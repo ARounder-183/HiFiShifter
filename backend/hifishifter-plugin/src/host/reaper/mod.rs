@@ -2,7 +2,7 @@
 //! ABI依据 justinfrankel/reaper-sdk c0eafe87863b2bf69c5c822760f1b32a753b211b，
 //! sdk/reaper_vst3_interfaces.h 与 reaper_plugin_functions.h。手写适配，不是SDK原文件。
 use crate::editor::connection::UnknownVtbl;
-use crate::vst3::{uid_guid, K_RESULT_OK};
+use crate::vst3::{alternate_iid, platform_iid, K_RESULT_OK};
 use std::ffi::{c_char, c_void};
 pub(super) mod item_chunk;
 pub(crate) use item_chunk::RewrittenItem;
@@ -240,15 +240,41 @@ impl NativeHost {
         if context.is_null() || !authorized() {
             return None;
         }
+        // 【为什么用 platform_iid 而不是 uid_guid】queryInterface 逐字节比较 IID，而
+        // VST3 的 INLINE_UID 按 COM_COMPATIBLE 展开成两种布局：Windows 是 COM/GUID，
+        // Linux / macOS 是每字大端（见 vst3.rs 的 platform_iid）。此前这里写死 COM 布局，
+        // 于是 Linux 上这一查**从未命中**，症状是"插件能加载、但 ARA 永远拿不到 item"。
         let mut pointer = std::ptr::null_mut();
-        let iid = uid_guid(IID);
-        let result = unsafe {
-            ((**context.cast::<*const UnknownVtbl>()).query)(context, iid.as_ptr(), &mut pointer)
+        let mut result = unsafe {
+            ((**context.cast::<*const UnknownVtbl>()).query)(
+                context,
+                platform_iid(IID).as_ptr(),
+                &mut pointer,
+            )
         };
+        // 【为什么还要试另一种布局】转发层（Wine / CrossOver / wrapper 进程）可能按它
+        // 自己那一套比较 IID。这种宿主是少数，但"悄悄能跑"与"悄悄不能跑"一样难查 ——
+        // 命中时记一行，让它变成可读事实。
+        if pointer.is_null() {
+            result = unsafe {
+                ((**context.cast::<*const UnknownVtbl>()).query)(
+                    context,
+                    alternate_iid(IID).as_ptr(),
+                    &mut pointer,
+                )
+            };
+            if !pointer.is_null() {
+                crate::log_line(
+                    "[reaper-host] the host answers in the alternate IID layout \
+                     (platform_iid missed; forwarding layer?)",
+                );
+            }
+        }
         if result != K_RESULT_OK || pointer.is_null() {
             crate::log_line(&format!(
-                "[reaper-host] QI result={result} interface={}",
-                !pointer.is_null()
+                "[reaper-host] QI result={result} interface={} (iid layout={}, tried both)",
+                !pointer.is_null(),
+                crate::vst3::iid_layout()
             ));
             return None;
         }

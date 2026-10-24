@@ -1,11 +1,10 @@
 //! 锁定SDK的IConnectionPoint/IHostApplication/IMessage ABI；消息允许宿主放置代理。
 use crate::vst3::{
-    iid_matches, uid_guid, TResult, K_INVALID_ARGUMENT, K_RESULT_FALSE, K_RESULT_OK,
+    iid_matches, platform_iid, TResult, K_INVALID_ARGUMENT, K_RESULT_FALSE, K_RESULT_OK,
 };
 use std::ffi::{c_char, c_void, CStr};
 use std::sync::Mutex;
 pub(crate) const IID_CONNECTION: [u32; 4] = [0x70A4156F, 0x6E6E4026, 0x989148BF, 0xAA60D8D1];
-const IID_HOST: [u32; 4] = [0x58E595CC, 0xDB2D4969, 0x8B6AAF8C, 0x36A664E5];
 const IID_MESSAGE: [u32; 4] = [0x936F033B, 0xC6C047DB, 0xBB0882F8, 0x13C1E613];
 const ROUTE_ID: &CStr = c"HiFiShifter.Editor.Route.v1";
 const REQUEST_ID: &CStr = c"HiFiShifter.Editor.RequestRoute.v1";
@@ -96,7 +95,7 @@ pub(crate) fn host_application_name() -> Option<String> {
 /// 调用 `IHostApplication::getName` 并记录；失败/空名一律静默（诊断信息不是硬依赖）。
 ///
 /// # Safety
-/// `host` 必须是 `IID_HOST` 查询成功返回的、仍持有引用的宿主接口指针。
+/// `host` 必须是 `IHostApplication`（`initialize` 的实参）且持有一份 owning 引用。
 unsafe fn record_host_name(host: *mut c_void) {
     if host.is_null() {
         return;
@@ -104,7 +103,7 @@ unsafe fn record_host_name(host: *mut c_void) {
     // SAFETY: host 指向 IHostApplication vtable；name 的签名为 `TResult(String128)`，
     // 即写入一个 128 个 UTF-16 单元的调用方缓冲（VST3 SDK 的 String128）。
     let table = unsafe { &**host.cast::<*const HostVtbl>() };
-    let mut buffer: HostNameBuffer = [0; 256];
+    let mut buffer = empty_host_name_buffer();
     if unsafe { (table.name)(host, buffer.as_mut_ptr().cast()) } != K_RESULT_OK {
         return;
     }
@@ -166,6 +165,23 @@ type HostNameBuffer = [u16; 128];
 #[cfg(not(windows))]
 type HostNameBuffer = [u8; 256];
 
+/// 一份清零的 `String128` 缓冲。
+///
+/// 【为什么要一个函数】缓冲长度是类型的一部分（Windows 是 128 个 UTF-16 单元、Unix 是
+/// 256 字节），而 `[0; N]` 里的 N 必须跟着平台走。写在一处，另一边改长度时编译器会
+/// 直接指着这里报错 —— 而不是让某个平台的构建悄悄坏掉（此前正是这样：Windows 侧写着
+/// `[0; 256]`，在 `[u16; 128]` 上根本编译不过）。
+fn empty_host_name_buffer() -> HostNameBuffer {
+    #[cfg(windows)]
+    {
+        [0u16; 128]
+    }
+    #[cfg(not(windows))]
+    {
+        [0u8; 256]
+    }
+}
+
 /// `String128` → `String`；空串/非法编码返回 `None`。
 ///
 /// 【为什么单独抽出来】宿主名是纯诊断信息，绝不能因为一次读名失败影响加载；把"怎么
@@ -182,12 +198,53 @@ fn decode_string128(buffer: &HostNameBuffer) -> Option<String> {
 
 #[cfg(not(windows))]
 fn decode_string128(buffer: &HostNameBuffer) -> Option<String> {
+    // 【为什么这里有两种编码】VST3 的 `String128` 在 Unix 上是 `char[128]`（UTF-8），
+    // 但宿主不一定照办：实测 REAPER/Linux 按 **UTF-16LE** 写（"REAPER" 写成
+    // `R\0E\0A\0P\0E\0R\0`）。只按 UTF-8 解会停在第一个 NUL 上得到 "R"，
+    // 于是宿主名永远是 `unknown`、日志文件名永远停在 `plugin-unknown.log` ——
+    // 症状与"根本没拿到宿主名"完全同形，这正是它藏了这么久的原因。
+    if looks_like_utf16le(buffer) {
+        if let Some(name) = decode_utf16le(buffer) {
+            return Some(name);
+        }
+    }
     let end = buffer
         .iter()
         .position(|byte| *byte == 0)
         .unwrap_or(buffer.len());
     let name = std::str::from_utf8(&buffer[..end]).ok()?.to_owned();
     (!name.is_empty()).then_some(name)
+}
+
+/// 这段缓冲是不是 UTF-16LE 写出来的？
+///
+/// 判据只有一条：**第二个字节是 0**。ASCII 名字的 UTF-16LE 一定长成 `R\0E\0…`；
+/// 而 UTF-8 名字的第二个字节不可能是 0（空名除外，空名两种解都得到空串）。
+/// 单字符 UTF-8 名（"X"）也会命中，但两种解都得到 "X"，没有区别。
+#[cfg(not(windows))]
+fn looks_like_utf16le(buffer: &HostNameBuffer) -> bool {
+    buffer.first().is_some_and(|byte| *byte != 0) && buffer.get(1) == Some(&0)
+}
+
+/// 按 UTF-16LE 解到第一个 0 单元；空串/非法代理对返回 `None`。
+#[cfg(not(windows))]
+fn decode_utf16le(buffer: &HostNameBuffer) -> Option<String> {
+    let mut units = Vec::new();
+    let mut index = 0;
+    while index + 1 < buffer.len() {
+        let unit = u16::from_le_bytes([buffer[index], buffer[index + 1]]);
+        if unit == 0 {
+            break;
+        }
+        units.push(unit);
+        index += 2;
+    }
+    if units.is_empty() {
+        return None;
+    }
+    String::from_utf16(&units)
+        .ok()
+        .filter(|name| !name.is_empty())
 }
 
 #[cfg(test)]
@@ -217,12 +274,18 @@ mod host_name_tests {
         // 全是 NUL ⇒ 空名 ⇒ None（不是 `Some("")`）。
         assert_eq!(decode_string128(&[0u16; 128]), None);
         // 没有终结符时取整段。
+        //
+        // 【为什么用 128 个 'A' 而不是两个字面量】`HostNameBuffer` 在 Windows 上是
+        // `[u16; 128]`，长度是类型的一部分；两元素字面量在这里**编译不过**（与 Unix
+        // 那条用例同一个坑的镜像）。
         assert_eq!(
-            decode_string128(&[b'A' as u16, b'B' as u16]).as_deref(),
-            Some("AB")
+            decode_string128(&[b'A' as u16; 128]).map(|name| name.len()),
+            Some(128)
         );
         // 非法 UTF-16（孤立高位代理）⇒ None，不 panic。
-        assert_eq!(decode_string128(&[0xD800, 0]), None);
+        let mut lone_surrogate = [0u16; 128];
+        lone_surrogate[0] = 0xD800;
+        assert_eq!(decode_string128(&lone_surrogate), None);
     }
 
     /// Unix：`String128` 是 `char[128]`（UTF-8），不是 UTF-16。
@@ -236,6 +299,15 @@ mod host_name_tests {
         assert_eq!(decode_string128(&buffer).as_deref(), Some("Reaper"));
         assert_eq!(decode_string128(&[0u8; 256]), None);
 
+        // 宿主按 **UTF-16LE** 写（实测 REAPER/Linux）：必须整名读回，而不是只读到 "R"。
+        // 这一条与上面那条一起，钉住"同一个缓冲的两种合法写法"。
+        let mut utf16 = [0u8; 256];
+        for (slot, unit) in "REAPER".encode_utf16().enumerate() {
+            utf16[slot * 2] = unit as u8;
+            utf16[slot * 2 + 1] = (unit >> 8) as u8;
+        }
+        assert_eq!(decode_string128(&utf16).as_deref(), Some("REAPER"));
+
         // 非 ASCII 的宿主名（中文/日文宿主名并不罕见）必须原样解出来。
         let mut wide = [0u8; 256];
         for (slot, byte) in "宿主".as_bytes().iter().enumerate() {
@@ -244,7 +316,14 @@ mod host_name_tests {
         assert_eq!(decode_string128(&wide).as_deref(), Some("宿主"));
 
         // 非法 UTF-8 ⇒ None，不 panic。
-        assert_eq!(decode_string128(&[0xFF, 0xFE, 0]), None);
+        //
+        // 【为什么不用 `&[0xFF, 0xFE, 0]` 字面量】`HostNameBuffer` 在 Unix 上是
+        // `[u8; 256]`，长度是类型的一部分；三元素字面量在 Linux 上**编译不过**
+        // （这条用例此前只在 Windows 上跑过）。
+        let mut invalid = [0u8; 256];
+        invalid[0] = 0xFF;
+        invalid[1] = 0xFE;
+        assert_eq!(decode_string128(&invalid), None);
     }
 }
 #[derive(Default)]
@@ -254,32 +333,35 @@ pub(crate) struct ConnectionState {
 }
 impl ConnectionState {
     /// 宿主提供message对象，不能把Rust Arc裸指针当跨代理协议。
+    ///
+    /// 【为什么不再 queryInterface】VST3 的 `initialize (IHostApplication*)` 契约里，
+    /// 实参**就是**宿主应用接口。此前为了拿一份 owning 引用去 QI，等于把"编辑器能不能
+    /// 连上处理器"绑死在 IID 的字节布局上 —— 布局一错，宿主名与整条消息通道一起死，
+    /// 而用户看到的只是每个命令都回一句 "FX editor not connected to its processor yet"。
+    /// 直接 addRef 就够了：它只碰 FUnknown 的前三个槽，与任何 IID 无关。
     pub unsafe fn initialize(&self, context: *mut c_void) {
         if context.is_null() {
             return;
         }
-        let mut host = std::ptr::null_mut();
-        let iid = uid_guid(IID_HOST);
-        let result = unsafe {
-            ((**context.cast::<*const UnknownVtbl>()).query)(context, iid.as_ptr(), &mut host)
-        };
-        if result == K_RESULT_OK && !host.is_null() {
-            let old = std::mem::replace(
-                &mut *self.host.lock().unwrap_or_else(|e| e.into_inner()),
-                host as usize,
-            );
-            drop(Owned(old));
-        }
+        // SAFETY: initialize 的实参按 VST3 契约是 IHostApplication*；addRef 只读 vtable
+        // 第 1 槽，不依赖任何 IID。
+        let owned = unsafe { Owned::retain(context) };
+        let old = std::mem::replace(
+            &mut *self.host.lock().unwrap_or_else(|e| e.into_inner()),
+            owned.0,
+        );
+        std::mem::forget(owned);
+        drop(Owned(old));
     }
     /// 读一次宿主应用名（`IHostApplication::getName`）。
     ///
-    /// 【为什么由调用方在**健康路径**上触发】`initialize` 里的 QI 可能先重入关闭组件
-    /// （见 `component_initialize` 的重入测试）。读名是一次额外的宿主调用，不该发生在
-    /// "已经被重入关闭"的那条路径上 —— 那时组件正在拒绝初始化，任何多余的宿主交互都
-    /// 没有意义。
+    /// 【为什么由调用方在**健康路径**上触发】`initialize` 期间的宿主调用可能重入关闭
+    /// 组件（见 `component_initialize` 的重入测试）。读名是一次额外的宿主调用，不该
+    /// 发生在"已经被重入关闭"的那条路径上 —— 那时组件正在拒绝初始化，任何多余的宿主
+    /// 交互都没有意义。
     pub fn record_host_name(&self) {
         let host = *self.host.lock().unwrap_or_else(|e| e.into_inner()) as *mut c_void;
-        // SAFETY: host 是本状态持有的 IHostApplication 引用（QI 成功后登记）。
+        // SAFETY: host 是本状态持有的 IHostApplication 引用（initialize 里 addRef 登记）。
         unsafe { record_host_name(host) };
     }
     /// 本组件持有的宿主应用接口（`IHostApplication*`）。
@@ -336,7 +418,7 @@ impl ConnectionState {
         }
         unsafe {
             let table = &**host.ptr().cast::<*const HostVtbl>();
-            let iid = uid_guid(IID_MESSAGE);
+            let iid = platform_iid(IID_MESSAGE);
             let mut message = std::ptr::null_mut();
             if (table.create)(host.ptr(), iid.as_ptr(), iid.as_ptr(), &mut message) != K_RESULT_OK
                 || message.is_null()

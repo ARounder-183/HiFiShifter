@@ -168,6 +168,14 @@ pub extern "system" fn GetPluginFactory() -> *mut c_void {
             std::env::consts::OS,
             std::env::consts::ARCH
         ));
+        // 【为什么把 IID 布局写进日志】它是"插件能不能和宿主说上话"的前置条件，却完全
+        // 不可见：发错布局的失败形态是宿主回一个 null 指针，日志里只剩一行
+        // `available=false`。把它钉在会话头附近，排查时第一眼就能排除一整类猜测。
+        crate::log_line(&format!(
+            "iid layout: {} ({})",
+            crate::vst3::iid_layout(),
+            std::env::consts::OS
+        ));
         editor::resources::initialize_models();
         let _ = runtime::runtime();
         vst3::get_plugin_factory()

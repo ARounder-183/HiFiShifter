@@ -47,6 +47,8 @@ pub(crate) struct Fixture {
     picker_paths: RefCell<Vec<String>>,
     pub valid: Cell<bool>,
     connection_host: Cell<bool>,
+    /// 假宿主**只**认另一种 IID 布局（模拟 Wine / wrapper 转发层）。
+    alternate_iid_layout: Cell<bool>,
     calls: RefCell<Vec<String>>,
     revoke_at: Cell<usize>,
     change_at: Cell<usize>,
@@ -113,6 +115,7 @@ impl Fixture {
             picker_paths: RefCell::new(Vec::new()),
             valid: Cell::new(true),
             connection_host: Cell::new(false),
+            alternate_iid_layout: Cell::new(false),
             calls: RefCell::new(Vec::new()),
             revoke_at: Cell::new(0),
             change_at: Cell::new(0),
@@ -261,6 +264,10 @@ impl Fixture {
     pub fn enable_connection_host(&self) {
         self.connection_host.set(true);
     }
+    /// 让假宿主按"另一种布局"比较 IID（见 §NativeHost::from_context§ 的兜底重试）。
+    pub fn force_alternate_iid_layout(&self) {
+        self.alternate_iid_layout.set(true);
+    }
     pub fn set_value(&self, name: &'static str, value: f64) {
         self.values.borrow_mut().insert(name, value);
         self.change.set(self.change.get().wrapping_add(1));
@@ -311,8 +318,16 @@ unsafe extern "system" fn query(this: *mut c_void, iid: *const u8, out: *mut *mu
     let f = unsafe { &*this.cast::<Fixture>() };
     f.record("QI");
     let requested = unsafe { std::slice::from_raw_parts(iid, 16) };
-    let host_iid = uid_guid([0x58E595CC, 0xDB2D4969, 0x8B6AAF8C, 0x36A664E5]);
-    if requested != uid_guid(IID) && !(f.connection_host.get() && requested == host_iid) {
+    // 真实宿主按平台布局比较 IID（Windows：COM/GUID；Linux / macOS：每字大端）。
+    // 夹具默认照这个来；`force_alternate_iid_layout` 把它换成"另一套"，用来验证
+    // `from_context` 的兜底重试不是摆设。
+    let own_iid = if f.alternate_iid_layout.get() {
+        crate::vst3::alternate_iid(IID)
+    } else {
+        crate::vst3::platform_iid(IID)
+    };
+    let host_iid = crate::vst3::platform_iid([0x58E595CC, 0xDB2D4969, 0x8B6AAF8C, 0x36A664E5]);
+    if requested != own_iid && !(f.connection_host.get() && requested == host_iid) {
         unsafe {
             *out = std::ptr::null_mut();
         }
@@ -1573,6 +1588,22 @@ fn task38a_query_initialization_reentry_balances_qi_and_stops_lookup() {
         assert_eq!(f.calls.borrow().len(), index);
         assert_eq!(f.refs.load(Ordering::Acquire), 1);
     }
+}
+
+/// 转发层按"另一套"字节比较 IID 时，原生扩展仍要拿得到。
+///
+/// 【为什么值得一条用例】`platform_iid` 解决的是"正常宿主"；兜底重试解决的是
+/// "宿主被包装过"（Wine / CrossOver / wrapper 进程）。两条路径都要有断言，
+/// 否则兜底那段代码只是看起来存在。
+#[test]
+fn a_host_answering_in_the_alternate_layout_is_still_found() {
+    let f = Fixture::new();
+    f.force_alternate_iid_layout();
+    let host = unsafe { NativeHost::from_context(f.context(), || true) };
+    assert!(
+        host.is_some(),
+        "the alternate IID layout must be retried instead of giving up"
+    );
 }
 
 #[test]

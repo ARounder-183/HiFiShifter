@@ -1,7 +1,7 @@
 //! 经真实VST3 connection消息关联实例；只接受本进程登记的活令牌，不猜最后一轨。
 use crate::editor::connection::UnknownVtbl;
 use crate::render::extension::ExtensionOwner;
-use crate::vst3::{uid_guid, TResult, K_RESULT_OK};
+use crate::vst3::{platform_iid, TResult, K_RESULT_OK};
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -79,7 +79,10 @@ impl EditorLink {
             0
         } else {
             let mut out = std::ptr::null_mut();
-            let iid = uid_guid(IID_COMPONENT_HANDLER2);
+            // 【为什么是 platform_iid】宿主按它自己那套字节比较 IID（Windows：COM/GUID；
+            // Linux / macOS：每字大端）。写死 COM 布局时，Linux 上这一查恒失败 ⇒
+            // `setDirty` 永不调用 ⇒ 用户改完工程、关窗口时宿主不提示保存。
+            let iid = platform_iid(IID_COMPONENT_HANDLER2);
             let result = unsafe {
                 ((**handler.cast::<*const UnknownVtbl>()).query)(handler, iid.as_ptr(), &mut out)
             };

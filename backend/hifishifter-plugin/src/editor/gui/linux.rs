@@ -60,6 +60,11 @@ mod x11 {
 
     pub type XWindow = libc::c_ulong;
 
+    // 【为什么必须有 link 属性】cdylib 允许存在未定义符号（运行时从 GTK 已经载入的
+    // libX11 里解析），所以插件本身不加这一行也能链接；但**测试可执行文件**不允许，
+    // 于是 `cargo test` 在 Linux 上会以"undefined symbol: XReparentWindow"失败。
+    // 加上它，两个目标都自洽；libx11-dev 本来就是 libgtk-3-dev 的依赖。
+    #[link(name = "X11")]
     extern "C" {
         /// `Display *gdk_x11_get_default_xdisplay (void)`
         pub fn gdk_x11_get_default_xdisplay() -> *mut c_void;
@@ -1044,6 +1049,10 @@ fn close_view(token: usize) {
 
 /// `IRunLoop` 的 IID：`18C35366-9776-4F1A-9C5B-83857A871389`
 /// （`DECLARE_CLASS_IID (IRunLoop, 0x18C35366, 0x97764F1A, 0x9C5B8385, 0x7A871389)`）。
+///
+/// 【注意它不是字节】这里是四个 32 位字。发给宿主之前必须经 `platform_iid` 展开成
+/// 平台布局 —— 直接 `as_ptr()` 读到的是**主机字节序**，既不是 COM 布局（第 2/3/4 字
+/// 要拆），也不是 Linux/macOS 的"每字大端"，于是这一探测在任何平台都恒为 false。
 const IID_RUN_LOOP: [u32; 4] = [0x18C35366, 0x97764F1A, 0x9C5B8385, 0x7A871389];
 
 /// `FUnknown` 的三项（`IPlugFrame` 与 `IRunLoop` 都从它派生，vtable 前缀一致）。
@@ -1075,7 +1084,8 @@ fn probe_run_loop(frame: usize) -> bool {
             return false;
         }
         let mut out: *mut std::ffi::c_void = std::ptr::null_mut();
-        let result = ((*vtbl).query)(object, IID_RUN_LOOP.as_ptr().cast(), &mut out);
+        let iid = crate::vst3::platform_iid(IID_RUN_LOOP);
+        let result = ((*vtbl).query)(object, iid.as_ptr().cast(), &mut out);
         if result != 0 || out.is_null() {
             return false;
         }
@@ -1618,26 +1628,33 @@ thread_local! {
 mod tests {
     use super::*;
 
-    /// **不变量：`IRunLoop` 的 IID 在内存里逐字节等于 SDK 声明的那 16 个字节。**
+    /// **不变量：`IRunLoop` 的 IID 按平台的 `INLINE_UID` 布局展开成那 16 个字节。**
     ///
-    /// 【为什么钉死】`queryInterface` 是**逐字节**比较 IID 的。抄错一个十六进制位，
-    /// 后果不是崩溃，而是"探测恒为 false" ⇒ 永远走情形 B ⇒ 宿主明明有正规解却没人用，
-    /// 而日志里看不出来 —— 这是本仓最讨厌的一类静默退化。
+    /// 【为什么钉死】`queryInterface` 是**逐字节**比较 IID 的。抄错一个十六进制位、
+    /// 或者按"主机字节序"直接读那四个 u32（此前的写法），后果都不是崩溃，而是
+    /// "探测恒为 false" ⇒ 永远走情形 B ⇒ 宿主明明有正规解却没人用，日志里看不出来。
     ///
     /// 期望值逐字来自 `DECLARE_CLASS_IID (IRunLoop, 0x18C35366, 0x97764F1A,
-    /// 0x9C5B8385, 0x7A871389)`，按 VST3 的 FUID 约定以四个 u32 依次存放（主机字节序）。
+    /// 0x9C5B8385, 0x7A871389)`，按 `funknown.h` 的 `INLINE_UID` 展开：
+    /// Windows 是 COM 布局（第 1 字小端、第 2 字拆两个 u16、第 3/4 字大端），
+    /// Linux / macOS 是每字大端。
     #[test]
-    fn the_run_loop_iid_is_byte_identical_to_the_sdk_declaration() {
+    fn the_run_loop_iid_uses_the_platform_inline_uid_layout() {
+        #[cfg(windows)]
         let expected: [u8; 16] = [
-            0x66, 0x53, 0xC3, 0x18, // 0x18C35366
-            0x1A, 0x4F, 0x76, 0x97, // 0x97764F1A
-            0x85, 0x83, 0x5B, 0x9C, // 0x9C5B8385
-            0x89, 0x13, 0x87, 0x7A, // 0x7A871389
+            0x66, 0x53, 0xC3, 0x18, // 0x18C35366，第 1 字小端
+            0x97, 0x76, 0x1A, 0x4F, // 0x97764F1A，第 2 字拆成两个 u16
+            0x9C, 0x5B, 0x83, 0x85, // 0x9C5B8385
+            0x7A, 0x87, 0x13, 0x89, // 0x7A871389
         ];
-        // SAFETY: IID_RUN_LOOP 是 [u32; 4]，长度恰好 16 字节，读成 [u8; 16] 是安全的。
-        let actual: &[u8; 16] = unsafe { &*(IID_RUN_LOOP.as_ptr().cast::<[u8; 16]>()) };
-        assert_eq!(actual, &expected);
-        assert_eq!(std::mem::size_of_val(&IID_RUN_LOOP), 16);
+        #[cfg(not(windows))]
+        let expected: [u8; 16] = [
+            0x18, 0xC3, 0x53, 0x66, // 0x18C35366，每字大端
+            0x97, 0x76, 0x4F, 0x1A, // 0x97764F1A
+            0x9C, 0x5B, 0x83, 0x85, // 0x9C5B8385
+            0x7A, 0x87, 0x13, 0x89, // 0x7A871389
+        ];
+        assert_eq!(crate::vst3::platform_iid(IID_RUN_LOOP), expected);
     }
 
     /// 没有 frame 时探测必须直接说"没有"，不能解引用空指针。
