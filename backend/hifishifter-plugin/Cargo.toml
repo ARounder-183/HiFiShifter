@@ -44,6 +44,58 @@ trash = "5.2.9"
 # 不靠传递依赖 —— 传递依赖一旦被上游裁剪，失败会发生在链接期而不是编译期。
 libc = "0.2"
 
+# ── Unix 内嵌编辑器（见 docs/plans/2026-10-24-plugin-unix-gui-plan.md `11.1）──
+#
+# 【为什么这些不是新依赖】它们是 tauri/wry 的**传递依赖**，版本早已被 workspace 的
+# Cargo.lock 钉住（gtk 0.18.2 / webkit2gtk 2.0.2 / glib 0.18.5 / objc2 0.6.5 …）。
+# 这里只是把它们从"传递"提升为"直接"，因此 Cargo.lock 一行都不变。
+#
+# 【为什么不违反 tests/no_tauri_in_dependency_tree】那份判据禁的是
+# `tauri* / wry* / HiFiShifter* / cpal*` —— 这四个都不在下表里。
+#
+# 【Linux 的构建前提】`webkit2gtk` 会让 `pkg-config` 要求
+# `libwebkit2gtk-4.1-dev` 与 `libgtk-3-dev`。CI 的 vst3-unix.yml 已经安装它们
+# （此前刻意不装，因为当时没有 GUI；这条注释随 GUI 一起更新）。
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+# `unsafe-assume-initialized`：宿主可能**已经**初始化过 GTK（Ardour / REAPER-Linux /
+# 任何 GTK 宿主），而 gtk-rs 只在"自己调的 `gtk::init()`"里才会把当前线程登记成
+# "GTK 主线程"。没有这个特性，寄宿主的 GTK 那条路一碰 `GtkPlug` 就会 panic
+# （`assert_initialized_main_thread!`）。打开它之后由**本模块**自己守线程纪律：
+# `VIEWS` 是 thread_local，每条命令都先比线程身份（见 `LinuxHost::submit`）。
+gtk = { version = "0.18", features = ["unsafe-assume-initialized"] }
+gdk = { version = "0.18", features = ["unsafe-assume-initialized"] }
+# `v2_40` = `webkit_web_view_evaluate_javascript`（异步投递）。它同时把
+# `v2_8`（脚本消息通道）、`v2_16`（ephemeral WebContext）、`v2_22`
+# （`JSCValue`）一并打开 —— 这些正是本模块用到的最低 API 面。
+webkit2gtk = { version = "2.0", features = ["v2_40"] }
+# §JSCValue → &str§（脚本消息通道只传字符串，见 §gui/bridge.js§）。同样是 Cargo.lock 里
+# 已有的版本（webkit2gtk 自己依赖它）。
+javascriptcore-rs = "1.1"
+
+# ── macOS 内嵌编辑器（见方案 `5 节）──
+#
+# 全部是 tauri/wry 的传递依赖，版本已由 Cargo.lock 钉住（objc2 0.6.5 /
+# objc2-app-kit 0.3.2 / objc2-web-kit 0.3.2 / objc2-foundation 0.3.2 / block2 0.6.2）。
+# 特性列表只列**用到的那几个类**：这些 crate 的默认特性会把整个 AppKit/WebKit 都编进来，
+# 而 macOS 的构建时间本来就贵。
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = { version = "0.3", features = [
+    "NSObject", "NSString", "NSData", "NSURL", "NSURLRequest", "NSURLResponse",
+    "NSDictionary", "NSArray", "NSGeometry", "NSRunLoop", "NSTimer", "NSValue",
+] }
+objc2-app-kit = { version = "0.3", features = [
+    "NSResponder", "NSView", "NSWindow", "NSOpenPanel", "NSSavePanel", "NSWorkspace",
+    "NSPasteboard", "NSDragging",
+] }
+objc2-web-kit = { version = "0.3", features = [
+    "WKWebView", "WKWebViewConfiguration", "WKUserContentController", "WKUserScript",
+    "WKScriptMessage", "WKScriptMessageHandler", "WKURLSchemeHandler", "WKURLSchemeTask",
+    "WKNavigationDelegate", "WKNavigation", "WKNavigationAction", "WKWebsiteDataStore",
+    "WKFrameInfo",
+] }
+
 [target.'cfg(windows)'.dependencies]
 # 二期仅原生WebView2，没有Tauri/wry主循环；与 workspace 其余部分同版（0.39 ↔ windows-core 0.62）。
 webview2-com = "0.39"

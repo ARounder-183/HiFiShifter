@@ -3,6 +3,7 @@ use crate::vst3::{
     iid_matches, TResult, K_INVALID_ARGUMENT, K_NO_INTERFACE, K_RESULT_FALSE, K_RESULT_OK,
 };
 use std::ffi::{c_char, c_void, CStr};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 
@@ -62,8 +63,11 @@ struct ViewState {
     frame: usize,
     attaching: bool,
     generation: u64,
-    #[cfg(windows)]
-    native: Option<super::webview::NativeEditor>,
+    /// 平台视图句柄。§None§ = 尚未附着或已移除。
+    ///
+    /// 【为什么是 §Rc§ 而不是 §Box§】几何/焦点/按键三处都需要**先取出来、再释放 view 锁**
+    /// 才能调用它（宿主回调会同步重入）。§Rc§ 让"取出来"是一次克隆。
+    native: Option<Rc<dyn super::gui::EditorHost>>,
 }
 #[repr(C)]
 struct View {
@@ -157,14 +161,36 @@ unsafe extern "system" fn platform(_this: *mut c_void, kind: *const c_char) -> T
             if kind.is_null() {
                 return K_INVALID_ARGUMENT;
             }
+            let kind = unsafe { CStr::from_ptr(kind) }.to_bytes();
             #[cfg(windows)]
-            if unsafe { CStr::from_ptr(kind) }.to_bytes() == b"HWND" {
+            if kind == b"HWND" {
+                return K_RESULT_OK;
+            }
+            // macOS：宿主给的 `NSView*`，坐标是**逻辑点**（iplugview.h）。
+            #[cfg(target_os = "macos")]
+            if kind == b"NSView" {
+                return K_RESULT_OK;
+            }
+            // Linux：支持 XEmbed 的 X11 Window ID，坐标是**物理像素**。
+            #[cfg(all(unix, not(target_os = "macos")))]
+            if kind == b"X11EmbedWindowID" {
+                return K_RESULT_OK;
+            }
+            // Wayland（SDK 3.8 的 `WaylandSurfaceID`）：接受，但只能开浮窗。
+            //
+            // 【为什么不返回 `K_RESULT_FALSE`】WebKitGTK 没有"把 `WebKitWebView` 渲染到
+            // 外部 `wl_surface`"的公开 API（见方案 `6.9`）。拒绝平台类型会让宿主面板
+            // 直接空着、用户没有任何界面；接受它则我们开一个自己的顶层窗口 ——
+            // 功能可用，只是不嵌在宿主里。这个取舍写在 `GuiFidelity::FloatingWindow` 上。
+            #[cfg(all(unix, not(target_os = "macos")))]
+            if kind == b"WaylandSurfaceID" {
                 return K_RESULT_OK;
             }
             K_RESULT_FALSE
         })
     }
 }
+
 unsafe extern "system" fn attached(
     this: *mut c_void,
     parent: *mut c_void,
@@ -174,76 +200,90 @@ unsafe extern "system" fn attached(
         return K_INVALID_ARGUMENT;
     }
     boundary(|| {
-        #[cfg(windows)]
-        {
-            let (width, height, generation) = {
-                let mut state = unsafe { view(this) }
-                    .state
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                if state.native.is_some() || state.attaching {
-                    return K_RESULT_FALSE;
-                }
-                let Some((width, height)) = state.rect.dimensions() else {
-                    return K_INVALID_ARGUMENT;
-                };
-                state.attaching = true;
-                state.generation = state.generation.wrapping_add(1);
-                (width, height, state.generation)
-            };
-            // CreateWindowEx会同步通知宿主父窗口，不能持有view锁。
-            let native = super::webview::NativeEditor::attach(
-                parent,
-                width,
-                height,
-                unsafe { view(this) }.link.clone(),
-            );
+        let (width, height, generation) = {
             let mut state = unsafe { view(this) }
                 .state
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            if state.generation != generation || !state.attaching {
-                drop(state);
-                drop(native);
+            if state.native.is_some() || state.attaching {
                 return K_RESULT_FALSE;
             }
-            state.attaching = false;
-            match native {
-                Ok(native) => {
-                    state.native = Some(native);
-                    K_RESULT_OK
-                }
-                Err(error) => {
-                    crate::log_line(&format!("IPlugView attach failed: {error}"));
-                    K_RESULT_FALSE
-                }
-            }
+            let Some((width, height)) = state.rect.dimensions() else {
+                return K_INVALID_ARGUMENT;
+            };
+            state.attaching = true;
+            state.generation = state.generation.wrapping_add(1);
+            (width, height, state.generation)
+        };
+        // 建原生视图会同步通知宿主（CreateWindowEx 的 WM_PARENTNOTIFY、XEmbed 握手），
+        // 不能持有 view 锁。
+        // 宿主给的是"可嵌入的父窗口"还是"我们只能自己开窗"（Wayland）。
+        let embedded = unsafe { CStr::from_ptr(kind) }.to_bytes() == b"X11EmbedWindowID";
+        let native = super::gui::create_for(
+            parent as usize,
+            width,
+            height,
+            embedded,
+            unsafe { view(this) }.link.clone(),
+        );
+        let mut state = unsafe { view(this) }
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // 创建期间宿主可能已经 removed（或又 attached 了一次）：那这一份就是过期产物。
+        if state.generation != generation || !state.attaching {
+            drop(state);
+            drop(native);
+            return K_RESULT_FALSE;
         }
-        #[cfg(not(windows))]
-        {
-            K_RESULT_FALSE
+        state.attaching = false;
+        match native {
+            Ok(host) => {
+                let fidelity = host.fidelity();
+                state.native = Some(host);
+                drop(state);
+                crate::log_line(&format!(
+                    "[gui] editor view attached ({})",
+                    fidelity.as_str()
+                ));
+                // 【为什么要单独一行】"浮窗"是一种**有损**的降级：泵不在宿主线程上，
+                // 宿主 Undo 的合并粒度会变粗。用户报"撤销一次退两步"时这行是关键线索。
+                if matches!(fidelity, super::gui::GuiFidelity::FloatingWindow) {
+                    crate::log_line(
+                        "[gui] running on a private GUI thread; host undo coalescing degraded",
+                    );
+                }
+                K_RESULT_OK
+            }
+            Err(error) => {
+                drop(state);
+                crate::log_line(&format!("IPlugView attach failed: {error}"));
+                K_RESULT_FALSE
+            }
         }
     })
 }
+
 unsafe extern "system" fn removed(this: *mut c_void) -> TResult {
     boundary(|| {
-        #[cfg(windows)]
-        {
-            // 先移出锁，再关闭。DestroyWindow/COM Close可能同步重入宿主。
-            let native = {
-                let mut state = unsafe { view(this) }
-                    .state
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                state.generation = state.generation.wrapping_add(1);
-                state.attaching = false;
-                state.native.take()
-            };
-            drop(native);
+        // 先移出锁，再关闭。DestroyWindow/COM Close 可能同步重入宿主。
+        let native = {
+            let mut state = unsafe { view(this) }
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            state.generation = state.generation.wrapping_add(1);
+            state.attaching = false;
+            state.native.take()
+        };
+        if let Some(host) = &native {
+            host.close();
         }
+        drop(native);
         K_RESULT_OK
     })
 }
+
 unsafe extern "system" fn wheel(_this: *mut c_void, _distance: f32) -> TResult {
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
@@ -275,20 +315,16 @@ unsafe fn forward_edit_key(
     down: bool,
 ) -> TResult {
     boundary(|| {
-        #[cfg(windows)]
         if let Some(character) = edit_key(key, code, if down { mods } else { mods | 4 }) {
             let native = {
                 let state = unsafe { view(this) }
                     .state
                     .lock()
                     .unwrap_or_else(|e| e.into_inner());
-                state
-                    .native
-                    .as_ref()
-                    .map(super::webview::NativeEditor::window_key)
+                state.native.clone()
             };
-            if let Some(native) = native {
-                if native.forward_edit_key(character, mods, down) {
+            if let Some(host) = native {
+                if host.forward_edit_key(character, mods, down) {
                     return K_RESULT_OK;
                 }
             }
@@ -334,24 +370,21 @@ unsafe extern "system" fn on_size(this: *mut c_void, rect: *mut ViewRect) -> TRe
         return K_INVALID_ARGUMENT;
     }
     let new = unsafe { *rect };
-    let Some((_width, _height)) = new.dimensions() else {
+    let Some((width, height)) = new.dimensions() else {
         return K_INVALID_ARGUMENT;
     };
     boundary(|| {
-        #[cfg(windows)]
         let native = {
             let state = unsafe { view(this) }
                 .state
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            state
-                .native
-                .as_ref()
-                .map(super::webview::NativeEditor::window_key)
+            state.native.clone()
         };
-        #[cfg(windows)]
-        if let Some(native) = native {
-            if let Err(error) = native.resize(_width, _height) {
+        if let Some(host) = native {
+            // 泵不在宿主线程上时（浮窗形态），这是宿主唯一还会回来的节拍。
+            host.host_tick();
+            if let Err(error) = host.resize(width, height) {
                 crate::log_line(&format!("IPlugView resize failed: {error}"));
                 return K_RESULT_FALSE;
             }
@@ -364,34 +397,31 @@ unsafe extern "system" fn on_size(this: *mut c_void, rect: *mut ViewRect) -> TRe
         K_RESULT_OK
     })
 }
+
 /// 宿主明确交付焦点时进入自有WebView，不主动改变宿主失焦后的焦点归属。
 unsafe extern "system" fn focus(this: *mut c_void, focused: u8) -> TResult {
     if focused == 0 {
         return K_RESULT_OK;
     }
     boundary(|| {
-        #[cfg(windows)]
-        {
-            let native = {
-                let state = unsafe { view(this) }
-                    .state
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                state
-                    .native
-                    .as_ref()
-                    .map(super::webview::NativeEditor::window_key)
-            };
-            if let Some(native) = native {
-                if let Err(error) = native.focus() {
-                    crate::log_line(&format!("IPlugView focus failed: {error}"));
-                    return K_RESULT_FALSE;
-                }
+        let native = {
+            let state = unsafe { view(this) }
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            state.native.clone()
+        };
+        if let Some(host) = native {
+            host.host_tick();
+            if let Err(error) = host.focus() {
+                crate::log_line(&format!("IPlugView focus failed: {error}"));
+                return K_RESULT_FALSE;
             }
         }
         K_RESULT_OK
     })
 }
+
 #[repr(C)]
 struct UnknownVtbl {
     query: unsafe extern "system" fn(*mut c_void, *const u8, *mut *mut c_void) -> TResult,
@@ -428,6 +458,17 @@ unsafe extern "system" fn set_frame(this: *mut c_void, frame: *mut c_void) -> TR
         };
         unsafe {
             frame_release(old);
+        }
+        // 宿主换了 frame（换实例 / 重新停靠）也是一次"宿主回来了"的节拍。
+        let native = {
+            let state = unsafe { view(this) }
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            state.native.clone()
+        };
+        if let Some(host) = native {
+            host.host_tick();
         }
         K_RESULT_OK
     })
@@ -472,7 +513,6 @@ unsafe extern "system" fn constrain(_this: *mut c_void, rect: *mut ViewRect) -> 
 impl Drop for View {
     fn drop(&mut self) {
         let state = self.state.get_mut().unwrap_or_else(|e| e.into_inner());
-        #[cfg(windows)]
         drop(state.native.take());
         unsafe {
             frame_release(std::mem::take(&mut state.frame));

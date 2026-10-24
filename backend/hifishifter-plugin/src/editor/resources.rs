@@ -125,3 +125,108 @@ fn model_directory() -> Result<PathBuf, String> {
             .join("Resources/models"))
     }
 }
+
+/// 前端产物目录（`Contents/Resources/frontend`）。
+///
+/// 【为什么与模型目录同构】三个平台的"资源在哪"只该有一个答案：
+/// `<bundle>/Contents/Resources/<名字>`。Windows 用 `GetModuleFileNameW`、Unix 用
+/// `dladdr` 找到本模块，再往上两级 —— 于是 `assets()` 的实现也只有一份。
+///
+/// 【`HIFISHIFTER_PLUGIN_EDITOR_ASSETS` 覆盖】开发时前端产物在 `frontend/dist`，
+/// 与 bundle 的相对位置无关。这个变量**只接受绝对路径**：相对路径会随宿主的 CWD
+/// 变化，而那正是"开发机能开、用户机白屏"的经典成因。
+pub(crate) fn frontend_directory() -> Result<PathBuf, String> {
+    if let Some(path) = std::env::var_os("HIFISHIFTER_PLUGIN_EDITOR_ASSETS") {
+        let path = PathBuf::from(path);
+        if !path.is_absolute() {
+            return Err("editor asset override must be absolute".into());
+        }
+        let path = path.canonicalize().map_err(|e| e.to_string())?;
+        if !path.join("plugin.html").is_file() {
+            return Err("editor plugin.html missing".into());
+        }
+        return Ok(path);
+    }
+    let folder = bundle_resources_directory()?.join("frontend");
+    if !folder.join("plugin.html").is_file() {
+        return Err(format!(
+            "plugin frontend assets missing: {}",
+            folder.display()
+        ));
+    }
+    Ok(folder)
+}
+
+/// 本模块所在的 `Contents` 目录（`<bundle>/Contents`）。
+///
+/// 【为什么不用 `std::env::current_exe`】插件跑在宿主进程里，那是**宿主**的路径。
+/// 【为什么 Windows 不用 `GetModuleFileNameW(None)`】那同样返回宿主 exe。
+fn bundle_contents_directory() -> Result<PathBuf, String> {
+    #[cfg(all(windows, not(test)))]
+    {
+        use windows::core::PCWSTR;
+        use windows::Win32::Foundation::HMODULE;
+        use windows::Win32::System::LibraryLoader::*;
+        let mut module = HMODULE::default();
+        unsafe {
+            GetModuleHandleExW(
+                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+                    | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                PCWSTR(initialize_models as *const () as *const u16),
+                &mut module,
+            )
+        }
+        .map_err(|e| e.to_string())?;
+        let mut name = vec![0_u16; 32768];
+        let count = unsafe { GetModuleFileNameW(Some(module), &mut name) } as usize;
+        if count == 0 || count >= name.len() {
+            return Err("plugin module path unavailable".into());
+        }
+        let path = PathBuf::from(String::from_utf16_lossy(&name[..count]));
+        return path
+            .parent()
+            .and_then(|p| p.parent())
+            .map(PathBuf::from)
+            .ok_or_else(|| "VST3 Contents unavailable".to_string());
+    }
+    #[cfg(all(unix, not(test)))]
+    {
+        use std::ffi::CStr;
+        let mut info = std::mem::MaybeUninit::<libc::Dl_info>::uninit();
+        // SAFETY: dladdr 只写它自己的 out 参数；地址取自本 crate 内的函数。
+        let found = unsafe {
+            libc::dladdr(
+                initialize_models as *const () as *const libc::c_void,
+                info.as_mut_ptr(),
+            )
+        };
+        if found == 0 {
+            return Err("plugin module path unavailable".into());
+        }
+        // SAFETY: found != 0 时 dladdr 已把 info 初始化完毕。
+        let info = unsafe { info.assume_init() };
+        if info.dli_fname.is_null() {
+            return Err("plugin module path unavailable".into());
+        }
+        // SAFETY: dli_fname 指向 dladdr 内部的 NUL 结尾字符串。
+        let module = PathBuf::from(
+            unsafe { CStr::from_ptr(info.dli_fname) }
+                .to_string_lossy()
+                .into_owned(),
+        );
+        return module
+            .parent()
+            .and_then(|p| p.parent())
+            .map(PathBuf::from)
+            .ok_or_else(|| "VST3 Contents unavailable".to_string());
+    }
+    #[cfg(test)]
+    {
+        Ok(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".."))
+    }
+}
+
+/// bundle 资源根（`Contents/Resources`）。
+pub(crate) fn bundle_resources_directory() -> Result<PathBuf, String> {
+    Ok(bundle_contents_directory()?.join("Resources"))
+}

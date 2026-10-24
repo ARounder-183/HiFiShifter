@@ -266,9 +266,8 @@ pub(super) fn store() -> NotebookStore {
 /// 【为什么放在这里而不是 dispatch】对话框要 HWND，而 HWND 只有 UI 线程持有；
 /// `commands.rs` 的 dispatch 跑在 actor 线程上。逻辑本体（改写引用、取字节）仍
 /// 留在本模块，这里只负责"问用户要一个路径，然后写文件"。
-#[cfg(windows)]
 pub(super) fn export_with_dialog(
-    hwnd: windows::Win32::Foundation::HWND,
+    window: crate::editor::gui::NativeWindow,
     command: &str,
     args: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
@@ -281,7 +280,7 @@ pub(super) fn export_with_dialog(
                 "untitled",
             );
             let Some(path) =
-                super::browser_files::pick_save_path(hwnd, &format!("{base}.{ext}"), &ext)?
+                super::browser_files::pick_save_path(window, &format!("{base}.{ext}"), &ext)?
             else {
                 return Ok(serde_json::json!({"ok": true, "canceled": true}));
             };
@@ -312,7 +311,8 @@ pub(super) fn export_with_dialog(
                 .filter(|name| !name.trim().is_empty())
                 .unwrap_or(&fallback);
             let name = sanitize_export_file_name(suggested, "asset");
-            let Some(path) = super::browser_files::pick_save_path(hwnd, &name, &asset.ext)? else {
+            let Some(path) = super::browser_files::pick_save_path(window, &name, &asset.ext)?
+            else {
                 return Ok(serde_json::json!({"ok": true, "canceled": true}));
             };
             write_output(&path, &asset.bytes)?;
@@ -326,7 +326,6 @@ pub(super) fn export_with_dialog(
     }
 }
 
-#[cfg(windows)]
 fn write_output(path: &Path, bytes: &[u8]) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {

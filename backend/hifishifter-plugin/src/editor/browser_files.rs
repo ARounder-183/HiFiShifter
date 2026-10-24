@@ -399,8 +399,8 @@ fn open_with_default_app(path: &Path) -> Result<(), String> {
 }
 
 #[cfg(not(windows))]
-fn open_with_default_app(_path: &Path) -> Result<(), String> {
-    Err("opening files with the default app is not implemented on this platform".into())
+fn open_with_default_app(path: &Path) -> Result<(), String> {
+    crate::editor::platform_services::open_with_default_app(path)
 }
 
 #[cfg(test)]
@@ -668,11 +668,17 @@ mod tests {
     }
 }
 
-#[cfg(windows)]
 /// 原生真实文件夹选择器，不用选文件后取父目录，也不接受虚拟Shell位置。
+///
+/// 【为什么参数是 §NativeWindow§（§usize§）而不是 §HWND§】三个平台的句柄互不相干，
+/// 而调用方是**平台无关**的 §gui/client.rs§。整数在平台实现内部再变回 §HWND§ /
+/// §NSView*§ / §GtkWidget*§ —— 那一步是唯一知道类型的地方。
+#[cfg(windows)]
 pub(super) fn pick_directory(
-    hwnd: windows::Win32::Foundation::HWND,
+    window: crate::editor::gui::NativeWindow,
 ) -> Result<Option<PathBuf>, String> {
+    use std::ffi::c_void;
+    use windows::Win32::Foundation::HWND;
     use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_INPROC_SERVER};
     use windows::Win32::UI::Shell::{
         FileOpenDialog, IFileOpenDialog, FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST, FOS_PICKFOLDERS,
@@ -689,7 +695,7 @@ pub(super) fn pick_directory(
                     | FOS_PATHMUSTEXIST,
             )
             .map_err(|e| e.to_string())?;
-        if let Err(error) = dialog.Show(Some(hwnd)) {
+        if let Err(error) = dialog.Show(Some(HWND(window as *mut c_void))) {
             if error.code().0 as u32 == 0x800704c7 {
                 return Ok(None);
             }
@@ -705,6 +711,17 @@ pub(super) fn pick_directory(
     }
 }
 
+/// 原生真实文件夹选择器（macOS / Linux）。
+///
+/// 【为什么这里也返回 `Ok(None)` 而不是错误】"用户取消"与"打不开对话框"是两件事：
+/// 前者是正常操作，后者才是故障。此前两者都混在 `Err` 里，前端会把取消显示成红色错误。
+#[cfg(not(windows))]
+pub(super) fn pick_directory(
+    _window: crate::editor::gui::NativeWindow,
+) -> Result<Option<PathBuf>, String> {
+    crate::editor::platform_services::pick_directory()
+}
+
 /// 原生"另存为"对话框（诊断导出用），与 [`pick_directory`] 同一套 COM 模式。
 ///
 /// 【为什么不用 rfd】插件不引入 Tauri，而 `IFileSaveDialog` 就在同一个
@@ -712,11 +729,13 @@ pub(super) fn pick_directory(
 /// 取消（`0x800704c7`）返回 `Ok(None)`，与文件夹选择器同一约定。
 #[cfg(windows)]
 pub(super) fn pick_save_path(
-    hwnd: windows::Win32::Foundation::HWND,
+    window: crate::editor::gui::NativeWindow,
     file_name: &str,
     extension: &str,
 ) -> Result<Option<PathBuf>, String> {
+    use std::ffi::c_void;
     use windows::core::HSTRING;
+    use windows::Win32::Foundation::HWND;
     use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_INPROC_SERVER};
     use windows::Win32::UI::Shell::{
         FileSaveDialog, IFileSaveDialog, FOS_FORCEFILESYSTEM, FOS_OVERWRITEPROMPT,
@@ -738,7 +757,7 @@ pub(super) fn pick_save_path(
         dialog
             .SetDefaultExtension(&HSTRING::from(extension))
             .map_err(|e| e.to_string())?;
-        if let Err(error) = dialog.Show(Some(hwnd)) {
+        if let Err(error) = dialog.Show(Some(HWND(window as *mut c_void))) {
             // 0x800704c7 = ERROR_CANCELLED。
             if error.code().0 as u32 == 0x800704c7 {
                 return Ok(None);
@@ -755,14 +774,16 @@ pub(super) fn pick_save_path(
     }
 }
 
-/// 非 Windows 平台暂不实现 —— 明确报错，不让调用方以为用户取消了。
+/// macOS / Linux 的另存为对话框（§GtkFileChooserNative§ / §NSSavePanel§）。
+///
+/// 取消返回 §Ok(None)§，与 Windows 同一约定（见 §platform_services§ 的模块注释）。
 #[cfg(not(windows))]
 pub(super) fn pick_save_path(
-    _hwnd: (),
-    _file_name: &str,
-    _extension: &str,
+    _window: crate::editor::gui::NativeWindow,
+    file_name: &str,
+    extension: &str,
 ) -> Result<Option<PathBuf>, String> {
-    Err("the save dialog is not implemented on this platform".into())
+    crate::editor::platform_services::pick_save_path(file_name, extension)
 }
 
 /// 原生"打开文件"对话框，带一条扩展名筛选（MIDI 导入用）。
@@ -774,11 +795,13 @@ pub(super) fn pick_save_path(
 /// 取消（`0x800704c7`）返回 `Ok(None)`，与文件夹选择器、另存为对话框同一约定。
 #[cfg(windows)]
 pub(super) fn pick_open_path(
-    hwnd: windows::Win32::Foundation::HWND,
+    window: crate::editor::gui::NativeWindow,
     filter_name: &str,
     extension: &str,
 ) -> Result<Option<PathBuf>, String> {
+    use std::ffi::c_void;
     use windows::core::{HSTRING, PCWSTR};
+    use windows::Win32::Foundation::HWND;
     use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_INPROC_SERVER};
     use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
     use windows::Win32::UI::Shell::{
@@ -804,7 +827,7 @@ pub(super) fn pick_open_path(
             pszSpec: PCWSTR(spec.as_ptr()),
         }];
         dialog.SetFileTypes(&filters).map_err(|e| e.to_string())?;
-        if let Err(error) = dialog.Show(Some(hwnd)) {
+        if let Err(error) = dialog.Show(Some(HWND(window as *mut c_void))) {
             if error.code().0 as u32 == 0x800704c7 {
                 return Ok(None);
             }
@@ -820,14 +843,14 @@ pub(super) fn pick_open_path(
     }
 }
 
-/// 非 Windows 平台暂不实现 —— 明确报错，不让调用方以为用户取消了。
+/// macOS / Linux 的打开对话框，带一条扩展名筛选（MIDI 导入用）。
 #[cfg(not(windows))]
 pub(super) fn pick_open_path(
-    _hwnd: (),
-    _filter_name: &str,
-    _extension: &str,
+    _window: crate::editor::gui::NativeWindow,
+    filter_name: &str,
+    extension: &str,
 ) -> Result<Option<PathBuf>, String> {
-    Err("the open dialog is not implemented on this platform".into())
+    crate::editor::platform_services::pick_open_path(filter_name, extension)
 }
 
 /// 在系统文件管理器中打开一个目录（Windows）。
@@ -858,9 +881,8 @@ pub(super) fn reveal_directory(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// 非 Windows 平台暂不实现 —— 明确报错，不让调用方以为打开成功了。
+/// macOS / Linux：在系统文件管理器里显示这个目录。
 #[cfg(not(windows))]
 pub(super) fn reveal_directory(path: &Path) -> Result<(), String> {
-    let _ = path;
-    Err("opening the file manager is not implemented on this platform".into())
+    crate::editor::platform_services::reveal_directory(path)
 }

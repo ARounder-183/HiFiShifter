@@ -13,6 +13,10 @@ mod notebook;
 // `#[cfg(not(test))]`（测试进程不该扫描/删除真实的用户临时目录）。
 pub(crate) mod capture_edits;
 pub(crate) mod parameter_atlas;
+// GUI 的另一半：文件对话框 / 在文件管理器中显示 / 用默认程序打开（按平台各一份）。
+pub(crate) mod gui;
+#[cfg(not(windows))]
+pub(crate) mod platform_services;
 mod plugin_diagnostics;
 pub(crate) mod private_groups;
 pub(crate) mod resources;
@@ -22,8 +26,6 @@ mod slow_lane;
 #[cfg(not(test))]
 mod temp_sweep;
 mod view;
-#[cfg(windows)]
-mod webview;
 pub(crate) mod workspace;
 pub(crate) use errors::classify_error;
 pub(crate) use view::create_view_with_link;
@@ -74,14 +76,7 @@ mod tests {
     }
 }
 
-/// 卸载前撤销本模块注册的窗口类；尚有窗口时明确拒绝正常卸载。
+/// 卸载前撤销本模块注册的窗口类 / 停掉私有 GUI 线程；尚有窗口时明确拒绝正常卸载。
 pub(crate) fn shutdown() -> bool {
-    #[cfg(windows)]
-    {
-        webview::shutdown()
-    }
-    #[cfg(not(windows))]
-    {
-        true
-    }
+    gui::shutdown()
 }

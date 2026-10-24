@@ -341,6 +341,14 @@ export function getPluginHost(): PluginHostBridge | null {
         };
         window.dispatchEvent(new Event("hfs-plugin-bootstrap-changed"));
     });
+    // 【为什么在装好监听之后立刻上报一次】macOS / Linux 的 WebKit 平台由我们注入一段
+    // 垫片才有 `chrome.webview`，页面是不是真的跑起来了只有这一句话能证明。它同时也
+    // 是一条**往返**证明：原生侧收到后回一条回执，于是"通道通不通"在启动阶段就有答案，
+    // 而不是等用户点第一下才发现白屏。
+    //
+    // 老版本原生侧没有这条命令（Windows 的构建可能落后一个版本），失败必须无害：
+    // 这里吞掉错误，不让它污染错误上报。
+    void active.invoke("plugin_ready").catch(() => undefined);
     window.addEventListener("pagehide", () => active?.dispose(), { once: true });
     return active;
 }
