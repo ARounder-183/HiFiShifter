@@ -32,8 +32,8 @@ use std::sync::mpsc::{channel, Sender, SyncSender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use webkit2gtk::{
-    NavigationPolicyDecisionExt, PolicyDecisionExt, SecurityManagerExt, URIRequestExt,
-    URISchemeRequestExt, UserContentManagerExt, WebContextExt, WebViewExt,
+    NavigationPolicyDecisionExt, PolicyDecisionExt, SecurityManagerExt, SettingsExt,
+    URIRequestExt, URISchemeRequestExt, UserContentManagerExt, WebContextExt, WebViewExt,
 };
 
 /// 回执泵的节拍：与 Windows 的 `WM_TIMER`、macOS 的 `NSTimer` 同频。
@@ -645,6 +645,32 @@ fn attach_view(
     let token = NEXT_TOKEN.fetch_add(1, Ordering::Relaxed) as usize;
 
     let webview = webkit2gtk::WebView::with_context(&context);
+    // ── 渲染后端：默认**关掉**加速合成 ───────────────────────────────────────
+    //
+    // 【为什么默认关】插件 UI 跑在宿主进程里，宿主的 GL/EGL 状态不是我们能假设的。
+    // 现场证据（Linux REAPER + WSLg）：打开插件窗口时 WebKit 的 EGL 初始化失败 ——
+    //
+    //     libEGL warning: DRI3 error: Could not get DRI3 device
+    //     libEGL warning: Ensure your X server supports DRI3 to get accelerated rendering
+    //
+    // 加速合成拿不到 DRI3 时的失败形态**不是报错，是黑屏**：页面照样 load-finished、
+    // 日志全绿，屏幕上一片黑。而关掉它（CPU 合成）在同样的环境里画得好好的 ——
+    // 独立探针里同一个 bundle 抓出 1306 种颜色、可辨认的工具栏布局。
+    //
+    // 【为什么不干脆全平台都关】有可用 GPU 时加速合成本来更省电也更顺滑；所以
+    // `HIFISHIFTER_WEBKIT_ACCEL=1` 可以把它打开，日志里会写明用的是哪一种。
+    let accelerate = std::env::var("HIFISHIFTER_WEBKIT_ACCEL").is_ok_and(|value| value.trim() == "1");
+    if let Some(settings) = WebViewExt::settings(&webview) {
+        settings.set_hardware_acceleration_policy(if accelerate {
+            webkit2gtk::HardwareAccelerationPolicy::OnDemand
+        } else {
+            webkit2gtk::HardwareAccelerationPolicy::Never
+        });
+        crate::gui_log_line(&format!(
+            "webkit hardware acceleration: {}",
+            if accelerate { "on-demand" } else { "never (CPU compositing)" }
+        ));
+    }
     let manager = webview
         .user_content_manager()
         .ok_or_else(|| "the web view has no user content manager".to_string())?;
