@@ -1772,7 +1772,26 @@ unsafe fn report_unwritten(this: *mut c_void, data: *mut c_void) {
 
 /// 宿主音频回调：完整渲染调度 + PCM 快照输出都在 `audio_process_inner` 里完成；
 /// 本层只负责 panic 遏制。
+/// 宿主音频回调的计时外壳。
+///
+/// 【为什么在这里计时】`process` 一秒几百次，不可能逐次记日志；但**它一旦阻塞**，
+/// 宿主在关闭窗口或改变尺寸时会等音频线程，表现为整个 UI 冻住 —— 而日志里什么都
+/// 没有。超过 50 ms 才出声（按 key 限流）。
 unsafe extern "system" fn audio_process(this: *mut c_void, data: *mut c_void) -> TResult {
+    let started = std::time::Instant::now();
+    let result = unsafe { audio_process_body(this, data) };
+    let elapsed = started.elapsed();
+    if elapsed > std::time::Duration::from_millis(50) {
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Warn,
+            "vst3.slow.process",
+            format_args!("[gui] slow entry: process took {} ms", elapsed.as_millis()),
+        );
+    }
+    result
+}
+
+unsafe extern "system" fn audio_process_body(this: *mut c_void, data: *mut c_void) -> TResult {
     // 【为什么必须 catch_unwind】本回调由**宿主音频线程**调用，panic 越过
     // `extern "system"` 边界是 UB，而且会带走整个 DAW 会话。`component_set_state` /
     // `component_get_state` 早就包了这一层，音频路径此前没有 —— 一条最不该崩的路径

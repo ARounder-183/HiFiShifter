@@ -91,7 +91,11 @@ impl log::Log for FileLogger {
             // 【顺序很重要】只有"确实要攒着"时才入队：先入队再决定要不要落盘，
             // 会让同一条日志既进缓冲又被 `drain_pending_into` 写一遍 —— 输出里出现
             // 两条一模一样、时间戳也一样的行。这个缺陷真的发生过。
-            if !timed_out && !explicit {
+            // 【为什么 `[gui]` 不走缓冲】GUI 侧的诊断是用来定位"宿主冻住"的，而冻结
+            // 恰好发生在启动后一两秒内 —— 那时写入器还没落定，整段缓冲会随进程一起消失，
+            // 日志里只剩一行 `module loaded`。这类行必须**立刻落盘**，否则等于没写。
+            let urgent = record.args().to_string().contains("[gui]");
+            if !timed_out && !explicit && !urgent {
                 let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
                 if pending.len() < MAX_PENDING_LINES {
                     // 落点未定（宿主名还没到、也没过宽限期）：先攒着，别急着创建

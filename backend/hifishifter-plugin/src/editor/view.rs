@@ -207,6 +207,7 @@ unsafe extern "system" fn attached(
     parent: *mut c_void,
     kind: *const c_char,
 ) -> TResult {
+    let _guard = EnterExit::new("attached");
     if parent.is_null() || unsafe { platform(this, kind) } != K_RESULT_OK {
         // 【为什么要记】走到这里说明**宿主给了一个我们不认的平台类型**（或者 parent
         // 是空）。这是一条"宿主想开窗、我们拒绝了"的现场证据，此前完全静默。
@@ -311,6 +312,7 @@ unsafe extern "system" fn attached(
 }
 
 unsafe extern "system" fn removed(this: *mut c_void) -> TResult {
+    let _guard = EnterExit::new("removed");
     boundary(|| {
         // 先移出锁，再关闭。DestroyWindow/COM Close 可能同步重入宿主。
         let native = {
@@ -437,8 +439,28 @@ unsafe extern "system" fn on_size(this: *mut c_void, rect: *mut ViewRect) -> TRe
         return K_INVALID_ARGUMENT;
     }
     let new = unsafe { *rect };
+    // ── 先把新矩形落盘，再做任何可能失败的事 ─────────────────────────────────
+    //
+    // 【这一行是"宿主冻住"的根因】宿主是靠 `getSize` / `onSize` 往返**收敛**尺寸的：
+    // 它 `onSize` 一个矩形，随后 `getSize` 必须回同一个。此前这里一旦走任何提前返回
+    // （矩形不合法、或 `resize` 失败），`state.rect` 就停在旧值，宿主于是永远看到
+    // "我设了尺寸但插件不认" —— 它会**无限重试**，而重试跑在宿主的 UI 线程上。
+    //
+    // 实测日志就是这个循环：`get_size × N -> can_resize -> on_size -> get_size …`，
+    // 宿主看起来"卡死"（CPU 不高、不处理输入），实际上是在这条循环里出不来。
+    //
+    // 所以顺序必须是：**先记录，再尽力而为地应用**，且永远回 `K_RESULT_OK` ——
+    // 尺寸协商是宿主的控制回路，插件不该有能力把它卡住。
+    {
+        let mut state = unsafe { view(this) }
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        state.rect = new;
+    }
     let Some((width, height)) = new.dimensions() else {
-        return K_INVALID_ARGUMENT;
+        // 矩形不合法（宽高非正）：已经如实记录，宿主下轮会自己修正。
+        return K_RESULT_OK;
     };
     boundary(|| {
         let native = {
@@ -452,15 +474,11 @@ unsafe extern "system" fn on_size(this: *mut c_void, rect: *mut ViewRect) -> TRe
             // 泵不在宿主线程上时（浮窗形态），这是宿主唯一还会回来的节拍。
             host.host_tick();
             if let Err(error) = host.resize(width, height) {
+                // 【为什么不回失败】见上：让宿主把"应用失败"当成"协商失败"只会让它重试
+                // 到死。记录原因，返回成功，界面最多是尺寸没跟上。
                 crate::log_line(&format!("IPlugView resize failed: {error}"));
-                return K_RESULT_FALSE;
             }
         }
-        let mut state = unsafe { view(this) }
-            .state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        state.rect = new;
         K_RESULT_OK
     })
 }
@@ -546,6 +564,11 @@ unsafe extern "system" fn can_resize(_this: *mut c_void) -> TResult {
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
+        // 【探针】HIFISHIFTER_FIXED_SIZE=1 时声明"不可缩放"，宿主于是完全不进
+        // 尺寸协商回路 —— 用来判定"打开 FX 窗口就冻结"是否来自这条回路。
+        if std::env::var("HIFISHIFTER_FIXED_SIZE").is_ok_and(|value| value.trim() == "1") {
+            return K_RESULT_FALSE;
+        }
         crate::guard_ffi(K_RESULT_FALSE, || K_RESULT_OK)
     }
 }
