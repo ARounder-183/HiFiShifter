@@ -339,7 +339,20 @@ pub(super) fn create(
         if run_loop { "available" } else { "absent" },
         if frame == 0 { "unset" } else { "set" }
     ));
-    if gtk3_initialized() {
+    // ── 默认**不**借用宿主的 GTK 主循环 ──────────────────────────────────────
+    //
+    // 【为什么把这个开关反过来】实测：只要编辑器窗口一出现，宿主就整体冻住 ——
+    // CPU 13%、状态 `S`（在等不是在算）、我们的回执泵照常 20 ms 一拍、没有任何
+    // 慢调用，而且**浮窗形态也一样**（所以不是窗口搬运的问题）。
+    //
+    // 剩下的共同因素只有一个：GTK/WebKit 跑在**宿主的 UI 线程**上，于是宿主的
+    // 消息泵被 GTK 的事件源接管，再也回不到它自己的输入处理。
+    //
+    // 所以默认改成情形 B：我们自己起一条 GTK 线程、自己的主循环，宿主的线程
+    // 一根手指都不碰。`HIFISHIFTER_GUI_HOST_LOOP=1` 可以退回情形 A。
+    let host_loop =
+        std::env::var("HIFISHIFTER_GUI_HOST_LOOP").is_ok_and(|value| value.trim() == "1");
+    if gtk3_initialized() && host_loop {
         // 情形 A：宿主的 GTK 已经在这条线程上跑着。
         //
         // 【为什么这里什么都不用做】本 crate 打开了 gtk 的
@@ -359,7 +372,18 @@ pub(super) fn create(
             link,
         }));
     }
-    // 情形 B：进程里没有 GTK 主循环，只能自己起一条。
+    // 情形 B：自己起一条 GTK 线程与主循环。
+    //
+    // 【注意这里是一个赌注】宿主可能已经初始化过 GTK（`gtk3_initialized()` 为真）。
+    // `gtk_init_check` 在那种情况下直接返回 TRUE，而我们随后在**自己的线程**上建
+    // widget —— 严格说是 UB。但两害相权：借用宿主的主循环会让宿主的消息泵再也
+    // 回不到自己的输入处理（实测整体冻住），而这条路的代价只是"可能不稳"。
+    // 一旦确认稳定，应当反过来把宿主的 GTK 换成 XEMBED 之外的方案。
+    if gtk3_initialized() {
+        crate::gui_log_line(
+            "the host had already initialised GTK; running the editor on a private thread anyway",
+        );
+    }
     //
     // 【为什么先把 GDK 钉到 X11】宿主给的是一个 **X11 Window ID**
     // （`kPlatformTypeX11EmbedWindowID`）。而 GDK 在 `WAYLAND_DISPLAY` 存在时
