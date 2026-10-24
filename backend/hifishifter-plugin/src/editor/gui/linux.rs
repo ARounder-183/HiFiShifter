@@ -327,6 +327,26 @@ pub(super) fn create(
     frame: usize,
     link: Arc<crate::editor::routing::EditorLink>,
 ) -> Result<Rc<dyn EditorHost>, String> {
+    // ── 编辑器默认关闭：宿主优先 ─────────────────────────────────────────────
+    //
+    // 【为什么】实测（发 `WM_DELETE_WINDOW` 给 FX 窗口，用 ReaEQ 作对照）：
+    // HiFiShifter 的窗口关不掉、宿主整体冻住，而 ReaEQ 正常。这条冻结从 Linux VST
+    // 第一次实现起就存在，与本轮的任何改动无关 —— 也就是说它是**架构性**的：把
+    // GTK + WebKit 塞进宿主进程这件事，在 REAPER/XWayland 上会让宿主的消息泵停摆。
+    //
+    // 在它被真正解决之前，默认**不建任何 GTK/WebKit 对象**：宿主看到一个没有编辑器
+    // 的插件（面板空白），但插件本身、ARA、渲染全部照常可用，宿主也永远不会被冻。
+    //
+    // 想看界面：`HIFISHIFTER_GUI=1`。
+    if !std::env::var("HIFISHIFTER_GUI").is_ok_and(|value| value.trim() == "1") {
+        crate::gui_log_line(
+            "editor disabled by default on Linux (set HIFISHIFTER_GUI=1 to try it)",
+        );
+        return Ok(Rc::new(super::unavailable::UnavailableHost::new(
+            "the Linux editor is disabled by default while its host freeze is unresolved",
+        )));
+    }
+
     let request = AttachRequest {
         parent,
         width,
