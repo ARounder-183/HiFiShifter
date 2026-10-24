@@ -349,10 +349,7 @@ mod remote {
         fn post_message(&self, text: &str) -> bool {
             let expression = protocol::js_expression(text);
             self.out
-                .send(
-                    serde_json::json!({"type":"eval","js":expression})
-                        .to_string(),
-                )
+                .send(serde_json::json!({"type":"eval","js":expression}).to_string())
                 .is_ok()
         }
 
@@ -592,9 +589,7 @@ mod remote {
                 break;
             }
             if let Ok(Some(_)) = child.try_wait() {
-                client
-                    .borrow_mut()
-                    .mark_dead("the editor process exited");
+                client.borrow_mut().mark_dead("the editor process exited");
                 break;
             }
             std::thread::sleep(Duration::from_millis(20));
@@ -603,7 +598,6 @@ mod remote {
         let _ = child.wait();
         let _ = std::fs::remove_file(&boot_path);
     }
-
 }
 
 pub(super) fn create(
