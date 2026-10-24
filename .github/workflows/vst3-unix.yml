@@ -130,8 +130,10 @@ jobs:
           path: third_party/sdk
           key: plugin-sdks-${{ hashFiles('scripts/env/plugin-sdks.json') }}
 
-      # 一条命令做完：取 SDK → 构建前端 → 编译 → 组装 bundle → **九项**自检
-      # （含 dlopen 探针与三条前端产物判据）→ tar.gz。
+      # 一条命令做完：取 SDK → 构建前端 → 编译 → 组装 bundle → 自检 → tar.gz。
+      # 自检里包含三条**只有真跑一遍才能发现**的判据：dlopen 黑盒加载、前端产物齐备、
+      # 以及宿主握手（插件按本平台 IID 布局拿到 IReaperHostApplication —— Windows 上
+      # 永远看不出这一条的问题，见 scripts/vst3/unix/host_iid_probe.c）。
       # 构建逻辑只在 scripts/vst3/unix/ 里存在一份，CI 不重复实现任何一步。
       - name: Build, verify and package
         run: bash scripts/vst3/unix/build.sh

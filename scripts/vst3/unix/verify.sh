@@ -4,12 +4,12 @@
 #
 #     scripts/vst3/unix/verify.sh <path/to/HiFiShifter.vst3>
 #
-# 九条判据，任何一条不过就退出非零。设计原则：**只信外部证据** ——
-# 符号表、动态段、真的 dlopen 一次、以及"前端产物真的在包里"，而不是
-# "构建脚本说它没问题"。
+# 判据（任何一条不过就退出非零）。设计原则：**只信外部证据** ——
+# 符号表、动态段、真的 dlopen 一次、真的和宿主握一次手、以及"前端产物真的在包里"，
+# 而不是"构建脚本说它没问题"。
 #
 #   1 布局  2 导出符号  3 依赖自洽  4 dlopen 黑盒加载  5 macOS bundle 元数据
-#   6 打包卫生  7 前端产物  8 html 引用的资源  9 没有远程引用
+#   6 打包卫生  7 前端产物  8 宿主握手（原生扩展 + IID 布局）
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -238,6 +238,35 @@ else
     printf "%s\n" "$REMOTE" | sed "s/^/    /"
     bad "前端产物里有远程引用（离线打开会失败）"
 fi
+# ── 8. 宿主握手 ──────────────────────────────────────────────────────────────
+#
+# 【为什么这条必须在打包门禁里】VST3 的 IID 是**逐字节**比较的，而 `INLINE_UID`
+# 按 `COM_COMPATIBLE` 展开成两种布局：Windows 是 COM/GUID，Linux / macOS 是每字大端。
+# 发错布局的失败形态是"宿主回一个空指针"——不崩、不报错，Windows 上完全看不出来，
+# 而在 Unix 上等于 ARA 拿不到 item、编辑器与处理器断链、工程永不标脏。
+#
+# 探针自己实现 `IHostApplication` 与 `IReaperHostApplication`（**只按本平台布局**），
+# 走一遍 `setHostContext → createInstance → initialize`，然后读插件日志断言三行。
+# 不建视图、不碰 X11，所以无显示环境也能跑。
+printf "\n8) 宿主握手（原生扩展 + IID 布局）\n"
+if [ "$HOST_OS" = "linux" ]; then
+    if cc -O1 -Wall -o "$PROBE_DIR/host_iid" "$SCRIPT_DIR/host_iid_probe.c" -ldl \
+        2>"$PROBE_DIR/host_iid-cc.log"; then
+        if "$PROBE_DIR/host_iid" "$MODULE" "$PROBE_DIR/handshake" >"$PROBE_DIR/host_iid.log" 2>&1; then
+            ok "插件按本平台布局拿到了宿主的原生扩展"
+            sed "s/^/    /" "$PROBE_DIR/host_iid.log"
+        else
+            bad "宿主握手失败（插件拿不到 IReaperHostApplication）："
+            sed "s/^/    /" "$PROBE_DIR/host_iid.log"
+        fi
+    else
+        bad "握手探针编译失败（需要 C 编译器）："
+        sed "s/^/    /" "$PROBE_DIR/host_iid-cc.log"
+    fi
+else
+    printf "    macOS 跳过：探针按 ELF 的加载路径编写，Darwin 需要另做一次\n"
+fi
+
 if [ "$FAILED" = "0" ]; then
     printf "\n[vst3:verify] 全部通过\n\n"
     exit 0
