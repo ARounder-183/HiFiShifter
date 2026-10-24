@@ -1407,6 +1407,7 @@ export const koKR = {
     // 템포 맵（템포/박자표/스케일 변경）
     tempo_map: "템포 맵",
     menu_view_tempo_map: "템포 맵",
+    menu_hand_keyboard_to_host: "키보드를 호스트로 넘기기",
     tempo_map_add_point: "여기에 템포/박자표/스케일 변경 추가...",
     tempo_map_add_scale_point: "여기에 스케일 변경 추가...",
     tempo_map_edit_point: "이 변경점 편집...",
@@ -2195,7 +2196,7 @@ export const koKR = {
     plugin_transport_stop: "호스트에서 재생 정지",
     plugin_transport_play: "호스트에서 재생/일시 정지",
     plugin_transport_host_only:
-        "플러그인이 호스트 재생을 시작할 수 없습니다 — 호스트에서 재생하세요",
+        "플러그인이 호스트 재생을 시작할 수 없습니다 — 플러그인에서 재생/일시정지 키를 누르면 호스트로 전달됩니다. 호스트에서 직접 눌러도 됩니다.",
     plugin_feature_unavailable: "이 기능은 아직 VST/ARA 플러그인에서 제공되지 않습니다",
     plugin_reverse_unavailable:
         "ARA는 역재생 오디오를 제공하지 않습니다. 역재생은 호스트에서 하세요",
@@ -2295,6 +2296,11 @@ export const koKR = {
         "호스트가 제어합니다. 파일, 클립 지오메트리, 템포, 박자, 재생은 호스트에서 조작하세요",
     cap_reason_host_owns: "이 단계는 호스트가 담당합니다(플러그인이 넘겨받지 않습니다)",
     cap_reason_unsupported_by_host: "현재 호스트가 이 인터페이스를 제공하지 않습니다",
+    // ── 호스트 전용 단축키 전달 결과(services/hostKeyRelay.ts 참조) ─────────
+    host_key_relay_no_response:
+        "「{action}」을(를) 호스트에 넘겼지만 응답이 없습니다. 반응이 없으면 호스트의 편곡 영역을 한 번 클릭한 뒤 다시 눌러 주세요.",
+    host_key_relay_refused:
+        "「{action}」을(를) 호스트에 넘기지 못했습니다(호스트 창을 지금 사용할 수 없습니다). 호스트의 편곡 영역을 클릭한 뒤 다시 시도해 주세요.",
     cap_reason_app_only: "독립 실행형 앱에서만 사용할 수 있습니다",
     cap_reason_piano_roll_only: "매개변수 편집기에서만 적용됩니다",
 

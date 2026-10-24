@@ -956,6 +956,16 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
             // 补丁是逐字段的：只传用户改过的键，后端按字段覆盖。
             return { ...(args[0] as Record<string, unknown> | undefined) };
 
+        // ── 宿主专属快捷键的让路（仅插件形态；见 `services/hostKeyRelay.ts`）─────
+        // 【为什么两条都要显式登记】`host_key_relay` 带三个位置参数，
+        // `host_key_escape_set` 带一个数组。漏登记会返回 `__unwired` 并直接 throw ——
+        // 而这里的失败是**静默**的（用户只看到"按了没反应"），正是本仓反复吃过的那类。
+        case "host_key_relay":
+            return { key: args[0], action: args[1], mods: args[2] };
+
+        case "host_key_escape_set":
+            return { strokes: args[0] };
+
         default:
             // 无参命令白名单：不携带参数的命令在此统一登记（invoke 时以空
             // args 对象调用，与无 args 调用在 Tauri 侧等价）。新命令若携带
@@ -1015,6 +1025,9 @@ const NO_ARG_COMMANDS: ReadonlySet<string> = new Set([
     "get_ui_settings",
     "ui_kv_dump",
     "get_vslib_status",
+    // 把键盘焦点交还宿主（仅插件形态；无参）。与 host_key_relay 一族同处
+    // `editor/webview.rs` 的视图层分发。
+    "host_key_focus",
     "has_reaper_clipboard",
     "has_timeline_clipboard",
     "import_project_dialog",

@@ -144,6 +144,7 @@ import { QuickSearchPopup } from "./components/layout/QuickSearchPopup";
 import { FolderImportHost } from "./components/layout/FolderImportHost";
 import { useKeybindings } from "./features/keybindings/useKeybindings";
 import { selectMergedKeybindings } from "./features/keybindings/keybindingsSlice";
+import { ACTION_META } from "./features/keybindings/defaultKeybindings";
 import { beginHoldRepeat } from "./features/keybindings/holdRepeat";
 import {
     ACTION_TO_EDIT_OP,
@@ -153,6 +154,15 @@ import {
     type EditOpChannel,
 } from "./features/keybindings/focusRouting";
 import { installFocusSurfaceTracking, getActiveSurface } from "./features/uiFocus/focusSurface";
+import {
+    classifyHostKeyRelay,
+    collectHostKeyEscapeStrokes,
+    hostKeyRelayEnv,
+    publishHostKeyEscapeSet,
+    relayHostKey,
+    subscribeHostKeyRelayNotice,
+    type HostKeyStroke,
+} from "./services/hostKeyRelay";
 import type { ActionId } from "./features/keybindings/types";
 import { store } from "./app/store";
 import { resolveRootTrackId, computeInsertBelowPlacement } from "./features/session/trackUtils";
@@ -2778,12 +2788,33 @@ function AppInner() {
 
     // 统一快捷键处理（通过 keybindings 模块管理，用户可自定义）
     const handleKeybindingAction = useCallback(
-        (actionId: ActionId) => {
+        (actionId: ActionId, stroke: HostKeyStroke) => {
             if (!pluginAllowsAction(actionId, getActiveSurface())) {
                 // 【为什么不再静默】快捷键被拒此前是彻底的 no-op：菜单项上有 tooltip 说明，
                 // 键盘却没有任何可以挂说明的表面 —— 用户按了没反应，只能当成 bug。
                 // 状态栏是现成的短时效提示位（渲染缓存统计 / 自动声道折叠都在用它），
                 // 因此这里只补一句"为什么"，不引入新的 UI 表面。
+                //
+                // 【但"为什么"要分两类】插件用不上的键里有一类，用户的本意压根不是让插件
+                // 去做 —— 典型是不支持 ARA 的宿主里按 Space：他想让**宿主**播放。对这类键
+                // 说"当前宿主没有提供这个接口"是把他往死路上指。所以先问让路判定：
+                // 能还的就还给宿主，还成了就什么都不说。
+                const relay = classifyHostKeyRelay(
+                    actionId,
+                    getActiveSurface(),
+                    stroke,
+                    hostKeyRelayEnv(),
+                );
+                if (relay) {
+                    void relayHostKey(relay).then((outcome) => {
+                        // 只有"连让都没让成"才回落旧文案；其余情况由
+                        // `host_key_relay_notice` 事件说话（见下面的订阅）。
+                        if (outcome !== "unsupported") return;
+                        const text = capabilityDeniedText(actionId, getActiveSurface());
+                        if (text) showNotice(text, 4000, "warning");
+                    });
+                    return false;
+                }
                 const deniedText = capabilityDeniedText(actionId, getActiveSurface());
                 if (deniedText) showNotice(deniedText, 4000, "warning");
                 return false;
@@ -3521,6 +3552,49 @@ function AppInner() {
     );
 
     useKeybindings(handleKeybindingAction);
+
+    /*
+     * 宿主专属快捷键：把"属于宿主"的按键集合推给原生。
+     *
+     * 【为什么要有这一份集合】macOS 的让路是**事前**的：键在进入页面之前就该决定让不让，
+     * 而原生不知道用户的键位（键位在 Redux / localStorage 里）。集合由前端算好推过去，
+     * 两端因此共用同一套判据（`capabilityForAction` + `RELAYABLE_KEYS`），不会各写一套。
+     *
+     * 【为什么也监听 bootstrap 变化】`transportControl` 决定"要不要让"（有 ARA 播放
+     * 请求时插件自己做更好）。它在 ARA 绑定之后才会变，而绑定发生在窗口打开之后 ——
+     * 只在挂载时算一次会把"还没绑定"的那个答案永久冻结。
+     */
+    const mergedKeybindings = useAppSelector(selectMergedKeybindings);
+    useEffect(() => {
+        if (!isPluginMode()) return;
+        const publish = () => {
+            publishHostKeyEscapeSet(
+                collectHostKeyEscapeStrokes(mergedKeybindings, hostKeyRelayEnv()),
+            );
+        };
+        publish();
+        window.addEventListener("hfs-plugin-bootstrap-changed", publish);
+        return () => window.removeEventListener("hfs-plugin-bootstrap-changed", publish);
+    }, [mergedKeybindings]);
+
+    /*
+     * 让路"没成"的回报：投递了但宿主没动，或者根本没投成（宿主窗口不可用 / 本平台没有这条路）。
+     *
+     * 【为什么这类话只能由原生发起】"宿主动没动"只有原生看得见（`TransportClock` 每个
+     * 音频块都在读 VST3 的 kPlaying）。前端若自己猜，就会在宿主慢一帧时误报。
+     */
+    useEffect(() => {
+        if (!isPluginMode()) return;
+        return subscribeHostKeyRelayNotice((notice) => {
+            const meta = ACTION_META[notice.action as ActionId];
+            const action = meta ? t(meta.labelKey) : notice.action;
+            const key =
+                notice.reason === "no-response"
+                    ? "host_key_relay_no_response"
+                    : "host_key_relay_refused";
+            showNotice(tVars(key, { action }), 6000, "warning");
+        });
+    }, [showNotice, t, tVars]);
 
     // 活动编辑表面跟踪：document 捕获阶段解析 pointerdown / focusin 落点，
     // 为编辑快捷键（复制/剪切/粘贴等）的归属裁决提供单一事实源 —— 捕获

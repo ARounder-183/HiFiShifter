@@ -1354,6 +1354,7 @@ export const jaJP = {
     // テンポマップ（テンポ/拍子/スケールの変化）
     tempo_map: "テンポマップ",
     menu_view_tempo_map: "テンポマップ",
+    menu_hand_keyboard_to_host: "キーボードをホストに渡す",
     tempo_map_add_point: "ここにテンポ/拍子/スケール変更を追加...",
     tempo_map_add_scale_point: "ここにスケール変更を追加...",
     tempo_map_edit_point: "この変更点を編集...",
@@ -2226,7 +2227,7 @@ export const jaJP = {
     plugin_transport_stop: "ホストの再生を停止",
     plugin_transport_play: "ホストの再生/一時停止",
     plugin_transport_host_only:
-        "プラグインからホストの再生は開始できません — ホストで再生してください",
+        "プラグインからホストの再生は開始できません — プラグイン内で再生/一時停止キーを押すとホストに転送されます。ホスト側で押すこともできます。",
     plugin_feature_unavailable: "この機能は VST/ARA プラグインでは未提供です",
     plugin_reverse_unavailable:
         "逆再生はホストのアイテム操作です。ホストでこのクリップを逆再生してください",
@@ -2326,6 +2327,11 @@ export const jaJP = {
         "ホストが制御します。ファイル、クリップのジオメトリ、テンポ、拍子、再生はホスト側で操作してください",
     cap_reason_host_owns: "この操作はホストが担当します（プラグインは引き受けません）",
     cap_reason_unsupported_by_host: "現在のホストはこのインターフェースを提供していません",
+    // ── ホスト専用ショートカットの転送結果（services/hostKeyRelay.ts 参照）──
+    host_key_relay_no_response:
+        "「{action}」をホストに渡しましたが、応答がありませんでした。反応しない場合は、ホストのアレンジ領域を一度クリックしてからもう一度押してください。",
+    host_key_relay_refused:
+        "「{action}」をホストに渡せませんでした（ホストのウィンドウが現在利用できません）。ホストのアレンジ領域をクリックしてからもう一度お試しください。",
     cap_reason_app_only: "スタンドアロン版でのみ使用できます",
     cap_reason_piano_roll_only: "パラメータエディタでのみ有効です",
 

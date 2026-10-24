@@ -5,6 +5,7 @@ import {
     canCreateHostTracks,
     canImportAsTakes,
 } from "../../services/hostCapabilities";
+import { handKeyboardToHost } from "../../services/hostKeyRelay";
 import { DropdownMenu, Flex } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
@@ -995,6 +996,19 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         「布局」二级菜单 —— 两个组件的停靠订阅都在 DockLayoutMenu
                         模块内部，不进 MenuBar。 */}
                     <DockLayoutMenus withCheck={withCheck} />
+                    {/*
+                     * 把键盘交给宿主：让路的**确定**那条路。
+                     *
+                     * 【为什么只出现在插件里】独立 App 没有宿主可交还。
+                     * 【为什么值得一个菜单项】"让路"要投递窗口消息，而有的宿主只看自己的
+                     * 前台焦点窗口、有的把编辑器放进桥接进程 —— 那些情况下让路不生效。
+                     * 交还焦点一定会生效，代价是焦点真的走了，所以它不自动发生。
+                     */}
+                    {isPluginMode() && (
+                        <DropdownMenu.Item onSelect={() => void handKeyboardToHost()}>
+                            {tf("menu_hand_keyboard_to_host")}
+                        </DropdownMenu.Item>
+                    )}
                     <DropdownMenu.Separator />
 
                     {/* 时间轴 / 编辑器里的显示开关。 */}

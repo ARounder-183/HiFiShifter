@@ -1474,6 +1474,7 @@ export const enUS = {
     // Tempo Map (tempo / time-signature / scale changes)
     tempo_map: "Tempo Map",
     menu_view_tempo_map: "Tempo Map",
+    menu_hand_keyboard_to_host: "Hand Keyboard to Host",
     tempo_map_add_point: "Add Tempo / Time Signature / Scale Change Here...",
     tempo_map_add_scale_point: "Add Scale Change Here...",
     tempo_map_edit_point: "Edit This Point...",
@@ -2209,7 +2210,7 @@ export const enUS = {
     plugin_transport_stop: "Stop playback in the host",
     plugin_transport_play: "Play or pause in the host",
     plugin_transport_host_only:
-        "The plug-in cannot start the host's transport — press play in the host",
+        "The plug-in cannot start the host's transport — pressing play/pause here hands the key to the host. You can also press it in the host.",
     plugin_feature_unavailable: "Not available in the VST/ARA plugin yet",
     plugin_reverse_unavailable:
         "Reversing is a host item operation; use the host to reverse this clip",
@@ -2311,6 +2312,11 @@ export const enUS = {
         "Controlled by the host; manage files, clip geometry, tempo, meter and playback in the host",
     cap_reason_host_owns: "The host owns this step; the plug-in does not take it over",
     cap_reason_unsupported_by_host: "The current host does not expose this interface",
+    // ── Host key relay follow-up (see services/hostKeyRelay.ts) ─────────────
+    host_key_relay_no_response:
+        "Handed “{action}” to the host, but it did not respond. If nothing happens, click the host's arrange area and try again.",
+    host_key_relay_refused:
+        "Could not hand “{action}” to the host (its window is unavailable right now). Click the host's arrange area and try again.",
     cap_reason_app_only: "Only available in the standalone app",
     cap_reason_piano_roll_only: "Only applies to the parameter editor",
 

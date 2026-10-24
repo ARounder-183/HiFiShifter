@@ -1305,6 +1305,7 @@ export const zhTW = {
     // 速度映射（變速/變拍/變音階）
     tempo_map: "速度映射",
     menu_view_tempo_map: "速度映射",
+    menu_hand_keyboard_to_host: "把鍵盤交給宿主",
     tempo_map_add_point: "在此新增速度/拍號/音階變化...",
     tempo_map_add_scale_point: "在此新增音階變化點...",
     tempo_map_edit_point: "編輯此變化點...",
@@ -2147,7 +2148,8 @@ export const zhTW = {
     plugin_apply_hint: "片段編輯與漸變寬度同步宿主 · 漸變聲音由宿主處理 · 倒放由 HiFiShifter 渲染",
     plugin_transport_stop: "控制宿主停止播放",
     plugin_transport_play: "控制宿主播放/暫停",
-    plugin_transport_host_only: "外掛無法啟動宿主播放 —— 請在宿主裡按播放",
+    plugin_transport_host_only:
+        "外掛無法啟動宿主播放 —— 在外掛裡按播放/暫停鍵會轉交給宿主；也可以直接在宿主裡按。",
     plugin_feature_unavailable: "該功能尚未在 VST/ARA 外掛裡提供",
     plugin_reverse_unavailable: "倒放是宿主 item 操作；請在宿主裡倒放這一條",
     // ── 捕獲（不支援 ARA 的宿主裡，把宿主播放的音訊錄進外掛）──────────────
@@ -2239,6 +2241,11 @@ export const zhTW = {
     plugin_daw_controlled_reason: "由宿主控制；請在宿主中操作檔案、片段幾何、速度、拍號與播放",
     cap_reason_host_owns: "這一步由宿主完成，外掛不接管",
     cap_reason_unsupported_by_host: "目前宿主沒有提供這個介面",
+    // ── 宿主專屬快速鍵的讓路回報（見 services/hostKeyRelay.ts）──────────────
+    host_key_relay_no_response:
+        "已把「{action}」轉交給宿主，但沒等到回應。若宿主沒有反應，請先點一下宿主的編曲區再按。",
+    host_key_relay_refused:
+        "這次沒能把「{action}」交給宿主（宿主視窗目前不可用）。請先點一下宿主的編曲區再按。",
     cap_reason_app_only: "僅在獨立 App 中可用",
     cap_reason_piano_roll_only: "僅適用於參數編輯器",
 

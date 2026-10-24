@@ -3,6 +3,7 @@ import { useAppSelector } from "../../app/hooks";
 import { firstBinding, selectMergedKeybindings } from "./keybindingsSlice";
 import { ACTION_META } from "./defaultKeybindings";
 import type { ActionId } from "./types";
+import type { HostKeyStroke } from "../../services/hostKeyRelay";
 import type { RootState } from "../../app/store";
 import {
     resolveActionByFocus,
@@ -195,7 +196,17 @@ function computeFocusDomain(): KeybindingFocusDomain {
     return surface === "fileBrowser" ? null : surface;
 }
 
-export type KeybindingActionHandler = (actionId: ActionId) => void;
+/**
+ * 命中一条绑定时交给应用层。
+ *
+ * 【为什么把 `stroke` 一起交出去】有些动作在插件形态下**插件自己用不上**（典型的
+ * 是 `playback.toggle`：没有 ARA 播放请求就无从执行），而用户的本意往往是让**宿主**
+ * 去做。要"让"就必须知道用户到底按了哪个键，而这一层正是唯一知道的人。
+ *
+ * 判定不在这一层做：它是"按键 → 动作"的纯派发器，不该知道能力矩阵。谁决定、怎么让，
+ * 见 `services/hostKeyRelay.ts`。
+ */
+export type KeybindingActionHandler = (actionId: ActionId, stroke: HostKeyStroke) => void;
 
 /**
  * 全局快捷键监听 Hook（window 上唯一的 keydown 监听器）
@@ -251,6 +262,15 @@ export function useKeybindings(handler: KeybindingActionHandler): void {
             if (isShortcutSuppressed()) return;
 
             const key = normalizeEventKey(e);
+            // 让路判定需要的全部按键事实，在这一层就地收齐（`key` 已归一化，
+            // 因此 Space 是 `space` 而不是 `" "`）。
+            const stroke: HostKeyStroke = {
+                key,
+                ctrl: e.ctrlKey,
+                shift: e.shiftKey,
+                alt: e.altKey,
+                meta: e.metaKey,
+            };
 
             /*
              * 复合控件（标签条 / 菜单 / 下拉 / 滑杆…）自己处理方向键，全局绑定让路。
@@ -383,7 +403,7 @@ export function useKeybindings(handler: KeybindingActionHandler): void {
             if (ACTION_TO_EDIT_OP[matched]) {
                 e.preventDefault();
                 e.stopPropagation();
-                handlerRef.current(matched);
+                handlerRef.current(matched, stroke);
                 return;
             }
 
@@ -397,7 +417,7 @@ export function useKeybindings(handler: KeybindingActionHandler): void {
 
             e.preventDefault();
             e.stopPropagation();
-            handlerRef.current(matched);
+            handlerRef.current(matched, stroke);
         }
 
         window.addEventListener("keydown", onKeyDown, true);

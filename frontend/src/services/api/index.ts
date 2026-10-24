@@ -7,3 +7,4 @@ export { fileBrowserApi } from "./fileBrowser";
 export { settingsApi } from "./settings";
 export { recordingApi } from "./recording";
 export { notebookApi } from "./notebook";
+export { hostKeysApi } from "./hostKeys";
