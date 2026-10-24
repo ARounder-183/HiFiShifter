@@ -201,8 +201,14 @@ pub mod gpu_info;
 #[path = "gpu_info_stub.rs"]
 pub mod gpu_info;
 
-#[cfg(target_os = "windows")]
+// 「诊断进行中 → 实时通路静音」的进程级计数。它**不是** Windows 专属：
+// 写入方是 kernel 里的预热/基准测试，读取方是 app 的音频回调与插件的实时输出
+// 阶段 —— 两者在三个平台上都存在。此前它被 cfg(windows) 挡着，于是
+// Linux/macOS 上这几处调用点编译不过（ONNX 通路一开就暴露）。
 pub mod diagnostics_busy;
+
+// DirectML 适配器枚举：真实现要用 windows crate 的 DXGI，只有 Windows 有。
+#[cfg(target_os = "windows")]
 pub mod dml_adapters;
 #[cfg(not(target_os = "windows"))]
 #[path = "dml_adapters_stub.rs"]
