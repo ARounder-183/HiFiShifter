@@ -68,6 +68,19 @@ impl HostEditPlan {
                             "track_id",
                             serde_json::json!(format!("{namespace}{}", edit.destination_track)),
                         ),
+                        // 【为什么两层增益都要进门，且都取 `after`】REAPER 里 item 增益
+                        // （`D_VOL`）与 take 增益是两个独立旋钮，链路里也分两路写
+                        // （`write-item:` 与 `write-take:`）。此前门里只有补丁里的
+                        // `gain`（take 层），item 层的写入**完全没有回流判据**：只改
+                        // item 增益的补丁 `matches()` 恒真，前端按权威回声整份应用，
+                        // 旋钮会弹回旧值，直到下一次几何刷新才纠正 —— 与 dir/shape
+                        // 当年那次抖动同源。
+                        //
+                        // 取 `after` 而不是补丁值：`after` 是应用后的权威快照（含
+                        // `clamp_gain` 的结果），补丁值只是请求；用请求当判据会把
+                        // "宿主把 16 夹到 15.8" 这类事判成成功。
+                        ("clip_gain", serde_json::json!(after.clip_gain)),
+                        ("gain", serde_json::json!(after.gain)),
                     ];
                     for (value, key) in [
                         (edit.patch.fade_in_sec, "fade_in_sec"),
@@ -75,7 +88,6 @@ impl HostEditPlan {
                         (edit.patch.auto_fade_in_sec, "auto_fade_in_sec"),
                         (edit.patch.auto_fade_out_sec, "auto_fade_out_sec"),
                         (edit.patch.snap_offset_sec, "snap_offset_sec"),
-                        (edit.patch.gain.map(f64::from), "gain"),
                     ] {
                         if let Some(value) = value {
                             fields.push((key, serde_json::json!(value)));
@@ -1163,12 +1175,15 @@ mod tests {
             assert_eq!(g.take_gain, -0.25);
             assert!(host.calls().contains(&"write-item:D_VOL".into()));
             assert!(!host.calls().iter().any(|call| call == "write-take:D_VOL"));
+            // 载荷按 `TimelineClip` 的真实形状写：它同时带 `clip_gain`（item 层）与
+            // `gain`（active take 的投影）。本次只改 item 层，因此 `gain` 保持夹具原值。
             let payload = json!({"clips":[{"id":clip.id,"start_sec":clip.start_sec,"length_sec":clip.length_sec,
-                "source_start_sec":clip.source_start_sec,"playback_rate":clip.playback_rate,"track_id":clip.track_id,"gain":gain}]});
-            assert!(receipt.matches(&payload));
+                "source_start_sec":clip.source_start_sec,"playback_rate":clip.playback_rate,"track_id":clip.track_id,
+                "clip_gain":gain,"gain":clip.gain}]});
+            assert!(receipt.matches(&payload), "{receipt:?} vs {payload}");
             let mut stale = payload;
-            stale["clips"][0]["gain"] = json!(1.);
-            assert!(!receipt.matches(&stale));
+            stale["clips"][0]["clip_gain"] = json!(1.);
+            assert!(!receipt.matches(&stale), "item 增益的陈旧回显必须被门拦下");
         }
         // 负增益没有意义（反相是宿主的 take 极性，不是增益），必须拒绝。
         assert!(editor
