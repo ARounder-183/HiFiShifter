@@ -178,13 +178,13 @@ fn module_shutdown() -> bool {
 /// VST3 模块初始化入口（Windows：REAPER 在 `LoadLibrary` 之后显式调用）。
 #[no_mangle]
 pub extern "system" fn InitDll() -> bool {
-    module_initialize()
+    crate::guard_ffi(false, module_initialize)
 }
 
 /// VST3 模块卸载入口（Windows）。
 #[no_mangle]
 pub extern "system" fn ExitDll() -> bool {
-    module_shutdown()
+    crate::guard_ffi(false, module_shutdown)
 }
 
 // ── Unix 模块入口 ───────────────────────────────────────────────────────────
@@ -203,26 +203,28 @@ pub extern "system" fn ExitDll() -> bool {
 #[cfg(unix)]
 #[no_mangle]
 pub extern "C" fn ModuleEntry(_module: *mut c_void) -> bool {
-    module_initialize()
+    // 【为什么守卫写在**入口**而不是只写在它调用的函数里】panic 越过 extern 边界
+    // 是 abort；把它放在边界上，才不依赖"每个被调者都记得包一层"。
+    crate::guard_ffi(false, module_initialize)
 }
 
 /// Linux 模块卸载入口。
 #[cfg(unix)]
 #[no_mangle]
 pub extern "C" fn ModuleExit() -> bool {
-    module_shutdown()
+    crate::guard_ffi(false, module_shutdown)
 }
 
 /// macOS bundle 入口（`CFBundleRef` 以裸指针传入）。
 #[cfg(target_os = "macos")]
 #[no_mangle]
 pub extern "C" fn bundleEntry(_bundle: *mut c_void) -> bool {
-    module_initialize()
+    crate::guard_ffi(false, module_initialize)
 }
 
 /// macOS bundle 卸载入口。
 #[cfg(target_os = "macos")]
 #[no_mangle]
 pub extern "C" fn bundleExit() -> bool {
-    module_shutdown()
+    crate::guard_ffi(false, module_shutdown)
 }

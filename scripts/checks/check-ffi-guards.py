@@ -1,9 +1,16 @@
 """CI gates for the plugin/App panic-containment and locking discipline.
 
-1. FFI guard gate: every `unsafe extern "system" fn` in the plugin crate must
-   contain a panic guard (guard_ffi / catch_unwind / boundary) in its body.
-   Since Rust 1.71 a panic across `extern "system"` is an abort - every host
-   entry is a potential DAW crash otherwise. Discipline: docs/thread-model.md.
+1. FFI guard gate: every `extern "system"` / `extern "C"` entry point in the
+   plugin crate must contain a panic guard (guard_ffi / catch_unwind / boundary)
+   in its body. Since Rust 1.71 a panic across any `extern` boundary is an
+   abort - every host entry is a potential DAW crash otherwise.
+   Discipline: docs/thread-model.md.
+
+   【Why "C" is in the list as well】The macOS/Linux editor (editor/gui) is
+   reached through Objective-C methods and GTK signal callbacks, both of which
+   are C ABI. They are written as `extern "C"` closures/functions, so a guard
+   gate that only knew `extern "system"` would leave exactly the newest and
+   least-tested entry points unchecked.
 
 2. Baseline gates: `.lock().unwrap()` and `error.contains(` are allowed only at
    the exact occurrences listed in scripts/checks/baseline-*.txt (path -> count).
@@ -19,7 +26,7 @@ import re
 import sys
 
 GUARD_MARKERS = ('guard_ffi(', 'catch_unwind', 'boundary(')
-sig_re = re.compile(r'^[ ]*(?:pub )?unsafe extern "system" fn (\w+)\(', re.M)
+sig_re = re.compile(r'^[ ]*(?:pub )?(?:unsafe )?extern "(?:system|C|C-unwind)" fn (\w+)\(', re.M)
 # All paths come from this file's own location. Scan roots are relative to
 # `backend/`, so the backend root must never be derived from a caller-supplied
 # plugin `src/` path: that produced
@@ -138,6 +145,30 @@ def is_test_path(rel_path):
     return base == 'tests.rs' or base.endswith('_tests.rs')
 
 
+def test_only_modules(root):
+    """Absolute paths of files whose module is declared as `#[cfg(test)] mod X;`.
+
+    【Why this is not just a filename rule】`src/test_host.rs` implements the ARA
+    test host: it is full of `extern "C"` callbacks that a real host never calls,
+    and it is gated by `#[cfg(test)] mod test_host;` in `lib.rs`. Naming it in a
+    list here would rot; reading the parent's declaration cannot.
+    """
+    declared = set()
+    pattern = re.compile(r'#\[cfg\(test\)\]\s*mod\s+(\w+)\s*;')
+    for dirpath, _dirs, files in os.walk(root):
+        for fn in files:
+            if not fn.endswith('.rs'):
+                continue
+            path = os.path.join(dirpath, fn)
+            with open(path, encoding='utf-8') as f:
+                src = f.read()
+            for name in pattern.findall(src):
+                candidate = os.path.join(dirpath, name + '.rs')
+                if os.path.exists(candidate):
+                    declared.add(os.path.normpath(candidate))
+    return declared
+
+
 def production_src(rel_path):
     """The file's source with every `#[cfg(test)] mod …` body removed.
 
@@ -217,6 +248,7 @@ def main():
 def ffi_guard_gate(root):
     offenders = []
     checked = 0
+    skip = test_only_modules(root)
     for dirpath, _dirs, files in os.walk(root):
         for fn in sorted(files):
             if not fn.endswith('.rs'):
@@ -227,6 +259,8 @@ def ffi_guard_gate(root):
             if fn == 'tests.rs' or fn.endswith('_tests.rs'):
                 continue
             path = os.path.join(dirpath, fn)
+            if os.path.normpath(path) in skip:
+                continue
             with open(path, encoding='utf-8') as f:
                 src = f.read()
             test_ranges = cfg_test_module_ranges(src)
@@ -253,14 +287,14 @@ def ffi_guard_gate(root):
                     offenders.append(f'{path}:{line}: fn {name}')
     if offenders:
         print(
-            'FFI guard gate FAILED - these extern "system" entries have no '
+            'FFI guard gate FAILED - these extern entries have no '
             'panic guard (guard_ffi/catch_unwind/boundary); a panic there '
             'aborts the host process. See docs/thread-model.md:'
         )
         for o in offenders:
             print(f'  {o}')
         return 1
-    print(f'FFI guard gate OK: {checked} extern "system" entries all guarded')
+    print(f'FFI guard gate OK: {checked} extern entries all guarded')
     return 0
 
 if __name__ == '__main__':

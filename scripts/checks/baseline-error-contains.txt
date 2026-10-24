@@ -19,5 +19,8 @@
 # classified by substring at all (it travels as `GeometryFailure`), so only the
 # restore-identity match in `extension/session.rs` is left.
 hifishifter-plugin/src/editor/errors.rs:2
-hifishifter-plugin/src/editor/webview.rs:2
+# 2026-10-24: `editor/webview.rs` was split into `editor/gui/` (policy + three
+# platform primitives). Its two substring sites moved to the policy file
+# unchanged — this is a move, not a new occurrence.
+hifishifter-plugin/src/editor/gui/client.rs:2
 hifishifter-plugin/src/render/extension/session.rs:1

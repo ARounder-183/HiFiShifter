@@ -8,6 +8,7 @@
 #
 # 阶段（--stage=…，默认 all）：
 #     sdk      按 scripts/env/plugin-sdks.json 的 pin 取 ARA_SDK / vst3sdk 并校验
+#     frontend 构建前端产物（vite）：bundle 里必须有 Contents/Resources/frontend
 #     build    cargo build -p hifishifter-plugin（默认 release 档：strip，与 Windows 出货档一致）
 #     bundle   按 VST3 3.7+ 的目录规范组装 HiFiShifter.vst3（含依赖、模型、Info.plist）
 #     verify   布局 / 符号 / 依赖自洽 / 黑盒加载（调用 verify.sh）
@@ -26,11 +27,13 @@ readonly REPO_ROOT="$(cd -- "$SCRIPT_DIR/../../.." && pwd)"
 readonly BACKEND_DIR="$REPO_ROOT/backend"
 readonly SDK_PINS="$REPO_ROOT/scripts/env/plugin-sdks.json"
 readonly API_NAME="HiFiShifter"
+readonly FRONTEND_DIST="$REPO_ROOT/frontend/dist"
 
 STAGE="all"
 PROFILE="release"
 OUT_DIR=""
 SKIP_VERIFY=0
+SKIP_FRONTEND=0
 
 log()  { printf "[vst3] %s\n" "$*"; }
 step() { printf "\n[vst3] ── %s\n" "$*"; }
@@ -44,6 +47,7 @@ usage() {
   --stage=all|sdk|build|bundle|verify|package   只跑到某个阶段（默认 all）
   --profile=release|dist|dev                    cargo profile（默认 release）
   --out=DIR                                     产物目录（默认 .build-tmp/vst3-unix）
+  --skip-frontend                               跳过前端构建（本地只改 Rust 时用；要求 dist 已存在）
   --no-verify                                   跳过 verify（只在该平台跑不了探针时用）
   -h, --help                                    显示本说明
 USAGE
@@ -55,6 +59,7 @@ while [ $# -gt 0 ]; do
         --stage)     STAGE="${2:?--stage needs a value}"; shift 2 ;;
         --profile=*) PROFILE="${1#*=}"; shift ;;
         --out=*)     OUT_DIR="${1#*=}"; shift ;;
+        --skip-frontend) SKIP_FRONTEND=1; shift ;;
         --no-verify) SKIP_VERIFY=1; shift ;;
         -h|--help)   usage; exit 0 ;;
         *)           die "unknown argument: $1（--help 看用法）" ;;
@@ -62,8 +67,8 @@ while [ $# -gt 0 ]; do
 done
 
 case "$STAGE" in
-    all|sdk|build|bundle|verify|package) ;;
-    *) die "--stage 只能是 all|sdk|build|bundle|verify|package，收到：$STAGE" ;;
+    all|sdk|frontend|build|bundle|verify|package) ;;
+    *) die "--stage 只能是 all|sdk|frontend|build|bundle|verify|package，收到：$STAGE" ;;
 esac
 
 # ── 平台 ─────────────────────────────────────────────────────────────────────
@@ -187,7 +192,34 @@ stage_sdk() {
     log "ARA_VST3_SDK_DIR=$ARA_VST3_SDK_DIR"
 }
 
-# ── 阶段 2：编译 ─────────────────────────────────────────────────────────────
+# ── 阶段 2：前端产物 ─────────────────────────────────────────────────────────
+
+# 前端是**同一份**产物：bundle 里的 `Contents/Resources/frontend` 与 Windows 完全同构，
+# 所以 `assets()` 的实现也只有一份（见 `editor/resources.rs`）。
+#
+# 【为什么构建在这里而不是在 CI 里】"我本地跑过 build.sh，产物里却没有前端"是最典型的
+# 打包漏项；把 npm 放进同一条流水线，这个坑就不存在。`--skip-frontend` 只给反复调
+# Rust 的循环用，而且它要求 `dist` 已经存在（缺了照样失败，不会静默产出空包）。
+stage_frontend() {
+    if [ "$SKIP_FRONTEND" = "1" ]; then
+        warn "按 --skip-frontend 跳过前端构建"
+        [ -f "$FRONTEND_DIST/plugin.html" ] \
+            || die "跳过前端构建但 $FRONTEND_DIST/plugin.html 不存在"
+        return
+    fi
+    step "构建前端（vite，含 plugin.html 入口）"
+    command -v npm >/dev/null 2>&1 || die "缺少 npm"
+    if [ ! -d "$REPO_ROOT/frontend/node_modules" ]; then
+        log "安装前端依赖（npm ci）"
+        ( cd "$REPO_ROOT/frontend" && npm ci --no-audit --no-fund ) \
+            || die "npm ci 失败"
+    fi
+    ( cd "$REPO_ROOT/frontend" && npm run build ) || die "前端构建失败"
+    [ -f "$FRONTEND_DIST/plugin.html" ] || die "前端构建完成但 $FRONTEND_DIST/plugin.html 不存在"
+    log "前端产物就绪：$FRONTEND_DIST"
+}
+
+# ── 阶段 3：编译 ─────────────────────────────────────────────────────────────
 stage_build() {
     step "编译 hifishifter-plugin（profile=$PROFILE）"
     command -v cargo >/dev/null 2>&1 || die "缺少 cargo"
@@ -278,6 +310,14 @@ stage_bundle() {
         log "依赖 $dep（$(du -hL "$BUNDLE_DIR/$RUNTIME_LIB_SUBDIR/$dep" | cut -f1)）"
     done
 
+    mkdir -p "$BUNDLE_DIR/Contents/Resources/frontend"
+    [ -f "$FRONTEND_DIST/plugin.html" ] || die "缺少前端产物：$FRONTEND_DIST/plugin.html（先跑 --stage=frontend）"
+    cp -f "$FRONTEND_DIST/plugin.html" "$BUNDLE_DIR/Contents/Resources/frontend/"
+    if [ -d "$FRONTEND_DIST/assets" ]; then
+        cp -R "$FRONTEND_DIST/assets" "$BUNDLE_DIR/Contents/Resources/frontend/"
+    fi
+    log "前端资源（$(du -sh "$BUNDLE_DIR/Contents/Resources/frontend" | cut -f1)）"
+
     cp -R "$REPO_ROOT/backend/src-tauri/resources/models/." "$BUNDLE_DIR/Contents/Resources/models/"
     [ -f "$BUNDLE_DIR/Contents/Resources/models/models.json" ] \
         || die "模型清单缺失：先跑 scripts/build/write-models-manifest.ps1 生成 models.json"
@@ -289,14 +329,14 @@ stage_bundle() {
 
     log "bundle 就绪：$BUNDLE_DIR"
 }
-# ── 阶段 4：自检 ─────────────────────────────────────────────────────────────
+# ── 阶段 5：自检 ─────────────────────────────────────────────────────────────
 stage_verify() {
     step "验证 bundle"
     [ -d "$BUNDLE_DIR" ] || die "还没有 bundle：$BUNDLE_DIR（先跑 --stage=bundle）"
     bash "$SCRIPT_DIR/verify.sh" "$BUNDLE_DIR"
 }
 
-# ── 阶段 5：打包 ─────────────────────────────────────────────────────────────
+# ── 阶段 6：打包 ─────────────────────────────────────────────────────────────
 stage_package() {
     step "打包 $ARTIFACT_BASE"
     local stage="$OUT_DIR/stage"
@@ -337,12 +377,13 @@ maybe_verify() {
 }
 
 case "$STAGE" in
-    sdk)     stage_sdk ;;
-    build)   stage_sdk; stage_build ;;
-    bundle)  stage_sdk; stage_build; stage_bundle ;;
-    verify)  stage_verify ;;
-    package) stage_sdk; stage_build; stage_bundle; maybe_verify; stage_package ;;
-    all)     stage_sdk; stage_build; stage_bundle; maybe_verify; stage_package ;;
+    sdk)      stage_sdk ;;
+    frontend) stage_frontend ;;
+    build)    stage_sdk; stage_frontend; stage_build ;;
+    bundle)   stage_sdk; stage_frontend; stage_build; stage_bundle ;;
+    verify)   stage_verify ;;
+    package)  stage_sdk; stage_frontend; stage_build; stage_bundle; maybe_verify; stage_package ;;
+    all)      stage_sdk; stage_frontend; stage_build; stage_bundle; maybe_verify; stage_package ;;
 esac
 
 log "完成"

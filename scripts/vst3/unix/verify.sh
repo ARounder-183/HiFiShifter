@@ -182,6 +182,58 @@ else
     esac
 fi
 
+
+# ── 7. 前端产物 ──────────────────────────────────────────────────────────────
+#
+# 【为什么这三条必须在这里】缺一个 asset 的 bundle 是最常见的打包漏项，而它的表现是
+# "插件窗口一片空白" —— 宿主不会报错，日志里也没有一行。三条判据分别覆盖：有没有 html、
+# html 引用的 js/css 在不在、有没有偷偷依赖远程资源。
+printf "\n7) 前端产物\n"
+FRONTEND="$BUNDLE/Contents/Resources/frontend"
+if [ -s "$FRONTEND/plugin.html" ]; then
+    ok "plugin.html 存在（$(du -h "$FRONTEND/plugin.html" | cut -f1)）"
+else
+    bad "缺少或为空的 Contents/Resources/frontend/plugin.html"
+fi
+# html 里引用的每个 js/css 都必须真的存在。
+MISSING_ASSETS=""
+if [ -s "$FRONTEND/plugin.html" ]; then
+    while IFS= read -r asset; do
+        [ -z "$asset" ] && continue
+        case "$asset" in
+            /*) rel="${asset#/}" ;;
+            *)  rel="$asset" ;;
+        esac
+        [ -f "$FRONTEND/$rel" ] || MISSING_ASSETS="$MISSING_ASSETS $rel"
+    done <<< "$(grep -oE '(src|href)="[^"]+[.](js|css)"' "$FRONTEND/plugin.html" \
+        | sed -E 's/^(src|href)="//; s/"$//' || true)"
+fi
+if [ -z "$MISSING_ASSETS" ]; then
+    ok "html 引用的 js/css 都在 bundle 内"
+else
+    bad "html 引用了不存在的资源：$MISSING_ASSETS"
+fi
+# 远程引用：插件窗口必须离线可用。
+#
+# 【为什么只查 html/css 的**属性**而不是全库 grep】压缩后的 JS 里到处是
+# `http://www.w3.org/2000/svg` 这类**命名空间字符串**和许可证里的链接 —— 它们不加载
+# 任何东西，却会让全库 grep 每次都报一堆假阳性，最终被所有人忽略。真正能触发网络请求的只有
+# html 的 src/href 与 css 的 url()，判据就只查这两处。
+REMOTE=""
+if [ -d "$FRONTEND" ]; then
+    HTML_REMOTE="$(grep -rInE "(src|href)[[:space:]]*=[[:space:]]*[\"']https?://" \
+        --include=*.html "$FRONTEND" 2>/dev/null || true)"
+    CSS_REMOTE="$(grep -rInE "url\([[:space:]]*[\"']?https?://" \
+        --include=*.css "$FRONTEND" 2>/dev/null || true)"
+    REMOTE="$(printf "%s\n%s\n" "$HTML_REMOTE" "$CSS_REMOTE" | sed "/^$/d")"
+fi
+if [ -z "$REMOTE" ]; then
+    ok "html/css 里没有远程引用"
+else
+    note "下列位置引用了远程资源："
+    printf "%s\n" "$REMOTE" | sed "s/^/    /"
+    bad "前端产物里有远程引用（离线打开会失败）"
+fi
 if [ "$FAILED" = "0" ]; then
     printf "\n[vst3:verify] 全部通过\n\n"
     exit 0

@@ -79,19 +79,29 @@ jobs:
           cache: false
           rustflags: ""
 
-      # 插件只需要 C 工具链 + CMake（SoundTouch 走 cmake）+ libxcb（剪贴板）。
-      # 刻意不装 GTK/WebKit：Unix 上插件没有内嵌编辑器，装了也不会被链接。
+      # C 工具链 + CMake（SoundTouch 走 cmake）+ libxcb（剪贴板）+ **WebKitGTK**。
+      #
+      # 【为什么现在要装 WebKit】内嵌编辑器在 Linux 上是 GtkPlug + WebKitWebView
+      # （见 editor/gui/linux.rs）。不装它，pkg-config 会在编译插件时直接失败 ——
+      # 与"装了也不会被链接"的旧状态正好相反。约 200 MB，换来的是插件窗口在这条
+      # 流水线上真的被编译过一次。
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential cmake pkg-config libxcb1-dev libssl-dev python3 file
+            build-essential cmake pkg-config libxcb1-dev libssl-dev python3 file \
+            libgtk-3-dev libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev
 
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
         run: |
           brew install cmake || true
+
+      # 桥接脚本是**手写的 JS**，语法错的表现是插件窗口一片空白。
+      # node 在三个 runner 上都有，一条 `node --check` 就能把它挡在合并之前。
+      - name: Check the WebKit bridge script
+        run: node --check backend/hifishifter-plugin/src/editor/gui/bridge.js
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
@@ -106,7 +116,8 @@ jobs:
           path: third_party/sdk
           key: plugin-sdks-${{ hashFiles('scripts/env/plugin-sdks.json') }}
 
-      # 一条命令做完：取 SDK → 编译 → 组装 bundle → 六项自检（含 dlopen 探针）→ tar.gz。
+      # 一条命令做完：取 SDK → 构建前端 → 编译 → 组装 bundle → **九项**自检
+      # （含 dlopen 探针与三条前端产物判据）→ tar.gz。
       # 构建逻辑只在 scripts/vst3/unix/ 里存在一份，CI 不重复实现任何一步。
       - name: Build, verify and package
         run: bash scripts/vst3/unix/build.sh
