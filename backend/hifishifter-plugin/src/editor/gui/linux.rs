@@ -852,7 +852,24 @@ fn attach_view(
     let display =
         gdk::Display::default().ok_or_else(|| "GTK has no default display".to_string())?;
     let display_kind = display.type_().name().to_string();
-    let embedded_ok = request.embedded && display_kind.contains("X11");
+    // ── 默认**不**嵌入 ────────────────────────────────────────────────────────
+    //
+    // 【为什么默认退回浮窗】把我们的窗口 `XReparentWindow` 进宿主的窗口，在
+    // XWayland + 合成器（WSLg 的 Weston）下会把合成器场景弄坏：宿主从此不重绘
+    // （拖动时满屏黑块），而且输入也没了 —— 实测宿主进程 CPU 只有 13%、状态 `S`
+    // （在等，不是在算），我们自己的回执泵照常在跑、没有任何慢调用。
+    //
+    // 也就是说：卡的不是我们的线程，是**别的东西被我们弄坏了**。在这条路被证明
+    // 可靠之前，默认走浮窗（GTK 的普通 toplevel，交给窗口管理器管，合成器不会乱），
+    // 嵌入留给 `HIFISHIFTER_GUI_EMBED=1` 显式开启。
+    let embed_requested =
+        std::env::var("HIFISHIFTER_GUI_EMBED").is_ok_and(|value| value.trim() == "1");
+    let embedded_ok = request.embedded && display_kind.contains("X11") && embed_requested;
+    if request.embedded && !embed_requested {
+        crate::gui_log_line(
+            "opening the editor as a floating window (set HIFISHIFTER_GUI_EMBED=1 to embed)",
+        );
+    }
     let fidelity = if embedded_ok {
         GuiFidelity::Embedded
     } else {
@@ -952,9 +969,11 @@ fn attach_view(
     } else {
         let reason = if !request.embedded {
             "the host did not hand us an embeddable X11 window"
-        } else {
+        } else if !display_kind.contains("X11") {
             // 【这一行就是 WSLg / Wayland 会话下的现场证据】非 X11 后端上没有外来窗口。
             "GTK is running on a non-X11 backend, so the host's X11 window cannot be embedded"
+        } else {
+            "embedding is opt-in on Linux (HIFISHIFTER_GUI_EMBED=1); the reparented window breaks the compositor"
         };
         crate::gui_log_line(&format!("falling back to a floating window: {reason}"));
         let weak = Rc::downgrade(&client);
