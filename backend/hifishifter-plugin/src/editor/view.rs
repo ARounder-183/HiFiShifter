@@ -396,7 +396,27 @@ unsafe extern "system" fn key_up(this: *mut c_void, key: u16, code: i16, mods: i
         })
     }
 }
+/// 入口守卫：进入打一行、离开打一行。
+///
+/// 【为什么需要它】"宿主冻住"时日志会停在**最后一个进入、却没有对应离开**的入口上 ——
+/// 那一行就是答案，不需要再猜是哪个回调、也不需要复现时的现场观察。
+struct EnterExit(&'static str);
+
+impl EnterExit {
+    fn new(name: &'static str) -> Self {
+        crate::gui_log_line(&format!("-> {name}"));
+        Self(name)
+    }
+}
+
+impl Drop for EnterExit {
+    fn drop(&mut self) {
+        crate::gui_log_line(&format!("<- {}", self.0));
+    }
+}
+
 unsafe extern "system" fn get_size(this: *mut c_void, rect: *mut ViewRect) -> TResult {
+    let _guard = EnterExit::new("get_size");
     if rect.is_null() {
         return K_INVALID_ARGUMENT;
     }
@@ -412,6 +432,7 @@ unsafe extern "system" fn get_size(this: *mut c_void, rect: *mut ViewRect) -> TR
     })
 }
 unsafe extern "system" fn on_size(this: *mut c_void, rect: *mut ViewRect) -> TResult {
+    let _guard = EnterExit::new("on_size");
     if rect.is_null() {
         return K_INVALID_ARGUMENT;
     }
@@ -491,6 +512,7 @@ unsafe fn frame_release(frame: usize) {
     }
 }
 unsafe extern "system" fn set_frame(this: *mut c_void, frame: *mut c_void) -> TResult {
+    let _guard = EnterExit::new("set_frame");
     boundary(|| {
         unsafe {
             frame_add(frame as usize);
@@ -520,6 +542,7 @@ unsafe extern "system" fn set_frame(this: *mut c_void, frame: *mut c_void) -> TR
     })
 }
 unsafe extern "system" fn can_resize(_this: *mut c_void) -> TResult {
+    let _guard = EnterExit::new("can_resize");
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。
         // 拦成 `K_RESULT_FALSE` 并记日志 —— 全部入口的统一纪律（thread-model.md）。
