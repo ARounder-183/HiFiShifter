@@ -237,7 +237,8 @@ fn sync_host_takes(
     // - **本实例手里有 PCM**（`pcm_media`）→ 挂到 active take；
     // - 前三环都缺席 → 保留上一轮已有的身份；
     // - 宿主换了 take → 一个都不挂（宁可占位，也不挂错的采样）。
-    let host_switched_take = granted.is_none() && (authorized_take.is_some() || authorized_source.is_some());
+    let host_switched_take =
+        granted.is_none() && (authorized_take.is_some() || authorized_source.is_some());
     // 授权媒体的来源取现有 active take（`normalize_takes` 保证它与扁平投影一致）；
     // 无 take 的扁平 clip 退回投影本身。
     let owned_media = || {
@@ -248,7 +249,8 @@ fn sync_host_takes(
         }
     };
     let active_index = || item.takes.iter().position(|take| take.active);
-    let inherited = inherited_media.and_then(|media| active_index().map(|index| (index, media.clone())));
+    let inherited =
+        inherited_media.and_then(|media| active_index().map(|index| (index, media.clone())));
     // 【T-C1】"知道它是哪个源"与"这一轮有采样"分开：前者永远成立，后者看 has_pcm。
     let pcm = pcm_media.and_then(|facts| {
         active_index().map(|index| {
@@ -287,7 +289,11 @@ fn sync_host_takes(
         Some((active_index()?, owned))
     };
     // 宿主换了 take ⇒ 一个都不挂，连"记忆"也不许用（见 `choose_link` 的说明）。
-    let remembered = if host_switched_take { None } else { last_known() };
+    let remembered = if host_switched_take {
+        None
+    } else {
+        last_known()
+    };
     let media = match crate::editor::media_identity::choose_link(
         host_switched_take,
         granted.is_some(),
@@ -295,7 +301,9 @@ fn sync_host_takes(
         has_pcm,
         remembered.is_some() || pcm.is_some(),
     ) {
-        crate::editor::media_identity::Link::Authorized => granted.map(|index| (index, owned_media())),
+        crate::editor::media_identity::Link::Authorized => {
+            granted.map(|index| (index, owned_media()))
+        }
         crate::editor::media_identity::Link::Inherited => inherited,
         // 【为什么 LastKnown 还要再退一次到 pcm】那是"只有身份、这一轮没有采样"的
         // 事实：采样会在下一次读到时回来，而身份一旦丢掉就再也找不回来。
@@ -333,7 +341,10 @@ fn sync_host_takes(
 pub(crate) struct PresentedIds(std::collections::HashMap<u64, String>);
 
 impl PresentedIds {
-    fn build(prefix: &impl Fn(&str) -> String, ids: &std::collections::HashMap<u64, String>) -> Self {
+    fn build(
+        prefix: &impl Fn(&str) -> String,
+        ids: &std::collections::HashMap<u64, String>,
+    ) -> Self {
         Self(
             ids.iter()
                 .map(|(key, id)| (*key, prefix(id)))
@@ -573,8 +584,15 @@ impl DocumentSession {
             String,
             crate::editor::media_identity::PcmFacts,
         > = {
-            let mut facts: std::collections::HashMap<String, crate::editor::media_identity::PcmFacts> =
-                self.media_facts.lock_or_recover().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            let mut facts: std::collections::HashMap<
+                String,
+                crate::editor::media_identity::PcmFacts,
+            > = self
+                .media_facts
+                .lock_or_recover()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
             for (item, pcm) in &pcm_by_item {
                 facts.insert(item.clone(), pcm.clone());
             }
@@ -881,8 +899,7 @@ impl DocumentSession {
                 });
             }
         }
-        self.presentation_dupes
-            .store(collapsed, Ordering::Release);
+        self.presentation_dupes.store(collapsed, Ordering::Release);
         if collapsed > 0 {
             hifishifter_kernel::log_limiter::emit_limited_key(
                 log::Level::Warn,
@@ -992,12 +1009,7 @@ impl DocumentSession {
             let orphans: Vec<&str> = timeline
                 .tracks
                 .iter()
-                .filter(|track| {
-                    !timeline
-                        .clips
-                        .iter()
-                        .any(|clip| clip.track_id == track.id)
-                })
+                .filter(|track| !timeline.clips.iter().any(|clip| clip.track_id == track.id))
                 .map(|track| track.id.as_str())
                 .collect();
             if !orphans.is_empty() {
@@ -1407,7 +1419,8 @@ impl DocumentSession {
         // 【为什么是计数而不是逐条】用户报障时"所有 clip 都在等"与"两条在等"是两种
         // 完全不同的形状；计数能直接分开它们，而逐条会把日志刷成一份清单。
         {
-            let (mut ready, mut pending, mut unavailable, mut unknown) = (0usize, 0usize, 0usize, 0usize);
+            let (mut ready, mut pending, mut unavailable, mut unknown) =
+                (0usize, 0usize, 0usize, 0usize);
             let mut total = 0usize;
             // 【T-S2-7：把"哪一条"也打出来】只给计数时，"一个 item 两条 clip"与
             // "一条 clip 没源"在日志里完全同形。这里给**呈现 id**（去掉命名空间前缀）
@@ -1432,7 +1445,11 @@ impl DocumentSession {
                     let id = clip["id"].as_str().unwrap_or("");
                     let id = id.strip_prefix(namespace).unwrap_or(id);
                     let reason = clip["host_media_reason"].as_str().unwrap_or("-");
-                    let source = if clip["source_path"].is_null() { "-" } else { "src" };
+                    let source = if clip["source_path"].is_null() {
+                        "-"
+                    } else {
+                        "src"
+                    };
                     notable.push(format!("{id}={state}/{reason}/{source}"));
                 }
                 if notable.len() < total.saturating_sub(ready) {
@@ -1547,7 +1564,9 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
             .iter()
             .find(|owner| {
                 owner.is_non_playback()
-                    && owner.editor_document().is_ok_and(|bound| bound.id == self.id)
+                    && owner
+                        .editor_document()
+                        .is_ok_and(|bound| bound.id == self.id)
             })
             .cloned();
         let Some(owner) = owner else {
@@ -1559,9 +1578,11 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
             // 实例，于是"所有 owner 都是 playback 且都绑在别的文档上"会落到下面那条
             // 完全沉默的 `return` —— 屏幕上什么都不更新，用户看到的是"没有报错、
             // 但片段一直等着"。把角色从判据里去掉，这两种形状得到同一个可行动读数。
-            let bound_elsewhere = owners
-                .iter()
-                .any(|owner| owner.editor_document().is_ok_and(|bound| bound.id != self.id));
+            let bound_elsewhere = owners.iter().any(|owner| {
+                owner
+                    .editor_document()
+                    .is_ok_and(|bound| bound.id != self.id)
+            });
             if bound_elsewhere {
                 let waiting = payload["clips"].as_array().map_or(0, |clips| {
                     clips
@@ -2552,8 +2573,6 @@ mod tests {
             "等了多久必须作为读数发出，等待才有上界可言"
         );
     }
-
-
 
     fn fixture() -> (
         ModelHandle,

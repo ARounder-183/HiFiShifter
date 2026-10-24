@@ -320,11 +320,11 @@ mod tests {
         // 而本用例要钉的是"没有 owner 时载荷不被丢掉"，所以载荷必须真的来自别处。
         let source = DocumentSession::new(70);
         source.ready.store(true, Ordering::Release);
-        source
-            .edits
-            .lock_or_recover()
-            .atlas
-            .seed_test_pitch_curve("mod:held", 250., vec![60., 62.]);
+        source.edits.lock_or_recover().atlas.seed_test_pitch_curve(
+            "mod:held",
+            250.,
+            vec![60., 62.],
+        );
         let mut provider = ArchivePersistence::new(&source);
         let bytes = provider.store_document().expect("archive encodes");
         let mut consumer = ArchivePersistence::new(&document);

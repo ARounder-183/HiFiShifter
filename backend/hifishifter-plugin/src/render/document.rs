@@ -86,8 +86,7 @@ pub(crate) enum SourceState {
     Failed,
 }
 
-impl SourceState {
-}
+impl SourceState {}
 
 /// 输入可用性的**综合判定**。
 ///
@@ -152,7 +151,8 @@ impl InputReadiness {
 }
 
 #[derive(Default)]
-pub(crate) struct DocumentSession {    controller: AtomicUsize,
+pub(crate) struct DocumentSession {
+    controller: AtomicUsize,
     alive: AtomicBool,
     /// 本文档是否曾经成功 attach 过 renderer（重绑/关闭后用于区分"还没绑"与"绑过又没了"）。
     ever_had_renderer: AtomicBool,
@@ -308,7 +308,8 @@ pub(crate) struct DocumentSession {    controller: AtomicUsize,
     ///
     /// 这张表把"我们知道它是哪个源"与"这一轮有没有采样"分开：事实只增不减，
     /// 只在 region 集合与文档关闭时按 key 回收。
-    pub media_facts: Mutex<std::collections::BTreeMap<String, crate::editor::media_identity::PcmFacts>>,
+    pub media_facts:
+        Mutex<std::collections::BTreeMap<String, crate::editor::media_identity::PcmFacts>>,
     /// 已授权但**读取失败**的 ARA 音频源（`audioSource.persistentID` → 原因）。
     ///
     /// 【为什么必须与 `ready` 分开】`ready` 的语义是"ARA 是否已重新交付输入"，它还
@@ -432,7 +433,12 @@ pub(crate) struct DocumentSession {    controller: AtomicUsize,
     /// 读到的那份"会在提交到达之前被**下一次**读取覆盖 —— 实测现场日志里
     /// `baseline=absent` 出现了 3 次，而每一次都让整条 clip 窗口被当成用户改动写回。
     /// 保留最近 8 份，提交时按它回传的指纹精确取回。
-    last_workspace_views: Mutex<Vec<(String, std::collections::BTreeMap<String, hifishifter_kernel::state::TrackParamsState>)>>,
+    last_workspace_views: Mutex<
+        Vec<(
+            String,
+            std::collections::BTreeMap<String, hifishifter_kernel::state::TrackParamsState>,
+        )>,
+    >,
     /// 【G5】此刻是否处在一次 ARA 编辑会话里（`beginEditing` … `endEditing`）。
     ///
     /// 【为什么它是判据】SDK 明确说明**还原会话在概念上就是一次编辑会话**
@@ -687,7 +693,9 @@ mod tests {
     fn an_undecodable_archive_is_still_handed_back() {
         let document = Arc::new(DocumentSession::new(31));
         let payload = b"{ this is not a valid archive".to_vec();
-        document.restore_archive(&payload).expect("host restore continues");
+        document
+            .restore_archive(&payload)
+            .expect("host restore continues");
         assert_eq!(
             document.archive_cache.lock_or_recover().as_ref(),
             Some(&payload),
@@ -1016,7 +1024,11 @@ impl DocumentSession {
                     // 是一份合法的、全默认的状态 —— 没有任何一处会报错。那正是用户看到
                     // "重开工程后参数全丢"的最后一环。
                     log::error!("[ara] archive store degraded to the last good snapshot: {error}");
-                    Ok(self.archive_cache.lock_or_recover().clone().unwrap_or_default())
+                    Ok(self
+                        .archive_cache
+                        .lock_or_recover()
+                        .clone()
+                        .unwrap_or_default())
                 }
             };
         }
@@ -1033,7 +1045,11 @@ impl DocumentSession {
             Err(error) => {
                 // 同上：能交回上一份成功载荷就绝不交空块。
                 log::error!("[ara] archive store degraded to the last good snapshot: {error}");
-                Ok(self.archive_cache.lock_or_recover().clone().unwrap_or_default())
+                Ok(self
+                    .archive_cache
+                    .lock_or_recover()
+                    .clone()
+                    .unwrap_or_default())
             }
         }
     }
@@ -1317,10 +1333,7 @@ impl DocumentSession {
     pub(crate) fn remember_workspace_view(
         &self,
         projection: &str,
-        params: &std::collections::BTreeMap<
-            String,
-            hifishifter_kernel::state::TrackParamsState,
-        >,
+        params: &std::collections::BTreeMap<String, hifishifter_kernel::state::TrackParamsState>,
     ) {
         /// 记住多少份视图。
         ///
@@ -1366,7 +1379,8 @@ impl DocumentSession {
     pub(crate) fn workspace_baseline(
         &self,
         projection: &str,
-    ) -> Option<std::collections::BTreeMap<String, hifishifter_kernel::state::TrackParamsState>> {
+    ) -> Option<std::collections::BTreeMap<String, hifishifter_kernel::state::TrackParamsState>>
+    {
         let stored = self.last_workspace_views.lock_or_recover();
         stored
             .iter()
@@ -2396,12 +2410,9 @@ impl DocumentSession {
     /// 记下"模型变脏了"（首次才落时刻：后续脏不推迟截止期）。
     pub(crate) fn note_model_dirty(&self) {
         let now = Self::monotonic_ms();
-        let _ = self.model_dirty_since_ms.compare_exchange(
-            0,
-            now,
-            Ordering::AcqRel,
-            Ordering::Relaxed,
-        );
+        let _ =
+            self.model_dirty_since_ms
+                .compare_exchange(0, now, Ordering::AcqRel, Ordering::Relaxed);
     }
 
     /// 记下"模型已成功发布"。
@@ -2498,7 +2509,8 @@ impl DocumentSession {
             readiness.map_or_else(|| "verdict=unknown".to_owned(), |r| r.summary()),
             self.ready.load(Ordering::Acquire),
             editing,
-            self.model_dirty_elapsed().map(|elapsed| elapsed.as_millis()),
+            self.model_dirty_elapsed()
+                .map(|elapsed| elapsed.as_millis()),
             scope_regions,
             assignments,
             ui_tracks,

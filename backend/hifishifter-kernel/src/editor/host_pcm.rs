@@ -260,11 +260,7 @@ pub fn materialize_with_byte_limit(
         log::warn!(
             "[host-pcm] {} clip(s) have no PCM this round and are shown as placeholders: {}",
             missing.len(),
-            missing
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(", ")
+            missing.iter().cloned().collect::<Vec<_>>().join(", ")
         );
     }
     Ok((timeline, reverse))

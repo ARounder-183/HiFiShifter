@@ -1,3 +1,8 @@
+# 钉到具体版本，不再跟随 "stable" 漂移：rustfmt 的默认风格随版本变，
+# 而 fmt 门禁的判据必须在本机、CI 与未来某一天三处是同一把尺子。
+# 升级版本的流程：改这里 → `cargo fmt --all`（若风格有漂移）→ 单独提交，
+# 绝不把格式对齐混进功能提交。
 [toolchain]
-channel = "stable"
+channel = "1.97.1"
+components = ["rustfmt", "clippy"]
 profile = "minimal"

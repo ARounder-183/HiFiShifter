@@ -50,7 +50,10 @@ fn the_requirements_method_occupies_the_fourth_slot_of_an_funknown_vtable() {
         "FUnknown 的三个槽必须位于 vtbl 开头"
     );
     assert_eq!(
-        std::mem::offset_of!(ProcessContextRequirementsVtbl, get_process_context_requirements),
+        std::mem::offset_of!(
+            ProcessContextRequirementsVtbl,
+            get_process_context_requirements
+        ),
         3 * std::mem::size_of::<*const std::ffi::c_void>(),
         "getProcessContextRequirements 必须是第 4 个槽（下标 3）—— \
          它继承 FUnknown 而非 IAudioProcessor，槽 3 不是 setBusArrangements"
@@ -82,7 +85,10 @@ fn the_host_reads_the_mask_through_the_real_query_interface_path() {
 
     // 反解回拥有者：子对象必须与基址不同（否则说明我们返回了对象首地址，
     // 那样宿主调槽 3 会打到 IComponent::initialize）。
-    assert_ne!(subobject as usize, base as usize, "子对象不能与组件基址重合");
+    assert_ne!(
+        subobject as usize, base as usize,
+        "子对象不能与组件基址重合"
+    );
     // SAFETY: subobject 由本对象生成，反解得到同一对象。
     assert_eq!(
         unsafe { base_from_context_requirements(subobject) } as usize,
@@ -142,7 +148,11 @@ fn the_mask_covers_every_field_the_plugin_consumes() {
     const NEED_CHORD: u32 = 1 << 8;
     const NEED_FRAME_RATE: u32 = 1 << 9;
     assert_eq!(mask & NEED_CHORD, 0, "和弦识别按块计算，我们没有消费者");
-    assert_eq!(mask & NEED_SAMPLES_TO_NEXT_CLOCK, 0, "MIDI 时钟分辨率无消费者");
+    assert_eq!(
+        mask & NEED_SAMPLES_TO_NEXT_CLOCK,
+        0,
+        "MIDI 时钟分辨率无消费者"
+    );
     assert_eq!(mask & NEED_FRAME_RATE, 0, "SMPTE 帧率无消费者");
 }
 

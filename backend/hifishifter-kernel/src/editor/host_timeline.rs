@@ -176,7 +176,10 @@ pub fn sanitize_host_timeline(
         let references_ok = std::iter::once(&clip.source_path)
             .chain(clip.takes.iter().map(|take| &take.source_path))
             .all(|id| id.as_deref().is_some_and(|id| known.contains(id)));
-        let track_ok = timeline.tracks.iter().any(|track| track.id == clip.track_id);
+        let track_ok = timeline
+            .tracks
+            .iter()
+            .any(|track| track.id == clip.track_id);
         if !geometry_ok || !references_ok {
             match admission {
                 Admission::Strict => {
@@ -268,9 +271,13 @@ mod tests {
             sample_rate: 44100,
             planes: &storage,
         }];
-        let error =
-            sanitize_host_timeline(&mut timeline(), &mut sources, INLINE_LIMIT, Admission::Strict)
-                .expect_err("一条坏 clip 必须让严格策略整份拒绝");
+        let error = sanitize_host_timeline(
+            &mut timeline(),
+            &mut sources,
+            INLINE_LIMIT,
+            Admission::Strict,
+        )
+        .expect_err("一条坏 clip 必须让严格策略整份拒绝");
         assert_eq!(error, "invalid or unsupported host clip geometry");
 
         // 越界采样率同理。
@@ -376,13 +383,10 @@ mod tests {
             sample_rate: 44100,
             planes: &storage,
         }];
-        assert!(sanitize_host_timeline(
-            &mut input,
-            &mut sources,
-            INLINE_LIMIT,
-            Admission::Degrade
-        )
-        .is_err());
+        assert!(
+            sanitize_host_timeline(&mut input, &mut sources, INLINE_LIMIT, Admission::Degrade)
+                .is_err()
+        );
     }
 
     /// 累计字节预算：超限的素材被拒，其后更小的仍可接受（不是"一超全废"）。
@@ -497,7 +501,10 @@ pub fn host_geometry_projection(timeline: &TimelineState) -> serde_json::Value {
 ///
 /// 拒绝时用户唯一能据以行动的信息就是这份路径列表：说「几何变了」没有用，
 /// 说 `clips[2].start_sec: 0.0 -> 0.25` 才有用。
-pub fn geometry_differences(baseline: &serde_json::Value, current: &serde_json::Value) -> Vec<String> {
+pub fn geometry_differences(
+    baseline: &serde_json::Value,
+    current: &serde_json::Value,
+) -> Vec<String> {
     let mut out = Vec::new();
     collect_json_differences(baseline, current, "", GEOMETRY_DIFF_LIMIT, &mut out);
     out
@@ -545,7 +552,11 @@ fn collect_json_differences(
         }
         (serde_json::Value::Array(before), serde_json::Value::Array(after)) => {
             if before.len() != after.len() {
-                out.push(format!("{path}: length {} -> {}", before.len(), after.len()));
+                out.push(format!(
+                    "{path}: length {} -> {}",
+                    before.len(),
+                    after.len()
+                ));
                 return;
             }
             for (index, (x, y)) in before.iter().zip(after.iter()).enumerate() {

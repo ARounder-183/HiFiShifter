@@ -142,7 +142,6 @@ fn try_enumerate_dxgi() -> Result<Vec<DmlAdapterInfo>, String> {
     Ok(adapters)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::DmlAdapterInfo;

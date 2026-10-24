@@ -51,7 +51,9 @@ fn phase() -> &'static Mutex<Option<Phase>> {
 }
 
 fn lock() -> std::sync::MutexGuard<'static, Option<Phase>> {
-    phase().lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    phase()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// 单调递增，用来作废被后来者取代的导出。

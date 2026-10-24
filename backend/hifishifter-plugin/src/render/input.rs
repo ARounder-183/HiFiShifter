@@ -127,8 +127,12 @@ fn snapshot_covered(
             (play_sec * rate).round() as i64
         };
         for range in &pcm.covered {
-            let from = map(range.start).max(origin).max((clip_start * rate).round() as i64);
-            let to = map(range.end).min(limit).min((clip_end * rate).round() as i64);
+            let from = map(range.start)
+                .max(origin)
+                .max((clip_start * rate).round() as i64);
+            let to = map(range.end)
+                .min(limit)
+                .min((clip_end * rate).round() as i64);
             if from < to {
                 push_covered(&mut covered, from..to);
             }
@@ -663,19 +667,20 @@ mod tests {
 
     /// 一条正向、不循环、单源的 clip。
     fn plain_clip() -> hifishifter_kernel::state::TimelineState {
-        let mut timeline: hifishifter_kernel::state::TimelineState = serde_json::from_value(serde_json::json!({
-            "tracks": [{"id": "t", "name": "t", "order": 0}],
-            "clips": [{
-                "id": "c", "track_id": "t", "name": "c",
-                "start_sec": 0.0, "length_sec": 2.0,
-                "takes": [{
-                    "id": "k", "source_path": "src",
-                    "source_start_sec": 0.0, "source_end_sec": 2.0, "playback_rate": 1.0
-                }]
-            }],
-            "bpm": 120.0, "project_sec": 2.0
-        }))
-        .unwrap();
+        let mut timeline: hifishifter_kernel::state::TimelineState =
+            serde_json::from_value(serde_json::json!({
+                "tracks": [{"id": "t", "name": "t", "order": 0}],
+                "clips": [{
+                    "id": "c", "track_id": "t", "name": "c",
+                    "start_sec": 0.0, "length_sec": 2.0,
+                    "takes": [{
+                        "id": "k", "source_path": "src",
+                        "source_start_sec": 0.0, "source_end_sec": 2.0, "playback_rate": 1.0
+                    }]
+                }],
+                "bpm": 120.0, "project_sec": 2.0
+            }))
+            .unwrap();
         for clip in &mut timeline.clips {
             clip.normalize_takes();
         }

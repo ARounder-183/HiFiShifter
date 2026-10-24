@@ -892,8 +892,7 @@ impl SnapshotPublisher {
             let mut start = origin;
             let mut end = origin.saturating_add(snapshot.left.len() as i64);
             // 有覆盖表时进一步收到真实的第一个/最后一个覆盖帧（表已升序不重叠）。
-            if let (Some(first), Some(last)) = (snapshot.covered.first(), snapshot.covered.last())
-            {
+            if let (Some(first), Some(last)) = (snapshot.covered.first(), snapshot.covered.last()) {
                 start = start.max(first.start);
                 end = end.min(last.end);
             }
@@ -1036,9 +1035,7 @@ impl SnapshotPublisher {
                 return true;
             }
             // 区间升序不重叠 ⇒ 二分。
-            let index = snapshot
-                .covered
-                .partition_point(|range| range.end <= frame);
+            let index = snapshot.covered.partition_point(|range| range.end <= frame);
             snapshot
                 .covered
                 .get(index)
@@ -1871,7 +1868,10 @@ mod tests {
             publisher.copy_block_layered_at(0, 48_000, &mut bus, 0, frames, &input, 0)
         });
         // 洞内：纯宿主原声。
-        assert!((left[1000] - 7.0).abs() < 1e-6, "the hole plays the host signal");
+        assert!(
+            (left[1000] - 7.0).abs() < 1e-6,
+            "the hole plays the host signal"
+        );
         // 第一个覆盖帧：斜坡的 t=0，必须仍是纯原声（锚错的话这里已经是 0）。
         assert!(
             (left[4096] - 7.0).abs() < 1e-3,
@@ -1979,9 +1979,15 @@ mod tests {
             left[2047]
         );
         // 洞内部：纯宿主原声（既不是零，也不是快照）。
-        assert!((left[3000] - 7.0).abs() < 1e-6, "inside the hole the dry signal wins");
+        assert!(
+            (left[3000] - 7.0).abs() < 1e-6,
+            "inside the hole the dry signal wins"
+        );
         // 出口：第一帧仍是原声，且下一帧不阶跃。
-        assert!((left[4096] - 7.0).abs() < 1e-6, "the onset starts from the dry signal");
+        assert!(
+            (left[4096] - 7.0).abs() < 1e-6,
+            "the onset starts from the dry signal"
+        );
         let step = (left[4097] - left[4096]).abs();
         assert!(step < 1.0, "the onset must ramp, not step (saw {step})");
         // 斜坡之后（4096 + 960）恢复为快照。

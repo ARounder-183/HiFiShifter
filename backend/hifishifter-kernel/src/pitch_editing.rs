@@ -715,13 +715,11 @@ mod tests {
         for compose in [false, true] {
             for drawn in [false, true] {
                 let (timeline, root) = timeline_with_curve(compose, drawn);
-                let waiting = crate::pitch_analysis::analysis::root_pitch_assembly_pending(
-                    &timeline, &root,
-                );
-                let will_run = timeline
-                    .clips
-                    .iter()
-                    .any(|clip| crate::pitch_clip::clip_is_analysis_candidate(&timeline, clip, true));
+                let waiting =
+                    crate::pitch_analysis::analysis::root_pitch_assembly_pending(&timeline, &root);
+                let will_run = timeline.clips.iter().any(|clip| {
+                    crate::pitch_clip::clip_is_analysis_candidate(&timeline, clip, true)
+                });
                 if waiting {
                     assert!(
                         will_run,

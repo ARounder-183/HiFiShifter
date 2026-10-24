@@ -1,0 +1,5 @@
+# 本仓使用 rustfmt 的默认风格；edition 跟随各 crate 的 Cargo.toml。
+# 这个文件的存在本身就是判据：风格意见住在仓库里，而不是随工具链漂移。
+# rust-toolchain.toml 钉死了 rustfmt 的版本 —— 两件事合起来，`cargo fmt --check`
+# 在本机与 CI 上才有同一个答案。加风格意见时逐条写在这里，并单独跑一次
+# `cargo fmt --all` 提交对齐结果。

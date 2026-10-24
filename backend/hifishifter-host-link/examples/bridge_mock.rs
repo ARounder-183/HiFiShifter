@@ -71,7 +71,11 @@ fn main() -> Result<(), String> {
         }),
         sources,
         // 桥接声明它会接受提交与几何写回 —— 这正是它与 ARA 的分野（见 SourceKind::admission）。
-        granted: vec![Capability::Commit, Capability::GeometryWrite, Capability::Audio],
+        granted: vec![
+            Capability::Commit,
+            Capability::GeometryWrite,
+            Capability::Audio,
+        ],
         revisions: Revisions { edits: 0, model: 1 },
         admission: source_kind.admission(),
         losses: Vec::new(),
@@ -138,7 +142,9 @@ fn respond(workspace: &Workspace, identity: &str, edit: &EditManifest) -> Result
 }
 
 /// 两条 clip、两份素材，PCM 是两条不同频率的正弦。
-fn build_content(workspace: &Workspace) -> Result<(Vec<SourceEntry>, Vec<serde_json::Value>), String> {
+fn build_content(
+    workspace: &Workspace,
+) -> Result<(Vec<SourceEntry>, Vec<serde_json::Value>), String> {
     let rate = 48_000;
     let mut sources = Vec::new();
     let mut clips = Vec::new();

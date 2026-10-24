@@ -130,7 +130,10 @@ mod tests {
         assert_eq!(choose_link(false, true, true, true, true), Link::Authorized);
         assert_eq!(choose_link(false, false, true, true, true), Link::Inherited);
         assert_eq!(choose_link(false, false, false, true, true), Link::Pcm);
-        assert_eq!(choose_link(false, false, false, false, true), Link::LastKnown);
+        assert_eq!(
+            choose_link(false, false, false, false, true),
+            Link::LastKnown
+        );
     }
 
     /// `PcmFacts::apply` 只写媒体身份，不碰宿主几何。

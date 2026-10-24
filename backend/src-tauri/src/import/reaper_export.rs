@@ -754,7 +754,8 @@ fn build_envseg_for_key(
                         let t = clip_start + i as f64 * fp / 1000.0;
                         let value = match key {
                             // VOLENV2 = 绝对量（推子 × 曲线倍率）。
-                            EnvSegKey::Volume => (volume_factor * *v as f64).clamp(0.0, f64::from(hifishifter_kernel::gain::GAIN_MAX)),
+                            EnvSegKey::Volume => (volume_factor * *v as f64)
+                                .clamp(0.0, f64::from(hifishifter_kernel::gain::GAIN_MAX)),
                             EnvSegKey::Pan => (*v as f64).clamp(-1.0, 1.0),
                         };
                         (t, value)

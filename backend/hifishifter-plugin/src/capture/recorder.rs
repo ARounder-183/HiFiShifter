@@ -2009,9 +2009,10 @@ impl Capture {
         }
         // 【T1：覆盖写入同样是"真的拷了样本"】上升沿允许用新内容覆盖停播时写过的
         // 同几何块；那段因此变成真实录到的内容，必须并进 coverage。
-        let transcribed = block.planes.iter().any(|plane| {
-            plane.is_some_and(|plane| plane.len() >= skip.saturating_add(frames))
-        });
+        let transcribed = block
+            .planes
+            .iter()
+            .any(|plane| plane.is_some_and(|plane| plane.len() >= skip.saturating_add(frames)));
         for (channel, plane) in active.planes.iter_mut().enumerate() {
             let target = &mut plane[offset..end];
             match block.planes.get(channel).copied().flatten() {
@@ -2021,8 +2022,7 @@ impl Capture {
                 _ => target.fill(0.0),
             }
         }
-        if transcribed
-            && !cover_range(&mut active.coverage, &mut active.coverage_len, offset..end)
+        if transcribed && !cover_range(&mut active.coverage, &mut active.coverage_len, offset..end)
         {
             active.coverage_overrun = true;
         }
@@ -2553,9 +2553,10 @@ impl Capture {
         //   * 起播窗口里宿主送来的是**真实音频但那段时间属于窗口**—— 那种由上面的
         //     `advance_without_samples` 处理，它不登记 coverage。
         // 只有"有声明的平面且拷到了样本"才把这段并进 coverage；其余回退宿主原声。
-        let transcribed = block.planes.iter().any(|plane| {
-            plane.is_some_and(|plane| plane.len() >= skip + writable)
-        });
+        let transcribed = block
+            .planes
+            .iter()
+            .any(|plane| plane.is_some_and(|plane| plane.len() >= skip + writable));
         for (channel, plane) in active.planes.iter_mut().enumerate() {
             let target = &mut plane[active.filled..active.filled + writable];
             match block.planes.get(channel).copied().flatten() {
@@ -3822,10 +3823,7 @@ mod tests {
             8..16,
             "段必须从内容起点开始：没录到的那一段不许被写成零并宣称覆盖"
         );
-        assert_eq!(
-            capture.pre_roll_frames, 8,
-            "漏掉的帧数必须仍然可诊断"
-        );
+        assert_eq!(capture.pre_roll_frames, 8, "漏掉的帧数必须仍然可诊断");
         assert_eq!(
             sealed[0].planes[0][..4],
             block(8, 4, 48_000.0).0[..],

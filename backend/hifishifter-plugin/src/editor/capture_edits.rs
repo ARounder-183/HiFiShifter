@@ -74,8 +74,8 @@ pub(crate) struct CaptureEdits {
 
 impl CaptureEdits {
     pub(crate) fn encode(&self) -> Result<Vec<u8>, String> {
-        let json = serde_json::to_vec(self)
-            .map_err(|error| format!("capture edits encode: {error}"))?;
+        let json =
+            serde_json::to_vec(self).map_err(|error| format!("capture edits encode: {error}"))?;
         if json.len() <= COMPRESS_THRESHOLD {
             return Ok(json);
         }
@@ -275,7 +275,8 @@ fn strip_session_namespace(key: &str) -> &str {
     let Some(tail) = parts.next() else {
         return key;
     };
-    let numeric = |value: &str| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit());
+    let numeric =
+        |value: &str| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit());
     if numeric(pid) && numeric(seq) {
         tail
     } else {
@@ -294,10 +295,7 @@ fn strip_session_namespace(key: &str) -> &str {
 /// `EditorSession::load_capture_timeline`）。这里保留完整版本，供往返测试断言
 /// "两部分合起来就是全部用户内容"。
 #[cfg(test)]
-pub(crate) fn apply(
-    timeline: &mut hifishifter_kernel::state::TimelineState,
-    edits: &CaptureEdits,
-) {
+pub(crate) fn apply(timeline: &mut hifishifter_kernel::state::TimelineState, edits: &CaptureEdits) {
     for (root, params) in &edits.params_by_root_track {
         timeline
             .params_by_root_track
@@ -432,9 +430,7 @@ mod tests {
             TrackParamsState::default(),
         );
         let decoded = CaptureEdits::decode(&payload.encode().unwrap()).unwrap();
-        assert!(decoded
-            .params_by_root_track
-            .contains_key("capture-track"));
+        assert!(decoded.params_by_root_track.contains_key("capture-track"));
     }
 
     /// **派生分析数组不落盘。**
@@ -496,7 +492,9 @@ mod tests {
             .params_by_root_track
             .get_mut("capture-track")
             .unwrap();
-        params.pitch_edit = (0..400_000).map(|index| 60.0 + index as f32 * 0.0001).collect();
+        params.pitch_edit = (0..400_000)
+            .map(|index| 60.0 + index as f32 * 0.0001)
+            .collect();
         params.pitch_edit_user_modified = true;
         let bytes = capture(&timeline, "").encode().unwrap();
         assert!(

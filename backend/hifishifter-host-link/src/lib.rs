@@ -554,7 +554,10 @@ mod tests {
                 note: None,
             }],
             granted: vec![Capability::Commit, Capability::Audio],
-            revisions: Revisions { edits: 7, model: 42 },
+            revisions: Revisions {
+                edits: 7,
+                model: 42,
+            },
             admission: Admission::Strict,
             losses: Vec::new(),
             diagnostics: None,
@@ -678,7 +681,10 @@ mod tests {
         assert!(a.starts_with("ara:REAPER:"), "{a}");
         assert!(!a.contains('/'), "{a}");
         assert!(!a.contains('\\'), "{a}");
-        assert_eq!(link_id(SourceKind::Bridge, "  ", ""), "bridge:unnamed:unnamed");
+        assert_eq!(
+            link_id(SourceKind::Bridge, "  ", ""),
+            "bridge:unnamed:unnamed"
+        );
         assert_ne!(
             link_id(SourceKind::Ara, "REAPER", "x"),
             link_id(SourceKind::Capture, "REAPER", "x")
@@ -692,7 +698,10 @@ mod tests {
             format: EDIT_FORMAT.into(),
             format_version: FORMAT_VERSION,
             link_id: "ara:REAPER:a3f1".into(),
-            base_revisions: Revisions { edits: 7, model: 42 },
+            base_revisions: Revisions {
+                edits: 7,
+                model: 42,
+            },
             host_geometry: serde_json::json!({"clips": []}),
             params: serde_json::json!({}),
             tracks: serde_json::json!([]),

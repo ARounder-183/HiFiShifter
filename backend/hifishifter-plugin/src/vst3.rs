@@ -1877,8 +1877,7 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
                 // 直接清零会在块首留下一次阶跃（正是用户听到的"咔"）。与门控清零
                 // 走同一条去咔路径：从上一块尾巴淡到零，其余帧写零。
                 // 该函数自己写满整块，因此**不能**再调 `clear_outputs`。
-                let stream =
-                    crate::capture::recorder::ProcessStream::from_mode(data.process_mode);
+                let stream = crate::capture::recorder::ProcessStream::from_mode(data.process_mode);
                 let frames = data.num_samples as usize;
                 let outputs = data.outputs;
                 if outputs.is_null() {
@@ -1997,7 +1996,8 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
                         Some(evidence) => {
                             let mut ready = true;
                             for part in evidence.split.iter() {
-                                let mut part_probe = crate::render::snapshot::LayeredProbe::default();
+                                let mut part_probe =
+                                    crate::render::snapshot::LayeredProbe::default();
                                 ready &= publisher.copy_block_layered_at_probed(
                                     part.position,
                                     output_rate.max(1.0) as u32,

@@ -129,8 +129,8 @@ pub mod state;
 
 // ── 曲线与参数 ──────────────────────────────────────────────────────────────
 pub mod fade_axes;
-pub mod gain;
 pub mod fade_curves;
+pub mod gain;
 pub mod models;
 pub mod pitch_config;
 pub mod vibrato;

@@ -531,11 +531,19 @@ fn effective_item_mute_projects_to_gui_and_gates_real_process_without_inference(
     // 直接跳到目标电平（阶跃正是用户听到的"咔"）。这里断言淡入的形状与方向，
     // 不要求第一帧就到目标值。
     assert!(
-        left[0] > 0.0 && left[3] < 0.25 && left[0] < left[1] && left[1] < left[2] && left[2] < left[3],
+        left[0] > 0.0
+            && left[3] < 0.25
+            && left[0] < left[1]
+            && left[1] < left[2]
+            && left[2] < left[3],
         "解除静音必须从零单调淡入：{left:?}"
     );
     assert!(
-        right[0] > 0.0 && right[3] < 0.5 && right[0] < right[1] && right[1] < right[2] && right[2] < right[3],
+        right[0] > 0.0
+            && right[3] < 0.5
+            && right[0] < right[1]
+            && right[1] < right[2]
+            && right[2] < right[3],
         "解除静音必须从零单调淡入：{right:?}"
     );
     document.close();
@@ -1558,7 +1566,6 @@ fn a_prefetch_block_without_playing_still_outputs_audio() {
     );
 }
 
-
 /// 门控清零的新语义：块内不得重新输出重复内容，只允许上一块尾巴的淡出。
 ///
 /// 【为什么不再断言"全零"】去咔要求门控**淡到零**而不是阶跃到零；短块（< 1.3 ms）
@@ -1615,10 +1622,7 @@ fn a_pinned_block_with_playing_one_is_silenced_after_the_first_occurrence() {
     let (second, _) = run_stream_block(&mut processor, 0, playing, 0, 8, 0.5);
     assert_eq!(second, vec![0.5; 8], "单块重复仍要出声");
     let (third, _) = run_stream_block(&mut processor, 0, playing, 0, 8, 0.5);
-    assert_gate_faded_out(
-        &third,
-        "kPlaying 常置 1 不能把同一位置的重复块变成连续输出",
-    );
+    assert_gate_faded_out(&third, "kPlaying 常置 1 不能把同一位置的重复块变成连续输出");
     let diagnostics = processor.extension_owner.block_diagnostics_json(0);
     assert_eq!(diagnostics["streams"]["realtime"]["gate_cleared"], 1);
 }

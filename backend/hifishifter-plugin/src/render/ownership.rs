@@ -138,8 +138,7 @@ impl RegionOwners {
     /// 全表清空会打断另一份正在用的工程。
     pub fn retain_alive_documents(&mut self, is_alive: &impl Fn(DocumentId) -> bool) -> usize {
         let before = self.regions.len();
-        self.regions
-            .retain(|_, (document, _)| is_alive(*document));
+        self.regions.retain(|_, (document, _)| is_alive(*document));
         let removed = before.saturating_sub(self.regions.len());
         if removed > 0 {
             log::info!("[ara] swept {removed} region entrie(s) owned by dead document(s)");

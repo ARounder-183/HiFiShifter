@@ -8,8 +8,8 @@
 //! 【为什么返回 `Option`】视图层先问一次"这是不是 Capture 命令"；不是就照旧交给会话。
 //! 于是这个模块的接入对既有命令**零影响**。
 
-use crate::render::extension::ExtensionOwner;
 use crate::capture::CaptureOptions;
+use crate::render::extension::ExtensionOwner;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
@@ -306,7 +306,10 @@ mod tests {
             "没见过 ProcessContext 之前不能声称可以录制"
         );
         assert_eq!(status["recording"], Value::Null);
-        assert_eq!(status["araBound"], false, "没绑定 ARA 的实例就是 Capture 的适用对象");
+        assert_eq!(
+            status["araBound"], false,
+            "没绑定 ARA 的实例就是 Capture 的适用对象"
+        );
     }
 
     /// 选项补丁是**逐字段**的：只传一个字段不该把其余字段清掉。

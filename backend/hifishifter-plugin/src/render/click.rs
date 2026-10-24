@@ -179,14 +179,17 @@ impl ClickLedger {
         let index = self.next.fetch_add(1, Ordering::Relaxed) % CLICK_RING;
         let seq = self.seq.fetch_add(1, Ordering::Relaxed) + 1;
         let slot = &self.slots[index];
-        slot.stream.store(u32::from(sample.stream), Ordering::Relaxed);
+        slot.stream
+            .store(u32::from(sample.stream), Ordering::Relaxed);
         slot.kind.store(u32::from(sample.kind), Ordering::Relaxed);
-        slot.seam.store(u32::from(sample.seam.code()), Ordering::Relaxed);
+        slot.seam
+            .store(u32::from(sample.seam.code()), Ordering::Relaxed);
         slot.fade_len.store(sample.fade_len, Ordering::Relaxed);
         slot.frames.store(sample.frames, Ordering::Relaxed);
         slot.first.store(sample.first.to_bits(), Ordering::Relaxed);
         slot.last.store(sample.last.to_bits(), Ordering::Relaxed);
-        slot.max_step.store(sample.max_step.to_bits(), Ordering::Relaxed);
+        slot.max_step
+            .store(sample.max_step.to_bits(), Ordering::Relaxed);
         slot.peak.store(sample.peak.to_bits(), Ordering::Relaxed);
         slot.input_peak
             .store(sample.input_peak.to_bits(), Ordering::Relaxed);
@@ -294,7 +297,10 @@ impl ClickLedger {
             if let Some(ratio) = envelope_ratio(&blocks, index) {
                 if !(ENVELOPE_MIN..=ENVELOPE_MAX).contains(&ratio) {
                     counted += 1;
-                    out.push(format!("envelope ratio={ratio:.3} {}", format_block(block, median)));
+                    out.push(format!(
+                        "envelope ratio={ratio:.3} {}",
+                        format_block(block, median)
+                    ));
                 }
             }
         }

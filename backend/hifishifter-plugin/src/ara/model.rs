@@ -2135,7 +2135,10 @@ impl ModelHandle {
             // 界面说"暂时收回"）；没有 ⇒ 什么都不写（缺席即"从未授权"）。
             let had_pcm = {
                 // 【锁序】`edit_sources` 先于 `source_states`（与 `publish_readiness` 同向）。
-                self.session.edit_sources.lock_or_recover().contains_key(&id)
+                self.session
+                    .edit_sources
+                    .lock_or_recover()
+                    .contains_key(&id)
             };
             if had_pcm {
                 // 宿主收回了访问：继续播旧采样等于播一份已经失效的结果，这一刻必须撤。

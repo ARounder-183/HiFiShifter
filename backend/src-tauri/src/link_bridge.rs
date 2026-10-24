@@ -27,17 +27,17 @@ use crate::state::AppState;
 use hifishifter_host_link::{
     LinkManifest, SourceKind, Workspace, WorkspaceLock, EDIT_FORMAT, FORMAT_VERSION,
 };
-use hifishifter_kernel::editor::host_timeline::Admission;
-use tauri::Manager;
 use hifishifter_kernel::editor::host_pcm::{
     materialize_with_byte_limit, PcmView, ReversePolicy, MAX_HOST_PCM_BYTES,
 };
+use hifishifter_kernel::editor::host_timeline::Admission;
 use hifishifter_kernel::editor::host_timeline::{
     sanitize_host_timeline, Rejection, SanitizeReport,
 };
 use hifishifter_kernel::state::TimelineState;
 use std::sync::atomic::Ordering;
 use std::sync::Mutex;
+use tauri::Manager;
 
 /// 宿主链接的会话状态。
 pub(crate) struct LinkBridge {
@@ -54,7 +54,9 @@ impl Default for LinkBridge {
 
 impl LinkBridge {
     fn lock(&self) -> std::sync::MutexGuard<'_, Option<LinkSession>> {
-        self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -158,7 +160,9 @@ pub(crate) fn open(
         let mut current = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
         let mut project = state.project.lock().unwrap_or_else(|e| e.into_inner());
         if state.timeline_version.load(Ordering::Acquire) != version || (project.dirty && !force) {
-            return Err("the local project changed while the workspace was being read; retry".into());
+            return Err(
+                "the local project changed while the workspace was being read; retry".into(),
+            );
         }
         state.audio_engine.stop();
         for clip in &current.clips {
@@ -169,7 +173,11 @@ pub(crate) fn open(
         let recent = std::mem::take(&mut project.recent);
         *project = crate::state::ProjectState::default();
         project.recent = recent;
-        project.name = format!("{} / {}", prefix_for(manifest.source_kind), manifest.host_label);
+        project.name = format!(
+            "{} / {}",
+            prefix_for(manifest.source_kind),
+            manifest.host_label
+        );
         project_baseline = project_projection(&project);
         state.audio_engine.update_timeline(current.clone());
         state.bump_timeline_version();
@@ -248,7 +256,8 @@ fn prepare_import(
         let audio = workspace.read_audio(entry)?;
         pending.push((entry.key.clone(), audio.sample_rate, audio.planes));
     }
-    let known: std::collections::HashSet<&str> = pending.iter().map(|(key, _, _)| key.as_str()).collect();
+    let known: std::collections::HashSet<&str> =
+        pending.iter().map(|(key, _, _)| key.as_str()).collect();
 
     // 2) 音频暂缺的素材 ⇒ 引用它的片段本次进不来。
     //
@@ -349,7 +358,10 @@ pub(crate) fn submit(app: &tauri::AppHandle) -> Result<serde_json::Value, String
             serde_json::to_value(&timeline.tracks).map_err(|error| error.to_string())?,
         )
     };
-    if !session.manifest.grants(hifishifter_host_link::Capability::Commit) {
+    if !session
+        .manifest
+        .grants(hifishifter_host_link::Capability::Commit)
+    {
         return Err("this host does not accept edits".into());
     }
     let edit = hifishifter_host_link::EditManifest {
@@ -443,8 +455,11 @@ pub(crate) fn refresh(app: &tauri::AppHandle, force: bool) -> Result<serde_json:
     let mut result = open(app, directory, force)?;
     let (carried_params, carried_tracks) = {
         let mut timeline = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-        let known: std::collections::HashSet<String> =
-            timeline.tracks.iter().map(|track| track.id.clone()).collect();
+        let known: std::collections::HashSet<String> = timeline
+            .tracks
+            .iter()
+            .map(|track| track.id.clone())
+            .collect();
         let (params, tracks) = carried;
         let mut carried_params = 0_usize;
         for (id, params) in params {

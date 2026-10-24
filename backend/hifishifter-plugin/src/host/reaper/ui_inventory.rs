@@ -755,8 +755,13 @@ mod tests {
             .clip_ids
             .lock_or_recover()
             .insert(7, format!("ara-item-{item_id}"));
-        document.regions.lock_or_recover().insert(7, Default::default());
-        document.ready.store(true, std::sync::atomic::Ordering::Release);
+        document
+            .regions
+            .lock_or_recover()
+            .insert(7, Default::default());
+        document
+            .ready
+            .store(true, std::sync::atomic::Ordering::Release);
         (document, item_id)
     }
 

@@ -145,10 +145,7 @@ fn log_path() -> PathBuf {
     if let Some(path) = env_override_path() {
         return path;
     }
-    let host = HOST_NAME
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
+    let host = HOST_NAME.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let file = crate::plugin_log_name::log_file_name(host.as_deref());
     default_log_dir().join(file)
 }
@@ -216,11 +213,7 @@ pub fn log_file() -> PathBuf {
     // 【为什么优先读实际打开的路径】`log_path()` 是"按当前宿主名应当用的路径"，
     // 而写入器一旦打开就以它为准（宿主名可能再变，但文件已经在那儿了）。
     // 两者在"名字还没到"的那段时间里不同，报给用户的必须是**真的写着日志**那个。
-    if let Some(path) = LOG_PATH
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone()
-    {
+    if let Some(path) = LOG_PATH.lock().unwrap_or_else(|e| e.into_inner()).clone() {
         return path;
     }
     log_path()
@@ -347,7 +340,10 @@ mod tests {
     /// 这里只钉住"插件前缀 + 与 App 的 `hifishifter.log` 不同名"。
     #[test]
     fn the_plugin_log_file_name_differs_from_the_app() {
-        let name = log_file().file_name().and_then(|n| n.to_str()).map(str::to_owned);
+        let name = log_file()
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::to_owned);
         let name = name.expect("log file name");
         assert!(name.starts_with("plugin-"), "{name}");
         assert!(name.ends_with(".log"), "{name}");
@@ -366,7 +362,11 @@ mod tests {
         {
             return;
         }
-        let name = log_file().file_name().and_then(|n| n.to_str()).unwrap_or_default().to_owned();
+        let name = log_file()
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_owned();
         assert!(name.starts_with("plugin-"), "{name}");
         assert!(log_directory()
             .to_string_lossy()

@@ -121,9 +121,8 @@ fn pick_binding(current: &TrackBindings, saved: &[(String, String)]) -> BindingP
         _ => return BindingPick::Ambiguous,
     }
     // 【二、交集】"多一条 / 少一条 region"是同一条轨的正常形状。
-    let pair_overlap = |known: &Vec<(String, String)>| {
-        known.iter().filter(|pair| saved.contains(pair)).count()
-    };
+    let pair_overlap =
+        |known: &Vec<(String, String)>| known.iter().filter(|pair| saved.contains(pair)).count();
     if let Some(pick) = unique_best(current, pair_overlap) {
         return pick;
     }
@@ -456,7 +455,9 @@ impl EditState {
         }
         let mut merged = self.clone();
         merged.revision = self.revision.checked_add(1).ok_or("revision exhausted")?;
-        merged.params.retain(|id, _| !host_ids.contains(id.as_str()));
+        merged
+            .params
+            .retain(|id, _| !host_ids.contains(id.as_str()));
         merged.params.extend(params.clone());
         merged
             .tracks
@@ -479,8 +480,7 @@ impl EditState {
             .params
             .iter()
             .filter(|(id, _)| {
-                !self.unbound.contains(*id)
-                    && timeline.tracks.iter().any(|t| t.id == **id)
+                !self.unbound.contains(*id) && timeline.tracks.iter().any(|t| t.id == **id)
             })
             .map(|(id, p)| (id.clone(), p.clone()))
             .collect();
@@ -1040,7 +1040,9 @@ mod tests {
             .insert("T_b".into(), vec![("m2".into(), "s2".into())]);
         let bytes = state.encode().expect("一条空轨不得让整份存档失败");
         let mut restored = EditState::default();
-        restored.restore(&bytes).expect("自己写的存档必须自己读得回来");
+        restored
+            .restore(&bytes)
+            .expect("自己写的存档必须自己读得回来");
         let keys = |value: &EditState| value.params.keys().cloned().collect::<BTreeSet<_>>();
         assert_eq!(keys(&restored), keys(&state));
         assert_eq!(restored.tracks.len(), state.tracks.len());

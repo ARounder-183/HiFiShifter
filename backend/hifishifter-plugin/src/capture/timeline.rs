@@ -260,7 +260,6 @@ fn segment_ranges(
         .collect()
 }
 
-
 /// 把一个区间并进**升序、不重叠**的列表（相邻或相交就合并）。
 ///
 /// 【为什么只有一处实现】`raw_tape` 与 `Tape::covered_ranges` 必须给出**同一种形状**的
@@ -621,10 +620,7 @@ pub(crate) struct LeadIn {
 
 /// 量一次录制的前导（见 [`LeadIn`]）。**纯读**。
 pub(crate) fn lead_in(segments: &[Segment]) -> LeadIn {
-    let takes = [ProjectionTake {
-        id: 0,
-        segments,
-    }];
+    let takes = [ProjectionTake { id: 0, segments }];
     let (tapes, _) = build_tapes(&takes);
     let Some(tape) = tapes.first() else {
         return LeadIn::default();
@@ -649,9 +645,8 @@ pub(crate) fn lead_in(segments: &[Segment]) -> LeadIn {
     //
     // 留 1 帧容差：`synthetic_frames` 与 `first_signal_sec` 都按帧取整，边界上的
     // 一个采样不应该被算成"整段都是我们的"。
-    let falsified = first_signal_sec.is_some_and(|sec| {
-        (sec * rate).round() as u64 + 1 < synthetic_frames
-    });
+    let falsified =
+        first_signal_sec.is_some_and(|sec| (sec * rate).round() as u64 + 1 < synthetic_frames);
     LeadIn {
         synthetic_frames,
         first_signal_sec,
@@ -1216,10 +1211,7 @@ mod tests {
         };
         assert_eq!(ids(&first), ids(&second));
         // 键是 `(take, 带内偏移)`：段 2 落在带上的第 10 帧。
-        assert_eq!(
-            ids(&first),
-            vec!["capture-clip-42-0", "capture-clip-42-10"]
-        );
+        assert_eq!(ids(&first), vec!["capture-clip-42-0", "capture-clip-42-10"]);
 
         // 再录一遍（盖住后半段）：前一片的 id 不变，尾片的偏移变了 ⇒ 换 id。
         let overlay = vec![segment(100, &[0.3; 10])];
@@ -1553,10 +1545,7 @@ mod tests {
         covered.coverage_len = 1;
         let lead = lead_in(&[covered]);
         assert_eq!(lead.synthetic_frames, 8);
-        assert!(
-            lead.falsified,
-            "第 0 帧有信号而覆盖从第 8 帧起 ⇒ 这是假洞"
-        );
+        assert!(lead.falsified, "第 0 帧有信号而覆盖从第 8 帧起 ⇒ 这是假洞");
     }
 
     /// 真实的前导静音（整段全零）**不是**假洞。
@@ -1567,11 +1556,7 @@ mod tests {
         covered.coverage_len = 1;
         let lead = lead_in(&[covered]);
         assert_eq!(lead.synthetic_frames, 8);
-        assert!(
-            !lead.falsified,
-            "前 8 帧确实是静音：覆盖表是对的，不得误报"
-        );
+        assert!(!lead.falsified, "前 8 帧确实是静音：覆盖表是对的，不得误报");
         assert_eq!(lead.first_signal_sec, Some(0.008));
     }
-
 }

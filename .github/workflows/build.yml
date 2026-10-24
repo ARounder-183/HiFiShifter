@@ -111,8 +111,9 @@ jobs:
 
       - name: Setup Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
+          # 不传 toolchain：让 action 读 rust-toolchain.toml（已钉具体版本）—— 本机、
+          # CI、每个矩阵入口共用同一把尺子，fmt 门禁的判据不再随 "stable" 漂移。
         with:
-          toolchain: stable
           cache: false
           # 该 action 默认 `-D warnings`；格式化检查与警告无关，置空以免被牵连。
           rustflags: ''
@@ -156,7 +157,6 @@ jobs:
       - name: Setup Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: stable
           cache: false
           rustflags: ''
 
@@ -228,7 +228,6 @@ jobs:
       - name: Setup Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: stable
           cache: false
           rustflags: ''
 
@@ -277,7 +276,6 @@ jobs:
       - name: Setup Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: stable
           cache: false
           rustflags: ''
 
@@ -405,7 +403,6 @@ jobs:
       - name: Setup Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: stable-${{ matrix.cargo_target }}
           cache: false
           # 该 action 默认把既有警告升级为错误（`-D warnings`）。构建 job 不该因为
           # 依赖 crate 的告警而红，也不该把告警静音 —— 因此显式置空，让警告可见

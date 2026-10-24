@@ -29,7 +29,10 @@ fn main() -> Result<(), String> {
     }
     let manifest = workspace.read_manifest()?;
     println!("identity   {}", manifest.link_id);
-    println!("source     {:?} / {}", manifest.source_kind, manifest.host_label);
+    println!(
+        "source     {:?} / {}",
+        manifest.source_kind, manifest.host_label
+    );
     println!(
         "producer   {} (pid {})",
         manifest.producer.implementation,
@@ -83,7 +86,10 @@ fn main() -> Result<(), String> {
     }
 
     if !manifest.losses.is_empty() {
-        println!("losses     {} item(s) did not come across", manifest.losses.len());
+        println!(
+            "losses     {} item(s) did not come across",
+            manifest.losses.len()
+        );
         for loss in manifest.losses.iter().take(16) {
             println!(
                 "  {} — {}{}",

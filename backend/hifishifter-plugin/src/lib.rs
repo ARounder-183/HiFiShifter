@@ -57,12 +57,13 @@
 pub mod ara;
 mod ara_entry;
 mod audio_abi;
+mod capture;
 mod component_state;
 mod diagnostics;
-mod host_identity;
-mod plugin_log_name;
 mod editor;
 mod fade;
+mod host_identity;
+mod plugin_log_name;
 pub mod render;
 mod runtime;
 mod settings_store;
@@ -73,7 +74,6 @@ mod sync;
 mod test_allocator;
 #[cfg(test)]
 mod test_host;
-mod capture;
 mod vst3;
 
 use std::ffi::c_void;

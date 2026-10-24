@@ -1713,7 +1713,11 @@ impl ParameterAtlas {
                             curves.len(),
                             begin,
                             end,
-                            if baseline_present { "present" } else { "absent" },
+                            if baseline_present {
+                                "present"
+                            } else {
+                                "absent"
+                            },
                             u8::from(accepted),
                         ),
                     );
@@ -3133,13 +3137,12 @@ fn capture_source_curve(request: SourceCapture<'_>) -> Result<SourceCurve, Strin
     // 之后那条线整体歪了"。
     if domain == CurveDomain::Project {
         let (region_first, region_last) = frame_range(geometry, frame_ms)?;
-        let (first, last) = match existing.and_then(|curve| {
-            curve.project_frame_extent(current, frame_ms)
-        }) {
-            Some((e_first, e_last)) => (region_first.min(e_first), region_last.max(e_last)),
-            // 【换算不出来就**不缩并集**】只用本 region 的窗口，别的半段保持原样。
-            None => (region_first, region_last),
-        };
+        let (first, last) =
+            match existing.and_then(|curve| curve.project_frame_extent(current, frame_ms)) {
+                Some((e_first, e_last)) => (region_first.min(e_first), region_last.max(e_last)),
+                // 【换算不出来就**不缩并集**】只用本 region 的窗口，别的半段保持原样。
+                None => (region_first, region_last),
+            };
         if last >= 1_000_000 || last < first {
             return Err("source parameter projection frame budget exceeded".into());
         }
@@ -3252,7 +3255,11 @@ mod tests {
             )]),
         );
         let merged = &target["a"];
-        assert_eq!(&merged.pitch_edit[10..20], &[70.0; 10][..], "覆盖到的帧必须更新");
+        assert_eq!(
+            &merged.pitch_edit[10..20],
+            &[70.0; 10][..],
+            "覆盖到的帧必须更新"
+        );
         assert_eq!(merged.pitch_edit[0], 60.0, "没投影到的帧必须保持原值");
         assert_eq!(merged.pitch_edit[50], 60.0);
         assert_eq!(merged.pitch_edit[99], 60.0);
@@ -4445,7 +4452,8 @@ mod tests {
 
         // 已经在新域 ⇒ 不再烘焙（幂等）。
         assert!(
-            bake_curve_to_anchor(&baked, ParamAnchor::Project, &geometry, "pitch_edit", 250.).is_none(),
+            bake_curve_to_anchor(&baked, ParamAnchor::Project, &geometry, "pitch_edit", 250.)
+                .is_none(),
             "域一致时不得再动数据"
         );
     }
@@ -4902,12 +4910,7 @@ mod tests {
         // 非默认格"都被当成用户改动 —— 那正是"用户刚画完一条线"的形状，也正是这里
         // 要验证的写入路径。
         let atlas = ParameterAtlas::default()
-            .capture_changes_with_anchor(
-                &timeline,
-                &ids,
-                &BTreeMap::new(),
-                ParamAnchor::Project,
-            )
+            .capture_changes_with_anchor(&timeline, &ids, &BTreeMap::new(), ParamAnchor::Project)
             .expect("捕获必须成功");
         let authority = atlas.authorities.get("mod:mod").expect("必须建立权威");
         assert_eq!(authority.anchor, ParamAnchor::Project);
@@ -4925,7 +4928,9 @@ mod tests {
         let first = (1. * 1000. / frame_ms) as usize;
         let last = ((1. + 1.) * 1000. / frame_ms) as usize;
         assert!(
-            clip.pitch_edit[first..=last].iter().all(|value| *value == 60.),
+            clip.pitch_edit[first..=last]
+                .iter()
+                .all(|value| *value == 60.),
             "工程域曲线在 2× 拉伸的 clip 上必须逐格还原，实测 {:?}",
             &clip.pitch_edit[first..=last]
         );
@@ -5076,15 +5081,16 @@ mod tests {
             ..Default::default()
         };
         wiped.pitch_edit = vec![0.; 8];
-        timeline
-            .params_by_root_track
-            .insert("a".to_owned(), wiped);
+        timeline.params_by_root_track.insert("a".to_owned(), wiped);
         let after_atlas = atlas
             .capture_changes_with_anchor(&timeline, &ids, &baseline, ParamAnchor::Project)
             .expect("捕获必须成功");
         let authority = &after_atlas.authorities["mod:mod"];
         let after = non_default_frames(&authority.curves);
-        assert_eq!(after, before, "被拒绝的写回不得改动任何一格：{before} -> {after}");
+        assert_eq!(
+            after, before,
+            "被拒绝的写回不得改动任何一格：{before} -> {after}"
+        );
         assert_eq!(
             authority.anchor,
             ParamAnchor::Source,
@@ -5099,5 +5105,4 @@ mod tests {
             );
         }
     }
-
 }

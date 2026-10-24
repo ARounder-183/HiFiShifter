@@ -314,7 +314,9 @@ pub fn default_root() -> Option<PathBuf> {
     } else {
         std::env::var_os("XDG_DATA_HOME")
             .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
+            .or_else(|| {
+                std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share"))
+            })
     }?;
     Some(base.join("HiFiShifter/links"))
 }
@@ -358,7 +360,8 @@ impl Drop for WorkspaceLock {
 impl Workspace {
     /// 已经开着的标记（若存在且未过期）。
     pub fn open_mark(&self, stale_after_ms: u64) -> Option<OpenMark> {
-        let mark: OpenMark = serde_json::from_slice(&std::fs::read(self.open_mark_path()).ok()?).ok()?;
+        let mark: OpenMark =
+            serde_json::from_slice(&std::fs::read(self.open_mark_path()).ok()?).ok()?;
         let age = crate::now_ms().saturating_sub(mark.since_unix_ms);
         if age > stale_after_ms {
             None
@@ -377,7 +380,11 @@ impl Workspace {
     /// 一个原子的"谁先到"。标记过期（进程被杀、机器断电）由**年龄**判断，
     /// 不查 pid 是否存活 —— 那需要平台相关的代码，而且"另一个用户/沙箱里的同号 pid"
     /// 会让它给出错误的答案。12 小时的默认寿命足够避开误判，也足够让用户接管。
-    pub fn acquire_open_mark(&self, label: Option<&str>, stale_after_ms: u64) -> Result<WorkspaceLock, String> {
+    pub fn acquire_open_mark(
+        &self,
+        label: Option<&str>,
+        stale_after_ms: u64,
+    ) -> Result<WorkspaceLock, String> {
         self.prepare()?;
         let path = self.open_mark_path();
         for attempt in 0..2 {
@@ -464,7 +471,9 @@ fn encode_wav(sample_rate: u32, planes: &[Vec<f32>]) -> Result<Vec<u8>, String> 
         let frames = planes[0].len();
         for frame in 0..frames {
             for plane in planes {
-                writer.write_sample(plane[frame]).map_err(|e| e.to_string())?;
+                writer
+                    .write_sample(plane[frame])
+                    .map_err(|e| e.to_string())?;
             }
         }
         writer.finalize().map_err(|e| e.to_string())?;
@@ -473,7 +482,8 @@ fn encode_wav(sample_rate: u32, planes: &[Vec<f32>]) -> Result<Vec<u8>, String> 
 }
 
 fn decode_wav(bytes: &[u8]) -> Result<LoadedAudio, String> {
-    let mut reader = hound::WavReader::new(std::io::Cursor::new(bytes)).map_err(|e| e.to_string())?;
+    let mut reader =
+        hound::WavReader::new(std::io::Cursor::new(bytes)).map_err(|e| e.to_string())?;
     let spec = reader.spec();
     if spec.sample_format != hound::SampleFormat::Float || spec.bits_per_sample != 32 {
         return Err(format!(
@@ -511,8 +521,8 @@ fn decode_wav(bytes: &[u8]) -> Result<LoadedAudio, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Admission, Revisions, SourceKind, FORMAT, FORMAT_VERSION};
     use crate::AudioState;
+    use crate::{Admission, Revisions, SourceKind, FORMAT, FORMAT_VERSION};
 
     fn temp_workspace(tag: &str) -> Workspace {
         let root = std::env::temp_dir().join(format!(
@@ -601,7 +611,9 @@ mod tests {
     #[test]
     fn tampered_audio_is_rejected_by_its_digest() {
         let workspace = temp_workspace("tamper");
-        let reference = workspace.write_audio("k", 48_000, &[vec![0.25; 64]]).unwrap();
+        let reference = workspace
+            .write_audio("k", 48_000, &[vec![0.25; 64]])
+            .unwrap();
         let entry = SourceEntry {
             key: "k".into(),
             sample_rate: 48_000,
@@ -639,7 +651,10 @@ mod tests {
             bytes: None,
             note: None,
         };
-        assert!(workspace.read_audio(&entry).unwrap_err().contains("names no file"));
+        assert!(workspace
+            .read_audio(&entry)
+            .unwrap_err()
+            .contains("names no file"));
         let _ = std::fs::remove_dir_all(workspace.root());
     }
 
@@ -670,9 +685,7 @@ mod tests {
     #[test]
     fn manifests_round_trip_through_the_workspace() {
         let workspace = temp_workspace("manifest");
-        workspace
-            .write_manifest(&manifest_for(Vec::new()))
-            .unwrap();
+        workspace.write_manifest(&manifest_for(Vec::new())).unwrap();
         assert!(workspace.looks_like_workspace());
         assert_eq!(workspace.read_manifest().unwrap().host_label, "REAPER");
 
@@ -739,9 +752,7 @@ mod tests {
     #[test]
     fn the_open_mark_is_exclusive_and_expires() {
         let workspace = temp_workspace("lock");
-        workspace
-            .write_manifest(&manifest_for(Vec::new()))
-            .unwrap();
+        workspace.write_manifest(&manifest_for(Vec::new())).unwrap();
         let held = workspace.acquire_open_mark(Some("test"), 60_000).unwrap();
         assert!(workspace.open_mark(60_000).is_some());
         let error = workspace
@@ -766,7 +777,10 @@ mod tests {
         let workspace = temp_workspace("plain");
         std::fs::create_dir_all(workspace.root()).unwrap();
         assert!(!workspace.looks_like_workspace());
-        assert!(workspace.read_manifest().unwrap_err().contains("cannot read"));
+        assert!(workspace
+            .read_manifest()
+            .unwrap_err()
+            .contains("cannot read"));
         let _ = std::fs::remove_dir_all(workspace.root());
     }
 }

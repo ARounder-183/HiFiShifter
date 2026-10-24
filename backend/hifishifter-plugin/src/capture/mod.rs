@@ -27,8 +27,8 @@
 //! 它只关心"键是否稳定"，不关心键是谁给的，而 Capture 的键（`capture-track` /
 //! `capture-clip-{take}-{n}`）是稳定的。
 
-pub(crate) mod recorder;
 pub(crate) mod commands;
+pub(crate) mod recorder;
 pub(crate) mod sidecar;
 pub(crate) mod timeline;
 
@@ -41,13 +41,13 @@ use recorder::{
 use timeline::ProjectionTake;
 // 【为什么单独 re-export】编辑器会话的测试要按真实形状喂音频块（`on_block`），
 // 而 `capture` 是私有子模块。
-pub(crate) use recorder::InputBlock;
 use hifishifter_kernel::state::TimelineState;
+pub(crate) use recorder::InputBlock;
 use std::collections::HashMap;
+use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
-use std::ops::Range;
 
 /// 单段容量（秒）。
 ///
@@ -1900,8 +1900,16 @@ mod tests {
             planes: [Some(samples), Some(samples)],
             playing: true,
         });
-        assert_eq!(store.bypass_pending(), 0, "the slot must be empty after replay");
-        assert_eq!(store.bypass_counters(), (0, 1), "the block must be saved, not lost");
+        assert_eq!(
+            store.bypass_pending(),
+            0,
+            "the slot must be empty after replay"
+        );
+        assert_eq!(
+            store.bypass_counters(),
+            (0, 1),
+            "the block must be saved, not lost"
+        );
         let _ = store.stop();
         let (timeline, _, _) = store.render_input().expect("has material");
         // Two adjacent blocks make one clip. If the first had been dropped there would
@@ -2287,7 +2295,10 @@ mod tests {
         let missing = store.missing_captures();
         assert_eq!(missing.len(), 1, "缺失必须被记下来，而不是只写一行日志");
         assert_eq!(missing[0].id, 3);
-        assert_eq!(missing[0].frames, 96_000, "帧数来自清单（文件没了就问不到了）");
+        assert_eq!(
+            missing[0].frames, 96_000,
+            "帧数来自清单（文件没了就问不到了）"
+        );
         assert_eq!(missing[0].sample_rate, 48_000);
         assert_eq!(missing[0].start_sec, Some(1.5));
         assert_eq!(missing[0].end_sec, Some(3.5));

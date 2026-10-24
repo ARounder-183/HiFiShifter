@@ -65,12 +65,12 @@ mod app_events;
 pub mod logging;
 mod zip_util;
 
-mod link_bridge;
 mod audio_engine;
 pub(crate) mod commands;
 #[path = "audio/hfspeaks_v2.rs"]
 mod hfspeaks_v2;
 mod launch_args;
+mod link_bridge;
 mod recording;
 mod search;
 #[path = "audio/silence_detect.rs"]
@@ -86,8 +86,8 @@ mod silence_detect;
 // 判据与理由见 `docs/superpowers/specs/2026-10-04-ara-plugin-v1-design.md` §4.2。
 pub use hifishifter_kernel::fade_curves;
 pub(crate) use hifishifter_kernel::{
-    audio_utils, channel_decision, gain, channel_mode, channel_policy, clip_rendering_state, config,
-    dml_adapters, encode, formant_cache, gpu_info, media, midi_import, mixdown, models,
+    audio_utils, channel_decision, channel_mode, channel_policy, clip_rendering_state, config,
+    dml_adapters, encode, formant_cache, gain, gpu_info, media, midi_import, mixdown, models,
     notebook_assets, pitch_analysis, pitch_clip, pitch_editing, project, render_cache, render_key,
     renderer, seam, stereo_detect, synth_clip_cache, temp_manager,
 };

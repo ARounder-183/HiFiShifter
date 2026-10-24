@@ -454,10 +454,8 @@ impl EditorSession {
         // 【为什么先把 before 克隆出来】`move_clips` 会就地改写 clip 的位置，而下面的
         // 预检要拿"编辑前"的位置去比宿主的当前几何。读晚了就会拿新值比旧值，把一次
         // 正常编辑误判成"宿主在我们编辑期间变过"。
-        let mut before_by_id: std::collections::HashMap<
-            String,
-            hifishifter_kernel::state::Clip,
-        > = std::collections::HashMap::new();
+        let mut before_by_id: std::collections::HashMap<String, hifishifter_kernel::state::Clip> =
+            std::collections::HashMap::new();
         for request in &requests {
             let Some(id) = request["clipId"].as_str() else {
                 continue;
@@ -480,10 +478,7 @@ impl EditorSession {
             if !seen.insert(id.to_owned()) {
                 return Err("duplicate clip in host edit batch".into());
             }
-            let before = before_by_id
-                .get(id)
-                .cloned()
-                .ok_or("unknown editor clip")?;
+            let before = before_by_id.get(id).cloned().ok_or("unknown editor clip")?;
             let destination = request["trackId"].as_str().unwrap_or(&before.track_id);
             if !timeline.tracks.iter().any(|track| track.id == destination) {
                 return Err("unknown target host track".into());
