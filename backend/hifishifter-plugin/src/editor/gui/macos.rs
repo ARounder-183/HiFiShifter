@@ -19,8 +19,12 @@ use super::protocol;
 use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
-use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly};
-use objc2_app_kit::{NSAutoresizingMaskOptions, NSView};
+use objc2::{
+    define_class, msg_send, AllocAnyThread, DefinedClass, MainThreadMarker, MainThreadOnly,
+};
+use objc2_app_kit::{
+    NSAutoresizingMaskOptions, NSDragOperation, NSDraggingDestination, NSDraggingInfo, NSView,
+};
 use objc2_foundation::{
     NSData, NSHTTPURLResponse, NSMutableDictionary, NSRunLoop, NSRunLoopCommonModes, NSString,
     NSTimer, NSURLRequest, NSURL,
@@ -135,11 +139,78 @@ define_class!(
     }
 );
 
+/// 容器视图：宿主的 `NSView` 里放它，它里面放 `WKWebView`。
+///
+/// 【为什么必须是子类】拖放要接 `NSDraggingDestination`，而那是 `NSView` 上的
+/// **协议**方法 —— 普通的 `NSView` 实例不会响应它们。于是容器成了本模块里唯一
+/// "有行为"的视图：它什么都不画，只负责把拖进来的文件翻译成 `native_drop` 事件。
+///
+/// 【为什么只认 `public.file-url` 的字符串形式】多文件要 `readObjectsForClasses:options:`
+/// （一个 `NSArray<AnyClass>` + `NSArray` 的向下转型），而本机没有任何 macOS 可以验证
+/// 那串类型体操。`public.file-url` 对 Finder 拖出的**每一个**文件都在，取第一条路径
+/// 就能让"拖一个 wav 进来"成立 —— 拿不到就返回 `false`，与今天（完全没有拖放）
+/// 一样，不会有更坏的形态。
+struct ContainerIvars {
+    client: Rc<RefCell<EditorClient>>,
+}
+define_class!(
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = ContainerIvars]
+    struct HFSContainerView;
+
+    unsafe impl NSObjectProtocol for HFSContainerView {}
+
+    unsafe impl NSDraggingDestination for HFSContainerView {
+        #[unsafe(method(draggingEntered:))]
+        fn dragging_entered(
+            &self,
+            _sender: &ProtocolObject<dyn NSDraggingInfo>,
+        ) -> NSDragOperation {
+            // 只声明"可以放"，不做任何副作用：用户松手之前不该有任何动作。
+            NSDragOperation::Copy
+        }
+
+        #[unsafe(method(performDragOperation:))]
+        fn perform_drop(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
+            let pasteboard = sender.draggingPasteboard();
+            // SAFETY: `NSPasteboardTypeFileURL` 是 AppKit 提供的常量字符串。
+            let Some(text) = pasteboard.stringForType(unsafe { NSPasteboardTypeFileURL }) else {
+                return false;
+            };
+            let Some(url) = NSURL::URLWithString(&text) else {
+                return false;
+            };
+            let Some(path) = url.path() else {
+                return false;
+            };
+            let path = std::path::PathBuf::from(path.to_string());
+            // 拖一个已删除的文件进来是常见操作；不存在就当没发生。
+            if !path.is_file() {
+                return false;
+            }
+            let client = self.ivars().client.clone();
+            let view_id = client.borrow().view_id.clone();
+            client.borrow_mut().post(serde_json::json!({
+                "version": 1,
+                "viewId": view_id,
+                "event": "native_drop",
+                "payload": { "paths": [path.to_string_lossy()] },
+            }));
+            true
+        }
+    }
+);
+
 struct SchemeIvars {
     root: std::path::PathBuf,
 }
 define_class!(
     #[unsafe(super(NSObject))]
+    // 【为什么也标 MainThreadOnly】§WKURLSchemeHandler§ 的回调由 WebKit 在主线程发出，
+    // 而 §alloc(marker)§ 这种构造方式只有 MainThreadOnly 的类才有 —— 标上它，构造与
+    // 调用就都落在同一套约束里，不需要再写一个 §unsafe impl Send§。
+    #[thread_kind = MainThreadOnly]
     #[ivars = SchemeIvars]
     struct HFSSchemeHandler;
 
@@ -186,13 +257,21 @@ fn serve_asset(root: &std::path::Path, task: &ProtocolObject<dyn WKURLSchemeTask
         &NSString::from_str(&body.len().to_string()),
     );
     let version = NSString::from_str("HTTP/1.1");
+    // 【为什么状态码要显式转型】§statusCode:§ 是 §NSInteger§（isize），我们算出来的是
+    // §i32§；不转就是一条类型错误，而不是隐式提升。
     let response = NSHTTPURLResponse::initWithURL_statusCode_HTTPVersion_headerFields(
         NSHTTPURLResponse::alloc(),
         &url,
-        status,
+        status as objc2_foundation::NSInteger,
         Some(&version),
         Some(&headers),
     );
+    // 初始化失败（URL 非法等）时不要往 task 上写半条响应：让它以失败收场，
+    // 页面会拿到一个明确的网络错误，而不是一段看似成功的空数据。
+    let Some(response) = response else {
+        crate::log_line(&format!("[gui] could not build a response for {path}"));
+        return;
+    };
     let data = NSData::from_vec(body);
     // SAFETY: 三个调用都发生在同一个 `WKURLSchemeTask` 生命周期内，且顺序正确
     // （先 response，再 data，最后 finish）。
@@ -306,7 +385,7 @@ impl EditorHost for MacHost {
 struct View {
     client: Rc<RefCell<EditorClient>>,
     port: Rc<MacPort>,
-    container: Retained<NSView>,
+    container: Retained<HFSContainerView>,
     webview: Retained<WKWebView>,
     timer: Retained<NSTimer>,
     /// 委托对象必须被**我们自己**持有：`WKUserContentController` 与 `WKWebView` 的
@@ -357,10 +436,22 @@ impl MacHost {
                 height: height as f64,
             },
         };
+        // 判定状态先建：容器要把它的 `Rc` 塞进 ivars（拖放回调要用）。
+        let client = EditorClient::open(link);
         let webview = unsafe {
             WKWebView::initWithFrame_configuration(WKWebView::alloc(marker), frame, &configuration)
         };
-        let container = unsafe { NSView::initWithFrame(NSView::alloc(marker), frame) };
+        let container = {
+            let this = marker
+                .alloc::<HFSContainerView>()
+                .set_ivars(ContainerIvars {
+                    client: client.clone(),
+                });
+            // SAFETY: `initWithFrame:` 是 `NSView` 的指定初始化器，this 已装好 ivars。
+            let container: Retained<HFSContainerView> =
+                unsafe { msg_send![super(this), initWithFrame: frame] };
+            container
+        };
         container.setAutoresizesSubviews(true);
         container.setAutoresizingMask(
             NSAutoresizingMaskOptions::ViewWidthSizable
@@ -370,10 +461,15 @@ impl MacHost {
             NSAutoresizingMaskOptions::ViewWidthSizable
                 | NSAutoresizingMaskOptions::ViewHeightSizable,
         );
+        // 只有登记过的类型才会触发 `draggingEntered:`；`public.file-url` 是 Finder 的
+        // 标准类型（拖文件、拖目录都是它）。
+        // SAFETY: 常量由 AppKit 提供；数组在本调用期间存活。
+        unsafe {
+            container.registerForDraggedTypes(&NSArray::<NSPasteboardType>::from_slice(&[
+                NSPasteboardTypeFileURL,
+            ]));
+        }
         container.addSubview(&webview);
-
-        // 判定状态与端口
-        let client = EditorClient::open(link);
         let port = Rc::new(MacPort {
             webview: RefCell::new(Some(webview.clone())),
             closed: Cell::new(false),
@@ -428,7 +524,9 @@ impl MacHost {
         let timer = unsafe { NSTimer::timerWithTimeInterval_repeats_block(TICK, true, &block) };
         // 【为什么加入 CommonModes】默认模式在拖拽/菜单跟踪时会停 —— 那时回执会卡住，
         // 而用户正按着鼠标拖片段。
-        NSRunLoop::mainRunLoop().addTimer_forMode(&timer, unsafe { NSRunLoopCommonModes });
+        unsafe {
+            NSRunLoop::mainRunLoop().addTimer_forMode(&timer, NSRunLoopCommonModes);
+        }
 
         VIEWS.with(|views| {
             views.borrow_mut().insert(
@@ -492,11 +590,11 @@ fn close_view(token: usize) {
     // 【顺序】先摘 `messageHandler` 再拆视图：`addScriptMessageHandler` 是**强引用**，
     // 不摘就会每开一次窗口泄漏一个 webview（方案 `5.4` 的循环引用警告）。
     if let Some(webview) = view.port.webview.borrow().clone() {
-        let controller = webview.configuration().userContentController();
+        // SAFETY: 全部在 §removed()§ 的主线程调用路径上，且顺序正确（先摘 handler，
+        // 再停加载、摘 delegate）。
         unsafe {
+            let controller = webview.configuration().userContentController();
             controller.removeScriptMessageHandlerForName(&NSString::from_str(HANDLER));
-        }
-        unsafe {
             webview.stopLoading();
             webview.setNavigationDelegate(None);
         }
