@@ -1188,22 +1188,60 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
         // 重开工程时那正是最慢的一段。这里只读 owner 的原子读数，返回同样的形状。
         Some("get_runtime_info") => {
             let link = state.borrow().link.clone();
-            link.owner().map(|owner| {
-                let health = owner.health_snapshot();
-                let clip_count = health["clip_count"].as_u64().unwrap_or(0);
-                let capture = health["host_kind"].as_str() == Some("capture");
-                serde_json::json!({
-                    "ok": true,
-                    "device": if capture { "Host / Capture" } else { "Host / ARA" },
-                    "model_loaded": health["model_available"].as_bool().unwrap_or(false),
-                    "audio_loaded": clip_count > 0,
-                    "has_synthesized": false,
-                    "is_playing": false,
-                    "playback_target": serde_json::Value::Null,
-                    "gpu_backend": "",
-                    "clip_count": clip_count,
-                })
-            })
+            // 【为什么 `owner` 缺席也要给答案】这是状态栏的心跳命令。让它在"还没绑定/
+            // 还没插到轨道上"时走通用路径，`editor_session()?` 会直接失败，前端就画一条
+            // `Backend invoke failed: plugin:get_runtime_info` 的红条 —— 而用户其实只是
+            // "插件还没开始工作"。降级答案与正常答案**同形**，前端不需要任何特判。
+            let health = link.owner().ok().map(|owner| owner.health_snapshot());
+            let clip_count = health
+                .as_ref()
+                .and_then(|health| health["clip_count"].as_u64())
+                .unwrap_or(0);
+            let capture = health
+                .as_ref()
+                .and_then(|health| health["host_kind"].as_str())
+                == Some("capture");
+            Ok(serde_json::json!({
+                "ok": true,
+                "device": if capture { "Host / Capture" } else { "Host / ARA" },
+                "model_loaded": health
+                    .as_ref()
+                    .and_then(|health| health["model_available"].as_bool())
+                    .unwrap_or(false),
+                "audio_loaded": clip_count > 0,
+                "has_synthesized": false,
+                "is_playing": false,
+                "playback_target": serde_json::Value::Null,
+                "gpu_backend": "",
+                "clip_count": clip_count,
+            }))
+        }
+        // 【为什么这个也要内联】它每 250 ms 被轮询一次。会话尚未建立时（刚插上、还没有
+        // 音频）走通用路径同样是 `editor_session()?` 失败 —— 于是状态栏每四分之一秒
+        // 刷一条 `Backend invoke failed: plugin_plugin_get_apply_state`。
+        Some("plugin_get_apply_state") => {
+            let link = state.borrow().link.clone();
+            let payload = match link
+                .owner()
+                .ok()
+                .and_then(|owner| owner.existing_editor_session())
+            {
+                Some(editor) => editor.state(),
+                // 与 `EditorSession::state()` 逐字段同形，只是"什么都没有"。
+                None => serde_json::json!({
+                    "mode": "ara",
+                    "generation": 0,
+                    "applied_generation": 0,
+                    "pending": false,
+                    "analysis_pending": false,
+                    "rendering_active": false,
+                    "host_version": 0,
+                    "error": serde_json::Value::Null,
+                    "connected": true,
+                    "ready": false,
+                }),
+            };
+            Ok(payload)
         }
         Some("ping") => Ok(serde_json::json!({"ok":true,"mode":"plugin","view_id":view_id,
             "connected":state.borrow().link.owner().is_ok()})),
