@@ -433,7 +433,7 @@ impl EditorClient {
             return;
         }
         self.dead = true;
-        crate::log_line(&format!("[gui] the embedded page is gone: {reason}"));
+        crate::gui_log_line(&format!("the embedded page is gone: {reason}"));
     }
 
     /// 页面就绪：把就绪前攒下的消息一次刷出。

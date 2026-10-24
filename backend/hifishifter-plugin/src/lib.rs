@@ -119,6 +119,17 @@ pub(crate) fn log_line(message: &str) {
     log::info!("[vst3] {message}");
 }
 
+/// GUI 生命周期的诊断行：**必须是 WARN 级**。
+///
+/// 【为什么不能是 `log_line` 的 INFO】release 的默认级别是 `Warn`（理由见
+/// `diagnostics.rs`：宿主回调的打点会把用户磁盘写满）。而 GUI 这几行恰恰是
+/// "用户报一个空面板时唯一能拿到的东西" —— 一次真实的 Linux 报障里，日志里
+/// **一条 `[gui]` 都没有**，于是"到底有没有 attach""走的是哪个后端""页面有没有起来"
+/// 全部只能靠猜。这类行每次会话只有几条，用 WARN 换现场可诊断，代价可以忽略。
+pub(crate) fn gui_log_line(message: &str) {
+    log::warn!("[gui] {message}");
+}
+
 /// FFI 入口的 panic 遏制原语：Rust 1.71+ 起 panic 越过 `extern "system"` 边界 =
 /// abort，宿主（DAW）进程随之崩溃。**每一个被宿主调用的入口**都必须把自己的
 /// panic 拦成明确的失败值 —— 这不是音频回调的特例，而是全部 ABI 面的规则。

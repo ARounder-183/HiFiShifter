@@ -269,7 +269,7 @@ fn serve_asset(root: &std::path::Path, task: &ProtocolObject<dyn WKURLSchemeTask
     // 初始化失败（URL 非法等）时不要往 task 上写半条响应：让它以失败收场，
     // 页面会拿到一个明确的网络错误，而不是一段看似成功的空数据。
     let Some(response) = response else {
-        crate::log_line(&format!("[gui] could not build a response for {path}"));
+        crate::gui_log_line(&format!("could not build a response for {path}"));
         return;
     };
     let data = NSData::from_vec(body);
@@ -303,7 +303,7 @@ impl EditorPort for MacPort {
         unsafe {
             let handler = RcBlock::new(move |_value: *mut AnyObject, error: *mut AnyObject| {
                 if !error.is_null() {
-                    crate::log_line("[gui] page delivery failed");
+                    crate::gui_log_line("page delivery failed");
                 }
             });
             webview.evaluateJavaScript_completionHandler(&script, Some(&handler));

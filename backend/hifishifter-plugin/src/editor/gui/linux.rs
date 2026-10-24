@@ -22,6 +22,7 @@ use super::port::{EditorHost, EditorPort, GuiFidelity, NativeWindow};
 use super::protocol;
 use gtk::gio;
 use gtk::glib;
+use gtk::glib::translate::{FromGlibPtrFull, ToGlibPtr};
 use gtk::prelude::*;
 use javascriptcore::ValueExt;
 use std::cell::{Cell, RefCell};
@@ -51,6 +52,21 @@ const ATTACH_TIMEOUT: Duration = Duration::from_secs(2);
 /// `ExitDll` 等 GTK 线程确认退出的上限。
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// 手写 `gdkx.h` 里的一个函数。
+///
+/// 【为什么不用 gdk-rs】gdk 0.18 **没有** `x11` 模块（那个能力在更晚的版本里才有），
+/// 而"把自己的 GdkWindow 挂到一个外来 X11 窗口下面"只有它表达得了。手写 5 行比升级
+/// 整条 gtk 依赖链便宜得多，也与本仓 `vst3.rs` 手写 SDK 接口的风格一致。
+mod x11 {
+    extern "C" {
+        /// `GdkWindow *gdk_x11_window_foreign_new_for_display (GdkDisplay*, Window)`
+        pub fn gdk_x11_window_foreign_new_for_display(
+            display: *mut gdk::ffi::GdkDisplay,
+            window: libc::c_ulong,
+        ) -> *mut gdk::ffi::GdkWindow;
+    }
+}
+
 static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
 /// 存活视图数（跨线程可读；`VIEWS` 是 thread_local，问不出别的线程）。
 static LIVE_VIEWS: AtomicUsize = AtomicUsize::new(0);
@@ -67,6 +83,8 @@ thread_local! {
 struct View {
     client: Rc<RefCell<EditorClient>>,
     port: Rc<LinuxPort>,
+    /// 挂载用的外来 X11 窗口（§Some§ 时容器是嵌进宿主的；§None§ 时是浮窗）。
+    foreign: Option<gdk::Window>,
     /// 泵是否就跑在**宿主 UI 线程**上（情形 A）。
     ///
     /// 【为什么必须区分】§client::tick§ 会碰宿主 API（§flush_dirty§ / 宿主时钟 /
@@ -107,7 +125,7 @@ impl EditorPort for LinuxPort {
             None::<&gio::Cancellable>,
             |result| {
                 if let Err(error) = result {
-                    crate::log_line(&format!("[gui] page delivery failed: {error}"));
+                    crate::gui_log_line(&format!("page delivery failed: {error}"));
                 }
             },
         );
@@ -213,10 +231,10 @@ enum Control {
     Close {
         token: usize,
     },
-    /// 只在情形 B：建视图并回报 token。
+    /// 只在情形 B：建视图并回报 §(token, 实际做到的保真度)§。
     Attach {
         request: AttachRequest,
-        reply: SyncSender<Result<usize, String>>,
+        reply: SyncSender<Result<(usize, GuiFidelity), String>>,
     },
     /// `ExitDll`：停掉 GTK 主循环。
     Shutdown {
@@ -268,29 +286,45 @@ pub(super) fn create(
     // 【抄错 IID 会怎样】只会让探测恒为 §false§，也就是永远走情形 B —— 不会崩、
     // 不会静默改行为。这条探测是纯只读的：拿到接口立刻释放，不注册任何东西。
     let run_loop = probe_run_loop(frame);
-    crate::log_line(&format!(
-        "[gui] host IRunLoop: {} (frame={})",
+    crate::gui_log_line(&format!(
+        "host IRunLoop: {} (frame={}, embedded={embedded})",
         if run_loop { "available" } else { "absent" },
         if frame == 0 { "unset" } else { "set" }
     ));
-    if gdk_is_initialized() {
+    if gtk3_initialized() {
         // 情形 A：宿主的 GTK 已经在这条线程上跑着。
         //
         // 【为什么这里什么都不用做】本 crate 打开了 gtk 的
         // `unsafe-assume-initialized`：gtk-rs 因此认为"GTK 已在本线程初始化"，
         // `assert_initialized_main_thread!` 全部放行。代价是它不再替我们守线程纪律 ——
         // 由 `VIEWS`（thread_local）与 `LinuxHost::submit`（先比线程身份）来守。
-        let token = attach_view(request, true)?;
-        crate::log_line("[gui] hosting the host's GTK main loop (embedded)");
+        let (token, fidelity) = attach_view(request, true)?;
+        crate::gui_log_line(&format!(
+            "hosting the host's GTK main loop ({})",
+            fidelity.as_str()
+        ));
         return Ok(Rc::new(LinuxHost {
             token,
             owner: std::thread::current().id(),
             control: None,
-            fidelity: GuiFidelity::Embedded,
+            fidelity,
             link,
         }));
     }
     // 情形 B：进程里没有 GTK 主循环，只能自己起一条。
+    //
+    // 【为什么先把 GDK 钉到 X11】宿主给的是一个 **X11 Window ID**
+    // （`kPlatformTypeX11EmbedWindowID`）。而 GDK 在 `WAYLAND_DISPLAY` 存在时
+    // **默认选 Wayland** —— WSLg 与 GNOME Wayland 会话下都是这样，实测
+    // `gdk_display_get_default()` 返回 `GdkWaylandDisplay`。Wayland 后端上没有
+    // "外来窗口"这个概念，嵌入必然失败；而且失败得**非常安静**：
+    // `gtk_plug_new` 会返回一个非空、永不映射、不报错的 widget —— 用户看到的就是
+    // 一块空面板。只有在"我们自己初始化 GTK"时才能改这个选择；宿主已经初始化过的
+    // 情形 A 改也没用，那时走浮窗（`attach_view` 会自报 `FloatingWindow`）。
+    if request.embedded && std::env::var_os("GDK_BACKEND").is_none() {
+        std::env::set_var("GDK_BACKEND", "x11");
+        crate::gui_log_line("pinning GDK_BACKEND=x11 so the host's X11 window can be embedded");
+    }
     //
     // 【为什么这里不返回 §Err§】"这台机器上没有可用的 GTK/WebKit"是一个**环境事实**，
     // 不是一个错误：宿主应当看到空面板 + 一行可搜到的日志，而不是一个没人读的字符串。
@@ -298,8 +332,8 @@ pub(super) fn create(
     let thread = match gui_thread() {
         Ok(thread) => thread,
         Err(_) => {
-            crate::log_line(
-                "[gui] no usable GTK/WebKit in this process; the editor panel stays empty",
+            crate::gui_log_line(
+                "no usable GTK/WebKit in this process; the editor panel stays empty",
             );
             return Ok(Rc::new(super::unavailable::UnavailableHost::new(
                 "no usable GTK/WebKit in this host",
@@ -312,13 +346,16 @@ pub(super) fn create(
         .send(Control::Attach { request, reply })
         .map_err(|_| "the GTK thread is gone".to_string())?;
     match replies.recv_timeout(ATTACH_TIMEOUT) {
-        Ok(Ok(token)) => {
-            crate::log_line("[gui] hosting our own GTK thread (floating window)");
+        Ok(Ok((token, fidelity))) => {
+            crate::gui_log_line(&format!(
+                "hosting our own GTK thread ({})",
+                fidelity.as_str()
+            ));
             Ok(Rc::new(LinuxHost {
                 token,
                 owner: thread.owner,
                 control: Some(thread.control.clone()),
-                fidelity: GuiFidelity::FloatingWindow,
+                fidelity,
                 link,
             }))
         }
@@ -356,14 +393,24 @@ pub(super) fn shutdown() -> bool {
     true
 }
 
-/// GDK 是否已经在本进程里初始化过。
+/// **GTK 3** 是否已经在本进程里初始化过。
+///
+/// 【为什么必须区分 GTK2 与 GTK3】`gdk_display_get_default` 这个符号 **GTK2 也有**
+/// （`libgdk-x11-2.0.so.0`）。而 Linux 上的宿主（REAPER 的 SWELL、Ardour 的插件窗口）
+/// 很可能已经装载了 GTK2 并打开了它的 display —— 于是朴素的 `dlsym` 探测会说
+/// "GDK 已初始化"，我们便跳过自己的 `gtk_init_check`，接着用 **GTK3** 的
+/// `gtk_widget_*` 去操作一个**从未初始化过**的工具箱。那不会报错，只会产出一个
+/// 不映射的窗口 —— 也就是"空面板、日志里什么都没有"。
+///
+/// 判据因此收紧成两步：先 `dlsym` 找到符号，再用 `dladdr` 问"它是哪个库提供的"，
+/// 要求路径里是 `libgtk-3` / `libgdk-3`。
 ///
 /// 【为什么用 `dlopen(NULL)` + `dlsym` 而不是链接期符号】我们**不能**为了探测去
 /// 初始化 GTK（那正是要判断的事）；`RTLD_DEFAULT` 只查"已经装载的模块"，
 /// 不加载任何东西。
-fn gdk_is_initialized() -> bool {
+fn gtk3_initialized() -> bool {
     type GetDefault = unsafe extern "C" fn() -> *mut std::ffi::c_void;
-    // SAFETY: dlopen/dlsym 只读进程的模块表；符号名与签名由 GDK 3 固定
+    // SAFETY: dlopen/dlsym/dladdr 只读进程的模块表；符号名与签名由 GDK 3 固定
     // （`GdkDisplay *gdk_display_get_default(void)`）。
     unsafe {
         let handle = libc::dlopen(std::ptr::null(), libc::RTLD_LAZY);
@@ -371,8 +418,28 @@ fn gdk_is_initialized() -> bool {
             return false;
         }
         let symbol = libc::dlsym(handle, c"gdk_display_get_default".as_ptr());
-        libc::dlclose(handle);
         if symbol.is_null() {
+            libc::dlclose(handle);
+            return false;
+        }
+        let mut info = std::mem::MaybeUninit::<libc::Dl_info>::uninit();
+        let located = libc::dladdr(symbol, info.as_mut_ptr());
+        libc::dlclose(handle);
+        if located == 0 {
+            return false;
+        }
+        let info = info.assume_init();
+        if info.dli_fname.is_null() {
+            return false;
+        }
+        let library = std::ffi::CStr::from_ptr(info.dli_fname)
+            .to_string_lossy()
+            .into_owned();
+        let is_gtk3 = library.contains("libgtk-3") || library.contains("libgdk-3");
+        if !is_gtk3 {
+            crate::gui_log_line(&format!(
+                "a GDK from {library} is loaded, but that is not GTK 3; initializing our own"
+            ));
             return false;
         }
         let get_default: GetDefault = std::mem::transmute(symbol);
@@ -385,7 +452,7 @@ fn gui_thread() -> Result<&'static GuiThread, String> {
         .get_or_init(|| {
             start_gui_thread()
                 .map_err(|error| {
-                    crate::log_line(&format!("[gui] GTK thread unavailable: {error}"));
+                    crate::gui_log_line(&format!("GTK thread unavailable: {error}"));
                     error
                 })
                 .ok()
@@ -400,7 +467,7 @@ fn start_gui_thread() -> Result<GuiThread, String> {
     let handle = std::thread::Builder::new()
         .name("hfs-gui".into())
         .spawn(move || {
-            // 【为什么不调 §gtk::init()§】本 crate 打开了 §unsafe-assume-initialized§，
+            // 【为什么不调 `gtk::init()`】本 crate 打开了 `unsafe-assume-initialized`，
             // 于是 §gtk::init()§ 会认为"已经初始化"并直接返回 —— 它**不会**真的去初始化。
             // 情形 B 里我们才是那个初始化者，所以显式调 §gtk_init_check§（argc/argv 允许
             // 为 NULL，GTK 文档明写）。
@@ -502,7 +569,7 @@ fn tick() -> glib::ControlFlow {
                     .map(|(token, _)| *token)
             });
             if let Some(token) = dead {
-                crate::log_line("[gui] closing the editor view: the page is gone");
+                crate::gui_log_line("closing the editor view: the page is gone");
                 close_view(token);
             }
         }
@@ -527,6 +594,9 @@ fn close_view(token: usize) {
     view.client.borrow_mut().close();
     view.port.close();
     view.webview.stop_loading();
+    // 外来窗口是 §gdk_x11_window_foreign_new_for_display§ 给我们的**一份引用**，
+    // 不还回去就每开一次窗口泄漏一个 GdkWindow。
+    drop(view.foreign);
     // SAFETY: 容器由本视图独占；GTK 的 destroy 只要求在同一线程上调用。
     unsafe { view.container.destroy() };
     LIVE_VIEWS.fetch_sub(1, Ordering::AcqRel);
@@ -587,7 +657,10 @@ fn probe_run_loop(frame: usize) -> bool {
 }
 
 /// 在拥有视图的线程上真正建视图。
-fn attach_view(request: AttachRequest, on_host_thread: bool) -> Result<usize, String> {
+fn attach_view(
+    request: AttachRequest,
+    on_host_thread: bool,
+) -> Result<(usize, GuiFidelity), String> {
     let assets = crate::editor::resources::frontend_directory()?;
     let context = web_context(&assets);
     let token = NEXT_TOKEN.fetch_add(1, Ordering::Relaxed) as usize;
@@ -636,26 +709,81 @@ fn attach_view(request: AttachRequest, on_host_thread: bool) -> Result<usize, St
     install_policy(&webview, &client);
     install_drop(&webview, &client);
 
-    let container: gtk::Widget = if request.embedded {
-        let plug = gtk::Plug::new(request.parent as gtk::xlib::Window);
-        plug.add(&webview);
-        plug.upcast()
-    } else {
-        // 浮窗：宿主没有可嵌入的 surface（Wayland）或我们必须用私有 GTK 线程。
-        let window = gtk::Window::new(gtk::WindowType::Toplevel);
-        window.set_title("HiFiShifter");
-        window.set_default_size(request.width, request.height);
-        window.add(&webview);
-        let weak = Rc::downgrade(&client);
-        window.connect_delete_event(move |_, _| {
-            if let Some(client) = weak.upgrade() {
-                client.borrow_mut().close();
+    // ── 把视图塞进宿主给的窗口（或者只能自己开窗）──────────────────────────
+    //
+    // 【为什么不再用 `GtkPlug`】实测（`scripts/vst3/unix/gui_probe.c`）：
+    //   * Wayland 后端下 `gtk_plug_new` **返回一个非空但永远不映射的 widget** ——
+    //     没有报错、没有日志，用户看到的就是一块空面板；
+    //   * 即使 X11 后端，`GtkPlug` 也要求父窗口是真正的 **XEmbed socket**，
+    //     而一般宿主的窗口只是被 reparent 的普通 X11 窗口（GTK 会打印
+    //     "Can't create GtkPlug as child of non-GtkSocket"，然后同样不映射）。
+    //
+    // 因此改用"把自己的 GdkWindow 挂到外来的 X11 窗口下面"：这是 GTK 官方给
+    // "嵌入到别的 toolkit" 的手法，**不需要**宿主实现任何协议，只需要它是 X11。
+    let display =
+        gdk::Display::default().ok_or_else(|| "GTK has no default display".to_string())?;
+    let display_kind = display.type_().name().to_string();
+    let x11_parent = if request.embedded && display_kind.contains("X11") {
+        // SAFETY: `gdk_x11_window_foreign_new_for_display` 只要求一个存在的 X11 窗口 ID；
+        // 宿主在 `attached` 期间保证它有效（VST3 契约）。返回的 GdkWindow 由我们持有
+        // 一份引用，`close_view` 里随 `View` 一起释放。
+        unsafe {
+            let pointer = x11::gdk_x11_window_foreign_new_for_display(
+                display.to_glib_none().0,
+                request.parent as libc::c_ulong,
+            );
+            if pointer.is_null() {
+                None
+            } else {
+                Some(gdk::Window::from_glib_full(pointer))
             }
-            // 【为什么 `Propagate`】窗口的销毁交给 `close_view`（它要同时摘掉注册表
-            // 与节拍）；这里只拒绝"由 GTK 自己删窗口"那条路。
-            gtk::glib::Propagation::Proceed
-        });
-        window.upcast()
+        }
+    } else {
+        None
+    };
+
+    let (container, foreign, fidelity) = match x11_parent {
+        Some(foreign) => {
+            // `GtkEventBox` 自带 GdkWindow（`has_window == TRUE`），是挂 parent window 的最小容器。
+            let boxed = gtk::EventBox::new();
+            boxed.set_parent_window(&foreign);
+            boxed.add(&webview);
+            (
+                boxed.upcast::<gtk::Widget>(),
+                Some(foreign),
+                GuiFidelity::Embedded,
+            )
+        }
+        None => {
+            let reason = if !request.embedded {
+                "the host did not hand us an embeddable X11 window"
+            } else if display_kind.contains("X11") {
+                "the host window is not a live X11 window"
+            } else {
+                // 【这一行就是 WSLg / Wayland 会话下的现场证据】GTK 在 Wayland 后端上
+                // 没有"外来窗口"这个概念，嵌入无从谈起。
+                "GTK is running on a non-X11 backend, so the host's X11 window cannot be embedded"
+            };
+            crate::gui_log_line(&format!("falling back to a floating window: {reason}"));
+            let window = gtk::Window::new(gtk::WindowType::Toplevel);
+            window.set_title("HiFiShifter");
+            window.set_default_size(request.width, request.height);
+            window.add(&webview);
+            let weak = Rc::downgrade(&client);
+            window.connect_delete_event(move |_, _| {
+                if let Some(client) = weak.upgrade() {
+                    client.borrow_mut().close();
+                }
+                // 【为什么 `Proceed`】窗口的销毁交给 `close_view`（它要同时摘掉注册表
+                // 与节拍）；这里只拒绝"由 GTK 自己删窗口"那条路。
+                gtk::glib::Propagation::Proceed
+            });
+            (
+                window.upcast::<gtk::Widget>(),
+                None,
+                GuiFidelity::FloatingWindow,
+            )
+        }
     };
     container.set_size_request(request.width, request.height);
     container.show_all();
@@ -668,6 +796,7 @@ fn attach_view(request: AttachRequest, on_host_thread: bool) -> Result<usize, St
                 port: port.clone(),
                 container: container.clone(),
                 webview: webview.clone(),
+                foreign,
                 on_host_thread,
             },
         );
@@ -676,11 +805,13 @@ fn attach_view(request: AttachRequest, on_host_thread: bool) -> Result<usize, St
     ensure_tick();
 
     webview.load_uri(protocol::PAGE_URL);
-    crate::log_line(&format!(
-        "[gui] webkit view {token} created ({}x{})",
-        request.width, request.height
+    crate::gui_log_line(&format!(
+        "webkit view {token} created ({}x{}, backend={display_kind}, {})",
+        request.width,
+        request.height,
+        fidelity.as_str()
     ));
-    Ok(token)
+    Ok((token, fidelity))
 }
 
 /// 进程级唯一的 WebContext：自定义 scheme 只注册一次。
@@ -739,7 +870,7 @@ fn serve_asset(root: &std::path::Path, request: &webkit2gtk::URISchemeRequest) {
 /// JS → 原生：只接受字符串，限长后交给 Policy。
 fn install_messages(manager: &webkit2gtk::UserContentManager, client: &Rc<RefCell<EditorClient>>) {
     if !manager.register_script_message_handler("hfs") {
-        crate::log_line("[gui] could not register the script message handler");
+        crate::gui_log_line("could not register the script message handler");
         return;
     }
     let weak = Rc::downgrade(client);
@@ -805,7 +936,7 @@ fn install_policy(webview: &webkit2gtk::WebView, client: &Rc<RefCell<EditorClien
     });
     let weak = Rc::downgrade(client);
     webview.connect_load_failed(move |_, _, uri, error| {
-        crate::log_line(&format!("[gui] page load failed for {uri}: {error}"));
+        crate::gui_log_line(&format!("page load failed for {uri}: {error}"));
         if let Some(client) = weak.upgrade() {
             client
                 .borrow_mut()
