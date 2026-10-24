@@ -104,7 +104,7 @@ unsafe fn record_host_name(host: *mut c_void) {
     // SAFETY: host 指向 IHostApplication vtable；name 的签名为 `TResult(String128)`，
     // 即写入一个 128 个 UTF-16 单元的调用方缓冲（VST3 SDK 的 String128）。
     let table = unsafe { &**host.cast::<*const HostVtbl>() };
-    let mut buffer: HostNameBuffer = [0; 128];
+    let mut buffer: HostNameBuffer = [0; 256];
     if unsafe { (table.name)(host, buffer.as_mut_ptr().cast()) } != K_RESULT_OK {
         return;
     }
@@ -159,8 +159,12 @@ pub(crate) fn resolve_and_record_host_identity() -> crate::host_identity::HostId
 /// 就是这一条：这段代码只在 Windows 上被跑过。
 #[cfg(windows)]
 type HostNameBuffer = [u16; 128];
+// 【为什么留 256 字节】宿主写多少字节由**它**的 `String128` 定义决定，而不是由我们的
+// 解码方式决定：Windows 是 128 个 UTF-16 单元（256 字节），Unix 是 128 字节。缓冲比
+// 两者都大，才不会被"对方用的是另一种编码"写穿 —— 那会是一次栈溢出，在 ARA 宿主里
+// 表现为一个语焉不详的 `ARA Error`。之前这里只有 128 字节，正好踩中。
 #[cfg(not(windows))]
-type HostNameBuffer = [u8; 128];
+type HostNameBuffer = [u8; 256];
 
 /// `String128` → `String`；空串/非法编码返回 `None`。
 ///
@@ -225,15 +229,15 @@ mod host_name_tests {
     #[cfg(not(windows))]
     #[test]
     fn string128_decoding_stops_at_the_terminator() {
-        let mut buffer = [0u8; 128];
+        let mut buffer = [0u8; 256];
         for (slot, byte) in "Reaper".bytes().enumerate() {
             buffer[slot] = byte;
         }
         assert_eq!(decode_string128(&buffer).as_deref(), Some("Reaper"));
-        assert_eq!(decode_string128(&[0u8; 128]), None);
+        assert_eq!(decode_string128(&[0u8; 256]), None);
 
         // 非 ASCII 的宿主名（中文/日文宿主名并不罕见）必须原样解出来。
-        let mut wide = [0u8; 128];
+        let mut wide = [0u8; 256];
         for (slot, byte) in "宿主".as_bytes().iter().enumerate() {
             wide[slot] = *byte;
         }
