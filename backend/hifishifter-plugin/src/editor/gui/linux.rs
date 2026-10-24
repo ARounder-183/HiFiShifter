@@ -562,9 +562,6 @@ fn run_inline(command: Control) {
             if let Some(view) = views.borrow().get(&token) {
                 // 坐标是**物理像素**（iplugview.h 对 X11 的约定），与 Windows 一致。
                 view.container.set_size_request(width, height);
-                if let Some(window) = view.container.downcast_ref::<gtk::Window>() {
-                    window.resize(width, height);
-                }
                 if view.embedded_xid != 0 {
                     // 【为什么还要直接发 X 请求】被 reparent 之后窗口不再由 WM 摆放，
                     // GTK 的 resize 只更新它自己的记录；尺寸真正生效要靠 X。
@@ -879,6 +876,16 @@ fn attach_view(
     // 让它抢焦点会把手感变成"点了插件之后宿主不再响应键盘"。
     window.set_accept_focus(false);
     window.set_focus_on_map(false);
+    // 【为什么还要这三个】`accept-focus` 只管"映射时要不要焦点"。我们这块画布在
+    // GTK 眼里仍是 toplevel：用户在里面点一下，GTK 会走 `gtk_window_present` ——
+    // 向窗口管理器请求激活、把输入焦点从宿主手里拿走。Weston/XWayland 照办之后，
+    // 宿主就"点不动了"（而且它自己的重绘也停摆，拖窗口时一片黑）。
+    //
+    // `Dock` 提示 + 跳过任务栏/分页器，让窗口管理器从一开始就不把这块当应用窗口看。
+    window.set_type_hint(gdk::WindowTypeHint::Dock);
+    window.set_skip_taskbar_hint(true);
+    window.set_skip_pager_hint(true);
+    window.set_modal(false);
     window.set_default_size(width, height);
     window.add(&webview);
     let mut embedded_xid = 0u64;
