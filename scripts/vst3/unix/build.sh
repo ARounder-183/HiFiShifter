@@ -502,7 +502,24 @@ stage_bundle() {
         log "依赖 $dep（$(du -hL "$BUNDLE_DIR/$RUNTIME_LIB_SUBDIR/$dep" | cut -f1)）"
     done
 
-    mkdir -p "$BUNDLE_DIR/Contents/Resources/frontend"
+    # ── 渲染进程（hfs-gui）──────────────────────────────────────────────────────
+  #
+  # 【为什么它必须和 .so 放在一起】实测：只要在 REAPER 的进程里创建 GTK 窗口，那个
+  # 进程的绘制就整个废掉（判据：xwd 从 3.1 MB 变 0 字节，连 REAPER 自己的对话框都变黑）。
+  # 所以编辑器跑在独立进程里，插件按"与 .so 同目录"去找它。
+  if [ "$OS_KIND" = "linux" ]; then
+    log "构建渲染进程 hfs-gui"
+    ( cd "$REPO_ROOT/backend/hfs-gui" && \
+      RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-stable}" cargo build --release \
+        --offline --target-dir "$BUILD_DIR/hfs-gui-target" ) >>"$LOG_FILE" 2>&1 \
+      || die "hfs-gui 构建失败（日志 $LOG_FILE）"
+    cp -f "$BUILD_DIR/hfs-gui-target/release/hfs-gui" \
+      "$BUNDLE_DIR/$MODULE_SUBDIR/hfs-gui"
+    chmod +x "$BUNDLE_DIR/$MODULE_SUBDIR/hfs-gui"
+    log "渲染进程就绪（$(du -h "$BUNDLE_DIR/$MODULE_SUBDIR/hfs-gui" | cut -f1)）"
+  fi
+
+  mkdir -p "$BUNDLE_DIR/Contents/Resources/frontend"
     [ -f "$FRONTEND_DIST/plugin.html" ] || die "缺少前端产物：$FRONTEND_DIST/plugin.html（先跑 --stage=frontend）"
     cp -f "$FRONTEND_DIST/plugin.html" "$BUNDLE_DIR/Contents/Resources/frontend/"
     if [ -d "$FRONTEND_DIST/assets" ]; then

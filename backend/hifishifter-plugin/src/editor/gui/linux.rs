@@ -319,6 +319,293 @@ struct GuiThread {
 
 static GUI_THREAD: OnceLock<Option<GuiThread>> = OnceLock::new();
 
+/// 渲染进程（`hfs-gui`）的宿主侧代理。
+///
+/// 【为什么整块都没有 GTK】实测：**只要在 REAPER 的进程里创建一个 GTK 窗口**，那个
+/// 进程的绘制就整个废掉 —— 判据是 `xwd -id <REAPER 主窗口>` 从 3.1 MB 变成 0 字节，
+/// 连 REAPER 自己的对话框都变黑、宿主 UI 线程空转、输入全无。窗口里只放一个
+/// `gtk::Label`（完全没有 WebKit）也照样复现。
+///
+/// 所以这里一行 GTK 都不碰：策略（`EditorClient`）跑在**我们自己的线程**上，
+/// 页面在**另一个进程**里，两者用管道上的 JSON 行对话。
+mod remote {
+    use super::*;
+    use std::io::{BufRead, BufReader, Write};
+    use std::sync::mpsc::{channel, Receiver, Sender};
+
+    /// 宿主线程 → 驱动线程。
+    pub(super) enum Command {
+        Resize(i32, i32),
+        Focus,
+        Close,
+    }
+
+    /// 渲染进程的出站端口：把一条已序列化的 JSON 交给页面。
+    struct RemotePort {
+        out: Sender<String>,
+    }
+
+    impl EditorPort for RemotePort {
+        fn post_message(&self, text: &str) -> bool {
+            let expression = protocol::js_expression(text);
+            self.out
+                .send(
+                    serde_json::json!({"type":"eval","js":expression})
+                        .to_string(),
+                )
+                .is_ok()
+        }
+
+        fn show_error(&self, text: &str) {
+            crate::gui_log_line(&format!("Native editor error: {text}"));
+            let text = text.replace('\\', " ").replace('\'', " ");
+            let script = format!(
+                "document.title = 'HiFiShifter editor: {text}'; if (document.body) {{ document.body.textContent = 'HiFiShifter editor: {text}'; }}"
+            );
+            let _ = self
+                .out
+                .send(serde_json::json!({"type":"eval","js":script}).to_string());
+        }
+
+        fn close(&self) {
+            let _ = self
+                .out
+                .send(serde_json::json!({"type":"close"}).to_string());
+        }
+    }
+
+    /// 宿主持有的句柄：只有通道与身份，可跨线程。
+    pub(super) struct RemoteHost {
+        pub(super) control: Sender<Command>,
+        pub(super) fidelity: GuiFidelity,
+    }
+
+    impl EditorHost for RemoteHost {
+        fn fidelity(&self) -> GuiFidelity {
+            self.fidelity
+        }
+
+        fn resize(&self, width: i32, height: i32) -> Result<(), String> {
+            self.control
+                .send(Command::Resize(width, height))
+                .map_err(|_| "the editor process is gone".to_string())
+        }
+
+        fn focus(&self) -> Result<(), String> {
+            self.control
+                .send(Command::Focus)
+                .map_err(|_| "the editor process is gone".to_string())
+        }
+
+        fn forward_edit_key(&self, _key: char, _mods: i16, _down: bool) -> bool {
+            false
+        }
+
+        fn host_tick(&self) {}
+
+        fn close(&self) {
+            let _ = self.control.send(Command::Close);
+        }
+    }
+
+    /// 找 `hfs-gui`：环境变量优先，其次与 `HiFiShifter.so` 同目录。
+    ///
+    /// 【为什么不用 `current_exe`】插件是加载进宿主的，`current_exe` 返回的是 REAPER
+    /// 的路径。我们的 .so 路径只能从 `/proc/self/maps` 里找。
+    pub(super) fn helper_path() -> Option<std::path::PathBuf> {
+        if let Some(path) = std::env::var_os("HIFISHIFTER_GUI_HELPER") {
+            return Some(path.into());
+        }
+        let maps = std::fs::read_to_string("/proc/self/maps").ok()?;
+        for line in maps.lines() {
+            let Some(path) = line.split_whitespace().last() else {
+                continue;
+            };
+            if !path.contains("HiFiShifter.vst3") || !path.ends_with(".so") {
+                continue;
+            }
+            let dir = std::path::Path::new(path).parent()?;
+            for name in ["hfs-gui", "hfs-gui.bin"] {
+                let candidate = dir.join(name);
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+        None
+    }
+
+    pub(super) fn attach(request: AttachRequest) -> Result<Rc<dyn EditorHost>, String> {
+        let assets = crate::editor::resources::frontend_directory()?;
+        let helper = helper_path()
+            .ok_or_else(|| "the editor process (hfs-gui) is not next to the plug-in".to_string())?;
+        let (commands, incoming) = channel::<Command>();
+        let link = request.link.clone();
+        let (parent, width, height) = (request.parent, request.width, request.height);
+
+        std::thread::Builder::new()
+            .name("hfs-editor".into())
+            .spawn(move || driver(link, helper, assets, parent, width, height, incoming))
+            .map_err(|error| format!("could not start the editor thread: {error}"))?;
+        // 其余通道都归驱动线程；这里立刻返回，宿主不会等任何东西。
+
+        crate::gui_log_line("editor runs out of process (hfs-gui)");
+        Ok(Rc::new(RemoteHost {
+            control: commands,
+            fidelity: GuiFidelity::Embedded,
+        }))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn driver(
+        link: Arc<crate::editor::routing::EditorLink>,
+        helper: std::path::PathBuf,
+        assets: std::path::PathBuf,
+        parent: NativeWindow,
+        width: i32,
+        height: i32,
+        commands: Receiver<Command>,
+    ) {
+        let (events_tx, events) = channel::<serde_json::Value>();
+        let (out_tx, out_rx) = channel::<String>();
+        let client = EditorClient::open(link);
+        let boot = {
+            let state = client.borrow();
+            client::bootstrap_json(&state.link, &state.view_id)
+        };
+        let boot_path = std::env::temp_dir().join(format!("hfs-boot-{}.json", std::process::id()));
+        if let Err(error) = std::fs::write(&boot_path, boot.to_string()) {
+            crate::gui_log_line(&format!("could not write the bootstrap file: {error}"));
+            client
+                .borrow_mut()
+                .mark_dead("the editor bootstrap could not be written");
+            return;
+        }
+        let mut child = match std::process::Command::new(&helper)
+            .arg("--parent")
+            .arg(format!("0x{parent:x}"))
+            .arg("--width")
+            .arg(width.to_string())
+            .arg("--height")
+            .arg(height.to_string())
+            .arg("--root")
+            .arg(&assets)
+            .arg("--bootstrap-file")
+            .arg(&boot_path)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(error) => {
+                crate::gui_log_line(&format!("could not start {helper:?}: {error}"));
+                client
+                    .borrow_mut()
+                    .mark_dead("the editor process could not be started");
+                return;
+            }
+        };
+        let Some(stdin) = child.stdin.take() else {
+            return;
+        };
+        let Some(stdout) = child.stdout.take() else {
+            return;
+        };
+        {
+            let mut stdin = stdin;
+            std::thread::Builder::new()
+                .name("hfs-editor-in".into())
+                .spawn(move || {
+                    for line in out_rx {
+                        if writeln!(stdin, "{line}").is_err() || stdin.flush().is_err() {
+                            break;
+                        }
+                    }
+                })
+                .ok();
+        }
+        {
+            std::thread::Builder::new()
+                .name("hfs-editor-out".into())
+                .spawn(move || {
+                    for line in BufReader::new(stdout).lines() {
+                        let Ok(line) = line else { break };
+                        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+                            continue;
+                        };
+                        if events_tx.send(value).is_err() {
+                            break;
+                        }
+                    }
+                })
+                .ok();
+        }
+
+        let port: Rc<dyn EditorPort> = Rc::new(RemotePort {
+            out: out_tx.clone(),
+        });
+        client.borrow_mut().set_port(port);
+
+        let mut closed = false;
+        while !closed {
+            for value in events.try_iter() {
+                match value["type"].as_str().unwrap_or_default() {
+                    "message" => {
+                        if let Some(text) = value["text"].as_str() {
+                            if text.len() <= protocol::MAX_MESSAGE_BYTES {
+                                client::on_message(&client, text);
+                            }
+                        }
+                    }
+                    "page-ready" => client.borrow_mut().on_page_ready(),
+                    "ready" => crate::gui_log_line(&format!(
+                        "the editor process embedded its window ({})",
+                        value["xid"]
+                    )),
+                    "error" => {
+                        let text = value["text"].as_str().unwrap_or("unknown error");
+                        crate::gui_log_line(&format!("the editor process reported: {text}"));
+                        client.borrow_mut().mark_dead(text);
+                    }
+                    _ => {}
+                }
+            }
+            while let Ok(command) = commands.try_recv() {
+                match command {
+                    Command::Resize(width, height) => {
+                        let _ = out_tx.send(
+                            serde_json::json!({"type":"resize","width":width,"height":height})
+                                .to_string(),
+                        );
+                    }
+                    Command::Focus => {
+                        let _ = out_tx.send(serde_json::json!({"type":"focus"}).to_string());
+                    }
+                    Command::Close => {
+                        let _ = out_tx.send(serde_json::json!({"type":"close"}).to_string());
+                        closed = true;
+                    }
+                }
+            }
+            client::pump(&client);
+            if client.borrow().is_dead() {
+                break;
+            }
+            if let Ok(Some(_)) = child.try_wait() {
+                client
+                    .borrow_mut()
+                    .mark_dead("the editor process exited");
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_file(&boot_path);
+    }
+
+}
+
 pub(super) fn create(
     parent: NativeWindow,
     width: i32,
@@ -334,7 +621,25 @@ pub(super) fn create(
         embedded,
         link: link.clone(),
     };
-    // 宿主是否提供 §Linux::IRunLoop§（"正规解"，见方案 §10.3）。
+    // ── 首选：渲染进程 ───────────────────────────────────────────────────────
+    //
+    // 宿主进程里**一个 GTK 符号都不碰**（见 `remote` 顶部的实测说明）。
+    if !std::env::var("HIFISHIFTER_INPROCESS_GUI").is_ok_and(|v| v.trim() == "1") {
+        match remote::attach(request) {
+            Ok(host) => return Ok(host),
+            Err(error) => crate::gui_log_line(&format!(
+                "the out-of-process editor is unavailable ({error}); falling back in-process"
+            )),
+        }
+    }
+    let request = AttachRequest {
+        parent,
+        width,
+        height,
+        embedded,
+        link: link.clone(),
+    };
+    // 宿主是否提供 `Linux::IRunLoop`（"正规解"，见方案 `10.3）。
     //
     // 【为什么现在只探测、不注册】IRunLoop 让 GTK 跑在**宿主线程**上、由宿主的
     // 定时器驱动 —— 但它要求我们同时把 Gdk 的 X 连接 fd 注册给宿主（否则 GTK 收不到
