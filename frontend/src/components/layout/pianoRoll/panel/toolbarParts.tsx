@@ -5,14 +5,17 @@
  * 它们曾经和近万行的面板挤在同一个文件里，"工具栏上的一个药丸长什么样"要翻到
  * 面板文件的第 600 多行才找得到。
  *
- * 【`ToolbarSlot` 为什么不是条件渲染】层级判据要靠"量出每个层级的内容宽度"
- * （见 `toolbarGauge`）：被让位的项若直接从 DOM 消失，就再也量不到"少藏一级要多宽"，
- * 于是只能靠"先撑开、再一级级收回去"试探，用户看到的正是那个抽动。常挂载 +
- * 由层级控制 `display` 之后，测量可以在**看不见的克隆**上一次做完。
+ * 【`ToolbarSlot` 为什么不是条件渲染】层级判据要靠"在真实行上逐级试显隐"
+ * （见 `toolbarGauge`）：被让位的项若直接从 DOM 消失，判据就变成**自反馈** ——
+ * 藏得越多内容越少，越少越不用藏，于是"降级 → 内容变窄 → 升级"每帧一轮，永不收敛
+ * （用户看到的就是控件反复横跳）。常挂载 + 只改 `display` 之后，"同一层级的内容"
+ * 与"层级本身"无关，判据才是宽度的纯函数。
  */
 import React from "react";
 import { DropdownMenu } from "@radix-ui/themes";
 import { ChevronDownIcon, EyeOpenIcon, EyeClosedIcon } from "@radix-ui/react-icons";
+
+import { slotDisplay } from "../toolbarOverflow";
 
 /**
  * “气声/气流”图标：三道向右上方倾斜流动的曲线，表示风/气流（类似 Material “Air” 图标），
@@ -68,13 +71,27 @@ export const BreathAirIcon: React.FC<{ off?: boolean }> = ({ off = false }) => (
  * 的 flex 项 —— 加了一层包装也不会改变原来的间距与对齐。
  */
 export const ToolbarSlot: React.FC<{
-    /** 达到这个层级时隐藏本槽位。 */
-    hideAt: number;
-    /** 当前层级。 */
+    /** 达到这个层级时隐藏本槽位（开区间上界；缺省 = 不按"隐藏"判）。 */
+    hideAt?: number;
+    /**
+     * 从这一级起**才**显示本槽位（闭区间下界；缺省 = 一直都在）。
+     *
+     * 唯一使用者是「⋯」按钮：前 9 级没有东西可收。它必须常挂载 —— 若按层级条件渲染，
+     * 测量第 0-9 级时按钮却还在 DOM 里，量到的宽度比真实排版多一个按钮，于是"收窄到
+     * 第 10 级之后要再拉宽 28px 才恢复"（同一宽度两个答案）。
+     */
+    showAt?: number;
+    /** 当前层级。负数 = 不参与让位（「⋯」菜单里的副本用，见 `NEVER_HIDE_TIER`）。 */
     tier: number;
     children: React.ReactNode;
-}> = ({ hideAt, tier, children }) => (
-    <span data-hide-at={hideAt} style={{ display: tier >= hideAt ? "none" : "contents" }}>
+}> = ({ hideAt, showAt, tier, children }) => (
+    <span
+        data-hide-at={hideAt}
+        data-show-at={showAt}
+        /* 【判据只有一份】与测量侧 `toolbarGauge.applyTier` 共用 `slotDisplay`：
+           各写一份，任何一处改动都会让"量的"与"画的"分叉。 */
+        style={{ display: slotDisplay({ hideAt: hideAt ?? null, showAt: showAt ?? null }, tier) }}
+    >
         {children}
     </span>
 );

@@ -68,7 +68,6 @@ export type Props = {
         | "effectivePitchSnapVisual"
         | "enabledVibratoPresetList"
         | "gatedPillHideOrder"
-        | "gatedPillsHidden"
         | "getProcessorParamLabel"
         | "getProcessorParamShortLabel"
         | "getStaticOptionLabel"

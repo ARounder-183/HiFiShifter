@@ -7,6 +7,11 @@
  * 决定"曲线是否绘制"。三者曾被混成一件（把让位当成可见），导致画布上凭空多出
  * 一条用户从未打开过的副参数曲线——文件里那段说明就是在钉住这条界线。
  *
+ * 【让位为什么只剩"顺序"在这里】"让几个"曾经由本 hook 用 `clamp(toolbarTier - 2)`
+ * 算出来，视图据此 `return null`。但层级正是按**内容宽度**量出来的 —— 内容随层级
+ * 增减就是自反馈（2⇄3 级之间每帧翻转）。现在本 hook 只提供顺序，层级到槽位
+ * `hideAt` 的换算在视图里做（`gatedPillHideAt`），内容与层级彻底解耦。
+ *
  * 【所有权不变】所有状态仍属于面板（`editParam` / `secondaryParamVisible` /
  * `hoveredReferenceRootTrackId` 的声明位置、两个 `useEffect` 的注册顺序全部留在
  * 原相对位置），这里只是把语句搬进了子 hook，因此 hook 顺序与依赖数组与拆分前
@@ -49,8 +54,6 @@ type PianoRollParamGatesInputs = {
     processorParams: ProcessorParamDescriptor[];
     /** 分离（张力 / 气声）门禁是否开启。 */
     separationEnabled: boolean;
-    /** 工具栏当前溢出分级（决定几个药丸让位）。 */
-    toolbarTier: number;
     /** 用户"眼睛"开关。 */
     secondaryParamVisible: Partial<Record<string, boolean>>;
     setSecondaryParamVisible: Dispatch<SetStateAction<Partial<Record<string, boolean>>>>;
@@ -76,16 +79,19 @@ export function usePianoRollParamGates({
     orderedProcessorParams,
     processorParams,
     separationEnabled,
-    toolbarTier,
     secondaryParamVisible,
     setSecondaryParamVisible,
     hoveredReferenceRootTrackId,
     setHoveredReferenceRootTrackId,
     t,
 }: PianoRollParamGatesInputs) {
-    // 被门禁的药丸逐个让位（第 3 / 4 级各让一个），顺序**先张力后气声**：
+    // 被门禁的药丸逐个让位的**顺序**（第 3 / 4 级各让一个），先张力后气声：
     // 气声药丸左侧挂着分离开关，先让气声会让开关独自悬空。
-    // 组首的药丸让位时开关保留（见下方组首分支）。
+    //
+    // 【这里只给顺序，不给"让几个"】"让几个"必须由视图按**当前层级**直接换算成
+    // 槽位的 `hideAt`（见 `ParamButtons`）。曾经在这里算 `clamp(toolbarTier - 2)`
+    // 并让视图 `return null`：层级是按内容宽度量出来的，而内容又随层级增减 ——
+    // 自反馈，在 2⇄3 级之间每帧翻转一次，用户看到控件反复横跳。
     //
     // 【让位就是让位：曲线跟着眼睛走，不再被强行点亮】这里曾额外在"渲染口径"上把
     // 被让位的参数一律视为可见（`effectiveSecondaryParamVisible`），理由是"关闭分离时
@@ -99,10 +105,6 @@ export function usePianoRollParamGates({
         () => gatedParamHideOrder(orderedProcessorParams.map((p) => p.id)),
         [orderedProcessorParams],
     );
-    const gatedPillsHidden = separationEnabled
-        ? 0
-        : Math.max(0, Math.min(toolbarTier - 2, gatedPillHideOrder.length));
-
     // 所属轨道组的 Compose 开关。它与分离开关是**两道独立门禁**，但都决定
     // 轨道级"合成"参数（共振峰/气声/张力）是否生效 —— Compose 关闭时必须
     // 完全静默（需求：听到未经任何改动的原音频）。
@@ -242,7 +244,6 @@ export function usePianoRollParamGates({
     );
     return {
         gatedPillHideOrder,
-        gatedPillsHidden,
         composeEnabled,
         groupTrackIds,
         referenceRootTrackOptions,

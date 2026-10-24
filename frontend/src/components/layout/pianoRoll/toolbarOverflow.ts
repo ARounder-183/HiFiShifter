@@ -17,6 +17,23 @@
  *
  * # 层级约定
  * `0` = 全部显示；数值越大隐藏越多，具体对应见 `panel/ParamToolbar.tsx` 里的 `ToolbarSlot` 使用点。
+ *
+ * # 铁律：层级只能决定"显不显示"，**不能**决定"有什么"
+ *
+ * 判据是"给定宽度 ⇒ 挑一级"，因此它要求**内容本身与层级无关**：同一份参数、同一套
+ * 开关下，第 0 级与第 11 级的 DOM 必须一模一样，只是部分槽位 `display: none`。
+ *
+ * 一旦某个控件"到了某一级就不渲染了"（`return null` / 条件渲染），判据立刻变成自反馈：
+ *
+ *     第 2 级量出"放不下" → 升到第 3 级 → 第 3 级少一个药丸 → 再量，第 2 级"放得下"了
+ *     → 降回第 2 级 → 药丸回来 → 又"放不下" → 升到第 3 级 → …
+ *
+ * 这就是"控件反复横跳、一直在闪"：每帧一轮，永不收敛。因此：
+ *
+ * 1. 一切随层级变化的东西**必须**写成 `<ToolbarSlot hideAt / showAt>`（常挂载、只改
+ *    `display`），由 `toolbarGauge` 在同一趟测量里逐级试；
+ * 2. 渲染时读 `tier` 去决定"渲染不渲染"是**禁止**的；
+ * 3. 唯一允许读 `tier` 的地方是「⋯」菜单**内部**的排布 —— 它不占工具栏宽度。
  */
 
 /** 第 10 级：静态枚举参数与算法下拉收进「⋯」菜单。 */
@@ -36,6 +53,10 @@ export const TIER_ALL_PILLS = 11;
  * 两个被门禁的药丸**逐个**让位，且**先张力后气声**：气声药丸左侧挂着分离开关，
  * 先让气声会让开关独自悬空。
  *
+ * 「⋯」按钮本身从第 10 级起出现（`showAt = TIER_STATIC_PARAMS`）—— 它是**唯一**
+ * 反向的槽位：前 9 级没有东西可收，多一个按钮只是白占宽度。它必须常挂载并由槽位
+ * 控制显隐，否则测量到的就是"另一个页面"（见模块头的铁律）。
+ *
  * # 为什么第 10/11 级是「收进菜单」而不是「隐藏」
  *
  * 1-9 级砍的都是**冗余**（重复的标题文字、可以缩小的滑块）。再往下剩下的每一项都是
@@ -49,3 +70,61 @@ export const TIER_ALL_PILLS = 11;
  * 加了也只是同一件事的第二个名字，因此不设。
  */
 export const TOOLBAR_MAX_TIER = TIER_ALL_PILLS;
+
+/** 被门禁的药丸里**第一个**让位的层级；第 `index` 个（0 起）在 `3 + index` 级隐藏。 */
+export const TIER_FIRST_GATED_PILL = 3;
+
+/**
+ * 第 `index` 个被门禁药丸的让位层级（0 起）。
+ *
+ * 顺序由 `gatedParamHideOrder` 定义（先张力后气声），第 0 个在第 3 级、第 1 个在
+ * 第 4 级 —— 与 `TOOLBAR_MAX_TIER` 的层级说明一致。写成函数而不是在视图里
+ * `3 + index`，是为了让"层级表"只有这一处定义。
+ */
+export function gatedPillHideAt(index: number): number {
+    return TIER_FIRST_GATED_PILL + index;
+}
+
+/**
+ * 「不参与让位」的层级：所有槽位都显示。
+ *
+ * 两个用途：
+ * 1. 「⋯」菜单里的**同一批控件**的副本 —— 它们已经被搬进菜单，菜单里再让位一次
+ *    就等于"唯一入口彻底消失"（而且菜单本来就不受行宽限制）；
+ * 2. 单元测试：按 `NEVER_HIDE_TIER` 渲染一份"全量 DOM"，与各级对比结构。
+ */
+export const NEVER_HIDE_TIER = -1;
+
+/**
+ * 一个槽位的显隐区间。
+ *
+ * - `hideAt`：达到这一级**隐藏**（区间上界，开区间）；
+ * - `showAt`：从这一级起**才显示**（区间下界，闭区间）；
+ * - 两者都缺省 = 永远显示（等价于"这层包装不参与让位"）。
+ *
+ * 为什么用"区间"而不是两个方向各写一条规则：测量（`applyTier`）与渲染
+ * （`ToolbarSlot`）必须**共用同一个判据**，否则量到的就不是用户看到的那一页。
+ */
+export type SlotRange = {
+    readonly hideAt: number | null;
+    readonly showAt: number | null;
+};
+
+/** 该槽位在 `tier` 级是否显示（见 `SlotRange`）。 */
+export function slotVisible(range: SlotRange, tier: number): boolean {
+    // 负数 = 不参与让位（菜单副本 / 测试）。放在最前面，任何区间都不得隐藏它。
+    if (tier < 0) return true;
+    if (range.showAt !== null && tier < range.showAt) return false;
+    if (range.hideAt !== null && tier >= range.hideAt) return false;
+    return true;
+}
+
+/**
+ * 该槽位在 `tier` 级的 `display` 值（渲染与测量共用，见 `ToolbarSlot`）。
+ *
+ * `contents` 让包装元素自己不参与 flex 布局、子元素直接成为祖父的 flex 项 ——
+ * 加了一层包装也不改变原来的间距与对齐；`none` 则连子元素一起移出布局。
+ */
+export function slotDisplay(range: SlotRange, tier: number): "none" | "contents" {
+    return slotVisible(range, tier) ? "contents" : "none";
+}

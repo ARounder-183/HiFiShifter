@@ -944,10 +944,14 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     // 同属 `h-qt-bar-main` 这一个容器），因此只观察这一个容器：任一处放不下即升级。
     // 完整层级见 `toolbarOverflow.ts` 的 `TOOLBAR_MAX_TIER`：
     //   1 标题 · 2 算法文本 · 3 张力药丸 · 4 气声药丸（开关保留）· 5 平滑度文本 ·
-    //   6 平滑度数值 · 7 平滑度滑块 · 8 导入 MIDI · 9 参考轨道组文本
+    //   6 平滑度数值 · 7 平滑度滑块 · 8 导入 MIDI · 9 参考轨道组文本 ·
+    //   10 静态参数 + 算法下拉 → 「⋯」· 11 参数药丸整排 → 「⋯」
     // 原则是**只砍冗余、不砍入口**：被隐藏项要么是纯装饰文字（旁边控件已表达同一信息），
     // 要么功能另有入口；唯一入口（如参考轨道组、分离开关）只瘦身、不隐藏。
     // 平滑度滑块是**控件**、数值只是读数，故数值（6）先于滑块（7）让位。
+    //
+    // 【层级只能改 `display`】任何"到了某一级就不渲染"的写法都会让判据自反馈并振荡 ——
+    // 铁律见 `toolbarOverflow` 模块头。视图侧只允许用 `<ToolbarSlot hideAt/showAt>`。
     const toolbarRowRef = useRef<HTMLDivElement | null>(null);
     const toolbarTier = useToolbarOverflowTier(toolbarRowRef, TOOLBAR_MAX_TIER);
 
@@ -956,7 +960,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     // 两个 effect 的相对顺序是行为的一部分。
     const {
         gatedPillHideOrder,
-        gatedPillsHidden,
         composeEnabled,
         groupTrackIds,
         referenceRootTrackOptions,
@@ -975,7 +978,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         orderedProcessorParams,
         processorParams,
         separationEnabled,
-        toolbarTier,
         secondaryParamVisible,
         setSecondaryParamVisible,
         hoveredReferenceRootTrackId,
@@ -2394,7 +2396,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         effectivePitchSnapVisual,
         enabledVibratoPresetList,
         gatedPillHideOrder,
-        gatedPillsHidden,
         getProcessorParamLabel,
         getProcessorParamShortLabel,
         getStaticOptionLabel,

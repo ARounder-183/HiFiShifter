@@ -13,14 +13,19 @@
  * 排好）。它夹在参考轨道组、子轨道音高组和算法下拉之间时，工具栏的可读性是断的；
  * 拆出来后"参数按钮怎么来"只剩这一个地方。
  *
- * 【门禁的两级让位】第 3/4 级工具栏宽度不够时，被门禁的药丸按
- * `gatedPillHideOrder` 逐个隐藏（`gatedPillsHidden` 是隐藏个数），但**组首**
- * 的药丸始终保留——它旁边的分离开关是重新打开气声/张力的唯一入口。
+ * 【门禁的两级让位】第 3/4 级工具栏宽度不够时，被门禁的药丸按 `gatedPillHideOrder`
+ * 逐个移入槽位（第 0 个在第 3 级、第 1 个在第 4 级），组首的药丸**也让位**，但它
+ * 左侧的分离开关保留 —— 它是重新打开气声/张力的唯一入口。
+ *
+ * 让位一律走 `ToolbarSlot`（只改 `display`），**绝不 `return null`**：层级是按内容
+ * 宽度量出来的，内容若随层级变化就成了自反馈 —— 藏一个 → 变窄 → 不用藏 → 又显示，
+ * 每帧一轮，用户看到的就是控件反复横跳（见 `toolbarOverflow` 模块头的铁律）。
  */
 import React from "react";
 import { isEffectParamGated, SEPARATION_PARAM_ID } from "../../../../features/pitch/separationGate";
 import { setEditParam } from "../../../../features/session/sessionSlice";
-import { BreathAirIcon, ParamGroupButton, ParamToolbarPill } from "./toolbarParts";
+import { BreathAirIcon, ParamGroupButton, ParamToolbarPill, ToolbarSlot } from "./toolbarParts";
+import { gatedPillHideAt } from "../toolbarOverflow";
 import type { PianoRollPanelModel } from "./usePianoRollPanelModel";
 
 /** 本文件用到的模型字段（AST 扫描得出）；`Pick<>` 保证它不会悄悄变宽。 */
@@ -32,7 +37,6 @@ type Props = {
         | "dispatch"
         | "editParam"
         | "gatedPillHideOrder"
-        | "gatedPillsHidden"
         | "getProcessorParamLabel"
         | "getProcessorParamShortLabel"
         | "handleStaticParamChange"
@@ -44,6 +48,7 @@ type Props = {
         | "separationSwitchAnchorParamId"
         | "t"
         | "toggleSecondaryParam"
+        | "toolbarTier"
     >;
 };
 
@@ -54,7 +59,6 @@ export function ParamButtons({ m }: Props) {
         dispatch,
         editParam,
         gatedPillHideOrder,
-        gatedPillsHidden,
         getProcessorParamLabel,
         getProcessorParamShortLabel,
         handleStaticParamChange,
@@ -65,6 +69,7 @@ export function ParamButtons({ m }: Props) {
         separationEnabled,
         separationSwitchAnchorParamId,
         t,
+        toolbarTier,
         toggleSecondaryParam,
     } = m;
 
@@ -72,13 +77,27 @@ export function ParamButtons({ m }: Props) {
         <>
             {/* 由后端 processorParams 驱动的动态参数按钮（按算法排列后的顺序） */}
             {orderedProcessorParams.map((p) => {
-                // 第 3 / 4 级：被门禁的药丸逐个让位（见 `gatedPillsHidden`）。
-                // 组首除外 —— 它旁边挂着分离开关，那是唯一入口。
+                // 第 3 / 4 级：被门禁的药丸逐个让位（顺序见 `gatedParamHideOrder`）。
+                // 层级由 `gatedPillHideAt` 换算，槽位常挂载、只改 `display` —— 见文件头
+                // 关于"绝不 return null"的说明。
+                //
+                // 【分离开启时不参与让位】此时这两个药丸是**活的功能入口**，而第 4–10 级
+                // 之间没有别的入口（「⋯」要到第 10 级才出现）—— 让位等于让参数暂时消失。
+                // 这个判据只看"分离开关"，与层级无关，因此不会重新引入自反馈。
                 const gatedHideIndex = gatedPillHideOrder.indexOf(p.id);
-                const hideGatedPill = gatedHideIndex >= 0 && gatedHideIndex < gatedPillsHidden;
-                if (hideGatedPill && p.id !== separationSwitchAnchorParamId) {
-                    return null;
-                }
+                const gatedHideAt =
+                    gatedHideIndex < 0 || separationEnabled
+                        ? null
+                        : gatedPillHideAt(gatedHideIndex);
+                /** 把受门禁的可让位元素包进槽位；不受门禁时原样返回（Fragment 只为保住 key）。 */
+                const withGatedSlot = (node: React.ReactNode) =>
+                    gatedHideAt === null ? (
+                        <React.Fragment key={p.id}>{node}</React.Fragment>
+                    ) : (
+                        <ToolbarSlot key={p.id} hideAt={gatedHideAt} tier={toolbarTier}>
+                            {node}
+                        </ToolbarSlot>
+                    );
                 if (p.id === "formant_shift_cents") {
                     return (
                         <ParamGroupButton
@@ -228,7 +247,7 @@ export function ParamButtons({ m }: Props) {
                 // 【为什么开关自身永不置灰】它是开启「气声 / 张力」的
                 // 唯一入口；若随这两个参数一起置灰就会死锁（关了再开不回来）。
                 // 置灰只作用于那两个参数药丸的标签段。
-                if (p.id !== separationSwitchAnchorParamId) return paramPill;
+                if (p.id !== separationSwitchAnchorParamId) return withGatedSlot(paramPill);
                 return (
                     <React.Fragment key={p.id}>
                         <span className="param-pill">
@@ -255,7 +274,13 @@ export function ParamButtons({ m }: Props) {
                         </span>
                         {/* 第 4 级：组首的药丸也让位，但**开关保留** ——
                                     它是重新开启气声 / 张力的唯一入口。 */}
-                        {hideGatedPill ? null : paramPill}
+                        {gatedHideAt === null ? (
+                            paramPill
+                        ) : (
+                            <ToolbarSlot hideAt={gatedHideAt} tier={toolbarTier}>
+                                {paramPill}
+                            </ToolbarSlot>
+                        )}
                     </React.Fragment>
                 );
             })}

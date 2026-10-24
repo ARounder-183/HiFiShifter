@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 
-import { TOOLBAR_MAX_TIER } from "./toolbarOverflow";
+import {
+    NEVER_HIDE_TIER,
+    TIER_ALL_PILLS,
+    TIER_FIRST_GATED_PILL,
+    TIER_STATIC_PARAMS,
+    TOOLBAR_MAX_TIER,
+    gatedPillHideAt,
+    slotDisplay,
+    slotVisible,
+} from "./toolbarOverflow";
 import { chooseTier } from "./toolbarGauge";
 
 /**
@@ -58,5 +67,57 @@ describe("chooseTier", () => {
             expect(tier).toBeLessThanOrEqual(previous);
             previous = tier;
         }
+    });
+});
+
+describe("slotVisible / slotDisplay", () => {
+    const hideAt3 = { hideAt: 3, showAt: null };
+    const showAt10 = { hideAt: null, showAt: 10 };
+    const always = { hideAt: null, showAt: null };
+
+    it("hideAt 是开区间上界：达到即隐藏", () => {
+        expect(slotVisible(hideAt3, 2)).toBe(true);
+        expect(slotVisible(hideAt3, 3)).toBe(false);
+        expect(slotDisplay(hideAt3, 2)).toBe("contents");
+        expect(slotDisplay(hideAt3, 3)).toBe("none");
+    });
+
+    it("showAt 是闭区间下界：达到才显示", () => {
+        expect(slotVisible(showAt10, 9)).toBe(false);
+        expect(slotVisible(showAt10, TIER_STATIC_PARAMS)).toBe(true);
+        expect(slotDisplay(showAt10, 9)).toBe("none");
+        expect(slotDisplay(showAt10, TIER_STATIC_PARAMS)).toBe("contents");
+    });
+
+    it("两个都不写 = 永远显示", () => {
+        expect(slotVisible(always, 0)).toBe(true);
+        expect(slotVisible(always, TOOLBAR_MAX_TIER)).toBe(true);
+    });
+
+    it("NEVER_HIDE_TIER（菜单副本）下任何区间都不隐藏", () => {
+        expect(slotVisible(hideAt3, NEVER_HIDE_TIER)).toBe(true);
+        expect(slotVisible(showAt10, NEVER_HIDE_TIER)).toBe(true);
+        expect(slotVisible({ hideAt: 0, showAt: 0 }, NEVER_HIDE_TIER)).toBe(true);
+    });
+
+    it("层级单调：区间内一旦显示，更低的隐藏级不会把它变回来", () => {
+        for (let tier = 0; tier < TOOLBAR_MAX_TIER; tier += 1) {
+            if (!slotVisible(hideAt3, tier)) {
+                expect(slotVisible(hideAt3, tier + 1)).toBe(false);
+            }
+        }
+    });
+});
+
+describe("门禁药丸的让位层级", () => {
+    it("第 0 个在第 3 级、第 1 个在第 4 级（先张力后气声）", () => {
+        expect(TIER_FIRST_GATED_PILL).toBe(3);
+        expect(gatedPillHideAt(0)).toBe(3);
+        expect(gatedPillHideAt(1)).toBe(4);
+    });
+
+    it("都落在「静态参数收进菜单」之前（否则药丸会先于静态参数消失）", () => {
+        expect(gatedPillHideAt(0)).toBeLessThan(TIER_STATIC_PARAMS);
+        expect(gatedPillHideAt(1)).toBeLessThan(TIER_ALL_PILLS);
     });
 });

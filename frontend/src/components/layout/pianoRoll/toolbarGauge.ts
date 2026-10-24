@@ -19,32 +19,61 @@
  * 现在直接量真实行：**所有层级在同一个同步任务里试完**。浏览器只在任务结束时绘制，
  * 因此中间态一次都不会出现在屏幕上 —— 这正是原设计想要的性质，而且不需要克隆。
  *
+ * # 三条必须守住的约束
+ *
+ * 1. **判据只能有一份**：显隐规则来自 `toolbarOverflow.slotDisplay`，与渲染侧的
+ *    `ToolbarSlot` 是同一个函数。各写一份迟早会分叉，而分叉的表现是"量到的不是用户
+ *    看到的那一页"。
+ * 2. **预算必须固定**：可用宽度在测量开始时取一次，全程用同一个数。若在测量途中
+ *    重新读 `row.clientWidth`，一张表就横跨了多个宽度，对不上任何一帧。
+ * 3. **内容不得依赖层级**：见 `toolbarOverflow` 模块头的铁律。测量只负责"试显隐"，
+ *    一旦某一级会改变内容（例如把控件从 DOM 摘掉），判据就变成自反馈并开始振荡。
+ *
  * # 判据：溢出，而不是"内容宽度"
  *
  * 把可用宽度摆好之后问：**它溢出吗？** 两处都要看：
  *
- * 1. 行本身 `scrollWidth > clientWidth` —— 右簇（`min-width: auto`）放不下；
+ * 1. 行本身 `scrollWidth > 可用宽度` —— 右簇（`min-width: auto`）放不下；
  * 2. **任一直接子项** `scrollWidth > clientWidth` —— 左簇（`min-width: 0`）被压到
  *    内容宽度以下。这一条是上一版完全看不见的那一半，也正是"控件互相重叠"的直接成因。
  *
  * 两者合起来 = "用户会看到重叠或裁切"，这才是"放不下"的定义。
  */
 
-import { TOOLBAR_MAX_TIER } from "./toolbarOverflow";
+import { TOOLBAR_MAX_TIER, slotDisplay, type SlotRange } from "./toolbarOverflow";
 
-/** 克隆与真实 DOM 共用的显隐钩子。 */
-export const HIDE_ATTR = "data-hide-at";
+/** 槽位"从第几级起隐藏"的属性（渲染与测量共用）。 */
+export const HIDE_AT_ATTR = "data-hide-at";
+
+/** 槽位"从第几级起才显示"的属性（「⋯」按钮用）。 */
+export const SHOW_AT_ATTR = "data-show-at";
+
+const SLOT_SELECTOR = `[${HIDE_AT_ATTR}], [${SHOW_AT_ATTR}]`;
+
+/** 读一个 `data-*` 数值属性：缺失或非数值都当成"没写"。 */
+function numberOrNull(raw: string | undefined): number | null {
+    if (raw === undefined) return null;
+    const value = Number(raw);
+    return Number.isFinite(value) ? value : null;
+}
+
+/** 从 DOM 读出一个槽位的显隐区间（与 `ToolbarSlot` 写下的属性一一对应）。 */
+export function readSlotRange(element: HTMLElement): SlotRange {
+    return {
+        hideAt: numberOrNull(element.dataset.hideAt),
+        showAt: numberOrNull(element.dataset.showAt),
+    };
+}
 
 /**
- * 把某个层级应用到一组槽位：达到 `hideAt` 的项隐藏，其余恢复成"不占盒子的包装"。
+ * 把某个层级应用到一组槽位。
  *
- * `display: contents` 让包装元素自己不参与 flex 布局，子元素直接成为祖父的 flex 项 ——
- * 与 `ToolbarSlot` 的呈现方式一致。
+ * 这是**测量侧**的渲染：与 `ToolbarSlot` 走同一个 `slotDisplay`，因此"试"与"呈现"
+ * 不会分叉。副作用只碰 `style.display`，不碰内容。
  */
 function applyTier(slots: readonly HTMLElement[], tier: number): void {
     for (const element of slots) {
-        const hideAt = Number(element.dataset.hideAt);
-        element.style.display = Number.isFinite(hideAt) && tier >= hideAt ? "none" : "contents";
+        element.style.display = slotDisplay(readSlotRange(element), tier);
     }
 }
 
@@ -53,38 +82,62 @@ function isSqueezed(element: HTMLElement): boolean {
     return element.scrollWidth > element.clientWidth + 1;
 }
 
-/** 这一级在当前可用宽度下放不放得下（见模块头的两条判据）。 */
-function fits(row: HTMLElement): boolean {
-    if (isSqueezed(row)) return false;
+/** 这一级在给定可用宽度下放不放得下（见模块头的两条判据）。 */
+function fits(row: HTMLElement, available: number): boolean {
+    if (row.scrollWidth > available + 1) return false;
     return !Array.from(row.children).some(
         (child) => child instanceof HTMLElement && isSqueezed(child),
     );
 }
 
 /**
- * 量出 `tier = 0..maxTier` 各自放不放得下，并把行**留在选中的那一级**上。
+ * 量出 `tier = 0..maxTier` 各自放不放得下，并把行**留在要呈现的那一级**上。
  *
- * 返回的表单调不降（藏得越多越容易放下）。量不出来时返回空数组（调用方保持现状）。
+ * 返回的表单调不降（藏得越多越容易放下），且在第一个"放得下"的层级处**截断** ——
+ * `chooseTier` 取的就是第一个 true，后面的答案不影响结论，再试只是白跑布局
+ * （常见情况：第 0 级就放得下，于是 1 次布局而不是 12 次）。
  *
  * 【为什么它自己写回最终层级】测量期间行被逐级改过 `display`。函数返回时若停在
  * "最后试过的那一级"，在 React 提交新状态之前的那一帧就会显示错层级。这里直接写回
  * 选中的那一级，于是**从测量到呈现没有中间态**，与是否走 React 无关。
  *
+ * 【为什么失败要回到 `currentTier`】半张表的答案（例如只试到第 2 级）不是任何一帧
+ * 的真实排版；若把它写回 DOM，React 会认为 `style` 与上次渲染一致而**永不修正**，
+ * 工具栏就永久停在一个错层级上。
+ *
  * @param row 工具栏行容器（真实 DOM）
  * @param maxTier 最大隐藏层级
+ * @param currentTier 进入测量时行所在的层级（失败时的回退目标）
  */
-export function measureTierFits(row: HTMLElement, maxTier = TOOLBAR_MAX_TIER): boolean[] {
+export function measureTierFits(
+    row: HTMLElement,
+    maxTier = TOOLBAR_MAX_TIER,
+    currentTier = 0,
+): boolean[] {
     if (typeof document === "undefined") return [];
-    const slots = Array.from(row.querySelectorAll<HTMLElement>(`[${HIDE_ATTR}]`));
+    const slots = Array.from(row.querySelectorAll<HTMLElement>(SLOT_SELECTOR));
     if (slots.length === 0) return [];
+
+    // 预算取一次，全程不变（见模块头第 2 条）。0 = 面板当前不可见，量不到真实宽度。
+    const available = row.clientWidth;
+    if (available <= 0) return [];
+
     const fitsByTier: boolean[] = [];
+    /** 结束时应当留在 DOM 上的层级；`null` = 测量未完成，回退到 `currentTier`。 */
+    let landing: number | null = null;
     try {
         for (let tier = 0; tier <= maxTier; tier += 1) {
             applyTier(slots, tier);
-            fitsByTier.push(fits(row));
+            // 行宽在测量途中变了（行被内容撑开 / 祖先出现滚动条）：这张表横跨了多个
+            // 宽度，对不上任何一帧。作废，让调用方下一帧重来。
+            if (row.clientWidth !== available) return [];
+            const ok = fits(row, available);
+            fitsByTier.push(ok);
+            if (ok) break;
         }
+        landing = chooseTier(fitsByTier);
     } finally {
-        applyTier(slots, chooseTier(fitsByTier));
+        applyTier(slots, landing ?? currentTier);
     }
     return fitsByTier;
 }
@@ -105,19 +158,25 @@ export function chooseTier(fitsByTier: readonly boolean[]): number {
  * 内容"布局签名"：只包含会影响宽度的部分。
  *
  * 【为什么要它】MutationObserver 会为平滑度百分比的每次文本变化回调（拖滑块时每帧一次）。
- * 若每次都跑一遍克隆测量，就等于把强制布局塞进拖拽热路径。签名不变 ⇒ 直接返回。
+ * 若每次都跑一遍测量，就等于把强制布局塞进拖拽热路径。签名不变 ⇒ 直接返回。
  *
  * 取舍：对带 `data-toolbar-volatile` 的槽位只记长度（"100% → 99%"不触发，但
  * "9% → 10%" 会）；其余槽位记全文（"PIT → FRM" 必须触发），并附上节点数量
  * （药丸多出一个 chevron 段时文本不变、结构变了）。
+ *
+ * 另外两条**必须**在签名里，否则"该重测时不重测"：
+ * - 槽位的显隐区间（`hideAt/showAt`）：第 10 级才出现的「⋯」按钮由 `showAt` 表达，
+ *   区间变了就是另一套判据；
+ * - 行的直接子节点数：行一级的条件子节点（对话框）挂载会改变可用宽度，但不改任何
+ *   槽位的文本。
  */
 export function layoutSignature(row: HTMLElement): string {
-    return Array.from(row.querySelectorAll<HTMLElement>(`[${HIDE_ATTR}]`))
-        .map((element) => {
-            const text = element.textContent ?? "";
-            const volatile = element.querySelector("[data-toolbar-volatile]") !== null;
-            const structural = element.querySelectorAll("*").length;
-            return `${element.dataset.hideAt}|${volatile ? text.length : text}|${structural}`;
-        })
-        .join("~");
+    const slots = Array.from(row.querySelectorAll<HTMLElement>(SLOT_SELECTOR)).map((element) => {
+        const text = element.textContent ?? "";
+        const volatile = element.querySelector("[data-toolbar-volatile]") !== null;
+        const structural = element.querySelectorAll("*").length;
+        const range = `${element.dataset.hideAt ?? ""}/${element.dataset.showAt ?? ""}`;
+        return `${range}|${volatile ? text.length : text}|${structural}`;
+    });
+    return Array.from(row.children).length + ":" + slots.join("~");
 }
