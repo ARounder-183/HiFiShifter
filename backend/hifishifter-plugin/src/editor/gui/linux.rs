@@ -668,6 +668,13 @@ fn close_view(token: usize) {
     };
     view.client.borrow_mut().close();
     view.port.close();
+    // 【为什么要显式 destroy】只 drop Rust 包装只是减一次引用；只要 GTK 侧还有一份，
+    // 这个 override-redirect 窗口就会留在合成器里 —— 一块盖在宿主上的黑矩形，
+    // 而且会吃掉点击。必须确定地销毁。
+    if let Some(window) = view.container.downcast_ref::<gtk::Window>() {
+        // SAFETY: 这个窗口只由我们持有，销毁发生在摘掉注册表之后。
+        unsafe { window.destroy() };
+    }
     view.webview.stop_loading();
     // SAFETY: 容器由本视图独占；GTK 的 destroy 只要求在同一线程上调用。
     unsafe { view.container.destroy() };
@@ -902,7 +909,13 @@ fn attach_view(
                 embedded_xid = x11::gdk_x11_window_get_xid(raw.cast());
             }
         }
-        window.show_all();
+        // 【为什么必须在 `show_all` **之前** reparent】先 `show_all` 再搬，窗口会以
+        // "override-redirect 的独立窗口"身份在合成器里存在一小会儿。Weston 记下它，
+        // 之后它被搬进宿主，WM 的场景就永久错位 —— 现象正是用户报的：宿主自己的窗口
+        // 大块变黑、拖一下满屏黑块、点哪里都没反应。
+        //
+        // 未映射的窗口照样可以 `XReparentWindow`；搬完再 map，窗口管理器从头到尾
+        // 都没见过它。
         if embedded_xid != 0 {
             // SAFETY: 两个 XID 都来自同一个 display 连接，且宿主窗口在 attached 期间有效。
             unsafe {
@@ -912,12 +925,13 @@ fn attach_view(
                 x11::XSync(dpy, 0);
             }
             crate::gui_log_line(&format!(
-                "reparented editor window 0x{embedded_xid:x} into host 0x{:x}",
+                "reparented editor window 0x{embedded_xid:x} into host 0x{:x} (before mapping)",
                 request.parent
             ));
         } else {
             crate::gui_log_line("could not resolve our X window id; the editor may stay hidden");
         }
+        window.show_all();
     } else {
         let reason = if !request.embedded {
             "the host did not hand us an embeddable X11 window"
