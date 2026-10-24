@@ -44,7 +44,8 @@ usage() {
     cat <<'USAGE'
 用法：scripts/vst3/unix/build.sh [选项]
 
-  --stage=all|sdk|build|bundle|verify|package   只跑到某个阶段（默认 all）
+  --stage=all|sdk|frontend|build|bundle|verify|package
+                                                只跑到某个阶段（默认 all）
   --profile=release|dist|dev                    cargo profile（默认 release）
   --out=DIR                                     产物目录（默认 .build-tmp/vst3-unix）
   --skip-frontend                               跳过前端构建（本地只改 Rust 时用；要求 dist 已存在）
@@ -132,6 +133,17 @@ sha256_of() {
     fi
 }
 
+# 文件内容的 sha256。用 python3 而不是 `sha256sum`/`shasum`：前者只有 Linux 有、
+# 后者只有 macOS 自带，而 `python3` 是 build.sh 已经在用的唯一跨平台解析器
+# （见下面的 `pin()`）。
+hash_file() {
+    python3 - "$1" <<'PY'
+import hashlib, sys
+with open(sys.argv[1], 'rb') as handle:
+    print(hashlib.sha256(handle.read()).hexdigest())
+PY
+}
+
 # 读 plugin-sdks.json 的某个字段（python3 是唯一跨平台且一定在 CI 镜像里的解析器）。
 pin() {
     python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]][sys.argv[3]])' "$SDK_PINS" "$1" "$2"
@@ -209,12 +221,45 @@ stage_frontend() {
     fi
     step "构建前端（vite，含 plugin.html 入口）"
     command -v npm >/dev/null 2>&1 || die "缺少 npm"
-    if [ ! -d "$REPO_ROOT/frontend/node_modules" ]; then
-        log "安装前端依赖（npm ci）"
-        ( cd "$REPO_ROOT/frontend" && npm ci --no-audit --no-fund ) \
-            || die "npm ci 失败"
+    # 【为什么要显式判 Node 版本】vite 8 用 rolldown 打包，而 rolldown 的原生绑定声明了
+    # engines: ^20.19.0 || >=22.12.0。不满足时它不会"构建失败"，而是**两段完全误导的报错**：
+    #
+    #   * Node 18 → "node:util does not provide an export named 'styleText'"（像前端代码问题）
+    #   * Node 22.11 → npm 把可选依赖静默跳过，于是 "Cannot find module
+    #     '@rolldown/binding-linux-x64-gnu'"（像依赖没装）
+    #
+    # 判在入口，报错才指向原因。区间照抄 lock 里的 engines，不自己发明。
+    local node_ok
+    node_ok="$(node -p 'const [a, b] = process.versions.node.split(".").map(Number);
+        (a === 20 && b >= 19) || a > 22 || (a === 22 && b >= 12) ? "yes" : "no"' 2>/dev/null || echo no)"
+    if [ "$node_ok" != "yes" ]; then
+        die "前端构建需要 Node ^20.19.0 或 >=22.12.0（当前 $(node -v 2>/dev/null || echo none)）：vite 8 / rolldown 的 engines 就是这两个区间"
     fi
-    ( cd "$REPO_ROOT/frontend" && npm run build ) || die "前端构建失败"
+    # 【为什么用 `package-lock.json` 的哈希当判据，而不是"`node_modules` 存在吗"】
+    # "存在但残缺"是最常见的形态：一次被中断的 `npm ci`、一次从别处拷来的目录、
+    # 或者上游刚加了依赖。那三种情况下"存在"都是 true，而 `npm run build` 会以
+    # 几十条 `Cannot find module 'vitest'` 失败 —— 报错指向的是症状，不是原因。
+    # 哈希标记把"依赖树是否对应当前锁"变成一条可判定的判据。
+    # 标记里**同时**带上 Node 大版本：原生依赖（`@rolldown/binding-linux-x64-gnu` 之类
+    # 的可选包）是按平台+ABI 装的。换一个 Node 版本重装之前，那份目录看起来"完整"，
+    # 实际缺的正是那个 .node 二进制 —— 报错会是 `Cannot find module
+    # '@rolldown/binding-linux-x64-gnu'`，离原因有十万八千里。
+    local stamp="$REPO_ROOT/frontend/node_modules/.hfs-lock-hash"
+    local want have=""
+    want="$(hash_file "$REPO_ROOT/frontend/package-lock.json")-node$(node -v)"
+    [ -f "$stamp" ] && have="$(cat "$stamp")"
+    if [ "$have" != "$want" ]; then
+        log "安装前端依赖（npm ci，锁文件已变或依赖树不完整）"
+        # `--include=dev`：`npm run build` 要 `tsc`（devDependency）；CI 上若设了
+        # `NODE_ENV=production`，默认会跳过 devDependencies，然后构建失败在一个
+        # 与前端无关的地方。
+        ( cd "$REPO_ROOT/frontend" && npm ci --include=dev --no-audit --no-fund ) \
+            || die "npm ci 失败（检查网络与 frontend/package-lock.json）"
+        printf '%s' "$want" >"$stamp"
+    fi
+    if ! ( cd "$REPO_ROOT/frontend" && npm run build ); then
+        die "前端构建失败：若报 Cannot find module，删掉 frontend/node_modules 重跑本脚本"
+    fi
     [ -f "$FRONTEND_DIST/plugin.html" ] || die "前端构建完成但 $FRONTEND_DIST/plugin.html 不存在"
     log "前端产物就绪：$FRONTEND_DIST"
 }

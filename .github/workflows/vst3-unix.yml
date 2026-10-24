@@ -98,8 +98,22 @@ jobs:
         run: |
           brew install cmake || true
 
+      # 【为什么必须钉 Node 版本】bundle 里的前端是 `npm run build` 产出的，而 vite 8
+      # 用 rolldown 打包，其原生绑定声明 engines: ^20.19.0 || >=22.12.0。
+      # 不满足时**没有一条报错说得清原因**：Node 18 报
+      # "node:util does not provide an export named 'styleText'"；Node 22.11 更糟 ——
+      # npm 会静默跳过那个可选的原生绑定，于是报
+      # "Cannot find module '@rolldown/binding-linux-x64-gnu'"。
+      # runner 自带的 node 版本随镜像漂移，所以这里钉死并复用 npm 缓存。
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.12"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
       # 桥接脚本是**手写的 JS**，语法错的表现是插件窗口一片空白。
-      # node 在三个 runner 上都有，一条 `node --check` 就能把它挡在合并之前。
+      # 一条 `node --check` 就能把它挡在合并之前。
       - name: Check the WebKit bridge script
         run: node --check backend/hifishifter-plugin/src/editor/gui/bridge.js
 
