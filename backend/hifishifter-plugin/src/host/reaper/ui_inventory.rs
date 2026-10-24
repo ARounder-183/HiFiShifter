@@ -588,7 +588,7 @@ mod tests {
     #[test]
     fn a_claimed_item_presents_exactly_one_clip() {
         let fixture = claimed_host();
-        let (document, item_id) = claimed_item(&fixture, 9901);
+        let (document, item_id) = claimed_item(fixture, 9901);
         let mut timeline = hifishifter_kernel::state::TimelineState::default();
         timeline.tracks.clear();
         timeline
@@ -619,7 +619,7 @@ mod tests {
     #[test]
     fn a_pre_upgrade_region_clip_is_not_duplicated_after_the_upgrade() {
         let fixture = claimed_host();
-        let (document, item_id) = claimed_item(&fixture, 9902);
+        let (document, item_id) = claimed_item(fixture, 9902);
         let mut timeline = hifishifter_kernel::state::TimelineState::default();
         timeline.tracks.clear();
         // 第一轮：clip_ids 还是 key 形态，时间线里是 region 形态的 clip。
@@ -660,7 +660,7 @@ mod tests {
     #[test]
     fn a_stray_unprefixed_clip_is_dropped_from_a_namespaced_presentation() {
         let fixture = claimed_host();
-        let (document, item_id) = claimed_item(&fixture, 9903);
+        let (document, item_id) = claimed_item(fixture, 9903);
         let mut timeline = hifishifter_kernel::state::TimelineState::default();
         timeline.tracks.clear();
         timeline
@@ -690,7 +690,7 @@ mod tests {
     #[test]
     fn the_duplicate_never_outlives_one_refresh() {
         let fixture = claimed_host();
-        let (document, item_id) = claimed_item(&fixture, 9904);
+        let (document, item_id) = claimed_item(fixture, 9904);
         let mut timeline = hifishifter_kernel::state::TimelineState::default();
         timeline.tracks.clear();
         timeline
@@ -721,7 +721,7 @@ mod tests {
     #[test]
     fn the_gui_lookup_composes_into_the_presented_id() {
         let fixture = claimed_host();
-        let (document, item_id) = claimed_item(&fixture, 9905);
+        let (document, item_id) = claimed_item(fixture, 9905);
         let native = document
             .gui_clip_for_host_item(&item_id)
             .expect("已认领的 item 必须能被定位");
