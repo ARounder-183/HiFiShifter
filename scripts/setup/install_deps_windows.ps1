@@ -1,4 +1,4 @@
-param(
+﻿param(
     [switch]$SkipFrontend
 )
 
@@ -21,10 +21,11 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "[install_deps_windows] Installing tauri-cli via cargo"
-try {
-    cargo install tauri-cli --version "^2" --locked -q
-} catch {
-    Write-Host "tauri-cli install failed or already installed: $_"
+# try/catch 捕不到原生命令的非零退出（那只写 $LASTEXITCODE）—— 必须显式检查。
+# 保持非致命：runner 预装链齐全时缺 tauri-cli 会由后续 tauri build 的显式报错暴露。
+cargo install tauri-cli --version "^2" --locked -q
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "tauri-cli install failed (exit $LASTEXITCODE) or already installed; tauri build will report it if actually needed"
 }
 
 if (-not $SkipFrontend) {

@@ -136,7 +136,7 @@ Test-Consistency '安装器文案与五语词表一致' {
     'scripts/release/installer/installer_strings.nsh'
 }
 
-# ── 4. 模型清单与真实模型文件一致 ──────────────────────────────────────
+# ── 5. 模型清单与真实模型文件一致 ──────────────────────────────────────
 Test-Consistency '模型清单与真实模型文件一致' {
     # 不 spawn `pwsh`：开发机上常常只有 Windows PowerShell 5.1（CI 有 pwsh）。
     # 同一会话直接调用那份脚本，它自带 -Check 模式、只读不写。
@@ -145,7 +145,7 @@ Test-Consistency '模型清单与真实模型文件一致' {
     'backend/src-tauri/resources/models/models.json'
 }
 
-# ── 5. 安装器的三条不变量 ──────────────────────────────────────────────
+# ── 6. 安装器的三条不变量 ──────────────────────────────────────────────
 #
 # 这三条都是"有人手改回去就会静默丢失一个用户可见能力"的地方：没有卸载项、重复安装
 # 堆积资产、模型又回到 bundle 里各存一份。
@@ -162,7 +162,7 @@ Test-Consistency '安装器注册卸载项、清理受管目录、模型走共�
     'WriteUninstaller / UninstallString / 目录对账 / 共享模型库'
 }
 
-# ── 6. 安装器的发布分支没被测试开关顶掉 ────────────────────────────────
+# ── 7. 安装器的发布分支没被测试开关顶掉 ────────────────────────────────
 Test-Consistency '安装器默认分支仍是 admin + HKLM + Common Files' {
     $nsi = Get-RepoText 'scripts/release/vst3-installer.nsi'
     foreach ($required in @('RequestExecutionLevel admin', 'InstallDir "$COMMONFILES64\VST3"', '!define HFS_ARP_ROOT HKLM')) {
@@ -175,7 +175,7 @@ Test-Consistency '安装器默认分支仍是 admin + HKLM + Common Files' {
     'HFS_TEST_MODE 只影响测试分支'
 }
 
-# ── 7. 插件 bundle 只带插件入口，不塞整套 dist ─────────────────────────
+# ── 8. 插件 bundle 只带插件入口，不塞整套 dist ─────────────────────────
 Test-Consistency '插件 bundle 只拷 plugin.html 与 assets' {
     $bundle = Get-RepoText 'scripts/build/build-plugin-bundle.ps1'
     if ($bundle -match "Get-ChildItem -LiteralPath 'frontend\\dist'") {
@@ -187,7 +187,7 @@ Test-Consistency '插件 bundle 只拷 plugin.html 与 assets' {
     'plugin.html + assets'
 }
 
-# ── 8. 两个 workflow 的公共策略一致 ───────────────────────────────────
+# ── 9. 两个 workflow 的公共策略一致 ───────────────────────────────────
 Test-Consistency '两个 workflow 都声明 concurrency 与 permissions' {
     foreach ($workflow in @('.github/workflows/build.yml', '.github/workflows/vst3.yml')) {
         $text = Get-RepoText $workflow
@@ -198,7 +198,7 @@ Test-Consistency '两个 workflow 都声明 concurrency 与 permissions' {
     'build.yml / vst3.yml'
 }
 
-# ── 9. SDK 镜像根只有一处定义 ─────────────────────────────────────────
+# ── 10. SDK 镜像根只有一处定义 ─────────────────────────────────────────
 #
 # 镜像根是"离网取源"的落点：prepare-plugin-sdks.ps1 与 export-sdk-mirror.ps1 都必须经
 # scripts/env/sdk-env.ps1 的 Get-SdkMirrorRoot 取它。任一脚本硬编码这个路径，改默认位置时就会

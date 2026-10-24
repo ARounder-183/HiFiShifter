@@ -95,7 +95,6 @@ try {
     if ($LASTEXITCODE -ne 0) {throw 'Shared frontend build failed.'}
     New-Item -ItemType Directory -Path $buildTaskDelivery | Out-Null
     $buildTaskProfile=$Configuration.ToLowerInvariant()
-    if ($buildTaskProfile -eq 'debug') {$buildTaskProfile='debug'}
     if ($buildTaskIncludesApp) {
         # 把 --config 的内容写成文件再传路径，而不是内联 JSON。
         #
