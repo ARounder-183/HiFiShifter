@@ -48,6 +48,10 @@ bool load_engine() noexcept {
 
 // 工厂对象与所有音频/ARA/GUI接口都由同进程Rust引擎提供，不启动任何辅助应用。
 extern "C" __declspec(dllexport) void* __stdcall GetPluginFactory() {
+    // 【为什么拿锁】`factory` 在 ExitDll 的锁内置空；这里的读若在锁外，恰逢宿主
+    // 在另一线程 ExitDll 时会调用已置空的指针。锁内调用不引入死锁（Gate 是叶级
+    // 临界区），代价只是与并发的 load_engine 串行一次。
+    Gate lock;
     return load_engine() ? factory() : nullptr;
 }
 // 宿主显式初始化发生在LoadLibrary之后；不得在DllMain跑ARA或WebView初始化。

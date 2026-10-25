@@ -294,7 +294,13 @@ pub fn get_or_compute_formant_analysis(
         .lock()
         .unwrap_or_else(|err| err.into_inner());
     if cache.len() >= FORMANT_ANALYSIS_CACHE_CAP {
-        cache.clear();
+        // 【为什么是逐出一条而不是 clear】满容量时整表清空会让第 CAP+1 个 clip 的
+        // 分析丢弃前 CAP 条全部结果 —— 大工程里共振峰可视化的缓存命中率周期性
+        // 归零重算（每条都是全量解码 + LPC）。HashMap 无插入序，取一个任意键逐出
+        // 即可有界且不批量失效；逐出谁对命中率无实质差别（无访问序可依）。
+        if let Some(oldest) = cache.keys().next().cloned() {
+            cache.remove(&oldest);
+        }
     }
     cache.insert(key, summary.clone());
     Ok(summary)

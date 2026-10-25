@@ -796,6 +796,10 @@ pub(super) fn create(
     // 一块空面板。只有在"我们自己初始化 GTK"时才能改这个选择；宿主已经初始化过的
     // 情形 A 改也没用，那时走浮窗（`attach_view` 会自报 `FloatingWindow`）。
     if request.embedded && std::env::var_os("GDK_BACKEND").is_none() {
+        // 【已知取舍】`set_var` 在多线程进程里与并发 `getenv` 是数据竞争（Rust 2024
+        // 已标 unsafe）。这里只能在**本进程**做（in-process GTK 初始化前必须生效，
+        // 远程路径由 hfs-gui 子进程自己设置、那里天然安全）；触发条件苛刻
+        // （embedded 且变量缺省），宿主在此时点并发读环境的概率极低。记录在案。
         std::env::set_var("GDK_BACKEND", "x11");
         crate::gui_log_line("pinning GDK_BACKEND=x11 so the host's X11 window can be embedded");
     }
@@ -1435,7 +1439,9 @@ fn attach_view(
         window.show_all();
     }
     let container: gtk::Widget = window.clone().upcast();
-    container.set_size_request(request.width, request.height);
+    // 用解析后的 width/height（embedded 分支已把 request 尺寸换成宿主窗口实际
+    // 尺寸）—— 同一窗口的两个尺寸来源必须一致，否则 request 尺寸会赢。
+    container.set_size_request(width, height);
     container.show_all();
 
     // ── 一次性自检：视图真的到屏幕上了吗 ─────────────────────────────────────
@@ -1738,7 +1744,8 @@ mod tests {
         #[cfg(windows)]
         let expected: [u8; 16] = [
             0x66, 0x53, 0xC3, 0x18, // 0x18C35366，第 1 字小端
-            0x97, 0x76, 0x1A, 0x4F, // 0x97764F1A，第 2 字拆成两个 u16
+            0x76, 0x97, 0x1A,
+            0x4F, // 0x97764F1A：Data2/Data3 各自 u16 小端（与 vst3.rs 的 uid_guid 逐字节一致）
             0x9C, 0x5B, 0x83, 0x85, // 0x9C5B8385
             0x7A, 0x87, 0x13, 0x89, // 0x7A871389
         ];

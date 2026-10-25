@@ -69,9 +69,26 @@ pub fn assemble_dyn_orig_from_cache(tl: &TimelineState, root_track_id: &str) -> 
 
     // 与音高组装完全一致的 clip 遍历顺序：下方轨道先写、上方轨道后写，
     // 同轨道按 z-order 递增 —— 保证两条曲线在重叠区间的取舍逻辑一致。
+    // 【为什么查表而不是逐 clip 沿链上行】resolve_root_track_id 每次调用都沿 parent
+    // 链逐跳分配 String + 线性扫 tracks；这里是 O(clips×tracks) 的字符串操作叠在
+    // timeline 更新路径上（engine.rs:1132 有同款记录）。root_track_map 一次构表
+    // O(tracks)，循环内查表 —— 与 snapshot.rs / engine.rs 的既有写法一致。
+    let root_by_track = tl.root_track_map();
+    // 与 resolve_root_track_id 的语义对齐：空 id 恒不属于任何根；未知 id（不在
+    // tracks 表里）视为自己的根。返回 bool 而不是 Option<&str>：map 值与入参的
+    // 生命周期不同源，谓词化免掉统一。
+    let in_root = |track_id: &str| -> bool {
+        if track_id.trim().is_empty() {
+            return false;
+        }
+        match root_by_track.get(track_id) {
+            Some(root) => *root == root_track_id,
+            None => track_id == root_track_id,
+        }
+    };
     let mut ordered_track_ids: Vec<&str> = Vec::new();
     for track in &tl.tracks {
-        if tl.resolve_root_track_id(&track.id).as_deref() == Some(root_track_id) {
+        if in_root(&track.id) {
             ordered_track_ids.push(track.id.as_str());
         }
     }
@@ -79,7 +96,7 @@ pub fn assemble_dyn_orig_from_cache(tl: &TimelineState, root_track_id: &str) -> 
     let mut track_clips: std::collections::HashMap<&str, Vec<&crate::state::Clip>> =
         std::collections::HashMap::new();
     for clip in &tl.clips {
-        if tl.resolve_root_track_id(&clip.track_id).as_deref() != Some(root_track_id) {
+        if !in_root(&clip.track_id) {
             continue;
         }
         if clip.muted || clip.source_path.is_none() {
@@ -417,6 +434,20 @@ pub fn assemble_dyn_orig_for_engine(tl: &mut TimelineState, root_track_id: &str)
 /// 语义与 `build_root_pitch_key` 一致：任何会改变"逐帧电平"的时间线变化
 /// （clip 几何、源文件签名、淡化、增益…）都必须产出一个不同的 key。
 pub fn build_root_dyn_key(tl: &TimelineState, root_track_id: &str) -> String {
+    // 同 assemble_dyn_orig_from_cache：查表代替逐 clip 沿链上行（见那里的说明）。
+    let root_by_track = tl.root_track_map();
+    // 与 resolve_root_track_id 的语义对齐：空 id 恒不属于任何根；未知 id（不在
+    // tracks 表里）视为自己的根。返回 bool 而不是 Option<&str>：map 值与入参的
+    // 生命周期不同源，谓词化免掉统一。
+    let in_root = |track_id: &str| -> bool {
+        if track_id.trim().is_empty() {
+            return false;
+        }
+        match root_by_track.get(track_id) {
+            Some(root) => *root == root_track_id,
+            None => track_id == root_track_id,
+        }
+    };
     let fp = tl.frame_period_ms().max(0.1);
     let mut hasher = blake3::Hasher::new();
     // 【v3】基线改为**绝对电平**（不归一化）+ 逐帧峰值口径（见文件头）。
@@ -426,7 +457,7 @@ pub fn build_root_dyn_key(tl: &TimelineState, root_track_id: &str) -> String {
     hasher.update(&crate::pitch_analysis::quantize_u32(fp, 1000.0).to_le_bytes());
 
     for clip in &tl.clips {
-        if tl.resolve_root_track_id(&clip.track_id).as_deref() != Some(root_track_id) {
+        if !in_root(&clip.track_id) {
             continue;
         }
         hasher.update(clip.id.as_bytes());

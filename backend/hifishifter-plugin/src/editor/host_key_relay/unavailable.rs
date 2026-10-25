@@ -1,9 +1,10 @@
 //! 没有"把键交回宿主"这条路的平台。
 //!
 //! 【哪些平台落在这里】Wayland（VST3 3.7.x 没有 Wayland 视图类型，也没有向别的客户端
-//! 注入按键的公开协议），以及**还没有编辑器窗口**的平台 —— 本仓的编辑器视图今天只有
-//! Windows 实现（`editor/view.rs` 对 `not(windows)` 直接返回
-//! `K_RESULT_FALSE`），macOS / Linux 的接缝随各自的编辑器落地。
+//! 注入按键的公开协议），以及**视图还在但让路接缝未接**的组合 —— macOS / Linux 的
+//! 编辑器视图已经落地（`gui/macos.rs` / `gui/linux.rs`），而让路只在 Windows 有
+//! 原生实现；Linux 上 Fidelity 是 `Unavailable`（经 `escape_for_platform` 的
+//! `not(windows)` 分支），不是"没有视图"。
 //!
 //! 【为什么 Unavailable 也要"接手"】做不到就该**当场**说清楚。回一句"我不接手"会让前端
 //! 回落那句"当前宿主没有提供这个接口"—— 那是把用户往死路上指；而反复按同一个键每次都

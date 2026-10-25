@@ -636,6 +636,11 @@ impl AudioEngine {
                                     meter_bus.record_rt_fault(RtFault::PanicF32);
                                     data.fill(0.0);
                                     is_playing_cb.store(false, Ordering::Relaxed);
+                                    // panic 若恰发生在"原地等待渲染"期间（mix 已置位
+                                    // play_start_wait），不清它会让快照持续上报
+                                    // waiting_for_render=true + is_playing=false 的矛盾
+                                    // 组合，前端据此冻结光标直到下次 stop/play。
+                                    play_start_wait_cb.store(false, Ordering::Relaxed);
                                 }
                             },
                             err_fn(meter_bus_for_cb.clone()),
@@ -675,6 +680,11 @@ impl AudioEngine {
                                     meter_bus.record_rt_fault(RtFault::PanicI16);
                                     data.fill(0);
                                     is_playing_cb.store(false, Ordering::Relaxed);
+                                    // panic 若恰发生在"原地等待渲染"期间（mix 已置位
+                                    // play_start_wait），不清它会让快照持续上报
+                                    // waiting_for_render=true + is_playing=false 的矛盾
+                                    // 组合，前端据此冻结光标直到下次 stop/play。
+                                    play_start_wait_cb.store(false, Ordering::Relaxed);
                                 }
                             },
                             err_fn(meter_bus_for_cb.clone()),
@@ -714,6 +724,11 @@ impl AudioEngine {
                                     meter_bus.record_rt_fault(RtFault::PanicU16);
                                     data.fill(U16_SILENCE);
                                     is_playing_cb.store(false, Ordering::Relaxed);
+                                    // panic 若恰发生在"原地等待渲染"期间（mix 已置位
+                                    // play_start_wait），不清它会让快照持续上报
+                                    // waiting_for_render=true + is_playing=false 的矛盾
+                                    // 组合，前端据此冻结光标直到下次 stop/play。
+                                    play_start_wait_cb.store(false, Ordering::Relaxed);
                                 }
                             },
                             err_fn(meter_bus_for_cb.clone()),

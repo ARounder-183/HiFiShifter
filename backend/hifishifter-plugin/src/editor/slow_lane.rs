@@ -46,6 +46,7 @@ const SLOW_CAPACITY: usize = 4;
 /// 【为什么必须是一句**可操作**的话】它会被 classify_error 判成 transient（值得重试），
 /// 而用户看到的正是这句。他要的是「等它跑完」，不是「出错了」。
 pub(crate) const SLOW_BUSY: &str = "a long-running task is already running; wait for it to finish";
+const SLOW_UNAVAILABLE: &str = "the slow lane is unavailable; restart the editor view";
 
 /// 一次慢任务。
 pub(crate) struct SlowTask {
@@ -130,8 +131,14 @@ impl Lane {
                 log::info!("[ara] slow lane: queued {command} (id={id})");
                 Ok(())
             }
-            Err(_) => {
+            Err(error) => {
                 self.shared.in_flight.fetch_sub(1, Ordering::AcqRel);
+                if matches!(error, std::sync::mpsc::TrySendError::Disconnected(_)) {
+                    // worker 线程意外终止：说"有任务在跑"是对用户撒谎 —— 没人占用，
+                    // 且此后每条 submit 都会失败。按不可用如实上报。
+                    log::error!("[ara] slow lane: worker gone; rejecting {command} (id={id})");
+                    return Err(SLOW_UNAVAILABLE.to_string());
+                }
                 log::warn!(
                     "[ara] slow lane: rejected {command} (id={id}) — another long task is running"
                 );
