@@ -91,6 +91,19 @@ fn resolve_asset(root: &std::path::Path, request_path: &str) -> Option<std::path
     Some(canonical)
 }
 
+/// 把最终生效的加速策略写进日志：A/B 时"到底用的哪一个"不能靠记忆。
+fn log_policy(policy: webkit2gtk::HardwareAccelerationPolicy) {
+    let name = match policy {
+        webkit2gtk::HardwareAccelerationPolicy::Never => "never",
+        webkit2gtk::HardwareAccelerationPolicy::Always => "always",
+        _ => "on-demand",
+    };
+    send(serde_json::json!({
+        "type": "note",
+        "text": format!("hardware acceleration policy: {name}")
+    }));
+}
+
 fn mime_for(path: &str) -> &'static str {
     match path.rsplit('.').next().unwrap_or("") {
         "html" => "text/html",
@@ -207,7 +220,20 @@ fn main() {
         // 【为什么 OnDemand 仍然守住了原来的顾虑】它是 WebKitGTK 的默认策略：能用 GPU
         // 就用，不能就自动退回软件路径。原来那条 `Never` 想避免的是「假设 GL 可用」，
         // 而 `OnDemand` 从不做这个假设 —— 它只是不在 GL 可用时白白放弃它。
-        settings.set_hardware_acceleration_policy(webkit2gtk::HardwareAccelerationPolicy::OnDemand);
+        // 【为什么留一个环境变量开关】OnDemand 修好了水平滚动时各层分离（软件光栅下
+        // DOM 与 WebGL2 画布不在同一个合成事务里）。但真机上又出现了"标签页切回来只
+        // 剩部分图层"的现象，而它既可能是画布 backing store 被丢弃，也可能是嵌入 X
+        // 窗口里的 GL 合成掉了。这两条修法完全不同，靠猜只会再来一轮。
+        //
+        // `HFS_GUI_ACCEL=never` 让现场直接 A/B：
+        //   · 设上之后问题消失 ⇒ 是 GL 合成的事，未走的路线是"让 OnDemand 与重绘共存"；
+        //   · 设上之后问题照旧 ⇒ 是各画布需要自己重绘，与合成无关。
+        let policy = match std::env::var("HFS_GUI_ACCEL").ok().as_deref() {
+            Some("never") => webkit2gtk::HardwareAccelerationPolicy::Never,
+            _ => webkit2gtk::HardwareAccelerationPolicy::OnDemand,
+        };
+        log_policy(policy);
+        settings.set_hardware_acceleration_policy(policy);
     }
     let Some(manager) = webview.user_content_manager() else {
         send(serde_json::json!({"type":"error","text":"no user content manager"}));

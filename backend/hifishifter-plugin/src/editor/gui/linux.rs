@@ -647,6 +647,13 @@ mod remote {
                         }
                     }
                     "page-ready" => client.borrow_mut().on_page_ready(),
+                    // 【为什么要这条通道】渲染进程（hfs-gui）里有些事实只有它自己知道：
+                    // 最终生效的硬件加速策略、被拒绝的注册、被跳过的一次注入。它们不是
+                    // 错误，但必须能在插件日志里读到 —— 否则 A/B 只能靠记忆。
+                    "note" => crate::gui_log_line(&format!(
+                        "the editor process: {}",
+                        value["text"].as_str().unwrap_or_default()
+                    )),
                     "ready" => crate::gui_log_line(&format!(
                         "the editor process embedded its window ({})",
                         value["xid"]
