@@ -68,6 +68,13 @@ export function useHostLinkPluginSnapshot(): HostLinkPluginSnapshot {
 
 /** 仅供测试重置模块级状态。 */
 export function resetHostLinkPluginStoreForTests(): void {
+    if (timer !== undefined) {
+        window.clearTimeout(timer);
+        timer = undefined;
+    }
+    running = 0;
+    backoffMs = POLL_MS;
+    inFlight = false;
     snapshot = EMPTY;
     listeners.clear();
 }
@@ -80,18 +87,17 @@ export function resetHostLinkPluginStoreForTests(): void {
  */
 export function startHostLinkPluginPolling(): () => void {
     running += 1;
-    void refresh();
-    if (timer === undefined) {
-        timer = window.setInterval(() => void refresh(), POLL_MS);
-    }
+    schedule(POLL_MS);
     let stopped = false;
     return () => {
         if (stopped) return;
         stopped = true;
         running -= 1;
-        if (running <= 0 && timer !== undefined) {
-            window.clearInterval(timer);
-            timer = undefined;
+        if (running <= 0) {
+            if (timer !== undefined) {
+                window.clearTimeout(timer);
+                timer = undefined;
+            }
             running = 0;
         }
     };
@@ -100,9 +106,28 @@ export function startHostLinkPluginPolling(): () => void {
 let running = 0;
 let timer: number | undefined;
 let backoffMs = POLL_MS;
+/** 一轮请求在途时不再发下一轮（终态早退的 catch 分支由 finally 复位）。 */
+let inFlight = false;
+
+/**
+ * 安排下一次轮询。
+ *
+ * 【为什么是 setTimeout 链而不是 setInterval】退避要求**间隔随失败时长变化**，
+ * 而 setInterval 的间隔一经创建就固定 —— 旧实现里 `backoffMs` 只写不读，
+ * 暂时性失败后仍以 750ms 固定频率打后端（与 `pluginApplyStore` 对照，后者
+ * 正是为此改成的链式调度）。链式还有两个附带收益：上一次请求未返回时不会
+ * 叠加下一轮；`ended` 后不再排程（旧实现的 interval 在终态后仍每 750ms 空转）。
+ */
+function schedule(delayMs: number): void {
+    if (snapshot.ended) return;
+    if (timer !== undefined) window.clearTimeout(timer);
+    timer = window.setTimeout(() => void refresh(), delayMs);
+}
 
 async function refresh(): Promise<void> {
-    if (snapshot.ended) return;
+    timer = undefined;
+    if (running <= 0 || snapshot.ended || inFlight) return;
+    inFlight = true;
     try {
         const status = await hostLinkPluginApi.status();
         backoffMs = POLL_MS;
@@ -115,6 +140,11 @@ async function refresh(): Promise<void> {
         }
         publish({ ...snapshot, failure: String(error) });
         backoffMs = Math.min(backoffMs * 4, MAX_POLL_MS);
+    } finally {
+        inFlight = false;
+    }
+    if (running > 0) {
+        schedule(backoffMs);
     }
 }
 

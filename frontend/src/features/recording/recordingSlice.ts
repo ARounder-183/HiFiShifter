@@ -129,15 +129,27 @@ export const startRecordingFlow = createAsyncThunk(
         try {
             const settings = current.settings;
             if (settings.countdownSec > 0) {
-                dispatch(recordingSlice.actions.beginCountdown(settings.countdownSec));
-                for (let remaining = settings.countdownSec; remaining > 0; remaining -= 1) {
+                // 【为什么先取整】beginCountdown 的 reducer 用 Math.max(1, floor())
+                // 写 UI 状态；循环若用原始值，小数配置（防御路径）会让 UI 倒数 N
+                // 而实际等 N+1 秒。两边必须用同一个取整值。
+                const countdownSec = Math.max(1, Math.floor(settings.countdownSec));
+                dispatch(recordingSlice.actions.beginCountdown(countdownSec));
+                for (let remaining = countdownSec; remaining > 0; remaining -= 1) {
                     await delay(1000);
                     const afterTick = (getState() as RootState).recording;
                     if (afterTick.countdownCancelRequested) {
                         dispatch(recordingSlice.actions.cancelCountdown());
-                        return { ok: true as const, cancelled: true as const };
+                        return { ok: true as const, canceled: true as const };
                     }
                     dispatch(recordingSlice.actions.tickCountdown());
+                }
+                // 【为什么开录前再复核一次】取消只在每秒 delay 之后检查过：最后一
+                // 次检查通过到 startRecording 之间到达的取消会被整段忽略 —— 用户
+                // "掐点取消"却照样开录并起播。delay(1000) 不可中断，这里是最后的
+                // 补偿窗口。
+                if ((getState() as RootState).recording.countdownCancelRequested) {
+                    dispatch(recordingSlice.actions.cancelCountdown());
+                    return { ok: true as const, cancelled: true as const };
                 }
             }
 

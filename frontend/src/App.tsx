@@ -90,7 +90,8 @@ import { emitPinch, pinchDeltaFromWheel } from "./utils/pinchGesture";
 import { useI18n } from "./i18n/I18nProvider";
 import { useClipPitchDataListener } from "./hooks/useClipPitchDataListener";
 import { useHistoryStateListener } from "./hooks/useHistoryStateListener";
-import { PitchAnalysisProvider, usePitchAnalysis } from "./contexts/PitchAnalysisContext";
+import { PitchAnalysisProvider } from "./contexts/PitchAnalysisContext";
+import { PitchAnalysisStatusChip } from "./components/layout/PitchAnalysisStatusChip";
 import { ParamDataLoadingChip } from "./components/layout/ParamDataLoadingChip";
 import { AppStatusProgressChips } from "./components/layout/AppStatusProgressChips";
 import { appStatusProgressBus } from "./utils/appStatusProgressBus";
@@ -546,7 +547,6 @@ function detectExternalActionKindFromPath(path: string): ExternalFileActionKind 
 function AppInner() {
     const dispatch = useAppDispatch();
     const { t, tf, tVars, plural } = useI18n();
-    const pitchAnalysis = usePitchAnalysis();
 
     const status = useAppSelector((state) => state.session.status);
     const error = useAppSelector((state) => state.session.error);
@@ -563,9 +563,13 @@ function AppInner() {
     const recordingActive = useAppSelector((state) => state.recording.active);
     const recordingSettings = useAppSelector((state) => state.recording.settings);
     const recordingStartSec = useAppSelector((state) => state.recording.startSec);
-    const selectedClipId = useAppSelector((state) => state.session.selectedClipId);
-    const multiSelectedClipIds = useAppSelector((state) => state.session.multiSelectedClipIds);
-    const sessionClips = useAppSelector((state) => state.session.clips);
+    // 注意（订阅纪律）：
+    // - playbackPositionSec 以 ~30Hz 持续变化，不能订阅 —— 需要它的地方（录音
+    //   自动停止）在回调内经 store.getState() 同步读取最新值。
+    // - selectedClipId / multiSelectedClipIds / session.clips 同理：clips 是拖拽
+    //   热路径（pointermove 每帧写），它们的唯一消费方（录音自动停止看门狗）也在
+    //   回调内现读。订阅它们会让 AppInner 连同 MenuBar/对话框/全部面板每帧重渲。
+    // - 音高分析进度经独立的 <PitchAnalysisStatusChip /> 订阅（逐 clip 高频流）。
     /*
      * 宿主音频读数（仅插件模式产生）。它只在"插件挂在 REAPER 轨道组父轨上"时
      * 变成一条可见提示，因此这里订阅的代价只有一次浅比较。
@@ -1117,22 +1121,8 @@ function AppInner() {
           })
         : statusText;
 
-    // 构建 pitch 分析进度文本（分析中时显示在状态栏左侧）
-    const pitchAnalysisText = pitchAnalysis.pending
-        ? (() => {
-              const parts: string[] = [t("status_analyzing_pitch")];
-              if (pitchAnalysis.currentClip) {
-                  parts.push(`"${pitchAnalysis.currentClip}"`);
-              }
-              if (pitchAnalysis.totalClips != null && pitchAnalysis.totalClips > 0) {
-                  parts.push(`(${pitchAnalysis.completedClips ?? 0}/${pitchAnalysis.totalClips})`);
-              }
-              if (pitchAnalysis.progress != null && Number.isFinite(pitchAnalysis.progress)) {
-                  parts.push(`${Math.round(pitchAnalysis.progress * 100)}%`);
-              }
-              return parts.join(" ");
-          })()
-        : null;
+    // 音高分析进度文本移入 <PitchAnalysisStatusChip />：逐 clip 的进度事件不再
+    // 惊动 AppInner（见该组件头注释）。
 
     // 后端"播放/预渲染"状态：active/target 镜像进 Redux（state.session
     // .playbackRenderingActive/Target）供状态栏展示；blocking（阻塞式前台
@@ -3758,22 +3748,27 @@ function AppInner() {
         if (!recordingActive || !recordingSettings.autoStopAtSelectionEnd) return;
         // 会话终态：录音流本身已经不可用，这个自动停止看门狗只会空转。
         if (sessionEnded) return;
-        const selectedIds = new Set<string>();
-        if (selectedClipId) selectedIds.add(selectedClipId);
-        for (const id of multiSelectedClipIds) selectedIds.add(id);
-        const selected = sessionClips.filter((clip) => selectedIds.has(clip.id));
-        if (selected.length === 0) return;
-        const endSec = Math.max(
-            ...selected.map((clip) => Number(clip.startSec) + Number(clip.lengthSec)),
-        );
-        if (!Number.isFinite(endSec)) return;
-        if (recordingStartSec == null || Number(recordingStartSec) > endSec + 0.05) return;
+        if (recordingStartSec == null) return;
 
         const id = window.setInterval(() => {
-            // 不能把 playbackPositionSec 放进闭包/依赖：它随播放轮询 ~33ms 变化，
-            // 会让本 effect 不停地销毁重建这个 100ms interval，回调永远等不到触发。
-            // 经 store 同步读取最新播放位置。
-            const positionSec = Number(store.getState().session.runtime.playbackPositionSec ?? 0);
+            // 【为什么全部经 store.getState() 现读】playbackPositionSec 随播放轮询
+            // ~33ms 变化，clips 随拖拽每帧变化 —— 放进闭包/依赖会让本 effect 不停
+            // 销毁重建这个 100ms interval（回调永远等不到触发），订阅它们又会拖
+            // 整个 AppInner 每帧重渲。选择集在录制期间几乎不变，100ms 一次的
+            // 过滤代价可忽略；顺带让录制中途改选区立即生效。
+            const session = store.getState().session;
+            const positionSec = Number(session.runtime.playbackPositionSec ?? 0);
+            const selectedIds = new Set<string>();
+            if (session.selectedClipId) selectedIds.add(session.selectedClipId);
+            for (const clipId of session.multiSelectedClipIds) selectedIds.add(clipId);
+            let endSec = -Infinity;
+            for (const clip of session.clips) {
+                if (!selectedIds.has(clip.id)) continue;
+                const end = Number(clip.startSec) + Number(clip.lengthSec);
+                if (Number.isFinite(end) && end > endSec) endSec = end;
+            }
+            if (!Number.isFinite(endSec)) return;
+            if (Number(recordingStartSec) > endSec + 0.05) return;
             if (positionSec >= endSec - 0.05) {
                 void dispatch(stopRecordingFlow());
             }
@@ -3781,12 +3776,9 @@ function AppInner() {
         return () => window.clearInterval(id);
     }, [
         dispatch,
-        multiSelectedClipIds,
         recordingActive,
         recordingSettings.autoStopAtSelectionEnd,
         recordingStartSec,
-        selectedClipId,
-        sessionClips,
         sessionEnded,
     ]);
 
@@ -4629,9 +4621,10 @@ function AppInner() {
                     {importBusy ? (
                         <AppStatusChip tone="accent">{t("status_importing")}</AppStatusChip>
                     ) : null}
-                    {pitchAnalysisText ? (
-                        <AppStatusChip tone="accent">{pitchAnalysisText}</AppStatusChip>
-                    ) : null}
+                    {/* 音高分析进度片：**独立订阅** PitchAnalysisContext，
+                        逐 clip 的进度事件不参与本组件重渲染
+                        （见 PitchAnalysisStatusChip 的说明）。 */}
+                    <PitchAnalysisStatusChip />
                     {/* 参数曲线取数提示：**独立订阅**外部 store，不参与本组件重渲染
                         （见 ParamDataLoadingChip 的说明）。 */}
                     <ParamDataLoadingChip />

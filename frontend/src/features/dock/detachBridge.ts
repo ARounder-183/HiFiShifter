@@ -285,11 +285,19 @@ export function createStoreBridgeMiddleware(role: BridgeRole): Middleware {
     const origin = role === "main" ? "main" : resolveWindowLabel();
     let pending: UnknownAction[] = [];
     let flushHandle: number | null = null;
+    let lastFlushAtMs = 0;
     let send: ((event: string, payload?: unknown) => Promise<void>) | null = null;
     let ready = false;
 
+    // rAF 兜底参数。主窗口被放到后台（用户聚焦卫星窗口或切去别的应用）时，
+    // WebView2 可以整段停发 rAF —— 没有兜底的话，已序列化的动作（每条含整段
+    // state 片段的 JSON）以每秒数十条的速度无限累积，回前台时一次性巨型 IPC。
+    const MAX_PENDING_ACTIONS = 64;
+    const MAX_FLUSH_DELAY_MS = 50;
+
     const flush = () => {
         flushHandle = null;
+        lastFlushAtMs = Date.now();
         if (!ready) return; // 事件 API 未就绪：动作留在队列里，就绪后统一补发
         const actions = pending;
         pending = [];
@@ -297,6 +305,20 @@ export function createStoreBridgeMiddleware(role: BridgeRole): Middleware {
         void send(BRIDGE_ACTION_EVENT, { origin, actions } satisfies BridgeEnvelope).catch(() => {
             // 广播失败只影响另一侧的实时性，不影响本窗口；不抛给派发路径。
         });
+    };
+
+    const scheduleFlush = () => {
+        if (flushHandle !== null) return;
+        const sinceLastFlush = Date.now() - lastFlushAtMs;
+        const backlogTooBig = pending.length >= MAX_PENDING_ACTIONS;
+        const overdue = sinceLastFlush >= MAX_FLUSH_DELAY_MS;
+        if (typeof requestAnimationFrame === "function" && !backlogTooBig && !overdue) {
+            flushHandle = requestAnimationFrame(flush);
+        } else {
+            // rAF 不可用 / 队列超限 / 距上次冲刷过久：setTimeout 不受后台节流约束
+            //（Chromium 的后台计时器最低 1s，也远好于无限堆积）。
+            flushHandle = setTimeout(flush, backlogTooBig || overdue ? 0 : 16) as unknown as number;
+        }
     };
 
     // 事件 API 异步就绪。就绪前派发的动作**不丢**：它们留在队列里，就绪时补发
@@ -316,11 +338,7 @@ export function createStoreBridgeMiddleware(role: BridgeRole): Middleware {
         const serialized = trySerialize(action);
         if (serialized === null) return result;
         pending.push(serialized as UnknownAction);
-        if (flushHandle === null && typeof requestAnimationFrame === "function") {
-            flushHandle = requestAnimationFrame(flush);
-        } else if (flushHandle === null) {
-            flushHandle = setTimeout(flush, 16) as unknown as number;
-        }
+        scheduleFlush();
         return result;
     };
 }

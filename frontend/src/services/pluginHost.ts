@@ -317,13 +317,35 @@ export function createPluginHost(
 }
 
 let active: PluginHostBridge | null = null;
+/** 「bootstrap 在而消息口缺」的畸形形态只报一次，避免每次 invoke 刷屏。 */
+let reportedMissingPort = false;
 
-/** 独立app没有插件bootstrap，原调用路径不会被WebView2对象本身误判为插件。 */
+/**
+ * 独立app没有插件bootstrap，原调用路径不会被WebView2对象本身误判为插件。
+ *
+ * 【为什么消息口缺失要返回 null 而不是抛】`invoke()` 的第一行就是本函数，且
+ * 位于其全部 try/catch 之外 —— 抛裸 `Error` 会绕过整个错误处理约定（错误分类、
+ * sessionGate、reportFrontendError 全部失效），畸形宿主/注入竞态下每次调用都
+ * 同步炸出未分类异常。返回 null 让 invoke 走正常的降级路径（Tauri / pywebview /
+ * 明确的不可用错误）。首次发现时上报一次，诊断仍有据可查。
+ */
 export function getPluginHost(): PluginHostBridge | null {
     if (typeof window === "undefined" || !window.__HFS_PLUGIN_BOOTSTRAP__) return null;
     if (active) return active;
     const port = window.chrome?.webview;
-    if (!port) throw new Error("Plugin bootstrap present but native message port unavailable");
+    if (!port) {
+        // 只报一次（避免每次 invoke 刷屏）。不走 reportFrontendError：它依赖
+        // invoke → getPluginHost 的调用链（模块级循环 + 本分支下的再入），而本
+        // 分支本身就在 invoke 的入口处 —— console 足以留下诊断线索。
+        if (!reportedMissingPort) {
+            reportedMissingPort = true;
+            console.error(
+                "[pluginHost] Plugin bootstrap present but native message port unavailable; " +
+                    "falling back to non-plugin invoke paths",
+            );
+        }
+        return null;
+    }
     active = createPluginHost(port, window.__HFS_PLUGIN_BOOTSTRAP__);
     // 【为什么监听 bootstrap 变化】窗口可能先于 ARA 绑定打开；绑定后后端会补发一条
     // `plugin_bootstrap_changed`。这里更新全局快照，并广播一个 DOM 事件让关心形态的

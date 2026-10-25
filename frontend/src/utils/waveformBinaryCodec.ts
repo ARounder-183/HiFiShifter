@@ -55,6 +55,15 @@ export interface WaveformMipmapBinary {
     /** 声道 1 的 min/max 视图；单声道时指向 ch0（同一数据） */
     ch1Min: Float32Array;
     ch1Max: Float32Array;
+    /**
+     * 零拷贝视图钉住的整个后端 ArrayBuffer 的字节数（v1/v2 均为解码后的
+     * buffer.byteLength）。
+     *
+     * 【为什么 LRU 记账需要它】ch* 视图是 buffer 的零拷贝切片 —— 只要视图还活着，
+     * 整个 buffer（立体声 ≈ 16N/桶，多声道更多）就无法被 GC。旧记账只数
+     * min/max 两份（8N），实际驻留约为记账值的 3 倍，LRU 预算因此形同虚设。
+     */
+    backingBytes: number;
 }
 
 /**
@@ -138,6 +147,7 @@ export function decodeWaveformBinary(buffer: ArrayBuffer): WaveformMipmapBinary 
                 ch0Max,
                 ch1Min,
                 ch1Max,
+                backingBytes: buffer.byteLength,
             };
         }
 
@@ -170,6 +180,7 @@ export function decodeWaveformBinary(buffer: ArrayBuffer): WaveformMipmapBinary 
             ch0Max,
             ch1Min,
             ch1Max,
+            backingBytes: buffer.byteLength,
         };
     }
 
@@ -197,6 +208,7 @@ export function decodeWaveformBinary(buffer: ArrayBuffer): WaveformMipmapBinary 
         ch0Max: max,
         ch1Min: min,
         ch1Max: max,
+        backingBytes: buffer.byteLength,
     };
 }
 

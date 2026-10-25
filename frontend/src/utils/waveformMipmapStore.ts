@@ -101,6 +101,26 @@ export interface LevelPeaks {
     /** 声道 1 的 min/max 视图（单声道时与 ch0 同引用） */
     ch1Min: Float32Array;
     ch1Max: Float32Array;
+    /** 零拷贝视图钉住的整个后端 buffer 的字节数（见 waveformBinaryCodec 的说明） */
+    backingBytes: number;
+}
+
+/**
+ * 一份峰值数据的**真实驻留**字节数：零拷贝视图钉住的 backing buffer + 跨声道
+ * 合并包络的两份拷贝（仅立体声 v2 存在拷贝：`min !== ch0Min` 即有拷贝）。
+ *
+ * 【为什么不用 min/max 两份直接相加】ch* 视图钉住整个 buffer：立体声每桶实际
+ * 驻留 ≈ 24N+，只数 8N 会让 192MB 的 LRU 预算实际放行 ~3 倍内存。
+ */
+function residencyBytes(peaks: {
+    min: Float32Array;
+    max: Float32Array;
+    ch0Min: Float32Array;
+    backingBytes: number;
+}): number {
+    const mergedCopies =
+        peaks.min !== peaks.ch0Min ? peaks.min.byteLength + peaks.max.byteLength : 0;
+    return peaks.backingBytes + mergedCopies;
 }
 
 export type WaveformMipmapLevel = 0 | 1 | 2;
@@ -1213,9 +1233,9 @@ class WaveformMipmapStoreImpl {
         entry.failedLevels.delete(clampedLevel);
         this.retryCooldownUntil.delete(`${sourcePath}|${clampedLevel}`);
         const previous = entry.levels[clampedLevel];
-        const previousBytes = previous ? previous.min.byteLength + previous.max.byteLength : 0;
-        const nextBytes = decoded.min.byteLength + decoded.max.byteLength;
-        entry.levels[clampedLevel] = {
+        // 记账口径 = 真实驻留（backing buffer + 立体声合并拷贝），见 residencyBytes。
+        const previousBytes = previous ? residencyBytes(previous) : 0;
+        const next: LevelPeaks = {
             min: decoded.min,
             max: decoded.max,
             divisionFactor: decoded.divisionFactor,
@@ -1225,7 +1245,10 @@ class WaveformMipmapStoreImpl {
             ch0Max: decoded.ch0Max,
             ch1Min: decoded.ch1Min,
             ch1Max: decoded.ch1Max,
+            backingBytes: decoded.backingBytes,
         };
+        const nextBytes = residencyBytes(next);
+        entry.levels[clampedLevel] = next;
         entry.bytes += nextBytes - previousBytes;
         this.cacheBytes += nextBytes - previousBytes;
         this.evictIfNeeded();
