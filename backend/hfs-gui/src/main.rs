@@ -173,7 +173,8 @@ fn main() {
                 .and_then(|rest| rest.split_once('/').map(|(_, path)| path.to_string()))
                 .unwrap_or_default();
             let path = path.split(['?', '#']).next().unwrap_or("");
-            let resolved = resolve_asset(&root, path);
+            // `root` 是命令行给的字符串；`resolve_asset` 要的是 `&Path`。
+            let resolved = resolve_asset(std::path::Path::new(&root), path);
             match resolved {
                 Some(full) => match std::fs::read(&full) {
                     Ok(bytes) => {
@@ -198,28 +199,55 @@ fn main() {
 
     let webview = webkit2gtk::WebView::with_context(&context);
     if let Some(settings) = WebViewExt::settings(&webview) {
-        // 与插件里同样的理由：宿主/环境的 GL 不可假设，CPU 合成最稳。
-        settings.set_hardware_acceleration_policy(webkit2gtk::HardwareAccelerationPolicy::Never);
+        // 【为什么是 OnDemand 而不是 Never】时间轴与参数编辑器各有一块 WebGL2 画布，
+        // 而标尺、Clip 体、网格是 DOM。`Never` 强制软件光栅：DOM 层由 rAF 立刻平移，
+        // 画布却要等一次软件重绘才跟上，于是水平滚动时标尺与网格/Clip/参数线肉眼可见
+        // 地分离、不同步。
+        //
+        // 【为什么 OnDemand 仍然守住了原来的顾虑】它是 WebKitGTK 的默认策略：能用 GPU
+        // 就用，不能就自动退回软件路径。原来那条 `Never` 想避免的是「假设 GL 可用」，
+        // 而 `OnDemand` 从不做这个假设 —— 它只是不在 GL 可用时白白放弃它。
+        settings.set_hardware_acceleration_policy(webkit2gtk::HardwareAccelerationPolicy::OnDemand);
     }
     let Some(manager) = webview.user_content_manager() else {
         send(serde_json::json!({"type":"error","text":"no user content manager"}));
         std::process::exit(1);
     };
+    // 【为什么 bootstrap 要序列化成字面量再 JSON.parse】
+    //
+    // 直接把 bootstrap 文本拼进 JS 源码，等于把「载荷」和「代码」放进同一个语法
+    // 单元：载荷里任何一个字符让整条脚本语法失败，注入的就是**空**，而 UserScript
+    // 的语法错误不报错、不抛异常、不留痕迹，症状只有「页面看不到这个全局」——
+    // 前端 `getPluginHost()` 随即静默返回 null，整个应用退化成 standalone。
+    // 经 serde 序列化成一个字符串字面量，载荷就只是数据，不可能破坏脚本结构。
+    let bootstrap_literal =
+        serde_json::to_string(&bootstrap).unwrap_or_else(|_| "\"{}\"".to_owned());
+    // 【为什么合成一条脚本】bootstrap 是前端的入口条件（`getPluginHost()` 看不到
+    // 它就返回 null），它必须与桥**同生共死**。分两条 `add_script` 时，第二条在真机上
+    // 没有生效过（桥的探针每次都到，单独的 bootstrap 探针一次都没到）；与其继续猜
+    // WebKit 为什么不执行第二条，不如把它并进那条已被证明会执行的那一条。
     manager.add_script(&webkit2gtk::UserScript::new(
-        BRIDGE,
+        &format!(
+            "{BRIDGE}\n\
+             try{{window.__HFS_PLUGIN_BOOTSTRAP__=JSON.parse({bootstrap_literal});}}\
+             catch(e){{window.__HFS_PLUGIN_BOOTSTRAP__={{}};}}\n"
+        ),
         webkit2gtk::UserContentInjectedFrames::TopFrame,
         webkit2gtk::UserScriptInjectionTime::Start,
         &[],
         &[],
     ));
-    manager.add_script(&webkit2gtk::UserScript::new(
-        &format!("window.__HFS_PLUGIN_BOOTSTRAP__={bootstrap};"),
-        webkit2gtk::UserContentInjectedFrames::TopFrame,
-        webkit2gtk::UserScriptInjectionTime::Start,
-        &[],
-        &[],
-    ));
-    if manager.register_script_message_handler("hfs") {
+    // 【为什么失败必须报出来】注册失败时 `window.webkit.messageHandlers.hfs` 是
+    // undefined，页面里 `postMessage` 抛 TypeError 并被前端自己的 try/catch 吞掉 ——
+    // 表现是「界面能显示，点什么都没反应」，而这是**唯一**的开关。成功时不说话：
+    // 一次会话一行噪声换不来任何信息。
+    if !manager.register_script_message_handler("hfs") {
+        send(serde_json::json!({
+            "type": "error",
+            "text": "the webview refused the 'hfs' script message handler; \
+                     the editor cannot send any command"
+        }));
+    } else {
         manager.connect_script_message_received(None, move |_, result| {
             // 只接受字符串：结构化值在这里没有意义，而字符串是三条链路上唯一逐字节
             // 一致的形式（见插件里 protocol.rs 的理由）。
@@ -250,8 +278,26 @@ fn main() {
             false
         });
         webview.connect_create(|_, _| None::<gtk::Widget>);
+        // 【为什么加载完成后再补一次 bootstrap】
+        //
+        // UserScript 的注入世界与页面自己的执行上下文未必相同 —— 真机上出现过
+        // `window.__HFS_PLUGIN_BOOTSTRAP__` 在页面里不存在、而同一通道的桥探针却到达
+        // 的情形。前端的 bootstrap 是**按需读取**的（`getPluginHost()` 每次调用现读
+        // 全局），所以晚到一拍也能被看到；而加载完成是这条链上还握在我们手里的时机。
+        // 与 UserScript 那条用同一个字面量，两处不可能给出不同的载荷。
+        let boot_webview = webview.clone();
+        let boot_script = format!(
+            "window.__HFS_PLUGIN_BOOTSTRAP__=JSON.parse({bootstrap_literal});"
+        );
         webview.connect_load_changed(move |_, event| {
             if event == webkit2gtk::LoadEvent::Finished {
+                boot_webview.evaluate_javascript(
+                    &boot_script,
+                    None,
+                    None,
+                    None::<&gtk::gio::Cancellable>,
+                    |_result| {},
+                );
                 send(serde_json::json!({"type":"page-ready"}));
             }
         });
