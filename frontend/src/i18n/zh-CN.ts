@@ -1601,6 +1601,7 @@ export const zhCN = {
     appearance_font_restore_default: "还原默认字体",
     appearance_apply: "应用",
     appearance_import_theme: "导入...",
+    appearance_delete_theme: "删除主题「{name}」",
     appearance_export_theme: "导出",
     appearance_export_failed: "导出主题文件失败。",
     appearance_import_failed: "该文件不是有效的主题文件（或无法读取）。",

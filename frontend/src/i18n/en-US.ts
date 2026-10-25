@@ -1777,6 +1777,7 @@ export const enUS = {
     appearance_font_restore_default: "Restore Default Font",
     appearance_apply: "Apply",
     appearance_import_theme: "Import...",
+    appearance_delete_theme: "Delete theme {name}",
     appearance_export_theme: "Export",
     appearance_export_failed: "Failed to export the theme file.",
     appearance_import_failed: "That file is not a valid theme (or could not be read).",

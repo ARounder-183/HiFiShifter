@@ -1604,6 +1604,7 @@ export const zhTW = {
     appearance_font_restore_default: "還原預設字型",
     appearance_apply: "套用",
     appearance_import_theme: "匯入...",
+    appearance_delete_theme: "刪除主題「{name}」",
     appearance_export_theme: "匯出",
     appearance_export_failed: "匯出主題檔案失敗。",
     appearance_import_failed: "該檔案不是有效的主題檔案（或無法讀取）。",

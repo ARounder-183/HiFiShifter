@@ -159,6 +159,7 @@ export const koKR = {
     appearance_font_restore_default: "기본 글꼴로 복원",
     appearance_apply: "적용",
     appearance_import_theme: "가져오기...",
+    appearance_delete_theme: "테마 {name} 삭제",
     appearance_export_theme: "내보내기",
     appearance_export_failed: "테마 파일을 내보내지 못했습니다.",
     appearance_import_failed: "유효한 테마 파일이 아닙니다(읽을 수 없을 수도 있습니다).",

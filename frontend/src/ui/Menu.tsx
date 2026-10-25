@@ -43,6 +43,7 @@ import {
     Fragment,
     useCallback,
     useEffect,
+    useId,
     useLayoutEffect,
     useMemo,
     useRef,
@@ -415,6 +416,11 @@ export function AppContextMenu({
          * 悬停高亮由 CSS `:hover` 负责，没有 `data-active` 这回事。
          */
         onHoverItem: ((index: number) => void) | null,
+        /**
+         * 本层项的 id 前缀：只有拥有 `activeIndex` 的顶层传（供容器的
+         * `aria-activedescendant` 引用）；子面板走 DOM 焦点导航，不需要。
+         */
+        idPrefix: string | null,
     ): ReactNode =>
         entries.map((item, index) => (
             <Fragment key={item.key}>
@@ -448,13 +454,14 @@ export function AppContextMenu({
                                 : undefined
                         }
                     >
-                        {renderEntries(item.items, -1, reserveIcon, null)}
+                        {renderEntries(item.items, -1, reserveIcon, null, null)}
                     </AppSubMenu>
                 ) : (
                     <AppContextMenuItem
                         item={item}
                         active={index === layerActiveIndex}
                         reserveIcon={reserveIcon}
+                        id={idPrefix ? `${idPrefix}-item-${index}` : undefined}
                         onHover={
                             onHoverItem ? () => onHoverItem(item.disabled ? -1 : index) : undefined
                         }
@@ -467,11 +474,23 @@ export function AppContextMenu({
             </Fragment>
         ));
 
+    /*
+     * 键盘高亮的可访问名称：`role="menu"` 的键盘契约要求容器报告"当前项"
+     *（焦点不落到项上 —— 见 renderEntries 的说明），否则方向键移动时读屏静默。
+     * 仅覆盖顶层：子面板由 useMenuKeyboard 用真实 DOM 焦点导航，天然可读。
+     */
+    const menuId = useId();
+    const activeDescendant =
+        activeIndex >= 0 && items[activeIndex] && !items[activeIndex].items?.length
+            ? `${menuId}-item-${activeIndex}`
+            : undefined;
+
     return (
         <div
             ref={ref}
             role="menu"
             aria-label={ariaLabel}
+            aria-activedescendant={activeDescendant}
             data-hs-context-menu="1"
             data-hs-floating-menu={floating ? "1" : undefined}
             // 只有需要收焦点时才可聚焦（`tabIndex=-1` 不进 Tab 序列，仅可编程聚焦）。
@@ -492,7 +511,7 @@ export function AppContextMenu({
             onContextMenu={(event) => event.preventDefault()}
         >
             {header ? <div className="hs-menu__header">{header}</div> : null}
-            {renderEntries(items, activeIndex, reserveIconColumn, setActiveIndex)}
+            {renderEntries(items, activeIndex, reserveIconColumn, setActiveIndex, menuId)}
         </div>
     );
 }
@@ -501,12 +520,15 @@ function AppContextMenuItem({
     item,
     active,
     reserveIcon,
+    id,
     onHover,
     onSelect,
 }: {
     item: AppMenuItemSpec;
     active: boolean;
     reserveIcon: boolean;
+    /** 顶层项的 id（aria-activedescendant 引用）；子层为 undefined。 */
+    id?: string;
     /**
      * 悬停回调。**只有拥有 `activeIndex` 的那一层会传** —— 子面板的项不传，
      * 因为它的下标不能写进外层（见 `renderEntries` 的 `onHoverItem`）。
@@ -522,9 +544,12 @@ function AppContextMenuItem({
     return (
         <button
             type="button"
-            role="menuitem"
+            id={id}
             disabled={item.disabled}
-            aria-checked={item.checked}
+            // aria-checked 只允许出现在 menuitemcheckbox / menuitemradio 上：
+            // 挂在 menuitem 上多数读屏会忽略，勾选态因此不可知。
+            role={item.checked === undefined ? "menuitem" : "menuitemcheckbox"}
+            aria-checked={item.checked === undefined ? undefined : item.checked ? "true" : "false"}
             // 键盘高亮与鼠标悬停在 CSS 里是**同一条规则**（`[data-active]` 与
             // `:hover` 并列），因此这里只需如实标出"当前高亮的是这一项"。
             data-active={active && !item.disabled ? "1" : undefined}

@@ -92,6 +92,11 @@ export function I18nProvider({ children }: PropsWithChildren) {
     const [localeState, setLocaleState] = useState<Locale>(getDefaultLocale);
 
     useEffect(() => {
+        // `<html lang>` 必须跟随界面语言：屏幕阅读器按它决定发音规则（切到
+        // zh-CN/ja-JP 后仍标 "en"，中文会被逐字母拼读），盲文翻译同样依赖它。
+        // 主窗口与独立窗口都挂本 Provider，一处写入各自生效。
+        document.documentElement.lang = localeState;
+
         // Native close-confirmation dialog lives in Rust (Tauri). Keep backend locale in sync
         // so the dialog follows the user's in-app language.
         if (!isTauriRuntime()) return;

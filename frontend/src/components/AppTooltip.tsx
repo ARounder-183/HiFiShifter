@@ -12,6 +12,15 @@ import {
  * （如内联曲线图标）。AppTooltipProvider 监听此事件维护注册表。
  */
 export const HS_TOOLTIP_CONTENT_EVENT = "hs-tooltip-content";
+
+/**
+ * 气泡元素的稳定 id：显示期间挂在触发元素的 `aria-describedby` 上。
+ *
+ * 【为什么必须有这层关联】本仓三个目录禁用原生 `title` 改走 data-tooltip 通道，
+ * 若不补 aria 关联，全部悬停帮助（含"为什么禁用"的说明）对屏幕阅读器完全
+ * 不可见 —— 比保留原生 title 是纯倒退。
+ */
+const TOOLTIP_BUBBLE_ID = "hs-tooltip-bubble";
 import { createPortal } from "react-dom";
 
 import { shouldSuppressHoverSideEffects } from "../utils/penInput";
@@ -76,6 +85,7 @@ export function AppTooltipBubble({
     return createPortal(
         <div
             ref={bubbleRef}
+            id={TOOLTIP_BUBBLE_ID}
             className="app-tooltip"
             role="tooltip"
             style={{
@@ -138,6 +148,19 @@ export function AppTooltipProvider({
         let pinned = false;
         /** 最近一次气泡显示所用的原始位置（渲染时再统一夹紧）。 */
         let lastShownPosition: AppTooltipPosition | null = null;
+        /** 当前挂着 aria-describedby 的触发元素（见 TOOLTIP_BUBBLE_ID 的说明）。 */
+        let described: HTMLElement | null = null;
+        const describe = (element: Element | null) => {
+            const target = element instanceof HTMLElement ? element : null;
+            if (described === target) return;
+            if (described) described.removeAttribute("aria-describedby");
+            described = target;
+            if (target) target.setAttribute("aria-describedby", TOOLTIP_BUBBLE_ID);
+        };
+        const hideTooltip = () => {
+            describe(null);
+            setTooltip(null);
+        };
         // ReactNode 内容注册表：元素 → {content, key}。设置方通过全局事件
         // 写入；Provider 在悬停/钉住刷新时优先取用富内容。
         const customContentByElement = new Map<
@@ -185,7 +208,7 @@ export function AppTooltipProvider({
                 pinned = false;
                 lastShownPosition = null;
                 currentElement = null;
-                setTooltip(null);
+                hideTooltip();
                 return;
             }
             const target = event.target instanceof Element ? event.target : null;
@@ -232,6 +255,7 @@ export function AppTooltipProvider({
             nodeKey: string | undefined,
             position: AppTooltipPosition,
         ) => {
+            describe(currentElement);
             lastShownPosition = position;
             setTooltip((prev) =>
                 prev &&
@@ -258,20 +282,20 @@ export function AppTooltipProvider({
             if (element !== currentElement) {
                 currentElement = element;
                 if (!element) {
-                    setTooltip(null);
+                    hideTooltip();
                     return;
                 }
             }
             if (!element) return;
 
             if (hasOpenContextMenu()) {
-                setTooltip(null);
+                hideTooltip();
                 currentElement = null;
                 return;
             }
             const { content, nodeKey } = resolveContent(element);
             if (!isRenderable(content)) {
-                setTooltip(null);
+                hideTooltip();
                 return;
             }
             showAt(content, nodeKey, { x: event.clientX, y: event.clientY });
@@ -281,7 +305,7 @@ export function AppTooltipProvider({
             if (!currentElement) return;
             const { content, nodeKey } = resolveContent(currentElement);
             if (!isRenderable(content)) {
-                setTooltip(null);
+                hideTooltip();
                 return;
             }
             setTooltip((prev) =>
@@ -307,7 +331,7 @@ export function AppTooltipProvider({
                 !relatedTarget?.closest?.("[data-tooltip], [data-hs-rich-tooltip]")
             ) {
                 currentElement = null;
-                setTooltip(null);
+                hideTooltip();
             }
         };
 
@@ -318,7 +342,7 @@ export function AppTooltipProvider({
             pinned = false;
             lastShownPosition = null;
             currentElement = null;
-            setTooltip(null);
+            hideTooltip();
         };
         const hasOpenMenuNow = () =>
             suppressGetterRef.current?.() === true ||
@@ -364,7 +388,7 @@ export function AppTooltipProvider({
             if (shouldSuppressHoverSideEffects(event)) {
                 if (!pinned && currentElement) {
                     currentElement = null;
-                    setTooltip(null);
+                    hideTooltip();
                 }
                 return;
             }
@@ -377,7 +401,7 @@ export function AppTooltipProvider({
             if (hasOpenContextMenu()) {
                 pinned = false;
                 lastShownPosition = null;
-                setTooltip(null);
+                hideTooltip();
                 currentElement = null;
                 return;
             }
@@ -390,7 +414,7 @@ export function AppTooltipProvider({
                 return;
             }
             if (!isRenderable(content)) {
-                setTooltip(null);
+                hideTooltip();
                 return;
             }
             showAt(content, nodeKey, { x: event.clientX, y: event.clientY });
@@ -412,6 +436,7 @@ export function AppTooltipProvider({
             document.removeEventListener("pointerover", onPointerOver);
             document.removeEventListener("pointermove", onPointerMove);
             document.removeEventListener("pointerout", onPointerOut);
+            describe(null);
         };
     }, []);
 

@@ -464,7 +464,7 @@ export interface AppearanceSettingsPanelProps {
 }
 
 export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = ({ formId }) => {
-    const { t, tf, plural } = useI18n();
+    const { t, tf, tVars, plural } = useI18n();
     const theme = useAppTheme();
     // 解构出稳定引用供下面的实时预览 effect 使用：effect 只依赖具体成员、
     // 不依赖整个 context 对象（对象身份随 provider 任意更新翻转，见该 effect 处说明）。
@@ -1095,28 +1095,39 @@ export const AppearanceSettingsPanel: React.FC<AppearanceSettingsPanelProps> = (
                                         {customThemes.map((ct) => {
                                             const isActive = activeThemeId === ct.id;
                                             return (
-                                                <div
+                                                <span
                                                     key={ct.id}
                                                     className={
-                                                        "inline-flex items-center gap-1 px-2 py-1 text-qt-micro rounded cursor-pointer " +
+                                                        "inline-flex items-center gap-1 px-2 py-1 text-qt-micro rounded " +
                                                         "transition-all duration-100 select-none " +
                                                         (isActive
                                                             ? "bg-qt-highlight/20 text-qt-highlight font-semibold"
                                                             : "bg-qt-surface text-qt-text hover:bg-qt-hover")
                                                     }
-                                                    onClick={() => handleSelectTheme(ct)}
                                                 >
-                                                    <span>{ct.name}</span>
+                                                    {/* 键盘可达性：chip 本体必须是按钮（aria-pressed 表达"当前
+                                                        主题"），这是应用已保存自定义主题的**唯一**途径；
+                                                        删除按钮移到兄弟节点，避免按钮嵌套。 */}
                                                     <button
+                                                        type="button"
+                                                        aria-pressed={isActive}
+                                                        onClick={() => handleSelectTheme(ct)}
+                                                        className="cursor-pointer"
+                                                    >
+                                                        {ct.name}
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        aria-label={tVars(
+                                                            "appearance_delete_theme",
+                                                            { name: ct.name },
+                                                        )}
                                                         className="text-qt-3xs opacity-30 hover:opacity-100 hover:text-qt-danger-text transition-opacity cursor-pointer"
-                                                        onClick={(e) => {
-                                                            e.stopPropagation();
-                                                            handleDeleteTheme(ct.id);
-                                                        }}
+                                                        onClick={() => handleDeleteTheme(ct.id)}
                                                     >
                                                         ×
                                                     </button>
-                                                </div>
+                                                </span>
                                             );
                                         })}
                                     </div>

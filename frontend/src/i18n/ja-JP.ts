@@ -1655,6 +1655,7 @@ export const jaJP = {
     appearance_font_restore_default: "既定フォントに戻す",
     appearance_apply: "適用",
     appearance_import_theme: "インポート...",
+    appearance_delete_theme: "テーマ「{name}」を削除",
     appearance_export_theme: "エクスポート",
     appearance_export_failed: "テーマファイルの書き出しに失敗しました。",
     appearance_import_failed:
