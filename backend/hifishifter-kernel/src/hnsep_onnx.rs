@@ -213,11 +213,7 @@ fn get_or_init_shared_session(
 ) -> Result<Arc<SeparatorSession>, crate::vocoder_ort_session::SessionBuildError> {
     let mutex = SHARED_SESSION.get_or_init(|| Mutex::new(None));
     // 快路径：已有会话直接克隆返回。
-    if let Some(session) = mutex
-        .lock()
-        .map_err(|e| format!("SHARED_SESSION lock poisoned: {e}"))?
-        .clone()
-    {
+    if let Some(session) = mutex.lock().unwrap_or_else(|e| e.into_inner()).clone() {
         return Ok(session);
     }
     // 慢路径：构建在全局构建锁内进行（与 Vocoder / FCPE 串行化，避免并发
@@ -236,11 +232,7 @@ fn get_or_init_shared_session(
     let _build_flight =
         crate::vocoder_ort_session::acquire_session_build_lock(std::time::Duration::from_secs(20))?;
     // 双重检查：等待期间其他线程（设备切换的异步预热）可能已完成构建。
-    if let Some(session) = mutex
-        .lock()
-        .map_err(|e| format!("SHARED_SESSION lock poisoned: {e}"))?
-        .clone()
-    {
+    if let Some(session) = mutex.lock().unwrap_or_else(|e| e.into_inner()).clone() {
         return Ok(session);
     }
     // 构建期间 EP 设置再次变化（用户连续切换设备）→ 丢弃陈旧结果并重建。
@@ -253,9 +245,7 @@ fn get_or_init_shared_session(
             log::warn!("[hnsep] inference device changed during session build — rebuilding with the new EP");
             continue;
         }
-        let mut guard = mutex
-            .lock()
-            .map_err(|e| format!("SHARED_SESSION lock poisoned: {e}"))?;
+        let mut guard = mutex.lock().unwrap_or_else(|e| e.into_inner());
         // 其他线程（设备切换的异步预热 / 并发的渲染线程）可能已完成构建：
         // 复用已存在的会话，避免无谓替换与重复烟测。
         if let Some(existing) = guard.as_ref() {
@@ -398,10 +388,7 @@ pub fn probe_load() -> Result<String, String> {
                 mask_input.to_vec().into_boxed_slice(),
             ))
             .map_err(|e| format!("build spec tensor failed: {e}"))?;
-            let mut guard = session
-                .runtime
-                .lock()
-                .map_err(|e| format!("hnsep session lock poisoned: {e}"))?;
+            let mut guard = session.runtime.lock().unwrap_or_else(|e| e.into_inner());
             let outputs = guard
                 .run(ort::inputs![tensor])
                 .map_err(|e| format!("hnsep ort session run failed: {e}"))?;
@@ -588,13 +575,13 @@ pub fn infer_harmonic_noise_mono(
     let session = get_or_init_shared_session()?;
     let cache_key = separation_cache_key(audio_mono, sample_rate, session.identity);
     // ORT本就串行使用唯一separator；把单飞边界前移到cache复查，避免并发重复STFT/推理。
-    let _flight = SEPARATION_FLIGHT
-        .lock()
-        .map_err(|e| format!("hnsep flight lock poisoned: {e}"))?;
+    // 【为什么毒化要恢复而不是报错】这把单飞锁跨"STFT→推理→重采样"整段持有，
+    // 而渲染循环的 catch_unwind 兜底恰好可能发生在持锁期内 —— 按"毒化即永久
+    // 失败"处理会让此后**所有** HNSEP 分离（气声/张力 clip 渲染）永久失败直到
+    // 重启。互斥语义在毒化后仍然成立，与全仓库的 into_inner 恢复策略一致。
+    let _flight = SEPARATION_FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
     {
-        let mut cache = global_cache()
-            .lock()
-            .map_err(|e| format!("hnsep cache lock poisoned: {e}"))?;
+        let mut cache = global_cache().lock().unwrap_or_else(|e| e.into_inner());
         if let Some(entry) = cache.entries.get(&cache_key) {
             // Verify length consistency before returning cached result.
             // If the cached audio differs in length from the request, treat as miss
@@ -636,10 +623,7 @@ pub fn infer_harmonic_noise_mono(
             ))
             .map_err(|e| format!("build hnsep spec tensor failed: {e}"))?;
 
-            let mut session_guard = session
-                .runtime
-                .lock()
-                .map_err(|e| format!("hnsep ort session lock poisoned: {e}"))?;
+            let mut session_guard = session.runtime.lock().unwrap_or_else(|e| e.into_inner());
             INFERENCE_RUNS.fetch_add(1, Ordering::Relaxed);
             let outputs = session_guard
                 .run(ort::inputs![spec_tensor])
@@ -716,9 +700,7 @@ pub fn infer_harmonic_noise_mono(
         harmonic: harmonic_arc.clone(),
         noise: noise_arc.clone(),
     };
-    let mut cache = global_cache()
-        .lock()
-        .map_err(|e| format!("hnsep cache lock poisoned: {e}"))?;
+    let mut cache = global_cache().lock().unwrap_or_else(|e| e.into_inner());
     cache.put(cache_key, entry);
 
     Ok((harmonic_arc, noise_arc))

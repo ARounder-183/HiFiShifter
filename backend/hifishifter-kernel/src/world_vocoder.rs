@@ -101,50 +101,14 @@ extern "C" {
         y: *mut f64,
     );
 
-    // ── 流式合成（WorldSynthesizer / synthesisrealtime.h）──────────────────
-    pub fn InitializeSynthesizer(
-        fs: i32,
-        frame_period: f64,
-        fft_size: i32,
-        buffer_size: i32,
-        number_of_pointers: i32,
-        synth: *mut WorldSynthesizerRaw,
-    );
-    pub fn AddParameters(
-        f0: *mut f64,
-        f0_length: i32,
-        spectrogram: *mut *mut f64,
-        aperiodicity: *mut *mut f64,
-        synth: *mut WorldSynthesizerRaw,
-    ) -> i32;
-    pub fn RefreshSynthesizer(synth: *mut WorldSynthesizerRaw);
-    pub fn DestroySynthesizer(synth: *mut WorldSynthesizerRaw);
-    pub fn IsLocked(synth: *mut WorldSynthesizerRaw) -> i32;
-    pub fn Synthesis2(synth: *mut WorldSynthesizerRaw) -> i32;
-}
-
-// ── WorldSynthesizer 不透明句柄 ────────────────────────────────────────────────
-//
-// WorldSynthesizer 结构体内部含有大量裸指针和 FFT 状态，Rust 侧不需要直接访问字段，
-// 只需保证内存布局足够大即可。我们用一个足够大的字节数组作为不透明存储，
-// 实际大小由 C++ 侧的 sizeof(WorldSynthesizer) 决定。
-//
-// 精确计算（x86_64，MSVC ABI）：
-//   基本字段（fs/frame_period/buffer_size/...到 randn_state 结束）：约 192 字节
-//   RandnState（4×uint32）：16 字节
-//   MinimumPhaseAnalysis（含 2 个 fft_plan，每个 72 字节）：176 字节
-//   InverseRealFFT（含 1 个 fft_plan）：96 字节
-//   ForwardRealFFT（含 1 个 fft_plan）：96 字节
-//   合计：约 560 字节
-//
-// 原来预留 512 字节不足（差 ~48 字节），导致 InitializeSynthesizer 写入越界，
-// 引发 STATUS_ACCESS_VIOLATION。现扩大到 1024 字节，留足安全余量。
-//
-// 注意：该结构体**只能**通过 Box::new(zeroed()) 分配在堆上，
-// 绝不能在栈上创建（避免栈溢出和移动后指针失效）。
-#[repr(C)]
-pub struct WorldSynthesizerRaw {
-    _opaque: [u8; 1024],
+    // 【已删除的流式合成 FFI】`InitializeSynthesizer` / `AddParameters` /
+    // `RefreshSynthesizer` / `DestroySynthesizer` / `IsLocked` / `Synthesis2` 与
+    // `WorldSynthesizerRaw` 曾服务于 streaming_world.rs 的逐块流式合成器，但它
+    // 有结构性缺陷（pad 窗口重叠导致合成器时间轴倒退，见下方
+    // `vocode_pitch_shift_chunked` 的接缝说明）且全仓无调用方，其 FFI 还依赖
+    // 硬编码的 C++ 字段偏移与**猜测**的 opaque 尺寸（512 时已实际造成
+    // ACCESS_VIOLATION）—— 留在代码里是随时会被复用的地雷，2026-10 审查后删除。
+    // 批量 `Synthesis`（上方声明）仍在使用，不受影响。
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -700,8 +664,9 @@ fn world_input_normalization(mono_pcm: &[f32]) -> (f64, f64) {
 /// 的合成结果按 [`crate::seam`] 的等功率窗**叠加**进输出，最后按权重和归一。
 /// 相邻块的核心区因此重叠 `overlap_len` 并被交叉淡化，接缝落在淡化区中部。
 ///
-/// 【为什么不再用流式合成器】旧实现把每块的**含 pad 输入**整段推给
-/// `StreamingWorldSynthesizer`，而相邻块的 pad 窗口**互相重叠**（共 2×overlap）——
+/// 【为什么不用流式合成器】旧实现把每块的**含 pad 输入**整段推给一个逐块推进的
+/// 流式合成器（该路径已删除，见文件头 FFI 声明处的说明），而相邻块的 pad 窗口
+/// **互相重叠**（共 2×overlap）——
 /// 合成器收到的时间轴因此**倒退**，其内部相位/时间状态被污染，
 /// `pull_samples()` 返回的样本与"本块的时间位置"不再对应，输出在接缝处错位。
 /// 再叠加"回退时整机重建"（等于每块一次冷启动），该路径实际从未提供它宣称的

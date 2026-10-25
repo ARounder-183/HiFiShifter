@@ -164,7 +164,6 @@ pub mod hnsep_dsp;
 mod hnsep_resources;
 pub mod host_pcm_cache;
 pub mod rd_tension;
-pub mod streaming_world;
 pub mod world_vocoder;
 
 #[cfg(feature = "onnx")]

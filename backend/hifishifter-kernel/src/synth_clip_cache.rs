@@ -1,12 +1,12 @@
-//! 通用 per-clip 合成结果缓存（WORLD / ONNX 共享）。
+//! 渲染缓存：分块合成缓存键（`compute_param_hash`）、整 clip 预渲染缓存
+//! （`RenderedClipCache`）与渲染状态集成。
 //!
-//! 以 `(clip_id, param_hash)` 为 key，缓存合成结果（stereo interleaved PCM）。
-//! 参数不变时直接复用缓存，避免重复合成；参数变化时自动失效并重新合成。
-//!
-//! # 设计
-//! - 进程级全局 `Mutex<SynthClipCache>`，实时路径与离线路径共享
-//! - LRU 淘汰，容量上限 64 个 clip
-//! - `param_hash` 使用 FNV-1a 64-bit，覆盖 clip 时间参数 + pitch_edit 曲线片段
+//! 【已删除：per-segment 合成缓存】`SynthClipCache` / `SynthClipCacheEntry` /
+//! `global_synth_clip_cache` 及其 `is_clip_rendered` / `mark_clip_rendering_*`
+//! 家族在 2026-10 审查中删除：全仓库从未有过任何**插入方**，`render_with_formant`
+//! 里"每段先付一次全段参数哈希 + 全局锁查询一个不可能命中的键"是纯浪费，
+//! "命中取左声道"的分支也不可达。真正生效的缓存是 `renderer::hifigan`
+//! 的**分块**缓存（`chunk_hash`，按块区间切片）与本文件的 `RenderedClipCache`。
 //!
 //! # 浮点参数量化（2026-06-30 修复）
 //! 在 `compute_rendered_clip_hash` 中, formant_morph 的 f1 / f2 / strength
@@ -30,128 +30,13 @@ use crate::pitch_editing::PitchCurvesSnapshot;
 use crate::byte_budget_cache::ByteBudgetCache;
 use crate::clip_rendering_state::{global_clip_rendering_state, ClipRenderingState};
 
-// ─── 缓存容量 ──────────────────────────────────────────────────────────────────
-
-const DEFAULT_CAPACITY: usize = 64;
-
-// ─── Key / Entry ───────────────────────────────────────────────────────────────
-
-/// 缓存 key：clip 唯一标识 + 参数哈希。
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct SynthClipCacheKey {
-    pub clip_id: String,
-    pub param_hash: u64,
-}
-
-/// 缓存 entry：合成结果（stereo interleaved PCM）。
-#[derive(Debug, Clone)]
-pub struct SynthClipCacheEntry {
-    /// Stereo interleaved PCM，长度 = `frames * 2`。
-    pub pcm_stereo: Arc<Vec<f32>>,
-    /// 有效帧数。
-    pub frames: u64,
-    /// 采样率（Hz）。
-    pub sample_rate: u32,
-}
-
-// ─── Cache ─────────────────────────────────────────────────────────────────────
-
-/// Byte-budgeted LRU cache for per-clip synthesis results (WORLD and ONNX share).
-pub struct SynthClipCache {
-    inner: ByteBudgetCache<SynthClipCacheKey, SynthClipCacheEntry>,
-}
-
-impl SynthClipCache {
-    /// 创建指定容量和字节预算的缓存。
-    pub fn new(capacity: usize, budget_bytes: u64) -> Self {
-        Self {
-            inner: ByteBudgetCache::new(capacity, budget_bytes),
-        }
-    }
-
-    /// 查询缓存。命中时将 key 移到 front（最近使用）。
-    pub fn get(&mut self, key: &SynthClipCacheKey) -> Option<&SynthClipCacheEntry> {
-        self.inner.get(key)
-    }
-
-    /// 插入缓存。字节预算自动管理淘汰。
-    pub fn insert(&mut self, key: SynthClipCacheKey, entry: SynthClipCacheEntry) {
-        let weight = entry.pcm_stereo.len() as u64 * 4; // f32 = 4 bytes
-        self.inner.insert(key, entry, weight);
-    }
-
-    /// 使指定 clip_id 的所有缓存失效（不论 param_hash）。
-    pub fn invalidate(&mut self, clip_id: &str) {
-        self.inner.invalidate_where(|k| k.clip_id == clip_id);
-    }
-
-    /// 清空所有缓存。
-    pub fn clear(&mut self) {
-        self.inner.clear();
-    }
-
-    /// 清空所有缓存并返回估算释放的字节数（仅 PCM 数据部分）。
-    pub fn clear_and_estimate_bytes(&mut self) -> u64 {
-        let bytes = self.inner.total_bytes();
-        self.inner.clear();
-        bytes
-    }
-
-    /// 当前缓存条目数。
-    pub fn len(&self) -> usize {
-        self.inner.len()
-    }
-
-    /// 当前缓存总字节数。
-    pub fn total_bytes(&self) -> u64 {
-        self.inner.total_bytes()
-    }
-}
-
-// ─── 全局实例 ──────────────────────────────────────────────────────────────────
-
-static GLOBAL_SYNTH_CLIP_CACHE: OnceLock<Mutex<SynthClipCache>> = OnceLock::new();
-
-/// 获取进程级全局合成 clip 缓存。
-///
-/// 首次调用时初始化，容量为 [`DEFAULT_CAPACITY`]（64）。
-/// WORLD 和 ONNX 共享同一个缓存实例。
-pub fn global_synth_clip_cache() -> &'static Mutex<SynthClipCache> {
-    GLOBAL_SYNTH_CLIP_CACHE.get_or_init(|| {
-        let budget = crate::byte_budget_cache::env_cache_budget_bytes() / 4; // 1/4 of total budget
-        Mutex::new(SynthClipCache::new(DEFAULT_CAPACITY, budget))
-    })
-}
-
 // ─── Clip 渲染状态集成 ──────────────────────────────────────────────────────────
-
-/// 检查 clip 是否已渲染完成（缓存命中）
-pub fn is_clip_rendered(clip_id: &str, param_hash: u64) -> bool {
-    let key = SynthClipCacheKey {
-        clip_id: clip_id.to_string(),
-        param_hash,
-    };
-
-    let mut cache = global_synth_clip_cache()
-        .lock()
-        .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
-
-    cache.get(&key).is_some()
-}
-
-/// 设置 clip 渲染状态
-pub fn set_clip_rendering_state(
-    clip_id: &str,
-    state: ClipRenderingState,
-    progress: f32,
-    error: Option<String>,
-) {
-    let mut state_manager = global_clip_rendering_state()
-        .lock()
-        .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
-
-    state_manager.set_state(clip_id, state, progress, error);
-}
+//
+// 【已删除的包装家族】`is_clip_rendered` / `is_clip_ready` / `set_clip_rendering_state` /
+// `mark_clip_rendering_start` / `mark_clip_rendering_complete` / `mark_clip_rendering_failed`
+// 一并移除：它们要么只服务于永不命中的 per-segment 缓存（见文件头），要么在
+// 调用方（src-tauri 的 playback.rs）直接经 `global_clip_rendering_state()` 写入后
+// 再无调用者。保留 `get_clip_rendering_state`（snapshot.rs 的读数口）。
 
 /// 获取 clip 渲染状态
 pub fn get_clip_rendering_state(clip_id: &str) -> Option<ClipRenderingState> {
@@ -160,52 +45,6 @@ pub fn get_clip_rendering_state(clip_id: &str) -> Option<ClipRenderingState> {
         .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
 
     state_manager.get_state(clip_id).map(|info| info.state)
-}
-
-/// 检查 clip 是否就绪（缓存命中且状态为 Ready）
-pub fn is_clip_ready(clip_id: &str, param_hash: u64) -> bool {
-    let state_manager = global_clip_rendering_state()
-        .lock()
-        .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
-
-    state_manager.is_ready(clip_id) && is_clip_rendered(clip_id, param_hash)
-}
-
-/// 标记 clip 渲染开始
-pub fn mark_clip_rendering_start(clip_id: &str) {
-    set_clip_rendering_state(clip_id, ClipRenderingState::Rendering, 0.0, None);
-}
-
-/// 标记 clip 渲染完成
-pub fn mark_clip_rendering_complete(clip_id: &str, param_hash: u64, entry: SynthClipCacheEntry) {
-    // 插入缓存
-    let key = SynthClipCacheKey {
-        clip_id: clip_id.to_string(),
-        param_hash,
-    };
-
-    let mut cache = global_synth_clip_cache()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-
-    cache.insert(key, entry);
-
-    // 更新状态
-    set_clip_rendering_state(clip_id, ClipRenderingState::Ready, 1.0, None);
-}
-
-/// 标记 clip 渲染失败
-pub fn mark_clip_rendering_failed(clip_id: &str, error: String) {
-    set_clip_rendering_state(clip_id, ClipRenderingState::Failed, 0.0, Some(error));
-}
-
-/// 清理超时的渲染任务
-pub fn cleanup_timeout_rendering_tasks() -> Vec<String> {
-    let mut state_manager = global_clip_rendering_state()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-
-    state_manager.cleanup_timeouts()
 }
 
 // ─── param_hash 计算 ───────────────────────────────────────────────────────────
@@ -372,7 +211,7 @@ pub struct RenderedClipCacheEntry {
 
 /// 整 Clip 渲染结果的 byte-budgeted LRU 缓存。
 ///
-/// 与 [`SynthClipCache`]（per-segment）共存，用于 Clip 级预渲染缓存。
+/// 与已删除的 per-segment 合成缓存（见文件头）相对，本缓存用于 Clip 级预渲染。
 /// audio callback 中通过 `EngineClip.rendered_pcm` 直接读取，不经过此缓存。
 /// 此缓存主要在 `build_snapshot` 阶段查询并填充 `rendered_pcm`。
 pub struct RenderedClipCache {
@@ -1130,7 +969,8 @@ pub fn global_breath_noise_cache() -> &'static Mutex<BreathNoiseCache> {
     })
 }
 
-/// 使指定 clip 的所有渲染缓存失效（SynthClipCache + RenderedClipCache + BreathNoiseCache）。
+/// 使指定 clip 的所有渲染缓存失效（RenderedClipCache + BreathNoiseCache；
+/// 分块合成缓存靠参数哈希自然失效，无需显式清）。
 ///
 /// 此函数应在 pitch_edit 或其他影响合成的参数发生变化时调用，
 /// 确保旧的预渲染结果不会被错误复用。
@@ -1147,22 +987,7 @@ pub fn invalidate_clip_all_caches(clip_id: &str) {
     //  表现为音频断续、播放光标近乎不动。按需移除没有这个问题。）
     crate::synth_clip_cache::remove_pending_rendered_key(clip_id);
 
-    // 1. SynthClipCache 失效（per-segment 合成缓存）
-    {
-        let mut cache = global_synth_clip_cache()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let before = cache.len();
-        cache.invalidate(clip_id);
-        if cache.len() < before {
-            debug_eprintln!(
-                "[cache:invalidate] clip_id={} SynthClipCache invalidated",
-                clip_id
-            );
-        }
-    }
-
-    // 2. RenderedClipCache 失效（整 Clip 预渲染缓存）
+    // 1. RenderedClipCache 失效（整 Clip 预渲染缓存）
     {
         let mut cache = global_rendered_clip_cache()
             .lock()
@@ -1233,16 +1058,10 @@ pub fn invalidate_clip_for_pitch_edit(clip_id: &str) {
     crate::synth_clip_cache::remove_pending_rendered_key(clip_id);
 
     debug_eprintln!(
-        "[cache:invalidate] clip_id={clip_id} pitch_edit invalidated (synth + pending keys cleared, rendered cache kept)"
+        "[cache:invalidate] clip_id={clip_id} pitch_edit invalidated (pending keys cleared, rendered cache kept)"
     );
-    // 1. SynthClipCache 失效
-    {
-        let mut cache = global_synth_clip_cache()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        cache.invalidate(clip_id);
-    }
-    // 2. pending_rendered_keys 清除
+    // （per-segment SynthClipCache 已删除，见文件头；分块缓存靠哈希自然失效。）
+    // pending_rendered_keys 清除
     {
         let mut map = global_pending_rendered_keys()
             .lock()

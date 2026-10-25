@@ -543,7 +543,12 @@ impl ClipProcessor for VslibProcessor {
             let mut pitch_applied_count = 0usize;
 
             for pnt in 0..ctrl_pnt_num {
-                let at_abs = seg_start + (pnt as f64) * cp_interval_sec;
+                // 控制点处于**源音频时间轴**（vslib 自己处理时间拉伸，见下方
+                // Timing 控制点段），而 formant/breathiness 曲线与 pitch_edit 一样
+                // 按 timeline 时间索引 —— 必须先除以 playback_rate 映射回 timeline
+                // 再采样（与下方 pitch 分支同一换算）。漏除会让 rate≠1 时曲线整体
+                // 错位：画在 10s 的共振峰偏移实际作用在源域 10s（timeline 20s）处。
+                let at_abs = seg_start + (pnt as f64) * cp_interval_sec / playback_rate;
                 let mut cp2 = unsafe { std::mem::zeroed::<VSCPINFOEX2>() };
                 if check(unsafe { VslibGetCtrlPntInfoEx2(proj.0, item_num, pnt, &mut cp2) })
                     .is_err()

@@ -239,9 +239,6 @@ impl HiFiGanRenderer {
             return Ok(ctx.mono_pcm.to_vec());
         }
 
-        // ── 查询 per-segment 缓存 ─────────────────────────────────────────────
-        // 用 clip_id + seg 范围 + pitch_edit 片段 计算 param_hash，
-        // 实现离线渲染路径的推理结果复用。
         let sr = ctx.sample_rate;
         let renderer_identity = format!(
             "{}:{}",
@@ -249,7 +246,6 @@ impl HiFiGanRenderer {
             crate::nsf_hifigan_onnx::cache_identity()?
         );
         let seg_start_frame = (ctx.seg_start_sec * sr as f64).round().max(0.0) as u64;
-        let seg_end_frame = (ctx.seg_end_sec * sr as f64).round().max(0.0) as u64;
         // 直接引用上下文里的 pitch_edit，不再 to_vec()
         // `pitch_orig` 必须传 `clip_midi`：`midi_fn` 在 `pitch_edit` 无编辑处
         // 回落到它，所以它**确实参与**声码器输入。此前传空切片，等于把源 F0
@@ -272,43 +268,12 @@ impl HiFiGanRenderer {
             extra_curves.push(("hifigan_tension", c));
         }
 
-        // 参数哈希（**不含波形指纹**）：张力曲线作为 extra_curve 参与，
-        // 并由 `compute_param_hash` 按本段的时间范围切片 —— 因此只有与该范围
-        // 相交的改动才会让本键失效。详见 `compute_param_hash` 的 extra_curves 说明。
-        let param_hash = crate::synth_clip_cache::compute_param_hash(
-            ctx.clip_id,
-            seg_start_frame,
-            seg_end_frame,
-            sr,
-            ctx.channel_index,
-            &renderer_identity,
-            &curves_snapshot,
-            extra_curves.clone(),
-            ctx.extra_params,
-        );
-        let cache_key = crate::synth_clip_cache::SynthClipCacheKey {
-            clip_id: ctx.clip_id.to_string(),
-            param_hash,
-        };
-        // 命中缓存：直接返回 mono PCM（从 stereo 取左声道）
-        {
-            let mut cache = crate::synth_clip_cache::global_synth_clip_cache()
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if let Some(entry) = cache.get(&cache_key) {
-                let mut mono_out: Vec<f32> = entry
-                    .pcm_stereo
-                    .iter()
-                    .step_by(2)
-                    .take(ctx.mono_pcm.len())
-                    .copied()
-                    .collect();
-                mono_out.resize(ctx.mono_pcm.len(), 0.0);
-                return Ok(mono_out);
-            }
-        }
-
-        // 未命中：推理后写入缓存
+        // 【已删除的 per-segment 合成缓存查询】这里曾对整段曲线切片做一次
+        // `compute_param_hash`（长 clip 数百 KB~MB 逐字节 FNV）再锁全局缓存查询
+        // `(clip_id, param_hash)` —— 但全仓库从未有过任何插入方（该缓存家族
+        // 已随 2026-10 审查删除），命中分支永远不会走，每次渲染白白付出全段
+        // 哈希 + 一次全局锁。真正生效的缓存是下方的**分块**缓存（按块区间
+        // 切片哈希，`chunk_hash`），未受影响。
         // midi_at_time 回调使用 clip_midi_at_time + edit_midi_at_time_or_none
         // 的组合逻辑，与 WorldRenderer 共用同一套 F0 查询语义。
 
