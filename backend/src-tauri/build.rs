@@ -1,6 +1,156 @@
 #[path = "../build-support/product_version.rs"]
 mod product_version;
 
+/// 让可执行文件在运行时能找到随包分发的共享库。
+///
+/// 【为什么必须写在这里】`hifishifter-kernel` 的 build script 确实打印了
+/// `-Wl,-rpath,$ORIGIN`，但 kernel 只是 rlib：cargo 对非 cdylib/bin 目标的
+/// `cargo:rustc-link-arg` 是**丢弃**的（`hifishifter-plugin/build.rs` 里对同一
+/// 现象的注释写得更细）。真正产出 `HiFiShifter` 二进制的是本 crate，所以只能写在
+/// 这里。缺了这一段，`readelf -d` 里一个 RPATH 都没有，`ldd` 报
+/// `libSoundTouchDLL.so`、`libwebgpu_dawn.so` "not found"，linuxdeploy 也会在
+/// 「Deploying dependencies for existing files」那一步失败。
+///
+/// 两条路径对应两种布局：
+///   * 开发态 `target/release/` —— 二进制与两个 `.so` 同级，`$ORIGIN` 即可；
+///   * AppImage —— 二进制在 `usr/bin/`，Tauri 把资源放在 `usr/lib/HiFiShifter/`。
+fn link_runtime_search_paths() {
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if matches!(target_os.as_str(), "linux" | "freebsd" | "android") {
+        println!("cargo:rustc-link-arg=-Wl,--enable-new-dtags");
+        println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
+        println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../lib/HiFiShifter");
+    }
+}
+
+/// 把 ONNX Runtime 的 `.so` 暂存到 `resources/linux/`，由 `tauri.linux.conf.json`
+/// 打进 AppImage 的 `usr/lib/HiFiShifter/`。
+///
+/// ort-sys（`copy-dylibs`）把下载包里的 `.so` 以符号链接放到 `target/<profile>/`。
+/// 可执行文件把它当作 `DT_NEEDED`（Linux 的 GPU 走 WebGPU/Dawn），而 AppImage 的
+/// `usr/bin/` 里没有它，linuxdeploy 于是报
+/// `Could not find dependency: libwebgpu_dawn.so`。macOS 的
+/// `stage_ort_macos_dylibs()` 解决的是同一个问题，这里是对应的 Linux 版本。
+fn stage_ort_linux_so() {
+    use std::path::Path;
+
+    if !cfg!(target_os = "linux") {
+        return;
+    }
+
+    let out_dir = std::env::var("OUT_DIR").unwrap_or_default();
+    if out_dir.is_empty() {
+        return;
+    }
+
+    // OUT_DIR = .../target/<triple>/<profile>/build/<pkg>-<hash>/out
+    // 4 levels up = target/<triple>/<profile>/ (same dir ort-sys copies into).
+    let target_dir = Path::new(&out_dir)
+        .ancestors()
+        .nth(3)
+        .expect("[ort] unexpected OUT_DIR depth");
+    let staging_dir = Path::new("resources/linux");
+    // This directory is a build output. Without an explicit rerun guard, Cargo's
+    // default filesystem tracking sees newly staged .so files as inputs and
+    // starts another build, creating a watch loop in `cargo tauri dev`.
+    println!("cargo:rerun-if-changed=build.rs");
+
+    if let Err(e) = std::fs::create_dir_all(staging_dir) {
+        println!(
+            "cargo:warning=[ort] could not create {}: {}",
+            staging_dir.display(),
+            e
+        );
+        return;
+    }
+
+    let entries = match std::fs::read_dir(target_dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            println!(
+                "cargo:warning=[ort] could not read {}: {}",
+                target_dir.display(),
+                e
+            );
+            return;
+        }
+    };
+
+    let mut staged = 0usize;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(name) => name.to_string(),
+            None => continue,
+        };
+        // SoundTouch 与插件 cdylib 各有自己的打包路径，不能混进来。
+        if !name.ends_with(".so")
+            || name.starts_with("libSoundTouchDLL")
+            || name.starts_with("libhifishifter")
+        {
+            continue;
+        }
+
+        // ort-sys 放的是符号链接，`read` 会跟进去，正好拿到真实内容。
+        let src_bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                println!(
+                    "cargo:warning=[ort] could not read {}: {}",
+                    path.display(),
+                    e
+                );
+                continue;
+            }
+        };
+        let dst = staging_dir.join(&name);
+        if std::fs::read(&dst).ok().as_deref() == Some(src_bytes.as_slice()) {
+            println!(
+                "cargo:warning=[ort] {} unchanged, skipping write",
+                dst.display()
+            );
+            continue;
+        }
+
+        let temp_dst = staging_dir.join(format!("{}.tmp", name));
+        if let Err(e) = std::fs::write(&temp_dst, &src_bytes) {
+            println!(
+                "cargo:warning=[ort] could not stage {} to {}: {}",
+                path.display(),
+                temp_dst.display(),
+                e
+            );
+            continue;
+        }
+        if let Err(e) = std::fs::rename(&temp_dst, &dst) {
+            println!(
+                "cargo:warning=[ort] could not replace {} with {}: {}",
+                temp_dst.display(),
+                dst.display(),
+                e
+            );
+            let _ = std::fs::remove_file(&temp_dst);
+            continue;
+        }
+        println!(
+            "cargo:warning=[ort] staged {} to {}",
+            path.display(),
+            dst.display()
+        );
+        staged += 1;
+    }
+
+    if staged == 0 {
+        println!(
+            "cargo:warning=[ort] no ORT shared libraries staged from {} (expected on Linux)",
+            target_dir.display()
+        );
+    }
+}
+
 fn main() {
     // 产品版本的单一来源（`src-tauri/tauri.conf.json`）注入为 `HFS_PRODUCT_VERSION`，
     // 供 `build_info::version()` 与插件的「关于」对话框共用同一个值。
@@ -9,6 +159,8 @@ fn main() {
         env!("CARGO_PKG_VERSION"),
     );
     build_frontend();
+    link_runtime_search_paths();
+    stage_ort_linux_so();
 
     // Allow skipping expensive native builds in CI checks via env var
     // Set HIFISHIFTER_SKIP_NATIVE_BUILD=1 to skip WORLD/Signalsmith/VSLIB builds

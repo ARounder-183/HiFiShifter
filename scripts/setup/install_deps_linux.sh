@@ -20,7 +20,7 @@ sudo apt-get install -y \
   libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev gir1.2-webkit2-4.1 gir1.2-javascriptcoregtk-4.1 \
   libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
   libx11-dev libx11-xcb-dev libxkbcommon-dev libpango1.0-dev libcairo2-dev libatk1.0-dev \
-  libdbus-1-dev desktop-file-utils || true
+  libdbus-1-dev desktop-file-utils librsvg2-dev || true
 
 # Try to install explicit webkit/javascriptcore -dev packages (common names)
 echo "[install_deps_linux] Installing webkit2gtk and javascriptcore dev packages"
@@ -61,11 +61,42 @@ if ! PKG_CONFIG_ALLOW_SYSTEM_CFLAGS=1 pkg-config --modversion webkit2gtk-4.1 >/d
   echo "[install_deps_linux] Showing pkg-config search path: $PKG_CONFIG_PATH"
 fi
 
-echo "[install_deps_linux] Ensure Node is available (install if missing)"
-if ! command -v node >/dev/null 2>&1; then
-  echo "[install_deps_linux] Installing nodejs/npm from apt repositories"
-  sudo apt-get install -y nodejs npm
+echo "[install_deps_linux] Ensure Node is available and new enough for the frontend"
+# `frontend/package.json` pins vite 8 / vitest 5. Their engines are
+# `^20.19.0 || >=22.12.0` and `^22.12.0 || ^24.0.0 || >=26.0.0`. Ubuntu noble
+# ships Node 18, which dies inside rolldown with
+# "The requested module 'node:util' does not provide an export named 'styleText'".
+# A bare `command -v node` therefore is not a sufficient check.
+NODE_MIN_MAJOR=22
+NODE_MIN_MINOR=12
+NODE_INSTALL_VERSION="${NODE_INSTALL_VERSION:-v24.22.1}"
+node_is_new_enough() {
+  command -v node >/dev/null 2>&1 || return 1
+  local major minor
+  major="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null)" || return 1
+  minor="$(node -p 'process.versions.node.split(".")[1]' 2>/dev/null)" || return 1
+  if [ "${major:-0}" -gt "$NODE_MIN_MAJOR" ]; then return 0; fi
+  if [ "${major:-0}" -eq "$NODE_MIN_MAJOR" ] && [ "${minor:-0}" -ge "$NODE_MIN_MINOR" ]; then return 0; fi
+  return 1
+}
+
+if ! node_is_new_enough; then
+  echo "[install_deps_linux] Node is missing or older than ${NODE_MIN_MAJOR}.${NODE_MIN_MINOR} (found: $(node --version 2>/dev/null || echo none))"
+  echo "[install_deps_linux] Installing Node ${NODE_INSTALL_VERSION} into \$HOME/.local/opt (no sudo required)"
+  NODE_TARBALL_DIR="node-${NODE_INSTALL_VERSION}-linux-x64"
+  mkdir -p "$HOME/.local/opt"
+  curl -fSL --retry 3 -o "$HOME/.local/opt/node.tar.xz" \
+    "https://nodejs.org/dist/${NODE_INSTALL_VERSION}/${NODE_TARBALL_DIR}.tar.xz"
+  rm -rf "$HOME/.local/opt/${NODE_TARBALL_DIR}"
+  mkdir -p "$HOME/.local/opt/${NODE_TARBALL_DIR}"
+  tar -xJf "$HOME/.local/opt/node.tar.xz" -C "$HOME/.local/opt/${NODE_TARBALL_DIR}" --strip-components=1
+  rm -f "$HOME/.local/opt/node.tar.xz"
+  ln -sfn "$NODE_TARBALL_DIR" "$HOME/.local/opt/node"
+  export PATH="$HOME/.local/opt/node/bin:$PATH"
+  echo "[install_deps_linux] Add this to your shell rc so later shells see it:"
+  echo '  export PATH="$HOME/.local/opt/node/bin:$PATH"'
 fi
+node --version
 
 if [ "${SKIP_FRONTEND:-0}" != "1" ]; then
   echo "[install_deps_linux] Installing frontend npm deps"
