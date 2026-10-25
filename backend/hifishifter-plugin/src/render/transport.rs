@@ -13,6 +13,14 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU64, Ordering};
 /// 又远短于用户能察觉的漂移。
 const HOST_READING_STALE_MS: u64 = 150;
 
+/// 播放中单次采样允许的最大前进量（秒）。
+///
+/// 【为什么要设上界】现场症状是"光标大部分时间正常，偶尔跳到正常位置之后约 1.4 秒、
+/// 再跳回来"。1.4 秒远大于一个宿主节拍（33 ms）或一个音频块（10 ms），不可能是
+/// 正常推进 —— 它是一个**不可能值**。此前我们照单全收，于是界面忠实地把它画出来。
+/// 0.5 秒留出 15 倍余量：真实的快速前进（高倍速播放）也不会在一拍里跨过它。
+const MAX_PLAUSIBLE_ADVANCE_SEC: f64 = 0.5;
+
 /// 宿主读数在**音频块计数**上的生存期（约 8 块 ≈ 85 ms @ 48 kHz / 512 帧）。
 ///
 /// 【为什么还要一条块计数的判据】音频线程不能读墙钟（实时纪律），所以它的进度
@@ -80,6 +88,29 @@ impl TransportClock {
     pub fn publish_host(&self, position: f64, playing: bool) {
         if !position.is_finite() {
             return;
+        }
+        // 【只诊断，不修改】把不可能的前进量记下来：它是"光标偶尔跳 1.4 秒又跳回"
+        // 的唯一直接证据，而我们目前连它来自宿主还是来自我们自己都还不知道。
+        // 不在这里纠偏：纠偏会掩盖真正的原因，还会把合法的快速定位一起改掉。
+        if self.host_valid.load(Ordering::Acquire) {
+            let previous = self.host_pose.load(Ordering::Acquire);
+            let previous_playing = previous & 1 != 0;
+            let previous_position = f64::from_bits(previous & !1);
+            let advance = position - previous_position;
+            if playing
+                && previous_playing
+                && advance.is_finite()
+                && advance > MAX_PLAUSIBLE_ADVANCE_SEC
+            {
+                hifishifter_kernel::log_limiter::emit_limited_key(
+                    log::Level::Warn,
+                    "transport.implausible-advance",
+                    format_args!(
+                        "[transport] implausible host advance: {previous_position:.3}s -> {position:.3}s \
+                         (+{advance:.3}s in one sample); the editor will draw it as given"
+                    ),
+                );
+            }
         }
         // 先读块序号再发布位置：并发的音频块只会让宿主读数显得**更旧**，
         // 绝不会让它显得更新 —— 判据因此永远偏向音频线程（安全的方向）。
