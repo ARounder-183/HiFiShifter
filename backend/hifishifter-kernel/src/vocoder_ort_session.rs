@@ -1983,12 +1983,28 @@ pub fn diagnose_available_providers() -> Vec<String> {
     // WebGPU — compiled on Linux x86_64 / macOS ARM64 only.
     // Excluded: Windows (Dawn/D3D12 crash risk), Linux ARM64 (no prebuilt binary),
     //           WSL2 (Vulkan not available; Dawn init hangs at shutdown).
+    // 【为什么要分三种说法】此前 WSL 上这里只是**不列** WebGPU，日志于是只剩
+    // "CPUExecutionProvider" —— 用户无法区分「没编进去」「编了但被跳过」「编了但探测失败」，
+    // 而它们的下一步完全不同（换构建 / 换机器 / 查驱动）。
+    //
+    // 只在日志里分档，**不改** `available_providers` 的内容：那是给 UI 与诊断包读的
+    // 名单，塞进带括号的说明会让每个消费方都要解析一遍。
     #[cfg(any(
         all(target_os = "linux", target_arch = "x86_64"),
         all(target_os = "macos", target_arch = "aarch64")
     ))]
-    if !is_wsl2() && probe_webgpu_ep_available() {
-        providers.push("WebGpuExecutionProvider".to_string());
+    {
+        if cfg!(target_os = "linux") && is_wsl2() {
+            log::warn!(
+                "[ort] webgpu: skipped(wsl2) — dawn needs a real vulkan device, \
+                 WSL2 only exposes the d3d12 passthrough"
+            );
+        } else if probe_webgpu_ep_available() {
+            log::warn!("[ort] webgpu: available");
+            providers.push("WebGpuExecutionProvider".to_string());
+        } else {
+            log::warn!("[ort] webgpu: probe-failed(dawn could not register this ep)");
+        }
     }
 
     // CoreML -- macOS ARM64 only (Apple Neural Engine / GPU).
@@ -2133,7 +2149,6 @@ pub fn diagnose_gpu() -> GpuDiagnostic {
 }
 
 #[cfg(test)]
-
 mod tests {
     use super::*;
 

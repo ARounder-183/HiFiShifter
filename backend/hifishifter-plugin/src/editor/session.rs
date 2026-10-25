@@ -367,6 +367,10 @@ pub(crate) struct EditorSession {
     pub(super) error: Mutex<Option<String>>,
     render_error: Mutex<Option<String>>,
     render_requested: AtomicBool,
+    /// `pending` 持续为真的起点；不 pending 时为 `None`（诊断用）。
+    pending_since: Mutex<Option<Instant>>,
+    /// 本段 pending 是否已经报过 —— 每段只报一次，避免把诊断变成刷屏。
+    pending_reported: AtomicBool,
     render_task: Mutex<Option<RenderTask>>,
     closed: AtomicBool,
     transport_probe: bool,
@@ -609,6 +613,8 @@ impl EditorSession {
             error: Mutex::new(None),
             render_error: Mutex::new(None),
             render_requested: AtomicBool::new(false),
+            pending_since: Mutex::new(None),
+            pending_reported: AtomicBool::new(false),
             render_task: Mutex::new(None),
             closed: AtomicBool::new(false),
             suppress_history: AtomicBool::new(false),
@@ -2650,6 +2656,59 @@ impl EditorSession {
             json!({"version":self.host_version.load(Ordering::Acquire)}),
         );
     }
+    /// 一段 pending 持续多久之后才值得记一行。3 秒：短于它的是正常的一次应用往返。
+    const PENDING_REPORT_AFTER: std::time::Duration = std::time::Duration::from_secs(3);
+
+    /// 是否该为这一段 pending 留一行（纯函数，便于钉住"每段只报一次"）。
+    ///
+    /// 【为什么需要它】`pending` 是六个分量的或，而前端只看到一句
+    /// "Applying automatically..." —— 用户无法区分"在正常跑"与"卡住了"，
+    /// 我们自己也一样：日志里没有任何一行说明是哪一个分量把状态按住了。
+    fn pending_report_due(elapsed: std::time::Duration, already_reported: bool) -> bool {
+        elapsed >= Self::PENDING_REPORT_AFTER && !already_reported
+    }
+
+    /// 维护 pending 计时段，并在持续过久时把**六个分量**并排打出来。
+    #[allow(clippy::too_many_arguments)]
+    fn note_pending_components(
+        &self,
+        pending: bool,
+        generation: u64,
+        applied: u64,
+        host: bool,
+        inventory: bool,
+        analysis: bool,
+        rendering: bool,
+    ) {
+        if !pending {
+            *self.pending_since.lock_or_recover() = None;
+            self.pending_reported.store(false, Ordering::Release);
+            return;
+        }
+        let started = {
+            let mut since = self.pending_since.lock_or_recover();
+            *since.get_or_insert_with(Instant::now)
+        };
+        let elapsed = started.elapsed();
+        if !Self::pending_report_due(elapsed, self.pending_reported.load(Ordering::Acquire)) {
+            return;
+        }
+        self.pending_reported.store(true, Ordering::Release);
+        let requested = self.render_requested.load(Ordering::Acquire);
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Warn,
+            "state.pending.stuck",
+            format_args!(
+                "[state] pending for {:.1}s: generation={generation} applied={applied}                  host={} inventory={} analysis={} rendering={} requested={requested}",
+                elapsed.as_secs_f32(),
+                u8::from(host),
+                u8::from(inventory),
+                u8::from(analysis),
+                u8::from(rendering),
+            ),
+        );
+    }
+
     pub(super) fn state(&self) -> Value {
         let generation = self.generation.load(Ordering::Acquire);
         let applied = self.applied.load(Ordering::Acquire);
@@ -2676,13 +2735,28 @@ impl EditorSession {
             self.document()
                 .is_some_and(|document| document.media_in_flight_items(&timeline) > 0)
         };
+        let pending = generation != applied
+            || host_pending
+            || inventory_pending
+            || analysis_pending
+            || rendering
+            || self.render_requested.load(Ordering::Acquire);
+        self.note_pending_components(
+            pending,
+            generation,
+            applied,
+            host_pending,
+            inventory_pending,
+            analysis_pending,
+            rendering,
+        );
         json!({
             // 【为什么把形态放进状态快照】bootstrap 是**窗口创建那一刻**算的，而形态判定
             // 要等 `setActive` 之后 5 秒宽限期才落定 —— 于是窗口打开时读到的一律是
             // `ara_only`，前端按形态分流的地方（录制面板的自动浮出）拿不到真实答案。
             // 状态快照每 250ms 轮询一次，是现成的、不依赖时序的通道。
             "mode":if self.is_capture(){"capture"}else{"ara"},
-            "generation":generation,"applied_generation":applied,"pending":generation!=applied||host_pending||inventory_pending||analysis_pending||rendering||self.render_requested.load(Ordering::Acquire),
+            "generation":generation,"applied_generation":applied,"pending":pending,
             // 【为什么把"在等分析"单独报出来】它是**唯一会持续很久**的一步（几分钟素材的
             // 神经分析本来就慢），而它此前被 `pending` 一句话盖住 —— 用户无法区分
             // "卡住了"与"在正常跑"。前端据此把状态栏片分成"在分析 / 在合成 / 在应用"。
@@ -2789,6 +2863,21 @@ impl MidiImportHost for EditorSession {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    /// 一段 pending 只在持续过久时报一次 —— 报完就不再重复，避免诊断变成刷屏。
+    #[test]
+    fn a_stuck_pending_period_is_reported_once() {
+        let below = EditorSession::PENDING_REPORT_AFTER - std::time::Duration::from_millis(1);
+        assert!(!EditorSession::pending_report_due(below, false));
+        assert!(EditorSession::pending_report_due(
+            EditorSession::PENDING_REPORT_AFTER,
+            false
+        ));
+        assert!(
+            !EditorSession::pending_report_due(std::time::Duration::from_secs(60), true),
+            "同一段 pending 只报一次"
+        );
+    }
+
     use crate::ara::model::ModelHandle;
     use crate::render::extension::ExtensionOwner;
     use crate::render::ownership::region_owners;
