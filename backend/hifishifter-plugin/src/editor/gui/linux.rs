@@ -91,14 +91,23 @@ mod x11 {
         ) -> i32;
         /// `int XSync (Display*, Bool)`
         pub fn XSync(display: *mut c_void, discard: i32) -> i32;
-        /// `Status XGetWindowAttributes (Display*, Window, XWindowAttributes*)`
+        /// `Status XGetGeometry (Display*, Drawable, Window*, int*, int*,
+        ///                     unsigned int*, unsigned int*, unsigned int*, unsigned int*)`
         ///
-        /// 只用到结构体开头的 `width/height`，所以按"足够大的不透明缓冲"接收 —— 这比
-        /// 逐字段复刻 `XWindowAttributes`（后面还跟着 `Colormap`、`Visual*` 等）稳。
-        pub fn XGetWindowAttributes(
+        /// 直接返回 width/height，不需要手抄 `XWindowAttributes` 的字段布局
+        /// （首个字段 `XWindow root` 在 LP64 上占 8 字节，手抄偏移极易错位 ——
+        /// 第 5 轮审查 P1-1 正是这么错的）。root/x/y/border/depth 全部不关心，
+        /// 传空指针即可（X11 协议允许对这些 return 参数传 NULL）。
+        pub fn XGetGeometry(
             display: *mut c_void,
-            window: XWindow,
-            attributes: *mut c_void,
+            drawable: XWindow,
+            root_return: *mut XWindow,
+            x_return: *mut i32,
+            y_return: *mut i32,
+            width_return: *mut u32,
+            height_return: *mut u32,
+            border_width_return: *mut u32,
+            depth_return: *mut u32,
         ) -> i32;
     }
 }
@@ -1316,31 +1325,28 @@ fn attach_view(
     let mut width = request.width;
     let mut height = request.height;
     if embedded_ok {
-        // SAFETY: parent 是宿主给的有效 XID；缓冲区按 `XWindowAttributes` 的真实大小开。
+        // SAFETY: parent 是宿主给的有效 XID；全部 return 参数里只关心 width/height，
+        // 其余按 X11 协议允许传 NULL。
         unsafe {
-            let mut attributes = [0u8; 256];
             let dpy = x11::gdk_x11_get_default_xdisplay();
-            if x11::XGetWindowAttributes(
+            let mut host_width = 0_u32;
+            let mut host_height = 0_u32;
+            if x11::XGetGeometry(
                 dpy,
                 request.parent as x11::XWindow,
-                attributes.as_mut_ptr().cast(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut host_width,
+                &mut host_height,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
             ) != 0
+                && host_width > 0
+                && host_height > 0
             {
-                // `XWindowAttributes` 的第 4、5 个字段是 `int width, height`（前面是
-                // x, y, width, height —— 各 4 字节，偏移 8 和 12）。
-                let read = |offset: usize| {
-                    i32::from_ne_bytes([
-                        attributes[offset],
-                        attributes[offset + 1],
-                        attributes[offset + 2],
-                        attributes[offset + 3],
-                    ])
-                };
-                let (host_width, host_height) = (read(8), read(12));
-                if host_width > 0 && host_height > 0 {
-                    width = host_width as i32;
-                    height = host_height as i32;
-                }
+                width = host_width as i32;
+                height = host_height as i32;
             }
         }
     }
