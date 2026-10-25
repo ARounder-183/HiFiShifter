@@ -161,6 +161,10 @@ impl Runtime {
                 // 缺了它，就说明请求在更早的地方被静默拒掉（代数落在区间外 / 宿主没
                 // 提供 assert 指针），宿主随后拿到的是一个 null 控制器。
                 log::info!("[ara] host requested a document controller");
+                // 【为什么在这里记线程】这是宿主第一次、也是在 **ARA model 线程**上
+                // 回调我们。播放控制请求（停在/播放/定位）被钉在同一条线程上，
+                // 而编辑器命令跑在客户端的线程里 —— 见 `editor::host_threads`。
+                crate::editor::host_threads::note_ara_model_thread();
                 let mut model = crate::ara::model::ModelHandle::new();
                 let head_tail = model.head_tail();
                 let session = model.session();

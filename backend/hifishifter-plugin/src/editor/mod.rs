@@ -7,6 +7,7 @@ mod events;
 mod formant;
 // 宿主专属快捷键的让路策略（跨平台：Policy 无 cfg，原语按平台各一份）。
 pub(crate) mod host_key_relay;
+pub(crate) mod host_threads;
 pub(crate) mod media_identity;
 mod notebook;
 // 只在非测试构建里存在：唯一调用点 `EditorSession::run` 的空闲分支本身是

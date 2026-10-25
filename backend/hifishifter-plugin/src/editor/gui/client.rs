@@ -1574,11 +1574,16 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
                 // 【为什么每次都要投递】ARA 的播放请求被钉在 **model 线程**上
                 // （`host playback request off model thread`），而这里有可能是客户端
                 // 线程。与原生扩展那条路同一套做法：投递过去、原地等它有界返回。
-                if command=="stop_audio" {playback.stop().map_err(|e|e.to_string())?;
+                if command=="stop_audio" {
+                    crate::editor::host_threads::on_ara_model(||playback.stop())
+                        .map_err(|e|e.to_string())?.map_err(|e|e.to_string())?;
                     // ARA只有Stop请求；暂停后定位到实际停止点，Stop按钮的回锚由原thunk另发seek。
-                    playback.set_position(position).map_err(|e|e.to_string())?;
+                    crate::editor::host_threads::on_ara_model(||playback.set_position(position))
+                        .map_err(|e|e.to_string())?.map_err(|e|e.to_string())?;
                     Ok(serde_json::json!({"ok":true,"stopped_at_sec":position}))
-                } else {playback.start().map_err(|e|e.to_string())?;
+                } else {
+                    crate::editor::host_threads::on_ara_model(||playback.start())
+                        .map_err(|e|e.to_string())?.map_err(|e|e.to_string())?;
                     Ok(serde_json::json!({"ok":true,"host_request":true,"anchorSec":position,"start_sec":position}))}
             })()
         },
@@ -1776,8 +1781,12 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
                 let result=(||->Result<(),String> {
                     let position=request["args"]["playheadSec"].as_f64().ok_or("invalid seek position")?;
                     let owner=link.owner()?;
-                    owner.host_playback().ok_or("host does not provide ARA playback control")?
-                        .set_position(position).map_err(|e|e.to_string())?;
+                    // 【为什么 seek 也要投递】同一个 model 线程守卫；这条回写此前 30 次
+                    // 调用全部失败，于是"点时间轴跳转"从来没有真正落到宿主上。
+                    let handle=owner.host_playback().ok_or("host does not provide ARA playback control")?;
+                    crate::editor::host_threads::on_ara_model(|| handle.set_position(position))
+                        .map_err(|e|e.to_string())?
+                        .map_err(|e|e.to_string())?;
                     // seek回执前同步真实宿主光标，避免继续发布上次UI tick的旧位置。
                     owner.refresh_host_transport();Ok(())
                 })();
