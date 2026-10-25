@@ -40,6 +40,31 @@ export type RootState = ReturnType<typeof rootReducer>;
  * UI。`{ ...state, ...payload }` 对快照里**存在**的切片仍是权威替换，缺的切片
  * 则保留本窗口 reducer 的当前值。
  */
+/**
+ * 快照切片的最小运行时校验：只接受「对象形态」的已知切片。
+ *
+ * 【为什么只做这么少】快照来自另一个窗口的 JSON，可能存在版本偏差（主窗口
+ * 重载后旧卫星仍在线）。旧实现 `{ ...state, ...payload } as RootState` 把任何
+ * 畸形载荷（null / 数组 / 未知结构）原样并入，错误以"某个面板渲染炸掉"的形态
+ * 深处爆发。逐字段深校验又不现实（session 切片巨大）。折中：逐切片检查"是纯
+ * 对象"，不认识的**键**不并入 —— 版本偏差降级为"新字段本窗口暂时没有"，
+ * 与缺切片同一语义。
+ */
+function mergeSnapshot(state: RootState | undefined, payload: object): RootState {
+    const merged: Record<string, unknown> = { ...(state as Record<string, unknown>) };
+    let accepted = 0;
+    for (const [key, slice] of Object.entries(payload)) {
+        if (slice !== null && typeof slice === "object" && !Array.isArray(slice)) {
+            merged[key] = slice;
+            accepted += 1;
+        }
+    }
+    if (accepted === 0) {
+        return rootReducer(state, { type: "@@hsBridgeUnusableSnapshot" });
+    }
+    return merged as RootState;
+}
+
 function appReducer(state: RootState | undefined, action: unknown): RootState {
     if (
         action !== null &&
@@ -50,7 +75,7 @@ function appReducer(state: RootState | undefined, action: unknown): RootState {
         if (!payload || typeof payload !== "object") {
             return rootReducer(state, { type: "@@hsBridgeEmptySnapshot" });
         }
-        return { ...state, ...payload } as RootState;
+        return mergeSnapshot(state, payload);
     }
     return rootReducer(state, action as Parameters<typeof rootReducer>[1]);
 }

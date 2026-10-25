@@ -36,6 +36,7 @@ export function useClipFormantStatusListener(): void {
                 );
                 if (disposed && unlisten) {
                     unlisten();
+                    unlisten = null;
                 }
             } catch {
                 // Safe no-op outside Tauri runtime.

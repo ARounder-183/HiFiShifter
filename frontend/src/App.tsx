@@ -37,8 +37,6 @@ import { useAppDispatch, useAppSelector } from "./app/hooks";
 import { webApi } from "./services/webviewApi";
 import { settingsApi } from "./services/api/settings";
 import { fileBrowserApi } from "./services/api/fileBrowser";
-import { IS_LINUX } from "./utils/platform";
-import { allowsNativeTextSelection, isEditableTarget } from "./utils/nativeSelectionGuards";
 import { clipboardErrorKey } from "./utils/clipboardError";
 import { resolveStatusText } from "./utils/statusText";
 import {
@@ -82,14 +80,10 @@ import {
     persistUiSettings,
 } from "./features/session/sessionSlice";
 import { resolveTransportShortcutCommand } from "./features/session/transportShortcuts";
-import {
-    installRightDragContextMenuGuard,
-    disposeRightDragContextMenuGuard,
-} from "./utils/rightDragContextMenuGuard";
-import { emitPinch, pinchDeltaFromWheel } from "./utils/pinchGesture";
 import { useI18n } from "./i18n/I18nProvider";
 import { useClipPitchDataListener } from "./hooks/useClipPitchDataListener";
 import { useHistoryStateListener } from "./hooks/useHistoryStateListener";
+import { useBrowserDefaultGuards } from "./hooks/useBrowserDefaultGuards";
 import { PitchAnalysisProvider } from "./contexts/PitchAnalysisContext";
 import { PitchAnalysisStatusChip } from "./components/layout/PitchAnalysisStatusChip";
 import { ParamDataLoadingChip } from "./components/layout/ParamDataLoadingChip";
@@ -587,10 +581,15 @@ function AppInner() {
     }, [projectDirty]);
     const projectPath = useAppSelector((state) => state.session.project.path);
     const hasExistingTempoMap = useAppSelector((state) => Boolean(state.session.tempoMap));
+    // 当前会话中已忽略的缺失媒体路径集合（用户点击"忽略"后不再重复弹窗）
+    const ignoredSourcePathsRef = useRef<Set<string>>(new Set());
     // 当工程路径变更时（新建/打开/关闭工程），重置已忽略的源文件路径集合
     useEffect(() => {
         ignoredSourcePathsRef.current = new Set();
     }, [projectPath]);
+    // （声明已上移到首个使用点之前：此前 effect 引用了后置声明的 ref，靠
+    // 「effect 在 render 之后才执行」侥幸成立 —— 任何把这些逻辑挪进 render
+    // 路径的重构都会立刻 TDZ 报错。）
 
     const vocalShifterSkippedFilesDialog = useAppSelector(
         (state) => state.session.vocalShifterSkippedFilesDialog,
@@ -645,8 +644,6 @@ function AppInner() {
     const pendingUnsavedActionRef = useRef<null | (() => Promise<void>)>(null);
     const allowWindowCloseRef = useRef(false);
     const processorParamCacheRef = useRef(new Map<string, ProcessorParamDescriptor[]>());
-    // 当前会话中已忽略的缺失媒体路径集合（用户点击"忽略"后不再重复弹窗）
-    const ignoredSourcePathsRef = useRef<Set<string>>(new Set());
 
     // MIDI clip import dialog state (lifted from TimelinePanel)
     const [midiClipDialogOpen, setMidiClipDialogOpen] = useState(false);
@@ -774,12 +771,8 @@ function AppInner() {
      * `MidiTrackSelectDialog` 按 `canImportMidiAsClip()` 把目标锁到音高曲线。在开启
      * 点整条挡掉，会让一个本来能用的功能消失。
      */
-    const openMidiClipDialog = useCallback(
-        (open: boolean) => {
-            setMidiClipDialogOpen(open);
-        },
-        [setMidiClipDialogOpen],
-    );
+    // setState 本身就是稳定引用：包一层 useCallback 只是无谓的间接层，直接传 setMidiClipDialogOpen。
+    const openMidiClipDialog = setMidiClipDialogOpen;
 
     const handleImportMidiFromMenu = useCallback(() => {
         const session = store.getState().session;
@@ -887,229 +880,10 @@ function AppInner() {
     // 撤销/重做可用性（栈深度）镜像：菜单置灰与快捷键前置判断都读它
     useHistoryStateListener();
 
-    // 阻止浏览器默认的 Ctrl+F 搜索、右键菜单和 Alt 键
-
-    // 改用 useRef，取消重绘
-    const isModifierRef = useRef(false);
-
-    /**
-     * 触控板捏合是否接管缩放（设置项）。
-     *
-     * 【为什么用 ref】下面的全局监听只挂载一次（`useEffect(..., [])`），直接闭包
-     * 会永远读到初始值。经 ref 转发后设置一改即生效，不必重挂监听器。
-     */
-    const pinchZoomEnabled = useAppSelector((state) => state.session.penInput.trackpadPinchZoom);
-    const pinchZoomEnabledRef = useRef(pinchZoomEnabled);
-    useEffect(() => {
-        pinchZoomEnabledRef.current = pinchZoomEnabled;
-    });
-
-    useEffect(() => {
-        // WebKitGTK fires `contextmenu` on right-button press instead of
-        // release. Track the right-button state on Linux and re-dispatch the
-        // deferred event on pointerup so right-click menus (and right-drag
-        // decisions made by local handlers) follow Windows-like timing.
-        let linuxRightButtonDown = false;
-        let linuxDeferredContextMenu: {
-            clientX: number;
-            clientY: number;
-            target: EventTarget | null;
-        } | null = null;
-        const trackLinuxRightButton = (event: PointerEvent) => {
-            if (IS_LINUX && event.button === 2) {
-                linuxRightButtonDown = true;
-            }
-        };
-        const flushLinuxDeferredContextMenu = () => {
-            const pending = linuxDeferredContextMenu;
-            linuxDeferredContextMenu = null;
-            linuxRightButtonDown = false;
-            if (!pending) return;
-            window.setTimeout(() => {
-                const clientX = pending.clientX;
-                const clientY = pending.clientY;
-                let target = pending.target;
-                if (!(target instanceof Element) || !document.contains(target)) {
-                    target = document.elementFromPoint(clientX, clientY);
-                }
-                target?.dispatchEvent(
-                    new MouseEvent("contextmenu", {
-                        bubbles: true,
-                        cancelable: true,
-                        clientX,
-                        clientY,
-                        button: 2,
-                        buttons: 0,
-                        view: window,
-                    }),
-                );
-            }, 0);
-        };
-        const cancelLinuxDeferredContextMenu = () => {
-            linuxDeferredContextMenu = null;
-            linuxRightButtonDown = false;
-        };
-        const handleLinuxPointerUp = (event: PointerEvent) => {
-            if (!IS_LINUX || event.button !== 2) return;
-            flushLinuxDeferredContextMenu();
-        };
-
-        function preventNativeTextSelection(e: Event) {
-            if (allowsNativeTextSelection(e.target)) return;
-            // 阻止 WebView 双击/拖选文本；不阻止传播，因此自定义双击逻辑仍会执行。
-            e.preventDefault();
-        }
-
-        function clearNativeTextSelection(e: Event) {
-            const selection = window.getSelection();
-            if (!selection || selection.isCollapsed) return;
-            if (allowsNativeTextSelection(e.target)) return;
-            selection.removeAllRanges();
-        }
-
-        function preventNativeDragStart(e: Event) {
-            const target = e.target as HTMLElement | null;
-            if (!target) return;
-            if (isEditableTarget(target)) return;
-            if (target.closest?.('[data-hs-native-drag="true"]') || target.draggable === true) {
-                return;
-            }
-            // 阻止 WebView 原生拖拽（选中文本/图片/链接），自定义 onDragStart 仍会收到事件。
-            e.preventDefault();
-        }
-
-        function preventMiddleClickNative(e: MouseEvent) {
-            if (e.button !== 1) return;
-            if (isEditableTarget(e.target)) return;
-            // 关闭 WebView 中键自动滚动；应用自身的中键平移通过 pointerdown 实现，不受影响。
-            e.preventDefault();
-        }
-
-        function preventBrowserZoomWheel(e: WheelEvent) {
-            if (!(e.ctrlKey || e.metaKey)) return;
-            if (isEditableTarget(e.target)) return;
-            // 禁用 Ctrl/Cmd+滚轮的 WebView 页面缩放；应用内的缩放滚轮绑定仍可正常执行。
-            e.preventDefault();
-            /*
-             * 同一批事件正是 Web 平台上报**触控板捏合**的唯一方式（`WheelEvent`
-             * 不带 `pointerType`，没有别的信号可用）。此前这里只是把它吞掉，于是
-             * 触控板用户既没有浏览器缩放、也没有应用内缩放 —— 手势完全没反应。
-             * 现在继续阻止页面缩放，但把同一批事件识别成捏合派发给当前表面。
-             */
-            if (!pinchZoomEnabledRef.current) return;
-            const delta = pinchDeltaFromWheel(e);
-            if (delta == null) return;
-            emitPinch({ clientX: e.clientX, clientY: e.clientY, delta });
-        }
-
-        function preventBrowserFind(e: KeyboardEvent) {
-            const isMac = navigator.platform?.toLowerCase().includes("mac");
-            const mod = isMac ? e.metaKey : e.ctrlKey;
-            const key = e.key.toLowerCase();
-            if (mod && (key === "f" || key === "p" || key === "g")) {
-                e.preventDefault();
-            }
-            // Ctrl/Cmd+R 是应用内的"开始/停止录音"快捷键；阻止 WebView 刷新但不阻断应用绑定。
-            if (mod && key === "r") {
-                e.preventDefault();
-            }
-            // 阻止浏览器页面缩放快捷键；若用户绑定 Ctrl/Cmd+数字键，应用逻辑仍会收到事件。
-            if (mod && (key === "=" || key === "+" || key === "-" || key === "0")) {
-                e.preventDefault();
-            }
-            if (e.key === "F5") {
-                e.preventDefault();
-            }
-            if (e.key === "F3") {
-                e.preventDefault();
-            }
-        }
-        function preventContextMenu(e: MouseEvent) {
-            if (IS_LINUX && linuxRightButtonDown && !e.defaultPrevented) {
-                // Linux/WebKitGTK emits this event while the button is still
-                // down. Hold it back and replay on pointerup; local right-drag
-                // handlers that already called preventDefault/stopPropagation
-                // keep full control of their own drag/context-menu flow.
-                e.preventDefault();
-                e.stopImmediatePropagation();
-                linuxDeferredContextMenu = {
-                    clientX: e.clientX,
-                    clientY: e.clientY,
-                    target: e.target,
-                };
-                return;
-            }
-            // 完全禁用 WebView 默认右键菜单。只调用 preventDefault，
-            // 不阻止传播，因此应用内基于 contextmenu 事件实现的
-            // 自定义菜单/右键拖拽仍可正常工作。
-            e.preventDefault();
-        }
-
-        function preventContextMenuKey(e: KeyboardEvent) {
-            // 同时屏蔽键盘触发的 WebView 默认菜单（Menu/ContextMenu 键与 Shift+F10）。
-            if (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey)) {
-                e.preventDefault();
-            }
-        }
-
-        function altKeyDown(e: KeyboardEvent) {
-            if (e.key !== "Alt") isModifierRef.current = true;
-        }
-
-        function altKeyUp(e: KeyboardEvent) {
-            if (e.key === "Alt" && !isModifierRef.current) {
-                e.preventDefault();
-            }
-            isModifierRef.current = false;
-        }
-
-        window.addEventListener("keydown", altKeyDown, true);
-        window.addEventListener("keyup", altKeyUp, true);
-        window.addEventListener("keydown", preventBrowserFind, true);
-        window.addEventListener("keydown", preventContextMenuKey, true);
-        if (IS_LINUX) {
-            window.addEventListener("pointerdown", trackLinuxRightButton, true);
-            window.addEventListener("pointerup", handleLinuxPointerUp, true);
-            window.addEventListener("pointercancel", cancelLinuxDeferredContextMenu, true);
-        }
-        document.addEventListener("contextmenu", preventContextMenu, true);
-        // 右键拖拽的收尾守卫：拖拽后在**任何**表面松开右键都不弹该表面的菜单
-        // （菜单由松开位置的元素决定，而发起手势的表面范围有限——见模块头注释）。
-        installRightDragContextMenuGuard();
-        document.addEventListener("selectstart", preventNativeTextSelection, true);
-        document.addEventListener("pointerdown", clearNativeTextSelection, true);
-        // WebKitGTK may create the selection during the drag rather than on
-        // `selectstart`; clear it again on release (editable/selectable
-        // targets are left untouched).
-        document.addEventListener("mouseup", clearNativeTextSelection, true);
-        document.addEventListener("dragstart", preventNativeDragStart, true);
-        document.addEventListener("mousedown", preventMiddleClickNative, true);
-        window.addEventListener("wheel", preventBrowserZoomWheel, {
-            capture: true,
-            passive: false,
-        });
-        return () => {
-            window.removeEventListener("keydown", preventBrowserFind, true);
-            window.removeEventListener("keydown", preventContextMenuKey, true);
-            window.removeEventListener("keydown", altKeyDown, true);
-            window.removeEventListener("keyup", altKeyUp, true);
-            if (IS_LINUX) {
-                window.removeEventListener("pointerdown", trackLinuxRightButton, true);
-                window.removeEventListener("pointerup", handleLinuxPointerUp, true);
-                window.removeEventListener("pointercancel", cancelLinuxDeferredContextMenu, true);
-            }
-            document.removeEventListener("contextmenu", preventContextMenu, true);
-            disposeRightDragContextMenuGuard();
-            document.removeEventListener("selectstart", preventNativeTextSelection, true);
-            document.removeEventListener("pointerdown", clearNativeTextSelection, true);
-            document.removeEventListener("mouseup", clearNativeTextSelection, true);
-            document.removeEventListener("dragstart", preventNativeDragStart, true);
-            document.removeEventListener("mousedown", preventMiddleClickNative, true);
-            window.removeEventListener("wheel", preventBrowserZoomWheel, {
-                capture: true,
-            } as EventListenerOptions);
-        };
-    }, []);
+    // 浏览器默认行为守卫（Ctrl+F/P/G、页面缩放、右键菜单、文本选取、中键、
+    // 触控板捏合）：抽到 useBrowserDefaultGuards，主窗口与独立窗口共用同一套
+    //（独立窗口此前完全没有这层守卫 —— 见该 hook 的头注释）。
+    useBrowserDefaultGuards();
 
     // 剪贴板错误码可能带回退链后缀/细节，先经 token 精确映射为 i18n key
     // （未收录的码回退显示原文，保留诊断信息）。
@@ -1431,6 +1205,8 @@ function AppInner() {
     useEffect(() => {
         let disposed = false;
         let unlisten: null | (() => void) = null;
+        // 渲染完成后的 200ms 延迟同步：卸载时要清掉（否则向已拆除的树派发）。
+        let deferredSyncTimer: ReturnType<typeof setTimeout> | null = null;
 
         async function setup() {
             try {
@@ -1525,7 +1301,8 @@ function AppInner() {
                         // 当前传输纪元与派发时刻，与 30Hz 轮询响应共享乱序丢弃
                         // 与时延外推。
                         if (!active && wasActiveForTarget) {
-                            setTimeout(() => {
+                            deferredSyncTimer = setTimeout(() => {
+                                deferredSyncTimer = null;
                                 dispatch(
                                     syncPlaybackState({
                                         epoch: store.getState().session._transportEpoch,
@@ -1581,6 +1358,7 @@ function AppInner() {
             disposed = true;
             if (unlisten) unlisten();
             if (unsubscribeApply) unsubscribeApply();
+            if (deferredSyncTimer) clearTimeout(deferredSyncTimer);
         };
     }, [dispatch]);
 
@@ -1599,6 +1377,7 @@ function AppInner() {
      * 为什么被拒"之后，用绿色报告一件**没做成**的事会让用户以为它成了。
      */
     const [noticeTone, setNoticeTone] = useState<AppStatusTone>("success");
+    const noticeHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const showNotice = useCallback(
         (text: string, holdMs = 15_000, tone: AppStatusTone = "success") => {
             if (!text) return;
@@ -1609,7 +1388,13 @@ function AppInner() {
         },
         [],
     );
-    const noticeHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    // 卸载时清掉挂着的隐藏定时器（否则会在卸载后 setNoticeText）。
+    useEffect(
+        () => () => {
+            if (noticeHideTimerRef.current) clearTimeout(noticeHideTimerRef.current);
+        },
+        [],
+    );
     useEffect(() => {
         if (!renderCacheShowHitStats) return;
         let disposed = false;
@@ -4339,7 +4124,10 @@ function AppInner() {
                             </div>
                         </div>
                         {sourceFileChangedDialog.changes.map((item) => {
-                            const itemKey = `${item.clip_id}::${item.change}`;
+                            // 【为什么带 source_path】同一 clip 以两个路径、同种变更
+                            // 出现时（替换后旧/新路径并存），`clip_id::change` 会撞出
+                            // 重复 key，React 列表协调异常。路径参与后 key 唯一。
+                            const itemKey = `${item.clip_id}::${item.source_path}::${item.change}`;
                             const isBusy = item.action === "processing";
                             const isProcessed =
                                 item.action === "ignored" ||

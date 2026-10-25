@@ -171,9 +171,14 @@ async function waitForPyWebviewApi(timeoutMs: number): Promise<PyWebviewApi | nu
         return api;
     }
 
-    // If pywebview didn't appear after a meaningful wait, treat it as unavailable
-    // to avoid stalling every call in browser/dev mode.
-    if (performance.now() - startedAt >= 750) {
+    // If pywebview didn't appear after essentially the whole requested wait, treat
+    // it as unavailable to avoid stalling every call in browser/dev mode.
+    //
+    // 【为什么按 timeoutMs 判定】唯一调用方传 1500ms，而旧阈值写死 750ms ——
+    // 等待至少 1500ms 后再比较 `>= 750` 恒为真：任何一次冷启动/大工程的 1.5s
+    // 超时都会把 pywebview **永久**判死，此后所有调用直接失败不再重试。分级
+    // 语义（"等待有意义时长仍未出现才判不可用"）要求阈值随本次等待时长联动。
+    if (performance.now() - startedAt >= timeoutMs * 0.9) {
         pywebviewAvailability = "unavailable";
     }
 
@@ -999,9 +1004,12 @@ const NO_ARG_COMMANDS: ReadonlySet<string> = new Set([
     "host_link_status",
     "cancel_background_render",
     "cancel_export_audio",
+    // 注意：clipboard_kind / has_timeline_clipboard / has_reaper_clipboard /
+    // read_system_clipboard_object 不在此登记 —— 它们在 switch 里以一组
+    // case 返回 {}（剪贴板一族聚在一起可读）。双份登记是死条目：switch
+    // 先命中，Set 里的条目永远轮不到，两处事实源迟早漂移。
     "check_source_files_changed",
     "clear_waveform_cache",
-    "clipboard_kind",
     "close_window",
     "consume_startup_project_path",
     "create_host_track",
@@ -1028,8 +1036,6 @@ const NO_ARG_COMMANDS: ReadonlySet<string> = new Set([
     // 把键盘焦点交还宿主（仅插件形态；无参）。与 host_key_relay 一族同处
     // `editor/webview.rs` 的视图层分发。
     "host_key_focus",
-    "has_reaper_clipboard",
-    "has_timeline_clipboard",
     "import_project_dialog",
     "load_default_model",
     "new_project",
@@ -1050,7 +1056,6 @@ const NO_ARG_COMMANDS: ReadonlySet<string> = new Set([
     "pick_directory",
     "pick_midi_output_path",
     "ping",
-    "read_system_clipboard_object",
     "redo_timeline",
     "run_vocoder_benchmark",
     "start_background_render",

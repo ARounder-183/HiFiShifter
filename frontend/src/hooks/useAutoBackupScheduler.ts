@@ -107,16 +107,20 @@ export function useAutoBackupScheduler({
             if (inFlightRef.current) return;
             if (waitingForEditRef.current) return;
 
+            // 守卫式而非非空断言：baselineRef 由挂载 effect `??=` 初始化，
+            // 断言成立只是"声明在前的 effect 先跑"的巧合 —— 显式判空消除对
+            // effect 顺序的隐式依赖（判空时下一秒的 tick 自然补上）。
+            const baseline = baselineRef.current;
+            if (!baseline) return;
             const intervalMs = Math.max(
                 1000,
                 Math.floor(settingsRef.current.timedBackupIntervalSec * 1000),
             );
-            const elapsedMs = Date.now() - baselineRef.current!.timestampMs;
+            const elapsedMs = Date.now() - baseline.timestampMs;
             if (elapsedMs < intervalMs) return;
 
             const hasEditSinceBaseline =
-                projectDirtyRef.current &&
-                paramsEpochRef.current > baselineRef.current!.paramsEpoch;
+                projectDirtyRef.current && paramsEpochRef.current > baseline.paramsEpoch;
             if (!hasEditSinceBaseline) {
                 waitingForEditRef.current = true;
                 return;
@@ -132,8 +136,10 @@ export function useAutoBackupScheduler({
     useEffect(() => {
         if (!settings.timedBackupEnabled) return;
         if (!waitingForEditRef.current) return;
+        const baseline = baselineRef.current;
+        if (!baseline) return;
 
-        const hasEditSinceBaseline = projectDirty && paramsEpoch > baselineRef.current!.paramsEpoch;
+        const hasEditSinceBaseline = projectDirty && paramsEpoch > baseline.paramsEpoch;
         if (!hasEditSinceBaseline) return;
 
         void runTimedBackupNow();

@@ -155,6 +155,21 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
     }, []);
 
     /**
+     * 同步绘制并撤掉挂起的 rAF。
+     *
+     * 【为什么同步画完要撤 rAF】layout effect / 总线 paint 会同步 draw；此前
+     * `invalidate()` 排入且尚未到期的 rAF 不会被取消，同帧再画一次（通常命中
+     * canReuse 走轻量 repaint，但 canvas2d 回退路径是一次完整重放）。
+     */
+    const drawNowAndCancelScheduled = React.useCallback(() => {
+        if (rafRef.current != null) {
+            cancelAnimationFrame(rafRef.current);
+            rafRef.current = null;
+        }
+        drawRef.current();
+    }, []);
+
+    /**
      * 停靠层把面板宿主搬回来时必须重绘。
      *
      * 【为什么这条不能省】搬移会把画布从文档里摘出去，浏览器随即丢掉它的 backing
@@ -483,9 +498,9 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
         const busDriven = props.viewportSource != null;
         if (!busDriven || previousVisualSignatureRef.current !== visualSignature) {
             previousVisualSignatureRef.current = visualSignature;
-            drawRef.current();
+            drawNowAndCancelScheduled();
         }
-    }, [draw, props.viewportSource, rendererKind, visualSignature]);
+    }, [draw, props.viewportSource, rendererKind, visualSignature, drawNowAndCancelScheduled]);
 
     React.useEffect(() => {
         const fallbackCanvas = fallbackCanvasRef.current;
@@ -580,13 +595,13 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
         const apply = () => {
             // 同步绘制：滚动事件在绘制前触发，波形面必须与原生滚动的 DOM
             // 内容层在同一帧内提交位移（DAW 式无缝滚动），禁止 rAF 延迟。
-            drawRef.current();
+            drawNowAndCancelScheduled();
         };
         apply();
         // 注册到统一帧提交器：由它保证本图层与网格 / clip 体的绘制顺序固定，
         // 且同一帧内重复的视口提交只触发一次重绘。
         return source.register({ name: "waveform", paint: apply }, LAYER_ORDER.waveform);
-    }, [props.viewportSource]);
+    }, [props.viewportSource, drawNowAndCancelScheduled]);
 
     React.useEffect(
         () => () => {

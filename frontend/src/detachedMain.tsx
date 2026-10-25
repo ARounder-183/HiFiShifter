@@ -19,6 +19,7 @@ import { registerBuiltinPanels } from "./components/dock/registerBuiltinPanels";
 import { attachBuiltinPanelComponents } from "./components/dock/attachBuiltinPanelComponents";
 import { AppTooltipProvider } from "./components/AppTooltip";
 import { AppRootErrorBoundary } from "./components/AppRootErrorBoundary";
+import { BrowserDefaultGuards } from "./hooks/useBrowserDefaultGuards";
 import { I18nProvider } from "./i18n/I18nProvider";
 import { AppThemeProvider } from "./theme/AppThemeProvider";
 import { installGlobalErrorReporting } from "./services/frontendErrorLog";
@@ -53,6 +54,10 @@ createRoot(document.getElementById("root")!).render(
                 <AppThemeProvider>
                     <AppTooltipProvider>
                         <AppRootErrorBoundary>
+                            {/* 独立窗口与主窗口共用同一组浏览器默认行为守卫
+                                （Ctrl+F/P/G、页面缩放、右键菜单、中键…）——
+                                此前这里完全没有，两个窗口的键盘行为会分叉。 */}
+                            <BrowserDefaultGuards />
                             <DetachedRoot />
                         </AppRootErrorBoundary>
                     </AppTooltipProvider>

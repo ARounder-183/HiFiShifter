@@ -43,6 +43,7 @@ export function useClipPitchDataListener(): void {
                 });
                 if (disposed && unlisten) {
                     unlisten();
+                    unlisten = null;
                 }
             } catch {
                 // 非 Tauri 环境（浏览器/pywebview）下安全忽略。
