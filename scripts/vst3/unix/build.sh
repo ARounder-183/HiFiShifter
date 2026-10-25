@@ -108,8 +108,17 @@ if [ "$HOST_OS" = "linux" ]; then
     RUNTIME_LIB_SUBDIR="$MODULE_SUBDIR"
     CARGO_LIB="libhifishifter_plugin.so"
     BUNDLE_TAG="linux-$PLATFORM_ARCH"
-    # 模块 NEEDED 里那两个非系统库（见 plan §3 的 ldd 实测）。
-    RUNTIME_DEPS="libSoundTouchDLL.so libwebgpu_dawn.so"
+    # 模块 NEEDED 里的非系统库（见 plan §3 的 ldd 实测）。
+    # 【为什么按架构区分】Linux ARM64 的 ort 刻意不带 webgpu feature
+    #（backend/hifishifter-kernel/Cargo.toml：aarch64 没有预编译 dawn 二进制），
+    # 构建产物里既不会 NEEDED 也不会存在 libwebgpu_dawn.so —— 无条件要求它，
+    # linux-aarch64 矩阵会在 stage_bundle 必然 die。x86_64 的 dawn 由
+    # ort 的 copy-dylibs 落在 target 下，仍然必须存在。
+    if [ "$PLATFORM_ARCH" = "x86_64" ]; then
+        RUNTIME_DEPS="libSoundTouchDLL.so libwebgpu_dawn.so"
+    else
+        RUNTIME_DEPS="libSoundTouchDLL.so"
+    fi
 else
     PLATFORM_ARCH="$HOST_ARCH"
     MODULE_SUBDIR="Contents/MacOS"

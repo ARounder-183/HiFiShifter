@@ -394,9 +394,13 @@ jobs:
         if: runner.os == 'Windows'
         uses: actions/cache@v5
         with:
+          # 【为什么不能用 %USERPROFILE%】actions/cache 的 path 不经过 shell，不展开
+          # cmd 风格的环境变量 —— 字面量路径匹配不到任何文件，缓存永远 miss/不保存
+          # （曾经就是这样，两个 Windows 矩阵项实际零 registry 缓存）。`~` 由
+          # action 自身展开，与上面的 Unix 分支同款。
           path: |
-            %USERPROFILE%\.cargo\registry
-            %USERPROFILE%\.cargo\git
+            ~/.cargo/registry
+            ~/.cargo/git
           key: ${{ runner.os }}-${{ matrix.cargo_target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-${{ matrix.cargo_target }}-cargo-
 
