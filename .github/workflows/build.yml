@@ -423,7 +423,9 @@ jobs:
         run: |
           set -euxo pipefail
           sudo apt-get update -y
-          sudo apt-get install -y jq cmake libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev libwebkit2gtk-4.1-0 libjavascriptcoregtk-4.1-0 librsvg2-dev patchelf pkg-config libasound2-dev
+          # xvfb + libgl1-mesa-dri：后面要用无头 X 服务器真正启动一次 AppImage
+          # （冒烟）；没有 DRI 驱动时 EGL 会退化为 llvmpipe。
+          sudo apt-get install -y jq cmake libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev libwebkit2gtk-4.1-0 libjavascriptcoregtk-4.1-0 librsvg2-dev patchelf pkg-config libasound2-dev xvfb libgl1-mesa-dri
           sudo apt-get install -y libappindicator3-dev || sudo apt-get install -y libayatana-appindicator3-dev
 
       - name: Ensure AppImage bundling prerequisites (Linux)
@@ -433,94 +435,6 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y zsync desktop-file-utils libglib2.0-bin libgtk-3-bin librsvg2-bin appstream xdg-utils
           test -x /usr/bin/xdg-open
-
-      - name: Generate Linux AppImage library include map
-        if: runner.os == 'Linux'
-        working-directory: backend/src-tauri
-        run: |
-          set -euxo pipefail
-          FILES_JSON='{}'
-
-          # ── Helper: add a library to the map (flat usr/lib/) ──────────
-          add_lib() {
-            local libname="$1"
-            local src
-            src="$(find /usr/lib -name "$libname" -type f -print -quit 2>/dev/null || true)"
-            if [ -n "$src" ] && [ -e "$src" ]; then
-              FILES_JSON="$(jq -c --arg k "usr/lib/$libname" --arg v "$src" '. + {($k): $v}' <<<"$FILES_JSON")"
-              echo "  added $libname ← $src"
-            else
-              echo "  WARNING: $libname not found"
-            fi
-          }
-
-          echo "=== Bundling WebKit2GTK runtime libraries ==="
-
-          # ── Core WebKit libraries ─────────────────────────────────────
-          mapfile -t WEBKIT_FILES < <(
-            { dpkg -L libwebkit2gtk-4.1-0 2>/dev/null || true
-              dpkg -L libjavascriptcoregtk-4.1-0 2>/dev/null || true; } \
-            | grep -E '^/usr/lib/.+/(libwebkit2gtk-4.1\.so\.0|libjavascriptcoregtk-4.1\.so\.0|webkit2gtk-4.1($|/))' | sort -u
-          )
-          for src in "${WEBKIT_FILES[@]}"; do
-            if [ -e "$src" ]; then
-              fname="$(basename "$src")"
-              if [ -d "$src" ]; then
-                FILES_JSON="$(jq -c --arg k "${src#/}" --arg v "$src" '. + {($k): $v}' <<<"$FILES_JSON")"
-              else
-                FILES_JSON="$(jq -c --arg k "usr/lib/$fname" --arg v "$src" '. + {($k): $v}' <<<"$FILES_JSON")"
-              fi
-            fi
-          done
-
-          echo "=== Bundling Wayland + xkbcommon stack ==="
-
-          add_lib "libwayland-client.so.0"
-          add_lib "libwayland-cursor.so.0"
-          add_lib "libwayland-egl.so.1"
-          add_lib "libxkbcommon.so.0"
-
-          echo "=== Bundling Mesa EGL / GLES / GBM stack ==="
-
-          # WebKit2GTK needs EGL + GLESv2 for its GPU-accelerated
-          # compositor.  Without these the WebKit render process aborts
-          # with "Could not create default EGL display".
-          add_lib "libEGL.so.1"
-          add_lib "libGLESv2.so.2"
-          add_lib "libgbm.so.1"
-          add_lib "libdrm.so.2"
-          add_lib "libdrm_amdgpu.so.1"
-          add_lib "libdrm_intel.so.1"
-          add_lib "libdrm_nouveau.so.2"
-          add_lib "libdrm_radeon.so.1"
-          add_lib "libglapi.so.0"
-
-          echo "=== Bundling Mesa software rendering DRI driver ==="
-
-          # Mesa's swrast (software rasterizer) DRI driver guarantees
-          # WebKit can always fall back to CPU rendering on any GPU or
-          # in headless environments.  We ship the DRI driver in the
-          # standard Mesa DRI search path so libEGL can find it.
-          add_dri_driver() {
-            local drv="$1"
-            local src
-            src="$(find /usr/lib -name "${drv}_dri.so" -type f -print -quit 2>/dev/null || true)"
-            if [ -n "$src" ] && [ -e "$src" ]; then
-              FILES_JSON="$(jq -c --arg k "usr/lib/dri/${drv}_dri.so" --arg v "$src" '. + {($k): $v}' <<<"$FILES_JSON")"
-              echo "  added dri/${drv}_dri.so ← $src"
-            fi
-          }
-          add_dri_driver "swrast"
-          add_dri_driver "zink"       # OpenGL over Vulkan — useful fallback
-
-          echo "=== Bundling SoundTouch ==="
-
-          ST_SO_PATH="$GITHUB_WORKSPACE/backend/src-tauri/third_party/soundtouch-static/soundtouch/libSoundTouchDLL.so"
-          FILES_JSON="$(jq -c --arg k "usr/bin/libSoundTouchDLL.so" --arg v "$ST_SO_PATH" '. + {($k): $v}' <<<"$FILES_JSON")"
-
-          echo "=== Writing tauri.linux.conf.json ==="
-          jq -n --argjson files "$FILES_JSON" '{ bundle: { linux: { appimage: { files: $files } } } }' > tauri.linux.conf.json
-        shell: bash
 
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
@@ -596,6 +510,13 @@ jobs:
           echo "LD_LIBRARY_PATH=${DEFAULT_LIB_DIR}${LD_LIBRARY_PATH:+:}${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
         shell: bash
 
+      # 【这里原本有一份"手工库清单"，已删除】它用 find -type f 去 /usr/lib 里找
+      # libEGL / libwayland-* / Mesa 的 DRI 驱动塞进 AppImage；但 Ubuntu 24.04 上
+      # 这些 SONAME 全是符号链接，-type f 一个都匹配不上（add_dri_driver 连
+      # WARNING 都没有），于是 2026-07-30 那两个"修复 EGL"的提交其实一个文件都没
+      # 打进包，beta.14 之后的产物在图形栈上与 beta.13 完全一致。
+      # 现在由 scripts/build/linux-appimage.sh 统一决定打包内容：桌面栈整块交给
+      # 宿主，包内只留 GTK + 自有库，并在打包后用 ldd 断言这件事真的成立。
       - name: Build Linux AppImage
         if: runner.os == 'Linux'
         uses: tauri-apps/tauri-action@v0.6.2
@@ -771,6 +692,24 @@ jobs:
           fi
         shell: bash
 
+      - name: Package, verify and smoke-test the AppImage (Linux)
+        if: runner.os == 'Linux' && !cancelled()
+        working-directory: ${{ github.workspace }}
+        env:
+          RELEASE_DIR: ${{ github.workspace }}/${{ steps.tauri-release-dir.outputs.release-dir }}
+          # 运行器没有 GPU：把软件路径显式钉死，免得冒烟结果取决于驱动探测。
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          WEBKIT_DISABLE_DMABUF_RENDERER: "1"
+        run: |
+          set -euo pipefail
+          if [ -z "${{ steps.tauri-release-dir.outputs.release-dir }}" ]; then
+            echo "ERROR: 解析不到 Tauri 产物目录，无法打包" >&2
+            exit 1
+          fi
+          # 剪裁（桌面栈交还宿主）→ 断言（该有的有、不该有的没有）→ 重打包 → 冒烟。
+          HIFISHIFTER_SMOKE_REQUIRED=1 bash scripts/build/linux-appimage.sh package "$RELEASE_DIR"
+        shell: bash
+
       # ── Portable directory (Windows) ─────────────────────────────────
 
       - name: Stage portable directory (Windows)
@@ -932,4 +871,10 @@ jobs:
           ldd --version || true
           echo "==== Candidate bundle dirs ===="
           find backend/target -maxdepth 6 -type d | grep -E 'bundle/appimage|bundle/appimage_deb|bundle' || true
+          echo "==== AppDir libraries (host-owned must be absent) ===="
+          for d in backend/target/*/dist/bundle/appimage/HiFiShifter.AppDir backend/target/dist/bundle/appimage/HiFiShifter.AppDir; do
+            [ -d "$d/usr/lib" ] || continue
+            echo "-- $d"
+            ls "$d/usr/lib" | grep -E 'webkit|javascriptcore|gst|icu|wayland|xkbcommon|libEGL|libGLES|libgbm|libdrm' || echo "   (none)"
+          done
         shell: bash
