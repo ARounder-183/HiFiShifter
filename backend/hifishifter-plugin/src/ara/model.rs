@@ -2236,6 +2236,10 @@ impl ModelHandle {
                     .contains_key(&region.audio_source_persistent_id)
             })
             .count();
+        // 【为什么先数「能出声的 PCM」】见 `InputVerdict::decide` 的说明：
+        // `sample_access_enabled` 回答的是"宿主此刻允不允许读 ARA 样本"，
+        // 而不是"我们手里有没有能出声的素材"。
+        let usable = self.session.edit_sources.lock_or_recover().len();
         let states = self.session.source_states.lock_or_recover();
         let sources = self.document.audio_sources.len();
         let authorized = self
@@ -2254,19 +2258,12 @@ impl ModelHandle {
             .count();
         drop(states);
         let model_published = self.session.timeline.lock_or_recover().is_some();
-        let verdict = if sources == 0 {
-            crate::render::document::InputVerdict::AwaitingRegions
-        } else if failed > 0 {
-            crate::render::document::InputVerdict::Degraded
-        }
-        // 【两个条件给同一个结论：合并成一支】"没有任何已授权源"与"一个都没发布"
-        // 都是"等宿主把素材真正交过来"，分开写只会让读者以为它们将走向不同的处置。
-        // 计数仍然各自上报给 `note_readiness`（下面的三个字段），诊断粒度不丢。
-        else if authorized == 0 || published == 0 {
-            crate::render::document::InputVerdict::AwaitingSamples
-        } else {
-            crate::render::document::InputVerdict::Ready
-        };
+        // 【判据收敛到一处】判定在 `InputVerdict::decide`（纯函数、带单测）。
+        // `authorized` 仍然照常上报，但**不再单独决定** verdict —— 否则"宿主不授权
+        // ARA 样本"会把整个编辑器永久钉在 `awaiting_samples`，而渲染侧其实正拿着
+        // `edit_sources` 里的 PCM 出声。
+        let verdict =
+            crate::render::document::InputVerdict::decide(sources, published, failed, usable);
         self.session
             .note_readiness(crate::render::document::InputReadiness {
                 regions,

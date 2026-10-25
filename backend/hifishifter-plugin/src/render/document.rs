@@ -114,6 +114,39 @@ impl InputVerdict {
             Self::Degraded => "degraded",
         }
     }
+
+    /// 由四个计数判定"输入到底可不可用"。
+    ///
+    /// 【为什么抽成纯函数】这条判据是"参数线画完回弹 / 操作像没生效"的总开关：
+    /// 编辑器把 `verdict != Ready` 当成"素材还没到"，于是所有依赖素材的动作都被
+    /// 按"等一个 tick 就会好"处理。它必须能被单测直接钉住，而不是只能起一个宿主
+    /// 去观察。
+    ///
+    /// 【为什么 `usable` 排在 `authorized` 前面】两个字段回答的是不同的问题：
+    ///   * `authorized` —— 宿主**此刻允不允许**读 ARA 样本；
+    ///   * `usable`    —— 我们手里**有没有能出声的 PCM**（`edit_sources`）。
+    /// REAPER-Linux 的 `[editor, view]` 形态下前者可以是恒 false，而渲染侧照样
+    /// 拿着 `edit_sources` 出声。用前者判定，编辑器就被永久钉在
+    /// `awaiting_samples` 上，而同一个文档在渲染侧看是 `pcm=1` —— 两份真相。
+    ///
+    /// 判据的顺序因此是：先问"能不能出声"，再问"卡在哪一步"。
+    pub(crate) fn decide(sources: usize, published: usize, failed: usize, usable: usize) -> Self {
+        if usable > 0 || published > 0 {
+            // 有能出声的 PCM 就算可用；部分源失败只降级，不把整条链判成"没素材"。
+            return if failed > 0 {
+                Self::Degraded
+            } else {
+                Self::Ready
+            };
+        }
+        if failed > 0 {
+            return Self::Degraded;
+        }
+        if sources == 0 {
+            return Self::AwaitingRegions;
+        }
+        Self::AwaitingSamples
+    }
 }
 
 /// 一次输入可用性的完整读数（见 [`InputVerdict`]）。
@@ -2772,5 +2805,45 @@ clips_src={clips_src} dupes={dupes}}}"
             .map(|(key, _)| *key)
             .take(MAX_KEYS)
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod input_verdict_tests {
+    use super::InputVerdict;
+
+    /// 渲染侧有 PCM、宿主却没授权 ARA 样本 —— REAPER-Linux 的实际形状。
+    ///
+    /// 【为什么这条最要紧】它就是"两份真相"的那条缝：`authorized=0 published=0`
+    /// 而 `pcm=1`。旧判据在这种输入下给出 `AwaitingSamples`，编辑器于是永远认为
+    /// 素材没到；新判据必须以能出声的 PCM 为准。
+    #[test]
+    fn usable_pcm_outranks_a_missing_sample_access_grant() {
+        assert_eq!(
+            InputVerdict::decide(1, 0, 0, 1),
+            InputVerdict::Ready,
+            "a published PCM must count as usable even when the host never granted sample access"
+        );
+    }
+
+    /// 什么都没有的时候仍然是"等 region"或"等样本"，不能被新判据吞掉。
+    #[test]
+    fn an_empty_document_still_reports_what_it_is_waiting_for() {
+        assert_eq!(
+            InputVerdict::decide(0, 0, 0, 0),
+            InputVerdict::AwaitingRegions
+        );
+        assert_eq!(
+            InputVerdict::decide(2, 0, 0, 0),
+            InputVerdict::AwaitingSamples
+        );
+        assert_eq!(InputVerdict::decide(2, 1, 0, 0), InputVerdict::Ready);
+    }
+
+    /// 有 PCM 但部分源失败：可用，但必须报成 `Degraded` 而不是装作一切正常。
+    #[test]
+    fn a_partial_failure_degrades_a_usable_document() {
+        assert_eq!(InputVerdict::decide(3, 2, 1, 2), InputVerdict::Degraded);
+        assert_eq!(InputVerdict::decide(1, 0, 1, 0), InputVerdict::Degraded);
     }
 }
