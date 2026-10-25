@@ -554,6 +554,35 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         viewportHeightPx: () => viewportHeightPx,
     });
 
+    // 【为什么还需要 IntersectionObserver】坑位里的非活动标签页常常用 `display: none`
+    // 隐藏。此时布局尺寸从 N 变成 0、再变回 N，ResizeObserver **应该**触发，但浏览器
+    // 也可能在元素不可见期间直接丢弃画布的 backing store：尺寸回来时它已经是一张空白
+    // 画布，而"尺寸没变"意味着没有任何一次重绘被排上。
+    //
+    // 交集从 0 变回正数是一个**独立于尺寸变化**的信号，正好覆盖这种情形。
+    // 它只在真正不可见→可见时触发，正常滚动/缩放不会让它变红，因此不会引入额外重绘。
+    const intersectionCtor = (
+        globalThis as { IntersectionObserver?: typeof IntersectionObserver }
+    ).IntersectionObserver;
+    if (typeof intersectionCtor === "function") {
+        let wasVisible = false;
+        const observer = new intersectionCtor((entries) => {
+            const entry = entries[entries.length - 1];
+            if (!entry) return;
+            const visible = entry.isIntersecting && entry.intersectionRatio > 0;
+            if (visible && !wasVisible) {
+                // 刚回到可见：重新量一次尺寸并整帧重绘，不依赖"尺寸一定变了"。
+                viewportWidthPx = Math.max(1, container.clientWidth || 1);
+                viewportHeightPx = Math.max(1, container.clientHeight || 1);
+                scroll.reclamp();
+                invalidateFull();
+            }
+            wasVisible = visible;
+        });
+        observer.observe(container);
+        teardown.push(() => observer.disconnect());
+    }
+
     const resizeObserverCtor = (globalThis as { ResizeObserver?: typeof ResizeObserver })
         .ResizeObserver;
     if (typeof resizeObserverCtor === "function") {
