@@ -220,7 +220,16 @@ impl ExtensionOwner {
                 self.roles.load(Ordering::Relaxed),
                 mode,
             );
-            if mode != 2 {
+            // 【为什么只有 realtime 能写位置】`mode` 的三档是 0=realtime /
+            // 1=prefetch / 2=offline。prefetch 块的位置是**渲染器跑到哪里**，它按设计
+            // 领先播放头（宿主提前算好后续缓冲）—— 拿它当"你现在听到哪里"，光标就会
+            // 向前跳一大截，直到下一次宿主采样把它拉回来。
+            //
+            // 现场症状正是如此：大部分时间正常，偶尔跳到正常位置之后约 1.4 秒再跳回。
+            // 触发条件是"宿主采样恰好过期"（选源仲裁会回落到音频读数），而 prefetch
+            // 写的那个位置就成了回落值。offline 早已被排除，prefetch 必须同样排除：
+            // 它们都是"渲染进度"，不是"播放位置"。
+            if mode == 0 {
                 clock.update(context);
             }
         }
