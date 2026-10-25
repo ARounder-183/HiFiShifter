@@ -585,14 +585,22 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
 
     // 面板宿主被停靠层搬回来时整帧重绘（见 `useDockSlot` 的广播注释）。
     // 尺寸没变、可见性没变、数据也没变 —— 只有"刚被搬回来"这一件事能作为重绘依据。
-    const onPanelReattached = () => {
-        viewportWidthPx = Math.max(1, container.clientWidth || 1);
-        viewportHeightPx = Math.max(1, container.clientHeight || 1);
-        scroll.reclamp();
-        invalidateFull();
-    };
-    window.addEventListener(PANEL_REATTACHED_EVENT, onPanelReattached);
-    teardown.push(() => window.removeEventListener(PANEL_REATTACHED_EVENT, onPanelReattached));
+    // 【为什么守卫 window】本模块的既定契约是"无 jsdom 的 node 环境可测"（见测试
+    // 文件头注释）：浏览器/WebView 恒有 window，node 测试环境没有——那里的记录型桩
+    // 不会触发停靠搬移，跳过该监听不影响被测语义（与下方 ResizeObserver 同款守卫）。
+    const reattachTarget: Window | null = typeof window !== "undefined" ? window : null;
+    if (reattachTarget !== null) {
+        const onPanelReattached = () => {
+            viewportWidthPx = Math.max(1, container.clientWidth || 1);
+            viewportHeightPx = Math.max(1, container.clientHeight || 1);
+            scroll.reclamp();
+            invalidateFull();
+        };
+        reattachTarget.addEventListener(PANEL_REATTACHED_EVENT, onPanelReattached);
+        teardown.push(() =>
+            reattachTarget.removeEventListener(PANEL_REATTACHED_EVENT, onPanelReattached),
+        );
+    }
 
     const resizeObserverCtor = (globalThis as { ResizeObserver?: typeof ResizeObserver })
         .ResizeObserver;

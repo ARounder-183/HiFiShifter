@@ -18,6 +18,7 @@
 import { canControlHostTransport, capabilityForAction, isPluginMode } from "./hostCapabilities";
 import { hostKeysApi, type HostKeyModifiers } from "./api/hostKeys";
 import { getPluginHost, PluginInvokeError } from "./pluginHost";
+import { backendDetail, invokeErrorKind } from "./invoke";
 import { firstBinding, isNoneBindingList } from "../features/keybindings/keybindingsSlice";
 import type { ActionId, KeybindingMap } from "../features/keybindings/types";
 import type { EditSurfaceId } from "../features/uiFocus/focusSurface";
@@ -211,7 +212,17 @@ export async function relayHostKey(
         // 的背压、一次瞬态 IPC 抖动都会 reject —— 把暂态失败也闩死，Space/Enter 的
         // 宿主让路就在余下整个会话里静默失效且不可自愈（第 5 轮审查 P3-3）。
         // 暂态失败保持可重试：用户下一拍按键就是重试。
-        if (cause instanceof PluginInvokeError && cause.kind === "terminal") {
+        //
+        // 【为什么不能只判 PluginInvokeError】生产路径走 `invoke()`：它把底层
+        // `PluginInvokeError` 重包装成 `BackendInvokeError` 再抛（分类随 cause 保留），
+        // 而"旧后端没这条命令"更是裸 `Error`。这里必须按 `invoke()` 实际抛出的形态
+        // 判定；`instanceof PluginInvokeError` 只覆盖测试直调 `hostKeysApi.relay` 的路径。
+        const notWired = backendDetail(cause)?.includes("not wired") ?? false;
+        if (
+            (cause instanceof PluginInvokeError && cause.kind === "terminal") ||
+            invokeErrorKind(cause) === "terminal" ||
+            notWired
+        ) {
             relayUnsupported = true;
         }
         return "unsupported";
