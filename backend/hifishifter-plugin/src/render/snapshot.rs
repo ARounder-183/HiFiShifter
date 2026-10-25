@@ -1102,6 +1102,17 @@ impl SnapshotPublisher {
         } else {
             // 没有快照 ⇒ 整块都是宿主原声。这里没有"覆盖边"可言（每一帧都是未覆盖）。
             probe.uncovered = frames;
+            // 【为什么这里也必须给峰值】此前这一支把 `input_peak` 留在 `None`，于是
+            // `[click]` 行永远打 `input_peak=n/a` —— 而"整块都不是我们"恰恰是最需要
+            // 知道"宿主那一段到底有没有信号"的场合：有信号说明我们把它换掉了（真问题），
+            // 没信号说明本来就是静音（假阳性）。缺了这一半读数，`ratio` 只能做相对判断。
+            let mut peak = 0.0_f32;
+            for offset in 0..frames {
+                if let Some(value) = input_at(0, offset) {
+                    peak = peak.max(value.abs());
+                }
+            }
+            probe.input_peak = Some(peak);
         }
         for channel in 0..channels {
             // SAFETY: 调用方已验证 SDK 数组有 `channels` 个指针，允许 inactive null plane。

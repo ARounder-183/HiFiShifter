@@ -1648,6 +1648,26 @@ pub fn trim_and_resample_midi(
             target_frames
         };
 
+    // 【为什么必须在这里校验比例】`trimmed.len() / target_frames` 就是**时间伸缩比**：
+    // 窗口里有多少源帧、时间线上要铺多少帧，两者的商必须等于 `rate`。任何系统性偏差
+    // 都以"音高对了、时长差一截"的形式出现 —— 耳朵很难定位，而一个数就能证明。
+    // 实测现场出现过 8.8% 的偏差（`rate=0.92` 而窗口却按正放算），当时日志里每一行
+    // 都"正常"，没有任何一处说这两个数对不上。
+    if !loop_enabled && !trimmed.is_empty() {
+        let expected = target_frames as f64 * rate;
+        let delta = trimmed.len() as f64 - expected;
+        if delta.abs() > 1.0 {
+            log::warn!(
+                "[pitch:trim] MISMATCH: trimmed={} target_frames={} rate={:.6} \
+                 expected_trimmed={:.1} delta={:.1} (窗口帧数与时间伸缩比对不上)",
+                trimmed.len(),
+                target_frames,
+                rate,
+                expected,
+                delta,
+            );
+        }
+    }
     log::warn!(
         "[pitch:trim] src_start={:.3}s src_end={:.3}s rate={:.2} tl_len={:.3}s \
          full_midi_len={} trimmed=[{}..{}]={} → target_frames={}",
