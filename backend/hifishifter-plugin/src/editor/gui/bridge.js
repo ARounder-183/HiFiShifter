@@ -63,6 +63,6 @@
             if (name !== "message") return;
             var index = listeners.indexOf(listener);
             if (index >= 0) listeners.splice(index, 1);
-        }
+        },
     };
 })();
