@@ -509,13 +509,17 @@ stage_bundle() {
   # 所以编辑器跑在独立进程里，插件按"与 .so 同目录"去找它。
   case "$MODULE_SUBDIR" in *-linux)
     log "构建渲染进程 hfs-gui"
+    # 【为什么加 --locked】`hfs-gui` 是独立 workspace，它的 `Cargo.lock` 已入库
+    # （与 `backend/Cargo.lock` 同一纪律）。不加 `--locked`，构建会静默解析出一棵
+    # 新依赖树并把锁写回工作区 —— 于是"本机构建"与"入库的锁"之间没有任何约束，
+    # 而本产物与插件本体是同一个 bundle 的两半，却用两套规矩，说不过去。
     # 【为什么不加 stable 兜底】ensure_toolchain 已保证 rust-toolchain.toml 钉死的
     # 版本可用（pinned 未装时复用同版本工具链并导出 RUSTUP_TOOLCHAIN）。此前回落
     # "stable" 会让同一 bundle 里插件用 pinned 工具链、渲染进程用 stable —— 违背
     # "本机与 CI 共用同一把尺子"的方针；且只装了 pinned 的机器上 stable 根本不存在，
     # cargo 直接报 "toolchain 'stable' is not installed"，错误与原因隔了一层。
     ( cd "$REPO_ROOT/backend/hfs-gui" && \
-      cargo build --release --offline --target-dir "$TARGET_DIR/hfs-gui" ) \
+      cargo build --release --offline --locked --target-dir "$TARGET_DIR/hfs-gui" ) \
       || die "hfs-gui 构建失败"
     cp -f "$TARGET_DIR/hfs-gui/release/hfs-gui" \
       "$BUNDLE_DIR/$MODULE_SUBDIR/hfs-gui"
