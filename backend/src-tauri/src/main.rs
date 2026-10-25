@@ -48,5 +48,10 @@ fn main() {
         }
     }
 
+    // Linux：把逃生开关翻译成 GTK/WebKit 认的环境变量，并把会话与 EGL 状态写进
+    // 日志。必须赶在 run() 之前 —— GTK 一旦初始化，GDK_BACKEND 就不再生效。
+    #[cfg(target_os = "linux")]
+    backend_lib::linux_desktop::prepare();
+
     backend_lib::run()
 }

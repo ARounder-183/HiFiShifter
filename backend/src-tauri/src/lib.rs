@@ -64,6 +64,10 @@ mod renderer_cross_checks;
 mod app_events;
 pub mod logging;
 mod zip_util;
+// Linux 桌面会话的启动前准备（逃生开关 / 会话诊断 / EGL 预检），
+// 由 `main` 在日志初始化之后、GTK 初始化之前调用一次。
+#[cfg(target_os = "linux")]
+pub mod linux_desktop;
 
 mod audio_engine;
 pub(crate) mod commands;
@@ -305,19 +309,6 @@ pub fn run() {
         .manage(link_bridge::LinkBridge::default())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            // ── AppImage Mesa/EGL driver path ──────────────────────────
-            // When running inside an AppImage, Mesa's libEGL is bundled
-            // along with its DRI drivers under usr/lib/dri/.  Tell Mesa
-            // where to find them so WebKit2GTK can create its EGL display.
-            #[cfg(target_os = "linux")]
-            if let Ok(appdir) = std::env::var("APPDIR") {
-                let dri_dir = format!("{appdir}/usr/lib/dri");
-                if std::path::Path::new(&dri_dir).is_dir() {
-                    std::env::set_var("LIBGL_DRIVERS_PATH", &dri_dir);
-                    log::warn!("[setup] LIBGL_DRIVERS_PATH={dri_dir}");
-                }
-            }
-
             // 模型位置由内核统一解析：优先共享模型库（与 ARA 插件共用同一份 152 MB），
             // 库里没有就从本 bundle 的副本建立（同卷硬链接，零额外字节），最后才退回
             // bundle 内的副本。此前这里直接登记 `resource_dir()/models`，于是"同时装
