@@ -1803,22 +1803,37 @@ fn create_dml_session(
 /// 渲染会话在预热 / 首次使用时就已经建好并复用，因此这个窗口是安全的。
 static DIAGNOSTIC_THREAD_CAP: AtomicUsize = AtomicUsize::new(0);
 
-/// 诊断期间的线程预算租约：进入时把上限压到 `threads`，离开时恢复。
+/// 并发预算作用域的深度：`enter` 加一、`Drop` 减一。
+static DIAGNOSTIC_BUDGET_DEPTH: AtomicUsize = AtomicUsize::new(0);
+
+/// 诊断期间的线程预算租约：进入时把上限压到 `threads`，**最后一个离开者**清零。
+///
+/// 【为什么不是"离开时恢复旧值"】启动预热是三个模型各自 spawn 的线程并发进入
+/// （fcpe / hnsep / nsf），租约在拿到会话构建租约**之前**就开始 —— 两个作用域
+/// 必然重叠。旧实现记 `previous` 并在 `Drop` 无条件恢复：A.enter(prev=0)、
+/// B.enter(prev=2)、A 先 Drop 恢复 0、B 后 Drop 恢复 **2** —— 进程级上限从此
+/// 恒为 2，此后任何会话重建（设备切换、EP 变更、首次回退）得到的 CPU intra
+/// 线程被钳到 2，多核机上渲染推理慢 3~4 倍，直到重启（第 5 轮审查 P2-1）。
+/// 计数 + "最后一个离开者关灯"让重叠在结构上安全。
 pub struct DiagnosticBudget {
-    previous: usize,
+    _private: (),
 }
 
 impl DiagnosticBudget {
-    /// 进入诊断预算。建议 `threads = 2`。
+    /// 进入诊断预算。建议 `threads = 2`。重叠作用域时后进者的值生效
+    /// （当前全部调用点都是 2，无实际分歧）。
     pub fn enter(threads: usize) -> Self {
-        let previous = DIAGNOSTIC_THREAD_CAP.swap(threads.max(1), Ordering::AcqRel);
-        Self { previous }
+        DIAGNOSTIC_BUDGET_DEPTH.fetch_add(1, Ordering::AcqRel);
+        DIAGNOSTIC_THREAD_CAP.store(threads.max(1), Ordering::Release);
+        Self { _private: () }
     }
 }
 
 impl Drop for DiagnosticBudget {
     fn drop(&mut self) {
-        DIAGNOSTIC_THREAD_CAP.store(self.previous, Ordering::Release);
+        if DIAGNOSTIC_BUDGET_DEPTH.fetch_sub(1, Ordering::AcqRel) == 1 {
+            DIAGNOSTIC_THREAD_CAP.store(0, Ordering::Release);
+        }
     }
 }
 
@@ -2118,8 +2133,31 @@ pub fn diagnose_gpu() -> GpuDiagnostic {
 }
 
 #[cfg(test)]
+
 mod tests {
     use super::*;
+
+    /// 预算作用域重叠（启动时三个预热线程并发进入）时，先结束的不得解除上限，
+    /// 最后一个离开者必须清零 —— 旧实现会把上限永久泄漏成 2（第 5 轮审查 P2-1）。
+    #[test]
+    fn overlapping_diagnostic_budgets_clear_the_cap_only_when_the_last_one_ends() {
+        DIAGNOSTIC_THREAD_CAP.store(0, Ordering::Release);
+        DIAGNOSTIC_BUDGET_DEPTH.store(0, Ordering::Release);
+        let first = DiagnosticBudget::enter(2);
+        let second = DiagnosticBudget::enter(2);
+        drop(first);
+        assert_eq!(
+            DIAGNOSTIC_THREAD_CAP.load(Ordering::Acquire),
+            2,
+            "另一个作用域还活着，线程上限不得解除"
+        );
+        drop(second);
+        assert_eq!(
+            DIAGNOSTIC_THREAD_CAP.load(Ordering::Acquire),
+            0,
+            "最后一个离开者必须把上限清零"
+        );
+    }
 
     /// 全局租约是进程级的：涉及它的用例必须串行，否则一个用例持锁会让另一个用例
     /// 读到"别人在构建"。
