@@ -491,12 +491,15 @@ function mergeLatestSourceFileChanges(
             return { ...item, change: "modified", reloadedPath: undefined };
         }
         if (handled) {
-            // 已处理文件再次被修改：重新变为未处理，保留原路径以便重新加载。
-            return resetSourceFileItemToPending({
-                ...item,
-                change: "modified",
+            // 已处理文件再次被修改：重新变为未处理，重载指向**当前**路径。
+            // 【为什么在 reset 之后再补路径】`resetSourceFileItemToPending` 会把
+            // `reloadedPath` 清回 undefined：替换 A→B 后 B 再被修改时，若不补上
+            // `latest.source_path`（= B），「重新加载」会回退到已不存在的 A 并必然
+            // 失败。deleted 分支不补是有意的：文件已消失，重载本就该失败并引导替换。
+            return {
+                ...resetSourceFileItemToPending({ ...item, change: "modified" }),
                 reloadedPath: latest.source_path,
-            });
+            };
         }
         return {
             ...item,

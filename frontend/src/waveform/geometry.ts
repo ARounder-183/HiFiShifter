@@ -814,49 +814,15 @@ export function buildWaveformGeometry(args: {
                 }
                 if (winCount < 1) continue;
 
-                // ── 极值预计算（与映射解耦）──────────────────────────────
-                // 逐切片取桶窗口的极值，且极值必须与**它自己所在桶的时刻**配对
-                //（见 MAX_COLUMN_GAIN_SLICES）：否则近零原声处会造出随缩放增高的
-                // 幻峰。切片把"逐值调用"提到每列 ≤16 次，同时保证某处允许的高电平
-                // 不会泄漏给邻近切片。
-                const sliceCount = Math.min(winCount, MAX_COLUMN_GAIN_SLICES);
-                for (let slice = 0; slice < sliceCount; slice += 1) {
-                    // 公平切分：边界 = floor(s·W/K)，各切恰好覆盖窗口、互不重叠，
-                    // 最后一切精确落在 winHi 上。
-                    const lo = winLo + Math.floor((slice * winCount) / sliceCount);
-                    const hi = winLo + Math.floor(((slice + 1) * winCount) / sliceCount) - 1;
-                    scanExtremes(band, lo, hi);
-                    sliceRawMinScratch[slice] = extremeScratch.min;
-                    sliceRawMaxScratch[slice] = extremeScratch.max;
-                    const tMax = absSecAtIndex(extremeScratch.argMax);
-                    sliceTimeMaxScratch[slice] = tMax;
-                    // 极值各自与**自身桶时刻**配对；两者落在同一桶是常见情形
-                    //（包络上下沿同源），此时只求值一次。
-                    sliceTimeMinScratch[slice] =
-                        extremeScratch.argMin === extremeScratch.argMax
-                            ? tMax
-                            : absSecAtIndex(extremeScratch.argMin);
-                    // 上界钳制需要的时间窗端点与索引同批求出（见 scratch 的说明）。
-                    //
-                    // 【为什么取桶的**边界**而不是桶中心】上界的定义是「该时间窗内
-                    // 可达电平的最大值」，而本切片的峰值来自 `[lo, hi]` 这些桶的
-                    // **整个时间跨度**。用桶中心当端点会让窗口比峰值来源窄一整圈：
-                    // 细档（每列 ≈19 桶）只差约 5%，看不出；**粗档 `coarseSpan = 1`
-                    // 时 `lo === hi`，窗口退化成一个点** —— 于是"桶峰"（宽桶）配
-                    // "单帧上界"（窄窗），既有 `桶峰 ≤ 窗内原声基线最大` 的论证失效，
-                    // 合法内容会被误钳（表现为粗档波形被压平，且随亚桶相位闪烁）。
-                    // 取边界后窗口恰好覆盖峰值来源，`MAX_COLUMN_GAIN_SLICES` 的
-                    // 「不把某处允许的高电平泄漏给邻近切片」仍然成立（仍是本切片的桶）。
-                    if (levelCeiling !== undefined) {
-                        sliceTimeLoScratch[slice] = absSecAtIndex(lo, 0);
-                        sliceTimeHiScratch[slice] = absSecAtIndex(hi, 1);
-                    }
-                }
-
                 if (columnGainIsConstant) {
                     // ── 恒定增益：单遍取值，不做切片 ──────────────────────
                     // 与切片路径**逐位相同**（推导见 canUseConstantGain 的说明）：
                     // 极值取自同一批桶，乘法只做一次。
+                    // 【为什么先判分支再做预计算】下面的切片预计算（scanExtremes ×
+                    // ≤16 次 + 时间换算）只服务于 else 分支；恒定增益分支对 slice*
+                    // scratch **零读取**。若把预计算留在分支之外，默认视图（无
+                    // amplitudeMap、列不交淡变区——最常见的重建路径）每列都要白付
+                    // 一整套预计算再整体丢弃——细档基准实测快路径收益被削掉一半以上。
                     scanExtremes(band, winLo, winHi);
                     const rawMin = extremeScratch.min;
                     const rawMax = extremeScratch.max;
@@ -876,6 +842,45 @@ export function buildWaveformGeometry(args: {
                     // 两条等价路径（见 WaveformAmplitudeFactors）：
                     // - 映射声明了 `factorAt`：每切片求值因子，min/max 各一次乘法；
                     // - 未声明：逐值调用映射（min/max 各一次，各自配对自身时刻）。
+
+                    // ── 极值预计算（与映射解耦）──────────────────────────────
+                    // 逐切片取桶窗口的极值，且极值必须与**它自己所在桶的时刻**配对
+                    //（见 MAX_COLUMN_GAIN_SLICES）：否则近零原声处会造出随缩放增高的
+                    // 幻峰。切片把"逐值调用"提到每列 ≤16 次，同时保证某处允许的高电平
+                    // 不会泄漏给邻近切片。
+                    const sliceCount = Math.min(winCount, MAX_COLUMN_GAIN_SLICES);
+                    for (let slice = 0; slice < sliceCount; slice += 1) {
+                        // 公平切分：边界 = floor(s·W/K)，各切恰好覆盖窗口、互不重叠，
+                        // 最后一切精确落在 winHi 上。
+                        const lo = winLo + Math.floor((slice * winCount) / sliceCount);
+                        const hi = winLo + Math.floor(((slice + 1) * winCount) / sliceCount) - 1;
+                        scanExtremes(band, lo, hi);
+                        sliceRawMinScratch[slice] = extremeScratch.min;
+                        sliceRawMaxScratch[slice] = extremeScratch.max;
+                        const tMax = absSecAtIndex(extremeScratch.argMax);
+                        sliceTimeMaxScratch[slice] = tMax;
+                        // 极值各自与**自身桶时刻**配对；两者落在同一桶是常见情形
+                        //（包络上下沿同源），此时只求值一次。
+                        sliceTimeMinScratch[slice] =
+                            extremeScratch.argMin === extremeScratch.argMax
+                                ? tMax
+                                : absSecAtIndex(extremeScratch.argMin);
+                        // 上界钳制需要的时间窗端点与索引同批求出（见 scratch 的说明）。
+                        //
+                        // 【为什么取桶的**边界**而不是桶中心】上界的定义是「该时间窗内
+                        // 可达电平的最大值」，而本切片的峰值来自 `[lo, hi]` 这些桶的
+                        // **整个时间跨度**。用桶中心当端点会让窗口比峰值来源窄一整圈：
+                        // 细档（每列 ≈19 桶）只差约 5%，看不出；**粗档 `coarseSpan = 1`
+                        // 时 `lo === hi`，窗口退化成一个点** —— 于是"桶峰"（宽桶）配
+                        // "单帧上界"（窄窗），既有 `桶峰 ≤ 窗内原声基线最大` 的论证失效，
+                        // 合法内容会被误钳（表现为粗档波形被压平，且随亚桶相位闪烁）。
+                        // 取边界后窗口恰好覆盖峰值来源，`MAX_COLUMN_GAIN_SLICES` 的
+                        // 「不把某处允许的高电平泄漏给邻近切片」仍然成立（仍是本切片的桶）。
+                        if (levelCeiling !== undefined) {
+                            sliceTimeLoScratch[slice] = absSecAtIndex(lo, 0);
+                            sliceTimeHiScratch[slice] = absSecAtIndex(hi, 1);
+                        }
+                    }
                     for (let slice = 0; slice < sliceCount; slice += 1) {
                         // 极值与**其自身所在桶的时刻**在上面的预计算里已成对求出
                         //（粗档为跨窗口插值，见 COARSE_WINDOW_MAX_SPAN）。这里只做映射。
