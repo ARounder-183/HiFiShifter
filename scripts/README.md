@@ -35,7 +35,7 @@ scripts/vst3/unix/verify.sh <HiFiShifter.vst3> # 只跑自检（布局/符号/�
 
 # 两个 GUI 探针（需要显示服务；CI 没有，所以它们是手工工具而不是门禁）
 gcc -o /tmp/gui_probe scripts/vst3/unix/gui_probe.c $(pkg-config --cflags --libs gtk+-3.0 webkit2gtk-4.1 x11)
-GDK_BACKEND=x11 /tmp/gui_probe <bundle>/Contents/Resources/frontend   # GTK/WebKit/嵌入能不能用
+GDK_BACKEND=x11 /tmp/gui_probe                                        # GTK/WebKit/嵌入能不能用（无参数：加载内置测试页）
 gcc -o /tmp/host_harness scripts/vst3/unix/host_harness.c -ldl -lX11
 HIFISHIFTER_PLUGIN_LOG=/tmp/hf.log /tmp/host_harness <bundle>/Contents/x86_64-linux/HiFiShifter.so
                                                                      # 合成宿主：走一遍 createView → attached

@@ -14,7 +14,7 @@ $buildTaskRoot=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 if (!$BuildName) {$BuildName='hfs-'+(Get-Date -Format 'yyyyMMdd-HHmmss')+'-'+[Guid]::NewGuid().ToString('N').Substring(0,8)}
 $buildTaskDelivery=Join-Path $buildTaskRoot ".build-tmp\deliveries\$BuildName"
 $buildTaskBundleName="$BuildName-vst3"
-if ($buildTaskBundleName.Length -gt 64) {throw 'Name is too long for the isolated plugin bundle (maximum 59 characters).'}
+if ($buildTaskBundleName.Length -gt 59) {throw 'Name is too long for the isolated plugin bundle (maximum 59 characters).'}
 if (Test-Path -LiteralPath $buildTaskDelivery) {throw "Delivery already exists; choose a fresh Name: $buildTaskDelivery"}
 $buildTaskIncludesApp=$Target -in @('All','App')
 $buildTaskIncludesPlugin=$Target -in @('All','Plugin')
@@ -151,7 +151,7 @@ try {
         # 原生导出测试明确读取debug cdylib，即使交付是release也构建其独立测试前置。
         & cargo build --manifest-path backend\Cargo.toml --offline --jobs 1 -p hifishifter-plugin
         if ($LASTEXITCODE -ne 0) {throw 'Plugin ABI regression prerequisite build failed.'}
-        foreach ($buildTaskContract in @('ara_mapping','renderer_assignments','vst3_exports','no_tauri_in_dependency_tree')) {
+        foreach ($buildTaskContract in @('ara_mapping','renderer_assignments','vst3_exports','no_tauri_in_dependency_tree','version_parity','host_persistent_ids')) {
             & cargo test --manifest-path backend\Cargo.toml --offline --jobs 1 -p hifishifter-plugin --test $buildTaskContract -- --test-threads=1
             if ($LASTEXITCODE -ne 0) {throw "Plugin integration contract failed: $buildTaskContract"}
         }

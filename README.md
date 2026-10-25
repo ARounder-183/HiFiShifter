@@ -148,7 +148,7 @@ SKIP_FRONTEND=0 bash ./scripts/setup/install_deps_macos.sh
 请确保已安装以下工具：
 
 - **Node.js**（建议 20+，CI 使用 24）及 npm
-- **Rust 工具链**（参见 `rust-toolchain.toml`，项目会自动选择对应平台的 stable 工具链）
+- **Rust 工具链**（参见 `rust-toolchain.toml`，项目会使用 rust-toolchain.toml 钉死的工具链版本）
 - **Tauri 2 CLI**：`cargo install tauri-cli --version "^2"`
 - **CMake**、**pkg-config** 及系统构建工具
 - **GTK3、WebKit2GTK、ALSA** 等 Tauri 运行时开发库（详见安装脚本）

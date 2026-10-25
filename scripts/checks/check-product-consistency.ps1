@@ -188,8 +188,8 @@ Test-Consistency '插件 bundle 只拷 plugin.html 与 assets' {
 }
 
 # ── 9. 两个 workflow 的公共策略一致 ───────────────────────────────────
-Test-Consistency '两个 workflow 都声明 concurrency 与 permissions' {
-    foreach ($workflow in @('.github/workflows/build.yml', '.github/workflows/vst3.yml')) {
+Test-Consistency '三个 workflow 都声明 concurrency 与 permissions' {
+    foreach ($workflow in @('.github/workflows/build.yml', '.github/workflows/vst3.yml', '.github/workflows/vst3-unix.yml')) {
         $text = Get-RepoText $workflow
         foreach ($required in @('concurrency:', 'permissions:')) {
             if ($text -notmatch [regex]::Escape($required)) { throw "$workflow 缺少 $required" }

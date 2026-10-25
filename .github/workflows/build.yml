@@ -742,7 +742,15 @@ jobs:
             ls -la "$APPDIR/usr/bin/" || true
 
             export APPIMAGE_EXTRACT_AND_RUN=1
-            wget -q -O /tmp/appimagetool "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
+            # 【为什么按 target 选架构】appimagetool 本身是运行在本矩阵 runner 上的
+            # 二进制：x86_64 版在 ubuntu-24.04-arm 上无法执行（无 binfmt），兜底路径
+            # 会在 ARM 上把"主打包失败"变成"兜底也失败"。aarch64 的 continuous
+            # 构建由同一个 release 提供。
+            case "${{ matrix.cargo_target }}" in
+              aarch64-unknown-linux-gnu) APPIMAGETOOL_ARCH=aarch64 ;;
+              *)                         APPIMAGETOOL_ARCH=x86_64 ;;
+            esac
+            wget -q -O /tmp/appimagetool "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${APPIMAGETOOL_ARCH}.AppImage"
             chmod +x /tmp/appimagetool
             /tmp/appimagetool "$APPDIR" "$OUT_APPIMAGE" || {
               echo "appimagetool failed — dumping diagnostics"
