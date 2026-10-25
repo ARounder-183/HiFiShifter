@@ -317,9 +317,8 @@ fn main() {
         // 全局），所以晚到一拍也能被看到；而加载完成是这条链上还握在我们手里的时机。
         // 与 UserScript 那条用同一个字面量，两处不可能给出不同的载荷。
         let boot_webview = webview.clone();
-        let boot_script = format!(
-            "window.__HFS_PLUGIN_BOOTSTRAP__=JSON.parse({bootstrap_literal});"
-        );
+        let boot_script =
+            format!("window.__HFS_PLUGIN_BOOTSTRAP__=JSON.parse({bootstrap_literal});");
         webview.connect_load_changed(move |_, event| {
             if event == webkit2gtk::LoadEvent::Finished {
                 boot_webview.evaluate_javascript(
