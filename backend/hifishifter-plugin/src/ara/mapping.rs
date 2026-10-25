@@ -381,7 +381,12 @@ pub fn source_sample_rates(doc: &AraDocument) -> Vec<u32> {
 ///
 /// 拿不到工程速率时（`project_rate` 为 0 / 非有限）**不猜**，按宿主比值原样返回，
 /// 由调用方走夹窗口降级。
-fn region_playback_rate(region: &AraPlaybackRegion, source_rate: f64, project_rate: f64) -> f64 {
+fn region_playback_rate(
+    region: &AraPlaybackRegion,
+    source_rate: f64,
+    project_rate: f64,
+    source_sample_count: f64,
+) -> f64 {
     if !(region.duration_in_playback_time.is_finite() && region.duration_in_playback_time > 0.0) {
         return 1.0;
     }
@@ -394,7 +399,39 @@ fn region_playback_rate(region: &AraPlaybackRegion, source_rate: f64, project_ra
     {
         return host_ratio;
     }
-    let rate = host_ratio * (project_rate / source_rate);
+    // 【要不要乘 `project/source` —— 靠一条等式判定，不靠猜】
+    //
+    // 两个宿主的时长域不同，而它们**各自**都留下了一个可验算的指纹：整条 region
+    // 覆盖整个源时，`durationMod` 乘上"它自己那个域的速率"必然等于源帧数。
+    //
+    //   * Cubase 15（实测）：durationMod = 34.610703，
+    //     34.610703 × 44100 = 1 526 332 = sampleCount  ⇒ 时长在**工程**域；
+    //   * REAPER（实测）：同一条 48 kHz / 1 526 332 帧素材放进 44.1 kHz 工程，
+    //     宿主按真实秒报 31.798583，31.798583 × 48000 = 1 526 332 ⇒ 时长在**源**域。
+    //
+    // 于是"该不该乘"从约定问题变成一个可判定问题：只有源域成立时才不乘。
+    // 两个候选都不成立（region 被裁剪过、或源帧数未知）时保持既有约定 —— 宁可
+    // 不修 Cubase 那条已验证的路径，也不要把判据建立在不可识别的数据上。
+    let content_frames = source_sample_count;
+    let tolerance = (content_frames * 1e-3).max(1.0);
+    let matches = |rate: f64| {
+        content_frames > 0.0
+            && (region.duration_in_modification_time * rate - content_frames).abs() <= tolerance
+    };
+    let in_project_domain = matches(project_rate);
+    let in_source_domain = matches(source_rate);
+
+    let rate = if in_source_domain && !in_project_domain {
+        // 时长是真实秒：采样率不同不构成拉伸，一秒就是一秒。
+        //
+        // 旧算式在这里给出 0.919，于是 `source_end = source_start + tl_len × 0.919`
+        // 把源窗口砍掉 8.8%，保音高的伸缩器再把 2.136 s 铺满 2.324 s —— 用户听到的
+        // 就是"整体慢了 8.8%、音高没变"。同一个 0.919 也让前端把源帧按工程率换算，
+        // 播放光标系统性领跑 8.8%（t ≈ 17 s 处正好 1.5 s）。
+        host_ratio
+    } else {
+        host_ratio * (project_rate / source_rate)
+    };
     if rate.is_finite() {
         rate
     } else {
@@ -410,12 +447,14 @@ fn region_playback_rate(region: &AraPlaybackRegion, source_rate: f64, project_ra
 pub fn has_observed_time_stretch(doc: &AraDocument) -> bool {
     let project_rate = resolve_project_rate(doc).rate;
     doc.playback_regions.iter().any(|region| {
-        let source_rate = doc
+        let source = doc
             .audio_sources
             .iter()
-            .find(|source| source.persistent_id == region.audio_source_persistent_id)
-            .map_or(0.0, |source| source.sample_rate);
-        (region_playback_rate(region, source_rate, project_rate) - 1.0).abs() > 1e-9
+            .find(|source| source.persistent_id == region.audio_source_persistent_id);
+        let source_rate = source.map_or(0.0, |source| source.sample_rate);
+        let source_sample_count = source.map_or(0.0, |source| source.sample_count as f64);
+        (region_playback_rate(region, source_rate, project_rate, source_sample_count) - 1.0).abs()
+            > 1e-9
     })
 }
 
@@ -776,7 +815,12 @@ fn ara_document_to_timeline_reporting_with_identities(
         // 【速率】宿主声明的时长比值，再乘"工程速率 / 源速率"的校正。后者修正的是
         // "宿主按工程速率折算修改时长"这一事实（见 `region_playback_rate`）：
         // 48 kHz 素材进 44.1 kHz 工程且宿主不拉伸时，比值 1 × 44100/48000 = 0.91875。
-        let playback_rate = region_playback_rate(region, source.sample_rate, project.rate);
+        let playback_rate = region_playback_rate(
+            region,
+            source.sample_rate,
+            project.rate,
+            source.sample_count as f64,
+        );
         // 【身份优先用 region key】位置派生的 id 会在宿主删掉靠前一条 region 之后整体前移，
         // 而所有参数表都按 clip id 索引 —— 那正是"编辑操作不更新 ARA"的直接机理。
         // key 是 ARA 在同一文档内保证稳定的令牌（宿主把它当作不透明句柄），
