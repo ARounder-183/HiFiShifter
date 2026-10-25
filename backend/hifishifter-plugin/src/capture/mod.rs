@@ -420,7 +420,8 @@ struct DeferredBlock {
 /// 定长旁路槽：一块音频一槽，槽位在实例创建时备好。
 struct BypassSlots {
     slots: Vec<Option<DeferredBlock>>,
-    /// 已取出但仍复用其平面的块（见 `drain_ordered` 的说明）。
+    /// 平面复用池：块已补写完毕，只有它的两条 `Vec<f32>` 平面（容量）还有价值，
+    /// 由 `defer_block` 弹出复用（见 `pop_spare_planes` 与 `recycle` 的说明）。
     spare: Vec<DeferredBlock>,
 }
 
@@ -434,21 +435,37 @@ impl BypassSlots {
         }
     }
 
-    /// 取一个空槽写入；全满时返回 `None`。
-    fn take_free(&mut self) -> Option<&mut Option<DeferredBlock>> {
-        self.slots.iter_mut().find(|slot| slot.is_none())
+    /// 找一个空槽的下标；全满时返回 `None`。
+    ///
+    /// 【为什么返回下标而不是 `&mut`】`defer_block` 在占槽**之后**还要从复用池弹
+    /// 平面（同样可变借用 `self`）—— 返回引用会让两个可变借用同时存活。下标在
+    /// 锁的保护下重取即安全，N=4 的线性查找代价可忽略。
+    fn free_index(&self) -> Option<usize> {
+        self.slots.iter().position(|slot| slot.is_none())
     }
 
-    /// 按**块首升序**取出全部待补写的块（消费即清空）。
+    /// 从复用池弹出一块，取走它的平面供新一轮暂存复用。
+    ///
+    /// 【为什么这是音频线程零分配的关键】池里的平面容量通常正好等于块长；
+    /// 池空（本轮首次竞争）才返回空 `Vec`，由调用方分配一次。
+    fn pop_spare_planes(&mut self) -> [Vec<f32>; 2] {
+        match self.spare.pop() {
+            Some(block) => block.planes,
+            None => [Vec::new(), Vec::new()],
+        }
+    }
+
+    /// 按**块首升序**取出全部**待补写**的槽位块（消费即清空）。
     ///
     /// 【为什么按块首排序】块可能在不同锁竞争窗口里进来又出去；捕获的写入判据
     /// （`expected_next`）要求按工程顺序补，否则一段连续音频会被判成 Gap。
     ///
-    /// 【为什么把块搬到 `spare` 而不是 `Option::take`】每块自带两条 `Vec<f32>` 平面；
-    /// 走 `take` 会把它们连同 `Option` 一起释放，下一轮补写又要重新分配 —— 音频线程
-    /// 旁边的 `audio_boundary_tests` 不允许那样。搬进 `spare` 让平面留在池里复用。
-    fn drain_ordered(&mut self) -> Vec<DeferredBlock> {
-        let mut taken = std::mem::take(&mut self.spare);
+    /// 【为什么只取槽位、不碰复用池】`spare` 里的块**已经补写完毕**，把它们再次
+    /// 交给补写循环等于每个音频块重复投递至多 4 个陈旧块 —— 旧实现正是这么做的
+    /// （`drain_ordered` 先 `mem::take(spare)`），靠 recorder 的覆盖写判据兜底才
+    /// 没有出错，`blocks_replayed` 因此持续虚高，白费每块的 CPU。
+    fn drain_pending(&mut self) -> Vec<DeferredBlock> {
+        let mut taken = Vec::new();
         for slot in &mut self.slots {
             if let Some(block) = slot.take() {
                 taken.push(block);
@@ -1008,7 +1025,7 @@ impl CaptureStore {
         // 否则补写本身又可能失败。顺序固定：先补旧的，再写新的。
         let deferred = {
             let mut slots = self.bypass.lock_or_recover();
-            slots.drain_ordered()
+            slots.drain_pending()
         };
         if !deferred.is_empty() {
             // 补写本身也要拿到同一把锁；拿不到就原样还回去（下一轮再补），
@@ -1098,16 +1115,17 @@ impl CaptureStore {
             return false;
         }
         let mut slots = self.bypass.lock_or_recover();
-        let Some(slot) = slots.take_free() else {
+        let Some(free_index) = slots.free_index() else {
             return false;
         };
-        let mut planes: [Vec<f32>; 2] = [Vec::new(), Vec::new()];
+        // 【音频线程零分配的关键】平面取自复用池（上一轮补写完经 `recycle` 还回的
+        // 块）：容量通常正好。池空（本轮首次竞争）才分配一次；长度不够只发生在
+        // 块长变化时，频率极低，且 `audio_boundary_tests` 的计数路径不会经过
+        //（它的块长恒定）。平面不足的畸形输入按满处理，见函数头注释。
+        let mut planes = slots.pop_spare_planes();
         for (index, plane) in block.planes.iter().enumerate() {
             match plane {
                 Some(source) if source.len() >= frames => {
-                    // 槽里的 Vec 是上一轮留下的：容量通常正好。长度不够时才需要分配 ——
-                    // 那种情况只发生在块长变化时，频率极低，且 `audio_boundary_tests` 的
-                    // 计数路径不会经过（它的块长恒定）。
                     if planes[index].len() < frames {
                         planes[index].resize(frames, 0.0);
                     }
@@ -1123,7 +1141,7 @@ impl CaptureStore {
             }
         }
         let _ = planes[1].len().max(planes[0].len());
-        *slot = Some(DeferredBlock {
+        slots.slots[free_index] = Some(DeferredBlock {
             start: block.start,
             frames,
             sample_rate: block.sample_rate.round().max(0.0) as u32,
@@ -1133,11 +1151,11 @@ impl CaptureStore {
         true
     }
 
-    /// 【T19】把一块（连同它的平面）还回备用池（下一轮竞争时复用）。
+    /// 【T19】把补写完的块（连同它的平面）还回复用池。
     ///
     /// 【为什么还整块而不是只还平面】平面在 `DeferredBlock` 里；只还平面就要把它
-    /// 拆出来再拼回去，多一层结构。整块还回去即可：`drain_ordered` 取走的块也在
-    /// 同一个池里，形状一致。
+    /// 拆出来再拼回去，多一层结构。整块还回去即可：`defer_block` 经
+    /// `pop_spare_planes` 取走平面，形状一致。池满即丢（容量上限 = 槽数）。
     fn recycle(&self, block: DeferredBlock) {
         let mut slots = self.bypass.lock_or_recover();
         if slots.spare.len() < BYPASS_SLOTS {
@@ -1149,8 +1167,8 @@ impl CaptureStore {
     fn requeue(&self, blocks: Vec<DeferredBlock>) {
         for block in blocks {
             let mut slots = self.bypass.lock_or_recover();
-            if let Some(slot) = slots.take_free() {
-                *slot = Some(block);
+            if let Some(index) = slots.free_index() {
+                slots.slots[index] = Some(block);
             }
         }
     }

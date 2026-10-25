@@ -125,6 +125,7 @@ impl InputVerdict {
     /// 【为什么 `usable` 排在 `authorized` 前面】两个字段回答的是不同的问题：
     ///   * `authorized` —— 宿主**此刻允不允许**读 ARA 样本；
     ///   * `usable`    —— 我们手里**有没有能出声的 PCM**（`edit_sources`）。
+    ///
     /// REAPER-Linux 的 `[editor, view]` 形态下前者可以是恒 false，而渲染侧照样
     /// 拿着 `edit_sources` 出声。用前者判定，编辑器就被永久钉在
     /// `awaiting_samples` 上，而同一个文档在渲染侧看是 `pcm=1` —— 两份真相。

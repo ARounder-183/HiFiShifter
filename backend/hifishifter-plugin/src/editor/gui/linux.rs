@@ -1055,6 +1055,15 @@ fn run_inline(command: Control) {
 const SLOW_ENTRY: Duration = Duration::from_millis(50);
 
 fn tick() -> glib::ControlFlow {
+    // 【为什么整个函数体都要包】本函数经 `glib::timeout_add_local` 由 GTK 主循环的
+    // C 栈调用：panic 越过 glib 的 C 帧 = abort 整个 DAW 进程（进程内 GUI 形态，
+    // 即 `HIFISHIFTER_INPROCESS_GUI=1` 或 OOP 不可用回退时）。与 Windows 的
+    // `window_proc` 全量守卫、`lib.rs` 的 guard_ffi 规则对齐。回执泵即使某一拍
+    // panic 也要继续转下去（Continue），否则前端从此收不到任何回执。
+    crate::guard_ffi(glib::ControlFlow::Continue, tick_inner)
+}
+
+fn tick_inner() -> glib::ControlFlow {
     // 【为什么要数节拍】宿主线程上的 `g_timeout_add` **只在宿主迭代 GTK 主循环时才跑**。
     // 宿主迭代得慢，回执泵就慢，前端就会报 "Backend invoke failed"、手感像卡死 ——
     // 而这个数字是唯一能把"宿主没在转"和"我们算得慢"分开的证据。
@@ -1441,9 +1450,12 @@ fn attach_view(
         crate::gui_log_line(&format!("falling back to a floating window: {reason}"));
         let weak = Rc::downgrade(&client);
         window.connect_delete_event(move |_, _| {
-            if let Some(client) = weak.upgrade() {
-                client.borrow_mut().close();
-            }
+            // 由 GTK 主循环的 C 栈调用；panic 拦成"继续销毁"（与正常路径同值）。
+            crate::guard_ffi(gtk::glib::Propagation::Proceed, || {
+                if let Some(client) = weak.upgrade() {
+                    client.borrow_mut().close();
+                }
+            });
             // 【为什么 `Proceed`】窗口的销毁交给 `close_view`（它要同时摘掉注册表与节拍）。
             gtk::glib::Propagation::Proceed
         });
@@ -1464,14 +1476,16 @@ fn attach_view(
     {
         let widget = container.clone();
         glib::timeout_add_local_once(std::time::Duration::from_millis(1500), move || {
-            let window = widget.window();
-            crate::gui_log_line(&format!(
-                "view self-check: widget_mapped={} window_viewable={} size={}x{}",
-                widget.is_mapped(),
-                window.as_ref().is_some_and(|w| w.is_viewable()),
-                window.as_ref().map(|w| w.width()).unwrap_or(0),
-                window.as_ref().map(|w| w.height()).unwrap_or(0),
-            ));
+            crate::guard_ffi((), || {
+                let window = widget.window();
+                crate::gui_log_line(&format!(
+                    "view self-check: widget_mapped={} window_viewable={} size={}x{}",
+                    widget.is_mapped(),
+                    window.as_ref().is_some_and(|w| w.is_viewable()),
+                    window.as_ref().map(|w| w.width()).unwrap_or(0),
+                    window.as_ref().map(|w| w.height()).unwrap_or(0),
+                ));
+            });
         });
     }
 
@@ -1503,43 +1517,50 @@ fn attach_view(
     {
         let view = webview.clone();
         glib::timeout_add_local_once(std::time::Duration::from_millis(3000), move || {
-            view.snapshot(
-                webkit2gtk::SnapshotRegion::Visible,
-                webkit2gtk::SnapshotOptions::NONE,
-                None::<&gio::Cancellable>,
-                move |result| {
-                    let surface = match result {
-                        Ok(surface) => surface,
-                        Err(error) => {
-                            // 【为什么要打错误文本】§snapshot§ 失败就是"WebKit 拿不出渲染
-                            // 结果"，那正是黑屏的机制。错误信息里写着它卡在哪一步
-                            // （进程崩溃 / 没有可绘制的帧 / 区域为空）。
+            crate::guard_ffi((), || {
+                view.snapshot(
+                    webkit2gtk::SnapshotRegion::Visible,
+                    webkit2gtk::SnapshotOptions::NONE,
+                    None::<&gio::Cancellable>,
+                    move |result| {
+                        // 该回调同样由 WebKitGTK 的 C 栈调起。
+                        crate::guard_ffi((), move || {
+                            let surface = match result {
+                                Ok(surface) => surface,
+                                Err(error) => {
+                                    // 【为什么要打错误文本】§snapshot§ 失败就是"WebKit 拿不出渲染
+                                    // 结果"，那正是黑屏的机制。错误信息里写着它卡在哪一步
+                                    //（进程崩溃 / 没有可绘制的帧 / 区域为空）。
+                                    crate::gui_log_line(&format!(
+                                        "paint self-check: snapshot failed: {error}"
+                                    ));
+                                    return;
+                                }
+                            };
+                            // 固定文件名：每开一次窗口覆盖上一次，不在日志目录里堆积。
+                            let path = crate::diagnostics::log_directory().join("gui-snapshot.png");
+                            let Ok(c_path) =
+                                std::ffi::CString::new(path.to_string_lossy().as_bytes())
+                            else {
+                                return;
+                            };
+                            use gtk::glib::translate::ToGlibPtr;
+                            let status = unsafe {
+                                cairo_ffi::cairo_surface_write_to_png(
+                                    surface.to_glib_none().0.cast(),
+                                    c_path.as_ptr(),
+                                )
+                            };
+                            let bytes =
+                                std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
                             crate::gui_log_line(&format!(
-                                "paint self-check: snapshot failed: {error}"
+                                "paint self-check: status={status} png_bytes={bytes} path={}",
+                                path.display()
                             ));
-                            return;
-                        }
-                    };
-                    // 固定文件名：每开一次窗口覆盖上一次，不在日志目录里堆积。
-                    let path = crate::diagnostics::log_directory().join("gui-snapshot.png");
-                    let Ok(c_path) = std::ffi::CString::new(path.to_string_lossy().as_bytes())
-                    else {
-                        return;
-                    };
-                    use gtk::glib::translate::ToGlibPtr;
-                    let status = unsafe {
-                        cairo_ffi::cairo_surface_write_to_png(
-                            surface.to_glib_none().0.cast(),
-                            c_path.as_ptr(),
-                        )
-                    };
-                    let bytes = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
-                    crate::gui_log_line(&format!(
-                        "paint self-check: status={status} png_bytes={bytes} path={}",
-                        path.display()
-                    ));
-                },
-            );
+                        });
+                    },
+                );
+            });
         });
     }
 
@@ -1614,74 +1635,87 @@ fn install_messages(manager: &webkit2gtk::UserContentManager, client: &Rc<RefCel
     }
     let weak = Rc::downgrade(client);
     manager.connect_script_message_received(None, move |_, result| {
-        let Some(client) = weak.upgrade() else {
-            return;
-        };
-        let Some(value) = result.js_value() else {
-            return;
-        };
-        // 我们只接受字符串（见 protocol.rs 的理由）；结构化对象在这里被拒绝。
-        if !value.is_string() {
-            return;
-        }
-        let text = value.to_str();
-        if text.len() > protocol::MAX_MESSAGE_BYTES {
-            return;
-        }
-        client::on_message(&client, text.as_str());
+        // 该闭包由 WebKitGTK 的 C 栈调用（同 `tick` 的守卫理由）。
+        crate::guard_ffi((), move || {
+            let Some(client) = weak.upgrade() else {
+                return;
+            };
+            let Some(value) = result.js_value() else {
+                return;
+            };
+            // 我们只接受字符串（见 protocol.rs 的理由）；结构化对象在这里被拒绝。
+            if !value.is_string() {
+                return;
+            }
+            let text = value.to_str();
+            if text.len() > protocol::MAX_MESSAGE_BYTES {
+                return;
+            }
+            client::on_message(&client, text.as_str());
+        });
     });
 }
 
 /// 导航白名单、新窗口、页面就绪、页面死亡。
 fn install_policy(webview: &webkit2gtk::WebView, client: &Rc<RefCell<EditorClient>>) {
     webview.connect_decide_policy(|_, decision, kind| {
-        if kind == webkit2gtk::PolicyDecisionType::NavigationAction {
-            if let Some(navigation) =
-                decision.downcast_ref::<webkit2gtk::NavigationPolicyDecision>()
-            {
-                // §request()§ 自 WebKit 2.6 起废弃，用 §navigation_action().request()§。
-                let allowed = navigation
-                    .navigation_action()
-                    .and_then(|action| action.request())
-                    .and_then(|request| request.uri())
-                    .is_some_and(|uri| protocol::is_allowed_navigation(&uri));
-                if !allowed {
-                    decision.ignore();
-                    return true;
+        // 由 WebKitGTK 的 C 栈调用；panic 必须拦成默认处置（false = 交给 WebKit）。
+        crate::guard_ffi(false, || {
+            if kind == webkit2gtk::PolicyDecisionType::NavigationAction {
+                if let Some(navigation) =
+                    decision.downcast_ref::<webkit2gtk::NavigationPolicyDecision>()
+                {
+                    // §request()§ 自 WebKit 2.6 起废弃，用 §navigation_action().request()§。
+                    let allowed = navigation
+                        .navigation_action()
+                        .and_then(|action| action.request())
+                        .and_then(|request| request.uri())
+                        .is_some_and(|uri| protocol::is_allowed_navigation(&uri));
+                    if !allowed {
+                        decision.ignore();
+                        return true;
+                    }
                 }
             }
-        }
-        false
+            false
+        })
     });
     // 新窗口一律拒绝：本编辑器只有一个页面。
     webview.connect_create(|_, _| None::<gtk::Widget>);
     let weak = Rc::downgrade(client);
     webview.connect_load_changed(move |_, event| {
-        if event == webkit2gtk::LoadEvent::Finished {
-            if let Some(client) = weak.upgrade() {
-                client.borrow_mut().on_page_ready();
+        crate::guard_ffi((), || {
+            if event == webkit2gtk::LoadEvent::Finished {
+                if let Some(client) = weak.upgrade() {
+                    client.borrow_mut().on_page_ready();
+                }
             }
-        }
+        });
     });
     // 【为什么"页面死亡"要直接标记】WebKitGTK 的 web process 崩溃之后所有投递都会
     // 静默失败，界面成了一张死图。继续假装可用只会让后续命令排进预算、把队列占满。
     let weak = Rc::downgrade(client);
     webview.connect_web_process_terminated(move |_, reason| {
-        if let Some(client) = weak.upgrade() {
-            client
-                .borrow_mut()
-                .mark_dead(&format!("the web process terminated ({reason:?})"));
-        }
+        crate::guard_ffi((), || {
+            if let Some(client) = weak.upgrade() {
+                client
+                    .borrow_mut()
+                    .mark_dead(&format!("the web process terminated ({reason:?})"));
+            }
+        });
     });
     let weak = Rc::downgrade(client);
     webview.connect_load_failed(move |_, _, uri, error| {
-        crate::gui_log_line(&format!("page load failed for {uri}: {error}"));
-        if let Some(client) = weak.upgrade() {
-            client
-                .borrow_mut()
-                .mark_dead("the editor page could not be loaded");
-        }
-        false
+        // false = 把失败交给 WebKit 的默认处理（与原闭包的返回值一致）。
+        crate::guard_ffi(false, move || {
+            crate::gui_log_line(&format!("page load failed for {uri}: {error}"));
+            if let Some(client) = weak.upgrade() {
+                client
+                    .borrow_mut()
+                    .mark_dead("the editor page could not be loaded");
+            }
+            false
+        })
     });
 }
 
@@ -1699,27 +1733,30 @@ fn install_drop(webview: &webkit2gtk::WebView, client: &Rc<RefCell<EditorClient>
     webview.drag_dest_set(gtk::DestDefaults::ALL, &targets, gtk::gdk::DragAction::COPY);
     let weak = Rc::downgrade(client);
     webview.connect_drag_data_received(move |_, _, _, _, data, _, _| {
-        let Some(client) = weak.upgrade() else {
-            return;
-        };
-        let paths = data
-            .uris()
-            .iter()
-            .filter_map(|uri| gio::File::for_uri(uri).path())
-            // 拖一个已删除的文件进来是常见操作；不存在就安静跳过，别报错。
-            .filter(|path| path.is_file())
-            .map(|path| path.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-        if paths.is_empty() {
-            return;
-        }
-        let view_id = client.borrow().view_id.clone();
-        client.borrow_mut().post(serde_json::json!({
-            "version": 1,
-            "viewId": view_id,
-            "event": "native_drop",
-            "payload": { "paths": paths },
-        }));
+        // 由 GTK 拖放机制的 C 栈调用（同 `tick` 的守卫理由）。
+        crate::guard_ffi((), move || {
+            let Some(client) = weak.upgrade() else {
+                return;
+            };
+            let paths = data
+                .uris()
+                .iter()
+                .filter_map(|uri| gio::File::for_uri(uri).path())
+                // 拖一个已删除的文件进来是常见操作；不存在就安静跳过，别报错。
+                .filter(|path| path.is_file())
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            if paths.is_empty() {
+                return;
+            }
+            let view_id = client.borrow().view_id.clone();
+            client.borrow_mut().post(serde_json::json!({
+                "version": 1,
+                "viewId": view_id,
+                "event": "native_drop",
+                "payload": { "paths": paths },
+            }));
+        });
     });
 }
 
