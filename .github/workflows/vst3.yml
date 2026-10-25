@@ -28,6 +28,11 @@ jobs:
       - name: FFI panic-guard gate
         run: python scripts/checks/check-ffi-guards.py
 
+      # 限流日志只允许 Warn / Error。Info/Debug 套上限流会在默认日志级别下
+      # 变成静默黑洞：代码看起来有诊断，实际一条都不输出。
+      - name: Log level gate
+        run: python scripts/checks/check-log-levels.py
+
       # SDK 路径的唯一事实来源在 scripts/env/sdk-env.ps1；直接 cargo 调用（不经过构建脚本）
       # 需要这里导出的 ARA_SDK_DIR / ARA_VST3_SDK_DIR。
       - name: Configure pinned SDK paths
