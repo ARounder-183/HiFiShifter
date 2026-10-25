@@ -1,5 +1,33 @@
 //! 实时回调发布的宿主播放时钟；GUI读近似最新块，process只执行原子写入。
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU64, Ordering};
+
+/// 宿主读数在**墙钟**上的生存期。
+///
+/// 【为什么需要上界】宿主采样与音频块是两个来源：前者 30 Hz、来自宿主主线程，
+/// 后者每块、来自音频线程。谁新用谁 —— 但"新"必须能被判出来，而 `host_valid`
+/// 是一个**只置真、从不复位**的闩锁：一次成功的采样之后，它会把音频线程的实时
+/// 读数**永久**压住。现场症状正是"光标停在原地、偏移越拉越大"，以及偶尔一帧
+/// 跳回真实位置（"随机闪"）。
+///
+/// 宿主节拍约 30 Hz（33 ms）。150 ms 是 4~5 个周期：足以容忍调度抖动，
+/// 又远短于用户能察觉的漂移。
+const HOST_READING_STALE_MS: u64 = 150;
+
+/// 宿主读数在**音频块计数**上的生存期（约 8 块 ≈ 85 ms @ 48 kHz / 512 帧）。
+///
+/// 【为什么还要一条块计数的判据】音频线程不能读墙钟（实时纪律），所以它的进度
+/// 只能用自己的块序号表达。宿主采样时记下当时的块号；块号走得太远就说明宿主
+/// 采样已经落后于音频，此时以音频为准。
+const HOST_STALE_BLOCKS: u64 = 8;
+
+/// 进程启动以来的毫秒数。只用于新鲜度判定，不参与任何音视频时序。
+fn now_ms() -> u64 {
+    static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    EPOCH
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_millis() as u64
+}
 #[derive(Default)]
 pub(crate) struct TransportClock {
     position: AtomicU64,
@@ -10,6 +38,12 @@ pub(crate) struct TransportClock {
     time_sig_denominator: AtomicI32,
     host_pose: AtomicU64,
     host_valid: AtomicBool,
+    /// 最近一次宿主采样的墙钟毫秒（见 `HOST_READING_STALE_MS`）。
+    host_at_ms: AtomicU64,
+    /// 音频线程推进的块序号；只用它的**差值**判新鲜度，绝不当作时间。
+    audio_serial: AtomicU64,
+    /// 宿主采样那一刻的块序号。
+    host_audio_serial: AtomicU64,
     realtime: AtomicU64,
     prefetch: AtomicU64,
     offline: AtomicU64,
@@ -39,10 +73,16 @@ impl TransportClock {
         if !position.is_finite() {
             return;
         }
+        // 先读块序号再发布位置：并发的音频块只会让宿主读数显得**更旧**，
+        // 绝不会让它显得更新 —— 判据因此永远偏向音频线程（安全的方向）。
+        let audio_serial = self.audio_serial.load(Ordering::Acquire);
         self.host_pose.store(
             (position.to_bits() & !1) | u64::from(playing),
             Ordering::Release,
         );
+        self.host_audio_serial
+            .store(audio_serial, Ordering::Release);
+        self.host_at_ms.store(now_ms(), Ordering::Release);
         self.host_valid.store(true, Ordering::Release);
     }
     /// 只采集原子诊断，不修改播放权威/不打印日志；并发快照是近似观测，不作精确同步证明。
@@ -117,6 +157,10 @@ impl TransportClock {
     pub fn diagnostics(&self) -> serde_json::Value {
         serde_json::json!({"realtime_callbacks":self.realtime.load(Ordering::Relaxed),
             "host_position_authority":self.host_valid.load(Ordering::Acquire),
+            // 【为什么要报"当前用的是谁"】"光标不跟手"的两种成因（宿主采样停摆 /
+            // 音频块停摆）在这两个计数上完全分得开，不必让用户复述现象。
+            "host_reading_fresh":self.host_is_fresh(),
+            "audio_serial":self.audio_serial.load(Ordering::Acquire),
             "prefetch_callbacks":self.prefetch.load(Ordering::Relaxed),"offline_callbacks":self.offline.load(Ordering::Relaxed),
             "writer_switches":self.switches.load(Ordering::Relaxed),"backwards_while_playing":self.backwards.load(Ordering::Relaxed),
             "last_writer":self.writer.load(Ordering::Relaxed),"last_role":self.role.load(Ordering::Relaxed),
@@ -133,6 +177,8 @@ impl TransportClock {
     pub fn update(&self, context: &crate::audio_abi::ProcessContext) {
         if context.sample_rate.is_finite() && context.sample_rate > 0. {
             self.received.store(true, Ordering::Release);
+            // 块序号只递增；它是"音频走到了第几块"的唯一表达（见 `HOST_STALE_BLOCKS`）。
+            self.audio_serial.fetch_add(1, Ordering::Release);
             self.position.store(
                 (context.project_time_samples as f64 / context.sample_rate).to_bits(),
                 Ordering::Release,
@@ -183,9 +229,35 @@ impl TransportClock {
     pub fn has_reading(&self) -> bool {
         self.host_valid.load(Ordering::Acquire) || self.received.load(Ordering::Acquire)
     }
-    /// 多个renderer可能并行发布同一文档块；展示容忍一块误差，不参与DSP寻址。
+    /// 宿主读数是否仍然**新鲜**（两次判据同时成立，见两个常量）。
+    ///
+    /// 【为什么不是"曾经读到过"】`host_valid` 只置真、从不复位。用它当权威，
+    /// 一次成功的采样就会把音频线程的实时读数永久压住 —— 光标停住、偏移越拉越大，
+    /// 而宿主偶尔来一次回调时又跳回真实位置（"随机闪"）。
+    fn host_is_fresh(&self) -> bool {
+        if !self.host_valid.load(Ordering::Acquire) {
+            return false;
+        }
+        let age_ms = now_ms().saturating_sub(self.host_at_ms.load(Ordering::Acquire));
+        if age_ms > HOST_READING_STALE_MS {
+            return false;
+        }
+        let blocks = self
+            .audio_serial
+            .load(Ordering::Acquire)
+            .saturating_sub(self.host_audio_serial.load(Ordering::Acquire));
+        blocks <= HOST_STALE_BLOCKS
+    }
+
+    /// 多个 renderer 可能并行发布同一文档块；展示容忍一块误差，不参与 DSP 寻址。
+    ///
+    /// 【为什么是"新鲜者胜"而不是"宿主优先"】两个来源回答的是不同的问题：宿主采样
+    /// 给的是**暂停时**的光标位置（那里只有宿主知道），音频线程给的是**播放中**的
+    /// 连续位置。两者天然有 1~2 帧相位差，而任一方都可能停摆 —— 用布尔闩锁选边，
+    /// 就等于让"最后一次成功"永远赢。这里按新鲜度仲裁：谁在最近一轮里还在推进，
+    /// 就用谁。
     pub fn read(&self) -> (f64, bool) {
-        if self.host_valid.load(Ordering::Acquire) {
+        if self.host_is_fresh() {
             let pose = self.host_pose.load(Ordering::Acquire);
             return (f64::from_bits(pose & !1), pose & 1 != 0);
         }
@@ -218,6 +290,56 @@ mod tests {
         assert_eq!(clock.read(), (0.25, false));
         assert_eq!(clock.diagnostics()["host_position_authority"], true);
     }
+    /// 宿主采样一旦**停摆**，音频线程的实时读数必须重新赢回来。
+    ///
+    /// 【为什么这条最要紧】它就是"光标停在原地、偏移越拉越大"的回归：旧实现在
+    /// `host_valid` 为真时无条件返回宿主值，于是停掉的采样会把播放头钉死在最后
+    /// 一次成功的位置上，直到下一次宿主回调把它"闪"回去。
+    #[test]
+    fn a_stalled_host_sample_yields_to_the_audio_thread() {
+        let clock = TransportClock::default();
+        clock.publish_host(1.0, true);
+        for block in 1..=12u64 {
+            clock.update(&crate::audio_abi::ProcessContext {
+                state: 1 << 1,
+                sample_rate: 44100.,
+                project_time_samples: 44100 * block as i64,
+                ..Default::default()
+            });
+        }
+        // 12 块 > HOST_STALE_BLOCKS ⇒ 宿主读数作废，取音频线程的块位置。
+        assert_eq!(clock.read(), (12.0, true));
+        assert_eq!(clock.diagnostics()["host_reading_fresh"], false);
+    }
+
+    /// 但一个**新鲜**的宿主采样必须立刻重新成为权威 —— 暂停时的光标位置只有宿主知道。
+    #[test]
+    fn a_fresh_host_sample_wins_back_immediately() {
+        let clock = TransportClock::default();
+        clock.publish_host(1.0, true);
+        for block in 1..=12u64 {
+            clock.update(&crate::audio_abi::ProcessContext {
+                state: 1 << 1,
+                sample_rate: 44100.,
+                project_time_samples: 44100 * block as i64,
+                ..Default::default()
+            });
+        }
+        assert_eq!(clock.read(), (12.0, true));
+        clock.publish_host(12.5, true);
+        assert_eq!(clock.read(), (12.5, true));
+        assert_eq!(clock.diagnostics()["host_reading_fresh"], true);
+    }
+
+    /// 音频不跑时（暂停、插件未被处理）宿主读数不会因为"没有块"而过期。
+    #[test]
+    fn a_host_sample_without_any_audio_blocks_stays_authoritative() {
+        let clock = TransportClock::default();
+        clock.publish_host(3.25, false);
+        assert_eq!(clock.read(), (3.25, false));
+        assert!(clock.diagnostics()["host_reading_fresh"].as_bool().unwrap_or(false));
+    }
+
     /// 诊断真实区分三模式/多writer/回跳/瞬时停止，但本身不能改变GUI播放时间。
     #[test]
     fn diagnostics_count_sources_without_changing_the_transport() {
