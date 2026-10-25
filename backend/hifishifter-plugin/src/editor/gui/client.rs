@@ -609,7 +609,6 @@ pub(crate) fn host_heartbeat() {
     for link in crate::editor::routing::live_links() {
         host_tick(&link);
     }
-    crate::host::reaper::host_heartbeat_report(owners.len());
 }
 
 /// 只碰客户端自身状态的周期工作：**不调用任何宿主 API**，因此可以在任意线程跑。
