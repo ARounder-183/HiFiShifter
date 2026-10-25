@@ -498,20 +498,31 @@ pub fn set_project_notes(state: State<'_, AppState>, notes_markdown: String) -> 
     }
 }
 
+/// 普通保存（Ctrl+S / 菜单）。无路径时回落到「另存为」对话框。
+///
+/// 【为什么必须异步 + 阻塞池】普通保存不只是 JSON 落盘：无路径分支会弹
+/// rfd 对话框，「另存为 .zip」会把全部引用媒体逐一压缩复制（可能数 GB）。
+/// 同步命令在 WebView IPC 线程（Windows 上即 UI 主线程）内联执行，大工程
+/// 保存期间窗口与其余 IPC 全部停摆 —— 与下方 `save_project_to_path` 的
+/// 设计约定直接矛盾。任务 panic 由 spawn_blocking 汇聚为 JoinError，
+/// 等价于旧 `guard_command` 的遏制语义。
 #[tauri::command(rename_all = "camelCase")]
-pub fn save_project(
-    state: State<'_, AppState>,
+pub async fn save_project(
+    app: tauri::AppHandle,
     window: Window,
     notes_markdown: Option<String>,
 ) -> serde_json::Value {
+    match tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        project::save_project(state, window, notes_markdown)
+    })
+    .await
     {
-        // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
-        // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
-        common::guard_command(
-            "save_project",
-            serde_json::json!({ "ok": false, "error": "panic in command: save_project" }),
-            || project::save_project(state, window, notes_markdown),
-        )
+        Ok(result) => result,
+        Err(error) => serde_json::json!({
+            "ok": false,
+            "error": format!("Failed to join save task: {error}"),
+        }),
     }
 }
 
@@ -705,20 +716,26 @@ pub fn notebook_save_asset_as(
     }
 }
 
+/// 「另存为」：rfd 对话框（阻塞等待用户选择）+ 选定路径后的完整落盘，
+/// 后者可能包含数 GB 媒体的 zip 压缩 —— 与 `save_project` 同样必须在阻塞
+/// 线程池执行（见其注释）。
 #[tauri::command(rename_all = "camelCase")]
-pub fn save_project_as(
-    state: State<'_, AppState>,
+pub async fn save_project_as(
+    app: tauri::AppHandle,
     window: Window,
     notes_markdown: Option<String>,
 ) -> serde_json::Value {
+    match tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        project::save_project_as(state, window, notes_markdown)
+    })
+    .await
     {
-        // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
-        // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
-        common::guard_command(
-            "save_project_as",
-            serde_json::json!({ "ok": false, "error": "panic in command: save_project_as" }),
-            || project::save_project_as(state, window, notes_markdown),
-        )
+        Ok(result) => result,
+        Err(error) => serde_json::json!({
+            "ok": false,
+            "error": format!("Failed to join save-as task: {error}"),
+        }),
     }
 }
 
@@ -835,29 +852,40 @@ pub fn get_recording_apps() -> serde_json::Value {
     }
 }
 
+/// 启动录音。`recording::start` 会等待捕获流就绪（`recv_timeout` 兜底 8s），
+/// 慢设备上同步命令会把 UI 主线程整段冻住 —— 放阻塞线程池，用户等待期间
+/// 界面/其余 IPC 继续响应。`recording_starting` 的 CAS 互斥已保证并发安全。
 #[tauri::command(rename_all = "camelCase")]
-pub fn start_recording(state: State<'_, AppState>, start_sec: f64) -> serde_json::Value {
+pub async fn start_recording(app: tauri::AppHandle, start_sec: f64) -> serde_json::Value {
+    match tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        recording::start_recording(state, start_sec)
+    })
+    .await
     {
-        // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
-        // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
-        common::guard_command(
-            "start_recording",
-            serde_json::json!({ "ok": false, "error": "panic in command: start_recording" }),
-            || recording::start_recording(state, start_sec),
-        )
+        Ok(result) => result,
+        Err(error) => serde_json::json!({
+            "ok": false,
+            "error": format!("Failed to join recording-start task: {error}"),
+        }),
     }
 }
 
+/// 停止录音：join 捕获线程与写盘线程，随后智能声道策略还会**解码整段录音**做
+/// 判定 —— 长录音停止时是数百 ms~秒级的阻塞工作，同样必须在阻塞线程池执行。
 #[tauri::command(rename_all = "camelCase")]
-pub fn stop_recording(state: State<'_, AppState>) -> serde_json::Value {
+pub async fn stop_recording(app: tauri::AppHandle) -> serde_json::Value {
+    match tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        recording::stop_recording(state)
+    })
+    .await
     {
-        // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
-        // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
-        common::guard_command(
-            "stop_recording",
-            serde_json::json!({ "ok": false, "error": "panic in command: stop_recording" }),
-            || recording::stop_recording(state),
-        )
+        Ok(result) => result,
+        Err(error) => serde_json::json!({
+            "ok": false,
+            "error": format!("Failed to join recording-stop task: {error}"),
+        }),
     }
 }
 
