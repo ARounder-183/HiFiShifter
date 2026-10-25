@@ -260,6 +260,14 @@ impl TransportClock {
         blocks <= HOST_STALE_BLOCKS
     }
 
+    /// 来源切换次数（廉价读法）。
+    ///
+    /// 【为什么不读 `diagnostics()`】那会构造一份二十几个键的 JSON —— 而这里
+    /// 每帧（30 Hz 轮询）都要问一次。诊断不该给被测路径加分配。
+    pub fn source_switches(&self) -> u64 {
+        self.source_switches.load(Ordering::Relaxed)
+    }
+
     /// 多个 renderer 可能并行发布同一文档块；展示容忍一块误差，不参与 DSP 寻址。
     ///
     /// 【为什么是"新鲜者胜"而不是"宿主优先"】两个来源回答的是不同的问题：宿主采样

@@ -2442,9 +2442,7 @@ impl EditorSession {
         // 来源来回切换就是"光标随机闪"的机制；把切换次数打到日志里，
         // 用户不必复述现象，我们也不必猜是后端在抖还是前端在插值。
         if let Some(clock) = clock.as_ref() {
-            let switches = clock.diagnostics()["source_switches"]
-                .as_u64()
-                .unwrap_or(0);
+            let switches = clock.source_switches();
             if switches != 0 {
                 hifishifter_kernel::log_limiter::emit_limited_key(
                     log::Level::Warn,
