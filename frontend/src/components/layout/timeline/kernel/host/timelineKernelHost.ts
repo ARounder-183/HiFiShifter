@@ -6104,6 +6104,38 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         loop.invalidate();
     });
     resizeObserver.observe(container);
+    /*
+     * 【为什么还要一个 IntersectionObserver】
+     *
+     * 非活动的停靠标签页通常保留布局盒（隐藏的是可见性，不是尺寸），于是
+     * `ResizeObserver` **不会**触发；而浏览器完全可能在元素不可见期间丢弃画布的
+     * backing store。回来时尺寸没变、没人标脏，画布就一直是空白的 —— 直到用户
+     * 滚动或缩放才被顺手重绘。这正是"切到时间轴只看到空轨道，动一下才出来"。
+     *
+     * 交集变化是**独立于尺寸变化**的信号，正好覆盖这一格。它只在真正
+     * 不可见→可见时触发，正常滚动/缩放不会让它变红，因此不引入额外重绘。
+     */
+    let wasVisible = false;
+    const intersectionObserver = new IntersectionObserver(
+        (entries) => {
+            const entry = entries[entries.length - 1];
+            if (!entry) return;
+            const visible = entry.isIntersecting && entry.intersectionRatio > 0;
+            if (visible && !wasVisible) {
+                // 刚回到可见：重新量一次尺寸、广播给各图层，并整帧重绘。
+                viewportWidthPx = Math.max(1, container.clientWidth || 1);
+                viewportHeightPx = Math.max(1, container.clientHeight || 1);
+                onViewportWidthChange?.(viewportWidthPx);
+                onViewportSizeChange?.(viewportWidthPx, viewportHeightPx);
+                scroll.reclamp();
+                sceneDirty = true;
+                loop.invalidate();
+            }
+            wasVisible = visible;
+        },
+        { threshold: 0 },
+    );
+    intersectionObserver.observe(container);
     // 初始回写：ResizeObserver 的首次回调是异步的，而标尺在首帧就需要正确的刻度
     // 窗口（否则首屏标尺只画得出前一段），各图层也需要首帧的尺寸。
     onViewportWidthChange?.(viewportWidthPx);
@@ -6320,6 +6352,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             // 不停会在组件卸载后继续滚动并阻止相关对象被回收。
             stopDragAutoScroll();
             resizeObserver.disconnect();
+            intersectionObserver.disconnect();
             container.removeEventListener("wheel", onWheel);
             container.removeEventListener("keydown", onKeyDown);
             container.removeEventListener("pointerdown", onPointerDown);
