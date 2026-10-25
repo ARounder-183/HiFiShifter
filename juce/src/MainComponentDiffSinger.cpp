@@ -69,7 +69,7 @@ void MainComponent::showDiffSingerPronunciationEditor(const juce::String& noteId
         });
     juce::DialogWindow::LaunchOptions options;
     options.dialogTitle = juce::String::fromUTF8("谋•UTAU — DS 发音转换与读音覆盖");
-    options.dialogBackgroundColour = juce::Colour(0xff202b31);
+    options.dialogBackgroundColour = Palette::panel;
     options.escapeKeyTriggersCloseButton = true; options.useNativeTitleBar = true; options.resizable = true;
     options.content.setOwned(editor);
     if (auto* window = options.launchAsync()) window->setResizeLimits(800, 500, 1600, 1000);
@@ -283,7 +283,7 @@ void MainComponent::showDiffSingerPhonemeEditor(const juce::String& trackId, con
             }
             juce::DialogWindow::LaunchOptions options;
             options.dialogTitle = juce::String::fromUTF8("谋•UTAU — DiffSinger 音素时长");
-            options.dialogBackgroundColour = juce::Colour(0xff202b31);
+            options.dialogBackgroundColour = Palette::panel;
             options.escapeKeyTriggersCloseButton = true;
             options.useNativeTitleBar = true; options.resizable = true;
             options.content.setOwned(new DiffSingerPhonemeEditor(result, json["notes"],

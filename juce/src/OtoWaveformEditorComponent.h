@@ -1,8 +1,11 @@
 #pragma once
 
 #include "SampleSettings.h"
+#include "MaterialAnnotationSession.h"
 #include "Theme.h"
+#include "I18n.h"
 #include "backend/OtoAudioAnalysis.h"
+#include "backend/UtauRenderer.h"
 #include <juce_audio_utils/juce_audio_utils.h>
 #include <juce_gui_extra/juce_gui_extra.h>
 #include <array>
@@ -12,6 +15,8 @@
 
 namespace hachi
 {
+class MaterialAnnotationSession;
+class MaterialAnnotationEditor;
 class OtoWaveformEditorComponent final : public juce::Component,
                                          private juce::ScrollBar::Listener,
                                          private juce::Timer
@@ -27,6 +32,62 @@ public:
                                bool mouMode,
                                std::function<void()> savedCallback);
     ~OtoWaveformEditorComponent() override;
+    // The single material editor used by the manager and quick wrench. All
+    // display modes share one native draft and save only to otto.ini.
+    [[nodiscard]] static std::unique_ptr<OtoWaveformEditorComponent> forMaterial(
+        const juce::File& audio, const juce::File& manifest, I18n& strings,
+        std::function<void(const std::vector<SampleRegionSetting>&)> onSaved,
+        bool quick = false, juce::String* error = nullptr,
+        const juce::String& selectedAudioId = {});
+    using EditScope = MaterialAnnotationSession::EditScope;
+    using NoteScopeBinding = MaterialAnnotationSession::NoteScopeBinding;
+    // Optional project-only destination on this SAME material editor/session.
+    // Caller supplies a real model adapter; no native/UTAU persistence is guessed.
+    bool enableNoteScope(NoteScopeBinding, EditScope initial, juce::String& error);
+    bool refreshNoteScopeBinding(juce::String& error);
+    juce::String diagnosticNoteContextId() const
+    { return materialSession && materialSession->hasNoteScope() ? materialSession->noteScopeBinding().noteId : juce::String{}; }
+    bool setEditScope(EditScope, juce::String& error);
+    bool discardAndSetEditScope(EditScope, juce::String& error);
+    bool restoreLocal(juce::String& error);
+    EditScope editScope() const;
+    bool diagnosticScopeDirty() const { return materialSession && materialSession->dirty(); }
+    void setPublicationValidator(std::function<bool(
+        const std::vector<SampleRegionSetting>&, juce::String&)> validator);
+    bool selectMaterialPronunciation(const juce::String& regionId, bool detail = false);
+    bool focusMaterialSourceRange(juce::Range<double> sourceRange, bool detail = true);
+    void bindMaterialViewPreferences(juce::PropertiesFile&);
+    bool setSingleSyllableMaterial(bool enabled);
+    bool diagnosticSingleSyllableMaterial() const { return singleSyllableMaterial; }
+    juce::String diagnosticMaterialRegionId() const { return materialRegionId; }
+    std::optional<juce::Range<double>> diagnosticMaterialSourceSelection() const;
+    juce::Range<double> diagnosticMaterialVisibleRange() const
+    { const auto start = waveform.visibleStartMilliseconds() / 1000.0;
+      return {start, start + waveform.visibleLengthMilliseconds() / 1000.0}; }
+    [[nodiscard]] bool diagnosticMaterialOverview() const { return materialSession && !materialDetail; }
+    [[nodiscard]] bool diagnosticOuterRangeLocked() const;
+    bool diagnosticMaterialBack();
+    [[nodiscard]] std::vector<SampleRegionSetting> diagnosticMaterialRows() const;
+    void diagnosticMaterialMode(int id) { materialMode.setSelectedId(id, juce::sendNotificationSync); }
+    void diagnosticDragMaterialBoundary(int index, double seconds) { waveform.diagnosticDragNativeBoundary(index, seconds); }
+    bool diagnosticCreateMaterialAlias(double start, double end, const juce::String& alias, juce::String& error);
+    bool diagnosticRemoveMaterialAlias(const juce::String& id, const juce::String& alias, juce::String& error);
+    void diagnosticMaterialAdjacent(bool enabled);
+    juce::Component* diagnosticMaterialOverviewWaveform();
+    void diagnosticMaterialAliasText(const juce::String& text);
+    void diagnosticCreateSelectedMaterialAlias();
+    void diagnosticPronunciationKind(int id) { materialPronunciationKindChoice.setSelectedId(id, juce::sendNotificationSync); }
+    void diagnosticSimplifiedConsonant(bool enabled);
+    void diagnosticConsonantGap(const juce::String& milliseconds);
+    void diagnosticDragMaterialAlignmentTo(double milliseconds) { waveform.diagnosticDragAlignmentTo(milliseconds); }
+    void diagnosticDragMaterialConsonantTo(double milliseconds) { waveform.diagnosticDragConsonantTo(milliseconds); }
+    void diagnosticBeginMaterialVowelSplit();
+    bool diagnosticConfirmMaterialVowelSplit(const juce::String& leftName, const juce::String& rightName);
+    void diagnosticCancelMaterialVowelSplit();
+    bool diagnosticSplitMaterialVowel(const juce::String& leftName, const juce::String& rightName);
+    void diagnosticSelectMaterialVowel(int ordinal) { materialSegmentChoice.setSelectedId(ordinal, juce::sendNotificationSync); }
+    bool diagnosticEditMaterialVowel(const juce::String& name, const juce::String& weight);
+    juce::StringArray diagnosticMaterialVowelItems() const;
 
     // 单独OTO编辑 for one note: the editor on that note's entry -- its own copy
     // when it already has one, so a second edit carries on from the first --
@@ -35,6 +96,18 @@ public:
     // the checks both open it through here.
     [[nodiscard]] static std::unique_ptr<OtoWaveformEditorComponent> forNote(
         ProjectModel& project, const juce::String& noteId, juce::String& error);
+    // Exact canonical renderer ticket only; no alias/file re-lookup. Local
+    // timing uses the checked model commit and never persists native binding IDs.
+    [[nodiscard]] static std::unique_ptr<OtoWaveformEditorComponent> forClassicNote(
+        ProjectModel&, const juce::String& noteId, I18n&,
+        const backend::UtauRenderer::ResolvedSample&, std::uint64_t resolvedAtRevision, juce::String& error,
+        EditScope initial = EditScope::thisNote, const juce::String& selectedAudioId = {},
+        const juce::String& selectedRegionId = {},
+        std::function<void(const std::vector<SampleRegionSetting>&)> onSourceSaved = {});
+    bool diagnosticClassicScalarScope() const
+    { return materialSession && materialSession->isClassicNoteScope(); }
+    bool diagnosticNativeAuthoringEnabled() const
+    { return materialPronunciationKindChoice.isEnabled() && materialSplitSegment.isEnabled(); }
     [[nodiscard]] const VoicebankOtoEntry& originalEntry() const { return original; }
     // 单独OTO编辑: the edited entry goes to one note instead of into any oto
     // file.  Saving then changes nothing on disk.
@@ -92,6 +165,7 @@ public:
 
     void paint(juce::Graphics& g) override;
     void resized() override;
+    void lookAndFeelChanged() override;
     // Read-only views for the offline layout check in --smoke-oto-editor.
     juce::String diagnosticParameterText(int index) const
     {
@@ -244,6 +318,8 @@ private:
         }
         [[nodiscard]] std::optional<double> playheadMilliseconds() const { return playheadMs; }
         void diagnosticDragOffsetTo(double ms) { applyHandle(Handle::offset, ms); }
+        void diagnosticDragAlignmentTo(double ms) { applyHandle(Handle::preutterance, ms); }
+        void diagnosticDragConsonantTo(double ms) { applyHandle(Handle::consonant, ms); }
         // Drag one region boundary, 0 for the first, to an absolute time.
         void diagnosticDragBoundary(int index, double ms)
         {
@@ -271,6 +347,8 @@ private:
         void paintSourceF0(juce::Graphics& g, juce::Rectangle<int> area);
         std::shared_ptr<backend::OtoAudioAnalysisRequest> analysisRequest;
         std::shared_ptr<const backend::OtoAudioAnalysisData> analysis;
+        // Presentation-only recolouring of the immutable shared analysis image.
+        juce::Image lightSpectrogramSource, lightSpectrogram;
         bool spectrumVisible = true, sourceF0Visible = true;
         std::optional<backend::FcpeFrame> selectedPitch;
         const backend::FcpeFrame* pitchFrameNear(juce::Point<float> position) const;
@@ -306,11 +384,11 @@ private:
         void updateCursor(const juce::Point<float>& position);
 
         VoicebankOtoEntry& entry;
-        const bool jie;
+        bool jie;
         // 谋 names the regions by number rather than by the part of a Chinese
         // syllable they usually are: any of them can be a consonant here, so
         // 韵尾 would be saying something the entry may well contradict.
-        const bool mou;
+        bool mou;
     public:
         // How many regions this entry has, and what each of them is.  Four
         // and empty unless a 谋 class string says otherwise: the view then
@@ -318,6 +396,16 @@ private:
         // lines two of which nothing can move.
         int regions = 4;
         juce::String classes;
+        bool lockOuterRange = false;
+        bool preferOuterRangeDrag = false;
+        bool nativeDetail = false;
+        std::vector<NativeSegment> nativeSegments;
+        void setTimingMode(bool withRegions, bool withClasses) { jie = withRegions; mou = withClasses; repaint(); }
+        void diagnosticDragNativeBoundary(int index, double seconds);
+    private:
+        int nativeBoundaryDragging = -1;
+        int nativeBoundaryNear(juce::Point<float>) const;
+    public:
     private:
         double viewZoom = 1.0;      // 1 = whole file visible
         double viewCentreMs = 0.0;
@@ -377,8 +465,63 @@ private:
     // recording puts the button back.
     void timerCallback() override;
 
-    const bool jie;
-    const bool mou;
+    // Modeless dialogs are not children of MainComponent and cannot inherit
+    // its local LookAndFeel. Keep a complete theme alive for this editor tree.
+    HachiLookAndFeel editorLookAndFeel;
+    bool jie;
+    bool mou;
+    std::shared_ptr<MaterialAnnotationSession> materialSession;
+    std::unique_ptr<I18n> ownedMaterialStrings; // legacy forNote factory lifetime
+    std::function<bool(const VoicebankOtoEntry&, SampleRegionSetting&, juce::String&)> classicScalarProjection;
+    std::unique_ptr<MaterialAnnotationEditor> materialOverview;
+    I18n* materialStrings = nullptr;
+    std::function<void(const std::vector<SampleRegionSetting>&)> materialSaved;
+    juce::ComboBox materialMode;
+    juce::Label materialModeLabel;
+    juce::TextButton materialBackButton;
+    juce::ToggleButton materialSingleSyllable;
+    bool singleSyllableMaterial = false;
+    juce::PropertiesFile* materialViewPreferences = nullptr;
+    juce::String materialViewPreferenceKey;
+    juce::ComboBox materialScope;
+    juce::TextButton materialRestoreLocal;
+    void refreshScopeView();
+    void requestEditScope(EditScope);
+    void requestRestoreLocal();
+    juce::ComboBox materialSegmentChoice, materialPronunciationKindChoice;
+    juce::Label materialSegmentLabel, materialGapLabel, materialKindLabel;
+    juce::ToggleButton materialSimplifiedConsonant;
+    juce::TextEditor materialConsonantGap;
+    juce::TextButton materialSplitSegment, materialMergeSegment;
+    juce::Label materialVowelNameLabel, materialVowelWeightLabel, materialSplitLeftLabel, materialSplitRightLabel;
+    juce::TextEditor materialVowelName, materialVowelWeight, materialSplitLeftName, materialSplitRightName;
+    juce::TextButton materialSplitConfirm, materialSplitCancel;
+    std::vector<juce::String> materialVowelIds;
+    juce::String materialVowelEditId, materialPendingSplitId, materialVowelWeightBaseline;
+    double materialPendingSplitCut = 0;
+    bool materialVowelSplitPending = false, refreshingMaterialVowel = false;
+    int selectedMaterialVowelIndex() const;
+    bool commitMaterialVowelFields();
+    void beginMaterialVowelSplit();
+    bool confirmMaterialVowelSplit();
+    void cancelMaterialVowelSplit();
+    SampleRegionSetting materialDetailDraft;
+    VoicebankOtoEntry materialTimingEntry;
+    bool syncMaterialTiming(juce::String& error);
+    void refreshMaterialTimingControls();
+    void commitMaterialConsonantGap();
+    void refreshNativeSegmentControls();
+    bool materialDetail = false;
+    bool loadingMaterial = false;
+    juce::String materialRegionId, materialDetailError;
+    VoicebankOtoEntry detailBaseline;
+    std::vector<NativeSegment> detailSegmentsBaseline;
+    void refreshMaterialVisibility();
+    void loadMaterialDetail(const SampleRegionSetting&);
+    bool commitMaterialDetail(juce::String& error);
+    void saveMaterial();
+    void materialSourceSaved(const std::vector<SampleRegionSetting>& rows);
+    juce::String materialText(const char* zh, const char* en) const;
     VoicebankOtoEntry original;
     VoicebankOtoEntry edited;
     std::function<void()> onSaved;

@@ -62,6 +62,10 @@ struct Mld5FileRenderRequest
     float neighborEdgeF0End = 0.0f;
     bool isGlideMerged = false;
     WavExportComponent exportComponent = WavExportComponent::full;
+    // Transient per-render diagnostic switch, never a project preference.
+    // True preserves current native incremental decoding; false uses legacy
+    // 4096-frame inference when noise protection is also disabled.
+    bool nsfIncrementalRender = true;
 };
 
 struct RenderedAudio

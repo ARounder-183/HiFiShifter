@@ -5,16 +5,6 @@
 #include <vector>
 namespace hachi::backend
 {
-// Invert monotone Bezier time before evaluating fade progress. Bisection also
-// handles vertical tangents and coincident control points without division by zero.
-template<class Settings> double tailFadeBezierProgress(double progress,const Settings& s)
-{
-    const auto cubic=[](double t,double a,double b){const auto r=1-t;return 3*r*r*t*a+3*r*t*t*b+t*t*t;};
-    if(progress<=0)return 0;if(progress>=1)return 1;
-    double lo=0,hi=1;
-    for(int i=0;i<24;++i){const auto t=(lo+hi)*.5;if(cubic(t,s.control1Time,s.control2Time)<progress)lo=t;else hi=t;}
-    return cubic((lo+hi)*.5,s.control1Progress,s.control2Progress);
-}
 // Mode 1 is straight in amplitude; mode 2 supports legacy smoothstep and Bezier.
 template<class Settings> double mixedEnvelopeGain(double progress,const Settings& s)
 {

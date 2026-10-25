@@ -57,6 +57,7 @@ inline bool MainComponent::diagnosticClipSplit(const juce::File& folder)
         if (accompaniment)
         {
             timeline.setPixelsPerSecond(140.0f);
+            timeline.setPlayheadSeconds(1.75);
             (void) timeline.createComponentSnapshot(timeline.getLocalBounds());
             juce::String clicked; double at = -1;
             const auto originalMenu = timeline.onClipMenu;
@@ -73,8 +74,8 @@ inline bool MainComponent::diagnosticClipSplit(const juce::File& folder)
             click(76, static_cast<float>(timeline.getRulerHeight() + 24));
             check("right_click_mute_badge_opens_menu_without_muting", clicked == "source"
                 && !project.snapshot().tracks[0].clips[0].muted && project.revisionNumber() == revision);
-            click(245, static_cast<float>(timeline.getRulerHeight() + 54));
-            check("right_click_targets_pointer_time_without_dragging", clicked == "source" && close(at, 1.75)
+            click(280, static_cast<float>(timeline.getRulerHeight() + 54));
+            check("right_click_targets_red_playhead_not_pointer_without_dragging", clicked == "source" && close(at, 1.75)
                 && project.revisionNumber() == revision);
             timeline.onClipMenu = originalMenu;
             auto menu = clipContextMenu(clicked, at); bool enabled = false;
@@ -202,7 +203,7 @@ inline bool MainComponent::diagnosticClipSplit(const juce::File& folder)
                            std::optional<double> expected, bool compose=true, bool backing=false)
     {
         auto fixture=score;auto& owner=fixture.tracks[0];owner.compose=compose;owner.accompaniment=backing;
-        auto& c=owner.clips[0];c.notes.clear();c.durationSeconds=8;c.sourceTimeMap.clear();c.sourceFile={};c.sourceDurationSeconds=8;
+        auto& c=owner.clips[0];c.notes.clear();c.durationSeconds=8;c.sourceTimeMap.clear();c.sourceFile=juce::File{};c.sourceDurationSeconds=8;
         for(std::size_t i=0;i<spans.size();++i)
         {auto n=middle;n.id="test-"+juce::String(static_cast<int>(i));n.startSeconds=spans[i].first;n.durationSeconds=spans[i].second;c.notes.push_back(n);}
         project.replace(fixture);const auto revision=project.revisionNumber();const auto bytes=noteBytes(fixture);

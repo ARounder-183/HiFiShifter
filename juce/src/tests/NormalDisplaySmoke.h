@@ -60,6 +60,7 @@ inline bool MainComponent::diagnosticNormalDisplay(const juce::File& folder)
     project.setClipNormalDisplay("right",true);project.setClipNoteHints("right",true);refresh();
     const auto enabled=project.snapshot();
     pianoRoll.setTool(PianoRollComponent::Tool::draw);
+    pianoRoll.setDrawAction(PianoRollComponent::DrawAction::notes);
     const juce::Point<float> drawAt(pianoRoll.diagnosticEdgeX(3.9),pianoRoll.diagnosticYForMidi(70));
     pianoRoll.mouseDown(event(pianoRoll,drawAt,drawAt));pianoRoll.mouseUp(event(pianoRoll,drawAt,drawAt));refresh();
     check("drawing_in_extra_region_uses_its_ownership",project.snapshot().tracks[0].clips[1].notes.size()==3

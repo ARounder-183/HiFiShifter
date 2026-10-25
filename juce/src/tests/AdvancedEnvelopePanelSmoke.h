@@ -7,6 +7,78 @@ inline bool MainComponent::diagnosticAdvancedEnvelopePanel(const juce::File& fol
     folder.createDirectory();bool ok=diagnosticAdvancedEnvelope(folder.getChildFile("baseline"));stopTimer();
     const auto check=[&](const char* name,bool v){ok=ok&&v;std::cout<<name<<'='<<v<<std::endl;};
     const auto near=[](double a,double b){return std::abs(a-b)<4.e-4;};
+    // The same graph edits OTO head/tail, native and CVVC drafts.
+    for(int context=0;context<4;++context)
+    {
+        backend::TailFadeSettings v;v.mixed=true;v.knots={{.25,.8,false},{.55,.5,false},{.8,.2,false}};
+        backend::copyEnvelopeShape(v,v.head);v.head.mode=2;
+        AdvancedEnvelopePanel panel({{"selection","Point selection",{0,1},{{0,0,true},{1,0,true}}, {},backend::UtauTailFadeSpan{0,1}}},
+            1,2,v,false,{},context>=2,context==3);
+        if(context==1)panel.diagnosticSection(true);
+        auto& graph=panel.graph;int applies=0;backend::TailFadeSettings applied;
+        panel.onApply=[&](int,const auto& value,bool){++applies;applied=value;return juce::String();};
+        const auto event=[&](juce::Point<float> pos,juce::Point<float> down,bool ctrl=false){return juce::MouseEvent(
+            juce::Desktop::getInstance().getMainMouseSource(),pos,juce::ModifierKeys(juce::ModifierKeys::leftButtonModifier|(ctrl?juce::ModifierKeys::ctrlModifier:0)),
+            0,0,0,0,0,&graph,&graph,juce::Time::getCurrentTime(),down,juce::Time::getCurrentTime(),1,pos!=down);};
+        const auto click=[&](juce::Point<float> pos){graph.mouseDown(event(pos,pos));graph.mouseUp(event(pos,pos));};
+        const auto del=[&]{return graph.keyPressed(juce::KeyPress(juce::KeyPress::deleteKey));};
+        const auto resetSelection=[&]{panel.setValues(2,v);graph.fit.onClick();};
+        const auto before=panel.values();click(graph.knotPoint(2));
+        check("advanced_point_release_preserves_highlight_and_draft",graph.selectedKnot==2&&graph.draggedKnot==-1&&panel.values()==before&&applies==0);
+        if(context==3)if(auto out=folder.getChildFile("point-selected-after-release.png").createOutputStream())
+        {out->setPosition(0);out->truncate();juce::PNGImageFormat().writeImageToStream(panel.createComponentSnapshot(panel.getLocalBounds()),*out);}
+        check("advanced_delete_after_release_removes_only_selected_knot",del()&&panel.editingValues().knots.size()==2
+            &&near(panel.editingValues().knots[0].time,.25)&&near(panel.editingValues().knots[1].time,.8)&&applies==0);
+        const auto deleted=panel.values();del();del();check("advanced_repeat_delete_does_not_remove_more_points",panel.values()==deleted);
+        check("advanced_delete_preserves_other_section",context==1?panel.values().knots==v.knots:panel.values().head==v.head);
+        panel.diagnosticApply();check("advanced_apply_receives_deleted_curve",applies==1&&applied==deleted);
+        resetSelection();auto from=graph.knotPoint(2),to=from+juce::Point<float>(8,4);
+        graph.mouseDown(event(from,from));graph.mouseDrag(event(to,from));graph.mouseUp(event(to,from));
+        check("advanced_drag_release_keeps_selection",graph.selectedKnot==2&&!near(panel.editingValues().knots[1].time,.55));
+        del();check("advanced_drag_then_delete",panel.editingValues().knots.size()==2);
+        resetSelection();click(graph.knotPoint(1));click(graph.knotPoint(3));del();
+        check("advanced_new_click_changes_point_selection",panel.editingValues().knots.size()==2&&near(panel.editingValues().knots.back().time,.55));
+        resetSelection();click(graph.knotPoint(2));click(graph.plot().getRelativePoint(.1f,.75f));del();
+        check("advanced_blank_click_clears_point",panel.editingValues().knots.size()==3);
+        resetSelection();click(graph.knotPoint(2));graph.focusLost(juce::Component::focusChangedDirectly);del();
+        check("advanced_focus_loss_clears_point",panel.editingValues().knots.size()==3);
+        resetSelection();click(graph.knotPoint(2));panel.setValues(2,v);del();
+        check("advanced_replacing_draft_invalidates_selection",panel.editingValues().knots.size()==3);
+        resetSelection();click(graph.knotPoint(2));panel.diagnosticSelectShape(1);panel.diagnosticSelectShape(3);del();
+        check("advanced_shape_change_clears_point",panel.editingValues().knots.size()==3);
+        resetSelection();click(graph.knotPoint(0));del();click(graph.knotPoint(4));del();
+        check("advanced_endpoints_retained",panel.editingValues().knots.size()==3);
+        resetSelection();from=graph.knotPoint(2);graph.mouseDown(event(from,from));del();graph.mouseUp(event(from,from));
+        check("advanced_delete_during_drag_not_resurrected",panel.editingValues().knots.size()==2);
+        resetSelection();graph.setZoom(2,2);click(graph.knotPoint(2));
+        check("advanced_zoomed_backspace",graph.keyPressed(juce::KeyPress(juce::KeyPress::backspaceKey))&&panel.editingValues().knots.size()==2);
+        resetSelection();click(graph.knotPoint(2));panel.diagnosticSelectPreview(0);del();
+        check("advanced_preview_change_clears_point",panel.editingValues().knots.size()==3);
+        const auto ctrlClick=[&](int index){const auto p=graph.knotPoint(index);graph.mouseDown(event(p,p,true));graph.mouseUp(event(p,p,true));};
+        resetSelection();click(graph.knotPoint(1));ctrlClick(2);
+        check("advanced_ctrl_multiselect",graph.selectedKnots.size()==2);
+        ctrlClick(2);check("advanced_ctrl_toggle",graph.selectedKnots.size()==1);ctrlClick(2);
+        const auto old=panel.editingValues();from=graph.knotPoint(1);to=from+juce::Point<float>(12,-10);
+        graph.mouseDown(event(from,from));graph.mouseDrag(event(to,from));graph.mouseUp(event(to,from));
+        const auto translated=panel.editingValues();
+        check("advanced_group_shared_time_delta",translated.knots[0].time>old.knots[0].time
+            &&near(translated.knots[0].time-old.knots[0].time,translated.knots[1].time-old.knots[1].time));
+        check("advanced_group_shared_gain_delta",translated.knots[0].gain>old.knots[0].gain
+            &&near(translated.knots[0].gain-old.knots[0].gain,translated.knots[1].gain-old.knots[1].gain));
+        check("advanced_group_unselected_unchanged",translated.knots[2]==old.knots[2]);
+        graph.keyPressed(juce::KeyPress('R',juce::ModifierKeys::ctrlModifier,0));
+        check("advanced_group_reset_defaults",near(panel.editingValues().knots[0].gain,1)&&near(panel.editingValues().knots[1].gain,1)
+            &&near(panel.editingValues().knots[0].time,translated.knots[0].time));
+        resetSelection();click(graph.knotPoint(1));ctrlClick(2);del();
+        check("advanced_group_delete",panel.editingValues().knots.size()==1&&near(panel.editingValues().knots[0].time,.8));
+        resetSelection();click(graph.knotPoint(1));ctrlClick(2);from=graph.knotPoint(1);to=from+juce::Point<float>(1000,-1000);
+        graph.mouseDown(event(from,from));graph.mouseDrag(event(to,from));graph.mouseUp(event(to,from));
+        const auto limited=panel.editingValues();
+        check("advanced_group_boundary_preserves_spacing",near(limited.knots[1].time-limited.knots[0].time,.3)&&limited.knots[1].time<limited.knots[2].time);
+        resetSelection();click(graph.knotPoint(0));ctrlClick(1);ctrlClick(4);del();
+        check("advanced_group_preserves_endpoints",panel.editingValues().knots.size()==2);
+
+    }
     const backend::TailFadeSettings settings{.2,.8,.8,.15,2.0};
     check("settings_validate",settings.valid());
     auto invalid=settings;invalid.endFraction=.1;check("reversed_range_rejected",!invalid.valid());invalid=settings;invalid.startGain=std::numeric_limits<double>::infinity();check("nonfinite_level_rejected",!invalid.valid());invalid=settings;invalid.endGain=1.2;check("rising_gain_rejected",!invalid.valid());
@@ -39,6 +111,79 @@ inline bool MainComponent::diagnosticAdvancedEnvelopePanel(const juce::File& fol
     customPanel.diagnosticPreset(5);check("uniform_bezier_preset",near(backend::tailFadeGain(2,.3,0,1,customPanel.values()),.7));
     customPanel.diagnosticPreset(2);customPanel.setSize(740,660);check("custom_controls_fit_minimum_size",customPanel.diagnosticControlsFit());
     {auto out=folder.getChildFile("custom-bezier-controls.png").createOutputStream();juce::PNGImageFormat png;check("custom_controls_snapshot",out&&png.writeImageToStream(customPanel.createComponentSnapshot(customPanel.getLocalBounds(),true,1.5f),*out));}
+    // View transforms must not change the draft; real mouse drags use the inverse mapping.
+    for(const bool phoneme:{false,true})
+    {
+        backend::TailFadeSettings v;v.mixed=true;v.allowRise=true;v.knots={{.5,.6,false}};
+        AdvancedEnvelopePanel zoomPanel({{"zoom","Zoom",{0,1},{{0,0,true},{1,0,true}}, {}}},1,2,v,false,{},true,phoneme);
+        auto& graph=zoomPanel.graph;const auto original=zoomPanel.values();int applies=0;
+        zoomPanel.onApply=[&](int,const auto&,bool){++applies;return juce::String();};
+        {
+            const auto at=graph.plot().getRelativePoint(.27f,.63f);
+            const auto wheel=[&](int flags,float dx,float dy,bool reversed=false){
+                const juce::MouseEvent e(juce::Desktop::getInstance().getMainMouseSource(),at,juce::ModifierKeys(flags),
+                    0,0,0,0,0,&graph,&graph,juce::Time::getCurrentTime(),at,juce::Time::getCurrentTime(),0,false);
+                juce::MouseWheelDetails d{};d.deltaX=dx;d.deltaY=dy;d.isReversed=reversed;graph.mouseWheelMove(e,d);
+            };
+            graph.setZoom(4,4);
+            const auto time=graph.timeAt(at.x,*zoomPanel.current());const auto gain=graph.gainAtY(at.y);
+            wheel(juce::ModifierKeys::ctrlModifier,0,.2f);
+            check("wheel_ctrl_zooms_only_gain_at_cursor",graph.zoomY>4&&near(graph.zoomX,4)&&near(graph.gainAtY(at.y),gain)&&near(graph.timeAt(at.x,*zoomPanel.current()),time));
+            wheel(juce::ModifierKeys::ctrlModifier,0,.2f,true);
+            check("wheel_reversed_zoom_restores_scale",near(graph.zoomY,4));
+            wheel(juce::ModifierKeys::ctrlModifier|juce::ModifierKeys::shiftModifier,0,.2f);
+            check("wheel_ctrl_shift_zooms_only_time_at_cursor",graph.zoomX>4&&near(graph.zoomY,4)&&near(graph.timeAt(at.x,*zoomPanel.current()),time));
+            const auto x=graph.viewX,y=graph.viewY;
+            wheel(0,0,.2f);check("wheel_plain_scrolls_vertically",graph.viewY<y&&near(graph.viewX,x));
+            const auto afterY=graph.viewY;wheel(juce::ModifierKeys::shiftModifier,0,.2f);
+            check("wheel_shift_scrolls_horizontally",graph.viewX<x&&near(graph.viewY,afterY));
+            const auto afterX=graph.viewX;wheel(0,-.1f,0);
+            check("wheel_horizontal_trackpad_scrolls_time",graph.viewX>afterX&&near(graph.viewY,afterY));
+            graph.setZoom(32,16);const auto maxX=graph.viewX,maxY=graph.viewY;
+            wheel(juce::ModifierKeys::ctrlModifier,0,1);wheel(juce::ModifierKeys::ctrlModifier|juce::ModifierKeys::shiftModifier,0,1);
+            check("wheel_zoom_upper_limits_do_not_drift",near(graph.zoomX,32)&&near(graph.zoomY,16)&&near(graph.viewX,maxX)&&near(graph.viewY,maxY));
+            graph.fit.onClick();wheel(juce::ModifierKeys::ctrlModifier,0,-1);wheel(juce::ModifierKeys::ctrlModifier|juce::ModifierKeys::shiftModifier,0,-1);
+            check("wheel_minimum_zoom_and_document_unchanged",near(graph.zoomX,1)&&near(graph.zoomY,1)&&near(graph.viewX,0)&&near(graph.viewY,0)&&zoomPanel.values()==original&&applies==0);
+        }
+        graph.xPlus.onClick();graph.xPlus.onClick();graph.yPlus.onClick();
+        check("zoom_axes_independent_and_view_only",near(graph.zoomX,4)&&near(graph.zoomY,2)&&zoomPanel.values()==original&&applies==0);
+        graph.horizontal.setCurrentRangeStart(.3,juce::sendNotificationSync);
+        graph.vertical.setCurrentRangeStart(.2,juce::sendNotificationSync);
+        check("zoom_scrollbars_move_visible_window",near(graph.viewX,.3)&&near(graph.viewY,.2));
+        const auto from=graph.knotPoint(1);
+        const auto to=juce::Point<float>{graph.x(.55,*zoomPanel.current()),graph.y(.66f)};
+        const auto event=[&](juce::Point<float> pos){return juce::MouseEvent(
+            juce::Desktop::getInstance().getMainMouseSource(),pos,juce::ModifierKeys(juce::ModifierKeys::leftButtonModifier),
+            0,0,0,0,0,&graph,&graph,juce::Time::getCurrentTime(),from,juce::Time::getCurrentTime(),1,pos!=from);};
+        graph.mouseDown(event(from));graph.mouseDrag(event(to));graph.mouseUp(event(to));
+        check("zoomed_knot_drag_matches_time_and_gain",near(zoomPanel.values().knots[0].time,.55)&&near(zoomPanel.values().knots[0].gain,.66)&&applies==0);
+        const auto edited=zoomPanel.values();graph.fit.onClick();
+        check("fit_restores_both_axes_without_resetting_envelope",near(graph.zoomX,1)&&near(graph.zoomY,1)&&near(graph.viewX,0)&&near(graph.viewY,0)&&zoomPanel.values()==edited);
+        graph.setZoom(32,16);graph.horizontal.setCurrentRangeStart(1,juce::sendNotificationSync);graph.vertical.setCurrentRangeStart(1,juce::sendNotificationSync);
+        check("zoom_pan_clamps_to_note_end_and_zero_gain",near(graph.visibleLast(*zoomPanel.current()),1)&&near(graph.gainAtY(graph.plot().getBottom()),0));
+        graph.setZoom(4,2);graph.horizontal.setCurrentRangeStart(.38,juce::sendNotificationSync);graph.vertical.setCurrentRangeStart(.2,juce::sendNotificationSync);
+        auto output=folder.getChildFile(phoneme?"zoomed-phoneme.png":"zoomed-native.png").createOutputStream();juce::PNGImageFormat png;
+        check("zoom_panel_snapshot",output&&png.writeImageToStream(zoomPanel.createComponentSnapshot(zoomPanel.getLocalBounds(),true,1.0f),*output));
+    }
+    customPanel.setValues(2,bezier);customPanel.graph.fit.onClick();customPanel.diagnosticDragCurveHandle(1,4,3);const auto unzoomedEdit=customPanel.values();
+    customPanel.setValues(2,bezier);customPanel.graph.setZoom(4,2);customPanel.diagnosticDragCurveHandle(1,16,6);
+    check("zoomed_bezier_drag_matches_unzoomed_gesture",near(customPanel.values().control1Time,unzoomedEdit.control1Time)&&near(customPanel.values().control1Progress,unzoomedEdit.control1Progress));
+    customPanel.graph.fit.onClick();
+    customPanel.setValues(1,settings);customPanel.graph.setZoom(4,1);
+    customPanel.graph.horizontal.setCurrentRangeStart(.1,juce::sendNotificationSync);
+    {
+        auto& graph=customPanel.graph;const auto start=juce::Point<float>{graph.x(.2,*customPanel.current()),graph.plot().getY()};
+        const auto target=juce::Point<float>{graph.x(.25,*customPanel.current()),start.y};
+        const auto event=[&](juce::Point<float> pos){return juce::MouseEvent(
+            juce::Desktop::getInstance().getMainMouseSource(),pos,juce::ModifierKeys(juce::ModifierKeys::leftButtonModifier),
+            0,0,0,0,0,&graph,&graph,juce::Time::getCurrentTime(),start,juce::Time::getCurrentTime(),1,pos!=start);};
+        graph.mouseDown(event(start));graph.mouseDrag(event(target));graph.mouseUp(event(target));
+        check("zoomed_boundary_drag_uses_visible_time_range",near(customPanel.values().startFraction,.25)&&near(customPanel.values().endFraction,.8));
+        graph.setZoom(32,16);graph.horizontal.setCurrentRangeStart(.2,juce::sendNotificationSync);
+        graph.horizontal.moveScrollbarInSteps(1,juce::sendNotificationSync);
+        check("high_zoom_scroll_step_is_fraction_of_visible_span",near(graph.viewX,.2+.1/32));
+        graph.fit.onClick();
+    }
     const auto presetDraft=settings;auto customDraft=presetDraft;customDraft.customCurve=true;customDraft.control1Time=.15;customDraft.control1Progress=.7;customDraft.control2Time=.8;customDraft.control2Progress=.95;
     customPanel.setValues(2,customDraft);int presetApplies=0;customPanel.onApply=[&](int,const auto&,bool){++presetApplies;return juce::String();};
     check("save_named_preset",customPanel.diagnosticSavePreset(juce::String::fromUTF8("轻柔尾音")));

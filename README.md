@@ -2,10 +2,11 @@
 
 HachiShifter 是用于录音调音、UTAU 音源合成与 DiffSinger 歌声合成的桌面编辑器。本仓库基于 [HiFiShifter](https://github.com/ARounder-183/HiFiShifter) 的项目历史继续开发，当前整合版采用 C++20 / JUCE 界面，并通过原生后端和 Python 桥接处理分析与合成。
 
-当前公开版本：**0.2.4**。源码功能基线：**更新 143，2026-10-10**。外置 WCSNDM 版本仍为 **0.0803**；功能更新编号不属于公开版本号。
+当前公开版本：**0.25**。本机源码基线：**更新 152，2026-10-14**（中文 CVVC 配置拼写扩展与发音器工具栏入口）。外置 WCSNDM 版本仍为 **0.0803**；功能更新编号不属于公开版本号。`SOURCE_STATUS.md` 和源码包说明保留上次 GitHub 同步（更新 143）的发布记录。
 
 ## 从哪里开始
 
+- 查实际功能对应的主接口、数据流和架构优化顺序：[功能接口与架构审计](docs/AI_INTERFACE_ARCHITECTURE.md)、[公开接口声明清单](docs/AI_API_REFERENCE.md)（2026-10-13 静态核对，未改运行时代码）。
 - 阅读各模块职责、数据流和维护边界：[代码功能总览与维护指南](docs/AI_CODE_GUIDE.md)。
 - 查找具体实现文件与诊断命令：[逐文件索引与命令入口](docs/AI_SOURCE_INDEX.md)。
 - 查看每次修复与验证记录：[更新记录](docs/updates.md)。
@@ -21,7 +22,7 @@ HachiShifter 是用于录音调音、UTAU 音源合成与 DiffSinger 歌声合�
 | 非 U 录音编辑 | 移动、拉伸、自由裁剪、向原文件扩展恢复隐藏内容、分割、粘连与断开、重叠控制 | `NativeNoteTiming.h`、`NativeAudio*`、`NativeTrimSource.h`、`NativeNoteJoin.h` |
 | 原始音高分析 | GAME 音符划分、FCPE 连续 F0、native-hq 回退、源音高与目标音高分离 | `backend/AnalysisService*`、`GameAnalyzer*`、`FcpeAnalyzer*`、`NativeAnalyzer*` |
 | 原生音高与响度 | 手绘、直线、贝塞尔标点、批量拉直及半音吸附、原音高还原、共享曲线、响度包络与颤音 | `ProjectModel.cpp`、`PianoRollComponent.cpp`、`NativeSharedEnvelope.h`、`backend/NativeEnvelope.h` |
-| 原生 NSF 合成 | 多种时间拉伸、HiFiShifter Mel 线性拉伸、可选音高突变平滑、谐波/噪声分离、清音保护 | `backend/NsfHifiganRenderer*`、`SourceVoicing.h`、`NativeSourceTimeMap.h` |
+| 原生 NSF 合成 | 多种时间拉伸、HiFiShifter Mel 线性拉伸、WCSNDM 非循环参数拉伸、可选音高突变平滑、谐波/噪声分离、清音保护 | `backend/NsfHifiganRenderer*`、`backend/WcsNonLoopFeatures*`、`SourceVoicing.h`、`NativeSourceTimeMap.h` |
 | 标准 UTAU 与分区 | 普通/界/谋模式、音源和 OTO、辅音速度、先行发声与重叠、传统重采样器/HiFisampler 输出 | `backend/UtauRenderer*`、`VoicebankSettingsComponent*`、`OtoWaveformEditorComponent*` |
 | 中文 CVVC | 标准 UTAU 的 `presamp.ini` 发音规则、VC/CV 编排、前后缀和句尾处理、别名回退 | `backend/ChineseCvvcPhonemizer.h`、[使用说明](docs/chinese-cvvc.md) |
 | 包络与 FLAG | 响度、OTO 音头/音尾、高级混合分段、逐段直线/贝塞尔、FLAG 曲线与预设 | `AdvancedEnvelopePanel.h`、`backend/AdvancedEnvelope.h`、`MixedEnvelopeIO.h`、`HifisamplerFlags.h` |

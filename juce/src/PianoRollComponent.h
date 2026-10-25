@@ -33,6 +33,9 @@ public:
     // Deletes the selection and the time it took up, closing the gap.
     void deleteSelectedNotesRippling(const juce::String& noteId);
     enum class Tool { note, draw, line, points, amplitude, flagCurve, connect, trim };
+    // An explicit view/tool choice, never inferred from a track's sound engine.
+    enum class DrawAction { pitchCurve, notes };
+    enum class PitchScope { focusedClip, currentTrack };
 
     PianoRollComponent(ProjectModel& modelToUse, const I18n& stringsToUse);
     void setNoteDanceEnabled(bool enabled)
@@ -90,17 +93,32 @@ public:
     void diagnosticRefresh();
     [[nodiscard]] juce::Rectangle<float> diagnosticOverlapSourceBounds(const juce::String& id) const
     { for(const auto& hit:nativeOverlapSourceHits)if(hit.noteId==id)return hit.bounds;return {}; }
-    [[nodiscard]] std::size_t diagnosticOverlapCardCount() const { return nativeOverlapHints.size(); }
+    void setShowOverlap(bool show) { if(showOverlap==show)return;showOverlap=show;nativeOverlapLines.clear();repaint(); }
+    [[nodiscard]] bool showsOverlap() const { return showOverlap; }
+    [[nodiscard]] const std::vector<std::pair<juce::String,juce::Rectangle<float>>>& diagnosticOverlapLines() const { return nativeOverlapLines; }
+    [[nodiscard]] std::size_t diagnosticOverlapCardCount() const { return nativeOverlapCardCount; }
+    static constexpr int materialSelectorNoteMenuItem = 32;
+    [[nodiscard]] juce::String diagnosticOverlapSelectorTarget() const
+    { return nativeOverlapSelector ? nativeOverlapSelector->targetNoteId : juce::String{}; }
+    [[nodiscard]] juce::Rectangle<float> diagnosticOverlapSelectorCloseBounds() const { return nativeOverlapSelectorClose; }
     // Update immediately before focusing notes created by a synchronous edit.
     void refreshFromModel();
+    // Builds the same sounding spans/curves as the loudness lane, then commits once.
+    int crossfadeSelectedNotes(bool curved = false);
     ~PianoRollComponent() override;
 
     void setPixelsPerSecond(float value);
     void setRowHeight(float value);
     void setSourceEditMode(bool enabled);
+    void cancelPendingEditingForTrackChange();
     void setFocusedClip(const juce::String& clipId);
     void setFocusedTrack(const juce::String& trackId);
     void setShowNoteLabels(bool enabled);
+    void setShowPhonemeInfo(bool enabled) { showPhonemeInfo=enabled; repaint(); }
+    bool phonemeInformationVisible(const juce::String& id) const
+    { return showPhonemeInfo || selectedNotes.contains(id.toStdString()) || selectedNote==id; }
+    std::vector<backend::UtauPhonemeSpan> diagnosticPhonemeSpans(const juce::String& id) const
+    { const auto it=diffSingerPhonemes.find(id.toStdString());return it==diffSingerPhonemes.end()?std::vector<backend::UtauPhonemeSpan>{}:it->second; }
     // Read a voicebank on a background thread rather than stopping the window
     // for it.  Until a bank is read its notes are drawn where they were last
     // drawn -- or, the first time, at their written place -- and the layout is
@@ -197,11 +215,13 @@ public:
     // the popup's own callback nothing could ask whether an item does
     // anything at all.
     void applyNoteMenuChoice(const juce::String& noteId, int result, double split,
-                             const std::vector<juce::String>& mergeIds);
+                             const std::vector<juce::String>& mergeIds,
+                             double contextSeconds = std::numeric_limits<double>::quiet_NaN());
     [[nodiscard]] std::vector<int> diagnosticNoteMenuIds(const juce::String& noteId) const;
     // Both of those include what is inside 高级.  This is the menu row by row
     // instead: an item's id, a submenu as its name with its ids in brackets,
     // a separator as "-".
+    [[nodiscard]] juce::String diagnosticNoteMenuLabel(const juce::String& noteId, int itemId) const;
     [[nodiscard]] std::vector<juce::String> diagnosticNoteMenuLayout(
         const juce::String& noteId) const;
 
@@ -443,6 +463,8 @@ public:
         return consonantMaximumPreutterance;
     }
     [[nodiscard]] bool diagnosticConsonantSetsPin() const { return consonantSetsPin; }
+    [[nodiscard]] double diagnosticConsonantPreview() const { return previewConsonantPreutterance; }
+    [[nodiscard]] int diagnosticConsonantVelocity() const { return previewConsonantVelocity; }
     // Drives the same arithmetic a drag does, from the lead-in the cursor
     // would be asking for.
     void diagnosticDragConsonantTo(double preutteranceSeconds)
@@ -521,6 +543,19 @@ public:
     {
         return amplitudeLaneY(gainDb);
     }
+    [[nodiscard]] std::vector<juce::Point<float>> diagnosticCvvcEnvelopeHandles(
+        const juce::String& noteId, int part, bool amplitude) const;
+    [[nodiscard]] juce::Rectangle<float> diagnosticCvvcPhonemeTab(const juce::String&, int part) const;
+    [[nodiscard]] juce::Rectangle<float> diagnosticCvvcBoundary(const juce::String&, int part) const;
+    [[nodiscard]] bool hasSelectedCvvcPhoneme() const;
+    struct CvvcEnvelopeSelection
+    {
+        juce::String noteId, label;
+        int part = 0;
+        double from = 0, to = 0;
+        backend::CvvcEnvelopeCurve points;
+    };
+    [[nodiscard]] std::optional<CvvcEnvelopeSelection> selectedCvvcEnvelope() const;
     // A note's envelope as the lane shows it -- the shape with its base value
     // already in it, which is what the audio will be shaped by.
     [[nodiscard]] std::vector<AmplitudeEnvelopePoint> diagnosticDisplayEnvelope(
@@ -557,6 +592,13 @@ public:
     void setPlayheadSeconds(double seconds);
     void setTool(Tool nextTool);
     [[nodiscard]] Tool currentTool() const { return tool; }
+    [[nodiscard]] DrawAction drawAction() const { return drawActionMode; }
+    void setDrawAction(DrawAction action);
+    [[nodiscard]] PitchScope pitchScope() const { return pitchScopeMode; }
+    void setPitchScope(PitchScope scope);
+    [[nodiscard]] std::vector<ResolvedConnectionPitchCurve> diagnosticConnectionPitchCurves() const;
+    [[nodiscard]] std::optional<juce::Point<float>> diagnosticConnectionPitchPoint(const juce::String&, int) const;
+    bool diagnosticConnectionPitchShape(const juce::String&, int, PitchCurveShape);
     [[nodiscard]] bool diffSingerPitchRestoreAvailable() const;
     [[nodiscard]] bool diffSingerPitchRestoreMode() const { return dsPitchRestoreMode; }
     void setDiffSingerPitchRestoreMode(bool enabled);
@@ -704,6 +746,7 @@ public:
     void mouseDrag(const juce::MouseEvent& event) override;
     void mouseUp(const juce::MouseEvent& event) override;
     bool keyPressed(const juce::KeyPress& key) override;
+    void focusLost(FocusChangeType) override;
     std::function<void(double)> onSeek;
     // Where an edit just began.  Distinct from onSeek, which is a transport
     // move the user asked for outright: this one follows the editing and is
@@ -728,6 +771,10 @@ public:
     std::function<void(const juce::String&)> onNoteSelected;
     std::function<void(const juce::String&)> onEditRejected;
     std::function<void(const juce::String&)> onNoteAliasCommitted;
+    std::function<void(const juce::String&, const juce::String&)> onRequestMaterialSourceInput;
+    bool diagnosticBeginAliasEdit(const juce::String& noteId);
+    bool suspendInlineAliasInput(const juce::String& noteId);
+    void resumeInlineAliasInput(const juce::String& noteId, bool discard = false);
     // Open the four-region / oto editor for this note's voicebank entry.
     std::function<void(const juce::String&)> onOpenRegionEditor;
     std::function<void()> onOpenNativeEnvelope;
@@ -737,6 +784,60 @@ public:
     std::function<void(int, const SampleRegionSetting&, bool)> onSampleRegionEdited;
 
 private:
+    friend bool runPointGroupSmoke(const juce::File&);
+    bool groupPointHitTest=false;
+    // Selection outlives the drag. A consumed/stale selection still owns Delete
+    // until another click, so key repeat cannot delete the containing note.
+    struct PointSelection
+    {
+        enum Kind { pitch, amplitude, flag, cvvc, connectionPitch };
+        juce::String noteId; // tagged owner key: connection ID only for connectionPitch
+        int index = -1;
+        std::uint64_t revision = 0;
+        Kind kind = pitch;
+        int part = 0;
+        juce::String key;
+    };
+    std::optional<PointSelection> selectedPoint;
+    std::vector<PointSelection> selectedPoints;
+    struct PointCurveDraft
+    {
+        PointSelection identity;
+        ProjectModel::PointCurveEdit edit;
+        std::vector<int> indices;
+        std::vector<std::pair<double,double>> original;
+        double start=0, length=1, base=1, first=0, last=0, low=0, high=127, separation=.001;
+        bool fixedEnds=false;
+    };
+    struct PointGroupGesture
+    {
+        std::vector<PointCurveDraft> curves;
+        juce::Point<float> down;
+        std::uint64_t revision=0;
+        bool changed=false;
+    };
+    std::optional<PointGroupGesture> pointGroupGesture;
+    void mouseDownSingle(const juce::MouseEvent&);
+    std::vector<PointCurveDraft> pointCurveDrafts();
+    void movePointGroup(const juce::MouseEvent&);
+    void commitPointGroup(std::vector<PointCurveDraft>, std::uint64_t);
+    void editSelectedPoints(bool initialize);
+    void cancelPointDrag();
+    void clearPointSelection();
+    bool deletePitchAnchor(const juce::String& noteId, int index);
+    bool deleteEnvelopePoint(const PointSelection& point);
+    bool pointIsSelected(PointSelection::Kind kind, const juce::String& noteId,
+                         int index, int part = 0, const juce::String& key = {}) const;
+    bool envelopePointHasMoved = false;
+    struct PointSelectionMouseListener : juce::MouseListener
+    {
+        explicit PointSelectionMouseListener(PianoRollComponent& roll) : owner(roll) {}
+        void mouseDown(const juce::MouseEvent& event) override
+        {
+            if (event.eventComponent != &owner) owner.clearPointSelection();
+        }
+        PianoRollComponent& owner;
+    } pointSelectionMouseListener { *this };
     struct NoteHit
     {
         juce::String id;
@@ -778,6 +879,7 @@ private:
         // still speaks through the velocity, the way 界 always has.
         bool setsPin = false;
         double overlapSeconds = 0.0;
+        std::function<double(int)> leadForVelocity;
     };
 
     // Vibrato is shaped by dragging its own trace rather than by typing
@@ -843,6 +945,9 @@ private:
     void rebuildLayout();
     NoteDanceAnimation noteDance;
     void rebuildUtauSoundSpans();
+    void requestCvvcLayouts();
+    juce::ThreadPool cvvcLayoutPool {1};
+    std::set<std::uint64_t> cvvcLayoutRequests;
     // Boundaries that have to end up where they already are, once something
     // has moved the span they are measured against.  Filled by resetConsonant
     // and spent on the next layout, when the new spans exist.
@@ -911,7 +1016,7 @@ private:
     // of a clip: a track that has none yet is still a UTAU track, and gating
     // on the focused clip sent the first stroke on a new track down the wrong
     // branch.
-    [[nodiscard]] bool drawingTrackIsUtau() const;
+    [[nodiscard]] bool canDrawNotesOnFocusedTrack() const;
     void beginDrawingNote(const juce::MouseEvent& event);
     // The clip drawing goes into, making one on the focused track when it has
     // none.  Returns an empty id when there is nowhere to draw.
@@ -1036,6 +1141,58 @@ private:
         const juce::String& sourceNoteId,
         const std::vector<AmplitudeEnvelopePoint>& source);
 
+    struct CvvcBoundaryHandle
+    {
+        juce::String noteId;
+        int part=0;
+        juce::Rectangle<float> bounds;
+    };
+    struct CvvcBoundaryDrag
+    {
+        juce::String noteId;
+        int part=0;
+        double duration=0, original=0, position=0, from=0, to=0;
+        std::uint64_t revision=0;
+        std::vector<backend::UtauPhonemeSpan> spans;
+    };
+    std::optional<CvvcBoundaryDrag> cvvcBoundaryDrag, pendingCvvcBoundary;
+    [[nodiscard]] std::vector<CvvcBoundaryHandle> cvvcBoundaryHandles() const;
+    [[nodiscard]] std::optional<CvvcBoundaryHandle> cvvcBoundaryAt(juce::Point<float>) const;
+    bool cvvcBoundaryMouseDown(const juce::MouseEvent&);
+    void cvvcBoundaryMouseDrag(const juce::MouseEvent&);
+    void finishCvvcBoundaryDrag();
+    void applyCvvcBoundaryPreview();
+    struct CvvcLanePiece
+    {
+        juce::String noteId, token, key;
+        int part = 0;
+        double from = 0, to = 0;
+        backend::CvvcEnvelopeCurve points;
+        backend::UtauMixEnvelope mixEnvelope; // absolute timeline, read-only renderer data
+    };
+    struct CvvcLaneDrag
+    {
+        CvvcLanePiece piece;
+        int point = -1;
+        std::uint64_t revision = 0;
+        bool changed = false;
+        bool continuous = false;
+    };
+    std::optional<CvvcLaneDrag> cvvcLaneDrag;
+    juce::String cvvcSelectedNote;
+    int cvvcSelectedPart = 0;
+    struct CvvcPhonemeTab { juce::String noteId, token; int part; juce::Rectangle<float> bounds; };
+    [[nodiscard]] std::vector<CvvcPhonemeTab> cvvcPhonemeTabs() const;
+    void drawCvvcPhonemeTabs(juce::Graphics&) const;
+    bool cvvcPhonemeTabMouseDown(const juce::MouseEvent&);
+    [[nodiscard]] bool cvvcTimingEnabled(const juce::String& noteId) const;
+    [[nodiscard]] bool usesCvvcEnvelope(const juce::String& noteId) const;
+    [[nodiscard]] std::vector<CvvcLanePiece> cvvcLanePieces(bool amplitude) const;
+    int drawCvvcEnvelopeLane(juce::Graphics&, bool amplitude) const;
+    bool cvvcEnvelopeMouseDown(const juce::MouseEvent&, bool addPoint);
+    void cvvcEnvelopeMouseDrag(const juce::MouseEvent&);
+    void finishCvvcEnvelopeDrag();
+
     ProjectModel& model;
     const I18n& strings;
     ProjectData snapshot;
@@ -1080,8 +1237,21 @@ private:
     };
     std::unordered_map<std::string, UtauNeighbours> utauNeighbours;
     std::vector<NoteHit> noteHits;
-    juce::TextEditor inlineAliasEditor;
-    juce::String inlineAliasNoteId;
+    class InlineAliasEditor final : public juce::TextEditor
+    {
+    public:
+        std::function<void()> requestSource;
+        bool keyPressed(const juce::KeyPress& key) override
+        {
+            if(key.isKeyCode(juce::KeyPress::returnKey)&&key.getModifiers().isCtrlDown()&&requestSource)
+            {requestSource();return true;}
+            return juce::TextEditor::keyPressed(key);
+        }
+    };
+    InlineAliasEditor inlineAliasEditor;
+    juce::String inlineAliasNoteId, suspendedAliasNoteId, suspendedAliasText;
+    bool inlineAliasSuspended = false;
+    std::uint64_t inlineAliasGeneration = 0, suspendedAliasGeneration = 0, suspendedAliasRevision = 0;
     std::vector<SampleRegionSetting> sampleRegions;
     std::vector<RegionHandleHit> regionHandleHits;
     int activeSampleRegion = -1;
@@ -1092,6 +1262,7 @@ private:
     int highestMidi = 96;
     int lowestMidi = 24;
     bool sourceEditMode = false;
+    bool showPhonemeInfo = false;
     bool showNoteLabels = false;
     // The shared UTAU-style editor starts with waveform ink hidden; it can be
     // enabled from the view menu when source detail is useful.
@@ -1117,6 +1288,27 @@ private:
     std::vector<std::pair<juce::Rectangle<float>,juce::String>> nativeOverlapHints;
     struct NativeOverlapSourceHit { juce::Rectangle<float> bounds;juce::String noteId; };
     std::vector<NativeOverlapSourceHit> nativeOverlapSourceHits;
+    struct NativeOverlapSelectorState
+    {
+        juce::String targetNoteId, leftSourceId, rightSourceId;
+        double targetSeconds = 0;
+        std::uint64_t revision = 0;
+    };
+    struct NativeOverlapPair
+    {
+        const TrackData* track = nullptr;
+        const ClipData* left = nullptr;
+        const ClipData* right = nullptr;
+        double from = 0, to = 0;
+    };
+    std::optional<NativeOverlapSelectorState> nativeOverlapSelector;
+    bool showOverlap = false;
+    std::vector<std::pair<juce::String,juce::Rectangle<float>>> nativeOverlapLines;
+    std::size_t nativeOverlapCardCount = 0;
+    juce::Rectangle<float> nativeOverlapSelectorClose;
+    [[nodiscard]] std::optional<NativeOverlapPair> overlapPairFor(const juce::String& noteId, double time) const;
+    void openNativeOverlapSelector(const juce::String& noteId, double time);
+    void closeNativeOverlapSelector();
     void drawNoteHints(juce::Graphics& g) const;
     // The rendered audio behind the loudness envelope, in the lane's own
     // percent scale.  Returns how many notes it drew, which is what a check
@@ -1138,6 +1330,16 @@ private:
     bool showOriginalPitchLine = true;
     bool consonantPitchDashed = false;
     Tool tool = Tool::note;
+    DrawAction drawActionMode = DrawAction::pitchCurve;
+    PitchScope pitchScopeMode = PitchScope::focusedClip;
+    [[nodiscard]] const TrackData* currentPitchTrack() const;
+    [[nodiscard]] static std::pair<double,double> trackPitchEditDomain(const NoteData&);
+    bool beginTrackPitchStroke(const juce::MouseEvent&);
+    bool commitTrackPitchStroke();
+    bool planTrackPitchStroke(std::vector<ProjectModel::PointCurveEdit>&, juce::String&);
+    bool trackPitchStrokeActive = false;
+    std::uint64_t trackPitchStrokeRevision = 0;
+    juce::String trackPitchStrokeTrack;
     juce::String focusedClip;
     juce::String focusedTrack;
     double playheadSeconds = 0.0;
@@ -1187,6 +1389,11 @@ private:
     double resizeMaximumDurationSeconds = 1.0e12;
     double consonantNoteAbsoluteStart = 0.0;
     double consonantScaledPreutterance = 0.0;
+    std::function<double(int)> consonantCvvcLead;
+    int previewConsonantVelocityBeforeDrag = 100;
+    juce::String pendingCvvcHead;
+    std::uint64_t pendingCvvcHeadRevision = 0;
+    double pendingCvvcHeadStart = 0;
     double consonantUnscaledPreutterance = 0.0;
     double consonantMinimumPreutterance = 0.0;
     double consonantMaximumPreutterance = 0.0;
@@ -1231,7 +1438,8 @@ private:
                                                       const NoteData& note,
                                                       double absoluteStart);
     [[nodiscard]] float pitchLineMidiAt(const TrackData& track, const NoteData& note,
-                                        double absoluteStart, double time);
+                                        double absoluteStart, double time,
+                                        const std::vector<PitchCurveEditPoint>* nativeDensePoints = nullptr);
     // Whether a handle of this note at this absolute moment decides anything:
     // on a shared line, only inside the stretch the note owns.
     [[nodiscard]] bool pitchHandleOffered(const NoteData& note, double absoluteSeconds) const;
@@ -1243,6 +1451,35 @@ private:
     [[nodiscard]] std::optional<double> firstShownPitchPoint(const juce::String& noteId,
                                                              double absoluteStart);
     mutable std::map<juce::String, SharedPitchLines> sharedLineCache;
+    mutable std::map<juce::String, SharedPitchLines> pitchPreviewSharedCache;
+    mutable std::map<juce::String, std::vector<AudioEngine::ProjectedNotePitch>> protocolPitchCache, protocolPreviewCache;
+    const AudioEngine::ProjectedNotePitch* protocolPitchFor(const TrackData&, const juce::String&) const;
+    mutable std::map<juce::String, std::vector<ResolvedConnectionPitchCurve>> connectionPitchCache, connectionPreviewCache;
+    std::optional<ProjectModel::PointCurvePlanPreview> pitchPlanPreview;
+    std::vector<ProjectModel::PointCurveEdit> pitchPendingEdits;
+    std::unordered_map<std::string, std::vector<PitchCurveEditPoint>> pitchPreviewAnchorCache;
+    const TrackData& pitchPreviewTrack(const TrackData&) const;
+    const NoteData& pitchPreviewNote(const NoteData&) const;
+    const std::vector<ResolvedConnectionPitchCurve>& connectionCurvesFor(const TrackData&, bool preview = true) const;
+    std::vector<ResolvedConnectionPitchCurve> visibleConnectionCurves(bool preview = true) const;
+    bool updatePitchPlanPreview(const std::vector<ProjectModel::PointCurveEdit>&, std::uint64_t);
+    void clearPitchPlanPreview();
+    std::optional<std::pair<juce::String,int>> connectionPointAt(juce::Point<float>) const;
+    std::optional<juce::String> connectionCurveAt(juce::Point<float>) const;
+    void drawConnectionPitchCurves(juce::Graphics&);
+    void clipNotePitchAgainstConnections(juce::Graphics&, const TrackData&) const;
+    bool connectionPitchMouseDown(const juce::MouseEvent&);
+    void moveConnectionPitchPoint(const juce::MouseEvent&);
+    bool connectionPitchDoubleClick(const juce::MouseEvent&);
+    juce::PopupMenu connectionPitchPointMenu(const juce::String&, int) const;
+    bool applyConnectionPitchPointMenu(const juce::String&, int, int);
+    void showConnectionPitchPointMenu(const juce::String&, int, juce::Point<int>);
+    bool graphPointDragging = false, graphDragValid = false;
+    juce::String graphDragId;
+    int graphDragIndex = -1;
+    juce::Point<float> graphDragDown;
+    std::uint64_t graphDragRevision = 0;
+    std::vector<PitchCurveEditPoint> graphDragOriginal;
     mutable std::map<juce::String, NativeNoiseRanges> nativePitchVisibilityCache;
     mutable std::map<juce::String, NativeNoiseRanges> nativePitchAuthoredCache;
     [[nodiscard]] const NativeNoiseRanges& nativePitchVisibilityFor(

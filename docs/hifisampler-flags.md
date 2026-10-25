@@ -27,6 +27,8 @@
 
 **模型与缓存：**原 PC-NSF-HiFiGAN 模型继续使用。Hb≠Hv 或 Ht≠0 时加载新增 `models/nsf_hifigan/hnsep/model.onnx`。其权重取自官方 v0.0.6 models.7z，使用上游封装导出为 float32 ONNX，大小 59,053,378 字节（约 56.3 MiB）。默认 Hb=Hv=100、Ht=0 时不加载该分离模型。无需 Python 渲染服务，也不在音源目录中写入缓存。缓存限制内存并计入相关参数和模型信息。
 
+更新 178：上述内存缓存之外，分离波形与 HN1 共用磁盘缓存；严格校验实际 PCM、模型、配置内容和算法版本。默认用户缓存目录预算 512 MiB，G 同时跳过两级缓存，细节见 [HN 模式说明](wcsndm-hn.md)。
+
 `models/nsf_hifigan/hifisampler.json` 可设置：
 
 ```json

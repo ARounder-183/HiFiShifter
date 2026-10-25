@@ -1,5 +1,6 @@
 #pragma once
 #include "../backend/ChineseCvvcPhonemizer.h"
+#include "CvvcEnvelopeSmoke.h"
 
 namespace hachi
 {
@@ -66,7 +67,7 @@ inline bool MainComponent::diagnosticChineseCvvc(const juce::File& folder, const
     check("missing_vc_falls_back_to_cv",aliases(planChineseCvvc(changed))=="a|pa|a R");
     changed=request; changed.notes[1].alias="absent";
     auto absent=planChineseCvvc(changed);
-    check("missing_cv_is_silent_and_diagnosed",aliases(absent).contains("RR")&&absent.warning.contains("Missing CV"));
+    check("missing_cv_keeps_failed_lyric_for_piano",aliases(absent).contains("absent")&&!aliases(absent).contains("RR")&&absent.warning.contains("Missing CV"));
     changed=request; changed.notes[1].startSeconds=1;
     check("gap_breaks_vc_context",!aliases(planChineseCvvc(changed)).contains("a b"));
     changed=request; changed.notes[0].alias="RR";
@@ -106,7 +107,77 @@ inline bool MainComponent::diagnosticChineseCvvc(const juce::File& folder, const
     check("legacy_presamp_encoding",aliases(planChineseCvvc(request))=="a|a b|ba|a R");
     bank.getChildFile("presamp.ini").replaceWithText(rules);
 
+    const auto variantRules = rules + "[VOWEL]\ne0=e0=nue,lue=100\n[CONSONANT]\nny=nve=0\nly=lve=0\n";
+    const auto variantOto = oto + "tone.wav=nve,0,100,-900,80,20\ntone.wav=lve,0,100,-900,80,20\n"
+        "tone.wav=a ny,0,100,-900,40,10\ntone.wav=a ly,0,100,-900,40,10\n"
+        "tone.wav=e0 R,0,100,-900,20,10\ntone.wav=e0 b,0,100,-900,40,10\n";
+    bank.getChildFile("presamp.ini").replaceWithText(variantRules);
+    bank.getChildFile("oto.ini").replaceWithText(variantOto);
+    UtauRenderer::invalidateVoicebankCache();
+    changed=request;changed.notes[1].alias="nue";
+    check("nue_uses_recorded_nve_and_vowel_tail",aliases(planChineseCvvc(changed))=="a|a ny|nve|e0 R");
+    changed.notes[1].alias=juce::String::fromUTF8("nüe");
+    check("umlaut_spelling_uses_bank_alias",aliases(planChineseCvvc(changed))=="a|a ny|nve|e0 R");
+    changed.notes[1].alias="lue";
+    check("lue_uses_recorded_lve_and_vowel_tail",aliases(planChineseCvvc(changed))=="a|a ly|lve|e0 R");
+    changed=request;changed.notes[0].alias="nue";
+    check("resolved_spelling_keeps_next_vc_context",aliases(planChineseCvvc(changed))=="nve|e0 b|ba|a R");
+    changed=request;changed.notes[1].alias="[nue]";
+    check("explicit_alias_not_respelled",aliases(planChineseCvvc(changed))=="a|nue");
+    bank.getChildFile("presamp.ini").replaceWithText(variantRules+"[REPLACE]\nnue=absent\n");
+    changed.notes[1].alias="nue";
+    check("explicit_replace_not_overridden",planChineseCvvc(changed).warning.contains("Missing CV: absent"));
+    bank.getChildFile("presamp.ini").replaceWithText(variantRules);
+    bank.getChildFile("oto.ini").replaceWithText(variantOto+"tone.wav=a nue,0,100,-900,80,20\n");
+    UtauRenderer::invalidateVoicebankCache();
+    check("exact_contextual_alias_not_respelled",aliases(planChineseCvvc(changed))=="a|a nue|e0 R");
+    const std::map<juce::String,juce::String> conflicting{{"nve","e0"},{"nue","other"}};
+    check("conflicting_vowel_groups_not_inferred",ChineseCvvcRules::lookup(conflicting,juce::String::fromUTF8("nüe"))==juce::String::fromUTF8("nüe"));
+    check("explicit_vowel_group_wins",ChineseCvvcRules::lookup(conflicting,"nue")=="other");
+
+    // Public presamp format variants must drive actual OTO selection, not
+    // merely parse successfully or fall back to the old space-separated form.
+    const auto customOto = oto
+        + "tone.wav=start_a,0,100,-900,80,20\ntone.wav=a+b,0,100,-900,40,10\n"
+          "tone.wav=bA,0,100,-900,110,20\ntone.wav=a_tail,0,100,-900,20,10\n"
+          "tone.wav=a_ba,0,100,-900,80,20\ntone.wav=ab,0,100,-900,40,10\n"
+          "tone.wav=a  b,0,100,-900,40,10\ntone.wav=A_end,0,100,-900,20,10\n";
+    bank.getChildFile("oto.ini").replaceWithText(customOto);
+    UtauRenderer::invalidateVoicebankCache();
+    const juce::String formats = "[ALIAS]\nBEGINING_CV=start_%CV%\nVCV=%v%%VCVPAD%%CV%\n"
+        "VC=%v%%vcpad%%c%\nCV=missing_%CV%,%c%%V%,%CV%\n"
+        "VCPAD=+\nVCVPAD=_\nENDING1=%v%_tail\n[PRIORITY]\nba\n";
+    bank.getChildFile("presamp.ini").replaceWithText(rules+formats);
+    check("alias_templates_candidates_and_priority",aliases(planChineseCvvc(request))=="start_a|a+b|bA|a_tail");
+    const auto upperAlias=UtauRenderer::mappedAliasTiming(bank,"bA",60);
+    const auto lowerAlias=UtauRenderer::mappedAliasTiming(bank,"ba",60);
+    const auto upperSample=UtauRenderer::resolveVoiceSample(bank,"bA",60,100,false,false,0,false,0,false,0,nullptr,true);
+    check("phoneme_case_preserved_through_render_lookup",upperAlias&&lowerAlias
+        &&near(upperAlias->preutteranceSeconds,.11)&&near(lowerAlias->preutteranceSeconds,.08)
+        &&upperSample.found&&near(upperSample.preutteranceSeconds,.11));
+    const auto noPriority = formats.upToFirstOccurrenceOf("[PRIORITY]",false,false);
+    bank.getChildFile("presamp.ini").replaceWithText(rules+noPriority);
+    check("custom_vcv_separator",aliases(planChineseCvvc(request))=="start_a|a_ba|a_tail");
+    bank.getChildFile("presamp.ini").replaceWithText(rules+formats+"[VCPAD]\n \n[ENDTYPE]\n%v% R\n[ENDTYPE1]\n%V%_end\n");
+    check("legacy_pad_and_ending_precedence",aliases(planChineseCvvc(request))=="start_a|a b|bA|A_end");
+    changed=request;changed.notes[1].alias="R";
+    check("explicit_release_uses_configured_format",aliases(planChineseCvvc(changed))=="start_a|A_end");
+    bank.getChildFile("presamp.ini").replaceWithText(rules+"[VCPAD]\n+\n[ENDTYPE]\n%v%_tail\n"+formats+"[ALIAS]\nVCPAD=_\n");
+    check("legacy_sections_win_independent_of_order",aliases(planChineseCvvc(request))=="start_a|a+b|bA|a_tail");
+    bank.getChildFile("presamp.ini").replaceWithText(rules+formats+"[ALIAS]\nVCPAD=\n");
+    check("empty_pad_has_no_separator",aliases(planChineseCvvc(request))=="start_a|ab|bA|a_tail");
+    bank.getChildFile("presamp.ini").replaceWithText(rules+formats+"[ALIAS]\nVCPAD=  \n");
+    check("padding_spaces_are_preserved",aliases(planChineseCvvc(request))=="start_a|a  b|bA|a_tail");
+    changed=request;changed.notes[1].alias="[ba]";
+    check("explicit_alias_bypasses_templates",aliases(planChineseCvvc(changed))=="start_a|ba");
+    bank.getChildFile("presamp.ini").replaceWithText(rules+formats+"[ALIAS]\nCV=%unknown%\n");
+    check("unknown_placeholder_does_not_invent_alias",planChineseCvvc(request).warning.contains("Missing CV: ba"));
+    bank.getChildFile("oto.ini").replaceWithText(oto);
+    bank.getChildFile("presamp.ini").replaceWithText(rules);
+    UtauRenderer::invalidateVoicebankCache();
+
     std::vector<std::size_t> callbacks;std::vector<std::vector<UtauPhonemeSpan>> spans(2);
+    verifyCvvcEnvelopes(folder, request, modelFolder, check);
     auto renderedRequest=request;
     renderedRequest.notePhonemes=[&](std::size_t i,const auto& p){if(i<spans.size())spans[i]=p;};
     renderedRequest.notePiece=[&](std::size_t i,const auto& audio,double rate,double lead,const auto&,const auto&)
@@ -145,17 +216,49 @@ inline bool MainComponent::diagnosticChineseCvvc(const juce::File& folder, const
     NoteData nb=na;nb.id="b";nb.label="ba";nb.startSeconds=.8;
     clip.notes={na,nb};track.clips={clip};ProjectData data;data.tracks={track};
     project.resetDocument(data);project.dispatchPendingMessages();
+    diagnosticSelectTrack(track.id);
+    setSize(1280,800);refreshProjectControls();
+    check("phonemizer_button_below_stretch",phonemizerButton.isVisible()
+        && phonemizerButton.getX()==stretchAlgorithm.getX()
+        && phonemizerButton.getY()>stretchAlgorithm.getBottom()
+        && !phonemizerButton.getBounds().intersects(autoCrossfadeButton.getBounds()));
+    check("editor_display_options_reachable_in_view_menu",diagnosticHasEditorViewItems());
+    setSize(900,600);
+    check("phonemizer_button_minimum_window",phonemizerButton.isVisible()
+        && !phonemizerButton.getBounds().isEmpty()
+        && getLocalBounds().contains(phonemizerButton.getBounds())
+        && !phonemizerButton.getBounds().intersects(autoCrossfadeButton.getBounds()));
+    check("crossfade_button_minimum_window",autoCrossfadeButton.isVisible()
+        && getLocalBounds().contains(autoCrossfadeButton.getBounds())
+        && !autoCrossfadeButton.getBounds().intersects(advancedEnvelopeButton.getBounds())
+        && autoCrossfadeButton.getRight()<phonemizerButton.getX());
+    check("minimum_window_preserves_view_menu_display_options",diagnosticHasEditorViewItems());
+    setSize(1280,800);
     auto menu=clipContextMenu(clip.id,.9);bool choices=false;
     for(juce::PopupMenu::MenuItemIterator it(menu);it.next();)
-        if(it.getItem().text==strings.text("phonemizer.choose"))choices=it.getItem().isEnabled&&it.getItem().subMenu&&it.getItem().subMenu->getNumItems()==2;
+        if(it.getItem().text==strings.text("phonemizer.choose"))choices=it.getItem().isEnabled&&it.getItem().subMenu&&it.getItem().subMenu->getNumItems()==3;
     check("standard_utau_menu_offers_two_phonemizers",choices);
     check("manual_aliases_default",!project.snapshot().tracks[0].chineseCvvc);
     outputEngineItemChosen(105,track.id);project.dispatchPendingMessages();
     check("menu_enables_chinese_cvvc",project.snapshot().tracks[0].chineseCvvc);
+    check("toolbar_reflects_phonemizer",phonemizerButton.getButtonText().contains(strings.text("phonemizer.zhCvvc")));
+    {juce::PNGImageFormat png;auto stream=folder.getChildFile("phonemizer-toolbar.png").createOutputStream();
+     if(stream)png.writeImageToStream(createComponentSnapshot(getLocalBounds()),*stream);}
     check("setting_undo_redo",project.undo()&&!project.snapshot().tracks[0].chineseCvvc&&project.redo()&&project.snapshot().tracks[0].chineseCvvc);
     const auto file=folder.getChildFile("cvvc.hjpx");
     ProjectModel reopened;
     check("setting_persists_in_project",project.save(file,error)&&reopened.load(file,error)&&reopened.snapshot().tracks[0].chineseCvvc);
+    const auto linearState=project.snapshot();
+    check("cvvc_default_crossfade_is_linear",!linearState.tracks[0].cvvcCurveCrossfade);
+    outputEngineItemChosen(107,track.id);
+    check("crossfade_menu_selects_curve",project.snapshot().tracks[0].cvvcCurveCrossfade);
+    check("crossfade_choice_invalidates_audio_and_mix",AudioEngine::diagnosticUtauRenderKey(linearState,clip.id,UtauOutputEngine::resampler,{},{})
+        !=AudioEngine::diagnosticUtauRenderKey(project.snapshot(),clip.id,UtauOutputEngine::resampler,{},{})
+        &&AudioEngine::utauPhonemeMixContextHash(linearState.tracks[0])!=AudioEngine::utauPhonemeMixContextHash(project.snapshot().tracks[0]));
+    check("crossfade_choice_undo_redo",project.undo()&&!project.snapshot().tracks[0].cvvcCurveCrossfade
+        &&project.redo()&&project.snapshot().tracks[0].cvvcCurveCrossfade);
+    check("crossfade_choice_project_roundtrip",project.save(file,error)&&reopened.load(file,error)&&reopened.snapshot().tracks[0].cvvcCurveCrossfade);
+    outputEngineItemChosen(106,track.id);
     auto saved=project.snapshot();
     const auto selected=AudioEngine::diagnosticUtauRequestNotes(saved,clip.id,{"b"});
     check("selection_preserves_muted_neighbors",selected.size()==2&&selected[0].gain==0&&selected[1].gain>0);
@@ -164,6 +267,8 @@ inline bool MainComponent::diagnosticChineseCvvc(const juce::File& folder, const
     check("phonemizer_in_render_cache_key",key!=AudioEngine::diagnosticUtauRenderKey(saved,clip.id,UtauOutputEngine::resampler,{},{}));
     saved=project.snapshot();bank.getChildFile("presamp.ini").appendText(";cache edit\n");
     check("presamp_changes_invalidate_render_cache",key!=AudioEngine::diagnosticUtauRenderKey(saved,clip.id,UtauOutputEngine::resampler,{},{}));
+    #include "CvvcAdvancedEnvelopeSmoke.inc"
+    #include "CvvcBoundarySmoke.inc"
     project.setTrackUtauMode(track.id,UtauMode::jie);project.dispatchPendingMessages();
     menu=clipContextMenu(clip.id,.9);bool disabled=false;
     for(juce::PopupMenu::MenuItemIterator it(menu);it.next();)
@@ -171,6 +276,11 @@ inline bool MainComponent::diagnosticChineseCvvc(const juce::File& folder, const
     check("regional_modes_do_not_enable_standard_phonemizer",disabled);
     outputEngineItemChosen(104,track.id);
     check("regional_mode_cannot_change_saved_phonemizer",project.snapshot().tracks[0].chineseCvvc);
+    check("regional_mode_hides_toolbar_phonemizer",!phonemizerButton.isVisible());
+    project.setTrackUtauMode(track.id,UtauMode::classic);
+    project.setTrackPitchAlgorithm(track.id,PitchAlgorithm::world);project.dispatchPendingMessages();
+    refreshProjectControls();
+    check("native_mode_hides_toolbar_phonemizer",!phonemizerButton.isVisible());
     auto* report=new juce::DynamicObject();report->setProperty("passed",ok);report->setProperty("checks",juce::var(checks));
     folder.getChildFile("report.json").replaceWithText(juce::JSON::toString(juce::var(report),true));
     return ok;

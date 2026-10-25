@@ -105,7 +105,7 @@ inline bool MainComponent::diagnosticPitchOffset(const juce::File& folder)
     const auto area=juce::Rectangle<int>((int)roll.diagnosticEdgeX(.25),(int)roll.diagnosticYForMidi(64),1120,310);
     if(auto stream=folder.getChildFile("pitch-offset.png").createOutputStream()){stream->setPosition(0);stream->truncate();juce::PNGImageFormat().writeImageToStream(roll.createComponentSnapshot(area),*stream);}
     roll.setTool(PianoRollComponent::Tool::note);check("changing_tool_exits_offset_mode",!roll.diffSingerPitchOffsetMode());
-    auto ordinary=model.snapshot();ordinary.tracks[0].voicebankDirectory={};ProjectModel ordinaryModel;ordinaryModel.replace(ordinary);
+    auto ordinary=model.snapshot();ordinary.tracks[0].voicebankDirectory=juce::File{};ProjectModel ordinaryModel;ordinaryModel.replace(ordinary);
     check("ordinary_UTAU_rejects_offset_edit",!ordinaryModel.setDiffSingerPitchOffset("n0",{{0,2}}));
     auto ordinaryWithout=ordinary;for(auto& c:ordinaryWithout.tracks[0].clips)for(auto& n:c.notes)n.diffSingerPitchOffset.clear();
     check("ordinary_UTAU_ignores_stored_offset",std::abs(actual(ordinary)[0].timelinePitchCents(.3)-actual(ordinaryWithout)[0].timelinePitchCents(.3))<1e-5);

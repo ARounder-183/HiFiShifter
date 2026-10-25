@@ -186,13 +186,13 @@ SettingsComponent::SettingsComponent(I18n& stringsToUse,
     importPage.addWide(locateMediaRecursively);
 
     const auto u8 = [](const char* s) { return juce::String::fromUTF8(s); };
-    dsBackend.addItem(u8("自动（优先 GPU，失败时使用 CPU）"), 1);
+    dsBackend.addItem(strings.text("Automatic (GPU preferred, CPU fallback)"), 1);
     dsBackend.addItem("CPU", 2); dsBackend.addItem("DirectML GPU", 3);
     for (int i = 0; i < 32; ++i) dsDevice.addItem("GPU " + juce::String(i), i + 1);
     for (auto* box : { &dsPreview, &dsExport })
     {
-        box->addItem(u8("快速"), 1); box->addItem(u8("标准"), 2);
-        box->addItem(u8("精细"), 3); box->addItem(u8("自定义"), 4);
+        box->addItem(strings.text("Fast"), 1); box->addItem(strings.text("Standard"), 2);
+        box->addItem(strings.text("Fine"), 3); box->addItem(strings.text("Custom"), 4);
         box->onChange = [this] { refreshDiffSingerControls(); };
     }
     dsBackend.onChange = [this] { refreshDiffSingerControls(); };
@@ -203,19 +203,19 @@ SettingsComponent::SettingsComponent(I18n& stringsToUse,
         slider->setRange(1, slider == &dsDepth ? 100 : 1000, 1);
     }
     dsDepth.setTextValueSuffix(" %");
-    dsBackendLabel.setText(u8("DS 推理设备"), juce::dontSendNotification);
-    dsDeviceLabel.setText(u8("显卡编号"), juce::dontSendNotification);
-    dsPreviewLabel.setText(u8("试听 / pitch 预测质量"), juce::dontSendNotification);
-    dsExportLabel.setText(u8("导出质量"), juce::dontSendNotification);
-    dsAcousticLabel.setText(u8("自定义：声学步数"), juce::dontSendNotification);
-    dsPitchLabel.setText(u8("自定义：pitch 步数"), juce::dontSendNotification);
-    dsVarianceLabel.setText(u8("自定义：表现参数步数"), juce::dontSendNotification);
-    dsDepthLabel.setText(u8("自定义：声学深度"), juce::dontSendNotification);
+    dsBackendLabel.setText(strings.text("DS inference device"), juce::dontSendNotification);
+    dsDeviceLabel.setText(strings.text("GPU index"), juce::dontSendNotification);
+    dsPreviewLabel.setText(strings.text("Preview / pitch prediction quality"), juce::dontSendNotification);
+    dsExportLabel.setText(strings.text("Export quality"), juce::dontSendNotification);
+    dsAcousticLabel.setText(strings.text("Custom: acoustic steps"), juce::dontSendNotification);
+    dsPitchLabel.setText(strings.text("Custom: pitch steps"), juce::dontSendNotification);
+    dsVarianceLabel.setText(strings.text("Custom: variance steps"), juce::dontSendNotification);
+    dsDepthLabel.setText(strings.text("Custom: acoustic depth"), juce::dontSendNotification);
     diffSingerPage.addRow(dsBackendLabel, dsBackend); diffSingerPage.addRow(dsDeviceLabel, dsDevice);
     diffSingerPage.addRow(dsPreviewLabel, dsPreview); diffSingerPage.addRow(dsExportLabel, dsExport);
     diffSingerPage.addRow(dsAcousticLabel, dsAcoustic); diffSingerPage.addRow(dsPitchLabel, dsPitch);
     diffSingerPage.addRow(dsVarianceLabel, dsVariance); diffSingerPage.addRow(dsDepthLabel, dsDepth);
-    dsHelp.setText(u8("步数（声学 / pitch / 表现参数）：快速 8 / 8 / 8，标准 20 / 20 / 20，精细 50 / 40 / 40。导出使用现有 pitch，不重新改动音高；深度按音源上限限制。"), juce::dontSendNotification);
+    dsHelp.setText(strings.text("Steps (acoustic / pitch / variance): Fast 8 / 8 / 8, Standard 20 / 20 / 20, Fine 50 / 40 / 40. Export uses existing pitch without changing it. Depth is limited by the voicebank."), juce::dontSendNotification);
     dsHelp.setJustificationType(juce::Justification::centredLeft);
     diffSingerPage.addWide(dsHelp, 58); diffSingerPage.addWide(dsStatus, 42);
     dsBackend.setComponentID("ds.backend"); dsPreview.setComponentID("ds.preview");
@@ -326,8 +326,8 @@ void SettingsComponent::refreshDiffSingerControls()
     const auto custom = dsPreview.getSelectedId() == 4 || dsExport.getSelectedId() == 4;
     for (auto* slider : { &dsAcoustic, &dsPitch, &dsVariance, &dsDepth }) slider->setEnabled(custom);
     const auto status = backend::DiffSingerRenderer::inferenceStatus();
-    const auto text = status.isEmpty() ? juce::String::fromUTF8("尚未运行 DS；应用后在音源预检、预测或试听时检查设备。")
-        : juce::String::fromUTF8("最近运行：") + status;
+    const auto text = status.isEmpty() ? strings.text("DS has not run yet; check the device during voicebank preflight, prediction or preview after applying.")
+        : strings.text("Last run: ") + status;
     dsStatus.setText(text.upToFirstOccurrenceOf("\n", false, false), juce::dontSendNotification);
     dsStatus.setTooltip(text);
 }
@@ -380,6 +380,18 @@ void SettingsComponent::saveValues()
 
 void SettingsComponent::setTexts()
 {
+    dsBackend.changeItemText(1,strings.text("Automatic (GPU preferred, CPU fallback)"));
+    for(auto* box:{&dsPreview,&dsExport})
+    {box->changeItemText(1,strings.text("Fast"));box->changeItemText(2,strings.text("Standard"));box->changeItemText(3,strings.text("Fine"));box->changeItemText(4,strings.text("Custom"));}
+    dsBackendLabel.setText(strings.text("DS inference device"),juce::dontSendNotification);
+    dsDeviceLabel.setText(strings.text("GPU index"),juce::dontSendNotification);
+    dsPreviewLabel.setText(strings.text("Preview / pitch prediction quality"),juce::dontSendNotification);
+    dsExportLabel.setText(strings.text("Export quality"),juce::dontSendNotification);
+    dsAcousticLabel.setText(strings.text("Custom: acoustic steps"),juce::dontSendNotification);
+    dsPitchLabel.setText(strings.text("Custom: pitch steps"),juce::dontSendNotification);
+    dsVarianceLabel.setText(strings.text("Custom: variance steps"),juce::dontSendNotification);
+    dsDepthLabel.setText(strings.text("Custom: acoustic depth"),juce::dontSendNotification);
+    dsHelp.setText(strings.text("Steps (acoustic / pitch / variance): Fast 8 / 8 / 8, Standard 20 / 20 / 20, Fine 50 / 40 / 40. Export uses existing pitch without changing it. Depth is limited by the voicebank."),juce::dontSendNotification);
     tabs.setTabName(0, strings.text("settings.interface"));
     tabs.setTabName(1, strings.text("settings.audio"));
     tabs.setTabName(2, strings.text("settings.algorithm"));
@@ -408,6 +420,7 @@ void SettingsComponent::setTexts()
     inference.changeItemText(1, strings.text("settings.auto"));
     inferenceDevice.changeItemText(1, strings.text("settings.auto"));
     utauVoicebankLabel.setText(strings.text("settings.utauVoicebank"), juce::dontSendNotification);
+    utauVoicebankLabel.setTooltip(strings.text("settings.utauVoicebankHint"));
     utauWavtoolLabel.setText(strings.text("settings.utauWavtool"), juce::dontSendNotification);
     utauResamplerLabel.setText(strings.text("settings.utauResampler"), juce::dontSendNotification);
     utauOutputEngineLabel.setText(strings.text("settings.utauOutputEngine"), juce::dontSendNotification);
@@ -446,13 +459,16 @@ void SettingsComponent::refreshImportedStretchItems(int preferredId)
         importedStretchAlgorithm.addItem(strings.text("algo.stretch.nsfVariableMel"), 2);
         importedStretchAlgorithm.addItem(strings.text("algo.stretch.nsfShiftThenSplice"), 5);
         importedStretchAlgorithm.addItem(strings.text("algo.stretch.hifiShifterMel"), 6);
+        importedStretchAlgorithm.addItem(strings.text("algo.stretch.wcsNonLoop"), 7);
     }
     importedStretchAlgorithm.addItem(strings.text("algo.stretch.loop"), 3);
     importedStretchAlgorithm.addItem(strings.text("algo.stretch.soundTouch"), 4);
-    const auto canUsePreferred = (previous != 2 && previous != 5 && previous != 6)
+    const auto canUsePreferred = (previous != 2 && previous != 5 && previous != 6 && previous != 7)
         || importedAlgorithm.getSelectedId() == 2;
     importedStretchAlgorithm.setSelectedId(canUsePreferred && previous > 0 ? previous : 1,
                                              juce::dontSendNotification);
+    importedStretchAlgorithm.setTooltip(importedStretchAlgorithm.getSelectedId()==7
+        ? strings.text("algo.stretch.wcsNonLoopHelp") : strings.text("algo.stretch"));
 }
 
 juce::File SettingsComponent::initialPathFor(const PathPicker& picker,

@@ -134,8 +134,8 @@ public:
     void paintListBoxItem(int row,juce::Graphics& g,int width,int height,bool selected) override
     {
         if(row<0||row>=(int)manualSections.size())return;
-        if(selected)g.fillAll(juce::Colour(0xff405b6b));
-        const auto& s=manualSections[(size_t)row];g.setColour(juce::Colours::white);
+        if(selected)g.fillAll(Palette::selection);
+        const auto& s=manualSections[(size_t)row];g.setColour(selected?Palette::contrastingText(Palette::selection):Palette::text);
         g.drawText(tr("第 ")+juce::String(s.startBar)+" – "+juce::String(s.endBar)+tr(" 小节   |   ")+hamood::keyName(s.tonic+(s.minor?12:0))+tr(s.confirmed?"   已确认":"   待确认"),8,0,width-16,height,juce::Justification::centredLeft);
     }
     void selectedRowsChanged(int row) override

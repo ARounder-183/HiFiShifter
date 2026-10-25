@@ -78,7 +78,18 @@ inline void TimelineComponent::paintClipEnvelope(juce::Graphics& g,const ClipDat
     for(const auto& point:points)if(point.timeSeconds>first&&point.timeSeconds<last)
         path.lineTo(timeToX(origin+point.timeSeconds),yFor(point.gainDb));
     path.lineTo(right,yFor(trackGainEnvelopeDbAt(points,last)));
-    g.setColour(Palette::accent.withAlpha(trackMuted||clip.muted?.25f:points.empty()?.38f:.85f));
+    const auto light=Palette::background.getPerceivedBrightness()>.5f;
+    const auto rowSurface=std::find(selectedTracks.begin(),selectedTracks.end(),snapshot.tracks[index].id)!=selectedTracks.end()
+        ?Palette::base.overlaidWith(Palette::accent.withAlpha(.06f)):Palette::base;
+    const auto clipSurface=rowSurface.overlaidWith(trackMuted||clip.muted
+        ?Palette::clipBackground.withAlpha(.55f):Palette::clipBackground);
+    auto curveInk=Palette::accent.withAlpha(trackMuted||clip.muted?.25f:points.empty()?.38f:.85f);
+    if(light&&!points.empty())
+    {
+        curveInk=trackMuted||clip.muted?Palette::textMuted:Palette::noteEdge;
+        if(Palette::contrastRatio(curveInk,clipSurface)<3.0)curveInk=Palette::contrastingText(clipSurface);
+    }
+    g.setColour(curveInk);
     g.strokePath(path,juce::PathStrokeType(1.15f));
     for(std::size_t i=0;i<points.size();++i)
     {
@@ -89,7 +100,8 @@ inline void TimelineComponent::paintClipEnvelope(juce::Graphics& g,const ClipDat
             ? static_cast<int>(i)==draggedEnvelopePoint : std::abs(point.timeSeconds-selectedEnvelopeTime)<1.0e-6);
         const auto radius=selected?4.2f:3.2f;
         g.setColour(Palette::panel);g.fillEllipse(x-radius,y-radius,radius*2,radius*2);
-        g.setColour(selected?Palette::text:Palette::accent);g.drawEllipse(x-radius,y-radius,radius*2,radius*2,1.3f);
+        g.setColour(light?(selected?Palette::heading:Palette::noteEdge):(selected?Palette::text:Palette::accent));
+        g.drawEllipse(x-radius,y-radius,radius*2,radius*2,1.3f);
         if(selected)
         {
             const auto label=juce::String(point.timeSeconds,3)+" s  "+gainLabel(juce::Decibels::decibelsToGain(point.gainDb,-60.0f));
@@ -97,7 +109,9 @@ inline void TimelineComponent::paintClipEnvelope(juce::Graphics& g,const ClipDat
             juce::Rectangle<float> box(juce::jlimit(firstX,std::max(firstX,lastX-width),x+7.0f),
                 std::max(area.getY(),y-20.0f),width,16.0f);
             g.setColour(Palette::panel.withAlpha(.94f));g.fillRoundedRectangle(box,2.0f);
-            g.setColour(Palette::text);g.setFont(10.5f);g.drawText(label,box.reduced(3,0),juce::Justification::centredLeft,false);
+            const auto labelSurface=clipSurface.overlaidWith(Palette::panel.withAlpha(.94f));
+            g.setColour(light?Palette::contrastingText(labelSurface):Palette::text);
+            g.setFont(10.5f);g.drawText(label,box.reduced(3,0),juce::Justification::centredLeft,false);
         }
     }
 }

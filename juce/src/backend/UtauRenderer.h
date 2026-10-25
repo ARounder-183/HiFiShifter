@@ -3,11 +3,17 @@
 #include <juce_audio_formats/juce_audio_formats.h>
 #include "UtauOtoOverride.h"
 #include "TailFadeSettings.h"
+#include "CvvcEnvelope.h"
+#include "CvvcTiming.h"
+#include "UtauMixEnvelope.h"
 #include "../WavExportOptions.h"
 #include <array>
 #include <functional>
 #include <optional>
 #include <vector>
+#include <memory>
+
+namespace hachi { struct VoicebankOtoEntry; }
 
 namespace hachi::backend
 {
@@ -23,6 +29,7 @@ struct UtauAmplitudePoint
     float gainDb = 0.0f;
     // As AmplitudeEnvelopePoint::linearToNext.
     bool linearToNext = false;
+    std::optional<EnvelopeBezier> bezier;
 };
 
 struct UtauNoteRenderSpec
@@ -85,17 +92,39 @@ struct UtauNoteRenderSpec
     // Generated phonemes retain the parent note's envelope clock.
     bool preserveEnvelopeTiming = false;
     bool aliasIsResolved = false;
+    CvvcEnvelopeEdits cvvcEnvelopes;
+    float cvvcDefaultEnvelopeGain = 1.0f; // base volume when no user envelope exists
+    bool cvvcStandardEnvelope = false;
+    CvvcBoundaryPositions cvvcBoundaries;
+    // Saved native note controls, in their native units (not FLAG g/Ht/Hb).
+    // Consumed by the native NSF voicebank backend; external UTAU engines do
+    // not implement these editor controls. Append to preserve aggregate callers.
+    float nativeFormantSemitones = 0.0f;
+    float nativeTension = 0.0f;
+    float nativeBreath = 0.0f;
 };
 
 struct UtauPhonemeSpan
 {
     juce::String token, kind;
     double startSeconds = 0, endSeconds = 0; // relative to the MIDI note
+    int envelopePart = 0;
+    double leadInSeconds = 0;
+    UtauMixEnvelope mixEnvelope;
 };
+
+// legacyAuto is only for historical direct backend callers. Host score tracks
+// carry their chosen family; bank files validate capability, never select it.
+enum class RequestedVoicebankFamily { legacyAuto, utau, diffSinger };
 
 struct UtauRenderRequest
 {
+    // Preview may audition unlabelled notes; exports must leave them silent.
+    bool silenceEmptyLyrics = false;
+    bool pianoPreviewEnabled = true;
     bool chineseCvvc = false;
+    bool cvvcCurveCrossfade = false;
+    bool cvvcPhonemes = false; // set by the CVVC adapter after expanding score notes
     juce::File voicebankDirectory;
     juce::String diffSingerLanguage = "zh";
     juce::String diffSingerSpeaker;
@@ -133,6 +162,7 @@ struct UtauRenderRequest
     // nothing of the neighbour's, so the picture still holds one note.
     std::function<void(std::size_t, const juce::var&)> noteParameters;
     std::function<void(std::size_t, const std::vector<UtauPhonemeSpan>&)> notePhonemes;
+    std::function<void(std::size_t, const UtauMixEnvelope&)> noteMixEnvelope;
     std::function<void(std::size_t, const juce::AudioBuffer<float>&, double, double,
                        const std::function<float(double)>&,
                        const std::function<float(double)>&)> notePiece;
@@ -141,7 +171,20 @@ struct UtauRenderRequest
     // stays in musical order, including neighbours needed for crossfades.
     double timelineStartSeconds = 0.0;
     std::function<double()> priorityPosition;
+    RequestedVoicebankFamily requestedFamily = RequestedVoicebankFamily::legacyAuto;
 };
+
+struct VoicebankFamilyResolution
+{
+    RequestedVoicebankFamily family = RequestedVoicebankFamily::utau;
+    juce::String warning;
+    // Empty for all matching legacy routes: preserve historical cache bytes.
+    juce::String cacheDiscriminator;
+};
+// Scheduling/cache call false (no bank index loading). Render workers call true
+// before CVVC expansion, model work or piano/native fallback. One shared policy.
+[[nodiscard]] VoicebankFamilyResolution resolveRequestedVoicebankFamily(
+    const UtauRenderRequest& request, bool validateUtauSamples = false);
 
 struct UtauRenderResult
 {
@@ -186,6 +229,22 @@ struct UtauSampleTiming
 };
 
 struct UtauTailFadeSpan {double startSeconds=0,endSeconds=0;};
+
+inline double consonantVelocityScale(int velocity)
+{
+    return std::exp2(juce::jlimit(-1022.0, 1023.0, 1.0 - static_cast<double>(velocity) / 100.0));
+}
+
+inline double scaledUtauPreutterance(double pre, double consonant, double available, int velocity)
+{
+    return juce::jlimit(0.0, available,
+        std::min(pre, consonant) * consonantVelocityScale(velocity) + std::max(0.0, pre - consonant));
+}
+
+inline double scaledUtauPreutterance(const UtauSampleTiming& timing, int velocity)
+{
+    return scaledUtauPreutterance(timing.preutteranceSeconds, timing.consonantSeconds, timing.sampleSeconds, velocity);
+}
 
 class UtauRenderer final
 {
@@ -312,6 +371,14 @@ public:
         bool hasRegions = false;
         std::array<double, 4> regionSeconds {};
         juce::String mouClasses;
+        // The actual canonical lookup's immutable, unmodified physical OTO row.
+        // Null for native OTTO/HJM, unlisted/derived audio, or no resolved sample.
+        // Consumers must revalidate sourceFingerprint before local application;
+        // never rediscover a row by alias/file or treat this as a native ID.
+        // Classic mode only; null in Jie/Mou because their auxiliary files
+        // are not pinned by the base row's fingerprint.
+        std::shared_ptr<const hachi::VoicebankOtoEntry> sourceOto;
+        juce::String resolvedAlias;
     };
     [[nodiscard]] static ResolvedSample resolveVoiceSample(
         const juce::File& voicebankDirectory, const juce::String& alias, float midiNote,
@@ -321,6 +388,8 @@ public:
         bool overlapOverrideEnabled = false, double overlapSeconds = 0.0,
         const UtauOtoOverride* noteOto = nullptr, bool aliasIsResolved = false);
     static UtauRenderResult render(const UtauRenderRequest& request);
+    static juce::AudioBuffer<float> pianoPreview(const UtauNoteRenderSpec& note, double sampleRate = 44100.0);
+    static float amplitudeGain(const std::vector<UtauAmplitudePoint>& envelope, double localSeconds);
     // The last existing OTO region, on the same sounding span shown in the roll.
     [[nodiscard]] static std::optional<UtauTailFadeSpan> tailFadeSpan(
         const UtauSampleTiming& timing,double soundStart,double soundEnd,

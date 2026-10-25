@@ -1,7 +1,7 @@
 # Native Windows Clang-CL (MSVC ABI), using MSYS2 binaries and xwin SDK.
 set(HACHI_TC_ROOT "$ENV{HACHI_TC_ROOT}")
 if(NOT HACHI_TC_ROOT)
-    set(HACHI_TC_ROOT "E:/hjs-tc")
+    set(HACHI_TC_ROOT "G:/hjs-tc")
 endif()
 file(TO_CMAKE_PATH "${HACHI_TC_ROOT}" HACHI_TC_ROOT)
 set(HACHI_LLVM "${HACHI_TC_ROOT}/packages/clang64/bin")

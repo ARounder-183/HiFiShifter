@@ -113,11 +113,9 @@ inline bool runNativeBatchFlattenSmoke()
             check("point_existing_anchor_double_click_no_flatten",model.contentFingerprint()==addedFingerprint);
             continue;
         }
-        // The default tool retains multi-selection through both presses.
-        const auto at = roll.diagnosticHitBounds(1).getCentre();
-        roll.mouseDown(event(at, at)); roll.mouseUp(event(at, at));
-        roll.mouseDown(event(at, at, 2)); roll.mouseDoubleClick(event(at, at, 2));
-        roll.mouseUp(event(at, at, 2));
+        // Flattening now has its explicit context action. Default double-click
+        // is preutterance alignment and must never flatten or quantize pitch.
+        roll.applyNoteMenuChoice(before.tracks[0].clips[0].notes[1].id,18,0,{});
         const auto after = model.snapshot();
         model.dispatchPendingMessages(); roll.diagnosticRefresh();
         bool shownFlat = true, renderedFlat = true;
@@ -150,7 +148,7 @@ inline bool runNativeBatchFlattenSmoke()
             {
                 const auto& original = before.tracks[0].clips[region].notes[index];
                 const auto& note = after.tracks[0].clips[region].notes[index];
-                allFlat &= note.nativeIndependentPitch && note.midiNote == std::round(original.midiNote)
+                allFlat &= note.nativeIndependentPitch && note.midiNote == original.midiNote
                     && note.pitchControlPoints.size() == 2 && note.drift == 0 && note.modulation == 0
                     && std::all_of(note.pitchControlPoints.begin(), note.pitchControlPoints.end(),
                         [&](const auto& p) { return p.targetMidi == note.midiNote; })
@@ -158,7 +156,7 @@ inline bool runNativeBatchFlattenSmoke()
                         [](const auto& p) { return p.hasManualTarget && p.manualTargetCents == 0; });
                 allSourceKept &= unchangedSource(original, note);
             }
-        check("native_batch_all_snap_and_flatten", allFlat);
+        check("native_batch_context_flatten_preserves_pitch_centers", allFlat);
         check("native_batch_retains_selection", roll.selectedNoteIds().size() == 4);
         check("native_batch_keeps_source_and_timing", allSourceKept);
         const auto& untouched = after.tracks[0].clips[1].notes[1];
@@ -172,8 +170,7 @@ inline bool runNativeBatchFlattenSmoke()
         // A different, unselected note should still be a single-note action.
         const auto outside = roll.diagnosticHitBounds(4).getCentre();
         roll.mouseDown(event(outside, outside)); roll.mouseUp(event(outside, outside));
-        roll.mouseDown(event(outside, outside, 2)); roll.mouseDoubleClick(event(outside, outside, 2));
-        roll.mouseUp(event(outside, outside, 2));
+        roll.applyNoteMenuChoice(before.tracks[0].clips[1].notes[1].id,18,0,{});
         const auto single = model.snapshot();
         check("native_batch_unselected_click_targets_only_it", roll.selectedNoteIds().size() == 1
             && single.tracks[0].clips[1].notes[1].pitchControlPoints.size() == 2

@@ -25,7 +25,8 @@ public:
 
 class TrackListComponent final : public juce::Component,
                                  public juce::TooltipClient,
-                                 private juce::ChangeListener
+                                 private juce::ChangeListener,
+                                 private juce::Timer
 {
 public:
     // The five painted switches on a track row.  They are drawn, not built
@@ -58,6 +59,7 @@ public:
     void mouseDown(const juce::MouseEvent& event) override;
     void mouseDrag(const juce::MouseEvent& event) override;
     void mouseUp(const juce::MouseEvent& event) override;
+    bool keyPressed(const juce::KeyPress& key) override;
     void resized() override;
     void setSelectedTrack(const juce::String& trackId);
     // Test seam: keyboard focus needs a window on the desktop, which an
@@ -99,10 +101,13 @@ public:
     // Test seam: the popup-menu modifier arrives from the desktop, which an
     // offline harness has not got.  Everything after it is the real path.
     void diagnosticRightClick(int x, int y);
+    void diagnosticReorderScrollTick() { timerCallback(); }
 
     std::function<float(const juce::String&)> peakProvider;
     std::function<void(const juce::String&)> onTrackSelected;
     std::function<void(const juce::String&, juce::Point<int>)> onTrackMenu;
+    std::function<void(const juce::String&)> onTrackGainRequested;
+    std::function<void(const juce::String&)> onTrackPanRequested;
     // A right-click on the space around the tracks, in screen coordinates.
     std::function<void(juce::Point<int>)> onEmptyAreaMenu;
 
@@ -110,6 +115,9 @@ private:
     void changeListenerCallback(juce::ChangeBroadcaster*) override;
     void refreshUtauEditors();
     void commitUtauEditors();
+    void timerCallback() override;
+    void updateReorderTarget();
+    void cancelReorder();
 
     ProjectModel& model;
     I18n& strings;
@@ -123,6 +131,10 @@ private:
     juce::String panDragTrack;
     float panDragPreview = 0.0f;
     int volumeDragRow = -1;
+    juce::String reorderTrack;
+    juce::Point<int> reorderScreenPoint;
+    bool reordering = false;
+    int reorderGap = -1;
     juce::Label consonantVelocityLabel;
     juce::TextEditor consonantVelocityEditor;
     juce::Label globalFlagsLabel;

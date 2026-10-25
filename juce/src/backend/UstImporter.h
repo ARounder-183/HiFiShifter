@@ -81,6 +81,19 @@ struct UstNote
     double envelopeP5 = 0.0, envelopeV5 = 100.0;
 
     [[nodiscard]] bool isRest() const;
+    // Optional absolute song-quarter positions/durations for USTX. Legacy UST
+    // stays sequential in 480 ticks/quarter and leaves both fields unset.
+    std::optional<double> positionQuarterNotes, durationQuarterNotes;
+};
+
+struct UstTempoChange
+{
+    double quarterPosition = 0.0, bpm = 120.0;
+};
+struct UstPart
+{
+    juce::String name, voiceDirectory, globalFlags;
+    std::vector<UstNote> notes;
 };
 
 struct UstProject
@@ -95,6 +108,13 @@ struct UstProject
     juce::String voiceDirectory;
     juce::String globalFlags;
     std::vector<UstNote> notes;
+    // Root notes represent the first voice track. Flattened additional tracks
+    // retain absolute musical time; raw document/warnings preserve unsupported
+    // source UI grouping instead of silently losing its semantics.
+    juce::String sourceFormat = "ust";
+    std::vector<UstTempoChange> tempoChanges;
+    int numerator = 4, denominator = 4;
+    std::vector<UstPart> additionalTracks;
 };
 
 class UstImporter final

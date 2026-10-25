@@ -1,6 +1,7 @@
 #include "backend/LegacyTextCodec.h"
 #include "backend/UstText.h"
 #include "SampleSettings.h"
+#include "OttoMaterialIO.h"
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <algorithm>
 #include <array>
@@ -190,47 +191,87 @@ bool writeOtoTextPreservingEncoding(const juce::File& file,const juce::String& o
 
 }
 
+namespace
+{
+juce::CriticalSection materialRootsLock;
+juce::StringArray registeredMaterialRoots;
+}
+
 juce::File SampleSettings::sidecarFor(const juce::File& audio)
 {
-    // Native rewrite uses the requested interoperable name while still
-    // accepting the main-branch .hachi.csv file during migration.
+    // Compatibility READ path only. Native writes go to folder-level otto.ini.
     return juce::File(audio.getFullPathName() + ".hjm.csv");
+}
+
+void SampleSettings::setMaterialRoots(const juce::StringArray& roots)
+{
+    const juce::ScopedLock guard(materialRootsLock);
+    registeredMaterialRoots = roots;
+    registeredMaterialRoots.removeDuplicates(false);
+}
+
+juce::StringArray SampleSettings::materialRoots()
+{
+    const juce::ScopedLock guard(materialRootsLock);
+    return registeredMaterialRoots;
+}
+
+juce::File SampleSettings::annotationFor(const juce::File& audio)
+{
+    // A registered root is an explicit storage boundary. Never borrow an
+    // unrelated manifest from an ancestor outside it.
+    juce::File root;
+    {
+        const juce::ScopedLock guard(materialRootsLock);
+        for (const auto& path : registeredMaterialRoots)
+        {
+            const juce::File candidate(path);
+            if (audio.isAChildOf(candidate)
+                && candidate.getFullPathName().length() > root.getFullPathName().length())
+                root = candidate;
+        }
+    }
+    if (root != juce::File{}) return root.getChildFile("otto.ini");
+    const auto manifest = OttoMaterialIO::findManifest(audio);
+    return manifest != juce::File{} ? manifest : audio.getSiblingFile("otto.ini");
+}
+
+bool SampleSettings::hasNativeAnnotation(const juce::File& audio, juce::String* error)
+{
+    if (error != nullptr) error->clear();
+    const auto manifest = annotationFor(audio);
+    if (manifest.existsAsFile())
+    {
+        juce::String problem;
+        const auto found = OttoMaterialIO::containsAudio(manifest, audio, problem);
+        if (problem.isNotEmpty())
+        {
+            if (error != nullptr) *error = problem;
+            return false;
+        }
+        return found; // OTTO is authoritative even when this audio has no row.
+    }
+    return sidecarFor(audio).existsAsFile()
+        || juce::File(audio.getFullPathName() + ".hachi.csv").existsAsFile();
+}
+
+bool SampleSettings::copyAnnotations(const juce::File& source,
+                                     const juce::File& destination, juce::String& error)
+{
+    error.clear();
+    if (!hasNativeAnnotation(source, &error)) return error.isEmpty();
+    auto rows = loadOrDerive(source, ProjectData{}, &error);
+    if (error.isNotEmpty()) return false;
+    // Pronunciation IDs are scoped by audio identity. A copied recording gets
+    // a new audio ID, while its internal next-ID links remain valid.
+    for (auto& row : rows) row.materialAudioId.clear();
+    return save(destination, rows, error);
 }
 
 std::vector<NativeSegment> SampleSettings::nativeSegmentsFor(
     const SampleRegionSetting& row)
 {
-    auto segments = row.segments;
-    if (segments.empty())
-    {
-        const auto start = row.regionStartSeconds;
-        const auto end = std::max(start + 0.001, row.regionEndSeconds);
-        const auto alignment = juce::jlimit(start, end, row.alignmentSeconds);
-        auto role = row.role;
-        const auto alias = row.name.trim();
-        if (role == NativeSegmentRole::unknown)
-            role = alias == "_" || alias.containsChar('_') ? NativeSegmentRole::transition
-                : alias == "-" ? NativeSegmentRole::unknown
-                : alignment > start + 1.0e-6 ? NativeSegmentRole::consonant
-                                             : NativeSegmentRole::vowel;
-        const auto segmentAlias = alias.isEmpty() ? juce::String("-") : alias;
-        segments.push_back({ "segment_1", segmentAlias, role, start, alignment,
-            row.provenance.isEmpty() ? juce::String("estimated") : row.provenance,
-            row.confidence, alignment, row.overlapSeconds,
-            role != NativeSegmentRole::consonant, 1.0 });
-        if (alignment < end - 1.0e-6)
-            segments.push_back({ "segment_2", segmentAlias, NativeSegmentRole::vowel,
-                alignment, end, row.provenance.isEmpty() ? juce::String("estimated")
-                                                          : row.provenance,
-                row.confidence, alignment, row.overlapSeconds, true, 1.0 });
-    }
-    for (auto& segment : segments)
-    {
-        segment.sourceStartSeconds -= row.regionStartSeconds;
-        segment.sourceEndSeconds -= row.regionStartSeconds;
-        segment.alignmentSeconds -= row.regionStartSeconds;
-    }
-    return segments;
+    return pronunciationSegmentsFor(row);
 }
 
 bool SampleSettings::convertMelodyneProject(ProjectData& project,
@@ -443,8 +484,33 @@ bool SampleSettings::convertMelodyneProject(ProjectData& project,
 }
 
 std::vector<SampleRegionSetting> SampleSettings::loadOrDerive(const juce::File& audio,
-                                                              const ProjectData& project)
+                                                              const ProjectData& project,
+                                                              juce::String* error,
+                                                              bool explicitLegacyMigration,
+                                                              const juce::String& audioId)
 {
+    if (error != nullptr) error->clear();
+    const auto manifest = annotationFor(audio);
+    if (manifest.existsAsFile())
+    {
+        juce::String problem;
+        const auto found = OttoMaterialIO::containsAudio(manifest, audio, problem);
+        std::vector<SampleRegionSetting> nativeRows;
+        if (problem.isEmpty() && (found || audioId.isNotEmpty()))
+            OttoMaterialIO::loadAudio(manifest, audio, nativeRows, problem, nullptr, audioId);
+        if (problem.isNotEmpty())
+        {
+            if (error != nullptr) *error = problem;
+            DBG("Could not read native material annotations: " + problem);
+            return {}; // Never hide a corrupt/future manifest with derived data.
+        }
+        if (found || !explicitLegacyMigration) return nativeRows;
+    }
+    if (audioId.isNotEmpty())
+    {
+        if (error != nullptr) *error = "Explicit audioId requires a matching native annotation variant";
+        return {}; // Never derive a different source baseline for a selected identity.
+    }
     auto sidecar = sidecarFor(audio);
     if (!sidecar.existsAsFile())
     {
@@ -482,6 +548,8 @@ std::vector<SampleRegionSetting> SampleSettings::loadOrDerive(const juce::File& 
             row.overlapSeconds = number(values, 17, 0.0);
             row.hjmVersion = static_cast<int>(number(values, 18, 1.0));
             row.role = parseNativeSegmentRole(values.size() > 19 ? values[19] : "unknown");
+            if (row.role == NativeSegmentRole::breath) row.pronunciationKind = PronunciationKind::breath;
+            else if (row.role == NativeSegmentRole::transition) row.pronunciationKind = PronunciationKind::transition;
             row.provenance = values.size() > 20 ? values[20].trim() : "estimated";
             row.confidence = static_cast<float>(number(values, 21, 0.0));
             if (values.size() > 22) row.segments = decodeSegments(values[22]);
@@ -565,17 +633,16 @@ std::vector<SampleRegionSetting> SampleSettings::loadOrDerive(const juce::File& 
 
 bool SampleSettings::save(const juce::File& audio,
                           const std::vector<SampleRegionSetting>& input,
-                          juce::String& error)
+                          juce::String& error, const juce::String& audioId)
 {
     auto rows = input;
     std::stable_sort(rows.begin(), rows.end(), [](const auto& left, const auto& right)
     {
         return left.regionStartSeconds < right.regionStartSeconds;
     });
-    juce::String csv = "name,region_start_sec,region_end_sec,note_alignment_sec,fixed_duration_sec,relative_pitch_cents,melodyne_project_data,melodyne_pitch_center_cents,melodyne_original_pitch_center_cents,melodyne_pitch_drift_factor,melodyne_pitch_modulation_factor,melodyne_transition_sec,melodyne_formant_offset_cents,melodyne_amplitude_factor,melodyne_sibilant_balance,melodyne_attack_duration_sec,melodyne_decay_elongation,utau_overlap_sec,hjm_version,native_role,native_provenance,native_confidence,native_segments,native_amplitude_envelope,native_unpitched\n";
     for (std::size_t index = 0; index < rows.size(); ++index)
     {
-        auto row = rows[index];
+        auto& row = rows[index];
         row.hjmVersion = std::max(2, row.hjmVersion);
         if (row.provenance.isEmpty()) row.provenance = "estimated";
         if (row.segments.empty())
@@ -596,32 +663,11 @@ bool SampleSettings::save(const juce::File& audio,
                                             row.alignmentSeconds);
         row.fixedDurationSeconds = juce::jlimit(0.0, row.regionEndSeconds - row.regionStartSeconds,
                                                 row.fixedDurationSeconds);
-        const std::array<double, 17> values {
-            row.regionStartSeconds, row.regionEndSeconds, row.alignmentSeconds,
-            row.fixedDurationSeconds, row.relativePitchCents,
-            row.melodyneData ? 1.0 : 0.0, row.melodynePitchCenterCents,
-            row.melodyneOriginalPitchCenterCents, row.melodynePitchDrift,
-            row.melodynePitchModulation, row.melodyneTransitionSeconds,
-            row.melodyneFormantCents, row.melodyneAmplitude,
-            row.melodyneSibilantBalance, row.melodyneAttackSeconds,
-            row.melodyneDecayElongation, row.overlapSeconds
-        };
-        csv += csvEscape(row.name.isEmpty() ? "region " + juce::String(index + 1) : row.name);
-        for (const auto value : values) csv += "," + juce::String(value, 9).trimCharactersAtEnd("0").trimCharactersAtEnd(".");
-        csv += "," + juce::String(row.hjmVersion) + "," + nativeSegmentRoleName(row.role)
-            + "," + csvEscape(row.provenance) + "," + juce::String(row.confidence, 6)
-            + "," + csvEscape(encodeSegments(row.segments))
-            + "," + csvEscape(encodeAmplitudeEnvelope(row.amplitudeEnvelope))
-            + "," + juce::String(row.nativeUnpitched ? 1 : 0);
-        csv += "\n";
+        if (row.name.isEmpty()) row.name = "region " + juce::String(index + 1);
     }
-    const auto sidecar = sidecarFor(audio);
-    if (!voicebankFileWritten(sidecar.replaceWithText(csv, false, false, "\n")))
-    {
-        if(error.isEmpty())error = "Could not write " + sidecar.getFullPathName();
-        return false;
-    }
-    return true;
+    // Only this audio's rows are merged into the folder-level document. The
+    // codec validates and atomically publishes it, preserving sibling audio.
+    return voicebankFileWritten(OttoMaterialIO::saveAudio(annotationFor(audio), audio, rows, error, {}, audioId));
 }
 
 bool SampleSettings::importOto(const juce::File& oto, const juce::File& audio,
@@ -673,23 +719,19 @@ bool SampleSettings::importOto(const juce::File& oto, const juce::File& audio,
         row.fixedDurationSeconds = juce::jlimit(0.0,
             row.regionEndSeconds - row.regionStartSeconds, row.fixedDurationSeconds);
         row.hjmVersion = 2;
-        row.role = row.name == "_" || row.name.containsChar('_')
-            ? NativeSegmentRole::transition
-            : row.name == "-" ? NativeSegmentRole::unknown
-            : NativeSegmentRole::vowel;
+        // An alias (including '_' multipitch suffixes) never determines whole
+        // pronunciation identity. OTO C/P lines use the same native zone builder.
+        row.role = NativeSegmentRole::unknown;
+        row.pronunciationKind = PronunciationKind::normal;
         row.provenance = "utau";
         row.confidence = 1.0f;
-        const auto firstRole = row.role == NativeSegmentRole::vowel
-            && row.fixedDurationSeconds > 1.0e-6
-            ? NativeSegmentRole::consonant : row.role;
-        row.segments.push_back({ "segment_1", row.name, firstRole,
-            row.regionStartSeconds, row.alignmentSeconds, "utau", 1.0f,
-            row.alignmentSeconds, row.overlapSeconds,
-            row.role != NativeSegmentRole::consonant, 1.0 });
-        if (row.alignmentSeconds < row.regionEndSeconds - 1.0e-6)
-            row.segments.push_back({ "segment_2", row.name, NativeSegmentRole::vowel,
-                row.alignmentSeconds, row.regionEndSeconds, "utau", 1.0f,
-                row.alignmentSeconds, row.overlapSeconds, true, 1.0 });
+        row.segments = nativeSegmentsFor(row);
+        for (auto& segment : row.segments)
+        {
+            segment.sourceStartSeconds += row.regionStartSeconds;
+            segment.sourceEndSeconds += row.regionStartSeconds;
+            segment.alignmentSeconds += row.regionStartSeconds;
+        }
         rows.push_back(std::move(row));
     }
     if (rows.empty())
@@ -906,6 +948,100 @@ std::vector<VoicebankOtoEntry> SampleSettings::loadVoicebankOto(
     mergeJieOto(entries);
     if (mouMode) mergeMouOto(entries);
     return entries;
+}
+
+std::vector<VoicebankOtoEntry> SampleSettings::loadAudioOto(const juce::File& audio,
+    const juce::File& root, UtauMode mode, juce::StringArray& warnings)
+{
+    warnings.clear();
+    if (!audio.existsAsFile() || !root.isDirectory()
+        || !audio.isAChildOf(root)) return {};
+    for (auto folder = audio.getParentDirectory();; folder = folder.getParentDirectory())
+    {
+        const auto classic = folder.getChildFile("oto.ini");
+        if (classic.existsAsFile() || (mode == UtauMode::jie
+            && folder.getChildFile("oto.jie.ini").existsAsFile()))
+        {
+            juce::StringArray localWarnings;
+            auto entries = loadVoicebankOto(root, localWarnings, mode == UtauMode::jie,
+                                           mode == UtauMode::mou, classic);
+            warnings.addArray(localWarnings);
+            std::erase_if(entries, [&](const auto& entry) { return entry.audioFile != audio; });
+            if (!entries.empty()) return entries;
+        }
+        if (folder == root || folder.getParentDirectory() == folder) break;
+    }
+    return {};
+}
+
+std::optional<ClipData> SampleSettings::nativeAudioFromOto(const VoicebankOtoEntry& entry,
+    UtauMode mode, double sourceDurationSeconds)
+{
+    if (!std::isfinite(sourceDurationSeconds) || sourceDurationSeconds <= 0
+        || !std::isfinite(entry.offsetMs) || !std::isfinite(entry.cutoffMs)
+        || !std::isfinite(entry.consonantMs)) return {};
+    if (mode != UtauMode::classic && !entry.hasJieOto) return {};
+    if (mode == UtauMode::mou)
+    {
+        if (entry.mouClasses.length() < 2 || entry.mouClasses.length() > 4) return {};
+        for (const auto kind : entry.mouClasses) if (kind != 'C' && kind != 'V' && kind != 'S') return {};
+    }
+    const auto begin = juce::jlimit(0.0, sourceDurationSeconds, entry.offsetMs / 1000.0);
+    const auto end = juce::jlimit(begin, sourceDurationSeconds, entry.cutoffMs < 0
+        ? entry.offsetMs / 1000.0 - entry.cutoffMs / 1000.0
+        : sourceDurationSeconds - entry.cutoffMs / 1000.0);
+    const auto span = end - begin;
+    if (span < 0.001) return {};
+    const auto count = mode == UtauMode::classic ? 2
+        : mode == UtauMode::jie ? 4 : mouRegionCount(entry.mouClasses);
+    const std::array<double, 3> boundaries = mode == UtauMode::classic
+        ? std::array<double, 3>{entry.consonantMs, 0, 0}
+        : std::array<double, 3>{entry.jieOnsetMs, entry.jieGlideMs, entry.jieNucleusMs};
+    ClipData clip;
+    clip.sourceFile = entry.audioFile;
+    clip.sourceOffsetSeconds = begin;
+    clip.durationSeconds = clip.sourceDurationSeconds = span;
+    double previous = 0;
+    for (int i = 0; i < count; ++i)
+    {
+        if (i < count - 1 && !std::isfinite(boundaries[static_cast<std::size_t>(i)])) return {};
+        const auto next = i == count - 1 ? span
+            : juce::jlimit(previous, span, boundaries[static_cast<std::size_t>(i)] / 1000.0);
+        if (next - previous > 1.e-6)
+        {
+            NoteData note;
+            note.label = entryLookupName(entry);
+            note.startSeconds = previous;
+            note.durationSeconds = next - previous;
+            note.nativeSourceStartSeconds = begin + previous;
+            note.nativeSourceEndSeconds = begin + next;
+            note.nativeProvenance = mode == UtauMode::classic ? "oto" : mode == UtauMode::jie ? "oto4" : "otomou";
+            note.nativeConfidence = 1;
+            if (mode == UtauMode::mou)
+            {
+                const auto kind = entry.mouClasses[i];
+                note.nativeRole = kind == 'C' ? NativeSegmentRole::consonant
+                    : kind == 'S' ? NativeSegmentRole::silence : NativeSegmentRole::vowel;
+            }
+            else if (mode == UtauMode::jie)
+            {
+                const NativeSegmentRole roles[]{NativeSegmentRole::consonant, NativeSegmentRole::transition,
+                    NativeSegmentRole::vowel, NativeSegmentRole::ending};
+                note.nativeRole = roles[i];
+            }
+            else note.nativeRole = i == 0 ? NativeSegmentRole::consonant : NativeSegmentRole::vowel;
+            note.nativeUnpitched = note.nativeRole == NativeSegmentRole::silence;
+            note.sourceMidiCenter = -1;
+            note.utauAutoPitchTransition = false;
+            note.nativeSegments.push_back({"segment_1", note.label, note.nativeRole, 0,
+                note.durationSeconds, note.nativeProvenance, 1, note.durationSeconds, 0, true, 1});
+            note.contour = {{0, 0, 0, !note.nativeUnpitched},
+                            {note.durationSeconds, 0, 0, !note.nativeUnpitched}};
+            clip.notes.push_back(std::move(note));
+        }
+        previous = next;
+    }
+    return clip;
 }
 
 bool SampleSettings::updateVoicebankOtoEntry(const VoicebankOtoEntry& original,
@@ -1137,9 +1273,7 @@ bool SampleSettings::importVoicebank(const juce::File& root, juce::StringArray& 
         for (const auto& sample : nativeAudio)
         {
             if (!sample.hasFileExtension("wav;flac;aif;aiff;mp3;ogg")) continue;
-            const auto sidecar = sidecarFor(sample);
-            const juce::File legacy(sample.getFullPathName() + ".hachi.csv");
-            if (!sidecar.existsAsFile() && !legacy.existsAsFile()) continue;
+            if (!hasNativeAnnotation(sample)) continue;
             const auto rows = loadOrDerive(sample, ProjectData{});
             if (rows.empty()) continue;
             audioFiles.addIfNotAlreadyThere(sample.getFullPathName(), false);
@@ -1204,6 +1338,8 @@ struct JieRow
     int lineIndex = -1;
 };
 
+juce::String takeClassString(juce::StringArray& fields);
+
 std::vector<JieRow> readJieRows(const juce::File& file)
 {
     std::vector<JieRow> rows;
@@ -1216,7 +1352,11 @@ std::vector<JieRow> readJieRows(const juce::File& file)
         const auto equals = line.indexOfChar('=');
         if (equals <= 0) continue;
         auto fields = splitCsv(line.substring(equals + 1));
-        if (fields.size() < 4) continue;
+        auto values = fields;
+        const auto classes = takeClassString(values);
+        // Compact Mou rows only need offset plus count-1 boundaries. In
+        // particular CV,offset,b1 has three fields, unlike an oto4 row.
+        if (fields.size() < (classes.isEmpty() ? 4 : classes.length() + 1)) continue;
         JieRow row;
         row.wav = line.substring(0, equals).trim();
         row.offsetMs = fields[0].trim().getDoubleValue();

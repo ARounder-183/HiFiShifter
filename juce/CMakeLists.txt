@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 
 # Public version changes require an explicit user request; small updates use docs/updates.md.
-project(HachiShifterNext VERSION 0.2.4 LANGUAGES C CXX)
+project(HachiShifterNext VERSION 0.25 LANGUAGES C CXX)
 
 option(HACHI_ENABLE_ASAN "Enable AddressSanitizer for native crash diagnosis" OFF)
 
@@ -10,6 +10,23 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 include(FetchContent)
+# USTX is YAML; use the bounded native parser rather than a partial YAML reader.
+set(YAML_CPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(YAML_CPP_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+set(YAML_CPP_BUILD_CONTRIB OFF CACHE BOOL "" FORCE)
+set(YAML_CPP_INSTALL OFF CACHE BOOL "" FORCE)
+set(YAML_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(yaml_cpp
+    URL https://codeload.github.com/jbeder/yaml-cpp/tar.gz/refs/tags/0.8.0
+    URL_HASH SHA256=fbe74bbdcee21d656715688706da3c8becfd946d92cd44705cc6098bb23b3a16
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+# yaml-cpp 0.8.0 declares an old minimum; CMake 4 needs an explicit compatibility
+# floor. Keep it scoped to this dependency, not JUCE or the application.
+function(hachi_make_yaml_available)
+    set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+    FetchContent_MakeAvailable(yaml_cpp)
+endfunction()
+hachi_make_yaml_available()
 FetchContent_Declare(
     JUCE
     GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
@@ -71,6 +88,7 @@ add_subdirectory("${juce_SOURCE_DIR}" "${juce_BINARY_DIR}" EXCLUDE_FROM_ALL)
 if(WIN32)
     set(HACHI_WINDOWING_FILE "${juce_SOURCE_DIR}/modules/juce_gui_basics/native/juce_Windowing_windows.cpp")
     file(READ "${HACHI_WINDOWING_FILE}" HACHI_WINDOWING_SOURCE)
+    set(HACHI_WINDOWING_ORIGINAL "${HACHI_WINDOWING_SOURCE}")
     string(REPLACE
         "new HWNDComponentPeer { *this, styleFlags, (HWND) parentHWND, false, 1 }"
         "new HWNDComponentPeer { *this, styleFlags, (HWND) parentHWND, false, 0 }"
@@ -110,12 +128,19 @@ if(WIN32)
     if(NOT HACHI_WINDOWING_SOURCE MATCHES "HachiShifter WM_PAINT scheduling")
         message(FATAL_ERROR "JUCE GDI repaint patch no longer matches")
     endif()
-    file(WRITE "${HACHI_WINDOWING_FILE}" "${HACHI_WINDOWING_SOURCE}")
+    if(NOT HACHI_WINDOWING_ORIGINAL STREQUAL HACHI_WINDOWING_SOURCE)
+        file(WRITE "${HACHI_WINDOWING_FILE}.hachi-patch-tmp" "${HACHI_WINDOWING_SOURCE}")
+        file(RENAME "${HACHI_WINDOWING_FILE}.hachi-patch-tmp" "${HACHI_WINDOWING_FILE}")
+    endif()
     set(HACHI_VBLANK_FILE "${juce_SOURCE_DIR}/modules/juce_gui_basics/native/juce_VBlank_windows.cpp")
     file(READ "${HACHI_VBLANK_FILE}" HACHI_VBLANK_SOURCE)
+    set(HACHI_VBLANK_ORIGINAL "${HACHI_VBLANK_SOURCE}")
     string(REPLACE "for (;;)" "while (! threadShouldExit())"
         HACHI_VBLANK_SOURCE "${HACHI_VBLANK_SOURCE}")
-    file(WRITE "${HACHI_VBLANK_FILE}" "${HACHI_VBLANK_SOURCE}")
+    if(NOT HACHI_VBLANK_ORIGINAL STREQUAL HACHI_VBLANK_SOURCE)
+        file(WRITE "${HACHI_VBLANK_FILE}.hachi-patch-tmp" "${HACHI_VBLANK_SOURCE}")
+        file(RENAME "${HACHI_VBLANK_FILE}.hachi-patch-tmp" "${HACHI_VBLANK_FILE}")
+    endif()
 endif()
 
 # GAME, FCPE and NSF-HiFiGAN use the official ONNX Runtime C++ API.  The runtime is part of
@@ -213,6 +238,10 @@ target_link_libraries(HachiShifterNext PRIVATE NoteDanceAssets)
 target_sources(HachiShifterNext PRIVATE
     src/Main.cpp
     src/MainComponent.cpp
+    src/MainProjectMaterialRegistration.cpp
+    src/AccompanimentTempo.cpp
+    src/AccompanimentTempo.h
+    src/AccompanimentTempoPanel.h
     src/Hamood.cpp
     src/MainComponentHamood.cpp
     src/MainComponentMcp.cpp
@@ -243,6 +272,30 @@ target_sources(HachiShifterNext PRIVATE
     src/SettingsComponent.cpp
     src/SettingsComponent.h
     src/SampleSettings.cpp
+    src/PronunciationTiming.cpp
+    src/PronunciationTiming.h
+    src/OttoMaterialIO.cpp
+    src/OttoMaterialIO.h
+    src/OttoMaterialMigration.cpp
+    src/OttoMaterialMigration.h
+    src/MaterialPronunciationCatalog.cpp
+    src/MaterialPronunciationCatalog.h
+    src/CommunityDatasetIO.cpp
+    src/CommunityDatasetIO.h
+    src/CommunityDatasetImportDialog.cpp
+    src/CommunityDatasetImportDialog.h
+    src/ProjectMaterialRegistration.cpp
+    src/ProjectMaterialRegistration.h
+    src/ProjectMaterialRegistrationFacts.cpp
+    src/ProjectMaterialRegistrationFacts.h
+    src/ProjectMaterialRegistrationTypes.h
+    src/ProjectMaterialRegistrationModel.inc
+    src/MaterialAnnotationSession.cpp
+    src/MaterialAnnotationSession.h
+    src/MaterialAnnotationEditor.cpp
+    src/MaterialAnnotationEditor.h
+    src/PronunciationCandidateBox.cpp
+    src/PronunciationCandidateBox.h
     src/VoicebankSettingsComponent.cpp
     src/OtoWaveformEditorComponent.cpp
     src/SampleSettings.h
@@ -255,6 +308,8 @@ target_sources(HachiShifterNext PRIVATE
     src/backend/MelodyneImporter.cpp
     src/backend/MelodyneProvider.cpp
     src/backend/UstImporter.cpp
+    src/backend/UstxImporter.cpp
+    src/backend/UstxImporter.h
     src/backend/MelodyneImporter.h
     src/backend/MelodyneProvider.h
     src/backend/McpServer.cpp
@@ -284,6 +339,8 @@ target_sources(HachiShifterNext PRIVATE
     src/backend/NsfHifiganRenderer.h
     src/backend/Llsm2Renderer.cpp
     src/backend/Llsm2Renderer.h
+    src/backend/WcsNonLoopFeatures.cpp
+    src/backend/WcsNonLoopFeatures.h
     src/backend/OrtExecution.cpp
     src/backend/OrtExecution.h
 )
@@ -328,6 +385,7 @@ if(MSVC)
 endif()
 
 target_link_libraries(HachiShifterNext PRIVATE
+    yaml-cpp::yaml-cpp
     juce::juce_audio_formats
     juce::juce_audio_utils
     juce::juce_dsp

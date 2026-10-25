@@ -1,8 +1,156 @@
 # HachiShifter 代码功能总览与维护指南
 
-更新日期：2026-10-10。实现基线：公开版本 **0.2.4**、功能更新 **143**、外置 WCSNDM **0.0803**。本指南覆盖当前整合版的界面、工程数据、音频编辑、UTAU、HiFisampler、DiffSinger、分析、和声、MCP、构建与验证。
+更新 215：UTAU 音符工具双击任意音符均进入歌词／别名编辑，不再限制空歌词。已有中文、带空格别名、休止符、未解析别名均可改；打开时回显并全选现有内容，Enter 提交、Esc 取消。原生 OTTO 和其他编辑工具不变。此行为替代更新 214 的“仅空歌词”限制。
+
+更新 214：音符工具双击 UTAU 空歌词（含纯空白）音符恢复行内歌词输入，普通／界／谋模式、未选音源均可用。原生 OTTO 的双击对齐行为和其他工具保持不变。
+
+更新 213：UTAU 编辑栏的“选择音源库…”右侧显示当前选中区域所属轨道绑定的音源文件夹名称，未绑定显示“未选择音源”，悬停显示完整路径。切换轨道或恢复工程时读取当前绑定，不使用全局默认值。
+
+更新 212：轨道声像 `P` 数字支持单击输入 -1 到 1 的小数，-1 最左、0 居中、1 最右。Enter 应用、Esc 取消；每轨独立，支持撤销和工程保存，原声像滑杆保留。
+
+更新 211：左侧轨道音量 dB 和区域增益数字支持单击输入。`DecibelGainDialog` 共用精确回显和严格数值校验，Enter 应用、Esc 取消，支持小数及 `-inf` 静音；空值、非数值和超范围输入不可应用。轨道上限沿用线性 2、区域上限沿用 4，有限负值最低 -120 dB。区域数字原拖动调节保留。
+
+更新 210：左侧轨道名称栏支持拖动排序。5 像素阈值启动，显示插入线，松开提交一次撤销事务；边缘自动滚动，Esc 或横向移出面板取消。`ProjectModel::moveTrackBefore` 按稳定 ID 改变轨道向量顺序，轨道内容和工程序列化保持原有结构。
+
+更新 209：UTAU 工具栏在发音器右侧提供“钢琴试听”，普通／界／谋轨道各自记住 `TrackData::utauPianoPreview`（默认 true），工程保存和撤销均保留。关闭仅静音空歌词及缺失样本的钢琴回退，正常样本合成不变；HiFisampler 同样生效，导出空歌词仍静音。状态参与渲染缓存身份。
+
+更新 208：未选中音符时直接播放，`selectAllRenderedUtauNotes(project)` 将普通 UTAU 空歌词纳入钢琴预览范围，不再要求先框选以建立渲染历史。非空歌词合成继续使用已有历史；显式框选仍是精确试听范围，DiffSinger 家族验证和导出空歌词静音不变。播放入口专项见 `--smoke-piano-transport`，验证状态见更新记录。
+
+更新 207：素材树右键菜单用鼠标屏幕坐标构造 1×1 锚点，修正误用双对角点矩形导致左上角错位。文件夹、工程音源及录音菜单提供“移除”，仅持久隐藏浏览项／取消手动登记，不删除磁盘文件、不解绑轨道；工程同步和搜索遵守隐藏记录，显式重新导入文件夹恢复其中录音。
+
+更新 206：UTAU 空歌词在已加载音源时同样播放内置钢琴预览，显式休止仍静音；导出准备阶段将空歌词保持静音。`syncProject(..., forExport)` 区分预览／导出，空歌词片段缓存身份包含用途，GUI／MCP 导出结束恢复预览；HiFisampler 共用同一个钢琴音生成器。专项 `--smoke-empty-lyric-piano` 覆盖实际播放混音、WAV 导出和重复切换。
+
+更新 205：移除 UTAU 模式切换和应用偏好时的默认音源自动绑定。未手动选音源的轨道保持空，历史 `algorithm.utauVoicebank` 仅作为显式选择目录时的初始位置。工程已有音源引用继续恢复，不清除作者绑定。钢琴预览仍是渲染器自动行为，空歌词在无音源时预览、有音源时休止；未解析的非空别名按原规则回退。
+
+更新 204：恢复 UTAU 工具栏“选择音源库…”按钮，位于强制连接右侧；普通／界／谋三种模式共用原文件夹选择和轨道绑定入口。两按钮作为同组换行，窄窗口也保持相邻；悬停显示当前音源路径。
+
+更新 203：左侧旋律音轨头右键增加“导入 MIDI…”，选择文件后确认一条 MIDI 轨道，在打开菜单时的播放线位置新增区域。保留已有音符、音源、引擎和工程速度；MIDI 开头空白保留，节拍从插入点按工程速度图换算，SMPTE 文件保留秒时间。原新建音轨导入入口保留。
+
+更新 202：区域右键“拆分”按打开菜单时红色播放线的位置执行，不再按鼠标横坐标。菜单可用性与实际拆分使用同一捕获时间；红线不在可拆分范围内时禁用。
+
+更新 201：区域右键菜单增加带勾选状态的“静音”，仅切换被点击片段，复用 `ProjectModel::setClipMuted`，与原 M 按钮、播放、撤销及工程保存共用状态。
+
+更新 200：区域右键“编辑…”提供原长度字段及整轨输出引擎选择，原外部引擎菜单保留。重采样器配置沿用现有面板，先编辑草稿，主窗口应用时经验证写入；长度继续只改变可编辑范围。
+
+更新 199：原生单音节详情允许直接拖两端紫线，重合标记时外边界优先命中并置顶绘制；显式保存到 OTTO 后重开保持范围。原生多音节详情始终锁定外边界，不再按当前行数临时解锁。
+
+更新 198：单音节音素控件和提示文字补齐 I18n 翻译；仅原生标注总览／详情显示，三种 UTAU 视图均隐藏，录音偏好保持。
+
+更新 197：共用素材编辑器顶栏提供每录音独立记忆的“单音节音素”，勾选跳过总览，取消恢复总览；已标注录音仅切换视图，不合并发音。未标注录音显式勾选后建立单发音草稿，保存仍经原 OTTO 会话和预检。偏好保存于应用设置而非源标注。
+
+更新 196：音符右键“编辑素材标注…”定位后停留在原生发音总览，直接提供起止范围编辑；已有详情窗口也返回总览并选择新目标。内部元音字段未改动时不做重新命名校验，保留默认占位名。
+
+更新 195：从原生音符右键进入素材标注会自动定位到原录音发音区域；已有标注 ID 优先，旧工程未绑定 ID 时使用实际源时间映射在当前标注版本中定位唯一发音。无法唯一匹配时显示原音频选区，保持草稿、工程和 OTTO 不被自动改写；复用窗口也会跟随新的右键目标。
+
+更新 194：原生音符右键的“编辑素材标注…”直接复用素材管理器原生编辑器。菜单携带被点击音符的 ID，经现有源录音解析保留合并片段归属及标注版本／发音身份；普通未标注录音同样支持，无需先在素材树中查找。
+
+更新 193：外部录音导入后自动打开素材管理器，并以“工程素材”显示实际引用的录音，可右键“编辑素材标注…”直接使用原生编辑器。`AssetManagerComponent::setProjectVoicebanks` 同时同步音源和工程录音（含嵌套合并 parts），引用不变时不重建列表。未登记的父目录仅显示实际引用文件，不扫描其他录音、不复制 PCM、不自动创建 OTTO 或写入全局登记；已有素材根复用。列表从工程源引用恢复，删除／撤销／重新打开自动同步。标注仅在用户保存时通过既有 `MaterialAnnotationSession` 写入 `otto.ini`。
+
+更新 191：区域右键“编辑长度…”仅调整可编辑外框末端，音符位置／时长、曲线及录音时钟不变。主入口 `ProjectModel::setClipEditableLength`，与 `resizeClip` 拉伸、`trimClip` 裁剪区分。缩短时保留区域外内容，保存重开不裁掉显式音频窗口，可再次延长恢复范围。专项 `--smoke-clip-length`。
+
+**Active implementation (2026-10-20):** Native annotations are moving from per-audio HJM CSV writes to compact folder-level `otto.ini`. Read [implementation status](native-material-implementation.md) and [format specification](otto-format.md) before changing material loading, source-update or asset insertion paths. Version stays 0.25. Legacy sections below describe historical behavior and are not authority for new annotation writes. The complete approved consolidation is not finished yet.
+
+更新 185：素材管理器增加声音文件名搜索框、清空按钮和无结果提示。搜索跨全部已注册及工程音源文件夹，包含未展开的子目录；文件名包含匹配忽略英文大小写，支持中文。结果平铺显示“文件名（音源／素材文件夹名字）”，同名录音保留各自来源；清空搜索恢复原展开状态。`AssetManagerComponent::ensureSearchFiles` 在单工作线程枚举尚未加载的文件列表，后续输入只筛选缓存，不解码音频或建立 OTO 索引。结果回主线程按仍存在的文件夹归并，使用最新搜索词，项目移除的音源不会重新出现。点击、Enter、右键、双击和拖拽继续使用原文件与所属音源 OTO 设置。新增 `--smoke-asset-search`，回归树视图、OTO 裁剪拆分、普通音频加载和大型音源注册；结果与界面截图见 `test-output/update185/`。
+
+更新 184：工程文件记录素材管理器打开／关闭状态。`ProjectData::assetManagerVisible` 随工程保存及恢复快照写入，旧文件缺省为关闭。`MainComponent::setAssetManagerVisible` 统一应用界面状态，加载工程、新建与替换工程同步恢复；用户切换通过 `ProjectModel::setAssetManagerVisible` 标记工程待保存，不新增音乐撤销项或触发音频重同步。音乐撤销／重做与普通 replace 保持当前面板状态。新增保存开／关、不同工程切换、全新模型读取、旧工程缺省、恢复快照与撤销重做验证，构建及安装版工程安全专项通过。报告 `test-output/update184/verification.json`。
+
+更新 183：OTO 别名选择菜单在录音拖放位置附近弹出。`itemDropped` 将落点由主界面坐标转为屏幕坐标，传给 `importAssetAudio`；菜单先指定主窗口以保持 DPI 缩放，再使用 withTargetScreenArea 指定该落点，不再锚定素材管理器整块面板的下沿。位置在读取音频与 OTO 前捕获，鼠标随后移动不会改变落点。右键／Enter 加载按调用时鼠标位置显示。导入时间、目标轨道、别名内容与取消行为不变。构建与安装版 OTO 专项共 66 项检查通过；专项验证导入流程，未模拟实体鼠标菜单操作。报告 `test-output/update183/verification.json`。
+
+更新 182：修复素材拖拽时整块素材管理器跟随鼠标显示。`AssetManagerComponent::mouseDrag` 原先未指定拖拽图，JUCE 因而截图整个源组件；现显式提供 220×26 逻辑像素的录音文件名标签，使用 2 倍像素图保持高 DPI 清晰。拖拽源、文件路径、所属音源与 OTO 类型数据及导入流程保持不变。构建与安装版 `--smoke-oto-audio` 共 66 项检查通过，覆盖三种 OTO 拖入、裁剪拆分及导出音频；该专项验证导入逻辑，不模拟实体鼠标拖拽。报告 `test-output/update182/verification.json`。
+
+更新 181：OTO 类型选择移入每个素材音源文件夹行的右下角，使用 100×18 小下拉菜单，保留 40 像素文件夹行高，移除顶部全局选择行。每个音源独立选择普通 OTO、界 OTO、谋 OTO 或不读取；按音源绝对路径记忆，重新排序、切换工程与重启均保留。已有安装首次沿用原全局选择，之后各音源互不影响。
+
+主入口 `AssetManagerComponent::otoImportKind(fileOrFolder)` / `setOtoImportKind(folder, kind)`；路径归一后以 SHA256 作为 PropertiesFile 键。内部拖拽、右键加载与 Enter 均按源录音所属音源读取类型，沿用更新 180 的统一解析、裁剪和拆分入口。树视图专项新增多音源独立设置、非当前音源拖拽、重排与磁盘重开验证，并检查 320/220 像素面板截图；回归 OTO 实际音频输出、普通素材加载与真实大型音源导入。报告 `test-output/update181/`。
+
+更新 180：素材管理器新增统一且持久记忆的“OTO 类型”下拉框：普通 OTO（二区）、界 OTO（四区）、谋 OTO（二至四区）以及不读取（完整录音），首次默认普通 OTO。素材内部拖入音轨、右键加载和 Enter 共用 `MainComponent::importAssetAudio`。按选定格式读取录音所属的最近 OTO，普通用 oto.ini，界优先独立 oto.jie.ini 并合并 oto4.ini，谋用 oto.ini 与 otomou.ini；不跨格式静默替代。一个录音有多个条目时列出别名供选择，取消不改工程。
+
+`SampleSettings::loadAudioOto` 只读该录音的祖先文件夹中相关 OTO，不扫描整库；`nativeAudioFromOto` 将 offset／正负 cutoff 转成真实源范围，普通固定区按 consonant 拆分，界按三边界拆成四区，谋按 C/V/S 与有效边界数拆分；零长度区不生成音符。`ProjectModel::addAudioFile` 接收可选 OTO，直接生成原生 ClipData 与独立 NoteData，复用既有插入、一次撤销、异步音高分析和保存，不转换或覆盖 HJM。分析只补充源音高，保留作者边界。不读取模式保留更新 179 的普通音频/HJM 行为。内部拖拽携带文件、根目录与所选类型；外部拖拽沿用原文件/副本策略。同时修复谋 OTO 二区简写 CV,offset,b1 被四字段门槛误跳过的问题。
+
+专项 `--smoke-oto-audio <输出目录>` 验证三种格式、二／三／四区、正负截尾、无效范围、单步撤销／重做、真实拖入处理、选择持久化、音高分析后边界、工程重开及导出 PCM。回归普通素材加载、文件夹树和 3219 文件音源注册，报告 `test-output/update180/`。公开版本保持 0.25。
+
+更新 179：素材管理器在非 U 模式也可导入、展开 UTAU 文件夹。右键录音选择“加载为音频素材”，或选中后按 Enter，按播放头位置导入并聚焦素材。选中原生调音轨道时复用该轨道和算法；选中 UTAU、DiffSinger、伴奏等轨道时新建普通音频轨道。文件夹导入后自动展开。浏览只枚举文件，加载复用普通音频分析，不应用 OTO 别名／拆音或修改录音与 OTO。分析后沿用普通音频流程生成 HJM 注释，已有 HJM 侧文件沿用原导入规则，双击参数编辑与拖动保持。
+
+主入口：`AssetManagerComponent::loadAudio` 经 `onLoadAudio` 委托 `MainComponent::addAnalysedAudioFile` → `ProjectModel::addAudioFile`／`scheduleAnalysis`；右键与 Enter 共用，异步菜单捕获原文件并用 SafePointer 检查组件生命周期。新增 `--smoke-asset-audio <输出目录> <真实录音>`，验证原生轨道、UTAU 选区分流、异步音高分析、保存重开和源文件不变；复用音源导入性能与树视图回归。
+
+更新 178：HN-SEP 完整谐波波形磁盘缓存由内置 HiFiSampler、非 U 噪声保护与 WCSNDM HN1 共用。实际输入 PCM、模型和配置内容 SHA256 加分离算法版本／声学网格决定身份；实际 PCM 相同才互用，保留两边原有预处理。内容校验、跨进程互斥、原子发布、512 MiB 磁盘预算及模型字节快照会话详见 [HN 模式说明](wcsndm-hn.md)。入口为 `backend/HnsepDiskCache.inc` 与外置 `hf_backend/hn_cache.py`，既有 `hifiSeparate`／`hn_mel.separate` 接入。测试入口 `--smoke-hn-cache`、外置 `src/test-hn-cache.py`／`test-hn-cache-render.py`；报告 `test-output/update178/`。
+
+更新 177：音高、响度与线性 FLAG 标点支持 Ctrl 加选／取消，可跨音符及 CVVC 音素。拖动任一已选点，以相同秒数和显示值位移整组平移；共享边界约束防止选中点越过未选中邻点，首尾保护沿用既有规则。Ctrl+R／多选右键菜单初始化所选点，保留时间：音高回音符音高、响度到 100%、FLAG 回参数默认值，DiffSinger 实参回模型参考值。Delete／Backspace 批量删除，连按不误删整音符；松开鼠标保留选择，普通点击新点替换整组。原生共享包络去重并同步预览。高级包络混合模式节点支持相同多选、平移、默认值与删除操作，仍为草稿，应用后保存。
+
+主入口：`PianoRollPointGroup.h` 复用现有命中检测与参数读取，`PointGroupEdit.h` 计算整组位移边界；`ProjectModel::setPointCurves` 使用已有各参数提交函数并合并为一次撤销，不复制新的工程格式。高级包络使用 `AdvancedEnvelopePanel::editKnots`。回归：`--smoke-point-group`、`--smoke-envelope-point-selection`、`--smoke-pitch-point-selection`、`--smoke-advanced-envelope-panel`；报告 `test-output/update177/{build,installed}/verification.json`。
+
+更新 176：高级包络混合模式的节点在点击／拖动并松开后保持选中高亮，Delete／Backspace 调用既有 deleteKnot 删除该节点；音头、音尾、原生音频及 CVVC 音素共用。选择与拖动状态分离，点击其他位置／面板控件、失焦、切换形状／预览、替换草稿时清除选择。连按 Delete 不继续删除其他节点，首尾边界点和贝塞尔控制柄沿用原有规则。删除只改草稿，应用时走原有提交入口，关闭不应用则不改工程。
+
+更新 175：响度包络和线性 FLAG 包络沿用音高标点的持久选择；点击或拖动后松开仍高亮，Delete／Backspace 删除所选标点，继续按键不会转而删除整音符。统一 PointSelection 记录类型、音符、点序号、CVVC 分片及 FLAG 键；点击其他位置、切换工具／FLAG／选区、失焦时清除。右键删除与快捷键共用 deleteEnvelopePoint，响度沿用已有选区／粘连组映射，FLAG 只改当前参数，CVVC 只改对应音素的对应包络；保留原来的响度／CVVC 两端与 FLAG 最后一个点。普通响度及 FLAG 纯点击不再提交工程编辑。
+
+更新 174：音高标点的选中状态独立于拖动状态；点击并松开或拖动后松开，标点继续高亮，Delete／Backspace 优先删除该点。点击其他位置、切换工具／轨道／片段、失去键盘焦点或重新选择音符时清除。删除使用与标点右键菜单相同的 deletePitchAnchor 入口，沿用端点保留和 DiffSinger 隐藏采样整理规则；通过既有 setNotePitchCurve 提交，支持撤销、重做及工程保存。删除完成或版本过期后保留按键消费状态直到下一次选择，防止连续 Delete 误删整音符。选择本身不改工程、不触发合成。
+
+更新 173：“自动交叉淡化”按钮增加右键直线／曲线菜单，默认直线，偏好 ui.autoCrossfadeCurve 记住选择。菜单只改后续操作方式，左键仍对同轨两个音符的已有发声重叠执行，不移动音符。PianoRollComponent::crossfadeSelectedNotes 将方式传给唯一提交入口 ProjectModel::crossfadeNotes；曲线复用 CVVC UtauMixRamp 的互补 smoothstep，以 32 段幅度直线保存到既有包络点格式，普通音符及 CVVC 分片共用，继续支持保存、撤销与重做。切回直线清除重叠区内的曲线中间点；无选区时仍可右键设置。
+
+更新 172 补充核验：HN1 八类谐波参数在普通 UTAU 线性 FLAG 及带标注的二／三／四段分区中通过 145 次真实模型合成、660 项检查；曲线／分区继承、优先级、零长度段和短音已验证。普通 UTAU 的经典二区不暴露独立分区 FLAG。详见 [HN 模式说明](wcsndm-hn.md)。
+
+更新 172：HN1 接入 g、Mo、QX/ME、Mr、Mq、Mt、Rd、NA 八类谐波参数及逐帧 FLAG 曲线。C 端复用现有声道编辑和 LF 模型生成相对中性谱的 dB 变化，Python 仅将功率增益作用于 HN-SEP 谐波；不重新合成 LLSM 谐波。源时间映射携带同帧增益，内部服务协议升级 HN2，公开开关仍只有 HN1。零参数保持上一版谐波功率完全一致；Mq 与普通路径共用实现。见 [wcsndm-hn.md](wcsndm-hn.md)。
+
+更新 171：仅 HN1 选择 HN-SEP 谐波＋LLSM 非谐波神经内核，与 HF2、V1、V2、K/L/M 并列互斥；继续使用第一个有效内核优先。裸 HN、HN0、HN2 等不启用、不占内核位置，也不拦截后面的 HN1。编辑器分离导出资格识别同步采用相同规则；合成算法未改。见 [wcsndm-hn.md](wcsndm-hn.md)。
+
+更新 170：WCSNDM 新增可选 HN/HN1 实验内核，HN-SEP 谐波波形的 STFT 功率按现有源时间映射拉伸，与 LLSM 非谐波功率相加后统一生成 log-Mel，目标 F0 交给 PC-NSF。HN0／不填保持默认 HF2；不混入 HN-SEP 噪声残差。独立版本化服务防止旧服务误处理；编辑器同步识别 HN 内核并禁止不支持的分离导出。详细范围、谐波 FLAG 限制与验证见 [wcsndm-hn.md](wcsndm-hn.md)。
+
+更新 169：高级包络图表沿用主编辑器滚轮快捷键：滚轮纵向滚动，Shift＋滚轮横向滚动，Ctrl＋滚轮纵向缩放，Ctrl＋Shift＋滚轮横向缩放。共用 ZoomScrollBar.h 的修饰键映射；缩放锚定鼠标所在时间／响度，边缘按可见范围限位。支持横向触控板滚动和反向缩放事件，拖动控制点时忽略滚轮；视图操作不改包络草稿。图表悬停提示显示快捷键。
+
+更新 168：高级包络图表增加横轴／纵轴独立缩放、倍率显示、滚动条与“适应全图”。时间轴最高 32 倍，响度轴最高 16 倍；图形、坐标刻度、控制柄与鼠标编辑共用视图变换。缩放和滚动仅属于面板视图，不写工程或预设；普通音符、音头／音尾、原生音频与 CVVC 单音素共用。
+
+更新 167：包络预设下拉菜单的六个选项恢复绿色形状缩略图，左图右文，复用原预设数据和缩略图比例。菜单保留键盘选择和无障碍名称，应用仍走既有 applyEnvelopePreset；不修改包络或合成规则。
+
+更新 166：工具栏六个包络预设按钮合并为“包络预设”下拉菜单，按原顺序提供标准、柔起、缓起、渐弱、句尾、短收。选择后仍调用 PianoRollComponent::applyEnvelopePreset，保留整音符和 CVVC 单音素选区语义；操作后清空菜单选中值，允许再次选择同一预设。移除旧的六按钮和重复标题，沿用原 UTAU 显示范围。
+
+更新 165：中文 CVVC 的音符右键菜单将“辅音强制重置”改为“强制重置”。现有菜单动作按轨道发音方式分流，ProjectModel::resetCvvcBoundaries 批量清除所选音符的手动拆音位置和派生缓存，恢复发音器自动位置；一次撤销，多次点击无额外修改。菜单不依赖后台拼字布局是否已就绪。响度／FLAG 包络、辅音速度及父音符起止保留，普通 UTAU 与四区模式继续使用原辅音重置。
+
+更新 164：CVVC 音符内部的 VC/CV、CV/尾音分界可左右拖动，固定相邻两片的外端点和父音符时长。NoteData::cvvcBoundaries 按右侧角色保存相对音符时长的位置；ProjectModel::setCvvcBoundary 是唯一提交入口，松手提交一次、支持保存及撤销，Esc 放弃草稿。CvvcTiming.h 的 applyCvvcBoundaries 统一发音规划和辅音速度预览的限位；上下包络复用实际分片布局，渲染键和派生拼字缓存随位置失效。分界手势不调用音源读取或合成，后台布局返回前保留已提交的位置。
+
+2026-10-13 增补：[实际功能主入口、数据流与架构审计](AI_INTERFACE_ARCHITECTURE.md) 按业务能力对应权威接口，记录重复快照、音频回调、大锁、缓存键、请求采样和 MCP 草稿问题及最小改造顺序；[接口声明清单](AI_API_REFERENCE.md) 列出核心公开方法、MCP 和启动参数。此次为静态核对，不代表性能优化已经实施；下面更新 148 的行为记录继续有效。
+
+更新日期：2026-10-15。实现基线：公开版本 **0.25**、内部更新 **176**、外置 WCSNDM **0.0803**。本指南覆盖当前整合版的界面、工程数据、音频编辑、UTAU、HiFisampler、DiffSinger、分析、和声、MCP、构建与验证。
+
+更新 163：单独选中 CVVC 音素后，“高级包络”不再被提前返回拦截。PianoRollComponent::selectedCvvcEnvelope 提供当前音素的范围与曲线；MainComponent 复用 AdvancedEnvelopePanel 的整段编辑界面，应用仍统一调用 setCvvcEnvelope，仅提交该角色。包络点可保存可选贝塞尔控制柄，cvvcEnvelopeValue 与两个 UTAU 渲染器共用同一插值，曲线加入混音缓存键。打开／未改动应用不写工程；草稿应用、试听、修订保护、保存和撤销保留。恢复默认使用该音素标准梯形。
+
+更新 162：修复旧 CVVC 工程保存的整音符默认分贝包络继续叠乘，造成句首弯曲起音和收尾弯曲淡出。ProjectModel::fromValueTree 仅对缺少 cvvcEnvelopeVersion、无高级包络及 UST 原始段的中文 CVVC 音符，识别四点 0 dB 平台、5/15 ms 起音、35 ms 收尾的历史默认形状，恢复为各音素独立标准梯形。新工程保存 cvvcEnvelopeVersion=1；现代显式曲线、非标准时长／音量、线性手绘和非 CVVC 曲线保持。音频与拼字混音缓存版本同步更新。真实“CVVC测试”工程专项覆盖修复前失败、保存重开、首尾像素位置、两种交叉方式逐采样增益及 HiFiSampler／WCSNDM 合成。
+
+更新 161：CVVC 默认梯形与“标准”预设统一使用 standardCvvcEnvelope 的 5 ms／35 ms 线性幅度规则。自动混音 useStandardUtauEnvelope 在重叠边缘接管标准淡入／淡出，避免手动默认梯形与自动层重复相乘产生转折；保留非标准手动曲线。发音器菜单新增“默认交叉方式→直线／曲线”，TrackData::cvvcCurveCrossfade 随工程保存、撤销，并参与声音与混音元数据缓存键。曲线为互补 smoothstep，两端斜率为零；传统 UTAU 与 HiFiSampler 共享增益描述。replacesStandardEnvelope 标记让上下包络显示使用同一实际增益。整音符 CVVC 预设按音素批量提交 setCvvcEnvelopes，原单片接口委托此入口，一次撤销。
+
+更新 160：CVVC 音符上方增加 VC／CV／尾音可点击标签，复用父音符 ID 加 envelopePart 的选区，不生成独立假音符。选中音素时响度预设只提交 setCvvcEnvelope，响度／FLAG 面板仅保留当前音素的编辑曲线和控制点，其他音素淡显实际曲线；点击主体或显式整音符选择恢复整音符操作。上方包络改为逐音素绘制实际自动混音增益，移除父音符包络的重复外形。音素选择时高级包络入口聚焦分片响度编辑，整音符 OTO 设置需点击主体。选择不写工程；曲线复用既有保存、撤销和渲染入口。
+
+更新 159：`mixNsfUtauNotes` 的自动淡出完成后保持零增益，消除前一 VC/CV 在交叉区后恢复音量的错误；负 OTO 重叠按间隔提前结束前音并使用 3 ms 去爆音，长正重叠按相邻音符时序为前音补足尾部。`UtauMixEnvelope` 的显示元数据与实际混音使用同一持久淡出规则；手动包络仍先应用再乘自动层。HiFiSampler 音频缓存与 CVVC 混音元数据版本更新。专项 `--smoke-hifisampler-envelope <输出目录> [工程] [模型] [重采样器]` 覆盖多音重叠、短后音、零／负重叠及用户工程只读合成；现有 CVVC 专项增加真实模型淡出保持及跨节拍长重叠。
+
+更新 158：CVVC 音头手柄按已解析的 VC／CV／收尾 OTO 与相邻音符时长构造纯时序求值器，通过二分反求整数辅音速度；拖动过程不读文件、不跑发音器或声码器。`cvvcTransitionDuration` 统一 VC 提前量规则，`scaledUtauPreutterance` 统一源时长封顶和固定辅音区缩放，移除 CVVC 独有的 0–200 限制；松手等待后台布局时保留已提交的预览音头位置。旧拼字与音频派生缓存按时序规则版本失效。`tests/CvvcConsonantDragSmoke.h` 随中文 CVVC 专项验证负值、快速辅音、饱和上限、实际渲染、撤销及松手前后位置。
+
+更新 157：`NoteData::cvvcPhonemeCache` 保存经哈希校验的派生拼字布局；`backend/CvvcPhonemeCache.h` 负责有界 JSON 读写。`ProjectModel::rememberCvvcPhonemes` 静默存储、不增加 revision／undo；工程和恢复文件序列化包含缓存，内容指纹与音频缓存键不包含。`PianoRollComponent::requestCvvcLayouts` 只在后台调用现有发音器补缺，`rebuildUtauSoundSpans` 优先恢复已保存布局，再接收有效渲染元数据。“显示→拼字信息”对应偏好 `ui.showPhonemeInfo`，开启后所有音符显示实际音素别名，关闭后仅选中项。验证见 `--smoke-cvvc-layout-cache <测试音源> <输出目录>`、`--smoke-chinese-cvvc`、`--smoke-view-menu`。
+
+更新 156：“自动交叉淡化”全模式按钮 → `PianoRollComponent::crossfadeSelectedNotes` 从现有发声布局收集未乘自动混音的曲线 → `ProjectModel::crossfadeNotes` 按重叠区统一写入普通响度／CVVC 分片响度。只选同轨两个前后重叠音符，一次撤销，修订号校验，无重叠不移动音符，重复执行不累积衰减。原有基准音量和 OTO 自动混音层保持生效。验证入口 `--smoke-auto-crossfade` 和 `--smoke-chinese-cvvc`，详见更新记录 156。
+
+更新 155：`backend::standardCvvcEnvelope` 统一生成各 CV／VC／收尾的默认四点直线梯形（5 ms 起音、35 ms 释放，短片段用三等分避免点序倒置）。`planChineseCvvc` 与 `PianoRollCvvcEnvelope.h` 复用该函数；仅在无手动父包络、无分片响度覆盖时使用。已有手动曲线及导入曲线保留，默认值不写回工程。`cvvcDefaultEnvelopeGain` 传递默认包络的基准音量，防止调节音量后被误判为手工平直曲线；CVVC 渲染键升级至 v3。
+
+更新 154：`backend/UtauMixEnvelope.h` 保存渲染器实际使用的采样级自动淡化窗口，传统 UTAU 与 HiFisampler 混音、CVVC 响度可视化共享增益计算。`noteMixEnvelope` 经发音器折回 `UtauPhonemeSpan::mixEnvelope`，只读数据不写工程；实线显示手动包络乘自动淡化，虚线／圆点保留编辑值，VC／CV／收尾用不同颜色，交叉区着色。HiFisampler CVVC 波形回调移到已确定自动混音增益之后，避免预览缺少淡化。`utauPhonemeMixContextHash` 防止邻音时序或引擎变化后继续显示过期交叉曲线；包络／FLAG 编辑保留布局和有效淡化。
+
+更新 153：标准中文 CVVC 的 VC、CV／VCV、收尾具有独立响度／FLAG 曲线。`NoteData::cvvcEnvelopes` 按稳定角色与参数存储归一化曲线，`ProjectModel::setCvvcEnvelope` 负责修订校验和一次撤销提交；`backend/CvvcEnvelope.h` 提供共用类型及持久化。`planChineseCvvc` 将曲线映射到实际生成片段，两个输出后端共用。`PianoRollCvvcEnvelope.h` 是同一钢琴卷帘的片段绘制和鼠标实现，不创建假音符 ID 或另一份工程；`UtauNoteWaveform::phonemeLayoutHash` 让包络修改期间保留有效布局。分片继承原曲线，只有编辑过的角色产生覆盖。具体使用和边界见 [chinese-cvvc.md](chinese-cvvc.md)。
+
+更新 152：标准 UTAU 的拉伸算法下方增加发音器按钮，`phonemizerMenu` 是按钮与右键菜单的共同菜单定义，选择仍走 `outputEngineItemChosen`／`setTrackChineseCvvc`。中文 CVVC 扩展 `ChineseCvvcRules::aliases`，统一生成配置指定的 CV、VC、VCV、句首、收尾候选，真实 OTO 决定是否可用；支持分隔符、代表元音、旧式 ENDTYPE 与逐音节 PRIORITY。不要在界面复制发音器状态，不按录音表品牌增加平行算法。完整范围见 [chinese-cvvc.md](chinese-cvvc.md)。
+
+更新 151：素材管理器导入音源直接复用 `AssetManagerComponent::registerFolder`，只登记目录并枚举成员；编辑／渲染按需读 OTO。不再使用只为统计而逐 WAV 重读 OTO 的 `SampleSettings::importVoicebank`；该旧接口仅保留在独立 MCP 库存命令／历史测试中，不应接回 GUI。导入完成提示改为真实音频数量，不声称生成 HJM。`--smoke-voicebank-import 输出目录 音源目录` 验证同一登记入口耗时、去重、持久化及不构建音源索引。
+
+中文 CVVC 的 `ChineseCvvcRules::spellingVariants/lookup` 和 `planChineseCvvc` 在本音源定义及真实 OTO 的约束下兼容 nve/nue、lve/lue 与 ü 输入，精确别名及显式 REPLACE 优先。不得强制合并各录音方案的元辅音标记；兼容边界、公开样本来源和测试记录见 [chinese-cvvc.md](chinese-cvvc.md)。
+
+更新 150：手动选择与默认音源通过 `MainComponent::selectVoicebank` 绑定。普通 UTAU 不调用整库 `SampleSettings::importVoicebank`，仅更新轨道和默认目录，OTO 仍按需使用后台索引；选择状态栏只显示名称。真实音源回归：`--smoke-voicebank-selection 输出目录 音源目录`，包含消息线程响应、撤销重做、重复选择与轨道隔离；不写音源。
+
+更新 148：素材管理器音频项改为 24 像素单行，只显示一次相对文件名；音源文件夹保持 40 像素名称／路径双行。`TreeRow` 缓存每行位置和高度，绘制、命中与滚动范围统一使用这些坐标，保持展开／收起、拖拽及参数编辑行为。
+
+更新 147：素材管理器改为全宽可折叠文件列表；音源左侧箭头展开／收起，双击文件夹名称也可切换。展开后列出包含子目录在内的音频文件，显示文件名和相对路径；单击选中、拖拽使用素材、双击编辑参数。多个文件夹可同时展开，滚轮与纵向滚动条浏览长音源库。`AssetManagerComponent` 缓存已展开成员，绘制只遍历可见行；工程更新保留现存文件夹展开状态，换工程清除失效引用。扩展 `tests/ProjectVoicebankAssetsSmoke.h` 验证窄面板点击、展开／收起、子目录、滚动末尾和工程切换。
+
+更新 146：素材管理器自动列出当前工程轨道使用的 UTAU 音源文件夹，置顶并标记“工程音源”。`AssetManagerComponent::setProjectVoicebanks` 读取工程快照，按路径去重；`MainComponent` 在面板打开和工程变更通知时同步。包含 UTAU／HiFisampler／原生 NSF 的音源库合成轨道，排除伴奏、非 U 录音和 DiffSinger。工程引用不写全局 `assets.materialFolders`，也不复制音源或生成 HJM；手动登记过的同路径素材保留。新建／打开工程、切换音源和移除最后一个使用轨道时自动更新，缺失路径仍显示并提示重新定位。使用中的工程音源不可直接从面板移除，应在轨道上变更音源。列表不变时不重新扫描成员，其他文件夹变化保留当前选中素材。验证入口：`--smoke-project-voicebank-assets 输出目录`，另运行既有 `--smoke-asset-manager` 回归。
 
 先读本页确定功能归属，再用 [逐文件索引](AI_SOURCE_INDEX.md) 找到实际源文件和命令分支。历史变更在 [updates.md](updates.md)。不要将历史评估中的“待实现”直接当成当前缺失项，也不要把一个测试文件存在等同于测试已通过。
+
+更新 144：非 U NSF 拉伸菜单新增“WCSNDM 非循环拉伸”，`StretchAlgorithm::wcsNonLoop` 追加为值 6（菜单 ID 7，工程／MCP 键 `wcsndm-nonloop`）。`backend/WcsNonLoopFeatures.*` 对源 PCM 和源 F0 作 LLSM layer-1 分析，按既有单调时间映射插值 Rd、声道 dB 包络、噪声 PSD 与残差；在采样后的目标 F0 上重建谐波功率谱，再生成物理 Mel，交给已有 NSF ONNX。它不是给旧 Mel 拉伸换名，也不先合成一遍 PCM。没有新增 OTO／C-V 识别、固定辅音头或发音时长保护；普通整段均匀拉长会同时拉长声学变化，手动分段、裁剪和源跳跃仍遵循项目时钟。源零 F0 不插值成有声，原有谐波／噪声保护、音高突变平滑、响度、颤音及原音直通继续有效。
+
+源参数分析使用 256 帧核心、两侧 16 帧上下文，块间和输出帧检查取消；同一源 PCM／F0／模型特征配置的参数保存于 64 MiB、最多 4 项缓存，目标音高改动可复用，程序退出时清空。超过 24000 源或目标模型帧显式报错，不替换用户选择的算法。物理 Mel 按原素材 STFT 标定电平，不将每次拉伸输出强行对齐固定响度。此路径在 C++ 内运行，不启动外置 WCSNDM EXE／Python daemon，不添加模型。专项命令 `--smoke-wcs-nonloop 输出目录 NSF模型目录 [真实录音]`；菜单、撤销、保存及单段／整句路由验证加入 `--smoke-nsf-picker`。
 
 ## 先确定目录和版本
 
@@ -18,10 +166,10 @@
 | `juce/third_party/`、`third_party/` | 算法依赖与来源许可；不是所有同名外部项目的完整源码 |
 | `build-integrated/`、`.deps/` | 本地构建产物与依赖缓存，不作为业务源码修改入口 |
 | `test-output/`、`integration-tests/` | 测试产物、报告、截图、音频与夹具；不要当作正式源素材 |
-| `../HachiShifter-整合版-0.2.4-DiffSinger/` | 现用便携配布，EXE、运行库、模型、说明和构建信息 |
+| `../HachiShifter-整合版-0.25-DiffSinger/` | 现用便携配布，EXE、运行库、模型、说明和构建信息 |
 | `../HachiShifter-github-0.2.3-20261006/` | 曾用于团队仓库发布的独立工作副本；目录名不等于当前内容版本 |
 
-当前用户要求保持公开版本 0.2.4，普通修复只增加文档内部更新号。版本约束见 [AGENTS.md](../AGENTS.md)。旧目录中的 0.2.3 名称、旧打包脚本默认值、旧日志不应驱动当前版本回退。
+当前用户要求保持公开版本 0.25，普通修复只增加文档内部更新号。版本约束见 [AGENTS.md](../AGENTS.md)。旧目录中的 0.2.3 名称、旧打包脚本默认值、旧日志不应驱动当前版本回退。
 
 团队发布目标曾明确为 `openhachimi/HachiShifter` 的 `next`，不是用户个人 fork。每次发布仍需核对实际工作树、远端、分支与本次授权；本指南不是自动推送、删分支或发布的授权。
 
@@ -260,6 +408,8 @@ DS 保留原始预测、实际编辑、用户偏移等不同层；重新生成�
 
 ## HAMOOD 和声与伴奏分析
 
+更新 145：伴奏音频右键“识别曲速”调用 `AccompanimentTempoTask` 与 `tools/hamood_audio/tempo_worker.py`，仅运行已有 Beat This! small0，不运行 BTC 和弦模型。`AccompanimentTempoPanel.h` 在非模态窗口中显示 BPM、估计限制及变速提示，只有取消／关闭按钮。分析持有片段副本，读取可见裁剪范围；合并区域按各子音频偏移拼出分析输入。后台逐块解码，取消／关闭窗口／程序退出回收自己的子进程和临时目录，不接触 ProjectModel、工程 BPM、位置、长度或撤销状态。不下载模型；运行环境沿用 `HACHI_HAMOOD_RUNTIME` 或配布 `engines/hamood/runtime.json`。单个编辑器窗口只允许一个曲速结果窗口，重复点击将其置前。`--smoke-accompaniment-tempo 输出目录 [真实伴奏]` 验证实际菜单、模型、裁剪／合并、取消、错误和工程不变。
+
 `Hamood.*` 是原生调性／和声计划与生成；`HamoodProject.h` 保存工程中的和声分析信息；`HamoodTimelinePanel.h` 显示时间轴相关结果；`MainComponentHamood.cpp` 负责菜单、任务与界面操作。生成通常创建新声部，继承需要保留的音源和唱法信息，原旋律不应被隐式改写。
 
 `HamoodAudio.h` 与 `tools/hamood_audio/worker.py` 对接伴奏音频分析。beat-this、BTC 与低频音级统计提供拍点、和弦等旁路证据；结果缓存到工程旁 `.hamood-cache`。`kara2.py` 等脚本提供更具体的分析／验证工作流；东京泰迪熊等命名脚本是具体任务用例，不是所有工程的默认处理。
@@ -287,7 +437,7 @@ MCP 参数以当前 `tools/list`、`McpServer` 的 schema 和 Live handler 为�
 
 ## 构建和配布
 
-`juce/CMakeLists.txt` 是 C++20／JUCE 8.0.8 构建入口，公开版本定义为 0.2.4，并管理 ONNX／DirectML、引擎资源和第三方算法依赖。`build-local.ps1` 是当前本机 MSVC 整合版构建脚本，读取已有 CMakeCache，支持 ASCII junction；`build-windows-native.ps1` 和 `juce/cmake/` 是另一条 MSYS2 clang-cl/xwin 构建路线，不要混用同一缓存。
+`juce/CMakeLists.txt` 是 C++20／JUCE 8.0.8 构建入口，公开版本定义为 0.25，并管理 ONNX／DirectML、引擎资源和第三方算法依赖。`build-local.ps1` 是当前本机 MSVC 整合版构建脚本，读取已有 CMakeCache，支持 ASCII junction；`build-windows-native.ps1` 和 `juce/cmake/` 是另一条 MSYS2 clang-cl/xwin 构建路线，不要混用同一缓存。
 
 本机最近成功构建使用：
 

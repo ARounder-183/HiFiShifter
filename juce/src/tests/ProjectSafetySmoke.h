@@ -115,6 +115,42 @@ inline bool MainComponent::diagnosticProjectSafety(const juce::File& folder)
     check("replacement_import_cannot_overwrite_previous_path",currentProjectFile==juce::File{}&&savedProjectRevision!=project.revisionNumber()&&!project.canUndo()&&project.snapshot().name==b.name);
     projectRecovery->capture(project,{});projectRecovery->finish();savedProjectRevision=project.revisionNumber();bool closed=false;
     requestClose([&]{closed=true;});check("approved_close_removes_own_snapshot",closed&&!projectRecovery->currentFile().exists()&&unrelated.existsAsFile());
-    projectRecovery.reset();return ok;
+    projectRecovery.reset();
+    project.resetDocument();setAssetManagerVisible(false);
+    savedProjectRevision=project.revisionNumber();
+    showAssetManager();
+    check("asset_panel_toggle_is_saved_dirty_state_without_undo",assetManagerVisible
+        &&project.snapshot().assetManagerVisible&&project.revisionNumber()!=savedProjectRevision&&!project.canUndo());
+    const auto panelOpen=folder.getChildFile("panel-open.hjpx");
+    check("asset_panel_open_save",saveProjectTo(panelOpen));
+    const auto cleanRevision=project.revisionNumber();
+    project.setAssetManagerVisible(true);
+    check("asset_panel_unchanged_setting_keeps_clean_revision",project.revisionNumber()==cleanRevision);
+    showAssetManager();
+    const auto panelClosed=folder.getChildFile("panel-closed.hjpx");
+    check("asset_panel_closed_save",!assetManagerVisible&&saveProjectTo(panelClosed));
+    check("asset_panel_load_open_restores_component",loadProjectFile(panelOpen)&&assetManagerVisible
+        &&assetManager!=nullptr&&assetManager->isVisible()&&assetManagerResizer->isVisible()
+        &&project.revisionNumber()==savedProjectRevision);
+    check("asset_panel_load_closed_hides_component",loadProjectFile(panelClosed)&&!assetManagerVisible
+        &&!assetManager->isVisible()&&!assetManagerResizer->isVisible());
+    ProjectModel fresh;
+    check("asset_panel_fresh_model_reads_disk",fresh.load(panelOpen,error)&&fresh.snapshot().assetManagerVisible);
+    auto legacy=projectio::validatedTree(bytes(panelOpen));legacy.removeProperty("assetManagerVisible",nullptr);
+    juce::MemoryOutputStream legacyBytes;legacy.writeToStream(legacyBytes);
+    const auto legacyFile=folder.getChildFile("panel-legacy.hjpx");
+    legacyFile.replaceWithData(legacyBytes.getData(),legacyBytes.getDataSize());
+    loadProjectFile(panelOpen);
+    check("asset_panel_legacy_missing_field_defaults_closed",loadProjectFile(legacyFile)&&!assetManagerVisible);
+    showAssetManager();project.addTrack("undo fixture");showAssetManager();
+    check("asset_panel_music_undo_preserves_visibility",project.undo()&&!project.snapshot().assetManagerVisible);
+    showAssetManager();
+    check("asset_panel_toggle_preserves_music_redo",project.redo()&&project.snapshot().assetManagerVisible);
+    const auto panelRecovery=folder.getChildFile("panel-recovery.hjpx");
+    check("asset_panel_recovery_keeps_state",ProjectModel::saveRecoverySnapshot(project.snapshot(),panelRecovery,{},error)
+        &&fresh.load(panelRecovery,error)&&fresh.snapshot().assetManagerVisible);
+    savedProjectRevision=project.revisionNumber();newProject();
+    check("asset_panel_new_project_defaults_closed",!assetManagerVisible&&!project.snapshot().assetManagerVisible);
+    return ok;
 }
 }

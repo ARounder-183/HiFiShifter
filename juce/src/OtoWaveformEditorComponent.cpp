@@ -1,4 +1,9 @@
 #include "OtoWaveformEditorComponent.h"
+#include "MaterialAnnotationEditor.h"
+#include "MaterialAnnotationSession.h"
+#include "OttoMaterialMigration.h"
+#include <juce_cryptography/juce_cryptography.h>
+#include <cstdlib>
 #include "backend/UtauRenderer.h"
 #include <algorithm>
 #include <atomic>
@@ -10,7 +15,20 @@ namespace hachi
 {
 namespace
 {
-juce::String utf8(const char* text) { return juce::String::fromUTF8(text); }
+juce::String utf8(const char* text) { return I18n::uiText(text); }
+
+bool lightEditor() { return Palette::background == juce::Colour(0xfffffffb); }
+juce::Colour sourcePitchColour()
+{
+    return lightEditor() ? Palette::pitchLine : juce::Colour(0xff7aeeee);
+}
+std::array<juce::Colour, 5> timingColours()
+{
+    if (lightEditor()) return { Palette::heading, Palette::text, Palette::heading,
+                                Palette::accent, Palette::textMuted };
+    return { juce::Colours::mediumpurple.brighter(0.35f), juce::Colours::orangered,
+             juce::Colours::mediumpurple.brighter(0.35f), juce::Colours::red, juce::Colours::limegreen };
+}
 
 constexpr std::array<const char*, 8> parameterNames {
     "偏移", "辅音", "终止", "先行声音", "重叠",
@@ -225,19 +243,20 @@ void OtoWaveformEditorComponent::WaveformView::paintSourceF0(
         else path.lineTo(x, y);
         connected = true; previousTime = it->timeSeconds;
     }
-    g.setColour(juce::Colours::black.withAlpha(0.85f)); g.strokePath(path, juce::PathStrokeType(3.8f));
-    g.setColour(juce::Colour(0xff7aeeee)); g.strokePath(path, juce::PathStrokeType(1.8f));
+    g.setColour(lightEditor() ? Palette::base : juce::Colours::black.withAlpha(0.85f));
+    g.strokePath(path, juce::PathStrokeType(3.8f));
+    g.setColour(sourcePitchColour()); g.strokePath(path, juce::PathStrokeType(1.8f));
     if (selectedPitch)
     {
         const auto x = xForMilliseconds(selectedPitch->timeSeconds * 1000.0);
         const auto hz = 440.0 * std::pow(2.0, (selectedPitch->midi - 69.0) / 12.0);
         const auto y = yForHz(hz);
         const float dashes[] { 3.0f, 4.0f };
-        g.setColour(juce::Colour(0xff7aeeee).withAlpha(0.45f));
+        g.setColour(sourcePitchColour().withAlpha(0.65f));
         g.drawDashedLine(juce::Line<float>(x, static_cast<float>(area.getY()),
             x, static_cast<float>(area.getBottom())), dashes, 2, 1.0f);
-        g.setColour(juce::Colour(0xff101922)); g.fillEllipse(x - 4, y - 4, 8, 8);
-        g.setColour(juce::Colour(0xff7aeeee)); g.drawEllipse(x - 4, y - 4, 8, 8, 1.8f);
+        g.setColour(lightEditor() ? Palette::base : juce::Colour(0xff101922)); g.fillEllipse(x - 4, y - 4, 8, 8);
+        g.setColour(sourcePitchColour()); g.drawEllipse(x - 4, y - 4, 8, 8, 1.8f);
     }
 }
 
@@ -245,11 +264,28 @@ void OtoWaveformEditorComponent::WaveformView::paintAnalysis(juce::Graphics& g)
 {
     const auto area = analysisBounds();
     if (area.isEmpty()) return;
-    g.setColour(juce::Colour(0xff101922)); g.fillRect(area);
+    const auto analysisBackground = lightEditor() ? Palette::graphBackground : juce::Colour(0xff101922);
+    g.setColour(analysisBackground); g.fillRect(area);
     if (analysis && spectrumVisible && analysis->spectrogram.isValid())
     {
         juce::Graphics::ScopedSaveState save(g); g.reduceClipRegion(area);
-        const auto& image = analysis->spectrogram;
+        if (lightEditor() && (lightSpectrogramSource != analysis->spectrogram || !lightSpectrogram.isValid()))
+        {
+            lightSpectrogramSource = analysis->spectrogram;
+            lightSpectrogram = juce::Image(juce::Image::RGB, lightSpectrogramSource.getWidth(),
+                lightSpectrogramSource.getHeight(), false, juce::SoftwareImageType());
+            const juce::Image::BitmapData source(lightSpectrogramSource, juce::Image::BitmapData::readOnly);
+            juce::Image::BitmapData destination(lightSpectrogram, juce::Image::BitmapData::writeOnly);
+            for (int y = 0; y < source.height; ++y)
+                for (int x = 0; x < source.width; ++x)
+                {
+                    // The backend heat ramp has strictly increasing red values
+                    // (16..255). Recolour only its display, never analysis data.
+                    const auto strength = juce::jlimit(0.0f, 1.0f, (source.getPixelColour(x, y).getRed() - 16) / 239.0f);
+                    destination.setPixelColour(x, y, Palette::graphBackground.interpolatedWith(Palette::heading, strength));
+                }
+        }
+        const auto& image = lightEditor() ? lightSpectrogram : analysis->spectrogram;
         const auto scaleX = static_cast<float>(durationMs / visibleSpanMs() * area.getWidth() / image.getWidth());
         const auto scaleY = static_cast<float>(area.getHeight()) / image.getHeight();
         g.setOpacity(1.0f);
@@ -268,7 +304,7 @@ void OtoWaveformEditorComponent::WaveformView::paintAnalysis(juce::Graphics& g)
             const auto y = yForHz(hz);
             if (y - lastLabel < 16) continue;
             lastLabel = y;
-            g.setColour(juce::Colours::white.withAlpha(0.10f));
+            g.setColour(lightEditor() ? Palette::beatGrid : juce::Colours::white.withAlpha(0.10f));
             g.drawHorizontalLine(juce::roundToInt(y), static_cast<float>(area.getX()), static_cast<float>(area.getRight()));
             g.setColour(Palette::textMuted);
             const auto label = hz >= 1000 ? juce::String(hz / 1000.0, hz == 10000 ? 0 : 1) + "k" : juce::String(static_cast<int>(hz));
@@ -285,8 +321,9 @@ void OtoWaveformEditorComponent::WaveformView::paintAnalysis(juce::Graphics& g)
         [](const auto& point) { return point.voiced; })) caption += utf8(" · 未检测到有声音高");
     if (analysis && analysis->warning.isNotEmpty()) caption += utf8(" · 内置识别回退");
     const auto badge = area.withHeight(18).reduced(4, 0);
-    g.setColour(juce::Colour(0xcc101922)); g.fillRect(badge);
-    g.setColour(juce::Colour(0xff7aeeee)); g.setFont(11.0f);
+    const auto badgeBackground = lightEditor() ? Palette::panel : juce::Colour(0xff101922);
+    g.setColour(badgeBackground); g.fillRect(badge);
+    g.setColour(Palette::contrastingText(badgeBackground)); g.setFont(11.0f);
     g.drawText(caption, badge.reduced(4, 0), juce::Justification::centredLeft, true);
 }
 
@@ -311,7 +348,7 @@ void OtoWaveformEditorComponent::WaveformView::paint(juce::Graphics& g)
     const auto preutteranceX = xForMilliseconds(entry.offsetMs + entry.preutteranceMs);
     const auto overlapX = xForMilliseconds(entry.offsetMs + entry.overlapMs);
 
-    g.setColour(juce::Colours::mediumpurple.withAlpha(0.27f));
+    g.setColour((lightEditor() ? Palette::accent : juce::Colours::mediumpurple).withAlpha(0.27f));
     g.fillRect(juce::Rectangle<float>(static_cast<float>(plot.getX()),
         static_cast<float>(plot.getY()), std::max(0.0f, offsetX - plot.getX()),
         static_cast<float>(plot.getHeight())));
@@ -320,7 +357,7 @@ void OtoWaveformEditorComponent::WaveformView::paint(juce::Graphics& g)
 
     if (!jie)
     {
-        g.setColour(juce::Colours::red.withAlpha(0.18f));
+        g.setColour((lightEditor() ? Palette::text : juce::Colours::red).withAlpha(0.18f));
         g.fillRect(juce::Rectangle<float>(std::min(offsetX, consonantX),
             static_cast<float>(plot.getY()), std::abs(consonantX - offsetX),
             static_cast<float>(plot.getHeight())));
@@ -331,10 +368,10 @@ void OtoWaveformEditorComponent::WaveformView::paint(juce::Graphics& g)
     const auto jieOnsetX = xForMilliseconds(entry.offsetMs + entry.jieOnsetMs);
     const auto jieGlideX = xForMilliseconds(entry.offsetMs + entry.jieGlideMs);
     const auto jieNucleusX = xForMilliseconds(entry.offsetMs + entry.jieNucleusMs);
-    const std::array<juce::Colour, 4> jieColours {
-        juce::Colours::orangered, juce::Colours::gold,
-        juce::Colours::deepskyblue, juce::Colours::mediumseagreen
-    };
+    const std::array<juce::Colour, 4> jieColours = lightEditor()
+        ? std::array<juce::Colour, 4>{ Palette::text, Palette::accent, Palette::heading, Palette::textMuted }
+        : std::array<juce::Colour, 4>{ juce::Colours::orangered, juce::Colours::gold,
+                                     juce::Colours::deepskyblue, juce::Colours::mediumseagreen };
     // The spans this entry really has.  The last one always closes at the
     // end of the entry, so three regions use two inner boundaries and two
     // regions use one; the rest of the array is not drawn at all.
@@ -366,7 +403,7 @@ void OtoWaveformEditorComponent::WaveformView::paint(juce::Graphics& g)
     if (!waveformPeaks.empty())
     {
         juce::Graphics::ScopedSaveState waveClip(g); g.reduceClipRegion(wave);
-        g.setColour(Palette::accentLight);
+        g.setColour(lightEditor() ? Palette::textMuted : Palette::accentLight);
         const auto centreY = static_cast<float>(wave.getCentreY());
         const auto amplitude = static_cast<float>(wave.getHeight()) * 0.43f
             * static_cast<float>(amplitudeZoom);
@@ -408,24 +445,57 @@ void OtoWaveformEditorComponent::WaveformView::paint(juce::Graphics& g)
     paintSourceF0(g, wave);
     paintAnalysis(g);
 
+    if (nativeDetail)
+    {
+        const float dash[]{4, 3};
+        for (const auto& segment : nativeSegments)
+        {
+            const auto left = xForMilliseconds(segment.sourceStartSeconds * 1000);
+            const auto right = xForMilliseconds(segment.sourceEndSeconds * 1000);
+            const auto colour = lightEditor()
+                ? (segment.role == NativeSegmentRole::consonant ? Palette::text : Palette::accent)
+                : (segment.role == NativeSegmentRole::consonant ? juce::Colours::orangered
+                    : segment.role == NativeSegmentRole::vowel ? juce::Colours::deepskyblue : juce::Colours::gold);
+            g.setColour(colour.withAlpha(0.12f));
+            g.fillRect(juce::Rectangle<float>(left, static_cast<float>(plot.getY()), std::max(0.0f, right-left), static_cast<float>(plot.getHeight())));
+            g.setColour(colour);
+            g.drawDashedLine(juce::Line<float>(right, static_cast<float>(plot.getY()), right, static_cast<float>(plot.getBottom())), dash, 2);
+            if (lightEditor()) g.setColour(Palette::contrastingText(Palette::graphBackground.overlaidWith(colour.withAlpha(0.12f))));
+            const auto caption = segment.role == NativeSegmentRole::vowel
+                && segment.alias.trim().isNotEmpty() && segment.alias != "-" ? segment.alias : nativeSegmentRoleName(segment.role);
+            const auto captionLeft = std::max(plot.getX(), juce::roundToInt(left)) + 3;
+            const auto captionWidth = std::min(plot.getRight(), juce::roundToInt(right)) - captionLeft - 2;
+            if (captionWidth >= 24)
+                g.drawText(caption, captionLeft, plot.getY()+3, captionWidth, 18, juce::Justification::centredLeft, true);
+        }
+    }
+
     const auto drawBoundary = [&g, &plot](float x, juce::Colour colour, float thickness)
     {
         g.setColour(colour);
         g.drawLine(x, static_cast<float>(plot.getY()), x,
                    static_cast<float>(plot.getBottom()), thickness);
     };
-    drawBoundary(offsetX, juce::Colours::mediumpurple.brighter(0.35f), 2.0f);
-    drawBoundary(endX, juce::Colours::mediumpurple.brighter(0.35f), 2.0f);
-    if (!jie) drawBoundary(consonantX, juce::Colours::orangered, 2.0f);
-    drawBoundary(preutteranceX, juce::Colours::red, 2.0f);
-    drawBoundary(overlapX, juce::Colours::limegreen, 2.0f);
+    const auto colours = timingColours();
+    drawBoundary(offsetX, colours[0], 2.0f);
+    drawBoundary(endX, colours[2], 2.0f);
+    if (!jie) drawBoundary(consonantX, colours[1], 2.0f);
+    drawBoundary(preutteranceX, colours[3], 2.0f);
+    drawBoundary(overlapX, colours[4], 2.0f);
+    if (preferOuterRangeDrag)
+    {
+        // Keep the draggable purple limits visible even when C/P/O coincide.
+        drawBoundary(offsetX, colours[0], 2.0f);
+        drawBoundary(endX, colours[2], 2.0f);
+    }
 
     g.setFont(11.0f);
     for (const auto& badge : handleBadges())
     {
-        g.setColour(badge.colour.withAlpha(0.78f));
+        // Opaque swatches make their WCAG foreground deterministic in both themes.
+        g.setColour(badge.colour);
         g.fillRoundedRectangle(badge.bounds, 3.0f);
-        g.setColour(badge.colour.contrasting(0.9f));
+        g.setColour(Palette::contrastingText(badge.colour));
         g.drawText(badge.text, badge.bounds, juce::Justification::centred);
     }
 
@@ -445,9 +515,9 @@ void OtoWaveformEditorComponent::WaveformView::paint(juce::Graphics& g)
             auto badge = juce::Rectangle<float>(
                 spans[index].first + width * 0.5f - 17.0f,
                 static_cast<float>(wave.getBottom() - 19), 34.0f, 15.0f);
-            g.setColour(jieColours[index].withAlpha(0.82f));
+            g.setColour(jieColours[index]);
             g.fillRoundedRectangle(badge, 3.0f);
-            g.setColour(jieColours[index].contrasting(0.9f));
+            g.setColour(Palette::contrastingText(jieColours[index]));
             g.drawText(regionName(mou, static_cast<int>(index)), badge,
                        juce::Justification::centred);
         }
@@ -471,7 +541,7 @@ void OtoWaveformEditorComponent::WaveformView::paint(juce::Graphics& g)
         const auto x = xForMilliseconds(*playheadMs);
         if (x >= static_cast<float>(plot.getX()) && x <= static_cast<float>(plot.getRight()))
         {
-            g.setColour(juce::Colours::white);
+            g.setColour(lightEditor() ? Palette::playhead : juce::Colours::white);
             g.drawLine(x, static_cast<float>(plot.getY()), x,
                        static_cast<float>(plot.getBottom()), 1.5f);
         }
@@ -510,7 +580,11 @@ void OtoWaveformEditorComponent::WaveformView::mouseExit(const juce::MouseEvent&
 
 void OtoWaveformEditorComponent::WaveformView::mouseDown(const juce::MouseEvent& event)
 {
-    dragging = handleNear(event.position);
+    const auto handle = handleNear(event.position);
+    const bool outer = preferOuterRangeDrag && (handle == Handle::offset || handle == Handle::cutoff);
+    nativeBoundaryDragging = !outer && nativeDetail && plotBounds().contains(event.position.toInt())
+        ? nativeBoundaryNear(event.position) : -1;
+    dragging = nativeBoundaryDragging >= 0 ? Handle::none : handle;
     dragGrabOffsetMs = dragging == Handle::none ? 0.0
         : millisecondsForX(event.position.x) - millisecondsForHandle(dragging);
     const auto* frame = event.mods.isLeftButtonDown() ? pitchFrameNear(event.position) : nullptr;
@@ -521,13 +595,18 @@ void OtoWaveformEditorComponent::WaveformView::mouseDown(const juce::MouseEvent&
         repaint();
     }
     // A pitch click reads the frame; boundary drags keep their original priority.
-    panning = dragging == Handle::none && frame == nullptr && viewZoom > 1.0;
+    panning = dragging == Handle::none && nativeBoundaryDragging < 0 && frame == nullptr && viewZoom > 1.0;
     panStartCentreMs = viewCentreMs;
     updateCursor(event.position);
 }
 
 void OtoWaveformEditorComponent::WaveformView::mouseDrag(const juce::MouseEvent& event)
 {
+    if (nativeBoundaryDragging >= 0)
+    {
+        diagnosticDragNativeBoundary(nativeBoundaryDragging, millisecondsForX(event.position.x) / 1000.0);
+        return;
+    }
     if (panning && durationMs > 0.0)
     {
         const auto perPixel = visibleSpanMs() / std::max(1, plotBounds().getWidth());
@@ -544,6 +623,7 @@ void OtoWaveformEditorComponent::WaveformView::mouseDrag(const juce::MouseEvent&
 void OtoWaveformEditorComponent::WaveformView::applyHandle(Handle handle, double value)
 {
     if (handle == Handle::none || durationMs <= 0.0) return;
+    if (lockOuterRange && (handle == Handle::offset || handle == Handle::cutoff)) return;
     // Overlap and preutterance are signed timing markers, not audio cuts.
     // Keep recording bounds only for handles which delimit real sample data.
     if (handle != Handle::overlap && handle != Handle::preutterance)
@@ -614,8 +694,40 @@ void OtoWaveformEditorComponent::WaveformView::applyHandle(Handle handle, double
     repaint();
 }
 
+int OtoWaveformEditorComponent::WaveformView::nativeBoundaryNear(juce::Point<float> position) const
+{
+    int nearest = -1; float distance = 8;
+    for (std::size_t i = 0; i + 1 < nativeSegments.size(); ++i)
+    {
+        if (nativeSegments[i].role != NativeSegmentRole::vowel || nativeSegments[i + 1].role != NativeSegmentRole::vowel
+            || !nativeSegments[i].stretchable || !nativeSegments[i + 1].stretchable) continue;
+        const auto delta = std::abs(position.x - xForMilliseconds(nativeSegments[i].sourceEndSeconds * 1000));
+        if (delta < distance) { distance = delta; nearest = static_cast<int>(i); }
+    }
+    return nearest;
+}
+
+void OtoWaveformEditorComponent::WaveformView::diagnosticDragNativeBoundary(int index, double seconds)
+{
+    if (!nativeDetail || index < 0 || static_cast<std::size_t>(index + 1) >= nativeSegments.size()
+        || !std::isfinite(seconds)) return;
+    auto& left = nativeSegments[static_cast<std::size_t>(index)];
+    auto& right = nativeSegments[static_cast<std::size_t>(index + 1)];
+    if (left.role != NativeSegmentRole::vowel || right.role != NativeSegmentRole::vowel
+        || !left.stretchable || !right.stretchable) return;
+    const bool contiguous = std::abs(left.sourceEndSeconds - right.sourceStartSeconds) <= 1.e-9;
+    const auto lower = left.sourceStartSeconds + 1.e-6;
+    const auto upper = contiguous ? right.sourceEndSeconds - 1.e-6 : right.sourceStartSeconds;
+    if (upper <= lower) return;
+    left.sourceEndSeconds = juce::jlimit(lower, upper, seconds);
+    if (contiguous) right.sourceStartSeconds = left.sourceEndSeconds;
+    if (changed) changed();
+    repaint();
+}
+
 void OtoWaveformEditorComponent::WaveformView::mouseUp(const juce::MouseEvent& event)
 {
+    nativeBoundaryDragging = -1;
     dragging = Handle::none;
     panning = false;
     updateCursor(event.position);
@@ -789,14 +901,12 @@ OtoWaveformEditorComponent::WaveformView::handleBadges() const
         Handle::cutoff, Handle::preutterance, Handle::overlap };
     const std::array<juce::String, 5> labels { utf8("偏移"), utf8("辅音"),
         utf8("终止"), utf8("先行"), utf8("重叠") };
-    const std::array<juce::Colour, 5> colours {
-        juce::Colours::mediumpurple.brighter(0.35f), juce::Colours::orangered,
-        juce::Colours::mediumpurple.brighter(0.35f), juce::Colours::red,
-        juce::Colours::limegreen };
+    const auto colours = timingColours();
     std::vector<HandleBadge> badges;
     for (std::size_t i = 0; i < handles.size(); ++i)
     {
         if (jie && handles[i] == Handle::consonant) continue;
+        if (lockOuterRange && (handles[i] == Handle::offset || handles[i] == Handle::cutoff)) continue;
         const auto x = juce::jlimit(static_cast<float>(plot.getX()),
             static_cast<float>(std::max(plot.getX(), plot.getRight() - 38)),
             xForMilliseconds(millisecondsForHandle(handles[i])) - 18.0f);
@@ -834,6 +944,13 @@ OtoWaveformEditorComponent::WaveformView::handleNear(const juce::Point<float>& p
     const auto badges = handleBadges();
     for (auto it = badges.rbegin(); it != badges.rend(); ++it)
         if (it->bounds.contains(position)) return it->handle;
+    if (preferOuterRangeDrag && !lockOuterRange && plotBounds().expanded(8).contains(position.toInt()))
+    {
+        const auto startDistance = std::abs(position.x - xForMilliseconds(entry.offsetMs));
+        const auto endDistance = std::abs(position.x - xForMilliseconds(endMilliseconds()));
+        if (std::min(startDistance, endDistance) < 9.0f)
+            return startDistance <= endDistance ? Handle::offset : Handle::cutoff;
+    }
     if (!plotBounds().expanded(8, 32).contains(position.toInt())) return Handle::none;
     std::vector<std::pair<Handle, float>> handles {
         { Handle::preutterance, xForMilliseconds(entry.offsetMs + entry.preutteranceMs) },
@@ -876,6 +993,7 @@ OtoWaveformEditorComponent::WaveformView::handleNear(const juce::Point<float>& p
     auto nearestDistance = 9.0f;
     for (const auto& handle : handles)
     {
+        if (lockOuterRange && (handle.first == Handle::offset || handle.first == Handle::cutoff)) continue;
         const auto distance = std::abs(position.x - handle.second);
         if (distance < nearestDistance)
         {
@@ -916,12 +1034,812 @@ void OtoWaveformEditorComponent::WaveformView::updateCursor(
                                       : juce::MouseCursor::NormalCursor);
 }
 
+juce::String OtoWaveformEditorComponent::materialText(const char* zh, const char* en) const
+{
+    juce::ignoreUnused(zh);
+    return materialStrings ? materialStrings->text(en) : juce::String::fromUTF8(en);
+}
+
+std::unique_ptr<OtoWaveformEditorComponent> OtoWaveformEditorComponent::forMaterial(
+    const juce::File& audio, const juce::File& manifest, I18n& strings,
+    std::function<void(const std::vector<SampleRegionSetting>&)> onSaved, bool quick, juce::String* error,
+    const juce::String& selectedAudioId)
+{
+    juce::String problem;
+    auto draft = MaterialAnnotationSession::open(audio, manifest, problem, selectedAudioId);
+    if (!draft) { if (error) *error = problem; return {}; }
+    VoicebankOtoEntry initial;
+    initial.audioFile = audio; initial.otoFile = manifest; initial.sourceName = audio.getFileName();
+    initial.hasJieOto = true; initial.cutoffMs = 0;
+    initial.jieOnsetMs = draft->durationSeconds() * 250;
+    initial.jieGlideMs = draft->durationSeconds() * 500;
+    initial.jieNucleusMs = draft->durationSeconds() * 750;
+    initial.mouClasses = "CVVV";
+    // Build every existing detailed control once, then switch its display mode.
+    auto editor = std::make_unique<OtoWaveformEditorComponent>(initial, true, true, [] {});
+    editor->materialSession = std::shared_ptr<MaterialAnnotationSession>(std::move(draft));
+    editor->materialStrings = &strings; editor->materialSaved = std::move(onSaved);
+    editor->materialModeLabel.setText(editor->materialText("编辑模式", "Editing mode"), juce::dontSendNotification);
+    editor->materialMode.addItem(editor->materialText("原生标注（默认）", "Native annotations (default)"), 1);
+    editor->materialMode.addItem("UTAU Classic", 2); editor->materialMode.addItem("UTAU Jie", 3); editor->materialMode.addItem("UTAU Mou", 4);
+    editor->materialMode.setSelectedId(1, juce::dontSendNotification);
+    editor->materialMode.setTooltip(editor->materialText("模式仅改变参数视图；源标注保存到 otto.ini，本音符范围仅应用到工程。旧 OTO 不变。",
+        "Modes change the view only: source scope saves otto.ini; this-note scope applies only to the project. Old OTO stays unchanged."));
+    editor->materialBackButton.setButtonText(editor->materialText("返回发音总览", "Back to pronunciation overview"));
+    for (auto* component : std::initializer_list<juce::Component*>{&editor->materialModeLabel, &editor->materialMode, &editor->materialBackButton})
+        editor->addAndMakeVisible(component);
+    juce::Component::SafePointer<OtoWaveformEditorComponent> safe(editor.get());
+    editor->materialOverview.reset(new MaterialAnnotationEditor(editor->materialSession, strings,
+        [safe](const auto& rows)
+        {
+            if (!safe || safe->editScope() != EditScope::source) return;
+            safe->materialSourceSaved(rows);
+        }));
+    editor->materialOverview->onEditPronunciation = [safe](const juce::String& id)
+    { if (safe) safe->selectMaterialPronunciation(id, true); };
+    editor->addAndMakeVisible(*editor->materialOverview);
+    editor->materialBackButton.onClick = [safe] { if (safe) safe->diagnosticMaterialBack(); };
+    editor->materialSingleSyllable.setButtonText(editor->materialText("单音节音素", "Single syllable / phoneme"));
+    editor->materialSingleSyllable.setTooltip(editor->materialText(
+        "此录音直接使用详细参数，取消勾选返回发音总览。已有发音标注保留；空录音建立一个未保存的发音草稿。",
+        "Use detail directly for this recording; uncheck to return to overview. Existing pronunciations are preserved. Unannotated audio gets one unsaved pronunciation draft."));
+    editor->addAndMakeVisible(editor->materialSingleSyllable);
+    editor->materialSingleSyllable.onClick = [safe]
+    {
+        if (safe && !safe->setSingleSyllableMaterial(safe->materialSingleSyllable.getToggleState()))
+            safe->materialSingleSyllable.setToggleState(safe->singleSyllableMaterial, juce::dontSendNotification);
+    };
+    editor->materialScope.addItem(editor->materialText("源标注（otto.ini）", "Source annotations (otto.ini)"), 1);
+    editor->materialScope.addItem(editor->materialText("仅此音符（工程）", "This note only (project)"), 2);
+    editor->materialScope.setSelectedId(1, juce::dontSendNotification);
+    editor->addChildComponent(editor->materialScope);
+    editor->materialScope.onChange = [safe]
+    { if (safe) safe->requestEditScope(safe->materialScope.getSelectedId() == 2 ? EditScope::thisNote : EditScope::source); };
+    editor->materialRestoreLocal.setButtonText(editor->materialText("恢复源设置", "Restore source settings"));
+    editor->addChildComponent(editor->materialRestoreLocal);
+    editor->materialRestoreLocal.onClick = [safe] { if (safe) safe->requestRestoreLocal(); };
+    editor->materialMode.onChange = [safe]
+    {
+        if (!safe || safe->loadingMaterial) return;
+        juce::String error;
+        if (safe->materialDetail && !safe->commitMaterialDetail(error))
+        {
+            safe->materialMode.setSelectedId(safe->waveform.nativeDetail ? 1 : !safe->jie ? 2 : safe->mou ? 4 : 3,
+                juce::dontSendNotification);
+            safe->helpLabel.setText(error, juce::dontSendNotification); return;
+        }
+        if (safe->materialDetail)
+        {
+            const auto id = safe->materialRegionId;
+            for (const auto& row : safe->materialSession->rows()) if (row.materialRegionId == id) { safe->loadMaterialDetail(row); break; }
+        }
+        safe->refreshMaterialVisibility();
+    };
+    editor->materialPronunciationKindChoice.addItem(editor->materialText("普通音节", "Normal syllable"), 1);
+    editor->materialPronunciationKindChoice.addItem(editor->materialText("过渡发音", "Transition pronunciation"), 2);
+    editor->materialPronunciationKindChoice.addItem(editor->materialText("呼吸", "Breath"), 3);
+    editor->materialPronunciationKindChoice.setTooltip(editor->materialText("整个发音的类别，不是内部 C/V 区段。", "Pronunciation identity, not an internal C/V role."));
+    editor->materialKindLabel.setText(editor->materialText("发音身份", "Pronunciation identity"), juce::dontSendNotification);
+    editor->materialSegmentLabel.setText(editor->materialText("内部元音区段", "Internal vowel segment"), juce::dontSendNotification);
+    editor->materialSegmentChoice.setTextWhenNothingSelected(editor->materialText("内部元音区段", "Internal vowel segment"));
+    editor->materialSplitSegment.setButtonText(editor->materialText("命名并切分元音", "Split named vowel"));
+    editor->materialMergeSegment.setButtonText(editor->materialText("合并下一区段", "Merge next segment"));
+    editor->materialSimplifiedConsonant.setButtonText(editor->materialText("简化辅音", "Simplified consonant"));
+    editor->materialSimplifiedConsonant.setTooltip(editor->materialText("开启后 C 随 P 保持相对位置；默认关闭。", "When enabled, C follows P by its derived offset. Off by default."));
+    editor->materialGapLabel.setText("C - P ms", juce::dontSendNotification);
+    editor->materialVowelNameLabel.setText(editor->materialText("名称", "Name"), juce::dontSendNotification);
+    editor->materialVowelWeightLabel.setText(editor->materialText("拉伸权重", "Stretch weight"), juce::dontSendNotification);
+    editor->materialVowelWeight.setTooltip(editor->materialText("正权重控制各手动元音分配的拉伸时长；不改变 C/P 固定区。", "Positive relative weight distributes elastic vowel time; it never changes the fixed C/P zone."));
+    editor->materialSplitLeftLabel.setText(editor->materialText("左元音名", "Left name"), juce::dontSendNotification);
+    editor->materialSplitRightLabel.setText(editor->materialText("右元音名", "Right name"), juce::dontSendNotification);
+    editor->materialSplitConfirm.setButtonText(editor->materialText("确认命名切分", "Confirm split"));
+    editor->materialSplitCancel.setButtonText(editor->materialText("取消", "Cancel"));
+    for (auto* component : std::initializer_list<juce::Component*>{&editor->materialKindLabel, &editor->materialSegmentLabel,
+        &editor->materialSegmentChoice, &editor->materialPronunciationKindChoice, &editor->materialSplitSegment,
+        &editor->materialMergeSegment, &editor->materialSimplifiedConsonant, &editor->materialGapLabel,
+        &editor->materialConsonantGap, &editor->materialVowelNameLabel, &editor->materialVowelName,
+        &editor->materialVowelWeightLabel, &editor->materialVowelWeight, &editor->materialSplitLeftLabel,
+        &editor->materialSplitRightLabel, &editor->materialSplitLeftName, &editor->materialSplitRightName,
+        &editor->materialSplitConfirm, &editor->materialSplitCancel}) editor->addAndMakeVisible(component);
+    editor->materialSegmentChoice.onChange = [safe]
+    {
+        if (!safe || safe->refreshingMaterialVowel || safe->loadingMaterial) return;
+        if (!safe->commitMaterialVowelFields())
+        {
+            const auto old = std::find(safe->materialVowelIds.begin(), safe->materialVowelIds.end(), safe->materialVowelEditId);
+            if (old != safe->materialVowelIds.end()) safe->materialSegmentChoice.setSelectedId(
+                static_cast<int>(old - safe->materialVowelIds.begin()) + 1, juce::dontSendNotification);
+            return;
+        }
+        safe->refreshNativeSegmentControls();
+    };
+    editor->materialVowelName.onReturnKey = editor->materialVowelWeight.onReturnKey = [safe]
+    { if (safe) safe->commitMaterialVowelFields(); };
+    editor->materialVowelName.onFocusLost = editor->materialVowelWeight.onFocusLost = editor->materialVowelName.onReturnKey;
+    editor->materialSplitConfirm.onClick = [safe] { if (safe) safe->confirmMaterialVowelSplit(); };
+    editor->materialSplitCancel.onClick = [safe] { if (safe) safe->cancelMaterialVowelSplit(); };
+    editor->materialPronunciationKindChoice.onChange = [safe]
+    {
+        if (!safe || safe->loadingMaterial || !safe->materialDetail) return;
+        safe->materialDetailDraft.pronunciationKind = static_cast<PronunciationKind>(
+            juce::jlimit(1, 3, safe->materialPronunciationKindChoice.getSelectedId()) - 1);
+    };
+    editor->materialSimplifiedConsonant.onClick = [safe]
+    {
+        if (!safe || safe->loadingMaterial || !safe->materialDetail) return;
+        const bool enabled = safe->materialSimplifiedConsonant.getToggleState();
+        juce::String error;
+        if (!safe->syncMaterialTiming(error) || !setSimplifiedConsonant(safe->materialDetailDraft,
+            enabled, -1.0, error))
+            safe->helpLabel.setText(error, juce::dontSendNotification);
+        else safe->refreshMaterialTimingControls();
+    };
+    editor->materialConsonantGap.onReturnKey = [safe] { if (safe) safe->commitMaterialConsonantGap(); };
+    editor->materialConsonantGap.onFocusLost = editor->materialConsonantGap.onReturnKey;
+    editor->materialSplitSegment.onClick = [safe] { if (safe) safe->beginMaterialVowelSplit(); };
+    editor->materialMergeSegment.onClick = [safe]
+    {
+        if (!safe || !safe->waveform.nativeDetail || !safe->commitMaterialVowelFields()) return;
+        const auto index = safe->selectedMaterialVowelIndex();
+        if (index < 0) return;
+        auto row = safe->materialDetailDraft; row.segments = safe->waveform.nativeSegments;
+        juce::String error;
+        if (!MaterialAnnotationSession::planMergeVowels(row, row.segments[static_cast<std::size_t>(index)].id, error))
+        { safe->helpLabel.setText(error, juce::dontSendNotification); return; }
+        safe->materialDetailDraft = std::move(row); safe->waveform.nativeSegments = safe->materialDetailDraft.segments;
+        safe->cancelMaterialVowelSplit(); safe->refreshNativeSegmentControls(); safe->waveform.repaint();
+    };
+    editor->materialOverview->refreshing = true;
+    editor->materialOverview->list.deselectAllRows();
+    editor->materialOverview->refreshing = false;
+    editor->materialOverview->activeId.clear(); editor->materialOverview->showFields();
+    editor->materialDetail = false;
+    editor->refreshMaterialVisibility();
+    editor->lookAndFeelChanged();
+    editor->setSize(quick ? 1000 : 1100, 780);
+    if (error) error->clear();
+    return editor;
+}
+
+void OtoWaveformEditorComponent::setPublicationValidator(std::function<bool(
+    const std::vector<SampleRegionSetting>&, juce::String&)> validator)
+{
+    if (materialSession) materialSession->validatePublication = std::move(validator);
+}
+
+OtoWaveformEditorComponent::EditScope OtoWaveformEditorComponent::editScope() const
+{ return materialSession ? materialSession->editScope() : EditScope::source; }
+
+bool OtoWaveformEditorComponent::enableNoteScope(NoteScopeBinding binding, EditScope initial, juce::String& error)
+{
+    if (!materialSession) { error = "Note scope requires the shared material editor"; return false; }
+    if (materialDetail && !commitMaterialDetail(error)) return false;
+    if (!materialDetail && materialOverview && !materialOverview->commitFields())
+    { error = "Invalid unpublished source fields"; return false; }
+    if (!materialSession->enableNoteScope(std::move(binding), error)) return false;
+    if (!materialSession->setEditScope(initial, error)) return false;
+    refreshScopeView();
+    return true;
+}
+
+bool OtoWaveformEditorComponent::refreshNoteScopeBinding(juce::String& error)
+{
+    if (!materialSession) { error = "Not a material editor"; return false; }
+    if (editScope() != EditScope::source)
+    { error = "Local drafts retain their original note revision; return to clean source scope before refreshing"; return false; }
+    if (materialDetail && !commitMaterialDetail(error)) return false;
+    if (!materialDetail && materialOverview && !materialOverview->commitFields())
+    { error = "Invalid unpublished source fields"; return false; }
+    return materialSession->refreshNoteScopeBinding(error); // No mode/draft replacement.
+}
+
+void OtoWaveformEditorComponent::materialSourceSaved(const std::vector<SampleRegionSetting>& rows)
+{
+    if (!materialSession || editScope() != EditScope::source) return;
+    const auto session = materialSession;
+    const auto callback = materialSaved;
+    juce::Component::SafePointer<OtoWaveformEditorComponent> safe(this);
+    if (callback) callback(rows); // Host publishes to the model BEFORE a fresh getter.
+    if (!safe || safe->materialSession != session || session->editScope() != EditScope::source) return;
+    // The detail and outer pronunciation list share a draft, but the ListBox
+    // still needs its content/selection refreshed after publication.
+    if (safe->materialOverview)
+        safe->materialOverview->refresh(safe->materialOverview->selectedIds());
+    if (!session->hasNoteScope() || !session->noteScopeBinding().refresh) return;
+    juce::String error;
+    if (!safe->refreshNoteScopeBinding(error) && safe)
+        safe->helpLabel.setText("Source saved; note-context refresh failed: " + error, juce::dontSendNotification);
+}
+
+bool OtoWaveformEditorComponent::setEditScope(EditScope scope, juce::String& error)
+{
+    if (!materialSession) { error = "Not a material editor"; return false; }
+    if (materialDetail && !commitMaterialDetail(error)) return false;
+    if (!materialDetail && materialOverview && !materialOverview->commitFields())
+    { error = "Invalid unpublished source fields"; return false; }
+    if (!materialSession->setEditScope(scope, error)) return false;
+    refreshScopeView();
+    return true;
+}
+
+bool OtoWaveformEditorComponent::discardAndSetEditScope(EditScope scope, juce::String& error)
+{
+    if (!materialSession) { error = "Not a material editor"; return false; }
+    if (!materialSession->discardAndSetEditScope(scope, error)) return false;
+    cancelMaterialVowelSplit();
+    refreshScopeView();
+    return true;
+}
+
+bool OtoWaveformEditorComponent::restoreLocal(juce::String& error)
+{
+    if (!materialSession) { error = "Not a material editor"; return false; }
+    if (materialDetail && !commitMaterialDetail(error)) return false;
+    const auto session = materialSession;
+    juce::Component::SafePointer<OtoWaveformEditorComponent> safe(this);
+    if (!session->restoreLocal(error)) return false;
+    if (safe) refreshScopeView();
+    return true;
+}
+
+void OtoWaveformEditorComponent::refreshScopeView()
+{
+    if (!materialSession) return;
+    stopPlayback();
+    const bool local = editScope() == EditScope::thisNote;
+    materialScope.setSelectedId(local ? 2 : 1, juce::dontSendNotification);
+    materialDetailError.clear();
+    if (local)
+    {
+        materialDetail = true;
+        materialRegionId = materialSession->noteScopeBinding().regionId;
+        loadMaterialDetail(materialSession->rows().front());
+        materialScope.setTooltip(materialSession->noteScopeBinding().noteId);
+        helpLabel.setText(materialSession->isClassicNoteScope()
+            ? materialText("仅此音符的经典 OTO 标量时序；不保存音节类型或命名元音，恢复表示继承引擎默认 OTO。", "Classic scalar OTO timing for this note only; kind/named vowels are not stored. Restore inherits engine OTO defaults.")
+            : materialText("仅应用到此音符；不修改源录音、OTTO 或旧 OTO。", "Applies to this note only; recording, OTTO and old OTO unchanged."), juce::dontSendNotification);
+    }
+    else
+    {
+        materialDetail = false; materialRegionId.clear();
+        materialOverview->refresh();
+    }
+    refreshMaterialVisibility();
+}
+
+void OtoWaveformEditorComponent::requestEditScope(EditScope target)
+{
+    juce::String error;
+    if (setEditScope(target, error)) return;
+    materialScope.setSelectedId(editScope() == EditScope::thisNote ? 2 : 1, juce::dontSendNotification);
+    if (target == editScope()) { helpLabel.setText(error, juce::dontSendNotification); return; }
+    juce::Component::SafePointer<OtoWaveformEditorComponent> safe(this);
+    juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::WarningIcon,
+        materialText("切换编辑范围", "Change editing scope"), error + "\n\n"
+            + materialText("丢弃未应用的草稿并重新载入目标范围？", "Discard the unpublished draft and reload the destination scope?"),
+        materialText("丢弃并切换", "Discard and switch"), materialText("取消", "Cancel"), this,
+        juce::ModalCallbackFunction::create([safe, target](int accepted)
+        {
+            if (!safe || !accepted) return;
+            juce::String problem;
+            if (!safe->discardAndSetEditScope(target, problem)) safe->helpLabel.setText(problem, juce::dontSendNotification);
+        }));
+}
+
+void OtoWaveformEditorComponent::requestRestoreLocal()
+{
+    juce::String error;
+    if (restoreLocal(error)) return;
+    if (!materialSession || editScope() != EditScope::thisNote || !materialSession->canRestoreLocal() || !materialSession->dirty())
+    { helpLabel.setText(error, juce::dontSendNotification); return; }
+    juce::Component::SafePointer<OtoWaveformEditorComponent> safe(this);
+    juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::WarningIcon,
+        materialText("恢复源设置", "Restore source settings"), error + "\n\n"
+            + materialText("丢弃未应用的草稿并恢复此音符的源设置？", "Discard the unpublished draft and restore this note's source settings?"),
+        materialText("丢弃并恢复", "Discard and restore"), materialText("取消", "Cancel"), this,
+        juce::ModalCallbackFunction::create([safe](int accepted)
+        {
+            if (!safe || !accepted) return;
+            juce::String problem;
+            if (!safe->discardAndSetEditScope(EditScope::thisNote, problem) || !safe->restoreLocal(problem))
+                safe->helpLabel.setText(problem, juce::dontSendNotification);
+        }));
+}
+
+std::vector<SampleRegionSetting> OtoWaveformEditorComponent::diagnosticMaterialRows() const
+{ return materialSession ? materialSession->rows() : std::vector<SampleRegionSetting>{}; }
+
+bool OtoWaveformEditorComponent::diagnosticCreateMaterialAlias(double start, double end,
+    const juce::String& alias, juce::String& error)
+{
+    if (!materialSession) { error = "Not a material editor"; return false; }
+    if (materialDetail && !commitMaterialDetail(error)) return false;
+    if (!materialSession->createPronunciation(start, end, alias, error)) return false;
+    materialDetail = false; materialOverview->refresh(); refreshMaterialVisibility(); return true;
+}
+
+bool OtoWaveformEditorComponent::diagnosticRemoveMaterialAlias(const juce::String& id,
+    const juce::String& alias, juce::String& error)
+{
+    if (!materialSession) { error = "Not a material editor"; return false; }
+    if (materialDetail && !commitMaterialDetail(error)) return false;
+    if (!materialSession->removeAlias(id, alias, error)) return false;
+    materialDetail = false; materialOverview->refresh(); refreshMaterialVisibility(); return true;
+}
+
+bool OtoWaveformEditorComponent::diagnosticOuterRangeLocked() const { return waveform.lockOuterRange; }
+
+std::optional<juce::Range<double>> OtoWaveformEditorComponent::diagnosticMaterialSourceSelection() const
+{
+    if (materialDetail) return juce::Range<double>(materialDetailDraft.regionStartSeconds, materialDetailDraft.regionEndSeconds);
+    if (materialOverview && materialOverview->rangeSelected)
+        return juce::Range<double>(materialOverview->selectedRangeStart, materialOverview->selectedRangeEnd);
+    if (materialOverview && materialSession)
+    {
+        const auto ids = materialOverview->selectedIds();
+        for (const auto& row : materialSession->rows())
+            if (std::find(ids.begin(), ids.end(), row.materialRegionId) != ids.end())
+                return juce::Range<double>(row.regionStartSeconds, row.regionEndSeconds);
+    }
+    return {};
+}
+
+void OtoWaveformEditorComponent::bindMaterialViewPreferences(juce::PropertiesFile& preferences)
+{
+    if (!materialSession || editScope() == EditScope::thisNote) return;
+    materialViewPreferences = &preferences;
+    auto path = materialSession->sourceAudio().getFullPathName().replaceCharacter('\\', '/');
+   #if JUCE_WINDOWS
+    path = path.toLowerCase();
+   #endif
+    materialViewPreferenceKey = "material.singleSyllable." + juce::SHA256(path.toRawUTF8(), path.getNumBytesAsUTF8()).toHexString();
+    const bool enabled = preferences.getBoolValue(materialViewPreferenceKey, false);
+    if (enabled && !materialDetail && materialRegionId.isEmpty() && materialOverview)
+    {
+        const auto preferred = preferences.getValue(materialViewPreferenceKey + ".region");
+        for (const auto& row : materialSession->rows())
+            if (row.materialRegionId == preferred) { materialOverview->refresh({preferred}); break; }
+    }
+    setSingleSyllableMaterial(enabled);
+}
+
+bool OtoWaveformEditorComponent::setSingleSyllableMaterial(bool enabled)
+{
+    if (!materialSession || editScope() == EditScope::thisNote) return false;
+    if (enabled == singleSyllableMaterial) return true;
+    juce::String error;
+    if (materialDetail && !commitMaterialDetail(error))
+    { helpLabel.setText(error, juce::dontSendNotification); return false; }
+    if (!materialDetail && materialOverview && !materialOverview->commitFields()) return false;
+    auto id = materialRegionId;
+    if (!materialDetail && materialOverview && materialOverview->activeRow()) id = materialOverview->activeRow()->materialRegionId;
+    if (enabled && materialSession->rows().empty())
+    {
+        const auto range = diagnosticMaterialSourceSelection().value_or(juce::Range<double>(0.0, materialSession->durationSeconds()));
+        if (!materialSession->createPronunciation(range.getStart(), range.getEnd(), "-", error))
+        { materialOverview->showError(error); return false; }
+        id = materialSession->rows().front().materialRegionId;
+    }
+    if (enabled && std::none_of(materialSession->rows().begin(), materialSession->rows().end(),
+        [&](const auto& row) { return row.materialRegionId == id; })) id = materialSession->rows().front().materialRegionId;
+    singleSyllableMaterial = enabled;
+    materialSingleSyllable.setToggleState(enabled, juce::dontSendNotification);
+    stopPlayback(); materialDetail = enabled; materialRegionId = id;
+    if (enabled)
+    {
+        for (const auto& row : materialSession->rows()) if (row.materialRegionId == id) { loadMaterialDetail(row); break; }
+    }
+    else
+    {
+        materialOverview->rangeSelected = false; materialOverview->selectedRangeAnchor.clear();
+        materialOverview->refresh({id});
+    }
+    if (materialViewPreferences)
+    {
+        materialViewPreferences->setValue(materialViewPreferenceKey, enabled);
+        if (enabled) materialViewPreferences->setValue(materialViewPreferenceKey + ".region", id);
+        materialViewPreferences->saveIfNeeded();
+    }
+    refreshMaterialVisibility(); return true;
+}
+
+bool OtoWaveformEditorComponent::focusMaterialSourceRange(juce::Range<double> range, bool detail)
+{
+    if (!materialSession || !std::isfinite(range.getStart()) || !std::isfinite(range.getEnd())) return false;
+    range = range.getIntersectionWith({0.0, materialSession->durationSeconds()});
+    if (range.getLength() <= 1.e-9) return false;
+    juce::String error;
+    if (materialDetail && !commitMaterialDetail(error)) { helpLabel.setText(error, juce::dontSendNotification); return false; }
+    if (!materialDetail && materialOverview && !materialOverview->commitFields()) return false;
+    std::vector<juce::String> exact, containing, overlapping;
+    for (const auto& row : materialSession->rows())
+    {
+        if (std::abs(row.regionStartSeconds-range.getStart()) < 1.e-6 && std::abs(row.regionEndSeconds-range.getEnd()) < 1.e-6)
+            exact.push_back(row.materialRegionId);
+        if (row.regionStartSeconds <= range.getStart()+1.e-6 && row.regionEndSeconds >= range.getEnd()-1.e-6)
+            containing.push_back(row.materialRegionId);
+        if (std::min(row.regionEndSeconds,range.getEnd())-std::max(row.regionStartSeconds,range.getStart()) > 1.e-6)
+            overlapping.push_back(row.materialRegionId);
+    }
+    const auto& matches = !exact.empty() ? exact : !containing.empty() ? containing : overlapping;
+    if (matches.size() == 1) return selectMaterialPronunciation(matches.front(), detail);
+    // Keep the current authored pronunciation when the source range is ambiguous.
+    if (singleSyllableMaterial) return materialDetail;
+    // No unique authored pronunciation: show the exact physical range without
+    // inventing an alias or silently choosing an overlapping alternative.
+    stopPlayback(); materialDetail = false; materialRegionId.clear();
+    if (materialOverview) materialOverview->selectSourceRange(range);
+    refreshMaterialVisibility(); return true;
+}
+
+bool OtoWaveformEditorComponent::selectMaterialPronunciation(const juce::String& id, bool detail)
+{
+    if (!materialSession) return false;
+    detail = detail || singleSyllableMaterial;
+    juce::String error;
+    if (materialDetail && !commitMaterialDetail(error)) { helpLabel.setText(error, juce::dontSendNotification); return false; }
+    if (!materialDetail && materialOverview && !materialOverview->commitFields()) return false;
+    for (const auto& row : materialSession->rows())
+        if (row.materialRegionId == id)
+        {
+            materialRegionId = id;
+            if (singleSyllableMaterial && materialViewPreferences)
+            {
+                materialViewPreferences->setValue(materialViewPreferenceKey + ".region", id);
+                materialViewPreferences->saveIfNeeded();
+            }
+            if (detail) { materialDetail = true; loadMaterialDetail(row); }
+            else if (materialOverview)
+            {
+                stopPlayback(); materialDetail = false;
+                materialOverview->rangeSelected = false; materialOverview->selectedRangeAnchor.clear();
+                materialOverview->refresh({id});
+            }
+            refreshMaterialVisibility(); return true;
+        }
+    return false;
+}
+
+bool OtoWaveformEditorComponent::diagnosticMaterialBack()
+{
+    if (!materialSession || !materialDetail || singleSyllableMaterial || editScope() == EditScope::thisNote) return false;
+    juce::String error;
+    if (!commitMaterialDetail(error)) { helpLabel.setText(error, juce::dontSendNotification); return false; }
+    stopPlayback(); materialDetail = false;
+    materialOverview->refresh({materialRegionId}); refreshMaterialVisibility(); return true;
+}
+
+void OtoWaveformEditorComponent::diagnosticMaterialAdjacent(bool enabled)
+{
+    if (materialOverview) materialOverview->adjacentPronunciation.setToggleState(enabled, juce::dontSendNotification);
+}
+juce::Component* OtoWaveformEditorComponent::diagnosticMaterialOverviewWaveform()
+{ return materialOverview ? &materialOverview->overviewWaveform() : nullptr; }
+void OtoWaveformEditorComponent::diagnosticMaterialAliasText(const juce::String& text)
+{ if (materialOverview) materialOverview->alias.setText(text, false); }
+void OtoWaveformEditorComponent::diagnosticCreateSelectedMaterialAlias()
+{ if (materialOverview) materialOverview->createRangeAlias(); }
+void OtoWaveformEditorComponent::diagnosticSimplifiedConsonant(bool enabled)
+{
+    materialSimplifiedConsonant.setToggleState(enabled, juce::dontSendNotification);
+    if (materialSimplifiedConsonant.onClick) materialSimplifiedConsonant.onClick();
+}
+void OtoWaveformEditorComponent::diagnosticConsonantGap(const juce::String& text)
+{ materialConsonantGap.setText(text, false); commitMaterialConsonantGap(); }
+
+void OtoWaveformEditorComponent::refreshMaterialTimingControls()
+{
+    if (!materialSession || !materialDetail) return;
+    const auto timing = pronunciationTimingFor(materialDetailDraft);
+    edited.offsetMs = timing.sourceStartSeconds * 1000;
+    edited.cutoffMs = (materialSession->durationSeconds() - timing.sourceEndSeconds) * 1000;
+    edited.consonantMs = (timing.consonantEndSeconds - timing.sourceStartSeconds) * 1000;
+    edited.preutteranceMs = (timing.alignmentSeconds - timing.sourceStartSeconds) * 1000;
+    edited.overlapMs = timing.overlapSeconds * 1000;
+    if (materialSession->isClassicNoteScope())
+    {
+        backend::UtauOtoOverride scalar; juce::String error;
+        if (!ProjectModel::makeClassicNoteMaterialOto(materialDetailDraft, scalar, error))
+        { materialDetailError = error; return; }
+        // The existing scalar adapter preserves negative-cutoff duration and
+        // relative C/P/O. Native/source display remains absolute-end based.
+        edited = SampleSettings::entryWithNoteOto(edited, scalar);
+    }
+    edited.jieOnsetMs = edited.consonantMs;
+    materialTimingEntry = edited;
+    waveform.nativeSegments = materialDetailDraft.segments;
+    materialSimplifiedConsonant.setToggleState(timing.simplifiedConsonant, juce::dontSendNotification);
+    materialConsonantGap.setEnabled(timing.simplifiedConsonant);
+    materialConsonantGap.setText(formatNumber(consonantAfterAlignmentSeconds(timing) * 1000), false);
+    refreshEditors(); refreshNativeSegmentControls();
+}
+
+bool OtoWaveformEditorComponent::syncMaterialTiming(juce::String& error)
+{
+    if (!materialSession || !materialDetail || loadingMaterial) return true;
+    auto row = materialDetailDraft;
+    row.segments = waveform.nativeSegments;
+    const auto requested = edited;
+    if (materialSession->isClassicNoteScope())
+    {
+        if (!classicScalarProjection)
+        { error = "No authoritative classic scalar projection is bound"; return false; }
+        // Reuse strict OTO conversion on the exact pinned source row, rather
+        // than applying native absolute-boundary edits to relative OTO fields.
+        if (!classicScalarProjection(requested, row, error)) return false;
+        materialDetailDraft = std::move(row);
+        refreshMaterialTimingControls();
+        return true;
+    }
+    const bool startChanged = !waveform.lockOuterRange && requested.offsetMs != materialTimingEntry.offsetMs;
+    const bool endChanged = !waveform.lockOuterRange && requested.cutoffMs != materialTimingEntry.cutoffMs;
+    const bool alignmentChanged = requested.preutteranceMs != materialTimingEntry.preutteranceMs || startChanged;
+    const bool consonantChanged = requested.consonantMs != materialTimingEntry.consonantMs || startChanged;
+    if (startChanged || endChanged || requested.overlapMs != materialTimingEntry.overlapMs)
+    {
+        auto timing = pronunciationTimingFor(row);
+        if (startChanged) timing.sourceStartSeconds = requested.offsetMs / 1000;
+        if (endChanged) timing.sourceEndSeconds = requested.cutoffMs < 0
+            ? requested.offsetMs / 1000 - requested.cutoffMs / 1000
+            : materialSession->durationSeconds() - requested.cutoffMs / 1000;
+        timing.overlapSeconds = requested.overlapMs / 1000;
+        if (!applyPronunciationTiming(row, timing, error)) return false;
+    }
+    if (alignmentChanged || consonantChanged)
+    {
+        detailBaseline.jieGlideMs = requested.jieGlideMs; detailBaseline.jieNucleusMs = requested.jieNucleusMs;
+    }
+    if (alignmentChanged && !editPronunciationAlignment(row, (requested.offsetMs + requested.preutteranceMs) / 1000, error)) return false;
+    if (consonantChanged && !editPronunciationConsonant(row, (requested.offsetMs + requested.consonantMs) / 1000, error)) return false;
+    materialDetailDraft = std::move(row);
+    refreshMaterialTimingControls(); return true;
+}
+
+void OtoWaveformEditorComponent::commitMaterialConsonantGap()
+{
+    if (!materialSession || !materialDetail || loadingMaterial || !materialDetailDraft.simplifiedConsonant) return;
+    const auto text = materialConsonantGap.getText().trim();
+    const auto* begin = text.toRawUTF8(); char* end = nullptr;
+    const auto value = std::strtod(begin, &end);
+    juce::String error;
+    if (text.isEmpty() || end == begin || *end != 0 || !std::isfinite(value) || value < 0)
+        error = materialText("C - P 必须为非负有限毫秒数。", "C - P must be finite nonnegative milliseconds.");
+    else if (syncMaterialTiming(error) && setSimplifiedConsonant(materialDetailDraft, true, value / 1000, error))
+    { refreshMaterialTimingControls(); return; }
+    helpLabel.setText(error, juce::dontSendNotification);
+}
+
+void OtoWaveformEditorComponent::loadMaterialDetail(const SampleRegionSetting& row)
+{
+    loadingMaterial = true;
+    materialVowelSplitPending = false; materialPendingSplitId.clear(); materialVowelEditId.clear(); materialVowelIds.clear();
+    materialRegionId = row.materialRegionId;
+    const int mode = materialMode.getSelectedId();
+    jie = mode == 3 || mode == 4; mou = mode == 4;
+    VoicebankOtoEntry entry;
+    entry.audioFile = materialSession->sourceAudio(); entry.otoFile = materialSession->manifestFile();
+    entry.sourceName = entry.audioFile.getFileName(); entry.alias = row.name;
+    entry.offsetMs = row.regionStartSeconds * 1000;
+    entry.cutoffMs = (materialSession->durationSeconds() - row.regionEndSeconds) * 1000;
+    entry.consonantMs = row.fixedDurationSeconds * 1000;
+    entry.preutteranceMs = (row.alignmentSeconds - row.regionStartSeconds) * 1000;
+    entry.overlapMs = row.overlapSeconds * 1000; entry.hasJieOto = true;
+    const auto span = (row.regionEndSeconds - row.regionStartSeconds) * 1000;
+    double boundaries[]{span * .25, span * .5, span * .75};
+    if (row.segments.size() >= 2 && row.segments.size() <= 4)
+    {
+        for (std::size_t i = 0; i < row.segments.size(); ++i)
+        {
+            const auto& segment = row.segments[i];
+            entry.mouClasses += segment.role == NativeSegmentRole::consonant ? 'C'
+                : segment.role == NativeSegmentRole::silence ? 'S' : 'V';
+            if (i + 1 < row.segments.size()) boundaries[i] = (segment.sourceEndSeconds - row.regionStartSeconds) * 1000;
+        }
+    }
+    else entry.mouClasses = "CVVV"; // Display-only fallback; never silently replaces native segments.
+    entry.jieOnsetMs = boundaries[0]; entry.jieGlideMs = std::max(boundaries[0], boundaries[1]);
+    entry.jieNucleusMs = std::max(entry.jieGlideMs, boundaries[2]);
+    entry.jieOnsetMs = entry.consonantMs; // The same canonical C marker in every view.
+    original = edited = entry; detailBaseline = entry; detailSegmentsBaseline = row.segments;
+    materialDetailDraft = row; materialTimingEntry = entry;
+    waveform.setTimingMode(jie, mou); waveform.nativeDetail = mode == 1;
+    waveform.nativeSegments = row.segments;
+    const bool nativeSource = waveform.nativeDetail && editScope() == EditScope::source;
+    waveform.preferOuterRangeDrag = nativeSource && singleSyllableMaterial;
+    waveform.lockOuterRange = nativeSource ? !singleSyllableMaterial : materialSession->rows().size() > 1;
+    classesEditor.setText(entry.mouClasses, false);
+    if (mou) syncRegionCount(); else { waveform.regions = 4; waveform.classes.clear(); }
+    // Locked outer bounds are inspectable/copyable, not editable. The drag and
+    // commit guards still enforce the same lock independently of presentation.
+    parameterEditors[0].setEnabled(true); parameterEditors[2].setEnabled(true);
+    parameterEditors[0].setReadOnly(waveform.lockOuterRange);
+    parameterEditors[2].setReadOnly(waveform.lockOuterRange);
+    lookAndFeelChanged();
+    fileLabel.setText(entry.sourceName + "  ·  " + row.name, juce::dontSendNotification);
+    saveButton.setButtonText(materialText("保存到 otto.ini", "Save to otto.ini"));
+    helpLabel.setText(waveform.lockOuterRange ? materialText("多发音：外边界仅在总览编辑；此处只编辑内部参数。",
+        "Multiple pronunciations: outer bounds are edited only in overview.") : materialText("原生草稿，原音频与旧 OTO 保持不变。", "Native draft; original audio and old OTO stay unchanged."), juce::dontSendNotification);
+    refreshEditors(); waveform.frameEntry(); loadingMaterial = false;
+    refreshMaterialTimingControls(); detailBaseline = edited;
+}
+
+int OtoWaveformEditorComponent::selectedMaterialVowelIndex() const
+{
+    const auto ordinal = materialSegmentChoice.getSelectedId();
+    if (ordinal <= 0 || ordinal > static_cast<int>(materialVowelIds.size())) return -1;
+    const auto& id = materialVowelIds[static_cast<std::size_t>(ordinal - 1)];
+    for (std::size_t i = 0; i < waveform.nativeSegments.size(); ++i) if (waveform.nativeSegments[i].id == id) return static_cast<int>(i);
+    return -1;
+}
+
+bool OtoWaveformEditorComponent::commitMaterialVowelFields()
+{
+    if (!materialSession || !materialDetail || !waveform.nativeDetail || loadingMaterial || refreshingMaterialVowel
+        || materialVowelEditId.isEmpty()) return true;
+    const auto text = materialVowelWeight.getText().trim(); const auto* begin = text.toRawUTF8(); char* end = nullptr;
+    auto weight = std::strtod(begin, &end); juce::String error;
+    auto row = materialDetailDraft; row.segments = waveform.nativeSegments;
+    // Navigating away must not treat an untouched inherited '-' as a new name.
+    if (text == materialVowelWeightBaseline)
+        for (const auto& segment : row.segments)
+            if (segment.id == materialVowelEditId && segment.alias == "-" && materialVowelName.getText() == segment.alias) return true;
+    if (text == materialVowelWeightBaseline)
+        for (const auto& segment : row.segments) if (segment.id == materialVowelEditId) { weight = segment.stretchWeight; break; }
+    if (text.isEmpty() || end == begin || *end != 0 || !std::isfinite(weight) || weight <= 0)
+        error = materialText("拉伸权重必须为正有限数。", "Stretch weight must be positive and finite.");
+    else if (MaterialAnnotationSession::planEditVowel(row, materialVowelEditId, materialVowelName.getText(), weight, error))
+    {
+        materialDetailDraft = std::move(row); waveform.nativeSegments = materialDetailDraft.segments;
+        helpLabel.setText(materialText("已更新元音名称与权重，C/P 保持不变。", "Vowel name and weight updated; C/P unchanged."), juce::dontSendNotification);
+        refreshNativeSegmentControls(); waveform.repaint(); return true;
+    }
+    helpLabel.setText(error, juce::dontSendNotification); return false;
+}
+
+void OtoWaveformEditorComponent::beginMaterialVowelSplit()
+{
+    if (!materialSession || !materialDetail || !waveform.nativeDetail || !commitMaterialVowelFields()) return;
+    commitEditors(); if (materialDetailError.isNotEmpty()) return;
+    const auto index = selectedMaterialVowelIndex(); if (index < 0) return;
+    const auto& segment = waveform.nativeSegments[static_cast<std::size_t>(index)];
+    if (segment.role != NativeSegmentRole::vowel || !segment.stretchable) return;
+    materialPendingSplitId = segment.id;
+    materialPendingSplitCut = (segment.sourceStartSeconds + segment.sourceEndSeconds) * .5;
+    materialSplitLeftName.setText(juce::String{}, false); materialSplitRightName.setText(juce::String{}, false);
+    materialVowelSplitPending = true; refreshMaterialVisibility();
+    if (materialSplitLeftName.isShowing()) materialSplitLeftName.grabKeyboardFocus();
+}
+
+bool OtoWaveformEditorComponent::confirmMaterialVowelSplit()
+{
+    if (!materialVowelSplitPending || !materialSession || !materialDetail) return false;
+    auto row = materialDetailDraft; row.segments = waveform.nativeSegments; juce::String error;
+    if (!MaterialAnnotationSession::planSplitVowel(row, materialPendingSplitId, materialPendingSplitCut,
+        materialSplitLeftName.getText(), materialSplitRightName.getText(), error))
+    { helpLabel.setText(error, juce::dontSendNotification); return false; }
+    materialDetailDraft = std::move(row); waveform.nativeSegments = materialDetailDraft.segments;
+    materialVowelSplitPending = false; materialPendingSplitId.clear();
+    helpLabel.setText(materialText("已创建命名元音分段，可选择各段调整权重。", "Named vowel parts created; select a part to adjust its weight."), juce::dontSendNotification);
+    refreshNativeSegmentControls(); refreshMaterialVisibility(); waveform.repaint(); return true;
+}
+void OtoWaveformEditorComponent::cancelMaterialVowelSplit()
+{
+    materialVowelSplitPending = false; materialPendingSplitId.clear();
+    if (materialSession) refreshMaterialVisibility();
+}
+void OtoWaveformEditorComponent::diagnosticBeginMaterialVowelSplit() { beginMaterialVowelSplit(); }
+bool OtoWaveformEditorComponent::diagnosticConfirmMaterialVowelSplit(const juce::String& left, const juce::String& right)
+{
+    materialSplitLeftName.setText(left, false); materialSplitRightName.setText(right, false);
+    return confirmMaterialVowelSplit();
+}
+void OtoWaveformEditorComponent::diagnosticCancelMaterialVowelSplit() { cancelMaterialVowelSplit(); }
+bool OtoWaveformEditorComponent::diagnosticSplitMaterialVowel(const juce::String& left, const juce::String& right)
+{ beginMaterialVowelSplit(); return diagnosticConfirmMaterialVowelSplit(left, right); }
+bool OtoWaveformEditorComponent::diagnosticEditMaterialVowel(const juce::String& name, const juce::String& weight)
+{
+    materialVowelName.setText(name, false); materialVowelWeight.setText(weight, false); return commitMaterialVowelFields();
+}
+juce::StringArray OtoWaveformEditorComponent::diagnosticMaterialVowelItems() const
+{
+    juce::StringArray items; for (int i = 0; i < materialSegmentChoice.getNumItems(); ++i) items.add(materialSegmentChoice.getItemText(i)); return items;
+}
+
+void OtoWaveformEditorComponent::refreshNativeSegmentControls()
+{
+    if (!materialSession) return;
+    refreshingMaterialVowel = true;
+    const auto selected = materialSegmentChoice.getSelectedId();
+    const auto selectedId = selected > 0 && selected <= static_cast<int>(materialVowelIds.size())
+        ? materialVowelIds[static_cast<std::size_t>(selected - 1)] : juce::String{};
+    materialSegmentChoice.clear(juce::dontSendNotification); materialVowelIds.clear(); int current = 0;
+    for (const auto& segment : waveform.nativeSegments)
+    {
+        if (segment.role != NativeSegmentRole::vowel || !segment.stretchable) continue;
+        materialVowelIds.push_back(segment.id); const auto ordinal = static_cast<int>(materialVowelIds.size());
+        materialSegmentChoice.addItem(juce::String(ordinal) + ": " + segment.alias
+            + " [" + juce::String(segment.sourceStartSeconds * 1000, 1) + ", "
+            + juce::String(segment.sourceEndSeconds * 1000, 1) + "]", ordinal);
+        if (segment.id == selectedId) current = ordinal;
+    }
+    if (current == 0 && !materialVowelIds.empty()) current = 1;
+    materialSegmentChoice.setSelectedId(current, juce::dontSendNotification);
+    const auto index = selectedMaterialVowelIndex(); const bool any = index >= 0;
+    const bool scalar = materialSession->isClassicNoteScope();
+    materialVowelEditId = any ? waveform.nativeSegments[static_cast<std::size_t>(index)].id : juce::String{};
+    materialVowelName.setText(any ? waveform.nativeSegments[static_cast<std::size_t>(index)].alias : juce::String{}, false);
+    const auto weight = any ? waveform.nativeSegments[static_cast<std::size_t>(index)].stretchWeight : 1.0;
+    materialVowelWeightBaseline = any ? (weight >= 1.e-6 && weight <= 1.e8
+        ? juce::String(weight, 9).trimCharactersAtEnd("0").trimCharactersAtEnd(".") : juce::String(weight, 16, true)) : juce::String{};
+    materialVowelWeight.setText(materialVowelWeightBaseline, false);
+    materialVowelName.setEnabled(any && !scalar); materialVowelWeight.setEnabled(any && !scalar);
+    materialPronunciationKindChoice.setEnabled(materialDetail && !scalar);
+    materialSimplifiedConsonant.setEnabled(!scalar);
+    materialConsonantGap.setEnabled(!scalar && materialDetailDraft.simplifiedConsonant);
+    materialPronunciationKindChoice.setSelectedId(static_cast<int>(materialDetailDraft.pronunciationKind) + 1, juce::dontSendNotification);
+    const auto elastic = [&](int i)
+    { return juce::isPositiveAndBelow(i, static_cast<int>(waveform.nativeSegments.size()))
+        && waveform.nativeSegments[static_cast<std::size_t>(i)].role == NativeSegmentRole::vowel
+        && waveform.nativeSegments[static_cast<std::size_t>(i)].stretchable; };
+    materialSplitSegment.setEnabled(any && !scalar);
+    materialMergeSegment.setEnabled(any && !scalar && elastic(index + 1));
+    refreshingMaterialVowel = false;
+}
+
+void OtoWaveformEditorComponent::refreshMaterialVisibility()
+{
+    if (!materialSession) return;
+    for (int i = 0; i < getNumChildComponents(); ++i) getChildComponent(i)->setVisible(materialDetail);
+    materialMode.setVisible(true); materialModeLabel.setVisible(true);
+    const bool local = editScope() == EditScope::thisNote;
+    materialBackButton.setVisible(materialDetail && !local && !singleSyllableMaterial);
+    const bool nativeView = materialMode.getSelectedId() == 1;
+    materialSingleSyllable.setVisible(nativeView);
+    materialSingleSyllable.setEnabled(nativeView && !local);
+    materialScope.setVisible(materialSession->hasNoteScope());
+    materialRestoreLocal.setVisible(local);
+    materialRestoreLocal.setEnabled(materialSession->canRestoreLocal());
+    const bool scalar = materialSession->isClassicNoteScope();
+    materialMode.setEnabled(!scalar);
+    materialRestoreLocal.setButtonText(scalar
+        ? materialText("继承引擎 OTO 默认值", "Inherit engine OTO defaults")
+        : materialText("恢复源设置", "Restore source settings"));
+    if (materialSession->hasNoteScope())
+        saveButton.setButtonText(local ? materialText("应用到此音符", "Apply to this note") : materialText("保存源标注", "Save source annotations"));
+    materialOverview->setVisible(!materialDetail);
+    if (materialDetail)
+    {
+        applyParameterVisibility();
+        for (auto* component : std::initializer_list<juce::Component*>{&classesLabel, &classesEditor, &consonantLabel}) component->setVisible(mou);
+        classesEditor.setReadOnly(true);
+        for (auto& button : countButtons) { button.setVisible(mou); button.setEnabled(false); }
+        for (auto& button : consonantButtons) { button.setVisible(mou); button.setEnabled(false); }
+        for (auto* component : std::initializer_list<juce::Component*>{&materialSegmentLabel, &materialSegmentChoice,
+            &materialSplitSegment, &materialMergeSegment, &materialVowelNameLabel, &materialVowelName,
+            &materialVowelWeightLabel, &materialVowelWeight}) component->setVisible(waveform.nativeDetail);
+        for (auto* component : std::initializer_list<juce::Component*>{&materialSplitLeftLabel, &materialSplitLeftName,
+            &materialSplitRightLabel, &materialSplitRightName, &materialSplitConfirm, &materialSplitCancel})
+            component->setVisible(waveform.nativeDetail && materialVowelSplitPending);
+        materialPronunciationKindChoice.setVisible(true);
+        refreshNativeSegmentControls();
+    }
+    resized(); repaint();
+}
+
 OtoWaveformEditorComponent::OtoWaveformEditorComponent(
     VoicebankOtoEntry entry, bool jieMode, bool mouMode,
     std::function<void()> savedCallback)
     : jie(jieMode), mou(mouMode), original(entry), edited(std::move(entry)),
       onSaved(std::move(savedCallback)),
-      waveform(edited, jieMode, mouMode, [this] { refreshEditors(); })
+      waveform(edited, jieMode, mouMode, [this]
+      {
+          if (materialSession && materialDetail && !loadingMaterial)
+          {
+              juce::String error;
+              if (!syncMaterialTiming(error)) helpLabel.setText(error, juce::dontSendNotification);
+          }
+          refreshEditors(); if (materialSession) refreshNativeSegmentControls();
+      })
 {
     setOpaque(true);
     // Opening an entry the voicebank has not been extended for yet: start from
@@ -1078,8 +1996,8 @@ OtoWaveformEditorComponent::OtoWaveformEditorComponent(
             button.setButtonText(juce::String(count) + utf8(" 段分"));
             button.setTooltip(utf8("把这条 oto 切成 ") + juce::String(count)
                               + utf8(" 段；波形与下面的边界数值会立刻跟着变"));
-            button.setColour(juce::TextButton::buttonOnColourId, Palette::accent);
-            button.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
+            button.setColour(juce::TextButton::buttonOnColourId, Palette::primaryButton);
+            button.setColour(juce::TextButton::textColourOnId, Palette::contrastingText(Palette::primaryButton));
             button.setClickingTogglesState(true);
             button.setRadioGroupId(0x6d6f75);
             button.onClick = [this, count] { setRegionCount(count); };
@@ -1106,7 +2024,7 @@ OtoWaveformEditorComponent::OtoWaveformEditorComponent(
     pitchReadoutTitle.setFont(12.0f);
     pitchReadoutHz.setFont(18.0f);
     pitchReadoutTime.setFont(11.0f);
-    pitchReadoutHz.setColour(juce::Label::textColourId, juce::Colour(0xff7aeeee));
+    pitchReadoutHz.setColour(juce::Label::textColourId, Palette::contrastingText(Palette::graphBackground));
     for (auto* label : { &pitchReadoutTitle, &pitchReadoutHz, &pitchReadoutTime })
     {
         label->setJustificationType(juce::Justification::centred);
@@ -1132,13 +2050,51 @@ OtoWaveformEditorComponent::OtoWaveformEditorComponent(
         { waveform.setAnalysisLayers(spectrumButton.getToggleState(), sourceF0Button.getToggleState()); };
         addAndMakeVisible(*button);
     }
+    setLookAndFeel(&editorLookAndFeel);
     setSize(1040, 620);
     refreshEditors();
+}
+
+void OtoWaveformEditorComponent::lookAndFeelChanged()
+{
+    editorLookAndFeel.refreshColours();
+    helpLabel.setColour(juce::Label::textColourId, Palette::contrastingText(Palette::panel, true));
+    for (auto* label : { &pitchReadoutTitle, &pitchReadoutHz, &pitchReadoutTime })
+        label->setColour(juce::Label::textColourId, Palette::contrastingText(Palette::graphBackground,
+            label == &pitchReadoutTime));
+    for (auto& button : countButtons)
+    {
+        button.setColour(juce::TextButton::buttonOnColourId, Palette::primaryButton);
+        button.setColour(juce::TextButton::textColourOnId, Palette::contrastingText(Palette::primaryButton));
+    }
+    // TextEditor stores per-run colours; JUCE's lookAndFeelChanged only resets
+    // its caret. Refresh existing text too, without rewriting text or selection.
+    const auto refresh = [](auto&& self, juce::Component& component) -> void
+    {
+        if (auto* editor = dynamic_cast<juce::TextEditor*>(&component))
+        {
+            const auto background = editor->isReadOnly() ? Palette::panel : Palette::base;
+            const auto foreground = Palette::contrastingText(background, editor->isReadOnly() || !editor->isEnabled());
+            editor->setColour(juce::TextEditor::backgroundColourId, background);
+            editor->setColour(juce::TextEditor::textColourId, foreground);
+            editor->applyColourToAllText(foreground, false);
+        }
+        if (auto* combo = dynamic_cast<juce::ComboBox*>(&component))
+        {
+            combo->setColour(juce::ComboBox::backgroundColourId, Palette::base);
+            combo->setColour(juce::ComboBox::textColourId, Palette::contrastingText(Palette::base));
+        }
+        for (int i = 0; i < component.getNumChildComponents(); ++i)
+            self(self, *component.getChildComponent(i));
+    };
+    refresh(refresh, *this);
+    repaint();
 }
 
 void OtoWaveformEditorComponent::paint(juce::Graphics& g)
 {
     g.fillAll(Palette::panel);
+    if (materialSession && !materialDetail) return;
     g.setColour(Palette::graphBackground);
     g.fillRoundedRectangle(pitchReadoutBounds.toFloat(), 5.0f);
     g.setColour(Palette::border);
@@ -1166,6 +2122,22 @@ void OtoWaveformEditorComponent::refreshScrollBar()
 void OtoWaveformEditorComponent::resized()
 {
     auto area = getLocalBounds().reduced(12);
+    if (materialSession)
+    {
+        auto header = area.removeFromTop(32);
+        materialModeLabel.setBounds(header.removeFromLeft(100));
+        materialMode.setBounds(header.removeFromLeft(230).reduced(0, 2));
+        materialSingleSyllable.setBounds(header.removeFromLeft(205).reduced(4, 2));
+        materialBackButton.setBounds(header.removeFromRight(240).reduced(0, 2));
+        if (materialSession->hasNoteScope())
+        {
+            auto destination = area.removeFromTop(32);
+            materialScope.setBounds(destination.removeFromLeft(280).reduced(0, 2));
+            materialRestoreLocal.setBounds(destination.removeFromLeft(240).reduced(8, 2));
+        }
+        area.removeFromTop(6);
+        if (!materialDetail) { if (materialOverview) materialOverview->setBounds(area); return; }
+    }
     auto title = area.removeFromTop(28);
     fileLabel.setBounds(title.removeFromLeft(title.getWidth() / 2));
     helpLabel.setBounds(title);
@@ -1194,6 +2166,37 @@ void OtoWaveformEditorComponent::resized()
     auto layers = area.removeFromTop(26);
     spectrumButton.setBounds(layers.removeFromLeft(86));
     sourceF0Button.setBounds(layers.removeFromLeft(120));
+    if (materialSession)
+    {
+        materialSimplifiedConsonant.setBounds(layers.removeFromLeft(176));
+        materialGapLabel.setBounds(layers.removeFromLeft(62));
+        materialConsonantGap.setBounds(layers.removeFromLeft(82).reduced(2));
+        materialKindLabel.setBounds(layers.removeFromLeft(150));
+        materialPronunciationKindChoice.setBounds(layers.removeFromLeft(180).reduced(2));
+    }
+    if (materialSession && waveform.nativeDetail)
+    {
+        auto native = area.removeFromTop(30);
+        materialSegmentLabel.setBounds(native.removeFromLeft(135));
+        materialSegmentChoice.setBounds(native.removeFromLeft(std::max(180, native.getWidth() / 3)).reduced(2));
+        materialSplitSegment.setBounds(native.removeFromLeft(180).reduced(2));
+        materialMergeSegment.setBounds(native.removeFromLeft(170).reduced(2));
+        auto fields = area.removeFromTop(30);
+        materialVowelNameLabel.setBounds(fields.removeFromLeft(45));
+        materialVowelName.setBounds(fields.removeFromLeft(220).reduced(2));
+        fields.removeFromLeft(8); materialVowelWeightLabel.setBounds(fields.removeFromLeft(110));
+        materialVowelWeight.setBounds(fields.removeFromLeft(100).reduced(2));
+        if (materialVowelSplitPending)
+        {
+            auto names = area.removeFromTop(32);
+            materialSplitLeftLabel.setBounds(names.removeFromLeft(70));
+            materialSplitLeftName.setBounds(names.removeFromLeft(180).reduced(2));
+            materialSplitRightLabel.setBounds(names.removeFromLeft(75));
+            materialSplitRightName.setBounds(names.removeFromLeft(180).reduced(2));
+            materialSplitConfirm.setBounds(names.removeFromLeft(130).reduced(2));
+            materialSplitCancel.setBounds(names.removeFromLeft(90).reduced(2));
+        }
+    }
     auto buttons = area.removeFromBottom(34);
     playButton.setBounds(buttons.removeFromLeft(112).reduced(0, 2));
     cancelButton.setBounds(buttons.removeFromRight(92).reduced(0, 2));
@@ -1389,7 +2392,36 @@ void OtoWaveformEditorComponent::refreshEditors()
 
 void OtoWaveformEditorComponent::commitEditors()
 {
-    if (refreshingEditors) return;
+    if (refreshingEditors || loadingMaterial) return;
+    if (materialSession)
+    {
+        materialDetailError.clear();
+        if (!materialDetail) return;
+        auto candidate = edited;
+        double* fields[]{&candidate.offsetMs, &candidate.consonantMs, &candidate.cutoffMs,
+            &candidate.preutteranceMs, &candidate.overlapMs, &candidate.jieOnsetMs,
+            &candidate.jieGlideMs, &candidate.jieNucleusMs};
+        const double previous[]{edited.offsetMs, edited.consonantMs, edited.cutoffMs,
+            edited.preutteranceMs, edited.overlapMs, edited.jieOnsetMs, edited.jieGlideMs, edited.jieNucleusMs};
+        for (const auto index : visibleParameters())
+        {
+            if (waveform.lockOuterRange && (index == 0 || index == 2)) continue;
+            const auto text = parameterEditors[index].getText().trim();
+            if (text == formatNumber(previous[index])) continue; // Keep exact inherited timing bits.
+            const auto* start = text.toRawUTF8(); char* end = nullptr;
+            const auto number = std::strtod(start, &end);
+            if (text.isEmpty() || end == start || *end != 0 || !std::isfinite(number))
+            {
+                materialDetailError = materialText("参数必须为有限的毫秒数。", "Parameters must be finite numeric milliseconds.");
+                helpLabel.setText(materialDetailError, juce::dontSendNotification); return;
+            }
+            *fields[index] = number;
+        }
+        if (jie && candidate.jieOnsetMs != edited.jieOnsetMs) candidate.consonantMs = candidate.jieOnsetMs;
+        edited = candidate;
+        if (!syncMaterialTiming(materialDetailError)) helpLabel.setText(materialDetailError, juce::dontSendNotification);
+        refreshEditors(); return;
+    }
     edited.offsetMs = parameterEditors[0].getText().getDoubleValue();
     if (!jie) edited.consonantMs = parameterEditors[1].getText().getDoubleValue();
     edited.cutoffMs = parameterEditors[2].getText().getDoubleValue();
@@ -1421,8 +2453,69 @@ void OtoWaveformEditorComponent::commitEditors()
     refreshEditors();
 }
 
+bool OtoWaveformEditorComponent::commitMaterialDetail(juce::String& error)
+{
+    if (!materialSession || !materialDetail) return true;
+    if (!commitMaterialVowelFields()) { error = "Invalid manual vowel name or stretch weight"; return false; }
+    commitEditors();
+    if (materialDetailError.isNotEmpty()) { error = materialDetailError; return false; }
+    auto row = materialDetailDraft;
+    row.segments = waveform.nativeSegments;
+    // UTAU views expose the same C/P authority. Additional displayed boundaries
+    // may retime existing elastic vowel pairs, never assign arbitrary C/V kinds.
+    if (jie)
+    {
+        const double now[]{edited.jieGlideMs, edited.jieNucleusMs};
+        const double before[]{detailBaseline.jieGlideMs, detailBaseline.jieNucleusMs};
+        for (int i = 0; i < 2; ++i)
+        {
+            if (now[i] == before[i]) continue;
+            const auto left = static_cast<std::size_t>(i + 1), right = left + 1;
+            if (right >= row.segments.size() || row.segments[left].role != NativeSegmentRole::vowel
+                || row.segments[right].role != NativeSegmentRole::vowel
+                || !row.segments[left].stretchable || !row.segments[right].stretchable)
+            { error = materialText("请在原生视图选择内部弹性元音区段。", "Choose an internal elastic vowel segment in native view."); return false; }
+            const auto position = row.regionStartSeconds + now[i] / 1000;
+            if (position <= row.segments[left].sourceStartSeconds || position >= row.segments[right].sourceEndSeconds)
+            { error = "Internal vowel boundary must remain inside its adjacent vowels"; return false; }
+            row.segments[left].sourceEndSeconds = position; row.segments[right].sourceStartSeconds = position;
+        }
+    }
+    if (!materialSession->setRow(materialRegionId, row, error)) return false;
+    for (const auto& updated : materialSession->rows()) if (updated.materialRegionId == materialRegionId)
+    {
+        materialDetailDraft = updated; detailSegmentsBaseline = updated.segments;
+        waveform.nativeSegments = updated.segments; break;
+    }
+    detailBaseline = edited; materialTimingEntry = edited;
+    return true;
+}
+
+void OtoWaveformEditorComponent::saveMaterial()
+{
+    if (!materialSession) return;
+    if (!materialDetail) { if (materialOverview) materialOverview->save(); return; }
+    juce::String error;
+    if (!commitMaterialDetail(error)) { helpLabel.setText(error, juce::dontSendNotification); return; }
+    const auto session = materialSession; // model callback may close this window
+    juce::Component::SafePointer<OtoWaveformEditorComponent> safe(this);
+    const bool saved = session->save(error);
+    if (!safe) return;
+    if (!saved) { helpLabel.setText(error, juce::dontSendNotification); return; }
+    if (editScope() == EditScope::thisNote)
+    {
+        helpLabel.setText(materialText("已应用到此音符；源录音、OTTO 和旧 OTO 未修改。", "Applied to this note; recording, OTTO and old OTO unchanged."), juce::dontSendNotification);
+        return; // Never call the SOURCE publisher/cache invalidator for local Save.
+    }
+    backend::UtauRenderer::invalidateVoicebankCache();
+    helpLabel.setText(materialText("标注已保存到 otto.ini；原音频和旧 OTO 未修改。", "Saved otto.ini; original audio and old OTO unchanged."), juce::dontSendNotification);
+    const auto rows = materialSession->rows();
+    materialSourceSaved(rows); // Host may close this component; no later access.
+}
+
 void OtoWaveformEditorComponent::save()
 {
+    if (materialSession) { saveMaterial(); return; }
     commitEditors();
     if (noteHandoff)
     {
@@ -1486,10 +2579,131 @@ void OtoWaveformEditorComponent::save()
     closeWindow();
 }
 
+std::unique_ptr<OtoWaveformEditorComponent> OtoWaveformEditorComponent::forClassicNote(
+    ProjectModel& project, const juce::String& noteId, I18n& strings,
+    const backend::UtauRenderer::ResolvedSample& sample, std::uint64_t resolvedAtRevision, juce::String& error,
+    EditScope initial, const juce::String& selectedAudioId, const juce::String& selectedRegionId,
+    std::function<void(const std::vector<SampleRegionSetting>&)> onSourceSaved)
+{
+    error.clear();
+    const auto reject = [&](const juce::String& why)
+    { error = why; return std::unique_ptr<OtoWaveformEditorComponent>{}; };
+    if (!sample.found || !sample.sourceOto || sample.sourceOto->lineIndex < 0
+        || sample.sourceOto->sourceFingerprint.isEmpty() || sample.sourceOto->audioFile != sample.file)
+        return reject("Classic note scope requires the exact canonical source OTO ticket; no alias fallback is available");
+    if (project.revisionNumber() != resolvedAtRevision) return reject("The project changed while resolving classic note timing");
+    const auto data = project.snapshot(); const auto expectedRevision = resolvedAtRevision;
+    if (project.revisionNumber() != expectedRevision) return reject("The note changed while opening classic timing");
+    const TrackData* owner = nullptr; const NoteData* note = nullptr; int matches = 0;
+    for (const auto& track : data.tracks) for (const auto& clip : track.clips) for (const auto& candidate : clip.notes)
+        if (candidate.id == noteId) { owner = &track; note = &candidate; ++matches; }
+    if (matches != 1 || !owner || !note || !trackUsesVoicebankSynthesis(*owner)
+        || trackIsDiffSinger(*owner) || owner->utauMode != UtauMode::classic)
+        return reject("A unique classic UTAU note is required for scalar note OTO editing");
+    const auto root = owner->voicebankDirectory, manifest = root.getChildFile("otto.ini");
+    if (!sample.file.isAChildOf(root)) return reject("The canonical recording is outside the note's voicebank");
+    OttoMaterialMigration::OtoSource otoSource;
+    if (!OttoMaterialMigration::readOtoSource(*sample.sourceOto, UtauMode::classic, otoSource, error)) return {};
+    SampleRegionSetting engineDefault;
+    if (!OttoMaterialMigration::convertOtoEntry(*sample.sourceOto, UtauMode::classic,
+            sample.fileSeconds, otoSource, engineDefault, error)) return {};
+    const auto requestedAudio = selectedAudioId.isNotEmpty() ? selectedAudioId : note->materialAudioId;
+    const auto requestedRegion = selectedRegionId.isNotEmpty() ? selectedRegionId
+        : note->materialRegionId.isNotEmpty() ? note->materialRegionId : engineDefault.materialRegionId;
+    auto editor = forMaterial(sample.file, manifest, strings, std::move(onSourceSaved), true, &error, requestedAudio);
+    if (!editor) return {};
+    const auto& sourceRows = editor->materialSession->rows();
+    const auto source = std::find_if(sourceRows.begin(), sourceRows.end(),
+        [&](const auto& row) { return row.materialRegionId == requestedRegion; });
+    if (source == sourceRows.end()) return reject("No matching pronunciation identity in the governing source; select an explicit variant/region");
+    auto entry = SampleSettings::entryWithNoteOto(*sample.sourceOto, note->utauOto);
+    SampleRegionSetting localRow;
+    if (!OttoMaterialMigration::convertOtoEntry(entry, UtauMode::classic, sample.fileSeconds, otoSource, localRow, error)) return {};
+    // Session editing identities are from the governing source. They are never
+    // written to NoteData by the scalar callback or treated as a native binding.
+    const auto adoptSessionIdentity = [&](SampleRegionSetting& row)
+    {
+        row.materialAudioId = source->materialAudioId; row.materialRegionId = source->materialRegionId;
+        row.name = source->name; row.additionalAliases = source->additionalAliases;
+        row.connectedNextRegionId = source->connectedNextRegionId;
+    };
+    adoptSessionIdentity(localRow); adoptSessionIdentity(engineDefault);
+    editor->classicScalarProjection = [ticket = sample.sourceOto, otoSource, duration = sample.fileSeconds]
+        (const VoicebankOtoEntry& requested, SampleRegionSetting& row, juce::String& why)
+    {
+        auto candidate = *ticket;
+        candidate.offsetMs = requested.offsetMs; candidate.cutoffMs = requested.cutoffMs;
+        candidate.consonantMs = requested.consonantMs; candidate.preutteranceMs = requested.preutteranceMs;
+        candidate.overlapMs = requested.overlapMs;
+        SampleRegionSetting converted;
+        if (!OttoMaterialMigration::convertOtoEntry(candidate, UtauMode::classic, duration, otoSource, converted, why)) return false;
+        // Keep immutable Session/source identity and metadata, replacing only
+        // scalar-authoritative geometry from the existing strict converter.
+        row.regionStartSeconds = converted.regionStartSeconds; row.regionEndSeconds = converted.regionEndSeconds;
+        row.alignmentSeconds = converted.alignmentSeconds; row.fixedDurationSeconds = converted.fixedDurationSeconds;
+        row.overlapSeconds = converted.overlapSeconds; row.segments = std::move(converted.segments);
+        return true;
+    };
+    backend::UtauOtoOverride check;
+    if (!ProjectModel::makeClassicNoteMaterialOto(localRow, check, error)
+        || !ProjectModel::makeClassicNoteMaterialOto(engineDefault, check, error)) return {};
+    const auto sourceSize = sample.file.getSize(); const auto sourceTime = sample.file.getLastModificationTime();
+    const auto audioFingerprint = juce::SHA256(sample.file).toHexString();
+    if (!sample.file.existsAsFile() || sample.file.getSize() != sourceSize || sample.file.getLastModificationTime() != sourceTime)
+        return reject("The recording changed while opening classic note timing");
+    const auto manifestToken = editor->materialSession->revisionToken();
+    const auto ticket = sample.sourceOto;
+    const auto guardSource = [ticket, manifest, manifestToken, audioFingerprint](const NoteScopeBinding& binding, juce::String& why)
+    {
+        if (binding.sourceAudio != ticket->audioFile || binding.sourceFingerprint != audioFingerprint
+            || !ticket->audioFile.existsAsFile() || juce::SHA256(ticket->audioFile).toHexString() != audioFingerprint)
+        { why = "The classic source recording changed; reopen note timing"; return false; }
+        OttoMaterialMigration::OtoSource current;
+        if (!OttoMaterialMigration::readOtoSource(*ticket, UtauMode::classic, current, why)) return false;
+        juce::MemoryBlock bytes;
+        if (manifest.exists() && (!manifest.existsAsFile() || !manifest.loadFileAsData(bytes)))
+        { why = "Cannot revalidate the governing native manifest"; return false; }
+        const auto token = manifest.exists() ? "v1:" + juce::SHA256(bytes).toHexString() : juce::String("absent");
+        if (token != manifestToken) { why = "The governing source annotations changed; reopen note timing"; return false; }
+        return true;
+    };
+    NoteScopeBinding binding;
+    binding.noteId = noteId; binding.audioId = source->materialAudioId; binding.regionId = source->materialRegionId;
+    binding.sourceAudio = sample.file; binding.sourceFingerprint = audioFingerprint;
+    binding.projectRevision = expectedRevision; binding.localRow = localRow;
+    binding.capability = MaterialAnnotationSession::NoteScopeCapability::classicScalarOto;
+    binding.apply = [&project, noteId, guardSource](const auto& bound, const auto& row, juce::uint64& revision, juce::String& why)
+    {
+        if (bound.noteId != noteId || !guardSource(bound, why)) return false;
+        backend::UtauOtoOverride scalar;
+        if (!ProjectModel::makeClassicNoteMaterialOto(row, scalar, why)) return false;
+        std::uint64_t committed = 0;
+        if (!project.setNoteUtauOtoChecked(noteId, bound.projectRevision, scalar, committed, why)) return false;
+        revision = committed; return true;
+    };
+    binding.restore = [&project, noteId, guardSource, engineDefault](const auto& bound, auto& restored, juce::uint64& revision, juce::String& why)
+    {
+        if (bound.noteId != noteId || !guardSource(bound, why)) return false;
+        backend::UtauOtoOverride scalar;
+        if (!ProjectModel::makeClassicNoteMaterialOto(engineDefault, scalar, why)) return false;
+        std::uint64_t committed = 0;
+        if (!project.setNoteUtauOtoChecked(noteId, bound.projectRevision, backend::UtauOtoOverride{}, committed, why)) return false;
+        restored = engineDefault; revision = committed; return true; // Explicit engine inheritance, not native restore.
+    };
+    if (!guardSource(binding, error) || !editor->enableNoteScope(std::move(binding), initial, error)) return {};
+    editor->setPublicationValidator([](const auto&, juce::String& why)
+    { why = "Source publication requires the host's source preflight/completion adapter"; return false; });
+    return editor;
+}
+
 std::unique_ptr<OtoWaveformEditorComponent> OtoWaveformEditorComponent::forNote(
     ProjectModel& project, const juce::String& noteId, juce::String& error)
 {
+    error.clear();
+    const auto expectedRevision = project.revisionNumber();
     const auto data = project.snapshot();
+    if (project.revisionNumber() != expectedRevision)
+    { error = "The project changed while opening note timing"; return {}; }
     const TrackData* owner = nullptr;
     const NoteData* target = nullptr;
     for (const auto& track : data.tracks)
@@ -1507,6 +2721,18 @@ std::unique_ptr<OtoWaveformEditorComponent> OtoWaveformEditorComponent::forNote(
         error = utf8("请先为当前轨道选择 UTAU 音源库。");
         return {};
     }
+    if (owner->utauMode == UtauMode::classic)
+    {
+        const auto sample = backend::UtauRenderer::resolveVoiceSample(owner->voicebankDirectory,
+            target->label, target->midiNote, 100, false, false);
+        auto strings = std::make_unique<I18n>();
+        auto editor = forClassicNote(project, noteId, *strings, sample, expectedRevision, error);
+        if (editor) editor->ownedMaterialStrings = std::move(strings);
+        return editor;
+    }
+    // Regional legacy capability is intentionally retained: its auxiliary
+    // Jie/Mou files are not covered by a classic provenance/scalar adapter.
+    // This branch is NOT claimed to be the unified native/classic Session path.
     juce::StringArray warnings;
     const auto mouMode = owner->utauMode == UtauMode::mou;
     const auto regions = utauModeUsesRegions(owner->utauMode);
@@ -1545,6 +2771,7 @@ OtoWaveformEditorComponent::~OtoWaveformEditorComponent()
     // Closing the window is how most playing ends: the device must not be left
     // calling a player that is about to go.
     stopPlayback();
+    setLookAndFeel(nullptr);
 }
 
 void OtoWaveformEditorComponent::togglePlayback()

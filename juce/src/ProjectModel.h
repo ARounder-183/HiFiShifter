@@ -5,6 +5,10 @@
 #include "backend/UtauOtoOverride.h"
 #include "backend/TailFadeSettings.h"
 #include "backend/NativeEnvelope.h"
+#include "backend/CvvcEnvelope.h"
+#include "backend/CvvcTiming.h"
+#include "PronunciationTiming.h"
+#include "ProjectMaterialRegistrationTypes.h"
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -19,6 +23,7 @@ inline constexpr int inheritedUtauConsonantVelocity =
     std::numeric_limits<int>::min();
 
 struct SampleRegionSetting;
+struct VoicebankOtoEntry;
 
 // Native annotation vocabulary shared by every import path.  Input formats
 // may retain provenance, but downstream editing does not branch on it.
@@ -125,7 +130,8 @@ enum class StretchAlgorithm
     loop,
     soundTouch,
     nsfShiftThenSplice,
-    hifiShifterMel
+    hifiShifterMel,
+    wcsNonLoop
 };
 
 // Where the splice sits relative to the pitch work, for a track that composes.
@@ -180,6 +186,9 @@ struct PitchCurveEditPoint
     float bezierY2 = 1.0f;
     // Internal DS prediction/restoration samples do not expose editable handles.
     bool diffSingerRestoreSupport = false;
+    // Exact newly cropped cubics opt into double inversion/evaluation. Legacy
+    // and default curves keep their historical float evaluator unchanged.
+    bool highPrecisionBezier = false;
 };
 
 // Per-note amplitude automation used after the UTAU resampler and before the
@@ -284,6 +293,21 @@ struct NoteData;
 
 [[nodiscard]] float evaluatePitchCurve(
     const std::vector<PitchCurveEditPoint>& points, double timeSeconds);
+// Pure exact cubic crop, with output times local to from. No sampling or
+// linearization of shaped segments; false if a singular crop is unrepresentable.
+[[nodiscard]] bool sliceNativePitchCurve(const std::vector<PitchCurveEditPoint>&,
+    double from, double to, std::vector<PitchCurveEditPoint>& result);
+// Compose a local polyline stroke with <=1ms/quarter-span INSIDE edge guards.
+// Old boundary values and exact cubic prefix/suffix are preserved. Sparse notes
+// return a complete curve/store=true; derived notes return only the stroke
+// window/store=false so existing source/target facts outside it are untouched.
+// False preserve flags are ONLY artificial clips at the body/authored union
+// domain edge, with no old authored support beyond. They use the user's exact
+// endpoint Y, so a continuous global stroke never resets at each material seam.
+[[nodiscard]] bool composeNativePitchStroke(const NoteData&,
+    const std::vector<PitchCurveEditPoint>& localStroke, std::vector<PitchCurveEditPoint>& out,
+    bool& storePitchControlPoints, juce::String& error,
+    bool preserveLeft = true, bool preserveRight = true);
 
 // A source-time anchor imported from an external editor.  Both values are
 // relative to the beginning of the clip: targetSeconds is the position on the
@@ -312,6 +336,27 @@ struct NoteData
     double nativeSourceStartSeconds = -1.0;
     double nativeSourceEndSeconds = -1.0;
     std::vector<NativeSegment> nativeSegments;
+    // Identity is (owning clip/part sourceFile, audio ID, region ID). No
+    // redundant absolute material root: sourceFile already relocates with media.
+    juce::String materialAudioId, materialRegionId;
+    // Alias selection is not identity, and a project display label is not a
+    // source selection. Primary-follow intent avoids copying a whole old row.
+    juce::String materialBoundAlias;
+    bool materialAliasFollowsPrimary = true;
+    bool materialLabelFollowsAlias = true;
+    // Explicit source replacement locks the existing musical score while new
+    // acoustic F0 is pending. Also provides a native singleton shared curve.
+    bool materialTargetPitchLocked = false;
+    // Last complete pronunciation bounds, separate from a split/cropped
+    // note's actual source slice. Copied with the reference, not rebound by trims.
+    double materialSourceStartSeconds = -1.0, materialSourceEndSeconds = -1.0;
+    bool materialLocalOverride = false;
+    bool materialReferenceUnresolved = false; // retain last usable snapshot
+    juce::StringArray materialAdditionalAliases;
+    juce::String materialConnectedNextRegionId;
+    PronunciationKind pronunciationKind = PronunciationKind::normal;
+    bool simplifiedConsonant = false;
+    bool vowelSplitsExplicit = false; // named authoring boundaries, never analysis epochs
     // Passed verbatim as the UTAU resampler's flags argument.  Interpretation
     // belongs to the selected resampler because flag dialects are not uniform.
     // DS phoneme onset overrides; immutable JSON, note-local seconds.
@@ -438,6 +483,9 @@ struct NoteData
     // These are stored separately from the dense 5 ms render contour so a
     // deliberately added collinear handle survives simplification and save/load.
     std::vector<PitchCurveEditPoint> pitchControlPoints;
+    // Explicit musical support intent. Geometry/import history alone never
+    // opts legacy PBW into extended playback. Extents come from this curve.
+    bool pitchSupportAuthored = false;
     // Last accepted DiffSinger prediction, for visual comparison only. Manual
     // pitch edits never write this field; it is not part of synthesis/cache keys.
     std::vector<PitchCurveEditPoint> diffSingerPitchReference;
@@ -446,6 +494,11 @@ struct NoteData
     // An older file may only contain its current pitch, not a DS prediction.
     bool diffSingerPitchReferenceFromSavedPitch = false;
     std::vector<AmplitudeEnvelopePoint> amplitudeEnvelope;
+    backend::CvvcEnvelopeEdits cvvcEnvelopes;
+    backend::CvvcBoundaryPositions cvvcBoundaries;
+    // Derived phoneme layout, immutable JSON. Saved, but excluded from dirty
+    // fingerprints and render keys; never a second pronunciation authority.
+    juce::String cvvcPhonemeCache;
     // The envelope's height as a whole, in UTAU's own linear percent: 100 is
     // the envelope as drawn, 200 twice as tall, 0 silence.  A note with no
     // envelope has a flat 100% one, so this raises it just the same.
@@ -527,6 +580,15 @@ struct ClipData
     std::shared_ptr<const std::vector<NativeSourcePitchPoint>> nativeSourcePitch;
     bool nativeSourcePitchComplete = false;
     bool nativeSourcePitchPending = false;
+    // Full-file byte fingerprint for explicit per-note source assignment.
+    // Pending owners are muted until guarded acoustic facts arrive; resumeMuted
+    // stores ONLY the child's own user mute, never an inherited parent mute.
+    juce::String materialSourceFingerprint;
+    // Actual imported source-use component; registration provenance only.
+    // Never inferred from neighbouring times, filenames or pitch-join graphs.
+    juce::String materialSourceUsageGroupId;
+    bool materialSourceAnalysisPending = false;
+    bool materialSourceResumeMuted = false;
     std::vector<SourceTimePoint> nativeTrimClock;
     std::vector<NoteData> notes;
     // Source-only children, with starts relative to this clip. Notes are owned
@@ -550,6 +612,10 @@ inline UtauOutputEngine parseUtauOutputEngine(const juce::String& key)
     return key == "pc-nsf-hifigan" ? UtauOutputEngine::pcNsfHifigan
         : key == "resampler" ? UtauOutputEngine::resampler : UtauOutputEngine::inherit;
 }
+
+enum class TrackType { hachi, utau, diffSinger };
+[[nodiscard]] juce::String trackTypeName(TrackType);
+[[nodiscard]] std::optional<TrackType> parseTrackType(const juce::String&);
 
 struct TrackData
 {
@@ -593,9 +659,10 @@ struct TrackData
     UtauMode utauMode = UtauMode::classic;
     // Opt-in lyric phonemizer; old projects retain literal OTO aliases.
     bool chineseCvvc = false;
-    // MLD5/MLD3 are retained only for loading old projects.  New native
-    // projects default to LLSM2; the UI promotes NSF-HiFiGAN when its model
-    // pack is actually available.
+    bool utauPianoPreview = true;
+    bool cvvcCurveCrossfade = false;
+    // MLD5/MLD3 remain loadable for old projects. New native tracks default
+    // explicitly to NSF-HiFiGAN; a missing model is reported, not substituted.
     PitchAlgorithm pitchAlgorithm = defaultPitchAlgorithm();
     // Explicit native picker selection must not reactivate legacy NSF+OTO
     // synthesis merely because a previously selected voicebank is remembered.
@@ -604,13 +671,19 @@ struct TrackData
     // Kept at processThenSplice so an existing project, and every track that
     // predates this field, renders exactly as it did before.
     RenderOrder renderOrder = RenderOrder::processThenSplice;
+    // Optional same-source decode continuity, also valid in process order.
+    bool mergeContiguousSource = false;
     std::vector<ClipData> clips;
     // Backing audio always uses the source reader; engine fields are inert.
     bool accompaniment = false;
     UtauOutputEngine outputEngine = UtauOutputEngine::inherit;
     // Empty per-track paths use global settings, then bundled resampler / internal mixer.
     juce::File outputResampler, outputWavtool;
+    // Null exists only for unadopted legacy/in-memory input. Creation, load and
+    // replace resolve it once; persisted model tracks always carry one of 3 types.
+    std::optional<TrackType> trackType;
 };
+[[nodiscard]] TrackType effectiveTrackType(const TrackData&);
 
 // One pitch line for UTAU notes whose pitch points reach into one another.
 //
@@ -677,8 +750,14 @@ struct SharedPitchLineMember
     // Independent native bodies can meet through a 1 ms boundary bridge.
     // These effective handles agree with the rendered piecewise curve.
     std::vector<PitchCurveEditPoint> nativeBoundaryAnchors;
+    std::vector<juce::Range<double>> connectionPitchWindows; // derived graph ownership
+    // Native request overlay only: when its old base did not render a shared
+    // line, consumers must retain the old request outside these graph windows.
+    bool connectionPitchOnly = false;
     [[nodiscard]] bool owns(double absoluteSeconds) const
     {
+        for(const auto& window:connectionPitchWindows)
+            if(absoluteSeconds>=window.getStart()-1.e-9&&absoluteSeconds<=window.getEnd()+1.e-9)return false;
         if (nativeSharedCurve)
             return std::any_of(nativeHandleTimes.begin(), nativeHandleTimes.end(),
                 [&](double time) { return std::abs(time - absoluteSeconds) < 1.0e-7; });
@@ -710,26 +789,19 @@ struct SharedPitchLines
 // curves; the voicebank chooses WCSNDM or DiffSinger parameter names.
 [[nodiscard]] inline bool trackIsDiffSinger(const TrackData& track)
 {
-    return !track.accompaniment && track.pitchAlgorithm == PitchAlgorithm::utau
-        && track.utauMode == UtauMode::mou
-        && track.voicebankDirectory.getChildFile("dsconfig.yaml").existsAsFile();
+    return !track.accompaniment && effectiveTrackType(track)==TrackType::diffSinger;
 }
 // OTO timing and regional editing are shared by classic resamplers and native NSF.
 // FLAG DSP remains a separate capability. DiffSinger keeps its own renderer.
 [[nodiscard]] inline bool trackUsesVoicebankSynthesis(const TrackData& track)
 {
-    return !track.accompaniment && (track.pitchAlgorithm == PitchAlgorithm::utau
-        || (track.pitchAlgorithm == PitchAlgorithm::nsfHifigan
-            && !track.nativeNsfAudio
-            && (utauModeUsesRegions(track.utauMode) || track.voicebankDirectory.isDirectory())
-            && !track.voicebankDirectory.getChildFile("dsconfig.yaml").existsAsFile()));
+    return !track.accompaniment && effectiveTrackType(track)!=TrackType::hachi;
 }
 // Native recordings are edited as one track-wide timeline. Voicebank and
 // source-file editors retain their selected-region scope.
 [[nodiscard]] inline bool trackShowsAllNativeRegions(const TrackData& track)
 {
-    return track.compose && !track.accompaniment
-        && !trackUsesVoicebankSynthesis(track) && !trackIsDiffSinger(track);
+    return track.compose && !track.accompaniment && effectiveTrackType(track)==TrackType::hachi;
 }
 [[nodiscard]] inline UtauOutputEngine effectiveUtauOutputEngine(const TrackData& track,
     UtauOutputEngine defaultEngine = UtauOutputEngine::resampler)
@@ -768,7 +840,42 @@ struct NativeConnection
     double boundarySeconds = 0.0;
     std::vector<PitchCurveEditPoint> pitchCurve;
     std::vector<AmplitudeEnvelopePoint> amplitudeCurve;
+    // Optional forced-portamento encoding. pitchCurve is the SOLE authority:
+    // normalized time 0..1, MIDI residual from the live endpoint chord. Older
+    // absolute graph curves retain their original units when this flag is false.
+    bool pitchCurveEndpointRelative = false;
+    double pitchStartOffsetSeconds = -0.05; // from live LEFT note end
+    double pitchEndOffsetSeconds = 0.05;    // from live RIGHT musical P anchor
 };
+
+struct ResolvedConnectionPitchCurve
+{
+    juce::String connectionId, leftNoteId, rightNoteId;
+    bool active = false;
+    juce::String issue;
+    double fromSeconds = 0, toSeconds = 0, anchorSeconds = 0;
+    std::vector<PitchCurveEditPoint> points; // derived absolute time/MIDI, not stored
+};
+// Graphless sharedPitchLines remains the legacy oracle. Render AND editor must
+// explicitly use this overload to hear/draw forced curves, including other files.
+[[nodiscard]] SharedPitchLines sharedPitchLines(const TrackData&,
+    const std::vector<NativeConnection>&, const juce::String& replacedNoteId = {},
+    const std::vector<PitchCurveEditPoint>* replacedPoints = nullptr);
+[[nodiscard]] std::vector<ResolvedConnectionPitchCurve> resolvedConnectionPitchCurves(
+    const TrackData&, const std::vector<NativeConnection>&,
+    const juce::String& replacedNoteId = {}, const std::vector<PitchCurveEditPoint>* replacedPoints = nullptr);
+// Absolute graph stroke -> complete absolute graph controls using the SAME
+// exact cubic splice kernel as note strokes. No fake NoteData curve carrier.
+// Intersects the live bridge window; outer graph pitches remain score-attached.
+// False with empty error is a harmless off-window/tiny no-op.
+[[nodiscard]] bool composeConnectionPitchStroke(const TrackData&,
+    const std::vector<NativeConnection>&, const juce::String& connectionId,
+    const std::vector<PitchCurveEditPoint>& absoluteStroke,
+    std::vector<PitchCurveEditPoint>& out, juce::String& error);
+// Empty when no explicit incident graph pitch curve exists. Includes live
+// anchors/base values/validity so move/transpose invalidates only affected audio.
+[[nodiscard]] juce::String connectionPitchDigest(const TrackData&,
+    const std::vector<NativeConnection>&, const ClipData& affectedClip);
 
 // Vibrato offset in cents at a time inside the note.  Shared by the piano roll
 // and the renderer so what is drawn is what is heard.
@@ -797,6 +904,7 @@ struct ProjectData
     // Smallest unit a note can be stretched or moved by, as 1/N of a beat.
     int noteEditDivision = 64;
     juce::String baseScale = "C";
+    bool assetManagerVisible = false;
     std::vector<TempoChange> tempoChanges;
     std::vector<NativeConnection> nativeConnections;
     std::vector<TrackData> tracks;
@@ -821,6 +929,8 @@ public:
     // Opening/new documents never share undo history with the previous document.
     void resetDocument(ProjectData replacement = {});
     void clear();
+    // Saved document UI state; does not enter musical undo or trigger audio sync.
+    void setAssetManagerVisible(bool visible);
     bool setHamoodState(const juce::String& state, juce::String& error);
     bool undo();
     bool redo();
@@ -829,14 +939,32 @@ public:
 
     [[nodiscard]] juce::String addAudioFile(const juce::File& file, double durationSeconds,
                                             double startSeconds = 0.0,
-                                            const juce::String& targetTrackId = {});
+                                            const juce::String& targetTrackId = {},
+                                            const VoicebankOtoEntry* oto = nullptr,
+                                            UtauMode otoMode = UtauMode::classic);
+    // Insert an authoritative ID selection, not aliases or row indices. The
+    // earliest selected source edge lands at absoluteStart (subject to the
+    // native collision-placement service). Exterior recording padding is not
+    // imported. Source gaps retain their timeline length but are silent: each
+    // discontinuous selected run owns an independent source-only child.
+    // Overlapping selected source intervals are rejected, never flattened.
+    // COMPLETE rows must have stable IDs and valid explicit OTTO links.
+    [[nodiscard]] juce::String addMaterialPronunciations(
+        const juce::File& audio, const std::vector<SampleRegionSetting>& completeRows,
+        const std::vector<juce::String>& selectedRegionIds, double absoluteStart,
+        const juce::String& targetTrackId, juce::String& error,
+        const juce::String& chosenAlias = {});
+    [[nodiscard]] juce::String addTypedTrack(TrackType type = TrackType::hachi,
+                                            const juce::String& name = {});
     [[nodiscard]] juce::String addTrack(const juce::String& name, bool compose = true,
-                                       bool referenceOnly = false, bool accompaniment = false);
+                                       bool referenceOnly = false, bool accompaniment = false,
+                                       TrackType type = TrackType::hachi);
     void setTrackReferenceOnly(const juce::String& trackId, bool referenceOnly);
     void setTrackName(const juce::String& trackId, const juce::String& name);
     bool setClipNotesIfEmpty(const juce::String& clipId, std::vector<NoteData> notes);
     std::size_t markNativeUnpitchedRegions(const juce::String& clipId);
-    bool setNativeTrimSourceAnalysis(const juce::File& file, const std::vector<NoteData>& sourceNotes);
+    bool setNativeTrimSourceAnalysis(const juce::File& file, const std::vector<NoteData>& sourceNotes,
+                                     const juce::String& expectedSourceFingerprint = {});
     bool setClipAudioAnalysis(const juce::String& clipId, std::vector<NoteData> notes,
                               const ClipData& importedClip = ClipData{});
     bool addMidiFile(const juce::File& file, juce::String& error);
@@ -855,18 +983,25 @@ public:
     // and their lyrics.  The notes land on the project's beats -- as a UST's
     // do -- and the file's tempo, tempo changes and time signature are taken
     // only when the project has no tracks yet.  One undo takes it away again.
-    // Returns the new track's id, or nothing with error set.
+    // With targetTrackId, append a region to that existing melodic track at
+    // startSeconds, preserving its settings and the project's tempo map.
+    // Returns the destination track's id, or nothing with error set.
     [[nodiscard]] juce::String addMidiTrack(const juce::File& file, int trackIndex,
-                                            juce::String& error);
+                                            juce::String& error,
+                                            const juce::String& targetTrackId = {}, double startSeconds = 0.0);
     // The same song written back out: every track that has notes, with the
     // tempo map, the time signature and the lyrics, as a type 1 file at 480
     // ticks to the quarter.  Musical time, not seconds -- a project read back
     // into this editor, or opened in anything else, lands on the same beats.
+    // Empty trackId exports the whole score. Muted tracks/clips are excluded
+    // unless requested; reserved rests and unpitched native regions never sing.
     static bool writeMidiFile(const ProjectData& data, const juce::File& file,
-                              juce::String& error);
+                              juce::String& error, const juce::String& trackId = {},
+                              bool includeMuted = false);
 
-    // A UTAU project file, opened as a plain UTAU track: the notes, their
-    // lyrics and timing, and the per-note UTAU parameters the renderer reads.
+    // UST/USTX musical data, imported into an explicit destination family
+    // (Hachi by default). Lyrics, timing and source renderer parameters remain
+    // preserved independently of the selected destination interface.
     // warnings collects what could not be carried over, which is worth saying
     // out loud rather than leaving it to be noticed missing.
     //
@@ -881,7 +1016,8 @@ public:
     bool addUstFile(const juce::File& file, juce::String& error,
                     juce::StringArray& warnings,
                     UstImportMode mode = UstImportMode::addTrack,
-                    juce::String* importedTrackId = nullptr, int encoding = 0);
+                    juce::String* importedTrackId = nullptr, int encoding = 0,
+                    TrackType destinationType = TrackType::hachi);
     bool exportUst(const juce::File& file, const juce::String& trackId,
                    juce::String& error, juce::StringArray& warnings, int encoding = 0) const;
     void setTempo(double bpm, int numerator, int denominator = 4);
@@ -892,6 +1028,13 @@ public:
     // "has anything changed?" -- it cannot miss a field the way a
     // hand-maintained projection of the project can.
     [[nodiscard]] juce::int64 contentFingerprint() const;
+    // Library adoption changes references only; all source clocks and music stay exact.
+    [[nodiscard]] static juce::String registrationMusicSourceFingerprint(const ProjectData&);
+    bool adoptRegisteredMaterialBindings(std::uint64_t expectedRevision,
+        const juce::String& expectedFingerprint,
+        const std::vector<ProjectMaterialRegistrationOwnerBinding>& owners,
+        const std::vector<ProjectMaterialRegistrationNoteBinding>& notes,
+        juce::String& error);
     void setGridDivision(const juce::String& division);
     void setNoteEditDivision(int division);
     void setBaseScale(const juce::String& scale);
@@ -912,6 +1055,8 @@ public:
     void setUtauMode(UtauMode mode);
     void setTrackUtauMode(const juce::String& trackId, UtauMode mode);
     void setTrackChineseCvvc(const juce::String& trackId, bool enabled);
+    void setTrackPianoPreview(const juce::String& trackId, bool enabled);
+    void setTrackCvvcCurveCrossfade(const juce::String& trackId, bool curved);
     void setTrackOutputEngine(const juce::String& trackId, UtauOutputEngine engine,
                               const juce::File& resampler = {}, const juce::File& wavtool = {});
     void setNotesVibrato(const std::vector<juce::String>& noteIds,
@@ -925,6 +1070,40 @@ public:
     void setNotesUtauSplice(const std::vector<juce::String>& noteIds, bool enabled);
     // All UTAU modes accept curves. Turning them off is allowed on any track,
     // and preserves the stored points for re-enabling or switching backends.
+    // One user gesture, one undo entry; delegates parameter normalization to the existing setters.
+    struct PointCurveEdit
+    {
+        enum Kind { pitch, amplitude, flag, cvvc, connectionPitch, connectionPitchStroke };
+        Kind kind=pitch; juce::String noteId,key; int part=0;
+        std::vector<PitchCurveEditPoint> pitchPoints;
+        std::vector<AmplitudeEnvelopePoint> amplitudePoints;
+        std::vector<FlagCurvePoint> flagPoints;
+        backend::CvvcEnvelopeCurve cvvcPoints;
+        bool storePitchControlPoints = true;
+        juce::String connectionId; // graph commands only
+        // Whole graph-handle batches may explicitly follow new proposed note
+        // endpoint pitches. Default remains strict; interior MIDI stays literal.
+        bool reanchorConnectionEndpoints = false;
+        bool authorPitchSupport = false; // command intent, never inferred from coordinates
+    };
+    struct PointCurvePlanPreview
+    {
+        bool changed = false;
+        std::vector<TrackData> tracks; // affected real tracks only, original order
+        std::vector<NativeConnection> connections;
+    };
+    // Notes are proposed first, graph commands resolve against that same new
+    // score. Any invalid late command rejects ALL edits. One live undo/change.
+    bool setPointCurves(std::vector<PointCurveEdit> edits, std::uint64_t expectedRevision,
+                        juce::String* error = nullptr);
+    bool previewPointCurves(const std::vector<PointCurveEdit>& edits, std::uint64_t expectedRevision,
+                           PointCurvePlanPreview&, juce::String& error) const;
+    struct CvvcEnvelopeEdit { juce::String noteId; int part; juce::String flag; backend::CvvcEnvelopeCurve points; };
+    bool resetCvvcBoundaries(const std::vector<juce::String>& noteIds, std::uint64_t expectedRevision);
+    bool setCvvcBoundary(const juce::String& noteId, int rightPart, double position, std::uint64_t expectedRevision);
+    bool setCvvcEnvelopes(std::vector<CvvcEnvelopeEdit>, std::uint64_t expectedRevision);
+    bool setCvvcEnvelope(const juce::String& noteId, int part, const juce::String& flag,
+                         backend::CvvcEnvelopeCurve points, std::uint64_t expectedRevision);
     void setNotesUtauFlagCurveEnabled(const std::vector<juce::String>& noteIds,
                                       bool enabled);
     // Drop every flag curve on the given notes, back to what they looked like
@@ -955,7 +1134,8 @@ public:
     void setTrackStretchAlgorithm(const juce::String& trackId, StretchAlgorithm algorithm);
     void setPitchAlgorithm(PitchAlgorithm algorithm);
     void setStretchAlgorithm(StretchAlgorithm algorithm);
-    void setTrackRenderOrder(const juce::String& trackId, RenderOrder order);
+    void setTrackRenderOrder(const juce::String& trackId, RenderOrder order,
+                             std::optional<bool> mergeContiguous = {});
     void setRenderOrder(RenderOrder order);
     void moveClip(const juce::String& clipId, double startSeconds);
     [[nodiscard]] bool canSplitClip(const juce::String& clipId, double absoluteSeconds) const;
@@ -968,6 +1148,7 @@ public:
     void resizeClip(const juce::String& clipId, double startSeconds,
                     double durationSeconds);
     bool trimClip(const juce::String& clipId, double startSeconds, double durationSeconds);
+    bool setClipEditableLength(const juce::String& clipId, double durationSeconds);
     void setClipGain(const juce::String& clipId, float gain);
     void setClipFades(const juce::String& clipId, double fadeInSeconds,
                       double fadeOutSeconds);
@@ -980,6 +1161,8 @@ public:
     [[nodiscard]] juce::String mergeClips(const std::vector<juce::String>& clipIds);
     void moveClips(const std::vector<juce::String>& clipIds, double deltaSeconds, int trackDelta = 0);
     void removeTrack(const juce::String& trackId);
+    // Empty beforeTrackId places the track last. IDs remain stable.
+    bool moveTrackBefore(const juce::String& trackId, const juce::String& beforeTrackId);
     void transposeNote(const juce::String& noteId, float semitones);
     void transposeNotes(const std::vector<juce::String>& noteIds, float semitones);
     // Move a group of UTAU notes as one phrase.  When the destination phrase
@@ -993,6 +1176,9 @@ public:
                          double deltaSeconds, float semitones, juce::String* error = nullptr);
     bool trimNativeNoteEdge(const juce::String& noteId, double deltaSeconds, bool leftEdge);
     bool resizeNativeNoteEdge(const juce::String& noteId, double deltaSeconds, bool leftEdge);
+    // Align the physical preutterance marker (or score onset) to the nearest
+    // feasible musical grid, preserving pitch data and committing one undo.
+    bool alignNotePreutteranceToGrid(const juce::String& noteId, double quarterStep, juce::String& error);
     void setNotesMidi(const std::vector<juce::String>& noteIds, float midiNote);
     void averageNotesMidi(const std::vector<juce::String>& noteIds);
     void quantizeNotesMidi(const std::vector<juce::String>& noteIds, float stepSemitones = 1.0f);
@@ -1019,6 +1205,18 @@ public:
     // Explicitly connect selected notes without destructively merging their
     // editable data. Pairs may cross clips and source-material regions.
     void setNotesConnection(const std::vector<juce::String>& noteIds, bool enabled);
+    // Pitch-only forced connection, NEVER a source join/amplitude splice. Uses
+    // existing nativeConnections directional authority and one undo transaction.
+    bool setNotesPortamento(const std::vector<juce::String>& noteIds, bool enabled,
+                            juce::String& error, double durationSeconds = 0.1);
+    // Editable absolute controls from resolvedConnectionPitchCurves. Outer MIDI
+    // values stay attached to current note scores; endpoint TIME/curvature and
+    // interior MIDI are editable. Mixed PointCurveEdit batches stage real note
+    // edits first, then use this validator against the proposed endpoint score.
+    bool setConnectionPitchCurve(const juce::String& connectionId,
+        std::vector<PitchCurveEditPoint> absolutePoints, juce::String& error);
+    bool setConnectionPitchPoint(const juce::String& connectionId, int pointIndex,
+        PitchCurveEditPoint absolutePoint, juce::String& error);
     bool disconnectNativeAudio(const std::vector<juce::String>& noteIds);
     bool linkNativeAudio(const std::vector<juce::String>& noteIds);
     bool setNativeAudioOverlap(const juce::String& trackId, bool enabled);
@@ -1085,6 +1283,10 @@ public:
     // Gives one note its own oto entry, or takes it away again with one whose
     // enabled is false.  One undoable step.
     void setNoteUtauOto(const juce::String& noteId, const backend::UtauOtoOverride& oto);
+    // Classic note-local callback commit: revision, identity and capability
+    // checks share the mutation lock. Success may be an honest no-op.
+    bool setNoteUtauOtoChecked(const juce::String& noteId, std::uint64_t expectedRevision,
+        const backend::UtauOtoOverride& value, std::uint64_t& resultingRevision, juce::String& error);
     // 恢复为音源OTO: these notes go back to their voicebank entries.  Notes with
     // no oto of their own are left alone.  One undoable step, and none at all
     // when there was nothing to restore.
@@ -1104,7 +1306,7 @@ public:
                                  std::vector<PitchCurveEditPoint> points);
     bool setNotePitchCurve(const juce::String& noteId,
                            std::vector<PitchCurveEditPoint> points,
-                           bool storeControlPoints = false);
+                           bool storeControlPoints = false, bool authorPitchSupport = false);
     bool applyDiffSingerTiming(std::uint64_t expectedRevision,
         const std::vector<std::pair<juce::String, juce::String>>& timings);
     bool applyDiffSingerPronunciation(std::uint64_t expectedRevision, const juce::String& trackId,
@@ -1118,6 +1320,19 @@ public:
                               const juce::String& speaker);
     bool setNoteAmplitudeEnvelope(const juce::String& noteId,
                                   std::vector<AmplitudeEnvelopePoint> points);
+    // Resolved sounding spans from the editor; points use absolute seconds,
+    // before base gain and automatic OTO mixing. part=0 is a whole note.
+    struct CrossfadeSpan
+    {
+        juce::String noteId;
+        int part = 0;
+        double from = 0, to = 0;
+        std::vector<AmplitudeEnvelopePoint> points;
+        double soundingEnd = 0; // optional OTO-mix cutoff, without changing part coordinates
+    };
+    int crossfadeNotes(std::vector<CrossfadeSpan> spans, std::uint64_t expectedRevision, bool curved = false);
+    bool rememberCvvcPhonemes(const std::vector<std::pair<juce::String,juce::String>>& caches,
+                             std::uint64_t expectedRevision);
     bool setNotesAmplitudeEnvelopes(
         std::vector<std::pair<juce::String, std::vector<AmplitudeEnvelopePoint>>> envelopes);
     // Scales the whole amplitude envelope of these notes by a base percent
@@ -1219,8 +1434,82 @@ public:
     // all through its track, move earlier by that much and the track loses it.
     void closeGapBeforeNote(const juce::String& noteId, double seconds);
     void toggleNoteConnection(const juce::String& noteId);
+    struct MaterialUpdateReport
+    {
+        bool rejected = false;
+        int updatedNotes = 0, boundLegacyNotes = 0, unresolvedNotes = 0;
+        int skippedLocalOverrides = 0, ambiguousLegacyNotes = 0;
+        juce::StringArray diagnostics;
+        [[nodiscard]] bool changed() const { return updatedNotes > 0; }
+    };
+    // rows is the complete current annotation for this source (empty means
+    // deleted). Legacy matching uses both source edges within 10 microseconds,
+    // never row order or alias. Rejection leaves ALL placements unchanged.
+    // New-ID topology is partitioned only for an intact single-source native
+    // shared owner and an explicit contiguous chain covering the old interval.
+    // The old source clock/coverage remains unchanged; cubic target automation
+    // and vibrato phase are sliced exactly. Fully derived pitch stays read-only
+    // contour data (no promoted source-sample handles). Mixed authored/derived,
+    // local/cropped/multi-source or advanced automation is rejected before publication.
+    // apply=false is a publication preflight: identical validation/report,
+    // but no project mutation, undo, revision, or notification. changed() then
+    // describes the prospective update, not a committed one.
+    [[nodiscard]] MaterialUpdateReport applySourceSettingsWithReport(
+        const juce::File& source, const std::vector<SampleRegionSetting>& rows,
+        bool apply = true);
     void applySourceSettings(const juce::File& source,
                              const std::vector<SampleRegionSetting>& rows);
+    void setNoteMaterialLocalOverride(const juce::String& noteId, bool enabled);
+    struct NoteMaterialLocalBinding
+    {
+        juce::String noteId, parentClipId, sourcePartId, audioId, regionId;
+        juce::File sourceFile;
+        juce::String sourceFingerprint;
+        std::uint64_t projectRevision = 0;
+        bool bindingResolved = false, nativeFullRow = false, utauScalarTiming = false;
+        juce::String diagnostic;
+    };
+    // Transient absolute-source row projection, never another persisted row.
+    // An unbound bank note returns capability/diagnostic, not an alias guess.
+    bool getNoteMaterialLocalBinding(const juce::String& noteId,
+        NoteMaterialLocalBinding&, SampleRegionSetting& row, juce::String& error) const;
+    bool applyNoteMaterialLocalRow(const NoteMaterialLocalBinding&, const SampleRegionSetting&,
+        std::uint64_t& resultingRevision, juce::String& error);
+    bool restoreNoteMaterialLocalRow(const NoteMaterialLocalBinding&, SampleRegionSetting& restored,
+        std::uint64_t& resultingRevision, juce::String& error);
+    // Pure representability adapter; no source binding or manifest writes.
+    static bool makeClassicNoteMaterialOto(const SampleRegionSetting&,
+        backend::UtauOtoOverride&, juce::String& error);
+    struct MaterialSourceBindingTicket
+    {
+        juce::String noteId, parentClipId, sourcePartId;
+        juce::File sourceFile;
+        juce::String sourceFingerprint;
+    };
+    struct MaterialSourceReplacementReport
+    {
+        bool rejected = false, changed = false, pendingAnalysis = false;
+        juce::String clipId, sourcePartId;
+        MaterialSourceBindingTicket ticket;
+        juce::StringArray diagnostics;
+    };
+    // Explicitly replace ONLY this note's physical source, preserving its ID,
+    // score time/pitch/expression and track renderer. apply=false is pure
+    // preflight; only a committed report's ticket may be queued for analysis.
+    // Native physical-file renderers are supported; voicebank/DS adapters must
+    // explicitly implement this capability before they may accept the action.
+    [[nodiscard]] MaterialSourceReplacementReport replaceNoteMaterialSource(
+        const juce::String& noteId, const juce::File& audio,
+        const std::vector<SampleRegionSetting>& completeRows,
+        const juce::String& audioId, const juce::String& regionId,
+        const juce::String& chosenAlias, juce::String& error, bool apply = true);
+    [[nodiscard]] std::vector<MaterialSourceBindingTicket> pendingMaterialSourceAnalyses() const;
+    // Full-file acoustic facts only, never old target snapshots. Empty facts
+    // reuse the bounded immutable fingerprint cache (e.g. redo after stale B).
+    // A stale ticket can warm the cache but cannot resurrect its old binding;
+    // only CURRENT pending owners of the same file/fingerprint are updated.
+    bool completeMaterialSourceAnalysis(const MaterialSourceBindingTicket& ticket,
+        const std::vector<NoteData>& fullFileSourceNotes, juce::String& error);
 
     bool save(const juce::File& file, juce::String& error) const;
     bool load(const juce::File& file, juce::String& error);
@@ -1234,6 +1523,12 @@ private:
     [[nodiscard]] bool canSplitClipAt(const juce::String& clipId, double absoluteSeconds) const;
     [[nodiscard]] juce::String splitClipAt(const juce::String& clipId, double absoluteSeconds);
     void pushUndoLocked();
+    bool setNoteUtauOtoLocked(const juce::String& noteId, const backend::UtauOtoOverride& value);
+    bool applyNoteMaterialLocalRowInternal(const NoteMaterialLocalBinding&, const SampleRegionSetting&,
+        bool restoringSource, std::uint64_t& resultingRevision, juce::String& error,
+        SampleRegionSetting* committedRow = nullptr);
+    bool planPointCurvesLocked(const std::vector<PointCurveEdit>&, PointCurvePlanPreview&,
+                               juce::String& error) const;
     void replaceInternal(ProjectData replacement, bool newDocument);
     // Whether a clip's source is a recording -- audio the engine plays
     // straight out when there are no notes left to play it through.
@@ -1260,11 +1555,14 @@ private:
     // drift apart over what a new note starts life as.  Call with the lock.
     [[nodiscard]] juce::String addNoteLocked(ClipData& destination,
                                              const PlannedNote& planned, float midiNote);
-    juce::ValueTree toValueTree(const juce::File& projectFile) const;
+    juce::ValueTree toValueTree(const juce::File& projectFile, bool includeDerived = true) const;
     static ProjectData fromValueTree(const juce::ValueTree& tree,
                                      const juce::File& projectFile);
     static juce::String makeId(const char* prefix);
 
+    bool attachSourceAnalysisLocked(const juce::File&, const std::vector<NoteData>&,
+                                    const juce::String& guardedFingerprint);
+    std::map<juce::String, std::shared_ptr<const std::vector<NoteData>>> materialSourceAnalysisCache;
     mutable juce::CriticalSection lock;
     ProjectData project;
     std::vector<ProjectData> undoHistory;

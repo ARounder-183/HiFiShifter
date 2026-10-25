@@ -1,4 +1,5 @@
 #include "backend/MixedEnvelopeIO.h"
+#include "backend/CvvcPhonemeCache.h"
 #include "NativeAudioTrim.h"
 #include "NativeNoteJoin.h"
 #include "NativeAudioOverlap.h"
@@ -15,9 +16,12 @@
 #include "ClipParts.h"
 #include "Pinyin.h"
 #include "SampleSettings.h"
+#include "OttoMaterialIO.h"
+#include <juce_cryptography/juce_cryptography.h>
 #include "backend/UstImporter.h"
 #include "backend/UtauRenderer.h"
 #include "backend/AmplitudeEnvelopeCurve.h"
+#include "backend/UtauMixEnvelope.h"
 #include "backend/NsfHifiganRenderer.h"
 #include "backend/AnalysisService.h"
 #include "NativeSourceTimeMap.h"
@@ -29,13 +33,49 @@
 #include <limits>
 #include <map>
 #include <optional>
+#include <set>
 
 namespace hachi
 {
+juce::String trackTypeName(TrackType type)
+{
+    switch(type){case TrackType::hachi:return "hachi";case TrackType::utau:return "utau";case TrackType::diffSinger:return "diffsinger";}return "hachi";
+}
+std::optional<TrackType> parseTrackType(const juce::String& name)
+{
+    const auto value=name.trim().toLowerCase();
+    if(value=="hachi"||value=="hachishifter")return TrackType::hachi;
+    if(value=="utau")return TrackType::utau;
+    if(value=="diffsinger"||value=="diff-singer")return TrackType::diffSinger;
+    return {};
+}
+TrackType effectiveTrackType(const TrackData& track)
+{
+    if(track.trackType)return *track.trackType;
+    // Compatibility for raw legacy DTOs only. Model adoption/load freezes this
+    // result, so later voicebank/filesystem changes cannot reinterpret a track.
+    if(track.accompaniment)return TrackType::hachi;
+    if(track.pitchAlgorithm==PitchAlgorithm::utau)
+        return track.utauMode==UtauMode::mou&&track.voicebankDirectory.getChildFile("dsconfig.yaml").existsAsFile()?TrackType::diffSinger:TrackType::utau;
+    const auto legacyBank=track.pitchAlgorithm==PitchAlgorithm::nsfHifigan&&!track.nativeNsfAudio
+        &&(utauModeUsesRegions(track.utauMode)||track.voicebankDirectory.isDirectory())
+        &&!track.voicebankDirectory.getChildFile("dsconfig.yaml").existsAsFile();
+    return legacyBank&&(track.outputEngine==UtauOutputEngine::inherit||track.outputEngine==UtauOutputEngine::pcNsfHifigan)?TrackType::utau:TrackType::hachi;
+}
+namespace
+{
+void configureNewTrackType(TrackData& track,TrackType type)
+{
+    track.trackType=type;
+    if(type==TrackType::hachi){track.pitchAlgorithm=PitchAlgorithm::nsfHifigan;track.nativeNsfAudio=true;track.renderOrder=RenderOrder::stretchSpliceThenPitch;}
+    else{track.pitchAlgorithm=PitchAlgorithm::utau;track.nativeNsfAudio=false;track.utauMode=type==TrackType::diffSinger?UtauMode::mou:UtauMode::classic;}
+}
+}
 PitchAlgorithm defaultPitchAlgorithm(const juce::File& modelDirectory)
 {
-    return backend::NsfHifiganRenderer::modelAvailable(modelDirectory)
-        ? PitchAlgorithm::nsfHifigan : PitchAlgorithm::llsm2;
+    // A missing model is a configuration error, not an implicit engine switch.
+    juce::ignoreUnused(modelDirectory);
+    return PitchAlgorithm::nsfHifigan;
 }
 juce::String nativeSegmentRoleName(NativeSegmentRole role)
 {
@@ -449,6 +489,7 @@ static SharedPitchLines nativeSharedPitchLines(const TrackData& track,
         bool edited;
         bool independent;
         bool handlesPlaced;
+        bool scoreLocked;
         std::vector<PitchCurveEditPoint> points;
     };
     std::map<juce::String, std::vector<Entry>> groups;
@@ -460,8 +501,9 @@ static SharedPitchLines nativeSharedPitchLines(const TrackData& track,
                 const auto replaced = replacedPoints && note.id == replacedNoteId && !replacedPoints->empty();
                 Entry entry {note.id, clip.startSeconds + note.startSeconds,
                     clip.startSeconds + note.startSeconds + note.durationSeconds,
-                    replaced || !nativePitchIsUnedited(note), note.nativeIndependentPitch && !envelopeGrouping,
-                    replaced || note.nativePitchHandlesPlaced, replaced ? *replacedPoints : ownPitchPoints(note)};
+                    replaced || note.materialTargetPitchLocked || !nativePitchIsUnedited(note), note.nativeIndependentPitch && !envelopeGrouping,
+                    replaced || note.nativePitchHandlesPlaced, note.materialTargetPitchLocked,
+                    replaced ? *replacedPoints : ownPitchPoints(note)};
                 for (auto& point : entry.points) point.timeSeconds += entry.start;
                 const auto group = clip.nativePitchGroupId.isNotEmpty() ? clip.nativePitchGroupId
                     : parent.nativeAudioLinked ? parent.id : clip.id;
@@ -540,6 +582,7 @@ static SharedPitchLines nativeSharedPitchLines(const TrackData& track,
             for (const auto& point : entry.points) member.nativeHandleTimes.push_back(point.timeSeconds);
             return result.byNote.emplace(entry.id, std::move(member)).first->second;
         };
+        for(const auto& entry:entries)if(entry.scoreLocked)ensureMember(entry);
         for (std::size_t i = 1; i < entries.size(); ++i)
         {
             const auto& left = entries[i - 1]; const auto& right = entries[i];
@@ -829,6 +872,16 @@ float evaluatePitchCurve(const std::vector<PitchCurveEditPoint>& points,
     const auto& next = points[rightIndex];
     const auto span = next.timeSeconds - left.timeSeconds;
     if (span <= 1.0e-9) return next.targetMidi;
+    if(next.shape==PitchCurveShape::customBezier&&next.highPrecisionBezier)
+    {
+        const auto position=juce::jlimit(0.0,1.0,(timeSeconds-left.timeSeconds)/span);
+        const auto x1=std::clamp<double>(next.bezierX1,0,1),x2=std::clamp<double>(next.bezierX2,0,1);
+        const auto cubic=[](double t,double a,double b){const auto v=1-t;return 3*v*v*t*a+3*v*t*t*b+t*t*t;};
+        double lo=0,hi=1;
+        for(int i=0;i<56;++i){const auto t=(lo+hi)*.5;if(cubic(t,x1,x2)<position)lo=t;else hi=t;}
+        const auto progress=cubic((lo+hi)*.5,next.bezierY1,next.bezierY2);
+        return static_cast<float>(static_cast<double>(left.targetMidi)+(static_cast<double>(next.targetMidi)-left.targetMidi)*progress);
+    }
     const auto u = static_cast<float>(juce::jlimit(0.0, 1.0,
         (timeSeconds - left.timeSeconds) / span));
 
@@ -951,6 +1004,7 @@ juce::String stretchAlgorithmName(StretchAlgorithm value)
         case StretchAlgorithm::soundTouch: return "soundtouch";
         case StretchAlgorithm::nsfShiftThenSplice: return "nsf-shift-then-splice";
         case StretchAlgorithm::hifiShifterMel: return "hifishifter-mel";
+        case StretchAlgorithm::wcsNonLoop: return "wcsndm-nonloop";
     }
     return "melodyne-hybrid";
 }
@@ -962,6 +1016,7 @@ StretchAlgorithm parseStretchAlgorithm(const juce::String& value)
     if (value == "soundtouch") return StretchAlgorithm::soundTouch;
     if (value == "nsf-shift-then-splice") return StretchAlgorithm::nsfShiftThenSplice;
     if (value == "hifishifter-mel") return StretchAlgorithm::hifiShifterMel;
+    if (value == "wcsndm-nonloop") return StretchAlgorithm::wcsNonLoop;
     return StretchAlgorithm::melodyneHybrid;
 }
 
@@ -979,6 +1034,250 @@ RenderOrder parseRenderOrder(const juce::String& value)
 {
     if (value == "stretch-splice-then-pitch") return RenderOrder::stretchSpliceThenPitch;
     return RenderOrder::processThenSplice;
+}
+}
+
+namespace
+{
+struct GraphPitchEndpoint
+{
+    const NoteData* note=nullptr;const ClipData* parent=nullptr;
+    double start=0,end=0,anchor=0;
+    bool sourceOwnerValid=true;
+};
+std::vector<GraphPitchEndpoint> graphPitchEndpoints(const TrackData& track)
+{
+    std::vector<GraphPitchEndpoint> result;
+    for(const auto& parent:track.clips)for(const auto& n:parent.notes)
+    {
+        const auto start=parent.startSeconds+n.startSeconds;double anchor=start;
+        const ClipData* source=&parent;
+        if(!parent.parts.empty())
+        {
+            source=nullptr;for(const auto& part:parent.parts)if(part.id==n.clipPartId){if(source){source=nullptr;break;}source=&part;}
+        }
+        if(source&&trackShowsAllNativeRegions(track)&&source->sourceFile!=juce::File{}
+            &&!source->sourceFile.hasFileExtension("ust;mid;midi;mpd;hjpx;hspx"))
+            anchor=parent.startSeconds+nativeNotePreutteranceTarget(n,parent);
+        result.push_back({&n,&parent,start,start+n.durationSeconds,anchor,!trackShowsAllNativeRegions(track)||source!=nullptr});
+    }
+    std::stable_sort(result.begin(),result.end(),[](const auto& a,const auto& b){return a.start<b.start;});return result;
+}
+juce::String graphPitchPairIssue(const TrackData& track,const std::vector<GraphPitchEndpoint>& all,std::size_t a,std::size_t b)
+{
+    if(!track.compose||track.accompaniment)return "The track has no note-pitch renderer";
+    if(b!=a+1)return "Portamento requires consecutive notes, with no intervening note or rest";
+    const auto& left=all[a];const auto& right=all[b];
+    if(!left.sourceOwnerValid||!right.sourceOwnerValid)return "Ambiguous physical source ownership for the P anchor";
+    if(!std::isfinite(left.start)||!std::isfinite(left.end)||!std::isfinite(right.start)||!std::isfinite(right.end)||!std::isfinite(right.anchor)
+        ||left.end-left.start<.001||right.end-right.start<.001)return "Invalid or zero-duration pitch endpoint";
+    if(left.end>right.start+1.e-7)return "Overlapping notes cannot share a forced portamento";
+    if(right.start-left.end>.001)return "A gap is not filled by forcing pitch; move the notes together explicitly";
+    const auto silent=[&](const NoteData& n){return n.nativeUnpitched||n.pronunciationKind==PronunciationKind::breath
+        ||(trackUsesVoicebankSynthesis(track)&&backend::isRestLyric(n.label));};
+    if(silent(*left.note)||silent(*right.note))return "A rest, breath or unpitched source cannot be forced voiced";
+    return {};
+}
+float graphBaseMidiAt(const SharedPitchLines& lines,const GraphPitchEndpoint& note,double t,
+                      const juce::String& replacedId,const std::vector<PitchCurveEditPoint>* replaced)
+{
+    if(const auto* member=lines.memberFor(note.note->id))return member->line->midiAt(t);
+    return evaluatePitchCurve(replaced&&!replaced->empty()&&note.note->id==replacedId?*replaced:ownPitchPoints(*note.note),t-note.start);
+}
+bool finiteGraphPoint(const PitchCurveEditPoint& p)
+{
+    return std::isfinite(p.timeSeconds)&&std::isfinite(p.targetMidi)&&std::isfinite(p.bezierX1)&&std::isfinite(p.bezierX2)
+        &&std::isfinite(p.bezierY1)&&std::isfinite(p.bezierY2)&&p.bezierX1>=0&&p.bezierX1<=1&&p.bezierX2>=0&&p.bezierX2<=1
+        &&static_cast<int>(p.shape)>=0&&static_cast<int>(p.shape)<=static_cast<int>(PitchCurveShape::customBezier);
+}
+bool sameGraphPitchData(const NativeConnection& a,const NativeConnection& b)
+{
+    if(a.id!=b.id||a.pitchCurveEndpointRelative!=b.pitchCurveEndpointRelative||a.pitchStartOffsetSeconds!=b.pitchStartOffsetSeconds
+        ||a.pitchEndOffsetSeconds!=b.pitchEndOffsetSeconds||a.pitchCurve.size()!=b.pitchCurve.size())return false;
+    for(std::size_t i=0;i<a.pitchCurve.size();++i)
+    {
+        const auto& x=a.pitchCurve[i];const auto& y=b.pitchCurve[i];
+        if(x.timeSeconds!=y.timeSeconds||x.targetMidi!=y.targetMidi||x.shape!=y.shape||x.bezierX1!=y.bezierX1||x.bezierX2!=y.bezierX2
+            ||x.bezierY1!=y.bezierY1||x.bezierY2!=y.bezierY2||x.diffSingerRestoreSupport!=y.diffSingerRestoreSupport||x.highPrecisionBezier!=y.highPrecisionBezier)return false;
+    }
+    return true;
+}
+}
+
+std::vector<ResolvedConnectionPitchCurve> resolvedConnectionPitchCurves(const TrackData& track,
+    const std::vector<NativeConnection>& connections,const juce::String& replacedId,const std::vector<PitchCurveEditPoint>* replaced)
+{
+    const auto endpoints=graphPitchEndpoints(track);const auto base=sharedPitchLines(track,replacedId,replaced,false);
+    std::vector<ResolvedConnectionPitchCurve> result;
+    for(const auto& connection:connections)
+    {
+        if(connection.pitchCurve.empty())continue;
+        std::vector<std::size_t> left,right;
+        for(std::size_t i=0;i<endpoints.size();++i){if(endpoints[i].note->id==connection.leftNoteId)left.push_back(i);if(endpoints[i].note->id==connection.rightNoteId)right.push_back(i);}
+        if(left.empty()&&right.empty())continue;
+        ResolvedConnectionPitchCurve resolved;resolved.connectionId=connection.id;resolved.leftNoteId=connection.leftNoteId;resolved.rightNoteId=connection.rightNoteId;
+        if(left.size()!=1||right.size()!=1){resolved.issue="Missing, ambiguous or cross-track pitch endpoint";result.push_back(std::move(resolved));continue;}
+        const auto& a=endpoints[left.front()];const auto& b=endpoints[right.front()];resolved.anchorSeconds=b.anchor;
+        resolved.issue=graphPitchPairIssue(track,endpoints,left.front(),right.front());
+        if(resolved.issue.isNotEmpty()){result.push_back(std::move(resolved));continue;}
+        if(connection.pitchCurve.size()<2||connection.pitchCurve.size()>2048){resolved.issue="A graph pitch curve needs 2..2048 controls";result.push_back(std::move(resolved));continue;}
+        bool valid=true;double previous=-std::numeric_limits<double>::infinity();
+        for(const auto& p:connection.pitchCurve){valid&=finiteGraphPoint(p)&&p.timeSeconds>previous;previous=p.timeSeconds;}
+        if(!valid){resolved.issue="Invalid graph pitch controls";result.push_back(std::move(resolved));continue;}
+        if(connection.pitchCurveEndpointRelative)
+        {
+            const auto& points=connection.pitchCurve;
+            if(!std::isfinite(connection.pitchStartOffsetSeconds)||!std::isfinite(connection.pitchEndOffsetSeconds)
+                ||std::abs(points.front().timeSeconds)>1.e-8||std::abs(points.back().timeSeconds-1)>1.e-8
+                ||std::abs(points.front().targetMidi)>1.e-4f||std::abs(points.back().targetMidi)>1.e-4f)
+                resolved.issue="Invalid live-endpoint graph encoding";
+            else
+            {
+                resolved.fromSeconds=juce::jlimit(a.start,a.end,a.end+connection.pitchStartOffsetSeconds);
+                resolved.toSeconds=juce::jlimit(b.start,b.end,b.anchor+connection.pitchEndOffsetSeconds);
+                const auto low=graphBaseMidiAt(base,a,resolved.fromSeconds,replacedId,replaced);
+                const auto high=graphBaseMidiAt(base,b,resolved.toSeconds,replacedId,replaced);
+                for(auto p:points)
+                {
+                    const auto u=p.timeSeconds;p.timeSeconds=resolved.fromSeconds+u*(resolved.toSeconds-resolved.fromSeconds);
+                    p.targetMidi=static_cast<float>(low+(high-low)*u)+p.targetMidi;resolved.points.push_back(p);
+                }
+            }
+        }
+        else
+        {
+            resolved.points=connection.pitchCurve;resolved.fromSeconds=resolved.points.front().timeSeconds;resolved.toSeconds=resolved.points.back().timeSeconds;
+            if(resolved.fromSeconds<a.start-1.e-8||resolved.fromSeconds>a.end+1.e-8||resolved.toSeconds<b.start-1.e-8||resolved.toSeconds>b.end+1.e-8)
+                resolved.issue="The legacy absolute bridge no longer fits its live endpoints";
+        }
+        if(resolved.toSeconds-resolved.fromSeconds<.001)resolved.issue="The bridge has less than 1ms of target time";
+        for(std::size_t i=0;i<endpoints.size();++i)if(i!=left.front()&&i!=right.front()
+            &&endpoints[i].start<resolved.toSeconds-1.e-8&&endpoints[i].end>resolved.fromSeconds+1.e-8)
+            resolved.issue="An overlapping third voice makes this bridge window ambiguous";
+        resolved.active=resolved.issue.isEmpty();result.push_back(std::move(resolved));
+    }
+    std::vector<bool> overlaps(result.size(),false);
+    for(std::size_t i=0;i<result.size();++i)for(std::size_t j=0;j<i;++j)
+        if(result[i].active&&result[j].active&&(result[i].leftNoteId==result[j].leftNoteId||result[i].leftNoteId==result[j].rightNoteId
+            ||result[i].rightNoteId==result[j].leftNoteId||result[i].rightNoteId==result[j].rightNoteId)
+            &&std::min(result[i].toSeconds,result[j].toSeconds)>std::max(result[i].fromSeconds,result[j].fromSeconds)+1.e-8)
+        {overlaps[i]=overlaps[j]=true;}
+    for(std::size_t i=0;i<result.size();++i)if(overlaps[i]){result[i].active=false;result[i].issue="Incident graph bridge windows overlap; shorten a bridge explicitly";}
+    return result;
+}
+
+SharedPitchLines sharedPitchLines(const TrackData& track,const std::vector<NativeConnection>& connections,
+    const juce::String& replacedId,const std::vector<PitchCurveEditPoint>* replaced)
+{
+    auto result=sharedPitchLines(track,replacedId,replaced,false);const auto endpoints=graphPitchEndpoints(track);
+    auto curves=resolvedConnectionPitchCurves(track,connections,replacedId,replaced);
+    std::stable_sort(curves.begin(),curves.end(),[](const auto& a,const auto& b){return a.fromSeconds<b.fromSeconds;});
+    for(const auto& curve:curves)if(curve.active)for(const auto& id:{curve.leftNoteId,curve.rightNoteId})
+    {
+        auto found=result.byNote.find(id);
+        if(found==result.byNote.end())
+        {
+            const auto endpoint=std::find_if(endpoints.begin(),endpoints.end(),[&](const auto& p){return p.note->id==id;});
+            if(endpoint==endpoints.end())continue;
+            auto own=replaced&&!replaced->empty()&&id==replacedId?*replaced:ownPitchPoints(*endpoint->note);for(auto& p:own)p.timeSeconds+=endpoint->start;
+            auto line=std::make_shared<SharedPitchLine>();line->pieces.push_back({-std::numeric_limits<double>::infinity(),std::move(own)});
+            SharedPitchLineMember member;member.line=line;member.drawFrom=endpoint->start;member.drawTo=endpoint->end;
+            for(const auto& p:line->pieces.front().points)member.nativeHandleTimes.push_back(p.timeSeconds);
+            found=result.byNote.emplace(id,std::move(member)).first;
+        }
+        const auto old=found->second.line;if(!old||old->pieces.empty())continue;
+        auto line=std::make_shared<SharedPitchLine>();std::size_t restore=0;
+        for(std::size_t i=0;i<old->pieces.size();++i)
+        {
+            if(old->pieces[i].from<curve.fromSeconds)line->pieces.push_back(old->pieces[i]);
+            if(old->pieces[i].from<=curve.toSeconds)restore=i;
+        }
+        line->pieces.push_back({curve.fromSeconds,curve.points});
+        auto restored=old->pieces[restore];restored.from=curve.toSeconds;line->pieces.push_back(std::move(restored));
+        for(const auto& piece:old->pieces)if(piece.from>curve.toSeconds)line->pieces.push_back(piece);
+        if(found->second.connectionPitchWindows.empty())found->second.connectionPitchOnly=!found->second.renderSharedCurve;
+        found->second.line=std::move(line);found->second.renderSharedCurve=true;
+        found->second.nativeSharedCurve=trackShowsAllNativeRegions(track);
+        found->second.connectionPitchWindows.emplace_back(curve.fromSeconds,curve.toSeconds);
+        // Graph handles remain owned/editable on the graph, never impersonated
+        // as a second set of writable note-local pitch controls.
+    }
+    return result;
+}
+
+juce::String connectionPitchDigest(const TrackData& track,const std::vector<NativeConnection>& connections,const ClipData& clip)
+{
+    juce::MemoryOutputStream stream;bool any=false;
+    for(const auto& curve:resolvedConnectionPitchCurves(track,connections))
+    {
+        if(std::none_of(clip.notes.begin(),clip.notes.end(),[&](const auto& n){return n.id==curve.leftNoteId||n.id==curve.rightNoteId;}))continue;
+        any=true;stream.writeString(curve.connectionId);stream.writeString(curve.leftNoteId);stream.writeString(curve.rightNoteId);
+        stream.writeBool(curve.active);stream.writeString(curve.issue);stream.writeDouble(curve.fromSeconds);stream.writeDouble(curve.toSeconds);stream.writeDouble(curve.anchorSeconds);
+        for(const auto& p:curve.points){stream.writeDouble(p.timeSeconds);stream.writeFloat(p.targetMidi);stream.writeInt(static_cast<int>(p.shape));
+            stream.writeFloat(p.bezierX1);stream.writeFloat(p.bezierY1);stream.writeFloat(p.bezierX2);stream.writeFloat(p.bezierY2);
+            if(p.highPrecisionBezier)stream.writeString("high-precision-bezier-v1");}
+    }
+    return any?juce::SHA256(stream.getData(),stream.getDataSize()).toHexString():juce::String{};
+}
+
+namespace
+{
+bool prepareConnectionPitchEdit(const TrackData& track,std::vector<NativeConnection>& graph,const juce::String& id,
+                                 const std::vector<PitchCurveEditPoint>& absolute,juce::String& error)
+{
+    error.clear();const auto found=std::find_if(graph.begin(),graph.end(),[&](const auto& c){return c.id==id;});
+    if(found==graph.end()||std::count_if(graph.begin(),graph.end(),[&](const auto& c){return c.id==id;})!=1){error="Unknown or ambiguous connection";return false;}
+    const auto endpoints=graphPitchEndpoints(track);std::size_t a=endpoints.size(),b=endpoints.size();int countA=0,countB=0;
+    for(std::size_t i=0;i<endpoints.size();++i){if(endpoints[i].note->id==found->leftNoteId){a=i;++countA;}if(endpoints[i].note->id==found->rightNoteId){b=i;++countB;}}
+    if(countA!=1||countB!=1){error="Missing or ambiguous connection endpoints";return false;}
+    error=graphPitchPairIssue(track,endpoints,a,b);if(error.isNotEmpty())return false;
+    if(absolute.size()<2||absolute.size()>2048){error="A bridge needs 2..2048 controls";return false;}
+    double previous=-std::numeric_limits<double>::infinity();
+    for(const auto& p:absolute)if(!finiteGraphPoint(p)||p.timeSeconds<=previous||p.targetMidi<0||p.targetMidi>127)
+    {error="Invalid editable bridge points";return false;}else previous=p.timeSeconds;
+    const auto prior=resolvedConnectionPitchCurves(track,graph);
+    const auto current=std::find_if(prior.begin(),prior.end(),[&](const auto& c){return c.connectionId==id;});
+    if(current!=prior.end()&&current->active&&current->points.size()==absolute.size())
+    {
+        bool same=true;
+        for(std::size_t i=0;i<absolute.size();++i)
+        {
+            const auto& x=current->points[i];const auto& y=absolute[i];
+            same&=std::abs(x.timeSeconds-y.timeSeconds)<1.e-10&&x.targetMidi==y.targetMidi&&x.shape==y.shape
+                &&x.bezierX1==y.bezierX1&&x.bezierY1==y.bezierY1&&x.bezierX2==y.bezierX2&&x.bezierY2==y.bezierY2&&x.highPrecisionBezier==y.highPrecisionBezier;
+        }
+        if(same)return false;
+    }
+    const auto from=absolute.front().timeSeconds,to=absolute.back().timeSeconds;
+    if(from<endpoints[a].start-1.e-8||from>endpoints[a].end+1.e-8||to<endpoints[b].start-1.e-8||to>endpoints[b].end+1.e-8||to-from<.001)
+    {error="Bridge endpoints must remain inside their own note bodies with at least 1ms duration";return false;}
+    const auto base=sharedPitchLines(track);const auto low=graphBaseMidiAt(base,endpoints[a],from,{},nullptr),high=graphBaseMidiAt(base,endpoints[b],to,{},nullptr);
+    if(std::abs(absolute.front().targetMidi-low)>.0002f||std::abs(absolute.back().targetMidi-high)>.0002f)
+    {error="Outer endpoint pitch follows the live score; edit endpoint time/curvature or interior pitch instead";return false;}
+    auto candidate=*found;candidate.pitchCurve.clear();candidate.pitchCurveEndpointRelative=true;
+    candidate.pitchStartOffsetSeconds=from-endpoints[a].end;candidate.pitchEndOffsetSeconds=to-endpoints[b].anchor;
+    for(auto p:absolute)
+    {
+        const auto u=(p.timeSeconds-from)/(to-from);p.timeSeconds=u;p.targetMidi-=static_cast<float>(low+(high-low)*u);candidate.pitchCurve.push_back(p);
+    }
+    candidate.pitchCurve.front().timeSeconds=0;candidate.pitchCurve.back().timeSeconds=1;
+    candidate.pitchCurve.front().targetMidi=candidate.pitchCurve.back().targetMidi=0;
+    const auto old=*found;*found=candidate;
+    const auto resolved=resolvedConnectionPitchCurves(track,graph);const auto check=std::find_if(resolved.begin(),resolved.end(),[&](const auto& c){return c.connectionId==id;});
+    if(check==resolved.end()||!check->active){*found=old;error=check==resolved.end()?juce::String("Bridge cannot be resolved"):check->issue;return false;}
+    return !sameGraphPitchData(old,candidate);
+}
+const TrackData* graphConnectionTrack(const ProjectData& project,const std::vector<NativeConnection>& graph,const juce::String& id,juce::String& error)
+{
+    const auto c=std::find_if(graph.begin(),graph.end(),[&](const auto& c){return c.id==id;});
+    if(c==graph.end()){error="Unknown connection";return nullptr;}
+    const TrackData* owner=nullptr;
+    for(const auto& t:project.tracks)
+    {
+        int left=0,right=0;for(const auto& p:t.clips)for(const auto& n:p.notes){left+=n.id==c->leftNoteId;right+=n.id==c->rightNoteId;}
+        if(left&&right){if(owner||left!=1||right!=1){error="Ambiguous connection track";return nullptr;}owner=&t;}
+    }
+    if(!owner)error="Connection endpoints are not on one track";return owner;
 }
 }
 
@@ -1103,12 +1402,20 @@ void ProjectModel::replaceInternal(ProjectData replacement, bool newDocument)
     for (auto& track : replacement.tracks)
     {
         if (track.accompaniment) { track.compose = false; track.referenceOnly = false; }
-        else if (track.voicebankDirectory.getChildFile("dsconfig.yaml").existsAsFile()) track.utauMode = UtauMode::mou;
+        if(!track.trackType)
+        {
+            if(!track.accompaniment&&track.voicebankDirectory.getChildFile("dsconfig.yaml").existsAsFile())track.utauMode=UtauMode::mou;
+            track.trackType=effectiveTrackType(track);
+        }
     }
     {
         const juce::ScopedLock guard(lock);
         if (newDocument) { undoHistory.clear(); redoHistory.clear(); ++revision; }
-        else pushUndoLocked();
+        else
+        {
+            replacement.assetManagerVisible = project.assetManagerVisible;
+            pushUndoLocked();
+        }
         project = std::move(replacement);
     }
     sendChangeMessage();
@@ -1128,6 +1435,14 @@ void ProjectModel::clear()
     resetDocument();
 }
 
+void ProjectModel::setAssetManagerVisible(bool visible)
+{
+    const juce::ScopedLock guard(lock);
+    if (project.assetManagerVisible == visible) return;
+    project.assetManagerVisible = visible;
+    ++revision;
+}
+
 bool ProjectModel::undo()
 {
     {
@@ -1135,7 +1450,9 @@ bool ProjectModel::undo()
         if (undoHistory.empty()) return false;
         redoHistory.push_back(project);
         if (redoHistory.size() > maxHistory) redoHistory.erase(redoHistory.begin());
+        const auto visible = project.assetManagerVisible;
         project = std::move(undoHistory.back());
+        project.assetManagerVisible = visible;
         undoHistory.pop_back();
         ++revision;
     }
@@ -1150,7 +1467,9 @@ bool ProjectModel::redo()
         if (redoHistory.empty()) return false;
         undoHistory.push_back(project);
         if (undoHistory.size() > maxHistory) undoHistory.erase(undoHistory.begin());
+        const auto visible = project.assetManagerVisible;
         project = std::move(redoHistory.back());
+        project.assetManagerVisible = visible;
         redoHistory.pop_back();
         ++revision;
     }
@@ -1175,9 +1494,119 @@ juce::String ProjectModel::makeId(const char* prefix)
     return juce::String(prefix) + "_" + juce::Uuid().toString().removeCharacters("-");
 }
 
+namespace
+{
+struct MaterialAliasProjection
+{
+    juce::String bound, label, previousEffective;
+    bool missing = false;
+    bool labelFollowsAlias = false;
+};
+MaterialAliasProjection materialAliasProjection(const NoteData& note,const SampleRegionSetting& row)
+{
+    const auto primary=row.name.trim().isEmpty()?juce::String("-"):row.name.trim();
+    const auto effective=note.materialBoundAlias.isNotEmpty()?note.materialBoundAlias
+        :note.materialLabelFollowsAlias?note.label:primary;
+    const auto bound=note.materialAliasFollowsPrimary?primary:effective;
+    // Carried Melodyne placements were registered with a '-' display snapshot.
+    // Naming that placeholder starts following the primary alias; explicitly
+    // renamed note labels remain independent of subsequent source publications.
+    const bool followsLabel=note.materialLabelFollowsAlias
+        || (note.materialAliasFollowsPrimary&&note.label=="-"&&effective=="-"&&primary!="-");
+    return {bound,followsLabel?bound:note.label,effective,
+        !note.materialAliasFollowsPrimary&&bound!=primary&&!row.additionalAliases.contains(bound),followsLabel};
+}
+// Source-snapshot whitelist shared by source publication and note-local edits.
+// This deliberately does not initialize/reset any musical target or source F0.
+void applyMaterialAnnotationSnapshot(NoteData& note,const SampleRegionSetting& row,
+    bool intact,const std::vector<NativeSegment>& segments)
+{
+    const auto alias=materialAliasProjection(note,row);
+    note.label=alias.label;note.materialBoundAlias=alias.bound;note.materialLabelFollowsAlias=alias.labelFollowsAlias;note.nativeRole=row.role;
+    note.nativeProvenance=row.provenance;note.nativeConfidence=row.confidence;
+    note.materialAudioId=row.materialAudioId;note.materialRegionId=row.materialRegionId;
+    note.materialAdditionalAliases=row.additionalAliases;note.materialConnectedNextRegionId=row.connectedNextRegionId;
+    note.pronunciationKind=row.pronunciationKind;note.simplifiedConsonant=row.simplifiedConsonant;note.vowelSplitsExplicit=row.vowelSplitsExplicit;
+    note.materialReferenceUnresolved=false;note.materialSourceStartSeconds=row.regionStartSeconds;note.materialSourceEndSeconds=row.regionEndSeconds;
+    if(intact){note.nativeSourceStartSeconds=row.regionStartSeconds;note.nativeSourceEndSeconds=row.regionEndSeconds;note.nativeSegments=segments;}
+}
+
+// Preserve hidden absolute-file trim anchors while publishing a validated clock.
+// Both full-source updates and local edits use this one ownership operation.
+bool publishMaterialSourceClock(ClipData& owner,const std::vector<SourceTimePoint>& oldClock,
+    std::vector<SourceTimePoint> newClock,double first,double last,juce::String& error)
+{
+    constexpr double epsilon=1.e-8;
+    if(!owner.nativeTrimClock.empty())
+    {
+        std::vector<SourceTimePoint> trim;
+        for(const auto& point:owner.nativeTrimClock)
+            if(point.targetSeconds<oldClock.front().targetSeconds-epsilon||point.targetSeconds>oldClock.back().targetSeconds+epsilon)trim.push_back(point);
+        for(auto point:newClock){point.sourceSeconds+=first;trim.push_back(point);}
+        std::stable_sort(trim.begin(),trim.end(),[](const auto& a,const auto& b){return a.targetSeconds<b.targetSeconds;});
+        for(std::size_t i=1;i<trim.size();++i)if(trim[i].sourceSeconds<=trim[i-1].sourceSeconds+epsilon)
+        {error="Boundary conflicts with retained trim history.";return false;}
+        owner.nativeTrimClock=std::move(trim);
+    }
+    owner.sourceTimeMap=std::move(newClock);owner.sourceOffsetSeconds=first;owner.sourceDurationSeconds=last-first;return true;
+}
+
+// Pure annotation-to-native-note builder shared by ordinary annotated audio
+// and explicit pronunciation insertion. The caller owns identity and timing.
+void initialiseMaterialNote(NoteData& note, const SampleRegionSetting& row,
+                            bool legacyUnpitchedMeasured = false)
+{
+    note.label = row.name.trim().isEmpty() ? "-" : row.name.trim();
+    note.materialBoundAlias=note.label;note.materialAliasFollowsPrimary=true;note.materialLabelFollowsAlias=true;
+    note.nativeRole = row.role; note.nativeUnpitched = row.nativeUnpitched;
+    note.nativeProvenance = row.provenance; note.nativeConfidence = row.confidence;
+    note.materialAudioId = row.materialAudioId; note.materialRegionId = row.materialRegionId;
+    note.materialSourceStartSeconds = note.nativeSourceStartSeconds = row.regionStartSeconds;
+    note.materialSourceEndSeconds = note.nativeSourceEndSeconds = row.regionEndSeconds;
+    note.materialAdditionalAliases = row.additionalAliases;
+    note.materialConnectedNextRegionId = row.connectedNextRegionId;
+    note.pronunciationKind=row.pronunciationKind;note.simplifiedConsonant=row.simplifiedConsonant;note.vowelSplitsExplicit=row.vowelSplitsExplicit;
+    note.consonantSeconds = juce::jlimit(0.0, note.durationSeconds, row.fixedDurationSeconds);
+    const auto storedSource = row.melodyneOriginalPitchCenterCents > 0.0
+        ? static_cast<float>(row.melodyneOriginalPitchCenterCents / 100.0)
+        : row.melodynePitchCenterCents > 0.0
+            ? static_cast<float>(row.melodynePitchCenterCents / 100.0) : 60.0f;
+    note.sourceMidiCenter = row.melodyneOriginalPitchCenterCents > 0.0 || row.melodynePitchCenterCents > 0.0
+        ? juce::jlimit(0.0f, 127.0f, storedSource) : -1.0f;
+    note.midiNote = row.melodynePitchCenterCents > 0.0
+        ? juce::jlimit(0.0f, 127.0f, static_cast<float>(row.melodynePitchCenterCents / 100.0))
+        : juce::jlimit(0.0f, 127.0f, storedSource + static_cast<float>(row.relativePitchCents / 100.0));
+    note.drift = juce::jlimit(0.0f, 2.0f, static_cast<float>(row.melodynePitchDrift));
+    note.modulation = juce::jlimit(0.0f, 2.0f, static_cast<float>(row.melodynePitchModulation));
+    note.formantSemitones = juce::jlimit(-12.0f, 12.0f, static_cast<float>(row.melodyneFormantCents / 100.0));
+    note.breath = juce::jlimit(0.0f, 1.0f, static_cast<float>(row.melodyneSibilantBalance));
+    note.gain = juce::jlimit(0.0f, 4.0f, static_cast<float>(row.melodyneAmplitude));
+    note.attackSpeed = juce::jlimit(0.05f, 20.0f, static_cast<float>(row.melodyneAttackSeconds > 1.0e-6
+        ? row.fixedDurationSeconds / row.melodyneAttackSeconds : 1.0));
+    note.nativeSegments = SampleSettings::nativeSegmentsFor(row);
+    note.amplitudeEnvelope = row.amplitudeEnvelope;
+    note.utauPreutteranceOverrideEnabled = true;
+    note.utauPreutteranceSeconds = std::max(0.0, row.alignmentSeconds - row.regionStartSeconds);
+    note.utauOverlapOverrideEnabled = std::abs(row.overlapSeconds) > 1.0e-9;
+    note.utauOverlapSeconds = row.overlapSeconds;
+    // A source centre in metadata is not sampled F0. Analysis can replace this
+    // explicitly unmeasured neutral stub without mistaking it for real data.
+    note.sourcePitchMeasured = false;
+    note.contour = {{0.0, 0.0f, 0.0f, !note.nativeUnpitched},
+                    {note.durationSeconds, 0.0f, 0.0f, !note.nativeUnpitched}};
+    if (note.nativeUnpitched)
+    {
+        note.sourceMidiCenter = note.midiNote;
+        note.sourcePitchMeasured = legacyUnpitchedMeasured;
+        note.nativeIndependentPitch = true; note.utauAutoPitchTransition = false;
+    }
+}
+}
+
 juce::String ProjectModel::addAudioFile(const juce::File& file, double durationSeconds,
                                         double startSeconds,
-                                        const juce::String& targetTrackId)
+                                        const juce::String& targetTrackId,
+                                        const VoicebankOtoEntry* oto, UtauMode otoMode)
 {
     ClipData clip;
     clip.id = makeId("clip");
@@ -1193,11 +1622,25 @@ juce::String ProjectModel::addAudioFile(const juce::File& file, double durationS
     const auto current = snapshot();
     const auto accompaniment = std::any_of(current.tracks.begin(), current.tracks.end(),
         [&](const auto& track) { return track.id == targetTrackId && track.accompaniment; });
-    const auto sidecar = SampleSettings::sidecarFor(file);
-    const juce::File legacy(file.getFullPathName() + ".hachi.csv");
-    if (!accompaniment && (sidecar.existsAsFile() || legacy.existsAsFile()))
+    juce::String annotationError;
+    const auto nativeAnnotated = SampleSettings::hasNativeAnnotation(file, &annotationError);
+    if (annotationError.isNotEmpty() && oto == nullptr) return {};
+    if (oto != nullptr)
     {
-        const auto rows = SampleSettings::loadOrDerive(file, ProjectData{});
+        if (oto->audioFile != file || accompaniment) return {};
+        for (const auto& track : current.tracks)
+            if (track.id == targetTrackId && !trackShowsAllNativeRegions(track)) return {};
+        auto prepared = SampleSettings::nativeAudioFromOto(*oto, otoMode, durationSeconds);
+        if (!prepared) return {};
+        prepared->id = clip.id;
+        prepared->startSeconds = clip.startSeconds;
+        clip = std::move(*prepared);
+        for (auto& note : clip.notes) note.id = makeId("note");
+    }
+    else if (!accompaniment && nativeAnnotated)
+    {
+        const auto rows = SampleSettings::loadOrDerive(file, ProjectData{}, &annotationError);
+        if (annotationError.isNotEmpty()) return {};
         std::vector<RegionSpan> spans;
         spans.reserve(rows.size());
         for (const auto& row : rows)
@@ -1217,56 +1660,9 @@ juce::String ProjectModel::addAudioFile(const juce::File& file, double durationS
             if (regionEnd - regionStart < 0.001) continue;
             NoteData note;
             note.id = makeId("note");
-            note.label = row.name.trim().isEmpty() ? "-" : row.name.trim();
-            note.nativeRole = row.role;
-            note.nativeUnpitched = row.nativeUnpitched;
-            note.nativeProvenance = row.provenance;
-            note.nativeConfidence = row.confidence;
-            note.nativeSourceStartSeconds = row.regionStartSeconds;
-            note.nativeSourceEndSeconds = row.regionEndSeconds;
             note.startSeconds = regionStart;
             note.durationSeconds = regionEnd - regionStart;
-            note.consonantSeconds = juce::jlimit(0.0, note.durationSeconds,
-                                                  row.fixedDurationSeconds);
-            const auto storedSource = row.melodyneOriginalPitchCenterCents > 0.0
-                ? static_cast<float>(row.melodyneOriginalPitchCenterCents / 100.0)
-                : row.melodynePitchCenterCents > 0.0
-                    ? static_cast<float>(row.melodynePitchCenterCents / 100.0)
-                    : 60.0f;
-            note.sourceMidiCenter = row.melodyneOriginalPitchCenterCents > 0.0
-                || row.melodynePitchCenterCents > 0.0
-                ? juce::jlimit(0.0f, 127.0f, storedSource) : -1.0f;
-            note.midiNote = row.melodynePitchCenterCents > 0.0
-                ? juce::jlimit(0.0f, 127.0f,
-                    static_cast<float>(row.melodynePitchCenterCents / 100.0))
-                : juce::jlimit(0.0f, 127.0f, storedSource
-                    + static_cast<float>(row.relativePitchCents / 100.0));
-            note.drift = juce::jlimit(0.0f, 2.0f,
-                static_cast<float>(row.melodynePitchDrift));
-            note.modulation = juce::jlimit(0.0f, 2.0f,
-                static_cast<float>(row.melodynePitchModulation));
-            note.formantSemitones = juce::jlimit(-12.0f, 12.0f,
-                static_cast<float>(row.melodyneFormantCents / 100.0));
-            note.breath = juce::jlimit(0.0f, 1.0f,
-                static_cast<float>(row.melodyneSibilantBalance));
-            note.gain = juce::jlimit(0.0f, 4.0f,
-                static_cast<float>(row.melodyneAmplitude));
-            note.attackSpeed = juce::jlimit(0.05f, 20.0f,
-                static_cast<float>(row.melodyneAttackSeconds > 1.0e-6
-                    ? row.fixedDurationSeconds / row.melodyneAttackSeconds : 1.0));
-            note.nativeSegments = SampleSettings::nativeSegmentsFor(row);
-            note.amplitudeEnvelope = row.amplitudeEnvelope;
-            note.utauPreutteranceOverrideEnabled = true;
-            note.utauPreutteranceSeconds = std::max(0.0,
-                row.alignmentSeconds - row.regionStartSeconds);
-            note.utauOverlapOverrideEnabled = std::abs(row.overlapSeconds) > 1.0e-9;
-            note.utauOverlapSeconds = row.overlapSeconds;
-            // Sidecars supply authored regions and controls. This temporary
-            // contour is replaced by acoustic F0 when import analysis finishes.
-            note.contour.push_back({ 0.0, 0.0f, 0.0f, !note.nativeUnpitched });
-            note.contour.push_back({ note.durationSeconds, 0.0f, 0.0f, !note.nativeUnpitched });
-            if (note.nativeUnpitched)
-            { note.sourceMidiCenter = note.midiNote; note.sourcePitchMeasured = true; note.nativeIndependentPitch = true; note.utauAutoPitchTransition = false; }
+            initialiseMaterialNote(note, row, true);
             clip.notes.push_back(std::move(note));
         }
     }
@@ -1290,7 +1686,7 @@ juce::String ProjectModel::addAudioFile(const juce::File& file, double durationS
         }
         else
         {
-            TrackData track;
+            TrackData track;configureNewTrackType(track,TrackType::hachi);
             track.id = makeId("track");
             track.name = file.getFileNameWithoutExtension();
             track.clips.push_back(std::move(clip));
@@ -1303,8 +1699,153 @@ juce::String ProjectModel::addAudioFile(const juce::File& file, double durationS
     return clipId;
 }
 
+juce::String ProjectModel::addMaterialPronunciations(
+    const juce::File& audio, const std::vector<SampleRegionSetting>& completeRows,
+    const std::vector<juce::String>& selectedRegionIds, double absoluteStart,
+    const juce::String& targetTrackId, juce::String& error, const juce::String& chosenAlias)
+{
+    error.clear();
+    const auto fail = [&](const juce::String& message) -> juce::String { error = message; return {}; };
+    if (!std::isfinite(absoluteStart) || absoluteStart < 0)
+        return fail("Invalid material insertion time.");
+    if (completeRows.empty() || selectedRegionIds.empty()) return fail("No material pronunciations selected.");
+    // Reuse the manifest authority, including scoped identities, finite source
+    // metadata, alias uniqueness within a row, explicit links and cycle checks.
+    OttoMaterialIO::Document document;
+    document.audio.push_back({completeRows.front().materialAudioId, audio.getFileName(), completeRows});
+    if (!OttoMaterialIO::validate(document, error)) return {};
+    juce::AudioFormatManager formats; formats.registerBasicFormats();
+    std::unique_ptr<juce::AudioFormatReader> reader(formats.createReaderFor(audio));
+    if (!reader || reader->sampleRate <= 0) return fail("Cannot read material source audio.");
+    const auto sourceDuration = reader->lengthInSamples / reader->sampleRate;
+    constexpr double epsilon = 1.0e-8;
+    for (const auto& row : completeRows)
+        if (row.regionEndSeconds > sourceDuration + epsilon)
+            return fail("Material pronunciation lies outside source audio: " + row.materialRegionId);
+    std::vector<const SampleRegionSetting*> selected;
+    for (const auto& id : selectedRegionIds)
+    {
+        if (std::any_of(selected.begin(), selected.end(), [&](const auto* row) { return row->materialRegionId == id; }))
+            return fail("Duplicate selected pronunciation identity: " + id);
+        const auto found = std::find_if(completeRows.begin(), completeRows.end(),
+            [&](const auto& row) { return row.materialRegionId == id; });
+        if (found == completeRows.end()) return fail("Unknown selected pronunciation identity: " + id);
+        if (found->regionEndSeconds - found->regionStartSeconds < .001)
+            return fail("Pronunciation shorter than the native 1ms minimum: " + id);
+        selected.push_back(&*found);
+    }
+    std::stable_sort(selected.begin(), selected.end(), [](const auto* a, const auto* b)
+    { return a->regionStartSeconds < b->regionStartSeconds; });
+    for (std::size_t i = 1; i < selected.size(); ++i)
+        if (selected[i]->regionStartSeconds < selected[i-1]->regionEndSeconds - epsilon)
+            return fail("Overlapping pronunciation selections require separate placements.");
+
+    if(chosenAlias.isNotEmpty()&&(selected.size()!=1
+        ||(chosenAlias!=selected.front()->name&&!selected.front()->additionalAliases.contains(chosenAlias))))
+        return fail("Chosen alias must belong to the single selected pronunciation.");
+    const auto firstSource = selected.front()->regionStartSeconds;
+    const auto lastSource = selected.back()->regionEndSeconds;
+    ClipData clip; clip.id = makeId("clip"); clip.sourceFile = audio;
+    clip.startSeconds = absoluteStart;
+    clip.durationSeconds = clip.sourceDurationSeconds = lastSource - firstSource;
+    clip.sourceOffsetSeconds = firstSource;
+    // An explicit identity map preserves authored source geometry rather than
+    // letting consonant expression derive a second implicit warp on insertion.
+    clip.sourceTimeMap = {{0, 0}, {clip.durationSeconds, clip.sourceDurationSeconds}};
+    struct Run { std::size_t first, last; };
+    std::vector<Run> runs;
+    for (std::size_t i = 0; i < selected.size(); ++i)
+    {
+        NoteData note; note.id = makeId("note");
+        note.startSeconds = selected[i]->regionStartSeconds - firstSource;
+        note.durationSeconds = selected[i]->regionEndSeconds - selected[i]->regionStartSeconds;
+        initialiseMaterialNote(note, *selected[i]);
+        if(chosenAlias.isNotEmpty())
+        {note.label=note.materialBoundAlias=chosenAlias;note.materialAliasFollowsPrimary=chosenAlias==selected[i]->name;}
+        clip.notes.push_back(std::move(note));
+        if (i == 0 || selected[i]->regionStartSeconds > selected[i-1]->regionEndSeconds + epsilon)
+            runs.push_back({i, i});
+        else runs.back().last = i;
+    }
+    // Discontinuous runs never share an audible source window. The parent
+    // keeps original-source spacing; only children are expanded for rendering.
+    if (runs.size() > 1)
+    {
+        clip.sourceTimeMap.clear();
+        for (const auto& run : runs)
+        {
+            ClipData part; part.id = makeId("material-part"); part.sourceFile = audio;
+            const auto begin = selected[run.first]->regionStartSeconds;
+            const auto end = selected[run.last]->regionEndSeconds;
+            part.startSeconds = begin - firstSource; part.sourceOffsetSeconds = begin;
+            part.durationSeconds = part.sourceDurationSeconds = end - begin;
+            part.sourceTimeMap = {{0, 0}, {part.durationSeconds, part.sourceDurationSeconds}};
+            for (auto i = run.first; i <= run.last; ++i) clip.notes[i].clipPartId = part.id;
+            clip.parts.push_back(std::move(part));
+        }
+    }
+    std::vector<NativeConnection> connections;
+    for (std::size_t i = 1; i < selected.size(); ++i)
+    {
+        const auto& left = *selected[i-1]; const auto& right = *selected[i];
+        if (left.connectedNextRegionId != right.materialRegionId) continue;
+        // Only explicit links with consecutive selected endpoints become
+        // project connections. The codec already checked <=1ms continuity.
+        if (std::abs(left.regionEndSeconds - right.regionStartSeconds)
+            > OttoMaterialIO::connectionToleranceSeconds + epsilon) continue;
+        clip.notes[i-1].connectedToNext = true; clip.notes[i].connectedToPrevious = true;
+        connections.push_back({makeId("connection"), clip.notes[i-1].id, clip.notes[i].id,
+            "pitch-and-amplitude", (left.regionEndSeconds + right.regionStartSeconds) * .5 - firstSource,
+            {}, {}});
+        if (clip.notes[i-1].clipPartId != clip.notes[i].clipPartId)
+            for (auto& part : clip.parts)
+            {
+                if (part.id == clip.notes[i-1].clipPartId) part.glideConnectedToNext = true;
+                if (part.id == clip.notes[i].clipPartId) part.glideConnectedFromPrevious = true;
+            }
+    }
+    if (!clip.parts.empty())
+        clip.nativeAudioLinked = std::all_of(clip.parts.begin() + 1, clip.parts.end(),
+            [](const auto& part) { return part.glideConnectedFromPrevious; });
+
+    const auto clipId = clip.id;
+    {
+        const juce::ScopedLock guard(lock);
+        auto target = std::find_if(project.tracks.begin(), project.tracks.end(),
+            [&](const auto& track) { return targetTrackId.isNotEmpty()
+                && track.id == targetTrackId && trackShowsAllNativeRegions(track); });
+        if (target != project.tracks.end())
+        {
+            auto relative = clip; relative.startSeconds = 0;
+            clip.startSeconds = nativePasteStart(*target, {relative}, absoluteStart);
+            for (auto& connection : connections) connection.boundarySeconds += clip.startSeconds;
+            pushUndoLocked();
+            target->clips.push_back(std::move(clip));
+        }
+        else
+        {
+            TrackData track;configureNewTrackType(track,TrackType::hachi); track.id = makeId("track"); track.name = audio.getFileNameWithoutExtension();
+            track.compose = true; track.nativeNsfAudio = true;
+            // A newly created native track keeps the explicit native defaults.
+            for (auto& connection : connections) connection.boundarySeconds += clip.startSeconds;
+            track.clips.push_back(std::move(clip));
+            pushUndoLocked();
+            project.tracks.push_back(std::move(track));
+        }
+        project.nativeConnections.insert(project.nativeConnections.end(), connections.begin(), connections.end());
+        if (project.name == "Untitled") project.name = audio.getFileNameWithoutExtension();
+    }
+    sendChangeMessage();
+    return clipId;
+}
+
+juce::String ProjectModel::addTypedTrack(TrackType type,const juce::String& name)
+{
+    return addTrack(name,true,false,false,type);
+}
+
 juce::String ProjectModel::addTrack(const juce::String& requestedName, bool compose,
-                                   bool referenceOnly, bool accompaniment)
+                                   bool referenceOnly, bool accompaniment,TrackType type)
 {
     juce::String id;
     {
@@ -1318,20 +1859,9 @@ juce::String ProjectModel::addTrack(const juce::String& requestedName, bool comp
         track.accompaniment = accompaniment;
         track.compose = compose && !accompaniment;
         track.referenceOnly = referenceOnly && !accompaniment;
-        // A new track follows the currently established project workflow,
-        // rather than unexpectedly returning to mld5 after the user has
-        // selected NSF/WORLD or a different stretch engine.
-        if (!accompaniment)
-        {
-            const auto previous = std::find_if(project.tracks.rbegin(), project.tracks.rend(),
-                [](const auto& candidate) { return !candidate.accompaniment; });
-            if (previous != project.tracks.rend())
-            {
-                track.pitchAlgorithm = previous->pitchAlgorithm;
-                track.stretchAlgorithm = previous->stretchAlgorithm;
-                track.renderOrder = previous->renderOrder;
-            }
-        }
+        configureNewTrackType(track,accompaniment?TrackType::hachi:type);
+        // New native tracks always use NSF and splice-before-synthesis defaults;
+        // previously saved tracks retain their own explicit configuration.
         id = track.id;
         project.tracks.push_back(std::move(track));
     }
@@ -1381,8 +1911,6 @@ bool ProjectModel::setClipNotesIfEmpty(const juce::String& clipId,
 {
     if (notes.empty()) return false;
     auto changed = false;
-    juce::File annotationSource;
-    std::vector<SampleRegionSetting> annotationRows;
     {
         const juce::ScopedLock guard(lock);
         for (auto& track : project.tracks)
@@ -1392,10 +1920,8 @@ bool ProjectModel::setClipNotesIfEmpty(const juce::String& clipId,
                 {
                     // Import analysis is one operation.  More importantly,
                     // do not replace notes the user drew while it was running.
-                    annotationSource = clip.sourceFile;
                     const auto ratio = clip.durationSeconds > 1.0e-9
                         ? clip.sourceDurationSeconds / clip.durationSeconds : 1.0;
-                    annotationRows.reserve(notes.size());
                     for (auto& note : notes)
                     {
                         if (trackIsDiffSinger(track)) note.utauFlagCurveEnabled = true;
@@ -1412,21 +1938,6 @@ bool ProjectModel::setClipNotesIfEmpty(const juce::String& clipId,
                             note.nativeRole, 0.0, note.durationSeconds,
                             "estimated", 0.0f, note.durationSeconds, 0.0,
                             true, 1.0 } };
-                        SampleRegionSetting row;
-                        row.name = note.label;
-                        row.role = note.nativeRole;
-                        row.nativeUnpitched = note.nativeUnpitched;
-                        row.provenance = "estimated";
-                        row.confidence = 0.0f;
-                        row.regionStartSeconds = clip.sourceOffsetSeconds
-                            + note.startSeconds * ratio;
-                        row.regionEndSeconds = row.regionStartSeconds
-                            + note.durationSeconds * ratio;
-                        row.segments.push_back({ "segment_1", note.label,
-                            note.nativeRole, row.regionStartSeconds,
-                            row.regionEndSeconds, "estimated", 0.0f,
-                            row.regionEndSeconds, 0.0, true, 1.0 });
-                        annotationRows.push_back(std::move(row));
                     }
                     clip.notes = std::move(notes);
                     changed = true;
@@ -1435,43 +1946,151 @@ bool ProjectModel::setClipNotesIfEmpty(const juce::String& clipId,
             if (changed) break;
         }
     }
-    if (changed && annotationSource.existsAsFile())
-    {
-        juce::String annotationError;
-        if (!SampleSettings::save(annotationSource, annotationRows, annotationError))
-            DBG("Could not save analysed HJM annotation: " + annotationError);
-    }
+    // Analysis supplies project notes, never authored source pronunciations.
+    // Source OTTO is published only by an explicit native annotation save.
     if (changed) sendChangeMessage();
     return changed;
 }
 
-bool ProjectModel::setNativeTrimSourceAnalysis(const juce::File& file,const std::vector<NoteData>& sourceNotes)
+bool ProjectModel::attachSourceAnalysisLocked(const juce::File& file,const std::vector<NoteData>& sourceNotes,
+                                               const juce::String& guardedFingerprint)
 {
-    if(sourceNotes.empty())return false;
     const auto reference=nativeSourcePitchReference(sourceNotes,[](double t){return t;});
     if(reference->empty())return false;
     bool changed=false;
+    for(auto& track:project.tracks)if(trackShowsAllNativeRegions(track))for(auto& parent:track.clips)
+    {
+        std::vector<ClipData*> owners;
+        if(parent.parts.empty())owners.push_back(&parent);else for(auto& p:parent.parts)owners.push_back(&p);
+        for(auto* owner:owners)
+        {
+            if(owner->sourceFile!=file)continue;
+            const bool guarded=owner->materialSourceFingerprint.isNotEmpty();
+            if(guarded&&(guardedFingerprint.isEmpty()||guardedFingerprint!=owner->materialSourceFingerprint))continue;
+            if(guarded&&!owner->materialSourceAnalysisPending&&!owner->nativeSourcePitchPending)continue;
+            auto proxy=*owner;proxy.parts.clear();proxy.notes.clear();
+            const auto offset=parent.parts.empty()?0.0:owner->startSeconds;
+            for(auto n:parent.notes)if(parent.parts.empty()||n.clipPartId==owner->id)
+            {n.startSeconds-=offset;proxy.notes.push_back(std::move(n));}
+            if(guarded&&proxy.notes.empty())continue; // never resurrect deleted source audio
+            const bool pending=owner->nativeSourcePitchPending;
+            if(guarded)
+            {
+                // The one acoustic mapper is reused, but its placeholder-pitch
+                // adoption must NEVER become a source-replacement score edit.
+                auto measured=proxy;
+                if(backend::AnalysisService::applySourcePitch(measured,sourceNotes)==0)continue;
+                proxy.nativeSourcePitch=reference;proxy.nativeSourcePitchComplete=true;
+                const auto clock=nativeClipClock(proxy);
+                for(auto& live:parent.notes)if(parent.parts.empty()||live.clipPartId==owner->id)
+                {
+                    const auto found=std::find_if(measured.notes.begin(),measured.notes.end(),[&](const auto& n){return n.id==live.id;});
+                    if(found==measured.notes.end())continue;
+                    const auto score=ownPitchPoints(live); // CURRENT edits, not the ticket's old snapshot
+                    std::vector<double> times{0,live.durationSeconds};
+                    for(const auto& p:found->contour)times.push_back(p.timeSeconds);
+                    for(const auto& p:live.contour)if(p.hasManualTarget&&p.timeSeconds>0&&p.timeSeconds<live.durationSeconds)times.push_back(p.timeSeconds);
+                    for(const auto& p:score)if(p.timeSeconds>0&&p.timeSeconds<live.durationSeconds)times.push_back(p.timeSeconds);
+                    std::sort(times.begin(),times.end());times.erase(std::unique(times.begin(),times.end()),times.end());
+                    std::vector<PitchPoint> facts;const auto centre=found->sourceMidiCenter>=0?found->sourceMidiCenter:live.midiNote;
+                    for(auto t:times)
+                    {
+                        const auto source=owner->sourceOffsetSeconds+nativeSourceTimeAt(clock,live.startSeconds-offset+t);
+                        const auto ref=nativeReferencePitchAt(proxy,source);PitchPoint p;p.timeSeconds=t;
+                        p.voiced=!live.nativeUnpitched&&ref&&ref->voiced;
+                        if(p.voiced){p.relativeCents=(ref->midi-centre)*100;p.withoutVibratoCents=(ref->withoutVibratoMidi-centre)*100;}
+                        p.hasManualTarget=true;p.manualTargetCents=(evaluatePitchCurve(score,t)-live.midiNote)*100;
+                        facts.push_back(p);
+                    }
+                    live.contour=std::move(facts);live.sourceMidiCenter=found->sourceMidiCenter;
+                    live.sourcePitchMeasured=true; // only real full-file facts reach this branch
+                }
+                owner->muted=owner->materialSourceResumeMuted;owner->materialSourceAnalysisPending=false;
+            }
+            else if(pending)
+            {
+                proxy.nativeSourcePitch=reference;proxy.nativeSourcePitchComplete=true;
+                for(auto& n:proxy.notes)refreshNativeTrimPitch(n,proxy);
+                for(auto& live:parent.notes)
+                    if(const auto n=std::find_if(proxy.notes.begin(),proxy.notes.end(),[&](const auto& n){return n.id==live.id;});n!=proxy.notes.end())
+                    {live.contour=n->contour;live.sourceMidiCenter=n->sourceMidiCenter;live.sourcePitchMeasured=n->sourcePitchMeasured;}
+            }
+            owner->nativeSourcePitch=reference;owner->nativeSourcePitchComplete=true;owner->nativeSourcePitchPending=false;
+            changed=true;
+        }
+    }
+    return changed;
+}
+
+bool ProjectModel::setNativeTrimSourceAnalysis(const juce::File& file,const std::vector<NoteData>& sourceNotes,
+                                               const juce::String& expectedSourceFingerprint)
+{
+    if(sourceNotes.empty())return false;
+    if(expectedSourceFingerprint.isNotEmpty()&&(!file.existsAsFile()||juce::SHA256(file).toHexString()!=expectedSourceFingerprint))return false;
+    bool changed=false;
     {
         const juce::ScopedLock guard(lock);
-        for(auto& track:project.tracks)if(trackShowsAllNativeRegions(track))
-            for(auto& parent:track.clips)
-            {
-                auto parts=expandedClipParts(parent);
-                for(auto& part:parts)if(part.sourceFile==file)
-                {
-                    const auto pending=part.nativeSourcePitchPending;
-                    part.nativeSourcePitch=reference;part.nativeSourcePitchComplete=true;part.nativeSourcePitchPending=false;
-                    if(pending)for(auto& note:part.notes)refreshNativeTrimPitch(note,part);
-                    if(parent.parts.empty())
-                    {parent.nativeSourcePitch=reference;parent.nativeSourcePitchComplete=true;parent.nativeSourcePitchPending=false;}
-                    else for(auto& original:parent.parts)if(parent.id+":"+original.id==part.id)
-                    {original.nativeSourcePitch=reference;original.nativeSourcePitchComplete=true;original.nativeSourcePitchPending=false;}
-                    if(pending)for(auto& note:parent.notes)
-                        if(const auto found=std::find_if(part.notes.begin(),part.notes.end(),[&](const auto& n){return n.id==note.id;});found!=part.notes.end())
-                        {note.contour=found->contour;note.sourceMidiCenter=found->sourceMidiCenter;note.sourcePitchMeasured=found->sourcePitchMeasured;}
-                    changed=true;
-                }
-            }
+        if(expectedSourceFingerprint.isNotEmpty())
+        {
+            materialSourceAnalysisCache[expectedSourceFingerprint]=std::make_shared<const std::vector<NoteData>>(sourceNotes);
+            while(materialSourceAnalysisCache.size()>8)materialSourceAnalysisCache.erase(materialSourceAnalysisCache.begin());
+        }
+        changed=attachSourceAnalysisLocked(file,sourceNotes,expectedSourceFingerprint);
+    }
+    if(changed)sendChangeMessage();return changed;
+}
+
+std::vector<ProjectModel::MaterialSourceBindingTicket> ProjectModel::pendingMaterialSourceAnalyses() const
+{
+    const juce::ScopedLock guard(lock);std::vector<MaterialSourceBindingTicket> result;
+    for(const auto& track:project.tracks)for(const auto& parent:track.clips)
+    {
+        const auto add=[&](const ClipData& owner,bool root)
+        {
+            if(!owner.materialSourceAnalysisPending||owner.materialSourceFingerprint.isEmpty())return;
+            const auto note=std::find_if(parent.notes.begin(),parent.notes.end(),[&](const auto& n){return root||n.clipPartId==owner.id;});
+            if(note!=parent.notes.end())result.push_back({note->id,parent.id,owner.id,owner.sourceFile,owner.materialSourceFingerprint});
+        };
+        if(parent.parts.empty())add(parent,true);else for(const auto& owner:parent.parts)add(owner,false);
+    }
+    return result;
+}
+
+bool ProjectModel::completeMaterialSourceAnalysis(const MaterialSourceBindingTicket& ticket,
+    const std::vector<NoteData>& fullFileSourceNotes,juce::String& error)
+{
+    error.clear();
+    if(ticket.noteId.isEmpty()||ticket.parentClipId.isEmpty()||ticket.sourcePartId.isEmpty()||ticket.sourceFingerprint.isEmpty())
+    {error="Incomplete source binding ticket";return false;}
+    if(!ticket.sourceFile.existsAsFile()||juce::SHA256(ticket.sourceFile).toHexString()!=ticket.sourceFingerprint)
+    {error="Source audio changed while acoustic analysis was pending; reselect the recording.";return false;}
+    for(const auto& n:fullFileSourceNotes)
+    {
+        if(!std::isfinite(n.startSeconds)||!std::isfinite(n.durationSeconds)||n.durationSeconds<=0||!std::isfinite(n.midiNote)||!std::isfinite(n.sourceMidiCenter))
+        {error="Invalid acoustic source analysis";return false;}
+        double previous=-std::numeric_limits<double>::infinity();
+        for(const auto& p:n.contour)
+        {
+            if(!std::isfinite(p.timeSeconds)||p.timeSeconds<previous||!std::isfinite(p.relativeCents)||!std::isfinite(p.withoutVibratoCents))
+            {error="Invalid acoustic source contour";return false;}
+            previous=p.timeSeconds;
+        }
+    }
+    bool changed=false;
+    {
+        const juce::ScopedLock guard(lock);
+        std::shared_ptr<const std::vector<NoteData>> facts;
+        if(!fullFileSourceNotes.empty())
+        {
+            facts=std::make_shared<const std::vector<NoteData>>(fullFileSourceNotes);
+            materialSourceAnalysisCache[ticket.sourceFingerprint]=facts;
+            while(materialSourceAnalysisCache.size()>8)materialSourceAnalysisCache.erase(materialSourceAnalysisCache.begin());
+        }
+        else if(const auto cached=materialSourceAnalysisCache.find(ticket.sourceFingerprint);cached!=materialSourceAnalysisCache.end())facts=cached->second;
+        if(!facts){error="Full-file source analysis is required (cache miss); reschedule the pending ticket.";return false;}
+        // The ticket identifies immutable FILE facts, not permission to restore
+        // its old note/source/score. Only current matching owners can consume it.
+        changed=attachSourceAnalysisLocked(ticket.sourceFile,*facts,ticket.sourceFingerprint);
     }
     if(changed)sendChangeMessage();return changed;
 }
@@ -1598,8 +2217,16 @@ bool ProjectModel::setClipAudioAnalysis(const juce::String& clipId,
 }
 
 bool ProjectModel::writeMidiFile(const ProjectData& data, const juce::File& file,
-                                 juce::String& error)
+                                 juce::String& error, const juce::String& trackId,
+                                 bool includeMuted)
 {
+    error.clear();
+    if (trackId.isNotEmpty() && std::none_of(data.tracks.begin(), data.tracks.end(),
+        [&](const auto& track) { return track.id == trackId; }))
+    {
+        error = "unknown MIDI export track: " + trackId;
+        return false;
+    }
     // Ticks, because that is what a MIDI file counts in and what keeps the
     // song on its beats wherever it is opened.  480 to the quarter is what a
     // UST counts in as well, so a note written as a whole number of ticks
@@ -1653,6 +2280,7 @@ bool ProjectModel::writeMidiFile(const ProjectData& data, const juce::File& file
     auto notesWritten = 0;
     for (const auto& track : data.tracks)
     {
+        if ((trackId.isNotEmpty() && track.id != trackId) || (!includeMuted && track.muted)) continue;
         struct Written
         {
             int start = 0, end = 0, number = 0, velocity = 100;
@@ -1660,9 +2288,11 @@ bool ProjectModel::writeMidiFile(const ProjectData& data, const juce::File& file
         };
         std::vector<Written> notes;
         for (const auto& clip : track.clips)
+        {
+            if (!includeMuted && clip.muted) continue;
             for (const auto& note : clip.notes)
             {
-                if (note.nativeUnpitched) continue;
+                if (note.nativeUnpitched || backend::isRestLyric(note.label)) continue;
                 Written written;
                 written.start = tickOf(clip.startSeconds + note.startSeconds);
                 written.end = juce::jmax(written.start + 1,
@@ -1676,6 +2306,7 @@ bool ProjectModel::writeMidiFile(const ProjectData& data, const juce::File& file
                 written.lyric = note.label.trim();
                 notes.push_back(std::move(written));
             }
+        }
         if (notes.empty()) continue;
         std::stable_sort(notes.begin(), notes.end(),
                          [](const Written& left, const Written& right)
@@ -1715,7 +2346,8 @@ bool ProjectModel::writeMidiFile(const ProjectData& data, const juce::File& file
 
     if (notesWritten == 0)
     {
-        error = "this project has no notes to write";
+        error = trackId.isEmpty() ? "this project has no exportable notes (muted notes may be excluded)"
+                                  : "the selected track has no exportable notes (muted notes may be excluded)";
         return false;
     }
     juce::TemporaryFile temporary(file);
@@ -1772,7 +2404,7 @@ bool ProjectModel::addMidiFile(const juce::File& file, juce::String& error)
         if (sequence == nullptr) continue;
         juce::MidiMessageSequence matched(*sequence);
         matched.updateMatchedPairs();
-        TrackData track;
+        TrackData track;configureNewTrackType(track,TrackType::hachi);
         track.id = makeId("track");
         track.name = file.getFileNameWithoutExtension()
             + (midi.getNumTracks() > 1 ? " " + juce::String(trackIndex + 1) : juce::String());
@@ -2024,8 +2656,13 @@ std::vector<ProjectModel::MidiTrackChoice> ProjectModel::midiTrackChoices(const 
 }
 
 juce::String ProjectModel::addMidiTrack(const juce::File& file, int trackIndex,
-                                        juce::String& error)
+                                        juce::String& error, const juce::String& targetTrackId, double startSeconds)
 {
+    if (!std::isfinite(startSeconds) || startSeconds < 0.0)
+    {
+        error = "Invalid MIDI insertion position.";
+        return {};
+    }
     auto song = readMidiSong(file, error);
     if (!song) return {};
     const auto part = std::find_if(song->parts.begin(), song->parts.end(),
@@ -2037,7 +2674,7 @@ juce::String ProjectModel::addMidiTrack(const juce::File& file, int trackIndex,
         return {};
     }
 
-    TrackData track;
+    TrackData track;configureNewTrackType(track,TrackType::hachi);
     track.id = makeId("track");
     track.name = part->name.isNotEmpty() ? part->name
         : file.getFileNameWithoutExtension()
@@ -2047,24 +2684,27 @@ juce::String ProjectModel::addMidiTrack(const juce::File& file, int trackIndex,
     ClipData clip;
     clip.id = makeId("clip");
     clip.sourceFile = file;
-    clip.startSeconds = 0.0;
+    clip.startSeconds = targetTrackId.isEmpty() ? 0.0 : startSeconds;
     clip.notes = std::move(part->notes);
 
-    const auto id = track.id;
+    const auto id = targetTrackId.isEmpty() ? track.id : targetTrackId;
     {
         const juce::ScopedLock guard(lock);
-        pushUndoLocked();
-        // The workflow the project is in, as a track 新建轨道 makes would.
-        if (!project.tracks.empty())
+        TrackData* destination = nullptr;
+        if (targetTrackId.isNotEmpty())
         {
-            track.pitchAlgorithm = project.tracks.back().pitchAlgorithm;
-            track.stretchAlgorithm = project.tracks.back().stretchAlgorithm;
-            track.renderOrder = project.tracks.back().renderOrder;
+            for (auto& existing : project.tracks)
+                if (existing.id == targetTrackId) { destination = &existing; break; }
+            if (destination == nullptr || !destination->compose || destination->accompaniment || destination->referenceOnly)
+            {
+                error = "The destination melodic track is no longer available.";
+                return {};
+            }
         }
-        // The song's own tempo only when nothing is there yet to disagree
-        // with; the tempo map has to be in place before a beat can become a
-        // second.
-        else if (!song->inSeconds)
+        pushUndoLocked();
+        // A new native MIDI track keeps NSF + splice-before-synthesis defaults.
+        // Adopt the song tempo only when no existing score can disagree.
+        if (project.tracks.empty() && !song->inSeconds)
         {
             if (song->bpm) project.bpm = *song->bpm;
             project.tempoChanges = song->tempoChanges;
@@ -2076,16 +2716,19 @@ juce::String ProjectModel::addMidiTrack(const juce::File& file, int trackIndex,
                     ? denominator : 4;
             }
         }
+        const auto startQuarter = destination != nullptr
+            ? project.quarterPositionForSeconds(clip.startSeconds) : 0.0;
         for (auto& note : clip.notes)
         {
             note.id = makeId("note");
             if (!song->inSeconds)
             {
-                const auto startQuarters = note.startSeconds;
+                const auto startQuarters = startQuarter + note.startSeconds;
                 const auto endQuarters = startQuarters + note.durationSeconds;
-                note.startSeconds = project.secondsForQuarterPosition(startQuarters);
+                const auto absoluteStart = project.secondsForQuarterPosition(startQuarters);
+                note.startSeconds = absoluteStart - clip.startSeconds;
                 note.durationSeconds = std::max(0.01,
-                    project.secondsForQuarterPosition(endQuarters) - note.startSeconds);
+                    project.secondsForQuarterPosition(endQuarters) - absoluteStart);
             }
             note.contour.push_back({ 0.0, 0.0f, 0.0f, true });
             note.contour.push_back({ note.durationSeconds, 0.0f, 0.0f, true });
@@ -2095,9 +2738,14 @@ juce::String ProjectModel::addMidiTrack(const juce::File& file, int trackIndex,
         std::stable_sort(clip.notes.begin(), clip.notes.end(),
             [](const auto& left, const auto& right) { return left.startSeconds < right.startSeconds; });
         clip.sourceDurationSeconds = clip.durationSeconds;
-        track.clips.push_back(std::move(clip));
-        project.tracks.push_back(std::move(track));
-        if (project.name == "Untitled") project.name = file.getFileNameWithoutExtension();
+        if (destination != nullptr)
+            destination->clips.push_back(std::move(clip));
+        else
+        {
+            track.clips.push_back(std::move(clip));
+            project.tracks.push_back(std::move(track));
+            if (project.name == "Untitled") project.name = file.getFileNameWithoutExtension();
+        }
     }
     sendChangeMessage();
     return id;
@@ -2215,21 +2863,39 @@ void applyUstPitchBend(NoteData& note, const backend::UstNote& source)
 
 bool ProjectModel::addUstFile(const juce::File& file, juce::String& error,
                               juce::StringArray& warnings, UstImportMode mode,
-                              juce::String* importedTrackId, int encoding)
+                              juce::String* importedTrackId, int encoding,TrackType destinationType)
 {
     const auto parsed = backend::UstImporter::read(file, error, warnings, encoding);
     if (!parsed) return false;
 
-    TrackData track;
+    struct PartView{juce::String name,voiceDirectory,globalFlags;const std::vector<backend::UstNote>* notes;};
+    std::vector<PartView> parts{{parsed->name,parsed->voiceDirectory,parsed->globalFlags,&parsed->notes}};
+    for(const auto& part:parsed->additionalTracks)parts.push_back({part.name,part.voiceDirectory,part.globalFlags,&part.notes});
+    struct PreparedPart{TrackData track;ClipData clip;std::vector<const backend::UstNote*> sources;const std::vector<backend::UstNote>* sourceNotes;double quarters;};
+    std::vector<PreparedPart> prepared;std::vector<TempoChange> tempoChanges;
+    for(const auto& tempo:parsed->tempoChanges)
+    {
+        if(!std::isfinite(tempo.quarterPosition)||tempo.quarterPosition<0||!std::isfinite(tempo.bpm)||tempo.bpm<20||tempo.bpm>400)
+        {error="The score tempo map is outside the supported 20..400 BPM range.";return false;}
+        tempoChanges.push_back({tempo.quarterPosition,tempo.bpm});
+    }
+    if(parsed->sourceFormat=="ustx"&&(!std::isfinite(parsed->tempo)||parsed->tempo<20||parsed->tempo>400))
+    {error="The score tempo is outside the supported 20..400 BPM range.";return false;}
+    if(parsed->sourceFormat=="ustx"&&(parsed->numerator<1||parsed->numerator>32
+        ||(parsed->denominator!=2&&parsed->denominator!=4&&parsed->denominator!=8&&parsed->denominator!=16)))
+    {error="The score meter cannot be represented by this project; no notes were imported.";return false;}
+    std::stable_sort(tempoChanges.begin(),tempoChanges.end(),[](const auto& x,const auto& y){return x.quarterPosition<y.quarterPosition;});
+    for(std::size_t partIndex=0;partIndex<parts.size();++partIndex)
+    {
+    const auto& part=parts[partIndex];
+    TrackData track;configureNewTrackType(track,destinationType);
     track.id = makeId("track");
-    track.name = parsed->name.isNotEmpty() ? parsed->name
+    track.name = part.name.isNotEmpty() ? part.name
                                            : file.getFileNameWithoutExtension();
     track.compose = true;
-    // Plain UTAU: the four-region modes are this application's own, and a UST
-    // says nothing that would fill them in.
-    track.pitchAlgorithm = PitchAlgorithm::utau;
-    track.utauMode = UtauMode::classic;
-    track.utauGlobalFlags = parsed->globalFlags;
+    // Destination family is an explicit import choice, defaulting to Hachi.
+    // Musical/UST metadata below is retained independently of that choice.
+    track.utauGlobalFlags = part.globalFlags;
     track.ustSourceDocument=parsed->sourceText; track.ustSourceEncoding=parsed->sourceEncoding; track.ustSourceBom=parsed->sourceBom; track.ustSourceBytes=parsed->sourceBytes;
 
     ClipData clip;
@@ -2241,23 +2907,25 @@ bool ProjectModel::addUstFile(const juce::File& file, juce::String& error,
     // is built in musical time and turned into seconds through the project's
     // own tempo map afterwards.  Summing seconds as we went would drift the
     // moment a note carried a tempo change.
-    std::vector<TempoChange> tempoChanges;
     std::vector<const backend::UstNote*> sources;
     auto quarters = 0.0;
     auto tempo = parsed->tempo;
-    for (const auto& source : parsed->notes)
+    for (const auto& source : *part.notes)
     {
-        if (source.tempo && *source.tempo > 0.0 && *source.tempo != tempo)
+        const auto position=source.positionQuarterNotes.value_or(quarters);
+        if(!std::isfinite(position)||position<0){error="Score positions must be finite and nonnegative.";return false;}
+        if (partIndex==0 && parsed->tempoChanges.empty() && source.tempo && *source.tempo > 0.0 && *source.tempo != tempo)
         {
             tempo = *source.tempo;
-            tempoChanges.push_back({ quarters, juce::jlimit(20.0, 400.0, tempo) });
+            tempoChanges.push_back({ position, juce::jlimit(20.0, 400.0, tempo) });
         }
-        const auto length = backend::UstImporter::quarterNotes(source.lengthTicks);
+        const auto length = source.durationQuarterNotes.value_or(backend::UstImporter::quarterNotes(source.lengthTicks));
+        if(!std::isfinite(length)||(source.durationQuarterNotes&&length<=0)){error="Invalid score duration.";return false;}
         // A rest becomes a gap rather than a silent note, which is the shape
         // the rest of this editor already works in.
         if (source.isRest() || length <= 0.0)
         {
-            quarters += length;
+            quarters = std::max(quarters,position+length);
             continue;
         }
         NoteData note;
@@ -2279,6 +2947,7 @@ bool ProjectModel::addUstFile(const juce::File& file, juce::String& error,
         // note is on its own pitch throughout, and nothing of the editor's is
         // laid over either.
         note.utauAutoPitchTransition = false;
+        if(destinationType==TrackType::diffSinger)note.utauFlagCurveEnabled=true;
         // The vibrato as the file writes it; the editor's own vibrato is the
         // same seven numbers, so they are carried across as they stand.
         if (source.mode2 && source.hasVibrato)
@@ -2311,47 +2980,41 @@ bool ProjectModel::addUstFile(const juce::File& file, juce::String& error,
             note.utauOverlapSeconds = *source.overlapMs / 1000.0;
         }
         // Musical position for now; converted below, once the tempo map is in.
-        note.startSeconds = quarters;
+        note.startSeconds = position;
         note.durationSeconds = length;
-        quarters += length;
+        quarters = std::max(quarters,position+length);
         clip.notes.push_back(std::move(note));
         sources.push_back(&source);
     }
 
-    if (clip.notes.empty())
-    {
-        error = "UST contains only rests: " + file.getFullPathName();
-        return false;
+    if(clip.notes.empty()){warnings.add("Empty/rest-only voice track omitted: "+part.name);continue;}
+    prepared.push_back({std::move(track),std::move(clip),std::move(sources),part.notes,quarters});
     }
-
-    const auto newTrackId = track.id;
+    if(prepared.empty()){error="The score contains no sounding notes: "+file.getFullPathName();return false;}
+    const auto newTrackId=prepared.front().track.id;
     {
         const juce::ScopedLock guard(lock);
-        if (mode == UstImportMode::replaceProject)
+        pushUndoLocked();
+        if(mode==UstImportMode::replaceProject)
+        {const auto visible=project.assetManagerVisible;project=ProjectData{};project.assetManagerVisible=visible;}
+        if(project.tracks.empty())
         {
-            undoHistory.clear(); redoHistory.clear(); ++revision;
-            project = ProjectData{};
+            project.bpm=juce::jlimit(20.0,400.0,parsed->tempo);project.tempoChanges=tempoChanges;
+            project.numerator=juce::jlimit(1,32,parsed->numerator);
+            project.denominator=parsed->denominator==2||parsed->denominator==8||parsed->denominator==16?parsed->denominator:4;
         }
-        else pushUndoLocked();
-        // The tempo map has to be in place before a musical position can be
-        // turned into seconds, and an imported song owns the tempo only when
-        // it is the first thing in the project.
-        if (project.tracks.empty())
+        else if(!tempoChanges.empty())warnings.add("tempo changes ignored: the project already has tracks");
+        for(auto& part:prepared)
         {
-            project.bpm = juce::jlimit(20.0, 400.0, parsed->tempo);
-            project.tempoChanges = tempoChanges;
-        }
-        else if (!tempoChanges.empty())
-            warnings.add("tempo changes ignored: the project already has tracks");
-
+        auto& track=part.track;auto& clip=part.clip;auto& sources=part.sources;
         for (std::size_t index = 0; index < clip.notes.size(); ++index)
         {
             auto& note = clip.notes[index];
             const auto startQuarters = note.startSeconds;
             const auto endQuarters = startQuarters + note.durationSeconds;
             note.startSeconds = project.secondsForQuarterPosition(startQuarters);
-            note.durationSeconds = std::max(0.01,
-                project.secondsForQuarterPosition(endQuarters) - note.startSeconds);
+            const auto seconds=project.secondsForQuarterPosition(endQuarters)-note.startSeconds;
+            note.durationSeconds = sources[index]->durationQuarterNotes ? seconds : std::max(0.01,seconds);
             note.consonantSeconds = 0.0;
             note.nativeSegments = { { "segment_1", note.label.isEmpty() ? "-" : note.label,
                 note.nativeRole, 0.0, note.durationSeconds, "utau",
@@ -2360,7 +3023,7 @@ bool ProjectModel::addUstFile(const juce::File& file, juce::String& error,
             note.contour.push_back({ 0.0, 0.0f, 0.0f, true });
             note.contour.push_back({ note.durationSeconds, 0.0f, 0.0f, true });
             if(parsed->mode2)applyUstPitchBend(note, *sources[index]);
-            else backend::ustexchange::applyMode1(note,*sources[index],project.tempoAtSeconds(note.startSeconds),sources[index]>parsed->notes.data()?sources[index]-1:nullptr);
+            else backend::ustexchange::applyMode1(note,*sources[index],project.tempoAtSeconds(note.startSeconds),sources[index]>part.sourceNotes->data()?sources[index]-1:nullptr);
             // The envelope is drawn against the preutterance the UST named.
             // Where it named none the oto's own is not known here -- no
             // voicebank has been chosen yet -- so the shape is anchored at the
@@ -2371,26 +3034,23 @@ bool ProjectModel::addUstFile(const juce::File& file, juce::String& error,
                                  ? note.utauPreutteranceSeconds : 0.0);
             note.ustBaseline=juce::JSON::toString(backend::ustexchange::noteState(note,project,clip.startSeconds,parsed->mode2),true);
         }
-        clip.durationSeconds = std::max(project.secondsForQuarterPosition(quarters),
-            clip.notes.back().startSeconds + clip.notes.back().durationSeconds);
+        clip.durationSeconds=project.secondsForQuarterPosition(part.quarters);
+        for(const auto& note:clip.notes)clip.durationSeconds=std::max(clip.durationSeconds,note.startSeconds+note.durationSeconds);
         clip.sourceDurationSeconds = clip.durationSeconds;
         track.clips.push_back(std::move(clip));
-        auto originalTempoProject=project;originalTempoProject.bpm=parsed->tempo;originalTempoProject.tempoChanges=tempoChanges;
+        ProjectData originalTempoProject;originalTempoProject.bpm=parsed->tempo;originalTempoProject.tempoChanges=tempoChanges;
         auto ustTrackBaseline=backend::ustexchange::trackState(track,project);
         const auto originalTempoState=backend::ustexchange::trackState(track,originalTempoProject);
         ustTrackBaseline.getDynamicObject()->setProperty("Tempo",originalTempoState["Tempo"]);
         ustTrackBaseline.getDynamicObject()->setProperty("_tempos",originalTempoState["_tempos"]);
         track.ustBaseline=juce::JSON::toString(ustTrackBaseline,true);
         project.tracks.push_back(std::move(track));
-        if (project.name == "Untitled" && parsed->name.isNotEmpty())
-            project.name = parsed->name;
+        }
+        if(project.name=="Untitled"&&parsed->name.isNotEmpty())project.name=parsed->name;
     }
-    if (importedTrackId != nullptr) *importedTrackId = newTrackId;
-    if (parsed->voiceDirectory.isNotEmpty())
-        warnings.add("this UST asks for voicebank \"" + parsed->voiceDirectory
-                     + "\" -- choose it under Settings / Algorithm");
-    sendChangeMessage();
-    return true;
+    if(importedTrackId)*importedTrackId=newTrackId;
+    for(const auto& part:parts)if(part.voiceDirectory.isNotEmpty())warnings.add("This score asks for voicebank \""+part.voiceDirectory+"\"; configure it explicitly for the chosen track type.");
+    sendChangeMessage();return true;
 }
 
 bool ProjectModel::exportUst(const juce::File& file,const juce::String& trackId,juce::String& error,juce::StringArray& warnings,int encoding) const
@@ -2563,7 +3223,7 @@ void ProjectModel::setTempoChange(double quarterPosition, double bpm, bool synch
 juce::int64 ProjectModel::contentFingerprint() const
 {
     juce::MemoryOutputStream stream;
-    toValueTree(juce::File()).writeToStream(stream);
+    toValueTree(juce::File(), false).writeToStream(stream);
     // Hash the raw bytes.  A serialised ValueTree is binary and full of zero
     // bytes, so reading it back as a string would stop at the first one and
     // leave almost the whole project out of the digest.
@@ -2768,11 +3428,10 @@ void ProjectModel::setTrackVoicebankDirectory(const juce::String& trackId,
             if (track.id == trackId && !track.accompaniment && track.voicebankDirectory != directory)
             {
                 pushUndoLocked();
-                const auto wasDiffSinger = trackIsDiffSinger(track);
+                if(!track.trackType)track.trackType=effectiveTrackType(track);
                 track.voicebankDirectory = directory;
-                if (directory.getChildFile("dsconfig.yaml").existsAsFile()) track.utauMode = UtauMode::mou;
-                if (!wasDiffSinger && trackIsDiffSinger(track))
-                    for (auto& clip : track.clips) for (auto& note : clip.notes) note.utauFlagCurveEnabled = true;
+                // Bank contents are configuration, not a track-type conversion.
+                // Selecting/moving a dsconfig file must not reinterpret music.
                 changed = true;
                 break;
             }
@@ -2834,6 +3493,34 @@ void ProjectModel::setTrackChineseCvvc(const juce::String& trackId, bool enabled
     if (changed) sendChangeMessage();
 }
 
+void ProjectModel::setTrackPianoPreview(const juce::String& trackId, bool enabled)
+{
+    bool changed = false;
+    {
+        const juce::ScopedLock guard(lock);
+        for (auto& track : project.tracks)
+            if (track.id == trackId && track.utauPianoPreview != enabled)
+            {
+                pushUndoLocked();
+                track.utauPianoPreview = enabled;
+                changed = true;
+                break;
+            }
+    }
+    if (changed) sendChangeMessage();
+}
+
+void ProjectModel::setTrackCvvcCurveCrossfade(const juce::String& trackId, bool curved)
+{
+    bool changed=false;
+    {
+        const juce::ScopedLock guard(lock);
+        for(auto& track:project.tracks)if(track.id==trackId&&track.cvvcCurveCrossfade!=curved)
+        {pushUndoLocked();track.cvvcCurveCrossfade=curved;changed=true;break;}
+    }
+    if(changed)sendChangeMessage();
+}
+
 void ProjectModel::setPitchAlgorithm(PitchAlgorithm algorithm)
 {
     auto changed = false;
@@ -2844,11 +3531,10 @@ void ProjectModel::setPitchAlgorithm(PitchAlgorithm algorithm)
                 || (algorithm == PitchAlgorithm::nsfHifigan && !track.nativeNsfAudio)))
             {
                 if (!changed) pushUndoLocked();
-                const auto wasDiffSinger = trackIsDiffSinger(track);
+                const auto previousType=effectiveTrackType(track);
                 track.pitchAlgorithm = algorithm;
+                track.trackType=algorithm==PitchAlgorithm::utau?(previousType==TrackType::diffSinger?TrackType::diffSinger:TrackType::utau):TrackType::hachi;
                 if (algorithm == PitchAlgorithm::nsfHifigan) track.nativeNsfAudio = true;
-                if (!wasDiffSinger && trackIsDiffSinger(track))
-                    for (auto& clip : track.clips) for (auto& note : clip.notes) note.utauFlagCurveEnabled = true;
                 changed = true;
             }
     }
@@ -2864,11 +3550,8 @@ void ProjectModel::setUtauMode(UtauMode mode)
             if (!track.accompaniment && track.utauMode != mode)
             {
                 if (!changed) pushUndoLocked();
-                const auto wasDiffSinger = trackIsDiffSinger(track);
-                track.utauMode = track.voicebankDirectory.getChildFile("dsconfig.yaml").existsAsFile()
-                    ? UtauMode::mou : mode;
-                if (!wasDiffSinger && trackIsDiffSinger(track))
-                    for (auto& clip : track.clips) for (auto& note : clip.notes) note.utauFlagCurveEnabled = true;
+                if(!track.trackType)track.trackType=effectiveTrackType(track);
+                track.utauMode = effectiveTrackType(track)==TrackType::diffSinger?UtauMode::mou:mode;
                 changed = true;
             }
     }
@@ -2905,11 +3588,8 @@ void ProjectModel::setTrackUtauMode(const juce::String& trackId, UtauMode mode)
             if (track.id == trackId && !track.accompaniment && track.utauMode != mode)
             {
                 pushUndoLocked();
-                const auto wasDiffSinger = trackIsDiffSinger(track);
-                track.utauMode = track.voicebankDirectory.getChildFile("dsconfig.yaml").existsAsFile()
-                    ? UtauMode::mou : mode;
-                if (!wasDiffSinger && trackIsDiffSinger(track))
-                    for (auto& clip : track.clips) for (auto& note : clip.notes) note.utauFlagCurveEnabled = true;
+                if(!track.trackType)track.trackType=effectiveTrackType(track);
+                track.utauMode = effectiveTrackType(track)==TrackType::diffSinger?UtauMode::mou:mode;
                 changed = true;
                 break;
             }
@@ -2928,11 +3608,10 @@ void ProjectModel::setTrackPitchAlgorithm(const juce::String& trackId,
                 || (algorithm == PitchAlgorithm::nsfHifigan && !track.nativeNsfAudio)))
             {
                 pushUndoLocked();
-                const auto wasDiffSinger = trackIsDiffSinger(track);
+                const auto previousType=effectiveTrackType(track);
                 track.pitchAlgorithm = algorithm;
+                track.trackType=algorithm==PitchAlgorithm::utau?(previousType==TrackType::diffSinger?TrackType::diffSinger:TrackType::utau):TrackType::hachi;
                 if (algorithm == PitchAlgorithm::nsfHifigan) track.nativeNsfAudio = true;
-                if (!wasDiffSinger && trackIsDiffSinger(track))
-                    for (auto& clip : track.clips) for (auto& note : clip.notes) note.utauFlagCurveEnabled = true;
                 changed = true;
                 break;
             }
@@ -2990,16 +3669,19 @@ void ProjectModel::setRenderOrder(RenderOrder order)
     if (changed) sendChangeMessage();
 }
 
-void ProjectModel::setTrackRenderOrder(const juce::String& trackId, RenderOrder order)
+void ProjectModel::setTrackRenderOrder(const juce::String& trackId, RenderOrder order,
+                                       std::optional<bool> mergeContiguous)
 {
     auto changed = false;
     {
         const juce::ScopedLock guard(lock);
         for (auto& track : project.tracks)
-            if (track.id == trackId && !track.accompaniment && track.renderOrder != order)
+            if (track.id == trackId && !track.accompaniment
+                && (track.renderOrder != order || (mergeContiguous && track.mergeContiguousSource != *mergeContiguous)))
             {
                 pushUndoLocked();
                 track.renderOrder = order;
+                if (mergeContiguous) track.mergeContiguousSource = *mergeContiguous;
                 changed = true;
                 break;
             }
@@ -3444,6 +4126,30 @@ void ProjectModel::resizeClip(const juce::String& clipId, double startSeconds,
     if (changed) sendChangeMessage();
 }
 
+bool ProjectModel::setClipEditableLength(const juce::String& clipId, double durationSeconds)
+{
+    if (!std::isfinite(durationSeconds) || durationSeconds < 0.01) return false;
+    {
+        const juce::ScopedLock guard(lock);
+        for (auto& track : project.tracks)
+            for (auto& clip : track.clips)
+                if (clip.id == clipId)
+                {
+                    if (!std::isfinite(clip.startSeconds + durationSeconds)) return false;
+                    if (std::abs(clip.durationSeconds - durationSeconds) < 1.e-9) return true;
+                    pushUndoLocked();
+                    // Older audio regions use the outer length as their audio clock.
+                    // Make that clock explicit before editing only the outer boundary.
+                    if (clip.audioDurationSeconds < 0.0 && (clip.sourceFile != juce::File{} || !clip.parts.empty()))
+                        clip.audioDurationSeconds = clip.durationSeconds;
+                    clip.durationSeconds = durationSeconds;
+                    sendChangeMessage();
+                    return true;
+                }
+    }
+    return false;
+}
+
 bool ProjectModel::trimClip(const juce::String& clipId, double startSeconds, double durationSeconds)
 {
     if (!std::isfinite(startSeconds) || !std::isfinite(durationSeconds)
@@ -3519,7 +4225,7 @@ void ProjectModel::setClipGain(const juce::String& clipId, float gain)
             for (auto& clip : track.clips)
                 if (clip.id == clipId)
                 {
-                    if (std::abs(clip.gain - next) <= 1.0e-6f) return;
+                    if (clip.gain == next) return;
                     pushUndoLocked();
                     clip.gain = next;
                     changed = true;
@@ -3685,6 +4391,26 @@ void ProjectModel::removeClips(const std::vector<juce::String>& clipIds)
     if (changed) sendChangeMessage();
 }
 
+bool ProjectModel::moveTrackBefore(const juce::String& trackId, const juce::String& beforeTrackId)
+{
+    {
+        const juce::ScopedLock guard(lock);
+        auto& tracks = project.tracks;
+        const auto source = std::find_if(tracks.begin(), tracks.end(), [&](const auto& t){return t.id == trackId;});
+        const auto before = std::find_if(tracks.begin(), tracks.end(), [&](const auto& t){return t.id == beforeTrackId;});
+        if (source == tracks.end() || (beforeTrackId.isNotEmpty() && before == tracks.end()) || source == before) return false;
+        const auto from = std::distance(tracks.begin(), source);
+        auto to = std::distance(tracks.begin(), before);
+        if (to > from) --to;
+        if (from == to) return false;
+        pushUndoLocked();
+        if (from < to) std::rotate(tracks.begin()+from, tracks.begin()+from+1, tracks.begin()+to+1);
+        else std::rotate(tracks.begin()+to, tracks.begin()+from, tracks.begin()+from+1);
+    }
+    sendChangeMessage();
+    return true;
+}
+
 void ProjectModel::removeTrack(const juce::String& trackId)
 {
     auto changed = false;
@@ -3789,6 +4515,88 @@ bool ProjectModel::resizeNativeNoteEdge(const juce::String& id, double delta, bo
                 }
     }
     if(changed) sendChangeMessage();
+    return changed;
+}
+
+bool ProjectModel::alignNotePreutteranceToGrid(const juce::String& noteId, double quarterStep, juce::String& error)
+{
+    error.clear();
+    if (!std::isfinite(quarterStep) || quarterStep < 1.e-6)
+    { error = "Invalid musical grid step"; return false; }
+    bool changed = false;
+    {
+        const juce::ScopedLock guard(lock);
+        TrackData* owner = nullptr; ClipData* clip = nullptr; const NoteData* note = nullptr;
+        for (auto& track : project.tracks) for (auto& candidate : track.clips)
+            for (const auto& value : candidate.notes) if (value.id == noteId)
+            { owner = &track; clip = &candidate; note = &value; }
+        if (!owner || !clip || !note) { error = "Unknown note"; return false; }
+        bool physical = clip->sourceFile != juce::File{};
+        for (const auto& part : clip->parts) if (part.id == note->clipPartId && part.sourceFile != juce::File{}) physical = true;
+        const auto originalNote = *note;
+        const auto pre = clip->startSeconds + (physical ? nativeNotePreutteranceTarget(*note, *clip) : note->startSeconds);
+        double from = clip->startSeconds;
+        double to = std::max(project.durationSeconds() + note->durationSeconds + 1.0,
+            project.secondsForQuarterPosition(project.quarterPositionForSeconds(pre) + quarterStep * 2));
+        if (physical)
+        {
+            const auto low = planNativeNoteMove(*clip, {noteId}, -1.e6, 0, NativeNoteTimeEdit::move);
+            const auto high = planNativeNoteMove(*clip, {noteId}, 1.e6, 0, NativeNoteTimeEdit::move);
+            if (!low || !high) { error = "No elastic vowel is available for alignment"; return false; }
+            from = std::max(0.0, pre + low->delta); to = std::min(to, pre + high->delta);
+        }
+        const auto first = static_cast<juce::int64>(std::ceil(project.quarterPositionForSeconds(from) / quarterStep - 1.e-9));
+        const auto last = static_cast<juce::int64>(std::floor(project.quarterPositionForSeconds(to) / quarterStep + 1.e-9));
+        if (last < first || last - first > 200000)
+        { error = "No feasible grid point in the timing range"; return false; }
+        std::vector<double> targets;
+        for (auto index = first; index <= last; ++index) targets.push_back(project.secondsForQuarterPosition(index * quarterStep));
+        std::stable_sort(targets.begin(), targets.end(), [pre](double a, double b) { return std::abs(a - pre) < std::abs(b - pre); });
+        for (const auto target : targets)
+        {
+            const auto delta = target - pre;
+            if (std::abs(delta) < 1.e-8) return false; // already aligned, no undo
+            if (physical)
+            {
+                auto plan = planNativeNoteMove(*clip, {noteId}, delta, 0, NativeNoteTimeEdit::move);
+                if (!plan || std::abs(plan->delta - delta) > 1.e-7) continue;
+                const auto safe = constrainedNativeNoteDelta(*owner, {noteId}, delta, NativeNoteTimeEdit::move);
+                if (std::abs(safe - delta) > 1.e-7) continue; // never clamp off-grid
+                auto moved = std::find_if(plan->clip.notes.begin(), plan->clip.notes.end(), [&](const auto& value) { return value.id == noteId; });
+                if (moved == plan->clip.notes.end()) continue;
+                // Alignment translates the complete selected pronunciation.
+                // Its local controls (including out-of-body shared handles and
+                // vibrato phase) do not undergo an implicit resize.
+                const auto movedStart = moved->startSeconds;
+                *moved = originalNote; moved->startSeconds = movedStart;
+                if (std::abs(plan->clip.startSeconds + nativeNotePreutteranceTarget(*moved, plan->clip) - target) > 1.e-7) continue;
+                pushUndoLocked(); *clip = std::move(plan->clip); changed = true; break;
+            }
+            // Reuse score movement rather than introducing another insertion or
+            // collision algorithm. Only the final candidate enters live history.
+            ProjectModel draft; draft.resetDocument(project); juce::String moveError;
+            if (owner->pitchAlgorithm == PitchAlgorithm::utau)
+            {
+                if (!draft.moveUtauNotes({noteId}, delta, 0, &moveError)) continue;
+            }
+            else draft.resizeNote(noteId, originalNote.startSeconds + delta, originalNote.durationSeconds);
+            auto proposed = draft.snapshot(); bool exact = false;
+            for (auto& track : proposed.tracks) for (auto& candidate : track.clips) for (auto& value : candidate.notes)
+                if (value.id == noteId)
+                {
+                    exact = std::abs(candidate.startSeconds + value.startSeconds - target) < 1.e-7;
+                    if (owner->pitchAlgorithm != PitchAlgorithm::utau)
+                    {
+                        const auto start = value.startSeconds;
+                        value = originalNote; value.startSeconds = start; // rigid move: retain all placed curve data
+                    }
+                }
+            if (!exact) continue;
+            pushUndoLocked(); project = std::move(proposed); changed = true; break;
+        }
+        if (!changed) error = "No feasible grid point: protected consonant/preutterance or neighbouring source cannot be compressed";
+    }
+    if (changed) sendChangeMessage();
     return changed;
 }
 
@@ -5126,6 +5934,13 @@ namespace
 // This keeps UTAU OTO libraries read-only during ordinary project editing.
 void relabelNote(NoteData& note, const juce::String& trimmed)
 {
+    if(note.materialAudioId.isNotEmpty()&&note.materialRegionId.isNotEmpty())
+    {
+        if(note.materialBoundAlias.isEmpty())note.materialBoundAlias=note.label;
+        note.label=trimmed.isEmpty()?juce::String("-"):trimmed;
+        note.materialLabelFollowsAlias=false;
+        return; // explicit source identity survives a free display-label edit
+    }
     const auto native = !note.nativeSegments.empty();
     const auto label = trimmed.isEmpty() ? juce::String("-") : trimmed;
     const auto oldLabel = note.label;
@@ -5202,7 +6017,7 @@ void ProjectModel::setNoteLabels(
                             // Once for the whole batch, so it undoes as one.
                             if (!changed) pushUndoLocked();
                             relabelNote(note, trimmed);
-                            keepVowelOnItsBeat(clip, note);
+                            if(note.materialAudioId.isEmpty()||note.materialRegionId.isEmpty())keepVowelOnItsBeat(clip, note);
                             changed = true;
                         }
         }
@@ -5247,7 +6062,7 @@ void ProjectModel::setNoteLabel(const juce::String& noteId, const juce::String& 
                     {
                         pushUndoLocked();
                         relabelNote(note, trimmed);
-                        keepVowelOnItsBeat(clip, note);
+                        if(note.materialAudioId.isEmpty()||note.materialRegionId.isEmpty())keepVowelOnItsBeat(clip, note);
                         changed = true;
                         break;
                     }
@@ -5444,6 +6259,91 @@ void ProjectModel::setNotesUtauSplice(const std::vector<juce::String>& noteIds,
     if (changed) sendChangeMessage();
 }
 
+bool ProjectModel::resetCvvcBoundaries(const std::vector<juce::String>& noteIds,
+                                       std::uint64_t expectedRevision)
+{
+    bool changed=false;
+    {
+        const juce::ScopedLock guard(lock);
+        if(revision!=expectedRevision)return false;
+        for(auto& track:project.tracks)
+            if(track.chineseCvvc && track.utauMode==UtauMode::classic
+                && trackUsesVoicebankSynthesis(track) && !trackIsDiffSinger(track))
+                for(auto& clip:track.clips)for(auto& note:clip.notes)
+                    if(std::find(noteIds.begin(),noteIds.end(),note.id)!=noteIds.end() && !note.cvvcBoundaries.empty())
+                    {
+                        if(!changed)pushUndoLocked();
+                        note.cvvcBoundaries.clear();
+                        note.cvvcPhonemeCache.clear();
+                        changed=true;
+                    }
+    }
+    if(changed)sendChangeMessage();
+    return changed;
+}
+
+bool ProjectModel::setCvvcBoundary(const juce::String& noteId, int rightPart,
+                                    double position, std::uint64_t expectedRevision)
+{
+    if ((rightPart!=2 && rightPart!=3) || !std::isfinite(position)) return false;
+    bool changed=false;
+    {
+        const juce::ScopedLock guard(lock);
+        if (revision!=expectedRevision) return false;
+        for (auto& track:project.tracks)
+            if (track.chineseCvvc && track.utauMode==UtauMode::classic
+                && trackUsesVoicebankSynthesis(track) && !trackIsDiffSinger(track))
+                for (auto& clip:track.clips) for (auto& note:clip.notes) if (note.id==noteId)
+                {
+                    const auto found=note.cvvcBoundaries.find(rightPart);
+                    if (found!=note.cvvcBoundaries.end() && found->second==position) return false;
+                    pushUndoLocked();
+                    note.cvvcBoundaries[rightPart]=position;
+                    note.cvvcPhonemeCache.clear();
+                    changed=true;
+                }
+    }
+    if (changed) sendChangeMessage();
+    return changed;
+}
+
+bool ProjectModel::setCvvcEnvelope(const juce::String& noteId, int part, const juce::String& flag,
+                                  backend::CvvcEnvelopeCurve points, std::uint64_t expectedRevision)
+{
+    return setCvvcEnvelopes({{noteId,part,flag,std::move(points)}},expectedRevision);
+}
+
+bool ProjectModel::setCvvcEnvelopes(std::vector<CvvcEnvelopeEdit> edits,std::uint64_t expectedRevision)
+{
+    for(auto& edit:edits)
+    {
+        if(edit.part<1||edit.part>3||edit.flag.startsWith("DS:"))return false;
+        backend::CvvcEnvelopeEdits input;input[edit.part][edit.flag]=std::move(edit.points);
+        auto normalized=backend::cvvcEnvelopesFromVar(backend::cvvcEnvelopesToVar(input));
+        if(normalized.empty())return false;
+        edit.points=std::move(normalized[edit.part][edit.flag]);
+        if(edit.flag.isNotEmpty())for(auto& p:edit.points)
+        {const auto& kind=flagCurveKindFor(edit.flag);p.value=juce::jlimit(kind.minimum,kind.maximum,p.value);}
+    }
+    bool changed=false;
+    {
+        const juce::ScopedLock guard(lock);
+        if(revision!=expectedRevision)return false;
+        for(auto& track:project.tracks)if(track.chineseCvvc&&track.utauMode==UtauMode::classic&&trackUsesVoicebankSynthesis(track))
+            for(auto& clip:track.clips)for(auto& note:clip.notes)for(auto& edit:edits)if(note.id==edit.noteId)
+            {
+                const auto old=note.cvvcEnvelopes.find(edit.part);
+                if(old!=note.cvvcEnvelopes.end())if(const auto found=old->second.find(edit.flag);
+                    found!=old->second.end()&&found->second==edit.points&&(edit.flag.isEmpty()||note.utauFlagCurveEnabled))continue;
+                if(!changed)pushUndoLocked();
+                note.cvvcEnvelopes[edit.part][edit.flag]=std::move(edit.points);
+                if(edit.flag.isNotEmpty())note.utauFlagCurveEnabled=true;
+                changed=true;
+            }
+    }
+    if(changed)sendChangeMessage();return changed;
+}
+
 void ProjectModel::setNotesUtauFlagCurveEnabled(
     const std::vector<juce::String>& noteIds, bool enabled)
 {
@@ -5491,12 +6391,13 @@ bool ProjectModel::resetNotesUtauFlagCurves(
             for (auto& clip : track.clips)
                 for (auto& note : clip.notes)
                     if (note.utauFlagCurveEnabled
-                        && !note.utauFlagCurves.empty()
+                        && (!note.utauFlagCurves.empty() || backend::hasCvvcFlagCurve(note.cvvcEnvelopes))
                         && std::find(noteIds.begin(), noteIds.end(), note.id)
                                != noteIds.end())
                     {
                         if (!changed) pushUndoLocked();
                         std::erase_if(note.utauFlagCurves, [](const auto& c) { return !isDiffSingerParameter(c.flag); });
+                        for(auto& [part, curves]:note.cvvcEnvelopes)std::erase_if(curves,[](const auto& c){return c.first.isNotEmpty();});
                         changed = true;
                     }
     }
@@ -5520,9 +6421,9 @@ bool ProjectModel::resetNotesUtauFlagCurve(
                     // HiFisampler may display a legacy unprefixed curve. Reset
                     // its native view without deleting the other engine's data.
                     if (flag.startsWith("HIFI:")) {
-                        if (flagCurvePointsFor(note,flag).empty()) continue;
+                        if (flagCurvePointsFor(note,flag).empty() && !backend::hasCvvcFlagCurve(note.cvvcEnvelopes,flag)) continue;
                     } else if (std::none_of(note.utauFlagCurves.begin(),note.utauFlagCurves.end(),
-                        [&](const auto& curve) {return curve.flag==flag;})) continue;
+                        [&](const auto& curve) {return curve.flag==flag;}) && !backend::hasCvvcFlagCurve(note.cvvcEnvelopes,flag)) continue;
                     const auto keepLegacy = flag.startsWith("HIFI:")
                         && !flagCurvePointsFor(note,flag.substring(5)).empty();
                     if (!changed) pushUndoLocked();
@@ -5530,6 +6431,11 @@ bool ProjectModel::resetNotesUtauFlagCurve(
                         return curve.flag==flag || (flag.startsWith("DS:ABS:") && curve.flag=="DS:PTS:"+flag.substring(7));
                     });
                     if (keepLegacy) note.utauFlagCurves.push_back({flag,{}});
+                    for(auto& [part, curves]:note.cvvcEnvelopes)
+                    {
+                        curves.erase(flag);
+                        if(flag.startsWith("HIFI:")&&curves.contains(flag.substring(5)))curves[flag]={};
+                    }
                     changed = true;
                 }
     }
@@ -6075,23 +6981,47 @@ void ProjectModel::clearNotesUtauJieSplit(const std::vector<juce::String>& noteI
     if (changed) sendChangeMessage();
 }
 
-void ProjectModel::setNoteUtauOto(const juce::String& noteId,
-                                  const backend::UtauOtoOverride& oto)
+bool ProjectModel::setNoteUtauOtoLocked(const juce::String& noteId,const backend::UtauOtoOverride& oto)
 {
-    auto changed = false;
+    bool changed=false;
+    for(auto& track:project.tracks)for(auto& clip:track.clips)for(auto& note:clip.notes)
+        if(note.id==noteId&&note.utauOto!=oto)
+        {
+            if(!changed)pushUndoLocked();
+            note.utauOto=oto;changed=true;
+        }
+    return changed;
+}
+
+void ProjectModel::setNoteUtauOto(const juce::String& noteId,const backend::UtauOtoOverride& oto)
+{
+    bool changed=false;
+    {const juce::ScopedLock guard(lock);changed=setNoteUtauOtoLocked(noteId,oto);}
+    if(changed)sendChangeMessage();
+}
+
+bool ProjectModel::setNoteUtauOtoChecked(const juce::String& noteId,std::uint64_t expectedRevision,
+    const backend::UtauOtoOverride& value,std::uint64_t& resultingRevision,juce::String& error)
+{
+    error.clear();resultingRevision=0;bool changed=false;
     {
         const juce::ScopedLock guard(lock);
-        for (auto& track : project.tracks)
-            for (auto& clip : track.clips)
-                for (auto& note : clip.notes)
-                    if (note.id == noteId && note.utauOto != oto)
-                    {
-                        if (!changed) pushUndoLocked();
-                        note.utauOto = oto;
-                        changed = true;
-                    }
+        if(revision!=expectedRevision){error="The project changed while the local OTO editor was open.";return false;}
+        if(noteId.isEmpty()){error="A stable note identity is required.";return false;}
+        const TrackData* owner=nullptr;int matches=0;
+        for(const auto& track:project.tracks)for(const auto& clip:track.clips)for(const auto& note:clip.notes)
+            if(note.id==noteId){++matches;owner=&track;}
+        if(matches!=1){error=matches?"Ambiguous note identity; no local OTO was changed.":"The note no longer exists.";return false;}
+        if(owner->accompaniment||!owner->compose||effectiveTrackType(*owner)!=TrackType::utau||owner->utauMode!=UtauMode::classic)
+        {error="This callback supports classic UTAU scalar OTO timing only, not native, DiffSinger or regional tracks.";return false;}
+        if(value.enabled&&(value.hasRegions||value.classes.isNotEmpty()))
+        {error="Classic OTO cannot apply regional source geometry or classes.";return false;}
+        for(const auto number:{value.offsetMs,value.consonantMs,value.cutoffMs,value.preutteranceMs,value.overlapMs,value.onsetMs,value.glideMs,value.nucleusMs})
+            if(!std::isfinite(number)){error="Local OTO values must be finite.";return false;}
+        changed=setNoteUtauOtoLocked(noteId,value);
+        resultingRevision=revision;
     }
-    if (changed) sendChangeMessage();
+    if(changed)sendChangeMessage();return true;
 }
 
 void ProjectModel::clearNotesUtauOto(const std::vector<juce::String>& noteIds)
@@ -6170,6 +7100,110 @@ void ProjectModel::setNoteUtauTimingOverrides(
     if (changed) sendChangeMessage();
 }
 
+bool ProjectModel::rememberCvvcPhonemes(const std::vector<std::pair<juce::String,juce::String>>& caches,
+                                      std::uint64_t expectedRevision)
+{
+    const juce::ScopedLock guard(lock);
+    if(revision!=expectedRevision)return false;
+    bool changed=false;
+    for(auto& track:project.tracks)if(track.chineseCvvc&&track.utauMode==UtauMode::classic)
+        for(auto& clip:track.clips)for(auto& note:clip.notes)
+            for(const auto& [id,text]:caches)if(note.id==id&&note.cvvcPhonemeCache!=text
+                &&!backend::readCvvcPhonemeCache(text).spans.empty())
+            {note.cvvcPhonemeCache=text;changed=true;}
+    // Rendering is not a user edit: do not advance revision, push undo, or
+    // trigger another render. The receiving view refreshes its own snapshot.
+    return changed;
+}
+
+int ProjectModel::crossfadeNotes(std::vector<CrossfadeSpan> spans, std::uint64_t expectedRevision, bool curved)
+{
+    const juce::ScopedLock guard(lock);
+    if (revision != expectedRevision || spans.size() < 2) return 0;
+    struct Owner { NoteData* note; double start; const TrackData* track; };
+    std::map<juce::String, Owner> owners;
+    for (auto& track : project.tracks) for (auto& clip : track.clips) for (auto& note : clip.notes)
+        for (const auto& span : spans) if (span.noteId == note.id)
+            owners.emplace(note.id, Owner{&note, clip.startSeconds + note.startSeconds, &track});
+    if (owners.size() != 2 || owners.begin()->second.track != owners.rbegin()->second.track) return 0;
+    for (const auto& span : spans)
+    {
+        if (!owners.contains(span.noteId) || !std::isfinite(span.from) || !std::isfinite(span.to)
+            || span.to - span.from < 1.e-6 || span.points.size() < 2 || span.part < 0 || span.part > 3) return 0;
+        double last = -std::numeric_limits<double>::infinity();
+        for (const auto& p : span.points)
+        {
+            if (!std::isfinite(p.timeSeconds) || !std::isfinite(p.gainDb) || p.timeSeconds < last) return 0;
+            last = p.timeSeconds;
+        }
+    }
+    std::stable_sort(spans.begin(), spans.end(), [](const auto& a, const auto& b) { return a.from < b.from; });
+    const auto ramp = [curved](auto& points, double from, double to, bool rising)
+    {
+        const auto level = nativeEnvelopeDbAt(points, rising ? to : from);
+        std::erase_if(points, [&](const auto& p) { return p.timeSeconds >= from - 1.e-9 && p.timeSeconds <= to + 1.e-9; });
+        points.push_back({from, rising ? -60.f : level, true, true});
+        if (curved)
+        {
+            // Persist in the existing amplitude-point format so every backend,
+            // the lane and undo/save consume exactly the same shape. 32 linear
+            // intervals approximate CVVC's complementary smoothstep to <0.001
+            // in normalized gain, without changing legacy dB interpolation.
+            backend::UtauMixRamp shape; shape.length=32;shape.rising=rising;shape.smoothCurve=true;
+            const auto peak=backend::envelopeGainFromDb(level);
+            for(int i=1;i<shape.length;++i)
+                points.push_back({from+(to-from)*i/shape.length,
+                    backend::envelopeDbFromGain(peak*shape.gainAt(i)),true,true});
+        }
+        points.push_back({to, rising ? level : -60.f, true, true});
+        std::stable_sort(points.begin(), points.end(), [](const auto& a, const auto& b) { return a.timeSeconds < b.timeSeconds; });
+    };
+    std::set<std::size_t> edited;
+    int count = 0;
+    for (std::size_t a = 0; a < spans.size(); ++a) for (std::size_t b = a + 1; b < spans.size(); ++b)
+    {
+        auto& left = spans[a]; auto& right = spans[b];
+        const auto end = left.soundingEnd > left.from ? std::min(left.to,left.soundingEnd) : left.to;
+        const auto rightEnd = right.soundingEnd > right.from ? std::min(right.to,right.soundingEnd) : right.to;
+        if (left.noteId == right.noteId || right.from >= end - 1.e-6) continue;
+        // A handoff requires a preceding tail and a following head. A fully
+        // nested sound is a layer, not a seam; fading it would mute the outer tail.
+        if (right.from <= left.from + 1.e-6 || rightEnd <= end + 1.e-6) continue;
+        ramp(left.points, right.from, end, false);
+        ramp(right.points, right.from, end, true);
+        edited.insert(a); edited.insert(b); ++count;
+    }
+    if (!count) return 0;
+    bool changed = false;
+    for (const auto index : edited)
+    {
+        const auto& span = spans[index]; auto& owner = owners.at(span.noteId);
+        if (span.part)
+        {
+            backend::CvvcEnvelopeCurve curve;
+            for (const auto& p : span.points) curve.push_back({(p.timeSeconds-span.from)/(span.to-span.from),p.gainDb,p.linearToNext});
+            const auto part = owner.note->cvvcEnvelopes.find(span.part);
+            if (part != owner.note->cvvcEnvelopes.end())
+                if (const auto old = part->second.find(juce::String()); old != part->second.end() && old->second == curve) continue;
+            if (!changed) pushUndoLocked(); changed = true;
+            owner.note->cvvcEnvelopes[span.part][juce::String()] = std::move(curve);
+        }
+        else
+        {
+            auto points = span.points;
+            for (auto& p : points) p.timeSeconds -= owner.start;
+            const auto& old = owner.note->amplitudeEnvelope;
+            if (old.size() == points.size() && std::equal(old.begin(),old.end(),points.begin(),[](const auto& a,const auto& b) {
+                return std::abs(a.timeSeconds-b.timeSeconds)<1.e-9 && std::abs(a.gainDb-b.gainDb)<1.e-5f
+                    && a.linearToNext==b.linearToNext && a.nativeSeamAnchor==b.nativeSeamAnchor; })) continue;
+            if (!changed) pushUndoLocked(); changed = true;
+            owner.note->amplitudeEnvelope = std::move(points);
+        }
+    }
+    if (changed) sendChangeMessage();
+    return count;
+}
+
 bool ProjectModel::setNoteAmplitudeEnvelope(
     const juce::String& noteId, std::vector<AmplitudeEnvelopePoint> points)
 {
@@ -6216,7 +7250,9 @@ bool ProjectModel::setNotesAmplitudeEnvelopes(
                         entry != envelopes.end())
                     {
                         const auto& points = entry->second;
-                        const auto same = note.amplitudeEnvelope.size() == points.size()
+                        const auto hasPartEnvelope = std::any_of(note.cvvcEnvelopes.begin(),note.cvvcEnvelopes.end(),
+                            [](const auto& part){return part.second.contains(juce::String());});
+                        const auto same = !hasPartEnvelope && note.amplitudeEnvelope.size() == points.size()
                             && std::equal(note.amplitudeEnvelope.begin(),
                                           note.amplitudeEnvelope.end(), points.begin(),
                                 [](const auto& left, const auto& right)
@@ -6229,6 +7265,7 @@ bool ProjectModel::setNotesAmplitudeEnvelopes(
                         if (same) continue;
                         if (!changed) pushUndoLocked();
                         note.amplitudeEnvelope = points;
+                        for(auto& [part, curves]:note.cvvcEnvelopes)curves.erase(juce::String());
                         changed = true;
                     }
     }
@@ -6417,9 +7454,136 @@ bool ProjectModel::setDiffSingerPitchOffset(const juce::String& noteId,
     return false;
 }
 
+bool ProjectModel::planPointCurvesLocked(const std::vector<PointCurveEdit>& edits,PointCurvePlanPreview& out,juce::String& error) const
+{
+    out={};error.clear();if(edits.empty()){error="No curve edits";return false;}
+    std::set<const TrackData*> affected;
+    const auto fail=[&](const juce::String& message){error=message;return false;};
+    for(const auto& e:edits)
+    {
+        const bool graph=e.kind==PointCurveEdit::connectionPitch||e.kind==PointCurveEdit::connectionPitchStroke;
+        if(graph)
+        {
+            if(std::count_if(project.nativeConnections.begin(),project.nativeConnections.end(),[&](const auto& c){return c.id==e.connectionId;})!=1)return fail("Unknown or ambiguous graph edit target");
+            const auto* track=graphConnectionTrack(project,project.nativeConnections,e.connectionId,error);if(!track)return false;affected.insert(track);
+            if(e.kind==PointCurveEdit::connectionPitch&&e.pitchPoints.size()<2)return fail("A graph curve needs at least two controls");
+            for(const auto& p:e.pitchPoints)if(!finiteGraphPoint(p)||p.targetMidi<0||p.targetMidi>127)return fail("Invalid graph pitch control");
+            continue;
+        }
+        const TrackData* owner=nullptr;const NoteData* note=nullptr;int count=0;
+        for(const auto& t:project.tracks)for(const auto& c:t.clips)for(const auto& n:c.notes)if(n.id==e.noteId){owner=&t;note=&n;++count;}
+        if(count!=1)return fail("Missing or ambiguous note edit target");affected.insert(owner);
+        switch(e.kind)
+        {
+            case PointCurveEdit::pitch:
+                if(note->nativeUnpitched||e.pitchPoints.empty())return fail("Missing pitched-note controls");
+                for(const auto& p:e.pitchPoints)if(!finiteGraphPoint(p)||p.targetMidi<0||p.targetMidi>127
+                    ||p.timeSeconds<(e.storePitchControlPoints?-30.0:0.0)||p.timeSeconds>note->durationSeconds+(e.storePitchControlPoints?30.0:0.0))return fail("Invalid note pitch controls");
+                break;
+            case PointCurveEdit::amplitude:
+            {
+                if(e.amplitudePoints.size()<2)return fail("An envelope needs at least two controls");
+                std::vector<double> times;
+                for(const auto& p:e.amplitudePoints)
+                {if(!std::isfinite(p.timeSeconds)||!std::isfinite(p.gainDb)||p.timeSeconds< -5||p.timeSeconds>60||p.gainDb< -60||p.gainDb>12)return fail("Invalid amplitude controls");times.push_back(p.timeSeconds);}
+                std::sort(times.begin(),times.end());int distinct=1;double previous=times.front();for(auto t:times)if(t>previous+1.e-5){++distinct;previous=t;}
+                if(distinct<2)return fail("Envelope controls collapse to one time");break;
+            }
+            case PointCurveEdit::flag:
+            {
+                if(e.key.isEmpty()||e.key.startsWith("DS:REF:")||e.key.startsWith("DS:PTS:"))return fail("Read-only or missing parameter key");
+                if(e.key.startsWith("DS:ABS:")&&!trackIsDiffSinger(*owner))return fail("This track has no DiffSinger parameter adapter");
+                if(!e.flagPoints.empty()&&(!trackTakesFlagCurves(*owner)||trackIsDiffSinger(*owner)!=e.key.startsWith("DS:")))return fail("Unsupported parameter curve for this track");
+                const auto& kind=flagCurveKindFor(e.key);
+                for(const auto& p:e.flagPoints)if(!std::isfinite(p.timeSeconds)||!std::isfinite(p.value)||!std::isfinite(p.bezierX1)||!std::isfinite(p.bezierY1)
+                    ||!std::isfinite(p.bezierX2)||!std::isfinite(p.bezierY2)||p.timeSeconds< -5||p.timeSeconds>60||p.value<kind.minimum||p.value>kind.maximum)return fail("Invalid parameter controls");
+                break;
+            }
+            case PointCurveEdit::cvvc:
+            {
+                if(e.part<1||e.part>3||e.key.startsWith("DS:")||!owner->chineseCvvc||owner->utauMode!=UtauMode::classic||!trackUsesVoicebankSynthesis(*owner))return fail("Unsupported CVVC envelope target");
+                backend::CvvcEnvelopeEdits input;input[e.part][e.key]=e.cvvcPoints;
+                if(backend::cvvcEnvelopesFromVar(backend::cvvcEnvelopesToVar(input)).empty())return fail("Invalid CVVC envelope controls");
+                for(const auto& p:e.cvvcPoints)if(!std::isfinite(p.position)||!std::isfinite(p.value))return fail("Invalid CVVC envelope value");
+                break;
+            }
+            default:return fail("Unknown curve edit kind");
+        }
+    }
+    ProjectModel draft;draft.suppressNestedUndo=true;draft.revision=revision;
+    draft.project.bpm=project.bpm;draft.project.beatOriginSeconds=project.beatOriginSeconds;draft.project.tempoChanges=project.tempoChanges;
+    draft.project.numerator=project.numerator;draft.project.denominator=project.denominator;draft.project.gridDivision=project.gridDivision;
+    draft.project.noteEditDivision=project.noteEditDivision;draft.project.nativeConnections=project.nativeConnections;
+    for(const auto& track:project.tracks)if(affected.count(&track))
+    {
+        if(track.id.isEmpty()||std::count_if(project.tracks.begin(),project.tracks.end(),[&](const auto& t){return t.id==track.id;})!=1)return fail("Missing or ambiguous track identity");
+        draft.project.tracks.push_back(track); // real affected tracks, not a whole-project clone
+    }
+    const auto baseline=draft.contentFingerprint();
+    // NOTE setters are the existing authorities, isolated with undo suppressed
+    // and no listeners. Their source-fact/normalization behavior is not copied.
+    for(const auto& e:edits)switch(e.kind)
+    {
+        case PointCurveEdit::pitch:if(!draft.setNotePitchCurve(e.noteId,e.pitchPoints,e.storePitchControlPoints,e.authorPitchSupport))return fail("Pitched note edit was rejected");break;
+        case PointCurveEdit::amplitude:(void)draft.setNotesAmplitudeEnvelopes({{e.noteId,e.amplitudePoints}});break;
+        case PointCurveEdit::flag:(void)draft.setNoteUtauFlagCurve(e.noteId,e.key,e.flagPoints);break;
+        case PointCurveEdit::cvvc:(void)draft.setCvvcEnvelope(e.noteId,e.part,e.key,e.cvvcPoints,draft.revision);break;
+        default:break;
+    }
+    // GRAPH commands see the proposed note score, never an old endpoint chord.
+    for(const auto& e:edits)if(e.kind==PointCurveEdit::connectionPitch||e.kind==PointCurveEdit::connectionPitchStroke)
+    {
+        const auto* track=graphConnectionTrack(draft.project,draft.project.nativeConnections,e.connectionId,error);if(!track)return false;
+        auto points=e.pitchPoints;
+        if(e.kind==PointCurveEdit::connectionPitchStroke)
+        {
+            std::vector<PitchCurveEditPoint> composed;
+            if(!composeConnectionPitchStroke(*track,draft.project.nativeConnections,e.connectionId,points,composed,error))
+            {if(error.isNotEmpty())return false;continue;}
+            points=std::move(composed);
+        }
+        else if(e.reanchorConnectionEndpoints)
+        {
+            const auto c=std::find_if(draft.project.nativeConnections.begin(),draft.project.nativeConnections.end(),[&](const auto& c){return c.id==e.connectionId;});
+            const auto endpoints=graphPitchEndpoints(*track);const auto a=std::find_if(endpoints.begin(),endpoints.end(),[&](const auto& n){return n.note->id==c->leftNoteId;});
+            const auto b=std::find_if(endpoints.begin(),endpoints.end(),[&](const auto& n){return n.note->id==c->rightNoteId;});
+            if(a==endpoints.end()||b==endpoints.end())return fail("Missing proposed graph endpoint");
+            const auto base=sharedPitchLines(*track);
+            points.front().targetMidi=graphBaseMidiAt(base,*a,points.front().timeSeconds,{},nullptr);
+            points.back().targetMidi=graphBaseMidiAt(base,*b,points.back().timeSeconds,{},nullptr);
+        }
+        (void)prepareConnectionPitchEdit(*track,draft.project.nativeConnections,e.connectionId,points,error);if(error.isNotEmpty())return false;
+    }
+    out.changed=draft.contentFingerprint()!=baseline;out.tracks=std::move(draft.project.tracks);out.connections=std::move(draft.project.nativeConnections);return true;
+}
+
+bool ProjectModel::previewPointCurves(const std::vector<PointCurveEdit>& edits,std::uint64_t expectedRevision,
+    PointCurvePlanPreview& out,juce::String& error) const
+{
+    const juce::ScopedLock guard(lock);out={};error.clear();
+    if(revision!=expectedRevision){error="Project changed during the curve gesture";return false;}
+    return planPointCurvesLocked(edits,out,error);
+}
+
+bool ProjectModel::setPointCurves(std::vector<PointCurveEdit> edits, std::uint64_t expectedRevision,juce::String* diagnostic)
+{
+    const juce::ScopedLock guard(lock);if(diagnostic)diagnostic->clear();
+    if(revision!=expectedRevision||edits.empty()){if(diagnostic)*diagnostic="Stale or empty curve gesture";return false;}
+    PointCurvePlanPreview planned;juce::String error;
+    if(!planPointCurvesLocked(edits,planned,error)){if(diagnostic)*diagnostic=error;return false;}
+    if(!planned.changed)return false;
+    pushUndoLocked();
+    for(auto& track:planned.tracks)
+    {
+        const auto at=std::find_if(project.tracks.begin(),project.tracks.end(),[&](const auto& t){return t.id==track.id;});
+        *at=std::move(track);
+    }
+    project.nativeConnections=std::move(planned.connections);sendChangeMessage();return true;
+}
+
 bool ProjectModel::setNotePitchCurve(const juce::String& noteId,
                                      std::vector<PitchCurveEditPoint> points,
-                                     bool storeControlPoints)
+                                     bool storeControlPoints, bool authorPitchSupport)
 {
     if (points.empty()) return false;
     std::stable_sort(points.begin(), points.end(), [](const auto& left, const auto& right)
@@ -6451,6 +7615,7 @@ bool ProjectModel::setNotePitchCurve(const juce::String& noteId,
                     pushUndoLocked();
                     changed = true;
                     if (trackShowsAllNativeRegions(track)) note.nativePitchHandlesPlaced = true;
+                    if(authorPitchSupport)note.pitchSupportAuthored=true; // explicit OR; local edits preserve prior intent
                     if (storeControlPoints) note.pitchControlPoints = points;
                     else note.pitchControlPoints.clear();
 
@@ -6462,7 +7627,38 @@ bool ProjectModel::setNotePitchCurve(const juce::String& noteId,
                         needsDensifying = needsDensifying
                             || note.contour[index].timeSeconds
                                 - note.contour[index - 1].timeSeconds > 0.0075;
-                    if (needsDensifying)
+                    if(trackShowsAllNativeRegions(track))
+                    {
+                        // A local native stroke must not rebuild/erase factual
+                        // source knots elsewhere. Union interpolated supports,
+                        // retaining every old tuple and its voiced/manual flags.
+                        const auto original=note.contour;
+                        const auto sourceAt=[&](double t)
+                        {
+                            PitchPoint p;p.timeSeconds=t;if(original.empty())return p;
+                            auto r=std::lower_bound(original.begin(),original.end(),t,[](const auto& p,double v){return p.timeSeconds<v;});
+                            if(r==original.end()){p=original.back();p.timeSeconds=t;return p;}
+                            if(r==original.begin()||r->timeSeconds==t){p=*r;p.timeSeconds=t;return p;}
+                            const auto& a=*std::prev(r);p=a;const auto u=static_cast<float>((t-a.timeSeconds)/(r->timeSeconds-a.timeSeconds));
+                            p.timeSeconds=t;p.relativeCents+=(r->relativeCents-a.relativeCents)*u;p.withoutVibratoCents+=(r->withoutVibratoCents-a.withoutVibratoCents)*u;
+                            p.voiced=a.voiced&&r->voiced;p.hasManualTarget=a.hasManualTarget&&r->hasManualTarget;
+                            if(p.hasManualTarget)p.manualTargetCents+=(r->manualTargetCents-a.manualTargetCents)*u;return p;
+                        };
+                        std::vector<double> supports;
+                        const auto from=storeControlPoints?0.0:points.front().timeSeconds;
+                        const auto to=storeControlPoints?note.durationSeconds:points.back().timeSeconds;
+                        if(needsDensifying)for(double t=from;t<to;t+=.005)supports.push_back(t);
+                        for(const auto& p:points)if(p.timeSeconds>=0&&p.timeSeconds<=note.durationSeconds)supports.push_back(p.timeSeconds);
+                        if(original.size()<2){supports.push_back(0);supports.push_back(note.durationSeconds);}
+                        std::sort(supports.begin(),supports.end());supports.erase(std::unique(supports.begin(),supports.end()),supports.end());
+                        for(auto t:supports)
+                        {
+                            const auto r=std::lower_bound(original.begin(),original.end(),t,[](const auto& p,double v){return p.timeSeconds<v;});
+                            if(r==original.end()||r->timeSeconds!=t)note.contour.push_back(sourceAt(t));
+                        }
+                        std::stable_sort(note.contour.begin(),note.contour.end(),[](const auto& a,const auto& b){return a.timeSeconds<b.timeSeconds;});
+                    }
+                    else if (needsDensifying)
                     {
                         const auto original = note.contour;
                         const auto evaluate = [&](double time)
@@ -6851,6 +8047,8 @@ bool ProjectModel::restoreNativeSourcePitch(const std::vector<juce::String>& not
             note->midiNote = note->sourceMidiCenter;
             note->drift = note->modulation = 1.0f;
             note->pitchControlPoints.clear();
+            note->materialTargetPitchLocked=false;
+            note->pitchSupportAuthored=false; // explicit restore-source action removes authored target support
             note->vibratoEnabled = note->vibratoRealLine = false;
             note->robustPitchCurve = false;
             note->connectedToPrevious = note->connectedToNext = false;
@@ -7009,6 +8207,7 @@ std::vector<std::size_t> ProjectModel::regionsToImport(
 
 bool ProjectModel::clipIsRecording(const ClipData& clip)
 {
+    if(!clip.parts.empty())return std::any_of(clip.parts.begin(),clip.parts.end(),[](const auto& p){return clipIsRecording(p);});
     if (clip.sourceFile == juce::File()) return false;
     return !clip.sourceFile.hasFileExtension("ust;mid;midi;mpd;hjpx;hspx");
 }
@@ -7016,10 +8215,17 @@ bool ProjectModel::clipIsRecording(const ClipData& clip)
 void ProjectModel::dropEmptyRecordedClipsLocked()
 {
     for (auto& track : project.tracks)
+    {
+        for(auto& clip:track.clips)std::erase_if(clip.parts,[&](const auto& part)
+        {
+            return part.materialSourceFingerprint.isNotEmpty()
+                &&std::none_of(clip.notes.begin(),clip.notes.end(),[&](const auto& n){return n.clipPartId==part.id;});
+        });
         std::erase_if(track.clips, [](const ClipData& clip)
         {
             return clip.notes.empty() && clipIsRecording(clip);
         });
+    }
 }
 
 void ProjectModel::removeNotes(const std::vector<juce::String>& noteIds)
@@ -7081,53 +8287,158 @@ void ProjectModel::removeNotes(const std::vector<juce::String>& noteIds)
     if (changed) sendChangeMessage();
 }
 
+namespace
+{
+struct ConnectionEndpoint
+{
+    NoteData* note;
+    ClipData* clip;
+    double start;
+};
+
+std::vector<ConnectionEndpoint> orderedConnectionEndpoints(TrackData& track)
+{
+    std::vector<ConnectionEndpoint> ordered;
+    for (auto& clip : track.clips)
+        for (auto& note : clip.notes)
+            ordered.push_back({ &note, &clip, clip.startSeconds + note.startSeconds });
+    std::stable_sort(ordered.begin(), ordered.end(),
+        [](const auto& left, const auto& right) { return left.start < right.start; });
+    return ordered;
+}
+
+bool hasConnectionPair(const std::vector<NativeConnection>& connections,
+                       const ConnectionEndpoint& left, const ConnectionEndpoint& right)
+{
+    return std::any_of(connections.begin(), connections.end(), [&](const auto& connection)
+    { return connection.leftNoteId == left.note->id && connection.rightNoteId == right.note->id; });
+}
+
+bool validNewConnectionPair(const ConnectionEndpoint& left, const ConnectionEndpoint& right)
+{
+    // A zero-duration source lead-in is legitimate. Independent overlapping
+    // bodies are not a boundary and must not acquire a join by start order alone.
+    return left.note != right.note && left.note->id.isNotEmpty() && right.note->id.isNotEmpty()
+        && left.note->id != right.note->id && std::isfinite(left.start) && std::isfinite(right.start)
+        && std::isfinite(left.note->durationSeconds) && left.note->durationSeconds >= 0.0
+        && std::isfinite(right.note->durationSeconds) && right.note->durationSeconds >= 0.0
+        && left.start + left.note->durationSeconds <= right.start + 1.0e-7;
+}
+
+void appendNativeConnection(std::vector<NativeConnection>& connections,
+                            const ConnectionEndpoint& left, const ConnectionEndpoint& right)
+{
+    connections.push_back({ "connection_" + juce::Uuid().toString().removeCharacters("-"),
+        left.note->id, right.note->id, "pitch-and-amplitude", (left.start + right.start) * 0.5, {}, {} });
+}
+
+bool materializeLegacyConnectionPairs(std::vector<NativeConnection>& connections,
+                                     const std::vector<ConnectionEndpoint>& ordered)
+{
+    bool changed = false;
+    for (std::size_t i = 1; i < ordered.size(); ++i)
+    {
+        const auto& left = ordered[i - 1]; const auto& right = ordered[i];
+        const bool reciprocalNoteJoin = left.note->connectedToNext && right.note->connectedToPrevious;
+        // Some importers/renderers encode the legacy join on just one side.
+        // Recover that intent only at a non-overlapping adjacent boundary; a
+        // reciprocal existing join is retained even when its bodies overlap.
+        const bool noteJoin = (left.note->connectedToNext || right.note->connectedToPrevious)
+            && (reciprocalNoteJoin || validNewConnectionPair(left, right));
+        const bool clipJoin = left.clip != right.clip && (left.clip->glideConnectedToNext
+            || right.clip->glideConnectedFromPrevious) && validNewConnectionPair(left, right);
+        if ((!noteJoin && !clipJoin) || left.note->id.isEmpty() || right.note->id.isEmpty()
+            || left.note->id == right.note->id || hasConnectionPair(connections, left, right)) continue;
+        // Explicit directional endpoints are authoritative. Their compatibility
+        // flags must not manufacture a second, guessed adjacent partner.
+        if (std::any_of(connections.begin(), connections.end(), [&](const auto& connection)
+            { return connection.leftNoteId == left.note->id || connection.rightNoteId == right.note->id; })) continue;
+        appendNativeConnection(connections, left, right);
+        changed = true;
+    }
+    return changed;
+}
+
+bool mutateNativeConnectionPair(std::vector<NativeConnection>& connections,
+                                const ConnectionEndpoint& left, const ConnectionEndpoint& right,
+                                bool enabled)
+{
+    const auto count = connections.size();
+    const bool existing = hasConnectionPair(connections, left, right);
+    std::erase_if(connections, [&](const auto& connection)
+    {
+        const bool exact = connection.leftNoteId == left.note->id && connection.rightNoteId == right.note->id;
+        // Adding B-C can replace B's outgoing edge and C's incoming edge, but
+        // never A-B or C-D. Removing a boundary removes only that exact pair.
+        return enabled ? !exact && (connection.leftNoteId == left.note->id || connection.rightNoteId == right.note->id)
+                       : exact;
+    });
+    const bool erased = count != connections.size();
+    if (enabled && !existing) appendNativeConnection(connections, left, right);
+    return erased || (enabled && !existing);
+}
+
+bool projectConnectionFlags(const std::vector<NativeConnection>& connections,
+                            const std::vector<ConnectionEndpoint>& ordered, bool apply)
+{
+    std::map<juce::String, const ConnectionEndpoint*> byId;
+    std::map<NoteData*, std::pair<bool, bool>> noteFlags;
+    std::map<ClipData*, std::pair<bool, bool>> clipFlags;
+    for (const auto& endpoint : ordered)
+    {
+        byId.emplace(endpoint.note->id, &endpoint);
+        noteFlags.emplace(endpoint.note, std::pair{ false, false });
+        clipFlags.emplace(endpoint.clip, std::pair{ false, false });
+    }
+    for (const auto& connection : connections)
+    {
+        if(connection.type=="pitch-portamento")continue; // pitch only: never concatenate/fade sources
+        const auto left = byId.find(connection.leftNoteId), right = byId.find(connection.rightNoteId);
+        // Unknown, self and cross-track records cannot project flags here.
+        if (left == byId.end() || right == byId.end() || left == right) continue;
+        noteFlags[left->second->note].second = true;
+        noteFlags[right->second->note].first = true;
+        if (left->second->clip != right->second->clip)
+        {
+            clipFlags[left->second->clip].second = true;
+            clipFlags[right->second->clip].first = true;
+        }
+    }
+    bool changed = false;
+    for (const auto& [note, flags] : noteFlags)
+    {
+        changed |= note->connectedToPrevious != flags.first || note->connectedToNext != flags.second;
+        if (apply) { note->connectedToPrevious = flags.first; note->connectedToNext = flags.second; }
+    }
+    for (const auto& [clip, flags] : clipFlags)
+    {
+        changed |= clip->glideConnectedFromPrevious != flags.first || clip->glideConnectedToNext != flags.second;
+        if (apply) { clip->glideConnectedFromPrevious = flags.first; clip->glideConnectedToNext = flags.second; }
+    }
+    return changed;
+}
+}
+
 void ProjectModel::toggleNoteConnection(const juce::String& noteId)
 {
-    auto changed = false;
+    bool changed = false;
     {
         const juce::ScopedLock guard(lock);
         for (auto& track : project.tracks)
         {
-            struct Positioned { NoteData* note; double start; };
-            std::vector<Positioned> ordered;
-            for (auto& clip : track.clips)
-                for (auto& note : clip.notes)
-                    ordered.push_back({ &note, clip.startSeconds + note.startSeconds });
-            std::stable_sort(ordered.begin(), ordered.end(),
-                [](const auto& left, const auto& right) { return left.start < right.start; });
-            for (std::size_t index = 1; index < ordered.size(); ++index)
-                if (ordered[index].note->id == noteId)
+            const auto ordered = orderedConnectionEndpoints(track);
+            for (std::size_t i = 1; i < ordered.size(); ++i)
+                if (ordered[i].note->id == noteId)
                 {
+                    auto connections = project.nativeConnections;
+                    const bool migrated = materializeLegacyConnectionPairs(connections, ordered);
+                    const bool connected = hasConnectionPair(connections, ordered[i - 1], ordered[i]);
+                    if (!connected && !validNewConnectionPair(ordered[i - 1], ordered[i])) return;
+                    const bool edited = mutateNativeConnectionPair(connections, ordered[i - 1], ordered[i], !connected);
+                    if (!migrated && !edited && !projectConnectionFlags(connections, ordered, false)) return;
                     pushUndoLocked();
-                    const auto connected = ordered[index].note->connectedToPrevious
-                        && ordered[index - 1].note->connectedToNext;
-                    ordered[index].note->connectedToPrevious = !connected;
-                    ordered[index - 1].note->connectedToNext = !connected;
-                    if (connected)
-                    {
-                        std::erase_if(project.nativeConnections,
-                            [&](const auto& connection)
-                            {
-                                return connection.leftNoteId == ordered[index - 1].note->id
-                                    && connection.rightNoteId == ordered[index].note->id;
-                            });
-                    }
-                    else
-                    {
-                        std::erase_if(project.nativeConnections,
-                            [&](const auto& connection)
-                            {
-                                return connection.leftNoteId == ordered[index - 1].note->id
-                                    || connection.rightNoteId == ordered[index - 1].note->id
-                                    || connection.leftNoteId == ordered[index].note->id
-                                    || connection.rightNoteId == ordered[index].note->id;
-                            });
-                        project.nativeConnections.push_back({
-                            makeId("connection"), ordered[index - 1].note->id,
-                            ordered[index].note->id, "pitch-and-amplitude",
-                            (ordered[index - 1].start + ordered[index].start) * 0.5,
-                            {}, {} });
-                    }
+                    project.nativeConnections = std::move(connections);
+                    projectConnectionFlags(project.nativeConnections, ordered, true);
                     changed = true;
                     break;
                 }
@@ -7273,178 +8584,1507 @@ void ProjectModel::setNotesConnection(const std::vector<juce::String>& noteIds,
 {
     if (noteIds.size() < 2) return;
     const auto includes = [&](const juce::String& id)
-    {
-        return std::find(noteIds.begin(), noteIds.end(), id) != noteIds.end();
-    };
-    auto changed = false;
+    { return std::find(noteIds.begin(), noteIds.end(), id) != noteIds.end(); };
+    bool changed = false;
     {
         const juce::ScopedLock guard(lock);
-        struct Positioned
+        struct Group
         {
-            NoteData* note = nullptr;
-            ClipData* clip = nullptr;
-            double start = 0.0;
+            std::vector<ConnectionEndpoint> ordered, selected;
         };
-        std::vector<std::vector<Positioned>> groups;
+        std::vector<Group> groups;
+        std::vector<juce::String> foundIds;
         for (auto& track : project.tracks)
         {
-            std::vector<Positioned> selected;
-            for (auto& clip : track.clips)
-                for (auto& note : clip.notes)
-                    if (includes(note.id))
-                        selected.push_back({ &note, &clip,
-                            clip.startSeconds + note.startSeconds });
-            if (selected.size() >= 2)
+            Group group; group.ordered = orderedConnectionEndpoints(track);
+            for (const auto& endpoint : group.ordered)
+                if (includes(endpoint.note->id))
+                {
+                    group.selected.push_back(endpoint);
+                    foundIds.push_back(endpoint.note->id);
+                }
+            if (group.selected.size() >= 2) groups.push_back(std::move(group));
+        }
+        // Invalid requests are atomic no-ops, not partial edits of the IDs that
+        // happened to resolve. A pair spanning tracks never enters a group.
+        if (groups.empty() || std::any_of(noteIds.begin(), noteIds.end(), [&](const auto& id)
+            { return id.isEmpty() || std::find(foundIds.begin(), foundIds.end(), id) == foundIds.end(); })) return;
+        auto connections = project.nativeConnections;
+        for (const auto& group : groups)
+        {
+            changed |= materializeLegacyConnectionPairs(connections, group.ordered);
+            for (std::size_t i = 1; i < group.selected.size(); ++i)
             {
-                std::stable_sort(selected.begin(), selected.end(),
-                    [](const auto& left, const auto& right) { return left.start < right.start; });
-                groups.push_back(std::move(selected));
+                const auto& left = group.selected[i - 1]; const auto& right = group.selected[i];
+                if (enabled && !hasConnectionPair(connections, left, right) && !validNewConnectionPair(left, right)) return;
+                changed |= mutateNativeConnectionPair(connections, left, right, enabled);
+            }
+            changed |= projectConnectionFlags(connections, group.ordered, false);
+        }
+        if (!changed) return;
+        pushUndoLocked();
+        project.nativeConnections = std::move(connections);
+        for (const auto& group : groups) projectConnectionFlags(project.nativeConnections, group.ordered, true);
+    }
+    if (changed) sendChangeMessage();
+}
+
+bool ProjectModel::setNotesPortamento(const std::vector<juce::String>& ids,bool enabled,juce::String& error,double durationSeconds)
+{
+    error.clear();if(ids.size()<2){error="Select at least two adjacent notes";return false;}
+    std::set<juce::String> selected(ids.begin(),ids.end());
+    if(selected.size()!=ids.size()||selected.count(juce::String{})){error="Duplicate or empty note identity";return false;}
+    if(enabled&&(!std::isfinite(durationSeconds)||durationSeconds<.002||durationSeconds>30))
+    {error="Portamento duration must be between 2ms and 30 seconds";return false;}
+    bool changed=false;
+    {
+        const juce::ScopedLock guard(lock);TrackData* owner=nullptr;std::size_t count=0;
+        for(auto& t:project.tracks)for(const auto& p:t.clips)for(const auto& n:p.notes)if(selected.count(n.id))
+        {
+            if(owner&&owner!=&t){error="Portamento endpoints must be on the same track";return false;}
+            owner=&t;++count;
+        }
+        if(!owner||count!=ids.size()){error="Missing or ambiguous note identity";return false;}
+        auto graph=project.nativeConnections;
+        if(!enabled)
+        {
+            for(auto it=graph.begin();it!=graph.end();)
+            {
+                if(!selected.count(it->leftNoteId)||!selected.count(it->rightNoteId)||it->pitchCurve.empty()){++it;continue;}
+                changed=true;
+                if(it->type=="pitch-portamento")it=graph.erase(it);
+                else{it->pitchCurve.clear();it->pitchCurveEndpointRelative=false;++it;} // retain prior physical/source intent
             }
         }
-        if (groups.empty()) return;
-        pushUndoLocked();
-        // A note has one incoming and one outgoing native boundary. Clear both
-        // sides of replaced records before erasing them, so a forced
-        // connection cannot silently leave stale compatibility booleans.
-        for (auto& track : project.tracks)
-            for (auto& clip : track.clips)
-                for (auto& note : clip.notes)
-                    for (const auto& connection : project.nativeConnections)
-                        if (includes(connection.leftNoteId) || includes(connection.rightNoteId))
-                        {
-                            if (note.id == connection.leftNoteId) note.connectedToNext = false;
-                            if (note.id == connection.rightNoteId) note.connectedToPrevious = false;
-                        }
-        std::erase_if(project.nativeConnections, [&](const auto& connection)
+        else
         {
-            return includes(connection.leftNoteId) || includes(connection.rightNoteId);
-        });
-        for (auto& track : project.tracks)
-            for (auto& clip : track.clips)
-                for (auto& note : clip.notes)
+            const auto endpoints=graphPitchEndpoints(*owner);std::vector<std::size_t> order;
+            for(std::size_t i=0;i<endpoints.size();++i)if(selected.count(endpoints[i].note->id))order.push_back(i);
+            if(order.size()!=ids.size()){error="Ambiguous pitch endpoint";return false;}
+            // Existing legacy source joins remain exactly as they were. Capture
+            // their graph identity, but never project new pitch-only edges back
+            // into concatenation, note splice or amplitude compatibility flags.
+            changed|=materializeLegacyConnectionPairs(graph,orderedConnectionEndpoints(*owner));
+            std::vector<juce::String> touched;
+            for(std::size_t i=1;i<order.size();++i)
+            {
+                const auto a=order[i-1],b=order[i];error=graphPitchPairIssue(*owner,endpoints,a,b);if(error.isNotEmpty())return false;
+                const auto& left=endpoints[a];const auto& right=endpoints[b];
+                if(std::any_of(graph.begin(),graph.end(),[&](const auto& c)
+                    {return (c.leftNoteId==left.note->id&&c.rightNoteId!=right.note->id)||(c.rightNoteId==right.note->id&&c.leftNoteId!=left.note->id);}))
+                {error="A directional endpoint already has another connection; disconnect it explicitly first";return false;}
+                auto edge=std::find_if(graph.begin(),graph.end(),[&](const auto& c){return c.leftNoteId==left.note->id&&c.rightNoteId==right.note->id;});
+                if(edge==graph.end())
                 {
-                    if (includes(note.id))
-                    {
-                        note.connectedToPrevious = false;
-                        note.connectedToNext = false;
-                    }
-                    if (enabled)
-                        for (const auto& group : groups)
-                            for (std::size_t index = 1; index < group.size(); ++index)
-                                if (group[index - 1].note->id == note.id)
-                                    note.connectedToNext = true;
+                    ConnectionEndpoint l{const_cast<NoteData*>(left.note),const_cast<ClipData*>(left.parent),left.start};
+                    ConnectionEndpoint r{const_cast<NoteData*>(right.note),const_cast<ClipData*>(right.parent),right.start};
+                    mutateNativeConnectionPair(graph,l,r,true);edge=std::prev(graph.end());edge->type="pitch-portamento";edge->boundarySeconds=0;changed=true;
                 }
-        if (enabled)
-            for (const auto& group : groups)
-                for (std::size_t index = 1; index < group.size(); ++index)
+                if(edge->pitchCurve.empty())
                 {
-                    auto* left = group[index - 1].note;
-                    auto* right = group[index].note;
-                    if (group[index - 1].clip != group[index].clip)
-                    {
-                        group[index - 1].clip->glideConnectedToNext = true;
-                        group[index].clip->glideConnectedFromPrevious = true;
-                    }
-                    right->connectedToPrevious = true;
-                    left->connectedToNext = true;
-                    project.nativeConnections.push_back({
-                        makeId("connection"), left->id, right->id,
-                        "pitch-and-amplitude",
-                        (group[index - 1].start + group[index].start) * 0.5,
-                        {}, {} });
+                    edge->pitchCurveEndpointRelative=true;
+                    edge->pitchStartOffsetSeconds=-std::min(durationSeconds*.5,(left.end-left.start)*.25);
+                    edge->pitchEndOffsetSeconds=std::min(durationSeconds*.5,(right.end-right.start)*.25);
+                    edge->pitchCurve={{0,0,PitchCurveShape::linear},{1,0,PitchCurveShape::smooth}};changed=true;
                 }
-        changed = true;
+                touched.push_back(edge->id);
+            }
+            const auto resolved=resolvedConnectionPitchCurves(*owner,graph);
+            for(const auto& id:touched)
+            {
+                const auto c=std::find_if(resolved.begin(),resolved.end(),[&](const auto& c){return c.connectionId==id;});
+                if(c==resolved.end()||!c->active){error=c==resolved.end()?juce::String("Unresolvable portamento"):c->issue;return false;}
+            }
+        }
+        if(!changed)return false;
+        pushUndoLocked();project.nativeConnections=std::move(graph);
+    }
+    sendChangeMessage();return true;
+}
+
+bool ProjectModel::setConnectionPitchCurve(const juce::String& id,std::vector<PitchCurveEditPoint> points,juce::String& error)
+{
+    error.clear();bool changed=false;
+    {
+        const juce::ScopedLock guard(lock);auto graph=project.nativeConnections;
+        const auto* track=graphConnectionTrack(project,graph,id,error);if(!track)return false;
+        changed=prepareConnectionPitchEdit(*track,graph,id,points,error);
+        if(changed){pushUndoLocked();project.nativeConnections=std::move(graph);}
+    }
+    if(changed)sendChangeMessage();return changed;
+}
+
+bool ProjectModel::setConnectionPitchPoint(const juce::String& id,int index,PitchCurveEditPoint point,juce::String& error)
+{
+    error.clear();const juce::ScopedLock guard(lock);
+    const auto* track=graphConnectionTrack(project,project.nativeConnections,id,error);if(!track)return false;
+    const auto curves=resolvedConnectionPitchCurves(*track,project.nativeConnections);
+    const auto c=std::find_if(curves.begin(),curves.end(),[&](const auto& c){return c.connectionId==id;});
+    if(c==curves.end()||!c->active||index<0||index>=static_cast<int>(c->points.size()))
+    {error="The editable connection point is unavailable";return false;}
+    auto points=c->points;points[static_cast<std::size_t>(index)]=point;
+    return setConnectionPitchCurve(id,std::move(points),error);
+}
+
+namespace
+{
+struct LocalMaterialView
+{
+    const TrackData* track=nullptr;const ClipData* parent=nullptr;const ClipData* owner=nullptr;const NoteData* note=nullptr;
+    double noteOffset=0;
+};
+bool localMaterialView(const ProjectData& project,const juce::String& id,LocalMaterialView& view,juce::String& error)
+{
+    int matches=0;
+    for(const auto& track:project.tracks)for(const auto& clip:track.clips)for(const auto& note:clip.notes)if(note.id==id)
+    {++matches;view.track=&track;view.parent=&clip;view.note=&note;}
+    if(matches!=1){error=matches?"Ambiguous note identity":"Note no longer exists";return false;}
+    if(view.parent->parts.empty())view.owner=view.parent;
+    else for(const auto& part:view.parent->parts)if(part.id==view.note->clipPartId)
+    {if(view.owner){error="Ambiguous source-child ownership";return false;}view.owner=&part;view.noteOffset=part.startSeconds;}
+    if(!view.owner){error="Missing explicit source-child ownership";return false;}return true;
+}
+SampleRegionSetting localMaterialRow(const NoteData& note,const ClipData& owner,double offset)
+{
+    auto local=note;local.startSeconds-=offset;
+    auto row=nativeNoteSourceTiming(local,owner,nativeClipClock(owner));
+    row.name=note.materialBoundAlias.isNotEmpty()?note.materialBoundAlias:note.label;
+    row.role=note.nativeRole;row.nativeUnpitched=note.nativeUnpitched;row.provenance=note.nativeProvenance;row.confidence=note.nativeConfidence;
+    row.materialAudioId=note.materialAudioId;row.materialRegionId=note.materialRegionId;row.additionalAliases=note.materialAdditionalAliases;
+    row.connectedNextRegionId=note.materialConnectedNextRegionId;
+    row.overlapSeconds=note.utauOverlapOverrideEnabled||std::abs(note.utauOverlapSeconds)>1.e-12?note.utauOverlapSeconds
+        :note.nativeSegments.empty()?0:note.nativeSegments.front().overlapSeconds;
+    row.melodynePitchCenterCents=note.midiNote*100;row.melodyneOriginalPitchCenterCents=note.sourceMidiCenter>=0?note.sourceMidiCenter*100:0;
+    row.relativePitchCents=note.sourceMidiCenter>=0?(note.midiNote-note.sourceMidiCenter)*100:0;
+    row.melodynePitchDrift=note.drift;row.melodynePitchModulation=note.modulation;row.melodyneFormantCents=note.formantSemitones*100;
+    row.melodyneAmplitude=note.gain;row.melodyneSibilantBalance=note.breath;row.amplitudeEnvelope=note.amplitudeEnvelope;
+    return row;
+}
+bool localMaterialMusicUnchanged(const SampleRegionSetting& a,const SampleRegionSetting& b)
+{
+    if(a.relativePitchCents!=b.relativePitchCents||a.melodyneData!=b.melodyneData||a.melodynePitchCenterCents!=b.melodynePitchCenterCents
+        ||a.melodyneOriginalPitchCenterCents!=b.melodyneOriginalPitchCenterCents||a.melodynePitchDrift!=b.melodynePitchDrift
+        ||a.melodynePitchModulation!=b.melodynePitchModulation||a.melodyneTransitionSeconds!=b.melodyneTransitionSeconds
+        ||a.melodyneFormantCents!=b.melodyneFormantCents||a.melodyneAmplitude!=b.melodyneAmplitude
+        ||a.melodyneSibilantBalance!=b.melodyneSibilantBalance||a.melodyneAttackSeconds!=b.melodyneAttackSeconds
+        ||a.melodyneDecayElongation!=b.melodyneDecayElongation||a.amplitudeEnvelope.size()!=b.amplitudeEnvelope.size())return false;
+    for(std::size_t i=0;i<a.amplitudeEnvelope.size();++i)
+    {const auto& x=a.amplitudeEnvelope[i];const auto& y=b.amplitudeEnvelope[i];if(x.timeSeconds!=y.timeSeconds||x.gainDb!=y.gainDb||x.linearToNext!=y.linearToNext||x.nativeSeamAnchor!=y.nativeSeamAnchor)return false;}
+    return true;
+}
+bool localMaterialIntact(const NoteData& note,const SampleRegionSetting& row)
+{
+    const auto start=note.materialSourceStartSeconds>=0?note.materialSourceStartSeconds:note.nativeSourceStartSeconds;
+    const auto end=note.materialSourceEndSeconds>=0?note.materialSourceEndSeconds:note.nativeSourceEndSeconds;
+    return (start<0||std::abs(start-row.regionStartSeconds)<=1.e-8)&&(end<0||std::abs(end-row.regionEndSeconds)<=1.e-8);
+}
+}
+
+bool ProjectModel::getNoteMaterialLocalBinding(const juce::String& noteId,
+    NoteMaterialLocalBinding& binding,SampleRegionSetting& row,juce::String& error) const
+{
+    error.clear();binding=NoteMaterialLocalBinding{};row=SampleRegionSetting{};
+    {
+        const juce::ScopedLock guard(lock);LocalMaterialView view;
+        if(!localMaterialView(project,noteId,view,error))return false;
+        binding.noteId=noteId;binding.parentClipId=view.parent->id;binding.sourcePartId=view.parent->parts.empty()?juce::String{}:view.owner->id;
+        binding.audioId=view.note->materialAudioId;binding.regionId=view.note->materialRegionId;binding.projectRevision=revision;
+        row=localMaterialRow(*view.note,*view.owner,view.noteOffset);
+        if(trackUsesVoicebankSynthesis(*view.track))
+        {
+            binding.utauScalarTiming=!trackIsDiffSinger(*view.track)&&view.track->utauMode==UtauMode::classic;
+            binding.diagnostic=binding.utauScalarTiming?"Classic scalar OTO timing is supported, but this note needs an authoritative catalog audio/region binding; no alias guess was made."
+                :"This renderer has no full native row annotation adapter.";
+            return true;
+        }
+        binding.sourceFile=view.owner->sourceFile;
+        binding.bindingResolved=trackShowsAllNativeRegions(*view.track)&&binding.sourceFile!=juce::File{}&&binding.audioId.isNotEmpty()&&binding.regionId.isNotEmpty();
+        binding.nativeFullRow=binding.bindingResolved&&localMaterialIntact(*view.note,row);
+        if(!binding.bindingResolved)binding.diagnostic="A stable native audio/region binding is required; legacy rows are not guessed by alias or order.";
+        else if(!binding.nativeFullRow)binding.diagnostic="The note is a cropped source slice; full-row timing cannot expand or replace its protected source ownership.";
+    }
+    if(!binding.bindingResolved)return true;
+    if(!binding.sourceFile.existsAsFile())
+    {binding.bindingResolved=binding.nativeFullRow=false;binding.diagnostic="The bound source audio is missing.";return true;}
+    const auto sourceSize=binding.sourceFile.getSize();const auto sourceModified=binding.sourceFile.getLastModificationTime();
+    binding.sourceFingerprint=juce::SHA256(binding.sourceFile).toHexString();
+    if(binding.sourceFile.getSize()!=sourceSize||binding.sourceFile.getLastModificationTime()!=sourceModified)
+    {error="Source audio changed while opening its local annotation.";return false;}
+    {
+        const juce::ScopedLock guard(lock);LocalMaterialView view;
+        if(revision!=binding.projectRevision||!localMaterialView(project,noteId,view,error)
+            ||view.parent->id!=binding.parentClipId||view.owner->sourceFile!=binding.sourceFile
+            ||view.note->materialAudioId!=binding.audioId||view.note->materialRegionId!=binding.regionId)
+        {error="The note binding changed while opening its local annotation.";return false;}
+        if(view.owner->materialSourceFingerprint.isNotEmpty()&&view.owner->materialSourceFingerprint!=binding.sourceFingerprint)
+        {error="The bound source audio changed; refresh its acoustic facts before local editing.";return false;}
+    }
+    return true;
+}
+
+bool ProjectModel::makeClassicNoteMaterialOto(const SampleRegionSetting& input,backend::UtauOtoOverride& result,juce::String& error)
+{
+    error.clear();
+    if(input.pronunciationKind!=PronunciationKind::normal||input.simplifiedConsonant||input.vowelSplitsExplicit)
+    {error="Classic OTO supports scalar P/C/overlap timing only, not native kind/link intent or named/weighted vowel subdivisions.";return false;}
+    if(!std::isfinite(input.regionStartSeconds)||!std::isfinite(input.regionEndSeconds)||!std::isfinite(input.alignmentSeconds)
+        ||!std::isfinite(input.fixedDurationSeconds)||!std::isfinite(input.overlapSeconds)||input.regionStartSeconds<0
+        ||input.regionEndSeconds<=input.regionStartSeconds||input.alignmentSeconds<input.regionStartSeconds||input.alignmentSeconds>input.regionEndSeconds
+        ||input.fixedDurationSeconds<0||input.fixedDurationSeconds>input.regionEndSeconds-input.regionStartSeconds)
+    {error="Invalid scalar source timing.";return false;}
+    VoicebankOtoEntry entry;entry.offsetMs=input.regionStartSeconds*1000;entry.consonantMs=input.fixedDurationSeconds*1000;
+    entry.cutoffMs=-(input.regionEndSeconds-input.regionStartSeconds)*1000;entry.preutteranceMs=(input.alignmentSeconds-input.regionStartSeconds)*1000;
+    entry.overlapMs=input.overlapSeconds*1000;result=SampleSettings::noteOtoFromEntry(entry,false);return true;
+}
+
+bool ProjectModel::applyNoteMaterialLocalRow(const NoteMaterialLocalBinding& binding,const SampleRegionSetting& row,
+    std::uint64_t& resultingRevision,juce::String& error)
+{
+    return applyNoteMaterialLocalRowInternal(binding,row,false,resultingRevision,error);
+}
+
+bool ProjectModel::restoreNoteMaterialLocalRow(const NoteMaterialLocalBinding& binding,SampleRegionSetting& restored,
+    std::uint64_t& resultingRevision,juce::String& error)
+{
+    error.clear();resultingRevision=0;
+    if(!binding.bindingResolved||!binding.nativeFullRow){error="A resolved intact native binding is required to restore a full row.";return false;}
+    const auto manifest=SampleSettings::annotationFor(binding.sourceFile);
+    if(!manifest.existsAsFile()){error="The latest native source annotation is missing; local data was retained.";return false;}
+    std::vector<SampleRegionSetting> latest;
+    if(!OttoMaterialIO::loadAudio(manifest,binding.sourceFile,latest,error,nullptr,binding.audioId))return false;
+    const SampleRegionSetting* match=nullptr;
+    for(const auto& row:latest)if(row.materialAudioId==binding.audioId&&row.materialRegionId==binding.regionId)
+    {if(match){error="Ambiguous source audio/region identity; local data was retained.";return false;}match=&row;}
+    if(!match){error="The source pronunciation was deleted; local data was retained.";return false;}
+    // Return the row from the SAME committed candidate. A second fallible
+    // getter after publication could report false despite a completed undo.
+    return applyNoteMaterialLocalRowInternal(binding,*match,true,resultingRevision,error,&restored);
+}
+
+bool ProjectModel::applyNoteMaterialLocalRowInternal(const NoteMaterialLocalBinding& binding,const SampleRegionSetting& input,
+    bool restoringSource,std::uint64_t& resultingRevision,juce::String& error,SampleRegionSetting* committedRow)
+{
+    error.clear();resultingRevision=0;
+    const auto reject=[&](const juce::String& problem){error=problem;return false;};
+    if(!binding.bindingResolved||!binding.nativeFullRow||binding.audioId.isEmpty()||binding.regionId.isEmpty()||binding.sourceFingerprint.isEmpty())
+        return reject("Full-row local editing requires an intact, authoritative native source binding. Classic OTO remains a separate scalar capability.");
+    if(input.materialAudioId!=binding.audioId||input.materialRegionId!=binding.regionId)return reject("Local edits cannot replace source identity.");
+    if(!binding.sourceFile.existsAsFile())return reject("The bound source audio is missing.");
+    const auto sourceBytes=binding.sourceFile.getSize();const auto sourceTime=binding.sourceFile.getLastModificationTime();
+    if(juce::SHA256(binding.sourceFile).toHexString()!=binding.sourceFingerprint)
+        return reject("Source audio changed while the local annotation was open.");
+    double mediaDuration=0;
+    {
+        juce::AudioFormatManager formats;formats.registerBasicFormats();std::unique_ptr<juce::AudioFormatReader> reader(formats.createReaderFor(binding.sourceFile));
+        if(!reader||reader->sampleRate<=0)return reject("The bound source is not readable audio.");
+        mediaDuration=reader->lengthInSamples/reader->sampleRate;
+    }
+    auto row=input;
+    if(!std::isfinite(row.regionStartSeconds)||!std::isfinite(row.regionEndSeconds)||!std::isfinite(row.alignmentSeconds)
+        ||!std::isfinite(row.fixedDurationSeconds)||!std::isfinite(row.overlapSeconds)||!std::isfinite(row.confidence)
+        ||row.regionStartSeconds<0||row.regionEndSeconds<=row.regionStartSeconds||row.regionEndSeconds>mediaDuration+1.e-8
+        ||row.alignmentSeconds<row.regionStartSeconds||row.alignmentSeconds>row.regionEndSeconds
+        ||row.fixedDurationSeconds<0||row.fixedDurationSeconds>row.regionEndSeconds-row.regionStartSeconds
+        ||(row.simplifiedConsonant&&row.regionStartSeconds+row.fixedDurationSeconds<row.alignmentSeconds-1.e-8))
+        return reject("Invalid source pronunciation timing.");
+    if(row.vowelSplitsExplicit)
+    {
+        std::set<juce::String> ids;
+        for(const auto& segment:row.segments)
+        {
+            if(segment.id.isNotEmpty()&&!ids.insert(segment.id).second)return reject("Duplicate manual segment identity.");
+            if(segment.role==NativeSegmentRole::vowel&&(segment.alias.trim().isEmpty()||segment.alias.trim()=="-"))return reject("Manual vowel subdivisions must be named.");
+        }
+    }
+    if(!applyPronunciationTiming(row,pronunciationTimingFor(row),error))return false;
+    {
+        const juce::ScopedLock guard(lock);LocalMaterialView view;
+        if(revision!=binding.projectRevision)return reject("The project changed while the local annotation was open.");
+        if(!localMaterialView(project,binding.noteId,view,error))return false;
+        if(view.parent->id!=binding.parentClipId||(view.parent->parts.empty()?juce::String{}:view.owner->id)!=binding.sourcePartId
+            ||view.owner->sourceFile!=binding.sourceFile||view.note->materialAudioId!=binding.audioId||view.note->materialRegionId!=binding.regionId
+            ||!trackShowsAllNativeRegions(*view.track)||trackUsesVoicebankSynthesis(*view.track))return reject("The physical note binding changed.");
+        if(binding.sourceFile.getSize()!=sourceBytes||binding.sourceFile.getLastModificationTime()!=sourceTime)return reject("Source audio changed during validation.");
+        if(view.owner->materialSourceFingerprint.isNotEmpty()&&view.owner->materialSourceFingerprint!=binding.sourceFingerprint)
+            return reject("Source acoustic facts refer to a different recording fingerprint.");
+        const auto current=localMaterialRow(*view.note,*view.owner,view.noteOffset);
+        if(!localMaterialIntact(*view.note,current))return reject("A cropped pronunciation cannot be expanded or rebound by local full-row editing.");
+        if(!restoringSource&&!localMaterialMusicUnchanged(input,current))return reject("Use the musical editors to change pitch, gain, formant or automation; local annotation cannot reset them.");
+        if(!restoringSource&&!view.note->materialAliasFollowsPrimary&&row.name!=current.name)return reject("The selected secondary alias is pinned; local annotation cannot silently replace it.");
+        auto candidate=*view.parent;NoteData* selected=nullptr;
+        for(auto& note:candidate.notes)if(note.id==binding.noteId)selected=&note;
+        auto* owner=&candidate;
+        if(!candidate.parts.empty())
+        {owner=nullptr;for(auto& part:candidate.parts)if(part.id==binding.sourcePartId)owner=&part;}
+        if(!selected||!owner)return reject("Source ownership changed.");
+        const auto oldClock=nativeClipClock(*owner);const auto oldOffset=owner->sourceOffsetSeconds;
+        if(oldClock.size()<2)return reject("Missing source clock.");
+        for(std::size_t i=0;i<oldClock.size();++i)
+            if(!std::isfinite(oldClock[i].targetSeconds)||!std::isfinite(oldClock[i].sourceSeconds)
+                ||(i&&(oldClock[i].targetSeconds<=oldClock[i-1].targetSeconds||oldClock[i].sourceSeconds<=oldClock[i-1].sourceSeconds)))
+                return reject("A non-monotonic source clock cannot be locally retimed.");
+        const auto start=selected->startSeconds-view.noteOffset,end=start+selected->durationSeconds;
+        if(start<oldClock.front().targetSeconds-1.e-8||end>oldClock.back().targetSeconds+1.e-8)return reject("The note extends outside its audible source owner.");
+        const auto zones=pronunciationSegmentsFor(row),oldZones=pronunciationSegmentsFor(current);
+        bool retime=row.regionStartSeconds!=current.regionStartSeconds||row.regionEndSeconds!=current.regionEndSeconds
+            ||row.alignmentSeconds!=current.alignmentSeconds||row.fixedDurationSeconds!=current.fixedDurationSeconds||zones.size()!=oldZones.size();
+        if(!retime)for(std::size_t i=0;i<zones.size();++i)
+            retime|=zones[i].sourceStartSeconds!=oldZones[i].sourceStartSeconds||zones[i].sourceEndSeconds!=oldZones[i].sourceEndSeconds
+                ||zones[i].role!=oldZones[i].role||zones[i].stretchable!=oldZones[i].stretchable||zones[i].stretchWeight!=oldZones[i].stretchWeight;
+        if(retime)
+        {
+            for(const auto& zone:zones)if(!zone.stretchable)for(const auto& oldZone:oldZones)if(!oldZone.stretchable)
+            {
+                // Protect the source that was AND remains fixed. A deliberate C
+                // edit may newly protect part of the old vowel; its old elastic
+                // ratio must not be mistaken for an already-stretched consonant.
+                const auto a=std::max(row.regionStartSeconds+zone.sourceStartSeconds,current.regionStartSeconds+oldZone.sourceStartSeconds);
+                const auto b=std::min(row.regionStartSeconds+zone.sourceEndSeconds,current.regionStartSeconds+oldZone.sourceEndSeconds);
+                if(b>a+1.e-9)
+                {
+                    const auto heard=nativeTargetTimeAt(oldClock,b-oldOffset)-nativeTargetTimeAt(oldClock,a-oldOffset);
+                    if(std::abs(heard-(b-a))>1.e-6)return reject("Existing protected source timing is non-unit; local retiming would stretch a fixed consonant/source zone.");
+                }
+            }
+            std::vector<SourceTimePoint> localMap;
+            if(!makePronunciationStretchMap(row,selected->durationSeconds,localMap,error))return false;
+            std::vector<SourceTimePoint> absolute;
+            for(auto point:oldClock)if(point.targetSeconds<start-1.e-9||point.targetSeconds>end+1.e-9)
+            {point.sourceSeconds+=oldOffset;absolute.push_back(point);}
+            for(auto point:localMap){point.targetSeconds+=start;absolute.push_back(point);}
+            for(const auto& other:candidate.notes)
+            {
+                if(other.id==selected->id||(!candidate.parts.empty()&&other.clipPartId!=binding.sourcePartId))continue;
+                const auto a=other.startSeconds-view.noteOffset,b=a+other.durationSeconds;
+                if(std::min(end,b)>std::max(start,a)+1.e-8)return reject("Overlapping notes cannot independently own one shared source clock.");
+                for(const auto t:{a,b})if(t>=oldClock.front().targetSeconds&&t<=oldClock.back().targetSeconds)
+                    absolute.push_back({t,oldOffset+nativeSourceTimeAt(oldClock,t)});
+            }
+            std::stable_sort(absolute.begin(),absolute.end(),[](const auto& a,const auto& b){return a.targetSeconds<b.targetSeconds;});
+            std::vector<SourceTimePoint> unique;
+            for(const auto& point:absolute)
+            {
+                if(!unique.empty()&&std::abs(point.targetSeconds-unique.back().targetSeconds)<1.e-9)
+                {if(std::abs(point.sourceSeconds-unique.back().sourceSeconds)>1.e-8)return reject("Local boundaries conflict with a pinned neighbouring note.");}
+                else unique.push_back(point);
+            }
+            for(std::size_t i=1;i<unique.size();++i)if(unique[i].sourceSeconds<=unique[i-1].sourceSeconds+1.e-9)return reject("Local source boundaries overlap or reverse.");
+            if(unique.size()<2||unique.front().sourceSeconds<0||unique.back().sourceSeconds>mediaDuration+1.e-8)return reject("Local timing leaves the source recording.");
+            if(selected->sourcePitchMeasured&&(!owner->nativeSourcePitch||owner->nativeSourcePitch->empty()))
+            {
+                std::vector<NoteData> measured;
+                for(auto note:candidate.notes)if(note.sourcePitchMeasured&&(candidate.parts.empty()||note.clipPartId==binding.sourcePartId))
+                {note.startSeconds-=view.noteOffset;measured.push_back(std::move(note));}
+                owner->nativeSourcePitch=nativeSourcePitchReference(measured,[&](double t){return oldOffset+nativeSourceTimeAt(oldClock,t);});
+            }
+            if(selected->sourcePitchMeasured&&(!nativeReferencePitchAt(*owner,row.regionStartSeconds)||!nativeReferencePitchAt(*owner,row.regionEndSeconds)))
+                return reject("The changed interval lacks measured source pitch coverage; analyze the source before expanding it.");
+            const auto first=unique.front().sourceSeconds,last=unique.back().sourceSeconds;
+            for(auto& point:unique)point.sourceSeconds-=first;
+            if(!publishMaterialSourceClock(*owner,oldClock,std::move(unique),first,last,error))return false;
+            if(selected->sourcePitchMeasured)
+            {
+                auto local=*selected;local.startSeconds-=view.noteOffset;refreshNativeTrimPitch(local,*owner);
+                selected->contour=std::move(local.contour);selected->sourceMidiCenter=local.sourceMidiCenter;selected->sourcePitchMeasured=local.sourcePitchMeasured;
+            }
+        }
+        const auto newClock=nativeClipClock(*owner);const auto unresolved=selected->materialReferenceUnresolved;
+        applyMaterialAnnotationSnapshot(*selected,row,true,SampleSettings::nativeSegmentsFor(row));
+        selected->nativeUnpitched=row.nativeUnpitched;selected->materialLocalOverride=!restoringSource;
+        if(!restoringSource)selected->materialReferenceUnresolved=unresolved;
+        selected->consonantSeconds=nativeTargetTimeAt(newClock,row.regionStartSeconds+row.fixedDurationSeconds-owner->sourceOffsetSeconds)-start;
+        selected->utauPreutteranceOverrideEnabled=true;selected->utauPreutteranceSeconds=row.alignmentSeconds-row.regionStartSeconds;
+        selected->utauOverlapOverrideEnabled=true;selected->utauOverlapSeconds=row.overlapSeconds;
+        owner->materialSourceFingerprint=binding.sourceFingerprint;
+        if(committedRow)*committedRow=localMaterialRow(*selected,*owner,view.noteOffset);
+        pushUndoLocked();*const_cast<ClipData*>(view.parent)=std::move(candidate);resultingRevision=revision;
+    }
+    sendChangeMessage();return true;
+}
+
+void ProjectModel::setNoteMaterialLocalOverride(const juce::String& noteId, bool enabled)
+{
+    bool changed = false;
+    {
+        const juce::ScopedLock guard(lock);
+        for (auto& track : project.tracks) for (auto& clip : track.clips)
+            for (auto& note : clip.notes)
+                if (note.id == noteId && note.materialLocalOverride != enabled)
+                {
+                    if (!changed) pushUndoLocked();
+                    note.materialLocalOverride = enabled;
+                    changed = true;
+                }
     }
     if (changed) sendChangeMessage();
 }
 
 void ProjectModel::applySourceSettings(const juce::File& source,
-                                       const std::vector<SampleRegionSetting>& rows)
+                                      const std::vector<SampleRegionSetting>& rows)
 {
-    if (rows.empty()) return;
-    auto changed = false;
+    (void) applySourceSettingsWithReport(source, rows);
+}
+
+// Exact cubic crop: unlike splitNote's historical linear cut, this retains
+// shaped pitch segments. Each fragment owns only its local handles; existing
+// native shared-line endpoint deduplication gives each seam ONE authority.
+bool sliceNativePitchCurve(const std::vector<PitchCurveEditPoint>& points, double from, double to,
+                        std::vector<PitchCurveEditPoint>& result)
+{
+    result.clear();
+    if (points.empty() || to <= from) return false;
+    struct P { double x, y; };
+    struct Cubic { P a, b, c, d; };
+    const auto lerp = [](P a, P b, double t) { return P{a.x+(b.x-a.x)*t,a.y+(b.y-a.y)*t}; };
+    const auto split = [&](Cubic s, double t)
+    {
+        const auto ab=lerp(s.a,s.b,t),bc=lerp(s.b,s.c,t),cd=lerp(s.c,s.d,t);
+        const auto abc=lerp(ab,bc,t),bcd=lerp(bc,cd,t),m=lerp(abc,bcd,t);
+        return std::pair{Cubic{s.a,ab,abc,m},Cubic{m,bcd,cd,s.d}};
+    };
+    const auto parameter = [&](const Cubic& s, double x)
+    {
+        double lo=0,hi=1;
+        for(int i=0;i<52;++i){const auto t=(lo+hi)*.5;if(split(s,t).first.d.x<x)lo=t;else hi=t;}
+        return (lo+hi)*.5;
+    };
+    std::vector<double> intervals(points.size()>1?points.size()-1:0);
+    std::vector<float> secants(intervals.size()), tangents(points.size(),0);
+    for(std::size_t i=0;i<intervals.size();++i)
+    {
+        intervals[i]=points[i+1].timeSeconds-points[i].timeSeconds;
+        if(intervals[i]<=1.e-9)return false;
+        secants[i]=(points[i+1].targetMidi-points[i].targetMidi)/static_cast<float>(intervals[i]);
+    }
+    for(std::size_t i=1;i+1<points.size();++i)
+        if(secants[i-1]!=0 && secants[i]!=0 && std::signbit(secants[i-1])==std::signbit(secants[i]))
+        {
+            const auto w1=2*intervals[i]+intervals[i-1],w2=intervals[i]+2*intervals[i-1];
+            tangents[i]=static_cast<float>((w1+w2)/(w1/secants[i-1]+w2/secants[i]));
+        }
+    const auto emit = [&](Cubic s) -> bool
+    {
+        if(s.d.x<=from || s.a.x>=to)return true;
+        if(s.d.x>to)s=split(s,parameter(s,to)).first;
+        if(s.a.x<from)s=split(s,parameter(s,from)).second;
+        const auto dx=s.d.x-s.a.x,dy=s.d.y-s.a.y;
+        if(dx<=1.e-10)return false;
+        if(result.empty())result.push_back({s.a.x-from,static_cast<float>(s.a.y),PitchCurveShape::linear});
+        PitchCurveEditPoint end{s.d.x-from,static_cast<float>(s.d.y),PitchCurveShape::customBezier};
+        if(std::abs(dy)<1.e-8)
+        {
+            // Equal-valued ends with an interior excursion cannot be encoded by
+            // normalized endpoint-relative controls. Reject rather than flatten.
+            if(std::abs(s.b.y-s.a.y)>1.e-7 || std::abs(s.c.y-s.a.y)>1.e-7)return false;
+            end.shape=PitchCurveShape::linear;
+        }
+        else
+        {
+            end.bezierX1=static_cast<float>(std::clamp((s.b.x-s.a.x)/dx,0.0,1.0));
+            end.bezierX2=static_cast<float>(std::clamp((s.c.x-s.a.x)/dx,0.0,1.0));
+            end.bezierY1=static_cast<float>((s.b.y-s.a.y)/dy);
+            end.bezierY2=static_cast<float>((s.c.y-s.a.y)/dy);
+            if(!std::isfinite(end.bezierY1)||!std::isfinite(end.bezierY2))return false;
+        }
+        end.highPrecisionBezier=end.shape==PitchCurveShape::customBezier;
+        result.push_back(end);return true;
+    };
+    const auto flat = [&](double a,double b,double y)
+    {return emit({{a,y},{a+(b-a)/3,y},{a+2*(b-a)/3,y},{b,y}});};
+    if(from<points.front().timeSeconds && !flat(from,std::min(to,points.front().timeSeconds),points.front().targetMidi))return false;
+    for(std::size_t i=1;i<points.size();++i)
+    {
+        const auto& a=points[i-1];const auto& d=points[i];const auto dx=d.timeSeconds-a.timeSeconds;
+        if(a.timeSeconds>=from&&d.timeSeconds<=to&&d.shape!=PitchCurveShape::natural)
+        {
+            // Uncut context-free segments retain their original handles and
+            // legacy float evaluator exactly; only actual crops need new cubics.
+            if(result.empty()){auto first=a;first.timeSeconds-=from;result.push_back(first);}
+            auto end=d;end.timeSeconds-=from;result.push_back(end);continue;
+        }
+        const auto dy=static_cast<double>(d.targetMidi-a.targetMidi);
+        double x1=1.0/3,x2=2.0/3,y1=1.0/3,y2=2.0/3;
+        switch(d.shape)
+        {
+            case PitchCurveShape::smooth:y1=0;y2=1;break;
+            case PitchCurveShape::easeIn:y1=0;y2=1.0/3;break;
+            case PitchCurveShape::easeOut:y1=2.0/3;y2=1;break;
+            case PitchCurveShape::customBezier:x1=std::clamp<double>(d.bezierX1,0,1);x2=std::clamp<double>(d.bezierX2,0,1);y1=d.bezierY1;y2=d.bezierY2;break;
+            case PitchCurveShape::natural:
+                if(std::abs(dy)>1.e-12){y1=tangents[i-1]*dx/(3*dy);y2=1-tangents[i]*dx/(3*dy);}break;
+            default:break;
+        }
+        if(!emit({{a.timeSeconds,a.targetMidi},{a.timeSeconds+x1*dx,a.targetMidi+y1*dy},
+            {a.timeSeconds+x2*dx,a.targetMidi+y2*dy},{d.timeSeconds,d.targetMidi}}))return false;
+    }
+    if(to>points.back().timeSeconds && !flat(std::max(from,points.back().timeSeconds),to,points.back().targetMidi))return false;
+    return result.size()>=2;
+}
+
+namespace
+{
+// One curve-vector splice authority for both note-local and absolute graph
+// editing. The wrappers only supply domains/ownership, never fake NoteData.
+bool composePitchStrokeCurve(const std::vector<PitchCurveEditPoint>& original,
+    const std::vector<PitchCurveEditPoint>& inputStroke,double minimum,double maximum,bool keepOutside,
+    std::vector<PitchCurveEditPoint>& out,juce::String& error,bool preserveLeft,bool preserveRight)
+{
+    out.clear();error.clear();
+    if(original.empty()||inputStroke.size()<2){error="A pitched stroke requires an original curve and at least two controls";return false;}
+    auto stroke=inputStroke;
+    std::stable_sort(stroke.begin(),stroke.end(),[](const auto& a,const auto& b){return a.timeSeconds<b.timeSeconds;});
+    for(std::size_t i=0;i<stroke.size();++i)
+    {
+        if(!finiteGraphPoint(stroke[i])||stroke[i].targetMidi<0||stroke[i].targetMidi>127
+            ||(i&&stroke[i].timeSeconds<=stroke[i-1].timeSeconds))
+        {error="Invalid or duplicate stroke controls";return false;}
+    }
+    const auto from=stroke.front().timeSeconds,to=stroke.back().timeSeconds;
+    if(!std::isfinite(minimum)||!std::isfinite(maximum)||to-from<1.e-6||from<minimum-1.e-10||to>maximum+1.e-10)
+    {error="Stroke is outside the existing authored/body union domain";return false;}
+    // A free edge is allowed only at an artificial union-domain clip. Never
+    // destroy real old authored controls outside the overall user's gesture.
+    if((!preserveLeft&&original.front().timeSeconds<from-1.e-10)
+        ||(!preserveRight&&original.back().timeSeconds>to+1.e-10))
+    {error="A free clipped edge would discard old outside authored support";return false;}
+    // Stroke samples define a polyline. Guards must sample that NEW line at
+    // their actual time, not shift endpoint Y horizontally by 1ms (which
+    // changes every interior sample's slope).
+    for(auto& p:stroke)p.shape=PitchCurveShape::linear;
+    const auto guard=std::min(.001,(to-from)*.25);
+    const auto innerLeft=from+(preserveLeft?guard:0),innerRight=to-(preserveRight?guard:0);
+    std::vector<PitchCurveEditPoint> replacement;
+    if(preserveLeft)replacement.push_back({from,evaluatePitchCurve(original,from),PitchCurveShape::linear});
+    replacement.push_back({innerLeft,evaluatePitchCurve(stroke,innerLeft),PitchCurveShape::linear});
+    for(auto p:stroke)if(p.timeSeconds>innerLeft&&p.timeSeconds<innerRight){p.shape=PitchCurveShape::linear;replacement.push_back(p);}
+    replacement.push_back({innerRight,evaluatePitchCurve(stroke,innerRight),PitchCurveShape::linear});
+    if(preserveRight)replacement.push_back({to,evaluatePitchCurve(original,to),PitchCurveShape::linear});
+    if(!keepOutside){out=std::move(replacement);return true;}
+    const auto append=[&](const std::vector<PitchCurveEditPoint>& points)
+    {
+        for(const auto& p:points)
+        {
+            // The already composed incoming descriptor owns a same-time seam.
+            // Prefix incoming survives stroke-start, stroke incoming survives
+            // suffix-start; replacing it with a first-point default linearizes.
+            if(!out.empty()&&std::abs(out.back().timeSeconds-p.timeSeconds)<1.e-10)continue;
+            out.push_back(p);
+        }
+    };
+    if(preserveLeft&&original.front().timeSeconds<from)
+    {
+        std::vector<PitchCurveEditPoint> prefix;
+        if(!sliceNativePitchCurve(original,original.front().timeSeconds,from,prefix)){error="Original cubic prefix cannot be cropped exactly";return false;}
+        for(auto& p:prefix)p.timeSeconds+=original.front().timeSeconds;append(prefix);
+    }
+    append(replacement);
+    if(preserveRight&&original.back().timeSeconds>to)
+    {
+        std::vector<PitchCurveEditPoint> suffix;
+        if(!sliceNativePitchCurve(original,to,original.back().timeSeconds,suffix)){error="Original cubic suffix cannot be cropped exactly";out.clear();return false;}
+        for(auto& p:suffix)p.timeSeconds+=to;append(suffix);
+    }
+    for(const auto& p:out)if(!finiteGraphPoint(p)||p.targetMidi<0||p.targetMidi>127)
+    {error="Existing curve cannot remain exact inside the editable MIDI range";out.clear();return false;}
+    return true;
+}
+
+} // curve-vector splice implementation
+
+bool composeNativePitchStroke(const NoteData& note,const std::vector<PitchCurveEditPoint>& stroke,
+    std::vector<PitchCurveEditPoint>& out,bool& storePitchControlPoints,juce::String& error,bool preserveLeft,bool preserveRight)
+{
+    out.clear();error.clear();storePitchControlPoints=!note.pitchControlPoints.empty();
+    if(note.nativeUnpitched||!std::isfinite(note.durationSeconds)){error="Missing pitched note domain";return false;}
+    const auto original=ownPitchPoints(note);if(original.empty()){error="Missing original target curve";return false;}
+    const auto minimum=storePitchControlPoints?std::min(0.0,original.front().timeSeconds):0.0;
+    const auto maximum=storePitchControlPoints?std::max(note.durationSeconds,original.back().timeSeconds):note.durationSeconds;
+    return composePitchStrokeCurve(original,stroke,minimum,maximum,storePitchControlPoints,out,error,preserveLeft,preserveRight);
+}
+
+bool composeConnectionPitchStroke(const TrackData& track,const std::vector<NativeConnection>& connections,
+    const juce::String& id,const std::vector<PitchCurveEditPoint>& absoluteStroke,std::vector<PitchCurveEditPoint>& out,juce::String& error)
+{
+    out.clear();error.clear();
+    if(std::count_if(connections.begin(),connections.end(),[&](const auto& c){return c.id==id;})!=1)
+    {error="Unknown or ambiguous graph stroke target";return false;}
+    const auto curves=resolvedConnectionPitchCurves(track,connections);
+    const auto current=std::find_if(curves.begin(),curves.end(),[&](const auto& c){return c.connectionId==id;});
+    if(current==curves.end()||!current->active){error=current==curves.end()?juce::String("Unresolved graph stroke target"):current->issue;return false;}
+    if(absoluteStroke.size()<2)return false;
+    auto stroke=absoluteStroke;std::stable_sort(stroke.begin(),stroke.end(),[](const auto& a,const auto& b){return a.timeSeconds<b.timeSeconds;});
+    for(std::size_t i=0;i<stroke.size();++i)
+    {
+        if(!finiteGraphPoint(stroke[i])||stroke[i].targetMidi<0||stroke[i].targetMidi>127||(i&&stroke[i].timeSeconds<=stroke[i-1].timeSeconds))
+        {error="Invalid absolute graph stroke controls";return false;}
+        stroke[i].shape=PitchCurveShape::linear;
+    }
+    const auto from=std::max(current->fromSeconds,stroke.front().timeSeconds),to=std::min(current->toSeconds,stroke.back().timeSeconds);
+    if(to-from<1.e-6)return false;
+    std::vector<PitchCurveEditPoint> clipped{{from,evaluatePitchCurve(stroke,from),PitchCurveShape::linear}};
+    for(const auto& p:stroke)if(p.timeSeconds>from&&p.timeSeconds<to)clipped.push_back(p);
+    clipped.push_back({to,evaluatePitchCurve(stroke,to),PitchCurveShape::linear});
+    // Even an artificially clipped graph edge remains attached to its proposed
+    // live note score. If note+graph painting agrees there, the guard has no bump.
+    return composePitchStrokeCurve(current->points,clipped,current->fromSeconds,current->toSeconds,true,out,error,true,true);
+}
+
+namespace
+{
+std::vector<PitchPoint> sliceMaterialContour(const NoteData& original,double from,double to,bool preserveTarget)
+{
+    const auto& points=original.contour;if(points.empty())return {};
+    const auto exact = [&](PitchPoint p,double t)
+    {
+        if(preserveTarget){p.manualTargetCents=renderedPitchCents(original,p);p.hasManualTarget=true;}
+        p.timeSeconds=t;return p;
+    };
+    const auto at = [&](double t)
+    {
+        auto right=std::upper_bound(points.begin(),points.end(),t,[](double v,const auto& p){return v<p.timeSeconds;});
+        if(right==points.begin())return exact(*right,t);
+        const auto left=std::prev(right);
+        // A detector knot's own voicing is authoritative. Looking ahead at an
+        // unvoiced NEXT point here would erase the preceding voiced interval.
+        if(left->timeSeconds==t||right==points.end())return exact(*left,t);
+        auto p=*left;const auto span=right->timeSeconds-p.timeSeconds;
+        const auto u=span>1.e-12?static_cast<float>((t-p.timeSeconds)/span):0.f;
+        const auto target=renderedPitchCents(original,*left)
+            +(renderedPitchCents(original,*right)-renderedPitchCents(original,*left))*u;
+        p.relativeCents+=(right->relativeCents-p.relativeCents)*u;
+        p.withoutVibratoCents+=(right->withoutVibratoCents-p.withoutVibratoCents)*u;
+        p.manualTargetCents=preserveTarget?target:p.manualTargetCents+(right->manualTargetCents-p.manualTargetCents)*u;
+        p.voiced=p.voiced&&right->voiced;p.hasManualTarget=preserveTarget||(p.hasManualTarget&&right->hasManualTarget);
+        p.timeSeconds=t;return p;
+    };
+    std::vector<PitchPoint> result{at(from)};
+    // Never drop a nearby real voiced support point merely because a cut is
+    // within an epsilon: AND-voicing interpolation makes that acoustically real.
+    for(auto p:points)if(p.timeSeconds>from&&p.timeSeconds<to)result.push_back(p);
+    result.push_back(at(to));for(auto& p:result)p.timeSeconds-=from;return result;
+}
+}
+
+ProjectModel::MaterialSourceReplacementReport ProjectModel::replaceNoteMaterialSource(
+    const juce::String& noteId,const juce::File& audio,const std::vector<SampleRegionSetting>& completeRows,
+    const juce::String& audioId,const juce::String& regionId,const juce::String& chosenAlias,
+    juce::String& error,bool apply)
+{
+    MaterialSourceReplacementReport report;error.clear();
+    const auto reject=[&](const juce::String& why)
+    {report.rejected=true;report.changed=false;error=why;report.diagnostics.add(why);return report;};
+    if(noteId.isEmpty()||audioId.isEmpty()||regionId.isEmpty()||completeRows.empty())return reject("A stable note/audio/pronunciation identity is required.");
+    OttoMaterialIO::Document annotation;annotation.audio.push_back({audioId,audio.getFileName(),completeRows});
+    if(!OttoMaterialIO::validate(annotation,error))return reject(error);
+    const auto rowIt=std::find_if(completeRows.begin(),completeRows.end(),[&](const auto& r){return r.materialAudioId==audioId&&r.materialRegionId==regionId;});
+    if(rowIt==completeRows.end())return reject("The chosen source pronunciation no longer exists.");
+    const auto& row=*rowIt;const auto alias=chosenAlias.isEmpty()?row.name:chosenAlias;
+    if(alias!=row.name&&!row.additionalAliases.contains(alias))return reject("The selected alias does not belong to this pronunciation identity.");
+    juce::AudioFormatManager formats;formats.registerBasicFormats();
+    std::unique_ptr<juce::AudioFormatReader> reader(formats.createReaderFor(audio));
+    if(!reader||reader->sampleRate<=0)return reject("The selected physical source audio cannot be read.");
+    const auto duration=reader->lengthInSamples/reader->sampleRate;
+    for(const auto& r:completeRows)if(r.regionEndSeconds>duration+1.e-8)return reject("A source pronunciation lies beyond the actual recording.");
+    const auto fingerprint=juce::SHA256(audio).toHexString();
+    constexpr double epsilon=1.e-8;
+    const auto near=[](double a,double b){return std::abs(a-b)<=epsilon;};
+    bool changed=false;
     {
         const juce::ScopedLock guard(lock);
-        struct Entry { ClipData* clip; NoteData* note; };
-        std::vector<Entry> entries;
-        for (auto& track : project.tracks)
-            for (auto& clip : track.clips)
-                if (clip.sourceFile == source)
-                    for (auto& note : clip.notes) entries.push_back({ &clip, &note });
-        std::stable_sort(entries.begin(), entries.end(), [](const auto& left, const auto& right)
+        TrackData* track=nullptr;ClipData* original=nullptr;NoteData* selected=nullptr;int matches=0;
+        for(auto& t:project.tracks)for(auto& c:t.clips)for(auto& n:c.notes)if(n.id==noteId)
+        {track=&t;original=&c;selected=&n;++matches;}
+        if(matches!=1)return reject("The target note is missing or ambiguous; no source was changed.");
+        // Capability, never import history: native physical-file renderers only.
+        if(!trackShowsAllNativeRegions(*track)||track->pitchAlgorithm==PitchAlgorithm::utau)
+            return reject("This renderer has no explicit physical-recording adapter. Its engine and voicebank were left unchanged.");
+        if(selected->materialLocalOverride)return reject("The selected note has a private material override; clear it explicitly before replacing its source.");
+        if(selected->durationSeconds<.001)return reject("A source assignment requires a target note at least 1ms long.");
+        ClipData* owner=original;
+        if(!original->parts.empty())
         {
-            return left.clip->sourceOffsetSeconds < right.clip->sourceOffsetSeconds;
-        });
-        if (entries.empty()) return;
-        pushUndoLocked();
-        for (std::size_t index = 0; index < std::min(entries.size(), rows.size()); ++index)
+            owner=nullptr;
+            for(auto& part:original->parts)if(part.id==selected->clipPartId){if(owner)return reject("Ambiguous source-child ownership.");owner=&part;}
+            if(!owner)return reject("The note has no explicit source-child owner.");
+            for(const auto& p:original->parts)if(!p.parts.empty())return reject("Nested physical source owners are unsupported.");
+        }
+        const auto ownerOffset=original->parts.empty()?0.0:owner->startSeconds;
+        auto clockOwner=*owner;
+        if(!original->parts.empty())
         {
-            auto& clip = *entries[index].clip;
-            auto& note = *entries[index].note;
-            const auto& row = rows[index];
-            note.label = row.name.trim().isEmpty() ? "-" : row.name.trim();
-            note.nativeRole = row.role;
-            note.nativeProvenance = row.provenance;
-            note.nativeConfidence = row.confidence;
-            note.nativeSourceStartSeconds = row.regionStartSeconds;
-            note.nativeSourceEndSeconds = row.regionEndSeconds;
-            note.nativeSegments = SampleSettings::nativeSegmentsFor(row);
-            clip.sourceOffsetSeconds = std::max(0.0, row.regionStartSeconds);
-            clip.sourceDurationSeconds = std::max(0.001,
-                row.regionEndSeconds - row.regionStartSeconds);
-            // Source-region editing establishes a new linear mapping.  An old
-            // MPD warp refers to the previous source range and must not be
-            // silently applied to the newly selected samples.
-            clip.sourceTimeMap.clear();
-            note.gain = juce::jlimit(0.0f, 4.0f,
-                static_cast<float>(row.melodyneAmplitude));
-            const auto targetPerSource = clip.durationSeconds / clip.sourceDurationSeconds;
-            note.consonantSeconds = juce::jlimit(0.0, note.durationSeconds,
-                row.fixedDurationSeconds * targetPerSource);
-            note.utauPreutteranceOverrideEnabled = true;
-            note.utauPreutteranceSeconds = std::max(0.0,
-                (row.alignmentSeconds - row.regionStartSeconds) * targetPerSource);
-            note.utauOverlapOverrideEnabled = std::abs(row.overlapSeconds) > 1.0e-9;
-            note.utauOverlapSeconds = row.overlapSeconds * targetPerSource;
-            note.amplitudeEnvelope = row.amplitudeEnvelope;
-            if (note.amplitudeEnvelope.empty() && row.melodyneAmplitude > 1.0e-6)
+            clockOwner.notes.clear();
+            for(auto n:original->notes)if(n.clipPartId==owner->id){n.startSeconds-=ownerOffset;clockOwner.notes.push_back(std::move(n));}
+        }
+        const auto actualClock=nativeClipClock(clockOwner);
+        const bool sameMappedEdges=!actualClock.empty()
+            &&near(owner->sourceOffsetSeconds+nativeSourceTimeAt(actualClock,selected->startSeconds-ownerOffset),row.regionStartSeconds)
+            &&near(owner->sourceOffsetSeconds+nativeSourceTimeAt(actualClock,selected->startSeconds-ownerOffset+selected->durationSeconds),row.regionEndSeconds);
+        report.clipId=original->id;report.sourcePartId=owner->id;
+        const bool samePhysical=sameMappedEdges&&owner->sourceFile==audio&&selected->materialAudioId==audioId&&selected->materialRegionId==regionId
+            &&near(selected->nativeSourceStartSeconds,row.regionStartSeconds)&&near(selected->nativeSourceEndSeconds,row.regionEndSeconds)
+            &&selected->nativeUnpitched==row.nativeUnpitched
+            &&(owner->materialSourceFingerprint.isEmpty()||owner->materialSourceFingerprint==fingerprint);
+        const bool followLabel=chosenAlias.isNotEmpty()||selected->materialLabelFollowsAlias;
+        const auto display=followLabel?alias:selected->label;
+        const bool aliasChanges=display!=selected->label||alias!=(selected->materialBoundAlias.isEmpty()?selected->label:selected->materialBoundAlias)
+            ||selected->materialAliasFollowsPrimary!=(alias==row.name)||selected->materialLabelFollowsAlias!=followLabel||selected->materialReferenceUnresolved
+            ||selected->pronunciationKind!=row.pronunciationKind||selected->simplifiedConsonant!=row.simplifiedConsonant
+            ||selected->vowelSplitsExplicit!=row.vowelSplitsExplicit;
+        if(samePhysical)
+        {
+            report.pendingAnalysis=owner->materialSourceAnalysisPending;
+            if(report.pendingAnalysis)report.ticket={noteId,original->id,owner->id,audio,owner->materialSourceFingerprint};
+            report.changed=aliasChanges;
+            if(apply&&aliasChanges)
             {
-                const auto gainDb = static_cast<float>(20.0
-                    * std::log10(row.melodyneAmplitude));
-                note.amplitudeEnvelope = { { 0.0, gainDb },
-                    { note.durationSeconds, gainDb } };
+                pushUndoLocked();selected->label=display;selected->materialBoundAlias=alias;
+                selected->materialAliasFollowsPrimary=alias==row.name;selected->materialLabelFollowsAlias=followLabel;
+                selected->materialReferenceUnresolved=false;selected->pronunciationKind=row.pronunciationKind;
+                selected->simplifiedConsonant=row.simplifiedConsonant;selected->vowelSplitsExplicit=row.vowelSplitsExplicit;changed=true;
             }
-            if (note.sourceMidiCenter >= 0.0f)
-                note.midiNote = juce::jlimit(0.0f, 127.0f,
-                    note.sourceMidiCenter + static_cast<float>(row.relativePitchCents / 100.0));
-            if (row.melodyneData)
+        }
+        else
+        {
+            if(original->glideConnectedFromPrevious||original->glideConnectedToNext)
+                return reject("An external physical glide requires a larger score snapshot before source replacement.");
+            const auto begin=selected->startSeconds-ownerOffset,end=begin+selected->durationSeconds;
+            if(begin<owner->audioStartSeconds-epsilon||end>owner->audioStartSeconds+owner->audioLength()+epsilon)
+                return reject("The target note extends outside its physical source-owner domain.");
+            auto candidate=*original;
+            const auto affected=[&](const NoteData& n){return original->parts.empty()||original->nativeAudioLinked||n.clipPartId==owner->id;};
+            bool authored=false,derived=false,neutral=false,nonNeutral=false;
+            for(const auto& n:original->notes)if(affected(n))
             {
-                note.drift = juce::jlimit(0.0f, 2.0f,
-                    static_cast<float>(row.melodynePitchDrift));
-                note.modulation = juce::jlimit(0.0f, 2.0f,
-                    static_cast<float>(row.melodynePitchModulation));
-                note.formantSemitones = juce::jlimit(-12.0f, 12.0f,
-                    static_cast<float>(row.melodyneFormantCents / 100.0));
-                note.breath = juce::jlimit(0.0f, 1.0f,
-                    static_cast<float>(row.melodyneSibilantBalance));
-                note.attackSpeed = juce::jlimit(0.05f, 20.0f,
-                    static_cast<float>(row.melodyneAttackSeconds > 1.0e-6
-                        ? row.fixedDurationSeconds / row.melodyneAttackSeconds : 1.0));
+                authored|=!n.pitchControlPoints.empty();derived|=n.pitchControlPoints.empty();
+                neutral|=nativePendingPitchIsNeutral(n);nonNeutral|=!nativePendingPitchIsNeutral(n);
+                if(n.nativeIndependentPitch||n.robustPitchCurve)return reject("Independent/robust pitch needs a larger exact score partition.");
             }
+            if(authored&&derived)return reject("Mixed authored and derived score authorities require an explicit shared partition.");
+            if(neutral&&nonNeutral)return reject("Mixed pending-neutral and expressive source notes must finish analysis first.");
+            const auto lines=sharedPitchLines(*track);const auto envelopes=nativeSharedEnvelopes(*track);
+            for(auto& n:candidate.notes)if(affected(n))
+            {
+                const auto old=std::find_if(original->notes.begin(),original->notes.end(),[&](const auto& p){return p.id==n.id;});
+                const auto absolute=original->startSeconds+n.startSeconds;
+                auto score=ownPitchPoints(*old);for(auto& p:score)p.timeSeconds+=absolute;
+                if(const auto* member=lines.memberFor(n.id))
+                {
+                    if(member->line->pieces.size()!=1)return reject("Piecewise independent pitch transitions cannot yet be rebound exactly.");
+                    score=member->line->pieces.front().points;
+                }
+                if(score.empty()||!std::isfinite(n.startSeconds)||!std::isfinite(n.durationSeconds))return reject("Invalid target score geometry.");
+                if(!old->pitchControlPoints.empty())
+                {
+                    // Keep real authored controls local; do not clone an entire
+                    // old shared line into every independently owned source.
+                    if(!sliceNativePitchCurve(score,absolute,absolute+n.durationSeconds,n.pitchControlPoints))
+                        return reject("A target cubic cannot be represented exactly after source partition.");
+                }
+                else n.pitchControlPoints.clear();
+                std::vector<double> times{0,n.durationSeconds};
+                for(const auto& p:old->contour)if(p.timeSeconds>0&&p.timeSeconds<n.durationSeconds)times.push_back(p.timeSeconds);
+                if(n.id==noteId)for(double t=0;t<n.durationSeconds;t+=.005)times.push_back(t);
+                for(const auto& p:score)if(p.timeSeconds>absolute&&p.timeSeconds<absolute+n.durationSeconds)times.push_back(p.timeSeconds-absolute);
+                std::sort(times.begin(),times.end());times.erase(std::unique(times.begin(),times.end()),times.end());
+                auto facts=sliceMaterialContour(*old,0,n.durationSeconds,false);
+                if(facts.empty())facts={{0,0,0,true},{n.durationSeconds,0,0,true}};
+                const auto factAt=[&](double t)
+                {
+                    auto right=std::lower_bound(facts.begin(),facts.end(),t,[](const auto& p,double time){return p.timeSeconds<time;});
+                    if(right==facts.end())return facts.back();
+                    if(right==facts.begin()||right->timeSeconds==t)return *right;
+                    auto p=*std::prev(right);const auto u=static_cast<float>((t-p.timeSeconds)/(right->timeSeconds-p.timeSeconds));
+                    p.relativeCents+=(right->relativeCents-p.relativeCents)*u;p.withoutVibratoCents+=(right->withoutVibratoCents-p.withoutVibratoCents)*u;
+                    p.voiced=p.voiced&&right->voiced;return p;
+                };
+                // Derived acoustic samples stay read-only target supports. For
+                // untouched all-neutral notes, retain their PCM-neutral predicate.
+                if(n.id==noteId||!nativePendingPitchIsNeutral(*old))
+                {
+                    std::vector<PitchPoint> frozen;
+                    for(auto t:times)
+                    {
+                        auto p=factAt(t);p.timeSeconds=t;p.hasManualTarget=true;
+                        p.manualTargetCents=(evaluatePitchCurve(score,absolute+t)-n.midiNote)*100;
+                        if(n.id==noteId){p.relativeCents=p.withoutVibratoCents=0;p.voiced=false;}
+                        frozen.push_back(p);
+                    }
+                    n.contour=std::move(frozen);
+                }
+                n.materialTargetPitchLocked=true;
+                if(const auto e=envelopes.find(n.id);e!=envelopes.end())
+                {
+                    const auto audible=sliceNativeSharedEnvelope(*e->second.points,absolute,absolute+n.durationSeconds);
+                    auto plain=unscaledAmplitudeEnvelope(audible,n.amplitudeEnvelopeBasePercent);
+                    const auto check=scaledAmplitudeEnvelope(plain,n.amplitudeEnvelopeBasePercent);
+                    for(std::size_t i=0;i<check.size();++i)if(std::abs(check[i].gainDb-audible[i].gainDb)>1.e-5f)
+                        return reject("The shared gain would saturate with the unchanged per-note base percent.");
+                    n.amplitudeEnvelope=std::move(plain);
+                }
+            }
+            auto newSelected=std::find_if(candidate.notes.begin(),candidate.notes.end(),[&](const auto& n){return n.id==noteId;});
+            auto base=*owner;base.parts.clear();base.notes.clear();
+            for(auto n:original->notes)if(original->parts.empty()||n.clipPartId==owner->id)
+            {
+                n.startSeconds-=ownerOffset;
+                if(n.id!=noteId&&n.startSeconds<end-epsilon&&n.startSeconds+n.durationSeconds>begin+epsilon)
+                    return reject("An overlapping note makes the requested physical source domain ambiguous.");
+                base.notes.push_back(std::move(n));
+            }
+            const auto oldClock=nativeClipClock(base);
+            if(oldClock.size()<2)return reject("The original source clock is unavailable.");
+            for(std::size_t i=1;i<oldClock.size();++i)if(oldClock[i].targetSeconds<=oldClock[i-1].targetSeconds||oldClock[i].sourceSeconds<=oldClock[i-1].sourceSeconds)
+                return reject("The original source clock is not monotonic.");
+            base.sourceTimeMap=oldClock;base.startSeconds=0;base.nativeAudioLinked=false;base.nativePitchGroupId.clear();
+            if(original->parts.empty())
+            {
+                // The parent retains these master layers; never bake them into
+                // children and then multiply them a second time during expansion.
+                base.gain=1;base.muted=owner->materialSourceAnalysisPending;base.materialSourceResumeMuted=false;
+                base.gainEnvelope.clear();base.inheritedGainEnvelopes.clear();
+                base.fadeInSeconds=base.fadeOutSeconds=base.crossfadeInSeconds=base.crossfadeOutSeconds=0;
+            }
+            const auto sourceA=nativeSourceTimeAt(oldClock,begin),sourceB=nativeSourceTimeAt(oldClock,end);
+            if(sourceB<=sourceA+epsilon)return reject("The selected note has no invertible source interval.");
+            std::vector<ClipData> partition;
+            const auto crop=[&](double from,double to,const juce::String& id)->bool
+            {
+                if(to-from<=epsilon)return true;
+                auto pieces=slicedClipParts({base},from,to,false,true);if(pieces.size()!=1)return false;
+                auto p=std::move(pieces.front());p.id=id;p.startSeconds=ownerOffset+from;p.notes.clear();p.nativeAudioLinked=false;p.nativePitchGroupId.clear();
+                if(!clipIsRecording(base))p.sourceFile=juce::File{}; // score/MIDI provenance is not PCM
+                partition.push_back(std::move(p));return true;
+            };
+            const auto leftId=begin>epsilon?(original->parts.empty()?makeId("source-left"):owner->id):juce::String{};
+            const auto rightId=end<base.durationSeconds-epsilon?makeId("source-right"):juce::String{};
+            if(!crop(0,begin,leftId))return reject("The original left source domain cannot be preserved.");
+            const auto selectedId=makeId("source-binding");
+            if(!crop(begin,end,selectedId))return reject("The new source domain cannot be represented.");
+            auto& replacement=partition.back();replacement.sourceFile=audio;replacement.sourceOffsetSeconds=row.regionStartSeconds;
+            replacement.sourceDurationSeconds=row.regionEndSeconds-row.regionStartSeconds;
+            replacement.audioStartSeconds=0;replacement.audioDurationSeconds=-1;replacement.durationSeconds=end-begin;
+            replacement.sourceTimeMap={{0,0}};
+            for(const auto& p:oldClock)if(p.targetSeconds>begin+epsilon&&p.targetSeconds<end-epsilon)
+                replacement.sourceTimeMap.push_back({p.targetSeconds-begin,(p.sourceSeconds-sourceA)/(sourceB-sourceA)*replacement.sourceDurationSeconds});
+            replacement.sourceTimeMap.push_back({end-begin,replacement.sourceDurationSeconds});
+            replacement.nativeSourcePitch.reset();replacement.nativeSourcePitchComplete=false;replacement.nativeSourcePitchPending=true;
+            replacement.nativeTrimClock.clear();replacement.materialSourceFingerprint=fingerprint;
+            replacement.materialSourceAnalysisPending=true;
+            replacement.materialSourceResumeMuted=original->parts.empty()?false
+                :owner->materialSourceAnalysisPending?owner->materialSourceResumeMuted:owner->muted;
+            replacement.muted=true; // model-only pending render gate, not a fake C4 source
+            if(!crop(end,base.durationSeconds,rightId))return reject("The original right source domain cannot be preserved.");
+            for(auto& n:candidate.notes)if(original->parts.empty()||n.clipPartId==owner->id)
+            {
+                if(n.id==noteId)n.clipPartId=selectedId;
+                else if(n.startSeconds+n.durationSeconds<=ownerOffset+begin+epsilon)n.clipPartId=leftId;
+                else if(n.startSeconds>=ownerOffset+end-epsilon)n.clipPartId=rightId;
+                else return reject("A note crosses the exact replacement source cut.");
+                if(n.clipPartId.isEmpty())return reject("A retained note lost its explicit source owner.");
+            }
+            if(original->parts.empty())
+            {
+                candidate.parts=std::move(partition);
+                if(candidate.materialSourceAnalysisPending)candidate.muted=candidate.materialSourceResumeMuted;
+                candidate.materialSourceFingerprint.clear();candidate.materialSourceAnalysisPending=false;
+                candidate.nativeSourcePitch.reset();candidate.nativeSourcePitchComplete=false;candidate.nativeSourcePitchPending=false;candidate.nativeTrimClock.clear();
+            }
+            else
+            {
+                const auto at=std::find_if(candidate.parts.begin(),candidate.parts.end(),[&](const auto& p){return p.id==owner->id;});
+                const auto index=static_cast<std::size_t>(at-candidate.parts.begin());candidate.parts.erase(at);
+                candidate.parts.insert(candidate.parts.begin()+static_cast<std::ptrdiff_t>(index),partition.begin(),partition.end());
+            }
+            candidate.nativeAudioLinked=false;
+            newSelected=std::find_if(candidate.notes.begin(),candidate.notes.end(),[&](const auto& n){return n.id==noteId;});
+            newSelected->sourceMidiCenter=-1;newSelected->sourcePitchMeasured=false;newSelected->nativeUnpitched=row.nativeUnpitched;
+            newSelected->label=display;newSelected->materialBoundAlias=alias;newSelected->materialAliasFollowsPrimary=alias==row.name;
+            newSelected->materialLabelFollowsAlias=followLabel;newSelected->materialReferenceUnresolved=false;
+            newSelected->materialAudioId=audioId;newSelected->materialRegionId=regionId;
+            newSelected->materialSourceStartSeconds=newSelected->nativeSourceStartSeconds=row.regionStartSeconds;
+            newSelected->materialSourceEndSeconds=newSelected->nativeSourceEndSeconds=row.regionEndSeconds;
+            newSelected->materialAdditionalAliases=row.additionalAliases;newSelected->materialConnectedNextRegionId=row.connectedNextRegionId;
+            newSelected->pronunciationKind=row.pronunciationKind;newSelected->simplifiedConsonant=row.simplifiedConsonant;newSelected->vowelSplitsExplicit=row.vowelSplitsExplicit;newSelected->nativeRole=row.role;
+            newSelected->nativeProvenance=row.provenance;newSelected->nativeConfidence=row.confidence;
+            newSelected->nativeSegments=SampleSettings::nativeSegmentsFor(row);
+            report.changed=true;report.pendingAnalysis=true;report.sourcePartId=selectedId;
+            report.ticket={noteId,original->id,selectedId,audio,fingerprint};
+            if(apply){pushUndoLocked();*original=std::move(candidate);changed=true;}
+        }
+    }
+    if(changed)sendChangeMessage();return report;
+}
+
+ProjectModel::MaterialUpdateReport ProjectModel::applySourceSettingsWithReport(
+    const juce::File& source, const std::vector<SampleRegionSetting>& rows, bool apply)
+{
+    MaterialUpdateReport report;
+    constexpr double edgeTolerance = 1.0e-5; // seconds; legacy matching only
+    constexpr double epsilon = 1.0e-8;
+    const auto near = [](double a, double b) { return std::abs(a - b) <= epsilon; };
+    const auto reject = [&](const juce::String& reason)
+    {
+        report.rejected = true;
+        report.updatedNotes = report.boundLegacyNotes = 0;
+        report.diagnostics.add(reason);
+    };
+    if (source == juce::File{})
+    { reject("Material updates require an owning source audio file."); return report; }
+    // Duplicate composite IDs are malformed, not a reason to choose the first.
+    for (std::size_t i = 0; i < rows.size(); ++i)
+    {
+        const auto& row = rows[i];
+        if (!std::isfinite(row.regionStartSeconds) || !std::isfinite(row.regionEndSeconds)
+            || row.regionStartSeconds < 0 || row.regionEndSeconds <= row.regionStartSeconds
+            || !std::isfinite(row.confidence))
+        { reject("Invalid material source interval."); return report; }
+        for (std::size_t j = 0; j < i; ++j)
+            if (row.materialAudioId.isNotEmpty() && row.materialRegionId.isNotEmpty()
+                && row.materialAudioId == rows[j].materialAudioId
+                && row.materialRegionId == rows[j].materialRegionId)
+            { reject("Duplicate material audio/region identity."); return report; }
+    }
+    const auto segmentsEqual = [](const auto& a, const auto& b)
+    {
+        if (a.size() != b.size()) return false;
+        for (std::size_t i = 0; i < a.size(); ++i)
+        {
+            const auto& x = a[i]; const auto& y = b[i];
+            if (x.id != y.id || x.alias != y.alias || x.role != y.role
+                || x.sourceStartSeconds != y.sourceStartSeconds || x.sourceEndSeconds != y.sourceEndSeconds
+                || x.provenance != y.provenance || x.confidence != y.confidence
+                || x.alignmentSeconds != y.alignmentSeconds || x.overlapSeconds != y.overlapSeconds
+                || x.stretchable != y.stretchable || x.stretchWeight != y.stretchWeight) return false;
+        }
+        return true;
+    };
+    bool changed = false;
+    {
+        const juce::ScopedLock guard(lock);
+        struct Plan { ClipData* destination; ClipData replacement; };
+        std::vector<Plan> plans;
+        auto candidateConnections = project.nativeConnections;
+        bool topologyGraphChanged = false;
+        std::vector<TrackData*> topologyTracks;
+        double mediaDuration = -1.0;
+        juce::String observedSourceFingerprint;
+        // Work on only touched clips, not an additional full-project snapshot.
+        for (auto& track : project.tracks) for (auto& original : track.clips)
+        {
+            if (track.accompaniment) continue;
+            bool relevant = original.parts.empty() ? original.sourceFile == source
+                : std::any_of(original.parts.begin(), original.parts.end(),
+                    [&](const auto& part) { return part.sourceFile == source; });
+            if (!relevant) continue;
+            auto candidate = original;
+            bool clipChanged = false;
+            const auto updateOwner = [&](ClipData& owner, double noteOffset,
+                                          const juce::String& partId) -> bool
+            {
+                struct Binding { NoteData* note; const SampleRegionSetting* row; double start, end; bool edgesChanged, intact; };
+                std::vector<Binding> bindings;
+                auto clockOwner = owner;
+                if (!candidate.parts.empty())
+                {
+                    clockOwner.notes.clear();
+                    for (auto note : candidate.notes) if (note.clipPartId == partId)
+                    { note.startSeconds -= noteOffset; clockOwner.notes.push_back(std::move(note)); }
+                }
+                const auto clock = nativeClipClock(clockOwner);
+                // Detect new-identity topology before ordinary boundary retargeting
+                // and before local-override skipping. It needs an exact partition of
+                // the OLD target/source coverage, not a stretch onto the retained ID.
+                struct Topology { std::size_t index; std::vector<const SampleRegionSetting*> chain; };
+                std::vector<Topology> topology;
+                const auto placed = [&](const SampleRegionSetting& row)
+                {
+                    return std::any_of(candidate.notes.begin(),candidate.notes.end(),[&](const auto& n)
+                    { return (candidate.parts.empty()||n.clipPartId==partId)
+                        &&n.materialAudioId==row.materialAudioId&&n.materialRegionId==row.materialRegionId; });
+                };
+                const auto topologyFailure = [&](const juce::String& detail)
+                { reject("Unsupported material topology: " + detail + ". Publication cancelled; original coverage and musical edits retained."); return false; };
+                for(std::size_t ni=0;ni<candidate.notes.size();++ni)
+                {
+                    const auto& note=candidate.notes[ni];
+                    if(!candidate.parts.empty()&&note.clipPartId!=partId)continue;
+                    if(note.materialAudioId.isEmpty()||note.materialRegionId.isEmpty())continue;
+                    auto retained=std::find_if(rows.begin(),rows.end(),[&](const auto& r)
+                    {return r.materialAudioId==note.materialAudioId&&r.materialRegionId==note.materialRegionId;});
+                    if(retained==rows.end())continue; // deleted/merged IDs retain unresolved snapshots
+                    const auto first=note.materialSourceStartSeconds>=0?note.materialSourceStartSeconds:note.nativeSourceStartSeconds;
+                    const auto last=note.materialSourceEndSeconds>=0?note.materialSourceEndSeconds:note.nativeSourceEndSeconds;
+                    if(first<0||last<=first)continue;
+                    if(retained->regionStartSeconds<=first+epsilon&&retained->regionEndSeconds>=last-epsilon)continue;
+                    const bool newCoverage=std::any_of(rows.begin(),rows.end(),[&](const auto& r)
+                    {
+                        const auto a=std::max(first,r.regionStartSeconds),b=std::min(last,r.regionEndSeconds);
+                        return r.materialAudioId==note.materialAudioId&&r.materialRegionId!=note.materialRegionId
+                            &&b>a+epsilon&&(a<retained->regionStartSeconds-epsilon||b>retained->regionEndSeconds+epsilon)&&!placed(r);
+                    });
+                    if(!newCoverage)continue;
+                    if(!candidate.parts.empty()||candidate.nativeAudioLinked||!trackShowsAllNativeRegions(track))
+                        return topologyFailure("only an intact single-source native owner can be partitioned");
+                    if(note.materialLocalOverride)return topologyFailure("local material override at "+note.id);
+                    if(!near(retained->regionStartSeconds,first))return topologyFailure("retained ID must be the first chain member");
+                    if(!near(owner.sourceOffsetSeconds+nativeSourceTimeAt(clock,note.startSeconds),first)
+                        ||!near(owner.sourceOffsetSeconds+nativeSourceTimeAt(clock,note.startSeconds+note.durationSeconds),last))
+                        return topologyFailure("cropped or independently retimed pronunciation "+note.id);
+                    Topology expansion{ni,{&*retained}};
+                    while(expansion.chain.back()->regionEndSeconds<last-epsilon)
+                    {
+                        const auto* previous=expansion.chain.back();
+                        auto next=std::find_if(rows.begin(),rows.end(),[&](const auto& r)
+                        {return r.materialAudioId==note.materialAudioId&&r.materialRegionId==previous->connectedNextRegionId;});
+                        if(next==rows.end()||next->materialRegionId.isEmpty()||placed(*next)
+                            ||!near(next->regionStartSeconds,previous->regionEndSeconds)||next->regionEndSeconds>last+epsilon
+                            ||std::find(expansion.chain.begin(),expansion.chain.end(),&*next)!=expansion.chain.end())
+                            return topologyFailure("new IDs must form an explicit contiguous chain filling the previous source interval");
+                        expansion.chain.push_back(&*next);
+                    }
+                    if(expansion.chain.size()<2||!near(expansion.chain.back()->regionEndSeconds,last))
+                        return topologyFailure("chain does not preserve the complete previous source interval");
+                    for(const auto& r:rows)
+                        if(r.materialAudioId==note.materialAudioId&&r.regionStartSeconds<last-epsilon&&r.regionEndSeconds>first+epsilon
+                            &&!placed(r)&&std::find(expansion.chain.begin(),expansion.chain.end(),&r)==expansion.chain.end())
+                            return topologyFailure("ambiguous overlapping new pronunciation IDs");
+                    topology.push_back(std::move(expansion));
+                }
+                if(!topology.empty())
+                {
+                    if(clock.size()<2)return topologyFailure("missing source clock");
+                    for(std::size_t i=1;i<clock.size();++i)
+                        if(clock[i].targetSeconds<=clock[i-1].targetSeconds+epsilon||clock[i].sourceSeconds<=clock[i-1].sourceSeconds+epsilon)
+                            return topologyFailure("non-monotonic source clock");
+                    for(std::size_t i=0;i<owner.sourceTimeMap.size();++i)
+                    {
+                        const auto& p=owner.sourceTimeMap[i];
+                        if(!std::isfinite(p.targetSeconds)||!std::isfinite(p.sourceSeconds)
+                            ||p.targetSeconds<owner.audioStartSeconds-epsilon||p.targetSeconds>owner.audioStartSeconds+owner.audioLength()+epsilon
+                            ||p.sourceSeconds<0||p.sourceSeconds>owner.sourceDurationSeconds+epsilon
+                            ||(i&&(p.targetSeconds<=owner.sourceTimeMap[i-1].targetSeconds+epsilon||p.sourceSeconds<=owner.sourceTimeMap[i-1].sourceSeconds+epsilon)))
+                            return topologyFailure("existing warp would require clamping");
+                    }
+                    if(mediaDuration<0)
+                    {
+                        juce::AudioFormatManager formats;formats.registerBasicFormats();
+                        std::unique_ptr<juce::AudioFormatReader> reader(formats.createReaderFor(source));
+                        if(!reader||reader->sampleRate<=0)return topologyFailure("cannot validate source media");
+                        mediaDuration=reader->lengthInSamples/reader->sampleRate;
+                    }
+                    if(owner.sourceOffsetSeconds<0||owner.sourceOffsetSeconds+clock.back().sourceSeconds>mediaDuration+epsilon)
+                        return topologyFailure("source interval outside recording");
+                    std::vector<std::size_t> ordered;
+                    for(std::size_t i=0;i<candidate.notes.size();++i)ordered.push_back(i);
+                    std::stable_sort(ordered.begin(),ordered.end(),[&](auto a,auto b){return candidate.notes[a].startSeconds<candidate.notes[b].startSeconds;});
+                    const bool automaticOwner=std::all_of(candidate.notes.begin(),candidate.notes.end(),[](const auto& n){return n.pitchControlPoints.empty();});
+                    if(!automaticOwner&&std::any_of(candidate.notes.begin(),candidate.notes.end(),[](const auto& n){return n.pitchControlPoints.empty();}))
+                        return topologyFailure("mixed authored and derived pitch requires a larger shared automation partition");
+                    if(automaticOwner&&std::any_of(candidate.notes.begin(),candidate.notes.end(),[](const auto& n){return n.contour.size()<2;}))
+                        return topologyFailure("derived pitch requires its acoustic contour before partition");
+                    const bool neutralOwner=std::all_of(candidate.notes.begin(),candidate.notes.end(),nativePendingPitchIsNeutral);
+                    if(!neutralOwner&&std::any_of(candidate.notes.begin(),candidate.notes.end(),nativePendingPitchIsNeutral))
+                        return topologyFailure("mixed pending-neutral source and expressive members must finish acoustic analysis first");
+                    double cursor=owner.audioStartSeconds;
+                    for(auto index:ordered)
+                    {
+                        const auto& n=candidate.notes[index];
+                        if(n.materialLocalOverride||n.nativeIndependentPitch||n.nativeUnpitched||n.robustPitchCurve||!near(n.startSeconds,cursor)
+                            ||n.nativeEnvelope.mode!=0||n.utauTailFadeMode!=0||!n.utauFlagCurves.empty()
+                            ||!n.diffSingerPitchOffset.empty()||!n.diffSingerPitchReference.empty()||!n.cvvcEnvelopes.empty())
+                            return topologyFailure("requires contiguous voiced shared notes without local/independent/advanced automation layers");
+                        cursor=n.startSeconds+n.durationSeconds;
+                        const bool expanded=std::any_of(topology.begin(),topology.end(),[&](const auto& t){return t.index==index;});
+                        if(!expanded)
+                        {
+                            auto r=std::find_if(rows.begin(),rows.end(),[&](const auto& r){return r.materialAudioId==n.materialAudioId&&r.materialRegionId==n.materialRegionId;});
+                            if(r!=rows.end()&&(!near(r->regionStartSeconds,n.materialSourceStartSeconds)||!near(r->regionEndSeconds,n.materialSourceEndSeconds)))
+                                return topologyFailure("simultaneous neighbor boundary changes need a separate transaction");
+                        }
+                    }
+                    if(!near(cursor,owner.audioStartSeconds+owner.audioLength()))return topologyFailure("notes do not cover the complete audible owner");
+                    const auto lines=sharedPitchLines(track);
+                    const auto envelopes=nativeSharedEnvelopes(track);
+                    const auto& firstNote=candidate.notes[ordered.front()];
+                    std::vector<PitchCurveEditPoint> pitch;
+                    if(const auto* member=lines.memberFor(firstNote.id))
+                    {
+                        if(member->line->pieces.size()!=1)return topologyFailure("piecewise independent pitch authority");
+                        pitch=member->line->pieces.front().points;
+                    }
+                    else
+                    {
+                        if(ordered.size()!=1)return topologyFailure("missing shared pitch authority");
+                        pitch=ownPitchPoints(firstNote);for(auto& p:pitch)p.timeSeconds+=candidate.startSeconds+firstNote.startSeconds;
+                    }
+                    std::vector<AmplitudeEnvelopePoint> envelope;
+                    if(const auto found=envelopes.find(firstNote.id);found!=envelopes.end())envelope=*found->second.points;
+                    else
+                    {
+                        if(ordered.size()!=1)return topologyFailure("missing shared gain authority");
+                        envelope=scaledAmplitudeEnvelope(firstNote.amplitudeEnvelope,firstNote.amplitudeEnvelopeBasePercent);
+                        if(envelope.empty())envelope={{0,scaledEnvelopeGainDb(0,firstNote.amplitudeEnvelopeBasePercent/100.0f)},
+                            {firstNote.durationSeconds,scaledEnvelopeGainDb(0,firstNote.amplitudeEnvelopeBasePercent/100.0f)}};
+                        for(auto& p:envelope)p.timeSeconds+=candidate.startSeconds+firstNote.startSeconds;
+                    }
+                    const auto groupStart=candidate.startSeconds+owner.audioStartSeconds;
+                    const auto groupEnd=groupStart+owner.audioLength();
+                    if(pitch.empty()||pitch.front().timeSeconds<groupStart-epsilon||pitch.back().timeSeconds>groupEnd+epsilon
+                        ||envelope.empty()||envelope.front().timeSeconds<groupStart-epsilon||envelope.back().timeSeconds>groupEnd+epsilon)
+                        return topologyFailure("external support handles outside the owner require a larger shared partition");
+                    std::vector<NoteData> members;
+                    std::vector<std::pair<juce::String,std::vector<juce::String>>> chains;
+                    for(auto index:ordered)
+                    {
+                        const auto originalNote=candidate.notes[index];
+                        const auto expansion=std::find_if(topology.begin(),topology.end(),[&](const auto& t){return t.index==index;});
+                        std::vector<const SampleRegionSetting*> chain;
+                        if(expansion!=topology.end())chain=expansion->chain;else chain={nullptr};
+                        std::vector<juce::String> ids;
+                        for(std::size_t ci=0;ci<chain.size();++ci)
+                        {
+                            const auto* row=chain[ci];auto n=originalNote;
+                            const auto start=row?nativeTargetTimeAt(clock,row->regionStartSeconds-owner.sourceOffsetSeconds):originalNote.startSeconds;
+                            const auto end=row?nativeTargetTimeAt(clock,row->regionEndSeconds-owner.sourceOffsetSeconds):originalNote.startSeconds+originalNote.durationSeconds;
+                            if(end-start<.001)return topologyFailure("new member shorter than 1ms on the target clock");
+                            const auto crop=start-originalNote.startSeconds;
+                            n.id=ci==0?originalNote.id:makeId("note");n.startSeconds=start;n.durationSeconds=end-start;
+                            n.consonantSeconds=std::max(0.0,std::min(originalNote.consonantSeconds-crop,n.durationSeconds));
+                            n.contour=sliceMaterialContour(originalNote,crop,crop+n.durationSeconds,automaticOwner&&!neutralOwner);
+                            if(!sliceNativePitchCurve(pitch,candidate.startSeconds+start,candidate.startSeconds+end,n.pitchControlPoints))
+                                return topologyFailure("singular or invalid cubic pitch crop");
+                            // Derived 5ms acoustic data stays a contour, not hundreds
+                            // of newly writable pitch handles. All derived target
+                            // segments are linear; cropped target-cents supports keep
+                            // drift/modulation exact without promoting source samples.
+                            // Neutral stubs additionally retain their PCM predicate.
+                            if(automaticOwner)n.pitchControlPoints.clear();
+                            n.nativePitchHandlesPlaced=automaticOwner?originalNote.nativePitchHandlesPlaced:true;
+                            const auto audibleEnvelope=sliceNativeSharedEnvelope(envelope,candidate.startSeconds+start,candidate.startSeconds+end);
+                            n.amplitudeEnvelope=unscaledAmplitudeEnvelope(audibleEnvelope,n.amplitudeEnvelopeBasePercent);
+                            const auto roundTripEnvelope=scaledAmplitudeEnvelope(n.amplitudeEnvelope,n.amplitudeEnvelopeBasePercent);
+                            for(std::size_t ei=0;ei<audibleEnvelope.size();++ei)
+                                if(std::abs(roundTripEnvelope[ei].gainDb-audibleEnvelope[ei].gainDb)>1.e-5f)
+                                    return topologyFailure("shared gain cannot be represented with the unchanged per-note base percent without saturation");
+                            n.vibratoReferenceDurationSeconds=originalNote.vibratoReferenceDurationSeconds>0?originalNote.vibratoReferenceDurationSeconds:originalNote.durationSeconds;
+                            n.vibratoTimeOffsetSeconds=originalNote.vibratoTimeOffsetSeconds+crop;
+                            n.sibilantMarkers.clear();for(auto t:originalNote.sibilantMarkers)if(t>=crop&&t<=crop+n.durationSeconds)n.sibilantMarkers.push_back(t-crop);
+                            if(row)
+                            {
+                                if(row->nativeUnpitched)return topologyFailure("split changes voicing classification");
+                                const auto alias=materialAliasProjection(n,*row);n.label=alias.label;n.materialBoundAlias=alias.bound;
+                                if(alias.missing)report.diagnostics.add("Selected material alias was removed; snapshot retained: "+n.id+" / "+alias.bound);
+                                n.nativeRole=row->role;
+                                n.nativeProvenance=row->provenance;n.nativeConfidence=row->confidence;
+                                n.materialAudioId=row->materialAudioId;n.materialRegionId=row->materialRegionId;
+                                n.materialSourceStartSeconds=n.nativeSourceStartSeconds=row->regionStartSeconds;
+                                n.materialSourceEndSeconds=n.nativeSourceEndSeconds=row->regionEndSeconds;
+                                n.materialAdditionalAliases=row->additionalAliases;n.materialConnectedNextRegionId=row->connectedNextRegionId;
+                                n.pronunciationKind=row->pronunciationKind;n.simplifiedConsonant=row->simplifiedConsonant;n.vowelSplitsExplicit=row->vowelSplitsExplicit;n.materialReferenceUnresolved=false;
+                                n.nativeSegments=SampleSettings::nativeSegmentsFor(*row);
+                            }
+                            ids.push_back(n.id);members.push_back(std::move(n));
+                        }
+                        if(expansion!=topology.end())chains.push_back({originalNote.id,std::move(ids)});
+                    }
+                    // Shared-line deduplication takes the RIGHT seam handle. Its
+                    // incoming cubic must be the LEFT slice's outgoing descriptor.
+                    for(std::size_t i=1;i<members.size();++i)
+                    {
+                        if(members[i-1].pitchControlPoints.empty()||members[i].pitchControlPoints.empty())continue;
+                        const auto incoming=members[i-1].pitchControlPoints.back();auto& seam=members[i].pitchControlPoints.front();
+                        seam.shape=incoming.shape;seam.bezierX1=incoming.bezierX1;seam.bezierY1=incoming.bezierY1;
+                        seam.bezierX2=incoming.bezierX2;seam.bezierY2=incoming.bezierY2;seam.highPrecisionBezier=incoming.highPrecisionBezier;
+                    }
+                    materializeLegacyConnectionPairs(candidateConnections,orderedConnectionEndpoints(track));
+                    for(const auto& chain:chains)for(auto& c:candidateConnections)
+                        if(c.leftNoteId==chain.first)c.leftNoteId=chain.second.back(); // incoming remains original first ID
+                    candidate.notes=std::move(members);
+                    for(const auto& chain:chains)for(std::size_t i=1;i<chain.second.size();++i)
+                    {
+                        auto left=std::find_if(candidate.notes.begin(),candidate.notes.end(),[&](const auto& n){return n.id==chain.second[i-1];});
+                        auto right=std::find_if(candidate.notes.begin(),candidate.notes.end(),[&](const auto& n){return n.id==chain.second[i];});
+                        ConnectionEndpoint a{&*left,&candidate,candidate.startSeconds+left->startSeconds};
+                        ConnectionEndpoint b{&*right,&candidate,candidate.startSeconds+right->startSeconds};
+                        mutateNativeConnectionPair(candidateConnections,a,b,true);
+                        for(auto& c:candidateConnections)if(c.leftNoteId==left->id&&c.rightNoteId==right->id)c.boundarySeconds=b.start;
+                    }
+                    // Freeze an implicit consonant clock before note topology can
+                    // alter it. Explicit maps remain byte-for-byte unchanged.
+                    if(owner.sourceTimeMap.empty())owner.sourceTimeMap=clock;
+                    topologyGraphChanged=true;clipChanged=true;report.updatedNotes+=static_cast<int>(candidate.notes.size());
+                    if(std::find(topologyTracks.begin(),topologyTracks.end(),&track)==topologyTracks.end())topologyTracks.push_back(&track);
+                }
+                bool boundaryChanged = false;
+                for (auto& note : candidate.notes)
+                {
+                    if (candidate.parts.size() && note.clipPartId != partId) continue;
+                    const auto start = owner.sourceOffsetSeconds + nativeSourceTimeAt(clock, note.startSeconds - noteOffset);
+                    const auto end = owner.sourceOffsetSeconds + nativeSourceTimeAt(clock, note.startSeconds - noteOffset + note.durationSeconds);
+                    const SampleRegionSetting* match = nullptr;
+                    if (note.materialLocalOverride)
+                    {
+                        ++report.skippedLocalOverrides;
+                        // A local timing/tuning snapshot does not pin its display
+                        // alias. Refresh identity text only, using exact variant IDs.
+                        for (const auto& row : rows)
+                            if (note.materialAudioId.isNotEmpty()&&note.materialRegionId.isNotEmpty()
+                                &&row.materialAudioId==note.materialAudioId&&row.materialRegionId==note.materialRegionId)
+                            {
+                                const auto alias=materialAliasProjection(note,row);
+                                if (note.label!=alias.label||note.materialBoundAlias!=alias.bound
+                                    ||note.materialLabelFollowsAlias!=alias.labelFollowsAlias
+                                    ||note.materialAdditionalAliases!=row.additionalAliases)
+                                {
+                                    note.label=alias.label;note.materialBoundAlias=alias.bound;
+                                    note.materialLabelFollowsAlias=alias.labelFollowsAlias;
+                                    note.materialAdditionalAliases=row.additionalAliases;
+                                    clipChanged=true;++report.updatedNotes;
+                                }
+                                break;
+                            }
+                    }
+                    else if (note.materialAudioId.isNotEmpty() || note.materialRegionId.isNotEmpty())
+                    {
+                        for (const auto& row : rows)
+                            if (row.materialAudioId.isNotEmpty() && row.materialRegionId.isNotEmpty()
+                                && row.materialAudioId == note.materialAudioId && row.materialRegionId == note.materialRegionId)
+                                match = &row;
+                        if (!match)
+                        {
+                            ++report.unresolvedNotes;
+                            report.diagnostics.add("Unresolved material reference retained: " + note.id);
+                            if (!note.materialReferenceUnresolved)
+                            { note.materialReferenceUnresolved = true; clipChanged = true; ++report.updatedNotes; }
+                        }
+                    }
+                    else if (note.materialAudioId.isEmpty() && note.materialRegionId.isEmpty())
+                    {
+                        int matches = 0;
+                        const auto oldStart = note.nativeSourceStartSeconds >= 0 ? note.nativeSourceStartSeconds : start;
+                        const auto oldEnd = note.nativeSourceEndSeconds >= 0 ? note.nativeSourceEndSeconds : end;
+                        for (const auto& row : rows)
+                            if (std::abs(row.regionStartSeconds - oldStart) <= edgeTolerance
+                                && std::abs(row.regionEndSeconds - oldEnd) <= edgeTolerance)
+                            { ++matches; match = &row; }
+                        if (matches != 1)
+                        {
+                            match = nullptr;
+                            if (matches > 1)
+                            {
+                                ++report.ambiguousLegacyNotes;
+                                report.diagnostics.add("Ambiguous legacy source edges; note left unbound: " + note.id);
+                            }
+                        }
+                        if (match && (match->materialAudioId.isEmpty() || match->materialRegionId.isEmpty())) match = nullptr;
+                        if (match) ++report.boundLegacyNotes;
+                    }
+                    const auto baselineStart = note.materialSourceStartSeconds >= 0 ? note.materialSourceStartSeconds
+                        : note.nativeSourceStartSeconds >= 0 ? note.nativeSourceStartSeconds : start;
+                    const auto baselineEnd = note.materialSourceEndSeconds >= 0 ? note.materialSourceEndSeconds
+                        : note.nativeSourceEndSeconds >= 0 ? note.nativeSourceEndSeconds : end;
+                    const bool intact = near(start, baselineStart) && near(end, baselineEnd);
+                    const bool edgesChanged = match && (!near(baselineStart, match->regionStartSeconds)
+                        || !near(baselineEnd, match->regionEndSeconds));
+                    // A split/cropped placement still references the pronunciation,
+                    // but its subrange cannot be expanded to the whole row safely.
+                    if (edgesChanged && !intact)
+                    { reject("Boundary update requires an intact source-region placement: " + note.id); return false; }
+                    boundaryChanged |= edgesChanged;
+                    bindings.push_back({ &note, match, start, end, edgesChanged, intact });
+                }
+                if (boundaryChanged)
+                {
+                    if (clock.size() < 2) { reject("Missing source clock."); return false; }
+                    for (std::size_t i = 0; i < owner.sourceTimeMap.size(); ++i)
+                    {
+                        const auto& point = owner.sourceTimeMap[i];
+                        const auto sourceLength = owner.sourceDurationSeconds > epsilon
+                            ? owner.sourceDurationSeconds : owner.audioLength();
+                        if (!std::isfinite(point.targetSeconds) || !std::isfinite(point.sourceSeconds)
+                            || point.targetSeconds < owner.audioStartSeconds - epsilon
+                            || point.targetSeconds > owner.audioStartSeconds + owner.audioLength() + epsilon
+                            || point.sourceSeconds < -epsilon || point.sourceSeconds > sourceLength + epsilon
+                            || (i && (point.targetSeconds <= owner.sourceTimeMap[i-1].targetSeconds + epsilon
+                                || point.sourceSeconds <= owner.sourceTimeMap[i-1].sourceSeconds + epsilon)))
+                        { reject("Existing non-monotonic source clock cannot be updated safely."); return false; }
+                    }
+                    if(owner.materialSourceFingerprint.isNotEmpty())
+                    {
+                        if(observedSourceFingerprint.isEmpty())observedSourceFingerprint=juce::SHA256(source).toHexString();
+                        if(observedSourceFingerprint!=owner.materialSourceFingerprint)
+                        {reject("The explicitly bound recording changed; reselect it before publishing new source boundaries.");return false;}
+                    }
+                    // Source knots describe ONE coherent transform for this owner.
+                    // Local/unresolved/unbound notes pin their actual source edges.
+                    std::vector<SourceTimePoint> knots;
+                    for (const auto& binding : bindings)
+                    {
+                        const auto* row = binding.row;
+                        const bool rowEdgesChanged = binding.edgesChanged;
+                        knots.push_back({ binding.start, rowEdgesChanged ? row->regionStartSeconds : binding.start });
+                        knots.push_back({ binding.end, rowEdgesChanged ? row->regionEndSeconds : binding.end });
+                    }
+                    const auto oldFirst = owner.sourceOffsetSeconds + clock.front().sourceSeconds;
+                    const auto oldLast = owner.sourceOffsetSeconds + clock.back().sourceSeconds;
+                    const auto pinOuter = [&](double value)
+                    {
+                        if (std::none_of(knots.begin(), knots.end(), [&](const auto& p) { return near(p.targetSeconds, value); }))
+                            knots.push_back({value, value});
+                    };
+                    pinOuter(oldFirst); pinOuter(oldLast);
+                    std::stable_sort(knots.begin(), knots.end(), [](const auto& a, const auto& b) { return a.targetSeconds < b.targetSeconds; });
+                    std::vector<SourceTimePoint> unique;
+                    for (const auto& knot : knots)
+                    {
+                        if (!unique.empty() && near(knot.targetSeconds, unique.back().targetSeconds))
+                        {
+                            if (!near(knot.sourceSeconds, unique.back().sourceSeconds))
+                            { reject("Conflicting shared source boundary (including local overrides)."); return false; }
+                        }
+                        else unique.push_back(knot);
+                    }
+                    for (std::size_t i = 1; i < unique.size(); ++i)
+                        if (unique[i].sourceSeconds <= unique[i-1].sourceSeconds + epsilon)
+                        { reject("Source boundaries overlap or reverse; no placements updated."); return false; }
+                    // Overlapping target notes cannot independently own one shared clock.
+                    for (std::size_t i = 0; i < bindings.size(); ++i)
+                        for (std::size_t j = 0; j < i; ++j)
+                            if (std::min(bindings[i].end, bindings[j].end)
+                                > std::max(bindings[i].start, bindings[j].start) + epsilon)
+                            { reject("Boundary edits of overlapping placements in one source owner are unsupported."); return false; }
+                    const auto transform = [&](double s) { return nativeSourceTimeAt(unique, s); };
+                    const auto newFirst = transform(oldFirst), newLast = transform(oldLast);
+                    if (mediaDuration < 0)
+                    {
+                        juce::AudioFormatManager formats; formats.registerBasicFormats();
+                        std::unique_ptr<juce::AudioFormatReader> reader(formats.createReaderFor(source));
+                        if (!reader || reader->sampleRate <= 0)
+                        { reject("Cannot validate source media length for boundary edit."); return false; }
+                        mediaDuration = reader->lengthInSamples / reader->sampleRate;
+                    }
+                    if (newFirst < 0 || newLast > mediaDuration + epsilon)
+                    { reject("Boundary outside source media."); return false; }
+                    auto mapped = clock;
+                    for (const auto& knot : unique)
+                        if (knot.targetSeconds > oldFirst + epsilon && knot.targetSeconds < oldLast - epsilon)
+                            mapped.push_back({nativeTargetTimeAt(clock, knot.targetSeconds - owner.sourceOffsetSeconds),
+                                              knot.targetSeconds - owner.sourceOffsetSeconds});
+                    std::stable_sort(mapped.begin(), mapped.end(), [](const auto& a, const auto& b) { return a.targetSeconds < b.targetSeconds; });
+                    std::vector<SourceTimePoint> newClock;
+                    for (auto point : mapped)
+                    {
+                        point.sourceSeconds = transform(owner.sourceOffsetSeconds + point.sourceSeconds) - newFirst;
+                        if (newClock.empty() || point.targetSeconds > newClock.back().targetSeconds + epsilon)
+                            newClock.push_back(point);
+                    }
+                    juce::String clockError;
+                    if(!publishMaterialSourceClock(owner,clock,std::move(newClock),newFirst,newLast,clockError))
+                    {reject(clockError);return false;}
+                    // Explicitly rebound notes have an independent locked score.
+                    // Their measured SOURCE F0 must follow the new source anchors,
+                    // not remain sampled from the previous pronunciation edges.
+                    if(owner.nativeSourcePitch&&owner.nativeSourcePitchComplete&&!owner.materialSourceAnalysisPending)
+                        for(const auto& binding:bindings)if(binding.note->materialTargetPitchLocked)
+                        {
+                            auto local=*binding.note;local.startSeconds-=noteOffset;refreshNativeTrimPitch(local,owner);
+                            binding.note->contour=std::move(local.contour);binding.note->sourceMidiCenter=local.sourceMidiCenter;
+                            binding.note->sourcePitchMeasured=local.sourcePitchMeasured;
+                        }
+                    clipChanged = true;
+                }
+                for (const auto& binding : bindings)
+                {
+                    if (!binding.row) continue;
+                    auto& note = *binding.note; const auto& row = *binding.row;
+                    const auto alias=materialAliasProjection(note,row);
+                    const auto& label=alias.label;
+                    if(alias.missing)report.diagnostics.add("Selected material alias was removed; source and display snapshot retained: "+note.id+" / "+alias.bound);
+                    const auto segments = binding.intact ? SampleSettings::nativeSegmentsFor(row) : note.nativeSegments;
+                    // All target-side musical edits remain untouched, even for a
+                    // freshly bound legacy note. These are source snapshots only.
+                    const bool different = note.label != label || alias.bound!=alias.previousEffective || note.nativeRole != row.role
+                        || note.nativeProvenance != row.provenance || note.nativeConfidence != row.confidence
+                        || note.materialAudioId != row.materialAudioId || note.materialRegionId != row.materialRegionId
+                        || note.materialAdditionalAliases != row.additionalAliases
+                        || note.materialConnectedNextRegionId != row.connectedNextRegionId
+                        || note.pronunciationKind!=row.pronunciationKind || note.simplifiedConsonant!=row.simplifiedConsonant
+                        || note.vowelSplitsExplicit!=row.vowelSplitsExplicit
+                        || note.materialReferenceUnresolved || !near(note.materialSourceStartSeconds, row.regionStartSeconds)
+                        || !near(note.materialSourceEndSeconds, row.regionEndSeconds)
+                        || (binding.intact && (!near(note.nativeSourceStartSeconds, row.regionStartSeconds)
+                            || !near(note.nativeSourceEndSeconds, row.regionEndSeconds)))
+                        || !segmentsEqual(note.nativeSegments, segments);
+                    if (!different) continue;
+                    applyMaterialAnnotationSnapshot(note,row,binding.intact,segments);
+                    ++report.updatedNotes; clipChanged = true;
+                }
+                return true;
+            };
+            if (candidate.parts.empty())
+            { if (!updateOwner(candidate, 0, {})) return report; }
+            else
+            {
+                // No nearest-child fallback: explicit ownership is mandatory.
+                for (const auto& note : candidate.notes)
+                    if (std::none_of(candidate.parts.begin(), candidate.parts.end(),
+                        [&](const auto& part) { return part.id == note.clipPartId; }))
+                    { reject("Merged placement lacks explicit source ownership."); return report; }
+                for (auto& part : candidate.parts) if (part.sourceFile == source)
+                {
+                    if (!part.parts.empty()) { reject("Nested source owners are unsupported."); return report; }
+                    if (!updateOwner(part, part.startSeconds, part.id)) return report;
+                }
+            }
+            if (clipChanged) plans.push_back({ &original, std::move(candidate) });
+        }
+        if(topologyGraphChanged)
+        {
+            // Project the directional authority on a shadow track containing ALL
+            // prepared placements. Never mutate live neighbor flags in preview.
+            for(auto& track:project.tracks)
+            {
+                if(std::find(topologyTracks.begin(),topologyTracks.end(),&track)==topologyTracks.end())continue;
+                bool affected=false;
+                auto shadow=track;
+                for(std::size_t i=0;i<track.clips.size();++i)
+                    if(const auto p=std::find_if(plans.begin(),plans.end(),[&](const auto& p){return p.destination==&track.clips[i];});p!=plans.end())
+                    {shadow.clips[i]=p->replacement;affected=true;}
+                if(!affected)continue;
+                projectConnectionFlags(candidateConnections,orderedConnectionEndpoints(shadow),true);
+                for(std::size_t i=0;i<track.clips.size();++i)
+                {
+                    auto p=std::find_if(plans.begin(),plans.end(),[&](const auto& p){return p.destination==&track.clips[i];});
+                    if(p!=plans.end()){p->replacement=std::move(shadow.clips[i]);continue;}
+                    const auto& a=track.clips[i];const auto& b=shadow.clips[i];
+                    bool flags=a.glideConnectedToNext!=b.glideConnectedToNext||a.glideConnectedFromPrevious!=b.glideConnectedFromPrevious;
+                    for(std::size_t n=0;n<a.notes.size();++n)flags|=a.notes[n].connectedToNext!=b.notes[n].connectedToNext||a.notes[n].connectedToPrevious!=b.notes[n].connectedToPrevious;
+                    if(flags)plans.push_back({&track.clips[i],std::move(shadow.clips[i])});
+                }
+            }
+        }
+        if (apply && !plans.empty())
+        {
+            pushUndoLocked();
+            for (auto& plan : plans) *plan.destination = std::move(plan.replacement);
+            if(topologyGraphChanged)project.nativeConnections=std::move(candidateConnections);
             changed = true;
         }
     }
     if (changed) sendChangeMessage();
+    return report;
 }
 
-juce::ValueTree ProjectModel::toValueTree(const juce::File& projectFile) const
+juce::ValueTree ProjectModel::toValueTree(const juce::File& projectFile, bool includeDerived) const
 {
     const auto data = snapshot();
     juce::ValueTree root("HachiShifterProject");
-    root.setProperty("version", 18, nullptr);
+    root.setProperty("version", 19, nullptr);
     if(data.hamoodState.isNotEmpty())root.setProperty("hamoodState",data.hamoodState,nullptr);
     root.setProperty("nativeSchemaVersion", 2, nullptr);
+    root.setProperty("materialAnnotationVersion", 1, nullptr);
     root.setProperty("diffSingerPitchReferenceVersion", 1, nullptr);
+    root.setProperty("cvvcEnvelopeVersion", 1, nullptr);
     root.setProperty("name", data.name, nullptr);
     root.setProperty("bpm", data.bpm, nullptr);
     root.setProperty("beatOriginSeconds", data.beatOriginSeconds, nullptr);
@@ -7453,6 +10093,7 @@ juce::ValueTree ProjectModel::toValueTree(const juce::File& projectFile) const
     root.setProperty("gridDivision", data.gridDivision, nullptr);
     root.setProperty("noteEditDivision", data.noteEditDivision, nullptr);
     root.setProperty("baseScale", data.baseScale, nullptr);
+    root.setProperty("assetManagerVisible", data.assetManagerVisible, nullptr);
 
     for (const auto& change : data.tempoChanges)
     {
@@ -7470,9 +10111,16 @@ juce::ValueTree ProjectModel::toValueTree(const juce::File& projectFile) const
         connectionTree.setProperty("rightNoteId", connection.rightNoteId, nullptr);
         connectionTree.setProperty("type", connection.type, nullptr);
         connectionTree.setProperty("boundarySeconds", connection.boundarySeconds, nullptr);
+        if(connection.pitchCurveEndpointRelative)
+        {
+            connectionTree.setProperty("pitchCurveEndpointRelative",true,nullptr);
+            connectionTree.setProperty("pitchStartOffsetSeconds",connection.pitchStartOffsetSeconds,nullptr);
+            connectionTree.setProperty("pitchEndOffsetSeconds",connection.pitchEndOffsetSeconds,nullptr);
+        }
         for (const auto& point : connection.pitchCurve)
         {
             juce::ValueTree pointTree("PitchCurvePoint");
+            if(point.highPrecisionBezier)pointTree.setProperty("highPrecisionBezier",true,nullptr);
             pointTree.setProperty("timeSeconds", point.timeSeconds, nullptr);
             pointTree.setProperty("targetMidi", point.targetMidi, nullptr);
             pointTree.setProperty("shape", pitchCurveShapeName(point.shape), nullptr);
@@ -7524,6 +10172,8 @@ juce::ValueTree ProjectModel::toValueTree(const juce::File& projectFile) const
         trackTree.setProperty("ustBaseline",track.ustBaseline,nullptr);
         trackTree.setProperty("utauMode", utauModeKey(track.utauMode), nullptr);
         trackTree.setProperty("utauPhonemizer", track.chineseCvvc ? "zh-cvvc" : "manual", nullptr);
+        trackTree.setProperty("utauPianoPreview", track.utauPianoPreview, nullptr);
+        trackTree.setProperty("cvvcCrossfade",track.cvvcCurveCrossfade?"curve":"linear",nullptr);
         trackTree.setProperty("outputEngine", utauOutputEngineKey(track.outputEngine), nullptr);
         trackTree.setProperty("outputResampler", track.outputResampler.getFullPathName(), nullptr);
         trackTree.setProperty("outputWavtool", track.outputWavtool.getFullPathName(), nullptr);
@@ -7545,14 +10195,21 @@ juce::ValueTree ProjectModel::toValueTree(const juce::File& projectFile) const
                 trackTree.setProperty("voicebankDirectoryRelative", relative, nullptr);
         }
         trackTree.setProperty("pitchAlgorithm", pitchAlgorithmName(track.pitchAlgorithm), nullptr);
+        trackTree.setProperty("trackType",trackTypeName(effectiveTrackType(track)),nullptr);
         trackTree.setProperty("stretchAlgorithm", stretchAlgorithmName(track.stretchAlgorithm), nullptr);
         trackTree.setProperty("renderOrder", renderOrderName(track.renderOrder), nullptr);
+        trackTree.setProperty("mergeContiguousSource", track.mergeContiguousSource, nullptr);
 
         for (const auto& clip : track.clips)
         {
             juce::ValueTree clipTree("Clip");
             clipTree.setProperty("id", clip.id, nullptr);
             clipTree.setProperty("sourceFile", clip.sourceFile.getFullPathName(), nullptr);
+            clipTree.setProperty("materialSourceFingerprint",clip.materialSourceFingerprint,nullptr);
+            if(clip.materialSourceUsageGroupId.isNotEmpty())
+                clipTree.setProperty("materialSourceUsageGroupId",clip.materialSourceUsageGroupId,nullptr);
+            clipTree.setProperty("materialSourceAnalysisPending",clip.materialSourceAnalysisPending,nullptr);
+            clipTree.setProperty("materialSourceResumeMuted",clip.materialSourceResumeMuted,nullptr);
             if (projectFile != juce::File{} && clip.sourceFile != juce::File{})
             {
                 const auto relative = clip.sourceFile.getRelativePathFrom(
@@ -7594,6 +10251,22 @@ juce::ValueTree ProjectModel::toValueTree(const juce::File& projectFile) const
                 noteTree.setProperty("id", note.id, nullptr);
                 if(note.clipPartId.isNotEmpty())noteTree.setProperty("clipPartId",note.clipPartId,nullptr);
                 noteTree.setProperty("label", note.label, nullptr);
+                noteTree.setProperty("materialAudioId", note.materialAudioId, nullptr);
+                noteTree.setProperty("materialRegionId", note.materialRegionId, nullptr);
+                noteTree.setProperty("materialBoundAlias",note.materialBoundAlias,nullptr);
+                noteTree.setProperty("materialAliasFollowsPrimary",note.materialAliasFollowsPrimary,nullptr);
+                noteTree.setProperty("materialLabelFollowsAlias",note.materialLabelFollowsAlias,nullptr);
+                noteTree.setProperty("materialTargetPitchLocked",note.materialTargetPitchLocked,nullptr);
+                if(note.pitchSupportAuthored)noteTree.setProperty("pitchSupportAuthored",true,nullptr);
+                noteTree.setProperty("materialSourceStartSeconds", note.materialSourceStartSeconds, nullptr);
+                noteTree.setProperty("materialSourceEndSeconds", note.materialSourceEndSeconds, nullptr);
+                noteTree.setProperty("materialLocalOverride", note.materialLocalOverride, nullptr);
+                noteTree.setProperty("materialReferenceUnresolved", note.materialReferenceUnresolved, nullptr);
+                noteTree.setProperty("materialAdditionalAliases", juce::var(note.materialAdditionalAliases), nullptr);
+                noteTree.setProperty("materialConnectedNextRegionId", note.materialConnectedNextRegionId, nullptr);
+                noteTree.setProperty("pronunciationKind",pronunciationKindName(note.pronunciationKind),nullptr);
+                noteTree.setProperty("simplifiedConsonant",note.simplifiedConsonant,nullptr);
+                noteTree.setProperty("vowelSplitsExplicit",note.vowelSplitsExplicit,nullptr);
                 noteTree.setProperty("nativeRole", nativeSegmentRoleName(note.nativeRole), nullptr);
                 noteTree.setProperty("nativeProvenance", note.nativeProvenance, nullptr);
                 noteTree.setProperty("nativeConfidence", note.nativeConfidence, nullptr);
@@ -7738,6 +10411,12 @@ juce::ValueTree ProjectModel::toValueTree(const juce::File& projectFile) const
                 noteTree.setProperty("nativeEnvelope",juce::JSON::toString(backend::nativeEnvelopeToVar(note.nativeEnvelope),true,17),nullptr);
                 noteTree.setProperty("amplitudeEnvelopeBase",
                                      note.amplitudeEnvelopeBasePercent, nullptr);
+                if(!note.cvvcBoundaries.empty())noteTree.setProperty("cvvcBoundaries",
+                    juce::JSON::toString(backend::cvvcBoundariesToVar(note.cvvcBoundaries),true,17),nullptr);
+                if(!note.cvvcEnvelopes.empty())noteTree.setProperty("cvvcEnvelopes",
+                    juce::JSON::toString(backend::cvvcEnvelopesToVar(note.cvvcEnvelopes),true,17),nullptr);
+                if(includeDerived&&note.cvvcPhonemeCache.isNotEmpty())
+                    noteTree.setProperty("cvvcPhonemeCache",note.cvvcPhonemeCache,nullptr);
                 noteTree.setProperty("robustPitchCurve", note.robustPitchCurve, nullptr);
                 noteTree.setProperty("connectedToPrevious", note.connectedToPrevious, nullptr);
                 noteTree.setProperty("connectedToNext", note.connectedToNext, nullptr);
@@ -7755,6 +10434,7 @@ juce::ValueTree ProjectModel::toValueTree(const juce::File& projectFile) const
                 for (const auto& point : note.pitchControlPoints)
                 {
                     juce::ValueTree pointTree("PitchControlPoint");
+                    if(point.highPrecisionBezier)pointTree.setProperty("highPrecisionBezier",true,nullptr);
                     pointTree.setProperty("timeSeconds", point.timeSeconds, nullptr);
                     pointTree.setProperty("targetMidi", point.targetMidi, nullptr);
                     pointTree.setProperty("shape", pitchCurveShapeName(point.shape), nullptr);
@@ -7778,6 +10458,7 @@ juce::ValueTree ProjectModel::toValueTree(const juce::File& projectFile) const
                 for (const auto& point : note.diffSingerPitchReference)
                 {
                     juce::ValueTree pointTree("DiffSingerPitchReferencePoint");
+                    if(point.highPrecisionBezier)pointTree.setProperty("highPrecisionBezier",true,nullptr);
                     pointTree.setProperty("timeSeconds", point.timeSeconds, nullptr);
                     pointTree.setProperty("targetMidi", point.targetMidi, nullptr);
                     pointTree.setProperty("shape", pitchCurveShapeName(point.shape), nullptr);
@@ -7850,7 +10531,7 @@ juce::ValueTree ProjectModel::toValueTree(const juce::File& projectFile) const
                 TrackData sources;sources.id="sources";sources.clips=clip.parts;
                 partsModel.project.tracks.push_back(std::move(sources));
                 juce::ValueTree partsTree("ClipParts");
-                partsTree.addChild(partsModel.toValueTree(projectFile),-1,nullptr);
+                partsTree.addChild(partsModel.toValueTree(projectFile,includeDerived),-1,nullptr);
                 clipTree.addChild(partsTree,-1,nullptr);
             }
             trackTree.addChild(clipTree, -1, nullptr);
@@ -7906,6 +10587,7 @@ ProjectData ProjectModel::fromValueTree(const juce::ValueTree& root,
     data.noteEditDivision = juce::jlimit(2, 128,
         static_cast<int>(root.getProperty("noteEditDivision", 64)));
     data.baseScale = root.getProperty("baseScale", "C").toString();
+    data.assetManagerVisible = static_cast<bool>(root.getProperty("assetManagerVisible", false));
 
     for (const auto child : root)
         if (child.hasType("TempoChange"))
@@ -7932,6 +10614,9 @@ ProjectData ProjectModel::fromValueTree(const juce::ValueTree& root,
             connection.type = connectionTree.getProperty("type", "pitch-and-amplitude").toString();
             connection.boundarySeconds = static_cast<double>(
                 connectionTree.getProperty("boundarySeconds", 0.0));
+            connection.pitchCurveEndpointRelative=static_cast<bool>(connectionTree.getProperty("pitchCurveEndpointRelative",false));
+            connection.pitchStartOffsetSeconds=static_cast<double>(connectionTree.getProperty("pitchStartOffsetSeconds",-.05));
+            connection.pitchEndOffsetSeconds=static_cast<double>(connectionTree.getProperty("pitchEndOffsetSeconds",.05));
             for (const auto pointTree : connectionTree)
             {
                 if (pointTree.hasType("PitchCurvePoint"))
@@ -7942,7 +10627,8 @@ ProjectData ProjectModel::fromValueTree(const juce::ValueTree& root,
                         static_cast<float>(pointTree.getProperty("bezierX1", 0.33)),
                         static_cast<float>(pointTree.getProperty("bezierY1", 0.0)),
                         static_cast<float>(pointTree.getProperty("bezierX2", 0.67)),
-                        static_cast<float>(pointTree.getProperty("bezierY2", 1.0)) });
+                        static_cast<float>(pointTree.getProperty("bezierY2", 1.0)),false,
+                        static_cast<bool>(pointTree.getProperty("highPrecisionBezier",false)) });
                 else if (pointTree.hasType("AmplitudeCurvePoint"))
                     connection.amplitudeCurve.push_back({
                         static_cast<double>(pointTree.getProperty("timeSeconds", 0.0)),
@@ -7955,6 +10641,12 @@ ProjectData ProjectModel::fromValueTree(const juce::ValueTree& root,
     {
         if (!trackTree.hasType("Track")) continue;
         TrackData track;
+        if(trackTree.hasProperty("trackType"))
+        {
+            // The load entry validates explicit types before any conversion,
+            // including nested source-part trees. Missing remains legacy input.
+            track.trackType=parseTrackType(trackTree.getProperty("trackType").toString());
+        }
         track.id = trackTree.getProperty("id").toString();
         track.name = trackTree.getProperty("name").toString();
         track.accompaniment = static_cast<bool>(trackTree.getProperty("accompaniment", false));
@@ -7975,7 +10667,7 @@ ProjectData ProjectModel::fromValueTree(const juce::ValueTree& root,
         track.allowNativeAudioOverlap=static_cast<bool>(trackTree.getProperty("allowNativeAudioOverlap",false));
         track.normalizeVolume = static_cast<bool>(trackTree.getProperty("normalizeVolume", false));
         track.nsfSmoothPitchTransitions = static_cast<bool>(trackTree.getProperty("nsfSmoothPitchTransitions", true));
-        track.nsfNoiseProtection = static_cast<bool>(trackTree.getProperty("nsfNoiseProtection", true));
+        track.nsfNoiseProtection = static_cast<bool>(trackTree.getProperty("nsfNoiseProtection", false));
         track.nativeNsfAudio = static_cast<bool>(trackTree.getProperty("nativeNsfAudio", false));
         track.voicebankDirectory = juce::File(
             trackTree.getProperty("voicebankDirectory").toString());
@@ -7991,6 +10683,8 @@ ProjectData ProjectModel::fromValueTree(const juce::ValueTree& root,
         track.diffSingerSpeaker = trackTree.getProperty("diffSingerSpeaker").toString();
         track.diffSingerDictionary = trackTree.getProperty("diffSingerDictionary").toString();
         track.chineseCvvc = trackTree.getProperty("utauPhonemizer", "manual").toString() == "zh-cvvc";
+        track.utauPianoPreview = static_cast<bool>(trackTree.getProperty("utauPianoPreview", true));
+        track.cvvcCurveCrossfade = trackTree.getProperty("cvvcCrossfade", "linear").toString()=="curve";
         // A project written before 谋 carries only the flag.
         track.utauMode = trackTree.hasProperty("utauMode")
             ? parseUtauMode(trackTree.getProperty("utauMode", "").toString())
@@ -8018,31 +10712,38 @@ ProjectData ProjectModel::fromValueTree(const juce::ValueTree& root,
         };
         track.outputResampler = engineFile("outputResampler");
         track.outputWavtool = engineFile("outputWavtool");
-        if (!track.nativeNsfAudio && !trackTree.hasProperty("outputEngine") && track.pitchAlgorithm == PitchAlgorithm::nsfHifigan
+        if (!track.trackType && !track.nativeNsfAudio && !trackTree.hasProperty("outputEngine") && track.pitchAlgorithm == PitchAlgorithm::nsfHifigan
             && !track.accompaniment && (utauModeUsesRegions(track.utauMode) || track.voicebankDirectory != juce::File{})
             && !track.voicebankDirectory.getChildFile("dsconfig.yaml").existsAsFile()) {
             track.pitchAlgorithm = PitchAlgorithm::utau;
             track.outputEngine = UtauOutputEngine::pcNsfHifigan;
         }
-        if (track.voicebankDirectory.getChildFile("dsconfig.yaml").existsAsFile()) track.utauMode = UtauMode::mou;
+        if (!track.trackType&&track.voicebankDirectory.getChildFile("dsconfig.yaml").existsAsFile()) track.utauMode = UtauMode::mou;
+        if(!track.trackType)track.trackType=effectiveTrackType(track);
         track.stretchAlgorithm = parseStretchAlgorithm(trackTree.getProperty("stretchAlgorithm", "melodyne-hybrid").toString());
         track.renderOrder = parseRenderOrder(trackTree.getProperty("renderOrder", "process-then-splice").toString());
+        track.mergeContiguousSource = static_cast<bool>(trackTree.getProperty("mergeContiguousSource", false));
 
         for (const auto clipTree : trackTree)
         {
             if (!clipTree.hasType("Clip")) continue;
             ClipData clip;
             clip.id = clipTree.getProperty("id").toString();
+            clip.materialSourceFingerprint=clipTree.getProperty("materialSourceFingerprint").toString();
+            clip.materialSourceUsageGroupId=clipTree.getProperty("materialSourceUsageGroupId").toString();
+            clip.materialSourceAnalysisPending=static_cast<bool>(clipTree.getProperty("materialSourceAnalysisPending",false));
+            clip.materialSourceResumeMuted=static_cast<bool>(clipTree.getProperty("materialSourceResumeMuted",false));
             clip.sourceFile = resolveSource(clipTree);
             clip.startSeconds = static_cast<double>(clipTree.getProperty("startSeconds", 0.0));
             clip.sourceOffsetSeconds = static_cast<double>(clipTree.getProperty("sourceOffsetSeconds", 0.0));
             clip.sourceDurationSeconds = static_cast<double>(clipTree.getProperty("sourceDurationSeconds", 0.0));
             clip.durationSeconds = static_cast<double>(clipTree.getProperty("durationSeconds", 1.0));
-            clip.audioStartSeconds = juce::jlimit(0.0, std::max(0.0, clip.durationSeconds),
-                static_cast<double>(clipTree.getProperty("audioStartSeconds", 0.0)));
+            // The editable boundary may be shorter than the retained audio window.
+            // Preserve that window so expanding the region after reopening is lossless.
+            const auto audioStart = static_cast<double>(clipTree.getProperty("audioStartSeconds", 0.0));
+            clip.audioStartSeconds = std::isfinite(audioStart) ? std::max(0.0, audioStart) : 0.0;
             clip.audioDurationSeconds = static_cast<double>(clipTree.getProperty("audioDurationSeconds", -1.0));
-            if (clip.audioDurationSeconds >= 0.0)
-                clip.audioDurationSeconds = juce::jlimit(0.0, std::max(0.0, clip.durationSeconds - clip.audioStartSeconds), clip.audioDurationSeconds);
+            if (!std::isfinite(clip.audioDurationSeconds)) clip.audioDurationSeconds = -1.0;
             clip.fadeInSeconds = static_cast<double>(clipTree.getProperty("fadeInSeconds", 0.0));
             clip.fadeOutSeconds = static_cast<double>(clipTree.getProperty("fadeOutSeconds", 0.0));
             clip.crossfadeInSeconds = static_cast<double>(clipTree.getProperty("crossfadeInSeconds", 0.0));
@@ -8085,6 +10786,38 @@ ProjectData ProjectModel::fromValueTree(const juce::ValueTree& root,
                 note.id = noteTree.getProperty("id").toString();
                 note.clipPartId = noteTree.getProperty("clipPartId").toString();
                 note.label = noteTree.getProperty("label").toString();
+                note.materialAudioId = noteTree.getProperty("materialAudioId").toString();
+                note.materialRegionId = noteTree.getProperty("materialRegionId").toString();
+                note.materialBoundAlias=noteTree.getProperty("materialBoundAlias").toString();
+                note.materialAliasFollowsPrimary=static_cast<bool>(noteTree.getProperty("materialAliasFollowsPrimary",true));
+                // Old files cannot distinguish renamed project labels from a
+                // source alias. Preserve their display conservatively until an
+                // explicit source/alias choice supplies the missing intent.
+                note.materialLabelFollowsAlias=static_cast<bool>(noteTree.getProperty("materialLabelFollowsAlias",note.materialAudioId.isEmpty()));
+                note.materialTargetPitchLocked=static_cast<bool>(noteTree.getProperty("materialTargetPitchLocked",false));
+                note.pitchSupportAuthored=static_cast<bool>(noteTree.getProperty("pitchSupportAuthored",false));
+                note.materialSourceStartSeconds = static_cast<double>(noteTree.getProperty("materialSourceStartSeconds", -1.0));
+                note.materialSourceEndSeconds = static_cast<double>(noteTree.getProperty("materialSourceEndSeconds", -1.0));
+                note.materialLocalOverride = static_cast<bool>(noteTree.getProperty("materialLocalOverride", false));
+                note.materialReferenceUnresolved = static_cast<bool>(noteTree.getProperty("materialReferenceUnresolved", false));
+                if (const auto* aliases = noteTree.getProperty("materialAdditionalAliases").getArray())
+                    for (const auto& alias : *aliases) note.materialAdditionalAliases.add(alias.toString());
+                note.materialConnectedNextRegionId = noteTree.getProperty("materialConnectedNextRegionId").toString();
+                if(noteTree.hasProperty("pronunciationKind"))
+                    note.pronunciationKind=parsePronunciationKind(noteTree.getProperty("pronunciationKind").toString());
+                else if(static_cast<bool>(noteTree.getProperty("materialTransitionPronunciation",false)))
+                    note.pronunciationKind=PronunciationKind::transition;
+                else
+                {
+                    // Legacy role is INTERNAL metadata and is parsed separately
+                    // below. Only old breath/transition identity is recovered;
+                    // old consonant/vowel elements remain structurally untouched.
+                    const auto legacyRole=parseNativeSegmentRole(noteTree.getProperty("nativeRole","unknown").toString());
+                    note.pronunciationKind=legacyRole==NativeSegmentRole::breath?PronunciationKind::breath
+                        :legacyRole==NativeSegmentRole::transition?PronunciationKind::transition:PronunciationKind::normal;
+                }
+                note.simplifiedConsonant=static_cast<bool>(noteTree.getProperty("simplifiedConsonant",false));
+                note.vowelSplitsExplicit=static_cast<bool>(noteTree.getProperty("vowelSplitsExplicit",false));
                 note.nativeRole = parseNativeSegmentRole(
                     noteTree.getProperty("nativeRole", "unknown").toString());
                 note.nativeProvenance = noteTree.getProperty("nativeProvenance", "estimated").toString();
@@ -8122,6 +10855,10 @@ ProjectData ProjectModel::fromValueTree(const juce::ValueTree& root,
                 note.amplitudeEnvelopeBasePercent = juce::jlimit(0.0f, 200.0f,
                     static_cast<float>(static_cast<double>(
                         noteTree.getProperty("amplitudeEnvelopeBasePercent", 100.0))));
+                note.cvvcBoundaries=backend::cvvcBoundariesFromVar(juce::JSON::parse(noteTree.getProperty("cvvcBoundaries").toString()));
+                note.cvvcEnvelopes=backend::cvvcEnvelopesFromVar(juce::JSON::parse(noteTree.getProperty("cvvcEnvelopes").toString()));
+                const auto phonemes=noteTree.getProperty("cvvcPhonemeCache").toString();
+                if(!backend::readCvvcPhonemeCache(phonemes).spans.empty())note.cvvcPhonemeCache=phonemes;
                 note.utauTailFadeMode=juce::jlimit(0,2,(int)noteTree.getProperty("utauTailFadeMode",0));
                 note.nativeEnvelope=backend::nativeEnvelopeFromVar(juce::JSON::parse(noteTree.getProperty("nativeEnvelope").toString()));
                 note.utauTailFade.startFraction=(double)noteTree.getProperty("utauTailFadeStartFraction",0.0);
@@ -8288,7 +11025,8 @@ ProjectData ProjectModel::fromValueTree(const juce::ValueTree& root,
                             static_cast<float>(child.getProperty("bezierY1", 0.0)),
                             static_cast<float>(child.getProperty("bezierX2", 0.67)),
                             static_cast<float>(child.getProperty("bezierY2", 1.0)),
-                            static_cast<bool>(child.getProperty("diffSingerRestoreSupport", false)) });
+                            static_cast<bool>(child.getProperty("diffSingerRestoreSupport", false)),
+                            static_cast<bool>(child.getProperty("highPrecisionBezier",false)) });
                     else if (child.hasType("DiffSingerPitchOffsetPoint"))
                     {
                         const auto time=static_cast<double>(child.getProperty("timeSeconds",0.0));
@@ -8305,7 +11043,8 @@ ProjectData ProjectModel::fromValueTree(const juce::ValueTree& root,
                             static_cast<float>(child.getProperty("bezierX1", 0.33)),
                             static_cast<float>(child.getProperty("bezierY1", 0.0)),
                             static_cast<float>(child.getProperty("bezierX2", 0.67)),
-                            static_cast<float>(child.getProperty("bezierY2", 1.0)) });
+                            static_cast<float>(child.getProperty("bezierY2", 1.0)),false,
+                            static_cast<bool>(child.getProperty("highPrecisionBezier",false)) });
                     else if (child.hasType("AmplitudeEnvelopePoint"))
                         note.amplitudeEnvelope.push_back({
                             static_cast<double>(child.getProperty("timeSeconds", 0.0)),
@@ -8383,6 +11122,27 @@ ProjectData ProjectModel::fromValueTree(const juce::ValueTree& root,
                     {
                         return left.timeSeconds < right.timeSeconds;
                     });
+                // Old CVVC files materialised the default whole-note envelope
+                // without an interpolation flag. Those dB ramps survived the
+                // independent-phoneme defaults and multiplied the mixer again
+                // at the phrase head/tail. Migrate only the exact old 5/15 ms,
+                // 35 ms unity template; authored shapes and modern files keep
+                // their semantics. No OTO scan or file write is needed here.
+                if (!root.hasProperty("cvvcEnvelopeVersion") && track.chineseCvvc
+                    && trackUsesVoicebankSynthesis(track) && !trackIsDiffSinger(track)
+                    && note.utauTailFadeMode==0 && note.utauTailFade.head.mode==0
+                    && note.ustSourceSection.isEmpty() && note.amplitudeEnvelope.size()==4)
+                {
+                    const auto& p=note.amplitudeEnvelope;
+                    const auto near=[](double a,double b){return std::abs(a-b)<1.e-7;};
+                    const auto attack=p[1].timeSeconds-p[0].timeSeconds;
+                    if (std::all_of(p.begin(),p.end(),[](const auto& v){return !v.linearToNext&&!v.nativeSeamAnchor;})
+                        && near(p[0].gainDb,-60)&&near(p[1].gainDb,0)&&near(p[2].gainDb,0)&&near(p[3].gainDb,-60)
+                        && p[0].timeSeconds<=0 && (near(attack,.005)||near(attack,.015))
+                        && near(p[3].timeSeconds-p[2].timeSeconds,.035)
+                        && near(p[3].timeSeconds,note.durationSeconds) && p[1].timeSeconds<p[2].timeSeconds)
+                        note.amplitudeEnvelope.clear();
+                }
                 // Before the reference field existed, DS files saved only the
                 // current pitch. Keep that as an explicitly labelled load-time
                 // reference; never replace a genuine saved prediction or create
@@ -8471,6 +11231,15 @@ bool ProjectModel::load(const juce::File& file, juce::String& error)
         auto tree = projectio::validatedTree(bytes);
         if (tree.hasType("HachiShifterProject"))
         {
+            std::function<bool(const juce::ValueTree&)> validTrackTypes;
+            validTrackTypes=[&](const juce::ValueTree& node)
+            {
+                if(node.hasType("Track")&&node.hasProperty("trackType")&&!parseTrackType(node.getProperty("trackType").toString()))
+                {error="Unsupported explicit track type: "+node.getProperty("trackType").toString();return false;}
+                for(const auto child:node)if(!validTrackTypes(child))return false;
+                return true;
+            };
+            if(!validTrackTypes(tree))return false;
             auto loaded = fromValueTree(tree, file);
             juce::StringArray missing;
             for (const auto& track : loaded.tracks)
@@ -8487,3 +11256,5 @@ bool ProjectModel::load(const juce::File& file, juce::String& error)
     return false;
 }
 }
+
+#include "ProjectMaterialRegistrationModel.inc"

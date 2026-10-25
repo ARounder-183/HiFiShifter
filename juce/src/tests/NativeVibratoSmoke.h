@@ -40,8 +40,11 @@ inline void MainComponent::diagnosticNativeVibrato(const juce::File& folder,
     setSize(900, 760); resized();
     state->check("native_button_visible_without_selection_and_disabled", nativeVibratoButton.isVisible() && !nativeVibratoButton.isEnabled());
     state->check("minimum_width_has_room_for_vibrato_and_other_controls", nativeVibratoButton.getWidth() == 64
-        && getLocalBounds().contains(nativeVibratoButton.getBounds()) && getLocalBounds().contains(showViewMenuButton.getBounds())
-        && !nativeVibratoButton.getBounds().intersects(advancedEnvelopeButton.getBounds()));
+        && getLocalBounds().contains(nativeVibratoButton.getBounds())
+        && !nativeVibratoButton.getBounds().intersects(advancedEnvelopeButton.getBounds())
+        && !nativeVibratoButton.getBounds().intersects(nativeAudioOverlapButton.getBounds())
+        && !nativeVibratoButton.getBounds().intersects(autoCrossfadeButton.getBounds()));
+    state->check("editor_display_options_reachable_in_view_menu", diagnosticHasEditorViewItems());
     pianoRoll.setSelectedNoteIds({"note-0", "note-1"});
     state->check("bulk_native_selection_enables_button", nativeVibratoButton.isEnabled());
     nativeVibratoButton.onClick();
@@ -141,8 +144,13 @@ inline void MainComponent::diagnosticNativeVibrato(const juce::File& folder,
                 pianoRoll.clearNoteSelection(); state->check("clearing_selection_disables_button", !nativeVibratoButton.isEnabled());
                 project.setTrackPitchAlgorithm("native", PitchAlgorithm::nsfHifigan); project.dispatchPendingMessages(); refreshProjectControls(); resized();
                 state->check("nsf_mode_button_and_switches_fit_minimum_width", nativeVibratoButton.isVisible()
+                    && nativeVibratoButton.getWidth() == 64 && getLocalBounds().contains(nativeVibratoButton.getBounds())
                     && getLocalBounds().contains(nsfNoiseProtectionButton.getBounds()) && nsfNoiseProtectionButton.getWidth() == 156
-                    && !nativeVibratoButton.getBounds().intersects(showViewMenuButton.getBounds()));
+                    && !nativeVibratoButton.getBounds().intersects(advancedEnvelopeButton.getBounds())
+                    && !nativeVibratoButton.getBounds().intersects(nativeAudioOverlapButton.getBounds())
+                    && !nativeVibratoButton.getBounds().intersects(nsfPitchTransitionsButton.getBounds())
+                    && !nativeVibratoButton.getBounds().intersects(nsfNoiseProtectionButton.getBounds()));
+                state->check("nsf_display_options_reachable_in_view_menu", diagnosticHasEditorViewItems());
                 auto stream = folder.getChildFile("native-toolbar.png").createOutputStream(); juce::PNGImageFormat png;
                 if (stream) { stream->setPosition(0); stream->truncate(); }
                 const auto bounds = advancedEnvelopeButton.getBounds().getUnion(nsfNoiseProtectionButton.getBounds()).expanded(4);

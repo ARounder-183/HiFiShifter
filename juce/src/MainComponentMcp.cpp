@@ -429,6 +429,7 @@ void MainComponent::pollLiveMcp()
         }
         else j->result=ok(liveMcpStatus());
         j->state=(bool)j->result["isError"]?"failed":"completed";
+        if (j->kind=="render:export_wav") syncAudio(project.snapshot());
     }
 }
 

@@ -7,6 +7,8 @@
 #include "NativeNoteTiming.h"
 #include "DiffSingerParameterCurves.h"
 #include "PianoRollComponent.h"
+#include "backend/CvvcPhonemeCache.h"
+#include "backend/ChineseCvvcPhonemizer.h"
 #include "ClipParts.h"
 #include "backend/DiffSingerTiming.h"
 #include "DiffSingerPhonemeDisplay.h"
@@ -25,6 +27,33 @@ namespace hachi
 {
 namespace
 {
+// Keep the established dark rendering; light colours always come from Theme.
+// These select presentation roles only, never note data or editor behaviour.
+bool physicalOverlapSource(const ClipData& clip)
+{
+    return clip.sourceFile != juce::File{} && clip.sourceFile.hasFileExtension("wav;aif;aiff;flac;ogg;mp3")
+        && std::isfinite(clip.startSeconds) && std::isfinite(clip.audioStartSeconds)
+        && std::isfinite(clip.audioLength()) && clip.audioLength() > 1.e-9;
+}
+juce::Range<double> physicalOverlapWindow(const ClipData& clip)
+{ const auto start = clip.startSeconds + clip.audioStartSeconds; return {start,start+clip.audioLength()}; }
+
+bool lightRollPalette() { return Palette::background.getPerceivedBrightness() > 0.5f; }
+juce::Colour rollRole(juce::Colour dark, juce::Colour light)
+{
+    return lightRollPalette() ? light : dark;
+}
+juce::Colour rollText(juce::Colour dark, juce::Colour actualBackground, bool muted = false)
+{
+    return lightRollPalette() ? Palette::contrastingText(actualBackground, muted) : dark;
+}
+juce::Colour rollInk(juce::Colour ink, juce::Colour actualBackground)
+{
+    if (!lightRollPalette() || Palette::contrastRatio(ink, actualBackground) >= 3.0) return ink;
+    return Palette::contrastRatio(Palette::heading, actualBackground) >= 3.0
+        ? Palette::heading : Palette::contrastingText(actualBackground);
+}
+
 // Two pitch points only have to stay in order.  A millisecond is finer than
 // any frame the engine resamples at, so this never stands between the user and
 // the shape they are drawing -- including a deliberate near-vertical jump.
@@ -86,16 +115,15 @@ public:
     {
         chooser.setEditableText(true);
         chooser.setTextWhenNothingSelected(
-            juce::String::fromUTF8("选择预设，或在此输入名称后保存"));
+            I18n::uiText("选择预设，或在此输入名称后保存"));
         chooser.onChange = [this] { applyChosen(); };
         addAndMakeVisible(chooser);
-        keep.setButtonText(juce::String::fromUTF8("存为预设"));
-        keep.setTooltip(juce::String::fromUTF8(
-            "把上面的数值存成预设；名称取自左边的输入框"));
+        keep.setButtonText(I18n::uiText("存为预设"));
+        keep.setTooltip(I18n::uiText("把上面的数值存成预设；名称取自左边的输入框"));
         keep.onClick = [this] { keepCurrent(); };
         addAndMakeVisible(keep);
-        remove.setButtonText(juce::String::fromUTF8("删除"));
-        remove.setTooltip(juce::String::fromUTF8("删除选中的自定义预设"));
+        remove.setButtonText(I18n::uiText("删除"));
+        remove.setTooltip(I18n::uiText("删除选中的自定义预设"));
         remove.onClick = [this] { removeChosen(); };
         addAndMakeVisible(remove);
         rebuild();
@@ -344,6 +372,7 @@ PianoRollComponent::PianoRollComponent(ProjectModel& modelToUse,
     consonantVoicing->addChangeListener(this);
     model.addChangeListener(this);
     setWantsKeyboardFocus(true);
+    juce::Desktop::getInstance().addGlobalMouseListener(&pointSelectionMouseListener);
     addChildComponent(inlineAliasEditor);
     inlineAliasEditor.setMultiLine(false);
     inlineAliasEditor.setReturnKeyStartsNewLine(false);
@@ -358,12 +387,20 @@ PianoRollComponent::PianoRollComponent(ProjectModel& modelToUse,
     inlineAliasEditor.onTextChange = [this] { repaint(); };
     inlineAliasEditor.onReturnKey = [this] { finishInlineAliasEdit(true); };
     inlineAliasEditor.onEscapeKey = [this] { finishInlineAliasEdit(false); };
-    inlineAliasEditor.onFocusLost = [this] { finishInlineAliasEdit(true); };
+    inlineAliasEditor.onFocusLost = [this] { if(!inlineAliasSuspended) finishInlineAliasEdit(true); };
+    inlineAliasEditor.requestSource = [this]
+    {
+        if(inlineAliasNoteId.isEmpty()||!onRequestMaterialSourceInput)return;
+        const auto id=inlineAliasNoteId,text=inlineAliasEditor.getText();const auto callback=onRequestMaterialSourceInput;
+        callback(id,text); // Host captures/suspends before stealing editor focus.
+    };
     rebuildLayout();
 }
 
 PianoRollComponent::~PianoRollComponent()
 {
+    juce::Desktop::getInstance().removeGlobalMouseListener(&pointSelectionMouseListener);
+    cvvcLayoutPool.removeAllJobs(true,5000);
     consonantVoicing->removeChangeListener(this);
     consonantVoicing.reset();
     for (auto& [_, thumbnail] : thumbnails)
@@ -411,6 +448,11 @@ void PianoRollComponent::setRowHeight(float value)
 
 void PianoRollComponent::setSourceEditMode(bool enabled)
 {
+    if (sourceEditMode != enabled)
+    {
+        closeNativeOverlapSelector();
+        trackPitchStrokeActive = false; trackPitchStrokeTrack.clear(); cancelPointDrag(); clearPointSelection();
+    }
     if (enabled) { setDiffSingerPitchRestoreMode(false); setDiffSingerPitchOffsetMode(false); }
     sourceEditMode = enabled;
     if (sourceEditMode && focusedClip.isEmpty())
@@ -426,10 +468,32 @@ void PianoRollComponent::setSourceEditMode(bool enabled)
     repaint();
 }
 
+void PianoRollComponent::cancelPendingEditingForTrackChange()
+{
+    // Track/interface activation is view state: discard, never accept, any
+    // editor that would otherwise commit when its old clip loses focus.
+    finishInlineAliasEdit(false);
+    closeNativeOverlapSelector();
+    cancelContinuousFlag();cancelDiffSingerPitchOffsetGesture();
+    pointGroupGesture.reset();trackPitchStrokeActive=false;trackPitchStrokeTrack.clear();
+    cancelPointDrag();clearPointSelection();
+    cvvcBoundaryDrag.reset();pendingCvvcBoundary.reset();cvvcLaneDrag.reset();pendingCvvcHead.clear();
+    drawClipId.clear();drawLengthSeconds=drawAvailableSeconds=0;
+    graphDragId.clear();graphDragOriginal.clear();graphDragIndex=-1;
+    noteDragPassedThreshold=false;pointPitchHasMoved=false;envelopePointHasMoved=false;
+    draggedVibratoHandle=VibratoHandle::none;nativeTrimDrag=false;
+    marqueeShowsContextMenu=false;marqueeScrollStep=0;stopTimer();
+    selectedNote.clear();selectedNotes.clear();hoverSeconds.reset();
+    previewMoveDeltaSeconds=0;draggedSharedKey=0;
+    repaint();
+}
+
 void PianoRollComponent::setFocusedClip(const juce::String& clipId)
 {
     if (focusedClip != clipId)
     {
+        closeNativeOverlapSelector();
+        clearPointSelection();
         cancelContinuousFlag();
         cancelDiffSingerPitchOffsetGesture();
         finishInlineAliasEdit(true);
@@ -451,6 +515,7 @@ void PianoRollComponent::setFocusedClip(const juce::String& clipId)
 
 void PianoRollComponent::setFocusedTrack(const juce::String& trackId)
 {
+    if (focusedTrack != trackId) { closeNativeOverlapSelector(); clearPointSelection(); }
     if (focusedTrack != trackId) { cancelContinuousFlag(); setDiffSingerPitchRestoreMode(false); setDiffSingerPitchOffsetMode(false); }
     if (focusedTrack != trackId && focusedClip.isNotEmpty())
     {
@@ -466,9 +531,40 @@ void PianoRollComponent::setFocusedTrack(const juce::String& trackId)
     repaint();
 }
 
+const TrackData* PianoRollComponent::currentPitchTrack() const
+{
+    for (const auto& track : snapshot.tracks) if (track.id == focusedTrack) return &track;
+    for (const auto& track : snapshot.tracks) for (const auto& clip : track.clips)
+        if (clip.id == focusedClip) return &track;
+    return nullptr;
+}
+
+void PianoRollComponent::setPitchScope(PitchScope scope)
+{
+    if (pitchScopeMode == scope) return;
+    pitchScopeMode = scope;
+    closeNativeOverlapSelector();
+    trackPitchStrokeActive = false; trackPitchStrokeTrack.clear();
+    cancelPointDrag(); clearPointSelection();
+    // Scope is view state. Prune hidden selection silently: notifying the host
+    // would change UTAU render selection merely because a View item was toggled.
+    std::unordered_set<std::string> visible;
+    for (const auto& track : snapshot.tracks) for (const auto& clip : track.clips)
+        if (clipIsVisible(track, clip)) for (const auto& note : clip.notes) visible.insert(note.id.toStdString());
+    std::erase_if(selectedNotes, [&](const auto& id) { return !visible.contains(id); });
+    if (selectedNote.isNotEmpty() && !visible.contains(selectedNote.toStdString()))
+        selectedNote = selectedNotes.empty() ? juce::String{} : juce::String::fromUTF8(selectedNotes.begin()->c_str());
+    rebuildNoteHits(); repaint();
+}
+
 bool PianoRollComponent::clipIsVisible(const TrackData& track, const ClipData& clip) const
 {
     if (sourceEditMode) return clip.id == focusedClip;
+    if (pitchScopeMode == PitchScope::currentTrack)
+    {
+        const auto* current = currentPitchTrack();
+        return current != nullptr && current->id == track.id && track.compose && !track.accompaniment;
+    }
     return track.compose && (focusedTrack.isEmpty() || track.id == focusedTrack)
         && (trackShowsAllNativeRegions(track) || focusedClip.isEmpty() || clip.id == focusedClip
             || (clip.showNormalDisplay && !track.accompaniment && track.id == focusedTrack));
@@ -619,7 +715,7 @@ std::vector<OtoRegionGuide> PianoRollComponent::otoRegionGuidesFor(const juce::S
                     const auto end = i + 1 == count ? relativeStart + length
                         : relativeStart + length * (*fractions)[static_cast<size_t>(i)];
                     const auto label = track.utauMode == UtauMode::mou
-                        ? juce::String::fromUTF8("第") + juce::String(i + 1) + juce::String::fromUTF8("区")
+                        ? I18n::uiText("第") + juce::String(i + 1) + I18n::uiText("区")
                         : juce::String::fromUTF8(names[static_cast<size_t>(i)]);
                     result.push_back({ previous, end, label });
                     previous = end;
@@ -669,15 +765,12 @@ const std::vector<PianoRollComponent::EnvelopePreset>& PianoRollComponent::envel
     {
         return static_cast<float>(20.0 * std::log10(value / 100.0));
     };
-    const auto text = [](const char* utf8) { return juce::String::fromUTF8(utf8); };
-    // Onsets first, then endings.  标准 and 柔起 are exactly the shapes they
-    // have always been -- UTAU's 5 and 35, and the softer start every lyric
-    // is given -- both straight in dB.  The rest run straight in amplitude, the
-    // way UTAU and OpenUtau read an envelope, so each ramp is as long to the
-    // ear as its tooltip says.
+    const auto text = [](const char* utf8) { return I18n::uiText(utf8); };
+    // Onsets first, then endings. Standard shares the new-phoneme linear
+    // amplitude trapezoid. Soft onset preserves its existing dB interpolation.
     static const std::vector<EnvelopePreset> presets {
         { text("标准"), text("起音 5 ms，释放 35 ms（UTAU 默认）"),
-          { { From::soundStart, 0.005, 0.0f }, { From::soundEnd, 0.035, 0.0f } } },
+          { { From::soundStart, 0.005, 0.0f, true }, { From::soundEnd, 0.035, 0.0f, true } }, true },
         { text("柔起"), text("起音 15 ms，释放 35 ms"),
           { { From::soundStart, 0.015, 0.0f }, { From::soundEnd, 0.035, 0.0f } } },
         // A soft vowel onset, the way OpenUtau's attack works: the consonant
@@ -710,6 +803,13 @@ const std::vector<PianoRollComponent::EnvelopePreset>& PianoRollComponent::envel
 std::vector<AmplitudeEnvelopePoint> PianoRollComponent::envelopePresetPoints(
     const EnvelopePreset& preset, double first, double last)
 {
+    if(preset.name==envelopePresets().front().name)
+    {
+        std::vector<AmplitudeEnvelopePoint> points;
+        for(const auto& p:backend::standardCvvcEnvelope(last-first))
+            points.push_back({first+p.position*(last-first),p.value,p.linear});
+        return points;
+    }
     using From = EnvelopePresetPoint::From;
     std::vector<AmplitudeEnvelopePoint> points;
     points.reserve(preset.points.size() + 2);
@@ -739,12 +839,35 @@ std::vector<AmplitudeEnvelopePoint> PianoRollComponent::envelopePresetPoints(
 
 int PianoRollComponent::applyEnvelopePreset(const EnvelopePreset& preset)
 {
+    if (hasSelectedCvvcPhoneme())
+        for (const auto& piece : cvvcLanePieces(true))
+            if (piece.noteId == cvvcSelectedNote && piece.part == cvvcSelectedPart)
+            {
+                backend::CvvcEnvelopeCurve curve;
+                const auto length = piece.to - piece.from;
+                for (const auto& p : envelopePresetPoints(preset, 0, length))
+                    curve.push_back({p.timeSeconds / length, p.gainDb, p.linearToNext});
+                return model.setCvvcEnvelope(piece.noteId, piece.part, {}, std::move(curve), model.revisionNumber()) ? 1 : 0;
+            }
     const auto selected = selectedNoteIds();
     if (selected.empty()) return 0;
+    if(std::all_of(selected.begin(),selected.end(),[&](const auto& id){return usesCvvcEnvelope(id);}))
+    {
+        std::vector<ProjectModel::CvvcEnvelopeEdit> parts;
+        for(const auto& piece:cvvcLanePieces(true))
+            if(std::find(selected.begin(),selected.end(),piece.noteId)!=selected.end())
+            {
+                backend::CvvcEnvelopeCurve curve;
+                const auto length=piece.to-piece.from;
+                for(const auto& p:envelopePresetPoints(preset,0,length))curve.push_back({p.timeSeconds/length,p.gainDb,p.linearToNext});
+                parts.push_back({piece.noteId,piece.part,{},std::move(curve)});
+            }
+        return model.setCvvcEnvelopes(std::move(parts),model.revisionNumber())?static_cast<int>(selected.size()):0;
+    }
     std::vector<std::pair<juce::String, std::vector<AmplitudeEnvelopePoint>>> edits;
     for (const auto& track : snapshot.tracks)
     {
-        if (track.pitchAlgorithm != PitchAlgorithm::utau) continue;
+        if (track.accompaniment) continue;
         for (const auto& clip : track.clips)
             for (const auto& note : clip.notes)
             {
@@ -819,6 +942,7 @@ void PianoRollComponent::setShowEnvelope(bool enabled)
 void PianoRollComponent::setShowPitchLine(bool enabled)
 {
     if (showPitchLine == enabled) return;
+    clearPointSelection();
     if (!enabled) { setDiffSingerPitchRestoreMode(false); setDiffSingerPitchOffsetMode(false); }
     showPitchLine = enabled;
     repaint();
@@ -887,7 +1011,14 @@ void PianoRollComponent::setDiffSingerPitchRestoreMode(bool enabled)
 
 void PianoRollComponent::setTool(Tool nextTool)
 {
-    if (tool != nextTool) cancelContinuousFlag();
+    if (tool != nextTool) closeNativeOverlapSelector();
+    if (tool != nextTool && trackPitchStrokeActive)
+    {
+        trackPitchStrokeActive = false; trackPitchStrokeTrack.clear(); pitchStroke.clear(); dragMode = DragMode::none;
+    }
+    if (tool != nextTool) clearPointSelection();
+    if (tool != nextTool) { cancelContinuousFlag(); cvvcLaneDrag.reset();
+        if(cvvcBoundaryDrag){cvvcBoundaryDrag.reset();refreshFromModel();} }
     if (nextTool != Tool::points) { setDiffSingerPitchRestoreMode(false); setDiffSingerPitchOffsetMode(false); }
     tool = nextTool;
     setMouseCursor(tool == Tool::draw || tool == Tool::line || tool == Tool::points
@@ -895,6 +1026,123 @@ void PianoRollComponent::setTool(Tool nextTool)
                        ? juce::MouseCursor::CrosshairCursor
                        : juce::MouseCursor::NormalCursor);
     repaint();
+}
+
+void PianoRollComponent::setDrawAction(DrawAction action)
+{
+    if (drawActionMode == action) return;
+    drawActionMode = action;
+    trackPitchStrokeActive = false; trackPitchStrokeTrack.clear();
+    // A tool choice cancels only an in-flight drawing preview. It must not
+    // publish an unfinished curve/note or create a project undo transaction.
+    if (dragMode == DragMode::drawPitch || dragMode == DragMode::drawNewNote)
+    {
+        dragMode = DragMode::none;
+        draggedNote.clear(); pitchStroke.clear();
+        drawClipId.clear(); drawLengthSeconds = 0.0;
+    }
+    repaint();
+}
+
+std::pair<double,double> PianoRollComponent::trackPitchEditDomain(const NoteData& note)
+{
+    double first=0,last=note.durationSeconds;
+    // Authored sparse controls may reach outside nominal notes. Derived source
+    // support is not an authored extension and never grows the editable domain.
+    for(const auto& point:note.pitchControlPoints)
+    {
+        if(!std::isfinite(point.timeSeconds))
+            return {std::numeric_limits<double>::quiet_NaN(),std::numeric_limits<double>::quiet_NaN()};
+        first=std::min(first,point.timeSeconds);last=std::max(last,point.timeSeconds);
+    }
+    return {first,last};
+}
+
+bool PianoRollComponent::beginTrackPitchStroke(const juce::MouseEvent& event)
+{
+    if (sourceEditMode || pitchScopeMode != PitchScope::currentTrack || event.position.x < 58) return false;
+    refreshFromModel();
+    const auto* track = currentPitchTrack();
+    if (!track || !track->compose || track->accompaniment) return false;
+    clearPointSelection();
+    draggedNote.clear(); draggedPitchAnchor = -1;
+    trackPitchStrokeActive = true; trackPitchStrokeTrack = track->id;
+    trackPitchStrokeRevision = model.revisionNumber(); pitchEditAbsoluteStart = 0;
+    const auto absolute = std::max(0.0, static_cast<double>(event.position.x - 58) / pixelsPerSecond);
+    pitchStroke = {{absolute,juce::jlimit(0.f,127.f,pitchMidiFromY(event.position.y)),PitchCurveShape::linear}};
+    dragMode = tool == Tool::line ? DragMode::linePitch : DragMode::drawPitch;
+    repaint(); return true;
+}
+
+bool PianoRollComponent::planTrackPitchStroke(std::vector<ProjectModel::PointCurveEdit>& edits,juce::String& error)
+{
+    edits.clear();error.clear();if(!trackPitchStrokeActive||pitchStroke.size()<2)return false;
+    auto stroke=pitchStroke;
+    std::stable_sort(stroke.begin(),stroke.end(),[](const auto& a,const auto& b){return a.timeSeconds<b.timeSeconds;});
+    std::vector<PitchCurveEditPoint> ordered;
+    for(const auto& point:stroke)
+    {if(!ordered.empty()&&std::abs(ordered.back().timeSeconds-point.timeSeconds)<1.e-9)ordered.back()=point;else ordered.push_back(point);}
+    if(ordered.size()<2||ordered.back().timeSeconds-ordered.front().timeSeconds<=1.e-9)return false;
+    const auto track=std::find_if(snapshot.tracks.begin(),snapshot.tracks.end(),[&](const auto& t){return t.id==trackPitchStrokeTrack;});
+    if(track==snapshot.tracks.end()||!track->compose||track->accompaniment)return false;
+    const auto& graphs=connectionCurvesFor(*track,false);
+    for(const auto& clip:track->clips)for(const auto& note:clip.notes)
+    {
+        if(note.nativeUnpitched)continue;
+        const auto start=clip.startSeconds+note.startSeconds;const auto domain=trackPitchEditDomain(note);
+        if(!std::isfinite(domain.first)||!std::isfinite(domain.second)){error="Invalid authored pitch domain";return false;}
+        const auto first=std::max(start+domain.first,ordered.front().timeSeconds);
+        const auto last=std::min(start+domain.second,ordered.back().timeSeconds);if(last-first<=1.e-9)continue;
+        std::vector<juce::Range<double>> pieces{{first,last}};
+        for(const auto& graph:graphs)if(graph.active)
+        {
+            std::vector<juce::Range<double>> outside;
+            for(const auto& piece:pieces)
+            {
+                if(graph.toSeconds<=piece.getStart()||graph.fromSeconds>=piece.getEnd()){outside.push_back(piece);continue;}
+                if(graph.fromSeconds>piece.getStart()+1.e-9)outside.emplace_back(piece.getStart(),graph.fromSeconds);
+                if(graph.toSeconds<piece.getEnd()-1.e-9)outside.emplace_back(graph.toSeconds,piece.getEnd());
+            }
+            pieces=std::move(outside);
+        }
+        auto staged=note;std::optional<ProjectModel::PointCurveEdit> sparseFinal;bool authoredSupportInStroke=false;
+        for(const auto& piece:pieces)
+        {
+            const auto from=piece.getStart(),to=piece.getEnd();if(to-from<=1.e-9)continue;
+            // Graph-window boundaries preserve hidden base controls. Only a
+            // genuine outside-domain clip inside the overall stroke releases a
+            // note-edge guard; graph endpoints are owned/reanchored by Model.
+            const bool preserveLeft=!(std::abs(from-(start+domain.first))<1.e-9&&from>ordered.front().timeSeconds+1.e-9);
+            const bool preserveRight=!(std::abs(to-(start+domain.second))<1.e-9&&to<ordered.back().timeSeconds-1.e-9);
+            std::vector<PitchCurveEditPoint> local;
+            if(!sliceNativePitchCurve(ordered,from,to,local)){error="Pitch stroke cannot be represented exactly";return false;}
+            for(auto& p:local){p.timeSeconds+=preserveLeft?from-start:domain.first;p.targetMidi=juce::jlimit(0.f,127.f,p.targetMidi-displayedPitchOffset(note,p.timeSeconds));}
+            if(!preserveLeft)local.front().timeSeconds=domain.first;if(!preserveRight)local.back().timeSeconds=domain.second;
+            ProjectModel::PointCurveEdit edit;edit.kind=ProjectModel::PointCurveEdit::pitch;edit.noteId=note.id;
+            // Intent comes from the actual painted interval, never from old
+            // controls retained outside it by the exact composer.
+            authoredSupportInStroke|=local.front().timeSeconds < -1.e-9 || local.back().timeSeconds > note.durationSeconds+1.e-9;
+            edit.authorPitchSupport=authoredSupportInStroke;
+            if(!composeNativePitchStroke(staged,local,edit.pitchPoints,edit.storePitchControlPoints,error,preserveLeft,preserveRight))return false;
+            if(edit.storePitchControlPoints){staged.pitchControlPoints=edit.pitchPoints;sparseFinal=std::move(edit);}
+            else edits.push_back(std::move(edit)); // disjoint dense windows retain all other facts
+        }
+        if(sparseFinal)edits.push_back(std::move(*sparseFinal));
+    }
+    for(const auto& graph:graphs)if(graph.active&&ordered.back().timeSeconds>graph.fromSeconds&&ordered.front().timeSeconds<graph.toSeconds)
+    {
+        ProjectModel::PointCurveEdit edit;edit.kind=ProjectModel::PointCurveEdit::connectionPitchStroke;
+        edit.connectionId=graph.connectionId;edit.pitchPoints=ordered;edits.push_back(std::move(edit));
+    }
+    return !edits.empty();
+}
+bool PianoRollComponent::commitTrackPitchStroke()
+{
+    std::vector<ProjectModel::PointCurveEdit> edits;juce::String error;
+    if(!planTrackPitchStroke(edits,error)){if(onEditRejected&&!error.isEmpty())onEditRejected(error);return false;}
+    const bool committed=model.setPointCurves(std::move(edits),trackPitchStrokeRevision,&error);
+    if(!committed&&onEditRejected&&!error.isEmpty())onEditRejected(error);
+    if(committed)refreshFromModel();return committed;
 }
 
 const NoteData* PianoRollComponent::findNote(const juce::String& noteId, bool* isUtau) const
@@ -1043,6 +1291,14 @@ std::vector<AmplitudeEnvelopePoint> PianoRollComponent::diagnosticDrawnEnvelope(
 std::vector<AmplitudeEnvelopePoint> PianoRollComponent::amplitudeEnvelopeFor(
     const NoteData& note, double absoluteStart) const
 {
+    if(pointGroupGesture)for(const auto& d:pointGroupGesture->curves)
+        if(d.identity.kind==PointSelection::amplitude)
+        {
+            if(d.identity.noteId==note.id)return d.edit.amplitudePoints;
+            const auto* a=nativeEnvelopeMember(d.identity.noteId);const auto* b=nativeEnvelopeMember(note.id);
+            if(a&&b&&a->points==b->points)
+            {auto points=d.edit.amplitudePoints;for(auto& p:points)p.timeSeconds+=a->noteStart-b->noteStart;return points;}
+        }
     // Everything that reads a note's envelope comes through here, so the base
     // value is applied in this one place: the lane's line, its handles, the
     // waveform behind it and the note's own row all show what will be heard.
@@ -1494,6 +1750,7 @@ void PianoRollComponent::cancelContinuousFlag()
 void PianoRollComponent::setFlagEditMode(FlagEditMode mode)
 {
     if (flagMode == mode) return;
+    clearPointSelection();
     cancelContinuousFlag();
     if (dragMode == DragMode::flagPoint)
     {
@@ -1575,6 +1832,7 @@ void PianoRollComponent::setFlagLaneFlag(const juce::String& flag)
     const auto& kinds = diffSingerFlagContext ? diffSingerFlagCurveKinds() : hifisamplerFlagContext ? hifisamplerFlagCurveKinds() : flagCurveKinds();
     for (const auto& kind : kinds) known = known || flag == kind.flag;
     if (!known) return;
+    if (laneFlag != flag) clearPointSelection();
     laneFlag = flag;
     if (diffSingerFlagContext)
     {
@@ -1696,7 +1954,7 @@ bool PianoRollComponent::flagResetAvailable(
 {
     for (const auto& id : noteIds)
         if (const auto* note = findNote(id); note != nullptr
-            && flagCurveActiveFor(id) && !note->utauFlagCurves.empty())
+            && flagCurveActiveFor(id) && (!note->utauFlagCurves.empty() || backend::hasCvvcFlagCurve(note->cvvcEnvelopes)))
             return true;
     return false;
 }
@@ -1743,7 +2001,7 @@ bool PianoRollComponent::flagResetAvailableForNote(const juce::String& noteId) c
 {
     const auto* note = findNote(noteId);
     return note != nullptr && flagCurveActiveFor(noteId)
-        && !flagCurvePointsFor(*note, laneFlag).empty();
+        && (!flagCurvePointsFor(*note, laneFlag).empty() || backend::hasCvvcFlagCurve(note->cvvcEnvelopes,laneFlag));
 }
 
 std::pair<double, double> PianoRollComponent::flagLaneDrawnSpan(
@@ -1782,6 +2040,8 @@ juce::Point<float> PianoRollComponent::diagnosticFlagHandleCentre(
 std::vector<FlagCurvePoint> PianoRollComponent::flagLaneCurveFor(
     const NoteData& note) const
 {
+    if(pointGroupGesture)for(const auto& d:pointGroupGesture->curves)
+        if(d.identity.kind==PointSelection::flag&&d.identity.noteId==note.id&&d.identity.key==laneFlag)return d.edit.flagPoints;
     if (laneFlag.startsWith("DS:ABS:")) return diffSingerParameterHandles(note,laneFlag);
     if (!note.utauFlagCurveEnabled) return {};
     auto points = flagCurvePointsFor(note, laneFlag);
@@ -1877,13 +2137,13 @@ void PianoRollComponent::showFlagLaneSwitchMenu()
     {
         if (laneFlag.startsWith("DS:ABS:"))
         {
-            menu.addSectionHeader(juce::String::fromUTF8("FLAG 实参（直接值）"));
+            menu.addSectionHeader(I18n::uiText("FLAG 实参（直接值）"));
             for (const auto& kind : diffSingerParameterKinds())
                 add(kind.flag, juce::String::fromUTF8(kind.label), flagLaneParameterSupported(kind.flag));
         }
         else
         {
-            menu.addSectionHeader(juce::String::fromUTF8("FLAG 偏移 / 其他控制"));
+            menu.addSectionHeader(I18n::uiText("FLAG 偏移 / 其他控制"));
             for (const auto& item : *diffSingerFlagCapabilities.getArray())
             {
                 const auto key = item["key"].toString();
@@ -1901,15 +2161,15 @@ void PianoRollComponent::showFlagLaneSwitchMenu()
             add(kind.flag, (juce::String(kind.flag).startsWith("HIFI:") ? juce::String(kind.flag).substring(5) : juce::String(kind.flag)) + juce::String::fromUTF8(" · ")
                 + juce::String::fromUTF8(kind.label), flagLaneParameterSupported(kind.flag));
         if (diffSingerFlagContext)
-            menu.addSectionHeader(juce::String::fromUTF8("正在读取音源能力；音源库设置可重新读取"));
+            menu.addSectionHeader(I18n::uiText("正在读取音源能力；音源库设置可重新读取"));
     }
     const auto unsupported = unsupportedDiffSingerFlagCurves();
     if (!unsupported.isEmpty())
     {
         menu.addSeparator();
-        menu.addSectionHeader(juce::String::fromUTF8("当前显示轨道：清除不支持的已有曲线（可撤销）"));
+        menu.addSectionHeader(I18n::uiText("当前显示轨道：清除不支持的已有曲线（可撤销）"));
         for (int index = 0; index < unsupported.size(); ++index)
-            menu.addItem(10000 + index, juce::String::fromUTF8("清除 ") + unsupported[index].substring(3));
+            menu.addItem(10000 + index, I18n::uiText("清除 ") + unsupported[index].substring(3));
     }
     juce::Component::SafePointer<PianoRollComponent> safe(this);
     const auto where = flagLaneSwitchBounds().toNearestInt() + getScreenPosition();
@@ -1945,38 +2205,38 @@ void PianoRollComponent::showFlagPointMenu(const juce::String& noteId, int index
         static_cast<int>(flagLaneCurveFor(*note).size()),
         value - flagCurveKindFor(laneFlag).defaultValue);
     juce::PopupMenu menu;
-    menu.addItem(1, juce::String::fromUTF8("删除标点"), state.canDelete, false);
-    menu.addItem(2, laneFlag.startsWith("DS:ABS:") ? juce::String::fromUTF8("恢复此点的原始预测")
-        : juce::String::fromUTF8("重置为默认值（")+juce::String(flagCurveKindFor(laneFlag).defaultValue,0)+juce::String::fromUTF8("）"),
+    menu.addItem(1, I18n::uiText("删除标点"), state.canDelete, false);
+    menu.addItem(2, laneFlag.startsWith("DS:ABS:") ? I18n::uiText("恢复此点的原始预测")
+        : I18n::uiText("重置为默认值（")+juce::String(flagCurveKindFor(laneFlag).defaultValue,0)+juce::String::fromUTF8("）"),
         laneFlag.startsWith("DS:ABS:") || state.canReset, false);
-    menu.addItem(3, juce::String::fromUTF8("输入 flag 值…"), true, false);
+    menu.addItem(3, I18n::uiText("输入 flag 值…"), true, false);
     menu.addSeparator();
     // Only the flag on show, and only this note: the lane's other sixteen
     // curves and every other note are left as they are.
-    menu.addItem(4, juce::String::fromUTF8("重置该音的 ") + laneFlag,
+    menu.addItem(4, I18n::uiText("重置该音的 ") + laneFlag,
                  flagResetAvailableForNote(noteId), false);
     // The shape of the segment arriving at this handle, so the first one has
     // no segment to shape.  Same names and same maths as the pitch line.
     menu.addSeparator();
     if (index == 0)
-        menu.addItem(20, juce::String::fromUTF8("线条形状（首个标点没有前段）"),
+        menu.addItem(20, I18n::uiText("线条形状（首个标点没有前段）"),
                      false, false);
     else
     {
         const auto shape = flagLaneCurveFor(*note)[static_cast<std::size_t>(index)].shape;
         juce::PopupMenu shapes;
-        shapes.addItem(21, juce::String::fromUTF8("直线"), true,
+        shapes.addItem(21, I18n::uiText("直线"), true,
                        shape == PitchCurveShape::linear);
-        shapes.addItem(22, juce::String::fromUTF8("平滑"), true,
+        shapes.addItem(22, I18n::uiText("平滑"), true,
                        shape == PitchCurveShape::smooth);
-        shapes.addItem(23, juce::String::fromUTF8("缓入"), true,
+        shapes.addItem(23, I18n::uiText("缓入"), true,
                        shape == PitchCurveShape::easeIn);
-        shapes.addItem(24, juce::String::fromUTF8("缓出"), true,
+        shapes.addItem(24, I18n::uiText("缓出"), true,
                        shape == PitchCurveShape::easeOut);
         shapes.addSeparator();
-        shapes.addItem(25, juce::String::fromUTF8("自定义贝塞尔…"), true,
+        shapes.addItem(25, I18n::uiText("自定义贝塞尔…"), true,
                        shape == PitchCurveShape::customBezier);
-        menu.addSubMenu(juce::String::fromUTF8("线条形状"), shapes);
+        menu.addSubMenu(I18n::uiText("线条形状"), shapes);
     }
     juce::Component::SafePointer<PianoRollComponent> safe(this);
     // At the handle, like every other right-click menu here.  Aimed at the
@@ -1996,13 +2256,17 @@ void PianoRollComponent::showFlagPointMenu(const juce::String& noteId, int index
                 return;
             }
             if (chosen == 25) { safe->showFlagPointBezierDialog(noteId, index); return; }
+            if (chosen == 1)
+            {
+                safe->deleteEnvelopePoint({noteId,index,safe->model.revisionNumber(),PointSelection::flag,0,safe->laneFlag});
+                return;
+            }
             const auto* current = safe->findNote(noteId);
             if (current == nullptr) return;
             auto points = safe->flagLaneCurveFor(*current);
             if (index >= static_cast<int>(points.size())) return;
             auto& point = points[static_cast<std::size_t>(index)];
-            if (chosen == 1) points.erase(points.begin() + index);
-            else if (chosen == 2) point.value = safe->laneFlag.startsWith("DS:ABS:")
+            if (chosen == 2) point.value = safe->laneFlag.startsWith("DS:ABS:")
                 ? flagCurveValueAt(flagCurvePointsFor(*current,"DS:REF:"+safe->laneFlag.substring(7)),point.timeSeconds)
                 : flagCurveKindFor(safe->laneFlag).defaultValue;
             else if (chosen >= 21 && chosen <= 24)
@@ -2044,19 +2308,18 @@ juce::String PianoRollComponent::flagPointValueBlurb(const juce::String& noteId,
     const auto& kind = flagCurveKindFor(laneFlag);
     auto blurb = juce::String(kind.flag) + juce::String::fromUTF8("：")
         + juce::String::fromUTF8(kind.label)
-        + juce::String::fromUTF8("，范围 ") + juce::String(kind.minimum, 0)
+        + I18n::uiText("，范围 ") + juce::String(kind.minimum, 0)
         + juce::String::fromUTF8(" … ") + juce::String(kind.maximum, 0)
         + juce::String::fromUTF8("。\n");
     if (laneFlag == "g")
-        blurb += juce::String::fromUTF8(
-            "正值下移共振峰（听感偏成熟/厚），负值上移（偏年轻/薄）。\n");
+        blurb += I18n::uiText("正值下移共振峰（听感偏成熟/厚），负值上移（偏年轻/薄）。\n");
     // Which handle this is.  Curves overlap wherever notes do, so a number on
     // its own does not say which of them was picked up.
-    return blurb + juce::String::fromUTF8("当前：第 ") + juce::String(index + 1)
-        + juce::String::fromUTF8(" 个标点（共 ") + juce::String(shown.size())
-        + juce::String::fromUTF8(" 个），位于音符内 ")
+    return blurb + I18n::uiText("当前：第 ") + juce::String(index + 1)
+        + I18n::uiText(" 个标点（共 ") + juce::String(shown.size())
+        + I18n::uiText(" 个），位于音符内 ")
         + juce::String(point.timeSeconds, 3)
-        + juce::String::fromUTF8(" 秒，现值 ") + juce::String(point.value, 3)
+        + I18n::uiText(" 秒，现值 ") + juce::String(point.value, 3)
         + juce::String::fromUTF8("。");
 }
 
@@ -2068,18 +2331,18 @@ void PianoRollComponent::showFlagPointValueDialog(const juce::String& noteId, in
     if (index >= static_cast<int>(shown.size())) return;
     const auto& point = shown[static_cast<std::size_t>(index)];
     auto* dialog = new juce::AlertWindow(
-        juce::String::fromUTF8("标点数值"),
+        I18n::uiText("标点数值"),
         flagPointValueBlurb(noteId, index),
         juce::MessageBoxIconType::NoIcon);
     dialog->addTextEditor("value", juce::String(point.value, 3),
-                          laneFlag + juce::String::fromUTF8(" 值："));
+                          laneFlag + I18n::uiText(" 值："));
     if (auto* editor = dialog->getTextEditor("value"))
     {
         editor->setSelectAllWhenFocused(true);
         editor->setInputRestrictions(0, "-0123456789.");
     }
-    dialog->addButton(juce::String::fromUTF8("应用"), 1);
-    dialog->addButton(juce::String::fromUTF8("取消"), 0,
+    dialog->addButton(I18n::uiText("应用"), 1);
+    dialog->addButton(I18n::uiText("取消"), 0,
                       juce::KeyPress(juce::KeyPress::escapeKey));
     juce::Component::SafePointer<PianoRollComponent> safe(this);
     dialog->enterModalState(true,
@@ -2115,7 +2378,7 @@ void PianoRollComponent::showFlagPointBezierDialog(const juce::String& noteId,
         return;
     const auto point = flagLaneCurveFor(*note)[static_cast<std::size_t>(index)];
     auto* dialog = new juce::AlertWindow(strings.text("pitchCurve.bezierTitle"),
-        juce::String::fromUTF8("归一化控制点。X 是段内的时间位置（0–1），"
+        I18n::uiText("归一化控制点。X 是段内的时间位置（0–1），"
                                 "Y 是这一段走完的比例；Y 超出 0–1 会先冲过头再回来。"),
         juce::MessageBoxIconType::NoIcon);
     const std::array<std::pair<const char*, float>, 4> fields {{
@@ -2133,8 +2396,8 @@ void PianoRollComponent::showFlagPointBezierDialog(const juce::String& noteId,
             editor->setInputRestrictions(0, "-0123456789.");
         }
     }
-    dialog->addButton(juce::String::fromUTF8("应用"), 1);
-    dialog->addButton(juce::String::fromUTF8("取消"), 0,
+    dialog->addButton(I18n::uiText("应用"), 1);
+    dialog->addButton(I18n::uiText("取消"), 0,
                       juce::KeyPress(juce::KeyPress::escapeKey));
     juce::Component::SafePointer<PianoRollComponent> safe(this);
     dialog->enterModalState(true,
@@ -2214,7 +2477,8 @@ void PianoRollComponent::drawFlagLane(juce::Graphics& g) const
     const auto pairedFlag = diffSingerFlagContext ? pairedDiffSingerFlag(laneFlag) : juce::String{};
     const auto hasPair = pairedFlag.isNotEmpty() && flagLaneParameterSupported(pairedFlag);
     const auto actualLayer = laneFlag.startsWith("DS:ABS:");
-    const auto referenceColour = actualLayer ? juce::Colour(0xffbd9ae8) : juce::Colour(0xff82b9df);
+    const auto cvvcContext = std::any_of(noteHits.begin(),noteHits.end(),[this](const auto& hit){return usesCvvcEnvelope(hit.id);});
+    const auto referenceColour = actualLayer ? rollRole(juce::Colour(0xffbd9ae8), Palette::heading) : rollRole(juce::Colour(0xff82b9df), Palette::textMuted);
     const auto& kind = flagCurveKindFor(laneFlag);
     const auto [windowLow, windowHigh] = flagLaneWindow();
     // The heading reports the slice on show, not the flag's whole range, so
@@ -2227,15 +2491,16 @@ void PianoRollComponent::drawFlagLane(juce::Graphics& g) const
     g.drawText(juce::String::fromUTF8(laneFlag.startsWith("DS:ABS:") ? "DS 实参 · " : (diffSingerFlagContext ? "DF FLAG 偏移/控制 · " : hifisamplerFlagContext ? "HiFisampler · " : "flag 包络 · "))
                    + (laneFlag.startsWith("DS:ABS:") ? laneFlag.substring(7) : (diffSingerFlagContext ? laneFlag.substring(3) : hifisamplerFlagContext ? laneFlag.substring(5) : laneFlag))
                    + juce::String::fromUTF8("（") + juce::String::fromUTF8(kind.label)
-                   + juce::String::fromUTF8("）  纵向 ")
+                   + I18n::uiText("）  纵向 ")
                    + juce::String(windowLow, 0) + " … " + juce::String(windowHigh, 0)
                    + zoomText
                    + (hasPair ? juce::String::fromUTF8(actualLayer
                        ? "  虚线：紫=偏移(右2) 蓝=原预测 绿=最终"
                        : "  虚线：蓝=实参(右2) 绿=最终(右2)") : juce::String())
                    + juce::String::fromUTF8(flagMode == FlagEditMode::continuous
-                       ? "   · 跨音符连续绘制" : "   · 逐音符控制点")
-                   + (kind.onsetOnly ? juce::String::fromUTF8("   仅声母区")
+                       ? (cvvcContext ? "   · 发音片段独立绘制" : "   · 跨音符连续绘制")
+                       : (cvvcContext ? "   · 发音片段控制点" : "   · 逐音符控制点"))
+                   + (kind.onsetOnly ? I18n::uiText("   仅声母区")
                                      : juce::String()),
         lane.toNearestInt().removeFromTop(28).reduced(8, 0).withTrimmedRight(158 + flagLaneExtraControlWidth()),
         juce::Justification::centredLeft, false);
@@ -2269,16 +2534,17 @@ void PianoRollComponent::drawFlagLane(juce::Graphics& g) const
     if (diffSingerFlagContext)
     {
         const auto drawButton = [&](juce::Rectangle<float> bounds, const juce::String& label, bool active, bool enabled) {
-            g.setColour(active ? juce::Colour(0xff437d81) : Palette::panel.brighter(0.08f));
+            g.setColour(active ? rollRole(juce::Colour(0xff437d81), Palette::selection) : Palette::panel.brighter(0.08f));
             g.fillRoundedRectangle(bounds, 3);
-            g.setColour(active ? juce::Colour(0xff8fd4d2) : Palette::border.brighter(0.25f));
+            g.setColour(active ? rollRole(juce::Colour(0xff8fd4d2), Palette::heading) : Palette::border.brighter(0.25f));
             g.drawRoundedRectangle(bounds, 3, 1);
-            g.setColour(enabled ? Palette::text : Palette::textMuted.withAlpha(0.5f));
+            g.setColour(rollText(enabled ? Palette::text : Palette::textMuted.withAlpha(0.5f),
+                active ? rollRole(juce::Colour(0xff437d81), Palette::selection) : Palette::panel.brighter(0.08f), !enabled));
             g.drawText(label, bounds.toNearestInt(), juce::Justification::centred, false);
         };
         const auto actual = laneFlag.startsWith("DS:ABS:");
-        drawButton(flagLaneLayerBounds(true), juce::String::fromUTF8("实参"), actual, hasDiffSingerParameters());
-        drawButton(flagLaneLayerBounds(false), juce::String::fromUTF8("偏移"), !actual, true);
+        drawButton(flagLaneLayerBounds(true), I18n::uiText("实参"), actual, hasDiffSingerParameters());
+        drawButton(flagLaneLayerBounds(false), I18n::uiText("偏移"), !actual, true);
         if (!actual) drawButton(flagLaneOffsetEnableBounds(), juce::String::fromUTF8(diffSingerOffsetsEnabled() ? "已启用" : "启用"),
                                diffSingerOffsetsEnabled(), !diffSingerOffsetTargets().empty());
     }
@@ -2291,7 +2557,7 @@ void PianoRollComponent::drawFlagLane(juce::Graphics& g) const
         const auto y = flagLaneY(value);
         // The line at zero is the one worth finding, when the window holds it.
         g.setColour(std::abs(value) < windowSpan * 0.005f
-                        ? juce::Colour(0xff72d6aa).withAlpha(0.36f)
+                        ? rollRole(juce::Colour(0xff72d6aa), Palette::noteEdge).withAlpha(0.36f)
                         : Palette::grid.withAlpha(0.70f));
         g.drawHorizontalLine(static_cast<int>(y), plot.getX(), plot.getRight());
         g.setColour(Palette::textMuted);
@@ -2303,7 +2569,7 @@ void PianoRollComponent::drawFlagLane(juce::Graphics& g) const
     // Zero is worth a line of its own when the window has been taken off it.
     if (windowLow < 0.0f && windowHigh > 0.0f)
     {
-        g.setColour(juce::Colour(0xff72d6aa).withAlpha(0.36f));
+        g.setColour(rollRole(juce::Colour(0xff72d6aa), Palette::noteEdge).withAlpha(0.36f));
         g.drawHorizontalLine(static_cast<int>(flagLaneY(0.0f)),
                              plot.getX(), plot.getRight());
     }
@@ -2372,7 +2638,7 @@ void PianoRollComponent::drawFlagLane(juce::Graphics& g) const
             if (actualLayer)
             {
                 dashed(makeLine(offsetAt,pairedY),referenceColour.withAlpha(note->utauFlagCurveEnabled ? .8f : .35f));
-                if (!original.empty()) dashed(makeLine([&](double t){return flagCurveValueAt(original,t);},baseY),juce::Colour(0xff82b9df).withAlpha(.7f));
+                if (!original.empty()) dashed(makeLine([&](double t){return flagCurveValueAt(original,t);},baseY),rollRole(juce::Colour(0xff82b9df), Palette::textMuted).withAlpha(.7f));
             }
             else if (!base.empty())
                 dashed(makeLine([&](double t){return flagCurveValueAt(base,t);},pairedY),referenceColour.withAlpha(.85f));
@@ -2388,7 +2654,7 @@ void PianoRollComponent::drawFlagLane(juce::Graphics& g) const
                         value+=code=="TENC" ? delta/20.0f : (delta-offsetKind.defaultValue)*.12f;
                     }
                     return juce::jlimit(baseKind.minimum,baseKind.maximum,value);
-                },baseY),juce::Colour(0xff80d7ab).withAlpha(.85f),true);
+                },baseY),rollRole(juce::Colour(0xff80d7ab), Palette::noteEdge).withAlpha(.85f),true);
             }
         }
     }
@@ -2397,7 +2663,7 @@ void PianoRollComponent::drawFlagLane(juce::Graphics& g) const
     {
         bool utau = false;
         const auto* note = findNote(hit.id, &utau);
-        if (note == nullptr || !utau || !flagCurveActiveFor(note->id)) continue;
+        if (note == nullptr || !utau || !flagCurveActiveFor(note->id) || usesCvvcEnvelope(note->id)) continue;
         const auto absoluteStart = hit.startSeconds + hit.clipStartSeconds;
         const auto dragging = dragMode == DragMode::flagPoint && note->id == draggedNote;
         const auto preview = continuousFlagPreview.find(note->id);
@@ -2472,7 +2738,7 @@ void PianoRollComponent::drawFlagLane(juce::Graphics& g) const
         // they were.
         const auto anySelected = flagMode == FlagEditMode::perNote && !selectedNotes.empty();
         const auto isSelected = selectedNotes.contains(note->id.toStdString());
-        g.setColour(juce::Colour(0xffe4b363).withAlpha(
+        g.setColour(rollRole(juce::Colour(0xffe4b363), Palette::heading).withAlpha(
             !anySelected ? 0.92f : (isSelected ? 1.0f : 0.42f)));
         g.strokePath(path, juce::PathStrokeType(
             anySelected && isSelected ? 2.3f : 1.6f));
@@ -2482,12 +2748,13 @@ void PianoRollComponent::drawFlagLane(juce::Graphics& g) const
             const auto centre = juce::Point<float>(xAt(handles[index].timeSeconds),
                                                    flagLaneY(handles[index].value));
             if (!plot.expanded(6.0f).contains(centre)) continue;
-            const auto held = dragging
-                && static_cast<int>(index) == draggedFlagPoint;
-            g.setColour(held ? juce::Colours::white : juce::Colour(0xffe4b363));
+            const auto held = (dragging && static_cast<int>(index) == draggedFlagPoint)
+                || pointIsSelected(PointSelection::flag,note->id,static_cast<int>(index),0,laneFlag);
+            g.setColour(held ? rollRole(juce::Colours::white, Palette::heading) : rollRole(juce::Colour(0xffe4b363), Palette::heading));
             g.fillEllipse(centre.x - 3.5f, centre.y - 3.5f, 7.0f, 7.0f);
         }
     }
+    drawnAny |= drawCvvcEnvelopeLane(g, false) > 0;
     if (!drawnAny)
     {
         g.setColour(Palette::textMuted);
@@ -2690,7 +2957,7 @@ juce::PopupMenu PianoRollComponent::buildPitchCurveShapeMenu(
     if (track != nullptr && trackIsDiffSinger(*track))
     {
         menu.addSeparator();
-        menu.addItem(10, juce::String::fromUTF8("还原至初始音高线（DS）"),
+        menu.addItem(10, I18n::uiText("还原至初始音高线（DS）"),
             !note->diffSingerPitchReference.empty(), dsPitchRestoreMode);
         if (!note->diffSingerPitchReference.empty())
             menu.addItem(11, juce::String::fromUTF8(note->diffSingerPitchReferenceFromSavedPitch
@@ -2789,6 +3056,11 @@ void PianoRollComponent::showPitchCurveShapeMenu(const juce::String& noteId,
             }
             const auto* currentNote = safe->findNote(noteId);
             if (currentNote == nullptr) return;
+            if (result == 8)
+            {
+                safe->deletePitchAnchor(noteId, anchorIndex);
+                return;
+            }
             auto anchorsCopy = safe->pitchAnchorsFor(*currentNote);
             prepareSampledPitchPointEdit(anchorsCopy, anchorIndex);
             if (anchorIndex < 0
@@ -2802,15 +3074,6 @@ void PianoRollComponent::showPitchCurveShapeMenu(const juce::String& noteId,
                 return;
             }
             if (anchorIndex == 0) return;
-            if (result == 8)
-            {
-                // The following point keeps its own segment shape, which now
-                // describes the span from the previous point instead.
-                if (anchorIndex + 1 >= static_cast<int>(anchorsCopy.size())) return;
-                anchorsCopy.erase(anchorsCopy.begin() + anchorIndex);
-                safe->model.setNotePitchCurve(noteId, std::move(anchorsCopy), true);
-                return;
-            }
             anchorsCopy[static_cast<std::size_t>(anchorIndex)].shape =
                 result == 2 ? PitchCurveShape::linear
                 : result == 3 ? PitchCurveShape::smooth
@@ -2828,7 +3091,7 @@ void PianoRollComponent::flattenPitchLine(const juce::String& noteId, bool snapN
     // renderer shifts away from that.
     model.flattenNotePitch(chosenNoteIds(noteId), snapNativeToSemitone);
     // The cached anchors were derived from the old line.
-    pitchAnchorCache.clear();
+    pitchAnchorCache.clear();connectionPitchCache.clear();protocolPitchCache.clear();clearPitchPlanPreview();
     sharedLineCache.clear(); nativeEnvelopeCache.clear();
     draggedSharedKey = 0;
     repaint();
@@ -2838,7 +3101,7 @@ void PianoRollComponent::restoreOriginalPitch(const juce::String& noteId)
 {
     if (!nativeNoteTimingEnabled(noteId)) return;
     if (!model.restoreNativeSourcePitch(chosenNoteIds(noteId))) return;
-    pitchAnchorCache.clear();
+    pitchAnchorCache.clear();connectionPitchCache.clear();protocolPitchCache.clear();clearPitchPlanPreview();
     sharedLineCache.clear(); nativeEnvelopeCache.clear();
     draggedSharedKey = 0;
     repaint();
@@ -2852,24 +3115,23 @@ void PianoRollComponent::showTransposeDialog(const juce::String& noteId)
     if (targets.empty() || targets.front().isEmpty()) return;
 
     auto* dialog = new juce::AlertWindow(
-        juce::String::fromUTF8("音高调整"),
-        juce::String::fromUTF8(
-            "按半音平移选中的音符（12 平均律）。\n"
+        I18n::uiText("音高调整"),
+        I18n::uiText("按半音平移选中的音符（12 平均律）。\n"
             "只改音高，不改时间；音高标点跟着一起移动。\n"
             "两个框都填时按两者之差平移。"),
         juce::MessageBoxIconType::NoIcon);
     dialog->addTextEditor("up", "0",
-                          juce::String::fromUTF8("上移（半音）："));
+                          I18n::uiText("上移（半音）："));
     dialog->addTextEditor("down", "0",
-                          juce::String::fromUTF8("下移（半音）："));
+                          I18n::uiText("下移（半音）："));
     for (const auto* key : { "up", "down" })
         if (auto* editor = dialog->getTextEditor(key))
         {
             editor->setInputRestrictions(4, "0123456789");
             editor->setSelectAllWhenFocused(true);
         }
-    dialog->addButton(juce::String::fromUTF8("应用"), 1);
-    dialog->addButton(juce::String::fromUTF8("取消"), 0,
+    dialog->addButton(I18n::uiText("应用"), 1);
+    dialog->addButton(I18n::uiText("取消"), 0,
                       juce::KeyPress(juce::KeyPress::escapeKey));
     juce::Component::SafePointer<PianoRollComponent> safe(this);
     dialog->enterModalState(true,
@@ -2886,8 +3148,114 @@ void PianoRollComponent::showTransposeDialog(const juce::String& noteId)
             }), false);
 }
 
+void PianoRollComponent::clearPointSelection()
+{
+    if(graphPointDragging){graphPointDragging=false;graphDragValid=false;clearPitchPlanPreview();}
+    if(pointGroupGesture){pointGroupGesture.reset();cancelPointDrag();}
+    selectedPoints.clear();
+    if (!selectedPoint) return;
+    selectedPoint.reset();
+    repaint();
+}
+
+void PianoRollComponent::focusLost(FocusChangeType)
+{
+    clearPointSelection();
+}
+
+bool PianoRollComponent::pointIsSelected(PointSelection::Kind kind, const juce::String& noteId,
+                                       int index, int part, const juce::String& key) const
+{
+    if(kind==PointSelection::amplitude)if(const auto* member=nativeEnvelopeMember(noteId))
+        for(const auto& p:selectedPoints)if(p.kind==kind&&p.index==index&&p.revision==model.revisionNumber())
+            if(const auto* other=nativeEnvelopeMember(p.noteId);other&&other->points==member->points)return true;
+    if(std::any_of(selectedPoints.begin(),selectedPoints.end(),[&](const auto& p){return p.kind==kind&&p.noteId==noteId&&p.index==index&&p.part==part&&p.key==key&&p.revision==model.revisionNumber();}))return true;
+    return selectedPoint && selectedPoint->kind == kind && selectedPoint->noteId == noteId
+        && selectedPoint->index == index && selectedPoint->part == part && selectedPoint->key == key
+        && selectedPoint->revision == model.revisionNumber();
+}
+
+bool PianoRollComponent::deleteEnvelopePoint(const PointSelection& point)
+{
+    if (point.index < 0 || point.revision != model.revisionNumber()) return false;
+    refreshFromModel();
+    const auto* note = findNote(point.noteId);
+    if (!note) return false;
+    const auto revision = model.revisionNumber();
+    if (point.kind == PointSelection::cvvc)
+    {
+        for (auto piece : cvvcLanePieces(point.key.isEmpty()))
+            if (piece.noteId == point.noteId && piece.part == point.part && piece.key == point.key)
+            {
+                if (point.index <= 0 || point.index + 1 >= static_cast<int>(piece.points.size())) return false;
+                piece.points.erase(piece.points.begin() + point.index);
+                model.setCvvcEnvelope(piece.noteId,piece.part,piece.key,std::move(piece.points),revision);
+                break;
+            }
+    }
+    else if (point.kind == PointSelection::amplitude)
+    {
+        const auto hit = std::find_if(noteHits.begin(),noteHits.end(),[&](const auto& h){return h.id == point.noteId;});
+        if (hit == noteHits.end()) return false;
+        auto points = amplitudeEnvelopeFor(*note,hit->startSeconds + hit->clipStartSeconds);
+        if (point.index <= 0 || point.index + 1 >= static_cast<int>(points.size())) return false;
+        points.erase(points.begin() + point.index);
+        commitAmplitudeEnvelopeToSelection(point.noteId,points);
+    }
+    else if (point.kind == PointSelection::flag && point.key == laneFlag)
+    {
+        auto points = flagLaneCurveFor(*note);
+        if (points.size() <= 1 || point.index >= static_cast<int>(points.size())) return false;
+        points.erase(points.begin() + point.index);
+        model.setNoteUtauFlagCurve(point.noteId,point.key,std::move(points));
+    }
+    const auto changed = revision != model.revisionNumber();
+    if (changed) { refreshFromModel(); repaint(); }
+    return changed;
+}
+
+bool PianoRollComponent::deletePitchAnchor(const juce::String& noteId, int index)
+{
+    refreshFromModel();
+    const auto* note = findNote(noteId);
+    if (note == nullptr) return false;
+    auto anchors = pitchAnchorsFor(*note);
+    // Keep the same endpoint rules as the point's context menu.
+    if (index <= 0 || index + 1 >= static_cast<int>(anchors.size())) return false;
+    prepareSampledPitchPointEdit(anchors, index);
+    anchors.erase(anchors.begin() + index);
+    // The next point's shape now describes the span from the previous point.
+    if (!model.setNotePitchCurve(noteId, std::move(anchors), true)) return false;
+    refreshFromModel();
+    repaint();
+    return true;
+}
+
 void PianoRollComponent::deleteSelectedNotes()
 {
+    if(!selectedPoints.empty()){editSelectedPoints(false);return;}
+    if (selectedPoint)
+    {
+        const auto point = *selectedPoint;
+        selectedPoint->index = -1;
+        // Delete is an alternative to finishing the point drag; mouseUp must
+        // not write the old draft back after the point has been removed.
+        if (dragMode == DragMode::pointPitch || dragMode == DragMode::amplitudePoint || dragMode == DragMode::flagPoint)
+        {
+            draggedNote.clear(); draggedPitchAnchor = -1;
+            draggedAmplitudePoint = draggedFlagPoint = -1;
+            amplitudeStroke.clear(); flagStroke.clear();
+            pitchStroke.clear(); dragMode = DragMode::none;
+        }
+        cvvcLaneDrag.reset();
+        if (point.revision == model.revisionNumber())
+        {
+            if (point.kind == PointSelection::pitch) deletePitchAnchor(point.noteId, point.index);
+            else deleteEnvelopePoint(point);
+        }
+        repaint();
+        return;
+    }
     std::vector<juce::String> removed;
     removed.reserve(selectedNotes.size());
     for (const auto& id : selectedNotes) removed.push_back(juce::String::fromUTF8(id.c_str()));
@@ -2906,7 +3274,8 @@ namespace
 enum class NoteMenuScope { both, utauOnly, plainOnly };
 struct NoteMenuEntry { int id; NoteMenuScope scope; };
 using Scope = NoteMenuScope;
-const std::array<NoteMenuEntry, 27> noteMenuEntries {{
+const std::array<NoteMenuEntry, 28> noteMenuEntries {{
+    { 34, Scope::plainOnly },   // 编辑素材标注：打开对应录音的共用原生编辑器
     {  1, Scope::both      },   // 分割音符
     {  2, Scope::both      },   // 合并音符
     { 20, Scope::utauOnly  },   // 添加拼字音符    -- a lead-in and nothing else
@@ -3035,14 +3404,23 @@ PianoRollComponent::NoteMenu PianoRollComponent::buildNoteMenu(
     };
 
     juce::PopupMenu menu;
-    menu.addSectionHeader(juce::String::fromUTF8("音符"));
-    if(nativeNoteTimingEnabled(noteId))menu.addItem(31,juce::String::fromUTF8("响度包络"),onOpenNativeEnvelope!=nullptr);
+    menu.addSectionHeader(strings.text("Note"));
+    menu.addItem(33,strings.text("Replace material..."),onRequestMaterialSourceInput!=nullptr);
+    if (nativeNoteTimingEnabled(noteId))
+        menu.addItem(34, strings.text("Edit material annotations..."), onOpenRegionEditor != nullptr);
+    bool physicalOwner = false;
+    for (const auto& track : snapshot.tracks) for (const auto& clip : track.clips)
+        if (physicalOverlapSource(clip) && std::any_of(clip.notes.begin(),clip.notes.end(),[&](const auto& n){return n.id==noteId;})) physicalOwner=true;
+    if (physicalOwner)
+        menu.addItem(materialSelectorNoteMenuItem, strings.text("Material selector"), !sourceEditMode && overlapPairFor(noteId,std::numeric_limits<double>::quiet_NaN()).has_value(),
+            nativeOverlapSelector && nativeOverlapSelector->targetNoteId==noteId);
+    if(nativeNoteTimingEnabled(noteId))menu.addItem(31,strings.text("Loudness envelope"),onOpenNativeEnvelope!=nullptr);
     if (wanted(1))
-        menu.addItem(1, juce::String::fromUTF8("分割音符"), canSplit, false);
+        menu.addItem(1, I18n::uiText("分割音符"), canSplit, false);
     if (wanted(2))
-        menu.addItem(2, juce::String::fromUTF8("合并音符"), allInOneClip, false);
+        menu.addItem(2, I18n::uiText("合并音符"), allInOneClip, false);
     if (wanted(24))
-        menu.addItem(24, juce::String::fromUTF8("强制连接（保留音符数据）"),
+        menu.addItem(24, I18n::uiText("强制连接（保留音符数据）"),
                      selectedNotes.size() >= 2, false);
     if (wanted(30) && nativeNoteTimingEnabled(noteId))
         menu.addItem(30, strings.text("native.linkAudio"),
@@ -3055,17 +3433,17 @@ PianoRollComponent::NoteMenu PianoRollComponent::buildNoteMenu(
     // very start of its clip has nowhere to put one.
     const auto roomInFront = note->startSeconds > 1.0e-9;
     if (wanted(20))
-        menu.addItem(20, juce::String::fromUTF8("添加拼字音符"), roomInFront, false);
+        menu.addItem(20, I18n::uiText("添加拼字音符"), roomInFront, false);
     if (wanted(3))
-        menu.addItem(3, juce::String::fromUTF8("时序…"), canEditTiming, false);
+        menu.addItem(3, I18n::uiText("时序…"), canEditTiming, false);
     if (wanted(4))
         menu.addItem(4, juce::String::fromUTF8(dsTrack ? "DS 音素时长…  Ctrl+G" : "区域编辑器…  Ctrl+G"),
                      onOpenRegionEditor != nullptr && selectedNotes.size() == 1, false);
     if (dsTrack)
     {
-        menu.addItem(25, juce::String::fromUTF8("DS 发音转换 / 读音覆盖…"), onDiffSingerPronunciation != nullptr);
-        menu.addItem(26, juce::String::fromUTF8("DS 局部重生成 pitch"), onDiffSingerPitch != nullptr);
-        menu.addItem(27, juce::String::fromUTF8("DS 局部重新生成 FLAG（预测实参）"), onDiffSingerParameters != nullptr);
+        menu.addItem(25, I18n::uiText("DS 发音转换 / 读音覆盖…"), onDiffSingerPronunciation != nullptr);
+        menu.addItem(26, I18n::uiText("DS 局部重生成 pitch"), onDiffSingerPitch != nullptr);
+        menu.addItem(27, I18n::uiText("DS 局部重新生成 FLAG（预测实参）"), onDiffSingerParameters != nullptr);
     }
 
     // 高级: the tools that reach into the entry a note is sung from, or split
@@ -3076,16 +3454,16 @@ PianoRollComponent::NoteMenu PianoRollComponent::buildNoteMenu(
     // carrying an STP from a lyric it used to have, and refusing to open
     // would be the only thing standing between the user and clearing it.
     if (wanted(19))
-        advanced.addItem(19, juce::String::fromUTF8("修改 STP…"), true, false);
+        advanced.addItem(19, I18n::uiText("修改 STP…"), true, false);
     // Its own copy of the entry, for this note alone: the oto files are not
     // touched.  Every UTAU mode, since every one of them reads an entry.
     if (wanted(21))
-        advanced.addItem(21, juce::String::fromUTF8("单独OTO编辑…"),
+        advanced.addItem(21, I18n::uiText("单独OTO编辑…"),
                          onOpenNoteOtoEditor != nullptr && selectedNotes.size() == 1, false);
     // And back to the voicebank's entry, which only a note with an oto of its
     // own has to go back to.
     if (wanted(22))
-        advanced.addItem(22, juce::String::fromUTF8("恢复为音源OTO"),
+        advanced.addItem(22, I18n::uiText("恢复为音源OTO"),
                          ownOtoRestoreAvailable(chosenNoteIds(noteId)), false);
     // Splitting flags only means anything where the note has four regions.
     auto fourRegionTrack = false;
@@ -3097,49 +3475,49 @@ PianoRollComponent::NoteMenu PianoRollComponent::buildNoteMenu(
                         && utauModeUsesRegions(track.utauMode);
     const auto* flagNote = findNote(noteId);
     if (wanted(9))
-        advanced.addItem(9, juce::String::fromUTF8("flag 拆分…"), fourRegionTrack,
+        advanced.addItem(9, I18n::uiText("flag 拆分…"), fourRegionTrack,
                          flagNote != nullptr && flagNote->utauFlagSplit);
     // Only when something is in it: off UTAU none of these is offered, and an
     // empty 高级 would open onto nothing.
     if (advanced.getNumItems() > 0)
-        menu.addSubMenu(juce::String::fromUTF8("高级"), advanced);
+        menu.addSubMenu(I18n::uiText("高级"), advanced);
 
     const auto* vibratoNote = findNote(noteId);
     const auto hasVibrato = vibratoNote != nullptr && vibratoNote->vibratoEnabled;
     if (wanted(5))
-        menu.addItem(5, juce::String::fromUTF8("颤音…"), vibratoNote != nullptr,
+        menu.addItem(5, I18n::uiText("颤音…"), vibratoNote != nullptr,
                      hasVibrato);
     if (wanted(6) && wanted(7))
     {
         if (hasVibrato && vibratoNote->vibratoRealLine)
-            menu.addItem(7, juce::String::fromUTF8("退回为标准颤音模式"), true, false);
+            menu.addItem(7, I18n::uiText("退回为标准颤音模式"), true, false);
         else
-            menu.addItem(6, juce::String::fromUTF8("改为真实颤音线"), hasVibrato, false);
+            menu.addItem(6, I18n::uiText("改为真实颤音线"), hasVibrato, false);
     }
     if (wanted(8))
-        menu.addItem(8, juce::String::fromUTF8("修改颤音为音高标点…"), hasVibrato, false);
+        menu.addItem(8, I18n::uiText("修改颤音为音高标点…"), hasVibrato, false);
     if (wanted(14))
-        menu.addItem(14, juce::String::fromUTF8("重置线性flag"),
+        menu.addItem(14, I18n::uiText("重置线性flag"),
                      flagResetAvailable(chosenNoteIds(noteId)), false);
     if (wanted(12))
-        menu.addItem(12, juce::String::fromUTF8("辅音强制重置"), true, false);
+        menu.addItem(12, juce::String::fromUTF8(cvvcTimingEnabled(noteId)?"强制重置":"辅音强制重置"), true, false);
     // The envelope's height as a whole.  It belongs beside the envelope lane
     // rather than in 高级: raising or lowering a note is an ordinary edit, and
     // the lane is where the result is seen.
     if (wanted(23))
-        menu.addItem(23, juce::String::fromUTF8("包络基础值…"), true, false);
+        menu.addItem(23, I18n::uiText("包络基础值…"), true, false);
     if (wanted(13))
-        menu.addItem(13, juce::String::fromUTF8("时序删除"), true, false);
+        menu.addItem(13, I18n::uiText("时序删除"), true, false);
     // A silence opened in front of the note, on UTAU tracks in every mode.
     if (wanted(15))
-        menu.addItem(15, juce::String::fromUTF8("添加空格"), true, false);
+        menu.addItem(15, I18n::uiText("添加空格"), true, false);
     if (wanted(16))
-        menu.addItem(16, juce::String::fromUTF8("添加指定长度空格…"), true, false);
+        menu.addItem(16, I18n::uiText("添加指定长度空格…"), true, false);
     if (wanted(17))
-        menu.addItem(17, juce::String::fromUTF8("批量输入歌词…"),
+        menu.addItem(17, I18n::uiText("批量输入歌词…"),
                      !batchLyricTargets(noteId).empty(), false);
     if (wanted(18))
-        menu.addItem(18, juce::String::fromUTF8("初始化音高线"), true, false);
+        menu.addItem(18, I18n::uiText("初始化音高线"), true, false);
     if (wanted(28) && nativeNoteTimingEnabled(noteId))
     {
         const auto ids = chosenNoteIds(noteId);
@@ -3151,10 +3529,10 @@ PianoRollComponent::NoteMenu PianoRollComponent::buildNoteMenu(
         menu.addItem(28, strings.text("native.restoreOriginalPitch"), available, false);
     }
     if (wanted(11))
-        menu.addItem(11, juce::String::fromUTF8("音高调整…"), true, false);
+        menu.addItem(11, I18n::uiText("音高调整…"), true, false);
     menu.addSeparator();
     if (wanted(10))
-        menu.addItem(10, juce::String::fromUTF8("删除音符  Delete"), true, false);
+        menu.addItem(10, I18n::uiText("删除音符  Delete"), true, false);
 
     built.menu = std::move(menu);
     built.splitSeconds = split;
@@ -3174,6 +3552,14 @@ std::vector<int> PianoRollComponent::diagnosticEnabledNoteMenuIds(
     return menuIds(buildNoteMenu(noteId).menu, true, true);
 }
 
+juce::String PianoRollComponent::diagnosticNoteMenuLabel(const juce::String& noteId,int itemId) const
+{
+    auto built=buildNoteMenu(noteId);
+    for(juce::PopupMenu::MenuItemIterator it(built.menu);it.next();)
+        if(it.getItem().itemID==itemId)return it.getItem().text;
+    return {};
+}
+
 std::vector<juce::String> PianoRollComponent::diagnosticNoteMenuLayout(
     const juce::String& noteId) const
 {
@@ -3184,15 +3570,17 @@ void PianoRollComponent::showNoteContextMenu(const juce::String& noteId,
                                               juce::Point<int> screenPosition)
 {
     auto built = buildNoteMenu(noteId);
+    const auto local = getLocalPoint(nullptr,screenPosition);
+    const auto contextSeconds = std::max(0.0,static_cast<double>(local.x-58)/pixelsPerSecond);
     const auto split = built.splitSeconds;
     auto mergeIds = std::move(built.mergeIds);
     juce::Component::SafePointer<PianoRollComponent> keep(this);
     built.menu.showMenuAsync(juce::PopupMenu::Options().withTargetScreenArea(
         { screenPosition.x, screenPosition.y, 1, 1 }),
-        [keep, noteId, split, mergeIds = std::move(mergeIds)](int result)
+        [keep, noteId, split, contextSeconds, mergeIds = std::move(mergeIds)](int result)
         {
             if (keep == nullptr) return;
-            keep->applyNoteMenuChoice(noteId, result, split, mergeIds);
+            keep->applyNoteMenuChoice(noteId, result, split, mergeIds, contextSeconds);
         });
 }
 
@@ -3202,8 +3590,21 @@ void PianoRollComponent::showNoteContextMenu(const juce::String& noteId,
 // accept a click and do nothing at all.
 void PianoRollComponent::applyNoteMenuChoice(
     const juce::String& noteId, int result, double split,
-    const std::vector<juce::String>& mergeIds)
+    const std::vector<juce::String>& mergeIds, double contextSeconds)
 {
+    if (result == 0) { closeNativeOverlapSelector(); return; }
+    if (result == 34)
+    {
+        if (nativeNoteTimingEnabled(noteId) && onOpenRegionEditor) onOpenRegionEditor(noteId);
+        return;
+    }
+    if (result == materialSelectorNoteMenuItem) { openNativeOverlapSelector(noteId,contextSeconds); return; }
+    if (result == 33 && onRequestMaterialSourceInput)
+    {
+        const auto* note=findNote(noteId);if(!note)return;
+        const auto query=inlineAliasNoteId==noteId?inlineAliasEditor.getText():note->label;
+        const auto callback=onRequestMaterialSourceInput;callback(noteId,query);return;
+    }
     if (result == 25 && onDiffSingerPronunciation) { onDiffSingerPronunciation(noteId); return; }
     if (result == 31 && nativeNoteTimingEnabled(noteId) && onOpenNativeEnvelope) { onOpenNativeEnvelope(); return; }
     if (result == 26 && onDiffSingerPitch) { onDiffSingerPitch(noteId); return; }
@@ -3480,8 +3881,8 @@ void PianoRollComponent::showGapContextMenu(const GapInfo& gap,
                                             juce::Point<int> screenPosition)
 {
     juce::PopupMenu menu;
-    menu.addItem(1, juce::String::fromUTF8("删除空格"), true, false);
-    menu.addItem(2, juce::String::fromUTF8("插入四分之一小节音符"), true, false);
+    menu.addItem(1, I18n::uiText("删除空格"), true, false);
+    menu.addItem(2, I18n::uiText("插入四分之一小节音符"), true, false);
     juce::Component::SafePointer<PianoRollComponent> safe(this);
     menu.showMenuAsync(juce::PopupMenu::Options().withTargetScreenArea(
         { screenPosition.x, screenPosition.y, 1, 1 }),
@@ -3611,17 +4012,17 @@ void PianoRollComponent::showBatchLyricDialog(const juce::String& noteId)
     // Title and the box, nothing else: the instructions ran longer than the
     // thing they explained, and the editor is the only place to type anyway.
     auto* dialog = new juce::AlertWindow(
-        juce::String::fromUTF8("批量输入歌词"), {},
+        I18n::uiText("批量输入歌词"), {},
         juce::MessageBoxIconType::NoIcon);
-    dialog->addTextEditor("lyrics", {}, juce::String::fromUTF8("歌词"));
+    dialog->addTextEditor("lyrics", {}, I18n::uiText("歌词"));
     if (auto* editor = dialog->getTextEditor("lyrics"))
     {
         editor->setSelectAllWhenFocused(true);
         editor->setEscapeAndReturnKeysConsumed(false);
     }
-    dialog->addButton(juce::String::fromUTF8("填入"), 1,
+    dialog->addButton(I18n::uiText("填入"), 1,
                       juce::KeyPress(juce::KeyPress::returnKey));
-    dialog->addButton(juce::String::fromUTF8("取消"), 0,
+    dialog->addButton(I18n::uiText("取消"), 0,
                       juce::KeyPress(juce::KeyPress::escapeKey));
     juce::Component::SafePointer<PianoRollComponent> safe(this);
     dialog->enterModalState(true,
@@ -3657,21 +4058,21 @@ void PianoRollComponent::showGapDialog(const juce::String& noteId)
     // amount is in the units it counts in.
     const auto preset = juce::jmax(1, juce::roundToInt(quarterBarSecondsAt(at) / unit));
     auto* dialog = new juce::AlertWindow(
-        juce::String::fromUTF8("添加指定长度空格"),
-        juce::String::fromUTF8("在该音符前插入一段空白，该轨道之后的音符整体后移。\n"
+        I18n::uiText("添加指定长度空格"),
+        I18n::uiText("在该音符前插入一段空白，该轨道之后的音符整体后移。\n"
                                "单位：1 = 四分音符的 1/128；四分之一小节 = ")
             + juce::String(preset) + juce::String::fromUTF8("。"),
         juce::MessageBoxIconType::NoIcon);
     dialog->addTextEditor("units", juce::String(preset),
-                          juce::String::fromUTF8("长度（单位）"));
+                          I18n::uiText("长度（单位）"));
     if (auto* editor = dialog->getTextEditor("units"))
     {
         editor->setInputRestrictions(7, "0123456789");
         editor->setSelectAllWhenFocused(true);
     }
-    dialog->addButton(juce::String::fromUTF8("添加"), 1,
+    dialog->addButton(I18n::uiText("添加"), 1,
                       juce::KeyPress(juce::KeyPress::returnKey));
-    dialog->addButton(juce::String::fromUTF8("取消"), 0,
+    dialog->addButton(I18n::uiText("取消"), 0,
                       juce::KeyPress(juce::KeyPress::escapeKey));
     juce::Component::SafePointer<PianoRollComponent> safe(this);
     dialog->enterModalState(true,
@@ -3721,9 +4122,8 @@ void PianoRollComponent::showStpDialog(const juce::String& noteId)
     if (note == nullptr) return;
     const auto targets = chosenNoteIds(noteId);
     auto* dialog = new juce::AlertWindow(
-        juce::String::fromUTF8("修改 STP"),
-        juce::String::fromUTF8(
-            "把这个音符所用 oto 条目中的全部分段信息整体移动：offset、重叠、"
+        I18n::uiText("修改 STP"),
+        I18n::uiText("把这个音符所用 oto 条目中的全部分段信息整体移动：offset、重叠、"
             "先行声音、辅音和 cutoff，以及四区域的划分，一起移动同样的距离。\n"
             "正数为后移（读取录音中更靠后的部分），负数为前移；单位是毫秒。\n"
             "音符在曲子里的位置不变，变的只是它读到录音的哪一段。"),
@@ -3735,9 +4135,9 @@ void PianoRollComponent::showStpDialog(const juce::String& noteId)
         editor->setInputRestrictions(0, "-0123456789.");
         editor->setSelectAllWhenFocused(true);
     }
-    dialog->addButton(juce::String::fromUTF8("应用"), 1,
+    dialog->addButton(I18n::uiText("应用"), 1,
                       juce::KeyPress(juce::KeyPress::returnKey));
-    dialog->addButton(juce::String::fromUTF8("取消"), 0,
+    dialog->addButton(I18n::uiText("取消"), 0,
                       juce::KeyPress(juce::KeyPress::escapeKey));
     juce::Component::SafePointer<PianoRollComponent> safe(this);
     dialog->enterModalState(true,
@@ -3758,20 +4158,20 @@ void PianoRollComponent::showEnvelopeBaseDialog(const juce::String& noteId)
     if (note == nullptr) return;
     const auto targets = chosenNoteIds(noteId);
     auto* dialog = new juce::AlertWindow(
-        juce::String::fromUTF8("包络基础值"),
+        I18n::uiText("包络基础值"),
         juce::String(),
         juce::MessageBoxIconType::NoIcon);
     dialog->addTextEditor("base",
                           juce::String(note->amplitudeEnvelopeBasePercent, 1),
-                          juce::String::fromUTF8("基础值，% （0–200）："));
+                          I18n::uiText("基础值，% （0–200）："));
     if (auto* editor = dialog->getTextEditor("base"))
     {
         editor->setInputRestrictions(0, "0123456789.");
         editor->setSelectAllWhenFocused(true);
     }
-    dialog->addButton(juce::String::fromUTF8("应用"), 1,
+    dialog->addButton(I18n::uiText("应用"), 1,
                       juce::KeyPress(juce::KeyPress::returnKey));
-    dialog->addButton(juce::String::fromUTF8("取消"), 0,
+    dialog->addButton(I18n::uiText("取消"), 0,
                       juce::KeyPress(juce::KeyPress::escapeKey));
     juce::Component::SafePointer<PianoRollComponent> safe(this);
     dialog->enterModalState(true,
@@ -3882,6 +4282,13 @@ void PianoRollComponent::deleteSelectedNotesRippling(const juce::String& noteId)
 
 void PianoRollComponent::resetConsonant(const juce::String& noteId)
 {
+    if(cvvcTimingEnabled(noteId))
+    {
+        cvvcBoundaryDrag.reset();pendingCvvcBoundary.reset();
+        model.resetCvvcBoundaries(chosenNoteIds(noteId),model.revisionNumber());
+        refreshFromModel();repaint();
+        return;
+    }
     // What holds a consonant away from where the voicebank puts it is a pinned
     // preutterance.  It can be left somewhere unusable -- a lead-in so long
     // there is no handle left to grab, most of all -- and then there is no way
@@ -3967,10 +4374,10 @@ void PianoRollComponent::showVibratoDialog(const juce::String& noteId)
         [this](const auto& id) { return nativeNoteTimingEnabled(id); });
 
     auto* dialog = new juce::AlertWindow(
-        juce::String::fromUTF8("颤音"),
-        native ? juce::String::fromUTF8("对选中的 ") + juce::String(static_cast<int>(targets.size()))
-            + juce::String::fromUTF8(" 个音频片段添加颤音，叠加在各自原有的音高线上。长度从终止位置往前算；不会修改原始音高参考。")
-            : juce::String::fromUTF8("以该音的音高线为基准上下颤动；长度从颤音终止处往前算。"),
+        I18n::uiText("颤音"),
+        native ? I18n::uiText("对选中的 ") + juce::String(static_cast<int>(targets.size()))
+            + I18n::uiText(" 个音频片段添加颤音，叠加在各自原有的音高线上。长度从终止位置往前算；不会修改原始音高参考。")
+            : I18n::uiText("以该音的音高线为基准上下颤动；长度从颤音终止处往前算。"),
         juce::MessageBoxIconType::NoIcon);
     dialog->setComponentID("vibrato-editor");
     struct Field { const char* key; const char* label; double value; };
@@ -3997,7 +4404,7 @@ void PianoRollComponent::showVibratoDialog(const juce::String& noteId)
     // Not one of UTAU's seven, so not part of a preset either: where the
     // swing stops.  100 is the note's end, where UTAU always stops it.
     dialog->addTextEditor("end", juce::String(note->vibratoEndPercent, 3),
-                          juce::String::fromUTF8("终止位置 (% 于音符，100 = 末尾)："));
+                          I18n::uiText("终止位置 (% 于音符，100 = 末尾)："));
     if (auto* editor = dialog->getTextEditor("end"))
     {
         editor->setSelectAllWhenFocused(true);
@@ -4015,18 +4422,18 @@ void PianoRollComponent::showVibratoDialog(const juce::String& noteId)
     juce::ToggleButton* realLine = nullptr;
     if (native)
     {
-        realLine = new juce::ToggleButton(juce::String::fromUTF8("在音高线上显示实际颤音"));
+        realLine = new juce::ToggleButton(I18n::uiText("在音高线上显示实际颤音"));
         realLine->setName({}); // AlertWindow labels named custom components separately.
         realLine->setComponentID("vibrato-real-line");
-        realLine->setTooltip(juce::String::fromUTF8("普通编辑时显示叠加后的音高；标点模式保留基础曲线与颤音参考，便于分别编辑。"));
+        realLine->setTooltip(I18n::uiText("普通编辑时显示叠加后的音高；标点模式保留基础曲线与颤音参考，便于分别编辑。"));
         realLine->setSize(390, 28);
         realLine->setToggleState(!note->vibratoEnabled || note->vibratoRealLine,
                                 juce::dontSendNotification);
         dialog->addCustomComponent(realLine);
     }
-    dialog->addButton(juce::String::fromUTF8("应用"), 1);
-    dialog->addButton(juce::String::fromUTF8("关闭颤音"), 2);
-    dialog->addButton(juce::String::fromUTF8("取消"), 0, juce::KeyPress(juce::KeyPress::escapeKey));
+    dialog->addButton(I18n::uiText("应用"), 1);
+    dialog->addButton(I18n::uiText("关闭颤音"), 2);
+    dialog->addButton(I18n::uiText("取消"), 0, juce::KeyPress(juce::KeyPress::escapeKey));
     juce::Component::SafePointer<PianoRollComponent> safe(this);
     dialog->enterModalState(true,
         juce::ModalCallbackFunction::create(
@@ -4096,21 +4503,19 @@ void PianoRollComponent::showNoteTimingDialog(const juce::String& noteId)
         ? note->utauPreutteranceSeconds : timing->preutteranceSeconds;
     const auto overlapSeconds = note->utauOverlapOverrideEnabled
         ? note->utauOverlapSeconds : timing->overlapSeconds;
-    auto* dialog = new juce::AlertWindow(juce::String::fromUTF8("时序"),
-        juce::String::fromUTF8(
-            "先行声音在辅音速度计算后应用；重叠为正时交叉衔接，为负时形成静音间隔。\n"
+    auto* dialog = new juce::AlertWindow(I18n::uiText("时序"),
+        I18n::uiText("先行声音在辅音速度计算后应用；重叠为正时交叉衔接，为负时形成静音间隔。\n"
             "填回音源值后直接应用，音符重新跟随音源；手动改过的数值则固定不变。")
         + (aliasKnown ? juce::String()
-                      : juce::String::fromUTF8(
-                            "\n音源库中没有这个歌词，所以下方的音源值是空的；"
+                      : I18n::uiText("\n音源库中没有这个歌词，所以下方的音源值是空的；"
                             "「填回音源值」仍可用来清掉上一个歌词留下的固定值。")),
                                           juce::MessageBoxIconType::NoIcon);
     dialog->addTextEditor("preMilliseconds",
         juce::String(preutteranceSeconds * 1000.0, 3),
-        juce::String::fromUTF8("先行声音 (Pre)，ms："));
+        I18n::uiText("先行声音 (Pre)，ms："));
     dialog->addTextEditor("overlapMilliseconds",
         juce::String(overlapSeconds * 1000.0, 3),
-        juce::String::fromUTF8("重叠 (Overlap)，ms："));
+        I18n::uiText("重叠 (Overlap)，ms："));
     if (auto* editor = dialog->getTextEditor("preMilliseconds"))
     {
         editor->setSelectAllWhenFocused(true);
@@ -4125,7 +4530,7 @@ void PianoRollComponent::showNoteTimingDialog(const juce::String& noteId)
     // AlertWindow button dismisses the window, so as a button it put the
     // voicebank values back and left before they could be seen or adjusted.
     auto* restoreButton = new juce::TextButton(
-        juce::String::fromUTF8("填回音源值"));
+        I18n::uiText("填回音源值"));
     restoreButton->setSize(120, 24);
     // Whether the fields still hold exactly what the voicebank says.  Applying
     // in that state hands the note back to the voicebank instead of pinning
@@ -4146,8 +4551,8 @@ void PianoRollComponent::showNoteTimingDialog(const juce::String& noteId)
         if (auto* editor = dialog->getTextEditor(key))
             editor->onTextChange = [restored] { *restored = false; };
     dialog->addCustomComponent(restoreButton);
-    dialog->addButton(juce::String::fromUTF8("应用"), 1);
-    dialog->addButton(juce::String::fromUTF8("取消"), 0,
+    dialog->addButton(I18n::uiText("应用"), 1);
+    dialog->addButton(I18n::uiText("取消"), 0,
                       juce::KeyPress(juce::KeyPress::escapeKey));
     juce::Component::SafePointer<PianoRollComponent> safe(this);
     dialog->enterModalState(true,
@@ -4309,9 +4714,241 @@ const TrackData* PianoRollComponent::trackOf(const juce::String& noteId) const
     return nullptr;
 }
 
+const AudioEngine::ProjectedNotePitch* PianoRollComponent::protocolPitchFor(const TrackData& track,const juce::String& noteId) const
+{
+    // Native FILE and DiffSinger adapters retain their own policies. Protocol
+    // notes share the host's one pure OWN/nominal/explicit-graph planner.
+    if(!trackUsesVoicebankSynthesis(track)||trackIsDiffSinger(track))return nullptr;
+    auto& cache=pitchPlanPreview?protocolPreviewCache:protocolPitchCache;
+    auto found=cache.find(track.id);
+    if(found==cache.end())found=cache.emplace(track.id,AudioEngine::projectTrackNotePitch(pitchPreviewTrack(track),
+        pitchPlanPreview?pitchPlanPreview->connections:snapshot.nativeConnections)).first;
+    for(const auto& note:found->second)if(note.noteId==noteId)return &note;return nullptr;
+}
+
+const TrackData& PianoRollComponent::pitchPreviewTrack(const TrackData& track) const
+{
+    if(pitchPlanPreview)for(const auto& proposed:pitchPlanPreview->tracks)if(proposed.id==track.id)return proposed;
+    return track;
+}
+const NoteData& PianoRollComponent::pitchPreviewNote(const NoteData& note) const
+{
+    if(pitchPlanPreview)for(const auto& track:pitchPlanPreview->tracks)for(const auto& clip:track.clips)
+        for(const auto& proposed:clip.notes)if(proposed.id==note.id)return proposed;
+    return note;
+}
+void PianoRollComponent::clearPitchPlanPreview()
+{
+    pitchPlanPreview.reset();pitchPendingEdits.clear();pitchPreviewSharedCache.clear();connectionPreviewCache.clear();pitchPreviewAnchorCache.clear();protocolPreviewCache.clear();
+}
+bool PianoRollComponent::updatePitchPlanPreview(const std::vector<ProjectModel::PointCurveEdit>& edits,std::uint64_t revision)
+{
+    ProjectModel::PointCurvePlanPreview proposed;juce::String error;
+    if(!model.previewPointCurves(edits,revision,proposed,error))
+    {if(onEditRejected&&!error.isEmpty())onEditRejected(error);return false;}
+    pitchPlanPreview=std::move(proposed);pitchPendingEdits=edits;
+    pitchPreviewSharedCache.clear();connectionPreviewCache.clear();pitchPreviewAnchorCache.clear();protocolPreviewCache.clear();return true;
+}
+const std::vector<ResolvedConnectionPitchCurve>& PianoRollComponent::connectionCurvesFor(const TrackData& track,bool preview) const
+{
+    auto& cache=preview&&pitchPlanPreview?connectionPreviewCache:connectionPitchCache;
+    if(const auto found=cache.find(track.id);found!=cache.end())return found->second;
+    return cache.emplace(track.id,resolvedConnectionPitchCurves(preview?pitchPreviewTrack(track):track,
+        preview&&pitchPlanPreview?pitchPlanPreview->connections:snapshot.nativeConnections)).first->second;
+}
+std::vector<ResolvedConnectionPitchCurve> PianoRollComponent::visibleConnectionCurves(bool preview) const
+{
+    std::vector<ResolvedConnectionPitchCurve> visible;if(sourceEditMode)return visible;
+    for(const auto& track:snapshot.tracks)
+    {
+        if(focusedTrack.isNotEmpty()&&track.id!=focusedTrack)continue;
+        for(const auto& graph:connectionCurvesFor(track,preview))
+        {
+            if(!graph.active)continue;bool incidentVisible=false;
+            for(const auto& clip:track.clips)if(clipIsVisible(track,clip))for(const auto& note:clip.notes)
+                incidentVisible|=note.id==graph.leftNoteId||note.id==graph.rightNoteId;
+            if(incidentVisible)visible.push_back(graph);
+        }
+    }
+    return visible;
+}
+std::vector<ResolvedConnectionPitchCurve> PianoRollComponent::diagnosticConnectionPitchCurves() const
+{ return visibleConnectionCurves(); }
+std::optional<juce::Point<float>> PianoRollComponent::diagnosticConnectionPitchPoint(const juce::String& id,int index) const
+{
+    for(const auto& curve:visibleConnectionCurves())if(curve.connectionId==id&&juce::isPositiveAndBelow(index,static_cast<int>(curve.points.size())))
+    {const auto& p=curve.points[static_cast<std::size_t>(index)];return juce::Point<float>(timeToX(p.timeSeconds),midiToY(p.targetMidi)+rowHeight*.5f);}
+    return {};
+}
+std::optional<std::pair<juce::String,int>> PianoRollComponent::connectionPointAt(juce::Point<float> position) const
+{
+    float best=81;std::optional<std::pair<juce::String,int>> result;
+    for(const auto& curve:visibleConnectionCurves(false))for(std::size_t i=0;i<curve.points.size();++i)
+    {
+        const auto& p=curve.points[i];const juce::Point<float> at(timeToX(p.timeSeconds),midiToY(p.targetMidi)+rowHeight*.5f);
+        const auto distance=at.getDistanceSquaredFrom(position);
+        if(distance<best){best=distance;result=std::pair{curve.connectionId,static_cast<int>(i)};}
+    }
+    return result;
+}
+std::optional<juce::String> PianoRollComponent::connectionCurveAt(juce::Point<float> position) const
+{
+    const auto seconds=static_cast<double>(position.x-58)/pixelsPerSecond;float best=std::numeric_limits<float>::max();std::optional<juce::String> result;
+    for(const auto& graph:visibleConnectionCurves(false))if(seconds>=graph.fromSeconds-1.e-9&&seconds<=graph.toSeconds+1.e-9)
+    {
+        const auto y=midiToY(evaluatePitchCurve(graph.points,seconds))+rowHeight*.5f;
+        if(std::abs(y-position.y)<best){best=std::abs(y-position.y);result=graph.connectionId;}
+    }
+    return result;
+}
+void PianoRollComponent::clipNotePitchAgainstConnections(juce::Graphics& g,const TrackData& track) const
+{
+    for(const auto& curve:connectionCurvesFor(track))if(curve.active)
+    {
+        const auto left=timeToX(curve.fromSeconds),right=timeToX(curve.toSeconds);
+        g.excludeClipRegion({static_cast<int>(std::floor(left)),0,std::max(1,static_cast<int>(std::ceil(right-left))),getHeight()});
+    }
+}
+void PianoRollComponent::drawConnectionPitchCurves(juce::Graphics& g)
+{
+    if(!showPitchLine||sourceEditMode||tool==Tool::amplitude)return;
+    for(const auto& curve:visibleConnectionCurves())
+    {
+        juce::Path line;
+        for(std::size_t i=1;i<curve.points.size();++i)
+        {
+            const auto from=curve.points[i-1].timeSeconds,to=curve.points[i].timeSeconds;
+            const auto steps=std::max(2,static_cast<int>(std::ceil((to-from)*pixelsPerSecond/2)));
+            for(int j=0;j<=steps;++j)
+            {
+                if(i>1&&j==0)continue;const auto time=from+(to-from)*j/steps;
+                const juce::Point<float> at(timeToX(time),midiToY(evaluatePitchCurve(curve.points,time))+rowHeight*.5f);
+                if(i==1&&j==0)line.startNewSubPath(at);else line.lineTo(at);
+            }
+        }
+        g.setColour(Palette::pitchLine);g.strokePath(line,juce::PathStrokeType(2.2f,juce::PathStrokeType::curved));
+        if(tool!=Tool::points)continue;
+        for(std::size_t i=0;i<curve.points.size();++i)
+        {
+            const auto& p=curve.points[i];const bool selected=pointIsSelected(PointSelection::connectionPitch,curve.connectionId,static_cast<int>(i));
+            const auto radius=selected?5.f:3.8f;const juce::Point<float> at(timeToX(p.timeSeconds),midiToY(p.targetMidi)+rowHeight*.5f);
+            g.setColour(selected?Palette::selection:Palette::panelRaised);g.fillEllipse(at.x-radius,at.y-radius,2*radius,2*radius);
+            g.setColour(rollInk(Palette::noteEdge,Palette::graphBackground));g.drawEllipse(at.x-radius,at.y-radius,2*radius,2*radius,selected?2.f:1.4f);
+        }
+    }
+}
+
+juce::PopupMenu PianoRollComponent::connectionPitchPointMenu(const juce::String& id,int index) const
+{
+    juce::PopupMenu menu;
+    for(const auto& curve:visibleConnectionCurves(false))if(curve.connectionId==id&&juce::isPositiveAndBelow(index,static_cast<int>(curve.points.size())))
+    {
+        const auto shapeIndex=std::max(1,index);const auto shape=curve.points[static_cast<std::size_t>(shapeIndex)].shape;
+        menu.addSectionHeader(I18n::uiText("连接音高标点 / Connection pitch"));
+        const PitchCurveShape shapes[]{PitchCurveShape::natural,PitchCurveShape::linear,PitchCurveShape::smooth,PitchCurveShape::easeIn,PitchCurveShape::easeOut,PitchCurveShape::customBezier};
+        for(int i=0;i<6;++i)menu.addItem(i+1,pitchCurveShapeName(shapes[i]),true,shape==shapes[i]);
+        menu.addSeparator();menu.addItem(7,I18n::uiText("删除内部标点 / Delete interior point"),index>0&&index+1<static_cast<int>(curve.points.size()));break;
+    }
+    return menu;
+}
+bool PianoRollComponent::applyConnectionPitchPointMenu(const juce::String& id,int index,int result)
+{
+    for(const auto& curve:visibleConnectionCurves(false))if(curve.connectionId==id&&juce::isPositiveAndBelow(index,static_cast<int>(curve.points.size())))
+    {
+        auto points=curve.points;
+        if(result==7)
+        {
+            if(index==0||index+1==static_cast<int>(points.size()))return false;
+            points.erase(points.begin()+index);
+        }
+        else if(result>=1&&result<=6)
+        {
+            const PitchCurveShape shapes[]{PitchCurveShape::natural,PitchCurveShape::linear,PitchCurveShape::smooth,PitchCurveShape::easeIn,PitchCurveShape::easeOut,PitchCurveShape::customBezier};
+            points[static_cast<std::size_t>(std::max(1,index))].shape=shapes[result-1];
+        }
+        else return false;
+        ProjectModel::PointCurveEdit edit;edit.kind=ProjectModel::PointCurveEdit::connectionPitch;edit.connectionId=id;
+        edit.pitchPoints=std::move(points);edit.reanchorConnectionEndpoints=true;juce::String error;
+        const bool changed=model.setPointCurves({edit},model.revisionNumber(),&error);
+        if(!changed&&!error.isEmpty()&&onEditRejected)onEditRejected(error);
+        if(changed)
+        {
+            clearPointSelection();refreshFromModel();
+            selectedPoint=PointSelection{id,result==7?-1:index,model.revisionNumber(),PointSelection::connectionPitch};repaint();
+        }
+        return changed;
+    }
+    return false;
+}
+bool PianoRollComponent::diagnosticConnectionPitchShape(const juce::String& id,int index,PitchCurveShape shape)
+{
+    const PitchCurveShape shapes[]{PitchCurveShape::natural,PitchCurveShape::linear,PitchCurveShape::smooth,PitchCurveShape::easeIn,PitchCurveShape::easeOut,PitchCurveShape::customBezier};
+    for(int i=0;i<6;++i)if(shapes[i]==shape)return applyConnectionPitchPointMenu(id,index,i+1);return false;
+}
+void PianoRollComponent::showConnectionPitchPointMenu(const juce::String& id,int index,juce::Point<int> at)
+{
+    auto menu=connectionPitchPointMenu(id,index);const auto revision=model.revisionNumber();
+    juce::Component::SafePointer<PianoRollComponent> safe(this);
+    menu.showMenuAsync(juce::PopupMenu::Options().withTargetScreenArea({at.x,at.y,1,1}),[safe,id,index,revision](int result)
+    {if(safe&&result&&safe->model.revisionNumber()==revision)safe->applyConnectionPitchPointMenu(id,index,result);});
+}
+bool PianoRollComponent::connectionPitchMouseDown(const juce::MouseEvent& event)
+{
+    if(sourceEditMode||tool!=Tool::points||dsPitchOffsetMode||snapshot.nativeConnections.empty())return false;
+    refreshFromModel();const auto hit=connectionPointAt(event.position);
+    if(!hit){graphPointDragging=false;return connectionCurveAt(event.position).has_value();}
+    for(const auto& curve:visibleConnectionCurves(false))if(curve.connectionId==hit->first)
+    {
+        selectedPoint=PointSelection{curve.connectionId,hit->second,model.revisionNumber(),PointSelection::connectionPitch};
+        if(event.mods.isPopupMenu())
+        {graphPointDragging=false;showConnectionPitchPointMenu(curve.connectionId,hit->second,event.getScreenPosition());return true;}
+        graphPointDragging=true;graphDragValid=false;graphDragId=curve.connectionId;graphDragIndex=hit->second;
+        graphDragDown=event.position;graphDragOriginal=curve.points;graphDragRevision=model.revisionNumber();
+        draggedNote.clear();dragMode=DragMode::none;repaint();return true;
+    }
+    return false;
+}
+void PianoRollComponent::moveConnectionPitchPoint(const juce::MouseEvent& event)
+{
+    if(!graphPointDragging||!juce::isPositiveAndBelow(graphDragIndex,static_cast<int>(graphDragOriginal.size())))return;
+    const auto delta=event.position-graphDragDown;auto points=graphDragOriginal;
+    auto& point=points[static_cast<std::size_t>(graphDragIndex)];
+    const auto first=graphDragIndex>0?points[static_cast<std::size_t>(graphDragIndex-1)].timeSeconds+minimumAnchorSeparation:0.0;
+    const auto last=graphDragIndex+1<static_cast<int>(points.size())?points[static_cast<std::size_t>(graphDragIndex+1)].timeSeconds-minimumAnchorSeparation:std::numeric_limits<double>::max();
+    point.timeSeconds=juce::jlimit(first,last,point.timeSeconds+delta.x/pixelsPerSecond);
+    if(graphDragIndex>0&&graphDragIndex+1<static_cast<int>(points.size()))point.targetMidi=juce::jlimit(0.f,127.f,point.targetMidi-delta.y/rowHeight);
+    ProjectModel::PointCurveEdit edit;edit.kind=ProjectModel::PointCurveEdit::connectionPitch;edit.connectionId=graphDragId;
+    edit.pitchPoints=std::move(points);edit.reanchorConnectionEndpoints=true;
+    graphDragValid=updatePitchPlanPreview({edit},graphDragRevision);repaint();
+}
+bool PianoRollComponent::connectionPitchDoubleClick(const juce::MouseEvent& event)
+{
+    if(sourceEditMode||tool!=Tool::points||dsPitchOffsetMode)return false;
+    if(connectionPointAt(event.position))return true;
+    const auto owner=connectionCurveAt(event.position);if(!owner)return false;
+    for(const auto& curve:visibleConnectionCurves(false))if(curve.connectionId==*owner)
+    {
+        const auto time=static_cast<double>(event.position.x-58)/pixelsPerSecond;
+        if(time<=curve.fromSeconds+minimumAnchorSeparation||time>=curve.toSeconds-minimumAnchorSeparation)return true;
+        if(std::any_of(curve.points.begin(),curve.points.end(),[&](const auto& p){return std::abs(p.timeSeconds-time)<minimumAnchorSeparation;}))return true;
+        auto points=curve.points;PitchCurveEditPoint added{time,juce::jlimit(0.f,127.f,pitchMidiFromY(event.position.y)),PitchCurveShape::natural};
+        points.insert(std::upper_bound(points.begin(),points.end(),time,[](double t,const auto& p){return t<p.timeSeconds;}),added);
+        ProjectModel::PointCurveEdit edit;edit.kind=ProjectModel::PointCurveEdit::connectionPitch;edit.connectionId=curve.connectionId;
+        edit.pitchPoints=std::move(points);edit.reanchorConnectionEndpoints=true;juce::String error;
+        if(!model.setPointCurves({edit},model.revisionNumber(),&error)&&onEditRejected)onEditRejected(error);
+        graphPointDragging=false;clearPointSelection();refreshFromModel();repaint();return true;
+    }
+    return true;
+}
+
 const SharedPitchLines& PianoRollComponent::sharedLinesFor(const TrackData& track,
                                                            bool followDrag) const
 {
+    if(followDrag&&pitchPlanPreview)
+    {
+        if(const auto found=pitchPreviewSharedCache.find(track.id);found!=pitchPreviewSharedCache.end())return found->second;
+        return pitchPreviewSharedCache.emplace(track.id,sharedPitchLines(pitchPreviewTrack(track),pitchPlanPreview->connections)).first->second;
+    }
     if (followDrag && dragMode == DragMode::pointPitch && !pitchStroke.empty()
         && draggedNote.isNotEmpty())
     {
@@ -4338,7 +4975,7 @@ const SharedPitchLines& PianoRollComponent::sharedLinesFor(const TrackData& trac
             }
             if (key != draggedSharedKey)
             {
-                draggedSharedLines = sharedPitchLines(track, draggedNote, &pitchStroke);
+                draggedSharedLines = sharedPitchLines(track, snapshot.nativeConnections, draggedNote, &pitchStroke);
                 draggedSharedKey = key;
             }
             return draggedSharedLines;
@@ -4346,7 +4983,7 @@ const SharedPitchLines& PianoRollComponent::sharedLinesFor(const TrackData& trac
     }
     const auto found = sharedLineCache.find(track.id);
     if (found != sharedLineCache.end()) return found->second;
-    return sharedLineCache.emplace(track.id, sharedPitchLines(track)).first->second;
+    return sharedLineCache.emplace(track.id, sharedPitchLines(track, snapshot.nativeConnections)).first->second;
 }
 
 const NativeNoiseRanges& PianoRollComponent::nativePitchVisibilityFor(
@@ -4368,6 +5005,7 @@ const NativeNoiseRanges& PianoRollComponent::nativePitchAuthoredFor(
 std::optional<PianoRollComponent::TransitionBridge> PianoRollComponent::transitionBridge(
     const TrackData& track, const NoteData& note, double absoluteStart)
 {
+    if(trackUsesVoicebankSynthesis(track)&&!trackIsDiffSinger(track))return std::nullopt; // nominal seams are already in the shared host projector
     const PositionedUtauNote positioned {
         note.id, absoluteStart, absoluteStart + note.durationSeconds,
         note.utauAutoPitchTransition
@@ -4413,6 +5051,13 @@ std::vector<double> PianoRollComponent::pitchLineBreaks(const TrackData& track,
                                                         double absoluteStart)
 {
     std::vector<double> breaks;
+    if(const auto* projection=protocolPitchFor(track,note.id))
+    {
+        breaks.push_back(projection->supportStartSeconds-absoluteStart);
+        for(const auto& point:projection->sampledLocalCents)breaks.push_back(point.timeSeconds);
+        breaks.push_back(projection->supportEndSeconds-absoluteStart);
+        std::sort(breaks.begin(),breaks.end());breaks.erase(std::unique(breaks.begin(),breaks.end()),breaks.end());return breaks;
+    }
     const auto includeOffsets=[&]
     {
         if (!trackIsDiffSinger(track) || breaks.empty()) return;
@@ -4439,20 +5084,38 @@ std::vector<double> PianoRollComponent::pitchLineBreaks(const TrackData& track,
 }
 
 float PianoRollComponent::pitchLineMidiAt(const TrackData& track, const NoteData& note,
-                                          double absoluteStart, double time)
+                                          double absoluteStart, double time,
+                                          const std::vector<PitchCurveEditPoint>* nativeDensePoints)
 {
+    if(const auto* projection=protocolPitchFor(track,note.id);projection&&projection->continuousLocalCents)
+        return projection->midiNote+projection->continuousLocalCents(time)/100.f+displayedPitchOffset(note,time);
     if (const auto* member = sharedLinesFor(track).memberFor(note.id))
         return member->line->midiAt(absoluteStart + time) + displayedPitchOffset(note,time);
-    const auto& anchors = draggedNote == note.id && dragMode == DragMode::pointPitch
-            && !pitchStroke.empty()
-        ? pitchStroke : pitchAnchorsFor(note);
-    return pitchAt(anchors, time) + displayedPitchOffset(note,time);
+    if (pointGroupGesture)
+        for (const auto& draft : pointGroupGesture->curves)
+            if (draft.identity.kind == PointSelection::pitch && draft.identity.noteId == note.id)
+                return evaluatePitchCurve(draft.edit.pitchPoints, time) + displayedPitchOffset(note,time);
+    if (draggedNote == note.id && dragMode == DragMode::pointPitch && !pitchStroke.empty())
+        return evaluatePitchCurve(pitchStroke, time) + displayedPitchOffset(note,time);
+    if (trackShowsAllNativeRegions(track) && note.pitchControlPoints.empty())
+    {
+        // Reduced automatic anchors are HANDLE scaffolding, not the audible
+        // curve. Read the same linear dense authority as paint and the renderer.
+        if (nativeDensePoints) return evaluatePitchCurve(*nativeDensePoints, time) + displayedPitchOffset(note,time);
+        return evaluatePitchCurve(ownPitchPoints(pitchPreviewNote(note)), time) + displayedPitchOffset(note,time);
+    }
+    return pitchAt(pitchAnchorsFor(note), time) + displayedPitchOffset(note,time);
 }
 
 bool PianoRollComponent::pitchHandleOffered(const NoteData& note, double absoluteSeconds) const
 {
     const auto* track = trackOf(note.id);
     if (track == nullptr) return true;
+    if(trackUsesVoicebankSynthesis(*track)&&!trackIsDiffSinger(*track))
+    {
+        for(const auto& curve:connectionCurvesFor(*track,false))if(curve.active&&absoluteSeconds>=curve.fromSeconds-1.e-9&&absoluteSeconds<=curve.toSeconds+1.e-9)return false;
+        return true; // OWN handles, never implicit old PBW ownership borrowing.
+    }
     // As the lines stood before any drag in progress: dragging a point must
     // not make another appear or disappear.
     const auto* member = sharedLinesFor(*track, false).memberFor(note.id);
@@ -4539,6 +5202,14 @@ std::optional<std::pair<double, double>> PianoRollComponent::diagnosticPitchLine
 
 std::vector<PitchCurveEditPoint>& PianoRollComponent::pitchAnchorsFor(const NoteData& note)
 {
+    if(pitchPlanPreview&&std::any_of(pitchPendingEdits.begin(),pitchPendingEdits.end(),[&](const auto& e){return e.kind==ProjectModel::PointCurveEdit::pitch&&e.noteId==note.id;}))
+    {
+        const auto key=note.id.toStdString();if(const auto found=pitchPreviewAnchorCache.find(key);found!=pitchPreviewAnchorCache.end())return found->second;
+        return pitchPreviewAnchorCache.emplace(key,ownPitchPoints(pitchPreviewNote(note))).first->second;
+    }
+
+    if(pointGroupGesture)for(auto& d:pointGroupGesture->curves)
+        if(d.identity.kind==PointSelection::pitch&&d.identity.noteId==note.id)return d.edit.pitchPoints;
     const auto key = note.id.toStdString();
     if (note.nativeUnpitched) return pitchAnchorCache[key] = {};
     if (const auto found = pitchAnchorCache.find(key); found != pitchAnchorCache.end())
@@ -4667,7 +5338,8 @@ void PianoRollComponent::diagnosticRefresh()
 
 void PianoRollComponent::refreshFromModel()
 {
-    pitchAnchorCache.clear();
+    if (nativeOverlapSelector && nativeOverlapSelector->revision!=model.revisionNumber()) closeNativeOverlapSelector();
+    pitchAnchorCache.clear();connectionPitchCache.clear();protocolPitchCache.clear();clearPitchPlanPreview();
     sharedLineCache.clear(); nativeEnvelopeCache.clear();
     draggedSharedKey = 0;
     rebuildLayout();
@@ -4703,6 +5375,7 @@ PianoRollComponent::diagnosticNotes() const
 
 void PianoRollComponent::selectAllNotes()
 {
+    clearPointSelection();
     selectedNotes.clear();
     for (const auto& track : snapshot.tracks)
     {
@@ -4723,6 +5396,7 @@ void PianoRollComponent::selectAllNotes()
 
 void PianoRollComponent::clearNoteSelection()
 {
+    clearPointSelection();
     selectedNote.clear();
     selectedNotes.clear();
     if (onNoteSelected) onNoteSelected({});
@@ -4731,6 +5405,9 @@ void PianoRollComponent::clearNoteSelection()
 
 void PianoRollComponent::setSelectedNoteIds(const std::vector<juce::String>& noteIds)
 {
+    if (nativeOverlapSelector && (noteIds.empty() || noteIds.front()!=nativeOverlapSelector->targetNoteId)) closeNativeOverlapSelector();
+    clearPointSelection();
+    cvvcSelectedNote.clear(); cvvcSelectedPart = 0;
     selectedNotes.clear();
     for (const auto& id : noteIds)
         if (id.isNotEmpty()) selectedNotes.insert(id.toStdString());
@@ -4821,16 +5498,16 @@ double PianoRollComponent::drawUnitSecondsAt(double seconds) const
     return std::max(1.0e-6, bar / static_cast<double>(std::max(1, drawLengthDivisionValue)));
 }
 
-bool PianoRollComponent::drawingTrackIsUtau() const
+bool PianoRollComponent::canDrawNotesOnFocusedTrack() const
 {
     for (const auto& track : snapshot.tracks)
         if (track.id == focusedTrack)
-            return trackUsesVoicebankSynthesis(track);
+            return track.compose && !track.accompaniment;
     // No track selected: fall back to whoever owns the focused clip.
     for (const auto& track : snapshot.tracks)
         for (const auto& clip : track.clips)
             if (clip.id == focusedClip)
-                return trackUsesVoicebankSynthesis(track);
+                return track.compose && !track.accompaniment;
     return false;
 }
 
@@ -4907,6 +5584,24 @@ void PianoRollComponent::beginDrawingNote(const juce::MouseEvent& event)
         for (const auto& clip : track.clips)
             if (clip.id == clipId) destination = &clip;
     if (destination == nullptr) return;
+    // A source-backed clip is not an infinitely growable composition region.
+    // Clicking before/after its actual source window must not silently snap a
+    // new note into that recording or author a note in an uncovered audio hole.
+    auto sourceWindowEnd = std::numeric_limits<double>::max();
+    const auto sources = clipSourceRegions(*destination);
+    if (std::any_of(sources.begin(), sources.end(), [](const auto* part) { return part->sourceFile != juce::File(); }))
+    {
+        sourceWindowEnd = -1.0;
+        for (const auto* part : sources)
+        {
+            if (part->sourceFile == juce::File()) continue;
+            const auto begin = part->startSeconds + part->audioStartSeconds
+                + (destination->parts.empty() ? 0.0 : destination->startSeconds);
+            const auto end = begin + part->audioLength();
+            if (cellStart >= begin && cellStart < end) sourceWindowEnd = std::max(sourceWindowEnd, end);
+        }
+        if (sourceWindowEnd < 0.0) return;
+    }
 
     std::vector<ProjectModel::NoteSpan> occupied;
     occupied.reserve(destination->notes.size());
@@ -4922,7 +5617,9 @@ void PianoRollComponent::beginDrawingNote(const juce::MouseEvent& event)
     // is the next note; one backed by audio ends where its audio does.
     auto available = destination->sourceFile == juce::File()
         ? std::numeric_limits<double>::max()
-        : destination->durationSeconds - localStart;
+        : std::min(destination->durationSeconds,
+            destination->audioStartSeconds + destination->audioLength()) - localStart;
+    available = std::min(available, sourceWindowEnd - destination->startSeconds - localStart);
     for (const auto& span : occupied)
         if (span.startSeconds > localStart)
             available = std::min(available, span.startSeconds - localStart);
@@ -4994,6 +5691,8 @@ void PianoRollComponent::rebuildLayout()
     if (dsPitchRestoreMode && !diffSingerPitchRestoreAvailable())
         setDiffSingerPitchRestoreMode(false);
     rebuildUtauSoundSpans();
+    requestCvvcLayouts();
+    applyCvvcBoundaryPreview();
     if (!pendingSplitRestate.empty())
     {
         // Restate before anything is drawn from these spans, so the lines do
@@ -5065,6 +5764,20 @@ void PianoRollComponent::rebuildUtauSoundSpans()
                 diffSingerPhonemes[id]=wave.phonemes;
             }
             continue;
+        }
+        if(track.chineseCvvc&&track.utauMode==UtauMode::classic)
+        {
+            const auto context=AudioEngine::utauPhonemeMixContextHash(track);
+            for(const auto& clip:track.clips)for(const auto& note:clip.notes)
+            {
+                const auto cache=backend::readCvvcPhonemeCache(note.cvvcPhonemeCache);
+                if(cache.layout!=AudioEngine::utauNotePhonemeHash(note)||cache.context!=context||cache.spans.empty())continue;
+                const auto start=clip.startSeconds+note.startSeconds;
+                diffSingerPhonemes[note.id.toStdString()]=cache.spans;
+                auto from=start;
+                for(const auto& p:cache.spans)from=std::min(from,start+p.startSeconds-p.leadInSeconds);
+                utauSoundSpans[note.id.toStdString()]={from,start+cache.spans.back().endSeconds};
+            }
         }
         if (!voicebankReadFor(track))
         {
@@ -5163,19 +5876,85 @@ void PianoRollComponent::rebuildUtauSoundSpans()
             }
             utauSoundSpans[note.id.toStdString()] = { soundingStart, soundingEnd };
         }
+        const auto mixContext = track.chineseCvvc ? AudioEngine::utauPhonemeMixContextHash(track) : 0;
         if (track.chineseCvvc && track.utauMode == UtauMode::classic && utauWaveforms)
             for (const auto& clip : track.clips) for (const auto& note : clip.notes)
                 for (const auto& wave : *utauWaveforms)
-                    if (wave.noteId == note.id && wave.audioHash == AudioEngine::utauNoteAudioHash(note)
-                        && !wave.phonemes.empty())
+                    if (wave.noteId == note.id && (wave.phonemeLayoutHash != 0
+                            ? wave.phonemeLayoutHash == AudioEngine::utauNotePhonemeHash(note)
+                            : wave.audioHash == AudioEngine::utauNoteAudioHash(note))
+                        && !wave.phonemes.empty()
+                        && (wave.phonemeMixContextHash==0 || wave.phonemeMixContextHash==mixContext))
                     {
                         // Shared read-only phoneme drawing/hover, without DiffSinger editing semantics.
                         diffSingerPhonemes[note.id.toStdString()] = wave.phonemes;
+                        if (wave.phonemeMixContextHash != mixContext)
+                            for (auto& span : diffSingerPhonemes[note.id.toStdString()]) span.mixEnvelope = {};
                         const auto start = clip.startSeconds + note.startSeconds;
                         utauSoundSpans[note.id.toStdString()] = {
                             start - wave.leadInSeconds, start + wave.phonemes.back().endSeconds };
                         break;
                     }
+        // Both saved layouts and live layouts define the same sounding range;
+        // a plain CV OTO lookup above must not overwrite a restored CVVC span.
+        if(track.chineseCvvc&&track.utauMode==UtauMode::classic)
+            for(const auto& clip:track.clips)for(const auto& note:clip.notes)
+                if(const auto found=diffSingerPhonemes.find(note.id.toStdString());found!=diffSingerPhonemes.end()&&!found->second.empty())
+                {
+                    const auto start=clip.startSeconds+note.startSeconds;auto from=start;
+                    for(const auto& p:found->second)from=std::min(from,start+p.startSeconds-p.leadInSeconds);
+                    utauSoundSpans[note.id.toStdString()]={from,start+found->second.back().endSeconds};
+                }
+    }
+}
+
+void PianoRollComponent::requestCvvcLayouts()
+{
+    // Keep the committed head where the preview put it while the layout-only
+    // background job catches up. Any subsequent edit invalidates this bridge.
+    if (pendingCvvcHead.isNotEmpty() && pendingCvvcHeadRevision == model.revisionNumber()
+        && !diffSingerPhonemes.contains(pendingCvvcHead.toStdString()))
+        if (auto span = utauSoundSpans.find(pendingCvvcHead.toStdString()); span != utauSoundSpans.end())
+            span->second.first = pendingCvvcHeadStart;
+    // The desktop uses background indexing. Offline fixtures can inject their
+    // own metadata without starting unrelated asynchronous work.
+    if(!readsVoicebankInBackground)return;
+    for(const auto& track:snapshot.tracks)
+    {
+        if(!track.chineseCvvc||track.utauMode!=UtauMode::classic||!trackUsesVoicebankSynthesis(track)
+            ||trackIsDiffSinger(track)||!track.voicebankDirectory.isDirectory())continue;
+        const auto context=AudioEngine::utauPhonemeMixContextHash(track);
+        auto missing=false;
+        for(const auto& clip:track.clips)for(const auto& note:clip.notes)
+            if(!backend::isRestLyric(note.label)&&!diffSingerPhonemes.contains(note.id.toStdString()))missing=true;
+        const auto key=context^static_cast<std::uint64_t>(track.id.hashCode64());
+        if(!missing||!cvvcLayoutRequests.insert(key).second)continue;
+        auto data=snapshot;data.tracks={track};
+        const auto revision=model.revisionNumber();
+        juce::Component::SafePointer<PianoRollComponent> safe(this);
+        cvvcLayoutPool.addJob([data=std::move(data),context,key,revision,safe]()
+        {
+            std::vector<std::pair<juce::String,juce::String>> caches;
+            const auto& track=data.tracks.front();
+            for(const auto& clip:track.clips)
+            {
+                backend::UtauRenderRequest request;
+                request.voicebankDirectory=track.voicebankDirectory;request.chineseCvvc=true;request.bpm=data.bpm;
+                request.notes=AudioEngine::utauRequestNotesForClip(data,clip.id);
+                const auto plan=backend::planChineseCvvc(request);
+                for(std::size_t i=0;i<clip.notes.size()&&i<plan.spans.size();++i)
+                    if(!plan.spans[i].empty())caches.emplace_back(clip.notes[i].id,backend::cvvcPhonemeCacheText(
+                        {AudioEngine::utauNotePhonemeHash(clip.notes[i]),context,plan.spans[i]}));
+            }
+            juce::MessageManager::callAsync([safe,key,revision,caches=std::move(caches)]()
+            {
+                if(!safe)return;
+                if(safe->model.revisionNumber()!=revision)
+                {safe->cvvcLayoutRequests.erase(key);safe->refreshFromModel();return;}
+                if(safe->model.rememberCvvcPhonemes(caches,revision))
+                {safe->cvvcLayoutRequests.erase(key);safe->refreshFromModel();}
+            });
+        });
     }
 }
 
@@ -5284,6 +6063,20 @@ void PianoRollComponent::setUtauNoteWaveforms(
     // one for every note in the song, forever.
     if (utauWaveforms == waveforms) return;
     utauWaveforms = std::move(waveforms);
+    const auto revision=model.revisionNumber();
+    snapshot=model.snapshot();expandProjectClipParts(snapshot,true);
+    std::vector<std::pair<juce::String,juce::String>> caches;
+    if(utauWaveforms)for(const auto& track:snapshot.tracks)
+        if(track.chineseCvvc&&track.utauMode==UtauMode::classic&&!trackIsDiffSinger(track))
+        {
+            const auto context=AudioEngine::utauPhonemeMixContextHash(track);
+            for(const auto& clip:track.clips)for(const auto& note:clip.notes)for(const auto& wave:*utauWaveforms)
+                if(wave.noteId==note.id&&wave.phonemeLayoutHash==AudioEngine::utauNotePhonemeHash(note)
+                    &&wave.phonemeMixContextHash==context&&!wave.phonemes.empty())
+                    caches.emplace_back(note.id,backend::cvvcPhonemeCacheText({wave.phonemeLayoutHash,context,wave.phonemes}));
+        }
+    if(model.rememberCvvcPhonemes(caches,revision))
+    {snapshot=model.snapshot();expandProjectClipParts(snapshot,true);}
     rebuildUtauSoundSpans(); rebuildNoteHits();
     repaint();
 }
@@ -5358,6 +6151,8 @@ float PianoRollComponent::notePictureAt(const UtauNoteWaveform& waveform,
                                         const std::vector<AmplitudeEnvelopePoint>& envelope,
                                         std::size_t bucket, bool high)
 {
+    if (std::any_of(waveform.phonemes.begin(), waveform.phonemes.end(), [](const auto& p){return p.envelopePart>0;}))
+        return high ? waveform.maxima[bucket] : waveform.minima[bucket];
     // The envelope on screen, not the one the piece was rendered with.  The
     // two agree in the song, but a render is only ever of the notes selected:
     // the last of them was rendered with no note after it, sang on to its
@@ -5377,6 +6172,8 @@ float PianoRollComponent::noteGhostAt(const UtauNoteWaveform& waveform,
                                       const std::vector<AmplitudeEnvelopePoint>& envelope,
                                       std::size_t bucket)
 {
+    if (std::any_of(waveform.phonemes.begin(), waveform.phonemes.end(), [](const auto& p){return p.envelopePart>0;}))
+        return std::max(waveform.maxima[bucket], -waveform.minima[bucket]);
     // Between the envelope's first and last points its shape is left out:
     // that is what the lane's line is there to change.  Past them the
     // envelope holds the gain it ends on, and no point in the lane can move
@@ -5456,7 +6253,7 @@ int PianoRollComponent::drawAmplitudeLaneWaveforms(juce::Graphics& g)
                     const auto gain=backend::envelopeGainFromDb(amplitudeDbAt(envelope,local));
                     const auto ghost=nativeScale*level,shaped=ghost*gain;
                     g.setColour(Palette::noteLight.withAlpha(selected?.16f:.09f));g.fillRect(x,nativeFloor-ghost,1.f,ghost);
-                    g.setColour(juce::Colour(0xff72d6aa).withAlpha(selected?.46f:.26f));g.fillRect(x,nativeFloor-shaped,1.f,shaped);
+                    g.setColour(rollRole(juce::Colour(0xff72d6aa), Palette::noteEdge).withAlpha(selected?.46f:.26f));g.fillRect(x,nativeFloor-shaped,1.f,shaped);
                 }
                 ++drawn;
             }
@@ -5498,7 +6295,8 @@ int PianoRollComponent::drawAmplitudeLaneWaveforms(juce::Graphics& g)
         // drawn until the new audio arrives.
         // The audio hash, not the render hash: the lane draws the piece
         // before the envelope, and an envelope edit leaves that piece alone.
-        if (waveform.audioHash != AudioEngine::utauNoteAudioHash(*note)) continue;
+        if (waveform.audioHash != AudioEngine::utauNoteAudioHash(*note)
+            || (usesCvvcEnvelope(note->id) && waveform.renderHash != AudioEngine::utauNoteRenderHash(*note))) continue;
 
         // Its own peak reaches the 100% line, so the envelope's 100% and the
         // sound's natural level are the same height and a point at half the
@@ -5584,7 +6382,8 @@ void PianoRollComponent::drawUtauNoteWaveforms(juce::Graphics& g)
                 // how loud the audio is and nothing else about it, so the
                 // piece already rendered is still the right piece after an
                 // envelope edit, and only its shape has to be redrawn.
-                if (waveform.audioHash != AudioEngine::utauNoteAudioHash(note)) continue;
+                if (waveform.audioHash != AudioEngine::utauNoteAudioHash(note)
+                    || (usesCvvcEnvelope(note.id) && waveform.renderHash != AudioEngine::utauNoteRenderHash(note))) continue;
                 if (waveform.unshapedMaxima.empty() || waveform.durationSeconds <= 0.0) continue;
                 // Always the piece shaped by the envelope on screen -- which
                 // during a drag is the stroke under the pointer, so the picture
@@ -5635,16 +6434,53 @@ void PianoRollComponent::drawUtauNoteWaveforms(juce::Graphics& g)
     }
 }
 
+std::optional<PianoRollComponent::NativeOverlapPair> PianoRollComponent::overlapPairFor(
+    const juce::String& noteId,double time) const
+{
+    const TrackData* ownerTrack=nullptr;const ClipData* owner=nullptr;const NoteData* target=nullptr;
+    for(const auto& track:snapshot.tracks)for(const auto& clip:track.clips)
+        for(const auto& note:clip.notes)if(note.id==noteId){ownerTrack=&track;owner=&clip;target=&note;}
+    if(sourceEditMode||!ownerTrack||!owner||!target||!physicalOverlapSource(*owner)||!clipIsVisible(*ownerTrack,*owner))return {};
+    if(!std::isfinite(time))time=owner->startSeconds+target->startSeconds+target->durationSeconds*.5;
+    std::optional<NativeOverlapPair> chosen;double best=std::numeric_limits<double>::infinity();
+    for(const auto& other:ownerTrack->clips)
+    {
+        if(&other==owner||!physicalOverlapSource(other)||other.notes.empty())continue;
+        const auto overlap=physicalOverlapWindow(*owner).getIntersectionWith(physicalOverlapWindow(other));
+        if(overlap.getLength()<=1.e-7)continue;
+        // Never choose an unrelated nearby source: EVERY candidate contains the
+        // explicitly requested note's physical source. Time only disambiguates
+        // that source's own overlaps, not a nearest-note/source fallback.
+        const auto distance=time<overlap.getStart()?overlap.getStart()-time:time>overlap.getEnd()?time-overlap.getEnd():0.0;
+        if(chosen&&distance>=best)continue;
+        best=distance;const bool ownerFirst=physicalOverlapWindow(*owner).getStart()<=physicalOverlapWindow(other).getStart();
+        chosen=NativeOverlapPair{ownerTrack,ownerFirst?owner:&other,ownerFirst?&other:owner,overlap.getStart(),overlap.getEnd()};
+    }
+    return chosen;
+}
+void PianoRollComponent::openNativeOverlapSelector(const juce::String& noteId,double time)
+{
+    closeNativeOverlapSelector();refreshFromModel();const auto pair=overlapPairFor(noteId,time);if(!pair)return;
+    if(!std::isfinite(time))time=(pair->from+pair->to)*.5;
+    nativeOverlapSelector=NativeOverlapSelectorState{noteId,pair->left->notes.front().id,pair->right->notes.front().id,time,model.revisionNumber()};
+    if(isShowing())grabKeyboardFocus();repaint();
+}
+void PianoRollComponent::closeNativeOverlapSelector()
+{
+    nativeOverlapSelector.reset();nativeOverlapSourceHits.clear();nativeOverlapCardCount=0;nativeOverlapSelectorClose={};repaint();
+}
+
 void PianoRollComponent::drawNativeAudioOverlaps(juce::Graphics& g)
 {
-    nativeOverlapHints.clear();nativeOverlapSourceHits.clear();if(sourceEditMode)return;
+    nativeOverlapHints.clear();nativeOverlapSourceHits.clear();nativeOverlapLines.clear();nativeOverlapCardCount=0;nativeOverlapSelectorClose={};
+    if(nativeOverlapSelector&&nativeOverlapSelector->revision!=model.revisionNumber())closeNativeOverlapSelector();
+    if(sourceEditMode)return;
     auto visible=g.getClipBounds().toFloat();
     if(const auto* viewport=findParentComponentOfClass<juce::Viewport>())visible=viewport->getViewArea().toFloat();
-    int cardIndex=0;
     for(const auto& track:snapshot.tracks)
     {
-        if(!trackShowsAllNativeRegions(track)||(focusedTrack.isNotEmpty()&&track.id!=focusedTrack))continue;
-        std::vector<const ClipData*> sources;for(const auto& clip:track.clips)if(clipIsVisible(track,clip)&&clip.audioLength()>1.e-9&&clip.sourceFile!=juce::File{})sources.push_back(&clip);
+        if(focusedTrack.isNotEmpty()&&track.id!=focusedTrack)continue;
+        std::vector<const ClipData*> sources;for(const auto& clip:track.clips)if(physicalOverlapSource(clip))sources.push_back(&clip);
         std::stable_sort(sources.begin(),sources.end(),[](const auto* a,const auto* b){return a->startSeconds+a->audioStartSeconds<b->startSeconds+b->audioStartSeconds;});
         for(std::size_t i=0;i<sources.size();++i)for(std::size_t j=i+1;j<sources.size();++j)
         {
@@ -5653,23 +6489,43 @@ void PianoRollComponent::drawNativeAudioOverlaps(juce::Graphics& g)
             const auto begin=std::max(a.startSeconds+a.audioStartSeconds,b.startSeconds+b.audioStartSeconds);
             const auto end=std::min(a.startSeconds+a.audioStartSeconds+a.audioLength(),b.startSeconds+b.audioStartSeconds+b.audioLength());
             if(end-begin<=1.e-7)continue;const auto left=timeToX(begin),right=timeToX(end);
-            if(right<visible.getX()+58||left>visible.getRight())continue;
-            const juce::Rectangle<float> band(left,visible.getY(),right-left,visible.getHeight());
-            const auto amber=juce::Colour(0xffffbf69),blue=juce::Colour(0xff70dcff);
-            {const juce::Graphics::ScopedSaveState save(g);g.reduceClipRegion(band.toNearestInt());
-                g.setColour(amber.withAlpha(.08f));g.fillRect(band);g.setColour(amber.withAlpha(.20f));
-                for(auto x=band.getX()-band.getHeight();x<band.getRight();x+=14)g.drawLine(x,band.getBottom(),x+band.getHeight(),band.getY(),1.f);}
-            g.setColour(amber.withAlpha(.8f));g.drawVerticalLine(static_cast<int>(left),band.getY(),band.getBottom());g.drawVerticalLine(static_cast<int>(right),band.getY(),band.getBottom());
+            const bool matching = nativeOverlapSelector && !a.notes.empty() && !b.notes.empty()
+                && ((nativeOverlapSelector->leftSourceId==a.notes.front().id&&nativeOverlapSelector->rightSourceId==b.notes.front().id)
+                    ||(nativeOverlapSelector->leftSourceId==b.notes.front().id&&nativeOverlapSelector->rightSourceId==a.notes.front().id));
+            if(!matching&&(!clipIsVisible(track,a)&&!clipIsVisible(track,b)))continue;
+            if(!matching&&(right<visible.getX()+58||left>visible.getRight()))continue;
+            const auto amber=juce::Colour(0xffffbf69),blue=rollRole(juce::Colour(0xff70dcff), Palette::heading);
+            // Optional overlap marks belong to the two actual note rows, never
+            // the full-height timeline. The explicit picker is independent.
+            if(showOverlap)for(const auto& an:a.notes)for(const auto& bn:b.notes)
+            {
+                const auto noteBegin=std::max({begin,a.startSeconds+an.startSeconds,b.startSeconds+bn.startSeconds});
+                const auto noteEnd=std::min({end,a.startSeconds+an.startSeconds+an.durationSeconds,b.startSeconds+bn.startSeconds+bn.durationSeconds});
+                if(noteEnd-noteBegin<=1.e-7)continue;
+                const auto mark=[&](const ClipData& owner,const NoteData& note)
+                {
+                    if(!clipIsVisible(track,owner))return;
+                    const juce::Rectangle<float> line(timeToX(noteBegin),midiToY(note.midiNote)+rowHeight*.5f-1.f,
+                        timeToX(noteEnd)-timeToX(noteBegin),2.f);
+                    g.setColour(juce::Colour(0xffffd54f));g.fillRect(line);
+                    nativeOverlapLines.emplace_back(note.id,line);
+                };
+                mark(a,an);mark(b,bn);
+            }
             const auto title=strings.text("native.overlap")+" "+juce::String((end-begin)*1000,1)+" ms · "+strings.text("native.overlapMix");
             const auto tip=title+"\n"+strings.text("native.overlapEarlier")+": "+a.sourceFile.getFileName()+"\n"+strings.text("native.overlapLater")+": "+b.sourceFile.getFileName()
                 +"\n"+juce::String(begin,3)+" – "+juce::String(end,3)+" s";
-            if(cardIndex<4)
+            if(matching&&nativeOverlapCardCount==0)
             {
                 const auto width=std::min(270.f,std::max(190.f,right-left));
-                const juce::Rectangle<float> card(juce::jlimit(visible.getX()+60,std::max(visible.getX()+60,visible.getRight()-width-4),left),
-                    visible.getY()+4+cardIndex*85,width,80);
-                g.setColour(juce::Colour(0xff182126).withAlpha(.95f));g.fillRoundedRectangle(card,5);g.setColour(amber);g.drawRoundedRectangle(card,5,1.2f);
-                g.setFont(11.f);g.drawText(title,card.reduced(7,3).withHeight(15),juce::Justification::centredLeft);
+                const juce::Rectangle<float> card(juce::jlimit(visible.getX()+60,std::max(visible.getX()+60,visible.getRight()-width-4),timeToX(nativeOverlapSelector->targetSeconds)),
+                    visible.getY()+4,width,80);
+                g.setColour(rollRole(juce::Colour(0xff182126), Palette::panelRaised).withAlpha(.95f));g.fillRoundedRectangle(card,5);g.setColour(amber);g.drawRoundedRectangle(card,5,1.2f);
+                g.setColour(rollText(amber, Palette::graphBackground.overlaidWith(Palette::panelRaised.withAlpha(.95f))));
+                nativeOverlapSelectorClose={card.getRight()-19,card.getY()+2,16,16};
+                g.setFont(11.f);g.drawText(strings.text("Material selector"),
+                    card.reduced(7,3).withHeight(15).withTrimmedRight(18),juce::Justification::centredLeft);
+                g.drawText("x",nativeOverlapSelectorClose,juce::Justification::centred);
                 const auto wave=[&](const ClipData& clip,bool later)
                 {
                     const auto row=card.reduced(7,0).withY(card.getY()+20+(later?28:0)).withHeight(25);
@@ -5678,12 +6534,14 @@ void PianoRollComponent::drawNativeAudioOverlaps(juce::Graphics& g)
                         :focusedClip.isNotEmpty()&&clip.id==focusedClip;
                     if(active)
                     {g.setColour(blue.withAlpha(.12f));g.fillRoundedRectangle(row.expanded(3,1),3);}
-                    const NativeAudioFocusLayer focus(g,opacity);
                     if(!clip.notes.empty())nativeOverlapSourceHits.push_back({row.expanded(3,1),clip.notes.front().id});
-                    g.setColour(later?blue:amber);g.setFont(10.f);
+                    const auto choiceSurface=Palette::graphBackground.overlaidWith(Palette::panelRaised.withAlpha(.95f))
+                        .overlaidWith(active ? blue.withAlpha(.12f) : juce::Colours::transparentBlack);
+                    g.setColour(rollText(later?blue:amber, choiceSurface));g.setFont(10.f);
                     g.drawText(strings.text(later?"native.overlapLater":"native.overlapEarlier")+" · "+clip.sourceFile.getFileName(),row.withHeight(11),juce::Justification::centredLeft,true);
                     const auto plot=row.withY(row.getY()+12).withHeight(12);const auto found=thumbnails.find(clip.sourceFile.getFullPathName().toStdString());
                     if(found==thumbnails.end()){g.drawText("…",plot,juce::Justification::centred);return;}
+                    const NativeAudioFocusLayer focus(g,opacity); // dim waveform only, never selector actions
                     const auto clock=nativeClipClock(clip);juce::Path shape;
                     for(int k=0;k<static_cast<int>(plot.getWidth());++k)
                     {
@@ -5696,9 +6554,9 @@ void PianoRollComponent::drawNativeAudioOverlaps(juce::Graphics& g)
                     }
                     g.strokePath(shape,juce::PathStrokeType(1.f));
                 };
-                wave(a,false);wave(b,true);nativeOverlapHints.push_back({card,tip});++cardIndex;
+                wave(a,false);wave(b,true);nativeOverlapHints.push_back({card,tip});++nativeOverlapCardCount;
             }
-            nativeOverlapHints.push_back({band,tip});
+
         }
     }
 }
@@ -5856,7 +6714,7 @@ void PianoRollComponent::changeListenerCallback(juce::ChangeBroadcaster* source)
         // simplifier prevents these rebuilds from exposing dense 5 ms frames.
         if (dragMode == DragMode::continuousFlag && model.revisionNumber() != continuousFlagRevision)
             cancelContinuousFlag();
-        pitchAnchorCache.clear();
+        pitchAnchorCache.clear();connectionPitchCache.clear();protocolPitchCache.clear();clearPitchPlanPreview();
         sharedLineCache.clear(); nativeEnvelopeCache.clear();
         draggedSharedKey = 0;
         rebuildLayout();
@@ -5908,8 +6766,10 @@ bool PianoRollComponent::diagnosticGrabConsonantHandle(std::size_t index)
                 consonantMaximumPreutterance = handle->maximumPreutterance;
                 previewConsonantPreutterance = handle->currentPreutterance;
                 previewConsonantVelocity = handle->currentVelocity;
+                previewConsonantVelocityBeforeDrag = handle->currentVelocity;
                 consonantSetsPin = handle->setsPin;
                 consonantOverlapSeconds = handle->overlapSeconds;
+                consonantCvvcLead = handle->leadForVelocity;
                 consonantDragTravelled = false;
                 dragMode = DragMode::consonantLeadIn;
                 return true;
@@ -5922,6 +6782,25 @@ void PianoRollComponent::dragConsonantTo(double cursorSeconds)
     const auto requested = juce::jlimit(consonantMinimumPreutterance,
         consonantMaximumPreutterance,
         consonantNoteAbsoluteStart - cursorSeconds);
+    if (consonantCvvcLead)
+    {
+        // Invert the complete sounding lead, including VC advance and OTO
+        // caps. The callback only evaluates captured timings, with no I/O.
+        int low = -102200, high = 102300;
+        while (high - low > 1)
+        {
+            const auto mid = low + (high - low) / 2;
+            if (consonantCvvcLead(mid) > requested) low = mid; else high = mid;
+        }
+        previewConsonantVelocity = std::abs(consonantCvvcLead(low) - requested)
+            < std::abs(consonantCvvcLead(high) - requested) ? low : high;
+        // Preserve the current value on a capped plateau.
+        if (std::abs(consonantCvvcLead(previewConsonantVelocity) - requested)
+            >= std::abs(consonantCvvcLead(previewConsonantVelocityBeforeDrag) - requested))
+            previewConsonantVelocity = previewConsonantVelocityBeforeDrag;
+        previewConsonantPreutterance = consonantCvvcLead(previewConsonantVelocity);
+        return;
+    }
     if (consonantSetsPin)
     {
         // Straight to the lead-in.  谋 writes what the drag asked for rather
@@ -6500,9 +7379,61 @@ PianoRollComponent::consonantHandleAt(juce::Point<float> position) const
                 const auto distance = std::abs(position.x
                                                - timeToX(span->second.first));
                 if (distance > bestDistance) continue;
+                if (!voicebankReadFor(track)) continue;
                 const auto currentVelocity =
                     note.utauConsonantVelocity != inheritedUtauConsonantVelocity
                     ? note.utauConsonantVelocity : track.utauConsonantVelocity;
+                if (track.chineseCvvc && track.utauMode == UtauMode::classic)
+                {
+                    const auto pieces = diffSingerPhonemes.find(note.id.toStdString());
+                    if (pieces == diffSingerPhonemes.end() || pieces->second.empty()) continue;
+                    struct PieceTiming { backend::UtauSampleTiming timing; double offset; int part; };
+                    std::vector<PieceTiming> timings;
+                    std::optional<backend::UtauSampleTiming> cv;
+                    std::optional<double> previousDuration;
+                    auto vcMidi = note.midiNote;
+                    for (const auto& previous : clip.notes)
+                        if (previous.id != note.id && !backend::isRestLyric(previous.label)
+                            && previous.label.isNotEmpty()
+                            && std::abs(previous.startSeconds + previous.durationSeconds - note.startSeconds) < .002)
+                        { previousDuration = previous.durationSeconds; vcMidi = previous.midiNote; }
+                    for (const auto& piece : pieces->second)
+                    {
+                        auto timing = backend::UtauRenderer::mappedAliasTiming(track.voicebankDirectory,
+                            piece.token, piece.kind == "VC" ? vcMidi : note.midiNote);
+                        if (!timing) continue;
+                        if (piece.kind == "CV") cv = timing;
+                        if ((piece.startSeconds==0 || piece.kind=="CV" || piece.kind=="VCV" || piece.kind=="manual") && note.ownOto())
+                            timing = backend::UtauRenderer::sampleTiming(track.voicebankDirectory,
+                                piece.token, note.midiNote, 100, false, false, note.ownOto());
+                        if (timing) timings.push_back({*timing, piece.startSeconds, piece.envelopePart});
+                    }
+                    if (timings.empty()) continue;
+                    const auto beat = 60.0 / std::max(1.0, snapshot.tempoAtSeconds(absoluteStart));
+                    const auto lead = [timings=std::move(timings), cv, previousDuration, beat,
+                        start=note.startSeconds, duration=note.durationSeconds, end=pieces->second.back().endSeconds,
+                        boundaries=note.cvvcBoundaries](int velocity)
+                    {
+                        double result = 0;
+                        std::vector<double> starts;std::vector<int> parts;
+                        for (const auto& piece : timings)
+                        {
+                            starts.push_back(piece.part==1 && cv
+                                ? -backend::cvvcTransitionDuration(*cv,beat,previousDuration,velocity) : piece.offset);
+                            parts.push_back(piece.part);
+                        }
+                        backend::applyCvvcBoundaries(starts,parts,duration,end,boundaries);
+                        for(size_t i=0;i<timings.size();++i)
+                            result=std::max(result,backend::scaledUtauPreutterance(timings[i].timing,velocity)-starts[i]);
+                        return std::min(std::max(0.0, start), result);
+                    };
+                    const auto minimum = lead(102300), maximum = lead(-102200);
+                    if (maximum - minimum <= 1.e-5) continue;
+                    bestDistance = distance;
+                    best = ConsonantHandleInfo {note.id, absoluteStart, 0, 0, minimum, maximum,
+                        absoluteStart - span->second.first, currentVelocity, false, 0, lead};
+                    continue;
+                }
                 const auto base = backend::UtauRenderer::sampleTiming(
                     track.voicebankDirectory, note.label, note.midiNote, 100,
                     utauModeUsesRegions(track.utauMode),
@@ -6621,6 +7552,7 @@ void PianoRollComponent::beginInlineAliasEdit(const NoteHit& hit)
     const auto aboveWaveform = bounds.getY() != hit.bounds.getY();
     const auto labelBottom = bounds.getBottom();
 
+    ++inlineAliasGeneration;inlineAliasSuspended=false;suspendedAliasNoteId.clear();
     inlineAliasNoteId = hit.id;
     inlineAliasEditor.setText(currentAlias, false);
     bounds.setWidth(std::max(84.0f, bounds.getWidth()));
@@ -6635,9 +7567,34 @@ void PianoRollComponent::beginInlineAliasEdit(const NoteHit& hit)
     inlineAliasEditor.selectAll();
 }
 
+bool PianoRollComponent::diagnosticBeginAliasEdit(const juce::String& noteId)
+{
+    if(!findNote(noteId))return false;
+    for(const auto& hit:noteHits)if(hit.id==noteId){beginInlineAliasEdit(hit);return inlineAliasNoteId==noteId&&inlineAliasEditor.isVisible();}
+    return false;
+}
+
+bool PianoRollComponent::suspendInlineAliasInput(const juce::String& noteId)
+{
+    if(noteId.isEmpty()||inlineAliasNoteId!=noteId||!inlineAliasEditor.isVisible()||!findNote(noteId))return false;
+    inlineAliasSuspended=true;suspendedAliasNoteId=noteId;suspendedAliasText=inlineAliasEditor.getText();
+    suspendedAliasGeneration=inlineAliasGeneration;suspendedAliasRevision=model.revisionNumber();return true;
+}
+void PianoRollComponent::resumeInlineAliasInput(const juce::String& noteId,bool discard)
+{
+    if(!inlineAliasSuspended||suspendedAliasNoteId!=noteId)return;
+    const bool same=inlineAliasNoteId==noteId&&inlineAliasGeneration==suspendedAliasGeneration&&inlineAliasEditor.isVisible();
+    const bool valid=same&&model.revisionNumber()==suspendedAliasRevision&&findNote(noteId);
+    const auto text=suspendedAliasText;inlineAliasSuspended=false;suspendedAliasNoteId.clear();
+    if(!same)return;
+    if(discard||!valid){finishInlineAliasEdit(false);return;}
+    inlineAliasEditor.setText(text,false);if(inlineAliasEditor.isShowing())inlineAliasEditor.grabKeyboardFocus();repaint();
+}
+
 void PianoRollComponent::finishInlineAliasEdit(bool accept)
 {
-    if (inlineAliasNoteId.isEmpty()) return;
+    if (inlineAliasNoteId.isEmpty() || (accept&&inlineAliasSuspended)) return;
+    inlineAliasSuspended=false;suspendedAliasNoteId.clear();
     const auto noteId = inlineAliasNoteId;
     inlineAliasNoteId.clear();
     const auto alias = inlineAliasEditor.getText();
@@ -6794,6 +7751,8 @@ void PianoRollComponent::drawNoteHints(juce::Graphics& g) const
 
 void PianoRollComponent::paint(juce::Graphics& g)
 {
+    const auto pitchSelectionCurrent = selectedPoint && selectedPoint->kind == PointSelection::pitch
+        && selectedPoint->revision == model.revisionNumber();
     // Preview the exact same source-clock warp that mouse-up commits. All
     // layers, including waveform and measured F0, see these temporary notes.
     struct RestoreSnapshot
@@ -6895,9 +7854,12 @@ void PianoRollComponent::paint(juce::Graphics& g)
                 // the right of them.  C stays brighter than the rest so an
                 // octave can still be found at a glance.
                 const auto black = juce::MidiMessage::isMidiNoteBlack(midi);
-                g.setColour(midi % 12 == 0 ? Palette::text
+                const auto keySurface = black
+                    ? Palette::panelRaised.overlaidWith(juce::Colours::black.withAlpha(0.55f))
+                    : Palette::panelRaised;
+                g.setColour(rollText(midi % 12 == 0 ? Palette::text
                            : black ? Palette::textMuted.brighter(0.40f)
-                                   : Palette::textMuted);
+                                   : Palette::textMuted, keySurface, midi % 12 != 0));
                 g.setFont(juce::jlimit(7.0f, 10.0f, rowHeight - 2.0f));
                 const auto name = juce::MidiMessage::getMidiNoteName(midi, true, true, 4);
                 if (black)
@@ -6938,7 +7900,7 @@ void PianoRollComponent::paint(juce::Graphics& g)
     {
         const auto x = timeToX(snapshot.secondsForQuarterPosition(change.quarterPosition));
         if (x < 58.0f || x > getWidth()) continue;
-        g.setColour(juce::Colour(0xffffa94d).withAlpha(0.72f));
+        g.setColour(rollRole(juce::Colour(0xffffa94d), Palette::heading).withAlpha(0.72f));
         g.drawVerticalLine(static_cast<int>(x), 0.0f, static_cast<float>(getHeight()));
     }
 
@@ -7007,9 +7969,9 @@ void PianoRollComponent::paint(juce::Graphics& g)
         }
     }
 
-    static const std::array<juce::Colour, 5> contourColours {
+    const std::array<juce::Colour, 5> contourColours {
         Palette::accentLight, Palette::accent, Palette::noteFill,
-        juce::Colour(0xff45b8aa), juce::Colour(0xffad7ad6)
+        rollRole(juce::Colour(0xff45b8aa), Palette::noteEdge), rollRole(juce::Colour(0xffad7ad6), Palette::accent)
     };
     struct PositionedNote
     {
@@ -7203,8 +8165,8 @@ void PianoRollComponent::paint(juce::Graphics& g)
                             + (span.second - clip.startSeconds - clip.audioStartSeconds) * sourceScale;
                     }
                 const auto nativeRangeColour = note.nativeUnpitched
-                    ? juce::Colour(0xffb0b7c3) : juce::Colour(0xff55caff);
-                const auto nativeEnvelopeColour = juce::Colour(0xff64ffa3);
+                    ? rollRole(juce::Colour(0xffb0b7c3), Palette::textMuted) : rollRole(juce::Colour(0xff55caff), Palette::heading);
+                const auto nativeEnvelopeColour = rollRole(juce::Colour(0xff64ffa3), Palette::noteEdge);
                 const auto noteHasSelection = selectedNotes.contains(note.id.toStdString()) || note.id == selectedNote;
                 const auto previewingConsonant = note.id == draggedNote
                     && dragMode == DragMode::consonantLeadIn;
@@ -7294,30 +8256,31 @@ void PianoRollComponent::paint(juce::Graphics& g)
                     {
                         if (!dataIsUtau)
                         {
-                            g.setColour(juce::Colours::black.withAlpha(.72f));
+                            g.setColour(rollRole(juce::Colours::black, Palette::panelRaised).withAlpha(.72f));
                             g.drawRoundedRectangle(displayBounds, 3.0f, noteHasSelection ? 4.2f : 3.6f);
                             g.setColour(nativeRangeColour);
                             g.drawRoundedRectangle(displayBounds, 3.0f, noteHasSelection ? 2.8f : 2.1f);
                         }
                         else
                         {
-                            g.setColour(juce::Colour(0xffffbd78).withAlpha(0.82f));
+                            g.setColour(rollRole(juce::Colour(0xffffbd78), Palette::heading).withAlpha(0.82f));
                             g.drawRoundedRectangle(displayBounds, 3.0f, 1.5f);
                         }
                     }
 
-                    if (const auto found=diffSingerPhonemes.find(note.id.toStdString());dataIsUtau && found!=diffSingerPhonemes.end())
+                    if (const auto found=diffSingerPhonemes.find(note.id.toStdString());dataIsUtau && found!=diffSingerPhonemes.end()
+                        && phonemeInformationVisible(note.id))
                         for (const auto& phone:found->second)
                         {
                             const auto left=timeToX(absoluteStart+phone.startSeconds);
                             const auto right=timeToX(absoluteStart+phone.endSeconds);
                             auto box=juce::Rectangle<float>(left,bounds.getY()+1,std::max(1.0f,right-left),bounds.getHeight()-2);
-                            g.setColour((phone.kind=="C" || phone.kind=="VC")?juce::Colour(0xff55a6be).withAlpha(.24f)
-                                :phone.kind=="V"?juce::Colour(0xff7fc995).withAlpha(.13f):Palette::textMuted.withAlpha(.10f));
+                            g.setColour((phone.kind=="C" || phone.kind=="VC")?rollRole(juce::Colour(0xff55a6be), Palette::accent).withAlpha(.24f)
+                                :phone.kind=="V"?rollRole(juce::Colour(0xff7fc995), Palette::noteLight).withAlpha(.13f):Palette::textMuted.withAlpha(.10f));
                             g.fillRect(box);
-                            g.setColour(juce::Colour(0xff8ac5d6).withAlpha(.65f));
+                            g.setColour(rollRole(juce::Colour(0xff8ac5d6), Palette::heading).withAlpha(.65f));
                             g.drawVerticalLine((int)left,box.getY(),box.getBottom());
-                            if (showLyrics && (phone.kind=="C" || phone.kind=="VC" || phone.kind=="release") && box.getWidth()>10)
+                            if ((showPhonemeInfo || (showLyrics && (phone.kind=="C" || phone.kind=="VC" || phone.kind=="release"))) && box.getWidth()>10)
                             {
                                 g.setFont(11);g.setColour(Palette::text);
                                 g.drawFittedText(diffSingerPhonemeLabel(phone.token),box.reduced(2).toNearestInt(),juce::Justification::centred,1,.65f);
@@ -7352,9 +8315,9 @@ void PianoRollComponent::paint(juce::Graphics& g)
                                 displaySpanSeconds, displayLeadIn, &regions);
                         if (fractions)
                         {
-                            static const std::array<juce::Colour, 4> regionColours {
-                                juce::Colour(0xffff7043), juce::Colour(0xffffca28),
-                                juce::Colour(0xff4fc3f7), juce::Colour(0xff81c784)
+                            const std::array<juce::Colour, 4> regionColours {
+                                rollRole(juce::Colour(0xffff7043), Palette::heading), rollRole(juce::Colour(0xffffca28), Palette::accent),
+                                rollRole(juce::Colour(0xff4fc3f7), Palette::noteLight), rollRole(juce::Colour(0xff81c784), Palette::noteEdge)
                             };
                             const auto left = displayBounds.getX();
                             const auto width = displayBounds.getWidth();
@@ -7384,8 +8347,8 @@ void PianoRollComponent::paint(juce::Graphics& g)
                             }
                             for (std::size_t index = 0; index + 1 < bands; ++index)
                             {
-                                g.setColour(regionColours[index + 1].withAlpha(
-                                    guideOnly ? 0.42f : (dragging ? 1.0f : 0.9f)));
+                                g.setColour(rollInk(regionColours[index + 1].withAlpha(
+                                    guideOnly ? 0.42f : (dragging ? 1.0f : 0.9f)), Palette::graphBackground));
                                 g.drawLine(edges[index + 1],
                                     displayBounds.getY() + 1.0f, edges[index + 1],
                                     displayBounds.getBottom() - 1.0f,
@@ -7446,20 +8409,20 @@ void PianoRollComponent::paint(juce::Graphics& g)
                                 case NativeSegmentRole::consonant:
                                     return Palette::noteLight;
                                 case NativeSegmentRole::transition:
-                                    return juce::Colour(0xff79c9c3);
+                                    return rollRole(juce::Colour(0xff79c9c3), Palette::accent);
                                 case NativeSegmentRole::unknown:
                                     return Palette::textMuted;
                                 case NativeSegmentRole::silence:
                                     return Palette::panelRaised;
                                 case NativeSegmentRole::breath:
-                                    return juce::Colour(0xff9fc6e8);
+                                    return rollRole(juce::Colour(0xff9fc6e8), Palette::textMuted);
                                 case NativeSegmentRole::noise:
-                                    return juce::Colour(0xffc2a7de);
+                                    return rollRole(juce::Colour(0xffc2a7de), Palette::accent);
                                 case NativeSegmentRole::ending:
-                                    return juce::Colour(0xff6ea6a2);
+                                    return rollRole(juce::Colour(0xff6ea6a2), Palette::heading);
                                 case NativeSegmentRole::vowel:
-                                    return segment.stretchable ? juce::Colour(0xff81c784)
-                                                               : juce::Colour(0xff4fc3f7);
+                                    return segment.stretchable ? rollRole(juce::Colour(0xff81c784), Palette::noteEdge)
+                                                               : rollRole(juce::Colour(0xff4fc3f7), Palette::noteLight);
                             }
                             return Palette::noteFill;
                         };
@@ -7483,15 +8446,21 @@ void PianoRollComponent::paint(juce::Graphics& g)
                             }
                             if (index > 0)
                             {
-                                g.setColour(segmentColour(segment).withAlpha(
-                                    segment.role == NativeSegmentRole::unknown ? 0.42f : 0.86f));
+                                g.setColour(rollInk(segmentColour(segment).withAlpha(
+                                    segment.role == NativeSegmentRole::unknown ? 0.42f : 0.86f), Palette::graphBackground));
                                 g.drawVerticalLine(static_cast<int>(std::lround(segmentX)),
                                     displayBounds.getY() + 1.0f,
                                     displayBounds.getBottom() - 1.0f);
                             }
                             const auto alias = segment.alias.trim().isEmpty()
                                 ? juce::String("-") : segment.alias.trim();
-                            if (!note.nativeUnpitched && showLyrics && segmentWidth >= 22.0f && (note.nativeSegments.size() > 1
+                            // Carried C/V snapshots keep their original aliases for
+                            // sound fidelity. Do not let inherited '-' segment labels
+                            // hide the newly named pronunciation on the piano roll.
+                            const bool inheritedPlaceholder=!dataIsUtau&&(alias=="-"||alias=="_")
+                                &&note.materialAudioId.isNotEmpty()&&note.materialRegionId.isNotEmpty()
+                                &&note.label.isNotEmpty()&&note.label!="-"&&note.label!="_";
+                            if (!inheritedPlaceholder && !note.nativeUnpitched && showLyrics && segmentWidth >= 22.0f && (note.nativeSegments.size() > 1
                                 || alias == "-" || alias == "_"))
                             {
                                 const auto alpha = segment.role == NativeSegmentRole::unknown ? 0.60f : 0.86f;
@@ -7503,7 +8472,11 @@ void PianoRollComponent::paint(juce::Graphics& g)
                                     waveformLabels.push_back({alias, aliasBounds, alpha});
                                 else
                                 {
-                                    g.setColour(Palette::text.withAlpha(alpha));
+                                    g.setColour(rollText(Palette::text.withAlpha(alpha),
+                                        Palette::graphBackground.overlaidWith(segmentColour(segment).withAlpha(dataIsUtau
+                                            ? segment.role == NativeSegmentRole::unknown ? .12f
+                                                : segment.role == NativeSegmentRole::transition ? .25f : .20f
+                                            : 0.0f))));
                                     g.setFont(std::min(10.0f, std::max(7.0f, displayBounds.getHeight() - 3.0f)));
                                     g.drawFittedText(alias, originalBounds.toNearestInt().reduced(3, 0),
                                         juce::Justification::centredLeft, 1);
@@ -7545,12 +8518,12 @@ void PianoRollComponent::paint(juce::Graphics& g)
                     // below is placed clear of the shape, which rises above the
                     // note whenever the gain goes over unity.
                     std::vector<AmplitudeEnvelopePoint> shownEnvelope;
-                    if (showEnvelope && tool != Tool::amplitude)
+                    if (showEnvelope && tool != Tool::amplitude && !usesCvvcEnvelope(note.id))
                         shownEnvelope = draggedNote == note.id
                                 && dragMode == DragMode::amplitudePoint
                                 && !amplitudeStroke.empty()
                             ? amplitudeStroke : amplitudeEnvelopeFor(note, absoluteStart);
-                    if (showEnvelope && tool != Tool::amplitude)
+                    if (showEnvelope && tool != Tool::amplitude && !usesCvvcEnvelope(note.id))
                     {
                         shownEnvelope=effectiveAmplitudeEnvelope(note,absoluteStart,shownEnvelope);
                         const auto& envelope = shownEnvelope;
@@ -7591,14 +8564,14 @@ void PianoRollComponent::paint(juce::Graphics& g)
                             g.reduceClipRegion(envelopeClip.getSmallestIntegerContainer());
                             if (dataIsUtau)
                             {
-                                g.setColour(juce::Colour(0xff72d6aa).withAlpha(lit ? 0.30f : 0.16f));
+                                g.setColour(rollRole(juce::Colour(0xff72d6aa), Palette::noteEdge).withAlpha(lit ? 0.30f : 0.16f));
                                 g.fillPath(shape);
-                                g.setColour(juce::Colour(0xff72d6aa).withAlpha(lit ? 0.95f : 0.60f));
+                                g.setColour(rollRole(juce::Colour(0xff72d6aa), Palette::noteEdge).withAlpha(lit ? 0.95f : 0.60f));
                                 g.strokePath(ridge, juce::PathStrokeType(lit ? 1.8f : 1.2f));
                             }
                             else
                             {
-                                g.setColour(juce::Colours::black.withAlpha(.72f));
+                                g.setColour(rollRole(juce::Colours::black, Palette::panelRaised).withAlpha(.72f));
                                 g.strokePath(shape, juce::PathStrokeType(lit ? 4.2f : 3.6f));
                                 g.setColour(nativeEnvelopeColour);
                                 g.strokePath(shape, juce::PathStrokeType(lit ? 2.6f : 2.0f));
@@ -7649,7 +8622,7 @@ void PianoRollComponent::paint(juce::Graphics& g)
                         g.setFont(10.0f);
                         // The lane's own orange, so the number reads as
                         // belonging to the envelope rather than to the note.
-                        g.setColour(juce::Colour(0xffffa94d).withAlpha(0.92f));
+                        g.setColour(rollText(rollRole(juce::Colour(0xffffa94d), Palette::heading).withAlpha(0.92f), Palette::graphBackground));
                         g.drawText(text, static_cast<int>(left),
                                    std::max(0, static_cast<int>(ceiling) - 11),
                                    44, 10, juce::Justification::centredLeft, false);
@@ -7664,13 +8637,13 @@ void PianoRollComponent::paint(juce::Graphics& g)
                         bounds.getWidth(), 3.5f);
                     if (dataIsUtau)
                     {
-                        g.setColour(juce::Colour(0xffe7a34b));
+                        g.setColour(rollRole(juce::Colour(0xffe7a34b), Palette::heading));
                         g.fillRoundedRectangle(nominalBar, 1.75f);
                     }
                     if (selectedNotes.contains(note.id.toStdString())
                         && displayBounds.getX() < bounds.getX() - 0.5f)
                     {
-                        g.setColour(juce::Colour(0xffffd19a));
+                        g.setColour(rollRole(juce::Colour(0xffffd19a), Palette::heading));
                         g.fillRoundedRectangle(juce::Rectangle<float>(
                             displayBounds.getX() - 1.5f, displayBounds.getY(),
                             3.0f, displayBounds.getHeight()), 1.5f);
@@ -7712,12 +8685,12 @@ void PianoRollComponent::paint(juce::Graphics& g)
                     // clearly differs from an ordinary pitched note.
                     juce::Graphics::ScopedSaveState state(g);
                     g.reduceClipRegion(displayBounds.toNearestInt());
-                    g.setColour(juce::Colour(0xff525965).withAlpha(.60f));
+                    g.setColour(rollRole(juce::Colour(0xff525965), Palette::selection).withAlpha(.60f));
                     g.fillRect(displayBounds);
                     g.setColour(nativeRangeColour.withAlpha(.38f));
                     for (auto stripe = displayBounds.getX() - displayBounds.getHeight(); stripe < displayBounds.getRight(); stripe += 10.0f)
                         g.drawLine(stripe, displayBounds.getBottom(), stripe + displayBounds.getHeight(), displayBounds.getY(), 1.0f);
-                    g.setColour(noteHasSelection ? juce::Colour(0xffe7edf7) : nativeRangeColour);
+                    g.setColour(noteHasSelection ? rollRole(juce::Colour(0xffe7edf7), Palette::heading) : nativeRangeColour);
                     g.drawRoundedRectangle(displayBounds.reduced(.7f), 3.0f, noteHasSelection ? 2.8f : 1.8f);
                 }
                 auto labelBounds = displayBounds;
@@ -7729,7 +8702,8 @@ void PianoRollComponent::paint(juce::Graphics& g)
                             labelBounds.setRight(timeToX(absoluteStart+phone.endSeconds));
                             break;
                         }
-                if (((showLyrics && !nativeSegmentLabelsDrawn && displayLabel.isNotEmpty()) || note.nativeUnpitched)
+                if (((showLyrics && !nativeSegmentLabelsDrawn && displayLabel.isNotEmpty()
+                    && !(showPhonemeInfo&&dataIsUtau&&diffSingerPhonemes.contains(note.id.toStdString()))) || note.nativeUnpitched)
                     && labelBounds.getWidth() >= 18.0f)
                 {
                     if (note.nativeUnpitched) displayLabel = strings.text("note.unpitched");
@@ -7738,14 +8712,15 @@ void PianoRollComponent::paint(juce::Graphics& g)
                         waveformLabels.push_back({displayLabel, aboveBounds, 0.96f});
                     else
                     {
-                        g.setColour(Palette::text.withAlpha(0.86f));
+                        g.setColour(rollText(Palette::text.withAlpha(0.86f),
+                            Palette::graphBackground.overlaidWith(note.nativeUnpitched ? Palette::selection.withAlpha(.60f) : Palette::noteFill.withAlpha(.30f))));
                         g.setFont(std::min(11.0f, std::max(8.0f, displayBounds.getHeight() - 2.0f)));
                         g.drawFittedText(displayLabel, labelBounds.toNearestInt().reduced(4, 0),
                                          juce::Justification::centredLeft, 1);
                     }
                 }
 
-                if (utauMode && tool == Tool::amplitude)
+                if (utauMode && tool == Tool::amplitude && !usesCvvcEnvelope(note.id))
                 {
                     const auto effective = displayAmplitudeEnvelope(note, absoluteStart);
                     const auto noteSelected = selectedNotes.contains(note.id.toStdString())
@@ -7753,7 +8728,7 @@ void PianoRollComponent::paint(juce::Graphics& g)
 
                     // A faint 0 dB reference makes the vertical scale readable
                     // without adding a separate automation lane.
-                    g.setColour(juce::Colour(0xff72d6aa).withAlpha(0.18f));
+                    g.setColour(rollRole(juce::Colour(0xff72d6aa), Palette::noteEdge).withAlpha(0.18f));
                     g.drawHorizontalLine(static_cast<int>(amplitudeY(note.midiNote, 0.0f)),
                         displayBounds.getX(), displayBounds.getRight());
 
@@ -7774,10 +8749,10 @@ void PianoRollComponent::paint(juce::Graphics& g)
                         envelopePath.lineTo(timeToX(absoluteStart + effective.back().timeSeconds), floorY);
                         envelopePath.lineTo(timeToX(absoluteStart + effective.front().timeSeconds), floorY);
                         envelopePath.closeSubPath();
-                        g.setColour(juce::Colours::black.withAlpha(.72f));
+                        g.setColour(rollRole(juce::Colours::black, Palette::panelRaised).withAlpha(.72f));
                         g.strokePath(envelopePath, juce::PathStrokeType(noteSelected ? 4.4f : 3.6f));
                     }
-                    const auto envelopeColour = dataIsUtau ? juce::Colour(0xff72d6aa) : nativeEnvelopeColour;
+                    const auto envelopeColour = dataIsUtau ? rollRole(juce::Colour(0xff72d6aa), Palette::noteEdge) : nativeEnvelopeColour;
                     g.setColour(dataIsUtau ? envelopeColour.withAlpha(noteSelected ? 0.98f : 0.62f) : envelopeColour);
                     g.strokePath(envelopePath, juce::PathStrokeType(dataIsUtau
                         ? (noteSelected ? 2.2f : 1.5f) : (noteSelected ? 2.6f : 2.0f)));
@@ -7808,7 +8783,7 @@ void PianoRollComponent::paint(juce::Graphics& g)
                     const float referenceDash[] {5.0f, 4.0f};
                     juce::PathStrokeType(1.5f, juce::PathStrokeType::curved)
                         .createDashedStroke(dashedReference, reference, referenceDash, 2);
-                    g.setColour(juce::Colour(0xff83bde8).withAlpha(0.72f));
+                    g.setColour(rollRole(juce::Colour(0xff83bde8), Palette::textMuted).withAlpha(0.72f));
                     g.fillPath(dashedReference);
                 }
 
@@ -7957,6 +8932,7 @@ void PianoRollComponent::paint(juce::Graphics& g)
                 if (!dataIsUtau && !pointsOwnTheLine && showPitchLine && tool != Tool::amplitude)
                 {
                     juce::Graphics::ScopedSaveState pitchClip(g);
+                    if(!sourceEditMode)clipNotePitchAgainstConnections(g,track);
                     if (maskNativePitch)
                         reduceNativePitchClip(g, notePitchVisibility, pixelsPerSecond, timeToX(0));
                     g.setColour(Palette::pitchLine);
@@ -8014,9 +8990,9 @@ void PianoRollComponent::paint(juce::Graphics& g)
                             reduceNativePitchClip(g, notePitchVisibility, pixelsPerSecond, timeToX(0));
                         // The line the swing is centred on, so the depth reads
                         // as a distance rather than an absolute position.
-                        g.setColour(juce::Colour(0xff7fd4ff).withAlpha(0.28f));
+                        g.setColour(rollRole(juce::Colour(0xff7fd4ff), Palette::heading).withAlpha(0.28f));
                         g.drawHorizontalLine(static_cast<int>(baseY), x, x + widthPixels);
-                        g.setColour(juce::Colour(0xff7fd4ff)
+                        g.setColour(rollRole(juce::Colour(0xff7fd4ff), Palette::heading)
                             .withAlpha(noteHasFocus ? 0.95f : 0.62f));
                         g.strokePath(swing, juce::PathStrokeType(1.2f));
                     }
@@ -8027,13 +9003,13 @@ void PianoRollComponent::paint(juce::Graphics& g)
                     if (noteHasFocus)
                     {
                         const std::array<std::pair<VibratoHandle, juce::Colour>, 7> handles {{
-                            { VibratoHandle::offset,  juce::Colour(0xffc9a0ff) },
-                            { VibratoHandle::length,  juce::Colour(0xffffc857) },
-                            { VibratoHandle::end,     juce::Colour(0xffffc857) },
-                            { VibratoHandle::fadeIn,  juce::Colour(0xff9ae66e) },
-                            { VibratoHandle::fadeOut, juce::Colour(0xff9ae66e) },
-                            { VibratoHandle::cycle,   juce::Colour(0xffff8fa3) },
-                            { VibratoHandle::depth,   juce::Colour(0xff7fd4ff) }
+                            { VibratoHandle::offset,  rollRole(juce::Colour(0xffc9a0ff), Palette::accent) },
+                            { VibratoHandle::length,  rollRole(juce::Colour(0xffffc857), Palette::heading) },
+                            { VibratoHandle::end,     rollRole(juce::Colour(0xffffc857), Palette::heading) },
+                            { VibratoHandle::fadeIn,  rollRole(juce::Colour(0xff9ae66e), Palette::noteEdge) },
+                            { VibratoHandle::fadeOut, rollRole(juce::Colour(0xff9ae66e), Palette::noteEdge) },
+                            { VibratoHandle::cycle,   rollRole(juce::Colour(0xffff8fa3), Palette::accent) },
+                            { VibratoHandle::depth,   rollRole(juce::Colour(0xff7fd4ff), Palette::heading) }
                         }};
                         for (const auto& handle : handles)
                         {
@@ -8097,6 +9073,8 @@ void PianoRollComponent::paint(juce::Graphics& g)
                 if ((dataIsUtau || pointsOwnTheLine || !authoredPitch.empty()) && showPitchLine
                     && tool != Tool::amplitude)
                 {
+                    const juce::Graphics::ScopedSaveState graphOwnershipClip(g);
+                    if(!sourceEditMode)clipNotePitchAgainstConnections(g,track);
                     const auto& anchors = draggedNote == note.id
                             && dragMode == DragMode::pointPitch && !pitchStroke.empty()
                         ? pitchStroke : pitchAnchorsFor(note);
@@ -8130,7 +9108,7 @@ void PianoRollComponent::paint(juce::Graphics& g)
                     // through every point exactly.
                     const auto denseAuthored = maskNativePitch && nativeSharedMember == nullptr
                         && note.pitchControlPoints.empty() && !authoredPitch.empty();
-                    const auto densePoints = denseAuthored ? ownPitchPoints(note)
+                    const auto densePoints = denseAuthored ? ownPitchPoints(pitchPreviewNote(note))
                         : std::vector<PitchCurveEditPoint>{};
                     auto breaks = pitchLineBreaks(track, note, absoluteStart);
                     if (denseAuthored)
@@ -8158,9 +9136,8 @@ void PianoRollComponent::paint(juce::Graphics& g)
                             const auto amount = static_cast<double>(step) / steps;
                             const auto time = startTime + (endTime - startTime) * amount;
                             const auto curveX = x + static_cast<float>(time) * pixelsPerSecond;
-                            auto midi = denseAuthored
-                                ? evaluatePitchCurve(densePoints, time) + displayedPitchOffset(note, time)
-                                : pitchLineMidiAt(track, note, absoluteStart, time);
+                            auto midi = pitchLineMidiAt(track, note, absoluteStart, time,
+                                denseAuthored ? &densePoints : nullptr);
                             if (foldVibrato)
                                 midi += static_cast<float>(vibratoCentsAt(shownVibrato,
                                     juce::jlimit(0.0, note.durationSeconds, time)) / 100.0);
@@ -8223,8 +9200,12 @@ void PianoRollComponent::paint(juce::Graphics& g)
                     {
                         if (anchors[index].diffSingerRestoreSupport
                             || (dsPitchRestoreMode && note.diffSingerPitchReference.empty())) continue;
-                        const auto active = draggedNote == note.id
-                            && static_cast<int>(index) == draggedPitchAnchor;
+                        const auto active = (draggedNote == note.id
+                            && static_cast<int>(index) == draggedPitchAnchor)
+                            || pointIsSelected(PointSelection::pitch,note.id,static_cast<int>(index))
+                            || (pitchSelectionCurrent && selectedPoint->noteId == note.id
+                                && selectedPoint->index == static_cast<int>(index)
+                                && dragMode != DragMode::pointPitch);
                         // Past the moment a later note's bend takes over, a
                         // point of this one decides nothing, and offering it
                         // is how a point came to be dragged for nothing.
@@ -8258,9 +9239,11 @@ void PianoRollComponent::paint(juce::Graphics& g)
                 const juce::Font font(juce::jlimit(11.0f, 13.0f, rowHeight * 0.55f));
                 auto badge = label.bounds;
                 badge.setWidth(std::min(badge.getWidth(), font.getStringWidthFloat(label.text) + 8.0f));
-                g.setColour(juce::Colour(0xff202629).withAlpha(0.94f));
+                const auto badgeInk = rollRole(juce::Colour(0xff202629), Palette::panelRaised).withAlpha(0.94f);
+                const auto badgeSurface = Palette::graphBackground.overlaidWith(badgeInk);
+                g.setColour(badgeInk);
                 g.fillRoundedRectangle(badge, 3.0f);
-                g.setColour(Palette::text.withAlpha(label.alpha));
+                g.setColour(rollText(Palette::text.withAlpha(label.alpha), badgeSurface));
                 g.setFont(font);
                 g.drawFittedText(label.text, badge.toNearestInt().reduced(4, 0),
                     juce::Justification::centredLeft, 1);
@@ -8270,6 +9253,7 @@ void PianoRollComponent::paint(juce::Graphics& g)
     }
 
     if (dsPitchOffsetMode && !sourceEditMode && showPitchLine) drawDiffSingerPitchOffsets(g);
+    drawCvvcPhonemeTabs(g);
     if (!sourceEditMode && tool == Tool::flagCurve) drawFlagLane(g);
     if (!sourceEditMode && tool == Tool::amplitude)
     {
@@ -8282,7 +9266,7 @@ void PianoRollComponent::paint(juce::Graphics& g)
 
         g.setFont(11.0f);
         g.setColour(Palette::text);
-        g.drawText(juce::String::fromUTF8("响度包络（线性百分比）  纵向 0–")
+        g.drawText(I18n::uiText("响度包络（线性百分比）  纵向 0–")
                 + juce::String(static_cast<int>(amplitudeLaneMaxPercent)) + "%",
             lane.toNearestInt().removeFromTop(28).reduced(8, 0).withTrimmedRight(104),
             juce::Justification::centredLeft, false);
@@ -8307,18 +9291,28 @@ void PianoRollComponent::paint(juce::Graphics& g)
                 * static_cast<float>(guide) / 4.0f;
             const auto guideY = amplitudeLaneY(amplitudeDbFromPercent(percent));
             g.setColour(std::abs(percent - 100.0f) < 0.1f
-                    ? juce::Colour(0xff72d6aa).withAlpha(0.36f)
+                    ? rollRole(juce::Colour(0xff72d6aa), Palette::noteEdge).withAlpha(0.36f)
                     : Palette::grid.withAlpha(0.70f));
             g.drawHorizontalLine(static_cast<int>(guideY), plot.getX(), plot.getRight());
             g.setColour(Palette::textMuted);
             const auto label = percent <= 0.05f
-                ? juce::String::fromUTF8("0 静音")
+                ? I18n::uiText("0 静音")
                 : juce::String(static_cast<int>(std::lround(percent))) + "%";
             g.drawText(label, static_cast<int>(plot.getRight() + 4.0f),
                 static_cast<int>(guideY - 8.0f), 49, 16,
                 juce::Justification::centredRight, false);
         }
 
+        if(std::any_of(noteHits.begin(),noteHits.end(),[&](const auto& hit){return usesCvvcEnvelope(hit.id);}))
+        {
+            const auto known=std::any_of(diffSingerPhonemes.begin(),diffSingerPhonemes.end(),[](const auto& entry){
+                return std::any_of(entry.second.begin(),entry.second.end(),[](const auto& span){return span.mixEnvelope.available();});});
+            g.setFont(11.f);g.setColour(Palette::text.withAlpha(.85f));
+            auto legend=lane.toNearestInt().removeFromTop(28).withTrimmedLeft(300).withTrimmedRight(85);
+            if(legend.getWidth()>80)g.drawFittedText(juce::String::fromUTF8(known
+                ?"实线：实际淡化  ·  虚线／圆点：编辑值  ·  点击音素标签可独立编辑"
+                :"手动包络 · 等待渲染交叉淡化"),legend,juce::Justification::centredLeft,1);
+        }
         auto paintedEnvelopeCount = 0;
         juce::Graphics::ScopedSaveState clip(g);
         g.reduceClipRegion(plot.toNearestInt().expanded(7));
@@ -8341,7 +9335,7 @@ void PianoRollComponent::paint(juce::Graphics& g)
                 || (selectedNotes.empty() && hit.id == selectedNote);
             bool utau = false;
             const auto* envelopeNote = findNote(hit.id, &utau);
-            if (envelopeNote == nullptr || (!utau && !nativeNoteTimingEnabled(hit.id))) continue;
+            if (envelopeNote == nullptr || (!utau && !nativeNoteTimingEnabled(hit.id)) || usesCvvcEnvelope(hit.id)) continue;
             const auto absoluteStart = hit.startSeconds + hit.clipStartSeconds;
             auto envelope = amplitudeEnvelopeFor(*envelopeNote, absoluteStart);
             const auto* group = nativeEnvelopeMember(hit.id);
@@ -8360,8 +9354,9 @@ void PianoRollComponent::paint(juce::Graphics& g)
 
             ++paintedEnvelopeCount;
             const auto isMaster = hit.id == draggedNote || hit.id == selectedNote;
-            const auto colour = juce::Colour(utau ? 0xffffa94d : 0xff64ffa3).withAlpha(
-                isMaster ? 1.0f : selected ? 0.76f : 0.32f);
+            const auto colour = rollInk(rollRole(juce::Colour(utau ? 0xffffa94d : 0xff64ffa3),
+                utau ? Palette::heading : Palette::noteEdge).withAlpha(
+                isMaster ? 1.0f : selected ? 0.76f : 0.32f), Palette::panel);
             juce::Path path;
             for (std::size_t index = 0; index < envelope.size(); ++index)
             {
@@ -8380,7 +9375,7 @@ void PianoRollComponent::paint(juce::Graphics& g)
                 juce::Path combined;for(size_t i=0;i<result.size();++i)
                 {const juce::Point<float> p(timeToX(absoluteStart+result[i].timeSeconds),amplitudeLaneY(result[i].gainDb));if(i==0)combined.startNewSubPath(p);else combined.lineTo(p);}
                 const float dashes[]{5,3};juce::Path dashed;juce::PathStrokeType(2).createDashedStroke(dashed,combined,dashes,2);
-                g.setColour(juce::Colour(0xff72d6aa).withAlpha(selected?.95f:.5f));g.fillPath(dashed);
+                g.setColour(rollRole(juce::Colour(0xff72d6aa), Palette::noteEdge).withAlpha(selected?.95f:.5f));g.fillPath(dashed);
             }
             if(envelopeNote->utauTailFadeMode!=0||envelopeNote->utauTailFade.head.mode!=0)
                 if(const auto tail=[&]{const auto last=envelopeNote->utauTailFadeMode!=0?tailFadeSpanFor(envelopeNote->id):std::nullopt;
@@ -8390,7 +9385,7 @@ void PianoRollComponent::paint(juce::Graphics& g)
                     juce::Path faded;for(size_t i=0;i<result.size();++i)
                     {const auto p=juce::Point<float>(timeToX(absoluteStart+result[i].timeSeconds),amplitudeLaneY(result[i].gainDb));if(i==0)faded.startNewSubPath(p);else faded.lineTo(p);}
                     const float dashes[]{5.0f,3.0f};juce::Path dashed;juce::PathStrokeType(2.0f).createDashedStroke(dashed,faded,dashes,2);
-                    g.setColour(juce::Colour(0xff72d6aa).withAlpha(selected?.95f:.5f));g.fillPath(dashed);
+                    g.setColour(rollRole(juce::Colour(0xff72d6aa), Palette::noteEdge).withAlpha(selected?.95f:.5f));g.fillPath(dashed);
                     const auto x=timeToX(absoluteStart+tail->startSeconds);
                     g.drawVerticalLine((int)x,plot.getY(),plot.getBottom());
                     const auto labelWidth=std::min(82,(int)(timeToX(absoluteStart+tail->endSeconds)-x)-8);
@@ -8401,10 +9396,11 @@ void PianoRollComponent::paint(juce::Graphics& g)
                 const auto point = juce::Point<float>(
                     timeToX(absoluteStart + envelope[index].timeSeconds),
                     amplitudeLaneY(envelope[index].gainDb));
-                const auto active = (envelopeNote->id == draggedNote
+                const auto active = ((envelopeNote->id == draggedNote
                     || (group && draggingGroup && group->points == draggingGroup->points))
                     && amplitudeDragUsesLane
-                    && static_cast<int>(index) == draggedAmplitudePoint;
+                    && static_cast<int>(index) == draggedAmplitudePoint)
+                    || pointIsSelected(PointSelection::amplitude,envelopeNote->id,static_cast<int>(index));
                 const auto radius = active ? 6.0f : selected ? 5.0f : 3.8f;
                 g.setColour(active ? Palette::noteFill
                                    : Palette::panelRaised.withAlpha(selected ? 1.0f : 0.70f));
@@ -8417,7 +9413,7 @@ void PianoRollComponent::paint(juce::Graphics& g)
                 {
                     const auto percent = amplitudePercentFromDb(envelope[index].gainDb);
                     const auto value = percent <= 0.05f
-                        ? juce::String::fromUTF8("响度 0（静音）")
+                        ? I18n::uiText("响度 0（静音）")
                         : juce::String(percent, 1) + "%  ("
                             + juce::String(envelope[index].gainDb, 1) + " dB)";
                     g.setColour(Palette::text);
@@ -8427,15 +9423,16 @@ void PianoRollComponent::paint(juce::Graphics& g)
                 }
             }
         }
+        paintedEnvelopeCount += drawCvvcEnvelopeLane(g, true);
         if (paintedEnvelopeCount == 0)
         {
             g.setColour(Palette::textMuted);
-            g.drawFittedText(juce::String::fromUTF8(
-                "当前轨道没有可显示的响度包络"),
+            g.drawFittedText(I18n::uiText("当前轨道没有可显示的响度包络"),
                 plot.toNearestInt().reduced(12), juce::Justification::centred, 1);
         }
     }
 
+    drawConnectionPitchCurves(g);
     drawNativeAudioOverlaps(g);
 
     if (draggedNote.isNotEmpty() && dragMode == DragMode::pitch)
@@ -8445,7 +9442,7 @@ void PianoRollComponent::paint(juce::Graphics& g)
                              58.0f, static_cast<float>(getWidth()));
     }
 
-    if (!pitchStroke.empty()
+    if (!pitchStroke.empty() && !pitchPlanPreview
         && (dragMode == DragMode::drawPitch || dragMode == DragMode::linePitch))
     {
         juce::Path preview;
@@ -8462,7 +9459,22 @@ void PianoRollComponent::paint(juce::Graphics& g)
         g.setColour(Palette::noteLight.withAlpha(0.96f));
         const auto* previewTrack = trackOf(draggedNote);
         const auto* previewNote = findNote(draggedNote);
-        if (previewTrack != nullptr && previewNote != nullptr && trackShowsAllNativeRegions(*previewTrack))
+        if(trackPitchStrokeActive)
+        {
+            juce::RectangleList<int> spans;
+            for(const auto& track:snapshot.tracks)if(track.id==trackPitchStrokeTrack)
+                for(const auto& clip:track.clips)for(const auto& note:clip.notes)if(!note.nativeUnpitched)
+                {
+                    const auto domain=trackPitchEditDomain(note);
+                    if(!std::isfinite(domain.first)||!std::isfinite(domain.second))continue;
+                    const auto left=timeToX(clip.startSeconds+note.startSeconds+domain.first);
+                    const auto right=timeToX(clip.startSeconds+note.startSeconds+domain.second);
+                    spans.add(juce::Rectangle<int>(static_cast<int>(std::floor(left)),0,std::max(1,static_cast<int>(std::ceil(right-left))),getHeight()));
+                }
+            const juce::Graphics::ScopedSaveState saved(g);g.reduceClipRegion(spans);
+            g.strokePath(preview,juce::PathStrokeType(2.2f,juce::PathStrokeType::curved));
+        }
+        else if (previewTrack != nullptr && previewNote != nullptr && trackShowsAllNativeRegions(*previewTrack))
         {
             for (const auto& clip : previewTrack->clips)
                 if (std::any_of(clip.notes.begin(), clip.notes.end(),
@@ -8624,11 +9636,20 @@ void PianoRollComponent::mouseMove(const juce::MouseEvent& event)
     }
     if (!sourceEditMode && tool == Tool::flagCurve && diffSingerFlagContext)
     {
-        if (flagLaneLayerBounds(true).contains(event.position)) phonemeTip = juce::String::fromUTF8("直接编辑预测实参；蓝色虚线保留原始预测");
-        else if (flagLaneLayerBounds(false).contains(event.position)) phonemeTip = juce::String::fromUTF8("编辑叠加在实参上的 FLAG 偏移，及 DYN 等控制");
-        else if (flagLaneOffsetEnableBounds().contains(event.position)) phonemeTip = juce::String::fromUTF8("为所选音符开启或关闭偏移；实参与已画曲线保留");
+        if (flagLaneLayerBounds(true).contains(event.position)) phonemeTip = I18n::uiText("直接编辑预测实参；蓝色虚线保留原始预测");
+        else if (flagLaneLayerBounds(false).contains(event.position)) phonemeTip = I18n::uiText("编辑叠加在实参上的 FLAG 偏移，及 DYN 等控制");
+        else if (flagLaneOffsetEnableBounds().contains(event.position)) phonemeTip = I18n::uiText("为所选音符开启或关闭偏移；实参与已画曲线保留");
     }
     for(const auto& hint:nativeOverlapHints)if(hint.first.contains(event.position)){phonemeTip=hint.second;break;}
+    for(const auto& tab:cvvcPhonemeTabs())if(tab.bounds.contains(event.position))
+    {phonemeTip=tab.token+I18n::uiText(" · 点击单独编辑此音素的响度／FLAG 包络；点击音符主体返回整音符");break;}
+    if (!event.mods.isAnyMouseButtonDown() && cvvcBoundaryAt(event.position))
+    {
+        setTooltip(I18n::uiText("拖动音素分界：调整相邻音素时长，总长度不变（Esc 取消）"));
+        setMouseCursor(juce::MouseCursor::LeftRightResizeCursor);
+        return;
+    }
+    if (tool==Tool::amplitude || tool==Tool::flagCurve) setMouseCursor(juce::MouseCursor::NormalCursor);
     setTooltip(phonemeTip);
     // Before the early returns below: a paste wants to know where the pointer
     // is whatever tool is in hand.
@@ -8668,14 +9689,24 @@ void PianoRollComponent::mouseExit(const juce::MouseEvent&)
         setMouseCursor(juce::MouseCursor::NormalCursor);
 }
 
-void PianoRollComponent::mouseDown(const juce::MouseEvent& event)
+void PianoRollComponent::mouseDownSingle(const juce::MouseEvent& event)
 {
-    if(!sourceEditMode && event.mods.isLeftButtonDown() && !event.mods.isPopupMenu())
+    clearPointSelection();
+    if (cvvcBoundaryMouseDown(event)) return;
+    if (cvvcPhonemeTabMouseDown(event)) return;
+    if(nativeOverlapSelector && event.mods.isLeftButtonDown() && !event.mods.isPopupMenu())
+    {
+        if(nativeOverlapSelectorClose.contains(event.position)){closeNativeOverlapSelector();return;}
         for(const auto& hit:nativeOverlapSourceHits)if(hit.bounds.contains(event.position))
         {
             const auto id=hit.noteId;dragMode=DragMode::none;draggedNote.clear();
-            setSelectedNoteIds({id});rebuildNoteHits();return;
+            closeNativeOverlapSelector();setSelectedNoteIds({id});rebuildNoteHits();return;
         }
+    }
+    // Clicking elsewhere never opens a picker. It dismisses the previous target
+    // before the ordinary editor/context-menu gesture is processed.
+    if(nativeOverlapSelector)closeNativeOverlapSelector();
+    if (connectionPitchMouseDown(event)) return;
     if (dsPitchOffsetMode) { offsetMouseDown(event); return; }
     hoverSeconds = std::max(0.0,
         static_cast<double>(event.position.x - 58.0f) / pixelsPerSecond);
@@ -8744,6 +9775,10 @@ void PianoRollComponent::mouseDown(const juce::MouseEvent& event)
     if (onEditPosition != nullptr && !event.mods.isPopupMenu() && !onLaneZoomButton)
         onEditPosition(std::max(0.0,
             static_cast<double>(event.position.x - 58.0f) / pixelsPerSecond));
+    if (cvvcEnvelopeMouseDown(event, false)) return;
+    if (!sourceEditMode && (tool!=Tool::amplitude || !amplitudeLaneBounds().contains(event.position))
+        && (tool!=Tool::flagCurve || !flagLaneBounds().contains(event.position)))
+    { cvvcSelectedNote.clear(); cvvcSelectedPart = 0; }
     if (!sourceEditMode && tool == Tool::amplitude)
     {
         const auto lane = amplitudeLaneBounds();
@@ -8816,18 +9851,15 @@ void PianoRollComponent::mouseDown(const juce::MouseEvent& event)
             // endpoints are retained so the envelope remains well-defined.
             if (event.mods.isPopupMenu())
             {
-                if (envelope.size() > 2 && closestPoint > 0
-                    && closestPoint + 1 < static_cast<int>(envelope.size()))
-                {
-                    envelope.erase(envelope.begin() + closestPoint);
-                    commitAmplitudeEnvelopeToSelection(note->id, envelope);
-                }
+                deleteEnvelopePoint({note->id,closestPoint,model.revisionNumber(),PointSelection::amplitude});
                 repaint();
                 return;
             }
 
             draggedNote = note->id;
             draggedAmplitudePoint = closestPoint;
+            selectedPoint = PointSelection {note->id,closestPoint,model.revisionNumber(),PointSelection::amplitude};
+            envelopePointHasMoved = false;
             amplitudeStroke = std::move(envelope);
             amplitudeEditAbsoluteStart = absoluteStart;
             amplitudeEditMidi = note->midiNote;
@@ -8948,6 +9980,11 @@ void PianoRollComponent::mouseDown(const juce::MouseEvent& event)
                 }
                 draggedNote = note->id;
                 draggedFlagPoint = closestPoint;
+                if (!selectedNotes.contains(note->id.toStdString())) selectedNotes = {note->id.toStdString()};
+                selectedNote = note->id;
+                if (onNoteSelected) onNoteSelected(selectedNote);
+                selectedPoint = PointSelection {note->id,closestPoint,model.revisionNumber(),PointSelection::flag,0,laneFlag};
+                envelopePointHasMoved = false;
                 flagStroke = flagLaneCurveFor(*note);
                 flagEditAbsoluteStart = hit->startSeconds + hit->clipStartSeconds;
                 const auto [spanFrom, spanTo] = flagLaneSpanFor(*note);
@@ -9092,7 +10129,7 @@ void PianoRollComponent::mouseDown(const juce::MouseEvent& event)
                     {
                         const auto points = pitchAnchorsFor(*note);
                         model.restoreDiffSingerPitchPoint(model.revisionNumber(), closestNoteId, points, closestAnchor);
-                        pitchAnchorCache.clear(); sharedLineCache.clear(); nativeEnvelopeCache.clear(); draggedSharedKey = 0;
+                        pitchAnchorCache.clear();connectionPitchCache.clear();protocolPitchCache.clear();clearPitchPlanPreview(); sharedLineCache.clear(); nativeEnvelopeCache.clear(); draggedSharedKey = 0;
                         rebuildLayout();
                     }
                     return;
@@ -9101,6 +10138,9 @@ void PianoRollComponent::mouseDown(const juce::MouseEvent& event)
                 draggedPitchAnchor = closestAnchor;
                 pitchEditAbsoluteStart = closestAbsoluteStart;
                 pitchStroke = pitchAnchorsFor(*note);
+                selectedPoint = PointSelection {
+                    closestNoteId, closestAnchor, model.revisionNumber() };
+                repaint();
                 pointPitchHasMoved = false;
                 pointPitchPressPosition = event.position;
                 pitchStroke[static_cast<size_t>(closestAnchor)].diffSingerRestoreSupport = false;
@@ -9292,8 +10332,10 @@ void PianoRollComponent::mouseDown(const juce::MouseEvent& event)
             consonantMaximumPreutterance = consonant->maximumPreutterance;
             previewConsonantPreutterance = consonant->currentPreutterance;
             previewConsonantVelocity = consonant->currentVelocity;
+            previewConsonantVelocityBeforeDrag = consonant->currentVelocity;
             consonantSetsPin = consonant->setsPin;
             consonantOverlapSeconds = consonant->overlapSeconds;
+            consonantCvvcLead = consonant->leadForVelocity;
             consonantDragTravelled = false;
             dragMode = DragMode::consonantLeadIn;
             setMouseCursor(juce::MouseCursor::LeftRightResizeCursor);
@@ -9329,13 +10371,18 @@ void PianoRollComponent::mouseDown(const juce::MouseEvent& event)
         }
     }
     if (!sourceEditMode && tool == Tool::draw && !event.mods.isPopupMenu()
-        && drawingTrackIsUtau())
+        && drawActionMode == DrawAction::notes)
     {
-        // Drawing makes notes here, not pitch curves, so a note under the
-        // pointer is not a reason to stop: clicking one is how the next note
-        // is put after it.
-        beginDrawingNote(event);
+        // Explicit note drawing is the same action for every composition engine.
+        // Clicking an occupied cell still uses the existing free-start search.
+        if (canDrawNotesOnFocusedTrack()) beginDrawingNote(event);
         return;
+    }
+    if (!sourceEditMode && pitchScopeMode == PitchScope::currentTrack && !event.mods.isPopupMenu()
+        && (tool == Tool::line || (tool == Tool::draw && drawActionMode == DrawAction::pitchCurve)))
+    {
+        beginTrackPitchStroke(event);
+        return; // Empty current-track space is never permission to add notes.
     }
     for (auto it = noteHits.rbegin(); it != noteHits.rend(); ++it)
     {
@@ -9506,27 +10553,9 @@ void PianoRollComponent::mouseDown(const juce::MouseEvent& event)
             showGapContextMenu(*gap, event.getScreenPosition());
             return;
         }
-    if ((tool == Tool::draw || tool == Tool::line) && !sourceEditMode)
-    {
-        const auto rawSeconds = std::max(0.0,
-            static_cast<double>(event.position.x - 58.0f) / pixelsPerSecond);
-        const auto cellStart = snapDownToGrid(rawSeconds);
-        const auto clipId = clipForDrawingAt(cellStart);
-        if (clipId.isEmpty()) return;
-        // The model decides whether there is room and how long the note may
-        // be; asking it is the only way to be sure the notes weighed are the
-        // current ones, since this view's copy refreshes on a message.
-        const auto id = model.addNote(clipId, cellStart, gridSecondsAt(cellStart),
-            juce::jlimit(0.0f, 127.0f, std::round(yToMidi(event.position.y))));
-        if (id.isNotEmpty())
-        {
-            selectedNote = id;
-            selectedNotes.clear();
-            selectedNotes.insert(id.toStdString());
-            if (onNoteSelected) onNoteSelected(id);
-        }
-        return;
-    }
+    // Pitch tools never create notes as a hidden empty-cell side effect.
+    // Note creation has one explicit action in the existing draw-tool menu.
+    if (!sourceEditMode && (tool == Tool::draw || tool == Tool::line)) return;
     marqueeAddsToSelection = event.mods.isShiftDown() || event.mods.isCommandDown();
     if (!marqueeAddsToSelection)
     {
@@ -9565,6 +10594,8 @@ std::optional<std::pair<juce::String,juce::String>> PianoRollComponent::nativeJo
 
 void PianoRollComponent::mouseDoubleClick(const juce::MouseEvent& event)
 {
+    if(connectionPitchDoubleClick(event))return;
+
     if (tool == Tool::trim) return;
     if(!sourceEditMode&&tool==Tool::connect&&!event.mods.isPopupMenu())
     {
@@ -9586,25 +10617,53 @@ void PianoRollComponent::mouseDoubleClick(const juce::MouseEvent& event)
     if (tool == Tool::points && dsPitchRestoreMode) return;
     if (sourceEditMode || tool == Tool::draw || tool == Tool::line) return;
     rebuildNoteHits();
-    if (tool == Tool::note && !event.mods.isPopupMenu())
+    std::optional<NoteHit> doubleClickNote;
+    if (tool == Tool::note && event.mods.isLeftButtonDown() && !event.mods.isPopupMenu())
         for (auto it = noteHits.rbegin(); it != noteHits.rend(); ++it)
-            if (it->bounds.contains(event.position) && nativeNoteTimingEnabled(it->id))
+            if (it->bounds.contains(event.position))
             {
-                const auto id=it->id;
-                draggedNote.clear();
-                draggedPitchAnchor = -1;
-                dragMode = DragMode::none;
-                pitchStroke.clear();
-                selectedNote = id;
-                if (!selectedNotes.contains(id.toStdString()))
-                {
-                    selectedNotes.clear();
-                    selectedNotes.insert(id.toStdString());
-                }
-                if (onNoteSelected) onNoteSelected(id);
-                flattenPitchLine(id, true);
-                return;
+                doubleClickNote=*it;
+                break;
             }
+    const auto* owner=doubleClickNote ? trackOf(doubleClickNote->id) : nullptr;
+    const bool enterUtauLyric=owner && effectiveTrackType(*owner)==TrackType::utau;
+    // In note mode a UTAU note body always edits its lyric, including rests
+    // and unresolved aliases. Phoneme overlays must not consume that gesture.
+    if (!enterUtauLyric)
+    {
+        if (cvvcEnvelopeMouseDown(event, true)) return;
+        if (cvvcPhonemeTabMouseDown(event)) return;
+    }
+    if (doubleClickNote)
+    {
+        const auto id=doubleClickNote->id;
+        draggedNote.clear();
+        draggedPitchAnchor = -1;
+        dragMode = DragMode::none;
+        pitchStroke.clear();
+        selectedNote = id;
+        if (!selectedNotes.contains(id.toStdString()))
+        {
+            selectedNotes.clear();
+            selectedNotes.insert(id.toStdString());
+        }
+        nativeTrimDrag = false;
+        previewMoveDeltaSeconds = 0;
+        pointGroupGesture.reset(); cvvcLaneDrag.reset(); cvvcBoundaryDrag.reset();
+        pendingCvvcBoundary.reset(); pendingCvvcHead.clear();
+        if (onNoteSelected) onNoteSelected(id);
+        if (enterUtauLyric)
+        {
+            beginInlineAliasEdit(*doubleClickNote);
+            repaint();
+            return;
+        }
+        juce::String error;
+        model.alignNotePreutteranceToGrid(id, gridQuarterNotes(), error);
+        if (error.isNotEmpty() && onEditRejected) onEditRejected(error);
+        refreshFromModel(); repaint();
+        return;
+    }
     if (tool == Tool::amplitude)
     {
         if (dragMode == DragMode::marquee) dragMode = DragMode::none;
@@ -9748,7 +10807,8 @@ void PianoRollComponent::mouseDoubleClick(const juce::MouseEvent& event)
             selectedNotes.clear();
             selectedNotes.insert(selectedNote.toStdString());
             if (onNoteSelected) onNoteSelected(selectedNote);
-            model.setNotePitchCurve(closestNote->id, anchors, true);
+            model.setNotePitchCurve(closestNote->id, anchors, true,
+                closestLocal < -1.e-9 || closestLocal > closestNote->durationSeconds+1.e-9);
             repaint();
             return;
         }
@@ -9757,24 +10817,7 @@ void PianoRollComponent::mouseDoubleClick(const juce::MouseEvent& event)
     for (auto it = noteHits.rbegin(); it != noteHits.rend(); ++it)
     {
         if (!it->bounds.contains(event.position)) continue;
-        if (tool == Tool::note)
-        {
-            draggedNote.clear();
-            dragMode = DragMode::none;
-            pitchStroke.clear();
-            selectedNote = it->id;
-            selectedNotes.clear();
-            selectedNotes.insert(it->id.toStdString());
-            if (onNoteSelected) onNoteSelected(it->id);
-            // Only where a lyric means anything.  Naming a note is a UTAU
-            // idea -- the label chooses the sample to sing -- and committing
-            // one converts the whole track to UTAU.  On a track being pitch
-            // shifted from its own recording there is nothing to choose, and
-            // a double-click here quietly changed what the track was.
-            if (isUtauNote(it->id)) beginInlineAliasEdit(*it);
-            repaint();
-            return;
-        }
+        if (tool == Tool::note) return; // ordinary double-click alignment was handled above; F2/typing still rename
         for (const auto& track : snapshot.tracks)
             for (const auto& clip : track.clips)
                 for (const auto& note : clip.notes)
@@ -9817,6 +10860,10 @@ void PianoRollComponent::mouseDoubleClick(const juce::MouseEvent& event)
 
 void PianoRollComponent::mouseDrag(const juce::MouseEvent& event)
 {
+    if(pointGroupGesture){movePointGroup(event);return;}
+    if(graphPointDragging){moveConnectionPitchPoint(event);return;}
+    if (cvvcBoundaryDrag) { cvvcBoundaryMouseDrag(event); return; }
+    if (cvvcLaneDrag) { cvvcEnvelopeMouseDrag(event); return; }
     if (dsPitchOffsetMode) { offsetMouseDrag(event); return; }
     if (dragMode == DragMode::continuousFlag)
     {
@@ -9880,6 +10927,18 @@ void PianoRollComponent::mouseDrag(const juce::MouseEvent& event)
         updateMarqueeAutoScroll(marqueeCurrent);
         repaintDrag(event.position.x);
         return;
+    }
+    if (trackPitchStrokeActive)
+    {
+        const auto absolute=std::max(0.0,static_cast<double>(event.position.x-58)/pixelsPerSecond);
+        PitchCurveEditPoint point{absolute,juce::jlimit(0.f,127.f,pitchMidiFromY(event.position.y)),PitchCurveShape::linear};
+        if(dragMode==DragMode::linePitch)
+        {if(pitchStroke.size()==1)pitchStroke.push_back(point);else pitchStroke.back()=point;}
+        else if(pitchStroke.empty()||std::abs(pitchStroke.back().timeSeconds-point.timeSeconds)>=.001
+            ||std::abs(pitchStroke.back().targetMidi-point.targetMidi)>=.02f)pitchStroke.push_back(point);
+        std::vector<ProjectModel::PointCurveEdit> edits;juce::String error;
+        if(planTrackPitchStroke(edits,error))updatePitchPlanPreview(edits,trackPitchStrokeRevision);else clearPitchPlanPreview();
+        repaint();return;
     }
     if (draggedNote.isEmpty()) return;
     if (tool == Tool::connect) return;
@@ -9983,6 +11042,7 @@ void PianoRollComponent::mouseDrag(const juce::MouseEvent& event)
         && draggedAmplitudePoint < static_cast<int>(amplitudeStroke.size()))
     {
         auto& point = amplitudeStroke[static_cast<std::size_t>(draggedAmplitudePoint)];
+        const auto previous = point;
         point.gainDb = amplitudeDragUsesLane
             ? amplitudeDbFromLaneY(event.position.y)
             : amplitudeDbFromY(amplitudeEditMidi, event.position.y);
@@ -9990,6 +11050,7 @@ void PianoRollComponent::mouseDrag(const juce::MouseEvent& event)
             / pixelsPerSecond - amplitudeEditAbsoluteStart;
         point.timeSeconds = juce::jlimit(amplitudePointMinimumTime,
                                          amplitudePointMaximumTime, local);
+        envelopePointHasMoved |= point.timeSeconds != previous.timeSeconds || point.gainDb != previous.gainDb;
         repaintDrag(event.position.x);
         return;
     }
@@ -9997,6 +11058,7 @@ void PianoRollComponent::mouseDrag(const juce::MouseEvent& event)
         && draggedFlagPoint < static_cast<int>(flagStroke.size()))
     {
         auto& point = flagStroke[static_cast<std::size_t>(draggedFlagPoint)];
+        const auto previous = point;
         point.value = flagValueFromLaneY(event.position.y);
         // Zoomed in, the reachable values are a slice of the flag's range;
         // rather than pinning the handle at the edge, the slice follows it.
@@ -10005,6 +11067,7 @@ void PianoRollComponent::mouseDrag(const juce::MouseEvent& event)
             / pixelsPerSecond - flagEditAbsoluteStart;
         point.timeSeconds = juce::jlimit(flagPointMinimumTime,
                                          flagPointMaximumTime, local);
+        envelopePointHasMoved |= point.timeSeconds != previous.timeSeconds || point.value != previous.value;
         repaint();
         return;
     }
@@ -10240,6 +11303,27 @@ void PianoRollComponent::timerCallback()
 
 void PianoRollComponent::mouseUp(const juce::MouseEvent& event)
 {
+    if(graphPointDragging)
+    {
+        graphPointDragging=false;
+        if(graphDragValid&&!pitchPendingEdits.empty())
+        {
+            juce::String error;
+            if(model.setPointCurves(pitchPendingEdits,graphDragRevision,&error))
+            {if(selectedPoint)selectedPoint->revision=model.revisionNumber();}
+            else if(onEditRejected&&!error.isEmpty())onEditRejected(error);
+        }
+        graphDragValid=false;clearPitchPlanPreview();refreshFromModel();repaint();return;
+    }
+
+    if(pointGroupGesture)
+    {
+        auto gesture=std::move(*pointGroupGesture);pointGroupGesture.reset();cancelPointDrag();
+        if(gesture.changed)commitPointGroup(std::move(gesture.curves),gesture.revision);
+        repaint();return;
+    }
+    if (cvvcBoundaryDrag) { finishCvvcBoundaryDrag(); return; }
+    if (cvvcLaneDrag) { finishCvvcEnvelopeDrag(); return; }
     if (dsPitchOffsetMode) { offsetMouseUp(); return; }
     if (dragMode == DragMode::continuousFlag) drawContinuousFlag(event.position);
     const auto openSelectionMenu = dragMode == DragMode::marquee && marqueeShowsContextMenu;
@@ -10250,6 +11334,8 @@ void PianoRollComponent::mouseUp(const juce::MouseEvent& event)
 
 void PianoRollComponent::finishDrag()
 {
+    if (cvvcBoundaryDrag) { finishCvvcBoundaryDrag(); return; }
+    if (cvvcLaneDrag) { finishCvvcEnvelopeDrag(); return; }
     lastDragBand = {};
     if (dragMode == DragMode::continuousFlag)
     {
@@ -10259,6 +11345,11 @@ void PianoRollComponent::finishDrag()
         model.setNoteUtauFlagCurves(laneFlag, edits, revision);
         repaint();
         return;
+    }
+    if (trackPitchStrokeActive)
+    {
+        commitTrackPitchStroke();trackPitchStrokeActive=false;trackPitchStrokeTrack.clear();
+        pitchStroke.clear();dragMode=DragMode::none;draggedNote.clear();repaint();return;
     }
     if (dragMode == DragMode::drawNewNote)
     {
@@ -10335,12 +11426,41 @@ void PianoRollComponent::finishDrag()
     }
     else if (dragMode == DragMode::drawPitch || dragMode == DragMode::linePitch
         || dragMode == DragMode::pointPitch)
-        model.setNotePitchCurve(draggedNote, std::move(pitchStroke),
-                                dragMode == DragMode::pointPitch);
-    else if (dragMode == DragMode::amplitudePoint)
-        commitAmplitudeEnvelopeToSelection(draggedNote, amplitudeStroke);
-    else if (dragMode == DragMode::flagPoint)
-        model.setNoteUtauFlagCurve(draggedNote, laneFlag, flagStroke);
+    {
+        bool committed = false;
+        if (dragMode == DragMode::pointPitch)
+        {
+            bool authorSupport=false;
+            if(const auto* note=findNote(draggedNote);note&&draggedPitchAnchor>=0&&draggedPitchAnchor<static_cast<int>(pitchStroke.size()))
+            {
+                const auto outside=[&](double time){return time < -1.e-9 || time > note->durationSeconds+1.e-9;};
+                authorSupport=outside(pitchStroke[static_cast<std::size_t>(draggedPitchAnchor)].timeSeconds);
+                const auto original=pitchAnchorsFor(*note);
+                if(draggedPitchAnchor<static_cast<int>(original.size()))authorSupport|=outside(original[static_cast<std::size_t>(draggedPitchAnchor)].timeSeconds);
+            }
+            committed = model.setNotePitchCurve(draggedNote, std::move(pitchStroke), true, authorSupport);
+        }
+        else if (const auto* note = findNote(draggedNote); note && pitchStroke.size() >= 2)
+        {
+            std::vector<PitchCurveEditPoint> composed; bool store = false; juce::String error;
+            if (composeNativePitchStroke(*note, pitchStroke, composed, store, error))
+                committed = model.setNotePitchCurve(draggedNote, std::move(composed), store,
+                    pitchStroke.front().timeSeconds < -1.e-9 || pitchStroke.back().timeSeconds > note->durationSeconds+1.e-9);
+            else if (onEditRejected) onEditRejected(error);
+        }
+        if (committed && dragMode == DragMode::pointPitch && selectedPoint)
+            selectedPoint = PointSelection {
+                draggedNote, draggedPitchAnchor, model.revisionNumber() };
+    }
+    else if (dragMode == DragMode::amplitudePoint || dragMode == DragMode::flagPoint)
+    {
+        if (envelopePointHasMoved)
+        {
+            if (dragMode == DragMode::amplitudePoint) commitAmplitudeEnvelopeToSelection(draggedNote, amplitudeStroke);
+            else model.setNoteUtauFlagCurve(draggedNote, laneFlag, flagStroke);
+            if (selectedPoint) selectedPoint->revision = model.revisionNumber();
+        }
+    }
     else if (dragMode == DragMode::vibrato)
         model.setNotesVibrato({ draggedNote }, previewVibrato, true);
     else if (dragMode == DragMode::jieSplit)
@@ -10375,6 +11495,12 @@ void PianoRollComponent::finishDrag()
                 model.setNoteUtauTimingOverrides(draggedNote, false, 0.0, 0.0);
             model.setNotesUtauConsonantVelocity({ draggedNote },
                                                 previewConsonantVelocity);
+            if (consonantCvvcLead)
+            {
+                pendingCvvcHead = draggedNote;
+                pendingCvvcHeadRevision = model.revisionNumber();
+                pendingCvvcHeadStart = consonantNoteAbsoluteStart - previewConsonantPreutterance;
+            }
         }
     }
     else if (dragMode == DragMode::pitch
@@ -10431,6 +11557,34 @@ void PianoRollComponent::finishDrag()
 
 bool PianoRollComponent::keyPressed(const juce::KeyPress& key)
 {
+    // Double-click now aligns preutterance; keep ordinary lyric editing
+    // reachable without opening the material replacement picker.
+    const auto typed=key.getTextCharacter();
+    const bool typeAlias=tool==Tool::note&&!isNoteDanceEnabled()&&typed>=0x21&&typed!=0x7f
+        &&!key.getModifiers().isCommandDown()&&!key.getModifiers().isCtrlDown()&&!key.getModifiers().isAltDown();
+    if(inlineAliasNoteId.isEmpty()&&(key.getKeyCode()==juce::KeyPress::F2Key||typeAlias)&&selectedNote.isNotEmpty())
+        for(const auto& hit:noteHits)if(hit.id==selectedNote)
+        {
+            beginInlineAliasEdit(hit);
+            if(typeAlias)inlineAliasEditor.insertTextAtCaret(juce::String::charToString(typed));
+            return true;
+        }
+    if(selectedPoint&&selectedPoint->kind==PointSelection::connectionPitch
+        &&(key.getKeyCode()==juce::KeyPress::deleteKey||key.getKeyCode()==juce::KeyPress::backspaceKey))
+    {
+        if(!selectedPoints.empty())editSelectedPoints(false);
+        else applyConnectionPitchPointMenu(selectedPoint->noteId,selectedPoint->index,7);
+        return true;
+    }
+
+    if (nativeOverlapSelector && key.getKeyCode()==juce::KeyPress::escapeKey) { closeNativeOverlapSelector(); return true; }
+    if(key.isKeyCode(juce::KeyPress::escapeKey)&&pointGroupGesture){pointGroupGesture.reset();cancelPointDrag();clearPointSelection();repaint();return true;}
+    if(key.getModifiers().isCtrlDown()&&key.getKeyCode()=='R'&&(!selectedPoints.empty()||selectedPoint))
+    {if(selectedPoints.empty()&&selectedPoint->index>=0)selectedPoints={*selectedPoint};editSelectedPoints(true);return true;}
+    if (key.isKeyCode(juce::KeyPress::escapeKey) && cvvcBoundaryDrag)
+    { cvvcBoundaryDrag.reset(); refreshFromModel(); repaint(); return true; }
+    if (key.isKeyCode(juce::KeyPress::escapeKey) && cvvcLaneDrag)
+    { cvvcLaneDrag.reset(); repaint(); return true; }
     if (key.isKeyCode(juce::KeyPress::escapeKey) && dsPitchOffsetMode)
     { if (!cancelDiffSingerPitchOffsetGesture()) setDiffSingerPitchOffsetMode(false); return true; }
     if (key.isKeyCode(juce::KeyPress::escapeKey) && dsPitchRestoreMode)
@@ -10455,7 +11609,7 @@ bool PianoRollComponent::keyPressed(const juce::KeyPress& key)
     }
     if ((key.getKeyCode() == juce::KeyPress::deleteKey
          || key.getKeyCode() == juce::KeyPress::backspaceKey)
-        && (selectedNote.isNotEmpty() || !selectedNotes.empty()))
+        && (selectedPoint || selectedNote.isNotEmpty() || !selectedNotes.empty()))
     {
         deleteSelectedNotes();
         return true;
@@ -10465,3 +11619,5 @@ bool PianoRollComponent::keyPressed(const juce::KeyPress& key)
 }
 
 #include "PianoRollDiffSingerOffset.h"
+#include "PianoRollCvvcEnvelope.h"
+#include "PianoRollPointGroup.h"

@@ -19,7 +19,8 @@ enum class NsfHifiganStretchOrder
     fixedHop,
     spliceThenShift,
     shiftThenSplice,
-    hifiShifterMel
+    hifiShifterMel,
+    wcsNonLoop
 };
 
 struct NsfHifiganTimeMapPoint
@@ -37,6 +38,8 @@ struct NsfHifiganRenderResult
     bool usedModel = false;
     bool usedHarmonicNoise = false;
     int protectedUnvoicedFrames = 0;
+    bool usedWcsParameters = false;
+    bool reusedWcsSourceAnalysis = false;
     // Diagnostics for native incremental synthesis (not persisted in projects).
     int inferredChunks = 0;
     int reusedChunks = 0;
@@ -79,7 +82,9 @@ public:
         bool protectNativeNoise = false,
         bool smoothPitchTransitions = true,
         // Native chunk reuse is independent of the optional H/N protection.
-        bool incrementalNativeRender = false);
+        bool incrementalNativeRender = false,
+        // Required only by the non-U WCSNDM parameter stretch option.
+        const std::vector<float>& sourceMidi = {});
 };
 
 // UTAU voicebank synthesis on the one NSF-HiFiGAN renderer (no separate
@@ -146,11 +151,14 @@ struct NsfUtauMixNote
     double soundStartSeconds = 0.0;
     double overlapSeconds = 0.0;
     bool rest = false;
+    double standardEnvelopeSeconds = 0;
+    int cvvcCrossfadeStyle = -1; // -1 preserves legacy NSF behavior, 0 linear, 1 smooth
 };
 
 [[nodiscard]] juce::AudioBuffer<float> mixNsfUtauNotes(
     const std::vector<NsfUtauMixNote>& notes, double totalSeconds, double sampleRate,
-    int channels = 1, const std::function<bool()>& cancelled = {});
+    int channels = 1, const std::function<bool()>& cancelled = {},
+    const std::function<void(std::size_t, const UtauMixEnvelope&)>& envelopeReady = {});
 
 // Synthesise one voicebank note through NSF-HiFiGAN (empty audio + reason when
 // the model is unavailable, so the caller warns rather than failing silently).
@@ -161,6 +169,12 @@ struct NsfUtauSynthResult
     bool usedModel = false;
     juce::String error;
 };
+
+// Apply only saved native tension/breath, in native units, to one already
+// decoded voicebank note. Gain and FLAG DSP belong to their existing stages.
+// Exactly neutral controls are an immediate byte-preserving no-op.
+void applyNsfUtauNativeExpression(juce::AudioBuffer<float>& audio, double sampleRate,
+    double framePeriodMs, const std::vector<float>& targetMidi, const UtauNoteRenderSpec& note);
 
 [[nodiscard]] NsfUtauSynthResult synthesizeNsfUtauNote(
     const juce::File& sampleFile, const NsfUtauNotePlan& plan,
@@ -182,7 +196,10 @@ struct NsfUtauSynthResult
 void conditionNsfPitchTransitions(std::vector<float>& f0, bool enabled);
 [[nodiscard]] bool runNsfPitchTransitionsSmoke(const juce::File& folder, const juce::File& modelDirectory);
 [[nodiscard]] bool runNativeNoiseSmoke(const juce::File& folder, const juce::File& modelDirectory, const juce::File& recording);
+[[nodiscard]] bool runWcsNonLoopSmoke(const juce::File& folder, const juce::File& modelDirectory, const juce::File& recording = {});
 [[nodiscard]] bool runHiFiShifterMelSmoke(const juce::File& folder, const juce::File& modelDirectory);
 [[nodiscard]] bool runHifisamplerSmoke(const juce::File& folder, const juce::File& modelDirectory);
+[[nodiscard]] bool runHnsepCacheProbe(const juce::File& folder, const juce::File& modelDirectory,
+                                    const juce::File& pcmFile, bool force);
 
 }

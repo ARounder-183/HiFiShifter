@@ -1,4 +1,4 @@
-# GAME 默认识别（0.2.4 内部更新 060）
+# GAME 默认识别（0.25 内部更新 060）
 
 录音导入默认使用 GAME Medium + FCPE。设置 → 算法中的 GAME 和 FCPE 路径可以留空；程序自动查找 EXE 旁的 `models/game/medium` 与 `models/fcpe/fcpe.onnx`。模型类型默认 `medium`，也保留 `large` / `small` 自定义模型支持。
 

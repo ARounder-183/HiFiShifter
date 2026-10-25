@@ -1,4 +1,4 @@
-# MCP 连接当前编辑器窗口（0.2.4）
+# MCP 连接当前编辑器窗口（0.25）
 
 先启动最新版编辑器，打开需要编辑的工程，再启动 MCP 客户端。此模式操作窗口里的真实工程、选区、撤销历史和音频引擎。连接端是一个独立的 stdio 代理进程，不会另建空白工程。
 
@@ -6,7 +6,7 @@
 {
   "mcpServers": {
     "hachishifter": {
-      "command": "E:/和声合成新UI/HachiShifter-整合版-0.2.4-DiffSinger/HachiShifter Next.exe",
+      "command": "E:/和声合成新UI/HachiShifter-整合版-0.25-DiffSinger/HachiShifter Next.exe",
       "args": ["--mcp-live"]
     }
   }

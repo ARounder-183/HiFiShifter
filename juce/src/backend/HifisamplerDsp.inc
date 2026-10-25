@@ -72,6 +72,8 @@ std::vector<float> hifiIstft(const HifiSpectrum& spec, std::size_t length)
     return result;
 }
 
+#include "HnsepDiskCache.inc"
+
 struct HifiSeparation { std::vector<float> harmonic; bool cacheHit = false; };
 
 juce::File hifiHnsepFile(const ModelFiles& files)
@@ -89,19 +91,30 @@ HifiSeparation hifiSeparate(const std::vector<float>& wave, const ModelFiles& fi
 {
     const auto path = hifiHnsepFile(files);
     if (!path.existsAsFile()) throw std::runtime_error("HiFisampler Hb/Hv/Ht requires HN-SEP: " + path.getFullPathName().toStdString());
-    const auto config = juce::JSON::parse(path.getSiblingFile("config.json").loadFileAsString());
+    juce::MemoryBlock modelBytes, configBytes;
+    if (!path.loadFileAsData(modelBytes) || !path.getSiblingFile("config.json").loadFileAsData(configBytes))
+        throw std::runtime_error("Could not snapshot HN-SEP model/configuration");
+    const auto config = juce::JSON::parse(juce::String::createStringFromData(configBytes.getData(),
+        static_cast<int>(configBytes.getSize())));
+    if (!config.isObject()) throw std::runtime_error("Invalid HN-SEP configuration JSON");
     const auto size = config.hasProperty("n_fft") ? static_cast<int>(config["n_fft"]) : 2048;
     const auto hop = config.hasProperty("hop_length") ? static_cast<int>(config["hop_length"]) : 512;
-    if (size < 128 || size > 8192 || hop <= 0 || hop > size / 2)
+    const auto rate = config.hasProperty("sr") ? static_cast<int>(config["sr"]) : 44100;
+    if (rate != 44100 || size < 128 || size > 8192 || hop <= 0 || hop > size / 2)
         throw std::runtime_error("Invalid HN-SEP STFT configuration");
-    const auto key = path.getFullPathName() + "#" + juce::String(path.getSize()) + "#"
-        + juce::String(path.getLastModificationTime().toMilliseconds()) + "#"
-        + juce::SHA256(wave.data(), wave.size()*sizeof(float)).toHexString() + "#" + juce::String(size) + ":" + juce::String(hop);
+    if (wave.empty() || !std::all_of(wave.begin(), wave.end(), [](float x) { return std::isfinite(x); }))
+        throw std::runtime_error("Invalid HN-SEP input PCM");
+    const auto key = hnCache::identity(wave, modelBytes, configBytes, rate, size, hop);
     static std::mutex cacheMutex;
     static std::map<juce::String, std::vector<float>> cache;
+    hnCache::Lock diskLock(key);
     {
         std::scoped_lock lock(cacheMutex);
         if (!force) if (const auto found = cache.find(key); found != cache.end()) return { found->second, true };
+    }
+    if (!force && diskLock.held) {
+        auto cached = hnCache::load(key, wave.size());
+        if (!cached.empty()) return { std::move(cached), true };
     }
     // Same length rounding and zero padding as HnsepModel.predict_fromaudio.
     const auto segment = static_cast<std::size_t>(32 * hop);
@@ -115,7 +128,7 @@ HifiSeparation hifiSeparate(const std::vector<float>& wave, const ModelFiles& fi
     std::vector<float> tensor(count * 2);
     for (std::size_t i = 0; i < count; ++i) { tensor[i] = spec.values[i].real(); tensor[count+i] = spec.values[i].imag(); }
     const std::array<int64_t, 4> shape { 1, 2, size/2+1, static_cast<int64_t>(spec.frames) };
-    auto entry = session(path, execution);
+    auto entry = session(path, execution, &modelBytes);
     const auto memory = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
     auto input = Ort::Value::CreateTensor<float>(memory, tensor.data(), tensor.size(), shape.data(), shape.size());
     Ort::AllocatorWithDefaultOptions allocator;
@@ -135,13 +148,17 @@ HifiSeparation hifiSeparate(const std::vector<float>& wave, const ModelFiles& fi
     auto restored = hifiIstft(spec, padded.size());
     std::vector<float> harmonic(restored.begin() + static_cast<std::ptrdiff_t>(left),
         restored.begin() + static_cast<std::ptrdiff_t>(left + wave.size()));
+    if (!std::all_of(harmonic.begin(), harmonic.end(), [](float x) { return std::isfinite(x); }))
+        throw std::runtime_error("Non-finite HN-SEP output");
+    checkNsfCancellation();
+    if (diskLock.held) hnCache::save(key, harmonic);
     {
         std::scoped_lock lock(cacheMutex);
         // Bound audio memory; no cache sidecars are written into user voicebanks.
         std::size_t bytes = harmonic.size()*sizeof(float);
         for (const auto& item : cache) bytes += item.second.size()*sizeof(float);
         if (bytes > 32*1024*1024 || cache.size() >= 16) cache.clear();
-        cache[key] = harmonic;
+        if (harmonic.size()*sizeof(float) <= 32*1024*1024) cache[key] = harmonic;
     }
     return { std::move(harmonic), false };
 }
@@ -531,6 +548,15 @@ NsfHifiganRenderResult renderHifisamplerNote(const juce::AudioBuffer<float>& sou
             if (localFrame >= 0 && localFrame < static_cast<std::ptrdiff_t>(frames)) {
                 scales[i] = feature.scale; pitch[i] = framePitch;
             }
+        }
+        // Native formant is in semitones, independently composed after the
+        // existing FLAG g/Ht feature transforms and target-time Mel warp. Never
+        // transpose F0 or substitute native values into FLAG-specific units.
+        // Cover the full decoder context; skip neutral to preserve old bytes.
+        if (std::isfinite(note.nativeFormantSemitones) && std::abs(note.nativeFormantSemitones) >= 5.0e-4f)
+        {
+            const std::vector<float> nativeFormants(modelFrames, note.nativeFormantSemitones);
+            shiftMelFormants(mel, *config, nativeFormants, hopSeconds * 1000.0);
         }
         auto entry = session(files->onnx, execution); result.activeInference = entry.activeInference;
         auto decoded = infer(*entry.model, *config, mel, f0, entry.runMutex.get());

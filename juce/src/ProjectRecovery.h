@@ -72,7 +72,7 @@ public:
         finish(); // A stale in-flight writer must never recreate a retired document.
         if (file.getParentDirectory()==root) file.deleteFile();
         if (claimedFile!=juce::File{} && claimedFile.getParentDirectory()==root) claimedFile.deleteFile();
-        claimedFile={}; claimedLease.reset(); hasSaved=false;
+        claimedFile=juce::File{}; claimedLease.reset(); hasSaved=false;
         nextAttempt=juce::Time::getMillisecondCounterHiRes()+30000.0;
     }
     static std::unique_ptr<Lease> tryClaim(const juce::File& file)

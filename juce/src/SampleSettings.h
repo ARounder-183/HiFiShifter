@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ProjectModel.h"
+#include "PronunciationTiming.h"
 #include <juce_core/juce_core.h>
 #include <vector>
 
@@ -37,6 +38,19 @@ struct SampleRegionSetting
     std::vector<NativeSegment> segments;
     std::vector<AmplitudeEnvelopePoint> amplitudeEnvelope;
     bool nativeUnpitched = false;
+    // Folder-level otto.ini identities. Empty only for legacy/derived rows;
+    // native material transactions assign stable IDs before publication.
+    juce::String materialAudioId;
+    juce::String materialRegionId;
+    juce::StringArray additionalAliases;
+    juce::String connectedNextRegionId;
+    PronunciationKind pronunciationKind = PronunciationKind::normal;
+    // Independent C/P editing by default. When linked, C-P is derived from the
+    // existing marker values, not duplicated in another persisted offset.
+    bool simplifiedConsonant = false;
+    // Only explicitly named manual vowel cuts are authoring regions. Pitch
+    // analysis/project-note epochs must never populate this intent implicitly.
+    bool vowelSplitsExplicit = false;
 };
 
 struct VoicebankOtoEntry
@@ -75,16 +89,30 @@ struct VoicebankOtoEntry
 class SampleSettings final
 {
 public:
+    // Legacy read-only lookup; native writes must use annotationFor().
     static juce::File sidecarFor(const juce::File& audio);
+    // One manifest per registered material root; nested audio uses relative paths.
+    static juce::File annotationFor(const juce::File& audio);
+    static void setMaterialRoots(const juce::StringArray& roots);
+    static juce::StringArray materialRoots();
+    static bool hasNativeAnnotation(const juce::File& audio, juce::String* error = nullptr);
+    // Copy only this audio's annotations, never an entire shared manifest.
+    static bool copyAnnotations(const juce::File& source, const juce::File& destination,
+                                juce::String& error);
     // Convert one legacy or v2 row to the native, arbitrarily segmented form
     // consumed by the editor and renderers.  Returned times are local to the
     // row's source region.
     [[nodiscard]] static std::vector<NativeSegment> nativeSegmentsFor(
         const SampleRegionSetting& row);
+    // Native variant ambiguity returns empty with error, never derived rows.
+    // Callers needing diagnostics must provide error; an explicit ID cannot derive.
     static std::vector<SampleRegionSetting> loadOrDerive(const juce::File& audio,
-                                                         const ProjectData& project);
+                                                         const ProjectData& project,
+                                                         juce::String* error = nullptr,
+                                                         bool explicitLegacyMigration = false,
+                                                          const juce::String& audioId = {});
     static bool save(const juce::File& audio, const std::vector<SampleRegionSetting>& rows,
-                     juce::String& error);
+                     juce::String& error, const juce::String& audioId = {});
     // Convert the already-parsed Melodyne project into native HJM annotations
     // and bind the resulting segments back to its native notes.  This is the
     // single conversion service used by GUI and headless imports.
@@ -143,6 +171,12 @@ public:
         const juce::File& root, juce::StringArray& warnings,
         bool jieMode = false, bool mouMode = false,
         const juce::File& onlyOtoFile = {});
+    // Read only the governing OTO files for this recording, nearest folder first.
+    static std::vector<VoicebankOtoEntry> loadAudioOto(const juce::File& audio,
+        const juce::File& root, UtauMode mode, juce::StringArray& warnings);
+    // Materialise authored OTO trim/regions as ordinary editable native notes.
+    static std::optional<ClipData> nativeAudioFromOto(const VoicebankOtoEntry& entry,
+        UtauMode mode, double sourceDurationSeconds);
     // Counts the writes made here to the files a voicebank is read from --
     // oto.ini, oto.jie.ini, oto4.ini, otomou.ini and the sample sidecars.  The
     // renderer keys its voicebank index on it, so what is written here is what

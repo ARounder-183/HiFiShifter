@@ -1,3 +1,29 @@
+// Cross-process cache probe: exact float32 PCM permits C++/Python interchange checks.
+bool runHnsepCacheProbe(const juce::File& folder, const juce::File& directory,
+                       const juce::File& pcmFile, bool force)
+{
+    folder.createDirectory();
+    auto* report = new juce::DynamicObject();
+    bool ok = false;
+#if defined(HACHI_HAS_ONNX_ANALYSIS) && HACHI_HAS_ONNX_ANALYSIS
+    try {
+        const auto files = modelFiles(directory);
+        juce::MemoryBlock input;
+        if (!files || !pcmFile.loadFileAsData(input) || input.isEmpty() || input.getSize() % 4 != 0)
+            throw std::runtime_error("Invalid probe model/PCM");
+        std::vector<float> wave(input.getSize()/4);
+        std::memcpy(wave.data(), input.getData(), input.getSize());
+        auto separated = hifiSeparate(wave, *files, {}, force);
+        ok = separated.harmonic.size() == wave.size()
+            && folder.getChildFile("harmonic.f32").replaceWithData(separated.harmonic.data(), separated.harmonic.size()*4);
+        report->setProperty("cache_hit", separated.cacheHit);
+    } catch (const std::exception& e) { report->setProperty("error", e.what()); }
+#endif
+    report->setProperty("ok", ok);
+    folder.getChildFile("cache-probe.json").replaceWithText(juce::JSON::toString(juce::var(report), true));
+    return ok;
+}
+
 // Real ONNX + numerical DSP integration checks, invoked by --smoke-hifisampler.
 bool runHifisamplerSmoke(const juce::File& folder, const juce::File& directory)
 {

@@ -24,7 +24,7 @@ inline bool runDiffSingerExpressionsSmoke()
     ClipData clip; clip.id="clip"; clip.durationSeconds=2;
     NoteData note; note.id="note"; note.durationSeconds=1; note.label="a";
     clip.notes.push_back(note); track.clips.push_back(clip); data.tracks.push_back(track);
-    auto plain=track; plain.id="plain"; plain.voicebankDirectory={};
+    auto plain=track; plain.id="plain"; plain.voicebankDirectory=juce::File{};
     plain.clips.front().id="plain-clip"; plain.clips.front().notes.front().id="plain-note";
     data.tracks.push_back(plain); model.replace(data);
     model.setNotesUtauFlagCurveEnabled({"note","plain-note"},true);

@@ -90,7 +90,11 @@ inline bool MainComponent::diagnosticAdvancedEnvelope(const juce::File& folder)
         for(int mode=0;mode<3;++mode){auto stream=folder.getChildFile(mode==0?"01-original.wav":mode==1?"02-tail-linear.wav":"03-tail-smooth.wav").createOutputStream();juce::WavAudioFormat wav;std::unique_ptr<juce::AudioFormatWriter> writer(wav.createWriterFor(stream.release(),44100,1,24,{},0));if(writer)writer->writeFromAudioSampleBuffer(buffers[(size_t)mode],0,buffers[(size_t)mode].getNumSamples());}
     }
     project.resetDocument(data);project.dispatchPendingMessages();stopTimer();focusClip("clip");pianoRoll.setReadsVoicebankInBackground(false);pianoRoll.diagnosticRefresh();pianoRoll.setSelectedNoteIds({"n2","n3","n4"});pianoRoll.applyTailFade(2);project.dispatchPendingMessages();stopTimer();pianoRoll.diagnosticRefresh();setSize(1280,1000);resized();setEnvelopeLane(EnvelopeLane::amplitude);pianoViewport.setViewPosition(0,(int)pianoRoll.diagnosticYForMidi(64));
-    check("advanced_button_fits_toolbar",advancedEnvelopeButton.isVisible()&&advancedEnvelopeButton.getWidth()==90&&advancedEnvelopeButton.getRight()<=showViewMenuButton.getX()&&showViewMenuButton.getRight()<getWidth());
+    check("advanced_button_fits_toolbar",advancedEnvelopeButton.isVisible()&&advancedEnvelopeButton.getWidth()==90
+        &&getLocalBounds().contains(advancedEnvelopeButton.getBounds())
+        &&!advancedEnvelopeButton.getBounds().intersects(envelopePresetMenu.getBounds())
+        &&!advancedEnvelopeButton.getBounds().intersects(autoCrossfadeButton.getBounds()));
+    check("editor_display_options_reachable_in_view_menu",diagnosticHasEditorViewItems());
     auto shot=createComponentSnapshot(getLocalBounds(),true,1.0f);juce::PNGImageFormat png;auto stream=folder.getChildFile("advanced-envelope.png").createOutputStream();check("advanced_envelope_preview_written",stream&&png.writeImageToStream(shot,*stream));
     return ok;
 }

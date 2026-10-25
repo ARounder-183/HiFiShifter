@@ -138,9 +138,9 @@ inline void componentExportChecks(const juce::File& folder, AudioEngine& audio,
 
     if (engine.existsAsFile())
     {
-        for(const auto* flags : {"K2","K2Mb100","K2HF2","K2Mx1","L2g-12"})
+        for(const auto* flags : {"K2","K2Mb100","K2HF2","K2Mx1","L2g-12","K2HN1","HNK2","HN0K2","HN2K2","HN-1K2","HN10K2"})
             check(juce::String("wcs_enabled_")+flags,backend::UtauRenderer::supportsComponentExport(engine,flags));
-        for(const auto* flags : {"","K1","V2","M1","HF2K2","K2u","K2Mm0","K2Mm100","K1K2"})
+        for(const auto* flags : {"","K1","V2","M1","HF2K2","K2u","K2Mm0","K2Mm100","K1K2","HN1","HN1K2","HNHN1K2","HN0HN1K2","HN2HN1K2"})
             check(juce::String("wcs_disabled_")+flags,!backend::UtauRenderer::supportsComponentExport(engine,flags));
         const auto bank=folder.getChildFile("component-bank");bank.createDirectory();fixture.copyFileTo(bank.getChildFile("a.wav"));
         bank.getChildFile("oto.ini").replaceWithText("a.wav=a,0,50,-950,0,0\n");

@@ -29,6 +29,8 @@ struct UtauNoteWaveform
     // alone has changed still has this audio -- and the picture can be
     // reshaped from it instead of disappearing until a render catches up.
     std::uint64_t audioHash = 0;
+    std::uint64_t phonemeLayoutHash = 0;
+    std::uint64_t phonemeMixContextHash = 0;
     double startSeconds = 0.0;      // on the timeline
     // What the piece covers, which is not what the note covers: it begins one
     // preutterance before the note -- the consonant is sung ahead of the beat
@@ -53,14 +55,16 @@ struct UtauNoteWaveform
 class AudioEngine final : public juce::AudioSource, public juce::ChangeBroadcaster
 {
 public:
-    AudioEngine();
+    // Offline callers can render/export without opening an OS audio device.
+    explicit AudioEngine(bool initialiseOutputDevice = true);
     ~AudioEngine() override;
 
     void prepareToPlay(int samplesPerBlockExpected, double sampleRate) override;
     void releaseResources() override;
     void getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferToFill) override;
 
-    void syncProject(const ProjectData& project, bool diffSingerExport = false,
+    // Export preparation also silences empty UTAU lyrics; preview is the default.
+    void syncProject(const ProjectData& project, bool forExport = false,
                      WavExportComponent component = WavExportComponent::full);
     [[nodiscard]] static juce::String componentExportIssue(const ProjectData& project,
         const juce::File& engine, const juce::String& trackId = {},
@@ -84,7 +88,7 @@ public:
     // was last selected would write one phrase and silence elsewhere.
     // Returns how many notes are now in scope.
     int selectEveryUtauNote(const ProjectData& project);
-    bool selectAllRenderedUtauNotes();
+    bool selectAllRenderedUtauNotes(const ProjectData& project);
     void setHifiganModelDirectory(const juce::File& directory);
     // Naming no resampler, or one that is not there, falls back to an engine
     // shipped beside the application.  This lives here rather than in the
@@ -170,13 +174,48 @@ public:
     [[nodiscard]] static backend::Mld5FileRenderRequest mergedRequestFor(
         const std::vector<const ClipData*>& group, const TrackData& track,
         const juce::File& hifiganModelDirectory,
-        const backend::OrtExecutionConfig& inference);
+        const backend::OrtExecutionConfig& inference,
+        std::optional<bool> legacyUvCarrier = {}, bool skipSharedPitch = false,
+        const SharedPitchLines* sharedLines = nullptr);
+
+    // Bench-only explicit overrides. Without these, project noise protection
+    // selects its compatible carrier/decoder policy. Set on a fresh engine before
+    // first syncProject; these options are never saved track state or UI settings.
+    void setDiagnosticNsfRendering(bool incrementalRender, bool legacyUvCarrier = false,
+                                   bool skipSharedPitch = false)
+    {
+        diagnosticNsfIncrementalRender = incrementalRender;
+        diagnosticLegacyUvCarrier = legacyUvCarrier;
+        diagnosticSkipSharedPitch = skipSharedPitch;
+    }
+
+    // Fresh-engine wire-PIT ablation only; the score and sampled curve remain
+    // intact. False removes continuous callbacks from queued voicebank notes.
+    void setDiagnosticUtauTimelinePitch(bool enabled) { diagnosticUtauTimelinePitch = enabled; }
+    void setDiagnosticUtauOwnPitch(bool enabled) { diagnosticUtauOwnPitch = enabled; }
+    void setDiagnosticUtauNominalBridge(bool enabled) { diagnosticUtauNominalBridge = enabled; }
 
     // How many phrases the last sync decided to decode in one pass.
     [[nodiscard]] int diagnosticMergedPhraseCount() const;
     [[nodiscard]] std::uint64_t diagnosticScheduledNsfUtauRenders() const { return scheduledNsfUtauRenders.load(); }
     [[nodiscard]] double diagnosticRenderPriorityPosition() const
     { return renderService.playbackPriorityPosition(); }
+
+    // Bank-independent pitch plan shared by host packet generation and display.
+    // OWN/auto arithmetic is pure; explicit graph resolution currently delegates
+    // to the model's existing track-capability resolver. Samples retain cents
+    // directly, with no MIDI round-trip quantization.
+    struct ProjectedNotePitch
+    {
+        juce::String noteId;
+        double absoluteStartSeconds = 0.0, durationSeconds = 0.0;
+        float midiNote = 60.0f;
+        double supportStartSeconds = 0.0, supportEndSeconds = 0.0; // absolute
+        std::vector<backend::UtauPitchPoint> sampledLocalCents;
+        std::function<float(double)> continuousLocalCents; // local seconds
+    };
+    [[nodiscard]] static std::vector<ProjectedNotePitch> projectTrackNotePitch(
+        const TrackData&, const std::vector<NativeConnection>&);
 
     // The per-frame target MIDI the native render request would carry for one
     // clip, so the automatic pitch-seam S-transition can be tested without the
@@ -208,6 +247,8 @@ public:
     // Everything utauNoteRenderHash covers except the amplitude envelope: what
     // says two notes would be sung the same way, however loud each is.
     [[nodiscard]] static std::uint64_t utauNoteAudioHash(const NoteData& note);
+    [[nodiscard]] static std::uint64_t utauNotePhonemeHash(const NoteData& note);
+    [[nodiscard]] static std::uint64_t utauPhonemeMixContextHash(const TrackData& track);
     // The notes one UTAU clip is sent to the renderer as, pitch curves and all,
     // for a check to read what will actually be sung.  Given a selection, only
     // those notes, sent as a render of that selection sends them.
@@ -216,6 +257,8 @@ public:
         const std::vector<juce::String>& selection = {});
     // Effective curves shared by playback and DS retake conditioning.
     [[nodiscard]] static std::vector<backend::UtauNoteRenderSpec> utauRequestNotesForClip(
+        const ProjectData& project, const juce::String& clipId);
+    [[nodiscard]] static backend::RequestedVoicebankFamily diagnosticUtauRequestedFamily(
         const ProjectData& project, const juce::String& clipId);
     [[nodiscard]] static std::string diagnosticUtauRenderKey(
         const ProjectData& project, const juce::String& clipId,
@@ -249,6 +292,7 @@ private:
         std::atomic<float> progress { 0.0f };
         // Computed on the message thread with this immutable render key.
         bool preservesNativeSource = false;
+        bool hasEmptyLyricPreview = false;
         // Under stretchSpliceThenPitch a whole glide chain is decoded in one
         // pass; this entry then holds the phrase, and each target is the span
         // belonging to one clip.  A target is filled the moment the phrase
@@ -287,11 +331,17 @@ private:
     };
 
     static float fadeEnvelope(const ClipData& clip, double localSeconds);
-    void rebuildLoadedClips(const ProjectData& project, bool diffSingerExport);
+    void rebuildLoadedClips(const ProjectData& project, bool forExport);
     [[nodiscard]] bool pendingAudioInRange(double start, double end) const; // renderLock held
 
     juce::AudioFormatManager formatManager;
     backend::RenderService renderService;
+    std::optional<bool> diagnosticNsfIncrementalRender;
+    std::optional<bool> diagnosticLegacyUvCarrier;
+    std::optional<bool> diagnosticSkipSharedPitch;
+    bool diagnosticUtauTimelinePitch = true;
+    std::optional<bool> diagnosticUtauOwnPitch;
+    std::optional<bool> diagnosticUtauNominalBridge;
     juce::AudioDeviceManager deviceManager;
     juce::AudioSourcePlayer sourcePlayer;
     mutable juce::ReadWriteLock renderLock;

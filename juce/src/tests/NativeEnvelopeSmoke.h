@@ -57,12 +57,19 @@ inline bool MainComponent::diagnosticNativeEnvelope(const juce::File& folder)
         window->exitModalState(0);
     }
     project.resetDocument(data);project.dispatchPendingMessages();diagnosticSelectTrack(track.id);pianoRoll.setFocusedClip(clip.id);pianoRoll.setSelectedNoteIds({note.id});refreshProjectControls();
-    closeEnvelopeLanes();const auto unchanged=project.contentFingerprint();advancedEnvelopeButton.onClick();refreshProjectControls();
-    check("native_loudness_toolbar_opens_lane",openEnvelopeLane()==EnvelopeLane::amplitude&&advancedEnvelopeButton.getToggleState()&&advancedEnvelopeButton.getButtonText()==juce::String::fromUTF8("响度包络"));
+    closeEnvelopeLanes();const auto unchanged=project.contentFingerprint();advancedEnvelopeButton.onClick();
+    auto* detailedWindow=dynamic_cast<juce::DialogWindow*>(juce::ModalComponentManager::getInstance()->getModalComponent(0));
+    check("native_advanced_button_opens_precise_shape_editor",detailedWindow
+        &&dynamic_cast<AdvancedEnvelopePanel*>(detailedWindow->getContentComponent())!=nullptr
+        &&advancedEnvelopeButton.getButtonText()==juce::String::fromUTF8("高级包络"));
+    if(detailedWindow)detailedWindow->exitModalState(0);
+    if(pianoRoll.onOpenNativeEnvelope)pianoRoll.onOpenNativeEnvelope();refreshProjectControls();
+    check("native_loudness_context_opens_lane",openEnvelopeLane()==EnvelopeLane::amplitude&&!advancedEnvelopeButton.getToggleState());
     {auto out=folder.getChildFile("native-loudness-button.png").createOutputStream();if(out){out->setPosition(0);out->truncate();juce::PNGImageFormat().writeImageToStream(advancedEnvelopeButton.createComponentSnapshot(advancedEnvelopeButton.getLocalBounds(),true,3.f),*out);}}
     check("opening_loudness_does_not_edit_audio",project.contentFingerprint()==unchanged);
-    advancedEnvelopeButton.onClick();check("native_loudness_toolbar_closes_lane",openEnvelopeLane()==EnvelopeLane::none);
-    auto laneData=data;auto second=clip;second.id="second-clip";second.startSeconds=1.5;second.notes[0].id="second-note";second.durationSeconds=second.notes[0].durationSeconds=.5;laneData.tracks[0].clips.push_back(second);
+    setEnvelopeLane(EnvelopeLane::none);check("native_loudness_context_closes_lane",openEnvelopeLane()==EnvelopeLane::none);
+    auto laneData=data;auto second=clip;second.id="second-clip";second.startSeconds=1.5;second.notes[0].id="second-note";second.durationSeconds=second.sourceDurationSeconds=second.notes[0].durationSeconds=.5;
+    bindNativeNoteSource(second.notes[0],second);laneData.tracks[0].clips.push_back(second);
     ProjectModel laneModel;laneModel.resetDocument(laneData);I18n laneStrings;PianoRollComponent roll(laneModel,laneStrings);
     roll.setFocusedTrack(track.id);roll.setFocusedClip(clip.id);roll.setSize(1200,600);roll.setPixelsPerSecond(400);roll.setTool(PianoRollComponent::Tool::amplitude);roll.diagnosticRefresh();
     const auto refresh=[&]{laneModel.dispatchPendingMessages();roll.diagnosticRefresh();};
@@ -89,7 +96,7 @@ inline bool MainComponent::diagnosticNativeEnvelope(const juce::File& folder)
     check("native_envelope_preset_saved",nativePreset.diagnosticSavePreset("Native fade in"));nativePreset.setValues(0,backend::NativeEnvelopeSettings{}.shape);nativePreset.diagnosticPreset(100);
     check("native_envelope_preset_recalled",nativePreset.mode()==1&&nativePreset.values()==rising.shape);
     auto utau=data;utau.tracks[0].pitchAlgorithm=PitchAlgorithm::utau;model.resetDocument(utau);check("utau_not_changed_by_native_action",!model.setNotesNativeEnvelope({note.id},settings));
-    AudioEngine engine;engine.prepareToPlay(256,48000);WavExportOptions options;options.sampleRate=48000;options.channels=2;options.bitDepth=32;
+    AudioEngine engine(false);engine.prepareToPlay(256,48000);WavExportOptions options;options.sampleRate=48000;options.channels=2;options.bitDepth=32;
     const auto render=[&](const ProjectData& d,const char* name){engine.syncProject(d);for(int i=0;i<1500&&engine.renderProgress();++i)juce::Thread::sleep(10);return engine.hasCurrentRenderedAudio()&&engine.exportWav(folder.getChildFile(name),error,track.id,0,1,options);};
     check("native_envelope_wav_exports",render(data,"original.wav")&&render(edited,"edited.wav"));
     juce::AudioFormatManager formats;formats.registerBasicFormats();std::unique_ptr<juce::AudioFormatReader> a(formats.createReaderFor(folder.getChildFile("original.wav"))),b(formats.createReaderFor(folder.getChildFile("edited.wav")));

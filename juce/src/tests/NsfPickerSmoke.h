@@ -36,6 +36,9 @@ inline bool MainComponent::diagnosticNsfPicker()
     const auto selected = project.addTrack("NSF picker", true);
     project.dispatchPendingMessages();
     diagnosticSelectTrack(selected);
+    // This fixture checks retention of a deliberately selected bank, not an
+    // automatic binding from the legacy default setting.
+    if (!selectVoicebank(selected, bank)) return false;
     bool ok = true;
     juce::Array<juce::var> results;
     const auto check = [&](const juce::String& name, bool pass) {
@@ -99,6 +102,23 @@ inline bool MainComponent::diagnosticNsfPicker()
         found=true; persisted &= track.stretchAlgorithm==StretchAlgorithm::hifiShifterMel;
     }
     check("hifishifter_choice_save_reopen",persisted && found);
+    check("wcs_nonloop_option_visible_only_nsf", stretchAlgorithm.indexOfItemId(7)>=0
+        && stretchAlgorithmItemsFor(3)==std::vector<int>{1} && stretchAlgorithmItemsFor(7)==std::vector<int>{1});
+    stretchAlgorithm.setSelectedId(7,juce::sendNotificationSync);
+    project.dispatchPendingMessages(); refreshProjectControls();
+    check("wcs_nonloop_picker_updates_track", selectedState().stretchAlgorithm==StretchAlgorithm::wcsNonLoop
+        && stretchAlgorithm.getSelectedId()==7);
+    check("wcs_nonloop_choice_undo",project.undo() && selectedState().stretchAlgorithm==StretchAlgorithm::hifiShifterMel);
+    check("wcs_nonloop_choice_redo",project.redo() && selectedState().stretchAlgorithm==StretchAlgorithm::wcsNonLoop);
+    ProjectModel wcsReopened;
+    persisted=project.save(saved,error) && wcsReopened.load(saved,error); found=false;
+    for (const auto& track:wcsReopened.snapshot().tracks) if (track.id==selected) {
+        found=true; persisted &= track.stretchAlgorithm==StretchAlgorithm::wcsNonLoop;
+    }
+    check("wcs_nonloop_choice_save_reopen",persisted && found);
+    const auto shot=folder.getChildFile("wcs-nonloop-selected.png").createOutputStream();
+    juce::PNGImageFormat wcsPng;
+    check("wcs_nonloop_selected_screenshot",shot && wcsPng.writeImageToStream(createComponentSnapshot(getLocalBounds()),*shot));
     check("pitch_smoothing_checkbox_visible_in_native_nsf",nsfPitchTransitionsButton.isVisible()
         && nsfPitchTransitionsButton.getToggleState());
     const auto smoothRevision=project.revisionNumber();
@@ -118,6 +138,14 @@ inline bool MainComponent::diagnosticNsfPicker()
     NoteData probeNote;probeNote.id="smooth-probe-note";probeNote.durationSeconds=.1;probeNote.midiNote=60;
     probeNote.contour={{0,0,0,true},{.1,0,0,true}};probe.notes.push_back(probeNote);probeTrack.clips={probe};
     ProjectData probeProject;probeProject.tracks={probeTrack};
+    check("wcs_nonloop_single_and_phrase_requests", AudioEngine::diagnosticNativeRequest(probe,probeTrack).stretchAlgorithm==6
+        && AudioEngine::mergedRequestFor({&probe},probeTrack,{},{}).stretchAlgorithm==6);
+    auto previousStretch=probeTrack;previousStretch.stretchAlgorithm=StretchAlgorithm::hifiShifterMel;
+    const auto wcsWaveHash=AudioEngine::nativeClipWaveformHash(probe,probeTrack);
+    const auto wcsAudioKey=AudioEngine::diagnosticUtauRenderKey(probeProject,probe.id);
+    auto oldProject=probeProject;oldProject.tracks[0]=previousStretch;
+    check("wcs_nonloop_invalidates_audio_and_waveform",wcsWaveHash!=AudioEngine::nativeClipWaveformHash(probe,previousStretch)
+        && wcsAudioKey!=AudioEngine::diagnosticUtauRenderKey(oldProject,probe.id));
     const auto offKey=AudioEngine::diagnosticUtauRenderKey(probeProject,probe.id);
     const auto offHash=AudioEngine::nativeClipWaveformHash(probe,probeTrack);
     const auto singleOff=AudioEngine::diagnosticNativeRequest(probe,probeTrack);
@@ -172,7 +200,7 @@ inline bool MainComponent::diagnosticNsfPicker()
     setSize(1280, 760); resized();
     pitchAlgorithm.setSelectedId(3,juce::sendNotificationSync);
     project.dispatchPendingMessages();refreshProjectControls();
-    check("switch_backend_drops_nsf_only_stretch",stretchAlgorithm.indexOfItemId(6)<0
+    check("switch_backend_drops_nsf_only_stretch",stretchAlgorithm.indexOfItemId(7)<0 && stretchAlgorithm.indexOfItemId(6)<0
         && selectedState().stretchAlgorithm==StretchAlgorithm::melodyneHybrid);
     check("pitch_smoothing_checkbox_hidden_on_other_backends",!nsfPitchTransitionsButton.isVisible());
     check("noise_protection_hidden_on_other_backends", !nsfNoiseProtectionButton.isVisible());

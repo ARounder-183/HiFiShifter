@@ -1,4 +1,59 @@
 #include "tests/DiffSingerCacheSmoke.h"
+#include "tests/OttoMaterialSmoke.h"
+#include "tests/MaterialBindingSmoke.h"
+#include "tests/MaterialAnnotationSmoke.h"
+#include "tests/MaterialInsertionSmoke.h"
+#include "tests/MaterialAssetTreeSmoke.h"
+#include "tests/UnifiedMaterialEditorSmoke.h"
+#include "tests/MaterialFormatAutoSmoke.h"
+#include "tests/NativeConnectionGraphSmoke.h"
+#include "tests/MaterialTopologySmoke.h"
+#include "tests/SingleEntryUiSmoke.h"
+#include "tests/NsfNativeExpressionSmoke.h"
+#include "tests/UnifiedDrawActionSmoke.h"
+#include "tests/MaterialTopologyAudioSmoke.h"
+#include "tests/MidiExportScopeSmoke.h"
+#include "tests/NativeWorkflowE2ESmoke.h"
+#include "tests/NativeNsfCompatibilitySmoke.h"
+#include "tests/PronunciationTimingSmoke.h"
+#include "tests/AdjacentPronunciationSmoke.h"
+#include "tests/VowelStretchAlignmentSmoke.h"
+#include "tests/MaterialSourceReplacementSmoke.h"
+#include "tests/NamedVowelSmoke.h"
+#include "tests/VowelTimingAudioSmoke.h"
+#include "tests/ForcedPortamentoSmoke.h"
+#include "tests/TrackPitchScopeSmoke.h"
+#include "tests/ForcedPortamentoAudioSmoke.h"
+#include "tests/OverlapSelectorSmoke.h"
+#include "tests/GraphPitchEditBatchSmoke.h"
+#include "tests/MaterialPronunciationCatalogSmoke.h"
+#include "tests/ConnectionPitchUiSmoke.h"
+#include "tests/HostPitchProjectionSmoke.h"
+#include "tests/MainSourceReplacementUiSmoke.h"
+#include "tests/LocalMaterialScopeSmoke.h"
+#include "tests/NoteMaterialLocalOverrideSmoke.h"
+#include "tests/CommunityDatasetSmoke.h"
+#include "tests/UstxImporterSmoke.h"
+#include "tests/ProjectMaterialRegistrationSmoke.h"
+#include "tests/ProjectMaterialRegistrationModelSmoke.h"
+#include "tests/ProjectMaterialRegistrationEvidenceAudit.h"
+#include "tests/ProjectMaterialRegistrationFactsSmoke.h"
+#include "tests/RegisteredProjectAudioSmoke.h"
+#include "tests/CommunityDatasetImportGuiSmoke.h"
+#include "tests/MainMaterialVariantHandoffSmoke.h" // Native single-syllable navigation and persisted source-boundary drag coverage.
+#include "tests/MainProjectRegistrationUiSmoke.h"
+#include "tests/OtoProvenanceSmoke.h"
+#include "tests/ClassicNoteScopeSmoke.h"
+#include "tests/CommunityDatasetMenuSmoke.h"
+#include "tests/MaterialVariantSmoke.h"
+#include "tests/TrackEditingInterfacesUiSmoke.h"
+#include "tests/TrackTypeSmoke.h"
+#include "tests/VoicebankFamilySmoke.h"
+#include "tests/EmptyLyricPianoSmoke.h"
+#include "tests/AssetContextSmoke.h"
+#include "tests/VariantAssetUiSmoke.h"
+#include "tests/MaterialRootRegistrationSmoke.h"
+#include "OttoMaterialMigration.h"
 #include "tests/HamoodUtauSmoke.h"
 #include "tests/IntegratedSmoke.h"
 #include "tests/TempoChangeSmoke.h"
@@ -21,6 +76,9 @@
 #include "TimelineComponent.h"
 #include "TrackListComponent.h"
 #include "AssetManagerComponent.h"
+#include "tests/ProjectVoicebankAssetsSmoke.h"
+#include "tests/AssetAudioSmoke.h"
+#include "tests/OtoAudioSmoke.h"
 #include "SampleSettings.h"
 #include <juce_gui_extra/juce_gui_extra.h>
 #include <algorithm>
@@ -47,6 +105,12 @@
 #include "tests/NativeUnpitchedRegionsSmoke.h"
 #include "tests/SourceBreathinessSmoke.h"
 #include "tests/NativeLinkedEnvelopeSmoke.h"
+#include "tests/AutoCrossfadeSmoke.h"
+#include "tests/PitchPointSelectionSmoke.h"
+#include "tests/EnvelopePointSelectionSmoke.h"
+#include "tests/PointGroupSmoke.h"
+#include "tests/CvvcLayoutCacheSmoke.h"
+#include "tests/HifisamplerEnvelopeSmoke.h"
 #include "tests/NativeSourcePitchSmoke.h"
 #include "tests/NativeImportPerformanceSmoke.h"
 #include "tests/NativeSourcePitchRestoreSmoke.h"
@@ -75,6 +139,9 @@
 #include "tests/NativeEnvelopeSmoke.h"
 #include "tests/OtoContinuitySmoke.h"
 #include "tests/ModelessOtoSmoke.h"
+#include "tests/PianoTransportSmoke.h"
+#include "tests/TrackReorderSmoke.h"
+#include "tests/DecibelInputSmoke.h"
 #include "tests/IndependentZoomSmoke.h"
 #include "tests/UstFidelitySmoke.h"
 #include "tests/PlaybackRenderSmoke.h"
@@ -83,6 +150,8 @@
 #include "tests/OtoOverlapSmoke.h"
 #include "tests/MouToJieSmoke.h"
 #include "tests/NsfPickerSmoke.h"
+#include "tests/VoicebankSelectionSmoke.h"
+#include "tests/VoicebankImportSmoke.h"
 #include "tests/NativeVibratoSmoke.h"
 #include "tests/NsfRegionsSmoke.h"
 #include "tests/NsfProjectNoteSmoke.h"
@@ -104,6 +173,7 @@
 #include "tests/ContinuousFlagSmoke.h"
 #include "tests/WavExportSmoke.h"
 #include "tests/AccompanimentSmoke.h"
+#include "tests/AccompanimentTempoSmoke.h"
 #include "tests/DiffSingerPitchOffsetSmoke.h"
 
 namespace hachi
@@ -119,6 +189,362 @@ public:
     {
         startupLog("Application: initialise " + getApplicationVersion());
         auto arguments = juce::StringArray::fromTokens(commandLine, true);
+        if (arguments.size() >= 2 && (arguments[0] == "--migrate-otto-folder"
+            || arguments[0] == "--export-otto-folder"))
+        {
+            OttoMaterialMigration::Report report;
+            juce::String error;
+            const juce::File root(arguments[1].unquoted());
+            bool ok = false;
+            if (arguments[0] == "--migrate-otto-folder")
+            {
+                const auto mode = arguments.size() >= 3 ? parseUtauMode(arguments[2]) : UtauMode::classic;
+                ok = OttoMaterialMigration::migrateFolder(root, mode,
+                    arguments.contains("--include-bare"), report, error);
+            }
+            else if (arguments.size() >= 3)
+                ok = OttoMaterialMigration::exportFolder(root, juce::File(arguments[2].unquoted()),
+                    arguments.contains("--replace"), report, error);
+            else error = "An output oto.ini path is required";
+            std::cout << "success=" << (ok ? 1 : 0) << "|audio=" << report.audioFiles
+                      << "|pronunciations=" << report.pronunciations << "|aliases=" << report.aliases
+                      << "|warnings=" << report.warnings.joinIntoString("; ")
+                      << "|error=" << error << std::endl;
+            setApplicationReturnValue(ok ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); });
+            return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-main-project-registration-ui")
+        {
+            auto component=std::make_unique<MainComponent>();
+            setApplicationReturnValue(component->diagnosticProjectRegistrationUi(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            component.reset();juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-classic-note-scope")
+        {
+            setApplicationReturnValue(runClassicNoteScopeSmoke(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-oto-provenance")
+        {
+            setApplicationReturnValue(otoProvenanceSmoke(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-community-dataset-menu")
+        {
+            setApplicationReturnValue(runCommunityDatasetMenuSmoke(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-material-root-registration")
+        {
+            setApplicationReturnValue(runMaterialRootRegistrationSmoke(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-variant-asset-ui")
+        {
+            setApplicationReturnValue(runVariantAssetUiSmoke(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-voicebank-family")
+        {
+            setApplicationReturnValue(voicebankFamilySmoke(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-empty-lyric-piano")
+        {
+            setApplicationReturnValue(emptyLyricPianoSmoke(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-asset-context")
+        {
+            setApplicationReturnValue(assetContextSmoke(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 3 && arguments[0] == "--inspect-piano-project")
+        {
+            setApplicationReturnValue(pianoProjectInspection(juce::File(arguments[1].unquoted()), juce::File(arguments[2].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-track-types")
+        {
+            setApplicationReturnValue(runTrackTypeSmoke(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-clip-length")
+        {
+            auto component = std::make_unique<MainComponent>();
+            setApplicationReturnValue(component->diagnosticClipLength(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            component.reset();
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-engine-view-capabilities")
+        {
+            auto component = std::make_unique<MainComponent>();
+            setApplicationReturnValue(component->diagnosticEngineViewCapabilities(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            component.reset();
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-track-editing-interfaces-ui")
+        {
+            auto component = std::make_unique<MainComponent>();
+            setApplicationReturnValue(component->diagnosticTrackEditingInterfacesUi(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            component.reset();
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-material-variants")
+        {
+            setApplicationReturnValue(runMaterialVariantSmoke(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-community-dataset")
+        {
+            setApplicationReturnValue(runCommunityDatasetSmoke(juce::File(arguments[1].unquoted()),
+                arguments.size() >= 3 ? juce::File(arguments[2].unquoted()) : juce::File{}) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-ustx-importer")
+        {
+            setApplicationReturnValue(ustxImporterSmoke(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 3 && arguments[0] == "--smoke-community-import-gui")
+        {
+            runCommunityDatasetImportGuiSmoke(juce::File(arguments[1].unquoted()),juce::File(arguments[2].unquoted()),
+                [this](bool ok){setApplicationReturnValue(ok ? 0 : 4);juce::MessageManager::callAsync([this]{quit();});});
+            return;
+        }
+        if (arguments.size() >= 4 && arguments[0] == "--smoke-registered-project-audio")
+        {
+            setApplicationReturnValue(runRegisteredProjectAudioSmoke(juce::File(arguments[1].unquoted()),
+                juce::File(arguments[2].unquoted()),juce::File(arguments[3].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-registration-facts")
+        {
+            setApplicationReturnValue(runProjectMaterialRegistrationFactsSmoke(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-main-material-variants")
+        {
+            auto component=std::make_unique<MainComponent>();
+            setApplicationReturnValue(component->diagnosticMaterialVariantHandoffUi(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            component.reset();juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 3 && arguments[0] == "--audit-project-material-registration")
+        {
+            juce::File report;juce::String error;
+            const auto ok=runProjectMaterialRegistrationEvidenceAudit(juce::File(arguments[1].unquoted()),
+                juce::File(arguments[2].unquoted()),report,error);
+            std::cout << "success=" << ok << "|report=" << report.getFullPathName() << "|error=" << error << std::endl;
+            setApplicationReturnValue(ok ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-project-material-registration-model")
+        {
+            setApplicationReturnValue(runProjectMaterialRegistrationModelSmoke(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-project-material-registration")
+        {
+            setApplicationReturnValue(runProjectMaterialRegistrationSmoke(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-note-material-local-override")
+        {
+            setApplicationReturnValue(runNoteMaterialLocalOverrideSmoke(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-local-material-scope")
+        {
+            setApplicationReturnValue(runLocalMaterialScopeSmoke(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-connection-pitch-ui")
+        {
+            setApplicationReturnValue(runConnectionPitchUiSmoke(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-host-pitch-projection")
+        {
+            setApplicationReturnValue(runHostPitchProjectionSmoke(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-material-pronunciation-catalog")
+        {
+            setApplicationReturnValue(runMaterialPronunciationCatalogSmoke(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-graph-pitch-edit-batch")
+        {
+            setApplicationReturnValue(runGraphPitchEditBatchSmoke(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-overlap-selector")
+        {
+            setApplicationReturnValue(runOverlapSelectorSmoke(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 3 && arguments[0] == "--smoke-forced-portamento-audio")
+        {
+            setApplicationReturnValue(runForcedPortamentoAudioSmoke(juce::File(arguments[1].unquoted()),
+                juce::File(arguments[2].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-track-pitch-scope")
+        {
+            setApplicationReturnValue(runTrackPitchScopeSmoke(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-forced-portamento")
+        {
+            setApplicationReturnValue(runForcedPortamentoSmoke(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-named-vowel")
+        {
+            setApplicationReturnValue(runNamedVowelSmoke(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 3 && arguments[0] == "--smoke-vowel-timing-audio")
+        {
+            setApplicationReturnValue(runVowelTimingAudioSmoke(juce::File(arguments[1].unquoted()),
+                juce::File(arguments[2].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-pronunciation-timing")
+        {
+            setApplicationReturnValue(runPronunciationTimingSmoke(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-adjacent-pronunciation")
+        {
+            setApplicationReturnValue(runAdjacentPronunciationSmoke(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-vowel-stretch-alignment")
+        {
+            setApplicationReturnValue(runVowelStretchAlignmentSmoke(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-material-source-replacement")
+        {
+            setApplicationReturnValue(runMaterialSourceReplacementSmoke(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-native-nsf-compatibility")
+        {
+            setApplicationReturnValue(runNativeNsfCompatibilitySmoke(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); });
+            return;
+        }
+        if (arguments.size() >= 3 && arguments[0] == "--smoke-native-workflow-e2e")
+        {
+            auto component = std::make_unique<MainComponent>();
+            const auto passed = component->diagnosticNativeWorkflow(juce::File(arguments[1].unquoted()), juce::File(arguments[2].unquoted()));
+            setApplicationReturnValue(passed ? 0 : 4);
+            component.reset();
+            juce::MessageManager::callAsync([this] { quit(); });
+            return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-material-topology-audio")
+        {
+            setApplicationReturnValue(runMaterialTopologyAudioSmoke(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); });
+            return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-midi-export-scope")
+        {
+            setApplicationReturnValue(runMidiExportScopeSmoke(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); });
+            return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-unified-draw-action")
+        {
+            setApplicationReturnValue(runUnifiedDrawActionSmoke(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); });
+            return;
+        }
+        if (arguments.size() >= 3 && arguments[0] == "--smoke-main-source-replacement-ui")
+        {
+            auto component = std::make_unique<MainComponent>();
+            setApplicationReturnValue(component->diagnosticMaterialSourceReplacementUi(
+                juce::File(arguments[1].unquoted()),juce::File(arguments[2].unquoted())) ? 0 : 4);
+            component.reset();
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-single-entry-ui")
+        {
+            auto component = std::make_unique<MainComponent>();
+            setApplicationReturnValue(component->diagnosticSingleEntryUi(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            component.reset();
+            juce::MessageManager::callAsync([this] { quit(); });
+            return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-nsf-native-expression")
+        {
+            const auto model = arguments.size() > 2 ? juce::File(arguments[2].unquoted()) : juce::File{};
+            const auto recording = arguments.size() > 3 ? juce::File(arguments[3].unquoted()) : juce::File{};
+            setApplicationReturnValue(runNsfNativeExpressionSmoke(juce::File(arguments[1].unquoted()), model, recording) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); });
+            return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-material-topology")
+        {
+            setApplicationReturnValue(runMaterialTopologySmoke(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); });
+            return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-native-connection-graph")
+        {
+            setApplicationReturnValue(runNativeConnectionGraphSmoke(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); });
+            return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-material-format-auto")
+        {
+            setApplicationReturnValue(runMaterialFormatAutoSmoke(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); });
+            return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-unified-material-editor")
+        {
+            setApplicationReturnValue(runUnifiedMaterialEditorSmoke(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); });
+            return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-material-insertion")
+        {
+            setApplicationReturnValue(runMaterialInsertionSmoke(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); });
+            return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-material-asset-tree")
+        {
+            setApplicationReturnValue(runMaterialAssetTreeSmoke(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); });
+            return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-material-annotation")
+        {
+            setApplicationReturnValue(runMaterialAnnotationSmoke(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); });
+            return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-material-binding")
+        {
+            setApplicationReturnValue(runMaterialBindingSmoke(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); });
+            return;
+        }
+        if (arguments.size() >= 1 && arguments[0] == "--smoke-otto-material")
+        {
+            const auto output = arguments.size() >= 2
+                ? juce::File(arguments[1].unquoted())
+                : juce::File::getSpecialLocation(juce::File::tempDirectory);
+            setApplicationReturnValue(runOttoMaterialSmoke(output) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); });
+            return;
+        }
         if (arguments.size() >= 3 && arguments[0] == "--audit-hamood-keys")
         {
             ProjectModel model;juce::String error;
@@ -157,6 +583,22 @@ public:
             const auto ok=component.diagnosticPitchOffset(juce::File(arguments[1].unquoted()));
             setApplicationReturnValue(ok ? 0 : 4);
             juce::MessageManager::callAsync([this]{quit();});return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-accompaniment-tempo")
+        {
+            auto component = std::make_shared<MainComponent>();
+            // Let the startup controls' async notifications settle before
+            // installing the read-only test document.
+            juce::Timer::callAfterDelay(100, [this, component, arguments]
+            {
+                component->diagnosticAccompanimentTempo(juce::File(arguments[1].unquoted()),
+                    arguments.size() > 2 ? juce::File(arguments[2].unquoted()) : juce::File(),
+                    [this, component](bool ok)
+                    {
+                        setApplicationReturnValue(ok ? 0 : 4);
+                        juce::MessageManager::callAsync([this, component] { quit(); });
+                    });
+            }); return;
         }
         if (arguments.size() >= 2 && arguments[0] == "--smoke-accompaniment")
         {
@@ -342,6 +784,20 @@ public:
             setApplicationReturnValue(ok ? 0 : 4);
             juce::MessageManager::callAsync([this] { quit(); }); return;
         }
+        if (arguments.size() >= 3 && arguments[0] == "--smoke-wcs-nonloop")
+        {
+            const auto ok = backend::runWcsNonLoopSmoke(juce::File(arguments[1].unquoted()),
+                juce::File(arguments[2].unquoted()), arguments.size() > 3 ? juce::File(arguments[3].unquoted()) : juce::File{});
+            setApplicationReturnValue(ok ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 4 && arguments[0] == "--smoke-hn-cache")
+        {
+            const auto ok = hachi::backend::runHnsepCacheProbe(juce::File(arguments[1].unquoted()),
+                juce::File(arguments[2].unquoted()), juce::File(arguments[3].unquoted()), arguments.contains("--force"));
+            setApplicationReturnValue(ok ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
         if (arguments.size() >= 3 && (arguments[0] == "--smoke-hifisampler" || arguments[0] == "--smoke-hifishifter-mel"))
         {
             const auto runner = arguments[0] == "--smoke-hifishifter-mel"
@@ -364,6 +820,21 @@ public:
             const auto ok=backend::runNsfPitchTransitionsSmoke(juce::File(arguments[1].unquoted()),juce::File(arguments[2].unquoted()));
             setApplicationReturnValue(ok ? 0 : 4);
             juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 3 && arguments[0] == "--smoke-voicebank-import")
+        {
+            const auto ok = runVoicebankImportSmoke(juce::File(arguments[1].unquoted()), juce::File(arguments[2].unquoted()));
+            setApplicationReturnValue(ok ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 3 && arguments[0] == "--smoke-voicebank-selection")
+        {
+            MainComponent component;
+            const auto ok = component.diagnosticVoicebankSelection(
+                juce::File(arguments[1].unquoted()), juce::File(arguments[2].unquoted()));
+            setApplicationReturnValue(ok ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); });
+            return;
         }
         if (!arguments.isEmpty() && arguments[0] == "--smoke-nsf-picker")
         {
@@ -398,6 +869,25 @@ public:
             MainComponent component;const auto ok=component.diagnosticModelessOto(juce::File(arguments[1].unquoted()));
             std::cout<<"modeless_oto="<<ok<<std::endl;setApplicationReturnValue(ok?0:3);juce::MessageManager::callAsync([this]{quit();});return;
         }
+        if(arguments.size()>=2&&arguments[0]=="--smoke-piano-transport")
+        {
+            MainComponent component;
+            const auto ok=component.diagnosticPianoTransport(juce::File(arguments[1].unquoted()),
+                arguments.size()>2 ? juce::File(arguments[2].unquoted()) : juce::File{});
+            setApplicationReturnValue(ok?0:3);juce::MessageManager::callAsync([this]{quit();});return;
+        }
+        if(arguments.size()>=2&&arguments[0]=="--smoke-track-reorder")
+        {
+            MainComponent component;
+            const auto ok=component.diagnosticTrackReorder(juce::File(arguments[1].unquoted()));
+            setApplicationReturnValue(ok?0:3);juce::MessageManager::callAsync([this]{quit();});return;
+        }
+        if(arguments.size()>=2&&arguments[0]=="--smoke-decibel-input")
+        {
+            MainComponent component;
+            const auto ok=component.diagnosticDecibelInput(juce::File(arguments[1].unquoted()));
+            setApplicationReturnValue(ok?0:3);juce::MessageManager::callAsync([this]{quit();});return;
+        }
         if(arguments.size()>=2&&arguments[0]=="--smoke-oto-continuity")
         {
             MainComponent component;const auto ok=component.diagnosticOtoContinuity(juce::File(arguments[1].unquoted()),arguments.size()>2?juce::File(arguments[2].unquoted()):juce::File{});
@@ -406,6 +896,31 @@ public:
         if(arguments.size()>=2&&arguments[0]=="--smoke-native-envelope")
         {
             MainComponent component;const auto ok=component.diagnosticNativeEnvelope(juce::File(arguments[1].unquoted()));
+            setApplicationReturnValue(ok?0:4);juce::MessageManager::callAsync([this]{quit();});return;
+        }
+        if(arguments.size()>=3&&arguments[0]=="--smoke-cvvc-layout-cache")
+        {
+            CvvcLayoutCacheSmoke::start(juce::File(arguments[1].unquoted()),juce::File(arguments[2].unquoted()),[this](bool ok)
+            {setApplicationReturnValue(ok?0:4);juce::MessageManager::callAsync([this]{quit();});});return;
+        }
+        if(arguments.size()>=2&&arguments[0]=="--smoke-auto-crossfade")
+        {
+            const auto ok=runAutoCrossfadeSmoke(juce::File(arguments[1].unquoted()));
+            setApplicationReturnValue(ok?0:4);juce::MessageManager::callAsync([this]{quit();});return;
+        }
+        if(arguments.size()>=2&&arguments[0]=="--smoke-pitch-point-selection")
+        {
+            const auto ok=runPitchPointSelectionSmoke(juce::File(arguments[1].unquoted()));
+            setApplicationReturnValue(ok?0:4);juce::MessageManager::callAsync([this]{quit();});return;
+        }
+        if(arguments.size()>=2&&arguments[0]=="--smoke-point-group")
+        {
+            const auto ok=runPointGroupSmoke(juce::File(arguments[1].unquoted()));
+            setApplicationReturnValue(ok?0:4);juce::MessageManager::callAsync([this]{quit();});return;
+        }
+        if(arguments.size()>=2&&arguments[0]=="--smoke-envelope-point-selection")
+        {
+            const auto ok=runEnvelopePointSelectionSmoke(juce::File(arguments[1].unquoted()));
             setApplicationReturnValue(ok?0:4);juce::MessageManager::callAsync([this]{quit();});return;
         }
         if(arguments.size()>=2&&arguments[0]=="--smoke-native-linked-envelope")
@@ -690,6 +1205,12 @@ public:
                 session = arg.fromFirstOccurrenceOf("=", false, false).unquoted();
             setApplicationReturnValue(backend::LiveMcpBridge::runProxy(session, arguments[0] == "--mcp-list-sessions"));
             juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-hifisampler-envelope")
+        {
+            const auto file=[&](int i){return arguments.size()>i?juce::File(arguments[i].unquoted()):juce::File();};
+            setApplicationReturnValue(hifisamplerEnvelopeSmoke(file(1),file(2),file(3),file(4))?0:4);
+            juce::MessageManager::callAsync([this]{quit();});return;
         }
         if (arguments.size() >= 5 && arguments[0] == "--smoke-nsf-project-note")
         {
@@ -7030,6 +7551,7 @@ public:
             roll.setPixelsPerSecond(200.0f);
             roll.setFocusedTrack(trackId);
             roll.setTool(PianoRollComponent::Tool::draw);
+            roll.setDrawAction(PianoRollComponent::DrawAction::notes);
 
             // 120 bpm in 4/4: a bar is two seconds.
             constexpr auto bar = 2.0;
@@ -7123,6 +7645,7 @@ public:
             plainRoll.setPixelsPerSecond(200.0f);
             plainRoll.setFocusedTrack(plainTrack);
             plainRoll.setTool(PianoRollComponent::Tool::draw);
+            plainRoll.setDrawAction(PianoRollComponent::DrawAction::notes);
 
             const auto eventOn = [](PianoRollComponent& roll, double seconds, float midi)
             {
@@ -7171,6 +7694,7 @@ public:
             utauRoll.setPixelsPerSecond(200.0f);
             utauRoll.setFocusedTrack(utauTrack);
             utauRoll.setTool(PianoRollComponent::Tool::draw);
+            utauRoll.setDrawAction(PianoRollComponent::DrawAction::notes);
 
             utauRoll.mouseDown(eventOn(utauRoll, 1.0, 64.0f));
             // The branch is chosen by the track, not by a focused clip -- a
@@ -7252,6 +7776,7 @@ public:
             roll.setFocusedTrack(project.snapshot().tracks.front().id);
             roll.setFocusedClip(clipId);
             roll.setTool(PianoRollComponent::Tool::draw);
+            roll.setDrawAction(PianoRollComponent::DrawAction::notes);
 
             const auto eventAt = [&roll](double seconds, float midi)
             {
@@ -7433,6 +7958,7 @@ public:
             roll.setFocusedTrack(project.snapshot().tracks.front().id);
             roll.setFocusedClip(clipId);
             roll.setTool(PianoRollComponent::Tool::draw);
+            roll.setDrawAction(PianoRollComponent::DrawAction::notes);
 
             // A click, as the roll receives one: 58 pixels of keyboard, then
             // time, and the middle of the pitch row.
@@ -7447,6 +7973,7 @@ public:
                     &roll, &roll, juce::Time::getCurrentTime(), where,
                     juce::Time::getCurrentTime(), 1, false);
                 roll.mouseDown(event);
+                roll.mouseUp(event);
             };
             const auto overlapsIn = [](const std::vector<NoteData>& notes)
             {
@@ -8031,10 +8558,17 @@ public:
                 && back.pitchLine == restored.pitchLine
                 && back.originalPitchLine == restored.originalPitchLine && back.consonantPitchDashed == restored.consonantPitchDashed;
 
-            const auto ok = readsOldSettings && defaultsKept && firstIsRange
+            const auto ninth=MainComponent::afterViewMenuChoice(defaults,9,true);
+            juce::PropertySet phonemePreferences;MainComponent::storeViewOptions(phonemePreferences,ninth);
+            const auto phonemeOption=ninth.phonemeInfo&&!defaults.phonemeInfo
+                &&MainComponent::viewOptionsFrom(phonemePreferences).phonemeInfo
+                &&!MainComponent::afterViewMenuChoice(ninth,9,true).phonemeInfo
+                &&!MainComponent::viewMenuItemEnabled(9,false);
+            const auto ok = phonemeOption && readsOldSettings && defaultsKept && firstIsRange
                 && secondIsEnvelope && thirdIsWaveform && fourthIsPitchLine
                 && greyRuleHolds && nothingOnMiss && roundTrips && seventhIsOriginal && eighthIsConsonant;
             std::cout << "reads_old_settings=" << (readsOldSettings ? 1 : 0)
+                      << "|ninth_item_phoneme_info_persists=" << phonemeOption
                       << "|defaults_kept=" << (defaultsKept ? 1 : 0)
                       << "|first_item_is_range=" << (firstIsRange ? 1 : 0)
                       << "|second_item_is_envelope=" << (secondIsEnvelope ? 1 : 0)
@@ -13222,12 +13756,72 @@ public:
                     c.expect("and_keeps_the_projects_tempo",
                              near(after.bpm, 120.0) && after.tempoChanges.empty() && after.numerator == 4);
                     c.expect("and_is_made_the_way_a_new_track_is",
-                             track != nullptr && track->compose && track->pitchAlgorithm == PitchAlgorithm::utau
+                             track != nullptr && track->compose && track->trackType == TrackType::hachi
+                             && track->pitchAlgorithm == PitchAlgorithm::nsfHifigan
+                             && track->renderOrder == RenderOrder::stretchSpliceThenPitch
                              && after.tracks.size() == 2 && after.tracks.back().id == id);
                     juce::String refused;
                     const auto none = model->addMidiTrack(c.twoParts, 0, refused);
                     c.expect("a_track_with_no_notes_is_refused",
                              none.isEmpty() && refused.isNotEmpty() && model->snapshot().tracks.size() == 2);
+                }
+
+                // ---- insert into an existing track across a project tempo change.
+                for (auto type : { TrackType::hachi, TrackType::utau, TrackType::diffSinger })
+                {
+                    ProjectModel model;
+                    ProjectData existing; existing.name = "Keep project"; existing.bpm = 120;
+                    existing.tempoChanges = {{4, 60}};
+                    TrackData destination; destination.id = "destination"; destination.name = "Keep track";
+                    destination.trackType = type; destination.compose = true;
+                    destination.pitchAlgorithm = type == TrackType::hachi ? PitchAlgorithm::nsfHifigan : PitchAlgorithm::utau;
+                    destination.outputEngine = UtauOutputEngine::resampler;
+                    destination.voicebankDirectory = c.folder;
+                    ClipData old; old.id = "keep-region"; old.startSeconds = 8; old.durationSeconds = 2;
+                    NoteData oldNote; oldNote.id = "keep-note"; oldNote.startSeconds = .25; oldNote.durationSeconds = .5;
+                    old.notes = {oldNote}; destination.clips = {old};
+                    TrackData other = destination; other.id = "other"; other.clips.clear();
+                    existing.tracks = {destination, other}; model.resetDocument(existing);
+                    const auto before = model.contentFingerprint();
+                    const auto revision = model.revisionNumber();
+                    const auto id = model.addMidiTrack(c.twoParts, 2, error, destination.id, 1.75);
+                    const auto after = model.snapshot();
+                    c.expect("existing_track_receives_region_without_new_track", id == destination.id
+                        && after.tracks.size() == 2 && after.tracks[0].clips.size() == 2 && after.tracks[1].clips.empty());
+                    if (after.tracks[0].clips.size() != 2) continue;
+                    const auto& imported = after.tracks[0].clips.back();
+                    c.expect("insert_at_red_line_uses_local_project_tempo", near(imported.startSeconds, 1.75)
+                        && imported.notes.size() == 2 && near(imported.notes[0].startSeconds, 0)
+                        && near(imported.notes[0].durationSeconds, 1.75)
+                        && near(imported.notes[1].startSeconds, 1.75) && near(imported.notes[1].durationSeconds, 2));
+                    c.expect("existing_track_settings_and_old_region_unchanged", after.name == "Keep project"
+                        && after.tracks[0].name == destination.name && after.tracks[0].trackType == type
+                        && after.tracks[0].pitchAlgorithm == destination.pitchAlgorithm
+                        && after.tracks[0].outputEngine == destination.outputEngine
+                        && after.tracks[0].voicebankDirectory == destination.voicebankDirectory
+                        && near(after.bpm, 120) && after.tempoChanges.size() == 1 && near(after.tempoChanges[0].bpm, 60)
+                        && after.tracks[0].clips[0].id == old.id && near(after.tracks[0].clips[0].startSeconds, 8)
+                        && after.tracks[0].clips[0].notes[0].id == oldNote.id
+                        && near(after.tracks[0].clips[0].notes[0].durationSeconds, .5));
+                    const auto applied = model.contentFingerprint();
+                    c.expect("existing_track_import_single_undo_and_redo", model.revisionNumber() == revision + 1
+                        && model.undo() && model.contentFingerprint() == before
+                        && model.redo() && model.contentFingerprint() == applied);
+                    const auto saved = c.folder.getChildFile("inserted.hjpx"); ProjectModel reopened;
+                    c.expect("inserted_region_survives_save_and_load", model.save(saved, error) && reopened.load(saved, error)
+                        && reopened.snapshot().tracks.size() == 2 && reopened.snapshot().tracks[0].clips.size() == 2
+                        && near(reopened.snapshot().tracks[0].clips.back().startSeconds, 1.75));
+                    c.expect("missing_target_never_falls_back_to_new_track",
+                        model.addMidiTrack(c.twoParts, 1, error, "deleted", 2).isEmpty()
+                        && model.contentFingerprint() == applied);
+                    c.expect("invalid_position_rejected_without_edit",
+                        model.addMidiTrack(c.twoParts, 1, error, destination.id, -1).isEmpty()
+                        && model.contentFingerprint() == applied);
+                    existing.tracks[0].accompaniment = true; model.resetDocument(existing);
+                    const auto ineligible = model.contentFingerprint();
+                    c.expect("accompaniment_rejected_without_edit",
+                        model.addMidiTrack(c.twoParts, 1, error, destination.id, 2).isEmpty()
+                        && model.contentFingerprint() == ineligible);
                 }
 
                 // ---- text that is not UTF-8: read as the kana it is
@@ -13326,7 +13920,33 @@ public:
                 {
                     check->expect("cancelling_imports_nothing",
                                   check->window->diagnosticProject().snapshot().tracks.size() == 2);
-                    finish();
+                    const auto target = check->window->diagnosticProject().snapshot().tracks.front().id;
+                    check->window->importMidiTrackFrom(check->twoParts, target, 4.25);
+                    auto* choice = dynamic_cast<juce::AlertWindow*>(juce::Component::getCurrentlyModalComponent());
+                    auto* tracks = choice != nullptr ? choice->getComboBoxComponent("track") : nullptr;
+                    check->expect("existing_track_also_offers_midi_part_choice", tracks && tracks->getNumItems() == 2);
+                    if (!tracks) { finish(); return; }
+                    tracks->setSelectedItemIndex(1); choice->exitModalState(1);
+                    Check::whenNoDialog(check, [check, finish, target]
+                    {
+                        const auto imported = check->window->diagnosticProject().snapshot();
+                        check->expect("dialog_imports_to_captured_target_and_position", imported.tracks.size() == 2
+                            && imported.tracks.front().id == target && imported.tracks.front().clips.size() == 2
+                            && std::abs(imported.tracks.front().clips.back().startSeconds - 4.25) < 1.e-8
+                            && imported.tracks.front().clips.back().notes.size() == 2
+                            && check->window->diagnosticSelectedTrack() == target);
+                        check->window->importMidiTrackFrom(check->single, target, 9);
+                        auto* single = dynamic_cast<juce::AlertWindow*>(juce::Component::getCurrentlyModalComponent());
+                        check->expect("existing_track_single_part_still_confirms", single != nullptr);
+                        if (!single) { finish(); return; }
+                        single->exitModalState(0);
+                        Check::whenNoDialog(check, [check, finish]
+                        {
+                            check->expect("cancel_existing_import_keeps_regions",
+                                check->window->diagnosticProject().snapshot().tracks.front().clips.size() == 2);
+                            finish();
+                        });
+                    });
                 });
             });
             return;
@@ -16269,7 +16889,7 @@ public:
             };
             // Pitch picker ids: 1 mld5, 2 nsf-hifigan, 3 WORLD,
             //                   4 vslib, 5 mld3, 6 llsm2.
-            const auto neural = items(2) == std::vector<int> { 1, 2, 5, 6 };
+            const auto neural = items(2) == std::vector<int> { 1, 2, 5, 6, 7 };
             const auto signalsmith = items(4) == std::vector<int> { 1, 3, 4 };
             const auto ownStretchers = items(1) == std::vector<int>{1}
                 && items(3) == std::vector<int>{1}
@@ -17050,6 +17670,48 @@ public:
             juce::MessageManager::callAsync([this] { quit(); });
             return;
         }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-oto-audio")
+        {
+            auto component = std::make_shared<MainComponent>();
+            juce::Timer::callAfterDelay(100, [this, component, arguments]
+            {
+                component->diagnosticOtoAudio(juce::File(arguments[1].unquoted()), [this, component](bool ok)
+                {
+                    setApplicationReturnValue(ok ? 0 : 4);
+                    juce::MessageManager::callAsync([this, component] { quit(); });
+                });
+            });
+            return;
+        }
+        if (arguments.size() >= 3 && arguments[0] == "--smoke-asset-audio")
+        {
+            auto component = std::make_shared<MainComponent>();
+            juce::Timer::callAfterDelay(100, [this, component, arguments]
+            {
+                component->diagnosticAssetAudio(juce::File(arguments[1].unquoted()),
+                    juce::File(arguments[2].unquoted()), [this, component](bool ok)
+                    {
+                        setApplicationReturnValue(ok ? 0 : 4);
+                        juce::MessageManager::callAsync([this, component] { quit(); });
+                    });
+            });
+            return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-project-voicebank-assets")
+        {
+            setApplicationReturnValue(runProjectVoicebankAssetsSmoke(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); });
+            return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-asset-search")
+        {
+            runAssetSearchSmoke(juce::File(arguments[1].unquoted()), [this](bool ok)
+            {
+                setApplicationReturnValue(ok ? 0 : 4);
+                juce::MessageManager::callAsync([this] { quit(); });
+            });
+            return;
+        }
         if (!arguments.isEmpty() && arguments[0] == "--smoke-asset-manager")
         {
             // The material manager: a folder is registered, audio added to it
@@ -17098,13 +17760,15 @@ public:
             const auto bankMembers = manager.diagnosticMembersOf(bankIndex);
             const auto registeredBank = bankIndex >= 0 && bankMembers.size() == 3;
 
-            // A from-scratch folder: add the loose file, parameters detected.
+            // Bare audio registration creates a native manifest, not guessed aliases.
             const auto scratchIndex = manager.diagnosticRegisterFolder(scratch);
             const auto added = manager.diagnosticAddAudioToFolder(scratchIndex,
                 { loose.getFullPathName() });
             const auto scratchMember = scratch.getChildFile("loose.wav");
-            const auto detectedParams = added == 1
-                && SampleSettings::sidecarFor(scratchMember).existsAsFile();
+            const auto nativeFolderReady = added == 1
+                && scratch.getChildFile("otto.ini").existsAsFile()
+                && !SampleSettings::hasNativeAnnotation(scratchMember)
+                && !SampleSettings::sidecarFor(scratchMember).existsAsFile();
 
             // 活字印刷: assemble "我想要" from the bank folder.
             int matched = 0, missing = 0;
@@ -17133,8 +17797,11 @@ public:
             // authoritative, converted to native annotation only in memory).
             const auto otoOut = root.getChildFile("exported-oto.ini");
             juce::String otoError;
-            const auto otoRows = manager.diagnosticExportFolderAsOto(bankIndex,
-                otoOut, otoError);
+            OttoMaterialMigration::Report migrationReport;
+            const auto migratedForExport = OttoMaterialMigration::migrateFolder(bank,
+                UtauMode::classic, true, migrationReport, otoError);
+            const auto otoRows = migratedForExport ? manager.diagnosticExportFolderAsOto(bankIndex,
+                otoOut, otoError) : -1;
             const auto exportedOto = otoRows == 3 && otoOut.existsAsFile();
             auto bankHasNoHjm = true;
             for (const auto& stem : { "wo", "xiang", "yao" })
@@ -17142,8 +17809,8 @@ public:
                         bank.getChildFile(juce::String(stem) + ".wav")).existsAsFile())
                     bankHasNoHjm = false;
 
-            // Native parameter editing on a from-scratch material writes back
-            // to its HJM sidecar (never an oto.ini), and the change round-trips.
+            // Native parameter editing publishes the folder's otto.ini, never
+            // a legacy CSV or standard oto.ini, and the source timing round-trips.
             juce::String nativeError;
             const auto nativeSaved = AssetManagerComponent::diagnosticWriteNativeTiming(
                 scratchMember, 20.0, 30.0, 40.0, 25.0, 15.0, nativeError);
@@ -17153,11 +17820,11 @@ public:
                 && !scratch.getChildFile("oto.ini").existsAsFile();
 
             root.deleteRecursively();
-            const auto ok = registeredBank && detectedParams && assembledInOrder
+            const auto ok = registeredBank && nativeFolderReady && assembledInOrder
                 && firstIsWo && reusable && exportedOto && bankHasNoHjm
                 && nativeRoundTrips;
             std::cout << "registered_bank=" << (registeredBank ? 1 : 0)
-                      << "|detected_params_on_add=" << (detectedParams ? 1 : 0)
+                      << "|native_folder_ready_without_guessed_alias=" << (nativeFolderReady ? 1 : 0)
                       << "|assembled_in_order=" << (assembledInOrder ? 1 : 0)
                       << "|first_is_wo=" << (firstIsWo ? 1 : 0)
                       << "|assembly_reusable=" << (reusable ? 1 : 0)
@@ -18997,6 +19664,8 @@ public:
                 const auto other = project.addNote(clipId, 1.5, 0.3, 60.0f);
                 project.setNoteLabel(sung, "aa");
                 project.setNoteLabel(other, "aa");
+                // Test envelope gain using the deterministic external K2 backend.
+                project.setNotesUtauFlags({sung,other}, "K2");
 
                 PianoRollComponent roll(project, strings);
                 roll.setBounds(0, 0, 1400, 700);
@@ -19059,11 +19728,11 @@ public:
                 const auto offeredInOrder = names.joinIntoString(",")
                     == juce::String::fromUTF8("标准,柔起,缓起,渐弱,句尾,短收");
 
-                // 标准 and 柔起, exactly as they were: two ramps straight in dB.
+                // Standard uses the same linear-amplitude trapezoid as new CVVC phonemes.
                 const auto keptAsTheyWere = first < -0.05
-                    && matches(applied(sung, "标准"), { { first, -60.0f, false },
-                        { first + 0.005, 0.0f, false }, { last - 0.035, 0.0f, false },
-                        { last, -60.0f, false } })
+                    && matches(applied(sung, "标准"), { { first, -60.0f, true },
+                        { first + 0.005, 0.0f, true }, { last - 0.035, 0.0f, true },
+                        { last, -60.0f, true } })
                     && matches(applied(sung, "柔起"), { { first, -60.0f, false },
                         { first + 0.015, 0.0f, false }, { last - 0.035, 0.0f, false },
                         { last, -60.0f, false } });
@@ -19209,26 +19878,18 @@ public:
                     && std::abs(leftHalf.back().gainDb - db(75.0)) < 0.05f;
                 const auto splitFlagKept = !afterCut.empty() && afterCut.front().linearToNext;
 
-                // The toolbar offers every one, laid out whole on a UTAU track in a
-                // window of the default size, ahead of the controls pinned right.
+                // Refreshing texts must keep exactly one picker with all six
+                // entries, in the authoritative preset order.
                 MainComponent window;
                 window.setBounds(0, 0, 1280, 760);
-                // Refreshed a second time, as closing the settings does: still one
-                // button per preset.
                 window.diagnosticRefreshTexts();
                 const auto layout = window.diagnosticEnvelopePresetLayout();
-                auto toolbarOffersEvery = layout.buttons.size() == presets.size();
-                auto previousRight = std::numeric_limits<int>::min();
-                for (std::size_t index = 0; toolbarOffersEvery && index < layout.buttons.size(); ++index)
-                {
-                    toolbarOffersEvery = layout.buttons[index].first == presets[index].name
-                        && layout.buttons[index].second.getWidth() == 46
-                        && layout.buttons[index].second.getX() >= previousRight;
-                    previousRight = layout.buttons[index].second.getRight();
-                }
-                const auto toolbarFits = toolbarOffersEvery && layout.viewMenu.getWidth() == 72
-                    && layout.viewMenu.getX() >= previousRight
-                    && layout.viewMenu.getRight() <= layout.rightControlsStart;
+                auto toolbarOffersEvery = layout.items.size() == static_cast<int>(presets.size());
+                for(std::size_t index=0;toolbarOffersEvery && index<presets.size();++index)
+                    toolbarOffersEvery=layout.items[static_cast<int>(index)]==presets[index].name;
+                const auto toolbarFits=toolbarOffersEvery && layout.picker.getWidth()==110
+                    && layout.picker.getRight()<=layout.rightControlsStart
+                    && layout.viewMenu.isEmpty() && window.diagnosticHasEditorViewItems();
                 work.deleteRecursively();
 
                 const auto passed = offeredInOrder && keptAsTheyWere && newShapesAsDesigned
@@ -19268,37 +19929,15 @@ public:
         }
         if (arguments.size() >= 2 && arguments[0] == "--smoke-envelope-presets")
         {
-            // These buttons say what they do by drawing it, and the drawing is
-            // the one thing a text report cannot check.  This lays them out at
-            // the size the parameter bar hands them and writes a PNG.
-            // Every preset the toolbar offers, in its order.
-            const auto& presets = PianoRollComponent::envelopePresets();
-            const auto count = static_cast<int>(presets.size());
-            struct Strip final : public juce::Component
-            {
-                void paint(juce::Graphics& g) override { g.fillAll(Palette::panel); }
-            };
-            HachiLookAndFeel presetLookAndFeel;
-            juce::LookAndFeel::setDefaultLookAndFeel(&presetLookAndFeel);
-            Strip strip;
-            strip.setBounds(0, 0, count * 46 + (count - 1) * 3, 30);
-            std::vector<std::unique_ptr<EnvelopePresetButton>> buttons;
-            for (int index = 0; index < count; ++index)
-            {
-                auto button = std::make_unique<EnvelopePresetButton>();
-                button->configure(presets[static_cast<std::size_t>(index)]);
-                button->setBounds(index * 49, 0, 46, 30);
-                strip.addAndMakeVisible(*button);
-                buttons.push_back(std::move(button));
-            }
-            const auto shot = strip.createComponentSnapshot(strip.getLocalBounds(), true, 3.0f);
+            MainComponent window;window.setBounds(0,0,1280,760);
+            juce::Image shot;
+            const auto layout=window.diagnosticEnvelopePresetLayout(&shot);
             juce::File out(arguments[1].unquoted());
             out.deleteFile();
             juce::PNGImageFormat png;
             std::unique_ptr<juce::FileOutputStream> stream(out.createOutputStream());
             const auto written = stream != nullptr && png.writeImageToStream(shot, *stream);
             stream.reset();
-            juce::LookAndFeel::setDefaultLookAndFeel(nullptr);
             std::cout << "written=" << (written ? 1 : 0)
                       << "|size=" << shot.getWidth() << "x" << shot.getHeight() << std::endl;
             juce::MessageManager::callAsync([this] { quit(); });
@@ -19368,7 +20007,7 @@ public:
                 return;
             }
             auto data = project.snapshot();
-            if (arguments.size() >= 4 && arguments[3].isNotEmpty())
+            if (arguments.size() >= 4 && arguments[3].unquoted().isNotEmpty())
             {
                 const juce::File vb(arguments[3].unquoted());
                 for (auto& track : data.tracks)
@@ -19377,32 +20016,77 @@ public:
             }
             // Optional 7th arg: solo one track by 0-based index (mute the rest),
             // so a single-track reference bounce can be matched exactly.
-            if (arguments.size() >= 7 && arguments[6].isNotEmpty())
+            if (arguments.size() >= 7 && arguments[6].unquoted().isNotEmpty())
             {
-                const auto soloIndex = arguments[6].getIntValue();
+                const auto soloIndex = arguments[6].unquoted().getIntValue();
+                if (soloIndex < 0 || soloIndex >= static_cast<int>(data.tracks.size()))
+                {
+                    std::cout << "rendered=0|error=invalid solo track" << std::endl;
+                    setApplicationReturnValue(2); juce::MessageManager::callAsync([this] { quit(); }); return;
+                }
                 for (std::size_t t = 0; t < data.tracks.size(); ++t)
+                {
                     data.tracks[t].muted = (static_cast<int>(t) != soloIndex);
+                    data.tracks[t].solo = (static_cast<int>(t) == soloIndex);
+                }
             }
             // Optional 8th arg: render order override -- "splice" =
             // stretchSpliceThenPitch (先拼接后合成), "process" = processThenSplice
             // (先合成后拼接).  Lets a consistency check exercise either NSF order.
-            if (arguments.size() >= 8 && arguments[7].isNotEmpty())
+            if (arguments.size() >= 8 && arguments[7].unquoted().isNotEmpty())
             {
-                const auto order = arguments[7].toLowerCase();
+                const auto order = arguments[7].unquoted().toLowerCase();
                 const auto ro = order.startsWith("splice")
                     ? RenderOrder::stretchSpliceThenPitch
                     : RenderOrder::processThenSplice;
-                for (auto& track : data.tracks) track.renderOrder = ro;
+                for (auto& track : data.tracks)
+                {
+                    track.renderOrder = ro;
+                    track.mergeContiguousSource = order.contains("merge");
+                }
             }
-            cliAudioEngine = std::make_unique<AudioEngine>();
-            if (arguments.size() >= 5 && arguments[4].isNotEmpty())
+            // Explicit diagnostic ablations, never written into the source
+            // project and never counted as acceptance at different settings.
+            const auto nsfDiagnostic = arguments.size() > 8 ? arguments[8].unquoted().toLowerCase() : juce::String();
+            const bool hostPitSharedNominal = nsfDiagnostic == "host-pit-shared-nominal-bridge";
+            const bool hostPitNominalBridge = hostPitSharedNominal || nsfDiagnostic == "host-pit-own-nominal-bridge";
+            const bool hostPitOwn = nsfDiagnostic == "host-pit-own-nominal-bridge" || nsfDiagnostic == "host-pit-own";
+            const bool hostPitSampled = hostPitOwn || hostPitSharedNominal || nsfDiagnostic == "host-pit-sampled";
+            const bool nsfOverride = nsfDiagnostic.isNotEmpty() && !hostPitSampled;
+            const bool nativeReference = nsfDiagnostic == "legacy-native-reference";
+            const bool skipSharedPitch = nativeReference || nsfDiagnostic == "legacy-nsf-no-chunks-uv-carrier-no-shared";
+            const bool legacyUvCarrier = skipSharedPitch || nsfDiagnostic == "legacy-nsf-no-chunks-uv-carrier";
+            const bool noChunks = legacyUvCarrier || nsfDiagnostic == "legacy-nsf-no-chunks";
+            for (auto& track : data.tracks)
+            {
+                if (nsfDiagnostic == "no-uv" || nsfDiagnostic == "legacy-nsf" || noChunks) track.nsfNoiseProtection = false;
+                if (nsfDiagnostic == "no-smoothing" || nsfDiagnostic == "legacy-nsf" || (noChunks && !nativeReference))
+                    track.nsfSmoothPitchTransitions = false;
+                // The old renderer already applied this exact conditioner.
+                // Reference ablation retains it while isolating newer inputs.
+                if (nativeReference) track.nsfSmoothPitchTransitions = true;
+            }
+            cliAudioEngine = std::make_unique<AudioEngine>(false);
+            if (nsfOverride)
+                cliAudioEngine->setDiagnosticNsfRendering(!noChunks, legacyUvCarrier, skipSharedPitch);
+            if (hostPitSampled) cliAudioEngine->setDiagnosticUtauTimelinePitch(false);
+            if (hostPitOwn) cliAudioEngine->setDiagnosticUtauOwnPitch(true);
+            if (hostPitNominalBridge) cliAudioEngine->setDiagnosticUtauNominalBridge(true);
+            if (arguments.size() >= 5 && arguments[4].unquoted().isNotEmpty())
                 cliAudioEngine->setUtauResamplerFile(juce::File(arguments[4].unquoted()));
-            if (arguments.size() >= 6 && arguments[5].isNotEmpty())
+            if (arguments.size() >= 6 && arguments[5].unquoted().isNotEmpty())
                 cliAudioEngine->setHifiganModelDirectory(juce::File(arguments[5].unquoted()));
             // UTAU rendering is selection-driven; a headless full render selects
             // every note so the whole song is synthesised, not just a marquee.
+            for (std::size_t index = 0; index < data.tracks.size(); ++index)
+            {
+                const auto& track = data.tracks[index];
+                std::cout << "render_track|index=" << index << "|name=" << track.name
+                          << "|muted=" << track.muted << "|solo=" << track.solo
+                          << "|flags=" << track.utauGlobalFlags << std::endl;
+            }
             cliAudioEngine->selectEveryUtauNote(data);
-            cliAudioEngine->syncProject(data);
+            cliAudioEngine->syncProject(data, true);
             const auto deadline = juce::Time::getMillisecondCounter() + 1'800'000;
             for (;;)
             {
@@ -19422,6 +20106,13 @@ public:
                 exportError);
             std::cout << "rendered=" << (ok ? 1 : 0)
                       << "|output=" << arguments[2]
+                      << "|nsf_diagnostic=" << nsfDiagnostic
+                      << "|nsf_incremental=" << (!nsfOverride ? "project" : noChunks ? "0" : "1")
+                      << "|nsf_legacy_uv_carrier=" << (!nsfOverride ? "project" : legacyUvCarrier ? "1" : "0")
+                      << "|nsf_skip_shared_pitch=" << (skipSharedPitch ? 1 : 0)
+                      << "|utau_timeline_pitch=" << (hostPitSampled ? 0 : 1)
+                      << "|utau_own_protocol_pitch=" << (hostPitOwn ? 1 : 0)
+                      << "|utau_nominal_bridge=" << (hostPitNominalBridge ? 1 : 0)
                       << "|backend=" << cliAudioEngine->activeRenderBackends()
                       << "|warning=" << cliAudioEngine->activeRenderWarnings()
                       << (ok ? juce::String() : "|error=" + exportError) << std::endl;
@@ -19569,7 +20260,7 @@ public:
                 (void) model.addAudioFile(input, *duration);
                 auto data = model.snapshot();
                 if (!data.tracks.empty()) data.tracks.front().compose = false;
-                cliAudioEngine->syncProject(data);
+                cliAudioEngine->syncProject(data, true);
                 juce::String error;
                 if (cliAudioEngine->exportWav(juce::File(arguments[2]), error))
                     std::cout << "duration=" << *duration << '\n'
@@ -19727,7 +20418,7 @@ public:
             if (arguments.size() >= 3)
                 cliAudioEngine->setUtauResamplerFile(juce::File(arguments[2].unquoted()));
             cliAudioEngine->setUtauRenderNoteSelection({ selectedNote.id });
-            cliAudioEngine->syncProject(data);
+            cliAudioEngine->syncProject(data, true);
 
             auto sawProgress = false;
             auto lastProgress = -1.0;

@@ -4,19 +4,142 @@
 #include "backend/NsfHifiganRenderer.h"
 #include "backend/DiffSingerRenderer.h"
 #include "OtoWaveformEditorComponent.h"
+#include "OttoMaterialIO.h"
+#include "OttoMaterialMigration.h"
+#include "PronunciationCandidateBox.h"
+#include "MaterialPronunciationCatalog.h"
+#include "NativeNoteTiming.h"
+#include <juce_cryptography/juce_cryptography.h>
 #include "AdvancedEnvelopePanel.h"
+#include "AccompanimentTempoPanel.h"
 #include "UtauOutputEnginePanel.h"
+#include "DecibelGainDialog.h"
+#include "PanValueDialog.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <thread>
+#include <set>
 
 namespace hachi
 {
 namespace
 {
-juce::String utf8(const char* text) { return juce::String::fromUTF8(text); }
+juce::String utf8(const char* text) { return I18n::uiText(text); }
 constexpr bool nsfPickerItem(int id) { return id == 2; }
+
+std::optional<double> clipLengthSeconds(const juce::String& input)
+{
+    const auto text = input.trim();
+    if (text.isEmpty() || !text.containsOnly("0123456789.")
+        || text.retainCharacters(".").length() > 1
+        || text.retainCharacters("0123456789").isEmpty()) return {};
+    const auto value = text.getDoubleValue();
+    if (!std::isfinite(value) || value < 0.01) return {};
+    return value;
+}
+
+// Draft controls only. The existing output tool picker edits these paths;
+// project setters run only when the enclosing Edit dialog is applied.
+class ClipEditDialog final : public juce::AlertWindow
+{
+public:
+    ClipEditDialog(I18n& i18n, const TrackData& track, const ClipData& clip, juce::Component* owner)
+        : juce::AlertWindow(i18n.text("clip.editLength"), i18n.text("clip.lengthHint"),
+                           juce::MessageBoxIconType::NoIcon, owner),
+          strings(i18n), trackId(track.id), trackName(track.name),
+          resampler(track.outputResampler), wavtool(track.outputWavtool)
+    {
+        addTextEditor("length", juce::String(clip.durationSeconds, 6), strings.text("clip.lengthSeconds"));
+        addComboBox("output", {strings.text("output.inherit"), juce::String::fromUTF8("HiFisampler（PC-NSF-HiFiGAN）"),
+            strings.text("output.resampler")}, strings.text("clip.outputEngine"));
+        auto* choice = getComboBoxComponent("output");
+        choice->setSelectedId(track.outputEngine == UtauOutputEngine::inherit ? 1 : track.outputEngine == UtauOutputEngine::pcNsfHifigan ? 2 : 3,
+                              juce::dontSendNotification);
+        canChooseOutput = trackUsesVoicebankSynthesis(track) && !trackIsDiffSinger(track);
+        choice->setEnabled(canChooseOutput);
+        configure.setButtonText(strings.text("clip.configureResampler"));
+        configure.setSize(300, 30); addCustomComponent(&configure);
+        choice->onChange = [this] { configure.setEnabled(canChooseOutput && getComboBoxComponent("output")->getSelectedId() == 3); };
+        choice->onChange();
+        configure.onClick = [this]
+        {
+            auto panel = std::make_unique<UtauOutputEnginePanel>(strings, trackName, resampler, wavtool);
+            juce::Component::SafePointer<ClipEditDialog> safe(this);
+            panel->onApply = [safe](const juce::File& r, const juce::File& w)
+            { if (safe) { safe->resampler = r; safe->wavtool = w; } };
+            juce::DialogWindow::LaunchOptions options;
+            options.dialogTitle = strings.text("output.resampler"); options.dialogBackgroundColour = Palette::panel;
+            options.content.setOwned(panel.release()); options.componentToCentreAround = this;
+            options.useNativeTitleBar = true; options.escapeKeyTriggersCloseButton = true; options.resizable = true;
+            options.launchAsync();
+        };
+        addButton(strings.text("dialog.apply"), 1, juce::KeyPress(juce::KeyPress::returnKey));
+        addButton(strings.text("dialog.cancel"), 0, juce::KeyPress(juce::KeyPress::escapeKey));
+        getTextEditor("length")->onTextChange = [this]
+        { getButton(0)->setEnabled(clipLengthSeconds(getTextEditorContents("length")).has_value()); };
+    }
+    UtauOutputEngine selectedEngine() const
+    {
+        const auto id = getComboBoxComponent("output")->getSelectedId();
+        return id == 2 ? UtauOutputEngine::pcNsfHifigan : id == 3 ? UtauOutputEngine::resampler : UtauOutputEngine::inherit;
+    }
+    I18n& strings;
+    juce::String trackId, trackName;
+    juce::File resampler, wavtool;
+    bool canChooseOutput = false;
+    juce::TextButton configure;
+};
+
+class EnvelopePresetMenuItem final : public juce::PopupMenu::CustomComponent
+{
+public:
+    explicit EnvelopePresetMenuItem(const PianoRollComponent::EnvelopePreset& value) : preset(value)
+    {
+        setName(preset.name);
+    }
+    void getIdealSize(int& width, int& height) override { width=166; height=34; }
+    void paint(juce::Graphics& g) override
+    {
+        const auto highlighted=isItemHighlighted();
+        g.fillAll(findColour(highlighted ? juce::PopupMenu::highlightedBackgroundColourId
+                                        : juce::PopupMenu::backgroundColourId));
+        const juce::Rectangle<float> plot(10.0f,8.0f,66.0f,18.0f);
+        using From=PianoRollComponent::EnvelopePresetPoint::From;
+        struct Knot { double seconds; bool fromEnd; float gainDb; };
+        std::vector<Knot> knots{{0.0,false,-60.0f}};
+        for(const auto& point:preset.points)
+            knots.push_back({point.from==From::beat ? 0.06+point.seconds : point.seconds,
+                             point.from==From::soundEnd,point.gainDb});
+        knots.push_back({0.0,true,-60.0f});
+        // Retain the old thumbnail proportions: make short ramps legible.
+        double rampSeconds=0.0;
+        for(size_t i=1;i<knots.size();++i)
+            if(knots[i].fromEnd==knots[i-1].fromEnd)
+                rampSeconds+=std::abs(knots[i].seconds-knots[i-1].seconds);
+        const auto scale=plot.getWidth()*0.62/std::max(1.0e-6,rampSeconds);
+        juce::Path shape;
+        for(size_t i=0;i<knots.size();++i)
+        {
+            const auto& knot=knots[i];
+            const auto x=static_cast<float>(knot.fromEnd ? plot.getRight()-scale*knot.seconds
+                                                       : plot.getX()+scale*knot.seconds);
+            const auto level=knot.gainDb<=-59.9f ? 0.0f : std::pow(10.0f,knot.gainDb/20.0f);
+            const auto y=plot.getBottom()-plot.getHeight()*level;
+            if(i==0)shape.startNewSubPath(x,y);else shape.lineTo(x,y);
+        }
+        shape.closeSubPath();
+        const auto tint=juce::Colour(0xff72d6aa);
+        g.setColour(tint.withAlpha(highlighted ? 0.42f : 0.26f));g.fillPath(shape);
+        g.setColour(tint);g.strokePath(shape,juce::PathStrokeType(1.5f));
+        g.setColour(findColour(highlighted ? juce::PopupMenu::highlightedTextColourId
+                                         : juce::PopupMenu::textColourId));
+        g.setFont(getLookAndFeel().getPopupMenuFont());
+        g.drawText(preset.name,86,0,getWidth()-96,getHeight(),juce::Justification::centredLeft);
+    }
+private:
+    PianoRollComponent::EnvelopePreset preset;
+};
 
 class WavExportAdvanced final : public juce::Component
 {
@@ -139,66 +262,39 @@ void DropdownButton::paintButton(juce::Graphics& g, bool highlighted, bool down)
     HachiLookAndFeel::drawDropdownArrow(g, getLocalBounds());
 }
 
-void EnvelopePresetButton::paintButton(juce::Graphics& g, bool highlighted, bool down)
+struct MainComponent::MaterialInputSession
 {
-    getLookAndFeel().drawButtonBackground(g, *this,
-        findColour(juce::TextButton::buttonColourId), highlighted, down);
-
-    auto area = getLocalBounds().toFloat().reduced(4.0f, 3.0f);
-    const auto captionHeight = preset.name.isEmpty() ? 0.0f : 11.0f;
-    auto plot = area.removeFromTop(std::max(8.0f, area.getHeight() - captionHeight));
-
-    // The ramps keep their true ratio to each other but not to the note: a 5 ms
-    // attack against a note of any real length would be a fraction of a pixel.
-    // Together they take a fixed share of the width, so the presets are told
-    // apart by the same thing that distinguishes them in use.  A stretch hangs
-    // from the side of the note it is measured from -- the start, or the beat
-    // drawn a nominal 60 ms in, on the left; the end on the right -- and the one
-    // joining the two sides is the hold, which takes up the rest.
-    using From = PianoRollComponent::EnvelopePresetPoint::From;
-    constexpr auto nominalLeadIn = 0.06;
-    struct Knot { double seconds; bool fromEnd; float gainDb; };
-    std::vector<Knot> knots { { 0.0, false, -60.0f } };
-    for (const auto& point : preset.points)
-        knots.push_back({ point.from == From::beat ? nominalLeadIn + point.seconds
-                                                   : point.seconds,
-                          point.from == From::soundEnd, point.gainDb });
-    knots.push_back({ 0.0, true, -60.0f });
-    auto rampSeconds = 0.0;
-    for (std::size_t index = 1; index < knots.size(); ++index)
-        if (knots[index - 1].fromEnd == knots[index].fromEnd)
-            rampSeconds += std::abs(knots[index].seconds - knots[index - 1].seconds);
-    const auto rampWidth = plot.getWidth() * 0.62f;
-    const auto scale = rampWidth / static_cast<float>(std::max(1.0e-6, rampSeconds));
-
-    juce::Path shape;
-    for (std::size_t index = 0; index < knots.size(); ++index)
+    MaterialInputAction action=MaterialInputAction::insert;
+    juce::String noteId,aliasNoteId,trackId,query,bindingKey;
+    double atSeconds=0;std::uint64_t serial=0;bool aliasSuspended=false,ready=false,resolving=false;
+    std::atomic_bool active{true};
+    std::vector<MaterialPronunciationCatalog::Entry> entries;
+    juce::Component::SafePointer<PronunciationCandidateBox> picker;
+};
+struct MainComponent::NativeAnalysisTask
+{
+    struct Recipient{juce::String clipId;ClipData importedClip;std::optional<ProjectModel::MaterialSourceBindingTicket> ticket;};
+    juce::File file;juce::String key,fingerprint;std::vector<Recipient> recipients;
+};
+namespace
+{
+juce::String materialBindingKey(const ProjectData& data,const juce::String& id)
+{
+    juce::String result;int count=0;
+    for(const auto& t:data.tracks)for(const auto& parent:t.clips)for(const auto& n:parent.notes)if(n.id==id)
     {
-        const auto& knot = knots[index];
-        const auto x = knot.fromEnd
-            ? plot.getRight() - scale * static_cast<float>(knot.seconds)
-            : plot.getX() + scale * static_cast<float>(knot.seconds);
-        const auto level = knot.gainDb <= -59.9f ? 0.0f
-                                                 : std::pow(10.0f, knot.gainDb / 20.0f);
-        const auto y = plot.getBottom() - (plot.getBottom() - plot.getY()) * level;
-        if (index == 0) shape.startNewSubPath(x, y);
-        else shape.lineTo(x, y);
+        const ClipData* owner=&parent;
+        if(!parent.parts.empty())
+        {
+            owner=nullptr;for(const auto& p:parent.parts)if(p.id==n.clipPartId){if(owner)return {};owner=&p;}
+            if(!owner)return {};
+        }
+        result=t.id+"|"+parent.id+"|"+owner->id+"|"+owner->sourceFile.getFullPathName()+"|"+owner->materialSourceFingerprint+"|"+n.materialAudioId+"|"+n.materialRegionId;
+        if(n.materialAudioId.isNotEmpty())result+="|"+(n.materialBoundAlias.isEmpty()?n.label:n.materialBoundAlias);
+        ++count;
     }
-    shape.closeSubPath();
-
-    const auto tint = juce::Colour(0xff72d6aa);
-    g.setColour(tint.withAlpha(highlighted || down ? 0.42f : 0.26f));
-    g.fillPath(shape);
-    g.setColour(tint.withAlpha(highlighted || down ? 1.0f : 0.85f));
-    g.strokePath(shape, juce::PathStrokeType(1.3f));
-
-    if (preset.name.isNotEmpty())
-    {
-        g.setColour(findColour(juce::TextButton::textColourOffId)
-                        .withAlpha(highlighted || down ? 1.0f : 0.8f));
-        g.setFont(9.5f);
-        g.drawText(preset.name, area, juce::Justification::centred, false);
-    }
+    return count==1?result:juce::String{};
+}
 }
 
 MainComponent::MainComponent()
@@ -221,18 +317,31 @@ MainComponent::MainComponent()
     applyPreferences();
     startupLog("MainComponent: preferences applied");
     setLookAndFeel(&lookAndFeel);
+    // Give application dialogs and import forms the same palette as the main UI.
+    juce::LookAndFeel::setDefaultLookAndFeel(&lookAndFeel);
     setOpaque(true);
     setWantsKeyboardFocus(true);
 
-    for (auto* button : std::initializer_list<juce::TextButton*>{ &openButton, &saveButton, &audioButton, &melodyneButton,
+    for (auto* button : std::initializer_list<juce::TextButton*>{
                           &playButton, &stopButton, &noteEditButton, &wrenchButton,
                           &lineButton, &pointButton, &trimButton, &connectButton, &pitchParamButton,
                           &driftParamButton, &attackParamButton,
                           &breathParamButton, &tensionParamButton, &formantParamButton,
-                          &volumeParamButton, &voicebankSettingsButton,
-                          &spliceButton, &flagCurveButton, &flagEnvelopeButton })
+                          &volumeParamButton,
+                          &spliceButton, &utauVoicebankButton, &flagCurveButton, &flagEnvelopeButton })
         addAndMakeVisible(*button);
-    addAndMakeVisible(showViewMenuButton);
+    addAndMakeVisible(phonemizerButton);
+    phonemizerButton.onClick = [this] { showPhonemizerMenu(); };
+    addAndMakeVisible(pianoPreviewButton);
+    pianoPreviewButton.onClick = [this]
+    { project.setTrackPianoPreview(selectedTrackId, pianoPreviewButton.getToggleState()); };
+    utauVoicebankButton.setComponentID("utau-choose-voicebank");
+    utauVoicebankButton.onClick = [this] { chooseUtauVoicebank(); };
+    addAndMakeVisible(utauVoicebankName);
+    utauVoicebankName.setComponentID("utau-voicebank-name");
+    utauVoicebankName.setFont(juce::Font(14.0f));
+    utauVoicebankName.setMinimumHorizontalScale(1.0f);
+    utauVoicebankName.setJustificationType(juce::Justification::centredLeft);
     addAndMakeVisible(nativeAudioOverlapButton);
     addAndMakeVisible(nsfPitchTransitionsButton);
     addAndMakeVisible(nsfNoiseProtectionButton);
@@ -273,9 +382,6 @@ MainComponent::MainComponent()
                              static_cast<juce::Component*>(&sampleSaveButton),
                              static_cast<juce::Component*>(&otoImportButton),
                              static_cast<juce::Component*>(&otoExportButton),
-                             static_cast<juce::Component*>(&utauVoicebankLabel),
-                             static_cast<juce::Component*>(&utauVoicebankButton),
-                             static_cast<juce::Component*>(&utauVoicebankPath),
                              static_cast<juce::Component*>(&noteAliasLabel),
                              static_cast<juce::Component*>(&noteAliasEditor),
                              static_cast<juce::Component*>(&noteConsonantVelocityLabel),
@@ -286,8 +392,6 @@ MainComponent::MainComponent()
                              static_cast<juce::Component*>(&smoothCaption),
                              static_cast<juce::Component*>(&smoothSlider),
                              static_cast<juce::Component*>(&robustPitchCurveButton),
-                             static_cast<juce::Component*>(&zoomSlider),
-                             static_cast<juce::Component*>(&vZoomSlider),
                              static_cast<juce::Component*>(&progressBar),
                              static_cast<juce::Component*>(&collapseTracksButton),
                              static_cast<juce::Component*>(&trackViewport),
@@ -295,10 +399,6 @@ MainComponent::MainComponent()
                              static_cast<juce::Component*>(&pianoViewport),
                              static_cast<juce::Component*>(&panelSplitter) })
         addAndMakeVisible(*component);
-
-    for (auto* button : { &horizontalZoomOutButton, &horizontalZoomInButton,
-                          &verticalZoomOutButton, &verticalZoomInButton })
-        addAndMakeVisible(*button);
 
     panelSplitter.setMouseCursor(juce::MouseCursor::UpDownResizeCursor);
     panelSplitter.addMouseListener(this, false);
@@ -324,15 +424,6 @@ MainComponent::MainComponent()
     sampleSaveButton.onClick = [this] { saveSampleSettings(); };
     otoImportButton.onClick = [this] { importOto(); };
     otoExportButton.onClick = [this] { exportOto(); };
-    utauVoicebankButton.onClick = [this] { chooseUtauVoicebank(); };
-    voicebankSettingsButton.onClick = [this]
-    {
-        juce::Component::SafePointer<MainComponent> safe(this);
-        juce::MessageManager::callAsync([safe]
-        {
-            if (safe != nullptr) safe->showVoicebankSettings();
-        });
-    };
     noteAliasEditor.setSelectAllWhenFocused(true);
     noteAliasEditor.onTextChange = [this]
     {
@@ -377,10 +468,6 @@ MainComponent::MainComponent()
         refreshSampleEditors();
     };
 
-    openButton.setComponentID("icon.open");
-    saveButton.setComponentID("icon.save");
-    audioButton.setComponentID("icon.audio");
-    melodyneButton.setComponentID("icon.melodyne");
     refreshCollapseIcon();
     playButton.setComponentID("icon.play");
     stopButton.setComponentID("icon.stop");
@@ -501,11 +588,8 @@ MainComponent::MainComponent()
     // so every UTAU affordance is inherited rather than reimplemented.
     pitchAlgorithm.addItem(utf8("界•UTAU"), 8);
     pitchAlgorithm.addItem(utf8("谋•UTAU"), 9);
-    const auto configuredHifigan = preferences != nullptr
-        ? juce::File(preferences->getValue("algorithm.hifiganPath")) : juce::File{};
-    const auto defaultPitchId = backend::NsfHifiganRenderer::modelAvailable(configuredHifigan)
-        ? 2 : 6;
-    pitchAlgorithm.setSelectedId(defaultPitchId);
+    const auto defaultPitchId = 2; // Native default is NSF; readiness is diagnosed when used.
+    pitchAlgorithm.setSelectedId(defaultPitchId,juce::dontSendNotification);
     refreshStretchAlgorithmItems(defaultPitchId);
     pitchAlgorithm.onChange = [this]
     {
@@ -556,9 +640,6 @@ MainComponent::MainComponent()
         {
             project.setTrackPitchAlgorithm(selectedTrack->id, algorithm);
             project.setTrackUtauMode(selectedTrack->id, utauMode);
-            if (algorithm == PitchAlgorithm::utau
-                && !selectedTrack->voicebankDirectory.isDirectory())
-                bindDefaultUtauVoicebank(selectedTrack->id);
         }
         else
         {
@@ -588,7 +669,7 @@ MainComponent::MainComponent()
                 return track.id == selectedTrackId;
             });
         if (selectedTrack != data.tracks.end())
-            project.setTrackRenderOrder(selectedTrack->id, order);
+            project.setTrackRenderOrder(selectedTrack->id, order, renderOrder.getSelectedId() == 3);
         else
             project.setRenderOrder(order);
     };
@@ -598,6 +679,7 @@ MainComponent::MainComponent()
         const auto algorithm = id == 2 ? StretchAlgorithm::variableMelHop
             : id == 3 ? StretchAlgorithm::loop
             : id == 4 ? StretchAlgorithm::soundTouch
+            : id == 7 ? StretchAlgorithm::wcsNonLoop
             : id == 6 ? StretchAlgorithm::hifiShifterMel
             : id == 5 ? StretchAlgorithm::nsfShiftThenSplice
             : StretchAlgorithm::melodyneHybrid;
@@ -690,7 +772,6 @@ MainComponent::MainComponent()
         if (preferences != nullptr)
             preferences->setValue("ui.vZoom", vZoomSlider.getValue());
     };
-    horizontalZoomOutButton.onClick = [this] { adjustHorizontalZoom(1.0 / 1.25); };
     timelineViewport.onZoomBegin = [this](bool vertical, bool leading)
     {
         auto& anchor = timelineScrollZoomAnchor;
@@ -780,9 +861,6 @@ MainComponent::MainComponent()
             lastTimelineX = timelineViewport.getViewPositionX();
         }
     };
-    horizontalZoomInButton.onClick = [this] { adjustHorizontalZoom(1.25); };
-    verticalZoomOutButton.onClick = [this] { adjustVerticalZoom(1.0 / 1.2); };
-    verticalZoomInButton.onClick = [this] { adjustVerticalZoom(1.2); };
     timeline.onSeek = [this](double seconds) { audio.setPosition(seconds); };
     // The same menu from either half of the track area: the headers on the
     // left and the lanes on the right are one surface to the person using it.
@@ -832,6 +910,20 @@ MainComponent::MainComponent()
         // playing the playhead belongs to the transport, not to the cursor.
         if (!audio.isPlaying()) audio.setPosition(seconds);
     };
+    for(auto* c:{static_cast<juce::Component*>(&trackEditingHeading),static_cast<juce::Component*>(&diffSingerContextLabel),static_cast<juce::Component*>(&diffSingerModelButton),
+        static_cast<juce::Component*>(&diffSingerTimingButton),static_cast<juce::Component*>(&diffSingerPronunciationButton),static_cast<juce::Component*>(&diffSingerPitchButton),
+        static_cast<juce::Component*>(&diffSingerParametersButton),static_cast<juce::Component*>(&diffSingerSettingsButton)})addChildComponent(c);
+    trackEditingHeading.setFont(juce::Font(14.0f,juce::Font::bold));trackEditingHeading.setColour(juce::Label::textColourId,Palette::accentLight);
+    trackEditingHeading.setComponentID("track-editing-interface");diffSingerContextLabel.setComponentID("diffsinger-track-properties");
+    diffSingerModelButton.setComponentID("diffsinger-choose-model");diffSingerTimingButton.setComponentID("diffsinger-phoneme-timing");
+    diffSingerPronunciationButton.setComponentID("diffsinger-pronunciation");diffSingerPitchButton.setComponentID("diffsinger-generate-pitch");
+    diffSingerParametersButton.setComponentID("diffsinger-variance-parameters");diffSingerSettingsButton.setComponentID("diffsinger-language-speaker");
+    diffSingerModelButton.onClick=[this]{showAssetManager();};
+    diffSingerTimingButton.onClick=[this]{showDiffSingerPhonemeEditor(selectedTrackId,selectedNoteId);};
+    diffSingerPronunciationButton.onClick=[this]{showDiffSingerPronunciationEditor(selectedNoteId);};
+    diffSingerPitchButton.onClick=[this]{generateDiffSingerPitch(false,selectedNoteId);};
+    diffSingerParametersButton.onClick=[this]{showDiffSingerParameterLane();};
+    diffSingerSettingsButton.onClick=[this]{for(const auto& t:project.snapshot().tracks)if(t.id==selectedTrackId){showDiffSingerSettings(t);break;}};
     addAndMakeVisible(selectionSummaryLabel);
     selectionSummaryLabel.setJustificationType(juce::Justification::centredRight);
     pianoRoll.onEditRejected=[this](const juce::String& message){statusLabel.setText(message,juce::dontSendNotification);};
@@ -854,26 +946,27 @@ MainComponent::MainComponent()
     {
         showNoteOtoEditorForNote(noteId);
     };
+    pianoRoll.onRequestMaterialSourceInput = [this](const juce::String& noteId,const juce::String& query)
+    {showMaterialPronunciationInput(MaterialInputAction::replace,noteId,query);};
     pianoRoll.onNoteAliasCommitted = [this](const juce::String& noteId)
     {
-        prepareUtauTrackForNote(noteId);
+        noteLabelCommitted(noteId);
     };
     trackList.onTrackMenu = [this](const juce::String& id, juce::Point<int> at) { showOutputEngineMenu(id, at); };
     timeline.outputEngineNameProvider = [this](const auto& track) { return audio.outputEngineDisplayName(track); };
     trackList.outputEngineNameProvider = timeline.outputEngineNameProvider;
     trackList.peakProvider = [this](const juce::String& trackId) { return audio.trackPeak(trackId); };
+    trackList.onTrackGainRequested = [this](const juce::String& id) { showTrackGainDialog(id); };
+    trackList.onTrackPanRequested = [this](const juce::String& id) { showTrackPanDialog(id); };
     trackList.onTrackSelected = [this](const juce::String& trackId)
     {
         timeline.setSelectedClips({});
+        if (selectedTrackId != trackId) { selectedClipId.clear(); selectedNoteId.clear(); }
         selectedTrackId = trackId;
         pianoRoll.setFocusedTrack(trackId);
         refreshProjectControls();
     };
 
-    openButton.onClick = [this] { openProject(); };
-    saveButton.onClick = [this] { saveProject(); };
-    audioButton.onClick = [this] { importAudio(); };
-    melodyneButton.onClick = [this] { importMelodyne(); };
     collapseTracksButton.onClick = [this] { setTracksCollapsed(!tracksCollapsed); };
     playButton.onClick = [this] { togglePlayback(); };
     stopButton.onClick = [this]
@@ -892,9 +985,8 @@ MainComponent::MainComponent()
     wrenchButton.onClick = [this]
     {
         closeEnvelopeLanes();
-        setSourceEditMode(true);
-        pianoRoll.setTool(PianoRollComponent::Tool::note);
-        setToolButton(wrenchButton);
+        setSourceEditMode(false);
+        openSelectedMaterialEditor(true);
     };
     drawButton.onSecondaryClick = [this](juce::Point<int> at)
     { showDrawSettingsMenu(at); };
@@ -992,7 +1084,11 @@ MainComponent::MainComponent()
 
 MainComponent::~MainComponent()
 {
-    voicebankWindows.clear();noteOtoWindows.clear();otoPreviews.clear();
+    closingUI = true;
+    cancelProjectMaterialRegistration();
+    dismissMaterialPronunciationInput();
+    tempoWindows.clear(); // Cancel and join the analysis we own before exit.
+    settingsWindows.clear();voicebankWindows.clear();noteOtoWindows.clear();otoPreviews.clear();
     stopLiveMcp();
     diffSingerCancel->store(true);
     diffSingerCapabilityCancel->store(true);
@@ -1002,6 +1098,8 @@ MainComponent::~MainComponent()
     audio.removeChangeListener(this);
     project.removeChangeListener(this);
     menuBar.setModel(nullptr);
+    if (&juce::LookAndFeel::getDefaultLookAndFeel() == &lookAndFeel)
+        juce::LookAndFeel::setDefaultLookAndFeel(nullptr);
     setLookAndFeel(nullptr);
 }
 
@@ -1059,11 +1157,6 @@ void MainComponent::applyPreferences()
     // is over by the time anything is played rather than spent on the first
     // HF note.
     backend::UtauRenderer::prewarmHfDaemon(audio.currentUtauResamplerFile());
-    const auto tracks = project.snapshot().tracks;
-    for (const auto& track : tracks)
-        if (track.pitchAlgorithm == PitchAlgorithm::utau
-            && !track.voicebankDirectory.isDirectory())
-            bindDefaultUtauVoicebank(track.id);
     const auto analysisConfig = backend::AnalysisService::configFromProperties(preferences.get());
     audio.setInferenceConfiguration(analysisConfig.inference, analysisConfig.deviceIndex);
     backend::DiffSingerRenderer::configure(backend::DiffSingerOptions::read(*preferences));
@@ -1074,6 +1167,12 @@ void MainComponent::applyPreferences()
     pianoRoll.setShowWaveforms(showWaveforms);
     pianoRoll.setDrawLengthDivision(
         preferences->getIntValue("ui.drawLengthDivision", 64));
+    pianoRoll.setDrawAction(preferences->getValue("ui.drawAction", "pitch-curve") == "notes"
+        ? PianoRollComponent::DrawAction::notes : PianoRollComponent::DrawAction::pitchCurve);
+    pianoRoll.setPitchScope(preferences->getValue("ui.pitchScope", "clip") == "track"
+        ? PianoRollComponent::PitchScope::currentTrack : PianoRollComponent::PitchScope::focusedClip);
+    refreshPitchScopeTitle();
+    pianoRoll.setShowOverlap(preferences->getBoolValue("ui.showOverlap", false));
     viewOptions = viewOptionsFrom(*preferences);
     applyViewOptions();
     setTracksCollapsed(preferences->getBoolValue("ui.tracksCollapsed", false));
@@ -1103,6 +1202,15 @@ void MainComponent::applyPreferences()
     // dark-theme text colour that is unreadable.  Cascade the change so each
     // one's lookAndFeelChanged() re-applies from the current Palette.
     sendLookAndFeelChange();
+    // Modeless material/settings windows are independent JUCE roots, not
+    // descendants of MainComponent. Refresh their cached theme state too.
+    auto& desktop = juce::Desktop::getInstance();
+    for (int index = 0; index < desktop.getNumComponents(); ++index)
+        if (auto* root = desktop.getComponent(index); root != nullptr && root != getTopLevelComponent())
+        {
+            if (auto* themed = dynamic_cast<HachiLookAndFeel*>(&root->getLookAndFeel())) themed->refreshColours();
+            root->sendLookAndFeelChange();
+        }
     applyUiScale();
     applyRenderingPreference();
 }
@@ -1120,24 +1228,8 @@ void MainComponent::refreshTexts()
     timeline.setGainKnobHint(strings.text("clip.gainKnobHint"));
     timeline.setGainEnvelopeTexts(strings.text("track.envelopeHint"),
         {strings.text("track.envelopeDelete"),strings.text("track.envelopeResetPoint"),strings.text("track.envelopeReset")});
-    openButton.setButtonText({});
-    openButton.setTooltip(strings.text("file.open"));
-    saveButton.setButtonText({});
-    saveButton.setTooltip(strings.text("file.save"));
-    audioButton.setButtonText({});
-    audioButton.setTooltip(strings.text("file.audio"));
-    melodyneButton.setButtonText({});
-    melodyneButton.setTooltip(strings.text("file.melodyne"));
     collapseTracksButton.setTooltip(utf8(
         "折叠上方的音轨与编排，把整个窗口留给调音；再次点击展开"));
-    horizontalZoomOutButton.setButtonText("-");
-    horizontalZoomOutButton.setTooltip(strings.text("view.zoomOut"));
-    horizontalZoomInButton.setButtonText("+");
-    horizontalZoomInButton.setTooltip(strings.text("view.zoomIn"));
-    verticalZoomOutButton.setButtonText("-");
-    verticalZoomOutButton.setTooltip(strings.text("view.vZoomOut"));
-    verticalZoomInButton.setButtonText("+");
-    verticalZoomInButton.setTooltip(strings.text("view.vZoomIn"));
     playButton.setButtonText({});
     playButton.setTooltip(strings.text("transport.play"));
     stopButton.setButtonText({});
@@ -1147,7 +1239,8 @@ void MainComponent::refreshTexts()
     wrenchButton.setButtonText({});
     wrenchButton.setTooltip(strings.text("tool.wrench"));
     drawButton.setButtonText({});
-    drawButton.setTooltip(strings.text("tool.draw"));
+    drawButton.setTooltip(strings.text("tool.draw") + "\n" + strings.text(pianoRoll.drawAction() == PianoRollComponent::DrawAction::notes
+        ? "draw.action.notes" : "draw.action.pitch"));
     lineButton.setButtonText({});
     lineButton.setTooltip(strings.text("tool.line"));
     pointButton.setButtonText({});
@@ -1155,8 +1248,8 @@ void MainComponent::refreshTexts()
     trimButton.setButtonText({});
     trimButton.setTooltip(strings.text("tool.trim"));
     connectButton.setButtonText({});
-    connectButton.setTooltip(strings.text("tool.connect"));
-    parameterTitle.setText(strings.text("editor.parameters"), juce::dontSendNotification);
+    connectButton.setTooltip(strings.text("Source-note boundary split/join, not forced pitch portamento"));
+    refreshPitchScopeTitle();
     smoothCaption.setText(strings.text("editor.smooth"), juce::dontSendNotification);
     pitchParamButton.setButtonText(strings.text("param.pitch"));
     driftParamButton.setButtonText(strings.text("param.drift"));
@@ -1165,13 +1258,13 @@ void MainComponent::refreshTexts()
     tensionParamButton.setButtonText(strings.text("param.tension"));
     formantParamButton.setButtonText(strings.text("param.formant"));
     volumeParamButton.setButtonText(strings.text("param.volume"));
-    volumeParamButton.setTooltip(utf8("编辑音量；右键打开音频／OTO 高级包络"));
+    volumeParamButton.setTooltip(utf8("编辑音量；高级形状使用高级包络按钮"));
     advancedEnvelopeButton.setButtonText(utf8("高级包络"));
     advancedEnvelopeButton.setTooltip(utf8("打开尾段淡出窗口：调整位置、起止响度和曲线，预览后应用或试听。"));
-    advancedEnvelopeButton.onClick=[this]{if(isUtauAlgorithmSelected())showAdvancedEnvelopeMenu();else setEnvelopeLane(nextEnvelopeLane(envelopeLane,EnvelopeLane::amplitude));};
+    advancedEnvelopeButton.onClick=[this]{showAdvancedEnvelopeMenu();};
     advancedEnvelopeButton.setComponentID("native-envelope-editor");
     pianoRoll.onOpenNativeEnvelope=[this]{setEnvelopeLane(EnvelopeLane::amplitude);};
-    volumeParamButton.onSecondaryClick=[this](juce::Point<int>){showAdvancedEnvelopeMenu();};
+    volumeParamButton.onSecondaryClick = {}; // Detailed envelope has one visible entry.
     robustPitchCurveButton.setButtonText(strings.text("param.robustPitchCurveShort"));
     robustPitchCurveButton.setTooltip(strings.text("param.robustPitchCurve"));
     bpmCaption.setText("BPM", juce::dontSendNotification);
@@ -1193,6 +1286,7 @@ void MainComponent::refreshTexts()
         renderOrder.clear(juce::dontSendNotification);
         renderOrder.addItem(strings.text("algo.order.processThenSplice"), 1);
         renderOrder.addItem(strings.text("algo.order.stretchSpliceThenPitch"), 2);
+        renderOrder.addItem(strings.text("algo.order.processMergeContiguous"), 3);
         renderOrder.setSelectedId(previousOrder > 0 ? previousOrder : 1,
                                   juce::dontSendNotification);
     }
@@ -1206,19 +1300,9 @@ void MainComponent::refreshTexts()
     sampleSaveButton.setButtonText(strings.text("sample.save"));
     otoImportButton.setButtonText(strings.text("sample.importOto"));
     otoExportButton.setButtonText(strings.text("sample.exportOto"));
-    utauVoicebankLabel.setText(utf8("UTAU 音源库"), juce::dontSendNotification);
-    utauVoicebankButton.setButtonText(utf8("选择音源库…"));
     // A dropdown rather than dialog settings: these are reached while tuning,
     // so they stay in the tool row where a click finds them, but folded into
     // one button because the row is the scarcest space in the window.
-    showViewMenuButton.setButtonText(strings.text("native.display"));
-    showViewMenuButton.setTooltip(utf8(
-        "范围：每个音符实际发声范围的橙色框\n"
-        "包络：在音符上画出它自己的振幅包络\n"
-        "气声虚线：标记原音中的明显气声／噪声特征；虚线段仍可包含音高，仅改变显示"));
-    // Opens on press rather than release, the way a dropdown does.
-    showViewMenuButton.setTriggeredOnMouseDown(true);
-    showViewMenuButton.onClick = [this] { showViewMenu(); };
     nativeAudioOverlapButton.setButtonText(strings.text("native.allowOverlap"));
     nsfPitchTransitionsButton.setButtonText(strings.text("native.nsfPitchTransitions"));
     nsfPitchTransitionsButton.setTooltip(strings.text("native.nsfPitchTransitionsHelp"));
@@ -1232,36 +1316,44 @@ void MainComponent::refreshTexts()
     timeline.setAudioOverlapLabel(strings.text("native.overlap"));
     nativeAudioOverlapButton.setTooltip(strings.text("native.overlapHelp"));
     nativeAudioOverlapButton.onClick=[this]{project.setNativeAudioOverlap(selectedTrackId,nativeAudioOverlapButton.getToggleState());};
-    envelopePresetCaption.setText(utf8("包络预设"), juce::dontSendNotification);
-    envelopePresetCaption.setJustificationType(juce::Justification::centredRight);
-    addAndMakeVisible(envelopePresetCaption);
-    // One button per preset, in the order the roll lists them.  Texts are
-    // refreshed again every time the settings close, so the buttons are made
-    // the first time only and given their text every time.
+    envelopePresetMenu.clear(juce::dontSendNotification);
+    envelopePresetMenu.setTextWhenNothingSelected(utf8("包络预设"));
+    envelopePresetMenu.setTooltip(utf8("选择预设，应用到所选音符或单独选中的音素"));
     const auto& presets = PianoRollComponent::envelopePresets();
-    if (envelopePresetButtons.empty())
-        for (const auto& preset : presets)
-        {
-            auto button = std::make_unique<EnvelopePresetButton>();
-            // The list is static, so the preset outlives every button made
-            // from it.
-            button->onClick = [this, &preset]
-            {
-                const auto count = pianoRoll.applyEnvelopePreset(preset);
-                if (count > 0)
-                    statusLabel.setText(utf8("包络预设：") + juce::String(count)
-                        + utf8(" 个音符"), juce::dontSendNotification);
-                else
-                    showError(utf8("先选中要套用预设的音符。"));
-            };
-            addAndMakeVisible(*button);
-            envelopePresetButtons.push_back(std::move(button));
-        }
-    for (std::size_t index = 0; index < presets.size(); ++index)
+    for(std::size_t i=0;i<presets.size();++i)
+        envelopePresetMenu.getRootMenu()->addCustomItem(static_cast<int>(i)+1,
+            std::make_unique<EnvelopePresetMenuItem>(presets[i]),nullptr,presets[i].name);
+    envelopePresetMenu.onChange=[this]
     {
-        envelopePresetButtons[index]->configure(presets[index]);
-        envelopePresetButtons[index]->setTooltip(presets[index].tip);
-    }
+        const auto index=envelopePresetMenu.getSelectedId()-1;
+        // This picker is an action, not a stored parameter. Clear it silently
+        // so the same preset can be applied again after changing the selection.
+        envelopePresetMenu.setSelectedId(0,juce::dontSendNotification);
+        const auto& choices=PianoRollComponent::envelopePresets();
+        if(index<0 || index>=static_cast<int>(choices.size()))return;
+        const auto count=pianoRoll.applyEnvelopePreset(choices[static_cast<std::size_t>(index)]);
+        if(count>0)statusLabel.setText(utf8("包络预设：")+juce::String(count)+utf8(" 个音符"),juce::dontSendNotification);
+        else showError(utf8("先选中要套用预设的音符。"));
+    };
+    addAndMakeVisible(envelopePresetMenu);
+    autoCrossfadeButton.setButtonText(utf8("自动交叉淡化"));
+    addAndMakeVisible(autoCrossfadeButton);
+    autoCrossfadeCurve = preferences->getBoolValue("ui.autoCrossfadeCurve", false);
+    selectAutoCrossfadeMode(autoCrossfadeCurve ? 2 : 1);
+    autoCrossfadeButton.onSecondaryClick = [this](juce::Point<int> at)
+    {
+        auto menu=autoCrossfadeModeMenu();menu.setLookAndFeel(&getLookAndFeel());
+        menu.showMenuAsync(juce::PopupMenu::Options().withTargetScreenArea({at.x,at.y,1,1}),
+            [safe=juce::Component::SafePointer<MainComponent>(this)](int chosen)
+            {if(safe!=nullptr)safe->selectAutoCrossfadeMode(chosen);});
+    };
+    autoCrossfadeButton.onClick = [this]
+    {
+        const auto count = pianoRoll.crossfadeSelectedNotes(autoCrossfadeCurve);
+        if (count > 0) setEnvelopeLane(EnvelopeLane::amplitude);
+        statusLabel.setText(count > 0 ? utf8("已生成交叉淡化，可在响度包络中编辑或撤销。")
+            : utf8("请选择同轨的两个前后重叠音符；无重叠、完全包含或音源尚未解析时无法交叉淡化。"), juce::dontSendNotification);
+    };
     spliceButton.setButtonText(utf8("强制连接"));
     spliceButton.setTooltip(utf8("把选中的音符连接为一条可渲染的原生边界；"
                                   "保留每个音符和素材数据，支持跨片段连接"));
@@ -1305,8 +1397,6 @@ void MainComponent::refreshTexts()
         { showDiffSingerParameterLane(); return; }
         setEnvelopeLane(nextEnvelopeLane(envelopeLane, EnvelopeLane::flagCurve));
     };
-    voicebankSettingsButton.setButtonText(utf8("音源库设置"));
-    voicebankSettingsButton.setTooltip(utf8("UTAU：查看 oto.ini；DiffSinger：选择歌词语言、音色并查看 pitch 能力"));
     noteAliasLabel.setText(utf8("音符发音/别名"), juce::dontSendNotification);
     noteConsonantVelocityLabel.setText(strings.text("editor.attackSpeed"), juce::dontSendNotification);
     const auto noteVelocityHelp = strings.text("native.velocityHelp");
@@ -1316,6 +1406,63 @@ void MainComponent::refreshTexts()
     noteFlagsLabel.setText("Flags", juce::dontSendNotification);
     noteFlagsEditor.setTextToShowWhenEmpty({}, Palette::textMuted);
     refreshSelectedNoteParameter();
+}
+
+void MainComponent::refreshTrackPitchItems(const TrackData* track)
+{
+    const auto type=track?effectiveTrackType(*track):TrackType::hachi;
+    const auto previous=pitchAlgorithm.getSelectedId();pitchAlgorithm.clear(juce::dontSendNotification);
+    if(type==TrackType::hachi)
+    {pitchAlgorithm.addItem("nsf-hifigan",2);pitchAlgorithm.addItem("WORLD",3);pitchAlgorithm.addItem("llsm2",6);}
+    else if(type==TrackType::utau)
+    {pitchAlgorithm.addItem("UTAU",7);pitchAlgorithm.addItem(utf8("界•UTAU"),8);pitchAlgorithm.addItem(utf8("谋•UTAU"),9);}
+    else pitchAlgorithm.addItem("DiffSinger",10);
+    if(pitchAlgorithm.indexOfItemId(previous)>=0)pitchAlgorithm.setSelectedId(previous,juce::dontSendNotification);
+}
+
+void MainComponent::refreshTrackEditingInterface(const TrackData* track)
+{
+    const auto id=track?track->id:juce::String{};const auto type=track?effectiveTrackType(*track):TrackType::hachi;
+    if(trackInterfaceOwner!=id||displayedTrackType!=type)
+    {
+        std::vector<juce::String> keep;
+        if(track)for(const auto& selected:pianoRoll.selectedNoteIds())for(const auto& clip:track->clips)for(const auto& n:clip.notes)if(n.id==selected)keep.push_back(n.id);
+        finishMaterialPronunciationInput(true); // discard UI query only, never a model action
+        pianoRoll.cancelPendingEditingForTrackChange();
+        sourceEditActive=false;pianoRoll.setSourceEditMode(false);audio.clearAuditionFile();
+        closeEnvelopeLanes();pianoRoll.setShowEnvelope(false);
+        noteFlagsDirty=false;noteConsonantVelocityDirty=false;
+        if(track)
+        {
+            if(std::none_of(track->clips.begin(),track->clips.end(),[&](const auto& c){return c.id==selectedClipId;}))selectedClipId.clear();
+            bool ownsNote=false;for(const auto& c:track->clips)for(const auto& n:c.notes)ownsNote|=n.id==selectedNoteId;
+            if(!ownsNote)selectedNoteId.clear();
+        }
+        else{selectedClipId.clear();selectedNoteId.clear();}
+        pianoRoll.setSelectedNoteIds(keep);trackInterfaceOwner=id;displayedTrackType=type;
+        menuItemsChanged(); // Track semantics, not a possibly stale algorithm picker.
+    }
+    projectedTrackEditable=track&&track->compose&&!track->accompaniment&&!track->referenceOnly;
+    utauVoicebankButton.setButtonText(strings.text("utau.chooseVoicebank"));
+    const auto bankDirectory = track ? track->voicebankDirectory : juce::File{};
+    utauVoicebankName.setText(bankDirectory != juce::File{} ? bankDirectory.getFileName()
+        : strings.text("utau.noVoicebankSelected"), juce::dontSendNotification);
+    utauVoicebankName.setTooltip(bankDirectory != juce::File{} ? bankDirectory.getFullPathName()
+        : strings.text("utau.noVoicebankSelected"));
+    utauVoicebankButton.setTooltip(strings.text("utau.chooseVoicebankHint")
+        + (track && track->voicebankDirectory != juce::File{}
+            ? "\n" + track->voicebankDirectory.getFullPathName() : juce::String{}));
+    const auto title=type==TrackType::hachi?juce::String("HachiShifter"):type==TrackType::utau?juce::String("UTAU"):juce::String("DiffSinger");
+    trackEditingHeading.setText(title+(track?" | "+track->name:juce::String{}),juce::dontSendNotification);
+    diffSingerContextLabel.setText(track?(strings.text("Language: "))+track->diffSingerLanguage+(strings.text("  Speaker: "))
+        +(track->diffSingerSpeaker.isEmpty()?juce::String("default"):track->diffSingerSpeaker):juce::String{},juce::dontSendNotification);
+    diffSingerModelButton.setButtonText(strings.text("Choose model"));diffSingerTimingButton.setButtonText(strings.text("Phoneme timing"));
+    diffSingerPronunciationButton.setButtonText(strings.text("Pronunciation"));diffSingerPitchButton.setButtonText(strings.text("Generate pitch"));
+    diffSingerParametersButton.setButtonText(strings.text("Variance parameters"));diffSingerSettingsButton.setButtonText(strings.text("Language / speaker"));
+    const bool ds=projectedTrackEditable&&type==TrackType::diffSinger;
+    for(auto* c:{static_cast<juce::Component*>(&diffSingerContextLabel),static_cast<juce::Component*>(&diffSingerModelButton),static_cast<juce::Component*>(&diffSingerTimingButton),
+        static_cast<juce::Component*>(&diffSingerPronunciationButton),static_cast<juce::Component*>(&diffSingerPitchButton),static_cast<juce::Component*>(&diffSingerParametersButton),static_cast<juce::Component*>(&diffSingerSettingsButton)})c->setVisible(ds);
+    refreshTrackPitchItems(track);
 }
 
 void MainComponent::refreshProjectControls()
@@ -1357,9 +1504,10 @@ void MainComponent::refreshProjectControls()
     if (selected == data.tracks.end())
         selected = std::find_if(data.tracks.begin(), data.tracks.end(),
                                 [](const auto& track) { return track.compose; });
+    refreshTrackEditingInterface(selected!=data.tracks.end()?&*selected:nullptr);
     if (selected != data.tracks.end())
     {
-        const auto pitchId = selected->accompaniment ? 0 : selected->pitchAlgorithm == PitchAlgorithm::nsfHifigan ? (trackUsesVoicebankSynthesis(*selected) ? utauModePickerItem(selected->utauMode) : 2)
+        const auto pitchId = selected->accompaniment ? 0 : effectiveTrackType(*selected)==TrackType::diffSinger ? 10 : selected->pitchAlgorithm == PitchAlgorithm::nsfHifigan ? (trackUsesVoicebankSynthesis(*selected) ? utauModePickerItem(selected->utauMode) : 2)
             : selected->pitchAlgorithm == PitchAlgorithm::world ? 3
             : selected->pitchAlgorithm == PitchAlgorithm::vocalShifter ? 4
             : selected->pitchAlgorithm == PitchAlgorithm::llsm2 ? 6
@@ -1368,6 +1516,7 @@ void MainComponent::refreshProjectControls()
         const auto stretchId = selected->stretchAlgorithm == StretchAlgorithm::variableMelHop ? 2
             : selected->stretchAlgorithm == StretchAlgorithm::loop ? 3
             : selected->stretchAlgorithm == StretchAlgorithm::soundTouch ? 4
+            : selected->stretchAlgorithm == StretchAlgorithm::wcsNonLoop ? 7
             : selected->stretchAlgorithm == StretchAlgorithm::hifiShifterMel ? 6
             : selected->stretchAlgorithm == StretchAlgorithm::nsfShiftThenSplice ? 5 : 1;
         pitchAlgorithm.setSelectedId(pitchAlgorithm.indexOfItemId(pitchId) >= 0 ? pitchId : 0,
@@ -1387,17 +1536,28 @@ void MainComponent::refreshProjectControls()
         }
         refreshStretchAlgorithmItems(stretchId);
         renderOrder.setSelectedId(
-            selected->renderOrder == RenderOrder::stretchSpliceThenPitch ? 2 : 1,
+            selected->renderOrder == RenderOrder::stretchSpliceThenPitch ? 2 : selected->mergeContiguousSource ? 3 : 1,
             juce::dontSendNotification);
-        utauVoicebankPath.setText(selected->voicebankDirectory.isDirectory()
-            ? selected->voicebankDirectory.getFullPathName()
-            : utf8("尚未选择音源库"), juce::dontSendNotification);
-        utauVoicebankPath.setTooltip(utauVoicebankPath.getText());
     }
     const auto accompaniment = selected != data.tracks.end() && selected->accompaniment;
-    pitchAlgorithm.setEnabled(!accompaniment);
-    stretchAlgorithm.setEnabled(!accompaniment);
-    renderOrder.setEnabled(!accompaniment);
+    phonemizerButton.setVisible(selected != data.tracks.end() && selected->id == selectedTrackId
+        && effectiveTrackType(*selected)==TrackType::utau && trackUsesVoicebankSynthesis(*selected) && selected->utauMode == UtauMode::classic
+        && !trackIsDiffSinger(*selected) && !sourceEditActive);
+    phonemizerButton.setButtonText(strings.text("phonemizer.choose") + ": "
+        + strings.text(selected != data.tracks.end() && selected->chineseCvvc
+            ? "phonemizer.zhCvvc" : "phonemizer.manualShort"));
+    phonemizerButton.setTooltip(strings.text("phonemizer.toolbarHelp"));
+    pianoPreviewButton.setVisible(selected != data.tracks.end()
+        && effectiveTrackType(*selected) == TrackType::utau
+        && trackUsesVoicebankSynthesis(*selected) && !accompaniment && !sourceEditActive);
+    pianoPreviewButton.setButtonText(strings.text("utau.pianoPreview"));
+    pianoPreviewButton.setTooltip(strings.text("utau.pianoPreviewHelp"));
+    pianoPreviewButton.setToggleState(selected != data.tracks.end() && selected->utauPianoPreview,
+                                     juce::dontSendNotification);
+    const auto dsInterface=selected!=data.tracks.end()&&effectiveTrackType(*selected)==TrackType::diffSinger;
+    pitchAlgorithm.setEnabled(!accompaniment&&!dsInterface);
+    stretchAlgorithm.setEnabled(!accompaniment&&!dsInterface);
+    renderOrder.setEnabled(!accompaniment&&!dsInterface);
     pianoRoll.setEnabled(!accompaniment);
     wrenchButton.setEnabled(!accompaniment);
     if (accompaniment)
@@ -1648,7 +1808,7 @@ void MainComponent::commitNoteAlias()
 {
     if (selectedNoteId.isEmpty() || !noteAliasEditor.isEnabled()) return;
     project.setNoteLabel(selectedNoteId, noteAliasEditor.getText());
-    prepareUtauTrackForNote(selectedNoteId);
+    noteLabelCommitted(selectedNoteId);
     // After the track has a voicebank, or the note would have no span to take
     // its shape from.
     pianoRoll.ensureDefaultEnvelope(selectedNoteId);
@@ -1706,27 +1866,32 @@ void MainComponent::chooseUtauVoicebank()
     chooser = std::make_unique<juce::FileChooser>(utf8("选择 UTAU / DiffSinger 音源库目录"), initial);
     chooser->launchAsync(juce::FileBrowserComponent::openMode
                              | juce::FileBrowserComponent::canSelectDirectories,
-        [this, trackId = selected->id](const juce::FileChooser& selectedChooser)
+        [safe = juce::Component::SafePointer<MainComponent>(this), trackId = selected->id](const juce::FileChooser& selectedChooser)
         {
-            const auto directory = selectedChooser.getResult();
-            if (!directory.isDirectory()) return;
-            juce::StringArray imported, warnings;
-            int sidecars = 0, regions = 0;
-            const auto neural = backend::DiffSingerRenderer::isVoicebank(directory);
-            if (neural) { loadDiffSingerVoicebank(trackId, directory); return; }
-            SampleSettings::importVoicebank(directory, imported, sidecars, regions, warnings);
-            project.setTrackVoicebankDirectory(trackId, directory);
-            if (preferences != nullptr)
-            {
-                preferences->setValue("algorithm.utauVoicebank", directory.getFullPathName());
-                preferences->saveIfNeeded();
-            }
-            statusLabel.setText(neural ? utf8("DiffSinger 音源已载入；音源库设置可选择歌词语言，编辑菜单可生成 pitch")
-                : utf8("UTAU 音源库：") + juce::String(imported.size())
-                + utf8(" 个采样，") + juce::String(regions) + utf8(" 个别名")
-                + (warnings.isEmpty() ? juce::String{} : utf8("（部分条目有警告）")),
-                juce::dontSendNotification);
+            if (safe != nullptr) safe->selectVoicebank(trackId, selectedChooser.getResult());
         });
+}
+
+bool MainComponent::selectVoicebank(const juce::String& trackId, const juce::File& directory)
+{
+    if (!directory.isDirectory()) return false;
+    const auto data = project.snapshot();
+    if (std::none_of(data.tracks.begin(), data.tracks.end(), [&](const auto& track)
+        { return track.id == trackId && !track.accompaniment; })) return false;
+    if (backend::DiffSingerRenderer::isVoicebank(directory))
+    {
+        loadDiffSingerVoicebank(trackId, directory);
+        return true;
+    }
+    // Selecting an existing bank only binds its path. importVoicebank is an
+    // inventory operation: it opens every WAV and repeatedly decodes the OTO
+    // just to count aliases. None of those rows populate the renderer's index.
+    // The existing asynchronous index supplies timing when notes need it.
+    project.setTrackVoicebankDirectory(trackId, directory);
+    // A track binding is not an implicit global-default edit.
+    statusLabel.setText(utf8("UTAU 音源库：") + directory.getFileName(),
+                        juce::dontSendNotification);
+    return true;
 }
 
 void MainComponent::refreshSpliceButton()
@@ -1738,66 +1903,33 @@ void MainComponent::refreshSpliceButton()
 
 void MainComponent::spliceSelectedNotes()
 {
+    // Historical private name; this ONE visible action now always means pitch
+    // portamento, never a backend-dependent audio splice or material join.
     const auto selected = pianoRoll.selectedNoteIds();
     if (selected.size() < 2) return;
     const auto data = project.snapshot();
-    auto hasNonUtau = false;
-    for (const auto& track : data.tracks)
-        for (const auto& clip : track.clips)
-            for (const auto& note : clip.notes)
-                if (std::find(selected.begin(), selected.end(), note.id) != selected.end()
-                    && track.pitchAlgorithm != PitchAlgorithm::utau)
-                    hasNonUtau = true;
-    if (hasNonUtau)
-    {
-        project.setNotesConnection(selected, true);
-        statusLabel.setText(utf8("强制连接：已保留音符数据并写入原生边界"),
-                            juce::dontSendNotification);
-        return;
-    }
-
-    struct Placed { juce::String id; double start = 0.0; double end = 0.0; bool spliced = false; };
+    struct Placed { juce::String id, trackId; double start = 0; };
     std::vector<Placed> notes;
     for (const auto& track : data.tracks)
-    {
-        if (track.pitchAlgorithm != PitchAlgorithm::utau) continue;
         for (const auto& clip : track.clips)
             for (const auto& note : clip.notes)
-            {
-                if (std::find(selected.begin(), selected.end(), note.id) == selected.end())
-                    continue;
-                const auto start = clip.startSeconds + note.startSeconds;
-                notes.push_back({ note.id, start, start + note.durationSeconds,
-                                  note.utauSplice });
-            }
-    }
-    std::stable_sort(notes.begin(), notes.end(), [](const auto& left, const auto& right)
+                if (std::find(selected.begin(), selected.end(), note.id) != selected.end())
+                    notes.push_back({note.id,track.id,clip.startSeconds+note.startSeconds});
+    std::stable_sort(notes.begin(),notes.end(),[](const auto& a,const auto& b)
+    {return a.trackId==b.trackId?a.start<b.start:a.trackId<b.trackId;});
+    bool allConnected=notes.size()==selected.size();
+    for(std::size_t i=1;i<notes.size();++i)
+        allConnected &= notes[i-1].trackId==notes[i].trackId
+            && std::any_of(data.nativeConnections.begin(),data.nativeConnections.end(),[&](const auto& edge)
+                {return edge.leftNoteId==notes[i-1].id&&edge.rightNoteId==notes[i].id&&!edge.pitchCurve.empty();});
+    juce::String error;
+    if(!project.setNotesPortamento(selected,!allConnected,error))
     {
-        return left.start < right.start;
-    });
-
-    // The flag belongs to the later note of each pair: it says "fade into what
-    // came before me".  Only a shared boundary can be spliced.
-    std::vector<juce::String> boundaries;
-    auto allSpliced = true;
-    for (std::size_t index = 1; index < notes.size(); ++index)
-    {
-        if (std::abs(notes[index - 1].end - notes[index].start) > 0.002) continue;
-        boundaries.push_back(notes[index].id);
-        allSpliced = allSpliced && notes[index].spliced;
-    }
-    if (boundaries.empty())
-    {
-        showError(utf8("选中的音符之间没有相邻的交界。"));
+        if(error.isNotEmpty())showError(error);
         return;
     }
-    // Pressing it again on an already spliced run takes the splice off, which
-    // is the only way back other than undo.
-    const auto enable = !allSpliced;
-    project.setNotesUtauSplice(boundaries, enable);
-    statusLabel.setText((enable ? utf8("拼接：") : utf8("取消拼接："))
-        + juce::String(static_cast<int>(boundaries.size())) + utf8(" 处交界"),
-        juce::dontSendNotification);
+    statusLabel.setText(allConnected ? utf8("已断开所选音符的滑音连接；素材与包络保持不变。")
+        : utf8("已建立滑音连接；可编辑连接音高曲线，素材与包络保持不变。"),juce::dontSendNotification);
 }
 
 void MainComponent::showVoicebankSettings()
@@ -1849,59 +1981,9 @@ void MainComponent::showVoicebankSettings()
 
 void MainComponent::showRegionEditorForNote(const juce::String& noteId)
 {
-    const auto wanted = noteId.isNotEmpty() ? noteId : selectedNoteId;
-    if (wanted.isEmpty()) return;
-    const auto data = project.snapshot();
-    const TrackData* owner = nullptr;
-    juce::String alias;
-    for (const auto& track : data.tracks)
-        for (const auto& clip : track.clips)
-            for (const auto& note : clip.notes)
-                if (note.id == wanted) { owner = &track; alias = note.label; }
-    if (owner == nullptr) return;
-    if (!trackUsesVoicebankSynthesis(*owner))
-    {
-        showError(utf8("区域编辑器仅用于 UTAU 轨道。"));
-        return;
-    }
-    if (!owner->voicebankDirectory.isDirectory())
-    {
-        showError(utf8("请先为当前轨道选择 UTAU 音源库。"));
-        return;
-    }
-
-    if (trackIsDiffSinger(*owner)) { showDiffSingerPhonemeEditor(owner->id, wanted); return; }
-    juce::StringArray warnings;
-    const auto mouMode = owner->utauMode == UtauMode::mou;
-    const auto entries = SampleSettings::loadVoicebankOto(
-        owner->voicebankDirectory, warnings, utauModeUsesRegions(owner->utauMode),
-        mouMode);
-    const auto index = SampleSettings::findEntryForAlias(entries, alias);
-    if (index < 0)
-    {
-        showError(utf8("音源库里没有可编辑的 oto 条目。"));
-        return;
-    }
-    const auto entry = entries[static_cast<std::size_t>(index)];
-    const auto windowKey="oto|"+entry.otoFile.getFullPathName()+"|"+juce::String(entry.lineIndex)+"|"+juce::String(static_cast<int>(owner->utauMode));
-    if(voicebankWindows.showExisting(windowKey))return;
-
-    juce::DialogWindow::LaunchOptions options;
-    options.dialogTitle = (mouMode ? utf8("谋•OTO 分区编辑器 — ")
-                           : utauModeUsesRegions(owner->utauMode)
-                               ? utf8("界•OTO 四区编辑器 — ")
-                               : utf8("oto 时序编辑器 — "))
-        + entry.sourceName;
-    options.dialogBackgroundColour = Palette::panel;
-    options.escapeKeyTriggersCloseButton = true;
-    options.useNativeTitleBar = true;
-    options.resizable = true;
-    auto* editor = new OtoWaveformEditorComponent(
-        entry, utauModeUsesRegions(owner->utauMode), mouMode, [] {});
-    attachOtoPlayback(*editor);
-    options.content.setOwned(editor);
-    if (auto* window = voicebankWindows.show(options,windowKey))
-        window->setResizeLimits(720, 400, 1800, 1100);
+    // Context/keyboard access resolves into the material manager's ONE precise
+    // editor; it must not create a third independent material writer.
+    openSelectedMaterialEditor(false, noteId);
 }
 
 void MainComponent::showNoteOtoEditorForNote(const juce::String& noteId)
@@ -1982,24 +2064,7 @@ void MainComponent::stopOtoPreviews()
     otoPreviews.erase(std::remove_if(otoPreviews.begin(),otoPreviews.end(),[](const auto& e){return e==nullptr;}),otoPreviews.end());
 }
 
-bool MainComponent::bindDefaultUtauVoicebank(const juce::String& trackId)
-{
-    if (preferences == nullptr || trackId.isEmpty()) return false;
-    const juce::File directory(preferences->getValue("algorithm.utauVoicebank"));
-    if (!directory.isDirectory()) return false;
-    if (backend::DiffSingerRenderer::isVoicebank(directory))
-    { loadDiffSingerVoicebank(trackId, directory); return true; }
-
-    // Binding an existing OTO bank is a path edit. The renderer reads OTO
-    // lazily; converting every sample to sidecars here blocks the UI even
-    // when this track has no notes.
-    project.setTrackVoicebankDirectory(trackId, directory);
-    statusLabel.setText(utf8("UTAU 默认音源库：") + directory.getFileName(),
-        juce::dontSendNotification);
-    return true;
-}
-
-void MainComponent::prepareUtauTrackForNote(const juce::String& noteId)
+void MainComponent::noteLabelCommitted(const juce::String& noteId)
 {
     const auto data = project.snapshot();
     const TrackData* owner = nullptr;
@@ -2016,22 +2081,47 @@ void MainComponent::prepareUtauTrackForNote(const juce::String& noteId)
     selectedTrackId = owner->id;
     trackList.setSelectedTrack(owner->id);
     pianoRoll.setFocusedTrack(owner->id);
-    if (!trackUsesVoicebankSynthesis(*owner))
-        project.setTrackPitchAlgorithm(owner->id, PitchAlgorithm::utau);
-
-    const auto hasVoicebank = owner->voicebankDirectory.isDirectory()
-        || bindDefaultUtauVoicebank(owner->id);
-    if (!hasVoicebank)
-        statusLabel.setText(utf8("未找到 UTAU 音源库：请在设置的算法页选择默认音源文件夹"),
-                            juce::dontSendNotification);
-    else
-        statusLabel.setText(utf8("已切换到 UTAU，正在生成音符音频…"),
+    // Editing a label is never permission to change the renderer or silently
+    // bind a global voicebank. Material assignment has one explicit manager entry.
+    if (trackUsesVoicebankSynthesis(*owner) && !owner->voicebankDirectory.isDirectory())
+        statusLabel.setText(utf8("请在素材管理器中选择素材文件夹并用于当前轨道。"),
                             juce::dontSendNotification);
     refreshProjectControls();
 }
 
 void MainComponent::showAdvancedEnvelopeMenu()
 {
+    if(const auto selected=pianoRoll.selectedCvvcEnvelope())
+    {
+        const auto initial=backend::cvvcEnvelopeSettings(selected->points);
+        auto* panel=new AdvancedEnvelopePanel({{selected->noteId,selected->label,{0,selected->to-selected->from},
+            {{0,0,true},{selected->to-selected->from,0,true}}, {},{}}},1,initial.mode,initial.shape,false,
+            preferences->getFile().getSiblingFile("cvvc-envelope-presets.json"),false,true);
+        auto revision=std::make_shared<std::uint64_t>(project.revisionNumber());
+        auto applied=std::make_shared<backend::NativeEnvelopeSettings>(initial);
+        juce::Component::SafePointer<MainComponent> safe(this);
+        panel->onApply=[safe,revision,applied,target=*selected](int mode,const backend::TailFadeSettings& shape,bool audition)->juce::String
+        {
+            if(!safe)return utf8("编辑器已关闭。");
+            if(safe->project.revisionNumber()!=*revision)return utf8("工程已发生其他修改。请重新打开窗口更新音素范围。");
+            backend::NativeEnvelopeSettings next;next.mode=mode;next.shape=shape;next.shape.head={};
+            if(next!=*applied)
+            {
+                const auto curve=backend::cvvcEnvelopeFromSettings(next);
+                safe->project.setCvvcEnvelope(target.noteId,target.part,{},curve,*revision);
+                *revision=safe->project.revisionNumber();*applied=next;
+            }
+            safe->setEnvelopeLane(EnvelopeLane::amplitude);safe->syncAudio(safe->project.snapshot());
+            if(audition){safe->audio.stop();safe->audio.setPosition(std::max(0.0,target.from));safe->togglePlayback();}
+            const auto message=utf8("已应用到音素 ")+target.label+utf8("；支持撤销。");
+            safe->statusLabel.setText(message,juce::dontSendNotification);return message;
+        };
+        juce::DialogWindow::LaunchOptions options;options.dialogTitle=utf8("高级包络 — ")+selected->label;
+        options.dialogBackgroundColour=Palette::panel;options.escapeKeyTriggersCloseButton=true;
+        options.useNativeTitleBar=true;options.resizable=true;options.content.setOwned(panel);
+        if(auto* window=options.launchAsync())window->setResizeLimits(740,660,1400,1000);
+        return;
+    }
     const auto selected=pianoRoll.selectedNoteIds();const auto data=project.snapshot();
     const auto native=std::any_of(data.tracks.begin(),data.tracks.end(),[&](const auto& t){return trackShowsAllNativeRegions(t)&&std::any_of(t.clips.begin(),t.clips.end(),[&](const auto& c){return std::any_of(c.notes.begin(),c.notes.end(),[&](const auto& n){return std::find(selected.begin(),selected.end(),n.id)!=selected.end();});});});
     std::vector<AdvancedEnvelopePanel::PreviewNote> previews;std::vector<juce::String> ids,validIds;
@@ -2116,7 +2206,7 @@ void MainComponent::setEnvelopeLane(EnvelopeLane lane)
     }
     // Both buttons, every time: the one that was not clicked is exactly the
     // one that used to be left showing a lane it no longer had.
-    advancedEnvelopeButton.setToggleState(!isUtauAlgorithmSelected() && lane==EnvelopeLane::amplitude,juce::dontSendNotification);
+    advancedEnvelopeButton.setToggleState(false,juce::dontSendNotification);
     volumeParamButton.setToggleState(isUtauAlgorithmSelected() && lane == EnvelopeLane::amplitude,
                                      juce::dontSendNotification);
     flagEnvelopeButton.setToggleState(lane == EnvelopeLane::flagCurve,
@@ -2127,31 +2217,34 @@ void MainComponent::setEnvelopeLane(EnvelopeLane lane)
 MainComponent::WheelAction MainComponent::wheelActionFor(
     const juce::ModifierKeys& modifiers)
 {
-    if (modifiers.isCommandDown())
-        return modifiers.isShiftDown() ? WheelAction::zoomHorizontally
-                                       : WheelAction::zoomVertically;
-    return modifiers.isShiftDown() ? WheelAction::scrollHorizontally
-                                   : WheelAction::scrollVertically;
+    return editorWheelActionFor(modifiers);
 }
 
 std::vector<int> MainComponent::stretchAlgorithmItemsFor(int pitchAlgorithmItemId)
 {
-    // NSF exposes three distinct Mel clocks/orders plus the upstream-compatible
-    // endpoint-aligned linear clock. Loop/SoundTouch are not NSF algorithms.
-    if (nsfPickerItem(pitchAlgorithmItemId)) return { 1, 2, 5, 6 };
+    // NSF also offers WCSNDM-style forward LLSM parameter interpolation.
+    // Loop/SoundTouch are not NSF algorithms.
+    if (nsfPickerItem(pitchAlgorithmItemId)) return { 1, 2, 5, 6, 7 };
     // vslib is the Signalsmith stretcher itself, so all three of its analysis
     // clocks are real -- and the two NSF orders mean nothing to it.
     if (pitchAlgorithmItemId == 4) return { 1, 3, 4 };
     return { 1 }; // Backend-native time mapping; no NSF-only Mel choices.
 }
 
+void MainComponent::addTrackFromMenu(TrackType type)
+{
+    const auto id=project.addTypedTrack(type);
+    if(id.isEmpty())return;
+    pianoRoll.cancelPendingEditingForTrackChange();
+    selectedClipId.clear();selectedNoteId.clear();selectedTrackId=id;
+    trackList.setSelectedTrack(id);pianoRoll.setFocusedTrack(id);
+    refreshProjectControls();menuItemsChanged();
+}
 void MainComponent::addTrackFromMenu(bool compose)
 {
-    selectedTrackId = project.addTrack(
-        strings.text(compose ? "track.compose" : "track.audio"), compose);
-    trackList.setSelectedTrack(selectedTrackId);
-    refreshProjectControls();
-    menuItemsChanged();
+    if(compose){addTrackFromMenu(TrackType::hachi);return;}
+    selectedTrackId=project.addTrack(strings.text("track.audio"),false);
+    trackList.setSelectedTrack(selectedTrackId);pianoRoll.setFocusedTrack(selectedTrackId);refreshProjectControls();menuItemsChanged();
 }
 
 bool MainComponent::selectedTrackIsAccompaniment() const
@@ -2231,9 +2324,9 @@ struct ViewMenuEntry
 {
     const char* text;
     bool MainComponent::ViewOptions::* flag;
-    bool utauOnly;
+    bool voicebankOnly;
 };
-const std::array<ViewMenuEntry, 8> viewMenuEntries {{
+const std::array<ViewMenuEntry, 9> viewMenuEntries {{
     { "native.range", &MainComponent::ViewOptions::noteRange, false },
     { "native.envelope", &MainComponent::ViewOptions::envelope, false },
     // Named for what it draws rather than kept as the button's 波形显示: the
@@ -2245,6 +2338,7 @@ const std::array<ViewMenuEntry, 8> viewMenuEntries {{
     { "view.showLyrics", &MainComponent::ViewOptions::lyrics, false },
     { "native.originalPitchLine", &MainComponent::ViewOptions::originalPitchLine, false },
     { "native.consonantPitchDashed", &MainComponent::ViewOptions::consonantPitchDashed, false },
+    { "view.phonemeInfo", &MainComponent::ViewOptions::phonemeInfo, true },
 }};
 }
 
@@ -2260,6 +2354,7 @@ MainComponent::ViewOptions MainComponent::viewOptionsFrom(const juce::PropertySe
     options.originalPitchLine = properties.getBoolValue("ui.showOriginalPitchLine", true);
     options.consonantPitchDashed = properties.getBoolValue("ui.consonantPitchDashed", false);
     options.lyrics = properties.getBoolValue("ui.showLyrics", true);
+    options.phonemeInfo = properties.getBoolValue("ui.showPhonemeInfo", false);
     return options;
 }
 
@@ -2276,28 +2371,49 @@ void MainComponent::storeViewOptions(juce::PropertySet& properties,
     properties.setValue("ui.showOriginalPitchLine", options.originalPitchLine);
     properties.setValue("ui.consonantPitchDashed", options.consonantPitchDashed);
     properties.setValue("ui.showLyrics", options.lyrics);
+    properties.setValue("ui.showPhonemeInfo", options.phonemeInfo);
+}
+
+bool MainComponent::viewMenuItemEnabled(int chosen, TrackType type)
+{
+    const auto index = static_cast<std::size_t>(chosen - 1);
+    if (chosen <= 0 || index >= viewMenuEntries.size()) return false;
+    if (chosen == 5 || chosen == 8) return type == TrackType::hachi;
+    // DiffSinger has its own real phoneme overlay; Hachi source labels are
+    // independent material annotations, not the voicebank spelling overlay.
+    return type != TrackType::hachi || !viewMenuEntries[index].voicebankOnly;
 }
 
 bool MainComponent::viewMenuItemEnabled(int chosen, bool utauEditorActive)
 {
+    return viewMenuItemEnabled(chosen, utauEditorActive ? TrackType::utau : TrackType::hachi);
+}
+
+MainComponent::ViewOptions MainComponent::afterViewMenuChoice(ViewOptions options,
+                                                              int chosen, TrackType type)
+{
     const auto index = static_cast<std::size_t>(chosen - 1);
-    if (chosen <= 0 || index >= viewMenuEntries.size()) return false;
-    if((chosen==5 || chosen==8) && utauEditorActive)return false;
-    return utauEditorActive || !viewMenuEntries[index].utauOnly;
+    if (viewMenuItemEnabled(chosen, type))
+    {
+        const auto flag = chosen == 3 && type == TrackType::hachi
+            ? &ViewOptions::nativeWaveform : viewMenuEntries[index].flag;
+        options.*flag = !(options.*flag);
+    }
+    return options;
 }
 
 MainComponent::ViewOptions MainComponent::afterViewMenuChoice(ViewOptions options,
                                                               int chosen, bool utauEditorActive)
 {
-    // Zero is the menu being dismissed, which changes nothing.
-    const auto index = static_cast<std::size_t>(chosen - 1);
-    if (chosen > 0 && index < viewMenuEntries.size() && viewMenuItemEnabled(chosen,utauEditorActive))
-    {
-        const auto flag = chosen == 3 && !utauEditorActive
-            ? &ViewOptions::nativeWaveform : viewMenuEntries[index].flag;
-        options.*flag = !(options.*flag);
-    }
-    return options;
+    return afterViewMenuChoice(options, chosen, utauEditorActive ? TrackType::utau : TrackType::hachi);
+}
+
+TrackType MainComponent::selectedEditorTrackType() const
+{
+    const auto data = project.snapshot();
+    const auto selected = std::find_if(data.tracks.begin(), data.tracks.end(),
+        [this](const auto& track) { return track.id == selectedTrackId; });
+    return selected != data.tracks.end() ? effectiveTrackType(*selected) : TrackType::hachi;
 }
 
 void MainComponent::applyViewOptions()
@@ -2312,40 +2428,62 @@ void MainComponent::applyViewOptions()
     pianoRoll.setShowOriginalPitchLine(viewOptions.originalPitchLine);
     pianoRoll.setConsonantPitchDashed(viewOptions.consonantPitchDashed);
     pianoRoll.setShowLyrics(viewOptions.lyrics);
+    pianoRoll.setShowPhonemeInfo(viewOptions.phonemeInfo);
 }
 
-void MainComponent::showViewMenu()
+void MainComponent::refreshPitchScopeTitle()
 {
-    juce::PopupMenu menu;
-    menu.setLookAndFeel(&getLookAndFeel());
-    // Ticks rather than radio items: both can be on at once, and now that the
-    // buttons are gone the tick is the only place their state shows.
-    const auto utauEditorActive = isUtauAlgorithmSelected();
+    const bool track = !sourceEditActive && pianoRoll.pitchScope() == PianoRollComponent::PitchScope::currentTrack;
+    parameterTitle.setText(track ? (strings.text("Track pitch"))
+        : strings.text("editor.parameters"), juce::dontSendNotification);
+    parameterTitle.setTooltip(track
+        ? strings.text("Whole-track pitch editing across all materials and clips; gaps are not connected automatically.")
+        : strings.text("Clip-focused pitch editing; switch to whole-track scope in View."));
+}
+
+void MainComponent::appendEditorViewItems(juce::PopupMenu& menu)
+{
+    const auto type = selectedEditorTrackType();
+    const bool voicebank = type != TrackType::hachi;
     for (std::size_t index = 0; index < viewMenuEntries.size(); ++index)
     {
-        const auto id = static_cast<int>(index) + 1;
-        menu.addItem(id, strings.text(id == 3 && !utauEditorActive ? "native.sourceWave" : viewMenuEntries[index].text),
-                     viewMenuItemEnabled(id, utauEditorActive),
-                     id == 3 && !utauEditorActive ? viewOptions.nativeWaveform : viewOptions.*(viewMenuEntries[index].flag));
+        const auto chosen = static_cast<int>(index) + 1;
+        menu.addItem(600 + chosen,
+            strings.text(chosen == 3 && !voicebank ? "native.sourceWave" : viewMenuEntries[index].text),
+            viewMenuItemEnabled(chosen, type),
+            chosen == 3 && !voicebank ? viewOptions.nativeWaveform : viewOptions.*(viewMenuEntries[index].flag));
     }
-    menu.showMenuAsync(
-        juce::PopupMenu::Options().withTargetComponent(&showViewMenuButton),
-        [this](int chosen)
-        {
-            const auto updated = afterViewMenuChoice(viewOptions, chosen, isUtauAlgorithmSelected());
-            if (updated.noteRange == viewOptions.noteRange
-                && updated.envelope == viewOptions.envelope
-                && updated.nativeRenderedWaveform == viewOptions.nativeRenderedWaveform
-                && updated.nativeWaveform == viewOptions.nativeWaveform
-                && updated.utauWaveform == viewOptions.utauWaveform
-                && updated.pitchLine == viewOptions.pitchLine
-                && updated.originalPitchLine == viewOptions.originalPitchLine
-                && updated.consonantPitchDashed == viewOptions.consonantPitchDashed
-                && updated.lyrics == viewOptions.lyrics) return;
-            viewOptions = updated;
-            applyViewOptions();
-            if (preferences != nullptr) storeViewOptions(*preferences, viewOptions);
-        });
+    menu.addSeparator();
+    menu.addItem(trackPitchScopeMenuItem, strings.text("Whole current track pitch edit"), !sourceEditActive,
+        pianoRoll.pitchScope() == PianoRollComponent::PitchScope::currentTrack);
+    menu.addItem(613, strings.text("Show note overlap lines"), true, pianoRoll.showsOverlap());
+}
+
+void MainComponent::applyEditorViewChoice(int chosen)
+{
+    if(chosen==13) // Existing View menu item 613; display state only.
+    {
+        pianoRoll.setShowOverlap(!pianoRoll.showsOverlap());
+        if(preferences)preferences->setValue("ui.showOverlap",pianoRoll.showsOverlap());
+        menuItemsChanged();repaint();return;
+    }
+    if (chosen == trackPitchScopeMenuItem - 600)
+    {
+        if (sourceEditActive) return;
+        const bool track = pianoRoll.pitchScope() != PianoRollComponent::PitchScope::currentTrack;
+        pianoRoll.setPitchScope(track ? PianoRollComponent::PitchScope::currentTrack : PianoRollComponent::PitchScope::focusedClip);
+        if (preferences) preferences->setValue("ui.pitchScope", track ? "track" : "clip");
+        const auto selected = pianoRoll.selectedNoteIds();
+        selectedNoteId = selected.empty() ? juce::String{} : selected.front();
+        refreshPitchScopeTitle(); refreshSpliceButton(); menuItemsChanged(); repaint();
+        return;
+    }
+    const auto type = selectedEditorTrackType();
+    if (!viewMenuItemEnabled(chosen, type)) return;
+    viewOptions = afterViewMenuChoice(viewOptions, chosen, type);
+    applyViewOptions();
+    if (preferences != nullptr) storeViewOptions(*preferences, viewOptions);
+    menuItemsChanged();
 }
 
 void MainComponent::setDrawLengthDivision(int division)
@@ -2443,6 +2581,28 @@ void MainComponent::selectFlagEditMode(int chosen)
         : "FLAG 逐音符模式：单击加点、拖动控制点、右键编辑数值"), juce::dontSendNotification);
 }
 
+juce::PopupMenu MainComponent::autoCrossfadeModeMenu() const
+{
+    juce::PopupMenu menu;
+    menu.addItem(1,utf8("直线"),true,!autoCrossfadeCurve);
+    menu.addItem(2,utf8("曲线"),true,autoCrossfadeCurve);
+    return menu;
+}
+
+void MainComponent::selectAutoCrossfadeMode(int chosen)
+{
+    if(chosen!=1&&chosen!=2)return;
+    autoCrossfadeCurve=chosen==2;
+    autoCrossfadeButton.setTooltip(utf8(autoCrossfadeCurve
+        ? "自动交叉淡化：曲线。右键选择直线／曲线；左键对同轨两个音符的已有重叠区生成淡化，不移动音符。"
+        : "自动交叉淡化：直线。右键选择直线／曲线；左键对同轨两个音符的已有重叠区生成淡化，不移动音符。"));
+    if(preferences && preferences->getBoolValue("ui.autoCrossfadeCurve",false)!=autoCrossfadeCurve)
+    {
+        preferences->setValue("ui.autoCrossfadeCurve",autoCrossfadeCurve);
+        preferences->saveIfNeeded();
+    }
+}
+
 void MainComponent::showFlagEditModeMenu(juce::Point<int> screenPosition)
 {
     auto menu = flagEditModeMenu();
@@ -2465,17 +2625,30 @@ void MainComponent::showDrawSettingsMenu(juce::Point<int> screenPosition)
 
     juce::PopupMenu menu;
     menu.setLookAndFeel(&getLookAndFeel());
-    menu.addSubMenu(utf8("选择最小拉伸倍率"), units);
+    const auto notes = pianoRoll.drawAction() == PianoRollComponent::DrawAction::notes;
+    menu.addItem(200, strings.text("draw.action.pitch"), true, !notes);
+    menu.addItem(201, strings.text("draw.action.notes"), true, notes);
+    if (notes)
+    {
+        menu.addSeparator();
+        menu.addSubMenu(strings.text("draw.noteLength"), units);
+    }
     menu.showMenuAsync(
         juce::PopupMenu::Options().withTargetScreenArea(
             juce::Rectangle<int>(screenPosition.x, screenPosition.y, 1, 1)),
-        [this, offered](int chosen)
+        [safe = juce::Component::SafePointer<MainComponent>(this), offered](int chosen)
         {
-            // The id is the position in the list the menu was built from, so
-            // what is shown and what a click means come from one place.
+            if (safe == nullptr) return;
+            if (chosen == 200 || chosen == 201)
+            {
+                safe->pianoRoll.setDrawAction(chosen == 201 ? PianoRollComponent::DrawAction::notes
+                    : PianoRollComponent::DrawAction::pitchCurve);
+                if (safe->preferences) safe->preferences->setValue("ui.drawAction", chosen == 201 ? "notes" : "pitch-curve");
+                safe->refreshTexts();
+                return;
+            }
             const auto index = static_cast<std::size_t>(chosen - 1);
-            if (chosen > 0 && index < offered.size())
-                setDrawLengthDivision(offered[index]);
+            if (chosen > 0 && index < offered.size()) safe->setDrawLengthDivision(offered[index]);
         });
 }
 
@@ -2507,21 +2680,50 @@ void MainComponent::addOutputEngineMenu(juce::PopupMenu& menu, const juce::Strin
             engines.addItem(103, strings.text("output.resampler"), true, track.outputEngine == UtauOutputEngine::resampler);
             menu.addSubMenu(strings.text("output.choose"), engines,
                 trackUsesVoicebankSynthesis(track) && !trackIsDiffSinger(track));
-            juce::PopupMenu phonemizers;
-            phonemizers.addItem(104, strings.text("phonemizer.manual"), true, !track.chineseCvvc);
-            phonemizers.addItem(105, strings.text("phonemizer.zhCvvc"), true, track.chineseCvvc);
-            menu.addSubMenu(strings.text("phonemizer.choose"), phonemizers,
+            menu.addSubMenu(strings.text("phonemizer.choose"), phonemizerMenu(track),
                 trackUsesVoicebankSynthesis(track) && track.utauMode == UtauMode::classic && !trackIsDiffSinger(track));
             return;
         }
 }
 
+juce::PopupMenu MainComponent::phonemizerMenu(const TrackData& track)
+{
+    juce::PopupMenu menu;
+    menu.addItem(104, strings.text("phonemizer.manual"), true, !track.chineseCvvc);
+    menu.addItem(105, strings.text("phonemizer.zhCvvc"), true, track.chineseCvvc);
+    juce::PopupMenu crossfade;
+    crossfade.addItem(106,utf8("直线"),true,!track.cvvcCurveCrossfade);
+    crossfade.addItem(107,utf8("曲线"),true,track.cvvcCurveCrossfade);
+    menu.addSubMenu(utf8("默认交叉方式"),crossfade,track.chineseCvvc);
+    return menu;
+}
+
+void MainComponent::showPhonemizerMenu()
+{
+    const auto data = project.snapshot();
+    const auto track = std::find_if(data.tracks.begin(), data.tracks.end(),
+        [this](const auto& t) { return t.id == selectedTrackId; });
+    if (track == data.tracks.end() || !trackUsesVoicebankSynthesis(*track)
+        || track->utauMode != UtauMode::classic || trackIsDiffSinger(*track)) return;
+    auto menu = phonemizerMenu(*track);
+    menu.setLookAndFeel(&getLookAndFeel());
+    juce::Component::SafePointer<MainComponent> safe(this);
+    menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&phonemizerButton),
+        [safe, trackId = track->id](int item)
+        { if (safe != nullptr) safe->outputEngineItemChosen(item, trackId); });
+}
+
 bool MainComponent::outputEngineItemChosen(int result, const juce::String& trackId)
 {
-    if (result < 101 || result > 105) return false;
+    if (result < 101 || result > 107) return false;
     const auto data = project.snapshot();
     const auto track = std::find_if(data.tracks.begin(), data.tracks.end(), [&](const auto& t) { return t.id == trackId; });
     if (track == data.tracks.end() || !trackUsesVoicebankSynthesis(*track) || trackIsDiffSinger(*track)) return true;
+    if(result==106||result==107)
+    {
+        if(track->chineseCvvc&&track->utauMode==UtauMode::classic)project.setTrackCvvcCurveCrossfade(trackId,result==107);
+        refreshProjectControls();return true;
+    }
     if (result == 104 || result == 105)
     {
         if (track->utauMode != UtauMode::classic) return true;
@@ -2552,10 +2754,24 @@ void MainComponent::showOutputEngineMenu(const juce::String& trackId, juce::Poin
 {
     juce::PopupMenu menu;
     menu.setLookAndFeel(&getLookAndFeel());
+    const auto insertSeconds = audio.position();
+    for (const auto& track : project.snapshot().tracks)
+        if (track.id == trackId)
+        {
+            menu.addItem(108, strings.text("track.importMidiHere"),
+                track.compose && !track.accompaniment && !track.referenceOnly);
+            menu.addSeparator();
+            break;
+        }
     addOutputEngineMenu(menu, trackId);
     juce::Component::SafePointer<MainComponent> safe(this);
     menu.showMenuAsync(juce::PopupMenu::Options().withTargetScreenArea({ at.x, at.y, 1, 1 }),
-        [safe, trackId](int item) { if (safe != nullptr) safe->outputEngineItemChosen(item, trackId); });
+        [safe, trackId, insertSeconds](int item)
+        {
+            if (safe == nullptr) return;
+            if (item == 108) safe->importMidiTrack(trackId, insertSeconds);
+            else safe->outputEngineItemChosen(item, trackId);
+        });
 }
 
 void MainComponent::showTrackResamplerSettings(const juce::String& trackId)
@@ -2598,7 +2814,11 @@ juce::PopupMenu MainComponent::clipContextMenu(const juce::String& clipId, doubl
         for (const auto& clip : track.clips)
             if (clip.id == clipId)
             {
+                menu.addItem(7, strings.text("clip.editLength"));
+                menu.addItem(8, strings.text("clip.muteToggle"), true, clip.muted);
                 menu.addSeparator();
+                if (track.accompaniment)
+                    menu.addItem(recogniseTempoMenuItem, strings.text("tempo.recognise"), AccompanimentTempoTask::canAnalyse(clip));
                 menu.addItem(3, strings.text(clip.showNoteHints ? "clip.stopNoteHints" : "clip.startNoteHints"),
                     clip.showNoteHints || (track.compose && !track.accompaniment && !clip.notes.empty()));
                 if (trackShowsAllNativeRegions(track))
@@ -2618,6 +2838,8 @@ juce::PopupMenu MainComponent::clipContextMenu(const juce::String& clipId, doubl
 
 void MainComponent::clipContextMenuItemChosen(int result, const juce::String& clipId, double seconds)
 {
+    if (result == 7) { showClipLengthDialog(clipId); return; }
+    if (result == recogniseTempoMenuItem) { showAccompanimentTempo(clipId); return; }
     if (result == 5)
     {
         project.markNativeUnpitchedRegions(clipId);
@@ -2631,7 +2853,7 @@ void MainComponent::clipContextMenuItemChosen(int result, const juce::String& cl
                 if (clip.id == clipId) { outputEngineItemChosen(result, track.id); return; }
         return;
     }
-    if (result == 3 || result == 4)
+    if (result == 3 || result == 4 || result == 8)
     {
         const auto data = project.snapshot();
         for (const auto& track : data.tracks)
@@ -2639,6 +2861,7 @@ void MainComponent::clipContextMenuItemChosen(int result, const juce::String& cl
                 if (clip.id == clipId)
                 {
                     if (result == 3) project.setClipNoteHints(clipId, !clip.showNoteHints);
+                    else if (result == 8) project.setClipMuted(clipId, !clip.muted);
                     else project.setClipNormalDisplay(clipId, !clip.showNormalDisplay);
                     return;
                 }
@@ -2660,11 +2883,107 @@ void MainComponent::clipContextMenuItemChosen(int result, const juce::String& cl
     if (right.isNotEmpty()) focusClip(clipId);
 }
 
+std::unique_ptr<juce::AlertWindow> MainComponent::makeClipLengthDialog(const juce::String& clipId)
+{
+    for (const auto& track : project.snapshot().tracks)
+        for (const auto& clip : track.clips)
+            if (clip.id == clipId)
+            {
+                return std::make_unique<ClipEditDialog>(strings, track, clip, this);
+            }
+    return {};
+}
+
+bool MainComponent::applyClipLengthText(const juce::String& clipId, const juce::String& text)
+{
+    const auto requested = clipLengthSeconds(text);
+    if (!requested) return false;
+    for (const auto& track : project.snapshot().tracks)
+        for (const auto& clip : track.clips)
+            if (clip.id == clipId)
+            {
+                if (text.trim() == juce::String(clip.durationSeconds, 6)) return true;
+                return project.setClipEditableLength(clipId, *requested);
+            }
+    return false;
+}
+
+void MainComponent::showClipLengthDialog(const juce::String& clipId)
+{
+    auto owned = makeClipLengthDialog(clipId);
+    if (!owned) return;
+    auto* dialog = owned.release();
+    juce::Component::SafePointer<MainComponent> safe(this);
+    dialog->enterModalState(true, juce::ModalCallbackFunction::create([safe, dialog, clipId](int result)
+    {
+        juce::String error;
+        const bool applied = safe == nullptr || result != 1 || safe->applyClipEditDialog(clipId, *dialog, error);
+        delete dialog;
+        if (safe != nullptr && !applied) safe->showError(error);
+    }), false);
+}
+
+bool MainComponent::applyClipEditDialog(const juce::String& clipId, const juce::AlertWindow& window, juce::String& error)
+{
+    const auto* dialog = dynamic_cast<const ClipEditDialog*>(&window);
+    error = strings.text("clip.lengthInvalid");
+    if (!dialog || !clipLengthSeconds(dialog->getTextEditorContents("length"))) return false;
+    for (const auto& track : project.snapshot().tracks)
+        for (const auto& clip : track.clips)
+            if (clip.id == clipId && track.id == dialog->trackId)
+            {
+                const bool canChoose = dialog->canChooseOutput && trackUsesVoicebankSynthesis(track) && !trackIsDiffSinger(track);
+                const auto engine = dialog->selectedEngine();
+                const auto resampler = engine == UtauOutputEngine::inherit ? juce::File{} : dialog->resampler;
+                const auto wavtool = engine == UtauOutputEngine::inherit ? juce::File{} : dialog->wavtool;
+                const bool outputChanged = canChoose && (engine != track.outputEngine
+                    || (engine != UtauOutputEngine::inherit && (resampler != track.outputResampler || wavtool != track.outputWavtool)));
+                // Validate both drafts before changing either the range or the engine.
+                if (outputChanged && engine == UtauOutputEngine::pcNsfHifigan
+                    && !backend::NsfHifiganRenderer::modelAvailable(preferences != nullptr
+                        ? juce::File(preferences->getValue("algorithm.hifiganPath")) : juce::File{}))
+                { error = utf8("HiFisampler（PC-NSF-HiFiGAN）模型未找到，请在设置中指定模型目录。"); return false; }
+                if (outputChanged && engine == UtauOutputEngine::resampler
+                    && ((resampler != juce::File{} && !resampler.existsAsFile()) || (wavtool != juce::File{} && !wavtool.existsAsFile())))
+                { error = strings.text("output.invalidTool"); return false; }
+                if (!applyClipLengthText(clipId, dialog->getTextEditorContents("length"))) return false;
+                if (outputChanged) project.setTrackOutputEngine(track.id, engine, resampler, wavtool);
+                refreshProjectControls(); error.clear(); return true;
+            }
+    return false;
+}
+
+void MainComponent::showAccompanimentTempo(const juce::String& clipId)
+{
+    // One model task at a time in this window. A second click raises its
+    // existing result/progress window rather than starting duplicate work.
+    if (tempoWindows.showExisting("accompaniment-tempo")) return;
+    const auto data = project.snapshot();
+    for (const auto& track : data.tracks)
+        if (track.accompaniment)
+            for (const auto& clip : track.clips)
+                if (clip.id == clipId && AccompanimentTempoTask::canAnalyse(clip))
+                {
+                    juce::DialogWindow::LaunchOptions options;
+                    options.dialogTitle = strings.text("tempo.recognise");
+                    options.dialogBackgroundColour = Palette::panel;
+                    options.content.setOwned(new AccompanimentTempoPanel(strings, clip));
+                    options.componentToCentreAround = this;
+                    options.useNativeTitleBar = true;
+                    options.escapeKeyTriggersCloseButton = true;
+                    options.resizable = false;
+                    tempoWindows.show(options, "accompaniment-tempo");
+                    return;
+                }
+}
+
 juce::PopupMenu MainComponent::trackAreaMenu(std::optional<TimelineComponent::Anchor> anchor)
 {
     juce::PopupMenu menu;
     menu.setLookAndFeel(&getLookAndFeel());
-    menu.addItem(1, strings.text("track.newHere"));
+    menu.addItem(1,strings.text("New HachiShifter track"));
+    menu.addItem(861,strings.text("New UTAU track"));
+    menu.addItem(862,strings.text("New DiffSinger track"));
     // Somewhere to keep a reference vocal or a backing take: audible while it
     // is the track in hand, silent whenever anything else is playing.
     menu.addItem(3, strings.text("track.newReference"));
@@ -2704,7 +3023,9 @@ void MainComponent::trackAreaMenuItemChosen(int chosen, std::optional<TimelineCo
     // A melodic track, which is what the app makes by default and what
     // ProjectModel::addTrack assumes; the Track menu still offers the audio
     // kind explicitly for the times that is not what is wanted.
-    if (chosen == 1) addTrackFromMenu(true);
+    if (chosen == 1) addTrackFromMenu(TrackType::hachi);
+    else if(chosen==861)addTrackFromMenu(TrackType::utau);
+    else if(chosen==862)addTrackFromMenu(TrackType::diffSinger);
     else if (chosen == 3) addReferenceTrackFromMenu();
     else if (chosen == accompanimentTrackMenuItem) addAccompanimentTrackFromMenu();
     else if (chosen == importMidiTrackMenuItem) importMidiTrack();
@@ -2730,20 +3051,21 @@ std::vector<MainComponent::MenuItemState> MainComponent::diagnosticTrackAreaMenu
     return items;
 }
 
-void MainComponent::importMidiTrack()
+void MainComponent::importMidiTrack(const juce::String& targetTrackId, double startSeconds)
 {
     chooser = std::make_unique<juce::FileChooser>(strings.text("track.importMidi"), juce::File{},
                                                   "*.mid;*.midi");
+    juce::Component::SafePointer<MainComponent> safe(this);
     chooser->launchAsync(juce::FileBrowserComponent::openMode
                              | juce::FileBrowserComponent::canSelectFiles,
-        [this](const juce::FileChooser& selected)
+        [safe, targetTrackId, startSeconds](const juce::FileChooser& selected)
         {
             const auto file = selected.getResult();
-            if (file != juce::File{}) importMidiTrackFrom(file);
+            if (safe != nullptr && file != juce::File{}) safe->importMidiTrackFrom(file, targetTrackId, startSeconds);
         });
 }
 
-void MainComponent::importMidiTrackFrom(const juce::File& file)
+void MainComponent::importMidiTrackFrom(const juce::File& file, const juce::String& targetTrackId, double startSeconds)
 {
     juce::String error;
     const auto choices = ProjectModel::midiTrackChoices(file, error);
@@ -2754,7 +3076,7 @@ void MainComponent::importMidiTrackFrom(const juce::File& file)
     }
     // One track with notes -- a type 0 file, or a type 1 file whose other
     // track only holds the tempo -- leaves nothing to ask.
-    if (choices.size() == 1)
+    if (choices.size() == 1 && targetTrackId.isEmpty())
     {
         addMidiTrackFrom(file, choices.front().index);
         return;
@@ -2768,8 +3090,14 @@ void MainComponent::importMidiTrackFrom(const juce::File& file)
                         : strings.text("dialog.midiTrackLabel") + " " + juce::String(choice.index + 1))
                    + "  (" + juce::String(choice.noteCount) + " "
                    + strings.text("dialog.midiTrackNotes") + ")");
+    juce::String destinationLabel;
+    if (targetTrackId.isNotEmpty())
+        for (const auto& track : project.snapshot().tracks)
+            if (track.id == targetTrackId)
+                destinationLabel = "\n" + track.name + "  @ " + juce::String(startSeconds, 3) + " s";
     auto* dialog = new juce::AlertWindow(strings.text("dialog.midiTrackTitle"),
-        file.getFileName() + "\n" + strings.text("dialog.midiTrackMessage"),
+        file.getFileName() + "\n" + strings.text(targetTrackId.isEmpty()
+            ? "dialog.midiTrackMessage" : "dialog.midiTrackHereMessage") + destinationLabel,
         juce::MessageBoxIconType::QuestionIcon);
     dialog->addComboBox("track", labels, strings.text("dialog.midiTrackLabel"));
     if (auto* box = dialog->getComboBoxComponent("track")) box->setSelectedItemIndex(0);
@@ -2780,21 +3108,21 @@ void MainComponent::importMidiTrackFrom(const juce::File& file)
     juce::Component::SafePointer<MainComponent> safe(this);
     dialog->enterModalState(true,
         juce::ModalCallbackFunction::create(
-            [safe, dialog, file, choices](int result)
+            [safe, dialog, file, choices, targetTrackId, startSeconds](int result)
             {
                 const auto* box = dialog->getComboBoxComponent("track");
                 const auto picked = box != nullptr ? box->getSelectedItemIndex() : -1;
                 if (safe != nullptr && result == 1 && picked >= 0
                     && picked < static_cast<int>(choices.size()))
-                    safe->addMidiTrackFrom(file, choices[static_cast<std::size_t>(picked)].index);
+                    safe->addMidiTrackFrom(file, choices[static_cast<std::size_t>(picked)].index, targetTrackId, startSeconds);
                 delete dialog;
             }), false);
 }
 
-void MainComponent::addMidiTrackFrom(const juce::File& file, int trackIndex)
+void MainComponent::addMidiTrackFrom(const juce::File& file, int trackIndex, const juce::String& targetTrackId, double startSeconds)
 {
     juce::String error;
-    const auto trackId = project.addMidiTrack(file, trackIndex, error);
+    const auto trackId = project.addMidiTrack(file, trackIndex, error, targetTrackId, startSeconds);
     if (trackId.isEmpty())
     {
         showError(strings.text("error.midi") + "\n" + error);
@@ -2809,7 +3137,7 @@ void MainComponent::addMidiTrackFrom(const juce::File& file, int trackIndex)
     for (const auto& track : data.tracks)
         if (track.id == trackId)
         {
-            if (!track.clips.empty()) focusClip(track.clips.front().id);
+            if (!track.clips.empty()) focusClip(targetTrackId.isEmpty() ? track.clips.front().id : track.clips.back().id);
             statusLabel.setText(strings.text("status.midiTrackImported") + track.name,
                                 juce::dontSendNotification);
             break;
@@ -2828,6 +3156,7 @@ void MainComponent::refreshStretchAlgorithmItems(int preferredId)
             item == 2 ? "algo.stretch.nsfVariableMel"
             : item == 3 ? "algo.stretch.loop"
             : item == 4 ? "algo.stretch.soundTouch"
+            : item == 7 ? "algo.stretch.wcsNonLoop"
             : item == 6 ? "algo.stretch.hifiShifterMel"
             : item == 5 ? "algo.stretch.nsfShiftThenSplice"
             : "algo.stretch.melodyneHybrid"), item);
@@ -2838,6 +3167,9 @@ void MainComponent::refreshStretchAlgorithmItems(int preferredId)
     // is about to be hidden still reports a sane, harmless id.
     const auto kept = previous > 0 && stretchAlgorithm.indexOfItemId(previous) >= 0;
     stretchAlgorithm.setSelectedId(kept ? previous : 1, juce::dontSendNotification);
+    stretchAlgorithm.setTooltip(stretchAlgorithm.getSelectedId()==7
+        ? strings.text("algo.stretch.wcsNonLoop") + "\n" + strings.text("algo.stretch.wcsNonLoopHelp")
+        : strings.text("algo.stretch"));
 }
 
 void MainComponent::diagnosticPressTool(PianoRollComponent::Tool wanted)
@@ -2862,19 +3194,41 @@ void MainComponent::diagnosticRefreshControls()
     refreshProjectControls();
 }
 
-MainComponent::EnvelopePresetLayout MainComponent::diagnosticEnvelopePresetLayout()
+MainComponent::EnvelopePresetLayout MainComponent::diagnosticEnvelopePresetLayout(juce::Image* preview)
 {
     // UTAU in the picker, which is what the row keys its UTAU tools off, and
     // the row laid out again.
     pitchAlgorithm.setSelectedId(7, juce::dontSendNotification);
     resized();
     EnvelopePresetLayout layout;
-    for (const auto& button : envelopePresetButtons)
-        if (button->isVisible())
-            layout.buttons.emplace_back(button->caption(), button->getBounds());
-    layout.viewMenu = showViewMenuButton.getBounds();
+    if(envelopePresetMenu.isVisible())layout.picker=envelopePresetMenu.getBounds();
+    for(int i=0;i<envelopePresetMenu.getNumItems();++i)layout.items.add(envelopePresetMenu.getItemText(i));
+    if(preview!=nullptr)
+    {
+        *preview=juce::Image(juce::Image::RGB,332,68*envelopePresetMenu.getNumItems(),true);
+        juce::Graphics g(*preview);
+        int y=0;
+        for(juce::PopupMenu::MenuItemIterator it(*envelopePresetMenu.getRootMenu());it.next();)
+            if(auto* item=it.getItem().customComponent.get())
+            {
+                int width=0,height=0;item->getIdealSize(width,height);
+                item->setLookAndFeel(&getLookAndFeel());item->setSize(width,height);
+                g.drawImageAt(item->createComponentSnapshot(item->getLocalBounds(),true,2.0f),0,y);
+                item->setLookAndFeel(nullptr);y+=height*2;
+            }
+    }
+    layout.viewMenu = {}; // Display controls now live only in the main View menu.
     layout.rightControlsStart = pianoViewport.getRight() - 4;
     return layout;
+}
+
+bool MainComponent::diagnosticHasEditorViewItems()
+{
+    auto menu = getMenuForIndex(3, strings.text("menu.view"));
+    std::set<int> found;
+    for (juce::PopupMenu::MenuItemIterator it(menu); it.next();)
+        if (it.getItem().itemID >= 601 && it.getItem().itemID <= 609) found.insert(it.getItem().itemID);
+    return found.size() == 9;
 }
 
 void MainComponent::diagnosticRefreshTexts()
@@ -2909,15 +3263,10 @@ bool MainComponent::diagnosticIntegratedLayout(const juce::File& directory)
             diagnosticSelectTrack(id);
             resized();
             const auto edge = assetManager->getX();
-            auto right = 0;
-            for (const auto& button : envelopePresetButtons)
-            {
-                ok = ok && button->isVisible() && button->getWidth() == 46
-                    && button->getX() >= right && button->getRight() <= edge;
-                right = button->getRight();
-            }
-            ok = ok && showViewMenuButton.getX() >= right
-                && showViewMenuButton.getRight() <= edge
+            const auto right=envelopePresetMenu.getRight();
+            ok=ok && envelopePresetMenu.isVisible() && envelopePresetMenu.getWidth()==110
+                && envelopePresetMenu.getX()>=flagEnvelopeButton.getRight() && right<=edge;
+            ok = ok && diagnosticHasEditorViewItems()
                 && flagCurveButton.getRight() <= edge && flagCurveButton.getWidth() > 0;
             auto file = directory.getChildFile("integrated-" + theme + "-" + juce::String(width) + ".png");
             file.deleteFile();
@@ -2939,16 +3288,16 @@ bool MainComponent::diagnosticRenderOrderPicker()
     setSize(1280, 760);
     refreshProjectControls();
     const auto visible = renderOrder.isVisible() && renderOrderLabel.isVisible()
-        && renderOrder.getWidth() > 0 && renderOrder.getNumItems() == 2;
+        && renderOrder.getWidth() > 0 && renderOrder.getNumItems() == 3;
     auto works = visible;
-    for (const auto id : { 1, 2 })
+    for (const auto id : { 1, 2, 3 })
     {
         renderOrder.setSelectedId(id, juce::dontSendNotification);
         if (renderOrder.onChange) renderOrder.onChange();
         const auto data = project.snapshot();
-        const auto expected = id == 1 ? RenderOrder::processThenSplice
-                                     : RenderOrder::stretchSpliceThenPitch;
-        works = works && data.tracks.back().renderOrder == expected;
+        const auto expected = id == 2 ? RenderOrder::stretchSpliceThenPitch : RenderOrder::processThenSplice;
+        works = works && data.tracks.back().renderOrder == expected
+            && data.tracks.back().mergeContiguousSource == (id == 3);
         refreshProjectControls();
         works = works && renderOrder.getSelectedId() == id;
     }
@@ -3056,9 +3405,11 @@ void MainComponent::togglePlayback()
         return;
     }
     stopOtoPreviews();
-    if (!sourceEditActive && pianoRoll.selectedNoteIds().empty()
-        && audio.selectAllRenderedUtauNotes())
-        syncAudio(project.snapshot());
+    if (!sourceEditActive && pianoRoll.selectedNoteIds().empty())
+    {
+        const auto data = project.snapshot();
+        if (audio.selectAllRenderedUtauNotes(data)) syncAudio(data);
+    }
     juce::String deviceError;
     if (!audio.ensureOutputDevice(deviceError))
     {
@@ -3146,6 +3497,11 @@ bool MainComponent::keyPressed(const juce::KeyPress& key)
     if (key.getModifiers().isCommandDown() && key.getKeyCode() == 'Y')
     {
         project.redo();
+        return true;
+    }
+    if (key.getModifiers().isCommandDown() && key.getKeyCode() == juce::KeyPress::returnKey)
+    {
+        showMaterialPronunciationInput();
         return true;
     }
     if (key.getModifiers().isCommandDown() && key.getKeyCode() == 'G')
@@ -3249,7 +3605,7 @@ void MainComponent::openExternalFile(const juce::File& file)
         loadMelodyneFile(file);
     else if (file.hasFileExtension("hjpx;hspx"))
         performWithUnsavedCheck([this, file] { loadProjectFile(file); });
-    else if (file.hasFileExtension("ust")) loadUstFile(file);
+    else if (file.hasFileExtension("ust;ustx")) loadUstFile(file);
     else if (file.hasFileExtension("mid;midi"))
     {
         juce::String error;
@@ -3260,7 +3616,7 @@ void MainComponent::openExternalFile(const juce::File& file)
         addAnalysedAudioFile(file, *duration);
 }
 
-void MainComponent::filesDropped(const juce::StringArray& files, int x, int y)
+std::pair<double, juce::String> MainComponent::audioDropTarget(int x, int y) const
 {
     auto dropSeconds = audio.position();
     juce::String targetTrackId;
@@ -3277,6 +3633,50 @@ void MainComponent::filesDropped(const juce::StringArray& files, int x, int y)
                                                 + pianoViewport.getViewPositionX());
         targetTrackId = selectedTrackId;
     }
+    return {std::max(0.0, dropSeconds), targetTrackId};
+}
+
+bool MainComponent::isInterestedInDragSource(const juce::DragAndDropTarget::SourceDetails& details)
+{
+    return assetManager != nullptr && details.sourceComponent.get() == assetManager.get()
+        && details.description["type"].toString() == "hachi-material-audio";
+}
+
+void MainComponent::itemDropped(const juce::DragAndDropTarget::SourceDetails& details)
+{
+    if (!isInterestedInDragSource(details)) return;
+    const auto point = details.localPosition;
+    if (!timelineViewport.getBounds().contains(point) && !pianoViewport.getBounds().contains(point)) return;
+    const auto [seconds, track] = audioDropTarget(point.x, point.y);
+    if (static_cast<bool>(details.description["nativeMaterial"]))
+    {
+        juce::StringArray ids;
+        const auto selectedIds = details.description["regionIds"];
+        if (const auto* selected = selectedIds.getArray())
+            for (const auto& id : *selected) ids.add(id.toString());
+        importMaterialPronunciations(juce::File(details.description["file"].toString()),
+            juce::File(details.description["manifest"].toString()), ids, seconds, track,{},details.description["audioVariantId"].toString());
+        return;
+    }
+    importAssetAudio(juce::File(details.description["file"].toString()),
+        juce::File(details.description["root"].toString()), static_cast<int>(details.description["otoKind"]),
+        seconds, track, localPointToGlobal(point),details.description["audioVariantId"].toString());
+}
+
+bool MainComponent::shouldDropFilesWhenDraggedExternally(
+    const juce::DragAndDropTarget::SourceDetails& details, juce::StringArray& files, bool& canMove)
+{
+    if (!isInterestedInDragSource(details)) return false;
+    const juce::File file(details.description["file"].toString());
+    if (!file.existsAsFile()) return false;
+    files.add(assetManager->dragFileFor(file).getFullPathName());
+    canMove = false;
+    return true;
+}
+
+void MainComponent::filesDropped(const juce::StringArray& files, int x, int y)
+{
+    const auto [dropSeconds, targetTrackId] = audioDropTarget(x, y);
     auto nextDropSeconds = dropSeconds;
     for (const auto& path : files)
     {
@@ -3296,307 +3696,170 @@ void MainComponent::filesDropped(const juce::StringArray& files, int x, int y)
 
 void MainComponent::resized()
 {
-    auto area = getLocalBounds();
-    auto menu = area.removeFromTop(27);
-    menuBar.setBounds(menu);
+    auto area = getLocalBounds(); menuBar.setBounds(area.removeFromTop(27));
     auto toolbar = area.removeFromTop(34).reduced(5, 3);
-    auto take = [&toolbar](juce::Component& component, int width)
-    {
-        component.setBounds(toolbar.removeFromLeft(width));
-        toolbar.removeFromLeft(3);
-    };
-    take(bpmCaption, 30);
-    take(bpmEditor, 50);
-    take(beatsCaption, 58);
-    take(beatsEditor, 32);
-    take(denominatorLabel, 27);
-    take(gridCaption, 28);
-    take(gridSelector, 67);
-    take(stretchCaption, 66);
-    take(stretchSelector, 70);
-    take(scaleCaption, 52);
-    take(scaleSelector, 58);
-    toolbar.removeFromLeft(5);
-    take(stopButton, 28);
-    take(playButton, 28);
-    toolbar.removeFromLeft(5);
-    take(openButton, 28);
-    take(saveButton, 28);
-    take(audioButton, 32);
-    take(melodyneButton, 32);
-    toolbar.removeFromLeft(5);
-    take(collapseTracksButton, 28);
-    zoomSlider.setBounds(toolbar.removeFromRight(100));
-    vZoomSlider.setBounds(toolbar.removeFromRight(70));
-    progressBar.setBounds(toolbar.removeFromRight(100).reduced(4, 5));
-
+    const auto take = [&toolbar](juce::Component& c, int width)
+    { c.setBounds(toolbar.removeFromLeft(width)); toolbar.removeFromLeft(3); };
+    take(bpmCaption,30); take(bpmEditor,50); take(beatsCaption,58); take(beatsEditor,32);
+    take(denominatorLabel,27); take(gridCaption,28); take(gridSelector,67); take(stretchCaption,66);
+    take(stretchSelector,70); take(scaleCaption,52); take(scaleSelector,58); toolbar.removeFromLeft(5);
+    take(stopButton,28); take(playButton,28); toolbar.removeFromLeft(10); take(collapseTracksButton,28);
+    progressBar.setBounds(toolbar.removeFromRight(100).reduced(4,5));
     auto footer = area.removeFromBottom(24);
-    selectionSummaryLabel.setBounds(footer.removeFromRight(250).reduced(8,0));
-    statusLabel.setBounds(footer.reduced(8, 0));
-    // The docked material manager takes a strip down the right of the editing
-    // area (drag-resizable via its left edge) so the piano roll stays visible
-    // beside it and both can be worked at once.
+    selectionSummaryLabel.setBounds(footer.removeFromRight(250).reduced(8,0)); statusLabel.setBounds(footer.reduced(8,0));
     if (assetManager != nullptr && assetManagerVisible)
     {
-        const auto width = juce::jlimit(220, std::max(220, area.getWidth() - 320),
-                                        assetManagerWidth);
-        auto panel = area.removeFromRight(width);
-        assetManager->setBounds(panel);
-        if (assetManagerResizer != nullptr)
-            assetManagerResizer->setBounds(panel.getX() - 3, panel.getY(),
-                                           6, panel.getHeight());
+        const auto width = juce::jlimit(220,std::max(220,area.getWidth()-320),assetManagerWidth);
+        auto panel = area.removeFromRight(width); assetManager->setBounds(panel);
+        if (assetManagerResizer) assetManagerResizer->setBounds(panel.getX()-3,panel.getY(),6,panel.getHeight());
     }
-    const auto utauEditorActive = isUtauAlgorithmSelected();
-    if(utauEditorActive)
-        volumeParamButton.setToggleState(envelopeLane==EnvelopeLane::amplitude,juce::dontSendNotification);
-    volumeParamButton.setButtonText(utauEditorActive ? utf8("响度包络")
-                                                     : strings.text("param.volume"));
-    volumeParamButton.setTooltip(utauEditorActive
-        ? utf8("显示全部 UTAU 音符的振幅包络；拖动标点编辑，双击曲线加点，右键内部标点删除")
-        : strings.text("param.volume"));
-    // Both editing modes reserve the same second row.  Its contents change,
-    // but the piano-roll origin must not jump when switching between the
-    // Melodyne-compatible and UTAU workflows.
-    constexpr auto modeEditorHeight = 36;
-    const auto sampleEditorHeight = sourceEditActive ? 36 : 0;
-    const auto splitAvailable = std::max(1, area.getHeight() - 8 - 36
-        - sampleEditorHeight - modeEditorHeight - 36);
-    // Folded away, the arrangement takes no room at all and the splitter goes
-    // with it -- there is nothing left above to drag against.
-    const auto upperHeight = tracksCollapsed ? 0
-        : juce::jlimit(150, std::max(150, splitAvailable - 120),
-            static_cast<int>(std::round(
-                static_cast<float>(splitAvailable) * panelSplitRatio)));
-    for (auto* component : { static_cast<juce::Component*>(&trackViewport),
-                             static_cast<juce::Component*>(&timelineViewport),
-                             static_cast<juce::Component*>(&panelSplitter) })
-        component->setVisible(!tracksCollapsed);
-    if (!tracksCollapsed)
+    const auto utau = projectedTrackEditable&&displayedTrackType==TrackType::utau;
+    const auto ds = projectedTrackEditable&&displayedTrackType==TrackType::diffSinger;
+    const auto hachi = !utau&&!ds;
+    if (utau) volumeParamButton.setToggleState(envelopeLane==EnvelopeLane::amplitude,juce::dontSendNotification);
+    volumeParamButton.setButtonText(utau ? utf8("响度包络") : strings.text("param.volume"));
+    volumeParamButton.setTooltip(utau ? utf8("显示全部 UTAU 音符的振幅包络；拖动标点编辑，双击曲线加点，右键内部标点删除") : strings.text("param.volume"));
+    refreshPitchScopeTitle();
+    // Atomic label/control groups wrap as a unit. Tools are laid out FIRST,
+    // never squeezed by right-hand algorithm pickers into one-pixel icons.
+    struct Item { juce::Component* component; int width; };
+    using Group = std::vector<Item>; using Groups = std::vector<Group>;
+    const auto available = std::max(1,area.getWidth()-8);
+    const auto add = [&](Groups& groups,std::initializer_list<Item> items)
     {
-        auto upper = area.removeFromTop(upperHeight);
-        trackViewport.setBounds(upper.removeFromLeft(280));
-        timelineViewport.setBounds(upper);
+        Group group(items);
+        for(auto& item:group)
+        {
+            int textWidth=0;
+            if(auto* label=dynamic_cast<juce::Label*>(item.component))
+                textWidth=juce::roundToInt(label->getFont().getStringWidthFloat(label->getText()))+8;
+            else if(auto* button=dynamic_cast<juce::TextButton*>(item.component);button&&!button->getButtonText().isEmpty())
+                textWidth=juce::roundToInt(button->getLookAndFeel().getTextButtonFont(*button,30).getStringWidthFloat(button->getButtonText()))+20;
+            else if(auto* combo=dynamic_cast<juce::ComboBox*>(item.component))
+                textWidth=juce::roundToInt(combo->getLookAndFeel().getComboBoxFont(*combo).getStringWidthFloat(combo->getText()))+32;
+            if (item.component == &utauVoicebankName) textWidth=std::min(260,textWidth);
+            item.width=std::min(available,std::max(item.width,textWidth));
+        }
+        groups.push_back(std::move(group));
+    };
+    const auto widthOf = [](const Group& group)
+    { int width=0;for(const auto& item:group)width+=item.width;return width+3*std::max(0,static_cast<int>(group.size())-1); };
+    const auto rowsFor = [&](const Groups& groups)
+    {
+        int rows=groups.empty()?0:1,used=0;
+        for(const auto& group:groups){const auto width=widthOf(group);if(used>0&&used+width>available){++rows;used=0;}used+=width+6;}
+        return rows;
+    };
+    const auto place = [&](const Groups& groups,juce::Rectangle<int> bounds)
+    {
+        const auto left=bounds.getX()+4,right=bounds.getRight()-4;int x=left,y=bounds.getY()+3;
+        for(const auto& group:groups)
+        {
+            if(x>left&&x+widthOf(group)>right){x=left;y+=36;}
+            for(const auto& item:group){item.component->setBounds(x,y,item.width,30);x+=item.width+3;}
+            x+=3;
+        }
+    };
+    Groups tools,expression,sample,mode;
+    pointButton.setVisible(true);spliceButton.setVisible(true);
+    trackEditingHeading.setVisible(true);parameterTitle.setVisible(false);
+    add(tools,{{&trackEditingHeading,std::min(available,300)}});
+    add(tools,{{&noteEditButton,27},{&drawButton,27},{&pointButton,27},{&lineButton,27}});
+    wrenchButton.setVisible(!ds);trimButton.setVisible(hachi);connectButton.setVisible(hachi);
+    if(!ds)add(tools,{{&wrenchButton,27}});if(hachi)add(tools,{{&trimButton,27},{&connectButton,27}});
+    pitchLabel.setVisible(!ds);pitchAlgorithm.setVisible(!ds);
+    if(!ds)add(tools,{{&pitchLabel,50},{&pitchAlgorithm,106}});
+    const auto showOrder=hachi&&nsfPickerItem(pitchAlgorithm.getSelectedId());
+    renderOrder.setVisible(showOrder);renderOrderLabel.setVisible(showOrder);
+    if(showOrder)add(tools,{{&renderOrderLabel,38},{&renderOrder,108}});
+    stretchAlgorithm.setVisible(!ds);stretchLabel.setVisible(!ds);
+    const auto stretchWidth=available>=900?168:124;
+    if(!ds)add(tools,{{&stretchLabel,52},{&stretchAlgorithm,stretchWidth}});
+    utauVoicebankButton.setVisible(utau);
+    utauVoicebankName.setVisible(utau);
+    utauVoicebankButton.setEnabled(utau && !sourceEditActive);
+    if(utau)add(tools,{{&spliceButton,100},{&utauVoicebankButton,120},{&utauVoicebankName,140}});
+    else add(tools,{{&spliceButton,100}});
+    if(ds)
+    {
+        add(tools,{{&diffSingerModelButton,110},{&diffSingerSettingsButton,150}});
+        add(expression,{{&diffSingerContextLabel,std::min(available,380)}});
+        add(expression,{{&diffSingerTimingButton,120},{&diffSingerPronunciationButton,120},{&diffSingerPitchButton,120},{&diffSingerParametersButton,150}});
+    }
+    // Each existing expression control appears once. The old 537px empty
+    // spacer and right-side reservations could consume the entire narrow row.
+    for(auto* c:{static_cast<juce::Component*>(&smoothCaption),static_cast<juce::Component*>(&smoothSlider),
+        static_cast<juce::Component*>(&pitchParamButton),static_cast<juce::Component*>(&driftParamButton),
+        static_cast<juce::Component*>(&attackParamButton),static_cast<juce::Component*>(&breathParamButton),
+        static_cast<juce::Component*>(&tensionParamButton),static_cast<juce::Component*>(&formantParamButton)})c->setVisible(hachi);
+    volumeParamButton.setVisible(!ds);flagEnvelopeButton.setVisible(utau);
+    if(utau)add(expression,{{&volumeParamButton,78},{&flagEnvelopeButton,78}});
+    envelopePresetMenu.setVisible(!ds&&!selectedTrackIsAccompaniment());
+    if(envelopePresetMenu.isVisible())add(expression,{{&envelopePresetMenu,110}});
+    advancedEnvelopeButton.setVisible(!ds&&(utau||nativeAudioOverlapButton.isVisible()));
+    advancedEnvelopeButton.setButtonText(utf8("高级包络"));advancedEnvelopeButton.setToggleState(false,juce::dontSendNotification);
+    advancedEnvelopeButton.setTooltip(utf8("编辑当前音符的高级响度包络"));
+    if(advancedEnvelopeButton.isVisible())add(expression,{{&advancedEnvelopeButton,90}});
+    if(nativeVibratoButton.isVisible())add(expression,{{&nativeVibratoButton,64}});
+    if(nativeAudioOverlapButton.isVisible())add(expression,{{&nativeAudioOverlapButton,108}});
+    if(nsfPitchTransitionsButton.isVisible())add(expression,{{&nsfPitchTransitionsButton,128}});
+    if(nsfNoiseProtectionButton.isVisible())add(expression,{{&nsfNoiseProtectionButton,156}});
+    autoCrossfadeButton.setVisible(!ds);if(!ds)add(expression,{{&autoCrossfadeButton,94}});
+    if(phonemizerButton.isVisible())
+        add(expression,{{&phonemizerButton,stretchWidth},{&pianoPreviewButton,110}});
+    else if(pianoPreviewButton.isVisible())add(expression,{{&pianoPreviewButton,110}});
+    for(auto* c:{static_cast<juce::Component*>(&sampleRegionSelector),static_cast<juce::Component*>(&sampleAliasEditor),
+        static_cast<juce::Component*>(&sampleStartEditor),static_cast<juce::Component*>(&sampleEndEditor),
+        static_cast<juce::Component*>(&sampleAlignmentEditor),static_cast<juce::Component*>(&sampleFixedEditor),
+        static_cast<juce::Component*>(&sampleAliasLabel),static_cast<juce::Component*>(&sampleStartLabel),
+        static_cast<juce::Component*>(&sampleEndLabel),static_cast<juce::Component*>(&sampleAlignmentLabel),
+        static_cast<juce::Component*>(&sampleFixedLabel),static_cast<juce::Component*>(&sampleSaveButton),
+        static_cast<juce::Component*>(&otoImportButton),static_cast<juce::Component*>(&otoExportButton)})c->setVisible(sourceEditActive);
+    if(sourceEditActive)
+    {
+        add(sample,{{&sourceEditHint,std::min(220,available)}});add(sample,{{&sampleRegionSelector,104}});
+        add(sample,{{&sampleAliasLabel,34},{&sampleAliasEditor,100}});add(sample,{{&sampleStartLabel,34},{&sampleStartEditor,64}});
+        add(sample,{{&sampleEndLabel,30},{&sampleEndEditor,64}});add(sample,{{&sampleAlignmentLabel,44},{&sampleAlignmentEditor,64}});
+        add(sample,{{&sampleFixedLabel,44},{&sampleFixedEditor,64}});add(sample,{{&sampleSaveButton,64}});
+        add(sample,{{&otoImportButton,82}});add(sample,{{&otoExportButton,82}});
+    }
+    else sourceEditHint.setBounds({});
+    noteAliasLabel.setVisible(utau||ds);noteAliasEditor.setVisible(utau||ds);
+    noteAliasLabel.setText(ds?(strings.text("Lyrics")):(strings.text("OTO alias")),juce::dontSendNotification);
+    for(auto* c:{static_cast<juce::Component*>(&noteFlagsLabel),static_cast<juce::Component*>(&noteFlagsEditor),static_cast<juce::Component*>(&flagCurveButton)})c->setVisible(utau);
+    noteConsonantVelocityLabel.setVisible(!ds);noteConsonantVelocityEditor.setVisible(!ds);
+    robustPitchCurveButton.setVisible(hachi&&pitchAlgorithm.getSelectedId()==1);
+    if(utau||ds)
+    {
+        add(mode,{{&noteAliasLabel,64},{&noteAliasEditor,100}});
+        if(utau)
+        {
+            add(mode,{{&noteConsonantVelocityLabel,72},{&noteConsonantVelocityEditor,52}});
+            add(mode,{{&noteFlagsLabel,42},{&noteFlagsEditor,std::max(90,std::min(220,available-144))},{&flagCurveButton,92}});
+        }
+    }
+    else
+    {
+        add(mode,{{&smoothCaption,42},{&smoothSlider,118}});add(mode,{{&pitchParamButton,64},{&driftParamButton,64},{&attackParamButton,64}});
+        add(mode,{{&noteConsonantVelocityLabel,72},{&noteConsonantVelocityEditor,52}});
+        add(mode,{{&breathParamButton,64},{&tensionParamButton,64},{&formantParamButton,72},{&volumeParamButton,64}});
+        if(robustPitchCurveButton.isVisible())add(mode,{{&robustPitchCurveButton,104}});
+    }
+    const auto headerHeight=36*(rowsFor(tools)+rowsFor(expression)+rowsFor(sample)+rowsFor(mode));
+    const auto splitAvailable=std::max(1,area.getHeight()-8-headerHeight);
+    const auto upperHeight=tracksCollapsed?0:juce::jlimit(150,std::max(150,splitAvailable-120),
+        static_cast<int>(std::round(static_cast<float>(splitAvailable)*panelSplitRatio)));
+    for(auto* c:{static_cast<juce::Component*>(&trackViewport),static_cast<juce::Component*>(&timelineViewport),static_cast<juce::Component*>(&panelSplitter)})c->setVisible(!tracksCollapsed);
+    if(!tracksCollapsed)
+    {
+        auto upper=area.removeFromTop(upperHeight);trackViewport.setBounds(upper.removeFromLeft(280));timelineViewport.setBounds(upper);
         panelSplitter.setBounds(area.removeFromTop(8));
     }
-
-    auto parameterHeader = area.removeFromTop(36).reduced(4, 3);
-    auto takeParameterRight = [&parameterHeader](juce::Component& component, int width)
-    {
-        component.setBounds(parameterHeader.removeFromRight(width));
-        parameterHeader.removeFromRight(3);
-    };
-    // No stretch algorithm in any UTAU mode: the stretching is the
-    // resampler's, and the picker only ever sat there greyed out.  And none on
-    // the four backends that stretch inside their own renderers, where every
-    // item rendered byte-identical audio and only the diagnostic label moved.
-    // Hidden rather than disabled, and its space given back to the row.
-    const auto showStretch = true;
-    stretchAlgorithm.setVisible(showStretch);
-    stretchLabel.setVisible(showStretch);
-    if (showStretch)
-    {
-        takeParameterRight(stretchAlgorithm, 124);
-        takeParameterRight(stretchLabel, 52);
-    }
-    // Rendering a phrase in one pass is something only the neural decoder
-    // does, so the choice is offered only where it means anything.
-    const auto showRenderOrder = !utauEditorActive
-        && nsfPickerItem(pitchAlgorithm.getSelectedId());
-    renderOrder.setVisible(showRenderOrder);
-    renderOrderLabel.setVisible(showRenderOrder);
-    if (showRenderOrder)
-    {
-        takeParameterRight(renderOrder, 108);
-        takeParameterRight(renderOrderLabel, 38);
-    }
-    takeParameterRight(pitchAlgorithm, 106);
-    takeParameterRight(pitchLabel, 50);
-    voicebankSettingsButton.setVisible(utauEditorActive);
-    if (utauEditorActive) takeParameterRight(voicebankSettingsButton, 104);
-    spliceButton.setVisible(true);
-    takeParameterRight(spliceButton, 60);
-    auto takeParameter = [&parameterHeader](juce::Component& component, int width)
-    {
-        component.setBounds(parameterHeader.removeFromLeft(width));
-        parameterHeader.removeFromLeft(3);
-    };
-    takeParameter(parameterTitle, 70);
-    takeParameter(noteEditButton, 27);
-    takeParameter(drawButton, 27);
-    // In every mode: the native renderer reads the pitch points too, so the
-    // tool does the same thing on either kind of track.
-    pointButton.setVisible(true);
-    takeParameter(pointButton, 27);
-    takeParameter(lineButton, 27);
-    takeParameter(wrenchButton, 27);
-    takeParameter(trimButton, 27);
-    takeParameter(connectButton, 27);
-    parameterHeader.removeFromLeft(8);
-    horizontalZoomOutButton.setButtonText("-");
-    horizontalZoomInButton.setButtonText("+");
-    verticalZoomOutButton.setButtonText("-");
-    verticalZoomInButton.setButtonText("+");
-    takeParameter(horizontalZoomOutButton, 30);
-    takeParameter(horizontalZoomInButton, 30);
-    parameterHeader.removeFromLeft(5);
-    takeParameter(verticalZoomOutButton, 30);
-    takeParameter(verticalZoomInButton, 30);
-    auto expressionBar = area.removeFromTop(36).reduced(4, 3);
-    const auto takeExpression = [&expressionBar](juce::Component& component, int width)
-    {
-        component.setBounds(expressionBar.removeFromLeft(width));
-        expressionBar.removeFromLeft(3);
-    };
-    // Keep the complete local envelope controls on their own row.
-    // Parameter controls are placed in the mode row below, not mixed into the
-    // tool row, so both modes retain the same tool geometry.
-    for (auto* component : { static_cast<juce::Component*>(&smoothCaption),
-         static_cast<juce::Component*>(&smoothSlider),
-         static_cast<juce::Component*>(&pitchParamButton),
-         static_cast<juce::Component*>(&driftParamButton),
-         static_cast<juce::Component*>(&attackParamButton),
-         static_cast<juce::Component*>(&breathParamButton),
-         static_cast<juce::Component*>(&tensionParamButton),
-         static_cast<juce::Component*>(&formantParamButton),
-         static_cast<juce::Component*>(&volumeParamButton) })
-        component->setVisible(!utauEditorActive);
-    volumeParamButton.setVisible(true);
-    if (!utauEditorActive)
-    {
-        // These controls are actually placed in modeBar below. Preserve the
-        // wide-window alignment, but reclaim the empty spacer on narrow windows
-        // so all native audio switches remain reachable at the minimum width.
-        const auto optionsWidth = 93 + 75 + (nativeAudioOverlapButton.isVisible() ? 111 : 0)
-            + (nsfPitchTransitionsButton.isVisible() ? 131 : 0)
-            + (nsfNoiseProtectionButton.isVisible() ? 159 : 0)
-            + (nativeVibratoButton.isVisible() ? 67 : 0);
-        expressionBar.removeFromLeft(std::min(537, std::max(0, expressionBar.getWidth() - optionsWidth)));
-    }
-    else
-    {
-        takeExpression(volumeParamButton, 78);
-        takeExpression(flagEnvelopeButton, 78);
-    }
-    flagEnvelopeButton.setVisible(utauEditorActive);
-    envelopePresetCaption.setVisible(utauEditorActive);
-    if (utauEditorActive) takeExpression(envelopePresetCaption, 60);
-    for (auto& button : envelopePresetButtons)
-    {
-        button->setVisible(utauEditorActive);
-        if (utauEditorActive) takeExpression(*button, 46);
-    }
-    advancedEnvelopeButton.setVisible(utauEditorActive||nativeAudioOverlapButton.isVisible());
-    advancedEnvelopeButton.setButtonText(utf8(utauEditorActive?"高级包络":"响度包络"));
-    advancedEnvelopeButton.setToggleState(!utauEditorActive && envelopeLane==EnvelopeLane::amplitude,juce::dontSendNotification);
-    advancedEnvelopeButton.setTooltip(utf8(utauEditorActive?"打开 OTO 高级包络设置":"开关下方响度包络；双击曲线加点，拖动调整，右键内部点删除"));
-    if(advancedEnvelopeButton.isVisible())takeExpression(advancedEnvelopeButton,90);
-    if(nativeVibratoButton.isVisible())takeExpression(nativeVibratoButton,64);
-    // After the envelope presets, at the end of the row, as asked.  That puts
-    // it past the controls that come and go with the mode, so unlike before it
-    // does not sit at a fixed x.
-    takeExpression(showViewMenuButton, 72);
-    if(nativeAudioOverlapButton.isVisible())takeExpression(nativeAudioOverlapButton,108);
-    if(nsfPitchTransitionsButton.isVisible())takeExpression(nsfPitchTransitionsButton,128);
-    if(nsfNoiseProtectionButton.isVisible())takeExpression(nsfNoiseProtectionButton,156);
-    if (robustPitchCurveButton.isVisible())
-        takeExpression(robustPitchCurveButton, 74);
-    sourceEditHint.setBounds(parameterHeader.reduced(3, 0));
-    auto sampleBar = area.removeFromTop(sampleEditorHeight).reduced(4, 3);
-    auto setSampleVisible = [this](bool visible)
-    {
-        for (auto* component : { static_cast<juce::Component*>(&sampleRegionSelector),
-             static_cast<juce::Component*>(&sampleAliasEditor), static_cast<juce::Component*>(&sampleStartEditor),
-             static_cast<juce::Component*>(&sampleEndEditor), static_cast<juce::Component*>(&sampleAlignmentEditor),
-             static_cast<juce::Component*>(&sampleFixedEditor), static_cast<juce::Component*>(&sampleAliasLabel),
-             static_cast<juce::Component*>(&sampleStartLabel), static_cast<juce::Component*>(&sampleEndLabel),
-             static_cast<juce::Component*>(&sampleAlignmentLabel), static_cast<juce::Component*>(&sampleFixedLabel),
-             static_cast<juce::Component*>(&sampleSaveButton), static_cast<juce::Component*>(&otoImportButton),
-             static_cast<juce::Component*>(&otoExportButton) }) component->setVisible(visible);
-    };
-    setSampleVisible(sourceEditActive);
-    if (sourceEditActive)
-    {
-        const auto takeSample = [&sampleBar](juce::Component& component, int width)
-        {
-            component.setBounds(sampleBar.removeFromLeft(width));
-            sampleBar.removeFromLeft(3);
-        };
-        takeSample(sampleRegionSelector, 104);
-        takeSample(sampleAliasLabel, 34); takeSample(sampleAliasEditor, 100);
-        takeSample(sampleStartLabel, 34); takeSample(sampleStartEditor, 64);
-        takeSample(sampleEndLabel, 30); takeSample(sampleEndEditor, 64);
-        takeSample(sampleAlignmentLabel, 44); takeSample(sampleAlignmentEditor, 64);
-        takeSample(sampleFixedLabel, 44); takeSample(sampleFixedEditor, 64);
-        takeSample(sampleSaveButton, 64);
-        takeSample(otoImportButton, 82);
-        takeSample(otoExportButton, 82);
-    }
-    auto modeBar = area.removeFromTop(modeEditorHeight).reduced(4, 3);
-    for (auto* component : { static_cast<juce::Component*>(&utauVoicebankLabel),
-         static_cast<juce::Component*>(&utauVoicebankButton),
-         static_cast<juce::Component*>(&utauVoicebankPath),
-         static_cast<juce::Component*>(&noteAliasLabel),
-         static_cast<juce::Component*>(&noteAliasEditor),
-         static_cast<juce::Component*>(&noteConsonantVelocityLabel),
-         static_cast<juce::Component*>(&noteConsonantVelocityEditor),
-         static_cast<juce::Component*>(&noteFlagsLabel),
-         static_cast<juce::Component*>(&noteFlagsEditor),
-         static_cast<juce::Component*>(&flagCurveButton) })
-         component->setVisible(utauEditorActive);
-    if (utauEditorActive)
-    {
-        const auto takeUtau = [&modeBar](juce::Component& component, int width)
-        {
-            component.setBounds(modeBar.removeFromLeft(width));
-            modeBar.removeFromLeft(4);
-        };
-        const auto compact = modeBar.getWidth() < 1050;
-        takeUtau(utauVoicebankLabel, compact ? 48 : 76);
-        takeUtau(utauVoicebankButton, compact ? 80 : 108);
-        utauVoicebankPath.setVisible(!compact);
-        if (!compact) takeUtau(utauVoicebankPath, std::min(330, std::max(100, modeBar.getWidth() - 620)));
-        takeUtau(noteAliasLabel, compact ? 64 : 92);
-        takeUtau(noteAliasEditor, compact ? 100 : 130);
-        takeUtau(noteConsonantVelocityLabel, 72);
-        takeUtau(noteConsonantVelocityEditor, 52);
-        takeUtau(noteFlagsLabel, 42);
-        // Leave room for the switch beside it rather than running the box to
-        // the end of the bar.
-        takeUtau(noteFlagsEditor, std::max(90, modeBar.getWidth() - 96));
-        takeUtau(flagCurveButton, std::min(92, std::max(0, modeBar.getWidth())));
-    }
-    else
-    {
-        // Melodyne-compatible tracks use the same row for their common
-        // expression controls.  The buttons keep their existing handlers and
-        // the project's custom icons; only their placement is shared with UTAU.
-        const auto takeCommon = [&modeBar](juce::Component& component, int width)
-        {
-            component.setVisible(true);
-            component.setBounds(modeBar.removeFromLeft(width));
-            modeBar.removeFromLeft(4);
-        };
-        takeCommon(smoothCaption, 42);
-        takeCommon(smoothSlider, 118);
-        takeCommon(pitchParamButton, 50);
-        takeCommon(driftParamButton, 50);
-        attackParamButton.setVisible(false);
-        takeCommon(noteConsonantVelocityLabel, 72);
-        takeCommon(noteConsonantVelocityEditor, 52);
-        takeCommon(breathParamButton, 50);
-        takeCommon(tensionParamButton, 50);
-        takeCommon(formantParamButton, 50);
-        takeCommon(volumeParamButton, 50);
-        robustPitchCurveButton.setVisible(pitchAlgorithm.getSelectedId() == 1);
-        if (robustPitchCurveButton.isVisible()) takeCommon(robustPitchCurveButton, 104);
-    }
-    const auto pianoArea = area;
-    pianoViewport.setBounds(pianoArea);
-    if (!pianoInitialScrollSet && pianoViewport.getHeight() > 0)
-    {
-        pianoViewport.setViewPosition(0, std::max(0, (pianoRoll.getHeight() - pianoViewport.getHeight()) / 2));
-        pianoInitialScrollSet = true;
-    }
+    place(tools,area.removeFromTop(36*rowsFor(tools)));place(expression,area.removeFromTop(36*rowsFor(expression)));
+    place(sample,area.removeFromTop(36*rowsFor(sample)));place(mode,area.removeFromTop(36*rowsFor(mode)));
+    pianoViewport.setBounds(area);
+    if(!pianoInitialScrollSet&&pianoViewport.getHeight()>0)
+    {pianoViewport.setViewPosition(0,std::max(0,(pianoRoll.getHeight()-pianoViewport.getHeight())/2));pianoInitialScrollSet=true;}
 }
 
 void MainComponent::adjustHorizontalZoom(double factor, bool upperPane)
@@ -3690,6 +3953,9 @@ void MainComponent::changeListenerCallback(juce::ChangeBroadcaster* source)
     if (source == &project)
     {
         const auto data = project.snapshot();
+        setAssetManagerVisible(data.assetManagerVisible);
+        if (assetManager != nullptr)
+            assetManager->setProjectVoicebanks(data);
         const auto trackExists = std::any_of(data.tracks.begin(), data.tracks.end(),
             [this](const auto& track) { return track.id == selectedTrackId; });
         if (!trackExists) selectedTrackId.clear();
@@ -3843,11 +4109,11 @@ void MainComponent::timerCallback()
                 if (!keepDiffSingerStatus) statusLabel.setText((audio.isPlaying() ? strings.text("transport.play")
                                                         : strings.text("status.ready"))
                                         + "  " + juce::String(audio.position(), 2) + " s"
-                                        + (backend.isNotEmpty() ? "  ·  " + backend : juce::String())
+                                        + (backend.isNotEmpty() ? utf8("  ·  ") + backend : juce::String())
                                         + (renderWarning.isNotEmpty()
-                                            ? "  ·  UTAU: " + renderWarning : juce::String())
+                                            ? utf8("  ·  UTAU: ") + renderWarning : juce::String())
                                         + (capability.isNotEmpty()
-                                            ? "  ·  ⚠ " + capability : juce::String()),
+                                            ? utf8("  ·  ⚠ ") + capability : juce::String()),
                                     juce::dontSendNotification);
             }
         }
@@ -4153,18 +4419,9 @@ void MainComponent::commitSampleEditors()
 
 void MainComponent::saveSampleSettings()
 {
-    commitSampleEditors();
-    if (!sampleSettingsFile.existsAsFile() || sampleSettingsRows.empty()) return;
-    juce::String error;
-    if (!SampleSettings::save(sampleSettingsFile, sampleSettingsRows, error))
-    {
-        showError(error);
-        return;
-    }
-    project.applySourceSettings(sampleSettingsFile, sampleSettingsRows);
-    statusLabel.setText(strings.text("sample.saved") + "  "
-                        + SampleSettings::sidecarFor(sampleSettingsFile).getFullPathName(),
-                        juce::dontSendNotification);
+    // Legacy keyboard/test handoff: never publish through the retired inline
+    // single-row form. Quick edits share the same guarded multi-row session.
+    openSelectedMaterialEditor(true);
 }
 
 void MainComponent::importOto()
@@ -4258,6 +4515,9 @@ juce::PopupMenu MainComponent::getMenuForIndex(int index, const juce::String&)
         menu.addSeparator();
         menu.addItem(9, strings.text("file.settings"));
         menu.addItem(10, strings.text("file.assets"));
+        menu.addItem(850, strings.text("material.pronunciationInput"));
+        menu.addItem(863,strings.text("Register project source materials..."),!projectRegistrationOperation);
+        menu.addItem(864,strings.text("Retry material folder registration"),!projectRegistrationRetryRoots.empty());
         menu.addSeparator();
         menu.addItem(7, strings.text("file.exit"));
     }
@@ -4306,10 +4566,11 @@ juce::PopupMenu MainComponent::getMenuForIndex(int index, const juce::String&)
     }
     else if (index == 2)
     {
-        menu.addItem(36, strings.text("track.addCompose"));
+        menu.addItem(36,strings.text("New HachiShifter track"));
+        menu.addItem(861,strings.text("New UTAU track"));
+        menu.addItem(862,strings.text("New DiffSinger track"));
         menu.addItem(37, strings.text("track.addAudio"));
         menu.addItem(accompanimentTrackMenuItem, strings.text("track.newAccompaniment"));
-        menu.addItem(30, strings.text("file.audio"));
         menu.addSeparator();
         menu.addItem(38, strings.text("track.rename"), selectedTrackId.isNotEmpty());
         menu.addItem(31, strings.text("track.toggleCompose"), selectedTrackId.isNotEmpty() && !selectedTrackIsAccompaniment());
@@ -4338,6 +4599,8 @@ juce::PopupMenu MainComponent::getMenuForIndex(int index, const juce::String&)
         menu.addItem(45, strings.text("view.vZoomOut"));
         menu.addSeparator();
         menu.addItem(43, strings.text("view.showWaveforms"), true, showWaveforms);
+        menu.addSeparator();
+        appendEditorViewItems(menu);
     }
     else
         menu.addItem(50, strings.text("help.about"));
@@ -4346,6 +4609,7 @@ juce::PopupMenu MainComponent::getMenuForIndex(int index, const juce::String&)
 
 void MainComponent::menuItemSelected(int id, int)
 {
+    if ((id >= 601 && id <= 609) || id == trackPitchScopeMenuItem || id == 613) { applyEditorViewChoice(id - 600); return; }
     if (id == 1) newProject();
     else if (id == 2) openProject();
     else if (id == 3) saveProject();
@@ -4361,6 +4625,9 @@ void MainComponent::menuItemSelected(int id, int)
     else if (id == 13) importUst();
     else if (id == 9) showSettings();
     else if (id == 10) showAssetManager();
+    else if (id == 850) showMaterialPronunciationInput();
+    else if(id==863)offerMaterialFolderForImport(project.snapshot());
+    else if(id==864)retryProjectMaterialRootRegistration();
     else if (id == 7) requestClose([] { juce::JUCEApplication::getInstance()->quit(); });
     else if (id >= 1'000 && id < 1'000 + recentProjectPaths.size())
     {
@@ -4390,7 +4657,10 @@ void MainComponent::menuItemSelected(int id, int)
     else if (id == 23) copySelectedClip();
     else if (id == 24) pasteCopiedClip();
     else if (id == 25) duplicateSelectedClip();
-    else if (id == 36 || id == 37) addTrackFromMenu(id == 36);
+    else if(id==36)addTrackFromMenu(TrackType::hachi);
+    else if(id==861)addTrackFromMenu(TrackType::utau);
+    else if(id==862)addTrackFromMenu(TrackType::diffSinger);
+    else if(id==37)addTrackFromMenu(false);
     else if (id == accompanimentTrackMenuItem) addAccompanimentTrackFromMenu();
     else if (id == 38) showRenameTrackDialog();
     else if (id == 31)
@@ -4439,6 +4709,12 @@ void MainComponent::menuItemSelected(int id, int)
 void MainComponent::showSettings(int page)
 {
     if (preferences == nullptr) return;
+    if (auto* existing = settingsWindows.findVisible<SettingsComponent>())
+    {
+        static_cast<SettingsComponent*>(existing->getContentComponent())->selectPage(page);
+        existing->toFront(true);
+        return;
+    }
     juce::DialogWindow::LaunchOptions options;
     options.dialogTitle = strings.text("settings.title");
     options.dialogBackgroundColour = Palette::panel;
@@ -4449,7 +4725,7 @@ void MainComponent::showSettings(int page)
     options.content.setOwned(new SettingsComponent(strings, audio.devices(), *preferences,
         [safe]
         {
-            if (safe == nullptr) return;
+            if (safe == nullptr || safe->closingUI) return;
             if (safe->preferences != nullptr)
                 safe->audio.saveDeviceState(*safe->preferences);
             safe->applyPreferences();
@@ -4461,18 +4737,48 @@ void MainComponent::showSettings(int page)
             safe->pianoRoll.repaint();
         }));
     static_cast<SettingsComponent*>(options.content.get())->selectPage(page);
-    options.launchAsync();
+    settingsWindows.show(options,"settings");
 }
 
 void MainComponent::showAssetManager()
 {
-    if (preferences == nullptr) return;
+    setAssetManagerVisible(!assetManagerVisible);
+    project.setAssetManagerVisible(assetManagerVisible);
+}
+
+void MainComponent::setAssetManagerVisible(bool visible)
+{
+    if (preferences == nullptr || assetManagerVisible == visible) return;
     // Docked in the main window, not a separate window: it stays operable
     // alongside the piano roll, and toggles off when its menu item is chosen
     // again.  Created lazily the first time it is shown.
     if (assetManager == nullptr)
     {
         assetManager = std::make_unique<AssetManagerComponent>(strings, *preferences);
+        assetManager->onMaterialPreflight = [this](const juce::File& source, const auto& rows, juce::String& error)
+        { return preflightMaterialPublication(source, rows, error); };
+        assetManager->onMaterialSaved = [this](const juce::File& source, const auto& rows)
+        { materialPublicationCompleted(source, rows); };
+        assetManager->onConfigureMaterialEditor = [this](OtoWaveformEditorComponent& editor)
+        { attachOtoPlayback(editor); };
+        assetManager->onUseMaterialFolder = [this](const juce::File& folder)
+        { selectVoicebank(selectedTrackId, folder); };
+        assetManager->onLoadMaterialSelection = [this](const AssetManagerComponent::MaterialSelection& selection)
+        {
+            if(selection.audioVariantId.isNotEmpty()||!selection.regionIds.isEmpty())
+                importMaterialPronunciations(selection.audio,selection.root.getChildFile("otto.ini"),selection.regionIds,audio.position(),selectedTrackId,{},selection.audioVariantId);
+            else importAssetAudio(selection.audio,selection.root,assetManager->otoImportKind(selection.audio),audio.position(),selectedTrackId,juce::Desktop::getMousePosition());
+        };
+        assetManager->onLoadPronunciations = [this](const juce::File& file, const juce::StringArray& ids)
+        {
+            importMaterialPronunciations(file, assetManager->rootForAudio(file).getChildFile("otto.ini"),
+                ids, audio.position(), selectedTrackId);
+        };
+        assetManager->onLoadAudio = [this](const juce::File& file)
+        {
+            importAssetAudio(file, assetManager->rootForAudio(file), assetManager->otoImportKind(file),
+                             audio.position(), selectedTrackId, juce::Desktop::getMousePosition());
+        };
         addChildComponent(assetManager.get());
         assetManagerWidth = juce::jlimit(220, 640,
             preferences->getIntValue("ui.assetManagerWidth", 320));
@@ -4492,14 +4798,16 @@ void MainComponent::showAssetManager()
             juce::ResizableEdgeComponent::leftEdge);
         addChildComponent(assetManagerResizer.get());
     }
-    assetManagerVisible = !assetManagerVisible;
+    assetManagerVisible = visible;
+    if (assetManagerVisible)
+        assetManager->setProjectVoicebanks(project.snapshot());
     assetManager->setVisible(assetManagerVisible);
     assetManagerResizer->setVisible(assetManagerVisible);
     if (assetManagerVisible)
     {
         assetManager->toFront(false);
         assetManagerResizer->toFront(false);
-        statusLabel.setText(strings.text("asset.docked"), juce::dontSendNotification);
+        statusLabel.setText(strings.text("asset.browseHint"), juce::dontSendNotification);
     }
     resized();
 }
@@ -4519,13 +4827,7 @@ void MainComponent::showClipGainDialog()
             }
     if (!found) return;
 
-    const auto gainDb = gain > 1.0e-6f ? 20.0 * std::log10(gain) : -60.0;
-    auto* dialog = new juce::AlertWindow(strings.text("clip.gain"), juce::String{},
-                                          juce::MessageBoxIconType::NoIcon);
-    dialog->addTextEditor("gain", juce::String(gainDb, 1), strings.text("clip.gainDb"));
-    dialog->addButton(strings.text("dialog.apply"), 1);
-    dialog->addButton(strings.text("dialog.cancel"), 0,
-                      juce::KeyPress(juce::KeyPress::escapeKey));
+    auto* dialog = new DecibelGainDialog(strings,strings.text("clip.gain"),gain,4.0f,this);
     const auto clipId = selectedClipId;
     juce::Component::SafePointer<MainComponent> safe(this);
     dialog->enterModalState(true,
@@ -4533,13 +4835,44 @@ void MainComponent::showClipGainDialog()
         {
             if (safe != nullptr && result == 1)
             {
-                const auto db = juce::jlimit(-60.0, 12.0,
-                    dialog->getTextEditorContents("gain").getDoubleValue());
-                safe->project.setClipGain(clipId, db <= -59.9 ? 0.0f
-                    : static_cast<float>(std::pow(10.0, db / 20.0)));
+                if(const auto value=dialog->value())safe->project.setClipGain(clipId,*value);
             }
             delete dialog;
         }), false);
+}
+
+void MainComponent::showTrackGainDialog(const juce::String& trackId)
+{
+    const auto data=project.snapshot();
+    const auto found=std::find_if(data.tracks.begin(),data.tracks.end(),[&](const auto& t){return t.id==trackId;});
+    if(found==data.tracks.end())return;
+    const auto initial=found->volume;
+    auto* dialog=new DecibelGainDialog(strings,strings.text("track.volume")+" — "+found->name,initial,2.0f,this);
+    juce::Component::SafePointer<MainComponent> safe(this);
+    dialog->enterModalState(true,juce::ModalCallbackFunction::create([safe,dialog,trackId,initial](int result)
+    {
+        if(safe!=nullptr && result==1)
+            if(const auto value=dialog->value();value && *value!=initial)
+                safe->project.setTrackVolume(trackId,*value);
+        delete dialog;
+    }),false);
+}
+
+void MainComponent::showTrackPanDialog(const juce::String& trackId)
+{
+    const auto data = project.snapshot();
+    const auto found = std::find_if(data.tracks.begin(), data.tracks.end(), [&](const auto& t) { return t.id == trackId; });
+    if (found == data.tracks.end()) return;
+    const auto initial = found->pan;
+    auto* dialog = new PanValueDialog(strings, strings.text("track.pan") + " — " + found->name, initial, this);
+    juce::Component::SafePointer<MainComponent> safe(this);
+    dialog->enterModalState(true, juce::ModalCallbackFunction::create([safe, dialog, trackId, initial](int result)
+    {
+        if (safe != nullptr && result == 1)
+            if (const auto value = dialog->value(); value && *value != initial)
+                safe->project.setTrackPan(trackId, *value);
+        delete dialog;
+    }), false);
 }
 
 void MainComponent::showRenameTrackDialog()
@@ -4973,7 +5306,9 @@ void MainComponent::newProject()
         audio.stop();
         audio.setPosition(0.0);
         backend::DiffSingerRenderer::openProjectCache();
+        cancelProjectMaterialRegistration();
         project.clear();
+        setAssetManagerVisible(false);
         discardProjectRecovery();
         liveMcpDocumentChanged();
         currentProjectFile = juce::File{};
@@ -5003,15 +5338,17 @@ void MainComponent::openProject()
 
 void MainComponent::replaceImportedProject(ProjectData replacement)
 {
+    cancelProjectMaterialRegistration();
     audio.stop();
     audio.setPosition(0.0);
     audio.setUtauRenderNoteSelection({});
     activeUtauSelectionCount=0;
     project.resetDocument(std::move(replacement));
+    setAssetManagerVisible(project.snapshot().assetManagerVisible);
     discardProjectRecovery();
     liveMcpDocumentChanged();
     backend::DiffSingerRenderer::openProjectCache();
-    currentProjectFile={};
+    currentProjectFile=juce::File{};
     savedProjectRevision=project.revisionNumber()-1;
     selectedTrackId.clear(); selectedClipId.clear(); selectedNoteId.clear();
     copiedClipId.clear(); copiedNotes.clear(); copiedNativeClips.clear(); copiedNativeConnections.clear();
@@ -5019,8 +5356,9 @@ void MainComponent::replaceImportedProject(ProjectData replacement)
     pianoRoll.setFocusedTrack({}); pianoRoll.setFocusedClip({});
 }
 
-bool MainComponent::loadProjectFile(const juce::File& file, bool recovering)
+bool MainComponent::loadProjectFile(const juce::File& file, bool recovering,bool offerRegistration)
 {
+    cancelProjectMaterialRegistration();
     juce::String error;
     // A project replacement invalidates every selection and any phrase render
     // derived from the previous document.  Stop transport before parsing and
@@ -5050,6 +5388,7 @@ bool MainComponent::loadProjectFile(const juce::File& file, bool recovering)
     auto openedMessage = recovering ? strings.text("recovery.restored")
         : strings.text("status.projectOpened") + "  " + file.getFileName();
     const auto loadedData = project.snapshot();
+    setAssetManagerVisible(loadedData.assetManagerVisible);
     auto hasSavedPitchReference = false;
     for (const auto& track : loadedData.tracks) for (const auto& clip : track.clips) for (const auto& note : clip.notes)
         hasSavedPitchReference = hasSavedPitchReference || note.diffSingerPitchReferenceFromSavedPitch;
@@ -5058,6 +5397,7 @@ bool MainComponent::loadProjectFile(const juce::File& file, bool recovering)
     statusLabel.setText(openedMessage, juce::dontSendNotification);
     if (error.isNotEmpty())
         showError(strings.text("warning.missingMedia") + "\n" + error);
+    if(offerRegistration&&!recovering&&file.hasFileExtension("hjpx;hspx"))offerMaterialFolderForImport(loadedData);
     return true;
 }
 
@@ -5098,6 +5438,7 @@ void MainComponent::saveProjectAs(std::function<void(bool)> completion)
 bool MainComponent::saveProjectTo(const juce::File& file)
 {
     rememberDiffSingerParameters();
+    pianoRoll.setUtauNoteWaveforms(audio.utauNoteWaveforms());
     juce::String error;
     if (!project.save(file, error))
     {
@@ -5563,12 +5904,11 @@ void MainComponent::finishExport()
                   + strings.text("status.exportFiles")
             : strings.text("status.ready"),
         juce::dontSendNotification);
-    const auto separated = pendingExportOptions.component != WavExportComponent::full;
     pendingExportOptions.component = WavExportComponent::full;
     // The audition scope was widened to the whole song to render it; hand it
     // back to whatever is selected in the roll.
     updateUtauRenderSelection();
-    if (separated) syncAudio(project.snapshot());
+    syncAudio(project.snapshot());
 }
 
 void MainComponent::importAudio()
@@ -5594,97 +5934,440 @@ void MainComponent::importAudio()
         });
 }
 
-void MainComponent::addAnalysedAudioFile(const juce::File& file, double durationSeconds,
-                                         double startSeconds,
-                                         const juce::String& targetTrackId)
+bool MainComponent::preflightMaterialPublication(const juce::File& source,
+    const std::vector<SampleRegionSetting>& rows, juce::String& error)
 {
-    const auto clipId = project.addAudioFile(file, durationSeconds, startSeconds, targetTrackId);
+    const auto report = project.applySourceSettingsWithReport(source, rows, false);
+    if (report.rejected) { error = report.diagnostics.joinIntoString("\n"); return false; }
+    return true;
+}
+
+void MainComponent::materialPublicationCompleted(const juce::File& source,
+    const std::vector<SampleRegionSetting>& rows)
+{
+    backend::UtauRenderer::invalidateVoicebankCache();
+    const auto report = project.applySourceSettingsWithReport(source, rows);
+    if (report.rejected || report.unresolvedNotes > 0) showError(report.diagnostics.joinIntoString("\n"));
+    if (sourceEditActive && sampleSettingsFile == source) loadSampleSettings();
+}
+
+void MainComponent::openMaterialEditor(const juce::File& source, const juce::File& manifest,
+    bool quick, const juce::String& pronunciationId,const juce::String& audioVariantId,
+    std::optional<juce::Range<double>> sourceRange)
+{
+    // Resolve explicit IDs before opening/reusing any editor. Never fall back
+    // to a sibling registration just because its physical WAV is the same.
+    if(audioVariantId.isNotEmpty())
+    {
+        std::vector<SampleRegionSetting> rows;juce::String error;
+        if(!OttoMaterialMigration::readAudioAnnotations(source,manifest.getParentDirectory(),UtauMode::classic,rows,error,audioVariantId))
+        {showError(error);return;}
+        if(pronunciationId.isNotEmpty()&&std::none_of(rows.begin(),rows.end(),[&](const auto& row){return row.materialRegionId==pronunciationId;}))
+        {showError("The requested pronunciation no longer belongs to this annotation variant.");return;}
+    }
+    if (!quick)
+    {
+        if (!assetManagerVisible) setAssetManagerVisible(true);
+        if (assetManager != nullptr) assetManager->editMaterial(source, pronunciationId,audioVariantId,
+            {}, MaterialAnnotationSession::EditScope::source, sourceRange);
+        return;
+    }
+    const auto key = "material-quick|" + source.getFullPathName()+(audioVariantId.isEmpty()?juce::String{}:"|"+audioVariantId);
+    if (noteOtoWindows.showExisting(key)) return;
+    juce::String error;
+    auto editor = OtoWaveformEditorComponent::forMaterial(source, manifest, strings,
+        [safe = juce::Component::SafePointer<MainComponent>(this), source](const auto& rows)
+        {
+            if (safe != nullptr) safe->materialPublicationCompleted(source, rows);
+            if (safe != nullptr && safe->assetManager) safe->assetManager->refreshMaterialAnnotations(source);
+        }, true, &error,audioVariantId);
+    if (!editor) { showError(error); return; }
+    editor->setPublicationValidator([safe = juce::Component::SafePointer<MainComponent>(this), source](const auto& rows, juce::String& problem)
+    {
+        if (safe == nullptr) { problem = "Project window was closed"; return false; }
+        return safe->preflightMaterialPublication(source, rows, problem);
+    });
+    if (pronunciationId.isNotEmpty()) editor->selectMaterialPronunciation(pronunciationId, false);
+    editor->bindMaterialViewPreferences(*preferences);
+    attachOtoPlayback(*editor);
+    juce::DialogWindow::LaunchOptions options;
+    options.dialogTitle = utf8("快速素材标注 — ") + source.getFileName();
+    options.dialogBackgroundColour = Palette::panel; options.escapeKeyTriggersCloseButton = true;
+    options.useNativeTitleBar = true; options.resizable = true; options.content.setOwned(editor.release());
+    if (auto* window = noteOtoWindows.show(options,key)) window->setResizeLimits(900,700,1800,1200);
+}
+
+void MainComponent::openSelectedMaterialEditor(bool quick, const juce::String& requestedNote)
+{
+    const auto wanted = requestedNote.isNotEmpty() ? requestedNote : selectedNoteId;
     const auto data = project.snapshot();
+    for (const auto& track : data.tracks) for (const auto& clip : track.clips)
+    {
+        const auto found = std::find_if(clip.notes.begin(),clip.notes.end(),[&](const auto& n){return n.id==wanted;});
+        if (found == clip.notes.end() && !(wanted.isEmpty() && clip.id==selectedClipId)) continue;
+        if (trackIsDiffSinger(track))
+        { showError(utf8("神经音源没有可标注的源录音；请在素材管理器选择音频。")); return; }
+        if (!trackUsesVoicebankSynthesis(track))
+        {
+            const ClipData* owner = &clip;
+            if (!clip.parts.empty())
+            {
+                owner = nullptr;
+                if (found != clip.notes.end())
+                    for (const auto& part : clip.parts) if (part.id==found->clipPartId) owner=&part;
+                if (!owner && clip.parts.size()==1) owner=&clip.parts.front();
+            }
+            if (!owner || !owner->sourceFile.existsAsFile())
+            { showError(utf8("请选择一个有明确源录音的音符。")); return; }
+            std::optional<juce::Range<double>> sourceRange;
+            if (found != clip.notes.end())
+            {
+                auto localNote = *found;
+                if (owner != &clip) localNote.startSeconds -= owner->startSeconds;
+                const auto timing = nativeNoteSourceTiming(localNote, *owner, nativeClipClock(*owner));
+                sourceRange = juce::Range<double>(timing.regionStartSeconds, timing.regionEndSeconds);
+            }
+            openMaterialEditor(owner->sourceFile, SampleSettings::annotationFor(owner->sourceFile), quick,
+                found != clip.notes.end() ? found->materialRegionId : juce::String(),
+                found != clip.notes.end() ? found->materialAudioId : juce::String(), sourceRange);
+            return;
+        }
+        if (found == clip.notes.end()) { showError(utf8("请选择要编辑素材的音符。")); return; }
+        const auto note = *found;
+        const auto root = track.voicebankDirectory;
+        const auto regions = utauModeUsesRegions(track.utauMode), classes = track.utauMode==UtauMode::mou;
+        // Resolve the actual recording in the existing bank service off the UI
+        // thread. Never substitute the alphabetically nearest alias.
+        std::thread([safe = juce::Component::SafePointer<MainComponent>(this), root, note, regions, classes, quick]
+        {
+            const auto sample = backend::UtauRenderer::resolveVoiceSample(root,note.label,note.midiNote,100,regions,classes);
+            juce::MessageManager::callAsync([safe,root,note,sample,quick]
+            {
+                if (safe == nullptr) return;
+                if (!sample.found) { safe->showError(utf8("没有找到此发音的源录音。")); return; }
+                safe->openMaterialEditor(sample.file, root.getChildFile("otto.ini"), quick, note.materialRegionId,note.materialAudioId);
+            });
+        }).detach();
+        return;
+    }
+    showError(utf8("请先选择需要标注的音频或音符。"));
+}
+
+void MainComponent::finishMaterialPronunciationInput(bool accepted,const juce::String& error)
+{
+    const auto session=std::exchange(materialInputSession,{});
+    if(session){session->active=false;if(session->aliasSuspended)materialAliasResumes.insert(session->aliasNoteId);}
+    if(materialPronunciationObserved){materialPronunciationObserved->removeComponentListener(this);materialPronunciationObserved=nullptr;}
+    if(auto* popup=materialPronunciationPopup.getComponent()){materialPronunciationPopup=nullptr;popup->setVisible(false);popup->dismiss();}
+    materialPronunciationPopup=nullptr;
+    const auto serial=materialInputSerial;juce::Component::SafePointer<MainComponent> safe(this);
+    const auto resume=[safe,serial,accepted]
+    {
+        if(!safe||safe->closingUI||safe->materialInputSerial!=serial||safe->materialInputSession)return;
+        auto ids=std::exchange(safe->materialAliasResumes,{});
+        for(const auto& id:ids)safe->pianoRoll.resumeInlineAliasInput(id,accepted);
+    };
+    if(error.isNotEmpty()&&!closingUI)
+        juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,strings.text("app.title"),error,{},this,
+            juce::ModalCallbackFunction::create([resume](int){resume();}));
+    else if(!closingUI)juce::MessageManager::callAsync(resume); // after callout's modal-dismiss message
+}
+void MainComponent::dismissMaterialPronunciationInput(){finishMaterialPronunciationInput(false);}
+void MainComponent::componentVisibilityChanged(juce::Component& component)
+{if(&component==materialPronunciationObserved&&!component.isVisible())finishMaterialPronunciationInput(false);}
+void MainComponent::componentBeingDeleted(juce::Component& component)
+{if(&component==materialPronunciationObserved){materialPronunciationObserved=nullptr;materialPronunciationPopup=nullptr;finishMaterialPronunciationInput(false);}}
+
+void MainComponent::showMaterialPronunciationInput(MaterialInputAction action,const juce::String& noteId,const juce::String& initialQuery)
+{
+    if(closingUI)return;dismissMaterialPronunciationInput();
+    auto session=std::make_shared<MaterialInputSession>();session->action=action;session->noteId=noteId;session->query=initialQuery;
+    session->serial=++materialInputSerial;session->atSeconds=audio.position();session->trackId=selectedTrackId;
+    session->aliasNoteId=action==MaterialInputAction::replace?noteId:selectedNoteId;
+    session->aliasSuspended=pianoRoll.suspendInlineAliasInput(session->aliasNoteId);materialInputSession=session;
+    const auto data=project.snapshot();
+    if(action==MaterialInputAction::replace)
+    {
+        session->bindingKey=materialBindingKey(data,noteId);
+        const TrackData* owner=nullptr;
+        for(const auto& t:data.tracks)for(const auto& c:t.clips)for(const auto& n:c.notes)if(n.id==noteId)owner=&t;
+        if(!owner||session->bindingKey.isEmpty()){finishMaterialPronunciationInput(false,"The requested note/source identity is missing or ambiguous.");return;}
+        if(!trackShowsAllNativeRegions(*owner)||owner->pitchAlgorithm==PitchAlgorithm::utau)
+        {finishMaterialPronunciationInput(false,"This renderer has no explicit physical-recording adapter. Its engine and voicebank were left unchanged.");return;}
+        session->trackId=owner->id;
+    }
+    std::vector<MaterialPronunciationCatalog::Root> roots;
+    for(const auto& t:data.tracks)if(t.voicebankDirectory.isDirectory())roots.push_back({t.voicebankDirectory,t.utauMode});
+    juce::StringArray registered;
+    if(assetManager)registered=assetManager->materialRoots();
+    else if(preferences)for(const auto& line:juce::StringArray::fromLines(preferences->getValue("assets.materialFolders")))
+    {const auto tab=line.indexOfChar('\t');const auto path=(tab>=0?line.substring(0,tab):line).trim();if(path.isNotEmpty())registered.addIfNotAlreadyThere(path);}
+    for(const auto& path:registered)
+    {
+        const juce::File root(path);
+        if(std::none_of(roots.begin(),roots.end(),[&](const auto& r){return r.folder==root;}))roots.push_back({root,UtauMode::classic});
+    }
+    presentMaterialPronunciationInput(session); // same owned picker immediately, index on worker
+    juce::Component::SafePointer<MainComponent> safe(this);
+    std::thread([safe,session,roots=std::move(roots)]
+    {
+        auto result=MaterialPronunciationCatalog::index(roots,[session]{return !session->active.load();});
+        juce::MessageManager::callAsync([safe,session,result=std::move(result)]()mutable
+        {
+            if(!safe||safe->closingUI||!session->active||safe->materialInputSession!=session)return;
+            if(result.cancelled)return;
+            if(!result.errors.isEmpty()){safe->finishMaterialPronunciationInput(false,result.errors.joinIntoString("\n"));return;}
+            if(result.entries.empty()){safe->finishMaterialPronunciationInput(false,"No usable pronunciation was found. Register a material folder or a supported voicebank first.");return;}
+            session->entries=std::move(result.entries);session->ready=true;safe->presentMaterialPronunciationInput(session);
+        });
+    }).detach();
+}
+
+void MainComponent::presentMaterialPronunciationInput(const std::shared_ptr<MaterialInputSession>& session)
+{
+    if(closingUI||materialInputSession!=session||!session->active)return;
+    if(auto* old=materialPronunciationPopup.getComponent())
+    {
+        if(auto* previous=session->picker.getComponent())session->query=previous->queryEditor().getText();
+        old->removeComponentListener(this);materialPronunciationObserved=nullptr;materialPronunciationPopup=nullptr;old->setVisible(false);old->dismiss();
+    }
+    std::vector<MaterialPronunciationCandidate> candidates;
+    for(const auto& e:session->entries)candidates.push_back({e.audio,e.manifest,e.audioId,e.regionId,e.alias,e.row.regionStartSeconds,e.row.regionEndSeconds,e.row.pronunciationKind});
+    auto box=std::make_shared<juce::Component::SafePointer<juce::CallOutBox>>();juce::Component::SafePointer<MainComponent> safe(this);
+    auto picker=std::make_unique<PronunciationCandidateBox>(strings,std::move(candidates),
+        [safe,session,box](const auto& candidate)
+        {if(safe&&!safe->closingUI&&session->active&&safe->materialInputSession==session&&box->getComponent()==safe->materialPronunciationPopup.getComponent())safe->chooseMaterialPronunciation(session,candidate);},
+        [safe,session,box]
+        {if(safe&&safe->materialInputSession==session&&box->getComponent()==safe->materialPronunciationPopup.getComponent())safe->finishMaterialPronunciationInput(false);});
+    picker->setQuery(session->query);
+    picker->setName(session->action==MaterialInputAction::replace?"Replace note material source":"Insert material pronunciation");
+    const auto anchor=pianoViewport.localAreaToGlobal(pianoViewport.getLocalBounds().removeFromTop(24));
+    juce::Component::SafePointer<PronunciationCandidateBox> pickerSafe(picker.get());session->picker=pickerSafe;
+    auto& callout=juce::CallOutBox::launchAsynchronously(std::move(picker),anchor,nullptr);*box=&callout;
+    materialPronunciationPopup=&callout;materialPronunciationObserved=&callout;callout.addComponentListener(this);
+    juce::MessageManager::callAsync([pickerSafe]{if(pickerSafe&&pickerSafe->isShowing())pickerSafe->queryEditor().grabKeyboardFocus();});
+}
+
+void MainComponent::chooseMaterialPronunciation(const std::shared_ptr<MaterialInputSession>& session,const MaterialPronunciationCandidate& candidate)
+{
+    if(!session->ready||session->resolving||materialInputSession!=session||!session->active)return;
+    const auto match=[&](const auto& e){return e.audio==candidate.audio&&e.audioId==candidate.audioId&&e.regionId==candidate.regionId&&e.alias==candidate.alias;};
+    if(std::count_if(session->entries.begin(),session->entries.end(),match)!=1){finishMaterialPronunciationInput(false,"The candidate source identity is ambiguous.");return;}
+    const auto selected=*std::find_if(session->entries.begin(),session->entries.end(),match);session->resolving=true;
+    juce::Component::SafePointer<MainComponent> safe(this);
+    std::thread([safe,session,selected]
+    {
+        MaterialPronunciationCatalog::Entry current;std::vector<SampleRegionSetting> rows;juce::String error;
+        const bool valid=MaterialPronunciationCatalog::resolve(selected,current,error,&rows);
+        juce::MessageManager::callAsync([safe,session,current=std::move(current),rows=std::move(rows),error,valid]()mutable
+        {
+            if(!safe||safe->closingUI||!session->active||safe->materialInputSession!=session)return;
+            if(!valid){safe->finishMaterialPronunciationInput(false,error);return;}
+            juce::String failure;
+            if(session->action==MaterialInputAction::insert)
+            {
+                const auto clip=safe->project.addMaterialPronunciations(current.audio,rows,{current.regionId},session->atSeconds,session->trackId,failure,current.alias);
+                if(clip.isEmpty()){safe->finishMaterialPronunciationInput(false,failure);return;}
+                safe->scheduleAnalysis(current.audio,clip);safe->focusClip(clip);safe->finishMaterialPronunciationInput(true);return;
+            }
+            const auto data=safe->project.snapshot();
+            if(materialBindingKey(data,session->noteId)!=session->bindingKey)
+            {safe->finishMaterialPronunciationInput(false,"The requested note source changed while choosing. Reopen the picker for that note.");return;}
+            for(const auto& t:data.tracks)for(const auto& parent:t.clips)for(const auto& n:parent.notes)if(n.id==session->noteId)
+            {
+                const ClipData* owner=&parent;for(const auto& p:parent.parts)if(p.id==n.clipPartId)owner=&p;
+                if(parent.notes.size()>1&&safe->originalSourceAnalysisPending(parent.id,owner->sourceFile))
+                {safe->finishMaterialPronunciationInput(false,"The original recording is still being measured. Wait for that analysis before replacing one source in this group.");return;}
+            }
+            const auto report=safe->project.replaceNoteMaterialSource(session->noteId,current.audio,rows,current.audioId,current.regionId,current.alias,failure);
+            if(report.rejected){safe->finishMaterialPronunciationInput(false,failure);return;}
+            if(report.pendingAnalysis)safe->scheduleAnalysis(current.audio,{},report.ticket,true);
+            safe->focusNote(session->noteId);safe->finishMaterialPronunciationInput(true);
+        });
+    }).detach();
+}
+
+void MainComponent::importMaterialPronunciations(const juce::File& file, const juce::File& manifest,
+    const juce::StringArray& regionIds, double startSeconds, const juce::String& trackId,
+    const juce::String& chosenAlias,const juce::String& audioVariantId)
+{
+    std::vector<SampleRegionSetting> rows;
+    juce::String error;
+    if (manifest == juce::File{} || !OttoMaterialMigration::readAudioAnnotations(file,
+            manifest.getParentDirectory(), UtauMode::classic, rows, error,audioVariantId))
+    { showError(error.isEmpty() ? "Material annotations cannot be read" : error); return; }
+    if(audioVariantId.isNotEmpty()&&std::any_of(rows.begin(),rows.end(),[&](const auto& row){return row.materialAudioId!=audioVariantId;}))
+    {showError("The requested annotation variant no longer matches this recording.");return;}
+    std::vector<juce::String> selected;
+    if (regionIds.isEmpty())
+    {
+        // A recording row is the default pronunciation, not a request to layer
+        // every OTO alternative. Keep the annotation/list order, even collapsed.
+        if (!rows.empty()) selected.push_back(rows.front().materialRegionId);
+    }
+    else for (const auto& id : regionIds) selected.push_back(id);
+    if (selected.empty()) { showError("This recording has no annotated pronunciations"); return; }
+    const auto clipId = project.addMaterialPronunciations(file, rows, selected, startSeconds, trackId, error, chosenAlias);
+    if (clipId.isEmpty()) { showError(error); return; }
+    scheduleAnalysis(file, clipId);
+    focusClip(clipId);
+}
+
+void MainComponent::importAssetAudio(const juce::File& file, const juce::File& root, int otoKind,
+                                    double startSeconds, const juce::String& trackId,
+                                    juce::Point<int> menuScreenPosition,const juce::String& audioVariantId)
+{
+    juce::ignoreUnused(otoKind, menuScreenPosition); // No GUI read/not-read policy remains.
+    std::vector<SampleRegionSetting> rows; juce::String error;
+    if (!OttoMaterialMigration::readAudioAnnotations(file,root,UtauMode::classic,rows,error,audioVariantId))
+    { showError(error); return; }
+    if (!rows.empty()||audioVariantId.isNotEmpty())
+    {
+        importMaterialPronunciations(file,root.getChildFile("otto.ini"),{},startSeconds,trackId,{},audioVariantId);
+        return;
+    }
+    const auto duration = audio.probeDuration(file);
+    if (!duration) { showError(strings.text("error.audio") + "\n" + file.getFullPathName()); return; }
+    juce::String targetTrack;
+    for (const auto& track : project.snapshot().tracks)
+        if (track.id == trackId && trackShowsAllNativeRegions(track)) targetTrack = track.id;
+    focusClip(addAnalysedAudioFile(file,*duration,startSeconds,targetTrack));
+}
+
+juce::String MainComponent::addAnalysedAudioFile(const juce::File& file, double durationSeconds,
+                                         double startSeconds,
+                                         const juce::String& targetTrackId,
+                                         const VoicebankOtoEntry* oto, UtauMode otoMode)
+{
+    const auto clipId = project.addAudioFile(file, durationSeconds, startSeconds, targetTrackId, oto, otoMode);
+    if (clipId.isEmpty()) return {};
+    setAssetManagerVisible(true);
+    project.setAssetManagerVisible(true);
+    const auto data = project.snapshot();
+    if (assetManager) assetManager->setProjectVoicebanks(data);
     for (const auto& track : data.tracks)
         if (track.accompaniment && std::any_of(track.clips.begin(), track.clips.end(),
             [&](const auto& clip) { return clip.id == clipId; }))
         {
             focusClip(clipId);
-            return;
+            return clipId;
         }
     scheduleAnalysis(file, clipId);
+    return clipId;
 }
 
+bool MainComponent::originalSourceAnalysisPending(const juce::String& clipId,const juce::File& file) const
+{
+    for(const auto& [key,task]:nativeAnalysisTasks)if(task->file==file)
+        for(const auto& recipient:task->recipients)if(recipient.clipId==clipId&&!recipient.ticket)return true;
+    return false;
+}
 void MainComponent::scheduleNativeTrimSourceAnalysis(const ProjectData& data)
 {
+    if(closingUI)return;
+    if(materialInputSession&&materialInputSession->action==MaterialInputAction::replace
+        &&materialBindingKey(data,materialInputSession->noteId)!=materialInputSession->bindingKey)
+        finishMaterialPronunciationInput(false);
+    std::map<juce::String,ProjectModel::MaterialSourceBindingTicket> pending;
+    std::set<juce::String> live;
+    for(const auto& ticket:project.pendingMaterialSourceAnalyses())
+    {
+        const auto key=ticket.sourceFile.getFullPathName()+":"+ticket.sourceFingerprint;live.insert(key);pending.emplace(key,ticket);
+    }
+    for(const auto& [key,ticket]:pending)
+    {
+        if(!ticket.sourceFile.existsAsFile()||juce::SHA256(ticket.sourceFile).toHexString()!=ticket.sourceFingerprint)continue;
+        juce::String cacheError;
+        if(project.completeMaterialSourceAnalysis(ticket,{},cacheError))continue;
+        scheduleAnalysis(ticket.sourceFile,{},ticket);
+    }
     std::map<juce::String,juce::File> files;
     for(const auto& track:data.tracks)if(trackShowsAllNativeRegions(track))
         for(const auto& clip:track.clips)for(const auto* source:clipSourceRegions(clip))
-            if(source->nativeSourcePitchPending&&source->sourceFile.existsAsFile())
+            if(source->nativeSourcePitchPending&&!source->materialSourceAnalysisPending&&source->sourceFile.existsAsFile())
                 files[source->sourceFile.getFullPathName()]=source->sourceFile;
     for(const auto& [path,file]:files)
     {
-        const auto key=path+":"+juce::String(file.getLastModificationTime().toMilliseconds());
-        if(!nativeTrimAnalysisAttempts.insert(key).second)continue;
-        ++pendingNativeAnalyses;juce::Component::SafePointer<MainComponent> safe(this);
-        const auto config=backend::AnalysisService::configFromProperties(preferences.get());
-        std::thread([safe,file,config]
-        {
-            juce::String error;auto result=backend::AnalysisService::analyse(file,config,error);
-            juce::MessageManager::callAsync([safe,file,result=std::move(result)]()mutable
-            {
-                if(safe==nullptr)return;
-                safe->project.setNativeTrimSourceAnalysis(file,result.notes);
-                safe->pendingNativeAnalyses=std::max(0,safe->pendingNativeAnalyses-1);
-            });
-        }).detach();
+        const auto key=path+":"+juce::SHA256(file).toHexString();live.insert(key);scheduleAnalysis(file,{});
     }
+    // Undo removes the pending episode. A later redo may retry or use the model
+    // hash cache; there is never a permanent path+mtime attempted blacklist.
+    std::erase_if(nativeAnalysisFailures,[&](const auto& p){return !live.count(p.first)&&!nativeAnalysisTasks.count(p.first);});
 }
 
-void MainComponent::scheduleAnalysis(const juce::File& file,
-                                     const juce::String& clipId)
+void MainComponent::scheduleAnalysis(const juce::File& file,const juce::String& clipId,
+    std::optional<ProjectModel::MaterialSourceBindingTicket> ticket,bool explicitRetry)
 {
-    const auto data = project.snapshot();
-    ClipData importedClip;
-    for (const auto& track : data.tracks)
-        for (const auto& clip : track.clips)
-            if (clip.id == clipId)
-            {
-                if (track.accompaniment) return;
-                importedClip = clip;
-            }
-    juce::Component::SafePointer<MainComponent> safe(this);
-    const auto analysisConfig = backend::AnalysisService::configFromProperties(preferences.get());
-    ++pendingNativeAnalyses;
-    nativeAnalysisProgress = 0.0;
-    nativeAnalysisName = file.getFileName();
-    statusLabel.setText(strings.text("status.analyzing") + "  " + file.getFileName(),
-                        juce::dontSendNotification);
-    std::thread([safe, file, clipId, importedClip, analysisConfig]
+    if(closingUI||!file.existsAsFile())return;
+    const auto fingerprint=juce::SHA256(file).toHexString();
+    if(ticket&&fingerprint!=ticket->sourceFingerprint)return;
+    const auto key=file.getFullPathName()+":"+fingerprint;
+    NativeAnalysisTask::Recipient recipient;recipient.clipId=clipId;recipient.ticket=ticket;
+    if(clipId.isNotEmpty())
     {
-        juce::String error;
-        auto result = backend::AnalysisService::analyse(file, analysisConfig, error,
-            [safe, name = file.getFileName()](double value)
+        bool found=false;const auto data=project.snapshot();
+        for(const auto& t:data.tracks)for(const auto& c:t.clips)if(c.id==clipId)
+        {if(t.accompaniment)return;recipient.importedClip=c;found=true;}
+        if(!found)return;
+    }
+    if(explicitRetry){nativeAnalysisFailures.erase(key);nativeAnalysisRetryScheduled.erase(key);}
+    if(const auto existing=nativeAnalysisTasks.find(key);existing!=nativeAnalysisTasks.end())
+    {
+        auto& targets=existing->second->recipients;
+        const bool duplicate=std::any_of(targets.begin(),targets.end(),[&](const auto& r)
+        {return r.clipId==clipId&&bool(r.ticket)==bool(ticket)&&(!ticket||r.ticket->sourcePartId==ticket->sourcePartId);});
+        if(!duplicate)targets.push_back(std::move(recipient));return;
+    }
+    if(nativeAnalysisRetryScheduled.count(key)||nativeAnalysisFailures[key]>=3)return;
+    auto task=std::make_shared<NativeAnalysisTask>();task->file=file;task->key=key;task->fingerprint=fingerprint;task->recipients.push_back(std::move(recipient));nativeAnalysisTasks[key]=task;
+    juce::Component::SafePointer<MainComponent> safe(this);const auto config=backend::AnalysisService::configFromProperties(preferences.get());
+    ++pendingNativeAnalyses;nativeAnalysisProgress=0;nativeAnalysisName=file.getFileName();
+    statusLabel.setText(strings.text("status.analyzing")+"  "+file.getFileName(),juce::dontSendNotification);
+    std::thread([safe,task,config]
+    {
+        juce::String error;backend::AnalysisResult result;
+        if(!task->file.existsAsFile()||juce::SHA256(task->file).toHexString()!=task->fingerprint)error="Source changed before acoustic analysis started";
+        else result=backend::AnalysisService::analyse(task->file,config,error,[safe,name=task->file.getFileName()](double value)
+        {
+            juce::MessageManager::callAsync([safe,name,value]{if(safe&&!safe->closingUI&&!safe->importInProgress){safe->nativeAnalysisName=name;safe->nativeAnalysisProgress=value;}});
+        });
+        if(!task->file.existsAsFile()||juce::SHA256(task->file).toHexString()!=task->fingerprint){error="Source changed during acoustic analysis";result.notes.clear();}
+        juce::MessageManager::callAsync([safe,task,result=std::move(result),error]()mutable
+        {
+            if(!safe||safe->closingUI)return;
+            const auto active=safe->nativeAnalysisTasks.find(task->key);
+            if(active==safe->nativeAnalysisTasks.end()||active->second!=task)return;
+            safe->nativeAnalysisTasks.erase(active);safe->pendingNativeAnalyses=std::max(0,safe->pendingNativeAnalyses-1);
+            bool applied=false;juce::String attachError;
+            const bool unchanged=task->file.existsAsFile()&&juce::SHA256(task->file).toHexString()==task->fingerprint;
+            safe->lastNativeAnalysisTrace="file="+task->file.getFullPathName()+"\nsha="+task->fingerprint
+                +"\nactive="+result.status.activeBackend+"\nrequested="+result.status.requestedBackend
+                +"\ngame="+result.status.gameModelDirectory.getFullPathName()+"\nfcpe="+result.status.fcpeModelPath.getFullPathName()
+                +"\ninference="+result.status.activeInference+"\nwarning="+result.warning+"\nerror="+error
+                +"\nnotes="+juce::String(static_cast<int>(result.notes.size()))+"\nsource_unchanged="+juce::String(unchanged?1:0);
+            if(!result.notes.empty()&&unchanged)
             {
-                juce::MessageManager::callAsync([safe, name, value]
+                safe->lastNativeAnalysisBackend=backend::AnalysisService::backendText(result.status);
+                for(const auto& r:task->recipients)
                 {
-                    if (safe == nullptr || safe->importInProgress) return;
-                    safe->nativeAnalysisName = name;
-                    safe->nativeAnalysisProgress = value;
-                });
-            });
-        juce::MessageManager::callAsync(
-            [safe, clipId, importedClip, result = std::move(result), error]() mutable
+                    if(r.ticket)applied|=safe->project.completeMaterialSourceAnalysis(*r.ticket,result.notes,attachError);
+                    else if(r.clipId.isNotEmpty())applied|=safe->project.setClipAudioAnalysis(r.clipId,result.notes,r.importedClip);
+                }
+                // Same full-file facts also serve current trims/new bindings,
+                // guarded by content hash. Never restore an old target snapshot.
+                applied|=safe->project.setNativeTrimSourceAnalysis(task->file,result.notes,task->fingerprint);
+                safe->nativeAnalysisFailures.erase(task->key);
+            }
+            else
             {
-                if (safe == nullptr) return;
-                const auto backendName = backend::AnalysisService::backendText(result.status);
-                const auto inserted = safe->project.setClipAudioAnalysis(
-                    clipId, std::move(result.notes), importedClip);
-                safe->pendingNativeAnalyses = std::max(0, safe->pendingNativeAnalyses - 1);
-                safe->nativeAnalysisProgress = inserted ? 1.0 : 0.0;
-                if (inserted)
-                    safe->statusLabel.setText(safe->strings.text("status.analysisComplete")
-                                                + " · " + backendName,
-                                              juce::dontSendNotification);
-                else if (error.isNotEmpty())
-                    safe->statusLabel.setText(safe->strings.text("status.analysisSkipped"),
-                                              juce::dontSendNotification);
-            });
+                const auto attempt=++safe->nativeAnalysisFailures[task->key];
+                if(attempt<3&&safe->nativeAnalysisRetryScheduled.insert(task->key).second)
+                    juce::Timer::callAfterDelay(2000*attempt,[safe,key=task->key]
+                    {if(safe&&!safe->closingUI){safe->nativeAnalysisRetryScheduled.erase(key);safe->scheduleNativeTrimSourceAnalysis(safe->project.snapshot());}});
+            }
+            if(applied){safe->nativeAnalysisProgress=1;safe->statusLabel.setText(safe->strings.text("status.analysisComplete")+utf8(" · ")+backend::AnalysisService::backendText(result.status),juce::dontSendNotification);}
+            else if(error.isNotEmpty()||attachError.isNotEmpty())safe->statusLabel.setText(safe->strings.text("status.analysisSkipped"),juce::dontSendNotification);
+        });
     }).detach();
 }
 
@@ -5733,26 +6416,64 @@ void MainComponent::exportUst()
 
 void MainComponent::exportMidi()
 {
-    chooser = std::make_unique<juce::FileChooser>(strings.text("file.exportMidi"),
-        exportStartFile(lastExportDirectory, project.snapshot().name), "*.mid");
-    chooser->launchAsync(juce::FileBrowserComponent::saveMode
-                             | juce::FileBrowserComponent::warnAboutOverwriting,
-        [this](const juce::FileChooser& selected)
+    // Freeze the score and selected identity before either asynchronous dialog.
+    // Changing documents while choosing a filename cannot export another song.
+    const auto data = std::make_shared<const ProjectData>(project.snapshot());
+    juce::String currentTrack, currentName;
+    for (const auto& track : data->tracks)
+        if (track.id == selectedTrackId) { currentTrack = track.id; currentName = track.name; break; }
+    const auto text = [this](const char*, const char* en) { return strings.text(en); };
+    auto* dialog = new juce::AlertWindow(strings.text("file.exportMidi"),
+        currentTrack.isEmpty() ? text("未选择轨道，默认导出整个工程。", "No current track; export defaults to the whole project.")
+                               : currentName,
+        juce::MessageBoxIconType::NoIcon);
+    auto dialogLook = std::make_shared<HachiLookAndFeel>();
+    dialog->setLookAndFeel(dialogLook.get());
+    dialog->addComboBox("scope", { text("当前轨道", "Current track"), text("整个工程", "Whole project") },
+                        text("导出范围", "Export scope"));
+    auto* scope = dialog->getComboBoxComponent("scope");
+    scope->setItemEnabled(1, currentTrack.isNotEmpty());
+    scope->setSelectedId(currentTrack.isEmpty() ? 2 : 1, juce::dontSendNotification);
+    // AlertWindow does not own custom components. The modal callback holds this
+    // checkbox until the dialog has been deleted, including cancellation.
+    auto includeMuted = std::make_shared<juce::ToggleButton>(text("包含静音轨道和片段", "Include muted tracks and clips"));
+    includeMuted->setName({}); // AlertWindow otherwise repeats the checkbox text as an extra label.
+    includeMuted->setSize(330, 25);
+    dialog->addCustomComponent(includeMuted.get());
+    dialog->addButton(text("选择保存位置", "Choose save location"), 1);
+    dialog->addButton(strings.text("dialog.cancel"), 0, juce::KeyPress(juce::KeyPress::escapeKey));
+    juce::Component::SafePointer<MainComponent> safe(this);
+    dialog->enterModalState(true, juce::ModalCallbackFunction::create(
+        [safe, dialog, dialogLook, includeMuted, data, currentTrack, currentName](int result)
         {
-            auto file = selected.getResult();
-            if (file == juce::File{}) return;
-            if (!file.hasFileExtension("mid;midi")) file = file.withFileExtension("mid");
-            rememberExportDirectory(file.getParentDirectory());
-            juce::String error;
-            if (!ProjectModel::writeMidiFile(project.snapshot(), file, error))
-            {
-                showError(strings.text("error.exportMidi") + "\n" + error);
-                return;
-            }
-            statusLabel.setText(strings.text("status.midiExported") + "  "
-                                    + file.getFileName(),
-                                juce::dontSendNotification);
-        });
+            const bool currentOnly = dialog->getComboBoxComponent("scope")->getSelectedId() == 1;
+            const bool muted = includeMuted->getToggleState();
+            delete dialog;
+            if (result != 1 || safe == nullptr) return;
+            const auto trackId = currentOnly ? currentTrack : juce::String{};
+            if (currentOnly && trackId.isEmpty()) return;
+            const auto name = currentOnly && currentName.isNotEmpty() ? currentName : data->name;
+            safe->chooser = std::make_unique<juce::FileChooser>(safe->strings.text("file.exportMidi"),
+                exportStartFile(safe->lastExportDirectory, name), "*.mid");
+            safe->chooser->launchAsync(juce::FileBrowserComponent::saveMode
+                                          | juce::FileBrowserComponent::warnAboutOverwriting,
+                [safe, data, trackId, muted](const juce::FileChooser& selected)
+                {
+                    if (safe == nullptr) return;
+                    auto file = selected.getResult();
+                    if (file == juce::File{}) return;
+                    if (!file.hasFileExtension("mid;midi")) file = file.withFileExtension("mid");
+                    juce::String error;
+                    if (!ProjectModel::writeMidiFile(*data, file, error, trackId, muted))
+                    {
+                        safe->showError(safe->strings.text("error.exportMidi") + "\n" + error);
+                        return;
+                    }
+                    safe->rememberExportDirectory(file.getParentDirectory());
+                    safe->statusLabel.setText(safe->strings.text("status.midiExported") + "  " + file.getFileName(),
+                                              juce::dontSendNotification);
+                });
+        }), false);
 }
 
 void MainComponent::importMidi()
@@ -5772,7 +6493,7 @@ void MainComponent::importMidi()
 void MainComponent::importUst()
 {
     chooser = std::make_unique<juce::FileChooser>(strings.text("file.ust"),
-                                                  juce::File{}, "*.ust");
+                                                  juce::File{}, "*.ust;*.ustx");
     chooser->launchAsync(juce::FileBrowserComponent::openMode
                              | juce::FileBrowserComponent::canSelectFiles,
         [this](const juce::FileChooser& selected)
@@ -5788,26 +6509,31 @@ void MainComponent::loadUstFile(const juce::File& file)
     const bool choice=ustImportNeedsChoice(project.snapshot());
     auto* dialog = new juce::AlertWindow(strings.text("dialog.ustImportTitle"),
         choice?strings.text("dialog.ustImportMessage"):utf8("选择 UST 读取编码；乱码时可指定原文件编码后重新导入。"),juce::MessageBoxIconType::QuestionIcon);
-    dialog->addComboBox("encoding",{utf8("自动识别"),"UTF-8","Shift-JIS","GBK","Big5","GB18030"},utf8("文件编码"));
+    dialog->addComboBox("trackType",{"HachiShifter","UTAU","DiffSinger"},utf8("导入目标编辑界面"));
+    dialog->getComboBoxComponent("trackType")->setSelectedId(1,juce::dontSendNotification);
+    dialog->addComboBox("encoding",{utf8("自动识别"),"UTF-8","Shift-JIS","GBK","Big5","GB18030"},utf8("UST 编码（USTX 固定 UTF-8）"));
+    dialog->getComboBoxComponent("encoding")->setEnabled(!file.hasFileExtension("ustx"));
     dialog->addButton(choice?strings.text("dialog.ustReplace"):utf8("导入"),1);
     if(choice)dialog->addButton(strings.text("dialog.ustAddTrack"),2);
     dialog->addButton(strings.text("dialog.cancel"),0,juce::KeyPress(juce::KeyPress::escapeKey));
     juce::Component::SafePointer<MainComponent> safe(this);
     dialog->enterModalState(true,juce::ModalCallbackFunction::create([safe,dialog,file,choice](int result)
     {
-        const int pages[]{0,65001,932,936,950,54936};const int cp=pages[juce::jlimit(0,5,dialog->getComboBoxComponent("encoding")->getSelectedItemIndex())];
+        const int pages[]{0,65001,932,936,950,54936};const int cp=file.hasFileExtension("ustx")?0:pages[juce::jlimit(0,5,dialog->getComboBoxComponent("encoding")->getSelectedItemIndex())];
+        const TrackType destinations[]{TrackType::hachi,TrackType::utau,TrackType::diffSinger};
+        const auto destination=destinations[juce::jlimit(0,2,dialog->getComboBoxComponent("trackType")->getSelectedItemIndex())];
         if(safe!=nullptr&&result==1)
         {
-            const auto apply=[safe,file,cp]{if(safe!=nullptr)safe->importUstFile(file,ProjectModel::UstImportMode::replaceProject,cp);};
+            const auto apply=[safe,file,cp,destination]{if(safe!=nullptr)safe->importUstFile(file,ProjectModel::UstImportMode::replaceProject,cp,destination);};
             if(choice)safe->performWithUnsavedCheck(apply);else apply();
         }
-        else if(safe!=nullptr&&result==2)safe->importUstFile(file,ProjectModel::UstImportMode::addTrack,cp);
+        else if(safe!=nullptr&&result==2)safe->importUstFile(file,ProjectModel::UstImportMode::addTrack,cp,destination);
         delete dialog;
     }),false);
 }
 
 void MainComponent::importUstFile(const juce::File& file,
-                                  ProjectModel::UstImportMode mode, int encoding)
+                                  ProjectModel::UstImportMode mode, int encoding, TrackType destinationType)
 {
     const auto replacing = mode == ProjectModel::UstImportMode::replaceProject;
     // Everything the old project's audio refers to is about to go; stop before
@@ -5816,7 +6542,7 @@ void MainComponent::importUstFile(const juce::File& file,
     juce::String error;
     juce::StringArray warnings;
     juce::String importedTrack;
-    if (!project.addUstFile(file, error, warnings, mode, &importedTrack, encoding))
+    if (!project.addUstFile(file, error, warnings, mode, &importedTrack, encoding, destinationType))
     {
         showError(strings.text("error.ust") + "\n" + error);
         return;
@@ -5858,6 +6584,7 @@ void MainComponent::importUstFile(const juce::File& file,
 
 void MainComponent::loadMelodyneFile(const juce::File& file)
 {
+    cancelProjectMaterialRegistration();
     startupLog("Import: MPD started " + file.getFullPathName());
     importInProgress = true;
     progress = 0.01;
@@ -5960,6 +6687,7 @@ void MainComponent::presentMelodyneComposeSelection(backend::MelodyneImportResul
     auto importedStretch = stretchAlgorithmId == 2 ? StretchAlgorithm::variableMelHop
         : stretchAlgorithmId == 3 ? StretchAlgorithm::loop
         : stretchAlgorithmId == 4 ? StretchAlgorithm::soundTouch
+        : stretchAlgorithmId == 7 ? StretchAlgorithm::wcsNonLoop
         : stretchAlgorithmId == 6 ? StretchAlgorithm::hifiShifterMel
         : stretchAlgorithmId == 5 ? StretchAlgorithm::nsfShiftThenSplice
         : StretchAlgorithm::melodyneHybrid;
@@ -5970,12 +6698,16 @@ void MainComponent::presentMelodyneComposeSelection(backend::MelodyneImportResul
     if (importedPitch != PitchAlgorithm::nsfHifigan
         && (importedStretch == StretchAlgorithm::variableMelHop
             || importedStretch == StretchAlgorithm::nsfShiftThenSplice
-            || importedStretch == StretchAlgorithm::hifiShifterMel))
+            || importedStretch == StretchAlgorithm::hifiShifterMel
+            || importedStretch == StretchAlgorithm::wcsNonLoop))
         importedStretch = StretchAlgorithm::melodyneHybrid;
     for (auto& track : imported.project.tracks)
     {
         track.pitchAlgorithm = importedPitch;
+        track.nativeNsfAudio = importedPitch == PitchAlgorithm::nsfHifigan;
+        track.trackType = TrackType::hachi;
         track.stretchAlgorithm = importedStretch;
+        track.renderOrder = RenderOrder::stretchSpliceThenPitch;
     }
 
     const auto storedComposeMode = preferences != nullptr
@@ -6046,101 +6778,6 @@ void MainComponent::presentMelodyneComposeSelection(backend::MelodyneImportResul
         }), false);
 }
 
-void MainComponent::offerMaterialFolderForImport(const ProjectData& imported)
-{
-    if (preferences == nullptr) return;
-    // The unique folders that hold the imported recordings.
-    juce::StringArray folders;
-    for (const auto& track : imported.tracks)
-        for (const auto& clip : track.clips)
-            if (clip.sourceFile.existsAsFile())
-                folders.addIfNotAlreadyThere(
-                    clip.sourceFile.getParentDirectory().getFullPathName());
-    if (folders.isEmpty()) return;
-    // Skip folders that are already registered.
-    const auto registered = juce::StringArray::fromLines(
-        preferences->getValue("assets.materialFolders"));
-    juce::StringArray fresh;
-    for (const auto& folder : folders)
-    {
-        auto known = false;
-        for (const auto& line : registered)
-            known = known || line.upToFirstOccurrenceOf("\t", false, false) == folder;
-        if (!known) fresh.add(folder);
-    }
-    if (fresh.isEmpty()) return;
-
-    // The unique source audio files, to copy when the user asks for it.
-    juce::StringArray sourceFiles;
-    for (const auto& track : imported.tracks)
-        for (const auto& clip : track.clips)
-            if (clip.sourceFile.existsAsFile())
-                sourceFiles.addIfNotAlreadyThere(clip.sourceFile.getFullPathName());
-
-    // Register once registration is decided, in place or into copiedFolder.
-    juce::Component::SafePointer<MainComponent> safe(this);
-    const auto registerFolders = [safe](const juce::StringArray& toRegister)
-    {
-        if (safe == nullptr || safe->preferences == nullptr || toRegister.isEmpty())
-            return;
-        auto lines = juce::StringArray::fromLines(
-            safe->preferences->getValue("assets.materialFolders"));
-        lines.removeEmptyStrings();
-        for (const auto& folder : toRegister)
-            lines.addIfNotAlreadyThere(folder + "\t" + juce::File(folder).getFileName());
-        safe->preferences->setValue("assets.materialFolders", lines.joinIntoString("\n"));
-        safe->preferences->saveIfNeeded();
-        safe->statusLabel.setText(safe->strings.text("asset.melodyneFolderDone")
-            .replace("{count}", juce::String(toRegister.size())),
-            juce::dontSendNotification);
-        if (safe->assetManager != nullptr) safe->showAssetManager();
-    };
-
-    auto* dialog = new juce::AlertWindow(strings.text("asset.melodyneFolderTitle"),
-        strings.text("asset.melodyneFolderPrompt").replace("{count}",
-            juce::String(fresh.size())),
-        juce::MessageBoxIconType::QuestionIcon, this);
-    // Default is to register; registering can optionally copy the media into a
-    // chosen folder (e.g. beside the project) so the material is self-contained.
-    dialog->addButton(strings.text("asset.melodyneRegisterInPlace"), 1,
-                      juce::KeyPress(juce::KeyPress::returnKey));
-    dialog->addButton(strings.text("asset.melodyneRegisterCopy"), 2);
-    dialog->addButton(strings.text("asset.melodyneNoRegister"), 0,
-                      juce::KeyPress(juce::KeyPress::escapeKey));
-    dialog->enterModalState(true, juce::ModalCallbackFunction::create(
-        [safe, fresh, sourceFiles, registerFolders, dialog](int result)
-        {
-            std::unique_ptr<juce::AlertWindow> owned(dialog);
-            if (safe == nullptr || result == 0) return;
-            if (result == 1) { registerFolders(fresh); return; }
-            // result == 2: choose a destination, copy the media in, register it.
-            safe->chooser = std::make_unique<juce::FileChooser>(
-                safe->strings.text("asset.melodyneRegisterCopy"), juce::File{});
-            safe->chooser->launchAsync(juce::FileBrowserComponent::openMode
-                    | juce::FileBrowserComponent::canSelectDirectories,
-                [safe, sourceFiles, registerFolders](const juce::FileChooser& chosen)
-                {
-                    const auto base = chosen.getResult();
-                    if (safe == nullptr || !base.isDirectory()) return;
-                    const auto dest = base.getChildFile("melodyne-materials");
-                    dest.createDirectory();
-                    for (const auto& path : sourceFiles)
-                    {
-                        const juce::File src(path);
-                        if (!src.existsAsFile()) continue;
-                        const auto target = dest.getChildFile(src.getFileName());
-                        if (src.getFullPathName() != target.getFullPathName())
-                            src.copyFileTo(target);
-                        // Carry any native sidecar alongside the copied audio.
-                        const auto sidecar = SampleSettings::sidecarFor(src);
-                        if (sidecar.existsAsFile())
-                            sidecar.copyFileTo(SampleSettings::sidecarFor(target));
-                    }
-                    registerFolders({ dest.getFullPathName() });
-                });
-        }), false);
-}
-
 void MainComponent::showError(const juce::String& message)
 {
     startupLog("UI warning: " + message);
@@ -6148,3 +6785,6 @@ void MainComponent::showError(const juce::String& message)
                                             strings.text("app.title"), message, {}, this);
 }
 }
+
+#include "tests/EngineViewCapabilitiesSmoke.h"
+#include "tests/ClipLengthSmoke.h"

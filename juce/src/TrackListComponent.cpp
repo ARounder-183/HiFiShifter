@@ -24,6 +24,8 @@ juce::String algorithmLabel(const TrackData& track, const juce::String& outputNa
         ? juce::String("variable-mel-hop")
         : track.stretchAlgorithm == StretchAlgorithm::loop ? juce::String("loop")
         : track.stretchAlgorithm == StretchAlgorithm::soundTouch ? juce::String("soundtouch")
+        : track.stretchAlgorithm == StretchAlgorithm::wcsNonLoop
+            ? juce::String("wcsndm-nonloop")
         : track.stretchAlgorithm == StretchAlgorithm::hifiShifterMel
             ? juce::String("hifishifter-mel")
         : track.stretchAlgorithm == StretchAlgorithm::nsfShiftThenSplice
@@ -109,6 +111,7 @@ void TrackListComponent::setRowHeight(float value)
 
 void TrackListComponent::changeListenerCallback(juce::ChangeBroadcaster*)
 {
+    cancelReorder();
     snapshot = model.snapshot();
     const auto selectedStillExists = std::any_of(snapshot.tracks.begin(), snapshot.tracks.end(),
         [this](const auto& track) { return track.id == selectedTrack; });
@@ -205,7 +208,8 @@ void TrackListComponent::paint(juce::Graphics& g)
         return;
     }
 
-    static const std::array<juce::Colour, 6> colours {
+    const auto light = Palette::background.getPerceivedBrightness() > 0.5f;
+    const std::array<juce::Colour, 6> colours {
         Palette::accent, Palette::accentLight, Palette::noteFill,
         juce::Colour(0xff9b8bdd), juce::Colour(0xffdedcff), juce::Colour(0xffffd94f)
     };
@@ -214,12 +218,15 @@ void TrackListComponent::paint(juce::Graphics& g)
         const auto& track = snapshot.tracks[index];
         auto row = juce::Rectangle<int>(0, rulerHeight + static_cast<int>(index) * rowHeight,
                                         getWidth(), rowHeight);
-        g.setColour(index % 2 == 0 ? Palette::panel : Palette::panelRaised.darker(0.1f));
+        auto rowSurface = index % 2 == 0 ? Palette::panel : Palette::panelRaised.darker(0.1f);
+        g.setColour(rowSurface);
         g.fillRect(row);
         if (highlightedTracks.empty() ? track.id == selectedTrack
             : std::find(highlightedTracks.begin(), highlightedTracks.end(), track.id) != highlightedTracks.end())
         {
-            g.setColour(Palette::accent.withAlpha(0.14f));
+            const auto selectedOverlay = (light ? Palette::selection : Palette::accent).withAlpha(0.14f);
+            rowSurface = rowSurface.overlaidWith(selectedOverlay);
+            g.setColour(selectedOverlay);
             g.fillRect(row);
             g.setColour(Palette::accent);
             g.fillRect(row.getX(), row.getY(), 3, row.getHeight());
@@ -228,10 +235,14 @@ void TrackListComponent::paint(juce::Graphics& g)
         g.drawLine(0.0f, static_cast<float>(row.getBottom() - 1),
                    static_cast<float>(getWidth()), static_cast<float>(row.getBottom() - 1));
 
-        const auto colour = colours[index % colours.size()];
+        const auto colour = light
+            ? (Palette::contrastRatio(Palette::trackColour(index), rowSurface) >= 3.0
+                ? Palette::trackColour(index) : Palette::noteEdge)
+            : colours[index % colours.size()];
         g.setColour(colour);
         g.fillEllipse(9.0f, static_cast<float>(row.getY() + 12), 9.0f, 9.0f);
-        g.setColour(track.muted ? Palette::textMuted : Palette::text);
+        g.setColour(light ? Palette::contrastingText(rowSurface, track.muted)
+                          : track.muted ? Palette::textMuted : Palette::text);
         g.setFont(13.0f);
         const auto displayedName = track.name
             + (track.accompaniment ? "  [" + strings.text("track.accompaniment") + "]"
@@ -243,9 +254,12 @@ void TrackListComponent::paint(juce::Graphics& g)
         const auto drawToggle = [&](float x, const char* label, bool active, juce::Colour activeColour)
         {
             const juce::Rectangle<float> bounds(x, buttonY, 28.0f, 21.0f);
-            g.setColour(active ? activeColour : Palette::panelRaised);
+            const auto surface = active ? (light ? Palette::primaryButton : activeColour)
+                                        : light ? Palette::button : Palette::panelRaised;
+            g.setColour(surface);
             g.fillRoundedRectangle(bounds, 3.0f);
-            g.setColour(active ? activeColour.contrasting(0.85f) : Palette::textMuted);
+            g.setColour(light ? Palette::contrastingText(surface, !active)
+                              : active ? activeColour.contrasting(0.85f) : Palette::textMuted);
             g.setFont(11.0f);
             g.drawText(label, bounds.toNearestInt(), juce::Justification::centred);
         };
@@ -263,12 +277,12 @@ void TrackListComponent::paint(juce::Graphics& g)
         const auto normalized = juce::jlimit(0.0f, 1.0f, displayedVolume * 0.5f);
         g.setColour(colour);
         g.fillRoundedRectangle(slider.withWidth(slider.getWidth() * normalized), 4.0f);
-        g.setColour(Palette::accentLight);
+        g.setColour(light ? Palette::noteEdge : Palette::accentLight);
         g.fillEllipse(slider.getX() + slider.getWidth() * normalized - 4.0f,
                       slider.getCentreY() - 4.0f, 8.0f, 8.0f);
-        const auto db = displayedVolume <= 0.0001f ? juce::String("-inf")
+        const auto db = displayedVolume <= 0.0f ? juce::String("-inf")
             : juce::String(20.0f * std::log10(displayedVolume), 1);
-        g.setColour(Palette::textMuted);
+        g.setColour(light ? Palette::contrastingText(rowSurface, true) : Palette::textMuted);
         g.setFont(10.0f);
         const auto showingUtauEditors = track.id == selectedTrack
             && !track.accompaniment && track.pitchAlgorithm == PitchAlgorithm::utau && rowHeight >= 80;
@@ -291,9 +305,9 @@ void TrackListComponent::paint(juce::Graphics& g)
         const auto panX = panRail.getX() + (displayedPan + 1.0f) * 0.5f * panRail.getWidth();
         g.setColour(colour.brighter(0.4f));
         g.fillEllipse(panX - 3.5f, panRail.getCentreY() - 3.5f, 7.0f, 7.0f);
-        g.setColour(Palette::textMuted);
+        g.setColour(light ? Palette::contrastingText(rowSurface, true) : Palette::textMuted);
         g.setFont(9.0f);
-        g.drawText("P " + juce::String(displayedPan, 2), 80, row.getY() + 77, 30, 16,
+        g.drawText("P " + juce::String(displayedPan, 2), 65, row.getY() + 77, 45, 16,
                    juce::Justification::centredRight);
 
         const auto peak = peakProvider ? std::max(0.0f, peakProvider(track.id)) : 0.0f;
@@ -317,6 +331,13 @@ void TrackListComponent::paint(juce::Graphics& g)
                     : peakDb >= -6.0f ? juce::Colour(0xffff9f2f)
                     : peakDb >= -18.0f ? Palette::noteFill : juce::Colour(0xff34b56f));
         g.fillRect(fill);
+    }
+    if (reordering && reorderGap >= 0)
+    {
+        const auto y = juce::jlimit(1, getHeight()-2, rulerHeight + reorderGap * rowHeight);
+        g.setColour(Palette::accent);
+        g.fillRect(0, y-1, getWidth(), 3);
+        g.fillEllipse(1.0f, static_cast<float>(y-4), 8.0f, 8.0f);
     }
 }
 
@@ -385,6 +406,9 @@ juce::String TrackListComponent::getTooltip()
 void TrackListComponent::mouseMove(const juce::MouseEvent& event)
 {
     pointer = event.getPosition();
+    const auto row = rowIndexAt(event.y,rulerHeight,rowHeight,static_cast<int>(snapshot.tracks.size()));
+    setMouseCursor(row >= 0 && event.y-rulerHeight-row*rowHeight < 32 && event.x < getWidth()-28
+        ? juce::MouseCursor::DraggingHandCursor : juce::MouseCursor::NormalCursor);
 }
 
 void TrackListComponent::mouseExit(const juce::MouseEvent&)
@@ -396,6 +420,7 @@ void TrackListComponent::mouseExit(const juce::MouseEvent&)
 
 void TrackListComponent::mouseDown(const juce::MouseEvent& event)
 {
+    cancelReorder();
     const auto index = rowIndexAt(event.y, rulerHeight, rowHeight,
                                  static_cast<int>(snapshot.tracks.size()));
     if (index < 0)
@@ -407,6 +432,12 @@ void TrackListComponent::mouseDown(const juce::MouseEvent& event)
         return;
     }
     const auto& track = snapshot.tracks[static_cast<std::size_t>(index)];
+    // Hit-test the readout that was visible before selecting this row (UTAU
+    // selection replaces this part of the row with its velocity/Flags fields).
+    const auto wasShowingUtauEditors = track.id == selectedTrack && !track.accompaniment
+        && track.pitchAlgorithm == PitchAlgorithm::utau && rowHeight >= 80;
+    const auto gainReadoutHit = !wasShowingUtauEditors
+        && juce::Rectangle<int>(170,rulerHeight+index*rowHeight+61,getWidth()-208,19).contains(event.getPosition());
     selectedTrack = track.id;
     if (onTrackSelected) onTrackSelected(selectedTrack);
     refreshUtauEditors();
@@ -418,6 +449,23 @@ void TrackListComponent::mouseDown(const juce::MouseEvent& event)
         return;
     }
     const auto localY = event.y - rulerHeight - index * rowHeight;
+    if (event.mods.isLeftButtonDown() && juce::Rectangle<int>(65,77,45,16).contains(event.x,localY))
+    {
+        if (onTrackPanRequested) onTrackPanRequested(track.id);
+        return;
+    }
+    if(event.mods.isLeftButtonDown() && gainReadoutHit)
+    {
+        if(onTrackGainRequested)onTrackGainRequested(track.id);
+        return;
+    }
+    if (event.mods.isLeftButtonDown() && localY < 32 && event.x < getWidth()-28)
+    {
+        reorderTrack = track.id;
+        setWantsKeyboardFocus(true);
+        if (isShowing()) grabKeyboardFocus();
+        return;
+    }
     switch (toggleAt(event.x, localY))
     {
         case TrackToggle::compose:
@@ -449,6 +497,15 @@ void TrackListComponent::mouseDown(const juce::MouseEvent& event)
 
 void TrackListComponent::mouseDrag(const juce::MouseEvent& event)
 {
+    if (reorderTrack.isNotEmpty())
+    {
+        if (!reordering && event.getDistanceFromDragStart() < 5) return;
+        reordering = true;
+        reorderScreenPoint = event.getScreenPosition();
+        updateReorderTarget();
+        startTimerHz(30);
+        return;
+    }
     const auto width = std::max(20, getWidth() - 210);
     const auto normalized = juce::jlimit(0.0f, 1.0f,
         static_cast<float>(event.x - 170) / static_cast<float>(width));
@@ -458,8 +515,20 @@ void TrackListComponent::mouseDrag(const juce::MouseEvent& event)
     repaint();
 }
 
-void TrackListComponent::mouseUp(const juce::MouseEvent&)
+void TrackListComponent::mouseUp(const juce::MouseEvent& event)
 {
+    if (reorderTrack.isNotEmpty())
+    {
+        reorderScreenPoint = event.getScreenPosition();
+        if (reordering) updateReorderTarget();
+        const auto source = reorderTrack;
+        const auto gap = reorderGap;
+        const auto before = gap >= 0 && gap < static_cast<int>(snapshot.tracks.size())
+            ? snapshot.tracks[static_cast<std::size_t>(gap)].id : juce::String();
+        const auto commit = reordering && gap >= 0;
+        cancelReorder();
+        if (commit) model.moveTrackBefore(source,before);
+    }
     if (volumeDragTrack.isNotEmpty())
         model.setTrackVolume(volumeDragTrack, volumeDragPreview);
     if (panDragTrack.isNotEmpty())
@@ -467,5 +536,38 @@ void TrackListComponent::mouseUp(const juce::MouseEvent&)
     volumeDragTrack.clear();
     panDragTrack.clear();
     volumeDragRow = -1;
+}
+
+void TrackListComponent::cancelReorder()
+{
+    stopTimer(); reorderTrack.clear(); reordering=false; reorderGap=-1; repaint();
+}
+
+void TrackListComponent::updateReorderTarget()
+{
+    const auto point=getLocalPoint(nullptr,reorderScreenPoint);
+    reorderGap=point.x < 0 || point.x >= getWidth() ? -1
+        : juce::jlimit(0,static_cast<int>(snapshot.tracks.size()),
+            static_cast<int>(std::floor(static_cast<double>(point.y-rulerHeight)/rowHeight+0.5)));
+    repaint();
+}
+
+void TrackListComponent::timerCallback()
+{
+    if (!reordering) { stopTimer(); return; }
+    if (auto* viewport=findParentComponentOfClass<juce::Viewport>())
+    {
+        const auto point=viewport->getLocalPoint(nullptr,reorderScreenPoint);
+        if (point.x >= 0 && point.x < viewport->getWidth())
+            viewport->autoScroll(point.x,point.y,24,12);
+    }
+    updateReorderTarget();
+}
+
+bool TrackListComponent::keyPressed(const juce::KeyPress& key)
+{
+    if (key == juce::KeyPress::escapeKey && reorderTrack.isNotEmpty())
+    { cancelReorder(); return true; }
+    return false;
 }
 }

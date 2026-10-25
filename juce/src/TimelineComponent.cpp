@@ -66,7 +66,7 @@ juce::Rectangle<float> gainControlBounds(juce::Rectangle<float> clip)
 
 juce::String gainValueLabel(float gain)
 {
-    if (gain <= 0.0001f) return juce::String::fromUTF8("-∞");
+    if (gain <= 0.0f) return juce::String::fromUTF8("-∞");
     const auto db = 20.0f * std::log10(gain);
     const auto rounded = std::round(db * 10.0f) / 10.0f;
     const auto whole = std::abs(rounded - std::round(rounded)) < 0.001f;
@@ -75,7 +75,7 @@ juce::String gainValueLabel(float gain)
 
 juce::String gainLabel(float gain)
 {
-    return (gain <= 0.0001f ? juce::String("-inf")
+    return (gain <= 0.0f ? juce::String("-inf")
                           : juce::String(20.0f * std::log10(gain), 1)) + " dB";
 }
 
@@ -286,6 +286,7 @@ void TimelineComponent::rebuild()
 void TimelineComponent::paint(juce::Graphics& g)
 {
     g.fillAll(Palette::base);
+    const auto light = Palette::background.getPerceivedBrightness() > 0.5f;
     clipHits.clear();
     g.setColour(Palette::background);
     g.fillRect(0, 0, getWidth(), rulerHeight);
@@ -325,6 +326,7 @@ void TimelineComponent::paint(juce::Graphics& g)
         g.setColour(juce::Colour(0xffffa94d));
         g.drawVerticalLine(static_cast<int>(x), 0.0f, static_cast<float>(getHeight()));
         g.setFont(9.5f);
+        if (light) g.setColour(Palette::contrastingText(Palette::background));
         g.drawText(juce::String(change.bpm, 2).trimCharactersAtEnd("0").trimCharactersAtEnd(".")
                 + " BPM", static_cast<int>(x) + 4, 3, 66, 16,
             juce::Justification::centredLeft, false);
@@ -407,10 +409,14 @@ void TimelineComponent::paint(juce::Graphics& g)
             clipHits.push_back({ clip.id, bounds, clip.startSeconds, clip.durationSeconds,
                                  clip.fadeInSeconds, clip.fadeOutSeconds, clip.muted,
                                  clip.startSeconds + clip.audioStartSeconds, contentDuration, clip.gain });
-            g.setColour(track.muted || clip.muted ? Palette::clipBackground.withAlpha(0.55f)
-                                                  : Palette::clipBackground);
+            const auto rowSurface = std::find(selectedTracks.begin(), selectedTracks.end(), track.id) != selectedTracks.end()
+                ? Palette::base.overlaidWith(Palette::accent.withAlpha(0.06f)) : Palette::base;
+            const auto clipInk = track.muted || clip.muted ? Palette::clipBackground.withAlpha(0.55f)
+                                                         : Palette::clipBackground;
+            const auto clipSurface = rowSurface.overlaidWith(clipInk);
+            g.setColour(clipInk);
             g.fillRect(bounds);
-            g.setColour(colour.withAlpha(0.82f));
+            g.setColour(light ? Palette::noteEdge : colour.withAlpha(0.82f));
             g.drawRect(bounds, 1.0f);
             if (isClipSelected(clip.id))
             {
@@ -426,7 +432,8 @@ void TimelineComponent::paint(juce::Graphics& g)
             for (const auto* part : sourceParts)
             if (const auto found = thumbnails.find(part->sourceFile.getFullPathName().toStdString()); found != thumbnails.end())
             {
-                g.setColour(colour.brighter(0.65f).withAlpha(
+                g.setColour(light ? Palette::heading.withAlpha(showNotes ? 0.32f : 0.85f)
+                    : colour.brighter(0.65f).withAlpha(
                     (track.muted || clip.muted || part->muted ? 0.25f : 0.78f)
                         * (showNotes ? 0.22f : 1.0f)));
                 // Keep the editor visually consistent for mono and stereo
@@ -490,7 +497,7 @@ void TimelineComponent::paint(juce::Graphics& g)
                             [&](const auto& part) { return part.id == note.clipPartId; });
                         const auto muted = track.muted || clip.muted
                             || (owner != clip.parts.end() && owner->muted);
-                        g.setColour(colour.brighter(0.9f).withAlpha(muted ? 0.34f : 0.96f));
+                        g.setColour(light ? Palette::noteEdge : colour.brighter(0.9f).withAlpha(muted ? 0.34f : 0.96f));
                         g.fillRect(noteBounds);
                         // A fine edge distinguishes consecutive notes at the same pitch.
                         g.setColour(Palette::clipBackground.withAlpha(0.72f));
@@ -517,7 +524,7 @@ void TimelineComponent::paint(juce::Graphics& g)
                 g.drawLine(fadeOutX, waveformTop,
                            timeToX(contentStart + contentDuration), bounds.getBottom(), 1.0f);
             }
-            g.setColour(colour.brighter(0.72f).withAlpha(
+            g.setColour(light ? Palette::noteEdge : colour.brighter(0.72f).withAlpha(
                 isClipSelected(clip.id) ? 0.95f : 0.52f));
             g.fillEllipse(fadeInX - 3.5f, waveformTop - 3.5f, 7.0f, 7.0f);
             g.fillEllipse(fadeOutX - 3.5f, waveformTop - 3.5f, 7.0f, 7.0f);
@@ -527,11 +534,11 @@ void TimelineComponent::paint(juce::Graphics& g)
             g.fillRect(bounds.toNearestInt().withHeight(17));
             g.setColour(clip.muted ? Palette::noteFill : colour.brighter(0.5f));
             g.fillRoundedRectangle(bounds.getX() + 2.0f, bounds.getY() + 2.0f, 14.0f, 13.0f, 2.0f);
-            g.setColour(Palette::panel);
+            g.setColour(light ? Palette::contrastingText(clip.muted ? Palette::noteFill : colour.brighter(0.5f)) : Palette::panel);
             g.setFont(9.0f);
             g.drawText("M", static_cast<int>(bounds.getX() + 2.0f), static_cast<int>(bounds.getY() + 1.0f),
                        14, 14, juce::Justification::centred);
-            g.setColour(Palette::text);
+            g.setColour(light ? Palette::contrastingText(clipSurface.overlaidWith(Palette::panel.withAlpha(0.82f))) : Palette::text);
             g.setFont(10.0f);
             const auto displayGain = clip.id == draggedClip && dragMode == DragMode::gain
                 ? draggedClipPreviewGain : clip.gain;
@@ -541,7 +548,7 @@ void TimelineComponent::paint(juce::Graphics& g)
                        bounds.toNearestInt().withTrimmedLeft(bounds.getHeight() < 34.0f && !gainControl.bounds.isEmpty()
                            ? static_cast<int>(std::ceil(gainControl.bounds.getRight()-bounds.getX()+3.0f)) : 19).withHeight(17),
                        juce::Justification::centredLeft, true);
-            g.setColour(colour.brighter(0.65f));
+            g.setColour(light ? Palette::noteEdge : colour.brighter(0.65f));
             juce::Path leftHandle;
             leftHandle.addTriangle(bounds.getX(), bounds.getY(), bounds.getX() + 7.0f, bounds.getY(),
                                    bounds.getX(), bounds.getY() + 7.0f);
@@ -557,7 +564,7 @@ void TimelineComponent::paint(juce::Graphics& g)
             {
                 const juce::Graphics::ScopedSaveState save(g);
                 g.reduceClipRegion(bounds.toNearestInt());
-                const auto grey = Palette::text.withAlpha(0.56f);
+                const auto grey = light ? Palette::contrastingText(clipSurface, true) : Palette::text.withAlpha(0.56f);
                 g.setColour(grey);
                 if (!gainControl.icon.isEmpty())
                 {
@@ -594,7 +601,7 @@ void TimelineComponent::paint(juce::Graphics& g)
                     g.setColour(Palette::clipBackground.withAlpha(0.88f));
                     g.fillRect(gainControl.value.withWidth(std::min(50.0f,valueWidth+22.0f)));
                     g.setFont(font);
-                    g.setColour(juce::Colour(0xff3a9dff));
+                    g.setColour(light ? Palette::contrastingText(clipSurface.overlaidWith(Palette::clipBackground.withAlpha(0.88f))) : juce::Colour(0xff3a9dff));
                     g.drawText(value, valueBounds, juce::Justification::centredLeft, false);
                     g.setColour(grey);
                     g.drawText("dB", valueBounds.withX(valueBounds.getRight()+4.0f).withWidth(18.0f),
@@ -965,8 +972,8 @@ void TimelineComponent::mouseDown(const juce::MouseEvent& event)
                 draggedClip.clear();
                 dragMode = DragMode::none;
                 setMouseCursor(juce::MouseCursor::NormalCursor);
-                if (onClipMenu) onClipMenu(selectedClip,
-                    static_cast<double>(event.position.x) / pixelsPerSecond, event.getScreenPosition());
+                // Capture the visible red playhead for both menu eligibility and the split action.
+                if (onClipMenu) onClipMenu(selectedClip, playheadSeconds, event.getScreenPosition());
                 repaint();
                 return;
             }
@@ -1007,6 +1014,7 @@ void TimelineComponent::mouseDown(const juce::MouseEvent& event)
             const auto grip = std::min(14.0f, it->bounds.getWidth() * 0.25f);
             if (onGainKnob)
             {
+                gainValueClick = gainControlLayout(it->bounds).value.contains(event.position);
                 dragMode = DragMode::gain;
                 draggedClipPreviewGain = it->gain;
                 draggedClipGainDb = juce::Decibels::gainToDecibels(it->gain, -60.0f);
@@ -1055,6 +1063,7 @@ void TimelineComponent::mouseDown(const juce::MouseEvent& event)
 
 void TimelineComponent::mouseDrag(const juce::MouseEvent& event)
 {
+    if(event.getDistanceFromDragStart()>=5)gainValueClick=false;
     if (draggedEnvelopeClip.isNotEmpty())
     {
         auto& point = envelopePreview[static_cast<std::size_t>(draggedEnvelopePoint)];
@@ -1134,8 +1143,17 @@ void TimelineComponent::mouseDrag(const juce::MouseEvent& event)
     repaint();
 }
 
-void TimelineComponent::mouseUp(const juce::MouseEvent&)
+void TimelineComponent::mouseUp(const juce::MouseEvent& event)
 {
+    if(dragMode==DragMode::gain && gainValueClick && event.getDistanceFromDragStart()<5)
+    {
+        const auto clipId=draggedClip;
+        draggedClip.clear();dragMode=DragMode::none;gainValueClick=false;
+        setMouseCursor(juce::MouseCursor::NormalCursor);repaint();
+        if(onClipGainRequested)onClipGainRequested(clipId);
+        return;
+    }
+    gainValueClick=false;
     if (draggedEnvelopeClip.isNotEmpty())
     {
         selectedEnvelopeTime = envelopePreview[static_cast<std::size_t>(draggedEnvelopePoint)].timeSeconds;

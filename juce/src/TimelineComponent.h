@@ -68,6 +68,7 @@ public:
     std::function<void(const std::vector<juce::String>&)> onTracksSelected;
     std::function<void()> onDeleteSelected;
     std::function<void(const juce::String&)> onClipGainRequested;
+    // Clip id, red playhead seconds captured at menu opening, popup screen position.
     std::function<void(const juce::String&, double, juce::Point<int>)> onClipMenu;
 
 private:
@@ -146,6 +147,7 @@ private:
     double draggedAudioStart = 0.0, draggedAudioDuration = 0.0;
     float draggedClipPreviewGain = 1.0f, draggedClipGainDb = 0.0f, gainDragY = 0.0f;
     juce::String gainKnobHint;
+    bool gainValueClick = false;
     juce::String envelopeHint, selectedEnvelopeClip, draggedEnvelopeClip;
     juce::StringArray envelopeMenuTexts;
     double selectedEnvelopeTime = -1.0, draggedEnvelopeStart = 0.0, draggedEnvelopeDuration = 0.0;

@@ -135,7 +135,7 @@ inline bool MainComponent::diagnosticPitchRestore(const juce::File& folder)
     roll.setDiffSingerPitchRestoreMode(true);model.replace(noReference);refresh();
     check("missing_reference_disabled_and_rejected",!roll.diffSingerPitchRestoreAvailable()&&!roll.diffSingerPitchRestoreMode()
         &&!model.restoreDiffSingerPitchPoint(model.revisionNumber(),"n0",edited,3));
-    auto classic=data;classic.tracks[0].voicebankDirectory={};model.replace(classic);refresh();roll.setDiffSingerPitchRestoreMode(true);
+    auto classic=data;classic.tracks[0].voicebankDirectory=juce::File{};model.replace(classic);refresh();roll.setDiffSingerPitchRestoreMode(true);
     check("ordinary_UTAU_disabled_and_rejected",!roll.diffSingerPitchRestoreAvailable()&&!roll.diffSingerPitchRestoreMode()
         &&!model.restoreDiffSingerPitchPoint(model.revisionNumber(),"n0",edited,3));
 

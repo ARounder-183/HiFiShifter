@@ -105,7 +105,7 @@ inline bool runDiffSingerParametersSmoke(const juce::File& output, const juce::F
     check("resize_keeps_parameter_time",std::abs(flagCurvePointsFor(current(),"DS:REF:BREC").back().timeSeconds-2)<.001);
     model.applyDiffSingerParameters(model.revisionNumber(),{{"n",{}}});
     check("release_frozen_prediction",sampleDiffSingerFlagCurves(current()).empty());
-    ProjectModel defaults;auto plain=data;plain.tracks[0].voicebankDirectory={};defaults.replace(plain);
+    ProjectModel defaults;auto plain=data;plain.tracks[0].voicebankDirectory=juce::File{};defaults.replace(plain);
     defaults.setTrackVoicebankDirectory("ds",bank);
     check("enter_DS_enables_existing_notes",defaults.snapshot().tracks[0].clips[0].notes[0].utauFlagCurveEnabled);
     const auto added=defaults.addNote("clip",2.6,.3,60);

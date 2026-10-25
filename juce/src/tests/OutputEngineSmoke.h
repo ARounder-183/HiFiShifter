@@ -236,7 +236,7 @@ inline bool MainComponent::diagnosticOutputEngine(const juce::File& folder,
     engine.syncProject(native); wait();
     check("explicit_resampler_overrides_global_native_backend_and_uses_selected_wavtool", engine.hasCurrentRenderedAudio()
         && engine.activeRenderBackends().contains("utau-resampler+external-wavtool") && engine.activeRenderWarnings().isEmpty());
-    request.resamplerExecutable = {}; request.requireExternalResampler = false;
+    request.resamplerExecutable = juce::File{}; request.requireExternalResampler = false;
     const auto internal = backend::UtauRenderer::render(request);
     request.wavtoolExecutable = wavtool;
     const auto assembled = backend::UtauRenderer::render(request);

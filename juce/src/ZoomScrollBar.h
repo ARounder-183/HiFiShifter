@@ -4,6 +4,15 @@
 
 namespace hachi
 {
+// Shared editor wheel modifiers; panels and main viewports use the same mapping.
+enum class EditorWheelAction { scrollVertically, scrollHorizontally, zoomVertically, zoomHorizontally };
+inline EditorWheelAction editorWheelActionFor(const juce::ModifierKeys& modifiers)
+{
+    if(modifiers.isCommandDown())
+        return modifiers.isShiftDown()?EditorWheelAction::zoomHorizontally:EditorWheelAction::zoomVertically;
+    return modifiers.isShiftDown()?EditorWheelAction::scrollHorizontally:EditorWheelAction::scrollVertically;
+}
+
 // JUCE still owns normal scrolling. Only the two circular end grips resize the view.
 class ZoomScrollBar final : public juce::ScrollBar
 {

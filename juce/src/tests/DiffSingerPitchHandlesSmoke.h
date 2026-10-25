@@ -112,7 +112,7 @@ inline bool runDiffSingerPitchHandlesSmoke(const juce::File& folder)
     check("regeneration_keeps_sparse_handles",model.applyDiffSingerPitch(model.revisionNumber(),{{"n0",retake}})&&visible(n().pitchControlPoints)<=16
         &&exact(n().diffSingerPitchReference,retake)&&exact(n(1).pitchControlPoints,generated.tracks[0].clips[0].notes[1].pitchControlPoints,true));
     refresh();shot("compact-regenerated-pitch.png");
-    auto classic=raw;classic.tracks[0].voicebankDirectory={};model.replace(classic);refresh();
+    auto classic=raw;classic.tracks[0].voicebankDirectory=juce::File{};model.replace(classic);refresh();
     check("ordinary_UTAU_explicit_points_unchanged",roll.diagnosticOfferedPitchAnchors("n0").size()==prediction.size());
     auto shortCurve=prediction;for(auto& p:shortCurve)p.timeSeconds=(p.timeSeconds+.12)*.02;
     const auto shortResult=compactDiffSingerPitchHandles(shortCurve,shortCurve,.03);

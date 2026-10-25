@@ -75,7 +75,7 @@ juce::var flagCurveShape()
     });
 }
 
-// One region of a recording, as the .hjm.csv sidecar keeps them.
+// One region of a recording, as the otto.ini sidecar keeps them.
 juce::var regionRowShape()
 {
     return typedSchema({
@@ -262,6 +262,7 @@ juce::String stretchAlgorithmText(StretchAlgorithm value)
     if (value == StretchAlgorithm::soundTouch) return "soundtouch";
     if (value == StretchAlgorithm::nsfShiftThenSplice) return "nsf-shift-then-splice";
     if (value == StretchAlgorithm::hifiShifterMel) return "hifishifter-mel";
+    if (value == StretchAlgorithm::wcsNonLoop) return "wcsndm-nonloop";
     return "melodyne-hybrid";
 }
 
@@ -313,7 +314,16 @@ juce::var sampleRowsJson(const std::vector<SampleRegionSetting>& rows)
         set(value, "melodyne_attack_seconds", row.melodyneAttackSeconds);
         set(value, "melodyne_decay_elongation", row.melodyneDecayElongation);
         set(value, "hjm_version", row.hjmVersion);
-        set(value, "native_role", nativeSegmentRoleName(row.role));
+        set(value, "native_role", nativeSegmentRoleName(row.role)); // Legacy/internal zone role, not pronunciation identity.
+        set(value, "pronunciation_kind", pronunciationKindName(row.pronunciationKind));
+        set(value, "simplified_consonant", row.simplifiedConsonant);
+        set(value, "vowel_splits_explicit", row.vowelSplitsExplicit);
+        set(value, "material_audio_id", row.materialAudioId);
+        set(value, "material_region_id", row.materialRegionId);
+        set(value, "connected_next_region_id", row.connectedNextRegionId);
+        std::vector<juce::var> aliases;
+        for (const auto& alias : row.additionalAliases) aliases.emplace_back(alias);
+        set(value, "additional_aliases", array(std::move(aliases)));
         set(value, "native_provenance", row.provenance);
         set(value, "native_confidence", row.confidence);
         std::vector<juce::var> segmentValues;
@@ -366,6 +376,15 @@ std::vector<SampleRegionSetting> sampleRowsFromJson(const juce::var& source)
             row.melodyneDecayElongation = number(value, "melodyne_decay_elongation");
             row.hjmVersion = static_cast<int>(number(value, "hjm_version", 1.0));
             row.role = parseNativeSegmentRole(string(value, "native_role"));
+            row.pronunciationKind = parsePronunciationKind(string(value, "pronunciation_kind"));
+            if (!value.hasProperty("pronunciation_kind") && (row.role == NativeSegmentRole::breath || row.role == NativeSegmentRole::transition))
+                row.pronunciationKind = row.role == NativeSegmentRole::breath ? PronunciationKind::breath : PronunciationKind::transition;
+            row.simplifiedConsonant = static_cast<bool>(value.getProperty("simplified_consonant", false));
+            row.vowelSplitsExplicit = static_cast<bool>(value.getProperty("vowel_splits_explicit", false));
+            row.materialAudioId = string(value, "material_audio_id");
+            row.materialRegionId = string(value, "material_region_id");
+            row.connectedNextRegionId = string(value, "connected_next_region_id");
+            for (const auto& alias : strings(value, "additional_aliases")) row.additionalAliases.add(alias);
             row.provenance = string(value, "native_provenance");
             row.confidence = static_cast<float>(number(value, "native_confidence"));
             if (const auto* segments = value.getProperty("native_segments", {}).getArray())
@@ -473,9 +492,13 @@ juce::var McpServer::diagnosticTools()
                 { .name = "path", .type = "string",
                   .description = "The MIDI file to add as tracks", .required = true },
             }),
-            makeTool("export_midi", "Write the project out as a MIDI file with its tempo map and lyrics / 导出 MIDI", {
+            makeTool("export_midi", "Write all tracks or one track as MIDI, retaining conductor tempo/meter and lyrics / 导出 MIDI", {
                 { .name = "path", .type = "string",
                   .description = "Where to write the .mid", .required = true },
+                { .name = "track_id", .type = "string",
+                  .description = "Optional track ID; empty exports the whole project. Unknown IDs fail without changing the destination." },
+                { .name = "include_muted", .type = "boolean",
+                  .description = "Include muted tracks and clips (default false). Reserved rests and native unpitched regions are always excluded." },
             }),
             makeTool("export_ust", "Export one monophonic track as UST, retaining imported opaque data / 导出单轨 UST", {
                 {.name="path",.type="string",.description="Output .ust path",.required=true},
@@ -550,10 +573,12 @@ juce::var McpServer::diagnosticTools()
                 { .name = "stretch_algorithm", .type = "string",
                   .description = "What changes a recording's length",
                   .choices = { "melodyne-hybrid", "variable-mel-hop", "loop", "soundtouch",
-                               "nsf-shift-then-splice", "hifishifter-mel" } },
+                               "nsf-shift-then-splice", "hifishifter-mel", "wcsndm-nonloop" } },
                 { .name = "render_order", .type = "string",
                   .description = "Whether notes are joined before or after they are processed",
                   .choices = { "process-then-splice", "stretch-splice-then-pitch" } },
+                { .name = "merge_contiguous_source", .type = "boolean",
+                  .description = "Decode explicitly connected same-source clips together, including process order; default false." },
                 { .name = "utau_global_flags", .type = "string",
                   .description = "Flags handed to the engine for every note of this track" },
                 { .name = "voicebank_directory", .type = "string",
@@ -733,6 +758,12 @@ juce::var McpServer::diagnosticTools()
                   .description = "The note whose join with the one before it is turned over",
                   .required = true },
             }),
+            makeTool("set_notes_portamento", "Set real pitch-only glide bridges; never join source audio or change envelopes / 设置真实滑音连接，不拼接素材", {
+                { .name="note_ids", .type="array", .description="Consecutive voiced notes on one track", .required=true,
+                  .shape=[](){return typedSchema({});} },
+                { .name="enabled", .type="boolean", .description="Enable or remove the selected pitch bridges; default true" },
+                { .name="duration_seconds", .type="number", .description="Requested total bridge duration; default 0.1 seconds" },
+            }),
             makeTool("remove_clip", "Delete a clip / 删除采样", {
                 { .name = "clip_id", .type = "string",
                   .description = "Which clip to delete", .required = true },
@@ -791,12 +822,12 @@ juce::var McpServer::diagnosticTools()
                   .description = "Where to move the playhead", .required = true },
             }),
             makeTool("transport_status", "Read playback position and render state / 读取播放位置与渲染状态"),
-            makeTool("sample_settings_read", "Read or derive audio .hjm.csv regions / 读取或生成音频 .hjm.csv 分段", {
+            makeTool("sample_settings_read", "Read or derive audio otto.ini regions / 读取或生成音频 otto.ini 分段", {
                 { .name = "audio_path", .type = "string",
                   .description = "The recording whose regions are read; they are derived when "
                                  "it has no sidecar yet", .required = true },
             }),
-            makeTool("sample_settings_save", "Save audio regions to .hjm.csv / 保存音频分段到 .hjm.csv", {
+            makeTool("sample_settings_save", "Save audio regions to otto.ini / 保存音频分段到 otto.ini", {
                 { .name = "audio_path", .type = "string",
                   .description = "The recording the regions belong to", .required = true },
                 { .name = "rows", .type = "array",
@@ -809,7 +840,7 @@ juce::var McpServer::diagnosticTools()
                 { .name = "oto_path", .type = "string",
                   .description = "The oto.ini to read", .required = true },
                 { .name = "save_sidecar", .type = "boolean",
-                  .description = "Write the regions to the recording's .hjm.csv as well.  "
+                  .description = "Write the regions to the recording's otto.ini as well.  "
                                  "Default true." },
             }),
             makeTool("oto_export", "Export one audio file's regions to UTAU oto.ini / 将单个音频分段导出为 UTAU oto.ini", {
@@ -822,7 +853,7 @@ juce::var McpServer::diagnosticTools()
                 { .name = "voicebank_path", .type = "string",
                   .description = "The voicebank folder holding oto.ini", .required = true },
             }),
-            makeTool("voicebank_import", "Import an UTAU voicebank and create .hjm.csv sidecars / 导入 UTAU 音源并生成 .hjm.csv", {
+            makeTool("voicebank_import", "Inspect a UTAU or native material folder without writing annotations / 只读检查 UTAU 或原生素材目录，不写入标注",  {
                 { .name = "path", .type = "string",
                   .description = "The voicebank folder to read", .required = true },
             }),
@@ -1079,7 +1110,8 @@ juce::var McpServer::dispatch(const juce::String& name, const juce::var& args)
     else if (name == "export_midi")
     {
         const juce::File file(string(args, "path"));
-        if (ProjectModel::writeMidiFile(project.snapshot(), file, error))
+        if (ProjectModel::writeMidiFile(project.snapshot(), file, error,
+                string(args, "track_id"), static_cast<bool>(args.getProperty("include_muted", false))))
             return toolResult("written=" + file.getFullPathName());
     }
     else if (name == "export_ust" || name == "import_ust")
@@ -1143,7 +1175,7 @@ juce::var McpServer::dispatch(const juce::String& name, const juce::var& args)
             if (track.id == id && track.accompaniment
                 && ((args.hasProperty("compose") && static_cast<bool>(args["compose"]))
                     || args.hasProperty("pitch_algorithm") || args.hasProperty("stretch_algorithm")
-                    || args.hasProperty("render_order") || args.hasProperty("voicebank_directory")
+                    || args.hasProperty("render_order") || args.hasProperty("merge_contiguous_source") || args.hasProperty("voicebank_directory")
                     || args.hasProperty("utau_global_flags") || args.hasProperty("output_engine")
                     || args.hasProperty("output_resampler") || args.hasProperty("output_wavtool")))
                 return toolResult("Accompaniment tracks play original audio and cannot enable tuning engines", true);
@@ -1211,16 +1243,20 @@ juce::var McpServer::dispatch(const juce::String& name, const juce::var& args)
                 value == "variable-mel-hop" ? StretchAlgorithm::variableMelHop
                 : value == "loop" ? StretchAlgorithm::loop
                 : value == "soundtouch" ? StretchAlgorithm::soundTouch
+                : value == "wcsndm-nonloop" ? StretchAlgorithm::wcsNonLoop
                 : value == "hifishifter-mel" ? StretchAlgorithm::hifiShifterMel
                 : value == "nsf-shift-then-splice" ? StretchAlgorithm::nsfShiftThenSplice
                 : StretchAlgorithm::melodyneHybrid);
         }
-        if (args.hasProperty("render_order"))
+        if (args.hasProperty("render_order") || args.hasProperty("merge_contiguous_source"))
         {
-            const auto value = string(args, "render_order").toLowerCase();
-            project.setTrackRenderOrder(id,
-                value == "stretch-splice-then-pitch" ? RenderOrder::stretchSpliceThenPitch
-                : RenderOrder::processThenSplice);
+            auto order = RenderOrder::processThenSplice;
+            for (const auto& track : project.snapshot().tracks) if (track.id == id) order = track.renderOrder;
+            if (args.hasProperty("render_order"))
+                order = string(args, "render_order").toLowerCase() == "stretch-splice-then-pitch"
+                    ? RenderOrder::stretchSpliceThenPitch : RenderOrder::processThenSplice;
+            project.setTrackRenderOrder(id, order, args.hasProperty("merge_contiguous_source")
+                ? std::optional<bool>(static_cast<bool>(args["merge_contiguous_source"])) : std::nullopt);
         }
         return toolResult("ok");
     }
@@ -1512,6 +1548,15 @@ juce::var McpServer::dispatch(const juce::String& name, const juce::var& args)
         project.toggleNoteConnection(string(args, "note_id"));
         return toolResult("ok");
     }
+    else if (name == "set_notes_portamento")
+    {
+        const auto ids=strings(args,"note_ids");
+        if(ids.size()<2)return toolResult("At least two consecutive note IDs are required",true);
+        const auto enabled=static_cast<bool>(args.getProperty("enabled",true));
+        const auto changed=project.setNotesPortamento(ids,enabled,error,number(args,"duration_seconds",.1));
+        if(error.isNotEmpty())return toolResult(error,true);
+        return toolResult(changed?"changed=1":"changed=0");
+    }
     else if (name == "remove_clip")
     {
         project.removeClip(string(args, "clip_id"));
@@ -1634,7 +1679,7 @@ juce::var McpServer::dispatch(const juce::String& name, const juce::var& args)
         if (!file.existsAsFile()) return toolResult("Audio file not found", true);
         auto value = object();
         set(value, "audio_path", file.getFullPathName());
-        set(value, "sidecar_path", SampleSettings::sidecarFor(file).getFullPathName());
+        set(value, "sidecar_path", SampleSettings::annotationFor(file).getFullPathName());
         set(value, "rows", sampleRowsJson(SampleSettings::loadOrDerive(file, project.snapshot())));
         return toolResult(juce::JSON::toString(value, false));
     }
@@ -1645,7 +1690,7 @@ juce::var McpServer::dispatch(const juce::String& name, const juce::var& args)
         const auto rows = sampleRowsFromJson(args.getProperty("rows", juce::var()));
         if (rows.empty()) return toolResult("rows must contain at least one valid region", true);
         if (SampleSettings::save(file, rows, error))
-            return toolResult("saved=" + SampleSettings::sidecarFor(file).getFullPathName()
+            return toolResult("saved=" + SampleSettings::annotationFor(file).getFullPathName()
                               + "; regions=" + juce::String(static_cast<juce::int64>(rows.size())));
     }
     else if (name == "oto_import")
@@ -1663,7 +1708,7 @@ juce::var McpServer::dispatch(const juce::String& name, const juce::var& args)
                 && !SampleSettings::save(audioFile, rows, error))
                 return toolResult(error, true);
             auto value = object();
-            set(value, "sidecar_path", SampleSettings::sidecarFor(audioFile).getFullPathName());
+            set(value, "sidecar_path", SampleSettings::annotationFor(audioFile).getFullPathName());
             set(value, "rows", sampleRowsJson(rows));
             return toolResult(juce::JSON::toString(value, false));
         }
@@ -1778,6 +1823,9 @@ juce::var McpServer::noteJson(const NoteData& note, bool includeCurves)
     }
     set(noteValue, "native_unpitched", note.nativeUnpitched);
     set(noteValue, "native_role", nativeSegmentRoleName(note.nativeRole));
+    set(noteValue, "pronunciation_kind", pronunciationKindName(note.pronunciationKind));
+    set(noteValue, "simplified_consonant", note.simplifiedConsonant);
+    set(noteValue, "vowel_splits_explicit", note.vowelSplitsExplicit);
     set(noteValue, "native_provenance", note.nativeProvenance);
     set(noteValue, "native_confidence", note.nativeConfidence);
     if (includeCurves)
@@ -1910,6 +1958,16 @@ juce::var McpServer::projectJson() const
         set(value, "right_note_id", connection.rightNoteId);
         set(value, "type", connection.type);
         set(value, "boundary_seconds", connection.boundarySeconds);
+        set(value, "pitch_endpoint_relative",connection.pitchCurveEndpointRelative);
+        set(value, "pitch_start_offset_seconds",connection.pitchStartOffsetSeconds);
+        set(value, "pitch_end_offset_seconds",connection.pitchEndOffsetSeconds);
+        std::vector<juce::var> controls;
+        for(const auto& point:connection.pitchCurve)
+        {
+            auto control=object();set(control,"time",point.timeSeconds);set(control,"midi_or_residual",point.targetMidi);
+            set(control,"shape",pitchCurveShapeName(point.shape));controls.push_back(std::move(control));
+        }
+        set(value,"pitch_controls",array(std::move(controls)));
         nativeConnections.push_back(std::move(value));
     }
     set(root, "native_connections", array(std::move(nativeConnections)));
@@ -1941,6 +1999,7 @@ juce::var McpServer::projectJson() const
                 : pitchAlgorithmText(track.pitchAlgorithm));
         set(trackValue, "stretch_algorithm", track.accompaniment ? juce::String("none") : stretchAlgorithmText(track.stretchAlgorithm));
         set(trackValue, "render_order", renderOrderText(track.renderOrder));
+        set(trackValue, "merge_contiguous_source", track.mergeContiguousSource);
         std::vector<juce::var> clips;
         for (const auto& clip : track.clips)
         {

@@ -1,6 +1,8 @@
 #pragma once
+#include "I18n.h"
 #include <juce_gui_extra/juce_gui_extra.h>
 #include "DiffSingerPhonemeDisplay.h"
+#include "Theme.h"
 #include <cmath>
 #include <map>
 #include <limits>
@@ -212,7 +214,7 @@ public:
         value.setBounds(info.removeFromRight(115).reduced(2)); selection.setBounds(info);
         viewport.setBounds(bounds); resizeCanvas();
     }
-    void paint(juce::Graphics& g) override { g.fillAll(juce::Colour(0xff202b31)); }
+    void paint(juce::Graphics& g) override { g.fillAll(Palette::panel); }
     bool keyPressed(const juce::KeyPress& key) override
     {
         if (key.getModifiers().isCommandDown() && key.getKeyCode() == 'Z')
@@ -222,7 +224,7 @@ public:
         return false;
     }
 private:
-    static juce::String u(const char* text) { return juce::String::fromUTF8(text); }
+    static juce::String u(const char* text) { return I18n::uiText(text); }
     float x(double time) const { return (float) (24+(time-from)*zoom.getValue()); }
     double time(float px) const { return from+(px-24)/zoom.getValue(); }
     bool canMove(int i) const
@@ -278,7 +280,7 @@ private:
         explicit Canvas(DiffSingerPhonemeEditor& owner) : editor(owner) {}
         void paint(juce::Graphics& g) override
         {
-            auto& e = editor; g.fillAll(juce::Colour(0xff182128)); g.setFont(13);
+            auto& e = editor; g.fillAll(Palette::graphBackground); g.setFont(13);
             const auto clip = g.getClipBounds();
             const auto step = e.zoom.getValue() < 180 ? 1.0 : .25;
             for (double t=std::floor(e.time((float) clip.getX())/step)*step; e.x(t)<clip.getRight(); t+=step)

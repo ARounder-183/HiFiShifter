@@ -1,4 +1,5 @@
 #include "UstImporter.h"
+#include "UstxImporter.h"
 #include "LegacyTextCodec.h"
 #include "UstText.h"
 
@@ -381,6 +382,7 @@ UstProject UstImporter::parse(const juce::String& text, juce::StringArray& warni
 std::optional<UstProject> UstImporter::read(const juce::File& file, juce::String& error,
                                             juce::StringArray& warnings, int encodingOverride)
 {
+    if(file.hasFileExtension("ustx"))return UstxImporter::read(file,error,warnings);
     const auto document=LegacyTextCodec::read(file,error,encodingOverride,false);
     if(!document)return std::nullopt;
     const auto& text=document->text;

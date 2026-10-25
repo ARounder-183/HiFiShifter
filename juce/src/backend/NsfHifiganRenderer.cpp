@@ -1,7 +1,9 @@
 #include "FcpeAnalyzer.h"
 #include "SourceVoicing.h"
 #include "NsfHifiganRenderer.h"
+#include "NativeExpression.h"
 #include "NsfRenderChunkCache.h"
+#include "WcsNonLoopFeatures.h"
 #include "ChineseCvvcPhonemizer.h"
 #include "AmplitudeEnvelopeCurve.h"
 #include "AdvancedEnvelope.h"
@@ -1011,7 +1013,8 @@ NsfSessionCache& nsfSessionCache()
     static NsfSessionCache value;
     return value;
 }
-SessionEntry session(const juce::File& model, const OrtExecutionConfig& execution)
+SessionEntry session(const juce::File& model, const OrtExecutionConfig& execution,
+                     const juce::MemoryBlock* modelSnapshot = nullptr)
 {
     auto& cache = nsfSessionCache();
     const auto lock = cancellableNsfLock(cache.mutex);
@@ -1019,6 +1022,7 @@ SessionEntry session(const juce::File& model, const OrtExecutionConfig& executio
     const auto key = (model.getFullPathName() + "#"
         + juce::String(model.getLastModificationTime().toMilliseconds()) + "#"
         + juce::String(model.getSize()) + "#"
+        + (modelSnapshot ? juce::SHA256(*modelSnapshot).toHexString() : juce::String{}) + "#"
         + inferenceBackendName(execution.requested) + "#"
         + juce::String(execution.deviceIndex) + "#"
         + juce::String(execution.intraOpThreads)).toStdString();
@@ -1026,8 +1030,9 @@ SessionEntry session(const juce::File& model, const OrtExecutionConfig& executio
         return found->second;
     SessionEntry value;
     auto options = makeOrtSessionOptions(execution, value.activeInference);
-    value.model = std::make_shared<Ort::Session>(
-        environment(), ortPath(model).c_str(), options);
+    value.model = modelSnapshot
+        ? std::make_shared<Ort::Session>(environment(), modelSnapshot->getData(), modelSnapshot->getSize(), options)
+        : std::make_shared<Ort::Session>(environment(), ortPath(model).c_str(), options);
     checkNsfCancellation();
     if (value.activeInference.startsWith("directml"))
         value.runMutex = std::make_shared<std::mutex>();
@@ -1189,6 +1194,7 @@ std::vector<float> infer(Ort::Session& model, const Config& config,
 void NsfHifiganRenderer::shutdown()
 {
 #if defined(HACHI_HAS_ONNX_ANALYSIS) && HACHI_HAS_ONNX_ANALYSIS
+    clearWcsNonLoopFeatureCache();
     auto& cache = nsfSessionCache();
     const std::scoped_lock lock(cache.mutex);
     cache.sessions.clear();
@@ -1214,7 +1220,7 @@ NsfHifiganRenderResult NsfHifiganRenderer::render(
     const OrtExecutionConfig& execution, NsfHifiganStretchOrder stretchOrder,
     bool normalizeVolume, const NsfHifiganEdgeGuard& edgeGuard,
     const std::function<bool()>& cancelled, bool protectNativeNoise, bool smoothPitchTransitions,
-    bool incrementalNativeRender)
+    bool incrementalNativeRender, const std::vector<float>& sourceMidi)
 {
     NsfHifiganRenderResult result;
 #if defined(HACHI_HAS_ONNX_ANALYSIS) && HACHI_HAS_ONNX_ANALYSIS
@@ -1285,6 +1291,30 @@ NsfHifiganRenderResult NsfHifiganRenderer::render(
             (targetModelSamples + static_cast<std::size_t>(config->hop) - 1)
                 / static_cast<std::size_t>(config->hop));
         const auto hifiShifter = stretchOrder == NsfHifiganStretchOrder::hifiShifterMel;
+        const auto wcsNonLoop = stretchOrder == NsfHifiganStretchOrder::wcsNonLoop;
+        std::vector<float> wcsF0;
+        MelData wcsMel;
+        if (wcsNonLoop)
+        {
+            const auto hopSeconds = double(config->hop) / config->sampleRate;
+            wcsF0.resize(targetFrames);
+            for (std::size_t i = 0; i < targetFrames; ++i)
+                wcsF0[i] = midiToHz(curveAt(targetMidi, i * hopSeconds * 1000. / std::max(.1, framePeriodMs)));
+            const auto requested = wcsF0;
+            conditionNsfPitchTransitions(wcsF0, smoothPitchTransitions);
+            for (std::size_t i = 0; i < targetFrames; ++i)
+                if (requested[i] <= 0 || (protectNativeNoise && voicing.at(sourceAt(i * hopSeconds)) >= .999f))
+                    wcsF0[i] = 0;
+            const auto sourceReference = buildMelWithHop(modelInput, *config, config->hop);
+            WcsFeatureConfig featureConfig { config->sampleRate, config->hop, config->fftSize,
+                config->windowSize, config->melBands, filterbank(*config) };
+            auto features = buildWcsNonLoopMel(modelInput, featureConfig,
+                double(targetSamples) / sampleRate, framePeriodMs, sourceMidi, wcsF0,
+                timeMap, sourceReference.values, sourceReference.frames, checkNsfCancellation);
+            wcsMel = { std::move(features.values), targetFrames };
+            result.usedWcsParameters = true;
+            result.reusedWcsSourceAnalysis = features.reusedSourceAnalysis;
+        }
         const auto variableHop = stretchOrder == NsfHifiganStretchOrder::spliceThenShift
             || stretchOrder == NsfHifiganStretchOrder::shiftThenSplice;
         auto referenceMel = normalizeVolume
@@ -1294,7 +1324,7 @@ NsfHifiganRenderResult NsfHifiganRenderer::render(
                 static_cast<double>(config->hop) / config->sampleRate, timeMap,
                 variableHop ? 0.5 : 0.0, variableHop ? 0.5 : 0.0)
             : MelData{};
-        auto mel = hifiShifter
+        auto mel = wcsNonLoop ? std::move(wcsMel) : hifiShifter
             ? stretchHiFiShifterMel(buildMelWithHop(modelInput, *config, config->hop),
                 config->melBands, static_cast<double>(sourceSamples) / sampleRate,
                 static_cast<double>(targetSamples) / sampleRate, timeMap)
@@ -1326,17 +1356,17 @@ NsfHifiganRenderResult NsfHifiganRenderer::render(
         {
             normalizeMelToReference(mel, referenceMel, config->melBands);
         }
-        std::vector<float> f0(mel.frames);
+        std::vector<float> f0 = wcsNonLoop ? std::move(wcsF0) : std::vector<float>(mel.frames);
         const auto hopSeconds = static_cast<double>(config->hop) / config->sampleRate;
         const auto framePeriod = std::max(0.1, framePeriodMs);
-        for (std::size_t frame = 0; frame < mel.frames; ++frame)
+        for (std::size_t frame = 0; !wcsNonLoop && frame < mel.frames; ++frame)
         {
             const auto seconds = static_cast<double>(frame) * hopSeconds;
             f0[frame] = midiToHz(curveAt(targetMidi,
                 seconds * 1000.0 / framePeriod));
         }
         const auto requestedF0 = f0;
-        conditionNsfPitchTransitions(f0, smoothPitchTransitions);
+        if (!wcsNonLoop) conditionNsfPitchTransitions(f0, smoothPitchTransitions);
         if (protectNativeNoise)
             for (std::size_t frame=0;frame<f0.size();++frame)
                 if (requestedF0[frame] <= 0 || voicing.at(sourceAt(frame*hopSeconds)) >= .999f)
@@ -1442,7 +1472,7 @@ NsfHifiganRenderResult NsfHifiganRenderer::render(
     juce::ignoreUnused(source, sampleRate, targetSamples, framePeriodMs, targetMidi,
                        formantSemitones, timeMap, configuredModelDirectory, execution,
                        stretchOrder, normalizeVolume, edgeGuard, cancelled, protectNativeNoise, smoothPitchTransitions,
-                       incrementalNativeRender);
+                       incrementalNativeRender, sourceMidi);
     result.error = "NSF-HiFiGAN ONNX runtime is not included";
 #endif
     if (!result.usedModel) result.buffer.setSize(0, 0);
@@ -1617,7 +1647,8 @@ std::vector<float> buildNsfUtauTargetMidi(float midiNote,
 
 juce::AudioBuffer<float> mixNsfUtauNotes(const std::vector<NsfUtauMixNote>& notes,
                                          double totalSeconds, double sampleRate,
-                                         int channels, const std::function<bool()>& cancelled)
+                                         int channels, const std::function<bool()>& cancelled,
+                                         const std::function<void(std::size_t, const UtauMixEnvelope&)>& envelopeReady)
 {
     const auto chans = juce::jlimit(1, 2, channels);
     const auto totalSamples = std::max(1, static_cast<int>(std::ceil(
@@ -1633,53 +1664,79 @@ juce::AudioBuffer<float> mixNsfUtauNotes(const std::vector<NsfUtauMixNote>& note
         return notes[a].soundStartSeconds < notes[b].soundStartSeconds;
     });
 
-    for (std::size_t oi = 0; oi < order.size(); ++oi)
+    // Plan all windows before applying gain. This lets a standard CVVC edge
+    // be replaced by its actual crossing, without pre-baking a second fade.
+    std::vector<UtauMixEnvelope> envelopes(notes.size());
+    for (std::size_t oi=0;oi<order.size();++oi)
     {
-        if (cancelled && cancelled()) return {};
-        const auto& note = notes[order[oi]];
-        if (note.rest || note.audio.getNumSamples() <= 0) continue;
-        const auto startSample = static_cast<int>(std::lround(
-            note.soundStartSeconds * sampleRate));
-        const auto fadeInSamples = std::max(0, static_cast<int>(std::lround(
-            std::max(0.0, note.overlapSeconds) * sampleRate)));
-        const auto noteSamples = note.audio.getNumSamples();
-        const auto srcChannels = note.audio.getNumChannels();
-        for (int index = 0; index < noteSamples; ++index)
+        if(cancelled&&cancelled())return {};
+        const auto& note=notes[order[oi]];
+        if(note.rest||note.audio.getNumSamples()<=0)continue;
+        const auto start=static_cast<int>(std::lround(note.soundStartSeconds*sampleRate));
+        const auto fade=std::max(0,static_cast<int>(std::lround(note.overlapSeconds*sampleRate)));
+        const auto gap=std::min(0,static_cast<int>(std::lround(note.overlapSeconds*sampleRate)));
+        const auto length=gap<0?std::max(1,static_cast<int>(std::lround(.003*sampleRate))):fade;
+        const auto outgoingStart=start+gap-(gap<0?length:0);
+        UtauMixRamp incoming {0,std::max(1,fade),true,true,.5,fade};
+        UtauMixRamp outgoing {0,std::max(1,length),false,gap==0,length>0?.5:1.0,-1,gap==0&&fade>0};
+        if(note.cvvcCrossfadeStyle>=0)
         {
-            if ((index & 1023) == 0 && cancelled && cancelled()) return {};
-            const auto target = startSample + index;
-            if (target < 0 || target >= totalSamples) continue;
-            auto gain = 1.0f;
-            if (fadeInSamples > 0 && index < fadeInSamples)
-            {
-                const auto phase = (static_cast<double>(index) + 0.5)
-                    / static_cast<double>(fadeInSamples);
-                gain = static_cast<float>(std::sin(
-                    juce::MathConstants<double>::halfPi * phase));
-            }
-            for (int channel = 0; channel < chans; ++channel)
-            {
-                const auto src = note.audio.getSample(
-                    std::min(channel, srcChannels - 1), index) * gain;
-                if (fadeInSamples > 0 && index < fadeInSamples)
-                {
-                    const auto phase = (static_cast<double>(index) + 0.5)
-                        / static_cast<double>(fadeInSamples);
-                    const auto outGain = static_cast<float>(std::cos(
-                        juce::MathConstants<double>::halfPi * phase));
-                    const auto existing = mix.getSample(channel, target);
-                    mix.setSample(channel, target, existing * outGain + src);
-                }
-                else
-                    mix.addSample(channel, target, src);
-            }
+            incoming.equalPower=outgoing.equalPower=false;
+            incoming.phaseOffset=0;outgoing.phaseOffset=length>0?0:1;
+            incoming.smoothCurve=note.cvvcCrossfadeStyle==1;
+            outgoing.smoothCurve=outgoing.crossfade&&note.cvvcCrossfadeStyle==1;
+        }
+        bool preceding=false;
+        for(std::size_t previous=0;previous<oi;++previous)
+        {
+            auto& earlier=envelopes[order[previous]];
+            if(!earlier.available())continue;
+            const auto relative=outgoingStart-static_cast<int>(std::lround(earlier.startSeconds*sampleRate));
+            if(relative>=earlier.samples)continue;
+            preceding=true;
+            auto ramp=outgoing;ramp.start=relative;earlier.ramps.push_back(ramp);
+        }
+        incoming.crossfade=preceding&&fade>0;
+        envelopes[order[oi]]={sampleRate,start/sampleRate,note.audio.getNumSamples(),{incoming}};
+    }
+    for(std::size_t i=0;i<notes.size();++i)
+    {
+        auto& envelope=envelopes[i];if(!envelope.available())continue;
+        const auto& note=notes[i];
+        if(note.standardEnvelopeSeconds>0)useStandardUtauEnvelope(envelope,note.standardEnvelopeSeconds);
+        const auto start=static_cast<int>(std::lround(envelope.startSeconds*sampleRate));
+        for(int sample=0;sample<note.audio.getNumSamples();++sample)
+        {
+            if((sample&1023)==0&&cancelled&&cancelled())return {};
+            const auto target=start+sample;if(target<0||target>=totalSamples)continue;
+            const auto gain=envelope.gainAtSample(sample);
+            for(int channel=0;channel<chans;++channel)
+                mix.addSample(channel,target,note.audio.getSample(std::min(channel,note.audio.getNumChannels()-1),sample)*gain);
         }
     }
+    if (envelopeReady)
+        for (std::size_t i = 0; i < envelopes.size(); ++i)
+            if (envelopes[i].available()) envelopeReady(i, envelopes[i]);
     auto peak = 0.0f;
     for (int channel = 0; channel < mix.getNumChannels(); ++channel)
         peak = std::max(peak, mix.getMagnitude(channel, 0, mix.getNumSamples()));
     if (peak > 0.98f) mix.applyGain(0.98f / peak);
     return mix;
+}
+
+void applyNsfUtauNativeExpression(juce::AudioBuffer<float>& audio, double sampleRate,
+    double framePeriodMs, const std::vector<float>& targetMidi, const UtauNoteRenderSpec& note)
+{
+    const auto tension = std::isfinite(note.nativeTension) ? note.nativeTension : 0.0f;
+    const auto breath = std::isfinite(note.nativeBreath) ? juce::jmax(0.0f, note.nativeBreath) : 0.0f;
+    if ((std::abs(tension) <= 1.0e-4f && breath == 0.0f)
+        || audio.getNumSamples() <= 0 || !std::isfinite(sampleRate) || sampleRate <= 0.0) return;
+    const auto frames = std::max(targetMidi.size(), static_cast<std::size_t>(std::ceil(
+        audio.getNumSamples() / sampleRate * 1000.0 / std::max(0.1, framePeriodMs))) + 1);
+    // Gain is deliberately empty: note.gain and the editing amplitude envelope
+    // are applied once by the existing voicebank phrase mixer afterwards.
+    applyNativeExpression(audio, sampleRate, framePeriodMs, targetMidi, {},
+        std::vector<float>(frames, tension), std::vector<float>(frames, breath));
 }
 
 NsfUtauSynthResult synthesizeNsfUtauNote(const juce::File& sampleFile,
@@ -1750,7 +1807,9 @@ NsfUtauSynthResult synthesizeNsfUtauNote(const juce::File& sampleFile,
     constexpr auto framePeriodMs = 5.0;
     const auto targetMidi = buildNsfUtauTargetMidi(midiNote, pitchCurve, framePeriodMs,
         plan.outputSeconds, plan.soundStartOffsetSeconds, timelinePitchCents);
-    const std::vector<float> formant(targetMidi.size(), 0.0f);
+#if !defined(HACHI_HAS_ONNX_ANALYSIS) || !HACHI_HAS_ONNX_ANALYSIS
+    const std::vector<float> formant(targetMidi.size(), flagsNote != nullptr ? flagsNote->nativeFormantSemitones : 0.0f);
+#endif
     const auto targetSamples = std::max(1, static_cast<int>(std::lround(
         plan.outputSeconds * sourceRate)));
 
@@ -1770,6 +1829,8 @@ NsfUtauSynthResult synthesizeNsfUtauNote(const juce::File& sampleFile,
                                                   : "NSF-HiFiGAN render failed";
         return result;
     }
+    if (flagsNote != nullptr)
+        applyNsfUtauNativeExpression(neural.buffer, sourceRate, framePeriodMs, targetMidi, *flagsNote);
     result.audio = std::move(neural.buffer);
     result.sampleRate = sourceRate;
     result.usedModel = true;
@@ -1780,15 +1841,18 @@ UtauRenderResult renderNsfUtauPhrase(const UtauRenderRequest& request,
                                      const juce::File& modelDirectory,
                                      const OrtExecutionConfig& execution)
 {
+    const auto family = resolveRequestedVoicebankFamily(request, true);
+    if (family.warning.isNotEmpty() || request.requestedFamily == RequestedVoicebankFamily::diffSinger)
+    {
+        UtauRenderResult failure;
+        failure.warning = family.warning.isNotEmpty() ? family.warning
+            : juce::String("DiffSinger track cannot use the UTAU NSF voicebank renderer; no backend fallback was attempted");
+        return failure;
+    }
     if (request.chineseCvvc && !request.fourRegion)
         return renderChineseCvvc(request, [&](const auto& expanded) { return renderNsfUtauPhrase(expanded, modelDirectory, execution); });
     UtauRenderResult result;
     result.backend = "hifisampler-native-voicebank";
-    if (!NsfHifiganRenderer::modelAvailable(modelDirectory))
-    {
-        result.warning = "NSF-HiFiGAN model pack unavailable";
-        return result;
-    }
 
     // 2^(1 - velocity/100): 100 -> 1.0, larger reaches the vowel sooner.
     const auto velocityScaleOf = [](int velocity)
@@ -1800,7 +1864,11 @@ UtauRenderResult renderNsfUtauPhrase(const UtauRenderRequest& request,
     double phraseRate = 0.0;
     std::vector<NsfUtauMixNote> mixNotes;
     mixNotes.reserve(request.notes.size());
+    std::vector<std::size_t> mixOwners;
+    mixOwners.reserve(request.notes.size());
     std::vector<std::size_t> silentContext;
+    std::vector<std::size_t> pianoNotes;
+    auto missingPiano = 0;
     std::vector<UtauRenderer::ResolvedSample> samples;
     samples.reserve(request.notes.size());
     for (const auto& note : request.notes)
@@ -1816,21 +1884,44 @@ UtauRenderResult renderNsfUtauPhrase(const UtauRenderRequest& request,
     {
         const auto& note = request.notes[noteIndex];
         if (request.cancelled && request.cancelled()) return result;
-        if (isRestLyric(note.alias))
+        if (isRestLyric(note.alias) || (request.silenceEmptyLyrics && note.alias.trim().isEmpty()))
         {
             mixNotes.push_back({ {}, note.startSeconds, 0.0, true });
+            mixOwners.push_back(noteIndex);
             continue;
         }
         const auto& resolved = samples[noteIndex];
-        if (!resolved.found) { ++missing; continue; }
+        if (note.alias.trim().isEmpty() || !resolved.found)
+        {
+            if (!request.pianoPreviewEnabled)
+            {
+                mixNotes.push_back({ {}, note.startSeconds, 0.0, true });
+                mixOwners.push_back(noteIndex);
+                continue;
+            }
+            // Generate at the final phrase rate, sharing the classic piano voice.
+            if (note.alias.trim().isNotEmpty()) ++missingPiano;
+            pianoNotes.push_back(mixNotes.size());
+            mixNotes.push_back({ {}, note.startSeconds, 0.004, false });
+            mixOwners.push_back(noteIndex);
+            continue;
+        }
         if (note.preserveEnvelopeTiming && note.gain <= 0)
         {
             silentContext.push_back(mixNotes.size());
             mixNotes.push_back({ {}, note.startSeconds - std::min(std::max(0.0, resolved.preutteranceSeconds),
-                std::max(0.0, note.startSeconds)), resolved.overlapSeconds, false });
+                std::max(0.0, note.startSeconds)), resolved.overlapSeconds, false,
+                             0.0,
+                             request.cvvcPhonemes ? (request.cvvcCurveCrossfade?1:0) : -1 });
+            mixOwners.push_back(noteIndex);
             continue;
         }
 
+        if (!NsfHifiganRenderer::modelAvailable(modelDirectory))
+        {
+            result.warning = "NSF-HiFiGAN model pack unavailable";
+            return result;
+        }
         NsfUtauSampleTiming timing;
         timing.offsetSeconds = resolved.offsetSeconds;
         timing.endSeconds = resolved.endSeconds;
@@ -1856,7 +1947,8 @@ UtauRenderResult renderNsfUtauPhrase(const UtauRenderRequest& request,
                                    std::max(0.0, note.startSeconds));
         const auto soundingLength = std::max(0.001, soundEnd - note.startSeconds + pre);
         const auto plan = buildNsfUtauNotePlan(timing, note.startSeconds,
-            note.durationSeconds, velocityScaleOf(note.consonantVelocity), 0.0,
+            note.durationSeconds, velocityScaleOf(note.consonantVelocity),
+            std::max(0.0, soundEnd - note.startSeconds - note.durationSeconds),
             note.jieSplitSet ? &note.jieSplit : nullptr,
             UtauRenderer::readsOnlyFirstTwoRegions(request.fourRegion, request.consonantClasses,
                 note.durationSeconds), timing.hasRegions ? soundingLength : 0.0);
@@ -1895,7 +1987,7 @@ UtauRenderResult renderNsfUtauPhrase(const UtauRenderRequest& request,
                 const auto& left = points[j - 1]; const auto& right = points[j];
                 const auto u = static_cast<float>(juce::jlimit(0.0, 1.0,
                     (time - left.timeSeconds) / std::max(1.0e-9, right.timeSeconds - left.timeSeconds)));
-                return envelopeGainFromDb(envelopeDbBetween(left.gainDb, right.gainDb, u, left.linearToNext));
+                return envelopeGainFromDb(envelopeDbBetween(left.gainDb, right.gainDb, u, left.linearToNext,left.bezier));
             }
             return 1.0f;
         };
@@ -1926,24 +2018,43 @@ UtauRenderResult renderNsfUtauPhrase(const UtauRenderRequest& request,
             request.notePhonemes(noteIndex, spans);
         }
         if (request.cancelled && request.cancelled()) return result;
-        if (request.notePiece)
+        if (request.notePiece && !request.noteMixEnvelope)
             request.notePiece(noteIndex, synth.audio, synth.sampleRate, -plan.soundStartOffsetSeconds,
                 [&](double time) { return envelopeAt(time) * noteGain; },
                 [noteGain](double) { return noteGain; });
         for (int i = 0; i < synth.audio.getNumSamples(); ++i) {
             if ((i & 1023) == 0 && request.cancelled && request.cancelled()) return result;
-            const auto gain = envelopeAt(plan.soundStartOffsetSeconds + i / synth.sampleRate) * noteGain;
+            const auto gain = (note.cvvcStandardEnvelope ? envelopeGainFromDb(fittedEnvelope[1].gainDb)
+                : envelopeAt(plan.soundStartOffsetSeconds + i / synth.sampleRate)) * noteGain;
             for (int c = 0; c < synth.audio.getNumChannels(); ++c)
                 synth.audio.setSample(c, i, synth.audio.getSample(c, i) * gain);
         }
         phraseRate = synth.sampleRate;
         mixNotes.push_back({ std::move(synth.audio),
                              note.startSeconds + plan.soundStartOffsetSeconds,
-                             resolved.overlapSeconds, false });
+                             resolved.overlapSeconds, false,
+                             note.cvvcStandardEnvelope ? fittedEnvelope.back().timeSeconds-fittedEnvelope.front().timeSeconds : 0.0,
+                             request.cvvcPhonemes ? (request.cvvcCurveCrossfade?1:0) : -1 });
+        mixOwners.push_back(noteIndex);
         ++synthesised;
     }
 
     if (phraseRate <= 0.0) phraseRate = 44100.0;
+    for (const auto index : pianoNotes)
+    {
+        const auto owner = mixOwners[index];
+        const auto& note = request.notes[owner];
+        auto& piece = mixNotes[index];
+        piece.audio = UtauRenderer::pianoPreview(note, phraseRate);
+        const auto envelope = note.preserveEnvelopeTiming ? note.amplitudeEnvelope
+            : UtauRenderer::fitAmplitudeEnvelope(note.amplitudeEnvelope, 0.0, note.durationSeconds);
+        for (int i = 0; i < piece.audio.getNumSamples(); ++i)
+            piece.audio.setSample(0, i, piece.audio.getSample(0, i)
+                * UtauRenderer::amplitudeGain(envelope, i / phraseRate));
+        if (request.notePiece && !request.noteMixEnvelope)
+            request.notePiece(owner, piece.audio, phraseRate, 0.0,
+                [](double) { return 1.0f; }, [](double) { return 1.0f; });
+    }
     for (const auto index : silentContext)
     {
         // A zero-valued crossfade still attenuates the selected preceding note.
@@ -1953,17 +2064,38 @@ UtauRenderResult renderNsfUtauPhrase(const UtauRenderRequest& request,
         context.audio.clear();
     }
     result.sampleRate = phraseRate;
+    const auto publishEnvelope = [&](std::size_t index, const UtauMixEnvelope& absolute)
+    {
+        if (!request.noteMixEnvelope) return;
+        const auto owner = mixOwners[index];
+        const auto& piece = mixNotes[index];
+        auto local = absolute;
+        local.startSeconds -= request.notes[owner].startSeconds;
+        request.noteMixEnvelope(owner, local);
+        // CVVC previews use the same automatic gain as the final mix. Manual
+        // amplitude is already in piece.audio; never multiply it a second time.
+        if (request.notePiece && !(request.notes[owner].preserveEnvelopeTiming && request.notes[owner].gain <= 0))
+            request.notePiece(owner, piece.audio, phraseRate, -local.startSeconds,
+                [&](double time) { return local.gainAt(time); },
+                [&](double time) { return local.gainAt(time); });
+    };
     result.buffer = mixNsfUtauNotes(mixNotes,
-        std::max(0.001, request.targetDurationSeconds), phraseRate, 2, request.cancelled);
+        std::max(0.001, request.targetDurationSeconds), phraseRate, 2, request.cancelled,
+        request.noteMixEnvelope ? std::function<void(std::size_t,const UtauMixEnvelope&)>(publishEnvelope) : nullptr);
     if (missing > 0)
         result.warning = (result.warning.isEmpty() ? juce::String()
                                                      : result.warning + "; ")
             + juce::String(missing) + " note(s) not synthesised";
+    if (!pianoNotes.empty()) result.backend += "+piano-preview";
+    if (missingPiano > 0)
+        result.warning += (result.warning.isEmpty() ? "" : "; ")
+            + juce::String(missingPiano) + " alias(es) were not found, played as piano";
     juce::ignoreUnused(synthesised);
     return result;
 }
 #include "HifisamplerSmoke.inc"
 #include "HiFiShifterMelSmoke.inc"
+#include "WcsNonLoopSmoke.inc"
 #include "NativeNoiseSmoke.inc"
 #include "NsfPitchTransitionsSmoke.inc"
 

@@ -776,6 +776,9 @@ std::optional<MelodyneImportResult> MelodyneImporter::importProject(
         const auto elementList = graph.reference(trackId, "elements");
         if (!elementList) continue;
         const auto elementIds = graph.list(*elementList);
+        // Keep the real imported endpoint identity until all playable elements
+        // exist. This is annotation provenance, independent of render joins.
+        std::map<std::uint32_t, std::pair<std::uint32_t, std::size_t>> importedSourceUses;
         std::set<std::uint32_t> connectedPrevious;
         for (const auto element : elementIds)
             if (const auto join = graph.reference(element, "followingJoin"))
@@ -1038,8 +1041,38 @@ std::optional<MelodyneImportResult> MelodyneImporter::importProject(
                 clip.gain = 1.0f;
             }
             clip.notes.push_back(std::move(note));
+            importedSourceUses.emplace(element,std::make_pair(source,track.clips.size()));
             track.clips.push_back(std::move(clip));
         }
+        // Group only actual MUSuccessiveJoin endpoints from this import and
+        // the same physical recording/source identity. Never enumerate possible
+        // subsets or connect merely adjacent target/source intervals.
+        std::map<std::uint32_t,std::uint32_t> usageRoots;
+        for(const auto& use:importedSourceUses)usageRoots.emplace(use.first,use.first);
+        const auto rootOf=[&](std::uint32_t id)
+        {
+            while(usageRoots.at(id)!=id)id=usageRoots.at(id);
+            return id;
+        };
+        for(const auto& use:importedSourceUses)
+            if(const auto join=graph.reference(use.first,"followingJoin"))
+                if(graph.boolean(*join,"joinsPitches"))
+                    if(const auto following=graph.reference(*join,"followingElement"))
+                    {
+                        const auto next=importedSourceUses.find(*following);
+                        if(next==importedSourceUses.end()||next->second.first!=use.second.first)continue;
+                        if(track.clips[use.second.second].sourceFile!=track.clips[next->second.second].sourceFile)continue;
+                        const auto a=rootOf(use.first),b=rootOf(*following);
+                        if(a!=b)usageRoots[b]=a;
+                    }
+        std::map<std::uint32_t,std::vector<std::size_t>> actualUsages;
+        for(const auto& use:importedSourceUses)actualUsages[rootOf(use.first)].push_back(use.second.second);
+        for(const auto& usage:actualUsages)
+            if(usage.second.size()>1)
+            {
+                const auto id=makeId("melodyne-use");
+                for(const auto index:usage.second)track.clips[index].materialSourceUsageGroupId=id;
+            }
         if (!track.clips.empty()) result.project.tracks.push_back(std::move(track));
     }
     if (result.project.tracks.empty())
