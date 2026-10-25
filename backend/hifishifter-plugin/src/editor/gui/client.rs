@@ -365,6 +365,8 @@ impl EditorClient {
         static NEXT_VIEW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let token = NEXT_VIEW.fetch_add(1, Ordering::Relaxed);
         let view_id = format!("view-{}-{token}", std::process::id());
+        // 登记到心跳表：宿主侧周期工作要能找到这条链路（见 `host_heartbeat`）。
+        link.register_heartbeat();
         let (reply, replies) = mpsc::channel();
         let (event_sender, events) = mpsc::sync_channel(128);
         let sink = crate::editor::session::UiSink {
@@ -586,30 +588,39 @@ pub(crate) fn host_tick(link: &Arc<crate::editor::routing::EditorLink>) {
 /// 【顺序不能换】私有状态通知必须先于可能收尾的 Undo 块；反过来会在宿主已记录状态后
 /// 才标脏。原实现把这两步放在 `deliver` 的头部，这里只是把它们提到 `pump` 之外 ——
 /// 因为情形 3 里 `pump` 跑在另一条线程上。
-pub(crate) fn tick(state: &Rc<RefCell<EditorClient>>) {
+/// 宿主主线程上的周期工作：宿主时钟、宿主 Undo 收口、`setDirty` 冲刷。
+///
+/// 【为什么单独成一个函数】Linux 上编辑器是独立进程（情形 B），GTK 定时器跑在插件
+/// 自己的线程上，**碰不得宿主 API**。此前这套工作挂在 `client::tick` 上、而 `tick`
+/// 只在情形 A 被调用 —— 于是情形 B 里它一个环节都不跑：时钟不采样（光标停在原地、
+/// 偏移越拉越大）、Undo 块不收口、`setDirty` 永不冲刷（宿主因此不知道工程脏了）。
+///
+/// 现在它只有一个调用方：`host/reaper/host_timer` 的宿主节拍（外加情形 A 的定时器）。
+/// 两个驱动、一份实现 —— 两种形态下行为逐字相同。
+pub(crate) fn host_heartbeat() {
+    for link in crate::editor::routing::live_links() {
+        host_tick(&link);
+        if let Ok(owner) = link.owner() {
+            owner.refresh_host_transport_tick();
+        }
+    }
+}
+
+/// 只碰客户端自身状态的周期工作：**不调用任何宿主 API**，因此可以在任意线程跑。
+///
+/// 【为什么要和 `host_heartbeat` 分开】让路状态机与 bootstrap 补发读的是
+/// `TransportClock` 与几个原子量，不需要宿主线程；把它们留在 GTK 定时器上，
+/// 情形 B 也能照常工作。
+pub(crate) fn ui_tick(state: &Rc<RefCell<EditorClient>>) {
     let link = state.borrow().link.clone();
     if let Ok(owner) = link.owner() {
-        owner.refresh_host_transport_tick();
-        // 【为什么在视图定时器上做这件事】宿主激活后仍无 ARA 绑定时要给出
-        // 一次性诊断，而它必须走一条"未绑定也照跑"的路径：
-        // `refresh_host_transport_tick` 在未绑定时会因 `host_query_stamp`
-        // 失败而立即返回，诊断挂在它内部永远不会执行。视图定时器与视图
-        // 同寿，且已经在每 20ms 跑一次。
         owner.note_editor_tick();
-        // 【为什么在定时器上补发】窗口可能先于 ARA 绑定打开；绑定后
-        // `hostKind` 与能力位都变了，而导航前注入的 bootstrap 是静态快照。
-        // 只在已有会话时发事件 —— 这里绝不创建会话。
         if owner.take_bootstrap_changed() {
             if let Some(session) = owner.existing_editor_session() {
                 let view_id = state.borrow().view_id.clone();
                 session.emit("plugin_bootstrap_changed", bootstrap_json(&link, &view_id));
             }
         }
-        // 让路状态机：与宿主时钟同一个节拍（20 ms）。
-        //
-        // 【为什么用视图定时器而不是自己的计时器】探针/观察窗要判的是"宿主动没动"，
-        // 而宿主的播放态只有 `TransportClock` 知道；这个定时器已经在读它，
-        // 而且它是"宿主不再回调时唯一还会跑的节拍"（见 `refresh_host_transport_tick`）。
         let reading = owner.transport_reading();
         let effects = state
             .borrow_mut()
@@ -617,7 +628,11 @@ pub(crate) fn tick(state: &Rc<RefCell<EditorClient>>) {
             .tick(std::time::Instant::now(), reading);
         apply_relay_effects(state, effects);
     }
-    host_tick(&link);
+}
+
+pub(crate) fn tick(state: &Rc<RefCell<EditorClient>>) {
+    ui_tick(state);
+    host_heartbeat();
     if !state.borrow().closed {
         pump(state);
     }
@@ -1556,6 +1571,9 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
                 let owner=link.owner()?;
                 let playback=owner.host_playback().ok_or("host does not provide ARA playback control")?;
                 let position=owner.clock.get().map(|clock|clock.read().0).unwrap_or(0.);
+                // 【为什么每次都要投递】ARA 的播放请求被钉在 **model 线程**上
+                // （`host playback request off model thread`），而这里有可能是客户端
+                // 线程。与原生扩展那条路同一套做法：投递过去、原地等它有界返回。
                 if command=="stop_audio" {playback.stop().map_err(|e|e.to_string())?;
                     // ARA只有Stop请求；暂停后定位到实际停止点，Stop按钮的回锚由原thunk另发seek。
                     playback.set_position(position).map_err(|e|e.to_string())?;

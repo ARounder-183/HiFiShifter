@@ -1037,8 +1037,9 @@ fn run_inline(command: Control) {
 
 /// 20 ms 节拍：先收命令，再推进每条视图的回执泵。
 ///
-/// 【为什么只 `pump` 不 `tick`】`client::tick` 会碰宿主 API，而这里可能不在宿主 UI
-/// 线程上（情形 B）。宿主侧的事由 `LinuxHost::host_tick` 在宿主线程上补做。
+/// 【为什么情形 B 不调 `client::tick`】它会碰宿主 API，而这里可能不在宿主 UI
+/// 线程上。宿主侧的事由 `host/reaper/host_timer` 的宿主节拍驱动
+/// （`client::host_heartbeat`）；这里只跑 `client::ui_tick` 与投递。
 /// 看门狗：任何一个跑在**宿主 UI 线程**上的入口超过这个时长，就落一行 WARN。
 ///
 /// 【为什么需要它】"宿主卡住"最难受的地方是无法归因：CPU 不高、X 也没被 grab，
@@ -1078,7 +1079,10 @@ fn tick() -> glib::ControlFlow {
             // 让路状态机）能在这里做 —— 与 Windows 的 §WM_TIMER§、macOS 的 §NSTimer§ 等价。
             client::tick(&client);
         } else {
-            // 情形 B：这里不是宿主线程，只推进投递；宿主侧由 §LinuxHost::host_tick§ 补做。
+            // 情形 B：这里不是宿主线程。**宿主 API 一律不碰** —— 宿主侧的心跳由
+            // `host/reaper/host_timer` 的宿主节拍驱动（见 `client::host_heartbeat`）。
+            // 这里只做客户端侧：让路状态机、bootstrap 补发、回执投递。
+            client::ui_tick(&client);
             client::pump(&client);
         }
         if client.borrow().is_dead() {

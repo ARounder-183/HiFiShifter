@@ -10,6 +10,24 @@ fn routes() -> &'static Mutex<HashMap<String, Weak<ExtensionOwner>>> {
     static ROUTES: OnceLock<Mutex<HashMap<String, Weak<ExtensionOwner>>>> = OnceLock::new();
     ROUTES.get_or_init(Default::default)
 }
+/// 进程内**全部仍存活**的编辑器链路（心跳遍历用）。
+///
+/// 【为什么需要一张表】宿主侧周期工作（时钟采样、宿主 Undo 收口、`setDirty` 冲刷）
+/// 必须跑在宿主主线程上，而它要的是一组 `EditorLink` —— 在独立进程形态（情形 B）里，
+/// 调用方手里没有客户端状态（那是 GTK 线程的 `Rc<RefCell<…>>`，不能跨线程）。
+/// 这张表只存 `Weak`：登记与回收都由 `EditorLink` 自己负责，不留悬空引用。
+fn links() -> &'static Mutex<Vec<Weak<EditorLink>>> {
+    static LINKS: OnceLock<Mutex<Vec<Weak<EditorLink>>>> = OnceLock::new();
+    LINKS.get_or_init(Default::default)
+}
+
+/// 仍在存活的全部链路；顺带回收已销毁的 `Weak`（表因此不会无限增长）。
+pub(crate) fn live_links() -> Vec<Arc<EditorLink>> {
+    let mut all = links().lock().unwrap_or_else(|e| e.into_inner());
+    all.retain(|link| link.strong_count() > 0);
+    all.iter().filter_map(Weak::upgrade).collect()
+}
+
 pub(crate) struct RouteLease {
     token: String,
 }
@@ -65,6 +83,16 @@ fn release_handler(pointer: usize) {
             let pointer = pointer as *mut c_void;
             ((**pointer.cast::<*const UnknownVtbl>()).release)(pointer);
         }
+    }
+}
+impl EditorLink {
+    /// 登记到心跳表（`Arc` 建成后调用一次）。重复登记同一链路不会重复计数。
+    pub(crate) fn register_heartbeat(self: &Arc<Self>) {
+        let mut all = links().lock().unwrap_or_else(|e| e.into_inner());
+        if all.iter().any(|link| std::ptr::eq(link.as_ptr(), Arc::as_ptr(self))) {
+            return;
+        }
+        all.push(Arc::downgrade(self));
     }
 }
 impl Drop for EditorLink {

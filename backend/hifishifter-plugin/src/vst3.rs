@@ -2313,7 +2313,13 @@ impl EditController {
             refcount: AtomicI32::new(1),
             connection_vtbl: &CONTROLLER_CONNECTION_VTBL,
             connection: Default::default(),
-            editor_link: Arc::new(Default::default()),
+            editor_link: {
+                let link = Arc::new(Default::default());
+                // 控制器在视图之前就可能持有 owner（宿主可以只走 IEditController 通道），
+                // 于是它也要进心跳表，否则那段时间里没有任何人推进宿主侧周期工作。
+                <crate::editor::routing::EditorLink>::register_heartbeat(&link);
+                link
+            },
             pending_state: std::sync::Mutex::new(None),
         }
     }
