@@ -12,8 +12,11 @@ Four surfaces exist, and all are legitimate:
   * the standalone app registers its commands in `backend/src-tauri/src/lib.rs`
     (`tauri::generate_handler![...]`);
   * the ARA plugin dispatches its own in `editor/commands.rs` (actor thread),
-    `editor/webview.rs` (UI thread, for anything needing an HWND), and
-    `capture/commands.rs` (forwarded from webview via `is_capture_command()`).
+    `editor/gui/client.rs` (the embedded editor's policy table, shared by all
+    platforms since the editor became a platform port - the former
+    `editor/webview.rs` UI-thread surface lives there now), and
+    `capture/commands.rs` (forwarded from the editor page via
+    `is_capture_command()`).
 
 A frontend method must appear in at least one of them. The reverse direction is
 deliberately *not* checked: a backend command with no frontend caller is normal
@@ -38,7 +41,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 INVOKE = ROOT / "frontend" / "src" / "services" / "invoke.ts"
 APP_LIB = ROOT / "backend" / "src-tauri" / "src" / "lib.rs"
 PLUGIN_ACTOR = ROOT / "backend" / "hifishifter-plugin" / "src" / "editor" / "commands.rs"
-PLUGIN_WEBVIEW = ROOT / "backend" / "hifishifter-plugin" / "src" / "editor" / "webview.rs"
+PLUGIN_EDITOR_UI = ROOT / "backend" / "hifishifter-plugin" / "src" / "editor" / "gui" / "client.rs"
 PLUGIN_CAPTURE = ROOT / "backend" / "hifishifter-plugin" / "src" / "capture" / "commands.rs"
 
 
@@ -88,7 +91,7 @@ def main() -> int:
     methods = frontend_methods(read(INVOKE))
     app = app_commands(read(APP_LIB))
     plugin = plugin_commands(
-        read(PLUGIN_ACTOR), read(PLUGIN_WEBVIEW), read(PLUGIN_CAPTURE)
+        read(PLUGIN_ACTOR), read(PLUGIN_EDITOR_UI), read(PLUGIN_CAPTURE)
     )
     known = app | plugin
 
