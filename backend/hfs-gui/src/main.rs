@@ -220,16 +220,21 @@ fn main() {
         // 【为什么 OnDemand 仍然守住了原来的顾虑】它是 WebKitGTK 的默认策略：能用 GPU
         // 就用，不能就自动退回软件路径。原来那条 `Never` 想避免的是「假设 GL 可用」，
         // 而 `OnDemand` 从不做这个假设 —— 它只是不在 GL 可用时白白放弃它。
-        // 【为什么留一个环境变量开关】OnDemand 修好了水平滚动时各层分离（软件光栅下
-        // DOM 与 WebGL2 画布不在同一个合成事务里）。但真机上又出现了"标签页切回来只
-        // 剩部分图层"的现象，而它既可能是画布 backing store 被丢弃，也可能是嵌入 X
-        // 窗口里的 GL 合成掉了。这两条修法完全不同，靠猜只会再来一轮。
+        // ── 硬件加速策略：默认开启（OnDemand），可显式关闭 ──────────────────
         //
-        // `HFS_GUI_ACCEL=never` 让现场直接 A/B：
-        //   · 设上之后问题消失 ⇒ 是 GL 合成的事，未走的路线是"让 OnDemand 与重绘共存"；
-        //   · 设上之后问题照旧 ⇒ 是各画布需要自己重绘，与合成无关。
+        // 现场 A/B 的两端都测过了，结论是「两个都不能少」：
+        //
+        //   · `Never`（软件光栅）：标签页切回来时各层完好；但**大量控件不对齐、漂移**
+        //     —— DOM 的 transform 与画布重绘不在同一个合成事务里，水平滚动时整片
+        //     界面都在错位。这比空白面板更糟：它让每一个控件都不可信。
+        //   · `OnDemand`（GPU）：几何一致；但标签页切回来后可能只剩部分画布。
+        //
+        // 默认取 `OnDemand`：几何正确是底线，而画布掉层有明确的修法（可见性重绘，
+        // 见 `WaveformSurface` 与两个内核宿主的 IntersectionObserver）。
+        // `HFS_GUI_ACCEL=never` 保留为对照实验用。
         let policy = match std::env::var("HFS_GUI_ACCEL").ok().as_deref() {
             Some("never") => webkit2gtk::HardwareAccelerationPolicy::Never,
+            Some("always") => webkit2gtk::HardwareAccelerationPolicy::Always,
             _ => webkit2gtk::HardwareAccelerationPolicy::OnDemand,
         };
         log_policy(policy);
