@@ -13,6 +13,17 @@ export function projectVisualPlayhead(
 }
 
 /**
+ * 把一次**已经过去**的采样补齐到当前时刻。
+ *
+ * 【与 `projectVisualPlayhead` 的分工】那个函数带 `hostControlled` 上限，约束的是
+ * "对未来推测多远"；本函数处理的是"过去已经过去了多久"，那是被测量的量，不该封顶。
+ * 两者分开命名，任何一处混用都会立刻表现为光标系统性落后于它自己报出的时间。
+ */
+export function catchUpSampledPlayhead(positionSec: number, ageSec: number): number {
+    return projectVisualPlayhead(positionSec, ageSec, false);
+}
+
+/**
  * 播放轮询采样仍被视为"新鲜"的最大年龄（秒）。
  *
  * 30Hz 轮询下，reducer 处理（≈IPC 到达）到 React 提交本 effect 通常只有
@@ -66,20 +77,45 @@ export function useVisualPlayhead({
         const now = performance.now();
         const sampledAtMs = typeof syncedAtMs === "number" && syncedAtMs > 0 ? syncedAtMs : NaN;
         const ageSec = Number.isFinite(sampledAtMs) ? Math.max(0, (now - sampledAtMs) / 1000) : NaN;
-        if (
-            advancingRef.current &&
-            Number.isFinite(ageSec) &&
-            ageSec <= PLAYHEAD_SAMPLE_FRESH_SEC
-        ) {
+        /*
+         * 【为什么宿主受控时不再要求"采样新鲜"】
+         *
+         * `PLAYHEAD_SAMPLE_FRESH_SEC` 存在的理由是：独立 App 的外推是**无界**的，
+         * 一个陈旧采样会让光标自行前漂数秒，所以必须靠"新鲜度"决定要不要外推。
+         *
+         * 插件模式的外推是**有界**的（`projectVisualPlayhead` 把它夹在 100 ms 内），
+         * 那个理由不成立；而继续套用同一条闸门反而制造了缺陷：插件命令的一次往返
+         * 超过 250 ms 时，这一支会走下面的"硬复位"，把光标拉回`syncedPlayheadSec`
+         * —— 那是**命令派发时刻**的位置，不是现在的位置。于是每收到一个采样就先
+         * 往回跳一个往返时延，再被下一帧外推追回去：用户看到的就是"偏移 + 随机闪"。
+         *
+         * 所以判据改成：正在前进、且（宿主受控 或 采样新鲜）就外推。
+         * 宿主受控时交给那个 100 ms 上限兜底，不需要也不应该再看新鲜度。
+         */
+        const hasAge = Number.isFinite(ageSec);
+        const fresh = hasAge && ageSec <= PLAYHEAD_SAMPLE_FRESH_SEC;
+        if (advancingRef.current && (hostControlled || fresh)) {
             // 新鲜的轮询采样：锚定采样时刻并外推到当前时刻。anchor 的
             // (值, 时刻) 二元组与 {synced@sampledAt} 表示同一条外推直线，
             // 因此 React 提交延迟与后续 RAF 帧的插值都不会引入滞后或回跳
             // （采样值本身已含 reducer 侧的往返时延外推，见
             // sessionSlice syncPlaybackState.fulfilled）。
-            const extrapolatedSec = projectVisualPlayhead(
+            /*
+             * 【为什么这里传 false（不封顶）】
+             *
+             * 那个 100 ms 上限的语义是"不要对未来**推测**太远"，它约束的是
+             * rAF 帧里 `elapsedSec` 那种**向前**的外推。
+             *
+             * 而这里的 `ageSec = now − sampledAtMs` 是**已经过去的、被测量到的**
+             * 时间：采样确实发生在那么久以前，把它补上不是推测，是还原。
+             *
+             * 此前这里也传了 `hostControlled`，于是每次采样只补 100 ms，剩下的
+             * 往返时延**永久丢失**——光标系统地落后于它自己报出的时间（"偏移"），
+             * 而下一个采样又把差值补回来一部分（"随机闪"）。
+             */
+            const extrapolatedSec = catchUpSampledPlayhead(
                 syncedPlayheadSec,
-                ageSec,
-                hostControlled,
+                hasAge ? ageSec : 0,
             );
             syncAnchorRef.current = {
                 playheadSec: extrapolatedSec,
