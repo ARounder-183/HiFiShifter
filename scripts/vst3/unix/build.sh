@@ -509,9 +509,13 @@ stage_bundle() {
   # 所以编辑器跑在独立进程里，插件按"与 .so 同目录"去找它。
   case "$MODULE_SUBDIR" in *-linux)
     log "构建渲染进程 hfs-gui"
+    # 【为什么不加 stable 兜底】ensure_toolchain 已保证 rust-toolchain.toml 钉死的
+    # 版本可用（pinned 未装时复用同版本工具链并导出 RUSTUP_TOOLCHAIN）。此前回落
+    # "stable" 会让同一 bundle 里插件用 pinned 工具链、渲染进程用 stable —— 违背
+    # "本机与 CI 共用同一把尺子"的方针；且只装了 pinned 的机器上 stable 根本不存在，
+    # cargo 直接报 "toolchain 'stable' is not installed"，错误与原因隔了一层。
     ( cd "$REPO_ROOT/backend/hfs-gui" && \
-      RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-stable}" cargo build --release \
-        --offline --target-dir "$TARGET_DIR/hfs-gui" ) \
+      cargo build --release --offline --target-dir "$TARGET_DIR/hfs-gui" ) \
       || die "hfs-gui 构建失败"
     cp -f "$TARGET_DIR/hfs-gui/release/hfs-gui" \
       "$BUNDLE_DIR/$MODULE_SUBDIR/hfs-gui"
