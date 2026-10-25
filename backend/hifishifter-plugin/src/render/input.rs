@@ -652,7 +652,6 @@ impl RenderInput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sync::MutexExt;
 
     /// 一份只有覆盖信息不同的源（其余字段无关）。
     fn source_with_coverage(covered: Vec<std::ops::Range<usize>>) -> Arc<SourcePcm> {
@@ -778,9 +777,6 @@ mod tests {
         crate::editor::resources::initialize_models();
         hifishifter_kernel::hnsep_onnx::clear_separation_cache();
         hifishifter_kernel::renderer::hifigan::clear_chunk_cache();
-        hifishifter_kernel::synth_clip_cache::global_synth_clip_cache()
-            .lock_or_recover()
-            .clear();
         let seconds = 180.;
         let frames = 44100 * 180;
         let budget = super::super::budget::global_budget();
@@ -1097,9 +1093,6 @@ mod tests {
         };
         let parameters = timeline.params_by_root_track["track"].clone();
         hifishifter_kernel::renderer::hifigan::clear_chunk_cache();
-        hifishifter_kernel::synth_clip_cache::global_synth_clip_cache()
-            .lock_or_recover()
-            .clear();
         let mut input = RenderInput {
             timeline: Some(timeline),
             regions: vec![region],

@@ -1023,9 +1023,12 @@ impl CaptureStore {
         }
         // 【T19：先把上一轮竞争留下的块补写进去】补写必须在**拿到锁之后**做，
         // 否则补写本身又可能失败。顺序固定：先补旧的，再写新的。
-        let deferred = {
-            let mut slots = self.bypass.lock_or_recover();
-            slots.drain_pending()
+        // 【为什么 try 而不是等】这把锁的另一个持有者是非音频侧的诊断读数
+        //（bypass_pending）。音频回调里阻塞等锁是优先级反转窗口；拿不到就
+        // 本块不补写（deferred 块留在槽里，下一块再试），不丢任何数据。
+        let deferred = match crate::sync::try_lock_or_recover(&self.bypass) {
+            Some(mut slots) => slots.drain_pending(),
+            None => Vec::new(),
         };
         if !deferred.is_empty() {
             // 补写本身也要拿到同一把锁；拿不到就原样还回去（下一轮再补），
@@ -1114,7 +1117,11 @@ impl CaptureStore {
         if !enough {
             return false;
         }
-        let mut slots = self.bypass.lock_or_recover();
+        // 同上：音频线程不等锁。拿不到就把本块计入丢弃（调用方的计数路径）。
+        let mut slots = match crate::sync::try_lock_or_recover(&self.bypass) {
+            Some(slots) => slots,
+            None => return false,
+        };
         let Some(free_index) = slots.free_index() else {
             return false;
         };
@@ -1157,19 +1164,25 @@ impl CaptureStore {
     /// 拆出来再拼回去，多一层结构。整块还回去即可：`defer_block` 经
     /// `pop_spare_planes` 取走平面，形状一致。池满即丢（容量上限 = 槽数）。
     fn recycle(&self, block: DeferredBlock) {
-        let mut slots = self.bypass.lock_or_recover();
-        if slots.spare.len() < BYPASS_SLOTS {
-            slots.spare.push(block);
+        // 拿不到锁（罕见：诊断读数恰好持锁）就放弃入池，平面随块释放 ——
+        // 与池满时同样的降级，下一轮竞争时重新分配一次。
+        if let Some(mut slots) = crate::sync::try_lock_or_recover(&self.bypass) {
+            if slots.spare.len() < BYPASS_SLOTS {
+                slots.spare.push(block);
+            }
         }
     }
 
     /// 【T19】补写失败时把块放回槽位（下一轮再补）。
     fn requeue(&self, blocks: Vec<DeferredBlock>) {
         for block in blocks {
-            let mut slots = self.bypass.lock_or_recover();
-            if let Some(index) = slots.free_index() {
-                slots.slots[index] = Some(block);
+            if let Some(mut slots) = crate::sync::try_lock_or_recover(&self.bypass) {
+                if let Some(index) = slots.free_index() {
+                    slots.slots[index] = Some(block);
+                }
             }
+            // 拿不到锁：块被丢弃。recorder 的覆盖写判据会按 Gap 处理，
+            // 比把音频回调挂在锁上等待更可取。
         }
     }
 

@@ -45,6 +45,20 @@ impl<T> MutexExt<T> for Mutex<T> {
     }
 }
 
+/// `Mutex::try_lock` 的毒化恢复版本：锁被其它线程持有时返回 `None`。
+///
+/// 【为什么音频线程要用它而不是 lock_or_recover】阻塞 `lock` 在音频回调里是
+/// 优先级反转窗口：非音频侧（诊断读数等）持锁瞬间被抢占，音频线程就被挂起。
+/// 竞争窗口里宁可走"本块丢弃 / 本次不入池"的既有计数路径，也不冒把回调
+/// 挂起的风险；毒化仍按全仓策略恢复（互斥语义在毒化后仍然成立）。
+pub(crate) fn try_lock_or_recover<T>(mutex: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
+    match mutex.try_lock() {
+        Ok(guard) => Some(guard),
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+        Err(std::sync::TryLockError::WouldBlock) => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::MutexExt;

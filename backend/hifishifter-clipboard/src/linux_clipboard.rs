@@ -58,6 +58,10 @@ struct IncrTransfer {
     property: x::Atom,
     target: x::Atom,
     pos: usize,
+    /// 启动传输时的数据快照。INCR 在握手时声明了总字节数；此后每次写入新
+    /// 剪贴板内容都替换 `entries`，若逐块回查当前 entries，传输会中途改数据、
+    /// 与声明尺寸失配（协议损坏）。快照让在途传输稳定送完，新内容由新请求承接。
+    data: Arc<Vec<u8>>,
 }
 
 struct X11Atoms {
@@ -139,44 +143,46 @@ struct X11Owner {
     refresh: Sender<()>,
 }
 
-static X11_OWNER: OnceLock<Mutex<X11Owner>> = OnceLock::new();
+/// 服务线程退出（X 连接断开）时把槽位清空，下一次 `x11_owner()` 重建上下文
+/// 与线程 —— 否则 OnceLock 里留着一条死线程的残骸，此后的每次剪贴板写入都
+/// 静默无人服务。
+static X11_OWNER: OnceLock<Mutex<Option<X11Owner>>> = OnceLock::new();
 
-fn x11_owner() -> Result<&'static Mutex<X11Owner>, String> {
-    if let Some(owner) = X11_OWNER.get() {
-        return Ok(owner);
+fn x11_owner() -> Result<Arc<X11Owner>, String> {
+    let slot = X11_OWNER.get_or_init(|| Mutex::new(None));
+    // 【为什么在整个初始化期间持锁】并发的第二个调用者会等待而不是各建一套
+    // （旧实现两个线程同时初始化时，输家多出一条永不退出的服务线程与一个
+    /// 无人收割的 X 连接 —— 一次性泄漏）。
+    let mut guard = slot
+        .lock()
+        .map_err(|_| "clipboard_x11_lock_failed".to_string())?;
+    if let Some(owner) = guard.as_ref() {
+        return Ok(Arc::clone(owner));
     }
 
     let context = Arc::new(X11Context::new()?);
     let entries = Arc::new(RwLock::new(Vec::<ClipboardEntry>::new()));
     let (refresh, refresh_receiver) = mpsc::channel::<()>();
 
+    let owner = Arc::new(X11Owner {
+        context: Arc::clone(&context),
+        entries: Arc::clone(&entries),
+        refresh,
+    });
+
     let serve_context = Arc::clone(&context);
     let serve_entries = Arc::clone(&entries);
     thread::Builder::new()
         .name("hifishifter-x11-clipboard".to_string())
-        .spawn(move || x11_serve(serve_context, serve_entries, refresh_receiver))
+        .spawn(move || x11_serve(serve_context, serve_entries, refresh_receiver, slot))
         .map_err(|error| format!("clipboard_x11_thread_failed: {error}"))?;
 
-    let owner = X11Owner {
-        context,
-        entries,
-        refresh,
-    };
-    match X11_OWNER.set(Mutex::new(owner)) {
-        Ok(()) => X11_OWNER
-            .get()
-            .ok_or_else(|| "clipboard_x11_init_failed".to_string()),
-        Err(_) => X11_OWNER
-            .get()
-            .ok_or_else(|| "clipboard_x11_init_failed".to_string()),
-    }
+    *guard = Some(Arc::clone(&owner));
+    Ok(owner)
 }
 
 fn write_x11_multi(formats: &[(&str, &[u8])]) -> Result<(), String> {
-    let owner_guard = x11_owner()?;
-    let owner = owner_guard
-        .lock()
-        .map_err(|_| "clipboard_x11_lock_failed".to_string())?;
+    let owner = x11_owner()?;
 
     let mut next_entries = Vec::with_capacity(formats.len());
     for (target, bytes) in formats {
@@ -221,18 +227,34 @@ fn x11_serve(
     context: Arc<X11Context>,
     entries: Arc<RwLock<Vec<ClipboardEntry>>>,
     refresh: Receiver<()>,
+    owner_slot: &'static Mutex<Option<X11Owner>>,
 ) {
-    let mut incr_transfers: HashMap<x::Atom, IncrTransfer> = HashMap::new();
+    // 【为什么按 (requestor, property) 键控】只按 property atom 键控时，两个
+    // 粘贴方用同名 property（如都叫 XCLIP_OUT）会互相覆盖 —— 后到的把先到的
+    // 传输顶掉，块被写给错误的窗口。
+    let mut incr_transfers: HashMap<(x::Window, x::Atom), IncrTransfer> = HashMap::new();
 
     loop {
-        while let Ok(()) = refresh.try_recv() {
-            incr_transfers.clear();
-        }
+        // 新内容写入不再清空在途传输：每条传输持有启动时的数据快照（见
+        // IncrTransfer.data），送完它声明过的内容才是协议正确的行为；旧实现
+        // 在 refresh 一到就 clear()，正被读取的传输被腰斩，请求方只能挂到超时。
+        while let Ok(()) = refresh.try_recv() {}
 
         // xcb 1.x：事件是 `xcb::Event::X(x::Event::…)` 枚举，不再靠
         // `response_type()` + `cast_event` 手工还原。
-        let Ok(event) = context.connection.wait_for_event() else {
-            continue;
+        //
+        // 【为什么错误要 break 而不是 continue】连接断开后 wait_for_event 每次
+        // 立即返回 Err —— `continue` 是无 sleep 的 100% CPU 自旋。退出服务线程
+        // 并清空 owner 槽位，下一次剪贴板操作重建整套上下文。
+        let event = match context.connection.wait_for_event() {
+            Ok(event) => event,
+            Err(error) => {
+                log::warn!("x11 clipboard: connection closed ({error:?}); service thread exiting");
+                if let Ok(mut guard) = owner_slot.lock() {
+                    *guard = None;
+                }
+                break;
+            }
         };
 
         match event {
@@ -284,12 +306,13 @@ fn x11_serve(
                             data: &[entry.data.len().min(u32::MAX as usize) as u32],
                         });
                         incr_transfers.insert(
-                            event.property(),
+                            (event.requestor(), event.property()),
                             IncrTransfer {
                                 requestor: event.requestor(),
                                 property: event.property(),
                                 target: event.target(),
                                 pos: 0,
+                                data: Arc::new(entry.data.clone()),
                             },
                         );
                         success = true;
@@ -321,32 +344,21 @@ fn x11_serve(
                     continue;
                 }
 
-                let Some(transfer) = incr_transfers.get_mut(&event.atom()) else {
+                let Some(transfer) = incr_transfers.get_mut(&(event.window(), event.atom())) else {
                     continue;
                 };
-                let Ok(current_entries) = entries.read() else {
-                    continue;
-                };
-                let Some(entry) = current_entries
-                    .iter()
-                    .find(|entry| entry.target == transfer.target)
-                else {
-                    incr_transfers.remove(&event.atom());
-                    continue;
-                };
-
-                let remaining = entry.data.len().saturating_sub(transfer.pos);
+                let remaining = transfer.data.len().saturating_sub(transfer.pos);
                 let chunk_len = remaining.min(INCR_CHUNK_SIZE);
                 context.connection.send_request(&x::ChangeProperty {
                     mode: x::PropMode::Replace,
                     window: transfer.requestor,
                     property: transfer.property,
                     r#type: transfer.target,
-                    data: &entry.data[transfer.pos..transfer.pos + chunk_len],
+                    data: &transfer.data[transfer.pos..transfer.pos + chunk_len],
                 });
                 transfer.pos += chunk_len;
                 if chunk_len == 0 {
-                    incr_transfers.remove(&event.atom());
+                    incr_transfers.remove(&(event.window(), event.atom()));
                 }
                 let _ = context.connection.flush();
             }

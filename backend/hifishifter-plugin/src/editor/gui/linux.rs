@@ -465,7 +465,16 @@ mod remote {
             .ok_or_else(|| "the editor process (hfs-gui) is not next to the plug-in".to_string())?;
         let (commands, incoming) = channel::<Command>();
         let link = request.link.clone();
-        let (parent, width, height) = (request.parent, request.width, request.height);
+        // 【为什么必须带上 embedded】Wayland 宿主给的是 surface id（embedded=false，
+        // 浮窗语义），那个值**不是 X 窗口** —— 丢了标志、无条件 `--parent` 传下去，
+        // hfs-gui 会对着非 X 句柄做 XReparentWindow（BadWindow）。非嵌入时干脆
+        // 不传 --parent，让渲染进程走它自己的浮窗路径。
+        let (parent, width, height, embedded) = (
+            request.parent,
+            request.width,
+            request.height,
+            request.embedded,
+        );
 
         // 驱动线程的生命期不受卸载协商约束（宿主不知道它存在），先把模块钉住，
         // 再起线程 —— `ExitDll` 的 FreeLibrary 从此变成无害的引用计数递减。
@@ -475,7 +484,9 @@ mod remote {
             .name("hfs-editor".into())
             .spawn(move || {
                 let _lease = DriverLease;
-                driver(link, helper, assets, parent, width, height, incoming)
+                driver(
+                    link, helper, assets, parent, width, height, embedded, incoming,
+                )
             })
             .map_err(|error| {
                 REMOTE_DRIVERS.fetch_sub(1, Ordering::AcqRel);
@@ -509,10 +520,13 @@ mod remote {
         parent: NativeWindow,
         width: i32,
         height: i32,
+        embedded: bool,
         commands: Receiver<Command>,
     ) {
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            driver_session(link, helper, assets, parent, width, height, commands)
+            driver_session(
+                link, helper, assets, parent, width, height, embedded, commands,
+            )
         }));
         if outcome.is_err() {
             crate::gui_log_line("the editor driver thread panicked; the helper process was reaped");
@@ -542,6 +556,7 @@ mod remote {
         parent: NativeWindow,
         width: i32,
         height: i32,
+        embedded: bool,
         commands: Receiver<Command>,
     ) {
         let (events_tx, events) = channel::<serde_json::Value>();
@@ -565,9 +580,13 @@ mod remote {
                 .mark_dead("the editor bootstrap could not be written");
             return;
         }
-        let mut child = match std::process::Command::new(&helper)
-            .arg("--parent")
-            .arg(format!("0x{parent:x}"))
+        let mut command = std::process::Command::new(&helper);
+        // embedded=false（Wayland surface id）时 parent 不是 X 窗口：不传 --parent，
+        // hfs-gui 走浮窗路径（见 attach 处的说明）。
+        if embedded {
+            command.arg("--parent").arg(format!("0x{parent:x}"));
+        }
+        let mut child = match command
             .arg("--width")
             .arg(width.to_string())
             .arg("--height")
