@@ -598,12 +598,18 @@ pub(crate) fn host_tick(link: &Arc<crate::editor::routing::EditorLink>) {
 /// 现在它只有一个调用方：`host/reaper/host_timer` 的宿主节拍（外加情形 A 的定时器）。
 /// 两个驱动、一份实现 —— 两种形态下行为逐字相同。
 pub(crate) fn host_heartbeat() {
+    // 【为什么先按 owner 遍历】宿主时钟采样只需要 owner。链路要等前端 `bind` 之后
+    // 才拿得到 owner —— 只按链路走，会出现「心跳在跑、采样却几乎不发生」：
+    // 现场日志里传送来源以约 0.7 次/秒反复切换，正是宿主读数一次次过期的形状。
+    let owners = crate::editor::routing::live_owners();
+    for owner in &owners {
+        owner.refresh_host_transport_tick();
+    }
+    // 链路侧的收尾（私有状态通知、宿主 Undo 收口）仍然按链路走。
     for link in crate::editor::routing::live_links() {
         host_tick(&link);
-        if let Ok(owner) = link.owner() {
-            owner.refresh_host_transport_tick();
-        }
     }
+    crate::host::reaper::host_heartbeat_report(owners.len());
 }
 
 /// 只碰客户端自身状态的周期工作：**不调用任何宿主 API**，因此可以在任意线程跑。

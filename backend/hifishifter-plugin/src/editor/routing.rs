@@ -21,6 +21,28 @@ fn links() -> &'static Mutex<Vec<Weak<EditorLink>>> {
     LINKS.get_or_init(Default::default)
 }
 
+/// 仍在存活的全部**组件 owner**（心跳用）。
+///
+/// 【为什么还要这一条】链路（`EditorLink`）要等编辑器视图建立、并且前端把
+/// 租约 `bind` 上来之后才拿得到 owner；而宿主侧周期工作只需要 owner。
+/// 只依赖链路，就会出现「心跳在跑、却一个 owner 都没遍历到」——采样频率掉到
+/// 只有命令驱动的那几次，宿主读数因此反复过期。
+pub(crate) fn live_owners() -> Vec<Arc<ExtensionOwner>> {
+    let mut all = routes().lock().unwrap_or_else(|e| e.into_inner());
+    all.retain(|_, owner| owner.strong_count() > 0);
+    let mut owners: Vec<Arc<ExtensionOwner>> = Vec::new();
+    for owner in all.values().filter_map(Weak::upgrade) {
+        if owners
+            .iter()
+            .any(|known| std::ptr::eq(Arc::as_ptr(known), Arc::as_ptr(&owner)))
+        {
+            continue;
+        }
+        owners.push(owner);
+    }
+    owners
+}
+
 /// 仍在存活的全部链路；顺带回收已销毁的 `Weak`（表因此不会无限增长）。
 pub(crate) fn live_links() -> Vec<Arc<EditorLink>> {
     let mut all = links().lock().unwrap_or_else(|e| e.into_inner());

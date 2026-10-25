@@ -40,6 +40,17 @@ static TIMERS: std::sync::Mutex<TimerState> = std::sync::Mutex::new(TimerState {
 /// 心跳计数：用来证明"注册成功"之外，节拍**真的在跑**。
 static TICKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// 最近一次心跳遍历到的 owner 数（由 `host_heartbeat` 每拍写入）。
+static OWNERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// 记录本拍遍历到的 owner 数；在第 200 拍把它并进那一行诊断。
+///
+/// 【为什么要数它】"心跳在跑"与"心跳采到了样"是两件事。上一版只证明了前者，
+/// 而采不到样的心跳和没有心跳的症状完全一样 —— 这一行把两者分开。
+pub(crate) fn host_heartbeat_report(owners: usize) {
+    OWNERS.store(owners, std::sync::atomic::Ordering::Relaxed);
+}
+
 extern "C" fn host_timer_tick() {
     let _ = std::panic::catch_unwind(|| {
         // 【为什么要数节拍并按条打点】`plugin_register("timer")` 返回非零只说明
@@ -48,7 +59,11 @@ extern "C" fn host_timer_tick() {
         // 会话两行，换来的是"节拍到底跑没跑"这个二值答案。
         let ticks = TICKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         if ticks == 1 || ticks == 200 {
-            log::warn!("[reaper-host] host timer tick #{ticks} (read by the host's main loop)");
+            let owners = OWNERS.load(std::sync::atomic::Ordering::Relaxed);
+            log::warn!(
+                "[reaper-host] host timer tick #{ticks} (read by the host's main loop, \
+                 {owners} owner(s) sampled)"
+            );
         }
         // 1) 先排空投递队列：编辑器命令要回到这条线程上执行。
         crate::host::marshal::pump();

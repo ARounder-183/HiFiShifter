@@ -14,6 +14,7 @@ mod ui_inventory;
 pub(crate) use ui_inventory::{UiItem, UiTrack};
 mod folder;
 mod host_timer;
+pub(crate) use host_timer::host_heartbeat_report;
 // 宿主原生执行层：写回 / 分割 / 剪贴板 / Undo 调度。它们直接调用 REAPER API，
 // 因此整体住在本模块内；通用层只经 `crate::host` 的中立门面访问。
 pub(crate) mod clipboard;
