@@ -3637,6 +3637,9 @@ function AppInner() {
         if (!isPluginMode()) return;
         let disposed = false;
         let unsubscribe: (() => void) | null = null;
+        // 【为什么补 catch】与同文件所有兄弟调用点同一纪律：插件形态下
+        // `pluginHost` 在 dispose 之后（pagehide、会话终态、热重载窗口）会拒绝
+        // listen —— 不接住就会进全局 unhandledrejection 上报，被当错误刷屏。
         void listenHostEvent<{ paths?: unknown }>("native_drop", (event) => {
             const paths = Array.isArray(event.payload?.paths)
                 ? event.payload.paths.filter(
@@ -3659,10 +3662,12 @@ function AppInner() {
                     }),
                 );
             }
-        }).then((off) => {
-            if (disposed) off();
-            else unsubscribe = off;
-        });
+        })
+            .then((off) => {
+                if (disposed) off();
+                else unsubscribe = off;
+            })
+            .catch(() => undefined);
         return () => {
             disposed = true;
             unsubscribe?.();

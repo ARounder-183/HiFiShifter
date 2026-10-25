@@ -43,10 +43,10 @@
 import { TOOLBAR_MAX_TIER, slotDisplay, type SlotRange } from "./toolbarOverflow";
 
 /** 槽位"从第几级起隐藏"的属性（渲染与测量共用）。 */
-export const HIDE_AT_ATTR = "data-hide-at";
+const HIDE_AT_ATTR = "data-hide-at";
 
 /** 槽位"从第几级起才显示"的属性（「⋯」按钮用）。 */
-export const SHOW_AT_ATTR = "data-show-at";
+const SHOW_AT_ATTR = "data-show-at";
 
 const SLOT_SELECTOR = `[${HIDE_AT_ATTR}], [${SHOW_AT_ATTR}]`;
 

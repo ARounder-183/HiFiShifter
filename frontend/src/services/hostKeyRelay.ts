@@ -17,7 +17,7 @@
  */
 import { canControlHostTransport, capabilityForAction, isPluginMode } from "./hostCapabilities";
 import { hostKeysApi, type HostKeyModifiers } from "./api/hostKeys";
-import { getPluginHost } from "./pluginHost";
+import { getPluginHost, PluginInvokeError } from "./pluginHost";
 import { firstBinding, isNoneBindingList } from "../features/keybindings/keybindingsSlice";
 import type { ActionId, KeybindingMap } from "../features/keybindings/types";
 import type { EditSurfaceId } from "../features/uiFocus/focusSurface";
@@ -88,7 +88,7 @@ export function isRelayableStroke(stroke: HostKeyStroke): boolean {
 }
 
 /** 键位的稳定标识（用于去重与集合比对）。 */
-export function strokeId(stroke: HostKeyStroke): string {
+function strokeId(stroke: HostKeyStroke): string {
     return stroke.key;
 }
 
@@ -205,9 +205,15 @@ export async function relayHostKey(
             return "unsupported";
         }
         return "accepted";
-    } catch {
-        // 旧后端没有这条命令（`method not wired yet`）或会话已终态：同样是"让不成立"。
-        relayUnsupported = true;
+    } catch (cause) {
+        // 【为什么按 kind 分流】只有**终态**失败才值得烧闩锁：旧后端没有这条命令
+        // （method not wired yet）、会话已终态。`invoke` 的 30s 超时、pending≥128
+        // 的背压、一次瞬态 IPC 抖动都会 reject —— 把暂态失败也闩死，Space/Enter 的
+        // 宿主让路就在余下整个会话里静默失效且不可自愈（第 5 轮审查 P3-3）。
+        // 暂态失败保持可重试：用户下一拍按键就是重试。
+        if (cause instanceof PluginInvokeError && cause.kind === "terminal") {
+            relayUnsupported = true;
+        }
         return "unsupported";
     }
 }

@@ -408,9 +408,11 @@ export function handleCanvasPointerDown(
     // Middle mouse: pan (time axis)
     if (e.button === 1) {
         e.preventDefault();
-        setCanvasCursor("grabbing");
         const scroller = scrollerRef.current;
+        // 【为什么先判空再换光标】光标由 onEnd 恢复；中键分支在 ref 为空时不建手势、
+        // 也没有 onEnd —— 先设 "grabbing" 再 return 会把光标永远挂住。
         if (!scroller) return;
+        setCanvasCursor("grabbing");
         const pid = e.pointerId;
         panRef.current = {
             pointerId: pid,

@@ -112,7 +112,7 @@ export function shouldWriteNumber(next: number, previous: number, epsilon = 0.01
 }
 
 /** 播放头 RGBA 的解析缓存（键 = 解析后的 CSS 颜色字符串）。 */
-export const playheadRgbaCache = new Map<string, [number, number, number, number]>();
+const playheadRgbaCache = new Map<string, [number, number, number, number]>();
 
 /**
  * 解析参数编辑器播放头的 GL 颜色（与上方标尺同源）。

@@ -12,7 +12,7 @@
  */
 
 /** 线性增益下界（0 = −inf dB，静音）。 */
-export const GAIN_MIN_LINEAR = 0;
+const GAIN_MIN_LINEAR = 0;
 
 /** 线性增益上界（16 = +24.08 dB，与 REAPER 的 item 增益上限一致）。 */
 export const GAIN_MAX_LINEAR = 16;
@@ -48,7 +48,7 @@ export const GAIN_TAPER_FLOOR_DB = -60;
  * 一致）。棘齿若占 6px，下半程就只剩 42px，灵敏度变成 1.43 dB/px —— 用户明确要求过
  * "范围变大不能让旋钮变灵敏"，所以宁可让棘齿只是一格"到底"的吸附。
  */
-export const GAIN_SILENCE_DETENT_PX = 1;
+const GAIN_SILENCE_DETENT_PX = 1;
 
 /** dB 上界（由线性上界反算，见文件头）。 */
 export const GAIN_MAX_DB = 20 * Math.log10(GAIN_MAX_LINEAR);
@@ -109,11 +109,6 @@ export function formatGainDbValue(db: number): string {
     if (Math.abs(rounded) < 0.05) return "0";
     const sign = rounded > 0 ? "+" : "";
     return Number.isInteger(rounded) ? `${sign}${rounded}` : `${sign}${rounded.toFixed(1)}`;
-}
-
-/** dB → 线性。 */
-export function dbToGainSafe(db: number): number {
-    return clampGain(Math.pow(10, clampGainDb(db) / 20));
 }
 
 /**

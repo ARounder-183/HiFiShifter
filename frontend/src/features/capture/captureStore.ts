@@ -54,9 +54,20 @@ function publish(next: CaptureSnapshot): void {
     for (const listener of listeners) listener();
 }
 
-/** 内容相同就保留旧引用：订阅者不该因为"又轮询了一次"而重渲染。 */
+/**
+ * 内容相同就保留旧引用：订阅者不该因为"又轮询了一次"而重渲染。
+ *
+ * 【为什么是序列化比较而不是引用比较】`captureApi.status()` 每 200ms 经 IPC 反序列化
+ * 出**全新对象**，引用永不相等 —— 旧判据等于从未生效，订阅者恒定 5Hz 空重渲染
+ * （第 5 轮审查 P2-1）。
+ * 【为什么是 JSON.stringify 而不是字段枚举】`CaptureStatus` 的形状由后端定义且仍在
+ * 演进，新增字段不该悄悄变成"内容变了"；一次 stringify 的开销远低于一次全栏重渲染。
+ */
+let lastStatusJson: string | null = null;
 function withStatus(status: CaptureStatus): CaptureSnapshot {
-    if (snapshot.status === status) return snapshot;
+    const json = JSON.stringify(status);
+    if (snapshot.status !== null && json === lastStatusJson) return snapshot;
+    lastStatusJson = json;
     return { ...snapshot, status };
 }
 
@@ -76,18 +87,10 @@ export function useCaptureSnapshot(): CaptureSnapshot {
     return useSyncExternalStore(subscribeCapture, getCaptureSnapshot, getCaptureSnapshot);
 }
 
-/** 只关心状态的那部分调用方（多数）用这个，避免为 `busy` 的变化重渲染。 */
-export function useCaptureStatus(): CaptureStatus | null {
-    return useSyncExternalStore(
-        subscribeCapture,
-        () => snapshot.status,
-        () => snapshot.status,
-    );
-}
-
 /** 仅供测试重置模块级状态。 */
 export function resetCaptureStoreForTests(): void {
     snapshot = EMPTY;
+    lastStatusJson = null;
     listeners.clear();
 }
 
