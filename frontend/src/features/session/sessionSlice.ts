@@ -637,6 +637,17 @@ export interface SessionState {
 
     playheadSec: number;
     /**
+     * playheadSec 最近一次由**本地写入**（拖拽 / seek / 粘贴）设置时的
+     * `performance.now()`；0 表示从未。
+     *
+     * 【为什么需要它】拖拽播放头时前端连续写 playheadSec，而 4~5 Hz 的
+     * `get_playback_state` 轮询同时在读**宿主**的编辑光标 —— 那个光标要等
+     * `set_transport` 回写之后才会跟上。于是拖拽期间每一个轮询都会把光标
+     * 拽回旧位置，下一帧拖拽又把它拉回鼠标处：用户看到的就是"跳回去再跳回来"。
+     * 本地写入之后的一小段窗口内，停止态的轮询不再覆盖光标。
+     */
+    playheadLocalAtMs: number;
+    /**
      * playheadSec 最近一次由**播放轮询**写入时的 performance.now()（毫秒，
      * 与 RAF/视觉插值同一时钟源；0 表示从未由轮询写入）。
      *
@@ -2423,6 +2434,7 @@ const initialState: SessionState = {
     playbackRateVersion: 0,
 
     playheadSec: 0,
+    playheadLocalAtMs: 0,
     playheadSampledAtMs: 0,
     pendingPlayheadRevealSec: null,
     tracks: [
@@ -3358,6 +3370,7 @@ const sessionSlice = createSlice({
         },
         setplayheadSec(state, action: PayloadAction<number>) {
             state.playheadSec = Math.max(0, action.payload);
+            state.playheadLocalAtMs = performance.now();
         },
         /** 设置/清除待执行的“聚焦播放光标”请求（见 pendingPlayheadRevealSec 注释）。 */
         setPendingPlayheadReveal(state, action: PayloadAction<number | null>) {
@@ -5073,7 +5086,12 @@ const sessionSlice = createSlice({
                 // 锚点回写负责）。
                 // 该规则同时使"常驻低频看门狗轮询"（见 App.tsx）安全：未播放时
                 // 采样通常读到 0，只用于纠正 isPlaying 镜像，不触碰光标。
-                if (nextIsPlaying || nextplayheadSec > 0) {
+                // 【为什么停止态要避让本地写入】见 `playheadLocalAtMs` 的注释：
+                // 拖拽/seek 之后宿主光标还没跟上，这一拍读到的旧值会把光标拽回去。
+                // 300 ms 覆盖"拖拽过程中"与"seek 刚发出"两个窗口；播放态不受影响。
+                const localWriteRecent =
+                    !nextIsPlaying && sampledNowMs - state.playheadLocalAtMs < 300;
+                if (!localWriteRecent && (nextIsPlaying || nextplayheadSec > 0)) {
                     state.runtime.playbackPositionSec = nextPositionSec;
                     if (nextplayheadSec !== state.playheadSec) {
                         state.playheadSec = nextplayheadSec;
