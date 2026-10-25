@@ -132,6 +132,10 @@ impl NativeHost {
         track: *mut c_void,
         authorized: &impl Fn() -> bool,
     ) -> Result<i32, String> {
+        // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
+        if std::thread::current().id() != self.thread {
+            return self.on_host(|| self.track_folder_depth(track, authorized))?;
+        }
         if std::thread::current().id() != self.thread {
             return Err("REAPER track inventory queried outside host thread".into());
         }
@@ -158,6 +162,10 @@ impl NativeHost {
         &self,
         authorized: &impl Fn() -> bool,
     ) -> Result<HostFolderTree, String> {
+        // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
+        if std::thread::current().id() != self.thread {
+            return self.on_host(|| self.folder_tree(authorized))?;
+        }
         if std::thread::current().id() != self.thread {
             return Err("REAPER track inventory queried outside host thread".into());
         }

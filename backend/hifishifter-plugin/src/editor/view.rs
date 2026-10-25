@@ -437,6 +437,12 @@ impl Drop for EnterExit {
 }
 
 unsafe extern "system" fn get_size(this: *mut c_void, rect: *mut ViewRect) -> TResult {
+    // 【宿主线程泵】宿主只在自己的 model/UI 线程上调用视图回调，而编辑器命令跑在
+    // 插件的私有 GTK 线程与会话 actor 线程上。宿主 API 只认那条线程，于是这里 ——
+    // 以及注册到宿主的 `plugin_register("timer")` 节拍 —— 是 `host::marshal` 唯一
+    // 能拿到宿主线程的两个入口。视图回调只在宿主重排窗口时来，所以它不是主力，
+    // 但它是**不依赖宿主支持任何额外能力**的那一条。
+    crate::host::marshal::pump();
     let _guard = EnterExit::new("get_size");
     if rect.is_null() {
         return K_INVALID_ARGUMENT;
@@ -453,6 +459,12 @@ unsafe extern "system" fn get_size(this: *mut c_void, rect: *mut ViewRect) -> TR
     })
 }
 unsafe extern "system" fn on_size(this: *mut c_void, rect: *mut ViewRect) -> TResult {
+    // 【宿主线程泵】宿主只在自己的 model/UI 线程上调用视图回调，而编辑器命令跑在
+    // 插件的私有 GTK 线程与会话 actor 线程上。宿主 API 只认那条线程，于是这里 ——
+    // 以及注册到宿主的 `plugin_register("timer")` 节拍 —— 是 `host::marshal` 唯一
+    // 能拿到宿主线程的两个入口。视图回调只在宿主重排窗口时来，所以它不是主力，
+    // 但它是**不依赖宿主支持任何额外能力**的那一条。
+    crate::host::marshal::pump();
     let _guard = EnterExit::new("on_size");
     if rect.is_null() {
         return K_INVALID_ARGUMENT;
@@ -579,6 +591,12 @@ unsafe extern "system" fn set_frame(this: *mut c_void, frame: *mut c_void) -> TR
     })
 }
 unsafe extern "system" fn can_resize(_this: *mut c_void) -> TResult {
+    // 【宿主线程泵】宿主只在自己的 model/UI 线程上调用视图回调，而编辑器命令跑在
+    // 插件的私有 GTK 线程与会话 actor 线程上。宿主 API 只认那条线程，于是这里 ——
+    // 以及注册到宿主的 `plugin_register("timer")` 节拍 —— 是 `host::marshal` 唯一
+    // 能拿到宿主线程的两个入口。视图回调只在宿主重排窗口时来，所以它不是主力，
+    // 但它是**不依赖宿主支持任何额外能力**的那一条。
+    crate::host::marshal::pump();
     let _guard = EnterExit::new("can_resize");
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。

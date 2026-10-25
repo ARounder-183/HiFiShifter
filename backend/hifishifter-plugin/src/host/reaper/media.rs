@@ -226,6 +226,10 @@ impl NativeHost {
         position: f64,
         authorized: &impl Fn() -> bool,
     ) -> Result<super::RewrittenItem, String> {
+        // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
+        if std::thread::current().id() != self.thread {
+            return self.on_host(|| self.prepare_copied_item(chunk, position, authorized))?;
+        }
         self.project(authorized)?;
         let api = self
             .item_state
@@ -262,6 +266,10 @@ impl NativeHost {
         multiple: bool,
         authorized: &impl Fn() -> bool,
     ) -> Result<Vec<String>, String> {
+        // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
+        if std::thread::current().id() != self.thread {
+            return self.on_host(|| self.pick_audio_paths(multiple, authorized))?;
+        }
         self.project(authorized)?;
         if let Some(picker) = self.extended_media.as_ref().and_then(|m| m.picker) {
             let mut bytes = vec![0_u8; 65536];
@@ -311,6 +319,11 @@ impl NativeHost {
         after_track_order: Option<i32>,
         authorized: &impl Fn() -> bool,
     ) -> Result<CreatedTrack, String> {
+        // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
+        if std::thread::current().id() != self.thread {
+            return self
+                .on_host(|| self.create_audio_track(name, after_track_order, authorized))?;
+        }
         if !self.can_create_audio_track() {
             return Err("REAPER new-track import API unavailable".into());
         }
@@ -411,6 +424,10 @@ impl NativeHost {
         &self,
         authorized: &impl Fn() -> bool,
     ) -> Result<Option<String>, String> {
+        // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
+        if std::thread::current().id() != self.thread {
+            return self.on_host(|| self.pick_audio(authorized))?;
+        }
         self.project(authorized)?;
         let media = self.media.as_ref().ok_or("REAPER media API unavailable")?;
         let mut bytes = vec![0_u8; 4096];
@@ -436,6 +453,10 @@ impl NativeHost {
         self: &Arc<Self>,
         authorized: &impl Fn() -> bool,
     ) -> Result<HostTrackTarget, String> {
+        // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
+        if std::thread::current().id() != self.thread {
+            return self.on_host(|| self.direct_track_target(authorized))?;
+        }
         let project = self.project(authorized)?;
         let pointer = self._interface.0 as *mut c_void;
         let table = unsafe { &**pointer.cast::<*const HostVtbl>() };
@@ -448,6 +469,10 @@ impl NativeHost {
         track: usize,
         authorized: &impl Fn() -> bool,
     ) -> Result<HostTrackTarget, String> {
+        // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
+        if std::thread::current().id() != self.thread {
+            return self.on_host(|| self.track_target(project, track, authorized))?;
+        }
         if !self.can_import_audio() {
             return Err("REAPER audio import API unavailable".into());
         }
@@ -495,6 +520,12 @@ impl HostTrackTarget {
         state: &super::RewrittenItem,
         authorized: &impl Fn() -> bool,
     ) -> Result<crate::host::geometry::HostClipGeometry, String> {
+        // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
+        if std::thread::current().id() != self.host.thread {
+            return self
+                .host
+                .on_host(|| self.create_copied_item(state, authorized))?;
+        }
         self.verify(authorized)?;
         if !self.host.can_clipboard_items() {
             return Err("host clip clipboard capability unavailable".into());
@@ -568,6 +599,10 @@ impl HostTrackTarget {
         &self.guid
     }
     fn verify(&self, authorized: &impl Fn() -> bool) -> Result<(), String> {
+        // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
+        if std::thread::current().id() != self.host.thread {
+            return self.host.on_host(|| self.verify(authorized))?;
+        }
         if std::thread::current().id() != self.host.thread {
             return Err("host audio import off UI thread".into());
         }
@@ -604,6 +639,12 @@ impl HostTrackTarget {
         start_sec: f64,
         authorized: &impl Fn() -> bool,
     ) -> Result<String, String> {
+        // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
+        if std::thread::current().id() != self.host.thread {
+            return self
+                .host
+                .on_host(|| self.import_audio(path, start_sec, authorized))?;
+        }
         self.verify(authorized)?;
         if !std::path::Path::new(path).is_absolute()
             || path.len() > 32767

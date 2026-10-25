@@ -78,6 +78,10 @@ pub(super) fn inventory_target(
 impl HostClipTarget {
     /// 删除前核对project/item/take/GUID；删除后不再对已失效对象调用UpdateItem。
     pub(crate) fn delete_item(&self, authorized: &impl Fn() -> bool) -> Result<(), String> {
+        // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
+        if std::thread::current().id() != self.host.thread {
+            return self.host.on_host(|| self.delete_item(authorized))?;
+        }
         self.verify(authorized)?;
         let api = self
             .host
@@ -97,6 +101,10 @@ impl HostClipTarget {
         &self,
         authorized: &impl Fn() -> bool,
     ) -> Result<String, String> {
+        // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
+        if std::thread::current().id() != self.host.thread {
+            return self.host.on_host(|| self.capture_item_state(authorized))?;
+        }
         self.verify(authorized)?;
         let api = self
             .host
@@ -138,6 +146,10 @@ impl HostClipTarget {
 
     /// 冻结UI对象不保活item，写入前按GUID查验并重新读取当前几何。
     pub(crate) fn current(&self, authorized: &impl Fn() -> bool) -> Result<Self, String> {
+        // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
+        if std::thread::current().id() != self.host.thread {
+            return self.host.on_host(|| self.current(authorized))?;
+        }
         self.verify(authorized)?;
         let mut result = self.clone();
         result.geometry = self
@@ -201,6 +213,10 @@ impl NativeHost {
         self: &Arc<Self>,
         authorized: &impl Fn() -> bool,
     ) -> Result<HostUndoBlock, String> {
+        // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
+        if std::thread::current().id() != self.thread {
+            return self.on_host(|| self.begin_project_undo(authorized))?;
+        }
         if !self.has_project_history() {
             return Err("REAPER project history API unavailable".into());
         }
@@ -237,6 +253,10 @@ impl NativeHost {
         &self,
         authorized: &impl Fn() -> bool,
     ) -> Result<serde_json::Value, String> {
+        // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
+        if std::thread::current().id() != self.thread {
+            return self.on_host(|| self.project_history(authorized))?;
+        }
         let token = self.history_token(authorized)?;
         let project = self.project(authorized)?;
         let history = self.history.as_ref().ok_or("REAPER history unavailable")?;
@@ -294,6 +314,10 @@ impl NativeHost {
         &self,
         authorized: &impl Fn() -> bool,
     ) -> Result<(i32, i32), String> {
+        // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
+        if std::thread::current().id() != self.thread {
+            return self.on_host(|| self.history_token(authorized))?;
+        }
         let change = self.geometry_revision(authorized)?;
         let project = self.project(authorized)?;
         let history = self.history.as_ref().ok_or("REAPER history unavailable")?;
@@ -308,6 +332,10 @@ impl NativeHost {
         redo: bool,
         authorized: &impl Fn() -> bool,
     ) -> Result<bool, String> {
+        // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
+        if std::thread::current().id() != self.thread {
+            return self.on_host(|| self.history_jump(redo, authorized))?;
+        }
         self.history_token(authorized)?;
         let project = self.project(authorized)?;
         let history = self.history.as_ref().ok_or("REAPER history unavailable")?;
@@ -336,6 +364,10 @@ impl NativeHost {
         target: i32,
         authorized: &impl Fn() -> bool,
     ) -> Result<(), String> {
+        // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
+        if std::thread::current().id() != self.thread {
+            return self.on_host(|| self.history_jump_to(target, authorized))?;
+        }
         if !(0..10000).contains(&target) {
             return Err("host history position out of range".into());
         }
@@ -360,6 +392,10 @@ impl NativeHost {
         self: &Arc<Self>,
         authorized: impl Fn() -> bool,
     ) -> Result<HostClipTarget, String> {
+        // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
+        if std::thread::current().id() != self.thread {
+            return self.on_host(|| self.clip_target(authorized))?;
+        }
         if !self.can_edit_clips() {
             return Err("REAPER clip write API unavailable".into());
         }
@@ -393,6 +429,10 @@ impl HostClipTarget {
         position: f64,
         authorized: &impl Fn() -> bool,
     ) -> Result<(HostClipGeometry, HostClipGeometry), String> {
+        // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
+        if std::thread::current().id() != self.host.thread {
+            return self.host.on_host(|| self.split_at(position, authorized))?;
+        }
         let current = self.current(authorized)?;
         let api = self
             .host
@@ -441,6 +481,10 @@ impl HostClipTarget {
         &self,
         authorized: &impl Fn() -> bool,
     ) -> Result<super::HostTrackTarget, String> {
+        // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
+        if std::thread::current().id() != self.host.thread {
+            return self.host.on_host(|| self.import_target(authorized))?;
+        }
         self.verify(authorized)?;
         self.host.track_target(self.project, self.track, authorized)
     }
@@ -509,6 +553,10 @@ impl HostClipTarget {
     }
     /// 即使地址被重用也不能写新对象。自身setter造成ARA模型代次推进不等同租约失效。
     pub(crate) fn verify(&self, authorized: &impl Fn() -> bool) -> Result<(), String> {
+        // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
+        if std::thread::current().id() != self.host.thread {
+            return self.host.on_host(|| self.verify(authorized))?;
+        }
         if std::thread::current().id() != self.host.thread {
             return Err("host edit off UI thread".into());
         }
@@ -531,6 +579,10 @@ impl HostClipTarget {
         &self,
         authorized: &impl Fn() -> bool,
     ) -> Result<HostUndoBlock, String> {
+        // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
+        if std::thread::current().id() != self.host.thread {
+            return self.host.on_host(|| self.begin_undo(authorized))?;
+        }
         self.verify(authorized)?;
         let block = HostUndoBlock {
             host: self.host.clone(),
@@ -549,6 +601,12 @@ impl HostClipTarget {
         value: f64,
         authorized: &impl Fn() -> bool,
     ) -> Result<(), String> {
+        // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
+        if std::thread::current().id() != self.host.thread {
+            return self
+                .host
+                .on_host(|| self.set_item(name, value, authorized))?;
+        }
         self.verify(authorized)?;
         if !matches!(
             name.to_bytes(),
@@ -597,6 +655,12 @@ impl HostClipTarget {
         value: f64,
         authorized: &impl Fn() -> bool,
     ) -> Result<(), String> {
+        // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
+        if std::thread::current().id() != self.host.thread {
+            return self
+                .host
+                .on_host(|| self.set_take(name, value, authorized))?;
+        }
         self.verify(authorized)?;
         if !matches!(
             name.to_bytes(),
@@ -624,6 +688,10 @@ impl HostClipTarget {
         name: &str,
         authorized: &impl Fn() -> bool,
     ) -> Result<(), String> {
+        // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
+        if std::thread::current().id() != self.host.thread {
+            return self.host.on_host(|| self.set_take_name(name, authorized))?;
+        }
         self.verify(authorized)?;
         if name.len() > 8192 || name.contains('\0') {
             return Err("take name budget or NUL rejected".into());
@@ -650,6 +718,12 @@ impl HostClipTarget {
         destination: &Self,
         authorized: &impl Fn() -> bool,
     ) -> Result<(), String> {
+        // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
+        if std::thread::current().id() != self.host.thread {
+            return self
+                .host
+                .on_host(|| self.move_to(destination, authorized))?;
+        }
         self.verify(authorized)?;
         destination.verify(authorized)?;
         if !self.same_project(destination) {
@@ -666,6 +740,10 @@ impl HostClipTarget {
     }
     /// 触发宿主刷新和真实ARA回流，不直接篡改插件timeline几何。
     pub(crate) fn update(&self, authorized: &impl Fn() -> bool) -> Result<(), String> {
+        // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
+        if std::thread::current().id() != self.host.thread {
+            return self.host.on_host(|| self.update(authorized))?;
+        }
         self.verify(authorized)?;
         let api = self.api()?;
         checked(authorized, || unsafe {

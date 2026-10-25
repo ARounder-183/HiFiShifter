@@ -57,6 +57,10 @@ impl NativeHost {
         self: &Arc<Self>,
         authorized: &impl Fn() -> bool,
     ) -> Result<UiTrack, String> {
+        // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
+        if std::thread::current().id() != self.thread {
+            return self.on_host(|| self.ui_track(authorized))?;
+        }
         if std::thread::current().id() != self.thread {
             return Err("UI inventory queried outside host thread".into());
         }
@@ -79,6 +83,10 @@ impl NativeHost {
         self: &Arc<Self>,
         authorized: &impl Fn() -> bool,
     ) -> Result<Vec<UiTrack>, String> {
+        // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
+        if std::thread::current().id() != self.thread {
+            return self.on_host(|| self.ui_folder_tracks(authorized))?;
+        }
         let own = self.ui_track(authorized)?;
         let project = self.project(authorized)?;
         let own_guid = own.guid.clone();
@@ -120,6 +128,11 @@ impl NativeHost {
         self: &Arc<Self>,
         authorized: &impl Fn() -> bool,
     ) -> Option<i32> {
+        if !self.on_host_thread() {
+            return self
+                .on_host(|| self.folder_anchor_order(authorized))
+                .unwrap_or(None);
+        }
         self.ui_folder_tracks(authorized)
             .ok()?
             .iter()
@@ -135,6 +148,10 @@ impl NativeHost {
         parent_guid: Option<String>,
         authorized: &impl Fn() -> bool,
     ) -> Result<UiTrack, String> {
+        // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
+        if std::thread::current().id() != self.thread {
+            return self.on_host(|| self.ui_track_at(project, track, parent_guid, authorized))?;
+        }
         let pointer = self._interface.0 as *mut c_void;
         let table = unsafe { &**pointer.cast::<*const HostVtbl>() };
         macro_rules! api {

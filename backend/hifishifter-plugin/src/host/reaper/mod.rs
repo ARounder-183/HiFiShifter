@@ -13,6 +13,7 @@ pub(crate) use media::HostTrackTarget;
 mod ui_inventory;
 pub(crate) use ui_inventory::{UiItem, UiTrack};
 mod folder;
+mod host_timer;
 // 宿主原生执行层：写回 / 分割 / 剪贴板 / Undo 调度。它们直接调用 REAPER API，
 // 因此整体住在本模块内；通用层只经 `crate::host` 的中立门面访问。
 pub(crate) mod clipboard;
@@ -59,6 +60,25 @@ type TakeSource = unsafe extern "C" fn(*mut c_void) -> *mut c_void;
 type SectionInfo = unsafe extern "C" fn(*mut c_void, *mut f64, *mut f64, *mut bool) -> bool;
 /// `void GetMediaSourceFileName(PCM_source*, char* bufOut, int sz)`：take 源文件的路径。
 type SourceFileName = unsafe extern "C" fn(*mut c_void, *mut std::ffi::c_char, i32);
+/// `int plugin_register(const char* name, void* inf)`：宿主自己的注册入口。
+///
+/// 【为什么只用它的一条能力】这里只挂 `"timer"`：它把回调放到宿主**主线程**上约
+/// 30 Hz 跑一次，正是 `host::marshal` 的泵需要的执行者（见 `host_timer` 模块）。
+pub(super) type PluginRegister = unsafe extern "C" fn(*const c_char, *mut c_void) -> i32;
+
+/// 宿主线程"刚才没来取任务"之后，暂停投递多久。
+///
+/// 【为什么是 1 秒】短到宿主一恢复就能立刻重试，长到足以让一整个 UI tick 的十来个
+/// 调用全部快速失败 —— 界面不会因为一次宿主繁忙而卡两秒半。
+const HOST_UNREACHABLE_BACKOFF_MS: u64 = 1000;
+
+/// 墙钟毫秒；只用于熔断窗口，不参与任何音视频时序。
+fn unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0)
+}
 
 /// 一个 take 的方向读取器（`GetMediaItemTake_Source` + `PCM_Source_GetSectionInfo`）。
 ///
@@ -151,6 +171,10 @@ pub(crate) struct NativeHost {
     /// 记录新条目时先丢掉所有索引大于它的旧记录，于是"用户回退后再编辑"造成的重编号
     /// 不会留下错位的时间。宿主的自有条目（不是本插件创建的）没有时间，读作 `null`。
     undo_entry_times: std::sync::Mutex<std::collections::BTreeMap<i32, u64>>,
+    /// 本实例是否真的把节拍挂上了（只有挂上过才在析构时摘）。
+    host_timer: bool,
+    /// 到这个时刻（Unix 毫秒）之前不再尝试投递 —— 见 `on_host` 的熔断说明。
+    host_unreachable_until: std::sync::atomic::AtomicU64,
 }
 
 impl NativeHost {
@@ -187,6 +211,15 @@ impl NativeHost {
 /// 【为什么能力位从既有谓词派生，而不是再列一遍 `Option`】这些谓词（`can_edit_clips` /
 /// `can_split_clips` / …）已经是"能不能用"的唯一出处，前端与命令分派都读它们。这里
 /// 只是把同一批判据翻译成宿主无关的 [`HostCapabilities`]，避免出现第二份会漂移的副本。
+/// 析构时把宿主节拍摘掉 —— 回调指针指向本模块的代码，模块卸载后再被调用就是崩溃。
+impl Drop for NativeHost {
+    fn drop(&mut self) {
+        if self.host_timer {
+            self.host_timer = false;
+            host_timer::release();
+        }
+    }
+}
 impl hifishifter_kernel::editor::host::EditorHost for NativeHost {
     fn kind(&self) -> hifishifter_kernel::editor::host::HostKind {
         hifishifter_kernel::editor::host::HostKind::Reaper
@@ -556,8 +589,20 @@ impl NativeHost {
             }
             _ => None,
         };
+        let plugin_register = lookup!(c"plugin_register", PluginRegister);
+        // 【为什么要在这里挂节拍】`from_context` 只在宿主的 model/UI 线程上被调用
+        // （`setActive` / 初始化），而 `plugin_register` 的注册动作本身要求宿主线程。
+        let host_timer = match plugin_register {
+            Some(register) => {
+                host_timer::acquire(register);
+                true
+            }
+            None => false,
+        };
         Some(Self {
             _interface: interface,
+            host_timer,
+            host_unreachable_until: std::sync::atomic::AtomicU64::new(0),
             thread: std::thread::current().id(),
             project: std::sync::atomic::AtomicUsize::new(project as usize),
             transport,
@@ -576,9 +621,60 @@ impl NativeHost {
             undo_entry_times: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         })
     }
+    /// 当前线程是不是宿主绑定线程（model/UI 线程）。
+    pub(crate) fn on_host_thread(&self) -> bool {
+        std::thread::current().id() == self.thread
+    }
+
+    /// 把一次宿主调用投递到宿主线程并**原地等它完成**。
+    ///
+    /// 【为什么入口写的是 `if !on_host_thread() { return self.on_host(|| self.f(...))? }`
+    /// 而不是把 `on_host` 塞进每个 `unsafe` 调用】宿主 API 只在**最外层**换一次线程
+    /// 就够了：内层调用此时已经在宿主线程上，`on_host` 会直接内联执行，不再排队。
+    /// 于是改造面收敛成"每个入口三行"，而不是"每处 API 调用一次编排"。
+    ///
+    /// 【为什么不需要 `Send` 边界之外的约束】见 `host::marshal::scoped`：投递方在
+    /// 返回前始终阻塞，因此闭包借用的一切（`&self`、`&authorized`、参数）在整个执行
+    /// 期间不可能被投递方同时访问。
+    pub(crate) fn on_host<R: Send>(&self, job: impl FnOnce() -> R) -> Result<R, String> {
+        if self.on_host_thread() {
+            return Ok(job());
+        }
+        // 【为什么要熔断】宿主线程不来取任务时，每个入口都要白等 250 ms。编辑器的
+        // 刷新一次要十来个宿主调用 —— 不熔断就是每个 tick 卡两秒半，界面直接死住。
+        // 记住"刚才没人来取"，接下来一小段时间直接失败；宿主一旦恢复泵，窗口一过
+        // 就自动重试。
+        let now = unix_millis();
+        if now
+            < self
+                .host_unreachable_until
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err("the host thread is not pumping host calls right now".into());
+        }
+        match crate::host::marshal::scoped(self.thread, job) {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                if matches!(error, crate::host::marshal::HostThreadError::Unpicked) {
+                    self.host_unreachable_until.store(
+                        now.saturating_add(HOST_UNREACHABLE_BACKOFF_MS),
+                        std::sync::atomic::Ordering::Release,
+                    );
+                }
+                Err(error.message())
+            }
+        }
+    }
+
     /// 项目延迟挂接只从同一个接口的直接parent取得；拒绝null，不借API的“当前项目”语义。
     /// 一旦绑定，不因用户切换活动tab而重新绑定；原线程与外部调用授权检查仍然执行。
     fn project(&self, authorized: &impl Fn() -> bool) -> Result<*mut c_void, String> {
+        if !self.on_host_thread() {
+            // 裸指针不是 `Send`；换成 `usize` 过边界，回来再还原。
+            return self
+                .on_host(|| self.project(authorized).map(|pointer| pointer as usize))?
+                .map(|pointer| pointer as *mut c_void);
+        }
         if std::thread::current().id() != self.thread {
             return Err("REAPER project queried outside its model/UI thread".into());
         }
@@ -599,6 +695,10 @@ impl NativeHost {
     }
     /// 原UI线程读取延迟补偿的实际听到位置；暂停保持play位置，完全停止才读edit cursor。
     pub fn sample(&self, authorized: impl Fn() -> bool) -> Result<(f64, bool), String> {
+        // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
+        if std::thread::current().id() != self.thread {
+            return self.on_host(|| self.sample(authorized))?;
+        }
         if std::thread::current().id() != self.thread {
             return Err("REAPER transport queried outside its model/UI thread".into());
         }
@@ -639,6 +739,10 @@ impl NativeHost {
 
     /// UI缓存只读变更token；负数/回绕合法，不假定单调，也不把counter当作take租约。
     pub(crate) fn geometry_revision(&self, authorized: impl Fn() -> bool) -> Result<i32, String> {
+        // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
+        if std::thread::current().id() != self.thread {
+            return self.on_host(|| self.geometry_revision(authorized))?;
+        }
         if std::thread::current().id() != self.thread {
             return Err("REAPER geometry queried outside its model/UI thread".into());
         }
@@ -660,6 +764,10 @@ impl NativeHost {
         &self,
         authorized: impl Fn() -> bool,
     ) -> Result<super::geometry::HostClipGeometry, String> {
+        // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
+        if std::thread::current().id() != self.thread {
+            return self.on_host(|| self.geometry(authorized))?;
+        }
         if std::thread::current().id() != self.thread {
             return Err("REAPER geometry queried outside its model/UI thread".into());
         }
@@ -683,6 +791,11 @@ impl NativeHost {
         take: *mut c_void,
         authorized: &impl Fn() -> bool,
     ) -> Option<TakeDirectionFacts> {
+        if !self.on_host_thread() {
+            return self
+                .on_host(|| self.take_direction_facts(take, authorized))
+                .unwrap_or(None);
+        }
         let api = self.take_enum.as_ref()?.direction.as_ref()?;
         let geometry = self.geometry.as_ref()?;
         let project = self.project(authorized).ok()?;
@@ -731,6 +844,11 @@ impl NativeHost {
         take: *mut c_void,
         authorized: &impl Fn() -> bool,
     ) -> Option<String> {
+        if !self.on_host_thread() {
+            return self
+                .on_host(|| self.take_source_file_name(take, authorized))
+                .unwrap_or(None);
+        }
         let api = self.take_enum.as_ref()?.direction.as_ref()?;
         let filename = api.filename?;
         let geometry = self.geometry.as_ref()?;
@@ -769,6 +887,10 @@ impl NativeHost {
         take: *mut c_void,
         authorized: impl Fn() -> bool,
     ) -> Result<super::geometry::HostClipGeometry, String> {
+        // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
+        if std::thread::current().id() != self.thread {
+            return self.on_host(|| self.geometry_for_take(take, authorized))?;
+        }
         use super::geometry::{HostClipGeometry, HostStretchMarker};
         if std::thread::current().id() != self.thread {
             return Err("REAPER geometry queried outside its model/UI thread".into());
@@ -1267,5 +1389,48 @@ mod tests {
         });
         drop(client);
         assert_eq!(host.refs.load(Ordering::Acquire), 1);
+    }
+    /// 从别的线程调用宿主必须**成功**，前提是宿主线程在泵。
+    ///
+    /// 【为什么这条是整套改造的验收用例】上面那条只证明了"不在宿主线程上会被
+    /// 拒绝"——那正是 Linux 上所有命令失败的原因。这里补上另一半：投递回宿主线程
+    /// 之后，同一个调用要给出与同线程调用**完全一样**的读数。
+    #[test]
+    fn a_worker_thread_reaches_the_host_through_the_pump() {
+        let mut project = Project {
+            position: 4.5,
+            cursor: 1.0,
+            state: 1,
+        };
+        let mut host = Host {
+            table: &TABLE,
+            refs: AtomicU32::new(1),
+            project: &raw mut project,
+        };
+        let client = std::sync::Arc::new(
+            unsafe { NativeHost::from_context((&raw mut host).cast(), || true) }.unwrap(),
+        );
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = {
+            let client = std::sync::Arc::clone(&client);
+            std::thread::spawn(move || {
+                let _ = sender.send(client.sample(|| true));
+            })
+        };
+        // 本线程扮演宿主 model/UI 线程：一直泵，直到拿到结果。
+        let mut reading = None;
+        for _ in 0..2_000 {
+            crate::host::marshal::pump();
+            if let Ok(value) = receiver.try_recv() {
+                reading = Some(value);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        worker.join().unwrap();
+        assert_eq!(
+            reading.expect("宿主线程一直在泵，投递却始终没被取走"),
+            Ok((4.5, true)),
+        );
     }
 }
