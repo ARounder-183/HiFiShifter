@@ -24,7 +24,7 @@ HiFiShifter는 그래픽 보컬 편집 및 합성 도구입니다. 멀티트랙 
 
 - **Windows**: NSIS 설치 관리자(`installer`) 또는 포터블 ZIP(`portable`), x86_64와 arm64 아키텍처를 제공합니다.
 - **macOS**: 서명되지 않은 dmg(Apple Silicon은 `arm64`, Intel은 `x86_64`). 첫 실행 시 수동으로 허용해야 합니다. "파일이 손상되었습니다"라는 메시지가 표시되면 [사용자 매뉴얼](USERMANUAL_ko.md#1-설치)의 절차에 따라 처리하세요.
-- **Linux**: AppImage(x86_64 / arm64).
+- **Linux**: AppImage(x86_64 / arm64). 실행하려면 시스템의 `webkit2gtk-4.1` 이 필요합니다(Arch/CachyOS, Ubuntu 24.04+, Fedora 39+, Debian 13+ 등 제공. Ubuntu 22.04 는 `webkit2gtk-4.0` 만 있어 미지원).
 
 **VST3 / ARA 플러그인**: Windows x64에는 REAPER에서 임베디드 인터페이스로 사용할 수 있는 VST3(ARA) 플러그인 형태가 별도로 있습니다(현재 REAPER에서만 검증). 설치 방법, 실행 종속성과 사용 제한은 사용자 매뉴얼의 [VST3 / ARA 플러그인](USERMANUAL_ko.md#8-vst3--ara-플러그인-reaper) 장을 참고하세요.
 
@@ -204,6 +204,8 @@ cargo tauri build --bundles appimage -- --no-default-features --features onnx
 .\scripts\build\pack-portable.ps1 -PackageTarget Plugin -SkipBuild -Installer
 ```
 
+AppImage 에 포함할 내용은 `scripts/build/linux-appimage.sh` 한 곳에서 결정됩니다(CI 와 로컬 공통). 호스트가 제공해야 하는 라이브러리(WebKitGTK / GStreamer / GL / Wayland)를 번들에서 제거하고, `ldd` 로 실행 파일이 실제로 호스트의 사본을 참조하는지 검증한 뒤, 다시 패키징하고 헤드리스 기동 스모크 테스트를 수행합니다. 개별 단계는 `bash scripts/build/linux-appimage.sh package <tauri-release-dir>`(또는 `verify <AppDir>`)로 실행할 수 있습니다.
+
 `pack-portable.bat`을 두 번 클릭하면 App, VST3 또는 둘 다를 선택할 수 있습니다. 사용 가능한 옵션은 `scripts/build/pack-portable.ps1`과 `scripts/` 아래의 빌드 스크립트를 참고하세요.
 
 `TAURI_UI_MODE` 환경 변수로 프론트엔드 시작 모드를 전환할 수 있습니다:
@@ -268,6 +270,9 @@ ONNX Runtime 바이너리는 ort crate의 `download-binaries` 기능으로 빌�
 - 실행 인수 `--log-file=<path>`: 로그를 지정한 경로에 기록합니다. `--log-file=-` 은 파일 로그를 명시적으로 비활성화합니다.
 - 환경 변수 `HIFISHIFTER_LOG=debug` (또는 `trace` / `info` / `warn` / `error`): 로그 상세 수준을 조정합니다.
 - 환경 변수 `HIFISHIFTER_LOG_DIR`: 기본 로그 디렉터리를 대체합니다.
+- 환경 변수 `HIFISHIFTER_GDK_BACKEND=x11|wayland`: AppImage 가 기본으로 강제하는 `x11` 을 덮어씁니다. Wayland 에서 화면이 흐리거나 IME 문제가 있으면 `wayland` 를 시도하세요.
+- 환경 변수 `HIFISHIFTER_SAFE_GL=1`: GPU 드라이버 문제로 창이 뜨지 않을 때 WebKit 컴포지터를 끄고 소프트웨어 렌더링으로 실행합니다(표시는 되지만 느립니다).
+- 시작 로그에는 항상 두 줄의 진단이 남습니다: `[linux] session:`(GTK 백엔드 / `DISPLAY` / `WAYLAND_DISPLAY` / AppImage) 와 `[linux] egl:`(EGL vendor 와 버전). 그래픽 관련 이슈에 첨부해 주세요.
 - 터미널에서 `HiFiShifter --benchmark` 실행: 추론 장치 벤치마크를 실행하고 JSON 결과를 출력합니다.
 
 ## 문서

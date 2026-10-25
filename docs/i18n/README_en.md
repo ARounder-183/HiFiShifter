@@ -24,7 +24,7 @@ Download the package for your operating system and architecture from the [Releas
 
 - **Windows**: NSIS installer (`installer`) or portable zip archive (`portable`), available for x86_64 and arm64.
 - **macOS**: unsigned dmg (Apple Silicon → `arm64`, Intel → `x86_64`). The first launch requires manual approval; if macOS reports the file as "damaged", follow the steps in the [user manual](USERMANUAL_en.md#1-installation).
-- **Linux**: AppImage (x86_64 / arm64).
+- **Linux**: AppImage (x86_64 / arm64). Requires `webkit2gtk-4.1` from the system (shipped by Arch/CachyOS, Ubuntu 24.04+, Fedora 39+, Debian 13+, …; Ubuntu 22.04 only has `webkit2gtk-4.0` and is not supported).
 
 **VST3 / ARA Plugin**: Windows x64 also has a VST3 (ARA) plugin form, usable as an embedded interface inside REAPER (currently verified against REAPER only). See the [VST3 / ARA plugin chapter](USERMANUAL_en.md#8-vst3--ara-plugin-reaper) of the user manual for installation, runtime dependencies and usage limitations.
 
@@ -204,6 +204,8 @@ cargo tauri build --bundles appimage -- --no-default-features --features onnx
 .\scripts\build\pack-portable.ps1 -PackageTarget Plugin -SkipBuild -Installer
 ```
 
+What goes into the AppImage is decided in one place, `scripts/build/linux-appimage.sh`, shared by CI and local builds: libraries that the host must provide (WebKitGTK, GStreamer, GL, Wayland) are pruned from the bundle, `ldd` then asserts the binary really resolves them from the host, and the repacked image is smoke-tested headlessly. Run one step on its own with `bash scripts/build/linux-appimage.sh package <tauri-release-dir>` (or `verify <AppDir>`).
+
 Double-clicking `pack-portable.bat` lets you choose App, VST3 or both; see `scripts/build/pack-portable.ps1` and the scripts under `scripts/` for the available switches.
 
 You can switch the frontend startup mode via the `TAURI_UI_MODE` environment variable:
@@ -268,6 +270,9 @@ Advanced options:
 - Launch flag `--log-file=<path>`: write the log to a specific path; `--log-file=-` disables file logging.
 - Environment variable `HIFISHIFTER_LOG=debug` (or `trace` / `info` / `warn` / `error`): adjust log verbosity.
 - Environment variable `HIFISHIFTER_LOG_DIR`: override the default log directory.
+- Environment variable `HIFISHIFTER_GDK_BACKEND=x11|wayland`: overrides the `x11` default baked into the AppImage. On Wayland desktops with blurry scaling or IME trouble, try `wayland`.
+- Environment variable `HIFISHIFTER_SAFE_GL=1`: for broken GPU drivers. Disables the WebKit compositor and forces software rendering (the window appears, drawing is slower).
+- Two graphics diagnostics lines are always logged at startup: `[linux] session:` (GTK backend / `DISPLAY` / `WAYLAND_DISPLAY` / AppImage) and `[linux] egl:` (EGL vendor and version). Please attach them to graphics-related issues.
 - Run `HiFiShifter --benchmark` in a terminal: run the inference-device benchmark and print JSON results.
 
 ## Documentation

@@ -24,7 +24,7 @@ HiFiShifterは、グラフィカルなボーカル編集・合成ツールです
 
 - **Windows**：NSIS インストーラー（`installer`）またはポータブル版 ZIP（`portable`）。x86_64 と arm64 の両アーキテクチャを提供しています。
 - **macOS**：未署名の dmg（Apple Silicon は `arm64`、Intel は `x86_64`）。初回起動時は手動で許可する必要があります。「ファイルが破損しています」と表示された場合は、[ユーザーマニュアル](USERMANUAL_ja.md#一インストール)の手順に従って対処してください。
-- **Linux**：AppImage（x86_64 / arm64）。
+- **Linux**：AppImage（x86_64 / arm64）。実行にはシステムの `webkit2gtk-4.1` が必要です（Arch/CachyOS、Ubuntu 24.04+、Fedora 39+、Debian 13+ などが提供。Ubuntu 22.04 は `webkit2gtk-4.0` のみのため非対応）。
 
 **VST3 / ARA プラグイン**：Windows x64 には VST3（ARA）プラグイン形態もあり、REAPER 内で埋め込みインターフェースとして使用できます（現在は REAPER でのみ検証済み）。インストール方法、実行時依存、使用上の制限はユーザーマニュアルの [VST3 / ARA プラグイン](USERMANUAL_ja.md#八vst3--ara-プラグインreaper)の章を参照してください。
 
@@ -204,6 +204,8 @@ cargo tauri build --bundles appimage -- --no-default-features --features onnx
 .\scripts\build\pack-portable.ps1 -PackageTarget Plugin -SkipBuild -Installer
 ```
 
+AppImage に含める内容は `scripts/build/linux-appimage.sh` の一箇所で決まります（CI とローカルで共通）。ホストが提供すべきライブラリ（WebKitGTK / GStreamer / GL / Wayland）を削除し、`ldd` でホスト側の実体を参照していることを検証したうえで、再パックとヘッドレス起動のスモークテストを行います。個別に実行するには `bash scripts/build/linux-appimage.sh package <tauri-release-dir>`（`verify <AppDir>` で検証のみ）。
+
 `pack-portable.bat` をダブルクリックすると、App・VST3・両方を選べます。指定できるオプションは `scripts/build/pack-portable.ps1` と `scripts/` 配下のビルドスクリプトを参照してください。
 
 `TAURI_UI_MODE` 環境変数でフロントエンドの起動モードを切り替えられます：
@@ -268,6 +270,9 @@ ONNX Runtimeのバイナリは、ort crateの `download-binaries` 機能によ�
 - 起動引数 `--log-file=<path>`：ログを指定パスに書き込みます。`--log-file=-` でファイルログを明示的に無効化。
 - 環境変数 `HIFISHIFTER_LOG=debug`（`trace` / `info` / `warn` / `error`）：ログの詳細度を調整。
 - 環境変数 `HIFISHIFTER_LOG_DIR`：既定のログディレクトリを上書き。
+- 環境変数 `HIFISHIFTER_GDK_BACKEND=x11|wayland`：AppImage が既定で強制する `x11` を上書き。Wayland でぼやける／IME が不調な場合は `wayland` を試してください。
+- 環境変数 `HIFISHIFTER_SAFE_GL=1`：GPU ドライバに問題があり起動しない場合に、WebKit のコンポジターを止めてソフトウェア描画にします（表示は可能、描画は低速）。
+- 起動ログには必ず 2 行の診断が残ります：`[linux] session:`（GTK バックエンド / `DISPLAY` / `WAYLAND_DISPLAY` / AppImage）と `[linux] egl:`（EGL の vendor とバージョン）。描画関連の issue には添付してください。
 - ターミナルで `HiFiShifter --benchmark` を実行：推論デバイスのベンチマークを実行し、JSON 結果を出力します。
 
 ## ドキュメント

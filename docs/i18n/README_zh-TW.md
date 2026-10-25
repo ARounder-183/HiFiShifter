@@ -24,7 +24,7 @@ HiFiShifter 是一個圖形化人聲編輯與合成工具。它支援多軌道�
 
 - **Windows**：NSIS 安裝包（`installer`）或可攜版壓縮包（`portable`），提供 x86_64 與 arm64 架構。
 - **macOS**：未簽名 dmg（Apple Silicon 裝 `arm64`，Intel 裝 `x86_64`）。首次安裝需要手動放行；若提示「檔案已損毀」，請按照[使用手冊](USERMANUAL_zh-TW.md#一安裝)中的步驟處理。
-- **Linux**：AppImage（x86_64 / arm64）。
+- **Linux**：AppImage（x86_64 / arm64）。執行需要系統提供 `webkit2gtk-4.1`（Arch/CachyOS、Ubuntu 24.04+、Fedora 39+、Debian 13+ 等均已提供；Ubuntu 22.04 僅有 `webkit2gtk-4.0`，不支援）。
 
 **VST3 / ARA 外掛**：Windows x64 另有 VST3（ARA）外掛形態，可在 REAPER 中以嵌入介面使用（目前僅針對 REAPER 驗證）。安裝方式、執行依賴與使用限制見使用手冊的 [VST3 / ARA 外掛](USERMANUAL_zh-TW.md#八vst3--ara-外掛reaper)章節。
 
@@ -204,6 +204,8 @@ cargo tauri build --bundles appimage -- --no-default-features --features onnx
 .\scripts\build\pack-portable.ps1 -PackageTarget Plugin -SkipBuild -Installer
 ```
 
+AppImage 的打包內容由 `scripts/build/linux-appimage.sh` 統一決定，CI 與本地共用同一份邏輯：先將 WebKitGTK / GStreamer / GL / Wayland 這些**必須由系統提供**的函式庫從包裡剪掉，再用 `ldd` 斷言執行檔確實解析到系統的副本，然後重新打包並做一次無頭啟動冒煙。需要單獨重用某一步時：`bash scripts/build/linux-appimage.sh package <Tauri 產物目錄>`（或 `verify <AppDir>` 只做斷言）。
+
 雙擊 `pack-portable.bat` 可選擇 App、VST3 或兩者；可用參數見 `scripts/build/pack-portable.ps1` 與 `scripts/` 下的構建腳本。
 
 前端啟動模式可透過環境變數 `TAURI_UI_MODE` 切換：
@@ -268,6 +270,9 @@ ONNX Runtime 二進位檔案由 ort crate 在編譯時透過 `download-binaries`
 - 啟動參數 `--log-file=<path>`：將日誌寫入指定路徑；`--log-file=-` 明確關閉檔案日誌。
 - 環境變數 `HIFISHIFTER_LOG=debug`（或 `trace` / `info` / `warn` / `error`）：調整日誌詳細程度。
 - 環境變數 `HIFISHIFTER_LOG_DIR`：覆蓋預設日誌目錄。
+- 環境變數 `HIFISHIFTER_GDK_BACKEND=x11|wayland`：覆蓋 AppImage 預設強制的 `x11`。Wayland 桌面若遇到縮放模糊／輸入法問題，可試試 `wayland`。
+- 環境變數 `HIFISHIFTER_SAFE_GL=1`：GPU 驅動有問題、介面起不來時使用，關閉 WebKit 合成器並強制軟體渲染（能出介面，繪製會變慢）。
+- 啟動日誌固定有兩行圖形診斷：`[linux] session:`（GTK 後端／`DISPLAY`／`WAYLAND_DISPLAY`／是否 AppImage）與 `[linux] egl:`（EGL vendor 與版本）。回報圖形相關 issue 時請附上這兩行。
 - 在終端機執行 `HiFiShifter --benchmark`：直接執行推理裝置基準測試並輸出 JSON 結果。
 
 ## 文件
