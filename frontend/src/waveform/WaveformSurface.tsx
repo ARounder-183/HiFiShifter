@@ -15,6 +15,7 @@
  * - 下游：`sceneBuilder.ts` → `geometry.ts` → `surfaceRenderer.ts`。
  */
 
+import { PANEL_REATTACHED_EVENT } from "../components/dock/useDockSlot";
 import React from "react";
 
 import { waveformMipmapStore } from "../utils/waveformMipmapStore";
@@ -152,6 +153,18 @@ export const WaveformSurface = React.memo(function WaveformSurface(props: Wavefo
             drawRef.current();
         });
     }, []);
+
+    /**
+     * 停靠层把面板宿主搬回来时必须重绘。
+     *
+     * 【为什么这条不能省】搬移会把画布从文档里摘出去，浏览器随即丢掉它的 backing
+     * store；搬回来时尺寸、dpr、数据全都没变 —— 上面每一条重绘依据都不会触发，
+     * 于是波形一直空白，直到用户滚动或缩放。
+     */
+    React.useEffect(() => {
+        window.addEventListener(PANEL_REATTACHED_EVENT, invalidate);
+        return () => window.removeEventListener(PANEL_REATTACHED_EVENT, invalidate);
+    }, [invalidate]);
 
     /**
      * DPR 变化（浏览器缩放 / 显示器切换）必须触发一次重绘。

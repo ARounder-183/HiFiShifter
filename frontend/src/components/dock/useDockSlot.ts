@@ -32,6 +32,9 @@ export function panelFallbackSize(panelId: string): { w: number; h: number } {
  *
  * `formId` 为 null 表示当前没有窗体（空槽位）—— 旧宿主会被送回停泊区。
  */
+/** 面板宿主被搬进槽位后广播的事件名（见下方 `attachPanelHost` 之后的注释）。 */
+export const PANEL_REATTACHED_EVENT = "hfs:panel-reattached";
+
 export function useDockSlot(formId: string | null): React.RefObject<HTMLDivElement | null> {
     const slotRef = useRef<HTMLDivElement | null>(null);
     const forms = useAppSelector((s) => s.dock.layout.forms);
@@ -67,6 +70,17 @@ export function useDockSlot(formId: string | null): React.RefObject<HTMLDivEleme
         acquirePanelHost(formId);
         attachPanelHost(formId, slot, owner);
         previousRef.current = formId;
+        /*
+         * 【为什么必须在这里广播】停靠层切换标签页时**不是**隐藏面板，而是把面板宿主
+         * 这个 DOM 节点整个搬出文档、再搬进新槽位（见 `parkPanelHost`）。搬出去的一
+         * 瞬间，浏览器会丢掉画布的 backing store（WebGL 上下文也可能被回收），而搬回
+         * 来时**没有任何事件**告诉面板"该重画了" —— 尺寸没变、可见性没变、数据也没变。
+         *
+         * 于是用户看到的正是"切过去只有空白，动一下鼠标/滚一下才出来"。`ResizeObserver`
+         * 与 `IntersectionObserver` 都指望不上：搬移发生在同一个合成帧内，两者都可能
+         * 观察不到中间状态。唯一可靠的时机就是这里 —— 我们刚刚搬完。
+         */
+        window.dispatchEvent(new Event(PANEL_REATTACHED_EVENT));
     }, [formId, forms, hostVersion]);
 
     // 槽位卸载（面板关闭 / 树结构变化）时把宿主送回停泊区：否则宿主留在一个

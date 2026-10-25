@@ -45,6 +45,7 @@
  *   `onScrollTopFrame` 把竖向真值逐帧交回面板刷新其值域视口 ref。
  */
 
+import { PANEL_REATTACHED_EVENT } from "../../../../dock/useDockSlot";
 import { readDevicePixelRatio } from "../../../../../utils/devicePixelLine";
 import { subscribeDevicePixelRatio } from "../../../../../hooks/useDevicePixelRatio";
 import { isStylusLike } from "../../../../../utils/penInput";
@@ -581,6 +582,17 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         observer.observe(container);
         teardown.push(() => observer.disconnect());
     }
+
+    // 面板宿主被停靠层搬回来时整帧重绘（见 `useDockSlot` 的广播注释）。
+    // 尺寸没变、可见性没变、数据也没变 —— 只有"刚被搬回来"这一件事能作为重绘依据。
+    const onPanelReattached = () => {
+        viewportWidthPx = Math.max(1, container.clientWidth || 1);
+        viewportHeightPx = Math.max(1, container.clientHeight || 1);
+        scroll.reclamp();
+        invalidateFull();
+    };
+    window.addEventListener(PANEL_REATTACHED_EVENT, onPanelReattached);
+    teardown.push(() => window.removeEventListener(PANEL_REATTACHED_EVENT, onPanelReattached));
 
     const resizeObserverCtor = (globalThis as { ResizeObserver?: typeof ResizeObserver })
         .ResizeObserver;

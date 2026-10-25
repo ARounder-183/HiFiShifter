@@ -43,6 +43,7 @@
  * 才由内核自绘。
  */
 
+import { PANEL_REATTACHED_EVENT } from "../../../../dock/useDockSlot";
 import { clipItemGain } from "../../clipGain";
 import type { ClipInfo, TrackInfo } from "../../../../../features/session/sessionTypes";
 import {
@@ -6136,6 +6137,18 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         { threshold: 0 },
     );
     intersectionObserver.observe(container);
+
+    // 面板宿主被停靠层搬回来时整帧重绘（见 `useDockSlot` 的广播注释）。
+    const onPanelReattached = () => {
+        viewportWidthPx = Math.max(1, container.clientWidth || 1);
+        viewportHeightPx = Math.max(1, container.clientHeight || 1);
+        onViewportWidthChange?.(viewportWidthPx);
+        onViewportSizeChange?.(viewportWidthPx, viewportHeightPx);
+        scroll.reclamp();
+        sceneDirty = true;
+        loop.invalidate();
+    };
+    window.addEventListener(PANEL_REATTACHED_EVENT, onPanelReattached);
     // 初始回写：ResizeObserver 的首次回调是异步的，而标尺在首帧就需要正确的刻度
     // 窗口（否则首屏标尺只画得出前一段），各图层也需要首帧的尺寸。
     onViewportWidthChange?.(viewportWidthPx);
@@ -6353,6 +6366,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             stopDragAutoScroll();
             resizeObserver.disconnect();
             intersectionObserver.disconnect();
+            window.removeEventListener(PANEL_REATTACHED_EVENT, onPanelReattached);
             container.removeEventListener("wheel", onWheel);
             container.removeEventListener("keydown", onKeyDown);
             container.removeEventListener("pointerdown", onPointerDown);
