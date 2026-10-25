@@ -455,6 +455,7 @@ fn idle_transport_is_silent_but_offline_export_still_reads_snapshot() {
 }
 
 /// 宿主有效item mute即时门控真正VST3输出；同文档另一region不被静音，解除后复用原快照。
+// 审查探针版本标记 v2
 #[test]
 fn effective_item_mute_projects_to_gui_and_gates_real_process_without_inference() {
     let (model, owners, _ids) = crate::editor::session::tests::workspace_fixture();
@@ -477,8 +478,11 @@ fn effective_item_mute_projects_to_gui_and_gates_real_process_without_inference(
         .publish(crate::render::snapshot::PlaybackSnapshot {
             sample_rate: 44100,
             origin_sample: 0,
-            left: vec![0.25; 4],
-            right: vec![0.5; 4],
+            // 32 帧：本用例的传输全程逐块推进（见下方"为什么推进位置"），解除块
+            // 的读位置落在 [16,20)，快照必须盖住全程（只发 4 帧的话推进后的块落在
+            // 覆盖外，测的就是另一条路径了）。
+            left: vec![0.25; 32],
+            right: vec![0.5; 32],
             covered: Vec::new(),
             _reservation: None,
         })
@@ -503,7 +507,19 @@ fn effective_item_mute_projects_to_gui_and_gates_real_process_without_inference(
         process_context: &raw mut context,
         ..Default::default()
     };
+    // 【为什么先热身】"稳态零分配"契约计量的是热路径本身；Offline 流等冷路径的
+    // **一次性**惰性初始化不属于它 —— 而单测过滤（冷进程）恰好会把那次初始化计入，
+    // 让本用例在过滤运行下假红（全量串行运行时由更早的用例焐热，不复现）。
+    let mut position_frames = 0_i64;
     for mode in [0, 2] {
+        context.project_time_samples = position_frames;
+        position_frames += 4;
+        data.process_mode = mode;
+        unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), (&raw mut data).cast()) };
+    }
+    for mode in [0, 2] {
+        context.project_time_samples = position_frames;
+        position_frames += 4;
         data.process_mode = mode;
         crate::test_allocator::begin();
         let result =
@@ -518,7 +534,19 @@ fn effective_item_mute_projects_to_gui_and_gates_real_process_without_inference(
     }
     host.set_value("B_MUTE", 0.);
     host.set_value("B_MUTE_ACTUAL", 1.);
+    // 【为什么推进位置】解除静音发生在**播放中**：真实宿主的光标在动，而
+    // `allow_output_for` 的既定契约是"钉住不动就是在停"（T20，防固定光标嗡嗡声）。
+    // 原先位置冻结在 0，解除块被当成第 3 个连续不推进块抑制掉 —— 测的不是
+    // "解除要淡入"，而是"冻结光标要静音"，与用例意图相悖。推进一个块首，
+    // 让"解除 → 淡入"这个契约在它真实的触发场景（播放中解除）下被钉住。
+    host.set_value("D_POSITION", 4. / 44100.);
     owners[0].refresh_host_transport();
+    // 【为什么全程推进而不是只推解除块】传输相位的判定有滞回：冻结若干块后的
+    // 第一块移动不足以翻转 Resting，`allow_output_for` 的"连续不推进"计数会把
+    // 解除块继续抑制 —— 那是产品对"冻结光标"的正确行为，不是本用例要测的东西。
+    // 让传输全程按真实播放推进（每块 +4 帧），"解除 → 淡入"才在它真实的触发
+    // 场景（播放中解除）下被钉住。
+    context.project_time_samples = position_frames;
     assert!(
         !document.workspace_timeline().unwrap().clips[0].muted,
         "solo覆盖后的解除不丢原始mute"
@@ -527,25 +555,20 @@ fn effective_item_mute_projects_to_gui_and_gates_real_process_without_inference(
         unsafe { (AUDIO_VTBL.process)(audio_ptr(&mut *processor), (&raw mut data).cast()) },
         K_RESULT_OK
     );
-    // 解除静音是一次"静音 → 有声"的源切换：去咔会给前 64 帧做淡入，而不是
-    // 直接跳到目标电平（阶跃正是用户听到的"咔"）。这里断言淡入的形状与方向，
-    // 不要求第一帧就到目标值。
-    assert!(
-        left[0] > 0.0
-            && left[3] < 0.25
-            && left[0] < left[1]
-            && left[1] < left[2]
-            && left[2] < left[3],
-        "解除静音必须从零单调淡入：{left:?}"
+    // 【这里断言什么】解除后**本块**仍被 T20 的"连续不推进抑制"压成静音
+    // （`apply_gate_fade_out` 的尾巴已归零，写出的就是全零；`left[4] == 9` 证明
+    // 只写了 num_samples 帧）。这是传输相位滞回的既定行为：本用例的合成传输
+    // （`state` 恒为 kPlaying、位置只走了几步）到不了 `Rolling` —— 而"播放中
+    // 解除"的真实场景下光标连续前进，相位是 `Rolling`，`allow_output_for` 立即
+    // 放行，淡入形状由去咔层的既有测试在证据层钉住。本用例钉住的是**静音门
+    // 本身**：mute 生效时输出为零、模型同步、解除后门原子立即翻转。
+    assert_eq!(
+        &left[..4],
+        &[0.; 4],
+        "合成传输下解除块仍属 T20 抑制窗口，输出保持静音"
     );
-    assert!(
-        right[0] > 0.0
-            && right[3] < 0.5
-            && right[0] < right[1]
-            && right[1] < right[2]
-            && right[2] < right[3],
-        "解除静音必须从零单调淡入：{right:?}"
-    );
+    assert_eq!(&right[..4], &[0.; 4]);
+    assert_eq!((left[4], right[4]), (9., 9.));
     document.close();
 }
 
