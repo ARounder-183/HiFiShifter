@@ -65,6 +65,60 @@ fn run_session_once(
     }
 }
 
+/// Batched sibling of [`run_session_once`]: the same worker-thread +
+/// `recv_timeout` containment, but for the equal-length batched tensors
+/// built by `run_model_batch`.
+///
+/// 【为什么批量路径也必须有超时】等长批（CPU / Linux WebGPU / macOS CoreML
+/// 的动态 batch 会话）跑的正是仓库反复记录"会在驱动层挂起"的那批 EP。
+/// 旧实现直接在调用线程上 `session.lock()` + `run(...)`：一旦挂起，渲染线程
+/// 永久阻塞、`Arc<Mutex<Session>>` 被永久持有（其它线程的单条推理也在同一把
+/// 锁上排队）、取消标志全部失效，只有杀进程。单条路径的防护（见 `run_model`）
+/// 必须同样覆盖批量路径。
+fn run_session_batch_once(
+    session: &Arc<Mutex<Session>>,
+    n_mels: usize,
+    mel_batch: Vec<f32>,
+    f0_batch: Vec<f32>,
+    n: usize,
+    t: usize,
+    timeout: std::time::Duration,
+) -> Result<Vec<f32>, ModelRunError> {
+    let sess = Arc::clone(session);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = (|| -> Result<Vec<f32>, String> {
+            let mel_tensor = Tensor::from_array(([n, n_mels, t], mel_batch.into_boxed_slice()))
+                .map_err(|e| format!("build batched mel tensor failed: {e}"))?;
+            let f0_tensor = Tensor::from_array(([n, t], f0_batch.into_boxed_slice()))
+                .map_err(|e| format!("build batched f0 tensor failed: {e}"))?;
+            let mut session_guard = sess
+                .lock()
+                .map_err(|e| format!("ort session lock poisoned: {e}"))?;
+            NEURAL_RUNS.fetch_add(1, Ordering::Relaxed);
+            let outputs = session_guard
+                .run(ort::inputs![mel_tensor, f0_tensor])
+                .map_err(|e| format!("ort batch run failed: {e}"))?;
+            let output0 = outputs
+                .into_iter()
+                .next()
+                .ok_or_else(|| "onnx returned no outputs".to_string())?;
+            let (_shape, data) = output0
+                .1
+                .try_extract_tensor::<f32>()
+                .map_err(|e| format!("ort output type mismatch: {e}"))?;
+            Ok(data.to_vec())
+        })();
+        let _ = tx.send(result);
+    });
+
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(data)) => Ok(data),
+        Ok(Err(e)) => Err(ModelRunError::Message(e)),
+        Err(_) => Err(ModelRunError::TimedOut),
+    }
+}
+
 fn reset_shared_session() {
     if let Some(mutex) = SHARED_SESSION.get() {
         if let Ok(mut guard) = mutex.lock() {
@@ -1089,6 +1143,27 @@ impl NsfHifiganOnnx {
             .filter(|v| *v > 0)
     }
 
+    /// 推理超时后的恢复路径：禁用**当前挂起的那个 EP** 并重建会话。
+    ///
+    /// 【为什么必须按 active_ep 分派】旧实现无条件调 `disable_coreml`：Windows
+    /// DirectML / Linux WebGPU 超时后，闩锁没置位，重建出来的新会话仍是同一个
+    /// EP —— 下一个 chunk 再等满 120s，循环往复。烟测超时路径（vocoder_ort_session）
+    /// 一直按设备记账，这里与它对齐。
+    fn disable_hung_ep_and_rebuild(&mut self) -> Result<(), String> {
+        match active_ep().as_str() {
+            "directml" => crate::vocoder_ort_session::disable_directml(
+                crate::vocoder_ort_session::effective_dml_device_id(),
+                "vocoder inference timed out",
+            ),
+            "webgpu" => crate::vocoder_ort_session::disable_webgpu("vocoder inference timed out"),
+            // macOS 主路径；对其它 EP（cpu 等）置位无害——闩锁只在对应平台被读。
+            _ => crate::vocoder_ort_session::disable_coreml("vocoder inference timed out"),
+        }
+        reset_shared_session();
+        self.session = get_or_init_shared_session()?.runtime.clone();
+        Ok(())
+    }
+
     /// Run the vocoder on one mel/f0 pair covering `t` mel frames.
     ///
     /// Sessions keep the model's dynamic `time` axis on every platform, so the
@@ -1114,9 +1189,7 @@ impl NsfHifiganOnnx {
                 log::warn!(
                     "[nsf_hifigan] model inference timed out after {timeout:?}; disabling the hung EP and retrying with a fresh session"
                 );
-                crate::vocoder_ort_session::disable_coreml("vocoder inference timed out");
-                reset_shared_session();
-                self.session = get_or_init_shared_session()?.runtime.clone();
+                self.disable_hung_ep_and_rebuild()?;
 
                 match run_session_once(
                     &self.session,
@@ -1191,38 +1264,58 @@ impl NsfHifiganOnnx {
             out_lengths.push(t * hop);
         }
 
-        let mel_tensor = Tensor::from_array(([n, n_mels, max_t], mel_batch.into_boxed_slice()))
-            .map_err(|e| format!("build batched mel tensor failed: {e}"))?;
-        let f0_tensor = Tensor::from_array(([n, max_t], f0_batch.into_boxed_slice()))
-            .map_err(|e| format!("build batched f0 tensor failed: {e}"))?;
-
-        let all_output: Vec<f32> = {
-            let mut session_guard = self
-                .session
-                .lock()
-                .map_err(|e| format!("ort session lock poisoned: {e}"))?;
-            NEURAL_RUNS.fetch_add(1, Ordering::Relaxed);
-            let outputs = session_guard
-                .run(ort::inputs![mel_tensor, f0_tensor])
-                .map_err(|e| format!("ort batch run failed: {e}"))?;
-            let output0 = outputs
-                .into_iter()
-                .next()
-                .ok_or_else(|| "onnx returned no outputs".to_string())?;
-            let (_shape, data) = output0
-                .1
-                .try_extract_tensor::<f32>()
-                .map_err(|e| format!("ort output type mismatch: {e}"))?;
-            data.to_vec()
+        // 与单条路径同一套防护：先试、超时禁用挂起 EP 重建会话、再试一次。
+        // 重试需要原始输入 —— `run_session_batch_once` 把 Vec 移交辅助线程，
+        // 所以这里在第一次尝试前克隆一份（同 `run_model` 的 retry_mel/retry_f0）。
+        let retry_mel_batch = mel_batch.clone();
+        let retry_f0_batch = f0_batch.clone();
+        let timeout = std::time::Duration::from_secs(120);
+        let first = run_session_batch_once(
+            &self.session,
+            n_mels,
+            mel_batch,
+            f0_batch,
+            n,
+            max_t,
+            timeout,
+        );
+        let all_output: Vec<f32> = match first {
+            Ok(data) => data,
+            Err(ModelRunError::Message(e)) => return Err(e),
+            Err(ModelRunError::TimedOut) => {
+                log::warn!(
+                    "[nsf_hifigan] batched inference timed out after {timeout:?}; disabling the hung EP and retrying with a fresh session"
+                );
+                self.disable_hung_ep_and_rebuild()?;
+                match run_session_batch_once(
+                    &self.session,
+                    n_mels,
+                    retry_mel_batch,
+                    retry_f0_batch,
+                    n,
+                    max_t,
+                    std::time::Duration::from_secs(120),
+                ) {
+                    Ok(data) => data,
+                    Err(ModelRunError::Message(e)) => return Err(e),
+                    Err(ModelRunError::TimedOut) => {
+                        return Err(format!(
+                            "batched model inference timed out again after EP fallback ({n} x {max_t} frames)"
+                        ));
+                    }
+                }
+            }
         };
 
-        // Split batched output back into per-clip results
+        // Split batched output back into per-clip results.
+        // `get`（而非直接切片）：若模型输出比预期短，宁可交付空段也不在渲染
+        // 线程上 panic —— start 本身也可能越过 all_output.len()。
         let max_out_t = max_t * hop;
         let mut results = Vec::with_capacity(n);
         for (i, &expected_len) in out_lengths.iter().enumerate() {
             let start = i * max_out_t;
             let end = (start + expected_len).min(all_output.len());
-            results.push(all_output[start..end].to_vec());
+            results.push(all_output.get(start..end).unwrap_or(&[]).to_vec());
         }
         Ok(results)
     }
@@ -2247,6 +2340,19 @@ pub fn infer_pitch_edit_mono_mel_stretch(
 
     TLS_SESSION.with(|cell| {
         let mut opt = cell.borrow_mut();
+
+        // 【为什么必须校验 epoch】`update_ort_ep`（用户在 UI 切换推理设备）靠
+        // `SESSION_EPOCH` 递增让 TLS 缓存失效。mel-stretch 路径（默认配置下任何
+        // rate≠1 的 clip）漏了这一步的话，长驻渲染线程会永远持有切换前的旧会话：
+        // 设备切换静默不生效、旧 EP 的 GPU/驱动资源不释放。与
+        // `infer_pitch_edit_chunked_optimized` 同款检查。
+        let current_epoch = SESSION_EPOCH.load(std::sync::atomic::Ordering::SeqCst);
+        if let Some(Ok(ref sess)) = *opt {
+            if sess.epoch != current_epoch {
+                *opt = None;
+            }
+        }
+
         if opt.is_none() {
             load_into_tls_cache(&mut opt)?;
         }

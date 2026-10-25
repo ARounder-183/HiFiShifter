@@ -118,6 +118,34 @@ fn creation_timeout(ep_name: &str) -> std::time::Duration {
 /// hung CoreML inference can never block the benchmark or rendering again.
 static COREML_DISABLED: OnceLock<std::sync::atomic::AtomicBool> = OnceLock::new();
 
+/// Set once a WebGPU inference (smoke test or real run) times out.  The
+/// WebGPU EP is then skipped for the rest of the process (CPU takes over),
+/// mirroring the CoreML latch.  Without it, a timed-out Dawn/Vulkan hang
+/// would be retried with a *fresh* WebGPU session after every timeout —
+/// each retry costing the full 120 s again (see the vocoder's
+/// `disable_hung_ep_and_rebuild`).
+static WEBGPU_DISABLED: OnceLock<std::sync::atomic::AtomicBool> = OnceLock::new();
+
+/// Reader is only referenced by the WebGPU-capable session-build branches
+/// (Linux x86_64 / macOS ARM64); gate it like `coreml_disabled` so Windows
+/// builds don't see a dead function.
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64")
+))]
+fn webgpu_disabled() -> bool {
+    WEBGPU_DISABLED
+        .get_or_init(|| std::sync::atomic::AtomicBool::new(false))
+        .load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn disable_webgpu(reason: &str) {
+    log::warn!("ort_session: disabling WebGPU EP for this process: {reason}");
+    WEBGPU_DISABLED
+        .get_or_init(|| std::sync::atomic::AtomicBool::new(false))
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// DirectML 的"坏设备"记账。
 ///
 /// 【为什么按**设备**记账，而不是按进程】DirectML 的 `device_id` 是 DXGI
@@ -1267,22 +1295,28 @@ fn build_session_inner(
     // even when WebGPU sessions are never used for inference.
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     if (choice == "auto" || choice == "webgpu" || choice == "gpu") && !is_wsl2() {
-        match Session::builder() {
-            Ok(builder) => match try_register_webgpu_ep(builder, role) {
-                Ok((b, ep)) => {
-                    let session = build_gpu_session_finalize(b, onnx_path, role, "WebGPU")?;
-                    return Ok((session, ep.to_string(), None));
-                }
+        if webgpu_disabled() {
+            log::warn!(
+                "ort_session[{role:?}]: WebGPU is disabled in this process (an earlier inference timed out) — using CPU. Run the benchmark to re-test."
+            );
+        } else {
+            match Session::builder() {
+                Ok(builder) => match try_register_webgpu_ep(builder, role) {
+                    Ok((b, ep)) => {
+                        let session = build_gpu_session_finalize(b, onnx_path, role, "WebGPU")?;
+                        return Ok((session, ep.to_string(), None));
+                    }
+                    Err(e) => {
+                        log::warn!("ort_session[{role:?}]: WebGPU unavailable — {e}");
+                        log_vulkan_diagnostics();
+                    }
+                },
                 Err(e) => {
-                    log::warn!("ort_session[{role:?}]: WebGPU unavailable — {e}");
+                    log::error!(
+                        "ort_session[{role:?}]: failed to create session builder for WebGPU — {e}"
+                    );
                     log_vulkan_diagnostics();
                 }
-            },
-            Err(e) => {
-                log::error!(
-                    "ort_session[{role:?}]: failed to create session builder for WebGPU — {e}"
-                );
-                log_vulkan_diagnostics();
             }
         }
     }
@@ -1323,21 +1357,27 @@ fn build_session_inner(
                 ),
             }
         }
-        match Session::builder() {
-            Ok(builder) => match try_register_webgpu_ep(builder, role) {
-                Ok((b, ep)) => match build_gpu_session_finalize(b, onnx_path, role, "WebGPU") {
-                    Ok(session) => return Ok((session, ep.to_string(), None)),
-                    Err(e) => log::error!(
-                        "ort_session[{role:?}]: WebGPU session creation failed (will try CPU): {e}"
-                    ),
+        if !webgpu_disabled() {
+            match Session::builder() {
+                Ok(builder) => match try_register_webgpu_ep(builder, role) {
+                    Ok((b, ep)) => match build_gpu_session_finalize(b, onnx_path, role, "WebGPU") {
+                        Ok(session) => return Ok((session, ep.to_string(), None)),
+                        Err(e) => log::error!(
+                            "ort_session[{role:?}]: WebGPU session creation failed (will try CPU): {e}"
+                        ),
+                    },
+                    Err(e) => log::error!("ort_session[{role:?}]: WebGPU unavailable: {e}"),
                 },
-                Err(e) => log::error!("ort_session[{role:?}]: WebGPU unavailable: {e}"),
-            },
-            Err(e) => {
-                log::error!(
-                    "ort_session[{role:?}]: failed to create session builder for WebGPU: {e}"
-                )
+                Err(e) => {
+                    log::error!(
+                        "ort_session[{role:?}]: failed to create session builder for WebGPU: {e}"
+                    )
+                }
             }
+        } else {
+            log::warn!(
+                "ort_session[{role:?}]: WebGPU is disabled in this process (an earlier inference timed out) — using CPU. Run the benchmark to re-test."
+            );
         }
     }
 
