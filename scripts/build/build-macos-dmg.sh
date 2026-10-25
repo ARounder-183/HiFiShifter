@@ -102,7 +102,10 @@ if [[ "$SKIP_BUILD" -eq 0 ]]; then
   echo "[mac-dmg] Building $PRODUCT_NAME $VERSION ($ARCH_SUFFIX) DMG"
   (
     cd "$TAURI_DIR"
-    cargo tauri build --bundles app,dmg -- --locked
+    # 【为什么钉 feature 集】与 build.yml 的 macOS 矩阵同口径（vslib 是
+    # x86_64 Windows 专属，macOS 不带）：本地自建的 DMG 必须与 CI 发布产物
+    # 特性一致，"本地跑通"才能佐证 CI 产物。此前本地默认 feature 与 CI 分叉。
+    cargo tauri build --bundles app,dmg -- --locked --no-default-features --features onnx
   )
 fi
 

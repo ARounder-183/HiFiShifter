@@ -39,7 +39,12 @@ jobs:
           cache: false
           rustflags: ""
       - name: Check rustfmt
-        run: cargo fmt --manifest-path backend/Cargo.toml --all --check
+        run: |
+          cargo fmt --manifest-path backend/Cargo.toml --all --check
+          # hfs-gui（VST3 的独立渲染进程，随 bundle 交付用户）在 backend workspace
+          # 之外，上面的 fmt 覆盖不到 —— 2026-10 审查时它正因不在任何门禁内而
+          # 积累了一处 rustfmt 漂移。
+          cargo fmt --manifest-path backend/hfs-gui/Cargo.toml --all --check
 
   # 【为什么 clippy 不在这里】本 crate 有一半是 Windows 专属（WebView2 编辑器、REAPER
   # 宿主扩展）。在 Unix 上那半边只留下成百条 dead_code 告警：把它们静音会让
@@ -137,6 +142,13 @@ jobs:
       # 构建逻辑只在 scripts/vst3/unix/ 里存在一份，CI 不重复实现任何一步。
       - name: Build, verify and package
         run: bash scripts/vst3/unix/build.sh
+
+      # hfs-gui 的 clippy 门禁：它是 workspace 外的交付物，build.sh 只证明"能编
+      # 译"，`-D warnings` 才拦得住退化。依赖上面装好的 GTK/WebKitGTK；只在
+      # x86_64 上跑一次（源码与架构无关，aarch64 重复跑没有增量价值）。
+      - name: Clippy hfs-gui
+        if: matrix.platform == 'linux-x86_64'
+        run: cargo clippy --manifest-path backend/hfs-gui/Cargo.toml --locked --all-targets -- -D warnings
 
       # 文件名本身已经带版本与平台（build.sh 生成），这里只是读出来，
       # 免得 artifact 列表里四个平台长成一模一样。

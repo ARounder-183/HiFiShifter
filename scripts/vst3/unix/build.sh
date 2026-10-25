@@ -527,8 +527,13 @@ stage_bundle() {
     # "stable" 会让同一 bundle 里插件用 pinned 工具链、渲染进程用 stable —— 违背
     # "本机与 CI 共用同一把尺子"的方针；且只装了 pinned 的机器上 stable 根本不存在，
     # cargo 直接报 "toolchain 'stable' is not installed"，错误与原因隔了一层。
+    # 【为什么不沿用 --offline】它依赖"插件构建恰好下载过相同版本的 crate"这一
+    # 巧合：hfs-gui 的 Cargo.lock 与 backend 的锁一旦版本漂移，构建就以一条
+    # 离线错误红掉，离真实原因很远。改为显式 fetch 入锁的依赖树 —— 锁不满足
+    # 时错误直接指出是哪个包，且不再依赖插件的下载副产品。
     ( cd "$REPO_ROOT/backend/hfs-gui" && \
-      cargo build --release --offline --locked --target-dir "$TARGET_DIR/hfs-gui" ) \
+      cargo fetch --locked && \
+      cargo build --release --locked --target-dir "$TARGET_DIR/hfs-gui" ) \
       || die "hfs-gui 构建失败"
     cp -f "$TARGET_DIR/hfs-gui/release/hfs-gui" \
       "$BUNDLE_DIR/$MODULE_SUBDIR/hfs-gui"
