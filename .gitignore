@@ -6,6 +6,14 @@ __pycache__/
 # C extensions
 *.so
 
+# 【外部工具残留】以仓库根为 cwd 的某些工具（已知肇事者：AI CLI 会话，见
+# openai/codex#16997）在环境变量未展开时按相对路径落目录；NVIDIA 驱动的
+# umdlogs 同理。空目录对 git 不可见，但一旦有文件写入就会污染 status ——
+# 每轮 audit 的杂物清单里也要有它们（第 4/5 轮各删过一次）。
+/%SystemDrive%/
+/NVIDIA Corporation/
+backend/NVIDIA Corporation/
+
 # Distribution / packaging
 # 【为什么逐条加根锚点】这一段来自 Python 模板，语义是"忽略仓库根的打包产物"。
 # 不带锚点的 `build/` 会一路命中 `scripts/build/` —— 那里是**源码**（7 个已跟踪
