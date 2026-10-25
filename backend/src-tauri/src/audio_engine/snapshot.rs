@@ -471,11 +471,6 @@ pub(crate) fn build_snapshot(
                     .saturating_mul(2)
                     .min(src_render.pcm.len())
             };
-            let mut clip_pcm = src_render.pcm[slice_start..slice_end].to_vec();
-            if clip.reversed && !clip.loop_enabled {
-                crate::mixdown::reverse_interleaved_frames(&mut clip_pcm, 2);
-            }
-
             let key = crate::formant_cache::make_formant_cache_key(
                 &clip.id,
                 path,
@@ -507,18 +502,33 @@ pub(crate) fn build_snapshot(
                 false,
                 params,
             );
-            match crate::formant_cache::get_or_compute_formant_audio(
-                key, &clip_pcm, out_rate, params,
-            ) {
+            // 【为什么先查缓存再物化输入】本函数随每个完成的 clip 全量重建
+            // （200ms 节流），Loop 模式下 slice 是**整份文件**（3 分钟歌 ≈ 63MB，
+            // 1 小时 ≈ 1.27GB）—— 而这个拷贝只在缓存 miss 时才被消费。先以已知
+            // 形状（帧数 = 窗口帧数，采样率 = out_rate）窥缓存，命中则完全不
+            // 物化 `clip_pcm`（第 5 轮审查 P2-2）。帧数一致性沿用了
+            // `get_or_compute_formant_audio` 的防御：形状不符按未命中重算。
+            let expected_frames = (slice_end - slice_start) / 2;
+            let cached =
+                crate::formant_cache::get_cached_formant_audio(&key, expected_frames, out_rate);
+            let computed = || -> Result<crate::formant_cache::FormantCacheEntry, String> {
+                let mut clip_pcm = src_render.pcm[slice_start..slice_end].to_vec();
+                if clip.reversed && !clip.loop_enabled {
+                    crate::mixdown::reverse_interleaved_frames(&mut clip_pcm, 2);
+                }
+                crate::formant_cache::get_or_compute_formant_audio(key, &clip_pcm, out_rate, params)
+            };
+            match cached.map(Ok).unwrap_or_else(computed) {
                 Ok(entry) => {
-                    crate::formant_cache::formant_debug_log(format!(
-                        "snapshot using formant clip_id={} frames={} diff={:.8} processor_handles_stretch={} playback_rate={:.4}",
-                        clip.id,
-                        entry.frames,
-                        crate::formant_cache::average_abs_diff(&clip_pcm, entry.pcm_stereo.as_ref()),
-                        processor_handles_stretch,
-                        playback_rate,
-                    ));
+                    if crate::formant_cache::formant_debug_enabled() {
+                        crate::formant_cache::formant_debug_log(format!(
+                            "snapshot using formant clip_id={} frames={} processor_handles_stretch={} playback_rate={:.4}",
+                            clip.id,
+                            entry.frames,
+                            processor_handles_stretch,
+                            playback_rate,
+                        ));
+                    }
                     src_render = ResampledStereo {
                         sample_rate: entry.sample_rate,
                         frames: entry.frames,
@@ -555,10 +565,12 @@ pub(crate) fn build_snapshot(
                     }
                 }
                 Err(error) => {
-                    crate::formant_cache::formant_debug_log(format!(
-                        "snapshot formant error clip_id={} error={}",
-                        clip.id, error
-                    ));
+                    if crate::formant_cache::formant_debug_enabled() {
+                        crate::formant_cache::formant_debug_log(format!(
+                            "snapshot formant error clip_id={} error={}",
+                            clip.id, error
+                        ));
+                    }
                 }
             }
         } else if !processor_handles_stretch && (playback_rate - 1.0).abs() > 1e-6 {

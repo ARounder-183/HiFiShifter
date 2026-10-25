@@ -506,6 +506,33 @@ pub fn compute_formant_cache_entry_for_clip(
     Ok((key, entry))
 }
 
+/// 只读缓存查询：命中且形状与调用方声明的 `(expected_frames, sample_rate)` 一致时
+/// 返回条目，否则 `None`。
+///
+/// 【为什么存在】快照重建（`audio_engine/snapshot.rs`）随每个完成的 clip 全量跑，
+/// 而 Loop 模式下喂给 [`get_or_compute_formant_audio`] 的输入是**整份文件**的拷贝
+/// —— 命中场景下这份拷贝纯属浪费。先以已知形状窥缓存，命中则完全不物化输入；
+/// 形状防御与 `get_or_compute` 一致（不符按未命中处理）。
+pub fn get_cached_formant_audio(
+    key: &FormantCacheKey,
+    expected_frames: usize,
+    sample_rate: u32,
+) -> Option<FormantCacheEntry> {
+    let mut cache = global_formant_cache()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    let entry = cache.get(key)?;
+    if entry.frames == expected_frames && entry.sample_rate == sample_rate {
+        formant_debug_log(format!(
+            "cache hit (peek) clip_id={} frames={} sr={}",
+            key.clip_id, entry.frames, entry.sample_rate
+        ));
+        Some(entry.clone())
+    } else {
+        None
+    }
+}
+
 pub fn get_or_compute_formant_audio(
     key: FormantCacheKey,
     input_stereo: &[f32],
