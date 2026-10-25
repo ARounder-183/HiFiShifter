@@ -199,8 +199,21 @@ fn module_initialize() -> bool {
 
 /// 模块级卸载：宿主在最后一次释放模块前的清理点。
 fn module_shutdown() -> bool {
-    // 先收尾 GUI（它会写诊断行），再把还攒在缓冲里的日志落盘。
-    let result = crate::guard_ffi(false, editor::shutdown);
+    // 先收尾 GUI（它会写诊断行），等慢车道清空，再把还攒在缓冲里的日志落盘。
+    let result = crate::guard_ffi(false, || {
+        let editors = editor::shutdown();
+        // 【为什么是限时】慢车道任务以分钟计；等不满就放弃。模块已被
+        // `editor::pin_module`（慢车道任务开始 / 编辑器附着时）钉住，
+        // 宿主随后的 FreeLibrary 不会真的卸载 —— 这里只是给"正常情况"
+        // （没有后台工作）一个干净的收尾。
+        let lane_idle = editor::slow_lane::wait_until_idle(std::time::Duration::from_secs(2));
+        if !lane_idle {
+            crate::gui_log_line(
+                "ExitDll: slow lane still busy; the module stays resident until it finishes",
+            );
+        }
+        editors
+    });
     diagnostics::flush_pending();
     result
 }

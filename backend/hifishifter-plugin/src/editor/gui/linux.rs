@@ -336,7 +336,20 @@ static GUI_THREAD: OnceLock<Option<GuiThread>> = OnceLock::new();
 mod remote {
     use super::*;
     use std::io::{BufRead, BufReader, Write};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc::{channel, Receiver, Sender};
+
+    /// 仍然活着的远程驱动线程数。卸载路径读它打日志（见 `super::shutdown`）。
+    pub(super) static REMOTE_DRIVERS: AtomicUsize = AtomicUsize::new(0);
+
+    /// 驱动线程的存活租约：Drop 时减员 —— 无论正常退出、`?` 早退还是 panic。
+    struct DriverLease;
+
+    impl Drop for DriverLease {
+        fn drop(&mut self) {
+            REMOTE_DRIVERS.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
 
     /// 宿主线程 → 驱动线程。
     pub(super) enum Command {
@@ -445,10 +458,23 @@ mod remote {
         let link = request.link.clone();
         let (parent, width, height) = (request.parent, request.width, request.height);
 
-        std::thread::Builder::new()
+        // 驱动线程的生命期不受卸载协商约束（宿主不知道它存在），先把模块钉住，
+        // 再起线程 —— `ExitDll` 的 FreeLibrary 从此变成无害的引用计数递减。
+        crate::editor::pin_module();
+        REMOTE_DRIVERS.fetch_add(1, Ordering::AcqRel);
+        let spawned = std::thread::Builder::new()
             .name("hfs-editor".into())
-            .spawn(move || driver(link, helper, assets, parent, width, height, incoming))
-            .map_err(|error| format!("could not start the editor thread: {error}"))?;
+            .spawn(move || {
+                let _lease = DriverLease;
+                driver(link, helper, assets, parent, width, height, incoming)
+            })
+            .map_err(|error| {
+                REMOTE_DRIVERS.fetch_sub(1, Ordering::AcqRel);
+                format!("could not start the editor thread: {error}")
+            });
+        if let Err(error) = spawned {
+            return Err(error);
+        }
         // 其余通道都归驱动线程；这里立刻返回，宿主不会等任何东西。
 
         crate::gui_log_line("editor runs out of process (hfs-gui)");
@@ -458,8 +484,49 @@ mod remote {
         }))
     }
 
+    /// 驱动线程的 panic 守卫 + 子进程收割守卫。
+    ///
+    /// 【为什么必须包住整个函数体】`on_message` / `pump` 在本线程裸跑，任何一处
+    /// panic（RefCell 借用冲突、序列化之外的索引……）都会 unwind 掉整条线程，
+    /// 跳过 `child.kill()` / `child.wait()` —— `hfs-gui` 窗口留在屏幕上、句柄随栈
+    /// 丢弃，子进程退出后成为无人收割的僵尸（第 5 轮审查 P2-8）。`run_inline` 有
+    /// GTK 主循环兜底，remote 路径在这里补上对应物：panic 折成日志，子进程由
+    /// [`ChildReaper`] 无论哪条退出路径都收割，引导文件顺带清掉。
     #[allow(clippy::too_many_arguments)]
     fn driver(
+        link: Arc<crate::editor::routing::EditorLink>,
+        helper: std::path::PathBuf,
+        assets: std::path::PathBuf,
+        parent: NativeWindow,
+        width: i32,
+        height: i32,
+        commands: Receiver<Command>,
+    ) {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            driver_session(link, helper, assets, parent, width, height, commands)
+        }));
+        if outcome.is_err() {
+            crate::gui_log_line("the editor driver thread panicked; the helper process was reaped");
+        }
+    }
+
+    /// 子进程与引导文件的 RAII 收割：正常退出、`?` 早退、panic 都会 kill + wait，
+    /// 并删除 bootstrap 文件（每视图唯一名，见 `driver_session`）。
+    struct ChildReaper<'a> {
+        child: std::process::Child,
+        boot_path: &'a std::path::Path,
+    }
+
+    impl Drop for ChildReaper<'_> {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            let _ = std::fs::remove_file(self.boot_path);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn driver_session(
         link: Arc<crate::editor::routing::EditorLink>,
         helper: std::path::PathBuf,
         assets: std::path::PathBuf,
@@ -475,7 +542,13 @@ mod remote {
             let state = client.borrow();
             client::bootstrap_json(&state.link, &state.view_id)
         };
-        let boot_path = std::env::temp_dir().join(format!("hfs-boot-{}.json", std::process::id()));
+        // 【为什么带 view_id】同一宿主进程里第二个编辑器视图（REAPER 多轨各开
+        // FX 窗口是常态）此前与第一个共用 `hfs-boot-<pid>.json`：后写覆盖先写、
+        // 先退出的 remove_file 可能删掉后启动视图还没被读的文件 —— 子进程读错
+        // bootstrap 就是 viewId 串号的永久白屏。文件名加视图唯一量后碰撞为零。
+        let view_token = client.borrow().view_id.clone();
+        let boot_path =
+            std::env::temp_dir().join(format!("hfs-boot-{}-{view_token}.json", std::process::id()));
         if let Err(error) = std::fs::write(&boot_path, boot.to_string()) {
             crate::gui_log_line(&format!("could not write the bootstrap file: {error}"));
             client
@@ -512,6 +585,11 @@ mod remote {
         };
         let Some(stdout) = child.stdout.take() else {
             return;
+        };
+        // 从这里起，任何退出路径（正常收尾 / `?` 早退 / panic）都由收割守卫兜底。
+        let mut reaper = ChildReaper {
+            child,
+            boot_path: &boot_path,
         };
         {
             let mut stdin = stdin;
@@ -593,15 +671,14 @@ mod remote {
             if client.borrow().is_dead() {
                 break;
             }
-            if let Ok(Some(_)) = child.try_wait() {
+            if let Ok(Some(_)) = reaper.child.try_wait() {
                 client.borrow_mut().mark_dead("the editor process exited");
                 break;
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-        let _ = child.kill();
-        let _ = child.wait();
-        let _ = std::fs::remove_file(&boot_path);
+        // 收割守卫在这里 drop：kill + wait + 清引导文件（正常路径与 panic 路径共用）。
+        drop(reaper);
     }
 }
 
@@ -761,6 +838,14 @@ pub(super) fn shutdown() -> bool {
     if LIVE_VIEWS.load(Ordering::Acquire) != 0 {
         crate::gui_log_line("ExitDll refused: native editor views still alive");
         return false;
+    }
+    if remote::REMOTE_DRIVERS.load(Ordering::Acquire) > 0 {
+        // 远程驱动线程还活着：模块已被 `pin_module` 钉住，卸载是安全的引用计数
+        // 递减，线程会活到它的视图关闭（或进程退出）。这里只留一句账，让日志
+        // 能解释"ExitDll 之后编辑器还在"。
+        crate::gui_log_line(
+            "ExitDll: the remote editor driver is still running; the module stays resident",
+        );
     }
     let Some(Some(thread)) = GUI_THREAD.get() else {
         return true;
@@ -1102,6 +1187,10 @@ fn attach_view(
     request: AttachRequest,
     on_host_thread: bool,
 ) -> Result<(usize, GuiFidelity), String> {
+    // 私有 GTK 线程在 `gui::shutdown` 等 5 秒不到就会被 abandon（注释写明"比死锁
+    // 好"）—— abandon 之后它的下一次 tick 同样落在已卸载代码上。钉住模块让
+    // abandon 真正无害。
+    super::super::pin_module();
     let assets = crate::editor::resources::frontend_directory()?;
     let context = web_context(&assets);
     let token = NEXT_TOKEN.fetch_add(1, Ordering::Relaxed) as usize;

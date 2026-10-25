@@ -160,6 +160,27 @@ pub(crate) fn submit(task: SlowTask) -> Result<(), String> {
     lane()?.submit(task)
 }
 
+/// 卸载前等慢车道清空。返回是否在限时内归零（车道不可用视为空闲）。
+///
+/// 【为什么是限时等待而不是 join】任务以分钟计，`ExitDll` 不能冻住宿主；
+/// 超时就放弃 —— 模块已被 `pin_module` 钉住，线程安全地活到进程退出。
+pub(crate) fn wait_until_idle(timeout: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let busy = match lane() {
+            Ok(lane) => lane.shared.in_flight.load(Ordering::Acquire) > 0,
+            Err(_) => false,
+        };
+        if !busy {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
 /// 车道状态（诊断包用）。
 pub(crate) fn snapshot() -> Value {
     match lane() {
@@ -185,6 +206,9 @@ fn worker(receiver: Receiver<SlowTask>, shared: std::sync::Arc<Shared>) {
         } = task;
         let started = std::time::Instant::now();
         shared.begin(&command);
+        // 任务真正开始执行的那一刻把模块钉住：任务以分钟计，宿主在此窗口内
+        // ExitDll → FreeLibrary 会让本线程落到已卸载的代码页（第 5 轮审查 §3）。
+        super::pin_module();
         log::info!("[ara] slow lane: started {command} (id={id})");
         // 长任务里的 panic 既不能带走宿主进程，也不能让调用方永远等不到回执。
         let outcome = run_task(work);

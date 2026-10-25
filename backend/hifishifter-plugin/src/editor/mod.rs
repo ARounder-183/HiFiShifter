@@ -22,7 +22,7 @@ pub(crate) mod private_groups;
 pub(crate) mod resources;
 pub(crate) mod routing;
 pub(crate) mod session;
-mod slow_lane;
+pub(crate) mod slow_lane;
 #[cfg(not(test))]
 mod temp_sweep;
 mod view;
@@ -79,4 +79,72 @@ mod tests {
 /// 卸载前撤销本模块注册的窗口类 / 停掉私有 GUI 线程；尚有窗口时明确拒绝正常卸载。
 pub(crate) fn shutdown() -> bool {
     gui::shutdown()
+}
+
+/// 把本模块钉进宿主进程：引用计数永久 +1，宿主随后的 `FreeLibrary`/`dlclose`
+/// 不再真正卸载本模块的代码页。
+///
+/// 【为什么需要它】三类后台实体的存活期**长于**任何一次卸载协商，而宿主并不
+/// 知情：慢车道任务以分钟计（基准测试实测 31–134 秒）、Linux 远程编辑器的
+/// `hfs-editor` 驱动线程 20ms 轮询、被 abandon 的私有 GTK 线程（`gui::shutdown`
+/// 等 5 秒就放弃）。它们任何一个在 `ExitDll` 之后的下一次执行都会落到已卸载的
+/// 代码页 —— 宿主崩溃（第 5 轮审查 §3）。与其和宿主协商"请别卸载"（`ExitDll`
+/// 返回假并不约束宿主），不如让卸载变成无害的引用计数递减。
+///
+/// 【为什么是不可逆的】`PIN`/`RTLD_NODELETE` 没有反向操作。这是既定取舍的
+/// 推广：WebView2 视图一旦打开就已经同样钉住（`gui/windows.rs` 的
+/// `pin_callback_code`，注释写明"开发升级需要正常退出宿主"）。触发点取
+/// "后台工作真正开始"的那一刻：慢车道任务开始执行、远程/嵌入式编辑器附着。
+#[allow(unused)]
+pub(crate) fn pin_module() {
+    #[cfg(windows)]
+    {
+        use windows::core::PCWSTR;
+        use windows::Win32::Foundation::HMODULE;
+        use windows::Win32::System::LibraryLoader::{
+            GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+            GET_MODULE_HANDLE_EX_FLAG_PIN,
+        };
+        static PINNED: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+        let result = PINNED.get_or_init(|| {
+            let mut module = HMODULE::default();
+            unsafe {
+                GetModuleHandleExW(
+                    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                    PCWSTR(pin_module as *const () as *const u16),
+                    &mut module,
+                )
+            }
+            .map_err(|error| error.to_string())
+        });
+        if let Err(error) = result {
+            log::warn!("[ara] could not pin the module: {error}");
+        }
+    }
+    #[cfg(unix)]
+    {
+        static PINNED: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+        let result = PINNED.get_or_init(|| unsafe {
+            // 先用 dladdr 拿本模块的装载路径（传一个本 crate 内函数的地址），
+            // 再以 RTLD_NODELETE 重开它：引用计数 +1 且此后 dlclose 不卸载。
+            let symbol = pin_module as *const () as *const libc::c_void;
+            let mut info: libc::Dl_info = std::mem::zeroed();
+            if libc::dladdr(symbol, &mut info) == 0 {
+                return Err("dladdr could not locate this module".to_string());
+            }
+            let path = std::ffi::CStr::from_ptr(info.dli_fname);
+            let handle = libc::dlopen(path.as_ptr(), libc::RTLD_NOW | libc::RTLD_NODELETE);
+            if handle.is_null() {
+                return Err("dlopen(self, RTLD_NODELETE) failed".to_string());
+            }
+            Ok(())
+        });
+        if let Err(error) = result {
+            log::warn!("[ara] could not pin the module: {error}");
+        }
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        // 该目标没有已知的驻留原语：后台工作窗口内的卸载风险维持原状（记录在案）。
+    }
 }
