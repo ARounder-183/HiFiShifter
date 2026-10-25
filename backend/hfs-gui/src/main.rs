@@ -23,8 +23,8 @@ use gtk::glib::translate::ToGlibPtr;
 use gtk::prelude::*;
 use javascriptcore::ValueExt;
 use webkit2gtk::{
-    NavigationPolicyDecisionExt, PolicyDecisionExt, SecurityManagerExt, SettingsExt,
-    URIRequestExt, URISchemeRequestExt, UserContentManagerExt, WebContextExt, WebViewExt,
+    NavigationPolicyDecisionExt, PolicyDecisionExt, SecurityManagerExt, SettingsExt, URIRequestExt,
+    URISchemeRequestExt, UserContentManagerExt, WebContextExt, WebViewExt,
 };
 
 /// 与插件里同一份桥接脚本（WebKitGTK 上它负责提供 `window.chrome.webview`）。
@@ -63,6 +63,32 @@ fn send(value: serde_json::Value) {
     let mut out = std::io::stdout().lock();
     let _ = writeln!(out, "{value}");
     let _ = out.flush();
+}
+
+/// 与插件侧 `editor/gui/protocol.rs::resolve_asset` 同一份契约的渲染进程实现。
+///
+/// 【为什么是拷贝而不是依赖】hfs-gui 是独立工作区的子进程，不依赖插件 crate；
+/// bridge.js 走 `include_str!` 共享，文本契约没法这样共享 —— 这里逐条对齐，
+/// 任何一侧改动判据都必须同步另一侧（对拍由插件侧 `protocol` 的测试与本
+/// 函数的一致性评审共同守卫）。
+fn resolve_asset(root: &std::path::Path, request_path: &str) -> Option<std::path::PathBuf> {
+    let relative = request_path.trim_start_matches('/');
+    if relative.is_empty() || relative.contains('\\') || relative.contains('\0') {
+        return None;
+    }
+    let mut path = root.to_path_buf();
+    for segment in relative.split('/') {
+        if segment.is_empty() || segment == "." || segment == ".." {
+            return None;
+        }
+        path.push(segment);
+    }
+    let canonical_root = root.canonicalize().ok()?;
+    let canonical = path.canonicalize().ok()?;
+    if !canonical.starts_with(&canonical_root) || !canonical.is_file() {
+        return None;
+    }
+    Some(canonical)
 }
 
 fn mime_for(path: &str) -> &'static str {
@@ -132,31 +158,39 @@ fn main() {
         let root = root.clone();
         context.register_uri_scheme("hfs-plugin", move |request| {
             let uri = request.uri().unwrap_or_default();
-            // `hfs-plugin://local/<path>` → 文件系统路径；`..` 一律拒绝。
+            // `hfs-plugin://local/<path>` → 文件系统路径。判据与插件侧的
+            // `editor/gui/protocol.rs::resolve_asset` 是**同一份契约**（bridge.js 已用
+            // include_str! 共享，同理这里逐条对齐）：拒绝绝对路径、反斜杠、NUL、空段、
+            // `.`/`..` 段，canonicalize 后必须仍在根内且是文件。
+            //
+            // 【为什么不能只拦 `..`】`Path::join` 对以 `/` 开头的 path 会**整体替换根**
+            // —— `hfs-plugin://local//etc/passwd` 原样放行；导航白名单拦不住 scheme
+            // 内部的子资源请求。页面可被注入脚本改写是插件侧写明的威胁模型，
+            // 渲染进程是它的延伸（第 5 轮审查 P2-7）。
             let path = uri
                 .split("://")
                 .nth(1)
                 .and_then(|rest| rest.split_once('/').map(|(_, path)| path.to_string()))
                 .unwrap_or_default();
             let path = path.split(['?', '#']).next().unwrap_or("");
-            if path.contains("..") {
-                request.finish_error(&mut gtk::glib::Error::new(
+            let resolved = resolve_asset(&root, path);
+            match resolved {
+                Some(full) => match std::fs::read(&full) {
+                    Ok(bytes) => {
+                        let mime = mime_for(path);
+                        let stream = gtk::gio::MemoryInputStream::from_bytes(
+                            &gtk::glib::Bytes::from(&bytes),
+                        );
+                        request.finish(&stream, bytes.len() as i64, Some(mime));
+                    }
+                    Err(error) => request.finish_error(&mut gtk::glib::Error::new(
+                        gtk::gio::IOErrorEnum::NotFound,
+                        &format!("{error}: {}", full.display()),
+                    )),
+                },
+                None => request.finish_error(&mut gtk::glib::Error::new(
                     gtk::gio::IOErrorEnum::InvalidArgument,
                     "invalid path",
-                ));
-                return;
-            }
-            let full = std::path::Path::new(&root).join(path);
-            match std::fs::read(&full) {
-                Ok(bytes) => {
-                    let mime = mime_for(path);
-                    let stream =
-                        gtk::gio::MemoryInputStream::from_bytes(&gtk::glib::Bytes::from(&bytes));
-                    request.finish(&stream, bytes.len() as i64, Some(mime));
-                }
-                Err(error) => request.finish_error(&mut gtk::glib::Error::new(
-                    gtk::gio::IOErrorEnum::NotFound,
-                    &format!("{error}: {}", full.display()),
                 )),
             }
         });
@@ -189,7 +223,9 @@ fn main() {
         manager.connect_script_message_received(None, move |_, result| {
             // 只接受字符串：结构化值在这里没有意义，而字符串是三条链路上唯一逐字节
             // 一致的形式（见插件里 protocol.rs 的理由）。
-            let Some(value) = result.js_value() else { return };
+            let Some(value) = result.js_value() else {
+                return;
+            };
             send(serde_json::json!({"type":"message","text": value.to_str().to_string()}));
         });
     }
