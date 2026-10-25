@@ -583,19 +583,23 @@ fn close_view(token: usize) {
     };
     view.timer.invalidate();
     view.client.borrow_mut().close();
-    view.port.close();
     // 【顺序】先摘 `messageHandler` 再拆视图：`addScriptMessageHandler` 是**强引用**，
     // 不摘就会每开一次窗口泄漏一个 webview（方案 `5.4` 的循环引用警告）。
-    if let Some(webview) = view.port.webview.borrow().clone() {
-        // SAFETY: 全部在 §removed()§ 的主线程调用路径上，且顺序正确（先摘 handler，
-        // 再停加载、摘 delegate）。
-        unsafe {
-            let controller = webview.configuration().userContentController();
-            controller.removeScriptMessageHandlerForName(&NSString::from_str(HANDLER));
-            webview.stopLoading();
-            webview.setNavigationDelegate(None);
-        }
+    //
+    // 【为什么用 `view.webview` 而不是端口的】`MacPort::close()` 会把端口的 webview
+    // 置 `None` —— 先 close 再摘，`if let Some` 永远落空，摘 handler 的三步成了
+    // 死代码，每开/关一次窗口泄漏一整个 WKWebView（第 5 轮审查 P1-4）。`View`
+    // 自持的 Retained 不受端口关闭影响。
+    let webview = view.webview.clone();
+    // SAFETY: 全部在 §removed()§ 的主线程调用路径上，且顺序正确（先摘 handler，
+    // 再停加载、摘 delegate）。
+    unsafe {
+        let controller = webview.configuration().userContentController();
+        controller.removeScriptMessageHandlerForName(&NSString::from_str(HANDLER));
+        webview.stopLoading();
+        webview.setNavigationDelegate(None);
     }
+    view.port.close();
     view.webview.removeFromSuperview();
     view.container.removeFromSuperview();
     drop(view.delegates);
