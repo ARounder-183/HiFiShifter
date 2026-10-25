@@ -287,43 +287,60 @@ impl AppState {
             }
         }
 
-        // ── 2. Inflight 去重检查 ──
-        // 如果另一线程已在计算同一文件，等待它完成后从缓存读取
+        // ── 2. Inflight 去重 ──
+        //
+        // 【为什么用 insert 的返回值判定"我是计算者"】旧写法是先 contains 检查、
+        // 释放锁、再由 RAII guard 重新加锁插入 —— check-then-acquire 之间两个
+        // 线程可以同时通过检查并各自完整计算同一文件（重复解码、重复进度事件、
+        // 重复写盘）。HashSet::insert 在同一临界区内原子地决出唯一胜者。
         {
-            let inflight = self
+            let mut inflight = self
                 .waveform_inflight
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
 
-            if inflight.contains(source_path) {
-                // 另一线程正在计算此文件，等待 Condvar 通知
+            if !inflight.insert(source_path.to_string()) {
+                // 另一线程正在计算此文件：等待 Condvar 通知。
+                //
+                // 【为什么带超时】RAII 守卫只覆盖 panic；计算线程若在解码库 /
+                // 网络盘上**挂起**（不 panic、不返回），无超时的 wait_while 会让
+                // 该文件的后续所有请求永久挂起。超时后本线程接手重算 —— 宁可
+                // 重复一次计算，不可永久卡死。
                 let key = source_path.to_string();
-                let _guard = self
+                let (_inflight_again, wait_result) = self
                     .waveform_inflight_cv
-                    .wait_while(inflight, |set| set.contains(&*key))
+                    .wait_timeout_while(inflight, std::time::Duration::from_secs(30), |set| {
+                        set.contains(&*key)
+                    })
                     .unwrap_or_else(|e| e.into_inner());
 
-                // 计算已完成，从缓存读取
-                let mut cache = self
-                    .waveform_cache_v2
-                    .lock()
-                    .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
-                if let Some(found) = cache.get(source_path) {
-                    if let Some(handle) = self.app_handle.get() {
-                        use tauri::Emitter;
-                        let _ = handle.emit(
-                            "waveform_analysis_progress",
-                            serde_json::json!({
-                                "sourcePath": source_path,
-                                "progress": 1.0,
-                                "status": "cached",
-                            }),
-                        );
+                if wait_result.timed_out() {
+                    log::warn!(
+                        "waveform inflight wait timed out for {source_path}; recomputing locally"
+                    );
+                } else {
+                    // 计算已完成，从缓存读取
+                    let mut cache = self
+                        .waveform_cache_v2
+                        .lock()
+                        .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
+                    if let Some(found) = cache.get(source_path) {
+                        if let Some(handle) = self.app_handle.get() {
+                            use tauri::Emitter;
+                            let _ = handle.emit(
+                                "waveform_analysis_progress",
+                                serde_json::json!({
+                                    "sourcePath": source_path,
+                                    "progress": 1.0,
+                                    "status": "cached",
+                                }),
+                            );
+                        }
+                        return Ok(found.clone());
                     }
-                    return Ok(found.clone());
+                    // 极端情况：前一线程计算失败未放入缓存，由下方的 guard
+                    // 登记本线程为新的计算者后继续重算。
                 }
-                // 极端情况：前一线程计算失败未放入缓存，由下方的 guard
-                // 登记本线程为新的计算者后继续重算。
             }
         }
 

@@ -1135,11 +1135,16 @@ pub async fn get_root_mix_waveform_peaks_segment(
     .await
     {
         Ok(result) => result,
-        Err(_) => self::waveform::WaveformPeaksSegmentPayload {
-            ok: false,
-            min: vec![],
-            max: vec![],
-        },
+        Err(join_error) => {
+            // 任务 panic 被吞成空 payload 时必须留痕，否则诊断"为什么整段波形
+            // 是空的"没有任何线索（同批其它命令都是这个口径）。
+            log::error!("get_root_mix_waveform_peaks_segment join failed: {join_error}");
+            self::waveform::WaveformPeaksSegmentPayload {
+                ok: false,
+                min: vec![],
+                max: vec![],
+            }
+        }
     }
 }
 
@@ -1164,11 +1169,14 @@ pub async fn get_track_mix_waveform_peaks_segment(
     .await
     {
         Ok(result) => result,
-        Err(_) => self::waveform::WaveformPeaksSegmentPayload {
-            ok: false,
-            min: vec![],
-            max: vec![],
-        },
+        Err(join_error) => {
+            log::error!("get_track_mix_waveform_peaks_segment join failed: {join_error}");
+            self::waveform::WaveformPeaksSegmentPayload {
+                ok: false,
+                min: vec![],
+                max: vec![],
+            }
+        }
     }
 }
 
@@ -1215,7 +1223,10 @@ pub async fn get_waveform_mipmap_binary(
         waveform::get_waveform_mipmap_binary(state, source_path, level)
     })
     .await
-    .unwrap_or_default()
+    .unwrap_or_else(|join_error| {
+        log::error!("get_waveform_mipmap_binary join failed: {join_error}");
+        String::new()
+    })
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1245,7 +1256,10 @@ pub async fn batch_get_waveform_mipmap(
         waveform::batch_get_waveform_mipmap(state, source_paths, levels)
     })
     .await
-    .unwrap_or_default()
+    .unwrap_or_else(|join_error| {
+        log::error!("batch_get_waveform_mipmap join failed: {join_error}");
+        std::collections::HashMap::new()
+    })
 }
 
 // ===================== timeline =====================
@@ -1735,35 +1749,45 @@ pub fn set_clip_state(
     // 每一个参数整体错位一格（历史已发生过同类事故）。
     item_gain: Option<f32>,
 ) -> crate::models::TimelineStatePayload {
-    timeline::set_clip_state(
-        state,
-        clip_id,
-        name,
-        start_sec,
-        length_sec,
-        gain,
-        muted,
-        source_start_sec,
-        source_end_sec,
-        playback_rate,
-        clip_playback_rate,
-        reversed,
-        loop_enabled,
-        snap_offset_sec,
-        fade_in_sec,
-        fade_out_sec,
-        fade_in_shape,
-        fade_out_shape,
-        fade_in_dir,
-        fade_out_dir,
-        auto_fade_in_sec,
-        auto_fade_out_sec,
-        color,
-        formant_morph,
-        checkpoint,
-        fade_in_s,
-        fade_out_s,
-        item_gain,
+    // 【panic 守卫】每次剪辑编辑的热路径（patch + 波纹推移 + 缓存失效，逻辑
+    // 相当复杂）—— 同步命令在 WebView IPC 线程内联执行，panic = abort 整个
+    // App。拦成 timeline 的失败 payload（错误走 missing_files，前端惯例见
+    // common::timeline_error_payload 的说明）。
+    common::guard_command(
+        "set_clip_state",
+        common::timeline_error_payload("panic in command: set_clip_state"),
+        move || {
+            timeline::set_clip_state(
+                state,
+                clip_id,
+                name,
+                start_sec,
+                length_sec,
+                gain,
+                muted,
+                source_start_sec,
+                source_end_sec,
+                playback_rate,
+                clip_playback_rate,
+                reversed,
+                loop_enabled,
+                snap_offset_sec,
+                fade_in_sec,
+                fade_out_sec,
+                fade_in_shape,
+                fade_out_shape,
+                fade_in_dir,
+                fade_out_dir,
+                auto_fade_in_sec,
+                auto_fade_out_sec,
+                color,
+                formant_morph,
+                checkpoint,
+                fade_in_s,
+                fade_out_s,
+                item_gain,
+            )
+        },
     )
 }
 
@@ -3082,15 +3106,34 @@ pub async fn run_vocoder_benchmark() -> Result<crate::nsf_hifigan_onnx::Benchmar
 }
 
 /// Enumerate all GPUs via NVML (Windows) or return empty list (other platforms).
+///
+/// 【panic 守卫】NVML 走 `libloading` 裸 FFI（加载 nvml.dll 并 unsafe 调用）；
+/// 同步命令在 IPC 线程内联执行，驱动层异常 = abort 整个 App。拦成空枚举。
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_gpu_devices() -> crate::gpu_info::GpuEnumerationResult {
-    onnx_status::get_gpu_devices()
+    common::guard_command(
+        "get_gpu_devices",
+        crate::gpu_info::GpuEnumerationResult {
+            devices: vec![],
+            note: Some("GPU enumeration panicked".to_string()),
+        },
+        onnx_status::get_gpu_devices,
+    )
 }
 
 /// Enumerate DirectML-compatible GPU adapters via DXGI (Windows only).
+///
+/// 【panic 守卫】同 `get_gpu_devices`：DXGI 枚举同样是无 catch_unwind 的裸 FFI。
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_dml_adapters() -> crate::dml_adapters::DmlAdapterList {
-    onnx_status::get_dml_adapters()
+    common::guard_command(
+        "get_dml_adapters",
+        crate::dml_adapters::DmlAdapterList {
+            adapters: vec![],
+            note: Some("DML adapter enumeration panicked".to_string()),
+        },
+        onnx_status::get_dml_adapters,
+    )
 }
 
 // ===================== file_browser =====================
@@ -3707,24 +3750,43 @@ pub async fn export_pitch_to_midi(
 
 // ===================== ui_settings =====================
 
+/// 读设置并下发到进程级消费方。取值与进程内值不一致时（换设备后首启等），
+/// `apply` 会重建 ORT 会话（CoreML 单模型 0.4~1.2s）—— 前端挂载即调本命令，
+/// 同步执行会把首帧卡在主线程上。放阻塞线程池；磁盘 JSON 很小，代价可忽略。
 #[tauri::command(rename_all = "camelCase")]
-pub fn get_ui_settings(state: State<'_, AppState>) -> crate::config::UiSettings {
-    ui_settings::get_ui_settings(state)
+pub async fn get_ui_settings(app: tauri::AppHandle) -> crate::config::UiSettings {
+    match tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        ui_settings::get_ui_settings(state)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(join_error) => {
+            log::error!("get_ui_settings join failed: {join_error}");
+            crate::config::UiSettings::default()
+        }
+    }
 }
 
+/// 合并、落盘并下发设置；EP/拉伸算法变化时还会失效全部 clip 缓存、重建时间线
+/// 快照与节拍器响点表 —— 同 `get_ui_settings` 的理由放阻塞线程池执行。
 #[tauri::command(rename_all = "camelCase")]
-pub fn save_ui_settings(
-    state: State<'_, AppState>,
+pub async fn save_ui_settings(
+    app: tauri::AppHandle,
     settings: serde_json::Value,
 ) -> serde_json::Value {
+    match tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        ui_settings::save_ui_settings(state, settings)
+    })
+    .await
     {
-        // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
-        // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
-        common::guard_command(
-            "save_ui_settings",
-            serde_json::json!({ "ok": false, "error": "panic in command: save_ui_settings" }),
-            || ui_settings::save_ui_settings(state, settings),
-        )
+        Ok(result) => result,
+        Err(join_error) => serde_json::json!({
+            "ok": false,
+            "error": format!("Failed to join save-settings task: {join_error}"),
+        }),
     }
 }
 
