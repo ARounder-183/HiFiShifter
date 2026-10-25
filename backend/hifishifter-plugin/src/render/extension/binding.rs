@@ -695,7 +695,7 @@ impl ExtensionOwner {
         let host = self.native_host().ok_or("host extension unavailable")?;
         let authorized = || self.host_query_authorized(&stamp);
         let candidates = host
-            .ui_folder_tracks(&authorized)?
+            .ui_folder_tracks(&authorized, &stamp.0.adopted_track_ids())?
             .into_iter()
             .flat_map(|track| track.items.into_iter().map(|item| item.geometry))
             .collect::<Vec<_>>();
@@ -1193,7 +1193,8 @@ impl ExtensionOwner {
             }
             // FX 挂在 folder 轨上时，folder 轨自身通常没有 item：连同后代一起枚举，
             // 否则整组在插件里"看不见"（ARA 侧没有 folder 概念，只能从宿主清单取）。
-            let Ok(own_tracks) = host.ui_folder_tracks(&own_allowed) else {
+            let adopted = stamp.0.adopted_track_ids();
+            let Ok(own_tracks) = host.ui_folder_tracks(&own_allowed, &adopted) else {
                 continue;
             };
             for mut track in own_tracks {

@@ -1384,11 +1384,18 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
                 let allowed=||link.authorize(&document).is_ok_and(|current|current==lease);
                 let host=owner.project_history_host().ok_or("host project history missing")?;
                 if !host.can_create_audio_track() {return Err("host track creation is unavailable".into());}
-                let anchor=host.folder_anchor_order(&allowed);
+                // 锚点要落在"本实例能看到的最下方轨道"之后 —— 已经采纳的轨道也算可见，
+                // 否则连续建轨会一条压一条地插回上面。
+                let adopted=document.adopted_track_ids();
+                let anchor=host.folder_anchor_order(&allowed,&adopted);
                 state.borrow_mut().undo_document=Some(Arc::downgrade(&document));
                 document.host_undo.begin_request(&view_id,id,true,true,&host,&allowed)?;
                 let result=(||->Result<(),String>{
                     let mut created=host.create_audio_track("HiFiShifter",anchor,&allowed)?;
+                    // 【为什么必须先登记再提交】建出来的轨道是本轨的**兄弟**，而清单的
+                    // 枚举范围是"本轨 + folder 后代" —— 不登记，它下一轮就会被枚举漏掉，
+                    // 用户看到的是"宿主里有、插件里没有"。
+                    document.adopt_track(created.target.inventory_guid());
                     created.commit();
                     Ok(())
                 })();

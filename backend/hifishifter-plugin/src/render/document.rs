@@ -472,6 +472,20 @@ pub(crate) struct DocumentSession {
             std::collections::BTreeMap<String, hifishifter_kernel::state::TrackParamsState>,
         )>,
     >,
+    /// 本实例**主动创建**的宿主轨道 GUID（`create_host_track` / 粘贴 / 导入建轨）。
+    ///
+    /// 【为什么必须有这张表】清单的轨道范围是「本轨 + folder 后代」（`ui_folder_tracks`），
+    /// 而 `create_host_track` 把新轨插在锚点**之后** —— 那是本轨的**兄弟**。
+    /// 兄弟不在「本轨 + 后代」里，于是新轨在宿主里真实存在，插件却**构造上**永远看不到。
+    /// 这不是刷新时机的问题：加多少次 `refresh_host_transport` 都不会让它出现。
+    ///
+    /// 【为什么登记而不是放宽枚举范围】放宽会让每个实例看到整个工程，与"每实例只服务
+    /// 自己那批 region"的既有纪律冲突。登记表表达的是"谁建的谁负责"，这是唯一的正确语义。
+    ///
+    /// 【为什么不做自动裁剪】用户删掉轨道之后，残留的 GUID 在树里查不到，每轮只是一次
+    /// 线性扫描的开销；而"枚举这一轮恰好失败"与"用户真的删了"在插件侧无法可靠区分，
+    /// 裁错一次就会让一条活着的轨道永久消失。所以只设上限（最旧先丢），不自动删。
+    pub adopted_tracks: Mutex<Vec<String>>,
     /// 【G5】此刻是否处在一次 ARA 编辑会话里（`beginEditing` … `endEditing`）。
     ///
     /// 【为什么它是判据】SDK 明确说明**还原会话在概念上就是一次编辑会话**
@@ -1406,6 +1420,32 @@ impl DocumentSession {
     /// 【G5】编辑会话开关（`ModelHandle::begin_editing` / `end_editing` 各调一次）。
     pub(crate) fn set_in_edit_session(&self, editing: bool) {
         self.in_edit_session.store(editing, Ordering::Release);
+    }
+
+    /// 登记一条"本实例自己建出来的宿主轨道"。
+    ///
+    /// 重复登记是幂等的；超过上限时丢最旧的（见字段注释里"为什么不自动裁剪"）。
+    pub(crate) fn adopt_track(&self, guid: &str) {
+        /// 一张文档最多登记多少条。一个会话里用户手点几十次建轨已经很少见，
+        /// 64 足够；它同时是这张表的硬上界，防止长时间运行后无界增长。
+        const MAX_ADOPTED: usize = 64;
+        if guid.is_empty() {
+            return;
+        }
+        let mut adopted = self.adopted_tracks.lock_or_recover();
+        if adopted.iter().any(|known| known == guid) {
+            return;
+        }
+        adopted.push(guid.to_owned());
+        if adopted.len() > MAX_ADOPTED {
+            let excess = adopted.len() - MAX_ADOPTED;
+            adopted.drain(..excess);
+        }
+    }
+
+    /// 当前登记表快照（清单枚举用；返回副本以免持锁回调宿主）。
+    pub(crate) fn adopted_track_ids(&self) -> Vec<String> {
+        self.adopted_tracks.lock_or_recover().clone()
     }
 
     /// 取回某个指纹对应的编辑器视图（没有则 `None`）。见 [`Self::remember_workspace_view`]。

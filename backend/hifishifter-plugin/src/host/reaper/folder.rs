@@ -91,6 +91,11 @@ impl HostFolderTree {
         self.parent_of.get(guid).cloned()
     }
 
+    /// 按 GUID 取节点（已采纳轨道用）。GUID 不存在时 `None`。
+    pub(crate) fn node(&self, guid: &str) -> Option<&HostTrackNode> {
+        self.nodes.iter().find(|node| node.guid == guid)
+    }
+
     /// 后代节点（含句柄），按宿主轨道顺序，供清单枚举直接使用。
     pub(crate) fn descendant_nodes(&self, guid: &str) -> Vec<HostTrackNode> {
         self.nodes

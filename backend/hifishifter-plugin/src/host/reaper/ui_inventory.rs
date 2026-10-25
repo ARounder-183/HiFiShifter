@@ -79,13 +79,19 @@ impl NativeHost {
     ///
     /// folder 结构读不出来时（旧宿主、畸形嵌套、未经核对的深度值）**退回单轨**，
     /// 与本次改动之前完全一致：可选增强不得拖垮整份清单。
+    /// `adopted` 是**本实例自己建出来的**轨道 GUID（见 `DocumentSession::adopt_track`）。
+    ///
+    /// 【为什么需要它】"本轨 + 后代"覆盖不到 ∕create_host_track∕ 建出的**兄弟轨**
+    /// —— 那条轨道在宿主里真实存在，但按上面的范围永远枚举不到。把"自己建的"显式
+    /// 列进来，范围才是完整的：本轨 + 后代 + 自己建的。
     pub(crate) fn ui_folder_tracks(
         self: &Arc<Self>,
         authorized: &impl Fn() -> bool,
+        adopted: &[String],
     ) -> Result<Vec<UiTrack>, String> {
         // 宿主调用必须在宿主线程上执行；不在就投递过去并原地等它完成（见 `host::marshal`）。
         if std::thread::current().id() != self.thread {
-            return self.on_host(|| self.ui_folder_tracks(authorized))?;
+            return self.on_host(|| self.ui_folder_tracks(authorized, adopted))?;
         }
         let own = self.ui_track(authorized)?;
         let project = self.project(authorized)?;
@@ -113,6 +119,25 @@ impl NativeHost {
                 )),
             }
         }
+        // 自己建出来的轨道：不在 folder 后代里，必须单独补上。
+        //
+        // 【为什么查不到就跳过】用户可能已经把它删了。跳过是一行沉默的事实，
+        // 而"因为一条陈旧 GUID 让整份清单失败"才是不可接受的。
+        for guid in adopted {
+            if tracks.iter().any(|track| &track.guid == guid) {
+                continue;
+            }
+            let Some(node) = tree.node(guid) else {
+                continue;
+            };
+            let parent_guid = tree.parent_of(guid).flatten();
+            match self.ui_track_at(project, node.track as *mut c_void, parent_guid, authorized) {
+                Ok(track) => tracks.push(track),
+                Err(error) => crate::log_line(&format!(
+                    "[reaper-folder] adopted track {guid} unavailable: {error}"
+                )),
+            }
+        }
         Ok(tracks)
     }
 
@@ -127,13 +152,14 @@ impl NativeHost {
     pub(crate) fn folder_anchor_order(
         self: &Arc<Self>,
         authorized: &impl Fn() -> bool,
+        adopted: &[String],
     ) -> Option<i32> {
         if !self.on_host_thread() {
             return self
-                .on_host(|| self.folder_anchor_order(authorized))
+                .on_host(|| self.folder_anchor_order(authorized, adopted))
                 .unwrap_or(None);
         }
-        self.ui_folder_tracks(authorized)
+        self.ui_folder_tracks(authorized, adopted)
             .ok()?
             .iter()
             .map(|track| track.order)
