@@ -1438,7 +1438,12 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
                         .or_else(||owner.clock.get().map(|clock|clock.diagnostics())),
                     // 音频线程被 catch_unwind 拦下的 panic 次数。音频线程不能写日志，
                     // 只能计数；这里（UI 线程）把它落进诊断包，否则"崩过但没痕迹"。
-"audioPanicCount":crate::vst3::audio_panic_count(),
+                    "audioPanicCount":crate::vst3::audio_panic_count(),
+                    // 音频回调慢块（>50ms）的次数与峰值毫秒。同上只记原子量：
+                    // "宿主冻住时音频线程在不在拖后腿"由此回答，而不是在音频线程上
+                    // 抢日志锁（那会恰在最坏时刻违反 RT 纪律）。
+                    "audioSlowBlockCount":crate::vst3::audio_slow_block_stats().0,
+                    "audioSlowBlockPeakMs":crate::vst3::audio_slow_block_stats().1,
                     "renderers":document.as_ref().map(|document|document.renderer_diagnostics())
                         .unwrap_or_else(||serde_json::json!([])),
                     // 慢车道状态：报障时"有一条长任务卡在这里"是最难从日志猜出来的

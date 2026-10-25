@@ -1734,6 +1734,40 @@ pub(crate) fn audio_panic_count() -> u64 {
     AUDIO_PANIC_COUNT.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// 超过该时长的音频块记一次"慢块"。
+///
+/// 【为什么是 50 ms】`process` 一秒几百次，不可能逐次记日志；但**它一旦阻塞**，
+/// 宿主在关闭窗口或改变尺寸时会等音频线程，表现为整个 UI 冻住 —— 而日志里什么都
+/// 没有。50 ms（约两个 1024 帧 @44.1k 的块）足以把"宿主在等音频线程"与正常抖动分开。
+const AUDIO_SLOW_BLOCK: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// 慢块累计次数。
+static AUDIO_SLOW_BLOCK_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 慢块的峰值时长（纳秒）。
+static AUDIO_SLOW_BLOCK_PEAK_NS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// 记一次块耗时：超阈值才碰原子量（热路径常态下两次比较都省不掉，但写为零成本）。
+fn note_block_elapsed(elapsed: std::time::Duration) {
+    if elapsed < AUDIO_SLOW_BLOCK {
+        return;
+    }
+    AUDIO_SLOW_BLOCK_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    AUDIO_SLOW_BLOCK_PEAK_NS.fetch_max(
+        u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+/// 音频回调慢块统计（诊断用）：`(次数, 最慢一块的毫秒数)`。
+pub(crate) fn audio_slow_block_stats() -> (u64, u64) {
+    (
+        AUDIO_SLOW_BLOCK_COUNT.load(std::sync::atomic::Ordering::Relaxed),
+        AUDIO_SLOW_BLOCK_PEAK_NS.load(std::sync::atomic::Ordering::Relaxed) / 1_000_000,
+    )
+}
+
 /// 输出写满审计是否开启（HIFISHIFTER_BUFFER_AUDIT=1）。
 ///
 /// 【为什么用环境变量而不是设置项】它是排查工具，不是产品行为；用户永远不会打开它，
@@ -1824,32 +1858,33 @@ unsafe fn report_unwritten(this: *mut c_void, data: *mut c_void) {
 }
 
 /// 宿主音频回调：完整渲染调度 + PCM 快照输出都在 `audio_process_inner` 里完成；
-/// 本层只负责 panic 遏制。
-/// 宿主音频回调的计时外壳。
+/// 本层负责 panic 遏制、写满审计与慢块计量。
 ///
-/// 【为什么在这里计时】`process` 一秒几百次，不可能逐次记日志；但**它一旦阻塞**，
-/// 宿主在关闭窗口或改变尺寸时会等音频线程，表现为整个 UI 冻住 —— 而日志里什么都
-/// 没有。超过 50 ms 才出声（按 key 限流）。
+/// 【为什么守卫必须在 extern 函数体里】本回调由**宿主音频线程**调用，panic 越过
+/// `extern "system"` 边界是 UB，而且会带走整个 DAW 会话（thread-model.md 的统一纪律，
+/// `check-ffi-guards.py` 按入口强制）。守卫因此罩住**全部**周边步骤 —— 计时、NaN
+/// 审计的预填与回扫都不在逃逸面上。捕获后输出静音（不留上一次的残留），并只做原子
+/// 计数：音频线程不得写文件、不得加锁等待。
 unsafe extern "system" fn audio_process(this: *mut c_void, data: *mut c_void) -> TResult {
-    let started = std::time::Instant::now();
-    let result = unsafe { audio_process_body(this, data) };
-    let elapsed = started.elapsed();
-    if elapsed > std::time::Duration::from_millis(50) {
-        hifishifter_kernel::log_limiter::emit_limited_key(
-            log::Level::Warn,
-            "vst3.slow.process",
-            format_args!("[gui] slow entry: process took {} ms", elapsed.as_millis()),
-        );
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        audio_process_body(this, data)
+    }));
+    match outcome {
+        Ok(result) => result,
+        Err(_) => {
+            // 守卫内的步骤（审计/计时）自己 panic 了：计数 + 清空输出后返回 OK，
+            // 此时 `audio_process_inner` 可能根本没跑过，输出平面交给 clear_outputs 兜底。
+            AUDIO_PANIC_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // SAFETY: 宿主提供的 ProcessData；清空失败（形状非法）也只能返回 OK，
+            // 不能二次 panic。
+            let _ = unsafe { crate::audio_abi::clear_outputs(data.cast()) };
+            K_RESULT_OK
+        }
     }
-    result
 }
 
-unsafe extern "system" fn audio_process_body(this: *mut c_void, data: *mut c_void) -> TResult {
-    // 【为什么必须 catch_unwind】本回调由**宿主音频线程**调用，panic 越过
-    // `extern "system"` 边界是 UB，而且会带走整个 DAW 会话。`component_set_state` /
-    // `component_get_state` 早就包了这一层，音频路径此前没有 —— 一条最不该崩的路径
-    // 反而最没有保护。捕获后输出静音（不留上一次的残留），并只做一次原子计数：
-    // 音频线程不得写文件、不得加锁等待。
+/// 计时 + 审计 + 调度的非 FFI 主体；panic 由外层 `audio_process` 拦下。
+unsafe fn audio_process_body(this: *mut c_void, data: *mut c_void) -> TResult {
     // 【输出写满审计（HIFISHIFTER_BUFFER_AUDIT=1）】把输出平面预填成 NaN，回调返回后
     // 扫一遍：任何仍是 NaN 的帧都说明某条分支**没有写满整块**，于是宿主会把上一次的
     // 内容（in-place 时甚至是**输入原声**）当作这一次的输出播出去。
@@ -1857,6 +1892,7 @@ unsafe extern "system" fn audio_process_body(this: *mut c_void, data: *mut c_voi
     // 【为什么这值得一次额外扫描】"输出缓冲残留"是用户提出的方向之一。逐条看分支可以
     // 论证它在立体声下不成立，但论证不是证据；这条审计把"到底有没有漏写、漏在哪一档"
     // 变成一次播放就能读到的一行。默认关闭（每块两次内存扫描，约 2 µs）。
+    let started = std::time::Instant::now();
     let auditing = buffer_audit_enabled();
     if auditing {
         // SAFETY: data 由宿主提供；形状非法时下面的 validate 会拦下，不会走到输出。
@@ -1869,7 +1905,7 @@ unsafe extern "system" fn audio_process_body(this: *mut c_void, data: *mut c_voi
         // SAFETY: 与 audio_process_inner 同一份宿主提供的 ProcessData。
         unsafe { report_unwritten(this, data) };
     }
-    match outcome {
+    let result = match outcome {
         Ok(result) => result,
         Err(_) => {
             AUDIO_PANIC_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1878,7 +1914,13 @@ unsafe extern "system" fn audio_process_body(this: *mut c_void, data: *mut c_voi
             let _ = unsafe { crate::audio_abi::clear_outputs(data.cast()) };
             K_RESULT_OK
         }
-    }
+    };
+    // 【为什么只记原子量而不打日志】音频线程不能写文件、也不能抢限流表/日志锁
+    // （`realtime_callbacks_do_not_enter_the_file_logger`）—— 而慢块恰恰在最坏时刻
+    // 出现。计数 + 峰值进原子量，由诊断包（`audioSlowBlockCount` / `audioSlowBlockPeakMs`）
+    // 落盘；既有测试保证健康小块零日志零分配。
+    note_block_elapsed(started.elapsed());
+    result
 }
 
 unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {

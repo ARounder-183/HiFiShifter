@@ -402,18 +402,37 @@ unsafe extern "system" fn key_up(this: *mut c_void, key: u16, code: i16, mods: i
 ///
 /// 【为什么需要它】"宿主冻住"时日志会停在**最后一个进入、却没有对应离开**的入口上 ——
 /// 那一行就是答案，不需要再猜是哪个回调、也不需要复现时的现场观察。
+///
+/// 【为什么按 key 限流】`on_size` / `get_size` 在交互式缩放的协商循环里**成对高频**
+/// 进出（宿主靠 getSize/onSize 往返收敛尺寸），逐次同步落盘既刷屏又是 UI 线程上的
+/// 高频 IO（与 linux.rs 对"每个入口的打点不会刷屏"的假设相悖）。改走
+/// `emit_limited_key`（同 key 10s 一条）：冻住场景要看的是"第一个进入没等到离开"，
+/// 限流保住了这一点；代价是 10s 窗口内的进/出不再逐条成对 —— 只影响读日志的观感，
+/// 不影响"停在哪个入口"的判定。
 struct EnterExit(&'static str);
 
 impl EnterExit {
     fn new(name: &'static str) -> Self {
-        crate::gui_log_line(&format!("-> {name}"));
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Info,
+            name,
+            format_args!("-> {name}"),
+        );
         Self(name)
     }
 }
 
 impl Drop for EnterExit {
     fn drop(&mut self) {
-        crate::gui_log_line(&format!("<- {}", self.0));
+        // 与进入共用一个 key 会被限流合并成"只见进入" —— 进/出各占一个键，
+        // "最后一个进入没有配对离开"在突发限流期间才读得出来。原来就是每次
+        // format! 分配，这里没有引入新的开销量级。
+        let exit_key = format!("{}.exit", self.0);
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Info,
+            &exit_key,
+            format_args!("<- {}", self.0),
+        );
     }
 }
 
