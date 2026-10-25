@@ -113,10 +113,7 @@ export function useVisualPlayhead({
              * 往返时延**永久丢失**——光标系统地落后于它自己报出的时间（"偏移"），
              * 而下一个采样又把差值补回来一部分（"随机闪"）。
              */
-            const extrapolatedSec = catchUpSampledPlayhead(
-                syncedPlayheadSec,
-                hasAge ? ageSec : 0,
-            );
+            const extrapolatedSec = catchUpSampledPlayhead(syncedPlayheadSec, hasAge ? ageSec : 0);
             syncAnchorRef.current = {
                 playheadSec: extrapolatedSec,
                 timestampMs: now,
