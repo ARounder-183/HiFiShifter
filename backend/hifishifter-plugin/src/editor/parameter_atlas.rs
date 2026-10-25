@@ -1104,13 +1104,10 @@ impl ParameterAtlas {
             migrated += 1;
         }
         if migrated > 0 {
-            hifishifter_kernel::log_limiter::emit_limited_key(
-                log::Level::Info,
-                "ara.atlas.migrated",
-                format_args!(
-                    "[ara] atlas migrated {migrated} parameter set(s) from legacy per-clip records; \
-                     new archives store them by stable host identity"
-                ),
+            // 迁移每份存档只发生一次，不需要限流；`info` 是它的正确级别。
+            log::info!(
+                "[ara] atlas migrated {migrated} parameter set(s) from legacy per-clip records; \
+                 new archives store them by stable host identity"
             );
         }
     }

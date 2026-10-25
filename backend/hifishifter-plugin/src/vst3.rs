@@ -238,11 +238,9 @@ unsafe fn hex_iid(iid: *const u8) -> String {
 fn log_query_interface_miss(owner: &str, iid: *const u8) {
     // SAFETY: 调用方保证 iid 指向可读的 16 字节 TUID（或为空）。
     let iid = unsafe { hex_iid(iid) };
-    hifishifter_kernel::log_limiter::emit_limited_key(
-        log::Level::Info,
-        &format!("vst3-qi-miss:{owner}:{iid}"),
-        format_args!("[vst3] {owner} queryInterface miss iid={iid}"),
-    );
+    // 探一个可选接口没命中是**正常**的（这里会逐个试很多 IID），属于跟踪信息：
+    // 由日志级别控制，不套限流 —— `Info + 限流` 在默认级别下等于没有。
+    log::debug!("[vst3] {owner} queryInterface miss iid={iid}");
 }
 
 /// 读取 companion 侧声明的 ARA 接口 IID（四个 32 位字）。

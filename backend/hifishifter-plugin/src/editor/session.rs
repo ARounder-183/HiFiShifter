@@ -1230,6 +1230,15 @@ impl EditorSession {
                             json!({"version":1,"viewId":request.sink.view_id,"id":request.id,"ok":true,"value":value})
                         }
                         Err(error) => {
+                            // 【为什么每条失败都要落一行】这是 actor 上**所有**命令失败的
+                            // 唯一出口，而它此前完全静默：前端只看到 `Invoke failed: …`，
+                            // 插件侧没有任何原因。按命令名分桶限流（10 s 一行 + 被压掉的
+                            // 条数），所以高频重试的命令不会刷屏，也不会消失。
+                            hifishifter_kernel::log_limiter::emit_limited_key(
+                                log::Level::Warn,
+                                &format!("cmd_failed:{}", request.command),
+                                format_args!("[cmd] {} failed (actor): {error}", request.command),
+                            );
                             // 与 `webview.rs` 的同一条协议：终态错误必须带 `errorKind`，
                             // 否则前端无法区分"稍后重试"与"会话已结束"。
                             json!({"version":1,"viewId":request.sink.view_id,"id":request.id,"ok":false,

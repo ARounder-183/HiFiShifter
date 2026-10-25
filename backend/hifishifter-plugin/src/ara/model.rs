@@ -841,14 +841,11 @@ impl ModelHandle {
             // 【T23】"模型没变"也是一次成功收口：截止期必须跟着清，否则下一轮
             // `request_settle_if_overdue` 会对一份已经收敛的模型反复请求 flush。
             self.session.note_model_clean();
-            hifishifter_kernel::log_limiter::emit_limited_key(
-                log::Level::Debug,
-                "ara.remap.unchanged",
-                format_args!(
-                    "[ara] endEditing delivered an unchanged model ({} region(s)); \
-                     the published timeline is kept without a re-map",
-                    self.remap_stamp.as_ref().map_or(0, Vec::len)
-                ),
+            // 正常路径的跟踪信息：由日志级别控制，不套限流（见 `view.rs::EnterExit`）。
+            log::debug!(
+                "[ara] endEditing delivered an unchanged model ({} region(s)); \
+                 the published timeline is kept without a re-map",
+                self.remap_stamp.as_ref().map_or(0, Vec::len)
             );
             // 准备队列仍要保证在跑：宿主可能刚在这一轮授予了 PCM 访问，而那不是模型变化。
             self.session.prepare_renderers();

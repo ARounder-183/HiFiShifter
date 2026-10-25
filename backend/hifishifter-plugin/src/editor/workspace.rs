@@ -2200,14 +2200,12 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
             regions.extend(scope.keys);
         }
         if derived {
-            hifishifter_kernel::log_limiter::emit_limited_key(
-                log::Level::Info,
-                "ara.scope.document-derived",
-                format_args!(
-                    "[ara] no renderer assignment this round; the workspace scope was derived \
-                     from the document's region sequences ({} region(s))",
-                    regions.len()
-                ),
+            // 这是**正常**的兜底（REAPER 的 `[editor, view]` 形态下常常没有渲染器分配），
+            // 属于解释性跟踪信息：由日志级别控制，不套限流。
+            log::debug!(
+                "[ara] no renderer assignment this round; the workspace scope was derived \
+                 from the document's region sequences ({} region(s))",
+                regions.len()
             );
         }
         if !regions.is_empty() {
@@ -2340,8 +2338,11 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
             .map(|track| track.id.clone())
             .collect();
         if !dropped.is_empty() {
+            // 【为什么这条是 Warn】把一条轨道从工作区里**丢掉**是用户可见的数据消失
+            // （「我的 Clip 不见了」）。它不是跟踪信息，必须在默认级别下可见；限流
+            // 只压重复，不压信号。
             hifishifter_kernel::log_limiter::emit_limited_key(
-                log::Level::Info,
+                log::Level::Warn,
                 "ara.workspace.track-dropped",
                 format_args!(
                     "[ara] dropping {} track(s) with no clip and no host entry: {}",

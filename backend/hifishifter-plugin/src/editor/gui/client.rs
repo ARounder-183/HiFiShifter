@@ -1061,17 +1061,50 @@ pub(crate) fn bootstrap_json(
 /// `rename_clip_take` 三条命令的改写只依赖时间线与路由（不依赖任何平台 API），
 /// 而它们改的是**同一条**前端命令的语义。放到平台侧就等于三份拷贝。
 pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
+    // 【为什么这三处早退各留一行】它们是「命令到底到没到」这个问题上唯一的盲区：
+    // 命令既没被接受、也没被拒绝，在日志里与「从未发送」完全同形。此前三处都是裸
+    // `return`，于是一次「点了没反应」无从归因。
+    //
+    // 【为什么都走限流而不是逐条打印】这里在每条前端消息的必经路径上，正常会话里
+    // 也可能出现被拒的探活消息。限流窗口是 10 s，窗口内被压掉的条数会在下一条前以
+    // `[throttled] N message(s) suppressed` 汇总 —— 故障信号不会消失，只是不重复。
     let view_id = {
         let state = state.borrow();
         if state.closed {
+            hifishifter_kernel::log_limiter::emit_limited(
+                log::Level::Warn,
+                file!(),
+                line!(),
+                format_args!("[gui] message dropped: the editor client is already closed"),
+            );
             return;
         }
         state.view_id.clone()
     };
     let Some(mut request) = protocol::parse_request(text, &view_id) else {
+        // 不带载荷：这里可能是任何东西（探活、旧版本消息、被截断的 JSON），
+        // 打印前 120 字节只会把日志变成载荷转储。长度足以区分形状。
+        hifishifter_kernel::log_limiter::emit_limited(
+            log::Level::Warn,
+            file!(),
+            line!(),
+            format_args!(
+                "[gui] message rejected: not a plugin request ({} bytes, view={view_id})",
+                text.len()
+            ),
+        );
         return;
     };
     let Some(id) = request["id"].as_u64() else {
+        hifishifter_kernel::log_limiter::emit_limited(
+            log::Level::Warn,
+            file!(),
+            line!(),
+            format_args!(
+                "[gui] message rejected: no request id (command={})",
+                request["command"].as_str().unwrap_or("?")
+            ),
+        );
         return;
     };
     // 页面的第一句话：不进命令表，就地消费（见 `protocol::PAGE_READY`）。
@@ -1261,8 +1294,11 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
                 truncate_key(message),
                 truncate_key(detail)
             );
+            // 【为什么是 Warn 而不是 Info】页面自己报的错是**故障信号**，而默认
+            // 日志级别是 Warn —— Info 级的限流诊断在本构建里一条都不会输出。
+            // 这条曾经因此哑了整场：前端在报错，插件侧一片空白。
             hifishifter_kernel::log_limiter::emit_limited_key(
-                log::Level::Info,
+                log::Level::Warn,
                 &key,
                 format_args!("Embedded frontend: {}", args),
             );
@@ -1769,6 +1805,20 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
         },
         None=>Err(String::from("native command missing")),
     };
+    // 【为什么这里必须有且只有一行】这是客户端侧**所有**命令失败的唯一共同出口。
+    // 此前它只把错误回给前端：前端报 `Invoke failed: set_param_frames` 时，插件侧
+    // 查不到任何原因，「命令走到哪个分支」也无从区分。
+    //
+    // 键按命令名分桶（`cmd_failed:<command>`），因此一条被高频重试的命令也只占
+    // 每 10 s 一行，并带上被压掉的条数；不同命令各自计数，互不遮蔽。
+    if let Err(error) = &result {
+        let command = request["command"].as_str().unwrap_or("?");
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Warn,
+            &format!("cmd_failed:{command}"),
+            format_args!("[cmd] {command} failed (client): {error}"),
+        );
+    }
     let response = match result {
         Ok(value) => {
             serde_json::json!({"version":1,"viewId":view_id,"id":id,"ok":true,"value":value})

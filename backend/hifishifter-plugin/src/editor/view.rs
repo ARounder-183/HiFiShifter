@@ -413,11 +413,12 @@ struct EnterExit(&'static str);
 
 impl EnterExit {
     fn new(name: &'static str) -> Self {
-        hifishifter_kernel::log_limiter::emit_limited_key(
-            log::Level::Info,
-            name,
-            format_args!("-> {name}"),
-        );
+        // 【为什么是 debug 而不是「Info + 限流」】限流器只服务 Warn/Error。
+        // 这一条曾经是 `emit_limited_key(Info, …)`，而默认日志级别是 Warn ——
+        // 于是这条刻意加上的「宿主冻在哪」诊断**一条都不会输出**，却看起来还在。
+        // 逐回调的进出是纯粹的跟踪信息：它由日志级别控制（`HIFISHIFTER_LOG=debug`
+        // 打开），不需要也不应该再套一层限流。
+        log::debug!("-> {name}");
         Self(name)
     }
 }
@@ -427,12 +428,7 @@ impl Drop for EnterExit {
         // 与进入共用一个 key 会被限流合并成"只见进入" —— 进/出各占一个键，
         // "最后一个进入没有配对离开"在突发限流期间才读得出来。原来就是每次
         // format! 分配，这里没有引入新的开销量级。
-        let exit_key = format!("{}.exit", self.0);
-        hifishifter_kernel::log_limiter::emit_limited_key(
-            log::Level::Info,
-            &exit_key,
-            format_args!("<- {}", self.0),
-        );
+        log::debug!("<- {}", self.0);
     }
 }
 

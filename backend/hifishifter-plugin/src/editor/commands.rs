@@ -588,13 +588,28 @@ fn budget(start: u32, count: usize) -> Result<(), String> {
     Ok(())
 }
 fn after_write(session: &EditorSession, result: Value) -> Result<Value, String> {
+    // 【为什么在这里留一行】这是**所有**曲线写入命令的统一收尾，而它此前是静默的：
+    // 前端只看到一句 `Invoke failed: set_param_frames`，插件侧没有任何一行说明被什么
+    // 拒绝。写入是交互里最热的路径（拖动时每帧一次），所以按固定键限流：10 s 一行，
+    // 带被压掉的条数。
     if result["ok"] == false {
-        return Err(result["error"]
+        let message = result["error"]
             .as_str()
             .unwrap_or("parameter operation rejected")
-            .into());
+            .to_owned();
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Warn,
+            "cmd_failed:write",
+            format_args!("[cmd] write rejected: {message}"),
+        );
+        return Err(message);
     }
     if let Some(error) = session.error.lock_or_recover().clone() {
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Warn,
+            "cmd_failed:write_session",
+            format_args!("[cmd] write rejected by session error: {error}"),
+        );
         return Err(error);
     }
     session.emit("history_state", history_state(session));
