@@ -44,6 +44,14 @@ pub(crate) struct TransportClock {
     audio_serial: AtomicU64,
     /// 宿主采样那一刻的块序号。
     host_audio_serial: AtomicU64,
+    /// 上一次 `read()` 用的是哪个来源（0 未知 / 1 宿主 / 2 音频）。
+    ///
+    /// 【为什么要数它】"光标随机闪"就是两个来源在来回抢。这个计数是唯一能证明
+    /// （或排除）"后端自己在抖"的量：后端稳定时它整场会话都是 0~2 次，
+    /// 而前端自己插值/回填造成的抖动不会让它增长。
+    last_source: AtomicU64,
+    /// 来源切换次数（诊断）。
+    source_switches: AtomicU64,
     realtime: AtomicU64,
     prefetch: AtomicU64,
     offline: AtomicU64,
@@ -160,6 +168,9 @@ impl TransportClock {
             // 【为什么要报"当前用的是谁"】"光标不跟手"的两种成因（宿主采样停摆 /
             // 音频块停摆）在这两个计数上完全分得开，不必让用户复述现象。
             "host_reading_fresh":self.host_is_fresh(),
+            // 来源切换次数：0~2 是正常（起播切一次、停播切一次）。整场几百次
+            // 说明两个来源在互相抢 —— 那就是用户看到的"闪"。
+            "source_switches":self.source_switches.load(Ordering::Relaxed),
             "audio_serial":self.audio_serial.load(Ordering::Acquire),
             "prefetch_callbacks":self.prefetch.load(Ordering::Relaxed),"offline_callbacks":self.offline.load(Ordering::Relaxed),
             "writer_switches":self.switches.load(Ordering::Relaxed),"backwards_while_playing":self.backwards.load(Ordering::Relaxed),
@@ -257,7 +268,14 @@ impl TransportClock {
     /// 就等于让"最后一次成功"永远赢。这里按新鲜度仲裁：谁在最近一轮里还在推进，
     /// 就用谁。
     pub fn read(&self) -> (f64, bool) {
-        if self.host_is_fresh() {
+        let host_fresh = self.host_is_fresh();
+        // 来源切换计数：只在**真的换了来源**时加一，重复读同一个来源不加。
+        let source = if host_fresh { 1 } else { 2 };
+        let previous = self.last_source.swap(source, Ordering::AcqRel);
+        if previous != 0 && previous != source {
+            self.source_switches.fetch_add(1, Ordering::Relaxed);
+        }
+        if host_fresh {
             let pose = self.host_pose.load(Ordering::Acquire);
             return (f64::from_bits(pose & !1), pose & 1 != 0);
         }

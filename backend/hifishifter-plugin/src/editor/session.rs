@@ -2438,6 +2438,25 @@ impl EditorSession {
             .as_ref()
             .map(|clock| clock.read())
             .unwrap_or((0., false));
+        // 【为什么要在这里报】这里是前端唯一读播放位置的地方（4~5 Hz）。
+        // 来源来回切换就是"光标随机闪"的机制；把切换次数打到日志里，
+        // 用户不必复述现象，我们也不必猜是后端在抖还是前端在插值。
+        if let Some(clock) = clock.as_ref() {
+            let switches = clock.diagnostics()["source_switches"]
+                .as_u64()
+                .unwrap_or(0);
+            if switches != 0 {
+                hifishifter_kernel::log_limiter::emit_limited_key(
+                    log::Level::Warn,
+                    "transport.source-switches",
+                    format_args!(
+                        "[transport] the position source switched {switches} time(s) \
+                         (playing={playing}, pos={position:.3}s); a healthy session switches \
+                         twice (start and stop)"
+                    ),
+                );
+            }
+        }
         json!({"ok":true,"is_playing":playing,"waiting_for_render":false,
             "target":if playing {Some("synthesized")} else {None},"base_sec":0.,
             "position_sec":position,"duration_sec":f64::from_bits(self.project_duration.load(Ordering::Acquire)),

@@ -37,8 +37,19 @@ static TIMERS: std::sync::Mutex<TimerState> = std::sync::Mutex::new(TimerState {
 /// 【为什么外面还要 catch_unwind】它从 `extern "C"` 进、由宿主调用 —— panic 越过
 /// 那个边界是 abort，也就是 REAPER 整个进程退出。单个任务自己的 panic 已经在
 /// `marshal::Ticket::run` 里被拦成一次"任务失败"，这里再兜一层是为了**泵本身**。
+/// 心跳计数：用来证明"注册成功"之外，节拍**真的在跑**。
+static TICKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 extern "C" fn host_timer_tick() {
     let _ = std::panic::catch_unwind(|| {
+        // 【为什么要数节拍并按条打点】`plugin_register("timer")` 返回非零只说明
+        // "注册被接受"，不说明宿主真的在调度它。而这条链上任何一环断掉，症状都是
+        // 同一个"光标不跟手"。第 1 次与第 200 次（约 6.6 s）各留一行，成本是每次
+        // 会话两行，换来的是"节拍到底跑没跑"这个二值答案。
+        let ticks = TICKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        if ticks == 1 || ticks == 200 {
+            log::warn!("[reaper-host] host timer tick #{ticks} (read by the host's main loop)");
+        }
         // 1) 先排空投递队列：编辑器命令要回到这条线程上执行。
         crate::host::marshal::pump();
         // 2) 再跑宿主侧周期工作。它与情形 A 的 GTK 定时器**共用同一份实现**，
@@ -56,13 +67,15 @@ pub(super) fn acquire(register: PluginRegister) {
         // 约定是一个 `void(*)()`。注册失败时只是没有节拍，泵仍由视图回调驱动。
         let ok = unsafe { (register)(c"timer".as_ptr(), host_timer_tick as *mut c_void) };
         if ok == 0 {
-            crate::log_line(
+            // 【为什么是 WARN】`log_line` 是 `log::info!`，而默认级别是 Warn ——
+            // 用它记"心跳失败"，用户在日志里只会看到"什么都没有"，与"心跳正常"同形。
+            log::warn!(
                 "[reaper-host] the host refused the timer registration; \
-                 the pump stays on the view callbacks only",
+                 the pump stays on the view callbacks only (the playhead will not follow)"
             );
             return;
         }
-        crate::log_line("[reaper-host] host-thread pump attached to the host timer");
+        log::warn!("[reaper-host] host-thread pump attached to the host timer");
     }
     state.live += 1;
 }
@@ -82,4 +95,5 @@ pub(super) fn release() {
     };
     // SAFETY: 与 `acquire` 同一条约定；注销的必须是**同一个**函数指针。
     unsafe { (register)(c"-timer".as_ptr(), host_timer_tick as *mut c_void) };
+    log::warn!("[reaper-host] host-thread pump detached (last instance released)");
 }
