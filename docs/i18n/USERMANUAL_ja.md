@@ -17,7 +17,7 @@ HiFiShifterは、グラフィカルなボーカル編集・合成ツールです
     1. ターミナルで `xattr -cr /Applications/HiFiShifter.app` を実行します；
     2. `システム設定` -> `プライバシーとセキュリティ` -> `このまま開く` をクリックして、アプリの実行を許可します。
 
-- Linux版はAppImageパッケージを提供しています。ファイルの`プロパティ -> パーミッション`で`ファイルをプログラムとして実行するを許可`にチェックを入れると直接実行できます。
+- Linux版はAppImageパッケージを提供しています。ファイルの`プロパティ -> パーミッション`で`ファイルをプログラムとして実行するを許可`にチェックを入れると直接実行できます。起動前に **WebKitGTK 4.1** がシステムに用意されていることを確認してください（下記「WebView について」参照）。AppImage がホストに求める唯一の大きな依存関係です。
 
 **GPUアクセラレーションについて**：HiFiShifterは各プラットフォーム向けに複数のGPUアクセラレーションオプションを提供しています：
 
@@ -33,7 +33,7 @@ HiFiShifterは、グラフィカルなボーカル編集・合成ツールです
 
 - **Windows**：Edge WebView2が必要です。Windows 10（バージョン1803以降）およびWindows 11にはプリインストールされているため、追加の操作は不要です。古いバージョンのWindowsを使用している場合や未インストールの場合は、インストーラーが自動的にダウンロードを促します。詳細は[Tauri公式ドキュメント](https://tauri.app/ja/start/prerequisites/#webview2)を参照してください。一般ユーザーはインストーラーを実行するだけで問題ありません。
 - **macOS**：システムにWebKitが含まれているため、追加インストールは不要です。
-- **Linux**：WebKitGTKが必要です。ほとんどの主要ディストリビューション（Ubuntu、Fedora、Arch Linuxなど）にはデフォルトで含まれています。不足している場合は、パッケージマネージャーで`webkit2gtk`をインストールしてください（例：`sudo apt install webkit2gtk`）。詳細はお使いのディストリビューションのドキュメントを参照してください。
+- **Linux**：**WebKitGTK 4.1** が必要です。Arch/CachyOS、Ubuntu 24.04+、Fedora 39+、Debian 13+ などの現行ディストリビューションには含まれているため、通常は追加インストール不要です。不足している場合は各ディストリビューションのパッケージ（Arch：`webkit2gtk-4.1`、Ubuntu / Debian：`libwebkit2gtk-4.1-0`、Fedora：`webkit2gtk4.1`）をインストールしてください。`webkit2gtk-4.0` しか提供しない古いディストリビューション（Ubuntu 22.04 など）では AppImage を実行できません。AppImage は WebKit を同梱せず、UI とグラフィックススタック（EGL / Mesa / Wayland）はすべてシステム側のものを使います。そのため常に互いに整合した組み合わせになります。
 
 Windows では、HiFiShifter は WebView2 が持つブラウザーショートカット（`Ctrl + F`、`Ctrl + P`、`F5`、および `Ctrl` と `+` / `-` によるページズーム）を無効にしているため、これらのキーはそのまま HiFiShifter に渡され、編集操作を妨げません。
 
@@ -839,9 +839,20 @@ HiFiShifter は実行ログを自動的に OS 標準のログディレクトリ�
     - 繰り返し発生するエラー / 警告は自動的にスロットリングされます：同じ位置のログは 10 秒ごとに最大 1 件出力され、抑制された件数は次の出力前に `[throttled]` 行で補記されます。
 - フロントエンドとバックエンドのエラーは同じログファイルに記録されるため、1 つのファイルで時系列に沿って調査できます。
 
+### Linux でウィンドウが表示されない／ダブルクリックしても何も起きない
+
+AppImage は WebKit とグラフィックススタックを同梱していないため、起動失敗はおおむね次のいずれかです。
+
+1. **依存関係の不足を確認**：ターミナルから一度 AppImage を実行してください。`error while loading shared libraries: libwebkit2gtk-4.1.so.0` と表示されたら、上記「WebView について」の手順で `webkit2gtk-4.1` をインストールします。
+2. **EGL のエラー、または真っ白な画面**：セーフモードで起動します — `HIFISHIFTER_SAFE_GL=1 ./HiFiShifter_*.AppImage`。WebKit のコンポジターを無効化しソフトウェア描画を強制します。これで表示されれば原因は GPU ドライバー／EGL 側です。
+3. **Wayland での表示問題**（拡大時のぼやけ、IME 候補ウィンドウの位置、ドラッグの不具合）：AppImage は最も安定する `x11`（XWayland）を GTK に強制しており、HiDPI ではぼやけることがあります。`HIFISHIFTER_GDK_BACKEND=wayland ./HiFiShifter_*.AppImage` でネイティブ Wayland を試せます。
+4. **issue を出すとき**は、ログ冒頭（`ヘルプ → ログフォルダーを開く`）の 2 行を添付してください：`[linux] session: gdk_backend=… display=… wayland_display=… session_type=… appimage=…` と `[linux] egl: …`。
+
 詳細オプション（通常の使用では不要）：
 
 - 起動引数 `--log-file=<path>`：ログを指定パスに書き込みます。`--log-file=-` でファイルログを明示的に無効化します。
 - 環境変数 `HIFISHIFTER_LOG=debug`（`trace` / `info` / `warn` / `error`）：ログの詳細度を調整します。release 版の既定は `info` です。
 - 環境変数 `HIFISHIFTER_LOG_DIR`：既定のログディレクトリを上書きします。
+- 環境変数 `HIFISHIFTER_GDK_BACKEND=x11|wayland`：AppImage が既定で強制する `x11` を上書きします。
+- 環境変数 `HIFISHIFTER_SAFE_GL=1`：WebKit のコンポジターを無効化し、ソフトウェア描画を強制します（GPU ドライバー不調時の緊急手段）。
 - ターミナルで `HiFiShifter --benchmark` を実行：推論デバイスのベンチマークを実行し、結果を JSON で出力します。

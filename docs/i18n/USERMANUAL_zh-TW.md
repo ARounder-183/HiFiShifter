@@ -17,7 +17,7 @@ HiFiShifter 是一款圖形化人聲編輯與合成工具。它支援多軌道�
     1. 終端機輸入 `xattr -cr /Applications/HiFiShifter.app`；
     2. 透過系統設定允許執行 `系統設定` -> `隱私權與安全性` -> 點選 `仍要打開`。
 
-- Linux 版本提供的是 AppImage 程式包。AppImage 程式包需要在檔案的 `屬性 -> 權限` 中，勾選 `允許將檔案作為程式執行`，之後便可以直接執行。
+- Linux 版本提供的是 AppImage 程式包。AppImage 程式包需要在檔案的 `屬性 -> 權限` 中，勾選 `允許將檔案作為程式執行`，之後便可以直接執行。執行前請確認系統已提供 **WebKitGTK 4.1**（見下方「關於 WebView 的說明」），它是 AppImage 唯一需要系統額外提供的大型相依套件。
 
 **關於 GPU 加速**：HiFiShifter 為各平台提供了多種 GPU 加速方案：
 
@@ -33,7 +33,7 @@ HiFiShifter 是一款圖形化人聲編輯與合成工具。它支援多軌道�
 
 - **Windows**：需要 Edge WebView2。Windows 10（1803 版本及以上）和 Windows 11 已經預裝，無需額外操作。如果你使用的是更早的 Windows 版本或者系統未預裝，安裝程式會自動提示你下載安裝。你也可以參考 [Tauri 官方說明](https://tauri.app/zh-cn/start/prerequisites/#webview2) 了解詳情。一般使用者無需擔心，直接執行安裝包即可。
 - **macOS**：系統自帶 WebKit，無需任何額外安裝。
-- **Linux**：需要 WebKitGTK。大多數主流發行版（如 Ubuntu、Fedora、Arch Linux）預設已包含。如果提示缺少元件，請使用你的套件管理器安裝 `webkit2gtk`（例如 `sudo apt install webkit2gtk`）。具體可參考你的發行版文件。
+- **Linux**：需要 **WebKitGTK 4.1**。Arch/CachyOS、Ubuntu 24.04+、Fedora 39+、Debian 13+ 等主流發行版均已提供，通常無需額外安裝；缺少時用發行版的套件管理員安裝（Arch：`webkit2gtk-4.1`，Ubuntu / Debian：`libwebkit2gtk-4.1-0`，Fedora：`webkit2gtk4.1`）。只有 `webkit2gtk-4.0` 的舊發行版（例如 Ubuntu 22.04）無法執行 AppImage。AppImage 不隨包攜帶 WebKit，介面與圖形堆疊（EGL / Mesa / Wayland）一律由系統提供，這樣它們才會始終是配套的一份。
 
 在 Windows 上，HiFiShifter 已停用 WebView2 自帶的瀏覽器快捷鍵（如 `Ctrl + F`、`Ctrl + P`、`F5` 以及 `Ctrl` 搭配 `+` / `-` 的頁面縮放），因此這些按鍵會正常交給 HiFiShifter 處理，不會打斷你的編輯操作。
 
@@ -838,9 +838,20 @@ HiFiShifter 會自動把執行日誌寫入系統標準日誌目錄，無需任�
     - 高頻重複的錯誤 / 警告會自動限流：同一位置的日誌預設每 10 秒最多輸出一條，被抑制的條數會在下一條輸出前以 `[throttled]` 彙總行補記。
 - 前端與後端的錯誤都會統一記錄在同一份日誌檔案裡，方便按時間軸對照排查。
 
+### Linux 上視窗起不來 / 雙擊沒反應
+
+AppImage 不自帶 WebKit 與圖形堆疊，遇到起不來時請依下列順序排查：
+
+1. **先看是不是缺少相依套件**：在終端機執行一次 AppImage。若出現 `error while loading shared libraries: libwebkit2gtk-4.1.so.0`，依上方的「關於 WebView 的說明」安裝 `webkit2gtk-4.1` 即可。
+2. **錯誤訊息含 EGL，或畫面全白**：先用安全模式啟動 —— `HIFISHIFTER_SAFE_GL=1 ./HiFiShifter_*.AppImage`。它會關閉 WebKit 合成器並強制軟體渲染；能出視窗就代表問題在 GPU 驅動／EGL 一側。
+3. **Wayland 桌面上的顯示問題**（縮放模糊、輸入法候選框位置、拖曳異常）：AppImage 預設讓 GTK 走 `x11`（XWayland），最穩定，代價是 HiDPI 下可能模糊。可改用原生 Wayland：`HIFISHIFTER_GDK_BACKEND=wayland ./HiFiShifter_*.AppImage`。
+4. **回報 issue 時**，請附上日誌開頭（`說明 → 開啟日誌資料夾`）的兩行圖形診斷：`[linux] session: gdk_backend=… display=… wayland_display=… session_type=… appimage=…` 與 `[linux] egl: …`。
+
 進階選項（一般使用者無需使用）：
 
 - 啟動參數 `--log-file=<path>`：把日誌寫入指定路徑；`--log-file=-` 明確關閉檔案日誌。
 - 環境變數 `HIFISHIFTER_LOG=debug`（或 `trace` / `info` / `warn` / `error`）：調整日誌詳細程度，release 版預設為 `info`。
 - 環境變數 `HIFISHIFTER_LOG_DIR`：覆蓋預設日誌目錄。
+- 環境變數 `HIFISHIFTER_GDK_BACKEND=x11|wayland`：覆蓋 AppImage 預設強制的 `x11`。
+- 環境變數 `HIFISHIFTER_SAFE_GL=1`：關閉 WebKit 合成器並強制軟體渲染（GPU 驅動異常時的應急開關）。
 - 在終端機執行 `HiFiShifter --benchmark`：直接執行推理裝置基準測試並以 JSON 格式輸出結果。

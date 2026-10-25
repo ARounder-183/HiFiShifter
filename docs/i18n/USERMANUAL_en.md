@@ -17,7 +17,7 @@ Download the HiFiShifter installer corresponding to your operating system and ar
     1. Run `xattr -cr /Applications/HiFiShifter.app` in Terminal;
     2. Allow the app to run via `System Settings` -> `Privacy & Security` -> click `Open Anyway`.
 
-- For Linux, an AppImage package is provided. You need to go to file `Properties -> Permissions` and check `Allow executing file as program`, then you can run it directly.
+- For Linux, an AppImage package is provided. You need to go to file `Properties -> Permissions` and check `Allow executing file as program`, then you can run it directly. Before launching, make sure the system provides **WebKitGTK 4.1** (see "About WebView" below) — it is the only large dependency the AppImage expects from the host.
 
 **About GPU Acceleration**: HiFiShifter provides multiple GPU acceleration options across platforms:
 
@@ -33,7 +33,7 @@ In the menu `Options → Inference Device`, you can select `Auto`, `CPU`, or `GP
 
 - **Windows**: Requires Edge WebView2. Windows 10 (version 1803 and later) and Windows 11 have it preinstalled, so no additional action is needed. If you are using an older Windows version or the component is missing, the installer will prompt you to download it automatically. You can also refer to the [Tauri official documentation](https://tauri.app/start/prerequisites/#webview2) for details. General users can simply run the installer without worry.
 - **macOS**: WebKit is provided by the system, no extra installation is required.
-- **Linux**: Requires WebKitGTK. Most major distributions (e.g., Ubuntu, Fedora, Arch Linux) include it by default. If you see a missing component error, use your package manager to install `webkit2gtk` (e.g., `sudo apt install webkit2gtk`). Refer to your distribution's documentation for specifics.
+- **Linux**: Requires **WebKitGTK 4.1**. Arch/CachyOS, Ubuntu 24.04+, Fedora 39+, Debian 13+ and other current distributions ship it, so usually nothing to install; if it is missing, install the distribution's package (Arch: `webkit2gtk-4.1`, Ubuntu / Debian: `libwebkit2gtk-4.1-0`, Fedora: `webkit2gtk4.1`). Older distributions that only provide `webkit2gtk-4.0` (e.g. Ubuntu 22.04) cannot run the AppImage. The AppImage does not bundle WebKit: the UI and the graphics stack (EGL / Mesa / Wayland) all come from the system, so they always match each other.
 
 On Windows, HiFiShifter disables the browser shortcuts that WebView2 normally intercepts (such as `Ctrl + F`, `Ctrl + P`, `F5`, and `Ctrl` with `+` / `-` for page zoom), so those key combinations reach HiFiShifter normally and never interrupt your editing.
 
@@ -839,9 +839,20 @@ HiFiShifter automatically writes its run log to the platform-standard log direct
     - Frequently repeating errors / warnings are throttled automatically: a given log site emits at most one message per 10-second window, and suppressed messages are summarized in a `[throttled]` line before the next one.
 - Frontend and backend errors are written to the same log file, so a single file tells the whole story in chronological order.
 
+### The window does not come up on Linux / double-click does nothing
+
+The AppImage does not bundle WebKit or the graphics stack, so a failed launch usually falls into one of these cases:
+
+1. **Check for a missing dependency first**: run the AppImage once from a terminal. If it prints `error while loading shared libraries: libwebkit2gtk-4.1.so.0`, install `webkit2gtk-4.1` as described in "About WebView" above.
+2. **EGL errors, or an all-white window**: start in safe mode — `HIFISHIFTER_SAFE_GL=1 ./HiFiShifter_*.AppImage`. It disables the WebKit compositor and forces software rendering; if the window appears, the problem is on the GPU driver / EGL side.
+3. **Display problems on Wayland** (blurry scaling, IME popup position, broken drag): the AppImage forces GTK onto `x11` (XWayland) because that is the most reliable path, at the cost of blurry HiDPI. Try native Wayland with `HIFISHIFTER_GDK_BACKEND=wayland ./HiFiShifter_*.AppImage`.
+4. **When filing an issue**, attach the two graphics lines from the top of the log (`Help → Open Log Folder`): `[linux] session: gdk_backend=… display=… wayland_display=… session_type=… appimage=…` and `[linux] egl: …`.
+
 Advanced options (not needed for regular use):
 
 - Launch flag `--log-file=<path>`: write the log to a specific path; `--log-file=-` disables file logging.
 - Environment variable `HIFISHIFTER_LOG=debug` (or `trace` / `info` / `warn` / `error`): adjust log verbosity; release builds default to `info`.
 - Environment variable `HIFISHIFTER_LOG_DIR`: override the default log directory.
+- Environment variable `HIFISHIFTER_GDK_BACKEND=x11|wayland`: overrides the `x11` the AppImage forces by default.
+- Environment variable `HIFISHIFTER_SAFE_GL=1`: disables the WebKit compositor and forces software rendering (emergency switch for broken GPU drivers).
 - Run `HiFiShifter --benchmark` in a terminal: run the inference-device benchmark and print the results as JSON.
