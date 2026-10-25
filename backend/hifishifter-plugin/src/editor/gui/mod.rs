@@ -28,10 +28,10 @@ mod linux;
 
 use std::rc::Rc;
 
-pub(crate) use port::{EditorHost, GuiFidelity, NativeWindow};
 /// 宿主主线程上的周期工作。驱动者是 `host/reaper/host_timer` 的宿主节拍（情形 B）
 /// 与 GTK 定时器（情形 A），两者共用这一份实现。
 pub(crate) use client::host_heartbeat;
+pub(crate) use port::{EditorHost, GuiFidelity, NativeWindow};
 
 /// 建一个内嵌视图，并把 JS 消息接到 Policy。
 ///

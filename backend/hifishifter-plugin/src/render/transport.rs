@@ -337,7 +337,9 @@ mod tests {
         let clock = TransportClock::default();
         clock.publish_host(3.25, false);
         assert_eq!(clock.read(), (3.25, false));
-        assert!(clock.diagnostics()["host_reading_fresh"].as_bool().unwrap_or(false));
+        assert!(clock.diagnostics()["host_reading_fresh"]
+            .as_bool()
+            .unwrap_or(false));
     }
 
     /// 诊断真实区分三模式/多writer/回跳/瞬时停止，但本身不能改变GUI播放时间。

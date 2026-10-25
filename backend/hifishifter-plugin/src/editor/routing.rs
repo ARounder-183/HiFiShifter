@@ -89,7 +89,10 @@ impl EditorLink {
     /// 登记到心跳表（`Arc` 建成后调用一次）。重复登记同一链路不会重复计数。
     pub(crate) fn register_heartbeat(self: &Arc<Self>) {
         let mut all = links().lock().unwrap_or_else(|e| e.into_inner());
-        if all.iter().any(|link| std::ptr::eq(link.as_ptr(), Arc::as_ptr(self))) {
+        if all
+            .iter()
+            .any(|link| std::ptr::eq(link.as_ptr(), Arc::as_ptr(self)))
+        {
             return;
         }
         all.push(Arc::downgrade(self));
