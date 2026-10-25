@@ -1438,7 +1438,7 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
                         .or_else(||owner.clock.get().map(|clock|clock.diagnostics())),
                     // 音频线程被 catch_unwind 拦下的 panic 次数。音频线程不能写日志，
                     // 只能计数；这里（UI 线程）把它落进诊断包，否则"崩过但没痕迹"。
-                    "audioPanicCount":crate::vst3::audio_panic_count(),
+"audioPanicCount":crate::vst3::audio_panic_count(),
                     "renderers":document.as_ref().map(|document|document.renderer_diagnostics())
                         .unwrap_or_else(||serde_json::json!([])),
                     // 慢车道状态：报障时"有一条长任务卡在这里"是最难从日志猜出来的
@@ -1656,7 +1656,7 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
                 Some(stroke)=>{
                     let reading=state.borrow().link.owner().ok().and_then(|owner|owner.transport_reading());
                     let outcome=state.borrow_mut().relay.on_key(std::time::Instant::now(),&action,stroke,reading);
-                    apply_relay_effects(&state,outcome.effects);
+                    apply_relay_effects(state,outcome.effects);
                     Ok(serde_json::json!({
                         "accepted":matches!(outcome.verdict,host_key_relay::KeyVerdict::Accepted),
                         "reason":outcome.verdict.reason(),

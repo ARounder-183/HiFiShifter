@@ -183,11 +183,10 @@ fn bundle_contents_directory() -> Result<PathBuf, String> {
             return Err("plugin module path unavailable".into());
         }
         let path = PathBuf::from(String::from_utf16_lossy(&name[..count]));
-        return path
-            .parent()
+        path.parent()
             .and_then(|p| p.parent())
             .map(PathBuf::from)
-            .ok_or_else(|| "VST3 Contents unavailable".to_string());
+            .ok_or_else(|| "VST3 Contents unavailable".to_string())
     }
     #[cfg(all(unix, not(test)))]
     {
