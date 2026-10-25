@@ -42,6 +42,20 @@ export interface GlCanvasHandle {
     /** 以透明清屏（每帧绘制的第一步）。 */
     clear(): void;
     /**
+     * 上下文是否**当前处于丢失状态**。
+     *
+     * 丢失期间所有 GL 调用都是空操作，画布会保持空白；调用方据此决定"这一帧没有
+     * 画成"，而不是把空白当成绘制结果。
+     */
+    isLost(): boolean;
+    /**
+     * 注册"上下文已恢复"的回调；返回注销函数。
+     *
+     * 恢复后 GL 资源（program / buffer / texture）全部失效，重绘是**唯一**能让内容
+     * 重新出现的动作 —— 而浏览器不会替我们重新调度一帧。
+     */
+    onRestored(listener: () => void): () => void;
+    /**
      * 释放句柄。
      *
      * 特殊说明：**不**主动丢失上下文（原因见实现处注释）——一个 canvas 只能有
@@ -77,8 +91,35 @@ export function createGlCanvas(canvas: HTMLCanvasElement): GlCanvasHandle | null
 
     let target = resolveGlRasterTarget(1, 1, 1);
 
+    // 【为什么必须接这两个事件】标签页切换/元素尺寸归零会让浏览器回收 WebGL2 上下文
+    // （显存压力下尤其如此）。恢复后全部 GL 资源失效，而**没有任何东西**会替我们
+    // 重新调度一帧 —— 表现就是"画布一直空白，直到用户滚动或缩放才恢复"。
+    // `preventDefault` 是恢复的前提：不阻止默认处理，浏览器不会触发 restored。
+    let lost = false;
+    const restoredListeners: Array<() => void> = [];
+    canvas.addEventListener("webglcontextlost", (event) => {
+        event.preventDefault();
+        lost = true;
+    });
+    canvas.addEventListener("webglcontextrestored", () => {
+        lost = false;
+        for (const listener of restoredListeners.slice()) listener();
+    });
+
     return {
         gl,
+
+        isLost() {
+            return lost || gl.isContextLost();
+        },
+
+        onRestored(listener) {
+            restoredListeners.push(listener);
+            return () => {
+                const index = restoredListeners.indexOf(listener);
+                if (index >= 0) restoredListeners.splice(index, 1);
+            };
+        },
 
         resize(cssWidthPx, cssHeightPx, dpr) {
             target = resolveGlRasterTarget(cssWidthPx, cssHeightPx, dpr);

@@ -594,6 +594,16 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
     if (args.glSceneEnabled === true && args.glCanvas != null) {
         try {
             glHandle = createGlCanvas(args.glCanvas);
+            if (glHandle !== null) {
+                // 【为什么恢复后必须自己重绘】浏览器不会替我们重新调度一帧；而恢复时
+                // 全部 GL 资源（program / buffer / 图集）都已失效。不重绘，画布就
+                // 一直空白到下一次用户操作 —— 那正是"切走再切回来是空白的"。
+                teardown.push(
+                    glHandle.onRestored(() => {
+                        invalidateFull();
+                    }),
+                );
+            }
             if (glHandle === null) {
                 glFailureReason = "WebGL2 不可用";
             } else {
