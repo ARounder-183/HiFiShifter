@@ -1640,6 +1640,12 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
                     // 慢车道状态：报障时"有一条长任务卡在这里"是最难从日志猜出来的
                     // 事实，让它随诊断包一起走。
                     "slowLane":crate::editor::slow_lane::snapshot(),
+                    // 编辑器路由：每条活链路是「宿主握上手了」还是「靠唯一的活实例兜底」，
+                    // 还是「压根没连上」。界面空着时，这三个结论指向完全不同的下一步。
+                    "editorRoutes":crate::editor::routing::live_links().iter().map(|link|serde_json::json!({
+                        "state":link.route_state().as_str(),
+                        "reason":link.route_failure(),
+                    })).collect::<Vec<_>>(),
                 });
                 let settings=serde_json::json!({
                     "plugin":crate::settings_store::settings(),
