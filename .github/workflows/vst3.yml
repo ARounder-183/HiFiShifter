@@ -4,6 +4,12 @@ on:
   workflow_dispatch:
   pull_request:
     branches: [main, develop]
+  push:
+    branches: [develop]
+    # 【为什么 push 也要跑】本仓的实际工作流是直接 push develop（不走 PR）；
+    # 只有 PR 触发时，FFI 守卫 / 日志级别 / 插件单测 + 并发测试 / load gate
+    # 这些最有价值的插件门禁会整段形同虚设 —— 2026-10 的 FFI 守卫回归正是
+    # 这样落进仓库的。concurrency 组保证连推时只跑最新一次。
 
 permissions:
   contents: read
@@ -63,6 +69,14 @@ jobs:
           shared-key: vst3-windows-x64
           cache-on-failure: true
 
+      # 与 build.yml / vst3-unix.yml 同款缓存：钉死 revision 的 SDK 检出只在
+      # pin 变化时重新联网拉取。
+      - name: Cache pinned plugin SDKs
+        uses: actions/cache@v5
+        with:
+          path: third_party/sdk
+          key: plugin-sdks-${{ hashFiles('scripts/env/plugin-sdks.json') }}
+
       - name: Install pinned ARA and VST3 SDKs
         run: ./scripts/setup/prepare-plugin-sdks.ps1
 
@@ -73,7 +87,9 @@ jobs:
           # 全绿的情况下合入。
           npm --prefix frontend ci
           if ($LASTEXITCODE -ne 0) { throw 'Frontend dependency installation failed.' }
-          # 预算门禁（同 build.yml）：140 条警告是只许降不许升的棘轮。
+          # 预算门禁（同 build.yml）：警告数是只许降不许升的棘轮（现值见
+          # frontend/tests/lintBudget.test.ts 的 WARNING_BUDGET 与 package.json
+          # 的 lint:budget，两者由该测试钉住一致）。
           npm --prefix frontend run lint:budget
           if ($LASTEXITCODE -ne 0) { throw 'Frontend lint failed.' }
           npm --prefix frontend run format:check

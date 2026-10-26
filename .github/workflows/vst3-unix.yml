@@ -110,10 +110,12 @@ jobs:
       # npm 会静默跳过那个可选的原生绑定，于是报
       # "Cannot find module '@rolldown/binding-linux-x64-gnu'"。
       # runner 自带的 node 版本随镜像漂移，所以这里钉死并复用 npm 缓存。
+      # 与 build.yml / vst3.yml 统一到 24：同一份前端不该在不同流水线上用
+      # 不同的大版本构建（22.12 是 vite 8 的最低可用线，历史遗留）。
       - name: Setup Node
         uses: actions/setup-node@v6
         with:
-          node-version: "22.12"
+          node-version: "24"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 

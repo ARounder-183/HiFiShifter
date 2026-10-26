@@ -47,6 +47,9 @@ jobs:
   frontend-build:
     name: Build Frontend
     runs-on: ubuntu-latest
+    # 其余 job 都有超时；最重的 frontend/backend 反而没有（默认 360 分钟）——
+    # 挂起时单个 job 要等 6 小时才失败（vst3-unix.yml 的注释记录过这个亏）。
+    timeout-minutes: 20
     outputs:
       artifact-name: frontend-dist
     steps:
@@ -103,6 +106,7 @@ jobs:
   rust-fmt:
     name: Check Rust formatting
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: backend
@@ -118,8 +122,13 @@ jobs:
           # 该 action 默认 `-D warnings`；格式化检查与警告无关，置空以免被牵连。
           rustflags: ''
 
-      - name: Check rustfmt
+      # hfs-gui 在 workspace 之外（backend/Cargo.toml 的 exclude），`--all`
+      # 覆盖不到它；它曾因此积累 rustfmt 漂移（见 vst3-unix.yml 的同款步骤）。
+      - name: Check rustfmt (workspace)
         run: cargo fmt --all --check
+
+      - name: Check rustfmt (hfs-gui, outside the workspace)
+        run: cargo fmt --manifest-path hfs-gui/Cargo.toml --all --check
 
   rust-clippy:
     name: Clippy (workspace)
@@ -311,6 +320,8 @@ jobs:
     name: Build Backend (${{ matrix.name }})
     needs: frontend-build
     runs-on: ${{ matrix.os }}
+    # 六平台矩阵：单个入口的最长构建（交叉编译 + 打包）120 分钟封顶。
+    timeout-minutes: 180
     env:
       # 【为什么不再设 RUSTFLAGS】这里原本是 `RUSTFLAGS: "-Awarnings"`，它确实让
       # 构建日志安静了，代价却是**把本 workspace 自己的告警一起吞掉** —— 190 条
