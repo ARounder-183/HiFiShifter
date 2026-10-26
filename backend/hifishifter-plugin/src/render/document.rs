@@ -2694,6 +2694,9 @@ clips_src={clips_src} dupes={dupes}}}"
 
     /// 在旧内容可能被改变前立即撤销**渲染许可与代次**；不撤已发布快照本身。
     ///
+    /// 名字是历史遗留：本函数**不会**清空 renderers 列表，只做失效标记；
+    /// 真正清空列表的是 [`Self::close`] / [`Self::detach_owner`]。
+    ///
     /// 【为什么不再清空快照】`clear_renderers()` 被一次宿主编辑触发**多次**
     /// （`ara/model.rs` 里 8 处调用）。清空 `current` 之后，`copy_block_at` 的读闭包
     /// 逐样本返回 `0.0`，而 bound 实例固定 `layered == false`，于是**每个音频块都是

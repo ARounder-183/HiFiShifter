@@ -720,11 +720,11 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
      * 特殊说明：引用必须**稳定**——下游 hook 把它作为 effect 依赖，随渲染重建会
      * 导致事件监听反复重注册。因此惰性创建一次并缓存。
      */
-    const viewportAccessRef = React.useRef<TimelineViewportAccess | null>(null);
-    if (viewportAccessRef.current === null) {
-        viewportAccessRef.current = createTimelineViewportAccess({ scrollRef, kernelHostRef });
-    }
-    const viewportAccess = viewportAccessRef.current;
+    const [viewportAccess] = React.useState(() =>
+        createTimelineViewportAccess({ scrollRef, kernelHostRef }),
+    );
+    // useCaptureReveal 需要 MutableRefObject 形状；包装一次即可，实例本身仍是单例。
+    const viewportAccessRef = React.useMemo(() => ({ current: viewportAccess }), [viewportAccess]);
 
     // 录完之后把视口移到刚录好的区间（见 `useCaptureReveal` 的文件头）。
     useCaptureReveal(viewportAccessRef);
@@ -1000,7 +1000,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         const text = formatCursorTime(
             s.primaryTimeUnit,
             s.secondaryTimeUnit,
-            Number(sessionRef.current.playheadSec ?? 0) || 0,
+            Number(s.playheadSec ?? 0) || 0,
             timeContext,
         ).combined;
         try {
@@ -6910,16 +6910,14 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                     <FadeContextMenuHost />
                     {contextMenu
                         ? (() => {
-                              const ctxClip = sessionRef.current.clips.find(
-                                  (c) => c.id === contextMenu.clipId,
-                              );
+                              const ctxClip = s.clips.find((c) => c.id === contextMenu.clipId);
                               if (!ctxClip) return null;
 
                               const selectedIds = resolveQuickExportClipIds({
                                   contextClipId: contextMenu.clipId,
                                   multiSelectedClipIds,
                               });
-                              const selectedClips = sessionRef.current.clips.filter((c) =>
+                              const selectedClips = s.clips.filter((c) =>
                                   selectedIds.includes(c.id),
                               );
 
@@ -6939,7 +6937,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                       : ctxClip.startSec;
 
                               const overlappingFadeClips = collectFadeContextClips({
-                                  allClips: sessionRef.current.clips,
+                                  allClips: s.clips,
                                   contextClip: ctxClip,
                                   contextTimeSec,
                                   explicitOverlappingClipIds: contextMenu.overlappingClipIds,
@@ -6947,7 +6945,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
 
                               const currentPlayheadSec = Math.max(
                                   0,
-                                  Number(sessionRef.current.playheadSec ?? 0) || 0,
+                                  Number(s.playheadSec ?? 0) || 0,
                               );
                               // 用与执行端同一个开区间谓词：闭区间会让"播放头恰好
                               // 落在 Clip 边缘"时菜单亮着、点下去却什么都不发生。
@@ -7206,7 +7204,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                   // Clip 边缘"这一种罕见情形的可用性误差，不划算。
                                   canSplit={
                                       resolveSplitTargetsAtSec({
-                                          clips: sessionRef.current.clips,
+                                          clips: s.clips,
                                           splitSec: Math.max(
                                               0,
                                               Number(sessionRef.current.playheadSec ?? 0) || 0,
@@ -7214,12 +7212,12 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                           selectedIds:
                                               multiSelectedClipIds.length > 0
                                                   ? multiSelectedClipIds
-                                                  : sessionRef.current.selectedClipId
-                                                    ? [sessionRef.current.selectedClipId]
+                                                  : s.selectedClipId
+                                                    ? [s.selectedClipId]
                                                     : [],
                                       }).ids.length > 0
                                   }
-                                  canCloseGaps={sessionRef.current.clips.some(
+                                  canCloseGaps={s.clips.some(
                                       (c) =>
                                           c.trackId === trackAreaMenu.trackId &&
                                           c.startSec > trackAreaMenu.timeSec + 1e-9,

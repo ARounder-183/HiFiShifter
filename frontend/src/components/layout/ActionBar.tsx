@@ -67,7 +67,7 @@ import {
 import { SCALE_KEYS, SCALE_LABELS, type ScaleLike } from "../../utils/musicalScales";
 import { applySelectWheelChange } from "../../utils/selectWheel";
 import { useNonPassiveWheel } from "../../utils/useNonPassiveWheel";
-import { createFrameCommitter, type FrameCommitter } from "../../utils/commitOncePerFrame";
+import { createFrameCommitter } from "../../utils/commitOncePerFrame";
 import {
     formatKeybindingList,
     isModifierActive,
@@ -528,20 +528,19 @@ export function ActionBar() {
     );
     /** 提交体经 ref 现读：宿主回调只创建一次，闭包捕获会用到旧的 tempoMap。 */
     const applyBpmCommitRef = useRef(applyBpmCommit);
-    applyBpmCommitRef.current = applyBpmCommit;
-    const bpmCommitRef = useRef<FrameCommitter<number> | null>(null);
-    if (bpmCommitRef.current === null) {
-        bpmCommitRef.current = createFrameCommitter<number>((value) =>
-            applyBpmCommitRef.current(value),
-        );
-    }
     useEffect(() => {
-        const committer = bpmCommitRef.current;
+        applyBpmCommitRef.current = applyBpmCommit;
+    }, [applyBpmCommit]);
+    const [bpmCommitRef] = useState(() =>
+        // eslint-disable-next-line react-hooks/refs -- 初始化只读 ref 的当前值；后续提交都在事件回调里
+        createFrameCommitter<number>((value) => applyBpmCommitRef.current(value)),
+    );
+    useEffect(() => {
         return () => {
             // 卸载前落地最后一次滚轮值：否则"最后一格"永远到不了 store。
-            committer?.flush();
+            bpmCommitRef.flush();
         };
-    }, []);
+    }, [bpmCommitRef]);
 
     /**
      * 滚轮累积的起点。
@@ -585,7 +584,7 @@ export function ActionBar() {
         // 文本逐事件更新（手感不变，且它不触发标尺重算）；Redux 提交合并到每帧一次。
         setBpmText(formatBpmValue(clamped));
         setBpmDirty(false);
-        bpmCommitRef.current?.schedule(clamped);
+        bpmCommitRef.schedule(clamped);
     });
 
     function commitBpm(nextText?: string) {

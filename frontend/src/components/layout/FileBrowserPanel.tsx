@@ -776,6 +776,23 @@ export const FileBrowserPanel: React.FC = () => {
         [displayEntries, selectedPathsInRange],
     );
 
+    // ── 对话框、行内编辑与选择状态 ─────────────────────────────────────────
+    // 这些 setter 会被下方的键盘模型与目录切换 effect 引用；声明必须在它们之前，
+    // 否则 React Compiler 会把「闭包引用后声明的 const」判成 TDZ 风险并跳过优化。
+    const [propertiesEntry, setPropertiesEntry] = useState<FileEntry | null>(null);
+    const [viewOptionsOpen, setViewOptionsOpen] = useState(false);
+    const [deleteRequest, setDeleteRequest] = useState<string[] | null>(null);
+    const [editing, setEditing] = useState<EditingState>(null);
+    const [pathDraft, setPathDraft] = useState<string | null>(null);
+    /** 写操作失败的一次性提示（重名 / 非法名 / 受保护路径）。 */
+    const [transientError, setError] = useState<string | null>(null);
+    const [menu, setMenu] = useState<{ x: number; y: number; entry: FileEntry | null } | null>(
+        null,
+    );
+    const selectAll = useCallback(() => {
+        setSelectedPaths(new Set(displayEntries.map((entry) => entry.path)));
+    }, [displayEntries]);
+
     /**
      * 列表容器的键盘模型。
      *
@@ -994,7 +1011,6 @@ export const FileBrowserPanel: React.FC = () => {
             focusRow(result.index);
             maybePreviewOnNavigate(displayEntries[result.index]);
         },
-        // eslint-disable-next-line react-hooks/exhaustive-deps -- selectAll / 等回调在下方定义，见其自身 useCallback
         [
             displayEntries,
             activeIndex,
@@ -1009,6 +1025,11 @@ export const FileBrowserPanel: React.FC = () => {
             handleParentDir,
             handleRefresh,
             maybePreviewOnNavigate,
+            selectAll,
+            setDeleteRequest,
+            setEditing,
+            setMenu,
+            setPathDraft,
         ],
     );
 
@@ -1016,16 +1037,6 @@ export const FileBrowserPanel: React.FC = () => {
     useEffect(() => {
         setActiveIndex((current) => (current >= displayEntries.length ? -1 : current));
     }, [displayEntries.length]);
-
-    // ── 选择 ───────────────────────────────────────────────────────────────
-    const selectAll = useCallback(() => {
-        setSelectedPaths(new Set(displayEntries.map((entry) => entry.path)));
-    }, [displayEntries]);
-
-    // ── 右键菜单 ───────────────────────────────────────────────────────────
-    const [menu, setMenu] = useState<{ x: number; y: number; entry: FileEntry | null } | null>(
-        null,
-    );
 
     const handleRowContextMenu = useCallback(
         (event: React.MouseEvent, entry: FileEntry) => {
@@ -1118,15 +1129,6 @@ export const FileBrowserPanel: React.FC = () => {
         t,
         tf,
     ]);
-
-    // ── 对话框与行内编辑 ───────────────────────────────────────────────────
-    const [propertiesEntry, setPropertiesEntry] = useState<FileEntry | null>(null);
-    const [viewOptionsOpen, setViewOptionsOpen] = useState(false);
-    const [deleteRequest, setDeleteRequest] = useState<string[] | null>(null);
-    const [editing, setEditing] = useState<EditingState>(null);
-    const [pathDraft, setPathDraft] = useState<string | null>(null);
-    /** 写操作失败的一次性提示（重名 / 非法名 / 受保护路径）。 */
-    const [transientError, setError] = useState<string | null>(null);
 
     const selectedEntries = useMemo(
         () => displayEntries.filter((entry) => selectedPaths.has(entry.path)),
