@@ -1019,7 +1019,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 // 忽略复制失败
             }
         }
-    }, [s.primaryTimeUnit, s.secondaryTimeUnit, sessionRef, timeContext]);
+    }, [s.primaryTimeUnit, s.secondaryTimeUnit, s.playheadSec, sessionRef, timeContext]);
 
     // TimeRuler 是 React.memo 组件：传给它的 handler 必须是稳定引用，内联箭头
     // 函数会让 memo 每次渲染都失效（拖拽 / 滚动期间标尺子树整棵重渲）。
