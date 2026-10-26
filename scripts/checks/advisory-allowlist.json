@@ -1,0 +1,32 @@
+[
+    {
+        "package": "glib",
+        "id": "RUSTSEC-2024-0429",
+        "reason": "unsound VariantStrIter iterator; fixed in glib 0.20, but tauri/wry pin gtk-rs 0.18. The affected API is not used by this workspace. Revisit when tauri moves to the gtk-rs 0.20 stack."
+    },
+    {
+        "package": "glib",
+        "id": "GHSA-wrw7-89jp-8q8g",
+        "reason": "GHSA alias of RUSTSEC-2024-0429 (same advisory, different database)."
+    },
+    {
+        "package": "proc-macro-error",
+        "id": "RUSTSEC-2024-0370",
+        "reason": "unmaintained; build-time only via glib-macros -> gtk3-macros, never linked into the shipped binary."
+    },
+    {
+        "package": "zbus_names",
+        "id": "RUSTSEC-2026-0371",
+        "reason": "unmaintained (merged into zbus 6); transitive via tauri-plugin-opener -> zbus 5.19, no fix inside the pinned major."
+    },
+    {
+        "package": "zvariant",
+        "id": "RUSTSEC-2026-0370",
+        "reason": "unmaintained (merged into zbus 6); transitive via tauri-plugin-opener -> zbus 5.19, no fix inside the pinned major."
+    },
+    {
+        "package": "zvariant_derive",
+        "id": "RUSTSEC-2026-0372",
+        "reason": "unmaintained (merged into zbus 6); transitive via tauri-plugin-opener -> zbus 5.19, no fix inside the pinned major."
+    }
+]

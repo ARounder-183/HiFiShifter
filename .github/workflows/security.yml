@@ -1,0 +1,49 @@
+name: Security advisories
+
+# 依赖漏洞是**随时间出现**的：今天干净的锁文件，下个月可能就命中了新公开的通告。
+# 构建矩阵（build.yml / vst3*.yml）只在 PR 与手动触发时跑，扫不到这种"事后公开"。
+# 所以这里单独一条：
+#   · 每周一 03:00 UTC 定期扫；
+#   · 改了两份锁文件（或这个门禁本身）的 PR 也扫一次 —— 那正是最该扫的时刻。
+on:
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "backend/Cargo.lock"
+      - "frontend/package-lock.json"
+      - "scripts/checks/check-dependency-advisories.py"
+      - "scripts/checks/advisory-allowlist.json"
+      - ".github/workflows/security.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  advisories:
+    name: Advisory sweep
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+
+      # 直接用 runner 自带的 python3：这一步不需要版本矩阵，也不需要装依赖
+      # （脚本只用标准库 urllib + json）。
+      - name: OSV sweep over both lockfiles
+        run: python3 scripts/checks/check-dependency-advisories.py --verbose
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+
+      # OSV 覆盖 crates.io 与 npm 的**通告库**；npm audit 额外覆盖"已弃用/有修复版本"
+      # 这类 OSV 不收录的运营信息。两者都跑，互为补充。
+      - name: npm audit (high and above fails the job)
+        working-directory: frontend
+        run: npm audit --audit-level=high
