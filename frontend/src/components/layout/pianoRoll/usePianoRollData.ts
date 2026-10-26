@@ -343,6 +343,13 @@ export function usePianoRollData(args: {
 
     useEffect(() => {
         setSecondaryParamViews((prev) => {
+            const ids = new Set(secondaryParamIds);
+            // 本 effect 只负责**裁剪**（新增走取数路径）。一个都没被裁掉时
+            // 返回原对象：上游按引用比较，无条件返回新对象会让每次
+            // secondaryParamIds 身份变化都白跑一整轮提交。
+            if (Object.keys(prev).every((key) => ids.has(key))) {
+                return prev;
+            }
             const next: Partial<Record<ParamName, ParamViewSegment>> = {};
             for (const paramId of secondaryParamIds) {
                 if (prev[paramId]) {
@@ -355,6 +362,10 @@ export function usePianoRollData(args: {
 
     useEffect(() => {
         setReferencePitchViews((prev) => {
+            const ids = new Set(referenceRootTrackIds);
+            if (Object.keys(prev).every((key) => ids.has(key))) {
+                return prev;
+            }
             const next: Record<string, ParamViewSegment> = {};
             for (const trackId of referenceRootTrackIds) {
                 if (prev[trackId]) {
