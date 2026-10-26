@@ -9,17 +9,21 @@
  */
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({ relay: vi.fn(), publish: vi.fn() }));
+const mocks = vi.hoisted(() => ({ relay: vi.fn(), publish: vi.fn(), focus: vi.fn() }));
 
 vi.mock("./api/hostKeys", () => ({
     hostKeysApi: {
         relay: mocks.relay,
         publishEscapeSet: mocks.publish,
+        focusHost: mocks.focus,
     },
 }));
 
 import {
     classifyHostKeyRelay,
+    HOST_KEY_FOCUS_RESULT_EVENT,
+    handKeyboardToHost,
+    type HostKeyFocusOutcome,
     collectHostKeyEscapeStrokes,
     hostKeyRelayEnv,
     isBareStroke,
@@ -251,5 +255,46 @@ describe("通知订阅", () => {
         const off = subscribeHostKeyRelayNotice((notice) => seen.push(notice.reason));
         expect(() => off()).not.toThrow();
         expect(seen).toEqual([]);
+    });
+});
+
+describe("把键盘交给宿主", () => {
+    /*
+     * 【为什么这条要有测试】这个功能此前把结果**整个吞掉**：成功与失败在界面上完全
+     * 同形。用户报障时只能描述成"似乎根本不起作用"。结果必须被广播出去，而且失败
+     * 必须带着原因 —— 两种失败（找不到宿主窗口 / 系统拒绝换焦点）指向完全不同的
+     * 下一步。
+     */
+    test("成功 ⇒ ok，且广播一条成功结果", async () => {
+        mocks.focus.mockResolvedValue({ ok: true });
+        const seen: HostKeyFocusOutcome[] = [];
+        const listener = (event: Event) => {
+            seen.push((event as CustomEvent<HostKeyFocusOutcome>).detail);
+        };
+        window.addEventListener(HOST_KEY_FOCUS_RESULT_EVENT, listener);
+        const outcome = await handKeyboardToHost();
+        window.removeEventListener(HOST_KEY_FOCUS_RESULT_EVENT, listener);
+        expect(outcome).toEqual({ ok: true, reason: null });
+        expect(seen).toEqual([{ ok: true, reason: null }]);
+    });
+
+    test("失败 ⇒ ok=false、原因原样带出", async () => {
+        for (const reason of ["no-host-window", "post-failed"]) {
+            mocks.focus.mockResolvedValue({ ok: false, reason });
+            const seen: HostKeyFocusOutcome[] = [];
+            const listener = (event: Event) => {
+                seen.push((event as CustomEvent<HostKeyFocusOutcome>).detail);
+            };
+            window.addEventListener(HOST_KEY_FOCUS_RESULT_EVENT, listener);
+            const outcome = await handKeyboardToHost();
+            window.removeEventListener(HOST_KEY_FOCUS_RESULT_EVENT, listener);
+            expect(outcome, reason).toEqual({ ok: false, reason });
+            expect(seen, reason).toEqual([{ ok: false, reason }]);
+        }
+    });
+
+    test("旧后端没有这条命令 ⇒ unavailable（而不是假装成功）", async () => {
+        mocks.focus.mockRejectedValue(new Error("method not wired yet"));
+        expect(await handKeyboardToHost()).toEqual({ ok: false, reason: "unavailable" });
     });
 });

@@ -453,6 +453,11 @@ unsafe extern "system" fn window_proc(
                     let _ = DestroyWindow(hwnd);
                 }
                 return LRESULT(0);
+            } else if message == WM_KILLFOCUS {
+                // 【为什么记这里】wParam 是**即将获得焦点**的那个窗口 —— 用户点了宿主
+                // 的哪一块，这里就是哪一块。"把键盘交给宿主"要把焦点还回原处，靠的就是
+                // 这一笔（见 `EditorClient::previous_focus`）。
+                (*pointer).client.borrow_mut().note_previous_focus(wparam.0);
             } else if message == WM_SETFOCUS {
                 // 宿主 Tab/onFocus 进入自有 HWND 后，使用标准 WebView2 接口进入 HTML 控件。
                 // MoveFocus 可能同步通知宿主；调用前不持任何借用。

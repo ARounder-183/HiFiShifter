@@ -251,6 +251,28 @@ export function publishHostKeyEscapeSet(strokes: readonly HostKeyStroke[]): void
         });
 }
 
+/** 一次"把键盘交给宿主"的结果。 */
+export interface HostKeyFocusOutcome {
+    ok: boolean;
+    /**
+     * 失败原因（`"no-host-window"` / `"post-failed"` / `"unavailable"`）。
+     *
+     * 【为什么要把它带出来】这个功能此前失败时是**完全静默**的：调用点把布尔丢掉，
+     * 用户看到的就是"点了没反应"。一个没有反馈的功能，与一个坏掉的功能在体验上
+     * 无法区分 —— 这正是它被报成"根本不起作用"的原因。
+     */
+    reason: string | null;
+}
+
+/**
+ * "键盘交还结果"的窗口事件名。
+ *
+ * 【为什么用 DOM 事件】菜单项在 `MenuBar`，而状态栏提示的宿主在 `App`（`showNotice`
+ * 是那里的局部状态）。把提示塞进 MenuBar 需要把一整套提示设施搬过去；一枚事件只让
+ * 两边各保留自己那一半，与本仓既有的 `hifi:*` 事件同一形状。
+ */
+export const HOST_KEY_FOCUS_RESULT_EVENT = "hfs-host-key-focus-result";
+
 /**
  * 把键盘焦点交还宿主 —— 让路的**确定**那条路。
  *
@@ -259,15 +281,31 @@ export function publishHostKeyEscapeSet(strokes: readonly HostKeyStroke[]): void
  * 办法。交还焦点一定会生效，代价是焦点真的走了（之后要点击插件才能回来）—— 因此它
  * 只由用户显式触发（视图菜单），从不自动发生。
  *
- * 返回是否成功；失败不弹提示（调用点就在菜单上，用户看得到焦点有没有走）。
+ * 结果同时以 [`HOST_KEY_FOCUS_RESULT_EVENT`] 广播：调用方可以是任何组件，而"说一句话"
+ * 的实现只有一处。
  */
-export async function handKeyboardToHost(): Promise<boolean> {
+export async function handKeyboardToHost(): Promise<HostKeyFocusOutcome> {
+    let outcome: HostKeyFocusOutcome;
     try {
         const reply = await hostKeysApi.focusHost();
-        return reply?.ok === true;
+        outcome =
+            reply?.ok === true
+                ? { ok: true, reason: null }
+                : {
+                      ok: false,
+                      reason: typeof reply?.reason === "string" ? reply.reason : "post-failed",
+                  };
     } catch {
-        return false;
+        outcome = { ok: false, reason: "unavailable" };
     }
+    if (typeof window !== "undefined") {
+        window.dispatchEvent(
+            new CustomEvent<HostKeyFocusOutcome>(HOST_KEY_FOCUS_RESULT_EVENT, {
+                detail: outcome,
+            }),
+        );
+    }
+    return outcome;
 }
 
 /**

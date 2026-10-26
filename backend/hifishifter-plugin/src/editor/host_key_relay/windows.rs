@@ -16,14 +16,15 @@
 
 use super::{EscapeError, Fidelity, HostKeyEscape, KeyToken, Stroke};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetFocus, MapVirtualKeyW, SetFocus, MAPVK_VK_TO_VSC, VIRTUAL_KEY, VK_BACK, VK_DELETE, VK_DOWN,
     VK_END, VK_ESCAPE, VK_HOME, VK_INSERT, VK_LEFT, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT,
     VK_SPACE, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetAncestor, GetForegroundWindow, IsChild, IsWindowVisible, PostMessageW, GA_ROOT, WM_KEYDOWN,
-    WM_KEYUP,
+    GetAncestor, GetForegroundWindow, GetWindowThreadProcessId, IsChild, IsWindow, IsWindowVisible,
+    PostMessageW, SetForegroundWindow, GA_ROOT, GA_ROOTOWNER, WM_KEYDOWN, WM_KEYUP,
 };
 
 pub(crate) struct WindowsEscape;
@@ -40,7 +41,7 @@ impl HostKeyEscape for WindowsEscape {
         }
         let key = virtual_key(stroke.token).ok_or(EscapeError::UnsupportedKey)?;
         let editor = HWND(window as *mut core::ffi::c_void);
-        let host = host_root(editor)?;
+        let host = host_window(editor)?;
         // SAFETY: 两个句柄都来自本进程的窗口树；两个调用都是纯查询，不改宿主状态。
         if !unsafe { IsWindowVisible(host) }.as_bool() {
             // 投给一个不可见窗口等于投进虚空（桥接进程的隐藏窗口正是这种）。
@@ -55,32 +56,95 @@ impl HostKeyEscape for WindowsEscape {
         Ok(())
     }
 
-    fn focus_host(&mut self, window: usize) -> Result<(), EscapeError> {
+    fn focus_host(&mut self, window: usize, previous: Option<usize>) -> Result<(), EscapeError> {
         let editor = HWND(window as *mut core::ffi::c_void);
-        let host = host_root(editor)?;
-        // SAFETY: 同线程 SetFocus。失败时用 GetFocus 复查 —— 首次 SetFocus 的旧句柄
-        // 可能为 null（Win32 包装因此返回 Err，但焦点其实已经设上了），与
-        // `WindowKey::focus` 同一个处理。
-        unsafe { SetFocus(Some(host)) }.map_err(|_| EscapeError::PostFailed)?;
-        let focused = unsafe { GetFocus() };
-        if focused == host || unsafe { IsChild(host, focused) }.as_bool() {
-            Ok(())
-        } else {
-            Err(EscapeError::PostFailed)
-        }
+        let host = host_window(editor)?;
+        let target = previous
+            .map(|raw| HWND(raw as *mut core::ffi::c_void))
+            .filter(|candidate| focus_target_belongs_to(*candidate, editor, host))
+            .unwrap_or(host);
+        hand_focus(target, editor)
     }
 }
 
-/// 宿主顶层窗口：编辑器 HWND 的根。
+/// 宿主窗口：编辑器 HWND 所属的、真正处理用户快捷键的那个窗口。
 ///
-/// 拿不到、拿到自己 —— 都不投递（前者是桥接进程，后者说明视图还没挂进宿主窗口树）。
-fn host_root(editor: HWND) -> Result<HWND, EscapeError> {
+/// 【为什么不是 `GA_ROOT`】插件视图的父窗口在多数宿主里**本身就是顶层窗口**
+/// （REAPER 的 FX 链窗口、VEGAS 的插件浮窗都是）。`GA_ROOT` 会停在那里，于是
+/// 「把键盘交给宿主」把焦点交给了一个不翻译快捷键的窗口 —— 用户按 Space 依旧没反应，
+/// 而功能看起来"完全没生效"。
+///
+/// `GA_ROOTOWNER` 会沿 **owner 链**继续向上，拿到真正的主窗口。取不到时才退回
+/// `GA_ROOT`；两者都拿不到、或拿到的就是编辑器自己（视图还没挂进宿主窗口树），
+/// 则如实失败。
+fn host_window(editor: HWND) -> Result<HWND, EscapeError> {
     // SAFETY: 纯查询，返回本线程窗口树里的祖先句柄。
-    let root = unsafe { GetAncestor(editor, GA_ROOT) };
-    if root.0.is_null() || root == editor {
+    let owner = unsafe { GetAncestor(editor, GA_ROOTOWNER) };
+    let host = if owner.0.is_null() || owner == editor {
+        // SAFETY: 同上。
+        unsafe { GetAncestor(editor, GA_ROOT) }
+    } else {
+        owner
+    };
+    if host.0.is_null() || host == editor {
         return Err(EscapeError::NoHostWindow);
     }
-    Ok(root)
+    Ok(host)
+}
+
+/// 记下来的"上一个焦点窗口"还能不能当目标。
+///
+/// 判据只有三条：还活着、不在我们的子树里、与宿主主窗口同属一棵 owner 树。
+/// 少任何一条都可能把焦点交给一个已销毁或与我们无关的窗口 —— 那比不交还更糟。
+fn focus_target_belongs_to(candidate: HWND, editor: HWND, host: HWND) -> bool {
+    // SAFETY: 全部是纯查询。
+    unsafe {
+        if !IsWindow(Some(candidate)).as_bool() {
+            return false;
+        }
+        if candidate == editor || IsChild(editor, candidate).as_bool() {
+            return false;
+        }
+        let candidate_root = GetAncestor(candidate, GA_ROOTOWNER);
+        candidate_root == host || GetAncestor(candidate, GA_ROOT) == host
+    }
+}
+
+/// 把焦点交给 `target`，并在返回前**验证**它真的落到了宿主侧。
+///
+/// 【为什么需要 `AttachThreadInput`】`SetFocus` 只对调用线程自己的窗口队列生效。
+/// 宿主主窗口与插件视图可能不属于同一条线程（桥接形态尤其如此），直接调用会
+/// 返回失败而焦点纹丝不动。临时挂到目标线程的输入队列上，是这个 API 的标准用法，
+/// 成功后必须立刻解挂 —— 挂着会让两条线程共享输入状态。
+///
+/// 【为什么要 `SetForegroundWindow`】焦点不能落到一个不在前台的窗口上；宿主在
+/// 后台时这一步会被系统拒绝，但那不是错误：目标窗口本身就是前台的宿主主窗口时，
+/// 它只是返回假，随后的 `SetFocus` 仍然成立。
+fn hand_focus(target: HWND, editor: HWND) -> Result<(), EscapeError> {
+    // SAFETY: 全部是 Win32 的纯查询 / 焦点操作，句柄来自本进程的窗口树。
+    unsafe {
+        let current = GetCurrentThreadId();
+        let target_thread = GetWindowThreadProcessId(target, None);
+        let attached = target_thread != 0
+            && target_thread != current
+            && AttachThreadInput(current, target_thread, true).as_bool();
+        let _ = SetForegroundWindow(target);
+        let result = SetFocus(Some(target));
+        if attached {
+            let _ = AttachThreadInput(current, target_thread, false);
+        }
+        let focused = GetFocus();
+        let landed = !focused.0.is_null()
+            && focused != editor
+            && !IsChild(editor, focused).as_bool()
+            && (focused == target || IsChild(target, focused).as_bool());
+        if landed {
+            return Ok(());
+        }
+        // 失败时把 Win32 的错误留在结构化的原因里，而不是只回一个布尔。
+        result.map(|_| ()).map_err(|_| EscapeError::PostFailed)?;
+        Err(EscapeError::PostFailed)
+    }
 }
 
 /// 一个要投递的键：虚拟键码 + 扫描码 + 是否扩展键。
@@ -248,6 +312,26 @@ mod tests {
             escape.escape(0, &bare(KeyToken::Space)),
             Err(EscapeError::NoHostWindow)
         );
+    }
+
+    /// **不变量：拿不到宿主窗口时，交还必须失败而不是假装成功。**
+    ///
+    /// 【为什么钉死】"把键盘交给宿主"唯一的失败形态就是**什么都没发生**。若这里
+    /// 返回 `Ok`，调用方会告诉用户"已交还"，而焦点其实还在插件里 —— 那正是本次
+    /// 报障的原始体验。
+    #[test]
+    fn an_empty_window_handle_is_refused_instead_of_reported_as_handed_back() {
+        let mut escape = WindowsEscape;
+        assert_eq!(escape.focus_host(0, None), Err(EscapeError::NoHostWindow));
+    }
+
+    /// 记下来的"上一个焦点窗口"若已销毁，绝不能被当成目标。
+    #[test]
+    fn a_dead_previous_focus_target_is_never_used() {
+        let dead = HWND(std::ptr::null_mut());
+        let editor = HWND(std::ptr::null_mut());
+        let host = HWND(std::ptr::null_mut());
+        assert!(!focus_target_belongs_to(dead, editor, host));
     }
 
     /// 带修饰的键在原生侧同样被拒 —— 不能假定调用方守规矩。

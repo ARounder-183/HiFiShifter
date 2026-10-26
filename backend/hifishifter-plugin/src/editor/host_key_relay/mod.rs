@@ -146,7 +146,10 @@ pub(crate) trait HostKeyEscape {
     ///
     /// 【为什么与 `escape` 同一个 trait】两者都是"把键盘还给宿主"，只是彻底程度不同；
     /// 分开成两个 trait 会让"这个平台支持到哪一步"变成两个各自演化的答案。
-    fn focus_host(&mut self, window: usize) -> Result<(), EscapeError>;
+    /// `previous` = 焦点离开本编辑器之前**最后一个拿到焦点的宿主窗口**（见
+    /// `EditorClient::previous_focus`）。原语优先还给它 —— "回到原处"比"跳到某个
+    /// 祖先窗口"更符合用户对"交还"的预期，也更容易让宿主的快捷键表命中。
+    fn focus_host(&mut self, window: usize, previous: Option<usize>) -> Result<(), EscapeError>;
 }
 
 /// 本平台的原语。

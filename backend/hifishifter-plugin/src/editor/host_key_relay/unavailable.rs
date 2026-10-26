@@ -34,7 +34,7 @@ impl HostKeyEscape for UnavailableEscape {
         Err(EscapeError::NoHostWindow)
     }
 
-    fn focus_host(&mut self, _window: usize) -> Result<(), EscapeError> {
+    fn focus_host(&mut self, _window: usize, _previous: Option<usize>) -> Result<(), EscapeError> {
         // 连"宿主窗口在哪"都不知道，就没有焦点可交还。
         Err(EscapeError::NoHostWindow)
     }

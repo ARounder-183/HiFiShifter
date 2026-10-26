@@ -148,6 +148,12 @@ pub(crate) struct EditorClient {
     pub(crate) closed: bool,
     /// 本视图的平台句柄，原样交给文件对话框与让路原语。
     pub(crate) window: NativeWindow,
+    /// 焦点离开本编辑器之前，**最后一个**拿到焦点的宿主窗口（0 = 还不知道）。
+    ///
+    /// 【为什么需要它】"把键盘交给宿主"要把焦点还到**原来的地方**，而不是随便哪个祖先
+    /// 窗口。`WM_KILLFOCUS` 的 `wParam` 正是"即将获得焦点"的那个窗口 —— 我们在那一刻
+    /// 记下它，交还时优先还给它（见 `host_key_relay`）。
+    pub(crate) previous_focus: usize,
     /// 出站端口。`None` = 平台还没把原生视图接上。
     port: Option<Rc<dyn EditorPort>>,
     /// 页面是否已就绪（导航完成）。未就绪时出站消息只入队。
@@ -396,6 +402,7 @@ impl EditorClient {
             events,
             closed: false,
             window: 0,
+            previous_focus: 0,
             port: None,
             ready: false,
             opened_at: std::time::Instant::now(),
@@ -427,6 +434,11 @@ impl EditorClient {
     /// 平台句柄（文件对话框与让路原语要用）。
     pub(crate) fn set_window(&mut self, window: NativeWindow) {
         self.window = window;
+    }
+
+    /// 记下"焦点正要交给谁"（窗口过程在 `WM_KILLFOCUS` 里调用）。
+    pub(crate) fn note_previous_focus(&mut self, window: usize) {
+        self.previous_focus = window;
     }
 
     pub(crate) fn is_dead(&self) -> bool {
@@ -1871,10 +1883,21 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
         // 窗口）。当投递不灵时，用户至少需要一条一定能生效的路 —— 代价是焦点真的
         // 走了，之后要点击插件才能回来。所以它不做默认，只做显式菜单项。
         Some("host_key_focus")=>{
-            let result={let mut state=state.borrow_mut();let window=state.window;state.escape.focus_host(window)};
+            let (window, previous)={let state=state.borrow();(state.window, state.previous_focus)};
+            let previous=if previous==0 {None} else {Some(previous)};
+            let result={let mut state=state.borrow_mut();state.escape.focus_host(window, previous)};
             Ok(match result {
-                Ok(())=>{log_relay("fidelity=focus handed the keyboard back to the host");serde_json::json!({"ok":true})},
-                Err(error)=>serde_json::json!({"ok":false,"reason":error.as_str()}),
+                Ok(())=>{
+                    log_relay("fidelity=focus handed the keyboard back to the host");
+                    serde_json::json!({"ok":true})
+                }
+                Err(error)=>{
+                    // 【为什么升到 Warn】这个功能此前失败时**完全静默**（菜单项把
+                    // `ok:false` 吞掉了），于是"交还了但宿主不认"与"根本没执行"
+                    // 在用户那里无法区分 —— 那正是"似乎根本不起作用"的由来。
+                    log::warn!("[relay] keyboard handback failed: {}", error.as_str());
+                    serde_json::json!({"ok":false,"reason":error.as_str()})
+                }
             })
         }
         Some("host_key_escape_set")=>{

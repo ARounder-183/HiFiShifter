@@ -178,6 +178,8 @@ import {
     publishHostKeyEscapeSet,
     relayHostKey,
     subscribeHostKeyRelayNotice,
+    HOST_KEY_FOCUS_RESULT_EVENT,
+    type HostKeyFocusOutcome,
     type HostKeyStroke,
 } from "./services/hostKeyRelay";
 import { subscribeEditorRouteNotice } from "./services/editorRoute";
@@ -3411,6 +3413,34 @@ function AppInner() {
         return subscribeEditorRouteNotice(() => {
             showNotice(t("editor_route_unavailable"), 8000, "warning");
         });
+    }, [showNotice, t]);
+
+    /*
+     * 「把键盘交给宿主」的结果。
+     *
+     * 【为什么必须回报】这个菜单项此前把成功与失败都吞成同一个"什么都没发生"：
+     * 用户点了、焦点没走、界面也不说话。而它失败的两种原因（找不到宿主窗口 /
+     * 系统拒绝换焦点）指向**完全不同**的下一步，所以原因要原样告诉用户。
+     */
+    useEffect(() => {
+        if (!isPluginMode()) return;
+        const onResult = (event: Event) => {
+            const detail = (event as CustomEvent<HostKeyFocusOutcome>).detail;
+            if (!detail) return;
+            if (detail.ok) {
+                showNotice(t("host_key_focus_ok"), 2000, "success");
+                return;
+            }
+            const key =
+                detail.reason === "no-host-window"
+                    ? "host_key_focus_failed_no_host_window"
+                    : detail.reason === "unavailable"
+                      ? "host_key_focus_failed_unavailable"
+                      : "host_key_focus_failed_post_failed";
+            showNotice(t(key), 6000, "warning");
+        };
+        window.addEventListener(HOST_KEY_FOCUS_RESULT_EVENT, onResult);
+        return () => window.removeEventListener(HOST_KEY_FOCUS_RESULT_EVENT, onResult);
     }, [showNotice, t]);
 
     /*
