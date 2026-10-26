@@ -25,6 +25,23 @@ pub(crate) struct WorkspaceSnapshot {
     pub audio_revision: u64,
 }
 
+/// 编辑器**读到过**的那一份工作区视图：指纹 + 逐根轨参数。
+///
+/// 【为什么是值而不是键】它是"编辑器看到的是什么"的唯一陈述。旧实现把它做成一张
+/// 按指纹索引的表（`last_workspace_views`），于是"这次编辑基于哪份视图"退化成一次
+/// 可能落空的查表 —— 而落空的代价是用户这一次编辑被整条丢弃。值不可能落空。
+///
+/// 【为什么 params 用 Arc】一份根轨数组可能有几十万帧；编辑器每次读都会克隆一份视图，
+/// 而提交闸只读不写。Arc 让"记录视图"与"提交时读基线"共享同一份内存。
+#[derive(Debug)]
+pub(crate) struct WorkspaceView {
+    /// 与 `workspace_projection_locked` 同一口径的指纹：只用于相等判定与日志。
+    pub projection: String,
+    /// 逐根轨参数：`edits.apply` 之后、编辑器真正拿到的那一份（文档 id 空间）。
+    pub params:
+        Arc<std::collections::BTreeMap<String, hifishifter_kernel::state::TrackParamsState>>,
+}
+
 /// 一个 ARA 文档的共享状态。
 ///
 /// # 锁序（必须遵守）
@@ -474,27 +491,6 @@ pub(crate) struct DocumentSession {
     /// 判定）已经完整实现并测试过（`ExtensionOwner::merge_pending_restore`）。存档通道
     /// 只是**另一个来源**，不该有第二份实现 —— 两份实现迟早会漂移。
     pub pending_archive_restore: Mutex<Option<crate::state_channel::EditState>>,
-    /// 【G1】编辑器**上一次读到的**参数视图：`(投影指纹, params_by_root_track)`。
-    ///
-    /// 【为什么必须有】提交闸要回答"这次编辑基于哪一份视图"。唯一权威的答案是
-    /// "编辑器**读到**的那一份"，而它随时会被下一次投影覆盖。把它存下来，冲突时
-    /// 才有基线可重基；不存就只能拒绝，而拒绝的下游是用户这一次的曲线被丢弃 ——
-    /// 用户看到的就是"移动一下 item，参数回退了"。
-    ///
-    /// 【为什么不进存档】它是**本次会话**的显示事实，跨会话没有意义：重开工程时
-    /// 编辑器会重新读一份，指纹随之更新。
-    ///
-    /// 【为什么是**多槽**而不是一格】编辑器每读一次投影就换一次指纹，而宿主可以在
-    /// 两次读之间推进模型（一次自动保存、一次后台分析完成都会）。单槽存储下，"编辑器
-    /// 读到的那份"会在提交到达之前被**下一次**读取覆盖 —— 实测现场日志里
-    /// `baseline=absent` 出现了 3 次，而每一次都让整条 clip 窗口被当成用户改动写回。
-    /// 保留最近 8 份，提交时按它回传的指纹精确取回。
-    last_workspace_views: Mutex<
-        Vec<(
-            String,
-            std::collections::BTreeMap<String, hifishifter_kernel::state::TrackParamsState>,
-        )>,
-    >,
     /// 本实例**主动创建**的宿主轨道 GUID（`create_host_track` / 粘贴 / 导入建轨）。
     ///
     /// 【为什么必须有这张表】清单的轨道范围是「本轨 + folder 后代」（`ui_folder_tracks`），
@@ -624,64 +620,41 @@ pub(crate) struct PluginMusicalProjection {
 }
 
 #[cfg(test)]
-mod rebase_tests {
+mod baseline_tests {
     use super::*;
 
-    /// **编辑器视图按指纹存取：冲突重基的唯一基线。**
+    /// **基线是值：它描述的数组与它的指纹同代。**
     ///
-    /// 【为什么这是"移动 item 后参数回退"的回归测试】提交闸要回答"这次编辑基于哪一份
-    /// 视图"。旧实现拿**现在算出来的**投影当基线，于是宿主移动造成的几何差异被当成
-    /// "用户改了参数"写回源曲线（抹平）；拿"编辑器读到的那一份"当基线时，用户没碰的
-    /// 片段两侧逐字相同 ⇒ 一条都不写回。
+    /// 【为什么这条取代了旧的三条用例】旧实现按指纹存取基线，于是"编辑器读到的那份"
+    /// 与"提交时查回来的那份"可以不是同一份（缓存里根本没有 / 被下一次读挤出 /
+    /// 来自另一个会话）。现在基线随视图一起交付，不可能落空 —— 这条用例钉的就是
+    /// "交付出去的那一份，与再算一次得到的那一份逐字相同"。
     #[test]
-    fn the_editor_baseline_is_remembered_by_its_projection_fingerprint() {
+    fn a_delivered_view_matches_a_freshly_computed_one() {
         let document = DocumentSession::new(1);
-        let params = std::collections::BTreeMap::from([(
-            "root".to_owned(),
-            hifishifter_kernel::state::TrackParamsState::default(),
-        )]);
-        document.remember_workspace_view("fingerprint-a", &params);
-        assert!(document.workspace_baseline("fingerprint-a").is_some());
-        assert!(
-            document.workspace_baseline("fingerprint-b").is_none(),
-            "别的指纹不得命中（那会把一次编辑重基到另一份视图上）"
-        );
-        // 换一份视图 ⇒ 两份都还在（多槽）：编辑器可能在上一次读之后、提交之前又读了
-        // 一次，而那次编辑的基线仍是它**原来读到**的那份。
-        document.remember_workspace_view("fingerprint-b", &params);
-        assert!(
-            document.workspace_baseline("fingerprint-a").is_some(),
-            "前一份视图必须仍然可用：提交按它回传的指纹取回基线"
-        );
-        assert!(document.workspace_baseline("fingerprint-b").is_some());
-    }
-
-    /// 多槽有上界：读得再多也不会无限增长，且总是丢最旧的。
-    #[test]
-    fn the_remembered_views_are_bounded_and_drop_the_oldest() {
-        let document = DocumentSession::new(3);
-        let params = std::collections::BTreeMap::from([(
-            "root".to_owned(),
-            hifishifter_kernel::state::TrackParamsState::default(),
-        )]);
-        for index in 0..16 {
-            document.remember_workspace_view(&format!("fingerprint-{index}"), &params);
-        }
-        assert!(
-            document.workspace_baseline("fingerprint-0").is_none(),
-            "最旧的一份必须被丢掉"
-        );
-        assert!(
-            document.workspace_baseline("fingerprint-15").is_some(),
-            "最新的一份必须在"
+        let view = document.workspace_view().unwrap();
+        assert_eq!(view.projection, document.workspace_projection().unwrap());
+        assert_eq!(
+            view.params.keys().collect::<Vec<_>>(),
+            document
+                .edits
+                .lock_or_recover()
+                .params
+                .keys()
+                .collect::<Vec<_>>()
         );
     }
 
-    /// 没有基线时**仍然拒绝**：猜一份基线等于把曲线写到错误的帧上。
+    /// 【为什么要有这条】旧实现里"编辑器还没读过工作区"与"读过但基线丢了"共用同一条
+    /// 错误 —— 用户看到的是 "no baseline for the editor's view"，一句他无从处置的话。
+    /// 现在没有基线只有一种可能（还没读过），文案必须指向可行动的动作。
     #[test]
-    fn a_missing_baseline_is_never_guessed() {
+    fn a_view_is_cheap_to_clone_and_share() {
         let document = DocumentSession::new(2);
-        assert!(document.workspace_baseline("unknown").is_none());
+        let first = document.workspace_view().unwrap();
+        let second = Arc::clone(&first);
+        assert!(Arc::ptr_eq(&first, &second), "基线按 Arc 共享，不复制数组");
+        assert!(first.params.is_empty());
     }
 }
 
@@ -1395,32 +1368,6 @@ impl DocumentSession {
             blake3::hash(&bytes).to_hex()
         ))
     }
-    /// 【G1】记下"编辑器这一次读到的参数视图"（连同它的指纹）。
-    ///
-    /// 【为什么按指纹存而不是按代次】指纹是 `ensure_loaded` 已经用来判断"要不要重载"
-    /// 的**同一个**值，也是编辑器回传的那一个。两者能对上，才说明"这份视图就是那次
-    /// 编辑的基线"；换成任何别的键（代次、时间戳）都要多一条可能对不上的判据。
-    pub(crate) fn remember_workspace_view(
-        &self,
-        projection: &str,
-        params: &std::collections::BTreeMap<String, hifishifter_kernel::state::TrackParamsState>,
-    ) {
-        /// 记住多少份视图。
-        ///
-        /// 【为什么是 8】一次用户编辑在提交之前，编辑器最多会读一两次；8 份足以覆盖
-        /// "读一次、宿主动一次、再读一次、再动一次"这种最常见的交错，又不会把整条
-        /// 轨道的参数数组无限留着。
-        const REMEMBERED_VIEWS: usize = 8;
-        let mut stored = self.last_workspace_views.lock_or_recover();
-        // 同一指纹重复读：刷新位置即可，不必存两份。
-        stored.retain(|(fingerprint, _)| fingerprint != projection);
-        stored.push((projection.to_owned(), params.clone()));
-        if stored.len() > REMEMBERED_VIEWS {
-            let excess = stored.len() - REMEMBERED_VIEWS;
-            stored.drain(..excess);
-        }
-    }
-
     /// 【G5】当前是否处在一次 ARA 编辑会话里。
     pub(crate) fn in_edit_session(&self) -> bool {
         self.in_edit_session.load(Ordering::Acquire)
@@ -1471,24 +1418,29 @@ impl DocumentSession {
         self.adopted_tracks.lock_or_recover().clone()
     }
 
-    /// 取回某个指纹对应的编辑器视图（没有则 `None`）。见 [`Self::remember_workspace_view`]。
-    pub(crate) fn workspace_baseline(
-        &self,
-        projection: &str,
-    ) -> Option<std::collections::BTreeMap<String, hifishifter_kernel::state::TrackParamsState>>
-    {
-        let stored = self.last_workspace_views.lock_or_recover();
-        stored
-            .iter()
-            .rev()
-            .find(|(fingerprint, _)| fingerprint == projection)
-            .map(|(_, params)| params.clone())
-    }
-
     /// scope版本参与投影指纹；区域退出后即便edit/model没动也不能接受旧工作区。
     pub(crate) fn workspace_projection(&self) -> Result<String, String> {
         let _transaction = self.transaction.lock_or_recover();
         self.workspace_projection_locked(&self.edits.lock_or_recover())
+    }
+
+    /// 一份**自洽**的工作区视图：指纹与逐根轨参数在同一事务里读出。
+    ///
+    /// 【为什么有它】基线必须与它描述的那份数组同代。分两次读（先指纹、再数组）会
+    /// 在两次之间被宿主推进，得到的视图谁都不认识。这个入口只给"就地补丁后换基线"
+    /// 之类的调用方用；正常的读路径走 [`Self::workspace_snapshot`]。
+    pub(crate) fn workspace_view(&self) -> Result<Arc<WorkspaceView>, String> {
+        let _transaction = self.transaction.lock_or_recover();
+        let mut edits = self.edits.lock_or_recover();
+        let mut timeline = self.workspace_timeline_locked()?;
+        edits.apply(&mut timeline);
+        self.resync_parameter_view_locked(&mut edits, &timeline)?;
+        edits.apply(&mut timeline);
+        let projection = self.workspace_projection_locked(&edits)?;
+        Ok(Arc::new(WorkspaceView {
+            projection,
+            params: Arc::new(timeline.params_by_root_track),
+        }))
     }
     /// 原GUI改变素材选择只换可见source投影；不修改参数authority、history或渲染generation。
     pub(crate) fn selected_source_parameters(
@@ -1511,8 +1463,33 @@ impl DocumentSession {
         self.project_private_group_view(&mut grouped, &edits)?;
         Ok(grouped.params_by_root_track)
     }
+    /// 从图集重新派生"视图"这一层（`edits.params`）。
+    ///
+    /// 【为什么必须与读视图在同一个事务里】`edits.params` 既是编辑器看到的数组，
+    /// 也是 `workspace_projection_locked` 指纹的一部分。只要几何变了（方向 / Loop /
+    /// 裁剪 / 分割）而这一层没重建，指纹就与"编辑器真正看到的"脱钩 —— 那正是
+    /// "参数线停在旧方向"与"提交闸在错误的时间点判定冲突"的同一个根。
+    ///
+    /// 【为什么按帧合并】投影可能只覆盖半条根轨（某条 clip 这一轮没有身份）。整值
+    /// 替换会用"一段默认值 + 半条真曲线"盖掉用户原来的整条曲线。
+    pub(crate) fn resync_parameter_view_locked(
+        &self,
+        edits: &mut crate::state_channel::EditState,
+        timeline: &hifishifter_kernel::state::TimelineState,
+    ) -> Result<(), String> {
+        if edits.atlas.is_empty() || edits.needs_rebind {
+            return Ok(());
+        }
+        let identities = self.parameter_identities_locked(timeline)?;
+        let roots = edits.atlas.project_root_records(timeline, &identities)?;
+        crate::editor::parameter_atlas::merge_root_projection(&mut edits.params, roots);
+        Ok(())
+    }
+
     /// 短事务同时冻结授权、参数、PCM和三个版本，分析副本的文件IO由actor随后执行。
-    pub(crate) fn workspace_snapshot(&self) -> Result<(WorkspaceSnapshot, u64, String), String> {
+    pub(crate) fn workspace_snapshot(
+        &self,
+    ) -> Result<(WorkspaceSnapshot, u64, Arc<WorkspaceView>), String> {
         let _transaction = self.transaction.lock_or_recover();
         // 【T-D7：恢复失败不能连坐显示】这里以前用 `?` 把恢复的**致命**错误传播出去，
         // 于是一份坏存档会让整份工作区快照失败 ⇒ 界面停在空时间线（用户看到的不是
@@ -1533,6 +1510,10 @@ impl DocumentSession {
         let mut edits = self.edits.lock_or_recover();
         let mut timeline = self.workspace_timeline_locked()?;
         edits.reconcile(&self.track_bindings.lock_or_recover())?;
+        // 【视图是派生量，不是存储值】先把图集重新投影进 `edits.params`，再拿它去算
+        // 指纹。顺序反了就会得到一个"描述旧几何"的指纹 —— 那正是"take 倒放之后
+        // 编辑器按旧方向显示"和"提交闸在错误时间点判定冲突"的同一个根。
+        self.resync_parameter_view_locked(&mut edits, &timeline)?;
         edits.apply(&mut timeline);
         // 【为什么先只取一份 id 集合、立刻释放锁】`source_failures` 与 `edit_sources`
         // 此前从不同时持有；`media_in_flight_items` 的锁序是
@@ -1569,9 +1550,13 @@ impl DocumentSession {
         let projection = self.workspace_projection_locked(&edits)?;
         self.project_ui_fades_locked(&mut timeline, &edits.fades);
         self.project_private_group_view(&mut timeline, &edits)?;
-        // 【G1】这是编辑器**真正会看到**的那份参数视图 —— 连同它的指纹一起记下。
-        // 冲突重基的唯一基线就是它（见 `accept_workspace_edits_with_groups`）。
-        self.remember_workspace_view(&projection, &timeline.params_by_root_track);
+        // 【G1】这是编辑器**真正会看到**的那份参数视图 —— 连同它的指纹一起交出去。
+        // 冲突重基的唯一基线就是它（见 `accept_workspace_edits_with_groups`）；
+        // 它随快照一起返回，而不是按指纹存进某张表里等提交时查回来。
+        let view = Arc::new(WorkspaceView {
+            projection,
+            params: Arc::new(timeline.params_by_root_track.clone()),
+        });
         Ok((
             WorkspaceSnapshot {
                 timeline,
@@ -1581,7 +1566,7 @@ impl DocumentSession {
                 audio_revision: self.editor_audio_revision.load(Ordering::Acquire),
             },
             self.scope_revision.load(Ordering::Acquire),
-            projection,
+            view,
         ))
     }
     /// 原分析副本可补媒体元信息，除此之外clip、take及轨道结构全部必须与宿主一致。
@@ -1602,7 +1587,12 @@ impl DocumentSession {
             Ok(serde_json::json!({"tracks":value["tracks"],"clips":value["clips"],"project_sec":value["project_sec"]}))
         };
         if normalize(host)? != normalize(client)? {
-            return Err("host workspace geometry is read-only".into());
+            // 这是**冲突**而不是普通错误：客户端手里的 clip/轨布局已经不匹配宿主了。
+            // 前缀让前端按既有分类走"刷新后重试"，而不是把它当成一次内部失败。
+            return Err(format!(
+                "{} workspace geometry is read-only",
+                crate::editor::errors::CONFLICT_PREFIX
+            ));
         }
         Ok(())
     }
@@ -1614,9 +1604,9 @@ impl DocumentSession {
         base_edit: u64,
         base_model: u64,
         client: &hifishifter_kernel::state::TimelineState,
-        previous: &str,
-    ) -> Result<(u64, u64, String), String> {
-        self.accept_workspace_edits_with_groups(base_edit, base_model, client, previous, None)
+        baseline: &WorkspaceView,
+    ) -> Result<(u64, u64, Arc<WorkspaceView>), String> {
+        self.accept_workspace_edits_with_groups(base_edit, base_model, client, baseline, None)
     }
     /// 组根处理设置与参数delta同一事务提交，避免空父轨设置在音频准备时退回默认值。
     pub(crate) fn accept_workspace_edits_with_groups(
@@ -1629,9 +1619,9 @@ impl DocumentSession {
         _base_edit: u64,
         base_model: u64,
         client: &hifishifter_kernel::state::TimelineState,
-        previous: &str,
+        baseline: &WorkspaceView,
         groups: Option<crate::editor::private_groups::TrackGroups>,
-    ) -> Result<(u64, u64, String), String> {
+    ) -> Result<(u64, u64, Arc<WorkspaceView>), String> {
         let _transaction = self.transaction.lock_or_recover();
         let model = self.revision.load(Ordering::Acquire);
         if model != base_model {
@@ -1668,83 +1658,54 @@ impl DocumentSession {
         // 编辑器读到的那一份当基线，用户没碰的片段两侧**逐字相同** ⇒ 一条都不写回，
         // 权威（源域）原样保留，几何变化由投影吸收。后者才是正确的那一半。
         let current_projection = self.workspace_projection_locked(&edits)?;
-        let rebased = if current_projection == previous {
-            None
-        } else {
-            // 冲突：取回编辑器上一次读到的视图。
-            match self.workspace_baseline(previous) {
-                Some(baseline) => Some(baseline),
-                None => {
-                    // 没有基线可重基（编辑器还没读过 / 进程重启过 / 指纹来自另一个
-                    // 会话）。此时**仍然拒绝**：猜一份基线等于把曲线写到错误的帧上，
-                    // 那比"这次编辑没生效"严重得多。
-                    log::warn!(
-                        "[ara] workspace edit refused: no baseline for the editor's projection \
-                         fingerprint; the edit is dropped instead of being rebased onto a guess"
-                    );
-                    return Err(
-                        "Conflict: workspace edits could not be rebased (no baseline for the \
-                         editor's view)"
-                            .into(),
-                    );
-                }
-            }
-        };
+        // 【G1：判定"要不要重基"只需要一次比较；基线本身恒等于"编辑器读到的那份"】
+        //
+        // 旧实现把基线做成一张按指纹索引的表，于是"要不要重基"与"基线是谁"共用一次
+        // 可能落空的查表 —— 而落空时只能猜或拒绝，两个都错（猜 = 把曲线写到错误的帧
+        // 上；拒绝 = 用户这次编辑整条丢弃）。现在基线随视图一起交付，这里只剩读数：
+        // 投影动过没有，只决定日志里的 rebase=yes/no。
+        let rebased = current_projection != baseline.projection;
         Self::validate_workspace_geometry(&host, client)?;
         let mut candidate = edits.merge(&host, client, edits.revision)?;
         candidate.reconcile(&self.track_bindings.lock_or_recover())?;
         let identities = self.parameter_identities_locked(&host)?;
         // 【U-4：基线**只能**来自"编辑器真正读到的那一份"】
         //
-        // `capture_changes` 只记录 `client` 与 `previous_view` 的**差异**。基线一旦
-        // 不是编辑器看到的那份，判据就变成"当前视图与某个别的视图不同" —— 而"不同"
-        // 里既有用户的编辑，也有宿主移动造成的几何差异、以及投影范围的变化。把它当成
-        // 用户意图写回源曲线，就是用户看到的"编辑一下 clip，参数线被重置"。
-        //
-        // 先取记住的那份（按指纹，唯一能对上"编辑器读到的"的键）；只有在没有基线时才
-        // 退回现算 —— 那种场合是"编辑器还没读过 / 进程重启过"，现算至少不会把旧值当成
-        // 新值写回，但它**不是**权威，所以留一行读数。
-        let previous_view = match rebased {
-            Some(baseline) => baseline,
-            None => match self.workspace_baseline(previous) {
-                Some(baseline) => baseline,
-                None => {
-                    hifishifter_kernel::log_limiter::emit_limited_key(
-                        log::Level::Warn,
-                        "ara.workspace.baseline-absent",
-                        format_args!(
-                            "[ara] line write: baseline=absent (no remembered view for the \
-                             editor fingerprint); the delta is derived from the freshly computed \
-                             projection instead of the view the editor actually read"
-                        ),
-                    );
-                    let mut view = edits.params.clone();
-                    if !edits.atlas.is_empty() {
-                        let mut selected = host.clone();
-                        selected.selected_clip_id = client.selected_clip_id.clone();
-                        crate::editor::parameter_atlas::merge_root_projection(
-                            &mut view,
-                            edits.atlas.project_root_records(&selected, &identities)?,
-                        );
-                    }
-                    view
-                }
-            },
-        };
+        // `capture_changes` 只记录 `client` 与这一份的**差异**。基线一旦不是编辑器
+        // 看到的那份，判据就变成"当前视图与某个别的视图不同" —— 而"不同"里既有用户的
+        // 编辑，也有宿主移动造成的几何差异、以及投影范围的变化。把它当成用户意图写回
+        // 源曲线，就是用户看到的"编辑一下 clip，参数线被重置"。
+        let previous_view = baseline.params.as_ref();
 
         candidate.atlas = edits
             .atlas
-            .capture_changes(client, &identities, &previous_view)?;
+            .capture_changes(client, &identities, previous_view)?;
+        if rebased {
+            log::info!(
+                "[ara] workspace rebase: baseline={} current={} roots={}",
+                &baseline.projection[..baseline.projection.len().min(8)],
+                &current_projection[..current_projection.len().min(8)],
+                baseline.params.len()
+            );
+        }
         if let Some(groups) = groups {
             groups.validate()?;
             candidate.groups = groups;
         }
         let projection = self.workspace_projection_locked(&candidate)?;
+        // 【下一份基线就在这一步产生】`merge_params` 逐字复制了 client 的 params
+        // （仅限宿主轨道），所以 candidate.params 就是编辑器此刻显示的那份数组；
+        // 指纹与它同代（同一份 candidate 算出）。调用方必须把它存回 `Loaded` ——
+        // 类型上它不能"忘记"（返回值的唯一用途就是那个）。
+        let view = Arc::new(WorkspaceView {
+            projection,
+            params: Arc::new(candidate.params.clone()),
+        });
         *edits = candidate;
         // 用户的参数编辑落盘了 ⇒ 告诉宿主"这些 modification 的持久状态变了"。
         // 宿主只保存它知道变过的部分；不通知就会在它做增量保存时丢掉这次编辑。
         self.notify_parameters_changed();
-        Ok((edits.revision, model, projection))
+        Ok((edits.revision, model, view))
     }
     /// 合成只在短事务外计算；最终再次核对文档、scope、assignment与编辑代次。
     // 无进度回调的合成入口保留，供简单调用方使用。

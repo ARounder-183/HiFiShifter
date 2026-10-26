@@ -768,14 +768,14 @@ pub(super) fn dispatch(
         "get_timeline_inventory" => {
             // 媒体写入回执只取结构，不为显示新GUID先物化整份宿主PCM或跑分析。
             if let Some(document) = session.document() {
-                session.refresh_ui_geometry(&document);
+                session.refresh_ui_geometry(&document, true);
             }
             return payload(session, false);
         }
         "select_track" | "select_clip" => {
             // 选择已确认的GUI对象不必等PCM；新粘贴片段先选中，再由后台补音频/波形。
             if let Some(document) = session.document() {
-                session.refresh_ui_geometry(&document);
+                session.refresh_ui_geometry(&document, true);
             }
             if command == "select_track" {
                 let id = input["trackId"].as_str().ok_or("trackId missing")?;

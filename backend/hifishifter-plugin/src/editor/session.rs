@@ -258,7 +258,11 @@ struct Loaded {
     model: u64,
     scope: u64,
     audio: u64,
-    projection: String,
+    /// 编辑器**读到过**的那一份工作区视图（指纹 + 逐根轨参数）。
+    ///
+    /// 【为什么是 Option】None = 这份会话还没读过工作区。提交闸据此给出可行动的话，
+    /// 而不是把"没读过"与"读过了但基线丢了"混成同一句 no baseline。
+    view: Option<Arc<crate::render::document::WorkspaceView>>,
     reverse_paths: HashMap<String, String>,
 }
 /// 本会话的**时间线/参数从哪里来**。
@@ -509,9 +513,10 @@ impl EditorSession {
         self.checkpoint_timeline(&before, HistoryOp::MoveTrack);
         *self.timeline.lock_or_recover() = candidate;
         {
+            let view = document.workspace_view()?;
             let mut loaded = self.loaded.lock_or_recover();
             loaded.edit = revision;
-            loaded.projection = document.workspace_projection()?;
+            loaded.view = Some(view);
         }
         self.mark_dirty();
         self.render_requested.store(true, Ordering::Release);
@@ -1305,7 +1310,15 @@ impl EditorSession {
         }
         let (edit, model, projection) = {
             let loaded = self.loaded.lock_or_recover();
-            (loaded.edit, loaded.model, loaded.projection.clone())
+            (
+                loaded.edit,
+                loaded.model,
+                loaded
+                    .view
+                    .as_ref()
+                    .map(|view| view.projection.clone())
+                    .unwrap_or_default(),
+            )
         };
         let document = self.require_document()?;
         Ok((document, edit, model, projection))
@@ -1625,7 +1638,7 @@ impl EditorSession {
             return Err("Conflict: no active renderer; local curves preserved".into());
         }
         if self.loaded.lock_or_recover().initialized {
-            self.refresh_ui_geometry(&document);
+            self.refresh_ui_geometry(&document, false);
         }
         let versions = document.editor_versions()?;
         {
@@ -1644,7 +1657,11 @@ impl EditorSession {
                 && loaded.scope == versions.2
                 && audio_current
                 && !force
-                && document.workspace_projection()? == loaded.projection
+                && loaded.view.as_ref().is_some_and(|view| {
+                    document
+                        .workspace_projection()
+                        .is_ok_and(|now| now == view.projection)
+                })
             {
                 loaded.edit = versions.0;
                 return Ok(());
@@ -1716,7 +1733,7 @@ impl EditorSession {
                 }
             }
         }
-        let (snapshot, scope, projection) = document.workspace_snapshot()?;
+        let (snapshot, scope, view) = document.workspace_snapshot()?;
         let mut timeline = snapshot.timeline;
         // 快照冻结take权威；先重建扁平投影，再判断真实的倒放/组合倍率。
         for clip in &mut timeline.clips {
@@ -1817,7 +1834,7 @@ impl EditorSession {
             scope,
             audio: snapshot.audio_revision,
             reverse_paths,
-            projection,
+            view: Some(view),
         };
         *self.error.lock_or_recover() = None;
         *self.render_error.lock_or_recover() = None;
@@ -1995,7 +2012,8 @@ impl EditorSession {
             scope: version,
             audio: version,
             reverse_paths,
-            projection: format!("capture:{version}"),
+            // Capture 没有宿主图集，也就没有"编辑基线"这回事（提交不走 accept 闸）。
+            view: None,
         };
         *self.error.lock_or_recover() = None;
         *self.render_error.lock_or_recover() = None;
@@ -2012,7 +2030,10 @@ impl EditorSession {
     }
 
     /// 清单结构与普通fade独立同步；ARA未ready时也通知新增/删除，不清空曲线、选择或历史。
-    pub(super) fn refresh_ui_geometry(&self, document: &DocumentSession) {
+    /// `adopt_view` 只在 `refresh_host` 这条路径上为真：那里补丁之后需要立刻换一份
+    /// 基线。`ensure_loaded` 内部那次调用传 false —— 它的末尾会用快照自己的视图覆盖，
+    /// 重复取一次只是白做一次投影。
+    pub(super) fn refresh_ui_geometry(&self, document: &DocumentSession, adopt_view: bool) {
         let version = document.ui_geometry_revision.load(Ordering::Acquire);
         if version == self.ui_geometry_version.load(Ordering::Acquire) {
             return;
@@ -2056,6 +2077,22 @@ impl EditorSession {
                 .store(timeline.project_sec.to_bits(), Ordering::Release);
         }
         self.ui_geometry_version.store(version, Ordering::Release);
+        // 【take 事实也是几何】清单改写了 clip 的方向 / Loop / 窗口 ⇒ 图集几何变了 ⇒
+        // 视图（`edits.params`）必须重建，基线必须跟着换。否则下一次提交会拿
+        // "旧方向下的数组"当基线 —— 那正是"改完倒放再改参数，线整体错位"的形状。
+        if adopt_view {
+            if let (Ok(view), Ok(versions)) =
+                (document.workspace_view(), document.editor_versions())
+            {
+                let mut loaded = self.loaded.lock_or_recover();
+                if loaded.initialized {
+                    loaded.view = Some(view);
+                    loaded.edit = versions.0;
+                    loaded.model = versions.1;
+                    loaded.scope = versions.2;
+                }
+            }
+        }
         self.notify_timeline();
     }
     /// 稳定模型变化在后台自动读取；pending曲线遇到真实冲突保留，不静默强制重载。
@@ -2108,7 +2145,7 @@ impl EditorSession {
             return;
         }
         *self.initial_retry_at.lock_or_recover() = None;
-        self.refresh_ui_geometry(&document);
+        self.refresh_ui_geometry(&document, true);
         // 原生媒体写入的短Undo窗口先回执GUI结构；音频物化留给写入收尾后的后台加载。
         if !document.host_undo.pending.load(Ordering::Acquire)
             && (document.editor_audio_revision.load(Ordering::Acquire) != audio
@@ -2828,21 +2865,27 @@ impl ParamHost for EditorSession {
                     )?)
                 };
             let timeline = self.native_timeline(timeline)?;
-            let (edit, model, projection) = {
+            let (edit, model, baseline) = {
                 let loaded = self.loaded.lock_or_recover();
-                (loaded.edit, loaded.model, loaded.projection.clone())
+                (loaded.edit, loaded.model, loaded.view.clone())
             };
-            let versions = document.accept_workspace_edits_with_groups(
-                edit,
-                model,
-                &timeline,
-                &projection,
-                groups,
-            )?;
+            // 【没有基线只有一种可能】这份会话还没读过工作区（窗口刚建、首帧还没到）。
+            // 那不是"冲突"，是一句可行动的话：重新打开窗口即可。
+            let Some(baseline) = baseline else {
+                return Err(
+                    "Conflict: the editor has not read the workspace yet; reopen the plugin \
+                     window"
+                        .into(),
+                );
+            };
+            let versions = document
+                .accept_workspace_edits_with_groups(edit, model, &timeline, &baseline, groups)?;
             let mut loaded = self.loaded.lock_or_recover();
             loaded.edit = versions.0;
             loaded.model = versions.1;
-            loaded.projection = versions.2;
+            // 【成对写】accept 返回的就是"编辑器此刻显示的视图"的下一份基线；
+            // 不存它，下一次提交的基线就落后一代（旧实现正是在这里把指针推离缓存）。
+            loaded.view = Some(versions.2);
             *self.error.lock_or_recover() = None;
             Ok::<_, String>(())
         })();
@@ -4853,7 +4896,7 @@ pub(crate) mod tests {
         let (model, owners, _ids) = workspace_fixture();
         let document = model.session();
         let host = document.workspace_timeline().unwrap();
-        let previous = document.workspace_projection().unwrap();
+        let baseline = document.workspace_view().unwrap();
         let version = document.revision.load(Ordering::Acquire);
         for changed in 0..5 {
             let mut client = host.clone();
@@ -4869,7 +4912,7 @@ pub(crate) mod tests {
                 _ => client.clips[0].takes[0].playback_rate = 2.,
             }
             assert!(document
-                .accept_workspace_edits(0, version, &client, &previous)
+                .accept_workspace_edits(0, version, &client, &baseline)
                 .is_err());
             assert_eq!(
                 document.edits.lock_or_recover().revision,
@@ -4881,7 +4924,7 @@ pub(crate) mod tests {
         assert_eq!(document.revision.load(Ordering::Acquire), version);
         assert!(
             document
-                .accept_workspace_edits(0, version, &host, &previous)
+                .accept_workspace_edits(0, version, &host, &baseline)
                 .unwrap_err()
                 .starts_with("Conflict"),
             "scope必须独立于model校验"
@@ -4892,7 +4935,7 @@ pub(crate) mod tests {
     fn workspace_accept_rejects_forged_geometry_before_changing_document_edits() {
         let (model, _owners, _ids) = workspace_fixture();
         let document = model.session();
-        let projection = document.workspace_projection().unwrap();
+        let baseline = document.workspace_view().unwrap();
         let mut client = document.workspace_timeline().unwrap();
         client.clips[0].start_sec = 42.;
         assert!(
@@ -4901,7 +4944,7 @@ pub(crate) mod tests {
                     0,
                     document.revision.load(Ordering::Acquire),
                     &client,
-                    &projection
+                    &baseline
                 )
                 .is_err(),
             "宿主几何必须拒绝而不是忽略"

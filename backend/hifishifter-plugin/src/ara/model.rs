@@ -1096,25 +1096,22 @@ impl ModelHandle {
                     if !edits.atlas.is_empty() && !edits.needs_rebind {
                         let projection = (|| {
                             let identities = self.session.parameter_identities_locked(&timeline)?;
-                            let roots = edits.atlas.project_root_records(&timeline, &identities)?;
+                            // 【先换几何，再重建视图】`follow_geometry` 只做查表与派生缓存，
+                            // 真正的"视图"（`edits.params`）由 `resync_parameter_view_locked`
+                            // 重建 —— 两件事收口在同一个入口，避免"模型重算时重建、清单刷新
+                            // 时不重建"的分叉（那正是"分割后参数线停在旧几何"的根）。
                             let followed = edits.atlas.follow_geometry(&timeline, &identities)?;
-                            Ok::<_, String>((roots, followed))
+                            edits.atlas = followed;
+                            self.session
+                                .resync_parameter_view_locked(&mut edits, &timeline)?;
+                            // 无活动region的轨道可能只是mute；保留其曲线，不能当删除清空。
+                            edits
+                                .tracks
+                                .retain(|track| bindings.contains_key(&track.id));
+                            Ok::<_, String>(())
                         })();
                         match projection {
-                            Ok((roots, followed)) => {
-                                // 无活动region的轨道可能只是mute；保留其曲线，不能当删除清空。
-                                // 【G4】按**帧**合并，不整值替换：这一轮投影可能只覆盖了
-                                // 半条根轨（有一条 clip 没查到权威 —— 日志里那种
-                                // `keys=0`），整值替换会把其余帧连同用户曲线一起抹成默认值。
-                                crate::editor::parameter_atlas::merge_root_projection(
-                                    &mut edits.params,
-                                    roots,
-                                );
-                                edits.atlas = followed;
-                                edits
-                                    .tracks
-                                    .retain(|track| bindings.contains_key(&track.id));
-                            }
+                            Ok(()) => {}
                             Err(error) => {
                                 // 【为什么不整份中止】参数投影失败只说明"曲线身份这次没能
                                 // 对齐"，几何与 PCM 都是好的。此前这里 `return`，于是
@@ -2849,13 +2846,13 @@ mod tests {
                 ..Default::default()
             },
         );
-        let projection = document.workspace_projection().unwrap();
+        let baseline = document.workspace_view().unwrap();
         document
             .accept_workspace_edits(
                 0,
                 document.revision.load(Ordering::Acquire),
                 &client,
-                &projection,
+                &baseline,
             )
             .unwrap();
         assert!(!document.edits.lock_or_recover().atlas.is_empty());

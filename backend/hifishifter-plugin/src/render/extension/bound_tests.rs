@@ -232,12 +232,13 @@ fn source_parameter_atlas_state_is_scoped_and_rebound_without_gui() {
             },
         );
     }
+    let baseline = document.workspace_view().unwrap();
     document
         .accept_workspace_edits(
             0,
             document.revision.load(Ordering::Acquire),
             &client,
-            &document.workspace_projection().unwrap(),
+            &baseline,
         )
         .unwrap();
     let saved = owners
@@ -1260,6 +1261,7 @@ fn automatic_apply_releases_the_transaction_and_rechecks_model_and_edit_versions
             })
             .unwrap();
         let projection = document.workspace_projection().unwrap();
+        let baseline = document.workspace_view().unwrap();
         let calls = std::sync::atomic::AtomicUsize::new(0);
         let result = document.apply_workspace_edits(
             0,
@@ -1281,7 +1283,7 @@ fn automatic_apply_releases_the_transaction_and_rechecks_model_and_edit_versions
                                 0,
                                 document.revision.load(Ordering::Acquire),
                                 &timeline,
-                                &projection,
+                                &baseline,
                             )
                             .unwrap();
                     }
