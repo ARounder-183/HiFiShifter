@@ -1014,3 +1014,169 @@ mod owned_message_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod host_handshake_tests {
+    use super::*;
+    use std::sync::atomic::AtomicU32;
+    use std::sync::{Arc, Mutex};
+
+    /// 一个**不实现** `IHostApplication::createInstance` 的宿主。
+    ///
+    /// 【为什么这是关键样本】它正是现场里「界面能开、时间轴全空」的那类宿主：
+    /// 连接点齐全，消息工厂缺席。此前 `send` 会在这里返回 `K_RESULT_FALSE`，
+    /// 于是编辑器永远没有 owner，每条命令都回「FX editor not connected to its
+    /// processor yet」。
+    #[repr(C)]
+    struct FakeHost {
+        vtbl: *const HostVtbl,
+        refs: AtomicU32,
+    }
+
+    /// 宿主放在两个组件之间的代理连接点。
+    #[repr(C)]
+    struct FakePeer {
+        vtbl: *const ConnectionVtbl,
+        refs: AtomicU32,
+        seen: Arc<Mutex<Option<(String, i64)>>>,
+    }
+
+    unsafe extern "system" fn fake_query(
+        _this: *mut c_void,
+        _iid: *const u8,
+        out: *mut *mut c_void,
+    ) -> TResult {
+        if !out.is_null() {
+            // SAFETY: out 是调用方提供的输出槽。
+            unsafe { *out = std::ptr::null_mut() };
+        }
+        K_NO_INTERFACE
+    }
+
+    unsafe extern "system" fn fake_add_ref(_this: *mut c_void) -> u32 {
+        2
+    }
+
+    unsafe extern "system" fn fake_release(_this: *mut c_void) -> u32 {
+        1
+    }
+
+    unsafe extern "system" fn fake_host_name(_this: *mut c_void, _name: *mut u16) -> TResult {
+        K_RESULT_OK
+    }
+
+    /// **这里就是那个兼容性分水岭**：真实宿主在这一格回 `kNotImplemented`。
+    unsafe extern "system" fn fake_host_create(
+        _this: *mut c_void,
+        _cid: *const u8,
+        _iid: *const u8,
+        out: *mut *mut c_void,
+    ) -> TResult {
+        if !out.is_null() {
+            // SAFETY: out 是调用方提供的输出槽。
+            unsafe { *out = std::ptr::null_mut() };
+        }
+        K_NOT_IMPLEMENTED
+    }
+
+    unsafe extern "system" fn fake_connect(_this: *mut c_void, _other: *mut c_void) -> TResult {
+        K_RESULT_OK
+    }
+
+    unsafe extern "system" fn fake_disconnect(_this: *mut c_void, _other: *mut c_void) -> TResult {
+        K_RESULT_OK
+    }
+
+    unsafe extern "system" fn fake_notify(this: *mut c_void, message: *mut c_void) -> TResult {
+        // SAFETY: this 是 FakePeer；message 由 send 构造并在 notify 期间有效。
+        let peer = unsafe { &*(this as *const FakePeer) };
+        match unsafe { read(message) } {
+            Ok(Message::Route { pid, token }) => {
+                *peer.seen.lock().unwrap() = Some((token, pid));
+                K_RESULT_OK
+            }
+            _ => K_RESULT_FALSE,
+        }
+    }
+
+    static FAKE_HOST_VTBL: HostVtbl = HostVtbl {
+        base: UnknownVtbl {
+            query: fake_query,
+            add: fake_add_ref,
+            release: fake_release,
+        },
+        name: fake_host_name,
+        create: fake_host_create,
+    };
+
+    static FAKE_PEER_VTBL: ConnectionVtbl = ConnectionVtbl {
+        base: UnknownVtbl {
+            query: fake_query,
+            add: fake_add_ref,
+            release: fake_release,
+        },
+        connect: fake_connect,
+        disconnect: fake_disconnect,
+        notify: fake_notify,
+    };
+
+    const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    /// **不变量：宿主没有消息工厂时，路由仍然送达。**
+    ///
+    /// 【为什么钉死】这一格是「非 ARA 宿主里编辑器完全不可用」的直接原因。修复之后，
+    /// 整条链路不再依赖宿主的可选能力：我们自带消息对象，宿主只需要实现它本来就必须
+    /// 实现的 `IConnectionPoint`。
+    #[test]
+    fn a_route_is_delivered_even_when_the_host_has_no_message_factory() {
+        let seen = Arc::new(Mutex::new(None));
+        let host = Box::new(FakeHost {
+            vtbl: &FAKE_HOST_VTBL,
+            refs: AtomicU32::new(1),
+        });
+        let peer = Box::new(FakePeer {
+            vtbl: &FAKE_PEER_VTBL,
+            refs: AtomicU32::new(1),
+            seen: Arc::clone(&seen),
+        });
+        let state = ConnectionState::default();
+        // SAFETY: 两个假对象都活到本用例结束；ConnectionState 只持有它们的引用。
+        unsafe {
+            let host_ptr = (&*host as *const FakeHost).cast::<c_void>() as *mut c_void;
+            let peer_ptr = (&*peer as *const FakePeer).cast::<c_void>() as *mut c_void;
+            state.initialize(host_ptr);
+            assert_eq!(state.connect(peer_ptr), K_RESULT_OK);
+            assert_eq!(
+                state.send(Some(TOKEN)),
+                K_RESULT_OK,
+                "宿主没有消息工厂时也必须送得出去"
+            );
+        }
+        let captured = seen
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("代理必须收到一条可读的 Route 消息");
+        assert_eq!(captured.0, TOKEN);
+        assert_eq!(captured.1, std::process::id() as i64);
+    }
+
+    /// **不变量：没有对端时如实失败，而不是假装发过。**
+    ///
+    /// 【为什么钉死】静默返回失败正是这条链路此前最难查的形态：日志里什么都没有，
+    /// 而用户看到的只是「编辑器没连上」。现在它至少有一步明确的拒绝。
+    #[test]
+    fn a_route_without_a_peer_is_refused() {
+        let host = Box::new(FakeHost {
+            vtbl: &FAKE_HOST_VTBL,
+            refs: AtomicU32::new(1),
+        });
+        let state = ConnectionState::default();
+        // SAFETY: 同上。
+        unsafe {
+            let host_ptr = (&*host as *const FakeHost).cast::<c_void>() as *mut c_void;
+            state.initialize(host_ptr);
+            assert_eq!(state.send(Some(TOKEN)), K_RESULT_FALSE);
+        }
+    }
+}
