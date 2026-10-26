@@ -188,7 +188,7 @@ pub(crate) fn open(
 
     let identity = manifest.link_id.clone();
     let revisions = manifest.revisions;
-    inner.replace(LinkSession {
+    let session = LinkSession {
         workspace,
         identity,
         manifest,
@@ -196,7 +196,9 @@ pub(crate) fn open(
         project_baseline,
         report: prepared.report,
         _mark: mark,
-    });
+    };
+    let session_payload_open = session_payload(&session);
+    inner.replace(session);
     let roots: Vec<_> = state
         .timeline
         .lock()
@@ -215,7 +217,7 @@ pub(crate) fn open(
         .unwrap_or_else(|e| e.into_inner())
         .to_payload();
     payload.project = Some(state.project_meta_payload());
-    let mut result = session_payload(inner.as_ref().unwrap());
+    let mut result = session_payload_open;
     result["timeline"] = serde_json::to_value(payload).map_err(|e| e.to_string())?;
     log::info!(
         "[host-link] opened {} clips / {} tracks (revisions {:?})",
@@ -347,8 +349,27 @@ fn merge_report(into: &mut SanitizeReport, extra: SanitizeReport) {
 pub(crate) fn submit(app: &tauri::AppHandle) -> Result<serde_json::Value, String> {
     let state = app.state::<AppState>();
     let bridge = app.state::<LinkBridge>();
-    let mut inner = bridge.lock();
-    let session = inner.as_mut().ok_or("no host workspace is open")?;
+    //
+    // 【为什么分三段持锁】旧实现把 bridge 锁横跨 write_edit + 20×100ms 状态轮询
+    // （最长 2 秒）持有 —— 并发的 refresh / release 全被串到 2 秒后。锁内只取
+    // 构建编辑所需字段；文件 IO 与轮询放锁外；最后短暂拿锁把回执落进会话。
+    let (identity, base_revisions, host_geometry, root, project_baseline_before) = {
+        let inner = bridge.lock();
+        let session = inner.as_ref().ok_or("no host workspace is open")?;
+        if !session
+            .manifest
+            .grants(hifishifter_host_link::Capability::Commit)
+        {
+            return Err("this host does not accept edits".into());
+        }
+        (
+            session.identity.clone(),
+            session.manifest.revisions,
+            session.host_geometry.clone(),
+            session.workspace.root().to_path_buf(),
+            session.project_baseline.clone(),
+        )
+    };
     let version = state.timeline_version.load(Ordering::Acquire);
     let (params, tracks) = {
         let timeline = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
@@ -358,30 +379,28 @@ pub(crate) fn submit(app: &tauri::AppHandle) -> Result<serde_json::Value, String
             serde_json::to_value(&timeline.tracks).map_err(|error| error.to_string())?,
         )
     };
-    if !session
-        .manifest
-        .grants(hifishifter_host_link::Capability::Commit)
-    {
-        return Err("this host does not accept edits".into());
-    }
     let edit = hifishifter_host_link::EditManifest {
         format: EDIT_FORMAT.into(),
         format_version: FORMAT_VERSION,
-        link_id: session.identity.clone(),
-        base_revisions: session.manifest.revisions,
-        host_geometry: session.host_geometry.clone(),
+        link_id: identity,
+        base_revisions,
+        host_geometry,
         params,
         tracks,
     };
-    // 记下提交前的状态，用来判断"回答是不是针对这一次提交的"。
-    let before = session.workspace.read_status();
-    let before_stamp = before.as_ref().map(|status| status.updated_unix_ms);
-    session.workspace.write_edit(&edit)?;
+    // 锁外的文件 IO：记录提交前状态（判断"回答是不是针对这一次提交的"），
+    // 写编辑，再短暂轮询宿主回执。
+    let workspace = hifishifter_host_link::Workspace::at(root);
+    let before_stamp = workspace
+        .read_status()
+        .as_ref()
+        .map(|status| status.updated_unix_ms);
+    workspace.write_edit(&edit)?;
 
     let mut status = None;
     for _ in 0..20 {
         std::thread::sleep(std::time::Duration::from_millis(100));
-        let current = session.workspace.read_status();
+        let current = workspace.read_status();
         let changed = current
             .as_ref()
             .is_some_and(|status| Some(status.updated_unix_ms) != before_stamp);
@@ -398,15 +417,23 @@ pub(crate) fn submit(app: &tauri::AppHandle) -> Result<serde_json::Value, String
         let timeline = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
         serde_json::to_value(&timeline.params_by_root_track).map_err(|e| e.to_string())?
     };
-    if status.as_ref().is_some_and(|status| status.ok)
+    let accepted = status.as_ref().is_some_and(|status| status.ok);
+    if accepted
         && state.timeline_version.load(Ordering::Acquire) == version
-        && project_baseline == session.project_baseline
+        && project_baseline == project_baseline_before
         && params_sent == edit.params
     {
         // 只有"送出去的就是现在的"才清 dirty（与旧实现同一条纪律：
         // 不能依赖撤销版本，必须在时间轴锁内确认）。
         let mut project = state.project.lock().unwrap_or_else(|e| e.into_inner());
         project.dirty = false;
+    }
+    // 回执落账必须确认会话没有被并发的 refresh/release 换掉：identity 一致
+    // 才把新代次写回（否则就是把旧会话的回执记到新会话头上）。
+    let mut inner = bridge.lock();
+    let session = inner.as_mut().ok_or("no host workspace is open")?;
+    if session.identity != edit.link_id {
+        return Err("host workspace changed while submitting".into());
     }
     if let Some(status) = status.as_ref().filter(|status| status.ok) {
         session.manifest.revisions = status.revisions;

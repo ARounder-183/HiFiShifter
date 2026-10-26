@@ -1286,25 +1286,10 @@ pub async fn import_audio_item(
         )
     })
     .await
-    .unwrap_or_else(|error| crate::models::TimelineStatePayload {
-        ok: false,
-        tracks: Vec::new(),
-        clips: Vec::new(),
-        created_clip_ids: Some(Vec::new()),
-        created_track_ids: None,
-        selected_track_id: None,
-        selected_clip_id: None,
-        bpm: 120.0,
-        playhead_sec: 0.0,
-        project_sec: None,
-        project: None,
-        missing_files: Some(vec![format!("import task failed: {error}")]),
-        disabled_group_ids: Vec::new(),
-        tempo_map: None,
-        undo_depth: None,
-        redo_depth: None,
-        notes_markdown: None,
-        param_selection_restore: None,
+    .unwrap_or_else(|error| {
+        // join 失败负载统一走 timeline_error_payload（created_clip_ids 等字段
+        // 的取值此前与它不一致：None vs Some(vec![]) 两套并存）。
+        crate::commands::common::timeline_error_payload(&format!("import task failed: {error}"))
     });
     // 同步判定对**容器**素材用的是一个很短的解码预算（导入不能卡住命令线程），
     // 长文件因此只拿到"未定论"。这里补一轮完整预算的后台扫描把它收敛掉 ——
@@ -1327,25 +1312,10 @@ pub async fn import_audio_bytes(
         timeline::import_audio_bytes(state, file_name, base64_data, track_id, start_sec)
     })
     .await
-    .unwrap_or_else(|error| crate::models::TimelineStatePayload {
-        ok: false,
-        tracks: Vec::new(),
-        clips: Vec::new(),
-        created_clip_ids: Some(Vec::new()),
-        created_track_ids: None,
-        selected_track_id: None,
-        selected_clip_id: None,
-        bpm: 120.0,
-        playhead_sec: 0.0,
-        project_sec: None,
-        project: None,
-        missing_files: Some(vec![format!("import task failed: {error}")]),
-        disabled_group_ids: Vec::new(),
-        tempo_map: None,
-        undo_depth: None,
-        redo_depth: None,
-        notes_markdown: None,
-        param_selection_restore: None,
+    .unwrap_or_else(|error| {
+        // join 失败负载统一走 timeline_error_payload（created_clip_ids 等字段
+        // 的取值此前与它不一致：None vs Some(vec![]) 两套并存）。
+        crate::commands::common::timeline_error_payload(&format!("import task failed: {error}"))
     });
     // 同 `import_audio_item`：把同步判定的短预算结论交给完整预算的后台扫描收敛。
     crate::commands::channel_scan::request_channel_scan(&scan_handle);
@@ -1555,25 +1525,10 @@ pub async fn add_clip(
         timeline::add_clip(state, track_id, name, start_sec, length_sec, source_path)
     })
     .await
-    .unwrap_or_else(|error| crate::models::TimelineStatePayload {
-        ok: false,
-        tracks: Vec::new(),
-        clips: Vec::new(),
-        created_clip_ids: Some(Vec::new()),
-        created_track_ids: None,
-        selected_track_id: None,
-        selected_clip_id: None,
-        bpm: 120.0,
-        playhead_sec: 0.0,
-        project_sec: None,
-        project: None,
-        missing_files: Some(vec![format!("add clip task failed: {error}")]),
-        disabled_group_ids: Vec::new(),
-        tempo_map: None,
-        undo_depth: None,
-        redo_depth: None,
-        notes_markdown: None,
-        param_selection_restore: None,
+    .unwrap_or_else(|error| {
+        // join 失败负载统一走 timeline_error_payload（created_clip_ids 等字段
+        // 的取值此前与它不一致：None vs Some(vec![]) 两套并存）。
+        crate::commands::common::timeline_error_payload(&format!("add clip task failed: {error}"))
     });
     // 判定用的是短容器预算，长素材只拿到"待定"：补一轮完整预算的后台扫描收敛。
     crate::commands::channel_scan::request_channel_scan(&scan_handle);
@@ -1593,25 +1548,12 @@ pub async fn create_clips_bulk(
         timeline::create_clips_bulk(state, payload)
     })
     .await
-    .unwrap_or_else(|error| crate::models::TimelineStatePayload {
-        ok: false,
-        tracks: Vec::new(),
-        clips: Vec::new(),
-        created_clip_ids: Some(Vec::new()),
-        created_track_ids: None,
-        selected_track_id: None,
-        selected_clip_id: None,
-        bpm: 120.0,
-        playhead_sec: 0.0,
-        project_sec: None,
-        project: None,
-        missing_files: Some(vec![format!("create clips task failed: {error}")]),
-        disabled_group_ids: Vec::new(),
-        tempo_map: None,
-        undo_depth: None,
-        redo_depth: None,
-        notes_markdown: None,
-        param_selection_restore: None,
+    .unwrap_or_else(|error| {
+        // join 失败负载统一走 timeline_error_payload（created_clip_ids 等字段
+        // 的取值此前与它不一致：None vs Some(vec![]) 两套并存）。
+        crate::commands::common::timeline_error_payload(&format!(
+            "create clips task failed: {error}"
+        ))
     });
     crate::commands::channel_scan::request_channel_scan(&scan_handle);
     payload
@@ -2019,25 +1961,10 @@ pub async fn add_clip_take_from_media(
         timeline::add_clip_take_from_media(state, clip_id, source_path, name, checkpoint)
     })
     .await
-    .unwrap_or_else(|error| crate::models::TimelineStatePayload {
-        ok: false,
-        tracks: Vec::new(),
-        clips: Vec::new(),
-        created_clip_ids: Some(Vec::new()),
-        created_track_ids: None,
-        selected_track_id: None,
-        selected_clip_id: None,
-        bpm: 120.0,
-        playhead_sec: 0.0,
-        project_sec: None,
-        project: None,
-        missing_files: Some(vec![format!("add take task failed: {error}")]),
-        disabled_group_ids: Vec::new(),
-        tempo_map: None,
-        undo_depth: None,
-        redo_depth: None,
-        notes_markdown: None,
-        param_selection_restore: None,
+    .unwrap_or_else(|error| {
+        // join 失败负载统一走 timeline_error_payload（created_clip_ids 等字段
+        // 的取值此前与它不一致：None vs Some(vec![]) 两套并存）。
+        crate::commands::common::timeline_error_payload(&format!("add take task failed: {error}"))
     });
     crate::commands::channel_scan::request_channel_scan(&scan_handle);
     payload
@@ -2058,25 +1985,12 @@ pub async fn import_media_files_as_takes(
         timeline::import_media_files_as_takes(state, paths, track_id, start_sec)
     })
     .await
-    .unwrap_or_else(|error| crate::models::TimelineStatePayload {
-        ok: false,
-        tracks: Vec::new(),
-        clips: Vec::new(),
-        created_clip_ids: Some(Vec::new()),
-        created_track_ids: None,
-        selected_track_id: None,
-        selected_clip_id: None,
-        bpm: 120.0,
-        playhead_sec: 0.0,
-        project_sec: None,
-        project: None,
-        missing_files: Some(vec![format!("import media files task failed: {error}")]),
-        disabled_group_ids: Vec::new(),
-        tempo_map: None,
-        undo_depth: None,
-        redo_depth: None,
-        notes_markdown: None,
-        param_selection_restore: None,
+    .unwrap_or_else(|error| {
+        // join 失败负载统一走 timeline_error_payload（created_clip_ids 等字段
+        // 的取值此前与它不一致：None vs Some(vec![]) 两套并存）。
+        crate::commands::common::timeline_error_payload(&format!(
+            "import media files task failed: {error}"
+        ))
     });
     // 同 `import_audio_item`：容器素材的同步判定用的是短解码预算，长文件只拿到
     // "未定论"，这里补一轮完整预算的后台扫描把它收敛掉。

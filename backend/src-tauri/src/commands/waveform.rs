@@ -77,9 +77,9 @@ pub(super) fn get_waveform_mipmap_binary(
     }
 }
 
-/// 棰勫姞杞芥墍鏈夌骇鍒殑 mipmap 鏁版嵁锛堥煶棰戝姞杞芥椂璋冪敤锛?
+/// 预加载所有级别的 mipmap 数据（音频加载时调用）。
 ///
-/// 瑙﹀彂 mipmap 璁＄畻骞剁紦瀛樺埌鍐呭瓨 + 纾佺洏锛岄伩鍏嶉娆℃覆鏌撴椂鐨勫欢杩熴€?
+/// 触发 mipmap 计算并缓存到内存 + 磁盘，避免首次渲染时的延迟。
 pub(super) fn preload_waveform_mipmap(
     state: State<'_, AppState>,
     source_path: String,

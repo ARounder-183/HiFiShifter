@@ -159,7 +159,13 @@ pub(super) fn ui_kv_put(
 ) -> std::collections::BTreeMap<String, String> {
     match prefs_dir(&state) {
         Some(dir) => crate::config::save_frontend_prefs(&dir, &patch),
-        None => patch,
+        // 【为什么与 dump/delete 同口径】配置目录缺失时返回**空表**：调用方
+        // （前端）把返回值当作"当前生效的偏好表"—— 回传入参 patch 会让它
+        // 误以为写入成功且已有值。存不下就是存不下，如实返回空并留痕。
+        None => {
+            log::warn!("ui_kv_put: config dir unavailable; prefs not persisted");
+            Default::default()
+        }
     }
 }
 

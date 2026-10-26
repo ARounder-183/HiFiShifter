@@ -262,7 +262,8 @@ fn root_pitch_assembly_pending(
 
 pub(super) fn play_original(state: State<'_, AppState>, start_sec: f64) -> serde_json::Value {
     guard_json_command("play_original", || {
-        log::warn!("[play_original] called start_sec={start_sec}");
+        // 常规路径打点：Info 级（release 默认 Warn，warn 会把每次播放都写进日志轮转）。
+        log::info!("[play_original] called start_sec={start_sec}");
         // 在同一把锁的作用域内克隆时间线：分离读取时，并发 checkpoint
         // （先解锁后 bump 版本）会让旧 timeline 配上新版本号。
         let timeline = match state.timeline.lock() {
@@ -579,7 +580,9 @@ fn render_single_clip(
     // `HIFISHIFTER_DEBUG_COMMANDS=1` 下；异常慢的 clip 另有
     // `[bg_render] clip N/M was slow` 告警兜底（见 `SLOW_CLIP_WARN_THRESHOLD`）。
     let stage_started = std::time::Instant::now();
-    log::warn!(
+    // 【为什么是 Info】每个渲染 clip 一行：按默认 Warn 级这会把用户日志轮转
+    // 塞满常规进度打点。慢块告警（SLOW_CLIP_WARN_THRESHOLD）另有 warn 兜底。
+    log::info!(
         "[render] stage=begin clip_id={} rate={:.6} len_sec={:.3}",
         clip.id,
         clip.playback_rate,
@@ -1503,7 +1506,7 @@ fn start_background_render_inner(
         return serde_json::json!({"ok": true, "rendered": 0});
     }
 
-    log::warn!(
+    log::info!(
         "[bg_render] starting background render: {} clips, engine_sr={}, timeline_version={} ({} already done, {} not pitch-ready)",
         total,
         sr,

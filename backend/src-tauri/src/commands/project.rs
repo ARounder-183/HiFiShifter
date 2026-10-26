@@ -1039,7 +1039,7 @@ pub(super) fn open_project(
 
     // 打开工程时清除所有渲染缓存，确保旧的预渲染结果不会影响新的播放。
     // 这是修复"音高分析未完成时播放导致音高编辑不生效"问题的关键步骤。
-    log::warn!("[open_project] Clearing all render caches before loading project...");
+    log::info!("[open_project] Clearing all render caches before loading project...");
     // 音高分析缓存：按源文件内容签名索引，跨工程没有语义，且单条可达数 MB。
     // 同时递增分析代次，让仍在为旧工程跑的分析线程放弃结果（否则它们会在
     // 切换之后往全局缓存里写入一条新工程永远不可达、也无人清理的条目）。
