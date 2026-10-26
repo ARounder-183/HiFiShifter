@@ -1874,7 +1874,13 @@ function snapshotTakeValue(value: unknown): unknown {
     // 抛 "Cannot perform 'get' on a proxy that has been revoked"。
     // 这里做一次脱壳拷贝（take 快照字段均为 JSON 数据）。
     if (value === null || typeof value !== "object") return value;
-    return JSON.parse(JSON.stringify(value)) as unknown;
+    // Immer draft 是 Proxy，structuredClone 会抛 DataCloneError；普通对象则走
+    // structuredClone（比 JSON 往返快，且保留 undefined / Date 等 JSON 会丢的值）。
+    try {
+        return structuredClone(value);
+    } catch {
+        return JSON.parse(JSON.stringify(value)) as unknown;
+    }
 }
 
 function captureTakeRollback(state: SessionState, clipIds: readonly string[]): void {
