@@ -149,15 +149,9 @@ function render({ keys, catalogs }) {
     );
     for (const { entry, catalog } of catalogs) {
         lines.push(`  ; ${entry.locale}`);
-        lines.push(
-            `  StrCpy $0 "$0${nsisEscape(catalog.installer_err_not_x64)}$\\r$\\n"`,
-        );
+        lines.push(`  StrCpy $0 "$0${nsisEscape(catalog.installer_err_not_x64)}$\\r$\\n"`);
     }
-    lines.push(
-        '  MessageBox MB_OK|MB_ICONSTOP "$0"',
-        "!macroend",
-        "",
-    );
+    lines.push('  MessageBox MB_OK|MB_ICONSTOP "$0"', "!macroend", "");
 
     return lines.join("\n");
 }

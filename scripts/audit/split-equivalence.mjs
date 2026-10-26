@@ -52,22 +52,14 @@ const ALLOWED = new Map([
         "export function handleCanvasPointerDown(",
         "函数声明本身在拆分中改名 / 拆成多个导出，声明行不再逐字存在",
     ],
-    [
-        "export function handleSelectPointerDown(",
-        "同上：分支模块的声明行",
-    ],
-    [
-        "export function handleVibratoPointerDown(",
-        "同上：分支模块的声明行",
-    ],
-    [
-        "type CanvasPointerDownDeps = Pick<",
-        "依赖类型在拆分中被拆成每个模块自己的 Pick 子集",
-    ],
+    ["export function handleSelectPointerDown(", "同上：分支模块的声明行"],
+    ["export function handleVibratoPointerDown(", "同上：分支模块的声明行"],
+    ["type CanvasPointerDownDeps = Pick<", "依赖类型在拆分中被拆成每个模块自己的 Pick 子集"],
 ]);
 
 /** 纯结构行：它们随缩进 / 分号位置变化而合理地消失。 */
-const STRUCTURAL = /^(\}|\)|\);|\}\)|\} else \{|else \{|\};|\]\);|\]|return;|\},|\] as const;|\} as const;)$/;
+const STRUCTURAL =
+    /^(\}|\)|\);|\}\)|\} else \{|else \{|\};|\]\);|\]|return;|\},|\] as const;|\} as const;)$/;
 
 /** 注释行：以两个斜杠、星号或斜杠星号开头的行。 */
 const COMMENT = /^(\/\/|\*|\/\*)/;
@@ -118,7 +110,15 @@ function norm(line) {
 function haystackAt(revision) {
     const listing = execFileSync(
         "git",
-        ["-c", "safe.directory=" + process.cwd(), "ls-tree", "-r", "--name-only", revision, "frontend/src"],
+        [
+            "-c",
+            "safe.directory=" + process.cwd(),
+            "ls-tree",
+            "-r",
+            "--name-only",
+            revision,
+            "frontend/src",
+        ],
         { encoding: "utf8", maxBuffer: 1 << 28 },
     );
     const files = listing.split("\n").filter((name) => /\.tsx?$/.test(name));

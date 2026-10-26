@@ -1,0 +1,17 @@
+# 根级 Prettier 只管辖 frontend/ 之外的仓库级脚本与 CI 配置。
+#
+# 【为什么是白名单】frontend/ 有自己的 .prettierrc/.prettierignore 与 npm scripts
+# （`npm run format:check` 口径不变）；本仓也没有根级 package.json，根目录的
+# 其余一切（文档、构建产物、第三方树、模型文件）都不是 JS/TS 源码，交给白名单
+# 比维护一长串黑名单稳。
+#
+# 【为什么排除 CI 的 yml】Prettier 的 YAML 重排会把 GitHub Actions 表达式
+# （`${{ }}`）与多行 run 脚本重排出难以评审的 diff，收益低于风险；
+# workflows 不纳入格式化范围。
+*
+!scripts/
+!scripts/**
+!.github/
+!.github/**
+*.yml
+*.yaml
