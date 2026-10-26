@@ -638,14 +638,6 @@ export const enUS = {
     midi_compose_required_title: "Compose Not Enabled",
     midi_compose_required_message:
         "Compose is not enabled on the root track. Enable it to continue importing the pitch curve?",
-    pitch_backend_unavailable: "Pitch backend unavailable (check WORLD DLL / ONNX model)",
-    pitch_edit_not_modified_hint: "No edit yet: curve matches original pitch",
-    pitch_status_label: "Pitch",
-    pitch_status_off: "Off",
-    pitch_status_pending: "Analyzing...",
-    pitch_status_ready: "Ready",
-    pitch_status_no_edit: "No Edit",
-    pitch_status_unavailable: "Unavailable",
     breath_separation_label: "Harmonic Separation",
     breath_gain_requires_separation: "Turn on Harmonic Separation to edit Breath Gain",
     hifigan_tension_requires_separation: "Turn on Harmonic Separation to edit Tension",
@@ -780,7 +772,6 @@ export const enUS = {
     menu_open_log_folder: "Open Log Folder",
     menu_export_diagnostics: "Export Diagnostics...",
     menu_open_log_folder_failed: "Could not open the log folder",
-    menu_open_log_folder_path: "Logs are in {path}",
     menu_open_log_folder_copy_path: "Copy path",
     menu_open_log_folder_copied: "Copied to clipboard",
     menu_export_diagnostics_failed: "Failed to export diagnostics",
@@ -823,7 +814,6 @@ export const enUS = {
     common_none: "None",
     common_bpm: "BPM",
     common_compose: "Compose",
-    status_na: "—",
     clip_mute: "Mute",
     clip_unmute: "Unmute",
     clip_takes: "Take",
@@ -842,8 +832,6 @@ export const enUS = {
     clip_channel_mode_mono_mix: "Mono (mix)",
     clip_channel_mode_mono_left: "Mono (left)",
     clip_channel_mode_mono_right: "Mono (right)",
-    clip_channel_source_stereo: "Stereo source",
-    clip_channel_source_mono: "Mono source",
     ctx_channel_mode: "Channel Mode",
     ctx_group: "Grouping",
     ctx_scan_fake_stereo: "Scan for Fake Stereo and Convert",
@@ -1482,9 +1470,9 @@ export const enUS = {
     // Tempo Map (tempo / time-signature / scale changes)
     tempo_map: "Tempo Map",
     menu_view_tempo_map: "Tempo Map",
-    editor_route_unavailable:
-        "The host did not connect the editor to its processor, so the timeline cannot load. Please export a diagnostics bundle and report it.",
-    host_key_focus_failed: "Could not hand the keyboard to the host. Click the host window.",
+    editor_route_unavailable: "The editor is not connected to the host.",
+    editor_route_unavailable_hint: "Exporting a diagnostics bundle shows the reason.",
+    host_key_focus_failed: "Could not hand the keyboard to the host.",
     tempo_map_add_point: "Add Tempo / Time Signature / Scale Change Here...",
     tempo_map_add_scale_point: "Add Scale Change Here...",
     tempo_map_edit_point: "Edit This Point...",
@@ -1499,8 +1487,7 @@ export const enUS = {
     tempo_map_scale: "Scale",
     tempo_map_scale_inherit: "Follow Previous Scale",
     tempo_map_bpm_range: "(10-960)",
-    tempo_map_actionbar_tip:
-        "Tempo Map is active: edits apply to the nearest point at or before the playhead",
+    tempo_map_actionbar_tip: "Tempo map is on: edits go to the point before the playhead",
     tempo_map_ts_inherit: "Follow Previous Time Signature",
     tempo_map_tooltip_position: "Position",
     tempo_map_tooltip_bpm: "BPM",
@@ -2126,9 +2113,6 @@ export const enUS = {
     host_link_revisions_label: "Revisions",
     host_link_applied: "Accepted by the host",
     host_link_pending: "Waiting for the host",
-    host_link_error_open: "Could not open the workspace",
-    host_link_error_submit: "Submitting failed",
-    host_link_error_release: "Disconnect failed",
     host_link_submit_blocked: "Submission blocked",
     host_link_submit_blocked_host_fields:
         "These host-owned fields were changed locally, so nothing was submitted. Change them in the host: {fields}",
@@ -2162,7 +2146,6 @@ export const enUS = {
     host_link_last_edit_label: "Last submission",
     host_link_status_json_label: "Status",
     host_link_last_edit_applied: "The host applied your last edits.",
-    host_link_last_edit_failed: "The host could not apply your last edits.",
     host_link_export_error: "Export failed: {error}",
     menu_host_link: "Open Host Workspace...",
     /*
@@ -2220,8 +2203,7 @@ export const enUS = {
         "Clip edits and fade widths sync to the host · the host renders fade audio · Reverse is rendered by HiFiShifter",
     plugin_transport_stop: "Stop playback in the host",
     plugin_transport_play: "Play or pause in the host",
-    plugin_transport_host_only:
-        "The plug-in cannot start the host's transport — pressing play/pause here hands the key to the host. You can also press it in the host.",
+    plugin_transport_host_only: "Playback belongs to the host; play keys are handed to it.",
     plugin_feature_unavailable: "Not available in the VST/ARA plugin yet",
     plugin_reverse_unavailable:
         "Reversing is a host item operation; use the host to reverse this clip",
@@ -2238,53 +2220,21 @@ export const enUS = {
     capture_waiting: "Waiting for the host to play",
     capture_start_hint: "Start capture",
     capture_open_settings: "Open capture settings",
-    panel_capture: "Capture",
     menu_capture: "Capture from Host...",
     capture_status_empty: "Nothing recorded",
     capture_status_standby: "Waiting for playback",
-    capture_field_peak: "Peak",
-    capture_field_peak_value: "{left} / {right}",
-    capture_guide_standby:
-        "Ready. Play the host - recording starts with playback. Stopping the transport only pauses; playing again resumes the same take.",
     capture_limit_warning:
         "Less than 10 seconds until the recording limit; it will stop automatically.",
-    capture_stopped_limit: "The recording limit was reached, so recording stopped automatically.",
-    capture_stopped_no_spare:
-        "The capture fell behind on memory and stopped. Shorten the limit or discard older takes.",
-    capture_stopped_rate_changed: "The host changed its sample rate, so recording stopped.",
-    capture_stopped_budget_full:
-        "The PCM memory budget ran out, so recording stopped. Discard older takes.",
-    capture_stopped_jump: "The playhead jumped; content after that point is not continuous.",
     capture_option_limit: "Recording limit (seconds)",
     capture_option_limit_hint:
         "Recording stops automatically at the limit and keeps what was captured. A larger limit uses more memory.",
     capture_option_limit_seconds: "{seconds} s",
-    capture_option_limit_unlimited: "No limit",
-    capture_output_processed: "Processed",
-    capture_output_raw: "Raw take (synthesising)",
-    capture_output_passthrough: "Host audio",
-    capture_output_pending: "Take ready, waiting for synthesis",
-    capture_output_recording: "Passing the host through",
-    capture_now_playing: "Now hearing: {what}",
     capture_status_recording: "Recording",
     capture_status_ready: "Recorded",
     capture_start: "Record",
     capture_stop: "Stop",
     capture_clear: "Discard all takes",
     capture_cancel_hint: "Discard this recording without keeping a take",
-    capture_guide_body:
-        "Press play in the host, then Record. The plug-in captures what passes through it and lines it up with the host's timeline.",
-    capture_guide_recording:
-        "Recording. Keep the playhead moving and do not seek; press Stop when the part is done. You hear the host's own audio while recording; the processed result comes back when you stop.",
-    capture_guide_ready:
-        "Recorded. Play the host from the recorded range to hear the processed result; record again to replace it.",
-    capture_guide_offline:
-        "This host also renders offline. Offline renders are two passes: arm Record and export once to capture (that pass is silent), then disarm and export again to get the processed result.",
-    capture_host_not_playing: "The host is not playing, so nothing is being recorded.",
-    capture_host_playing: "Host is playing",
-    capture_field_waiting_host: "Waiting for the host to play",
-    capture_recorded_silent:
-        "Captured {seconds}s, but the input was silent — check that this track's audio actually reaches the plug-in.",
     capture_option_monitor: "Monitor the input while recording",
     capture_option_monitor_hint:
         "You hear what is being recorded. Off means silence while recording.",
@@ -2294,26 +2244,14 @@ export const enUS = {
     capture_take_label: "Take {id} · {clips} clips",
     capture_take_span: "{start}s – {end}s",
     capture_take_delete: "Delete",
-    capture_yes: "yes",
-    capture_no: "no",
-    capture_diagnostics:
-        "Host gives: playhead {context} · input audio {input} · offline render {offline}",
     capture_not_applicable_ara: "This host provides audio through ARA, so Capture is not needed.",
     capture_cannot_capture:
         "This host does not give the plug-in a playhead position, so there is nothing to line the audio up with. Use the host's own editing, or a host that supports ARA.",
     capture_no_input_audio:
         "This host gives the plug-in a playhead but no audio on its input bus — put the plug-in on the track whose audio you want, and check that the host routes that track into it.",
-    capture_no_audio_arriving:
-        "The host is playing, but no audio is reaching this instance — check that the plug-in sits on the track you want and that the host routes that track into it.",
-    capture_field_no_audio: "No audio arriving",
     capture_unsupported_precision:
         "This host processes the plug-in at 64-bit sample precision, which the plug-in cannot read yet, so it stays silent. Switch the host's processing precision to 32-bit float.",
-    capture_field_precision: "64-bit host",
-    capture_recording_progress: "Recorded {seconds}s",
     capture_recording_elapsed: "{seconds}s",
-    capture_field_segments: "Segments",
-    capture_field_gaps: "Jumps",
-    capture_field_spares: "Buffers left",
     capture_field_takes: "Takes",
     plugin_apply_analyzing: "Analysing pitch...",
     plugin_apply_analyzing_hint:

@@ -50,13 +50,17 @@ const MenuItem: React.FC<{
     shortcut?: string;
     disabled?: boolean;
     danger?: boolean;
-    /** 悬停 / 禁用原因提示。 */
-    title?: string;
+    /**
+     * 禁用理由：渲染成标签下的第二行。
+     *
+     * 【为什么不是 tooltip】菜单弹出期间项目的气泡通道被全局抑制（见
+     * `docs/i18n/style-guide.md` §3.5），挂在菜单项上的 tooltip 一次都不会显示。
+     */
+    description?: string;
     onClick: () => void;
-}> = ({ label, shortcut, disabled, danger, title, onClick }) => (
+}> = ({ label, shortcut, disabled, danger, description, onClick }) => (
     <button
         role="menuitem"
-        data-tooltip={title}
         disabled={disabled}
         data-danger={danger ? "1" : undefined}
         className="hs-menu__item"
@@ -66,7 +70,12 @@ const MenuItem: React.FC<{
             onClick();
         }}
     >
-        <span className="hs-menu__label-text">{label}</span>
+        <span className="flex min-w-0 flex-col items-start">
+            <span className="hs-menu__label-text">{label}</span>
+            {disabled && description ? (
+                <span className="hs-menu__description">{description}</span>
+            ) : null}
+        </span>
         <span className="hs-menu__trail">{shortcut ? <span>{shortcut}</span> : null}</span>
     </button>
 );
@@ -444,9 +453,16 @@ export const ClipContextMenu: React.FC<{
     const unavailableReason = pluginMode ? t("plugin_feature_unavailable") : undefined;
     /** 倒放有**专有**原因：不是"没做"，而是 ARA 不提供反向 PCM。 */
     const reverseReason = pluginMode ? t("plugin_reverse_unavailable") : undefined;
+    /**
+     * 一个菜单项的可用性与"为什么不可用"。
+     *
+     * 【为什么字段叫 `description` 而不是 `title`/`tooltip`】菜单弹出期间项目的气泡
+     * 通道被全局抑制（见 `docs/i18n/style-guide.md` §3.5），挂在菜单项上的 tooltip
+     * 一次都不会显示。理由必须渲染成正立文本（第二行弱化小字）。
+     */
     const gate = (allowed: boolean, reason?: string) => ({
         disabled: !allowed,
-        ...(allowed ? {} : { title: reason ?? hostReason }),
+        ...(allowed ? {} : { description: reason ?? hostReason }),
     });
 
     // 菜单挂到 `document.body`：弹出面留在布局盒里会被沿途任何一层
@@ -785,7 +801,7 @@ export const ClipContextMenu: React.FC<{
                             <Divider />
                             <MenuItem
                                 label={t("ctx_scan_fake_stereo")}
-                                title={t("ctx_scan_fake_stereo_hint")}
+                                description={t("ctx_scan_fake_stereo_hint")}
                                 {...gate(pluginLocalTools, unavailableReason)}
                                 onClick={() => {
                                     onScanFakeStereo(ids);
@@ -859,7 +875,7 @@ export const ClipContextMenu: React.FC<{
                 //   * 播放头不在这条片段内 / 多选时不是所有片段都能切 ⇒ 用户操作问题，
                 //     用这条规则自己的说明。
                 disabled={!hostSplit || (isMulti ? !canSplitSelected : !playheadInClip)}
-                title={
+                description={
                     !hostSplit
                         ? hostReason
                         : isMulti && !canSplitSelected
@@ -914,7 +930,7 @@ export const ClipContextMenu: React.FC<{
                         <MenuItem
                             label={t("ctx_silence_detection")}
                             disabled={!silenceEligible || !pluginLocalTools}
-                            title={
+                            description={
                                 silenceEligible && pluginLocalTools
                                     ? undefined
                                     : pluginLocalTools
@@ -1016,7 +1032,7 @@ export const ClipContextMenu: React.FC<{
                             <MenuItem
                                 label={t("common_glue")}
                                 disabled={glueDisabled || !hostItemCreate}
-                                title={hostItemCreate ? undefined : hostReason}
+                                description={hostItemCreate ? undefined : hostReason}
                                 onClick={() => {
                                     onGlue(ids);
                                     close();

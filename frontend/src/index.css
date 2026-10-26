@@ -1149,6 +1149,21 @@ textarea {
     white-space: nowrap;
 }
 
+/*
+ * 禁用项的理由（第二行弱化小字）。
+ *
+ * 【为什么是常驻文字而不是 tooltip】菜单弹出期间 `AppTooltipProvider` 全局抑制气泡
+ * （见 docs/i18n/style-guide.md §3.5），所以挂在菜单项上的 tooltip **一次都不会显示** ——
+ * 而"为什么点不了"恰恰是最需要被看见的一句话。第二行多占一行高度，但它真的看得见。
+ * 只在 `disabled` 时渲染：可用项不需要解释。
+ */
+.hs-menu__description {
+    color: var(--qt-text-muted);
+    font-size: var(--qt-fs-xs);
+    line-height: 1.25;
+    white-space: normal;
+}
+
 .hs-menu__trail {
     display: flex;
     flex: none;

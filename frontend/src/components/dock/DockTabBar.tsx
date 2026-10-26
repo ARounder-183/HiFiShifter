@@ -341,7 +341,7 @@ export function DockTabBar({ node, onToggleFloat, compact, tabPosition }: DockTa
                                   // 而失败路径只留一行日志、用户看到的是面板原地不动。
                                   // 保留入口并写明原因，比"点了没反应"或"悄悄消失"都好。
                                   disabled: isPluginMode(),
-                                  tooltip: isPluginMode() ? dawControlledReason() : undefined,
+                                  description: isPluginMode() ? dawControlledReason() : undefined,
                               }
                             : null
                     }

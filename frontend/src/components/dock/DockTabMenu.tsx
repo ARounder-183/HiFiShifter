@@ -37,7 +37,7 @@ export interface DockTabMenuProps {
      * 收回入口由那个窗口自己的标题栏提供）—— 此时不渲染该项，而不是给一个点了
      * 没反应的按钮。
      *
-     * 【为什么还要 `disabled` / `tooltip`】有些"不支持"是**模式级**的：插件里没有
+     * 【为什么还要 `disabled` / `description`】有些"不支持"是**模式级**的：插件里没有
      * Tauri 窗口 API，拆出去必然失败。那时保留入口并写明原因比直接隐藏更有用 ——
      * 用户至少知道"这里本来有这个功能，是当前宿主环境不允许"。
      */
@@ -45,7 +45,8 @@ export interface DockTabMenuProps {
         labelKey: string;
         run: () => void;
         disabled?: boolean;
-        tooltip?: string;
+        /** 禁用理由：渲染成标签下的第二行（菜单里 tooltip 不会显示）。 */
+        description?: string;
     } | null;
 }
 
@@ -80,7 +81,7 @@ export function DockTabMenu({
                             key: "detach",
                             label: tf(detachAction.labelKey),
                             disabled: detachAction.disabled === true,
-                            tooltip: detachAction.tooltip,
+                            description: detachAction.description,
                             onSelect: () => {
                                 detachAction.run();
                                 onClose();

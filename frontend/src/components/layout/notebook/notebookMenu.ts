@@ -130,7 +130,7 @@ export type NotebookMenuActionKey =
 
 export type NotebookMenuActions = Partial<Record<NotebookMenuActionKey, () => void>>;
 
-/** 置灰项：动作键 → 原因（本地化文本，进 `data-tooltip`）。缺省即可用。 */
+/** 置灰项：动作键 → 原因（本地化文本，渲染成菜单项的第二行）。缺省即可用。 */
 export type NotebookMenuDisabled = Partial<Record<NotebookMenuActionKey, string>>;
 
 export interface NotebookMenuContext {
@@ -230,7 +230,7 @@ function makeItem(
         danger: opts.danger,
         checked: opts.checked,
         disabled: reason !== undefined,
-        tooltip: reason,
+        description: reason,
     };
 }
 

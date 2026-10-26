@@ -74,10 +74,16 @@ export interface AppMenuItemSpec {
     /** 条目左侧图标（take 操作、菜单按钮等）。 */
     icon?: ReactNode;
     /**
-     * 悬停 / 禁用原因解释（走项目自定义 tooltip 通道）。收编自
-     * `ClipContextMenu` 的 `title` prop —— "为什么点不了"应当可见。
+     * 禁用理由，渲染成标签下的**第二行弱化小字**。
+     *
+     * 【为什么不是 tooltip】菜单弹出期间项目的气泡通道被全局抑制（见
+     * `docs/i18n/style-guide.md` §3.5），挂在菜单项上的 tooltip 一次都不会显示 ——
+     * 而"为什么点不了"正是最需要被看见的那句话。它曾经叫 `tooltip`，名字对、
+     * 通道错，于是 `dawControlledReason()` 与整族解释**从未被渲染过**。
+     *
+     * 只在 `disabled` 时渲染：可用项不需要解释。
      */
-    tooltip?: string;
+    description?: string;
     /**
      * 分组标题行：渲染为不可选中的小标题（大写弱化色），不参与键盘导航。
      * 收编自 ActionBar 录音菜单的手写分组行 —— 平面菜单也常有分段需求。
@@ -569,22 +575,28 @@ function AppContextMenuItem({
             data-active={active && !item.disabled ? "1" : undefined}
             data-danger={item.danger ? "1" : undefined}
             className="hs-menu__item"
-            data-tooltip={item.tooltip}
             onMouseEnter={onHover}
             onClick={() => {
                 if (item.disabled) return;
                 onSelect();
             }}
         >
-            <span className="flex min-w-0 items-center gap-2">
-                {item.icon ? (
-                    <span className="hs-menu__icon" aria-hidden>
-                        {item.icon}
-                    </span>
-                ) : reserveIcon ? (
-                    <span className="hs-menu__icon" aria-hidden />
+            <span className="flex min-w-0 flex-col items-start">
+                <span className="flex min-w-0 items-center gap-2">
+                    {item.icon ? (
+                        <span className="hs-menu__icon" aria-hidden>
+                            {item.icon}
+                        </span>
+                    ) : reserveIcon ? (
+                        <span className="hs-menu__icon" aria-hidden />
+                    ) : null}
+                    <span className="hs-menu__label-text">{item.label}</span>
+                </span>
+                {/* 【为什么只在 disabled 时】可用项的第二行是噪声；而"点不了"的
+                    理由必须在点之前就能读到（菜单里没有别的通道）。 */}
+                {item.disabled && item.description ? (
+                    <span className="hs-menu__description">{item.description}</span>
                 ) : null}
-                <span className="hs-menu__label-text">{item.label}</span>
             </span>
             <span className="hs-menu__trail">
                 {item.checked ? (

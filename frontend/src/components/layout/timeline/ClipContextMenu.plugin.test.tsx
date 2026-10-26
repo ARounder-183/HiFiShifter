@@ -172,9 +172,16 @@ test("entries the plugin cannot do are disabled with a reason, not hidden", asyn
     await renderMenu(clipWithTakes());
 
     // 倒放：ARA 不给反向 PCM —— 有专有原因，不是"由 REAPER 控制"。
+    //
+    // 【为什么读第二行而不是 `data-tooltip`】菜单弹出期间项目的气泡通道被全局抑制
+    // （见 `docs/i18n/style-guide.md` §3.5），挂在菜单项上的 tooltip 一次都不会显示。
+    // 理由改渲染成标签下的第二行弱化小字，这里断言的就是用户真的能看到的那一段。
     const reverse = entryByLabel(enUS.ctx_reverse);
     expect(reverse.disabled).toBe(true);
-    expect(reverse.dataset.tooltip).toBe(enUS.plugin_reverse_unavailable);
+    expect(reverse.querySelector(".hs-menu__description")?.textContent).toBe(
+        enUS.plugin_reverse_unavailable,
+    );
+    expect(reverse.dataset.tooltip).toBeUndefined();
 
     // Take 子菜单的**内容**要悬停展开才渲染（`AppSubMenu` 懒渲染），所以这里只断言
     // 触发项存在 —— 它的存在本身正是本次修复的重点（此前插件里整块没有）。

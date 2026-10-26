@@ -82,7 +82,7 @@ const SAMPLE: AppMenuItemSpec[] = [
     { key: "copy", label: "Copy", shortcut: "Ctrl+C", onSelect: () => {} },
     { key: "group", label: "Format", heading: true },
     { key: "bold", label: "Bold", onSelect: () => {} },
-    { key: "grey", label: "Cut", disabled: true, tooltip: "Select some text first" },
+    { key: "grey", label: "Cut", disabled: true, description: "Select some text first" },
 ];
 
 test("菜单挂在 document.body 上，不在触发它的容器里", async () => {

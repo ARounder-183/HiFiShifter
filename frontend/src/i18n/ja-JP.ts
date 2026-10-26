@@ -505,15 +505,6 @@ export const jaJP = {
     midi_compose_required_title: "Compose が無効です",
     midi_compose_required_message:
         "ルートトラックで Compose が有効になっていません。有効にしてピッチカーブのインポートを続行しますか？",
-    pitch_backend_unavailable:
-        "ピッチバックエンドが利用不可（WORLD DLL / ONNX モデルを確認してください）",
-    pitch_edit_not_modified_hint: "まだ編集されていません：カーブは元のピッチと同じです",
-    pitch_status_label: "ピッチ",
-    pitch_status_off: "オフ",
-    pitch_status_pending: "分析中...",
-    pitch_status_ready: "準備完了",
-    pitch_status_no_edit: "未編集",
-    pitch_status_unavailable: "利用不可",
     breath_separation_label: "ハーモニック分離",
     breath_gain_requires_separation: "「ハーモニック分離」をオンにするとブレス量を編集できます",
     hifigan_tension_requires_separation:
@@ -651,7 +642,6 @@ export const jaJP = {
     menu_open_log_folder: "ログフォルダーを開く",
     menu_export_diagnostics: "診断情報をエクスポート...",
     menu_open_log_folder_failed: "ログフォルダーを開けませんでした",
-    menu_open_log_folder_path: "ログの場所: {path}",
     menu_open_log_folder_copy_path: "パスをコピー",
     menu_open_log_folder_copied: "クリップボードにコピーしました",
     menu_export_diagnostics_failed: "診断情報のエクスポートに失敗しました",
@@ -694,7 +684,6 @@ export const jaJP = {
     common_none: "なし",
     common_bpm: "BPM",
     common_compose: "コンポーズ",
-    status_na: "—",
     clip_mute: "ミュート",
     clip_unmute: "ミュート解除",
     clip_takes: "テイク",
@@ -713,8 +702,6 @@ export const jaJP = {
     clip_channel_mode_mono_mix: "モノラル（混合）",
     clip_channel_mode_mono_left: "モノラル（左）",
     clip_channel_mode_mono_right: "モノラル（右）",
-    clip_channel_source_stereo: "ステレオソース",
-    clip_channel_source_mono: "モノラルソース",
     ctx_channel_mode: "チャンネルモード",
     ctx_group: "グループ",
     ctx_scan_fake_stereo: "疑似ステレオをスキャンして変換",
@@ -1362,10 +1349,9 @@ export const jaJP = {
     // テンポマップ（テンポ/拍子/スケールの変化）
     tempo_map: "テンポマップ",
     menu_view_tempo_map: "テンポマップ",
-    editor_route_unavailable:
-        "ホストがエディターのハンドシェイクを完了していないため、タイムラインを読み込めません。診断パッケージを書き出して報告してください。",
-    host_key_focus_failed:
-        "キーボードをホストに渡せませんでした。ホストのウィンドウをクリックしてください。",
+    editor_route_unavailable: "エディターがホストに接続されていません",
+    editor_route_unavailable_hint: "診断パッケージを書き出すと原因がわかります",
+    host_key_focus_failed: "キーボードをホストに渡せませんでした",
     tempo_map_add_point: "ここにテンポ/拍子/スケール変更を追加...",
     tempo_map_add_scale_point: "ここにスケール変更を追加...",
     tempo_map_edit_point: "この変更点を編集...",
@@ -2141,9 +2127,6 @@ export const jaJP = {
     host_link_revisions_label: "リビジョン",
     host_link_applied: "ホストが受け付けました",
     host_link_pending: "ホストの受信を待っています",
-    host_link_error_open: "ワークスペースを開けませんでした",
-    host_link_error_submit: "送信に失敗しました",
-    host_link_error_release: "切断に失敗しました",
     host_link_submit_blocked: "送信を拒否しました",
     host_link_submit_blocked_host_fields:
         "ホストが所有する以下のフィールドがローカルで変更されたため、何も送信していません。ホスト側で変更してください：{fields}",
@@ -2179,7 +2162,6 @@ export const jaJP = {
     host_link_last_edit_label: "前回の送信",
     host_link_status_json_label: "状態",
     host_link_last_edit_applied: "ホストが前回の編集を適用しました。",
-    host_link_last_edit_failed: "ホストが前回の編集を適用できませんでした。",
     host_link_export_error: "エクスポートに失敗しました: {error}",
     menu_host_link: "ホストワークスペースを開く...",
     /*
@@ -2239,7 +2221,7 @@ export const jaJP = {
     plugin_transport_stop: "ホストの再生を停止",
     plugin_transport_play: "ホストの再生/一時停止",
     plugin_transport_host_only:
-        "プラグインからホストの再生は開始できません — プラグイン内で再生/一時停止キーを押すとホストに転送されます。ホスト側で押すこともできます。",
+        "再生はホストが制御します。プラグインの再生キーはホストに転送されます。",
     plugin_feature_unavailable: "この機能は VST/ARA プラグインでは未提供です",
     plugin_reverse_unavailable:
         "逆再生はホストのアイテム操作です。ホストでこのクリップを逆再生してください",
@@ -2256,69 +2238,29 @@ export const jaJP = {
     capture_waiting: "ホストの再生を待機中",
     capture_start_hint: "キャプチャを開始",
     capture_open_settings: "キャプチャ設定を開く",
-    panel_capture: "キャプチャ",
     menu_capture: "ホストからキャプチャ...",
     capture_status_empty: "未録音",
     capture_status_standby: "再生待ち",
-    capture_field_peak: "ピーク",
-    capture_field_peak_value: "{left} / {right}",
-    capture_guide_standby:
-        "準備完了。ホストを再生してください —— 再生と同時に録音が始まります。停止は一時停止で、再び再生すると同じテイクの続きを録ります。",
     capture_limit_warning: "録音上限まで残り 10 秒未満です。自動的に停止します。",
-    capture_stopped_limit: "録音上限に達したため自動的に停止しました。",
-    capture_stopped_no_spare:
-        "メモリが追いつかず自動的に停止しました。上限を短くするか古いテイクを消してください。",
-    capture_stopped_rate_changed: "ホストのサンプルレートが変わったため停止しました。",
-    capture_stopped_budget_full:
-        "PCM のメモリ予算を使い切ったため停止しました。古いテイクを消してください。",
-    capture_stopped_jump: "再生位置がジャンプしました。その先の内容は連続していません。",
     capture_option_limit: "1 回の録音上限（秒）",
     capture_option_limit_hint:
         "上限に達すると自動停止し、録れた内容は保持されます。上限が大きいほどメモリを使います。",
     capture_option_limit_seconds: "{seconds} 秒",
-    capture_option_limit_unlimited: "無制限",
-    capture_output_processed: "処理結果",
-    capture_output_raw: "生録音（合成中）",
-    capture_output_passthrough: "ホストの原音",
-    capture_output_pending: "素材は準備済み、合成待ち",
-    capture_output_recording: "ホストをスルー中",
-    capture_now_playing: "再生中: {what}",
     capture_status_recording: "録音中",
     capture_status_ready: "録音済み",
     capture_start: "録音",
     capture_stop: "停止",
     capture_clear: "すべてのテイクを破棄",
     capture_cancel_hint: "この録音を破棄する（テイクを残さない）",
-    capture_guide_body:
-        "ホストで再生を開始してから「録音」を押してください。プラグインは通ってきた音声を取り込み、ホストのタイムラインに合わせます。",
-    capture_guide_recording:
-        "録音中です。再生位置を動かしたりシークしたりしないでください。終わったら「停止」を押します。録音中はホストの原音が聞こえ、停止すると処理結果に戻ります。",
-    capture_guide_ready:
-        "録音できました。録音した範囲からホストを再生すると処理結果が聞こえます。再度録音すると置き換わります。",
-    capture_guide_offline:
-        "このホストはオフライン書き出しにも対応しています。オフラインは二段階です。「録音」を押して一度書き出すと取り込み（この回は無音）、録音を解除してもう一度書き出すと処理結果が得られます。",
-    capture_host_not_playing: "ホストが再生していません。録音されません。",
     capture_not_applicable_ara: "このホストは ARA で音声を提供しています。キャプチャは不要です。",
     capture_cannot_capture:
         "このホストは再生位置をプラグインに渡さないため、音声をタイムラインに合わせられません。ホスト側の編集機能を使うか、ARA 対応のホストをご利用ください。",
     capture_no_input_audio:
         "このホストは再生位置は渡しますが、入力バスに音声を送っていません — 処理したいトラックにプラグインを挿し、そのトラックの音声がプラグインにルーティングされているか確認してください。",
-    capture_no_audio_arriving:
-        "ホストは再生中ですが、このインスタンスには音声が届いていません — プラグインが目的のトラックに挿さっているか、そのトラックがプラグインにルーティングされているか確認してください。",
-    capture_field_no_audio: "音声が届いていません",
     capture_unsupported_precision:
         "このホストはプラグインを 64 ビット精度で処理しています。プラグインはそのサンプルを読めないため無音のままです。ホストの処理精度を 32 ビット浮動小数点に切り替えてください。",
-    capture_field_precision: "ホストが 64 ビット",
-    capture_recording_progress: "録音済み {seconds} 秒",
     capture_recording_elapsed: "{seconds}秒",
-    capture_field_segments: "セグメント数",
-    capture_field_gaps: "ジャンプ回数",
-    capture_field_spares: "残りバッファ",
     capture_field_takes: "テイク数",
-    capture_host_playing: "ホストが再生中",
-    capture_field_waiting_host: "ホストの再生待ち",
-    capture_recorded_silent:
-        "{seconds} 秒録音しましたが、入力が無音でした — このトラックの音声が本当にプラグインに届いているか確認してください。",
     capture_option_monitor: "録音中に入力をモニター",
     capture_option_monitor_hint: "録音中の音が聞こえます。オフにすると録音中は無音になります。",
     capture_option_outside: "録音範囲の外はホストの音声を再生",
@@ -2327,10 +2269,6 @@ export const jaJP = {
     capture_take_label: "テイク {id} · {clips} クリップ",
     capture_take_span: "{start} 秒 – {end} 秒",
     capture_take_delete: "削除",
-    capture_yes: "あり",
-    capture_no: "なし",
-    capture_diagnostics:
-        "ホストが提供：再生位置 {context} · 入力音声 {input} · オフライン書き出し {offline}",
     plugin_apply_analyzing: "ピッチを解析中...",
     plugin_apply_analyzing_hint:
         "この工程は素材の長さに比例して数秒から数分かかります。解析中は生録音を再生します。",

@@ -1393,14 +1393,27 @@ function AppInner() {
      * 为什么被拒"之后，用绿色报告一件**没做成**的事会让用户以为它成了。
      */
     const [noticeTone, setNoticeTone] = useState<AppStatusTone>("success");
+    /**
+     * 提示片的悬停补充（可空）。
+     *
+     * 【为什么需要】状态栏只能放**状态**：一句话带指令的长句在那里会被父级的
+     * `truncate` 从中间裁掉（状态片是 `shrink-0`，不参与收缩）。于是"是什么"留在
+     * 片子里，"下一步怎么做"放进 `data-tooltip` —— 那是本项目唯一会如实换行、且
+     * 跟随明暗主题的提示通道。
+     */
+    const [noticeTooltip, setNoticeTooltip] = useState("");
     const noticeHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const showNotice = useCallback(
-        (text: string, holdMs = 15_000, tone: AppStatusTone = "success") => {
+        (text: string, holdMs = 15_000, tone: AppStatusTone = "success", tooltip = "") => {
             if (!text) return;
             setNoticeTone(tone);
             setNoticeText(text);
+            setNoticeTooltip(tooltip);
             if (noticeHideTimerRef.current) clearTimeout(noticeHideTimerRef.current);
-            noticeHideTimerRef.current = setTimeout(() => setNoticeText(""), holdMs);
+            noticeHideTimerRef.current = setTimeout(() => {
+                setNoticeText("");
+                setNoticeTooltip("");
+            }, holdMs);
         },
         [],
     );
@@ -3401,7 +3414,12 @@ function AppInner() {
     useEffect(() => {
         if (!isPluginMode()) return;
         return subscribeEditorRouteNotice(() => {
-            showNotice(t("editor_route_unavailable"), 8000, "warning");
+            showNotice(
+                t("editor_route_unavailable"),
+                8000,
+                "warning",
+                t("editor_route_unavailable_hint"),
+            );
         });
     }, [showNotice, t]);
 
@@ -4441,7 +4459,9 @@ function AppInner() {
                         横移一次 —— 用户视线里"提示在乱动"。把长时效的钉在最左，
                         短的插在它右侧，左侧位置就永远稳定。 */}
                     {noticeText ? (
-                        <AppStatusChip tone={noticeTone}>{noticeText}</AppStatusChip>
+                        <AppStatusChip tone={noticeTone} tooltip={noticeTooltip || undefined}>
+                            {noticeText}
+                        </AppStatusChip>
                     ) : null}
                     {/* 导入等待提示：只在真慢时点亮（见 IMPORT_BUSY_DELAY_MS），
                         位置紧跟长时效提示位之后、短时效进度片之前。 */}

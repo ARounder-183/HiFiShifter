@@ -378,12 +378,12 @@ describe("buildNotebookContextMenu —— 剪贴板可用性", () => {
         for (const key of ["cut", "copy"]) {
             const item = findTop(items, key);
             expect(item?.disabled, key).toBe(true);
-            expect(item?.tooltip, key).toBe("notebook_ctx_need_selection");
+            expect(item?.description, key).toBe("notebook_ctx_need_selection");
         }
         for (const key of ["copyMarkdown", "copyPlain"]) {
             const item = findAny(items, key);
             expect(item?.disabled, key).toBe(true);
-            expect(item?.tooltip, key).toBe("notebook_ctx_need_selection");
+            expect(item?.description, key).toBe("notebook_ctx_need_selection");
         }
     });
 
@@ -392,15 +392,15 @@ describe("buildNotebookContextMenu —— 剪贴板可用性", () => {
         for (const key of ["cut", "copy", "copyMarkdown", "copyPlain"]) {
             const item = findAny(items, key);
             expect(item?.disabled, key).toBe(false);
-            expect(item?.tooltip, key).toBeUndefined();
+            expect(item?.description, key).toBeUndefined();
         }
     });
 
     it("历史为空时撤销 / 重做置灰", () => {
         const items = build({ flags: { canUndo: false, canRedo: false } });
         expect(findTop(items, "undo")?.disabled).toBe(true);
-        expect(findTop(items, "undo")?.tooltip).toBe("notebook_ctx_nothing_to_undo");
-        expect(findTop(items, "redo")?.tooltip).toBe("notebook_ctx_nothing_to_redo");
+        expect(findTop(items, "undo")?.description).toBe("notebook_ctx_nothing_to_undo");
+        expect(findTop(items, "redo")?.description).toBe("notebook_ctx_nothing_to_redo");
     });
 
     it("清除格式仅在确实有格式时可用", () => {
@@ -419,7 +419,7 @@ describe("buildNotebookContextMenu —— 剪贴板可用性", () => {
             actions: { insertClipReference: () => {} },
             disabled: { insertClipReference: "notebook_clip_ref_none" },
         });
-        expect(findAny(items, "insertClipReference")?.tooltip).toBe("notebook_clip_ref_none");
+        expect(findAny(items, "insertClipReference")?.description).toBe("notebook_clip_ref_none");
     });
 });
 

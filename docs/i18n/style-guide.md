@@ -117,6 +117,37 @@ notebook_toolbar_bold: "Bold ({modifier}+B)",
 
 ---
 
+### 2.6 长度预算（状态片 / tooltip）
+
+同一句话放在对话框正文里是正常的，放在**状态栏那一行**就是灾难：状态片是
+`shrink-0`、父容器是 `truncate`，超长提示会被**从中间裁掉且没有省略号**
+（`text-overflow` 不作用于 flex 子元素）—— 用户读到的恰好是"什么都没说"的那半句。
+
+| 面 | 中文/日文/韩文 | 英文 | 判据 |
+|---|---|---|---|
+| 状态片（`status_*`、`cap_reason_*`、`editor_route_unavailable`、`host_key_focus_failed`） | ≤ 44 字 | ≤ 62 字符 | 一句话、一个**状态**；不写"请……" |
+| tooltip（`*_tooltip` / `*_tip` + 登记在案的例外） | ≤ 46 字 | ≤ 80 字符 | 一句短语；解释写进对话框正文 |
+
+**状态片只放状态，指令放进 tooltip。** `AppStatusChip` 支持 `tooltip`（走
+`data-tooltip` 通道，会如实换行且跟随主题），那才是"下一步怎么做"该待的地方。
+
+> 数值是**棘轮**：取"今天的最差值 + 余量"，不追认历史，但禁止新增更长的。
+> 新增文案时按理想值写，别贴着上限写。
+
+由 `src/i18n/catalogIntegrity.test.ts` 的「长度预算」两条用例强制。新增一条状态栏
+文案必须同时改那里的 `STATUS_BAR_KEYS` —— "必须停下来改测试"正是要的那一步。
+
+### 2.7 没有死键
+
+目录里的每个键都必须**至少被引用一次**。历史教训：捕获面板从"一整块面板"改成
+"工具栏一个图标 + 设置窗口"时，旧的一整族文案（`capture_guide_*`、`capture_output_*`
+…）没有跟着删 —— 实测 **49 个键、245 条译文**再也不会被渲染，而它们不会报错、
+不会被发现，只会让下一个维护者以为"词表里有，说明界面上有"。
+
+动态拼接的键族（`history_op_<op>`、`theme_<mode>`、`ripple_tooltip_<mode>`、
+`recording_error_<code>`、`installer_*`）豁免，但**新增拼接点必须登记**在
+`src/i18n/keyReferenceIntegrity.test.ts` 的 `DYNAMIC_PREFIXES` 里。
+
 ## 3. 语义规则
 
 ### 3.1 同一命名族内的短标签不得重名
@@ -187,7 +218,7 @@ notebook_toolbar_bold: "Bold ({modifier}+B)",
 **小写标签**上的 `title` 直接报错。其余目录尚未纳入，迁移到那一层时把
 `files` 列表扩过去即可，规则本身不用改。
 
-**一个已知例外：菜单项。** `AppTooltipProvider` 在菜单弹出期间全局抑制气泡
+**菜单项一律不用 tooltip。** `AppTooltipProvider` 在菜单弹出期间全局抑制气泡
 （既定规则，`AppTooltip.tsx:123-130`），所以菜单条目上无论 `title` 还是
 `data-tooltip` 都不会显示。这类"为什么点不了"的理由应当**常驻**渲染成
 第二行弱化小字（见 `MenuBar.tsx` 的 `StandaloneOnlyItem`），而不是挂在

@@ -160,7 +160,10 @@ describe("键引用完整性", () => {
         expect(
             missing.length === 0 ? [] : ["以下动态键展开后不存在：", ...missing].join("\n"),
         ).toEqual([]);
-    });
+        // 【为什么显式给超时】这条要读上千个源文件（含 `scripts/`），全量跑测试时
+        // 与其它 worker 抢 I/O，默认 5 s 会偶发超时 —— 而它一旦超时，报出来的是
+        // "测试超时"而不是"有没有死键"，等于把门禁变成噪声。
+    }, 30_000);
 
     /*
      * 调用的**字面量**键必须存在于参考目录。
@@ -174,6 +177,76 @@ describe("键引用完整性", () => {
      * 【为什么必须剥离注释】`src/ui/*` 的 JSDoc 示例里写着 `t("bitrate")` 这类
      * 示范键，不剥离会误报 8 处、逼人加无意义的豁免。
      */
+    /*
+     * 反向检查：目录里的每个键都至少被**引用**一次。
+     *
+     * 【为什么必须有】正向检查（"调用的键存在"）只保证不写错名字，不保证不写没用的
+     * 文案。捕获面板从"一整块面板"改成"工具栏一个图标 + 设置窗口"时，旧的一整族
+     * 文案（`capture_guide_*`、`capture_output_*` …）没有跟着删 —— 实测 **49 个键、
+     * 245 条译文**再也不会被渲染。它们不会报错、不会被发现，只会让下一个维护者以为
+     * "词表里有，说明界面上有"。
+     *
+     * 【为什么豁免那几个前缀】它们是**动态拼接**出来的键族（`history_op_<op>`、
+     * `theme_<mode>` …），源码里没有字面量。这份豁免清单与
+     * `keyReferenceIntegrity` 里的 `FAMILIES` 是同一份知识 —— 新增一个拼接点必须
+     * 同时在这里登记，否则那些键会被判成死键。
+     */
+    test("词典里没有死键：每个键都至少被引用一次", () => {
+        const DYNAMIC_PREFIXES = [
+            "history_op_",
+            "theme_",
+            "ripple_tooltip_",
+            "recording_error_",
+            "installer_",
+        ];
+        /** 不按 `.tsx?` 过滤：`scripts/` 里的安装器词表是 `.mjs` / `.nsi`。 */
+        function walkAny(dir: string, out: string[] = []): string[] {
+            for (const entry of readdirSync(dir)) {
+                const full = join(dir, entry);
+                if (statSync(full).isDirectory()) {
+                    if (entry !== "node_modules") walkAny(full, out);
+                } else if (/\.(tsx?|mjs|js|ps1|nsi)$/.test(entry)) {
+                    out.push(full);
+                }
+            }
+            return out;
+        }
+
+        const sources: string[] = [];
+        for (const file of walkAny("src")) {
+            if (file.startsWith(join("src", "i18n"))) continue;
+            sources.push(readFileSync(file, "utf8"));
+        }
+        // 安装器的五语词表由 `scripts/release/build-installer-strings.mjs` 读取。
+        for (const file of walkAny(join("..", "scripts"))) {
+            sources.push(readFileSync(file, "utf8"));
+        }
+        const corpus = sources.join("\n");
+
+        // 【为什么先切成标识符再查，而不是 `corpus.includes(key)`】源文件加起来
+        // 约 30 MB，2000 个键逐个 `includes` 是 60 GB 的扫描量（实测 4 s，全量跑
+        // 测试时会撞上 5 s 的默认超时）。切一次标识符得到集合，查询变成 O(1)。
+        // 而且它比 `includes` **更精确**：`foo_capture_guide_body` 这种更长的
+        // 标识符不会被误判成引用了 `capture_guide_body`。
+        const tokens = new Set(corpus.match(/[A-Za-z0-9_]+/g) ?? []);
+
+        const dead = [...CATALOG_KEYS]
+            .filter((key) => !DYNAMIC_PREFIXES.some((prefix) => key.startsWith(prefix)))
+            .filter((key) => !tokens.has(key));
+
+        // 自检：扫描本身必须真的读到东西，否则"0 个死键"毫无意义。
+        expect(sources.length, "没有读到任何源码，扫描路径已失效").toBeGreaterThan(300);
+        expect(tokens.size, "没有切出任何标识符，扫描路径已失效").toBeGreaterThan(10_000);
+        expect(
+            dead.length === 0
+                ? []
+                : [
+                      "以下词条没有任何调用点（界面上永远不会出现）：",
+                      ...dead.map((key) => `  ${key}`),
+                  ].join("\n"),
+        ).toEqual([]);
+    }, 30_000);
+
     test("调用的字面量键必须在参考目录里", () => {
         /*
          * 两族写法都要守：

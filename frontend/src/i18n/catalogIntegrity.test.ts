@@ -388,6 +388,106 @@ describe("文本风格", () => {
     });
 });
 
+describe("长度预算（状态片与 tooltip）", () => {
+    /*
+     * 【为什么要按"面"分预算，而不是一条全局上限】同一句话放在对话框正文里是正常的，
+     * 放在状态栏那一行就是灾难。状态片是 `shrink-0`、父容器是 `truncate`，超长的
+     * 提示会被**从中间裁掉且没有省略号**（`text-overflow` 不作用于 flex 子元素）——
+     * 用户读到的恰好是"什么都没说"的那半句。
+     *
+     * 【为什么数值是"今天的最差值 + 余量"而不是一个理想值】这是一道**棘轮**：它不
+     * 追认历史（历史文案里还有几条偏长的，改写它们要动五语系的译文，风险与收益不成
+     * 比例），但禁止新增更长的。理想值应当远小于它 —— 新增文案时按"一句话、一个状态"
+     * 来写，而不是贴着上限写。
+     *
+     * 【为什么按语系分两档】中文/日文/韩文一个字占一个全角宽度，拉丁字母约半个；
+     * 同一条文案在 en 里天然长一倍。用一条上限卡所有语系，只会逼人把英文写成电报体。
+     */
+    const STATUS_BAR_LIMIT = { cjk: 44, latin: 62 };
+    const TOOLTIP_LIMIT = { cjk: 46, latin: 80 };
+
+    /**
+     * 状态栏能收到的**全部**键。
+     *
+     * 【为什么显式列出来】"哪些键会进状态栏"只有 `showNotice` 的调用点知道，而那
+     * 是代码不是数据。这份清单是那道边界的**声明**：新增一条状态栏文案必须同时改这里，
+     * 而"必须停下来改测试"正是我们要的那一步。
+     */
+    const STATUS_BAR_KEYS = new Set([
+        "status_render_cache_summary",
+        "status_channel_scan_folded",
+        "status_channel_scan_pending",
+        "editor_route_unavailable",
+        "host_key_focus_failed",
+        // 被拒绝的快捷键会把这些当理由显示在状态栏上。
+        "cap_reason_host_owns",
+        "cap_reason_unsupported_by_host",
+        "cap_reason_app_only",
+        "cap_reason_plugin_only",
+        "cap_reason_piano_roll_only",
+    ]);
+
+    /**
+     * 当 tooltip 用、名字里却没有 `_tooltip` 的键。
+     *
+     * 【为什么需要这一小份清单】命名约定覆盖了绝大多数（`*_tooltip` / `*_tip`），
+     * 但历史上有几个键先有文案后有约定。它们的名字不能改（调用点、测试、翻译都在用），
+     * 因此在这里登记 —— 与 `KNOWN_BENIGN` 同一种"已审计"清单。
+     */
+    const TOOLTIP_NAMED_DIFFERENTLY = new Set([
+        "plugin_transport_host_only",
+        "capture_cancel_hint",
+        "capture_unavailable",
+        "capture_waiting",
+        "capture_start_hint",
+    ]);
+
+    /** 复数形态用 `|` 分隔，取最长的那一形态。 */
+    const width = (value: string) => Math.max(...value.split("|").map((part) => part.length));
+    const limitFor = (locale: Locale) =>
+        locale === "en-US" ? "latin" : ("cjk" as keyof typeof STATUS_BAR_LIMIT);
+
+    test("状态栏文案不超过预算（超过就会被裁掉）", () => {
+        const violations: string[] = [];
+        for (const locale of LOCALES) {
+            const dict = dictOf(locale);
+            const limit = STATUS_BAR_LIMIT[limitFor(locale)];
+            for (const key of STATUS_BAR_KEYS) {
+                const value = dict[key];
+                if (value === undefined) {
+                    violations.push(`${locale}.${key} 不在词典里（清单过期了？）`);
+                    continue;
+                }
+                if (width(value) > limit) {
+                    violations.push(
+                        `${locale}.${key} = ${width(value)} 字（上限 ${limit}）：${value}`,
+                    );
+                }
+            }
+        }
+        expect(violations, "状态片只放状态；指令与原因放进 tooltip").toEqual([]);
+    });
+
+    test("tooltip 文案不超过预算（它是一句短语，不是一段说明）", () => {
+        const violations: string[] = [];
+        for (const locale of LOCALES) {
+            const dict = dictOf(locale);
+            const limit = TOOLTIP_LIMIT[limitFor(locale)];
+            for (const [key, value] of Object.entries(dict)) {
+                const isTooltip =
+                    /(_tooltip|_tip)$/.test(key) || TOOLTIP_NAMED_DIFFERENTLY.has(key);
+                if (!isTooltip) continue;
+                if (width(value) > limit) {
+                    violations.push(
+                        `${locale}.${key} = ${width(value)} 字（上限 ${limit}）：${value}`,
+                    );
+                }
+            }
+        }
+        expect(violations, "把解释写进对话框正文，tooltip 只留一句").toEqual([]);
+    });
+});
+
 describe("CJK 排版", () => {
     /*
      * 简繁中文里的半角括号/冒号。曾发现 `silence_threshold: "阈值 (dBFS)"`
