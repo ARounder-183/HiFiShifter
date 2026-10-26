@@ -131,6 +131,8 @@ pub struct ModelHandle {
     /// `create_playback_region` 的说明），只能靠"ARA 在同一文档内给同一对象稳定指针"
     /// 这一事实来推。顺序按首次出现，与宿主创建顺序一致。
     sequence_index_by_model_ref: HashMap<usize, usize>,
+    /// 还没收齐的宿主分割（跨帧候选，见 `SplitCandidate`）。
+    split_candidates: Vec<SplitCandidate>,
     /// 上一帧映射时的 region 集合快照，供宿主分割的**结构 diff** 使用。
     ///
     /// 【为什么需要它】GUI 分割会显式 `register_split`，而宿主分割（REAPER 里按 S）
@@ -236,6 +238,75 @@ impl RegionFrame {
     }
 }
 
+/// 一次**尚未收齐**的宿主分割：父段 + 已经见到的子段。
+///
+/// 【为什么需要它】结构 diff 只能比较"上一帧"与"这一帧"。宿主把一次分割拆成两轮交付
+/// 时（先缩短左段、再创建右段），第一轮只看到 1 个子段（`split_children` 要求至少两段），
+/// 第二轮又没有"消失的父段" —— 两条路都不登记，右侧半段从此没有任何参数权威。
+///
+/// 【为什么是"有界记忆"而不是放宽判据】判据仍然是`子段们**划分**了父段区间`（与单帧
+/// 版本等价），只是把"同一帧"换成"最多 N 轮之内"。相邻不是父子，划分才是。
+struct SplitCandidate {
+    parent: RegionFrame,
+    children: Vec<RegionFrame>,
+    rounds_left: u8,
+}
+
+/// 一次分割最多等多少轮 remap（宿主通常 1~2 轮，8 轮足以覆盖节流与乱序）。
+const SPLIT_CANDIDATE_ROUNDS: u8 = 8;
+/// 同时跟踪多少条未收齐的分割（长会话里反复分割不会无界增长）。
+const MAX_SPLIT_CANDIDATES: usize = 32;
+
+impl SplitCandidate {
+    /// 这个子段是否属于本候选（同源、播放区间与源窗口都落在父段内）。
+    fn admits(&self, child: &RegionFrame) -> bool {
+        if child.audio_source != self.parent.audio_source {
+            return false;
+        }
+        let inside_play = child.play_start >= self.parent.play_start - 1e-6
+            && child.play_start + child.play_dur
+                <= self.parent.play_start + self.parent.play_dur + 1e-6;
+        let inside_mod = child.mod_start >= self.parent.mod_start - 1e-6
+            && child.mod_start + child.mod_dur
+                <= self.parent.mod_start + self.parent.mod_dur + 1e-6;
+        inside_play && inside_mod
+    }
+
+    /// 把本帧出现的、还没登记过的子段吸收进来（按 (play_start, play_dur) 去重）。
+    fn absorb(&mut self, appeared: &[RegionFrame]) {
+        for child in appeared {
+            if !self.admits(child) {
+                continue;
+            }
+            let duplicate = self.children.iter().any(|known| {
+                known.play_start.to_bits() == child.play_start.to_bits()
+                    && known.play_dur.to_bits() == child.play_dur.to_bits()
+            });
+            if !duplicate {
+                self.children.push(child.clone());
+            }
+        }
+        self.children
+            .sort_by(|a, b| a.play_start.total_cmp(&b.play_start));
+    }
+
+    /// 子段集合是否**划分**了父段的播放区间（首尾相接、合起来覆盖父段）。
+    fn partitions_parent(&self) -> bool {
+        let close = crate::host::geometry::host_value_compatible;
+        if self.children.len() < 2 {
+            return false;
+        }
+        let mut cursor = self.parent.play_start;
+        for child in &self.children {
+            if !close(child.play_start, cursor) {
+                return false;
+            }
+            cursor = child.play_start + child.play_dur;
+        }
+        close(cursor, self.parent.play_start + self.parent.play_dur)
+    }
+}
+
 /// 宿主颜色（三个 0..1 分量）转成插件侧时间线用的 `#rrggbb`。
 ///
 /// 【为什么要转】宿主给的是 float 分量（`ARAColor`），而内核的时间线用 `#rrggbb`
@@ -297,6 +368,7 @@ impl Default for ModelHandle {
             destroyed_regions: HashSet::new(),
             sequence_index_by_model_ref: HashMap::new(),
             lineage_frame: Vec::new(),
+            split_candidates: Vec::new(),
             remap_stamp: None,
             ledger: std::sync::Arc::new(ara2_bridge::plugin::GraphLedger::default()),
         }
@@ -481,6 +553,8 @@ impl ModelHandle {
     fn register_host_split_lineage(&mut self) {
         let current = self.region_frames();
         let previous = std::mem::take(&mut self.lineage_frame);
+        let mut appeared: Vec<RegionFrame> = Vec::new();
+        let mut fresh: Vec<SplitCandidate> = Vec::new();
         if !previous.is_empty() {
             let current_geometry: HashSet<_> = current.iter().map(RegionFrame::geometry).collect();
             let previous_geometry: HashSet<_> =
@@ -488,17 +562,81 @@ impl ModelHandle {
             let disappeared = previous
                 .iter()
                 .filter(|frame| !current_geometry.contains(&frame.geometry()))
+                .cloned()
                 .collect::<Vec<_>>();
-            let appeared = current
+            appeared = current
                 .iter()
                 .filter(|frame| !previous_geometry.contains(&frame.geometry()))
-                .collect::<Vec<_>>();
+                .cloned()
+                .collect();
             for parent in disappeared {
-                let children = Self::split_children(parent, &appeared);
-                if !children.is_empty() {
-                    self.register_host_split(parent, &children);
-                }
+                let refs = appeared.iter().collect::<Vec<_>>();
+                let children = Self::split_children(&parent, &refs)
+                    .into_iter()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                fresh.push(SplitCandidate {
+                    parent,
+                    children,
+                    rounds_left: SPLIT_CANDIDATE_ROUNDS,
+                });
             }
+        }
+        // 【先吸收、后收口】老候选拿本帧的新子段（跨帧送达）；新候选可能本帧就齐。
+        let mut kept: Vec<SplitCandidate> = Vec::new();
+        let mut settled: Vec<SplitCandidate> = Vec::new();
+        let mut expired = 0_usize;
+        for mut candidate in std::mem::take(&mut self.split_candidates) {
+            candidate.absorb(&appeared);
+            if candidate.partitions_parent() {
+                settled.push(candidate);
+                continue;
+            }
+            candidate.rounds_left = candidate.rounds_left.saturating_sub(1);
+            if candidate.rounds_left == 0 {
+                expired += 1;
+            } else {
+                kept.push(candidate);
+            }
+        }
+        let fresh_count = fresh.len();
+        for mut candidate in fresh {
+            candidate.absorb(&appeared);
+            if candidate.partitions_parent() {
+                settled.push(candidate);
+            } else {
+                kept.push(candidate);
+            }
+        }
+        if kept.len() > MAX_SPLIT_CANDIDATES {
+            let excess = kept.len() - MAX_SPLIT_CANDIDATES;
+            kept.drain(..excess);
+        }
+        self.split_candidates = kept;
+        for candidate in &settled {
+            let refs = candidate.children.iter().collect::<Vec<_>>();
+            self.register_host_split(&candidate.parent, &refs);
+        }
+        if !settled.is_empty() {
+            // 【为什么打一行】"谱系登记成功"与"退回几何兜底"在用户侧是同一个画面，
+            // 只有这行日志能把"这次分割到底有没有继承参数"变成可核对的事实。
+            log::info!(
+                "[ara] split lineage registered: {} candidate(s), parent=ara-region-{}, \
+                 children={} (fresh={fresh_count})",
+                settled.len(),
+                settled[0].parent.key,
+                settled.iter().map(|c| c.children.len()).sum::<usize>(),
+            );
+        }
+        if expired > 0 {
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "ara.split.pending-expired",
+                format_args!(
+                    "[ara] {expired} host split candidate(s) never completed within \
+                     {SPLIT_CANDIDATE_ROUNDS} remaps; their children keep the geometric fallback"
+                ),
+            );
         }
         self.lineage_frame = current;
     }
@@ -525,6 +663,20 @@ impl ModelHandle {
                 if let (Some(parent_key), Some(child_key)) = (parent_key.as_deref(), child_key) {
                     if edits.atlas.seed_authority(parent_key, &child_key) {
                         edits.revision = edits.revision.saturating_add(1);
+                    }
+                }
+            }
+        }
+        // 【谱系边本身也要记】权威已经播好了（上面那块），但 `split_parents` 是诊断与
+        // `find()` 旧路径的唯一读数：`register_split` 需要 per-clip 种子才建它，而
+        // 新路径的种子是**权威**、不是 per-clip 记录。不补这一步，日志里会出现
+        // "曲线继承成功但没有任何谱系边"的自相矛盾形状。
+        if let Some(parent_item) = parent.item.as_deref() {
+            let mut edits = self.session.edits.lock_or_recover();
+            for child in children {
+                if let Some(child_item) = child.item.as_deref() {
+                    if child_item != parent_item {
+                        edits.atlas.note_split_parent(parent_item, child_item);
                     }
                 }
             }
@@ -3696,6 +3848,77 @@ mod tests {
         assert_eq!(model.lineage_frame.len(), 2);
     }
 
+    /// **一次分割分两轮送达：右半段仍然要拿到父段的参数权威。**
+    ///
+    /// 【为什么这条是回归】结构 diff 只看"上一帧 vs 这一帧"。宿主先把父段缩短成左段、
+    /// 下一轮才创建右段时，第一轮只有一个子段（`split_children` 要求至少两段），
+    /// 第二轮又没有"消失的父段" —— 旧实现两条路都不登记，右半段从此没有权威。
+    /// 现在候选会跨轮记住父段窗口，等右段出现再收口。
+    #[test]
+    fn a_split_delivered_in_two_rounds_still_seeds_the_right_half() {
+        const PARENT: &str = "{AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA}";
+        const RIGHT: &str = "{BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB}";
+
+        let mut model = ModelHandle::new();
+        model.document = identity_document(&["A"]);
+        model
+            .session
+            .edits
+            .lock_or_recover()
+            .atlas
+            .seed_test_pitch_curve(&format!("item:{PARENT}"), 100., vec![61.; 8]);
+
+        let region = |mod_start: f64, mod_dur: f64, play_start: f64| AraPlaybackRegion {
+            audio_source_persistent_id: "src".into(),
+            audio_modification_persistent_id: "mod".into(),
+            start_in_modification_time: mod_start,
+            duration_in_modification_time: mod_dur,
+            start_in_playback_time: play_start,
+            duration_in_playback_time: mod_dur,
+            ..Default::default()
+        };
+
+        // 第一轮：父段消失，只有左段（沿用父 item GUID）。
+        model.lineage_frame = vec![frame(PARENT, "src", 0., 1., 0., 1.)];
+        model.document.playback_regions = vec![region(0., 0.5, 0.)];
+        model.region_keys = vec![7];
+        {
+            let mut items = model.session.region_items.lock_or_recover();
+            items.insert(7, PARENT.to_string());
+        }
+        model.register_host_split_lineage();
+        assert_eq!(
+            model.split_candidates.len(),
+            1,
+            "一轮没齐的分割必须留在候选里，而不是被丢掉"
+        );
+
+        // 第二轮：右段出现（新 GUID）。父段仍在候选里，跨帧收口。
+        model.document.playback_regions.push(region(0.5, 0.5, 0.5));
+        model.region_keys.push(8);
+        model
+            .session
+            .region_items
+            .lock_or_recover()
+            .insert(8, RIGHT.to_string());
+        model.register_host_split_lineage();
+
+        let edits = model.session.edits.lock_or_recover();
+        assert_eq!(
+            edits.atlas.split_parent_of(RIGHT),
+            Some(PARENT),
+            "右半段必须显式继承父段"
+        );
+        assert!(
+            edits.atlas.has_authority_parameters(Some(RIGHT), "mod"),
+            "跨帧收口后必须把父段的权威播给右半段"
+        );
+        assert!(
+            model.split_candidates.is_empty(),
+            "收口后候选必须清掉，不能每帧重复登记"
+        );
+    }
+
     /// 父段**没有** live 曲线时：曲线谱系不登记（没有可继承的 seed），但**媒体身份必须
     /// 照常登记**。
     ///
@@ -3741,16 +3964,17 @@ mod tests {
 
         model.register_host_split_lineage();
 
-        assert_eq!(
-            model
-                .session
-                .edits
-                .lock_or_recover()
-                .atlas
-                .split_parent_of(RIGHT),
-            None,
-            "没有可继承的曲线时不登记曲线谱系"
+        let edits = model.session.edits.lock_or_recover();
+        assert!(
+            !edits.atlas.has_authority_parameters(Some(RIGHT), "mod"),
+            "父段没有曲线时不得凭空造一份权威"
         );
+        assert_eq!(
+            edits.atlas.split_parent_of(RIGHT),
+            Some(PARENT),
+            "谱系边仍然要记：它是诊断与旧路径的唯一读数"
+        );
+        drop(edits);
         assert_eq!(
             model
                 .session

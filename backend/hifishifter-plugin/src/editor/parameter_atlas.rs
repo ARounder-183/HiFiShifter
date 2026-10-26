@@ -804,6 +804,22 @@ impl ParameterAtlas {
         let mut checked = atlas.reserve_restored()?;
         Ok(checked.regions.remove("clipboard-seed").unwrap())
     }
+    /// 只登记"右段 ← 父段"的谱系边，**不需要**一份 per-clip 种子。
+    ///
+    /// 【为什么独立于 `register_split`】后者还要求一份 per-clip 记录（旧存档迁移窗口
+    /// 的产物）才能建立 `split-basis`。而权威表已经把曲线播给子段时，谱系边仍然值得
+    /// 记下来 —— 它是诊断（"这次分割到底有没有认出父段"）与 `find()` 旧路径的唯一读数。
+    pub(crate) fn note_split_parent(&mut self, parent: &str, right: &str) {
+        if parent.is_empty() || right.is_empty() || parent == right {
+            return;
+        }
+        if self.split_parents.len() >= 16384 {
+            return;
+        }
+        self.split_parents
+            .insert(right.to_owned(), parent.to_owned());
+    }
+
     /// 在原生加载新item前登记确切GUID谱系，支持跨root与新的source/modification身份。
     pub(crate) fn register_copy(
         &mut self,
@@ -903,8 +919,7 @@ impl ParameterAtlas {
             seed.live = false;
             self.regions.insert(format!("split-basis:{right}"), seed);
         }
-        self.split_parents
-            .insert(right.to_owned(), parent.to_owned());
+        self.note_split_parent(parent, right);
         Ok(())
     }
     pub fn is_empty(&self) -> bool {
