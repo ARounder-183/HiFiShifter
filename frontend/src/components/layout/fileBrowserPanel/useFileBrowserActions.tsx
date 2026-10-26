@@ -344,7 +344,6 @@ export function useFileBrowserActions(
                 items.push({
                     key: `pinned:${path}`,
                     label: locationLabel(path, tf("fb_computer")),
-                    description: path,
                     checked: path === fb.currentPath,
                     onSelect: () => navigateTo(path),
                 });
@@ -361,7 +360,6 @@ export function useFileBrowserActions(
                 items.push({
                     key: `recent:${path}`,
                     label: locationLabel(path, tf("fb_computer")),
-                    description: path,
                     onSelect: () => navigateTo(path),
                 });
             }
