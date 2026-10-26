@@ -206,7 +206,6 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
     const [composeConfirmOpen, setComposeConfirmOpen] = useState(false);
     const [readingClipboard, setReadingClipboard] = useState(false);
     const autoReadTriedRef = useRef(false);
-    const composePendingRef = useRef(false);
 
     // 当前有效的 MIDI 路径（内部选择优先）
     const effectivePath = localMidiPath ?? midiPath;
@@ -337,7 +336,6 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
             setMidiHasBpm(true);
             setReadingClipboard(false);
             autoReadTriedRef.current = false;
-            composePendingRef.current = false;
         }
     }, [open]);
 
@@ -425,7 +423,6 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
 
         // pitchEdit 模式下，若根轨未开启 Compose，先弹出确认对话框
         if (effectiveMode === "pitchEdit" && rootTrackComposeEnabled === false) {
-            composePendingRef.current = true;
             setComposeConfirmOpen(true);
             return;
         }
@@ -553,7 +550,6 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
     // Compose 确认回调：开启合成后继续导入
     const handleComposeConfirm = useCallback(() => {
         setComposeConfirmOpen(false);
-        composePendingRef.current = false;
         onRequestEnableCompose?.();
         // 重新触发导入（此时 rootTrackComposeEnabled 可能还未更新，但后端不会再报错）
         setImporting(true);
@@ -623,7 +619,6 @@ export const MidiTrackSelectDialog: React.FC<MidiTrackSelectDialogProps> = ({
 
     const handleComposeDecline = useCallback(() => {
         setComposeConfirmOpen(false);
-        composePendingRef.current = false;
     }, []);
 
     // 解析失败（无轨道）时也要提供可见的关闭出口，不能只剩错误文本。

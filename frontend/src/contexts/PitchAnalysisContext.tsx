@@ -5,7 +5,6 @@ import {
     useContext,
     useEffect,
     useMemo,
-    useRef,
     useState,
     type ReactNode,
 } from "react";
@@ -49,10 +48,6 @@ const PitchAnalysisContext = createContext<PitchAnalysisContextValue | null>(nul
 
 export function PitchAnalysisProvider({ children }: { children: ReactNode }) {
     const [state, setStateRaw] = useState<PitchAnalysisState>(DEFAULT_STATE);
-
-    // 使用 ref 避免 setState 闭包过期问题
-    const stateRef = useRef(state);
-    stateRef.current = state;
 
     const setState = useCallback((patch: Partial<PitchAnalysisState>) => {
         setStateRaw((prev) => ({ ...prev, ...patch }));
@@ -232,11 +227,3 @@ export function usePitchAnalysis(): PitchAnalysisState {
     return ctx.state;
 }
 
-/** 写入 pitch 分析进度状态（供外部手动更新，通常由 Provider 内部事件监听自动维护） */
-export function usePitchAnalysisDispatch() {
-    const ctx = useContext(PitchAnalysisContext);
-    if (!ctx) {
-        throw new Error("usePitchAnalysisDispatch must be used within PitchAnalysisProvider");
-    }
-    return { setState: ctx.setState, reset: ctx.reset };
-}
