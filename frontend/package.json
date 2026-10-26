@@ -10,7 +10,7 @@
         "test": "vitest run",
         "bench": "vitest bench",
         "lint": "eslint .",
-        "lint:budget": "eslint . --max-warnings 140",
+        "lint:budget": "eslint . --max-warnings 98",
         "format": "prettier . --write",
         "format:check": "prettier . --check",
         "preview": "vite preview",
