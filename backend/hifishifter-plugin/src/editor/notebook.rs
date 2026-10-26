@@ -32,7 +32,8 @@ use std::path::{Path, PathBuf};
 use base64::Engine as _;
 use hifishifter_kernel::notebook_assets::{
     prune_unreferenced, read_image_file, referenced_asset_ids, sanitize_asset_id,
-    sanitize_export_file_name, sanitize_ext, NotebookAsset, NotebookAssetKind, NotebookAssetMap,
+    sanitize_asset_mime, sanitize_export_file_name, sanitize_ext, NotebookAsset, NotebookAssetKind,
+    NotebookAssetMap,
 };
 
 /// 单条附件的解码后字节上限（与 App 侧同值）。
@@ -118,13 +119,17 @@ impl NotebookStore {
         if bytes.len() > MAX_ASSET_BYTES {
             return Err("notebook_asset_too_large".into());
         }
+        // MIME 收口与 App 同源（`sanitize_asset_mime`）：导出时它会变成
+        // `data:{mime};base64,…` 的类型段，前端可控，不能原样落盘。
+        let ext = sanitize_ext(ext);
+        let mime = sanitize_asset_mime(mime.unwrap_or_default(), &ext);
         let mut map = self.load_assets();
         map.insert(
             id.clone(),
             NotebookAsset {
                 kind: kind_of(kind),
-                ext: sanitize_ext(ext),
-                mime: mime.unwrap_or_default().to_string(),
+                ext,
+                mime,
                 byte_len: bytes.len() as u64,
                 created_at_ms: now_ms(),
                 orphaned: false,
@@ -241,11 +246,8 @@ pub(super) fn render_export(content: &str, store: &NotebookStore) -> (String, Ve
             missing.push(asset_ref.id.clone());
             continue;
         }
-        let mime = if asset.mime.is_empty() {
-            mime_for_ext(&asset.ext)
-        } else {
-            asset.mime.clone()
-        };
+        // 与 App 同一份收口：旧工程里的 mime 可能是任意值。
+        let mime = sanitize_asset_mime(&asset.mime, &asset.ext);
         out.replace_range(
             asset_ref.start..asset_ref.end,
             &format!("data:{mime};base64,{}", asset.data),
@@ -422,21 +424,8 @@ fn extension_of(path: &Path) -> String {
         .unwrap_or_default()
 }
 
-pub(super) fn mime_for_ext(ext: &str) -> String {
-    match ext {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        "bmp" => "image/bmp",
-        "avif" => "image/avif",
-        "svg" => "image/svg+xml",
-        "hsf" => "application/x-hifishifter-fragment",
-        "hsp" => "application/json",
-        _ => "application/octet-stream",
-    }
-    .to_string()
-}
+// 扩展名 → MIME 的映射已收口到内核 `notebook_assets::sanitize_asset_mime`：
+// 插件与 App 必须给出同一个答案，两处各写一份正是此前不一致的来源。
 
 // 导出/另存为对话框的默认文件名清洗已收口到内核
 // `notebook_assets::sanitize_export_file_name`（App 与插件共用，此前两侧逐字
@@ -483,6 +472,49 @@ mod tests {
         assert_eq!(store.read_asset("asset-1")["missing"], true);
     }
 
+    /// **不变量：写进来的 MIME 只能是图片类型或两种载荷类型。**
+    ///
+    /// 导出时它会被拼进 `data:{mime};base64,…`：放行 `text/html` 等于让一条
+    /// 图片引用在导出物里变成一段可执行文档。收口在内核，这条测试钉住"插件确实
+    /// 走了那道收口"。
+    #[test]
+    fn a_foreign_mime_is_replaced_by_the_extension_fallback() {
+        let store = scratch("mime");
+        let payload = B64.encode(b"<html><script>alert(1)</script></html>");
+        store
+            .put_asset("asset-1", "image", "png", Some("text/html"), &payload, None)
+            .unwrap();
+        assert_eq!(store.read_asset("asset-1")["mime"], "image/png");
+
+        // 参数注入（`; charset=…`）同样按扩展名兜底。
+        store
+            .put_asset(
+                "asset-2",
+                "image",
+                "webp",
+                Some("image/png; charset=utf-8"),
+                &payload,
+                None,
+            )
+            .unwrap();
+        assert_eq!(store.read_asset("asset-2")["mime"], "image/webp");
+
+        // 载荷类型原样保留（导出要靠它区分 hsf / hsp）。
+        store
+            .put_asset(
+                "asset-3",
+                "clip_payload",
+                "hsf",
+                Some("application/x-hifishifter-fragment"),
+                &payload,
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            store.read_asset("asset-3")["mime"],
+            "application/x-hifishifter-fragment"
+        );
+    }
     /// 非法 id 必须被挡在存储之外（正文里的 `../` 不能变成路径）。
     #[test]
     fn invalid_asset_ids_never_reach_the_store() {

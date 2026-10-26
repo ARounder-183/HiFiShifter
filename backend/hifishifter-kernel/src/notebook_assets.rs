@@ -180,6 +180,46 @@ pub fn image_mime_for_ext(ext: &str) -> &'static str {
     }
 }
 
+/// 附件 MIME 的收口（App 与插件共用）。
+///
+/// 【为什么必须收口】`mime` 由前端给出、随工程文件落盘，而导出与预览都会把它原样
+/// 拼进 `data:{mime};base64,…` 或 Blob 的 `type`。放行 `text/html` 之类的类型，等于
+/// 让工程文件里的一条"图片引用"在导出物里变成一段可执行文档（CWE-79 的变体：类型与
+/// 内容脱钩）。允许值只有三类：`image/*`（字符集受限）、HiFiShifter 片段
+/// `application/x-hifishifter-fragment`、以及参数线载荷的 `application/json`；
+/// 其余一律按扩展名兜底 —— 拒绝时**不报错**，因为旧工程里本来就可能有空 mime。
+pub fn sanitize_asset_mime(raw: &str, ext: &str) -> String {
+    let fallback = asset_mime_fallback(ext);
+    let value = raw.trim().to_ascii_lowercase();
+    if value.is_empty() || value.len() > 64 {
+        return fallback.to_string();
+    }
+    // 只允许 RFC 6838 的 type/subtype 字符集：`;`/`,`/空白会把一个类型变成一串
+    // 参数，正是"类型与内容脱钩"的入口。
+    let charset_ok = value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '-' | '+' | '.'));
+    if !charset_ok {
+        return fallback.to_string();
+    }
+    let allowed = value.starts_with("image/")
+        || value == "application/x-hifishifter-fragment"
+        || value == "application/json";
+    if allowed {
+        value
+    } else {
+        fallback.to_string()
+    }
+}
+
+/// `sanitize_asset_mime` 的兜底表：图片按扩展名，两种载荷类型按固定值。
+fn asset_mime_fallback(ext: &str) -> &'static str {
+    match ext {
+        "hsf" => "application/x-hifishifter-fragment",
+        "hsp" => "application/json",
+        other => image_mime_for_ext(other),
+    }
+}
 /// 读一个磁盘图片文件（拖入图片的读盘通道；App 与插件共用此实现）。
 ///
 /// 三条服务端收口缺一不可：
@@ -396,6 +436,35 @@ mod tests {
         assert_eq!(sanitize_asset_id("abc-123_x").unwrap(), "abc-123_x");
     }
 
+    /// **不变量：附件 MIME 只可能是图片类型或两种载荷类型。**
+    ///
+    /// 守的是"类型与内容脱钩"这条：导出物里的 `data:{mime};base64,…` 由这里决定，
+    /// 放行 `text/html` 就等于放行一段可执行文档。
+    #[test]
+    fn sanitize_asset_mime_refuses_non_image_types() {
+        assert_eq!(sanitize_asset_mime("image/png", "png"), "image/png");
+        assert_eq!(sanitize_asset_mime("IMAGE/WEBP", "webp"), "image/webp");
+        assert_eq!(sanitize_asset_mime("image/svg+xml", "svg"), "image/svg+xml");
+        assert_eq!(
+            sanitize_asset_mime("application/x-hifishifter-fragment", "hsf"),
+            "application/x-hifishifter-fragment"
+        );
+        // 非图片类型一律退回扩展名兜底。
+        assert_eq!(sanitize_asset_mime("text/html", "png"), "image/png");
+        assert_eq!(
+            sanitize_asset_mime("application/javascript", "hsf"),
+            "application/x-hifishifter-fragment"
+        );
+        // 参数注入（分号后面挂 charset）同样被拒。
+        assert_eq!(
+            sanitize_asset_mime("image/png; charset=utf-8", "png"),
+            "image/png"
+        );
+        // 空值按扩展名兜底：旧工程里 mime 可能就是空的。
+        assert_eq!(sanitize_asset_mime("", "webp"), "image/webp");
+        assert_eq!(sanitize_asset_mime("   ", "hsp"), "application/json");
+        assert_eq!(sanitize_asset_mime("", "bin"), "application/octet-stream");
+    }
     #[test]
     fn sanitize_ext_strips_dots_and_junk() {
         assert_eq!(sanitize_ext(".PNG"), "png");

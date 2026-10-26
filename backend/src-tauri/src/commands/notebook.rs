@@ -111,7 +111,9 @@ pub(super) fn put_asset(
         return json!({ "ok": false, "error": "notebook_asset_too_large", "byteLen": byte_len });
     }
     let ext = notebook_assets::sanitize_ext(&ext);
-    let mime = mime.unwrap_or_else(|| mime_for_ext(&ext).to_string());
+    // MIME 收口在内核（`sanitize_asset_mime`）：它是导出物里 `data:{mime};base64,…`
+    // 的类型段，前端可控，不能原样落盘。
+    let mime = notebook_assets::sanitize_asset_mime(mime.as_deref().unwrap_or_default(), &ext);
 
     let asset = NotebookAsset {
         kind: kind_from_str(&kind),
@@ -491,11 +493,9 @@ pub(super) fn export_document(
             missing.push(asset_ref.id.clone());
             continue;
         }
-        let mime = if asset.mime.is_empty() {
-            mime_for_ext(&asset.ext).to_string()
-        } else {
-            asset.mime.clone()
-        };
+        // 工程文件里的 mime 可能是旧版本写下的任意值：导出前按同一份收口过滤，
+        // 否则 `data:{mime};base64,…` 会把一条图片引用变成一段可执行文档。
+        let mime = notebook_assets::sanitize_asset_mime(&asset.mime, &asset.ext);
         out.replace_range(
             asset_ref.start..asset_ref.end,
             &format!("data:{mime};base64,{}", asset.data),
