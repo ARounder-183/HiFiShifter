@@ -1565,7 +1565,9 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         secondaryParamIds: visibleSecondaryParamIds,
         referenceRootTrackIds: visibleReferenceRootTrackIds,
         pitchEnabled,
-        paramsEpoch: (s as unknown as { paramsEpoch?: number }).paramsEpoch ?? 0,
+        // SessionState 已正式声明 paramsEpoch；此前经 `as unknown as` 鸭子类型
+        // 读取，字段一旦改名就静默退化成 0、曲线不再跟随时间线重取。
+        paramsEpoch: s.paramsEpoch,
         rootTrackId,
         selectedTrackId: effectiveSelectedTrackId,
         scrollLeft,
@@ -1603,7 +1605,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         projectFrames: loudnessProjectFrames,
         framePeriodMs: loudnessFpMs,
         liveEditActiveRef,
-        paramsEpoch: (s as unknown as { paramsEpoch?: number }).paramsEpoch ?? 0,
+        paramsEpoch: s.paramsEpoch,
         refreshToken,
     });
 
