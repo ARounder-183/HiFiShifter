@@ -200,13 +200,58 @@ pub(crate) struct EditorClient {
     relay: host_key_relay::Arbiter,
     /// 本平台的"把键交回宿主"原语。自报 `Fidelity`，状态机据此决定要不要探针/提示。
     escape: Box<dyn host_key_relay::HostKeyEscape>,
-    /// 前端声明的"属于宿主"的按键集合（`host_key_escape_set` 的产物）。
-    escape_set: host_key_relay::StrokeSet,
+    /// 前端声明的"插件自己占用"的按键集合（`host_key_owned_set` 的产物）。
+    ///
+    /// 【为什么是"占用"而不是"可让"】可让的是**未绑定**的那些键 —— 那是个补集，
+    /// 没法枚举；而"插件占用了哪些键"恰好是有限的、前端本来就算得出来的那份。
+    /// 原生的闸门因此是"拒绝投递一个在已占用集合里的键"。
+    owned: host_key_relay::OwnedStrokes,
+    /// 让路的累计读数（诊断包用）。
+    ///
+    /// 【为什么计数在客户端而不是状态机里】状态机是纯逻辑、按会话重置；而"投递过几次、
+    /// 被拒过几次"是**这台机器上这个视图**的事实。删掉用户提示之后，这组数字是唯一还能
+    /// 回答"让路到底有没有在工作"的东西。
+    relay_stats: RelayStats,
     /// 待发给前端的**非回执**事件（让路没成的回报）。
     ///
     /// 【为什么与 `replies` 分开】回执按 id 对应一次 `invoke`；这里的事件没有 id，
     /// 是"后台发生了一件事"。共用一条通道会逼前端去猜"这条到底对应哪个 promise"。
     view_events: std::collections::VecDeque<serde_json::Value>,
+}
+
+/// 让路的累计读数（见 `EditorClient::relay_stats`）。
+#[derive(Clone, Copy, Debug, Default)]
+struct RelayStats {
+    /// 成功投递给宿主的次数。
+    posted: u64,
+    /// 被原语拒绝的次数，按原因分。
+    refused: [u64; 5],
+}
+
+impl RelayStats {
+    /// 拒绝原因 → 计数槽位。**表外归 0 槽**：宁可让"其它"变多，也不静默丢一次拒绝。
+    fn slot(reason: &str) -> usize {
+        match reason {
+            "no-host-window" => 1,
+            "not-foreground" => 2,
+            "post-failed" => 3,
+            "owned-key" => 4,
+            _ => 0,
+        }
+    }
+
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "posted": self.posted,
+            "refused": {
+                "unsupported-key": self.refused[0],
+                "no-host-window": self.refused[1],
+                "not-foreground": self.refused[2],
+                "post-failed": self.refused[3],
+                "owned-key": self.refused[4],
+            },
+        })
+    }
 }
 
 /// 出站消息的字节上限（单条）。
@@ -421,7 +466,8 @@ impl EditorClient {
             last_history: None,
             relay,
             escape,
-            escape_set: host_key_relay::StrokeSet::default(),
+            owned: host_key_relay::OwnedStrokes::default(),
+            relay_stats: RelayStats::default(),
             view_events: std::collections::VecDeque::new(),
         }))
     }
@@ -982,15 +1028,18 @@ fn apply_relay_effects(state: &Rc<RefCell<EditorClient>>, effects: Vec<host_key_
                 log_relay(&format!("fidelity={} {}", fidelity.as_str(), trace));
             }
             host_key_relay::Effect::Escape { action, stroke } => {
-                // 【一致性闸】页面只能让"它自己声明过"的键。集合为空 = 前端还没发布
-                // （旧前端 / 启动瞬间），此时按"前端已经判定过"处理 —— 与引入集合之前的
-                // 行为一致；集合非空时它就是一份白名单。
-                let declared = {
+                // 【一致性闸】页面不能借宿主的手按一个**它自己也在用**的键。
+                //
+                // 方向是"拒绝已占用"而不是"只允许已声明"：可让的是未绑定的那些键，
+                // 那是一个没法枚举的补集；而"插件占用了什么"是有限的、前端算得出来的。
+                // 集合为空 = 前端还没发布 ⇒ **拒绝一切**（保守）：放行等于把闸门拆掉，
+                // 而前端在挂载时就会发布，这个窗口是毫秒级的。
+                let owned = {
                     let state = state.borrow();
-                    state.escape_set.is_empty() || state.escape_set.contains(&stroke)
+                    state.owned.is_empty() || state.owned.contains(&stroke)
                 };
-                if !declared {
-                    refuse_relay(&action, "unsupported-key");
+                if owned {
+                    refuse_relay(state, &action, "owned-key");
                     continue;
                 }
                 let (fidelity, result) = {
@@ -1003,13 +1052,16 @@ fn apply_relay_effects(state: &Rc<RefCell<EditorClient>>, effects: Vec<host_key_
                     (fidelity, result)
                 };
                 match result {
-                    Ok(()) => log_relay(&format!(
-                        "fidelity={} key={:?} relayed",
-                        fidelity.as_str(),
-                        stroke.token
-                    )),
+                    Ok(()) => {
+                        state.borrow_mut().relay_stats.posted += 1;
+                        log_relay(&format!(
+                            "fidelity={} code={} relayed",
+                            fidelity.as_str(),
+                            stroke.code.as_str()
+                        ));
+                    }
                     // 没投成：结构化原因进日志（不再对用户说话）。
-                    Err(error) => refuse_relay(&action, error.as_str()),
+                    Err(error) => refuse_relay(state, &action, error.as_str()),
                 }
             }
         }
@@ -1020,7 +1072,8 @@ fn apply_relay_effects(state: &Rc<RefCell<EditorClient>>, effects: Vec<host_key_
 ///
 /// 【为什么不对用户说话】失败的唯一出路是"点一下宿主窗口"，而那件事不需要一句被状态栏
 /// 裁掉一半的警告来提醒。留证据是日志与诊断包的职责（见 `hostKeyRelay` 读数）。
-fn refuse_relay(action: &str, reason: &str) {
+fn refuse_relay(state: &Rc<RefCell<EditorClient>>, action: &str, reason: &str) {
+    state.borrow_mut().relay_stats.refused[RelayStats::slot(reason)] += 1;
     log_relay(&format!("action={action} refused reason={reason}"));
 }
 
@@ -1598,6 +1651,14 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
                 // 用户报障时它正是第一件要拿到的东西。
                 let document=owner.editor_document().ok();
                 let backend=owner.host_backend();
+                // 让路读数：删掉用户提示之后，这是唯一还能回答"它到底有没有在工作"
+                // 的东西 —— 投递成功过几次、被拒在哪一层、插件占用了多少键。
+                let relay=serde_json::json!({
+                    "fidelity":state.borrow().relay.fidelity().as_str(),
+                    "hostNativeKeys":state.borrow().relay.host_native_count(),
+                    "owned":state.borrow().owned.len(),
+                    "stats":state.borrow().relay_stats.json(),
+                });
                 let system=serde_json::json!({
                     "product":"HiFiShifter VST3 / ARA plugin",
                     "about":hifishifter_kernel::build_info::about_payload(crate::plugin_form_label(Some(owner.as_ref())),crate::VERSION),
@@ -1636,6 +1697,7 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
                     // 参数视图：报障时"编辑器读到的是哪一份、根轨参数有多少、分割窗口
                     // 推导有没有登记"都只能从内存里读。指纹只给前 8 位 —— 它是用来
                     // 对齐日志的，不是给人读的。
+                    "hostKeyRelay":relay,
                     "parameterView":document.as_ref().map(|document|{
                         // 只读一次：`workspace_view` 会跑一次图集投影，诊断路径不该跑两遍。
                         let view=document.workspace_view().ok();
@@ -1859,14 +1921,21 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
         // 要的只是"这一下接不接手"。把回执拖到探针之后，会让连按的第二下永远撞上
         // "in-flight"。
         Some("host_key_relay")=>{
+            // 【两种入口】命中过绑定、但能力矩阵拒绝（`action` 非空），与一条绑定都
+            // 没命中（`action` 为空）。前者要探针（防双触发），后者直接投 —— 差别在
+            // 状态机里，这里只负责如实转达。
             let action=request["args"]["action"].as_str().unwrap_or_default().to_owned();
             // 【为什么不在这里用 `?`】本闭包返回的是 `windows::core::Result`（COM 调用），
             // 而命令失败要变成 `Err(String)` 交给下面的统一回执分支。两种错误类型混用
             // 会让 `?` 去找一个不存在的 `From<&str>` —— 这里显式分支即可。
             match host_key_relay::Stroke::from_json(&request["args"]) {
                 Some(stroke)=>{
-                    let reading=state.borrow().link.owner().ok().and_then(|owner|owner.transport_reading());
-                    let outcome=state.borrow_mut().relay.on_key(std::time::Instant::now(),&action,stroke,reading);
+                    let outcome=if action.is_empty(){
+                        state.borrow_mut().relay.on_unbound(std::time::Instant::now(),stroke)
+                    }else{
+                        let reading=state.borrow().link.owner().ok().and_then(|owner|owner.transport_reading());
+                        state.borrow_mut().relay.on_key(std::time::Instant::now(),&action,stroke,reading)
+                    };
                     apply_relay_effects(state,outcome.effects);
                     Ok(serde_json::json!({
                         "accepted":matches!(outcome.verdict,host_key_relay::KeyVerdict::Accepted),
@@ -1904,10 +1973,10 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
                 }
             })
         }
-        Some("host_key_escape_set")=>{
-            let set=host_key_relay::StrokeSet::from_json(&request["args"]["strokes"]);
+        Some("host_key_owned_set")=>{
+            let set=host_key_relay::OwnedStrokes::from_json(&request["args"]["strokes"]);
             let count=set.len();
-            state.borrow_mut().escape_set=set;
+            state.borrow_mut().owned=set;
             Ok(serde_json::json!({"ok":true,"count":count}))
         }
         // 拖入的真实磁盘文件：Windows 在**进入本函数之前**就把它改写成

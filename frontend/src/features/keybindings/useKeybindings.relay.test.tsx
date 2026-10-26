@@ -68,21 +68,21 @@ function press(init: KeyboardEventInit): void {
     );
 }
 
-test("Space 归一化成 space，并带上四个修饰位", async () => {
+test("Space 带上 DOM code（与键盘布局无关的物理键名），并带四个修饰位", async () => {
     await mount();
     press({ key: " ", code: "Space" });
     expect(fired).toEqual([
         {
             action: "playback.toggle",
-            stroke: { key: "space", ctrl: false, shift: false, alt: false, meta: false },
+            stroke: { code: "Space", ctrl: false, shift: false, alt: false, meta: false },
         },
     ]);
 });
 
-test("Enter 归一化成 enter", async () => {
+test("Enter 的 code 是 Enter（不是 NumpadEnter）", async () => {
     await mount();
     press({ key: "Enter", code: "Enter" });
-    expect(fired.map((item) => item.stroke.key)).toEqual(["enter"]);
+    expect(fired.map((item) => item.stroke.code)).toEqual(["Enter"]);
 });
 
 test("修饰键如实上报（让路判定据此拒绝）", async () => {
@@ -92,7 +92,7 @@ test("修饰键如实上报（让路判定据此拒绝）", async () => {
     // 具体命中哪个动作由焦点路由裁决（这里不钉），本用例只关心按键描述被如实带上。
     expect(fired[0].action).toMatch(/^(edit\.|pianoRoll\.)/);
     expect(fired[0].stroke).toEqual({
-        key: "z",
+        code: "KeyZ",
         ctrl: true,
         shift: false,
         alt: false,
@@ -105,6 +105,6 @@ test("编辑 op 的路由分支也带按键描述", async () => {
     press({ key: "c", code: "KeyC", ctrlKey: true });
     expect(fired).toHaveLength(1);
     expect(fired[0].action).toMatch(/^(clip|pianoRoll)\.copy$/);
-    expect(fired[0].stroke.key).toBe("c");
+    expect(fired[0].stroke.code).toBe("KeyC");
     expect(fired[0].stroke.ctrl).toBe(true);
 });

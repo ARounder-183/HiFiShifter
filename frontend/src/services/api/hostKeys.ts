@@ -4,11 +4,11 @@ import { invoke } from "../invoke";
  * 宿主专属快捷键的让路通道（仅插件形态有意义）。
  *
  * 【为什么单独一个分组】这两条命令是**成对**的：`relay` 是"这一次按键我不要了"，
- * `publishEscapeSet` 是"以下这些键我以后都不要"。分成两处登记会让"哪一侧是权威"
- * 说不清；放在一起，读者一眼看到它们共用同一套按键词汇（`key` + 四个修饰位）。
+ * `publishOwnedStrokes` 是"以下这些键我自己要用"。分成两处登记会让"哪一侧是权威"
+ * 说不清；放在一起，读者一眼看到它们共用同一套按键词汇（`code` + 四个修饰位）。
  */
 
-/** 按键的修饰位。全部为假 = 裸键，也是唯一允许让路的形态。 */
+/** 按键的修饰位。全部为假 = 裸键，也是唯一允许让路的形态（见 hostKeyRelay）。 */
 export interface HostKeyModifiers {
     ctrl: boolean;
     shift: boolean;
@@ -22,43 +22,39 @@ export interface HostKeyRelayReply {
     /**
      * 不接手的原因（`null` = 已接手）。
      *
-     * 分两类，调用方据此决定要不要说话：
+     * 分两类，调用方据此决定要不要回落旧文案：
      * - `host-native` / `in-flight` / `rate-limited`：**正常不接手**（宿主本来就会处理、
-     *   上一拍还没走完、连按太快）。用户什么都没做错，不该看到任何提示。
-     * - `unsupported-key` / `modified-key` / `not-foreground` / `no-host-window`：
-     *   让路**没成立**。前两者等于回到"插件做不到"的旧行为，调用方应回落旧文案；
-     *   后两者由原生另行发 `host_key_relay_notice` 事件说话。
+     *   上一拍的探针还没走完、连按太快）。用户什么都没做错，不该看到任何提示。
+     * - `unsupported-key` / `modified-key`：让路**没成立**，等于回到"插件做不到"的
+     *   旧行为，调用方应回落旧文案。
      */
     reason:
-        | null
-        | "host-native"
-        | "in-flight"
-        | "rate-limited"
-        | "unsupported-key"
-        | "modified-key"
-        | "not-foreground"
-        | "no-host-window";
+        null | "host-native" | "in-flight" | "rate-limited" | "unsupported-key" | "modified-key";
 }
 
 export const hostKeysApi = {
     /**
      * 把这一次按键交回宿主。
      *
-     * 【为什么 `action` 也传】它只用于日志与"每个动作每次会话只提示一次"的记账；
-     * 原生**不**按它查表 —— 宿主的动作表不可枚举，插件也绝不替用户翻译键（见方案 R1）。
+     * 【为什么 `action` 也传】它只用于日志，以及"这一次要不要先探针"：
+     * - 非空 = 插件**认识**这个键（命中过绑定、被能力矩阵拒绝）⇒ 先探针，防双触发；
+     * - 空串 = 一条绑定都没命中 ⇒ 直接投，插件本来就不处理它。
+     *
+     * 原生**不**按 `action` 查表 —— 宿主的动作表不可枚举，插件也绝不替用户翻译键。
      */
-    relay: (key: string, action: string, mods: HostKeyModifiers) =>
-        invoke<HostKeyRelayReply>("host_key_relay", key, action, mods),
+    relay: (code: string, action: string | null, mods: HostKeyModifiers) =>
+        invoke<HostKeyRelayReply>("host_key_relay", code, action ?? "", mods),
 
     /**
-     * 声明"哪些键属于宿主"。
+     * 声明"插件自己占用了哪些键"。
      *
-     * 【为什么必需】`PassThrough` 平台要在**页面看到按键之前**决定让不让，而原生不知道
-     * 用户的键位（键位在 Redux / localStorage 里）。集合由前端算好推过去，
-     * 两端因此只有一套"哪些键该让"的判据（见 `collectHostKeyEscapeStrokes`）。
+     * 【为什么是"占用"而不是"可让"】可让的是**未绑定**的那些键 —— 那是一个没法枚举
+     * 的补集（用户随时改键）。而"插件占用了什么"恰好是有限的、前端本来就算得出来的
+     * 那份。原生据此拒绝"页面借宿主的手按一个它自己也在用的键"（最坏的情形是
+     * `Delete`：插件删片段，宿主删它自己的对象）。
      */
-    publishEscapeSet: (strokes: ReadonlyArray<{ key: string } & HostKeyModifiers>) =>
-        invoke<{ ok: boolean; count: number }>("host_key_escape_set", strokes),
+    publishOwnedStrokes: (strokes: ReadonlyArray<{ code: string } & HostKeyModifiers>) =>
+        invoke<{ ok: boolean; count: number }>("host_key_owned_set", strokes),
 
     /**
      * 把键盘焦点交还宿主。

@@ -3,7 +3,12 @@ import { useAppSelector } from "../../app/hooks";
 import { firstBinding, selectMergedKeybindings } from "./keybindingsSlice";
 import { ACTION_META } from "./defaultKeybindings";
 import type { ActionId } from "./types";
-import type { HostKeyStroke } from "../../services/hostKeyRelay";
+import {
+    classifyUnboundHostKey,
+    hostKeyRelayEnv,
+    relayHostKey,
+    type HostKeyStroke,
+} from "../../services/hostKeyRelay";
 import type { RootState } from "../../app/store";
 import {
     resolveActionByFocus,
@@ -262,10 +267,13 @@ export function useKeybindings(handler: KeybindingActionHandler): void {
             if (isShortcutSuppressed()) return;
 
             const key = normalizeEventKey(e);
-            // 让路判定需要的全部按键事实，在这一层就地收齐（`key` 已归一化，
-            // 因此 Space 是 `space` 而不是 `" "`）。
+            // 让路判定需要的全部按键事实，在这一层就地收齐。
+            //
+            // 【为什么带 `code` 而不是归一化后的 `key`】`code` 是**与键盘布局无关的
+            // 物理键名**（AZERTY 上按同一个物理键，`code` 仍是 `KeyQ`），而投递到宿主
+            // 必须按物理键来 —— 一个被布局改写的键恰好违背"让路"的全部意义。
             const stroke: HostKeyStroke = {
-                key,
+                code: e.code,
                 ctrl: e.ctrlKey,
                 shift: e.shiftKey,
                 alt: e.altKey,
@@ -383,7 +391,28 @@ export function useKeybindings(handler: KeybindingActionHandler): void {
                 domain,
                 toolModeRef.current,
             );
-            if (!matched) return;
+            if (!matched) {
+                /*
+                 * 一条绑定都没命中 ⇒ 这个键可能是**宿主的**。
+                 *
+                 * 【为什么排到微任务】事件派发是同步的：微任务检查点在整条派发链
+                 * （捕获 → 目标 → 冒泡，含 React 的合成事件）跑完之后才执行。此时
+                 * `defaultPrevented` 已经是"有没有人认领这个键"的最终答案 —— 比维护
+                 * 一份"哪些组件自己处理了哪些键"的名单可靠得多（那份名单一定漂移）。
+                 *
+                 * 【为什么不理会自动重复】按住不放是**一次**意图。逐拍投递既会灌满宿主
+                 * 的消息队列，也会撞上让路的限流（那道闸是为"宿主把键弹回来"准备的），
+                 * 结果是按住没用、单按才灵。一次物理按下 = 一次投递。
+                 */
+                if (!e.repeat) {
+                    queueMicrotask(() => {
+                        if (e.defaultPrevented) return;
+                        const request = classifyUnboundHostKey(stroke, hostKeyRelayEnv());
+                        if (request) void relayHostKey(request);
+                    });
+                }
+                return;
+            }
 
             // OS 自动重复：仅 REPEATABLE_ACTIONS（快进/缩放/轨道导航）走系统
             // 重复，其余一律吞掉 —— 复制/剪切等编辑操作若放行重复，会以键率

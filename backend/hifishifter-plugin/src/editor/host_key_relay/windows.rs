@@ -14,13 +14,13 @@
 //! 也不保证宿主一定会处理（有的宿主只看自己的前台焦点窗口）。因此 Policy 仍要先探针、
 //! 之后再观察窗口判定"成没成"，而不是假定它一定灵。
 
-use super::{EscapeError, Fidelity, HostKeyEscape, KeyToken, Stroke};
+use super::{EscapeError, Fidelity, HostKeyEscape, KeyCode, Stroke};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetFocus, MapVirtualKeyW, SetFocus, MAPVK_VK_TO_VSC, VIRTUAL_KEY, VK_BACK, VK_DELETE, VK_DOWN,
-    VK_END, VK_ESCAPE, VK_HOME, VK_INSERT, VK_LEFT, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT,
-    VK_SPACE, VK_TAB, VK_UP,
+    GetFocus, MapVirtualKeyW, SetFocus, MAPVK_VK_TO_VSC, VIRTUAL_KEY, VK_ADD, VK_BACK, VK_DECIMAL,
+    VK_DELETE, VK_DIVIDE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_INSERT, VK_LEFT, VK_MULTIPLY,
+    VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SPACE, VK_SUBTRACT, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetAncestor, GetForegroundWindow, GetWindowThreadProcessId, IsChild, IsWindow, IsWindowVisible,
@@ -39,7 +39,7 @@ impl HostKeyEscape for WindowsEscape {
         if !stroke.is_bare() {
             return Err(EscapeError::UnsupportedKey);
         }
-        let key = virtual_key(stroke.token).ok_or(EscapeError::UnsupportedKey)?;
+        let key = virtual_key(stroke.code).ok_or(EscapeError::UnsupportedKey)?;
         let editor = HWND(window as *mut core::ffi::c_void);
         let host = host_window(editor)?;
         // SAFETY: 两个句柄都来自本进程的窗口树；两个调用都是纯查询，不改宿主状态。
@@ -47,8 +47,12 @@ impl HostKeyEscape for WindowsEscape {
             // 投给一个不可见窗口等于投进虚空（桥接进程的隐藏窗口正是这种）。
             return Err(EscapeError::NoHostWindow);
         }
-        if unsafe { GetForegroundWindow() } != host {
-            // 宿主不在前台时投递，键可能落到别人身上。
+        // 【为什么不再要求"前台窗口 == 宿主主窗口"】插件通常活在一个**自己的顶层窗口**
+        // 里（宿主的 FX 链 / 插件浮窗），那个窗口才是前台。要求相等，等于在浮窗形态下
+        // 恒拒绝 —— 而这正是"让路从来没生效过"的直接原因：目标窗口取的是 owner 链顶端
+        // 的主窗口，前台窗口却是宿主给插件开的那个浮窗，两者必然不同。
+        if !belongs_to_host_tree(unsafe { GetForegroundWindow() }, editor, host) {
+            // 前台是别的应用：此时投递，键可能落到别人身上。
             return Err(EscapeError::NotForeground);
         }
         post(host, key, false)?;
@@ -90,6 +94,30 @@ fn host_window(editor: HWND) -> Result<HWND, EscapeError> {
         return Err(EscapeError::NoHostWindow);
     }
     Ok(host)
+}
+
+/// 前台窗口是不是"宿主的"那一棵窗口树里的。
+///
+/// 【为什么不是判等】插件常驻在自己的顶层窗口里（宿主的 FX 链窗口 / 插件浮窗），
+/// 那个窗口才是前台，而它的 **root owner** 才是宿主主窗口 —— 也就是我们真正要投递的
+/// 目标。判等等于在浮窗形态下恒拒绝，而那恰恰是最常见的形态。
+///
+/// 【为什么这四条就够】它们覆盖了"宿主自己的窗口"的三种形态（主窗口本身、主窗口的
+/// 子窗口、与编辑器同一条 owner 链上的兄弟浮窗）加上"主窗口就是顶层"的普通情形。
+/// 前台属于**别的应用**时四条全假 —— 那种情况下投递会把键送到别人身上。
+fn belongs_to_host_tree(foreground: HWND, editor: HWND, host: HWND) -> bool {
+    if foreground.0.is_null() || host.0.is_null() {
+        return false;
+    }
+    if foreground == host || foreground == editor {
+        return true;
+    }
+    // SAFETY: 全部是纯查询。
+    unsafe {
+        IsChild(host, foreground).as_bool()
+            || GetAncestor(foreground, GA_ROOTOWNER) == host
+            || GetAncestor(foreground, GA_ROOT) == host
+    }
 }
 
 /// 记下来的"上一个焦点窗口"还能不能当目标。
@@ -155,27 +183,58 @@ struct VirtualKey {
     extended: bool,
 }
 
-/// token 到虚拟键码。
+/// DOM `code` 到虚拟键码。
 ///
-/// 【为什么只有这张表】只让**与键盘布局无关**的具名键（见 `strokes::RELAYABLE_TOKENS`）。
-/// 表外一律 `None`：不猜、不近似。
-fn virtual_key(token: KeyToken) -> Option<VirtualKey> {
-    let (key, extended) = match token {
-        KeyToken::Space => (VK_SPACE, false),
-        KeyToken::Enter => (VK_RETURN, false),
-        KeyToken::Tab => (VK_TAB, false),
-        KeyToken::Escape => (VK_ESCAPE, false),
-        KeyToken::Backspace => (VK_BACK, false),
-        KeyToken::Insert => (VK_INSERT, true),
-        KeyToken::Delete => (VK_DELETE, true),
-        KeyToken::Home => (VK_HOME, true),
-        KeyToken::End => (VK_END, true),
-        KeyToken::PageUp => (VK_PRIOR, true),
-        KeyToken::PageDown => (VK_NEXT, true),
-        KeyToken::ArrowLeft => (VK_LEFT, true),
-        KeyToken::ArrowUp => (VK_UP, true),
-        KeyToken::ArrowRight => (VK_RIGHT, true),
-        KeyToken::ArrowDown => (VK_DOWN, true),
+/// 【为什么可以直接查表】`KeyboardEvent.code` 是**与键盘布局无关的物理键名**，
+/// 与 VK 一一对应；需要 `VkKeyScanW` 那种布局换算的只有可打印字符，而它们不在
+/// 可让路的表里（见 `strokes`）。
+///
+/// 【表外一律 None】不猜、不近似。
+fn virtual_key(code: KeyCode) -> Option<VirtualKey> {
+    let (key, extended) = match code.as_str() {
+        "Space" => (VK_SPACE, false),
+        "Enter" => (VK_RETURN, false),
+        "Tab" => (VK_TAB, false),
+        "Escape" => (VK_ESCAPE, false),
+        "Backspace" => (VK_BACK, false),
+        "Insert" => (VK_INSERT, true),
+        "Delete" => (VK_DELETE, true),
+        "Home" => (VK_HOME, true),
+        "End" => (VK_END, true),
+        "PageUp" => (VK_PRIOR, true),
+        "PageDown" => (VK_NEXT, true),
+        "ArrowLeft" => (VK_LEFT, true),
+        "ArrowUp" => (VK_UP, true),
+        "ArrowRight" => (VK_RIGHT, true),
+        "ArrowDown" => (VK_DOWN, true),
+        // 小键盘：数字区与主键盘同码不同键，靠扩展位区分。
+        "NumpadEnter" => (VK_RETURN, true),
+        "NumpadAdd" => (VK_ADD, false),
+        "NumpadSubtract" => (VK_SUBTRACT, false),
+        "NumpadMultiply" => (VK_MULTIPLY, false),
+        "NumpadDivide" => (VK_DIVIDE, true),
+        "NumpadDecimal" => (VK_DECIMAL, false),
+        other => {
+            // F1–F24 是连续区间（0x70 起），Numpad0–9 也是（0x60 起）——
+            // 把 34 个常量逐个 import 只会让这张表更难读，区间表达更贴近 VK 的定义。
+            if let Some(number) = other
+                .strip_prefix('F')
+                .and_then(|rest| rest.parse::<u16>().ok())
+            {
+                if !(1..=24).contains(&number) {
+                    return None;
+                }
+                (VIRTUAL_KEY(0x70 + number - 1), false)
+            } else {
+                let digit = other
+                    .strip_prefix("Numpad")
+                    .and_then(|rest| rest.parse::<u16>().ok())?;
+                if digit > 9 {
+                    return None;
+                }
+                (VIRTUAL_KEY(0x60 + digit), false)
+            }
+        }
     };
     Some(VirtualKey {
         code: key.0,
@@ -225,9 +284,13 @@ fn post(host: HWND, key: VirtualKey, up: bool) -> Result<(), EscapeError> {
 mod tests {
     use super::*;
 
-    fn bare(token: KeyToken) -> Stroke {
+    fn code(name: &str) -> KeyCode {
+        KeyCode::parse(name).expect(name)
+    }
+
+    fn bare(name: &str) -> Stroke {
         Stroke {
-            token,
+            code: code(name),
             ctrl: false,
             shift: false,
             alt: false,
@@ -260,17 +323,17 @@ mod tests {
         assert_eq!(key_lparam(left, true) as u32 as u64, 0xC14B_0001);
     }
 
-    /// **不变量：token 表里每一项都有虚拟键码。**
+    /// **不变量：键表里每一项都有虚拟键码。**
     ///
-    /// 【为什么是回归测试】两处各写一张表时，最容易发生的漂移是"token 收进来了、
-    /// 键码忘了加"，表现是那个键按了毫无反应。
+    /// 【为什么是回归测试】表与换算各写一份时，最容易发生的漂移是"表里加了、换算忘了"，
+    /// 表现是那个键按了毫无反应、且没有任何提示。
     #[test]
-    fn every_relayable_token_has_a_virtual_key() {
-        for token in super::super::strokes::relayable_tokens() {
-            let parsed = KeyToken::parse(token).expect("表里的每一项都必须能解析");
+    fn every_relayable_code_has_a_virtual_key() {
+        for name in super::super::strokes::relayable_codes() {
+            let parsed = KeyCode::parse(name).expect("表里的每一项都必须能解析");
             assert!(
                 virtual_key(parsed).is_some(),
-                "{token} 在 token 表里却没有虚拟键码"
+                "{name} 在键表里却没有虚拟键码"
             );
         }
     }
@@ -278,29 +341,36 @@ mod tests {
     /// 方向键/翻页键是扩展键，文本类不是 —— 宿主编排逻辑依赖这个分类。
     #[test]
     fn navigation_keys_are_extended_and_text_keys_are_not() {
-        for token in [
-            KeyToken::Space,
-            KeyToken::Enter,
-            KeyToken::Tab,
-            KeyToken::Escape,
-            KeyToken::Backspace,
-        ] {
-            assert!(!virtual_key(token).unwrap().extended, "{token:?}");
+        for name in ["Space", "Enter", "Tab", "Escape", "Backspace"] {
+            assert!(!virtual_key(code(name)).unwrap().extended, "{name}");
         }
-        for token in [
-            KeyToken::Insert,
-            KeyToken::Delete,
-            KeyToken::Home,
-            KeyToken::End,
-            KeyToken::PageUp,
-            KeyToken::PageDown,
-            KeyToken::ArrowLeft,
-            KeyToken::ArrowUp,
-            KeyToken::ArrowRight,
-            KeyToken::ArrowDown,
+        for name in [
+            "Insert",
+            "Delete",
+            "Home",
+            "End",
+            "PageUp",
+            "PageDown",
+            "ArrowLeft",
+            "ArrowUp",
+            "ArrowRight",
+            "ArrowDown",
         ] {
-            assert!(virtual_key(token).unwrap().extended, "{token:?}");
+            assert!(virtual_key(code(name)).unwrap().extended, "{name}");
         }
+    }
+
+    /// 功能键与小键盘落在 VK 的两个连续区间上。
+    #[test]
+    fn function_and_numpad_keys_land_on_the_vk_ranges() {
+        assert_eq!(virtual_key(code("F1")).unwrap().code, 0x70);
+        assert_eq!(virtual_key(code("F24")).unwrap().code, 0x87);
+        assert_eq!(virtual_key(code("Numpad0")).unwrap().code, 0x60);
+        assert_eq!(virtual_key(code("Numpad9")).unwrap().code, 0x69);
+        // 小键盘回车与主键盘回车同码，只有扩展位能区分。
+        assert_eq!(virtual_key(code("NumpadEnter")).unwrap().code, VK_RETURN.0);
+        assert!(virtual_key(code("NumpadEnter")).unwrap().extended);
+        assert!(!virtual_key(code("Enter")).unwrap().extended);
     }
 
     /// 投递前的拒绝必须给出**结构化**原因，而不是 panic 或静默。
@@ -309,7 +379,7 @@ mod tests {
         // 0 号句柄不是窗口：必须得到明确原因，不能投递、不能 panic。
         let mut escape = WindowsEscape;
         assert_eq!(
-            escape.escape(0, &bare(KeyToken::Space)),
+            escape.escape(0, &bare("Space")),
             Err(EscapeError::NoHostWindow)
         );
     }
@@ -317,8 +387,7 @@ mod tests {
     /// **不变量：拿不到宿主窗口时，交还必须失败而不是假装成功。**
     ///
     /// 【为什么钉死】"把键盘交给宿主"唯一的失败形态就是**什么都没发生**。若这里
-    /// 返回 `Ok`，调用方会告诉用户"已交还"，而焦点其实还在插件里 —— 那正是本次
-    /// 报障的原始体验。
+    /// 返回 `Ok`，调用方会告诉用户"已交还"，而焦点其实还在插件里。
     #[test]
     fn an_empty_window_handle_is_refused_instead_of_reported_as_handed_back() {
         let mut escape = WindowsEscape;
@@ -334,17 +403,32 @@ mod tests {
         assert!(!focus_target_belongs_to(dead, editor, host));
     }
 
+    /// **不变量：前台判据看的是"窗口树归属"，不是"等于主窗口"。**
+    ///
+    /// 【为什么这是本轮的关键回归】插件通常活在自己的顶层窗口里（宿主的 FX 链 /
+    /// 插件浮窗），那个窗口才是前台；而投递目标是它的 **root owner**（宿主主窗口）。
+    /// 两者恒不相等 —— 旧判据因此在浮窗形态下**一次都没投递过**，而那正是"让路按了
+    /// 没反应"的直接原因。
+    #[test]
+    fn a_foreground_window_is_accepted_by_tree_membership_not_by_equality() {
+        // 句柄 0 一律拒绝（没有前台窗口 / 没有宿主）。
+        let host = HWND(std::ptr::dangling_mut::<core::ffi::c_void>());
+        assert!(!belongs_to_host_tree(HWND::default(), host, host));
+        assert!(!belongs_to_host_tree(host, host, HWND::default()));
+        // 非窗口句柄：四个查询都会失败或返回 null ⇒ 必须拒绝，而不是"碰巧通过"。
+        let stranger = HWND(std::ptr::without_provenance_mut(2));
+        assert!(
+            !belongs_to_host_tree(stranger, host, host),
+            "不认识的前台窗口必须被拒绝"
+        );
+    }
+
     /// 带修饰的键在原生侧同样被拒 —— 不能假定调用方守规矩。
     #[test]
     fn a_modified_stroke_is_refused() {
         let mut escape = WindowsEscape;
-        let stroke = Stroke {
-            token: KeyToken::Space,
-            ctrl: true,
-            shift: false,
-            alt: false,
-            meta: false,
-        };
+        let mut stroke = bare("Space");
+        stroke.ctrl = true;
         assert_eq!(escape.escape(0, &stroke), Err(EscapeError::UnsupportedKey));
     }
 }

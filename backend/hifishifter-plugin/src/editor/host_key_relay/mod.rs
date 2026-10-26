@@ -34,15 +34,15 @@ mod windows;
 
 mod unavailable;
 
-pub(crate) use strokes::{KeyToken, Stroke, StrokeSet};
+pub(crate) use strokes::{KeyCode, OwnedStrokes, Stroke};
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 /// 探针窗口：等"宿主自己会不会动"。
 ///
 /// 宿主动作 → 音频块 `kPlaying`（最大 1024 帧 @44.1k ≈ 23 ms）→ 20 ms 的 UI tick，
-/// 90 ms 是 3–4 个 tick：足够看清，又不牺牲手感。
+/// 90 ms 是 3–4 个 tick：足够看清，又不牺牲手感。**只付一次**（见 `Gate`）。
 const PROBE: Duration = Duration::from_millis(90);
 
 /// 观察窗：让路之后等"宿主真的动了吗"。
@@ -72,9 +72,7 @@ pub(crate) enum Fidelity {
     PassThrough,
     /// 页面先吃掉了键，我们再补一次。**必须**先证明宿主没自己处理过。
     Synthetic,
-    /// 本平台没有这条路。第一次按就说清楚。
-    ///
-    /// 【同上】由 `unavailable.rs` 的原语构造；Windows 上那个原语不会被实例化。
+    /// 本平台没有这条路。接手但不投递，也不说话。
     #[allow(dead_code)]
     Unavailable,
 }
@@ -142,10 +140,7 @@ pub(crate) trait HostKeyEscape {
     ///
     /// 【为什么它是最后手段】焦点真的走了 —— 用户想在插件里继续编辑必须先点回来。
     /// 但它是**确定**的那条路：宿主自己的键位表一定会生效，不像投递那样要看宿主脸色。
-    /// 所以它不做默认，只做"投递不灵时的下一步"。
     ///
-    /// 【为什么与 `escape` 同一个 trait】两者都是"把键盘还给宿主"，只是彻底程度不同；
-    /// 分开成两个 trait 会让"这个平台支持到哪一步"变成两个各自演化的答案。
     /// `previous` = 焦点离开本编辑器之前**最后一个拿到焦点的宿主窗口**（见
     /// `EditorClient::previous_focus`）。原语优先还给它 —— "回到原处"比"跳到某个
     /// 祖先窗口"更符合用户对"交还"的预期，也更容易让宿主的快捷键表命中。
@@ -173,6 +168,8 @@ pub(crate) fn escape_for_platform() -> Box<dyn HostKeyEscape> {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) enum Effect {
     /// 把这一次按键交回宿主。
+    ///
+    /// `action` 只用于日志：入口 B（未绑定的键）没有动作名，那里是空串。
     Escape { action: String, stroke: Stroke },
     /// 只记一行诊断日志，不改变任何状态。
     ///
@@ -186,7 +183,7 @@ pub(crate) enum Effect {
 pub(crate) enum RejectReason {
     /// 宿主自己处理了这个键（探针学到的会话级事实）。**不该提示**。
     HostNative,
-    /// 上一拍（探针或观察窗）还没走完。**不该提示**。
+    /// 上一拍的探针还没走完。**不该提示**。
     InFlight,
     /// 连按太快 / 限流。**不该提示**。
     RateLimited,
@@ -255,19 +252,18 @@ impl KeyOutcome {
     }
 }
 
+/// 入口 A（插件认识的键）当前处在哪一档。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Mode {
+enum Gate {
     /// 等一等：宿主会不会自己处理这个键。
     Probe,
     /// 已经证明宿主不处理：以后立即让路。
     Relay,
-    /// 宿主自己处理这个键（会话闩锁）。以后永不投递，也不提示。
-    HostNative,
-    /// 本平台没有这条路：每次按都如实说一句。
+    /// 本平台没有这条路：接手，但不投递。
     Unavailable,
 }
 
-/// 在途的窗口（探针或观察窗，二者互斥）。
+/// 在途的探针或观察窗（二者互斥）。
 #[derive(Clone, Debug)]
 struct Pending {
     /// `true` = 探针（等宿主自己动），`false` = 观察窗（等让路之后动）。
@@ -285,7 +281,9 @@ struct Pending {
 /// 让路状态机。纯逻辑：不碰窗口、不碰 COM、不碰会话，只认注入的 `Instant` 与读数。
 pub(crate) struct Arbiter {
     fidelity: Fidelity,
-    mode: Mode,
+    gate: Gate,
+    /// 宿主自己处理过的键。**按码记账** —— 宿主认识空格，不代表它认识 F2。
+    host_native: HashSet<KeyCode>,
     pending: Option<Pending>,
     last_escape: Option<Instant>,
     escapes: VecDeque<Instant>,
@@ -295,12 +293,13 @@ impl Arbiter {
     pub(crate) fn new(fidelity: Fidelity) -> Self {
         Self {
             fidelity,
-            mode: match fidelity {
+            gate: match fidelity {
                 // 键根本没进页面 ⇒ 不存在双触发 ⇒ 探针纯属浪费一次手感。
-                Fidelity::PassThrough => Mode::Relay,
-                Fidelity::Synthetic => Mode::Probe,
-                Fidelity::Unavailable => Mode::Unavailable,
+                Fidelity::PassThrough => Gate::Relay,
+                Fidelity::Synthetic => Gate::Probe,
+                Fidelity::Unavailable => Gate::Unavailable,
             },
+            host_native: HashSet::new(),
             pending: None,
             last_escape: None,
             escapes: VecDeque::new(),
@@ -311,7 +310,16 @@ impl Arbiter {
         self.fidelity
     }
 
-    /// 收到一次"可让"的按键（前端已经判定过）。返回判决 + 立即产生的副作用。
+    /// 宿主自己处理过的键有几个（诊断读数）。
+    pub(crate) fn host_native_count(&self) -> usize {
+        self.host_native.len()
+    }
+
+    /// 入口 A：插件**认识**这个键（命中了一条绑定），但能力矩阵说它不归插件做。
+    ///
+    /// 【为什么它要探针】这类键有可能被宿主路由给插件视图（`IPlugView::onKeyDown`）。
+    /// 若宿主已经处理、我们又补一次，用户按一下 Space 会被处理两次（播放→又暂停），
+    /// 表现是"按了完全没反应" —— 比现状更坏。所以先等 90 ms 看宿主会不会自己动。
     pub(crate) fn on_key(
         &mut self,
         now: Instant,
@@ -319,15 +327,17 @@ impl Arbiter {
         stroke: Stroke,
         reading: Option<Reading>,
     ) -> KeyOutcome {
-        match self.mode {
-            Mode::Unavailable => {
+        match self.gate {
+            Gate::Unavailable => {
                 // 【为什么"接手"却什么也不做】前端已经判定"这个键插件用不上"。若我们
                 // 回"不接手"，前端只会回落那句"当前宿主没有提供这个接口" —— 那是把
                 // 用户往死路上指。这里接手，把结论留在日志里：本平台没有让路原语。
                 return KeyOutcome::accepted_with(vec![Effect::Trace("unavailable")]);
             }
-            Mode::HostNative => return KeyOutcome::rejected(RejectReason::HostNative),
-            Mode::Probe | Mode::Relay => {}
+            Gate::Probe | Gate::Relay => {}
+        }
+        if self.host_native.contains(&stroke.code) {
+            return KeyOutcome::rejected(RejectReason::HostNative);
         }
         if !stroke.is_bare() {
             return KeyOutcome::rejected(RejectReason::ModifiedKey);
@@ -343,8 +353,8 @@ impl Arbiter {
         if self.throttled(now) {
             return KeyOutcome::rejected(RejectReason::RateLimited);
         }
-        match self.mode {
-            Mode::Probe => match reading {
+        match self.gate {
+            Gate::Probe => match reading {
                 Some(baseline) => {
                     self.pending = Some(Pending {
                         probe: true,
@@ -359,7 +369,7 @@ impl Arbiter {
                 // 没有读数就无从验证：跳过探针直接让一次，观察窗记为"不可验证"。
                 // 把它当成"宿主没动"会让探针每次都误判，于是每次都多等 90 ms。
                 None => {
-                    self.mode = Mode::Relay;
+                    self.gate = Gate::Relay;
                     self.record_escape(now);
                     self.pending = Some(Pending {
                         probe: false,
@@ -378,7 +388,7 @@ impl Arbiter {
                     ])
                 }
             },
-            Mode::Relay => {
+            Gate::Relay => {
                 self.record_escape(now);
                 self.pending = Some(Pending {
                     probe: false,
@@ -396,9 +406,33 @@ impl Arbiter {
                     },
                 ])
             }
-            Mode::HostNative => KeyOutcome::rejected(RejectReason::HostNative),
-            Mode::Unavailable => KeyOutcome::rejected(RejectReason::HostNative),
+            Gate::Unavailable => KeyOutcome::rejected(RejectReason::HostNative),
         }
+    }
+
+    /// 入口 B：插件**不认识**这个键（一条绑定都没命中）。
+    ///
+    /// 【为什么它不探针、不观察】插件本来就不处理这个键，所以不存在"插件做一次 + 宿主
+    /// 又做一次"的双触发 —— 探针在这里只是白付 90 ms 手感。观察窗同理：没有"成没成"
+    /// 可判，只有"发出去了"。
+    pub(crate) fn on_unbound(&mut self, now: Instant, stroke: Stroke) -> KeyOutcome {
+        if self.gate == Gate::Unavailable {
+            return KeyOutcome::accepted_with(vec![Effect::Trace("unavailable")]);
+        }
+        if !stroke.is_bare() {
+            return KeyOutcome::rejected(RejectReason::ModifiedKey);
+        }
+        if self.throttled(now) {
+            return KeyOutcome::rejected(RejectReason::RateLimited);
+        }
+        self.record_escape(now);
+        KeyOutcome::accepted_with(vec![
+            Effect::Trace("relayed-unbound"),
+            Effect::Escape {
+                action: String::new(),
+                stroke,
+            },
+        ])
     }
 
     /// 20 ms tick：推进探针/观察窗。
@@ -420,7 +454,7 @@ impl Arbiter {
                     if now < pending.deadline {
                         self.pending = Some(pending);
                     }
-                    // 到期仍无读数：无可奉告（verifiable=false ⇒ 不发提示）。
+                    // 到期仍无读数：无可奉告（verifiable=false ⇒ 不下结论）。
                 }
             }
             return Vec::new();
@@ -428,8 +462,8 @@ impl Arbiter {
 
         if reading.is_some_and(|reading| Some(reading) != pending.baseline) {
             if pending.probe {
-                // 宿主自己动了 ⇒ 这个宿主本来就会处理这个键。会话闩锁，永不投递。
-                self.mode = Mode::HostNative;
+                // 宿主自己动了 ⇒ 这个宿主本来就会处理**这个键**。按码记账，永不投递。
+                self.host_native.insert(pending.stroke.code);
                 return vec![Effect::Trace("host-native")];
             }
             return vec![Effect::Trace("accepted")];
@@ -442,7 +476,7 @@ impl Arbiter {
 
         if pending.probe {
             // 探针结论：宿主没动 ⇒ 让它一次，转入观察窗。
-            self.mode = Mode::Relay;
+            self.gate = Gate::Relay;
             self.record_escape(now);
             let stroke = pending.stroke.clone();
             let action = pending.action.clone();
@@ -495,9 +529,13 @@ impl Arbiter {
 mod tests {
     use super::*;
 
-    fn bare(token: KeyToken) -> Stroke {
+    fn code(name: &str) -> KeyCode {
+        KeyCode::parse(name).expect(name)
+    }
+
+    fn bare(name: &str) -> Stroke {
         Stroke {
-            token,
+            code: code(name),
             ctrl: false,
             shift: false,
             alt: false,
@@ -542,7 +580,7 @@ mod tests {
             .collect()
     }
 
-    /// **不变量：宿主自己动了 ⇒ 会话闩锁，永不投递。**
+    /// **不变量：宿主自己动了 ⇒ 按码闩锁，永不投递。**
     ///
     /// 【为什么这是最重要的一条】有的宿主本来就会把按键交给插件视图处理。若我们也投一次，
     /// 用户按一下 Space 会被处理两次（播放→又暂停），表现是"按了完全没反应" —— 比现状更坏。
@@ -550,28 +588,18 @@ mod tests {
     fn a_host_that_handles_the_key_itself_is_never_posted_to() {
         let start = Instant::now();
         let mut arbiter = Arbiter::new(Fidelity::Synthetic);
-        let outcome = arbiter.on_key(
-            start,
-            "playback.toggle",
-            bare(KeyToken::Space),
-            playing(false),
-        );
+        let outcome = arbiter.on_key(start, "playback.toggle", bare("Space"), playing(false));
         assert_eq!(outcome.verdict, KeyVerdict::Accepted);
         assert_eq!(escaped(&outcome.effects), 0, "探针期间不得投递");
 
         // 宿主自己开始播放：探针看到翻转。
         let effects = tick_for(&mut arbiter, start, 100, playing(true));
         assert_eq!(escaped(&effects), 0, "宿主已处理 ⇒ 不得投递");
-        assert_eq!(traces(&effects), vec!["host-native"], "正常情况只记一行日志");
+        assert_eq!(traces(&effects), vec!["host-native"]);
 
-        // 之后所有按键都不再走这条路，也不提示。
+        // 同一个键之后都不再走这条路。
         let later = start + Duration::from_secs(1);
-        let outcome = arbiter.on_key(
-            later,
-            "playback.toggle",
-            bare(KeyToken::Space),
-            playing(true),
-        );
+        let outcome = arbiter.on_key(later, "playback.toggle", bare("Space"), playing(true));
         assert_eq!(
             outcome.verdict,
             KeyVerdict::Rejected(RejectReason::HostNative)
@@ -579,17 +607,33 @@ mod tests {
         assert!(outcome.effects.is_empty());
     }
 
+    /// **不变量：闩锁按码记账 —— 宿主认识空格，不代表它认识 F2。**
+    ///
+    /// 【为什么必须是按码】用一个键的观察结果锁死全部键，是把"这个宿主认识空格"
+    /// 误读成"这个宿主认识一切"。那样一来，只要宿主对某一个键有反应，其余所有键
+    /// （包括它根本不处理的 Home / F2）就永远不再让路。
+    #[test]
+    fn the_host_native_latch_is_per_key() {
+        let start = Instant::now();
+        let mut arbiter = Arbiter::new(Fidelity::Synthetic);
+        arbiter.on_key(start, "playback.toggle", bare("Space"), playing(false));
+        tick_for(&mut arbiter, start, 100, playing(true));
+        assert_eq!(arbiter.host_native_count(), 1);
+
+        // 另一个键照样让路。
+        let later = start + Duration::from_secs(1);
+        let outcome = arbiter.on_key(later, "playback.stop", bare("Enter"), playing(true));
+        assert_eq!(outcome.verdict, KeyVerdict::Accepted);
+        let effects = tick_for(&mut arbiter, later, 100, playing(true));
+        assert_eq!(escaped(&effects), 1, "没被闩过的键必须照常让路");
+    }
+
     /// **不变量：宿主没动 ⇒ 投递一次，并转入"以后立即投"。**
     #[test]
     fn a_host_that_ignores_the_key_gets_exactly_one_post() {
         let start = Instant::now();
         let mut arbiter = Arbiter::new(Fidelity::Synthetic);
-        arbiter.on_key(
-            start,
-            "playback.toggle",
-            bare(KeyToken::Space),
-            playing(false),
-        );
+        arbiter.on_key(start, "playback.toggle", bare("Space"), playing(false));
 
         // 90 ms 探针内不得投递。
         let early = tick_for(&mut arbiter, start, 80, playing(false));
@@ -600,12 +644,7 @@ mod tests {
 
         // 第二下：模式已是 Relay ⇒ 立即投，不再等 90 ms。
         let second = start + Duration::from_millis(200);
-        let outcome = arbiter.on_key(
-            second,
-            "playback.toggle",
-            bare(KeyToken::Space),
-            playing(false),
-        );
+        let outcome = arbiter.on_key(second, "playback.toggle", bare("Space"), playing(false));
         assert_eq!(outcome.verdict, KeyVerdict::Accepted);
         assert_eq!(escaped(&outcome.effects), 1, "Relay 模式下必须立即投递");
     }
@@ -619,12 +658,7 @@ mod tests {
     fn a_silent_success_and_a_silent_timeout() {
         let start = Instant::now();
         let mut arbiter = Arbiter::new(Fidelity::Synthetic);
-        arbiter.on_key(
-            start,
-            "playback.toggle",
-            bare(KeyToken::Space),
-            playing(false),
-        );
+        arbiter.on_key(start, "playback.toggle", bare("Space"), playing(false));
         tick_for(&mut arbiter, start, 100, playing(false));
 
         // 宿主动起来了：观察窗判成功。
@@ -636,54 +670,31 @@ mod tests {
         );
         assert_eq!(traces(&success), vec!["accepted"]);
 
-        // 再来一次，这次宿主一直不动：观察窗到期后提示一次。
+        // 再来一次，这次宿主一直不动：观察窗到期后只记一行。
         let second = start + Duration::from_secs(1);
-        arbiter.on_key(
-            second,
-            "playback.toggle",
-            bare(KeyToken::Space),
-            playing(true),
-        );
+        arbiter.on_key(second, "playback.toggle", bare("Space"), playing(true));
         let timeout = tick_for(&mut arbiter, second, 460, playing(true));
         assert_eq!(traces(&timeout), vec!["no-response"]);
-        assert_eq!(
-            timeout.iter().filter(|e| matches!(e, Effect::Escape { .. })).count(),
-            0,
-            "观察窗只记账，不再投递"
-        );
+        assert_eq!(escaped(&timeout), 0, "观察窗只记账，不再投递");
 
         // 同一个动作再失败一次：照常记账，仍然不说话。
         let third = start + Duration::from_secs(3);
-        arbiter.on_key(
-            third,
-            "playback.toggle",
-            bare(KeyToken::Space),
-            playing(true),
-        );
+        arbiter.on_key(third, "playback.toggle", bare("Space"), playing(true));
         let again = tick_for(&mut arbiter, third, 460, playing(true));
         assert_eq!(traces(&again), vec!["no-response"]);
     }
 
     /// **不变量：探针期间不接第二下；观察窗期间照接（连按 = 两次意图）。**
-    ///
-    /// 【为什么分开】探针靠"基线有没有翻转"下结论，插进来的按键会污染基线；而观察窗
-    /// 只是记账。让它挡住第二下，用户连按两下 Space（播 / 停）就只会生效一次 ——
-    /// 可他按的是两次不同的意图。
     #[test]
     fn a_second_key_during_the_probe_is_dropped_but_not_during_observation() {
         let start = Instant::now();
         let mut arbiter = Arbiter::new(Fidelity::Synthetic);
-        arbiter.on_key(
-            start,
-            "playback.toggle",
-            bare(KeyToken::Space),
-            playing(false),
-        );
+        arbiter.on_key(start, "playback.toggle", bare("Space"), playing(false));
 
         let during_probe = arbiter.on_key(
             start + Duration::from_millis(40),
             "playback.toggle",
-            bare(KeyToken::Space),
+            bare("Space"),
             playing(false),
         );
         assert_eq!(
@@ -700,7 +711,7 @@ mod tests {
         let during_observe = arbiter.on_key(
             start + Duration::from_millis(200),
             "playback.toggle",
-            bare(KeyToken::Space),
+            bare("Space"),
             playing(false),
         );
         assert_eq!(during_observe.verdict, KeyVerdict::Accepted);
@@ -712,12 +723,7 @@ mod tests {
     fn bursts_are_rate_limited_without_nagging() {
         let start = Instant::now();
         let mut arbiter = Arbiter::new(Fidelity::Synthetic);
-        arbiter.on_key(
-            start,
-            "playback.toggle",
-            bare(KeyToken::Space),
-            playing(false),
-        );
+        arbiter.on_key(start, "playback.toggle", bare("Space"), playing(false));
         tick_for(&mut arbiter, start, 100, playing(false));
         tick_for(&mut arbiter, start, 500, playing(false)); // 让观察窗走完
 
@@ -725,7 +731,7 @@ mod tests {
         let outcome = arbiter.on_key(
             start + Duration::from_millis(120),
             "playback.toggle",
-            bare(KeyToken::Space),
+            bare("Space"),
             playing(false),
         );
         assert_eq!(
@@ -735,15 +741,12 @@ mod tests {
         assert!(outcome.effects.is_empty(), "限流不该顺带提示用户");
     }
 
-    /// **不变量：没有读数时跳过探针，直接让一次，并且绝不因此提示。**
-    ///
-    /// 【为什么】"还没收到宿主读数"不等于"宿主没动"。把它当成"没动"会让探针每次都误判、
-    /// 每次都白等 90 ms；而据此发提示更是把"我没看见"说成"它没做"。
+    /// **不变量：没有读数时跳过探针，直接让一次，并且绝不因此下结论。**
     #[test]
     fn a_missing_reading_skips_the_probe_and_stays_silent() {
         let start = Instant::now();
         let mut arbiter = Arbiter::new(Fidelity::Synthetic);
-        let outcome = arbiter.on_key(start, "playback.toggle", bare(KeyToken::Space), None);
+        let outcome = arbiter.on_key(start, "playback.toggle", bare("Space"), None);
         assert_eq!(outcome.verdict, KeyVerdict::Accepted);
         assert_eq!(escaped(&outcome.effects), 1, "没有读数时直接让一次");
 
@@ -756,8 +759,8 @@ mod tests {
     fn a_late_reading_upgrades_the_observation_window() {
         let start = Instant::now();
         let mut arbiter = Arbiter::new(Fidelity::Synthetic);
-        arbiter.on_key(start, "playback.toggle", bare(KeyToken::Space), None);
-        // 100 ms 时读数出现（此时基线 = false）；之后宿主动了 ⇒ 成功、不提示。
+        arbiter.on_key(start, "playback.toggle", bare("Space"), None);
+        // 100 ms 时读数出现（此时基线 = false）；之后宿主动了 ⇒ 成功。
         let effects = tick_for(&mut arbiter, start, 100, playing(false));
         assert_eq!(traces(&effects), Vec::<&str>::new());
         let effects = tick_for(
@@ -770,65 +773,72 @@ mod tests {
     }
 
     /// **不变量：PassThrough 平台不付探针的成本。**
-    ///
-    /// 【为什么】键根本没进页面，宿主当场就动了 —— 再等 90 ms 只是白白拖慢手感。
     #[test]
     fn pass_through_platforms_relay_immediately() {
         let start = Instant::now();
         let mut arbiter = Arbiter::new(Fidelity::PassThrough);
-        let outcome = arbiter.on_key(
-            start,
-            "playback.toggle",
-            bare(KeyToken::Space),
-            playing(false),
-        );
+        let outcome = arbiter.on_key(start, "playback.toggle", bare("Space"), playing(false));
         assert_eq!(escaped(&outcome.effects), 1, "PassThrough 必须立即让路");
     }
 
     /// **不变量：Unavailable 平台接手但什么都不做，只留一行日志。**
-    ///
-    /// 【为什么是"接手"】前端已经判定"这个键插件用不上"。回"不接手"只会让它回落那句
-    /// "当前宿主没有提供这个接口" —— 那是把用户往死路上指。
     #[test]
     fn unavailable_platforms_accept_without_posting_or_speaking() {
         let start = Instant::now();
         let mut arbiter = Arbiter::new(Fidelity::Unavailable);
-        let outcome = arbiter.on_key(
-            start,
-            "playback.toggle",
-            bare(KeyToken::Space),
-            playing(false),
-        );
+        let outcome = arbiter.on_key(start, "playback.toggle", bare("Space"), playing(false));
         assert_eq!(outcome.verdict, KeyVerdict::Accepted);
         assert_eq!(escaped(&outcome.effects), 0, "本平台没有原语，不得假装投递");
         assert_eq!(traces(&outcome.effects), vec!["unavailable"]);
 
-        let again = arbiter.on_key(
-            start + Duration::from_secs(5),
-            "playback.toggle",
-            bare(KeyToken::Space),
-            playing(false),
-        );
-        assert_eq!(again.verdict, KeyVerdict::Accepted);
+        let unbound = arbiter.on_unbound(start, bare("F2"));
+        assert_eq!(unbound.verdict, KeyVerdict::Accepted);
+        assert_eq!(escaped(&unbound.effects), 0);
     }
 
     /// **不变量：带修饰的键一律不让。**
+    ///
+    /// 【为什么这条是硬限制而不是偏好】`PostMessage` 不更新线程的异步键状态，宿主读
+    /// `GetKeyState` 会看到"没按 Ctrl"，于是 `Ctrl+Home` 变成 `Home`。送一个错的键
+    /// 比不送更坏。
     #[test]
     fn modified_strokes_are_never_relayed() {
         let start = Instant::now();
         let mut arbiter = Arbiter::new(Fidelity::Synthetic);
-        let stroke = Stroke {
-            token: KeyToken::Space,
-            ctrl: true,
-            shift: false,
-            alt: false,
-            meta: false,
-        };
-        let outcome = arbiter.on_key(start, "playback.toggle", stroke, playing(false));
+        let mut stroke = bare("Space");
+        stroke.ctrl = true;
+        let outcome = arbiter.on_key(start, "playback.toggle", stroke.clone(), playing(false));
         assert_eq!(
             outcome.verdict,
             KeyVerdict::Rejected(RejectReason::ModifiedKey)
         );
         assert!(outcome.effects.is_empty());
+
+        let unbound = arbiter.on_unbound(start, stroke);
+        assert_eq!(
+            unbound.verdict,
+            KeyVerdict::Rejected(RejectReason::ModifiedKey)
+        );
+        assert!(unbound.effects.is_empty());
+    }
+
+    /// **不变量：未绑定的键直接投，不付探针的 90 ms，也不进观察窗。**
+    #[test]
+    fn unbound_keys_are_posted_immediately_and_never_probed() {
+        let start = Instant::now();
+        let mut arbiter = Arbiter::new(Fidelity::Synthetic);
+        let outcome = arbiter.on_unbound(start, bare("F2"));
+        assert_eq!(outcome.verdict, KeyVerdict::Accepted);
+        assert_eq!(escaped(&outcome.effects), 1, "未绑定的键没有双触发风险");
+        assert_eq!(traces(&outcome.effects), vec!["relayed-unbound"]);
+
+        // 观察窗里没有任何待办：tick 不会产出成功/超时的结论。
+        let after = tick_for(&mut arbiter, start, 460, playing(false));
+        assert_eq!(traces(&after), Vec::<&str>::new());
+
+        // 连按两下 = 两次意图，第二下不被"探针单飞"吃掉。
+        let second = arbiter.on_unbound(start + Duration::from_millis(120), bare("F2"));
+        assert_eq!(second.verdict, KeyVerdict::Accepted);
+        assert_eq!(escaped(&second.effects), 1);
     }
 }

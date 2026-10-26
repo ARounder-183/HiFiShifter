@@ -963,12 +963,12 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
 
         // ── 宿主专属快捷键的让路（仅插件形态；见 `services/hostKeyRelay.ts`）─────
         // 【为什么两条都要显式登记】`host_key_relay` 带三个位置参数，
-        // `host_key_escape_set` 带一个数组。漏登记会返回 `__unwired` 并直接 throw ——
+        // `host_key_owned_set` 带一个数组。漏登记会返回 `__unwired` 并直接 throw ——
         // 而这里的失败是**静默**的（用户只看到"按了没反应"），正是本仓反复吃过的那类。
         case "host_key_relay":
-            return { key: args[0], action: args[1], mods: args[2] };
+            return { code: args[0], action: args[1], mods: args[2] };
 
-        case "host_key_escape_set":
+        case "host_key_owned_set":
             return { strokes: args[0] };
 
         default:

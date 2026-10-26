@@ -6,9 +6,9 @@
 //! 原生实现；Linux 上 Fidelity 是 `Unavailable`（经 `escape_for_platform` 的
 //! `not(windows)` 分支），不是"没有视图"。
 //!
-//! 【为什么 Unavailable 也要"接手"】做不到就该**当场**说清楚。回一句"我不接手"会让前端
-//! 回落那句"当前宿主没有提供这个接口"—— 那是把用户往死路上指；而反复按同一个键每次都
-//! 得到沉默，比一句明确的指引更糟。
+//! 【为什么 Unavailable 也要"接手"】回一句"我不接手"会让前端回落那句"当前宿主没有提供
+//! 这个接口" —— 那是把用户往死路上指。接手之后什么都不做、只留一行日志：本平台没有
+//! 让路原语，这是能力事实，不是操作失败。
 //!
 //! 【新平台怎么接进来】在 `mod.rs` 的 `escape_for_platform` 里加一条 `cfg` 分支，
 //! 写一个 `HostKeyEscape` 实现，自报 `Fidelity::PassThrough`（能事前让路，如
@@ -29,7 +29,7 @@ impl HostKeyEscape for UnavailableEscape {
     }
 
     fn escape(&mut self, _window: usize, _stroke: &Stroke) -> Result<(), EscapeError> {
-        // 状态机在 Fidelity::Unavailable 下根本不会走到这里（它直接发提示）；保留一个
+        // 状态机在 Fidelity::Unavailable 下根本不会走到这里（它直接记一行日志）；保留一个
         // 明确的失败值，是为了让"忘了看 Fidelity"的新调用方也拿不到假成功。
         Err(EscapeError::NoHostWindow)
     }

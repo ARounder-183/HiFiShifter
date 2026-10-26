@@ -172,10 +172,10 @@ import {
 import { installFocusSurfaceTracking, getActiveSurface } from "./features/uiFocus/focusSurface";
 import {
     classifyHostKeyRelay,
-    collectHostKeyEscapeStrokes,
+    collectOwnedStrokes,
     handKeyboardToHost,
     hostKeyRelayEnv,
-    publishHostKeyEscapeSet,
+    publishOwnedStrokes,
     relayHostKey,
     type HostKeyStroke,
 } from "./services/hostKeyRelay";
@@ -3368,23 +3368,21 @@ function AppInner() {
     useKeybindings(handleKeybindingAction);
 
     /*
-     * 宿主专属快捷键：把"属于宿主"的按键集合推给原生。
+     * 宿主专属快捷键：把"插件自己占用"的按键集合推给原生。
      *
-     * 【为什么要有这一份集合】macOS 的让路是**事前**的：键在进入页面之前就该决定让不让，
-     * 而原生不知道用户的键位（键位在 Redux / localStorage 里）。集合由前端算好推过去，
-     * 两端因此共用同一套判据（`capabilityForAction` + `RELAYABLE_KEYS`），不会各写一套。
+     * 【为什么原生需要它】让路的方向是"未绑定的键归宿主"，而"未绑定"是一个没法枚举的
+     * 补集。反过来，"插件占用了哪些键"恰好是有限的、且前端本来就算得出来（合并后的
+     * 键位表）。原生据此拒绝"页面借宿主的手按一个它自己也在用的键" —— 最坏的情形是
+     * `Delete`：插件删片段，宿主删它自己的对象。
      *
-     * 【为什么也监听 bootstrap 变化】`transportControl` 决定"要不要让"（有 ARA 播放
-     * 请求时插件自己做更好）。它在 ARA 绑定之后才会变，而绑定发生在窗口打开之后 ——
-     * 只在挂载时算一次会把"还没绑定"的那个答案永久冻结。
+     * 【为什么也监听 bootstrap 变化】`isPluginMode` 在视图形态确定后才稳定，而绑定
+     * 发生在窗口打开之后 —— 只在挂载时算一次会把它永久冻结成"还没就绪"的那个答案。
      */
     const mergedKeybindings = useAppSelector(selectMergedKeybindings);
     useEffect(() => {
         if (!isPluginMode()) return;
         const publish = () => {
-            publishHostKeyEscapeSet(
-                collectHostKeyEscapeStrokes(mergedKeybindings, hostKeyRelayEnv()),
-            );
+            publishOwnedStrokes(collectOwnedStrokes(mergedKeybindings, hostKeyRelayEnv()));
         };
         publish();
         window.addEventListener("hfs-plugin-bootstrap-changed", publish);
