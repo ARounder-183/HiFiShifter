@@ -20,6 +20,12 @@ use crate::state::AppState;
 const DIAGNOSTICS_LOG_SIZE_CAP: u64 = 32 * 1024 * 1024;
 /// 前端回传的错误详情长度上限。
 const FRONTEND_DETAIL_MAX_CHARS: usize = 4000;
+/// 前端回传的错误正文长度上限。
+///
+/// 【为什么正文也要上限】`message` 由渲染进程给出、长度完全不受控：一个循环里抛出
+/// 的长错误足以把日志写成 GB 级（诊断包随后被同一个上限拖大）。详情早就有上限，
+/// 正文此前没有。
+const FRONTEND_MESSAGE_MAX_CHARS: usize = 512;
 
 // ===================== open_log_folder =====================
 
@@ -257,24 +263,68 @@ fn reveal_in_file_manager(path: &Path) -> Result<(), String> {
 
 // ===================== log_frontend_error =====================
 
+/// 把任意文本压成**单行、有字符上限**的日志字段。
+///
+/// 【为什么连换行也要转义】日志按行读、按行 grep：一条带 `\n` 的 message 能凭空
+/// 伪造出整条假日志（log injection，CWE-117），例如让诊断包看起来像"某个更早的
+/// 严重错误发生过"。转义成字面量 `\n` 既保住内容，又把它钉在同一行里。
+fn log_field(text: &str, max_chars: usize) -> String {
+    let mut out = String::with_capacity(text.len().min(max_chars * 2));
+    let mut truncated = false;
+    for (index, ch) in text.chars().enumerate() {
+        if index >= max_chars {
+            truncated = true;
+            break;
+        }
+        match ch {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            // 其余控制字符没有可读形式，直接丢弃（保留它们只会让日志更难读）。
+            ch if ch.is_control() => {}
+            ch => out.push(ch),
+        }
+    }
+    if truncated {
+        out.push_str("…(truncated)");
+    }
+    out
+}
+
 /// 前端错误回传入口：写入统一日志文件，便于和后端日志按时间轴对齐。
 pub(super) fn log_frontend_error(message: String, detail: Option<String>) -> serde_json::Value {
+    let message = log_field(message.trim(), FRONTEND_MESSAGE_MAX_CHARS);
     let detail = detail
         .map(|d| d.trim().to_string())
-        .filter(|d| !d.is_empty());
+        .filter(|d| !d.is_empty())
+        .map(|d| log_field(&d, FRONTEND_DETAIL_MAX_CHARS));
     match detail {
-        Some(detail) => {
-            let detail = if detail.chars().count() > FRONTEND_DETAIL_MAX_CHARS {
-                let mut truncated: String =
-                    detail.chars().take(FRONTEND_DETAIL_MAX_CHARS).collect();
-                truncated.push_str("…(truncated)");
-                truncated
-            } else {
-                detail
-            };
-            log::error!("[frontend] {message} | detail: {detail}");
-        }
+        Some(detail) => log::error!("[frontend] {message} | detail: {detail}"),
         None => log::error!("[frontend] {message}"),
     }
     serde_json::json!({ "ok": true })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **不变量：一条前端错误永远只占一行日志。**
+    #[test]
+    fn a_log_field_never_spans_more_than_one_line() {
+        let field = log_field("boom\n[frontend] forged entry\r\nnext\u{7}", 512);
+        assert!(!field.contains('\n'), "{field}");
+        assert!(!field.contains('\r'), "{field}");
+        assert!(!field.contains('\u{7}'), "{field}");
+        assert!(field.contains("\\n[frontend] forged entry"), "{field}");
+    }
+
+    /// **不变量：截断按字符算，不按字节算（中文不会被截成半个）。**
+    #[test]
+    fn truncation_counts_characters_not_bytes() {
+        let long = "安".repeat(FRONTEND_MESSAGE_MAX_CHARS + 10);
+        let field = log_field(&long, FRONTEND_MESSAGE_MAX_CHARS);
+        assert!(field.ends_with("…(truncated)"), "{field}");
+        assert_eq!(field.matches('安').count(), FRONTEND_MESSAGE_MAX_CHARS);
+    }
 }

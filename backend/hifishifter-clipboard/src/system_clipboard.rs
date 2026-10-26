@@ -412,6 +412,15 @@ pub fn read_bytes() -> Result<Option<Vec<u8>>, String> {
     }
 }
 
+/// 单张剪贴板位图的字节上限（256 MiB ≈ 8K×8K×32bpp，正常截图远小于此）。
+///
+/// 【为什么要有】`CF_DIB` 的大小由**剪贴板持有者**决定，任何以同一用户身份运行的
+/// 进程都能往剪贴板里放一块任意大的全局内存。此前这里直接 `vec![0u8; size]`：一块
+/// 4 GiB 的位图就足以把宿主进程拖进分配失败（Windows 上即 abort）。读之前先看大小，
+/// 超限按"没有位图"处理 —— 记事本的粘贴本来就有其它来源（File / 纯文本）。
+#[cfg(target_os = "windows")]
+const MAX_CLIPBOARD_BITMAP_BYTES: usize = 256 * 1024 * 1024;
+
 /// 读系统剪贴板里的位图（Windows `CF_DIB`）。
 ///
 /// 返回的是**原始 DIB**（`BITMAPINFOHEADER` + 调色板/掩码 + 像素），不是
@@ -435,6 +444,14 @@ pub fn read_bitmap_dib() -> Result<Option<ClipboardBitmap>, String> {
         return Ok(None);
     }
     let size = raw::size(CF_DIB).ok_or_else(|| "clipboard_empty".to_string())?;
+    if size.get() > MAX_CLIPBOARD_BITMAP_BYTES {
+        log::warn!(
+            "[clipboard] refusing a {}-byte CF_DIB (limit {})",
+            size.get(),
+            MAX_CLIPBOARD_BITMAP_BYTES
+        );
+        return Ok(None);
+    }
     let mut buf = vec![0u8; size.get()];
     let bytes_read =
         raw::get(CF_DIB, &mut buf).map_err(|e| format!("clipboard_bitmap_read_failed: {}", e))?;
