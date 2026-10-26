@@ -229,15 +229,13 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
         [doSearch],
     );
 
-    // 当 regexEnabled 变化时根据当前查询重新搜索
-    useEffect(() => {
-        if (query.trim()) {
-            doSearch(query);
-        }
-    }, [regexEnabled, query, doSearch]);
-
-    // 匹配方式变化时同样重跑：结果是后端算好的，不重跑就看不到任何变化。
-    const searchOptionsKey = `${searchOptions.mode}|${searchOptions.heteronym}|${searchOptions.japaneseLongVowel}|${searchOptions.koreanChoseong}`;
+    // 匹配方式（含正则开关）变化时重跑：结果是后端算好的，不重跑就看不到任何变化。
+    // 【为什么 regexEnabled 也要进 key】正则模式下 searchOptions.mode 恒为 "off"
+    //（正则过滤在客户端做），当用户本就选着 "off" 模式时，切正则不会改变
+    // searchOptions.mode —— 不进 key 就会漏掉这次重搜。
+    // 【为什么不再单独盯 query】输入路径（handleInputChange）已直接调 doSearch，
+    // effect 若再盯 query，每次按键都会双重搜索：seq 白自增、loading 白翻转。
+    const searchOptionsKey = `${regexEnabled ? "regex" : "plain"}|${searchOptions.mode}|${searchOptions.heteronym}|${searchOptions.japaneseLongVowel}|${searchOptions.koreanChoseong}`;
     const lastSearchOptionsKeyRef = useRef(searchOptionsKey);
     useEffect(() => {
         if (lastSearchOptionsKeyRef.current === searchOptionsKey) return;
