@@ -17,13 +17,17 @@
 use super::traits::{RenderContext, Renderer, RendererCapabilities};
 use super::utils::{clip_midi_at_time, edit_midi_at_time_or_none};
 use crate::state::SynthPipelineKind;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 // ─── 分块缓存（独立于 SynthClipCache，靠 hash 比对自然失效）───────────────────
 
 pub struct ChunkCacheEntry {
     pub param_hash: u64,
-    pub waveform: Vec<f32>,
+    /// 用 `Arc` 而不是裸 `Vec`：命中路径（HIT 分支）把整块波形交还给装配器时
+    /// 消费方只读（`is_finite` 扫描 + `accumulate_chunk` OLA 叠加），按值 clone
+    /// 意味着每次命中都付一次整块 memcpy（默认块长 10s ≈ 1.7MB，3 分钟工程
+    /// 一次重渲 ≈ 30MB 纯拷贝）。共享所有权后命中只剩一次引用计数。
+    pub waveform: Arc<Vec<f32>>,
 }
 
 /// 分块缓存的键：`(clip_id, 声道位, 块起点的 mel 帧号)`。
@@ -70,7 +74,7 @@ impl ChunkCache {
             self.bytes -= old.waveform.len() * 4;
         }
     }
-    /// 字节驱逐只释放缓存所有权；已取出的worker副本与当前就绪快照不受影响。
+    /// 字节驱逐只释放缓存所有权；已取出的 `Arc` 克隆与当前就绪快照不受影响。
     fn insert(&mut self, key: Key, entry: ChunkCacheEntry) {
         let bytes = entry.waveform.len().saturating_mul(4);
         if bytes > self.max_bytes || entry.waveform.is_empty() {
@@ -355,7 +359,7 @@ impl HiFiGanRenderer {
             ctx.seg_start_sec,
             midi_fn,
             formant_shift_fn,
-            &|mel_start: usize, mel_end: usize, c0: f64, c1: f64| -> Option<Vec<f32>> {
+            &|mel_start: usize, mel_end: usize, c0: f64, c1: f64| -> Option<Arc<Vec<f32>>> {
                 // 参数哈希（**不含波形指纹**），张力曲线按本块区间切片。
                 //
                 // 【为什么不再指纹化波形】波形指纹必须 bit-exact 才有意义，而
@@ -371,39 +375,48 @@ impl HiFiGanRenderer {
                     .unwrap_or_else(|e| e.into_inner());
                 match cache.get(&cache_key) {
                     Some(entry) if entry.param_hash == hash => {
-                        chunk_debug(&format!(
-                            "  chunk [{mel_start}..{mel_end}) ch={} HIT (hash={hash:016x})",
-                            ctx.channel_index,
-                        ));
-                        Some(entry.waveform.clone())
+                        if debug_enabled() {
+                            chunk_debug(&format!(
+                                "  chunk [{mel_start}..{mel_end}) ch={} HIT (hash={hash:016x})",
+                                ctx.channel_index,
+                            ));
+                        }
+                        // 命中零拷贝：只克隆 Arc，波形本体留在缓存里由装配器只读。
+                        Some(Arc::clone(&entry.waveform))
                     }
                     Some(entry) => {
-                        chunk_debug(&format!(
-                            "  chunk [{mel_start}..{mel_end}) ch={} STALE (cached={:016x} current={hash:016x})",
-                            ctx.channel_index,
-                            entry.param_hash,
-                        ));
+                        if debug_enabled() {
+                            chunk_debug(&format!(
+                                "  chunk [{mel_start}..{mel_end}) ch={} STALE (cached={:016x} current={hash:016x})",
+                                ctx.channel_index,
+                                entry.param_hash,
+                            ));
+                        }
                         cache.remove(&cache_key);
                         None
                     }
                     None => {
-                        chunk_debug(&format!(
-                            "  chunk [{mel_start}..{mel_end}) ch={} MISS",
-                            ctx.channel_index,
-                        ));
+                        if debug_enabled() {
+                            chunk_debug(&format!(
+                                "  chunk [{mel_start}..{mel_end}) ch={} MISS",
+                                ctx.channel_index,
+                            ));
+                        }
                         None
                     }
                 }
             },
-            &|mel_start: usize, mel_end: usize, c0: f64, c1: f64, wf: Vec<f32>| {
+            &|mel_start: usize, mel_end: usize, c0: f64, c1: f64, wf: Arc<Vec<f32>>| {
                 let hash = chunk_hash(c0, c1);
                 let cache_key = (clip_id.clone(), ctx.channel_index, mel_start);
 
-                chunk_debug(&format!(
-                    "  chunk [{mel_start}..{mel_end}) ch={} PUT (hash={hash:016x} samples={})",
-                    ctx.channel_index,
-                    wf.len(),
-                ));
+                if debug_enabled() {
+                    chunk_debug(&format!(
+                        "  chunk [{mel_start}..{mel_end}) ch={} PUT (hash={hash:016x} samples={})",
+                        ctx.channel_index,
+                        wf.len(),
+                    ));
+                }
 
                 let mut cache = global_chunk_cache_ref()
                     .lock()
@@ -502,7 +515,7 @@ mod tests {
         let mut cache = ChunkCache::new(32);
         let entry = |n, value| ChunkCacheEntry {
             param_hash: 1,
-            waveform: vec![value; n],
+            waveform: Arc::new(vec![value; n]),
         };
         cache.insert(("a".into(), 0, 0), entry(4, 0.25));
         cache.insert(("a".into(), 1, 0), entry(4, 0.5));

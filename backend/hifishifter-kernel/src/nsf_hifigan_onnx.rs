@@ -1772,15 +1772,19 @@ fn accumulate_chunk(
 /// 缓存的仍是**块的原始输出**（未加窗）：交叉淡化发生在装配阶段，因此
 /// per-chunk 缓存与拼接方式解耦，换重叠长度不会让缓存语义错位
 /// （但仍需 `cache_identity()` 混入重叠长度，见该函数）。
+/// 装配器对块波形**只读**（长度校验 + `is_finite` 扫描 + `accumulate_chunk`），
+/// 因此 `get` 交给它的是 `Arc<Vec<f32>>`：缓存命中零拷贝（见
+/// `renderer::hifigan::ChunkCacheEntry::waveform` 的说明），装配器与缓存共享
+/// 同一份本体；测试直接 `Arc::new` 包一份即可。
 fn assemble_bounded_chunks(
     frames: usize,
     hop: usize,
     chunk_frames: usize,
     overlap_frames: usize,
     batch_max: usize,
-    mut get: impl FnMut(usize, usize) -> Option<Vec<f32>>,
+    mut get: impl FnMut(usize, usize) -> Option<Arc<Vec<f32>>>,
     mut infer: impl FnMut(&[(usize, usize)]) -> Result<Vec<Vec<f32>>, String>,
-    mut put: impl FnMut(usize, usize, Vec<f32>),
+    mut put: impl FnMut(usize, usize, Arc<Vec<f32>>),
 ) -> Result<Vec<f32>, String> {
     if hop == 0 || chunk_frames == 0 || batch_max == 0 {
         return Err("invalid HiFiGAN chunk geometry".into());
@@ -1806,11 +1810,20 @@ fn assemble_bounded_chunks(
             }
             let end = offset.saturating_add(chunk_frames).min(frames);
             let expected = (end - offset) * hop;
-            if let Some(cached) = get(offset, end)
-                .filter(|wf| wf.len() == expected && wf.iter().all(|v| v.is_finite()))
-            {
+            // `as_slice` 经 Arc → Vec 自动解引用拿切片，无歧义。
+            if let Some(cached) = get(offset, end).filter(|wf| {
+                wf.as_slice().len() == expected && wf.as_slice().iter().all(|v| v.is_finite())
+            }) {
                 accumulate_chunk(
-                    &mut out, &mut wsum, &mut win, offset, end, frames, overlap, hop, &cached,
+                    &mut out,
+                    &mut wsum,
+                    &mut win,
+                    offset,
+                    end,
+                    frames,
+                    overlap,
+                    hop,
+                    cached.as_slice(),
                 );
                 completed += 1;
             } else {
@@ -1833,7 +1846,7 @@ fn assemble_bounded_chunks(
                 accumulate_chunk(
                     &mut out, &mut wsum, &mut win, start, end, frames, overlap, hop, &wf,
                 );
-                put(start, end, wf);
+                put(start, end, Arc::new(wf));
                 completed += 1;
             }
         }
@@ -1880,6 +1893,10 @@ fn assemble_bounded_chunks(
 /// `chunk_cache_get(mel_start, mel_end, chunk_start_sec, chunk_end_sec)` → 命中时返回缓存的 mono PCM，
 /// `chunk_cache_put(mel_start, mel_end, chunk_start_sec, chunk_end_sec, waveform)` → 写入波形到缓存。
 ///
+/// 【为什么走 `Arc`】命中波形在装配阶段全程只读（见 [`assemble_bounded_chunks`]），
+/// 回调交出 `Arc` 让调用方的缓存与装配器共享同一份本体——命中路径只剩引用计数，
+/// 不再按块深拷贝。
+///
 /// 【缓存的是**原始块输出**（未加窗）】交叉淡化发生在装配阶段，因此缓存语义与
 /// 重叠长度解耦：改重叠长度不会让已缓存的内容"含义变了"。
 /// 但块的**起点网格**依赖重叠长度，所以 `cache_identity()` 必须混入它
@@ -1900,8 +1917,8 @@ pub fn infer_pitch_edit_chunked_optimized(
     start_sec: f64,
     midi_at_time: impl Fn(f64) -> f64 + Clone,
     formant_shift_at_time: impl Fn(f64) -> f32 + Clone,
-    chunk_cache_get: &dyn Fn(usize, usize, f64, f64) -> Option<Vec<f32>>,
-    chunk_cache_put: &dyn Fn(usize, usize, f64, f64, Vec<f32>),
+    chunk_cache_get: &dyn Fn(usize, usize, f64, f64) -> Option<Arc<Vec<f32>>>,
+    chunk_cache_put: &dyn Fn(usize, usize, f64, f64, Arc<Vec<f32>>),
 ) -> Result<Vec<f32>, String> {
     if mono_pcm.is_empty() {
         return Ok(vec![]);
@@ -3034,6 +3051,8 @@ pub fn run_benchmark() -> Result<BenchmarkResults, String> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::smooth_tail_then_align;
     use super::{
         formant_shifts_for_frames, mel_frame_count, quantize_key_shift, shift_n_fft,
@@ -3109,7 +3128,7 @@ mod tests {
             2,
             |start, end| {
                 if start == 6 {
-                    Some(vec![9.; (end - start) * 2])
+                    Some(Arc::new(vec![9.; (end - start) * 2]))
                 } else {
                     None
                 }
@@ -3151,7 +3170,7 @@ mod tests {
             3,
             0,
             2,
-            |_, _| Some(vec![f32::NAN; 6]),
+            |_, _| Some(Arc::new(vec![f32::NAN; 6])),
             |_| Ok(vec![vec![0.; 6], vec![0.; 5]]),
             |_, _, _| writes.set(writes.get() + 1),
         )
@@ -3164,7 +3183,7 @@ mod tests {
             3,
             0,
             2,
-            |_, _| Some(vec![0.; 1]),
+            |_, _| Some(Arc::new(vec![0.; 1])),
             |_| Ok(vec![vec![0.25, 0.5]]),
             |_, _, _| writes.set(writes.get() + 1),
         )
@@ -3279,9 +3298,11 @@ mod tests {
             .collect();
         let cache = std::cell::RefCell::new(std::collections::BTreeMap::new());
         let writes = std::cell::RefCell::new(Vec::new());
-        let get =
-            |start: usize, end: usize, _: f64, _: f64| cache.borrow().get(&(start, end)).cloned();
-        let put = |start, end, c0, c1, wf: Vec<f32>| {
+        // 缓存值走 Arc（与生产 ChunkCacheEntry 同型）：命中路径只克隆引用计数。
+        let get = |start: usize, end: usize, _: f64, _: f64| -> Option<std::sync::Arc<Vec<f32>>> {
+            cache.borrow().get(&(start, end)).cloned()
+        };
+        let put = |start, end, c0, c1, wf: std::sync::Arc<Vec<f32>>| {
             writes.borrow_mut().push((start, end, c0, c1));
             cache.borrow_mut().insert((start, end), wf);
         };
