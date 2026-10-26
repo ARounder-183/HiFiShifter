@@ -2123,7 +2123,7 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
                     );
                 }
             }
-            let window = derived.or_else(|| if clip.reversed { host_window } else { None });
+            let window = derived.or(if clip.reversed { host_window } else { None });
             if let Some(window) = window {
                 clip.source_start_sec = window.start();
                 clip.source_end_sec = window.end();

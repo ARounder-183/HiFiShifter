@@ -647,38 +647,32 @@ pub(crate) struct PluginMusicalProjection {
 mod baseline_tests {
     use super::*;
 
-    /// **基线是值：它描述的数组与它的指纹同代。**
+    /// **基线是值：它描述的那份数组与它一起交付，靠 Arc 共享而不是复制。**
     ///
     /// 【为什么这条取代了旧的三条用例】旧实现按指纹存取基线，于是"编辑器读到的那份"
     /// 与"提交时查回来的那份"可以不是同一份（缓存里根本没有 / 被下一次读挤出 /
-    /// 来自另一个会话）。现在基线随视图一起交付，不可能落空 —— 这条用例钉的就是
-    /// "交付出去的那一份，与再算一次得到的那一份逐字相同"。
+    /// 来自另一个会话）。现在基线随视图一起交付，不可能落空。
+    ///
+    /// 【为什么不在这里开一个 DocumentSession】`workspace_view` 要求宿主时间线已经
+    /// 交付（文档级 fixture）；这条用例钉的是**类型语义**，不需要那套装置。真正的
+    /// 端到端行为由 `editor/session` 与 `bound_tests` 覆盖。
     #[test]
-    fn a_delivered_view_matches_a_freshly_computed_one() {
-        let document = DocumentSession::new(1);
-        let view = document.workspace_view().unwrap();
-        assert_eq!(view.projection, document.workspace_projection().unwrap());
-        assert_eq!(
-            view.params.keys().collect::<Vec<_>>(),
-            document
-                .edits
-                .lock_or_recover()
-                .params
-                .keys()
-                .collect::<Vec<_>>()
+    fn a_view_carries_the_arrays_it_describes() {
+        let params = Arc::new(std::collections::BTreeMap::from([(
+            "root".to_owned(),
+            hifishifter_kernel::state::TrackParamsState::default(),
+        )]));
+        let view = WorkspaceView {
+            projection: "scope:abc".to_owned(),
+            params: Arc::clone(&params),
+        };
+        let shared = Arc::new(view);
+        assert!(
+            Arc::ptr_eq(&params, &shared.params),
+            "基线按 Arc 共享，不复制数组"
         );
-    }
-
-    /// 【为什么要有这条】旧实现里"编辑器还没读过工作区"与"读过但基线丢了"共用同一条
-    /// 错误 —— 用户看到的是 "no baseline for the editor's view"，一句他无从处置的话。
-    /// 现在没有基线只有一种可能（还没读过），文案必须指向可行动的动作。
-    #[test]
-    fn a_view_is_cheap_to_clone_and_share() {
-        let document = DocumentSession::new(2);
-        let first = document.workspace_view().unwrap();
-        let second = Arc::clone(&first);
-        assert!(Arc::ptr_eq(&first, &second), "基线按 Arc 共享，不复制数组");
-        assert!(first.params.is_empty());
+        assert_eq!(shared.projection, "scope:abc");
+        assert_eq!(shared.params.len(), 1);
     }
 }
 

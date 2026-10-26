@@ -3948,6 +3948,16 @@ mod tests {
             model.split_candidates.is_empty(),
             "收口后候选必须清掉，不能每帧重复登记"
         );
+        drop(edits);
+        // 右段的窗口来源必须登记：它是"从父段切"这条推导的唯一输入。
+        assert_eq!(model.session.split_window_count(), 1);
+        let windows = model.session.split_windows.lock_or_recover();
+        let source = windows
+            .get(RIGHT)
+            .expect("right half must have a window source");
+        assert_eq!(source.left, PARENT);
+        assert!((source.offset_sec - 0.5).abs() < 1e-9);
+        assert!((source.length_sec - 0.5).abs() < 1e-9);
     }
 
     /// 父段**没有** live 曲线时：曲线谱系不登记（没有可继承的 seed），但**媒体身份必须
