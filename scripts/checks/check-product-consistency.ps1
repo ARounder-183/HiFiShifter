@@ -195,7 +195,7 @@ Test-Consistency '三个 workflow 都声明 concurrency 与 permissions' {
             if ($text -notmatch [regex]::Escape($required)) { throw "$workflow 缺少 $required" }
         }
     }
-    'build.yml / vst3.yml'
+    'build.yml / vst3.yml / vst3-unix.yml'
 }
 
 # ── 10. SDK 镜像根只有一处定义 ─────────────────────────────────────────

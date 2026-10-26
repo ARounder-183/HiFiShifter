@@ -40,7 +40,7 @@ if (!(Get-Command cargo -ErrorAction SilentlyContinue) -or !(Get-Command npm -Er
 
 # 中文：跟踪及未跟踪源码都参与构建身份；模型虽被git忽略仍是实际产品输入。
 function Get-BuildSourceFingerprint {
-    $buildFingerprintPaths=@(& git ls-files --cached --others --exclude-standard -- backend frontend tools)
+    $buildFingerprintPaths=@(& git ls-files --cached --others --exclude-standard -- backend frontend)
     if ($LASTEXITCODE -ne 0) {throw 'Cannot enumerate product source files.'}
     $buildFingerprintPaths+=@(Get-ChildItem -LiteralPath (Join-Path $buildTaskRoot 'backend\src-tauri\resources\models') -Recurse -File |
         ForEach-Object {$_.FullName.Substring($buildTaskRoot.Length+1)})

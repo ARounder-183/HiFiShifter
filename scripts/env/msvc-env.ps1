@@ -73,7 +73,7 @@ if (-not (Test-Path $vcvars)) {
 }
 
 # 技巧：让 cmd 先跑 vcvars64.bat，然后 `set` 转储整个环境；
-# 用 NUL 分隔（-s）便于逐条解析，避免值里含 '=' 时被截断。
+# 逐行解析时按**第一个** '=' 切分（值本身可以含 '='，见下方 IndexOf 用法）。
 $dump = & cmd.exe /c "`"$vcvars`" >nul 2>&1 && set" 2>$null
 
 foreach ($line in $dump) {

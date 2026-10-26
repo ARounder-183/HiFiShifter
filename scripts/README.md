@@ -10,7 +10,7 @@
 | `setup/` | 前置准备：安装系统依赖、按 pin 拉取并校验插件 SDK、导出无网络构建用的本地镜像。 |
 | `build/` | 构建与打包：App/插件统一构建、便携包、Linux/macOS 产物、模型清单、CoreML 补丁生成。 |
 | `release/` | 发布物组装：VST3 打包与 NSIS 安装器（`.nsi` + 五语词表），版本号同步。 |
-| `checks/` | CI 门禁：FFI panic 守卫、产品一致性守卫。 |
+| `checks/` | CI 门禁：FFI panic 守卫、日志级别守卫（`check-log-levels.py`）、命令接线守卫（`check-command-gating.py`，经产品一致性脚本调用）、产品一致性守卫。 |
 | `vst3/unix/` | **macOS / Linux** 的 VST3 构建：`build.sh`（SDK→前端→编译→bundle→自检→打包）与 `verify.sh` + `probe.c`（dlopen 黑盒加载 + 前端产物完整性验证）。Windows 的插件构建仍在 `build/`、`release/`。 |
 | `dev/` | 开发期辅助：`tauri dev` 的前端启动脚本、音高分析内存计量。 |
 

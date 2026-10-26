@@ -7,7 +7,7 @@
             "command": "cargo",
             "args": ["check", "--lib", "-q"],
             "options": {
-                "cwd": "${workspaceFolder}"
+                "cwd": "${workspaceFolder}/backend"
             },
             "isBackground": false,
             "group": "build"

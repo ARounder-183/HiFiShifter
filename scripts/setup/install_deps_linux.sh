@@ -33,7 +33,7 @@ sudo apt-get install -y libsoup3.0-dev || sudo apt-get install -y libsoup-3.0-de
 sudo apt-get install -y libwebkit2gtk-4.0-dev libwebkit2gtk-dev gir1.2-webkit2-4.0 || true
 
 # Ensure PKG_CONFIG_PATH available to subsequent steps (in CI append to GITHUB_ENV)
-PKG_PATH="/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig:/usr/lib/pkgconfig"
+PKG_PATH="/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig"
 if [ -n "${GITHUB_ENV:-}" ]; then
   echo "PKG_CONFIG_PATH=$PKG_PATH" >> "$GITHUB_ENV"
 else
@@ -83,7 +83,13 @@ node_is_new_enough() {
 if ! node_is_new_enough; then
   echo "[install_deps_linux] Node is missing or older than ${NODE_MIN_MAJOR}.${NODE_MIN_MINOR} (found: $(node --version 2>/dev/null || echo none))"
   echo "[install_deps_linux] Installing Node ${NODE_INSTALL_VERSION} into \$HOME/.local/opt (no sudo required)"
-  NODE_TARBALL_DIR="node-${NODE_INSTALL_VERSION}-linux-x64"
+  # 【为什么按架构分发】Node 官方 tarball 的目录名带架构后缀；在 ARM64 Linux
+  # 上硬编码 linux-x64 会装错二进制（执行时 "cannot execute binary file"）。
+  case "$(uname -m)" in
+    aarch64|arm64) NODE_ARCH="arm64" ;;
+    *)             NODE_ARCH="x64" ;;
+  esac
+  NODE_TARBALL_DIR="node-${NODE_INSTALL_VERSION}-linux-${NODE_ARCH}"
   mkdir -p "$HOME/.local/opt"
   curl -fSL --retry 3 -o "$HOME/.local/opt/node.tar.xz" \
     "https://nodejs.org/dist/${NODE_INSTALL_VERSION}/${NODE_TARBALL_DIR}.tar.xz"
@@ -115,7 +121,7 @@ if ! command -v appimagetool >/dev/null 2>&1; then
   if [ "$ARCH" = "x86_64" ] || [ "$ARCH" = "amd64" ]; then
     URL="https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"
   elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
-    URL="https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-aarch64.AppImage" || true
+    URL="https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-aarch64.AppImage"
   else
     URL="https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"
   fi

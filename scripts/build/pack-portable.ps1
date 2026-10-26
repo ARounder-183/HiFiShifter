@@ -212,7 +212,10 @@ if ($Version) {
         throw "Version script not found: $SetVersionScript"
     }
     Write-Host "[Preprocessing] Applying version: $Version" -ForegroundColor Yellow
-    & powershell -NoProfile -ExecutionPolicy Bypass -File $SetVersionScript -Version $Version
+    # 与仓内其它脚本同口径：优先 pwsh（PowerShell 7+），没有才回落 Windows PowerShell。
+    $psExe = Get-Command pwsh -ErrorAction SilentlyContinue
+    $psExe = if ($psExe) { $psExe.Source } else { "powershell" }
+    & $psExe -NoProfile -ExecutionPolicy Bypass -File $SetVersionScript -Version $Version
     if ($LASTEXITCODE -ne 0) {
         throw "Version update failed, exit code: $LASTEXITCODE"
     }

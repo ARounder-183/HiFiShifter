@@ -1,3 +1,4 @@
+﻿# 【定位】诊断辅助工具：只回显输出并打印 exit=N，**不**透传退出码。不得接入任何门禁。
 ﻿# Run one cargo invocation with the pinned SDK environment and capture both streams.
 # Why Start-Process: PowerShell surfaces cargo's stderr as NativeCommandError and aborts
 # the pipeline; redirecting to files is the only stable way to capture it.

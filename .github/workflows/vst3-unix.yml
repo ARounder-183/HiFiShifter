@@ -111,7 +111,7 @@ jobs:
       # "Cannot find module '@rolldown/binding-linux-x64-gnu'"。
       # runner 自带的 node 版本随镜像漂移，所以这里钉死并复用 npm 缓存。
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: "22.12"
           cache: npm
