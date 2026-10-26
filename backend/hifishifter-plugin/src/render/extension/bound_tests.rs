@@ -1250,6 +1250,12 @@ fn automatic_apply_releases_the_transaction_and_rechecks_model_and_edit_versions
                 None,
             )
             .unwrap();
+        // 【为什么先等后台排空】`bind_to_document` 尾部会把 prepare_job 排上后台线程；
+        // 该 job 从空时间线渲染出 0 帧空快照并 `publish` 原子替换 `current`，同时把
+        // 下面手工发布的那份（无读者、已非 current）`reclaim` 掉 —— 若它晚于手工
+        // publish 落地，`copy_block` 读到的就是空快照（available=true、内容全零），
+        // 本用例就间歇性失败。先等它退场再手工发布，用例与后台 worker 不再共享时序。
+        owner.await_preparation_idle(std::time::Duration::from_secs(3));
         owner.snapshots[0]
             .publish(super::super::snapshot::PlaybackSnapshot {
                 sample_rate: 44100,
