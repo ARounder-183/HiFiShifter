@@ -346,6 +346,9 @@ mod tests {
     fn the_plugin_log_shares_the_app_log_directory() {
         if std::env::var_os("HIFISHIFTER_PLUGIN_LOG").is_some()
             || std::env::var_os("HIFISHIFTER_LOG_DIR").is_some()
+            || (cfg!(windows)
+                && std::env::var_os("LOCALAPPDATA").is_none()
+                && std::env::var_os("USERPROFILE").is_none())
         {
             return;
         }
@@ -387,6 +390,9 @@ mod tests {
         // 不实际设置环境变量（会与并行测试互踩），只断言**未设置**时用的是默认目录。
         if std::env::var_os("HIFISHIFTER_PLUGIN_LOG").is_some()
             || std::env::var_os("HIFISHIFTER_LOG_DIR").is_some()
+            || (cfg!(windows)
+                && std::env::var_os("LOCALAPPDATA").is_none()
+                && std::env::var_os("USERPROFILE").is_none())
         {
             return;
         }

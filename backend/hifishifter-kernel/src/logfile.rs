@@ -59,8 +59,16 @@ pub fn log_dir() -> Option<PathBuf> {
     }
     #[cfg(windows)]
     {
-        let base = std::env::var_os("LOCALAPPDATA")?;
-        Some(PathBuf::from(base).join(APP_IDENTIFIER).join("logs"))
+        let base = match std::env::var_os("LOCALAPPDATA") {
+            Some(base) => PathBuf::from(base),
+            None => {
+                // LOCALAPPDATA 是 Windows 的标准变量；极简环境（CI 容器、测试沙箱）
+                // 可能没有它，此时按同一语义回退到 USERPROFILE 下的 AppData\Local。
+                let home = std::env::var_os("USERPROFILE")?;
+                PathBuf::from(home).join("AppData").join("Local")
+            }
+        };
+        Some(base.join(APP_IDENTIFIER).join("logs"))
     }
     #[cfg(target_os = "macos")]
     {
@@ -306,7 +314,11 @@ mod tests {
     #[test]
     fn the_log_dir_env_var_overrides_the_platform_default() {
         // 这个测试不设环境变量（会与并行测试互踩），只断言未设置时的形状。
-        if std::env::var_os(LOG_DIR_ENV).is_some() {
+        if std::env::var_os(LOG_DIR_ENV).is_some()
+            || (cfg!(windows)
+                && std::env::var_os("LOCALAPPDATA").is_none()
+                && std::env::var_os("USERPROFILE").is_none())
+        {
             return;
         }
         let dir = log_dir().expect("platform log dir");
