@@ -255,6 +255,13 @@ $env:TAURI_UI_MODE='build'; cargo tauri dev
 
 **注意：** 首次编译需要很长的时间，请耐心等待。
 
+**代码风格与格式化**：前端由 Prettier 管辖（`frontend/` 内 `npm run format` 与
+`npm run format:check`；仓库级 `scripts/` 由根 `.prettierrc.json` 与
+`format:scripts` 门禁管辖），Rust 由 `cargo fmt` 管辖（workspace 与
+`backend/hfs-gui` 两个口径）。**CI workflow 的 yml 有意不纳入 Prettier 范围**：
+它对 YAML 的重排与 GitHub Actions 表达式（`${{ }}`）及多行 run 脚本相处不佳，
+决策记录见根 `.prettierignore` 的头注释。
+
 ### 5. GPU 加速
 
 HiFiShifter 在支持的平台上自动启用 GPU 推理加速。你可以在菜单栏中的 **推理设备（Inference Device）** 里选择 Auto / CPU / GPU，并通过 **运行基准测试（Run Benchmark）** 比较各设备的推理延迟。
