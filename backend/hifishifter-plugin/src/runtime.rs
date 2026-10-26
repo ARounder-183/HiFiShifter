@@ -205,6 +205,9 @@ impl Runtime {
                             handle.map(|handle| crate::render::document::PlaybackEndpoint {
                                 thread: std::thread::current().id(),
                                 handle,
+                                supersession: std::sync::Arc::new(
+                                    std::sync::atomic::AtomicU64::new(0),
+                                ),
                             });
                         *playback.playback.lock_or_recover() = endpoint;
                     })

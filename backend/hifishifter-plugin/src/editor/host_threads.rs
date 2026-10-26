@@ -36,6 +36,7 @@
 
 use ara2_bridge::plugin::PlaybackRequestHandle;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::thread::ThreadId;
 
 /// 一次宿主播放请求。
@@ -103,29 +104,43 @@ impl ModelThreadError {
 /// 【为什么需要它】请求可以留在队列里等下一次回调。若用户先按播放、随即按停止，
 /// 两个请求都会在那一刻执行 —— 后到的那个才代表用户此刻的意图。让旧请求在执行时
 /// 发现自己已被取代，就不会出现「按了停止，几秒后却开始播放」。
-static LATEST_REQUEST: AtomicU64 = AtomicU64::new(0);
-
-/// 投递方最多等这么久。
 ///
-/// 【为什么不是 250 ms】那个值是为宿主 UI 线程的「一次重排窗口」定的。模型线程的
-/// 回调间隔取决于宿主自己在做什么（一次编辑事务里可能几毫秒，空闲时可能几秒）。
-/// 两秒是「用户还觉得这是一次同步操作」的上限；超过它就不是慢，而是宿主此刻没有
-/// 回调可接 —— 那时把请求留成「已排队」比报错更诚实。
-pub(crate) const MODEL_REQUEST_WAIT: std::time::Duration = std::time::Duration::from_millis(2000);
+/// 【为什么按端点而不是进程】取代只在**同一份票据域**（= 同一个
+/// `PlaybackEndpoint`，即同一个 ARA 文档）内生效。进程级票号下，任何文档的任意
+/// 一次投递都会把**别的**文档排队中的请求判成「已被取代」而静默丢弃 —— 多工程
+/// tab / 双实例时「按了播放没反应」；单文档内，排队中的 Stop 也会被随后独立的
+/// SetPosition 作废（「按了停止却不停」）。票据域随端点走，取代语义才与用户
+/// 意图同域。
+pub(crate) fn ticket_is_current(supersession: &AtomicU64, ticket: u64) -> bool {
+    supersession.load(Ordering::Acquire) == ticket
+}
+
+/// 投递方为「当场拿到结果」最多等这么久；拿不到即回「已排队」。
+///
+/// 【为什么从 2 s 压到 250 ms】原等待把窗口线程卡满整个上限（宿主空闲时每次
+/// 传输点击都冻结整整 2 s），期间它无法泵 `host::marshal` 里 target 为 UI 线程
+/// 的任务，并发的宿主回执被拖延、marshal 超时可能级联。250 ms 与
+/// `host::marshal` 的拾取超时同口径：超过它，任务**留在队列里**由宿主下一次
+/// 模型回调执行 —— 结论是「已请求宿主」，不是错误，用户感知不变。
+pub(crate) const MODEL_REQUEST_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// 把一次播放请求送到 ARA 的 model 线程。
 ///
+/// `supersession` 是本次投递所属端点的票据域（见 [`ticket_is_current`] 的说明）。
+///
 /// 返回 `Ok(Ok(()))` = 宿主接受了请求；`Ok(Err(reason))` = 宿主自己拒绝了它
-/// （租约已撤销 / 线程不对 / 位置非法）；`Err(Queued)` = 已排队、稍后执行。
+/// （租约已撤销 / 线程不对 / 位置非法 / 已被更新请求取代）；`Err(Queued)` =
+/// 已排队、稍后执行。
 pub(crate) fn on_ara_model(
+    supersession: Arc<AtomicU64>,
     target: ThreadId,
     handle: PlaybackRequestHandle,
     request: PlaybackRequest,
 ) -> Result<Result<(), String>, ModelThreadError> {
-    let ticket = LATEST_REQUEST.fetch_add(1, Ordering::AcqRel) + 1;
+    let ticket = supersession.fetch_add(1, Ordering::AcqRel) + 1;
     deliver(target, move || {
-        // 被更新的传输请求取代 ⇒ 这次什么也不做。
-        if LATEST_REQUEST.load(Ordering::Acquire) != ticket {
+        // 被更新（同端点）的传输请求取代 ⇒ 这次什么也不做。
+        if !ticket_is_current(&supersession, ticket) {
             return Err("superseded by a newer transport request".to_owned());
         }
         request.execute(&handle)
@@ -155,7 +170,7 @@ fn deliver<R: Send + 'static>(
             "the ARA model thread queue is full; the host is not draining it".to_owned(),
         ));
     }
-    match receiver.recv_timeout(MODEL_REQUEST_WAIT) {
+    match receiver.recv_timeout(MODEL_REQUEST_GRACE) {
         Ok(value) => Ok(value),
         Err(_) => Err(ModelThreadError::Queued),
     }
@@ -167,7 +182,7 @@ mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
 
-    /// 队列与「最新请求」都是进程级状态；两条用例并行会互相看见对方的任务。
+    /// 队列是进程级状态（取代票据已随端点走）；用例并行会互相看见对方的任务。
     fn serialize() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         LOCK.lock().unwrap_or_else(|error| error.into_inner())
@@ -228,5 +243,34 @@ mod tests {
         let outcome = deliver(target, || 13_u32);
         stop.store(true, Ordering::Release);
         assert_eq!(outcome, Ok(13));
+    }
+
+    /// **不变量：取代只在同一份票据域（= 同一个 `PlaybackEndpoint`）内生效。**
+    ///
+    /// 【为什么钉死】票据此前是进程级 static：任何一次投递（哪怕来自另一个文档）
+    /// 都推进全局票号，把**别的**文档排队中的请求判成「已被取代」而静默丢弃 ——
+    /// 用户在 A 里按了播放没反应，只是因为 B 里也动过传输；单文档内，排队中的
+    /// Stop 也会被随后独立的 SetPosition 作废（「按了停止却不停」）。
+    /// 抽出 [`ticket_is_current`] 是为了在没有 `PlaybackRequestHandle` 的测试里
+    /// 钉住这两个方向的契约（句柄只能由 vendored bridge 从真实宿主接口构造）。
+    #[test]
+    fn supersession_is_scoped_to_one_endpoint_ticket_domain() {
+        let endpoint_a = Arc::new(AtomicU64::new(0));
+        let endpoint_b = Arc::new(AtomicU64::new(0));
+        // A 上取一张票；B 上随后任意多次投递。
+        let ticket_a = endpoint_a.fetch_add(1, Ordering::AcqRel) + 1;
+        for _ in 0..3 {
+            endpoint_b.fetch_add(1, Ordering::AcqRel);
+        }
+        assert!(
+            ticket_is_current(&endpoint_a, ticket_a),
+            "另一个票据域的新票不得使本域排队请求失效"
+        );
+        // 同一域内：后到的新票取代旧票（「先播放后停止」按停止生效的机制）。
+        let _newer = endpoint_a.fetch_add(1, Ordering::AcqRel) + 1;
+        assert!(
+            !ticket_is_current(&endpoint_a, ticket_a),
+            "同一票据域内的新票必须作废旧票"
+        );
     }
 }

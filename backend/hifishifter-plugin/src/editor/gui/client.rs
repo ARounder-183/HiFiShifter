@@ -952,13 +952,18 @@ pub(crate) fn pump(state: &Rc<RefCell<EditorClient>>) {
 /// 返回 `Ok(true)` = 已排队（宿主下一次模型回调时执行），`Ok(false)` = 宿主当场接受了。
 /// 两者对调用方都是**成功**：前者只是「还没轮到」。
 fn request_host_playback(
-    target: std::thread::ThreadId,
-    handle: &ara2_bridge::plugin::PlaybackRequestHandle,
+    endpoint: &crate::render::document::PlaybackEndpoint,
     request: crate::editor::host_threads::PlaybackRequest,
 ) -> Result<bool, String> {
-    match crate::editor::host_threads::on_ara_model(target, handle.clone(), request) {
+    // 票据域随端点走：取代只在同一个 ARA 文档内生效（见 PlaybackEndpoint::supersession）。
+    match crate::editor::host_threads::on_ara_model(
+        endpoint.supersession.clone(),
+        endpoint.thread,
+        endpoint.handle.clone(),
+        request,
+    ) {
         Ok(Ok(())) => Ok(false),
-        // 宿主自己拒绝（租约撤销 / 位置非法 / 线程不对）：如实报错。
+        // 宿主自己拒绝（租约撤销 / 位置非法 / 线程不对 / 被更新请求取代）：如实报错。
         Ok(Err(reason)) => Err(reason),
         Err(crate::editor::host_threads::ModelThreadError::Queued) => Ok(true),
         Err(error) => Err(error.message()),
@@ -1729,21 +1734,20 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
                 let owner=link.owner()?;
                 let playback=owner.host_playback().ok_or("host does not provide ARA playback control")?;
                 // 线程随租约一起来：它就是句柄守卫要求的那条（见 PlaybackEndpoint）。
-                let target=playback.thread;
                 let position=owner.clock.get().map(|clock|clock.read().0).unwrap_or(0.);
                 // 【为什么每次都要投递】ARA 的播放请求被钉在 **model 线程**上
                 // （`host playback request off model thread`），而这里跑在客户端的线程上。
-                // 【为什么结论可能是「已排队」】宿主不保证在我们愿意等的两秒里回到模型
+                // 【为什么结论可能是「已排队」】宿主不保证在我们的短等待窗口里回到模型
                 // 线程；那时请求留在队列里等下一次回调，而**不是**作废 —— 作废正是
                 // 「按了播放没反应，还多一条红条」的形状。
                 if command=="stop_audio" {
                     // ARA 只有 Stop 请求；暂停后定位到实际停止点。两者合成**一次**投递，
                     // 否则后一张票会把前一张判成「已被取代」，于是只定位、没停。
-                    let queued=request_host_playback(target,&playback.handle,
+                    let queued=request_host_playback(&playback,
                         crate::editor::host_threads::PlaybackRequest::StopAtPosition(position))?;
                     Ok(serde_json::json!({"ok":true,"stopped_at_sec":position,"queued":queued}))
                 } else {
-                    let queued=request_host_playback(target,&playback.handle,
+                    let queued=request_host_playback(&playback,
                         crate::editor::host_threads::PlaybackRequest::Start)?;
                     Ok(serde_json::json!({"ok":true,"host_request":true,"anchorSec":position,"start_sec":position,"queued":queued}))}
             })()
@@ -1957,7 +1961,7 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
                     // 调用全部失败，于是"点时间轴跳转"从来没有真正落到宿主上。
                     let playback=owner.host_playback().ok_or("host does not provide ARA playback control")?;
                     // 排队也接受：定位是「最终要生效」的意图，不是必须当场完成的读数。
-                    let _queued=request_host_playback(playback.thread,&playback.handle,
+                    let _queued=request_host_playback(&playback,
                         crate::editor::host_threads::PlaybackRequest::SetPosition(position))?;
                     // seek回执前同步真实宿主光标，避免继续发布上次UI tick的旧位置。
                     owner.refresh_host_transport();Ok(())

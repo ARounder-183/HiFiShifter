@@ -17,7 +17,7 @@
 use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// 投递失败的结构化原因。
 ///
@@ -74,6 +74,8 @@ type Job = Box<dyn FnOnce() + Send + 'static>;
 struct Queued {
     target: std::thread::ThreadId,
     job: Job,
+    /// 入队时刻（[`MAX_QUEUE_AGE`] 清退的依据）。
+    queued_at: Instant,
 }
 
 fn queue() -> &'static Mutex<VecDeque<Queued>> {
@@ -102,6 +104,54 @@ fn take_one() -> Option<Job> {
 /// 之间的折中：REAPER 的主循环里有 2 ms 的空转不会被察觉。
 const LINGER: Duration = Duration::from_millis(2);
 
+/// 队列条目的最长滞留时间；超过即按「目标线程已死」清退。
+///
+/// 【为什么需要清退】`editor::host_threads::deliver` 超时返回 `Queued` 后任务
+/// **留在队列里**；若该文档此后再无模型回调（文档已关、宿主不再进入
+/// `endEditing`），任务（持有 `PlaybackEndpoint` 的 Arc 等）既不执行也不被逐出。
+/// 这是慢性侵蚀：满 [`QUEUE_CAPACITY`] 后 `scoped`/`post_owned` 对**所有**线程
+/// 失败 —— 全插件表现为 "host thread queue is full"。60 s 远大于任何合法等待
+/// （宿主节拍 30 Hz、UI 泵随每次窗口回调运行），滞留这么久只可能是目标线程
+/// 不会再泵了。
+///
+/// 【为什么丢弃是安全的】`scoped` 条目被投递方放弃时槽位已置 `Abandoned`，
+/// ticket 的执行入口对 `Abandoned` 直接返回、绝不解引用借用指针；而直接 drop
+/// 连执行入口都不会碰到，只递减引用计数。`post_owned` 条目拥有自己的数据。
+const MAX_QUEUE_AGE: Duration = Duration::from_secs(60);
+
+/// 清退滞留超限的条目（[`pump`] 每次顺手做一次；代价是一次线性扫描）。
+fn evict_expired() {
+    let cutoff = Instant::now() - MAX_QUEUE_AGE;
+    let mut pending = lock_queue();
+    let before = pending.len();
+    pending.retain(|entry| entry.queued_at >= cutoff);
+    let evicted = before - pending.len();
+    drop(pending);
+    if evicted > 0 {
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Warn,
+            "host.marshal.queue-evicted",
+            format_args!(
+                "[host] dropped {evicted} stale queued job(s) older than {} s; \
+                 their target thread stopped pumping",
+                MAX_QUEUE_AGE.as_secs()
+            ),
+        );
+    }
+}
+
+/// 拒投时记一行（限流）：目标线程与当前深度，排障时看得见"为什么满"。
+fn log_queue_rejected(target: std::thread::ThreadId, depth: usize) {
+    hifishifter_kernel::log_limiter::emit_limited_key(
+        log::Level::Warn,
+        "host.marshal.post-rejected",
+        format_args!(
+            "[host] queue full ({depth} pending); rejected a post for thread {target:?} — \
+             its pump is not draining"
+        ),
+    );
+}
+
 /// 在**宿主线程**上执行队列里的全部待办。
 ///
 /// 【调用者必须是宿主线程】它由 `IPlugView` 的回调与注册到宿主的 timer 驱动。这里
@@ -111,6 +161,7 @@ const LINGER: Duration = Duration::from_millis(2);
 /// 【为什么空队列时立刻返回】宿主每次重排窗口都会调 `getSize`，一次会话几十次；
 /// 那时队列多半是空的，白等 2 ms 只是白白拖慢宿主。
 pub(crate) fn pump() {
+    evict_expired();
     let Some(first) = take_one() else {
         return;
     };
@@ -175,11 +226,13 @@ pub(crate) fn scoped<R: Send, F: FnOnce() -> R>(
         {
             let mut pending = lock_queue();
             if pending.len() >= QUEUE_CAPACITY {
+                log_queue_rejected(target, pending.len());
                 return Err(HostThreadError::Backlog);
             }
             pending.push_back(Queued {
                 target,
                 job: Box::new(move || ticket.run()),
+                queued_at: Instant::now(),
             });
         }
         wait(&slot)?;
@@ -295,9 +348,14 @@ pub(crate) fn post_owned(
 ) -> bool {
     let mut pending = lock_queue();
     if pending.len() >= QUEUE_CAPACITY {
+        log_queue_rejected(target, pending.len());
         return false;
     }
-    pending.push_back(Queued { target, job });
+    pending.push_back(Queued {
+        target,
+        job,
+        queued_at: Instant::now(),
+    });
     true
 }
 
@@ -368,6 +426,7 @@ mod tests {
             job: Box::new(move || {
                 let _ = sender.send(7);
             }),
+            queued_at: Instant::now(),
         });
         assert!(drain() >= 1);
         assert_eq!(receiver.try_recv().unwrap(), 7);
@@ -384,10 +443,47 @@ mod tests {
             job: Box::new(move || {
                 let _ = sender.send(7);
             }),
+            queued_at: Instant::now(),
         });
         pump();
         assert!(receiver.try_recv().is_err(), "本线程的泵取走了别人的任务");
         assert!(pending() >= 1);
+        drain();
+    }
+
+    /// **不变量：滞留超限的条目被清退，新条目不受影响。**
+    ///
+    /// 【为什么钉死】`deliver` 超时后任务留在队列里，目标线程若再也不泵（文档
+    /// 已关），它既不执行也不被逐出 —— 满员后**所有**线程的投递都失败。清退
+    /// 就是这条泄漏路径的唯一出口。
+    #[test]
+    fn a_stale_entry_is_evicted_while_a_fresh_one_survives() {
+        let _guard = serialize();
+        drain();
+        let dead_target = std::thread::spawn(|| {}).thread().id();
+        {
+            let mut pending = lock_queue();
+            pending.push_back(Queued {
+                target: dead_target,
+                job: Box::new(|| {}),
+                // 直接构造一个已滞留超限的时刻，测试不等真实的 60 s。
+                queued_at: Instant::now() - MAX_QUEUE_AGE - Duration::from_secs(1),
+            });
+            pending.push_back(Queued {
+                target: dead_target,
+                job: Box::new(|| {}),
+                queued_at: Instant::now(),
+            });
+        }
+        // 队列是进程级的：别的测试可能留下针对死线程的残留条目，因此断言
+        // 「本次 pump 恰好清退一条」而不是绝对深度。
+        let before = pending();
+        pump();
+        assert_eq!(
+            pending(),
+            before - 1,
+            "滞留超限的条目必须被清退，其余条目必须保留"
+        );
         drain();
     }
 

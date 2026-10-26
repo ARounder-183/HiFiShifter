@@ -6,7 +6,7 @@ use crate::sync::MutexExt;
 use ara2_bridge::companion::CompanionControllerBinding;
 use ara2_bridge::core::{ApiGeneration, AraError};
 use ara2_bridge::plugin::ExtensionControllerLease;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
@@ -58,6 +58,52 @@ pub(crate) struct SplitWindowSource {
     pub offset_sec: f64,
     /// 子段的播放长度（秒）。
     pub length_sec: f64,
+}
+
+/// 已确认分割的子段窗口来源表：按 GUID 查取 + **插入序**淘汰最旧。
+///
+/// 【为什么淘汰最旧而不是整体清空】这张表是「从父段推导窗口」（`1cf39259`）的
+/// 唯一输入。整体清空会把长会话里**全部**已登记的窗口一次砸掉：之后任何需要
+/// 推导的分割段都退回宿主读数 —— 恰是那次修复要消灭的「右段偏移」故障形态，
+/// 且静默无日志。按插入序逐条淘汰，后登记的（正在参与本轮推导的）不受影响。
+#[derive(Default)]
+pub(crate) struct SplitWindows {
+    map: HashMap<String, SplitWindowSource>,
+    order: VecDeque<String>,
+}
+
+impl SplitWindows {
+    /// 一张文档最多登记多少条。宿主反复分割会持续产生新 item GUID，没有上界的
+    /// 话这张表随编辑次数无界增长；4096 条足够覆盖任何一次会话的分割历史，
+    /// 超出时丢最旧的 —— 它只是"推导窗口"的提示，条目被淘汰后退回宿主读数，
+    /// 不会让任何东西失效。
+    const MAX_ENTRIES: usize = 4096;
+
+    /// 重复登记是幂等的（刷新既有条目，不改变其插入序）。
+    fn insert(&mut self, child: String, source: SplitWindowSource) {
+        if !self.map.contains_key(&child) {
+            self.order.push_back(child.clone());
+            while self.order.len() > Self::MAX_ENTRIES {
+                let Some(oldest) = self.order.pop_front() else {
+                    break;
+                };
+                if self.map.remove(&oldest).is_some() {
+                    log::debug!(
+                        "[ara] split window table is full; evicted the oldest entry ({oldest})"
+                    );
+                }
+            }
+        }
+        self.map.insert(child, source);
+    }
+
+    pub(crate) fn get(&self, child: &str) -> Option<&SplitWindowSource> {
+        self.map.get(child)
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.map.len()
+    }
 }
 
 /// 一个 ARA 文档的共享状态。
@@ -238,6 +284,15 @@ pub struct PlaybackEndpoint {
     pub thread: std::thread::ThreadId,
     /// 租约本体（`Clone`：每次调用取一份副本）。
     pub handle: ara2_bridge::plugin::PlaybackRequestHandle,
+    /// 本端点的传输请求**票据域**（`editor::host_threads` 的取代判定只在本域内
+    /// 生效）。
+    ///
+    /// 【为什么随端点而不是进程】进程级票号下，任何文档的任意一次投递都会把
+    /// **别的**文档排队中的请求判成「已被取代」而静默丢弃（多工程 tab / 双实例
+    /// 时「按了播放没反应」）；单文档内，排队中的 Stop 也会被随后独立的
+    /// SetPosition 作废（「按了停止却不停」）。票据域随端点走，取代语义才与
+    /// 用户意图同域。
+    pub supersession: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[derive(Default)]
@@ -516,12 +571,8 @@ pub(crate) struct DocumentSession {
     /// 判定）已经完整实现并测试过（`ExtensionOwner::merge_pending_restore`）。存档通道
     /// 只是**另一个来源**，不该有第二份实现 —— 两份实现迟早会漂移。
     pub pending_archive_restore: Mutex<Option<crate::state_channel::EditState>>,
-    /// 已确认分割的子段窗口来源（见 [`SplitWindowSource`]）。
-    ///
-    /// 【为什么有上界】宿主反复分割会持续产生新 item GUID；没有上界的话这张表随编辑
-    /// 次数无界增长。4096 条足够覆盖任何一次会话的分割历史，超出时整体清空 —— 它只是
-    /// "推导窗口"的提示，清空后退回宿主读数，不会让任何东西失效。
-    pub split_windows: Mutex<HashMap<String, SplitWindowSource>>,
+    /// 已确认分割的子段窗口来源（见 [`SplitWindowSource`] 与 [`SplitWindows`]）。
+    pub split_windows: Mutex<SplitWindows>,
     /// 本实例**主动创建**的宿主轨道 GUID（`create_host_track` / 粘贴 / 导入建轨）。
     ///
     /// 【为什么必须有这张表】清单的轨道范围是「本轨 + folder 后代」（`ui_folder_tracks`），
@@ -648,6 +699,52 @@ impl MusicalProjectionKey {
 pub(crate) struct PluginMusicalProjection {
     pub project_scale_notes: Vec<u8>,
     pub tempo_map: Option<Vec<hifishifter_kernel::state::TempoPointData>>,
+}
+
+#[cfg(test)]
+mod split_windows_tests {
+    use super::*;
+
+    fn source() -> SplitWindowSource {
+        SplitWindowSource {
+            left: "left".into(),
+            offset_sec: 0.5,
+            length_sec: 0.5,
+        }
+    }
+
+    /// **不变量：表满时逐条淘汰最旧，而不是整体清空。**
+    ///
+    /// 【为什么钉死】整体清空会把长会话里全部已登记窗口一次砸掉，让后续分割段
+    /// 退回宿主读数 —— 正是 `1cf39259` 要消灭的「右段偏移」故障形态，且静默无日志。
+    #[test]
+    fn an_overflow_evicts_the_oldest_entry_instead_of_clearing_the_table() {
+        let mut table = SplitWindows::default();
+        for index in 0..(SplitWindows::MAX_ENTRIES + 3) {
+            table.insert(format!("child-{index}"), source());
+        }
+        assert_eq!(table.len(), SplitWindows::MAX_ENTRIES);
+        assert!(table.get("child-0").is_none(), "最旧的条目必须被逐出");
+        assert!(table.get("child-2").is_none());
+        assert!(
+            table.get("child-3").is_some(),
+            "未被逐出的旧条目必须保留（不清空全表）"
+        );
+        assert!(table
+            .get(&format!("child-{}", SplitWindows::MAX_ENTRIES + 2))
+            .is_some());
+        // 重复登记幂等：刷新内容，不新增条目。
+        table.insert(
+            "child-3".into(),
+            SplitWindowSource {
+                left: "renewed".into(),
+                offset_sec: 1.,
+                length_sec: 1.,
+            },
+        );
+        assert_eq!(table.len(), SplitWindows::MAX_ENTRIES);
+        assert_eq!(table.get("child-3").unwrap().left, "renewed");
+    }
 }
 
 #[cfg(test)]
@@ -1438,16 +1535,15 @@ impl DocumentSession {
         }
     }
 
-    /// 记下一次已确认分割的子段窗口来源（重复登记是幂等的）。
+    /// 记下一次已确认分割的子段窗口来源（重复登记是幂等的；超上界丢最旧，见
+    /// [`SplitWindows`]）。
     pub(crate) fn note_split_window(&self, child: &str, source: SplitWindowSource) {
         if child.is_empty() {
             return;
         }
-        let mut map = self.split_windows.lock_or_recover();
-        if map.len() >= 4096 && !map.contains_key(child) {
-            map.clear();
-        }
-        map.insert(child.to_owned(), source);
+        self.split_windows
+            .lock_or_recover()
+            .insert(child.to_owned(), source);
     }
 
     /// 当前登记了多少条"分割子段窗口来源"（诊断用）。
@@ -1877,6 +1973,11 @@ impl DocumentSession {
         Arc::new(Self {
             id,
             alive: AtomicBool::new(true),
+            // `resynced_geometry` 与 `ui_geometry_revision` 同为 0 起步是**有意**的：
+            // 让首轮 `workspace_view()`（读路径）不做重投影 —— "读一次工作区"不得
+            // 改变待提交编辑依赖的指纹，否则并发的 automatic apply 会判成
+            // workspace changed（该字段注释与 bound_tests 钉死这一契约）。
+            // 冷恢复后首轮跳过的窗口由 restore 路径自己的 inventory 推进兜住。
             ..Default::default()
         })
     }
