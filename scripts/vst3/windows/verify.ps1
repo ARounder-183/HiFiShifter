@@ -79,14 +79,21 @@ try {
     $process.StartInfo = $psi
     if (-not $process.Start()) { throw 'Failed to start load_probe.exe' }
 
+    # 【为什么先起异步读再等退出】管道缓冲只有 ~4KB：先 WaitForExit 再 ReadToEnd
+    # 的顺序里，子进程一旦写满缓冲就会阻塞在写上，WaitForExit 必然超时 ——
+    # 而这个假超时会被下面的报错误诊成 "GetPluginFactory deadlocked"。
+    # 读与等必须并行；Kill 之后 ReadToEndAsync 也总能完成（管道随进程终止而关）。
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
+
     $timedOut = -not $process.WaitForExit($TimeoutSeconds * 1000)
     if ($timedOut) {
         try { $process.Kill() } catch { }
         $process.WaitForExit()
     }
 
-    $stdout = $process.StandardOutput.ReadToEnd()
-    $stderr = $process.StandardError.ReadToEnd()
+    $stdout = $stdoutTask.GetAwaiter().GetResult()
+    $stderr = $stderrTask.GetAwaiter().GetResult()
     $utf8 = New-Object System.Text.UTF8Encoding($false)
     [IO.File]::WriteAllText($stdoutPath, $stdout, $utf8)
     [IO.File]::WriteAllText($stderrPath, $stderr, $utf8)
