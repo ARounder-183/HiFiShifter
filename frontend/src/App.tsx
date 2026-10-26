@@ -31,8 +31,16 @@ import {
     pluginAllowsEditChannel,
 } from "./services/hostCapabilities";
 import { loadStandaloneWindowApi } from "./services/hostWindow";
-import { TimelinePanel } from "./components/layout/TimelinePanel";
-import { PianoRollPanel } from "./components/layout/PianoRollPanel";
+const TimelinePanel = lazy(() =>
+    import("./components/layout/TimelinePanel").then((module) => ({
+        default: module.TimelinePanel,
+    })),
+);
+const PianoRollPanel = lazy(() =>
+    import("./components/layout/PianoRollPanel").then((module) => ({
+        default: module.PianoRollPanel,
+    })),
+);
 import { useAppDispatch, useAppSelector } from "./app/hooks";
 import { webApi } from "./services/webviewApi";
 import { settingsApi } from "./services/api/settings";
@@ -89,8 +97,16 @@ import { PitchAnalysisStatusChip } from "./components/layout/PitchAnalysisStatus
 import { ParamDataLoadingChip } from "./components/layout/ParamDataLoadingChip";
 import { AppStatusProgressChips } from "./components/layout/AppStatusProgressChips";
 import { appStatusProgressBus } from "./utils/appStatusProgressBus";
-import { FileBrowserPanel } from "./components/layout/FileBrowserPanel";
-import { AppearanceSettingsPanel } from "./components/layout/AppearanceSettingsPanel";
+const FileBrowserPanel = lazy(() =>
+    import("./components/layout/FileBrowserPanel").then((module) => ({
+        default: module.FileBrowserPanel,
+    })),
+);
+const AppearanceSettingsPanel = lazy(() =>
+    import("./components/layout/AppearanceSettingsPanel").then((module) => ({
+        default: module.AppearanceSettingsPanel,
+    })),
+);
 import { UndoHistoryPanel } from "./components/layout/UndoHistoryPanel";
 import { DockRoot } from "./components/dock/DockRoot";
 import { registerBuiltinPanels } from "./components/dock/registerBuiltinPanels";
@@ -131,7 +147,7 @@ const NotebookPanel = lazy(() =>
     })),
 );
 // 记事本自带的错误边界与按需加载放在一起：动态 chunk 加载失败或模块求值抛错
-// 都由它兜住，不会把整个窗口打空（应用没有根级 ErrorBoundary）。
+// 都由它兜住，不会把整个窗口打空（根级 ErrorBoundary 在 mount.tsx 的 AppRootErrorBoundary）。
 const NotebookErrorBoundary = lazy(() =>
     import("./components/layout/notebook/NotebookErrorBoundary").then((module) => ({
         default: module.NotebookErrorBoundary,
@@ -3640,54 +3656,68 @@ function AppInner() {
     // 是 App，搬进注册表只会变成第二份拷贝。写在渲染期是安全的：写入幂等，
     // 且读取发生在同一趟渲染里更靠后的子组件（见 `panelRenderer` 注释）。
     setPanelRenderer(PANEL_TIMELINE, () => (
-        <TimelinePanel
-            midiClipDialogOpen={midiClipDialogOpen}
-            midiClipPath={midiClipPath}
-            midiClipStartSec={midiClipStartSec}
-            midiClipTrackId={midiClipTrackId}
-            midiClipClipboardGuid={midiClipClipboardGuid}
-            fillGaps={fillGaps}
-            multiTrackMerge={multiTrackMerge}
-            importBpmAsProject={importBpmAsProject}
-            noteBpmMode={noteBpmMode}
-            specifiedBpm={specifiedBpm}
-            importPosition={importPosition}
-            closeLeadingGap={closeLeadingGap}
-            onMidiClipDialogOpenChange={openMidiClipDialog}
-            onMidiClipPathChange={setMidiClipPath}
-            onMidiClipStartSecChange={setMidiClipStartSec}
-            onMidiClipTrackIdChange={setMidiClipTrackId}
-            onFillGapsChange={handleFillGapsChange}
-            onMultiTrackMergeChange={handleMultiTrackMergeChange}
-            onImportBpmAsProjectChange={handleImportBpmAsProjectChange}
-            onNoteBpmModeChange={handleNoteBpmModeChange}
-            onSpecifiedBpmChange={handleSpecifiedBpmChange}
-            onImportPositionChange={handleImportPositionChange}
-            onCloseLeadingGapChange={handleCloseLeadingGapChange}
-            importTempoMapEnabled={importTempoMapEnabled}
-            onImportTempoMapEnabledChange={handleImportTempoMapEnabledChange}
-            importTempoMapTempo={importTempoMapTempo}
-            onImportTempoMapTempoChange={handleImportTempoMapTempoChange}
-            importTempoMapTimeSignature={importTempoMapTimeSignature}
-            onImportTempoMapTimeSignatureChange={handleImportTempoMapTimeSignatureChange}
-            importTempoMapKeySignature={importTempoMapKeySignature}
-            onImportTempoMapKeySignatureChange={handleImportTempoMapKeySignatureChange}
-            midiDialogSource={midiDialogSource}
-            onMidiDialogSourceChange={setMidiDialogSource}
-            importTargetMenu={midiImportTargetMenu}
-            onImportTargetMenuChange={handleImportTargetMenuChange}
-            importTargetDragDrop={midiImportTargetDragDrop}
-            onImportTargetDragDropChange={handleImportTargetDragDropChange}
-        />
+        <Suspense fallback={null}>
+            <TimelinePanel
+                midiClipDialogOpen={midiClipDialogOpen}
+                midiClipPath={midiClipPath}
+                midiClipStartSec={midiClipStartSec}
+                midiClipTrackId={midiClipTrackId}
+                midiClipClipboardGuid={midiClipClipboardGuid}
+                fillGaps={fillGaps}
+                multiTrackMerge={multiTrackMerge}
+                importBpmAsProject={importBpmAsProject}
+                noteBpmMode={noteBpmMode}
+                specifiedBpm={specifiedBpm}
+                importPosition={importPosition}
+                closeLeadingGap={closeLeadingGap}
+                onMidiClipDialogOpenChange={openMidiClipDialog}
+                onMidiClipPathChange={setMidiClipPath}
+                onMidiClipStartSecChange={setMidiClipStartSec}
+                onMidiClipTrackIdChange={setMidiClipTrackId}
+                onFillGapsChange={handleFillGapsChange}
+                onMultiTrackMergeChange={handleMultiTrackMergeChange}
+                onImportBpmAsProjectChange={handleImportBpmAsProjectChange}
+                onNoteBpmModeChange={handleNoteBpmModeChange}
+                onSpecifiedBpmChange={handleSpecifiedBpmChange}
+                onImportPositionChange={handleImportPositionChange}
+                onCloseLeadingGapChange={handleCloseLeadingGapChange}
+                importTempoMapEnabled={importTempoMapEnabled}
+                onImportTempoMapEnabledChange={handleImportTempoMapEnabledChange}
+                importTempoMapTempo={importTempoMapTempo}
+                onImportTempoMapTempoChange={handleImportTempoMapTempoChange}
+                importTempoMapTimeSignature={importTempoMapTimeSignature}
+                onImportTempoMapTimeSignatureChange={handleImportTempoMapTimeSignatureChange}
+                importTempoMapKeySignature={importTempoMapKeySignature}
+                onImportTempoMapKeySignatureChange={handleImportTempoMapKeySignatureChange}
+                midiDialogSource={midiDialogSource}
+                onMidiDialogSourceChange={setMidiDialogSource}
+                importTargetMenu={midiImportTargetMenu}
+                onImportTargetMenuChange={handleImportTargetMenuChange}
+                importTargetDragDrop={midiImportTargetDragDrop}
+                onImportTargetDragDropChange={handleImportTargetDragDropChange}
+            />
+        </Suspense>
     ));
     // 把窗体身份传进去：参数编辑器要判断"我是否与时间轴上下堆叠"，以决定同步
     // 偏移怎么算（多实例时每个窗体各判各的）。
-    setPanelRenderer(PANEL_PARAM_EDITOR, (form) => <PianoRollPanel dockFormId={form.id} />);
-    setPanelRenderer(PANEL_FILE_BROWSER, () => <FileBrowserPanel />);
+    setPanelRenderer(PANEL_PARAM_EDITOR, (form) => (
+        <Suspense fallback={null}>
+            <PianoRollPanel dockFormId={form.id} />
+        </Suspense>
+    ));
+    setPanelRenderer(PANEL_FILE_BROWSER, () => (
+        <Suspense fallback={null}>
+            <FileBrowserPanel />
+        </Suspense>
+    ));
     setPanelRenderer(PANEL_UNDO_HISTORY, () => <UndoHistoryPanel />);
     // 外观设置：曾经是独立 OS 窗口（`appearance.html` + 独立 React 根），现在复用
     // 停靠机制 —— 居中浮出、不可停靠、不进「窗口」菜单（见注册表声明）。
-    setPanelRenderer(PANEL_APPEARANCE, (form) => <AppearanceSettingsPanel formId={form.id} />);
+    setPanelRenderer(PANEL_APPEARANCE, (form) => (
+        <Suspense fallback={null}>
+            <AppearanceSettingsPanel formId={form.id} />
+        </Suspense>
+    ));
     // 宿主链接（仅独立 App）：默认关闭的浮出面板，入口在「视图」菜单。
     // 它取代了旧的 "ARA 宿主连接" —— 宿主导出的是一份磁盘上的工作区，没有实例可连。
     setPanelRenderer(PANEL_HOST_LINK, () => (

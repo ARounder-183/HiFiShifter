@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import {
     isPluginMode,
     canImportHostAudio,
@@ -75,7 +75,9 @@ import {
 import { IS_WINDOWS } from "../../utils/platform";
 import { getActiveSurface } from "../../features/uiFocus/focusSurface";
 import { webApi } from "../../services/webviewApi";
-import { KeybindingsDialog } from "./KeybindingsDialog";
+const KeybindingsDialog = lazy(() =>
+    import("./KeybindingsDialog").then((module) => ({ default: module.KeybindingsDialog })),
+);
 import {
     TransposeCentsDialog,
     TransposeDegreesDialog,
@@ -86,15 +88,23 @@ import {
     MeanQuantizeDialog,
 } from "../editDialogs/EditDialogs";
 import { SCALE_LABELS } from "../../utils/musicalScales";
-import { ExportAudioDialog } from "./ExportAudioDialog";
+const ExportAudioDialog = lazy(() =>
+    import("./ExportAudioDialog").then((module) => ({ default: module.ExportAudioDialog })),
+);
 import { AutoBackupDialog } from "./AutoBackupDialog";
-import { RenderCacheDialog } from "./RenderCacheDialog";
-import { VibratoDialog } from "./VibratoDialog";
+const RenderCacheDialog = lazy(() =>
+    import("./RenderCacheDialog").then((module) => ({ default: module.RenderCacheDialog })),
+);
+const VibratoDialog = lazy(() =>
+    import("./VibratoDialog").then((module) => ({ default: module.VibratoDialog })),
+);
 import { ChannelImportDialog } from "./ChannelImportDialog";
 import { PenInputDialog } from "./PenInputDialog";
 import { SearchSettingsDialog } from "./SearchSettingsDialog";
 import { RecordingSettingsDialog } from "./RecordingSettingsDialog";
-import { BenchmarkDialog } from "./BenchmarkDialog";
+const BenchmarkDialog = lazy(() =>
+    import("./BenchmarkDialog").then((module) => ({ default: module.BenchmarkDialog })),
+);
 import { AboutDialog } from "./AboutDialog";
 
 import {
@@ -591,7 +601,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
         } catch (e) {
             setNotice({ title: tf("status_error_prefix"), message: String(e) });
         }
-    }, [tf]);
+    }, [tf, t]);
 
     // 快捷键「导入媒体文件」→ 复用文件菜单的导入流程（多文件/多音轨选择）。
     useEffect(() => {
@@ -1616,8 +1626,12 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 </DropdownMenu.Root>
             </Flex>
 
-            {/* 快捷键设置对话框 */}
-            <KeybindingsDialog open={kbDialogOpen} onOpenChange={setKbDialogOpen} />
+            {/* 快捷键设置对话框：只在打开时加载，避免把整块编辑器塞进首屏。 */}
+            {kbDialogOpen ? (
+                <Suspense fallback={null}>
+                    <KeybindingsDialog open onOpenChange={setKbDialogOpen} />
+                </Suspense>
+            ) : null}
 
             {/* 停靠窗体的「窗口 / 布局」二级菜单所触发的对话框（常驻，
                 不能放进视图菜单的 Content —— 菜单关闭时那里会卸载）。 */}
@@ -1630,7 +1644,11 @@ export const MenuBar: React.FC<MenuBarProps> = ({
 
             <SnapGridSettingsDialog open={snapSettingsOpen} onOpenChange={setSnapSettingsOpen} />
 
-            <ExportAudioDialog open={exportDialogOpen} onOpenChange={setExportDialogOpen} />
+            {exportDialogOpen ? (
+                <Suspense fallback={null}>
+                    <ExportAudioDialog open onOpenChange={setExportDialogOpen} />
+                </Suspense>
+            ) : null}
 
             <AutoBackupDialog
                 open={autoBackupDialogOpen}
@@ -1649,17 +1667,22 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 onOpenChange={setChannelImportDialogOpen}
             />
             <PenInputDialog open={penInputDialogOpen} onOpenChange={setPenInputDialogOpen} />
-            <RenderCacheDialog
-                open={renderCacheDialogOpen}
-                onOpenChange={setRenderCacheDialogOpen}
-            />
+            {renderCacheDialogOpen ? (
+                <Suspense fallback={null}>
+                    <RenderCacheDialog open onOpenChange={setRenderCacheDialogOpen} />
+                </Suspense>
+            ) : null}
 
             {/* 颤音预设库：与右键菜单的「管理预设…」共用同一个对话框 */}
-            <VibratoDialog
-                open={vibratoDialogOpen}
-                onOpenChange={setVibratoDialogOpen}
-                editParam={s.editParam}
-            />
+            {vibratoDialogOpen ? (
+                <Suspense fallback={null}>
+                    <VibratoDialog
+                        open
+                        onOpenChange={setVibratoDialogOpen}
+                        editParam={s.editParam}
+                    />
+                </Suspense>
+            ) : null}
 
             <RecordingSettingsDialog
                 open={recordingDialogOpen}
@@ -1667,7 +1690,11 @@ export const MenuBar: React.FC<MenuBarProps> = ({
             />
 
             {/* Inference device benchmark */}
-            <BenchmarkDialog open={benchmarkDialogOpen} onOpenChange={setBenchmarkDialogOpen} />
+            {benchmarkDialogOpen ? (
+                <Suspense fallback={null}>
+                    <BenchmarkDialog open onOpenChange={setBenchmarkDialogOpen} />
+                </Suspense>
+            ) : null}
 
             {/* 导出诊断信息进行中：含基准测试（约 20–60 秒），给出明确的进行中提示。
                 不可中断（后端没有取消通道），因此屏蔽 Esc / 点击遮罩关闭

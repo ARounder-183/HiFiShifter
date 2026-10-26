@@ -15,7 +15,8 @@
         "format:check": "prettier . --check",
         "preview": "vite preview",
         "build:sdk": "tsc -p tsconfig.sdk.json",
-        "build:installer-strings": "node ../scripts/release/build-installer-strings.mjs"
+        "build:installer-strings": "node ../scripts/release/build-installer-strings.mjs",
+        "check:bundle": "node scripts/check-bundle-size.mjs"
     },
     "dependencies": {
         "@radix-ui/react-icons": "^1.3.2",
