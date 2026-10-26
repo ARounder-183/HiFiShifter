@@ -74,8 +74,22 @@ type Job = Box<dyn FnOnce() + Send + 'static>;
 struct Queued {
     target: std::thread::ThreadId,
     job: Job,
-    /// 入队时刻（[`MAX_QUEUE_AGE`] 清退的依据）。
+    /// 入队时刻（清退阈值的依据）。
     queued_at: Instant,
+    /// 投递入口（[`scoped`] / [`post_owned`]），决定清退阈值。
+    kind: EntryKind,
+}
+
+/// 投递入口 → 清退阈值。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EntryKind {
+    /// `scoped`：借用投递方栈帧，投递方超时即放弃（`Abandoned`）；
+    /// [`MAX_QUEUE_AGE`] 清退即可。
+    Scoped,
+    /// `post_owned`：拥有自己的数据。目标线程多为 ARA 模型线程 —— 它的泵**只在
+    /// 宿主进入模型回调时运行**，宿主暂停/失焦几分钟是常态；[`MAX_OWNED_QUEUE_AGE`]
+    /// 给它们足够的存活期，见该常量的说明。
+    Owned,
 }
 
 fn queue() -> &'static Mutex<VecDeque<Queued>> {
@@ -119,22 +133,58 @@ const LINGER: Duration = Duration::from_millis(2);
 /// 连执行入口都不会碰到，只递减引用计数。`post_owned` 条目拥有自己的数据。
 const MAX_QUEUE_AGE: Duration = Duration::from_secs(60);
 
+/// `post_owned` 条目的清退阈值（10 分钟）。
+///
+/// 【为什么与 [`MAX_QUEUE_AGE`] 分开】60 s 的论证对**窗口线程**成立（泵随视图回调
+/// /节拍持续运行），对**模型线程**不成立：它的泵只在宿主进入模型回调时运行，
+/// 宿主暂停/失焦几分钟里一次都不来。全局队列上，窗口线程的泵会顺手清退**别人的**
+/// 条目 —— 60 s 会把用户按过、拿到「已排队」回执的 Start/Stop 静默丢掉：按了播放，
+/// 60 s 后宿主恢复却什么都不发生。十分钟足够跨过一次暂停，又不至于让死文档的
+/// 任务永久占着队列（侵蚀仍有界）。清退时升格为 Error 日志：这是「用户的一个
+/// 意图被丢了」，不是普通的卫生清理。
+const MAX_OWNED_QUEUE_AGE: Duration = Duration::from_secs(600);
+
 /// 清退滞留超限的条目（[`pump`] 每次顺手做一次；代价是一次线性扫描）。
 fn evict_expired() {
-    let cutoff = Instant::now() - MAX_QUEUE_AGE;
-    let mut pending = lock_queue();
-    let before = pending.len();
-    pending.retain(|entry| entry.queued_at >= cutoff);
-    let evicted = before - pending.len();
-    drop(pending);
-    if evicted > 0 {
+    let now = Instant::now();
+    let mut scoped_evicted = 0_usize;
+    let mut owned_evicted = 0_usize;
+    {
+        let mut pending = lock_queue();
+        pending.retain(|entry| {
+            let limit = match entry.kind {
+                EntryKind::Scoped => MAX_QUEUE_AGE,
+                EntryKind::Owned => MAX_OWNED_QUEUE_AGE,
+            };
+            if now.duration_since(entry.queued_at) < limit {
+                return true;
+            }
+            match entry.kind {
+                EntryKind::Scoped => scoped_evicted += 1,
+                EntryKind::Owned => owned_evicted += 1,
+            }
+            false
+        });
+    }
+    if scoped_evicted > 0 {
         hifishifter_kernel::log_limiter::emit_limited_key(
             log::Level::Warn,
             "host.marshal.queue-evicted",
             format_args!(
-                "[host] dropped {evicted} stale queued job(s) older than {} s; \
+                "[host] dropped {scoped_evicted} stale queued job(s) older than {} s; \
                  their target thread stopped pumping",
                 MAX_QUEUE_AGE.as_secs()
+            ),
+        );
+    }
+    if owned_evicted > 0 {
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Error,
+            "host.marshal.owned-evicted",
+            format_args!(
+                "[host] dropped {owned_evicted} owned queued job(s) older than {} s; \
+                 a queued transport request was lost (its target thread never picked it up)",
+                MAX_OWNED_QUEUE_AGE.as_secs()
             ),
         );
     }
@@ -165,11 +215,11 @@ pub(crate) fn pump() {
     let Some(first) = take_one() else {
         return;
     };
-    first();
+    run_owned_job(first);
     let mut idle_since: Option<std::time::Instant> = None;
     loop {
         if let Some(job) = take_one() {
-            job();
+            run_owned_job(job);
             idle_since = None;
             continue;
         }
@@ -178,6 +228,26 @@ pub(crate) fn pump() {
             return;
         }
         std::thread::sleep(Duration::from_micros(150));
+    }
+}
+
+/// 执行一个 `post_owned` 任务，并拦住它的 panic。
+///
+/// 【为什么必须在这里 catch】这类任务多为 `PlaybackRequest`（vendored bridge 的
+/// FFI 封装），在宿主线程的视图回调/节拍泵里执行；panic 会一路穿过 `pump()`
+/// 越过 `extern "system"` 边界 —— 那是 abort，也就是整个宿主退出。与
+/// [`Ticket::run`]（scoped 路径）的拦截对称：scoped 的 panic 有投递方等着的槽位
+/// 可写，owned 任务没有，所以只留一行 Error 日志。
+fn run_owned_job(job: Job) {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
+    if outcome.is_err() {
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Error,
+            "host.marshal.owned-job-panicked",
+            format_args!(
+                "[host] an owned queued job panicked; the host thread survives, the request is lost"
+            ),
+        );
     }
 }
 
@@ -233,6 +303,7 @@ pub(crate) fn scoped<R: Send, F: FnOnce() -> R>(
                 target,
                 job: Box::new(move || ticket.run()),
                 queued_at: Instant::now(),
+                kind: EntryKind::Scoped,
             });
         }
         wait(&slot)?;
@@ -355,6 +426,7 @@ pub(crate) fn post_owned(
         target,
         job,
         queued_at: Instant::now(),
+        kind: EntryKind::Owned,
     });
     true
 }
@@ -387,6 +459,18 @@ fn drain() -> usize {
     handled
 }
 
+/// 【测试专用】进程级队列的全局串行锁。
+///
+/// 【为什么是模块级函数而不是 tests 模块的私有静态】`editor::host_threads` 的测试
+/// 也往**同一条**进程级队列里投递；两边各持一把模块内静态锁时，两族用例照样并行
+/// 互踩（一边把队列填满，另一边的 `scoped`/`deliver` 撞上 Backlog）。共用这一把，
+/// 队列的任何测试写入都互斥。
+#[cfg(test)]
+pub(crate) fn serialize_queue_for_tests() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|error| error.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -396,8 +480,7 @@ mod tests {
     /// 队列是**进程级**的，测试并行跑会互相看见对方的任务。串行化是本模块测试的
     /// 前提，而不是可选项。
     fn serialize() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        LOCK.lock().unwrap_or_else(|error| error.into_inner())
+        super::serialize_queue_for_tests()
     }
 
     /// 起一个扮演"宿主线程"的线程，并把它的 ThreadId 交回来。
@@ -427,6 +510,7 @@ mod tests {
                 let _ = sender.send(7);
             }),
             queued_at: Instant::now(),
+            kind: EntryKind::Owned,
         });
         assert!(drain() >= 1);
         assert_eq!(receiver.try_recv().unwrap(), 7);
@@ -444,6 +528,7 @@ mod tests {
                 let _ = sender.send(7);
             }),
             queued_at: Instant::now(),
+            kind: EntryKind::Owned,
         });
         pump();
         assert!(receiver.try_recv().is_err(), "本线程的泵取走了别人的任务");
@@ -468,11 +553,13 @@ mod tests {
                 job: Box::new(|| {}),
                 // 直接构造一个已滞留超限的时刻，测试不等真实的 60 s。
                 queued_at: Instant::now() - MAX_QUEUE_AGE - Duration::from_secs(1),
+                kind: EntryKind::Scoped,
             });
             pending.push_back(Queued {
                 target: dead_target,
                 job: Box::new(|| {}),
                 queued_at: Instant::now(),
+                kind: EntryKind::Scoped,
             });
         }
         // 队列是进程级的：别的测试可能留下针对死线程的残留条目，因此断言
@@ -555,5 +642,75 @@ mod tests {
         assert_eq!(error, HostThreadError::Panicked);
         stop.store(true, Ordering::Release);
         pumper.join().unwrap();
+    }
+
+    /// **不变量：清退阈值按投递入口分层 —— scoped 60 s，owned 10 分钟。**
+    ///
+    /// 【为什么钉死】窗口线程的泵会顺手清退**别的**线程的条目；60 s 一刀切会把
+    /// 宿主暂停期间（模型线程没有泵活动）排队中的播放请求静默丢掉 —— 用户按过
+    /// 播放、拿到「已排队」回执，宿主恢复后却什么都不发生。owned 条目必须活得
+    /// 比"一次暂停"久，同时侵蚀仍有界（10 分钟后清退 + Error 日志）。
+    #[test]
+    fn owned_entries_outlive_scoped_entries_in_the_queue() {
+        let _guard = serialize();
+        let dead_target = std::thread::spawn(|| {}).thread().id();
+        // 队列是进程级的：先前用例可能留下**别的**目标线程的残留条目，
+        // 因此只对死线程 id（全进程唯一）做相对计数，不做绝对深度断言。
+        let count_for = |target: std::thread::ThreadId| {
+            lock_queue()
+                .iter()
+                .filter(|entry| entry.target == target)
+                .count()
+        };
+        assert_eq!(count_for(dead_target), 0);
+        let enqueue = |kind: EntryKind, queued_at: Instant| {
+            lock_queue().push_back(Queued {
+                target: dead_target,
+                job: Box::new(|| {}),
+                queued_at,
+                kind,
+            });
+        };
+        let now = Instant::now();
+        enqueue(EntryKind::Scoped, now - Duration::from_secs(61));
+        enqueue(EntryKind::Owned, now - Duration::from_secs(61));
+        evict_expired();
+        assert_eq!(
+            count_for(dead_target),
+            1,
+            "61 s 的 owned 条目必须存活，scoped 被清退"
+        );
+
+        // 验证 owned 阈值：目标线程已死，`drain()` 取不到它的任务。
+        lock_queue().retain(|entry| entry.target != dead_target);
+        enqueue(EntryKind::Owned, now - Duration::from_secs(601));
+        evict_expired();
+        assert_eq!(count_for(dead_target), 0, "超过 10 分钟的 owned 条目被清退");
+        lock_queue().retain(|entry| entry.target != dead_target);
+    }
+
+    /// **不变量：队列满时 `post_owned` 拒投**（`deliver` 据此回
+    /// `ModelThreadError::Failed`）。此前这条路径零覆盖。
+    #[test]
+    fn post_owned_refuses_when_the_queue_is_full() {
+        let _guard = serialize();
+        let dead_target = std::thread::spawn(|| {}).thread().id();
+        // 从**当前深度**补齐到容量：进程级队列可能带着其它用例的残留条目，
+        // 绝对填 256 条既可能撞上满队列、也可能把并行用例挤到 Backlog。
+        let fill = QUEUE_CAPACITY - pending();
+        {
+            let mut pending = lock_queue();
+            for _ in 0..fill {
+                pending.push_back(Queued {
+                    target: dead_target,
+                    job: Box::new(|| {}),
+                    queued_at: Instant::now(),
+                    kind: EntryKind::Owned,
+                });
+            }
+        }
+        assert!(!post_owned(dead_target, Box::new(|| {})), "队列满必须拒投");
+        // 只清理本用例的条目（死线程 id 全进程唯一，不会误伤残留条目）。
+        lock_queue().retain(|entry| entry.target != dead_target);
     }
 }
