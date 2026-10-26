@@ -27,6 +27,16 @@ use crate::{
 };
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// 临时文件名的进程内原子序号。
+///
+/// 【为什么需要它】临时名里的毫秒时间戳在同一毫秒内会撞名：两个线程
+/// （生产者写清单与写状态可以并发）各自 `File::create` 同一个临时文件时，
+/// 第二次 create 把对方正在写的内容截断，最后改名出去的可能是"半个清单 +
+/// 半个状态"。序号让每个临时名都唯一，根除这类碰撞（`Relaxed` 即可：
+/// 这里只需要唯一性，不需要任何跨线程的先后可见性）。
+static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// 一次音频写入的结果。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -256,12 +266,13 @@ impl Workspace {
     /// 比读到半份数据好。改名在同一目录内是原子的，于是读者要么看到旧的、要么看到新的。
     fn write_bytes_atomic(&self, path: &Path, bytes: &[u8]) -> Result<(), String> {
         let temp = self.temp_dir().join(format!(
-            "{}.{}.{}",
+            "{}.{}.{}.{}",
             path.file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or("link"),
             std::process::id(),
-            crate::now_ms()
+            crate::now_ms(),
+            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
         {
             let mut file = std::fs::File::create(&temp).map_err(|error| error.to_string())?;
@@ -455,10 +466,13 @@ fn audio_digest(key: &str, sample_rate: u32, planes: &[Vec<f32>]) -> String {
 }
 
 fn encode_wav(sample_rate: u32, planes: &[Vec<f32>]) -> Result<Vec<u8>, String> {
-    let channels = planes.len() as u16;
+    // 【为什么先比较再转换】`as u16` 是静默截断：65536 个声道会被折成 0。
+    // 先转换再校验的话，一旦校验被人改动或删掉，越界值就带着假身份往下走；
+    // 先把上界钉住，转换才总有意义。
     if planes.len() > u16::MAX as usize {
         return Err("too many channels".into());
     }
+    let channels = planes.len() as u16;
     let spec = hound::WavSpec {
         channels,
         sample_rate,

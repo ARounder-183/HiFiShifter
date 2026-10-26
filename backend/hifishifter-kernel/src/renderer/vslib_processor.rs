@@ -183,28 +183,17 @@ impl Drop for TempFileGuard {
 /// 返回 `None` 表示 curve 为空或未提供，调用方应使用默认值。
 #[cfg(feature = "vslib")]
 fn curve_at_abs_sec(curve: Option<&[f32]>, abs_sec: f64, frame_period_ms: f64) -> Option<f32> {
-    let c = curve?;
-    if c.is_empty() {
-        return None;
-    }
-    let fp = frame_period_ms.max(0.1);
-    let idx_f = (abs_sec * 1000.0 / fp).max(0.0);
-    if !idx_f.is_finite() {
-        return None;
-    }
-    let i0 = idx_f.floor() as usize;
     // 越界（超出曲线末点）返回 None：调用方保留 vslib 控制点的默认值，
     // 而不是钳制到最后一个元素 —— 否则最后一个参数点之后的 formant /
     // volume / pan / breathiness 会被末值污染（Bug 复现：共振峰偏移点
-    // 之后本应回退 0，却持续被 359.15 污染到 clip 末尾）。
-    if i0 >= c.len() {
-        return None;
-    }
-    let i1 = (i0 + 1).min(c.len().saturating_sub(1));
-    let frac = (idx_f - i0 as f64).clamp(0.0, 1.0) as f32;
-    let a = c.get(i0).copied().unwrap_or_else(|| *c.last().unwrap());
-    let b = c.get(i1).copied().unwrap_or_else(|| *c.last().unwrap());
-    Some(a + (b - a) * frac)
+    // 之后本应回退 0，却持续被 359.15 污染到 clip 末尾）。语义统一见
+    // `utils::BeyondEnd`（本处即 FallToDefault）。
+    super::utils::sample_curve_linear_beyond(
+        curve.unwrap_or(&[]),
+        abs_sec,
+        frame_period_ms,
+        super::utils::BeyondEnd::FallToDefault,
+    )
 }
 
 #[cfg(feature = "vslib")]
@@ -739,8 +728,10 @@ impl ClipProcessor for VslibProcessor {
         // ── 9. 获取输出帧数（触发 vslib 内部计算）──────────────────────────
         //  VslibGetMixSample 返回每声道帧数（frame count per channel），
         //  与 VSITEMINFO.sampleOrg 单位相同，与输出声道数无关。
-        //  catch_unwind 防护：vslib DLL 内部可能触发 SEH 异常（如 STATUS_ACCESS_VIOLATION），
-        //  通过 catch_unwind 将其转为 Err 而非进程崩溃。
+        //  catch_unwind 防护：拦的是 **Rust panic**（把它转成 Err）。SEH 硬异常
+        //  （ACCESS_VIOLATION 等）**不会**被 catch_unwind 捕获，仍会终止进程 ——
+        //  这层包裹提供的是"我们的包装代码 panic 不炸渲染线程"，不是"DLL 任何
+        //  异常都可恢复"（同类约束见 vocoder_ort_session.rs 对 C 级 SIGSEGV 的说明）。
         let mix_frames =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| proj.mix_sample()))
                 .map_err(|_| {
@@ -763,7 +754,7 @@ impl ClipProcessor for VslibProcessor {
         //  → 越界写堆 → STATUS_HEAP_CORRUPTION (0xc0000374)。
         let mut buf_stereo = vec![0i16; (mix_frames as usize) * 2];
         //  catch_unwind 防护：VslibGetMixData 是 vslib 合成引擎的核心调用，
-        //  若 DLL 内部发生 ACCESS_VIOLATION 等 SEH 异常，转为安全的错误返回。
+        //  拦 Rust panic 转为安全的错误返回（SEH 硬异常不在此列，见上方说明）。
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             check(unsafe {
                 VslibGetMixData(

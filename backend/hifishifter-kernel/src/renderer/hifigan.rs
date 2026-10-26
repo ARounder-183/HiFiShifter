@@ -279,32 +279,21 @@ impl HiFiGanRenderer {
 
         // 构造共振峰偏移回调
         let fp_local = fp.max(0.1);
-        let time_to_idx_mul = 1000.0 / fp_local;
 
+        // 共振峰的越界语义是 FallToDefault（=0）：越界后继续插值会混入末值与
+        // frac，产生 0..末值 的锯齿振荡，污染末参数点之后的音频（Bug 复现：
+        // 共振峰偏移点之后应回退 0，却渲染出 0..359 剧烈抖动的偏移）。
         let formant_shift_fn = move |abs_time_sec: f64| -> f32 {
             let Some(curve) = formant_shift_curve else {
                 return 0.0;
             };
-            if curve.is_empty() {
-                return 0.0;
-            }
-            let idx_f = abs_time_sec.max(0.0) * time_to_idx_mul;
-            if !idx_f.is_finite() {
-                return 0.0;
-            }
-            let i0 = idx_f.floor().max(0.0) as usize;
-            // 越界（超出曲线末点）时按默认值 0.0 返回：i1 会被钳制到最后一个
-            // 元素，若继续插值会混入末值与 frac（小数部分），产生 0..末值 的
-            // 锯齿振荡，污染最后一个参数点之后的音频（Bug 复现：共振峰偏移
-            // 点之后应回退 0，却渲染出 0..359 剧烈抖动的偏移）。
-            if i0 >= curve.len() {
-                return 0.0;
-            }
-            let i1 = (i0 + 1).min(curve.len().saturating_sub(1));
-            let frac = (idx_f - i0 as f64).clamp(0.0, 1.0) as f32;
-            let a = curve.get(i0).copied().unwrap_or(0.0);
-            let b = curve.get(i1).copied().unwrap_or(a);
-            a + (b - a) * frac
+            super::utils::sample_curve_linear_beyond(
+                curve,
+                abs_time_sec,
+                fp_local,
+                super::utils::BeyondEnd::FallToDefault,
+            )
+            .unwrap_or(0.0)
         };
 
         let midi_fn = move |abs_time_sec| {
@@ -459,32 +448,21 @@ impl HiFiGanRenderer {
         let chunk_sec = crate::nsf_hifigan_onnx::env_chunk_sec();
         let overlap_sec = crate::nsf_hifigan_onnx::env_overlap_sec();
         let fp_local = fp.max(0.1);
-        let time_to_idx_mul = 1000.0 / fp_local;
 
+        // 共振峰的越界语义是 FallToDefault（=0）：越界后继续插值会混入末值与
+        // frac，产生 0..末值 的锯齿振荡，污染末参数点之后的音频（Bug 复现：
+        // 共振峰偏移点之后应回退 0，却渲染出 0..359 剧烈抖动的偏移）。
         let formant_shift_fn = move |abs_time_sec: f64| -> f32 {
             let Some(curve) = formant_shift_curve else {
                 return 0.0;
             };
-            if curve.is_empty() {
-                return 0.0;
-            }
-            let idx_f = abs_time_sec.max(0.0) * time_to_idx_mul;
-            if !idx_f.is_finite() {
-                return 0.0;
-            }
-            let i0 = idx_f.floor().max(0.0) as usize;
-            // 越界（超出曲线末点）时按默认值 0.0 返回：i1 会被钳制到最后一个
-            // 元素，若继续插值会混入末值与 frac（小数部分），产生 0..末值 的
-            // 锯齿振荡，污染最后一个参数点之后的音频（Bug 复现：共振峰偏移
-            // 点之后应回退 0，却渲染出 0..359 剧烈抖动的偏移）。
-            if i0 >= curve.len() {
-                return 0.0;
-            }
-            let i1 = (i0 + 1).min(curve.len().saturating_sub(1));
-            let frac = (idx_f - i0 as f64).clamp(0.0, 1.0) as f32;
-            let a = curve.get(i0).copied().unwrap_or(0.0);
-            let b = curve.get(i1).copied().unwrap_or(a);
-            a + (b - a) * frac
+            super::utils::sample_curve_linear_beyond(
+                curve,
+                abs_time_sec,
+                fp_local,
+                super::utils::BeyondEnd::FallToDefault,
+            )
+            .unwrap_or(0.0)
         };
 
         crate::nsf_hifigan_onnx::infer_pitch_edit_chunked_mel_stretch(

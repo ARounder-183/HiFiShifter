@@ -155,3 +155,49 @@ mod tests {
         assert!(!pitch_curve_is_renderable(&[0.0, f32::NAN, -1.0]));
     }
 }
+
+/// 曲线**末点之后**的取值语义。
+///
+/// 【为什么要有这个枚举】同族参数曲线在三个渲染器里曾有三种越界行为
+/// （hold-last / 回退缺省 / 保留调用方缺省），历史缺陷注释各自成立，但语义
+/// 漂移是温床：统一成单一采样器后，"这条曲线越界怎么办"由调用点**显式声明**，
+/// 新曲线不可能再抄错。
+pub enum BeyondEnd {
+    /// 保持末值：音量 / 气声的既有语义（曲线画到哪，增益就保持到哪）。
+    HoldLast,
+    /// 越界视为"无值"：调用方回落自己的缺省（共振峰的历史语义：末点之后
+    /// 回到 0；vslib 则保留控制点缺省）。
+    FallToDefault,
+}
+
+/// 自动化曲线的**单一事实源**线性采样器（绝对秒 → 按帧周期换算索引）。
+///
+/// 返回 `None` 的情形：曲线缺失/为空、时间非有限，或按 `beyond` 声明的
+/// 越界语义属于"无值"。调用方对 `None` 统一回落自己的缺省值。
+pub fn sample_curve_linear_beyond(
+    curve: &[f32],
+    abs_sec: f64,
+    frame_period_ms: f64,
+    beyond: BeyondEnd,
+) -> Option<f32> {
+    if curve.is_empty() {
+        return None;
+    }
+    let fp = frame_period_ms.max(0.1);
+    let idx_f = (abs_sec.max(0.0) * 1000.0) / fp;
+    if !idx_f.is_finite() {
+        return None;
+    }
+    let i0 = idx_f.floor().max(0.0) as usize;
+    if i0 >= curve.len() {
+        return match beyond {
+            BeyondEnd::HoldLast => curve.last().copied(),
+            BeyondEnd::FallToDefault => None,
+        };
+    }
+    let i1 = (i0 + 1).min(curve.len() - 1);
+    let frac = (idx_f - i0 as f64).clamp(0.0, 1.0) as f32;
+    let a = curve[i0];
+    let b = curve[i1];
+    Some(a + (b - a) * frac)
+}

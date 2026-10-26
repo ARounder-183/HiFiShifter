@@ -1298,7 +1298,7 @@ unsafe extern "system" fn component_get_bus_count(
 }
 
 unsafe extern "system" fn component_get_bus_info(
-    _this: *mut c_void,
+    this: *mut c_void,
     media_type: i32,
     direction: i32,
     index: i32,
@@ -1324,12 +1324,12 @@ unsafe extern "system" fn component_get_bus_info(
             // 泛化到任意声道数（`copy_block` 只处理前两个声道，`audio_abi::clear_outputs`
             // 按 `num_channels` 清零其余），所以这里照实报即可。未协商时
             // `bus_arrangement` 默认 kStereo(3) ⇒ 2。
-            bus.channel_count = if _this.is_null() {
+            bus.channel_count = if this.is_null() {
                 2
             } else {
-                // SAFETY: `_this` 是存活 component（即 `Processor`）。
+                // SAFETY: `this` 是存活 component（即 `Processor`）。
                 unsafe {
-                    (*_this.cast::<Processor>())
+                    (*this.cast::<Processor>())
                         .extension_owner
                         .bus_arrangement(direction)
                 }

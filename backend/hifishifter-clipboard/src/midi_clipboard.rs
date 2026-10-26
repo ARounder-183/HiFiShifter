@@ -41,6 +41,15 @@ pub fn read_standard_midi_file() -> Result<Vec<u8>, String> {
     use objc2_app_kit::NSPasteboard;
     use objc2_foundation::NSString;
 
+    // 【为什么持 CLIPBOARD_LOCK】本进程里 NSPasteboard 的写路径
+    // （system_clipboard 的 `write_contents`：先 clearContents 再 setData）不是
+    // 原子的，不持锁的读可能落在"清空之后、写入之前"，把一次正常的写误报成
+    // `midi_clipboard_empty`。与同 crate 其它剪贴板入口持**同一把**锁才能串行化；
+    // Windows 分支经由 `clipboard_session` 拿到的就是它。
+    let _guard = crate::system_clipboard::CLIPBOARD_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
     let pasteboard = unsafe { NSPasteboard::generalPasteboard() };
     let pb_type = NSString::from_str(STANDARD_MIDI_FILE_FORMAT);
 

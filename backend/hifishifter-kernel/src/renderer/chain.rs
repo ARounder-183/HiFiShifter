@@ -234,29 +234,14 @@ pub fn sample_curve_at_abs_sec(
     frame_period_ms: f64,
     default_value: f32,
 ) -> f32 {
-    let Some(curve) = curve else {
-        return default_value;
-    };
-    if curve.is_empty() {
-        return default_value;
-    }
-    let last = curve.len() - 1;
-
-    let fp = frame_period_ms.max(0.1);
-    let idx_f = (abs_sec.max(0.0) * 1000.0) / fp;
-    if !idx_f.is_finite() {
-        return default_value;
-    }
-    let i0 = idx_f.floor().max(0.0) as usize;
-    // 越界：保持末值（hold-last），不回退 default。
-    if i0 >= last {
-        return curve[last];
-    }
-    let i1 = i0 + 1;
-    let frac = (idx_f - i0 as f64).clamp(0.0, 1.0) as f32;
-    let a = curve[i0];
-    let b = curve[i1];
-    a + (b - a) * frac
+    // 本族曲线（音量/气声）的越界语义是 hold-last：曲线画到哪，增益保持到哪。
+    super::utils::sample_curve_linear_beyond(
+        curve.unwrap_or(&[]),
+        abs_sec,
+        frame_period_ms,
+        super::utils::BeyondEnd::HoldLast,
+    )
+    .unwrap_or(default_value)
 }
 
 /// 把噪声（气声）stem 对齐到谐波输出的（时间轴）长度。
@@ -536,6 +521,13 @@ impl HiFiGanStage {
             crate::time_stretch::resolved_external_stretch_algorithm(),
         );
         let out_len = processed_harmonic.len();
+        // 显式兜底：align 在噪声 stem 为空时返回空 Vec，zip 会产出空 —— 若不拦，
+        // `mixed` 是空向量被当作结果返回，谐波支整段丢失。当前调用图里
+        // `infer_harmonic_noise_mono` 保证 noise 与输入等长，这是跨模块隐式
+        // 不变量；与其依赖它，不如让"没有噪声"自然退化为"只有谐波"。
+        if noise_aligned.is_empty() {
+            return Ok(processed_harmonic);
+        }
 
         let has_varying_curve = breath_curve.is_some_and(|c| {
             if c.len() <= 1 {

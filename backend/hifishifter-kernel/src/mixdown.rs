@@ -747,10 +747,24 @@ fn host_pcm_hash(source: &MixdownPcm) -> blake3::Hash {
     hasher.update(b"host-pcm-v1");
     hasher.update(&source.sample_rate.to_le_bytes());
     hasher.update(&source.channels.to_le_bytes());
-    for sample in source.samples.iter() {
-        hasher.update(&sample.to_bits().to_le_bytes());
-    }
+    hash_f32_slice(&mut hasher, &source.samples);
     hasher.finalize()
+}
+
+/// 把 f32 切片按位模式整块喂进哈希（逐样本 4 字节 update 在长素材上是
+/// 3×10⁷ 量级的调用开销；整块一次搞定。SAFETY：`[f32]` 无 padding，
+/// 重解释为 `[u8]` 恒有效，等价 `bytemuck::cast_slice`）。
+fn hash_f32_slice(hash: &mut blake3::Hasher, samples: &[f32]) {
+    if samples.is_empty() {
+        return;
+    }
+    let bytes = unsafe {
+        std::slice::from_raw_parts(
+            samples.as_ptr().cast::<u8>(),
+            std::mem::size_of_val(samples),
+        )
+    };
+    hash.update(bytes);
 }
 
 /// 同实际DSP源内容在多个ARA renderer并发到达时共用单飞；不串行整个工程或持文档锁。
@@ -923,8 +937,15 @@ fn apply_host_pitch_edit(
         let origin = (clip.start_sec.max(0.0) * 1000.0 / fp).floor() as usize;
         for (local, offset) in offsets.offsets.iter().enumerate() {
             let frame = origin + local;
+            // 【为什么越界帧直接跳过】`pitch_orig` 越界时回退 0.0 会让目标音高
+            // 变成裸 offset（+2 半音 → MIDI 2 ≈ 2.9Hz），仍是正数、能通过
+            // 可渲染性检查并送进声码器 —— 输出一段超低频噪声。曲线没覆盖到
+            // 的帧本来就没有偏移依据，保留原 pitch_edit 值才是对的。
+            let Some(orig) = entry.pitch_orig.get(frame) else {
+                continue;
+            };
             if let Some(target) = pitch_edit.get_mut(frame).filter(|value| **value > 0.0) {
-                *target = entry.pitch_orig.get(frame).copied().unwrap_or(0.0) + offset;
+                *target = *orig + offset;
             }
         }
     }
@@ -986,9 +1007,7 @@ fn apply_host_pitch_edit(
     // 内部缓存有按 clip_id 索引且不含源波形的分支，必须隔离完整PCM及实际DSP输入。
     let mut hasher = blake3::Hasher::new();
     hasher.update(source_hash.as_bytes());
-    for sample in pcm_stereo.iter() {
-        hasher.update(&sample.to_bits().to_le_bytes());
-    }
+    hash_f32_slice(&mut hasher, pcm_stereo);
     let hash = hasher.finalize();
     let flight = host_processor_flight(hash);
     let _flight = lock_host_processor_flight(&flight, cancel)?;

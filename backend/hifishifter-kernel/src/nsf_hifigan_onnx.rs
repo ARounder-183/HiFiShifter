@@ -322,8 +322,21 @@ fn resolve_model_paths() -> Result<(PathBuf, PathBuf), String> {
 
 fn read_config(path: &Path) -> Result<NsfHifiganConfig, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("read config.json failed: {e}"))?;
-    serde_json::from_slice::<NsfHifiganConfig>(&bytes)
-        .map_err(|e| format!("parse config.json failed: {e}"))
+    let cfg = serde_json::from_slice::<NsfHifiganConfig>(&bytes)
+        .map_err(|e| format!("parse config.json failed: {e}"))?;
+    // 【为什么在这里拒绝奇数差】`mel_from_audio_fast` 的 pad 拆分
+    //（left = d/2, right = (d+1)/2）与 `mel_frame_count` 的帧数换算只在
+    // `win_size - hop_size` 为**偶数**时严格对齐（现有模型 2048/512 即如此）。
+    // 这是隐式约束：与其等运行期 mel/f0 差一帧，不如在加载模型配置时拒绝。
+    // 注意约束只属于**基础配置**——逐 keyShift 的 ShiftPlan 窗长随 factor 变化，
+    // 奇偶不受此限（在 ShiftPlan 里检查会误伤合法档位）。
+    if !(cfg.win_size.saturating_sub(cfg.hop_size)).is_multiple_of(2) {
+        return Err(format!(
+            "parse config.json failed: (win_size - hop_size) must be even, got {} - {}",
+            cfg.win_size, cfg.hop_size
+        ));
+    }
+    Ok(cfg)
 }
 
 pub fn probe_load() -> Result<String, String> {
@@ -2417,7 +2430,10 @@ pub fn infer_pitch_edit_chunked_mel_stretch(
     let step = chunk_samples.saturating_sub(overlap_samples).max(1);
 
     let mut chunk_start = 0usize;
-    let mut prev_chunk_out: Option<(Vec<f32>, usize)> = None;
+    // 只需要"上一块是否存在"这一个 bit：crossfade 直接从 `out` 读旧内容，
+    // 旧块的波形与起点从不被读取 —— 存整块波形是白多驻留一份（默认 10s 块
+    // ≈ 1.7MB f32）。
+    let mut have_prev_chunk = false;
 
     loop {
         let chunk_end = (chunk_start + chunk_samples).min(total_samples);
@@ -2442,7 +2458,7 @@ pub fn infer_pitch_edit_chunked_mel_stretch(
         // 重叠区域的输出样本数
         let overlap_out_samples = ((overlap_samples as f64) / playback_rate).round() as usize;
 
-        if let Some((_prev_out, _prev_start)) = prev_chunk_out.take() {
+        if have_prev_chunk {
             // crossfade 区域
             let xfade_len = overlap_out_samples.min(chunk_len);
 
@@ -2470,7 +2486,7 @@ pub fn infer_pitch_edit_chunked_mel_stretch(
                 out[out_idx] = chunk_result.get(i).copied().unwrap_or(0.0);
             }
 
-            prev_chunk_out = Some((chunk_result, out_start));
+            have_prev_chunk = true;
         } else {
             // 第一块
             for i in 0..chunk_len {
@@ -2480,7 +2496,7 @@ pub fn infer_pitch_edit_chunked_mel_stretch(
                 }
                 out[out_idx] = chunk_result.get(i).copied().unwrap_or(0.0);
             }
-            prev_chunk_out = Some((chunk_result, out_start));
+            have_prev_chunk = true;
         }
 
         if chunk_end >= total_samples {

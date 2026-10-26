@@ -512,10 +512,27 @@ fn separation_cache_key(audio: &[f32], sample_rate: u32, model: blake3::Hash) ->
     hash.update(model.as_bytes());
     hash.update(&sample_rate.to_le_bytes());
     hash.update(&(audio.len() as u64).to_le_bytes());
-    for sample in audio {
-        hash.update(&sample.to_bits().to_le_bytes());
-    }
+    hash_f32_slice(&mut hash, audio);
     *hash.finalize().as_bytes()
+}
+
+/// 把 f32 切片按位模式整块喂进哈希。
+///
+/// 【为什么不逐样本 `update(&sample.to_bits().to_le_bytes())`】每次 4 字节调用
+/// 都要过一遍哈希压缩器接口：10 分钟 48k 单声道 ≈ 3×10⁷ 次。整块 update 一次
+/// 搞定。SAFETY：`[f32]` 无 padding、对齐为 4，重解释为 `[u8]` 恒有效（等价于
+/// `bytemuck::cast_slice`，不引依赖）。
+fn hash_f32_slice(hash: &mut blake3::Hasher, samples: &[f32]) {
+    if samples.is_empty() {
+        return;
+    }
+    let bytes = unsafe {
+        std::slice::from_raw_parts(
+            samples.as_ptr().cast::<u8>(),
+            std::mem::size_of_val(samples),
+        )
+    };
+    hash.update(bytes);
 }
 
 /// 只在非实时诊断/worker读取；次数不包含session构建的烟测。

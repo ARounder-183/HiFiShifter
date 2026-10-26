@@ -47,10 +47,19 @@ static SENDER: OnceLock<Mutex<Sender<Job>>> = OnceLock::new();
 fn sender() -> &'static Mutex<Sender<Job>> {
     SENDER.get_or_init(|| {
         let (tx, rx) = channel::<Job>();
-        std::thread::Builder::new()
+        // spawn 失败（线程资源耗尽等）**不能 panic**：写盘失败只该降级为
+        // "仅内存缓存"——下游 `enqueue` 的 send 会失败并走既有的
+        // "writer thread is gone" 告警路径，本就容忍线程消失。
+        if let Err(error) = std::thread::Builder::new()
             .name("render-cache-writer".to_string())
             .spawn(move || writer_loop(rx))
-            .expect("spawn render-cache writer thread");
+        {
+            log::error!(
+                "[render_cache] writer thread spawn failed ({}); staying memory-only",
+                error
+            );
+            // rx 随此作用域丢弃：之后所有 send 都失败，走降级路径。
+        }
         Mutex::new(tx)
     })
 }

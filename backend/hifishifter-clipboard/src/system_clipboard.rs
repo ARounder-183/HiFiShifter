@@ -49,7 +49,9 @@ const TEXT_PREFIX: &str = "HIFISHIFTER_CLIPBOARD_V1:";
 /// can only be opened by one thread at a time — even within the same process
 /// a second `OpenClipboard` fails with ERROR_ACCESS_DENIED.  The guard is
 /// held only around the raw Win32 session, never during encode/decode.
-static CLIPBOARD_LOCK: Mutex<()> = Mutex::new(());
+/// `pub(crate)` so `midi_clipboard`'s macOS reader takes the SAME lock (a
+/// separate lock would not serialize against this module's write path).
+pub(crate) static CLIPBOARD_LOCK: Mutex<()> = Mutex::new(());
 
 /// `clipboard-win::Clipboard::new_attempts` retries with `Sleep(0)` — it
 /// yields the scheduler but waits virtually no time, so genuine contention

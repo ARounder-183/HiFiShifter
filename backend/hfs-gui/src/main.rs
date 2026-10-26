@@ -151,6 +151,19 @@ fn main() {
         }
     }
 
+    // 【为什么在这里就拒绝】`--root` 缺参时留下的是空串：scheme handler 会把每个
+    // 请求都判成"invalid path"，页面表现为白屏 —— 而渲染进程还活着，宿主侧看不到
+    // 任何异常。宁可启动即败，把原因说清楚（本 crate 没有 log 依赖，走 stderr +
+    // 管道消息双通道上报）。
+    if root.is_empty() {
+        eprintln!("hfs-gui: missing required --root <frontend assets directory>");
+        send(serde_json::json!({
+            "type": "error",
+            "text": "hfs-gui: missing required --root <frontend assets directory>"
+        }));
+        std::process::exit(2);
+    }
+
     // 【必须先钉后端】只要会话里存在 `WAYLAND_DISPLAY`，GDK 就默认选 Wayland ——
     // 那时我们的 GdkWindow 不是 X11 窗口，既拿不到 XID 也无法被 `XReparentWindow`
     // 搬进宿主的窗口（`gdk_x11_window_get_xid` 会直接断言失败）。
@@ -180,11 +193,22 @@ fn main() {
             // —— `hfs-plugin://local//etc/passwd` 原样放行；导航白名单拦不住 scheme
             // 内部的子资源请求。页面可被注入脚本改写是插件侧写明的威胁模型，
             // 渲染进程是它的延伸（第 5 轮审查 P2-7）。
-            let path = uri
-                .split("://")
-                .nth(1)
-                .and_then(|rest| rest.split_once('/').map(|(_, path)| path.to_string()))
-                .unwrap_or_default();
+            // 契约与插件侧 `editor/gui/protocol.rs::ORIGIN`（`hfs-plugin://local/`）
+            // 相同：安全边界是 scheme + host，不是路径。这里手工解析 URI，host 段
+            // 必须钉死为 `local` —— 导航白名单只拦导航，而页面里 fetch/img/script
+            // 的子资源请求直达本 handler，`hfs-plugin://evil/…` 不判 host 照样能
+            // 取到 bundle 里的文件。
+            let (host, path) = uri
+                .strip_prefix("hfs-plugin://")
+                .map(|rest| rest.split_once('/').unwrap_or((rest, "")))
+                .unwrap_or(("", ""));
+            if host != "local" {
+                request.finish_error(&mut gtk::glib::Error::new(
+                    gtk::gio::IOErrorEnum::InvalidArgument,
+                    "invalid origin",
+                ));
+                return;
+            }
             let path = path.split(['?', '#']).next().unwrap_or("");
             // `root` 是命令行给的字符串；`resolve_asset` 要的是 `&Path`。
             let resolved = resolve_asset(std::path::Path::new(&root), path);
@@ -281,10 +305,15 @@ fn main() {
     } else {
         manager.connect_script_message_received(None, move |_, result| {
             // 只接受字符串：结构化值在这里没有意义，而字符串是三条链路上唯一逐字节
-            // 一致的形式（见插件里 protocol.rs 的理由）。
+            // 一致的形式（见插件里 protocol.rs 的理由）。与插件侧 install_messages
+            // 相同：非字符串一律丢弃 —— `to_str()` 会按 JS 语义做强转（对象变
+            // "[object Object]"），不判就把坏形状的值当成了消息。
             let Some(value) = result.js_value() else {
                 return;
             };
+            if !value.is_string() {
+                return;
+            }
             send(serde_json::json!({"type":"message","text": value.to_str().to_string()}));
         });
     }
@@ -346,7 +375,14 @@ fn main() {
     if let Some(gdk_window) = window.window() {
         let raw: *mut gtk::gdk::ffi::GdkWindow = gdk_window.to_glib_none().0;
         unsafe {
-            x11::gdk_window_set_override_redirect(raw.cast(), 1);
+            // 【为什么仅在嵌入时关掉 WM 管理】override-redirect 让窗口管理器彻底
+            // 不管这个窗口 —— 嵌进宿主时这正是要的（对照插件侧 linux.rs 的
+            // embedded_ok：确认嵌入才设）；parent==0（独立启动/调试）时它留下的
+            // 是一个无 WM 管理的顶层窗：没有边框、钉在 (0,0)、不受摆位与焦点
+            // 规则约束。独立运行时保持普通 toplevel。
+            if parent != 0 {
+                x11::gdk_window_set_override_redirect(raw.cast(), 1);
+            }
             xid = x11::gdk_x11_window_get_xid(raw.cast());
         }
     }
