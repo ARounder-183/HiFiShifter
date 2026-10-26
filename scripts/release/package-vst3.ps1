@@ -3,7 +3,8 @@ param(
     [Parameter(Mandatory)][string]$DeliveryDirectory,
     [Parameter(Mandatory)][string]$OutputDirectory,
     [switch]$NoZip,
-    [switch]$Installer
+    [switch]$Installer,
+    [switch]$VerifyLoad
 )
 $ErrorActionPreference = 'Stop'
 $packageTaskRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
@@ -16,6 +17,13 @@ foreach ($packageTaskPath in @($packageTaskDelivery, $packageTaskOutput)) {
 }
 $packageTaskManifest = Get-Content -LiteralPath (Join-Path $packageTaskDelivery 'build-manifest.json') -Raw | ConvertFrom-Json
 $packageTaskBundle = Join-Path $packageTaskDelivery 'HiFiShifter.vst3'
+
+if ($VerifyLoad) {
+    # 打包前再跑一次黑盒加载门禁：manifest 的哈希只能证明文件没变，不能证明
+    # GetPluginFactory 不会死锁。失败时拒绝生成 zip/setup。
+    & (Join-Path $PSScriptRoot '..\vst3\windows\verify.ps1') -BundleDirectory $packageTaskBundle -TimeoutSeconds 20
+    if ($LASTEXITCODE -ne 0) { throw 'Windows VST3 load gate failed.' }
+}
 $packageTaskFiles = @($packageTaskManifest.files | Where-Object { $_.path.StartsWith('HiFiShifter.vst3\') })
 if (!$packageTaskFiles.Count -or $packageTaskManifest.configuration -ne 'Release') { throw 'A complete Release delivery is required.' }
 if (@(Get-ChildItem -LiteralPath $packageTaskBundle -Recurse -File).Count -ne $packageTaskFiles.Count) { throw 'Plugin file count differs from manifest.' }

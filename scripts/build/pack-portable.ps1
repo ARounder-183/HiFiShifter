@@ -282,7 +282,7 @@ if ($PackageTarget -ne 'App') {
             throw 'All packaging requires a complete App + plugin delivery.'
         }
     }
-    & (Join-Path $ProjectRoot 'scripts\release\package-vst3.ps1') -DeliveryDirectory $DeliveryDirectory -OutputDirectory $OutputDir -NoZip:$NoZip -Installer:$Installer
+    & (Join-Path $ProjectRoot 'scripts\release\package-vst3.ps1') -DeliveryDirectory $DeliveryDirectory -OutputDirectory $OutputDir -NoZip:$NoZip -Installer:$Installer -VerifyLoad
     if ($PackageTarget -eq 'Plugin') { return }
     # All 已由同一条构建流生成 App 与插件；下面只组装 App，避免再构建一次。
     $SkipBuild = $true

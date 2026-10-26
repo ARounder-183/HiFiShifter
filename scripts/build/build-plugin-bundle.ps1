@@ -105,5 +105,16 @@ try {
     # 原生 loader：VST3 宿主加载的是这个薄 DLL，它再按绝对路径拉起邻接的 Rust 引擎。
     & cl.exe /nologo /utf-8 /std:c++17 /LD /MT /EHsc /O2 'backend\hifishifter-plugin\native\module_loader.cpp' "/Fo:$pluginBundleTemp\module_loader.obj" /link "/OUT:$pluginBundleModule\HiFiShifter.vst3" "/IMPLIB:$pluginBundleTemp\HiFiShifterLoader.lib"
     if ($LASTEXITCODE -ne 0) { throw 'native VST3 loader build failed' }
-    Write-Output "Built isolated $pluginBundleProfile bundle: $pluginBundleBundle (not installed; tests and REAPER acceptance pending)."
+
+    # VST3 宿主只认导出表；编译成功不等于导出正确。这里在打包前钉死三个入口，
+    # 避免“能链接、能打包、宿主 0 个类”的产物进入交付。
+    $pluginBundleShim = Join-Path $pluginBundleModule 'HiFiShifter.vst3'
+    $pluginBundleExports = & dumpbin /nologo /exports $pluginBundleShim
+    if ($LASTEXITCODE -ne 0) { throw 'dumpbin /exports failed for the native VST3 loader' }
+    foreach ($pluginBundleEntry in @('GetPluginFactory', 'InitDll', 'ExitDll')) {
+        if (-not ($pluginBundleExports | Select-String -Pattern $pluginBundleEntry -SimpleMatch -Quiet)) {
+            throw "native VST3 loader is missing export: $pluginBundleEntry"
+        }
+    }
+    Write-Output "Built isolated $pluginBundleProfile bundle: $pluginBundleBundle (not installed; load gate and REAPER acceptance pending)."
 } finally { Pop-Location }

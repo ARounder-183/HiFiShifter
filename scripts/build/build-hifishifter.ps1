@@ -18,6 +18,7 @@ if ($buildTaskBundleName.Length -gt 59) {throw 'Name is too long for the isolate
 if (Test-Path -LiteralPath $buildTaskDelivery) {throw "Delivery already exists; choose a fresh Name: $buildTaskDelivery"}
 $buildTaskIncludesApp=$Target -in @('All','App')
 $buildTaskIncludesPlugin=$Target -in @('All','Plugin')
+$buildTaskNativeLoadGate=$null
 if ($buildTaskIncludesPlugin -and (Test-Path -LiteralPath (Join-Path $buildTaskRoot ".build-tmp\$buildTaskBundleName"))) {
     throw 'Plugin bundle already exists; immutable build requires a fresh Name.'
 }
@@ -60,6 +61,10 @@ try {
     if ($LASTEXITCODE -ne 0) {throw 'Cannot resolve source commit.'}
     $buildTaskState=& git status --porcelain
     if ($LASTEXITCODE -ne 0) {throw 'Cannot inspect working changes.'}
+    $buildTaskDirtyFiles=@()
+    if ($buildTaskState) {
+        $buildTaskDirtyFiles=@($buildTaskState | ForEach-Object { $_.Substring(3) })
+    }
     $buildTaskFingerprint=Get-BuildSourceFingerprint
     . .\scripts\env\msvc-env.ps1
     # vcvars会重设TEMP/TMP，必须在其返回后设置新的工作树私有目录。
@@ -146,6 +151,12 @@ try {
         if (!$buildTaskPluginSource.StartsWith($buildTaskAllowedPrefix,[StringComparison]::OrdinalIgnoreCase) -or
             !$buildTaskPluginTarget.StartsWith($buildTaskAllowedPrefix,[StringComparison]::OrdinalIgnoreCase)) {throw 'Plugin move escaped the intended build workspace.'}
         Move-Item -LiteralPath $buildTaskPluginSource -Destination $buildTaskPluginTarget
+        if ($Verify) {
+            $buildTaskNativeLoadGatePath=Join-Path $buildTaskTemp 'native-load-gate.json'
+            & (Join-Path $buildTaskRoot 'scripts\vst3\windows\verify.ps1') -BundleDirectory $buildTaskPluginTarget -TimeoutSeconds 20 -ResultPath $buildTaskNativeLoadGatePath
+            if ($LASTEXITCODE -ne 0) { throw 'Windows VST3 load gate failed.' }
+            $buildTaskNativeLoadGate=Get-Content -LiteralPath $buildTaskNativeLoadGatePath -Raw | ConvertFrom-Json
+        }
     }
     if ($Verify -and $buildTaskIncludesPlugin) {
         # 原生导出测试明确读取debug cdylib，即使交付是release也构建其独立测试前置。
@@ -165,7 +176,7 @@ try {
             sha256=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash}
     })
     $buildTaskManifest=[ordered]@{schema=1;sourceCommit=$buildTaskCommit;sourceFingerprint=$buildTaskFingerprint;workingTreeModified=[bool]$buildTaskState;
-        target=$Target;configuration=$Configuration;verificationRequested=[bool]$Verify;nativeAcceptance=$false;
+        target=$Target;configuration=$Configuration;verificationRequested=[bool]$Verify;nativeAcceptance=$false;nativeLoadGate=$buildTaskNativeLoadGate;dirtyFiles=$buildTaskDirtyFiles;
         createdUtc=[DateTime]::UtcNow.ToString('o');files=$buildTaskFiles}
     [IO.File]::WriteAllText((Join-Path $buildTaskDelivery 'build-manifest.json'),($buildTaskManifest|ConvertTo-Json -Depth 6),[Text.UTF8Encoding]::new($false))
     Write-Output "Built: $buildTaskDelivery. No installation, REAPER launch or native acceptance was performed."
