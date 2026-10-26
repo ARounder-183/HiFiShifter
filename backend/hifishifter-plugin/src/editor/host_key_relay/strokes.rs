@@ -154,7 +154,8 @@ impl Stroke {
 ///
 /// 于是原生的闸门是：**拒绝投递一个在已占用集合里的键**。它防的是"页面凭一次 invoke
 /// 就借宿主的手按一个它自己也在用的键"（最坏的情形是 `Delete`：插件删片段，宿主删
-/// 它自己的对象）。
+/// 它自己的对象）。它**只拦入口 B**（未绑定键），理由见
+/// [`OwnedStrokes::blocks_unbound_relay`]。
 #[derive(Default, Clone, Debug)]
 pub(crate) struct OwnedStrokes(HashSet<Stroke>);
 
@@ -188,6 +189,17 @@ impl OwnedStrokes {
 
     pub(crate) fn contains(&self, stroke: &Stroke) -> bool {
         self.0.contains(stroke)
+    }
+
+    /// 【一致性闸】这条投递要不要在原生侧拦下。
+    ///
+    /// 只拦**入口 B**（`action` 为空 = 未绑定键）："没有任何绑定命中"是前端刚判定完
+    /// 的事实，这里复核一次，防的是两侧键表漂移。**入口 A（命中了绑定但能力矩阵拒绝）
+    /// 豁免**：它的键按定义都在本集合里 —— 两者来自同一份键位表，闸它等于把入口 A
+    /// 全部拒死。键虽然挂在插件的动作上，插件却已经声明"这件事归宿主做"
+    /// （transport / 节拍器 / 本地录音三族），此刻它并没有被插件占用。
+    pub(crate) fn blocks_unbound_relay(&self, action: &str, stroke: &Stroke) -> bool {
+        action.is_empty() && (self.is_empty() || self.contains(stroke))
     }
 }
 
@@ -289,5 +301,42 @@ mod tests {
             .collect::<Vec<_>>());
         assert_eq!(OwnedStrokes::from_json(&many).len(), 1);
         assert!(OwnedStrokes::from_json(&json!([])).is_empty());
+    }
+
+    /// **一致性闸只拦入口 B。**
+    ///
+    /// 【为什么钉死】入口 A 的键按定义都在占用集合里（两者来自同一份键位表）；
+    /// 闸门若不分入口，Space/方向键的"能力被拒就还给宿主"就会被 100% 拒死，
+    /// 让路的主场景整体失效 —— 这是真实的回归形状（见
+    /// `docs/plans/2026-10-27-audit-repair-round2.md` §1.2），必须由测试钉住。
+    #[test]
+    fn the_gate_blocks_unbound_relays_only() {
+        let space = Stroke {
+            code: KeyCode::parse("Space").unwrap(),
+            ctrl: false,
+            shift: false,
+            alt: false,
+            meta: false,
+        };
+        let home = Stroke {
+            code: KeyCode::parse("Home").unwrap(),
+            ctrl: false,
+            shift: false,
+            alt: false,
+            meta: false,
+        };
+        let owned = OwnedStrokes::from_json(&json!([{"code": "Space"}]));
+
+        // 入口 A（带 action）：键即使已占用也放行 —— 能力矩阵显式审过的白名单。
+        assert!(!owned.blocks_unbound_relay("transport.playPause", &space));
+        // 入口 A 且集合未发布：同样放行（豁免与集合内容无关）。
+        assert!(!OwnedStrokes::default().blocks_unbound_relay("transport.playPause", &space));
+
+        // 入口 B：已占用 → 拒（闸门存在的意义：防两侧键表漂移）。
+        assert!(owned.blocks_unbound_relay("", &space));
+        // 入口 B：未占用 → 放行。
+        assert!(!owned.blocks_unbound_relay("", &home));
+        // 入口 B 且集合未发布 → 保守拒绝一切（方向不变）。
+        assert!(OwnedStrokes::default().blocks_unbound_relay("", &home));
     }
 }

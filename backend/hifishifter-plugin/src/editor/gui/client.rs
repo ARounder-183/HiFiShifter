@@ -225,17 +225,20 @@ struct RelayStats {
     /// 成功投递给宿主的次数。
     posted: u64,
     /// 被原语拒绝的次数，按原因分。
-    refused: [u64; 5],
+    refused: [u64; 6],
 }
 
 impl RelayStats {
-    /// 拒绝原因 → 计数槽位。**表外归 0 槽**：宁可让"其它"变多，也不静默丢一次拒绝。
+    /// 拒绝原因 → 计数槽位。**表外归 0 槽（other）**：宁可让"其它"变多，也不静默
+    /// 丢一次拒绝 —— 更不能把它伪装成某个已知原因（那会把"新变体"误读成
+    /// "键不支持"，误导排障）。
     fn slot(reason: &str) -> usize {
         match reason {
-            "no-host-window" => 1,
-            "not-foreground" => 2,
-            "post-failed" => 3,
-            "owned-key" => 4,
+            "unsupported-key" => 1,
+            "no-host-window" => 2,
+            "not-foreground" => 3,
+            "post-failed" => 4,
+            "owned-key" => 5,
             _ => 0,
         }
     }
@@ -244,11 +247,12 @@ impl RelayStats {
         serde_json::json!({
             "posted": self.posted,
             "refused": {
-                "unsupported-key": self.refused[0],
-                "no-host-window": self.refused[1],
-                "not-foreground": self.refused[2],
-                "post-failed": self.refused[3],
-                "owned-key": self.refused[4],
+                "other": self.refused[0],
+                "unsupported-key": self.refused[1],
+                "no-host-window": self.refused[2],
+                "not-foreground": self.refused[3],
+                "post-failed": self.refused[4],
+                "owned-key": self.refused[5],
             },
         })
     }
@@ -1028,17 +1032,10 @@ fn apply_relay_effects(state: &Rc<RefCell<EditorClient>>, effects: Vec<host_key_
                 log_relay(&format!("fidelity={} {}", fidelity.as_str(), trace));
             }
             host_key_relay::Effect::Escape { action, stroke } => {
-                // 【一致性闸】页面不能借宿主的手按一个**它自己也在用**的键。
-                //
-                // 方向是"拒绝已占用"而不是"只允许已声明"：可让的是未绑定的那些键，
-                // 那是一个没法枚举的补集；而"插件占用了什么"是有限的、前端算得出来的。
-                // 集合为空 = 前端还没发布 ⇒ **拒绝一切**（保守）：放行等于把闸门拆掉，
-                // 而前端在挂载时就会发布，这个窗口是毫秒级的。
-                let owned = {
-                    let state = state.borrow();
-                    state.owned.is_empty() || state.owned.contains(&stroke)
-                };
-                if owned {
+                // 【一致性闸】入口 B（未绑定键）的投递要在原生侧复核"插件没占用这个键"；
+                // 入口 A（命中了绑定但能力矩阵拒绝）豁免 —— 判定与理由全文见
+                // `OwnedStrokes::blocks_unbound_relay`。
+                if state.borrow().owned.blocks_unbound_relay(&action, &stroke) {
                     refuse_relay(state, &action, "owned-key");
                     continue;
                 }
