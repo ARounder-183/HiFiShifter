@@ -40,6 +40,7 @@ export default mergeConfig(
             // 默认 node；需要 DOM 的测试文件在文件头写：
             //   // @vitest-environment jsdom
             environment: "node",
+            setupFiles: ["./src/test/setup.ts"],
         },
     }),
 );
