@@ -386,6 +386,7 @@ export const zhCN = {
     notebook_setting_image_format: "图片格式",
     notebook_setting_image_format_auto: "自动",
     notebook_setting_remote_images: "加载外链图片",
+    notebook_setting_remote_images_blocked: "当前版本由安全策略禁用：应用不加载任何远程图源。",
     notebook_setting_smart_paste: "智能粘贴",
     notebook_setting_html_paste: "富文本粘贴为",
     notebook_setting_plain_paste: "纯文本粘贴为",

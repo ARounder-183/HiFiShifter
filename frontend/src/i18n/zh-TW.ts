@@ -387,6 +387,7 @@ export const zhTW = {
     notebook_setting_image_format: "圖片格式",
     notebook_setting_image_format_auto: "自動",
     notebook_setting_remote_images: "載入外部連結圖片",
+    notebook_setting_remote_images_blocked: "目前版本由安全政策停用：應用程式不載入任何遠端圖源。",
     notebook_setting_smart_paste: "智慧貼上",
     notebook_setting_html_paste: "富文字貼上為",
     notebook_setting_plain_paste: "純文字貼上為",

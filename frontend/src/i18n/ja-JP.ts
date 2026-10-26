@@ -407,6 +407,8 @@ export const jaJP = {
     notebook_setting_image_format: "画像形式",
     notebook_setting_image_format_auto: "自動",
     notebook_setting_remote_images: "外部画像を読み込む",
+    notebook_setting_remote_images_blocked:
+        "現在のバージョンでは安全ポリシーにより無効です（外部画像は読み込みません）。",
     notebook_setting_smart_paste: "スマートペースト",
     notebook_setting_html_paste: "リッチテキストの貼り付け形式",
     notebook_setting_plain_paste: "プレーンテキストの貼り付け形式",

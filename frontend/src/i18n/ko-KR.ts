@@ -474,6 +474,8 @@ export const koKR = {
     notebook_setting_image_format: "이미지 형식",
     notebook_setting_image_format_auto: "자동",
     notebook_setting_remote_images: "원격 이미지 불러오기",
+    notebook_setting_remote_images_blocked:
+        "현재 버전에서는 보안 정책으로 사용할 수 없습니다(원격 이미지를 불러오지 않습니다).",
     notebook_setting_smart_paste: "스마트 붙여넣기",
     notebook_setting_html_paste: "리치 텍스트 붙여넣기 형식",
     notebook_setting_plain_paste: "일반 텍스트 붙여넣기 형식",

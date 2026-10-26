@@ -433,10 +433,19 @@ export function NotebookSettingsDialog({
                             ]}
                         />
                     </AppField>
+                    {/*
+                     * 【为什么这一行是禁用态】远程图源被 App 的 CSP 挡住（`img-src` 只有
+                     * `self`/`data:`/`blob:`/`asset:`，见 `src-tauri/tauri.conf.json`）。
+                     * 留一个能点、但点了什么也不会发生的开关，比不给这个开关更糟：用户会以为
+                     * "开了就能看到外链图"，然后对着破图排查网络。开关保留（数据模型不变），
+                     * 但把真相写在 hint 里。
+                     */}
                     <AppSwitchRow
                         label={tf("notebook_setting_remote_images")}
                         checked={settings.allowRemoteImages}
                         onCheckedChange={(value) => onChange({ allowRemoteImages: value })}
+                        disabled
+                        hint={tf("notebook_setting_remote_images_blocked")}
                     />
                 </AppFormSection>
 

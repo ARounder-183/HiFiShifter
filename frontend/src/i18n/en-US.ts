@@ -542,6 +542,8 @@ export const enUS = {
     notebook_setting_image_format: "Image format",
     notebook_setting_image_format_auto: "Automatic",
     notebook_setting_remote_images: "Load remote images",
+    notebook_setting_remote_images_blocked:
+        "Disabled: the app security policy blocks every remote image source.",
     notebook_setting_smart_paste: "Smart paste",
     notebook_setting_html_paste: "Paste rich text as",
     notebook_setting_plain_paste: "Paste plain text as",
