@@ -95,9 +95,15 @@ type PianoRollScrollerWiringInputs = {
     /** 工具模式切换时的光标与右键菜单。 */
     setCanvasCursor: Dispatch<SetStateAction<CSSProperties["cursor"]>>;
     setCtxMenu: Dispatch<SetStateAction<{ x: number; y: number } | null>>;
-    /** 轴列浮窗。 */
+    /** 轴列浮窗（rect 快照随读数落地，见 usePianoRollAxisInteractions 的 flush）。 */
     setAxisValuePreview: Dispatch<
-        SetStateAction<{ clientX: number; clientY: number; text: string } | null>
+        SetStateAction<{
+            clientX: number;
+            clientY: number;
+            text: string;
+            rectLeft: number;
+            rectTop: number;
+        } | null>
     >;
 };
 

@@ -46,7 +46,14 @@ type PianoRollAxisInputs = {
     /** 参数值 → 悬浮读数字符串（与曲线浮窗同一套口径）。 */
     formatParamValuePreview: (value: number) => string;
     /** 左轴读数浮窗的 setter（浮窗本身由面板渲染）。 */
-    setAxisValuePreview: (value: { clientX: number; clientY: number; text: string } | null) => void;
+    setAxisValuePreview: (value: {
+        clientX: number;
+        clientY: number;
+        text: string;
+        /** 轴列容器 rect 快照（flushPreview 内随读数同帧采集）。 */
+        rectLeft: number;
+        rectTop: number;
+    } | null) => void;
 };
 
 /** 左轴列的三个交互。副作用顺序（试听 → 单位切换 → 读数）与拆分前一致。 */
@@ -209,11 +216,22 @@ export function usePianoRollAxisInteractions({
         // 读数合帧：pointermove 高频触发，且 describe 内含 getBoundingClientRect
         // （布局读取）。每帧至多计算 + setState 一次，滞后一帧不可感知。
         let previewRafId: number | null = null;
-        let pending: { clientX: number; clientY: number; text: string } | null | undefined;
+        let pending: {
+            clientX: number;
+            clientY: number;
+            text: string;
+        } | null | undefined;
         const flushPreview = () => {
             previewRafId = null;
             if (pending === undefined) return;
-            setAxisValuePreview(pending);
+            // 容器 rect 在这里（rAF 内、事件后）随读数同帧快照：EditorArea
+            // 渲染期只消费数值，不再 getBoundingClientRect（渲染期强制同步布局）。
+            if (pending) {
+                const rect = el.getBoundingClientRect();
+                setAxisValuePreview({ ...pending, rectLeft: rect.left, rectTop: rect.top });
+            } else {
+                setAxisValuePreview(pending);
+            }
             pending = undefined;
         };
 

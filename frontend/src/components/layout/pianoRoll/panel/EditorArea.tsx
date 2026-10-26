@@ -203,11 +203,15 @@ export function EditorArea({ m }: Props) {
                     ) : null}
 
                     {/* 纵轴浮动读数（`弹出展示参数` 的轴列形态）：挂在轴列坐标系里，
-                        底边对齐光标向上展开——与曲线浮窗同一观感。 */}
+                        底边对齐光标向上展开——与曲线浮窗同一观感。rect 随读数在
+                        rAF flush 里同帧快照（见 usePianoRollAxisInteractions），
+                        渲染期只消费数值、不再强制同步布局。 */}
                     {s.showParamValuePopup && axisValuePreview
                         ? (() => {
-                              const rect = axisWrapRef.current?.getBoundingClientRect();
-                              if (!rect) return null;
+                              const rect = {
+                                  left: axisValuePreview.rectLeft,
+                                  top: axisValuePreview.rectTop,
+                              };
                               return (
                                   <div
                                       className="absolute z-20 pointer-events-none bg-qt-panel border border-qt-border rounded px-2 py-1 text-qt-xs leading-none text-qt-text"
@@ -421,12 +425,17 @@ export function EditorArea({ m }: Props) {
                                 {s.showParamValuePopup &&
                                     (paramValuePreview || vibratoDragHud) &&
                                     (() => {
-                                        const rect = canvasRef.current?.getBoundingClientRect();
-                                        if (!rect) return null;
+                                        // rect 随读数/HUD 在各自的落地时机同帧快照
+                                        //（模型层的合帧 flush / setVibratoDragHud 包装），
+                                        // 渲染期只消费数值、不再强制同步布局。
                                         // 位置以值读数为准（它本就贴着指针）；只有 HUD
                                         // 时（例如不产生值读数的路径）用 HUD 的位置。
                                         const anchor = paramValuePreview ?? vibratoDragHud;
                                         if (!anchor) return null;
+                                        const rect = {
+                                            left: anchor.rectLeft,
+                                            top: anchor.rectTop,
+                                        };
                                         const hudPreset = vibratoDragHud
                                             ? findVibratoPreset(
                                                   resolvedVibratoPresets,

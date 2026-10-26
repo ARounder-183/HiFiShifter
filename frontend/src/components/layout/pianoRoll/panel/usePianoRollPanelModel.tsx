@@ -406,14 +406,42 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
      *
      * 用一个本地 state 而不是 ref：HUD 要跟着切换预设 / 滚轮调参实时刷新。
      */
-    const [vibratoDragHud, setVibratoDragHud] = useState<{
+    const [vibratoDragHud, setVibratoDragHudState] = useState<{
         presetId: string;
         depthCents: number;
         rateHz: number;
         adjusted: boolean;
         clientX: number;
         clientY: number;
+        /** 画布容器 rect 快照（随 HUD 同帧采集，与 paramValuePreview 同一口径）。 */
+        rectLeft: number;
+        rectTop: number;
     } | null>(null);
+    /** 落地时顺手快照画布 rect：渲染期（EditorArea）不再量 getBoundingClientRect。 */
+    const setVibratoDragHud = useCallback(
+        (
+            hud: {
+                presetId: string;
+                depthCents: number;
+                rateHz: number;
+                adjusted: boolean;
+                clientX: number;
+                clientY: number;
+            } | null,
+        ) => {
+            if (!hud) {
+                setVibratoDragHudState(null);
+                return;
+            }
+            const rect = canvasRef.current?.getBoundingClientRect();
+            setVibratoDragHudState({
+                ...hud,
+                rectLeft: rect?.left ?? 0,
+                rectTop: rect?.top ?? 0,
+            });
+        },
+        [],
+    );
     /**
      * 颤音窗口是否打开。
      *
@@ -528,6 +556,9 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         clientY: number;
         value: number;
         displayText?: string;
+        /** 画布容器 rect 快照（随读数同帧采集，见下方合帧注释）。 */
+        rectLeft: number;
+        rectTop: number;
     } | null>(null);
     // 浮窗更新合帧（见 onParamValuePreviewChange 处的说明）：pointermove 在高刷
     // 设备上可达数百 Hz，逐事件 setState 会让整个面板以事件频率重渲。
@@ -555,6 +586,9 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         clientX: number;
         clientY: number;
         text: string;
+        /** 轴列容器 rect 快照（随读数同帧采集，见 usePianoRollAxisInteractions）。 */
+        rectLeft: number;
+        rectTop: number;
     } | null>(null);
 
     /**
@@ -2196,7 +2230,18 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                     paramValuePreviewRafRef.current = null;
                     const pending = paramValuePreviewPendingRef.current;
                     paramValuePreviewPendingRef.current = null;
-                    if (pending) setParamValuePreview(pending.payload);
+                    if (!pending) return;
+                    // 容器 rect 在这里（rAF 内、事件后）随读数同帧快照：
+                    // EditorArea 渲染期只消费数值，不再 getBoundingClientRect
+                    // （渲染期强制同步布局，hover 时每帧都付一次）。
+                    const rect = canvasRef.current?.getBoundingClientRect();
+                    setParamValuePreview(
+                        pending.payload && {
+                            ...pending.payload,
+                            rectLeft: rect?.left ?? 0,
+                            rectTop: rect?.top ?? 0,
+                        },
+                    );
                 });
             },
             [],
