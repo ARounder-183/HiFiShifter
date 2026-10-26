@@ -1463,6 +1463,27 @@ impl ParameterAtlas {
             let view = previous_view
                 .and_then(|view| view.get(&root))
                 .filter(|view| view.frame_period_ms == params.frame_period_ms);
+            // 【不变式】只要调用方给了基线，就必须能在这个根上找到它。
+            // 找不到只有一种成因：这个根的 id 变了（宿主重建序列），而基线还是旧键。
+            // 此时**当前视图不是用户输入** —— 把整窗写回等于把"投影不完整产生的默认值"
+            // 固化成用户曲线（不可逆）。跳过这一条 clip（其余照常），并留一行可复盘的话。
+            // 【为什么"空基线"不算基线】一份**空的**参数视图只说明"这份工作区还没有
+            // 任何曲线"（新工程 / 第一次画线）。那种场合下"当前视图里的非默认帧就是
+            // 用户刚画的"是唯一可用的解释 —— 拦掉它会让第一条曲线永远画不上。
+            // 只有"基线里**有别的根**、却没有这一个"才说明根键错位（宿主重建了序列）。
+            if previous_view.is_some_and(|view| !view.is_empty()) && view.is_none() {
+                hifishifter_kernel::log_limiter::emit_limited_key(
+                    log::Level::Warn,
+                    "ara.atlas.baseline-root-missing",
+                    format_args!(
+                        "[ara] line write skipped: no baseline array for root {root} this round \
+                         (the root id changed); clip {} keeps its authority unchanged instead of \
+                         treating the whole visible window as user input",
+                        clip.id
+                    ),
+                );
+                continue;
+            }
             let baseline_present = view.is_some();
             for (key, values) in parameter_curves(params) {
                 if values.is_empty() {
@@ -3662,6 +3683,57 @@ mod tests {
         timeline.clips[0].normalize_takes();
         timeline
     }
+    /// **没有该根的基线 = 这一轮没有可证实的用户意图。**
+    ///
+    /// 【为什么这是"分割后参数线回退"的闸】根轨 id 被宿主重建之后，基线还挂在旧键上；
+    /// 而"没有权威 + 没有基线"的 clip 在旧实现里会被当成"整窗都是用户改的"，把投影
+    /// 出来的默认值写进一个新权威 —— 不可逆。现在这一条被跳过并留痕。
+    #[test]
+    fn a_missing_root_baseline_skips_the_clip_instead_of_writing_defaults() {
+        let host = host(0., 1., 0., 1.);
+        let ids = identities();
+        let mut client = host.clone();
+        let mut params = TrackParamsState {
+            frame_period_ms: 100.,
+            ..Default::default()
+        };
+        params.pitch_edit = vec![60.; 6];
+        client
+            .params_by_root_track
+            .insert("a".into(), params.clone());
+
+        let atlas = ParameterAtlas::default();
+        // 基线里**有别的根**、却没有这个根 —— 宿主重建序列后的真实形状。
+        let stale = TrackParamsState {
+            frame_period_ms: 100.,
+            ..Default::default()
+        };
+        let after = atlas
+            .capture_changes(
+                &client,
+                &ids,
+                &BTreeMap::from([("old-root".to_owned(), stale)]),
+            )
+            .unwrap();
+        assert!(
+            after.authorities.is_empty(),
+            "根键错位时不得凭空建立权威（那会把默认值固化成用户曲线）"
+        );
+
+        // 同一份输入，基线里有这个根 ⇒ delta 正常写入（闸不能拦住正常编辑）。
+        let mut view = TrackParamsState {
+            frame_period_ms: 100.,
+            ..Default::default()
+        };
+        view.pitch_edit = vec![0.; 6];
+        let baseline = BTreeMap::from([("a".to_owned(), view)]);
+        let after = atlas.capture_changes(&client, &ids, &baseline).unwrap();
+        assert!(
+            after.authorities.contains_key("mod:mod"),
+            "有基线时 delta 必须照常落盘"
+        );
+    }
+
     fn identities() -> BTreeMap<String, RegionIdentity> {
         BTreeMap::from([(
             "clip".into(),

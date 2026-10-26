@@ -108,7 +108,11 @@ enum BindingPick {
 ///
 /// 【为什么平局必须拒绝】两条候选同样像，说明这次的模型图不足以区分它们；挑一个就是
 /// 把用户的参数挂到错误的轨道上。宁可继续等，也不要那种错误。
-fn pick_binding(current: &TrackBindings, saved: &[(String, String)]) -> BindingPick {
+fn pick_binding(
+    current: &TrackBindings,
+    saved: &[(String, String)],
+    allow_source_only: bool,
+) -> BindingPick {
     // 【一、逐项相等优先】它是最强的证据：宿主原样把这份身份还了回来。
     let exact: Vec<&String> = current
         .iter()
@@ -128,6 +132,13 @@ fn pick_binding(current: &TrackBindings, saved: &[(String, String)]) -> BindingP
     }
     // 【三、仅按源降级】宿主重建 item 时可能给新的 modification id 而 source 不变。
     // 只在"源的交集"唯一最大时接受 —— 同一文件被两个 item 共用时必然平局，仍拒绝。
+    //
+    // 【为什么这一档只给冷恢复用】在线路径上"同一个源、不同 modification"就是**另一条
+    // take**（用户切了 take / 复制了一段新内容），不是"这条轨改了名"。把它当改名会
+    // 把别人的曲线搬过来 —— 那是比"这一轮不显示"严重得多的错误。
+    if !allow_source_only {
+        return BindingPick::Unobserved;
+    }
     let saved_sources: BTreeSet<&str> = saved.iter().map(|pair| pair.1.as_str()).collect();
     let source_overlap = |known: &Vec<(String, String)>| {
         known
@@ -232,6 +243,8 @@ impl EditState {
         let mut candidate = self.clone();
         let mut mapping = BTreeMap::new();
         let mut unbound: BTreeSet<String> = BTreeSet::new();
+        // 旧根 id → 宿主重建序列后的新根 id（在线路径的"改名"）。
+        let mut renamed: BTreeMap<String, String> = BTreeMap::new();
         let ids: BTreeSet<_> = self
             .tracks
             .iter()
@@ -261,7 +274,7 @@ impl EditState {
                 //   * 只有一条有交集 ⇒ 接受（多/少一条 region 是同一批源）；
                 //   * 多条并**并列最大** ⇒ 仍然拒绝（那才是真正的歧义）。
                 // 平局拒绝这一条是"I2 身份单调"的底线：两条候选同样像，就不能挑一个。
-                match pick_binding(current, &saved) {
+                match pick_binding(current, &saved, true) {
                     BindingPick::Unique(id) => (id, saved),
                     BindingPick::Ambiguous => {
                         return Err(
@@ -278,30 +291,45 @@ impl EditState {
                 }
             } else {
                 // live轨道已由真实sequence边明确关联，不因轨内成员增删而丢掉编辑。
-                let Some(identity) = current.get(old) else {
-                    // 【G2】这条轨这一轮没出现在绑定表里。它可能只是**暂时**看不到
-                    // （宿主正在重建 region sequence、几何还没交付、编辑中途），也可能
-                    // 真的被删了。两种情况下"保留数据、不套用"都比删除安全：
-                    // 删除是**不可逆**的数据销毁，而保留只让这条记录这一轮不参与投影。
-                    //
-                    // 此前这里 `continue` ⇒ 不建 mapping ⇒ 下面的 filter_map 把它删掉。
-                    // 而轨道 id 来自宿主的 **realtime key**（`create_region_sequence`），
-                    // 宿主重建序列时必然改变 —— 于是"切个屏回来，整轨参数消失"。
-                    unbound.insert(old.clone());
-                    continue;
-                };
-                // mute/空轨不是身份丢失；live序列仍明确，保留此前持久成员供解除/保存。
-                // 冷恢复分支仍拒绝空或歧义身份，不能用旧轨道序号猜归属。
-                if identity.is_empty() {
-                    if saved.is_empty() {
-                        // 两侧都没有身份：live 也给不出，存档也给不出 ⇒ 无法持久化。
-                        unbound.insert(old.clone());
-                        continue;
+                //
+                // 【G2】这条轨这一轮没出现在绑定表里。它可能只是**暂时**看不到
+                // （宿主正在重建 region sequence、几何还没交付、编辑中途），也可能
+                // 真的被删了。两种情况下"保留数据、不套用"都比删除安全：
+                // 删除是**不可逆**的数据销毁，而保留只让这条记录这一轮不参与投影。
+                //
+                // 【但"改名"与"被删"必须分开】根轨 id 来自宿主的 realtime key，
+                // 宿主重建 region sequence 时 key 必然改变 —— 旧实现把它当成"轨被
+                // 删了"：数据留着、这一轮不套用。对**持久化**这是安全的，对**显示**
+                // 却是致命的：新 id 上没有旧数组，投影一旦不完整，
+                // `merge_root_projection` 的"新根整份装入"就会把一条默认值数组盖到
+                // 整条轨上（用户看到的就是"分割后整轨参数线掉回默认"）。
+                //
+                // 判据与冷恢复**同一套**：唯一最大交集才算认领，平局/零交集仍不猜。
+                // 证据强度一样，而"没结果"的代价从"整份存档不合入"降到"这一轮不套用"。
+                let (new, identity) = match current.get(old) {
+                    Some(identity) if !identity.is_empty() => (old.clone(), identity.clone()),
+                    // mute/空轨不是身份丢失；live序列仍明确，保留此前持久成员供解除/保存。
+                    // 冷恢复分支仍拒绝空或歧义身份，不能用旧轨道序号猜归属。
+                    Some(_) => {
+                        if saved.is_empty() {
+                            // 两侧都没有身份：live 也给不出，存档也给不出 ⇒ 无法持久化。
+                            unbound.insert(old.clone());
+                            continue;
+                        }
+                        (old.clone(), saved)
                     }
-                    (old.clone(), saved)
-                } else {
-                    (old.clone(), identity.clone())
-                }
+                    None => match pick_binding(current, &saved, false) {
+                        BindingPick::Unique(id) => {
+                            renamed.insert(old.clone(), id.clone());
+                            (id, saved)
+                        }
+                        _ => {
+                            unbound.insert(old.clone());
+                            continue;
+                        }
+                    },
+                };
+                (new, identity)
             };
             // live归属已由宿主区域分配证明；复制轨道合法共享modification/source。
             // restore仍要求候选集中恰好一个身份匹配，不能仅按旧轨道序号猜测。
@@ -373,6 +401,20 @@ impl EditState {
             })
             .collect();
         candidate.needs_rebind = false;
+        if !renamed.is_empty() {
+            // 【为什么推进 revision】下一次 `ensure_loaded` 据此重读一份带新键的视图；
+            // 不推进的话，编辑器会一直拿着旧键的基线，直到下一次宿主编辑。
+            candidate.revision = candidate.revision.saturating_add(1);
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "ara.atlas.root-renamed",
+                format_args!(
+                    "[ara] {} track record(s) followed the host's rebuilt sequence: {:?}",
+                    renamed.len(),
+                    renamed.iter().take(4).collect::<Vec<_>>()
+                ),
+            );
+        }
         *self = candidate;
         Ok(())
     }
@@ -855,6 +897,65 @@ mod tests {
         host.tracks.push(track_fixture("a"));
         state.apply(&mut host);
         assert!(!host.params_by_root_track.contains_key("a"));
+    }
+
+    /// **宿主重建 region sequence 时，根轨是"改名"而不是"被删"。**
+    ///
+    /// 【为什么这条是"分割后整轨掉回默认"的回归】根轨 id 来自宿主的 realtime key，
+    /// 重建序列时必然改变。旧实现把它当成"轨被删了"：数据留着、这一轮不套用 ——
+    /// 于是新 id 上没有旧数组，投影一旦不完整，`merge_root_projection` 的"新根整份
+    /// 装入"就会把一条默认值数组盖到整条轨上。
+    #[test]
+    fn a_rebuilt_sequence_renames_the_track_instead_of_unbinding() {
+        let mut edited = host();
+        edited.tracks[0].volume = 0.25;
+        let mut state = EditState::default().merge(&host(), &edited, 0).unwrap();
+        state.params.insert("track".to_owned(), params_fixture());
+        state
+            .reconcile(&BTreeMap::from([(
+                "track".into(),
+                vec![("mod".into(), "source".into())],
+            )]))
+            .unwrap();
+        let revision = state.revision;
+
+        // 宿主销毁并重建了序列：身份不变，id 变了。
+        let current = BTreeMap::from([(
+            "track-rebuilt".into(),
+            vec![("mod".into(), "source".into())],
+        )]);
+        state.reconcile(&current).unwrap();
+
+        assert!(state.unbound.is_empty(), "这不是'认不出'，是'改名'");
+        assert!(state.params.contains_key("track-rebuilt"));
+        assert!(state.tracks.iter().any(|track| track.id == "track-rebuilt"));
+        assert_eq!(state.tracks[0].volume, 0.25, "值必须跟着走");
+        assert!(
+            state.revision > revision,
+            "改名必须推进 revision，让下一次读重新拿一份带新键的基线"
+        );
+    }
+
+    /// **两条候选同样像时仍然不猜**（红线与冷恢复一致）。
+    #[test]
+    fn a_rebuilt_sequence_with_two_equal_candidates_is_still_refused() {
+        let mut edited = host();
+        edited.tracks[0].volume = 0.25;
+        let mut state = EditState::default().merge(&host(), &edited, 0).unwrap();
+        state
+            .reconcile(&BTreeMap::from([(
+                "track".into(),
+                vec![("mod".into(), "source".into())],
+            )]))
+            .unwrap();
+        let current = BTreeMap::from([
+            ("one".to_owned(), vec![("mod".into(), "source".into())]),
+            ("two".to_owned(), vec![("mod".into(), "source".into())]),
+        ]);
+        state.reconcile(&current).unwrap();
+        assert!(state.unbound.contains("track"), "平局必须留在 unbound");
+        assert!(!state.params.contains_key("one"));
+        assert!(!state.params.contains_key("two"));
     }
 
     /// **一张空的绑定图不是证据**：它只说明"这一轮什么都没看到"。
