@@ -346,12 +346,16 @@ impl HiFiGanRenderer {
                 ctx.extra_params,
             )
         };
-        chunk_debug(&format!(
-            "chunked_opt path: clip={} samples={} seg_start_frame={}",
-            clip_id,
-            ctx.mono_pcm.len(),
-            seg_start
-        ));
+        // 【为什么判 debug_enabled】与下方五个 per-chunk 站点同一条纪律：调试关闭时
+        // 不先付 format! 的成本（每次 render 都会走到这里）。
+        if debug_enabled() {
+            chunk_debug(&format!(
+                "chunked_opt path: clip={} samples={} seg_start_frame={}",
+                clip_id,
+                ctx.mono_pcm.len(),
+                seg_start
+            ));
+        }
 
         let result = crate::nsf_hifigan_onnx::infer_pitch_edit_chunked_optimized(
             ctx.mono_pcm,
