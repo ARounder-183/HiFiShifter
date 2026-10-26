@@ -222,7 +222,12 @@ impl Workspace {
             .file
             .as_deref()
             .ok_or_else(|| format!("source {} names no file", entry.key))?;
-        let path = self.resolve(file);
+        let Some(path) = self.resolve_source(file) else {
+            return Err(format!(
+                "source {} points outside the workspace: {file}",
+                entry.key
+            ));
+        };
         let bytes = std::fs::read(&path)
             .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
         let loaded = decode_wav(&bytes)
@@ -247,6 +252,28 @@ impl Workspace {
         } else {
             self.root.join(as_path)
         }
+    }
+
+    /// 读素材时用的解析：绝对路径照旧（`extern` 是设计的一部分），但**相对路径**
+    /// 不许带 `..`。
+    ///
+    /// 【为什么相对路径要单独判】工作区目录是用户从磁盘上打开的（可能来自下载的
+    /// zip），清单里的 `file` 完全由生产者写。一个 `../../../Users/x/.ssh/id_rsa`
+    /// 会被 `root.join()` 直接拼出工作区之外 —— 读进来的虽然是"音频"，但把任意路径
+    /// 接进工程本身就不该是默认能力。绝对路径那条是**有意的**（宿主可能引用工作区
+    /// 之外的素材），因此这里不假装能拦住它，只把"相对路径越界"这条明显的错误挡掉。
+    fn resolve_source(&self, file: &str) -> Option<PathBuf> {
+        let as_path = Path::new(file);
+        if as_path.is_absolute() {
+            return Some(as_path.to_path_buf());
+        }
+        if as_path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return None;
+        }
+        Some(self.root.join(as_path))
     }
 
     fn prepare(&self) -> Result<(), String> {
@@ -599,6 +626,30 @@ mod tests {
         let _ = std::fs::remove_dir_all(workspace.root());
     }
 
+    /// **不变量：清单里的相对路径不能把读取带到工作区之外。**
+    ///
+    /// 工作区目录可能来自下载的 zip，清单里的 `file` 由生产者写。`..` 段必须被拒 ——
+    /// 否则一个工作区就能让本进程去读任意路径（`extern` 的绝对路径是设计允许的，
+    /// 与这条不冲突：这里只判相对路径）。
+    #[test]
+    fn a_relative_source_may_not_escape_the_workspace() {
+        let workspace = temp_workspace("escape");
+        std::fs::create_dir_all(workspace.root()).unwrap();
+        let entry = SourceEntry {
+            key: "k".into(),
+            sample_rate: 48_000,
+            channels: 1,
+            frames: 1,
+            state: AudioState::Complete,
+            file: Some("../../../etc/passwd".into()),
+            blake3: None,
+            bytes: None,
+            note: None,
+        };
+        let error = workspace.read_audio(&entry).unwrap_err();
+        assert!(error.contains("outside the workspace"), "{error}");
+        let _ = std::fs::remove_dir_all(workspace.root());
+    }
     /// 内容寻址：同一份音频写两次是**同一个文件**，且第二次不重写。
     #[test]
     fn identical_audio_is_addressed_by_content_and_not_rewritten() {

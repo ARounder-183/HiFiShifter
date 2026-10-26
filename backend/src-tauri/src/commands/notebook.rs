@@ -53,6 +53,13 @@ const B64: base64::engine::general_purpose::GeneralPurpose =
 /// （会话内只增不删）。上限必须在写入前拒绝。
 const MAX_ASSET_BYTES: usize = 32 * 1024 * 1024;
 
+/// `data_base64` 文本的长度上限（解码后不超过 [`MAX_ASSET_BYTES`]）。
+///
+/// 【为什么先看长度再解码】解码会立刻分配 3/4 的输入长度：一段 1 GiB 的
+/// `data_base64` 会先吃掉 750 MiB 内存，然后才被上面那条上限拒掉。门禁必须在
+/// 分配之前。
+const MAX_ASSET_BASE64_LEN: usize = MAX_ASSET_BYTES / 3 * 4 + 4;
+
 fn b64_encode(bytes: &[u8]) -> String {
     B64.encode(bytes)
 }
@@ -99,7 +106,15 @@ pub(super) fn put_asset(
         Ok(id) => id,
         Err(error) => return json!({ "ok": false, "error": error }),
     };
-    // 先解码校验：宁可在这里拒绝，也不要把一段坏 base64 写进工程文件 ——
+    // 长度先看：见 `MAX_ASSET_BASE64_LEN` 的理由（门禁在分配之前）。
+    if data_base64.len() > MAX_ASSET_BASE64_LEN {
+        return json!({
+            "ok": false,
+            "error": "notebook_asset_too_large",
+            "byteLen": data_base64.len() / 4 * 3,
+        });
+    }
+    // 再解码校验：宁可在这里拒绝，也不要把一段坏 base64 写进工程文件 ——
     // 那会让工程在后续每次保存/读取时都带着一颗雷。
     let byte_len = match b64_decode(&data_base64) {
         Ok(bytes) => bytes.len(),

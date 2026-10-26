@@ -39,6 +39,10 @@ use hifishifter_kernel::notebook_assets::{
 /// 单条附件的解码后字节上限（与 App 侧同值）。
 const MAX_ASSET_BYTES: usize = 32 * 1024 * 1024;
 
+/// `data_base64` 文本的长度上限（解码后不超过 [`MAX_ASSET_BYTES`]）：门禁要在
+/// 分配之前，而不是先吃掉 3/4 的输入长度再拒。
+const MAX_ASSET_BASE64_LEN: usize = MAX_ASSET_BYTES / 3 * 4 + 4;
+
 const B64: base64::engine::general_purpose::GeneralPurpose =
     base64::engine::general_purpose::STANDARD;
 
@@ -113,6 +117,9 @@ impl NotebookStore {
         meta: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, String> {
         let id = sanitize_asset_id(asset_id)?;
+        if data_base64.len() > MAX_ASSET_BASE64_LEN {
+            return Err("notebook_asset_too_large".into());
+        }
         let bytes = B64
             .decode(data_base64.as_bytes())
             .map_err(|e| format!("notebook_asset_base64_invalid: {e}"))?;
@@ -514,6 +521,19 @@ mod tests {
             store.read_asset("asset-3")["mime"],
             "application/x-hifishifter-fragment"
         );
+    }
+    /// **不变量：超限的载荷在解码之前就被拒。**
+    ///
+    /// 解码会立刻分配 3/4 的输入长度：先解码再判上限，等于让一段畸形载荷先把
+    /// 内存吃掉再被拒。
+    #[test]
+    fn an_oversized_payload_is_refused_before_it_is_decoded() {
+        let store = scratch("oversize");
+        let payload = "A".repeat(MAX_ASSET_BASE64_LEN + 4);
+        let error = store
+            .put_asset("big", "image", "png", None, &payload, None)
+            .unwrap_err();
+        assert_eq!(error, "notebook_asset_too_large");
     }
     /// 非法 id 必须被挡在存储之外（正文里的 `../` 不能变成路径）。
     #[test]
