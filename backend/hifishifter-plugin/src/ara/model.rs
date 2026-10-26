@@ -570,6 +570,21 @@ impl ModelHandle {
                 .cloned()
                 .collect();
             for parent in disappeared {
+                // 【入表资格】本帧至少有一个新 region 与父段的**播放轴**区间相交。
+                //
+                // 纯删除、撤销、移动同样表现为"region 消失"，但没有子段会在父段的
+                // 区间里出现 —— 为它们建候选只会换来若干轮后的过期 Warn（误导
+                // 排障：用户每删一个 item 就看到一条"分割失败"），还会在批量
+                // 编辑时把正在跨帧收齐的真分割候选挤出上限表。
+                // 残余：裁剪边缘也会走"消失 + 交叠出现"，仍会产生候选并在
+                // 收不齐时过期 —— 与收紧前一致，但 Warn 已限流且携带父段读数。
+                let intersects_an_appeared = appeared.iter().any(|frame| {
+                    frame.play_start < parent.play_start + parent.play_dur
+                        && parent.play_start < frame.play_start + frame.play_dur
+                });
+                if !intersects_an_appeared {
+                    continue;
+                }
                 let refs = appeared.iter().collect::<Vec<_>>();
                 let children = Self::split_children(&parent, &refs)
                     .into_iter()
@@ -586,6 +601,7 @@ impl ModelHandle {
         let mut kept: Vec<SplitCandidate> = Vec::new();
         let mut settled: Vec<SplitCandidate> = Vec::new();
         let mut expired = 0_usize;
+        let mut expired_keys: Vec<String> = Vec::new();
         for mut candidate in std::mem::take(&mut self.split_candidates) {
             candidate.absorb(&appeared);
             if candidate.partitions_parent() {
@@ -595,6 +611,11 @@ impl ModelHandle {
             candidate.rounds_left = candidate.rounds_left.saturating_sub(1);
             if candidate.rounds_left == 0 {
                 expired += 1;
+                // 过期 Warn 携带前几个父段读数：只报数量时，用户侧无从把这条
+                // Warn 对回到"刚才做了什么"。
+                if expired_keys.len() < 4 {
+                    expired_keys.push(format!("ara-region-{}", candidate.parent.key));
+                }
             } else {
                 kept.push(candidate);
             }
@@ -609,7 +630,19 @@ impl ModelHandle {
             }
         }
         if kept.len() > MAX_SPLIT_CANDIDATES {
+            // 挤出策略：先淘汰**最旧的**「还没有任何子段」的候选（多轮收不齐的
+            // 最不可能完成），不足以覆盖时再按最旧淘汰 —— 一批删除/移动不该把
+            // 正在跨帧收齐的真分割候选挤出去。
+            let mut evicted = 0_usize;
             let excess = kept.len() - MAX_SPLIT_CANDIDATES;
+            kept.retain(|candidate| {
+                if evicted < excess && candidate.children.is_empty() {
+                    evicted += 1;
+                    return false;
+                }
+                true
+            });
+            let excess = kept.len().saturating_sub(MAX_SPLIT_CANDIDATES);
             kept.drain(..excess);
         }
         self.split_candidates = kept;
@@ -629,12 +662,18 @@ impl ModelHandle {
             );
         }
         if expired > 0 {
+            let samples = if expired_keys.is_empty() {
+                String::new()
+            } else {
+                format!(" (e.g. {})", expired_keys.join(", "))
+            };
             hifishifter_kernel::log_limiter::emit_limited_key(
                 log::Level::Warn,
                 "ara.split.pending-expired",
                 format_args!(
                     "[ara] {expired} host split candidate(s) never completed within \
-                     {SPLIT_CANDIDATE_ROUNDS} remaps; their children keep the geometric fallback"
+                     {SPLIT_CANDIDATE_ROUNDS} remaps{samples}; their children keep the \
+                     geometric fallback"
                 ),
             );
         }
@@ -3958,6 +3997,76 @@ mod tests {
         assert_eq!(source.left, PARENT);
         assert!((source.offset_sec - 0.5).abs() < 1e-9);
         assert!((source.length_sec - 0.5).abs() < 1e-9);
+    }
+
+    /// **不变量：纯删除不是分割，不得产生候选、更不得刷过期 Warn。**
+    ///
+    /// 【为什么钉死】"父段消失"对分割与删除是同一个形状；没有入表资格判定时，
+    /// 用户每删一个 item 都会留下一个永远收不齐的候选，若干轮 remap 后刷一条
+    /// "split candidate never completed" 的 Warn —— 误导排障，还占用上限表。
+    #[test]
+    fn a_plain_delete_never_becomes_a_split_candidate() {
+        const PARENT: &str = "{AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA}";
+        let mut model = ModelHandle::new();
+        // 上一帧：一个父 region。当前帧：它直接消失，没有任何新 region。
+        model.lineage_frame = vec![frame(PARENT, "src", 0., 1., 0., 1.)];
+        model.document.playback_regions = Vec::new();
+        model.register_host_split_lineage();
+        assert!(
+            model.split_candidates.is_empty(),
+            "父段消失且无新 region 时不得产生分割候选"
+        );
+        // 后续帧同样干净：没有候选，也就没有轮次倒计时与过期 Warn。
+        model.register_host_split_lineage();
+        assert!(model.split_candidates.is_empty());
+    }
+
+    /// **不变量：候选表满员时，先淘汰最旧的「无子段」候选，不牺牲正在跨帧收齐的。**
+    ///
+    /// 【为什么钉死】一批删除/移动曾把真分割候选挤出表（旧策略无差别丢最旧），
+    /// 右半段退回几何兜底 —— 旧故障回归且无日志。
+    #[test]
+    fn candidate_overflow_evicts_childless_entries_first() {
+        let mut model = ModelHandle::new();
+        // 直构 MAX+1 个候选：MAX 个无子段（最旧在头部）+ 1 个已收到子段。
+        let mut candidates: Vec<SplitCandidate> = (0..MAX_SPLIT_CANDIDATES)
+            .map(|index| SplitCandidate {
+                parent: frame(
+                    &format!("p{index}"),
+                    "src",
+                    index as f64,
+                    1.,
+                    index as f64,
+                    1.,
+                ),
+                children: Vec::new(),
+                rounds_left: SPLIT_CANDIDATE_ROUNDS,
+            })
+            .collect();
+        candidates.push(SplitCandidate {
+            parent: frame("p-with-child", "src", 100., 1., 100., 1.),
+            // 半段不算完整划分：这个候选仍需后续帧补齐右半段。
+            children: vec![frame("c-left", "src", 100., 0.5, 100., 0.5)],
+            rounds_left: SPLIT_CANDIDATE_ROUNDS,
+        });
+        model.split_candidates = candidates;
+        // 本帧无任何变化：候选不收口也不新增，只走轮次递减与挤出。
+        model.register_host_split_lineage();
+        assert_eq!(model.split_candidates.len(), MAX_SPLIT_CANDIDATES);
+        assert!(
+            !model
+                .split_candidates
+                .iter()
+                .any(|c| c.parent.item.as_deref() == Some("p0")),
+            "最旧的无子段候选必须先被淘汰"
+        );
+        assert!(
+            model
+                .split_candidates
+                .iter()
+                .any(|c| c.parent.item.as_deref() == Some("p-with-child")),
+            "正在跨帧收齐的候选不得被无子段候选的淘汰波及"
+        );
     }
 
     /// 父段**没有** live 曲线时：曲线谱系不登记（没有可继承的 seed），但**媒体身份必须
