@@ -23,9 +23,9 @@
    禁止新增（`scripts/checks/baseline-lock-unwrap.txt`，现存 0 处）。门禁会剥掉
    `#[cfg(test)] mod` 的函数体，测试里的 `.lock().unwrap()` 不计入。
 3. **错误语义不靠子串匹配传播。** 禁止新增 `error.contains("...")` 式的分类
-   （基线 `scripts/checks/baseline-error-contains.txt`，现存 6 处：`editor::errors`
-   的 `classify_error` / `error_code_for`、`editor::webview` 的重试判定、
-   `render::extension` 的绑定失败判定，各 2 处）。协议语义用结构化错误码
+   （基线 `scripts/checks/baseline-error-contains.txt`，现存 5 处：`editor::errors`
+   的 `classify_error` / `error_code_for` 与 `editor::gui` 客户端各 2 处、
+   `render::extension` 的绑定失败判定 1 处）。协议语义用结构化错误码
    （`hifishifter-host-channel` 的 `Response.code`；notebook 家族的
    `notebook_*` 稳定码），字符串只做展示。
 
@@ -75,3 +75,23 @@
 - 插件 `vst3.rs` 的音频路径（`component_set_state` / `component_get_state` /
   `audio_process`）有自己的专项 `catch_unwind`（音频语义的静音降级），
   不走通用 `guard_ffi`。
+
+## 5. Windows VST3 native loader 锁契约
+
+Windows 插件 bundle 里的 HiFiShifter.vst3 是一个 C++ shim，它按绝对路径加载
+HiFiShifterEngine.dll。shim 的 gate 是**唯一**的生命周期锁，保护
+engine / factory / initialize / engine_exit / load_failed。
+
+- load_engine_locked() 要求调用者已经持有 gate，自己**绝不再取锁**。
+- GetPluginFactory() / InitDll() / ExitDll() 在入口各取一次 Gate。
+- GetPluginFactory() 在 Gate 内调用 engine 的工厂函数；InitDll() 在 Gate 内调用
+  engine 的初始化函数，保证 ExitDll() 不会在“读取函数指针”和“调用函数指针”之间
+  清空/卸载 engine。
+- ExitDll() 在 Gate 内清空状态，FreeLibrary() 放到 Gate 外执行（避免在持锁时
+  运行 engine 的 DllMain/静态析构）。
+- 任何新增的导出入口都必须遵守同一契约；不要为了“保护一个指针”在已经持锁的调用链
+  上再取一次 SRWLOCK——它不是递归锁。
+
+回归守卫：scripts/vst3/windows/load_probe.cpp + verify.ps1，由
+.github/workflows/vst3.yml 的 Windows VST3 load gate 执行。vst3_exports.rs 只覆盖
+Rust engine DLL，不能替代这个黑盒门禁。
