@@ -30,7 +30,6 @@ import {
     relayHostKey,
     resetHostKeyRelayLatchForTests,
     RELAYABLE_KEYS,
-    subscribeHostKeyRelayNotice,
     type HostKeyRelayEnv,
     type HostKeyStroke,
 } from "./hostKeyRelay";
@@ -243,16 +242,6 @@ describe("发往原生", () => {
             "unsupported",
         );
         expect(hostKeyRelayEnv().unsupported).toBe(true);
-    });
-});
-
-describe("通知订阅", () => {
-    test("独立 App 里没有宿主消息口：订阅是空操作，退订也不炸", () => {
-        delete (window as { __HFS_PLUGIN_BOOTSTRAP__?: unknown }).__HFS_PLUGIN_BOOTSTRAP__;
-        const seen: string[] = [];
-        const off = subscribeHostKeyRelayNotice((notice) => seen.push(notice.reason));
-        expect(() => off()).not.toThrow();
-        expect(seen).toEqual([]);
     });
 });
 

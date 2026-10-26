@@ -17,7 +17,7 @@
  */
 import { canControlHostTransport, capabilityForAction, isPluginMode } from "./hostCapabilities";
 import { hostKeysApi, type HostKeyModifiers } from "./api/hostKeys";
-import { getPluginHost, PluginInvokeError } from "./pluginHost";
+import { PluginInvokeError } from "./pluginHost";
 import { backendDetail, invokeErrorKind } from "./invoke";
 import { firstBinding, isNoneBindingList } from "../features/keybindings/keybindingsSlice";
 import type { ActionId, KeybindingMap } from "../features/keybindings/types";
@@ -40,12 +40,6 @@ export interface HostKeyRelayEnv {
 export interface HostKeyRelayRequest {
     action: ActionId;
     stroke: HostKeyStroke;
-}
-
-/** 原生告知"让路没成"的通知。 */
-export interface HostKeyRelayNotice {
-    action: string;
-    reason: "no-response" | "refused" | "unavailable";
 }
 
 /**
@@ -287,40 +281,4 @@ export async function handKeyboardToHost(): Promise<HostKeyFocusOutcome> {
     } catch {
         return { ok: false, reason: "unavailable" };
     }
-}
-
-/**
- * 订阅"让路没成"的通知；返回退订函数。
- *
- * 【为什么不用 `listen` 的 Promise】调用点是一个 React effect，卸载时必须能**同步**
- * 退订。这里把异步订阅的完成与退订排队：若订阅在卸载之后才完成，立即退订。
- */
-export function subscribeHostKeyRelayNotice(
-    listener: (notice: HostKeyRelayNotice) => void,
-): () => void {
-    let unsubscribe: (() => void) | null = null;
-    let disposed = false;
-    void (async () => {
-        try {
-            const host = getPluginHost();
-            if (!host) return;
-            const off = await host.listen<HostKeyRelayNotice>("host_key_relay_notice", (event) => {
-                const payload = event.payload;
-                if (!payload || typeof payload.action !== "string") return;
-                const reason = payload.reason;
-                if (reason !== "no-response" && reason !== "refused" && reason !== "unavailable")
-                    return;
-                listener({ action: payload.action, reason });
-            });
-            if (disposed) off();
-            else unsubscribe = off;
-        } catch {
-            // 独立 App / 消息口不可用：没有通知可订阅，也不需要提示。
-        }
-    })();
-    return () => {
-        disposed = true;
-        unsubscribe?.();
-        unsubscribe = null;
-    };
 }

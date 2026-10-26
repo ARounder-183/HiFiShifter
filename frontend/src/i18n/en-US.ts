@@ -2323,11 +2323,6 @@ export const enUS = {
         "Controlled by the host; manage files, clip geometry, tempo, meter and playback in the host",
     cap_reason_host_owns: "The host owns this step; the plug-in does not take it over",
     cap_reason_unsupported_by_host: "The current host does not expose this interface",
-    // ── Host key relay follow-up (see services/hostKeyRelay.ts) ─────────────
-    host_key_relay_no_response:
-        "Handed “{action}” to the host, but it did not respond. If nothing happens, click the host's arrange area and try again.",
-    host_key_relay_refused:
-        "Could not hand “{action}” to the host (its window is unavailable right now). Click the host's arrange area and try again.",
     cap_reason_app_only: "Only available in the standalone app",
     cap_reason_plugin_only: "Only available in the plug-in",
     cap_reason_piano_roll_only: "Only applies to the parameter editor",

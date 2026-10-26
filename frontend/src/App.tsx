@@ -161,7 +161,6 @@ import { QuickSearchPopup } from "./components/layout/QuickSearchPopup";
 import { FolderImportHost } from "./components/layout/FolderImportHost";
 import { useKeybindings } from "./features/keybindings/useKeybindings";
 import { selectMergedKeybindings } from "./features/keybindings/keybindingsSlice";
-import { ACTION_META } from "./features/keybindings/defaultKeybindings";
 import { beginHoldRepeat } from "./features/keybindings/holdRepeat";
 import {
     ACTION_TO_EDIT_OP,
@@ -178,7 +177,6 @@ import {
     hostKeyRelayEnv,
     publishHostKeyEscapeSet,
     relayHostKey,
-    subscribeHostKeyRelayNotice,
     type HostKeyStroke,
 } from "./services/hostKeyRelay";
 import { subscribeEditorRouteNotice } from "./services/editorRoute";
@@ -3392,25 +3390,6 @@ function AppInner() {
         window.addEventListener("hfs-plugin-bootstrap-changed", publish);
         return () => window.removeEventListener("hfs-plugin-bootstrap-changed", publish);
     }, [mergedKeybindings]);
-
-    /*
-     * 让路"没成"的回报：投递了但宿主没动，或者根本没投成（宿主窗口不可用 / 本平台没有这条路）。
-     *
-     * 【为什么这类话只能由原生发起】"宿主动没动"只有原生看得见（`TransportClock` 每个
-     * 音频块都在读 VST3 的 kPlaying）。前端若自己猜，就会在宿主慢一帧时误报。
-     */
-    useEffect(() => {
-        if (!isPluginMode()) return;
-        return subscribeHostKeyRelayNotice((notice) => {
-            const meta = ACTION_META[notice.action as ActionId];
-            const action = meta ? t(meta.labelKey) : notice.action;
-            const key =
-                notice.reason === "no-response"
-                    ? "host_key_relay_no_response"
-                    : "host_key_relay_refused";
-            showNotice(tVars(key, { action }), 6000, "warning");
-        });
-    }, [showNotice, t, tVars]);
 
     /*
      * 编辑器路由确定失败（宿主没有把视图连到处理器）。

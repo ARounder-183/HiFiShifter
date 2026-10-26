@@ -36,7 +36,7 @@ mod unavailable;
 
 pub(crate) use strokes::{KeyToken, Stroke, StrokeSet};
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 /// 探针窗口：等"宿主自己会不会动"。
@@ -165,15 +165,15 @@ pub(crate) fn escape_for_platform() -> Box<dyn HostKeyEscape> {
 }
 
 /// 状态机必须让调用方去做的事。
+///
+/// 【为什么没有"告诉用户"这一种】让路的成功与失败都是**静默**的：成功时宿主自己动
+/// 起来了，那就是反馈；失败时用户的下一步本来就是"点一下宿主窗口"，一句被状态栏
+/// 裁掉一半的警告并不能让他做得更好。留下的证据是诊断日志与诊断包读数 —— 它们回答
+/// 的是"这个功能到底有没有在工作"，而那是支持场景的问题，不是操作场景的问题。
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) enum Effect {
     /// 把这一次按键交回宿主。
     Escape { action: String, stroke: Stroke },
-    /// 告诉用户下一步（每个动作每种原因每次会话只说一次）。
-    Notice {
-        action: String,
-        reason: &'static str,
-    },
     /// 只记一行诊断日志，不改变任何状态。
     ///
     /// 【为什么把日志做成 effect】状态机因此保持纯函数：它只**声明**发生了什么，
@@ -289,8 +289,6 @@ pub(crate) struct Arbiter {
     pending: Option<Pending>,
     last_escape: Option<Instant>,
     escapes: VecDeque<Instant>,
-    /// 已经提示过的 `动作|原因`。
-    noticed: HashSet<String>,
 }
 
 impl Arbiter {
@@ -306,7 +304,6 @@ impl Arbiter {
             pending: None,
             last_escape: None,
             escapes: VecDeque::new(),
-            noticed: HashSet::new(),
         }
     }
 
@@ -324,18 +321,10 @@ impl Arbiter {
     ) -> KeyOutcome {
         match self.mode {
             Mode::Unavailable => {
-                // 【为什么接受却还要提示】前端已经判定"这个键插件用不上"，若我们回
-                // "不接手"，前端只会回落那句"当前宿主没有提供这个接口"—— 那是把用户
-                // 往死路上指。这里接手，并给出一条**可执行**的出路。
-                let effects = if self.mark_noticed(action, "unavailable") {
-                    vec![Effect::Notice {
-                        action: action.to_owned(),
-                        reason: "unavailable",
-                    }]
-                } else {
-                    Vec::new()
-                };
-                return KeyOutcome::accepted_with(effects);
+                // 【为什么"接手"却什么也不做】前端已经判定"这个键插件用不上"。若我们
+                // 回"不接手"，前端只会回落那句"当前宿主没有提供这个接口" —— 那是把
+                // 用户往死路上指。这里接手，把结论留在日志里：本平台没有让路原语。
+                return KeyOutcome::accepted_with(vec![Effect::Trace("unavailable")]);
             }
             Mode::HostNative => return KeyOutcome::rejected(RejectReason::HostNative),
             Mode::Probe | Mode::Relay => {}
@@ -468,26 +457,11 @@ impl Arbiter {
             return vec![Effect::Trace("relayed"), Effect::Escape { action, stroke }];
         }
 
-        // 观察窗到期、宿主仍没动。
-        if pending.verifiable && self.mark_noticed(&pending.action, "no-response") {
-            return vec![Effect::Notice {
-                action: pending.action,
-                reason: "no-response",
-            }];
+        // 观察窗到期、宿主仍没动。静默：用户的下一个动作本来就是去点宿主窗口。
+        if pending.verifiable {
+            return vec![Effect::Trace("no-response")];
         }
         Vec::new()
-    }
-
-    /// 让路失败（原语给出了结构化原因）：回报一次，每个动作每次会话只说一次。
-    ///
-    /// 【为什么记账在状态机里】"每个动作只说一次"是判定的一部分，不是 UI 的偏好。
-    /// 放在这里，前端与日志看到的是同一个事实。
-    pub(crate) fn note_refusal(&mut self, action: &str) -> bool {
-        self.mark_noticed(action, "refused")
-    }
-
-    fn mark_noticed(&mut self, action: &str, reason: &str) -> bool {
-        self.noticed.insert(format!("{action}|{reason}"))
     }
 
     fn throttled(&self, now: Instant) -> bool {
@@ -558,11 +532,11 @@ mod tests {
             .count()
     }
 
-    fn notices(effects: &[Effect]) -> Vec<&'static str> {
+    fn traces(effects: &[Effect]) -> Vec<&'static str> {
         effects
             .iter()
             .filter_map(|effect| match effect {
-                Effect::Notice { reason, .. } => Some(*reason),
+                Effect::Trace(trace) => Some(*trace),
                 _ => None,
             })
             .collect()
@@ -588,7 +562,7 @@ mod tests {
         // 宿主自己开始播放：探针看到翻转。
         let effects = tick_for(&mut arbiter, start, 100, playing(true));
         assert_eq!(escaped(&effects), 0, "宿主已处理 ⇒ 不得投递");
-        assert_eq!(notices(&effects), Vec::<&str>::new(), "正常情况不该提示");
+        assert_eq!(traces(&effects), vec!["host-native"], "正常情况只记一行日志");
 
         // 之后所有按键都不再走这条路，也不提示。
         let later = start + Duration::from_secs(1);
@@ -636,9 +610,13 @@ mod tests {
         assert_eq!(escaped(&outcome.effects), 1, "Relay 模式下必须立即投递");
     }
 
-    /// **不变量：投递成功是静默的，投递没人接才说一句，且每个动作只说一次。**
+    /// **不变量：成功与超时都只留一行日志，绝不对用户说话。**
+    ///
+    /// 【为什么超时也不说话】"让路没成"的下一步永远是同一个：点一下宿主窗口。而状态栏
+    /// 那个位置放不下一句完整的解释（状态片是 `shrink-0`，父容器 `truncate` 会把它
+    /// 从中间裁掉）。与其给一句被裁掉一半的警告，不如把事实留在日志与诊断包里。
     #[test]
-    fn a_silent_success_and_a_single_notice_on_timeout() {
+    fn a_silent_success_and_a_silent_timeout() {
         let start = Instant::now();
         let mut arbiter = Arbiter::new(Fidelity::Synthetic);
         arbiter.on_key(
@@ -649,14 +627,14 @@ mod tests {
         );
         tick_for(&mut arbiter, start, 100, playing(false));
 
-        // 宿主动起来了：观察窗判成功，不发提示。
+        // 宿主动起来了：观察窗判成功。
         let success = tick_for(
             &mut arbiter,
             start + Duration::from_millis(100),
             60,
             playing(true),
         );
-        assert_eq!(notices(&success), Vec::<&str>::new());
+        assert_eq!(traces(&success), vec!["accepted"]);
 
         // 再来一次，这次宿主一直不动：观察窗到期后提示一次。
         let second = start + Duration::from_secs(1);
@@ -667,9 +645,14 @@ mod tests {
             playing(true),
         );
         let timeout = tick_for(&mut arbiter, second, 460, playing(true));
-        assert_eq!(notices(&timeout), vec!["no-response"]);
+        assert_eq!(traces(&timeout), vec!["no-response"]);
+        assert_eq!(
+            timeout.iter().filter(|e| matches!(e, Effect::Escape { .. })).count(),
+            0,
+            "观察窗只记账，不再投递"
+        );
 
-        // 同一个动作再失败一次：不再提示（用户已经知道下一步了）。
+        // 同一个动作再失败一次：照常记账，仍然不说话。
         let third = start + Duration::from_secs(3);
         arbiter.on_key(
             third,
@@ -678,7 +661,7 @@ mod tests {
             playing(true),
         );
         let again = tick_for(&mut arbiter, third, 460, playing(true));
-        assert_eq!(notices(&again), Vec::<&str>::new(), "每个动作只提示一次");
+        assert_eq!(traces(&again), vec!["no-response"]);
     }
 
     /// **不变量：探针期间不接第二下；观察窗期间照接（连按 = 两次意图）。**
@@ -765,7 +748,7 @@ mod tests {
         assert_eq!(escaped(&outcome.effects), 1, "没有读数时直接让一次");
 
         let effects = tick_for(&mut arbiter, start, 460, None);
-        assert_eq!(notices(&effects), Vec::<&str>::new(), "不可验证就无可奉告");
+        assert_eq!(traces(&effects), Vec::<&str>::new(), "不可验证就无可奉告");
     }
 
     /// **不变量：读数迟到时观察窗就地升级为可验证，基线取第一次拿到的读数。**
@@ -776,14 +759,14 @@ mod tests {
         arbiter.on_key(start, "playback.toggle", bare(KeyToken::Space), None);
         // 100 ms 时读数出现（此时基线 = false）；之后宿主动了 ⇒ 成功、不提示。
         let effects = tick_for(&mut arbiter, start, 100, playing(false));
-        assert_eq!(notices(&effects), Vec::<&str>::new());
+        assert_eq!(traces(&effects), Vec::<&str>::new());
         let effects = tick_for(
             &mut arbiter,
             start + Duration::from_millis(100),
             200,
             playing(true),
         );
-        assert_eq!(notices(&effects), Vec::<&str>::new());
+        assert_eq!(traces(&effects), vec!["accepted"]);
     }
 
     /// **不变量：PassThrough 平台不付探针的成本。**
@@ -802,9 +785,12 @@ mod tests {
         assert_eq!(escaped(&outcome.effects), 1, "PassThrough 必须立即让路");
     }
 
-    /// **不变量：Unavailable 平台当场说清楚，且只说一次。**
+    /// **不变量：Unavailable 平台接手但什么都不做，只留一行日志。**
+    ///
+    /// 【为什么是"接手"】前端已经判定"这个键插件用不上"。回"不接手"只会让它回落那句
+    /// "当前宿主没有提供这个接口" —— 那是把用户往死路上指。
     #[test]
-    fn unavailable_platforms_explain_immediately_and_once() {
+    fn unavailable_platforms_accept_without_posting_or_speaking() {
         let start = Instant::now();
         let mut arbiter = Arbiter::new(Fidelity::Unavailable);
         let outcome = arbiter.on_key(
@@ -814,7 +800,8 @@ mod tests {
             playing(false),
         );
         assert_eq!(outcome.verdict, KeyVerdict::Accepted);
-        assert_eq!(notices(&outcome.effects), vec!["unavailable"]);
+        assert_eq!(escaped(&outcome.effects), 0, "本平台没有原语，不得假装投递");
+        assert_eq!(traces(&outcome.effects), vec!["unavailable"]);
 
         let again = arbiter.on_key(
             start + Duration::from_secs(5),
@@ -822,7 +809,7 @@ mod tests {
             bare(KeyToken::Space),
             playing(false),
         );
-        assert!(again.effects.is_empty(), "同一个动作不再重复说");
+        assert_eq!(again.verdict, KeyVerdict::Accepted);
     }
 
     /// **不变量：带修饰的键一律不让。**
@@ -843,14 +830,5 @@ mod tests {
             KeyVerdict::Rejected(RejectReason::ModifiedKey)
         );
         assert!(outcome.effects.is_empty());
-    }
-
-    /// **不变量：让路失败的回报每个动作只发生一次。**
-    #[test]
-    fn a_refusal_is_reported_once_per_action() {
-        let mut arbiter = Arbiter::new(Fidelity::Synthetic);
-        assert!(arbiter.note_refusal("playback.toggle"));
-        assert!(!arbiter.note_refusal("playback.toggle"));
-        assert!(arbiter.note_refusal("playback.stop"), "不同动作各自记账");
     }
 }

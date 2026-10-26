@@ -2250,11 +2250,6 @@ export const zhTW = {
     plugin_daw_controlled_reason: "由宿主控制；請在宿主中操作檔案、片段幾何、速度、拍號與播放",
     cap_reason_host_owns: "這一步由宿主完成，外掛不接管",
     cap_reason_unsupported_by_host: "目前宿主沒有提供這個介面",
-    // ── 宿主專屬快速鍵的讓路回報（見 services/hostKeyRelay.ts）──────────────
-    host_key_relay_no_response:
-        "已把「{action}」轉交給宿主，但沒等到回應。若宿主沒有反應，請先點一下宿主的編曲區再按。",
-    host_key_relay_refused:
-        "這次沒能把「{action}」交給宿主（宿主視窗目前不可用）。請先點一下宿主的編曲區再按。",
     cap_reason_app_only: "僅在獨立 App 中可用",
     cap_reason_plugin_only: "僅在外掛中可用",
     cap_reason_piano_roll_only: "僅適用於參數編輯器",

@@ -2246,11 +2246,6 @@ export const zhCN = {
     plugin_daw_controlled_reason: "由宿主控制；在宿主中操作文件、片段几何、速度、拍号与播放",
     cap_reason_host_owns: "这一步由宿主完成，插件不接管",
     cap_reason_unsupported_by_host: "当前宿主没有提供这个接口",
-    // ── 宿主专属快捷键的让路回报（见 services/hostKeyRelay.ts）──────────────
-    host_key_relay_no_response:
-        "已把「{action}」转交给宿主，但没等到回应。若宿主没有反应，请先点一下宿主的编曲区再按。",
-    host_key_relay_refused:
-        "这次没能把「{action}」交给宿主（宿主窗口当前不可用）。请先点一下宿主的编曲区再按。",
     cap_reason_app_only: "只在独立 App 中可用",
     cap_reason_plugin_only: "只在插件中可用",
     cap_reason_piano_roll_only: "只适用于参数编辑器",

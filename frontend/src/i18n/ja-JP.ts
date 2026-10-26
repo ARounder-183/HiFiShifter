@@ -2339,11 +2339,6 @@ export const jaJP = {
         "ホストが制御します。ファイル、クリップのジオメトリ、テンポ、拍子、再生はホスト側で操作してください",
     cap_reason_host_owns: "この操作はホストが担当します（プラグインは引き受けません）",
     cap_reason_unsupported_by_host: "現在のホストはこのインターフェースを提供していません",
-    // ── ホスト専用ショートカットの転送結果（services/hostKeyRelay.ts 参照）──
-    host_key_relay_no_response:
-        "「{action}」をホストに渡しましたが、応答がありませんでした。反応しない場合は、ホストのアレンジ領域を一度クリックしてからもう一度押してください。",
-    host_key_relay_refused:
-        "「{action}」をホストに渡せませんでした（ホストのウィンドウが現在利用できません）。ホストのアレンジ領域をクリックしてからもう一度お試しください。",
     cap_reason_app_only: "スタンドアロン版でのみ使用できます",
     cap_reason_plugin_only: "プラグインでのみ使用できます",
     cap_reason_piano_roll_only: "パラメータエディタでのみ有効です",

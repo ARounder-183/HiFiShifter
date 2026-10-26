@@ -2307,11 +2307,6 @@ export const koKR = {
         "호스트가 제어합니다. 파일, 클립 지오메트리, 템포, 박자, 재생은 호스트에서 조작하세요",
     cap_reason_host_owns: "이 단계는 호스트가 담당합니다(플러그인이 넘겨받지 않습니다)",
     cap_reason_unsupported_by_host: "현재 호스트가 이 인터페이스를 제공하지 않습니다",
-    // ── 호스트 전용 단축키 전달 결과(services/hostKeyRelay.ts 참조) ─────────
-    host_key_relay_no_response:
-        "「{action}」을(를) 호스트에 넘겼지만 응답이 없습니다. 반응이 없으면 호스트의 편곡 영역을 한 번 클릭한 뒤 다시 눌러 주세요.",
-    host_key_relay_refused:
-        "「{action}」을(를) 호스트에 넘기지 못했습니다(호스트 창을 지금 사용할 수 없습니다). 호스트의 편곡 영역을 클릭한 뒤 다시 시도해 주세요.",
     cap_reason_app_only: "독립 실행형 앱에서만 사용할 수 있습니다",
     cap_reason_plugin_only: "플러그인에서만 사용할 수 있습니다",
     cap_reason_piano_roll_only: "매개변수 편집기에서만 적용됩니다",

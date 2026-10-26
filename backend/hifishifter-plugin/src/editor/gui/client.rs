@@ -981,10 +981,6 @@ fn apply_relay_effects(state: &Rc<RefCell<EditorClient>>, effects: Vec<host_key_
                 let fidelity = state.borrow().relay.fidelity();
                 log_relay(&format!("fidelity={} {}", fidelity.as_str(), trace));
             }
-            host_key_relay::Effect::Notice { action, reason } => {
-                log_relay(&format!("action={action} notice={reason}"));
-                push_relay_notice(state, &action, reason);
-            }
             host_key_relay::Effect::Escape { action, stroke } => {
                 // 【一致性闸】页面只能让"它自己声明过"的键。集合为空 = 前端还没发布
                 // （旧前端 / 启动瞬间），此时按"前端已经判定过"处理 —— 与引入集合之前的
@@ -994,7 +990,7 @@ fn apply_relay_effects(state: &Rc<RefCell<EditorClient>>, effects: Vec<host_key_
                     state.escape_set.is_empty() || state.escape_set.contains(&stroke)
                 };
                 if !declared {
-                    refuse_relay(state, &action, "unsupported-key");
+                    refuse_relay(&action, "unsupported-key");
                     continue;
                 }
                 let (fidelity, result) = {
@@ -1012,34 +1008,20 @@ fn apply_relay_effects(state: &Rc<RefCell<EditorClient>>, effects: Vec<host_key_
                         fidelity.as_str(),
                         stroke.token
                     )),
-                    // 没投成：结构化原因进日志，并且**回报用户一次**（每个动作一次）。
-                    Err(error) => refuse_relay(state, &action, error.as_str()),
+                    // 没投成：结构化原因进日志（不再对用户说话）。
+                    Err(error) => refuse_relay(&action, error.as_str()),
                 }
             }
         }
     }
 }
 
-/// 让路失败：记一行日志，并按"每个动作每次会话一次"回报用户。
+/// 让路失败：只记一行日志。
 ///
-/// 【为什么记账在状态机里】"每个动作只说一次"是判定的一部分，不是 UI 的偏好；
-/// 放在状态机里，前端看到的与日志里记的是同一个事实。
-fn refuse_relay(state: &Rc<RefCell<EditorClient>>, action: &str, reason: &str) {
+/// 【为什么不对用户说话】失败的唯一出路是"点一下宿主窗口"，而那件事不需要一句被状态栏
+/// 裁掉一半的警告来提醒。留证据是日志与诊断包的职责（见 `hostKeyRelay` 读数）。
+fn refuse_relay(action: &str, reason: &str) {
     log_relay(&format!("action={action} refused reason={reason}"));
-    let newly = state.borrow_mut().relay.note_refusal(action);
-    if newly {
-        push_relay_notice(state, action, "refused");
-    }
-}
-
-fn push_relay_notice(state: &Rc<RefCell<EditorClient>>, action: &str, reason: &str) {
-    let view_id = state.borrow().view_id.clone();
-    state.borrow_mut().view_events.push_back(serde_json::json!({
-        "version": 1,
-        "viewId": view_id,
-        "event": "host_key_relay_notice",
-        "payload": { "action": action, "reason": reason },
-    }));
 }
 
 /// 让路的诊断日志。
