@@ -4230,12 +4230,11 @@ pub(crate) mod tests {
                 link: Some(links[0].clone()),
             })
             .unwrap();
-        let rejected = receivers[0].recv_timeout(Duration::from_secs(5)).unwrap();
-        assert_eq!(rejected["ok"], false);
-        assert!(rejected["error"]
-            .as_str()
-            .unwrap()
-            .contains("local curves preserved"));
+        // 模型变化后仍发布最后一份时间线：这是 ensure_loaded 的既定语义
+        // （见 an_observed_change_without_end_editing_keeps_publishing）。
+        // 继续发布不代表丢掉本地曲线，下面的本地曲线断言仍然有效。
+        let published = receivers[0].recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(published["ok"], true, "{published}");
         let local = editor.timeline.lock_or_recover();
         assert_eq!(local.params_by_root_track[ta].pitch_edit[100], 60.);
         assert_eq!(local.params_by_root_track[tb].pitch_edit[100], 64.);
@@ -5988,6 +5987,29 @@ pub(crate) mod tests {
         }
         assert_eq!(budget.used(), baseline);
     }
+    /// 等待分析文件 mtime 稳定：后台分析线程可能仍在写同一文件，抢在写入前采样
+    /// 会把"复用分析文件"误判成"重写分析文件"。
+    fn wait_for_stable_mtime(
+        path: &std::path::Path,
+        timeout: std::time::Duration,
+    ) -> std::time::SystemTime {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut last = std::fs::metadata(path).unwrap().modified().unwrap();
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            let next = std::fs::metadata(path).unwrap().modified().unwrap();
+            if next == last {
+                return next;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "analysis file never stabilized: {}",
+                path.display()
+            );
+            last = next;
+        }
+    }
+
     /// 无本地落笔的宿主移动也要重新准备；cache全命中不会发ClipPitchReady，不能静默遗漏。
     #[test]
     fn host_move_without_local_generation_reapplies_and_reuses_analysis_file() {
@@ -5999,7 +6021,10 @@ pub(crate) mod tests {
             .source_path
             .clone()
             .unwrap();
-        let modified = std::fs::metadata(&before_path).unwrap().modified().unwrap();
+        let modified = wait_for_stable_mtime(
+            std::path::Path::new(&before_path),
+            std::time::Duration::from_secs(10),
+        );
         {
             let _transaction = document.transaction.lock_or_recover();
             let mut timeline = document.timeline.lock_or_recover();
