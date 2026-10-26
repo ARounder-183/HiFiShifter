@@ -1309,6 +1309,7 @@ export const zhCN = {
     tempo_map: "速度映射",
     menu_view_tempo_map: "速度映射",
     menu_hand_keyboard_to_host: "把键盘交给宿主",
+    editor_route_unavailable: "宿主没有完成编辑器的握手，插件读不到时间线。请导出诊断包并反馈。",
     tempo_map_add_point: "在此添加速度/拍号/音阶变化...",
     tempo_map_add_scale_point: "在此添加音阶变化点...",
     tempo_map_edit_point: "编辑此变化点...",

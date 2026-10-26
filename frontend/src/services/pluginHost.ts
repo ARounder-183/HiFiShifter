@@ -91,6 +91,23 @@ export type PluginBootstrap = {
         /** 现在能不能录（等于 `sawContext`；单独给出让前端读一个字段就够）。 */
         canCapture: boolean;
     } | null;
+    /**
+     * 编辑器 ↔ 处理器这条「路由」的状态。
+     *
+     * 【为什么需要它】视图与处理器的关联只由宿主的 VST3 `IConnectionPoint` 握手建立；
+     * 不完成这套握手的宿主上，窗口能开、时间轴却是空的（连一条轨都没有），每条命令
+     * 都回「FX editor not connected to its processor yet」。后端会在宽限期后按
+     * 「进程内唯一活实例」兜底，兜底不成时给出原因。前端据此**说一句话**，
+     * 而不是让用户对着一块空界面猜。
+     *
+     * 旧后端没有这个字段 ⇒ `undefined`，按「未知」处理（不提示）。
+     */
+    editorRoute?: {
+        /** `"waiting-host"` / `"bound"` / `"fallback"` / `"unbound"`。 */
+        state: string;
+        /** 只在 `"unbound"` 时有值：为什么连不上。 */
+        reason?: string | null;
+    } | null;
 };
 export interface WebViewMessagePort {
     postMessage(message: unknown): void;

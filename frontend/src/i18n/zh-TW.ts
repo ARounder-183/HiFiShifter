@@ -1311,6 +1311,7 @@ export const zhTW = {
     tempo_map: "速度映射",
     menu_view_tempo_map: "速度映射",
     menu_hand_keyboard_to_host: "把鍵盤交給宿主",
+    editor_route_unavailable: "宿主沒有完成編輯器的握手，外掛讀不到時間軸。請匯出診斷包並回報。",
     tempo_map_add_point: "在此新增速度/拍號/音階變化...",
     tempo_map_add_scale_point: "在此新增音階變化點...",
     tempo_map_edit_point: "編輯此變化點...",

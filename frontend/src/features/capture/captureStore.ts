@@ -16,6 +16,7 @@
 import { useSyncExternalStore } from "react";
 
 import { captureApi, captureError, type CaptureOptions, type CaptureStatus } from "./captureApi";
+import { pluginBootstrap } from "../../services/hostDetect";
 
 /** 轮询间隔：与后端录制读数的更新节奏一致（见 `capture/mod.rs` 的说明）。 */
 const POLL_MS = 200;
@@ -106,7 +107,20 @@ export function resetCaptureStoreForTests(): void {
     listeners.clear();
 }
 
+/**
+ * 路由未建立时，`capture_status` 一定失败（后端拿不到 owner）。
+ *
+ * 【为什么直接跳过而不是让它失败】失败会以 5 Hz 的速度把同一条错误写进日志与状态栏
+ * —— 实测一次会话 60 秒 300 条。这条读数的意义是「现在能不能录」，而「编辑器还没连上
+ * 处理器」已经把答案定死了；等路由恢复（bootstrap 事件会刷新页面状态）再问，
+ * 结论一样，噪声少两个数量级。
+ */
+function routeIsUnavailable(): boolean {
+    return pluginBootstrap()?.editorRoute?.state === "unbound";
+}
+
 async function refresh(): Promise<void> {
+    if (routeIsUnavailable()) return;
     try {
         publish(withStatus(await captureApi.status()));
         if (snapshot.error !== "") publish({ ...snapshot, error: "" });

@@ -1481,6 +1481,8 @@ export const enUS = {
     tempo_map: "Tempo Map",
     menu_view_tempo_map: "Tempo Map",
     menu_hand_keyboard_to_host: "Hand Keyboard to Host",
+    editor_route_unavailable:
+        "The host did not connect the editor to its processor, so the timeline cannot load. Please export a diagnostics bundle and report it.",
     tempo_map_add_point: "Add Tempo / Time Signature / Scale Change Here...",
     tempo_map_add_scale_point: "Add Scale Change Here...",
     tempo_map_edit_point: "Edit This Point...",

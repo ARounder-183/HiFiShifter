@@ -1415,6 +1415,8 @@ export const koKR = {
     tempo_map: "템포 맵",
     menu_view_tempo_map: "템포 맵",
     menu_hand_keyboard_to_host: "키보드를 호스트로 넘기기",
+    editor_route_unavailable:
+        "호스트가 편집기 핸드셰이크를 완료하지 않아 타임라인을 읽을 수 없습니다. 진단 패키지를 내보내 보고해 주세요.",
     tempo_map_add_point: "여기에 템포/박자표/스케일 변경 추가...",
     tempo_map_add_scale_point: "여기에 스케일 변경 추가...",
     tempo_map_edit_point: "이 변경점 편집...",

@@ -1361,6 +1361,8 @@ export const jaJP = {
     tempo_map: "テンポマップ",
     menu_view_tempo_map: "テンポマップ",
     menu_hand_keyboard_to_host: "キーボードをホストに渡す",
+    editor_route_unavailable:
+        "ホストがエディターのハンドシェイクを完了していないため、タイムラインを読み込めません。診断パッケージを書き出して報告してください。",
     tempo_map_add_point: "ここにテンポ/拍子/スケール変更を追加...",
     tempo_map_add_scale_point: "ここにスケール変更を追加...",
     tempo_map_edit_point: "この変更点を編集...",

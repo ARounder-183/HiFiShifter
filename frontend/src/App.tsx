@@ -180,6 +180,7 @@ import {
     subscribeHostKeyRelayNotice,
     type HostKeyStroke,
 } from "./services/hostKeyRelay";
+import { subscribeEditorRouteNotice } from "./services/editorRoute";
 import type { ActionId } from "./features/keybindings/types";
 import { store } from "./app/store";
 import { resolveRootTrackId, computeInsertBelowPlacement } from "./features/session/trackUtils";
@@ -3395,6 +3396,22 @@ function AppInner() {
             showNotice(tVars(key, { action }), 6000, "warning");
         });
     }, [showNotice, t, tVars]);
+
+    /*
+     * 编辑器路由确定失败（宿主没有把视图连到处理器）。
+     *
+     * 【为什么必须说一句话】这一条失败的表现是**时间轴完全空白**——不是报错对话框，
+     * 是一块什么都没有的界面。用户能做的只有猜。后端已经把原因算出来了
+     * （无活实例 / 多个活实例 / 宿主拒绝消息），这里把它摊到状态栏上。
+     *
+     * 【为什么只说一次】后端只在结论落定时发一次事件；重复提示只会变成噪声。
+     */
+    useEffect(() => {
+        if (!isPluginMode()) return;
+        return subscribeEditorRouteNotice(() => {
+            showNotice(t("editor_route_unavailable"), 8000, "warning");
+        });
+    }, [showNotice, t]);
 
     /*
      * 页面就绪上报：让原生侧知道"这套 UI 真的跑起来了"。
