@@ -454,7 +454,10 @@ pub(crate) fn project(takes: &[ProjectionTake<'_>], bpm: f64) -> (TimelineState,
         let source_start_sec = piece.offset as f64 / rate;
         let source_end_sec = (piece.offset + frames) as f64 / rate;
         let id = clip_id(tape.take, piece.offset);
-        let name = format!("#{index} @ {start_sec:.3}s");
+        // 【为什么名字里是时长而不是起点】片段在时间轴上的**位置**已经画出来了，
+        // 名字里再写一遍等于浪费一列宽度；用户从名字里想读到的是"这一段有多长"。
+        // 索引仍然回答"这是第几片"，它与位置无关，因此保留。
+        let name = format!("#{index} @ {length_sec:.3}s");
         // 短 clip 不能两侧各淡 2 ms（会叠在一起），按半长夹一下。
         let edge_fade = CAPTURE_EDGE_FADE_SEC.min(length_sec / 2.0);
         // 【T-A1-5】2 ms 边缘淡化只加在**这条 take 的真实外沿**上。
@@ -1010,6 +1013,27 @@ mod tests {
         let clip = &timeline.clips[0];
         assert!((clip.fade_in_sec - 0.001).abs() < 1e-9);
         assert!((clip.fade_out_sec - 0.001).abs() < 1e-9);
+    }
+
+    /// **不变量：片段名里的秒数是它的时长，不是它在工程上的起点。**
+    ///
+    /// 【为什么钉住】这个名字是用户在时间轴上唯一能读到的数字。写起点等于把已经画在
+    /// 那一格的信息重复一遍；而"这一段有多长"没有别的显示位置。1000 Hz 下起点 200 帧
+    /// 应当是 0.200s、长 50 帧应当是 0.050s —— 名字里必须出现后者。
+    #[test]
+    fn a_clip_is_named_after_its_duration() {
+        let (timeline, _) = one(1, &[segment(200, &[0.5; 50])]);
+        assert_eq!(timeline.clips.len(), 1);
+        assert!(
+            timeline.clips[0].name.ends_with("@ 0.050s"),
+            "名字里的秒数必须是时长，实际 {}",
+            timeline.clips[0].name
+        );
+        assert_eq!(
+            timeline.clips[0].active_take().name,
+            timeline.clips[0].name,
+            "take 与 clip 共用同一个名字，不得分叉"
+        );
     }
 
     /// 不相交的两段各生成一个片段，且**位置就是工程位置**。
