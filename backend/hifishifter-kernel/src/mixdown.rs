@@ -1145,6 +1145,22 @@ fn render_mixdown_internal(
     let scale_signature = timeline.render_scale_signature();
     let mut host_hashes = HashMap::new();
 
+    // 【按 path 去重解码】独立文件入口（`sources: None`）下，同一源文件常被
+    // 多个 clip 引用，此前每个 clip 都全量解码一遍——解码通常是导出流程的
+    // CPU/IO 大头。只缓存**引用 ≥2 次**的路径：缓存会把解码结果保留到整趟
+    // 混音结束，无差别缓存会让内存峰值从"单个文件"涨到"全部文件之和"；
+    // 单次使用的文件维持原有的"即用即弃"节奏。缓存随本次混音作用域创建与
+    // 释放，不引入跨命令状态；失败结果（含错误文本）一并缓存，避免同一坏
+    // 文件被 N 个 clip 重复解码 N 次（每个 clip 仍打自己的诊断日志）。
+    let mut path_refcounts: HashMap<&str, usize> = HashMap::new();
+    for clip in &timeline.clips {
+        if let Some(path) = clip.source_path.as_ref() {
+            *path_refcounts.entry(path.as_str()).or_insert(0) += 1;
+        }
+    }
+    let mut decoded_sources: HashMap<String, Result<(u32, u16, Arc<Vec<f32>>), String>> =
+        HashMap::new();
+
     for (clip_index, clip) in timeline.clips.iter().enumerate() {
         // 在迭代开头上报（= 前 `clip_index` 个已完成）。放在 `continue` 之前，
         // 因此被跳过的 clip 也不会让进度漏拍。
@@ -1216,19 +1232,41 @@ fn render_mixdown_internal(
                 )
             }
             None => {
-                match crate::audio_utils::decode_audio_f32_interleaved(Path::new(source_path)) {
-                    Ok((rate, channels, pcm)) => (rate, channels, Arc::new(pcm)),
-                    Err(e) => {
-                        if debug {
-                            log::error!(
-                                "mixdown: decode failed; clip_id={} track_id={} path={} err={}",
-                                clip.id,
-                                clip.track_id,
-                                source_path,
-                                e
-                            );
+                let log_decode_failure = |error: &str| {
+                    if debug {
+                        log::error!(
+                            "mixdown: decode failed; clip_id={} track_id={} path={} err={}",
+                            clip.id,
+                            clip.track_id,
+                            source_path,
+                            error
+                        );
+                    }
+                };
+                let shared = path_refcounts
+                    .get(source_path.as_str())
+                    .is_some_and(|count| *count >= 2);
+                if shared {
+                    let entry = decoded_sources
+                        .entry(source_path.clone())
+                        .or_insert_with(|| {
+                            crate::audio_utils::decode_audio_f32_interleaved(Path::new(source_path))
+                                .map(|(rate, channels, pcm)| (rate, channels, Arc::new(pcm)))
+                        });
+                    match entry {
+                        Ok((rate, channels, pcm)) => (*rate, *channels, Arc::clone(pcm)),
+                        Err(error) => {
+                            log_decode_failure(error.as_str());
+                            continue;
                         }
-                        continue;
+                    }
+                } else {
+                    match crate::audio_utils::decode_audio_f32_interleaved(Path::new(source_path)) {
+                        Ok((rate, channels, pcm)) => (rate, channels, Arc::new(pcm)),
+                        Err(error) => {
+                            log_decode_failure(&error);
+                            continue;
+                        }
                     }
                 }
             }
