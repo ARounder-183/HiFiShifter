@@ -1,6 +1,7 @@
 //! 锁定SDK的IConnectionPoint/IHostApplication/IMessage ABI；消息允许宿主放置代理。
 use crate::vst3::{
-    iid_matches, platform_iid, TResult, K_INVALID_ARGUMENT, K_RESULT_FALSE, K_RESULT_OK,
+    iid_matches, TResult, K_INVALID_ARGUMENT, K_NOT_IMPLEMENTED, K_NO_INTERFACE, K_RESULT_FALSE,
+    K_RESULT_OK,
 };
 use std::ffi::{c_char, c_void, CStr};
 use std::sync::Mutex;
@@ -25,6 +26,13 @@ pub(crate) struct ConnectionVtbl {
 struct HostVtbl {
     base: UnknownVtbl,
     name: unsafe extern "system" fn(*mut c_void, *mut u16) -> TResult,
+    /// `IHostApplication::createInstance`。
+    ///
+    /// 【为什么保留但不再调用】本仓改为自带 `IMessage`（见 `ConnectionState::send`）：
+    /// 这条工厂是**可选**的，宿主回 `kNotImplemented` 时整条编辑器路由会静默失败。
+    /// 槽位留着，这张表才是 `IHostApplication` 的完整 ABI 镜像 —— 没有它，
+    /// 下一次有人往表里补字段时就得重新数一遍偏移。
+    #[allow(dead_code)]
     create:
         unsafe extern "system" fn(*mut c_void, *const u8, *const u8, *mut *mut c_void) -> TResult,
 }
@@ -404,56 +412,470 @@ impl ConnectionState {
         drop(Owned(host));
     }
     /// 在无内部锁时调用宿主，notify可同步重入另一个connection并请求回信。
+    ///
+    /// 【为什么消息对象由**我们**分配】`IMessage` 只是 6 个槽位（`FUnknown` 3 个 +
+    /// 自己的 3 个），规范**建议**插件经 `IHostApplication::createInstance` 申请，
+    /// 但这不是协议要求。实测宿主分两类：实现了消息工厂的（REAPER），与只回
+    /// `kNotImplemented` 的。后者让这条握手静默失败 —— 而握手是编辑器与处理器之间
+    /// **唯一**的身份来源，失败的表现是界面空着、每条命令都回
+    /// 「FX editor not connected to its processor yet」。自带一份消息对象，
+    /// 就把这个变量从「宿主是否实现某个可选工厂」变成「不需要」。
     pub fn send(&self, token: Option<&str>) -> TResult {
-        let host = {
-            let host = self.host.lock().unwrap_or_else(|e| e.into_inner());
-            unsafe { Owned::retain(*host as *mut c_void) }
-        };
         let peer = {
             let peer = self.peer.lock().unwrap_or_else(|e| e.into_inner());
             unsafe { Owned::retain(*peer as *mut c_void) }
         };
-        if host.0 == 0 || peer.0 == 0 {
+        if peer.0 == 0 {
+            // 【为什么是 Warn】这是「编辑器为什么没连上」的第一现场。此前的记录走
+            // `log_line`（INFO），而 release 的默认级别是 Warn —— 写在 INFO 里等于没写，
+            // 于是「宿主没 connect」与「宿主拒绝消息」在用户日志里完全同形。
+            log::warn!("[gui] editor route: no peer connection; the route message was not sent");
             return K_RESULT_FALSE;
         }
+        let direction = if token.is_some() {
+            "processor->controller"
+        } else {
+            "controller->processor"
+        };
         unsafe {
-            let table = &**host.ptr().cast::<*const HostVtbl>();
-            let iid = platform_iid(IID_MESSAGE);
-            let mut message = std::ptr::null_mut();
-            if (table.create)(host.ptr(), iid.as_ptr(), iid.as_ptr(), &mut message) != K_RESULT_OK
-                || message.is_null()
-            {
-                return K_RESULT_FALSE;
-            }
-            let _message = Owned(message as usize);
-            let message_table = &**message.cast::<*const MessageVtbl>();
-            (message_table.set_id)(
-                message,
-                if token.is_some() {
-                    ROUTE_ID.as_ptr()
-                } else {
-                    REQUEST_ID.as_ptr()
-                },
-            );
+            let message = OwnedMessage::allocate(if token.is_some() {
+                ROUTE_ID
+            } else {
+                REQUEST_ID
+            });
             if let Some(token) = token {
-                let attrs = (message_table.attributes)(message);
-                if attrs.is_null() {
+                if !(*message).set_route(token) {
+                    release_message(message.cast());
+                    log::warn!("[gui] editor route: the route token was rejected ({direction})");
                     return K_RESULT_FALSE;
                 }
-                let table = &**attrs.cast::<*const AttributesVtbl>();
-                let wide: Vec<u16> = token.encode_utf16().chain(Some(0)).collect();
-                if (table.set_string)(attrs, c"hfs_editor_route".as_ptr(), wide.as_ptr())
-                    != K_RESULT_OK
-                    || (table.set_int)(attrs, c"hfs_process_id".as_ptr(), std::process::id() as i64)
-                        != K_RESULT_OK
-                {
-                    return K_RESULT_FALSE;
-                }
+                (*message).set_process_id(std::process::id() as i64);
             }
-            ((**peer.ptr().cast::<*const ConnectionVtbl>()).notify)(peer.ptr(), message)
+            let result =
+                ((**peer.ptr().cast::<*const ConnectionVtbl>()).notify)(peer.ptr(), message.cast());
+            release_message(message.cast());
+            if result != K_RESULT_OK {
+                log::warn!("[gui] editor route: {direction} notify rejected result={result:#x}");
+            }
+            result
         }
     }
 }
+
+/// 我们自己实现的 `Vst::IMessage`（`FUnknown` + `getMessageID` / `setMessageID` /
+/// `getAttributes`）。
+///
+/// 【为什么引用计数从 1 起】`send` 是唯一的初始持有者：把裸指针交给 `notify`，
+/// 返回后立刻 release 自己那一份。宿主若想长期保留，按 COM 规则必须先 `addRef` ——
+/// 这也是它必须是堆对象、而不是栈上临时量的原因。
+///
+/// 【为什么 id 是 `*const c_char` 而不是 `String`】两个消息 ID 都是编译期常量
+/// （`HiFiShifter.Editor.Route.v1` / `….RequestRoute.v1`），宿主只在 `notify`
+/// 期间读它；存静态指针既省一次分配，也让「谁拥有这块内存」没有歧义。
+#[repr(C)]
+struct OwnedMessage {
+    vtbl: *const MessageVtbl,
+    refs: std::sync::atomic::AtomicU32,
+    id: *const c_char,
+    attrs: *mut OwnedAttributes,
+}
+
+impl OwnedMessage {
+    /// 分配一条消息（引用计数 1，属性表 1 份引用）。
+    fn allocate(id: &'static CStr) -> *mut OwnedMessage {
+        let attrs = Box::into_raw(Box::new(OwnedAttributes {
+            vtbl: &OWNED_ATTRIBUTES_VTBL,
+            refs: std::sync::atomic::AtomicU32::new(1),
+            route: Vec::new(),
+            pid: 0,
+        }));
+        Box::into_raw(Box::new(Self {
+            vtbl: &OWNED_MESSAGE_VTBL,
+            refs: std::sync::atomic::AtomicU32::new(1),
+            id: id.as_ptr(),
+            attrs,
+        }))
+    }
+
+    /// 写入路由令牌（UTF-16，无终结符 —— 终结由 `getString` 负责补）。
+    ///
+    /// # Safety
+    /// `self` 必须是一条仍然存活的消息。
+    unsafe fn set_route(&self, token: &str) -> bool {
+        if self.attrs.is_null() {
+            return false;
+        }
+        // SAFETY: attrs 由 allocate 分配，与消息同寿。
+        let attrs = unsafe { &mut *self.attrs };
+        attrs.route = token.encode_utf16().collect();
+        true
+    }
+
+    /// # Safety
+    /// 同上。
+    unsafe fn set_process_id(&self, pid: i64) {
+        if self.attrs.is_null() {
+            return;
+        }
+        // SAFETY: 同上。
+        unsafe { (*self.attrs).pid = pid };
+    }
+}
+
+/// 消息的属性表。
+///
+/// 【为什么与消息分开分配】`getAttributes` 交出去的是**另一个** COM 接口：宿主会对它
+/// 单独 `addRef` / `release`。让它们各自计数，是唯一不会在「宿主先放消息、后放属性」
+/// 这种顺序下把内存释放两次的形状。
+#[repr(C)]
+struct OwnedAttributes {
+    vtbl: *const AttributesVtbl,
+    refs: std::sync::atomic::AtomicU32,
+    /// 路由令牌（UTF-16，无终结符）。
+    route: Vec<u16>,
+    pid: i64,
+}
+
+const ROUTE_ATTRIBUTE: &CStr = c"hfs_editor_route";
+const PID_ATTRIBUTE: &CStr = c"hfs_process_id";
+
+/// `FUnknown` 的 IID（与 `vst3.rs` 里那份同值；本模块不导出它，避免两处耦合）。
+const IID_UNKNOWN: [u32; 4] = [0x0000_0000, 0x0000_0000, 0xC000_0000, 0x0000_0046];
+
+unsafe extern "system" fn message_query(
+    this: *mut c_void,
+    iid: *const u8,
+    out: *mut *mut c_void,
+) -> TResult {
+    crate::guard_ffi(K_RESULT_FALSE, || {
+        if out.is_null() || iid.is_null() || this.is_null() {
+            return K_INVALID_ARGUMENT;
+        }
+        // SAFETY: out 是调用方提供的输出槽。
+        unsafe { *out = std::ptr::null_mut() };
+        // SAFETY: iid 指向 16 字节 TUID；两个候选 IID 都是本模块的常量。
+        let hit = unsafe { iid_matches(iid, IID_MESSAGE) || iid_matches(iid, IID_UNKNOWN) };
+        if !hit {
+            return K_NO_INTERFACE;
+        }
+        // SAFETY: this 是 OwnedMessage；交出自己那一份的副本引用。
+        unsafe {
+            (*this.cast::<OwnedMessage>())
+                .refs
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            *out = this;
+        }
+        K_RESULT_OK
+    })
+}
+
+unsafe extern "system" fn message_add_ref(this: *mut c_void) -> u32 {
+    crate::guard_ffi(0, || {
+        // SAFETY: this 是仍然存活的消息对象。
+        unsafe {
+            (*this.cast::<OwnedMessage>())
+                .refs
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+                + 1
+        }
+    })
+}
+
+unsafe extern "system" fn message_release(this: *mut c_void) -> u32 {
+    crate::guard_ffi(0, || unsafe { release_message(this) })
+}
+
+/// 递减消息的引用计数；归零时连同属性表一起释放。
+///
+/// # Safety
+/// `this` 必须来自 `OwnedMessage::allocate`（或它的某个已 addRef 的副本）。
+unsafe fn release_message(this: *mut c_void) -> u32 {
+    if this.is_null() {
+        return 0;
+    }
+    // SAFETY: 调用方保证指针来自 allocate。
+    let message = unsafe { &mut *this.cast::<OwnedMessage>() };
+    let previous = message
+        .refs
+        .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    if previous > 1 {
+        return previous - 1;
+    }
+    let attrs = message.attrs;
+    // SAFETY: 计数归零，没有其它持有者。
+    unsafe { drop(Box::from_raw(this.cast::<OwnedMessage>())) };
+    unsafe { release_attributes(attrs.cast()) };
+    0
+}
+
+unsafe extern "system" fn message_id(this: *mut c_void) -> *const c_char {
+    crate::guard_ffi(std::ptr::null(), || {
+        // SAFETY: this 是仍然存活的消息对象。
+        unsafe { (*this.cast::<OwnedMessage>()).id }
+    })
+}
+
+/// `setMessageID` 对我们是空操作：消息 ID 决定这条消息的**语义**，而我们只发两种、
+/// 都在分配时定好了。让宿主（或某个代理）改写它，就等于允许对端把「路由」读成
+/// 「请求路由」，那是没有意义的组合。
+unsafe extern "system" fn message_set_id(_this: *mut c_void, _id: *const c_char) {}
+
+unsafe extern "system" fn message_attributes(this: *mut c_void) -> *mut c_void {
+    crate::guard_ffi(std::ptr::null_mut(), || {
+        if this.is_null() {
+            return std::ptr::null_mut();
+        }
+        // SAFETY: this 是仍然存活的消息对象。
+        let attrs = unsafe { (*this.cast::<OwnedMessage>()).attrs };
+        if attrs.is_null() {
+            return std::ptr::null_mut();
+        }
+        // SAFETY: attrs 与消息同寿；交出去的那一份由调用方 release。
+        unsafe {
+            (*attrs)
+                .refs
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        }
+        attrs.cast()
+    })
+}
+
+unsafe extern "system" fn attributes_query(
+    this: *mut c_void,
+    iid: *const u8,
+    out: *mut *mut c_void,
+) -> TResult {
+    crate::guard_ffi(K_RESULT_FALSE, || {
+        if out.is_null() || iid.is_null() || this.is_null() {
+            return K_INVALID_ARGUMENT;
+        }
+        // SAFETY: out 是调用方提供的输出槽。
+        unsafe { *out = std::ptr::null_mut() };
+        // SAFETY: iid 指向 16 字节 TUID。
+        if !unsafe { iid_matches(iid, IID_ATTRIBUTE_LIST) || iid_matches(iid, IID_UNKNOWN) } {
+            return K_NO_INTERFACE;
+        }
+        // SAFETY: this 是 OwnedAttributes。
+        unsafe {
+            (*this.cast::<OwnedAttributes>())
+                .refs
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            *out = this;
+        }
+        K_RESULT_OK
+    })
+}
+
+unsafe extern "system" fn attributes_add_ref(this: *mut c_void) -> u32 {
+    crate::guard_ffi(0, || {
+        // SAFETY: this 是仍然存活的属性表。
+        unsafe {
+            (*this.cast::<OwnedAttributes>())
+                .refs
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+                + 1
+        }
+    })
+}
+
+unsafe extern "system" fn attributes_release(this: *mut c_void) -> u32 {
+    crate::guard_ffi(0, || unsafe { release_attributes(this) })
+}
+
+/// # Safety
+/// `this` 必须来自 `OwnedMessage::allocate` 的属性表（或它的某个已 addRef 的副本）。
+unsafe fn release_attributes(this: *mut c_void) -> u32 {
+    if this.is_null() {
+        return 0;
+    }
+    // SAFETY: 调用方保证指针来自 allocate。
+    let attrs = unsafe { &mut *this.cast::<OwnedAttributes>() };
+    let previous = attrs.refs.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    if previous > 1 {
+        return previous - 1;
+    }
+    // SAFETY: 计数归零，没有其它持有者。
+    unsafe { drop(Box::from_raw(this.cast::<OwnedAttributes>())) };
+    0
+}
+
+/// 读一个以 NUL 结尾的 UTF-16 串；超出上限即拒绝（不做无界读）。
+///
+/// # Safety
+/// `value` 必须是调用方可读的、以 0 结尾的 `TChar*`（Windows 上是 char16）。
+unsafe fn read_tchar(value: *const u16, limit: usize) -> Option<Vec<u16>> {
+    if value.is_null() {
+        return None;
+    }
+    let mut units = Vec::new();
+    for index in 0..=limit {
+        // SAFETY: 调用方保证可读到第一个 0 为止；limit 是防御上界。
+        let unit = unsafe { *value.add(index) };
+        if unit == 0 {
+            return Some(units);
+        }
+        units.push(unit);
+    }
+    None
+}
+
+unsafe extern "system" fn attributes_set_int(
+    this: *mut c_void,
+    key: *const c_char,
+    value: i64,
+) -> TResult {
+    crate::guard_ffi(K_RESULT_FALSE, || {
+        if this.is_null() || key.is_null() {
+            return K_INVALID_ARGUMENT;
+        }
+        // SAFETY: key 是调用方给的 NUL 结尾 C 串。
+        if unsafe { CStr::from_ptr(key) } != PID_ATTRIBUTE {
+            return K_RESULT_FALSE;
+        }
+        // SAFETY: this 是仍然存活的属性表。
+        unsafe { (*this.cast::<OwnedAttributes>()).pid = value };
+        K_RESULT_OK
+    })
+}
+
+unsafe extern "system" fn attributes_get_int(
+    this: *mut c_void,
+    key: *const c_char,
+    value: *mut i64,
+) -> TResult {
+    crate::guard_ffi(K_RESULT_FALSE, || {
+        if this.is_null() || key.is_null() || value.is_null() {
+            return K_INVALID_ARGUMENT;
+        }
+        // SAFETY: key 是调用方给的 NUL 结尾 C 串。
+        if unsafe { CStr::from_ptr(key) } != PID_ATTRIBUTE {
+            return K_RESULT_FALSE;
+        }
+        // SAFETY: value 是调用方提供的输出槽。
+        unsafe { *value = (*this.cast::<OwnedAttributes>()).pid };
+        K_RESULT_OK
+    })
+}
+
+/// `setString` 的 `TChar*` 在 Windows 上是 UTF-16、且**以 NUL 结尾**（无长度参数）。
+/// 这与 `ivstattributes.h` 的声明逐一对应：错一位就会把内存读穿。
+unsafe extern "system" fn attributes_set_string(
+    this: *mut c_void,
+    key: *const c_char,
+    value: *const u16,
+) -> TResult {
+    crate::guard_ffi(K_RESULT_FALSE, || {
+        if this.is_null() || key.is_null() {
+            return K_INVALID_ARGUMENT;
+        }
+        // SAFETY: key 是调用方给的 NUL 结尾 C 串。
+        if unsafe { CStr::from_ptr(key) } != ROUTE_ATTRIBUTE {
+            return K_RESULT_FALSE;
+        }
+        // SAFETY: 路由令牌由我们自己写入，最长 64 个 UTF-16 单元；留一倍余量。
+        let Some(units) = (unsafe { read_tchar(value, 256) }) else {
+            return K_INVALID_ARGUMENT;
+        };
+        // SAFETY: this 是仍然存活的属性表。
+        unsafe { (*this.cast::<OwnedAttributes>()).route = units };
+        K_RESULT_OK
+    })
+}
+
+/// `getString` 的 size 单位是**字节**（不是字符），且调用方保证缓冲够大。
+unsafe extern "system" fn attributes_get_string(
+    this: *mut c_void,
+    key: *const c_char,
+    buffer: *mut u16,
+    size_in_bytes: u32,
+) -> TResult {
+    crate::guard_ffi(K_RESULT_FALSE, || {
+        if this.is_null() || key.is_null() || buffer.is_null() {
+            return K_INVALID_ARGUMENT;
+        }
+        // SAFETY: key 是调用方给的 NUL 结尾 C 串。
+        if unsafe { CStr::from_ptr(key) } != ROUTE_ATTRIBUTE {
+            return K_RESULT_FALSE;
+        }
+        let capacity = (size_in_bytes as usize) / 2;
+        if capacity == 0 {
+            return K_INVALID_ARGUMENT;
+        }
+        // SAFETY: this 是仍然存活的属性表；缓冲容量由调用方保证。
+        unsafe {
+            let attrs = &*this.cast::<OwnedAttributes>();
+            let copy = attrs.route.len().min(capacity - 1);
+            std::ptr::copy_nonoverlapping(attrs.route.as_ptr(), buffer, copy);
+            *buffer.add(copy) = 0;
+        }
+        K_RESULT_OK
+    })
+}
+
+unsafe extern "system" fn attributes_set_float(
+    _this: *mut c_void,
+    _key: *const c_char,
+    _value: f64,
+) -> TResult {
+    K_NOT_IMPLEMENTED
+}
+
+unsafe extern "system" fn attributes_get_float(
+    _this: *mut c_void,
+    _key: *const c_char,
+    _value: *mut f64,
+) -> TResult {
+    K_NOT_IMPLEMENTED
+}
+
+unsafe extern "system" fn attributes_set_binary(
+    _this: *mut c_void,
+    _key: *const c_char,
+    _data: *const c_void,
+    _size: u32,
+) -> TResult {
+    K_NOT_IMPLEMENTED
+}
+
+unsafe extern "system" fn attributes_get_binary(
+    _this: *mut c_void,
+    _key: *const c_char,
+    _data: *mut *const c_void,
+    _size: *mut u32,
+) -> TResult {
+    K_NOT_IMPLEMENTED
+}
+
+/// `Vst::IAttributeList` 的 IID。
+const IID_ATTRIBUTE_LIST: [u32; 4] = [0x1E5F_0AEB, 0xCC7F_4533, 0xA254_4011, 0x38AD_5EE4];
+
+static OWNED_MESSAGE_VTBL: MessageVtbl = MessageVtbl {
+    base: UnknownVtbl {
+        query: message_query,
+        add: message_add_ref,
+        release: message_release,
+    },
+    id: message_id,
+    set_id: message_set_id,
+    attributes: message_attributes,
+};
+
+static OWNED_ATTRIBUTES_VTBL: AttributesVtbl = AttributesVtbl {
+    base: UnknownVtbl {
+        query: attributes_query,
+        add: attributes_add_ref,
+        release: attributes_release,
+    },
+    set_int: attributes_set_int,
+    get_int: attributes_get_int,
+    set_float: attributes_set_float,
+    get_float: attributes_get_float,
+    set_string: attributes_set_string,
+    get_string: attributes_get_string,
+    set_binary: attributes_set_binary,
+    get_binary: attributes_get_binary,
+};
+
 impl Drop for ConnectionState {
     fn drop(&mut self) {
         self.close();
@@ -507,4 +929,88 @@ pub(crate) unsafe fn read(message: *mut c_void) -> Result<Message, String> {
 /// 判断IID仅在真实queryInterface入口使用，不把其它VST对象误当connection。
 pub(crate) unsafe fn is_connection(iid: *const u8) -> bool {
     unsafe { iid_matches(iid, IID_CONNECTION) }
+}
+
+#[cfg(test)]
+mod owned_message_tests {
+    use super::*;
+
+    const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    /// **不变量：自带的消息对象与自带的 reader 使用同一套 ABI。**
+    ///
+    /// 【为什么钉死】这两个半边的字段顺序、`TChar` 宽度、`getString` 的字节语义
+    /// 只要有一处对不上，表现都是「握手静默失败」—— 而它不是崩溃，是一整块空界面。
+    #[test]
+    fn an_owned_message_round_trips_the_route_attributes() {
+        // SAFETY: 消息由 allocate 分配，read 只在本线程内读取它。
+        unsafe {
+            let message = OwnedMessage::allocate(ROUTE_ID);
+            assert!((*message).set_route(TOKEN), "route token must be accepted");
+            (*message).set_process_id(4321);
+            match read(message.cast()) {
+                Ok(Message::Route { pid, token }) => {
+                    assert_eq!(pid, 4321);
+                    assert_eq!(token, TOKEN);
+                }
+                Ok(Message::RequestRoute) => panic!("the message ID was not preserved"),
+                Err(error) => panic!("the owned message was not readable: {error}"),
+            }
+            release_message(message.cast());
+        }
+    }
+
+    /// **不变量：消息与属性表各自计数。**
+    ///
+    /// 【为什么必须分开】宿主完全可以先放消息、后放属性（或反序）。共用一份计数时，
+    /// 先放的那一个会把另一个一起释放 —— 那是 use-after-free，只在宿主恰好这个顺序时出现。
+    #[test]
+    fn message_and_attribute_references_are_counted_separately() {
+        // SAFETY: 全程单线程，指针都在本用例里产生与释放。
+        unsafe {
+            let message = OwnedMessage::allocate(ROUTE_ID);
+            let attrs = message_attributes(message.cast());
+            assert!(!attrs.is_null());
+            assert_eq!(
+                (*attrs.cast::<OwnedAttributes>())
+                    .refs
+                    .load(std::sync::atomic::Ordering::Acquire),
+                2,
+                "getAttributes 必须交出自己的一份引用"
+            );
+            // 宿主先放消息：属性表还剩 getAttributes 那一份。
+            release_message(message.cast());
+            assert_eq!(
+                (*attrs.cast::<OwnedAttributes>())
+                    .refs
+                    .load(std::sync::atomic::Ordering::Acquire),
+                1,
+                "消息释放不能连带把属性表放掉"
+            );
+            attributes_release(attrs);
+        }
+    }
+
+    /// 未知属性名必须被拒绝，而不是写进一个随便的位置。
+    #[test]
+    fn unknown_attribute_keys_are_refused() {
+        // SAFETY: 同上。
+        unsafe {
+            let message = OwnedMessage::allocate(ROUTE_ID);
+            let attrs = message_attributes(message.cast());
+            let wide: Vec<u16> = TOKEN.encode_utf16().chain(Some(0)).collect();
+            assert_eq!(
+                attributes_set_string(attrs, c"not_a_route".as_ptr(), wide.as_ptr()),
+                K_RESULT_FALSE
+            );
+            let mut pid = 7_i64;
+            assert_eq!(
+                attributes_get_int(attrs, c"not_a_pid".as_ptr(), &mut pid),
+                K_RESULT_FALSE
+            );
+            assert_eq!(pid, 7, "被拒绝的读不能改动输出槽");
+            attributes_release(attrs);
+            release_message(message.cast());
+        }
+    }
 }
