@@ -252,12 +252,5 @@ export function useBrowserDefaultGuards(): void {
             } as EventListenerOptions);
         };
         // 只挂载一次；设置项经 ref 转发（见上方 pinchZoomEnabledRef 的说明）。
-        // eslint-disable-next-line react-hooks/exhaustive-deps -- ref 镜像已在无依赖 effect 里同步
     }, []);
-}
-
-/** 独立窗口入口用的组件形态：hook 必须在 React 组件里调用。 */
-export function BrowserDefaultGuards() {
-    useBrowserDefaultGuards();
-    return null;
 }

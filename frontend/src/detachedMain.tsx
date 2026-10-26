@@ -19,7 +19,7 @@ import { registerBuiltinPanels } from "./components/dock/registerBuiltinPanels";
 import { attachBuiltinPanelComponents } from "./components/dock/attachBuiltinPanelComponents";
 import { AppTooltipProvider } from "./components/AppTooltip";
 import { AppRootErrorBoundary } from "./components/AppRootErrorBoundary";
-import { BrowserDefaultGuards } from "./hooks/useBrowserDefaultGuards";
+import { BrowserDefaultGuards } from "./hooks/BrowserDefaultGuards";
 import { I18nProvider } from "./i18n/I18nProvider";
 import { AppThemeProvider } from "./theme/AppThemeProvider";
 import { installGlobalErrorReporting } from "./services/frontendErrorLog";
