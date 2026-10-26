@@ -4,7 +4,7 @@
 # above the baseline fails CI; the count may only go down (delete the line
 # once it reaches 0).
 #
-# Protocol semantics must travel as structured codes (the hifishifter-host-channel
+# Protocol semantics must travel as structured codes (the hifishifter-host-link
 # `Response.code`, the notebook `notebook_*` codes); strings are for display
 # only. See docs/thread-model.md §1.3.
 #

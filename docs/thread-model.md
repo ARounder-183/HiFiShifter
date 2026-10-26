@@ -26,7 +26,7 @@
    （基线 `scripts/checks/baseline-error-contains.txt`，现存 5 处：`editor::errors`
    的 `classify_error` / `error_code_for` 与 `editor::gui` 客户端各 2 处、
    `render::extension` 的绑定失败判定 1 处）。协议语义用结构化错误码
-   （`hifishifter-host-channel` 的 `Response.code`；notebook 家族的
+   （`hifishifter-host-link` 的 `Response.code`；notebook 家族的
    `notebook_*` 稳定码），字符串只做展示。
 
 ## 2. 线程清单与各线程的允许/禁止
@@ -54,7 +54,8 @@
 - **配置文件**：App 与插件是两个进程、共用一份 `app_config.json`。
   读-改-写必须走 `config.rs::update_config`（进程内 `CONFIG_WRITE` +
   `app_config.json.lock` 跨进程文件锁，`File::lock`）。
-- **IPC**：`hifishifter-host-channel` 命名管道；错误带结构化 `code`。
+- **IPC**：`hifishifter-host-link` 的 **workspace 文件交接**（前身是命名管道；
+  为什么改成文件见该 crate `lib.rs` 的文档）；错误带结构化 `code`。
 
 ## 3. 新增入口的 checklist
 
