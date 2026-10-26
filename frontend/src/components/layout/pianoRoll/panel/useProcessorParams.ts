@@ -96,7 +96,7 @@ export function useProcessorParams({
                 max: CHILD_FORMANT_OFFSET_CENTS_RANGE.max,
             };
         }
-        const desc = processorParamsRef.current.find((d) => d.id === editParam);
+        const desc = processorParams.find((d) => d.id === editParam);
         if (desc?.kind.type === "automation_curve") {
             return {
                 min: desc.kind.min_value,
@@ -104,7 +104,7 @@ export function useProcessorParams({
             };
         }
         return undefined;
-    }, [editParam]);
+    }, [editParam, processorParams]);
 
     const currentParamDefaultValue = useMemo(() => {
         if (editParam === "pitch") return 60;
@@ -115,7 +115,7 @@ export function useProcessorParams({
         ) {
             return 0;
         }
-        const desc = processorParamsRef.current.find((d) => d.id === editParam);
+        const desc = processorParams.find((d) => d.id === editParam);
         if (desc?.kind.type === "automation_curve") {
             return Number(desc.kind.default_value) || 0;
         }
@@ -123,7 +123,7 @@ export function useProcessorParams({
             return 1;
         }
         return 0;
-    }, [editParam]);
+    }, [editParam, processorParams]);
 
     const currentParamQuantizeUnit = useMemo(() => {
         if (isChildPitchOffsetCentsParam(editParam)) return 100;
