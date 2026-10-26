@@ -143,13 +143,11 @@ function isBroadcastable(action: unknown): action is UnknownAction {
 /** 尝试序列化为可跨窗口传输的纯数据；失败（循环引用 / 函数载荷）时返回 null。 */
 function trySerialize(value: unknown): unknown | null {
     try {
-        return structuredClone(value);
+        // 刻意保留 JSON 往返：structuredClone 会接受循环引用，而本桥的契约是
+        // "不可 JSON 序列化的动作跳过广播"，循环动作必须继续被拒绝。
+        return JSON.parse(JSON.stringify(value));
     } catch {
-        try {
-            return JSON.parse(JSON.stringify(value));
-        } catch {
-            return null;
-        }
+        return null;
     }
 }
 
