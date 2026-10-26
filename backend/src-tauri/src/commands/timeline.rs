@@ -1443,8 +1443,10 @@ pub(super) fn remove_clip_take(
         state.checkpoint_timeline(&tl, crate::state::HistoryOp::TakeRemove);
     }
     if let Some(clip) = tl.clips.iter_mut().find(|c| c.id == clip_id) {
-        // 校验已通过，唯一可能失败的是并发竞争；忽略其返回值安全。
-        let _ = clip.remove_take(&take_id);
+        // 校验已通过，唯一可能失败的是并发竞争；失败只降级为 debug 日志。
+        if let Err(error) = clip.remove_take(&take_id) {
+            log::debug!("[timeline] remove_take({clip_id}, {take_id}) rejected: {error}");
+        }
     }
     invalidate_take_related_caches(&clip_id);
     let root_track_id = tl
@@ -1493,7 +1495,9 @@ pub(super) fn rename_clip_take(
         state.checkpoint_timeline(&tl, crate::state::HistoryOp::TakeRename);
     }
     if let Some(clip) = tl.clips.iter_mut().find(|c| c.id == clip_id) {
-        let _ = clip.rename_take(&take_id, &name);
+        if let Err(error) = clip.rename_take(&take_id, &name) {
+            log::debug!("[timeline] rename_take({clip_id}, {take_id}) rejected: {error}");
+        }
     }
     state.audio_engine.update_timeline(tl.clone());
     let mut payload = tl.to_payload();

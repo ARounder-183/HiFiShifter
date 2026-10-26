@@ -866,7 +866,13 @@ impl AudioEngine {
                         offset_sec,
                         target,
                     } => handle_play_file(&mut state, path, offset_sec, target),
-                    EngineCommand::Shutdown => unreachable!(),
+                    // 两个入口（recv 与排水暂存）都已在上方对 Shutdown break；
+                    // 若未来新增路径漏掉预过滤，这里降级为跳过而不是 abort。
+                    EngineCommand::Shutdown => {
+                        log::error!(
+                            "engine command loop received an unfiltered Shutdown; skipping it"
+                        );
+                    }
                 }
             }
         });

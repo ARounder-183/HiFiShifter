@@ -230,7 +230,13 @@ pub fn apply_formant_morph_mono(
             / sample_rate as f32)
             .min(analysis_dur_sec);
         let af_f = (t_sec / ANALYSIS_HOP_SEC).clamp(0.0, tracks_max);
-        let af = (af_f.round() as usize).min(frame_coeffs.len() - 1);
+        // 不变式：candidates 与 frame_coeffs 严格同步 push，非空一起非空。
+        // 上方 "af 恒为 0" 的历史修复就在这个易漂移区（见本函数注释），显式钉住。
+        debug_assert!(
+            !frame_coeffs.is_empty(),
+            "frame_coeffs must track candidates and never be empty here"
+        );
+        let af = (af_f.round() as usize).min(frame_coeffs.len().saturating_sub(1));
 
         let gate_val = gate.advance(
             track::interpolate_at(&tracks, af_f)

@@ -538,8 +538,11 @@ pub fn set_param_frames(
         "pitch" => &mut entry.pitch_edit,
         "tension" => &mut entry.tension_edit,
         _ => {
-            // Safety: we ensured extra_curves[&param] exists above.
-            entry.extra_curves.get_mut(&param).unwrap()
+            // 不变式：上方 ensure 已保证 extra_curves[&param] 存在。
+            entry
+                .extra_curves
+                .get_mut(&param)
+                .expect("invariant: the extra-curves entry was ensured above")
         }
     };
 
@@ -1106,7 +1109,10 @@ fn merge_write_segment(writes: &mut Vec<(usize, Vec<f32>)>, start: usize, values
         return;
     }
     if let Some(&(last_start, _)) = writes.last() {
-        let last = &mut writes.last_mut().unwrap().1;
+        let last = &mut writes
+            .last_mut()
+            .expect("invariant: writes.last() was just matched non-empty")
+            .1;
         let prev_end = last_start + last.len();
         if start == prev_end {
             last.extend_from_slice(values);
