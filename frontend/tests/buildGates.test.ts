@@ -287,6 +287,38 @@ test(
 );
 
 /*
+ * frontend/ 之外的 Prettier 覆盖（仓库级 scripts/）。
+ *
+ * 【为什么单独一条】`format:check` 的目标必须恒为仓库根 `.`（见上一条门禁的
+ * ①），scripts/ 在 frontend 之外、有自己的根级 .prettierrc/.prettierignore，
+ * 所以它走独立的 `format:scripts` 脚本，由这里在 vitest 里跑 —— 两条 CI
+ * 流水线都跑 `npm test`，scripts/ 的漂移因此与 src/ 同样有门禁。
+ */
+test(
+    "scripts/ 的 Prettier 门禁（npm run format:scripts）",
+    () => {
+        const script = readScripts()["format:scripts"];
+        expect(script, "缺少 format:scripts 脚本").toBeTruthy();
+        expect(script, "format:scripts 的目标必须是 ../scripts").toContain("../scripts");
+        expect(script, "format:scripts 必须带 --check").toContain("--check");
+
+        const { status, output } = runScriptBody("format:scripts");
+        if (status === 0) return;
+        throw new Error(
+            [
+                "scripts/ 下有文件没经过 Prettier。提交前请跑：",
+                "",
+                "    npm run format",
+                "",
+                "Prettier 输出：",
+                output,
+            ].join("\n"),
+        );
+    },
+    FORMAT_TIMEOUT_MS,
+);
+
+/*
  * `build` 的类型检查必须与 `typecheck` 是**同一段命令**，且不得嵌套 npm。
  *
  * 【为什么值得一条门禁】`build` 里内联这段命令是为了不与 `typecheck` 各写一份而

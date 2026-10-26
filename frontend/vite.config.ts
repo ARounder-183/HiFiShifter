@@ -110,6 +110,7 @@ export default defineConfig(({ mode }) => ({
             ignored: ["**/node_modules/**", "**/dist/**"],
         },
     },
-    // 开发模式下清除缓存，确保总是重新构建
+    // `clearScreen` 只控制 Vite 是否在启动时清掉终端屏。Tauri 的 dev 控制台
+    // 混排 Rust 侧日志与 Vite 输出，清屏会把已打出的日志一起抹掉。
     clearScreen: false,
 }));

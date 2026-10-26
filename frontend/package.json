@@ -6,17 +6,21 @@
     "scripts": {
         "dev": "vite",
         "typecheck": "tsc -b && tsc -p tsconfig.sdk.json --noEmit",
-        "build": "tsc -b && tsc -p tsconfig.sdk.json --noEmit && vite build",
+        "build": "tsc -b && tsc -p tsconfig.sdk.json --noEmit && vite build && tsc -p tsconfig.sdk.json",
         "test": "vitest run",
         "bench": "vitest bench",
         "lint": "eslint .",
-        "lint:budget": "eslint . --max-warnings 97",
-        "format": "prettier . --write",
+        "lint:budget": "eslint . --max-warnings 91",
+        "format": "prettier . --write && prettier --write ../scripts",
         "format:check": "prettier . --check",
+        "format:scripts": "prettier --check ../scripts",
         "preview": "vite preview",
         "build:sdk": "tsc -p tsconfig.sdk.json",
         "build:installer-strings": "node ../scripts/release/build-installer-strings.mjs",
         "check:bundle": "node scripts/check-bundle-size.mjs"
+    },
+    "engines": {
+        "node": ">=22.12"
     },
     "dependencies": {
         "@radix-ui/react-icons": "^1.3.2",

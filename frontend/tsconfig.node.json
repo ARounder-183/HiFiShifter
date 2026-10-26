@@ -27,5 +27,9 @@
         "noFallthroughCasesInSwitch": true,
         "noUncheckedSideEffectImports": true
     },
-    "include": ["vite.config.ts", "vitest.config.ts", "scripts/**/*.mjs"]
+    /* tests/ 的三个门禁测试（buildGates / fileSizeBudget / lintBudget）导入
+       vite.config.ts 与 node 模块，语义在本侧。此前不在任何 tsconfig 的
+       include 图里，`tsc -b` 从不检查它们 —— 门禁自身的类型错误只会在
+       vitest 运行时爆。 */
+    "include": ["vite.config.ts", "vitest.config.ts", "scripts/**/*.mjs", "tests"]
 }
