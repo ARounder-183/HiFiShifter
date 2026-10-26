@@ -77,7 +77,14 @@ int wmain(int argc, wchar_t** argv) {
     auto release_object = [](void* object) {
         if (object) release_of(object)(object);
     };
-    auto cleanup = [&]() {
+    // Tear down in the order a real host uses: release the objects first,
+    // then ExitDll, then unload the library.  Calling ExitDll while the
+    // component is still alive would pin a sequence production never exercises
+    // (the shim's gate clears engine state inside ExitDll, so a later Release
+    // would touch cleared engine state), and a future engine change could then
+    // crash only inside this probe.
+    // Returns false only when ExitDll itself ran and returned false.
+    auto cleanup = [&]() -> bool {
         if (component) {
             release_object(component);
             component = nullptr;
@@ -86,14 +93,16 @@ int wmain(int argc, wchar_t** argv) {
             release_object(factory);
             factory = nullptr;
         }
+        bool exit_ok = true;
         if (exit_fn) {
-            exit_fn();
+            exit_ok = exit_fn();
             exit_fn = nullptr;
         }
         if (module) {
             FreeLibrary(module);
             module = nullptr;
         }
+        return exit_ok;
     };
 
     module = LoadLibraryW(argv[1]);
@@ -171,19 +180,17 @@ int wmain(int argc, wchar_t** argv) {
         std::printf("createInstance(component): ok\n");
     }
 
-    {
-        const bool exit_ok = exit_fn();
-        exit_fn = nullptr;
-        if (!exit_ok) {
-            std::fprintf(stderr, "FAIL: ExitDll returned false\n");
-            goto done;
-        }
-    }
-
     result = 0;
 
 done:
-    cleanup();
+    // The happy path deliberately has no standalone ExitDll call: cleanup()
+    // runs the full host-order teardown (Release objects -> ExitDll ->
+    // FreeLibrary).  A false return from ExitDll on the happy path still fails
+    // the gate; on failure paths the result is already non-zero.
+    if (result == 0 && !cleanup()) {
+        std::fprintf(stderr, "FAIL: ExitDll returned false\n");
+        result = 1;
+    }
     if (result == 0) {
         std::printf("PASS\n");
     }
