@@ -256,6 +256,45 @@ impl TakeGeometry {
     }
 }
 
+/// 把父段的**正向**窗口按"子段在播放时间上的偏移 / 长度"切成子段窗口。
+///
+/// 【为什么从这里推导而不是重读宿主】父段窗口是**分割前真的在响的那一段**，子段必须
+/// 划分它 —— 这是分割的定义，与宿主怎么填 D_STARTOFFS 无关。独立 App 的分割
+/// （state::model::split_clip_take_window）用的就是这条算式；宿主读数只作校验。
+///
+/// `offset_sec` 是子段起点相对左段起点的**播放时间**偏移，`length_sec` 是它的播放长度。
+/// 方向决定消费轴：正放沿 +rate 推进，倒放沿 −rate 推进。
+pub fn split_child_window(
+    left: ForwardWindow,
+    rate: f64,
+    offset_sec: f64,
+    length_sec: f64,
+    reversed: bool,
+) -> Option<ForwardWindow> {
+    let rate = if rate.is_finite() && rate > 1e-6 {
+        rate
+    } else {
+        1.0
+    };
+    let offset = if offset_sec.is_finite() {
+        offset_sec.max(0.0)
+    } else {
+        0.0
+    };
+    let length = if length_sec.is_finite() {
+        length_sec.max(0.0)
+    } else {
+        0.0
+    };
+    if reversed {
+        let end = left.end() - offset * rate;
+        ForwardWindow::new(end - length * rate, end)
+    } else {
+        let start = left.start() + offset * rate;
+        ForwardWindow::new(start, start + length * rate)
+    }
+}
+
 /// 正向窗口终点 → 宿主 SOFFS（镜像域）。[TakeGeometry::forward_source_window]
 /// 的**逆运算**：写回宿主时必须再翻回镜像域，否则倒放 take 会被整体平移
 /// 媒体长 − 正向终点。
@@ -549,6 +588,44 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// 分割切分：正放从起点向右切，倒放从终点向左切；两半必须划分父段。
+    #[test]
+    fn a_split_child_partitions_the_parent_window_from_both_sides() {
+        let parent = win(0.25, 1.25);
+        // 正放：左 [0.25, 0.75)，右 [0.75, 1.25)。
+        assert_eq!(
+            split_child_window(parent, 1.0, 0.0, 0.5, false),
+            Some(win(0.25, 0.75))
+        );
+        assert_eq!(
+            split_child_window(parent, 1.0, 0.5, 0.5, false),
+            Some(win(0.75, 1.25))
+        );
+        // 倒放：左 [0.75, 1.25)，右 [0.25, 0.75) —— 从终点向左切。
+        assert_eq!(
+            split_child_window(parent, 1.0, 0.0, 0.5, true),
+            Some(win(0.75, 1.25))
+        );
+        assert_eq!(
+            split_child_window(parent, 1.0, 0.5, 0.5, true),
+            Some(win(0.25, 0.75))
+        );
+    }
+
+    /// 拉伸过的父段：切分按 |rate| 折算，位置与宽度同时缩放。
+    #[test]
+    fn a_split_child_scales_with_the_play_rate() {
+        let parent = win(0.0, 2.0);
+        assert_eq!(
+            split_child_window(parent, 2.0, 0.25, 0.25, false),
+            Some(win(0.5, 1.0))
+        );
+        assert_eq!(
+            split_child_window(parent, 2.0, 0.25, 0.25, true),
+            Some(win(1.0, 1.5))
+        );
     }
 
     /// 类型层拒绝：起点晚于终点、或任一端非有限，都不是窗口。

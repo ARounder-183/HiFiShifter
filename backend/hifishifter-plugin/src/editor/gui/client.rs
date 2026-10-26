@@ -1646,6 +1646,18 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
                         "state":link.route_state().as_str(),
                         "reason":link.route_failure(),
                     })).collect::<Vec<_>>(),
+                    // 参数视图：报障时"编辑器读到的是哪一份、根轨参数有多少、分割窗口
+                    // 推导有没有登记"都只能从内存里读。指纹只给前 8 位 —— 它是用来
+                    // 对齐日志的，不是给人读的。
+                    "parameterView":document.as_ref().map(|document|{
+                        // 只读一次：`workspace_view` 会跑一次图集投影，诊断路径不该跑两遍。
+                        let view=document.workspace_view().ok();
+                        serde_json::json!({
+                            "projection":view.as_ref().map(|view|view.projection.chars().take(8).collect::<String>()).unwrap_or_default(),
+                            "roots":view.as_ref().map(|view|view.params.len()).unwrap_or(0),
+                            "splitWindows":document.split_window_count(),
+                        })
+                    }).unwrap_or(serde_json::Value::Null),
                 });
                 let settings=serde_json::json!({
                     "plugin":crate::settings_store::settings(),

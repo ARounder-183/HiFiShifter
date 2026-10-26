@@ -42,6 +42,24 @@ pub(crate) struct WorkspaceView {
         Arc<std::collections::BTreeMap<String, hifishifter_kernel::state::TrackParamsState>>,
 }
 
+/// 一次**已确认**分割：子段 item GUID → 它在父段播放轴上的位置。
+///
+/// 【为什么记这个】分割后的两半必须**划分**父段窗口；而父段窗口是分割前真的在响的
+/// 那一段，与宿主怎么填右半段的 D_STARTOFFS 无关。记下"左段是哪个 item、子段在播放
+/// 轴上偏移多少、长度多少"，就能用共享解算把子段窗口推导出来（见
+/// `take_geometry::split_child_window`），宿主读数只作校验。
+///
+/// 【为什么按子段 GUID 索引】右半段是新 item；左半段沿用父段 GUID，不需要条目。
+#[derive(Clone, Debug)]
+pub(crate) struct SplitWindowSource {
+    /// 左段（沿用父段 GUID 的那一条）的 item GUID。
+    pub left: String,
+    /// 子段起点相对左段起点的**播放时间**偏移（秒）。
+    pub offset_sec: f64,
+    /// 子段的播放长度（秒）。
+    pub length_sec: f64,
+}
+
 /// 一个 ARA 文档的共享状态。
 ///
 /// # 锁序（必须遵守）
@@ -491,6 +509,12 @@ pub(crate) struct DocumentSession {
     /// 判定）已经完整实现并测试过（`ExtensionOwner::merge_pending_restore`）。存档通道
     /// 只是**另一个来源**，不该有第二份实现 —— 两份实现迟早会漂移。
     pub pending_archive_restore: Mutex<Option<crate::state_channel::EditState>>,
+    /// 已确认分割的子段窗口来源（见 [`SplitWindowSource`]）。
+    ///
+    /// 【为什么有上界】宿主反复分割会持续产生新 item GUID；没有上界的话这张表随编辑
+    /// 次数无界增长。4096 条足够覆盖任何一次会话的分割历史，超出时整体清空 —— 它只是
+    /// "推导窗口"的提示，清空后退回宿主读数，不会让任何东西失效。
+    pub split_windows: Mutex<HashMap<String, SplitWindowSource>>,
     /// 本实例**主动创建**的宿主轨道 GUID（`create_host_track` / 粘贴 / 导入建轨）。
     ///
     /// 【为什么必须有这张表】清单的轨道范围是「本轨 + folder 后代」（`ui_folder_tracks`），
@@ -1411,6 +1435,23 @@ impl DocumentSession {
             let excess = adopted.len() - MAX_ADOPTED;
             adopted.drain(..excess);
         }
+    }
+
+    /// 记下一次已确认分割的子段窗口来源（重复登记是幂等的）。
+    pub(crate) fn note_split_window(&self, child: &str, source: SplitWindowSource) {
+        if child.is_empty() {
+            return;
+        }
+        let mut map = self.split_windows.lock_or_recover();
+        if map.len() >= 4096 && !map.contains_key(child) {
+            map.clear();
+        }
+        map.insert(child.to_owned(), source);
+    }
+
+    /// 当前登记了多少条"分割子段窗口来源"（诊断用）。
+    pub(crate) fn split_window_count(&self) -> usize {
+        self.split_windows.lock_or_recover().len()
     }
 
     /// 当前登记表快照（清单枚举用；返回副本以免持锁回调宿主）。

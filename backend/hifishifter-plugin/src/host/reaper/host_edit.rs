@@ -593,7 +593,7 @@ fn host_start_offset(clip: &hifishifter_kernel::state::Clip) -> Option<f64> {
 /// 域）比较。倒放 clip 上这是两个不同坐标系的值：检查要么恒失败（用户看到
 /// "host source window changed before GUI commit"，一次编辑被拒），要么碰巧通过。
 /// 统一换算到正向域之后，判据对两个方向都成立。
-fn host_forward_window_start(
+pub(super) fn host_forward_window_start(
     geometry: &crate::host::geometry::HostClipGeometry,
     media_duration_sec: Option<f64>,
 ) -> f64 {

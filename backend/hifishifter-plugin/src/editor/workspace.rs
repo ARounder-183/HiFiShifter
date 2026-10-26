@@ -747,10 +747,28 @@ impl DocumentSession {
                 if !timeline.clips.iter().any(|clip| clip.id == id) {
                     // 同上的 panic 纪律：宿主给一个非有限 `playback_rate`（离线/损坏素材）
                     // 时不能让整个清单刷新 panic。反序列化失败就跳过这个 item。
+                    // 【占位 clip 也必须走同一个解算】此前这里是
+                    // `g.source_start_sec + duration*rate`：倒放时那是"镜像起点 + 正向
+                    // 跨度"，两个坐标域混在一个数上，只有等事实投影覆写才对；任何一步
+                    // 没跑到（facts 缺 active take / 缺 item）就会把错窗口留在界面上。
+                    let media = media_by_item.get(&g.item_id).and_then(|facts| {
+                        (facts.sample_rate > 0 && facts.frames > 0)
+                            .then_some(facts.frames as f64 / f64::from(facts.sample_rate))
+                    });
+                    let window = hifishifter_kernel::take_geometry::TakeGeometry {
+                        start_offset_sec: g.source_start_sec,
+                        item_length_sec: g.duration_sec,
+                        play_rate_signed: g.play_rate_signed,
+                        media_duration_sec: media,
+                        section: g.section,
+                        reversed: g.reversed,
+                        loop_enabled: g.loop_source,
+                    }
+                    .forward_source_window();
                     let built = serde_json::from_value::<hifishifter_kernel::state::Clip>(
                         serde_json::json!({"id":id,"track_id":track_id,"name":item.name,
-                        "start_sec":g.start_sec,"length_sec":g.duration_sec,"takes":[{"id":prefix(&g.take_id),"source_start_sec":g.source_start_sec,
-                        "source_end_sec":g.source_start_sec+g.duration_sec*g.playback_rate,"playback_rate":g.playback_rate}]}),
+                        "start_sec":g.start_sec,"length_sec":g.duration_sec,"takes":[{"id":prefix(&g.take_id),"source_start_sec":window.start(),
+                        "source_end_sec":window.end(),"playback_rate":g.playback_rate}]}),
                     );
                     match built {
                         Ok(mut clip) => {
@@ -2011,6 +2029,17 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
                 )
             })
             .collect();
+        // 【为什么先取一份 item → 源】下面循环要可变借用 clips；而"分割子段从左段切"
+        // 需要左段的源（媒体时长按源索引）。先取成一张小表，循环里只读它。
+        let source_by_item: std::collections::HashMap<String, String> = timeline
+            .clips
+            .iter()
+            .filter_map(|clip| {
+                let guid = host_item_guid(&clip.id)?;
+                let source = clip.active_take().source_path.clone()?;
+                Some((guid.to_owned(), source))
+            })
+            .collect();
         for clip in &mut timeline.clips {
             // 【为什么按后缀取 GUID】编辑器时间线的 id 带 GUI namespace 前缀，
             // `strip_prefix("ara-item-")` 在它上面恒为 `None` ⇒ 整条投影静默空转
@@ -2018,12 +2047,12 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
             let Some(guid) = host_item_guid(&clip.id) else {
                 continue;
             };
-            let Some(facts) = facts.get(guid) else {
+            let Some(item_facts) = facts.get(guid) else {
                 continue;
             };
-            clip.reversed = facts.reversed;
-            clip.loop_enabled = facts.loop_source;
-            clip.channel_mode = facts.channel_mode;
+            clip.reversed = item_facts.reversed;
+            clip.loop_enabled = item_facts.loop_source;
+            clip.channel_mode = item_facts.channel_mode;
             // 【倒放的镜像坐标复原】ARA 报的 region 时间是**已镜像坐标**（F-4 实测，
             // 见 `probe/ara/REVERSE-FINDINGS.md`）：倒放 take 的 `D_STARTOFFS` 是
             // `源长 − 正向起点 − 跨度`，而内核的倒放消费窗口
@@ -2035,50 +2064,93 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
             // `hifishifter_kernel::take_geometry`，本处只负责喂宿主读数。
             // 它由宿主事实直接推导，**幂等**（不读入参 clip 的当前窗口），因此重认领/
             // 重建不会累积镜像。
-            if clip.reversed {
-                if let Some(host) = &facts.host {
-                    // 媒体总时长：先按 **item GUID**（认领后可用），再按 **音频源 id**
-                    // （映射阶段就有，与认领/授权无关）。分割瞬间两半都还没有自己的
-                    // region→item 边，只有后者能命中 —— 这是"分割含倒放 Take 的 Item 后
-                    // 偏移"的根因。
-                    let by_source = clip
-                        .active_take()
-                        .source_path
-                        .as_deref()
-                        .and_then(|source| media_by_source.get(source).copied());
-                    let media = reversed_media_duration(
-                        media_by_item.get(guid).copied().or(by_source),
-                        clip,
-                    );
-                    let geometry = host.to_geometry(media, facts.reversed, facts.loop_source);
-                    let window = geometry.forward_source_window();
-                    clip.source_start_sec = window.start();
-                    clip.source_end_sec = window.end();
-                    // 窗口只写 **active take**（或全部，当 active 身份不可解析时）：
-                    // 多 take item 里各 take 的源窗口本可不同，把 active 的窗口盖到
-                    // 全部 take 上会污染 inactive take 的几何 —— 用户切过去时看到的是
-                    // 上一个 take 的窗口。
-                    for take in active_takes_of(clip) {
-                        take.source_start_sec = window.start();
-                        take.source_end_sec = window.end();
-                    }
-                } else {
+            // 【两级解算】① 有"已确认分割"的条目 ⇒ 从**左段**的窗口按播放轴切出来
+            // （左段的 D_STARTOFFS 分割不改，是两半里唯一可信的读数）；② 否则用宿主
+            // 读数（解算已修好倒放的镜像翻转）。分割子段即使方向是正放也走 ①——
+            // 正放子段的窗口同样必须与父段划分，而 ARA 报的只是它自己那一段。
+            let by_source = clip
+                .active_take()
+                .source_path
+                .as_deref()
+                .and_then(|source| media_by_source.get(source).copied());
+            let media =
+                reversed_media_duration(media_by_item.get(guid).copied().or(by_source), clip);
+            let host_window = item_facts.host.as_ref().map(|host| {
+                host.to_geometry(media, item_facts.reversed, item_facts.loop_source)
+                    .forward_source_window()
+            });
+            let split = self.split_windows.lock_or_recover().get(guid).cloned();
+            let derived = split.and_then(|split| {
+                let left = facts.get(&split.left)?;
+                let left_host = left.host.as_ref()?;
+                let left_media = media_by_item.get(&split.left).copied().or_else(|| {
+                    source_by_item
+                        .get(&split.left)
+                        .and_then(|source| media_by_source.get(source).copied())
+                });
+                let left_window = left_host
+                    .to_geometry(left_media, left.reversed, left.loop_source)
+                    .forward_source_window();
+                let rate = left_host.play_rate_signed.abs();
+                hifishifter_kernel::take_geometry::split_child_window(
+                    left_window,
+                    rate,
+                    split.offset_sec,
+                    split.length_sec,
+                    item_facts.reversed,
+                )
+            });
+            if let (Some(derived), Some(host_window)) = (derived, host_window) {
+                let close = crate::host::geometry::host_value_compatible;
+                if !close(derived.start(), host_window.start())
+                    || !close(derived.end(), host_window.end())
+                {
+                    // 【为什么留一行 Warn】推导与宿主读数不一致 = "宿主换了折算口径"的
+                    // 第一个报警点。以推导为准（父段窗口是分割前真的在响的那一段），
+                    // 但差异必须可复盘。
                     hifishifter_kernel::log_limiter::emit_limited_key(
                         log::Level::Warn,
-                        "ara.reversed-window",
+                        "ara.split.window-mismatch",
                         format_args!(
-                            "[ara] reversed item {guid} has no active take geometry; the clip \
-                             keeps the host's mirrored coordinates and will render shifted"
+                            "[ara] split window mismatch for item {guid}: derived \
+                             [{:.6},{:.6}] host [{:.6},{:.6}]; using the derived window so audio \
+                             and curves stay on the same geometry",
+                            derived.start(),
+                            derived.end(),
+                            host_window.start(),
+                            host_window.end(),
                         ),
                     );
                 }
             }
+            let window = derived.or_else(|| if clip.reversed { host_window } else { None });
+            if let Some(window) = window {
+                clip.source_start_sec = window.start();
+                clip.source_end_sec = window.end();
+                // 窗口只写 **active take**（或全部，当 active 身份不可解析时）：
+                // 多 take item 里各 take 的源窗口本可不同，把 active 的窗口盖到
+                // 全部 take 上会污染 inactive take 的几何 —— 用户切过去时看到的是
+                // 上一个 take 的窗口。
+                for take in active_takes_of(clip) {
+                    take.source_start_sec = window.start();
+                    take.source_end_sec = window.end();
+                }
+            } else if clip.reversed {
+                hifishifter_kernel::log_limiter::emit_limited_key(
+                    log::Level::Warn,
+                    "ara.reversed-window",
+                    format_args!(
+                        "[ara] reversed item {guid} has no active take geometry; the clip \
+                         keeps the host's mirrored coordinates and will render shifted"
+                    ),
+                );
+            }
             // 同上：让 **active take** 也带上同一份事实。`normalize_takes()` 之后 clip 的
             // 扁平字段来自 active take，只在 clip 上写会被下一次物化覆盖。
             for take in active_takes_of(clip) {
-                take.reversed = facts.reversed;
-                take.loop_enabled = facts.loop_source;
-                take.channel_mode = facts.channel_mode;
+                take.reversed = item_facts.reversed;
+                take.loop_enabled = item_facts.loop_source;
+                take.channel_mode = item_facts.channel_mode;
             }
         }
     }

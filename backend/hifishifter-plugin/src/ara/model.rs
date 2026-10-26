@@ -735,6 +735,37 @@ impl ModelHandle {
             .filter_map(|child| child.item.as_deref())
             .find(|item| *item == parent_item)
             .or_else(|| children.iter().find_map(|child| child.item.as_deref()));
+        // 【登记子段窗口来源】左段（沿用父 item GUID 的那一条）的窗口是**可信的**：
+        // 分割不改它的 D_STARTOFFS。子段按播放轴偏移从它切出来，宿主读数只作校验 ——
+        // 右半段的 D_STARTOFFS 才是会被分割推过镜像中点的那个量。
+        if let Some(left) = children
+            .iter()
+            .find(|child| child.item.as_deref() == Some(parent_item))
+            .or_else(|| children.first())
+        {
+            if let Some(left_item) = left.item.clone() {
+                for child in children {
+                    let Some(child_item) = child.item.as_deref() else {
+                        continue;
+                    };
+                    if child_item == left_item {
+                        continue;
+                    }
+                    let offset = child.play_start - left.play_start;
+                    if !(offset.is_finite() && offset > 1e-9) {
+                        continue;
+                    }
+                    self.session.note_split_window(
+                        child_item,
+                        crate::render::document::SplitWindowSource {
+                            left: left_item.clone(),
+                            offset_sec: offset,
+                            length_sec: child.play_dur,
+                        },
+                    );
+                }
+            }
+        }
         let mut edits = self.session.edits.lock_or_recover();
         // 曲线谱系：只有父段有 live 曲线可继承时才登记（`register_split` 的 seed 是
         // 父段完整窗口，子段靠它做包含判定）。

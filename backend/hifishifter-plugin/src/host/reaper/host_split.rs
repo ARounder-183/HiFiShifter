@@ -93,10 +93,17 @@ pub(crate) fn execute(
         if !g.markers.is_empty() {
             return Err("nonlinear host split is not supported".into());
         }
+        // 【源窗口必须换到正向域再比】`g.source_start_sec` 是宿主镜像域（倒放时
+        // D_STARTOFFS = D − 正向终点），而 `before.source_start_sec` 来自编辑器时间线
+        // （正向域）。直接比会让**每一个倒放 clip 的分割**都被判成"宿主变了"。
+        let host_source_start = super::host_edit::host_forward_window_start(
+            g,
+            hifishifter_kernel::state::clip_source_media_duration_sec(before),
+        );
         if [
             (g.start_sec, before.start_sec),
             (g.duration_sec, before.length_sec),
-            (g.source_start_sec, before.source_start_sec),
+            (host_source_start, before.source_start_sec),
             (g.playback_rate, before.playback_rate as f64),
         ]
         .iter()
