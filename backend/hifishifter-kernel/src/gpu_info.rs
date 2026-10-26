@@ -92,12 +92,85 @@ pub fn enumerate_gpus() -> GpuEnumerationResult {
     }
 }
 
+/// 载入 NVML 动态库。
+///
+/// 【为什么不能用裸文件名】libloading 的 `Library::new("nvml.dll")` 走的是操作系统
+/// 默认的 DLL 搜索顺序：进程当前工作目录与 `PATH` 里的目录都排在 System32 之前。
+/// 用户从下载目录、工程目录或 U 盘启动本程序时，同目录下任何一个同名 `nvml.dll`
+/// 都会被当作 NVIDIA 驱动加载并执行其 `DllMain` —— 典型的 DLL 预加载/劫持路径
+/// （CWE-426，以及 CWE-427 的不受控搜索路径）。NVML 只可能来自驱动安装的固定位置，
+/// 因此这里只接受**绝对路径**，一处都没有就按"没有 NVIDIA 驱动"降级。
+fn load_nvml() -> Result<libloading::Library, String> {
+    let candidates = nvml_candidates();
+    let mut last_error: Option<String> = None;
+    for path in &candidates {
+        if !path.is_file() {
+            continue;
+        }
+        match unsafe { libloading::Library::new(path) } {
+            Ok(library) => return Ok(library),
+            Err(error) => last_error = Some(format!("{}: {error}", path.display())),
+        }
+    }
+    Err(match last_error {
+        Some(error) => format!("Cannot load NVML: {error}"),
+        None => format!(
+            "Cannot load NVML: not found in {}",
+            candidates
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    })
+}
+
+/// NVML 的候选**绝对路径**（驱动安装器写下的固定位置）。
+///
+/// 绝不包含相对路径或裸文件名：`load_nvml` 的整个安全前提就是"只加载驱动自己
+/// 装下的那一个文件"。
+fn nvml_candidates() -> Vec<std::path::PathBuf> {
+    #[cfg(windows)]
+    {
+        let mut candidates = Vec::new();
+        if let Some(root) = std::env::var_os("SystemRoot") {
+            candidates.push(
+                std::path::PathBuf::from(root)
+                    .join("System32")
+                    .join("nvml.dll"),
+            );
+        }
+        if let Some(program_files) = std::env::var_os("ProgramFiles") {
+            candidates.push(
+                std::path::PathBuf::from(program_files)
+                    .join("NVIDIA Corporation")
+                    .join("NVSMI")
+                    .join("nvml.dll"),
+            );
+        }
+        candidates
+    }
+    #[cfg(target_os = "linux")]
+    {
+        [
+            "/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1",
+            "/usr/lib/aarch64-linux-gnu/libnvidia-ml.so.1",
+            "/usr/lib64/libnvidia-ml.so.1",
+            "/usr/lib/libnvidia-ml.so.1",
+        ]
+        .into_iter()
+        .map(std::path::PathBuf::from)
+        .collect()
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        Vec::new()
+    }
+}
+
 fn try_enumerate() -> Result<Vec<GpuDeviceInfo>, String> {
-    // 1. Load nvml.dll (always present when NVIDIA driver is installed)
-    let nvml = unsafe {
-        libloading::Library::new("nvml.dll")
-            .map_err(|e| format!("Cannot load nvml.dll: {e} — is NVIDIA driver installed?"))?
-    };
+    // 1. Load NVML from an absolute, driver-installed path (see `load_nvml`).
+    let nvml = load_nvml()?;
 
     // Safety helper: get a function pointer or return error
     // `.into_raw()` returns `*mut T`; we dereference with `*` to get the fn value.
@@ -204,4 +277,34 @@ fn try_enumerate() -> Result<Vec<GpuDeviceInfo>, String> {
     }
 
     Ok(devices)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **不变量：NVML 的候选路径必须全部是绝对路径。**
+    ///
+    /// 这条测试守的是"动态库搜索路径劫持"的回归点：任何人把裸文件名
+    /// （`nvml.dll`）或相对路径塞回候选表，`is_absolute()` 会立刻失败。
+    #[test]
+    fn nvml_candidates_are_always_absolute() {
+        for candidate in nvml_candidates() {
+            assert!(
+                candidate.is_absolute(),
+                "NVML candidate must be absolute, got {}",
+                candidate.display()
+            );
+        }
+    }
+
+    /// 驱动不存在时必须返回可读错误（列出搜过的路径），而不是 panic 或静默成功。
+    #[test]
+    fn a_missing_driver_reports_where_it_looked() {
+        match load_nvml() {
+            // 机器上确实装了 NVIDIA 驱动：这条断言无从验证，跳过。
+            Ok(_) => {}
+            Err(error) => assert!(error.starts_with("Cannot load NVML"), "{error}"),
+        }
+    }
 }
