@@ -26,6 +26,21 @@ export function canControlHostTransport(): boolean {
     return isPluginMode() && pluginBootstrap()?.transportControl === true;
 }
 /**
+ * 播放光标是不是**宿主**的，且插件改不动它。
+ *
+ * 【为什么单独一个谓词】"能不能控制传输"（播放/暂停）与"能不能移动光标"是两件事，
+ * 只是当前恰好都由同一个 ARA 播放请求提供。将来若出现只给播放、不给定位的宿主，
+ * 分叉点在这里，而调用点不用动。
+ *
+ * 【为什么它必须存在】非 ARA 宿主里 `set_transport` 必然失败，而前端每一次"跳转"
+ * 都是"乐观写 store + 打后端"两步：光标先跳过去，随后 30 Hz 的播放轮询用宿主真实
+ * 位置把它拽回来。宿主拥有光标时，镜像不该写源。
+ */
+export function playheadIsHostOwned(): boolean {
+    return isPluginMode() && !canControlHostTransport();
+}
+
+/**
  * 只有本次原生入口明确具备写 API **且**有宿主撤销栈，才打开片段拖拽/裁切/线性拉伸。
  *
  * 【为什么还要 `undoStack`】后端 `effective_host_capabilities` 把 `clipWrite`

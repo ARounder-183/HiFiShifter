@@ -22,6 +22,7 @@ import {
     importMultipleAudioFilesAtPosition,
 } from "../../thunks/importThunks";
 import { applyTimelineState, upsertImportedClip } from "../helpersTimeline";
+import { intentPlayheadSec } from "../playheadIntent";
 import {
     applyTimelineStatePreservingPitchVisuals,
     applyAutoCrossfadeInReducer,
@@ -187,8 +188,9 @@ export function registerAudio(builder: ActionReducerMapBuilder<SessionState>) {
                 // 导入定位光标：thunk 以独立字段带回的导入起始位置
                 // （对应旧乐观路径 upsertImportedClip 的 playheadSec=startSec）。
                 if (typeof payload.playheadSec === "number") {
-                    state.playheadSec = Math.max(0, payload.playheadSec);
-                    state.pendingPlayheadRevealSec = state.playheadSec;
+                    if (intentPlayheadSec(state, payload.playheadSec)) {
+                        state.pendingPlayheadRevealSec = state.playheadSec;
+                    }
                 }
                 if (payload.newClipIds && payload.newClipIds.length > 0) {
                     applyAutoCrossfadeInReducer(state, payload.newClipIds);
@@ -230,8 +232,9 @@ export function registerAudio(builder: ActionReducerMapBuilder<SessionState>) {
                 applyTimelineStatePreservingPitchVisuals(state, payload.imported);
                 // 导入定位光标：thunk 以独立字段带回的导入起始位置。
                 if (typeof payload.playheadSec === "number") {
-                    state.playheadSec = Math.max(0, payload.playheadSec);
-                    state.pendingPlayheadRevealSec = state.playheadSec;
+                    if (intentPlayheadSec(state, payload.playheadSec)) {
+                        state.pendingPlayheadRevealSec = state.playheadSec;
+                    }
                 }
                 if (payload.newClipIds && payload.newClipIds.length > 0) {
                     applyAutoCrossfadeInReducer(state, payload.newClipIds);
@@ -275,8 +278,9 @@ export function registerAudio(builder: ActionReducerMapBuilder<SessionState>) {
                 applyTimelineStatePreservingPitchVisuals(state, payload.imported);
                 // 导入定位光标：thunk 以独立字段带回的导入起始位置。
                 if (typeof payload.playheadSec === "number") {
-                    state.playheadSec = Math.max(0, payload.playheadSec);
-                    state.pendingPlayheadRevealSec = state.playheadSec;
+                    if (intentPlayheadSec(state, payload.playheadSec)) {
+                        state.pendingPlayheadRevealSec = state.playheadSec;
+                    }
                 }
                 if (payload.newClipIds && payload.newClipIds.length > 0) {
                     applyAutoCrossfadeInReducer(state, payload.newClipIds);
@@ -338,8 +342,9 @@ export function registerAudio(builder: ActionReducerMapBuilder<SessionState>) {
             if (ok && payload.imported && payload.imported.tracks) {
                 applyTimelineStatePreservingPitchVisuals(state, payload.imported);
                 if (typeof payload.playheadSec === "number") {
-                    state.playheadSec = Math.max(0, payload.playheadSec);
-                    state.pendingPlayheadRevealSec = state.playheadSec;
+                    if (intentPlayheadSec(state, payload.playheadSec)) {
+                        state.pendingPlayheadRevealSec = state.playheadSec;
+                    }
                 }
                 if (payload.newClipIds && payload.newClipIds.length > 0) {
                     applyAutoCrossfadeInReducer(state, payload.newClipIds);
@@ -380,8 +385,9 @@ export function registerAudio(builder: ActionReducerMapBuilder<SessionState>) {
                 applyTimelineStatePreservingPitchVisuals(state, payload.imported);
                 // 导入定位光标：thunk 以独立字段带回的导入起始位置。
                 if (typeof payload.playheadSec === "number") {
-                    state.playheadSec = Math.max(0, payload.playheadSec);
-                    state.pendingPlayheadRevealSec = state.playheadSec;
+                    if (intentPlayheadSec(state, payload.playheadSec)) {
+                        state.pendingPlayheadRevealSec = state.playheadSec;
+                    }
                 }
                 if (payload.newClipIds && payload.newClipIds.length > 0) {
                     applyAutoCrossfadeInReducer(state, payload.newClipIds);
@@ -558,8 +564,9 @@ export function registerAudio(builder: ActionReducerMapBuilder<SessionState>) {
                     typeof payload.pasteEndSec === "number" &&
                     Number.isFinite(payload.pasteEndSec)
                 ) {
-                    state.playheadSec = Math.max(0, payload.pasteEndSec);
-                    state.pendingPlayheadRevealSec = Math.max(0, payload.pasteEndSec);
+                    if (intentPlayheadSec(state, payload.pasteEndSec)) {
+                        state.pendingPlayheadRevealSec = state.playheadSec;
+                    }
                 }
             }
             state.lastResult = payload;
@@ -598,8 +605,9 @@ export function registerAudio(builder: ActionReducerMapBuilder<SessionState>) {
                     typeof payload.pasteEndSec === "number" &&
                     Number.isFinite(payload.pasteEndSec)
                 ) {
-                    state.playheadSec = Math.max(0, payload.pasteEndSec);
-                    state.pendingPlayheadRevealSec = Math.max(0, payload.pasteEndSec);
+                    if (intentPlayheadSec(state, payload.pasteEndSec)) {
+                        state.pendingPlayheadRevealSec = state.playheadSec;
+                    }
                 }
             }
             const skippedFiles = payload?.skippedFiles;

@@ -1,7 +1,7 @@
 // 传输与时间线读取；插件旧刷新不得覆盖在途宿主片段编辑。
 import { createAsyncThunk } from "@reduxjs/toolkit";
 import { webApi } from "../../../services/webviewApi";
-import { isPluginMode } from "../../../services/hostCapabilities";
+import { isPluginMode, playheadIsHostOwned } from "../../../services/hostCapabilities";
 
 import { setMetronomeConfig, persistUiSettings } from "../sessionSlice";
 import type { SessionState } from "../sessionSlice";
@@ -134,6 +134,16 @@ export const stopAudioPlayback = createAsyncThunk(
 );
 
 export const seekPlayhead = createAsyncThunk("session/seekPlayhead", async (sec: number) => {
+    // 【为什么先短路】宿主拥有播放光标时（非 ARA 的 VST 宿主），`set_transport` 必然
+    // 失败；而拖拽标尺会以 rAF 频率走到这里 —— 每一次都是一次注定失败的 IPC 加一条
+    // 错误日志。写入闸（`intentPlayheadSec`）已经保证光标不动，这里再省掉往返。
+    //
+    // 【为什么返回 ok 而不是 reject】调用方把它当"定位意图已处理"看待；reject 会写
+    // `state.error` 并在状态栏报错，而用户什么都没做错 —— 他只是在一个不能跳转的
+    // 宿主里点了标尺。
+    if (playheadIsHostOwned()) {
+        return { ok: true, playhead_sec: sec, skipped: true };
+    }
     return enqueueTransportCommand(() => webApi.setTransport({ playheadSec: sec }));
 });
 

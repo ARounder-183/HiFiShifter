@@ -16,6 +16,7 @@ import {
     basenameFromPath,
 } from "./helpersCore";
 import { parseClipTakes } from "./helpersTakes";
+import { intentPlayheadSec } from "./playheadIntent";
 import { VALID_GRID_SIZES } from "./settings";
 export function applyTimelineState(
     state: SessionState,
@@ -404,7 +405,8 @@ export function upsertImportedClip(
         fadeOutDir: 0,
     });
     state.selectedClipId = newClipId;
-    state.playheadSec = startSec;
+    // 新建片段的落点也是**意图**：宿主拥有光标时，插件不能把光标搬到这里。
+    intentPlayheadSec(state, startSec);
     state.clipPitchRanges[newClipId] = meta?.pitchRange ?? {
         min: -24,
         max: 24,

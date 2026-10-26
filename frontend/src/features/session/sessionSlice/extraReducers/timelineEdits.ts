@@ -1,4 +1,5 @@
 import { classifyClipEditFailure } from "../../clipEditFailure";
+import { intentPlayheadSec } from "../playheadIntent";
 import type { TimelineState } from "../../../../types/api";
 import {
     addClipOnTrack,
@@ -108,8 +109,9 @@ export function registerTimelineEdits(builder: ActionReducerMapBuilder<SessionSt
             // useLayoutEffect 依据 pendingPlayheadRevealSec 执行，
             // 避免在工程全长扩充前被旧滚动上限钳制。
             if (typeof payload.pasteEndSec === "number" && Number.isFinite(payload.pasteEndSec)) {
-                state.playheadSec = Math.max(0, payload.pasteEndSec);
-                state.pendingPlayheadRevealSec = Math.max(0, payload.pasteEndSec);
+                if (intentPlayheadSec(state, payload.pasteEndSec)) {
+                    state.pendingPlayheadRevealSec = state.playheadSec;
+                }
             }
             state.status = "Timeline clipboard pasted";
         })

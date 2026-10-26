@@ -65,6 +65,7 @@ import type { ClipColor, SessionState, StretchAlgorithmOption } from "./sessionS
 import { resolveTrackIdForClipSelection } from "./selectionFocus";
 import { applyHistoryDepths } from "./sessionSlice/history";
 import { applyTimelineState } from "./sessionSlice/helpersTimeline";
+import { intentPlayheadSec } from "./sessionSlice/playheadIntent";
 import {
     applyToolMode,
     normalizeTimelineSnapSettings,
@@ -827,7 +828,11 @@ const sessionSlice = createSlice({
             state.edgeSmoothnessPercent = clamp(Number(action.payload) || 0, 0, 100);
         },
         setPlayheadSec(state, action: PayloadAction<number>) {
-            state.playheadSec = Math.max(0, action.payload);
+            // 【为什么这里是全仓的单一闸门】乐观写播放光标只有这一个入口，而"跳转"
+            // 在非 ARA 宿主里必然失败（`set_transport` 需要 ARA 播放请求）。闸在
+            // 入口上，十几处"先写乐观值再打后端"的调用点就一起被覆盖 —— 否则每一处
+            // 都要自己判一次，而漏掉任何一处都会重现"先跳过去再跳回来"。
+            if (!intentPlayheadSec(state, action.payload)) return;
             state.playheadLocalAtMs = performance.now();
         },
         /** 设置/清除待执行的“聚焦播放光标”请求（见 pendingPlayheadRevealSec 注释）。 */
