@@ -428,6 +428,13 @@ pub(crate) struct DocumentSession {
     pub scope_revision: AtomicU64,
     /// 纯GUI宿主装饰版本，不改变编辑曲线或神经合成代次。
     pub ui_geometry_revision: AtomicU64,
+    /// 最近一次把图集重投影进 `edits.params` 时的 `ui_geometry_revision`。
+    ///
+    /// 【为什么需要它】视图重建只应发生在**几何真的变了**之后。没有这个读数时，
+    /// 任何一次 `workspace_view()`（诊断、私有分组、清单刷新）都会重写参数数组 ——
+    /// 而"读一次工作区"不应改变一个待提交编辑所依赖的指纹（并发的 automatic apply
+    /// 会因此判成 workspace changed）。
+    resynced_geometry: AtomicU64,
     pub ready: AtomicBool,
     /// 宿主是否至少给过一个源样本访问授权。
     ///
@@ -1469,8 +1476,12 @@ impl DocumentSession {
         let mut edits = self.edits.lock_or_recover();
         let mut timeline = self.workspace_timeline_locked()?;
         edits.apply(&mut timeline);
-        self.resync_parameter_view_locked(&mut edits, &timeline)?;
-        edits.apply(&mut timeline);
+        let geometry = self.ui_geometry_revision.load(Ordering::Acquire);
+        if self.resynced_geometry.load(Ordering::Acquire) != geometry {
+            self.resync_parameter_view_locked(&mut edits, &timeline)?;
+            self.resynced_geometry.store(geometry, Ordering::Release);
+            edits.apply(&mut timeline);
+        }
         let projection = self.workspace_projection_locked(&edits)?;
         Ok(Arc::new(WorkspaceView {
             projection,
@@ -1545,10 +1556,10 @@ impl DocumentSession {
         let mut edits = self.edits.lock_or_recover();
         let mut timeline = self.workspace_timeline_locked()?;
         edits.reconcile(&self.track_bindings.lock_or_recover())?;
-        // 【视图是派生量，不是存储值】先把图集重新投影进 `edits.params`，再拿它去算
-        // 指纹。顺序反了就会得到一个"描述旧几何"的指纹 —— 那正是"take 倒放之后
-        // 编辑器按旧方向显示"和"提交闸在错误时间点判定冲突"的同一个根。
-        self.resync_parameter_view_locked(&mut edits, &timeline)?;
+        // 【为什么这里**不**重投影视图】`workspace_snapshot` 是**读**路径：它随时可能被
+        // 编辑器 actor 的后台刷新调用，而一次读不能改变"待提交编辑"所依赖的指纹
+        // （那会让并发的 apply 判成 workspace changed）。视图的重建放在两个真正的
+        // "几何变了"的写点上：`remap_and_log` 与 `refresh_ui_geometry`。
         edits.apply(&mut timeline);
         // 【为什么先只取一份 id 集合、立刻释放锁】`source_failures` 与 `edit_sources`
         // 此前从不同时持有；`media_in_flight_items` 的锁序是
