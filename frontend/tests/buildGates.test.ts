@@ -40,7 +40,8 @@
  */
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { delimiter, join } from "node:path";
+import { delimiter, join, relative } from "node:path";
+import { EXTENSION_ALIASES } from "../vite.config.ts";
 import { expect, test } from "vitest";
 
 /** `tsc -b` 冷启动在 CI 上可能要几十秒，给足余量。 */
@@ -121,15 +122,14 @@ test("扩展别名在 tsconfig 与 vite 两侧指向同一批文件", async () =
         fromTsconfig[key] = targets[0].replace(/^\.\//, "");
     }
 
-    // vite.config.ts 是 TS 源码，这里按文本取出 `"@hs/x": resolve(__dirname, "…")`。
-    // 解析 TS 文件要引入编译 API，而这条门禁要守的只是"两侧列出同一批键与路径"。
-    const viteSource = readFileSync(join(process.cwd(), "vite.config.ts"), "utf8");
-    const fromVite: Record<string, string> = {};
-    for (const match of viteSource.matchAll(
-        /"(@hs\/[^"]+)":\s*resolve\(__dirname,\s*"([^"]+)"\)/g,
-    )) {
-        fromVite[match[1]] = match[2];
-    }
+    // 直接读 vite.config.ts 导出的唯一事实来源，避免正则解析源码文本在
+    // __dirname → import.meta.dirname 迁移时静默失配。
+    const fromVite: Record<string, string> = Object.fromEntries(
+        Object.entries(EXTENSION_ALIASES).map(([key, value]) => [
+            key,
+            relative(process.cwd(), value).replaceAll("\\", "/"),
+        ]),
+    );
 
     expect(fromVite).toEqual(fromTsconfig);
     expect(Object.keys(fromTsconfig).length, "别名不该为空").toBeGreaterThan(0);

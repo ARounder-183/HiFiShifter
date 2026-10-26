@@ -5,9 +5,12 @@
  * - index.html → 主窗口
  */
 
-import { resolve } from "path";
+import { resolve } from "node:path";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+
+/** 本配置文件所在目录；Node 20.11+ 的 ESM 原生写法，避免 __dirname 在 native loader 下告警。 */
+const projectRoot = import.meta.dirname;
 
 /**
  * 各构建入口（多窗口 Tauri 应用）。
@@ -20,16 +23,25 @@ import react from "@vitejs/plugin-react";
  * dev server 不受影响：Vite 开发服务器按需服务根目录下的任意 HTML，
  * 不依赖 rollupOptions.input。
  */
+/**
+ * 扩展入口别名：vite 与 tsconfig.app.json 的唯一事实来源。
+ * buildGates 直接导入本常量做一致性比对，避免再解析源码文本。
+ */
+export const EXTENSION_ALIASES = {
+    "@hs/sdk": resolve(projectRoot, "src/sdk/index.ts"),
+    "@hs/ui": resolve(projectRoot, "src/ui/index.ts"),
+} as const;
+
 function buildInputs(mode: string): Record<string, string> {
     const inputs: Record<string, string> = {
-        main: resolve(__dirname, "index.html"),
+        main: resolve(projectRoot, "index.html"),
         // REAPER原生WebView入口；同一个App，独立app入口不变。
-        plugin: resolve(__dirname, "plugin.html"),
+        plugin: resolve(projectRoot, "plugin.html"),
         // 独立窗口（把一个窗体拆到主窗口之外）：见 features/dock/detachedWindow.ts
-        detached: resolve(__dirname, "detached.html"),
+        detached: resolve(projectRoot, "detached.html"),
     };
     if (mode === "development" || process.env.VITE_INCLUDE_TEST_PAGES === "1") {
-        inputs.waveformTest = resolve(__dirname, "waveform-test.html");
+        inputs.waveformTest = resolve(projectRoot, "waveform-test.html");
     }
     return inputs;
 }
@@ -46,10 +58,7 @@ export default defineConfig(({ mode }) => ({
      * 同步在 tsconfig.app.json 的 `paths` 里声明，两处必须一致。
      */
     resolve: {
-        alias: {
-            "@hs/sdk": resolve(__dirname, "src/sdk/index.ts"),
-            "@hs/ui": resolve(__dirname, "src/ui/index.ts"),
-        },
+        alias: EXTENSION_ALIASES,
     },
     build: {
         rollupOptions: {

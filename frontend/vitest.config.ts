@@ -23,7 +23,7 @@
  * 专项（见修复方案 T4-6），本文件先只做零行为变化的集中声明。
  */
 import { defineConfig, mergeConfig, type ViteUserConfig } from "vitest/config";
-import viteConfig from "./vite.config";
+import viteConfig from "./vite.config.ts";
 
 // vite.config.ts 的默认导出是 `defineConfig(({ mode }) => …)` 的函数形态；
 // 以 serve/test 模式求值（测试不关心 rollup 入口，排除 waveform-test 无副作用）。
