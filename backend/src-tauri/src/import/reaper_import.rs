@@ -2453,17 +2453,21 @@ mod tests {
     }
 
     #[test]
-    fn take_linear_gain_combines_item_trim_with_take_volume() {
-        // REAPER 可听增益 = item trim（VOLPAN[0]）× take volume（VOLPAN[2]）。
-        // 用户拖动 item 音量把手写的是 trim —— 只取 take volume 会丢增益。
+    fn take_linear_gain_and_item_trim_are_layered() {
+        // REAPER 可听增益 = item trim（VOLPAN[0]）× take volume（VOLPAN[2]），
+        // 但新模型里两者**分层承载**：trim 进 item 层（`Clip::clip_gain`），
+        // take volume 进 take 层。`take_linear_gain` 只负责后者 —— 它若再乘一次
+        // trim，导入后的可听增益就会被平方（旧断言正是按单层模型写的）。
         let mut item = ReaperItem::default();
-        item.default_take.vol_pan = vec![0.5, 0.0, 1.0, -1.0]; // trim -6dB
-        assert!((take_linear_gain(&item, &item.default_take, false) - 0.5).abs() < 1e-9);
+        item.default_take.vol_pan = vec![0.5, 0.0, 1.0, -1.0]; // trim -6dB，take 0dB
+        assert!((take_linear_gain(&item, &item.default_take, false) - 1.0).abs() < 1e-9);
+        assert!((item_trim_gain(&item) - 0.5).abs() < 1e-9);
 
-        // 提升：trim 与 volume 都 >1（+6dB × +6dB = +12dB）。
+        // 提升：trim 与 volume 都 >1（+6dB × +6dB = +12dB，分两层）。
         let mut boost = ReaperItem::default();
         boost.default_take.vol_pan = vec![2.0, 0.0, 2.0, -1.0];
-        assert!((take_linear_gain(&boost, &boost.default_take, false) - 4.0).abs() < 1e-9);
+        assert!((take_linear_gain(&boost, &boost.default_take, false) - 2.0).abs() < 1e-9);
+        assert!((item_trim_gain(&boost) - 2.0).abs() < 1e-9);
 
         // 负 volume（REAPER 反相）：响度取绝对值保留。
         let mut inverted = ReaperItem::default();
@@ -2484,7 +2488,7 @@ mod tests {
         });
         assert!((take_linear_gain(&multi, &multi.takes[0], false) - 0.9).abs() < 1e-9);
 
-        // 显式 take 的 TAKEVOLPAN 音量同样乘以 item trim。
+        // 显式 take 的 TAKEVOLPAN 音量照常返回；item trim 由 item 层单独承载。
         let mut explicit_trim = ReaperItem::default();
         explicit_trim.default_take.vol_pan = vec![0.5, 0.0, 1.0, -1.0];
         explicit_trim.takes.push(ReaperTake {
@@ -2492,9 +2496,10 @@ mod tests {
             ..ReaperTake::default()
         });
         assert!(
-            (take_linear_gain(&explicit_trim, &explicit_trim.takes[0], false) - 0.75).abs() < 1e-9,
-            "explicit take gain must include item trim"
+            (take_linear_gain(&explicit_trim, &explicit_trim.takes[0], false) - 1.5).abs() < 1e-9,
+            "explicit take gain is take-layer only; trim rides on clip_gain"
         );
+        assert!((item_trim_gain(&explicit_trim) - 0.5).abs() < 1e-9);
     }
 
     /// **REAPER 的 +24 dB 必须被如实导入**，而不是被压到 +12。

@@ -631,7 +631,10 @@ fn compact_json_roundtrip_preserves_non_default_fields() {
     }
     {
         let clip = &mut tl.clips[0];
-        clip.gain = 0.75;
+        // 【为什么写 clip_gain】item / take 分层之后，旋钮值在 item 层
+        //（`clip_gain`）；`gain` 是活跃 take 的旧镜像。只改镜像会在加载时
+        // 被 `apply_to_clip` 覆盖回 1.0（见 `migrate_gain_split` 的说明）。
+        clip.clip_gain = 0.75;
         clip.muted = true;
         clip.source_start_sec = 0.25;
         clip.playback_rate = 1.5;
@@ -688,7 +691,7 @@ fn compact_json_roundtrip_preserves_non_default_fields() {
     assert_eq!(track.color, "#112233");
 
     let clip = &loaded.timeline.clips[0];
-    assert!((clip.gain - 0.75).abs() < f32::EPSILON);
+    assert!((clip.clip_gain - 0.75).abs() < f32::EPSILON);
     assert!(clip.muted);
     assert!((clip.source_start_sec - 0.25).abs() < 1e-12);
     assert!((clip.playback_rate - 1.5).abs() < f32::EPSILON);
@@ -722,7 +725,9 @@ fn compact_json_roundtrip_preserves_non_default_fields() {
 
     let take = &clip.takes[0];
     assert_eq!(take.id, clip.active_take_id.as_deref().unwrap());
-    assert!((take.gain - 0.75).abs() < f32::EPSILON);
+    // item 层承载 0.75；take 层保持中性 1.0（可听增益 = 0.75 × 1.0）。
+    assert!((take.gain - 1.0).abs() < f32::EPSILON);
+    assert!((clip.audible_gain() - 0.75).abs() < 1e-6);
     assert_eq!(take.source_start_sec, 0.25);
     assert_eq!(take.source_file_fingerprint, Some(0x1122334455667788));
 }
@@ -782,14 +787,21 @@ fn legacy_flat_clip_json_migrates_to_single_take() {
     let take = &clip.takes[0];
     assert_eq!(clip.active_take_id.as_deref(), Some(take.id.as_str()));
     assert_eq!(take.source_path.as_deref(), Some("C:/audio/a.wav"));
-    assert!((take.gain - 0.5).abs() < f32::EPSILON);
+    // 旧工程的单层增益被 `migrate_gain_split` 提升到 item 层：take 归 1.0，
+    // 可听增益保持 0.5（见 kernel 的 legacy_take_gain_is_hoisted_into_the_item_layer）。
+    assert!((take.gain - 1.0).abs() < f32::EPSILON);
+    assert!((clip.clip_gain - 0.5).abs() < f32::EPSILON);
     assert_eq!(take.source_start_sec, 1.0);
     assert_eq!(
         take.source_end_sec, 0.0,
         "v3 哨兵保留给 open_project 版本迁移"
     );
     assert_eq!(clip.source_path.as_deref(), Some("C:/audio/a.wav"));
-    assert!((clip.gain - 0.5).abs() < f32::EPSILON);
+    assert!(
+        (clip.gain - 1.0).abs() < f32::EPSILON,
+        "旧镜像随 take 归中性"
+    );
+    assert!((clip.audible_gain() - 0.5).abs() < 1e-6);
     // 旧命名曲线在加载时换算为 REAPER 形状/曲率模型（sine → 轻微 S）。
     assert_eq!(clip.fade_in_shape, 5.0);
     assert_eq!(clip.fade_out_shape, 5.0);
