@@ -2620,8 +2620,9 @@ function AppInner() {
                 );
                 if (relay) {
                     void relayHostKey(relay).then((outcome) => {
-                        // 只有"连让都没让成"才回落旧文案；其余情况由
-                        // `host_key_relay_notice` 事件说话（见下面的订阅）。
+                        // 只有"连让都没让成"（键不在让路键表里）才回落旧文案；
+                        // 其余情况按设计保持沉默 —— 让路成没成的证据在 `[relay]`
+                        // 诊断日志与诊断包读数里（提示事件已随 17d6f2cf 删除）。
                         if (outcome !== "unsupported") return;
                         const text = capabilityDeniedText(actionId, getActiveSurface());
                         if (text) showNotice(text, 4000, "warning");

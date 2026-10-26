@@ -22,14 +22,23 @@ export interface HostKeyRelayReply {
     /**
      * 不接手的原因（`null` = 已接手）。
      *
-     * 分两类，调用方据此决定要不要回落旧文案：
+     * 分三类，调用方据此决定要不要回落旧文案：
      * - `host-native` / `in-flight` / `rate-limited`：**正常不接手**（宿主本来就会处理、
      *   上一拍的探针还没走完、连按太快）。用户什么都没做错，不该看到任何提示。
      * - `unsupported-key` / `modified-key`：让路**没成立**，等于回到"插件做不到"的
      *   旧行为，调用方应回落旧文案。
+     * - `owned-key`：原生一致性闸拒绝投递 —— 这是入口 B（未绑定键）的投递撞上了
+     *   插件自己的键位表（两侧键表漂移或发布竞态）。对调用方等价于"已接手"：
+     *   未绑定键没有可回落的文案，证据在诊断读数的 `refused["owned-key"]` 里。
      */
     reason:
-        null | "host-native" | "in-flight" | "rate-limited" | "unsupported-key" | "modified-key";
+        | null
+        | "host-native"
+        | "in-flight"
+        | "rate-limited"
+        | "unsupported-key"
+        | "modified-key"
+        | "owned-key";
 }
 
 export const hostKeysApi = {
