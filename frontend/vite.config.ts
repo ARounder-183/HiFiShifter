@@ -9,8 +9,33 @@ import { resolve } from "path";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
+/**
+ * 各构建入口（多窗口 Tauri 应用）。
+ *
+ * `waveform-test.html` 是开发期波形调试页，**默认不进构建**：多一个 rollup
+ * 入口就多一份 dist 产物（并随安装包分发）。仅在以下情况加入：
+ * - `vite build --mode development`（开发模式构建，调试用）；
+ * - 显式设 `VITE_INCLUDE_TEST_PAGES=1`（例如打包环境里做波形回归验证）。
+ *
+ * dev server 不受影响：Vite 开发服务器按需服务根目录下的任意 HTML，
+ * 不依赖 rollupOptions.input。
+ */
+function buildInputs(mode: string): Record<string, string> {
+    const inputs: Record<string, string> = {
+        main: resolve(__dirname, "index.html"),
+        // REAPER原生WebView入口；同一个App，独立app入口不变。
+        plugin: resolve(__dirname, "plugin.html"),
+        // 独立窗口（把一个窗体拆到主窗口之外）：见 features/dock/detachedWindow.ts
+        detached: resolve(__dirname, "detached.html"),
+    };
+    if (mode === "development" || process.env.VITE_INCLUDE_TEST_PAGES === "1") {
+        inputs.waveformTest = resolve(__dirname, "waveform-test.html");
+    }
+    return inputs;
+}
+
 // https://vite.dev/config/
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
     base: "./",
     plugins: [react()],
     /*
@@ -28,14 +53,7 @@ export default defineConfig({
     },
     build: {
         rollupOptions: {
-            input: {
-                main: resolve(__dirname, "index.html"),
-                // REAPER原生WebView入口；同一个App，独立app入口不变。
-                plugin: resolve(__dirname, "plugin.html"),
-                // 独立窗口（把一个窗体拆到主窗口之外）：见 features/dock/detachedWindow.ts
-                detached: resolve(__dirname, "detached.html"),
-                waveformTest: resolve(__dirname, "waveform-test.html"),
-            },
+            input: buildInputs(mode),
             output: {
                 // 按库分组 vendor chunk：稳定缓存 + 避免超大主 chunk
                 manualChunks(id: string) {
@@ -85,4 +103,4 @@ export default defineConfig({
     },
     // 开发模式下清除缓存，确保总是重新构建
     clearScreen: false,
-});
+}));

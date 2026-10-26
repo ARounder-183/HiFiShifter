@@ -110,5 +110,25 @@ export default defineConfig([
             ],
         },
     },
+    {
+        // 根目录的 Node 侧脚本此前不在任何块的 files 里（其余块都是
+        // **/*.{ts,tsx}），scripts/*.mjs、eslint.config.js 与 postcss.config.js
+        // 等于从不被 lint —— 坏味道只能靠人工发现。补上：
+        // - 规则沿用 js.recommended（这些文件没有类型信息，不接 tseslint，
+        //   纯 JS 上 TS 规则面只是噪音）；
+        // - globals 必须 node+browser 并集：脚本本体在 Node 跑（process /
+        //   console），但 playwright 的 page.evaluate 回调字符串在浏览器里
+        //   求值，其中合法使用 document / window / rAF —— 只给 node 会让
+        //   no-undef 全线报错；
+        // - sourceType module（.mjs 与本仓的 ESM 配置文件都是模块语法，
+        //   顶层 await 依赖 ecmaVersion 2022+）。
+        files: ["scripts/**/*.mjs", "eslint.config.js", "postcss.config.js"],
+        extends: [js.configs.recommended],
+        languageOptions: {
+            ecmaVersion: 2022,
+            sourceType: "module",
+            globals: { ...globals.node, ...globals.browser },
+        },
+    },
     eslintConfigPrettier,
 ]);

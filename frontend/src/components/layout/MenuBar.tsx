@@ -8,6 +8,7 @@ import {
 import { handKeyboardToHost } from "../../services/hostKeyRelay";
 import { DropdownMenu, Flex } from "@radix-ui/themes";
 import { useI18n } from "../../i18n/I18nProvider";
+import type { Locale } from "../../i18n/messages";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
 import { shallowEqual } from "react-redux";
 import { store, type RootState } from "../../app/store";
@@ -193,7 +194,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     loopNewClips,
     onLoopNewClipsChange,
 }) => {
-    const { t, tf, tVars, setLocale, plural } = useI18n();
+    const { t, tf, tVars, setLocale, plural, locale } = useI18n();
     const dispatch = useAppDispatch();
     // 只选取本组件实际消费的字段子集并以 shallowEqual 比较：播放期间
     // runtime.playbackPositionSec 每 ~33ms 变一次，整片 session 的对象引用
@@ -1588,21 +1589,29 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                         </Flex>
                     </DropdownMenu.Trigger>
                     <DropdownMenu.Content>
-                        <DropdownMenu.Item onSelect={() => setLocale("en-US")}>
-                            {t("lang_en")}
-                        </DropdownMenu.Item>
-                        <DropdownMenu.Item onSelect={() => setLocale("zh-CN")}>
-                            {t("lang_zh")}
-                        </DropdownMenu.Item>
-                        <DropdownMenu.Item onSelect={() => setLocale("zh-TW")}>
-                            {t("lang_zh_tw")}
-                        </DropdownMenu.Item>
-                        <DropdownMenu.Item onSelect={() => setLocale("ja-JP")}>
-                            {t("lang_ja")}
-                        </DropdownMenu.Item>
-                        <DropdownMenu.Item onSelect={() => setLocale("ko-KR")}>
-                            {t("lang_ko")}
-                        </DropdownMenu.Item>
+                        {/* RadioGroup/RadioItem：语言是单选项，当前项必须带
+                            aria-checked 与指示符（role="menuitemradio" 由
+                            Radix 提供），否则读屏与键盘用户无从得知当前语言。 */}
+                        <DropdownMenu.RadioGroup
+                            value={locale}
+                            onValueChange={(value) => setLocale(value as Locale)}
+                        >
+                            <DropdownMenu.RadioItem value="en-US">
+                                {t("lang_en")}
+                            </DropdownMenu.RadioItem>
+                            <DropdownMenu.RadioItem value="zh-CN">
+                                {t("lang_zh")}
+                            </DropdownMenu.RadioItem>
+                            <DropdownMenu.RadioItem value="zh-TW">
+                                {t("lang_zh_tw")}
+                            </DropdownMenu.RadioItem>
+                            <DropdownMenu.RadioItem value="ja-JP">
+                                {t("lang_ja")}
+                            </DropdownMenu.RadioItem>
+                            <DropdownMenu.RadioItem value="ko-KR">
+                                {t("lang_ko")}
+                            </DropdownMenu.RadioItem>
+                        </DropdownMenu.RadioGroup>
                     </DropdownMenu.Content>
                 </DropdownMenu.Root>
             </Flex>

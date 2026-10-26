@@ -177,6 +177,43 @@ const boundaryScratch = new Float64Array(3);
 /** 媒体边界标记的两个位置（0 与媒体时长）。 */
 const mediaBoundaryScratch = new Float64Array(2);
 
+/**
+ * source tile 复用 scratch（模块级一次分配，配合 `tileScratchCount` 计数使用）。
+ *
+ * 【为什么需要】loop 展开使每个 clip 每次重建都产出 tiles 数组与一批 tile
+ * 对象（细缩放下可达数千个）。此前的 `const tiles: SourceTile[] = []` 在
+ * 400 clip 的全览重建里是每 clip 两次分配（数组 + 逐 tile 对象），全部落在
+ * 渲染关键路径上。池化后稳态零分配：容量按需增长（tile 对象按槽复用），
+ * 总量受展开上限（4096 周期 + 2）约束、不会无界。`buildWaveformScene`
+ * 同步执行、无重入，与上方 Float64Array scratch 同一纪律——调用方不得在
+ * 函数返回后持有 tile 引用。
+ */
+const tileScratch: SourceTile[] = [];
+let tileScratchCount = 0;
+
+/** 开始收集新一批 tile（复用底层槽位，计数归零）。 */
+function beginTileScratch(): void {
+    tileScratchCount = 0;
+}
+
+function pushTileScratch(
+    localStartSec: number,
+    durationSec: number,
+    sourceStartSec: number,
+    sourceEndSec: number,
+): void {
+    let tile = tileScratch[tileScratchCount];
+    if (tile === undefined) {
+        tile = { localStartSec: 0, durationSec: 0, sourceStartSec: 0, sourceEndSec: 0 };
+        tileScratch[tileScratchCount] = tile;
+    }
+    tile.localStartSec = localStartSec;
+    tile.durationSec = durationSec;
+    tile.sourceStartSec = sourceStartSec;
+    tile.sourceEndSec = sourceEndSec;
+    tileScratchCount += 1;
+}
+
 function effectiveFade(auto: number | undefined, manual: number): number {
     const automatic = Number(auto ?? 0);
     return automatic > 0 ? automatic : Math.max(0, Number(manual) || 0);
@@ -309,15 +346,10 @@ export function buildWaveformScene(args: {
             // clip 两个覆盖都缺省，正好退回行波形带。
             const bandTopPx = row.waveformTopPx + (clip.laneTopPx ?? 0);
             const bandHeightPx = Math.max(1, clip.laneHeightPx ?? row.waveformHeightPx);
-            const tiles: SourceTile[] = [];
+            beginTileScratch();
 
             if (!loopEnabled) {
-                tiles.push({
-                    localStartSec: 0,
-                    durationSec: clip.lengthSec,
-                    sourceStartSec: window.winStartSec,
-                    sourceEndSec: window.winEndSec,
-                });
+                pushTileScratch(0, clip.lengthSec, window.winStartSec, window.winEndSec);
             } else {
                 const anchorForward = modEuclid(sourceStartSec, mediaDurationSec);
                 const anchorReverse = modEuclid(sourceEndSec, mediaDurationSec);
@@ -326,12 +358,12 @@ export function buildWaveformScene(args: {
                 const periodSec = mediaDurationSec / playbackRate;
 
                 if (headDurationSec > 1e-9 && visibleLocalStartSec < headDurationSec) {
-                    tiles.push({
-                        localStartSec: 0,
-                        durationSec: headDurationSec,
-                        sourceStartSec: reversed ? 0 : anchorForward,
-                        sourceEndSec: reversed ? anchorReverse : mediaDurationSec,
-                    });
+                    pushTileScratch(
+                        0,
+                        headDurationSec,
+                        reversed ? 0 : anchorForward,
+                        reversed ? anchorReverse : mediaDurationSec,
+                    );
                 }
 
                 const firstPeriod = Math.max(
@@ -343,23 +375,18 @@ export function buildWaveformScene(args: {
                     localStartSec < visibleLocalEndSec - 1e-9 && guard < 4096;
                     localStartSec += periodSec, guard += 1
                 ) {
-                    tiles.push({
-                        localStartSec,
-                        durationSec: periodSec,
-                        sourceStartSec: 0,
-                        sourceEndSec: mediaDurationSec,
-                    });
+                    pushTileScratch(localStartSec, periodSec, 0, mediaDurationSec);
                     if (guard === 4095 && localStartSec + periodSec < visibleLocalEndSec - 1e-9) {
                         // 超短周期 × 长循环 × 极缩放可能超出 4096 个周期的上限。
                         // 简单截断会让剩余范围整段空白（旧实现有退化兜底）；
                         // 剩余周期都已亚像素级，退化为覆盖余下区间的单片近似，
                         // 视觉上是一段致密块，好过整段空白。
-                        tiles.push({
-                            localStartSec: localStartSec + periodSec,
-                            durationSec: visibleLocalEndSec - (localStartSec + periodSec),
-                            sourceStartSec: 0,
-                            sourceEndSec: mediaDurationSec,
-                        });
+                        pushTileScratch(
+                            localStartSec + periodSec,
+                            visibleLocalEndSec - (localStartSec + periodSec),
+                            0,
+                            mediaDurationSec,
+                        );
                     }
                 }
 
@@ -400,7 +427,8 @@ export function buildWaveformScene(args: {
             const fadeInSec = effectiveFade(clip.autoFadeInSec, clip.fadeInSec);
             const fadeOutSec = effectiveFade(clip.autoFadeOutSec, clip.fadeOutSec);
 
-            for (const tile of tiles) {
+            for (let tileIndex = 0; tileIndex < tileScratchCount; tileIndex += 1) {
+                const tile = tileScratch[tileIndex];
                 const tileEndSec = tile.localStartSec + tile.durationSec;
                 const clippedLocalStart = Math.max(tile.localStartSec, visibleLocalStartSec);
                 const clippedLocalEnd = Math.min(tileEndSec, visibleLocalEndSec);

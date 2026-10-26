@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { ChevronDownIcon, ChevronUpIcon, MagnifyingGlassIcon } from "@radix-ui/react-icons";
 import { useAppDispatch, useAppSelector } from "../../app/hooks";
@@ -65,6 +65,8 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
     const [results, setResults] = useState<FileEntry[]>([]);
     const [selectedIndex, setSelectedIndex] = useState(0);
     const [loading, setLoading] = useState(false);
+    // 组合框语义的 id 基（输入框 / listbox / option 见 render 段）。
+    const popupId = useId();
     const [regexEnabled, setRegexEnabled] = useState(false);
     const [sortMode, setSortMode] = useState<"name" | "date" | "size">("name");
     // 初值与文件浏览器一致：名称升序（切换依据时按该依据的自然方向重置）。
@@ -406,6 +408,15 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
     // 「计算机」虚拟层（盘符列表）没有可递归搜索的目录，与未选文件夹同样对待。
     const noFolder = !currentPath || currentPath === FILE_BROWSER_COMPUTER_PATH;
 
+    // 组合框语义的 id 族（输入框 / 列表 / 选项），useId 保证多实例不撞。
+    const inputId = `${popupId}-input`;
+    const listboxId = `${popupId}-list`;
+    const optionId = (index: number): string => `${popupId}-option-${index}`;
+    const hasResults = !noFolder && query.trim() !== "" && !loading && sortedResults.length > 0;
+    // 键盘选中项的 aria-activedescendant 指针（无结果时不挂，避免指向不存在的 id）。
+    const activeDescendantId =
+        hasResults && sortedResults[selectedIndex] ? optionId(selectedIndex) : undefined;
+
     return (
         <>
             {/* 全屏透明遮罩层 —— 点击即关闭弹窗 */}
@@ -451,6 +462,16 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                         className="flex-1 bg-transparent border-none outline-hidden text-qt-text text-qt-xs placeholder:text-qt-text-muted"
                         autoComplete="off"
                         spellCheck={false}
+                        // 输入 + 下拉候选 = 组合框：placeholder 不能当无障碍名称
+                        // （读屏通常不朗读它），显式给 aria-label；列表语义见下方
+                        // 列表容器的 role="listbox"。
+                        id={inputId}
+                        role="combobox"
+                        aria-label={noFolder ? t("qs_no_folder") : t("qs_placeholder")}
+                        aria-autocomplete="list"
+                        aria-expanded={hasResults}
+                        aria-controls={listboxId}
+                        aria-activedescendant={activeDescendantId}
                     />
                     {/* 正则切换 */}
                     <AppIconButton
@@ -518,9 +539,13 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                     {loading && <AppBusy className="shrink-0" />}
                 </div>
 
-                {/* 候选列表 */}
+                {/* 候选列表：listbox + option 让方向键/回车的键盘模型对读屏可见
+                    （aria-activedescendant 挂在上方输入框上，见 combobox 语义）。 */}
                 <div
                     ref={listRef}
+                    id={listboxId}
+                    role="listbox"
+                    aria-labelledby={inputId}
                     className="hs-scroll-gutter flex-1 overflow-y-auto min-h-0"
                     style={{ maxHeight: 340 }}
                 >
@@ -542,6 +567,9 @@ export const QuickSearchPopup: React.FC<QuickSearchPopupProps> = ({ open, onClos
                                 <div
                                     key={entry.path}
                                     data-qs-item
+                                    id={optionId(index)}
+                                    role="option"
+                                    aria-selected={index === selectedIndex}
                                     className={[
                                         "flex items-center gap-1.5 px-2 py-[4px] cursor-pointer text-qt-xs",
                                         index === selectedIndex

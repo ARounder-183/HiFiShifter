@@ -7,13 +7,6 @@ export interface HostFadeMetadata {
     out_s: number;
 }
 
-export type ApiResult<T> =
-    | ({ ok: true } & T)
-    | {
-          ok: false;
-          error: { code?: string; message: string; traceback?: string };
-      };
-
 export interface RuntimeInfo {
     ok: true;
     device: string;
@@ -159,6 +152,8 @@ export interface TimelineClip {
     midi_fill_gaps?: boolean;
 }
 
+// ProjectMeta 保留导出：`selectClipRemote`（features/session/thunks）的导出
+// 类型引用它，sdk 声明发射（tsconfig.sdk.json）要求该名字可从本模块命名。
 export interface ProjectMeta {
     name: string;
     path?: string | null;
@@ -348,7 +343,8 @@ export interface SilenceDetectOptionsPayload {
     syncAllTakes: boolean;
 }
 
-export interface SilenceRegion {
+// 仅作为 ClipSilenceReport.regions 的元素类型使用，不导出。
+interface SilenceRegion {
     startSec: number;
     endSec: number;
 }
@@ -530,23 +526,6 @@ export interface WaveformPeaksSegmentPayload {
     max: number[];
 }
 
-/** HFSPeaks v2 mipmap 级别（L0=div16, L1=div512, L2=div4096；默认切换阈值 512/1024 spp） */
-export type MipmapLevel = 0 | 1 | 2;
-
-/** v2 波形峰值响应 */
-export interface WaveformPeaksV2Payload {
-    ok: boolean;
-    min: number[];
-    max: number[];
-    sample_rate: number;
-    mipmap_level: number;
-    division_factor: number;
-    /** 返回数据实际覆盖的起始时间（秒），由后端 floor/ceil 取整后的峰值索引决定 */
-    actual_start_sec: number;
-    /** 返回数据实际覆盖的持续时间（秒），由后端 floor/ceil 取整后的峰值索引决定 */
-    actual_duration_sec: number;
-}
-
 export type ParamReferenceKind = "source_curve" | "default_value";
 
 export interface ParamFramesPayload {
@@ -632,7 +611,10 @@ export interface OnnxDiagnosticResult {
     gpuDiagnostic?: GpuDiagnostic | null;
 }
 
-export interface GpuDiagnostic {
+// 以下 GPU / DML 诊断载荷类型仅被本文件内的聚合类型（OnnxDiagnosticResult、
+// GpuEnumerationResult、DmlAdapterList、BenchmarkResult）引用，模块外无引用，
+// 因此不再导出。
+interface GpuDiagnostic {
     availableProviders: string[];
     selectedEp: string;
     gpuDeviceId: number;
@@ -643,7 +625,7 @@ export interface GpuDiagnostic {
 }
 
 /** Info about a single GPU device. */
-export interface GpuDeviceInfo {
+interface GpuDeviceInfo {
     deviceId: number;
     name: string;
     memoryMb: number;
@@ -657,7 +639,7 @@ export interface GpuEnumerationResult {
 }
 
 /** DirectML-compatible GPU adapter info from DXGI enumeration. */
-export interface DmlAdapterInfo {
+interface DmlAdapterInfo {
     deviceId: number;
     name: string;
     dedicatedVideoMemoryMb: number;
@@ -705,19 +687,10 @@ export interface BenchmarkResult {
     dmlAdapters?: DmlAdapterInfo[];
 }
 
-export interface BenchmarkResult_simple {
-    cpuMedianMs: number;
-    cpuRtFactor: number;
-    gpuMedianMs?: number | null;
-    gpuRtFactor?: number | null;
-    dmlMedianMs?: number | null;
-    dmlRtFactor?: number | null;
-    benchmarkSamples: number;
-}
-
 // ─── Processor param descriptors ────────────────────────────────────────────
 
-export type ParamKindDto =
+// 仅作为 ProcessorParamDescriptor.kind 使用，不导出。
+type ParamKindDto =
     | {
           type: "automation_curve";
           unit: string;

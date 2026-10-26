@@ -14,6 +14,11 @@
         "moduleDetection": "force",
         "noEmit": true,
 
+        /* scripts/*.mjs（node 侧工具脚本）：仅纳入解析（allowJs、不开
+           checkJs），编辑器至少能提供跳转/补全；类型质量由 eslint 块守。 */
+        "allowJs": true,
+        "checkJs": false,
+
         /* Linting */
         "strict": true,
         "noUnusedLocals": true,
@@ -22,5 +27,5 @@
         "noFallthroughCasesInSwitch": true,
         "noUncheckedSideEffectImports": true
     },
-    "include": ["vite.config.ts"]
+    "include": ["vite.config.ts", "vitest.config.ts", "scripts/**/*.mjs"]
 }

@@ -35,6 +35,9 @@ export const koKR = {
     export_dialog_range_all: "전체",
     export_dialog_range_custom: "사용자 지정",
     export_dialog_range_custom_label: "시작 / 끝",
+    export_dialog_range_custom_start: "시작",
+    export_dialog_range_custom_end: "끝",
+    export_dialog_range_custom_unit_seconds: "초",
     export_dialog_output_dir: "출력 폴더",
     export_dialog_project_file_name: "출력 파일 이름",
     export_dialog_browse: "찾아보기",
@@ -244,6 +247,7 @@ export const koKR = {
     action_stop: "정지",
     action_metronome: "메트로놈",
     action_refresh: "새로고침",
+    common_dialog_action_failed: "작업 실패",
     common_loading: "로딩 중...",
     common_rendering: "렌더링 중...",
 

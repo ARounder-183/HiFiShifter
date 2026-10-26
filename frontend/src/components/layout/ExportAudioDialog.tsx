@@ -1429,7 +1429,7 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                 unit="seconds"
                                 min={0}
                                 width={160}
-                                ariaLabel={tf("export_dialog_range_custom_label")}
+                                ariaLabel={tf("export_dialog_range_custom_start")}
                                 onChange={(next) => setCustomStartSec(next)}
                                 onCommit={(next) => setCustomStartSec(next)}
                             />
@@ -1439,11 +1439,13 @@ export function ExportAudioDialog({ open, onOpenChange }: ExportAudioDialogProps
                                 unit="seconds"
                                 min={0}
                                 width={160}
-                                ariaLabel={tf("export_dialog_range_custom_label")}
+                                ariaLabel={tf("export_dialog_range_custom_end")}
                                 onChange={(next) => setCustomEndSec(next)}
                                 onCommit={(next) => setCustomEndSec(next)}
                             />
-                            <span className="hs-type-caption">sec</span>
+                            <span className="hs-type-caption">
+                                {tf("export_dialog_range_custom_unit_seconds")}
+                            </span>
                         </Flex>
                     )}
 

@@ -36,6 +36,9 @@ export const zhTW = {
     export_dialog_range_all: "全部",
     export_dialog_range_custom: "自訂",
     export_dialog_range_custom_label: "起始 / 結束",
+    export_dialog_range_custom_start: "起始",
+    export_dialog_range_custom_end: "結束",
+    export_dialog_range_custom_unit_seconds: "秒",
     export_dialog_output_dir: "輸出資料夾",
     export_dialog_project_file_name: "輸出檔案名稱",
     export_dialog_browse: "瀏覽",
@@ -165,6 +168,7 @@ export const zhTW = {
     action_stop: "停止",
     action_metronome: "節拍器",
     action_refresh: "重新整理",
+    common_dialog_action_failed: "操作失敗",
     common_loading: "載入中...",
     common_rendering: "算繪中...",
 

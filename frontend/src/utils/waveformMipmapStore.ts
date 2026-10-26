@@ -79,6 +79,16 @@ const NOT_READY_MAX_RETRY = 5;
  */
 const MAX_CACHE_BYTES = 192 * 1024 * 1024;
 
+/**
+ * 空切片的共享零长度视图。
+ *
+ * getSlice / getSliceFromPeaks 在空时间区间上此前每次 `new Float32Array(0)`
+ * ×2（getResampledSlice 的空 interleaved 再 +1）——高频重绘路径上是纯粹的
+ * 年轻代垃圾分配。切片的既有语义就是只读（subarray 视图直通缓存数据，
+ * 调用方从未原地写入），共享同一常量安全。
+ */
+const EMPTY_F32 = new Float32Array(0);
+
 // ============== 类型 ==============
 
 /** 单级 peaks 数据 */
@@ -320,6 +330,14 @@ class WaveformMipmapStoreImpl {
             const oldest = this.cache.get(oldestKey);
             this.cache.delete(oldestKey);
             this.cacheBytes -= oldest?.bytes ?? 0;
+            // 驱逐必须是完整的作废语义（与 invalidate() 对齐）：递增该文件的
+            // 代次 + 摘掉在途登记 + 作废"尚未就绪"重试。否则驱逐时仍在途的
+            // loadLevel 落地后 applyDecoded 会重建刚驱逐的条目——"复活"路径
+            // 绕过一次预算判定（下一轮驱逐仍会收敛，这里修正的是预算语义，
+            // 不是泄漏）。
+            this.pathGenerations.set(oldestKey, (this.pathGenerations.get(oldestKey) ?? 0) + 1);
+            this.releaseInFlight(oldestKey);
+            this.clearNotReadyRetry(oldestKey);
             this.notify(oldestKey, "evicted");
         }
     }
@@ -423,8 +441,8 @@ class WaveformMipmapStoreImpl {
 
         if (endIdx <= startIdx) {
             return {
-                min: new Float32Array(0),
-                max: new Float32Array(0),
+                min: EMPTY_F32,
+                max: EMPTY_F32,
             };
         }
 
@@ -474,22 +492,18 @@ class WaveformMipmapStoreImpl {
         const w = Math.max(1, targetWidth);
 
         // 计算实际的数据时间范围（用于 renderWaveform 的 dataStartSec/dataDurationSec）
-        let dataStartSec = startSec;
-        let dataDurationSec = durationSec;
-        if (peaks) {
-            const { sampleRate, divisionFactor } = peaks;
-            const startIdx = Math.max(0, Math.floor((startSec * sampleRate) / divisionFactor));
-            const endIdx = Math.min(
-                peaks.min.length,
-                Math.ceil(((startSec + durationSec) * sampleRate) / divisionFactor),
-            );
-            dataStartSec = (startIdx * divisionFactor) / sampleRate;
-            dataDurationSec = ((endIdx - startIdx) * divisionFactor) / sampleRate;
-        }
+        const { sampleRate, divisionFactor } = peaks;
+        const startIdx = Math.max(0, Math.floor((startSec * sampleRate) / divisionFactor));
+        const endIdx = Math.min(
+            peaks.min.length,
+            Math.ceil(((startSec + durationSec) * sampleRate) / divisionFactor),
+        );
+        const dataStartSec = (startIdx * divisionFactor) / sampleRate;
+        const dataDurationSec = ((endIdx - startIdx) * divisionFactor) / sampleRate;
 
         if (srcLen === 0) {
             return {
-                interleaved: new Float32Array(0),
+                interleaved: EMPTY_F32,
                 dataStartSec,
                 dataDurationSec,
             };
@@ -1270,8 +1284,8 @@ class WaveformMipmapStoreImpl {
 
         if (endIdx <= startIdx) {
             return {
-                min: new Float32Array(0),
-                max: new Float32Array(0),
+                min: EMPTY_F32,
+                max: EMPTY_F32,
             };
         }
 

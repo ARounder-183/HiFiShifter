@@ -39,6 +39,10 @@ export interface DockSplitterProps {
 /** 一次拖拽的目标尺寸（也是最终提交的载荷）。 */
 type SplitTarget = { ratio: number; fixed: DockSplitNode["fixed"] };
 
+/** 键盘步进（CSS px）：方向键一格；按住 Shift 走精细档（与数字字段的手感同源）。 */
+const KEYBOARD_STEP_PX = 16;
+const KEYBOARD_FINE_STEP_PX = 4;
+
 export function DockSplitter({
     dir,
     containerRef,
@@ -51,6 +55,9 @@ export function DockSplitter({
 }: DockSplitterProps) {
     const [dragging, setDragging] = useState(false);
     const latestRef = useRef<SplitTarget | null>(null);
+    const separatorRef = useRef<HTMLDivElement | null>(null);
+    /** aria-valuenow（两侧占比 %）：聚焦/键控时从 DOM 实测刷新。 */
+    const [valueNowPct, setValueNowPct] = useState<number | null>(null);
 
     const onPointerDown = useCallback(
         (event: React.PointerEvent<HTMLDivElement>) => {
@@ -117,6 +124,79 @@ export function DockSplitter({
         [containerRef, dir, fixed, minA, minB, onCommit, onLiveSize],
     );
 
+    /*
+     * 键盘操作（WAI-ARIA "focusable separator" 模式）。
+     *
+     * 【为什么实测而不是读 props】当前分界位置不在本组件的 props 里（拖拽期
+     * 间只有 `fixed` 一侧有权威像素值，`fixed === null` 时只有 Redux 里的
+     * ratio），而分隔条在容器里的**几何位置**本身就是两侧当前尺寸的事实：
+     * `分隔条左缘（row）/ 上缘（column）− 容器对应缘` 恰好等于侧 A 的当前
+     * 尺寸。聚焦与每次键控都重新实测，鼠标拖拽后的漂移也自然被带上。
+     *
+     * 方向键是离散动作，立即提交（与滚轮/数字字段的方向键同一语义），不走
+     * 拖拽期的 onLiveSize 直写路径。
+     */
+    const measureSplit = useCallback((): { available: number; aSize: number } | null => {
+        const container = containerRef.current;
+        const separator = separatorRef.current;
+        if (!container || !separator) return null;
+        const contRect = container.getBoundingClientRect();
+        const sepRect = separator.getBoundingClientRect();
+        const horizontal = dir === "row";
+        const available = Math.max(
+            0,
+            (horizontal ? contRect.width : contRect.height) - DOCK_SPLITTER_PX,
+        );
+        if (available <= 0) return null;
+        const aSize = horizontal ? sepRect.left - contRect.left : sepRect.top - contRect.top;
+        return { available, aSize };
+    }, [containerRef, dir]);
+
+    const commitKeyboardStep = useCallback(
+        (nextASize: number) => {
+            const m = measureSplit();
+            if (!m) return;
+            const next = resolveSplitDragTarget({
+                fixed,
+                minA,
+                minB,
+                available: m.available,
+                pointerOffset: nextASize,
+            });
+            setValueNowPct(Math.round(next.ratio * 100));
+            onCommit(next);
+        },
+        [fixed, minA, minB, measureSplit, onCommit],
+    );
+
+    const onKeyDown = useCallback(
+        (event: React.KeyboardEvent<HTMLDivElement>) => {
+            const horizontal = dir === "row";
+            const forwardKey = horizontal ? "ArrowRight" : "ArrowDown";
+            const backwardKey = horizontal ? "ArrowLeft" : "ArrowUp";
+            const m = measureSplit();
+            if (!m) return;
+            if (event.key === forwardKey || event.key === backwardKey) {
+                event.preventDefault();
+                const step =
+                    (event.shiftKey ? KEYBOARD_FINE_STEP_PX : KEYBOARD_STEP_PX) *
+                    (event.key === forwardKey ? 1 : -1);
+                commitKeyboardStep(m.aSize + step);
+                return;
+            }
+            if (event.key === "Home") {
+                event.preventDefault();
+                commitKeyboardStep(minA);
+                return;
+            }
+            if (event.key === "End") {
+                event.preventDefault();
+                commitKeyboardStep(Math.max(minA, m.available - minB));
+            }
+        },
+        [commitKeyboardStep, dir, measureSplit, minA, minB],
+    );
+
     return (
         <div
             // `hs-touch-none`：分隔条按下即拖，触摸上必须收回手势所有权，
@@ -126,6 +206,18 @@ export function DockSplitter({
             data-dragging={dragging ? "true" : "false"}
             role="separator"
             aria-orientation={dir === "row" ? "vertical" : "horizontal"}
+            // 可聚焦分隔条：读屏用户与键盘用户唯一可用的尺寸调整通道。
+            tabIndex={0}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={valueNowPct ?? undefined}
+            aria-valuetext={valueNowPct == null ? undefined : `${valueNowPct}%`}
+            ref={separatorRef}
+            onFocus={() => {
+                const m = measureSplit();
+                if (m) setValueNowPct(Math.round((m.aSize / m.available) * 100));
+            }}
+            onKeyDown={onKeyDown}
             onPointerDown={onPointerDown}
             onDoubleClick={onReset}
         />

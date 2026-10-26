@@ -14,9 +14,11 @@ import type {
     RadixAccentColor,
     RadixGrayColor,
     RadixRadius,
+    QtColorToken,
 } from "./themeTypes";
 import {
     DEFAULT_APPEARANCE,
+    QT_COLOR_TOKENS,
     RADIX_ACCENT_COLORS,
     RADIX_GRAY_COLORS,
     RADIX_RADIUS_OPTIONS,
@@ -112,6 +114,52 @@ function isValidRadius(v: unknown): v is RadixRadius {
 }
 
 /**
+ * 颜色值白名单正则（导入主题用）。
+ *
+ * 接受本应用颜色选择器会产出的全部形态：#hex（3/4/6/8 位）、rgb()/rgba()、
+ * hsl()/hsla() 与 CSS 命名色。命名字用有界的字母段近似（完整命名色表 148 个
+ * 不值得内置；不认识的词在 CSS 里本就解析失败、回落继承值，不会崩）。
+ *
+ * 【为什么要校验】导入的 colors 此后会逐条 `setProperty` 到 `--qt-*` 上——
+ * 主题文件是用户手写/外部来源的 JSON，不校验就把任意字符串（分号、
+ * `url(...)`、几 KB 的乱码）写进全局自定义属性，轻则界面花掉，重则把
+ * 恶意内容持久化进 localStorage 并随每次启动生效。
+ */
+const CSS_COLOR_RE =
+    /^(?:#[0-9a-f]{3,4}|#[0-9a-f]{6}|#[0-9a-f]{8}|rgba?\(\s*[\d.]+%?\s*,\s*[\d.]+%?\s*,\s*[\d.]+%?\s*(?:,\s*[\d.]+%?\s*)?\)|hsla?\(\s*[\d.]+(?:deg|rad|turn)?\s*,\s*[\d.]+%\s*,\s*[\d.]+%\s*(?:,\s*[\d.]+%?\s*)?\)|[a-z]{3,30})$/i;
+
+const KNOWN_COLOR_TOKENS = new Set<string>(QT_COLOR_TOKENS);
+
+/** 单个颜色值是否为可安全写入 CSS 变量的形态。 */
+function isValidCssColor(v: unknown): v is string {
+    return typeof v === "string" && CSS_COLOR_RE.test(v.trim()) && v.trim().length <= 64;
+}
+
+/**
+ * 清洗导入的 colors 映射：只保留**已知 token** 且**值合法**的条目。
+ * 非法条目静默丢弃（导入的应是可用的主题，报错列表对用户没有行动价值）。
+ */
+function sanitizeImportedColors(input: unknown): Partial<Record<QtColorToken, string>> {
+    if (input === null || typeof input !== "object") return {};
+    const out: Partial<Record<QtColorToken, string>> = {};
+    for (const [key, value] of Object.entries(input as Record<string, unknown>)) {
+        if (!KNOWN_COLOR_TOKENS.has(key)) continue;
+        if (isValidCssColor(value)) out[key as QtColorToken] = value.trim();
+    }
+    return out;
+}
+
+/** 清洗导入的波形颜色（fill/stroke 都合法才保留，缺省交回默认值）。 */
+function sanitizeWaveformColors(input: unknown): { fill: string; stroke: string } | undefined {
+    if (input === null || typeof input !== "object") return undefined;
+    const record = input as Record<string, unknown>;
+    if (isValidCssColor(record.fill) && isValidCssColor(record.stroke)) {
+        return { fill: record.fill.trim(), stroke: record.stroke.trim() };
+    }
+    return undefined;
+}
+
+/**
  * 导出主题为 v2 JSON 字符串（包含通用设置 + 颜色覆盖）
  */
 export function exportThemeAsJson(
@@ -154,8 +202,8 @@ export function importThemeFromJson(json: string): {
                 id: parsed.id ?? crypto.randomUUID(),
                 name: parsed.name,
                 base: parsed.base,
-                colors: parsed.colors,
-                waveformColors: parsed.waveformColors ?? undefined,
+                colors: sanitizeImportedColors(parsed.colors),
+                waveformColors: sanitizeWaveformColors(parsed.waveformColors),
                 accentColor: isValidAccentColor(parsed.accentColor)
                     ? parsed.accentColor
                     : undefined,

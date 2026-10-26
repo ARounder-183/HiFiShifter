@@ -129,12 +129,24 @@ export function AppNumberField({
      * `source` 表示"这份 text 是从哪个外部值派生的"：打字时它不变（外部值也
      * 没变），提交后我们乐观地把它推进到新值，于是紧随其后的 props 更新不会
      * 覆盖草稿。
+     *
+     * 【聚焦期间跳过重播种】实时 `onChange` 会把**未取整的中间值**（例如
+     * "5.5"，而该单位的小数位是 0）交给上游，上游按自己的域取整/夹紧后回流
+     * 成 6 —— 若此刻就地重播种，`format(5.5, 0)` 会把用户打到一半的 "5.5"
+     * 当场改写成 "6"（实测：ClipFormantToolWindow）。聚焦即"草稿期"，外部
+     * 值在 blur / Enter 提交之前不是权威；失焦（或从未聚焦）后照旧重播种。
+     * 原生受控输入在聚焦时同样不采纳外部回写，语义一致。
+     *
+     * 【为什么用 focus 状态而不是读 ref】渲染期读 `ref.current` 判聚焦是
+     * react-hooks/refs 明确禁止的模式；onFocus/onBlur 各一次 setState，
+     * 成本可以忽略。
      */
+    const [focused, setFocused] = useState(false);
     const [draft, setDraft] = useState(() => ({
         source: value,
         text: format(value, spec.decimals),
     }));
-    if (draft.source !== value) {
+    if (draft.source !== value && !focused) {
         setDraft({ source: value, text: format(value, spec.decimals) });
     }
     const text = draft.text;
@@ -243,7 +255,11 @@ export function AppNumberField({
                         onChange(clamp(parsed, min, max));
                     }
                 }}
-                onBlur={commitText}
+                onBlur={() => {
+                    setFocused(false);
+                    commitText();
+                }}
+                onFocus={() => setFocused(true)}
                 onKeyDown={(event) => {
                     if (event.key === "ArrowUp") {
                         stepByArrow(event, 1);

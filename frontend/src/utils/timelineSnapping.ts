@@ -119,21 +119,31 @@ export function snapTimelineClipMove(
         ? Math.min(Math.max(0, clipSnapOffsetSec), safeLen)
         : 0;
 
+    // 三次探测（前缘 / 偏移点 / 后缘）共用同一份轨道过滤结果：同一 ctx 下
+    // 结果恒同，重建只是重复扫描（见 visibleClipsForSnap 的说明）。吸附总
+    // 开关关闭时 snapTimelinePosition 内部直接早退，这里也保持惰性——不
+    // 为注定早退的探测付一次过滤。
+    let sharedVisibleClips: readonly ClipInfo[] | null = null;
+    const probe = (rawSec: number): SnapResult => {
+        sharedVisibleClips ??= visibleClipsForSnap(ctx);
+        return snapTimelinePosition(ctx, rawSec, sharedVisibleClips);
+    };
+
     const candidates: Array<{
         result: SnapResult;
         side: SnapClipMoveResult["edgeSide"];
         shift: number;
     }> = [];
-    const startResult = snapTimelinePosition(ctx, rawStartSec);
+    const startResult = probe(rawStartSec);
     candidates.push({ result: startResult, side: "start", shift: 0 });
     if (safeOffset > 1e-9 && Math.abs(safeOffset - safeLen) > 1e-9) {
-        const offsetResult = snapTimelinePosition(ctx, rawStartSec + safeOffset);
+        const offsetResult = probe(rawStartSec + safeOffset);
         candidates.push({ result: offsetResult, side: "snap_offset", shift: safeOffset });
     }
     if (safeLen > 1e-9) {
         // 后缘；偏移恰等于长度（两位置重合）时跳过，避免重复候选。
         if (!(safeOffset > 1e-9 && Math.abs(safeOffset - safeLen) <= 1e-9)) {
-            const endResult = snapTimelinePosition(ctx, rawStartSec + safeLen);
+            const endResult = probe(rawStartSec + safeLen);
             candidates.push({ result: endResult, side: "end", shift: safeLen });
         }
     }
@@ -371,9 +381,12 @@ function clipTrackDistance(
  *
  * 【为什么把轨道索引提出来】`snapAcrossTracks` 默认开启，于是每个 clip 都要
  * 按轨道距离过滤；此前每个 clip 各做两次 `findIndex`（锚点轨道是**循环不变量**，
- * 却每 clip 重算一次）。而 `snapTimelineClipMove` 每次指针移动最多调用 3 次
- * `snapTimelinePosition`，每次又会两次调用本函数 —— clip/轨道多时是纯粹的
- * 重复扫描。索引与锚点下标一次算好，候选结果也由调用方共用一份。
+ * 却每 clip 重算一次）。索引与锚点下标一次算好，候选结果也由调用方共用一份。
+ *
+ * 【为什么还要共用过滤结果本身】`snapTimelineClipMove` 每次指针移动最多调用
+ * 3 次 `snapTimelinePosition`，每次又会调用本函数一次 —— 同一 ctx 的过滤结果
+ * 恒同，重复的只是整套索引重建 + 全 clip 扫描。clip-move 路径因此把结果算一次
+ * 后经 `precomputedVisibleClips` 传入三次探测。
  */
 function visibleClipsForSnap(ctx: TimelineSnapContext): ClipInfo[] {
     const excluded = ctx.excludeClipIds ?? new Set<string>();
@@ -568,8 +581,17 @@ function pushExtraCandidates(ctx: TimelineSnapContext, out: SnapCandidate[]): vo
 
 /**
  * 计算 rawSec 的吸附结果。
+ *
+ * @param precomputedVisibleClips 调用方预计算的轨道过滤结果（同一 ctx 的
+ *        多次探测共用一份，见 `visibleClipsForSnap` 的说明）；缺省时内部
+ *        现算。传入的列表必须与 `visibleClipsForSnap(ctx)` 的结果一致——
+ *        即同一 ctx、未变更 tracks/clips/settings 的快照。
  */
-export function snapTimelinePosition(ctx: TimelineSnapContext, rawSec: number): SnapResult {
+export function snapTimelinePosition(
+    ctx: TimelineSnapContext,
+    rawSec: number,
+    precomputedVisibleClips?: readonly ClipInfo[],
+): SnapResult {
     const settings = ctx.settings;
     const safeRaw = clampSec(rawSec);
     if (!settings.enabled) {
@@ -580,7 +602,7 @@ export function snapTimelinePosition(ctx: TimelineSnapContext, rawSec: number): 
 
     // 轨道过滤后的可见 clip 一次算好，选择族与 Clip 边缘族共用（两族候选顺序
     // 都来自同一个 `ctx.clips` 过滤结果，合并后与各自独立过滤逐项一致）。
-    const visibleClips = visibleClipsForSnap(ctx);
+    const visibleClips = precomputedVisibleClips ?? visibleClipsForSnap(ctx);
 
     // ── 网格候选 ──
     const wantsGrid =

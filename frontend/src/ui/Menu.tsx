@@ -250,13 +250,27 @@ export function AppContextMenu({
     useLayoutEffect(() => {
         const el = ref.current;
         if (!el) return;
-        const rect = el.getBoundingClientRect();
-        setPosition({
-            left: clampAxisPosition(x, rect.width, window.innerWidth, 0, EDGE_GAP),
-            top: clampAxisPosition(y, rect.height, window.innerHeight, 0, EDGE_GAP),
-            ready: true,
-        });
-    }, [x, y, items.length]);
+        const reclamp = () => {
+            const rect = el.getBoundingClientRect();
+            const next = {
+                left: clampAxisPosition(x, rect.width, window.innerWidth, 0, EDGE_GAP),
+                top: clampAxisPosition(y, rect.height, window.innerHeight, 0, EDGE_GAP),
+                ready: true,
+            };
+            setPosition((prev) =>
+                prev.left === next.left && prev.top === next.top && prev.ready ? prev : next,
+            );
+        };
+        reclamp();
+        /*
+         * 打开期间视口可能变小（窗口 resize / 缩放 / 停靠布局挤压）：原先只在
+         * [x, y, items.length] 变化时夹紧，resize 后菜单可能整张跑出屏幕外。
+         * 跟随 resize 重夹；items 本身（而非 length）进依赖，覆盖"标签变长
+         * 换行 → 菜单变高"这类条数不变但几何变了的情况。
+         */
+        window.addEventListener("resize", reclamp);
+        return () => window.removeEventListener("resize", reclamp);
+    }, [x, y, items]);
 
     /**
      * 本层是否有子菜单 —— 决定壳能不能裁切内容。

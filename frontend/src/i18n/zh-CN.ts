@@ -35,6 +35,9 @@ export const zhCN = {
     export_dialog_range_all: "全部",
     export_dialog_range_custom: "自定义",
     export_dialog_range_custom_label: "起始 / 结束",
+    export_dialog_range_custom_start: "起始",
+    export_dialog_range_custom_end: "结束",
+    export_dialog_range_custom_unit_seconds: "秒",
     export_dialog_output_dir: "输出文件夹",
     export_dialog_project_file_name: "输出文件名称",
     export_dialog_browse: "浏览",
@@ -164,6 +167,7 @@ export const zhCN = {
     action_stop: "停止",
     action_metronome: "节拍器",
     action_refresh: "刷新",
+    common_dialog_action_failed: "操作失败",
     common_loading: "加载中...",
     common_rendering: "渲染中...",
 

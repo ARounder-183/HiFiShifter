@@ -9,7 +9,7 @@
  * 通过 `setPanelRenderer` 提供，因为它需要大量只有 App 才持有的 props。
  */
 
-import { getPanel, registerPanel } from "../../features/dock/panelRegistry";
+import { registerPanel } from "../../features/dock/panelRegistry";
 import { MAIN_FORM_PARAM_EDITOR, MAIN_FORM_TIMELINE } from "../../features/dock/dockSchema";
 import { NOTEBOOK_PANEL_MIN_WIDTH } from "../layout/notebook/notebookSettings";
 import { RULER_BASE_HEIGHT_PX } from "../layout/timeline/rulerHeight";
@@ -220,9 +220,4 @@ export function registerBuiltinPanels(): void {
         // 排在「外观设置」之后：同为低频入口。
         order: 95,
     });
-}
-
-/** 面板是否已注册（供菜单构建时跳过未注册项）。 */
-export function hasPanel(panelId: string): boolean {
-    return getPanel(panelId) !== undefined;
 }

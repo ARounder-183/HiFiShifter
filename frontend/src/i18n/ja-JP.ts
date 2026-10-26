@@ -35,6 +35,9 @@ export const jaJP = {
     export_dialog_range_all: "全体",
     export_dialog_range_custom: "カスタム",
     export_dialog_range_custom_label: "開始 / 終了",
+    export_dialog_range_custom_start: "開始",
+    export_dialog_range_custom_end: "終了",
+    export_dialog_range_custom_unit_seconds: "秒",
     export_dialog_output_dir: "出力フォルダ",
     export_dialog_project_file_name: "出力ファイル名",
     export_dialog_browse: "参照",
@@ -175,6 +178,7 @@ export const jaJP = {
     action_stop: "停止",
     action_metronome: "メトロノーム",
     action_refresh: "更新",
+    common_dialog_action_failed: "操作に失敗しました",
     common_loading: "読み込み中...",
     common_rendering: "レンダリング中...",
 

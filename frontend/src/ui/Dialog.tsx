@@ -32,6 +32,7 @@ import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "rea
 
 import { AppButton, type AppButtonIntent } from "./Button";
 import { cx } from "./cx";
+import { translateOutsideReact } from "../i18n/I18nProvider";
 import { acquireShortcutSuppression, releaseShortcutSuppression } from "./shortcutScope";
 
 /**
@@ -234,6 +235,27 @@ export function AppDialog({
     const defaultSubmitRef = useRef<HTMLButtonElement | null>(null);
     /** 正在执行的异步动作 id；非空时禁用全部按钮。 */
     const [pendingActionId, setPendingActionId] = useState<string | null>(null);
+    /** 异步动作失败的内联错误（动作重新开始或对话框重开时清除）。 */
+    const [actionError, setActionError] = useState<string | null>(null);
+
+    /*
+     * 【错误文案为什么走 translateOutsideReact 而不是 useI18n】本壳是无 Provider
+     * 也必须可渲染的基元（单测直接 createRoot 渲染 AppDialog，应用内则恒在
+     * Provider 之下）。translateOutsideReact 从与 Provider 同一来源
+     * （localStorage 的 locale）取词，两边不会分叉；查不到键时回落英文词典。
+     */
+    const actionFailedLabel = translateOutsideReact("common_dialog_action_failed");
+
+    /*
+     * 重新打开时清掉上一轮的失败提示：用户带着"新一次尝试"进来。
+     * 用渲染期调整（与 NumberField 的草稿同步同一官方模式）而不是 effect ——
+     * effect 里同步 setState 会触发级联渲染告警。
+     */
+    const [prevOpen, setPrevOpen] = useState(open);
+    if (open !== prevOpen) {
+        setPrevOpen(open);
+        if (open) setActionError(null);
+    }
 
     /**
      * 抑制全局快捷键。
@@ -283,15 +305,19 @@ export function AppDialog({
             return;
         }
         setPendingActionId(action.id);
+        setActionError(null);
         try {
             await result;
             if (action.autoClose ?? false) onOpenChange(false);
         } catch (err) {
             // 本 shell 是全部对话框异步动作的唯一入口：动作拒绝（典型是 invoke
             // 抛 BackendInvokeError）若无接住，会变成 unhandled rejection —— 按钮
-            // pending 复位、对话框停在原地、失败原因只进控制台。统一兜底：记录
-            // 并保持对话框打开（不自动关闭），让用户能重试或取消。
+            // pending 复位、对话框停在原地、失败原因只进控制台。统一兜底：记录、
+            // 保持对话框打开（不自动关闭）让用户能重试或取消，并给出**内联**错误
+            // 提示（见页脚上方的 role="alert" 条）——只进控制台等于对用户静默失败。
             console.error("[AppDialog] action failed:", action.id, err);
+            const detail = err instanceof Error ? err.message : String(err);
+            setActionError(detail ? `${actionFailedLabel}: ${detail}` : actionFailedLabel);
         } finally {
             setPendingActionId(null);
         }
@@ -484,6 +510,26 @@ export function AppDialog({
                             )}
                         >
                             {children}
+                        </div>
+                    ) : null}
+
+                    {/*
+                     * 异步动作失败的内联提示。role="alert"：出现即被读屏打断朗读，
+                     * 无需焦点移动 —— 用户按了按钮却"什么都没发生"是最需要被
+                     * 告知的时刻。配色走 danger 语义令牌（与 App.tsx 的错误条同款）。
+                     */}
+                    {actionError ? (
+                        <div
+                            role="alert"
+                            className="hs-type-caption mt-3 flex items-start gap-1.5 rounded border border-qt-danger-border bg-qt-danger-bg px-2 py-1.5 text-qt-danger-text"
+                        >
+                            <ExclamationTriangleIcon
+                                className="mt-[1px] shrink-0"
+                                width="14"
+                                height="14"
+                                aria-hidden
+                            />
+                            <span className="min-w-0 break-words">{actionError}</span>
                         </div>
                     ) : null}
 

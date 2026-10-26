@@ -135,10 +135,19 @@ export function gainKnobAngleDeg(db: number): number {
  * 【映射】先在**归一化行程** `u ∈ [−1, 1]` 上走（与值域大小无关）：
  *
  * ```text
- * u = clamp(startU + deltaPx / KNOB_HALF_TRAVEL_PX, −1, 1)
- * u < 0  ⇒  db = lerp(GAIN_MIN_DB, 0, u + 1)
- * u >= 0 ⇒  db = lerp(0, GAIN_MAX_DB, u)
+ * startU = start >= 0 ? start / GAIN_MAX_DB
+ *                     : max(start, GAIN_TAPER_FLOOR_DB) / −GAIN_TAPER_FLOOR_DB
+ * travel = startU + deltaPx / KNOB_HALF_TRAVEL_PX
+ * travel < −(1 − GAIN_SILENCE_DETENT_PX / KNOB_HALF_TRAVEL_PX)
+ *        ⇒  行程触底棘齿，直接返回 0（线性）= −inf
+ * u      = clamp(travel, −1, 1)
+ * u >= 0 ⇒  db = u · GAIN_MAX_DB
+ * u < 0  ⇒  db = (−u) · GAIN_TAPER_FLOOR_DB
  * ```
+ *
+ * 下半程按**锥度下界**（−60，`GAIN_TAPER_FLOOR_DB`）铺满，不是按
+ * `GAIN_MIN_DB`（−150）—— 有用的 −12~+12 dB 若按下界 −150 铺开会被压进
+ * 整条行程的 4%，手感崩坏（见该常量的说明）；低于 −60 的起点按弧底算。
  *
  * 于是**全程行程恒为 96 px**（两段各 48），与值域大小无关 —— 与旧实现
  * （±12 dB / 0.25 dB·px⁻¹ ⇒ 96 px 走完全程）**逐像素一致**。

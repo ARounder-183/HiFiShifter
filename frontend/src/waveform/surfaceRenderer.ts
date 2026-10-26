@@ -55,7 +55,9 @@ export function expandLineSegmentsToQuads(vertices: Float32Array, dpr = 1): Floa
         const y2 = vertices[base + 7];
         const segDx = x2 - x1;
         const segDy = y2 - y1;
-        const length = Math.hypot(segDx, segDy);
+        // 坐标是单屏内的 CSS 像素级小值，dx²+dy² 无溢出风险；Math.hypot 的
+        // 防溢出/防下溢分支在这里是纯开销（数千段 × 每帧）。
+        const length = Math.sqrt(segDx * segDx + segDy * segDy);
         const nx = length > 1e-9 ? (-segDy / length) * half : 0;
         const ny = length > 1e-9 ? (segDx / length) * half : half;
         const outBase = segment * 36;
@@ -385,6 +387,13 @@ export class WebGl2WaveformRenderer implements WaveformSurfaceRenderer {
      * 流程：光栅化（尺寸通常未变，`rasterize` 内部按值比较后跳过写回）→
      * 清屏 → 更新 u_viewOrigin → drawArrays。**不触碰顶点缓冲**，因此平移帧
      * 的 CPU 成本与 clip 数、像素列数完全无关。
+     *
+     * 【为什么不再重复设置 program / attrib / blend】这些是 GL 上下文的持久
+     * 状态，`render()` 每次都会完整设置一遍（见上），而 `repaint()` 的契约
+     * 就是"必须在 render() 之后调用"——期间上下文只被本渲染器使用，状态
+     * 必然仍然生效，每帧重设 8 次 attrib/program/blend 调用是纯冗余。画布
+     * resize 只重置像素存储、不重置上下文状态；上下文丢失走"销毁旧渲染器
+     * + 新建"路径（见 dispose 的说明），新渲染器首个动作必是 render()。
      */
     repaint(
         widthPx: number,
@@ -396,30 +405,16 @@ export class WebGl2WaveformRenderer implements WaveformSurfaceRenderer {
         const gl = this.gl;
         const target = rasterize(this.canvas, widthPx, heightPx, dpr);
         gl.viewport(0, 0, target.physicalWidth, target.physicalHeight);
-        gl.clearColor(0, 0, 0, 0);
+        // clearColor(0,0,0,0) 也是持久状态（render() 已设置）；它同时是
+        // WebGL 的默认值，因此"尚未 render 过就 repaint"的越界调用也不会
+        // 画出脏底色。
         gl.clear(gl.COLOR_BUFFER_BIT);
-        gl.useProgram(this.program);
         gl.uniform2f(
             this.originLocation,
             snappedOriginPx(originXPx, dpr),
             snappedOriginPx(originYPx, dpr),
         );
         gl.uniform2f(this.resolutionLocation, target.resolutionWidth, target.resolutionHeight);
-        gl.bindBuffer(gl.ARRAY_BUFFER, this.buffer);
-        const stride = 6 * Float32Array.BYTES_PER_ELEMENT;
-        gl.enableVertexAttribArray(this.positionLocation);
-        gl.vertexAttribPointer(this.positionLocation, 2, gl.FLOAT, false, stride, 0);
-        gl.enableVertexAttribArray(this.colorLocation);
-        gl.vertexAttribPointer(
-            this.colorLocation,
-            4,
-            gl.FLOAT,
-            false,
-            stride,
-            2 * Float32Array.BYTES_PER_ELEMENT,
-        );
-        gl.enable(gl.BLEND);
-        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
         gl.drawArrays(gl.TRIANGLES, 0, this.uploadedVertexCount);
     }
 

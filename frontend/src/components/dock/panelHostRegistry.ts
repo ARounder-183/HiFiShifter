@@ -84,10 +84,6 @@ export function notifyPanelHosts(): void {
     notify();
 }
 
-export function getPanelHost(formId: string): HTMLDivElement | undefined {
-    return hosts.get(formId);
-}
-
 /**
  * 槽位归属：哪个 `useDockSlot` 实例当前"拥有"这个宿主。
  *

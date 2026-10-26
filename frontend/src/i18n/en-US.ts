@@ -169,6 +169,9 @@ export const enUS = {
     export_dialog_range_all: "All",
     export_dialog_range_custom: "Custom",
     export_dialog_range_custom_label: "Start / End",
+    export_dialog_range_custom_start: "Start",
+    export_dialog_range_custom_end: "End",
+    export_dialog_range_custom_unit_seconds: "sec",
     export_dialog_output_dir: "Output Folder",
     export_dialog_project_file_name: "Output File Name",
     export_dialog_sample_rate: "Sample Rate",
@@ -312,6 +315,7 @@ export const enUS = {
     action_stop: "Stop",
     action_metronome: "Metronome",
     action_refresh: "Refresh",
+    common_dialog_action_failed: "Action failed",
     common_loading: "Loading...",
     common_rendering: "Rendering...",
 

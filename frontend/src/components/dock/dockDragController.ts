@@ -987,8 +987,3 @@ export function beginFloatDrag(event: React.PointerEvent, args: FloatDragArgs): 
     zoneRects = collectZoneRects();
     attach();
 }
-
-/** 拖拽是否正在进行（供 CSS 关掉指针事件等）。 */
-export function isDockDragging(): boolean {
-    return getDockDragState()?.started === true;
-}
