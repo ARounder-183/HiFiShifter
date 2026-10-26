@@ -2051,16 +2051,16 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
                         clip,
                     );
                     let geometry = host.to_geometry(media, facts.reversed, facts.loop_source);
-                    let (forward_start, forward_end) = geometry.forward_source_window();
-                    clip.source_start_sec = forward_start;
-                    clip.source_end_sec = forward_end;
+                    let window = geometry.forward_source_window();
+                    clip.source_start_sec = window.start();
+                    clip.source_end_sec = window.end();
                     // 窗口只写 **active take**（或全部，当 active 身份不可解析时）：
                     // 多 take item 里各 take 的源窗口本可不同，把 active 的窗口盖到
                     // 全部 take 上会污染 inactive take 的几何 —— 用户切过去时看到的是
                     // 上一个 take 的窗口。
                     for take in active_takes_of(clip) {
-                        take.source_start_sec = forward_start;
-                        take.source_end_sec = forward_end;
+                        take.source_start_sec = window.start();
+                        take.source_end_sec = window.end();
                     }
                 } else {
                     hifishifter_kernel::log_limiter::emit_limited_key(
@@ -2855,7 +2855,7 @@ mod tests {
     /// `hifishifter_kernel::take_geometry`（公式本身由内核的用例覆盖）。这里测的是
     /// "喂进去的宿主读数对不对"，也就是投影层唯一的职责。
     fn mirrored_geometry(media: Option<f64>, host_start: f64, host_span: f64) -> (f64, f64) {
-        hifishifter_kernel::take_geometry::TakeGeometry {
+        let window = hifishifter_kernel::take_geometry::TakeGeometry {
             start_offset_sec: host_start,
             item_length_sec: host_span,
             play_rate_signed: 1.0,
@@ -2864,7 +2864,8 @@ mod tests {
             reversed: true,
             loop_enabled: false,
         }
-        .forward_source_window()
+        .forward_source_window();
+        (window.start(), window.end())
     }
 
     /// F-4 实测：源长 2.0、非对称裁切 `[0.25, 1.25]`、倒放后宿主报 `D_STARTOFFS=0.75`

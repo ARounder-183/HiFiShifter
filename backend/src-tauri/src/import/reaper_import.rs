@@ -339,9 +339,9 @@ fn build_audio_clip_take(
     // 一次上界，而退化时本来就没超上界），因此是死代码。退化只在"宿主报了越界
     // 镜像读数"或"正放 Loop 锚点被钳到段末端"时出现，见
     // `hifishifter_kernel::take_geometry` 的边界测试。
-    let (source_start, source_end) =
-        take_geometry(take, item.length, duration_sec, item_reversed, item_loop)
-            .forward_source_window();
+    let window = take_geometry(take, item.length, duration_sec, item_reversed, item_loop)
+        .forward_source_window();
+    let (source_start, source_end) = (window.start(), window.end());
 
     let name = if take.name.trim().is_empty() {
         clip_name_from_path(&audio_path)
@@ -1535,9 +1535,9 @@ fn process_item(
         // 无 stretch markers：使用 take 的 play_rate。窗口同样由共享解算给出
         // （见 `take_geometry`），两条导入路径不可能再分叉。
         let effective_rate = play_rate;
-        let (source_start, source_end) =
-            take_geometry(take, item_length, duration_sec, item_reversed, item_loop)
-                .forward_source_window();
+        let window = take_geometry(take, item_length, duration_sec, item_reversed, item_loop)
+            .forward_source_window();
+        let (source_start, source_end) = (window.start(), window.end());
         // 构造全部 take（default + 显式 TAKE 块），active take 由选择规则决定。
         let mut hs_takes: Vec<crate::state::ClipTake> = Vec::new();
         for reaper_take in std::iter::once(&item.default_take).chain(item.takes.iter()) {
@@ -2376,7 +2376,9 @@ mod tests {
             ..ReaperTake::default()
         };
         let window = |item_length: f64, media: Option<f64>, reversed: bool, is_loop: bool| {
-            take_geometry(&take, item_length, media, reversed, is_loop).forward_source_window()
+            let window =
+                take_geometry(&take, item_length, media, reversed, is_loop).forward_source_window();
+            (window.start(), window.end())
         };
 
         let (start, end) = window(10.0, Some(4.0), false, true);
@@ -2534,7 +2536,8 @@ mod tests {
             s_offs: 2.0,
             ..ReaperTake::default()
         };
-        let (start, end) = take_geometry(&take, 3.0, None, false, true).forward_source_window();
+        let window = take_geometry(&take, 3.0, None, false, true).forward_source_window();
+        let (start, end) = (window.start(), window.end());
         assert!((start - 2.0).abs() < 1e-9);
         assert!((end - 5.0).abs() < 1e-9);
     }

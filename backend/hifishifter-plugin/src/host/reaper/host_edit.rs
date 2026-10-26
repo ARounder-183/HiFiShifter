@@ -576,7 +576,10 @@ fn host_start_offset(clip: &hifishifter_kernel::state::Clip) -> Option<f64> {
     if clip.reversed && !clip.loop_enabled {
         let media = hifishifter_kernel::state::clip_source_media_duration_sec(clip);
         // 与读取侧同一个逆运算（`forward_source_window` 的逆），避免两侧各写一份。
-        hifishifter_kernel::take_geometry::host_start_offset(clip.source_end_sec, media)
+        let (start, end) = hifishifter_kernel::state::clip_playback_window_sec(clip);
+        let window = hifishifter_kernel::take_geometry::ForwardWindow::new(start, end)?;
+        hifishifter_kernel::take_geometry::host_start_offset(window, media)
+            .map(|offset| offset.value())
     } else {
         Some(clip.source_start_sec)
     }
@@ -604,7 +607,7 @@ fn host_forward_window_start(
         loop_enabled: geometry.loop_source,
     }
     .forward_source_window()
-    .0
+    .start()
 }
 
 /// 先冻结并验证整批对象，再开始Undo和setter；任一预检失败都不写入任何宿主item。
