@@ -256,12 +256,14 @@ export const zhTW = {
     layout_unit_ms: "毫秒",
     layout_unit_px: "像素",
     kb_group_layout: "佈局",
+    kb_group_host: "宿主",
     kb_layout_toggle_float: "浮動 / 停靠目前視窗",
     kb_layout_next_panel: "聚焦下一個視窗",
     kb_layout_prev_panel: "聚焦上一個視窗",
     kb_layout_maximize: "最大化 / 還原目前視窗",
     kb_layout_new_panel: "新增一個空白面板",
     kb_layout_dissolve_panel: "解散包含目前視窗的面板",
+    kb_host_hand_keyboard: "把鍵盤交給宿主",
     common_notebook: "記事本",
     notebook_mode_rich: "富文字",
     notebook_mode_source: "Markdown 原始碼",
@@ -1310,12 +1312,8 @@ export const zhTW = {
     // 速度映射（變速/變拍/變音階）
     tempo_map: "速度映射",
     menu_view_tempo_map: "速度映射",
-    menu_hand_keyboard_to_host: "把鍵盤交給宿主",
     editor_route_unavailable: "宿主沒有完成編輯器的握手，外掛讀不到時間軸。請匯出診斷包並回報。",
-    host_key_focus_ok: "鍵盤已交還宿主。",
-    host_key_focus_failed_no_host_window: "找不到宿主的視窗，鍵盤沒有交還。焦點可能仍在外掛裡。",
-    host_key_focus_failed_post_failed: "系統拒絕了焦點切換，鍵盤沒有交還。",
-    host_key_focus_failed_unavailable: "這個宿主沒有提供交還鍵盤的介面。",
+    host_key_focus_failed: "沒能把鍵盤交給宿主，請點擊宿主視窗",
     tempo_map_add_point: "在此新增速度/拍號/音階變化...",
     tempo_map_add_scale_point: "在此新增音階變化點...",
     tempo_map_edit_point: "編輯此變化點...",
@@ -2258,6 +2256,7 @@ export const zhTW = {
     host_key_relay_refused:
         "這次沒能把「{action}」交給宿主（宿主視窗目前不可用）。請先點一下宿主的編曲區再按。",
     cap_reason_app_only: "僅在獨立 App 中可用",
+    cap_reason_plugin_only: "僅在外掛中可用",
     cap_reason_piano_roll_only: "僅適用於參數編輯器",
 
     // ── 宿主淡入淡出 tooltip 的補充說明 ─────────────────────────────

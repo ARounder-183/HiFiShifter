@@ -342,7 +342,8 @@ export type CapabilityId =
     | "project.file"
     | "recording.local"
     | "playback.metronome"
-    | "surface.pianoRollOnly";
+    | "surface.pianoRollOnly"
+    | "host.keyboardHandoff";
 
 /** 一条能力的判定结果。 */
 export interface CapabilityDecision {
@@ -385,6 +386,8 @@ const CAPABILITIES: Record<CapabilityId, { allowed: () => boolean; reason: Messa
     "recording.local": { allowed: () => false, reason: "cap_reason_app_only" },
     "playback.metronome": { allowed: () => false, reason: "cap_reason_app_only" },
     "surface.pianoRollOnly": { allowed: () => false, reason: "cap_reason_piano_roll_only" },
+    // 交还键盘是"本窗口与宿主的关系"：独立 App 里没有宿主，这条动作没有意义。
+    "host.keyboardHandoff": { allowed: isPluginMode, reason: "cap_reason_plugin_only" },
 };
 
 /**
@@ -438,6 +441,7 @@ export function capabilityReasonText(id: CapabilityId): string {
  * 返回 null 表示「这条动作不受宿主能力限制」。
  */
 export function capabilityForAction(action: string, surface: string | null): CapabilityId | null {
+    if (action === "host.handKeyboardToHost") return "host.keyboardHandoff";
     if (action === "playback.toggle" || action === "playback.stop") return "transport.control";
     if (action === "playback.metronome") return "playback.metronome";
     if (action === "project.importMedia") return "media.import";

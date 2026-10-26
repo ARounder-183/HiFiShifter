@@ -19,7 +19,7 @@ import { KeybindingsDialog } from "./KeybindingsDialog";
 import { I18nProvider } from "../../i18n/I18nProvider";
 import keybindingsReducer from "../../features/keybindings/keybindingsSlice";
 import sessionReducer from "../../features/session/sessionSlice";
-import { ALL_ACTION_IDS } from "../../features/keybindings/defaultKeybindings";
+import { ACTION_GROUP_ORDER, ALL_ACTION_IDS } from "../../features/keybindings/defaultKeybindings";
 
 /*
  * jsdom 没有 `ResizeObserver`，而 Radix 的 ScrollArea 在布局副作用里会用它。
@@ -194,10 +194,15 @@ describe("KeybindingsDialog — 搜索过滤", () => {
 });
 
 describe("KeybindingsDialog — 分类导航", () => {
-    it("列出「全部」与全部 14 个分组", () => {
+    it("列出「全部」与全部真实分组", () => {
         const { cleanup } = renderDialog();
         try {
-            expect(document.body.querySelectorAll('[role="option"]').length).toBe(15);
+            // 【为什么不写死数字】分组是 `ACTION_GROUP_ORDER` 的函数：新增一组
+            // （例如"宿主"）时这个数字必然过期，而过期的断言只会逼下一个人把它
+            // 再加一。这里直接问那份顺序表，断言的是"导航列出了全部组"这件事本身。
+            expect(document.body.querySelectorAll('[role="option"]').length).toBe(
+                ACTION_GROUP_ORDER.length + 1,
+            );
         } finally {
             cleanup();
         }

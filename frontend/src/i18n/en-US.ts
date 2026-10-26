@@ -407,12 +407,14 @@ export const enUS = {
     layout_unit_ms: "ms",
     layout_unit_px: "px",
     kb_group_layout: "Layout",
+    kb_group_host: "Host",
     kb_layout_toggle_float: "Float / dock the focused panel",
     kb_layout_next_panel: "Focus the next panel",
     kb_layout_prev_panel: "Focus the previous panel",
     kb_layout_maximize: "Maximize / restore the focused panel",
     kb_layout_new_panel: "Create a new empty panel",
     kb_layout_dissolve_panel: "Dissolve the panel that holds the focused window",
+    kb_host_hand_keyboard: "Hand Keyboard to Host",
     common_notebook: "Notebook",
     notebook_mode_rich: "Rich text",
     notebook_mode_source: "Markdown source",
@@ -1480,15 +1482,9 @@ export const enUS = {
     // Tempo Map (tempo / time-signature / scale changes)
     tempo_map: "Tempo Map",
     menu_view_tempo_map: "Tempo Map",
-    menu_hand_keyboard_to_host: "Hand Keyboard to Host",
     editor_route_unavailable:
         "The host did not connect the editor to its processor, so the timeline cannot load. Please export a diagnostics bundle and report it.",
-    host_key_focus_ok: "Keyboard handed back to the host.",
-    host_key_focus_failed_no_host_window:
-        "Could not find the host window, so the keyboard was not handed back. Focus may still be inside the plug-in.",
-    host_key_focus_failed_post_failed:
-        "The system refused the focus change; the keyboard was not handed back.",
-    host_key_focus_failed_unavailable: "This host does not expose a way to hand the keyboard back.",
+    host_key_focus_failed: "Could not hand the keyboard to the host. Click the host window.",
     tempo_map_add_point: "Add Tempo / Time Signature / Scale Change Here...",
     tempo_map_add_scale_point: "Add Scale Change Here...",
     tempo_map_edit_point: "Edit This Point...",
@@ -2333,6 +2329,7 @@ export const enUS = {
     host_key_relay_refused:
         "Could not hand “{action}” to the host (its window is unavailable right now). Click the host's arrange area and try again.",
     cap_reason_app_only: "Only available in the standalone app",
+    cap_reason_plugin_only: "Only available in the plug-in",
     cap_reason_piano_roll_only: "Only applies to the parameter editor",
 
     // ── 宿主淡入淡出 tooltip 的补充说明 ─────────────────────────────

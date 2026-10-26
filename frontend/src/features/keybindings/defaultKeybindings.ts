@@ -68,6 +68,13 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     "layout.newPanel": [{ key: "__none__" }],
     "layout.dissolvePanel": [{ key: "__none__" }],
 
+    // 宿主（插件形态）
+    // 把键盘焦点交还宿主：一次性、低频、破坏性（焦点走了要再点回来），因此用
+    // Ctrl+Shift+* 这一档，与 layout.toggleFloat / maximize 同级；`h` 在整张
+    // 默认表里此前一次都没出现过（裸键、Ctrl、Shift、Alt 四个维度都空）。
+    // 菜单项已删除：点两下菜单还不如直接用鼠标点宿主窗口，而快捷键只要一下。
+    "host.handKeyboardToHost": [{ key: "h", ctrl: true, shift: true }],
+
     // 工程
     "project.new": [{ key: "n", ctrl: true }],
     "project.open": [{ key: "o", ctrl: true, shift: true }],
@@ -729,6 +736,10 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
         labelKey: "kb_layout_dissolve_panel",
         group: "layout",
     },
+    "host.handKeyboardToHost": {
+        labelKey: "kb_host_hand_keyboard",
+        group: "host",
+    },
 };
 
 /**
@@ -749,6 +760,7 @@ export const GROUP_LABEL_KEYS: Record<ActionMeta["group"], string> = {
     paramEditor: "kb_group_param_editor",
     quickSearch: "kb_group_quick_search",
     layout: "kb_group_layout",
+    host: "kb_group_host",
     modClip: "kb_group_mod_clip",
     modFade: "kb_group_mod_fade",
     modParam: "kb_group_mod_param",
@@ -797,6 +809,7 @@ export const ACTION_GROUP_ORDER: ActionMeta["group"][] = [
     "paramEditor",
     "quickSearch",
     "layout",
+    "host",
     "modClip",
     "modFade",
     "modParam",

@@ -174,12 +174,11 @@ import { installFocusSurfaceTracking, getActiveSurface } from "./features/uiFocu
 import {
     classifyHostKeyRelay,
     collectHostKeyEscapeStrokes,
+    handKeyboardToHost,
     hostKeyRelayEnv,
     publishHostKeyEscapeSet,
     relayHostKey,
     subscribeHostKeyRelayNotice,
-    HOST_KEY_FOCUS_RESULT_EVENT,
-    type HostKeyFocusOutcome,
     type HostKeyStroke,
 } from "./services/hostKeyRelay";
 import { subscribeEditorRouteNotice } from "./services/editorRoute";
@@ -2768,6 +2767,18 @@ function AppInner() {
                         }),
                     );
                     break;
+                case "host.handKeyboardToHost":
+                    /*
+                     * 把键盘交还宿主：一次性、低频、破坏性（焦点走了要再点回来）。
+                     *
+                     * 【为什么成功不说话】焦点已经肉眼可见地移到了宿主窗口；再加一条
+                     * 绿色状态片只是噪声。失败才说一句 —— 三种失败原因（找不到窗口 /
+                     * 系统拒绝 / 本平台没有接口）对用户意味着同一个下一步：点一下宿主。
+                     */
+                    void handKeyboardToHost().then((outcome) => {
+                        if (!outcome.ok) showNotice(t("host_key_focus_failed"), 4000, "warning");
+                    });
+                    break;
                 case "timeline.zoomIn":
                     window.dispatchEvent(
                         new CustomEvent("hifi:zoomTimelineFocus", {
@@ -3351,6 +3362,8 @@ function AppInner() {
             // 被拒快捷键的说明要写进状态栏提示位（见函数顶部）。`showNotice` 本身是
             // 空依赖的 useCallback，引用恒定，放进依赖不会引起额外重渲染。
             showNotice,
+            // 「把键盘交给宿主」失败时要说一句；`t` 只在切换语言时换引用。
+            t,
         ],
     );
 
@@ -3413,34 +3426,6 @@ function AppInner() {
         return subscribeEditorRouteNotice(() => {
             showNotice(t("editor_route_unavailable"), 8000, "warning");
         });
-    }, [showNotice, t]);
-
-    /*
-     * 「把键盘交给宿主」的结果。
-     *
-     * 【为什么必须回报】这个菜单项此前把成功与失败都吞成同一个"什么都没发生"：
-     * 用户点了、焦点没走、界面也不说话。而它失败的两种原因（找不到宿主窗口 /
-     * 系统拒绝换焦点）指向**完全不同**的下一步，所以原因要原样告诉用户。
-     */
-    useEffect(() => {
-        if (!isPluginMode()) return;
-        const onResult = (event: Event) => {
-            const detail = (event as CustomEvent<HostKeyFocusOutcome>).detail;
-            if (!detail) return;
-            if (detail.ok) {
-                showNotice(t("host_key_focus_ok"), 2000, "success");
-                return;
-            }
-            const key =
-                detail.reason === "no-host-window"
-                    ? "host_key_focus_failed_no_host_window"
-                    : detail.reason === "unavailable"
-                      ? "host_key_focus_failed_unavailable"
-                      : "host_key_focus_failed_post_failed";
-            showNotice(t(key), 6000, "warning");
-        };
-        window.addEventListener(HOST_KEY_FOCUS_RESULT_EVENT, onResult);
-        return () => window.removeEventListener(HOST_KEY_FOCUS_RESULT_EVENT, onResult);
     }, [showNotice, t]);
 
     /*

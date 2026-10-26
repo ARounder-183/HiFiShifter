@@ -339,12 +339,14 @@ export const koKR = {
     layout_unit_ms: "ms",
     layout_unit_px: "px",
     kb_group_layout: "레이아웃",
+    kb_group_host: "호스트",
     kb_layout_toggle_float: "포커스 패널 플로팅/도킹",
     kb_layout_next_panel: "다음 패널로 포커스",
     kb_layout_prev_panel: "이전 패널로 포커스",
     kb_layout_maximize: "포커스 패널 최대화/복원",
     kb_layout_new_panel: "새 빈 패널 만들기",
     kb_layout_dissolve_panel: "포커스된 창이 속한 패널 해체",
+    kb_host_hand_keyboard: "키보드를 호스트로 넘기기",
     common_notebook: "노트",
     notebook_mode_rich: "리치 텍스트",
     notebook_mode_source: "Markdown 소스",
@@ -1414,15 +1416,9 @@ export const koKR = {
     // 템포 맵（템포/박자표/스케일 변경）
     tempo_map: "템포 맵",
     menu_view_tempo_map: "템포 맵",
-    menu_hand_keyboard_to_host: "키보드를 호스트로 넘기기",
     editor_route_unavailable:
         "호스트가 편집기 핸드셰이크를 완료하지 않아 타임라인을 읽을 수 없습니다. 진단 패키지를 내보내 보고해 주세요.",
-    host_key_focus_ok: "키보드를 호스트로 돌려주었습니다.",
-    host_key_focus_failed_no_host_window:
-        "호스트 창을 찾지 못해 키보드를 돌려주지 못했습니다. 포커스가 아직 플러그인 안에 있을 수 있습니다.",
-    host_key_focus_failed_post_failed:
-        "시스템이 포커스 전환을 거부해 키보드를 돌려주지 못했습니다.",
-    host_key_focus_failed_unavailable: "이 호스트에는 키보드를 돌려주는 인터페이스가 없습니다.",
+    host_key_focus_failed: "키보드를 호스트로 넘기지 못했습니다. 호스트 창을 클릭하세요.",
     tempo_map_add_point: "여기에 템포/박자표/스케일 변경 추가...",
     tempo_map_add_scale_point: "여기에 스케일 변경 추가...",
     tempo_map_edit_point: "이 변경점 편집...",
@@ -2317,6 +2313,7 @@ export const koKR = {
     host_key_relay_refused:
         "「{action}」을(를) 호스트에 넘기지 못했습니다(호스트 창을 지금 사용할 수 없습니다). 호스트의 편곡 영역을 클릭한 뒤 다시 시도해 주세요.",
     cap_reason_app_only: "독립 실행형 앱에서만 사용할 수 있습니다",
+    cap_reason_plugin_only: "플러그인에서만 사용할 수 있습니다",
     cap_reason_piano_roll_only: "매개변수 편집기에서만 적용됩니다",
 
     // ── 호스트 페이드 tooltip 보충 설명 ─────────────────────────────

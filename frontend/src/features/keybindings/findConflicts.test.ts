@@ -212,3 +212,17 @@ describe("findConflicts — 绑定列表逐槽位检测", () => {
         );
     });
 });
+
+describe("findConflicts — 新动作的默认键位", () => {
+    /*
+     * 【为什么这条要单独钉】"把键盘交给宿主"是新加的一条**全局**绑定，而全局绑定
+     * 最容易撞车的地方恰恰是 Ctrl+Shift+* 这一档（布局类的低频动作都在这儿）。
+     * 冲突检测是用户在设置里改键时才跑的，默认表本身没有别的守卫 —— 所以在这里
+     * 断言"默认值放到今天这张表里不冲突"。
+     */
+    it("host.handKeyboardToHost 的默认 Ctrl+Shift+H 不与任何动作冲突", () => {
+        const binding = firstBinding(DEFAULT_KEYBINDINGS["host.handKeyboardToHost"]);
+        expect(binding).toEqual({ key: "h", ctrl: true, shift: true });
+        expect(findConflicts({}, "host.handKeyboardToHost", binding)).toEqual([]);
+    });
+});

@@ -255,12 +255,14 @@ export const zhCN = {
     layout_unit_ms: "毫秒",
     layout_unit_px: "像素",
     kb_group_layout: "布局",
+    kb_group_host: "宿主",
     kb_layout_toggle_float: "浮动 / 停靠当前窗体",
     kb_layout_next_panel: "聚焦下一个窗体",
     kb_layout_prev_panel: "聚焦上一个窗体",
     kb_layout_maximize: "最大化 / 还原当前窗体",
     kb_layout_new_panel: "新建一个空面板",
     kb_layout_dissolve_panel: "解散包含当前窗体的面板",
+    kb_host_hand_keyboard: "把键盘交给宿主",
     common_notebook: "记事本",
     notebook_mode_rich: "富文本",
     notebook_mode_source: "Markdown 源码",
@@ -1308,12 +1310,8 @@ export const zhCN = {
     // 速度映射（变速/变拍/变音阶）
     tempo_map: "速度映射",
     menu_view_tempo_map: "速度映射",
-    menu_hand_keyboard_to_host: "把键盘交给宿主",
     editor_route_unavailable: "宿主没有完成编辑器的握手，插件读不到时间线。请导出诊断包并反馈。",
-    host_key_focus_ok: "键盘已交还宿主。",
-    host_key_focus_failed_no_host_window: "没有找到宿主的窗口，键盘没有交还。焦点可能仍在插件里。",
-    host_key_focus_failed_post_failed: "系统拒绝了焦点切换，键盘没有交还。",
-    host_key_focus_failed_unavailable: "这个宿主没有提供交还键盘的接口。",
+    host_key_focus_failed: "没能把键盘交给宿主，请点击宿主窗口",
     tempo_map_add_point: "在此添加速度/拍号/音阶变化...",
     tempo_map_add_scale_point: "在此添加音阶变化点...",
     tempo_map_edit_point: "编辑此变化点...",
@@ -2254,6 +2252,7 @@ export const zhCN = {
     host_key_relay_refused:
         "这次没能把「{action}」交给宿主（宿主窗口当前不可用）。请先点一下宿主的编曲区再按。",
     cap_reason_app_only: "只在独立 App 中可用",
+    cap_reason_plugin_only: "只在插件中可用",
     cap_reason_piano_roll_only: "只适用于参数编辑器",
 
     // ── 宿主淡入淡出 tooltip 的补充说明 ─────────────────────────────

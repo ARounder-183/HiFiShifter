@@ -265,47 +265,28 @@ export interface HostKeyFocusOutcome {
 }
 
 /**
- * "键盘交还结果"的窗口事件名。
- *
- * 【为什么用 DOM 事件】菜单项在 `MenuBar`，而状态栏提示的宿主在 `App`（`showNotice`
- * 是那里的局部状态）。把提示塞进 MenuBar 需要把一整套提示设施搬过去；一枚事件只让
- * 两边各保留自己那一半，与本仓既有的 `hifi:*` 事件同一形状。
- */
-export const HOST_KEY_FOCUS_RESULT_EVENT = "hfs-host-key-focus-result";
-
-/**
  * 把键盘焦点交还宿主 —— 让路的**确定**那条路。
  *
  * 【什么时候用它】投递窗口消息要看宿主脸色：有的宿主只看自己的前台焦点窗口，有的把
  * 编辑器放进桥接进程。那些情况下"让路"不会生效，而用户仍需要一个能立刻用宿主键位的
  * 办法。交还焦点一定会生效，代价是焦点真的走了（之后要点击插件才能回来）—— 因此它
- * 只由用户显式触发（视图菜单），从不自动发生。
+ * 只由用户显式触发（快捷键），从不自动发生。
  *
- * 结果同时以 [`HOST_KEY_FOCUS_RESULT_EVENT`] 广播：调用方可以是任何组件，而"说一句话"
- * 的实现只有一处。
+ * 【为什么直接返回结果，不再广播 DOM 事件】它曾经只有一个菜单项入口，而"说一句话"的
+ * 实现在 App 里 —— 事件是那时绕开组件边界的手段。现在入口是 App 自己的快捷键分支，
+ * 事件绕一圈又回到原点，只剩一层没人受益的间接。
  */
 export async function handKeyboardToHost(): Promise<HostKeyFocusOutcome> {
-    let outcome: HostKeyFocusOutcome;
     try {
         const reply = await hostKeysApi.focusHost();
-        outcome =
-            reply?.ok === true
-                ? { ok: true, reason: null }
-                : {
-                      ok: false,
-                      reason: typeof reply?.reason === "string" ? reply.reason : "post-failed",
-                  };
+        if (reply?.ok === true) return { ok: true, reason: null };
+        return {
+            ok: false,
+            reason: typeof reply?.reason === "string" ? reply.reason : "post-failed",
+        };
     } catch {
-        outcome = { ok: false, reason: "unavailable" };
+        return { ok: false, reason: "unavailable" };
     }
-    if (typeof window !== "undefined") {
-        window.dispatchEvent(
-            new CustomEvent<HostKeyFocusOutcome>(HOST_KEY_FOCUS_RESULT_EVENT, {
-                detail: outcome,
-            }),
-        );
-    }
-    return outcome;
 }
 
 /**

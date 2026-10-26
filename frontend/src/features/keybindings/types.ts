@@ -130,6 +130,8 @@ export type ActionId =
     | "layout.maximize" // 最大化 / 还原当前窗体
     | "layout.newPanel" // 新建一个空面板
     | "layout.dissolvePanel" // 解散包含当前窗体的面板
+    // 宿主（插件形态）
+    | "host.handKeyboardToHost" // 把键盘焦点交还宿主
     | "quickSearch.preview" // 快速搜索：预览/试听
     | "quickSearch.confirm" // 快速搜索：确认放置
     | "quickSearch.close"; // 快速搜索：关闭弹窗
@@ -220,6 +222,7 @@ export interface ActionMeta {
         | "paramEditor"
         | "quickSearch"
         | "layout"
+        | "host"
         | "modClip"
         | "modFade"
         | "modParam"

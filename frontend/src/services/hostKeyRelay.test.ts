@@ -21,9 +21,7 @@ vi.mock("./api/hostKeys", () => ({
 
 import {
     classifyHostKeyRelay,
-    HOST_KEY_FOCUS_RESULT_EVENT,
     handKeyboardToHost,
-    type HostKeyFocusOutcome,
     collectHostKeyEscapeStrokes,
     hostKeyRelayEnv,
     isBareStroke,
@@ -261,35 +259,18 @@ describe("通知订阅", () => {
 describe("把键盘交给宿主", () => {
     /*
      * 【为什么这条要有测试】这个功能此前把结果**整个吞掉**：成功与失败在界面上完全
-     * 同形。用户报障时只能描述成"似乎根本不起作用"。结果必须被广播出去，而且失败
-     * 必须带着原因 —— 两种失败（找不到宿主窗口 / 系统拒绝换焦点）指向完全不同的
-     * 下一步。
+     * 同形。用户报障时只能描述成"似乎根本不起作用"。因此结果必须被**返回**出去 ——
+     * 调用方（快捷键分支）据此决定要不要说一句。
      */
-    test("成功 ⇒ ok，且广播一条成功结果", async () => {
+    test("成功 ⇒ ok，reason 为 null", async () => {
         mocks.focus.mockResolvedValue({ ok: true });
-        const seen: HostKeyFocusOutcome[] = [];
-        const listener = (event: Event) => {
-            seen.push((event as CustomEvent<HostKeyFocusOutcome>).detail);
-        };
-        window.addEventListener(HOST_KEY_FOCUS_RESULT_EVENT, listener);
-        const outcome = await handKeyboardToHost();
-        window.removeEventListener(HOST_KEY_FOCUS_RESULT_EVENT, listener);
-        expect(outcome).toEqual({ ok: true, reason: null });
-        expect(seen).toEqual([{ ok: true, reason: null }]);
+        expect(await handKeyboardToHost()).toEqual({ ok: true, reason: null });
     });
 
     test("失败 ⇒ ok=false、原因原样带出", async () => {
         for (const reason of ["no-host-window", "post-failed"]) {
             mocks.focus.mockResolvedValue({ ok: false, reason });
-            const seen: HostKeyFocusOutcome[] = [];
-            const listener = (event: Event) => {
-                seen.push((event as CustomEvent<HostKeyFocusOutcome>).detail);
-            };
-            window.addEventListener(HOST_KEY_FOCUS_RESULT_EVENT, listener);
-            const outcome = await handKeyboardToHost();
-            window.removeEventListener(HOST_KEY_FOCUS_RESULT_EVENT, listener);
-            expect(outcome, reason).toEqual({ ok: false, reason });
-            expect(seen, reason).toEqual([{ ok: false, reason }]);
+            expect(await handKeyboardToHost(), reason).toEqual({ ok: false, reason });
         }
     });
 

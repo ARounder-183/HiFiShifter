@@ -271,12 +271,14 @@ export const jaJP = {
     layout_unit_ms: "ms",
     layout_unit_px: "px",
     kb_group_layout: "レイアウト",
+    kb_group_host: "ホスト",
     kb_layout_toggle_float: "フォーカス中のパネルをフロート/ドック",
     kb_layout_next_panel: "次のパネルへフォーカス",
     kb_layout_prev_panel: "前のパネルへフォーカス",
     kb_layout_maximize: "フォーカス中のパネルを最大化/復元",
     kb_layout_new_panel: "空のパネルを作成",
     kb_layout_dissolve_panel: "フォーカス中のウィンドウがあるパネルを解散",
+    kb_host_hand_keyboard: "キーボードをホストに渡す",
     common_notebook: "ノート",
     notebook_mode_rich: "リッチテキスト",
     notebook_mode_source: "Markdown ソース",
@@ -1360,16 +1362,10 @@ export const jaJP = {
     // テンポマップ（テンポ/拍子/スケールの変化）
     tempo_map: "テンポマップ",
     menu_view_tempo_map: "テンポマップ",
-    menu_hand_keyboard_to_host: "キーボードをホストに渡す",
     editor_route_unavailable:
         "ホストがエディターのハンドシェイクを完了していないため、タイムラインを読み込めません。診断パッケージを書き出して報告してください。",
-    host_key_focus_ok: "キーボードをホストに戻しました。",
-    host_key_focus_failed_no_host_window:
-        "ホストのウィンドウが見つからないため、キーボードを戻せませんでした。フォーカスはプラグイン内に残っている可能性があります。",
-    host_key_focus_failed_post_failed:
-        "システムがフォーカス切り替えを拒否したため、キーボードを戻せませんでした。",
-    host_key_focus_failed_unavailable:
-        "このホストにはキーボードを戻すインターフェースがありません。",
+    host_key_focus_failed:
+        "キーボードをホストに渡せませんでした。ホストのウィンドウをクリックしてください。",
     tempo_map_add_point: "ここにテンポ/拍子/スケール変更を追加...",
     tempo_map_add_scale_point: "ここにスケール変更を追加...",
     tempo_map_edit_point: "この変更点を編集...",
@@ -2349,6 +2345,7 @@ export const jaJP = {
     host_key_relay_refused:
         "「{action}」をホストに渡せませんでした（ホストのウィンドウが現在利用できません）。ホストのアレンジ領域をクリックしてからもう一度お試しください。",
     cap_reason_app_only: "スタンドアロン版でのみ使用できます",
+    cap_reason_plugin_only: "プラグインでのみ使用できます",
     cap_reason_piano_roll_only: "パラメータエディタでのみ有効です",
 
     // ── ホストフェードの tooltip 補足 ───────────────────────────────
