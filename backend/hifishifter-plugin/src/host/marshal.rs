@@ -281,6 +281,26 @@ impl Ticket {
     }
 }
 
+/// 把一件**拥有自己数据**的任务排到目标线程；**不等待**。
+///
+/// 【为什么需要这条与 [`scoped`] 并存的入口】`scoped` 借用调用方的栈帧，因此它
+/// 只能在"投递方原地等"的前提下成立（放弃协议就是为此存在的）。而 ARA 的模型线程
+/// 并不保证在我们愿意等的这段时间里回到我们的代码：任务必须能**留在队列里**，
+/// 等那一次回调到来时再执行。留得住的前提是任务拥有自己的数据，也就是 `'static`。
+///
+/// 返回 `false` = 队列已满（没排上）。调用方据此给出"宿主线程队列繁忙"。
+pub(crate) fn post_owned(
+    target: std::thread::ThreadId,
+    job: Box<dyn FnOnce() + Send + 'static>,
+) -> bool {
+    let mut pending = lock_queue();
+    if pending.len() >= QUEUE_CAPACITY {
+        return false;
+    }
+    pending.push_back(Queued { target, job });
+    true
+}
+
 /// 一次投递的栈上上下文：闭包本身 + 结果写回处。
 struct JobContext<'a, R, F> {
     job: Option<F>,

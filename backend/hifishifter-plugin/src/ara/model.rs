@@ -1273,6 +1273,30 @@ impl ModelHandle {
     }
 }
 
+impl ModelHandle {
+    /// **本次调用来自 ARA model 线程** —— 顺手把宿主线程队列排空。
+    ///
+    /// 【为什么泵必须在这里】`host::marshal` 的泵此前只装在**宿主 UI 线程**上
+    /// （`IPlugView::getSize` / `on_size` / `can_resize`，以及 REAPER 的
+    /// `plugin_register("timer")`）。而 ARA 的播放请求被钉在 **model 线程**上，
+    /// 于是投给它的任务永远取不到 —— 现场日志是
+    /// `host thread did not pick the request up within 250 ms`，且括号里的
+    /// 待办数一路增长。
+    ///
+    /// 【为什么是这四个入口】它们覆盖了宿主每一次模型交互的入口：
+    /// `take_forced_edit_close` 由 vendored 的 `ControllerAdapter::service_forced_settle`
+    /// 在**每一次** `runtime_mut()` 里调用（创建/更新/删除片段、编辑会话、
+    /// `notifyModelUpdates` 都会经过），另外三个是编辑会话与模型刷新的直接入口。
+    /// 四个互为冗余：任何一个先到，队列都会被排空。
+    ///
+    /// 【为什么这里只允许排播放请求】此刻我们正被宿主调用，栈上持着
+    /// `&mut ControllerAdapter`。往队列里放任意闭包，等于允许在那一刻重入模型 ——
+    /// 那是未定义行为。类型上的约束见 `editor::host_threads::PlaybackRequest`。
+    fn service_model_thread(&self) {
+        crate::host::marshal::pump();
+    }
+}
+
 impl DocumentLifecycle for ModelHandle {
     type Document = ();
 
@@ -1301,6 +1325,7 @@ impl DocumentLifecycle for ModelHandle {
     /// `destroy/create_playback_region`、`update_audio_source_content` 各自负责。
     /// 会话本身只需要被**记录**下来，供会话侧把"会话中的未就绪窗口"识别为暂缓。
     fn begin_editing(&mut self, _document: &mut Self::Document) -> Result<(), AraError> {
+        self.service_model_thread();
         self.editing = true;
         // 【G5】把"编辑会话中"这个事实推给文档：存档载荷到达时据此判断它是
         // "一次撤销/重做"（必须覆盖）还是"宿主交回一份旧载荷"（必须补缺）。
@@ -1317,6 +1342,7 @@ impl DocumentLifecycle for ModelHandle {
         _document: &mut Self::Document,
         _host: &HostContentScope<'_, '_>,
     ) -> Result<(), AraError> {
+        self.service_model_thread();
         self.editing = false;
         self.session.set_in_edit_session(false);
         self.session.note_editing_finished();
@@ -1334,6 +1360,7 @@ impl DocumentLifecycle for ModelHandle {
     }
 
     fn flush_pending_model_updates(&mut self) -> bool {
+        self.service_model_thread();
         if !self.model_dirty {
             return false;
         }
@@ -1348,6 +1375,7 @@ impl DocumentLifecycle for ModelHandle {
     /// 模型线程上跑 —— 两者之间唯一的合法通道就是一个原子量。`swap` 保证同一次请求
     /// 只被消费一次（否则每次回调都会重跑一次全量重映射）。
     fn take_forced_edit_close(&mut self) -> bool {
+        self.service_model_thread();
         self.session
             .forced_edit_close
             .swap(false, std::sync::atomic::Ordering::AcqRel)
