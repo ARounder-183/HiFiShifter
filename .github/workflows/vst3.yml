@@ -190,9 +190,17 @@ jobs:
       - name: Build complete VST3 Release delivery
         run: ./scripts/build/build-hifishifter.ps1 -Target Plugin -Configuration Release -BuildName ci-vst3
 
+      # 黑盒加载门禁：LoadLibrary 成功、导出齐全都不代表 GetPluginFactory 不会死锁。
+      # 必须放在独立进程 + 硬超时里跑；死锁时杀进程并让本 step 红，而不是等 job 超时。
+      - name: Windows VST3 load gate
+        timeout-minutes: 5
+        run: |
+          . ./scripts/env/msvc-env.ps1
+          ./scripts/vst3/windows/verify.ps1 -BundleDirectory "$PWD/.build-tmp/deliveries/ci-vst3/HiFiShifter.vst3" -TimeoutSeconds 20
+
       - name: Package and verify VST3
         run: |
-          ./scripts/release/package-vst3.ps1 -DeliveryDirectory "$PWD/.build-tmp/deliveries/ci-vst3" -OutputDirectory "$PWD/.build-tmp/vst3-artifacts" -Installer
+          ./scripts/release/package-vst3.ps1 -DeliveryDirectory "$PWD/.build-tmp/deliveries/ci-vst3" -OutputDirectory "$PWD/.build-tmp/vst3-artifacts" -Installer -VerifyLoad
 
       # ── Artifact 命名 ──────────────────────────────────────────────────
       #
@@ -245,7 +253,9 @@ jobs:
           # 兜底名：失败可能发生在"确定产物名"之前，那时该 step 的输出是空的，
           # 而 artifact 名不能为空。
           name: ${{ steps.artifact-name.outputs.base || 'HiFiShifter-windows-x86_64-vst3' }}-diagnostics
-          path: .build-tmp/*.log
+          path: |
+            .build-tmp/*.log
+            .build-tmp/native-load-gate.json
           if-no-files-found: ignore
           include-hidden-files: true
           retention-days: 7
