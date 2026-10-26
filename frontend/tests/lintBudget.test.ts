@@ -15,7 +15,7 @@ import { delimiter, join } from "node:path";
 import { expect, test } from "vitest";
 
 /** 预算本身：改这个数字要同时在下面的失败信息里说明理由。 */
-const WARNING_BUDGET = 98;
+const WARNING_BUDGET = 97;
 
 test("ESLint 警告不超过预算（npm run lint:budget）", () => {
     const scripts = JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf8")).scripts;

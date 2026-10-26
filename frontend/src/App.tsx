@@ -934,15 +934,15 @@ function AppInner() {
     // 还没结束才说明这次真的慢（慢盘 / 网络盘 / 超大文件），此时才点。
     const IMPORT_BUSY_DELAY_MS = 300;
     const importInFlight = useAppSelector((state) => state.session.importInFlight);
-    const [importBusy, setImportBusy] = useState(false);
+    const importGenerationRef = useRef(0);
+    const [slowImportGeneration, setSlowImportGeneration] = useState(0);
     useEffect(() => {
-        if (importInFlight <= 0) {
-            setImportBusy(false);
-            return;
-        }
-        const timer = setTimeout(() => setImportBusy(true), IMPORT_BUSY_DELAY_MS);
+        const generation = ++importGenerationRef.current;
+        if (importInFlight <= 0) return;
+        const timer = setTimeout(() => setSlowImportGeneration(generation), IMPORT_BUSY_DELAY_MS);
         return () => clearTimeout(timer);
     }, [importInFlight]);
+    const importBusy = importInFlight > 0 && slowImportGeneration === importGenerationRef.current;
 
     // Listen for backend stretch progress notifications (Tauri only).
     useEffect(() => {

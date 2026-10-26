@@ -159,6 +159,7 @@ export function useProcessorParams({
             },
         };
         invalidate();
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- paramViewsRef 是稳定 ref；加入依赖不会改变语义
     }, [editParam, invalidate]);
 
     // 当 algo 变化时，重新抓取参数描述符
