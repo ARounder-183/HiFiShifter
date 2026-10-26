@@ -154,6 +154,39 @@ fn persistent_import_dir(state: &AppState) -> Option<std::path::PathBuf> {
     Some(dir)
 }
 
+/// 拖放导入落盘时**不允许**出现的扩展名。
+///
+/// 这一串的共同点：在三个平台上"双击即执行"（或能改注册表 / 加载 DLL）。
+const FORBIDDEN_IMPORT_EXTS: &[&str] = &[
+    "exe", "com", "scr", "pif", "bat", "cmd", "ps1", "psm1", "vbs", "vbe", "js", "jse", "wsf",
+    "wsh", "msi", "msp", "lnk", "url", "reg", "hta", "cpl", "dll", "ocx", "sys", "jar", "sh",
+    "command", "desktop", "app",
+];
+
+/// 拖放导入落盘用的扩展名（只保留字母数字，最多 8 位）。
+///
+/// 【为什么必须收口】`file_name` 来自渲染进程，而这条命令把字节写到
+/// `<config>/imported_media/import_<uuid>.<ext>` —— 一个**路径可预测**的位置。
+/// 扩展名原样沿用就等于给出一条"把任意内容写成任意可执行文件"的通道
+/// （`.bat` / `.exe` / `.lnk`…），而本应用还有"用默认程序打开路径"的命令，
+/// 两者一串就是代码执行。危险扩展名一律降级为 `bin`：解码按**内容**探测
+/// （`try_read_audio_header_only` 走 symphonia probe），不依赖扩展名。
+fn import_file_extension(file_name: &str) -> String {
+    let raw = Path::new(file_name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let cleaned: String = raw
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(8)
+        .collect();
+    if cleaned.is_empty() || FORBIDDEN_IMPORT_EXTS.contains(&cleaned.as_str()) {
+        return "bin".to_string();
+    }
+    cleaned
+}
 pub(super) fn import_audio_bytes(
     state: State<'_, AppState>,
     file_name: String,
@@ -183,10 +216,7 @@ pub(super) fn import_audio_bytes(
         }
     };
 
-    let ext = Path::new(&file_name)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("bin");
+    let ext = import_file_extension(&file_name);
     // 优先落持久目录：这里的文件是 clip 的唯一副本，不能放进启动即清理的临时目录。
     // 仅当 config_dir 不可用（极端降级）时才退回临时目录。
     let path = match persistent_import_dir(&state) {
@@ -2671,4 +2701,29 @@ pub(super) fn set_timeline_tempo_map(
     }
 
     payload
+}
+
+#[cfg(test)]
+mod tests {
+    use super::import_file_extension;
+
+    /// **不变量：拖放导入永远不会落成一个"双击即执行"的文件。**
+    ///
+    /// 守的是这条链：渲染进程给出 `file_name` → 我们写进路径可预测的
+    /// `imported_media/` → 另一个命令可以用系统默认程序打开它。
+    #[test]
+    fn dropped_imports_never_land_with_an_executable_extension() {
+        assert_eq!(import_file_extension("song.wav"), "wav");
+        assert_eq!(import_file_extension("SONG.MP3"), "mp3");
+        assert_eq!(import_file_extension("track.flac"), "flac");
+        // 危险扩展名一律降级。
+        for name in ["evil.bat", "evil.EXE", "evil.lnk", "evil.ps1", "evil.hta"] {
+            assert_eq!(import_file_extension(name), "bin", "{name}");
+        }
+        // 双扩展名只看最后一段：`evil.wav.exe` 仍是可执行文件。
+        assert_eq!(import_file_extension("evil.wav.exe"), "bin");
+        // 没有扩展名 / 非法字符都不该原样落盘。
+        assert_eq!(import_file_extension("noext"), "bin");
+        assert_eq!(import_file_extension("a.b:c"), "bc");
+    }
 }

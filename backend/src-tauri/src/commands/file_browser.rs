@@ -192,7 +192,7 @@ fn app_owned_dirs(config_dir: Option<&Path>) -> Vec<std::path::PathBuf> {
 }
 
 /// 目标路径是否落在应用自身目录之内（含其本身）。
-fn is_inside_app_dirs(path: &Path, config_dir: Option<&Path>) -> bool {
+pub(crate) fn is_inside_app_dirs(path: &Path, config_dir: Option<&Path>) -> bool {
     let target = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     for candidate in app_owned_dirs(config_dir) {
         let dir = candidate.canonicalize().unwrap_or(candidate);

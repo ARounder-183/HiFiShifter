@@ -3242,15 +3242,31 @@ pub fn reveal_paths_in_file_manager(
 }
 
 /// 用系统默认程序打开一个路径。
+///
+/// 【为什么拒绝应用自己的目录】那里只有本应用写下的东西（`imported_media`、
+/// 渲染缓存、日志、配置）。"用默认程序打开"一旦覆盖到它们，就等于把"写文件"与
+/// "执行文件"接成一条链：渲染进程先落一个文件，再让系统去开它。
 #[tauri::command(rename_all = "camelCase")]
-pub fn open_path_with_default_app(app: tauri::AppHandle, path: String) -> serde_json::Value {
+pub fn open_path_with_default_app(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+) -> serde_json::Value {
     {
         // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
         // Win32 消息循环的 FFI 边界 = abort 整个 App。拦成明确的失败值。
         common::guard_command(
             "open_path_with_default_app",
             serde_json::json!({ "ok": false, "error": "panic in command: open_path_with_default_app" }),
-            || common::open_path_with_default_app(&app, &path),
+            || {
+                if file_browser::is_inside_app_dirs(
+                    std::path::Path::new(&path),
+                    state.config_dir.get().map(|p| p.as_path()),
+                ) {
+                    return serde_json::json!({ "ok": false, "error": "protected_path" });
+                }
+                common::open_path_with_default_app(&app, &path)
+            },
         )
     }
 }
