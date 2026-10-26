@@ -20,6 +20,7 @@
 | 12 | `runtime.rs` 的 `CreateContext::for_test` | 增量 | `#[doc(hidden)]` 的测试用构造器：给定代数与 realtime key 造一个上下文。生产路径仍只走 `document()` / `object()`，不改变任何行为 | 新增 |
 | 13 | `runtime.rs` 的 `create_playback_region` / `update_playback_region` 的 sequence 校验 | **行为** | 宿主没声明 `regionSequenceRef` 时以 trait 参数为准（原先 `None != Some(expected)` 恒真 ⇒ 整条 region 被拒）。只在宿主声明了一个**不同**的 sequence 时才拒绝 —— 那才是真冲突 | 新增 |
 | 14 | `controller.rs` 的 7 个生命周期回调 | **行为** | null hostRef 不再让回调裸 `return`，改走无宿主变体（`update_musical_context{,_content}` / `update_audio_source{,_content}` / `set_audio_source_deactivated_with_host` / `set_audio_source_samples_access_with_host` / `destroy_audio_source`）。补丁 12 只让 create 容忍 null hostRef，于是"对象建起来了，但采样读不到、tempo 读不到、源销毁不了" | 新增 |
+| 15 | `extension/mod.rs` 的 controller 生命周期闸门 | **行为** | `add/removePlaybackRegion` 在 controller lease 销毁后返回 `InvalidState` 并记录拒绝；线程不匹配仍按 T7 只记录不拒绝。修复 controller 先销毁时仍能写入分配表的生命周期漏洞 | 新增 |
 
 ## 代数协商的静默失败（补丁 6/7）
 

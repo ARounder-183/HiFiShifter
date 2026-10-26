@@ -25,8 +25,11 @@ pub(crate) unsafe extern "C" fn remove_playback_region(
     // SAFETY: same role-reference invariant as `add_playback_region`.
     unsafe {
         with_state(reference.cast(), (), |state| {
-            let _ =
-                state.remove_playback_region(ExtensionRoles::PLAYBACK_RENDERER, region as usize);
+            if let Err(error) =
+                state.remove_playback_region(ExtensionRoles::PLAYBACK_RENDERER, region as usize)
+            {
+                state.note_assignment_reject(ExtensionRoles::PLAYBACK_RENDERER, &error);
+            }
         })
     }
 }

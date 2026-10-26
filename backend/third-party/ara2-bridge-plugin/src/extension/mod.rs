@@ -139,12 +139,11 @@ impl ExtensionState {
         )
     }
 
+    /// Only the controller lifecycle gates mutations. A caller-thread mismatch is
+    /// deliberately *not* a rejection reason (the ARA contract does not guarantee
+    /// `addPlaybackRegion` runs on the binding thread); it is recorded separately.
     fn require_controller(&self) -> Result<(), AraError> {
-        if std::thread::current().id() != self.model_thread {
-            Err(AraError::InvalidState(
-                "extension assignment must run on the binding thread",
-            ))
-        } else if self.controller_alive.load(Ordering::Acquire) {
+        if self.controller_alive.load(Ordering::Acquire) {
             Ok(())
         } else {
             Err(AraError::InvalidState(
@@ -153,12 +152,22 @@ impl ExtensionState {
         }
     }
 
-    fn add_playback_region(&self, role: ExtensionRoles, region: usize) -> Result<(), AraError> {
-        // T7: the caller thread is no longer a rejection reason (the ARA contract does not
-        // guarantee `addPlaybackRegion` runs on the binding thread). It is recorded instead.
-        if let Err(error) = self.require_controller() {
-            self.note_assignment_reject(role, &error);
+    fn note_thread_mismatch(&self, role: ExtensionRoles) {
+        if std::thread::current().id() != self.model_thread {
+            self.note_assignment_reject(
+                role,
+                &AraError::InvalidState(
+                    "extension assignment must run on the binding thread",
+                ),
+            );
         }
+    }
+
+    fn add_playback_region(&self, role: ExtensionRoles, region: usize) -> Result<(), AraError> {
+        // The controller lease is a tombstone: once destroyed, the host may still call
+        // through the retained interface storage, but no mutation may be recorded.
+        self.require_controller()?;
+        self.note_thread_mismatch(role);
         if region == 0 || !self.enabled.contains(role) || role.bits().count_ones() != 1 {
             return Err(AraError::InvalidArgument(
                 "playback region role is not enabled",
@@ -177,6 +186,7 @@ impl ExtensionState {
 
     fn remove_playback_region(&self, role: ExtensionRoles, region: usize) -> Result<(), AraError> {
         self.require_controller()?;
+        self.note_thread_mismatch(role);
         if !lock(&self.playback_regions).remove(&(role.bits(), region)) {
             return Err(AraError::InvalidState(
                 "playback region is not assigned to this role",
