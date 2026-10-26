@@ -1094,6 +1094,25 @@ fn apply_host_pitch_edit(
     Ok(true)
 }
 
+/// `decoded_sources` 的字节预算：与分块缓存（`renderer/hifigan.rs`）同量级。
+/// 超限后的新 shared 源退回"即用即弃"，**不驱逐**已有条目（已付的解码成本不抖掉）。
+const DECODE_CACHE_BUDGET_BYTES: usize = 128 * 1024 * 1024;
+
+/// 解码缓存的键归一。
+///
+/// 【为什么只在 Windows 折叠】NTFS / 常见 FAT 系不区分大小写、两种分隔符等价；
+/// 同一文件以 `C:\A.wav` 与 `c:/a.wav` 出现在两个 clip 上时，原样键会把去重漏成
+/// 两次解码。Unix 文件系统区分大小写，折叠反而会把两个真实不同的文件错误合并。
+#[cfg(windows)]
+fn decode_cache_key(path: &str) -> String {
+    path.replace('/', "\\").to_ascii_lowercase()
+}
+
+#[cfg(not(windows))]
+fn decode_cache_key(path: &str) -> String {
+    path.to_string()
+}
+
 fn render_mixdown_internal(
     timeline: &TimelineState,
     opts: MixdownOptions,
@@ -1152,14 +1171,53 @@ fn render_mixdown_internal(
     // 单次使用的文件维持原有的"即用即弃"节奏。缓存随本次混音作用域创建与
     // 释放，不引入跨命令状态；失败结果（含错误文本）一并缓存，避免同一坏
     // 文件被 N 个 clip 重复解码 N 次（每个 clip 仍打自己的诊断日志）。
-    let mut path_refcounts: HashMap<&str, usize> = HashMap::new();
-    for clip in &timeline.clips {
-        if let Some(path) = clip.source_path.as_ref() {
-            *path_refcounts.entry(path.as_str()).or_insert(0) += 1;
+    //
+    // 【引用计数只数"真的会解码"的 clip】muted、静音轨道、零增益、长度非法、
+    // 渲染窗口外的 clip 都走不到解码分支；把它们也算进引用数，会把一个实际
+    // 只解码一次的文件误判成 shared 而缓存到导出结束（内存峰值因此从
+    // "单个可听文件"涨到"全部出现过的文件"）。这里的判定必须与主循环的
+    // 跳过条件逐条一致 —— 两处由同一段注释锚点对照维护，改动任何一侧都要
+    // 同步另一侧。
+    //
+    // 【字节预算】shared 文件的解码 PCM 保留到整趟结束，最坏峰值是全部
+    // shared 文件之和（量级见 `audio_utils` 的注释：1 小时立体声 ≈ 1.27GB）。
+    // 上限取与分块缓存同量级的 128 MiB（[`DECODE_CACHE_BUDGET_BYTES`]）。
+    let path_refcounts: HashMap<String, usize> = if sources.is_none() {
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for clip in &timeline.clips {
+            let Some(path) = clip.source_path.as_ref() else {
+                continue;
+            };
+            if clip.muted || !audible_tracks.contains(&clip.track_id) {
+                continue;
+            }
+            let (track_gain_value, _tmuted, _solo_ok) = track_gain
+                .get(&clip.track_id)
+                .cloned()
+                .unwrap_or((1.0, false, true));
+            if crate::gain::clamp_gain(clip.audible_gain() * track_gain_value) <= 0.0 {
+                continue;
+            }
+            let clip_timeline_len_sec = clip.length_sec.max(0.0);
+            if !(clip_timeline_len_sec.is_finite() && clip_timeline_len_sec > 0.0) {
+                continue;
+            }
+            let clip_start_sec = clip.start_sec.max(0.0);
+            let clip_end_sec = clip_start_sec + clip_timeline_len_sec;
+            if clip_end_sec <= start_sec || clip_start_sec >= end_sec {
+                continue;
+            }
+            *counts.entry(decode_cache_key(path)).or_insert(0) += 1;
         }
-    }
+        counts
+    } else {
+        HashMap::new()
+    };
     let mut decoded_sources: HashMap<String, Result<(u32, u16, Arc<Vec<f32>>), String>> =
         HashMap::new();
+    // 缓存当前占用的字节数（成功条目才记账）；预算打满只提示一次。
+    let mut decode_cached_bytes: usize = 0;
+    let mut decode_budget_logged = false;
 
     for (clip_index, clip) in timeline.clips.iter().enumerate() {
         // 在迭代开头上报（= 前 `clip_index` 个已完成）。放在 `continue` 之前，
@@ -1243,18 +1301,45 @@ fn render_mixdown_internal(
                         );
                     }
                 };
+                let cache_key = decode_cache_key(source_path);
                 let shared = path_refcounts
-                    .get(source_path.as_str())
+                    .get(&cache_key)
                     .is_some_and(|count| *count >= 2);
                 if shared {
-                    let entry = decoded_sources
-                        .entry(source_path.clone())
-                        .or_insert_with(|| {
-                            crate::audio_utils::decode_audio_f32_interleaved(Path::new(source_path))
-                                .map(|(rate, channels, pcm)| (rate, channels, Arc::new(pcm)))
-                        });
+                    // 已缓存 → 直接用；没缓存 → 先解码，再按 [`DECODE_CACHE_BUDGET_BYTES`]
+                    // 决定留不留（超限退回"即用即弃"，不驱逐已有条目 —— 已付的解码
+                    // 成本不抖掉）。失败结果只是一行文本，永远缓存。
+                    let entry = match decoded_sources.get(&cache_key) {
+                        Some(entry) => entry.clone(),
+                        None => {
+                            let decoded = crate::audio_utils::decode_audio_f32_interleaved(
+                                Path::new(source_path),
+                            )
+                            .map(|(rate, channels, pcm)| (rate, channels, Arc::new(pcm)));
+                            let fits_budget = match &decoded {
+                                Ok((_, _, pcm)) => {
+                                    decode_cached_bytes + pcm.len() * 4 <= DECODE_CACHE_BUDGET_BYTES
+                                }
+                                Err(_) => true,
+                            };
+                            if fits_budget {
+                                if let Ok((_, _, pcm)) = &decoded {
+                                    decode_cached_bytes += pcm.len() * 4;
+                                }
+                                decoded_sources.insert(cache_key.clone(), decoded.clone());
+                            } else if !decode_budget_logged {
+                                decode_budget_logged = true;
+                                log::debug!(
+                                    "mixdown: decode cache budget ({} MiB) reached; \
+                                     further shared sources decode per use",
+                                    DECODE_CACHE_BUDGET_BYTES / (1024 * 1024)
+                                );
+                            }
+                            decoded
+                        }
+                    };
                     match entry {
-                        Ok((rate, channels, pcm)) => (*rate, *channels, Arc::clone(pcm)),
+                        Ok((rate, channels, pcm)) => (rate, channels, Arc::clone(&pcm)),
                         Err(error) => {
                             log_decode_failure(error.as_str());
                             continue;
