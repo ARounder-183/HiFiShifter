@@ -583,6 +583,20 @@ impl ModelHandle {
                         && parent.play_start < frame.play_start + frame.play_dur
                 });
                 if !intersects_an_appeared {
+                    // 【为什么留痕】被门挡掉的主体是纯删除/撤销，但"删父段与建子段
+                    // 被宿主拆进两次模型交付"的**真分割**也会走到这里 —— 那种情形
+                    // 静默退回几何兜底且无任何日志。Debug 计数让它在日志里可辨，
+                    // 攒到真机证据再决定是否放宽为跨帧资格（见
+                    // docs/plans/2026-10-27-audit-repair-round2.md §3.5）。
+                    hifishifter_kernel::log_limiter::emit_limited_key(
+                        log::Level::Debug,
+                        "ara.split.gate-skipped",
+                        format_args!(
+                            "[ara] split candidate skipped: parent ara-region-{} vanished \
+                             with no intersecting child this frame",
+                            parent.key
+                        ),
+                    );
                     continue;
                 }
                 let refs = appeared.iter().collect::<Vec<_>>();
