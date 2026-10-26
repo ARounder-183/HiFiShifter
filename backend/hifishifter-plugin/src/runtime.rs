@@ -206,7 +206,7 @@ impl Runtime {
                                 thread: std::thread::current().id(),
                                 handle,
                                 supersession: std::sync::Arc::new(
-                                    std::sync::atomic::AtomicU64::new(0),
+                                    crate::editor::host_threads::SupersessionDomain::new(),
                                 ),
                             });
                         *playback.playback.lock_or_recover() = endpoint;

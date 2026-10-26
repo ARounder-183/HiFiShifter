@@ -108,11 +108,42 @@ impl ModelThreadError {
 /// 【为什么按端点而不是进程】取代只在**同一份票据域**（= 同一个
 /// `PlaybackEndpoint`，即同一个 ARA 文档）内生效。进程级票号下，任何文档的任意
 /// 一次投递都会把**别的**文档排队中的请求判成「已被取代」而静默丢弃 —— 多工程
-/// tab / 双实例时「按了播放没反应」；单文档内，排队中的 Stop 也会被随后独立的
-/// SetPosition 作废（「按了停止却不停」）。票据域随端点走，取代语义才与用户
-/// 意图同域。
-pub(crate) fn ticket_is_current(supersession: &AtomicU64, ticket: u64) -> bool {
-    supersession.load(Ordering::Acquire) == ticket
+/// tab / 双实例时「按了播放没反应」。票据域随端点走，取代语义才与用户意图同域。
+///
+/// 【为什么域内还分两类票】Start 与 StopAtPosition 是同一类意图（**传输**：
+/// 播不播、停不停），互相取代；SetPosition 是另一类意图（**定位**：播放头在哪），
+/// 它**不得**作废排队中的 Start / StopAtPosition —— 用户按了停止、又点了一下
+/// 时间轴，两件事都要发生（先停、再定位）。全域一票会让「按了停止却不停」在
+/// **单文档内**复活：Stop 排队后任何一次时间轴点击都把 Stop 判成已被取代。
+#[derive(Default)]
+pub(crate) struct SupersessionDomain {
+    /// 传输意图（`Start` / `StopAtPosition`）共用的票号。
+    transport: AtomicU64,
+    /// 定位意图（`SetPosition`）专用的票号。
+    position: AtomicU64,
+}
+
+impl SupersessionDomain {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    fn counter(&self, request: &PlaybackRequest) -> &AtomicU64 {
+        match request {
+            PlaybackRequest::Start | PlaybackRequest::StopAtPosition(_) => &self.transport,
+            PlaybackRequest::SetPosition(_) => &self.position,
+        }
+    }
+
+    /// 投递前取票：同域**同类**的后到请求会让旧票失效。
+    fn take_ticket(&self, request: &PlaybackRequest) -> u64 {
+        self.counter(request).fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    /// 执行时的取代判定（规则见类型级文档）。
+    fn ticket_is_current(&self, request: &PlaybackRequest, ticket: u64) -> bool {
+        self.counter(request).load(Ordering::Acquire) == ticket
+    }
 }
 
 /// 投递方为「当场拿到结果」最多等这么久；拿不到即回「已排队」。
@@ -126,21 +157,21 @@ pub(crate) const MODEL_REQUEST_GRACE: std::time::Duration = std::time::Duration:
 
 /// 把一次播放请求送到 ARA 的 model 线程。
 ///
-/// `supersession` 是本次投递所属端点的票据域（见 [`ticket_is_current`] 的说明）。
+/// `domain` 是本次投递所属端点的票据域（见 [`SupersessionDomain`] 的说明）。
 ///
 /// 返回 `Ok(Ok(()))` = 宿主接受了请求；`Ok(Err(reason))` = 宿主自己拒绝了它
 /// （租约已撤销 / 线程不对 / 位置非法 / 已被更新请求取代）；`Err(Queued)` =
 /// 已排队、稍后执行。
 pub(crate) fn on_ara_model(
-    supersession: Arc<AtomicU64>,
+    domain: Arc<SupersessionDomain>,
     target: ThreadId,
     handle: PlaybackRequestHandle,
     request: PlaybackRequest,
 ) -> Result<Result<(), String>, ModelThreadError> {
-    let ticket = supersession.fetch_add(1, Ordering::AcqRel) + 1;
+    let ticket = domain.take_ticket(&request);
     deliver(target, move || {
-        // 被更新（同端点）的传输请求取代 ⇒ 这次什么也不做。
-        if !ticket_is_current(&supersession, ticket) {
+        // 被同端点**同类**的更新请求取代 ⇒ 这次什么也不做。
+        if !domain.ticket_is_current(&request, ticket) {
             return Err("superseded by a newer transport request".to_owned());
         }
         request.execute(&handle)
@@ -183,9 +214,10 @@ mod tests {
     use std::time::Duration;
 
     /// 队列是进程级状态（取代票据已随端点走）；用例并行会互相看见对方的任务。
+    /// 与 marshal 的测试**共用同一把**全局锁 —— 两族用例写同一条队列，
+    /// 各持一把模块内锁等于没锁（一边把队列填满，另一边撞上 Backlog）。
     fn serialize() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        LOCK.lock().unwrap_or_else(|error| error.into_inner())
+        crate::host::marshal::serialize_queue_for_tests()
     }
 
     /// 已经结束的线程：它的 id 仍然有效，但不会再有泵来取任务。
@@ -245,32 +277,49 @@ mod tests {
         assert_eq!(outcome, Ok(13));
     }
 
-    /// **不变量：取代只在同一份票据域（= 同一个 `PlaybackEndpoint`）内生效。**
+    /// **不变量：取代只在同一份票据域（= 同一个 `PlaybackEndpoint`）内生效，
+    /// 且定位请求不取代排队中的传输请求。**
     ///
     /// 【为什么钉死】票据此前是进程级 static：任何一次投递（哪怕来自另一个文档）
     /// 都推进全局票号，把**别的**文档排队中的请求判成「已被取代」而静默丢弃 ——
-    /// 用户在 A 里按了播放没反应，只是因为 B 里也动过传输；单文档内，排队中的
-    /// Stop 也会被随后独立的 SetPosition 作废（「按了停止却不停」）。
-    /// 抽出 [`ticket_is_current`] 是为了在没有 `PlaybackRequestHandle` 的测试里
-    /// 钉住这两个方向的契约（句柄只能由 vendored bridge 从真实宿主接口构造）。
+    /// 用户在 A 里按了播放没反应，只是因为 B 里也动过传输。域化修掉这一半之后，
+    /// 剩下的那一半是**域内**的：全域一票下，排队中的 Stop 仍会被随后独立的
+    /// SetPosition 作废（「按了停止却不停」）。抽出 [`SupersessionDomain`] 的
+    /// 判定方法是为了在没有 `PlaybackRequestHandle` 的测试里钉住这三个方向的
+    /// 契约（句柄只能由 vendored bridge 从真实宿主接口构造）。
     #[test]
-    fn supersession_is_scoped_to_one_endpoint_ticket_domain() {
-        let endpoint_a = Arc::new(AtomicU64::new(0));
-        let endpoint_b = Arc::new(AtomicU64::new(0));
-        // A 上取一张票；B 上随后任意多次投递。
-        let ticket_a = endpoint_a.fetch_add(1, Ordering::AcqRel) + 1;
+    fn supersession_is_scoped_to_one_endpoint_and_split_by_intent() {
+        let endpoint_a = Arc::new(SupersessionDomain::new());
+        let endpoint_b = Arc::new(SupersessionDomain::new());
+        // A 上取一张 Start 票；B 上随后任意多次投递。
+        let ticket_a = endpoint_a.take_ticket(&PlaybackRequest::Start);
         for _ in 0..3 {
-            endpoint_b.fetch_add(1, Ordering::AcqRel);
+            let _ = endpoint_b.take_ticket(&PlaybackRequest::StopAtPosition(0.0));
         }
         assert!(
-            ticket_is_current(&endpoint_a, ticket_a),
+            endpoint_a.ticket_is_current(&PlaybackRequest::Start, ticket_a),
             "另一个票据域的新票不得使本域排队请求失效"
         );
-        // 同一域内：后到的新票取代旧票（「先播放后停止」按停止生效的机制）。
-        let _newer = endpoint_a.fetch_add(1, Ordering::AcqRel) + 1;
+        // 同域传输意图：后到的新票取代旧票（「先播放后停止」按停止生效的机制）。
+        let _newer = endpoint_a.take_ticket(&PlaybackRequest::StopAtPosition(1.0));
         assert!(
-            !ticket_is_current(&endpoint_a, ticket_a),
-            "同一票据域内的新票必须作废旧票"
+            !endpoint_a.ticket_is_current(&PlaybackRequest::Start, ticket_a),
+            "同域内后到的传输请求必须作废先到的"
+        );
+        // 定位意图独立：SetPosition 的新票**不**作废排队中的 StopAtPosition ——
+        // 「按了停止、又点了时间轴」两件事都要发生（先停、再定位）。
+        let stop_ticket = endpoint_a.take_ticket(&PlaybackRequest::StopAtPosition(2.0));
+        let _seek = endpoint_a.take_ticket(&PlaybackRequest::SetPosition(3.0));
+        assert!(
+            endpoint_a.ticket_is_current(&PlaybackRequest::StopAtPosition(2.0), stop_ticket),
+            "定位请求不得作废排队中的停止"
+        );
+        // 同类定位请求仍互相取代（连点时间轴 = 后一次是此刻的意图）。
+        let seek_ticket = endpoint_a.take_ticket(&PlaybackRequest::SetPosition(3.0));
+        let _newer_seek = endpoint_a.take_ticket(&PlaybackRequest::SetPosition(4.0));
+        assert!(
+            !endpoint_a.ticket_is_current(&PlaybackRequest::SetPosition(3.0), seek_ticket),
+            "同域内后到的定位请求必须作废先到的"
         );
     }
 }

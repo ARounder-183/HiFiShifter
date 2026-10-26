@@ -285,14 +285,14 @@ pub struct PlaybackEndpoint {
     /// 租约本体（`Clone`：每次调用取一份副本）。
     pub handle: ara2_bridge::plugin::PlaybackRequestHandle,
     /// 本端点的传输请求**票据域**（`editor::host_threads` 的取代判定只在本域内
-    /// 生效）。
+    /// 生效，且**传输与定位分票**：SetPosition 不得作废排队中的 Start/StopAtPosition）。
     ///
     /// 【为什么随端点而不是进程】进程级票号下，任何文档的任意一次投递都会把
     /// **别的**文档排队中的请求判成「已被取代」而静默丢弃（多工程 tab / 双实例
-    /// 时「按了播放没反应」）；单文档内，排队中的 Stop 也会被随后独立的
-    /// SetPosition 作废（「按了停止却不停」）。票据域随端点走，取代语义才与
-    /// 用户意图同域。
-    pub supersession: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// 时「按了播放没反应」）。票据域随端点走，取代语义才与用户意图同域；
+    /// 域内传输/定位分票的完整规则见
+    /// [`editor::host_threads::SupersessionDomain`]。
+    pub supersession: std::sync::Arc<crate::editor::host_threads::SupersessionDomain>,
 }
 
 #[derive(Default)]
