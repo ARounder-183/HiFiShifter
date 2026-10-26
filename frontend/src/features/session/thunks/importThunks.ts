@@ -2,7 +2,12 @@ import { createAsyncThunk } from "@reduxjs/toolkit";
 import { webApi } from "../../../services/webviewApi";
 import { fileBrowserApi } from "../../../services/api";
 import { isVideoFilePath } from "../../../components/layout/timeline/dnd";
-import { checkpointHistory, applyTimelinePayload, type SessionState } from "../sessionSlice";
+import {
+    checkpointHistory,
+    applyTimelinePayload,
+    setAudioPath,
+    type SessionState,
+} from "../sessionSlice";
 
 import { addTrackRemote, setClipStateRemote } from "./timelineThunks";
 import {
@@ -17,7 +22,20 @@ import { waveformMipmapStore } from "../../../utils/waveformMipmapStore";
 import { appStatusProgressBus } from "../../../utils/appStatusProgressBus";
 import { isPluginMode } from "../../../services/hostCapabilities";
 import { getPluginHost } from "../../../services/pluginHost";
+import { reportFrontendError } from "../../../services/frontendErrorLog";
 import type { TimelineResult } from "../../../types/api";
+
+/**
+ * finally 里收尾 undo 组：主结果（成功返回或 rejectWithValue）已经定了，
+ * 收尾失败不能再向上传播顶掉它 —— 但 `void` 直接丢弃会让 rejection 变成
+ * unhandledrejection（只剩一条控制台噪音，undo 组可能真的没关上）。
+ * 统一上报到前端错误日志，既保留"不吞主结果"的语义，又让失败可见。
+ */
+function endUndoGroupQuietly(): void {
+    void webApi.endUndoGroup().catch((err) => {
+        reportFrontendError("end_undo_group_failed", err);
+    });
+}
 
 /** 插件多文件依原GUI模式导入；每次确认宿主ARA返回的确切new clip，不按位置猜目标。 */
 async function importHostBatch(args: {
@@ -199,10 +217,6 @@ async function syncAutoCrossfadeFromLatestTimeline(args: {
     return latestTimeline;
 }
 
-const setAudioPathAction = (path: string) => ({
-    type: "session/setAudioPath" as const,
-    payload: path,
-});
 export const importAudioFromDialog = createAsyncThunk(
     "session/importAudioFromDialog",
     async (_, { dispatch, rejectWithValue, getState }) => {
@@ -223,7 +237,7 @@ export const importAudioFromDialog = createAsyncThunk(
         const trackId = state.session.selectedTrackId ?? null;
         const firstPath = pickedPaths[0];
 
-        dispatch(setAudioPathAction(firstPath));
+        dispatch(setAudioPath(firstPath));
 
         if (pickedPaths.length > 1) {
             return {
@@ -298,7 +312,7 @@ export const importAudioFromPath = createAsyncThunk(
         const importGen = currentImportGeneration();
         const importRun = registerImportRun();
         try {
-            dispatch(setAudioPathAction(audioPath));
+            dispatch(setAudioPath(audioPath));
             // 在发起导入前捕获现有 clip id 集合：await 期间其他 thunk 的
             // fulfilled 可能已把新 clip 写进 state，事后取差集会得到空集。
             const beforeClipIds = new Set(
@@ -347,7 +361,7 @@ export const importAudioAtPosition = createAsyncThunk(
         },
         { dispatch, rejectWithValue, getState },
     ) => {
-        dispatch(setAudioPathAction(payload.audioPath));
+        dispatch(setAudioPath(payload.audioPath));
 
         // 取消闸门：撤销 / 跳转历史 / 打开工程后，在途的建轨 / 导入命令落地时
         // 后端可能凭空造出 Track（见 importCancellation）。
@@ -503,7 +517,7 @@ export const importAudioAtPosition = createAsyncThunk(
             };
         } finally {
             importRun.finish();
-            void webApi.endUndoGroup();
+            endUndoGroupQuietly();
         }
     },
 );
@@ -622,7 +636,7 @@ export const importAudioFileAtPosition = createAsyncThunk(
             );
         } finally {
             importRun.finish();
-            void webApi.endUndoGroup();
+            endUndoGroupQuietly();
         }
     },
 );
@@ -849,7 +863,7 @@ export const importMultipleAudioAtPosition = createAsyncThunk(
             return { ok: true, imported: importedResult, newClipIds, playheadSec: startSec };
         } finally {
             importRun.finish();
-            void webApi.endUndoGroup();
+            endUndoGroupQuietly();
         }
     },
 );
@@ -1068,7 +1082,7 @@ export const importFolderAtPosition = createAsyncThunk(
         } finally {
             reportProgress(false);
             importRun.finish();
-            void webApi.endUndoGroup();
+            endUndoGroupQuietly();
         }
     },
 );
@@ -1119,7 +1133,9 @@ export const importMultipleAudioFilesAtPosition = createAsyncThunk(
 
         dispatch(checkpointHistory());
 
-        await webApi.beginUndoGroup();
+        // 多文件媒体导入的 undo 组：与单文件路径（importAudioFileAtPosition）
+        // 及宿主批量路径（importHostBatch）使用同一个标签，撤销菜单里不区分来源。
+        await webApi.beginUndoGroup("import_media");
         // 取消闸门：本批可能是目录导入委托过来的长循环（见 importCancellation）。
         const importGen = currentImportGeneration();
         // 登记这次导入：历史跳转前会等它收尾（见 registerImportRun）。
@@ -1275,7 +1291,7 @@ export const importMultipleAudioFilesAtPosition = createAsyncThunk(
             return { ok: true, imported: importedResult, newClipIds, playheadSec: startSec };
         } finally {
             importRun.finish();
-            void webApi.endUndoGroup();
+            endUndoGroupQuietly();
         }
     },
 );
@@ -1305,7 +1321,7 @@ export const importMidiAsClip = createAsyncThunk(
         // 取消闸门：撤销 / 跳转历史 / 打开工程后，在途的建轨 / 导入命令落地时
         // 后端可能凭空造出 Track（见 importCancellation）。
         const importGen = currentImportGeneration();
-        await webApi.beginUndoGroup("import_vocalshifter");
+        await webApi.beginUndoGroup("import_midi");
         const importRun = registerImportRun();
         try {
             if (isImportCancelled(importGen)) {
@@ -1372,7 +1388,7 @@ export const importMidiAsClip = createAsyncThunk(
             return rejectWithValue(err instanceof Error ? err.message : "import_midi_clip_failed");
         } finally {
             importRun.finish();
-            void webApi.endUndoGroup();
+            endUndoGroupQuietly();
         }
     },
 );

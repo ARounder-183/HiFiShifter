@@ -28,7 +28,7 @@ import { rulerLayerTranslatePx } from "../../renderKernel/timelineAxis.js";
 import { readDevicePixelRatio } from "../../../../utils/devicePixelLine";
 import { waveformMipmapStore } from "../../../../utils/waveformMipmapStore";
 import { fileBrowserApi } from "../../../../services/api/fileBrowser";
-import { seekPlayhead, setplayheadSec } from "../../../../features/session/sessionSlice";
+import { seekPlayhead, setPlayheadSec } from "../../../../features/session/sessionSlice";
 import { selectKeybinding } from "../../../../features/keybindings/keybindingsSlice";
 import type { Keybinding } from "../../../../features/keybindings/types";
 import { resolveScrollableProjectSec } from "../../../../features/session/projectBoundary";
@@ -1164,14 +1164,14 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
             ).sec;
 
             if (commit) {
-                dispatch(setplayheadSec(beat));
+                dispatch(setPlayheadSec(beat));
                 void dispatch(seekPlayhead(beat));
                 clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
             } else {
                 // 更新 Redux state 使三角形头部（TimeRulerPlayhead）与竖线同步。
                 // 轨道区播放头（内核自绘）无需在此直写 DOM：位置变化经数据镜像 +
                 // 视觉插值 ref 流入内核，由桥接的每帧重绘请求驱动。
-                dispatch(setplayheadSec(beat));
+                dispatch(setPlayheadSec(beat));
             }
             return beat;
         },

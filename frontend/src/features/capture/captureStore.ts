@@ -64,6 +64,18 @@ function publish(next: CaptureSnapshot): void {
  * 演进，新增字段不该悄悄变成"内容变了"；一次 stringify 的开销远低于一次全栏重渲染。
  */
 let lastStatusJson: string | null = null;
+
+/**
+ * 所有直接写 `snapshot.status` 的路径共用：同步更新比较缓存。
+ *
+ * 【为什么不能只在轮询里更新】`act()` / `noteRecorded` 用命令回信直写 status
+ * 时若不动缓存，动作后的第一轮轮询会拿同一份状态与**旧缓存**比较，误判
+ * "内容变了"，多发一次全栏重渲染 —— 正是这套缓存要防的事。
+ */
+function rememberStatus(status: CaptureStatus | null): void {
+    lastStatusJson = status === null ? null : JSON.stringify(status);
+}
+
 function withStatus(status: CaptureStatus): CaptureSnapshot {
     const json = JSON.stringify(status);
     if (snapshot.status !== null && json === lastStatusJson) return snapshot;
@@ -145,6 +157,7 @@ function noteRecorded(status: CaptureStatus | undefined): void {
         span && sampleRate > 0
             ? ([span.startFrame / sampleRate, span.endFrame / sampleRate] as [number, number])
             : null;
+    rememberStatus(status);
     publish({
         ...snapshot,
         status,
@@ -163,7 +176,10 @@ async function act(
     try {
         const status = await run();
         if (onDone) onDone(status);
-        else publish({ ...snapshot, status, error: "" });
+        else {
+            rememberStatus(status);
+            publish({ ...snapshot, status, error: "" });
+        }
     } catch (cause) {
         publish({ ...snapshot, error: captureError(cause) });
     } finally {
@@ -185,5 +201,6 @@ export const captureActions = {
 
 /** 供测试注入一条状态（不发命令）。 */
 export function publishCaptureStatusForTests(status: CaptureStatus | null): void {
+    rememberStatus(status);
     publish({ ...snapshot, status });
 }

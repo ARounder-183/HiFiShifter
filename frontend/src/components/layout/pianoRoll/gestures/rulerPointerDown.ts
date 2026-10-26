@@ -7,7 +7,7 @@
  * 【依赖怎么拿】上下文由调用方打包传入（`Pick<PointerDeps, …>`，字段清单由 AST
  * 扫描得出），函数体原样搬过来，开头解构回局部变量。
  */
-import { seekPlayhead, setplayheadSec } from "../../../../features/session/sessionSlice";
+import { seekPlayhead, setPlayheadSec } from "../../../../features/session/sessionSlice";
 import { isLegacyMouseEventFromStylus } from "../../../../utils/penInput";
 import { clamp } from "../../timeline";
 import { secFromViewportClientX } from "../seekPlayheadMapping";
@@ -45,7 +45,7 @@ export function handleRulerPointerDown(deps: Deps, e: ReactMouseEvent<HTMLDivEle
         );
 
         if (commit) {
-            dispatch(setplayheadSec(sec));
+            dispatch(setPlayheadSec(sec));
             void dispatch(seekPlayhead(sec));
         }
         return sec;
@@ -54,7 +54,7 @@ export function handleRulerPointerDown(deps: Deps, e: ReactMouseEvent<HTMLDivEle
     // 标尺没有其他编辑操作需要区分，按下时立即提交一次 seek。
     let lastSec = updateAt(e.clientX, true);
 
-    // 拖动中的 setplayheadSec 逐事件派发会让所有订阅 session 的组件
+    // 拖动中的 setPlayheadSec 逐事件派发会让所有订阅 session 的组件
     // 随 mousemove 频率重渲；rAF 合帧后与画布重绘节奏一致。
     let rafId: number | null = null;
     let queuedSec: number | null = null;
@@ -66,7 +66,7 @@ export function handleRulerPointerDown(deps: Deps, e: ReactMouseEvent<HTMLDivEle
             rafId = requestAnimationFrame(() => {
                 rafId = null;
                 if (queuedSec == null) return;
-                dispatch(setplayheadSec(queuedSec));
+                dispatch(setPlayheadSec(queuedSec));
                 queuedSec = null;
             });
         }

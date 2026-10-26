@@ -93,7 +93,7 @@ const initialState: FileBrowserState = {
  */
 export const loadDirectory = createAsyncThunk(
     "fileBrowser/loadDirectory",
-    async (dirPath: string, { rejectWithValue, getState }) => {
+    async (dirPath: string, { rejectWithValue, getState, requestId }) => {
         const state = getState() as {
             session?: { fileBrowserView?: { showHiddenFiles?: boolean } };
         };
@@ -103,6 +103,17 @@ export const loadDirectory = createAsyncThunk(
                 dirPath,
                 includeHidden ? { includeHidden } : undefined,
             );
+            /*
+             * "记住上次的目录"在这里写盘而不是 fulfilled reducer 里：reducer 必须
+             * 是纯函数，卫星窗口重放 / DevTools 时间旅行重演的是**动作**而非
+             * thunk，会反复触发副作用（keybindingsSlice 的持久化同款纪律；它的
+             * listener middleware 组装在 app/store.ts，本切片不重复那条接线）。
+             * 判据与 reducer 一致：迟到的旧请求不写（快速 A→B 导航时 A 不得
+             * 覆盖 B 的记录）。
+             */
+            const latest = (getState() as { fileBrowser?: { latestLoadRequestId?: string | null } })
+                .fileBrowser?.latestLoadRequestId;
+            if (latest === requestId) writeStoredPath(dirPath);
             return { dirPath, entries };
         } catch (err) {
             return rejectWithValue(err instanceof Error ? err.message : "Failed to load directory");
@@ -163,12 +174,12 @@ const fileBrowserSlice = createSlice({
             })
             .addCase(loadDirectory.fulfilled, (state, action) => {
                 // 只接受最新一次请求的结果：进入慢目录 A 后又快速进入 B 时，
-                // A 的迟到响应不得覆盖 B 的列表。
+                // A 的迟到响应不得覆盖 B 的列表。（"记住上次目录"的落盘在
+                // thunk 体内完成，见 loadDirectory 的注释。）
                 if (action.meta.requestId !== state.latestLoadRequestId) return;
                 state.loading = false;
                 state.currentPath = action.payload.dirPath;
                 state.entries = action.payload.entries;
-                writeStoredPath(action.payload.dirPath);
             })
             .addCase(loadDirectory.rejected, (state, action) => {
                 if (action.meta.requestId !== state.latestLoadRequestId) return;

@@ -1,5 +1,5 @@
 import { startPointerGesture, type PointerGesture } from "./pointerGesture";
-import { seekPlayhead, setplayheadSec } from "../../../../features/session/sessionSlice";
+import { seekPlayhead, setPlayheadSec } from "../../../../features/session/sessionSlice";
 import {
     isEraserButton,
     isStylusLike,
@@ -276,7 +276,7 @@ export function handleCanvasPointerDown(
     const stylusDown = isStylusLike(e.nativeEvent);
     if (e.button === 0 && !stylusDown && paramEditorSeekPlayheadEnabled !== false) {
         const sec = pointerSec(e.clientX);
-        dispatch(setplayheadSec(sec));
+        dispatch(setPlayheadSec(sec));
         void dispatch(seekPlayhead(sec));
     }
 

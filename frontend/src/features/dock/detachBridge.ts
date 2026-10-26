@@ -439,11 +439,17 @@ export function installBridge(args: {
     /** 是否已收到快照（收到后停止重发）。 */
     let received = false;
     let requestTimer: ReturnType<typeof setInterval> | null = null;
+    /** 超时上报的句柄也必须可清：dispose 后再触发会把已销毁的窗口报成故障。 */
+    let requestTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
 
     function stopRequesting(): void {
         if (requestTimer !== null) {
             clearInterval(requestTimer);
             requestTimer = null;
+        }
+        if (requestTimeoutTimer !== null) {
+            clearTimeout(requestTimeoutTimer);
+            requestTimeoutTimer = null;
         }
     }
 
@@ -461,7 +467,8 @@ export function installBridge(args: {
         };
         request();
         requestTimer = setInterval(request, SNAPSHOT_REQUEST_INTERVAL_MS);
-        setTimeout(() => {
+        requestTimeoutTimer = setTimeout(() => {
+            requestTimeoutTimer = null;
             if (received || disposed) return;
             stopRequesting();
             reportBridgeFailure("snapshot-timeout");

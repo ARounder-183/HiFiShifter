@@ -477,9 +477,8 @@ const dockSlice = createSlice({
             const baseTree = state.layout.roots[rootId];
             const pruned = removeZone(baseTree, tabsetId);
             if (!pruned) {
-                // 整棵根就是这一组：把组内容重建为一侧的新组（主根不允许清空，
-                // 但"只剩一组再搬到边上"等价于原样保留 —— 直接返回）。
-                if (rootId !== MAIN_ROOT_ID) return;
+                // 整棵根就是这一组（主根不允许清空）："只剩一组再搬到边上"
+                // 等价于原样保留 —— 直接返回。
                 return;
             }
 

@@ -30,7 +30,7 @@ import {
     removeClipsRemote,
     seekPlayhead,
     selectTrackRemote,
-    setplayheadSec,
+    setPlayheadSec,
     setSelectedClip,
     setSelectedClipPreservingTrack,
 } from "../../../../features/session/sessionSlice";
@@ -367,7 +367,7 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
                 gridStepBeats(sessionRef.current.grid) * (60 / Math.max(1, sessionRef.current.bpm));
             const current = Number(sessionRef.current.playheadSec ?? 0) || 0;
             const next = Math.max(0, current + Math.sign(direction) * stepSec);
-            dispatch(setplayheadSec(next));
+            dispatch(setPlayheadSec(next));
             void dispatch(seekPlayhead(next));
         }
 

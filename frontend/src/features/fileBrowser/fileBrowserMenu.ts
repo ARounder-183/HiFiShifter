@@ -248,7 +248,7 @@ function entryMenu(targets: FileEntry[], ctx: FileBrowserMenuContext): AppMenuIt
             key: "delete",
             label: single ? t("fb_ctx_delete") : ctx.plural("fb_ctx_delete_items", targets.length),
             danger: true,
-            separatorBefore: single ? false : true,
+            separatorBefore: !single,
             onSelect: () => actions.remove(targets),
         });
     }

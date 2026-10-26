@@ -10,8 +10,10 @@
  *   - Tempo Map 提交（BPM / 拍号）：`setTempoMapRemote.fulfilled` → 标脏；
  *   - 增删轨道：`addTrackRemote/removeTrackRemote.fulfilled` → 标脏；
  *   - 轨道音量与轨道名：`setTrackVolume` / `setTrackName` → 标脏（此前漏挂）；
- *   - 已有的：clip 增删、自动化点增删移、工程笔记、checkpointHistory，以及后端
+ *   - 已有的：自动化点增删移、工程笔记、checkpointHistory，以及后端
  *     回报 `project.dirty` 的四条（基础/自定义音阶、时间线设置、拉伸设置）。
+ *     （本地同步的 clip 增删 action `addClip`/`removeSelectedClip` 经审查为
+ *     死代码已删除；clip 增删现在全部走后端 remote 路径。）
  *
  * 【仍未覆盖（如实记录，供后续跟进，不要当作已修）】轨道颜色 / 算法等其余轨道
  * 设置的提交路径。它们走的是后端快照通路（`applyTimelineState`），在那里统一
@@ -21,7 +23,7 @@ import { describe, expect, test } from "vitest";
 
 import { markProjectDirty } from "./sessionDirtyState.js";
 import sessionReducer, {
-    addClip,
+    setTrackName,
     setTempoMap,
     setMetronomeConfig,
     setTempoMapVisible,
@@ -45,8 +47,8 @@ test("markProjectDirty 只做一件事：把标记置为 true", () => {
 });
 
 describe("工程级编辑必须标脏", () => {
-    test("新增片段与变更轨道音量会标脏", () => {
-        expect(run(initial, addClip({ trackId })).project.dirty).toBe(true);
+    test("轨道改名与变更轨道音量会标脏", () => {
+        expect(run(initial, setTrackName({ trackId, name: "Vocals" })).project.dirty).toBe(true);
         expect(run(initial, setTrackVolume({ trackId, volume: 0.5 })).project.dirty).toBe(true);
     });
 

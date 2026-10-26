@@ -11,7 +11,7 @@
  * 【为什么要显示目录路径】这是这条通路唯一需要用户手动完成的一步：导出的工作区在磁盘
  * 上，用户必须把它的**路径**交给独立 App。路径因此放在明面上，并配一个复制按钮。
  */
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Flex } from "@radix-ui/themes";
 
 import { useI18n } from "../../i18n/I18nProvider";
@@ -30,8 +30,19 @@ export function HostLinkExportControl() {
     const { status, failure, busy, ended } = useHostLinkPluginSnapshot();
     const [details, setDetails] = useState(false);
     const [copied, setCopied] = useState(false);
+    // "已复制"的复位定时器：句柄必须跟踪 —— 连续点击会叠加多个定时器
+    // （先复位的那个会把后来那次的高亮提前掐掉），卸载后也会留下对已卸载
+    // 组件的 setState。
+    const copiedResetTimer = useRef<number | null>(null);
 
     useEffect(() => startHostLinkPluginPolling(), []);
+
+    useEffect(
+        () => () => {
+            if (copiedResetTimer.current !== null) window.clearTimeout(copiedResetTimer.current);
+        },
+        [],
+    );
 
     const phase = status?.attached ? status.phase : undefined;
     const directory = status?.attached ? status.directory : undefined;
@@ -41,7 +52,11 @@ export function HostLinkExportControl() {
         if (!directory) return;
         if (await copyTextToClipboard(directory)) {
             setCopied(true);
-            window.setTimeout(() => setCopied(false), 1500);
+            if (copiedResetTimer.current !== null) window.clearTimeout(copiedResetTimer.current);
+            copiedResetTimer.current = window.setTimeout(() => {
+                copiedResetTimer.current = null;
+                setCopied(false);
+            }, 1500);
         }
     }
 

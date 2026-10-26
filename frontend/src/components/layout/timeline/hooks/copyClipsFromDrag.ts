@@ -30,7 +30,7 @@ import {
     selectClipRemote,
     seekPlayhead,
     setClipAutoFades,
-    setplayheadSec,
+    setPlayheadSec,
 } from "../../../../features/session/sessionSlice";
 import { webApi } from "../../../../services/webviewApi";
 import { computeAutoCrossfadeFromPayload } from "./autoCrossfade";
@@ -231,7 +231,7 @@ export async function copyClipsFromDrag(deps: CopyClipsFromDragDeps): Promise<vo
             return Math.min(min, Math.max(0, initial.startSec + deltaSec));
         }, Infinity);
         if (Number.isFinite(targetStartSec)) {
-            dispatch(setplayheadSec(targetStartSec));
+            dispatch(setPlayheadSec(targetStartSec));
             void dispatch(seekPlayhead(targetStartSec));
         }
 

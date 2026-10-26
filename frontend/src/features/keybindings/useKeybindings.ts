@@ -368,14 +368,13 @@ export function useKeybindings(handler: KeybindingActionHandler): void {
 
             const domain = computeFocusDomain();
 
-            const isArrowKey =
-                key === "arrowup" ||
-                key === "arrowdown" ||
-                key === "arrowleft" ||
-                key === "arrowright";
-            if (isArrowKey && domain) {
-                e.preventDefault();
-            }
+            /*
+             * 方向键的 preventDefault 不在这里预先做：只有真正派发/消费动作的
+             * 分支才阻止默认行为（下方各派发分支与 repeat 吞掉分支都已各自
+             * `preventDefault()`；edit.* 交由卷帘 scroller 本地处理，那里对方向
+             * 键同样自管）。此前"域内方向键一律 preventDefault"会把**未命中任何
+             * 绑定**的按键的浏览器默认行为（容器滚动）也一并吞掉。
+             */
 
             // ── 焦点感知路由：按「激活作用域 > 全局 > 其它作用域」取最佳匹配 ──
             const matched = resolveActionByFocus(

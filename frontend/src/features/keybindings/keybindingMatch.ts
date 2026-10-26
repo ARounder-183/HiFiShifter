@@ -2,9 +2,28 @@ import type { Keybinding } from "./types";
 import { IS_MAC } from "../../utils/platform";
 
 /**
+ * 匹配管线实际消费的键盘事件形状（结构类型）。
+ *
+ * 【为什么不用 KeyboardEvent】`clearFineModifierState` 需要"剥掉精细调整
+ * 修饰键后再匹配"，只能构造一个**部分事件对象**；此前用 `as KeyboardEvent`
+ * 冒充完整事件，是类型谎言（对象上没有 target / type 等成员，运行时碰上
+ * 读这些字段的代码就会暴露）。匹配逻辑只读这几个字段，把它们声明成结构化
+ * 参数后，部分对象可以诚实地通过类型检查 —— 真实 KeyboardEvent 天然满足
+ * 该形状，所有既有调用点不受影响。
+ */
+export type MinimalKeyboardEvent = {
+    key: string;
+    code?: string;
+    ctrlKey: boolean;
+    shiftKey: boolean;
+    altKey: boolean;
+    metaKey: boolean;
+};
+
+/**
  * 将 KeyboardEvent 的按键信息规范化为小写 key 字符串
  */
-export function normalizeEventKey(e: KeyboardEvent): string {
+export function normalizeEventKey(e: MinimalKeyboardEvent): string {
     // 对 Space 按键特殊处理
     if (e.key === " " || e.code === "Space") return "space";
     return e.key.toLowerCase();
@@ -28,7 +47,7 @@ const PHYSICAL_KEY_BY_CODE: Record<string, string> = {
  * → "+"）时回退到 `e.code` 对应的基础字符；其它键位（字母、数字等）
  * 返回 null，调用方沿用 `normalizeEventKey` 即可。
  */
-export function physicalKeyFromEvent(e: Pick<KeyboardEvent, "key" | "code">): string | null {
+export function physicalKeyFromEvent(e: { key: string; code?: string }): string | null {
     const code = (e.code ?? "").toLowerCase();
     const base = PHYSICAL_KEY_BY_CODE[code];
     if (!base) return null;
@@ -40,14 +59,14 @@ export function physicalKeyFromEvent(e: Pick<KeyboardEvent, "key" | "code">): st
  * 的基础字符，保证录入值与默认绑定（key: "=" + shift: true）可比、可
  * 冲突检测、可匹配。
  */
-export function canonicalKeyFromEvent(e: KeyboardEvent): string {
+export function canonicalKeyFromEvent(e: MinimalKeyboardEvent): string {
     return physicalKeyFromEvent(e) ?? normalizeEventKey(e);
 }
 
 /**
  * 判断按下的按键是否匹配某个 Keybinding 定义
  */
-export function matchesKeybinding(e: KeyboardEvent, kb: Keybinding): boolean {
+export function matchesKeybinding(e: MinimalKeyboardEvent, kb: Keybinding): boolean {
     // 主键匹配同时接受「事件字符」与「物理键位字符」：Shift+标点在 US
     // 布局下 e.key 是上档字符（Shift+= → "+"），按 e.code 还原后才能
     // 命中 key: "=" 的默认绑定；非上档场景两值相同，行为不变。
@@ -74,7 +93,7 @@ export function matchesKeybinding(e: KeyboardEvent, kb: Keybinding): boolean {
  * （如把命中项交给长按重复管理器）用本函数。
  */
 export function matchKeybinding(
-    e: KeyboardEvent,
+    e: MinimalKeyboardEvent,
     bindings: readonly Keybinding[] | undefined,
 ): Keybinding | null {
     if (!bindings) return null;
@@ -86,7 +105,7 @@ export function matchKeybinding(
 
 /** 事件是否命中该动作绑定列表中的任一绑定。 */
 export function matchesAnyKeybinding(
-    e: KeyboardEvent,
+    e: MinimalKeyboardEvent,
     bindings: readonly Keybinding[] | undefined,
 ): boolean {
     return matchKeybinding(e, bindings) !== null;
@@ -100,7 +119,10 @@ export type ModifierEventLike = {
     metaKey?: boolean;
 };
 
-function clearFineModifierState(e: KeyboardEvent, fineAdjustKb: Keybinding): KeyboardEvent {
+function clearFineModifierState(
+    e: MinimalKeyboardEvent,
+    fineAdjustKb: Keybinding,
+): MinimalKeyboardEvent {
     return {
         key: e.key,
         code: e.code,
@@ -108,11 +130,11 @@ function clearFineModifierState(e: KeyboardEvent, fineAdjustKb: Keybinding): Key
         metaKey: fineAdjustKb.ctrl ? false : e.metaKey,
         shiftKey: fineAdjustKb.shift ? false : e.shiftKey,
         altKey: fineAdjustKb.alt ? false : e.altKey,
-    } as KeyboardEvent;
+    };
 }
 
 export function matchesKeybindingAllowingFineModifier(
-    e: KeyboardEvent,
+    e: MinimalKeyboardEvent,
     kb: Keybinding,
     fineAdjustKb?: Keybinding,
 ): boolean {
@@ -147,7 +169,7 @@ export function matchesKeybindingAllowingFineModifier(
  * 走同一条拖拽路径，因此同样可用）。
  */
 export function matchKeybindingAllowingFineModifier(
-    e: KeyboardEvent,
+    e: MinimalKeyboardEvent,
     bindings: readonly Keybinding[] | undefined,
     fineAdjustKb?: Keybinding,
 ): Keybinding | null {

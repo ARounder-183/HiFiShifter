@@ -134,7 +134,7 @@ import {
     setTrackName,
     setTrackVolume,
     setPendingPlayheadReveal,
-    setplayheadSec,
+    setPlayheadSec,
     moveClipStart,
     moveClipTrack,
     checkpointHistory,
@@ -1557,7 +1557,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
      * 采纳分支永不命中——只派发 `seekPlayhead` 时引擎动了而 store 的
      * `playheadSec` 纹丝不动（"点空白处播放头不跟随"的根因；播放中 30Hz 轮询
      * 重新锚定才让它"偶尔"生效）。此处与标尺路径
-     * （`useTimelineState.setPlayheadFromClientX`：`setplayheadSec` + `seekPlayhead`
+     * （`useTimelineState.setPlayheadFromClientX`：`setPlayheadSec` + `seekPlayhead`
      * 成对派发）保持同一契约，两个分支都不得只派发 seek。
      */
     /**
@@ -1565,7 +1565,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
      *
      * 所有播放头落点路径（标尺 / 轨道空白 / clip 点击）在旧实现里都汇入
      * `setPlayheadFromClientX`：先 `snapTimelineDetailed(…, "cursor", …)` 吸附，
-     * 再写 `setplayheadSec` + `seekPlayhead`；`commit=true` 表示手势语境结束，
+     * 再写 `setPlayheadSec` + `seekPlayhead`；`commit=true` 表示手势语境结束，
      * 顺带清除瞬态吸附高亮。内核原先直接写**裸**秒数——标尺路径吸附、轨道空白
      * 路径不吸附，同一个界面里两条 seek 行为不一致。
      *
@@ -1599,7 +1599,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         (sec: number): void => {
             const target = resolveKernelSeekSec(sec, true);
             clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
-            dispatch(setplayheadSec(target));
+            dispatch(setPlayheadSec(target));
             void dispatch(seekPlayhead(target));
         },
         [dispatch, resolveKernelSeekSec],
@@ -1681,7 +1681,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 kernelSeekPendingRef.current = null;
                 clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
                 // 乐观写 store：见函数头注释（缺了它 playheadSec 不会动）。
-                dispatch(setplayheadSec(target));
+                dispatch(setPlayheadSec(target));
                 void dispatch(seekPlayhead(target));
                 return;
             }
@@ -1695,7 +1695,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 // `startDeferredPlayheadSeek` 的移动分支走 `commit = false`，整段拖拽
                 // 只在松手时发一次 `seekPlayhead`（内核原先逐帧成对派发，等于按住拖动
                 // 时以 rAF 频率持续刷后端）。松手的收尾由内核补发提交式落点。
-                dispatch(setplayheadSec(pending));
+                dispatch(setPlayheadSec(pending));
             });
         },
         [deselectAllTrackLaneClips, dispatch, resolveKernelSeekSec, sessionRef],
@@ -4667,14 +4667,14 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
      * 播放位置），切换本身走 `setClipActiveTakeRemote`（含后端落库与撤销步）。
      *
      * 特殊说明：本回调**确实要移动播放头**，因此同样遵循「乐观写 + seek 成对派发」
-     * 契约（`setplayheadSec` 必须先于 `seekPlayhead`）——只派发 seek 时后端原样
+     * 契约（`setPlayheadSec` 必须先于 `seekPlayhead`）——只派发 seek 时后端原样
      * 回显请求值，`seekPlayhead.fulfilled` 的采纳分支不命中，store 的
      * `playheadSec` 不会变（同 `handleKernelSeek` 的说明）。
      */
     const handleKernelActivateTake = React.useCallback(
         (clipId: string, takeId: string, sec: number) => {
             if (!timelineRuntimeIsPlaying) {
-                dispatch(setplayheadSec(sec));
+                dispatch(setPlayheadSec(sec));
                 void dispatch(seekPlayhead(sec));
             }
             activateTrackLaneTake(clipId, takeId);

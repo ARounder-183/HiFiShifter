@@ -561,9 +561,11 @@ export function findHostPanelId(layout: DockLayout, formId: string): string | nu
         if (!isPanelForm(form) || !form.childRootId) continue;
         const tree = layout.roots[form.childRootId];
         if (tree && findTabsetOfForm(tree, formId)) {
-            // 更深层的面板优先：这个面板自己若也被包着，先解散外层没有意义。
-            const outer = findHostPanelId(layout, form.id);
-            return outer ?? form.id;
+            // 一个窗体只会停靠在一棵树里，命中的宿主即唯一：即使这个面板自己
+            // 也被包在更外层的面板里，对 formId 而言最内层的宿主仍是它。
+            // （旧实现在此处递归调用自身，但递归入口对"form 是面板"恒真返回，
+            // 结果恒等于 form.id —— 递归从不真正发生。）
+            return form.id;
         }
     }
     return null;

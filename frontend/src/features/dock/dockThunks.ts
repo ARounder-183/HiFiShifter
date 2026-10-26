@@ -112,11 +112,13 @@ export function finalizeDockHydration(dispatch: AppDispatch, getState: () => Roo
         const floating = main
             ? current.floatOrder.filter((id) => current.forms[id]?.floating === true)
             : [];
-        if (main && floating.length > 0) {
+        const mainRootId = MAIN_ROOT_ID;
+        const baseTree = main && floating.length > 0 ? current.roots[mainRootId] : null;
+        // 主根树缺失（异常形态）时跳过"收回浮窗"这步，但**不提前返回**——
+        // 下方"恢复独立窗口"仍必须执行（见上方的【不要在这里 return】）。
+        if (main && floating.length > 0 && baseTree) {
             const forms = { ...current.forms };
-            const mainRootId = MAIN_ROOT_ID;
-            let tree = current.roots[mainRootId];
-            if (!tree) return;
+            let tree = baseTree;
             for (const formId of floating) {
                 const form = forms[formId];
                 if (!form) continue;

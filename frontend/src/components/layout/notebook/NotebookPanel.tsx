@@ -31,7 +31,7 @@ import {
 import {
     redoRemote,
     setProjectNotesMarkdown,
-    setplayheadSec,
+    setPlayheadSec,
     undoRemote,
 } from "../../../features/session/sessionSlice";
 import { selectClipRemote } from "../../../features/session/thunks/timelineThunks";
@@ -376,14 +376,14 @@ export function NotebookPanel() {
     const runInternalLink = useCallback(
         (link: NotebookInternalLink) => {
             if (link.type === "seek") {
-                dispatch(setplayheadSec(link.seconds));
+                dispatch(setPlayheadSec(link.seconds));
                 void dispatch(seekPlayhead(link.seconds));
                 notify(`${t("notebook_seek_jump")} ${formatTimecode(link.seconds)}`);
                 return;
             }
             const clip = clips.find((entry) => entry.id === link.clipId);
             if (clip) {
-                dispatch(setplayheadSec(clip.startSec));
+                dispatch(setPlayheadSec(clip.startSec));
                 void dispatch(seekPlayhead(clip.startSec));
             }
             void dispatch(selectClipRemote(link.clipId));

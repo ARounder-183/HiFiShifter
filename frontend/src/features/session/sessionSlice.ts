@@ -956,10 +956,6 @@ export function rejectedMessage(action: {
     return "Request failed";
 }
 
-function createId(prefix: string): string {
-    return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
-}
-
 /**
  * 导入 clip 的 id：由源路径**确定性**导出。
  *
@@ -3368,7 +3364,7 @@ const sessionSlice = createSlice({
         setEdgeSmoothnessPercent(state, action: PayloadAction<number>) {
             state.edgeSmoothnessPercent = clamp(Number(action.payload) || 0, 0, 100);
         },
-        setplayheadSec(state, action: PayloadAction<number>) {
+        setPlayheadSec(state, action: PayloadAction<number>) {
             state.playheadSec = Math.max(0, action.payload);
             state.playheadLocalAtMs = performance.now();
         },
@@ -3376,17 +3372,8 @@ const sessionSlice = createSlice({
         setPendingPlayheadReveal(state, action: PayloadAction<number | null>) {
             state.pendingPlayheadRevealSec = action.payload;
         },
-        setModelDir(state, action: PayloadAction<string>) {
-            state.modelDir = action.payload;
-        },
         setAudioPath(state, action: PayloadAction<string>) {
             state.audioPath = action.payload;
-        },
-        setOutputPath(state, action: PayloadAction<string>) {
-            state.outputPath = action.payload;
-        },
-        setPitchShift(state, action: PayloadAction<number>) {
-            state.pitchShift = action.payload;
         },
         setProjectNotesMarkdown(state, action: PayloadAction<string>) {
             const next = action.payload;
@@ -3683,75 +3670,6 @@ const sessionSlice = createSlice({
             if (!clip) return;
             clip.color = normalizeClipColor(action.payload.color);
         },
-        /**
-         * 新建 clip。
-         *
-         * 【为什么用 `prepare` 生成 id】reducer 必须是**纯函数**：卫星窗口会把
-         * 广播动作在本地 reducer 上**重放**（见 `features/dock/detachBridge.ts`）。
-         * 若 id 在 reducer 里用 `Math.random()` 现算，主窗口与卫星窗口会为同一个
-         * `addClip` 算出**不同的 id**，`session.clips` 从此永久发散（快照只在
-         * 卫星窗口启动时对齐一次）。放进 `prepare` 后 id 随动作对象一起被复制，
-         * 两边必然一致；同时动作对象本身仍是可序列化的纯数据。
-         */
-        addClip: {
-            reducer(state, action: PayloadAction<{ trackId: string; clipId: string }>) {
-                const newClipId = action.payload.clipId;
-                markProjectDirty(state.project);
-                state.clips.push({
-                    id: newClipId,
-                    trackId: action.payload.trackId,
-                    name: "New Clip.wav",
-                    startSec: Math.max(0, state.playheadSec),
-                    lengthSec: 2,
-                    color: "emerald",
-                    gain: 1,
-                    muted: false,
-                    sourceStartSec: 0,
-                    sourceEndSec: 2,
-                    playbackRate: 1,
-                    reversed: false,
-                    loopEnabled: state.loopNewClipsEnabled !== false,
-                    channelMode: 0,
-                    sourceChannels: undefined,
-                    snapOffsetSec: 0,
-                    fadeInSec: 0,
-                    fadeOutSec: 0,
-                    fadeInShape: 1,
-                    fadeOutShape: 1,
-                    fadeInDir: 0,
-                    fadeOutDir: 0,
-                });
-                state.selectedClipId = newClipId;
-                state.selectedTrackId = action.payload.trackId;
-                state.clipPitchRanges[newClipId] = { min: -24, max: 24 };
-            },
-            prepare(payload: { trackId: string }) {
-                return { payload: { ...payload, clipId: createId("clip") } };
-            },
-        },
-        removeSelectedClip(state) {
-            const selectedId = state.selectedClipId;
-            if (!selectedId) {
-                return;
-            }
-            markProjectDirty(state.project);
-            state.clips = state.clips.filter((clip) => clip.id !== selectedId);
-            delete state.clipPitchRanges[selectedId];
-            delete state.clipPitchCurves[selectedId];
-            state.selectedClipId = state.clips[0]?.id ?? null;
-        },
-        toggleTrackMute(state, action: PayloadAction<string>) {
-            const track = state.tracks.find((entry) => entry.id === action.payload);
-            if (track) {
-                track.muted = !track.muted;
-            }
-        },
-        toggleTrackSolo(state, action: PayloadAction<string>) {
-            const track = state.tracks.find((entry) => entry.id === action.payload);
-            if (track) {
-                track.solo = !track.solo;
-            }
-        },
         setTrackVolume(state, action: PayloadAction<{ trackId: string; volume: number }>) {
             const track = state.tracks.find((entry) => entry.id === action.payload.trackId);
             if (track) {
@@ -3778,10 +3696,6 @@ const sessionSlice = createSlice({
             };
             // 同步触发轨道总体音高线刷新
             state.paramsEpoch = (Number(state.paramsEpoch) || 0) + 1;
-        },
-        /** 移除某个 clip 的音高曲线（clip 被删除时清理�?*/
-        removeClipPitchData(state, action: PayloadAction<string>) {
-            delete state.clipPitchCurves[action.payload];
         },
         setClipFormantStatus(
             state,
@@ -7431,13 +7345,10 @@ export const {
     cycleDragDirection,
     setDragDirection,
     setEdgeSmoothnessPercent,
-    setplayheadSec,
+    setPlayheadSec,
     setPlaybackRenderingState,
     setPendingPlayheadReveal,
-    setModelDir,
     setAudioPath,
-    setOutputPath,
-    setPitchShift,
     setProjectNotesMarkdown,
     closeVocalShifterSkippedFilesDialog,
     closeReaperSkippedFilesDialog,
@@ -7496,10 +7407,6 @@ export const {
     setClipsGroupId,
     optimisticUpdateClipColor,
     rollbackClipColor,
-    addClip,
-    removeSelectedClip,
-    toggleTrackMute,
-    toggleTrackSolo,
     setTrackVolume,
     setClipPitchData,
     setClipFormantStatus,
@@ -7507,7 +7414,6 @@ export const {
     openClipFormantToolWindow,
     setClipFormantToolWindowPosition,
     closeClipFormantToolWindow,
-    removeClipPitchData,
     bumpParamsEpoch,
 } = sessionSlice.actions;
 
