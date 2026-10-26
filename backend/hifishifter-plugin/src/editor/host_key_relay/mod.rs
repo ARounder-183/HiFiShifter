@@ -422,6 +422,14 @@ impl Arbiter {
         if !stroke.is_bare() {
             return KeyOutcome::rejected(RejectReason::ModifiedKey);
         }
+        // 【为什么探针在飞时不投】入口 B 不探针，但与入口 A 共享同一个宿主反应：
+        // 探针窗口内插进来的投递会翻转 `playing`，`tick` 把**探针那个键**误记成
+        // host-native（闩的是 `pending.stroke.code`，不是实际投出去的这个键）——
+        // 于是 Space 从此永远 `Rejected(HostNative)`。与 `on_key` 的单飞同一条
+        // 理由，代价只是这 90 ms 里未绑定键不投、不计入限流窗口。
+        if self.pending.as_ref().is_some_and(|pending| pending.probe) {
+            return KeyOutcome::rejected(RejectReason::InFlight);
+        }
         if self.throttled(now) {
             return KeyOutcome::rejected(RejectReason::RateLimited);
         }
@@ -840,5 +848,36 @@ mod tests {
         let second = arbiter.on_unbound(start + Duration::from_millis(120), bare("F2"));
         assert_eq!(second.verdict, KeyVerdict::Accepted);
         assert_eq!(escaped(&second.effects), 1);
+    }
+
+    /// **不变量：探针在飞时，未绑定键不投递、也不计入限流窗口。**
+    ///
+    /// 【为什么钉死】入口 B 虽不探针，但它与入口 A 共享宿主反应：探针窗口内投出去
+    /// 的键会翻转 `playing`，`tick` 会把**探针那个键**误记成 host-native（闩的是
+    /// `pending.stroke.code`）—— 于是 Space 从此永远不再让路。这 90 ms 里让一让，
+    /// 比污染基线便宜得多。
+    #[test]
+    fn an_unbound_key_yields_while_a_probe_is_in_flight() {
+        let start = Instant::now();
+        let mut arbiter = Arbiter::new(Fidelity::Synthetic);
+        // 入口 A 先启动一枚探针（Space，基线 playing=false）。
+        let probe = arbiter.on_key(start, "transport.playPause", bare("Space"), playing(false));
+        assert_eq!(probe.verdict, KeyVerdict::Accepted);
+        assert_eq!(escaped(&probe.effects), 0, "探针期间不投递");
+
+        // 探针窗口内的未绑定键：拒为 InFlight，且不得记账 —— 否则下面限流会让它失败。
+        let during = arbiter.on_unbound(start + Duration::from_millis(30), bare("F2"));
+        assert_eq!(during.verdict, KeyVerdict::Rejected(RejectReason::InFlight));
+        assert_eq!(escaped(&during.effects), 0);
+
+        // 探针到期、宿主没动 ⇒ 转入 Relay 并投递 Space（观察窗同时启动）。
+        let effects = tick_for(&mut arbiter, start, 120, playing(false));
+        assert_eq!(escaped(&effects), 1, "探针到期应转投");
+
+        // 观察窗在飞（非探针）不挡入口 B；等过 60 ms 限流间隔后 F2 立即可投 ——
+        // 证明被拒的那次没有悄悄记进限流窗口。
+        let after = arbiter.on_unbound(start + Duration::from_millis(200), bare("F2"));
+        assert_eq!(after.verdict, KeyVerdict::Accepted);
+        assert_eq!(escaped(&after.effects), 1);
     }
 }
