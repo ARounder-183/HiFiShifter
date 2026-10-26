@@ -32,6 +32,12 @@ pub(crate) fn live_owners() -> Vec<Arc<ExtensionOwner>> {
     all.retain(|_, owner| owner.strong_count() > 0);
     let mut owners: Vec<Arc<ExtensionOwner>> = Vec::new();
     for owner in all.values().filter_map(Weak::upgrade) {
+        // 【为什么剔除已关闭的实例】它们仍可能被某个 Arc 短暂持有（宿主正在销毁），
+        // 但已经不能服务任何命令。把它们算进「唯一活实例」会让兜底绑定瞄准一具尸体，
+        // 也会让心跳去采样一个已关闭的时钟。
+        if owner.is_closed() {
+            continue;
+        }
         if owners
             .iter()
             .any(|known| std::ptr::eq(Arc::as_ptr(known), Arc::as_ptr(&owner)))
@@ -82,10 +88,52 @@ impl Drop for RouteLease {
             .remove(&self.token);
     }
 }
+/// 编辑器路由是**怎么**建立的。
+///
+/// 【为什么需要区分】两者对用户都「能用」，但诊断含义完全相反：握手成功说明宿主的
+/// VST3 实现完整；兜底成功说明宿主跳过了 IConnectionPoint（或拒绝了我们发的消息）。
+/// 把它们混成一个「已绑定」布尔，报障时就再也分不清「宿主变了」与「我们退化了」。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum RouteOrigin {
+    /// 宿主完成了 VST3 的 `IConnectionPoint` 握手。
+    HostHandshake,
+    /// 宿主没有完成握手；按「进程内唯一活实例」兜底绑定（见 [`bind_sole_owner`]）。
+    SoleOwnerFallback,
+}
+
+/// 路由状态（诊断包、`plugin_health` 与前端共用的四态）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum RouteState {
+    /// 视图刚建立，握手结果还没出来 —— 这不是错误。
+    WaitingHost,
+    /// 由宿主握手绑定。
+    Bound,
+    /// 由兜底绑定。
+    Fallback,
+    /// 明确失败（原因见 [`EditorLink::route_failure`]）。
+    Unbound,
+}
+
+impl RouteState {
+    /// 稳定的线格式（跨语言、跨版本都只读这一份）。
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            RouteState::WaitingHost => "waiting-host",
+            RouteState::Bound => "bound",
+            RouteState::Fallback => "fallback",
+            RouteState::Unbound => "unbound",
+        }
+    }
+}
+
 #[derive(Default)]
 struct Binding {
     token: Option<String>,
     generation: u64,
+    /// 只在 `token` 存在时有意义。
+    origin: Option<RouteOrigin>,
+    /// 兜底失败的原因；只写一次（`ui_tick` 每 20 ms 跑一次）。
+    failure: Option<String>,
 }
 const IID_COMPONENT_HANDLER2: [u32; 4] = [0xF040B4B3, 0xA36045EC, 0xABCDC045, 0xB4D5A2CC];
 #[repr(C)]
@@ -194,11 +242,14 @@ impl EditorLink {
             .checked_add(1)
             .ok_or("editor route generation exhausted")?;
         binding.token = Some(token.to_owned());
+        binding.origin = Some(RouteOrigin::HostHandshake);
+        binding.failure = None;
         Ok(())
     }
     pub fn clear(&self) {
         let mut binding = self.binding.lock().unwrap_or_else(|e| e.into_inner());
         binding.token = None;
+        binding.origin = None;
         binding.generation = binding.generation.saturating_add(1);
     }
     /// 每次请求重新验证租约，杜绝组件已销毁但editor旧weak仍可升级的情况。
@@ -248,10 +299,182 @@ impl EditorLink {
         Some((binding.token.as_ref()?.clone(), binding.generation))
     }
 }
+impl EditorLink {
+    /// 已经绑定（任一来源）。
+    pub(crate) fn is_bound(&self) -> bool {
+        self.binding
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .token
+            .is_some()
+    }
+
+    /// 四态路由状态。
+    pub(crate) fn route_state(&self) -> RouteState {
+        let binding = self.binding.lock().unwrap_or_else(|e| e.into_inner());
+        match (&binding.token, binding.origin) {
+            (Some(_), Some(RouteOrigin::SoleOwnerFallback)) => RouteState::Fallback,
+            (Some(_), _) => RouteState::Bound,
+            (None, _) if binding.failure.is_some() => RouteState::Unbound,
+            (None, _) => RouteState::WaitingHost,
+        }
+    }
+
+    /// 兜底失败的原因（`unbound` 时才有）。
+    pub(crate) fn route_failure(&self) -> Option<String> {
+        self.binding
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .failure
+            .clone()
+    }
+
+    /// 记录一次兜底失败。
+    ///
+    /// 【为什么只留第一条】调用方是 20 ms 的视图定时器；后到的失败原因几乎总是
+    /// 「还是那一个」，覆盖掉最初的现场只会让诊断变模糊。
+    pub(crate) fn note_route_failure(&self, reason: String) {
+        let mut binding = self.binding.lock().unwrap_or_else(|e| e.into_inner());
+        if binding.failure.is_none() && binding.token.is_none() {
+            binding.failure = Some(reason);
+        }
+    }
+
+    /// 由「进程内唯一活实例」兜底绑定；只由 [`bind_sole_owner`] 调用。
+    fn bind_fallback(&self, token: &str) {
+        let mut binding = self.binding.lock().unwrap_or_else(|e| e.into_inner());
+        binding.generation = binding.generation.saturating_add(1);
+        binding.token = Some(token.to_owned());
+        binding.origin = Some(RouteOrigin::SoleOwnerFallback);
+        binding.failure = None;
+    }
+}
+
+/// 兜底绑定失败的结构化原因。
+///
+/// 【为什么是枚举而不是字符串】上层要据此决定「要不要继续等」（`Ambiguous` 是终局，
+/// 再等也不会变），而字符串子串匹配是本仓明令禁止的错误分类方式。
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) enum FallbackError {
+    /// 进程里没有任何活着的插件实例（视图比组件活得久）。
+    NoOwner,
+    /// 有多个活实例：映射不唯一，宁可拒绝也不猜。
+    Ambiguous(usize),
+}
+
+impl std::fmt::Display for FallbackError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FallbackError::NoOwner => write!(formatter, "no live plug-in instance"),
+            FallbackError::Ambiguous(count) => write!(
+                formatter,
+                "{count} live plug-in instances; refusing to guess which one owns this editor"
+            ),
+        }
+    }
+}
+
+/// 宿主没有完成 `IConnectionPoint` 握手时的**唯一**兜底绑定。
+///
+/// 【为什么不是「猜最后一个实例」】判据是「进程内恰好只有一个活 owner」：此时映射是
+/// **唯一**的，不是猜。多于一个就拒绝并给出可读原因 —— 宁可让用户看到一句明确的话，
+/// 也不要把两个实例的编辑串在一起（那会让 A 轨的曲线写进 B 轨）。
+///
+/// 【为什么可以安全地绑定到「唯一」】`EditorLink::bind` 之后，`owner()` 会再校验
+/// owner 未关闭，`authorize` 会再校验文档身份；多实例时我们根本不绑定，
+/// 行为与没有这条兜底时完全一致。
+pub(crate) fn bind_sole_owner(link: &EditorLink) -> Result<(), FallbackError> {
+    if link.is_bound() {
+        return Ok(());
+    }
+    let owners = live_owners();
+    let token = sole_token(&owners)?;
+    link.bind_fallback(&token);
+    Ok(())
+}
+
+/// 测试入口：用**给定**的候选集合执行兜底（生产路径读进程级的活实例表）。
+#[cfg(test)]
+fn bind_sole_owner_with(
+    link: &EditorLink,
+    candidates: &[Arc<ExtensionOwner>],
+) -> Result<(), FallbackError> {
+    let token = sole_token(candidates)?;
+    link.bind_fallback(&token);
+    Ok(())
+}
+
+/// 从候选实例里选出唯一的那个并取它的租约令牌（纯函数：不读全局表之外的任何状态）。
+///
+/// 【为什么单独抽出来】实时判断依赖进程级的 owner 表，而那张表在测试里是共享的、
+/// 无法安全地构造「恰好一个」。把「几个候选才叫唯一」抽成纯函数，就能确定性地钉住
+/// 0 / 1 / N 三种结论。
+fn sole_token(candidates: &[Arc<ExtensionOwner>]) -> Result<String, FallbackError> {
+    match candidates {
+        [] => Err(FallbackError::NoOwner),
+        [only] => token_of(only).ok_or(FallbackError::NoOwner),
+        many => Err(FallbackError::Ambiguous(many.len())),
+    }
+}
+
+/// 反查某个实例的租约令牌。
+fn token_of(owner: &Arc<ExtensionOwner>) -> Option<String> {
+    let all = routes().lock().unwrap_or_else(|e| e.into_inner());
+    all.iter().find_map(|(token, weak)| {
+        weak.upgrade()
+            .filter(|candidate| Arc::ptr_eq(candidate, owner))
+            .map(|_| token.clone())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicU32;
+    /// **不变量：兜底只在映射唯一时成立。**
+    ///
+    /// 【为什么钉死】这条兜底的全部安全性都建立在「只有一个候选」上。一旦它退化成
+    /// 「取最后一个」，多实例宿主里两条轨的编辑就会串在一起 —— 那是最难归因的一类
+    /// 数据损坏，而它的起因只是一个看起来无害的便利分支。
+    #[test]
+    fn the_fallback_binds_only_when_exactly_one_instance_is_alive() {
+        assert_eq!(sole_token(&[]), Err(FallbackError::NoOwner));
+
+        let a = Arc::new(ExtensionOwner::default());
+        let b = Arc::new(ExtensionOwner::default());
+        assert_eq!(
+            sole_token(&[Arc::clone(&a), Arc::clone(&b)]),
+            Err(FallbackError::Ambiguous(2))
+        );
+
+        let lease = RouteLease::new(&a);
+        assert_eq!(sole_token(&[Arc::clone(&a)]), Ok(lease.token().to_owned()));
+
+        // 绑定之后 owner() 立刻可用，且状态如实写成 fallback。
+        let link = EditorLink::default();
+        assert!(!link.is_bound());
+        assert_eq!(link.route_state(), RouteState::WaitingHost);
+        bind_sole_owner_with(&link, &[Arc::clone(&a)]).unwrap();
+        assert!(link.is_bound());
+        assert_eq!(link.route_state(), RouteState::Fallback);
+        assert!(Arc::ptr_eq(&link.owner().unwrap(), &a));
+    }
+
+    /// 兜底失败只记第一条，且不会把已经绑好的链路打回未绑定。
+    #[test]
+    fn a_failed_fallback_keeps_the_first_reason_and_never_unbinds() {
+        let owner = Arc::new(ExtensionOwner::default());
+        let lease = RouteLease::new(&owner);
+        let link = EditorLink::default();
+        link.note_route_failure("first".into());
+        link.note_route_failure("second".into());
+        assert_eq!(link.route_state(), RouteState::Unbound);
+        assert_eq!(link.route_failure().as_deref(), Some("first"));
+        link.bind(std::process::id() as i64, lease.token()).unwrap();
+        assert_eq!(link.route_state(), RouteState::Bound);
+        assert_eq!(link.route_failure(), None);
+    }
+
     #[test]
     fn actual_route_tokens_never_select_another_live_instance() {
         let a = Arc::new(ExtensionOwner::default());

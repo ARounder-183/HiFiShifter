@@ -152,8 +152,10 @@ pub(crate) struct EditorClient {
     port: Option<Rc<dyn EditorPort>>,
     /// 页面是否已就绪（导航完成）。未就绪时出站消息只入队。
     ready: bool,
-    /// 视图建立时刻，只用来算 `[gui] page ready after {n}ms`。
+    /// 视图建立时刻。既用来算 `[gui] page ready after {n}ms`，也是路由宽限期的起点。
     opened_at: std::time::Instant,
+    /// 路由兜底是否已经试过（只试一次，见 [`try_route_fallback`]）。
+    route_fallback_tried: bool,
     /// 就绪前的待发队列（见 `4.3`）。
     queue: std::collections::VecDeque<String>,
     /// 连续投递失败次数；页面进程死掉后它只增不减，是"视图该自毁"的唯一判据。
@@ -221,6 +223,14 @@ const QUEUE_BUDGET: usize = 256;
 /// 失败，而界面此时已经是一张死图；继续投递只会让 `pending` 涨到预算上限、把后续
 /// 命令全部拒掉 —— 那是"看起来能用、其实全废"的形态。
 const POST_FAILURE_LIMIT: u32 = 8;
+
+/// 等宿主完成「编辑器 ↔ 处理器」握手的最长时间。
+///
+/// 【为什么是 1500 ms】正常宿主在 `attached` 之后几十毫秒内就走完
+/// `connect` → `notify` 往返（REAPER 实测）。超过一秒半还没绑定，就不是「慢」，
+/// 而是「这条宿主路径不存在」—— 那时才该启用 [`crate::editor::routing::bind_sole_owner`]
+/// 的兜底，而不是继续让用户对着空时间轴等。
+const ROUTE_GRACE: std::time::Duration = std::time::Duration::from_millis(1500);
 
 /// 在途预算判据（纯函数：`EditorClient` 要 COM 才建得起来，判据本身必须可测）。
 fn budget_exhausted(in_flight: usize, id_present: bool, slow: bool) -> bool {
@@ -389,6 +399,7 @@ impl EditorClient {
             port: None,
             ready: false,
             opened_at: std::time::Instant::now(),
+            route_fallback_tried: false,
             queue: std::collections::VecDeque::new(),
             post_failures: 0,
             dead: false,
@@ -611,6 +622,75 @@ pub(crate) fn host_heartbeat() {
     }
 }
 
+/// 往页面的**非回执**事件流里塞一条（没有 id，不属于任何一次 `invoke`）。
+///
+/// 【为什么复用 `view_events`】它与让路通知同一条出口、同一份投递纪律（每次 tick
+/// 最多 16 条、投递失败即停）。给路由单独开一条通道只会多一份「什么时候发」的实现。
+fn push_view_event(state: &Rc<RefCell<EditorClient>>, event: &str, payload: serde_json::Value) {
+    let view_id = state.borrow().view_id.clone();
+    state.borrow_mut().view_events.push_back(serde_json::json!({
+        "version": 1,
+        "viewId": view_id,
+        "event": event,
+        "payload": payload,
+    }));
+}
+
+/// 宽限期到了还没绑定 ⇒ 试一次「进程内唯一活实例」兜底。
+///
+/// 【为什么必须有它】编辑器与处理器之间的身份只由宿主的 `IConnectionPoint` 握手建立
+/// （`EditorLink::bind` 的唯一写入点）。宿主不完成这套握手时——普通 FX 形态在部分
+/// 宿主上就是如此——界面能开，但每条命令都回
+/// 「FX editor not connected to its processor yet」，时间轴连一条轨道都没有。
+///
+/// 【为什么只试一次】兜底的结论由「进程里有几个活实例」决定，那个数在视图存活期间
+/// 只会朝一个方向变（变多）。每 20 ms 重试等于把同一件事算 50 次/秒，还会把最初
+/// 那次真实原因覆盖掉。
+fn try_route_fallback(
+    state: &Rc<RefCell<EditorClient>>,
+    link: &Arc<crate::editor::routing::EditorLink>,
+) {
+    if link.is_bound() {
+        return;
+    }
+    let already_tried = {
+        let state = state.borrow();
+        if state.closed || state.route_fallback_tried {
+            return;
+        }
+        if state.opened_at.elapsed() < ROUTE_GRACE {
+            return;
+        }
+        state.route_fallback_tried
+    };
+    if already_tried {
+        return;
+    }
+    state.borrow_mut().route_fallback_tried = true;
+    match crate::editor::routing::bind_sole_owner(link) {
+        Ok(()) => {
+            // 【为什么是 Warn】这不是错误，但它是一条**必须能从日志里读出来**的宿主事实：
+            // 该宿主没有完成 VST3 的编辑器握手，本实例是靠兜底才可用的。
+            log::warn!("[gui] editor route bound without the host handshake (sole live instance)");
+            // 让页面重新读一次 bootstrap：能力位与 hostKind 都是按「有没有 owner」算的。
+            let payload = bootstrap_json(link, &state.borrow().view_id);
+            push_view_event(state, "plugin_bootstrap_changed", payload);
+        }
+        Err(error) => {
+            log::warn!("[gui] editor route still unbound after {ROUTE_GRACE:?}: {error}");
+            link.note_route_failure(error.to_string());
+            push_view_event(
+                state,
+                "editor_route_notice",
+                serde_json::json!({
+                    "state": link.route_state().as_str(),
+                    "reason": error.to_string(),
+                }),
+            );
+        }
+    }
+}
+
 /// 只碰客户端自身状态的周期工作：**不调用任何宿主 API**，因此可以在任意线程跑。
 ///
 /// 【为什么要和 `host_heartbeat` 分开】让路状态机与 bootstrap 补发读的是
@@ -618,6 +698,7 @@ pub(crate) fn host_heartbeat() {
 /// 情形 B 也能照常工作。
 pub(crate) fn ui_tick(state: &Rc<RefCell<EditorClient>>) {
     let link = state.borrow().link.clone();
+    try_route_fallback(state, &link);
     if let Ok(owner) = link.owner() {
         owner.note_editor_tick();
         if owner.take_bootstrap_changed() {
@@ -1038,7 +1119,7 @@ pub(crate) fn bootstrap_json(
     if let Some(owner) = &owner {
         owner.resolve_binding_mode();
     }
-    BootstrapFlags {
+    let mut payload = BootstrapFlags {
         transport_control: owner
             .as_ref()
             .is_some_and(|owner| owner.host_playback().is_some()),
@@ -1072,7 +1153,15 @@ pub(crate) fn bootstrap_json(
             .map(|owner| owner.effective_host_capabilities())
             .unwrap_or_else(hifishifter_kernel::editor::host::HostCapabilities::none),
     }
-    .to_json(view_id)
+    .to_json(view_id);
+    // 路由状态：前端据此区分「还在等宿主」与「宿主根本没连」，并决定要不要提示。
+    // 放在这里而不是 `BootstrapFlags` 里，是因为后者是 `Copy` 的纯能力快照，
+    // 而这两个字段带一段可能很长的原因字符串。
+    payload["editorRoute"] = serde_json::json!({
+        "state": link.route_state().as_str(),
+        "reason": link.route_failure(),
+    });
+    payload
 }
 
 /// 一条页面消息：校验 → 就地改写少数命令 → 分流。
@@ -1230,7 +1319,16 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
         // 会话队列后面 —— 那正是 `get_runtime_info` 30 s 超时的来源。
         Some("plugin_health") => {
             let link = state.borrow().link.clone();
-            link.owner().map(|owner| owner.health_snapshot())
+            // 路由状态与健康快照同源：一个回答「会话还在不在」，一个回答「编辑器有没有
+            // 连上处理器」。用户报「界面空着」时，这两条要能同时看见。
+            link.owner().map(|owner| {
+                let mut snapshot = owner.health_snapshot();
+                snapshot["editorRoute"] = serde_json::json!({
+                    "state": link.route_state().as_str(),
+                    "reason": link.route_failure(),
+                });
+                snapshot
+            })
         }
         // ARA 绑定后补发 bootstrap：前端拿到新快照后更新 hostKind / 能力位。
         Some("get_plugin_bootstrap") => {
