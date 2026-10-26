@@ -113,7 +113,7 @@ export type SnapTimelineFn = (
 ) => number;
 
 // ── 返回类型 ─────────────────────────────────────────────────────
-type TimelineSessionSlice = Pick<
+export type TimelineSessionSlice = Pick<
     RootState["session"],
     | "autoCrossfadeEnabled"
     | "autoScrollEnabled"

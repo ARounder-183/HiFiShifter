@@ -29,7 +29,17 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
-const SOURCE = readFileSync(join("src", "components", "layout", "TimelinePanel.tsx"), "utf8");
+const SOURCE = [
+    "useTimelineKernelSeekDrag.ts",
+    "useTimelineKernelTrim.ts",
+    "useTimelineKernelFade.ts",
+    "useTimelineKernelGainCrossfade.ts",
+    "useTimelineKernelSelection.ts",
+]
+    .map((file) =>
+        readFileSync(join("src", "components", "layout", "timeline", "hooks", file), "utf8"),
+    )
+    .join("\n");
 
 /** 去掉块注释与行注释：注释里引用的符号名不得计入文本事实。 */
 function stripComments(text: string): string {

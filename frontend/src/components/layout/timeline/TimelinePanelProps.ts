@@ -1,0 +1,40 @@
+// TimelinePanel 的公开 props。拆自 TimelinePanel。
+export interface TimelinePanelProps {
+    midiClipDialogOpen: boolean;
+    midiClipPath: string | null;
+    midiClipStartSec: number;
+    midiClipTrackId: string | null;
+    fillGaps: boolean;
+    multiTrackMerge: boolean;
+    importBpmAsProject: boolean;
+    noteBpmMode: string;
+    specifiedBpm: number;
+    onMidiClipDialogOpenChange: (open: boolean) => void;
+    onMidiClipPathChange: (path: string | null) => void;
+    onMidiClipStartSecChange: (sec: number) => void;
+    onMidiClipTrackIdChange: (trackId: string | null) => void;
+    onFillGapsChange: (v: boolean) => void;
+    onMultiTrackMergeChange: (v: boolean) => void;
+    onImportBpmAsProjectChange: (v: boolean) => void;
+    onNoteBpmModeChange: (v: string) => void;
+    onSpecifiedBpmChange: (v: number) => void;
+    midiClipClipboardGuid?: string | null;
+    importPosition: string;
+    onImportPositionChange: (position: string) => void;
+    closeLeadingGap: boolean;
+    onCloseLeadingGapChange: (v: boolean) => void;
+    midiDialogSource: "menu" | "dragDrop";
+    onMidiDialogSourceChange: (v: "menu" | "dragDrop") => void;
+    importTargetMenu?: string;
+    onImportTargetMenuChange?: (v: string) => void;
+    importTargetDragDrop?: string;
+    onImportTargetDragDropChange?: (v: string) => void;
+    importTempoMapEnabled?: boolean;
+    onImportTempoMapEnabledChange?: (v: boolean) => void;
+    importTempoMapTempo?: boolean;
+    onImportTempoMapTempoChange?: (v: boolean) => void;
+    importTempoMapTimeSignature?: boolean;
+    onImportTempoMapTimeSignatureChange?: (v: boolean) => void;
+    importTempoMapKeySignature?: boolean;
+    onImportTempoMapKeySignatureChange?: (v: boolean) => void;
+}
