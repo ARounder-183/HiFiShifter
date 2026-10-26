@@ -618,7 +618,11 @@ unsafe extern "system" fn message_id(this: *mut c_void) -> *const c_char {
 /// `setMessageID` 对我们是空操作：消息 ID 决定这条消息的**语义**，而我们只发两种、
 /// 都在分配时定好了。让宿主（或某个代理）改写它，就等于允许对端把「路由」读成
 /// 「请求路由」，那是没有意义的组合。
-unsafe extern "system" fn message_set_id(_this: *mut c_void, _id: *const c_char) {}
+unsafe extern "system" fn message_set_id(_this: *mut c_void, _id: *const c_char) {
+    // 空操作也要带守卫：thread-model §1.1 的合同是「每个宿主可调入口自带 panic
+    // 遏制」，不因为函数体平凡而豁免。
+    crate::guard_ffi((), || {})
+}
 
 unsafe extern "system" fn message_attributes(this: *mut c_void) -> *mut c_void {
     crate::guard_ffi(std::ptr::null_mut(), || {
@@ -812,12 +816,15 @@ unsafe extern "system" fn attributes_get_string(
     })
 }
 
+// 数值/二进制属性我们既不发布也不消费（属性表只承载「编辑器路由」一个字符串键，
+// 见 attributes_query），四个入口恒回未实现。入口平凡不代表可以裸奔：守卫是
+// thread-model §1.1 的合同，漏一个 check-ffi-guards.py 就全量红。
 unsafe extern "system" fn attributes_set_float(
     _this: *mut c_void,
     _key: *const c_char,
     _value: f64,
 ) -> TResult {
-    K_NOT_IMPLEMENTED
+    crate::guard_ffi(K_NOT_IMPLEMENTED, || K_NOT_IMPLEMENTED)
 }
 
 unsafe extern "system" fn attributes_get_float(
@@ -825,7 +832,7 @@ unsafe extern "system" fn attributes_get_float(
     _key: *const c_char,
     _value: *mut f64,
 ) -> TResult {
-    K_NOT_IMPLEMENTED
+    crate::guard_ffi(K_NOT_IMPLEMENTED, || K_NOT_IMPLEMENTED)
 }
 
 unsafe extern "system" fn attributes_set_binary(
@@ -834,7 +841,7 @@ unsafe extern "system" fn attributes_set_binary(
     _data: *const c_void,
     _size: u32,
 ) -> TResult {
-    K_NOT_IMPLEMENTED
+    crate::guard_ffi(K_NOT_IMPLEMENTED, || K_NOT_IMPLEMENTED)
 }
 
 unsafe extern "system" fn attributes_get_binary(
@@ -843,7 +850,7 @@ unsafe extern "system" fn attributes_get_binary(
     _data: *mut *const c_void,
     _size: *mut u32,
 ) -> TResult {
-    K_NOT_IMPLEMENTED
+    crate::guard_ffi(K_NOT_IMPLEMENTED, || K_NOT_IMPLEMENTED)
 }
 
 /// `Vst::IAttributeList` 的 IID。
@@ -1177,6 +1184,52 @@ mod host_handshake_tests {
             let host_ptr = (&*host as *const FakeHost).cast::<c_void>() as *mut c_void;
             state.initialize(host_ptr);
             assert_eq!(state.send(Some(TOKEN)), K_RESULT_FALSE);
+        }
+    }
+}
+
+#[cfg(test)]
+mod ffi_guard_tests {
+    use super::*;
+
+    /// **不变量：每个宿主可调入口都自带 panic 遏制，且对垃圾指针无害。**
+    ///
+    /// 【为什么钉死】thread-model §1.1 的合同是「panic 越过 FFI 边界 = abort = DAW
+    /// 崩溃」。编辑器消息这一批入口是后加的，此前漏包守卫让全量门禁红了一轮；
+    /// 这里把五个入口对非法指针的行为钉住——既验证守卫在（不 panic），
+    /// 也验证 stub 的诚实返回值不被将来顺手改掉。
+    #[test]
+    fn the_trivial_entries_survive_garbage_pointers() {
+        // SAFETY: 传入的"宿主指针"全是悬空/垃圾值，正是要用守卫兜住的情形；
+        // 五个入口都不解引用 this，panic 与否只取决于守卫是否存在。
+        // 垃圾指针用整数转换造出来：只比较/传递、绝不解引用。
+        let garbage_a = 0xDEAD_BEEF_usize as *mut c_void;
+        let garbage_b = 1_usize as *mut c_void;
+        let garbage_c = 3_usize as *mut c_void;
+        unsafe {
+            message_set_id(garbage_a, c"anything".as_ptr());
+
+            assert_eq!(
+                attributes_set_float(garbage_b, c"not_a_route".as_ptr(), 1.5),
+                K_NOT_IMPLEMENTED
+            );
+            assert_eq!(
+                attributes_get_float(garbage_b, std::ptr::null(), std::ptr::null_mut()),
+                K_NOT_IMPLEMENTED
+            );
+            assert_eq!(
+                attributes_set_binary(std::ptr::null_mut(), std::ptr::null(), std::ptr::null(), 0),
+                K_NOT_IMPLEMENTED
+            );
+            assert_eq!(
+                attributes_get_binary(
+                    garbage_c,
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut()
+                ),
+                K_NOT_IMPLEMENTED
+            );
         }
     }
 }
