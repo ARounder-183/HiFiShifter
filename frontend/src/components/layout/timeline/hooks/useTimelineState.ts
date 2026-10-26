@@ -34,7 +34,10 @@ import type { Keybinding } from "../../../../features/keybindings/types";
 import { resolveScrollableProjectSec } from "../../../../features/session/projectBoundary";
 import { applyNativeScrollLeft } from "../runtime/nativeScrollApply";
 import type { TimelineKernelHost } from "../kernel/host/timelineKernelHost";
-import { createTimelineViewportAccess } from "./timelineViewportAccess";
+import {
+    createTimelineViewportAccess,
+    type TimelineViewportAccess,
+} from "./timelineViewportAccess";
 import {
     DEFAULT_PX_PER_SEC,
     DEFAULT_ROW_HEIGHT,
@@ -266,6 +269,14 @@ export interface TimelineStateResult {
     syncScrollLeft: (next: number) => void;
     /** 逐帧水平同步（内核每帧通知）：只做跨面板同步，不做 React 对齐。 */
     syncScrollLeftFrame: (next: number) => void;
+    /**
+     * 模式无关的视口访问器（本 hook 创建的唯一实例）。
+     *
+     * 【为什么要随本结果外泄】下游（视口控制器 / 面板）全部复用这一份，
+     * 不再各自 `createTimelineViewportAccess`——访问器只包同一对 ref，
+     * 第二份实例没有任何额外语义。
+     */
+    viewportAccess: TimelineViewportAccess;
     secFromClientX: (clientX: number, bounds: DOMRect, xScroll: number) => number;
     beatFromClientX: (clientX: number, bounds: DOMRect, xScroll: number) => number;
     trackIdFromClientY: (clientY: number) => string | null;
@@ -1202,6 +1213,7 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
         dispatch,
         s,
         sessionRef,
+        viewportAccess,
 
         scrollRef,
         trackListScrollRef,

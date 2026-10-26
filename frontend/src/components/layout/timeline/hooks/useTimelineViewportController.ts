@@ -1,6 +1,5 @@
 // 时间轴视口控制：滚动/缩放落地、标尺滚轮、竖直滚动条与粘贴聚焦。
 import React from "react";
-import { createTimelineViewportAccess } from "./timelineViewportAccess";
 import { useCaptureReveal } from "./useCaptureReveal";
 import { createTimelineAxis, playheadLineLeftPx } from "../../renderKernel/timelineAxis";
 import { computeFocusCursorScrollLeft } from "../../../../utils/autoFollowScroll";
@@ -39,10 +38,10 @@ export function useTimelineViewportController({
         trackIdFromClientY,
         rowHeight,
         sessionRef,
+        // 复用 `useTimelineState` 创建的那一份实例：访问器只包同一对 ref，
+        // 第二份实例没有任何额外语义，只会让"单例"变成"两处各建一次"。
+        viewportAccess,
     } = state;
-    const [viewportAccess] = React.useState(() =>
-        createTimelineViewportAccess({ scrollRef, kernelHostRef }),
-    );
     // useCaptureReveal 需要 MutableRefObject 形状；包装一次即可，实例本身仍是单例。
     const viewportAccessRef = React.useMemo(() => ({ current: viewportAccess }), [viewportAccess]);
 
@@ -143,7 +142,9 @@ export function useTimelineViewportController({
     );
     const handleKernelZoomRequest = React.useCallback(
         (next: { pxPerSec: number; scrollLeft: number }) => {
-            if (next.pxPerSec === pxPerSec) {
+            // 与 handleKernelScrollLeftCommit 同一口径（1e-9 容差）：
+            // 全仓的 pxPerSec 比较不应存在两种判等规则。
+            if (Math.abs(next.pxPerSec - pxPerSec) <= 1e-9) {
                 // 缩放已在上/下限（或该步被钳制回原值）：请求退化为"位置无变化"，
                 // 直接应用一次即可。**不能**留成待落地——`setPxPerSec` 传同值不会
                 // 触发重渲染，下面的 layout effect 也就永远不会跑，请求会被搁置。
