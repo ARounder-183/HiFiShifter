@@ -83,10 +83,18 @@ pub fn apply(settings: &UiSettings) -> AppliedChanges {
         // 稳定标识 → **本进程**的 DXGI 序号。换算必须在这里做（每个进程各一次），
         // 因为枚举顺序随进程而变（见 `UiSettings::ort_device_key` 的说明）。
         // 适配器已不在时解析为 `None`，会话按"显存最大"自动选择。
+        //
+        // 【为什么按 feature 分支】`vocoder_ort_session` 只随 `onnx` feature 编译
+        // （lib.rs），且它是唯一没有 stub 的 ONNX 模块 —— 无 ONNX 构建里不存在
+        // DML 适配器枚举，"没有可换算的 PCI 标识"与"适配器已不在"回落到同一个
+        // 语义：会话按"显存最大"自动选择。
+        #[cfg(feature = "onnx")]
         let device_index = settings
             .ort_device_key
             .as_deref()
             .and_then(crate::vocoder_ort_session::dml_device_index_for_key);
+        #[cfg(not(feature = "onnx"))]
+        let device_index = None::<i32>;
         // 三个模型模块各自持有会话；只重建取值真的变了的那一类也要全部走一遍，
         // 因为 EP 是全局选择（`update_ort_ep` 内部按 EP 去重，重复调用是廉价的）。
         crate::nsf_hifigan_onnx::update_ort_ep(&settings.ort_ep, device_index);

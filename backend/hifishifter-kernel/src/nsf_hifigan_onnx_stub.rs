@@ -1,4 +1,10 @@
 //! 未编译ONNX时保持HiFiGAN接口，不伪造可用模型、推理或缓存身份。
+//!
+//! 【为什么签名必须与真实现逐字一致】`lib.rs` 在关闭 `onnx` feature 时用本文件
+//! `#[path]` 顶替同名模块；调用方（`renderer/hifigan.rs`）的闭包类型标注只有一个。
+//! 真实现改签名时这里必须跟着改，否则无 ONNX 构建先红（35e9f1fc 的教训）。
+
+use std::sync::Arc;
 
 pub fn probe_load() {
     // ONNX feature disabled.
@@ -127,8 +133,8 @@ pub fn infer_pitch_edit_chunked_optimized(
     _start_sec: f64,
     _midi_at_time: impl Fn(f64) -> f64 + Clone,
     _formant_shift_at_time: impl Fn(f64) -> f32 + Clone,
-    _chunk_cache_get: &dyn Fn(usize, usize, f64, f64) -> Option<Vec<f32>>,
-    _chunk_cache_put: &dyn Fn(usize, usize, f64, f64, Vec<f32>),
+    _chunk_cache_get: &dyn Fn(usize, usize, f64, f64) -> Option<Arc<Vec<f32>>>,
+    _chunk_cache_put: &dyn Fn(usize, usize, f64, f64, Arc<Vec<f32>>),
 ) -> Result<Vec<f32>, String> {
     Ok(mono_pcm.to_vec())
 }
