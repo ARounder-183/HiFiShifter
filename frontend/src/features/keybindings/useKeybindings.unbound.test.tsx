@@ -113,6 +113,28 @@ test("被组件 preventDefault 的键不算「没人要」", async () => {
     expect(relayMock).not.toHaveBeenCalled();
 });
 
+test("只 stopPropagation 不 preventDefault 的消费者仍会让路（已知缺口）", async () => {
+    await mount();
+    /*
+     * 【为什么钉住这个"坏"行为】分发器判断"本地已消费"的唯一依据是 `defaultPrevented`：
+     * 一个只 `stopPropagation()` 的监听器会自己拿到键、宿主也会拿到同一份 —— 双触发。
+     * 现仓没有任何一处这么写（全部原生 keydown 监听要么成对出现、要么落在分发器的
+     * 提前返回分支），但这是守着它的**唯一**测试：未来新增一个只 stopPropagation 的
+     * 滑杆/列表，这里会立刻把缺口暴露出来，而不是静默双触发。
+     *
+     * 规范：本地消费可让路键必须成对 `preventDefault() + stopPropagation()`（或改用
+     * 分发器的既有提前返回分支）。
+     */
+    const localOnly = (event: Event) => event.stopPropagation();
+    window.addEventListener("keydown", localOnly);
+    try {
+        await press({ key: "F2", code: "F2" });
+    } finally {
+        window.removeEventListener("keydown", localOnly);
+    }
+    expect(relayMock).toHaveBeenCalledTimes(1);
+});
+
 test("命中绑定的键不走让路", async () => {
     await mount();
     await press({ key: " ", code: "Space" });
