@@ -181,6 +181,10 @@ export function usePianoRollEditCommands({
             paramView?.framePeriodMs,
             dynamicProjectSec,
             s.edgeSmoothnessPercent,
+            // `case "deselect"` 用它做守卫、REAPER 剪贴板导入把快照写进
+            // midiDialogOpenParamsRef（editOperations.ts 两处消费）。漏掉它会让
+            // 闭包拿到旧工具模式，表现为"切回 select 后 deselect 静默无操作"。
+            s.toolMode,
             effectiveProjectScale,
             projectScaleAtSec,
             resolveScaleFromToken,
