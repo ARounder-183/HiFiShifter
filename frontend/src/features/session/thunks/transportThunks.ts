@@ -176,6 +176,14 @@ export type PlayOriginalResult = {
     anchorSec: number;
     noop?: boolean;
     host_request?: boolean;
+    /**
+     * 宿主还没有在它的模型线程上回调，请求**已排队**（不是失败）。
+     *
+     * 【为什么它不改变文案】`host_request` 已经把这条路径写成「Playback requested」——
+     * 用户看到的是"请求已交给宿主"，而排队与否只影响多久之后生效。把它变成另一句话，
+     * 只会让人以为出了新问题。
+     */
+    queued?: boolean;
     playing?: string;
     start_sec?: number;
 };

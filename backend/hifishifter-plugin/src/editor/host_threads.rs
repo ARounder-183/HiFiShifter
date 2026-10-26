@@ -38,8 +38,6 @@ use ara2_bridge::plugin::PlaybackRequestHandle;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::ThreadId;
 
-static ARA_MODEL: std::sync::OnceLock<ThreadId> = std::sync::OnceLock::new();
-
 /// 一次宿主播放请求。
 ///
 /// 【为什么是枚举而不是闭包】见模块头最后一段：类型把它限死在三个纯宿主请求上，
@@ -114,17 +112,6 @@ static LATEST_REQUEST: AtomicU64 = AtomicU64::new(0);
 /// 两秒是「用户还觉得这是一次同步操作」的上限；超过它就不是慢，而是宿主此刻没有
 /// 回调可接 —— 那时把请求留成「已排队」比报错更诚实。
 pub(crate) const MODEL_REQUEST_WAIT: std::time::Duration = std::time::Duration::from_millis(2000);
-
-/// 记下 ARA model 线程。由 `runtime::factory` 的 `document_controller` 闭包调用 ——
-/// 那是宿主第一次、也是在 model 线程上回调我们的地方。重复调用无副作用。
-pub(crate) fn note_ara_model_thread() {
-    ARA_MODEL.get_or_init(|| std::thread::current().id());
-}
-
-/// ARA model 线程；尚未捕获时为 `None`。
-pub(crate) fn ara_model() -> Option<ThreadId> {
-    ARA_MODEL.get().copied()
-}
 
 /// 把一次播放请求送到 ARA 的 model 线程。
 ///

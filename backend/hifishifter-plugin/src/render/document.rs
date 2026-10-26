@@ -184,6 +184,27 @@ impl InputReadiness {
     }
 }
 
+/// 宿主交给本文档的播放控制租约。
+///
+/// 【为什么线程要**跟着租约**存，而不是进程级记一份】`PlaybackRequestHandle` 的
+/// 守卫比较的是「创建这个句柄的那条线程」：
+///
+/// ```text
+/// if endpoint.thread != current().id() { return Err(InvalidState(...)) }
+/// ```
+///
+/// 而一条进程里可以有多个 ARA 文档（多工程 / 多实例），每个文档控制器都可能在
+/// **不同**的线程上创建。此前那份 `OnceLock<ThreadId>` 只记住第一次见到的那条，
+/// 于是第二个文档的播放请求会被投到一条与它无关的线程上 —— 永远不会被执行。
+/// 让线程随租约走，这两个事实就不可能再分叉。
+#[derive(Clone)]
+pub struct PlaybackEndpoint {
+    /// 宿主创建这条租约时所在的线程（= 句柄守卫要求的那条）。
+    pub thread: std::thread::ThreadId,
+    /// 租约本体（`Clone`：每次调用取一份副本）。
+    pub handle: ara2_bridge::plugin::PlaybackRequestHandle,
+}
+
 #[derive(Default)]
 pub(crate) struct DocumentSession {
     controller: AtomicUsize,
@@ -421,7 +442,8 @@ pub(crate) struct DocumentSession {
     pub edits: Arc<Mutex<crate::state_channel::EditState>>,
     pub id: DocumentId,
     pub clock: Arc<super::transport::TransportClock>,
-    pub playback: Mutex<Option<ara2_bridge::plugin::PlaybackRequestHandle>>,
+    /// 宿主给本**文档**的播放控制租约，连同它被创建时所在的那条线程。
+    pub playback: Mutex<Option<PlaybackEndpoint>>,
     pub host_undo: crate::host::undo::HostUndo,
     /// 宿主 BPM / 拍号读数（VST3 进程上下文）。
     ///

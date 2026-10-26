@@ -1698,8 +1698,8 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
             (||->Result<serde_json::Value,String> {
                 let owner=link.owner()?;
                 let playback=owner.host_playback().ok_or("host does not provide ARA playback control")?;
-                let target=crate::editor::host_threads::ara_model()
-                    .ok_or("the ARA model thread is not known yet")?;
+                // 线程随租约一起来：它就是句柄守卫要求的那条（见 PlaybackEndpoint）。
+                let target=playback.thread;
                 let position=owner.clock.get().map(|clock|clock.read().0).unwrap_or(0.);
                 // 【为什么每次都要投递】ARA 的播放请求被钉在 **model 线程**上
                 // （`host playback request off model thread`），而这里跑在客户端的线程上。
@@ -1709,11 +1709,11 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
                 if command=="stop_audio" {
                     // ARA 只有 Stop 请求；暂停后定位到实际停止点。两者合成**一次**投递，
                     // 否则后一张票会把前一张判成「已被取代」，于是只定位、没停。
-                    let queued=request_host_playback(target,&playback,
+                    let queued=request_host_playback(target,&playback.handle,
                         crate::editor::host_threads::PlaybackRequest::StopAtPosition(position))?;
                     Ok(serde_json::json!({"ok":true,"stopped_at_sec":position,"queued":queued}))
                 } else {
-                    let queued=request_host_playback(target,&playback,
+                    let queued=request_host_playback(target,&playback.handle,
                         crate::editor::host_threads::PlaybackRequest::Start)?;
                     Ok(serde_json::json!({"ok":true,"host_request":true,"anchorSec":position,"start_sec":position,"queued":queued}))}
             })()
@@ -1914,11 +1914,9 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
                     let owner=link.owner()?;
                     // 【为什么 seek 也要投递】同一个 model 线程守卫；这条回写此前 30 次
                     // 调用全部失败，于是"点时间轴跳转"从来没有真正落到宿主上。
-                    let handle=owner.host_playback().ok_or("host does not provide ARA playback control")?;
-                    let target=crate::editor::host_threads::ara_model()
-                        .ok_or("the ARA model thread is not known yet")?;
+                    let playback=owner.host_playback().ok_or("host does not provide ARA playback control")?;
                     // 排队也接受：定位是「最终要生效」的意图，不是必须当场完成的读数。
-                    let _queued=request_host_playback(target,&handle,
+                    let _queued=request_host_playback(playback.thread,&playback.handle,
                         crate::editor::host_threads::PlaybackRequest::SetPosition(position))?;
                     // seek回执前同步真实宿主光标，避免继续发布上次UI tick的旧位置。
                     owner.refresh_host_transport();Ok(())

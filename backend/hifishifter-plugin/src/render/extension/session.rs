@@ -342,8 +342,12 @@ impl ExtensionOwner {
             })
         })
     }
-    /// native主线程取得宿主给本ARA文档的可撤销播放租约；不寻找全局REAPER窗口。
-    pub(crate) fn host_playback(&self) -> Option<ara2_bridge::plugin::PlaybackRequestHandle> {
+    /// 宿主给本 ARA 文档的可撤销播放租约（含它要求的线程）；不寻找全局 REAPER 窗口。
+    ///
+    /// 【为什么连线程一起返回】调用方必须把请求投递到**创建这条租约的那条线程**上
+    /// （见 `render::document::PlaybackEndpoint`）。只交出句柄，调用方就只能去猜
+    /// 线程，而猜错的代价是请求永远排在一个没人排空的队列里。
+    pub(crate) fn host_playback(&self) -> Option<crate::render::document::PlaybackEndpoint> {
         self.document
             .lock_or_recover()
             .as_ref()
