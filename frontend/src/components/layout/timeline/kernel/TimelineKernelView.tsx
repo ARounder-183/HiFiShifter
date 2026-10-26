@@ -48,6 +48,27 @@ import {
     type TimelineKernelInteractions,
 } from "./host/timelineKernelHost";
 
+/** `activeGroupIds` / `disabledGroupIds` 缺省时的稳定空数组（`?? []` 每渲染换新引用）。 */
+const NO_GROUP_IDS: readonly string[] = [];
+
+/**
+ * 渲染期镜像 ref 的浅 diff 写入：逐字段 `Object.is` 比较，全等复用旧对象、
+ * 任何字段变化才整体替换（约定详见 TimelineKernelView 内「渲染期镜像」注记）。
+ *
+ * 首帧配合 `useRef({} as T)` 哨兵使用：哨兵必有字段不等而被整体替换，
+ * 哨兵本身不会存活到任何读取点。
+ */
+function shallowDiffRef<T extends object>(ref: React.MutableRefObject<T>, build: () => T): void {
+    const next = build();
+    const prev = ref.current;
+    for (const key of Object.keys(next) as Array<keyof T>) {
+        if (!Object.is(prev[key], next[key])) {
+            ref.current = next;
+            return;
+        }
+    }
+}
+
 export interface TimelineKernelViewProps {
     /** 行高（与左侧轨道头同源；内核不自行维护行高）。 */
     readonly rowHeight: number;
@@ -427,6 +448,24 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
     );
     const { mode } = useAppTheme();
 
+    const buildKeybindings = () => ({
+        horizontalZoom: horizontalZoomKb,
+        verticalZoom: verticalZoomKb,
+        scrollHorizontal: scrollHorizontalKb,
+        scrollVertical: scrollVerticalKb,
+        scrollbarZoom: scrollbarZoomKb,
+        // 【为什么不再把键位设成 null】此前"形状/曲率不可写"时把这两个键位置空，
+        // 于是 Alt 悬停的 `move` 光标形态也一起消失、Ctrl+点击的循环也静默失效 ——
+        // 用户看到的是"控件没了"。现在键位**保留**，由语义层按能力决定做什么
+        // （能做就做，不能做就明确不做并说明原因）。见 `interactions` 的两个只读标志。
+        fadeShapeCycle: fadeShapeCycleKb,
+        clipMultiSelectToggle: clipMultiSelectToggleKb,
+        clipRangeSelect: clipRangeSelectKb,
+        clipRangeToParamSelection: clipRangeToParamKb,
+        clipStretch: clipStretchKb,
+        fadeCurvatureDrag: fadeCurvatureKb,
+    });
+
     const buildData = (): TimelineKernelData => ({
         tracks,
         clips,
@@ -443,36 +482,36 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         tempoMap,
         rowHeight,
         playheadSec: getPlayheadSec(),
-        keybindings: {
-            horizontalZoom: horizontalZoomKb,
-            verticalZoom: verticalZoomKb,
-            scrollHorizontal: scrollHorizontalKb,
-            scrollVertical: scrollVerticalKb,
-            scrollbarZoom: scrollbarZoomKb,
-            // 【为什么不再把键位设成 null】此前"形状/曲率不可写"时把这两个键位置空，
-            // 于是 Alt 悬停的 `move` 光标形态也一起消失、Ctrl+点击的循环也静默失效 ——
-            // 用户看到的是"控件没了"。现在键位**保留**，由语义层按能力决定做什么
-            // （能做就做，不能做就明确不做并说明原因）。见 `interactions` 的两个只读标志。
-            fadeShapeCycle: fadeShapeCycleKb,
-            clipMultiSelectToggle: clipMultiSelectToggleKb,
-            clipRangeSelect: clipRangeSelectKb,
-            clipRangeToParamSelection: clipRangeToParamKb,
-            clipStretch: clipStretchKb,
-            fadeCurvatureDrag: fadeCurvatureKb,
-        },
+        keybindings: keybindingsRef.current,
         playheadZoomEnabled,
         initialPxPerSec,
         selectedClipId,
         multiSelectedClipIds,
-        activeGroupIds: activeGroupIds ?? [],
-        disabledGroupIds: disabledGroupIds ?? [],
+        activeGroupIds: activeGroupIds ?? NO_GROUP_IDS,
+        disabledGroupIds: disabledGroupIds ?? NO_GROUP_IDS,
         silenceSegmentsByClipId,
         showAllTakes: showAllTakes ?? true,
     });
 
-    // 数据镜像：渲染期写 ref，宿主在 rAF 内读取（避免宿主订阅 React 状态）。
-    const dataRef = React.useRef<TimelineKernelData>(buildData());
-    dataRef.current = buildData();
+    // ── 渲染期镜像（数据/回调 ref 均经浅 diff 写入）─────────────────────────
+    //
+    // 镜像在渲染期写 ref，宿主在 rAF 内读取（避免宿主订阅 React 状态）。
+    //
+    // 【为什么要浅 diff 而不是无条件重建】无条件 `ref.current = build()` 意味着
+    // 每次渲染都换全新对象——外层 20+ 字段、keybindings 11 字段、两个 `?? []`
+    // 兜底数组全是新引用。宿主每帧 rAF 都读这份数据，引用抖动会让它把"数据
+    // 没变"当成"变了"；同时也把面板每次重渲都变成一批稳定分配。逐字段
+    // `Object.is` 比较，全等就复用上一份对象（引用保持稳定），任何字段变化
+    // 才整体替换。嵌套对象（keybindings）同样走浅 diff，保证全等时复用旧引用。
+    //
+    // `{} as T` 哨兵只存在于本轮渲染体内、浅 diff 之前：首帧必有一个字段
+    // 不等（undefined ≠ 值），整个哨兵对象会被真实构建结果替换。
+    const keybindingsRef = React.useRef<ReturnType<typeof buildKeybindings>>(
+        {} as ReturnType<typeof buildKeybindings>,
+    );
+    const dataRef = React.useRef<TimelineKernelData>({} as TimelineKernelData);
+    shallowDiffRef(keybindingsRef, buildKeybindings);
+    shallowDiffRef(dataRef, buildData);
 
     /**
      * 可见行窗口变化（内核低频回调）：刷新行窗口与波形投影快照。
@@ -519,7 +558,8 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
     }, []);
 
     // 回调镜像：宿主持有的是稳定函数，函数内部读取最新回调，避免重建宿主。
-    const callbacksRef = React.useRef({
+    // 同样走浅 diff：回调引用没变时保持对象引用稳定（哨兵语义同上）。
+    const buildCallbacks = () => ({
         onRowHeightChange,
         onPxPerSecChange,
         onZoomRequest,
@@ -531,18 +571,10 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
         onViewportSizeChange: handleViewportSizeChange,
         onUnavailable,
     });
-    callbacksRef.current = {
-        onRowHeightChange,
-        onPxPerSecChange,
-        onZoomRequest,
-        getPlayheadSec,
-        onVisibleRowsChange: handleVisibleRowsChange,
-        onScrollLeftCommit,
-        onScrollLeftFrame,
-        onViewportWidthChange,
-        onViewportSizeChange: handleViewportSizeChange,
-        onUnavailable,
-    };
+    const callbacksRef = React.useRef<ReturnType<typeof buildCallbacks>>(
+        {} as ReturnType<typeof buildCallbacks>,
+    );
+    shallowDiffRef(callbacksRef, buildCallbacks);
 
     // 交互回调镜像：同上（面板用 useCallback 提供，但引用仍可能在依赖变化时更新）。
     const interactionsRef = React.useRef<TimelineKernelInteractions | undefined>(interactions);
