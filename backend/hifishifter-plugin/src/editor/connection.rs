@@ -1202,10 +1202,10 @@ mod ffi_guard_tests {
     fn the_trivial_entries_survive_garbage_pointers() {
         // SAFETY: 传入的"宿主指针"全是悬空/垃圾值，正是要用守卫兜住的情形；
         // 五个入口都不解引用 this，panic 与否只取决于守卫是否存在。
-        // 垃圾指针用整数转换造出来：只比较/传递、绝不解引用。
-        let garbage_a = 0xDEAD_BEEF_usize as *mut c_void;
-        let garbage_b = 1_usize as *mut c_void;
-        let garbage_c = 3_usize as *mut c_void;
+        // 悬空指针用 std::ptr::dangling_mut 造出来：只比较/传递、绝不解引用。
+        let garbage_a = std::ptr::dangling_mut::<c_void>();
+        let garbage_b = std::ptr::dangling_mut::<c_void>();
+        let garbage_c = std::ptr::dangling_mut::<c_void>();
         unsafe {
             message_set_id(garbage_a, c"anything".as_ptr());
 
