@@ -21,8 +21,12 @@ $packageTaskBundle = Join-Path $packageTaskDelivery 'HiFiShifter.vst3'
 if ($VerifyLoad) {
     # 打包前再跑一次黑盒加载门禁：manifest 的哈希只能证明文件没变，不能证明
     # GetPluginFactory 不会死锁。失败时拒绝生成 zip/setup。
-    & (Join-Path $PSScriptRoot '..\vst3\windows\verify.ps1') -BundleDirectory $packageTaskBundle -TimeoutSeconds 20
+    $packageTaskNativeLoadGatePath = Join-Path $packageTaskRoot '.build-tmp\native-load-gate.json'
+    & (Join-Path $PSScriptRoot '..\vst3\windows\verify.ps1') -BundleDirectory $packageTaskBundle -TimeoutSeconds 20 -ResultPath $packageTaskNativeLoadGatePath
     if ($LASTEXITCODE -ne 0) { throw 'Windows VST3 load gate failed.' }
+    if (Test-Path -LiteralPath $packageTaskNativeLoadGatePath) {
+        $packageTaskManifest | Add-Member -NotePropertyName nativeLoadGate -NotePropertyValue (Get-Content -LiteralPath $packageTaskNativeLoadGatePath -Raw | ConvertFrom-Json) -Force
+    }
 }
 $packageTaskFiles = @($packageTaskManifest.files | Where-Object { $_.path.StartsWith('HiFiShifter.vst3\') })
 if (!$packageTaskFiles.Count -or $packageTaskManifest.configuration -ne 'Release') { throw 'A complete Release delivery is required.' }
