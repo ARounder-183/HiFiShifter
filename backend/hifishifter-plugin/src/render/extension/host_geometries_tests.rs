@@ -95,6 +95,62 @@ fn two_regions_claiming_one_item_keep_exactly_one_owner() {
     document.close();
 }
 
+/// **不变量：几何读数只描述"这一次求解"。**
+///
+/// 【为什么这条是回归】宿主里"分割 → 撤销"之后，用户会看到一条永不消失的
+/// 「宿主分配的区域对不上片段」：那份判定读的是 `binding_report` —— 一份为**日志去重**
+/// 服务的指纹。它只在多 region 路径上刷新，而单 region 路径从不刷新；撤销又会让几何
+/// 缓存作废、`claimed_items` 归零，于是"旧失败 + 零认领"永久成立。
+///
+/// 现在读数与条目同源：**没求解过 ⇒ `None`**，调用方因此只能退回"还在等"，
+/// 不可能断言"对不上"。
+#[test]
+fn the_geometry_readout_describes_this_solve_only() {
+    use std::sync::atomic::Ordering;
+
+    let (model, owners, ids) = crate::editor::session::tests::workspace_fixture();
+    let document = model.session();
+    let owner = &owners[0];
+    let first = (&*ids[0] as *const u8) as u64;
+    let second = (&*ids[1] as *const u8) as u64;
+    // 从未求解过：一个结论都不能给（尤其不能给"1 条分配、0 条绑上"）。
+    assert_eq!(
+        owner.host_geometry_readout(&document),
+        None,
+        "没有求解过的实例不得报告任何 region 计数"
+    );
+    {
+        let mut regions = document.regions.lock_or_recover();
+        align_with_fixture_item(regions.get_mut(&first).unwrap());
+    }
+    let raw = owner.binding.lock_or_recover().as_ref().unwrap().as_raw();
+    unsafe {
+        let ext = &*raw;
+        ((*ext.playbackRendererInterface).addPlaybackRegion.unwrap())(
+            ext.playbackRendererRef,
+            second as *mut _,
+        );
+    }
+    let host = fixture_host();
+    unsafe {
+        owner.bind_host_adapter(host.context());
+    }
+    owner.refresh_host_geometry();
+    assert_eq!(
+        owner.host_geometry_readout(&document),
+        Some((2, 1)),
+        "两条 region 只有一条能按几何唯一匹配：读数必须如实分开这两个数"
+    );
+    // 缓存过期（撤销 / 新 region / 宿主工程变更）：回到 `None`，而不是"2 条全对不上"。
+    document.scope_revision.fetch_add(1, Ordering::AcqRel);
+    assert_eq!(
+        owner.host_geometry_readout(&document),
+        None,
+        "缓存过期时必须退回\"没有求解\"，绝不能变成\"全都对不上\""
+    );
+    document.close();
+}
+
 // ── 绑定读数的去重与退避（2026-10-12 刷屏缺陷的回归）───────────────────────────
 //
 // 【为什么这一组必须存在】用户报障：REAPER 挂后台 35 分钟，`multi-region owner` /

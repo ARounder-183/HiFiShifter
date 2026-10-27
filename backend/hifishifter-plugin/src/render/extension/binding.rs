@@ -874,32 +874,58 @@ impl ExtensionOwner {
         &self,
         document: &super::document::DocumentSession,
     ) -> Vec<crate::host::geometry::BoundHostGeometry> {
+        let Some((keys, bound)) = self.cached_geometry(document) else {
+            return Vec::new();
+        };
+        bound
+            .into_iter()
+            .filter(|entry| keys.contains(&entry.region_key))
+            .collect()
+    }
+
+    /// 本实例**这一次**求解的读数：`(分配到的 region 数, 匹配到唯一 item 的条数)`。
+    ///
+    /// 【为什么必须与 [`Self::host_geometries_locked`] 同源】两者回答的是同一份缓存的
+    /// 两个问题（"有哪些绑定"与"求解过没有、几条对不上"）。分成两条独立路径，就会
+    /// 出现"条目为空被当成对不上"这种只有现场才看得见的错误 —— 而那正是宿主里撤销之后
+    /// 误报「宿主分配的区域对不上片段」的成因：读数取自一份为**日志去重**服务的指纹，
+    /// 而单 region 路径从不刷新它。
+    ///
+    /// `None` = **这一次没有可用求解**（缓存过期 / 从未求解 / 宿主未授权 / 求解失败）。
+    /// 此时"对不上"这个结论**不成立** —— 调用方必须退回"还在等"，而不是断言故障。
+    pub(crate) fn host_geometry_readout(
+        &self,
+        document: &super::document::DocumentSession,
+    ) -> Option<(usize, usize)> {
+        let (keys, bound) = self.cached_geometry(document)?;
+        Some((keys.len(), bound.len()))
+    }
+
+    /// 缓存几何的**唯一**取值口：`None` = 这一次没有可用求解。
+    ///
+    /// 【为什么抽出来】读数与条目必须来自同一次取值、同一组守卫。两份各自演化的
+    /// 取值函数，正是"读数说对不上、条目却说全绑上了"这类自相矛盾的来源。
+    fn cached_geometry(
+        &self,
+        document: &super::document::DocumentSession,
+    ) -> Option<(Vec<u64>, Vec<crate::host::geometry::BoundHostGeometry>)> {
         if self.is_closed()
             || !document.is_alive()
             || !self
                 .editor_document()
                 .is_ok_and(|current| std::ptr::eq(Arc::as_ptr(&current), document))
         {
-            return Vec::new();
+            return None;
         }
-        let Some(cached) = self.host_geometry.lock_or_recover().clone() else {
-            return Vec::new();
-        };
+        let cached = self.host_geometry.lock_or_recover().clone()?;
         if cached.model != document.revision.load(Ordering::Acquire)
             || cached.scope != document.scope_revision.load(Ordering::Acquire)
         {
-            return Vec::new();
+            return None;
         }
-        let Ok(keys) = self.host_assigned_regions(document) else {
-            return Vec::new();
-        };
-        match cached.value {
-            Ok(bound) => bound
-                .into_iter()
-                .filter(|entry| keys.contains(&entry.region_key))
-                .collect(),
-            Err(_) => Vec::new(),
-        }
+        let keys = self.host_assigned_regions(document).ok()?;
+        let bound = cached.value.ok()?;
+        Some((keys, bound))
     }
     /// 最近一次清单刷新得出的宿主音频读数；GUI 载荷读它。
     ///
@@ -1250,14 +1276,17 @@ impl ExtensionOwner {
         // 分类只用可核实的事实（见 `classify_host_audio`）。folder 结构读不出来时
         // `None` ⇒ 退化成"等待中"，绝不给出一个可能指错方向的 folder 提示。
         //
-        // 绑定侧读数取自 `binding_report`：它与刷屏日志**同源** —— 同一份事实既决定
-        // 日志输出，也决定用户看到的提示。`None` 表示"全部绑上了"（或还没求解过），
-        // 此时两个 region 计数传 0，分类退回既有的 folder / awaiting 判定。
+        // 【为什么不再读 `binding_report`】那是一份为**日志去重**服务的指纹：它记的是
+        // "上一次不干净"，只在多 region 路径上被刷新，而单 region 路径从不刷新它
+        // （`host_geometry()` 里没有 `report_binding`）。把它当现状，就等于把一个可能
+        // 几分钟前的失败永久贴在这一屏上 —— 宿主里一次分割再撤销之后，用户看到的就是
+        // 一条永远不消失的「宿主分配的区域对不上片段」。
+        //
+        // 现在的读数与条目同源（`cached_geometry`）：没求解过 ⇒ 两个计数都是 0 ⇒
+        // 分类退回 folder / awaiting 那两支（"还在等"是**真话**，而不是一句断言）。
         let (regions_assigned, regions_unmatched) = self
-            .binding_report
-            .lock_or_recover()
-            .as_ref()
-            .map(|report| (report.assigned.len(), report.unmatched.len()))
+            .host_geometry_readout(&stamp.0)
+            .map(|(assigned, bound)| (assigned, assigned.saturating_sub(bound)))
             .unwrap_or((0, 0));
         let status = classify_host_audio(
             fx_folder_depth.is_some_and(|depth| depth >= 1),
