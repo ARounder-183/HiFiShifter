@@ -283,6 +283,32 @@ pub(crate) enum SessionBacking {
     Capture(Weak<crate::render::extension::ExtensionOwner>),
 }
 
+/// 播放位置采样的节奏读数（见 `EditorSession::note_playhead_sample`）。
+struct PlayheadGaps {
+    /// 上一次采样的时刻。
+    last: Option<Instant>,
+    /// 最近若干次的间隔（毫秒），用于分位数。
+    recent: std::collections::VecDeque<u32>,
+    /// 本次上报窗口内见过的最长间隔。
+    max_ms: u32,
+    /// 本窗口内的采样次数（够一个样本量才值得打一行）。
+    samples: u32,
+    /// 上一次上报的时刻（10 秒一条）。
+    reported_at: Instant,
+}
+
+impl Default for PlayheadGaps {
+    fn default() -> Self {
+        Self {
+            last: None,
+            recent: std::collections::VecDeque::new(),
+            max_ms: 0,
+            samples: 0,
+            reported_at: Instant::now(),
+        }
+    }
+}
+
 pub(crate) struct EditorSession {
     /// 时间线/参数来源（[`SessionBacking`]）。
     ///
@@ -371,6 +397,8 @@ pub(crate) struct EditorSession {
     pub(super) error: Mutex<Option<String>>,
     render_error: Mutex<Option<String>>,
     render_requested: AtomicBool,
+    /// 播放位置采样的节奏读数（见 `note_playhead_sample`）。
+    playhead_gaps: Mutex<PlayheadGaps>,
     /// `pending` 持续为真的起点；不 pending 时为 `None`（诊断用）。
     pending_since: Mutex<Option<Instant>>,
     /// 本段 pending 是否已经报过 —— 每段只报一次，避免把诊断变成刷屏。
@@ -618,6 +646,7 @@ impl EditorSession {
             error: Mutex::new(None),
             render_error: Mutex::new(None),
             render_requested: AtomicBool::new(false),
+            playhead_gaps: Mutex::new(PlayheadGaps::default()),
             pending_since: Mutex::new(None),
             pending_reported: AtomicBool::new(false),
             render_task: Mutex::new(None),
@@ -2475,6 +2504,7 @@ impl EditorSession {
             .as_ref()
             .map(|clock| clock.read())
             .unwrap_or((0., false));
+        self.note_playhead_sample(playing);
         json!({"ok":true,"is_playing":playing,"waiting_for_render":false,
             "target":if playing {Some("synthesized")} else {None},"base_sec":0.,
             "position_sec":position,"duration_sec":f64::from_bits(self.project_duration.load(Ordering::Acquire)),
@@ -2483,6 +2513,62 @@ impl EditorSession {
             // 两条都没有时它是假 —— 前端据此知道那个 0 不是"宿主在 0"。
             "host_authoritative":clock.is_some()})
     }
+    /// 播放位置采样的节奏读数（诊断）。
+    ///
+    /// 【为什么在后端记】前端每次轮询都落到这条快速路径上，于是「两次采样之间隔了多久」
+    /// 在这里是可测的，且与 UI 线程是否被占用**同源** —— 而那正是光标冻住的唯一成因。
+    /// 放在前端记则要额外开一条 IPC，而这条通道本来就只写日志。
+    ///
+    /// 【为什么要打这一行】光标卡顿有三种成因：采样通道停摆、外推被夹住、纠偏策略有问题。
+    /// 没有这个数，三者在日志里长得一模一样。
+    /// 本会话的音频线程此刻有没有可服务的快照（见 `render_audible_stale`）。
+    fn has_serviceable_snapshot(&self) -> bool {
+        if let Some(owner) = self.capture_owner() {
+            return owner.has_serviceable_snapshot();
+        }
+        self.document().is_some_and(|document| {
+            document
+                .renderer_owners()
+                .iter()
+                .any(|owner| owner.has_serviceable_snapshot())
+        })
+    }
+
+    fn note_playhead_sample(&self, playing: bool) {
+        if !playing {
+            *self.playhead_gaps.lock_or_recover() = PlayheadGaps::default();
+            return;
+        }
+        let now = Instant::now();
+        let mut gaps = self.playhead_gaps.lock_or_recover();
+        let Some(last) = gaps.last.replace(now) else {
+            return;
+        };
+        let gap_ms = now.duration_since(last).as_millis().min(u32::MAX as u128) as u32;
+        gaps.samples += 1;
+        gaps.max_ms = gaps.max_ms.max(gap_ms);
+        gaps.recent.push_back(gap_ms);
+        if gaps.recent.len() > 256 {
+            gaps.recent.pop_front();
+        }
+        if gaps.samples < 64 || now.duration_since(gaps.reported_at) < Duration::from_secs(10) {
+            return;
+        }
+        gaps.reported_at = now;
+        gaps.samples = 0;
+        let mut sorted: Vec<u32> = gaps.recent.iter().copied().collect();
+        sorted.sort_unstable();
+        let p95 = sorted.get(sorted.len() * 95 / 100).copied().unwrap_or(0);
+        let max = gaps.max_ms;
+        gaps.max_ms = 0;
+        drop(gaps);
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Warn,
+            "playhead.samples",
+            format_args!("[playhead] samples: gap_max={max}ms gap_p95={p95}ms"),
+        );
+    }
+
     /// 一次性时钟探针最多每秒写一条；只在命令actor线程调用，不在音频callback写文件。
     pub(super) fn report_transport_probe(&self) {
         if !self.transport_probe {
@@ -2763,6 +2849,12 @@ impl EditorSession {
         let host_error = states.into_iter().find_map(|state| state.1);
         let analysis_pending = self.requires_analysis(&self.timeline.lock_or_recover());
         let rendering = self.render_task.lock_or_recover().is_some();
+        // 「你听到的是不是旧版本」：有任务在跑，**而且**音频线程此刻没有可服务的快照。
+        //
+        // 【为什么与 `rendering` 分开】后者回答"后台在忙吗"，用户问的是"我听到的是不是
+        // 旧的"。一次刷新（旧快照仍可服务）在听感上什么都没发生 —— 把它显示成「渲染中」
+        // 就是本方案要消灭的那句噪音。
+        let audible_stale = rendering && !self.has_serviceable_snapshot();
         // 【为什么不是"有片段缺 source_path 就算在途"】`unavailable` 的三类成因都是终态
         // （folder 父轨 / 样本读取失败 / 超期未认领）。把它们也算作"进行中"会让应用状态
         // 永久停在 pending —— 用户对着一个永远转不完的转圈。口径交给文档侧的唯一判据
@@ -2802,6 +2894,8 @@ impl EditorSession {
             // 只靠 `playback_rendering_state` 事件流。事件用 `try_send`（队列满即丢），
             // 丢一个 `active:false` 就会让片永久亮着；快照每 250 ms 重读一次，自愈。
             "rendering_active":rendering,
+            // 状态栏的「渲染中」读这一个（见上面 `audible_stale` 的说明）。
+            "render_audible_stale":audible_stale,
             "host_version":self.host_version.load(Ordering::Acquire),
             "error":self.error.lock_or_recover().clone().or_else(||self.render_error.lock_or_recover().clone()).or(host_error),"connected":!self.closed.load(Ordering::Acquire),
             "ready":self.loaded.lock_or_recover().initialized})

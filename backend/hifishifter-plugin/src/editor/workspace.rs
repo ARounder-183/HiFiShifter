@@ -2803,10 +2803,17 @@ mod tests {
             .region_items
             .lock_or_recover()
             .insert(key, "{ITEM-2}".to_owned());
+        // 一条**活着的** region：`regions` 是"该不该留下"的文档级权威，缺席时
+        // 保留规则会把两条都剔掉（那不是本用例要测的东西）。
+        document
+            .regions
+            .lock_or_recover()
+            .insert(key, crate::ara::AraPlaybackRegion::default());
         let mut timeline: TimelineState = serde_json::from_value(serde_json::json!({
             "tracks":[{"id":"track","name":"t","order":0}],
             "clips":[
                 {"id":region_id,"name":"A","track_id":"track","start_sec":0.0,"length_sec":1.0,
+                 "source_path":"/pcm.wav",
                  "takes":[{"id":"t1","source_path":"/pcm.wav","source_start_sec":0.0,"source_end_sec":1.0}]},
                 {"id":item_id,"name":"A","track_id":"track","start_sec":0.0,"length_sec":1.0,
                  "takes":[{"id":"t2","source_start_sec":0.0,"source_end_sec":1.0}]}
@@ -2814,6 +2821,19 @@ mod tests {
             "bpm":120,"project_sec":1.0
         }))
         .unwrap();
+        // 清单非空才会走到折叠/保留那一段（空清单整体早退，见 `present_host_inventory`）。
+        let host = crate::host::MockHost::new();
+        host.enable_media();
+        host.clear_markers();
+        host.inventory_enabled.set(true);
+        let api = Arc::new(host.client());
+        let mut track = api.ui_track(&|| true).unwrap();
+        track.id = "track".into();
+        track.items.clear();
+        document
+            .ui_tracks
+            .lock_or_recover()
+            .insert(track.guid.clone(), track);
         document.present_host_inventory(&mut timeline, "");
         assert_eq!(
             timeline.clips.len(),
@@ -2823,6 +2843,10 @@ mod tests {
         assert!(
             timeline.clips[0].source_path.is_some(),
             "留下的必须是**有源**的那一条（另一条只是占位）"
+        );
+        assert!(
+            timeline.clips[0].id.contains("ara-region-"),
+            "保留的应当是**映射层**那条（它带着 ARA 几何与源窗口）"
         );
     }
 

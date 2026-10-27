@@ -32,6 +32,14 @@ export interface PluginApplyState {
      */
     rendering_active?: boolean;
     /**
+     * 「你听到的是不是旧版本」（后端 `render_audible_stale`）。
+     *
+     * 【为什么与 `rendering_active` 分开】后者回答「后台在忙吗」，用户问的是「我听到的
+     * 是不是旧的」。一次**刷新**（旧快照仍可服务）在听感上什么都没发生 —— 把它显示成
+     * 「渲染中」就是把「后台在忙」说成「你听到的是错的」。状态栏那片读这一个。
+     */
+    render_audible_stale?: boolean;
+    /**
      * 后端是否在等**音高分析**。
      *
      * 【为什么必须与 `pending` 分开】分析是这条链路上**唯一会持续很久**的一步
@@ -101,6 +109,7 @@ function sameState(a: PluginApplyState | null, b: PluginApplyState | null): bool
         a.connected === b.connected &&
         a.ready === b.ready &&
         a.rendering_active === b.rendering_active &&
+        a.render_audible_stale === b.render_audible_stale &&
         a.analysis_pending === b.analysis_pending &&
         a.error === b.error
     );

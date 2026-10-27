@@ -1244,7 +1244,13 @@ function AppInner() {
                             target?: string | null;
                             pass?: number | null;
                         };
-                        const active = Boolean(payload?.active);
+                        // 【为什么还要问一次「你听到的是不是旧的」】`active` 回答的是
+                        // 「后台有没有一个渲染任务」，而状态栏那片要回答「我听到的是不是
+                        // 旧的」。一次**刷新**（旧快照仍可服务）在听感上什么都没发生 ——
+                        // 把它点亮就是用户报的「播放时总是先弹出渲染中」。
+                        // 独立 App 没有这份快照（`state` 为 null）⇒ 行为不变。
+                        const stale = getPluginApplySnapshot().state?.render_audible_stale;
+                        const active = Boolean(payload?.active) && stale !== false;
                         const pRaw = payload?.progress;
                         const p =
                             typeof pRaw === "number" && Number.isFinite(pRaw)
@@ -1354,7 +1360,14 @@ function AppInner() {
         const unsubscribeApply = isPluginMode()
             ? subscribePluginApply(() => {
                   const state = getPluginApplySnapshot().state;
-                  if (!state || state.rendering_active !== false) return;
+                  // 【为什么两个条件都是「熄灭」】`rendering_active === false` 是「没有任务」；
+                  // `render_audible_stale === false` 是「有任务，但你听到的已经是当前版本」。
+                  // 两者都意味着那片不该亮着。
+                  if (
+                      !state ||
+                      (state.rendering_active !== false && state.render_audible_stale !== false)
+                  )
+                      return;
                   if (!originalRenderActiveRef.current && !backgroundRenderActiveRef.current) {
                       return;
                   }
@@ -1590,6 +1603,18 @@ function AppInner() {
     });
 
     const playbackSyncInFlightRef = useRef(false);
+    /** 在途采样的派发时刻（performance.now()）。见 `PLAYBACK_SYNC_DEADLINE_MS`。 */
+    const playbackSyncSinceRef = useRef(0);
+    /** 在途采样的票据：只有最后一张能复位在途标志（后到的采样**取代**先前那次）。 */
+    const playbackSyncTicketRef = useRef(0);
+    /**
+     * 一次采样最多挡住后续采样多久。
+     *
+     * 【为什么必须有】单飞标志的本意是"别把 IPC 堆起来"，但一次慢往返（UI 线程被加载/
+     * 发布占用）会让它一直为真，于是**之后所有 tick 都早退** —— 采样通道停摆，而视觉
+     * 光标只能领先最后一份采样 100 ms，于是"卡在那里一会儿"。超时放行 = 通道自愈。
+     */
+    const PLAYBACK_SYNC_DEADLINE_MS = 1000;
     // 按 target 隔离的渲染活跃状态（见 playback_rendering_state 监听器）：
     // 前台（阻塞式）与后台渲染线程并发发射事件，必须分 ref 跟踪才能把
     // "阻塞式前台预渲染"窗口的开关与后台渲染的生命周期解耦。
@@ -3542,8 +3567,16 @@ function AppInner() {
             // 读取按 target 隔离的 blocking 镜像：两类渲染并发发射事件，
             // 后台渲染的完成事件不得提前关闭本守卫。
             if (rendering.blocking) return;
-            if (playbackSyncInFlightRef.current) return;
+            const nowMs = performance.now();
+            if (
+                playbackSyncInFlightRef.current &&
+                nowMs - playbackSyncSinceRef.current < PLAYBACK_SYNC_DEADLINE_MS
+            ) {
+                return;
+            }
             playbackSyncInFlightRef.current = true;
+            playbackSyncSinceRef.current = nowMs;
+            const ticket = (playbackSyncTicketRef.current += 1);
             // 派发时刻的传输纪元与时钟读数：响应迟到且期间发生过
             // 播放/停止/seek/isPlaying 翻转时，reducer 把该响应按乱序丢弃；
             // 时钟读数用于把采样位置外推到处理时刻（消除 IPC 时延滞后/抖动
@@ -3567,7 +3600,11 @@ function AppInner() {
                     // 正常运行时的临时失败。
                 })
                 .finally(() => {
-                    playbackSyncInFlightRef.current = false;
+                    // 【为什么要比票据】超时放行之后可能有两次在途；先到的那次不能
+                    // 把后到的那次也"复位"掉 —— 那会让单飞形同虚设（每次都放行）。
+                    if (playbackSyncTicketRef.current === ticket) {
+                        playbackSyncInFlightRef.current = false;
+                    }
                 });
         }, intervalMs);
         return () => window.clearInterval(id);

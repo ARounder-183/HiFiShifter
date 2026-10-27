@@ -20,12 +20,12 @@ use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetFocus, MapVirtualKeyW, SetFocus, MAPVK_VK_TO_VSC, VIRTUAL_KEY, VK_ADD, VK_BACK, VK_CONTROL,
     VK_DECIMAL, VK_DELETE, VK_DIVIDE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_INSERT, VK_LEFT,
-    VK_MENU, VK_MULTIPLY, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE,
-    VK_SUBTRACT, VK_TAB, VK_UP,
+    VK_MENU, VK_MULTIPLY, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_SUBTRACT,
+    VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetAncestor, GetForegroundWindow, GetGUIThreadInfo, GetParent, GetWindowThreadProcessId, IsChild,
-    IsWindow, IsWindowVisible, PostMessageW, SetForegroundWindow, GA_ROOT, GA_ROOTOWNER,
+    GetAncestor, GetForegroundWindow, GetGUIThreadInfo, GetParent, GetWindowThreadProcessId,
+    IsChild, IsWindow, IsWindowVisible, PostMessageW, SetForegroundWindow, GA_ROOT, GA_ROOTOWNER,
     GUITHREADINFO, WM_KEYDOWN, WM_KEYUP,
 };
 

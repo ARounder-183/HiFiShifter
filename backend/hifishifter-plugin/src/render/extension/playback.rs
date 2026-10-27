@@ -667,6 +667,21 @@ impl ExtensionOwner {
     /// 改了但合成还没跑完"这一档若回落到原始磁带，用户刚调完音高就会听到**未处理的原声**
     /// —— 那是倒退。只比 take 号：曲线编辑不改 take，于是仍然读处理结果（听到上一版处理，
     /// 与既有行为一致）；换 take 才回落。
+    /// 此刻音频线程**能不能**服务一份已发布的快照。
+    ///
+    /// 【为什么需要它】「渲染中」此前绑在"有没有一个渲染任务"上，而那回答的是
+    /// "后台在做一件事"，不是"你听到的是不是旧的"。一次**刷新**（旧快照仍可服务）
+    /// 在听感上什么都没发生，把它显示成「渲染中」等于把「后台在忙」说成「你听到的是错的」。
+    ///
+    /// capture：有素材且（处理结果或原始磁带）能对上当前 take；
+    /// ARA：发布过一份 prepared 快照。
+    pub(crate) fn has_serviceable_snapshot(&self) -> bool {
+        if self.is_bound() || self.bound_once.load(Ordering::Acquire) {
+            return self.prepared.lock_or_recover().is_some();
+        }
+        self.capture.has_material() && (self.processed_ready() || self.raw_tape_ready())
+    }
+
     pub(super) fn processed_ready(&self) -> bool {
         if !self.capture.has_material() {
             return false;

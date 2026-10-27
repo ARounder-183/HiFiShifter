@@ -33,6 +33,21 @@ export function catchUpSampledPlayhead(positionSec: number, ageSec: number): num
  */
 const PLAYHEAD_SAMPLE_FRESH_SEC = 0.25;
 
+/**
+ * 纠偏速率上限（秒/秒）：每帧最多把"视觉位置"往采样值移动 25% 的时间差。
+ *
+ * 【为什么是这个量级】300 ms 的采样迟到要在 "1.2 s 内吃掉 —— 再快就能看出跳变，
+ * 再慢就会长时间偏离真实位置。
+ */
+const SLEW_SEC_PER_SEC = 0.25;
+
+/**
+ * 超过这个差值就当成**真的跳转**（seek / 循环折返），直接硬复位。
+ *
+ * 【为什么必须区分】平滑一个真实的 seek 是错的：用户按了跳转，光标就该跳。
+ */
+const SEEK_RESET_SEC = 0.5;
+
 export interface UseVisualPlayheadArgs {
     syncedPlayheadSec: number;
     isTransportAdvancing: boolean;
@@ -62,6 +77,8 @@ export function useVisualPlayhead({
         timestampMs: 0,
     });
     const advancingRef = useRef(isTransportAdvancing);
+    /** 最新采样值（视觉位置朝它纠偏，见 `SLEW_SEC_PER_SEC`）。 */
+    const targetSecRef = useRef(syncedPlayheadSec);
     const onFrameRef = useRef(onFrame);
     const hostControlled = isPluginMode();
 
@@ -114,12 +131,26 @@ export function useVisualPlayhead({
              * 而下一个采样又把差值补回来一部分（"随机闪"）。
              */
             const extrapolatedSec = catchUpSampledPlayhead(syncedPlayheadSec, hasAge ? ageSec : 0);
-            syncAnchorRef.current = {
-                playheadSec: extrapolatedSec,
-                timestampMs: now,
-            };
-            visualPlayheadSecRef.current = extrapolatedSec;
-            onFrameRef.current?.(extrapolatedSec);
+            /*
+             * 【为什么不再把锚点直接跳到采样值】那会把"采样通道的抖动"变成"光标的跳变"：
+             * 一次迟到 300 ms 的采样会让光标先冻在原地、再瞬间前进 300 ms。
+             *
+             * 现在锚点只**追**采样值：每帧最多走 `SLEW_SEC_PER_SEC × dt`（25% 的速度差），
+             * 于是 300 ms 的误差在 "1.2 s 内平滑吃掉，用户看不到跳变。真正的位置跳变
+             * （seek / 循环折返）仍走硬复位 —— 那是"位置真的变了"，平滑它反而是错的。
+             */
+            const jumpSec = Math.abs(extrapolatedSec - visualPlayheadSecRef.current);
+            if (!Number.isFinite(jumpSec) || jumpSec > SEEK_RESET_SEC) {
+                syncAnchorRef.current = {
+                    playheadSec: extrapolatedSec,
+                    timestampMs: now,
+                };
+                targetSecRef.current = extrapolatedSec;
+                visualPlayheadSecRef.current = extrapolatedSec;
+                onFrameRef.current?.(extrapolatedSec);
+            } else {
+                targetSecRef.current = extrapolatedSec;
+            }
         } else {
             // 非轮询写入（seek / stop / 粘贴……）或采样过旧：硬复位到提交值。
             syncAnchorRef.current = {
@@ -161,11 +192,19 @@ export function useVisualPlayhead({
 
         const tick = (timestampMs: number) => {
             const elapsedSec = (timestampMs - syncAnchorRef.current.timestampMs) / 1000;
-            const nextPlayheadSec = projectVisualPlayhead(
+            // 1) 按 1x 前进。**不设上限**：宿主在播放是已知事实（`isTransportAdvancing`），
+            //    采样只是它的估计值 —— 用估计值的迟到去冻结一个已知在前进的量是本末倒置。
+            const advanced = projectVisualPlayhead(
                 syncAnchorRef.current.playheadSec,
                 elapsedSec,
-                hostControlled,
+                false,
             );
+            // 2) 朝采样值纠偏，每帧最多走 `SLEW_SEC_PER_SEC × dt`。
+            const target = targetSecRef.current;
+            const maxStep = SLEW_SEC_PER_SEC * Math.max(0, elapsedSec);
+            const error = target - advanced;
+            const nextPlayheadSec = advanced + Math.max(-maxStep, Math.min(maxStep, error));
+            syncAnchorRef.current = { playheadSec: nextPlayheadSec, timestampMs };
             visualPlayheadSecRef.current = nextPlayheadSec;
             onFrameRef.current?.(nextPlayheadSec);
             rafId = requestAnimationFrame(tick);
