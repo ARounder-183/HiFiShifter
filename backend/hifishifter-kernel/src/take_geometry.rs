@@ -106,8 +106,16 @@ pub struct TakeGeometry {
     pub media_duration_sec: Option<f64>,
     /// SECTION 边界（RPP 的 STARTPOS/LENGTH，或实时 PCM_Source_GetSectionInfo）。
     pub section: Option<SourceSection>,
-    /// 方向：play_rate < 0 **或** SECTION MODE > 0（App），或宿主方向位（插件）。
-    pub reversed: bool,
+    /// 方向：`play_rate < 0` **或** SECTION MODE > 0（App），或宿主方向位（插件）。
+    ///
+    /// 【为什么是三态】REAPER 的 "Toggle take reverse" 是"正 PLAYRATE + SECTION MODE 1"，
+    /// 方向**唯一**来源就是那个方向位。读不到它时旧实现按正放处理 —— 而"读不到"与
+    /// "确实是正放"是两件完全不同的事：前者会把倒放片段按正放渲染（方向与 REAPER
+    /// 完全相反、偏移量差 `2·soffs + consumed − D`），后者是正常。
+    ///
+    /// `None` = 读不到。此时 [`TakeGeometry::forward_source_window`] 返回 `None`
+    /// （调用方保留宿主镜像坐标并留读数），**不允许**静默按正放渲染。
+    pub reversed: Option<bool>,
     /// 循环源（REAPER "Loop source" / B_LOOPSRC）。
     pub loop_enabled: bool,
 }
@@ -138,54 +146,68 @@ impl TakeGeometry {
 
     /// 可寻址的源区间 (min_bound, max_bound) 与"是否存在 SECTION"。
     fn source_bounds(&self) -> (f64, f64, bool) {
-        let mut min_bound = 0.0;
-        let mut max_bound = f64::INFINITY;
-        let has_section = self.section.is_some();
-        if let Some(section) = self.section {
-            min_bound = section.start_sec.max(0.0);
-            if let Some(length) = section
-                .length_sec
-                .filter(|len| len.is_finite() && *len > 0.0)
-            {
-                max_bound = (section.start_sec + length).max(min_bound);
-            }
-        }
-        if let Some(total) = self
-            .media_duration_sec
-            .filter(|value| value.is_finite() && *value > 0.0)
-        {
-            max_bound = max_bound.min(total);
-        }
-        (min_bound, max_bound, has_section)
+        let min_bound = self
+            .section
+            .map(|section| section.start_sec.max(0.0))
+            .unwrap_or(0.0);
+        // 【轴只有一个来源】`take_axis_sec` 与写回侧调的是**同一个函数** —— 读用一份
+        // 轴、写用另一份，每编辑一次就漂 `Δaxis`。这里不再就地重算一遍。
+        let max_bound =
+            take_axis_sec(self.section, self.media_duration_sec, None).unwrap_or(f64::INFINITY);
+        (min_bound, max_bound, self.section.is_some())
+    }
+
+
+    /// 方向位是否**读得到**。
+    pub fn direction_known(&self) -> bool {
+        self.reversed.is_some()
+    }
+
+    /// 有效方向（`None` 按正放参与数学，但调用方必须先问 `direction_known`）。
+    pub fn is_reversed(&self) -> bool {
+        self.reversed.unwrap_or(false)
+    }
+
+    /// 镜像轴；倒放且轴未知时为 `None`（见 [`take_axis_sec`]）。
+    pub fn axis_sec(&self) -> Option<f64> {
+        let (_, max_bound, _) = self.source_bounds();
+        max_bound.is_finite().then_some(max_bound)
     }
 
     /// 入口锚点（源域秒）：正放是窗口**起点**，倒放是窗口**终点**。
-    fn source_anchor(&self, min_bound: f64, max_bound: f64, has_section: bool) -> f64 {
+    ///
+    /// 【为什么返回 `Option`】倒放的锚点是 `轴 − soffs`，轴未知时这个式子没有值。
+    /// 旧实现在那种情形下"退回原始读数"—— 那是把"不知道"伪装成"知道"：镜像量被当成
+    /// 正向起点用，整段内容偏移 `2·soffs − D`（F-4 夹具：D=2、soffs=0.75 ⇒ 得
+    /// `[0, 0.75]`，正确是 `[0.25, 1.25]`）。宁可不给窗口，也不给一个错的。
+    fn source_anchor(&self, min_bound: f64, max_bound: f64, has_section: bool) -> Option<f64> {
+        // 【方向读不到 ⇒ 没有锚点】"不知道是不是倒放"与"确实是正放"必须分开：
+        // 前者的正确处置是"保留宿主镜像坐标 + 留读数"，不是按正放解算。
+        let reversed = self.reversed?;
         let section_start = self.section.map(|section| section.start_sec).unwrap_or(0.0);
         // SOFFS 的负值只在"正放 + 无 SECTION"时是合法的（REAPER 左延伸 item 的
         // 前导静音）；其余情形按 0 处理，与 App 一致。
         let soffs_nonneg = self.start_offset_sec.max(0.0);
 
         let primary = if has_section {
-            if self.reversed {
+            if reversed {
                 max_bound - soffs_nonneg
             } else {
                 section_start + soffs_nonneg
             }
-        } else if self.reversed {
-            if max_bound.is_finite() {
-                max_bound - soffs_nonneg
-            } else {
-                // 媒体时长未知 ⇒ 无法镜像，退回原始读数（不编造）。
-                self.start_offset_sec
+        } else if reversed {
+            // 轴未知 ⇒ 无法镜像（不编造）。
+            if !max_bound.is_finite() {
+                return None;
             }
+            max_bound - soffs_nonneg
         } else {
             // 兼容 REAPER 左延伸 item（负 SOFFS = 前导静音）：保留原始符号，
             // 仅在媒体时长已知时对上界钳制。
             self.start_offset_sec.clamp(-1_000_000.0, max_bound)
         };
 
-        let mut anchor = if has_section || self.reversed {
+        let mut anchor = if has_section || reversed {
             primary.clamp(min_bound, max_bound)
         } else if primary.is_finite() {
             primary
@@ -202,7 +224,7 @@ impl TakeGeometry {
         // 解释 max_bound - soffs；再让"更长跨度"去决定用哪种，就是把解释权交给被解释
         // 的数。宿主分割右半段恰好把 offset 推过中点 —— 那正是"分割后右段偏移完全
         // 错误"的机理。
-        if has_section && !self.reversed {
+        if has_section && !reversed {
             let alt = soffs_nonneg.clamp(min_bound, max_bound);
             let primary_span = max_bound - anchor;
             let alt_span = max_bound - alt;
@@ -210,21 +232,26 @@ impl TakeGeometry {
                 anchor = alt;
             }
         }
-        anchor
+        Some(anchor)
     }
 
     /// 该 take 消费的**正向**源窗口，恒有 start <= end。
     ///
     /// 这是交给内核的唯一窗口：倒放时内核用它的 end 反向取窗，**不要再翻一次**。
-    pub fn forward_source_window(&self) -> ForwardWindow {
+    ///
+    /// 【为什么返回 `Option`】三种"不知道"必须能被调用方看见，而不是变成一个看起来
+    /// 合法的窗口：① 方向位读不到；② 倒放但没有镜像轴；③ 几何退化（NaN / 负长度）。
+    /// 调用方拿到 `None` 时的正确处置是**保留宿主镜像坐标并留读数**，不是渲染。
+    pub fn forward_source_window(&self) -> Option<ForwardWindow> {
         let (min_bound, max_bound, has_section) = self.source_bounds();
         let consumed = self.consumed_sec();
-        let anchor = self.source_anchor(min_bound, max_bound, has_section);
+        let reversed = self.reversed?;
+        let anchor = self.source_anchor(min_bound, max_bound, has_section)?;
 
         let (start, end) = if self.loop_enabled {
             // Loop：源窗口取"锚点 → 可用边界"的完整区间，**不**按 item 长度钳制 ——
             // 超出窗口的播放时间由引擎按该窗口周期回绕产生循环内容。
-            if self.reversed {
+            if reversed {
                 (min_bound.min(anchor), anchor)
             } else {
                 let end = if max_bound.is_finite() {
@@ -235,7 +262,7 @@ impl TakeGeometry {
                 };
                 (anchor, end)
             }
-        } else if self.reversed {
+        } else if reversed {
             let end = anchor;
             ((end - consumed).max(min_bound).min(end), end)
         } else {
@@ -243,17 +270,72 @@ impl TakeGeometry {
             // REAPER 中 LENGTH 大于可用源的 item 其超出部分为静音尾巴，导入必须保真。
             (anchor, anchor + consumed)
         };
-        // 走到这里 start/end 必然有限（钳制过），new 只是把那件事写进类型。
-        ForwardWindow::new(start, end).unwrap_or(ForwardWindow {
-            start: 0.0,
-            end: 0.0,
-        })
+        ForwardWindow::new(start, end)
     }
 
     /// 正向窗口的**终点** —— 内核倒放消费数学唯一用到的量。
-    pub fn forward_window_end_sec(&self) -> f64 {
-        self.forward_source_window().end()
+    pub fn forward_window_end_sec(&self) -> Option<f64> {
+        self.forward_source_window().map(ForwardWindow::end)
     }
+}
+
+
+/// 倒放 take 的**镜像轴**（秒）—— 读写两侧唯一的来源。
+///
+/// 【为什么必须只有一个来源】镜像关系是 `soffs = axis − 正向终点`。读的时候用一个轴、
+/// 写的时候用另一个，每编辑一次就漂 `Δaxis`。而轴上可用的候选有三个，优先级不同：
+///   1. **SECTION 末端**（`PCM_Source_GetSectionInfo` 的 `offset + length`）——
+///      宿主自己说"这一段到这儿为止"，是最强的证据；
+///   2. **ARA 源时长**（`AudioSource.durationSeconds`）—— 与授权无关，映射阶段就有；
+///   3. **解码时长**（本地文件）—— 容器头差一点就会差几毫秒。
+///
+/// 取 `min(1, 2|3)`：宿主把段设在媒体中间时，可寻址的上界就是段末端；否则就是媒体全长。
+/// 三者都没有 ⇒ `None`（**不猜**）。
+///
+/// 【为什么这里不接收 `soffs`】轴是**媒体**的属性，`soffs` 是**宿主读数**。让轴依赖
+/// 被解释的那个数，就再也无法用它去校验那个数 —— 而往返自校验正是本模块现在唯一的
+/// 真机取证手段。
+pub fn take_axis_sec(
+    section: Option<SourceSection>,
+    ara_duration: Option<f64>,
+    decoded_duration: Option<f64>,
+) -> Option<f64> {
+    let mut axis = f64::INFINITY;
+    if let Some(section) = section {
+        let start = section.start_sec.max(0.0);
+        if let Some(length) = section.length_sec.filter(|len| len.is_finite() && *len > 0.0) {
+            axis = axis.min((start + length).max(start));
+        }
+    }
+    // 【为什么 ARA 优先于解码时长】两者的差别通常只有一个容器头（几毫秒），但 ARA 的
+    // 那个数是宿主与插件**共享**的读数，而解码时长是本地文件的事实。写回宿主时用前者，
+    // 宿主读回时才会逐位相等 —— 往返不变量靠的就是这一点。
+    for candidate in [ara_duration, decoded_duration].into_iter().flatten() {
+        if candidate.is_finite() && candidate > 0.0 {
+            axis = axis.min(candidate);
+            break;
+        }
+    }
+    axis.is_finite().then_some(axis)
+}
+
+/// **读 → 写 → 读**的残差：把正向窗口按 `axis` 折回宿主读数，与宿主原本给的
+/// `soffs` 相减。
+///
+/// 【为什么这是一条不变量而不是一个测试】镜像约定（`soffs = axis − 正向终点` 还是
+/// `soffs = 正向起点`）属于**宿主**，而仓库里没有任何一处能证明 REAPER 用的是哪一条。
+/// 把"读出来的窗口再写回去必须回到原值"变成一行运行时读数，真机日志就能直接回答这个
+/// 问题：残差为 0 ⇒ 约定正确；残差是 `2·soffs − axis` 之类 ⇒ 约定反了。
+pub fn roundtrip_residual(
+    forward: ForwardWindow,
+    axis_sec: Option<f64>,
+    host_offset_sec: f64,
+) -> Option<f64> {
+    let axis = axis_sec.filter(|value| value.is_finite() && *value > 0.0)?;
+    if !host_offset_sec.is_finite() {
+        return None;
+    }
+    Some((axis - forward.end()) - host_offset_sec)
 }
 
 /// 把父段的**正向**窗口按"子段在播放时间上的偏移 / 长度"切成子段窗口。
@@ -320,7 +402,7 @@ mod tests {
             play_rate_signed: 1.0,
             media_duration_sec: Some(2.0),
             section: None,
-            reversed: false,
+            reversed: Some(false),
             loop_enabled: false,
         }
     }
@@ -340,10 +422,10 @@ mod tests {
     fn reversed_take_un_mirrors_to_the_forward_window() {
         let geometry = TakeGeometry {
             start_offset_sec: 0.75,
-            reversed: true,
+            reversed: Some(true),
             ..base()
         };
-        assert_eq!(geometry.forward_source_window(), win(0.25, 1.25));
+        assert_eq!(geometry.forward_source_window(), Some(win(0.25, 1.25)));
     }
 
     /// 同一个夹具，但 SECTION 覆盖整个媒体（REAPER 实测给的就是这个形状）：
@@ -356,10 +438,10 @@ mod tests {
                 start_sec: 0.0,
                 length_sec: Some(2.0),
             }),
-            reversed: true,
+            reversed: Some(true),
             ..base()
         };
-        assert_eq!(geometry.forward_source_window(), win(0.25, 1.25));
+        assert_eq!(geometry.forward_source_window(), Some(win(0.25, 1.25)));
     }
 
     /// **倒放 take 的正向窗口落在素材前半段时，SOFFS 仍然是镜像量。**
@@ -378,10 +460,10 @@ mod tests {
                 start_sec: 0.0,
                 length_sec: Some(2.0),
             }),
-            reversed: true,
+            reversed: Some(true),
             ..base()
         };
-        let window = geometry.forward_source_window();
+        let window = geometry.forward_source_window().expect("window known");
         assert!(close(window.start(), 0.1), "got {window:?}");
         assert!(close(window.end(), 0.9), "got {window:?}");
     }
@@ -397,10 +479,10 @@ mod tests {
                     start_sec: 0.0,
                     length_sec: Some(2.0),
                 }),
-                reversed: true,
+                reversed: Some(true),
                 ..base()
             };
-            let window = geometry.forward_source_window();
+            let window = geometry.forward_source_window().expect("window known");
             assert!(close(window.end(), 2.0 - soffs), "soffs={soffs}");
             assert!(
                 close(window.start(), (2.0 - soffs - 0.5).max(0.0)),
@@ -421,7 +503,7 @@ mod tests {
             }),
             ..base()
         };
-        assert_eq!(geometry.forward_source_window(), win(0.5, 1.0));
+        assert_eq!(geometry.forward_source_window(), Some(win(0.5, 1.0)));
     }
 
     /// 正放 take 的窗口就是"锚点 → 锚点 + 消耗量"，且**不**按媒体时长钳制
@@ -434,7 +516,7 @@ mod tests {
             media_duration_sec: Some(2.0),
             ..base()
         };
-        assert_eq!(geometry.forward_source_window(), win(0.25, 3.25));
+        assert_eq!(geometry.forward_source_window(), Some(win(0.25, 3.25)));
     }
 
     /// 负 SOFFS（REAPER 左延伸 item 的前导静音）只在"正放 + 无 SECTION"时保留符号。
@@ -446,7 +528,7 @@ mod tests {
             item_length_sec: 1.0,
             ..base()
         };
-        assert_eq!(geometry.forward_source_window(), win(-0.5, 0.5));
+        assert_eq!(geometry.forward_source_window(), Some(win(-0.5, 0.5)));
     }
 
     /// 负速率是倒放的**另一个**来源，必须与 SECTION MODE 1 等价。
@@ -458,10 +540,10 @@ mod tests {
         let geometry = TakeGeometry {
             start_offset_sec: 0.75,
             play_rate_signed: -1.0,
-            reversed: TakeGeometry::reversed_from_host(-1.0, 0),
+            reversed: Some(TakeGeometry::reversed_from_host(-1.0, 0)),
             ..base()
         };
-        assert_eq!(geometry.forward_source_window(), win(0.25, 1.25));
+        assert_eq!(geometry.forward_source_window(), Some(win(0.25, 1.25)));
     }
 
     /// 倒放 Loop 走"锚点 → 区间起点"的完整区间，不被 item 长度钳制。
@@ -471,12 +553,12 @@ mod tests {
             start_offset_sec: 1.0,
             item_length_sec: 0.5,
             media_duration_sec: Some(4.0),
-            reversed: true,
+            reversed: Some(true),
             loop_enabled: true,
             ..base()
         };
         // 锚点 = 4.0 − 1.0 = 3.0；回绕区间 = [0, 3.0]。
-        assert_eq!(geometry.forward_source_window(), win(0.0, 3.0));
+        assert_eq!(geometry.forward_source_window(), Some(win(0.0, 3.0)));
     }
 
     /// 正放 Loop：区间到媒体末端。
@@ -489,35 +571,61 @@ mod tests {
             loop_enabled: true,
             ..base()
         };
-        assert_eq!(geometry.forward_source_window(), win(1.0, 4.0));
+        assert_eq!(geometry.forward_source_window(), Some(win(1.0, 4.0)));
     }
 
-    /// 媒体时长未知时**不编造**镜像：退回原始读数，宁可偏移也不静默给错值。
+    /// **轴未知时不给窗口** —— 旧实现"退回原始读数"，把镜像量当成正向起点用。
+    ///
+    /// 【为什么这是本模块唯一正确的处置】`soffs` 在倒放 take 上是镜像量
+    /// （`axis − 正向终点`）。轴不知道时，`soffs` 与"正向起点"之间**没有**任何可用的
+    /// 等式 —— 拿它当起点，整段内容就偏移 `2·soffs − D`（F-4 夹具：D=2、soffs=0.75
+    /// ⇒ 得 `[0, 0.75]`，正确是 `[0.25, 1.25]`）。宁可交 `None` 让调用方保留宿主
+    /// 镜像坐标并留读数，也不交一个看起来合法的错窗口。
     #[test]
-    fn an_unknown_media_duration_does_not_invent_a_mirror() {
+    fn an_unknown_axis_yields_no_window_instead_of_a_raw_offset() {
         let geometry = TakeGeometry {
             start_offset_sec: 0.75,
             media_duration_sec: None,
-            reversed: true,
+            reversed: Some(true),
             ..base()
         };
-        let window = geometry.forward_source_window();
-        assert!(
-            close(window.end(), 0.75),
-            "anchor falls back to the raw offset"
+        assert_eq!(
+            geometry.forward_source_window(),
+            None,
+            "轴未知时不得把镜像量当成正向起点"
         );
-        assert!(close(window.start(), 0.0), "clamped to the lower bound");
+        // 正放不受影响：它的窗口不需要轴。
+        let forward = TakeGeometry {
+            start_offset_sec: 0.75,
+            media_duration_sec: None,
+            reversed: Some(false),
+            ..base()
+        };
+        assert_eq!(forward.forward_source_window(), Some(win(0.75, 1.75)));
     }
+
+    /// **方向位读不到时不给窗口** —— "不知道是不是倒放"与"确实是正放"必须分开。
+    #[test]
+    fn an_unknown_direction_yields_no_window() {
+        let geometry = TakeGeometry {
+            start_offset_sec: 0.75,
+            reversed: None,
+            ..base()
+        };
+        assert!(!geometry.direction_known());
+        assert_eq!(geometry.forward_source_window(), None);
+    }
+
 
     /// 写回是读取的逆运算：host_start_offset(正向终点) 必须还原出宿主读数。
     #[test]
     fn host_start_offset_inverts_the_forward_window() {
         let geometry = TakeGeometry {
             start_offset_sec: 0.75,
-            reversed: true,
+            reversed: Some(true),
             ..base()
         };
-        let window = geometry.forward_source_window();
+        let window = geometry.forward_source_window().expect("window known");
         let mirrored = host_start_offset(window, Some(2.0)).expect("axis known");
         assert!(close(mirrored.value(), 0.75), "got {mirrored:?}");
     }
@@ -539,7 +647,7 @@ mod tests {
             item_length_sec: 1.0,
             ..base()
         };
-        assert_eq!(geometry.forward_source_window(), win(0.25, 1.25));
+        assert_eq!(geometry.forward_source_window(), Some(win(0.25, 1.25)));
     }
 
     /// 【为什么钉住"退化"而不是"修好"】某些输入会给出零长窗口：镜像锚点被钳到下界
@@ -549,10 +657,10 @@ mod tests {
         let beyond_media = TakeGeometry {
             start_offset_sec: 2.0,
             media_duration_sec: Some(2.0),
-            reversed: true,
+            reversed: Some(true),
             ..base()
         };
-        assert_eq!(beyond_media.forward_source_window(), win(0.0, 0.0));
+        assert_eq!(beyond_media.forward_source_window(), Some(win(0.0, 0.0)));
 
         let clamped_loop = TakeGeometry {
             start_offset_sec: 1.5,
@@ -565,7 +673,7 @@ mod tests {
             loop_enabled: true,
             ..base()
         };
-        assert_eq!(clamped_loop.forward_source_window(), win(1.25, 1.25));
+        assert_eq!(clamped_loop.forward_source_window(), Some(win(1.25, 1.25)));
     }
 
     /// 内容存在的区间里（SOFFS 落在段内、且窗口能装下消耗量）窗口严格非零 ——
@@ -578,10 +686,10 @@ mod tests {
                     start_offset_sec: start_offset,
                     item_length_sec: 1.0,
                     media_duration_sec: Some(2.0),
-                    reversed,
+                    reversed: Some(reversed),
                     ..base()
                 };
-                let window = geometry.forward_source_window();
+                let window = geometry.forward_source_window().expect("window known");
                 assert!(
                     window.end() > window.start(),
                     "degenerate window for offset={start_offset} reversed={reversed}: {window:?}"
