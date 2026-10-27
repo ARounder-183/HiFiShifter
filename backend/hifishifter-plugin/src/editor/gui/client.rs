@@ -222,6 +222,10 @@ pub(crate) struct EditorClient {
     /// 上一次推送的时刻：读数没变也按 `TRANSPORT_HEARTBEAT` 补一拍，
     /// 让"通道还活着"本身成为可观测的事实。
     last_transport_at: std::time::Instant,
+    /// 上一次推送时"在播且位置在动"的时刻；位置停住超过 `TRANSPORT_FROZEN` 就留证据。
+    last_transport_move_at: std::time::Instant,
+    /// 上一次推送的位置（判断"动没动"用）。
+    last_transport_position: f64,
 }
 
 /// 让路的累计读数（见 `EditorClient::relay_stats`）。
@@ -494,6 +498,8 @@ impl EditorClient {
             view_events: std::collections::VecDeque::new(),
             last_transport: None,
             last_transport_at: std::time::Instant::now(),
+            last_transport_move_at: std::time::Instant::now(),
+            last_transport_position: f64::NAN,
         }))
     }
 
@@ -739,6 +745,12 @@ fn push_view_event(state: &Rc<RefCell<EditorClient>>, event: &str, payload: serd
 /// 诊断看到"通道在跑"，又不会把 UI 线程变成 50 Hz 的 JSON 工厂。
 const TRANSPORT_HEARTBEAT: std::time::Duration = std::time::Duration::from_millis(200);
 
+/// 宿主说在播、位置却这么久没动 —— 值得留一行证据。
+///
+/// 【为什么是 500 ms】宿主采样 30 Hz、推送 50 Hz；半秒不动已经远超调度抖动，
+/// 而短于它会把一次正常的重排/落盘误报成故障。
+const TRANSPORT_FROZEN: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// 把宿主传输**推**给页面（事件，不是回执）。
 ///
 /// 【为什么是推送而不是让前端轮询】轮询是"请求-响应"：一次慢回执、一次在途去重、
@@ -764,10 +776,37 @@ fn push_transport(state: &Rc<RefCell<EditorClient>>) {
     if !due {
         return;
     }
-    {
+    let frozen_for = {
         let mut state = state.borrow_mut();
+        let now = std::time::Instant::now();
+        if !state.last_transport_position.is_finite()
+            || (state.last_transport_position - view.position_sec).abs() > 1e-4
+        {
+            state.last_transport_move_at = now;
+        }
+        state.last_transport_position = view.position_sec;
+        let frozen = if view.playing && !view.seek_pending {
+            now.duration_since(state.last_transport_move_at)
+        } else {
+            std::time::Duration::ZERO
+        };
         state.last_transport = Some(view);
-        state.last_transport_at = std::time::Instant::now();
+        state.last_transport_at = now;
+        frozen
+    };
+    if frozen_for >= TRANSPORT_FROZEN {
+        // 【为什么这一行值得存在】"光标卡住"的三种成因（来源停摆 / 来源一直在给
+        // 同一个值 / 前端没消费）在日志里同形。这一行把**来源、年龄、定位窗口**
+        // 一起写出来，一次现场就能定死是哪一种。限流由 `emit_limited_key` 负责。
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Warn,
+            "transport.frozen",
+            format_args!(
+                "[transport] trace: the host reports playing but the position has not moved for {} ms ({}); the editor keeps extrapolating at 1x",
+                frozen_for.as_millis(),
+                view.to_json()
+            ),
+        );
     }
     push_view_event(state, "transport", view.to_json());
 }
