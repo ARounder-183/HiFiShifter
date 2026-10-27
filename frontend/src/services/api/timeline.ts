@@ -298,19 +298,12 @@ export const timelineApi = {
 
     removeClips: (clipIds: string[]) => invoke<TimelineResult>("remove_clips", clipIds),
 
-    moveClip: (payload: {
-        clipId: string;
-        startSec: number;
-        trackId?: string;
-        moveLinkedParams?: boolean;
-    }) =>
-        invoke<TimelineResult>(
-            "move_clip",
-            payload.clipId,
-            payload.startSec,
-            payload.trackId,
-            payload.moveLinkedParams,
-        ),
+    // 【为什么没有 moveLinkedParams】「锁定参数线」是**持续有效的偏好**，由后端在
+    // 真正决定曲线位置的地方现读设置（独立 App 是 `move_clips` 的命令边界，插件是
+    // `ParameterAtlas` 的投影）。随命令捎带一份快照，必然得到两个来源 —— 而这一维
+    // 曾经因为「放在批次层、后端按每条 move 去读」而**永远**读不到。
+    moveClip: (payload: { clipId: string; startSec: number; trackId?: string }) =>
+        invoke<TimelineResult>("move_clip", payload.clipId, payload.startSec, payload.trackId),
 
     moveClips: (payload: {
         moves: Array<{
@@ -318,8 +311,7 @@ export const timelineApi = {
             startSec: number;
             trackId?: string;
         }>;
-        moveLinkedParams?: boolean;
-    }) => invoke<TimelineResult>("move_clips", payload.moves, payload.moveLinkedParams),
+    }) => invoke<TimelineResult>("move_clips", payload.moves),
 
     getClipLinkedParams: (clipId: string) =>
         invoke<{ ok: boolean; linkedParams?: LinkedParamCurves }>("get_clip_linked_params", clipId),

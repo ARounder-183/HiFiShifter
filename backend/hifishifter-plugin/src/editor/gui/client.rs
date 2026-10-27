@@ -1340,7 +1340,7 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
                 request["args"] = if moves.is_empty() {
                     serde_json::json!({})
                 } else {
-                    serde_json::json!({"moves":moves,"moveLinkedParams":true})
+                    serde_json::json!({"moves":moves})
                 };
             }
         }

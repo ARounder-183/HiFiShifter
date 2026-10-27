@@ -743,7 +743,12 @@ pub(super) fn move_clips(
     moves: Vec<crate::state::MoveClipPayload>,
     move_linked_params: Option<bool>,
 ) -> crate::models::TimelineStatePayload {
-    let move_linked_params = move_linked_params.unwrap_or(false);
+    // 【为什么缺省值取**当前设置**而不是 false】「锁定参数线」是用户偏好，不是每次
+    // 命令的一次性意图。前端不再传这一维（它曾经是一个会漂移的偏好快照：多选拖动
+    // 时被放在批次层、后端却按每条 move 去读，于是永远回落），由后端在此现读设置，
+    // 与插件侧 `ParameterAtlas::anchor_is_locked` 同一个事实源。
+    let move_linked_params =
+        move_linked_params.unwrap_or_else(|| state.ui_settings_snapshot().lock_param_lines);
     let payload = {
         let mut tl = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
         state.checkpoint_timeline(&tl, crate::state::HistoryOp::MoveClip);

@@ -1040,6 +1040,10 @@ impl ParameterAtlas {
         identities: &BTreeMap<String, RegionIdentity>,
     ) -> Result<Self, String> {
         let mut followed = self.clone();
+        // 【为什么先补一次锚点对齐】开关只在**写入**时被读取（`bake_curve_to_anchor` 的
+        // 目标就是当前设置），而用户的典型顺序是"画完线再拨开关"。不在这里补一次烘焙，
+        // 拨开关就完全没有可见效果 —— 那正是"锁定参数线在插件里完全没反应"的直接成因。
+        followed.realign_anchors(timeline, identities, anchor_is_locked());
         // 旧存档只有 per-clip 记录：按旧规则认领一次并折算进权威（一次性）。
         followed.migrate_legacy_records(timeline, identities);
         // 本帧投影完全由权威派生。clip id 的不稳定在这里不再有影响。
@@ -1073,6 +1077,77 @@ impl ParameterAtlas {
             .retain(|signature, _| live_signatures.contains(signature));
         followed.validate()?;
         Ok(followed)
+    }
+
+    /// 让「锁定参数线」对**既有**曲线也生效（拨开关即刻可见）。
+    ///
+    /// 【为什么必须补这一步】开关只在**写入**时被读取（`bake_curve_to_anchor` 的目标
+    /// 就是当前设置），而用户的典型顺序是"画完线再拨开关"。不补这一次烘焙，拨开关就
+    /// 完全没有可见效果 —— 而"完全没有反应"正是用户对它的原话。
+    ///
+    /// 【为什么烘焙不了就保持原锚点】工程域的格号是**绝对工程帧**，一条源窗只覆盖工程
+    /// 时间的一段；换域必然变短，而变短等于丢用户数据。宁可这一次不生效（锚点跟着数据
+    /// 走，见 `landed_anchor` 的同一条不变式），也不悄悄截断。
+    ///
+    /// 【为什么按 clip 而不是按权威】几何是**片段**的属性，而一条权威可能被多条 region
+    /// 共享（同一 modification 的多个子段）。逐 clip 走，每条都能用自己的几何烘焙；
+    /// 同一条权威被烘焙两次是幂等的（第二次 `domain == wanted` 直接返回 `None`）。
+    fn realign_anchors(
+        &mut self,
+        timeline: &TimelineState,
+        identities: &BTreeMap<String, RegionIdentity>,
+        locked: bool,
+    ) -> usize {
+        let wanted = anchor_for_lock(locked);
+        let mut pending: Vec<(String, AuthorityParameters)> = Vec::new();
+        let mut realigned = 0_usize;
+        for clip in &timeline.clips {
+            let Some(identity) = identities.get(&clip.id) else {
+                continue;
+            };
+            let Some(key) = authority_key(identity.item.as_deref(), &identity.modification) else {
+                continue;
+            };
+            if pending.iter().any(|(done, _)| *done == key) {
+                continue;
+            }
+            let Some(params) = self.authorities.get(&key) else {
+                continue;
+            };
+            if params.anchor == wanted {
+                continue;
+            }
+            let Ok(geometry) = geometry(clip) else {
+                continue;
+            };
+            let frame_ms = params.template.frame_period_ms;
+            let mut curves = params.curves.clone();
+            let mut baked = 0_usize;
+            for (param, curve) in params.curves.iter() {
+                let Some(next) = bake_curve_to_anchor(curve, wanted, &geometry, param, frame_ms)
+                else {
+                    continue;
+                };
+                // 换域会让曲线变短（工程域里没有窗外的格）⇒ 这一次不换这一条。
+                if non_default_values(param, &next) < non_default_values(param, curve) {
+                    continue;
+                }
+                curves.insert(param.clone(), next);
+                baked += 1;
+            }
+            if baked == 0 {
+                continue;
+            }
+            let mut next = params.clone();
+            next.curves = curves;
+            next.anchor = wanted;
+            realigned += 1;
+            pending.push((key, next));
+        }
+        for (key, params) in pending {
+            self.set_authority(&key, params);
+        }
+        realigned
     }
 
     /// 把旧存档里的 per-clip 记录折算进权威表（幂等）。
@@ -2421,6 +2496,25 @@ fn anchor_for_lock(locked: bool) -> ParamAnchor {
         ParamAnchor::Source
     } else {
         ParamAnchor::Project
+    }
+}
+
+/// 当前设置是否要求"参数跟着素材走"。
+///
+/// 【为什么收成一个函数】它是"锁定参数线"在插件侧的**唯一**读点：新建权威、烘焙目标、
+/// 以及拨开关后的重投影都从这里取值。散成三处读取，就会出现"写的时候按新设置、
+/// 读的时候按旧锚点"——那正是"参数线被重置"的经典成因。
+///
+/// 【为什么测试里恒为 true】与 [`default_anchor`] 同一条理由：进程级设置是全局状态，
+/// 而测试并行运行。需要工程域锚点的用例直接调 `realign_anchors(.., false)`。
+fn anchor_is_locked() -> bool {
+    #[cfg(not(test))]
+    {
+        crate::settings_store::lock_param_lines()
+    }
+    #[cfg(test)]
+    {
+        true
     }
 }
 

@@ -1047,18 +1047,18 @@ export function useTimelineKernelSeekDrag({
                     selectTrackRemote({ trackId: anchorMove.trackId, applySelectedClip: false }),
                 );
             }
-            // 「锁定参数线」必须随移动一起透出（旧实现 `useClipDrag` 同源）：
-            // 漏传会让参数线在该开关打开时**不跟随 clip 移动**，且没有任何提示。
-            const moveLinkedParams = session.lockParamLinesEnabled;
+            // 【为什么不再传「锁定参数线」】它是**持续有效的偏好**，由后端在真正决定
+            // 曲线位置的地方现读设置。随命令捎带一份快照，必然得到两个来源 —— 而这一维
+            // 曾经因为「放在批次层、后端按每条 move 去读」而永远读不到，于是多选拖动时
+            // 开关完全失效。
             const movePromise =
                 moves.length > 1
-                    ? dispatch(moveClipsRemote({ moves, moveLinkedParams })).unwrap()
+                    ? dispatch(moveClipsRemote({ moves })).unwrap()
                     : dispatch(
                           moveClipRemote({
                               clipId: moves[0].clipId,
                               startSec: moves[0].startSec,
                               trackId: moves[0].trackId,
-                              moveLinkedParams,
                           }),
                       ).unwrap();
             void (async () => {

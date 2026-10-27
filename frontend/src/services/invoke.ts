@@ -301,18 +301,18 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
         case "remove_clips":
             return { clipIds: args[0] };
 
+        // 两条移动命令都**不带**「锁定参数线」：那是用户偏好，由后端在决定曲线
+        // 位置的地方现读设置（见 `api/timeline.ts` 的同一条注释）。
         case "move_clip":
             return {
                 clipId: args[0],
                 startSec: args[1],
                 trackId: (args[2] ?? null) as unknown,
-                moveLinkedParams: args[3],
             };
 
         case "move_clips":
             return {
                 moves: args[0],
-                moveLinkedParams: args[1],
             };
 
         case "get_clip_linked_params":
