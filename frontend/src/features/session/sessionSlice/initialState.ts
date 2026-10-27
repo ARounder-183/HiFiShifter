@@ -161,6 +161,7 @@ export const initialState: SessionState = {
         playbackTarget: null,
         playbackPositionSec: 0,
         playbackDurationSec: 0,
+        hostAuthoritative: false,
         gpuBackend: "",
     },
 

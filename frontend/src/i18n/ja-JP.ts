@@ -2202,7 +2202,6 @@ export const jaJP = {
 
     // ── プラグインホストの自動適用状態（ステータスバーのチップ）───────
     plugin_apply_waiting_host: "ホストのオーディオを待機中",
-    plugin_apply_pending: "自動適用中...",
     plugin_apply_applied: "適用済み",
     plugin_apply_error: "未適用：{error}",
     plugin_apply_session_ended:

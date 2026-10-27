@@ -2127,7 +2127,6 @@ export const zhTW = {
 
     // ── 外掛宿主的自動套用狀態（狀態列片）───────────────────────────
     plugin_apply_waiting_host: "等待宿主音訊",
-    plugin_apply_pending: "正在自動套用...",
     plugin_apply_applied: "已套用",
     plugin_apply_error: "尚未套用：{error}",
     plugin_apply_session_ended: "本次編輯工作階段已結束。請關閉並重新開啟外掛視窗後繼續。",

@@ -2185,7 +2185,6 @@ export const enUS = {
 
     // ── 插件宿主的自动应用状态（状态栏片）───────────────────────────
     plugin_apply_waiting_host: "Waiting for host audio",
-    plugin_apply_pending: "Applying automatically...",
     plugin_apply_applied: "Applied",
     plugin_apply_error: "Not applied: {error}",
     plugin_apply_session_ended:

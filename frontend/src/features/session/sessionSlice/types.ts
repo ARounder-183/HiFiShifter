@@ -389,6 +389,15 @@ export interface SessionState {
         playbackTarget: string | null;
         playbackPositionSec: number;
         playbackDurationSec: number;
+        /**
+         * 最近一次播放采样是不是**宿主在回答**（后端 `host_authoritative`）。
+         *
+         * 【为什么它必须进状态】轮询节奏此前只看 `isPlaying` —— 而那是前端镜像，
+         * 起播那一瞬还是 false。于是采样停在 400 ms，光标只能一格一格地挪
+         * （"跳到位之后卡一会儿"）。`host_authoritative` 一旦为真，采样节奏就必须
+         * 跟上宿主，与"谁认为在播"无关。
+         */
+        hostAuthoritative: boolean;
         gpuBackend: string;
     };
 

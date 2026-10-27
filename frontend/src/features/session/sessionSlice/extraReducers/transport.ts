@@ -196,6 +196,9 @@ export function registerTransport(builder: ActionReducerMapBuilder<SessionState>
             // 时引擎保持 is_playing=true 但位置冻结，等待渲染完成后自动
             // 开始/继续播放。旧后端不带此字段 → 视为 false。
             const nextWaitingForRender = nextIsPlaying && Boolean(payload.waiting_for_render);
+            // 轮询节奏的唯一依据（见 `runtime.hostAuthoritative`）：它回答"这份位置
+            // 是不是宿主给的"，与"谁认为在播"无关。
+            state.runtime.hostAuthoritative = Boolean(payload.host_authoritative);
 
             // 原地等待采样：保持播放态、光标冻结 —— 不做时延外推（位置
             // 并未前进，外推会让光标按 IPC 时延缓慢漂移）、不改写

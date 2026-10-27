@@ -2172,7 +2172,6 @@ export const koKR = {
 
     // ── 플러그인 호스트의 자동 적용 상태（상태 표시줄 칩）─────────────
     plugin_apply_waiting_host: "호스트 오디오 대기 중",
-    plugin_apply_pending: "자동 적용 중...",
     plugin_apply_applied: "적용됨",
     plugin_apply_error: "적용되지 않음: {error}",
     plugin_apply_session_ended:

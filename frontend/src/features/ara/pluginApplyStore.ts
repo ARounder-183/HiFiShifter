@@ -48,6 +48,19 @@ export interface PluginApplyState {
      */
     analysis_pending?: boolean;
     /**
+     * 状态栏**唯一**该读的字段：你听到的是不是当前编辑。
+     *
+     * 【为什么它取代了 `pending` 与 `rendering_active`】两者回答的都是"后台在忙吗"，
+     * 而用户问的是"我听到的对不对"。旧实现把「内务工作」（素材物化、后台快照刷新）
+     * 也算进 `pending`，于是播放一开始就弹「正在自动应用…」—— 而用户此刻什么都没改。
+     * 那句文案名不副实，而且它出现得太频繁，用户学会了忽略它；等到真的需要它的时候
+     * （编辑后长时间不生效）也就看不见了。
+     *
+     * 四态：`preparing`（还没有可服务的输出）/ `stale`（听到的是旧版本）/
+     * `awaiting-analysis`（在等分析）/ `current`（就是当前编辑）。
+     */
+    audible_state?: "preparing" | "stale" | "awaiting-analysis" | "current";
+    /**
      * 本实例的运行形态（`"capture"` / `"ara"`）。
      *
      * 【为什么不能只读 bootstrap 的 `hostKind`】bootstrap 是窗口创建那一刻算的，而形态
@@ -111,6 +124,9 @@ function sameState(a: PluginApplyState | null, b: PluginApplyState | null): bool
         a.rendering_active === b.rendering_active &&
         a.render_audible_stale === b.render_audible_stale &&
         a.analysis_pending === b.analysis_pending &&
+        // 【为什么必须在比较表里】`publish` 在"内容相同"时保留旧引用，订阅者因此
+        // 不会重渲染。漏掉一个字段 ⇒ 它的每一次变化都被判成"没变" ⇒ 界面停在旧读数。
+        a.audible_state === b.audible_state &&
         a.error === b.error
     );
 }

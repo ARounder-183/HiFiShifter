@@ -562,6 +562,7 @@ function AppInner() {
     const error = useAppSelector((state) => state.session.error);
 
     const runtimeIsPlaying = useAppSelector((state) => state.session.runtime.isPlaying);
+    const hostAuthoritative = useAppSelector((state) => state.session.runtime.hostAuthoritative);
     const runtimeHasSynthesized = useAppSelector((state) => state.session.runtime.hasSynthesized);
     const toolMode = useAppSelector((state) => state.session.toolMode);
     const drawToolMode = useAppSelector((state) => state.session.drawToolMode);
@@ -3559,7 +3560,12 @@ function AppInner() {
         // 每 400ms 造一次本地失败（闸门挡掉了 IPC，但定时器本身仍在空转），并让状态栏
         // 持续闪一条没有意义的错误。
         if (sessionEnded) return;
-        const intervalMs = runtimeIsPlaying ? 33 : 400;
+        // 【为什么"宿主受控"就够了】`runtimeIsPlaying` 是**前端镜像**，起播那一瞬它
+        // 还是 false（第一次采样甚至还没回来）—— 于是轮询停在 400 ms，光标只能一格
+        // 一格地挪，这就是"跳到位之后卡一会儿"里那个"一会儿"的直接来源。
+        // `host_authoritative` 说的是"位置来自宿主"，它一旦为真，采样节奏就必须跟上
+        // 宿主（33 ms）；播放与否交给后端去答。
+        const intervalMs = runtimeIsPlaying || hostAuthoritative ? 33 : 400;
         const id = window.setInterval(() => {
             // 阻塞式前台预渲染（target="original"）阶段后端还未真正进入 playing，
             // 若此时同步会把前端"准备播放"状态误判为停止，导致 stop 锚点丢失。
@@ -3608,7 +3614,7 @@ function AppInner() {
                 });
         }, intervalMs);
         return () => window.clearInterval(id);
-    }, [dispatch, runtimeIsPlaying, rendering.blocking, sessionEnded]);
+    }, [dispatch, runtimeIsPlaying, hostAuthoritative, rendering.blocking, sessionEnded]);
 
     useEffect(() => {
         if (!recordingActive || !recordingSettings.autoStopAtSelectionEnd) return;

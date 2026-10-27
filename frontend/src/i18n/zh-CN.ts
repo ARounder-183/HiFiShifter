@@ -2123,7 +2123,6 @@ export const zhCN = {
 
     // ── 插件宿主的自动应用状态（状态栏片）───────────────────────────
     plugin_apply_waiting_host: "等待宿主音频",
-    plugin_apply_pending: "正在自动应用...",
     plugin_apply_applied: "已应用",
     plugin_apply_error: "尚未应用：{error}",
     plugin_apply_session_ended: "本次编辑会话已结束。请关闭并重新打开插件窗口后继续。",

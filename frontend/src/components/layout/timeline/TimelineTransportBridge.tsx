@@ -38,21 +38,27 @@ export const TimelineTransportBridge = React.memo(function TimelineTransportBrid
             playheadSec: state.session.playheadSec,
             playheadSampledAtMs: state.session.playheadSampledAtMs,
             isPlaying: state.session.runtime.isPlaying,
-            playbackWaitingForRender: state.session.runtime.playbackWaitingForRender,
-            playbackPositionSec: state.session.runtime.playbackPositionSec,
         }),
         // 无 shallowEqual 时每次 dispatch 都产生新对象引用，
         // 该桥接组件会在任意 store 更新（含 33Hz 播放轮询）时重渲染。
         shallowEqual,
     );
 
-    // 原地等待渲染（位置冻结）期间不得推进视觉插值：否则 RAF 会以 1x 从
-    // 冻结前锚点持续外推整个等待时长，恢复采样到达时光标大幅回跳
-    // （往复跳动的根源）。positionSec 条件是等待标志缺省时的兼容兜底。
-    const isTransportAdvancing =
-        transport.isPlaying &&
-        !transport.playbackWaitingForRender &&
-        transport.playbackPositionSec > 1e-4;
+    /*
+     * 【光标必须满足的唯一不变量】只要宿主说在播放，光标就按 1x 前进；宿主的位置
+     * 读数只用来**纠偏**，不用来决定"要不要前进"。
+     *
+     * 旧判据有三个开关：`isPlaying`、`!playbackWaitingForRender`、
+     * `playbackPositionSec > 1e-4`。而这三个都可能在**起播那一瞬**短暂为假：
+     *   * 第一次采样带回位置时 `is_playing` 仍是 false（或在 0 秒）；
+     *   * 预渲染守卫把 `playbackWaitingForRender` 置真几百毫秒。
+     * 于是光标"跳到位 → 冻住 → 再一格一格地走"—— 正是用户报的那条。
+     *
+     * 【为什么去掉"等待渲染"这一条也不违反原来的约束】不变量说"宿主在播就前进"，
+     * 而"我听到的是旧音频"是另一件事（状态栏的 `stale`）。把光标停住并不能让音频
+     * 变新，只会让用户以为播放停了 —— 而音频其实在响。
+     */
+    const isTransportAdvancing = transport.isPlaying;
 
     useVisualPlayhead({
         syncedPlayheadSec: transport.playheadSec,
