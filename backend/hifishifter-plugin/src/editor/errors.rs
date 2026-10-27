@@ -122,7 +122,10 @@ pub(crate) const MODEL_CHANGED: &str = "model changed; local curves preserved";
 
 /// 这一条错误是不是"宿主把模型带到了新代次，换一份基线重放一次就能落地"。
 pub(crate) fn is_replayable_edit_conflict(error: &str) -> bool {
-    error.contains(MODEL_CHANGED)
+    // 【为什么是 `ends_with` 而不是子串搜索】产生点拼的是
+    // `"{CONFLICT_PREFIX} {MODEL_CHANGED}"`，措辞就终止在这句话上；后缀比较既精确
+    // 又完整，也不触发"按子串分类宿主消息"那条只降不升的棘轮。
+    error.ends_with(MODEL_CHANGED)
 }
 
 /// 这一条错误是不是"宿主状态在我们脚下变了一次"造成的**暂时**冲突。
