@@ -347,7 +347,8 @@ impl TransportClock {
             return;
         }
         // 请求时刻的播放位必须快照下来：停止态的定位不该让光标自己走起来。
-        self.seek_playing.store(self.current_playing(), Ordering::Release);
+        self.seek_playing
+            .store(self.current_playing(), Ordering::Release);
         self.seek_target
             .store(target_sec.to_bits(), Ordering::Release);
         self.seek_at_ms.store(now_ms(), Ordering::Release);
@@ -362,7 +363,9 @@ impl TransportClock {
         }
         let target = f64::from_bits(self.seek_target.load(Ordering::Acquire));
         if (observed_sec - target).abs() <= SEEK_SETTLE_EPS_SEC {
-            let _ = self.seek_at_ms.compare_exchange(at, 0, Ordering::AcqRel, Ordering::Acquire);
+            let _ = self
+                .seek_at_ms
+                .compare_exchange(at, 0, Ordering::AcqRel, Ordering::Acquire);
         }
     }
 
@@ -827,9 +830,11 @@ mod tests {
         assert_eq!(view.position_sec, 0.0, "渲染进度不得充当播放位置");
         assert_eq!(view.provenance, Provenance::Stale);
         // 块停了 ⇒ 播放位也必须停（否则光标会在停播后继续前漂）。
-        assert!(!clock
-            .read_view_at(t0 + PREFETCH_PLAYING_STALE_MS + 1)
-            .playing);
+        assert!(
+            !clock
+                .read_view_at(t0 + PREFETCH_PLAYING_STALE_MS + 1)
+                .playing
+        );
     }
 
     /// 每个读数都要能说出自己是谁给的。

@@ -194,7 +194,8 @@ impl NativeHost {
 
     /// 宿主节拍此刻挂着吗。
     pub(crate) fn host_timer_attached(&self) -> bool {
-        self.host_timer_ok.load(std::sync::atomic::Ordering::Acquire)
+        self.host_timer_ok
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// 再试一次挂载宿主节拍（幂等；5 秒退避）。
@@ -203,7 +204,10 @@ impl NativeHost {
     /// 而"节拍没挂上"的后果是**每次宿主调用白等 250 ms 再熔断** —— 光标不跟手、
     /// 清单不刷新，全都长这个样子。视图定时器是唯一还会跑的节拍，让它每 5 秒补一次。
     pub(crate) fn ensure_host_timer(&self) {
-        if self.host_timer_ok.load(std::sync::atomic::Ordering::Acquire) {
+        if self
+            .host_timer_ok
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
             return;
         }
         let Some(register) = self.plugin_register else {
@@ -265,7 +269,10 @@ impl NativeHost {
 /// 析构时把宿主节拍摘掉 —— 回调指针指向本模块的代码，模块卸载后再被调用就是崩溃。
 impl Drop for NativeHost {
     fn drop(&mut self) {
-        if self.host_timer_held.swap(false, std::sync::atomic::Ordering::AcqRel) {
+        if self
+            .host_timer_held
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
             host_timer::release();
         }
     }

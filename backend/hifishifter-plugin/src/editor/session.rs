@@ -2604,7 +2604,8 @@ impl EditorSession {
     pub(super) fn playback_state(&self) -> Value {
         let clock = self.host_clock();
         let view = clock.as_ref().map(|clock| clock.read_view());
-        let (position, playing) = view.map_or((0., false), |view| (view.position_sec, view.playing));
+        let (position, playing) =
+            view.map_or((0., false), |view| (view.position_sec, view.playing));
         self.note_playhead_sample(playing);
         self.note_transport_stall(position, playing);
         let mut payload = json!({"ok":true,"is_playing":playing,"waiting_for_render":false,
@@ -6940,7 +6941,10 @@ fn adopt_view_into_timeline(
         return;
     }
     for (root, projected) in params {
-        let entry = timeline.params_by_root_track.entry(root.clone()).or_default();
+        let entry = timeline
+            .params_by_root_track
+            .entry(root.clone())
+            .or_default();
         // 【只换曲线】几何变了不等于素材变了：`pitch_orig_key` / `dyn_orig_key` /
         // `pending_pitch_offset` 是会话自己的记账，一起换掉会让分析每次都判"缓存失效"，
         // 于是一次拖动就触发一轮重分析。
@@ -6964,4 +6968,114 @@ fn adopt_view_into_timeline(
     timeline
         .params_by_root_track
         .retain(|root, _| params.contains_key(root));
+}
+
+#[cfg(test)]
+mod projection_adoption_tests {
+    use super::adopt_view_into_timeline;
+    use hifishifter_kernel::state::{TimelineState, TrackParamsState};
+    use std::collections::BTreeMap;
+
+    fn params(edit: &[f32]) -> TrackParamsState {
+        TrackParamsState {
+            pitch_edit: edit.to_vec(),
+            ..Default::default()
+        }
+    }
+
+    fn projection(entries: &[(&str, TrackParamsState)]) -> BTreeMap<String, TrackParamsState> {
+        entries
+            .iter()
+            .map(|(root, value)| ((*root).to_owned(), value.clone()))
+            .collect()
+    }
+
+    /// **不变量：重投影的曲线必须落到 GUI 读的那份数组上。**
+    ///
+    /// 【为什么钉死】这是"锁定参数线：移动 item 不跟随"的直接回归。设计上
+    /// `refresh_ui_geometry` 是"几何变了"的第二个写点，而它此前只把结果存进
+    /// `loaded.view`，GUI 读的 `timeline.params_by_root_track` 一个字都没变。
+    #[test]
+    fn a_reprojected_curve_replaces_what_the_gui_reads() {
+        let mut timeline = TimelineState::default();
+        timeline
+            .params_by_root_track
+            .insert("root".to_owned(), params(&[1.0, 1.0, 1.0]));
+        adopt_view_into_timeline(&mut timeline, &projection(&[("root", params(&[2.0, 2.0]))]));
+        assert_eq!(
+            timeline.params_by_root_track["root"].pitch_edit,
+            vec![2.0, 2.0],
+            "投影给出的曲线必须当场成为 GUI 的曲线"
+        );
+    }
+
+    /// **不变量：换曲线不换会话记账。**
+    ///
+    /// 【为什么】`pitch_orig_key` / `dyn_orig_key` 是"这条原线算的是哪份素材"的凭据。
+    /// 一次拖动把它们清掉，等于每次移动 item 都重跑一遍神经分析。
+    #[test]
+    fn adopting_a_projection_keeps_the_session_bookkeeping() {
+        let mut timeline = TimelineState::default();
+        let mut existing = params(&[1.0]);
+        existing.pitch_orig_key = Some("pitch-key".into());
+        existing.dyn_orig_key = Some("dyn-key".into());
+        existing.pending_pitch_offset = Some(vec![0.5]);
+        timeline
+            .params_by_root_track
+            .insert("root".to_owned(), existing);
+        adopt_view_into_timeline(&mut timeline, &projection(&[("root", params(&[3.0]))]));
+        let adopted = &timeline.params_by_root_track["root"];
+        assert_eq!(adopted.pitch_edit, vec![3.0]);
+        assert_eq!(adopted.pitch_orig_key.as_deref(), Some("pitch-key"));
+        assert_eq!(adopted.dyn_orig_key.as_deref(), Some("dyn-key"));
+        assert_eq!(adopted.pending_pitch_offset, Some(vec![0.5]));
+    }
+
+    /// **不变量：一轮空投影不清空用户看得见的曲线。**
+    ///
+    /// 【为什么】身份表还没跟上时投影会一个根都不给。整份替换会把曲线一次性抹掉，
+    /// 而下一轮未必立刻回来 —— 用户看到的是"参数线忽然全没了"。
+    #[test]
+    fn an_empty_projection_leaves_the_visible_curves_alone() {
+        let mut timeline = TimelineState::default();
+        timeline
+            .params_by_root_track
+            .insert("root".to_owned(), params(&[4.0, 5.0]));
+        adopt_view_into_timeline(&mut timeline, &BTreeMap::new());
+        assert_eq!(
+            timeline.params_by_root_track["root"].pitch_edit,
+            vec![4.0, 5.0]
+        );
+    }
+
+    /// **不变量：投影里消失的根不再留在界面上。**
+    #[test]
+    fn a_root_that_left_the_projection_leaves_the_timeline() {
+        let mut timeline = TimelineState::default();
+        timeline
+            .params_by_root_track
+            .insert("gone".to_owned(), params(&[1.0]));
+        timeline
+            .params_by_root_track
+            .insert("kept".to_owned(), params(&[1.0]));
+        adopt_view_into_timeline(&mut timeline, &projection(&[("kept", params(&[2.0]))]));
+        assert!(!timeline.params_by_root_track.contains_key("gone"));
+        assert!(timeline.params_by_root_track.contains_key("kept"));
+    }
+
+    /// **不变量：派生曲线不会被一轮"还没分析完"的投影抹掉。**
+    #[test]
+    fn a_projection_without_derived_curves_keeps_the_ones_already_computed() {
+        let mut timeline = TimelineState::default();
+        let mut existing = params(&[1.0]);
+        existing.pitch_orig = vec![7.0, 7.0];
+        existing.dyn_orig = vec![0.5, 0.5];
+        timeline
+            .params_by_root_track
+            .insert("root".to_owned(), existing);
+        adopt_view_into_timeline(&mut timeline, &projection(&[("root", params(&[2.0]))]));
+        let adopted = &timeline.params_by_root_track["root"];
+        assert_eq!(adopted.pitch_orig, vec![7.0, 7.0]);
+        assert_eq!(adopted.dyn_orig, vec![0.5, 0.5]);
+    }
 }

@@ -747,7 +747,9 @@ const TRANSPORT_HEARTBEAT: std::time::Duration = std::time::Duration::from_milli
 fn push_transport(state: &Rc<RefCell<EditorClient>>) {
     let link = state.borrow().link.clone();
     let Ok(owner) = link.owner() else { return };
-    let Some(clock) = owner.host_clock() else { return };
+    let Some(clock) = owner.host_clock() else {
+        return;
+    };
     let view = clock.read_view();
     let due = {
         let state = state.borrow();

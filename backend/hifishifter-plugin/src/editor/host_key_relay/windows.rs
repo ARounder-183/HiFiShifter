@@ -19,10 +19,10 @@ use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetFocus, MapVirtualKeyW, SendInput, SetFocus, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-    KEYBD_EVENT_FLAGS, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, MAPVK_VK_TO_VSC, VIRTUAL_KEY, VK_ADD,
-    VK_BACK, VK_CONTROL, VK_DECIMAL, VK_DELETE, VK_DIVIDE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME,
-    VK_INSERT, VK_LEFT, VK_MENU, VK_MULTIPLY, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT,
-    VK_SPACE, VK_SUBTRACT, VK_TAB, VK_UP,
+    KEYBD_EVENT_FLAGS, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, MAPVK_VK_TO_VSC, VIRTUAL_KEY,
+    VK_ADD, VK_BACK, VK_CONTROL, VK_DECIMAL, VK_DELETE, VK_DIVIDE, VK_DOWN, VK_END, VK_ESCAPE,
+    VK_HOME, VK_INSERT, VK_LEFT, VK_MENU, VK_MULTIPLY, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT,
+    VK_SHIFT, VK_SPACE, VK_SUBTRACT, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetAncestor, GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId, IsChild,
@@ -450,8 +450,8 @@ impl FocusLoan {
             .then_some(target_thread);
             let _ = SetFocus(Some(target));
             let focused = GetFocus();
-            let landed = !focused.0.is_null()
-                && (focused == target || IsChild(target, focused).as_bool());
+            let landed =
+                !focused.0.is_null() && (focused == target || IsChild(target, focused).as_bool());
             if !landed {
                 if let Some(thread) = attached {
                     let _ = AttachThreadInput(current, thread, false);
@@ -577,6 +577,40 @@ mod tests {
             alt: false,
             meta: false,
         }
+    }
+
+    /// **不变量：记下来的"上一个宿主焦点窗口"优先于主窗口。**
+    ///
+    /// 【为什么钉死】VEGAS 的日志证明目标**已经是**主窗口（`class=Vegas.Class.Frame`）
+    /// 却仍然 `no-response` —— 说明"投给谁"还有一层没用上：用户按键之前正在用的那个
+    /// 宿主窗口。这个句柄本来就记着（`WM_KILLFOCUS` 的 wParam），此前没有投递路径用过。
+    ///
+    /// 句柄 0 与非法句柄必须落回 `RootOwner`，而不是"投进虚空"。
+    #[test]
+    fn a_missing_previous_focus_falls_back_to_the_root_owner() {
+        let editor = HWND(std::ptr::null_mut());
+        let host = HWND(std::ptr::dangling_mut::<core::ffi::c_void>());
+        assert_eq!(
+            keyboard_target(editor, host, None).unwrap().1,
+            TargetKind::RootOwner
+        );
+        let stranger = HWND(std::ptr::without_provenance_mut(2));
+        assert_eq!(
+            keyboard_target(editor, host, Some(stranger)).unwrap().1,
+            TargetKind::RootOwner,
+            "认不出来的句柄必须被拒绝，而不是当成目标"
+        );
+    }
+
+    /// **不变量：租不到焦点就不注入，而且不留下任何状态。**
+    ///
+    /// 【为什么钉死】`FocusLoan` 是 RAII：失败路径必须自己把 `AttachThreadInput` 解掉。
+    /// 这里用非法句柄走一遍失败分支 —— 它同时证明"拿不到焦点时返回 None"这条契约。
+    #[test]
+    fn a_focus_loan_is_refused_when_the_target_is_not_a_window() {
+        let editor = HWND(std::ptr::null_mut());
+        let target = HWND(std::ptr::without_provenance_mut(2));
+        assert!(FocusLoan::take(editor, target).is_none());
     }
 
     /// **不变量：lParam 的位域逐位正确。**

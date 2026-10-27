@@ -253,7 +253,13 @@ pub(crate) enum RejectReason {
     RateLimited,
     /// 这个键不在键表里 —— 让不成立，调用方应回落旧文案。
     UnsupportedKey,
-    /// 带修饰键 —— 让不成立，调用方应回落旧文案。
+    /// 带修饰键，且**本平台**只有合成路径（它不能忠实转交组合键）。
+    ///
+    /// 【为什么它现在没有构造点】原语自己按保真度裁决（见 `windows::escape` 的两条路），
+    /// 状态机不再替它拒绝。这个变体保留在词汇里，是因为**别的平台**（`Unavailable` /
+    /// 未来的合成-only 平台）仍可能据此回一句"这个组合键送不出去" —— 删掉它会让那句
+    /// 话失去唯一的类型化出口。
+    #[allow(dead_code)]
     ModifiedKey,
 }
 
@@ -703,12 +709,17 @@ impl Arbiter {
     /// 记下"合成对这个键不管用"。返回是否**新增**（用于只打一次日志）。
     fn escalate(&mut self, code: KeyCode, now: Instant) -> bool {
         self.expire_injected(now);
-        if self.injected.contains_key(&code) {
-            self.injected.insert(code, now);
-            return false;
+        match self.injected.entry(code) {
+            // 已经升级过：只刷新时刻（延长它自己的有效期），不重复记日志。
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                entry.insert(now);
+                false
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(now);
+                true
+            }
         }
-        self.injected.insert(code, now);
-        true
     }
 
     fn expire_injected(&mut self, now: Instant) {
@@ -1025,6 +1036,57 @@ mod tests {
         let unbound = arbiter.on_unbound(later, stroke);
         assert_eq!(unbound.verdict, KeyVerdict::Accepted);
         assert_eq!(escaped(&unbound.effects), 1);
+    }
+
+    /// **不变量：升级只作用于**那一个**失败过的键。**
+    ///
+    /// 【为什么按码而不是全局】一次误判（宿主当时正忙 / 弹了模态框）不该让**所有**
+    /// 键都改走更贵的注入路径 —— 焦点租借是有代价的。按码记账，代价就只落在真正
+    /// 出问题的那个键上。
+    #[test]
+    fn escalation_is_scoped_to_the_key_that_failed() {
+        let start = Instant::now();
+        let mut arbiter = Arbiter::new(Fidelity::Synthetic);
+        arbiter.on_key(start, "playback.toggle", bare("Space"), playing(true));
+        // 90 ms 探针：宿主没动 ⇒ 让一次（进入观察窗）。
+        assert_eq!(
+            traces(&tick_for(&mut arbiter, start, 120, playing(true))),
+            vec!["relayed"]
+        );
+        // 400 ms 观察窗到期：宿主仍没动 ⇒ 记账 + 升级。
+        let timeout = tick_for(
+            &mut arbiter,
+            start + Duration::from_millis(120),
+            460,
+            playing(true),
+        );
+        assert_eq!(traces(&timeout), vec!["no-response", "escalate"]);
+        assert!(arbiter.prefers_injected(code("Space")));
+        assert!(
+            !arbiter.prefers_injected(code("F2")),
+            "别的键不该为这一次失败买单"
+        );
+    }
+
+    /// **不变量：升级不会在记完之后立刻消失。**
+    ///
+    /// 【为什么只钉这一条】记账用的是真实时钟（`prefers_injected` 内部取
+    /// `Instant::now`），过期时间 120 s —— 测试里既不能等，也不该改系统时间。
+    /// 这里钉的是"刚记下就一定生效"，过期由 `ESCALATION_TTL` 的常量本身表达。
+    #[test]
+    fn an_escalation_survives_the_next_lookup() {
+        let start = Instant::now();
+        let mut arbiter = Arbiter::new(Fidelity::Synthetic);
+        arbiter.on_key(start, "playback.toggle", bare("Space"), playing(true));
+        tick_for(&mut arbiter, start, 120, playing(true));
+        tick_for(
+            &mut arbiter,
+            start + Duration::from_millis(120),
+            460,
+            playing(true),
+        );
+        assert!(arbiter.prefers_injected(code("Space")));
+        assert!(arbiter.prefers_injected(code("Space")));
     }
 
     /// **不变量：未绑定的键直接投，不付探针的 90 ms，也不进观察窗。**
