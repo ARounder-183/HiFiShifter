@@ -231,6 +231,12 @@ impl ExtensionOwner {
             // 它们都是"渲染进度"，不是"播放位置"。
             if mode == 0 {
                 clock.update(context);
+            } else if mode == 1 {
+                // 【为什么 prefetch 只投"播不播"这一票】它的位置是渲染进度（领先
+                // 播放头约 1~1.5 秒），但 kPlaying 位与 realtime 块同源。把两者拆开
+                // 之后，ARA 形态下的编辑器实例终于有了一个可信的播放位 —— 它的音频
+                // 块恒为零，而宿主采样只在 REAPER 这类宿主里存在。
+                clock.observe_prefetch_playing(context.state & (1 << 1) != 0);
             }
         }
     }

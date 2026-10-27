@@ -1025,6 +1025,23 @@ impl ExtensionOwner {
         // "我们多久没成功采过样"不需要任何授权：它是本侧的时钟事实。把"记录需求"
         // 与"执行动作"分开之后，随后的枚举仍会被原来的 gating 拦下（正确），
         // 但恢复需求已经被记下来了，下一次 stamp 可用时会真正执行。
+        // 【T-R4】宿主节拍没挂上时，任何**非宿主线程**的宿主调用都要白等 250 ms
+        // 再熔断 —— 光标不跟手、清单不刷新，全都长这个样子。视图定时器是唯一还会
+        // 跑的节拍，让它补一次（`ensure_host_timer` 自带 5 s 退避，幂等）。
+        if let Some(host) = self.native_host() {
+            host.ensure_host_timer();
+            // 【为什么这条是 WARN】节拍没挂上时，每次宿主调用都要白等 250 ms 再熔断 ——
+            // 光标不跟手、清单不刷新，全都长这个样子。限流器保证稳态下最多一行。
+            if !host.host_timer_attached() {
+                hifishifter_kernel::log_limiter::emit_limited_key(
+                    log::Level::Warn,
+                    "reaper.timer-missing",
+                    format_args!(
+                        "[reaper-host] the host timer is not attached; host calls run on the view thread and may wait up to 250 ms each"
+                    ),
+                );
+            }
+        }
         self.heal_stale_inventory_stamp();
         // 【T23】视图定时器是"宿主不再回调"时唯一还会跑的节拍：在这里提出收口请求。
         self.request_settle_if_overdue();
@@ -1092,9 +1109,37 @@ impl ExtensionOwner {
                 .as_ref()
                 .is_some_and(|stamp| self.host_query_authorized(stamp));
             if stamp.is_none() || authorized {
-                if let Ok((position, playing)) = host.sample(|| stamp.is_none()) {
-                    if let Some(clock) = self.clock.get() {
-                        clock.publish_host(position, playing);
+                // 【授权闭包必须**真的**问授权】`sample` 在一次调用里要过 3~6 次闭包
+                // （`checked` 在每次宿主调用前后各问一次）。此前这里写的是
+                // `|| stamp.is_none()` —— 只要文档存在就恒为假 ⇒ ARA 形态下
+                // `publish_host` 一次都不执行，光标永远冻住，而且**完全静默**。
+                //
+                // 现在闭包里只做原子读与弱引用判活，不枚举宿主绑定：50 Hz 下那会把
+                // 一次 20 ms 的心跳拖成 200 ms（而正确性只需要"这份盖戳还有效"）。
+                let allowed = || match &stamp {
+                    None => true,
+                    Some((document, revision, scope, _)) => sample_allowed(
+                        Some((*revision, *scope)),
+                        Some((
+                            document.is_alive(),
+                            document.revision.load(Ordering::Acquire),
+                            document.scope_revision.load(Ordering::Acquire),
+                        )),
+                    ),
+                };
+                match host.sample(allowed) {
+                    Ok((position, playing)) => {
+                        // 【为什么是 `host_clock` 而不是 `self.clock`】ARA 下两者碰巧是
+                        // 同一个 `Arc`（见 `bind_to_document`），但读路径走的是文档时钟
+                        // （`EditorSession::host_clock`）。取值只留一处，两个答案就不会漂移。
+                        if let Some(clock) = self.host_clock() {
+                            clock.publish_host(position, playing);
+                        }
+                    }
+                    Err(error) => {
+                        if let Some(clock) = self.host_clock() {
+                            clock.note_sample_failure(&error);
+                        }
                     }
                 }
             }
@@ -1681,5 +1726,51 @@ impl ExtensionOwner {
         if prepare_fades {
             stamp.0.invalidate_render_input();
         }
+    }
+}
+
+/// 一次宿主采样是否被允许（**纯判据**，不碰宿主、不取锁）。
+///
+/// `document` = 采样开始时那枚盖戳 (revision, scope)；`now` = 此刻的 (alive, revision, scope)。
+///
+/// 【为什么要抽成纯函数】上一轮的回归正是这一句写错了（只要有文档就恒拒），而它藏在
+/// `host.sample(|| …)` 的闭包里 —— 任何需要真宿主的用例都很难覆盖到。纯函数让
+/// "有文档时必须允许"变成一条当场可钉的断言。
+fn sample_allowed(document: Option<(u64, u64)>, now: Option<(bool, u64, u64)>) -> bool {
+    match (document, now) {
+        (None, _) => true,
+        (Some((revision, scope)), Some((alive, now_revision, now_scope))) => {
+            alive && revision == now_revision && scope == now_scope
+        }
+        (Some(_), None) => false,
+    }
+}
+
+#[cfg(test)]
+mod transport_gate_tests {
+    use super::sample_allowed;
+
+    /// **不变量：有文档时采样必须被允许。**
+    ///
+    /// 【为什么钉死】`cafdc1d3` 把授权闭包写成了"没有文档才允许"，于是 ARA 形态下
+    /// （一定**有**文档）一次宿主采样都不会发生 —— 播放光标因此彻底停摆，而日志里
+    /// 一个字都没有。这条断言在旧实现上会直接失败。
+    #[test]
+    fn a_document_makes_the_host_sample_authorized() {
+        assert!(sample_allowed(Some((7, 3)), Some((true, 7, 3))));
+    }
+
+    /// 采样期间宿主改了模型或范围 ⇒ 这一次读数不再可信。
+    #[test]
+    fn a_gate_that_moved_during_the_sample_is_refused() {
+        assert!(!sample_allowed(Some((7, 3)), Some((true, 8, 3))));
+        assert!(!sample_allowed(Some((7, 3)), Some((true, 7, 4))));
+        assert!(!sample_allowed(Some((7, 3)), Some((false, 7, 3))));
+    }
+
+    /// 没有文档（Capture / 未绑定）时仍然允许：那是唯一还能读到宿主位置的形态。
+    #[test]
+    fn a_sample_without_a_document_is_allowed() {
+        assert!(sample_allowed(None, None));
     }
 }

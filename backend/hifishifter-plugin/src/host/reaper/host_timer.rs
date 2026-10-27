@@ -51,7 +51,15 @@ extern "C" fn host_timer_tick() {
 }
 
 /// 注册节拍（引用计数 +1）。重复注册同一实例不会重复挂载。
-pub(super) fn acquire(register: PluginRegister) {
+///
+/// 返回 `true` = **本次调用真的加了一个引用**（调用方析构时必须配对 `release`）；
+/// 返回 `false` = 没挂上（宿主拒绝），或本来就不是本次挂的 —— 两种情况下调用方
+/// 都不该在析构时减计数。
+///
+/// 【为什么要区分】自愈会反复调用它（见 `NativeHost::ensure_host_timer`）。若"宿主
+/// 拒绝"也计一次引用，几次重试之后 `live` 就永远回不到 0，节拍照样没挂上却再也不会
+/// 被摘 —— 一个安静的双重错误。
+pub(super) fn acquire(register: PluginRegister) -> bool {
     let mut state = TIMERS.lock_or_recover();
     state.register = Some(register);
     if state.live == 0 {
@@ -65,11 +73,17 @@ pub(super) fn acquire(register: PluginRegister) {
                 "[reaper-host] the host refused the timer registration; \
                  the pump stays on the view callbacks only (the playhead will not follow)"
             );
-            return;
+            return false;
         }
         log::warn!("[reaper-host] host-thread pump attached to the host timer");
     }
     state.live += 1;
+    true
+}
+
+/// 节拍此刻是否挂着（不论是谁挂的）。
+pub(super) fn attached() -> bool {
+    TIMERS.lock_or_recover().live > 0
 }
 
 /// 注销节拍（引用计数 -1）。计数归零才真正从宿主那里摘掉。

@@ -171,8 +171,14 @@ pub(crate) struct NativeHost {
     /// 记录新条目时先丢掉所有索引大于它的旧记录，于是"用户回退后再编辑"造成的重编号
     /// 不会留下错位的时间。宿主的自有条目（不是本插件创建的）没有时间，读作 `null`。
     undo_entry_times: std::sync::Mutex<std::collections::BTreeMap<i32, u64>>,
-    /// 本实例是否真的把节拍挂上了（只有挂上过才在析构时摘）。
-    host_timer: bool,
+    /// 本实例**持有**一个节拍引用（只有它为真时才在析构里减计数）。
+    host_timer_held: std::sync::atomic::AtomicBool,
+    /// 节拍此刻是否挂着（不论是谁挂的）。`refresh_host_transport_tick` 读它决定要不要自愈。
+    host_timer_ok: std::sync::atomic::AtomicBool,
+    /// 挂节拍用的宿主入口（`plugin_register`）；`None` = 宿主没提供，自愈无从谈起。
+    plugin_register: Option<PluginRegister>,
+    /// 下一次允许重试挂节的时刻（退避，避免 50 Hz 地撞宿主）。
+    host_timer_retry_at: std::sync::Mutex<Option<std::time::Instant>>,
     /// 到这个时刻（Unix 毫秒）之前不再尝试投递 —— 见 `on_host` 的熔断说明。
     host_unreachable_until: std::sync::atomic::AtomicU64,
 }
@@ -184,6 +190,51 @@ impl NativeHost {
     /// 同一个宿主接口重建适配器"；没有这个读数就只能猜。
     pub(crate) fn bound_thread(&self) -> std::thread::ThreadId {
         self.thread
+    }
+
+    /// 宿主节拍此刻挂着吗。
+    pub(crate) fn host_timer_attached(&self) -> bool {
+        self.host_timer_ok.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// 再试一次挂载宿主节拍（幂等；5 秒退避）。
+    ///
+    /// 【为什么需要它】`acquire` 只在 `from_context` 里调用一次，失败就只剩一行 WARN。
+    /// 而"节拍没挂上"的后果是**每次宿主调用白等 250 ms 再熔断** —— 光标不跟手、
+    /// 清单不刷新，全都长这个样子。视图定时器是唯一还会跑的节拍，让它每 5 秒补一次。
+    pub(crate) fn ensure_host_timer(&self) {
+        if self.host_timer_ok.load(std::sync::atomic::Ordering::Acquire) {
+            return;
+        }
+        let Some(register) = self.plugin_register else {
+            return;
+        };
+        {
+            let mut next = self
+                .host_timer_retry_at
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let now = std::time::Instant::now();
+            if next.is_some_and(|at| now < at) {
+                return;
+            }
+            *next = Some(now + std::time::Duration::from_secs(5));
+        }
+        // 【为什么先看"别人挂没挂"】节拍是进程级的：另一个实例可能已经挂上了。
+        // 那时我们只需要知道"泵在跑"，不需要也不应该再持一个引用（否则析构时会
+        // 把别人的节拍摘掉 —— 见 `host_timer::acquire` 的返回值约定）。
+        if host_timer::attached() {
+            self.host_timer_ok
+                .store(true, std::sync::atomic::Ordering::Release);
+            return;
+        }
+        if host_timer::acquire(register) {
+            self.host_timer_held
+                .store(true, std::sync::atomic::Ordering::Release);
+            self.host_timer_ok
+                .store(true, std::sync::atomic::Ordering::Release);
+            log::warn!("[reaper-host] host-thread pump re-attached by the view timer");
+        }
     }
 
     /// 宿主用哪一套淡化轴（`Some(true)` = 7.81+ 的连续 curvature/S 两轴）。
@@ -214,8 +265,7 @@ impl NativeHost {
 /// 析构时把宿主节拍摘掉 —— 回调指针指向本模块的代码，模块卸载后再被调用就是崩溃。
 impl Drop for NativeHost {
     fn drop(&mut self) {
-        if self.host_timer {
-            self.host_timer = false;
+        if self.host_timer_held.swap(false, std::sync::atomic::Ordering::AcqRel) {
             host_timer::release();
         }
     }
@@ -592,16 +642,18 @@ impl NativeHost {
         let plugin_register = lookup!(c"plugin_register", PluginRegister);
         // 【为什么要在这里挂节拍】`from_context` 只在宿主的 model/UI 线程上被调用
         // （`setActive` / 初始化），而 `plugin_register` 的注册动作本身要求宿主线程。
-        let host_timer = match plugin_register {
-            Some(register) => {
-                host_timer::acquire(register);
-                true
-            }
+        let host_timer_held = match plugin_register {
+            Some(register) => host_timer::acquire(register),
             None => false,
         };
         Some(Self {
             _interface: interface,
-            host_timer,
+            host_timer_held: std::sync::atomic::AtomicBool::new(host_timer_held),
+            host_timer_ok: std::sync::atomic::AtomicBool::new(
+                host_timer_held || host_timer::attached(),
+            ),
+            plugin_register,
+            host_timer_retry_at: std::sync::Mutex::new(None),
             host_unreachable_until: std::sync::atomic::AtomicU64::new(0),
             thread: std::thread::current().id(),
             project: std::sync::atomic::AtomicUsize::new(project as usize),

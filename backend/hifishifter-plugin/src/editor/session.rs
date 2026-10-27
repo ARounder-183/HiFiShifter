@@ -399,6 +399,8 @@ pub(crate) struct EditorSession {
     render_requested: AtomicBool,
     /// 播放位置采样的节奏读数（见 `note_playhead_sample`）。
     playhead_gaps: Mutex<PlayheadGaps>,
+    /// "在播、但位置一秒没动"的观测起点（见 `note_transport_stall`）。
+    transport_stall: Mutex<Option<(f64, Instant)>>,
     /// `pending` 持续为真的起点；不 pending 时为 `None`（诊断用）。
     pending_since: Mutex<Option<Instant>>,
     /// 本段 pending 是否已经报过 —— 每段只报一次，避免把诊断变成刷屏。
@@ -647,6 +649,7 @@ impl EditorSession {
             render_error: Mutex::new(None),
             render_requested: AtomicBool::new(false),
             playhead_gaps: Mutex::new(PlayheadGaps::default()),
+            transport_stall: Mutex::new(None),
             pending_since: Mutex::new(None),
             pending_reported: AtomicBool::new(false),
             render_task: Mutex::new(None),
@@ -2175,12 +2178,36 @@ impl EditorSession {
             if let (Ok(view), Ok(versions)) =
                 (document.workspace_view(), document.editor_versions())
             {
-                let mut loaded = self.loaded.lock_or_recover();
-                if loaded.initialized {
-                    loaded.view = Some(view);
-                    loaded.edit = versions.0;
-                    loaded.model = versions.1;
-                    loaded.scope = versions.2;
+                let initialized = {
+                    let mut loaded = self.loaded.lock_or_recover();
+                    let initialized = loaded.initialized;
+                    if initialized {
+                        loaded.view = Some(view.clone());
+                        loaded.edit = versions.0;
+                        loaded.model = versions.1;
+                        loaded.scope = versions.2;
+                    }
+                    initialized
+                };
+                if initialized {
+                    // 【写点 B 的实体】视图重建了，就必须落到 **GUI 读的那份数组** 上。
+                    //
+                    // 少这一句，"移动 item" 只会把 clip 挪走、把曲线留在原地（用户
+                    // 报的"参数线不跟随"）；而"分割"因为推进了 edit/scope、走了
+                    // 整份重载，看起来又是对的 —— 两条路径在这里分叉。
+                    let roots = {
+                        let mut timeline = self.timeline.lock_or_recover();
+                        adopt_view_into_timeline(&mut timeline, view.params.as_ref());
+                        timeline.params_by_root_track.len()
+                    };
+                    hifishifter_kernel::log_limiter::emit_limited_key(
+                        log::Level::Warn,
+                        "ara.projection",
+                        format_args!(
+                            "[ara] projection epoch={} roots={roots}",
+                            self.ui_geometry_version.load(Ordering::Acquire)
+                        ),
+                    );
                 }
             }
         }
@@ -2543,9 +2570,19 @@ impl EditorSession {
 
     /// GUI读取真实宿主时钟，不驱动独立设备；未收到process上下文时保留本地查看游标。
     pub(super) fn transport(&self) -> (f64, bool) {
-        self.host_clock()
-            .map(|clock| clock.read())
-            .unwrap_or_else(|| (self.timeline.lock_or_recover().playhead_sec, false))
+        match self.host_clock() {
+            Some(clock) => {
+                let view = clock.read_view();
+                // 【为什么 Stale 要退回本地游标】残值是"上一次观测"，不是"现在在哪"；
+                // 把它当位置发出去，等于让一次时间线刷新把光标拽回一个已经过期的点。
+                // 本地查看游标至少是用户自己放的位置（与"没有时钟"同一处置）。
+                if view.provenance == crate::render::transport::Provenance::Stale && !view.playing {
+                    return (self.timeline.lock_or_recover().playhead_sec, false);
+                }
+                (view.position_sec, view.playing)
+            }
+            None => (self.timeline.lock_or_recover().playhead_sec, false),
+        }
     }
     /// 新淡化轴只装饰发给原GUI的JSON，不进入算法状态、撤销历史或音频缓存键。
     pub(super) fn decorate_host_fades(&self, payload: &mut Value) {
@@ -2560,20 +2597,72 @@ impl EditorSession {
         }
     }
     /// 只读宿主原子时钟；重合成阻塞actor时UI仍取得新鲜播放态，不借编辑timeline锁。
+    ///
+    /// 【为什么载荷要带 `position_source`】"位置是 0"有四种含义（见 `Provenance`），
+    /// 而界面上它们都画成同一条竖线。把来源与年龄一起交出去之后，下一次现场不必再
+    /// 从"光标不动"反推是宿主没给、还是我们没读。
     pub(super) fn playback_state(&self) -> Value {
         let clock = self.host_clock();
-        let (position, playing) = clock
-            .as_ref()
-            .map(|clock| clock.read())
-            .unwrap_or((0., false));
+        let view = clock.as_ref().map(|clock| clock.read_view());
+        let (position, playing) = view.map_or((0., false), |view| (view.position_sec, view.playing));
         self.note_playhead_sample(playing);
-        json!({"ok":true,"is_playing":playing,"waiting_for_render":false,
+        self.note_transport_stall(position, playing);
+        let mut payload = json!({"ok":true,"is_playing":playing,"waiting_for_render":false,
             "target":if playing {Some("synthesized")} else {None},"base_sec":0.,
             "position_sec":position,"duration_sec":f64::from_bits(self.project_duration.load(Ordering::Acquire)),
             // 【为什么如实报而不是恒真】这个字段的语义是"上面那个位置来自宿主"。
             // Capture 形态下时钟来自 owner（同样是宿主写入的），因此也为真；
             // 两条都没有时它是假 —— 前端据此知道那个 0 不是"宿主在 0"。
-            "host_authoritative":clock.is_some()})
+            "host_authoritative":clock.is_some()});
+        if let Some(view) = view {
+            payload["position_source"] = json!(view.provenance.as_str());
+            payload["position_age_ms"] = json!(view.age_ms);
+            payload["seek_pending"] = json!(view.seek_pending);
+        }
+        payload
+    }
+
+    /// 播放中位置长时间不动 ⇒ 留一份可归因的读数。
+    ///
+    /// 【为什么需要它】"光标卡住"有三种成因：来源停摆、来源一直在给同一个值、
+    /// 前端没消费。日志里三者同形，而这一行把**来源 + 年龄 + 定位窗口**直接写出来。
+    /// 限流由 `emit_limited_key` 负责，因此稳态下最多每 10 s 一行。
+    fn note_transport_stall(&self, position: f64, playing: bool) {
+        if !playing {
+            *self.transport_stall.lock_or_recover() = None;
+            return;
+        }
+        let now = Instant::now();
+        let stalled = {
+            let mut stall = self.transport_stall.lock_or_recover();
+            match stall.as_mut() {
+                Some((last, since)) if (*last - position).abs() < 1e-4 => {
+                    if now.duration_since(*since) < Duration::from_secs(1) {
+                        false
+                    } else {
+                        *since = now;
+                        true
+                    }
+                }
+                _ => {
+                    *stall = Some((position, now));
+                    false
+                }
+            }
+        };
+        if !stalled {
+            return;
+        }
+        if let Some(clock) = self.host_clock() {
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "transport.stuck",
+                format_args!(
+                    "[transport] the playhead has not moved for over a second while the host is playing: {}",
+                    clock.diagnostics()
+                ),
+            );
+        }
     }
     /// 播放位置采样的节奏读数（诊断）。
     ///
@@ -6833,4 +6922,46 @@ mod host_selection_tests {
         drop(model);
         editor.close();
     }
+}
+
+/// 把一份重投影结果落到 GUI 读的那份数组上（**唯一**落地点）。
+///
+/// 【为什么必须存在】`timeline.params_by_root_track` 是 `commands::payload` 交给
+/// 前端的那份数组，而重投影的结果住在 `WorkspaceView.params` 里。两者之间此前
+/// **没有任何一行代码** —— 于是"几何变了"只在模型提交（分割 / 撤销）那一刻被看见，
+/// 纯粹的移动永远等不到。
+fn adopt_view_into_timeline(
+    timeline: &mut TimelineState,
+    params: &std::collections::BTreeMap<String, TrackParamsState>,
+) {
+    if params.is_empty() {
+        // 这一轮投影一个根都没给出（身份表还没跟上）。整份清空会把用户看得见的
+        // 曲线一次性抹掉，而下一轮未必立刻回来 —— 什么都不做才是安全的那一侧。
+        return;
+    }
+    for (root, projected) in params {
+        let entry = timeline.params_by_root_track.entry(root.clone()).or_default();
+        // 【只换曲线】几何变了不等于素材变了：`pitch_orig_key` / `dyn_orig_key` /
+        // `pending_pitch_offset` 是会话自己的记账，一起换掉会让分析每次都判"缓存失效"，
+        // 于是一次拖动就触发一轮重分析。
+        entry.frame_period_ms = projected.frame_period_ms;
+        entry.pitch_edit = projected.pitch_edit.clone();
+        entry.tension_edit = projected.tension_edit.clone();
+        entry.extra_curves = projected.extra_curves.clone();
+        // 派生曲线（原线 / 原声基线）只在投影确实给出内容、或本地本来就是空的时候
+        // 才覆盖：否则一次"分析还没跑完"的投影会把已经算好的波形抹掉。
+        if !projected.pitch_orig.is_empty() || entry.pitch_orig.is_empty() {
+            entry.pitch_orig = projected.pitch_orig.clone();
+        }
+        if !projected.tension_orig.is_empty() || entry.tension_orig.is_empty() {
+            entry.tension_orig = projected.tension_orig.clone();
+        }
+        if !projected.dyn_orig.is_empty() || entry.dyn_orig.is_empty() {
+            entry.dyn_orig = projected.dyn_orig.clone();
+        }
+    }
+    // 投影里不再存在的根（片段被删）不该继续留在 UI 上。
+    timeline
+        .params_by_root_track
+        .retain(|root, _| params.contains_key(root));
 }
