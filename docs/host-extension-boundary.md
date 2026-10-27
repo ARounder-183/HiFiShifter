@@ -91,6 +91,16 @@
 取消裁剪能完整恢复曲线（裁剪不缩短权威里的源曲线）。
 「锁定参数线」决定参数跟着**素材**走（源域锚定，默认）还是留在**工程位置**（工程域锚定）。
 
+> **它什么时候生效**：放置策略（`Placement`）决定"用哪条映射"，而**几何代次**
+> （`ui_geometry_revision`）决定"映射到哪"。两者都必须在**投影**时读同一份几何，
+> 开关才是一个真正的开关。此前的实现只在模型收口（`remap_and_log`）那一刻重投影，
+> 而"在宿主里拖动一个 item"既不改 edit 也不改 model —— 于是曲线停住，只有分割
+> （它推进了 edit/scope、走整份重载）才让曲线跟上。现在清单刷新
+> （`refresh_ui_geometry`）也会把重投影结果落到 GUI 读的那份数组上
+> （`adopt_view_into_timeline`），并且**只换曲线**：`pitch_orig_key` /
+> `dyn_orig_key` / `pending_pitch_offset` 是会话自己的记账，换掉它们会让每次拖动
+> 都触发一轮重分析。
+
 **persistentID 的生命周期必须跟着搬权威**：宿主改名（`updateAudioModificationProperties`）、
 整份 / 部分存档恢复时的 ID 重映射，都要同步把权威表搬过去，否则曲线被孤儿化。
 宿主动销毁 modification 时权威**不立即删**（撤销会把同一个 ID 带回来），

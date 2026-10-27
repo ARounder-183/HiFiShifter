@@ -139,3 +139,71 @@ plugin156项；后续Verify流水线被中止，不能称整条Verify成功。
 - 倒放的读→写→读往返（残差 < 1e-6）；
 - 倒放 + 循环源的往返；
 - 两个候选轴取残差最小的那个。
+
+## 后续更新（2026-10-27，传输权威与让路保真度）
+
+这一轮修的是**四条互相独立的断链**，每一条都能在旧日志里指认。
+
+### 播放光标：谁给的读数
+
+- **ARA 形态下的宿主采样曾完全停摆**：`refresh_host_transport_inner` 把授权闭包
+  写成了 `|| stamp.is_none()`，而 `NativeHost::sample` 在每次宿主调用前后都要问它。
+  只要文档存在（ARA 一定存在），闭包恒假 ⇒ `publish_host` 一次都没执行，且**静默**。
+  现场日志的指纹是 `[playhead]` 采样为 **0 条**（同一天的 VEGAS 会话有 3106 个
+  `playing=1` 的实时块）。
+- 现在每个读数都带来源（`position_source`: `host` / `block` / `seek` / `stale`）、
+  年龄（`position_age_ms`）与定位窗口（`seek_pending`）。**"位置是 0" 的四种含义
+  从此可以分开。**
+- **定位有"未落地窗口"**：`request_seek` 在投递之前记下意图，宿主报回的位置落进
+  `±0.25 s` 才关闭，最长 1 s。于是"跳过去又被拽回来"在源头不可能发生 ——
+  前端不再需要猜"该压住采样多久"。
+- **prefetch 块只能投"播不播"**：它的 `kPlaying` 与 realtime 块同源，而位置是渲染
+  进度。把两者拆开之后，编辑器实例（不处理音频）终于有了一个可信的播放位。
+- **推送优先**：视图定时器每拍读一次原子时钟，变了就发一条 `transport` 事件
+  （≤50 Hz + 200 ms 心跳）。轮询在插件形态退化为 400 ms 看门狗。
+
+### 锁定参数线：几何代次是投影的输入
+
+- 设计上"几何变了"有两个写点：`remap_and_log`（模型收口）与 `refresh_ui_geometry`
+  （清单刷新）。第二个写点**算对了然后丢掉了** —— 它调 `workspace_view()` 拿到重投影
+  结果，却只存进 `loaded.view`，而 GUI 读的是 `timeline.params_by_root_track`。
+- 于是：**移动 item 不跟随**（不推进 edit/model/scope），**分割后才跟随**（推进了
+  edit/scope，走整份重载）。
+- 现在 `adopt_view_into_timeline` 把重投影落到 GUI 那份数组上，并且**只换曲线**。
+
+### 非 ARA 宿主：让路的两级证据
+
+- VEGAS 一次会话里四次 `[relay] ... target=root-owner class=Vegas.Class.Frame ... no-response`
+  —— 目标**已经是**主窗口，仍然没反应。说明缺的不是目标，是**通道**：
+  `PostMessage` 只把消息塞进窗口队列，绕过宿主的输入分发、线程键状态与焦点判定。
+- 新增两级：目标多一档 `previous-focus`（`WM_KILLFOCUS` 的 wParam，本来就记着），
+  通道多一档 `Injected`（`SendInput` + RAII 焦点租借）。合成失败一次之后，**同一个键**
+  的下一次直接走注入（120 s 内有效）。
+- 带修饰的组合键**不再一律拒绝**：合成会送出一个错键，注入不会。
+
+### 真机验收（本轮新增）
+
+| 宿主 | 步 | 期望 | 证据 |
+|---|---|---|---|
+| REAPER | 播放 | 光标跟着走 | `[playhead] samples: gap_p95 < 40ms` |
+| REAPER | 拖动播放头 | 光标立即跟上 | `[transport] trace … src=host` |
+| REAPER | 插件内 seek（播放中） | 跳过去就停在那 | `src=seek` → `src=host`，无回跳 |
+| REAPER | 移动 item（锁开） | 曲线跟着走 | `[ara] projection epoch=… roots=…` |
+| REAPER | 关锁再移动 | 曲线留在原位 | 同上，位置不变 |
+| VEGAS | Space | 宿主播放/暂停 | `[relay] target=previous-focus class=…` + `fidelity=injected` |
+| VEGAS | Ctrl+Z | 宿主撤销 | 同上，`code=KeyZ` |
+
+三条必须留下的读数（缺一条就说明那一环没走到）：
+
+    [transport] trace … src=host …          （或 sample-failed，二选一）
+    [relay] target=previous-focus class=… fidelity=injected relayed
+    [ara] projection epoch=<ui_geometry_revision> roots=<n>
+
+### 仍未做（本轮诚实清单）
+
+- `HostFacts` 的**完整**结构（单一写者 + 清单/ARA 冲突裁决）仍不存在；本轮只补了
+  "几何代次 → 视图"这条边。
+- 升级表的键是 (宿主, 键) 里的**键**，不是 (窗口类名, 键)：一个进程只有一个宿主，
+  两者在实际中等价，但类型上少一维。
+- `SendInput` 的焦点租借在"宿主失焦即关闭 FX 窗"的宿主上可能让窗口闪一下；
+  目前只在**合成已被证明无效**之后才走这条路。
