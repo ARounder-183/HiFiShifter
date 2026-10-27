@@ -763,14 +763,16 @@ fn unexplained_removals(
         }
         // 这一帧被删掉了。现在要两条证据。
         let source_sec = (old.first_frame + index) as f64 * old.frame_ms / 1000.;
-        let explained = current.source_to_project(source_sec).is_some_and(|project_sec| {
-            let frame = project_sec * 1000. / frame_ms;
-            let prior = baseline.map(|view| sample_project_frames(view, frame, key));
-            let now = sample_project_frames(client, frame, key);
-            // 证据①：当前是默认值。证据②：基线不是默认值。
-            (now - pad_value).abs() <= 1e-6
-                && prior.is_some_and(|prior| (prior - pad_value).abs() > 1e-6)
-        });
+        let explained = current
+            .source_to_project(source_sec)
+            .is_some_and(|project_sec| {
+                let frame = project_sec * 1000. / frame_ms;
+                let prior = baseline.map(|view| sample_project_frames(view, frame, key));
+                let now = sample_project_frames(client, frame, key);
+                // 证据①：当前是默认值。证据②：基线不是默认值。
+                (now - pad_value).abs() <= 1e-6
+                    && prior.is_some_and(|prior| (prior - pad_value).abs() > 1e-6)
+            });
         if !explained {
             unexplained += 1;
         }
@@ -1025,7 +1027,6 @@ impl ParameterAtlas {
             },
         );
     }
-
 
     /// 有界回收**孤儿权威**：它的 modification 已不在文档图里。
     ///
@@ -1509,11 +1510,14 @@ impl ParameterAtlas {
                 Placement::FollowMaterial => Placement::FollowMaterial,
                 Placement::PinProject { .. } => match (params.placement.clone(), geometry) {
                     // 已经有冻结几何 ⇒ 保留它：来回拨开关不该把"钉在哪"悄悄改掉。
-                    (Placement::PinProject { frozen: Some(frozen) }, _) => {
+                    (
                         Placement::PinProject {
                             frozen: Some(frozen),
-                        }
-                    }
+                        },
+                        _,
+                    ) => Placement::PinProject {
+                        frozen: Some(frozen),
+                    },
                     // 第一次钉住 / 旧存档没有冻结几何 ⇒ 用此刻的几何。
                     (_, Some(geometry)) => Placement::pinned(geometry),
                     // 没有任何活几何可钉：保留"待冻结"状态，下一次拿到几何时补上。
@@ -1527,7 +1531,6 @@ impl ParameterAtlas {
         }
         changed
     }
-
 
     /// 把旧存档里的 per-clip 记录折算进权威表（幂等）。
     ///
@@ -1842,7 +1845,12 @@ impl ParameterAtlas {
         identities: &BTreeMap<String, RegionIdentity>,
         previous_view: &BTreeMap<String, TrackParamsState>,
     ) -> Result<Self, String> {
-        self.capture_changes_reporting(timeline, identities, previous_view, &mut CaptureReport::default())
+        self.capture_changes_reporting(
+            timeline,
+            identities,
+            previous_view,
+            &mut CaptureReport::default(),
+        )
     }
     /// 与 [`Self::capture_changes`] 相同，但把**读数**交回调用方。
     ///
@@ -2149,7 +2157,8 @@ impl ParameterAtlas {
                     continue;
                 }
                 if let Some(before) = authority_curve.map(|curve| non_default_values(&key, curve)) {
-                    report.removed_frames += before.saturating_sub(non_default_values(&key, &curve));
+                    report.removed_frames +=
+                        before.saturating_sub(non_default_values(&key, &curve));
                 }
                 curves.insert(key, curve);
             }
@@ -2959,7 +2968,6 @@ pub(crate) fn placement_from_settings() -> Option<Placement> {
 fn default_placement() -> Placement {
     placement_for_lock(true)
 }
-
 
 pub(crate) fn geometry(clip: &hifishifter_kernel::state::Clip) -> Result<RegionGeometry, String> {
     // Loop 有自己的回绕锚点语义，不适用"窗口终点递减"模型；沿用既有的正放近似。
@@ -4738,7 +4746,12 @@ mod tests {
 
         // 锁定（跟随素材）：片段从 [1,2) 移到 [3,4)，曲线跟着走。
         let mut locked = ParameterAtlas::default();
-        locked.seed_test_pitch_curve_placed("mod:mod", 250., curve.clone(), Placement::FollowMaterial);
+        locked.seed_test_pitch_curve_placed(
+            "mod:mod",
+            250.,
+            curve.clone(),
+            Placement::FollowMaterial,
+        );
         let moved = locked.project(&host(3., 1., 0., 1.), &ids).unwrap();
         assert_eq!(
             &moved["clip"].pitch_edit[12..16],
@@ -4748,12 +4761,7 @@ mod tests {
 
         // 不锁定（钉在 [1,2) 那份几何上）：移走之后新位置是空的。
         let mut unlocked = ParameterAtlas::default();
-        unlocked.seed_test_pitch_curve_placed(
-            "mod:mod",
-            250.,
-            curve.clone(),
-            pinned_at(1., 1.),
-        );
+        unlocked.seed_test_pitch_curve_placed("mod:mod", 250., curve.clone(), pinned_at(1., 1.));
         let moved = unlocked.project(&host(3., 1., 0., 1.), &ids).unwrap();
         assert_eq!(
             &moved["clip"].pitch_edit[12..16],
@@ -4779,7 +4787,6 @@ mod tests {
             reversed: false,
         })
     }
-
 
     /// **投影按权威自己的放置策略解释曲线，而不是按调用方传进来的"当前设置"。**
     ///
@@ -4854,15 +4861,10 @@ mod tests {
 
         // 拨到"不锁定"：只改元数据（冻结几何 = 此刻的 [1,2)），数据不动。
         let timeline = host(1., 1., 0., 1.);
-        let changed = atlas.set_placement(
-            &timeline,
-            &ids,
-            &Placement::PinProject { frozen: None },
-        );
+        let changed = atlas.set_placement(&timeline, &ids, &Placement::PinProject { frozen: None });
         assert_eq!(changed, 1, "必须有一条权威被改");
         assert_eq!(
-            atlas.authorities["mod:mod"].curves["pitch_edit"].values,
-            original.values,
+            atlas.authorities["mod:mod"].curves["pitch_edit"].values, original.values,
             "拨开关不得改动任何一个采样"
         );
 
@@ -4884,12 +4886,10 @@ mod tests {
         let back = atlas.project(&host(1., 1., 0., 1.), &ids).unwrap();
         assert_eq!(&back["clip"].pitch_edit[4..8], &[60., 62., 64., 66.]);
         assert_eq!(
-            atlas.authorities["mod:mod"].curves["pitch_edit"].values,
-            original.values,
+            atlas.authorities["mod:mod"].curves["pitch_edit"].values, original.values,
             "来回拨开关必须逐帧回到原样"
         );
     }
-
 
     /// **投影必须把"权威持有音高曲线"翻译成内核的"用户数据"标记。**
     ///
@@ -5305,11 +5305,7 @@ mod tests {
 
         let before = followed.authorities["mod:mod"].curves.clone();
         let mut unlocked = followed;
-        unlocked.set_placement(
-            &halves,
-            &half_ids,
-            &Placement::PinProject { frozen: None },
-        );
+        unlocked.set_placement(&halves, &half_ids, &Placement::PinProject { frozen: None });
         assert!(
             unlocked.authorities["mod:mod"]
                 .curves
@@ -5373,7 +5369,9 @@ mod tests {
         );
 
         // 片段移走后，钉住的曲线留在工程 [1,2)：新位置读出默认值。
-        let moved = atlas.project(&host(3., 1., 0., 2.), &ids).expect("投影必须成功");
+        let moved = atlas
+            .project(&host(3., 1., 0., 2.), &ids)
+            .expect("投影必须成功");
         assert_eq!(
             &moved["clip"].pitch_edit[12..16],
             &[0., 0., 0., 0.],
@@ -5455,9 +5453,7 @@ mod tests {
         for frame in 4..=8 {
             erased.pitch_edit[frame] = 0.;
         }
-        timeline
-            .params_by_root_track
-            .insert("a".to_owned(), erased);
+        timeline.params_by_root_track.insert("a".to_owned(), erased);
         let mut report = CaptureReport::default();
         let after_atlas = atlas
             .capture_changes_reporting(&timeline, &ids, &baseline, &mut report)
@@ -5469,7 +5465,11 @@ mod tests {
             "擦除必须真的写回（窗口内五格）：{before} -> {after}"
         );
         assert_eq!(report.removed_frames, 5, "读数必须如实记下被删的帧数");
-        assert!(!report.has_refusals(), "用户擦除不该被拒绝：{}", report.summary());
+        assert!(
+            !report.has_refusals(),
+            "用户擦除不该被拒绝：{}",
+            report.summary()
+        );
         // 下一次投影：视图与权威一致（不会"切屏之后又回来"）。
         let reprojected = after_atlas.project(&timeline, &ids).expect("投影必须成功");
         // 【为什么只看 4..=7】音高这一路的插值有一条规矩：一侧为 0 时取另一侧的值
@@ -5587,4 +5587,3 @@ mod tests {
         );
     }
 }
-

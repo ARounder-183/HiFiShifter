@@ -300,10 +300,7 @@ impl TransportClock {
             // 于是"宿主说在播、光标却冻住"—— 用户看到的是"跳到位之后卡一会儿"。
             // 反过来错一次（宿主已经停了、我们多前进几毫秒）代价小得多：下一拍采样
             // 就把位置纠回来，而"该走的时候不走"是看得见的卡顿。
-            return (
-                f64::from_bits(pose & !1),
-                pose & 1 != 0 || audio_playing,
-            );
+            return (f64::from_bits(pose & !1), pose & 1 != 0 || audio_playing);
         }
         (
             f64::from_bits(self.position.load(Ordering::Acquire)),

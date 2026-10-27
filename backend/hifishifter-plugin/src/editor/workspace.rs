@@ -846,9 +846,7 @@ impl DocumentSession {
                             g.source_start_sec,
                             end,
                         )
-                        .or_else(|| {
-                            hifishifter_kernel::take_geometry::ForwardWindow::new(0., 0.)
-                        })
+                        .or_else(|| hifishifter_kernel::take_geometry::ForwardWindow::new(0., 0.))
                         .expect("a zero window is always valid")
                     });
                     let built = serde_json::from_value::<hifishifter_kernel::state::Clip>(
@@ -2222,11 +2220,8 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
             // 这条不变量说的是"同一份宿主读数进出解算一圈不变"，那是读路径的性质。
             if let (Some(host), Some(window)) = (item_facts.host.as_ref(), host_window) {
                 if item_facts.reversed {
-                    let axis = hifishifter_kernel::take_geometry::take_axis_sec(
-                        host.section,
-                        media,
-                        None,
-                    );
+                    let axis =
+                        hifishifter_kernel::take_geometry::take_axis_sec(host.section, media, None);
                     let residual = hifishifter_kernel::take_geometry::roundtrip_residual(
                         window,
                         axis,
@@ -2318,10 +2313,7 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
     /// 的最小落地：清单侧先做，ARA 侧仍由 `remap_and_log` 供值）。
     ///
     /// 返回被改动的 clip 条数。
-    pub(crate) fn project_host_item_geometry_locked(
-        &self,
-        timeline: &mut TimelineState,
-    ) -> usize {
+    pub(crate) fn project_host_item_geometry_locked(&self, timeline: &mut TimelineState) -> usize {
         let items: std::collections::HashMap<String, (f64, f64)> = self
             .ui_tracks
             .lock_or_recover()

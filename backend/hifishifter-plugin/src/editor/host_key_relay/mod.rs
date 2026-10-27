@@ -635,7 +635,11 @@ impl Arbiter {
     /// 不是"宿主没动"。下结论会把一次没看见记成"宿主不处理这个键"（或反之），
     /// 而那正是本模块最贵的一类错误。作废之后下一次按键重新探针一次即可。
     fn settle_expired(&mut self, now: Instant) {
-        if self.pending.as_ref().is_some_and(|pending| now >= pending.deadline) {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| now >= pending.deadline)
+        {
             self.pending = None;
         }
     }

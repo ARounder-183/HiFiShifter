@@ -127,17 +127,17 @@ impl EditHealth {
     }
 }
 
-    /// 一次存档合入的结论。
-    ///
-    /// 【为什么要把"还在等"与"失败"分开】宿主的图在重开工程时是**逐块**长出来的：
-    /// 存档到达时 region 往往还没交付。那时身份对不上不是失败，而是"还没长成"。
-    /// 两种结论的处置相反：一个必须留着载荷再试，一个必须报出来。
-    pub(crate) enum RestoreMerge {
-        /// 已合入（`edits` 已更新）。
-        Merged,
-        /// 还缺东西（宿主图未重建 / fade 元数据在途），载荷必须留着下次再试。
-        Waiting(String),
-    }
+/// 一次存档合入的结论。
+///
+/// 【为什么要把"还在等"与"失败"分开】宿主的图在重开工程时是**逐块**长出来的：
+/// 存档到达时 region 往往还没交付。那时身份对不上不是失败，而是"还没长成"。
+/// 两种结论的处置相反：一个必须留着载荷再试，一个必须报出来。
+pub(crate) enum RestoreMerge {
+    /// 已合入（`edits` 已更新）。
+    Merged,
+    /// 还缺东西（宿主图未重建 / fade 元数据在途），载荷必须留着下次再试。
+    Waiting(String),
+}
 
 /// 一次**已确认**分割：子段 item GUID → 它在父段播放轴上的位置。
 ///
@@ -2021,9 +2021,12 @@ impl DocumentSession {
         // 它进状态快照与诊断包，用户与支持都看得见。丢掉读数的版本（
         // `capture_changes`）只留给测试与不需要报告的调用方。
         let mut report = crate::editor::parameter_atlas::CaptureReport::default();
-        candidate.atlas = edits
-            .atlas
-            .capture_changes_reporting(client, &identities, previous_view, &mut report)?;
+        candidate.atlas = edits.atlas.capture_changes_reporting(
+            client,
+            &identities,
+            previous_view,
+            &mut report,
+        )?;
         self.note_capture_report(report);
         if rebased {
             log::info!(
@@ -2647,7 +2650,6 @@ impl DocumentSession {
         }
     }
 
-
     /// 记一次"宿主交回了存档"（证据，不是数据）。
     pub(crate) fn note_archive_restored(&self, bytes: usize) {
         self.archive_reading.lock_or_recover().restored_bytes = bytes;
@@ -2814,7 +2816,10 @@ impl DocumentSession {
             .copy_seeds
             .retain(|_, seed| !track_ids.contains(&seed.root));
         merged.atlas.copy_seeds.extend(restored.atlas.copy_seeds);
-        merged.atlas.gaps.retain(|root, _| !track_ids.contains(root));
+        merged
+            .atlas
+            .gaps
+            .retain(|root, _| !track_ids.contains(root));
         merged.atlas.gaps.extend(restored.atlas.gaps);
         let items = self.fade_items_locked(&clip_ids);
         if !merged.fades.is_empty() && items.is_empty() && !clip_ids.is_empty() {

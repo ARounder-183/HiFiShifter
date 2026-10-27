@@ -157,7 +157,6 @@ impl TakeGeometry {
         (min_bound, max_bound, self.section.is_some())
     }
 
-
     /// 方向位是否**读得到**。
     pub fn direction_known(&self) -> bool {
         self.reversed.is_some()
@@ -279,7 +278,6 @@ impl TakeGeometry {
     }
 }
 
-
 /// 倒放 take 的**镜像轴**（秒）—— 读写两侧唯一的来源。
 ///
 /// 【为什么必须只有一个来源】镜像关系是 `soffs = axis − 正向终点`。读的时候用一个轴、
@@ -303,7 +301,10 @@ pub fn take_axis_sec(
     let mut axis = f64::INFINITY;
     if let Some(section) = section {
         let start = section.start_sec.max(0.0);
-        if let Some(length) = section.length_sec.filter(|len| len.is_finite() && *len > 0.0) {
+        if let Some(length) = section
+            .length_sec
+            .filter(|len| len.is_finite() && *len > 0.0)
+        {
             axis = axis.min((start + length).max(start));
         }
     }
@@ -615,7 +616,6 @@ mod tests {
         assert!(!geometry.direction_known());
         assert_eq!(geometry.forward_source_window(), None);
     }
-
 
     /// 写回是读取的逆运算：host_start_offset(正向终点) 必须还原出宿主读数。
     #[test]

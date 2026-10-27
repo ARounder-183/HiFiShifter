@@ -24,8 +24,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetAncestor, GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId,
-    IsChild, IsWindow, IsWindowVisible, PostMessageW, SetForegroundWindow, GA_ROOT, GA_ROOTOWNER,
+    GetAncestor, GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId, IsChild,
+    IsWindow, IsWindowVisible, PostMessageW, SetForegroundWindow, GA_ROOT, GA_ROOTOWNER,
     GUITHREADINFO, WM_KEYDOWN, WM_KEYUP,
 };
 
