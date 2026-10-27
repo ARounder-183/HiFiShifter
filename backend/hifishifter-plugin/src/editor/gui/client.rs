@@ -217,6 +217,11 @@ pub(crate) struct EditorClient {
     /// 【为什么与 `replies` 分开】回执按 id 对应一次 `invoke`；这里的事件没有 id，
     /// 是"后台发生了一件事"。共用一条通道会逼前端去猜"这条到底对应哪个 promise"。
     view_events: std::collections::VecDeque<serde_json::Value>,
+    /// 上一次推给页面的传输读数（去重与心跳，见 `push_transport`）。
+    last_transport: Option<crate::render::transport::TransportView>,
+    /// 上一次推送的时刻：读数没变也按 `TRANSPORT_HEARTBEAT` 补一拍，
+    /// 让"通道还活着"本身成为可观测的事实。
+    last_transport_at: std::time::Instant,
 }
 
 /// 让路的累计读数（见 `EditorClient::relay_stats`）。
@@ -226,7 +231,7 @@ struct RelayStats {
     posted: u64,
     /// 被原语拒绝的次数，按原因分。
     refused: [u64; 6],
-    /// 成功投递时，**投给了哪一级窗口**（focus / parent / root-owner）。
+    /// 成功投递时，**投给了哪一级窗口**（focus / previous-focus / root-owner）。
     ///
     /// 【为什么必须记这个】「按了没反应」有两种成因：投给了一个不处理按键的窗口，
     /// 或者宿主根本没收到。两者在日志里同形，而修的地方相隔很远 —— 有了这一维，
@@ -487,6 +492,8 @@ impl EditorClient {
             owned: host_key_relay::OwnedStrokes::default(),
             relay_stats: RelayStats::default(),
             view_events: std::collections::VecDeque::new(),
+            last_transport: None,
+            last_transport_at: std::time::Instant::now(),
         }))
     }
 
@@ -726,6 +733,43 @@ fn push_view_event(state: &Rc<RefCell<EditorClient>>, event: &str, payload: serd
     }));
 }
 
+/// 读数没变也要补一拍的间隔。
+///
+/// 【为什么需要心跳】一条**从不出现**的事件与"通道断了"在日志里同形。200 ms 足够让
+/// 诊断看到"通道在跑"，又不会把 UI 线程变成 50 Hz 的 JSON 工厂。
+const TRANSPORT_HEARTBEAT: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// 把宿主传输**推**给页面（事件，不是回执）。
+///
+/// 【为什么是推送而不是让前端轮询】轮询是"请求-响应"：一次慢回执、一次在途去重、
+/// 一次乱序丢弃，任何一环都会变成用户看得见的一次停顿。而这份读数是**原子读**，
+/// 生产它的成本几乎为零 —— 让它跟着视图定时器走，往返时延就从链路上消失了。
+fn push_transport(state: &Rc<RefCell<EditorClient>>) {
+    let link = state.borrow().link.clone();
+    let Ok(owner) = link.owner() else { return };
+    let Some(clock) = owner.host_clock() else { return };
+    let view = clock.read_view();
+    let due = {
+        let state = state.borrow();
+        let changed = state.last_transport.is_none_or(|last| {
+            (last.position_sec - view.position_sec).abs() > 1e-3
+                || last.playing != view.playing
+                || last.provenance != view.provenance
+                || last.seek_pending != view.seek_pending
+        });
+        changed || state.last_transport_at.elapsed() >= TRANSPORT_HEARTBEAT
+    };
+    if !due {
+        return;
+    }
+    {
+        let mut state = state.borrow_mut();
+        state.last_transport = Some(view);
+        state.last_transport_at = std::time::Instant::now();
+    }
+    push_view_event(state, "transport", view.to_json());
+}
+
 /// 宽限期到了还没绑定 ⇒ 试一次「进程内唯一活实例」兜底。
 ///
 /// 【为什么必须有它】编辑器与处理器之间的身份只由宿主的 `IConnectionPoint` 握手建立
@@ -809,6 +853,7 @@ pub(crate) fn ui_tick(state: &Rc<RefCell<EditorClient>>) {
 pub(crate) fn tick(state: &Rc<RefCell<EditorClient>>) {
     ui_tick(state);
     host_heartbeat();
+    push_transport(state);
     if !state.borrow().closed {
         pump(state);
     }
@@ -1067,17 +1112,21 @@ fn apply_relay_effects(state: &Rc<RefCell<EditorClient>>, effects: Vec<host_key_
                     refuse_relay(state, &action, "owned-key");
                     continue;
                 }
-                let (fidelity, result) = {
+                let result = {
                     let mut state = state.borrow_mut();
-                    let fidelity = state.escape.fidelity();
                     // 句柄在 `WM_NCCREATE` 之后才有效；在此之前按下按键是不可能的
                     // （窗口还没显示），因此这里不做额外判空。
                     let window = state.window;
-                    let result = state.escape.escape(window, &stroke);
-                    (fidelity, result)
+                    let previous = state.previous_focus;
+                    // 【为什么偏好要在这里问】它是**按键**记账的（"合成对这个键不管用"），
+                    // 而状态机是唯一知道观察窗结论的地方。
+                    let prefer_injected = state.relay.prefers_injected(stroke.code);
+                    state
+                        .escape
+                        .escape(window, Some(previous), &stroke, prefer_injected)
                 };
                 match result {
-                    Ok(target) => {
+                    Ok((target, fidelity)) => {
                         {
                             let mut state = state.borrow_mut();
                             state.relay_stats.posted += 1;
@@ -1115,7 +1164,7 @@ fn refuse_relay(state: &Rc<RefCell<EditorClient>>, action: &str, reason: &str) {
 fn target_slot(target: host_key_relay::TargetKind) -> usize {
     match target {
         host_key_relay::TargetKind::Focus => 0,
-        host_key_relay::TargetKind::Parent => 1,
+        host_key_relay::TargetKind::PreviousFocus => 1,
         host_key_relay::TargetKind::RootOwner => 2,
     }
 }
@@ -2076,6 +2125,12 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
                 let result=(||->Result<(),String> {
                     let position=request["args"]["playheadSec"].as_f64().ok_or("invalid seek position")?;
                     let owner=link.owner()?;
+                    // 【为什么先记意图再投递】投递是异步的（宿主可能几百毫秒后才执行），
+                    // 而轮询/推送从下一拍就开始读。没有这个窗口，前端会先看到"新位置"、
+                    // 再被一条旧读数拽回去 —— 用户看到的就是"跳过去又跳回来"。
+                    if let Some(clock) = owner.host_clock() {
+                        clock.request_seek(position);
+                    }
                     // 【为什么 seek 也要投递】同一个 model 线程守卫；这条回写此前 30 次
                     // 调用全部失败，于是"点时间轴跳转"从来没有真正落到宿主上。
                     let playback=owner.host_playback().ok_or("host does not provide ARA playback control")?;

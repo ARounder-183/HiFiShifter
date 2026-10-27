@@ -28,7 +28,13 @@ impl HostKeyEscape for UnavailableEscape {
         Fidelity::Unavailable
     }
 
-    fn escape(&mut self, _window: usize, _stroke: &Stroke) -> Result<TargetKind, EscapeError> {
+    fn escape(
+        &mut self,
+        _window: usize,
+        _previous: Option<usize>,
+        _stroke: &Stroke,
+        _prefer_injected: bool,
+    ) -> Result<(TargetKind, Fidelity), EscapeError> {
         // 状态机在 Fidelity::Unavailable 下根本不会走到这里（它直接记一行日志）；保留一个
         // 明确的失败值，是为了让"忘了看 Fidelity"的新调用方也拿不到假成功。
         Err(EscapeError::NoHostWindow)
