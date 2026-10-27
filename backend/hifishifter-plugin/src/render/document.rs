@@ -42,6 +42,41 @@ pub(crate) struct WorkspaceView {
         Arc<std::collections::BTreeMap<String, hifishifter_kernel::state::TrackParamsState>>,
 }
 
+/// ARA 文档存档通道的**读数**。
+///
+/// 【为什么需要它】这条通道的四个回调此前只有 `log::info!`，而 release 的默认级别是
+/// `Warn` —— 用户机器上一条都不落盘。于是"宿主到底有没有走存档通道"这个问题在真机上
+/// **无法回答**：修法完全取决于它（存档通道 ≠ VST3 组件状态通道），而证据链在第一步
+/// 就断了。这里把同一批事实记成读数，让它同时出现在日志（限流 WARN）与诊断包里。
+///
+/// 【为什么在文档上】`storeDocumentToArchive` / `beginRestoringDocumentFromArchive`
+/// 是**文档控制器**的回调，它们的读数天然是文档级的。
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ArchiveReading {
+    /// 宿主最近一次交回来的字节数。
+    restored_bytes: usize,
+    /// 我们最近一次交给宿主的字节数。
+    stored_bytes: usize,
+    /// 最近一次保存是否走了「交回旧载荷」那条分支（I3），以及累计次数。
+    unmerged_returns: u32,
+    /// 最近一次"存档已合入"的单调毫秒（0 = 还没合入过）。
+    merged_at_ms: u64,
+}
+
+impl ArchiveReading {
+    /// 诊断包 / 状态栏读的 JSON 形状。
+    pub(crate) fn json(&self, pending: bool, pending_reason: Option<String>) -> serde_json::Value {
+        serde_json::json!({
+            "restoredBytes": self.restored_bytes,
+            "storedBytes": self.stored_bytes,
+            "unmergedReturns": self.unmerged_returns,
+            "mergedAtMs": self.merged_at_ms,
+            "pending": pending,
+            "pendingReason": pending_reason,
+        })
+    }
+}
+
 /// 一次**已确认**分割：子段 item GUID → 它在父段播放轴上的位置。
 ///
 /// 【为什么记这个】分割后的两半必须**划分**父段窗口；而父段窗口是分割前真的在响的
@@ -607,6 +642,12 @@ pub(crate) struct DocumentSession {
     /// 现在 `ready == false` 时返回这份快照；恢复到达时也会先写一份，保证
     /// "恢复后还没合入就保存"不会把编辑覆盖成空。
     pub archive_cache: Mutex<Option<Vec<u8>>>,
+    /// ARA 文档存档通道的读数（见 [`ArchiveReading`]）。
+    ///
+    /// 【为什么与 `archive_cache` 分开】那个字段是**数据**（要原样交回宿主），这个
+    /// 字段是**证据**（通道有没有被调用、交回了多少字节、合入发生在什么时候）。
+    /// 把两者混在一起，就得在读数据时顺带改证据。
+    pub archive_reading: Mutex<ArchiveReading>,
     /// ARA 变更通知队列，由 `runtime.rs` 在构建插件时注入。
     ///
     /// 【为什么必须有】宿主只保存"它知道变过"的部分。插件从不通知，只存增量的宿主
@@ -1159,10 +1200,15 @@ impl DocumentSession {
                 .iter()
                 .find_map(|owner| owner.pending_restore_bytes());
             if let Some(bytes) = cached.or(pending) {
-                log::warn!(
-                    "[ara] archive store returns the unmerged payload ({} byte(s)); the saved \
-                     parameters are preserved instead of being replaced by the in-memory state",
-                    bytes.len()
+                self.note_archive_unmerged(bytes.len());
+                hifishifter_kernel::log_limiter::emit_limited_key(
+                    log::Level::Warn,
+                    "ara.archive.unmerged-returned",
+                    format_args!(
+                        "[ara] archive store returns the unmerged payload ({} byte(s)); the saved \
+                         parameters are preserved instead of being replaced by the in-memory state",
+                        bytes.len()
+                    ),
                 );
                 return Ok(bytes);
             }
@@ -1205,6 +1251,7 @@ impl DocumentSession {
         match edits.encode() {
             Ok(bytes) => {
                 *self.archive_cache.lock_or_recover() = Some(bytes.clone());
+                self.note_archive_stored(bytes.len());
                 Ok(bytes)
             }
             Err(error) => {
@@ -1248,6 +1295,7 @@ impl DocumentSession {
         // 此时若宿主再保存一次，旧实现会用空 `edits` 重编码并覆盖 cache —— 磁盘上
         // 从此只剩默认值。先把原始字节存下来，`encode_archive` 才有东西可以还回去。
         *self.archive_cache.lock_or_recover() = Some(bytes.to_vec());
+        self.note_archive_restored(bytes.len());
         let mut restored = crate::state_channel::EditState::default();
         // 【为什么解码失败也只记日志】宿主把 `beginRestoringDocumentFromArchive`
         // 的失败当成"整份文档恢复失败"：region 不再交付、界面永远停在
@@ -2455,6 +2503,52 @@ impl DocumentSession {
             owner.refresh_host_state_for_model();
             owner.prepare();
         }
+    }
+
+
+    /// 记一次"宿主交回了存档"（证据，不是数据）。
+    pub(crate) fn note_archive_restored(&self, bytes: usize) {
+        self.archive_reading.lock_or_recover().restored_bytes = bytes;
+    }
+
+    /// 记一次"我们交给宿主一份存档"。
+    pub(crate) fn note_archive_stored(&self, bytes: usize) {
+        self.archive_reading.lock_or_recover().stored_bytes = bytes;
+    }
+
+    /// 记一次"这次保存交回的是**旧载荷**"（I3 分支）。
+    ///
+    /// 【为什么必须计数而不是只打日志】它是"编辑落不了盘"的唯一直接证据。用户报的
+    /// "编辑了也白忙活"就是它连续发生；一个累计数让"偶发"与"一直"在诊断包里可分。
+    pub(crate) fn note_archive_unmerged(&self, bytes: usize) {
+        let mut reading = self.archive_reading.lock_or_recover();
+        reading.unmerged_returns = reading.unmerged_returns.saturating_add(1);
+        reading.stored_bytes = bytes;
+    }
+
+    /// 记一次"存档已合入"。
+    pub(crate) fn note_archive_merged(&self) {
+        self.archive_reading.lock_or_recover().merged_at_ms = Self::monotonic_ms();
+    }
+
+    /// 存档通道的读数（诊断包与状态栏共用）。
+    pub(crate) fn archive_reading(&self) -> serde_json::Value {
+        let pending = self.pending_archive_restore.lock_or_recover().is_some()
+            || self
+                .renderer_owners()
+                .iter()
+                .any(|owner| owner.has_pending_restore());
+        let reason = self
+            .pending_archive_restore
+            .lock_or_recover()
+            .as_ref()
+            .map(|_| "document-payload-not-merged".to_owned())
+            .or_else(|| {
+                self.renderer_owners()
+                    .iter()
+                    .find_map(|owner| owner.restore_pending_reason())
+            });
+        self.archive_reading.lock_or_recover().json(pending, reason)
     }
 
     /// 是否还有一份**没合入**的持久化载荷（文档级 ARA 存档或任一实例的组件状态）。

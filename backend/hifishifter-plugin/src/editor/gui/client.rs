@@ -1733,6 +1733,11 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
                     "audioSlowBlockPeakMs":crate::vst3::audio_slow_block_stats().1,
                     "renderers":document.as_ref().map(|document|document.renderer_diagnostics())
                         .unwrap_or_else(||serde_json::json!([])),
+                    // ARA 文档存档通道的读数：宿主有没有调用它、交回/交出了多少字节、
+                    // 有没有"交回旧载荷"、"合入"发生在什么时候。没有这一块，
+                    // "编辑重开后消失"在诊断包里就只剩一段沉默。
+                    "araRestore":document.as_ref().map(|document|document.archive_reading())
+                        .unwrap_or(serde_json::Value::Null),
                     // 慢车道状态：报障时"有一条长任务卡在这里"是最难从日志猜出来的
                     // 事实，让它随诊断包一起走。
                     "slowLane":crate::editor::slow_lane::snapshot(),

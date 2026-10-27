@@ -638,6 +638,8 @@ impl ExtensionOwner {
                     }
                 } else {
                     self.note_restore_applied();
+                    // 存档通道的读数：合入发生的时刻（诊断包里回答"到底合进去了没有"）。
+                    document.note_archive_merged();
                     if let Some(digest) = pending_digest {
                         *self.restore_applied_digest.lock_or_recover() = Some(digest);
                     }

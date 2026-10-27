@@ -53,10 +53,18 @@ impl Persistence for ArchivePersistence {
             log::error!("[ara] document archive restore failed: {error}");
             AraError::InvalidState("ARA document archive could not be decoded")
         })?;
-        log::info!(
-            "[ara] document archive restored: {} byte(s); edits are held until the model graph \
-             is ready",
-            bytes.len()
+        // 【为什么是 Warn 而不是 Info】这条通道此前只有 log::info!，而 release 的默认
+        // 级别是 Warn（见 diagnostics.rs）—— 用户机器上一条都不落盘，于是
+        // "宿主到底有没有走 ARA 存档通道"在真机上**无法回答**。而修法完全取决于它
+        // （存档通道 ≠ VST3 组件状态通道）。限流只压重复，不压信号。
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Warn,
+            "ara.archive.restored",
+            format_args!(
+                "[ara] document archive restored: {} byte(s); edits are held until the model \
+                 graph is ready",
+                bytes.len()
+            ),
         );
         Ok(())
     }
@@ -65,14 +73,23 @@ impl Persistence for ArchivePersistence {
         let Some(document) = self.document.upgrade() else {
             // 文档已释放 ⇒ 没有编辑可存。返回空载荷而不是失败：宿主对失败的反应是提示
             // 用户"插件存档失败"，而这里并没有失败。
-            log::info!("[ara] document archive requested after teardown; storing empty");
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "ara.archive.teardown",
+                format_args!("[ara] document archive requested after teardown; storing empty"),
+            );
             return Ok(Vec::new());
         };
         let bytes = document.encode_archive().map_err(|error| {
             log::error!("[ara] document archive store failed: {error}");
             AraError::InvalidState("ARA document archive could not be encoded")
         })?;
-        log::info!("[ara] document archive stored: {} byte(s)", bytes.len());
+        // 同 restore_document：这一行是"宿主确实走存档通道"的唯一证据。
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Warn,
+            "ara.archive.stored",
+            format_args!("[ara] document archive stored: {} byte(s)", bytes.len()),
+        );
         Ok(bytes)
     }
 }
@@ -118,9 +135,14 @@ impl PartialPersistence for ArchivePersistence {
             log::error!("[ara] partial archive restore failed: {error}");
             AraError::InvalidState("ARA partial archive could not be decoded")
         })?;
-        log::info!(
-            "[ara] partial archive restored: {} byte(s); it is merged by key once the model graph              is ready",
-            bytes.len()
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Warn,
+            "ara.archive.partial-restored",
+            format_args!(
+                "[ara] partial archive restored: {} byte(s); it is merged by key once the model \
+                 graph is ready",
+                bytes.len()
+            ),
         );
         Ok(())
     }
@@ -153,10 +175,14 @@ impl PartialPersistence for ArchivePersistence {
                 log::error!("[ara] partial archive store failed: {error}");
                 AraError::InvalidState("ARA partial archive could not be encoded")
             })?;
-        log::info!(
-            "[ara] partial archive stored: {} byte(s); {} modification(s) selected",
-            bytes.len(),
-            modifications.as_ref().map_or(0, BTreeSet::len)
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Warn,
+            "ara.archive.partial-stored",
+            format_args!(
+                "[ara] partial archive stored: {} byte(s); {} modification(s) selected",
+                bytes.len(),
+                modifications.as_ref().map_or(0, BTreeSet::len)
+            ),
         );
         Ok(bytes)
     }
