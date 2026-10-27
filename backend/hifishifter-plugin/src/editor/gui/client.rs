@@ -1703,7 +1703,7 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
                 // 的东西 —— 投递成功过几次、被拒在哪一层、插件占用了多少键。
                 let relay=serde_json::json!({
                     "fidelity":state.borrow().relay.fidelity().as_str(),
-                    "hostNativeKeys":state.borrow().relay.host_native_count(),
+                    "hostNativeKeys":state.borrow_mut().relay.host_native_count(),
                     "owned":state.borrow().owned.len(),
                     "stats":state.borrow().relay_stats.json(),
                 });

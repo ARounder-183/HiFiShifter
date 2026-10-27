@@ -99,7 +99,11 @@ pub(crate) fn execute(
         let host_source_start = super::host_edit::host_forward_window_start(
             g,
             hifishifter_kernel::state::clip_source_media_duration_sec(before),
-        );
+        )
+        // 【拿不到窗口 ⇒ 拒绝分割】见 `host_edit` 的同一条：两个坐标系的值不能互比。
+        .ok_or(
+            "the host take window is not resolvable (direction or mirror axis missing);              refresh the plugin window before splitting a reversed take",
+        )?;
         if [
             (g.start_sec, before.start_sec),
             (g.duration_sec, before.length_sec),

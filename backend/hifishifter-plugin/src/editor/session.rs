@@ -2941,6 +2941,27 @@ impl EditorSession {
             analysis_pending,
             rendering,
         );
+        // 【状态栏只回答一个问题：你听到的是不是当前编辑】
+        //
+        // 旧实现把「内务工作」（素材物化 / 后台快照刷新）也算进 `pending`，前端于是把它
+        // 显示成「正在自动应用…」—— 而用户此刻什么都没改。这句文案名不副实，而且它出现
+        // 在**每次**播放开始，于是用户学会了忽略它；等到真的需要它的时候（编辑后长时间
+        // 不生效）也就看不见了。
+        //
+        // 现在只有四个互斥读数，每一个都对应一个**用户能感知的后果**：
+        //   * `preparing` —— 还没有任何可服务的输出（冷启动 / 素材尚未物化）；
+        //   * `stale` —— 有输出，但它不是当前编辑（真正的"正在合成"）；
+        //   * `awaiting-analysis` —— 在等音高分析，且该根真的会产出；
+        //   * `current` —— 输出就是当前编辑（"已应用"，或干脆不显示）。
+        let audible_state = if !self.has_serviceable_snapshot() {
+            "preparing"
+        } else if audible_stale {
+            "stale"
+        } else if analysis_pending {
+            "awaiting-analysis"
+        } else {
+            "current"
+        };
         json!({
             // 【为什么把形态放进状态快照】bootstrap 是**窗口创建那一刻**算的，而形态判定
             // 要等 `setActive` 之后 5 秒宽限期才落定 —— 于是窗口打开时读到的一律是
@@ -2958,6 +2979,9 @@ impl EditorSession {
             "rendering_active":rendering,
             // 状态栏的「渲染中」读这一个（见上面 `audible_stale` 的说明）。
             "render_audible_stale":audible_stale,
+            // 【唯一驱动状态栏文案的字段】见上面 `audible_state` 的说明。
+            // `pending` 仍然保留（诊断包与"卡住了"的判定要用），但**不再驱动任何文案**。
+            "audible_state":audible_state,
             // 【"你的这次编辑有没有被采纳"】写回被拒 / 跳过 / 无基线 / 被保护 / 重放耗尽
             // 都在这一个读数里。§1.3 那 11 条回退路径里 9 条此前**连字符串都没有**，
             // 用户唯一能做的事是"再画一次试试"。它不驱动任何文案（那是 §3.6 的事），

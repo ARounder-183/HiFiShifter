@@ -1074,32 +1074,40 @@ impl ExtensionOwner {
     }
 
     pub(super) fn refresh_host_transport_inner(&self, throttled: bool) {
-        let Ok(stamp) = self.host_query_stamp() else {
-            return;
-        };
+        // 【时钟发布**不再**由几何授权门住】`host_query_stamp()` 回答的是"这份清单 /
+        // 几何此刻能不能查"，而时钟只需要"宿主在哪儿、在不在播"。两者绑在一起的后​果：
+        // 没有 document / 没有分配 / 实例刚关闭时拿不到 stamp ⇒ 一次也不发布 ⇒
+        // `host_is_fresh()` 150 ms 后为假 ⇒ 光标退回音频块读数，而**编辑器实例不处理
+        // 音频**，那两个量恒为 `(0,false)` ⇒ 用户看到"跳到位之后冻住一会儿"。
+        //
+        // 现在：先采一次并发布（授权判据仍要过 —— 采样本身是宿主调用），再用 stamp
+        // 决定要不要继续做下面那一段清单刷新。
+        let stamp = self.host_query_stamp().ok();
         let host = self.native_host();
         if let Some(host) = host {
-            if let Ok((position, playing)) = host.sample(|| self.host_query_authorized(&stamp)) {
-                // getter可能重入关闭/改scope，发布与撤销共用最终短事务。
-                let _transaction = stamp.0.transaction.lock_or_recover();
-                if !self.is_closed()
-                    && stamp.0.is_alive()
-                    && stamp.0.revision.load(Ordering::Acquire) == stamp.1
-                    && stamp.0.scope_revision.load(Ordering::Acquire) == stamp.2
-                {
+            // 【为什么授权判据在有 stamp 时才用】**没有 stamp**（无文档 / 无分配）时
+            // 恰恰是最需要时钟的时刻：宿主在播、而插件这边还没长出手臂。此时按
+            // "宿主原生可用"直接采样；采样是只读查询，失败也只是拿不到读数。
+            let authorized = stamp
+                .as_ref()
+                .is_some_and(|stamp| self.host_query_authorized(stamp));
+            if stamp.is_none() || authorized {
+                if let Ok((position, playing)) = host.sample(|| stamp.is_none()) {
                     if let Some(clock) = self.clock.get() {
                         clock.publish_host(position, playing);
                     }
                 }
             }
         }
+        let Some(stamp) = stamp else {
+            return;
+        };
         if !self.host_query_authorized(&stamp) {
             return;
         }
         // 【前台恢复不依赖 setActive】后台期间定时器可能停摆；超过一个刷新周期
         // 没有成功采样过，就强制一次完整枚举（清掉采样时刻，让 `refresh_ui_inventory`
-        // 跳过"令牌未变"的早退），并跳过实例级节流。强制重采在事实未变时无副作用
-        // （见 `refresh_ui_inventory` 的 `token_changed` 分支）。
+        // 跳过"令牌未变"的早退），并跳过实例级节流。
         let stale_sample = stamp
             .0
             .ui_inventory_sampled_at

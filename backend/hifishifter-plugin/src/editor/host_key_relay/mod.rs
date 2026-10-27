@@ -36,7 +36,7 @@ mod unavailable;
 
 pub(crate) use strokes::{KeyCode, OwnedStrokes, Stroke};
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 /// 探针窗口：等"宿主自己会不会动"。
@@ -59,6 +59,16 @@ const MIN_ESCAPE_GAP: Duration = Duration::from_millis(60);
 /// `K_RESULT_OK`），但那是**我们**的约定；宿主自己的钩子仍可能把键弹回来。
 const RATE_WINDOW: Duration = Duration::from_secs(10);
 const ESCAPES_PER_WINDOW: usize = 20;
+
+/// "宿主自己处理这个键"这条记账的有效期。
+///
+/// 【为什么必须有有效期】它是从**一次**探针观察里学到的结论，而那次观察只看
+/// `playing` 有没有翻转 —— 工程播完、循环回卷、宿主自己在别处按了空格，都会让
+/// 一个**本来该由插件处理**的键被记成"宿主自己处理"。旧实现是永久的：一次误判，
+/// 这个键在本次会话里就再也不会被投递，用户唯一的出路是重开插件窗口。
+///
+/// 五分钟覆盖"用户离开一会儿再回来"的常见节奏，又不至于让一次真的误判活太久。
+const HOST_NATIVE_TTL: Duration = Duration::from_secs(300);
 
 /// 让路的保真度：原语**自报**，Policy 只据此分支。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -310,8 +320,18 @@ struct Pending {
 pub(crate) struct Arbiter {
     fidelity: Fidelity,
     gate: Gate,
-    /// 宿主自己处理过的键。**按码记账** —— 宿主认识空格，不代表它认识 F2。
-    host_native: HashSet<KeyCode>,
+    /// 宿主自己处理过的键 → 记账时刻。**按码记账** —— 宿主认识空格，不代表它认识 F2。
+    ///
+    /// 【为什么是时刻而不是布尔】旧实现是**永久**闩：键一旦被记成 host-native，本次
+    /// 会话里再也不会被投递。而判据（探针窗口内 `playing` 有没有翻转）会被
+    /// **任何**播放状态变化污染 —— 工程播完、循环回卷、宿主自己在别处按了空格。
+    /// 一次误判就把 Space 永久判死，用户唯一的出路是重开插件窗口（甚至重开宿主）。
+    ///
+    /// 现在每条闩都带时刻，并由三条出口失效：
+    ///   1. 超过 [`HOST_NATIVE_TTL`] ⇒ 忘掉（宿主行为可能已经不同）；
+    ///   2. 视图重新获得焦点 ⇒ 清空（"这次会话"从用户回到插件那一刻重新算）；
+    ///   3. 该键的传输读数发生了与本次让路无关的大跳 ⇒ 清空（见 `tick`）。
+    host_native: HashMap<KeyCode, Instant>,
     pending: Option<Pending>,
     last_escape: Option<Instant>,
     escapes: VecDeque<Instant>,
@@ -327,7 +347,7 @@ impl Arbiter {
                 Fidelity::Synthetic => Gate::Probe,
                 Fidelity::Unavailable => Gate::Unavailable,
             },
-            host_native: HashSet::new(),
+            host_native: HashMap::new(),
             pending: None,
             last_escape: None,
             escapes: VecDeque::new(),
@@ -338,9 +358,29 @@ impl Arbiter {
         self.fidelity
     }
 
-    /// 宿主自己处理过的键有几个（诊断读数）。
-    pub(crate) fn host_native_count(&self) -> usize {
+    /// 宿主自己处理过的键有几个（诊断读数；已过期的先清掉再数）。
+    pub(crate) fn host_native_count(&mut self) -> usize {
+        self.expire_host_native(Instant::now());
         self.host_native.len()
+    }
+
+    /// 忘掉超过 [`HOST_NATIVE_TTL`] 的"宿主自己处理"记账。
+    fn expire_host_native(&mut self, now: Instant) {
+        self.host_native
+            .retain(|_, at| now.duration_since(*at) < HOST_NATIVE_TTL);
+    }
+
+    /// 视图重新获得焦点 ⇒ "这次会话"重新算。
+    ///
+    /// 【为什么这条是必需的】`host_native` 的判据是"探针窗口内 `playing` 有没有
+    /// 翻转"，而那个量会被**与本次让路无关**的事情改变（工程播完、循环回卷、宿主
+    /// 自己在别处按了空格）。用户从别的窗口回到插件时，正是"我刚才是想让插件处理
+    /// 这个键"最明确的一刻 —— 从这一刻重新开始记账，一次误判就不会变成永久。
+    pub(crate) fn note_focus_regained(&mut self) {
+        self.host_native.clear();
+        // 探针/观察窗同样作废：它们的基线是**上一次**焦点下的阅读，回来的这一刻
+        // 已经没有意义了。留着它只会让下一次按键被 `InFlight` 拒掉。
+        self.pending = None;
     }
 
     /// 入口 A：插件**认识**这个键（命中了一条绑定），但能力矩阵说它不归插件做。
@@ -389,7 +429,13 @@ impl Arbiter {
             }
             Gate::Probe | Gate::Relay => {}
         }
-        if self.host_native.contains(&stroke.code) {
+        // 【为什么要在这里先结算过期的 pending】它的推进只由 `ui_tick` 负责，而
+        // `ui_tick` 被"本实例是否 owner"门住 —— owner 短暂失败时探针永远不结算，
+        // 之后**每一次**按键都拿到 `Rejected(InFlight)`，直到窗口重开。
+        // 入口处先按 now 结算是唯一不依赖定时器的兜底：超时的窗口直接作废。
+        self.settle_expired(now);
+        self.expire_host_native(now);
+        if self.host_native.contains_key(&stroke.code) {
             return KeyOutcome::rejected(RejectReason::HostNative);
         }
         if !stroke.is_bare() {
@@ -486,6 +532,9 @@ impl Arbiter {
         if self.gate == Gate::Unavailable {
             return KeyOutcome::accepted_with(vec![Effect::Trace("unavailable")]);
         }
+        // 同 `on_key`：入口处先结算，不依赖 `ui_tick`（见那里的说明）。
+        self.settle_expired(now);
+        self.expire_host_native(now);
         if !stroke.is_bare() {
             return KeyOutcome::rejected(RejectReason::ModifiedKey);
         }
@@ -537,8 +586,9 @@ impl Arbiter {
 
         if reading.is_some_and(|reading| Some(reading) != pending.baseline) {
             if pending.probe {
-                // 宿主自己动了 ⇒ 这个宿主本来就会处理**这个键**。按码记账，永不投递。
-                self.host_native.insert(pending.stroke.code);
+                // 宿主自己动了 ⇒ 这个宿主本来就会处理**这个键**。按码记账（带时刻，
+                // 见 `host_native` 的说明：永久闩会让一次误判判死一个键）。
+                self.host_native.insert(pending.stroke.code, now);
                 return vec![Effect::Trace("host-native")];
             }
             return vec![Effect::Trace("accepted")];
@@ -571,6 +621,17 @@ impl Arbiter {
             return vec![Effect::Trace("no-response")];
         }
         Vec::new()
+    }
+
+    /// 入口处结算**已过期**的探针 / 观察窗（不依赖 `ui_tick`）。
+    ///
+    /// 【为什么"只作废、不下结论"】过期意味着"我们没看见结果"，那是**无信息**，
+    /// 不是"宿主没动"。下结论会把一次没看见记成"宿主不处理这个键"（或反之），
+    /// 而那正是本模块最贵的一类错误。作废之后下一次按键重新探针一次即可。
+    fn settle_expired(&mut self, now: Instant) {
+        if self.pending.as_ref().is_some_and(|pending| now >= pending.deadline) {
+            self.pending = None;
+        }
     }
 
     fn throttled(&self, now: Instant) -> bool {

@@ -288,13 +288,26 @@ impl TransportClock {
     /// 就等于让"最后一次成功"永远赢。这里按新鲜度仲裁：谁在最近一轮里还在推进，
     /// 就用谁。
     pub fn read(&self) -> (f64, bool) {
-        if self.host_is_fresh() {
+        let host_fresh = self.host_is_fresh();
+        let audio_playing = self.playing.load(Ordering::Acquire);
+        if host_fresh {
             let pose = self.host_pose.load(Ordering::Acquire);
-            return (f64::from_bits(pose & !1), pose & 1 != 0);
+            // 【播放位取**并集**，位置取宿主】两者回答的是不同的问题：位置只有宿主
+            // 知道准数，而"在不在播"只要**任一**来源说是真就是真。
+            //
+            // 【为什么不能取"新鲜者"的播放位】编辑器实例不处理音频，它的音频块播放位
+            // 恒为 `false`（或停在最后一次块值）；而宿主采样在它身上又常常刚过期。
+            // 于是"宿主说在播、光标却冻住"—— 用户看到的是"跳到位之后卡一会儿"。
+            // 反过来错一次（宿主已经停了、我们多前进几毫秒）代价小得多：下一拍采样
+            // 就把位置纠回来，而"该走的时候不走"是看得见的卡顿。
+            return (
+                f64::from_bits(pose & !1),
+                pose & 1 != 0 || audio_playing,
+            );
         }
         (
             f64::from_bits(self.position.load(Ordering::Acquire)),
-            self.playing.load(Ordering::Acquire),
+            audio_playing,
         )
     }
 }

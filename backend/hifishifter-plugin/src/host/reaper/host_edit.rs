@@ -543,16 +543,23 @@ impl EditorSession {
 /// 写回时必须再翻回镜像域，否则倒放 take 会被整体平移 `媒体长 − 正向终点`。
 /// 媒体总长取不到时返回 `None`：宁可不写，也不写一个错的起点。
 fn host_start_offset(clip: &hifishifter_kernel::state::Clip) -> Option<f64> {
-    if clip.reversed && !clip.loop_enabled {
-        let media = hifishifter_kernel::state::clip_source_media_duration_sec(clip);
-        // 与读取侧同一个逆运算（`forward_source_window` 的逆），避免两侧各写一份。
-        let (start, end) = hifishifter_kernel::state::clip_playback_window_sec(clip);
-        let window = hifishifter_kernel::take_geometry::ForwardWindow::new(start, end)?;
-        hifishifter_kernel::take_geometry::host_start_offset(window, media)
-            .map(|offset| offset.value())
-    } else {
-        Some(clip.source_start_sec)
+    if !clip.reversed {
+        return Some(clip.source_start_sec);
     }
+    // 【为什么倒放**不分** loop / 非 loop】读取侧对两者都给"正向窗口"，倒放时窗口的
+    // **终点**就是锚点（loop 时是"锚点 → 可用边界"的右端，非 loop 时是"终点 − 消耗量"
+    // 的右端）。镜像关系 `soffs = 轴 − 正向终点` 对两者是同一条式子 —— 旧实现给 loop
+    // 单开一支、直接把 `source_start_sec` 写回去，而读取侧那个窗口的终点被钳到
+    // `min_bound`，于是循环 + 倒放的 take 每写一次就漂一个 `soffs`。
+    let axis = hifishifter_kernel::take_geometry::take_axis_sec(
+        None,
+        hifishifter_kernel::state::clip_source_media_duration_sec(clip),
+        None,
+    );
+    // 与读取侧同一个逆运算（`forward_source_window` 的逆），避免两侧各写一份。
+    let (start, end) = hifishifter_kernel::state::clip_playback_window_sec(clip);
+    let window = hifishifter_kernel::take_geometry::ForwardWindow::new(start, end)?;
+    hifishifter_kernel::take_geometry::host_start_offset(window, axis).map(|offset| offset.value())
 }
 
 /// 宿主几何换算出的**正向**窗口起点 —— 与 `project_host_take_facts_locked` 走同一份
@@ -566,18 +573,18 @@ fn host_start_offset(clip: &hifishifter_kernel::state::Clip) -> Option<f64> {
 pub(super) fn host_forward_window_start(
     geometry: &crate::host::geometry::HostClipGeometry,
     media_duration_sec: Option<f64>,
-) -> f64 {
+) -> Option<f64> {
     hifishifter_kernel::take_geometry::TakeGeometry {
         start_offset_sec: geometry.source_start_sec,
         item_length_sec: geometry.duration_sec,
         play_rate_signed: geometry.play_rate_signed,
         media_duration_sec,
         section: geometry.section,
-        reversed: geometry.reversed,
+        reversed: Some(geometry.reversed),
         loop_enabled: geometry.loop_source,
     }
     .forward_source_window()
-    .start()
+    .map(|window| window.start())
 }
 
 /// 先冻结并验证整批对象，再开始Undo和setter；任一预检失败都不写入任何宿主item。
@@ -649,7 +656,13 @@ pub(crate) fn execute_managed(
                 host_forward_window_start(
                     &target.geometry,
                     hifishifter_kernel::state::clip_source_media_duration_sec(&edit.before),
-                ),
+                )
+                // 【拿不到窗口 ⇒ 拒绝】方向读不到 / 倒放但没有镜像轴时，"宿主起点"没有
+                // 可比较的值。放行等于用两个不同坐标系的值做等值判断 —— 那正是
+                // "倒放 clip 上每一次编辑都被判成宿主变了"与"碰巧通过"两种症状的来源。
+                .ok_or(
+                    "the host take window is not resolvable (direction or mirror axis                      missing); refresh the plugin window before editing a reversed take",
+                )?,
                 edit.before.source_start_sec,
             ) || !host_value_compatible(
                 target.geometry.playback_rate,
@@ -661,7 +674,8 @@ pub(crate) fn execute_managed(
                 host_forward_window_start(
                     &target.geometry,
                     hifishifter_kernel::state::clip_source_media_duration_sec(&edit.before),
-                ),
+                )
+                .unwrap_or(target.geometry.source_start_sec),
                 target.geometry.playback_rate,
                 edit.before.source_start_sec,
                 edit.before.playback_rate as f64,
@@ -806,8 +820,6 @@ pub(crate) fn execute_managed(
             }
             // 【倒放必须写**镜像**起点】宿主 `D_STARTOFFS` 在倒放 take 上是
             // `D − 正向终点`（F-4 实测），而 clip 持有的是镜像复原之后的**正向**窗口。
-            // 直接写正向起点会让宿主把内容整体平移。镜像复原（`reversed_forward_window`）
-            // 的逆运算就在这里。
             let after_offs = host_start_offset(after)
                 .ok_or("cannot write a reversed take without its media duration")?;
             if host_start_offset(before).is_none_or(|b| (b - after_offs).abs() > 1e-9) {
@@ -1481,10 +1493,14 @@ mod tests {
         // 正放：就是正向起点本身。
         clip.reversed = false;
         assert_eq!(host_start_offset(&clip), Some(0.25));
-        // 倒放 + 循环源：走内核回绕分支，不适用镜像模型。
+        // 【倒放 + 循环源也走镜像】**旧行为在这里返回 `source_start_sec`（0.25）**，
+        // 而读取侧给的是 `(min_bound.min(anchor), anchor)` —— 窗口**终点**是锚点。
+        // 两边用不同的量当"镜像起点"，于是循环 + 倒放的 take 每写一次就漂一个 `soffs`
+        // （用户报的"倒放 take 的偏移量算错了"在循环源上更明显）。镜像关系
+        // `soffs = 轴 − 正向终点` 对 loop / 非 loop 是同一条式子，这里不再分叉。
         clip.reversed = true;
         clip.loop_enabled = true;
-        assert_eq!(host_start_offset(&clip), Some(0.25));
+        assert_eq!(host_start_offset(&clip), Some(0.75));
         // 媒体总长取不到 ⇒ 返回 None（宁可不写，也不写一个错的起点）。
         clip.loop_enabled = false;
         clip.duration_sec = None;

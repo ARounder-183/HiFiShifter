@@ -314,15 +314,9 @@ impl ExtensionOwner {
                 edits
                     .reconcile(&document.track_bindings.lock_or_recover())
                     .map_err(Self::invalid_edit)?;
+                let assigned = self.assigned_timeline(&document).map_err(Self::invalid_edit)?;
                 let mut candidate = edits
-                    .merge_params(
-                        &self
-                            .assigned_timeline(&document)
-                            .map_err(Self::invalid_edit)?,
-                        &params,
-                        &tracks,
-                        edit.base_revisions.edits,
-                    )
+                    .merge_params(&assigned, &params, &tracks, edit.base_revisions.edits)
                     .map_err(Self::invalid_edit)?;
                 let mut curve_timeline = self
                     .assigned_timeline(&document)

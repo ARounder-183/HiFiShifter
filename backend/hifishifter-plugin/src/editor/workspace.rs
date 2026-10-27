@@ -485,6 +485,24 @@ impl DocumentSession {
     /// UI可显示宿主尚未分配给ARA的静音item；这些占位不进入任何renderer或源PCM读取。
     pub(crate) fn present_host_inventory(&self, timeline: &mut TimelineState, namespace: &str) {
         let prefix = |id: &str| format!("{namespace}{id}");
+        // 【媒体总时长：按 item 与按源两份索引】倒放的镜像复原需要轴，而轴的一个来源就是
+        // 媒体总时长。GUID 那份只在 region 被认领之后才有值；**按源**那份在映射阶段就
+        // 写好了（与认领、授权都无关）。两份都要 —— 宿主分割的瞬间两个新 item 都还没有
+        // GUID，只按 GUID 查会让倒放窗口无法复原（与
+        // `project_host_take_facts_locked` 的 `:2129-2130` 同一口径）。
+        //
+        // 【为什么在最前面取】锁序是 `timeline → edits`；本函数随后要取 `edits`
+        // （`delegated_fades`），所以这一份必须在它之前拿。
+        // 【为什么用 `try_lock`】本函数可能被"已经持有文档时间线"的路径调用（快照刷新、
+        // 诊断）。`std::sync::Mutex` 不可重入，`lock` 会当场自锁；而这份索引只是
+        // "倒放镜像复原"的一个可选输入 —— 拿不到就当这一轮没有轴（旧行为），
+        // 绝不能因为它把整个清单刷新挂死。
+        let (mapped_duration_by_item, mapped_duration_by_source) = self
+            .timeline
+            .try_lock()
+            .ok()
+            .and_then(|mapped| mapped.as_ref().map(media_duration_indexes))
+            .unwrap_or_default();
         // 委托 fade 的样式（宿主把边界包络交给 HFS 渲染时，shape/dir 由插件状态决定）。
         // 一次取出，避免在 track/item 双层循环里反复取锁。
         let delegated_fades = self.edits.lock_or_recover().fades.clone();
@@ -777,20 +795,62 @@ impl DocumentSession {
                     // `g.source_start_sec + duration*rate`：倒放时那是"镜像起点 + 正向
                     // 跨度"，两个坐标域混在一个数上，只有等事实投影覆写才对；任何一步
                     // 没跑到（facts 缺 active take / 缺 item）就会把错窗口留在界面上。
-                    let media = media_by_item.get(&g.item_id).and_then(|facts| {
-                        (facts.sample_rate > 0 && facts.frames > 0)
-                            .then_some(facts.frames as f64 / f64::from(facts.sample_rate))
-                    });
+                    let media = media_by_item
+                        .get(&g.item_id)
+                        .and_then(|facts| {
+                            (facts.sample_rate > 0 && facts.frames > 0)
+                                .then_some(facts.frames as f64 / f64::from(facts.sample_rate))
+                        })
+                        .or_else(|| mapped_duration_by_item.get(&g.item_id).copied());
                     let window = hifishifter_kernel::take_geometry::TakeGeometry {
                         start_offset_sec: g.source_start_sec,
                         item_length_sec: g.duration_sec,
                         play_rate_signed: g.play_rate_signed,
-                        media_duration_sec: media,
+                        // 【媒体时长也按源查一次】此前只查 `media_by_item`（item GUID）。
+                        // 而宿主分割的瞬间两个新 item 都还没有被 region 认领，GUID 表里
+                        // 没有它们 —— 于是"轴"取不到，倒放窗口无法复原。音频源 id 在映射
+                        // 阶段就写好了，与认领无关（与 `project_host_take_facts_locked`
+                        // 的 `:2129-2130` 同一口径）。
+                        media_duration_sec: media.or_else(|| {
+                            g.source_file_name
+                                .as_deref()
+                                .and_then(|source| mapped_duration_by_source.get(source).copied())
+                        }),
                         section: g.section,
-                        reversed: g.reversed,
+                        reversed: Some(g.reversed),
                         loop_enabled: g.loop_source,
                     }
                     .forward_source_window();
+                    // 【拿不到窗口时保留**宿主坐标**并留读数，不丢掉这条 clip】
+                    //
+                    // 丢掉它等于"用户在宿主里的片段从插件里消失"，而那比"偏移待定"严重
+                    // 得多 —— 用户会以为插件坏了。方案 §3.4.1 的处置是"保留宿主镜像坐标
+                    // + 标读数"：界面仍然看得见这一段（可以选中、可以画线），而渲染与投影
+                    // **不会**把它当成正放（见 `project_host_take_facts_locked` 的
+                    // `ara.reversed-window`）。方向读不到（`reversed: None`）同理。
+                    let window = window.unwrap_or_else(|| {
+                        hifishifter_kernel::log_limiter::emit_limited_key(
+                            log::Level::Warn,
+                            "ara.reversed-axis-missing",
+                            format_args!(
+                                "[ara] item {} has no resolvable source window this round \
+                                 (reversed={} section={:?}); the host's raw coordinates are kept \
+                                 and this segment will not be rendered as forward",
+                                g.item_id, g.reversed, g.section
+                            ),
+                        );
+                        // 宿主镜像域的原始读数：起点 + 正向跨度。没有轴时它是**唯一**还能
+                        // 陈述的事实，因此这一轮如实呈现，等宿主读数补齐后自动改回。
+                        let end = g.source_start_sec + g.duration_sec * g.playback_rate;
+                        hifishifter_kernel::take_geometry::ForwardWindow::new(
+                            g.source_start_sec,
+                            end,
+                        )
+                        .or_else(|| {
+                            hifishifter_kernel::take_geometry::ForwardWindow::new(0., 0.)
+                        })
+                        .expect("a zero window is always valid")
+                    });
                     let built = serde_json::from_value::<hifishifter_kernel::state::Clip>(
                         serde_json::json!({"id":id,"track_id":track_id,"name":item.name,
                         "start_sec":g.start_sec,"length_sec":g.duration_sec,"takes":[{"id":prefix(&g.take_id),"source_start_sec":window.start(),
@@ -2128,7 +2188,7 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
                 .and_then(|source| media_by_source.get(source).copied());
             let media =
                 reversed_media_duration(media_by_item.get(&guid).copied().or(by_source), clip);
-            let host_window = item_facts.host.as_ref().map(|host| {
+            let host_window = item_facts.host.as_ref().and_then(|host| {
                 host.to_geometry(media, item_facts.reversed, item_facts.loop_source)
                     .forward_source_window()
             });
@@ -2143,7 +2203,7 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
                 });
                 let left_window = left_host
                     .to_geometry(left_media, left.reversed, left.loop_source)
-                    .forward_source_window();
+                    .forward_source_window()?;
                 let rate = left_host.play_rate_signed.abs();
                 hifishifter_kernel::take_geometry::split_child_window(
                     left_window,
@@ -2153,6 +2213,43 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
                     item_facts.reversed,
                 )
             });
+            // 【读→写→读：读数只在**读**这一侧成立】镜像轴属于宿主的约定，而仓库里没有
+            // 任何一处能证明 REAPER 用的是哪一条。把"宿主给的 soffs 经解算再折回去必须
+            // 回到原值"变成一行运行时读数：残差为 0 ⇒ 约定正确；不为 0 ⇒ 约定反了，
+            // 而日志直接给出残差、用到的轴与正向终点 —— 真机日志因此能定死这件事。
+            //
+            // 【为什么在这里而不是写回时】写回时窗口**本来就变了**，残差非零是正常的。
+            // 这条不变量说的是"同一份宿主读数进出解算一圈不变"，那是读路径的性质。
+            if let (Some(host), Some(window)) = (item_facts.host.as_ref(), host_window) {
+                if item_facts.reversed {
+                    let axis = hifishifter_kernel::take_geometry::take_axis_sec(
+                        host.section,
+                        media,
+                        None,
+                    );
+                    let residual = hifishifter_kernel::take_geometry::roundtrip_residual(
+                        window,
+                        axis,
+                        host.start_offset_sec,
+                    );
+                    if residual.is_some_and(|residual| residual.abs() > 1e-6) {
+                        hifishifter_kernel::log_limiter::emit_limited_key(
+                            log::Level::Warn,
+                            "ara.reversed-roundtrip",
+                            format_args!(
+                                "[ara] reversed round-trip residual {:.9}s for item {guid}: \
+                                 host soffs={:.6} axis={:?} forward=[{:.6},{:.6}]; the host and \
+                                 the plugin disagree about the mirror convention",
+                                residual.unwrap_or(0.),
+                                host.start_offset_sec,
+                                axis,
+                                window.start(),
+                                window.end(),
+                            ),
+                        );
+                    }
+                }
+            }
             if let (Some(derived), Some(host_window)) = (derived, host_window) {
                 let close = crate::host::geometry::host_value_compatible;
                 if !close(derived.start(), host_window.start())
@@ -2680,7 +2777,10 @@ impl HostTakeFacts {
             play_rate_signed: self.play_rate_signed,
             media_duration_sec,
             section: self.section,
-            reversed,
+            // 【方向来自宿主清单】`UiTake.reversed` 是宿主读数，读不到时上游已落成
+            // `false`（见 `take_direction_facts` 的读数）。这里如实传 `Some`，
+            // 让内核的分支与宿主口径一致。
+            reversed: Some(reversed),
             loop_enabled,
         }
     }
@@ -3129,18 +3229,22 @@ mod tests {
     /// 【为什么在插件侧只造输入】插件不再有自带的镜像公式 —— 它已收口到
     /// `hifishifter_kernel::take_geometry`（公式本身由内核的用例覆盖）。这里测的是
     /// "喂进去的宿主读数对不对"，也就是投影层唯一的职责。
-    fn mirrored_geometry(media: Option<f64>, host_start: f64, host_span: f64) -> (f64, f64) {
-        let window = hifishifter_kernel::take_geometry::TakeGeometry {
+    fn mirrored_geometry(
+        media: Option<f64>,
+        host_start: f64,
+        host_span: f64,
+    ) -> Option<(f64, f64)> {
+        hifishifter_kernel::take_geometry::TakeGeometry {
             start_offset_sec: host_start,
             item_length_sec: host_span,
             play_rate_signed: 1.0,
             media_duration_sec: media,
             section: None,
-            reversed: true,
+            reversed: Some(true),
             loop_enabled: false,
         }
-        .forward_source_window();
-        (window.start(), window.end())
+        .forward_source_window()
+        .map(|window| (window.start(), window.end()))
     }
 
     /// F-4 实测：源长 2.0、非对称裁切 `[0.25, 1.25]`、倒放后宿主报 `D_STARTOFFS=0.75`
@@ -3149,9 +3253,9 @@ mod tests {
     #[test]
     fn a_reversed_host_window_is_mirrored_back_to_the_forward_window() {
         // 宿主 [0.75, 0.75+1.0]，源长 2.0 ⇒ 正向 [2.0−1.75, 2.0−0.75] = [0.25, 1.25]。
-        assert_eq!(mirrored_geometry(Some(2.0), 0.75, 1.0), (0.25, 1.25));
+        assert_eq!(mirrored_geometry(Some(2.0), 0.75, 1.0), Some((0.25, 1.25)));
         // 幂等：只读宿主事实，不读 clip 当前窗口，重复调用结果相同。
-        assert_eq!(mirrored_geometry(Some(2.0), 0.75, 1.0), (0.25, 1.25));
+        assert_eq!(mirrored_geometry(Some(2.0), 0.75, 1.0), Some((0.25, 1.25)));
     }
 
     /// **越界必须夹紧**：长 item / 短媒体时镜像端点会落到媒体之外，不夹紧就写出一个
@@ -3159,16 +3263,24 @@ mod tests {
     #[test]
     fn an_out_of_range_reversed_host_window_is_clamped_into_the_media() {
         // 宿主窗口整体越过媒体末端：正向 [2.0−2.5, 2.0−1.5] = [−0.5, 0.5] ⇒ 夹到 [0, 0.5]。
-        assert_eq!(mirrored_geometry(Some(2.0), 1.5, 1.0), (0.0, 0.5));
+        assert_eq!(mirrored_geometry(Some(2.0), 1.5, 1.0), Some((0.0, 0.5)));
         // 窗口完全在媒体之外 ⇒ 两端夹到同一端点，退化为零长度而不是负长度。
-        assert_eq!(mirrored_geometry(Some(2.0), 5.0, 1.0), (0.0, 0.0));
+        assert_eq!(mirrored_geometry(Some(2.0), 5.0, 1.0), Some((0.0, 0.0)));
     }
 
-    /// 媒体总长未知时退回**原始读数**作锚点（与独立 App 的 `else { take.s_offs }` 同口径），
-    /// 而不是保留镜像坐标。两侧必须给同一个答案 —— 这正是本次收口的目的。
+    /// **媒体总长未知时不给窗口** —— 旧实现"退回原始读数"，把镜像量当成正向起点用。
+    ///
+    /// 【为什么这条是本轮推翻的旧结论之一】旧用例把"退回 soffs"钉成了正确
+    /// （`(0.75, 1.0)` 的输入得到 `(0.0, 0.75)`），而那正是插件与 App 分歧的现场：
+    /// 正确窗口是 `[0.25, 1.25]`，退回之后整段内容平移 `2·soffs − D`。两侧现在给
+    /// **同一个**答案：不知道就不给（`None`），由调用方保留宿主镜像坐标并留读数。
     #[test]
-    fn an_unknown_media_duration_falls_back_to_the_raw_offset() {
-        assert_eq!(mirrored_geometry(None, 0.75, 1.0), (0.0, 0.75));
+    fn an_unknown_media_duration_yields_no_window() {
+        assert_eq!(
+            mirrored_geometry(None, 0.75, 1.0),
+            None,
+            "轴未知时不得把镜像量当成正向起点"
+        );
     }
 
     /// **不变量：倒放镜像复原所需的媒体时长来自 ARA 源时长，不依赖"是否已授权 PCM"。**
@@ -3207,13 +3319,18 @@ mod tests {
         assert_eq!(media, Some(2.0));
         assert_eq!(
             mirrored_geometry(media, 0.75, 1.0),
-            (0.25, 1.25),
+            Some((0.25, 1.25)),
             "宿主镜像窗口 [0.75, 1.75] + 源长 2.0 ⇒ 正向 [0.25, 1.25]"
         );
 
-        // 连 ARA 源时长也没有时，`reversed_media_duration` 明确返回 None
-        // （调用方据此留痕；共享解算会退回原始读数作锚点，而不是编造一个媒体长）。
+        // 连 ARA 源时长也没有时，`reversed_media_duration` 明确返回 None ——
+        // 调用方据此留痕，共享解算不给窗口（而不是编造一个媒体长）。
         assert_eq!(reversed_media_duration(None, &unclaimed), None);
+        assert_eq!(
+            mirrored_geometry(None, 0.75, 1.0),
+            None,
+            "没有轴就没有窗口：这一轮不呈现该片段，等宿主读数补齐"
+        );
     }
 
     /// **回归：未认领的分割半段也要能拿到媒体总长。**

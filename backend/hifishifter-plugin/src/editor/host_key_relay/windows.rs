@@ -24,7 +24,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetAncestor, GetForegroundWindow, GetGUIThreadInfo, GetParent, GetWindowThreadProcessId,
+    GetAncestor, GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId,
     IsChild, IsWindow, IsWindowVisible, PostMessageW, SetForegroundWindow, GA_ROOT, GA_ROOTOWNER,
     GUITHREADINFO, WM_KEYDOWN, WM_KEYUP,
 };
@@ -58,6 +58,19 @@ impl HostKeyEscape for WindowsEscape {
             // 前台是别的应用：此时投递，键可能落到别人身上。
             return Err(EscapeError::NotForeground);
         }
+        // 【一行能定死"容器 vs 主窗口"的读数】真机上一次会话就能回答"投给谁"，
+        // 不必再从"没反应"反推。限流只压重复，不压信号。
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Warn,
+            "hostKeyRelay.target",
+            format_args!(
+                "[relay] target={} hwnd={:#x} class={} parent={:#x}",
+                kind.as_str(),
+                target.0 as usize,
+                window_class(target),
+                unsafe { GetAncestor(target, GA_ROOT) }.0 as usize,
+            ),
+        );
         post_stroke(target, key, stroke)?;
         Ok(kind)
     }
@@ -97,43 +110,56 @@ fn host_window(editor: HWND) -> Result<HWND, EscapeError> {
     }
     Ok(host)
 }
-
 /// 宿主里**真正会收到这个键**的那个窗口。
 ///
-/// 【为什么不是直接投给 owner 链顶端】Windows 的键盘消息落在**焦点窗口**上。宿主把
-/// 快捷键处理挂在哪个窗口上，是它自己的实现细节，但它一定挂在"本来会收到这个键"的
-/// 那个窗口上或其祖先链上。投给 owner 链顶端，等于赌"每个宿主的主窗口都自己处理
-/// 按键"—— 这个赌在 REAPER 上赢了，在别的宿主上就输了（插件嵌在自己的容器窗口里、
-/// 快捷键挂在那条容器上时，主窗口的 `WndProc` 收到 `WM_KEYDOWN` 直接走
-/// `DefWindowProc`）。
+/// 【为什么不再有"Parent"这一级】上一版在这里加过第三级：焦点在我们子树里时，沿父链
+/// 走出我们子树的第一层（宿主给插件开的容器窗口）。它的前提是"宿主把键位表挂在他给
+/// 插件的容器上"，而这条前提**没有任何证据**，并且可以构造性证伪：
 ///
-/// 三级，判据各不相同：
-///  1. `Focus` —— 宿主线程的焦点窗口（`GetGUIThreadInfo`）。这就是"用户此刻按键会去哪"；
-///  2. `Parent` —— 焦点在我们子树里时，沿父链走出我们子树的第一层（宿主给插件开的容器）；
-///  3. `RootOwner` —— 前两级都拿不到才退回现状。
+///   * 编辑器是 `WS_CHILD`（见 `gui/windows.rs`），所以 `GetParent(editor)` 与
+///     `editor` 同属一个顶层窗口 ⇒ `belongs_to_host_tree(parent, …)` **恒真**；
+///   * 于是"焦点在我们子树里"这一支**恒返回 Parent**，`RootOwner` 永远不可达；
+///   * 而 `Focus` 级要求焦点不在我们子树里，可 WebView2 只在拿到焦点时才把键变成
+///     DOM 事件（`WM_SETFOCUS → port.focus_page()`）—— 用户在插件里按键时它必然不可达。
+///
+/// 三条合起来的实际效果是：**Space 恒被投给宿主为装插件视图而建的容器子窗口**，而那个
+/// 窗口的 `WndProc` 里没有宿主的键位表 ⇒ 按键进了虚空，日志里还是一行 `relayed`。
+///
+/// 现在只有两级，且每一级都有明确的证据：
+///  1. `Focus` —— 宿主线程的焦点窗口（`GetGUIThreadInfo`），且**不在我们子树里**
+///     （"用户此刻按键会去哪"；此时我们本来就不是接收方，投给它最保真）；
+///  2. `RootOwner` —— owner 链顶端，也就是宿主主窗口。`ARAPlugInExtensionInstance`
+///     与 VST3 视图都挂在它下面，宿主的快捷键表在主窗口的消息过程里。
 fn keyboard_target(editor: HWND, host: HWND) -> Result<(HWND, TargetKind), EscapeError> {
     let Some(focused) = focused_window(host) else {
         return Ok((host, TargetKind::RootOwner));
     };
     // SAFETY: 纯查询。
     let ours = focused == editor || unsafe { IsChild(editor, focused) }.as_bool();
-    if !ours {
-        if belongs_to_host_tree(focused, editor, host) {
-            return Ok((focused, TargetKind::Focus));
-        }
-        // 焦点在一个我们完全不认识的窗口上：退回宿主主窗口，而不是投给它。
-        return Ok((host, TargetKind::RootOwner));
+    if !ours && belongs_to_host_tree(focused, editor, host) {
+        return Ok((focused, TargetKind::Focus));
     }
-    // 焦点在我们子树里 ⇒ 这个键本来会落到我们的父窗口（宿主给插件开的容器）上。
-    // SAFETY: 纯查询。
-    let parent = unsafe { GetParent(editor) }.unwrap_or_default();
-    if !parent.0.is_null() && parent != editor && belongs_to_host_tree(parent, editor, host) {
-        return Ok((parent, TargetKind::Parent));
-    }
+    // 焦点在我们子树里（= 用户在插件里按键），或者落在一个我们完全不认识的窗口上：
+    // 都投给宿主主窗口。前者是常态（用户就在插件里画曲线），后者是"投给未知窗口
+    // 等于投进虚空"的同一个处置。
     Ok((host, TargetKind::RootOwner))
 }
-
 /// 宿主线程的焦点窗口；读不到时 `None`。
+/// 窗口类名（诊断用）。读不到时返回询问符，绝不 panic。
+///
+/// 【为什么值一行日志】"投给容器还是投给主窗口"这个问题只能靠真机会话回答，而类名
+/// （`REAPERwnd` / WebView 的容器类 / `#32770` …）是其中最直接的那一个事实。
+fn window_class(window: HWND) -> String {
+    use windows::Win32::UI::WindowsAndMessaging::GetClassNameW;
+    let mut buffer = [0u16; 256];
+    // SAFETY: 纯查询；缓冲区长度按元素个数传入。
+    let len = unsafe { GetClassNameW(window, &mut buffer) };
+    if len <= 0 {
+        return "?".to_owned();
+    }
+    String::from_utf16_lossy(&buffer[..len as usize])
+}
+
 fn focused_window(host: HWND) -> Option<HWND> {
     // SAFETY: 纯查询。
     let thread = unsafe { GetWindowThreadProcessId(host, None) };
