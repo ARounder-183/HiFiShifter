@@ -965,8 +965,17 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
         // 【为什么两条都要显式登记】`host_key_relay` 带三个位置参数，
         // `host_key_owned_set` 带一个数组。漏登记会返回 `__unwired` 并直接 throw ——
         // 而这里的失败是**静默**的（用户只看到"按了没反应"），正是本仓反复吃过的那类。
+        // 【为什么把修饰位摊平】原生侧按 `{ code, ctrl, shift, alt, meta }` 解析
+        // （`host_key_relay/strokes.rs` 的 `Stroke::from_json`）。此前这里把修饰位
+        // 包在 `mods` 里，而解析器只读平铺字段 —— 于是**每一个**修饰位都被读成 false。
+        // 上一轮只外送裸键，这个错误因此一直不可见；放开组合键之后它会立刻变成
+        // 「宿主收到的是没按 Ctrl 的 S」。
         case "host_key_relay":
-            return { code: args[0], action: args[1], mods: args[2] };
+            return {
+                code: args[0],
+                action: args[1],
+                ...((args[2] ?? {}) as Record<string, unknown>),
+            };
 
         case "host_key_owned_set":
             return { strokes: args[0] };

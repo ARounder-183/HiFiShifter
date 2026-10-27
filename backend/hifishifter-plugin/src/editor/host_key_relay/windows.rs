@@ -14,17 +14,19 @@
 //! 也不保证宿主一定会处理（有的宿主只看自己的前台焦点窗口）。因此 Policy 仍要先探针、
 //! 之后再观察窗口判定"成没成"，而不是假定它一定灵。
 
-use super::{EscapeError, Fidelity, HostKeyEscape, KeyCode, Stroke};
+use super::{EscapeError, Fidelity, HostKeyEscape, KeyCode, Stroke, TargetKind};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetFocus, MapVirtualKeyW, SetFocus, MAPVK_VK_TO_VSC, VIRTUAL_KEY, VK_ADD, VK_BACK, VK_DECIMAL,
-    VK_DELETE, VK_DIVIDE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_INSERT, VK_LEFT, VK_MULTIPLY,
-    VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SPACE, VK_SUBTRACT, VK_TAB, VK_UP,
+    GetFocus, MapVirtualKeyW, SetFocus, MAPVK_VK_TO_VSC, VIRTUAL_KEY, VK_ADD, VK_BACK, VK_CONTROL,
+    VK_DECIMAL, VK_DELETE, VK_DIVIDE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_INSERT, VK_LEFT,
+    VK_MENU, VK_MULTIPLY, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE,
+    VK_SUBTRACT, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetAncestor, GetForegroundWindow, GetWindowThreadProcessId, IsChild, IsWindow, IsWindowVisible,
-    PostMessageW, SetForegroundWindow, GA_ROOT, GA_ROOTOWNER, WM_KEYDOWN, WM_KEYUP,
+    GetAncestor, GetForegroundWindow, GetGUIThreadInfo, GetParent, GetWindowThreadProcessId, IsChild,
+    IsWindow, IsWindowVisible, PostMessageW, SetForegroundWindow, GA_ROOT, GA_ROOTOWNER,
+    GUITHREADINFO, WM_KEYDOWN, WM_KEYUP,
 };
 
 pub(crate) struct WindowsEscape;
@@ -34,16 +36,17 @@ impl HostKeyEscape for WindowsEscape {
         Fidelity::Synthetic
     }
 
-    fn escape(&mut self, window: usize, stroke: &Stroke) -> Result<(), EscapeError> {
-        // 前端已经挡过带修饰的键；这里再挡一次 —— 原生入口不能假定调用方守规矩。
-        if !stroke.is_bare() {
+    fn escape(&mut self, window: usize, stroke: &Stroke) -> Result<TargetKind, EscapeError> {
+        // `Meta`（Win 键）不外送：它带系统级副作用，而宿主快捷键里几乎不用它。
+        if stroke.meta {
             return Err(EscapeError::UnsupportedKey);
         }
         let key = virtual_key(stroke.code).ok_or(EscapeError::UnsupportedKey)?;
         let editor = HWND(window as *mut core::ffi::c_void);
         let host = host_window(editor)?;
+        let (target, kind) = keyboard_target(editor, host)?;
         // SAFETY: 两个句柄都来自本进程的窗口树；两个调用都是纯查询，不改宿主状态。
-        if !unsafe { IsWindowVisible(host) }.as_bool() {
+        if !unsafe { IsWindowVisible(target) }.as_bool() {
             // 投给一个不可见窗口等于投进虚空（桥接进程的隐藏窗口正是这种）。
             return Err(EscapeError::NoHostWindow);
         }
@@ -55,9 +58,8 @@ impl HostKeyEscape for WindowsEscape {
             // 前台是别的应用：此时投递，键可能落到别人身上。
             return Err(EscapeError::NotForeground);
         }
-        post(host, key, false)?;
-        post(host, key, true)?;
-        Ok(())
+        post_stroke(target, key, stroke)?;
+        Ok(kind)
     }
 
     fn focus_host(&mut self, window: usize, previous: Option<usize>) -> Result<(), EscapeError> {
@@ -94,6 +96,59 @@ fn host_window(editor: HWND) -> Result<HWND, EscapeError> {
         return Err(EscapeError::NoHostWindow);
     }
     Ok(host)
+}
+
+/// 宿主里**真正会收到这个键**的那个窗口。
+///
+/// 【为什么不是直接投给 owner 链顶端】Windows 的键盘消息落在**焦点窗口**上。宿主把
+/// 快捷键处理挂在哪个窗口上，是它自己的实现细节，但它一定挂在"本来会收到这个键"的
+/// 那个窗口上或其祖先链上。投给 owner 链顶端，等于赌"每个宿主的主窗口都自己处理
+/// 按键"—— 这个赌在 REAPER 上赢了，在别的宿主上就输了（插件嵌在自己的容器窗口里、
+/// 快捷键挂在那条容器上时，主窗口的 `WndProc` 收到 `WM_KEYDOWN` 直接走
+/// `DefWindowProc`）。
+///
+/// 三级，判据各不相同：
+///  1. `Focus` —— 宿主线程的焦点窗口（`GetGUIThreadInfo`）。这就是"用户此刻按键会去哪"；
+///  2. `Parent` —— 焦点在我们子树里时，沿父链走出我们子树的第一层（宿主给插件开的容器）；
+///  3. `RootOwner` —— 前两级都拿不到才退回现状。
+fn keyboard_target(editor: HWND, host: HWND) -> Result<(HWND, TargetKind), EscapeError> {
+    let Some(focused) = focused_window(host) else {
+        return Ok((host, TargetKind::RootOwner));
+    };
+    // SAFETY: 纯查询。
+    let ours = focused == editor || unsafe { IsChild(editor, focused) }.as_bool();
+    if !ours {
+        if belongs_to_host_tree(focused, editor, host) {
+            return Ok((focused, TargetKind::Focus));
+        }
+        // 焦点在一个我们完全不认识的窗口上：退回宿主主窗口，而不是投给它。
+        return Ok((host, TargetKind::RootOwner));
+    }
+    // 焦点在我们子树里 ⇒ 这个键本来会落到我们的父窗口（宿主给插件开的容器）上。
+    // SAFETY: 纯查询。
+    let parent = unsafe { GetParent(editor) }.unwrap_or_default();
+    if !parent.0.is_null() && parent != editor && belongs_to_host_tree(parent, editor, host) {
+        return Ok((parent, TargetKind::Parent));
+    }
+    Ok((host, TargetKind::RootOwner))
+}
+
+/// 宿主线程的焦点窗口；读不到时 `None`。
+fn focused_window(host: HWND) -> Option<HWND> {
+    // SAFETY: 纯查询。
+    let thread = unsafe { GetWindowThreadProcessId(host, None) };
+    if thread == 0 {
+        return None;
+    }
+    let mut info = GUITHREADINFO {
+        cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: 纯查询；`cbSize` 已按结构体大小填好。
+    if unsafe { GetGUIThreadInfo(thread, &mut info) }.is_err() {
+        return None;
+    }
+    (!info.hwndFocus.0.is_null()).then_some(info.hwndFocus)
 }
 
 /// 前台窗口是不是"宿主的"那一棵窗口树里的。
@@ -266,6 +321,46 @@ fn key_lparam(key: VirtualKey, up: bool) -> isize {
     (repeat | scan | extended | previous | transition) as isize
 }
 
+/// 把一次按键（含修饰位）按**同一条消息流**投出去。
+///
+/// 【为什么要补修饰键的按下/抬起】`PostMessage` 不更新线程的异步键状态，所以
+/// `GetKeyState(VK_CONTROL)` 永远是"没按"。但**按消息流维护自己修饰状态的宿主**会
+/// 正确看到 `Ctrl` —— 顺序固定为「修饰按下 → 键按下 → 键抬起 → 修饰抬起」，宿主
+/// 不可能收到半个组合（除非它丢消息，而那与单键投递是同一个风险）。
+///
+/// 【已知边界】直接读 `GetKeyState` 的宿主仍然看不到修饰位。那条路只有 `SendInput`
+/// 能走通，而它要求先把焦点抢到宿主窗口 —— 本功能明确不做。
+fn post_stroke(host: HWND, key: VirtualKey, stroke: &Stroke) -> Result<(), EscapeError> {
+    let mut modifiers: Vec<VIRTUAL_KEY> = Vec::new();
+    if stroke.ctrl {
+        modifiers.push(VK_CONTROL);
+    }
+    if stroke.shift {
+        modifiers.push(VK_SHIFT);
+    }
+    if stroke.alt {
+        modifiers.push(VK_MENU);
+    }
+    for modifier in &modifiers {
+        post(host, modifier_key(*modifier), false)?;
+    }
+    post(host, key, false)?;
+    post(host, key, true)?;
+    for modifier in modifiers.iter().rev() {
+        post(host, modifier_key(*modifier), true)?;
+    }
+    Ok(())
+}
+
+/// 修饰键的键描述（扫描码取不到时填 0，宿主普遍不依赖它）。
+fn modifier_key(key: VIRTUAL_KEY) -> VirtualKey {
+    VirtualKey {
+        code: key.0,
+        scan: scan_code(key),
+        extended: false,
+    }
+}
+
 fn post(host: HWND, key: VirtualKey, up: bool) -> Result<(), EscapeError> {
     let message = if up { WM_KEYUP } else { WM_KEYDOWN };
     // SAFETY: 同进程投递，不阻塞、不等待；目标句柄在上面的可见性/前台检查里已确认。
@@ -423,12 +518,22 @@ mod tests {
         );
     }
 
-    /// 带修饰的键在原生侧同样被拒 —— 不能假定调用方守规矩。
+    /// **不变量：带修饰的组合允许外送，`Meta` 不允许。**
+    ///
+    /// 【为什么改了】上一轮把「带修饰」一律拒掉，理由是 `PostMessage` 不更新异步键状态。
+    /// 那条限制是真的，但它只影响「直接读 `GetKeyState` 的宿主」；按**消息流**维护修饰
+    /// 状态的宿主收到「修饰按下 → 键按下 → 键抬起 → 修饰抬起」这一串就是忠实的。
+    /// 而宿主快捷键绝大多数是带修饰的组合 —— 一律拒掉等于让这条路只对空格有用。
+    ///
+    /// `Meta`（Win 键）例外：它带系统级副作用，外送一次就可能把开始菜单弹出来。
     #[test]
-    fn a_modified_stroke_is_refused() {
+    fn a_modified_stroke_is_relayed_but_meta_is_refused() {
         let mut escape = WindowsEscape;
         let mut stroke = bare("Space");
         stroke.ctrl = true;
+        // 句柄 0 不是窗口 ⇒ 走到「找不到宿主窗口」，而不是「这个键不支持」。
+        assert_eq!(escape.escape(0, &stroke), Err(EscapeError::NoHostWindow));
+        stroke.meta = true;
         assert_eq!(escape.escape(0, &stroke), Err(EscapeError::UnsupportedKey));
     }
 }

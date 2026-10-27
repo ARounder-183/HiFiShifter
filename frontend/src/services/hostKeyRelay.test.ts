@@ -71,9 +71,12 @@ describe("入口 A：插件认识这个键，但宿主那一族", () => {
         /*
          * 【为什么这两条要用 F5/F6 而不是默认的 K / Ctrl+R】两族判定是**与关系**：
          * 动作属于宿主那一族（规则 3）**且**这个物理键在可让表里（规则 6）。
-         * 默认的 `K` 是字母（打字领地）、`Ctrl+R` 带修饰（无法忠实重放），所以它们
-         * 在默认键位下并不会被让 —— 这是对的，不是漏。用户把节拍器改绑到 F5 之后
-         * 才真正走这条路。
+         * 默认的 `K` 是字母（打字领地），所以它在默认键位下并不会被让 —— 这是对的，
+         * 不是漏。用户把节拍器改绑到 F5 之后才真正走这条路。
+         *
+         * `Ctrl+R` 仍是**不让**的：字母不在可让表里（见下面的边界说明）。带修饰的
+         * **具名键**（`Shift+Space`、`Ctrl+Home`、`Alt+F4`）则照常让 —— 原生侧按消息流
+         * 补齐修饰位。`Meta` 一律拒（系统级副作用）。
          */
         expect(
             classifyHostKeyRelay("playback.metronome", null, stroke("F5"), PLUGIN_NO_TRANSPORT),
@@ -81,10 +84,14 @@ describe("入口 A：插件认识这个键，但宿主那一族", () => {
         expect(
             classifyHostKeyRelay("recording.toggle", null, stroke("F6"), PLUGIN_NO_TRANSPORT),
         ).not.toBeNull();
-        // 默认键位下：字母与带修饰的组合都不让。
+        // 字母仍然不让（打字领地）。
         expect(
             classifyHostKeyRelay("playback.metronome", null, stroke("KeyK"), PLUGIN_NO_TRANSPORT),
         ).toBeNull();
+        // 【边界：字母即使带修饰也不让】可让表只收**具名键**（`RELAYABLE_CODES`）。
+        // 字母的物理键名（`KeyR`）不在表里，于是 `Ctrl+R` 仍然不外送 —— 这不是漏，
+        // 是这一轮明确划下的范围：把 26 个字母 + 10 个数字放进表，会让"裸字母"也
+        // 变成可让，而裸字母正是打字领地（见下一条用例）。
         expect(
             classifyHostKeyRelay(
                 "recording.toggle",
@@ -132,8 +139,10 @@ describe("入口 A：插件认识这个键，但宿主那一族", () => {
         }
     });
 
-    test("规则 4：带修饰的键不让", () => {
-        for (const mods of [{ ctrl: true }, { shift: true }, { alt: true }, { meta: true }]) {
+    test("规则 4：只有 Meta 不让，其余修饰位照常让", () => {
+        // 【为什么改了】宿主快捷键绝大多数是带修饰的组合。原生侧按消息流补齐修饰位
+        // （`post_stroke`），所以 `Ctrl+Space` 到宿主那里仍然是 `Ctrl+Space`。
+        for (const mods of [{ ctrl: true }, { shift: true }, { alt: true }]) {
             expect(
                 classifyHostKeyRelay(
                     "playback.toggle",
@@ -142,8 +151,16 @@ describe("入口 A：插件认识这个键，但宿主那一族", () => {
                     PLUGIN_NO_TRANSPORT,
                 ),
                 JSON.stringify(mods),
-            ).toBeNull();
+            ).not.toBeNull();
         }
+        expect(
+            classifyHostKeyRelay(
+                "playback.toggle",
+                null,
+                stroke("Space", { meta: true }),
+                PLUGIN_NO_TRANSPORT,
+            ),
+        ).toBeNull();
     });
 
     test("规则 5：本会话已明确让不成时不再尝试", () => {
@@ -184,15 +201,24 @@ describe("入口 B：一条绑定都没命中", () => {
         }
     });
 
-    test("Escape / Tab 不让：宿主里它们几乎总是关窗口与换焦点", () => {
+    test("Escape / Tab 的**裸键**不让：宿主里它们几乎总是关窗口与换焦点", () => {
         for (const code of NON_RELAYABLE_CODES) {
             expect(classifyUnboundHostKey(stroke(code), PLUGIN_NO_TRANSPORT), code).toBeNull();
+            // 带修饰时它们是明确的命令（`Ctrl+Tab` 换标签、`Shift+Escape` 取消），照常让。
+            expect(
+                classifyUnboundHostKey(stroke(code, { shift: true }), PLUGIN_NO_TRANSPORT),
+                code,
+            ).not.toBeNull();
         }
     });
 
-    test("带修饰、独立 App、已闩锁 —— 三种情况都不让", () => {
+    test("独立 App、已闩锁、Meta —— 三种情况都不让", () => {
+        // 【带修饰的组合现在会外送】见 `isRelayableStroke` 的说明；`Meta` 是唯一的例外。
         expect(
             classifyUnboundHostKey(stroke("Home", { ctrl: true }), PLUGIN_NO_TRANSPORT),
+        ).not.toBeNull();
+        expect(
+            classifyUnboundHostKey(stroke("Home", { meta: true }), PLUGIN_NO_TRANSPORT),
         ).toBeNull();
         expect(
             classifyUnboundHostKey(stroke("Home"), { ...PLUGIN_NO_TRANSPORT, plugin: false }),

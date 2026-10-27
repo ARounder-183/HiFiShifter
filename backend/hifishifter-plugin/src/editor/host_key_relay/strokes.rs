@@ -132,10 +132,22 @@ impl Stroke {
         !self.ctrl && !self.shift && !self.alt && !self.meta
     }
 
-    /// 从 IPC 载荷（`{ code, ctrl, shift, alt, meta }`）解析。缺修饰字段按 `false`。
+    /// 从 IPC 载荷解析。缺修饰字段按 `false`。
+    ///
+    /// 【为什么同时接受平铺与嵌套两种形状】修饰位现在由前端**摊平**发送
+    /// （`{ code, action, ctrl, shift, alt, meta }`）。此前它们被包在 `mods` 里，而这里
+    /// 只读平铺字段 —— 于是每一个修饰位都被静默读成 `false`。同时读两种形状，是为了让
+    /// 一个还没更新的页面也不会把组合键降级成裸键（那比不让更糟：宿主会执行另一个命令）。
     pub(crate) fn from_json(value: &Value) -> Option<Self> {
         let code = KeyCode::parse(value.get("code")?.as_str()?)?;
-        let flag = |name: &str| value.get(name).and_then(Value::as_bool).unwrap_or(false);
+        let nested = value.get("mods");
+        let flag = |name: &str| {
+            value
+                .get(name)
+                .or_else(|| nested.and_then(|mods| mods.get(name)))
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        };
         Some(Self {
             code,
             ctrl: flag("ctrl"),

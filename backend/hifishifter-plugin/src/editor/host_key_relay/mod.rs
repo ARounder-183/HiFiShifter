@@ -130,11 +130,39 @@ impl EscapeError {
 /// 【为什么 `window` 是参数而不是字段】窗口句柄在 `WM_NCCREATE` 之前并不存在，
 /// 而持有本原语的 `BrowserState` 早于它构造。把它当参数传，构造顺序问题就消失了，
 /// 也顺手让原语保持无状态（可测、可在任意线程重建）。
+/// 这一次投给了宿主的**哪一级**窗口。
+///
+/// 【为什么要把这件事带出来】"按了没反应"有两种完全不同的成因：投给了一个不处理
+/// 按键的窗口，或者宿主根本没收到。没有这个读数，两者在日志里同形 —— 而它们要改的
+/// 地方相隔很远（前者是目标选择，后者是投递本身）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum TargetKind {
+    /// 宿主线程的**焦点窗口**（最可能真正处理这个键的那一个）。
+    Focus,
+    /// 焦点在我们子树里时，宿主给插件开的容器窗口。
+    Parent,
+    /// 退回 owner 链顶端（旧行为）。
+    RootOwner,
+}
+
+impl TargetKind {
+    /// 诊断/日志用的稳定短名。
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            TargetKind::Focus => "focus",
+            TargetKind::Parent => "parent",
+            TargetKind::RootOwner => "root-owner",
+        }
+    }
+}
+
 pub(crate) trait HostKeyEscape {
     fn fidelity(&self) -> Fidelity;
 
     /// `window` = 本编辑器窗口的平台句柄（HWND / NSView / XID），由调用方给出。
-    fn escape(&mut self, window: usize, stroke: &Stroke) -> Result<(), EscapeError>;
+    ///
+    /// 成功时交回**投给了哪一级**（诊断读数用）。
+    fn escape(&mut self, window: usize, stroke: &Stroke) -> Result<TargetKind, EscapeError>;
 
     /// 把键盘焦点**交还宿主**。
     ///
@@ -320,12 +348,32 @@ impl Arbiter {
     /// 【为什么它要探针】这类键有可能被宿主路由给插件视图（`IPlugView::onKeyDown`）。
     /// 若宿主已经处理、我们又补一次，用户按一下 Space 会被处理两次（播放→又暂停），
     /// 表现是"按了完全没反应" —— 比现状更坏。所以先等 90 ms 看宿主会不会自己动。
+    /// `verifiable` = 这个动作的后果会不会体现在 `playing` 上。
+    ///
+    /// 【为什么需要它】`Reading { playing }` 只能验证**传输类**动作。节拍器与本地录制
+    /// 无论宿主收没收到键，`playing` 都不会翻转 —— 探针只是白付 90 ms，然后把
+    /// "宿主没动"当成结论（而那个结论本来就不成立）。不可验证时直接走"跳过探针、
+    /// 让一次、观察窗记不可验证"那条分支。
     pub(crate) fn on_key(
         &mut self,
         now: Instant,
         action: &str,
         stroke: Stroke,
         reading: Option<Reading>,
+    ) -> KeyOutcome {
+        self.on_key_with(now, action, stroke, reading, true)
+    }
+
+    /// 与 [`Self::on_key`] 相同，但显式声明「这次能不能验证」。
+    ///
+    /// 见 `verifiable` 的说明：只有调用方知道某个动作的后果会不会体现在 `playing` 上。
+    pub(crate) fn on_key_with(
+        &mut self,
+        now: Instant,
+        action: &str,
+        stroke: Stroke,
+        reading: Option<Reading>,
+        verifiable: bool,
     ) -> KeyOutcome {
         match self.gate {
             Gate::Unavailable => {
@@ -354,6 +402,20 @@ impl Arbiter {
             return KeyOutcome::rejected(RejectReason::RateLimited);
         }
         match self.gate {
+            // 【不可验证就不探针】`playing` 翻转不了的动作（节拍器 / 本地录制）等多久都
+            // 得不出结论，而探针只是白付 90 ms 手感。
+            // 【为什么不顺手把档位改成 Relay】"宿主是否自己处理这个键"仍然未知；改了
+            // 档位，下一个**可验证**的传输键就再也不探针了 —— 那会让双触发重新出现。
+            Gate::Probe if !verifiable => {
+                self.record_escape(now);
+                KeyOutcome::accepted_with(vec![
+                    Effect::Trace("relayed-unverified"),
+                    Effect::Escape {
+                        action: action.to_owned(),
+                        stroke,
+                    },
+                ])
+            }
             Gate::Probe => match reading {
                 Some(baseline) => {
                     self.pending = Some(Pending {

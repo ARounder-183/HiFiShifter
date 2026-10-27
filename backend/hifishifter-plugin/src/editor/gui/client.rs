@@ -220,12 +220,20 @@ pub(crate) struct EditorClient {
 }
 
 /// 让路的累计读数（见 `EditorClient::relay_stats`）。
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct RelayStats {
     /// 成功投递给宿主的次数。
     posted: u64,
     /// 被原语拒绝的次数，按原因分。
     refused: [u64; 6],
+    /// 成功投递时，**投给了哪一级窗口**（focus / parent / root-owner）。
+    ///
+    /// 【为什么必须记这个】「按了没反应」有两种成因：投给了一个不处理按键的窗口，
+    /// 或者宿主根本没收到。两者在日志里同形，而修的地方相隔很远 —— 有了这一维，
+    /// 一份现场日志就能把方向定下来。
+    by_target: [u64; 3],
+    /// 最近一次拒绝的结构化原因（诊断包用）。
+    last_reason: Option<String>,
 }
 
 impl RelayStats {
@@ -246,6 +254,11 @@ impl RelayStats {
     fn json(&self) -> serde_json::Value {
         serde_json::json!({
             "posted": self.posted,
+            "byTarget": {
+                "focus": self.by_target[0],
+                "parent": self.by_target[1],
+                "rootOwner": self.by_target[2],
+            },
             "refused": {
                 "other": self.refused[0],
                 "unsupported-key": self.refused[1],
@@ -254,6 +267,7 @@ impl RelayStats {
                 "post-failed": self.refused[4],
                 "owned-key": self.refused[5],
             },
+            "lastReason": self.last_reason,
         })
     }
 }
@@ -1049,12 +1063,17 @@ fn apply_relay_effects(state: &Rc<RefCell<EditorClient>>, effects: Vec<host_key_
                     (fidelity, result)
                 };
                 match result {
-                    Ok(()) => {
-                        state.borrow_mut().relay_stats.posted += 1;
+                    Ok(target) => {
+                        {
+                            let mut state = state.borrow_mut();
+                            state.relay_stats.posted += 1;
+                            state.relay_stats.by_target[target_slot(target)] += 1;
+                        }
                         log_relay(&format!(
-                            "fidelity={} code={} relayed",
+                            "fidelity={} code={} target={} relayed",
                             fidelity.as_str(),
-                            stroke.code.as_str()
+                            stroke.code.as_str(),
+                            target.as_str()
                         ));
                     }
                     // 没投成：结构化原因进日志（不再对用户说话）。
@@ -1070,16 +1089,48 @@ fn apply_relay_effects(state: &Rc<RefCell<EditorClient>>, effects: Vec<host_key_
 /// 【为什么不对用户说话】失败的唯一出路是"点一下宿主窗口"，而那件事不需要一句被状态栏
 /// 裁掉一半的警告来提醒。留证据是日志与诊断包的职责（见 `hostKeyRelay` 读数）。
 fn refuse_relay(state: &Rc<RefCell<EditorClient>>, action: &str, reason: &str) {
-    state.borrow_mut().relay_stats.refused[RelayStats::slot(reason)] += 1;
+    {
+        let stats = &mut state.borrow_mut().relay_stats;
+        stats.refused[RelayStats::slot(reason)] += 1;
+        stats.last_reason = Some(reason.to_owned());
+    }
     log_relay(&format!("action={action} refused reason={reason}"));
 }
 
-/// 让路的诊断日志。
+/// `TargetKind` → 计数槽位（与 `byTarget` 的键同序）。
+fn target_slot(target: host_key_relay::TargetKind) -> usize {
+    match target {
+        host_key_relay::TargetKind::Focus => 0,
+        host_key_relay::TargetKind::Parent => 1,
+        host_key_relay::TargetKind::RootOwner => 2,
+    }
+}
+
+/// 这个动作的后果会不会体现在宿主的**播放态**上。
 ///
-/// 【为什么不需要额外限流】投递本身已被状态机的 60 ms 硬间隔与"10 秒 20 次"限流，
-/// 稳态最多 2 行/秒 —— 比给这里再加一个节流器更简单，也更不会掩盖真实节奏。
+/// 【为什么探针只能验证这一族】`Reading { playing }` 是唯一能证明「宿主收到了这个键」
+/// 的硬证据，而它只对播放/暂停翻转。节拍器与本地录制不会让它动 —— 对它们探针只是
+/// 白付 90 ms，然后把「宿主没动」当成结论（而那个结论本来就不成立）。
+fn relay_observable(action: &str) -> bool {
+    matches!(action, "playback.toggle" | "playback.stop") || action.starts_with("transport.")
+}
+
+/// 让路的诊断日志。**必须是 WARN 级**。
+///
+/// 【为什么不能用 `log_line`】那是 `log::info!`，而 release 的默认级别是 `Warn`
+/// （见 `lib.rs` 对 `gui_log_line` 的同一段说明）。这个功能的失败形态是「按了没反应」，
+/// 它**没有界面**（状态片装不下一句解释，所以上一轮把提示删掉了）—— 日志因此是它
+/// 唯一的证据。此前它走 info，于是现场日志里一条都没有，排查只能靠猜。
+///
+/// 【为什么要限流】投递本身已被状态机的 60 ms 硬间隔与「10 秒 20 次」限流，但**拒绝**
+/// 不受那两道闸约束（探针在飞、键不在表里、前台不是宿主…）。按文本分桶限流，稳态
+/// 最多 10 秒一行，既不刷屏也不掩盖节奏。
 fn log_relay(text: &str) {
-    crate::log_line(&format!("[relay] {text}"));
+    hifishifter_kernel::log_limiter::emit_limited_key(
+        log::Level::Warn,
+        &format!("relay:{text}"),
+        format_args!("[relay] {text}"),
+    );
 }
 /// WebView 启动时注入的能力标志（`window.__HFS_PLUGIN_BOOTSTRAP__`）。
 ///
@@ -1931,7 +1982,8 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
                         state.borrow_mut().relay.on_unbound(std::time::Instant::now(),stroke)
                     }else{
                         let reading=state.borrow().link.owner().ok().and_then(|owner|owner.transport_reading());
-                        state.borrow_mut().relay.on_key(std::time::Instant::now(),&action,stroke,reading)
+                        let verifiable=relay_observable(&action);
+                        state.borrow_mut().relay.on_key_with(std::time::Instant::now(),&action,stroke,reading,verifiable)
                     };
                     apply_relay_effects(state,outcome.effects);
                     Ok(serde_json::json!({

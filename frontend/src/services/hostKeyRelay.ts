@@ -152,14 +152,24 @@ const HOST_OWNED_CAPABILITIES: ReadonlySet<CapabilityId> = new Set<CapabilityId>
     "recording.local",
 ]);
 
-/** 键位描述是否"裸键"：无任何修饰。修饰状态无法忠实重放（见 `relayHostKey` 的注释）。 */
+/** 键位描述是否"裸键"：无任何修饰。 */
 export function isBareStroke(stroke: HostKeyStroke): boolean {
     return !stroke.ctrl && !stroke.shift && !stroke.alt && !stroke.meta;
 }
 
-/** 该键位能否让路：裸键 + 在具名表内。 */
+/**
+ * 该键位能否让路：在具名表内，且不含 `Meta`。
+ *
+ * 【为什么带修饰的组合**可以**让】上一轮把"带修饰"一律拒掉，理由是 `PostMessage`
+ * 不更新线程的异步键状态。那条限制是真的，但它只影响"直接读 `GetKeyState` 的宿主"；
+ * 按**消息流**维护修饰状态的宿主收到"修饰按下 → 键按下 → 键抬起 → 修饰抬起"这一串
+ * 就是忠实的。而宿主快捷键绝大多数是带修饰的组合（`Ctrl+S`、`Shift+Space`）——
+ * 一律拒掉等于让这条路只对空格有用。
+ *
+ * 【为什么 `Meta` 仍然拒】Win 键带系统级副作用：外送一次就可能把开始菜单弹出来。
+ */
 export function isRelayableStroke(stroke: HostKeyStroke): boolean {
-    return isBareStroke(stroke) && RELAYABLE_CODES.has(stroke.code);
+    return !stroke.meta && RELAYABLE_CODES.has(stroke.code);
 }
 
 /**
@@ -203,8 +213,8 @@ export function classifyHostKeyRelay(
     // 3. 只让"宿主自己那一族"。编辑类被拒时**绝不能**外泄（见 HOST_OWNED_CAPABILITIES）。
     const capability = capabilityForAction(action, surface);
     if (capability === null || !HOST_OWNED_CAPABILITIES.has(capability)) return null;
-    // 4. 裸键才让：修饰状态无法忠实重放，宿主会看到"没按 Ctrl 的 S"。
-    if (!isBareStroke(stroke)) return null;
+    // 4. `Meta` 不让（系统级副作用）；其余修饰位由原生侧按消息流补齐。
+    if (stroke.meta) return null;
     // 5. 这个会话里已经明确让不成了，不再重复打扰。
     if (env.unsupported) return null;
     // 6. 只让具名、与布局无关的键（见 RELAYABLE_CODES 的说明）。
@@ -228,9 +238,11 @@ export function classifyUnboundHostKey(
 ): HostKeyRelayRequest | null {
     if (!env.plugin) return null;
     if (env.unsupported) return null;
-    if (!isBareStroke(stroke)) return null;
-    if (!RELAYABLE_CODES.has(stroke.code)) return null;
-    if (NON_RELAYABLE_CODES.has(stroke.code)) return null;
+    if (!isRelayableStroke(stroke)) return null;
+    // 【为什么这份短名单只在**裸键**时生效】`Escape` / `Tab` 在宿主里几乎总是
+    // "关窗 / 换焦点"，一次误触就会关掉宿主窗口。而 `Ctrl+Tab`、`Shift+Escape` 是明确
+    // 的命令，没有人会把它们当成"随手一按" —— 它们照常外送。
+    if (isBareStroke(stroke) && NON_RELAYABLE_CODES.has(stroke.code)) return null;
     return { action: null, stroke };
 }
 

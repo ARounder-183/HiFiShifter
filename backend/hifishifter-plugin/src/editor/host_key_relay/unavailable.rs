@@ -15,7 +15,7 @@
 //! macOS 的响应链）或 `Fidelity::Synthetic`（只能事后补一次，如 X11 的合成事件）。
 //! **Policy 一行都不用改** —— 这就是把"怎么让"和"什么时候让"分开的全部收益。
 
-use super::{EscapeError, Fidelity, HostKeyEscape, Stroke};
+use super::{EscapeError, Fidelity, HostKeyEscape, Stroke, TargetKind};
 
 /// 【为什么在 Windows 上也算"未构造"却仍保留】把它 cfg 掉能让警告消失，代价是这份
 /// 文件在 Windows 上**不再被编译** —— 一个只在别的平台编译的文件，等真到那个平台时
@@ -28,7 +28,7 @@ impl HostKeyEscape for UnavailableEscape {
         Fidelity::Unavailable
     }
 
-    fn escape(&mut self, _window: usize, _stroke: &Stroke) -> Result<(), EscapeError> {
+    fn escape(&mut self, _window: usize, _stroke: &Stroke) -> Result<TargetKind, EscapeError> {
         // 状态机在 Fidelity::Unavailable 下根本不会走到这里（它直接记一行日志）；保留一个
         // 明确的失败值，是为了让"忘了看 Fidelity"的新调用方也拿不到假成功。
         Err(EscapeError::NoHostWindow)
