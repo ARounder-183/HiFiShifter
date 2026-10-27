@@ -1424,10 +1424,28 @@ impl ExtensionOwner {
             log::warn!("[ara] archive merge on inventory refresh failed: {error}");
         }
         drop(_transaction);
+        // 【纯几何变化也必须让渲染失效】`facts_changed` 只覆盖"方向 / 循环源 / 声道
+        // 模式"这一批 ARA 表达不到的事实；而**位置与长度**同样会改变听感（片段搬到
+        // 别的时间点、裁短一段），却只在 `token_changed` 里体现。旧实现只让后者推进
+        // `ui_geometry_revision`（界面），不推进 `render_epoch`（音频）——
+        // 于是"移动 item：波形动了、参数线动了、声音没动"。
+        //
+        // `project_host_item_geometry_locked` 让渲染读到的位置与 GUI 同源，这里让它
+        // 有机会被重算。
         if facts_changed {
             // 渲染输入变了 ⇒ 文档级失效：推进 epoch 并通知**全部 owner**。
             // 不持 `transaction` 调用，避免与 `prepare_job` 的事务重入。
             stamp.0.invalidate_render_input();
+        } else if token_changed {
+            // 【为什么这一支**只**推进代次，不通知 owner】`invalidate_render_input`
+            // 会调每个 owner 的 `prepare()`，而 `prepare()` 要投递到会话 actor。
+            // 本函数可能正跑在**那条 actor 线程**上（`ensure_loaded` 的清单刷新），
+            // 于是"投递并等自己"就是一次必然的自锁 —— 实测整份测试套件挂死在这里。
+            //
+            // 只推进 `render_epoch` 已经足够：`PreparedVersion` 含它，下一次
+            // 20 ms 定时器驱动的 prepare 会看到版本不匹配并重算。位置/长度这类纯几何
+            // 变化只需要"让已发布的快照失效"，不需要当场重排。
+            stamp.0.note_render_geometry_changed();
         }
     }
     /// ARA-only 后端的渲染事实来源：只登记 ARA region 自己能给出的字段。

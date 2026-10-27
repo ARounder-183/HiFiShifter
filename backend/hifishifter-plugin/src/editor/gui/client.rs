@@ -505,6 +505,20 @@ impl EditorClient {
         self.previous_focus = window;
     }
 
+    /// 视图**重新获得焦点**（窗口过程在 `WM_SETFOCUS` 里调用）。
+    ///
+    /// 【为什么这条必须存在】让路状态机里"宿主自己处理这个键"是按 key 记账的，而它的
+    /// 判据（探针窗口内 `playing` 有没有翻转）会被与本次让路无关的事情污染。用户从
+    /// 别的窗口回到插件的这一刻，是"我接下来想让插件处理这些键"最明确的一刻 ——
+    /// 从这里重新记账，一次误判就不会变成整场会话。
+    ///
+    /// 【为什么只清这一层】让路开关（`Gate`）是**会话级**结论（"这个宿主有没有让路
+    /// 原语"），它不因用户点了一下别处而失效。
+    #[cfg(windows)]
+    pub(crate) fn note_focus_regained(&mut self) {
+        self.relay.note_focus_regained();
+    }
+
     pub(crate) fn is_dead(&self) -> bool {
         self.dead
     }

@@ -489,6 +489,10 @@ impl ExtensionOwner {
         // "在 HiFiShifter 中，倒放被识别为正放"）。与音阶播种（`document.timeline` 的
         // `project_scale_notes`）是同一条纪律、同一个理由。
         document.project_host_take_facts_locked(&mut timeline);
+        // 【几何也必须来自同一份清单】见 `project_host_item_geometry_locked`：移动
+        // item 不产生 ARA 收口，所以 `document.timeline` 里的位置会落后一步；而编辑器
+        // 读的是 REAPER 清单。不在这里覆盖，就是"GUI 动了、声音没动"。
+        document.project_host_item_geometry_locked(&mut timeline);
         let mut resolved = edits.clone();
         resolved.reconcile(&document.track_bindings.lock_or_recover())?;
         resolved.apply(&mut timeline);

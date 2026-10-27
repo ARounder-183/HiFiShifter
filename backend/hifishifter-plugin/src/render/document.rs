@@ -3322,6 +3322,15 @@ clips_src={clips_src} dupes={dupes}}}"
     /// 因此这里取事务没有正确性收益，却会在这个 20 ms 定时器路径上多抢一次文档锁，
     /// 并让调用方无法"持事务阻止后台渲染"（测试与离线 setup 都依赖这个手法）。
     /// 锁序也因此更简单：本函数只取 `renderers`，不参与"事务 → renderers"的嵌套。
+    /// 只推进渲染代次，**不**通知 owner（见 `refresh_ui_inventory` 的说明）。
+    ///
+    /// 【为什么需要它】纯几何变化（宿主移动 / 裁剪 item）会让已发布的快照不再对应
+    /// 当前时间线，但重排必须由定时器驱动 —— 在清单刷新的调用栈上直接 `prepare()`
+    /// 会自锁（那条栈可能就在会话 actor 上，而 `prepare` 要投递回同一个 actor）。
+    pub(crate) fn note_render_geometry_changed(&self) {
+        self.render_epoch.fetch_add(1, Ordering::AcqRel);
+    }
+
     pub fn invalidate_render_input(&self) {
         self.render_epoch.fetch_add(1, Ordering::AcqRel);
         let owners = self

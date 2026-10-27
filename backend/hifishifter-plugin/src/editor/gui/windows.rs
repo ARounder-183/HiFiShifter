@@ -461,6 +461,13 @@ unsafe extern "system" fn window_proc(
             } else if message == WM_SETFOCUS {
                 // 宿主 Tab/onFocus 进入自有 HWND 后，使用标准 WebView2 接口进入 HTML 控件。
                 // MoveFocus 可能同步通知宿主；调用前不持任何借用。
+                //
+                // 【为什么在这里清"宿主自己处理这个键"的记账】用户从别的窗口回到插件的
+                // 这一刻，是"我接下来想让插件处理这些键"最明确的一刻。那条记账来自一次
+                // 只看 `playing` 翻转的探针，会被工程播完 / 循环回卷污染 —— 不清它，
+                // 一次误判就让某个键在整场会话里都送不出去。
+                let client = (*pointer).client.clone();
+                client.borrow_mut().note_focus_regained();
                 let port = (*pointer).port.clone();
                 port.focus_page();
                 return LRESULT(0);
@@ -700,6 +707,20 @@ fn configure_browser(
     unsafe {
         settings.SetAreHostObjectsAllowed(false)?;
         settings.SetAreDefaultContextMenusEnabled(false)?;
+        // 【为什么必须关掉浏览器加速键】默认值下 WebView2 自己消费一批按键
+        // （`F5` 重载页面、`F3` / `F7`、`Ctrl+F`、`Alt+←` …），页面根本收不到
+        // `keydown`。而 `F1-F24` 明确在可让路键表里 —— 用户按 F5 期望宿主动作，
+        // 实际发生的是**插件页面被重载**（顺带清掉前端的"本会话不再尝试"闩锁，
+        // 于是同一个 bug 会"偶尔自愈"，更难查）。
+        //
+        // 【为什么选"关掉"而不是订阅 `AcceleratorKeyPressed`】两者都能到达 DOM，
+        // 但订阅那条路要自己维护一份"哪些键允许浏览器处理"的白名单，而那份名单
+        // 会与页面里的键表漂移成两份；关掉之后**所有**按键都进页面，让路的判据
+        // 只剩一处（前端 `hostKeyRelay`）。方案 §3.5.5 允许二选一。
+        // 该成员在 `ICoreWebView2Settings3` 上（WebView2 ≥ 1.0.864），基础接口没有。
+        let settings3: webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings3 =
+            settings.cast()?;
+        settings3.SetAreBrowserAcceleratorKeysEnabled(false)?;
     }
     let mut token = 0;
     unsafe {

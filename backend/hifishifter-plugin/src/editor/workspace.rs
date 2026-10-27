@@ -2304,6 +2304,62 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
             }
         }
     }
+
+    /// 把宿主清单里的 **item 几何**（位置 / 长度）投影到一条时间线的 clip 上。
+    ///
+    /// 【为什么需要它：这是"移动 item 之后声音不动"的直接成因】编辑器看到的片段位置
+    /// 来自 REAPER 清单（`present_host_inventory` 把 `D_POSITION / D_LENGTH` 写进
+    /// clip），而渲染输入读的是 `document.timeline`（ARA 映射产物）—— 后者只在
+    /// `remap_and_log` 收口时重建。**移动 item 不保证产生收口**，于是 GUI 动了、渲染
+    /// 没动、声音也没动；分割必然 destroy+create ⇒ 收口一次 ⇒ "分割之后才对"。
+    ///
+    /// 【为什么放在渲染输入之前】它必须与 GUI 读的是**同一份**清单。两份几何是这条
+    /// 缺陷的根，收口到同一份投影是唯一的正解（方案 §3.2.1 的 `HostFacts::project`
+    /// 的最小落地：清单侧先做，ARA 侧仍由 `remap_and_log` 供值）。
+    ///
+    /// 返回被改动的 clip 条数。
+    pub(crate) fn project_host_item_geometry_locked(
+        &self,
+        timeline: &mut TimelineState,
+    ) -> usize {
+        let items: std::collections::HashMap<String, (f64, f64)> = self
+            .ui_tracks
+            .lock_or_recover()
+            .values()
+            .flat_map(|track| &track.items)
+            .map(|item| {
+                (
+                    item.geometry.item_id.clone(),
+                    (item.geometry.start_sec, item.geometry.duration_sec),
+                )
+            })
+            .collect();
+        if items.is_empty() {
+            return 0;
+        }
+        let mut changed = 0_usize;
+        for clip in &mut timeline.clips {
+            let Some(guid) = host_item_guid(&clip.id) else {
+                continue;
+            };
+            let Some((start, length)) = items.get(guid).copied() else {
+                continue;
+            };
+            if !(start.is_finite() && length.is_finite() && length > 0.0) {
+                continue;
+            }
+            // 宿主几何的浮点抖动不该每轮都算一次"变化"（那会让渲染永久失效）。
+            if crate::host::geometry::host_value_compatible(clip.start_sec, start)
+                && crate::host::geometry::host_value_compatible(clip.length_sec, length)
+            {
+                continue;
+            }
+            clip.start_sec = start;
+            clip.length_sec = length;
+            changed += 1;
+        }
+        changed
+    }
     /// 有效item静音按同文档唯一region身份投影；不把它存成HFS自己的可写轨道状态。
     pub(crate) fn project_host_mutes_locked(&self, timeline: &mut TimelineState) {
         let identities = self.clip_ids.lock_or_recover();
