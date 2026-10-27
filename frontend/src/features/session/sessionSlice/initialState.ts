@@ -160,6 +160,7 @@ export const initialState: SessionState = {
         playbackWaitingForRender: false,
         playbackTarget: null,
         playbackPositionSec: 0,
+        positionAdvancing: false,
         playbackDurationSec: 0,
         hostAuthoritative: false,
         gpuBackend: "",
@@ -214,6 +215,5 @@ export const initialState: SessionState = {
     hostAudio: null,
     _latestEditRequestId: null,
     _transportEpoch: 0,
-    _pluginSeekRequestId: null,
     _stopInterruptedPlayback: false,
 };

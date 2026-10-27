@@ -18,6 +18,10 @@ import { PluginApplyStatus } from "./features/ara/PluginApplyStatus";
 import { HostLinkExportControl } from "./features/hostLink/HostLinkExportControl";
 import { getPluginApplySnapshot, subscribePluginApply } from "./features/ara/pluginApplyStore";
 import { listen as listenHostEvent } from "./services/hostEvents";
+import {
+    transportPushed,
+    type TransportSample,
+} from "./features/session/sessionSlice/extraReducers/transport";
 import { getPluginHost } from "./services/pluginHost";
 import {
     importAudioAtPosition,
@@ -3481,6 +3485,34 @@ function AppInner() {
      * —— 拖动根本没进 DOM，没有坐标可算。播放头 + 当前选中轨道是唯一能预期的答案，
      * 也与"文件菜单导入"完全一致。
      */
+    /*
+     * 宿主传输推送：宿主侧的视图定时器每 20 ms 读一次原子时钟，**变了就发一条事件**。
+     *
+     * 【为什么不再靠轮询】轮询是"请求-响应"：一次慢回执、一次在途去重、一次乱序丢弃，
+     * 任何一环都会变成用户看得见的一次停顿。推送把那一段往返整个删掉，于是"跳到位
+     * 之后卡一会儿"这类症状从链路上消失，而不是被调参掩盖。
+     *
+     * 【为什么是 plugin-only】独立 App 的传输在本进程里，没有宿主定时器可挂 ——
+     * 那边继续用轮询（见下面的常驻采样）。
+     */
+    useEffect(() => {
+        if (!isPluginMode()) return;
+        let disposed = false;
+        let unsubscribe: (() => void) | null = null;
+        void listenHostEvent<TransportSample>("transport", (event) => {
+            if (event.payload) dispatch(transportPushed(event.payload));
+        })
+            .then((off) => {
+                if (disposed) off();
+                else unsubscribe = off;
+            })
+            .catch(() => undefined);
+        return () => {
+            disposed = true;
+            unsubscribe?.();
+        };
+    }, [dispatch]);
+
     useEffect(() => {
         if (!isPluginMode()) return;
         let disposed = false;
@@ -3565,7 +3597,10 @@ function AppInner() {
         // 一格地挪，这就是"跳到位之后卡一会儿"里那个"一会儿"的直接来源。
         // `host_authoritative` 说的是"位置来自宿主"，它一旦为真，采样节奏就必须跟上
         // 宿主（33 ms）；播放与否交给后端去答。
-        const intervalMs = runtimeIsPlaying || hostAuthoritative ? 33 : 400;
+        // 【为什么插件形态不再需要 33 ms 档】宿主侧的视图定时器已经在**推**传输读数
+        // （见下方的 `transport` 事件），轮询只剩看门狗职责。独立 App 没有推送通道，
+        // 保留原节奏。
+        const intervalMs = !isPluginMode() && (runtimeIsPlaying || hostAuthoritative) ? 33 : 400;
         const id = window.setInterval(() => {
             // 阻塞式前台预渲染（target="original"）阶段后端还未真正进入 playing，
             // 若此时同步会把前端"准备播放"状态误判为停止，导致 stop 锚点丢失。

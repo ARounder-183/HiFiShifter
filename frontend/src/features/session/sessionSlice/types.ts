@@ -388,6 +388,13 @@ export interface SessionState {
         playbackWaitingForRender: boolean;
         playbackTarget: string | null;
         playbackPositionSec: number;
+        /**
+         * 宿主说在播、且位置真的在前进（由两次连续采样算出）。
+         *
+         * 【为什么与 `isPlaying` 并存】`isPlaying` 是"宿主说在播"的镜像，起播第一条
+         * 采样到达之前它是假的；而视觉推进不能等它 —— 那正是"跳到位之后卡一会儿"。
+         */
+        positionAdvancing: boolean;
         playbackDurationSec: number;
         /**
          * 最近一次播放采样是不是**宿主在回答**（后端 `host_authoritative`）。
@@ -574,8 +581,6 @@ export interface SessionState {
      * `_latestHistoryOpRequestId` / seekPlayhead 的乱序防护同理。
      */
     _transportEpoch: number;
-    /** 插件seek写入未结束时不接纳同代但仍在旧位置的宿主轮询。 */
-    _pluginSeekRequestId: string | null;
 
     /**
      * 最近一次 stop/pause 命令**开始瞬间**的真实播放状态（由

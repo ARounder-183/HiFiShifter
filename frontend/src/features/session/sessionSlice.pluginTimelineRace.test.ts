@@ -130,10 +130,11 @@ test("split receipt keeps both clips when an old one-clip refresh arrives late",
     expect(state._pluginClipEditRequests).toEqual({});
 });
 
-test("plugin seek ignores old-position polls during request and old polls after acknowledgement", () => {
+test("plugin seek is not undone by a poll that was dispatched before it", () => {
     let state = { ...initial(), playheadSec: 5 };
+    // seek 之前派发的那条采样携带旧纪元 ⇒ 迟到响应必须被丢弃。
+    const beforeSeek = state._transportEpoch;
     state = reducer(state, seekPlayhead.pending("seek-b", 5));
-    const epoch = state._transportEpoch;
     const oldPoll = {
         ok: true as const,
         is_playing: false,
@@ -145,17 +146,40 @@ test("plugin seek ignores old-position polls during request and old polls after 
     };
     state = reducer(
         state,
-        syncPlaybackState.fulfilled(oldPoll, "poll", { epoch, dispatchedAtMs: 0 }),
+        syncPlaybackState.fulfilled(oldPoll, "poll", {
+            epoch: beforeSeek,
+            dispatchedAtMs: 0,
+        }),
     );
     expect(state.playheadSec).toBe(5);
     state = reducer(state, seekPlayhead.fulfilled({ ok: true, playhead_sec: 1 }, "seek-b", 5));
     expect(state.playheadSec).toBe(5);
+});
+
+test("★ 定位窗口内的读数就是目标：一条「宿主还在旧位置」的采样不得拽回光标", () => {
+    // 后端在宿主落地之前把读数钉在目标上（position_source = "seek"），
+    // 前端只需要照抄 —— 它没有任何观测宿主的能力。
+    let state = { ...initial(), playheadSec: 20 };
     state = reducer(
         state,
-        syncPlaybackState.fulfilled(oldPoll, "poll-late", { epoch, dispatchedAtMs: 0 }),
+        syncPlaybackState.fulfilled(
+            {
+                ok: true,
+                is_playing: true,
+                target: null,
+                base_sec: 0,
+                position_sec: 20,
+                duration_sec: 60,
+                host_authoritative: true,
+                position_source: "seek",
+                seek_pending: true,
+            } as never,
+            "poll-seek",
+            { epoch: state._transportEpoch, dispatchedAtMs: 0 },
+        ),
     );
-    expect(state.playheadSec).toBe(5);
-    expect(state._pluginSeekRequestId).toBeNull();
+    expect(state.playheadSec).toBe(20);
+    expect(state.runtime.isPlaying).toBe(true);
 });
 
 test("import acknowledgement cannot be removed by a read started before import", () => {

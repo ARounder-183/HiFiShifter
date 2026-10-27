@@ -38,6 +38,9 @@ export const TimelineTransportBridge = React.memo(function TimelineTransportBrid
             playheadSec: state.session.playheadSec,
             playheadSampledAtMs: state.session.playheadSampledAtMs,
             isPlaying: state.session.runtime.isPlaying,
+            // 【为什么要带上它】`isPlaying` 是镜像，起播第一条采样到达之前是假的；
+            // 而"位置真的在前进"可以由两条采样直接算出来（见 applyTransportSample）。
+            positionAdvancing: state.session.runtime.positionAdvancing,
         }),
         // 无 shallowEqual 时每次 dispatch 都产生新对象引用，
         // 该桥接组件会在任意 store 更新（含 33Hz 播放轮询）时重渲染。
@@ -58,7 +61,7 @@ export const TimelineTransportBridge = React.memo(function TimelineTransportBrid
      * 而"我听到的是旧音频"是另一件事（状态栏的 `stale`）。把光标停住并不能让音频
      * 变新，只会让用户以为播放停了 —— 而音频其实在响。
      */
-    const isTransportAdvancing = transport.isPlaying;
+    const isTransportAdvancing = transport.isPlaying || transport.positionAdvancing;
 
     useVisualPlayhead({
         syncedPlayheadSec: transport.playheadSec,
