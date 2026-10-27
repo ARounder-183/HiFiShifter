@@ -96,3 +96,39 @@ engine / factory / initialize / engine_exit / load_failed。
 回归守卫：scripts/vst3/windows/load_probe.cpp + verify.ps1，由
 .github/workflows/vst3.yml 的 Windows VST3 load gate 执行。vst3_exports.rs 只覆盖
 Rust engine DLL，不能替代这个黑盒门禁。
+
+## 6. 几何与时钟：两条不被授权门控的读通道
+
+本节补在 2026-10-27 的编辑完整性改造之后，回答两个**曾经被门住**的通道。
+
+### 6.1 几何只有一个投影面
+
+- 编辑器看到的片段位置 / 长度来自 **REAPER 清单**（`D_POSITION` / `D_LENGTH`）；
+  渲染输入读的是 `document.timeline`（ARA 映射产物），而后者只在 `remap_and_log`
+  收口时重建。
+- **移动 item 不保证产生收口**。于是两份几何会分叉：GUI 动了、渲染没动、声音也没动。
+  修复不是"再同步一次"，而是让渲染输入在读之前**接受同一份清单投影**
+  （`DocumentSession::project_host_item_geometry_locked`）。
+- 推论：任何新增的"渲染前几何来源"都必须**接到这条投影上**，不得另起一份读法。
+  ARA 侧仍然由 `remap_and_log` 供值（那一侧本来就在收口时整体重算）。
+
+### 6.2 时钟不受几何授权门控
+
+- `host_query_stamp()` 回答的是"这份清单 / 几何此刻能不能查"（需要 document、分配、
+  未关闭）。它**不是**时钟的授权：时钟只需要"宿主在哪儿、在不在播"。
+- 旧实现把两者绑在一起，于是没有 document / 没有分配的实例一次也不发布宿主位置，
+  150 ms 后 `host_is_fresh()` 为假，光标退回音频块读数 —— 而编辑器实例不处理音频，
+  那两个量恒为 `(0, false)`。用户看到的就是"跳到位之后冻住一会儿"。
+- 现在：先无条件采一次并发布，再用 stamp（可选）决定要不要继续做清单那一段。
+- 播放位在 `read()` 里取**并集**（任一来源说在播就是真），位置仍取最新鲜的来源。
+  "该走的时候不走"是看得见的卡顿，"多走几毫秒"下一拍就被采样纠回来 —— 两者代价不对称。
+
+### 6.3 纯几何变化不能让渲染当场重排
+
+- 清单刷新可能跑在**会话 actor 自己**的调用栈上（`ensure_loaded` → 清单刷新），
+  而 `ExtensionOwner::prepare()` 要投递回同一个 actor。在那种栈上直接调
+  `invalidate_render_input()` 就是"投递并等自己"——实测会让整份测试套件挂死。
+- 只有"ARA 表达不到的渲染事实"（方向 / 循环源 / 声道模式）才走
+  `invalidate_render_input()`；纯位置 / 长度变化只推进 `render_epoch`
+  （`note_render_geometry_changed`），由 20 ms 定时器驱动的下一次 prepare 接手。
+
