@@ -1409,6 +1409,12 @@ impl ExtensionOwner {
                 status.state.as_str()
             );
         }
+        // 【触发点③：清单 / 几何推进】合入的候选集是 `track_bindings`，而它由真实
+        // sequence 边写入 —— "宿主图又长出了一块"的第一个可见信号正是这次清单刷新。
+        // 在这里补一次尝试，让"存档先到、图后长成"的窗口按毫秒收敛，而不是等宿主收口。
+        if let Err(error) = stamp.0.merge_archive_restore_locked() {
+            log::warn!("[ara] archive merge on inventory refresh failed: {error}");
+        }
         drop(_transaction);
         if facts_changed {
             // 渲染输入变了 ⇒ 文档级失效：推进 epoch 并通知**全部 owner**。

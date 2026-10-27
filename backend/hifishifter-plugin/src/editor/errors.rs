@@ -112,6 +112,19 @@ const TERMINAL: &[&str] = &[
 /// "宿主模型冲突"前缀：可重试（宿主把模型带到了真实状态后会收敛）。
 pub(crate) const CONFLICT_PREFIX: &str = "Conflict: host";
 
+/// 提交闸的"模型代次变了"——**唯一**可重放的那一条冲突。
+///
+/// 【为什么不能把整个 `Conflict:` 家族都当可重放】"工作区几何只读"（编辑器手里的
+/// clip 布局与宿主对不上）、"编辑权威毒化"都不是"换一份基线再交一次"能解决的：
+/// 前者要用户先刷新，后者是终态。把它们也重放，等于把一次可行动的错误变成三次
+/// 无谓的重算，最后仍要报同一个错 —— 而中间那三次会让状态栏闪成"正在应用"。
+pub(crate) const MODEL_CHANGED: &str = "model changed; local curves preserved";
+
+/// 这一条错误是不是"宿主把模型带到了新代次，换一份基线重放一次就能落地"。
+pub(crate) fn is_replayable_edit_conflict(error: &str) -> bool {
+    error.contains(MODEL_CHANGED)
+}
+
 /// 这一条错误是不是"宿主状态在我们脚下变了一次"造成的**暂时**冲突。
 ///
 /// 【为什么不能只认 `CONFLICT_PREFIX`】`Conflict:` 家族里除了 `Conflict: host …`

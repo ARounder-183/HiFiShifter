@@ -228,6 +228,12 @@ impl ExtensionOwner {
             renderer.refresh_ui_inventory();
             renderer.prepare();
         }
+        // 【触发点②：实例绑定】重开工程时"先给存档、再交付模型"，而存档到达那一刻
+        // 还没有任何 owner —— 于是合并的唯一入口（`prepare_renderers`）要等宿主收口。
+        // 绑定是**图已经长出来**的第一个确定时刻，在这里补一次尝试。
+        if let Err(error) = document.merge_archive_restore() {
+            log::warn!("[ara] archive merge after binding failed: {error}");
+        }
         // 【T8：把图读数打出来】绑定成功的那一刻宿主的图通常还没建（region 在之后才到），
         // 所以这一行几乎总是全零 —— 它的价值在于**当它停在零**：下一次重启报障时，
         // 若这里 ctx=0，说明宿主要么没发图、要么被我们拒了，不必再从位掩码反推。

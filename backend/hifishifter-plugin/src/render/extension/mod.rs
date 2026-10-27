@@ -60,8 +60,8 @@ use types::*;
 // 这些类型本来就是 `pub(crate)`（别的模块按 `render::extension::X` 引用），搬家后
 // 必须在本模块名下重新导出，否则它们的可见面会静默窄一层。
 pub(crate) use types::{
-    BlockEvidence, CaptureOutput, CaptureStage, HostAudioState, InstanceMode, ScopeSource,
-    SnapshotSource,
+    BlockEvidence, CaptureOutput, CaptureStage, HostAudioState, InstanceMode,
+    RestoreIdentityVerdict, ScopeSource, SnapshotSource,
 };
 
 /// 原生接口与只读元数据属于真实组件，缓存不跨其文档/分配/host变更复用。

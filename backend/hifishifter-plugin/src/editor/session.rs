@@ -1324,10 +1324,72 @@ impl EditorSession {
         let _ = current.worker.join();
         Some((current.generation, current.ticket, cancelled, result))
     }
+
+    /// 把一份时间线作为**用户编辑**提交给文档（一次尝试）。
+    ///
+    /// 【为什么从 `publish_timeline` 里抽出来】重放要求"同一份用户意图提交多次"，
+    /// 而每次提交都必须用**当次**的基线与代次。抽成一个函数，重放循环里就只剩
+    /// "取新基线 → 再交一次"这一件事。
+    fn submit_workspace_edit(&self, timeline: &TimelineState) -> Result<(), String> {
+        let document = self.require_document()?;
+        let groups = document.edits.lock_or_recover().groups.clone();
+        let groups = if groups.is_empty() {
+            None
+        } else {
+            Some(groups.with_processing_from(timeline, &document.group_aliases(&self.namespace))?)
+        };
+        let native = self.native_timeline(timeline.clone())?;
+        let (edit, model, baseline) = {
+            let loaded = self.loaded.lock_or_recover();
+            (loaded.edit, loaded.model, loaded.view.clone())
+        };
+        // 【没有基线只有一种可能】这份会话还没读过工作区（窗口刚建、首帧还没到）。
+        // 那不是"冲突"，是一句可行动的话：重新打开窗口即可。
+        let Some(baseline) = baseline else {
+            return Err(
+                "Conflict: the editor has not read the workspace yet; reopen the plugin window"
+                    .into(),
+            );
+        };
+        let versions =
+            document.accept_workspace_edits_with_groups(edit, model, &native, &baseline, groups)?;
+        let mut loaded = self.loaded.lock_or_recover();
+        loaded.edit = versions.0;
+        loaded.model = versions.1;
+        // 【成对写】accept 返回的就是"编辑器此刻显示的视图"的下一份基线；
+        // 不存它，下一次提交的基线就落后一代（旧实现正是在这里把指针推离缓存）。
+        loaded.view = Some(versions.2);
+        Ok(())
+    }
+
+    /// 重新取一份"编辑器此刻读到的"工作区视图，作为下一次提交的差分基线。
+    ///
+    /// 【为什么必须重取而不是复用】`capture_changes` 只记录 `client` 与基线的**差异**。
+    /// 拿一份过期基线重放，几何变化会被当成"用户改了参数"写回源曲线（抹平）。
+    fn refresh_baseline(&self) -> Result<(), String> {
+        let document = self.require_document()?;
+        let versions = document.editor_versions()?;
+        let view = document.workspace_view()?;
+        let mut loaded = self.loaded.lock_or_recover();
+        loaded.edit = versions.0;
+        loaded.model = versions.1;
+        loaded.view = Some(view);
+        Ok(())
+    }
+
     /// 原线缓存组装保留在actor；只把已确认的版本票据交给DSP线程，不并发修改timeline。
     fn prepare_apply(&self) -> Result<(Arc<DocumentSession>, u64, u64, String), String> {
+        // 【R7：只有**终态**错误才短路自动渲染】瞬时冲突（`Conflict: …`）意味着"宿主
+        // 在提交窗口里动过"，它必然收敛 —— 而 `self.error` 只在"提交成功"或
+        // `ensure_loaded` 成功时被清空。于是**一次**冲突就能让音频停在旧版本，直到
+        // 用户再做一次能成功的操作（用户报的"编辑之后没有声音"）。
+        //
+        // 现在瞬时冲突只进 `render_error`（读数），不挡渲染：旧快照仍可服务，
+        // 而重放（见 `publish_timeline`）会把编辑补上。
         if let Some(error) = self.error.lock_or_recover().clone() {
-            return Err(error);
+            if !crate::editor::errors::is_replayable_edit_conflict(&error) {
+                return Err(error);
+            }
         }
         self.complete_cached_analysis();
         if let Some(error) = self.error.lock_or_recover().clone() {
@@ -2896,6 +2958,12 @@ impl EditorSession {
             "rendering_active":rendering,
             // 状态栏的「渲染中」读这一个（见上面 `audible_stale` 的说明）。
             "render_audible_stale":audible_stale,
+            // 【"你的这次编辑有没有被采纳"】写回被拒 / 跳过 / 无基线 / 被保护 / 重放耗尽
+            // 都在这一个读数里。§1.3 那 11 条回退路径里 9 条此前**连字符串都没有**，
+            // 用户唯一能做的事是"再画一次试试"。它不驱动任何文案（那是 §3.6 的事），
+            // 只让"没有被采纳"成为可查的事实。
+            "edit_health":self.document().map(|document|document.edit_health_json())
+                .unwrap_or(serde_json::Value::Null),
             "host_version":self.host_version.load(Ordering::Acquire),
             "error":self.error.lock_or_recover().clone().or_else(||self.render_error.lock_or_recover().clone()).or(host_error),"connected":!self.closed.load(Ordering::Acquire),
             "ready":self.loaded.lock_or_recover().initialized})
@@ -2946,45 +3014,66 @@ impl ParamHost for EditorSession {
             self.render_requested.store(true, Ordering::Release);
             return;
         }
-        let result = (|| {
-            let document = self.require_document()?;
-            let groups = document.edits.lock_or_recover().groups.clone();
-            let groups =
-                if groups.is_empty() {
-                    None
+        // 【重基 + 重放】提交闸在"宿主在我编辑期间动过"时会返回 Conflict。
+        //
+        // 那条冲突是**可重基**的：用户的意图是"这条曲线的这几个帧改成这些值"，与
+        // "宿主在这期间移动了 item"在语义上并不冲突 —— 只要把差分落到**编辑器现在
+        // 看到的那份基线**上。旧实现把这种冲突写进 `self.error`，而
+        // `prepare_apply` 见错即停 ⇒ 一次瞬时冲突就让自动渲染停摆到用户下一次
+        // 成功的操作。这是"编辑之后没有声音"的第二个成因。
+        //
+        // 现在：每次重放前取一份**新基线**（`refresh_baseline`），最多
+        // `MAX_EDIT_REPLAYS` 次。重放的输入是"用户意图的差分"，与几何无关，所以
+        // 不会无限循环；只有"连差分都无法表达"（目标轨已不存在）才会耗尽。
+        const MAX_EDIT_REPLAYS: usize = 3;
+        let mut attempt = 0_usize;
+        let mut failure: Option<String> = None;
+        loop {
+            match self.submit_workspace_edit(&timeline) {
+                Ok(()) => {
+                    *self.error.lock_or_recover() = None;
+                    break;
+                }
+                Err(error) => {
+                    let retryable = crate::editor::errors::is_replayable_edit_conflict(&error);
+                    if retryable && attempt < MAX_EDIT_REPLAYS {
+                        attempt += 1;
+                        // 取新基线：下一次提交必须以"编辑器现在看到的那一份"为差分基准。
+                        // 取不到就当作耗尽 —— 拿旧基线重放会把几何差异当成用户改动写回。
+                        if let Err(reload) = self.refresh_baseline() {
+                            failure = Some(format!(
+                                "{error}; the baseline could not be refreshed ({reload})"
+                            ));
+                            break;
+                        }
+                        continue;
+                    }
+                    failure = Some(error);
+                    break;
+                }
+            }
+        }
+        match failure {
+            None => {}
+            Some(error) => {
+                if crate::editor::errors::is_replayable_edit_conflict(&error) {
+                    // 【瞬时冲突不进 `self.error`】那个位置是"终态、需要用户处置"的。
+                    // 放进去会让 `prepare_apply` 永久短路（见 R7）。这里只进渲染读数，
+                    // 并把"这次编辑没有被采纳"记成可读的读数 —— 用户至少知道该重画。
+                    *self.render_error.lock_or_recover() = Some(format!(
+                        "Conflict: this edit was not applied after {} attempt(s): {error}",
+                        attempt + 1
+                    ));
+                    if let Some(document) = self.document() {
+                        document.note_edit_dropped(format!(
+                            "replay budget exhausted after {} attempt(s): {error}",
+                            attempt + 1
+                        ));
+                    }
                 } else {
-                    Some(groups.with_processing_from(
-                        &timeline,
-                        &document.group_aliases(&self.namespace),
-                    )?)
-                };
-            let timeline = self.native_timeline(timeline)?;
-            let (edit, model, baseline) = {
-                let loaded = self.loaded.lock_or_recover();
-                (loaded.edit, loaded.model, loaded.view.clone())
-            };
-            // 【没有基线只有一种可能】这份会话还没读过工作区（窗口刚建、首帧还没到）。
-            // 那不是"冲突"，是一句可行动的话：重新打开窗口即可。
-            let Some(baseline) = baseline else {
-                return Err(
-                    "Conflict: the editor has not read the workspace yet; reopen the plugin \
-                     window"
-                        .into(),
-                );
-            };
-            let versions = document
-                .accept_workspace_edits_with_groups(edit, model, &timeline, &baseline, groups)?;
-            let mut loaded = self.loaded.lock_or_recover();
-            loaded.edit = versions.0;
-            loaded.model = versions.1;
-            // 【成对写】accept 返回的就是"编辑器此刻显示的视图"的下一份基线；
-            // 不存它，下一次提交的基线就落后一代（旧实现正是在这里把指针推离缓存）。
-            loaded.view = Some(versions.2);
-            *self.error.lock_or_recover() = None;
-            Ok::<_, String>(())
-        })();
-        if let Err(error) = result {
-            *self.error.lock_or_recover() = Some(error);
+                    *self.error.lock_or_recover() = Some(error);
+                }
+            }
         }
     }
 }

@@ -471,33 +471,6 @@ impl ExtensionOwner {
         Ok(())
     }
 
-    /// 暂存 ARA 存档恢复出来的编辑，交给本 owner 的既有合并路径。
-    ///
-    /// 【为什么不直接写 `document.edits`】合并要做身份重绑、冲突判定、`needs_rebind`
-    /// 处理 —— 这些都在 `merge_pending_restore` 里，而且已经过测试。存档通道只是另一个
-    /// 来源，走同一条路才不会出现两份会漂移的实现。
-    ///
-    /// 【为什么覆盖已有的 `pending_restore`】VST3 组件状态与 ARA 存档携带的是同一份
-    /// `EditState`。两者同时到达时后到的应当胜出（它是宿主更晚保存的那份）；而 ARA 存档
-    /// 在宿主重载工程时是权威来源。
-    ///
-    /// 【为什么这里**不**刷新文档】唯一的调用点是 `DocumentSession::prepare_renderers`，
-    /// 它已经持有 `transaction`，而刷新要取同一把不可重入的锁 —— 那就是用户报的
-    /// "重开工程宿主未响应"。合入由 `prepare_renderers` 紧随其后的
-    /// `merge_pending_restore` 循环完成，所以这里只负责**暂存**。
-    pub(crate) fn stash_archive_restore(&self, restored: crate::state_channel::EditState) {
-        // 【T-D5】与 `restore_state` 同一条纪律：已经合入过的同一份载荷不再重放。
-        if Self::restore_digest(&restored).is_some_and(|digest| {
-            *self.restore_applied_digest.lock_or_recover() == Some(digest)
-                && !self.has_pending_restore()
-        }) {
-            log::info!("[ara] archive payload unchanged since the last merge; not replaying it");
-            return;
-        }
-        *self.pending_restore.lock_or_recover() = Some(restored);
-        self.reset_restore_budget();
-        self.note_restore_pending();
-    }
     /// 新载荷到达 ⇒ 等待账从头开始（否则上一份载荷用完的 10 s 会立刻压到这一份上）。
     pub(super) fn reset_restore_budget(&self) {
         self.restore_attempts.store(0, Ordering::Relaxed);
@@ -665,7 +638,7 @@ impl ExtensionOwner {
     /// （`state_channel` 不依赖本模块的错误类型），三条身份错误都带 `identity`：
     /// "ARA edit identity missing…" / "…missing or ambiguous in rebuilt host graph" /
     /// "ARA saved edit identities are ambiguous…"。其余错误（修订号耗尽）是真失败。
-    pub(super) fn classify_restore_identity_error(error: &str) -> RestoreIdentityVerdict {
+    pub(crate) fn classify_restore_identity_error(error: &str) -> RestoreIdentityVerdict {
         // 【为什么是 `identit` 而不是 `identity`】`state_channel` 的三条措辞分别是
         // "identity missing"、"identity missing or ambiguous" 与
         // **"identities are ambiguous"** —— 第三条是复数，用全词会漏掉它，
@@ -711,121 +684,32 @@ impl ExtensionOwner {
             }
             return Ok(());
         }
+        // 【候选集只收本实例被分配的轨道】组件状态是**逐实例**的存档：它只带本实例
+        // 服务的那些轨。文档级存档走 `DocumentSession::merge_archive_restore`，
+        // 候选集是整份 `track_bindings` —— 两条通道的视野本来就不同。
         let allowed: BTreeSet<_> = host.tracks.iter().map(|t| t.id.clone()).collect();
-        let bindings = document
+        let bindings: crate::state_channel::TrackBindings = document
             .track_bindings
             .lock_or_recover()
             .iter()
             .filter(|(id, _)| allowed.contains(*id))
             .map(|(id, identity)| (id.clone(), identity.clone()))
             .collect();
-        let mut restored = saved.clone();
-        // 【T18：身份对不上是"还在等"，不是"失败"】
-        //
-        // `reconcile` 的契约是严格的：任何一条旧轨在新图里找不到唯一身份，它就返回
-        // `Err`（这条契约由 `restored_edits_refuse_ambiguous_empty_and_missing_host_identity`
-        // 等用例钉住，本轮**不动**它 —— 猜测归属会把参数挂到别人的轨道上）。
-        //
-        // 但"对不上"有两种成因，处置相反：
-        //   * 存档坏了 / 身份本身为空 —— 真失败，报 `failed`；
-        //   * 宿主**这一次**的图还没长成（重开工程时 region 尚未交付、轨道还在重建）——
-        //     该继续等，报 `pending` 并说明在等什么。
-        // 此前两者都走 `?` ⇒ `note_restore_failed` ⇒ 界面显示"没能读回参数"，而实际
-        // 上再等一轮（或用户在宿主里做一次编辑）就好了。
-        if let Err(error) = restored.reconcile(&bindings) {
-            match Self::classify_restore_identity_error(&error) {
-                RestoreIdentityVerdict::AwaitingHostGraph => {
-                    self.note_restore_waiting(&format!("host-graph-not-rebuilt: {error}"));
-                    return Ok(());
-                }
-                RestoreIdentityVerdict::Fatal => return Err(error),
+        // 【合入的核心已经搬到文档上】`DocumentSession::merge_restore_locked` 是
+        // **文档级**存档与**逐实例**组件状态共用的那一份实现 —— 两份实现迟早会漂移，
+        // 而"漂移"在这里的代价正是"重开工程后参数没读回来"。
+        match document.merge_restore_locked(saved, &host, &bindings)? {
+            super::document::RestoreMerge::Merged => {
+                *pending = None;
+                Ok(())
+            }
+            super::document::RestoreMerge::Waiting(reason) => {
+                self.note_restore_waiting(&reason);
+                Ok(())
             }
         }
-        restored.atlas.migrate_legacy_gaps(&restored.params)?;
-        let mut changed_geometry = false;
-        if !restored.atlas.is_empty() {
-            let rebound = restored
-                .atlas
-                .rebind(&host, &document.parameter_identities_locked(&host)?)?;
-            changed_geometry = !restored.atlas.same_layout(&rebound);
-            restored.atlas = rebound;
-        }
-        let mut client = host.clone();
-        restored.apply(&mut client);
-        if changed_geometry {
-            crate::editor::parameter_atlas::merge_root_projection(
-                &mut client.params_by_root_track,
-                restored
-                    .atlas
-                    .project_root_records(&host, &document.parameter_identities_locked(&host)?)?,
-            );
-        } else if restored.atlas.is_empty() && !restored.params.is_empty() {
-            // 旧v2只有项目帧：在首次真实绑定的宿主布局建立source basis，随后移动/拉伸沿此迁移。
-            // 不猜旧会话key/名字，也不能回推旧状态未保存的、首次加载前已改变的布局。
-            restored.atlas = crate::editor::parameter_atlas::ParameterAtlas::default()
-                .capture(&client, &document.parameter_identities_locked(&host)?)?;
-        }
-        let mut edits = document.edits.lock_or_recover();
-        let mut merged = edits.merge(&host, &client, edits.revision)?;
-        merged.groups = restored.groups.clone();
-        let clip_ids = host
-            .clips
-            .iter()
-            .map(|clip| clip.id.clone())
-            .collect::<BTreeSet<_>>();
-        // 【G5：权威侧合并分两种，不能一律覆盖】
-        //
-        // 旧规则是"恢复的那一份更权威"，理由写得很直白 —— 它只在**重开工程**时成立
-        // （在线状态是空的）。而切屏重载 take 时交回来的载荷携带的是**更旧**的参数，
-        // 那时"恢复的更权威"就等于"回退"。
-        //
-        // 三种情况分开处置：
-        //   * 在线状态是**空的**（冷启动）⇒ 整份装上。没有别的数据源。
-        //   * 载荷到达时我们正处在**一次编辑会话**里 ⇒ 覆盖。撤销/重做在 ARA 里就是
-        //     一次还原会话（`ARAInterface.h:2938-2943`），undo 必须生效。
-        //   * 其余（宿主交回一份旧载荷）⇒ **按键补缺**：只补在线状态里没有的键。
-        let authoritative = !restored.from_archive
-            || edits.is_pristine()
-            || restored.arrived_in_edit_session
-            || document.authoritative_restore();
-        let mut kept_live = 0_usize;
-        for (key, params) in restored.atlas.authorities.clone() {
-            if authoritative || !merged.atlas.authorities.contains_key(&key) {
-                merged.atlas.set_authority(&key, params);
-            } else {
-                kept_live += 1;
-            }
-        }
-        if kept_live > 0 {
-            log::info!(
-                "[ara] restore kept {kept_live} live parameter set(s); the payload carries older \
-                 values for them and the live state is newer"
-            );
-        }
-        merged.atlas.regions.retain(|id, _| !clip_ids.contains(id));
-        merged.atlas.regions.extend(restored.atlas.regions);
-        merged
-            .atlas
-            .copy_seeds
-            .retain(|_, seed| !allowed.contains(&seed.root));
-        merged.atlas.copy_seeds.extend(restored.atlas.copy_seeds);
-        merged.atlas.gaps.retain(|root, _| !allowed.contains(root));
-        merged.atlas.gaps.extend(restored.atlas.gaps);
-        let items = document.fade_items_locked(&clip_ids);
-        if !merged.fades.is_empty() && items.is_empty() && !clip_ids.is_empty() {
-            // 【为什么是 pending 而不是失败】fade 归属元数据要等宿主几何刷新后
-            // 才能算出来；这是一次可重试的暂缓，不是身份冲突。保留载荷，下一次
-            // `prepare_renderers` / 分配变化会再试。
-            self.note_restore_waiting("fade-metadata-pending");
-            return Ok(());
-        }
-        merged.fades.retain(|item, _| !items.contains(item));
-        merged.fades.extend(restored.fades);
-        merged.reconcile(&document.track_bindings.lock_or_recover())?;
-        *edits = merged;
-        *pending = None;
-        Ok(())
     }
+
 
     /// 保存前重新核对完整宿主图；歧义或中间编辑态不能伪装成可恢复的state。
     ///

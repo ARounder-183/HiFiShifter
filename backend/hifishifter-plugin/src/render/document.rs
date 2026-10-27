@@ -77,6 +77,68 @@ impl ArchiveReading {
     }
 }
 
+/// "你的这次编辑有没有被采纳"的**读数**。
+///
+/// 【为什么必须有】§1.3 列出的 11 条回退路径里，9 条**连字符串都没有**：写回被拒只留
+/// 一行限流日志，静默丢轨连日志都没有。用户唯一能做的事是"再画一次试试"，而这恰好
+/// 与"数据被抹平"最难区分。这里把同一批事实记成读数，让它进状态快照与诊断包。
+#[derive(Clone, Debug, Default)]
+pub(crate) struct EditHealth {
+    /// 最近一次用户编辑的捕获读数。
+    last: Option<crate::editor::parameter_atlas::CaptureReport>,
+    /// 累计被拒绝写回的曲线条数。
+    refused_total: u64,
+    /// 累计"这次编辑没有被采纳"的次数（重放预算耗尽）。
+    dropped_edits: u64,
+    /// 最近一次被丢弃的编辑的可读原因。
+    last_drop: Option<String>,
+}
+
+impl EditHealth {
+    /// 记一次捕获的读数。
+    fn record(&mut self, report: crate::editor::parameter_atlas::CaptureReport) {
+        self.refused_total = self
+            .refused_total
+            .saturating_add(report.refused.len() as u64);
+        if report.has_refusals() {
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "ara.atlas.capture-report",
+                format_args!("[ara] line write report: {}", report.summary()),
+            );
+        }
+        self.last = Some(report);
+    }
+
+    /// 记一次"这次编辑没有被采纳"（重放预算耗尽）。
+    fn drop_edit(&mut self, reason: String) {
+        self.dropped_edits = self.dropped_edits.saturating_add(1);
+        self.last_drop = Some(reason);
+    }
+
+    /// 状态快照 / 诊断包的 JSON 形状。
+    pub(crate) fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "last": self.last.as_ref().map(|report| report.json()),
+            "refusedTotal": self.refused_total,
+            "droppedEdits": self.dropped_edits,
+            "lastDrop": self.last_drop,
+        })
+    }
+}
+
+    /// 一次存档合入的结论。
+    ///
+    /// 【为什么要把"还在等"与"失败"分开】宿主的图在重开工程时是**逐块**长出来的：
+    /// 存档到达时 region 往往还没交付。那时身份对不上不是失败，而是"还没长成"。
+    /// 两种结论的处置相反：一个必须留着载荷再试，一个必须报出来。
+    pub(crate) enum RestoreMerge {
+        /// 已合入（`edits` 已更新）。
+        Merged,
+        /// 还缺东西（宿主图未重建 / fade 元数据在途），载荷必须留着下次再试。
+        Waiting(String),
+    }
+
 /// 一次**已确认**分割：子段 item GUID → 它在父段播放轴上的位置。
 ///
 /// 【为什么记这个】分割后的两半必须**划分**父段窗口；而父段窗口是分割前真的在响的
@@ -606,6 +668,12 @@ pub(crate) struct DocumentSession {
     /// 判定）已经完整实现并测试过（`ExtensionOwner::merge_pending_restore`）。存档通道
     /// 只是**另一个来源**，不该有第二份实现 —— 两份实现迟早会漂移。
     pub pending_archive_restore: Mutex<Option<crate::state_channel::EditState>>,
+    /// 下一次允许尝试合入文档级存档的时刻（退避）。
+    ///
+    /// 【为什么需要】合入会在工作区快照上被重试（33–400 ms 一次），而失败原因是
+    /// "宿主图还没长成"，那要等几百毫秒到几秒。没有退避就会在等待窗口里每帧跑一次
+    /// rebind（O(曲线) 的工作）。
+    archive_merge_next_attempt: Mutex<Option<std::time::Instant>>,
     /// 已确认分割的子段窗口来源（见 [`SplitWindowSource`] 与 [`SplitWindows`]）。
     pub split_windows: Mutex<SplitWindows>,
     /// 本实例**主动创建**的宿主轨道 GUID（`create_host_track` / 粘贴 / 导入建轨）。
@@ -648,6 +716,14 @@ pub(crate) struct DocumentSession {
     /// 字段是**证据**（通道有没有被调用、交回了多少字节、合入发生在什么时候）。
     /// 把两者混在一起，就得在读数据时顺带改证据。
     pub archive_reading: Mutex<ArchiveReading>,
+    /// 用户编辑的采纳读数（见 [`EditHealth`]）。
+    pub edit_health: Mutex<EditHealth>,
+    /// 最近一次把「锁定参数线」应用到既有权威时的设置代次。
+    ///
+    /// 【为什么是「设置代次」而不是布尔】切换一次就要重新落一次；而"当前值是什么"
+    /// 由 `settings_store::lock_param_lines()` 回答。用代次做缓存戳，热路径只付一次
+    /// 原子读。初值取 `u64::MAX`：进程启动后的第一次调用必须真的落一次。
+    placement_revision: AtomicU64,
     /// ARA 变更通知队列，由 `runtime.rs` 在构建插件时注入。
     ///
     /// 【为什么必须有】宿主只保存"它知道变过"的部分。插件从不通知，只存增量的宿主
@@ -1324,6 +1400,12 @@ impl DocumentSession {
         // ② 它是"我们的"字节，而宿主下一次保存会把它当成权威 —— 一旦合并逻辑还有
         //    缺陷，被固化的就是我们的误解，而不是用户的数据。
         *self.pending_archive_restore.lock_or_recover() = Some(restored);
+        // 【触发点①：存档到达】此前合并只有一个入口（`prepare_renderers`），而它在
+        // "宿主不再收口"时不会再来 —— 于是载荷永远躺在队列里。这里排一次尝试：
+        // 图已经就绪的场合（撤销、切屏）当场就能合入。
+        if let Err(error) = self.merge_archive_restore() {
+            log::warn!("[ara] archive merge on arrival failed: {error}");
+        }
         Ok(())
     }
 
@@ -1619,6 +1701,10 @@ impl DocumentSession {
         let _transaction = self.transaction.lock_or_recover();
         let mut edits = self.edits.lock_or_recover();
         let mut timeline = self.workspace_timeline_locked()?;
+        // 【锁序】`edits → timeline → host facts`（文档声明的顺序）。本调用要读身份表
+        // （host facts），因此必须在**持有 `edits` 之后**、与
+        // `accept_workspace_edits_with_groups` 同向，否则就是一条 ABBA 边。
+        self.sync_placement_with_settings(&mut edits, &timeline);
         edits.apply(&mut timeline);
         let geometry = self.ui_geometry_revision.load(Ordering::Acquire);
         if self.resynced_geometry.load(Ordering::Acquire) != geometry {
@@ -1653,6 +1739,61 @@ impl DocumentSession {
         self.project_private_group_view(&mut grouped, &edits)?;
         Ok(grouped.params_by_root_track)
     }
+    /// 把「锁定参数线」的当前设置落到**既有**权威上（纯元数据、幂等）。
+    ///
+    /// 【为什么它在投影之前跑】设置变了 ⇒ 曲线的**可见位置**必须立刻改变，而这不需要
+    /// 一次模型收口、不需要烘焙、也不需要用户先分割一次。旧实现只在
+    /// «remap_and_log»（模型收口）里读这个设置，于是"移动 item 不跟随、分割之后才对"。
+    ///
+    /// 【为什么按设置代次早退】本函数在每次读工作区时都被调用（33–400 ms 一次）。
+    /// 代次没变时它只付一次原子读的代价。
+    ///
+    /// 返回被改动的权威条数。
+    pub(crate) fn sync_placement_with_settings(
+        &self,
+        edits: &mut crate::state_channel::EditState,
+        timeline: &hifishifter_kernel::state::TimelineState,
+    ) -> usize {
+        // 【为什么存 `revision + 1`】0 必须能表示"从没落过"（进程刚启动时设置代次也是
+        // 0，直接用它会早退，于是初始设置永远不生效）。
+        let stamp = crate::settings_store::revision().wrapping_add(1);
+        if self.placement_revision.load(Ordering::Acquire) == stamp {
+            return 0;
+        }
+        // 【为什么可能拿到 None】测试里不读进程级设置（见
+        // `parameter_atlas::placement_from_settings`）。
+        let Some(wanted) = crate::editor::parameter_atlas::placement_from_settings() else {
+            return 0;
+        };
+        let locked = matches!(
+            wanted,
+            crate::editor::parameter_atlas::Placement::FollowMaterial
+        );
+        let identities = match self.parameter_identities_locked(timeline) {
+            Ok(identities) => identities,
+            // 身份表这一轮还没跟上：不改任何东西，也不推进代次 —— 下一轮再试。
+            Err(_) => return 0,
+        };
+        let changed = edits.atlas.set_placement(timeline, &identities, &wanted);
+        self.placement_revision.store(stamp, Ordering::Release);
+        if changed > 0 {
+            // 同一份数据在新映射下读出不同的值 ⇒ 渲染输入变了。
+            // 只推进代次：清快照会制造一段静音空窗，而重排本来就是异步的。
+            self.revision.fetch_add(1, Ordering::AcqRel);
+            self.render_epoch.fetch_add(1, Ordering::AcqRel);
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "ara.atlas.placement-changed",
+                format_args!(
+                    "[ara] lock parameter lines is now {}; {changed} parameter set(s) moved to \
+                     the new placement (no samples were rewritten)",
+                    if locked { "on" } else { "off" }
+                ),
+            );
+        }
+        changed
+    }
+
     /// 从图集重新派生"视图"这一层（`edits.params`）。
     ///
     /// 【为什么必须与读视图在同一个事务里】`edits.params` 既是编辑器看到的数组，
@@ -1685,6 +1826,12 @@ impl DocumentSession {
         // 于是一份坏存档会让整份工作区快照失败 ⇒ 界面停在空时间线（用户看到的不是
         // "参数没读回来"，而是"什么都没有"）。恢复的载荷与显示的载荷是两件事：
         // 前者失败只该改读数，后者必须照常产出。
+        // 【触发点④：兜底心跳】编辑器每 33–400 ms 读一次工作区。合入失败的唯一成因是
+        // "宿主图还没长成"，而那一刻一定会过去 —— 让这条既有心跳把它带过去，比另开
+        // 一个定时器简单，也不会在宿主静止时白跑（内部有 1 s 退避）。
+        if let Err(error) = self.merge_archive_restore_locked() {
+            log::warn!("[ara] archive merge on snapshot failed: {error}");
+        }
         for owner in self.renderer_owners() {
             if let Err(error) = owner.merge_pending_restore(self) {
                 log::warn!("[ara] instance state unresolved: {error}");
@@ -1699,6 +1846,8 @@ impl DocumentSession {
         // `workspace_timeline_locked` 本身不碰 `edits`，所以把顺序倒过来是安全的。
         let mut edits = self.edits.lock_or_recover();
         let mut timeline = self.workspace_timeline_locked()?;
+        // 设置变了 ⇒ 曲线的可见位置必须立刻改变（见 `sync_placement_with_settings`）。
+        self.sync_placement_with_settings(&mut edits, &timeline);
         edits.reconcile(&self.track_bindings.lock_or_recover())?;
         // 【为什么这里**不**重投影视图】`workspace_snapshot` 是**读**路径：它随时可能被
         // 编辑器 actor 的后台刷新调用，而一次读不能改变"待提交编辑"所依赖的指纹
@@ -1816,8 +1965,9 @@ impl DocumentSession {
         let model = self.revision.load(Ordering::Acquire);
         if model != base_model {
             return Err(format!(
-                "{} model changed; local curves preserved",
-                crate::editor::errors::CONFLICT_PREFIX
+                "{} {}",
+                crate::editor::errors::CONFLICT_PREFIX,
+                crate::editor::errors::MODEL_CHANGED
             ));
         }
         let host = self.workspace_timeline_locked()?;
@@ -1867,9 +2017,14 @@ impl DocumentSession {
         // 源曲线，就是用户看到的"编辑一下 clip，参数线被重置"。
         let previous_view = baseline.params.as_ref();
 
+        // 【为什么走带读数的入口】"这次写回被拒了哪几条曲线"必须离开本函数 ——
+        // 它进状态快照与诊断包，用户与支持都看得见。丢掉读数的版本（
+        // `capture_changes`）只留给测试与不需要报告的调用方。
+        let mut report = crate::editor::parameter_atlas::CaptureReport::default();
         candidate.atlas = edits
             .atlas
-            .capture_changes(client, &identities, previous_view)?;
+            .capture_changes_reporting(client, &identities, previous_view, &mut report)?;
+        self.note_capture_report(report);
         if rebased {
             log::info!(
                 "[ara] workspace rebase: baseline={} current={} roots={}",
@@ -2459,37 +2614,24 @@ impl DocumentSession {
             .filter_map(|lease| lease.owner.upgrade())
             .filter(|owner| !owner.is_closed())
             .collect::<Vec<_>>();
-        // 【ARA 存档的落点】存档恢复在模型图重建之前到达，那时还没有 owner 可合并，
-        // 所以载荷暂存在文档级。现在图已就绪，把它交给**第一个** owner 的既有合并
-        // 路径 —— 编辑权威是文档共享的，交给谁合并都一样（合并写的是 `document.edits`）。
-        // 部分存档先合入（它是按键合并，不会覆盖整份状态），再走整份存档的合并路径。
+        // 【ARA 存档的落点：由**文档**合并，不再交给某个 owner】
+        //
+        // 载荷是**文档级**的（`storeDocumentToArchive` 是文档控制器的回调），而合入
+        // 判据此前是**逐实例**的（只认本实例被分配的 region）。工程里只要有两条轨有
+        // 参数编辑，"不属于本实例的那条轨"就会 reconcile 成 Unobserved ⇒ 载荷永久
+        // pending ⇒ 而 I3 守卫又让此后所有新编辑都不落盘。用户的原话是"编辑了也白忙活"。
+        //
+        // 现在合入只有一个入口：`merge_archive_restore_locked`（候选集是整份
+        // `track_bindings`）。部分存档先合入（按键合并，不会覆盖整份状态），再走整份。
         self.merge_partial_restores();
-        // 【为什么这里要把 `take()` 与"放回去"分成两次独立的取锁】此前写成
-        // `if let Some(restored) = self.pending_archive_restore.lock_or_recover().take()`
-        // —— 那个 guard 活到整个 `if let` 块结束，而 `None` 分支里又要
-        // `*self.pending_archive_restore.lock_or_recover() = Some(restored)`。
-        // `std::sync::Mutex` 不可重入，于是"没有任何 renderer 绑定时"当场自锁：
-        // `prepare_renderers` 永久挂住，本文档再不响应任何宿主编缉。
-        // 用户报的症状正是"无论宿主里怎么编辑，ARA 中都不能同步，只有把插件删掉再
-        // 添加才好" —— 撤销/重载会送来存档还原，而还原到达时经常还没有 renderer。
-        let held_back = self.pending_archive_restore.lock_or_recover().take();
-        if let Some(restored) = held_back {
-            match owners.first() {
-                // 【为什么只暂存、不在这里刷新】本函数已经持有 `transaction`，而刷新要取
-                // 同一把不可重入的锁 —— 那会当场自锁（用户报的"重开 ARA 工程宿主未
-                // 响应"）。合入由紧随其后的 `merge_pending_restore` 循环完成。
-                Some(owner) => owner.stash_archive_restore(restored),
-                None => {
-                    // 没有任何 owner：把载荷放回去，等下一次收口再试。
-                    log::warn!(
-                        "[ara] archive restore held back: no renderer is bound yet; it will be \
-                         applied on the next prepare"
-                    );
-                    *self.pending_archive_restore.lock_or_recover() = Some(restored);
-                }
-            }
+        // 【为什么这里是 `_locked`】本函数已经持有 `transaction`，而公开入口要取同一把
+        // 不可重入的锁 —— 那会当场自锁（用户报的"重开 ARA 工程宿主未响应"）。
+        match self.merge_archive_restore_locked() {
+            Ok(true) => log::info!("[ara] document archive merged into the edit authority"),
+            Ok(false) => {}
+            Err(error) => log::warn!("[ara] document archive merge failed: {error}"),
         }
-        // 先统一恢复全部组件权威，再允许任何后台任务捕获共享revision。
+
         for owner in &owners {
             if let Err(error) = owner.merge_pending_restore(self) {
                 log::warn!("[ara] instance state unresolved: {error}");
@@ -2526,6 +2668,30 @@ impl DocumentSession {
         reading.stored_bytes = bytes;
     }
 
+    /// 记一次用户编辑的捕获读数。
+    pub(crate) fn note_capture_report(
+        &self,
+        report: crate::editor::parameter_atlas::CaptureReport,
+    ) {
+        self.edit_health.lock_or_recover().record(report);
+    }
+
+    /// 记一次"这次编辑没有被采纳"。
+    pub(crate) fn note_edit_dropped(&self, reason: impl Into<String>) {
+        let reason = reason.into();
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Error,
+            "ara.edit.dropped",
+            format_args!("[ara] edit not applied: {reason}"),
+        );
+        self.edit_health.lock_or_recover().drop_edit(reason);
+    }
+
+    /// 编辑采纳读数（状态快照与诊断包共用）。
+    pub(crate) fn edit_health_json(&self) -> serde_json::Value {
+        self.edit_health.lock_or_recover().json()
+    }
+
     /// 记一次"存档已合入"。
     pub(crate) fn note_archive_merged(&self) {
         self.archive_reading.lock_or_recover().merged_at_ms = Self::monotonic_ms();
@@ -2549,6 +2715,183 @@ impl DocumentSession {
                     .find_map(|owner| owner.restore_pending_reason())
             });
         self.archive_reading.lock_or_recover().json(pending, reason)
+    }
+
+    /// 把一份存档载荷合入**文档级**编辑权威。
+    ///
+    /// 【为什么在文档上，而不是在某个实例上】`storeDocumentToArchive` 是**文档控制器**
+    /// 的回调，载荷覆盖整份文档；而合入判据此前是**逐实例**的（只认本实例被分配的
+    /// region）。工程里只要有两条轨有参数编辑，"不属于本实例的那条轨"就会 reconcile
+    /// 成 Unobserved ⇒ 载荷永久 pending ⇒ 而"有未合入载荷就不许覆盖存档"的守卫又让
+    /// 此后**所有新编辑都不落盘**。这正是"编辑了也白忙活"的机理。
+    ///
+    /// 【为什么候选集是整份 `track_bindings`】`track_bindings` 由真实 sequence 边写入，
+    /// 是**文档级**的归属事实。按实例分配范围收窄它是 VST3 组件状态的语义，不是存档的。
+    ///
+    /// 【调用方必须持 `transaction`】本函数会取 `edits` 与宿主事实，锁序是
+    /// `transaction → timeline → edits → host facts`。
+    pub(crate) fn merge_restore_locked(
+        &self,
+        saved: &crate::state_channel::EditState,
+        host: &hifishifter_kernel::state::TimelineState,
+        bindings: &crate::state_channel::TrackBindings,
+    ) -> Result<RestoreMerge, String> {
+        let mut restored = saved.clone();
+        // 【T18：身份对不上是"还在等"，不是"失败"】`reconcile` 的契约是严格的：
+        // 任何一条旧轨在新图里找不到唯一身份就 `Err`（猜测归属会把参数挂到别人的
+        // 轨道上）。但"对不上"有两种成因，处置相反：存档坏了 ⇒ 真失败；宿主**这一次**
+        // 的图还没长成 ⇒ 该继续等。
+        if let Err(error) = restored.reconcile(bindings) {
+            match crate::render::extension::ExtensionOwner::classify_restore_identity_error(&error)
+            {
+                crate::render::extension::RestoreIdentityVerdict::AwaitingHostGraph => {
+                    return Ok(RestoreMerge::Waiting(format!(
+                        "host-graph-not-rebuilt: {error}"
+                    )))
+                }
+                crate::render::extension::RestoreIdentityVerdict::Fatal => return Err(error),
+            }
+        }
+        restored.atlas.migrate_legacy_gaps(&restored.params)?;
+        let identities = self.parameter_identities_locked(host)?;
+        let mut changed_geometry = false;
+        if !restored.atlas.is_empty() {
+            let rebound = restored.atlas.rebind(host, &identities)?;
+            changed_geometry = !restored.atlas.same_layout(&rebound);
+            restored.atlas = rebound;
+        }
+        let mut client = host.clone();
+        restored.apply(&mut client);
+        if changed_geometry {
+            crate::editor::parameter_atlas::merge_root_projection(
+                &mut client.params_by_root_track,
+                restored.atlas.project_root_records(host, &identities)?,
+            );
+        } else if restored.atlas.is_empty() && !restored.params.is_empty() {
+            // 旧 v2 只有项目帧：在首次真实绑定的宿主布局建立 source basis。
+            restored.atlas = crate::editor::parameter_atlas::ParameterAtlas::default()
+                .capture(&client, &identities)?;
+        }
+        let mut edits = self.edits.lock_or_recover();
+        let mut merged = edits.merge(host, &client, edits.revision)?;
+        merged.groups = restored.groups.clone();
+        let clip_ids = host
+            .clips
+            .iter()
+            .map(|clip| clip.id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        let track_ids = host
+            .tracks
+            .iter()
+            .map(|track| track.id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        // 【G5：权威侧合并分两种，不能一律覆盖】
+        //   * 在线状态是空的（冷启动）⇒ 整份装上，没有别的数据源；
+        //   * 载荷到达时我们在一次编辑会话里（撤销/重做）⇒ 覆盖，undo 必须生效；
+        //   * 其余（宿主交回一份旧载荷）⇒ 按键补缺，只补在线状态里没有的键。
+        let authoritative = !restored.from_archive
+            || edits.is_pristine()
+            || restored.arrived_in_edit_session
+            || self.authoritative_restore();
+        let mut kept_live = 0_usize;
+        for (key, params) in restored.atlas.authorities.clone() {
+            if authoritative || !merged.atlas.authorities.contains_key(&key) {
+                merged.atlas.set_authority(&key, params);
+            } else {
+                kept_live += 1;
+            }
+        }
+        if kept_live > 0 {
+            log::info!(
+                "[ara] restore kept {kept_live} live parameter set(s); the payload carries older \
+                 values for them and the live state is newer"
+            );
+        }
+        merged.atlas.regions.retain(|id, _| !clip_ids.contains(id));
+        merged.atlas.regions.extend(restored.atlas.regions);
+        merged
+            .atlas
+            .copy_seeds
+            .retain(|_, seed| !track_ids.contains(&seed.root));
+        merged.atlas.copy_seeds.extend(restored.atlas.copy_seeds);
+        merged.atlas.gaps.retain(|root, _| !track_ids.contains(root));
+        merged.atlas.gaps.extend(restored.atlas.gaps);
+        let items = self.fade_items_locked(&clip_ids);
+        if !merged.fades.is_empty() && items.is_empty() && !clip_ids.is_empty() {
+            // fade 归属元数据要等宿主几何刷新后才能算出来；这是一次可重试的暂缓。
+            return Ok(RestoreMerge::Waiting("fade-metadata-pending".into()));
+        }
+        merged.fades.retain(|item, _| !items.contains(item));
+        merged.fades.extend(restored.fades);
+        merged.reconcile(&self.track_bindings.lock_or_recover())?;
+        *edits = merged;
+        Ok(RestoreMerge::Merged)
+    }
+
+    /// 尝试把**文档级** ARA 存档载荷合入（幂等，自带事务）。
+    ///
+    /// 【为什么要自带事务】它有四个触发点（存档到达 / 实例绑定 / 清单推进 / 模型收口），
+    /// 其中两个在文档事务之外。带上事务让调用点不必各自记住这件事。
+    pub(crate) fn merge_archive_restore(&self) -> Result<bool, String> {
+        let _transaction = self.transaction.lock_or_recover();
+        self.merge_archive_restore_locked()
+    }
+
+    /// 调用方持 `transaction` 的版本（见 [`Self::merge_archive_restore`]）。
+    pub(crate) fn merge_archive_restore_locked(&self) -> Result<bool, String> {
+        // 【为什么要退避】它在工作区快照（33–400 ms 一次）上被重试。没有退避就会在
+        // "宿主图还没长成"的几秒里每帧跑一次 rebind（那是 O(曲线) 的工作）。
+        const RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+        if !self.ready.load(Ordering::Acquire) {
+            return Ok(false);
+        }
+        if self.pending_archive_restore.lock_or_recover().is_none() {
+            return Ok(false);
+        }
+        {
+            let now = std::time::Instant::now();
+            let mut next = self.archive_merge_next_attempt.lock_or_recover();
+            if next.is_some_and(|at| now < at) {
+                return Ok(false);
+            }
+            *next = Some(now + RETRY_INTERVAL);
+        }
+        let Some(saved) = self.pending_archive_restore.lock_or_recover().take() else {
+            return Ok(false);
+        };
+        let Some(host) = self.timeline.lock_or_recover().clone() else {
+            *self.pending_archive_restore.lock_or_recover() = Some(saved);
+            return Ok(false);
+        };
+        let bindings = self.track_bindings.lock_or_recover().clone();
+        let outcome = self.merge_restore_locked(&saved, &host, &bindings);
+        match outcome {
+            Ok(RestoreMerge::Merged) => {
+                self.note_archive_merged();
+                // 【合入之后必须重投影一次】合入是"权威刚换了"，而视图重建只在"几何
+                // 代次变了"时发生。不补这一步，重开工程后第一帧仍然看不见曲线。
+                let mut edits = self.edits.lock_or_recover();
+                if let Err(error) = self.resync_parameter_view_locked(&mut edits, &host) {
+                    log::warn!("[ara] parameter view resync after archive merge failed: {error}");
+                }
+                drop(edits);
+                *self.archive_merge_next_attempt.lock_or_recover() = None;
+                Ok(true)
+            }
+            Ok(RestoreMerge::Waiting(reason)) => {
+                *self.pending_archive_restore.lock_or_recover() = Some(saved);
+                hifishifter_kernel::log_limiter::emit_limited_key(
+                    log::Level::Warn,
+                    "ara.archive.merge-waiting",
+                    format_args!("[ara] archive payload is held: {reason}"),
+                );
+                Ok(false)
+            }
+            Err(error) => {
+                *self.pending_archive_restore.lock_or_recover() = Some(saved);
+                Err(error)
+            }
+        }
     }
 
     /// 是否还有一份**没合入**的持久化载荷（文档级 ARA 存档或任一实例的组件状态）。
