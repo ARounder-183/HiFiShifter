@@ -137,7 +137,7 @@ inline bool runNativeSourcePitchRestoreSmoke(const juce::File& folder)
     roll.mouseUp(event(roll,unknownAt,unknownAt,juce::ModifierKeys::leftButtonModifier));
     check("unknown_source_pitch_is_disabled",!has(roll.diagnosticEnabledNoteMenuIds("n0"),28));
     check("unknown_source_pitch_not_fabricated",!model.restoreNativeSourcePitch({"n0"}));
-    auto utau=edited;utau.tracks[0].pitchAlgorithm=PitchAlgorithm::utau;model.replace(utau);
+    auto utau=edited;utau.tracks[0].trackType=TrackType::utau;utau.tracks[0].pitchAlgorithm=PitchAlgorithm::utau;model.replace(utau);
     model.dispatchPendingMessages();roll.diagnosticRefresh();const auto beforeUtau=model.revisionNumber();
     check("utau_menu_excludes_native_restore",!has(roll.diagnosticNoteMenuIds("n0"),28));
     roll.applyNoteMenuChoice("n0",28,0,{});

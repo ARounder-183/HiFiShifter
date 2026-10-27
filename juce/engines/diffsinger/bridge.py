@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import sys
 from pathlib import Path
 
@@ -405,22 +406,43 @@ def allocate(weights, length):
     return (np.diff(boundaries)+1).tolist()
 
 
-def groups(notes):
+def groups(notes, selected=None, check_overlap=True):
+    """Keep monophonic context, but unrelated overlap blocks are scope barriers.
+
+    A selected member of an overlap still fails, even if its partner is muted.
+    None means a whole-score operation, which must validate every note.
+    """
     result, current = [], []
-    previous_end = None
-    for note in sorted(notes, key=lambda n: n["start"]):
+    ordered = sorted(notes, key=lambda n: n["start"])
+    wanted = lambda block: selected is None or any(str(n['id']) in selected for n in block)
+    for note in ordered:
         if not math.isfinite(note["start"]) or not math.isfinite(note["duration"]) or note["duration"] <= 0:
             raise ValueError("音符时间必须是有效正时长")
         if note["duration"] > 30:
             raise ValueError("DiffSinger 初版单个音符最长 30 秒，请使用 + 拆分长延音。")
-        if previous_end is not None and note["start"] < previous_end - 1e-6:
-            raise ValueError("DiffSinger 要求单声部；请将重叠音符移到另一条轨道。")
-        previous_end = note["start"] + note["duration"]
+    index = 0
+    while index < len(ordered):
+        end = index + 1
+        occupied_end = ordered[index]['start'] + ordered[index]['duration']
+        while check_overlap and end < len(ordered) and ordered[end]['start'] < occupied_end - 1e-6:
+            occupied_end = max(occupied_end, ordered[end]['start'] + ordered[end]['duration'])
+            end += 1
+        if end > index + 1:
+            if wanted(ordered[index:end]):
+                raise ValueError("DiffSinger 要求单声部；所选音符存在重叠，请将重叠音符移到另一条轨道。")
+            if current and wanted(current):
+                result.append(current)
+            current = []
+            index = end
+            continue
+        note = ordered[index]
         if current and (note.get('context') != current[-1].get('context') or note["start"] - (current[-1]["start"]+current[-1]["duration"]) > .4
-                        or note["start"] - current[0]["start"] > 15) and note["lyric"].strip() not in ("+", "-") and not note.get('resolved_extension'):
-            result.append(current); current = []
+                        or note["start"] - current[0]["start"] > 15) and note["lyric"].strip() not in ("+", "-") and not re.fullmatch(r'\+\d+', note["lyric"].strip()) and not note.get('resolved_extension'):
+            if wanted(current): result.append(current)
+            current = []
         current.append(note)
-    if current: result.append(current)
+        index = end
+    if current and wanted(current): result.append(current)
     return result
 
 
@@ -433,9 +455,26 @@ def execute(request, output, bank=None):
         return bank.inspect()
     if request["operation"] not in ("pitch", "render", "timing", "phonemize", "parameters"):
         raise ValueError("未知 DiffSinger 操作")
-    prepared, pronunciations = bank.resolver.prepare(request['notes'], request.get('dictionary', ''))
+    selected = request.get('retake_ids')
+    selected = None if selected is None else set(map(str, selected))
+    if selected is not None and (not selected or not selected.issubset({str(n['id']) for n in request['notes']})):
+        raise ValueError('局部生成所选音符无效或已不存在')
+    scope = ({str(n['id']) for n in request['notes'] if n.get('audible', True)}
+             if request['operation'] == 'render' else selected)
+    # Scope before lyric conversion too: an unrelated misspelled lyric or
+    # unsupported phoneme must not block a valid local edit/render. Retain each
+    # selected phrase, including Chinese word and continuation-note context.
+    if scope is None:
+        prepared, pronunciations = bank.resolver.prepare(request['notes'], request.get('dictionary', ''))
+        phrases = None
+    else:
+        phrases, pronunciations = [], []
+        for context in groups(request['notes'], scope, check_overlap=request['operation'] != 'phonemize'):
+            prepared, readings = bank.resolver.prepare(context, request.get('dictionary', ''), context_notes=request['notes'])
+            phrases.append(prepared)
+            pronunciations.extend(readings)
     if request['operation'] == 'phonemize':
-        return dict(ok=True, pronunciations=pronunciations)
+        return dict(ok=True, pronunciations=[r for r in pronunciations if selected is None or str(r['id']) in selected])
     inspected = bank.inspect()
     if not inspected['ok']:
         return inspected
@@ -447,12 +486,10 @@ def execute(request, output, bank=None):
     curves, phonemes, ignored_timings = [], [], []
     parameters = []
     timing_clamped = False
-    selected = request.get('retake_ids')
-    selected = None if selected is None else set(map(str, selected))
-    if selected is not None and (not selected or not selected.issubset({str(n['id']) for n in prepared})):
-        raise ValueError('局部生成所选音符无效或已不存在')
     generated_phrases = 0
-    for phrase, notes in enumerate(groups(prepared)):
+    if phrases is None:
+        phrases = groups(prepared)
+    for phrase, notes in enumerate(phrases):
         if request['operation'] in ('pitch', 'parameters') and selected is not None and not any(str(n['id']) in selected for n in notes):
             continue
         if request["operation"] == "render" and not any(n.get("audible", True) for n in notes):

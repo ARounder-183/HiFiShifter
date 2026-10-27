@@ -248,6 +248,7 @@ inline void runAssetSearchSmoke(const juce::File& root, std::function<void(bool)
         query("GOU"); manager.setProjectVoicebanks(ProjectData{});
         state->check("search_project_switch_removes_old_banks",manager.diagnosticTreeRowCount()==0);
         manager.diagnosticRegisterFolder(fileA.getParentDirectory().getParentDirectory());
+        query("GOU");
         state->check("search_newly_registered_folder_appears",manager.diagnosticSearchLabels().size()==1);
         query("");
         state->check("search_clear_restores_collapsed_tree",manager.diagnosticTreeRowCount()==1);

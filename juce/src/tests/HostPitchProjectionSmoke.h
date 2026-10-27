@@ -59,18 +59,26 @@ inline bool runHostPitchProjectionSmoke(const juce::File& output)
     const auto legacy=AudioEngine::projectTrackNotePitch(track,{});const auto* a=find(legacy,"A");const auto* b=find(legacy,"B");
     check("public_bank_independent_projector_contains_all_note_identities",legacy.size()==3&&a&&b&&find(legacy,"C"));
     if(!a||!b)return false;
-    // Frozen decoded integer-cent packet oracle for OWN 5ms base + nominal
-    // 40ms S, sampled endpoints. No duplicate production curve algorithm here.
-    std::vector<int> goldenA(240,775),goldenB(231,75);
-    std::fill(goldenA.begin(),goldenA.begin()+208,25);std::fill(goldenB.begin(),goldenB.begin()+16,-675);
-    const int rampA[]{46,117,232,371,515,643,736,774};const int rampB[]{-654,-583,-468,-329,-185,-57,36,74};
-    for(int i=0;i<8;++i){goldenA[208+i]=rampA[i];goldenB[16+i]=rampB[i];}
-    check("legacy_OWN_nominal_auto_left_packet_is_byte_exact",wire(*a)==encode(goldenA));
-    check("legacy_OWN_nominal_auto_right_packet_is_byte_exact",wire(*b,.1,1.2)==encode(goldenB));
-    check("positive_first_early_last_do_not_define_306ms_auto_bridge",near(sample(a->sampledLocalCents,.5),25)
-        &&near(sample(a->sampledLocalCents,.98),25)&&near(sample(a->sampledLocalCents,1.02),775));
-    check("legacy_auto_extends_only_nominal_seam_support",near(a->supportStartSeconds,0)&&near(a->supportEndSeconds,1.02)
-        &&near(b->supportStartSeconds,.98)&&near(b->supportEndSeconds,2));
+    // Update 221: authored endpoints (.8 and 1.1), not the old nominal
+    // boundary +/-20ms, define the transition. Independent cubic oracle.
+    bool leftWire=true,rightWire=true;
+    for(const auto* p:{a,b})
+    {
+        const auto values=decode(wire(*p));bool accurate=true;
+        for(size_t i=0;i<values.size();++i)
+        {
+            const auto t=p->absoluteStartSeconds+i*(60./(120*96))-.1;
+            const auto u=std::clamp((t-.8)/.3,0.,1.);
+            const auto desired=(60.25+7.5*u*u*(3-2*u)-p->midiNote)*100;
+            accurate&=std::abs(values[i]-desired)<.65;
+        }
+        if(p==a)leftWire=accurate;else rightWire=accurate;
+    }
+    check("point_first_left_packet_uses_authored_transition",leftWire);
+    check("point_first_right_packet_uses_same_transition",rightWire);
+    check("authored_endpoints_are_on_the_prepared_curve",std::abs(sample(a->sampledLocalCents,.8)-25)<.001
+        &&std::abs(sample(b->sampledLocalCents,.1)-75)<.001&&std::abs(sample(a->sampledLocalCents,.95)-400)<.1);
+    check("point_first_support_covers_both_transition_endpoints",a->supportEndSeconds>=1.1&&b->supportStartSeconds<=.8);
     bool display=true;
     for(const auto& p:legacy)for(const auto t:{-.3,.0,.123456,.987654,1.23456})
         display&=p.continuousLocalCents&&std::abs(p.continuousLocalCents(t)-sample(p.sampledLocalCents,t))<=1.e-5f;

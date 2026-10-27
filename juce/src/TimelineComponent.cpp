@@ -1,4 +1,5 @@
 #include "NativeAudioFocus.h"
+#include "NativeAudioOverlap.h"
 #include "AudioEngine.h"
 #include "SourceWaveformPreview.h"
 #include "TimelineComponent.h"
@@ -390,11 +391,14 @@ void TimelineComponent::paint(juce::Graphics& g)
                 : clip.id == draggedClip ? draggedClipPreviewStart : clip.startSeconds;
             const auto displayDuration = clip.id == draggedClip ? draggedClipPreviewDuration
                                                                  : clip.durationSeconds;
-            const auto contentStart = clip.startSeconds + clip.audioStartSeconds
-                + (moving ? displayStart - clip.startSeconds : 0.0);
-            const auto contentDuration = clip.audioLength();
-            auto displayFadeIn = clip.fadeInSeconds;
-            auto displayFadeOut = clip.fadeOutSeconds;
+            const auto stretching = clip.id == draggedClip && draggedClipStretch
+                && (dragMode == DragMode::resizeLeft || dragMode == DragMode::resizeRight);
+            const auto scale = stretching ? displayDuration / std::max(.01, clip.durationSeconds) : 1.0;
+            const auto contentOrigin = moving || stretching ? displayStart : clip.startSeconds;
+            const auto contentStart = contentOrigin + clip.audioStartSeconds * scale;
+            const auto contentDuration = clip.audioLength() * scale;
+            auto displayFadeIn = clip.fadeInSeconds * scale;
+            auto displayFadeOut = clip.fadeOutSeconds * scale;
             if (clip.id == draggedClip
                 && (dragMode == DragMode::fadeIn || dragMode == DragMode::fadeOut))
             {
@@ -408,7 +412,7 @@ void TimelineComponent::paint(juce::Graphics& g)
                                                   static_cast<float>(rowHeight - 25));
             clipHits.push_back({ clip.id, bounds, clip.startSeconds, clip.durationSeconds,
                                  clip.fadeInSeconds, clip.fadeOutSeconds, clip.muted,
-                                 clip.startSeconds + clip.audioStartSeconds, contentDuration, clip.gain });
+                                 clip.startSeconds + clip.audioStartSeconds, clip.audioLength(), clip.gain, trackShowsAllNativeRegions(track) });
             const auto rowSurface = std::find(selectedTracks.begin(), selectedTracks.end(), track.id) != selectedTracks.end()
                 ? Palette::base.overlaidWith(Palette::accent.withAlpha(0.06f)) : Palette::base;
             const auto clipInk = track.muted || clip.muted ? Palette::clipBackground.withAlpha(0.55f)
@@ -439,10 +443,10 @@ void TimelineComponent::paint(juce::Graphics& g)
                 // Keep the editor visually consistent for mono and stereo
                 // sources.  Playback still uses every source channel; only the
                 // compact waveform lane displays channel 1.
-                const auto partStart = part->startSeconds + part->audioStartSeconds
-                    + (nativePreview || clip.parts.empty() ? 0.0 : clip.startSeconds)
-                    + (moving ? displayStart - clip.startSeconds : 0.0);
-                const auto partDuration = part->audioLength();
+                const auto originalPartStart = part->startSeconds + part->audioStartSeconds
+                    + (nativePreview || clip.parts.empty() ? 0.0 : clip.startSeconds);
+                const auto partStart = contentOrigin + (originalPartStart - clip.startSeconds) * scale;
+                const auto partDuration = part->audioLength() * scale;
                 if (partDuration > 1.0e-9)
                 {
                     const juce::Graphics::ScopedSaveState save(g);
@@ -479,13 +483,13 @@ void TimelineComponent::paint(juce::Graphics& g)
                     const auto noteHeight = juce::jlimit(2.5f, 6.0f, noteArea.getHeight()/pitchSpan*0.85f);
                     // Notes are already parent-local (also in merged clips).
                     // Trimming moves only the boundary, while moving shifts the content.
-                    const auto noteOrigin = clip.startSeconds + (moving ? displayStart-clip.startSeconds : 0.0);
+                    const auto noteOrigin = contentOrigin;
                     for (const auto& note : clip.notes)
                     {
                         if (!hasPreviewNote(clip, note)) continue;
-                        const auto start = std::max(displayStart, noteOrigin + note.startSeconds);
+                        const auto start = std::max(displayStart, noteOrigin + note.startSeconds * scale);
                         const auto end = std::min(displayStart + displayDuration,
-                            noteOrigin + note.startSeconds + note.durationSeconds);
+                            noteOrigin + (note.startSeconds + note.durationSeconds) * scale);
                         if (end <= start) continue;
                         const auto left = timeToX(start), right = timeToX(end);
                         if (right < visible.getX() || left > visible.getRight()) continue;
@@ -755,10 +759,24 @@ juce::String TimelineComponent::clipHeaderText(const TrackData& track, const Cli
         + "  " + gainLabel(gain);
 }
 
+bool TimelineComponent::nativeStretchEdgeAt(juce::Point<float> position) const
+{
+    if (!stretchClipEdges) return false;
+    for (auto it=clipHits.rbegin(); it!=clipHits.rend(); ++it)
+        if (it->bounds.expanded(4.f,0.f).contains(position))
+        {
+            const auto grip=std::min(14.f,it->bounds.getWidth()*.25f);
+            return it->nativeStretch && (position.x<=it->bounds.getX()+grip || position.x>=it->bounds.getRight()-grip);
+        }
+    return false;
+}
+
 void TimelineComponent::mouseMove(const juce::MouseEvent& event)
 {
     rememberPointer(event);
     setTooltip({});
+    if (nativeStretchEdgeAt(event.position))
+    { setTooltip(clipStretchHint); setMouseCursor(juce::MouseCursor::LeftRightResizeCursor); return; }
     for (const auto& hit : clipHits)
         if (hit.bounds.contains(event.position) && event.position.y < hit.bounds.getY()+17.0f)
             for (const auto& track : snapshot.tracks) for (const auto& clip : track.clips)
@@ -802,6 +820,7 @@ void TimelineComponent::mouseMove(const juce::MouseEvent& event)
             const auto grip = std::min(14.0f, it->bounds.getWidth() * 0.25f);
             const auto onHandle = event.position.x <= it->bounds.getX() + grip
                 || event.position.x >= it->bounds.getRight() - grip;
+            if (onHandle && it->nativeStretch && stretchClipEdges) setTooltip(clipStretchHint);
             setMouseCursor(onHandle ? juce::MouseCursor::LeftRightResizeCursor
                                     : juce::MouseCursor::NormalCursor);
             return;
@@ -938,7 +957,8 @@ void TimelineComponent::mouseDown(const juce::MouseEvent& event)
     }
     if (event.mods.isAltDown() && !event.mods.isPopupMenu())
     { beginMarquee(event); return; }
-    if (const auto hit = envelopeHit(event.position, false))
+    const bool stretchingEdge = !event.mods.isPopupMenu() && nativeStretchEdgeAt(event.position);
+    if (!stretchingEdge) if (const auto hit = envelopeHit(event.position, false))
     {
         draggedClip.clear(); dragMode = DragMode::none;
         const auto* clip = findEnvelopeClip(hit->clipId);
@@ -957,7 +977,7 @@ void TimelineComponent::mouseDown(const juce::MouseEvent& event)
     for (auto it = clipHits.rbegin(); it != clipHits.rend(); ++it)
         if (it->bounds.expanded(4.0f, 0.0f).contains(event.position))
         {
-            const auto onGainKnob = gainControlBounds(it->bounds).contains(event.position);
+            const auto onGainKnob = !stretchingEdge && gainControlBounds(it->bounds).contains(event.position);
             if (!event.mods.isPopupMenu() && !onGainKnob && (event.mods.isShiftDown() || event.mods.isCommandDown()))
             {
                 auto ids = selectedClips;
@@ -979,12 +999,13 @@ void TimelineComponent::mouseDown(const juce::MouseEvent& event)
             }
             const auto muteBounds = juce::Rectangle<float>(it->bounds.getX() + 2.0f,
                 it->bounds.getY() + 2.0f, 14.0f, 13.0f);
-            if (muteBounds.contains(event.position))
+            if (!stretchingEdge && muteBounds.contains(event.position))
             {
                 model.setClipMuted(it->id, !it->muted);
                 return;
             }
             draggedClip = it->id;
+            draggedClipStretch = stretchClipEdges && it->nativeStretch;
             draggedClipStart = it->startSeconds;
             draggedClipDuration = it->durationSeconds;
             draggedClipPreviewStart = draggedClipStart;
@@ -1012,7 +1033,12 @@ void TimelineComponent::mouseDown(const juce::MouseEvent& event)
             const auto fadeIn = juce::Point<float>(timeToX(it->audioStartSeconds + it->fadeInSeconds), waveformTop);
             const auto fadeOut = juce::Point<float>(timeToX(it->audioStartSeconds + it->audioDurationSeconds - it->fadeOutSeconds), waveformTop);
             const auto grip = std::min(14.0f, it->bounds.getWidth() * 0.25f);
-            if (onGainKnob)
+            if (stretchingEdge)
+            {
+                dragMode = event.position.x <= it->bounds.getX()+grip ? DragMode::resizeLeft : DragMode::resizeRight;
+                setMouseCursor(juce::MouseCursor::LeftRightResizeCursor);
+            }
+            else if (onGainKnob)
             {
                 gainValueClick = gainControlLayout(it->bounds).value.contains(event.position);
                 dragMode = DragMode::gain;
@@ -1118,13 +1144,13 @@ void TimelineComponent::mouseDrag(const juce::MouseEvent& event)
     {
         const auto end = draggedClipStart + draggedClipDuration;
         draggedClipPreviewStart = juce::jlimit(0.0, end - 0.01,
-                                                snap(draggedClipStart + delta));
+                                                delta == 0.0 ? draggedClipStart : snap(draggedClipStart + delta));
         draggedClipPreviewDuration = end - draggedClipPreviewStart;
     }
     else if (dragMode == DragMode::resizeRight)
     {
         const auto end = std::max(draggedClipStart + 0.01,
-                                  snap(draggedClipStart + draggedClipDuration + delta));
+                                  delta == 0.0 ? draggedClipStart + draggedClipDuration : snap(draggedClipStart + draggedClipDuration + delta));
         draggedClipPreviewDuration = end - draggedClipStart;
     }
     else if (dragMode == DragMode::move) {
@@ -1140,6 +1166,9 @@ void TimelineComponent::mouseDrag(const juce::MouseEvent& event)
             viewport->autoScroll(p.x, p.y, 18, 18);
         }
     }
+    if (draggedClipStretch && (dragMode == DragMode::resizeLeft || dragMode == DragMode::resizeRight))
+        constrainNativeClipResize(snapshot.tracks[static_cast<std::size_t>(draggedClipTrack)], draggedClip,
+            draggedClipPreviewStart, draggedClipPreviewDuration);
     repaint();
 }
 
@@ -1175,8 +1204,12 @@ void TimelineComponent::mouseUp(const juce::MouseEvent& event)
             model.setClipFades(draggedClip, draggedClipPreviewFadeIn,
                                draggedClipPreviewFadeOut);
         else if (dragMode == DragMode::resizeLeft || dragMode == DragMode::resizeRight)
-            model.trimClip(draggedClip, draggedClipPreviewStart,
-                             draggedClipPreviewDuration);
+        {
+            if (draggedClipStretch)
+                model.resizeClip(draggedClip, draggedClipPreviewStart, draggedClipPreviewDuration);
+            else
+                model.trimClip(draggedClip, draggedClipPreviewStart, draggedClipPreviewDuration);
+        }
         else if (dragMode == DragMode::move
             && (draggedTrackDelta != 0 || std::abs(draggedClipPreviewStart - draggedClipStart) > 1.0e-9))
             model.moveClips(selectedClips, draggedClipPreviewStart - draggedClipStart, draggedTrackDelta);

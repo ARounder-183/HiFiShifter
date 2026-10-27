@@ -4,6 +4,53 @@
 
 namespace hachi
 {
+// Move a word boundary on an unchanged recording clock. Author controls stay
+// at their original absolute times; newly exposed pitch comes from the source.
+inline void repartitionNativeTrimNote(NoteData& note,ClipData& source,double start,double end)
+{
+    const auto before=note;
+    const auto added=before.startSeconds-start;
+    note.startSeconds=start;note.durationSeconds=end-start;
+    const auto shift=[&](auto& points){for(auto& p:points)p.timeSeconds+=added;};
+    shift(note.pitchControlPoints);shift(note.amplitudeEnvelope);
+    shift(note.diffSingerPitchReference);shift(note.diffSingerPitchOffset);
+    for(auto& curve:note.utauFlagCurves)shift(curve.points);
+    for(auto& t:note.sibilantMarkers)t+=added;
+    if(note.vibratoEnabled||note.vibratoReferenceDurationSeconds>0)
+    {
+        if(note.vibratoReferenceDurationSeconds<=0)note.vibratoReferenceDurationSeconds=before.durationSeconds;
+        note.vibratoTimeOffsetSeconds-=added;
+    }
+    if(start>=before.startSeconds&&end<=before.startSeconds+before.durationSeconds)
+        note.nativeEnvelope=backend::slicedNativeEnvelope(before.nativeEnvelope,
+            -added/before.durationSeconds,(end-before.startSeconds)/before.durationSeconds);
+    else if(note.nativeEnvelope.mode!=0)
+    {
+        auto& s=note.nativeEnvelope.shape;
+        s.startFraction=(added+s.startFraction*before.durationSeconds)/note.durationSeconds;
+        s.endFraction=(added+s.endFraction*before.durationSeconds)/note.durationSeconds;
+    }
+    extendNativeTrimContour(note,before,source,added);
+    if(!note.contour.empty())
+    {
+        const auto at=[&](double t)
+        {
+            const auto right=std::lower_bound(note.contour.begin(),note.contour.end(),t,[](const auto& p,double time){return p.timeSeconds<time;});
+            if(right==note.contour.end())return note.contour.back();
+            if(right==note.contour.begin()||std::abs(right->timeSeconds-t)<1.e-9)return *right;
+            auto p=*std::prev(right);const auto u=float((t-p.timeSeconds)/(right->timeSeconds-p.timeSeconds));
+            p.relativeCents+=(right->relativeCents-p.relativeCents)*u;p.withoutVibratoCents+=(right->withoutVibratoCents-p.withoutVibratoCents)*u;
+            p.manualTargetCents+=(right->manualTargetCents-p.manualTargetCents)*u;
+            p.hasManualTarget &= right->hasManualTarget;p.voiced &= right->voiced;return p;
+        };
+        auto a=at(0),b=at(note.durationSeconds);a.timeSeconds=0;b.timeSeconds=note.durationSeconds;
+        std::erase_if(note.contour,[&](const auto& p){return p.timeSeconds<=0||p.timeSeconds>=note.durationSeconds;});
+        note.contour.insert(note.contour.begin(),a);note.contour.push_back(b);
+    }
+    note.consonantSeconds=juce::jlimit(0.0,note.durationSeconds,before.consonantSeconds+added);
+    bindNativeNoteSource(note,source);
+}
+
 // Crop or expose source audio without changing the retained source clock.
 // Shared by the drag preview and the committed edit; the source file is untouched.
 inline std::optional<NativeNoteMovePlan> planNativeNoteTrim(
@@ -18,6 +65,41 @@ inline std::optional<NativeNoteMovePlan> planNativeNoteTrim(
     if (owner == sources.end() || !owner->sourceFile.existsAsFile()) return {};
     rememberNativeTrimSource(*owner);
     const auto note = std::find_if(owner->notes.begin(), owner->notes.end(), [&](const auto& n) { return n.id == id; });
+    // Two words of one continuous source share a boundary, not two crop edges.
+    // Work inside the existing source child so grouping/gain layers and the
+    // recording clock remain intact, including a child in a merged region.
+    const auto boundary=left?note->startSeconds:note->startSeconds+note->durationSeconds;
+    NoteData* adjacent=nullptr;bool ambiguous=false;
+    for(auto& other:owner->notes)if(other.id!=id
+        &&std::abs((left?other.startSeconds+other.durationSeconds:other.startSeconds)-boundary)<1.e-7)
+    {if(adjacent)ambiguous=true;adjacent=&other;}
+    if(adjacent&&!ambiguous)
+    {
+        auto* first=left?adjacent:&*note;auto* second=left?&*note:adjacent;
+        const auto begin=first->startSeconds,end=second->startSeconds+second->durationSeconds;
+        for(const auto& other:owner->notes)if(other.id!=first->id&&other.id!=second->id
+            &&std::min(end,other.startSeconds+other.durationSeconds)>std::max(begin,other.startSeconds)+1.e-7)ambiguous=true;
+        if(!ambiguous)
+        {
+            const auto minimum=std::min(1.e-6,(end-begin)*.25);
+            const auto next=juce::jlimit(begin+minimum,end-minimum,boundary+requested);
+            const auto delta=next-boundary;if(std::abs(delta)<1.e-9)return NativeNoteMovePlan{original,0,true};
+            TrackData envelopeTrack;envelopeTrack.pitchAlgorithm=PitchAlgorithm::world;envelopeTrack.clips={*owner};
+            const auto envelopes=nativeSharedEnvelopes(envelopeTrack);
+            repartitionNativeTrimNote(*first,*owner,begin,next);
+            repartitionNativeTrimNote(*second,*owner,next,end);
+            for(auto* value:{first,second})
+                if(const auto shared=envelopes.find(value->id);shared!=envelopes.end())
+                    value->amplitudeEnvelope=unscaledAmplitudeEnvelope(sliceNativeSharedEnvelope(*shared->second.points,
+                        owner->startSeconds+value->startSeconds,owner->startSeconds+value->startSeconds+value->durationSeconds),
+                        value->amplitudeEnvelopeBasePercent);
+            auto result=original;rememberNativeTrimSources(result);
+            const auto offset=owner->startSeconds-original.startSeconds;
+            for(auto& target:result.notes)for(const auto* value:{first,second})if(target.id==value->id)
+            {const auto partId=target.clipPartId;target=*value;target.startSeconds+=offset;target.clipPartId=partId;}
+            return NativeNoteMovePlan{std::move(result),delta,true};
+        }
+    }
     if ((left && requested < 0) || (!left && requested > 0))
     {
         juce::AudioFormatManager formats;formats.registerBasicFormats();

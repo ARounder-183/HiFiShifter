@@ -52,7 +52,8 @@ inline bool MainComponent::diagnosticChineseCvvc(const juce::File& folder, const
     check("ownership_and_negative_phoneme_span",plan.owners==std::vector<std::size_t>{0,1,1,1}&&near(plan.spans[1][0].startSeconds,-.08));
     check("parent_envelope_starts_before_vc",plan.request.notes[1].preserveEnvelopeTiming&&plan.request.notes[1].amplitudeEnvelope.front().timeSeconds<0);
     check("flag_curve_keeps_parent_clock",near(plan.request.notes[1].flagCurves[0].second[0].first,.08));
-    check("pitch_curve_keeps_parent_clock",near(plan.request.notes[1].timelinePitchCents(0),-8));
+    check("vc_pitch_reads_previous_score_note",near(plan.request.notes[1].timelinePitchCents(0),0));
+    check("cv_pitch_reads_own_score_note",near(plan.request.notes[2].timelinePitchCents(.1),10));
     check("score_and_lyrics_not_modified",request.notes.size()==2&&request.notes[1].alias=="ba"&&near(request.notes[0].durationSeconds,.5));
     auto changed=request; changed.notes[1].consonantVelocity=200;
     check("velocity_changes_vc_duration",near(planChineseCvvc(changed).spans[1][0].startSeconds,-.04));

@@ -72,9 +72,13 @@ expected_pitch=np.interp(time[locked]-.5,[0,.3,.7],[60,60.2,60])
 check('unedited pitch supplied as locked context', np.max(np.abs(seen[0]['pitch'][0,locked]-expected_pitch))<1e-5)
 saved=bank.pitch
 bank.pitch=lambda *args,**kwargs: (_ for _ in ()).throw(AssertionError('no selection must not infer'))
-empty=b.execute(request('pitch',probe,retake_ids=[]),out/'empty.json',bank)
+try:
+    b.execute(request('pitch',probe,retake_ids=[]),out/'empty.json',bank)
+except ValueError as e:
+    check('empty retake does not become whole track', '所选音符无效' in str(e))
+else:
+    raise AssertionError('empty retake accepted')
 bank.pitch=saved
-check('empty retake does not become whole track',not empty['curves'])
 render_notes=notes(['银','行','en/hello','+2','张'])
 render_notes[-1]['pronunciation']='[zh/zh zh/a en/ng]'
 pitch=b.execute(request('pitch',render_notes),out/'mixed-pitch.json',bank)

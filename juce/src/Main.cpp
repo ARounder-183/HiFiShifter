@@ -18,6 +18,8 @@
 #include "tests/PronunciationTimingSmoke.h"
 #include "tests/AdjacentPronunciationSmoke.h"
 #include "tests/VowelStretchAlignmentSmoke.h"
+#include "tests/NativeGapStretchSmoke.h"
+#include "tests/NativeBoundaryStretchSmoke.h"
 #include "tests/MaterialSourceReplacementSmoke.h"
 #include "tests/NamedVowelSmoke.h"
 #include "tests/VowelTimingAudioSmoke.h"
@@ -47,10 +49,12 @@
 #include "tests/CommunityDatasetMenuSmoke.h"
 #include "tests/MaterialVariantSmoke.h"
 #include "tests/TrackEditingInterfacesUiSmoke.h"
+#include "tests/UtauSelectionScopeSmoke.h"
 #include "tests/TrackTypeSmoke.h"
 #include "tests/VoicebankFamilySmoke.h"
 #include "tests/EmptyLyricPianoSmoke.h"
 #include "tests/AssetContextSmoke.h"
+#include "tests/ProjectMaterialMemorySmoke.h"
 #include "tests/VariantAssetUiSmoke.h"
 #include "tests/MaterialRootRegistrationSmoke.h"
 #include "OttoMaterialMigration.h"
@@ -94,12 +98,16 @@
 #include "tests/ClipSplitSmoke.h"
 #include "tests/ClipTrimSmoke.h"
 #include "tests/TimelineSelectionSmoke.h"
+#include "tests/NativeLoudnessSmoke.h"
+#include "tests/NativeInitialPitchSmoke.h"
 #include "tests/ClipMergeSmoke.h"
 #include "tests/ClipGainKnobSmoke.h"
 #include "tests/TimelineNotePreviewSmoke.h"
 #include "tests/NativeWaveformPreviewSmoke.h"
 #include "tests/NativeBatchFlattenSmoke.h"
 #include "tests/NativeLinkedPitchSmoke.h"
+#include "tests/NativePointFirstSmoke.h"
+#include "tests/NativeSparsePitchSmoke.h"
 #include "tests/NativeConsonantDisplaySmoke.h"
 #include "tests/NativePitchVisibilitySmoke.h"
 #include "tests/NativeUnpitchedRegionsSmoke.h"
@@ -111,6 +119,10 @@
 #include "tests/PointGroupSmoke.h"
 #include "tests/CvvcLayoutCacheSmoke.h"
 #include "tests/HifisamplerEnvelopeSmoke.h"
+#include "tests/CvvcLinearProjectSmoke.h"
+#include "tests/CvvcPitchProjectSmoke.h"
+#include "tests/UtauOverlapPitchSmoke.h"
+#include "tests/PointFirstPitchSmoke.h"
 #include "tests/NativeSourcePitchSmoke.h"
 #include "tests/NativeImportPerformanceSmoke.h"
 #include "tests/NativeSourcePitchRestoreSmoke.h"
@@ -166,6 +178,7 @@
 #include "tests/DiffSingerUiSmoke.h"
 #include "tests/DiffSingerTimingSmoke.h"
 #include "tests/DiffSingerConsonantSmoke.h"
+#include "tests/DiffSingerHistoryPlaybackSmoke.h"
 #include "tests/DiffSingerExpressionsSmoke.h"
 #include "tests/DiffSingerParametersSmoke.h"
 #include "tests/DiffSingerParameterRetakeSmoke.h"
@@ -255,6 +268,12 @@ public:
             setApplicationReturnValue(emptyLyricPianoSmoke(juce::File(arguments[1].unquoted())) ? 0 : 4);
             juce::MessageManager::callAsync([this] { quit(); }); return;
         }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-project-material-memory")
+        {
+            runProjectMaterialMemorySmoke(juce::File(arguments[1].unquoted()), [this](bool ok)
+            { setApplicationReturnValue(ok ? 0 : 4); juce::MessageManager::callAsync([this] { quit(); }); });
+            return;
+        }
         if (arguments.size() >= 2 && arguments[0] == "--smoke-asset-context")
         {
             setApplicationReturnValue(assetContextSmoke(juce::File(arguments[1].unquoted())) ? 0 : 4);
@@ -281,6 +300,13 @@ public:
         {
             auto component = std::make_unique<MainComponent>();
             setApplicationReturnValue(component->diagnosticEngineViewCapabilities(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            component.reset();
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-utau-selection-scope")
+        {
+            auto component = std::make_unique<MainComponent>();
+            setApplicationReturnValue(component->diagnosticUtauSelectionScope(juce::File(arguments[1].unquoted())) ? 0 : 4);
             component.reset();
             juce::MessageManager::callAsync([this] { quit(); }); return;
         }
@@ -696,6 +722,13 @@ public:
             setApplicationReturnValue(ok?0:4);
             juce::MessageManager::callAsync([this]{quit();});return;
         }
+        if (arguments.size() >= 3 && arguments[0] == "--smoke-diffsinger-history-playback")
+        {
+            MainComponent component;
+            const auto ok=component.diagnosticDiffSingerHistoryPlayback(juce::File(arguments[1].unquoted()),juce::File(arguments[2].unquoted()));
+            setApplicationReturnValue(ok?0:4);
+            juce::MessageManager::callAsync([this]{quit();});return;
+        }
         if (arguments.size() >= 3 && arguments[0] == "--smoke-diffsinger-timing")
         {
             const auto ok = runDiffSingerTimingSmoke(juce::File(arguments[1].unquoted()), juce::File(arguments[2].unquoted()));
@@ -703,13 +736,14 @@ public:
             juce::MessageManager::callAsync([this] { quit(); });
             return;
         }
-        if (arguments.size() >= 3 && arguments[0] == "--smoke-diffsinger-ui")
+        if (arguments.size() >= 3 && (arguments[0] == "--smoke-diffsinger-ui"
+                                     || arguments[0] == "--smoke-diffsinger-timing-selection"))
         {
             runDiffSingerUiSmoke(juce::File(arguments[1].unquoted()), juce::File(arguments[2].unquoted()), [this](bool ok)
             {
                 setApplicationReturnValue(ok ? 0 : 4);
                 juce::MessageManager::callAsync([this] { quit(); });
-            });
+            }, arguments[0] == "--smoke-diffsinger-timing-selection");
             return;
         }
         if (arguments.size() >= 3 && arguments[0] == "--smoke-diffsinger")
@@ -1028,6 +1062,17 @@ public:
             setApplicationReturnValue(ok ? 0 : 4);
             juce::MessageManager::callAsync([this] { quit(); }); return;
         }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-native-sparse-pitch")
+        {
+            setApplicationReturnValue(runNativeSparsePitchSmoke(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-native-point-first")
+        {
+            setApplicationReturnValue(runNativePointFirstSmoke(juce::File(arguments[1].unquoted()),
+                arguments.size() >= 3 ? juce::File(arguments[2].unquoted()) : juce::File{}) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
         if (arguments.size() >= 2 && arguments[0] == "--smoke-native-unpitched-regions")
         {
             const auto ok = runNativeUnpitchedRegionsSmoke(juce::File(arguments[1].unquoted()),
@@ -1131,6 +1176,28 @@ public:
             setApplicationReturnValue(ok ? 0 : 4);
             juce::MessageManager::callAsync([this] { quit(); }); return;
         }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-native-boundary-stretch")
+        {
+            setApplicationReturnValue(runNativeBoundaryStretchSmoke(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-native-gap-stretch")
+        {
+            setApplicationReturnValue(runNativeGapStretchSmoke(juce::File(arguments[1].unquoted()),
+                arguments.size()>2?juce::File(arguments[2].unquoted()):juce::File{}) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-native-initial-pitch")
+        {
+            setApplicationReturnValue(runNativeInitialPitchSmoke(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 2 && arguments[0] == "--smoke-native-loudness")
+        {
+            MainComponent component;
+            setApplicationReturnValue(component.diagnosticNativeLoudness(juce::File(arguments[1].unquoted())) ? 0 : 4);
+            juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
         if (arguments.size() >= 2 && arguments[0] == "--smoke-timeline-selection")
         {
             hachi::MainComponent main;
@@ -1205,6 +1272,29 @@ public:
                 session = arg.fromFirstOccurrenceOf("=", false, false).unquoted();
             setApplicationReturnValue(backend::LiveMcpBridge::runProxy(session, arguments[0] == "--mcp-list-sessions"));
             juce::MessageManager::callAsync([this] { quit(); }); return;
+        }
+        if (arguments.size() >= 3 && arguments[0] == "--smoke-point-first-pitch")
+        {
+            setApplicationReturnValue(pointFirstPitchSmoke(juce::File(arguments[1].unquoted()),juce::File(arguments[2].unquoted()))?0:4);
+            juce::MessageManager::callAsync([this]{quit();});return;
+        }
+        if (arguments.size() >= 3 && arguments[0] == "--smoke-utau-overlap-pitch")
+        {
+            setApplicationReturnValue(utauOverlapPitchSmoke(juce::File(arguments[1].unquoted()),
+                juce::File(arguments[2].unquoted()),arguments.size()>3?arguments[3]:juce::String("K2"))?0:4);
+            juce::MessageManager::callAsync([this]{quit();});return;
+        }
+        if (arguments.size() >= 4 && arguments[0] == "--smoke-cvvc-pitch-project")
+        {
+            setApplicationReturnValue(cvvcPitchProjectSmoke(juce::File(arguments[1].unquoted()),
+                juce::File(arguments[2].unquoted()),juce::File(arguments[3].unquoted()),arguments.size()>4?arguments[4]:juce::String("K2"))?0:4);
+            juce::MessageManager::callAsync([this]{quit();});return;
+        }
+        if (arguments.size() >= 4 && arguments[0] == "--smoke-cvvc-linear-project")
+        {
+            setApplicationReturnValue(cvvcLinearProjectSmoke(juce::File(arguments[1].unquoted()),
+                juce::File(arguments[2].unquoted()),juce::File(arguments[3].unquoted()))?0:4);
+            juce::MessageManager::callAsync([this]{quit();});return;
         }
         if (arguments.size() >= 2 && arguments[0] == "--smoke-hifisampler-envelope")
         {

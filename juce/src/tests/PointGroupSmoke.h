@@ -88,7 +88,18 @@ inline bool runPointGroupSmoke(const juce::File& folder)
         reset();select();click(at("a",3));del();check(prefix+"plain_click_replaces_group",stored(0).size()==4&&stored(1,cvvc?3:2).size()==5);
         reset();select();const auto far=at("a",1);roll.mouseDown(event(far,far));roll.mouseDrag(event(far+juce::Point<float>(400,-400),far));roll.mouseUp(event(far+juce::Point<float>(400,-400),far));
         const auto limitedA=stored(0),limitedB=stored(1,cvvc?3:2);
-        check(prefix+"group_stops_at_first_boundary",near(limitedA[1].first-beforeA[1].first,limitedA[2].first-beforeA[2].first)&&limitedA[2].first<limitedA[3].first
+        if(mode==0)
+        {
+            const auto delta=400.0/270.0;
+            check(prefix+"native_group_crosses_unselected_points",near(limitedA[2].first,beforeA[1].first+delta)
+                &&near(limitedA[4].first,beforeA[2].first+delta)&&near(limitedB[4].first,beforeB[2].first+delta)
+                &&near(limitedA[1].first,beforeA[3].first)&&near(limitedA[3].first,beforeA[4].first));
+            refresh();roll.keyPressed(juce::KeyPress('R',juce::ModifierKeys::ctrlModifier,0));
+            const auto resetA=stored(0),resetB=stored(1);
+            check(prefix+"crossing_preserves_selected_point_identity",near(resetA[2].second,60)&&near(resetA[4].second,60)
+                &&near(resetB[4].second,60)&&near(resetA[1].second,62)&&near(resetB[2].second,62));
+        }
+        else check(prefix+"group_stops_at_first_boundary",near(limitedA[1].first-beforeA[1].first,limitedA[2].first-beforeA[2].first)&&limitedA[2].first<limitedA[3].first
             &&near((limitedA[1].first-beforeA[1].first)*(cvvc?1.1:1),(limitedB[2].first-beforeB[2].first)*(cvvc?.5:1)));
         reset();select();const auto anchor=at("a",1),target=anchor+juce::Point<float>(8,-8);
         roll.mouseDown(event(anchor,anchor));roll.mouseDrag(event(target,anchor));roll.mouseUp(event(target,anchor));refresh();del();

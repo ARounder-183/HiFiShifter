@@ -2296,7 +2296,8 @@ VoicebankFamilyResolution resolveRequestedVoicebankFamily(const UtauRenderReques
         else if (!request.chineseCvvc || request.cvvcPhonemes || request.fourRegion)
             for (const auto& note : request.notes)
             {
-                if (isRestLyric(note.alias) || note.alias.trim().isEmpty()) continue;
+                if (isRestLyric(note.alias) || note.alias.trim().isEmpty()
+                    || (note.preserveEnvelopeTiming && note.gain <= 0)) continue;
                 if (resolveSample(*bank, note.alias, note.midiNote, note.aliasIsResolved) == nullptr)
                 {
                     resolution.warning = "UTAU track cannot resolve alias '" + note.alias

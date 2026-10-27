@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 
 # Public version changes require an explicit user request; small updates use docs/updates.md.
-project(HachiShifterNext VERSION 0.25 LANGUAGES C CXX)
+project(HachiShifterNext VERSION 0.27 LANGUAGES C CXX)
 
 option(HACHI_ENABLE_ASAN "Enable AddressSanitizer for native crash diagnosis" OFF)
 

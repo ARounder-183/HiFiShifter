@@ -29,9 +29,9 @@ public:
     // Project references are views of the original banks, not global imports.
     // Returns false when the folder set is unchanged (no member rescan).
     bool setProjectVoicebanks(const ProjectData& project);
+    std::function<void(const juce::String& state, const juce::String& session)> onBrowserStateChanged;
     // Production registration shares the folder action's authority/cache writer.
-    // False may mean preference persistence failed AFTER in-memory registration;
-    // error describes this retained state. The caller must not delete adopted data.
+    // Registration/removal memory is published to the owning project.
     bool registerMaterialRoot(const juce::File& folder, juce::String& error);
     // Refresh visible pronunciation names after any shared editor publishes.
     void refreshMaterialAnnotations(const juce::File& source);
@@ -190,7 +190,7 @@ private:
     bool updateProjectAudio(const ProjectData&, bool force);
     std::vector<juce::File> projectAudioSources;
     bool projectAudioDirty = false;
-    bool save();
+    void save();
     int registerFolder(const juce::File& folder, const juce::String& displayName = {});
     void createFolderDialog();
     juce::String registrationError;
@@ -233,6 +233,8 @@ private:
 
     I18n& strings;
     juce::PropertiesFile& properties;
+    juce::String browserState, browserSession;
+    std::uint64_t browserGeneration = 0;
     juce::TextButton folderActionsButton;
     std::vector<MaterialFolder> folders;
     std::vector<juce::File> members;

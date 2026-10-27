@@ -349,6 +349,14 @@ private:
     std::unordered_map<std::string, std::shared_ptr<std::atomic<float>>> trackMeters;
     std::unordered_map<std::string, std::shared_ptr<RenderedClip>> renderCache;
     std::unordered_map<std::string, std::shared_ptr<RenderedClip>> playbackFallbackByClip;
+    struct DiffSingerPlaybackHistory
+    {
+        std::string contextKey;
+        std::vector<std::shared_ptr<RenderedClip>> renders;
+    };
+    std::unordered_map<std::string, DiffSingerPlaybackHistory> diffSingerPlaybackHistory;
+    bool renderedHistoryPlayback = false;
+    std::shared_ptr<RenderedClip> diffSingerHistoryAudio(const std::string& clipId, double clipStart);
     std::string exportTrackFilter;
     WavExportComponent renderComponent = WavExportComponent::full;
     juce::String componentExportError;

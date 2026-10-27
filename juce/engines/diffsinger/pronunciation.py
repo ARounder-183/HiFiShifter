@@ -195,7 +195,7 @@ class Resolver:
             starts.append(b-onset)
         return [phones[a:b] for a, b in zip(starts, starts[1:]+[len(phones)])]
 
-    def prepare(self, notes, dictionary=''):
+    def prepare(self, notes, dictionary='', context_notes=None):
         user = dictionary_entries(dictionary, self.bank.language)
         # Validate dictionary entries even when no current note uses them.
         for (lang, text), value in user.items():
@@ -216,7 +216,10 @@ class Resolver:
                 readings[str(n['id'])] = ' '.join(values[offset:offset+count])
                 offset += count
             run.clear()
-        for n in ordered:
+        # Text context may cross an inference phrase boundary. Read it without
+        # validating unrelated phonemes; only the scoped notes below are resolved.
+        text_context = ordered if context_notes is None else sorted(context_notes, key=lambda n: n['start'])
+        for n in text_context:
             eligible = self.bank.language == 'zh' and HAN.fullmatch(n['lyric']) and not n.get('pronunciation')
             if not eligible or (run and (n['start'] > run[-1]['start']+run[-1]['duration']+.08
                                         or n.get('context') != run[-1].get('context'))):

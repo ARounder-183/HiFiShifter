@@ -324,7 +324,7 @@ MainComponent::MainComponent()
 
     for (auto* button : std::initializer_list<juce::TextButton*>{
                           &playButton, &stopButton, &noteEditButton, &wrenchButton,
-                          &lineButton, &pointButton, &trimButton, &connectButton, &pitchParamButton,
+                          &lineButton, &pointButton, &trimButton, &nativeLoudnessButton, &connectButton, &pitchParamButton,
                           &driftParamButton, &attackParamButton,
                           &breathParamButton, &tensionParamButton, &formantParamButton,
                           &volumeParamButton,
@@ -339,9 +339,12 @@ MainComponent::MainComponent()
     utauVoicebankButton.onClick = [this] { chooseUtauVoicebank(); };
     addAndMakeVisible(utauVoicebankName);
     utauVoicebankName.setComponentID("utau-voicebank-name");
-    utauVoicebankName.setFont(juce::Font(14.0f));
+    utauVoicebankName.setFont(juce::Font(14.0f,juce::Font::bold));
+    utauVoicebankName.setColour(juce::Label::textColourId,Palette::accentLight);
     utauVoicebankName.setMinimumHorizontalScale(1.0f);
     utauVoicebankName.setJustificationType(juce::Justification::centredLeft);
+    utauVoicebankName.addMouseListener(this, false);
+    utauVoicebankName.setMouseCursor(juce::MouseCursor::PointingHandCursor);
     addAndMakeVisible(nativeAudioOverlapButton);
     addAndMakeVisible(nsfPitchTransitionsButton);
     addAndMakeVisible(nsfNoiseProtectionButton);
@@ -477,6 +480,7 @@ MainComponent::MainComponent()
     pointButton.setComponentID("icon.points");
     wrenchButton.setComponentID("icon.wrench");
     trimButton.setComponentID("icon.trim");
+    nativeLoudnessButton.setComponentID("tool.nativeLoudness");
     connectButton.setComponentID("icon.connect");
 
     bpmEditor.setEditable(true, false, false);
@@ -588,6 +592,7 @@ MainComponent::MainComponent()
     // so every UTAU affordance is inherited rather than reimplemented.
     pitchAlgorithm.addItem(utf8("界•UTAU"), 8);
     pitchAlgorithm.addItem(utf8("谋•UTAU"), 9);
+    pitchAlgorithm.addItem("DiffSinger (DS)", 10);
     const auto defaultPitchId = 2; // Native default is NSF; readiness is diagnosed when used.
     pitchAlgorithm.setSelectedId(defaultPitchId,juce::dontSendNotification);
     refreshStretchAlgorithmItems(defaultPitchId);
@@ -608,52 +613,15 @@ MainComponent::MainComponent()
                 return;
             }
         }
-        const auto chosenUtau = utauModeForPickerItem(id);
-        const auto utauItem = chosenUtau.has_value();
-        if (pitchAlgorithm.getSelectedId() == 0 && utauAmplitudeEnvelopeActive)
-        {
-            closeEnvelopeLanes();
-            pianoRoll.setTool(PianoRollComponent::Tool::note);
-            setToolButton(noteEditButton);
-        }
-        else if (utauItem && volumeParamButton.getToggleState()
-                 && !utauAmplitudeEnvelopeActive)
-        {
-            pianoRoll.setTool(PianoRollComponent::Tool::note);
-            setToolButton(noteEditButton);
-        }
-        const auto previousStretch = stretchAlgorithm.getSelectedId();
-        refreshStretchAlgorithmItems(previousStretch);
-        const auto algorithm = nsfPickerItem(id) ? PitchAlgorithm::nsfHifigan
-            : id == 3 ? PitchAlgorithm::world
-            : id == 4 ? PitchAlgorithm::vocalShifter
-            : id == 6 ? PitchAlgorithm::llsm2
-            : utauItem ? PitchAlgorithm::utau : PitchAlgorithm::llsm2;
-        const auto utauMode = chosenUtau.value_or(UtauMode::classic);
-        const auto data = project.snapshot();
-        const auto selectedTrack = std::find_if(data.tracks.begin(), data.tracks.end(),
-            [this](const auto& track)
-            {
-                return track.id == selectedTrackId;
-            });
-        if (selectedTrack != data.tracks.end())
-        {
-            project.setTrackPitchAlgorithm(selectedTrack->id, algorithm);
-            project.setTrackUtauMode(selectedTrack->id, utauMode);
-        }
-        else
-        {
-            project.setPitchAlgorithm(algorithm);
-            project.setUtauMode(utauMode);
-        }
-        if (previousStretch != stretchAlgorithm.getSelectedId())
-        {
-            if (selectedTrack != data.tracks.end())
-                project.setTrackStretchAlgorithm(selectedTrack->id,
-                                                  StretchAlgorithm::melodyneHybrid);
-            else
-                project.setStretchAlgorithm(StretchAlgorithm::melodyneHybrid);
-        }
+        const auto mode = utauModeForPickerItem(id);
+        if (sourceEditActive || diffSingerBusy || !projectedTrackEditable
+            || (id != 2 && id != 3 && id != 6 && !mode && id != 10))
+        { refreshProjectControls(); return; }
+        const auto type = id == 10 ? TrackType::diffSinger : mode ? TrackType::utau : TrackType::hachi;
+        const auto algorithm = id == 2 ? PitchAlgorithm::nsfHifigan : id == 3 ? PitchAlgorithm::world
+            : id == 6 ? PitchAlgorithm::llsm2 : PitchAlgorithm::utau;
+        project.setTrackEditingType(selectedTrackId, type, algorithm, mode);
+        project.dispatchPendingMessages();
         refreshProjectControls();
         refreshSelectedNoteParameter();
         resized();
@@ -915,6 +883,8 @@ MainComponent::MainComponent()
         static_cast<juce::Component*>(&diffSingerParametersButton),static_cast<juce::Component*>(&diffSingerSettingsButton)})addChildComponent(c);
     trackEditingHeading.setFont(juce::Font(14.0f,juce::Font::bold));trackEditingHeading.setColour(juce::Label::textColourId,Palette::accentLight);
     trackEditingHeading.setComponentID("track-editing-interface");diffSingerContextLabel.setComponentID("diffsinger-track-properties");
+    trackEditingHeading.setInterceptsMouseClicks(false, false);
+    pitchAlgorithm.setComponentID("track-editor-algorithm");
     diffSingerModelButton.setComponentID("diffsinger-choose-model");diffSingerTimingButton.setComponentID("diffsinger-phoneme-timing");
     diffSingerPronunciationButton.setComponentID("diffsinger-pronunciation");diffSingerPitchButton.setComponentID("diffsinger-generate-pitch");
     diffSingerParametersButton.setComponentID("diffsinger-variance-parameters");diffSingerSettingsButton.setComponentID("diffsinger-language-speaker");
@@ -1033,6 +1003,15 @@ MainComponent::MainComponent()
         pianoRoll.setTool(active ? PianoRollComponent::Tool::note : PianoRollComponent::Tool::trim);
         setToolButton(active ? noteEditButton : trimButton);
     };
+    nativeLoudnessButton.onClick = [this]
+    {
+        if (!nativeLoudnessButton.isEnabled()) return;
+        const auto active = nativeLoudnessButton.getToggleState();
+        closeEnvelopeLanes(); setSourceEditMode(false);
+        pianoRoll.setTool(PianoRollComponent::Tool::note);
+        setToolButton(active ? noteEditButton : nativeLoudnessButton);
+        if (!active) statusLabel.setText(strings.text("tool.nativeLoudnessHint"), juce::dontSendNotification);
+    };
     connectButton.onClick = [this]
     {
         closeEnvelopeLanes();
@@ -1045,7 +1024,8 @@ MainComponent::MainComponent()
                           &formantParamButton, &volumeParamButton })
         button->onClick = [this, button]
         {
-            if (button == &volumeParamButton && isUtauAlgorithmSelected())
+            if (button == &volumeParamButton && (isUtauAlgorithmSelected()
+                || displayedTrackType == TrackType::diffSinger))
             {
                 setEnvelopeLane(nextEnvelopeLane(envelopeLane, EnvelopeLane::amplitude));
                 return;
@@ -1095,6 +1075,7 @@ MainComponent::~MainComponent()
     stopTimer();
     if (preferences != nullptr) audio.saveDeviceState(*preferences);
     panelSplitter.removeMouseListener(this);
+    utauVoicebankName.removeMouseListener(this);
     audio.removeChangeListener(this);
     project.removeChangeListener(this);
     menuBar.setModel(nullptr);
@@ -1247,6 +1228,8 @@ void MainComponent::refreshTexts()
     pointButton.setTooltip(strings.text("tool.points") + utf8("；右键可选择 DS 音高还原或绘制偏移"));
     trimButton.setButtonText({});
     trimButton.setTooltip(strings.text("tool.trim"));
+    nativeLoudnessButton.setButtonText(strings.text("tool.nativeLoudness"));
+    nativeLoudnessButton.setTooltip(strings.text("tool.nativeLoudnessHint"));
     connectButton.setButtonText({});
     connectButton.setTooltip(strings.text("Source-note boundary split/join, not forced pitch portamento"));
     refreshPitchScopeTitle();
@@ -1408,16 +1391,23 @@ void MainComponent::refreshTexts()
     refreshSelectedNoteParameter();
 }
 
-void MainComponent::refreshTrackPitchItems(const TrackData* track)
+void MainComponent::refreshTrackPitchItems(const TrackData*)
 {
-    const auto type=track?effectiveTrackType(*track):TrackType::hachi;
-    const auto previous=pitchAlgorithm.getSelectedId();pitchAlgorithm.clear(juce::dontSendNotification);
-    if(type==TrackType::hachi)
-    {pitchAlgorithm.addItem("nsf-hifigan",2);pitchAlgorithm.addItem("WORLD",3);pitchAlgorithm.addItem("llsm2",6);}
-    else if(type==TrackType::utau)
-    {pitchAlgorithm.addItem("UTAU",7);pitchAlgorithm.addItem(utf8("界•UTAU"),8);pitchAlgorithm.addItem(utf8("谋•UTAU"),9);}
-    else pitchAlgorithm.addItem("DiffSinger",10);
-    if(pitchAlgorithm.indexOfItemId(previous)>=0)pitchAlgorithm.setSelectedId(previous,juce::dontSendNotification);
+    const auto previous = pitchAlgorithm.getSelectedId();
+    pitchAlgorithm.clear(juce::dontSendNotification);
+    pitchAlgorithm.addItem("nsf-hifigan", 2);
+    pitchAlgorithm.addItem("WORLD", 3);
+    pitchAlgorithm.addItem("llsm2", 6);
+    pitchAlgorithm.addSeparator();
+    pitchAlgorithm.addItem("UTAU", 7);
+    pitchAlgorithm.addItem(utf8("界•UTAU"), 8);
+    pitchAlgorithm.addItem(utf8("谋•UTAU"), 9);
+    pitchAlgorithm.addSeparator();
+    pitchAlgorithm.addItem("DiffSinger (DS)", 10);
+    pitchAlgorithm.setSelectedId(previous, juce::dontSendNotification);
+    pitchAlgorithm.setTooltip(utf8("变调算法 / 编辑模式"));
+    pitchAlgorithm.setColour(juce::ComboBox::backgroundColourId, Palette::accent);
+    pitchAlgorithm.setColour(juce::ComboBox::textColourId, Palette::contrastingText(Palette::accent));
 }
 
 void MainComponent::refreshTrackEditingInterface(const TrackData* track)
@@ -1425,6 +1415,9 @@ void MainComponent::refreshTrackEditingInterface(const TrackData* track)
     const auto id=track?track->id:juce::String{};const auto type=track?effectiveTrackType(*track):TrackType::hachi;
     if(trackInterfaceOwner!=id||displayedTrackType!=type)
     {
+        // Selection restoration calls focusNote -> focusClip -> this refresh.
+        // Publish the new owner before those synchronous callbacks can re-enter.
+        trackInterfaceOwner=id;displayedTrackType=type;
         std::vector<juce::String> keep;
         if(track)for(const auto& selected:pianoRoll.selectedNoteIds())for(const auto& clip:track->clips)for(const auto& n:clip.notes)if(n.id==selected)keep.push_back(n.id);
         finishMaterialPronunciationInput(true); // discard UI query only, never a model action
@@ -1439,7 +1432,7 @@ void MainComponent::refreshTrackEditingInterface(const TrackData* track)
             if(!ownsNote)selectedNoteId.clear();
         }
         else{selectedClipId.clear();selectedNoteId.clear();}
-        pianoRoll.setSelectedNoteIds(keep);trackInterfaceOwner=id;displayedTrackType=type;
+        pianoRoll.setSelectedNoteIds(keep);
         menuItemsChanged(); // Track semantics, not a possibly stale algorithm picker.
     }
     projectedTrackEditable=track&&track->compose&&!track->accompaniment&&!track->referenceOnly;
@@ -1448,12 +1441,15 @@ void MainComponent::refreshTrackEditingInterface(const TrackData* track)
     utauVoicebankName.setText(bankDirectory != juce::File{} ? bankDirectory.getFileName()
         : strings.text("utau.noVoicebankSelected"), juce::dontSendNotification);
     utauVoicebankName.setTooltip(bankDirectory != juce::File{} ? bankDirectory.getFullPathName()
+        + (type == TrackType::utau ? "\n" + strings.text("utau.editVoicebankHint") : juce::String{})
         : strings.text("utau.noVoicebankSelected"));
+    utauVoicebankName.setMouseCursor(type == TrackType::utau ? juce::MouseCursor::PointingHandCursor
+        : juce::MouseCursor::NormalCursor);
     utauVoicebankButton.setTooltip(strings.text("utau.chooseVoicebankHint")
         + (track && track->voicebankDirectory != juce::File{}
             ? "\n" + track->voicebankDirectory.getFullPathName() : juce::String{}));
-    const auto title=type==TrackType::hachi?juce::String("HachiShifter"):type==TrackType::utau?juce::String("UTAU"):juce::String("DiffSinger");
-    trackEditingHeading.setText(title+(track?" | "+track->name:juce::String{}),juce::dontSendNotification);
+    trackEditingHeading.setText(track ? track->name : juce::String{}, juce::dontSendNotification);
+    trackEditingHeading.setTooltip(track ? track->name : juce::String{});
     diffSingerContextLabel.setText(track?(strings.text("Language: "))+track->diffSingerLanguage+(strings.text("  Speaker: "))
         +(track->diffSingerSpeaker.isEmpty()?juce::String("default"):track->diffSingerSpeaker):juce::String{},juce::dontSendNotification);
     diffSingerModelButton.setButtonText(strings.text("Choose model"));diffSingerTimingButton.setButtonText(strings.text("Phoneme timing"));
@@ -1485,7 +1481,10 @@ void MainComponent::refreshProjectControls()
     nsfNoiseProtectionButton.setVisible(nsfPitchTransitionsButton.isVisible());
     nsfNoiseProtectionButton.setToggleState(overlapTrack!=data.tracks.end() && overlapTrack->nsfNoiseProtection,juce::dontSendNotification);
     trimButton.setEnabled(overlapTrack!=data.tracks.end()&&trackShowsAllNativeRegions(*overlapTrack)&&!sourceEditActive);
-    if (!trimButton.isEnabled() && pianoRoll.currentTool() == PianoRollComponent::Tool::trim)
+    nativeLoudnessButton.setEnabled(trimButton.isEnabled());
+    timeline.setClipStretchMode(false);
+    pianoRoll.setNativeLoudnessMode(nativeLoudnessButton.isEnabled() && nativeLoudnessButton.getToggleState());
+    if (!trimButton.isEnabled() && (pianoRoll.currentTool() == PianoRollComponent::Tool::trim || nativeLoudnessButton.getToggleState()))
     {
         pianoRoll.setTool(PianoRollComponent::Tool::note); setToolButton(noteEditButton);
     }
@@ -1555,7 +1554,7 @@ void MainComponent::refreshProjectControls()
     pianoPreviewButton.setToggleState(selected != data.tracks.end() && selected->utauPianoPreview,
                                      juce::dontSendNotification);
     const auto dsInterface=selected!=data.tracks.end()&&effectiveTrackType(*selected)==TrackType::diffSinger;
-    pitchAlgorithm.setEnabled(!accompaniment&&!dsInterface);
+    pitchAlgorithm.setEnabled(projectedTrackEditable && !sourceEditActive && !diffSingerBusy);
     stretchAlgorithm.setEnabled(!accompaniment&&!dsInterface);
     renderOrder.setEnabled(!accompaniment&&!dsInterface);
     pianoRoll.setEnabled(!accompaniment);
@@ -2207,7 +2206,8 @@ void MainComponent::setEnvelopeLane(EnvelopeLane lane)
     // Both buttons, every time: the one that was not clicked is exactly the
     // one that used to be left showing a lane it no longer had.
     advancedEnvelopeButton.setToggleState(false,juce::dontSendNotification);
-    volumeParamButton.setToggleState(isUtauAlgorithmSelected() && lane == EnvelopeLane::amplitude,
+    volumeParamButton.setToggleState((isUtauAlgorithmSelected() || displayedTrackType == TrackType::diffSinger)
+                                     && lane == EnvelopeLane::amplitude,
                                      juce::dontSendNotification);
     flagEnvelopeButton.setToggleState(lane == EnvelopeLane::flagCurve,
                                       juce::dontSendNotification);
@@ -3306,9 +3306,12 @@ bool MainComponent::diagnosticRenderOrderPicker()
 
 void MainComponent::setToolButton(juce::Button& selected)
 {
-    const std::array<juce::Button*, 7> editTools {
-        &noteEditButton, &wrenchButton, &drawButton, &lineButton, &pointButton, &trimButton, &connectButton
+    const std::array<juce::Button*, 8> editTools {
+        &noteEditButton, &wrenchButton, &drawButton, &lineButton, &pointButton, &trimButton, &nativeLoudnessButton, &connectButton
     };
+    timeline.setClipStretchMode(false);
+    pianoRoll.setNativeStretchMode(false);
+    pianoRoll.setNativeLoudnessMode(&selected == &nativeLoudnessButton);
     for (auto* button : editTools)
         button->setToggleState(button == &selected, juce::dontSendNotification);
     const std::array<juce::Button*, 7> parameterTools {
@@ -3716,9 +3719,11 @@ void MainComponent::resized()
     const auto utau = projectedTrackEditable&&displayedTrackType==TrackType::utau;
     const auto ds = projectedTrackEditable&&displayedTrackType==TrackType::diffSinger;
     const auto hachi = !utau&&!ds;
-    if (utau) volumeParamButton.setToggleState(envelopeLane==EnvelopeLane::amplitude,juce::dontSendNotification);
-    volumeParamButton.setButtonText(utau ? utf8("响度包络") : strings.text("param.volume"));
-    volumeParamButton.setTooltip(utau ? utf8("显示全部 UTAU 音符的振幅包络；拖动标点编辑，双击曲线加点，右键内部标点删除") : strings.text("param.volume"));
+    if (utau || ds) volumeParamButton.setToggleState(envelopeLane==EnvelopeLane::amplitude,juce::dontSendNotification);
+    volumeParamButton.setButtonText(utau || ds ? utf8("响度包络") : strings.text("param.volume"));
+    volumeParamButton.setTooltip(ds
+        ? utf8("编辑 DS 合成后的音量包络，默认平直、100% 原音量；拖动标点调整，双击曲线加点，右键内部标点删除。与能量参数分开，不改变音高或音素时长；试听和导出均生效。")
+        : utau ? utf8("显示全部 UTAU 音符的振幅包络；拖动标点编辑，双击曲线加点，右键内部标点删除") : strings.text("param.volume"));
     refreshPitchScopeTitle();
     // Atomic label/control groups wrap as a unit. Tools are laid out FIRST,
     // never squeezed by right-hand algorithm pickers into one-pixel icons.
@@ -3738,6 +3743,7 @@ void MainComponent::resized()
             else if(auto* combo=dynamic_cast<juce::ComboBox*>(item.component))
                 textWidth=juce::roundToInt(combo->getLookAndFeel().getComboBoxFont(*combo).getStringWidthFloat(combo->getText()))+32;
             if (item.component == &utauVoicebankName) textWidth=std::min(260,textWidth);
+            if (item.component == &trackEditingHeading) textWidth=std::min(164,textWidth);
             item.width=std::min(available,std::max(item.width,textWidth));
         }
         groups.push_back(std::move(group));
@@ -3762,13 +3768,15 @@ void MainComponent::resized()
     };
     Groups tools,expression,sample,mode;
     pointButton.setVisible(true);spliceButton.setVisible(true);
-    trackEditingHeading.setVisible(true);parameterTitle.setVisible(false);
-    add(tools,{{&trackEditingHeading,std::min(available,300)}});
+    trackEditingHeading.setVisible(hachi);parameterTitle.setVisible(false);
+    pitchAlgorithm.setVisible(true);pitchLabel.setVisible(false);
+    add(tools,{{&pitchAlgorithm,156}});
+    utauVoicebankName.setVisible(utau||ds);
+    if(utau||ds)add(tools,{{&utauVoicebankName,164}});
+    else add(tools,{{&trackEditingHeading,std::min(available,164)}});
     add(tools,{{&noteEditButton,27},{&drawButton,27},{&pointButton,27},{&lineButton,27}});
-    wrenchButton.setVisible(!ds);trimButton.setVisible(hachi);connectButton.setVisible(hachi);
-    if(!ds)add(tools,{{&wrenchButton,27}});if(hachi)add(tools,{{&trimButton,27},{&connectButton,27}});
-    pitchLabel.setVisible(!ds);pitchAlgorithm.setVisible(!ds);
-    if(!ds)add(tools,{{&pitchLabel,50},{&pitchAlgorithm,106}});
+    wrenchButton.setVisible(!ds);trimButton.setVisible(hachi);nativeLoudnessButton.setVisible(hachi);connectButton.setVisible(hachi);
+    if(!ds)add(tools,{{&wrenchButton,27}});if(hachi)add(tools,{{&trimButton,27},{&nativeLoudnessButton,48},{&connectButton,27}});
     const auto showOrder=hachi&&nsfPickerItem(pitchAlgorithm.getSelectedId());
     renderOrder.setVisible(showOrder);renderOrderLabel.setVisible(showOrder);
     if(showOrder)add(tools,{{&renderOrderLabel,38},{&renderOrder,108}});
@@ -3776,9 +3784,8 @@ void MainComponent::resized()
     const auto stretchWidth=available>=900?168:124;
     if(!ds)add(tools,{{&stretchLabel,52},{&stretchAlgorithm,stretchWidth}});
     utauVoicebankButton.setVisible(utau);
-    utauVoicebankName.setVisible(utau);
     utauVoicebankButton.setEnabled(utau && !sourceEditActive);
-    if(utau)add(tools,{{&spliceButton,100},{&utauVoicebankButton,120},{&utauVoicebankName,140}});
+    if(utau)add(tools,{{&spliceButton,100},{&utauVoicebankButton,120}});
     else add(tools,{{&spliceButton,100}});
     if(ds)
     {
@@ -3792,9 +3799,10 @@ void MainComponent::resized()
         static_cast<juce::Component*>(&pitchParamButton),static_cast<juce::Component*>(&driftParamButton),
         static_cast<juce::Component*>(&attackParamButton),static_cast<juce::Component*>(&breathParamButton),
         static_cast<juce::Component*>(&tensionParamButton),static_cast<juce::Component*>(&formantParamButton)})c->setVisible(hachi);
-    volumeParamButton.setVisible(!ds);flagEnvelopeButton.setVisible(utau);
+    volumeParamButton.setVisible(true);flagEnvelopeButton.setVisible(utau);
     if(utau)add(expression,{{&volumeParamButton,78},{&flagEnvelopeButton,78}});
-    envelopePresetMenu.setVisible(!ds&&!selectedTrackIsAccompaniment());
+    if(ds)add(expression,{{&volumeParamButton,78}});
+    envelopePresetMenu.setVisible(!selectedTrackIsAccompaniment());
     if(envelopePresetMenu.isVisible())add(expression,{{&envelopePresetMenu,110}});
     advancedEnvelopeButton.setVisible(!ds&&(utau||nativeAudioOverlapButton.isVisible()));
     advancedEnvelopeButton.setButtonText(utf8("高级包络"));advancedEnvelopeButton.setToggleState(false,juce::dontSendNotification);
@@ -3922,6 +3930,13 @@ void MainComponent::adjustVerticalZoom(double factor, bool upperPane)
         oldCentreY * juce::jlimit(12.0, 48.0, 22.0 * vZoomSlider.getValue())
             / juce::jlimit(12.0, 48.0, 22.0 * oldZoom) - viewHeight / 2.0)));
     pianoViewport.setViewPosition(pianoViewport.getViewPositionX(), nextViewY);
+}
+
+void MainComponent::mouseDoubleClick(const juce::MouseEvent& event)
+{
+    if (event.eventComponent == &utauVoicebankName && event.mods.isLeftButtonDown()
+        && utauVoicebankName.isVisible() && displayedTrackType == TrackType::utau && !sourceEditActive)
+        showVoicebankSettings();
 }
 
 void MainComponent::mouseDown(const juce::MouseEvent& event)
@@ -4755,6 +4770,11 @@ void MainComponent::setAssetManagerVisible(bool visible)
     if (assetManager == nullptr)
     {
         assetManager = std::make_unique<AssetManagerComponent>(strings, *preferences);
+        assetManager->onBrowserStateChanged = [this](const juce::String& state, const juce::String& session)
+        {
+            if (project.snapshot().materialBrowserSessionId == session)
+                project.setMaterialBrowserState(state);
+        };
         assetManager->onMaterialPreflight = [this](const juce::File& source, const auto& rows, juce::String& error)
         { return preflightMaterialPublication(source, rows, error); };
         assetManager->onMaterialSaved = [this](const juce::File& source, const auto& rows)
@@ -6035,17 +6055,33 @@ void MainComponent::openSelectedMaterialEditor(bool quick, const juce::String& r
         if (found == clip.notes.end()) { showError(utf8("请选择要编辑素材的音符。")); return; }
         const auto note = *found;
         const auto root = track.voicebankDirectory;
+        const auto mode = track.utauMode;
         const auto regions = utauModeUsesRegions(track.utauMode), classes = track.utauMode==UtauMode::mou;
         // Resolve the actual recording in the existing bank service off the UI
         // thread. Never substitute the alphabetically nearest alias.
-        std::thread([safe = juce::Component::SafePointer<MainComponent>(this), root, note, regions, classes, quick]
+        std::thread([safe = juce::Component::SafePointer<MainComponent>(this), root, note, regions, classes, mode]
         {
             const auto sample = backend::UtauRenderer::resolveVoiceSample(root,note.label,note.midiNote,100,regions,classes);
-            juce::MessageManager::callAsync([safe,root,note,sample,quick]
+            juce::MessageManager::callAsync([safe,root,sample,mode]
             {
                 if (safe == nullptr) return;
                 if (!sample.found) { safe->showError(utf8("没有找到此发音的源录音。")); return; }
-                safe->openMaterialEditor(sample.file, root.getChildFile("otto.ini"), quick, note.materialRegionId,note.materialAudioId);
+                const auto key = "utau-source|" + root.getFullPathName() + "|" + juce::String(static_cast<int>(mode))
+                    + "|" + sample.file.getFullPathName() + "|" + sample.resolvedAlias;
+                if (safe->noteOtoWindows.showExisting(key)) return;
+                juce::String error;
+                auto editor = OtoWaveformEditorComponent::forVoicebankSample(root, mode, sample,
+                    [safe] { if (safe) safe->refreshAfterVoicebankChange(); }, error);
+                if (!editor) { safe->showError(error); return; }
+                safe->attachOtoPlayback(*editor);
+                juce::DialogWindow::LaunchOptions options;
+                options.dialogTitle = (mode == UtauMode::mou ? utf8("谋•OTO 分区编辑器 — ")
+                    : mode == UtauMode::jie ? utf8("界•OTO 四区编辑器 — ") : utf8("OTO 时序编辑器 — "))
+                    + sample.file.getFileName() + " · " + sample.resolvedAlias;
+                options.dialogBackgroundColour = Palette::panel;
+                options.escapeKeyTriggersCloseButton = true; options.useNativeTitleBar = true; options.resizable = true;
+                options.content.setOwned(editor.release());
+                if (auto* window = safe->noteOtoWindows.show(options,key)) window->setResizeLimits(720,400,1800,1100);
             });
         }).detach();
         return;

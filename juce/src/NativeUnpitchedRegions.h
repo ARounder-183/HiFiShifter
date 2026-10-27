@@ -53,35 +53,52 @@ inline std::size_t appendNativeUnpitchedRegions(ClipData& clip)
     return count;
 }
 
-// Delete actual playback spans. Keep the source file intact and use the same
-// source clock/trim machinery as ordinary audio cuts, with no timeline ripple.
-inline std::vector<ClipData> removeNativeUnpitchedAudio(
-    const ClipData& original, const std::vector<juce::String>& ids)
+// Selected spans minus audio still owned by unselected notes. Merge the
+// result so a shared interval is closed only once by ripple deletion.
+inline std::vector<juce::Range<double>> nativeNoteRemovalRanges(
+    const ClipData& clip, const std::vector<juce::String>& ids)
+{
+    const auto selected = [&](const auto& id) { return std::find(ids.begin(),ids.end(),id)!=ids.end(); };
+    std::vector<juce::Range<double>> cuts;
+    for(const auto& note:clip.notes) if(selected(note.id))
+    {
+        const auto a=std::max(0.0,note.startSeconds), b=std::min(clip.durationSeconds,note.startSeconds+note.durationSeconds);
+        if(b>a)cuts.emplace_back(a,b);
+    }
+    for(const auto& note:clip.notes) if(!selected(note.id))
+    {
+        std::vector<juce::Range<double>> remaining;
+        const juce::Range<double> protectedRange(note.startSeconds,note.startSeconds+note.durationSeconds);
+        for(const auto& cut:cuts)
+        {
+            if(!cut.intersects(protectedRange)){remaining.push_back(cut);continue;}
+            if(cut.getStart()<protectedRange.getStart())remaining.emplace_back(cut.getStart(),protectedRange.getStart());
+            if(cut.getEnd()>protectedRange.getEnd())remaining.emplace_back(protectedRange.getEnd(),cut.getEnd());
+        }
+        cuts=std::move(remaining);
+    }
+    std::stable_sort(cuts.begin(),cuts.end(),[](auto a,auto b){return a.getStart()<b.getStart();});
+    std::vector<juce::Range<double>> merged;
+    for(const auto& cut:cuts)
+    {
+        if(!merged.empty()&&cut.getStart()<=merged.back().getEnd())merged.back().setEnd(std::max(merged.back().getEnd(),cut.getEnd()));
+        else merged.push_back(cut);
+    }
+    return merged;
+}
+
+// Delete actual playback spans. Keep the source file intact and reuse the
+// source clock/trim machinery. Ordinary delete leaves the timeline gap.
+inline std::vector<ClipData> removeNativeNoteAudio(
+    const ClipData& original, const std::vector<juce::String>& ids, bool ripple = false)
 {
     const auto selected = [&](const auto& id) { return std::find(ids.begin(), ids.end(), id) != ids.end(); };
-    if (std::none_of(original.notes.begin(), original.notes.end(), [&](const auto& n) { return n.nativeUnpitched && selected(n.id); }))
+    if (std::none_of(original.notes.begin(), original.notes.end(), [&](const auto& n) { return selected(n.id); }))
         return {original};
     std::vector<ClipData> result;
     for (auto source : expandedClipParts(original))
     {
-        std::vector<juce::Range<double>> cuts;
-        for (const auto& note : source.notes)
-            if (note.nativeUnpitched && selected(note.id))
-                cuts.emplace_back(std::max(0.0, note.startSeconds), std::min(source.durationSeconds, note.startSeconds + note.durationSeconds));
-        // An overlapped, unselected note owns its audio and must survive.
-        for (const auto& note : source.notes) if (!selected(note.id))
-        {
-            std::vector<juce::Range<double>> remaining;
-            const juce::Range<double> protectedRange(note.startSeconds, note.startSeconds + note.durationSeconds);
-            for (const auto& cut : cuts)
-            {
-                if (!cut.intersects(protectedRange)) { remaining.push_back(cut); continue; }
-                if (cut.getStart() < protectedRange.getStart()) remaining.emplace_back(cut.getStart(), protectedRange.getStart());
-                if (cut.getEnd() > protectedRange.getEnd()) remaining.emplace_back(protectedRange.getEnd(), cut.getEnd());
-            }
-            cuts = std::move(remaining);
-        }
-        std::stable_sort(cuts.begin(), cuts.end(), [](auto a, auto b) { return a.getStart() < b.getStart(); });
+        const auto cuts = nativeNoteRemovalRanges(source, ids);
         if (cuts.empty()) { result.push_back(std::move(source)); continue; }
         rememberNativeTrimSource(source);
         const auto absoluteStart = source.startSeconds;
@@ -112,6 +129,17 @@ inline std::vector<ClipData> removeNativeUnpitchedAudio(
             cursor = std::max(cursor, cut.getEnd());
         }
         emit(cursor, source.durationSeconds);
+    }
+    if(ripple)
+    {
+        const auto cuts=nativeNoteRemovalRanges(original,ids);
+        for(auto& part:result)
+        {
+            const auto local=part.startSeconds-original.startSeconds;
+            double shift=0;
+            for(const auto& cut:cuts)shift+=std::max(0.0,std::min(local,cut.getEnd())-cut.getStart());
+            part.startSeconds-=shift;
+        }
     }
     return result;
 }

@@ -10,8 +10,9 @@ namespace
 {
 juce::String algorithmLabel(const TrackData& track, const juce::String& outputName)
 {
+    if (trackIsDiffSinger(track)) return "DiffSinger";
     const auto pitch = track.pitchAlgorithm == PitchAlgorithm::nsfHifigan
-        ? juce::String("nsf-hifigan") + (utauModeUsesRegions(track.utauMode)
+        ? juce::String("nsf-hifigan") + (trackUsesVoicebankSynthesis(track) && utauModeUsesRegions(track.utauMode)
             ? " · " + utauModeLabel(track.utauMode) : juce::String())
         : track.pitchAlgorithm == PitchAlgorithm::world ? juce::String("WORLD")
         : track.pitchAlgorithm == PitchAlgorithm::vocalShifter ? juce::String("vslib")

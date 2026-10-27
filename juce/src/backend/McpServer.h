@@ -36,6 +36,10 @@ public:
     [[nodiscard]] static std::vector<juce::File> projectRoots(const ProjectData& data);
     // The tools this server offers, exactly as tools/list sends them.
     [[nodiscard]] static juce::var diagnosticTools();
+    // Shared live/headless scope resolution; empty never means the whole score.
+    static bool resolveUtauRenderSelection(const ProjectData&, const juce::var& arguments,
+        const std::vector<juce::String>& currentSelection, std::vector<juce::String>& result,
+        juce::String& error);
 
 private:
     juce::var handle(const juce::var& request, bool& shouldRespond);

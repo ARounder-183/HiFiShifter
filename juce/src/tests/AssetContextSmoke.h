@@ -33,6 +33,8 @@ inline bool assetContextSmoke(const juce::File& folder)
     {
         juce::PropertiesFile props(settings, options);
         AssetManagerComponent manager(strings, props);
+        manager.onBrowserStateChanged = [&](const auto& state, const auto&) { project.materialBrowserState = state; };
+        manager.setProjectVoicebanks(project);
         juce::Component parent; parent.setBounds(100, 60, 1300, 800);
         parent.addAndMakeVisible(manager); manager.setBounds(900, 80, 300, 600);
         for (const auto scale : {1.0f, 1.5f, 2.0f})
@@ -64,6 +66,8 @@ inline bool assetContextSmoke(const juce::File& folder)
     {
         juce::PropertiesFile props(settings, options);
         AssetManagerComponent manager(strings, props);
+        manager.onBrowserStateChanged = [&](const auto& state, const auto&) { project.materialBrowserState = state; };
+        manager.setProjectVoicebanks(project);
         manager.setProjectVoicebanks(project);
         check("removed_bank_stays_removed_after_reopen", manager.diagnosticTreeRowCount() == 0);
         check("explicit_reimport_succeeds", manager.diagnosticRegisterFolder(bank) >= 0);
@@ -75,6 +79,8 @@ inline bool assetContextSmoke(const juce::File& folder)
     {
         juce::PropertiesFile props(settings, options);
         AssetManagerComponent manager(strings, props);
+        manager.onBrowserStateChanged = [&](const auto& state, const auto&) { project.materialBrowserState = state; };
+        manager.setProjectVoicebanks(project);
         manager.diagnosticSearchEditor().setText(".wav", false);
         manager.diagnosticSearchEditor().onTextChange();
         check("reopened_root_already_loaded", !manager.diagnosticSearchPending());

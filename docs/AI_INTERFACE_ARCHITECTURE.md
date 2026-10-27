@@ -1,5 +1,63 @@
 # 实际功能主入口、数据流与架构审计
 
+更新 248：颤音整体转换先冻结 track 与连接，再读取 SharedPitchLines 和 vibratoCentsAt；拟合仅用于转换，运行时仍使用 evaluatePitchCurve。整组及涉及的连接在草案中完成后一次撤销提交，关闭原振荡层并清除共同颤音时钟，避免二次叠加。
+
+更新 247：JoinedVibrato 只解析既有参考时钟身份，不新增插值器。模型参数写入原子扩展到整组，GUI 使用虚拟完整音符计算控制柄，成员仍按原时间偏移调用 vibratoCentsAt。组缓存随模型快照刷新；载入旧组以首成员参数统一副本，音符时钟和源素材不变。
+
+更新 246：多音节颤音仍由 setNotesVibrato 单次事务和 vibratoCentsAt 统一求值。共同时间基准复用既有裁剪时钟字段，已有显示、渲染、缓存键和序列化自动读取；不合并音符，不烘焙到基础音高，不引入第二套振荡器。单音编辑保留已有裁剪/共同时间基准。
+
+更新 245：曲线类型属于上一点至当前点的连线；原生当前点的局部索引为零并不代表整条线起点。菜单资格使用既有共享线的 canonical handles，形状仍只保存在终点的 PitchCurveEditPoint，通过 setNotePitchCurve 提交，不新增插值或音频路径。
+
+更新 244：原生音高共享线的拓扑容纳最多 2 ms 正间隙，保持与源时钟拓扑独立；不可通过移动源/改变时长修补显示断线。回归除检查单个控制点落在线上，还检查微小分界两侧引用同一个 SharedPitchLine，防止两条各自正确的局部线同时占据同一时间。
+
+更新 243：双选中间边界拉伸复用既有 NativeNoteTimeEdit/planNativeNoteMove 源时钟，不另建音频拉伸器。planNativeBoundaryStretch 统一双音拓扑、重叠保护及位移约束；显示和提交使用同一候选 clip。stretchNativeNoteBoundary 校验 expectedRevision 后一次替换所有目标片段，保留一次撤销及原连接数据；不改变裁剪工具的源分界重新划分语义。
+
+更新 242：稀疏初始化仍复用 pitchControlPoints → nativeSharedPitchLines → 显示/合成，未新增曲线权威。nativeSparsePitchControls 仅表达空控制点的意图，避免内部音符从 contour 再生冗余点。初始化在一次模型事务内分组；多选拖动继续通过 previewPointCurves/setPointCurves 原子规划并映射排序后的选择身份。单点拖动不再依赖邻点区间，既有负时刻支持点在无关编辑中保持原位。
+
+更新 241：原生音高权威入口仍是 nativeSharedPitchLines，不另建显示或合成插值器。先规范化绝对时间控制点，再为连续且有手动音高编辑的区间构建共享线，成员只划分显示/渲染范围。真实空隙和重叠声部不自动跨接。强制连接的端点附着读取本音符规范点，避免借用邻音 MIDI；最终显示和合成读取解析后的线。共享曲线内容进入原生缓存键。
+
+更新 240：批量响度复用 NoteData::gain，不新增音量存储。setNoteGains 是单次撤销的原子事务，锁内校验 expectedRevision、目标完整性及有限值；单音符接口也复用它。预览与提交共同读取固定手势初值加同一 dB 增量，音符分别服从现有 0–4 限制。
+
+更新 239：原生响度直接复用 NoteData::gain 和 setNoteGain，不新增工程字段或并行音量链。拖动保留临时 gain，原波形只缩放绘制高度；松开校验模型版本后提交一次，渲染波形不重复乘增益。UTAU/DS 禁用此工具。
+
+更新 238：分字边界编辑仍进入 planNativeNoteTrim，判定源内相邻后仅重新分配音符范围，不切分源。模型通过 plan.sharedTrimBoundary 保留已有连接，UI 预览也读取完整联动结果；不增加第二套源时钟或切片数据。
+
+更新 237：原生拉伸仍由 planNativeNoteMove 统一预览与提交；连接素材代理显式携带实际源窗口，因此编辑时间轴的空白不再被当成不可压缩的录音。允许代理时钟以同一新时间表达空隙两侧旧锚点；该代理不送渲染器，实际源各自保持合法时钟。
+
+更新 236：删除同步在模型层完成，不给时间线或播放器增加独立静音遮罩。原生有/无音高音符共用 removeNativeNoteAudio 和 slicedClipParts；由裁后的源时钟自然触发缓存更新与上下显示。时序删除仅压缩已删除且未被其他音符占用的时间范围，其他音符的数据保留。音源乐谱模式不走录音切片。
+
+更新 234：用户要求恢复 0.25 原生拉伸语义，因此原生手工时间编辑重新以整段时钟等比例映射；音素预测/UTAU 辅音速度继续由其原有服务负责，不能通过音素元音权重拒绝原生素材编辑。预览和提交继续共用 planNativeNoteMove/constrainNativeClipResize。双击入口只对点击的原始音高音符调用现有 flattenNotePitch，不扩大到多选，也不再调用 alignNotePreutteranceToGrid；显式对齐 API 保留。
+
+更新 233：恢复旧 HachiShifter-next 时间线 resizeClip 能力，按用户要求采用独立“拉伸”按钮，不用修饰键复用裁剪。没有复制合成/拉伸算法：GUI 与现有 MCP 仍调用 ProjectModel::resizeClip；轨道类型、碰撞约束、源时间映射复用既有实现。工具状态由 setToolButton 管理，不写入工程音乐数据。
+
+更新 232：素材列表只有一条同步入口 AssetManagerComponent::setProjectVoicebanks。工程持久状态只存手动登记与隐藏记录，自动音源/录音继续派生自 tracks/clip.parts，避免第二套来源真值。浏览器动作通过带文档会话 ID 的回调写入 ProjectModel，普通音乐撤销/replace 保留浏览状态；打开/新建恢复本工程状态。加载不读取 assets.materialFolders/hiddenFolders/hiddenAudio，旧全局记录不自动迁移到未知工程。异步搜索/标注以 browserGeneration 拒收跨文档结果。
+
+更新 231：显示范围与播放选区分离。波形快照直接复用 `diffSingerPlaybackHistory` 中经过完整上下文校验的 ready 渲染；不增加第二套无失效规则的 UI 缓存，也不把历史显示音符加入新合成选区。读取遵循 renderLock → sliceLock，快照仍由 generation 控制，只在内容/渲染完成变化时重建。
+
+更新 230：UTAU 渲染选区由 `McpServer::resolveUtauRenderSelection` 共同解析，live/headless 不再各自将空值扩成整工程。MCP 的 note_ids 元素声明为字符串，失效/非音源音符拒绝，整工程需要显式 whole_project。CVVC 仍先规划邻接音素以保留交叉/音高上下文，只有可发声音符计入缺失别名警告和混合库别名校验；未选上下文不触发 HiFisampler 钢琴回退警告。
+
+更新 229：GUI 与 MCP 继续复用 DiffSingerRenderer 和 bridge.execute；预测作用域在读音解析之前生效，完整请求中的相邻乐句仍提供中文多音字、多音节分配和延音上下文。只读音转换不要求单声部，合成/时长/pitch/实参仍拒绝选中真实重叠。全轨操作仍校验全轨；错误选区明确拒绝，不能变成整轨请求。运行脚本指纹参与工程缓存键，新桥接代码不会复用旧脚本结果。
+
+更新 228：音素时长的预测作用域与显示作用域来自同一个 visibleIds，包含工具栏多选和右键未选音符的既有目标规则。请求仍携带整轨音符，后端依 retake_ids 选择单声部上下文；真实重叠判断仍只依据乐谱时间，辅音提前发声不参与 MIDI 重叠判断。
+
+更新 227：DS 历史回放属于 AudioEngine 播放缓存，不改变 ProjectModel 音符，也不新增合成器。控制线程从 ready 发布后的不可变 RenderedClip 取音频，按各音符真实发声范围覆盖累积 PCM；重复选区不相加。仅正常预览收集历史，导出不取历史捷径；音源/音乐/表达等完整上下文改变后失效，删除 Clip 时移除。累积历史不保留无界的整歌选区副本。
+
+更新 226：DS 响度包络没有增加平行模型字段或音频处理器；复用 NoteData::amplitudeEnvelope、既有模型事务、PianoRoll 与 DiffSingerRenderer 后处理。默认保持 0 dB，不写入 UTAU 起音包络。显示/音频沿用 diffSingerEnvelope 的音素起止映射与 envelopeDbBetween 插值；曲线在百分比坐标中绘制真实形状。OpenUTAU 参考：OpenUtau.Core/Render/Renderers.cs::ApplyDynamics，在合成后对 PCM 施加增益。
+
+更新 225：DS 选区上下文与合成范围在现有 Python 分句入口统一处理。render 的 audible 标记由现有宿主选择静音产生；局部预测沿用 retake_ids。未选中重叠块是上下文边界，不作为可发声片段；选中其任意成员仍拒绝多声部。保留非重叠相邻音符作为模型上下文，不在渲染器擅自移动／删改工程音符。DS 歌词输入复用现有模型写入，避免写入 UTAU 默认包络。
+
+更新 224：音源名称只是当前轨道绑定的只读投影，不新增状态或音源绑定入口。UTAU／DS 共用同一名称控件及左上角布局，原生轨道保留轨道名；原 UTAU 名称双击 OTO 的事件处理随控件移位继续复用。
+
+更新 223：统一算法选择复用 `setTrackEditingType`，将类型、具体算法、UTAU 子模式和需要重置的拉伸算法合为一次模型事务。跨家族才解除不兼容音源；UTAU 子模式内切换保持音源绑定。无效选择、相同选择不修改模型，无选中可编辑轨道时不再调用全工程算法 setter。此前独立标题模式菜单已移除，界面与音频继续通过模型通知同步。
+
+更新 222：显式转换编辑模式新增唯一模型写入口 `setTrackEditingType`，标题菜单只分派稳定轨道 ID 与目标类型。复用新建轨道的类型配置规则、既有 change listener 的界面／渲染刷新，不通过换音源文件推断类型。所有音乐数据保留；不兼容家族的音源绑定在同一次撤销事务内清除。伴奏、参考轨道及非编曲轨道不转换；源编辑和 DS 后台任务期间菜单禁用。
+
+更新 221：UTAU 自动过渡链含作者点时，权威顺序改为 `utauPointCurves` 收集锚点→现有插值器连线→宿主投影→UI／音符渲染读取；不允许后续固定名义过渡覆盖该曲线。未编辑音符的默认锚点只用于构造连续曲线，不写回模型。显式连接图最后覆盖自己的窗口；颤音沿用现有单次叠加。间隙、休止、独立重叠和非自动过渡仍隔离，原生／DiffSinger 分支不变。此规则替代更新 220 中作者点仍受名义过渡覆盖的行为。
+
+更新 220：普通／界／谋 UTAU 与 CVVC 共用 `UtauPitchTimeline.h`（从更新 219 的分片器内实现提取）。宿主仍先通过 `projectTrackNotePitch` 生成每个音符的音乐曲线，普通音符在 `makeUtauRequest` 从整轨投影绑定实际发声时间读取器；选区裁剪不截断音高上下文，后台外部渲染不丢弃读取器。CVVC 沿用共同构建器。UTAU 基础作者曲线的采样保留所有内部控制点，并以 0.1 音分误差上限自适应细化；名义过渡、显式连接和原生文件策略保持原责任划分。缓存加入新音高策略版本。
+
+更新 219：CVVC 分片的歌词归属与音高读取范围分离。`CvvcPitchTimeline` 每个连续非休止音符链只保存一份不可变的宿主投影，生成的音素按绝对时刻读取它，经典重采样器 PIT 与 HiFisampler F0 共用。上游 `projectTrackNotePitch` 仍是音乐曲线权威，分片器不自行计算新的音高过渡；音源映射、OTO 提前量、辅音速度及交叉淡化不依赖曲线取值。音符间隙、休止和独立重叠分隔链，外层缓存加入策略版本。
+
 ## 当前整合任务（0.25，尚未整体验收）
 
 以下历史更新不是新素材编辑规则的权威；当前进度见 [实现状态](native-material-implementation.md) 和 [源码索引](AI_SOURCE_INDEX.md)。

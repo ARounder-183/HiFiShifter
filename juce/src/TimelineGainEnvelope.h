@@ -60,7 +60,9 @@ inline std::optional<TimelineComponent::EnvelopeHit> TimelineComponent::envelope
 inline void TimelineComponent::paintClipEnvelope(juce::Graphics& g,const ClipData& clip,bool trackMuted,std::size_t index)
 {
     const auto area=envelopeArea(index);
-    const auto origin=envelopeDisplayOrigin(clip);
+    const auto stretching=clip.id==draggedClip&&draggedClipStretch
+        &&(dragMode==DragMode::resizeLeft||dragMode==DragMode::resizeRight);
+    const auto origin=stretching?draggedClipPreviewStart:envelopeDisplayOrigin(clip);
     const auto start=clip.id==draggedClip?draggedClipPreviewStart:origin;
     const auto duration=clip.id==draggedClip?draggedClipPreviewDuration:clip.durationSeconds;
     const auto firstX=timeToX(start),lastX=timeToX(start+duration);
@@ -69,7 +71,9 @@ inline void TimelineComponent::paintClipEnvelope(juce::Graphics& g,const ClipDat
         std::max(1.0f,lastX-firstX),static_cast<float>(rowHeight-25)).getSmallestIntegerContainer());
     const auto visible=g.getClipBounds();
     if(visible.isEmpty())return;
-    const auto& points=displayedEnvelope(clip);
+    auto scaledPoints=stretching?displayedEnvelope(clip):std::vector<TrackGainPoint>{};
+    if(stretching)for(auto& p:scaledPoints)p.timeSeconds*=duration/std::max(.01,clip.durationSeconds);
+    const auto& points=stretching?scaledPoints:displayedEnvelope(clip);
     const auto yFor=[&](float db){return area.getCentreY()-trackGainLevelFromDb(db)*area.getHeight()*.5f;};
     const auto left=std::max(firstX,static_cast<float>(visible.getX())),right=std::min(lastX,static_cast<float>(visible.getRight()));
     const auto first=static_cast<double>(left)/pixelsPerSecond-origin;

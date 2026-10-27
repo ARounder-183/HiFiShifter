@@ -1893,7 +1893,7 @@ UtauRenderResult renderNsfUtauPhrase(const UtauRenderRequest& request,
         const auto& resolved = samples[noteIndex];
         if (note.alias.trim().isEmpty() || !resolved.found)
         {
-            if (!request.pianoPreviewEnabled)
+            if (!request.pianoPreviewEnabled || (note.preserveEnvelopeTiming && note.gain <= 0))
             {
                 mixNotes.push_back({ {}, note.startSeconds, 0.0, true });
                 mixOwners.push_back(noteIndex);

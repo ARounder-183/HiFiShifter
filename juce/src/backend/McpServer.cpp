@@ -774,12 +774,14 @@ juce::var McpServer::diagnosticTools()
             }),
             makeTool("undo", "Undo the last project edit / 撤销工程编辑"),
             makeTool("redo", "Redo the last project edit / 重做工程编辑"),
-            makeTool("utau_render_selection", "Choose which UTAU notes render and play; empty selects every note / 选择参与 UTAU 渲染与试听的音符", {
+            makeTool("utau_render_selection", "Choose exact UTAU/DS render scope; [] clears it, omitted IDs use GUI selection (headless: empty) / 仅渲染所选音符", {
                 { .name = "note_ids", .type = "array",
-                  .description = "The notes that render; leave it out to select every UTAU note",
-                  .shape = []() { return typedSchema({}); } },
+                  .description = "Exact note IDs; an empty array clears the render selection",
+                  .shape = []() { auto item=object(); set(item,"type","string"); return item; } },
                 { .name = "note_id", .type = "string",
                   .description = "One note, when there is only one" },
+                { .name = "whole_project", .type = "boolean",
+                  .description = "Explicitly select every voicebank note; cannot be combined with note IDs" },
             }),
             makeTool("set_utau_resampler", "Point UTAU rendering at a resampler executable / 指定 UTAU 重采样器", {
                 { .name = "path", .type = "string",
@@ -1010,6 +1012,40 @@ juce::var McpServer::callTool(const juce::String& name, const juce::var& args)
             if (const auto given = string(args, key); given.isNotEmpty())
                 allow(juce::File(given));
     return result;
+}
+
+bool McpServer::resolveUtauRenderSelection(const ProjectData& data, const juce::var& args,
+    const std::vector<juce::String>& current, std::vector<juce::String>& result, juce::String& error)
+{
+    result.clear(); error.clear();
+    const bool whole = static_cast<bool>(args.getProperty("whole_project", false));
+    if ((whole && (args.hasProperty("note_ids") || args.hasProperty("note_id")))
+        || (args.hasProperty("note_ids") && args.hasProperty("note_id")))
+    { error = "Choose only one scope: note_ids, note_id, or whole_project"; return false; }
+    std::vector<juce::String> eligible;
+    for (const auto& track : data.tracks)
+        if (!track.accompaniment && trackUsesVoicebankSynthesis(track))
+            for (const auto& clip : track.clips)
+                for (const auto& note : clip.notes) eligible.push_back(note.id);
+    if (whole) result = eligible;
+    else if (args.hasProperty("note_ids"))
+    {
+        if (!args["note_ids"].isArray()) { error = "note_ids must be an array"; return false; }
+        for (const auto& id : *args["note_ids"].getArray())
+        {
+            if (!id.isString() || id.toString().isEmpty())
+            { error = "note_ids must contain nonempty strings"; return false; }
+            result.push_back(id.toString());
+        }
+    }
+    else if (args.hasProperty("note_id")) result.push_back(string(args, "note_id"));
+    else result = current;
+    for (const auto& id : result)
+        if (std::find(eligible.begin(), eligible.end(), id) == eligible.end())
+        { error = "Not a current UTAU/DS note: " + id; return false; }
+    std::sort(result.begin(), result.end());
+    result.erase(std::unique(result.begin(), result.end()), result.end());
+    return true;
 }
 
 juce::var McpServer::dispatch(const juce::String& name, const juce::var& args)
@@ -1588,19 +1624,9 @@ juce::var McpServer::dispatch(const juce::String& name, const juce::var& args)
     }
     else if (name == "utau_render_selection")
     {
-        // UTAU rendering is selection-driven, so without this a headless
-        // caller can only ever export silence from a UTAU track.
-        auto ids = strings(args, "note_ids");
-        if (ids.empty())
-            if (const auto id = string(args, "note_id"); id.isNotEmpty()) ids.push_back(id);
-        if (ids.empty())
-        {
-            const auto data = project.snapshot();
-            for (const auto& track : data.tracks)
-                if (track.pitchAlgorithm == PitchAlgorithm::utau)
-                    for (const auto& clip : track.clips)
-                        for (const auto& note : clip.notes) ids.push_back(note.id);
-        }
+        std::vector<juce::String> ids;
+        if (!resolveUtauRenderSelection(project.snapshot(), args, {}, ids, error))
+            return toolResult(error, true);
         audio->setUtauRenderNoteSelection(ids);
         audioPrepared = false;
         return toolResult("note_ids=" + juce::String(static_cast<int>(ids.size())));

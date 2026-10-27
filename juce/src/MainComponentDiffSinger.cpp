@@ -25,7 +25,15 @@ void MainComponent::showDiffSingerPronunciationEditor(const juce::String& noteId
     for (int i = 0; i < ids.size(); ++i)
         if (std::find(selection.begin(), selection.end(), ids[i]) != selection.end()) shown.add(juce::String(i));
     if (ids.contains(noteId) && !shown.contains(juce::String(ids.indexOf(noteId)))) shown = {juce::String(ids.indexOf(noteId))};
-    const auto json = backend::DiffSingerRenderer::requestJson(request, "phonemize");
+    if ((!noteId.isEmpty() && !ids.contains(noteId)) || (!selection.empty() && shown.isEmpty()))
+    { showDiffSingerError(juce::String::fromUTF8("所选音符不在当前可用轨道内，请重新选择。")); return; }
+    auto json = backend::DiffSingerRenderer::requestJson(request, "phonemize");
+    if (!shown.isEmpty())
+    {
+        juce::Array<juce::var> selected;
+        for (const auto& id : shown) selected.add(id);
+        json.getDynamicObject()->setProperty("retake_ids", selected);
+    }
     const auto revision = project.revisionNumber();
     const auto trackId = track->id;
     const juce::Component::SafePointer<MainComponent> safe(this);
@@ -257,10 +265,20 @@ void MainComponent::showDiffSingerPhonemeEditor(const juce::String& trackId, con
     {
         visibleIds = {juce::String(ids.indexOf(noteId))}; auditionIds = {noteId};
     }
+    if ((!noteId.isEmpty() && !ids.contains(noteId)) || (!selection.empty() && visibleIds.isEmpty()))
+    { showDiffSingerError(juce::String::fromUTF8("所选音符不在当前可用轨道内，请重新选择。")); return; }
     if (auditionIds.isEmpty()) auditionIds = ids;
     const auto focusId = ids.contains(noteId) ? juce::String(ids.indexOf(noteId))
         : (visibleIds.isEmpty() ? juce::String{} : visibleIds[0]);
-    const auto json = backend::DiffSingerRenderer::requestJson(request, "timing");
+    auto json = backend::DiffSingerRenderer::requestJson(request, "timing");
+    // Scope prediction as well as the dialog. Keep adjacent notes in the request
+    // for timing context; unrelated overlapping phrases must not block editing.
+    if (!visibleIds.isEmpty())
+    {
+        juce::Array<juce::var> selected;
+        for (const auto& id : visibleIds) selected.add(id);
+        json.getDynamicObject()->setProperty("retake_ids", selected);
+    }
     const auto revision = project.revisionNumber();
     diffSingerBusy = true;
     diffSingerCancel = std::make_shared<std::atomic<bool>>(false);
@@ -318,7 +336,9 @@ void MainComponent::showDiffSingerPhonemeEditor(const juce::String& trackId, con
 
 void MainComponent::rememberDiffSingerParameters()
 {
-    if (diffSingerBusy) return;
+    // Derived playback metadata must not invalidate the revision captured by
+    // an open transactional editor. Import it after that dialog has closed.
+    if (diffSingerBusy || juce::Component::getCurrentlyModalComponent()!=nullptr) return;
     audio.refreshUtauWaveforms();
     const auto waves=audio.utauNoteWaveforms();
     if (!waves || waves==rememberedParameterWaveforms) return;
@@ -353,8 +373,10 @@ void MainComponent::showDiffSingerParameterLane()
         }
         setEnvelopeLane(EnvelopeLane::flagCurve);
         bool exists = false;
-        for (const auto& clip : track.clips) for (const auto& note : clip.notes)
-            exists = exists || !flagCurvePointsFor(note, pianoRoll.flagLaneFlag()).empty();
+        const auto selected=pianoRoll.selectedNoteIds();
+        for (const auto& clip : track.clips) if(!clip.muted) for (const auto& note : clip.notes)
+            if(selected.empty() || std::find(selected.begin(),selected.end(),note.id)!=selected.end())
+                exists = exists || !flagCurvePointsFor(note, pianoRoll.flagLaneFlag()).empty();
         if (!exists) generateDiffSingerParameters();
         return;
     }
@@ -455,6 +477,8 @@ void MainComponent::generateDiffSingerPitch(bool wholeTrack, const juce::String&
     if (noteIds.isEmpty()) return;
     auto selectedNotes = wholeTrack ? std::vector<juce::String>{} : pianoRoll.selectedNoteIds();
     std::erase_if(selectedNotes, [&](const auto& id) { return !noteIds.contains(id); });
+    if (!noteId.isEmpty() && !noteIds.contains(noteId))
+    { showDiffSingerError(juce::String::fromUTF8("此音符不在当前可用片段内，请重新选择音符。")); return; }
     if (noteIds.contains(noteId) && std::find(selectedNotes.begin(), selectedNotes.end(), noteId) == selectedNotes.end())
         selectedNotes = {noteId};
     if (!wholeTrack && noteId.isEmpty() && !pianoRoll.selectedNoteIds().empty() && selectedNotes.empty())

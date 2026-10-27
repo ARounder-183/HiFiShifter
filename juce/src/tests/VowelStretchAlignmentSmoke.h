@@ -50,28 +50,28 @@ inline bool runVowelStretchAlignmentSmoke(const juce::File& output)
     };
     const auto targetAt=[](const ClipData& clip,double localSource){return nativeTargetTimeAt(nativeClipClock(clip),localSource);};
     const auto right=planNativeNoteMove(base,{"n"},1,0,NativeNoteTimeEdit::rightEdge);
-    check("right_stretch_1_to_2_keeps_C_point20_and_P_point12",right&&near(right->clip.notes[0].durationSeconds,2)
-        &&near(targetAt(right->clip,.2),.2)&&near(targetAt(right->clip,.12),.12)&&near(right->clip.notes[0].consonantSeconds,.2));
+    check("native_right_stretch_scales_C_and_P_with_entire_note",right&&near(right->clip.notes[0].durationSeconds,2)
+        &&near(targetAt(right->clip,.2),.4)&&near(targetAt(right->clip,.12),.24)&&near(right->clip.notes[0].consonantSeconds,.4));
     check("right_stretch_preserves_source_and_pitch_values",right&&near(right->clip.notes[0].nativeSourceStartSeconds,4)
         &&near(right->clip.notes[0].nativeSourceEndSeconds,5)&&valuesKept(base.notes[0],right->clip.notes[0]));
     const auto left=planNativeNoteMove(base,{"n"},.1,0,NativeNoteTimeEdit::leftEdge);
-    check("left_stretch_moves_leading_protected_block_rigidly",left&&near(left->clip.notes[0].startSeconds,.1)
+    check("native_left_stretch_scales_source_timing_proportionally",left&&near(left->clip.notes[0].startSeconds,.1)
         &&near(left->clip.notes[0].startSeconds+left->clip.notes[0].durationSeconds,1)
-        &&near(targetAt(left->clip,.2)-targetAt(left->clip,0),.2)
-        &&near(nativeNotePreutteranceTarget(left->clip.notes[0],left->clip),.22));
+        &&near(targetAt(left->clip,.2)-targetAt(left->clip,0),.18)
+        &&near(nativeNotePreutteranceTarget(left->clip.notes[0],left->clip),.208));
     const auto shrink=planNativeNoteMove(base,{"n"},-.95,0,NativeNoteTimeEdit::rightEdge);
-    check("impossible_contraction_clamps_without_compressing_C",shrink&&shrink->delta>-.81
-        &&near(targetAt(shrink->clip,.2),.2)&&shrink->clip.notes[0].durationSeconds>.2);
+    check("native_contraction_compresses_whole_source",shrink&&near(shrink->delta,-.95)
+        &&near(targetAt(shrink->clip,.2),.01)&&near(shrink->clip.notes[0].durationSeconds,.05));
     auto early=base;early.notes[0].consonantSeconds=.1;early.notes[0].utauPreutteranceSeconds=.3;
     early.notes[0].nativeSegments={{"c","a",NativeSegmentRole::consonant,0,.1,"user",1,.3,0,false,1},
         {"v","a",NativeSegmentRole::vowel,.1,1,"user",1,.3,0,true,1}};
     const auto earlyPlan=planNativeNoteMove(early,{"n"},1,0,NativeNoteTimeEdit::rightEdge);
-    check("early_V_before_P_is_protected_even_when_C_earlier",earlyPlan&&near(targetAt(earlyPlan->clip,.1),.1)&&near(targetAt(earlyPlan->clip,.3),.3));
+    check("native_stretch_also_scales_early_vowel_and_preutterance",earlyPlan&&near(targetAt(earlyPlan->clip,.1),.2)&&near(targetAt(earlyPlan->clip,.3),.6));
     auto custom=base;custom.sourceTimeMap={{0,0},{.1,.05},{.3,.2},{.5,.4},{1,1}};custom.notes[0].consonantSeconds=.3;
     const auto oldP=targetAt(custom,.12);const auto customPlan=planNativeNoteMove(custom,{"n"},1,0,NativeNoteTimeEdit::rightEdge);
-    check("custom_old_C_clock_duration_is_preserved_not_raw_reset",customPlan&&near(targetAt(customPlan->clip,.2),.3)
-        &&near(targetAt(customPlan->clip,.12),oldP)&&near(targetAt(customPlan->clip,.05),.1));
-    check("custom_old_source_anchors_survive_composed_warp",customPlan&&near(nativeSourceTimeAt(nativeClipClock(customPlan->clip),.5+(.5-.3)/.7),.4));
+    check("custom_existing_clock_is_scaled_without_reset",customPlan&&near(targetAt(customPlan->clip,.2),.6)
+        &&near(targetAt(customPlan->clip,.12),oldP*2)&&near(targetAt(customPlan->clip,.05),.2));
+    check("custom_old_source_anchors_survive_composed_warp",customPlan&&near(nativeSourceTimeAt(nativeClipClock(customPlan->clip),1.0),.4));
     auto zones=base;zones.notes[0].vowelSplitsExplicit=true;zones.notes[0].nativeSegments={
         {"c","a",NativeSegmentRole::consonant,0,.2,"user",1,.12,0,false,1},
         {"v1","a",NativeSegmentRole::vowel,.2,.4,"user",1,.12,0,true,1},
@@ -79,17 +79,17 @@ inline bool runVowelStretchAlignmentSmoke(const juce::File& output)
         {"v2","a",NativeSegmentRole::vowel,.5,.8,"user",1,.12,0,true,1},
         {"end","x",NativeSegmentRole::ending,.8,1,"user",1,.12,0,false,1}};
     const auto zonePlan=planNativeNoteMove(zones,{"n"},1,0,NativeNoteTimeEdit::rightEdge);
-    check("internal_noise_and_ending_keep_heard_durations",zonePlan
-        &&near(targetAt(zonePlan->clip,.5)-targetAt(zonePlan->clip,.4),.1)
-        &&near(targetAt(zonePlan->clip,1)-targetAt(zonePlan->clip,.8),.2));
+    check("internal_noise_and_ending_scale_with_the_note",zonePlan
+        &&near(targetAt(zonePlan->clip,.5)-targetAt(zonePlan->clip,.4),.2)
+        &&near(targetAt(zonePlan->clip,1)-targetAt(zonePlan->clip,.8),.4));
     auto weighted=base;weighted.notes[0].vowelSplitsExplicit=true;weighted.notes[0].nativeSegments={
         {"c","a",NativeSegmentRole::consonant,0,.2,"user",1,.12,0,false,1},
         {"v1","a",NativeSegmentRole::vowel,.2,.5,"user",1,.12,0,true,1},
         {"v2","a",NativeSegmentRole::vowel,.5,.8,"user",1,.12,0,true,3},
         {"end","x",NativeSegmentRole::ending,.8,1,"user",1,.12,0,false,1}};
     const auto weights=planNativeNoteMove(weighted,{"n"},1,0,NativeNoteTimeEdit::rightEdge);
-    check("weighted_V_progress_controls_only_elastic_displacement",weights&&near(targetAt(weights->clip,.5),.75)
-        &&near(targetAt(weights->clip,.8),1.8)&&near(targetAt(weights->clip,1),2));
+    check("phoneme_weights_do_not_override_native_proportional_stretch",weights&&near(targetAt(weights->clip,.5),1)
+        &&near(targetAt(weights->clip,.8),1.6)&&near(targetAt(weights->clip,1),2));
     auto analysisEpochs=base;analysisEpochs.notes[0].nativeSegments.clear();
     for(int i=0;i<1000;++i)
     {
@@ -102,7 +102,7 @@ inline bool runVowelStretchAlignmentSmoke(const juce::File& output)
     check("runtime_analysis_epochs_do_not_infer_authored_vowel_splits",!epochRow.vowelSplitsExplicit
         &&pronunciationSegmentsFor(epochRow).size()==2&&analysisEpochs.notes[0].nativeSegments.size()==1000);
     const auto epochPlan=planNativeNoteMove(analysisEpochs,{"n"},1,0,NativeNoteTimeEdit::rightEdge);
-    check("runtime_default_epoch_coalescing_still_preserves_C_stretch_policy",epochPlan&&near(targetAt(epochPlan->clip,.2),.2)
+    check("runtime_analysis_epochs_do_not_block_uniform_stretch",epochPlan&&near(targetAt(epochPlan->clip,.2),.4)
         &&near(epochPlan->clip.notes[0].durationSeconds,2));
     const auto authoredRow=nativeNoteSourceTiming(weighted.notes[0],weighted,nativeClipClock(weighted));
     check("runtime_authored_split_intent_is_copied_not_guessed",authoredRow.vowelSplitsExplicit
@@ -110,10 +110,10 @@ inline bool runVowelStretchAlignmentSmoke(const juce::File& output)
     auto three=base;three.durationSeconds=three.sourceDurationSeconds=3;three.sourceTimeMap={{0,0},{3,3}};
     three.notes={makeNote("x",0,4),makeNote("a",1,5),makeNote("b",2,6)};
     const auto alignPlan=planNativeNoteMove(three,{"b"},.1,0,NativeNoteTimeEdit::move);
-    check("align_previous_V_absorbs_delta_without_rippling_prior_chain",alignPlan
+    check("moving_a_note_scales_the_intervening_neighbor_clock",alignPlan
         &&near(alignPlan->clip.notes[0].startSeconds,0)&&near(alignPlan->clip.notes[0].durationSeconds,1)
         &&near(alignPlan->clip.notes[1].startSeconds,1)&&near(alignPlan->clip.notes[1].durationSeconds,1.1)
-        &&near(targetAt(alignPlan->clip,1.2)-targetAt(alignPlan->clip,1),.2)
+        &&near(targetAt(alignPlan->clip,1.2)-targetAt(alignPlan->clip,1),.22)
         &&near(alignPlan->clip.notes[2].startSeconds,2.1)&&near(alignPlan->clip.notes[2].durationSeconds,1));
     const auto ordinaryLeft=planNativeNoteMove(three,{"b"},.1,0,NativeNoteTimeEdit::leftEdge);
     check("ordinary_left_drag_still_ripples_touching_previous_notes_rigidly",ordinaryLeft
@@ -129,13 +129,13 @@ inline bool runVowelStretchAlignmentSmoke(const juce::File& output)
         auto note=makeNote("owner-"+juce::String(i),i,part.sourceOffsetSeconds);note.clipPartId=part.id;linked.notes.push_back(note);
     }
     const auto linkedPlan=planNativeNoteMove(linked,{"owner-1"},1,0,NativeNoteTimeEdit::rightEdge);
-    check("linked_multiple_sources_project_physical_C_before_proxy_clear",linkedPlan&&linkedPlan->clip.parts.size()==2
-        &&near(linkedPlan->clip.parts[1].sourceOffsetSeconds,20)&&near(targetAt(linkedPlan->clip.parts[1],.2),.2)
+    check("linked_multiple_sources_keep_source_anchors_and_scale_target_clock",linkedPlan&&linkedPlan->clip.parts.size()==2
+        &&near(linkedPlan->clip.parts[1].sourceOffsetSeconds,20)&&near(targetAt(linkedPlan->clip.parts[1],.2),.4)
         &&near(linkedPlan->clip.parts[1].durationSeconds,2)&&near(linkedPlan->clip.notes[1].nativeSourceStartSeconds,20));
     auto independent=linked;independent.nativeAudioLinked=false;
     const auto independentPlan=planNativeNoteMove(independent,{"owner-1"},1,0,NativeNoteTimeEdit::rightEdge);
-    check("independent_multiple_source_children_reuse_protected_planner",independentPlan&&independentPlan->clip.parts.size()==2
-        &&near(targetAt(independentPlan->clip.parts[0],.2),.2)&&near(targetAt(independentPlan->clip.parts[1],.2),.2));
+    check("independent_multiple_source_children_reuse_uniform_planner",independentPlan&&independentPlan->clip.parts.size()==2
+        &&near(targetAt(independentPlan->clip.parts[0],.2),.2)&&near(targetAt(independentPlan->clip.parts[1],.2),.4));
 
     ProjectData data;data.bpm=120;data.gridDivision="1/16";TrackData track;track.id="timing";track.compose=true;
     track.pitchAlgorithm=PitchAlgorithm::world;track.clips={base};data.tracks={track};
@@ -161,16 +161,18 @@ inline bool runVowelStretchAlignmentSmoke(const juce::File& output)
     nearest.tracks[0].clips[0].sourceTimeMap={{0,0},{1.205,1.205}};
     auto tinyNext=makeNote("tiny-next",1,5);tinyNext.durationSeconds=.205;tinyNext.nativeSourceEndSeconds=5.205;
     nearest.tracks[0].clips[0].notes.push_back(tinyNext);
-    model.resetDocument(nearest);check("nearest_infeasible_grid_searches_next_feasible_grid",model.alignNotePreutteranceToGrid("n",.25,error));
+    model.resetDocument(nearest);check("uniform_neighbour_clock_allows_nearest_grid",model.alignNotePreutteranceToGrid("n",.25,error));
     aligned=model.snapshot();check("alignment_never_returns_clamped_off_grid",near(aligned.tracks[0].clips[0].startSeconds
-        +nativeNotePreutteranceTarget(aligned.tracks[0].clips[0].notes[0],aligned.tracks[0].clips[0]),1.125));
+        +nativeNotePreutteranceTarget(aligned.tracks[0].clips[0].notes[0],aligned.tracks[0].clips[0]),1.25));
     auto fixed=data;fixed.tracks[0].clips[0].durationSeconds=fixed.tracks[0].clips[0].sourceDurationSeconds=2;
     fixed.tracks[0].clips[0].sourceTimeMap={{0,0},{2,2}};
     auto fixedNeighbour=makeNote("fixed-neighbour",1,5);fixedNeighbour.consonantSeconds=1;
     fixed.tracks[0].clips[0].notes.push_back(fixedNeighbour);
     model.resetDocument(fixed);const auto fixedBefore=model.contentFingerprint();
-    check("fixed_neighbour_impossible_alignment_rejects_without_undo",!model.alignNotePreutteranceToGrid("n",.25,error)
-        &&error.isNotEmpty()&&model.contentFingerprint()==fixedBefore&&!model.canUndo());
+    check("fixed_neighbour_can_follow_uniform_alignment",model.alignNotePreutteranceToGrid("n",.25,error)
+        &&error.isEmpty()&&near(model.snapshot().tracks[0].clips[0].startSeconds
+            +nativeNotePreutteranceTarget(model.snapshot().tracks[0].clips[0].notes[0],model.snapshot().tracks[0].clips[0]),1.125)
+        &&model.undo()&&model.contentFingerprint()==fixedBefore&&!model.canUndo());
     for(const auto engine:{PitchAlgorithm::world,PitchAlgorithm::nsfHifigan})
     {
         auto same=data;same.tracks[0].pitchAlgorithm=engine;same.tracks[0].clips[0].notes[0].pronunciationKind=PronunciationKind::breath;
@@ -194,11 +196,10 @@ inline bool runVowelStretchAlignmentSmoke(const juce::File& output)
     const auto event=juce::MouseEvent(juce::Desktop::getInstance().getMainMouseSource(),at,juce::ModifierKeys(juce::ModifierKeys::leftButtonModifier),1,0,0,0,0,
         &roll,&roll,juce::Time::getCurrentTime(),at,juce::Time::getCurrentTime(),2,false);
     roll.mouseDoubleClick(event);const auto clicked=model.snapshot();
-    check("actual_note_tool_double_click_aligns_without_flatten_or_semitone_snap",near(clicked.tracks[0].clips[0].startSeconds
-        +nativeNotePreutteranceTarget(clicked.tracks[0].clips[0].notes[0],clicked.tracks[0].clips[0]),1.125)
-        &&localDataKept(base.notes[0],clicked.tracks[0].clips[0].notes[0])&&!clicked.tracks[0].clips[0].notes[0].nativeIndependentPitch);
-    check("actual_double_click_adds_only_one_undo",model.undo()&&model.contentFingerprint()==fingerprint&&!model.canUndo());
-    // Native OTTO notes retain their timing action; all UTAU lyrics remain
+    check("double_click_preserves_already_edited_native_pitch_and_timing",model.contentFingerprint()==fingerprint
+        &&localDataKept(base.notes[0],clicked.tracks[0].clips[0].notes[0]));
+    check("protected_double_click_adds_no_undo",!model.canUndo());
+    // Native OTTO notes never open a lyric editor; all UTAU lyrics remain
     // editable, regardless of bank, mode, renderer, selection or alias text.
     auto nativeBlank=data;nativeBlank.tracks[0].trackType=TrackType::hachi;
     nativeBlank.tracks[0].clips[0].notes[0].label.clear();
@@ -206,13 +207,14 @@ inline bool runVowelStretchAlignmentSmoke(const juce::File& output)
     check("native_otto_empty_note_does_not_open_lyric_editor",!roll.diagnosticAliasEditorOpen());
     roll.setReadsVoicebankInBackground(false);
     const auto bank=output.getChildFile("empty-lyric-bank");bank.createDirectory();
+    for(const auto type:{TrackType::utau,TrackType::diffSinger})
     for(const auto mode:{UtauMode::classic,UtauMode::jie,UtauMode::mou})
         for(const bool bound:{false,true})
         for(const auto engine:{PitchAlgorithm::utau,PitchAlgorithm::nsfHifigan})
         for(const auto lyric:{juce::String{},juce::String("   "),juce::String::fromUTF8("你好"),
             juce::String("a R"),juce::String("-"),juce::String("R"),juce::String("missing-alias")})
         {
-            ProjectData score;TrackData t;t.id="lyrics-track";t.trackType=TrackType::utau;
+            ProjectData score;TrackData t;t.id="lyrics-track";t.trackType=type;
             t.pitchAlgorithm=engine;t.utauMode=mode;t.compose=true;
             if(bound)t.voicebankDirectory=bank;
             ClipData c;c.id="lyrics-clip";c.durationSeconds=3;

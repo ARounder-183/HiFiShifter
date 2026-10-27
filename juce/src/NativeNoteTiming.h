@@ -90,60 +90,42 @@ inline double nativeNotePreutteranceTarget(const NoteData& note,const ClipData& 
     return nativeTargetTimeAt(clock,row.alignmentSeconds-clip.sourceOffsetSeconds);
 }
 
-enum class NativeNoteTimeEdit { move, leftEdge, rightEdge };
+enum class NativeNoteTimeEdit { move, leftEdge, rightEdge, sharedBoundary };
 
 struct NativeNoteMovePlan
 {
     ClipData clip;
     double delta = 0;
+    bool sharedTrimBoundary = false;
 };
 
+// Restore 0.25's proportional audio-clock warp and rigid neighbour ripple.
+// Native timeline stretching is not phoneme-duration prediction: consonant-only
+// and unannotated material must remain stretchable too.
 inline std::optional<NativeNoteMovePlan> planNativeNoteMove(
     const ClipData& original, const std::vector<juce::String>& ids,
-    double requested, float pitch, NativeNoteTimeEdit edit = NativeNoteTimeEdit::move)
+    double requested, float pitch, NativeNoteTimeEdit edit = NativeNoteTimeEdit::move,
+    const std::vector<juce::Range<double>>* sourceWindows = nullptr)
 {
     if (!std::isfinite(requested) || !std::isfinite(pitch)) return {};
+    if (edit == NativeNoteTimeEdit::sharedBoundary && ids.size() != 2) return {};
     const auto selected = [&](const NoteData& note)
     { return std::find(ids.begin(), ids.end(), note.id) != ids.end(); };
-    const bool leftLike=edit==NativeNoteTimeEdit::leftEdge;
     if (std::none_of(original.notes.begin(), original.notes.end(), selected)) return {};
     if (std::abs(requested)<1.e-9 && std::abs(pitch)<1.e-6f) return NativeNoteMovePlan {original,0};
     if (!original.parts.empty() && original.nativeAudioLinked)
     {
         // An identity clock describes the common editor time axis. Its warped
         // result maps NEW time back to OLD time, independently of source files.
-        auto proxy=original;
-        // Resolve each child's physical markers BEFORE replacing its clock by
-        // the common editor axis. Absolute source seconds are not proxy seconds.
-        for(auto& note:proxy.notes)
-            for(const auto& part:original.parts)if(part.id==note.clipPartId)
-            {
-                auto childNote=note;childNote.startSeconds-=part.startSeconds;
-                const auto clock=nativeClipClock(part);
-                const auto row=nativeNoteSourceTiming(childNote,part,clock);
-                const auto placed=[&](double source){return part.startSeconds+nativeTargetTimeAt(clock,source-part.sourceOffsetSeconds);};
-                const auto timing=pronunciationTimingFor(row);
-                note.nativeSegments=pronunciationSegmentsFor(row);
-                for(auto& segment:note.nativeSegments)
-                {
-                    segment.sourceStartSeconds=placed(row.regionStartSeconds+segment.sourceStartSeconds)-note.startSeconds;
-                    segment.sourceEndSeconds=placed(row.regionStartSeconds+segment.sourceEndSeconds)-note.startSeconds;
-                    segment.alignmentSeconds=placed(row.regionStartSeconds+segment.alignmentSeconds)-note.startSeconds;
-                }
-                note.nativeSourceStartSeconds=note.startSeconds;
-                note.nativeSourceEndSeconds=note.startSeconds+note.durationSeconds;
-                note.materialSourceStartSeconds=note.startSeconds;
-                note.materialSourceEndSeconds=note.startSeconds+note.durationSeconds;
-                note.utauPreutteranceOverrideEnabled=true;
-                note.utauPreutteranceSeconds=placed(timing.alignmentSeconds)-note.startSeconds;
-                note.consonantSeconds=placed(timing.consonantEndSeconds)-note.startSeconds;
-                break;
-            }
-        proxy.parts.clear();proxy.nativeAudioLinked=false;
+        auto proxy=original;proxy.parts.clear();proxy.nativeAudioLinked=false;
         proxy.audioStartSeconds=0;proxy.audioDurationSeconds=-1;
         proxy.sourceOffsetSeconds=0;proxy.sourceDurationSeconds=proxy.durationSeconds;
         proxy.sourceTimeMap={{0,0},{proxy.durationSeconds,proxy.durationSeconds}};
-        auto plan=planNativeNoteMove(proxy,ids,requested,pitch,edit);if(!plan)return {};
+        std::vector<juce::Range<double>> windows;
+        for(const auto& part:original.parts)
+            windows.emplace_back(part.startSeconds+part.audioStartSeconds,
+                part.startSeconds+part.audioStartSeconds+part.audioLength());
+        auto plan=planNativeNoteMove(proxy,ids,requested,pitch,edit,&windows);if(!plan)return {};
         const auto commonClock=plan->clip.sourceTimeMap;
         const auto warp=[&](double t){return nativeTargetTimeAt(commonClock,t);};
         auto result=std::move(plan->clip);result.nativeAudioLinked=true;
@@ -192,9 +174,6 @@ inline std::optional<NativeNoteMovePlan> planNativeNoteMove(
                 auto originalNote=*bound;bindNativeNoteSource(originalNote,source,&clock);
                 note.nativeSourceStartSeconds=originalNote.nativeSourceStartSeconds;
                 note.nativeSourceEndSeconds=originalNote.nativeSourceEndSeconds;note.nativeSegments=std::move(originalNote.nativeSegments);
-                note.materialSourceStartSeconds=bound->materialSourceStartSeconds;note.materialSourceEndSeconds=bound->materialSourceEndSeconds;
-                note.utauPreutteranceOverrideEnabled=bound->utauPreutteranceOverrideEnabled;
-                note.utauPreutteranceSeconds=bound->utauPreutteranceSeconds;
             }
         }
         return NativeNoteMovePlan{std::move(result),plan->delta};
@@ -260,9 +239,10 @@ inline std::optional<NativeNoteMovePlan> planNativeNoteMove(
     {
         for (const auto& note : original.notes)
             if (selected(note))
-                movingEdges.push_back(leftLike ? note.startSeconds
+                movingEdges.push_back((edit == NativeNoteTimeEdit::leftEdge
+                    || (edit == NativeNoteTimeEdit::sharedBoundary && note.id == ids[1])) ? note.startSeconds
                     : note.startSeconds + note.durationSeconds);
-        bool changed = true;
+        bool changed = edit != NativeNoteTimeEdit::sharedBoundary;
         while (changed)
         {
             changed = false;
@@ -271,23 +251,23 @@ inline std::optional<NativeNoteMovePlan> planNativeNoteMove(
                 if (selected(note)) continue;
                 const auto start = note.startSeconds;
                 const auto end = start + note.durationSeconds;
-                const auto attached = leftLike ? end : start;
-                const auto outer = leftLike ? start : end;
+                const auto attached = edit == NativeNoteTimeEdit::leftEdge ? end : start;
+                const auto outer = edit == NativeNoteTimeEdit::leftEdge ? start : end;
                 if (edgeMoves(attached) && !edgeMoves(outer))
                 { movingEdges.push_back(outer); changed = true; }
             }
         }
     }
-    struct Boundary { double time; double coefficient; };
+    struct Boundary { double time; bool moves; };
     std::vector<Boundary> boundaries { {original.audioStartSeconds, false},
         {original.audioStartSeconds + original.audioLength(), false} };
     for (const auto& note : original.notes)
     {
-        boundaries.push_back({note.startSeconds, selected(note) && edit != NativeNoteTimeEdit::rightEdge ? 1.0 : 0.0});
-        boundaries.push_back({note.startSeconds + note.durationSeconds, selected(note) && !leftLike ? 1.0 : 0.0});
+        boundaries.push_back({note.startSeconds, selected(note) && edit != NativeNoteTimeEdit::rightEdge});
+        boundaries.push_back({note.startSeconds + note.durationSeconds, selected(note) && edit != NativeNoteTimeEdit::leftEdge});
     }
     if (edit != NativeNoteTimeEdit::move)
-        for (auto& boundary : boundaries) boundary.coefficient = edgeMoves(boundary.time);
+        for (auto& boundary : boundaries) boundary.moves = edgeMoves(boundary.time);
     // Analysis normally leaves a short piece of original audio outside the
     // first/last note. Those outer margins travel with their nearest edge;
     // treating them as fixed neighbors locks the whole recording in place.
@@ -297,102 +277,58 @@ inline std::optional<NativeNoteMovePlan> planNativeNoteMove(
         [](const auto& a, const auto& b)
         { return a.startSeconds + a.durationSeconds < b.startSeconds + b.durationSeconds; });
     if (original.audioStartSeconds <= first->startSeconds + 1.0e-7)
-        boundaries[0].coefficient = edit == NativeNoteTimeEdit::move ? selected(*first) : edgeMoves(first->startSeconds);
+        boundaries[0].moves = edit == NativeNoteTimeEdit::move ? selected(*first) : edgeMoves(first->startSeconds);
     if (original.audioStartSeconds + original.audioLength() >= last->startSeconds + last->durationSeconds - 1.0e-7)
-        boundaries[1].coefficient = edit == NativeNoteTimeEdit::move ? selected(*last)
+        boundaries[1].moves = edit == NativeNoteTimeEdit::move ? selected(*last)
             : edgeMoves(last->startSeconds + last->durationSeconds);
     std::stable_sort(boundaries.begin(), boundaries.end(),
         [](const auto& a, const auto& b) { return a.time < b.time; });
     std::vector<Boundary> edges;
     for (const auto& edge : boundaries)
         if (!edges.empty() && std::abs(edges.back().time - edge.time) < 1.0e-7)
-            edges.back().coefficient = std::max(edges.back().coefficient,edge.coefficient);
+            edges.back().moves |= edge.moves;
         else edges.push_back(edge);
-    const auto clock = nativeClipClock(original);
-    const auto endpointEdges=edges;
-    const auto endpointCoefficient=[&](double time)
-    {
-        const auto next=std::upper_bound(endpointEdges.begin(),endpointEdges.end(),time,
-            [](double t,const auto& edge){return t<edge.time;});
-        if(next==endpointEdges.begin())return endpointEdges.front().coefficient;
-        if(next==endpointEdges.end())return endpointEdges.back().coefficient;
-        const auto& prev=*std::prev(next);
-        return prev.coefficient+(next->coefficient-prev.coefficient)*(time-prev.time)/(next->time-prev.time);
-    };
-    for(const auto& note:original.notes)
-    {
-        const auto from=note.startSeconds,to=from+note.durationSeconds;
-        const auto gStart=endpointCoefficient(from),gEnd=endpointCoefficient(to);
-        if(std::abs(gStart-gEnd)<1.e-12)continue; // old rigid-ripple semantics
-        const auto row=nativeNoteSourceTiming(note,original,clock);
-        if(row.regionEndSeconds<=row.regionStartSeconds+1.e-12)return {};
-        const auto zones=pronunciationSegmentsFor(row);
-        struct Zone {double from,to,weight;};std::vector<Zone> placed;double total=0;
-        for(const auto& zone:zones)
-        {
-            const auto a=juce::jlimit(from,to,nativeTargetTimeAt(clock,row.regionStartSeconds+zone.sourceStartSeconds-original.sourceOffsetSeconds));
-            const auto b=juce::jlimit(from,to,nativeTargetTimeAt(clock,row.regionStartSeconds+zone.sourceEndSeconds-original.sourceOffsetSeconds));
-            if(b<=a+1.e-12)continue;
-            const auto weight=zone.role==NativeSegmentRole::vowel&&zone.stretchable&&std::isfinite(zone.stretchWeight)
-                ?(b-a)*std::max(0.0,zone.stretchWeight):0.0;
-            placed.push_back({a,b,weight});total+=weight;
-        }
-        if(total<=1.e-12)return NativeNoteMovePlan{original,0};
-        double progress=0;
-        for(const auto& zone:placed)
-        {
-            edges.push_back({zone.from,gStart+(gEnd-gStart)*progress/total});
-            progress+=zone.weight;
-            edges.push_back({zone.to,gStart+(gEnd-gStart)*progress/total});
-        }
-    }
-    std::stable_sort(edges.begin(),edges.end(),[](const auto& a,const auto& b){return a.time<b.time;});
-    std::vector<Boundary> knots;
-    for(const auto& edge:edges)
-        if(!knots.empty()&&std::abs(knots.back().time-edge.time)<1.e-9)knots.back().coefficient=edge.coefficient;
-        else knots.push_back(edge);
-    edges=std::move(knots);
     double low = -std::numeric_limits<double>::infinity(), high = -low;
     for (const auto& edge : edges)
-        if (edge.coefficient>1.e-12) low = std::max(low, (-original.startSeconds-edge.time)/edge.coefficient);
+        if (edge.moves) low = std::max(low, -original.startSeconds - edge.time);
     for (std::size_t i = 1; i < edges.size(); ++i)
     {
         const auto length = edges[i].time - edges[i-1].time;
-        const auto minimum = std::min(1.e-6, length);
-        const auto slope = edges[i].coefficient - edges[i-1].coefficient;
-        if (slope > 1.e-12) low = std::max(low, (minimum-length)/slope);
-        if (slope < -1.e-12) high = std::min(high, (length-minimum)/-slope);
+        // The 10 ms minimum protects real recording, not an empty interval
+        // between linked sources. An empty gap may close completely.
+        const auto begin=edges[i-1].time, end=edges[i].time;
+        const auto overlaps=[&](double a,double b){return std::min(end,b)>std::max(begin,a)+1.e-9;};
+        const auto hasAudio=sourceWindows
+            ? std::any_of(sourceWindows->begin(),sourceWindows->end(),[&](const auto& w){return overlaps(w.getStart(),w.getEnd());})
+            : overlaps(original.audioStartSeconds,original.audioStartSeconds+original.audioLength());
+        const auto hasNote=std::any_of(original.notes.begin(),original.notes.end(),[&](const auto& n)
+            {return overlaps(n.startSeconds,n.startSeconds+n.durationSeconds);});
+        const auto minimum = hasAudio||hasNote ? std::min(.01, length) : 0.0;
+        const auto slope = int(edges[i].moves) - int(edges[i-1].moves);
+        if (slope > 0) low = std::max(low, minimum - length);
+        if (slope < 0) high = std::min(high, length - minimum);
     }
-    // Preserve the existing minimum musical note length independently of the
-    // much finer source-zone/clock breakpoints introduced above.
-    for(const auto& note:original.notes)
-    {
-        const auto slope=endpointCoefficient(note.startSeconds+note.durationSeconds)-endpointCoefficient(note.startSeconds);
-        const auto minimum=std::min(.01,note.durationSeconds);
-        if(slope>1.e-12)low=std::max(low,(minimum-note.durationSeconds)/slope);
-        if(slope< -1.e-12)high=std::min(high,(note.durationSeconds-minimum)/-slope);
-    }
-    if(low>high)return {};
     const auto delta = juce::jlimit(low, high, requested);
     const auto warp = [&](double time)
     {
         const auto next = std::upper_bound(edges.begin(), edges.end(), time,
             [](double t, const auto& edge) { return t < edge.time; });
-        if (next == edges.begin()) return time + edges.front().coefficient*delta;
-        if (next == edges.end()) return time + edges.back().coefficient*delta;
+        if (next == edges.begin()) return time + (edges.front().moves ? delta : 0);
+        if (next == edges.end()) return time + (edges.back().moves ? delta : 0);
         const auto& prev = *(next-1);
         const auto amount = (time-prev.time)/(next->time-prev.time);
-        return time + delta * (prev.coefficient*(1-amount) + next->coefficient*amount);
+        return time + delta * ((prev.moves ? 1.0 : 0.0)*(1-amount) + (next->moves ? 1.0 : 0.0)*amount);
     };
     auto result = original;
     const auto audioStart = warp(original.audioStartSeconds);
     const auto audioEnd = warp(original.audioStartSeconds + original.audioLength());
-    const auto rigid = std::all_of(edges.begin(), edges.end(), [](const auto& edge) { return std::abs(edge.coefficient-1.0)<1.e-9; });
+    const auto rigid = std::all_of(edges.begin(), edges.end(), [](const auto& edge) { return edge.moves; });
     const auto origin = rigid ? delta : std::min(0.0, audioStart);
     result.startSeconds += origin;
     result.audioStartSeconds = audioStart - origin;
     result.audioDurationSeconds = audioEnd - audioStart;
     result.durationSeconds = std::max(.01, warp(original.durationSeconds) - origin);
+    const auto clock = nativeClipClock(original);
     auto map = clock;
     for (const auto& edge : edges)
         if (edge.time >= original.audioStartSeconds - 1.0e-7
@@ -403,7 +339,10 @@ inline std::optional<NativeNoteMovePlan> planNativeNoteMove(
     for (auto point : map)
     {
         point.targetSeconds = warp(point.targetSeconds) - origin;
-        if (result.sourceTimeMap.empty() || point.targetSeconds > result.sourceTimeMap.back().targetSeconds + 1.0e-7)
+        // The linked-source proxy is an old-to-new editor warp, never rendered.
+        // Keep both sides of a closed gap at the same new time so its inverse
+        // does not stretch the next source across the vanished gap.
+        if (sourceWindows || result.sourceTimeMap.empty() || point.targetSeconds > result.sourceTimeMap.back().targetSeconds + 1.0e-7)
             result.sourceTimeMap.push_back(point);
     }
     TrackData envelopeTrack;envelopeTrack.pitchAlgorithm=PitchAlgorithm::world;envelopeTrack.clips={original};
@@ -421,7 +360,7 @@ inline std::optional<NativeNoteMovePlan> planNativeNoteMove(
         bindNativeNoteSource(note, original, &clock);
         const auto start = warp(note.startSeconds);
         const auto duration = warp(note.startSeconds + note.durationSeconds) - start;
-        const auto ratio = note.durationSeconds>1.e-9 ? duration/note.durationSeconds : 1.0;
+        const auto ratio = duration / note.durationSeconds;
         // Shared pitch/envelope handles can live outside this fragment. They
         // follow the recording's common clock, not this note's length ratio:
         // a handle in a rigidly moving neighbour must not be stretched twice.
@@ -455,7 +394,7 @@ inline std::optional<NativeNoteMovePlan> planNativeNoteMove(
         for (auto& marker : note.sibilantMarkers) marker = local(marker);
         note.vibratoReferenceDurationSeconds *= ratio;
         note.vibratoTimeOffsetSeconds *= ratio;
-        note.consonantSeconds = local(note.consonantSeconds);
+        note.consonantSeconds *= ratio;
         note.startSeconds = start - origin; note.durationSeconds = duration;
         if (selected(note))
         {
@@ -469,5 +408,45 @@ inline std::optional<NativeNoteMovePlan> planNativeNoteMove(
     gainTime(result.gainEnvelope);
     for (auto& layer : result.inheritedGainEnvelopes) gainTime(layer);
     return NativeNoteMovePlan { std::move(result), delta };
+}
+
+struct NativeBoundaryStretchPlan
+{
+    std::vector<NativeNoteMovePlan> clips;
+    double delta = 0;
+};
+
+// The pair owns one moving seam. All other breakpoints stay fixed; reuse the
+// normal source-clock/curve warp so GUI preview and audio commit agree.
+inline std::optional<NativeBoundaryStretchPlan> planNativeBoundaryStretch(
+    const TrackData& track, const juce::String& leftId, const juce::String& rightId, double requested)
+{
+    if (!trackShowsAllNativeRegions(track) || leftId == rightId || !std::isfinite(requested)) return {};
+    const NoteData* left=nullptr;const NoteData* right=nullptr;
+    double start=0,seam=0,rightStart=0,end=0;int found=0;
+    for(const auto& c:track.clips)for(const auto& n:c.notes)
+    {
+        if(n.id==leftId){left=&n;start=c.startSeconds+n.startSeconds;seam=start+n.durationSeconds;++found;}
+        if(n.id==rightId){right=&n;rightStart=c.startSeconds+n.startSeconds;end=rightStart+n.durationSeconds;++found;}
+    }
+    if(found!=2||!left||!right||std::abs(seam-rightStart)>1.e-7||end<=seam||seam<=start)return {};
+    // A shared source clock must not stretch an unselected overlapping voice.
+    for(const auto& c:track.clips)for(const auto& n:c.notes)if(n.id!=leftId&&n.id!=rightId)
+        if(std::min(end,c.startSeconds+n.startSeconds+n.durationSeconds)
+            >std::max(start,c.startSeconds+n.startSeconds)+1.e-7)return {};
+    const std::vector<juce::String> ids{leftId,rightId};
+    auto delta=juce::jlimit(-left->durationSeconds+std::min(.01,left->durationSeconds),
+        right->durationSeconds-std::min(.01,right->durationSeconds),requested);
+    for(const auto& c:track.clips)
+        if(const auto plan=planNativeNoteMove(c,ids,delta,0,NativeNoteTimeEdit::sharedBoundary))
+            delta=delta<0?std::max(delta,plan->delta):std::min(delta,plan->delta);
+    NativeBoundaryStretchPlan result;result.delta=delta;
+    for(const auto& c:track.clips)
+        if(auto plan=planNativeNoteMove(c,ids,delta,0,NativeNoteTimeEdit::sharedBoundary))
+        {
+            if(std::abs(plan->delta-delta)>1.e-7)return {};
+            result.clips.push_back(std::move(*plan));
+        }
+    return result;
 }
 }

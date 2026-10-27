@@ -343,6 +343,7 @@ public:
     void mouseDown(const juce::MouseEvent& event) override;
     void mouseDrag(const juce::MouseEvent& event) override;
     void mouseUp(const juce::MouseEvent& event) override;
+    void mouseDoubleClick(const juce::MouseEvent& event) override;
     void openExternalFile(const juce::File& file);
     void requestClose(std::function<void()> approved);
     void startProjectRecovery();
@@ -390,6 +391,8 @@ public:
     void diagnosticRefreshControls();
     [[nodiscard]] juce::ToggleButton& diagnosticNativeAudioOverlapButton() { return nativeAudioOverlapButton; }
     bool diagnosticDiffSingerExpressionLane();
+    void diagnosticGenerateDiffSingerParameters() { generateDiffSingerParameters(); }
+    void diagnosticShowDiffSingerParameterLane() { showDiffSingerParameterLane(); }
     void diagnosticLoadDiffSingerBank(const juce::String& trackId, const juce::File& directory);
     bool diagnosticPitchPersistence(const juce::File& original, const juce::File& output, bool reopenOnly);
     bool diagnosticPitchRestore(const juce::File& output);
@@ -415,6 +418,8 @@ public:
     bool diagnosticHasEditorViewItems();
     bool diagnosticSingleEntryUi(const juce::File& output);
     bool diagnosticTrackEditingInterfacesUi(const juce::File& output);
+    bool diagnosticUtauSelectionScope(const juce::File& output);
+    bool diagnosticDiffSingerHistoryPlayback(const juce::File& bank, const juce::File& output);
     bool diagnosticNativeWorkflow(const juce::File& output, const juce::File& nsfModel);
     bool diagnosticMaterialSourceReplacementUi(const juce::File& output, const juce::File& nsfModel);
     bool diagnosticMaterialVariantHandoffUi(const juce::File& output);
@@ -425,6 +430,7 @@ public:
     [[nodiscard]] bool diagnosticClipSplit(const juce::File& directory);
     [[nodiscard]] bool diagnosticClipTrim(const juce::File& directory);
     [[nodiscard]] bool diagnosticTimelineSelection(const juce::File& directory);
+    [[nodiscard]] bool diagnosticNativeLoudness(const juce::File& directory);
     [[nodiscard]] bool diagnosticClipMerge(const juce::File& directory);
     [[nodiscard]] bool diagnosticClipGainKnob(const juce::File& directory);
     [[nodiscard]] bool diagnosticNativeRenderedWaveform(const juce::File& directory, const juce::File& modelDirectory = {});
@@ -691,6 +697,7 @@ private:
     juce::TextButton lineButton;
     ToolButton pointButton;
     juce::TextButton trimButton;
+    juce::TextButton nativeLoudnessButton;
     juce::TextButton connectButton;
     juce::TextButton pitchParamButton;
     juce::TextButton driftParamButton;

@@ -3,6 +3,7 @@
 #include "I18n.h"
 #include "AudioEngine.h"
 #include "ProjectModel.h"
+#include "JoinedVibrato.h"
 #include "NativeSharedEnvelope.h"
 #include "NativePitchVoicingDisplay.h"
 #include "backend/UtauRenderer.h"
@@ -197,6 +198,8 @@ public:
         const juce::String& noteId, int anchorIndex);
     [[nodiscard]] std::vector<int> diagnosticEnabledAnchorMenuIds(
         const juce::String& noteId, int anchorIndex);
+    bool setPitchAnchorShape(const juce::String& noteId, int anchorIndex,
+        PitchCurveShape shape, std::optional<std::array<float, 4>> bezier = {});
 
     // Where a paste should land: the grid line nearest the pointer, or nothing
     // when the pointer is not over the roll.
@@ -283,6 +286,7 @@ public:
     }
     // Closes it without writing, so a check can go on to the next case.
     void diagnosticCancelAliasEdit() { finishInlineAliasEdit(false); }
+    void diagnosticShowBatchLyrics(const juce::String& id) { showBatchLyricDialog(id); }
     // Which note the box is on and what it holds, for the Tab check.
     [[nodiscard]] juce::String diagnosticAliasEditorNoteId() const
     {
@@ -324,6 +328,7 @@ public:
     // The pitch handles a note is drawn and edited with.
     // Where a vibrato handle of a note sits on screen -- "length" (its start),
     // "end", "fadeIn", "fadeOut", "depth", "cycle" or "offset".
+    [[nodiscard]] int diagnosticVibratoControlSetCount() const;
     [[nodiscard]] std::optional<juce::Point<float>> diagnosticVibratoHandle(
         const juce::String& noteId, const juce::String& which) const;
     [[nodiscard]] std::vector<PitchCurveEditPoint> diagnosticPitchAnchors(const juce::String& id)
@@ -591,6 +596,9 @@ public:
     void setSampleRegions(const std::vector<SampleRegionSetting>& regions, int activeRegion);
     void setPlayheadSeconds(double seconds);
     void setTool(Tool nextTool);
+    void setNativeLoudnessMode(bool active);
+    [[nodiscard]] bool isNativeLoudnessMode() const { return nativeLoudnessMode; }
+    void setNativeStretchMode(bool active) { nativeStretchMode = active; }
     [[nodiscard]] Tool currentTool() const { return tool; }
     [[nodiscard]] DrawAction drawAction() const { return drawActionMode; }
     void setDrawAction(DrawAction action);
@@ -905,6 +913,9 @@ private:
     // Parameters to draw a note with: the live drag preview when it is the one
     // being dragged, otherwise what the note stores.
     [[nodiscard]] NoteData effectiveVibrato(const NoteData& note) const;
+    [[nodiscard]] const JoinedVibrato* joinedVibratoFor(const juce::String& noteId) const;
+    [[nodiscard]] NoteData vibratoControlNote(const NoteData& note) const;
+    [[nodiscard]] bool ownsVibratoControls(const NoteData& note) const;
     [[nodiscard]] std::optional<VibratoHandleInfo> vibratoHandleAt(
         juce::Point<float> position) const;
     // Where a vibrato handle is drawn and grabbed, on screen.  The one place
@@ -1102,6 +1113,7 @@ private:
     void showTransposeDialog(const juce::String& noteId);
     void drawBarNumbers(juce::Graphics& g);
     void showCustomBezierDialog(const juce::String& noteId, int anchorIndex);
+    [[nodiscard]] bool pitchAnchorHasIncoming(const NoteData& note, int anchorIndex);
     // Asks for one anchor's frequency in hertz and moves it there.
     void showAnchorFrequencyDialog(const juce::String& noteId, int anchorIndex);
     [[nodiscard]] static float pitchAt(const std::vector<PitchCurveEditPoint>& anchors,
@@ -1262,6 +1274,12 @@ private:
     int highestMidi = 96;
     int lowestMidi = 24;
     bool sourceEditMode = false;
+    bool nativeStretchMode = false;
+    bool nativeLoudnessMode = false;
+    std::map<juce::String, float> loudnessStartGains;
+    float loudnessDeltaDb = 0.0f;
+    std::uint64_t loudnessRevision = 0;
+    [[nodiscard]] float displayedNativeGain(const NoteData& note) const;
     bool showPhonemeInfo = false;
     bool showNoteLabels = false;
     // The shared UTAU-style editor starts with waveform ink hidden; it can be
@@ -1351,7 +1369,9 @@ private:
     float dragStartY = 0.0f;
     bool finePitchDrag = false;
     bool nativeTrimDrag = false;
-    enum class DragMode { none, pitch, moveUtauNote, moveNativeNote, resizeNativeLeft, resizeNativeRight,
+    std::vector<juce::String> sharedBoundaryNotes;
+    std::uint64_t sharedBoundaryRevision = 0;
+    enum class DragMode { none, nativeLoudness, pitch, moveUtauNote, moveNativeNote, resizeNativeLeft, resizeNativeRight,
                           resizeLeft, resizeRight, consonantLeadIn,
                           drawPitch, linePitch, drawNewNote,
                           pointPitch, amplitudePoint, flagPoint, continuousFlag, jieSplit, vibrato,
@@ -1451,6 +1471,7 @@ private:
     [[nodiscard]] std::optional<double> firstShownPitchPoint(const juce::String& noteId,
                                                              double absoluteStart);
     mutable std::map<juce::String, SharedPitchLines> sharedLineCache;
+    mutable std::map<juce::String, std::vector<JoinedVibrato>> joinedVibratoCache;
     mutable std::map<juce::String, SharedPitchLines> pitchPreviewSharedCache;
     mutable std::map<juce::String, std::vector<AudioEngine::ProjectedNotePitch>> protocolPitchCache, protocolPreviewCache;
     const AudioEngine::ProjectedNotePitch* protocolPitchFor(const TrackData&, const juce::String&) const;

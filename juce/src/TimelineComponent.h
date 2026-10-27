@@ -38,6 +38,9 @@ public:
     [[nodiscard]] const std::vector<juce::String>& selectedTrackIds() const { return selectedTracks; }
     void setPixelsPerSecond(float value);
     void setRowHeight(float value);
+    void setClipStretchMode(bool enabled) { stretchClipEdges = enabled; }
+    void setClipStretchHint(juce::String hint) { clipStretchHint = std::move(hint); }
+    [[nodiscard]] bool clipStretchMode() const { return stretchClipEdges; }
     void setGainKnobHint(juce::String hint) { gainKnobHint = std::move(hint); }
     void setGainEnvelopeTexts(juce::String hint, juce::StringArray menu)
     { envelopeHint = std::move(hint); envelopeMenuTexts = std::move(menu); }
@@ -108,8 +111,10 @@ private:
         double audioStartSeconds = 0.0;
         double audioDurationSeconds = 0.0;
         float gain = 1.0f;
+        bool nativeStretch = false;
     };
 
+    [[nodiscard]] bool nativeStretchEdgeAt(juce::Point<float> position) const;
     ProjectModel& model;
     ProjectData snapshot;
     juce::AudioFormatManager formats;
@@ -148,6 +153,8 @@ private:
     float draggedClipPreviewGain = 1.0f, draggedClipGainDb = 0.0f, gainDragY = 0.0f;
     juce::String gainKnobHint;
     bool gainValueClick = false;
+    bool stretchClipEdges = false, draggedClipStretch = false;
+    juce::String clipStretchHint;
     juce::String envelopeHint, selectedEnvelopeClip, draggedEnvelopeClip;
     juce::StringArray envelopeMenuTexts;
     double selectedEnvelopeTime = -1.0, draggedEnvelopeStart = 0.0, draggedEnvelopeDuration = 0.0;

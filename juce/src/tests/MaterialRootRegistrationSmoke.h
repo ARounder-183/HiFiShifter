@@ -1,6 +1,7 @@
 #pragma once
 #include "../AssetManagerComponent.h"
 #include "../OttoMaterialIO.h"
+#include "../ProjectModel.h"
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <iostream>
 
@@ -34,12 +35,19 @@ inline bool runMaterialRootRegistrationSmoke(const juce::File& output)
     I18n strings;
     juce::PropertiesFile preferences(base.getChildFile("preferences.xml"), options);
     AssetManagerComponent manager(strings, preferences);
+    ProjectModel model; manager.setProjectVoicebanks(model.snapshot());
+    manager.onBrowserStateChanged = [&](const auto& state, const auto&) { model.setMaterialBrowserState(state); };
     check("production_registration_success", manager.registerMaterialRoot(bank, error) && error.isEmpty());
     check("production_registration_idempotent", manager.registerMaterialRoot(bank, error)
         && manager.diagnosticFolderCount() == 1 && manager.materialRoots() == juce::StringArray{bank.getFullPathName()});
     {
-        juce::PropertiesFile reopened(base.getChildFile("preferences.xml"), options);
-        check("preferences_actually_persisted", reopened.getValue("assets.materialFolders").contains(bank.getFullPathName()));
+        check("project_state_saved", model.save(base.getChildFile("registered.hjpx"), error));
+        ProjectModel reopened;
+        check("project_state_reopened", reopened.load(base.getChildFile("registered.hjpx"), error)
+            && reopened.snapshot().materialBrowserState.isNotEmpty());
+        AssetManagerComponent restored(strings, preferences); restored.setProjectVoicebanks(reopened.snapshot());
+        check("project_registry_restored", restored.materialRoots() == juce::StringArray{bank.getFullPathName()});
+        check("global_registry_unchanged", preferences.getValue("assets.materialFolders").isEmpty());
     }
     check("no_audio_copy_or_annotation_edit", bytes(audio) == sourceBytes && bytes(manifest) == sourceManifest
         && bank.findChildFiles(juce::File::findFiles, false).size() == 2 && !base.getChildFile("Copy").exists());
@@ -50,18 +58,15 @@ inline bool runMaterialRootRegistrationSmoke(const juce::File& output)
     const auto badBytes = bytes(bad.getChildFile("otto.ini"));
     check("invalid_manifest_rejects_without_mutation", !manager.registerMaterialRoot(bad, error)
         && error.isNotEmpty() && bytes(bad.getChildFile("otto.ini")) == badBytes && manager.diagnosticFolderCount() == 1);
-    // A regular file as a parent makes persistence fail deterministically without
-    // changing filesystem permissions, deleting user data, or relying on ACLs.
+    // An unwritable global preference location no longer blocks project registration.
     const auto blocker = base.getChildFile("blocked-parent");
     check("preference_failure_fixture", blocker.replaceWithText("fixture: not a directory"));
     {
         juce::PropertiesFile blockedPreferences(blocker.getChildFile("preferences.xml"), options);
         AssetManagerComponent blockedManager(strings, blockedPreferences);
-        check("reports_preferences_failure_after_registration", !blockedManager.registerMaterialRoot(bank, error)
-            && error.containsIgnoreCase("preferences") && error.containsIgnoreCase("retained in memory"));
-        check("adopted_root_retained_on_preferences_failure", blockedManager.materialRoots() == juce::StringArray{bank.getFullPathName()}
-            && blockedManager.diagnosticFolderCount() == 1 && audio.existsAsFile() && manifest.existsAsFile());
-        check("failed_preference_retry_never_duplicates", !blockedManager.registerMaterialRoot(bank, error)
+        check("registration_independent_of_global_preferences", blockedManager.registerMaterialRoot(bank, error)
+            && error.isEmpty() && blockedManager.materialRoots() == juce::StringArray{bank.getFullPathName()});
+        check("repeat_registration_never_duplicates", blockedManager.registerMaterialRoot(bank, error)
             && blockedManager.diagnosticFolderCount() == 1);
     }
     check("failed_operations_preserve_source_bytes", bytes(audio) == sourceBytes && bytes(manifest) == sourceManifest);

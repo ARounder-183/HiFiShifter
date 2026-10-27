@@ -1,8 +1,80 @@
 #pragma once
 #include "../NativePitchIdentity.h"
+#include "JoinedVibratoBakeSmoke.h"
 
 namespace hachi
 {
+template<class Check>
+void checkJoinedVibrato(const juce::File& folder, Check check)
+{
+    ProjectData data;TrackData track;track.id="joined";track.trackType=TrackType::hachi;track.pitchAlgorithm=PitchAlgorithm::world;
+    for(int i=0;i<4;++i)
+    {
+        ClipData c;c.id="c"+juce::String(i);c.startSeconds=3+i*.5;c.durationSeconds=c.sourceDurationSeconds=.5;
+        NoteData n;n.id="n"+juce::String(i);n.durationSeconds=.5;n.midiNote=n.sourceMidiCenter=i<3?60.f:64.f;
+        n.sourcePitchMeasured=true;n.label="a";n.contour={{0,0,0,true},{.5,0,0,true}};c.notes={n};track.clips.push_back(c);
+    }
+    data.tracks={track};ProjectModel model;model.resetDocument(data);
+    NoteData parameters;parameters.vibratoLengthPercent=85;parameters.vibratoCycleMs=213;
+    parameters.vibratoDepthCents=50;parameters.vibratoFadeInPercent=30;parameters.vibratoFadeOutPercent=25;
+    parameters.vibratoPhasePercent=17;parameters.vibratoEndPercent=92;
+    auto reference=parameters;reference.vibratoEnabled=true;reference.durationSeconds=1.5;
+    const auto original=model.contentFingerprint();
+    model.setNotesVibrato({"n2","n0","n1","n3"},parameters,true,true);
+    const auto joined=model.snapshot();bool same=true,requests=true;
+    for(int i=0;i<3;++i)
+    {
+        const auto& c=joined.tracks[0].clips[i];const auto& n=c.notes[0];
+        same &= n.vibratoReferenceDurationSeconds==1.5&&n.vibratoTimeOffsetSeconds==i*.5;
+        for(int f=0;f<=500;++f)same &= std::abs(vibratoCentsAt(n,f*.001)-vibratoCentsAt(reference,i*.5+f*.001))<1.e-7;
+        const auto r=AudioEngine::diagnosticNativeRequest(c,joined.tracks[0]);
+        for(size_t f=1;f+1<r.targetMidi.size();++f)
+            requests &= std::abs(r.targetMidi[f]-60-vibratoCentsAt(reference,i*.5+f*r.framePeriodMs/1000.)/100)<.0002;
+    }
+    check("joined_vibrato_matches_one_complete_note_including_fades_and_phase",same);
+    check("joined_vibrato_native_requests_follow_one_clock",requests);
+    check("different_pitch_starts_independent_vibrato",joined.tracks[0].clips[3].notes[0].vibratoReferenceDurationSeconds==0);
+    check("joined_vibrato_one_undo",model.undo()&&model.contentFingerprint()==original);
+    check("joined_vibrato_redo",model.redo());
+    juce::String error;ProjectModel reopened;
+    check("joined_vibrato_save_reopen",model.save(folder.getChildFile("joined.hjpx"),error)&&reopened.load(folder.getChildFile("joined.hjpx"),error)
+        &&std::abs(vibratoCentsAt(reopened.snapshot().tracks[0].clips[1].notes[0],.19)-vibratoCentsAt(reference,.69))<1.e-7);
+    auto changedParameters=parameters;changedParameters.vibratoDepthCents=91;changedParameters.vibratoPhasePercent=63;
+    model.setNotesVibrato({"n1"},changedParameters,true);
+    const auto edited=model.snapshot();bool unified=true;
+    for(int i=0;i<3;++i)unified &= edited.tracks[0].clips[i].notes[0].vibratoDepthCents==91&&edited.tracks[0].clips[i].notes[0].vibratoPhasePercent==63;
+    check("one_member_parameter_edit_updates_entire_group_only",unified&&edited.tracks[0].clips[3].notes[0].vibratoDepthCents==50);
+    model.setNotesVibratoRealLine({"n2"},false);const auto display=model.snapshot();
+    check("one_member_display_toggle_updates_group",!display.tracks[0].clips[0].notes[0].vibratoRealLine&&!display.tracks[0].clips[1].notes[0].vibratoRealLine);
+    model.setNotesVibrato({"n1"},changedParameters,false);const auto off=model.snapshot();
+    check("one_member_disable_updates_entire_group_only",!off.tracks[0].clips[0].notes[0].vibratoEnabled&&!off.tracks[0].clips[2].notes[0].vibratoEnabled&&off.tracks[0].clips[3].notes[0].vibratoEnabled);
+    auto legacy=joined;legacy.tracks[0].clips[1].notes[0].vibratoDepthCents=12;model.resetDocument(legacy);
+    check("legacy_joined_parameters_unified_on_reopen",model.save(folder.getChildFile("legacy-joined.hjpx"),error)&&reopened.load(folder.getChildFile("legacy-joined.hjpx"),error)
+        &&reopened.snapshot().tracks[0].clips[1].notes[0].vibratoDepthCents==50);
+    model.resetDocument(data);model.setNotesVibrato({"n0","n2"},parameters,true);
+    const auto isolated=model.snapshot();check("unselected_middle_note_breaks_vibrato_group",!isolated.tracks[0].clips[1].notes[0].vibratoEnabled
+        &&isolated.tracks[0].clips[0].notes[0].vibratoReferenceDurationSeconds==0&&isolated.tracks[0].clips[2].notes[0].vibratoReferenceDurationSeconds==0);
+    bool separate=true;
+    for(double shift:{-.05,.01})
+    {
+        auto p=data;p.tracks[0].clips[1].startSeconds+=shift;model.resetDocument(p);model.setNotesVibrato({"n0","n1"},parameters,true);
+        const auto d=model.snapshot();separate &= d.tracks[0].clips[0].notes[0].vibratoReferenceDurationSeconds==0&&d.tracks[0].clips[1].notes[0].vibratoReferenceDurationSeconds==0;
+    }
+    check("gaps_and_overlaps_do_not_join_vibrato",separate);
+    auto multi=data;multi.tracks.push_back(track);multi.tracks[1].id="other";
+    for(auto& c:multi.tracks[1].clips){c.id+="other";for(auto& n:c.notes)n.id+="other";}
+    model.resetDocument(multi);model.setNotesVibrato({"n0","n1other"},parameters,true);
+    const auto split=model.snapshot();check("different_tracks_do_not_join_vibrato",split.tracks[0].clips[0].notes[0].vibratoReferenceDurationSeconds==0&&split.tracks[1].clips[1].notes[0].vibratoReferenceDurationSeconds==0);
+    bool modes=true;
+    for(auto type:{TrackType::utau,TrackType::diffSinger})
+    {
+        auto p=data;p.tracks[0].trackType=type;p.tracks[0].pitchAlgorithm=PitchAlgorithm::utau;model.resetDocument(p);
+        model.setNotesVibrato({"n0","n1","n2"},parameters,true);const auto d=model.snapshot();
+        for(int i=0;i<3;++i)for(int f=1;f<500;++f)modes &= std::abs(vibratoCentsAt(d.tracks[0].clips[i].notes[0],f*.001)-vibratoCentsAt(reference,i*.5+f*.001))<1.e-7;
+    }
+    check("utau_and_ds_use_same_continuous_vibrato_clock",modes);
+}
+
 inline void MainComponent::diagnosticNativeVibrato(const juce::File& folder,
                                                   std::function<void(bool)> finished)
 {
@@ -19,6 +91,8 @@ inline void MainComponent::diagnosticNativeVibrato(const juce::File& folder,
     };
     folder.createDirectory();
     auto state = std::make_shared<State>();
+    checkJoinedVibrato(folder,[state](const char* name,bool pass){state->check(name,pass);});
+    checkJoinedVibratoBake(folder,[state](const char* name,bool pass){state->check(name,pass);});
     const auto finish = [state, folder, finished]
     {
         auto* report = new juce::DynamicObject(); report->setProperty("passed", state->ok); report->setProperty("checks", state->checks);
@@ -28,7 +102,7 @@ inline void MainComponent::diagnosticNativeVibrato(const juce::File& folder,
     for (int i = 0; i < 3; ++i)
     {
         NoteData note; note.id = "note-" + juce::String(i); note.label = "audio";
-        note.startSeconds = i; note.durationSeconds = 1; note.midiNote = note.sourceMidiCenter = static_cast<float>(57 + i);
+        note.startSeconds = i; note.durationSeconds = 1; note.midiNote = note.sourceMidiCenter = static_cast<float>(i < 2 ? 57 : 59);
         note.sourcePitchMeasured = true; note.utauAutoPitchTransition = false;
         note.contour = {{0, 0, 0, true}, {1, 0, 0, true}};
         note.connectedToPrevious = i > 0; note.connectedToNext = i < 2;
@@ -84,6 +158,9 @@ inline void MainComponent::diagnosticNativeVibrato(const juce::File& folder,
             << " real=" << notes[0].vibratoRealLine << ',' << notes[1].vibratoRealLine << std::endl;
         state->check("dialog_applies_to_all_selected_only", notes[0].vibratoEnabled && notes[1].vibratoEnabled && !notes[2].vibratoEnabled
             && notes[0].vibratoRealLine && notes[1].vibratoRealLine && notes[1].vibratoDepthCents == 60 && notes[0].vibratoCycleMs == 200);
+        state->check("dialog_joins_adjacent_equal_pitch_selection",notes[0].vibratoReferenceDurationSeconds==2
+            &&notes[1].vibratoReferenceDurationSeconds==2&&notes[1].vibratoTimeOffsetSeconds==1
+            &&std::abs(vibratoCentsAt(notes[0],1)-vibratoCentsAt(notes[1],0))<1.e-7);
         bool unchanged = true;
         for (int i = 0; i < 3; ++i) unchanged &= notes[i].midiNote == state->initial.tracks[0].clips[0].notes[i].midiNote
             && notes[i].pitchControlPoints.empty() && notes[i].contour[0].relativeCents == 0 && notes[i].startSeconds == i && notes[i].durationSeconds == 1;
@@ -115,6 +192,12 @@ inline void MainComponent::diagnosticNativeVibrato(const juce::File& folder,
         }
         const auto depth = pianoRoll.diagnosticVibratoHandle("note-0", "depth");
         state->check("native_vibrato_handles_available", depth.has_value());
+        state->check("joined_vibrato_draws_one_control_set",pianoRoll.diagnosticVibratoControlSetCount()==1);
+        bool sameHandles=true;for(const auto* name:{"length","end","fadeIn","fadeOut","depth","cycle","offset"})
+            sameHandles &= pianoRoll.diagnosticVibratoHandle("note-0",name)==pianoRoll.diagnosticVibratoHandle("note-1",name);
+        state->check("both_members_resolve_same_seven_controls",sameHandles);
+        pianoRoll.setSelectedNoteIds({"note-1"});
+        state->check("selecting_second_member_keeps_whole_control_set",pianoRoll.diagnosticVibratoControlSetCount()==1);
         if (depth)
         {
             const auto event = [this](juce::Point<float> at, juce::Point<float> from)
@@ -122,9 +205,19 @@ inline void MainComponent::diagnosticNativeVibrato(const juce::File& folder,
                 1, 0, 0, 0, 0, &pianoRoll, &pianoRoll, juce::Time::getCurrentTime(), from, juce::Time::getCurrentTime(), 1, false); };
             const auto to = *depth + juce::Point<float>(0, -6);
             pianoRoll.mouseDown(event(*depth, *depth)); pianoRoll.mouseDrag(event(to, *depth)); pianoRoll.mouseUp(event(to, *depth));
-            state->check("native_depth_handle_edits_just_its_note", project.snapshot().tracks[0].clips[0].notes[0].vibratoDepthCents > 60
-                && project.snapshot().tracks[0].clips[0].notes[1].vibratoDepthCents == 60);
+            state->check("native_depth_handle_edits_entire_joined_vibrato", project.snapshot().tracks[0].clips[0].notes[0].vibratoDepthCents > 60
+                && project.snapshot().tracks[0].clips[0].notes[1].vibratoDepthCents == project.snapshot().tracks[0].clips[0].notes[0].vibratoDepthCents);
             project.undo(); project.dispatchPendingMessages(); pianoRoll.diagnosticRefresh();
+            const auto end=pianoRoll.diagnosticVibratoHandle("note-1","end");
+            if(end)
+            {
+                const auto moved=*end+juce::Point<float>(-56,0);
+                pianoRoll.mouseDown(event(*end,*end));pianoRoll.mouseDrag(event(moved,*end));pianoRoll.mouseUp(event(moved,*end));
+                const auto changed=project.snapshot();const auto& a=changed.tracks[0].clips[0].notes[0];const auto& b=changed.tracks[0].clips[0].notes[1];
+                state->check("end_drag_uses_full_duration_and_updates_both",std::abs(a.vibratoEndPercent-90)<.01
+                    &&a.vibratoEndPercent==b.vibratoEndPercent&&std::abs(a.vibratoLengthPercent-70)<.01&&a.vibratoLengthPercent==b.vibratoLengthPercent);
+                project.undo();project.dispatchPendingMessages();pianoRoll.diagnosticRefresh();
+            }
         }
         pianoRoll.setSelectedNoteIds({"note-0", "note-1"}); nativeVibratoButton.onClick();
         auto* disable = dynamic_cast<juce::AlertWindow*>(juce::Component::getCurrentlyModalComponent());

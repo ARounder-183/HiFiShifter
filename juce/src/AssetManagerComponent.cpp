@@ -72,68 +72,45 @@ void AssetManagerComponent::load()
 {
     folders.clear();
     hiddenFolders.clear(); hiddenAudio.clear();
-    for (const auto& path : juce::StringArray::fromLines(properties.getValue("assets.hiddenFolders")))
+    const auto state = juce::JSON::parse(browserState);
+    for (const auto& path : juce::StringArray::fromLines(state.getProperty("hiddenFolders", {}).toString()))
         if (path.isNotEmpty()) hiddenFolders.insert(path);
-    for (const auto& path : juce::StringArray::fromLines(properties.getValue("assets.hiddenAudio")))
+    for (const auto& path : juce::StringArray::fromLines(state.getProperty("hiddenAudio", {}).toString()))
         if (path.isNotEmpty()) hiddenAudio.insert(path);
-    // New folder-based registry.  A path per line, an optional display name
-    // after a tab so a renamed folder keeps its label.
-    const auto stored = juce::StringArray::fromLines(
-        properties.getValue("assets.materialFolders"));
+    // Never adopt the old global registry: it cannot identify its owning project.
+    const auto stored = juce::StringArray::fromLines(state.getProperty("folders", {}).toString());
     for (const auto& line : stored)
     {
         if (line.trim().isEmpty()) continue;
         const auto tab = line.indexOfChar('\t');
         const auto path = tab >= 0 ? line.substring(0, tab) : line;
         const auto name = tab >= 0 ? line.substring(tab + 1) : juce::String();
+        if (!juce::File::isAbsolutePath(path.trim())) continue;
         const juce::File directory(path.trim());
-        if (directory.isDirectory())
-            folders.push_back({ directory,
-                name.trim().isNotEmpty() ? name.trim() : directory.getFileName() });
-    }
-
-    // Migrate the old flat file list: each registered file's parent folder
-    // becomes a material folder, so nothing already registered is lost.
-    const auto legacy = juce::StringArray::fromLines(properties.getValue("assets.files"));
-    for (const auto& path : legacy)
-    {
-        const juce::File file(path.trim());
-        if (file.existsAsFile())
-        {
-            const auto parent = file.getParentDirectory();
-            const auto known = std::any_of(folders.begin(), folders.end(),
-                [&](const auto& folder)
-                {
-                    return folder.directory.getFullPathName()
-                        == parent.getFullPathName();
-                });
-            if (!known && parent.isDirectory())
-                folders.push_back({ parent, parent.getFileName() });
-        }
-    }
-    if (!legacy.isEmpty())
-    {
-        properties.removeValue("assets.files");
-        save();
+        // Keep missing registrations so reconnecting an external drive restores them.
+        folders.push_back({ directory,
+            name.trim().isNotEmpty() ? name.trim() : directory.getFileName() });
     }
 
     selectedFolder = folders.empty() ? -1 : 0;
     rebuildMemberList();
 }
 
-bool AssetManagerComponent::save()
+void AssetManagerComponent::save()
 {
     juce::StringArray lines;
     for (const auto& folder : folders)
         if (folder.registered)
             lines.add(folder.directory.getFullPathName() + "\t" + folder.name);
-    properties.setValue("assets.materialFolders", lines.joinIntoString("\n"));
+    auto* state = new juce::DynamicObject();
+    state->setProperty("folders", lines.joinIntoString("\n"));
     juce::StringArray removedFolders, removedAudio;
     for (const auto& path : hiddenFolders) removedFolders.add(path);
     for (const auto& path : hiddenAudio) removedAudio.add(path);
-    properties.setValue("assets.hiddenFolders", removedFolders.joinIntoString("\n"));
-    properties.setValue("assets.hiddenAudio", removedAudio.joinIntoString("\n"));
-    return properties.saveIfNeeded();
+    state->setProperty("hiddenFolders", removedFolders.joinIntoString("\n"));
+    state->setProperty("hiddenAudio", removedAudio.joinIntoString("\n"));
+    browserState = juce::JSON::toString(juce::var(state), true);
+    if (onBrowserStateChanged) onBrowserStateChanged(browserState, browserSession);
 }
 
 bool AssetManagerComponent::registerMaterialRoot(const juce::File& folder, juce::String& error)
@@ -165,16 +142,14 @@ int AssetManagerComponent::registerFolder(const juce::File& folder,
         if (folders[index].directory == folder)
         {
             folders[index].registered = true;
-            if (!save()) registrationError = "Material root retained in memory, but preferences could not be saved; retry registration: "
-                + properties.getFile().getFullPathName();
+            save();
             selectedFolder = static_cast<int>(index);
             rebuildMemberList();
             return selectedFolder;
         }
     folders.push_back({ folder,
         displayName.isNotEmpty() ? displayName : folder.getFileName() });
-    if (!save()) registrationError = "Material root retained in memory, but preferences could not be saved; retry registration: "
-        + properties.getFile().getFullPathName();
+    save();
     selectedFolder = static_cast<int>(folders.size()) - 1;
     rebuildMemberList();
     return selectedFolder;
@@ -185,8 +160,28 @@ int AssetManagerComponent::registerFolder(const juce::File& folder,
 
 bool AssetManagerComponent::setProjectVoicebanks(const ProjectData& project)
 {
+    const bool changedDocument = browserSession != project.materialBrowserSessionId;
+    const bool changedState = browserState != project.materialBrowserState;
+    if (changedDocument || changedState)
+    {
+        ++browserGeneration; // Retire async search/annotation results from the old view.
+        if (changedDocument)
+        {
+            chooser.reset(); dialog.reset(); editorWindows.clear();
+            searchQuery.clear(); searchEditor.setText({}, juce::dontSendNotification);
+        }
+        browserSession = project.materialBrowserSessionId;
+        browserState = project.materialBrowserState;
+        searchScanPending = false; scrollOffset = 0;
+        projectAudioSources.clear(); projectAudioDirty = true;
+        manifestCaches.clear(); expandedAudio.clear(); draggedOnce.clear();
+        pronunciationSelectionAudio = {}; selectedAudioVariantId.clear();
+        selectedRegionIds.clear(); selectionAnchor.clear(); pronunciationSelectionActive = false;
+        dragStartFile = {}; dragStartVariantId.clear();
+        load();
+    }
     const auto banksChanged = updateProjectVoicebanks(project);
-    return updateProjectAudio(project, banksChanged) || banksChanged;
+    return updateProjectAudio(project, banksChanged) || banksChanged || changedDocument || changedState;
 }
 
 bool AssetManagerComponent::updateProjectAudio(const ProjectData& project, bool force)
@@ -203,7 +198,8 @@ bool AssetManagerComponent::updateProjectAudio(const ProjectData& project, bool 
         for (const auto& part : clip.parts) self(self, part);
     };
     for (const auto& track : project.tracks)
-        for (const auto& clip : track.clips) collectClip(collectClip, clip);
+        if (!trackIsDiffSinger(track))
+            for (const auto& clip : track.clips) collectClip(collectClip, clip);
     std::sort(sources.begin(), sources.end(), [](const auto& a, const auto& b)
         { return materialPathKey(a) < materialPathKey(b); });
     if (!force && !projectAudioDirty && sources == projectAudioSources) return false;
@@ -427,9 +423,9 @@ void AssetManagerComponent::showFolderActions()
     menu.addItem(4, strings.text("asset.assemble"), selected);
     menu.addItem(5, strings.text("asset.remove"), selected);
     menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&folderActionsButton),
-        [safe = juce::Component::SafePointer<AssetManagerComponent>(this)](int result)
+        [safe = juce::Component::SafePointer<AssetManagerComponent>(this), generation = browserGeneration](int result)
         {
-            if (safe == nullptr) return;
+            if (safe == nullptr || safe->browserGeneration != generation) return;
             if (result == communityDatasetImportAction) safe->requestCommunityDatasetImport({});
             else if (result == 1) safe->importAudioFolderDialog();
             else if (result == 2) safe->createFolderDialog();
@@ -682,9 +678,9 @@ void AssetManagerComponent::migrateFolderDialog(const juce::File& folder)
     juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::QuestionIcon, "OTTO",
         strings.text("Migrate this folder to one otto.ini. Bare audio becomes one pronunciation; existing OTTO entries are kept. Original audio and legacy annotations remain unchanged."),
         strings.text("dialog.apply"), strings.text("dialog.cancel"), this,
-        juce::ModalCallbackFunction::create([safe = juce::Component::SafePointer<AssetManagerComponent>(this), folder, mode](int result)
+        juce::ModalCallbackFunction::create([safe = juce::Component::SafePointer<AssetManagerComponent>(this), folder, mode, generation = browserGeneration](int result)
         {
-            if (safe == nullptr || result != 1) return;
+            if (safe == nullptr || safe->browserGeneration != generation || result != 1) return;
             OttoMaterialMigration::Report report; juce::String error;
             if (!OttoMaterialMigration::migrateFolder(folder, mode, true, report, error))
             {
@@ -709,9 +705,9 @@ void AssetManagerComponent::chooseOtoExport(const juce::File& folder)
     juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::QuestionIcon, strings.text("asset.exportOto"),
         strings.text("Standard UTAU OTO loses native connections, multi-vowel segmentation, transition flags and expression data. otto.ini is unchanged; existing targets merge by recording path. Continue?"),
         strings.text("dialog.apply"), strings.text("dialog.cancel"), this,
-        juce::ModalCallbackFunction::create([safe = juce::Component::SafePointer<AssetManagerComponent>(this), folder](int result)
+        juce::ModalCallbackFunction::create([safe = juce::Component::SafePointer<AssetManagerComponent>(this), folder, generation = browserGeneration](int result)
         {
-            if (safe == nullptr || result != 1) return;
+            if (safe == nullptr || safe->browserGeneration != generation || result != 1) return;
             safe->chooser = std::make_unique<juce::FileChooser>(safe->strings.text("asset.exportOto"),
                 folder.getChildFile("oto.ini"), "*.ini");
             safe->chooser->launchAsync(juce::FileBrowserComponent::saveMode,
@@ -882,13 +878,13 @@ void AssetManagerComponent::ensureOtoRows(const juce::File& audio)
     cache.recordings.erase(key); cache.audioErrors.erase(key); cache.pendingAudio.insert(key);
     const auto request = ++nextAnnotationRequest;
     cache.audioRequests[key] = request;
-    searchPool.addJob([safe = juce::Component::SafePointer<AssetManagerComponent>(this), audio, root, rootKey, key, request]
+    searchPool.addJob([safe = juce::Component::SafePointer<AssetManagerComponent>(this), audio, root, rootKey, key, request, generation = browserGeneration]
     {
         std::vector<SampleRegionSetting> rows; juce::String error;
         OttoMaterialMigration::readAudioAnnotations(audio, root, UtauMode::classic, rows, error);
-        juce::MessageManager::callAsync([safe, root, rootKey, key, request, rows = std::move(rows), error]() mutable
+        juce::MessageManager::callAsync([safe, root, rootKey, key, request, generation, rows = std::move(rows), error]() mutable
         {
-            if (safe == nullptr) return;
+            if (safe == nullptr || safe->browserGeneration != generation) return;
             if (root.getChildFile("otto.ini").exists())
             { safe->ensureManifest(root); safe->rebuildTreeRows(); return; }
             const auto found = safe->manifestCaches.find(rootKey);
@@ -1089,13 +1085,13 @@ void AssetManagerComponent::ensureSearchFiles()
         if (!folder.childrenLoaded) pending.push_back(folder.directory);
     if (pending.empty()) return;
     searchScanPending = true;
-    searchPool.addJob([pending = std::move(pending), safe = juce::Component::SafePointer<AssetManagerComponent>(this)]
+    searchPool.addJob([pending = std::move(pending), safe = juce::Component::SafePointer<AssetManagerComponent>(this), generation = browserGeneration]
     {
         std::vector<std::pair<juce::File, std::vector<juce::File>>> results;
         for (const auto& directory : pending) results.emplace_back(directory, membersOf(directory));
-        juce::MessageManager::callAsync([safe, results = std::move(results)]() mutable
+        juce::MessageManager::callAsync([safe, generation, results = std::move(results)]() mutable
         {
-            if (safe == nullptr) return;
+            if (safe == nullptr || safe->browserGeneration != generation) return;
             for (auto& [directory, files] : results)
                 for (auto& folder : safe->folders)
                     if (folder.directory == directory && !folder.childrenLoaded)
@@ -1374,9 +1370,9 @@ void AssetManagerComponent::mouseDown(const juce::MouseEvent& event)
             menu.addSeparator();
             menu.addItem(4, strings.text("asset.remove"));
             menu.showMenuAsync(popupOptions,
-                [safe = juce::Component::SafePointer<AssetManagerComponent>(this), folder](int result)
+                [safe = juce::Component::SafePointer<AssetManagerComponent>(this), folder, generation = browserGeneration](int result)
                 {
-                    if (safe == nullptr) return;
+                    if (safe == nullptr || safe->browserGeneration != generation) return;
                     if (result == communityDatasetImportAction) safe->requestCommunityDatasetImport(folder);
                     else if (result == 1) safe->migrateFolderDialog(folder);
                     else if (result == 2) safe->chooseOtoExport(folder);
@@ -1393,9 +1389,9 @@ void AssetManagerComponent::mouseDown(const juce::MouseEvent& event)
         menu.addItem(3, strings.text("asset.remove"));
         menu.showMenuAsync(popupOptions,
             [safe = juce::Component::SafePointer<AssetManagerComponent>(this), file,
-             ids = row.region >= 0 ? selectedRegionIds : juce::StringArray{}, regionId = row.regionId, audioId = row.audioVariantId](int result)
+             ids = row.region >= 0 ? selectedRegionIds : juce::StringArray{}, regionId = row.regionId, audioId = row.audioVariantId, generation = browserGeneration](int result)
             {
-                if (safe == nullptr) return;
+                if (safe == nullptr || safe->browserGeneration != generation) return;
                 if (result == 1)
                 {
                     safe->dispatchSelection(file, audioId, ids);

@@ -4,6 +4,7 @@
 #include "../Theme.h"
 #include "../SampleSettings.h"
 #include "../PianoRollComponent.h"
+#include "../TimelineComponent.h"
 #include "../AudioEngine.h"
 #include "../backend/AnalysisService.h"
 #include <iostream>
@@ -131,6 +132,80 @@ inline bool runNativeUnpitchedRegionsSmoke(const juce::File& folder,
     auto merged=marked;auto child=merged.tracks[0].clips[0];child.id="child";child.startSeconds=0;child.notes.clear();merged.tracks[0].clips[0].parts={child};
     for(auto& n:merged.tracks[0].clips[0].notes)n.clipPartId="child";model.replace(merged);model.removeNotes({middle});
     check("merged_audio_gap_deletes_actual_span",model.snapshot().tracks[0].clips.size()==2);
+    // Pitched notes must remove the same playback source as unpitched notes.
+    // Exercise the keyboard entry point and an already-warm audio engine.
+    model.resetDocument(marked);model.dispatchPendingMessages();roll.diagnosticRefresh();
+    roll.setFocusedClip(clip.id);roll.setSelectedNoteIds({"voice0"});
+    AudioEngine live;live.prepareToPlay(256,48000);live.syncProject(marked);
+    for(int i=0;i<1000&&live.renderProgress();++i)juce::Thread::sleep(10);
+    const auto sampleLive=[&](double seconds)
+    {
+        juce::AudioBuffer<float> block(2,512);block.clear();live.setPosition(seconds);live.play();
+        juce::AudioSourceChannelInfo info(&block,0,512);live.getNextAudioBlock(info);live.stop();
+        return block.getRMSLevel(0,0,512);
+    };
+    check("pitched_source_audible_before_keyboard_delete",sampleLive(1.75)>.01f);
+    roll.keyPressed(juce::KeyPress(juce::KeyPress::deleteKey));const auto pitchedRemoved=model.snapshot();
+    const auto audioAt=[](const ProjectData& d,double at)
+    {for(const auto& t:d.tracks)for(const auto& c:t.clips)for(const auto& p:expandedClipParts(c))
+        if(at>=p.startSeconds+p.audioStartSeconds&&at<p.startSeconds+p.audioStartSeconds+p.audioLength())return true;return false;};
+    check("pitched_delete_removes_source_span_keeps_neighbors",!audioAt(pitchedRemoved,1.75)&&audioAt(pitchedRemoved,1.25)&&audioAt(pitchedRemoved,3.25));
+    live.syncProject(pitchedRemoved);for(int i=0;i<1000&&live.renderProgress();++i)juce::Thread::sleep(10);
+    check("warm_playback_cache_no_longer_sounds_deleted_note",sampleLive(1.75)<1.e-7f);
+    juce::AudioBuffer<float> pitchedAfter;
+    check("pitched_delete_export_silent_and_other_note_audible",render(pitchedRemoved,"pitched-deleted.wav",pitchedAfter)
+        &&pitchedAfter.getNumSamples()==144000&&pitchedAfter.getRMSLevel(0,28800,14400)<1.e-7f
+        &&pitchedAfter.getRMSLevel(0,100800,14400)>.01f);
+    TimelineComponent timeline(model);timeline.setPixelsPerSecond(200);timeline.setSize(1000,220);
+    timeline.diagnosticRefresh();(void)timeline.createComponentSnapshot(timeline.getLocalBounds());
+    timeline.setSelectedClips({});const juce::Point<float> blank(timeline.pixelForSeconds(1.75),timeline.getRulerHeight()+45.f);
+    const juce::MouseEvent click(juce::Desktop::getInstance().getMainMouseSource(),blank,juce::ModifierKeys::leftButtonModifier,
+        0,0,0,0,0,&timeline,&timeline,juce::Time::getCurrentTime(),blank,juce::Time::getCurrentTime(),1,false);
+    timeline.mouseDown(click);timeline.mouseUp(click);
+    check("upper_timeline_deleted_span_has_no_clip_hit",timeline.selectedClipIds().empty());
+    check("pitched_delete_one_undo_restores_audio",model.undo()&&!model.canUndo()&&audioAt(model.snapshot(),1.75));
+    check("pitched_delete_redo_restores_silence",model.redo()&&!audioAt(model.snapshot(),1.75));
+    ProjectModel deletedReload;
+    check("pitched_delete_survives_save_reopen",model.save(folder.getChildFile("pitched-deleted.hjpx"),error)
+        &&deletedReload.load(folder.getChildFile("pitched-deleted.hjpx"),error)&&!audioAt(deletedReload.snapshot(),1.75));
+    auto pitchedWarp=marked;pitchedWarp.tracks[0].clips[0].sourceTimeMap={{0,0},{.5,.3},{1,1.2},{3,3}};
+    model.resetDocument(pitchedWarp);model.removeNotes({"voice0"});
+    auto warpCut=model.snapshot();bool correctOffset=false;
+    for(const auto& c:warpCut.tracks[0].clips)if(near(c.startSeconds,2))correctOffset=near(c.sourceOffsetSeconds,1.2);
+    check("pitched_delete_uses_stretched_source_clock",correctOffset&&!audioAt(warpCut,1.75));
+    model.resetDocument(merged);model.removeNotes({"voice0"});
+    check("pitched_delete_in_merged_source_removes_pcm_span",!audioAt(model.snapshot(),1.75)&&audioAt(model.snapshot(),3.25));
+    auto overlapping=marked;auto keep=overlapping.tracks[0].clips[0].notes[1];keep.id="overlap-keep";
+    keep.startSeconds=.75;keep.durationSeconds=.25;overlapping.tracks[0].clips[0].notes.push_back(keep);
+    model.resetDocument(overlapping);model.removeNotes({"voice0"});
+    check("shared_source_unselected_overlap_still_owns_audio",!audioAt(model.snapshot(),1.6)&&audioAt(model.snapshot(),1.85));
+    model.resetDocument(marked);model.removeNotes({"voice0","voice1"});
+    check("noncontiguous_pitched_delete_leaves_middle_audio",!audioAt(model.snapshot(),1.75)&&!audioAt(model.snapshot(),3.25)&&audioAt(model.snapshot(),2.5));
+    model.resetDocument(marked);model.removeNotesRippling({"voice0"});const auto rippled=model.snapshot();
+    bool neighborMoved=false,sourceMoved=false;
+    for(const auto& c:rippled.tracks[0].clips)
+    {
+        for(const auto& n:c.notes)if(n.id=="voice1")neighborMoved=near(c.startSeconds+n.startSeconds,2.5);
+        if(near(c.startSeconds,1.5))sourceMoved=near(c.sourceOffsetSeconds,1)&&near(c.durationSeconds,2);
+    }
+    check("ripple_delete_moves_source_and_notes_together",neighborMoved&&sourceMoved);
+    check("ripple_delete_single_undo_restores_both",model.undo()&&!model.canUndo()&&model.snapshot().tracks[0].clips.size()==1);
+    juce::AudioBuffer<float> rippleAfter;
+    bool ripplePcm=render(rippled,"pitched-ripple-deleted.wav",rippleAfter)&&rippleAfter.getNumSamples()==120000;
+    if(ripplePcm&&before.getNumSamples()==144000)
+        for(int i=78000;i<90000;++i)ripplePcm &= std::abs(rippleAfter.getSample(0,i)-before.getSample(0,i+24000))<1.e-5f;
+    check("ripple_delete_audio_matches_shifted_retained_source",ripplePcm);
+    model.resetDocument(marked);model.removeNotesRippling({"voice0","voice1"});
+    const auto noncontiguousRipple=model.snapshot();
+    bool keptGap=false;for(const auto& c:noncontiguousRipple.tracks[0].clips)for(const auto& n:c.notes)
+        if(n.id==middle)keptGap=near(n.durationSeconds,1)&&near(c.startSeconds+n.startSeconds,1.5);
+    check("noncontiguous_ripple_preserves_unselected_middle",keptGap);
+    std::vector<juce::String> all;for(const auto& n:marked.tracks[0].clips[0].notes)all.push_back(n.id);
+    model.resetDocument(marked);model.removeNotes(all);check("delete_all_notes_removes_all_source_audio",model.snapshot().tracks[0].clips.empty());
+    for(const auto type:{TrackType::utau,TrackType::diffSinger})
+    {auto score=marked;score.tracks[0].trackType=type;score.tracks[0].pitchAlgorithm=PitchAlgorithm::utau;
+        model.resetDocument(score);model.removeNotes({"voice0"});const auto d=model.snapshot();
+        check("voicebank_score_delete_does_not_split_regions",d.tracks[0].clips.size()==1&&d.tracks[0].clips[0].notes.size()==4);}
     auto u=data;u.tracks[0].pitchAlgorithm=PitchAlgorithm::utau;model.replace(u);check("utau_has_no_gap_marking",model.markNativeUnpitchedRegions(clip.id)==0);
     juce::MemoryBlock currentBytes; file.loadFileAsData(currentBytes);
     check("original_audio_file_untouched",currentBytes==originalBytes);

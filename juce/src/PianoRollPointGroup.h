@@ -6,6 +6,7 @@ namespace hachi
 {
 void PianoRollComponent::cancelPointDrag()
 {
+    sharedBoundaryNotes.clear();
     draggedNote.clear();draggedPitchAnchor=draggedAmplitudePoint=draggedFlagPoint=-1;
     pitchStroke.clear();amplitudeStroke.clear();flagStroke.clear();cvvcLaneDrag.reset();dragMode=DragMode::none;
     graphPointDragging=false;graphDragValid=false;clearPitchPlanPreview();
@@ -89,7 +90,8 @@ std::vector<PianoRollComponent::PointCurveDraft> PianoRollComponent::pointCurveD
             if(p.kind==PointSelection::pitch)
             {
                 d.edit.pitchPoints=pitchAnchorsFor(*note);
-                d.first=std::max(-30.0,-d.start);d.last=note->durationSeconds+30;
+                d.first=nativeNoteTimingEnabled(p.noteId)?-d.start:std::max(-30.0,-d.start);
+                d.last=nativeNoteTimingEnabled(p.noteId)?std::numeric_limits<double>::max():note->durationSeconds+30;
                 if(!nativeNoteTimingEnabled(p.noteId)&&!d.edit.pitchPoints.empty())
                 {
                     d.first=std::min(0.0,d.edit.pitchPoints.front().timeSeconds);
@@ -151,8 +153,11 @@ void PianoRollComponent::movePointGroup(const juce::MouseEvent& event)
     for(const auto& d:gesture.curves)
     {
         std::vector<PointGroupCoordinate> ps;for(const auto& p:d.original)ps.push_back({p.first,p.second});
-        limits.constrain(ps,d.indices,d.first,d.last,d.low,d.high,d.separation,d.fixedEnds);
-        if(d.identity.kind==PointSelection::pitch)
+        const auto freeNative=d.identity.kind==PointSelection::pitch && nativeNoteTimingEnabled(d.identity.noteId);
+        if(freeNative)
+            for(int i:d.indices)limits.constrain({ps[(size_t)i]},{0},d.first,d.last,d.low,d.high,0);
+        else limits.constrain(ps,d.indices,d.first,d.last,d.low,d.high,d.separation,d.fixedEnds);
+        if(d.identity.kind==PointSelection::pitch && !freeNative)
         {
             const auto* ownTrack=trackOf(d.identity.noteId);
             const auto* own=ownTrack?sharedLinesFor(*ownTrack).memberFor(d.identity.noteId):nullptr;
@@ -201,7 +206,7 @@ void PianoRollComponent::movePointGroup(const juce::MouseEvent& event)
         else if(d.identity.kind==PointSelection::flag){auto& p=d.edit.flagPoints[(size_t)i];p.timeSeconds=t;p.value=(float)v;}
         else {auto& p=d.edit.cvvcPoints[(size_t)i];p.position=t/d.length;p.value=d.identity.key.isEmpty()?backend::envelopeDbFromGain((float)(v/d.base)):(float)v;}
     }
-    if(std::any_of(gesture.curves.begin(),gesture.curves.end(),[](const auto& d){return d.identity.kind==PointSelection::connectionPitch;}))
+    if(std::any_of(gesture.curves.begin(),gesture.curves.end(),[&](const auto& d){return d.identity.kind==PointSelection::connectionPitch || (d.identity.kind==PointSelection::pitch && nativeNoteTimingEnabled(d.identity.noteId));}))
     {std::vector<ProjectModel::PointCurveEdit> edits;for(const auto& d:gesture.curves)edits.push_back(d.edit);updatePitchPlanPreview(edits,gesture.revision);}
     repaint();
 }
@@ -211,6 +216,15 @@ void PianoRollComponent::commitPointGroup(std::vector<PointCurveDraft> curves,st
     std::vector<ProjectModel::PointCurveEdit> edits;
     for(auto& d:curves)
     {
+        if(d.identity.kind==PointSelection::pitch && nativeNoteTimingEnabled(d.identity.noteId))
+        {
+            std::vector<std::pair<PitchCurveEditPoint,int>> sorted;
+            for(size_t i=0;i<d.edit.pitchPoints.size();++i)sorted.emplace_back(d.edit.pitchPoints[i],static_cast<int>(i));
+            std::stable_sort(sorted.begin(),sorted.end(),[](const auto& a,const auto& b){return a.first.timeSeconds<b.first.timeSeconds;});
+            const auto selected=d.indices;d.indices.clear();
+            for(size_t i=0;i<sorted.size();++i){d.edit.pitchPoints[i]=sorted[i].first;
+                if(std::find(selected.begin(),selected.end(),sorted[i].second)!=selected.end())d.indices.push_back(static_cast<int>(i));}
+        }
         if(d.identity.kind==PointSelection::amplitude)
         {
             std::vector<juce::String> ids{d.identity.noteId};

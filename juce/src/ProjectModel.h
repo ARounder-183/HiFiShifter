@@ -441,6 +441,9 @@ struct NoteData
     // Once edited, pitch handles (including endpoints) are literal positions.
     // Legacy/just-flattened notes may still derive their initial seam handles.
     bool nativePitchHandlesPlaced = false;
+    // Explicit sparse controls: empty interior notes read the shared line,
+    // without regenerating source-contour handles at each syllable boundary.
+    bool nativeSparsePitchControls = false;
     juce::String utauRegionFlags1, utauRegionFlags2,
                  utauRegionFlags3, utauRegionFlags4;
     // Per-frame ("linear") flags for this note.  While this is on, g comes
@@ -905,6 +908,10 @@ struct ProjectData
     int noteEditDivision = 64;
     juce::String baseScale = "C";
     bool assetManagerVisible = false;
+    // Browser membership/removals belong to this document, never global preferences.
+    juce::String materialBrowserState;
+    // Transient identity: distinct even for two new/identical documents.
+    juce::String materialBrowserSessionId = juce::Uuid().toString();
     std::vector<TempoChange> tempoChanges;
     std::vector<NativeConnection> nativeConnections;
     std::vector<TrackData> tracks;
@@ -931,6 +938,7 @@ public:
     void clear();
     // Saved document UI state; does not enter musical undo or trigger audio sync.
     void setAssetManagerVisible(bool visible);
+    void setMaterialBrowserState(const juce::String& state);
     bool setHamoodState(const juce::String& state, juce::String& error);
     bool undo();
     bool redo();
@@ -1130,6 +1138,8 @@ public:
     void setNotesUtauJieSplit(const std::vector<juce::String>& noteIds,
                               double first, double second, double third);
     void clearNotesUtauJieSplit(const std::vector<juce::String>& noteIds);
+    void setTrackEditingType(const juce::String& trackId, TrackType type,
+        std::optional<PitchAlgorithm> algorithm = {}, std::optional<UtauMode> mode = {});
     void setTrackPitchAlgorithm(const juce::String& trackId, PitchAlgorithm algorithm);
     void setTrackStretchAlgorithm(const juce::String& trackId, StretchAlgorithm algorithm);
     void setPitchAlgorithm(PitchAlgorithm algorithm);
@@ -1176,6 +1186,8 @@ public:
                          double deltaSeconds, float semitones, juce::String* error = nullptr);
     bool trimNativeNoteEdge(const juce::String& noteId, double deltaSeconds, bool leftEdge);
     bool resizeNativeNoteEdge(const juce::String& noteId, double deltaSeconds, bool leftEdge);
+    bool stretchNativeNoteBoundary(const juce::String& leftId, const juce::String& rightId,
+                                   double deltaSeconds, std::uint64_t expectedRevision);
     // Align the physical preutterance marker (or score onset) to the nearest
     // feasible musical grid, preserving pitch data and committing one undo.
     bool alignNotePreutteranceToGrid(const juce::String& noteId, double quarterStep, juce::String& error);
@@ -1232,6 +1244,8 @@ public:
     void setNoteBreath(const juce::String& noteId, float breath);
     void setNoteFormant(const juce::String& noteId, float semitones);
     void setNoteGain(const juce::String& noteId, float gain);
+    bool setNoteGains(const std::map<juce::String, float>& gains,
+                      std::optional<std::uint64_t> expectedRevision = {});
     bool setNotesTailFade(const std::vector<juce::String>& noteIds, int mode);
     bool setNotesNativeEnvelope(const std::vector<juce::String>& noteIds, const backend::NativeEnvelopeSettings& settings);
     bool setNotesTailFade(const std::vector<juce::String>& noteIds, int mode,
@@ -1404,6 +1418,8 @@ public:
     // measured curve it is moved away from, and under mld5 the sound is
     // shifted by the difference between the two -- so an octave error in the
     // measurement still comes out as an octave error in the result.
+    // Double-click initialisation never overwrites authored native pitch.
+    bool initializeNativeNotePitch(const juce::String& noteId);
     void flattenNotePitch(const std::vector<juce::String>& noteIds, bool snapNativeToSemitone = false);
     bool restoreNativeSourcePitch(const std::vector<juce::String>& noteIds);
     [[nodiscard]] static double firstFreeStartFrom(double startSeconds,

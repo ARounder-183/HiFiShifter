@@ -594,9 +594,10 @@ juce::var MainComponent::handleLiveMcp(const juce::var& request,bool& respond)
         if(name=="transport_seek") {audio.setPosition((double)args["position_seconds"]);return ok(liveMcpStatus());}
         if(name=="utau_render_selection")
         {
-            auto chosen=ids(args["note_ids"]);if(chosen.empty()&&args.hasProperty("note_id"))chosen.push_back(str(args,"note_id"));
-            if(chosen.empty())activeUtauSelectionCount=audio.selectEveryUtauNote(project.snapshot());
-            else {audio.setUtauRenderNoteSelection(chosen);activeUtauSelectionCount=(int)chosen.size();}
+            std::vector<juce::String> chosen; juce::String error;
+            if (!backend::McpServer::resolveUtauRenderSelection(project.snapshot(), args,
+                pianoRoll.selectedNoteIds(), chosen, error)) return fail(error);
+            audio.setUtauRenderNoteSelection(chosen);activeUtauSelectionCount=(int)chosen.size();
             syncAudio(project.snapshot());return ok(liveMcpStatus());
         }
         if(name=="render_prepare"||name=="transport_play"||name=="export_wav")
@@ -661,7 +662,16 @@ juce::var MainComponent::handleLiveMcp(const juce::var& request,bool& respond)
                 for(const auto& t:data.tracks)if(t.id==focusedTrack&&trackIsDiffSinger(t))
                 {
                     juce::StringArray noteIds;auto r=diffSingerRequest(data,t,noteIds);r.diffSingerCacheSession=cacheSession;
-                    auto result=backend::DiffSingerRenderer::invoke(backend::DiffSingerRenderer::requestJson(r,"timing"),[commandCancel]{return commandCancel->load();});
+                    auto request=backend::DiffSingerRenderer::requestJson(r,"timing");
+                    if(!whole)
+                    {
+                        juce::Array<juce::var> chosen;
+                        for(int i=0;i<noteIds.size();++i)
+                            if(std::find(selection.begin(),selection.end(),noteIds[i])!=selection.end())chosen.add(juce::String(i));
+                        if(chosen.isEmpty())return fail("Selected notes are not in the available DS clips");
+                        request.getDynamicObject()->setProperty("retake_ids",chosen);
+                    }
+                    auto result=backend::DiffSingerRenderer::invoke(request,[commandCancel]{return commandCancel->load();});
                     if(!(bool)result["ok"])return fail(result["error"].toString());
                     juce::Array<juce::var> rows;
                     if(const auto ph=result["phonemes"];ph.isArray())for(auto row:*ph.getArray())

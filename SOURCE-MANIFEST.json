@@ -1,16 +1,19 @@
 {
-  "public_version": "0.25",
-  "internal_update": 215,
-  "created_at": "2026-10-25T12:39:34.261487+08:00",
+  "public_version": "0.27",
+  "internal_update": 249,
+  "created_at": "2026-10-27T23:36:31.934602+08:00",
   "repository": "openhachimi/HachiShifter",
-  "branch": "0.26",
-  "previous_published_commit": "cb4bccbd1a40e293821c6be1fae0e6992f04d756",
-  "scope": "Current source used for the locally deployed update 215; branch rename does not change executable version.",
+  "branch": "0.27",
+  "previous_published_commit": "284f49cbf83d3d5f0110356ea4ed12286cff7829",
   "excluded": [
-    "SOURCE-MANIFEST.json"
+    "SOURCE-MANIFEST.json",
+    "juce/engines/diffsinger/__pycache__/",
+    "juce/engines/diffsinger/pronunciation-data/pypinyin/__pycache__/",
+    "juce/engines/diffsinger/pronunciation-data/pypinyin/contrib/__pycache__/",
+    "juce/engines/diffsinger/pronunciation-data/pypinyin/seg/__pycache__/",
+    "juce/engines/diffsinger/pronunciation-data/pypinyin/style/__pycache__/"
   ],
-  "source_file_count": 763,
-  "source_bytes": 25123016,
+  "source_file_count": 797,
   "files": [
     {
       "path": ".github/ISSUE_TEMPLATE/bug-report.yml",
@@ -39,18 +42,8 @@
     },
     {
       "path": "AGENTS.md",
-      "bytes": 2362,
-      "sha256": "83196db998d19ec2346a46208e125abf30205a9beb67aaa5d65aab51d8a71fc1"
-    },
-    {
-      "path": "LICENSE",
-      "bytes": 2611,
-      "sha256": "6ea1e02d8b8288efcec8db0293559fc4138f970091a29572f0fb2b9286ebd1aa"
-    },
-    {
-      "path": "README.md",
-      "bytes": 8057,
-      "sha256": "d711c4d71213cd27b3b33a240fbebea21ed338048d184c4d4cd46f3c8d5d8e86"
+      "bytes": 2350,
+      "sha256": "39fef6780ab5bd81086ebc6bd32fbe7de29bd9ce685cd9c939325213ea098f2a"
     },
     {
       "path": "build-local.ps1",
@@ -63,31 +56,6 @@
       "sha256": "4e59250bacce885facb7e14de21c858cd271d07582452170d67d79d7131221f4"
     },
     {
-      "path": "docs/AI_API_REFERENCE.md",
-      "bytes": 109794,
-      "sha256": "bb5cca5db751bd2dbd0137774c40deae8a6e92e5f2772b7e5a053a8898c0d38c"
-    },
-    {
-      "path": "docs/AI_CODE_GUIDE.md",
-      "bytes": 90925,
-      "sha256": "ec26b16c9a745295d472c4fe2d0364188d18fa48ab93c76f5241e2f8d5c6c05c"
-    },
-    {
-      "path": "docs/AI_INTERFACE_ARCHITECTURE.md",
-      "bytes": 71000,
-      "sha256": "d48b54f71e3dc33ca35f43c57ed4a2da0518eb6d0cb452c23a7ba7eff0002437"
-    },
-    {
-      "path": "docs/AI_SOURCE_INDEX.md",
-      "bytes": 117453,
-      "sha256": "f86c368d1ad23a4c5fe4a35d7afa29604fdd28d868bc01c07181172ae79c941b"
-    },
-    {
-      "path": "docs/SOURCE_STATUS.md",
-      "bytes": 3188,
-      "sha256": "e74276f1fa2f0c4f9f732d2a83d85ec8f33cf970f93ad2bbe365d11a25036d55"
-    },
-    {
       "path": "docs/accompaniment.md",
       "bytes": 2644,
       "sha256": "f93d4e2183d289db1ed4d55976158d92797753ffbd30ce64b5890024051e104d"
@@ -96,6 +64,26 @@
       "path": "docs/advanced-envelope.md",
       "bytes": 10392,
       "sha256": "a971dbf881cd413a656dafb644da567a72e6301a52ddd345a10273803b255708"
+    },
+    {
+      "path": "docs/AI_API_REFERENCE.md",
+      "bytes": 112175,
+      "sha256": "64b6e90ba1dd2a935e02d9448314d5effd34577cc6c1f73bfc5349ab26f7cb90"
+    },
+    {
+      "path": "docs/AI_CODE_GUIDE.md",
+      "bytes": 102242,
+      "sha256": "dc396d3a536e64257998b109cba732e31684964505e6769a4491f1e323dbed82"
+    },
+    {
+      "path": "docs/AI_INTERFACE_ARCHITECTURE.md",
+      "bytes": 82943,
+      "sha256": "ffe2165d83f4842e67a375b08ad13a5ad28af21b9ba2cab16f9ad66511eb644c"
+    },
+    {
+      "path": "docs/AI_SOURCE_INDEX.md",
+      "bytes": 132582,
+      "sha256": "b707dad8eb36d91c7b095e9996dea8c0ecd5577f346b8a5ab5ac02416274d85a"
     },
     {
       "path": "docs/audio-export.md",
@@ -144,8 +132,8 @@
     },
     {
       "path": "docs/interface-audit-inventory.json",
-      "bytes": 137602,
-      "sha256": "d4bbf2339df00f3755f9a0998bca5174839a51601887d16fcc63061f6e9aeabb"
+      "bytes": 140337,
+      "sha256": "d97f14a9fb085d4a879e897f2f61a1c3ae1d2f5fb5cd3b81adcdfa31c6fa91b8"
     },
     {
       "path": "docs/kara2.md",
@@ -193,6 +181,11 @@
       "sha256": "7b888ca054ba5d34829f0c2e539302000baff2a389f1fa2574e3dde4b3a6d05a"
     },
     {
+      "path": "docs/SOURCE_STATUS.md",
+      "bytes": 1267,
+      "sha256": "ea3b89a344f2b1b04352ae089c6f5c396b55af4e890798f0173e1c7a5a02e374"
+    },
+    {
       "path": "docs/tempo-change-options.md",
       "bytes": 1105,
       "sha256": "c01a0129e0fa2ae90983ec515c70db36f4cf3b6f612010a51f0995bd58e22300"
@@ -204,8 +197,8 @@
     },
     {
       "path": "docs/updates.md",
-      "bytes": 199837,
-      "sha256": "a5ea130f69ddf5d6296546c706cb6f9fd6dd8eb0a8cd05c71b9eb0e3deda7646"
+      "bytes": 240307,
+      "sha256": "a7837354408ffc9f4d72813bb78167440ba79feb7e7d1276c236449b8033b69c"
     },
     {
       "path": "docs/ust-fidelity.md",
@@ -238,24 +231,14 @@
       "sha256": "79dd0053fd808339c7f4687dcaf559fe2fa8f79b59e390688df8fc158f1c5003"
     },
     {
-      "path": "juce/CMakeLists.txt",
-      "bytes": 23625,
-      "sha256": "94ae526b874b2b50a3217674c5e58552cbc8bf03f5b9193436a0fd2bfa4928d3"
-    },
-    {
-      "path": "juce/README.md",
-      "bytes": 3374,
-      "sha256": "dd3c9303dc5fbbee675fa2362b68815769dfc38611b28eb80cabb6a1226b44b1"
+      "path": "juce/assets/toolbar-icons/crop.svg",
+      "bytes": 366,
+      "sha256": "0e7e8bee314f3547ce19a1bd4cdf1476de1f5578d057296072296a8a500065b4"
     },
     {
       "path": "juce/assets/toolbar-icons/LICENSE.txt",
       "bytes": 1073,
       "sha256": "d5a3f948ae5cb95bfc4d2f767ef2bf6a778815b0ddb2d1c48037744cf636518e"
-    },
-    {
-      "path": "juce/assets/toolbar-icons/crop.svg",
-      "bytes": 366,
-      "sha256": "0e7e8bee314f3547ce19a1bd4cdf1476de1f5578d057296072296a8a500065b4"
     },
     {
       "path": "juce/assets/toolbar-icons/line.svg",
@@ -298,9 +281,14 @@
       "sha256": "72f466cfd8c2e2a5c2abea8447383920dc6896ce765f71f75d6991f64c6a0e51"
     },
     {
+      "path": "juce/CMakeLists.txt",
+      "bytes": 23625,
+      "sha256": "cd67bff1d889d3512f4c2d7ca6f9d9a6b751ede658b9f3e7eeb0df024eee265e"
+    },
+    {
       "path": "juce/engines/diffsinger/bridge.py",
-      "bytes": 34345,
-      "sha256": "38a3063cfa582e6fd941a7c55dfef367b2c5b6913158750aabb130d6c54146bb"
+      "bytes": 36306,
+      "sha256": "beca1d71d5b35c3cc58d72da81f6c58d6bca90da22f95ddf5ee51948f27d30ac"
     },
     {
       "path": "juce/engines/diffsinger/compatibility.py",
@@ -323,6 +311,16 @@
       "sha256": "5cab2a63a49ed75809b983a8f592e5d78d8749506f8c6d54f5161949eb9eac34"
     },
     {
+      "path": "juce/engines/diffsinger/pronunciation-data/checkpoint20.npz",
+      "bytes": 3342298,
+      "sha256": "b8af35e4596d8dd5836dfd3fe9b2ba4f97b9c311efe8879544cbcfcbd566d8c6"
+    },
+    {
+      "path": "juce/engines/diffsinger/pronunciation-data/cmudict.dict",
+      "bytes": 3618488,
+      "sha256": "81917843c7f44ce2b094ac63873c2c7a4cf802040792c455ba3ca406891c3d22"
+    },
+    {
       "path": "juce/engines/diffsinger/pronunciation-data/LICENSE-cmudict.txt",
       "bytes": 1754,
       "sha256": "bd4ce8e44170a5f9f481310ca85c51de3c4f851a65e679b40e603b143bd3542a"
@@ -336,16 +334,6 @@
       "path": "juce/engines/diffsinger/pronunciation-data/LICENSE-pypinyin.txt",
       "bytes": 1105,
       "sha256": "1e6c90014b4912815c296ee64bb6f6280af47e6d4c5d80e86232dfc5defe764c"
-    },
-    {
-      "path": "juce/engines/diffsinger/pronunciation-data/checkpoint20.npz",
-      "bytes": 3342298,
-      "sha256": "b8af35e4596d8dd5836dfd3fe9b2ba4f97b9c311efe8879544cbcfcbd566d8c6"
-    },
-    {
-      "path": "juce/engines/diffsinger/pronunciation-data/cmudict.dict",
-      "bytes": 3618488,
-      "sha256": "81917843c7f44ce2b094ac63873c2c7a4cf802040792c455ba3ca406891c3d22"
     },
     {
       "path": "juce/engines/diffsinger/pronunciation-data/pypinyin/__init__.py",
@@ -754,8 +742,8 @@
     },
     {
       "path": "juce/engines/diffsinger/pronunciation.py",
-      "bytes": 13673,
-      "sha256": "854ffc8445fe2eadfd9153588ca3b66182460690adf39a9dbc331114b2c94bf1"
+      "bytes": 13969,
+      "sha256": "212d139d93d21b4d20073aee8313527b11ce2dfeffa2e601c1f177eea03ee7db"
     },
     {
       "path": "juce/engines/diffsinger/requirements.txt",
@@ -776,6 +764,11 @@
       "path": "juce/engines/diffsinger/variance_retake.py",
       "bytes": 7770,
       "sha256": "efc4041d8ca852990d62feeec3cf266197b5f7db8dddc145e27bf815cbd5d072"
+    },
+    {
+      "path": "juce/README.md",
+      "bytes": 3374,
+      "sha256": "dd3c9303dc5fbbee675fa2362b68815769dfc38611b28eb80cabb6a1226b44b1"
     },
     {
       "path": "juce/resources/icon-small.png",
@@ -864,543 +857,23 @@
     },
     {
       "path": "juce/src/AssetManagerComponent.cpp",
-      "bytes": 89842,
-      "sha256": "019bf2a806cc1aedefe3c378c9d643cfe54c556fdb5ee4537746d7f0dcdbe9a8"
+      "bytes": 92342,
+      "sha256": "5931e029bd2665e7acb7b77db789e33e20d6f5f6f2772eb8f98d85fed590a779"
     },
     {
       "path": "juce/src/AssetManagerComponent.h",
-      "bytes": 15230,
-      "sha256": "0bd71829f072349cedcd21b6a3449401857c20b5942c51008fa58fb06f07089e"
+      "bytes": 15596,
+      "sha256": "4149b0722625c0679c941cbfe75a90931df7e75f52a9b8e66dacd054366a9c82"
     },
     {
       "path": "juce/src/AudioEngine.cpp",
-      "bytes": 208907,
-      "sha256": "c58207c216d912d66a1ce7da1a2e8bac9fa4f7e3b63d6288e7b75272f9d5c9e7"
+      "bytes": 225797,
+      "sha256": "e1294019bef2ba3dd82f8993f64d79845513f190b38426da745bb7c6732d0d22"
     },
     {
       "path": "juce/src/AudioEngine.h",
-      "bytes": 22371,
-      "sha256": "d893788e7f78c29f77bebf4afcf7b2e63fe96ffdd14b46fb628b243c6eddb103"
-    },
-    {
-      "path": "juce/src/ClipParts.h",
-      "bytes": 8467,
-      "sha256": "b60d1b8e6c4397bd54107afcfe096ef249d3798a946c975d245d0047fb797456"
-    },
-    {
-      "path": "juce/src/CommunityDatasetIO.cpp",
-      "bytes": 26732,
-      "sha256": "27b47c6c25137ea63a8d78aafea9f38a770f4816f4191f92aec2509e9a12509c"
-    },
-    {
-      "path": "juce/src/CommunityDatasetIO.h",
-      "bytes": 4490,
-      "sha256": "fdd59516cde3c8dd9c7dbfe81a735ea639821dde1dbdf73b351111b351d42a65"
-    },
-    {
-      "path": "juce/src/CommunityDatasetImportDialog.cpp",
-      "bytes": 32644,
-      "sha256": "adf60d21221c20f105c96cddfae177fa9b15e0685eded57759440087db7364c5"
-    },
-    {
-      "path": "juce/src/CommunityDatasetImportDialog.h",
-      "bytes": 3017,
-      "sha256": "91cf9db4529fc757c25bf82649f69c081972d58b8b6264c0bba56c1445a7b9ed"
-    },
-    {
-      "path": "juce/src/DecibelGainDialog.h",
-      "bytes": 2049,
-      "sha256": "cbb66a8cf0d3c4f14f6001a5941f8e5696e9d3f5be6836748dfe012e2dc563e7"
-    },
-    {
-      "path": "juce/src/DiffSingerParameterCurves.h",
-      "bytes": 3407,
-      "sha256": "7ded3f0180babf53d27654c3fe0a436127ab9f5bd899d598004c717e7b618c88"
-    },
-    {
-      "path": "juce/src/DiffSingerPhonemeDisplay.h",
-      "bytes": 430,
-      "sha256": "94ce570ae807359ba09ccaa806ced971446eea5525dc412b6bbfaf2302fe62ac"
-    },
-    {
-      "path": "juce/src/DiffSingerPhonemeEditor.h",
-      "bytes": 21216,
-      "sha256": "45773143ce51340548c184224c0c06ac1241b0483297d3ad703a901149148dd6"
-    },
-    {
-      "path": "juce/src/DiffSingerPitchHandles.h",
-      "bytes": 4609,
-      "sha256": "087057fc789112bd591e9c71ebd2adee12562232a345d80bbfa44d023c554990"
-    },
-    {
-      "path": "juce/src/DiffSingerPitchRestore.h",
-      "bytes": 5196,
-      "sha256": "6a2bee57ad554e24d4693f0dc121589d576c82f44dbf77826aa600c5341e547a"
-    },
-    {
-      "path": "juce/src/DiffSingerPronunciationEditor.h",
-      "bytes": 7504,
-      "sha256": "edac3497de6282c79cd01b90dab1abef1be7b638e29cb0962ffb829b4b56fab5"
-    },
-    {
-      "path": "juce/src/DiffSingerRequest.h",
-      "bytes": 1862,
-      "sha256": "6a0bd6e3c45c267d2131ddca1952b4bcc3b86d837fdc8685fa7a1243d84c4f68"
-    },
-    {
-      "path": "juce/src/FlagCurveDrawing.h",
-      "bytes": 2925,
-      "sha256": "37c23908f5a4cc734d43b8d10136d6f0e36080748b43da9b1a00ad84cfa0acec"
-    },
-    {
-      "path": "juce/src/Hamood.cpp",
-      "bytes": 27377,
-      "sha256": "d359b45b8f9eaa677b348d9a7bc96625913889cb11b86cd3bbb7a42945425f8f"
-    },
-    {
-      "path": "juce/src/Hamood.h",
-      "bytes": 2265,
-      "sha256": "469e540f2d4c27c0ea144dacc5b48f3b6106983441dde72f67e4d06a7763a169"
-    },
-    {
-      "path": "juce/src/HamoodAudio.h",
-      "bytes": 12773,
-      "sha256": "572aab28f7f2ec248fe2211fdbbbebb65f62a6c4320a6526e2c1df52c1ee9490"
-    },
-    {
-      "path": "juce/src/HamoodProject.h",
-      "bytes": 10912,
-      "sha256": "10f112f6de55de284aa1a178b7cc46dc936ebf3018513eb79cbbc21d51efea3d"
-    },
-    {
-      "path": "juce/src/HamoodTimelinePanel.h",
-      "bytes": 10801,
-      "sha256": "9bbb0c5e4bdaea106e05d8293f38aecf879620069757a8b005000c8d3b984c44"
-    },
-    {
-      "path": "juce/src/I18n.cpp",
-      "bytes": 228923,
-      "sha256": "76e745f319c3971e430f89cb62ce8fcd58d283c2b3df7ebadcbc2e7affe5e1fc"
-    },
-    {
-      "path": "juce/src/I18n.h",
-      "bytes": 683,
-      "sha256": "478e48abd8ec8e49e021fe0208c8c71d47e2f51185b5eb2dfea6b2ecf5c32493"
-    },
-    {
-      "path": "juce/src/Main.cpp",
-      "bytes": 1218226,
-      "sha256": "0bc49687a828d70ecf00b1638e8b3e0fdc143c340363a1e6d96c759242902616"
-    },
-    {
-      "path": "juce/src/MainCommunityDatasetImport.cpp",
-      "bytes": 15257,
-      "sha256": "bd3b0bad5664e028ba8879c39eb7b00ce1518e4950407bdea4b768a9dd76771b"
-    },
-    {
-      "path": "juce/src/MainComponent.cpp",
-      "bytes": 352053,
-      "sha256": "5254ebae8c69f6cc2db6107514555892b8acf4e65d780871d177600a5bdffb84"
-    },
-    {
-      "path": "juce/src/MainComponent.h",
-      "bytes": 50095,
-      "sha256": "486a320ebd88c3eb1c3f2e17ec03f07a24d3ba46c04a251812e3800835f74187"
-    },
-    {
-      "path": "juce/src/MainComponentDiffSinger.cpp",
-      "bytes": 37454,
-      "sha256": "e32adc6cc92f2a35dc90090bf2e2bd6c88398a7498102880b581cdcfe50edd03"
-    },
-    {
-      "path": "juce/src/MainComponentHamood.cpp",
-      "bytes": 34318,
-      "sha256": "175e7d14be0407fde2209464bb938101aee6b2c3464c7aae1ef636c4c60bfd83"
-    },
-    {
-      "path": "juce/src/MainComponentMcp.cpp",
-      "bytes": 58660,
-      "sha256": "3c8f13cce0b8326018607198273476a2e1afa4b0180afba1759e911955b0f6a7"
-    },
-    {
-      "path": "juce/src/MainProjectMaterialRegistration.cpp",
-      "bytes": 13689,
-      "sha256": "d08f04c0b1f29d30ee3c7f74daeb1e75cd690418c2a74c9cd671d5eef6fd6323"
-    },
-    {
-      "path": "juce/src/MaterialAnnotationEditor.cpp",
-      "bytes": 36282,
-      "sha256": "be55dd7251ae312ac4b70032a7767b44c5328ba5e45e98bc7db42a3832a741ea"
-    },
-    {
-      "path": "juce/src/MaterialAnnotationEditor.h",
-      "bytes": 3587,
-      "sha256": "67762ebb6cc235d4e315e9754d706f52d98e8688e739994c144e42d53348ccd2"
-    },
-    {
-      "path": "juce/src/MaterialAnnotationSession.cpp",
-      "bytes": 38742,
-      "sha256": "34a8102d9ac8f78313308a1cf7454d112358d89899cc6368ed19d92533f642aa"
-    },
-    {
-      "path": "juce/src/MaterialAnnotationSession.h",
-      "bytes": 6637,
-      "sha256": "2f5868a3bd54ff56c7c022aa4dcc3a3b95239b82a8bd9c1cf70ca427d5618d3a"
-    },
-    {
-      "path": "juce/src/MaterialPronunciationCatalog.cpp",
-      "bytes": 11290,
-      "sha256": "37aae4188c1b821da14c34b51ad14bd0d897faaad04005256b50e43d262eff86"
-    },
-    {
-      "path": "juce/src/MaterialPronunciationCatalog.h",
-      "bytes": 2234,
-      "sha256": "75d4ba0f4aafd97b571d86175918d65d99046b4828ff2dbcd8f2329db5624640"
-    },
-    {
-      "path": "juce/src/ModelessWindows.h",
-      "bytes": 2267,
-      "sha256": "f8572dc6fd87147a6b040d4ab057581dcdb09410a94b526b64a2d1e0caffbdbd"
-    },
-    {
-      "path": "juce/src/NativeAudioClipboard.h",
-      "bytes": 5325,
-      "sha256": "2411508494c5b1b263f55362b0907b3d477d7bdde707c5f88d7a90af6ece0622"
-    },
-    {
-      "path": "juce/src/NativeAudioDisconnect.h",
-      "bytes": 3609,
-      "sha256": "58f70913945a9a36fbcd74811794dd64b70b64ffa129290402ee5729fbd44385"
-    },
-    {
-      "path": "juce/src/NativeAudioFocus.h",
-      "bytes": 2416,
-      "sha256": "ad84c7107c5fcdf476251d56396fe9d070cf3c7c4fba34ca1da6adfe70fadb64"
-    },
-    {
-      "path": "juce/src/NativeAudioLink.h",
-      "bytes": 2094,
-      "sha256": "da931be4e0edb1be2772b1fe5ee8972202f80905e0cad56b08c5f75fdb1a627f"
-    },
-    {
-      "path": "juce/src/NativeAudioOverlap.h",
-      "bytes": 11115,
-      "sha256": "ba1619fed3dd2fcbf1c8b387aad712069e4e9f9239855701dd9ad69cdf1489ec"
-    },
-    {
-      "path": "juce/src/NativeAudioTrim.h",
-      "bytes": 11811,
-      "sha256": "57a926cb639ef4e8912a03cdcf5a6e7391e1c803fcb5da61622f5a31ca9e2475"
-    },
-    {
-      "path": "juce/src/NativeNoteJoin.h",
-      "bytes": 10012,
-      "sha256": "afc1eef74b749b0af8a0370ae64af6a1860c77979d54ceb7df45bb29dcfe0a08"
-    },
-    {
-      "path": "juce/src/NativeNoteTiming.h",
-      "bytes": 28932,
-      "sha256": "1d4a8fb347c42a264b4f6fd559d70620f0762430563ad347d8879f3bc41e5a80"
-    },
-    {
-      "path": "juce/src/NativePitchIdentity.h",
-      "bytes": 1901,
-      "sha256": "0dad7fed65647eb77204589918a02b2d8b29e9cf5813511003d99ccaff99794d"
-    },
-    {
-      "path": "juce/src/NativePitchVoicingDisplay.cpp",
-      "bytes": 14265,
-      "sha256": "7d7ad5276e8000fe2326565ef3452b736bbcc792a3b6f78324620746c0c01cdf"
-    },
-    {
-      "path": "juce/src/NativePitchVoicingDisplay.h",
-      "bytes": 2646,
-      "sha256": "c1fcdd4a0ca416d99c1542f041b90de33b2dba4b56c199aaec8e95201355acf7"
-    },
-    {
-      "path": "juce/src/NativeSharedEnvelope.h",
-      "bytes": 5639,
-      "sha256": "198c52c99438e36d5e9cc178991d7816ed500beb576fd55e7e8100dff270cec9"
-    },
-    {
-      "path": "juce/src/NativeSourceTimeMap.h",
-      "bytes": 5111,
-      "sha256": "c5556ce3849c9b117b7f9bd6128f8bed37d933ce63539d4eba4c91c2df926056"
-    },
-    {
-      "path": "juce/src/NativeTrimSource.h",
-      "bytes": 10247,
-      "sha256": "db028ae2ac5964a072e37126d1e710f4cd1908c025a8dcac8d96aedaabc5fe59"
-    },
-    {
-      "path": "juce/src/NativeUnpitchedRegions.h",
-      "bytes": 5797,
-      "sha256": "30639aa5aed0c580f65d8b006306b42c4b6cd23dbd4d43f22b3f50dd5e8f119f"
-    },
-    {
-      "path": "juce/src/NoteDanceAnimation.h",
-      "bytes": 2418,
-      "sha256": "02a7a616edb556bd64cd6f029dced8dde273f119f3f83201315b998e17a06ad2"
-    },
-    {
-      "path": "juce/src/OtoRegionGuides.h",
-      "bytes": 1759,
-      "sha256": "42674e976144bbc3ede9cbd642c8f5ca8df3f4de15dd41cf77c8414471b9b3eb"
-    },
-    {
-      "path": "juce/src/OtoWaveformEditorComponent.cpp",
-      "bytes": 149632,
-      "sha256": "09b5271efd9de63d0a40976a93dd783f6bac9a1f885e32f059c1737444102ee1"
-    },
-    {
-      "path": "juce/src/OtoWaveformEditorComponent.h",
-      "bytes": 31444,
-      "sha256": "b9b2b06940c1f6dc03ca5d07dbf8f70ffd304f00db479c3958b510783319ca14"
-    },
-    {
-      "path": "juce/src/OttoMaterialIO.cpp",
-      "bytes": 41541,
-      "sha256": "4c06cda82df289c70d67256ecb0f449a459a59c30f3c7d969dc72d41d4bdbdc4"
-    },
-    {
-      "path": "juce/src/OttoMaterialIO.h",
-      "bytes": 3351,
-      "sha256": "d0a0c233f388c7de91a91a988fec6554cc2bd010a5c12b2cd2ea1ebea3a33403"
-    },
-    {
-      "path": "juce/src/OttoMaterialMigration.cpp",
-      "bytes": 29216,
-      "sha256": "07b153244080029bfe0ecab352ded81fd7238cc2b8a3a334bf99184d5a04c3f7"
-    },
-    {
-      "path": "juce/src/OttoMaterialMigration.h",
-      "bytes": 2402,
-      "sha256": "65b040f3d0f4c9abaad64089c5766e0ca749ef5f32655a2b9f97801df924e914"
-    },
-    {
-      "path": "juce/src/PanValueDialog.h",
-      "bytes": 1590,
-      "sha256": "a9267edd5b9eab2cbd380cd7832bfe9e3b40dc9e2d65be25171db7cd9239be69"
-    },
-    {
-      "path": "juce/src/PianoRollComponent.cpp",
-      "bytes": 610837,
-      "sha256": "f4d4992b520f5389c31544f1ed66b86278715ad93e33c89ae2a011e7d01b7972"
-    },
-    {
-      "path": "juce/src/PianoRollComponent.h",
-      "bytes": 88248,
-      "sha256": "07b4b9d7f44d1363ca71e33f5fc022e4dee4719bc3e0642c6b3ec514886db56c"
-    },
-    {
-      "path": "juce/src/PianoRollCvvcEnvelope.h",
-      "bytes": 35066,
-      "sha256": "0d2f53d89ca38307b092c565fab054d0c32a5e2b4b0e4add6d87b2c3ca6ec572"
-    },
-    {
-      "path": "juce/src/PianoRollDiffSingerOffset.h",
-      "bytes": 13477,
-      "sha256": "311288f2c2f1f12eb67094c7741ff52a21014a73b1c56c02836de4aec3b1b360"
-    },
-    {
-      "path": "juce/src/PianoRollPointGroup.h",
-      "bytes": 17522,
-      "sha256": "f9468cd10d4c886321b90a715f24e48e470f4e40fae2d100d0558a9e0d6828a7"
-    },
-    {
-      "path": "juce/src/Pinyin.cpp",
-      "bytes": 1184,
-      "sha256": "13676e6e32bf67a4a7495fb189e758f34fabf9b82407666ef76121f177cba5bb"
-    },
-    {
-      "path": "juce/src/Pinyin.h",
-      "bytes": 759,
-      "sha256": "3cf021d36e16aa1ccac7adce8871326358bd78d6ac10e943c5768dc9819ff8bc"
-    },
-    {
-      "path": "juce/src/PinyinTable.inc",
-      "bytes": 367401,
-      "sha256": "3f46aa809025f11ce2c352606668f29f1c4d528c5a1e53a37bc74c9d81dbca35"
-    },
-    {
-      "path": "juce/src/PointGroupEdit.h",
-      "bytes": 1856,
-      "sha256": "bbd93a85e63e1e3cb069c24a2a83eb53339eb5638a618a68236d710a81a8941d"
-    },
-    {
-      "path": "juce/src/ProjectFileIO.h",
-      "bytes": 3442,
-      "sha256": "5881922f0bd6abb71c690d67584f6c74ac3e8b9622d982f0d278c115bea271fd"
-    },
-    {
-      "path": "juce/src/ProjectMaterialRegistration.cpp",
-      "bytes": 34939,
-      "sha256": "f91aa5e56e239f703d639df116e86138fa35bffd2667fec3754846ce2b85983d"
-    },
-    {
-      "path": "juce/src/ProjectMaterialRegistration.h",
-      "bytes": 5709,
-      "sha256": "9c1ca489a5e4ecdfb415d963e0a8d3500070c24530dd1b0a3bdbfa6e4311c852"
-    },
-    {
-      "path": "juce/src/ProjectMaterialRegistrationFacts.cpp",
-      "bytes": 12738,
-      "sha256": "2be7f14315ce94e0641a8e93af8cf5a6fa125842d1fea8db79f3647216054726"
-    },
-    {
-      "path": "juce/src/ProjectMaterialRegistrationFacts.h",
-      "bytes": 1349,
-      "sha256": "4d313fdd4f500555c733928e53a1307aa1d8afa072480b05e317e37d9516ffab"
-    },
-    {
-      "path": "juce/src/ProjectMaterialRegistrationModel.inc",
-      "bytes": 13856,
-      "sha256": "7bf7940da59294eb9175e397c9a598639ea25a56a1c5ab994d7642f2c28fc4a5"
-    },
-    {
-      "path": "juce/src/ProjectMaterialRegistrationTypes.h",
-      "bytes": 1199,
-      "sha256": "5b03ac184f7272e21afa93c948fb4c808d8374308bb37e977f0e722a9ba3a872"
-    },
-    {
-      "path": "juce/src/ProjectModel.cpp",
-      "bytes": 621195,
-      "sha256": "b143b94d99b2af2cc97150508b3b2fd1a4e9987bb13daf70aa3fe8ae70667451"
-    },
-    {
-      "path": "juce/src/ProjectModel.h",
-      "bytes": 91388,
-      "sha256": "7d48caa849d92c148de61f66103ac5ab84e64adfa1af2eab294c34656026aa15"
-    },
-    {
-      "path": "juce/src/ProjectRecovery.h",
-      "bytes": 5017,
-      "sha256": "6f912b3cb3d711ff0045cafe65149a0429ce6a96ec1c130c57e0efa7255cb361"
-    },
-    {
-      "path": "juce/src/PronunciationCandidateBox.cpp",
-      "bytes": 9664,
-      "sha256": "4f29b5a9a6f615a68565b59fbc6281afa970efb380dd1e5542dbe9395e7fe0f6"
-    },
-    {
-      "path": "juce/src/PronunciationCandidateBox.h",
-      "bytes": 2539,
-      "sha256": "c9c0c445b0298e7529192437b7e74a770e27a724333fdf101d6a9eeb069aaea5"
-    },
-    {
-      "path": "juce/src/PronunciationTiming.cpp",
-      "bytes": 17749,
-      "sha256": "1e77b6a963fc89d8c4314845c77df53a760d81a067765df76d0fca7b729a4bf0"
-    },
-    {
-      "path": "juce/src/PronunciationTiming.h",
-      "bytes": 2606,
-      "sha256": "d4b220ff2f20de13790a8ba8c66ad4fdfcb10441cedb67ca01903b041ab335d5"
-    },
-    {
-      "path": "juce/src/RenderedWaveformPeaks.h",
-      "bytes": 1771,
-      "sha256": "40200ebfc6fc2e0e11eddf4549636c6f18d2d2eddaeb17daacd91d99b172c9e7"
-    },
-    {
-      "path": "juce/src/SampleSettings.cpp",
-      "bytes": 94263,
-      "sha256": "b965536042d77989a349834f50d5488e17a460c555a30546e06796010e0cbfc3"
-    },
-    {
-      "path": "juce/src/SampleSettings.h",
-      "bytes": 14109,
-      "sha256": "54dccb8255df217b611d9cce41377b3e8932497fde3d6cb0d37a2f4bb71251e9"
-    },
-    {
-      "path": "juce/src/SettingsComponent.cpp",
-      "bytes": 33070,
-      "sha256": "57f9d65252f26a26bc98663bcca643ce98beb473c08565c4d0a9d8e4f5608eea"
-    },
-    {
-      "path": "juce/src/SettingsComponent.h",
-      "bytes": 4702,
-      "sha256": "8f75a0d848b1b36486f4c47c2d6e4839f940052feb4bbe10c59c0b41ca5216ee"
-    },
-    {
-      "path": "juce/src/SourceWaveformPreview.h",
-      "bytes": 6262,
-      "sha256": "b3d16e82709fb2a37ea458f7621440618cf24d916684b1814cd1f486bf0f0668"
-    },
-    {
-      "path": "juce/src/StartupLog.h",
-      "bytes": 546,
-      "sha256": "c7ee5de9c5c06e97e2b65ca821277e70c9d22e89afc93d1afdf2e4bef1b92bb6"
-    },
-    {
-      "path": "juce/src/TailFadePresetStore.h",
-      "bytes": 7353,
-      "sha256": "b2b4ace66ed7c4b78d8cb7831cf6884bf6482d3756f9f7c2619e174599484908"
-    },
-    {
-      "path": "juce/src/Theme.cpp",
-      "bytes": 28780,
-      "sha256": "9242222d2f71eec3da4251d7bd55a12f5d064c4af79f58c39762a1016479c6da"
-    },
-    {
-      "path": "juce/src/Theme.h",
-      "bytes": 3182,
-      "sha256": "abf186c974083388ea14cf059b7711946bf0a98de1e4bc1a95f80b42c8d5aece"
-    },
-    {
-      "path": "juce/src/TimelineComponent.cpp",
-      "bytes": 61608,
-      "sha256": "ffa4bf34d9513faf0650994ea4995b86268cf73da85f0fe7d28d58e0254257e7"
-    },
-    {
-      "path": "juce/src/TimelineComponent.h",
-      "bytes": 8645,
-      "sha256": "18b72ba8525f54a98cf15a25c56359ad0ea3c8c5739af5f7be180b455d190cc2"
-    },
-    {
-      "path": "juce/src/TimelineGainEnvelope.h",
-      "bytes": 9073,
-      "sha256": "2ed8027200100ed84a3bad45092f09ebf23950be024152c3cd496ba898324af2"
-    },
-    {
-      "path": "juce/src/TrackGainEnvelope.h",
-      "bytes": 4928,
-      "sha256": "bf616e4a365948e7fd63d2eb5ad24acdbe698834fd771bcdde109b0fa2df3628"
-    },
-    {
-      "path": "juce/src/TrackListComponent.cpp",
-      "bytes": 27135,
-      "sha256": "3bc44614b420cbfc8af8d5ccd9eed76b35a8067aae14cb7a84522bc835e9f45d"
-    },
-    {
-      "path": "juce/src/TrackListComponent.h",
-      "bytes": 6615,
-      "sha256": "a057ce53cc5a5662e19321c24165fbd6575f908d45f95d754921ce496fe18a62"
-    },
-    {
-      "path": "juce/src/UtauOutputEnginePanel.h",
-      "bytes": 4566,
-      "sha256": "62f9b0881ad8932d7b89b0608c77d28615482f3804b79f08b94f17a46f9bd910"
-    },
-    {
-      "path": "juce/src/VoicebankSettingsComponent.cpp",
-      "bytes": 32581,
-      "sha256": "4f688b309a18b64fda057fdcbb122be0afa1ced2b04d00bf59904e214e6e34d1"
-    },
-    {
-      "path": "juce/src/VoicebankSettingsComponent.h",
-      "bytes": 5711,
-      "sha256": "38b88d7a331e05be301cf1a3c8a107b90bd70cec7813528430086fb648eddd65"
-    },
-    {
-      "path": "juce/src/WavExportOptions.h",
-      "bytes": 908,
-      "sha256": "8393b55933f5312691848f5554256eea124525d21884064fbe0d25af6a0debd7"
-    },
-    {
-      "path": "juce/src/ZoomScrollBar.h",
-      "bytes": 5582,
-      "sha256": "dced7ebbde36d1c3cbdbc40453bfd3029d391f00e6e3bc027427a291534f240f"
+      "bytes": 22756,
+      "sha256": "c7a41fe5971818674b492a2aefc651389fb33eedbbf832c20dbf61d702e0a61f"
     },
     {
       "path": "juce/src/backend/AdvancedEnvelope.h",
@@ -1434,8 +907,8 @@
     },
     {
       "path": "juce/src/backend/ChineseCvvcPhonemizer.h",
-      "bytes": 25611,
-      "sha256": "c6ae76c1895c8735d821b29c8b98ece76cfab949cb77f15eadbfb24e87429522"
+      "bytes": 25586,
+      "sha256": "8355c3517f0046f4260a20f72029ed00fabdf467b4a135b6b48433bb1ea63703"
     },
     {
       "path": "juce/src/backend/CvvcEnvelope.h",
@@ -1498,11 +971,6 @@
       "sha256": "6c054c2f4747b7b3841c97944e20332f6b694f5a164e564b2259244c51a520bd"
     },
     {
-      "path": "juce/src/backend/HiFiShifterMelSmoke.inc",
-      "bytes": 4934,
-      "sha256": "6e2bbeafc3d19ef823004f5355f5f002ca6c5b86dcf8734f7dfd8af91533f39a"
-    },
-    {
       "path": "juce/src/backend/HifisamplerDsp.inc",
       "bytes": 36121,
       "sha256": "38e5288c8025e055ca2cd59db803026e0818577b5cfbe232a29cea056f7c2640"
@@ -1516,6 +984,11 @@
       "path": "juce/src/backend/HifisamplerSmoke.inc",
       "bytes": 21357,
       "sha256": "06da7a9c1181b3ad21058ef982e746852545fe3b594ae45287e91e1631b2b770"
+    },
+    {
+      "path": "juce/src/backend/HiFiShifterMelSmoke.inc",
+      "bytes": 4934,
+      "sha256": "6e2bbeafc3d19ef823004f5355f5f002ca6c5b86dcf8734f7dfd8af91533f39a"
     },
     {
       "path": "juce/src/backend/HnsepDiskCache.inc",
@@ -1549,13 +1022,13 @@
     },
     {
       "path": "juce/src/backend/McpServer.cpp",
-      "bytes": 123342,
-      "sha256": "0f945c93056e672df37f5ab7b295ec566c24ecb592a6a2eb9c3904ab50039b2f"
+      "bytes": 124824,
+      "sha256": "8e6f384740c7099bd0a42dcd4f699235cbefb7c5fb485d2c483bcb2b7049243a"
     },
     {
       "path": "juce/src/backend/McpServer.h",
-      "bytes": 3382,
-      "sha256": "e8db23247ccdfdbcb079eb905d514b6c37b0fb2593b95cdd3fcc51bc61894a4b"
+      "bytes": 3682,
+      "sha256": "2fa51d434798a7ada3d7a19a82dea607578097bf856b52ddd792c0af9c4bac8e"
     },
     {
       "path": "juce/src/backend/MelodyneImporter.cpp",
@@ -1629,8 +1102,8 @@
     },
     {
       "path": "juce/src/backend/NsfHifiganRenderer.cpp",
-      "bytes": 107546,
-      "sha256": "547b077fb7f39dd5cd22b4005a167967cefa8c5de8e4a92728a84f6a0871339f"
+      "bytes": 107597,
+      "sha256": "b701427d64e132da021bbe8b612adb214d451d0ac06459db4c54f00113b441d1"
     },
     {
       "path": "juce/src/backend/NsfHifiganRenderer.h",
@@ -1743,9 +1216,14 @@
       "sha256": "60cae7ae73f3c1821b47483f72e9a6b4d0b30a8949a0ad72003b910710fbb04c"
     },
     {
+      "path": "juce/src/backend/UtauPitchTimeline.h",
+      "bytes": 4998,
+      "sha256": "cc667b9d310d383ddcfa5fd9a55c116b6a249140be066e2852c699f6b2e048e7"
+    },
+    {
       "path": "juce/src/backend/UtauRenderer.cpp",
-      "bytes": 138412,
-      "sha256": "5593e48db5c674125c40466df7fcee7a74deb4077ca742aff4a302adb03463a8"
+      "bytes": 138483,
+      "sha256": "c646f4f07240cc7f101d5ce3f9452e8f544b5da01cda22e646de98688506e3dd"
     },
     {
       "path": "juce/src/backend/UtauRenderer.h",
@@ -1776,6 +1254,471 @@
       "path": "juce/src/backend/WorldRenderer.h",
       "bytes": 704,
       "sha256": "41a34859726d69c9dd0ee25c79c4ae20fbfd40a894be74a5372c06eecadc551c"
+    },
+    {
+      "path": "juce/src/ClipParts.h",
+      "bytes": 8467,
+      "sha256": "b60d1b8e6c4397bd54107afcfe096ef249d3798a946c975d245d0047fb797456"
+    },
+    {
+      "path": "juce/src/CommunityDatasetImportDialog.cpp",
+      "bytes": 32644,
+      "sha256": "adf60d21221c20f105c96cddfae177fa9b15e0685eded57759440087db7364c5"
+    },
+    {
+      "path": "juce/src/CommunityDatasetImportDialog.h",
+      "bytes": 3017,
+      "sha256": "91cf9db4529fc757c25bf82649f69c081972d58b8b6264c0bba56c1445a7b9ed"
+    },
+    {
+      "path": "juce/src/CommunityDatasetIO.cpp",
+      "bytes": 26732,
+      "sha256": "27b47c6c25137ea63a8d78aafea9f38a770f4816f4191f92aec2509e9a12509c"
+    },
+    {
+      "path": "juce/src/CommunityDatasetIO.h",
+      "bytes": 4490,
+      "sha256": "fdd59516cde3c8dd9c7dbfe81a735ea639821dde1dbdf73b351111b351d42a65"
+    },
+    {
+      "path": "juce/src/DecibelGainDialog.h",
+      "bytes": 2049,
+      "sha256": "cbb66a8cf0d3c4f14f6001a5941f8e5696e9d3f5be6836748dfe012e2dc563e7"
+    },
+    {
+      "path": "juce/src/DiffSingerParameterCurves.h",
+      "bytes": 3407,
+      "sha256": "7ded3f0180babf53d27654c3fe0a436127ab9f5bd899d598004c717e7b618c88"
+    },
+    {
+      "path": "juce/src/DiffSingerPhonemeDisplay.h",
+      "bytes": 430,
+      "sha256": "94ce570ae807359ba09ccaa806ced971446eea5525dc412b6bbfaf2302fe62ac"
+    },
+    {
+      "path": "juce/src/DiffSingerPhonemeEditor.h",
+      "bytes": 21216,
+      "sha256": "45773143ce51340548c184224c0c06ac1241b0483297d3ad703a901149148dd6"
+    },
+    {
+      "path": "juce/src/DiffSingerPitchHandles.h",
+      "bytes": 4609,
+      "sha256": "087057fc789112bd591e9c71ebd2adee12562232a345d80bbfa44d023c554990"
+    },
+    {
+      "path": "juce/src/DiffSingerPitchRestore.h",
+      "bytes": 5196,
+      "sha256": "6a2bee57ad554e24d4693f0dc121589d576c82f44dbf77826aa600c5341e547a"
+    },
+    {
+      "path": "juce/src/DiffSingerPronunciationEditor.h",
+      "bytes": 7504,
+      "sha256": "edac3497de6282c79cd01b90dab1abef1be7b638e29cb0962ffb829b4b56fab5"
+    },
+    {
+      "path": "juce/src/DiffSingerRequest.h",
+      "bytes": 1862,
+      "sha256": "6a0bd6e3c45c267d2131ddca1952b4bcc3b86d837fdc8685fa7a1243d84c4f68"
+    },
+    {
+      "path": "juce/src/FlagCurveDrawing.h",
+      "bytes": 2925,
+      "sha256": "37c23908f5a4cc734d43b8d10136d6f0e36080748b43da9b1a00ad84cfa0acec"
+    },
+    {
+      "path": "juce/src/Hamood.cpp",
+      "bytes": 27377,
+      "sha256": "d359b45b8f9eaa677b348d9a7bc96625913889cb11b86cd3bbb7a42945425f8f"
+    },
+    {
+      "path": "juce/src/Hamood.h",
+      "bytes": 2265,
+      "sha256": "469e540f2d4c27c0ea144dacc5b48f3b6106983441dde72f67e4d06a7763a169"
+    },
+    {
+      "path": "juce/src/HamoodAudio.h",
+      "bytes": 12773,
+      "sha256": "572aab28f7f2ec248fe2211fdbbbebb65f62a6c4320a6526e2c1df52c1ee9490"
+    },
+    {
+      "path": "juce/src/HamoodProject.h",
+      "bytes": 10912,
+      "sha256": "10f112f6de55de284aa1a178b7cc46dc936ebf3018513eb79cbbc21d51efea3d"
+    },
+    {
+      "path": "juce/src/HamoodTimelinePanel.h",
+      "bytes": 10801,
+      "sha256": "9bbb0c5e4bdaea106e05d8293f38aecf879620069757a8b005000c8d3b984c44"
+    },
+    {
+      "path": "juce/src/I18n.cpp",
+      "bytes": 229921,
+      "sha256": "42b90f0beb836a32fea3f31e28826bb84a086bc4f41a65600445999d073fa67a"
+    },
+    {
+      "path": "juce/src/I18n.h",
+      "bytes": 683,
+      "sha256": "478e48abd8ec8e49e021fe0208c8c71d47e2f51185b5eb2dfea6b2ecf5c32493"
+    },
+    {
+      "path": "juce/src/JoinedVibrato.h",
+      "bytes": 3331,
+      "sha256": "7dc4f5d3ddcae1f23a869892ebfb02060b53cbddc089a779ba045c96e1d1280c"
+    },
+    {
+      "path": "juce/src/JoinedVibratoBake.h",
+      "bytes": 7382,
+      "sha256": "3b72a0890ab438322dbe1d969887a14d30fff97d04f94ce959acacff1f1d66ee"
+    },
+    {
+      "path": "juce/src/Main.cpp",
+      "bytes": 1223586,
+      "sha256": "45027db301ae2a96c6bd1a780e1b1f46dc00f3827c83f3eac3f6c92c7d14ca71"
+    },
+    {
+      "path": "juce/src/MainCommunityDatasetImport.cpp",
+      "bytes": 15257,
+      "sha256": "bd3b0bad5664e028ba8879c39eb7b00ce1518e4950407bdea4b768a9dd76771b"
+    },
+    {
+      "path": "juce/src/MainComponent.cpp",
+      "bytes": 355240,
+      "sha256": "602f81578ed38e85bee41be809e19d25fb38161f45d1ab44c10cbd97f8aafe52"
+    },
+    {
+      "path": "juce/src/MainComponent.h",
+      "bytes": 50621,
+      "sha256": "2d2626896e4781584b462bf18ab4a4a30b739f7121f2d85459e869aa0359b936"
+    },
+    {
+      "path": "juce/src/MainComponentDiffSinger.cpp",
+      "bytes": 39073,
+      "sha256": "ec548081be146ccc4c7bb57453052886ae06f71af5a6462362febd4e9fa1e3bb"
+    },
+    {
+      "path": "juce/src/MainComponentHamood.cpp",
+      "bytes": 34318,
+      "sha256": "175e7d14be0407fde2209464bb938101aee6b2c3464c7aae1ef636c4c60bfd83"
+    },
+    {
+      "path": "juce/src/MainComponentMcp.cpp",
+      "bytes": 59224,
+      "sha256": "6358a828ec8693b5b42d919714121109bd222127d2d8dab48443f5a78ba5a195"
+    },
+    {
+      "path": "juce/src/MainProjectMaterialRegistration.cpp",
+      "bytes": 13689,
+      "sha256": "d08f04c0b1f29d30ee3c7f74daeb1e75cd690418c2a74c9cd671d5eef6fd6323"
+    },
+    {
+      "path": "juce/src/MaterialAnnotationEditor.cpp",
+      "bytes": 36282,
+      "sha256": "be55dd7251ae312ac4b70032a7767b44c5328ba5e45e98bc7db42a3832a741ea"
+    },
+    {
+      "path": "juce/src/MaterialAnnotationEditor.h",
+      "bytes": 3587,
+      "sha256": "67762ebb6cc235d4e315e9754d706f52d98e8688e739994c144e42d53348ccd2"
+    },
+    {
+      "path": "juce/src/MaterialAnnotationSession.cpp",
+      "bytes": 38742,
+      "sha256": "34a8102d9ac8f78313308a1cf7454d112358d89899cc6368ed19d92533f642aa"
+    },
+    {
+      "path": "juce/src/MaterialAnnotationSession.h",
+      "bytes": 6637,
+      "sha256": "2f5868a3bd54ff56c7c022aa4dcc3a3b95239b82a8bd9c1cf70ca427d5618d3a"
+    },
+    {
+      "path": "juce/src/MaterialPronunciationCatalog.cpp",
+      "bytes": 11290,
+      "sha256": "37aae4188c1b821da14c34b51ad14bd0d897faaad04005256b50e43d262eff86"
+    },
+    {
+      "path": "juce/src/MaterialPronunciationCatalog.h",
+      "bytes": 2234,
+      "sha256": "75d4ba0f4aafd97b571d86175918d65d99046b4828ff2dbcd8f2329db5624640"
+    },
+    {
+      "path": "juce/src/ModelessWindows.h",
+      "bytes": 2267,
+      "sha256": "f8572dc6fd87147a6b040d4ab057581dcdb09410a94b526b64a2d1e0caffbdbd"
+    },
+    {
+      "path": "juce/src/NativeAudioClipboard.h",
+      "bytes": 5325,
+      "sha256": "2411508494c5b1b263f55362b0907b3d477d7bdde707c5f88d7a90af6ece0622"
+    },
+    {
+      "path": "juce/src/NativeAudioDisconnect.h",
+      "bytes": 3609,
+      "sha256": "58f70913945a9a36fbcd74811794dd64b70b64ffa129290402ee5729fbd44385"
+    },
+    {
+      "path": "juce/src/NativeAudioFocus.h",
+      "bytes": 2416,
+      "sha256": "ad84c7107c5fcdf476251d56396fe9d070cf3c7c4fba34ca1da6adfe70fadb64"
+    },
+    {
+      "path": "juce/src/NativeAudioLink.h",
+      "bytes": 2094,
+      "sha256": "da931be4e0edb1be2772b1fe5ee8972202f80905e0cad56b08c5f75fdb1a627f"
+    },
+    {
+      "path": "juce/src/NativeAudioOverlap.h",
+      "bytes": 11115,
+      "sha256": "ba1619fed3dd2fcbf1c8b387aad712069e4e9f9239855701dd9ad69cdf1489ec"
+    },
+    {
+      "path": "juce/src/NativeAudioTrim.h",
+      "bytes": 17230,
+      "sha256": "6fc46db2983d27cf6f0272f77f792bcfe4823f28f5c1003df12c7cbcfd18ea1c"
+    },
+    {
+      "path": "juce/src/NativeNoteJoin.h",
+      "bytes": 10012,
+      "sha256": "afc1eef74b749b0af8a0370ae64af6a1860c77979d54ceb7df45bb29dcfe0a08"
+    },
+    {
+      "path": "juce/src/NativeNoteTiming.h",
+      "bytes": 27590,
+      "sha256": "7c9ff5210ac77093d415b2fdb12125c0174ceecb5370fdf064c225487aaad63b"
+    },
+    {
+      "path": "juce/src/NativePitchIdentity.h",
+      "bytes": 1901,
+      "sha256": "0dad7fed65647eb77204589918a02b2d8b29e9cf5813511003d99ccaff99794d"
+    },
+    {
+      "path": "juce/src/NativePitchVoicingDisplay.cpp",
+      "bytes": 14265,
+      "sha256": "7d7ad5276e8000fe2326565ef3452b736bbcc792a3b6f78324620746c0c01cdf"
+    },
+    {
+      "path": "juce/src/NativePitchVoicingDisplay.h",
+      "bytes": 2646,
+      "sha256": "c1fcdd4a0ca416d99c1542f041b90de33b2dba4b56c199aaec8e95201355acf7"
+    },
+    {
+      "path": "juce/src/NativeSharedEnvelope.h",
+      "bytes": 5639,
+      "sha256": "198c52c99438e36d5e9cc178991d7816ed500beb576fd55e7e8100dff270cec9"
+    },
+    {
+      "path": "juce/src/NativeSourceTimeMap.h",
+      "bytes": 5111,
+      "sha256": "c5556ce3849c9b117b7f9bd6128f8bed37d933ce63539d4eba4c91c2df926056"
+    },
+    {
+      "path": "juce/src/NativeTrimSource.h",
+      "bytes": 10247,
+      "sha256": "db028ae2ac5964a072e37126d1e710f4cd1908c025a8dcac8d96aedaabc5fe59"
+    },
+    {
+      "path": "juce/src/NativeUnpitchedRegions.h",
+      "bytes": 6735,
+      "sha256": "8e88184cc0f16369bf9744ba25aa57a238b34205b9c0e9123216f2a6bccb0fd3"
+    },
+    {
+      "path": "juce/src/NoteDanceAnimation.h",
+      "bytes": 2418,
+      "sha256": "02a7a616edb556bd64cd6f029dced8dde273f119f3f83201315b998e17a06ad2"
+    },
+    {
+      "path": "juce/src/OtoRegionGuides.h",
+      "bytes": 1759,
+      "sha256": "42674e976144bbc3ede9cbd642c8f5ca8df3f4de15dd41cf77c8414471b9b3eb"
+    },
+    {
+      "path": "juce/src/OtoWaveformEditorComponent.cpp",
+      "bytes": 151267,
+      "sha256": "6806dc92fcc5c23191ff1790119e67cfe48d4052606cfa672e1fe22af5d935bd"
+    },
+    {
+      "path": "juce/src/OtoWaveformEditorComponent.h",
+      "bytes": 31850,
+      "sha256": "f0c4d394157f87cb14ba71a643dd7c5c87b1a163472c95b95ab1a3a5e1b8bd3d"
+    },
+    {
+      "path": "juce/src/OttoMaterialIO.cpp",
+      "bytes": 41541,
+      "sha256": "4c06cda82df289c70d67256ecb0f449a459a59c30f3c7d969dc72d41d4bdbdc4"
+    },
+    {
+      "path": "juce/src/OttoMaterialIO.h",
+      "bytes": 3351,
+      "sha256": "d0a0c233f388c7de91a91a988fec6554cc2bd010a5c12b2cd2ea1ebea3a33403"
+    },
+    {
+      "path": "juce/src/OttoMaterialMigration.cpp",
+      "bytes": 29216,
+      "sha256": "07b153244080029bfe0ecab352ded81fd7238cc2b8a3a334bf99184d5a04c3f7"
+    },
+    {
+      "path": "juce/src/OttoMaterialMigration.h",
+      "bytes": 2402,
+      "sha256": "65b040f3d0f4c9abaad64089c5766e0ca749ef5f32655a2b9f97801df924e914"
+    },
+    {
+      "path": "juce/src/PanValueDialog.h",
+      "bytes": 1590,
+      "sha256": "a9267edd5b9eab2cbd380cd7832bfe9e3b40dc9e2d65be25171db7cd9239be69"
+    },
+    {
+      "path": "juce/src/PianoRollComponent.cpp",
+      "bytes": 623127,
+      "sha256": "fb30c83b222d59b042388d3f5c996c948b9ecbb55c3ae6a4db1f766b209e01fc"
+    },
+    {
+      "path": "juce/src/PianoRollComponent.h",
+      "bytes": 89601,
+      "sha256": "43d5ec1695a900a0898fec98c0591678ee28f9ed82c65af6f54878122789fd97"
+    },
+    {
+      "path": "juce/src/PianoRollCvvcEnvelope.h",
+      "bytes": 35066,
+      "sha256": "0d2f53d89ca38307b092c565fab054d0c32a5e2b4b0e4add6d87b2c3ca6ec572"
+    },
+    {
+      "path": "juce/src/PianoRollDiffSingerOffset.h",
+      "bytes": 13477,
+      "sha256": "311288f2c2f1f12eb67094c7741ff52a21014a73b1c56c02836de4aec3b1b360"
+    },
+    {
+      "path": "juce/src/PianoRollPointGroup.h",
+      "bytes": 19059,
+      "sha256": "4deb598701af256bd6a87079a822204227f8e1faa78f1cba8e6d011c31c68187"
+    },
+    {
+      "path": "juce/src/Pinyin.cpp",
+      "bytes": 1184,
+      "sha256": "13676e6e32bf67a4a7495fb189e758f34fabf9b82407666ef76121f177cba5bb"
+    },
+    {
+      "path": "juce/src/Pinyin.h",
+      "bytes": 759,
+      "sha256": "3cf021d36e16aa1ccac7adce8871326358bd78d6ac10e943c5768dc9819ff8bc"
+    },
+    {
+      "path": "juce/src/PinyinTable.inc",
+      "bytes": 367401,
+      "sha256": "3f46aa809025f11ce2c352606668f29f1c4d528c5a1e53a37bc74c9d81dbca35"
+    },
+    {
+      "path": "juce/src/PointGroupEdit.h",
+      "bytes": 1856,
+      "sha256": "bbd93a85e63e1e3cb069c24a2a83eb53339eb5638a618a68236d710a81a8941d"
+    },
+    {
+      "path": "juce/src/ProjectFileIO.h",
+      "bytes": 3442,
+      "sha256": "5881922f0bd6abb71c690d67584f6c74ac3e8b9622d982f0d278c115bea271fd"
+    },
+    {
+      "path": "juce/src/ProjectMaterialRegistration.cpp",
+      "bytes": 34939,
+      "sha256": "f91aa5e56e239f703d639df116e86138fa35bffd2667fec3754846ce2b85983d"
+    },
+    {
+      "path": "juce/src/ProjectMaterialRegistration.h",
+      "bytes": 5709,
+      "sha256": "9c1ca489a5e4ecdfb415d963e0a8d3500070c24530dd1b0a3bdbfa6e4311c852"
+    },
+    {
+      "path": "juce/src/ProjectMaterialRegistrationFacts.cpp",
+      "bytes": 12738,
+      "sha256": "2be7f14315ce94e0641a8e93af8cf5a6fa125842d1fea8db79f3647216054726"
+    },
+    {
+      "path": "juce/src/ProjectMaterialRegistrationFacts.h",
+      "bytes": 1349,
+      "sha256": "4d313fdd4f500555c733928e53a1307aa1d8afa072480b05e317e37d9516ffab"
+    },
+    {
+      "path": "juce/src/ProjectMaterialRegistrationModel.inc",
+      "bytes": 13856,
+      "sha256": "7bf7940da59294eb9175e397c9a598639ea25a56a1c5ab994d7642f2c28fc4a5"
+    },
+    {
+      "path": "juce/src/ProjectMaterialRegistrationTypes.h",
+      "bytes": 1199,
+      "sha256": "5b03ac184f7272e21afa93c948fb4c808d8374308bb37e977f0e722a9ba3a872"
+    },
+    {
+      "path": "juce/src/ProjectModel.cpp",
+      "bytes": 657010,
+      "sha256": "c389d6d2dff7463159a80be3caaa6d435fce6ad24f9d0c7110db1ce671d3b6aa"
+    },
+    {
+      "path": "juce/src/ProjectModel.h",
+      "bytes": 92556,
+      "sha256": "2a2832cb67fabb208e0af45445839841193aeeee9b4e827dc8e29ff6f61e3633"
+    },
+    {
+      "path": "juce/src/ProjectRecovery.h",
+      "bytes": 5017,
+      "sha256": "6f912b3cb3d711ff0045cafe65149a0429ce6a96ec1c130c57e0efa7255cb361"
+    },
+    {
+      "path": "juce/src/PronunciationCandidateBox.cpp",
+      "bytes": 9664,
+      "sha256": "4f29b5a9a6f615a68565b59fbc6281afa970efb380dd1e5542dbe9395e7fe0f6"
+    },
+    {
+      "path": "juce/src/PronunciationCandidateBox.h",
+      "bytes": 2539,
+      "sha256": "c9c0c445b0298e7529192437b7e74a770e27a724333fdf101d6a9eeb069aaea5"
+    },
+    {
+      "path": "juce/src/PronunciationTiming.cpp",
+      "bytes": 17749,
+      "sha256": "1e77b6a963fc89d8c4314845c77df53a760d81a067765df76d0fca7b729a4bf0"
+    },
+    {
+      "path": "juce/src/PronunciationTiming.h",
+      "bytes": 2606,
+      "sha256": "d4b220ff2f20de13790a8ba8c66ad4fdfcb10441cedb67ca01903b041ab335d5"
+    },
+    {
+      "path": "juce/src/RenderedWaveformPeaks.h",
+      "bytes": 1771,
+      "sha256": "40200ebfc6fc2e0e11eddf4549636c6f18d2d2eddaeb17daacd91d99b172c9e7"
+    },
+    {
+      "path": "juce/src/SampleSettings.cpp",
+      "bytes": 94263,
+      "sha256": "b965536042d77989a349834f50d5488e17a460c555a30546e06796010e0cbfc3"
+    },
+    {
+      "path": "juce/src/SampleSettings.h",
+      "bytes": 14109,
+      "sha256": "54dccb8255df217b611d9cce41377b3e8932497fde3d6cb0d37a2f4bb71251e9"
+    },
+    {
+      "path": "juce/src/SettingsComponent.cpp",
+      "bytes": 33070,
+      "sha256": "57f9d65252f26a26bc98663bcca643ce98beb473c08565c4d0a9d8e4f5608eea"
+    },
+    {
+      "path": "juce/src/SettingsComponent.h",
+      "bytes": 4702,
+      "sha256": "8f75a0d848b1b36486f4c47c2d6e4839f940052feb4bbe10c59c0b41ca5216ee"
+    },
+    {
+      "path": "juce/src/SourceWaveformPreview.h",
+      "bytes": 6262,
+      "sha256": "b3d16e82709fb2a37ea458f7621440618cf24d916684b1814cd1f486bf0f0668"
+    },
+    {
+      "path": "juce/src/StartupLog.h",
+      "bytes": 546,
+      "sha256": "c7ee5de9c5c06e97e2b65ca821277e70c9d22e89afc93d1afdf2e4bef1b92bb6"
+    },
+    {
+      "path": "juce/src/TailFadePresetStore.h",
+      "bytes": 7353,
+      "sha256": "b2b4ace66ed7c4b78d8cb7831cf6884bf6482d3756f9f7c2619e174599484908"
     },
     {
       "path": "juce/src/tests/AccompanimentSmoke.h",
@@ -1809,8 +1752,8 @@
     },
     {
       "path": "juce/src/tests/AssetContextSmoke.h",
-      "bytes": 7298,
-      "sha256": "76af5a3c0741d42e620fd323d8c68804f53c5de62a0bf26fd4c56d0933a654ad"
+      "bytes": 7929,
+      "sha256": "752d8bbfdac1c5c90c80fe6454899bd91c71afffb45d43a0cf3e3704820dae0a"
     },
     {
       "path": "juce/src/tests/AutoCrossfadeSmoke.h",
@@ -1819,8 +1762,8 @@
     },
     {
       "path": "juce/src/tests/ChineseCvvcSmoke.h",
-      "bytes": 22505,
-      "sha256": "aa348ccdd2e31783bbbcae181d559da53554480fe5c7779c82d4d3cfcfc23f2b"
+      "bytes": 22607,
+      "sha256": "59bdce95616d4b3bd4b055f58f0d2a46239643dc518022ca52c22afd21449e3e"
     },
     {
       "path": "juce/src/tests/ClassicFlagUiSmoke.h",
@@ -1924,8 +1867,18 @@
     },
     {
       "path": "juce/src/tests/CvvcLegacyEnvelopeSmoke.h",
-      "bytes": 7423,
-      "sha256": "bdc2059b2a10c7ad9849dfc5c2d49265c6d64b6bd7a0bff51094d529cc535c10"
+      "bytes": 10501,
+      "sha256": "4a9de7bc3c1468fa3697238bc23c011bb63f205fa720d985b77090c291f5ef21"
+    },
+    {
+      "path": "juce/src/tests/CvvcLinearProjectSmoke.h",
+      "bytes": 7234,
+      "sha256": "d4770b6fb1fcbe888e64a12c86d57302e02044d209b1fde1e201dd580bfed24b"
+    },
+    {
+      "path": "juce/src/tests/CvvcPitchProjectSmoke.h",
+      "bytes": 9990,
+      "sha256": "967b3e5c343885f042fde30b74a447008493acbfab243cb47f4c350388798b81"
     },
     {
       "path": "juce/src/tests/DecibelInputSmoke.h",
@@ -1939,13 +1892,18 @@
     },
     {
       "path": "juce/src/tests/DiffSingerConsonantSmoke.h",
-      "bytes": 6453,
-      "sha256": "ed2204f09fdf4da91a4c932b8717e3f67b03ddc41940e5210512bc80206d8ced"
+      "bytes": 11634,
+      "sha256": "0cbabaa02d0fb517c9dd050a5417eba01be6ad1a316c9d3bc1777434afe04677"
     },
     {
       "path": "juce/src/tests/DiffSingerExpressionsSmoke.h",
       "bytes": 4578,
       "sha256": "d229562f7e31813a8dac2c28342b998c90b987395e1d9b3d17145454981043cd"
+    },
+    {
+      "path": "juce/src/tests/DiffSingerHistoryPlaybackSmoke.h",
+      "bytes": 7233,
+      "sha256": "26c5a5f2715200edb7b8a9195096dd43f3e03082f40540aa6715c7ec0b46916e"
     },
     {
       "path": "juce/src/tests/DiffSingerInferenceSmoke.h",
@@ -1964,8 +1922,8 @@
     },
     {
       "path": "juce/src/tests/DiffSingerPitchHandlesSmoke.h",
-      "bytes": 10703,
-      "sha256": "e057d190922e41dede180ac3927b65ea62a6bb5e5ecffb2f1586b12fc2a60e86"
+      "bytes": 10880,
+      "sha256": "fc2cb7add815e7cbd44c76a38480c53e7fbc4ecef708ec80f5a8c9c020dd9c1b"
     },
     {
       "path": "juce/src/tests/DiffSingerPitchOffsetSmoke.h",
@@ -1999,8 +1957,8 @@
     },
     {
       "path": "juce/src/tests/DiffSingerUiSmoke.h",
-      "bytes": 13579,
-      "sha256": "1ce12f4e3addde2e1ceae4a5efb88538e97c72cabff24edfec35196b2a5cf157"
+      "bytes": 26418,
+      "sha256": "94901d3593b3507a658b4c56ffb32ab6b6e83a48e11ba5c505ddbba1c8b2fd1a"
     },
     {
       "path": "juce/src/tests/EmptyLyricPianoSmoke.h",
@@ -2059,8 +2017,8 @@
     },
     {
       "path": "juce/src/tests/HostPitchProjectionSmoke.h",
-      "bytes": 21874,
-      "sha256": "56c5d772e949085ed6dd0db6e0e344cf82300d7767a87ad07a60bf44cc105b97"
+      "bytes": 21925,
+      "sha256": "214a580b6590b742ad922039a565ec3766e75be3009bcf2a4ca36f3e664cbecb"
     },
     {
       "path": "juce/src/tests/IndependentZoomSmoke.h",
@@ -2071,6 +2029,11 @@
       "path": "juce/src/tests/IntegratedSmoke.h",
       "bytes": 5563,
       "sha256": "35ffb568221b8a0b4f59075c6ec256ed40101b6c00de8e38d1732b463c084435"
+    },
+    {
+      "path": "juce/src/tests/JoinedVibratoBakeSmoke.h",
+      "bytes": 8485,
+      "sha256": "c1f954c577bd49671f37b5c7b49828b0379c7204d4e665d3e7b9ed75e74e9718"
     },
     {
       "path": "juce/src/tests/LocalMaterialScopeSmoke.h",
@@ -2124,8 +2087,8 @@
     },
     {
       "path": "juce/src/tests/MaterialRootRegistrationSmoke.h",
-      "bytes": 4679,
-      "sha256": "a08dbfcf39dd3c5f6eab7908f927e7972968f25b021b31ba6fb51656b7b93829"
+      "bytes": 5057,
+      "sha256": "ac311eba05132ef394cfd88549cfc1aa9c467518d5bda24a0ab90d670dc83a81"
     },
     {
       "path": "juce/src/tests/MaterialSourceReplacementSmoke.h",
@@ -2189,13 +2152,18 @@
     },
     {
       "path": "juce/src/tests/NativeAudioTrimSmoke.h",
-      "bytes": 10705,
-      "sha256": "e88742649eda09be1808d1edbc8868ba11f553c304591c9b9921ec083c3ba334"
+      "bytes": 15966,
+      "sha256": "6ea81d04e223edfb01a3ec02e8c7076fa751f7ed4b3697cbb59984e3f31a3c63"
     },
     {
       "path": "juce/src/tests/NativeBatchFlattenSmoke.h",
       "bytes": 11534,
       "sha256": "45f10ca30b8270604f3b243d4c54d68d501a738673258b91d22c353b1c9ff2a8"
+    },
+    {
+      "path": "juce/src/tests/NativeBoundaryStretchSmoke.h",
+      "bytes": 9530,
+      "sha256": "693ed3cf85f8f375a4a887d4641c2f6b6262df438e5f7f560832830faed08693"
     },
     {
       "path": "juce/src/tests/NativeConnectionGraphSmoke.h",
@@ -2213,6 +2181,11 @@
       "sha256": "250dd9cffbf8cf8478e103aa7813803fed297b558b72ab48915518235394c2a9"
     },
     {
+      "path": "juce/src/tests/NativeGapStretchSmoke.h",
+      "bytes": 7828,
+      "sha256": "0ada8026b0ac461e71aaaa23a815fb8720721af0d4af37d29e00d6e3fc1d501e"
+    },
+    {
       "path": "juce/src/tests/NativeImportPerformanceSmoke.h",
       "bytes": 6727,
       "sha256": "6da712f4a4d694e6ba116dcecc012ae39854c77f4ba934e4ec33d04ab27349a7"
@@ -2223,6 +2196,11 @@
       "sha256": "9baaef17e0eca36b674ab9a60b1ce22c6505c76684d1c61f01a7fdc275cf4f19"
     },
     {
+      "path": "juce/src/tests/NativeInitialPitchSmoke.h",
+      "bytes": 5407,
+      "sha256": "305159ac1be00d171e42c0dc01340f80e84c79805ed29d97d0601fad7545553f"
+    },
+    {
       "path": "juce/src/tests/NativeLinkedEnvelopeSmoke.h",
       "bytes": 12153,
       "sha256": "e52bf660f226e9ec7b5503261e5ad56d6ce69ec45e7829ea3cfb82a13a921af4"
@@ -2231,6 +2209,11 @@
       "path": "juce/src/tests/NativeLinkedPitchSmoke.h",
       "bytes": 20565,
       "sha256": "c60b754f339352569e3c1f18445d77d272bc476188623851f26060f7eaa62e93"
+    },
+    {
+      "path": "juce/src/tests/NativeLoudnessSmoke.h",
+      "bytes": 13321,
+      "sha256": "a82d412fb18bc4d6a83e4a8133b711e6c971a2bc39a53b0d451756fa8e44454b"
     },
     {
       "path": "juce/src/tests/NativeNoiseOptionSmoke.h",
@@ -2263,6 +2246,11 @@
       "sha256": "26f6d5cf117a51e5ab664d6db10c2a9305e0afb6571baef3d38bc7257763e095"
     },
     {
+      "path": "juce/src/tests/NativePointFirstSmoke.h",
+      "bytes": 9005,
+      "sha256": "adba6a828b135e142816e6cba449dcb4cee77815b5330042fb0ac0c4778354f7"
+    },
+    {
       "path": "juce/src/tests/NativeRenderedWaveformSmoke.h",
       "bytes": 16115,
       "sha256": "d4b45dd05f7175a83ae14ff58aba095f68c2c6d2c3061b11bba24a46db349ede"
@@ -2274,13 +2262,18 @@
     },
     {
       "path": "juce/src/tests/NativeSourcePitchRestoreSmoke.h",
-      "bytes": 11596,
-      "sha256": "1a7dbab56b90bfb9a91706c3be619861403f8dc8b6558f8a0f5959b5ec2d64a0"
+      "bytes": 11637,
+      "sha256": "4f8f0ee473de11dc2e9c9a8be0e2008e362a619f69af1128f8994e6209ab7308"
     },
     {
       "path": "juce/src/tests/NativeSourcePitchSmoke.h",
       "bytes": 25599,
       "sha256": "04fda900d61ebedf216a5b2bd280fe8d74621b9a6e4fb597b4ded186827c54bc"
+    },
+    {
+      "path": "juce/src/tests/NativeSparsePitchSmoke.h",
+      "bytes": 13325,
+      "sha256": "b1d11e3e147c6baa14b580249869a8dee40c1430ec0d775cc40735c3dcefbb52"
     },
     {
       "path": "juce/src/tests/NativeTrimExpandSmoke.h",
@@ -2289,13 +2282,13 @@
     },
     {
       "path": "juce/src/tests/NativeUnpitchedRegionsSmoke.h",
-      "bytes": 13125,
-      "sha256": "58b24734e996bd573c8d92c637d1635116da958fd8129fe2c1880a5de507869c"
+      "bytes": 19716,
+      "sha256": "4ebacf00034f22ec463b56a52322c5c3ac7e33f446ecace43512a14fd27098f8"
     },
     {
       "path": "juce/src/tests/NativeVibratoSmoke.h",
-      "bytes": 21392,
-      "sha256": "a86bd9344374494208df5bbb8c3815ab2d31cc6dc64a76ebce2ee9d67bd965a6"
+      "bytes": 29250,
+      "sha256": "ef691596b4962f20ca44386c208fcda5dd31e88019fc4fd7a7571d1bac7340b0"
     },
     {
       "path": "juce/src/tests/NativeWaveformPreviewSmoke.h",
@@ -2403,9 +2396,19 @@
       "sha256": "9834e442a54bd5f49402ee0344dd68f836eb2709462265959ffb1d5a96215ee4"
     },
     {
+      "path": "juce/src/tests/PointFirstPitchSmoke.h",
+      "bytes": 4823,
+      "sha256": "07ecb14fb45fc84f0bf3e0f42fd7b7bdd427e997087af68e34c4667c1be50a0a"
+    },
+    {
       "path": "juce/src/tests/PointGroupSmoke.h",
-      "bytes": 10855,
-      "sha256": "08a1636bfafa942f2919559562b98c03e11ef76a79788896c21e032d1ace5594"
+      "bytes": 11647,
+      "sha256": "4a68362a30e5f91814f953a3e9e1c27c1b1f5c9a12b5ac02825c3ac3214cbca6"
+    },
+    {
+      "path": "juce/src/tests/ProjectMaterialMemorySmoke.h",
+      "bytes": 9211,
+      "sha256": "707aca92b647bbfb5e082f143f803740baccab30e95a447b52ce2b81af4d93fd"
     },
     {
       "path": "juce/src/tests/ProjectMaterialRegistrationEvidenceAudit.h",
@@ -2434,8 +2437,8 @@
     },
     {
       "path": "juce/src/tests/ProjectVoicebankAssetsSmoke.h",
-      "bytes": 15822,
-      "sha256": "ad99e06711aeb5076f8eb4fcf515c970a43c16b4309cca7f2ad39e6c484a1049"
+      "bytes": 16103,
+      "sha256": "010dfae04e3cfd0b15ec9f748c8bd8e6a67343fc78ea5911ee2c26548445c1ce"
     },
     {
       "path": "juce/src/tests/PronunciationTimingSmoke.h",
@@ -2489,8 +2492,8 @@
     },
     {
       "path": "juce/src/tests/TrackEditingInterfacesUiSmoke.h",
-      "bytes": 11118,
-      "sha256": "83eacc683e478af5ba38dd0d4fe3e050fa4c6fcf882caaf211195fbbd4008183"
+      "bytes": 23558,
+      "sha256": "56a1c2156d592aa5e788b6c8bbec379d42a439936cb509eb31b5b20d9b759ba9"
     },
     {
       "path": "juce/src/tests/TrackGainEnvelopeSmoke.h",
@@ -2533,6 +2536,26 @@
       "sha256": "4f20d11e185d0244c5e8a1ad37a41f632742dd29d2d4ff73beabc181217b4ca4"
     },
     {
+      "path": "juce/src/tests/UtauEnvelopeDefaultsSmoke.h",
+      "bytes": 3203,
+      "sha256": "24886ac99ba8b74f73451de5a3e4722c518e65a1a7f0d58857aaf616550badcf"
+    },
+    {
+      "path": "juce/src/tests/UtauOverlapPitchSmoke.h",
+      "bytes": 12993,
+      "sha256": "575a01195fb905f2a01d0bd1e07091d2939062a733f7369aad2985d9b16c050e"
+    },
+    {
+      "path": "juce/src/tests/UtauSelectionScopeSmoke.h",
+      "bytes": 11274,
+      "sha256": "5cd3ad20938c8962cf1f92836dd82974a726bc46ad7df7168797d2c6de235bac"
+    },
+    {
+      "path": "juce/src/tests/UtauSourceEditorSmoke.h",
+      "bytes": 4288,
+      "sha256": "e358f763675109e88e49c1ca501a77208a38410beab2c5fd329904dc3ada89b5"
+    },
+    {
       "path": "juce/src/tests/VariantAssetUiSmoke.h",
       "bytes": 12438,
       "sha256": "ace5b752ed00e03b9512428e32656f05d8d1c254c23b595c70c2a4cc496978ca"
@@ -2554,8 +2577,8 @@
     },
     {
       "path": "juce/src/tests/VowelStretchAlignmentSmoke.h",
-      "bytes": 21681,
-      "sha256": "5f035d2b20d4d5096807fc7c13249be17c6a67e5bcff15427a82c583557f507f"
+      "bytes": 21914,
+      "sha256": "9f3bc4b9ab1096cc4b0d83d498b671fd2499f1a7e456e1999fbd6e8de9c1d8eb"
     },
     {
       "path": "juce/src/tests/VowelTimingAudioSmoke.h",
@@ -2566,6 +2589,76 @@
       "path": "juce/src/tests/WavExportSmoke.h",
       "bytes": 22337,
       "sha256": "47ffdc8d9b8123eca8e112852f64e5c15b42dc7ca256f14eeccefe2dc6b9bd8c"
+    },
+    {
+      "path": "juce/src/Theme.cpp",
+      "bytes": 28780,
+      "sha256": "9242222d2f71eec3da4251d7bd55a12f5d064c4af79f58c39762a1016479c6da"
+    },
+    {
+      "path": "juce/src/Theme.h",
+      "bytes": 3182,
+      "sha256": "abf186c974083388ea14cf059b7711946bf0a98de1e4bc1a95f80b42c8d5aece"
+    },
+    {
+      "path": "juce/src/TimelineComponent.cpp",
+      "bytes": 63780,
+      "sha256": "386c0e06f6bba22b32a4629ee2729e613ba200cef0115d14806367016fcdc145"
+    },
+    {
+      "path": "juce/src/TimelineComponent.h",
+      "bytes": 9100,
+      "sha256": "721f1fa246e04e61b4a699a980c36164fb2bc3486b7721b7555391df930ad92c"
+    },
+    {
+      "path": "juce/src/TimelineGainEnvelope.h",
+      "bytes": 9620,
+      "sha256": "667cf5427a6eda41b20f3eac29856b4bc16c8e78cbfa8ff380f2f917a6ec2e43"
+    },
+    {
+      "path": "juce/src/TrackGainEnvelope.h",
+      "bytes": 4928,
+      "sha256": "bf616e4a365948e7fd63d2eb5ad24acdbe698834fd771bcdde109b0fa2df3628"
+    },
+    {
+      "path": "juce/src/TrackListComponent.cpp",
+      "bytes": 27229,
+      "sha256": "b80a3f0889962a56e68c0792a77ebe533b431dd52a7fd178faf285757eeb1dfa"
+    },
+    {
+      "path": "juce/src/TrackListComponent.h",
+      "bytes": 6615,
+      "sha256": "a057ce53cc5a5662e19321c24165fbd6575f908d45f95d754921ce496fe18a62"
+    },
+    {
+      "path": "juce/src/UtauOutputEnginePanel.h",
+      "bytes": 4566,
+      "sha256": "62f9b0881ad8932d7b89b0608c77d28615482f3804b79f08b94f17a46f9bd910"
+    },
+    {
+      "path": "juce/src/UtauPointCurve.h",
+      "bytes": 3891,
+      "sha256": "07065c5065014fcdbf49dcb877d59f8ee847094c1221436e18326d364baab6be"
+    },
+    {
+      "path": "juce/src/VoicebankSettingsComponent.cpp",
+      "bytes": 32581,
+      "sha256": "4f688b309a18b64fda057fdcbb122be0afa1ced2b04d00bf59904e214e6e34d1"
+    },
+    {
+      "path": "juce/src/VoicebankSettingsComponent.h",
+      "bytes": 5711,
+      "sha256": "38b88d7a331e05be301cf1a3c8a107b90bd70cec7813528430086fb648eddd65"
+    },
+    {
+      "path": "juce/src/WavExportOptions.h",
+      "bytes": 908,
+      "sha256": "8393b55933f5312691848f5554256eea124525d21884064fbe0d25af6a0debd7"
+    },
+    {
+      "path": "juce/src/ZoomScrollBar.h",
+      "bytes": 5582,
+      "sha256": "dced7ebbde36d1c3cbdbc40453bfd3029d391f00e6e3bc027427a291534f240f"
     },
     {
       "path": "juce/tests/advanced_envelope_live.py",
@@ -2599,13 +2692,18 @@
     },
     {
       "path": "juce/tests/diffsinger_pronunciation_retake.py",
-      "bytes": 5421,
-      "sha256": "097044ac52ce9d3be315ef1af94d607b7a5768f0fd913c4cfbb07effa47b7798"
+      "bytes": 5520,
+      "sha256": "6544d1640096bbfb0302fc73437491f394c0bee536bdd4290145c5e8df1e1b5e"
     },
     {
       "path": "juce/tests/diffsinger_runtime.py",
       "bytes": 9813,
       "sha256": "01d72bed123d0146b161a4f6796811174766b39dae7c0bf0499d994709ae43fc"
+    },
+    {
+      "path": "juce/tests/diffsinger_selection_overlap.py",
+      "bytes": 7715,
+      "sha256": "3a2a4a96044bdf62f73a874b010b82bae433ee213628618ea12a8b587057fe0b"
     },
     {
       "path": "juce/tests/diffsinger_smoke.py",
@@ -2768,11 +2866,6 @@
       "sha256": "8d13b7e80dcb3b1f53ac7126888c3756d1786cc62b21f84d0eaa84adb6cbcf34"
     },
     {
-      "path": "juce/third_party/ciglet/CMakeLists.txt",
-      "bytes": 152,
-      "sha256": "506ff7fa772cabfa99752b956f6d44edf3b224a0f09035036a41e0ae975ddaf8"
-    },
-    {
       "path": "juce/third_party/ciglet/ciglet.c",
       "bytes": 48180,
       "sha256": "d2ed7a0da09607b67618f0220df0542fd051ac432f65fa29796c250a50b7f48c"
@@ -2781,6 +2874,11 @@
       "path": "juce/third_party/ciglet/ciglet.h",
       "bytes": 42873,
       "sha256": "8c9a94f0edabbad8489a99313d03fbeb092b1aba15fb50df461ca2d48cf49b67"
+    },
+    {
+      "path": "juce/third_party/ciglet/CMakeLists.txt",
+      "bytes": 152,
+      "sha256": "506ff7fa772cabfa99752b956f6d44edf3b224a0f09035036a41e0ae975ddaf8"
     },
     {
       "path": "juce/third_party/ciglet/external/fastapprox-all.h",
@@ -2808,29 +2906,14 @@
       "sha256": "ea2c060e8bdcb12f1a10e5bf5470e2e534e049ed1d6a5c6138cf81b1baaf5e29"
     },
     {
-      "path": "juce/third_party/libllsm2/CMakeLists.txt",
-      "bytes": 302,
-      "sha256": "362d93758b43f2956e5b3da63c5d6bdc6cb2247735a5893c5f6e01a7739569e2"
-    },
-    {
-      "path": "juce/third_party/libllsm2/LICENSE",
-      "bytes": 35821,
-      "sha256": "0b383d5a63da644f628d99c33976ea6487ed89aaa59f0b3257992deac1171e6b"
-    },
-    {
-      "path": "juce/third_party/libllsm2/NOTE",
-      "bytes": 1303,
-      "sha256": "efbaea326dc5d236707548a554bf61de47a29450e9568d66fc27de3d9ae7ece9"
-    },
-    {
-      "path": "juce/third_party/libllsm2/README.md",
-      "bytes": 10746,
-      "sha256": "134d5d9250c9dbfcb2c4ebbd98ded4ae4246c24b3e3a338637f6e420a82aeec1"
-    },
-    {
       "path": "juce/third_party/libllsm2/buffer.h",
       "bytes": 10718,
       "sha256": "44bc4277d3f01820a3b9a92dc3a190a3e72937bcbf11e7508b3f6d5f38707f00"
+    },
+    {
+      "path": "juce/third_party/libllsm2/CMakeLists.txt",
+      "bytes": 302,
+      "sha256": "362d93758b43f2956e5b3da63c5d6bdc6cb2247735a5893c5f6e01a7739569e2"
     },
     {
       "path": "juce/third_party/libllsm2/coder.c",
@@ -2878,6 +2961,11 @@
       "sha256": "fa0652a69d700bd204d4428072c382e2c9dbb167a3c40e09c93d8b69cf201e5f"
     },
     {
+      "path": "juce/third_party/libllsm2/LICENSE",
+      "bytes": 35821,
+      "sha256": "0b383d5a63da644f628d99c33976ea6487ed89aaa59f0b3257992deac1171e6b"
+    },
+    {
       "path": "juce/third_party/libllsm2/llsm.h",
       "bytes": 16433,
       "sha256": "634bcc4abea64503f877d6be07e538fe48815a25fa7cace4a5cfd8d8b56f44e4"
@@ -2903,19 +2991,29 @@
       "sha256": "0ea3ff9559a02afd5026b149ad67ffaf2eceb5f872fa2033aa06cd0de39633b9"
     },
     {
+      "path": "juce/third_party/libllsm2/NOTE",
+      "bytes": 1303,
+      "sha256": "efbaea326dc5d236707548a554bf61de47a29450e9568d66fc27de3d9ae7ece9"
+    },
+    {
+      "path": "juce/third_party/libllsm2/README.md",
+      "bytes": 10746,
+      "sha256": "134d5d9250c9dbfcb2c4ebbd98ded4ae4246c24b3e3a338637f6e420a82aeec1"
+    },
+    {
       "path": "juce/third_party/signalsmith-stretch/LICENSE.txt",
       "bytes": 1113,
       "sha256": "16bf62d475af149d96a24853e77c9e0d939259a9d55b23b41da7f9939db85085"
     },
     {
-      "path": "juce/third_party/signalsmith-stretch/signalsmith-linear/LICENSE.txt",
-      "bytes": 1095,
-      "sha256": "a91f5703b0f5fa22e8c14a8bd854559a7c512bbe58656ea8bdcd4964e923ab2f"
-    },
-    {
       "path": "juce/third_party/signalsmith-stretch/signalsmith-linear/fft.h",
       "bytes": 46269,
       "sha256": "1f9e5d16ffdae37f87021c505e8a36f107ade2723d4ccd4a75402e74b9680028"
+    },
+    {
+      "path": "juce/third_party/signalsmith-stretch/signalsmith-linear/LICENSE.txt",
+      "bytes": 1095,
+      "sha256": "a91f5703b0f5fa22e8c14a8bd854559a7c512bbe58656ea8bdcd4964e923ab2f"
     },
     {
       "path": "juce/third_party/signalsmith-stretch/signalsmith-linear/linear.h",
@@ -2943,16 +3041,6 @@
       "sha256": "4f244683666c7f7ba312891ff061cab8c076959d6a4ab6839655d4aa98b529ae"
     },
     {
-      "path": "juce/third_party/world/LICENSE.txt",
-      "bytes": 2847,
-      "sha256": "cb19c28611fcee6ce200c075a0e5bc91f0dcb0637985797b830990d2fe2fcffe"
-    },
-    {
-      "path": "juce/third_party/world/README.md",
-      "bytes": 5325,
-      "sha256": "be876ecb881754f390018b4336cbb2642174c1cf6024c3c3aa024ea8966a96dd"
-    },
-    {
       "path": "juce/third_party/world/doc/readme_ENG.txt",
       "bytes": 786,
       "sha256": "82b3ffe60e84e8b6654cd88cbcdc84c32a6e83394228b11ff7a1ea2da6284eee"
@@ -2963,24 +3051,14 @@
       "sha256": "8d34e5728a082b71ae44013f5d12ec70dd3527717a50211ed8bf59eb96430ea2"
     },
     {
-      "path": "juce/third_party/world/examples/CMakeLists.txt",
-      "bytes": 601,
-      "sha256": "830752d809d35a4d89c6dca0a7ba3787db219b75b2627cbe0a887e0352212cb8"
-    },
-    {
-      "path": "juce/third_party/world/examples/README.md",
-      "bytes": 1173,
-      "sha256": "30fa641606b34c642248955cd2e139d3fc82ba5141b80e0b0c0b6fdfea0e3d27"
+      "path": "juce/third_party/world/examples/analysis_synthesis/analysis.cpp",
+      "bytes": 13993,
+      "sha256": "41e7fc8bebdbeaaf122b626690549915961846ab355518d9af7ba6f30f37e694"
     },
     {
       "path": "juce/third_party/world/examples/analysis_synthesis/CMakeLists.txt",
       "bytes": 78,
       "sha256": "232b196ddee545c63b1074c169e0a17156ab2ddd527f92aca1fa0aadd7d185cd"
-    },
-    {
-      "path": "juce/third_party/world/examples/analysis_synthesis/analysis.cpp",
-      "bytes": 13993,
-      "sha256": "41e7fc8bebdbeaaf122b626690549915961846ab355518d9af7ba6f30f37e694"
     },
     {
       "path": "juce/third_party/world/examples/analysis_synthesis/makefile",
@@ -2993,19 +3071,19 @@
       "sha256": "c516c513275c8a22353fd6f1355856dcfd44d29a68369db667cb7a4d53daeae4"
     },
     {
-      "path": "juce/third_party/world/examples/codec_test/CMakeLists.txt",
-      "bytes": 121,
-      "sha256": "75e07401d3ca54b62523a91efbfee8ab4720a7359beb121f2cd494f8fbd04526"
-    },
-    {
-      "path": "juce/third_party/world/examples/codec_test/README.md",
-      "bytes": 514,
-      "sha256": "28ebde7ca499dca554fe435e665e4917d2213d7726f8fad470d1a69aba411a77"
+      "path": "juce/third_party/world/examples/CMakeLists.txt",
+      "bytes": 601,
+      "sha256": "830752d809d35a4d89c6dca0a7ba3787db219b75b2627cbe0a887e0352212cb8"
     },
     {
       "path": "juce/third_party/world/examples/codec_test/apanalysis.cpp",
       "bytes": 5658,
       "sha256": "a212e64f79dbb9dc0e05244a38e27a1ff2605e35488bb78b31ca923b8b38d56c"
+    },
+    {
+      "path": "juce/third_party/world/examples/codec_test/CMakeLists.txt",
+      "bytes": 121,
+      "sha256": "75e07401d3ca54b62523a91efbfee8ab4720a7359beb121f2cd494f8fbd04526"
     },
     {
       "path": "juce/third_party/world/examples/codec_test/f0analysis.cpp",
@@ -3023,24 +3101,24 @@
       "sha256": "e29cb8cc56fe63fc09d796684bfb1ef5777fe38d60c69e9d7aac615dc5c76be9"
     },
     {
+      "path": "juce/third_party/world/examples/codec_test/README.md",
+      "bytes": 514,
+      "sha256": "28ebde7ca499dca554fe435e665e4917d2213d7726f8fad470d1a69aba411a77"
+    },
+    {
       "path": "juce/third_party/world/examples/codec_test/spanalysis.cpp",
       "bytes": 5659,
       "sha256": "3b2e507767d16fcd487579117dd6e7c3604c865d4a5ea6aa7a133862880faf64"
     },
     {
-      "path": "juce/third_party/world/examples/parameter_io/CMakeLists.txt",
-      "bytes": 123,
-      "sha256": "f20e3d00fcb2b5094132b346bea23f3e638903451066bcf00ab19eae41ed5a92"
-    },
-    {
-      "path": "juce/third_party/world/examples/parameter_io/README.md",
-      "bytes": 436,
-      "sha256": "dfa1778310a72969bd62034e5d4c123bf41e63fa9c33e8d70f9f115d7eae5a10"
-    },
-    {
       "path": "juce/third_party/world/examples/parameter_io/apanalysis.cpp",
       "bytes": 4545,
       "sha256": "20ca1f7489fe84d5cdcee83e7cb4b6e778c7d4a878d6a16dfc32fad3aeb405dc"
+    },
+    {
+      "path": "juce/third_party/world/examples/parameter_io/CMakeLists.txt",
+      "bytes": 123,
+      "sha256": "f20e3d00fcb2b5094132b346bea23f3e638903451066bcf00ab19eae41ed5a92"
     },
     {
       "path": "juce/third_party/world/examples/parameter_io/f0analysis.cpp",
@@ -3058,14 +3136,34 @@
       "sha256": "2e798e60136113315592932f4be4f07feb3521365f4e4a1932fdc71db2f32e07"
     },
     {
+      "path": "juce/third_party/world/examples/parameter_io/README.md",
+      "bytes": 436,
+      "sha256": "dfa1778310a72969bd62034e5d4c123bf41e63fa9c33e8d70f9f115d7eae5a10"
+    },
+    {
       "path": "juce/third_party/world/examples/parameter_io/spanalysis.cpp",
       "bytes": 4572,
       "sha256": "e68db0d9b09aa9b13f84bb7ae0d8ac1f187d82fba3d2730f278480f6b7ace7fc"
     },
     {
+      "path": "juce/third_party/world/examples/README.md",
+      "bytes": 1173,
+      "sha256": "30fa641606b34c642248955cd2e139d3fc82ba5141b80e0b0c0b6fdfea0e3d27"
+    },
+    {
+      "path": "juce/third_party/world/LICENSE.txt",
+      "bytes": 2847,
+      "sha256": "cb19c28611fcee6ce200c075a0e5bc91f0dcb0637985797b830990d2fe2fcffe"
+    },
+    {
       "path": "juce/third_party/world/makefile",
       "bytes": 4783,
       "sha256": "263ac5eb030271da8c6981ac16a3131d3d75fd57db275d92d8d32a80176c5ea8"
+    },
+    {
+      "path": "juce/third_party/world/README.md",
+      "bytes": 5325,
+      "sha256": "be876ecb881754f390018b4336cbb2642174c1cf6024c3c3aa024ea8966a96dd"
     },
     {
       "path": "juce/third_party/world/src/cheaptrick.cpp",
@@ -3203,11 +3301,6 @@
       "sha256": "33c927c3cba4e178a87ba291940b3597731132e5416d6fd74cc5e6c1a80a4e8b"
     },
     {
-      "path": "juce/third_party/world/tools/README.md",
-      "bytes": 187,
-      "sha256": "85823807134364ab2304063c2c80b7545f3ccfc4697e399dfab0af46f394b7d6"
-    },
-    {
       "path": "juce/third_party/world/tools/audioio.cpp",
       "bytes": 6952,
       "sha256": "07f4c586fa9c592238f22c34a780e984dc1a0c52bbdbbdc557813a4d543e9bd0"
@@ -3226,6 +3319,11 @@
       "path": "juce/third_party/world/tools/parameterio.h",
       "bytes": 5144,
       "sha256": "298e88900f07b5aebbf5428ebe505e45fc40b35b9fe6c7b33f2eead4df4e7de3"
+    },
+    {
+      "path": "juce/third_party/world/tools/README.md",
+      "bytes": 187,
+      "sha256": "85823807134364ab2304063c2c80b7545f3ccfc4697e399dfab0af46f394b7d6"
     },
     {
       "path": "juce/third_party/world/visualstudio2015/.gitignore",
@@ -3293,9 +3391,74 @@
       "sha256": "b89aee3ba69a60039ba8fc23c441f40572513ddad2dfd103623809ac9a404bcd"
     },
     {
+      "path": "LICENSE",
+      "bytes": 2611,
+      "sha256": "6ea1e02d8b8288efcec8db0293559fc4138f970091a29572f0fb2b9286ebd1aa"
+    },
+    {
       "path": "new.md",
-      "bytes": 11289,
-      "sha256": "1985448f3de322f2c8771b22d06162ecebd2587a919a41d7954ceea3a7f1a81a"
+      "bytes": 11331,
+      "sha256": "0247892665c6580f728d739fcd74d3c172c171defa62812011ff991f7055204c"
+    },
+    {
+      "path": "README.md",
+      "bytes": 7087,
+      "sha256": "fd8b2b48091f0eea77256e48344bc268583a33c9b2571a915546caa4a1042f48"
+    },
+    {
+      "path": "reverse/algo_test/metrics-20260806.txt",
+      "bytes": 3974,
+      "sha256": "e8424a66c9a9ccaa12f5c07da71d7b252d03045a8ec3729858967ce928d05035"
+    },
+    {
+      "path": "reverse/algo_test/metrics-corrected-20260806.txt",
+      "bytes": 4128,
+      "sha256": "edd25f83903c74e6f4a049d00c844fef51c27344549c29356daf88445ee69a16"
+    },
+    {
+      "path": "reverse/algo_test/metrics-f0-20260806.txt",
+      "bytes": 5682,
+      "sha256": "1118fa98d9f41e08bb60924b97a60e0063ed00b75101f6edf6ce2618ea2329bd"
+    },
+    {
+      "path": "reverse/algo_test/mpd_dump.cpp",
+      "bytes": 12558,
+      "sha256": "6bb341fd6a77fdedf07085de0cbd6f8c5726b2cf0c2eb3ffd5070f1aee2c1e8d"
+    },
+    {
+      "path": "reverse/algo_test/test_algo.cpp",
+      "bytes": 57377,
+      "sha256": "9ebcbe5d613105b082ee6dd9b2dfd0f014e1ff8bda3be806b236e78a384538a8"
+    },
+    {
+      "path": "reverse/notes/algo_test_log.md",
+      "bytes": 37537,
+      "sha256": "70d7298ff14907078449657e452dc227fce5d0309d80e3e875643239bbaa5a33"
+    },
+    {
+      "path": "reverse/notes/decomp/M5_melodicStretchDriver.c",
+      "bytes": 220972,
+      "sha256": "8072d883a2c774448c978110bd8d8d5c98227c7abd2f660948700ee15a16d2a6"
+    },
+    {
+      "path": "reverse/notes/decomp/M5_prepareRenderSpectralBlock.c",
+      "bytes": 39121,
+      "sha256": "fa77cd429644e0c3cee30dc8d9ab2d4c9af5d3a3a4b56dc1ef080cf98359909f"
+    },
+    {
+      "path": "reverse/notes/decomp/M5_processSpectralFrame.c",
+      "bytes": 34886,
+      "sha256": "bb0e660cfa8b7d4537cbc93e9b7bbb74df0a379a0747859ed400cee6fbd4ed79"
+    },
+    {
+      "path": "reverse/notes/decomp/M5_reconstructSpectralComponents.c",
+      "bytes": 31475,
+      "sha256": "3b58d664f25e556df8e28b80024241fdbafe6b4f972d8cfd74444401c719ca6f"
+    },
+    {
+      "path": "reverse/notes/melodyne_pitch_engines.md",
+      "bytes": 16463,
+      "sha256": "1b242f7f6ab70dc6eca630c363ab19da8bca3aa1b703f53d8b8f7becd5db7ecc"
     },
     {
       "path": "third_party/hifisampler/LICENSE",
@@ -3623,16 +3786,6 @@
       "sha256": "d77aef5861e87830860e91d982b1c83a1ab27ee5f9cc5973e74b510888d01b34"
     },
     {
-      "path": "tools/hamood_audio/vendor/BTC-ISMIR19/LICENSE",
-      "bytes": 1091,
-      "sha256": "26cce0d49b43b301baae32c06e9ecbbe5c2bf1a21decdc033675de3df59390dd"
-    },
-    {
-      "path": "tools/hamood_audio/vendor/BTC-ISMIR19/README.md",
-      "bytes": 2720,
-      "sha256": "ce703f7d98dde1f8284704e256a40d17762239da2f64989fb523f77de35edb33"
-    },
-    {
       "path": "tools/hamood_audio/vendor/BTC-ISMIR19/audio_dataset.py",
       "bytes": 9891,
       "sha256": "d2aad299c7b1a0fd17eaf8f2e08a1fe9ebf782516f08400fbb97400ead01fea5"
@@ -3653,6 +3806,11 @@
       "sha256": "ddd45a26a8d6e1bc0608cf0f1080d06125ec046b8d7d8ebfaad5007579258cf9"
     },
     {
+      "path": "tools/hamood_audio/vendor/BTC-ISMIR19/LICENSE",
+      "bytes": 1091,
+      "sha256": "26cce0d49b43b301baae32c06e9ecbbe5c2bf1a21decdc033675de3df59390dd"
+    },
+    {
       "path": "tools/hamood_audio/vendor/BTC-ISMIR19/png/attention.png",
       "bytes": 1640905,
       "sha256": "f0907cd0e5890b0aef7093fdc655ff81b055e070a8b2e8aab692617070475fa8"
@@ -3666,6 +3824,11 @@
       "path": "tools/hamood_audio/vendor/BTC-ISMIR19/png/model.png",
       "bytes": 92636,
       "sha256": "c8b5759058979ace298846a40910333b66f23552f5f067ed5a4496af5a8cd392"
+    },
+    {
+      "path": "tools/hamood_audio/vendor/BTC-ISMIR19/README.md",
+      "bytes": 2720,
+      "sha256": "ce703f7d98dde1f8284704e256a40d17762239da2f64989fb523f77de35edb33"
     },
     {
       "path": "tools/hamood_audio/vendor/BTC-ISMIR19/run_config.yaml",
@@ -3821,6 +3984,16 @@
       "path": "打包说明-20261019.md",
       "bytes": 1341,
       "sha256": "7cdc8b47d862aa797e5c194953cad1581311d97f6a49dd914e2753a61be6fd45"
+    },
+    {
+      "path": "打包说明-20261025.md",
+      "bytes": 847,
+      "sha256": "4b991c6b3cc015b78592b28500a721ce3ae119a724fc864a69eff789339ad823"
+    },
+    {
+      "path": "打包说明-20261027.md",
+      "bytes": 1267,
+      "sha256": "ea3b89a344f2b1b04352ae089c6f5c396b55af4e890798f0173e1c7a5a02e374"
     },
     {
       "path": "源码包说明.md",

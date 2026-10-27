@@ -3,11 +3,14 @@
 // Adapted from OpenUtau's ChineseCVVCPhonemizer (MIT).
 // See third_party/openutau/NOTICE.md and LICENSE.txt.
 #include "UtauRenderer.h"
+#include "UtauPitchTimeline.h"
 #include "LegacyTextCodec.h"
 #include "../Pinyin.h"
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <memory>
+#include <limits>
 #include <numeric>
 #include <optional>
 
@@ -213,6 +216,7 @@ inline ChineseCvvcPlan planChineseCvvc(const UtauRenderRequest& source)
             && std::abs(source.notes[a].startSeconds + source.notes[a].durationSeconds
                         - source.notes[b].startSeconds) < 0.002;
     };
+    const auto pitchTimelines=makeUtauPitchTimelines(source.notes);
     for (std::size_t position = 0; position < order.size(); ++position)
     {
         const auto i = order[position];
@@ -272,7 +276,9 @@ inline ChineseCvvcPlan planChineseCvvc(const UtauRenderRequest& source)
             // Keep the failed lyric distinct from an authored rest so the
             // renderer can audition it with the same missing-sample piano.
             add(lyric, "missing", 0, note.midiNote, true);
-            if (plan.warning.length() < 1000) plan.warning += "Missing CV: " + lyric + "; ";
+            // Silent context still separates phrases, but is not an audition target.
+            if (note.gain > 0 && plan.warning.length() < 1000)
+                plan.warning += "Missing CV: " + lyric + "; ";
             continue;
         }
         if (!full)
@@ -346,10 +352,6 @@ inline ChineseCvvcPlan planChineseCvvc(const UtauRenderRequest& source)
         piece.amplitudeEnvelope = UtauRenderer::fitAmplitudeEnvelope(parent.amplitudeEnvelope,
             -onset[event.owner], parent.durationSeconds);
         for (auto& point : piece.amplitudeEnvelope) point.timeSeconds -= offset;
-        const auto midiShift = (parent.midiNote - piece.midiNote) * 100.0f;
-        if (parent.timelinePitchCents)
-            piece.timelinePitchCents = [curve = parent.timelinePitchCents, offset, midiShift](double t) { return curve(t + offset) + midiShift; };
-        for (auto& point : piece.pitchCurve) { point.timeSeconds -= offset; point.cents += midiShift; }
         for (auto& curve : piece.flagCurves) for (auto& point : curve.second) point.first -= offset;
         if (!event.base)
         {
@@ -371,6 +373,7 @@ inline ChineseCvvcPlan planChineseCvvc(const UtauRenderRequest& source)
         const auto lead = std::min(std::max(0.0, piece.startSeconds), std::max(0.0,
             piece.preutteranceOverrideEnabled ? piece.preutteranceSeconds
             : timing ? scaledUtauPreutterance(*timing, piece.consonantVelocity) : 0.0));
+        pitchTimelines[event.owner]->apply(piece,lead,pitchTimelines[event.owner]);
         if(role>0 && parent.amplitudeEnvelope.empty())
         {
             piece.cvvcStandardEnvelope=true;

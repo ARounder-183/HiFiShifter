@@ -9,6 +9,8 @@
 #include "backend/MelodyneProvider.h"
 #include "backend/DiffSingerRenderer.h"
 #include "backend/HifisamplerFlags.h"
+#include "backend/UtauPitchTimeline.h"
+#include "UtauPointCurve.h"
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -659,6 +661,7 @@ void writeNoteRenderFields(juce::MemoryOutputStream& stream, const NoteData& not
     stream.writeBool(note.nativeIndependentPitch);
     stream.writeBool(note.nativeUnpitched);
     stream.writeBool(note.nativePitchHandlesPlaced);
+    stream.writeBool(note.nativeSparsePitchControls);
     for (const auto& text : { note.utauRegionFlags1, note.utauRegionFlags2,
                               note.utauRegionFlags3, note.utauRegionFlags4 })
     {
@@ -831,6 +834,22 @@ void writeNativePitchContext(juce::MemoryOutputStream& stream, const ClipData& c
 {
     if (!trackShowsAllNativeRegions(track)) return;
     stream.writeString("native-shared-pitch-envelope-131");
+    // Cross-recording author points can change this clip's target F0. Cache the
+    // resolved line used by its notes, including the neighbouring point spans.
+    stream.writeString("native-point-first-241");
+    const auto lines = sharedPitchLines(track);
+    std::set<const SharedPitchLine*> written;
+    for (const auto& note : clip.notes)
+        if (const auto* member = lines.memberFor(note.id); member && member->renderSharedCurve && written.insert(member->line.get()).second)
+            for (const auto& piece : member->line->pieces)
+            {
+                stream.writeDouble(piece.from); stream.writeInt64(static_cast<juce::int64>(piece.points.size()));
+                for (const auto& point : piece.points)
+                {
+                    stream.writeDouble(point.timeSeconds); stream.writeFloat(point.targetMidi); stream.writeInt(static_cast<int>(point.shape));
+                    stream.writeFloat(point.bezierX1); stream.writeFloat(point.bezierY1); stream.writeFloat(point.bezierX2); stream.writeFloat(point.bezierY2);
+                }
+            }
     const auto group = clip.nativePitchGroupId.isNotEmpty() ? clip.nativePitchGroupId : clip.id;
     std::vector<NoteData> notes;
     for (const auto& parent : track.clips)
@@ -928,9 +947,14 @@ std::string renderKey(const ClipData& clip, const TrackData& track,
     stream.writeBool(track.chineseCvvc);
     stream.writeBool(track.utauPianoPreview);
     stream.writeBool(track.cvvcCurveCrossfade);
-    if(track.chineseCvvc)stream.writeString("cvvc-single-edge-envelope-v2");
+    if(track.chineseCvvc)stream.writeString("cvvc-single-edge-envelope-v2-selection-warnings-v1");
+    if(trackUsesVoicebankSynthesis(track)&&!trackIsDiffSinger(track))
+        stream.writeString("utau-point-first-pitch-v2");
     if (track.chineseCvvc && track.utauMode == UtauMode::classic)
+    {
         stream.writeString("zh-cvvc-signed-velocity-timing-v4");
+        stream.writeString("zh-cvvc-shared-timeline-pitch-v1");
+    }
     stream.writeInt(static_cast<int>(effectiveUtauOutputEngine(track, defaultEngine)));
     if (effectiveUtauOutputEngine(track, defaultEngine) == UtauOutputEngine::pcNsfHifigan)
         stream.writeString("hifisampler-held-crossfade-v2");
@@ -1006,6 +1030,8 @@ std::vector<AudioEngine::ProjectedNotePitch> projectTrackPitchImpl(const TrackDa
     // selected, and the point that bends a selected note's tail may belong to
     // a note that was not.
     const auto sharedLines = ownHostPitch ? SharedPitchLines{} : sharedPitchLines(track);
+    const auto pointLines=trackUsesVoicebankSynthesis(track)&&!trackIsDiffSinger(track)&&ownHostPitch
+        ?utauPointCurves(track):std::map<juce::String,std::shared_ptr<const UtauPointCurve>>{};
     // A note's pitch before any transition is laid over it: the curve it is
     // sung along, and where its own line runs from and to -- which is where
     // the roll hands it over to the transition: its own outermost points when
@@ -1021,7 +1047,8 @@ std::vector<AudioEngine::ProjectedNotePitch> projectTrackPitchImpl(const TrackDa
         double ownFirst = 0.0;
         double ownLast = 0.0;
     };
-    const auto planPitch = [&sharedLines, ownHostPitch, nominalHostBridge](const NoteData& note, double absoluteStart)
+    const auto planPitch = [&sharedLines, &pointLines, ownHostPitch, nominalHostBridge,
+        refineUtau=trackUsesVoicebankSynthesis(track)&&!trackIsDiffSinger(track)](const NoteData& note, double absoluteStart)
     {
         PlannedPitch planned;
         auto& renderedNote = planned.spec;
@@ -1032,7 +1059,31 @@ std::vector<AudioEngine::ProjectedNotePitch> projectTrackPitchImpl(const TrackDa
         const auto* sharedMember = ownHostPitch ? nullptr : sharedLines.memberFor(note.id);
         planned.sharesPrevious = sharedMember != nullptr && sharedMember->joinsPrevious;
         planned.sharesNext = sharedMember != nullptr && sharedMember->joinsNext;
-        if (sharedMember != nullptr)
+        if(const auto found=pointLines.find(note.id);found!=pointLines.end())
+        {
+            const auto line=found->second;
+            planned.sharesPrevious=planned.sharesNext=true;
+            auto first=-.6,last=note.durationSeconds+.3;
+            for(const auto& p:note.pitchControlPoints){first=std::min(first,p.timeSeconds);last=std::max(last,p.timeSeconds);}
+            const auto cents=[line,absoluteStart,note](double t)
+            {return (line->midiAt(absoluteStart+t)-note.midiNote)*100.f
+                +float(vibratoCentsAt(note,juce::jlimit(0.,note.durationSeconds,t)));};
+            std::vector<double> knots{first,last};
+            for(auto t=first;t<last;t+=.005)knots.push_back(t);
+            for(const auto& p:line->points)if(p.timeSeconds>=absoluteStart+first&&p.timeSeconds<=absoluteStart+last)knots.push_back(p.timeSeconds-absoluteStart);
+            std::sort(knots.begin(),knots.end());knots.erase(std::unique(knots.begin(),knots.end()),knots.end());
+            renderedNote.pitchCurve.push_back({knots.front(),cents(knots.front())});
+            std::function<void(double,float,double,float,int)> refine;
+            refine=[&](double a,float va,double b,float vb,int depth)
+            {
+                bool accurate=true;for(const auto f:{.25,.5,.75})if(std::abs(cents(a+(b-a)*f)-(va+(vb-va)*float(f)))>.1f){accurate=false;break;}
+                if(!accurate&&depth<20&&b-a>1.e-6){const auto m=(a+b)*.5;const auto v=cents(m);refine(a,va,m,v,depth+1);refine(m,v,b,vb,depth+1);}
+                else renderedNote.pitchCurve.push_back({b,vb});
+            };
+            for(size_t i=1;i<knots.size();++i)refine(knots[i-1],cents(knots[i-1]),knots[i],cents(knots[i]),0);
+            renderedNote.timelinePitchCents=cents;
+        }
+        else if (sharedMember != nullptr)
         {
             // The renderer queries the immutable line at its actual sounding
             // times. The sampled vector below is only a preview/test view, not
@@ -1100,6 +1151,27 @@ std::vector<AudioEngine::ProjectedNotePitch> projectTrackPitchImpl(const TrackDa
             for (auto time = firstTime; time < lastTime; time += 0.005)
                 renderedNote.pitchCurve.push_back({ time, centsAt(time) });
             renderedNote.pitchCurve.push_back({ lastTime, centsAt(lastTime) });
+            if(refineUtau)
+            {
+            for(const auto& point:note.pitchControlPoints)
+                if(point.timeSeconds>=firstTime&&point.timeSeconds<=lastTime)
+                    renderedNote.pitchCurve.push_back({point.timeSeconds,centsAt(point.timeSeconds)});
+            std::stable_sort(renderedNote.pitchCurve.begin(),renderedNote.pitchCurve.end(),[](const auto& a,const auto& b){return a.timeSeconds<b.timeSeconds;});
+            renderedNote.pitchCurve.erase(std::unique(renderedNote.pitchCurve.begin(),renderedNote.pitchCurve.end(),[](const auto& a,const auto& b){return a.timeSeconds==b.timeSeconds;}),renderedNote.pitchCurve.end());
+            const auto coarse=std::move(renderedNote.pitchCurve);
+            renderedNote.pitchCurve={coarse.front()};
+            std::function<void(double,float,double,float,int)> refine;
+            refine=[&](double a,float va,double b,float vb,int depth)
+            {
+                bool accurate=true;
+                for(const auto fraction:{.25,.5,.75})
+                    if(std::abs(centsAt(a+(b-a)*fraction)-(va+(vb-va)*static_cast<float>(fraction)))>.1f){accurate=false;break;}
+                if(!accurate&&depth<20&&b-a>1.e-6)
+                {const auto mid=(a+b)*.5;const auto value=centsAt(mid);refine(a,va,mid,value,depth+1);refine(mid,value,b,vb,depth+1);}
+                else renderedNote.pitchCurve.push_back({b,vb});
+            };
+            for(size_t i=1;i<coarse.size();++i)refine(coarse[i-1].timeSeconds,coarse[i-1].cents,coarse[i].timeSeconds,coarse[i].cents,0);
+            }
             if(note.pitchSupportAuthored)
             {
                 // Authoring guards can be shorter than the legacy 5ms grid.
@@ -1460,6 +1532,26 @@ backend::UtauRenderRequest makeUtauRequest(const ClipData& clip, const TrackData
     auto projections=ownHostPitch.has_value()||nominalHostBridge.has_value()
         ?projectTrackPitchImpl(track,project.nativeConnections,ownHostPitch.value_or(true),nominalHostBridge.value_or(true))
         :AudioEngine::projectTrackNotePitch(track,project.nativeConnections);
+    // Read pitch over the full track even when rendering a selected note or
+    // one clip. Reuse the CVVC timeline adapter; musical projection stays above.
+    std::unordered_map<std::string,std::shared_ptr<const backend::UtauPitchTimeline>> timelines;
+    if(request.requestedFamily==backend::RequestedVoicebankFamily::utau&&!request.chineseCvvc)
+    {
+        std::unordered_map<std::string,const NoteData*> notes;
+        for(const auto& c:track.clips)for(const auto& n:c.notes)notes.emplace(n.id.toStdString(),&n);
+        std::vector<backend::UtauNoteRenderSpec> context;context.reserve(projections.size());
+        for(const auto& projection:projections)
+        {
+            backend::UtauNoteRenderSpec n;
+            const auto* source=notes.at(projection.noteId.toStdString());
+            n.alias=source->nativeUnpitched?juce::String("RR"):source->label;
+            n.startSeconds=projection.absoluteStartSeconds;n.durationSeconds=projection.durationSeconds;n.midiNote=projection.midiNote;
+            n.pitchCurve=projection.sampledLocalCents;n.timelinePitchCents=projection.continuousLocalCents;
+            context.push_back(std::move(n));
+        }
+        const auto runs=backend::makeUtauPitchTimelines(context);
+        for(size_t i=0;i<projections.size();++i)timelines.emplace(projections[i].noteId.toStdString(),runs[i]);
+    }
     std::unordered_map<std::string,AudioEngine::ProjectedNotePitch> planned;
     for(auto& projection:projections)planned.emplace(projection.noteId.toStdString(),std::move(projection));
 
@@ -1584,6 +1676,8 @@ backend::UtauRenderRequest makeUtauRequest(const ClipData& clip, const TrackData
             renderedNote.pitchCurve=std::move(projection.sampledLocalCents);
             renderedNote.timelinePitchCents=std::move(projection.continuousLocalCents);
         }
+        if(const auto found=timelines.find(note.id.toStdString());found!=timelines.end())
+            found->second->bind(renderedNote,clip.startSeconds+note.startSeconds,found->second);
         request.notes.push_back(std::move(renderedNote));
     }
 
@@ -1963,23 +2057,40 @@ std::shared_ptr<const std::vector<UtauNoteWaveform>>
 void AudioEngine::refreshUtauWaveformSnapshot()
 {
     auto collected = std::make_shared<std::vector<UtauNoteWaveform>>();
+    std::unordered_map<std::string, std::size_t> displayed;
+    const auto append = [&](const std::shared_ptr<RenderedClip>& entry, bool keepParameters)
+    {
+        if (entry == nullptr || !entry->ready.load(std::memory_order_acquire)) return;
+        const juce::ScopedLock sliceGuard(entry->sliceLock);
+        for (const auto& waveform : entry->utauWaveforms)
+        {
+            const auto [at, inserted] = displayed.emplace(waveform.noteId.toStdString(), collected->size());
+            if (inserted) collected->push_back(waveform);
+            else (*collected)[at->second] = waveform;
+            if (!keepParameters) (*collected)[at->second].diffSingerParameters.clear();
+        }
+    };
     {
         const juce::ScopedReadLock guard(renderLock);
         for (const auto& loaded : loadedClips)
         {
+            // Selection is a playback scope, not the lifetime of DS analysis.
+            // rebuildLoadedClips validates this history against the full score,
+            // bank and render context. Read its finished results oldest first;
+            // pending/failed requests cannot erase previously displayed notes.
+            if (loaded->diffSinger)
+                if (const auto history = diffSingerPlaybackHistory.find(loaded->clip.id.toStdString());
+                    history != diffSingerPlaybackHistory.end())
+                    for (const auto& completed : history->second.renders) append(completed, true);
             // The last render that was ready, which is the one being heard --
             // so an edit that has not finished rendering leaves the notes it
             // did not touch showing what they still sound like.
             const auto& entry = loaded->rendered != nullptr
                                 && loaded->rendered->ready.load(std::memory_order_acquire)
                 ? loaded->rendered : loaded->fallbackRendered;
-            if (entry == nullptr || !entry->ready.load(std::memory_order_acquire)) continue;
-            const juce::ScopedLock sliceGuard(entry->sliceLock);
-            for (const auto& waveform : entry->utauWaveforms) {
-                collected->push_back(waveform);
-                // A fallback can belong to a previous bank/phrase/pitch context.
-                if (entry != loaded->rendered) collected->back().diffSingerParameters.clear();
-            }
+            // Latest ready selection wins for the same note, without duplicates.
+            // A fallback can belong to a previous bank/phrase/pitch context.
+            append(entry, entry == loaded->rendered);
         }
     }
     const juce::ScopedLock guard(utauWaveformLock);
@@ -2153,6 +2264,7 @@ void AudioEngine::setAuditionTrack(const juce::String& trackId)
 void AudioEngine::setUtauRenderNoteSelection(const std::vector<juce::String>& noteIds)
 {
     const juce::ScopedWriteLock guard(renderLock);
+    renderedHistoryPlayback = false;
     // A normal marquee is an exact audition scope.  Keeping old IDs here made
     // every later marquee silently accumulate historical notes and caused the
     // rendered phrase to disagree with the visible selection.  Shift-marquee
@@ -2182,6 +2294,7 @@ int AudioEngine::selectEveryUtauNote(const ProjectData& project)
 bool AudioEngine::selectAllRenderedUtauNotes(const ProjectData& project)
 {
     const juce::ScopedWriteLock guard(renderLock);
+    renderedHistoryPlayback = true;
     ++utauRenderRequestGeneration;
     utauRenderNoteSelection = utauRenderedNoteHistory;
     // Blank UTAU notes are cheap, model-free piano previews. They must be
@@ -2195,7 +2308,61 @@ bool AudioEngine::selectAllRenderedUtauNotes(const ProjectData& project)
                 for (const auto& note : clip.notes)
                     if (note.label.trim().isEmpty() && !note.nativeUnpitched)
                         utauRenderNoteSelection.insert(note.id.toStdString());
-    return !utauRenderNoteSelection.empty();
+    return !utauRenderNoteSelection.empty() || !diffSingerPlaybackHistory.empty();
+}
+
+std::shared_ptr<AudioEngine::RenderedClip> AudioEngine::diffSingerHistoryAudio(
+    const std::string& clipId, double clipStart)
+{
+    // Called with renderLock on the control thread. Only finished PCM enters
+    // history playback; never synthesize the union of old selection IDs.
+    auto& history=diffSingerPlaybackHistory[clipId];
+    std::vector<std::shared_ptr<RenderedClip>> ready;
+    for(const auto& state:history.renders)
+        if(state->ready.load(std::memory_order_acquire)) ready.push_back(state);
+    if(ready.empty())return {};
+    if(ready.size()==1)return ready.front();
+    const auto rate=ready.back()->sampleRate;
+    double from=ready.front()->timelineOffsetSeconds,to=from;int channels=1;
+    for(const auto& state:ready)
+    {
+        if(state->sampleRate!=rate)return ready.back();
+        from=std::min(from,state->timelineOffsetSeconds);
+        to=std::max(to,state->timelineOffsetSeconds+state->buffer.getNumSamples()/rate);
+        channels=std::max(channels,state->buffer.getNumChannels());
+    }
+    auto mixed=std::make_shared<RenderedClip>();mixed->sampleRate=rate;mixed->timelineOffsetSeconds=from;
+    mixed->buffer.setSize(channels,std::max(1,(int)std::ceil((to-from)*rate)));mixed->buffer.clear();
+    for(const auto& state:ready)
+    {
+        const juce::ScopedLock guard(state->sliceLock);
+        if(state->utauWaveforms.empty())continue;
+        auto waves=state->utauWaveforms;
+        std::sort(waves.begin(),waves.end(),[](const auto& a,const auto& b){return a.startSeconds<b.startSeconds;});
+        for(std::size_t i=0;i<waves.size();++i)
+        {
+            const auto& wave=waves[i];
+            auto first=(int)std::llround((wave.startSeconds-wave.leadInSeconds-clipStart-state->timelineOffsetSeconds)*rate);
+            auto last=first+(int)std::llround(wave.durationSeconds*rate);
+            if(i==0)first=std::min(first,state->firstAudibleSample);
+            if(i+1==waves.size())last=std::max(last,state->lastAudibleSample+1);
+            first=juce::jlimit(0,state->buffer.getNumSamples(),first);last=juce::jlimit(first,state->buffer.getNumSamples(),last);
+            const auto target=(int)std::llround((state->timelineOffsetSeconds-from)*rate)+first;
+            const auto count=std::min(last-first,mixed->buffer.getNumSamples()-target);
+            // Later completed selections replace their owned span, rather
+            // than summing the same syllable twice when selections overlap.
+            if(count>0)for(int ch=0;ch<channels;++ch)
+                mixed->buffer.copyFrom(ch,target,state->buffer,std::min(ch,state->buffer.getNumChannels()-1),first,count);
+            std::erase_if(mixed->utauWaveforms,[&](const auto& previous){return previous.noteId==wave.noteId;});
+            mixed->utauWaveforms.push_back(wave);
+        }
+    }
+    mixed->backend=ready.back()->backend;mixed->firstAudibleSample=0;mixed->lastAudibleSample=mixed->buffer.getNumSamples()-1;
+    mixed->scheduled=true;mixed->ready=true;mixed->finished=true;mixed->progress=1;
+    // Keep one accumulated PCM per clip, not a whole-song buffer for every
+    // marquee ever made. Pending jobs remain separate until publication.
+    std::erase_if(history.renders,[](const auto& state){return state->ready.load(std::memory_order_acquire);});
+    history.renders.insert(history.renders.begin(),mixed);return mixed;
 }
 
 void AudioEngine::setHifiganModelDirectory(const juce::File& directory)
@@ -2329,6 +2496,7 @@ void AudioEngine::rebuildLoadedClips(const ProjectData& sourceProject, bool forE
     {
         return !projectClipIds.contains(item.first);
     });
+    std::erase_if(diffSingerPlaybackHistory,[&projectClipIds](const auto& item){return !projectClipIds.contains(item.first);});
     for (const auto& loaded : loadedClips)
     {
         auto ready = loaded->rendered != nullptr
@@ -2589,6 +2757,20 @@ void AudioEngine::rebuildLoadedClips(const ProjectData& sourceProject, bool forE
             loaded->accompaniment = track.accompaniment;
             loaded->meter = meter;
             loaded->reader = reader;
+            if(loaded->diffSinger && !forExport && renderComponent==WavExportComponent::full)
+            {
+                auto& history=diffSingerPlaybackHistory[clip.id.toStdString()];
+                const auto context=renderKey(clip,track,hifiganModelDirectory,inferenceConfiguration,
+                    utauResamplerFile,dsOptions,defaultUtauOutputEngine,utauWavtoolFile,&bankStamp,&project.nativeConnections);
+                if(history.contextKey!=context){history={};history.contextKey=context;}
+                if(history.renders.size()>1)diffSingerHistoryAudio(clip.id.toStdString(),clip.startSeconds);
+                if(renderedHistoryPlayback)
+                {
+                    loaded->rendered=diffSingerHistoryAudio(clip.id.toStdString(),clip.startSeconds);
+                    loadedClips.push_back(std::move(loaded));
+                    continue;
+                }
+            }
             if (const auto fallback = playbackFallbackByClip.find(clip.id.toStdString());
                 fallback != playbackFallbackByClip.end())
                 // Do not audition an earlier backend's cached output while a
@@ -2708,6 +2890,17 @@ void AudioEngine::rebuildLoadedClips(const ProjectData& sourceProject, bool forE
                 if (!utauTrack) state->preservesNativeSource = preservesSource;
                 state->timelineOffsetSeconds = renderTimelineOffset;
                 loaded->rendered = state;
+                if(loaded->diffSinger && !forExport && renderComponent==WavExportComponent::full)
+                {
+                    auto& history=diffSingerPlaybackHistory[clip.id.toStdString()];
+                    if(std::find(history.renders.begin(),history.renders.end(),state)==history.renders.end())
+                    {
+                        // Drop cancelled/failed requests, retain successful scopes.
+                        std::erase_if(history.renders,[](const auto& old){return !old->ready.load(std::memory_order_acquire)
+                            && (!old->scheduled.load()||old->finished.load());});
+                        history.renders.push_back(state);
+                    }
+                }
                 // A failed/empty render must not remain as a permanently silent
                 // cache entry.  The next selection/project sync is allowed to
                 // retry it after paths or voicebank contents have been fixed.
@@ -2912,7 +3105,7 @@ void AudioEngine::rebuildLoadedClips(const ProjectData& sourceProject, bool forE
                                 measure(result);
                             forward(std::move(result));
                         };
-                        if ((!nsfVoicebank && !trackIsDiffSinger(track)) || !diagnosticUtauTimelinePitch)
+                        if (!diagnosticUtauTimelinePitch)
                             for (auto& note : request.notes) note.timelinePitchCents = {};
                         if (nsfVoicebank) {
                             scheduledNsfUtauRenders.fetch_add(1, std::memory_order_relaxed);

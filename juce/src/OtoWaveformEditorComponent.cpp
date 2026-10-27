@@ -1040,6 +1040,36 @@ juce::String OtoWaveformEditorComponent::materialText(const char* zh, const char
     return materialStrings ? materialStrings->text(en) : juce::String::fromUTF8(en);
 }
 
+std::unique_ptr<OtoWaveformEditorComponent> OtoWaveformEditorComponent::forVoicebankSample(
+    const juce::File& root, UtauMode mode, const backend::UtauRenderer::ResolvedSample& sample,
+    std::function<void()> onSaved, juce::String& error)
+{
+    error.clear();
+    if (!sample.found || !sample.file.existsAsFile() || !sample.file.isAChildOf(root))
+    { error = utf8("没有找到此发音的源录音。"); return {}; }
+    std::optional<VoicebankOtoEntry> entry;
+    if (mode == UtauMode::classic && sample.sourceOto)
+        entry = *sample.sourceOto;
+    else
+    {
+        juce::StringArray warnings;
+        // Match the renderer and voicebank editor: both regional modes use
+        // independent classic timing, with mode-specific partition sidecars.
+        const auto rows = SampleSettings::loadVoicebankOto(root, warnings,
+            utauModeUsesRegions(mode), mode == UtauMode::mou);
+        for (const auto& row : rows)
+        {
+            const auto alias = row.alias.trim().isNotEmpty() ? row.alias.trim() : row.audioFile.getFileNameWithoutExtension();
+            if (row.audioFile == sample.file && alias == sample.resolvedAlias)
+            { entry = row; break; }
+        }
+    }
+    if (!entry || entry->audioFile != sample.file)
+    { error = utf8("没有找到当前轨道模式对应的 OTO 条目，请检查音源分段文件。"); return {}; }
+    return std::make_unique<OtoWaveformEditorComponent>(*entry, utauModeUsesRegions(mode),
+        mode == UtauMode::mou, std::move(onSaved));
+}
+
 std::unique_ptr<OtoWaveformEditorComponent> OtoWaveformEditorComponent::forMaterial(
     const juce::File& audio, const juce::File& manifest, I18n& strings,
     std::function<void(const std::vector<SampleRegionSetting>&)> onSaved, bool quick, juce::String* error,
@@ -2711,7 +2741,7 @@ std::unique_ptr<OtoWaveformEditorComponent> OtoWaveformEditorComponent::forNote(
             for (const auto& note : clip.notes)
                 if (note.id == noteId) { owner = &track; target = &note; }
     if (owner == nullptr || target == nullptr) return {};
-    if (owner->pitchAlgorithm != PitchAlgorithm::utau)
+    if (effectiveTrackType(*owner) != TrackType::utau)
     {
         error = utf8("单独OTO编辑仅用于 UTAU 轨道。");
         return {};
@@ -2727,7 +2757,11 @@ std::unique_ptr<OtoWaveformEditorComponent> OtoWaveformEditorComponent::forNote(
             target->label, target->midiNote, 100, false, false);
         auto strings = std::make_unique<I18n>();
         auto editor = forClassicNote(project, noteId, *strings, sample, expectedRevision, error);
-        if (editor) editor->ownedMaterialStrings = std::move(strings);
+        if (editor)
+        {
+            editor->ownedMaterialStrings = std::move(strings);
+            editor->materialMode.setSelectedId(2, juce::sendNotificationSync);
+        }
         return editor;
     }
     // Regional legacy capability is intentionally retained: its auxiliary

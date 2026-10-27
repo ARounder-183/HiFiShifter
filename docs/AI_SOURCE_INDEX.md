@@ -1,5 +1,71 @@
 # HachiShifter 逐文件索引与命令入口
 
+更新 249：juce/CMakeLists.txt 的 PROJECT_VERSION 更新为 0.27，供 JUCE_APPLICATION_VERSION_STRING 与 EXE 版本资源共用；运行功能沿用更新 248。
+
+更新 248：JoinedVibratoBake.h 在草案中将既有音高求值拟合为普通可编辑贝塞尔标点，ProjectModel::bakeNoteVibratoIntoPitch 对颤音组统一规划、一次提交。JoinedVibratoBakeSmoke.h 覆盖短中间音节、弯曲基线、显示/合成请求、连接、撤销保存及实际 PCM 前后对比。
+
+更新 247：JoinedVibrato.h 解析同轨、相接、同音高且共享参考起点/时长的持久颤音组。PianoRollComponent 统一控制音符、控制柄绘制/命中及成员预览，setNotesVibrato / setNotesVibratoRealLine 扩展至整组。NativeVibratoSmoke 增加单套控制柄、单成员编辑、全长结束拖动和旧工程参数统一回归。
+
+更新 246：ProjectModel::setNotesVibrato 在每轨按绝对时间识别选中同音高连续段，复用 vibratoReferenceDurationSeconds / vibratoTimeOffsetSeconds 保存共同时间基准。NativeVibratoSmoke 增加连续段、相位/包络、合成请求、隔离及真实批量对话框回归。
+
+更新 245：PianoRollComponent::pitchAnchorHasIncoming 使用 SharedPitchLines 的同线控制点判定原生上一段；setPitchAnchorShape 统一普通形状与贝塞尔菜单提交。NativeSparsePitchSmoke 增加六种形状、跨音符端点、移动重排、真实间隔隔离、保存撤销及显示/合成输入一致性检查。
+
+更新 244：ProjectModel.cpp::nativeSharedPitchLines 全局连续区间使用 2 ms 正间隙容差；NativePointFirstSmoke 扩展跨微小分界点流唯一性，并在传入实际工程时检查各个极短分界左右是否使用同一条线。未改变音频时间或曲线存储。
+
+更新 243：NativeNoteTiming::planNativeBoundaryStretch 校验相邻双音、计算共同可行位移，复用 planNativeNoteMove 的 sharedBoundary 模式仅移动中间分界。PianoRollComponent 的普通音符边界命中保留双选，预览与 ProjectModel::stretchNativeNoteBoundary 共用同一规划。新增 NativeBoundaryStretchSmoke.h / --smoke-native-boundary-stretch <output>，覆盖真实框选、双向边缘、同源/连接/跨片段、保存撤销、取消、极限和实际 PCM。
+
+更新 242：ProjectModel::flattenNotePitch 统一生成连续同音高段的首尾控制点；NoteData::nativeSparsePitchControls 区分“有意无内部点”和“从原素材推导点”，进入工程序列化及音频缓存。PianoRollComponent::mouseDrag 与 PianoRollPointGroup.h 放开原生邻点时间约束并重排选中索引。新增 NativeSparsePitchSmoke.h / --smoke-native-sparse-pitch <output>，覆盖两段四点、跨点拖动、撤销保存、选区隔离、画笔与实际 PCM。
+
+更新 241：ProjectModel.cpp::nativeSharedPitchLines 负责原生点先于线的连续区间构建、时间排序和重复时刻归一；PianoRollComponent::pitchAnchorsFor 读取同一规范控制点，AudioEngine::writeNativePitchContext 纳入共享线依赖。新增 NativePointFirstSmoke.h / --smoke-native-point-first <output> [工程文件]，覆盖跨录音/交错控制点、旧乱序点、显示/合成请求一致性和缓存失效；可只读验证实际工程。
+
+更新 240：PianoRollComponent 的响度分支接入既有 marquee/selectedNotes；loudnessStartGains 保存整个手势选区的初值，displayedNativeGain 共用相同 dB 增量。ProjectModel::setNoteGains 在锁内验证版本及所有目标，一次提交；setNoteGain 委托此入口。NativeLoudnessSmoke 扩充真实框选、批量音频、选区隔离及撤销保存。
+
+更新 239：MainComponent::nativeLoudnessButton → PianoRollComponent::setNativeLoudnessMode → ProjectModel::setNoteGain。新增 --smoke-native-loudness <output> / NativeLoudnessSmoke.h，取代已移除按钮的 native-clip-stretch 专项；原生时间规划回归仍用 native-gap-stretch/native-note-move。
+
+更新 238：NativeAudioTrim::planNativeNoteTrim 优先识别同一源内无歧义的相邻分字，共用 repartitionNativeTrimNote 更新两字范围并保持合并结构；NativeNoteMovePlan::sharedTrimBoundary 让模型保留连接。NativeAudioTrimSmoke 扩展真实四方向拖动、合并增益、撤销重开与整段 PCM 比对。
+
+更新 237：NativeNoteTiming::planNativeNoteMove 的连接素材代理接收 sourceWindows，区分真实源范围与空白，闭合空隙时保留代理映射双侧锚点。NativeGapStretchSmoke.h / --smoke-native-gap-stretch 覆盖真实拖动、源时钟、PCM 及只读实际工程验证。
+
+更新 236：NativeUnpitchedRegions.h 的 nativeNoteRemovalRanges 统一选择范围减去未选音符保护范围；removeNativeNoteAudio 扩展到普通原生音符并支持 ripple。ProjectModel::removeNotes/removeNotesRippling 共用源切片实现；NativeUnpitchedRegionsSmoke 扩充普通删除与时序删除的实际 PCM/热缓存/时间线检查。
+
+更新 234：ProjectModel::initializeNativeNotePitch 负责原始音高/作者标记/连接检查，通过既有 flattenNotePitch 单次事务初始化当前音符；PianoRollComponent 原生双击复用该入口。NativeNoteTiming.h::planNativeNoteMove 与 0.25/update185 函数一致，保留新版本原生素材/先行声查询辅助函数。TimelineComponent::nativeStretchEdgeAt 和 PianoRollComponent::setNativeStretchMode 统一按钮意图与边缘优先级。新增 --smoke-native-initial-pitch；既有 native-clip-stretch 增加波形端点和下方纯辅音相邻链实操。
+
+更新 233：MainComponent::clipStretchButton/setToolButton 接通 TimelineComponent::setClipStretchMode。时间线在按下时固定本次操作模式，原生拉伸提交 ProjectModel::resizeClip，普通裁剪仍提交 trimClip；波形、音符、淡化和轨道响度包络提供比例预览，预览/提交共用 constrainNativeClipResize。新增 --smoke-native-clip-stretch <output>，覆盖真实按钮/鼠标、音频时钟、实际 WAV 尾部、撤销保存与模式隔离。
+
+更新 232：ProjectData::materialBrowserState 序列化工程素材登记/隐藏记录，materialBrowserSessionId 为仅运行期的文档身份；ProjectModel::setMaterialBrowserState 与 MainComponent 回调接通。AssetManagerComponent::setProjectVoicebanks 统一加载工程浏览状态与自动引用，generation 隔离旧异步搜索/标注。新增 --smoke-project-material-memory <output>；素材右键/注册/搜索专项按工程持久化更新。
+
+更新 231：`AudioEngine::refreshUtauWaveformSnapshot` 汇集有效 DS 历史与当前完成渲染，按 noteId 去重，供现有 PianoRoll 波形和音素区域显示。`--smoke-diffsinger-history-playback <bank> <output>` 扩展验证切换/等待/失败/取消选区/重复选择的持久显示、实参回填、PCM 不叠加以及改词后旧显示失效，并输出截图。
+
+更新 230：`PianoRollComponent::batchLyricTargets` 限定 UTAU/DS 单选填词；`McpServer::resolveUtauRenderSelection` 为 live/headless 共同渲染范围解析入口。ChineseCvvcPhonemizer、UtauRenderer、NsfHifiganRenderer 排除静音上下文的缺失别名警告/家族拒绝。新增 `--smoke-utau-selection-scope <output>`：四种模式的非连续选区、远处重叠、参数/歌词/包络、保存撤销、MCP 空/失效选区，以及 CVVC/HiFisampler 实际 PCM 与告警验证。
+
+更新 229：MainComponentDiffSinger 的 pronunciation 请求补 retake_ids，并保护 timing/pronunciation/pitch 的失效目标；showDiffSingerParameterLane 按当前选区检查实参。MainComponentMcp::ds_query_phonemes 在预测前设置 retake_ids。bridge.execute 在选中乐句内调用 Resolver.prepare；groups 的 check_overlap=False 仅用于允许编辑重叠音符的读音。现有 timing-selection UI 专项增加局部 pitch/实参、跨选区打开参数、发音预览/应用/保存/撤销和真实 MCP 查询。
+
+更新 228：MainComponent::showDiffSingerPhonemeEditor 将现有 visibleIds 写入 timing 请求 retake_ids，复用 bridge.groups 的作用域检查，不删除上下文或更改音符时间。新增 --smoke-diffsinger-timing-selection <project> <output>，复用 DiffSingerUiSmoke 的音素窗口检查，覆盖远处重叠/正常打开和真实重叠警告；juce/tests/diffsinger_selection_overlap.py 增加真实 timing 作用域及结果一致性检查。
+
+更新 227：AudioEngine::setUtauRenderNoteSelection/selectAllRenderedUtauNotes 区分精确选区与历史回放；rebuildLoadedClips 在 DS 历史分支使用 diffSingerHistoryAudio。DiffSingerPlaybackHistory 复用 RenderedClip 已完成 PCM；按完整渲染上下文校验，合并后压缩为每 Clip 一份累积 PCM，避免保存每次框选的整歌副本。新增 --smoke-diffsinger-history-playback <bank> <output>，从 MainComponent 空格键入口验证真实模型。
+
+更新 226：MainComponent 的 volumeParamButton / resized / setEnvelopeLane 接通 DS 响度入口及既有预设；PianoRollComponent::amplitudeEnvelopeFor 的 DS 默认是线性平直，DS 底部包络绘制按渲染增益插值采样曲线。测试：TrackEditingInterfacesUiSmoke 覆盖按钮、鼠标加点拖动删除、保存撤销与预设；DiffSingerConsonantSmoke 补充真实模型单次增益、导出、缓存撤销与直线/曲线/直线切换。
+
+更新 225：`PianoRollComponent::mouseDoubleClick` 将 DS 纳入歌词编辑入口，`ensureDefaultEnvelope` 跳过 DS。`engines/diffsinger/bridge.py::groups(notes, selected)` 按最大结束时间扫描重叠块；请求作用范围外的重叠块分隔上下文，范围内保持单声部错误。`execute` 对 render 使用 audible 范围，对局部生成使用 retake_ids。既有 `vowel-stretch-alignment` 覆盖 DS 双击；`juce/tests/diffsinger_selection_overlap.py` 验证嵌套重叠、上下文、真实模型音频及局部音高。更新需同时部署 EXE 和 bridge.py。
+
+更新 224：将现有 `utauVoicebankName` 控件移至算法选择框右侧，在 UTAU／DS 下显示并隐藏 `trackEditingHeading`，移除音源选择按钮后面的名称布局项。`refreshTrackEditingInterface` 仍从当前轨道绑定读取名称；双击 OTO 入口限定 UTAU，DS 只显示模型名／完整路径。界面专项沿用名称位置、三模式、窄窗口和双击 OTO 检查，并核对 DS 头部模型名称。
+
+更新 223：`pitchAlgorithm` 移至工具栏最左侧，`refreshTrackPitchItems` 提供全部七项并使用现有 Palette::accent 紫色主题色。移除 `trackEditingModeMenu/selectTrackEditingMode/showTrackEditingModeMenu`，标题恢复为只读轨道名。`setTrackEditingType` 接受可选算法／UTAU 子模式，在同一撤销事务内配置类型、兼容的拉伸算法及音源绑定；ComboBox 是唯一 UI 入口。界面专项覆盖跨家族切换、算法选择回显、单次撤销、窄窗口布局及 DS 合成家族。
+
+更新 222：`MainComponent::trackEditingModeMenu/showTrackEditingModeMenu/selectTrackEditingMode` 将标题点击连接到 `ProjectModel::setTrackEditingType`。模型复用 `configureNewTrackType`，只修改类型配置和不兼容音源绑定；正常工程通知刷新音频及界面。异步菜单捕获轨道 ID，取消、相同类型、失效 ID 不写入。已有 `--smoke-track-editing-interfaces-ui` 扩展覆盖三种 UTAU 转 DS、反向转换、歌词／控制点保留、撤销重做和保存重开。
+
+更新 221：新增 `UtauPointCurve.h`，以绝对时间排列连续自动过渡链上的控制点，沿用现有插值器与四点局部窗口缓存。`AudioEngine::projectTrackPitchImpl` 先生成共享曲线，再采样给各音符，保留控制点时间及自适应细化，跳过再次覆盖的名义过渡。缓存策略更新为 point-first v2。`--smoke-point-first-pitch <输出目录> <工程>` 验证显示、宿主投影和音符合成请求在控制点的一致性，覆盖三模式、越界交错点及真实工程。
+
+更新 220：`backend/UtauPitchTimeline.h` 提取原 `CvvcPitchTimeline`，提供共同的不可变音高链构建、相对时间绑定和 CVVC 采样视图。`AudioEngine::makeUtauRequest` 按整轨投影绑定普通／界／谋音符，工作线程不再因外部重采样器而清除读取器，`renderKey` 加入策略版本。`projectTrackPitchImpl` 的 UTAU 基础作者曲线保留内部转折并自适应细化，音乐过渡及显式连接图仍走原入口。新命令 `--smoke-utau-overlap-pitch <输出目录> <重采样器> [Flags=K2]` 覆盖三模式、音高修改／恢复、PIT、HiFisampler F0、实际 PCM、后台导出、选区、跨 Clip、亚 5 ms 转折、贝塞尔与颤音、休止和间隙。
+
+更新 219：`ChineseCvvcPhonemizer.h::CvvcPitchTimeline` 按连续非休止乐谱音符共享不可变宿主投影；音素的负时域／尾域读取实际时刻的音高，音源映射仍用名义 MIDI。`AudioEngine::renderKey` 增加 CVVC 音高策略版本。新入口 `--smoke-cvvc-pitch-project <输出目录> <工程> <重采样器> [Flags=K2]` 检查真实 peng→you→jin 段的原始／两种调音／恢复、数据包整数音分、HiFisampler F0 帧、实际混音时序及缓存恢复，支持 HF2 实际引擎验证；测试生成的音频和报告写到输出目录，原工程只读。
+
+更新 218：`PianoRollComponent::amplitudeEnvelopeFor` 的 UTAU 默认分支改为 5/35 ms 且 `linearToNext=true`；不修改 `envelopePresets` 的显式预设。`UtauEnvelopeDefaultsSmoke.h` 通过实际行内填词与预设提交核对普通／界／谋模式；`CvvcLinearProjectSmoke.h` 扩展为五次直线／曲线交替、同一视图旧元数据失效及 WCSNDM 实际增益检查，`CvvcLegacyEnvelopeSmoke.h` 同时检查交叉区像素。原 `--smoke-cvvc-linear-project` 命令参数兼容保留；旧预设语义回归入口 `--smoke-envelope-shapes <重采样器>`，菜单截图入口 `--smoke-envelope-presets <PNG>`。
+
+更新 217：`PianoRollComponent::ensureDefaultEnvelope` 在 CVVC 时序模式下不物化整音符柔起模板，避免填词把标准音素淡化变成叠乘。`ProjectModel::discardLegacyCvvcDefaultEnvelope` 共用于旧工程加载及手动→CVVC 切换，精确识别旧 5/15 ms 起音、35 ms 收尾、0 dB 平台。`--smoke-cvvc-linear-project <输出目录> <工程> <重采样器>` 用真实填词段检查载入、行内重填、保存重开及实际混音增益／响度包络截图，不写原工程。
+
+更新 216：`MainComponent::openSelectedMaterialEditor` 的 UTAU 路径经 `resolveVoiceSample` → `OtoWaveformEditorComponent::forVoicebankSample` 打开 OTO 源参数；普通模式用精确来源条目，区域模式用与渲染器一致的 `SampleSettings::loadVoicebankOto` 模式参数，按解析后录音和别名匹配。既有保存器写对应 OTO 文件，不建立原生 OTTO。音源名称通过 Main 的鼠标监听复用 `showVoicebankSettings`。`UtauSourceEditorSmoke.h` 随 `track-editing-interfaces-ui` 检查模式、前后缀解析、直接参数页和保存目的地。
+
 更新 215：`PianoRollComponent::mouseDoubleClick` 先复制音符命中，依据所属轨道 `effectiveTrackType == utau` 统一进入 `beginInlineAliasEdit`，不再判断歌词内容。UTAU 音符本体命中优先于 CVVC 音素标签选择，其余工具及原生对齐按原路径处理。`vowel-stretch-alignment` 覆盖三种 UTAU 模式、两种算法、是否绑定音源、七种歌词内容及多选情况下只改目标音符。
 
 更新 214：`PianoRollComponent::mouseDoubleClick` 在音符工具命中后，根据 `effectiveTrackType == utau` 且空歌词分流到现有 `beginInlineAliasEdit`，跳过先行声音网格对齐。在选择回调前复制命中数据，避免回调刷新布局使迭代器失效。提交沿用 `commitInlineAlias`；`vowel-stretch-alignment` 覆盖真实双击序列、取消／提交、三种 UTAU 模式和原生空歌词不打开输入框。

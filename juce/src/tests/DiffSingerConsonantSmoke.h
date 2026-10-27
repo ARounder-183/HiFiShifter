@@ -92,6 +92,72 @@ inline bool runDiffSingerConsonantSmoke(const juce::File& input, const juce::Fil
     engine.refreshUtauWaveforms();const auto waves=engine.utauNoteWaveforms();
     check("clip_lead_in_preserved",waves && !waves->empty() && waves->front().leadInSeconds>.02);
     check("clip_lead_in_export",engine.exportWav(folder.getChildFile("clip-start-consonant.wav"),error));
+    // Loudness is post-synthesis gain: editing it must not regenerate a
+    // different performance, change phoneme timing, or bake the gain twice.
+    auto neutral=data;
+    for(auto& n:neutral.tracks[0].clips[0].notes)n.amplitudeEnvelope.clear();
+    model.resetDocument(neutral);
+    request.notes=AudioEngine::diagnosticUtauRequestNotes(model.snapshot(),clip.id);
+    const auto dry=backend::DiffSingerRenderer::render(request);
+    const auto drySpans=spans;
+    check("DS_neutral_loudness_render",dry.warning.isEmpty()&&dry.buffer.getNumSamples()>0);
+    check("DS_neutral_export",renderWait(engine,model.snapshot())&&engine.exportWav(folder.getChildFile("ds-envelope-unity.wav"),error));
+    const auto dryKey=AudioEngine::diagnosticUtauRenderKey(model.snapshot(),clip.id);
+    std::vector<std::pair<juce::String,std::vector<AmplitudeEnvelopePoint>>> halves;
+    for(const auto& n:neutral.tracks[0].clips[0].notes)halves.push_back({n.id,{{0,-6.0206f,true},{1,-6.0206f,true}}});
+    check("DS_half_gain_committed",model.setNotesAmplitudeEnvelopes(halves));
+    check("DS_envelope_invalidates_playback_cache",dryKey!=AudioEngine::diagnosticUtauRenderKey(model.snapshot(),clip.id));
+    check("DS_half_gain_export",renderWait(engine,model.snapshot())&&engine.exportWav(folder.getChildFile("ds-envelope-half.wav"),error));
+    juce::AudioFormatManager formats;formats.registerBasicFormats();
+    std::unique_ptr<juce::AudioFormatReader> dryReader(formats.createReaderFor(folder.getChildFile("ds-envelope-unity.wav")));
+    std::unique_ptr<juce::AudioFormatReader> halfReader(formats.createReaderFor(folder.getChildFile("ds-envelope-half.wav")));
+    bool scaled=dryReader&&halfReader&&dryReader->lengthInSamples==halfReader->lengthInSamples&&dryReader->sampleRate==halfReader->sampleRate;
+    if(scaled)
+    {
+        const auto count=(int)dryReader->lengthInSamples;juce::AudioBuffer<float> a(2,count),b(2,count);
+        dryReader->read(&a,0,count,0,true,true);halfReader->read(&b,0,count,0,true,true);
+        double energy=0,residual=0;
+        for(int ch=0;ch<2;++ch)for(int s=0;s<count;++s)
+        {const auto expected=.5*a.getSample(ch,s),delta=b.getSample(ch,s)-expected;energy+=expected*expected;residual+=delta*delta;}
+        scaled=energy>1e-5&&residual/energy<1e-6;
+    }
+    check("DS_export_has_exactly_one_half_gain",scaled);
+    check("DS_envelope_undo_restores_render_key",model.undo()&&AudioEngine::diagnosticUtauRenderKey(model.snapshot(),clip.id)==dryKey);
+    check("DS_undo_export",renderWait(engine,model.snapshot())&&engine.exportWav(folder.getChildFile("ds-envelope-undo.wav"),error));
+    juce::MemoryBlock dryBytes,undoBytes;folder.getChildFile("ds-envelope-unity.wav").loadFileAsData(dryBytes);
+    folder.getChildFile("ds-envelope-undo.wav").loadFileAsData(undoBytes);
+    check("DS_undo_restores_identical_audio",dryBytes==undoBytes);
+    // Verify the visible curve against the real rendered PCM, including the
+    // consonant before the MIDI beat, while switching straight/curved/straight.
+    for(bool linear:{true,false,true})
+    {
+        model.setNotesAmplitudeEnvelopes({{"0",{{0,-60,linear},{.25,0,linear},{.7,0,linear},{1,-60,true}}},
+                                         {"1",{{0,-60,linear},{.25,0,linear},{.7,0,linear},{1,-60,true}}}});
+        request.notes=AudioEngine::diagnosticUtauRequestNotes(model.snapshot(),clip.id);
+        const auto shaped=backend::DiffSingerRenderer::render(request);
+        bool matches=shaped.warning.isEmpty()&&shaped.buffer.getNumSamples()==dry.buffer.getNumSamples();
+        check("DS_shaped_playback_ready",renderWait(engine,model.snapshot()));
+        engine.refreshUtauWaveforms();roll.diagnosticRefresh();roll.setTool(PianoRollComponent::Tool::amplitude);
+        roll.setUtauNoteWaveforms(engine.utauNoteWaveforms());
+        double residual=0,energy=0;
+        for(std::size_t i=0;i<spans.size();++i)
+        {
+            matches=matches&&spans[i].size()==drySpans[i].size();
+            if(spans[i].empty()) {matches=false;continue;}
+            for(std::size_t j=0;j<spans[i].size()&&j<drySpans[i].size();++j)
+                matches=matches&&spans[i][j].startSeconds==drySpans[i][j].startSeconds&&spans[i][j].endSeconds==drySpans[i][j].endSeconds;
+            const auto drawn=roll.diagnosticDrawnEnvelope(juce::String((int)i));
+            const auto onset=request.notes[i].startSeconds+spans[i].front().startSeconds;
+            const auto end=request.notes[i].startSeconds+spans[i].back().endSeconds;
+            for(int s=(int)std::ceil(onset*dry.sampleRate)+2;s<std::min((int)(end*dry.sampleRate)-2,shaped.buffer.getNumSamples());++s)
+            {
+                const auto gain=backend::envelopeGainFromDb(PianoRollComponent::diagnosticAmplitudeDbAt(drawn,s/dry.sampleRate-request.notes[i].startSeconds));
+                const auto expected=dry.buffer.getSample(0,s)*gain,delta=shaped.buffer.getSample(0,s)-expected;
+                energy+=expected*expected;residual+=delta*delta;
+            }
+        }
+        check(linear?"DS_linear_picture_matches_single_audio_gain":"DS_curved_picture_matches_single_audio_gain",matches&&energy>1e-5&&residual/energy<1e-6);
+    }
     std::cout<<"wang_lead_ms="<<pieces[1].lead*1000<<"|consonant_peak="<<energy<<std::endl;
     return ok;
 }

@@ -32,6 +32,11 @@ public:
                                bool mouMode,
                                std::function<void()> savedCallback);
     ~OtoWaveformEditorComponent() override;
+    // Source OTO editing is mode-specific, and opens one resolved phoneme
+    // directly. It must not migrate the bank into native OTTO annotations.
+    [[nodiscard]] static std::unique_ptr<OtoWaveformEditorComponent> forVoicebankSample(
+        const juce::File& root, UtauMode mode, const backend::UtauRenderer::ResolvedSample& sample,
+        std::function<void()> onSaved, juce::String& error);
     // The single material editor used by the manager and quick wrench. All
     // display modes share one native draft and save only to otto.ini.
     [[nodiscard]] static std::unique_ptr<OtoWaveformEditorComponent> forMaterial(
