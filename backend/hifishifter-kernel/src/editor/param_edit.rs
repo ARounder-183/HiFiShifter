@@ -7,18 +7,149 @@
 //!
 //! 本模块把用户显式编辑收敛为稀疏的连续 run：未出现的帧永远没有编辑，显示时再
 //! 与当前分析基线合成。独立 App 与 ARA 插件共用同一套提取、重映射和合成原语。
+//!
+//! 【为什么 run 需要锚】「锁定参数线」的两种语义只差一件事：这条编辑**跟着素材走**
+//! 还是**钉在工程位置**。旧模型把这件事存在权威级（一份 `Placement`），于是"移动之后
+//! 再画一笔"这一笔没有自己的位置可钉 —— 它只能继承整份权威的冻结窗口，而那窗口
+//! 描述的是**上一次**的几何。锚把它下沉到 run：每个 run 记住自己被画在哪一段工程
+//! 时间上，锁定 = 没有锚（跟随素材），不锁定 = 有锚（钉住）。开关因此是纯元数据
+//! 操作：只改 run 的 `anchor` 字段，源帧与数值一格不动。
 
 use crate::state::TrackParamsState;
 use serde::{Deserialize, Serialize};
+
+/// 一条编辑 run 在工程时间上的**锚**：它被画在哪一段工程时间 / 哪一段源时间上。
+///
+/// 【为什么锚是纯数据】它只描述一次映射（工程窗口 ⇄ 源窗口），任何时刻都能重新算出
+/// 一一对应，因此"钉住 / 不钉住"是可逆的：拨开关只改 `EditRun::anchor` 这个下标，
+/// 曲线本身一个字节都不动。旧模型把"钉在哪"存成权威级的 `frozen: Vec<RegionGeometry>`，
+/// 于是它只能描述**建立权威那一刻**的几何 —— 之后新画的笔画无处可钉，只能被解释成
+/// "跟随素材"，这正是"移动之后再画一笔，线落在错地方"的成因。
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct EditAnchor {
+    /// 这条锚落在哪条根轨上（工程时间的坐标属于一条根轨）。
+    pub root: String,
+    pub project_start_sec: f64,
+    pub project_duration_sec: f64,
+    pub source_start_sec: f64,
+    pub source_duration_sec: f64,
+    /// 倒放：工程时间增、源位置减。
+    #[serde(default)]
+    pub reversed: bool,
+}
+
+impl EditAnchor {
+    /// 窗口是否可用于映射（有限、正长度）。
+    pub fn is_valid(&self) -> bool {
+        [
+            self.project_start_sec,
+            self.project_duration_sec,
+            self.source_start_sec,
+            self.source_duration_sec,
+        ]
+        .into_iter()
+        .all(f64::is_finite)
+            && self.project_duration_sec > 0.0
+            && self.source_duration_sec > 0.0
+    }
+
+    /// 工程秒 → 源秒。窗口外返回 `None`（这一帧没有编辑），绝不钳到端点 ——
+    /// 钳位会把第一格编辑复制到整条空白区。
+    pub fn project_to_source(&self, project_sec: f64) -> Option<f64> {
+        if !self.is_valid() || !project_sec.is_finite() {
+            return None;
+        }
+        let end = self.project_start_sec + self.project_duration_sec;
+        // 右端是**闭**的：输出的最后一格常常正好落在窗口终点上（ceil 取整）。
+        if project_sec < self.project_start_sec - 1e-9 || project_sec > end + 1e-9 {
+            return None;
+        }
+        let clamped = project_sec.clamp(self.project_start_sec, end);
+        let fraction = (clamped - self.project_start_sec) / self.project_duration_sec;
+        Some(if self.reversed {
+            self.source_start_sec + self.source_duration_sec * (1.0 - fraction)
+        } else {
+            self.source_start_sec + self.source_duration_sec * fraction
+        })
+    }
+
+    /// 源秒 → 工程秒。源窗口外返回 `None`。
+    pub fn source_to_project(&self, source_sec: f64) -> Option<f64> {
+        if !self.is_valid() || !source_sec.is_finite() {
+            return None;
+        }
+        let end = self.source_start_sec + self.source_duration_sec;
+        if source_sec < self.source_start_sec - 1e-9 || source_sec > end + 1e-9 {
+            return None;
+        }
+        let clamped = source_sec.clamp(self.source_start_sec, end);
+        let fraction = (clamped - self.source_start_sec) / self.source_duration_sec;
+        Some(if self.reversed {
+            self.project_start_sec + self.project_duration_sec * (1.0 - fraction)
+        } else {
+            self.project_start_sec + self.project_duration_sec * fraction
+        })
+    }
+
+    /// 同一个窗口（同一根、同一段工程/源区间、同方向）。
+    pub fn equivalent(&self, other: &Self) -> bool {
+        self.root == other.root
+            && self.reversed == other.reversed
+            && [
+                (self.project_start_sec, other.project_start_sec),
+                (self.project_duration_sec, other.project_duration_sec),
+                (self.source_start_sec, other.source_start_sec),
+                (self.source_duration_sec, other.source_duration_sec),
+            ]
+            .into_iter()
+            .all(|(a, b)| (a - b).abs() <= 1e-9)
+    }
+}
+
+/// 工程秒 → 源秒（显式给定锚）。
+pub fn anchor_project_to_source(anchor: &EditAnchor, project_sec: f64) -> Option<f64> {
+    anchor.project_to_source(project_sec)
+}
+
+/// 源秒 → 工程秒（显式给定锚）。
+pub fn anchor_source_to_project(anchor: &EditAnchor, source_sec: f64) -> Option<f64> {
+    anchor.source_to_project(source_sec)
+}
 
 /// 一条连续的用户编辑 run（闭区间，按帧索引）。
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct EditRun {
     pub first_frame: usize,
     pub values: Vec<f32>,
+    /// 该 run 的锚（索引到 `EditCurveSet::anchors`）；`None` = 跟随素材。
+    ///
+    /// 【为什么是下标而不是内联结构】同一条 clip 上的一笔通常覆盖几十个 run
+    /// （pitch / tension / dyn 各一条曲线），它们共享同一个窗口。内联会把同一份
+    /// 窗口数据重复几十遍，而 `u32` 让"这一笔钉在哪"变成一个可以整体重指的指针 ——
+    /// 锁定开关因此是 O(run 数) 的下标清零，不是数据搬运。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<u32>,
 }
 
 impl EditRun {
+    /// 跟随素材的 run（独立 App 与锁定模式都用它）。
+    pub fn new(first_frame: usize, values: Vec<f32>) -> Self {
+        Self {
+            first_frame,
+            values,
+            anchor: None,
+        }
+    }
+
+    /// 钉在某个锚上的 run。
+    pub fn anchored(first_frame: usize, values: Vec<f32>, anchor: u32) -> Self {
+        Self {
+            first_frame,
+            values,
+            anchor: Some(anchor),
+        }
+    }
+
     pub fn end_frame(&self) -> usize {
         self.first_frame
             .saturating_add(self.values.len().saturating_sub(1))
@@ -71,6 +202,29 @@ impl EditCurve {
         self.runs.last().map(EditRun::end_frame)
     }
 
+    /// 一条曲线里属于某个锚层（`None` = 跟随素材）的 run。
+    ///
+    /// 【为什么按层取而不是"取全部"】同一个源帧可能同时存在"钉住的旧笔画"与
+    /// "跟随素材的新笔画"。合成时必须分两层各自映射，否则其中一层会被另一层的
+    /// 工程位置解释，用户看到的就是"拨一下开关，线跑到别处"。
+    pub fn runs_in_layer(&self, anchor: Option<u32>) -> impl Iterator<Item = &EditRun> {
+        self.runs.iter().filter(move |run| run.anchor == anchor)
+    }
+
+    /// 只保留某一层的 run（其它层原样丢弃）。
+    pub fn layer(&self, anchor: Option<u32>) -> Self {
+        Self {
+            frame_ms: self.frame_ms,
+            runs: self.runs_in_layer(anchor).cloned().collect(),
+        }
+    }
+
+    /// 某一层里是否真的有一条编辑。
+    pub fn has_layer(&self, anchor: Option<u32>) -> bool {
+        self.runs_in_layer(anchor).next().is_some()
+    }
+
+    /// 任意层里取样（旧存档迁移与 App 用）。
     pub fn value_at(&self, frame: f64, key: &str) -> Option<f32> {
         if !frame.is_finite() {
             return None;
@@ -79,6 +233,16 @@ impl EditCurve {
             .runs
             .partition_point(|run| (run.end_frame() as f64) < frame);
         self.runs.get(index).and_then(|run| run.sample(frame, key))
+    }
+
+    /// 只在某一层里取样。
+    pub fn value_at_in_layer(&self, frame: f64, key: &str, anchor: Option<u32>) -> Option<f32> {
+        if !frame.is_finite() {
+            return None;
+        }
+        let runs: Vec<&EditRun> = self.runs_in_layer(anchor).collect();
+        let index = runs.partition_point(|run| (run.end_frame() as f64) < frame);
+        runs.get(index).and_then(|run| run.sample(frame, key))
     }
 
     /// 展开成逐帧 map，便于捕获时做并集/删除证据。
@@ -98,22 +262,47 @@ impl EditCurve {
         key: &str,
         values: std::collections::BTreeMap<usize, f32>,
     ) -> Self {
+        Self::from_frame_values_in_layer(frame_ms, key, None, values)
+    }
+
+    /// 从逐帧 map 重建**某一层**的稀疏 run。
+    pub fn from_frame_values_in_layer(
+        frame_ms: f64,
+        key: &str,
+        anchor: Option<u32>,
+        values: std::collections::BTreeMap<usize, f32>,
+    ) -> Self {
         let mut curve = Self::new(frame_ms);
         for (frame, value) in values {
             if !is_edited_value(key, value, None, Some(default_pad_for_key(key))) {
                 continue;
             }
             match curve.runs.last_mut() {
-                Some(run) if run.end_frame().saturating_add(1) == frame => {
+                Some(run) if run.anchor == anchor && run.end_frame().saturating_add(1) == frame => {
                     run.values.push(value);
                 }
                 _ => curve.runs.push(EditRun {
                     first_frame: frame,
                     values: vec![value],
+                    anchor,
                 }),
             }
         }
         curve
+    }
+
+    /// 展开成逐帧 map，只取某一层。
+    pub fn frame_values_in_layer(
+        &self,
+        anchor: Option<u32>,
+    ) -> std::collections::BTreeMap<usize, f32> {
+        let mut out = std::collections::BTreeMap::new();
+        for run in self.runs_in_layer(anchor) {
+            for (offset, value) in run.values.iter().copied().enumerate() {
+                out.insert(run.first_frame + offset, value);
+            }
+        }
+        out
     }
 
     pub fn covers(&self, first: usize, last: usize) -> bool {
@@ -129,13 +318,24 @@ impl EditCurve {
     /// 只保留“不是默认值”的帧。用户把某帧画回默认值等价于删除该帧的编辑；
     /// 这是独立 App 既有语义（保存层与 compact_params 都按此精简）。
     pub fn replace_range(&mut self, first_frame: usize, values: &[f32], key: &str) {
+        self.replace_range_in_layer(first_frame, values, key, None);
+    }
+
+    /// 与 [`Self::replace_range`] 相同，但只动一层（其它层原样保留）。
+    pub fn replace_range_in_layer(
+        &mut self,
+        first_frame: usize,
+        values: &[f32],
+        key: &str,
+        anchor: Option<u32>,
+    ) {
         if values.is_empty() {
             return;
         }
         let last = first_frame.saturating_add(values.len().saturating_sub(1));
         let mut next = Vec::<EditRun>::new();
         for run in &self.runs {
-            if run.end_frame() < first_frame || run.first_frame > last {
+            if run.anchor != anchor || run.end_frame() < first_frame || run.first_frame > last {
                 next.push(run.clone());
                 continue;
             }
@@ -143,6 +343,7 @@ impl EditCurve {
                 next.push(EditRun {
                     first_frame: run.first_frame,
                     values: run.values[..first_frame - run.first_frame].to_vec(),
+                    anchor,
                 });
             }
             if run.end_frame() > last {
@@ -150,6 +351,7 @@ impl EditCurve {
                 next.push(EditRun {
                     first_frame: last + 1,
                     values: run.values[skip..].to_vec(),
+                    anchor,
                 });
             }
         }
@@ -159,21 +361,22 @@ impl EditCurve {
             }
             let frame = first_frame + offset;
             match next.last_mut() {
-                Some(run) if run.end_frame().saturating_add(1) == frame => {
+                Some(run) if run.anchor == anchor && run.end_frame().saturating_add(1) == frame => {
                     run.values.push(value);
                 }
                 _ => next.push(EditRun {
                     first_frame: frame,
                     values: vec![value],
+                    anchor,
                 }),
             }
         }
         next.retain(|run| !run.values.is_empty());
-        next.sort_by_key(|run| run.first_frame);
+        next.sort_by_key(|run| (run.first_frame, run.anchor));
         self.runs = next;
     }
 
-    /// 删除一段帧上的编辑。
+    /// 删除一段帧上的编辑（所有层）。
     pub fn remove_range(&mut self, first_frame: usize, last_frame: usize) {
         if first_frame > last_frame {
             return;
@@ -188,6 +391,7 @@ impl EditCurve {
                 next.push(EditRun {
                     first_frame: run.first_frame,
                     values: run.values[..first_frame - run.first_frame].to_vec(),
+                    anchor: run.anchor,
                 });
             }
             if run.end_frame() > last_frame {
@@ -195,6 +399,43 @@ impl EditCurve {
                 next.push(EditRun {
                     first_frame: last_frame + 1,
                     values: run.values[skip..].to_vec(),
+                    anchor: run.anchor,
+                });
+            }
+        }
+        next.retain(|run| !run.values.is_empty());
+        self.runs = next;
+    }
+
+    /// 删除某一层里的一段帧上的编辑。
+    pub fn remove_range_in_layer(
+        &mut self,
+        first_frame: usize,
+        last_frame: usize,
+        anchor: Option<u32>,
+    ) {
+        if first_frame > last_frame {
+            return;
+        }
+        let mut next = Vec::new();
+        for run in &self.runs {
+            if run.anchor != anchor || run.end_frame() < first_frame || run.first_frame > last_frame {
+                next.push(run.clone());
+                continue;
+            }
+            if run.first_frame < first_frame {
+                next.push(EditRun {
+                    first_frame: run.first_frame,
+                    values: run.values[..first_frame - run.first_frame].to_vec(),
+                    anchor,
+                });
+            }
+            if run.end_frame() > last_frame {
+                let skip = last_frame + 1 - run.first_frame;
+                next.push(EditRun {
+                    first_frame: last_frame + 1,
+                    values: run.values[skip..].to_vec(),
+                    anchor,
                 });
             }
         }
@@ -213,6 +454,7 @@ impl EditCurve {
             shifted.push(EditRun {
                 first_frame: first as usize,
                 values: run.values.clone(),
+                anchor: run.anchor,
             });
         }
         self.runs = shifted;
@@ -262,20 +504,14 @@ impl EditCurve {
                 }
                 (Some(_), Some(value)) => values.push(value),
                 (Some(begin), None) => {
-                    out.runs.push(EditRun {
-                        first_frame: begin,
-                        values: std::mem::take(&mut values),
-                    });
+                    out.runs.push(EditRun::new(begin, std::mem::take(&mut values)));
                     start = None;
                 }
                 (None, None) => {}
             }
         }
         if let Some(begin) = start {
-            out.runs.push(EditRun {
-                first_frame: begin,
-                values,
-            });
+            out.runs.push(EditRun::new(begin, values));
         }
         out
     }
@@ -303,20 +539,14 @@ impl EditCurve {
                 }
                 (Some(_), Some(value)) => values.push(value),
                 (Some(begin), None) => {
-                    out.runs.push(EditRun {
-                        first_frame: begin,
-                        values: std::mem::take(&mut values),
-                    });
+                    out.runs.push(EditRun::new(begin, std::mem::take(&mut values)));
                     start = None;
                 }
                 (None, None) => {}
             }
         }
         if let Some(begin) = start {
-            out.runs.push(EditRun {
-                first_frame: begin,
-                values,
-            });
+            out.runs.push(EditRun::new(begin, values));
         }
         out
     }
@@ -326,12 +556,40 @@ impl EditCurve {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct EditCurveSet {
     pub frame_ms: f64,
+    /// 去重后的锚表。同一条 clip 上的一笔只存一份窗口。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub anchors: Vec<EditAnchor>,
     pub curves: std::collections::BTreeMap<String, EditCurve>,
 }
 
 impl EditCurveSet {
     pub fn is_empty(&self) -> bool {
         self.curves.is_empty()
+    }
+
+    /// 某个窗口的锚下标；没有就追加一条（按窗口去重）。
+    pub fn intern_anchor(&mut self, anchor: &EditAnchor) -> u32 {
+        if let Some(index) = self
+            .anchors
+            .iter()
+            .position(|known| known.equivalent(anchor))
+        {
+            return index as u32;
+        }
+        self.anchors.push(anchor.clone());
+        (self.anchors.len() - 1) as u32
+    }
+
+    /// 锚表里的一条。
+    pub fn anchor(&self, index: u32) -> Option<&EditAnchor> {
+        self.anchors.get(index as usize)
+    }
+
+    /// 曲线里是否真的存在某一层。
+    pub fn has_layer(&self, key: &str, anchor: Option<u32>) -> bool {
+        self.curves
+            .get(key)
+            .is_some_and(|curve| curve.has_layer(anchor))
     }
 
     pub fn get(&self, key: &str) -> Option<&EditCurve> {
@@ -343,6 +601,14 @@ impl EditCurveSet {
             .get("pitch_edit")
             .is_some_and(|curve| !curve.is_empty())
     }
+}
+
+/// 把一条曲线里属于某个锚层（`None` = 无锚层）的 run 取出来。
+pub fn runs_for_anchor<'a>(
+    curve: &'a EditCurve,
+    anchor: Option<u32>,
+) -> impl Iterator<Item = &'a EditRun> {
+    curve.runs_in_layer(anchor)
 }
 
 /// 这个值是否表达“用户显式编辑”。
@@ -396,20 +662,14 @@ fn scan_curve<F>(
         match (start, hit) {
             (None, true) => start = Some(frame),
             (Some(begin), false) => {
-                curve.runs.push(EditRun {
-                    first_frame: begin,
-                    values: values[begin..frame].to_vec(),
-                });
+                curve.runs.push(EditRun::new(begin, values[begin..frame].to_vec()));
                 start = None;
             }
             _ => {}
         }
     }
     if let Some(begin) = start {
-        curve.runs.push(EditRun {
-            first_frame: begin,
-            values: values[begin..].to_vec(),
-        });
+        curve.runs.push(EditRun::new(begin, values[begin..].to_vec()));
     }
     if !curve.is_empty() {
         curves.insert(key.to_owned(), curve);
@@ -459,7 +719,11 @@ pub fn extract_edit_curves(params: &TrackParamsState) -> EditCurveSet {
         });
     }
 
-    EditCurveSet { frame_ms, curves }
+    EditCurveSet {
+        frame_ms,
+        anchors: Vec::new(),
+        curves,
+    }
 }
 
 /// 把一份编辑值合成到显示数组：未编辑帧取 defaults，编辑帧覆盖。
@@ -470,6 +734,24 @@ pub fn compose_curve<F>(
     key: &str,
     defaults: &[f32],
     edit: Option<&EditCurve>,
+    map_frame: F,
+) -> (Vec<f32>, Vec<bool>)
+where
+    F: FnMut(usize) -> Option<f64>,
+{
+    compose_curve_in_layer(key, defaults, edit, None, map_frame)
+}
+
+/// 与 [`compose_curve`] 相同，但只应用**某一层**的 run。
+///
+/// 【为什么要分层】锁定（无锚）与不锁定（有锚）是两层独立的编辑：无锚层跟着
+/// 当前几何走，有锚层钉在各自的工程窗口上。把两层混在一次取样里，其中一层就会
+/// 被另一层的映射解释 —— 这正是"拨一下开关，线跑到别处"的形状。
+pub fn compose_curve_in_layer<F>(
+    key: &str,
+    defaults: &[f32],
+    edit: Option<&EditCurve>,
+    anchor: Option<u32>,
     mut map_frame: F,
 ) -> (Vec<f32>, Vec<bool>)
 where
@@ -480,11 +762,14 @@ where
     let Some(edit) = edit else {
         return (values, edited);
     };
+    if !edit.has_layer(anchor) {
+        return (values, edited);
+    }
     for frame in 0..values.len() {
         let Some(source_frame) = map_frame(frame) else {
             continue;
         };
-        if let Some(value) = edit.value_at(source_frame, key) {
+        if let Some(value) = edit.value_at_in_layer(source_frame, key, anchor) {
             values[frame] = value;
             edited[frame] = true;
         }
@@ -515,20 +800,14 @@ where
             }
             (Some(_), Some(value)) => values.push(value),
             (Some(begin), None) => {
-                out.runs.push(EditRun {
-                    first_frame: begin,
-                    values: std::mem::take(&mut values),
-                });
+                out.runs.push(EditRun::new(begin, std::mem::take(&mut values)));
                 start = None;
             }
             (None, None) => {}
         }
     }
     if let Some(begin) = start {
-        out.runs.push(EditRun {
-            first_frame: begin,
-            values,
-        });
+        out.runs.push(EditRun::new(begin, values));
     }
     out
 }
@@ -594,10 +873,12 @@ mod tests {
                 EditRun {
                     first_frame: 0,
                     values: vec![1.0],
+                anchor: None,
                 },
                 EditRun {
                     first_frame: 10,
                     values: vec![3.0],
+                anchor: None,
                 },
             ],
         };
@@ -613,6 +894,7 @@ mod tests {
             runs: vec![EditRun {
                 first_frame: 10,
                 values: vec![1.0; 10],
+            anchor: None,
             }],
         };
         curve.remove_range(12, 15);
@@ -629,6 +911,7 @@ mod tests {
             runs: vec![EditRun {
                 first_frame: 2,
                 values: vec![9.0],
+            anchor: None,
             }],
         };
         let (values, edited) = compose_curve("tension_edit", &[0.0; 5], Some(&edit), |frame| {
@@ -645,6 +928,7 @@ mod tests {
             runs: vec![EditRun {
                 first_frame: 0,
                 values: vec![60.0, 62.0, 64.0],
+            anchor: None,
             }],
         };
         let stretched = curve.stretch_window(0.0, 2.0, 0.0, 4.0, "pitch_edit");
@@ -662,6 +946,7 @@ mod tests {
             runs: vec![EditRun {
                 first_frame: 0,
                 values: vec![60.0, 62.0, 64.0],
+            anchor: None,
             }],
         };
         let reversed = curve.reverse_window(0.0, 2.0, "pitch_edit");
@@ -669,4 +954,96 @@ mod tests {
         assert_eq!(reversed.value_at(1.0, "pitch_edit"), Some(62.0));
         assert_eq!(reversed.value_at(2.0, "pitch_edit"), Some(60.0));
     }
+    fn anchor(root: &str, start: f64, duration: f64, source: f64, reversed: bool) -> EditAnchor {
+        EditAnchor {
+            root: root.to_owned(),
+            project_start_sec: start,
+            project_duration_sec: duration,
+            source_start_sec: source,
+            source_duration_sec: duration,
+            reversed,
+        }
+    }
+
+    #[test]
+    fn an_anchor_maps_project_and_source_in_both_directions() {
+        let forward = anchor("root", 2.0, 4.0, 10.0, false);
+        assert_eq!(forward.project_to_source(2.0), Some(10.0));
+        assert_eq!(forward.project_to_source(4.0), Some(12.0));
+        assert_eq!(forward.project_to_source(6.0), Some(14.0));
+        assert_eq!(forward.project_to_source(6.5), None);
+        assert_eq!(forward.source_to_project(12.0), Some(4.0));
+
+        let reversed = anchor("root", 2.0, 4.0, 10.0, true);
+        assert_eq!(reversed.project_to_source(2.0), Some(14.0));
+        assert_eq!(reversed.project_to_source(6.0), Some(10.0));
+        assert_eq!(reversed.source_to_project(14.0), Some(2.0));
+    }
+
+    #[test]
+    fn an_anchored_run_keeps_its_project_position_after_a_move() {
+        // 用户在第 4 秒画了一格 64；clip 随后被移到第 10 秒。
+        let mut curve = EditCurve::new(5.0);
+        curve.runs.push(EditRun::anchored(800, vec![64.0], 0));
+        let pinned = anchor("root", 4.0, 0.005, 4.0, false);
+        // 钉住的这一笔仍然只出现在它被画的那一段工程时间上。
+        let (values, edited) = compose_curve_in_layer(
+            "pitch_edit",
+            &[60.0; 3],
+            Some(&curve),
+            Some(0),
+            |frame| {
+                pinned
+                    .project_to_source(4.0 + frame as f64 * 0.005)
+                    .map(|source_sec| source_sec * 1000.0 / 5.0)
+            },
+        );
+        assert_eq!(values, vec![64.0, 60.0, 60.0]);
+        assert_eq!(edited, vec![true, false, false]);
+        // 无锚层看不到它：锁定状态下这一笔必须跟着素材，而不是留在旧位置。
+        assert_eq!(curve.value_at_in_layer(800.0, "pitch_edit", None), None);
+        assert_eq!(
+            curve.value_at_in_layer(800.0, "pitch_edit", Some(0)),
+            Some(64.0)
+        );
+    }
+
+    #[test]
+    fn two_runs_over_the_same_source_with_different_anchors_stay_apart() {
+        let mut curve = EditCurve::new(5.0);
+        curve.runs.push(EditRun::new(0, vec![61.0]));
+        curve.runs.push(EditRun::anchored(0, vec![64.0], 0));
+        assert_eq!(curve.value_at(0.0, "pitch_edit"), Some(61.0));
+        assert_eq!(curve.value_at_in_layer(0.0, "pitch_edit", None), Some(61.0));
+        assert_eq!(curve.value_at_in_layer(0.0, "pitch_edit", Some(0)), Some(64.0));
+        assert_eq!(curve.runs_in_layer(None).count(), 1);
+        assert_eq!(curve.runs_in_layer(Some(0)).count(), 1);
+    }
+
+    #[test]
+    fn anchors_are_deduplicated_by_window() {
+        let mut set = EditCurveSet::default();
+        let first = set.intern_anchor(&anchor("root", 1.0, 2.0, 3.0, false));
+        let again = set.intern_anchor(&anchor("root", 1.0, 2.0, 3.0, false));
+        let other = set.intern_anchor(&anchor("root", 5.0, 2.0, 3.0, false));
+        assert_eq!(first, again);
+        assert_ne!(first, other);
+        assert_eq!(set.anchors.len(), 2);
+    }
+
+    #[test]
+    fn a_layer_survives_range_edits_and_shifts() {
+        let mut curve = EditCurve::new(5.0);
+        curve.runs.push(EditRun::anchored(10, vec![64.0, 65.0], 3));
+        curve.remove_range_in_layer(11, 11, Some(3));
+        assert_eq!(curve.runs.len(), 1);
+        assert_eq!(curve.runs[0].values, vec![64.0]);
+        assert!(curve.shift_by(5));
+        assert_eq!(curve.runs[0].first_frame, 15);
+        assert_eq!(curve.runs[0].anchor, Some(3));
+        // 另一层不受影响。
+        curve.remove_range_in_layer(0, 100, None);
+        assert_eq!(curve.runs.len(), 1);
+    }
+
 }
