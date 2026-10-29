@@ -1598,9 +1598,12 @@ impl EditorSession {
     /// 投影撤销项目缓存键时，源分析可能早已全量命中；由actor组装，不等GUI读取/新通知。
     /// 只消费clip分析缓存，不做神经推理；尚未齐全仍pending，用户目标曲线保持。
     fn complete_cached_analysis(&self) {
+        let Some(document) = self.document() else {
+            return;
+        };
         let roots = {
             let mut timeline = self.timeline.lock_or_recover();
-            // 首次载入尚未get_param_frames时也必须有根状态，否则完成通知找不到接收原线的条目。
+            // 首次载入尚未 get_param_frames 时也必须有根状态，否则完成通知找不到接收原线的条目。
             let active_roots = timeline
                 .clips
                 .iter()
@@ -1609,13 +1612,13 @@ impl EditorSession {
             for root in active_roots {
                 timeline.ensure_params_for_root(&root);
             }
+            // 【判据搬进基线层】"这一根还没有当前几何的分析结果"由文档的基线层回答。
+            // 显示层的 `pitch_orig_key` 不再是判据 —— 它已经由合成写入。
             timeline
                 .params_by_root_track
-                .iter()
-                .filter(|(_, params)| {
-                    params.pitch_orig_key.is_none() || params.dyn_orig_key.is_none()
-                })
-                .map(|(root, _)| root.clone())
+                .keys()
+                .filter(|root| !document.baseline_is_ready(root))
+                .cloned()
                 .collect::<Vec<_>>()
         };
         if roots.is_empty() {
@@ -1636,52 +1639,58 @@ impl EditorSession {
             hifishifter_kernel::pitch_analysis::maybe_schedule_dyn_orig(&analysis, root);
         }
         let params = analysis.into_inner().unwrap().params_by_root_track;
+        // 【T1 / T7：分析完成只写**基线层**】旧实现把 pitch_orig / pitch_edit 直接写进
+        // 显示时间线，再走"用户提交"漏斗回写文档 —— 于是"分析完成"被捕获成一次
+        // 用户编辑（R5），未编辑帧被当成用户输入固化。现在它只发布基线：
+        // 显示由合成产生，捕获只认编辑域的差分。
         let mut changed = false;
-        {
-            let mut timeline = self.timeline.lock_or_recover();
-            for root in roots {
-                let Some(next) = params.get(&root) else {
-                    continue;
-                };
-                let Some(current) = timeline.params_by_root_track.get_mut(&root) else {
-                    continue;
-                };
-                // 【原线补齐不等于内容变了】`pitch_orig_key` 是**缓存失效标记**，
-                // 不是内容本身：清掉它之后重新组装出的数组可能逐值相同（同一份
-                // 素材、同一份分析结果）。那时渲染结果一个字都不会变，就不该推进
-                // 渲染版本。
-                //
-                // 旧实现无条件 `changed = true`，于是"分析完成"这个本该一次性的
-                // 事件变成了每轮都推进版本：版本闸触发重渲染 → 快照换版 →
-                // 输出 token 变 → 装填一次接缝淡化（用户听到的咔）。
-                //
-                // 【为什么键仍然要写】它是失效标记：不写回去，下一轮 `roots` 仍然
-                // 包含它，组装会无限重复。写键、但不推进版本 —— 这两件事必须分开。
-                if current.pitch_orig_key.is_none() && next.pitch_orig_key.is_some() {
-                    let edit_differs =
-                        !current.pitch_edit_user_modified && current.pitch_edit != next.pitch_edit;
-                    changed |= current.pitch_orig != next.pitch_orig || edit_differs;
-                    current.pitch_orig = next.pitch_orig.clone();
-                    if !current.pitch_edit_user_modified {
-                        current.pitch_edit = next.pitch_edit.clone();
-                    }
-                    current.pitch_orig_key = next.pitch_orig_key.clone();
-                    current.has_pitch_adjustment_active = next.has_pitch_adjustment_active;
-                }
-                if current.dyn_orig_key.is_none() && next.dyn_orig_key.is_some() {
-                    changed |= current.dyn_orig != next.dyn_orig;
-                    current.dyn_orig = next.dyn_orig.clone();
-                    current.dyn_orig_key = next.dyn_orig_key.clone();
-                }
+        for root in roots {
+            let Some(next) = params.get(&root) else {
+                continue;
+            };
+            // 键缺席 ⇒ 分析还没真的完成；这一轮不发布，下一轮还会再试。
+            if next.pitch_orig_key.is_none() && next.dyn_orig_key.is_none() {
+                continue;
             }
+            changed |= document.publish_baseline(
+                &root,
+                crate::editor::parameter_atlas::RootBaseline::from_params(next),
+            );
         }
         if changed {
             self.revision_bumps_analysis.fetch_add(1, Ordering::Relaxed);
-            let updated = self.timeline.lock_or_recover().clone();
-            self.publish_timeline(updated);
+            self.refresh_display_from_document();
             self.render_requested.store(true, Ordering::Release);
         }
     }
+
+    /// 把文档合成出来的显示数组装进本会话的时间线（**只读**，不提交任何编辑）。
+    fn refresh_display_from_document(&self) {
+        let Some(document) = self.document() else {
+            return;
+        };
+        let Ok(view) = document.workspace_view() else {
+            return;
+        };
+        {
+            let mut timeline = self.timeline.lock_or_recover();
+            timeline.params_by_root_track = view.params.as_ref().clone();
+        }
+        self.publish_timeline_derived();
+    }
+
+    /// 派生发布：只让 GUI / 渲染看到新数组，**绝不**把它当成用户编辑提交。
+    fn publish_timeline_derived(&self) {
+        self.revision_bumps_publish.fetch_add(1, Ordering::Relaxed);
+        self.timeline_revision.fetch_add(1, Ordering::AcqRel);
+        self.clip_count.store(
+            self.timeline.lock_or_recover().clips.len() as u64,
+            Ordering::Release,
+        );
+        self.render_requested.store(true, Ordering::Release);
+        self.notify_timeline();
+    }
+
     /// 把宿主的编辑器视图选择搬进时间线（A5：`notifySelection` → 插件选区）。
     ///
     /// 【为什么只在"宿主的选择变了"时才覆盖】`notifySelection` 的契约是"通知插件用户
@@ -1874,10 +1883,9 @@ impl EditorSession {
         // 上一轮素材上卡死的分析结论不该跟着新素材走，否则新录的东西会被当成
         // "算不出来"，直接降级渲染（见 `analysis_abandoned` 的字段说明）。
         self.analysis_abandoned.lock_or_recover().clear();
-        for params in timeline.params_by_root_track.values_mut() {
-            params.pitch_orig_key = None;
-            params.dyn_orig_key = None;
-        }
+        // 【T1：不再清 `pitch_orig_key` / `dyn_orig_key`】这两个键的失效判据搬进了
+        // 基线层（`RootBaseline::pitch_key` / `dyn_key`）。在这里清显示层的键
+        // 只会让"分析完成"重新把整条数组写回显示数组 —— 那正是 R1 的起点。
         self.rewrite_ids(&mut timeline, true);
         self.retain_display_waveforms(&mut timeline, false);
         document.present_host_inventory(&mut timeline, &self.namespace);
@@ -2202,7 +2210,9 @@ impl EditorSession {
                     // 整份重载，看起来又是对的 —— 两条路径在这里分叉。
                     let roots = {
                         let mut timeline = self.timeline.lock_or_recover();
-                        adopt_view_into_timeline(&mut timeline, view.param_roots.as_ref());
+                        // 视图里的参数**就是**这一轮的完整显示（基线 + 编辑），
+                        // 因此整份装上即可 —— 不再需要"按帧合并"。
+                        timeline.params_by_root_track = view.params.as_ref().clone();
                         timeline.params_by_root_track.len()
                     };
                     hifishifter_kernel::log_limiter::emit_limited_key(
@@ -6938,153 +6948,3 @@ mod host_selection_tests {
     }
 }
 
-/// 把一份重投影结果落到 GUI 读的那份数组上（**唯一**落地点）。
-///
-/// 【为什么必须存在】`timeline.params_by_root_track` 是 `commands::payload` 交给
-/// 前端的那份数组，而重投影的结果住在 `WorkspaceView.params` 里。两者之间此前
-/// **没有任何一行代码** —— 于是"几何变了"只在模型提交（分割 / 撤销）那一刻被看见，
-/// 纯粹的移动永远等不到。
-fn adopt_view_into_timeline(
-    timeline: &mut TimelineState,
-    roots: &std::collections::BTreeMap<String, crate::editor::parameter_atlas::RootProjection>,
-) {
-    if roots.is_empty() {
-        // 这一轮投影一个根都没给出（身份表还没跟上）。整份清空会把用户看得见的
-        // 曲线一次性抹掉，而下一轮未必立刻回来 —— 什么都不做才是安全的那一侧。
-        return;
-    }
-    // 非破坏合并：只覆盖投影真正拥有的帧；不按投影根集合裁剪，不整值替换，
-    // 不丢 `pitch_orig_key` / `dyn_orig_key` / `pending_pitch_offset` 会话记账。
-    crate::editor::parameter_atlas::merge_root_projection(
-        &mut timeline.params_by_root_track,
-        roots
-            .iter()
-            .map(|(root, projection)| (root.clone(), projection.clone()))
-            .collect(),
-    );
-}
-
-#[cfg(test)]
-mod projection_adoption_tests {
-    use super::adopt_view_into_timeline;
-    use hifishifter_kernel::state::{TimelineState, TrackParamsState};
-    use std::collections::BTreeMap;
-
-    fn params(edit: &[f32]) -> TrackParamsState {
-        TrackParamsState {
-            pitch_edit: edit.to_vec(),
-            ..Default::default()
-        }
-    }
-
-    fn projection(
-        entries: &[(&str, TrackParamsState)],
-    ) -> BTreeMap<String, crate::editor::parameter_atlas::RootProjection> {
-        entries
-            .iter()
-            .map(|(root, value)| {
-                (
-                    (*root).to_owned(),
-                    crate::editor::parameter_atlas::RootProjection {
-                        params: value.clone(),
-                        #[allow(clippy::single_range_in_vec_init)]
-                        frames: [0..usize::MAX].to_vec(),
-                        edited_frames: BTreeMap::new(),
-                        complete: true,
-                        baseline_ready: true,
-                        cleared_curves: std::collections::BTreeSet::new(),
-                    },
-                )
-            })
-            .collect()
-    }
-
-    /// **不变量：重投影的曲线必须落到 GUI 读的那份数组上。**
-    ///
-    /// 【为什么钉死】这是"锁定参数线：移动 item 不跟随"的直接回归。设计上
-    /// `refresh_ui_geometry` 是"几何变了"的第二个写点，而它此前只把结果存进
-    /// `loaded.view`，GUI 读的 `timeline.params_by_root_track` 一个字都没变。
-    #[test]
-    fn a_reprojected_curve_replaces_what_the_gui_reads() {
-        let mut timeline = TimelineState::default();
-        timeline
-            .params_by_root_track
-            .insert("root".to_owned(), params(&[1.0, 1.0, 1.0]));
-        adopt_view_into_timeline(&mut timeline, &projection(&[("root", params(&[2.0, 2.0]))]));
-        assert_eq!(
-            timeline.params_by_root_track["root"].pitch_edit,
-            vec![2.0, 2.0, 0.0],
-            "完整投影替换可编辑层；尾部旧用户值不能残留"
-        );
-    }
-
-    /// **不变量：换曲线不换会话记账。**
-    ///
-    /// 【为什么】`pitch_orig_key` / `dyn_orig_key` 是"这条原线算的是哪份素材"的凭据。
-    /// 一次拖动把它们清掉，等于每次移动 item 都重跑一遍神经分析。
-    #[test]
-    fn adopting_a_projection_keeps_the_session_bookkeeping() {
-        let mut timeline = TimelineState::default();
-        let mut existing = params(&[1.0]);
-        existing.pitch_orig_key = Some("pitch-key".into());
-        existing.dyn_orig_key = Some("dyn-key".into());
-        existing.pending_pitch_offset = Some(vec![0.5]);
-        timeline
-            .params_by_root_track
-            .insert("root".to_owned(), existing);
-        adopt_view_into_timeline(&mut timeline, &projection(&[("root", params(&[3.0]))]));
-        let adopted = &timeline.params_by_root_track["root"];
-        assert_eq!(adopted.pitch_edit, vec![3.0]);
-        assert_eq!(adopted.pitch_orig_key.as_deref(), Some("pitch-key"));
-        assert_eq!(adopted.dyn_orig_key.as_deref(), Some("dyn-key"));
-        assert_eq!(adopted.pending_pitch_offset, Some(vec![0.5]));
-    }
-
-    /// **不变量：一轮空投影不清空用户看得见的曲线。**
-    ///
-    /// 【为什么】身份表还没跟上时投影会一个根都不给。整份替换会把曲线一次性抹掉，
-    /// 而下一轮未必立刻回来 —— 用户看到的是"参数线忽然全没了"。
-    #[test]
-    fn an_empty_projection_leaves_the_visible_curves_alone() {
-        let mut timeline = TimelineState::default();
-        timeline
-            .params_by_root_track
-            .insert("root".to_owned(), params(&[4.0, 5.0]));
-        adopt_view_into_timeline(&mut timeline, &BTreeMap::new());
-        assert_eq!(
-            timeline.params_by_root_track["root"].pitch_edit,
-            vec![4.0, 5.0]
-        );
-    }
-
-    /// **不变量：投影里暂时消失的根必须保留（部分投影不得删根）。**
-    #[test]
-    fn a_root_missing_from_a_partial_projection_is_kept() {
-        let mut timeline = TimelineState::default();
-        timeline
-            .params_by_root_track
-            .insert("gone".to_owned(), params(&[1.0]));
-        timeline
-            .params_by_root_track
-            .insert("kept".to_owned(), params(&[1.0]));
-        adopt_view_into_timeline(&mut timeline, &projection(&[("kept", params(&[2.0]))]));
-        assert!(timeline.params_by_root_track.contains_key("gone"));
-        assert!(timeline.params_by_root_track.contains_key("kept"));
-    }
-
-    /// **不变量：派生曲线不会被一轮"还没分析完"的投影抹掉。**
-    #[test]
-    fn a_projection_without_derived_curves_keeps_the_ones_already_computed() {
-        let mut timeline = TimelineState::default();
-        let mut existing = params(&[1.0]);
-        existing.pitch_orig = vec![7.0, 7.0];
-        existing.dyn_orig = vec![0.5, 0.5];
-        timeline
-            .params_by_root_track
-            .insert("root".to_owned(), existing);
-        adopt_view_into_timeline(&mut timeline, &projection(&[("root", params(&[2.0]))]));
-        let adopted = &timeline.params_by_root_track["root"];
-        assert_eq!(adopted.pitch_orig, vec![7.0, 7.0]);
-        assert_eq!(adopted.dyn_orig, vec![0.5, 0.5]);
-    }
-}

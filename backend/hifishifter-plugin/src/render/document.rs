@@ -40,9 +40,12 @@ pub(crate) struct WorkspaceView {
     /// 逐根轨参数：`edits.apply` 之后、编辑器真正拿到的那一份（文档 id 空间）。
     pub params:
         Arc<std::collections::BTreeMap<String, hifishifter_kernel::state::TrackParamsState>>,
-    /// 与 `params` 同代的按帧根投影；adopt 只合并它真正拥有的帧。
-    pub param_roots:
-        Arc<std::collections::BTreeMap<String, crate::editor::parameter_atlas::RootProjection>>,
+    /// 与 `params` 同代的**分析基线**：提交闸用它判定"编辑器读到的那份原始值"。
+    ///
+    /// 【为什么基线必须随视图一起交付】捕获的差分是在**编辑域**做的：只有知道
+    /// "这一帧的原始值是什么"，才能区分"用户没碰"与"用户画回了默认值"。
+    pub baseline:
+        Arc<std::collections::BTreeMap<String, crate::editor::parameter_atlas::RootBaseline>>,
     /// 这份视图对应的 UI 几何代次。提交时与当前代次不一致就走重基/重试。
     pub geometry_revision: u64,
 }
@@ -729,6 +732,12 @@ pub(crate) struct DocumentSession {
     /// 由 `settings_store::lock_param_lines()` 回答。用代次做缓存戳，热路径只付一次
     /// 原子读。初值取 `u64::MAX`：进程启动后的第一次调用必须真的落一次。
     placement_revision: AtomicU64,
+    /// 逐根轨的**分析基线**：派生原始值的唯一权威（见 `RootBaseline`）。
+    ///
+    /// 【为什么单独一层】派生值此前住在 `edits.params` / `timeline.params_by_root_track`
+    /// 里，于是"分析完成"与"编辑器回传"会互相覆盖 —— 用户看到的就是参数线随机回退。
+    /// 这里只有一个写入口（[publish_baseline]），显示永远由它派生。
+    pub(crate) baseline: Mutex<std::collections::BTreeMap<String, crate::editor::parameter_atlas::RootBaseline>>,
     /// ARA 变更通知队列，由 `runtime.rs` 在构建插件时注入。
     ///
     /// 【为什么必须有】宿主只保存"它知道变过"的部分。插件从不通知，只存增量的宿主
@@ -891,7 +900,7 @@ mod baseline_tests {
         let view = WorkspaceView {
             projection: "scope:abc".to_owned(),
             params: Arc::clone(&params),
-            param_roots: Arc::new(std::collections::BTreeMap::new()),
+            baseline: Arc::new(std::collections::BTreeMap::new()),
             geometry_revision: 0,
         };
         let shared = Arc::new(view);
@@ -1708,30 +1717,18 @@ impl DocumentSession {
         let _transaction = self.transaction.lock_or_recover();
         let mut edits = self.edits.lock_or_recover();
         let mut timeline = self.workspace_timeline_locked()?;
-        // 【锁序】`edits → timeline → host facts`（文档声明的顺序）。本调用要读身份表
-        // （host facts），因此必须在**持有 `edits` 之后**、与
-        // `accept_workspace_edits_with_groups` 同向，否则就是一条 ABBA 边。
-        self.sync_placement_with_settings(&mut edits, &timeline);
+        // 【锁序】`edits → timeline → baseline → host facts`（文档声明的顺序）。
+        self.sync_lock_mode(&mut edits, &timeline);
         edits.apply(&mut timeline);
         let geometry = self.ui_geometry_revision.load(Ordering::Acquire);
-        let mut resynced_now = false;
-        if self.resynced_geometry.load(Ordering::Acquire) != geometry {
-            self.resync_parameter_view_locked(&mut edits, &timeline)?;
-            self.resynced_geometry.store(geometry, Ordering::Release);
-            edits.apply(&mut timeline);
-            resynced_now = true;
-        }
+        self.compose_root_view_locked(&mut edits, &mut timeline)?;
+        self.resynced_geometry.store(geometry, Ordering::Release);
         let projection = self.workspace_projection_locked(&edits)?;
-        let param_roots = if resynced_now && !edits.atlas.is_empty() {
-            let identities = self.parameter_identities_locked(&timeline)?;
-            edits.atlas.project_root_records(&timeline, &identities)?
-        } else {
-            std::collections::BTreeMap::new()
-        };
+        let baseline = self.baseline_snapshot();
         Ok(Arc::new(WorkspaceView {
             projection,
             params: Arc::new(timeline.params_by_root_track),
-            param_roots: Arc::new(param_roots),
+            baseline: Arc::new(baseline),
             geometry_revision: geometry,
         }))
     }
@@ -1765,8 +1762,10 @@ impl DocumentSession {
     /// 【为什么按设置代次早退】本函数在每次读工作区时都被调用（33–400 ms 一次）。
     /// 代次没变时它只付一次原子读的代价。
     ///
-    /// 返回被改动的权威条数。
-    pub(crate) fn sync_placement_with_settings(
+    /// 【L5：代次只在**真的落地**之后推进】旧实现无论 `set_placement` 有没有改动都写
+    /// stamp，于是"这一轮没有活几何"会让开关被永久吞掉。现在只要还有权威在等几何，
+    /// 就不推进代次 —— 下一轮还会再试。
+    pub(crate) fn sync_lock_mode(
         &self,
         edits: &mut crate::state_channel::EditState,
         timeline: &hifishifter_kernel::state::TimelineState,
@@ -1777,23 +1776,20 @@ impl DocumentSession {
         if self.placement_revision.load(Ordering::Acquire) == stamp {
             return 0;
         }
-        // 【为什么可能拿到 None】测试里不读进程级设置（见
-        // `parameter_atlas::placement_from_settings`）。
-        let Some(wanted) = crate::editor::parameter_atlas::placement_from_settings() else {
+        // 【为什么可能拿到 None】测试里不读进程级设置（见 `lock_mode_from_settings`）。
+        let Some(wanted) = crate::editor::parameter_atlas::lock_mode_from_settings() else {
             return 0;
         };
-        let locked = matches!(
-            wanted,
-            crate::editor::parameter_atlas::Placement::FollowMaterial
-        );
         let identities = match self.parameter_identities_locked(timeline) {
             Ok(identities) => identities,
             // 身份表这一轮还没跟上：不改任何东西，也不推进代次 —— 下一轮再试。
             Err(_) => return 0,
         };
-        let changed = edits.atlas.set_placement(timeline, &identities, &wanted);
-        self.placement_revision.store(stamp, Ordering::Release);
-        if changed > 0 {
+        let sync = edits.atlas.set_lock_mode(timeline, &identities, wanted);
+        if sync.pending == 0 {
+            self.placement_revision.store(stamp, Ordering::Release);
+        }
+        if sync.changed > 0 {
             // 同一份数据在新映射下读出不同的值 ⇒ 渲染输入变了。
             // 只推进代次：清快照会制造一段静音空窗，而重排本来就是异步的。
             self.revision.fetch_add(1, Ordering::AcqRel);
@@ -1802,36 +1798,127 @@ impl DocumentSession {
                 log::Level::Warn,
                 "ara.atlas.placement-changed",
                 format_args!(
-                    "[ara] lock parameter lines is now {}; {changed} parameter set(s) moved to \
-                     the new placement (no samples were rewritten)",
-                    if locked { "on" } else { "off" }
+                    "[ara] lock mode: {} authorities={} anchored_runs={} pending={}",
+                    if wanted.is_locked() { "on" } else { "off" },
+                    sync.changed,
+                    sync.anchored_runs,
+                    sync.pending,
                 ),
             );
         }
-        changed
+        sync.changed
     }
 
-    /// 从图集重新派生"视图"这一层（`edits.params`）。
+    /// 从图集 + 基线**合成**这一轮每根轨的显示数组，并装进时间线。
     ///
-    /// 【为什么必须与读视图在同一个事务里】`edits.params` 既是编辑器看到的数组，
-    /// 也是 `workspace_projection_locked` 指纹的一部分。只要几何变了（方向 / Loop /
-    /// 裁剪 / 分割）而这一层没重建，指纹就与"编辑器真正看到的"脱钩 —— 那正是
-    /// "参数线停在旧方向"与"提交闸在错误的时间点判定冲突"的同一个根。
+    /// 【为什么必须与读视图在同一个事务里】`timeline.params_by_root_track` 既是编辑器
+    /// 看到的数组，也是 `workspace_projection_locked` 指纹的一部分。只要几何变了
+    /// （方向 / Loop / 裁剪 / 分割）而这一层没重建，指纹就与"编辑器真正看到的"脱钩 ——
+    /// 那正是"参数线停在旧方向"与"提交闸在错误的时间点判定冲突"的同一个根。
     ///
-    /// 【为什么按帧合并】投影可能只覆盖半条根轨（某条 clip 这一轮没有身份）。整值
-    /// 替换会用"一段默认值 + 半条真曲线"盖掉用户原来的整条曲线。
-    pub(crate) fn resync_parameter_view_locked(
+    /// 【为什么是"整根替换"而不是"按帧合并"】合成的输入已经包含基线层：未编辑帧就是
+    /// 这一代分析结果。因此输出**就是**完整显示，不需要再猜"这一轮哪些帧有信息"。
+    pub(crate) fn compose_root_view_locked(
         &self,
         edits: &mut crate::state_channel::EditState,
-        timeline: &hifishifter_kernel::state::TimelineState,
+        timeline: &mut hifishifter_kernel::state::TimelineState,
     ) -> Result<(), String> {
-        if edits.atlas.is_empty() || edits.needs_rebind {
+        if edits.atlas.is_empty() {
+            // 没有权威时也要把基线装进显示：否则分析完成之后 GUI 仍然读不到原始值。
+            self.install_baseline_locked(timeline);
             return Ok(());
         }
         let identities = self.parameter_identities_locked(timeline)?;
-        let roots = edits.atlas.project_root_records(timeline, &identities)?;
-        crate::editor::parameter_atlas::merge_root_projection(&mut edits.params, roots);
+        let baseline = self.baseline.lock_or_recover();
+        let views = edits
+            .atlas
+            .compose_root_views(timeline, &identities, &baseline, &edits.params);
+        drop(baseline);
+        // 合成里缺席的根保留旧值（缺基线 / 帧周期不同代）；时间线里不存在的根删除。
+        let roots = timeline
+            .tracks
+            .iter()
+            .filter(|track| track.parent_id.is_none())
+            .map(|track| track.id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        timeline
+            .params_by_root_track
+            .retain(|root, _| roots.contains(root));
+        for (root, params) in views {
+            timeline.params_by_root_track.insert(root, params);
+        }
         Ok(())
+    }
+
+    /// 把基线层装进时间线的派生字段（显示层的唯一来源）。
+    pub(crate) fn install_baseline_locked(
+        &self,
+        timeline: &mut hifishifter_kernel::state::TimelineState,
+    ) {
+        let baseline = self.baseline.lock_or_recover();
+        for (root, base) in baseline.iter() {
+            let Some(params) = timeline.params_by_root_track.get_mut(root) else {
+                continue;
+            };
+            if !base.is_ready() {
+                continue;
+            }
+            params.frame_period_ms = base.frame_period_ms;
+            params.pitch_orig = base.pitch_orig.clone();
+            params.dyn_orig = base.dyn_orig.clone();
+            params.tension_orig = base.tension_orig.clone();
+            params.pitch_orig_key = base.pitch_key.clone();
+            params.dyn_orig_key = base.dyn_key.clone();
+        }
+    }
+
+    /// 这一代基线的快照（随视图交付给提交闸）。
+    pub(crate) fn baseline_snapshot(
+        &self,
+    ) -> std::collections::BTreeMap<String, crate::editor::parameter_atlas::RootBaseline> {
+        self.baseline.lock_or_recover().clone()
+    }
+
+    /// 发布一条根轨的新基线（分析流水线的**唯一**写入口）。
+    ///
+    /// 【为什么不在这里发通知】它可能跑在 ARA 模型线程上；回调宿主会重入。
+    /// 通知由调用方在事务外发（见 `EditorSession::complete_cached_analysis`）。
+    pub(crate) fn publish_baseline(
+        &self,
+        root: &str,
+        baseline: crate::editor::parameter_atlas::RootBaseline,
+    ) -> bool {
+        let mut map = self.baseline.lock_or_recover();
+        let changed = map.get(root).is_none_or(|old| {
+            old.pitch_orig != baseline.pitch_orig
+                || old.dyn_orig != baseline.dyn_orig
+                || old.tension_orig != baseline.tension_orig
+                || old.frame_period_ms != baseline.frame_period_ms
+                || old.pitch_key != baseline.pitch_key
+                || old.dyn_key != baseline.dyn_key
+        });
+        map.insert(root.to_owned(), baseline);
+        changed
+    }
+
+    /// 这一根是否已经有一份**当前几何**的基线。
+    pub(crate) fn baseline_is_ready(&self, root: &str) -> bool {
+        self.baseline
+            .lock_or_recover()
+            .get(root)
+            .is_some_and(|baseline| baseline.is_ready())
+    }
+
+    /// 从图集重新派生"视图"这一层（`timeline.params_by_root_track`）。
+    pub(crate) fn resync_parameter_view_locked(
+        &self,
+        edits: &mut crate::state_channel::EditState,
+        timeline: &mut hifishifter_kernel::state::TimelineState,
+    ) -> Result<(), String> {
+        if edits.needs_rebind {
+            return Ok(());
+        }
+        self.compose_root_view_locked(edits, timeline)
     }
 
     /// 短事务同时冻结授权、参数、PCM和三个版本，分析副本的文件IO由actor随后执行。
@@ -1863,14 +1950,17 @@ impl DocumentSession {
         // `workspace_timeline_locked` 本身不碰 `edits`，所以把顺序倒过来是安全的。
         let mut edits = self.edits.lock_or_recover();
         let mut timeline = self.workspace_timeline_locked()?;
-        // 设置变了 ⇒ 曲线的可见位置必须立刻改变（见 `sync_placement_with_settings`）。
-        self.sync_placement_with_settings(&mut edits, &timeline);
+        // 设置变了 ⇒ 曲线的可见位置必须立刻改变（见 `sync_lock_mode`）。
+        self.sync_lock_mode(&mut edits, &timeline);
         edits.reconcile(&self.track_bindings.lock_or_recover())?;
         // 【为什么这里**不**重投影视图】`workspace_snapshot` 是**读**路径：它随时可能被
         // 编辑器 actor 的后台刷新调用，而一次读不能改变"待提交编辑"所依赖的指纹
         // （那会让并发的 apply 判成 workspace changed）。视图的重建放在两个真正的
         // "几何变了"的写点上：`remap_and_log` 与 `refresh_ui_geometry`。
         edits.apply(&mut timeline);
+        // 基线层是派生原始值的唯一来源：读路径也要把它装进显示，否则分析完成之后
+        // GUI 读到的 `pitch_orig` 仍是空数组。
+        self.install_baseline_locked(&mut timeline);
         // 【为什么先只取一份 id 集合、立刻释放锁】`source_failures` 与 `edit_sources`
         // 此前从不同时持有；`media_in_flight_items` 的锁序是
         // `regions → region_items → source_failures`。在这里引入 `edit_sources →
@@ -1913,11 +2003,11 @@ impl DocumentSession {
         // 按帧合并，不会用一份默认值覆盖整根。
         // 快照是读路径，不负责重投影；param_roots 只在 refresh_ui_geometry 的
         // workspace_view 里生成，避免读一次工作区也去锁 host facts。
-        let param_roots = std::collections::BTreeMap::new();
+        let baseline = self.baseline_snapshot();
         let view = Arc::new(WorkspaceView {
             projection,
             params: Arc::new(timeline.params_by_root_track.clone()),
-            param_roots: Arc::new(param_roots),
+            baseline: Arc::new(baseline),
             geometry_revision: self.ui_geometry_revision.load(Ordering::Acquire),
         });
         Ok((
@@ -2049,7 +2139,11 @@ impl DocumentSession {
         // 看到的那份，判据就变成"当前视图与某个别的视图不同" —— 而"不同"里既有用户的
         // 编辑，也有宿主移动造成的几何差异、以及投影范围的变化。把它当成用户意图写回
         // 源曲线，就是用户看到的"编辑一下 clip，参数线被重置"。
-        let previous_view = baseline.params.as_ref();
+        let client_view = baseline.params.as_ref();
+        let client_baseline = baseline.baseline.as_ref();
+        // 新 run 打不打锚由**用户当前设置**决定；既有 run 的锚不受影响。
+        let mode = crate::editor::parameter_atlas::lock_mode_from_settings()
+            .unwrap_or(crate::editor::parameter_atlas::EditMode::FollowMaterial);
 
         // 【为什么走带读数的入口】"这次写回被拒了哪几条曲线"必须离开本函数 ——
         // 它进状态快照与诊断包，用户与支持都看得见。丢掉读数的版本（
@@ -2058,7 +2152,9 @@ impl DocumentSession {
         candidate.atlas = edits.atlas.capture_changes_reporting(
             client,
             &identities,
-            previous_view,
+            client_view,
+            client_baseline,
+            mode,
             &mut report,
         )?;
         self.note_capture_report(report);
@@ -2079,11 +2175,11 @@ impl DocumentSession {
         // （仅限宿主轨道），所以 candidate.params 就是编辑器此刻显示的那份数组；
         // 指纹与它同代（同一份 candidate 算出）。调用方必须把它存回 `Loaded` ——
         // 类型上它不能"忘记"（返回值的唯一用途就是那个）。
-        let param_roots = std::collections::BTreeMap::new();
+        let baseline = self.baseline_snapshot();
         let view = Arc::new(WorkspaceView {
             projection,
             params: Arc::new(candidate.params.clone()),
-            param_roots: Arc::new(param_roots),
+            baseline: Arc::new(baseline),
             geometry_revision: self.ui_geometry_revision.load(Ordering::Acquire),
         });
         *edits = candidate;
@@ -2801,15 +2897,23 @@ impl DocumentSession {
         }
         let mut client = host.clone();
         restored.apply(&mut client);
-        if changed_geometry {
-            crate::editor::parameter_atlas::merge_root_projection(
-                &mut client.params_by_root_track,
-                restored.atlas.project_root_records(host, &identities)?,
-            );
-        } else if restored.atlas.is_empty() && !restored.params.is_empty() {
+        if restored.atlas.is_empty() && !restored.params.is_empty() {
             // 旧 v2 只有项目帧：在首次真实绑定的宿主布局建立 source basis。
             restored.atlas = crate::editor::parameter_atlas::ParameterAtlas::default()
                 .capture(&client, &identities)?;
+        }
+        if changed_geometry || !restored.atlas.is_empty() {
+            // 合成而不是"按帧合并"：基线来自宿主这一代的分析结果，编辑来自恢复的权威。
+            let baseline = crate::editor::parameter_atlas::RootBaseline::from_timeline(host);
+            let views = restored.atlas.compose_root_views(
+                host,
+                &identities,
+                &baseline,
+                &client.params_by_root_track,
+            );
+            for (root, params) in views {
+                client.params_by_root_track.insert(root, params);
+            }
         }
         let mut edits = self.edits.lock_or_recover();
         let mut merged = edits.merge(host, &client, edits.revision)?;
@@ -2913,7 +3017,8 @@ impl DocumentSession {
                 // 【合入之后必须重投影一次】合入是"权威刚换了"，而视图重建只在"几何
                 // 代次变了"时发生。不补这一步，重开工程后第一帧仍然看不见曲线。
                 let mut edits = self.edits.lock_or_recover();
-                if let Err(error) = self.resync_parameter_view_locked(&mut edits, &host) {
+                let mut host = host;
+                if let Err(error) = self.resync_parameter_view_locked(&mut edits, &mut host) {
                     log::warn!("[ara] parameter view resync after archive merge failed: {error}");
                 }
                 drop(edits);

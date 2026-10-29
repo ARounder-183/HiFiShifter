@@ -416,13 +416,17 @@ impl DocumentSession {
             .groups
             .apply(timeline, &self.group_aliases(""), &host_owned);
         if !edits.atlas.is_empty() {
-            let roots = edits
-                .atlas
-                .project_root_records(timeline, &self.parameter_identities_locked(timeline)?)?;
-            crate::editor::parameter_atlas::merge_root_projection(
-                &mut timeline.params_by_root_track,
-                roots,
+            let identities = self.parameter_identities_locked(timeline)?;
+            let baseline = self.baseline_snapshot();
+            let views = edits.atlas.compose_root_views(
+                timeline,
+                &identities,
+                &baseline,
+                &timeline.params_by_root_track,
             );
+            for (root, params) in views {
+                timeline.params_by_root_track.insert(root, params);
+            }
         }
         let roots = timeline
             .tracks
@@ -450,26 +454,34 @@ impl DocumentSession {
         edits.apply(&mut flat);
         self.add_group_view_tracks(&mut flat);
         if !edits.atlas.is_empty() {
-            let roots = edits
-                .atlas
-                .project_root_records(&flat, &self.parameter_identities_locked(&flat)?)?;
-            crate::editor::parameter_atlas::merge_root_projection(
-                &mut flat.params_by_root_track,
-                roots,
+            let identities = self.parameter_identities_locked(&flat)?;
+            let baseline = self.baseline_snapshot();
+            let views = edits.atlas.compose_root_views(
+                &flat,
+                &identities,
+                &baseline,
+                &flat.params_by_root_track,
             );
+            for (root, params) in views {
+                flat.params_by_root_track.insert(root, params);
+            }
         }
         let mut grouped = flat.clone();
         groups
             .unwrap_or(&edits.groups)
             .apply(&mut grouped, &self.group_aliases(""), &host_owned);
         if !edits.atlas.is_empty() {
-            let roots = edits
-                .atlas
-                .project_root_records(&grouped, &self.parameter_identities_locked(&grouped)?)?;
-            crate::editor::parameter_atlas::merge_root_projection(
-                &mut grouped.params_by_root_track,
-                roots,
+            let identities = self.parameter_identities_locked(&grouped)?;
+            let baseline = self.baseline_snapshot();
+            let views = edits.atlas.compose_root_views(
+                &grouped,
+                &identities,
+                &baseline,
+                &grouped.params_by_root_track,
             );
+            for (root, params) in views {
+                grouped.params_by_root_track.insert(root, params);
+            }
         }
         let roots = grouped
             .tracks

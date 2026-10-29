@@ -1338,8 +1338,10 @@ impl ModelHandle {
                             // 时不重建"的分叉（那正是"分割后参数线停在旧几何"的根）。
                             let followed = edits.atlas.follow_geometry(&timeline, &identities)?;
                             edits.atlas = followed;
-                            self.session
-                                .resync_parameter_view_locked(&mut edits, &timeline)?;
+                            // 【L2：视图不再在这里重建】这里的时间线是"刚映射出来的
+                            // 几何"，没有 `params_by_root_track` —— 拿它当基线投影，
+                            // 未编辑帧就会被写成默认值（参数线掉到底的成因）。
+                            // 显示由读路径 `compose_root_view_locked` 用**基线层**合成。
                             // 无活动region的轨道可能只是mute；保留其曲线，不能当删除清空。
                             edits
                                 .tracks
