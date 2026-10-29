@@ -25,6 +25,7 @@ import { batch } from "react-redux";
 import { holdLoudnessFetch, releaseLoudnessFetch } from "../loudnessFetchGate";
 import { resolveTrimSourceWindow, resolveTrimSnapOffset } from "../trimSourceWindow";
 import { resolveClipContentDurationSec } from "../../../../utils/loopRender";
+import { canRewriteParamLinesLocally } from "../../../../services/hostCapabilities";
 import { resolveRootTrackId } from "../../../../features/session/trackUtils";
 import {
     SNAP_HIGHLIGHT_GROUP,
@@ -1074,7 +1075,9 @@ export function useTimelineKernelTrim({
                         return;
                     }
                     // 锁定参数线：本次是否要搬曲线（决定取数闸门是否需要合上）。
-                    const lockParamLines = sessionRef.current.lockParamLinesEnabled;
+                    const lockParamLines =
+                        canRewriteParamLinesLocally() &&
+                        sessionRef.current.lockParamLinesEnabled;
                     // 闸门必须在落库派发**之前**合上（见 `loudnessFetchGate`）。
                     if (lockParamLines) holdLoudnessFetch();
                     const groupPersist = dispatch(setClipsStateBulkRemote({ updates })).unwrap();
@@ -1197,7 +1200,9 @@ export function useTimelineKernelTrim({
                     ),
                 };
                 // 锁定参数线：本次是否要搬曲线（决定取数闸门是否需要合上）。
-                const lockParamLines = sessionRef.current.lockParamLinesEnabled;
+                const lockParamLines =
+                    canRewriteParamLinesLocally() &&
+                    sessionRef.current.lockParamLinesEnabled;
                 // 闸门必须在落库派发**之前**合上（见 `loudnessFetchGate`）。
                 if (lockParamLines) holdLoudnessFetch();
                 const persist = dispatch(setClipsStateBulkRemote({ updates: [next] })).unwrap();
