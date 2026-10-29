@@ -5,6 +5,7 @@ pub mod host;
 pub mod host_pcm;
 pub mod host_timeline;
 pub mod midi_import;
+pub mod param_edit;
 pub mod params;
 pub mod selection;
 pub mod settings;
@@ -21,6 +22,25 @@ pub struct ConvertRange {
     pub frame_count: u32,
 }
 
+/// 一次参数写入的**显式意图**：范围来自命令本身，不依赖旧几何的整份数组差分。
+///
+/// ARA 插件用它把"用户确实写了哪几帧"记进会话；独立 App 可以忽略（默认 no-op）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ParamEditIntent {
+    SetFrames {
+        track_id: String,
+        param: String,
+        start_frame: usize,
+        frame_count: usize,
+    },
+    RestoreFrames {
+        track_id: String,
+        param: String,
+        start_frame: usize,
+        frame_count: usize,
+    },
+}
+
 /// 原参数命令所需的最小运行时边界；不包含Tauri、窗口或设备句柄。
 pub trait ParamHost {
     fn timeline(&self) -> &Mutex<TimelineState>;
@@ -29,6 +49,8 @@ pub trait ParamHost {
     fn mark_dirty(&self);
     /// 独立app更新设备快照；插件只排后台自动渲染，不能在这里跑设备/推理。
     fn publish_timeline(&self, timeline: TimelineState);
+    /// 记录一笔显式参数写入意图；默认实现供独立 App 忽略。
+    fn note_param_edit(&self, _intent: ParamEditIntent) {}
 }
 
 #[cfg(test)]

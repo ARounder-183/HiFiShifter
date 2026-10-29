@@ -1,5 +1,5 @@
 //! 参数命令：checkpoint控制undo，成功写入仍须独立记录工程dirty。
-use super::{ConvertRange, ParamHost};
+use super::{ConvertRange, ParamEditIntent, ParamHost};
 
 // ===================== param curves =====================
 
@@ -677,6 +677,12 @@ pub fn set_param_frames(
         invalidate_rendered_clip_caches_for_child_track(&tl, spec.track_id);
     }
 
+    state.note_param_edit(ParamEditIntent::SetFrames {
+        track_id: root.clone(),
+        param: param.clone(),
+        start_frame: start_frame as usize,
+        frame_count: written,
+    });
     // Ensure realtime playback reflects edits immediately.
     state.publish_timeline(tl.clone());
 
@@ -795,6 +801,12 @@ pub fn restore_param_frames(
         invalidate_rendered_clip_caches_for_child_track(&tl, spec.track_id);
     }
 
+    state.note_param_edit(ParamEditIntent::RestoreFrames {
+        track_id: root.clone(),
+        param: param.clone(),
+        start_frame: start_frame as usize,
+        frame_count: frame_count as usize,
+    });
     // Ensure realtime playback reflects edits immediately.
     state.publish_timeline(tl.clone());
 
