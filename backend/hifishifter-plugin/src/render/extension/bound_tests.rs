@@ -174,7 +174,7 @@ fn legacy_v2_first_restore_promotes_source_basis_before_host_transform() {
     let saved = owners[0].encode_state().unwrap();
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&saved).unwrap()["version"],
-        8
+        9
     );
     let atlas = document.edits.lock_or_recover().atlas.clone();
     assert_eq!(atlas.regions.len(), 1);

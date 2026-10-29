@@ -497,7 +497,10 @@ impl EditState {
         }
         let mut merged = self.clone();
         merged.revision = self.revision.checked_add(1).ok_or("revision exhausted")?;
-        // 逐根合并：只覆盖客户端真的送来的根；缺席的根保留（部分载荷不得删根）。
+        // 组件作用域：本组件 host 视图里的根由这一份载荷重新定义，其余根保留。
+        merged
+            .params
+            .retain(|id, _| !host_ids.contains(id.as_str()));
         for (id, incoming) in params {
             let entry = merged.params.entry(id.clone()).or_default();
             entry.frame_period_ms = incoming.frame_period_ms;
@@ -647,20 +650,18 @@ impl EditState {
         // 新存档只带用户可编辑曲线：分析派生的 pitch_orig / dyn_orig /
         // tension_orig 与未编辑的 pitch_edit 全部丢弃；旧权威的整条 curves
         // 也已在本代迁移成 edits，不得再写回。
-        trimmed.params =
-            trimmed
-                .params
-                .into_iter()
-                .map(|(root, params)| {
-                    // 保留根的存在性（空轨也要能被认回），但清掉派生数组。
-                    let compact = crate::editor::capture_edits::compact_params(&params)
-                        .unwrap_or_else(|| TrackParamsState {
-                            frame_period_ms: params.frame_period_ms,
-                            ..Default::default()
-                        });
-                    (root, compact)
-                })
-                .collect();
+        trimmed.params = trimmed
+            .params
+            .into_iter()
+            .map(|(root, params)| {
+                // 保留根的存在性（空轨也要能被认回），只清派生数组：
+                // 用户曲线不能按"标记是否存在"推断丢弃（旧载荷没有那个标记）。
+                (
+                    root,
+                    crate::editor::capture_edits::strip_derived_curves(&params),
+                )
+            })
+            .collect();
         for authority in trimmed.atlas.authorities.values_mut() {
             authority.clear_legacy_curves();
         }
@@ -703,12 +704,10 @@ impl EditState {
                 .params
                 .into_iter()
                 .map(|(root, params)| {
-                    let compact = crate::editor::capture_edits::compact_params(&params)
-                        .unwrap_or_else(|| TrackParamsState {
-                            frame_period_ms: params.frame_period_ms,
-                            ..Default::default()
-                        });
-                    (root, compact)
+                    (
+                        root,
+                        crate::editor::capture_edits::strip_derived_curves(&params),
+                    )
                 })
                 .collect();
         }

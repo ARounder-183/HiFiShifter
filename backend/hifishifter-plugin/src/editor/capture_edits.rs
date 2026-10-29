@@ -186,6 +186,35 @@ pub(crate) fn capture(
 ///
 /// 【为什么派生数组不能存】它们由源 PCM 重新分析得到，长工程里比用户曲线大一个数量级；
 /// 组件 state 有 64 MiB 硬上限，把它们塞进去会让保存直接失败。
+/// 只剥离**分析派生**的数组，保留一切用户可编辑曲线（含"标记缺失的旧载荷"）。
+///
+/// 【为什么与 compact_params 分开】`compact_params` 会按
+/// `pitch_edit_user_modified` 丢弃未编辑的 `pitch_edit` —— 那个标记在第 9 代之前
+/// 的载荷里**不存在**，用它判"这条曲线是不是用户数据"会把旧工程的手绘音高整条删掉。
+/// 存档写出与旧载荷迁移都必须走这一条。
+pub(crate) fn strip_derived_curves(params: &TrackParamsState) -> TrackParamsState {
+    let mut stripped = params.clone();
+    stripped.pitch_orig.clear();
+    stripped.tension_orig.clear();
+    stripped.dyn_orig.clear();
+    stripped.pitch_orig_key = None;
+    stripped.dyn_orig_key = None;
+    stripped.dyn_orig_source_key = None;
+    stripped.pending_pitch_offset = None;
+    sanitize_curve(&mut stripped.pitch_edit);
+    sanitize_curve(&mut stripped.tension_edit);
+    for curve in stripped.extra_curves.values_mut() {
+        sanitize_curve(curve);
+    }
+    stripped.extra_curves.retain(|_, curve| !curve.is_empty());
+    for value in stripped.extra_params.values_mut() {
+        if !value.is_finite() {
+            *value = 0.0;
+        }
+    }
+    stripped
+}
+
 pub(crate) fn compact_params(params: &TrackParamsState) -> Option<TrackParamsState> {
     let mut compact = params.clone();
     compact.pitch_orig.clear();
