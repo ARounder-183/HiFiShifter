@@ -20,6 +20,7 @@ import {
     canEditFadeS,
     canSelectHostFadeShape,
     canEditTempoMapTempo,
+    canRewriteParamLinesLocally,
     canExportAudio,
     canExportDataFiles,
     hostFadeAxes,
@@ -381,4 +382,14 @@ test("a backend that reports no export capability gates the export action off", 
     expect(canExportAudio()).toBe(false);
     expect(canExportDataFiles()).toBe(false);
     expect(pluginAllowsAction("project.export", null)).toBe(false);
+});
+
+test("parameter lines are only remapped locally outside ARA plugin mode", () => {
+    expect(canRewriteParamLinesLocally()).toBe(true);
+    window.__HFS_PLUGIN_BOOTSTRAP__ = {
+        version: 1,
+        viewId: "no-local-stretch",
+        hostCapabilities: araOnlyCaps(),
+    };
+    expect(canRewriteParamLinesLocally()).toBe(false);
 });

@@ -3856,6 +3856,7 @@ mod tests {
             "ara-track-0".into(),
             hifishifter_kernel::state::TrackParamsState {
                 frame_period_ms: 100.,
+                pitch_edit_user_modified: true,
                 pitch_orig: vec![57.; 6],
                 pitch_edit: vec![60., 61., 62., 63., 64., 65.],
                 ..Default::default()
@@ -4164,6 +4165,7 @@ mod tests {
             "ara-track-1".into(),
             hifishifter_kernel::state::TrackParamsState {
                 frame_period_ms: 5.0,
+                pitch_edit_user_modified: true,
                 pitch_edit: vec![62.0, 64.0],
                 ..Default::default()
             },

@@ -476,7 +476,7 @@ impl AuthorityParameters {
     }
     /// 把第 8 代及以前的整条曲线迁移成稀疏编辑（幂等）。
     pub(crate) fn migrate_legacy_to_edits(&mut self) {
-        if self.edits.is_empty() && !self.curves.is_empty() {
+        if self.edits.values().all(|curve| curve.is_empty()) && !self.curves.is_empty() {
             self.edits = edits_from_source_curves(&self.curves, self.template.frame_period_ms);
             self.last_edit_seq = self.last_edit_seq.max(1);
             self.curves.clear();
@@ -2237,6 +2237,7 @@ impl ParameterAtlas {
             // 权威里没有这条用户曲线 ⇒ 用户明确清空过整条线；只有 complete 才允许删除。
             if record.complete {
                 let mut intended = std::collections::BTreeSet::new();
+                let mut emptied = std::collections::BTreeSet::new();
                 for clip in &timeline.clips {
                     let Some(identity) = identities.get(&clip.id) else {
                         continue;
@@ -2251,20 +2252,20 @@ impl ParameterAtlas {
                         authority_key(identity.item.as_deref(), &identity.modification)
                     {
                         if let Some(params) = self.authorities.get(&key) {
-                            intended.extend(params.edits.keys().cloned());
+                            for (curve_key, curve) in &params.edits {
+                                if curve.is_empty() {
+                                    emptied.insert(curve_key.clone());
+                                } else {
+                                    intended.insert(curve_key.clone());
+                                }
+                            }
                         }
                     }
                 }
-                for key in &self
-                    .gaps
-                    .get(root)
-                    .map(|g| &g.curves)
-                    .into_iter()
-                    .flatten()
-                    .map(|(k, _)| k.clone())
-                    .collect::<Vec<_>>()
-                {
-                    intended.insert(key.clone());
+                if let Some(gaps) = self.gaps.get(root) {
+                    for key in gaps.curves.keys() {
+                        intended.insert(key.clone());
+                    }
                 }
                 for key in parameter_curves(&record.params)
                     .into_iter()
@@ -2276,6 +2277,11 @@ impl ParameterAtlas {
                     ) {
                         continue;
                     }
+                    if !intended.contains(&key) {
+                        record.cleared_curves.insert(key);
+                    }
+                }
+                for key in emptied {
                     if !intended.contains(&key) {
                         record.cleared_curves.insert(key);
                     }
