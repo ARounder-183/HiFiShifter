@@ -2,6 +2,9 @@
 //! 身份来自真实ARA region→modification/source边；不从名字/文件路径/会话序号猜冷恢复归属。
 
 use crate::ara::time_map::{SourceTimeMap, TimeAnchor};
+use hifishifter_kernel::editor::param_edit::{
+    compose_curve, default_pad_for_key, extract_edit_curves, is_edited_value, EditCurve,
+};
 use hifishifter_kernel::state::{TimelineState, TrackParamsState};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -176,10 +179,16 @@ pub(crate) struct RegionParameters {
     #[serde(default = "default_live")]
     live: bool,
     template: TrackParamsState,
+    /// 新路径的稀疏用户编辑；与 `curves` 并存以读旧存档。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    edits: BTreeMap<String, EditCurve>,
     curves: BTreeMap<String, SourceCurve>,
 }
 fn default_live() -> bool {
     true
+}
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
 }
 
 /// 曲线在工程时间上的**放置策略**。它只影响投影，不影响存储。
@@ -204,12 +213,14 @@ pub(crate) enum Placement {
     FollowMaterial,
     /// 不锁定：按冻结几何投影 —— 曲线留在工程位置。
     PinProject {
-        /// 冻结几何。
+        /// 冻结的是工程窗口到源窗口的若干段，而不是某一条 region 的单一几何。
         ///
-        /// `None` 只出现在两种场合：① 旧存档的 `anchor: "Project"`（那时还没有这个
-        /// 字段）；② 用户刚把开关拨到"不锁定"而这一轮没有活着的 clip 几何可用。
+        /// 一个 modification 可能被多条 region 共享（Cubase 分割是常态）。只冻结
+        /// 第一条 region 的几何会让所有半段都按父段窗口读，右半段整段落到界外。
+        /// 空 vec 只出现在两种场合：旧存档的 `anchor: "Project"`（那时还没有这个
+        /// 字段）；用户刚把开关拨到"不锁定"而这一轮没有活着的 clip 几何可用。
         /// 两者都在第一次能拿到几何时补上 —— 那正是它当初被冻结的那一刻。
-        frozen: Option<RegionGeometry>,
+        frozen: Vec<RegionGeometry>,
     },
 }
 
@@ -217,19 +228,64 @@ impl Placement {
     /// 把曲线钉在**当前**这份几何上（用户拨开关时用）。
     pub(crate) fn pinned(frozen: RegionGeometry) -> Self {
         Self::PinProject {
-            frozen: Some(frozen),
+            frozen: vec![frozen],
+        }
+    }
+
+    /// 把曲线钉在一组 region 几何上（同一 modification 被多条 region 共享）。
+    pub(crate) fn pinned_many(frozen: Vec<RegionGeometry>) -> Self {
+        Self::PinProject { frozen }
+    }
+
+    fn frozen(&self) -> &[RegionGeometry] {
+        match self {
+            Self::FollowMaterial => &[],
+            Self::PinProject { frozen } => frozen,
         }
     }
 
     /// 投影用的映射：跟随素材取**当前**几何，钉住取**冻结**几何。
     ///
-    /// 【为什么这里就是全部的实现】曲线永远按源秒存，于是"用哪条映射"是这两个策略
-    /// 之间唯一的差别。`frozen == None` 时退回当前几何：没有冻结数据时"钉在现在"
-    /// 是唯一可解释的答案。
+    /// frozen 为空时退回当前几何：没有冻结数据时"钉在现在"是唯一可解释的答案。
     fn map(&self, current: &RegionGeometry) -> Result<SourceTimeMap, String> {
         match self {
             Self::FollowMaterial => current.map(),
-            Self::PinProject { frozen } => frozen.as_ref().unwrap_or(current).map(),
+            Self::PinProject { frozen } => frozen.first().unwrap_or(current).map(),
+        }
+    }
+
+    /// 某一工程时刻该用哪条映射。钉住模式下窗口可以有多段；找不到覆盖段返回
+    /// `None`（这一帧没有编辑），而不是拿最近的一段猜。
+    fn map_at_project(
+        &self,
+        current: &RegionGeometry,
+        project_sec: f64,
+    ) -> Result<Option<SourceTimeMap>, String> {
+        match self {
+            Self::FollowMaterial => Ok(Some(current.map()?)),
+            Self::PinProject { frozen } if frozen.is_empty() => Ok(Some(current.map()?)),
+            Self::PinProject { frozen } => {
+                let found = frozen
+                    .iter()
+                    .filter(|geometry| {
+                        // 冻结窗口的右端是开区间：片段被拉长后，超出原窗口的那一格
+                        // 必须读出默认值，而不是把最后一个编辑复制到窗口外。
+                        project_sec >= geometry.project_start - 1e-9
+                            && project_sec
+                                < geometry.project_start + geometry.project_duration - 1e-9
+                    })
+                    .min_by(|a, b| {
+                        a.project_duration
+                            .partial_cmp(&b.project_duration)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                            .then_with(|| {
+                                a.project_start
+                                    .partial_cmp(&b.project_start)
+                                    .unwrap_or(std::cmp::Ordering::Equal)
+                            })
+                    });
+                found.map(|geometry| geometry.map()).transpose()
+            }
         }
     }
 }
@@ -272,7 +328,7 @@ impl<'de> Deserialize<'de> for Placement {
                     // 旧存档的两种取值：「Source」就是"跟随素材"，「Project」是"钉在
                     // 工程位置"（那时没有冻结几何字段，第一次能拿到几何时补上）。
                     "Source" | "FollowMaterial" => Ok(Placement::FollowMaterial),
-                    "Project" | "PinProject" => Ok(Placement::PinProject { frozen: None }),
+                    "Project" | "PinProject" => Ok(Placement::PinProject { frozen: Vec::new() }),
                     other => Err(E::unknown_variant(
                         other,
                         &["FollowMaterial", "PinProject", "Source", "Project"],
@@ -287,7 +343,18 @@ impl<'de> Deserialize<'de> for Placement {
                 if key != "PinProject" {
                     return Err(de::Error::unknown_variant(&key, &["PinProject"]));
                 }
-                let frozen = map.next_value::<Option<RegionGeometry>>()?;
+                // 兼容两种形状：旧存档是单个 object/null，新存档是数组。
+                #[derive(Deserialize)]
+                #[serde(untagged)]
+                enum Frozen {
+                    One(RegionGeometry),
+                    Many(Vec<RegionGeometry>),
+                }
+                let frozen = match map.next_value::<Option<Frozen>>()? {
+                    Some(Frozen::One(geometry)) => vec![geometry],
+                    Some(Frozen::Many(geometries)) => geometries,
+                    None => Vec::new(),
+                };
                 Ok(Placement::PinProject { frozen })
             }
         }
@@ -329,7 +396,14 @@ pub(crate) fn authority_key(item: Option<&str>, modification: &str) -> Option<St
 /// 移动 / 裁剪 / 拉伸同理。切分或重采样反而会引入误差。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct AuthorityParameters {
-    /// 曲线以**源域**存储；`basis` 是该权威被捕获时的源窗。
+    /// 用户显式编辑的稀疏源域记录。新写入只写这里；未出现的帧永远没有编辑。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    edits: BTreeMap<String, EditCurve>,
+    /// 该权威所属的 ARA audio source；take 切换后 item GUID 可能不变，必须校验源。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    source: String,
+    /// 旧存档（第 8 代及以前）的整条源域曲线。只读兼容；新写入为空，encode 前清空。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     curves: BTreeMap<String, SourceCurve>,
     /// 逐轨模板（曲线已清空），与 [`RegionParameters::template`] 同形。
     template: TrackParamsState,
@@ -340,6 +414,10 @@ pub(crate) struct AuthorityParameters {
     /// 而新写入一律用新名字。
     #[serde(default, alias = "anchor")]
     pub(crate) placement: Placement,
+
+    /// 该权威最后一次被用户写入的序号；多个编辑碰撞时用于确定性优先级。
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    last_edit_seq: u64,
 
     /// 连续多少轮它的 modification 已不在文档图里（孤儿回收的宽限期计数）。
     ///
@@ -366,17 +444,43 @@ const ORPHAN_GRACE_ROUNDS: u32 = 64;
 impl AuthorityParameters {
     /// 从一条已解析的 per-clip 记录建立权威条目（迁移与播种共用）。
     fn from_record(record: &RegionParameters, placement: Placement) -> Self {
+        let edits = if record.edits.is_empty() {
+            edits_from_source_curves(&record.curves, record.template.frame_period_ms)
+        } else {
+            record.edits.clone()
+        };
         Self {
+            edits,
+            source: record.identity.source.clone(),
             curves: record.curves.clone(),
             template: record.template.clone(),
             placement,
+            last_edit_seq: 0,
             unseen_rounds: 0,
             refused_rounds: 0,
         }
     }
-    /// 曲线是否为空（空条目等价于"这个身份还没有参数"）。
+    /// 是否持有用户编辑（曲线或旧存档曲线任一非空）。
     fn has_curves(&self) -> bool {
-        !self.curves.is_empty()
+        !self.edits.is_empty() || !self.curves.is_empty()
+    }
+    fn has_pitch_edits(&self) -> bool {
+        self.edits
+            .get("pitch_edit")
+            .is_some_and(|curve| !curve.is_empty())
+            || self.curves.contains_key("pitch_edit")
+    }
+    /// 第 9 代存档写出前清掉旧整条曲线；新权威只留 edits。
+    pub(crate) fn clear_legacy_curves(&mut self) {
+        self.curves.clear();
+    }
+    /// 把第 8 代及以前的整条曲线迁移成稀疏编辑（幂等）。
+    pub(crate) fn migrate_legacy_to_edits(&mut self) {
+        if self.edits.is_empty() && !self.curves.is_empty() {
+            self.edits = edits_from_source_curves(&self.curves, self.template.frame_period_ms);
+            self.last_edit_seq = self.last_edit_seq.max(1);
+            self.curves.clear();
+        }
     }
 }
 /// 项目绝对时间的空白编辑；只保存有效片段，clip源曲线不会被旧位置的整轨数组冒充。
@@ -449,10 +553,42 @@ pub(crate) struct ParameterAtlas {
 #[derive(Clone, Debug)]
 pub(crate) struct RootProjection {
     pub params: TrackParamsState,
-    /// 这一轮真的写入过的帧（升序、不重叠；`0..usize::MAX` = 整轨）。
+    /// 这一轮真的写入过的帧（升序、不重叠；不再使用整轨哨兵）。
     pub frames: Vec<std::ops::Range<usize>>,
-    /// 这条根轨上每一条 clip 都拿到权威了吗。
+    /// 每条曲线这一轮由显式编辑赢下的帧。只有这些帧允许覆盖其它 clip 的编辑。
+    pub edited_frames: BTreeMap<String, Vec<std::ops::Range<usize>>>,
+    /// 这一轮是否完整（所有 clip 都投影）。
     pub complete: bool,
+    /// baseline 是否与当前几何同代（有可用的 pitch_orig 内容）。
+    pub baseline_ready: bool,
+    /// 用户明确清空、且本轮 complete 的曲线；merge 时才允许删除。
+    pub cleared_curves: std::collections::BTreeSet<String>,
+}
+
+/// 一条 clip 的投影结果：参数 + 这一轮由显式编辑赢下的帧。
+struct ProjectedClip {
+    params: TrackParamsState,
+    edited_frames: BTreeMap<String, Vec<std::ops::Range<usize>>>,
+    baseline_ready: bool,
+}
+
+fn mask_ranges(mask: &[bool]) -> Vec<std::ops::Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut start = None;
+    for (frame, edited) in mask.iter().copied().enumerate() {
+        match (start, edited) {
+            (None, true) => start = Some(frame),
+            (Some(begin), false) => {
+                push_frame_range(&mut ranges, begin..frame);
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(begin) = start {
+        push_frame_range(&mut ranges, begin..mask.len());
+    }
+    ranges
 }
 
 impl RootProjection {
@@ -464,10 +600,12 @@ impl RootProjection {
     pub(crate) fn whole(params: TrackParamsState) -> Self {
         Self {
             params,
-            // 同 `project_root_records`：`frames` 常态是多个区间，整轨只是特例。
             #[allow(clippy::single_range_in_vec_init)]
             frames: [0..usize::MAX].to_vec(),
+            edited_frames: BTreeMap::new(),
             complete: true,
+            baseline_ready: true,
+            cleared_curves: std::collections::BTreeSet::new(),
         }
     }
 }
@@ -483,12 +621,23 @@ pub(crate) fn merge_root_projection(
 ) {
     for (root, projection) in roots {
         let Some(existing) = target.get_mut(&root) else {
-            // 新根：没有旧值可保护，整份装上。
-            target.insert(root, projection.params);
+            // 新根：只有完整投影才装。半份投影插进去会让缺失的帧永远以默认值存在。
+            if projection.complete {
+                target.insert(root, projection.params);
+            } else {
+                hifishifter_kernel::log_limiter::emit_limited_key(
+                    log::Level::Warn,
+                    "ara.atlas.root-projection-incomplete",
+                    format_args!(
+                        "[ara] root {root}: no existing root view and this round projected only \
+                         {} clip(s); the new root is not materialized from a partial default",
+                        projection.frames.len()
+                    ),
+                );
+            }
             continue;
         };
-        // 帧周期不一致时无法按帧合并（数组的时间轴不同）。此时保留旧值并留痕：
-        // 用错误的时间轴合并比"这一轮不更新"更糟。
+        // 帧周期不一致时无法按帧合并（数组的时间轴不同）。保留旧值。
         if existing.frame_period_ms != projection.params.frame_period_ms {
             hifishifter_kernel::log_limiter::emit_limited_key(
                 log::Level::Warn,
@@ -506,13 +655,27 @@ pub(crate) fn merge_root_projection(
                 log::Level::Warn,
                 "ara.atlas.root-projection-incomplete",
                 format_args!(
-                    "[ara] root {root}: only {} of its clips were projected this round; the \
-                     frames that were not projected keep their previous curves",
+                    "[ara] root {root}: only {} clip range(s) were projected this round;                      frames that were not projected keep their previous curves",
                     projection.frames.len()
                 ),
             );
         }
+        // 用户明确清空整条曲线：只有完整投影才允许删除。否则保留旧曲线。
+        if projection.complete {
+            for key in &projection.cleared_curves {
+                if parameter_curves(existing)
+                    .into_iter()
+                    .any(|(name, values)| &name == key && !values.is_empty())
+                {
+                    set_curve(existing, key, Vec::new());
+                }
+            }
+        }
         for (key, values) in parameter_curves(&projection.params) {
+            // 派生原始值只由当前分析/根 baseline 提供，永远不从投影写回。
+            if matches!(key.as_str(), "pitch_orig" | "dyn_orig" | "tension_orig") {
+                continue;
+            }
             if values.is_empty() {
                 continue;
             }
@@ -521,23 +684,81 @@ pub(crate) fn merge_root_projection(
                 .find(|(name, _)| *name == key)
                 .map(|(_, current)| current.to_vec())
                 .unwrap_or_default();
-            for frame in &projection.frames {
-                let from = frame.start;
-                // `usize::MAX` 是"整轨"的哨兵：它必须夹到数组长度上，不能直接当索引。
-                let to = frame.end.min(values.len());
+            // 显式编辑任何情况下都覆盖；未编辑帧只在 baseline 同代时覆盖。
+            let mut ranges = projection
+                .edited_frames
+                .get(&key)
+                .cloned()
+                .unwrap_or_default();
+            if projection.baseline_ready {
+                ranges.extend(projection.frames.iter().cloned());
+                ranges.sort_by_key(|range| (range.start, range.end));
+                let mut merged_ranges = Vec::new();
+                for range in ranges {
+                    push_frame_range(&mut merged_ranges, range);
+                }
+                ranges = merged_ranges;
+            }
+            for range in ranges {
+                let from = range.start;
+                let to = range.end.min(values.len());
                 if from >= to {
                     continue;
                 }
-                // 【为什么只在不够长时扩】`Vec::resize` 往**小**改会截断：原曲线
-                // 比这一段长时，截断等于把这一段之后的用户曲线整段丢掉。
                 if merged.len() < to {
                     merged.resize(to, pad(&key));
                 }
                 merged[from..to].copy_from_slice(&values[from..to]);
             }
-            set_curve(existing, &key, merged);
+            if !merged.is_empty() {
+                set_curve(existing, &key, merged);
+            }
         }
-        existing.pitch_edit_user_modified |= projection.params.pitch_edit_user_modified;
+        // 完整投影是这条根轨这一轮的**完整显示**：只保留 frames 的旧值会让 clip
+        // 移走后旧位置继续残留编辑（锁定时参数线“跟着走”的可见反例）。这里用
+        // projection 的完整曲线替换可编辑层，但保留派生原始值与会话记账。
+        if projection.complete {
+            let mut keys = std::collections::BTreeSet::new();
+            for (key, _) in parameter_curves(existing) {
+                if !matches!(key.as_str(), "pitch_orig" | "dyn_orig" | "tension_orig") {
+                    keys.insert(key);
+                }
+            }
+            for (key, _) in parameter_curves(&projection.params) {
+                if !matches!(key.as_str(), "pitch_orig" | "dyn_orig" | "tension_orig") {
+                    keys.insert(key);
+                }
+            }
+            keys.extend(projection.cleared_curves.iter().cloned());
+            for key in keys {
+                if projection.cleared_curves.contains(&key) {
+                    set_curve(existing, &key, Vec::new());
+                    continue;
+                }
+                let Some(values) = parameter_curves(&projection.params)
+                    .into_iter()
+                    .find(|(name, _)| *name == key)
+                    .map(|(_, values)| values.to_vec())
+                else {
+                    continue;
+                };
+                let old_len = parameter_curves(existing)
+                    .into_iter()
+                    .find(|(name, _)| *name == key)
+                    .map(|(_, values)| values.len())
+                    .unwrap_or(0);
+                let mut values = values;
+                if values.len() < old_len {
+                    values.resize(old_len, pad(&key));
+                }
+                set_curve(existing, &key, values);
+            }
+        }
+        if projection.complete {
+            existing.pitch_edit_user_modified = projection.params.pitch_edit_user_modified;
+        } else {
+            existing.pitch_edit_user_modified |= projection.params.pitch_edit_user_modified;
+        }
     }
 }
 
@@ -564,6 +785,14 @@ impl Authority<'_> {
             Self::Legacy(record) => &record.template,
         }
     }
+    fn edits(&self) -> Option<&BTreeMap<String, EditCurve>> {
+        match self {
+            Self::Current(params) if !params.edits.is_empty() => Some(&params.edits),
+            _ => None,
+        }
+    }
+
+    /// 旧存档的整条曲线；只用于读兼容与测试种子。
     fn curves(&self) -> &BTreeMap<String, SourceCurve> {
         match self {
             Self::Current(params) => &params.curves,
@@ -596,7 +825,10 @@ impl Authority<'_> {
     /// 都会改变它**。这是完全独立于图集的第二条"参数被重置"路径。权威里有一条音高曲线，
     /// 就说明这份数据是用户意图，不是可丢弃的陈旧分析结果。
     fn has_pitch_curve(&self) -> bool {
-        self.curves().contains_key("pitch_edit")
+        match self {
+            Self::Current(params) => params.has_pitch_edits(),
+            Self::Legacy(record) => record.curves.contains_key("pitch_edit"),
+        }
     }
 }
 
@@ -959,27 +1191,22 @@ impl ParameterAtlas {
         values: Vec<f32>,
         placement: Placement,
     ) {
-        let mut curves = BTreeMap::new();
-        curves.insert(
-            "pitch_edit".to_owned(),
-            SourceCurve {
-                basis: None,
-                domain: CurveDomain::Source,
-                first_frame: 0,
-                frame_ms,
-                values: Arc::new(values),
-                reservation: None,
-            },
-        );
+        let mut edits = BTreeMap::new();
+        if let Some(curve) = edit_curve_from_values(&values, 0, frame_ms, "pitch_edit") {
+            edits.insert("pitch_edit".to_owned(), curve);
+        }
         self.authorities.insert(
             key.to_owned(),
             AuthorityParameters {
-                curves,
+                edits,
+                source: String::new(),
+                curves: BTreeMap::new(),
                 template: TrackParamsState {
                     frame_period_ms: frame_ms,
                     ..Default::default()
                 },
                 placement,
+                last_edit_seq: 1,
                 unseen_rounds: 0,
                 refused_rounds: 0,
             },
@@ -1015,13 +1242,16 @@ impl ParameterAtlas {
         self.authorities.insert(
             key.to_owned(),
             AuthorityParameters {
+                edits: BTreeMap::new(),
+                source: String::new(),
                 curves,
                 template: TrackParamsState {
                     frame_period_ms: frame_ms,
                     ..Default::default()
                 },
                 // 旧 `anchor: "Project"` 读进来就是"钉住但还没有冻结几何"。
-                placement: Placement::PinProject { frozen: None },
+                placement: Placement::PinProject { frozen: Vec::new() },
+                last_edit_seq: 0,
                 unseen_rounds: 0,
                 refused_rounds: 0,
             },
@@ -1168,7 +1398,10 @@ impl ParameterAtlas {
             }
             // 权威侧：复制回执直接给出新 item GUID ⇒ 播种 item 级权威。
             if let Some(seed) = self.copy_seeds.get(item) {
-                let params = AuthorityParameters::from_record(seed, Placement::FollowMaterial);
+                let mut params = AuthorityParameters::from_record(seed, Placement::FollowMaterial);
+                // 复制回执已给出新 item GUID；item 身份比旧 source 更强，不能因为
+                // 宿主给复制体换了 source identity 就把 seed 丢掉。
+                params.source = String::new();
                 if let Some(key) = authority_key(Some(item), "") {
                     self.set_authority(&key, params);
                 }
@@ -1232,7 +1465,10 @@ impl ParameterAtlas {
         if let Some(mut seed) = seed {
             // 权威侧：分割回执给出右半段的新 item GUID（左半段沿用原 item 的 GUID，
             // 因此它自己的条目无需播种）⇒ 把父段参数整份播给右半段。
-            let params = AuthorityParameters::from_record(&seed, Placement::FollowMaterial);
+            let mut params = AuthorityParameters::from_record(&seed, Placement::FollowMaterial);
+            // 分割出的右半段可能拿到新的 source identity；item GUID 是宿主明确
+            // 给出的新身份，旧 source 不应阻止父曲线播种。
+            params.source = String::new();
             if let Some(key) = authority_key(Some(right), "") {
                 self.set_authority(&key, params);
             }
@@ -1242,6 +1478,13 @@ impl ParameterAtlas {
         self.note_split_parent(parent, right);
         Ok(())
     }
+    /// 读取第 8 代及以前存档后，把整条 curves 一次性折算成稀疏 edits。
+    pub(crate) fn migrate_legacy_authority_edits(&mut self) {
+        for authority in self.authorities.values_mut() {
+            authority.migrate_legacy_to_edits();
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.authorities.is_empty()
             && self.regions.is_empty()
@@ -1455,9 +1698,9 @@ impl ParameterAtlas {
             }
             let mut next = params.clone();
             next.curves = curves;
-            // 旧 `anchor: "Project"` 读进来是 `PinProject { frozen: None }`：折算用的
+            // 旧 `anchor: "Project"` 读进来是 `PinProject { frozen: [] }`：折算用的
             // 就是这份几何，于是把冻结几何补成它 —— 曲线停在用户此刻看到的位置。
-            if matches!(next.placement, Placement::PinProject { frozen: None }) {
+            if matches!(next.placement, Placement::PinProject { ref frozen } if frozen.is_empty()) {
                 next.placement = Placement::pinned(geometry);
             }
             migrated += 1;
@@ -1487,8 +1730,9 @@ impl ParameterAtlas {
         identities: &BTreeMap<String, RegionIdentity>,
         wanted: &Placement,
     ) -> usize {
-        // 每种放置各缓存一份几何：同一条权威只取一次，避免逐 clip 重复解算。
-        let mut geometry_by_key: BTreeMap<String, Option<RegionGeometry>> = BTreeMap::new();
+        // 同一条权威可能被多条 live region 共享（Cubase 分割、复制后共享 modification）。
+        // 钉住必须收集**全部**几何；只取第一条会让右半段按父段整窗读，整段落到界外。
+        let mut geometries_by_key: BTreeMap<String, Vec<RegionGeometry>> = BTreeMap::new();
         for clip in &timeline.clips {
             let Some(identity) = identities.get(&clip.id) else {
                 continue;
@@ -1496,32 +1740,44 @@ impl ParameterAtlas {
             let Some(key) = authority_key(identity.item.as_deref(), &identity.modification) else {
                 continue;
             };
-            if geometry_by_key.contains_key(&key) {
+            let Some(geometry) = geometry(clip).ok() else {
                 continue;
+            };
+            let windows = geometries_by_key.entry(key).or_default();
+            if !windows.iter().any(|known| known.equivalent(&geometry)) {
+                windows.push(geometry);
             }
-            geometry_by_key.insert(key, geometry(clip).ok());
+        }
+        for windows in geometries_by_key.values_mut() {
+            windows.sort_by(|a, b| {
+                a.project_start
+                    .partial_cmp(&b.project_start)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| {
+                        a.project_duration
+                            .partial_cmp(&b.project_duration)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+            });
+            windows.truncate(256);
         }
         let mut changed = 0_usize;
-        for (key, geometry) in geometry_by_key {
+        for (key, windows) in geometries_by_key {
             let Some(params) = self.authorities.get_mut(&key) else {
                 continue;
             };
             let target = match wanted {
                 Placement::FollowMaterial => Placement::FollowMaterial,
-                Placement::PinProject { .. } => match (params.placement.clone(), geometry) {
-                    // 已经有冻结几何 ⇒ 保留它：来回拨开关不该把"钉在哪"悄悄改掉。
-                    (
+                Placement::PinProject { .. } => match &params.placement {
+                    // 已经有冻结窗口 ⇒ 保留它：来回拨开关不该把“钉在哪”悄悄改掉。
+                    Placement::PinProject { frozen } if !frozen.is_empty() => {
                         Placement::PinProject {
-                            frozen: Some(frozen),
-                        },
-                        _,
-                    ) => Placement::PinProject {
-                        frozen: Some(frozen),
-                    },
-                    // 第一次钉住 / 旧存档没有冻结几何 ⇒ 用此刻的几何。
-                    (_, Some(geometry)) => Placement::pinned(geometry),
-                    // 没有任何活几何可钉：保留"待冻结"状态，下一次拿到几何时补上。
-                    (_, None) => Placement::PinProject { frozen: None },
+                            frozen: frozen.clone(),
+                        }
+                    }
+                    _ if !windows.is_empty() => Placement::pinned_many(windows),
+                    // 没有任何活几何可钉：保留待冻结状态，下一次拿到几何时补上。
+                    _ => Placement::PinProject { frozen: Vec::new() },
                 },
             };
             if params.placement != target {
@@ -1612,6 +1868,7 @@ impl ParameterAtlas {
                     current: geometry,
                     live: true,
                     template: authority.template().clone(),
+                    edits: authority.edits().cloned().unwrap_or_default(),
                     curves: authority.curves().clone(),
                 },
             );
@@ -1636,7 +1893,17 @@ impl ParameterAtlas {
     ) -> Result<Option<Authority<'a>>, String> {
         if let Some(key) = authority_key(identity.item.as_deref(), &identity.modification) {
             if let Some(params) = self.authorities.get(&key) {
-                return Ok(Some(Authority::Current(params)));
+                if params.source.is_empty() || params.source == identity.source {
+                    return Ok(Some(Authority::Current(params)));
+                }
+                hifishifter_kernel::log_limiter::emit_limited_key(
+                    log::Level::Warn,
+                    "ara.atlas.source-mismatch",
+                    format_args!(
+                        "[ara] parameter authority for key={key} belongs to source {} but the                          live region reads {}; the old source curve is not projected",
+                        params.source, identity.source
+                    ),
+                );
             }
         }
         // item 级缺席时按 modification 级兜底：宿主 `cloneAudioModification` 只能给出
@@ -1647,7 +1914,9 @@ impl ParameterAtlas {
                 .authorities
                 .get(&format!("mod:{}", identity.modification))
             {
-                return Ok(Some(Authority::Current(params)));
+                if params.source.is_empty() || params.source == identity.source {
+                    return Ok(Some(Authority::Current(params)));
+                }
             }
         }
         let legacy = self.find(identity, root, geometry)?.map(Authority::Legacy);
@@ -1720,36 +1989,54 @@ impl ParameterAtlas {
         timeline: &TimelineState,
         identities: &BTreeMap<String, RegionIdentity>,
     ) -> Result<BTreeMap<String, RootProjection>, String> {
-        let clips = self.project(timeline, identities)?;
         let mut roots = BTreeMap::<String, RootProjection>::new();
+        let baseline_for = |root: &str| timeline.params_by_root_track.get(root).cloned();
+        let baseline_ready_for = |root: &str| {
+            timeline
+                .params_by_root_track
+                .get(root)
+                .is_some_and(|params| !params.pitch_orig.is_empty())
+        };
+
+        // 空白编辑是最低层：只覆盖 clip 外的帧，clip 一旦盖住该位置就暂时隐藏。
         for (root, gaps) in &self.gaps {
             if !timeline.tracks.iter().any(|track| &track.id == root) {
                 continue;
             }
-            let mut params = gaps.template.clone();
+            let mut params = baseline_for(root).unwrap_or_else(|| gaps.template.clone());
+            clear_user_curves(&mut params);
+            let mut frames = Vec::new();
             for (key, curve) in &gaps.curves {
-                set_curve(
-                    &mut params,
-                    key,
-                    gap_values(curve, key, gaps.template.frame_period_ms)?,
+                let dense = gap_values(curve, key, params.frame_period_ms)?;
+                let ranges = gap_ranges(curve, params.frame_period_ms)?;
+                if ranges.is_empty() {
+                    continue;
+                }
+                set_curve(&mut params, key, dense);
+                for range in ranges {
+                    push_frame_range(&mut frames, range);
+                }
+            }
+            if let Some(existing) = roots.get_mut(root) {
+                // 同一根不应有两条 gap 记录；保留已合并的帧。
+                for range in frames {
+                    push_frame_range(&mut existing.frames, range);
+                }
+            } else {
+                roots.insert(
+                    root.clone(),
+                    RootProjection {
+                        params,
+                        frames,
+                        edited_frames: BTreeMap::new(),
+                        complete: true,
+                        baseline_ready: baseline_ready_for(root),
+                        cleared_curves: std::collections::BTreeSet::new(),
+                    },
                 );
             }
-            // 空白编辑覆盖整条根轨：它本身就是"整轨数组"，因此算作完整。
-            roots.insert(
-                root.clone(),
-                RootProjection {
-                    params,
-                    // 【为什么是 Vec】`frames` 的语义是"这一轮覆盖了哪些帧区间"，多数
-                    // 情况下是**多个**区间（半条轨被投影时）。整轨覆盖只是它的一个特例，
-                    // 为特例单开一个 `Box<[T]>` 分支会让消费方多一次判断。
-                    // clippy::single_range_in_vec_init 在此已知为假警报。
-                    #[allow(clippy::single_range_in_vec_init)]
-                    frames: [0..usize::MAX].to_vec(),
-                    complete: true,
-                },
-            );
         }
-        // 每条根轨上**应该**投影多少条 clip（`complete` 的分母）。
+
         let mut expected = BTreeMap::<String, usize>::new();
         for clip in &timeline.clips {
             if let Some(root) = timeline.resolve_root_track_id(&clip.track_id) {
@@ -1757,82 +2044,248 @@ impl ParameterAtlas {
             }
         }
         let mut projected = BTreeMap::<String, usize>::new();
+        let mut explicit_masks = BTreeMap::<(String, String), Vec<bool>>::new();
         let mut order = timeline.clips.iter().collect::<Vec<_>>();
+        // 选中的 clip 最后处理：它的显式编辑优先于其它 clip；它的未编辑帧不会
+        // 覆盖其它 clip 已经赢下的显式编辑（见下面的 explicit_masks）。
         order.sort_by_key(|clip| Some(&clip.id) == timeline.selected_clip_id.as_ref());
         for clip in order {
-            let Some(params) = clips.get(&clip.id) else {
-                continue;
-            };
-            // 与 `capture_changes` 同一条理由：几何不可解的片段只跳过它自己，
-            // 绝不能让一条片段使整份投影失败（本函数在渲染输入路径上）。
-            //
-            // 【为什么根解析也排到几何之后】此前 `ok_or("unknown parameter root")?` 排在
-            // 几何 `continue` **之前**，于是"轨道身份这一轮还查不到"会让整份投影失败 ——
-            // 而按设计它本该被下面这条 `continue` 兜住。两处口径统一到"局部跳过"。
             let Ok(geometry) = geometry(clip) else {
                 continue;
             };
             let Some(root) = timeline.resolve_root_track_id(&clip.track_id) else {
                 continue;
             };
-            let Some((begin, end)) = covered_frame_range(&geometry, params.frame_period_ms)? else {
+            let Some(detail) =
+                self.project_clip(timeline, identities, clip, false, &default_placement())?
+            else {
+                continue;
+            };
+            let Some((begin, end)) = covered_frame_range(&geometry, detail.params.frame_period_ms)?
+            else {
                 continue;
             };
             *projected.entry(root.clone()).or_default() += 1;
             let entry = roots.entry(root.clone()).or_insert_with(|| {
-                let mut entry = params.clone();
-                clear_curves(&mut entry);
+                let mut params = baseline_for(&root).unwrap_or_else(|| {
+                    let mut empty = detail.params.clone();
+                    clear_curves(&mut empty);
+                    empty
+                });
+                clear_user_curves(&mut params);
                 RootProjection {
-                    params: entry,
+                    params,
                     frames: Vec::new(),
+                    edited_frames: BTreeMap::new(),
                     complete: true,
+                    baseline_ready: baseline_ready_for(&root),
+                    cleared_curves: std::collections::BTreeSet::new(),
                 }
             });
-            if entry.params.frame_period_ms != params.frame_period_ms {
-                // 【为什么不再整份失败】同一根轨道上两条片段声明了不同的帧周期，
-                // 合并它们的曲线会把值按错误的时间轴插值。此前这里 `Err` ⇒ 整份投影
-                // 失败 ⇒ 整份编辑被拒。改为跳过这一条片段：它的曲线本次不并入根视图，
-                // 其余片段照常。
+            if entry.params.frame_period_ms != detail.params.frame_period_ms {
                 hifishifter_kernel::log_limiter::emit_limited_key(
                     log::Level::Warn,
                     "ara.atlas.frame-period-mismatch",
                     format_args!(
                         "[ara] clip {} declares {} ms frames but its root already uses {} ms; \
                          its curves are not merged into the root view",
-                        clip.id, params.frame_period_ms, entry.params.frame_period_ms
+                        clip.id, detail.params.frame_period_ms, entry.params.frame_period_ms
                     ),
                 );
                 continue;
             }
-            for (key, values) in parameter_curves(params) {
-                if values.is_empty() {
+            push_frame_range(&mut entry.frames, begin..end.saturating_add(1));
+            entry.baseline_ready |= detail.baseline_ready;
+            entry.params.pitch_edit_user_modified |= detail.params.pitch_edit_user_modified;
+
+            // clip 投影的每条曲线：显式编辑覆盖一切；未编辑帧只覆盖空白层，不覆盖
+            // 另一条 clip 的显式编辑。
+            for (key, values) in parameter_curves(&detail.params) {
+                if matches!(key.as_str(), "pitch_orig" | "dyn_orig" | "tension_orig")
+                    || values.is_empty()
+                {
                     continue;
                 }
-                if key == "pitch_edit" {
-                    // 根视图上也要标记，否则编辑器/渲染路径的 `ensure_params_for_root`
-                    // 会把这条来自权威的曲线当陈旧分析结果清掉。
-                    entry.params.pitch_edit_user_modified = true;
+                let mask = explicit_masks
+                    .entry((root.clone(), key.clone()))
+                    .or_insert_with(|| vec![false; end.saturating_add(1)]);
+                if mask.len() <= end {
+                    mask.resize(end.saturating_add(1), false);
                 }
-                let mut merged = parameter_curves(&entry.params)
+                let edited_ranges = detail.edited_frames.get(&key).cloned().unwrap_or_default();
+                let mut edited_mask = vec![false; end.saturating_sub(begin).saturating_add(1)];
+                for range in &edited_ranges {
+                    let lo = range.start.max(begin);
+                    let hi = range.end.min(end.saturating_add(1));
+                    if lo < hi {
+                        for bit in &mut edited_mask[lo - begin..hi - begin] {
+                            *bit = true;
+                        }
+                    }
+                }
+                let existing_values = parameter_curves(&entry.params)
                     .into_iter()
                     .find(|(name, _)| *name == key)
-                    .map(|(_, v)| v.to_vec())
+                    .map(|(_, values)| values.to_vec())
                     .unwrap_or_default();
-                merged.resize(end.max(merged.len().saturating_sub(1)) + 1, pad(&key));
-                merged[begin..=end].copy_from_slice(&values[begin..=end]);
+                let mut merged = existing_values;
+                if merged.len() <= end {
+                    merged.resize(end.saturating_add(1), pad(&key));
+                }
+                for frame in begin..=end {
+                    let is_edit = edited_mask[frame - begin];
+                    if is_edit {
+                        merged[frame] = values[frame];
+                        mask[frame] = true;
+                    } else if detail.baseline_ready && !mask[frame] {
+                        merged[frame] = values[frame];
+                    }
+                }
                 set_curve(&mut entry.params, &key, merged);
+                if !edited_mask.iter().any(|bit| *bit) {
+                    continue;
+                }
+                let ranges = entry.edited_frames.entry(key.clone()).or_default();
+                for range in edited_ranges {
+                    let lo = range.start.max(begin);
+                    let hi = range.end.min(end.saturating_add(1));
+                    if lo < hi {
+                        push_frame_range(ranges, lo..hi);
+                    }
+                }
             }
-            push_frame_range(&mut entry.frames, begin..end.saturating_add(1));
         }
+
+        // 不锁定时，编辑留在**冻结的工程位置**：即使 clip 已经移走，旧位置的线仍在。
+        // 这一层是显式编辑，最后叠加，保证不会被新位置上的未编辑 baseline 抹掉。
+        let mut pinned_seen = std::collections::BTreeSet::new();
+        for clip in &timeline.clips {
+            let Some(identity) = identities.get(&clip.id) else {
+                continue;
+            };
+            let Some(root) = timeline.resolve_root_track_id(&clip.track_id) else {
+                continue;
+            };
+            let Some(key) = authority_key(identity.item.as_deref(), &identity.modification) else {
+                continue;
+            };
+            if !pinned_seen.insert((root.clone(), key.clone())) {
+                continue;
+            }
+            let Some(params) = self.authorities.get(&key) else {
+                continue;
+            };
+            if !matches!(params.placement, Placement::PinProject { .. }) {
+                continue;
+            }
+            let windows = params.placement.frozen().to_vec();
+            if windows.is_empty() {
+                continue;
+            }
+            let entry = roots.entry(root.clone()).or_insert_with(|| {
+                let mut shell = baseline_for(&root).unwrap_or_else(|| params.template.clone());
+                clear_user_curves(&mut shell);
+                RootProjection {
+                    params: shell,
+                    frames: Vec::new(),
+                    edited_frames: BTreeMap::new(),
+                    complete: true,
+                    baseline_ready: baseline_ready_for(&root),
+                    cleared_curves: std::collections::BTreeSet::new(),
+                }
+            });
+            let frame_ms = entry.params.frame_period_ms;
+            for window in windows {
+                let Some((begin, end)) = covered_frame_range(&window, frame_ms)? else {
+                    continue;
+                };
+                for (curve_key, curve) in &params.edits {
+                    if curve.is_empty() {
+                        continue;
+                    }
+                    let existing = parameter_curves(&entry.params)
+                        .into_iter()
+                        .find(|(name, _)| name == curve_key)
+                        .map(|(_, values)| values.to_vec())
+                        .unwrap_or_default();
+                    let mut merged = existing;
+                    if merged.len() <= end {
+                        merged.resize(end.saturating_add(1), pad(curve_key));
+                    }
+                    let map = window.map()?;
+                    for frame in begin..=end {
+                        let project_sec = frame as f64 * frame_ms / 1000.0;
+                        let Some(source_sec) = map.project_to_source(project_sec) else {
+                            continue;
+                        };
+                        let source_frame = source_sec * 1000.0 / curve.frame_ms;
+                        if let Some(value) = curve.value_at(source_frame, curve_key) {
+                            merged[frame] = value;
+                            push_frame_range(&mut entry.frames, frame..frame + 1);
+                            let ranges = entry.edited_frames.entry(curve_key.clone()).or_default();
+                            push_frame_range(ranges, frame..frame + 1);
+                        }
+                    }
+                    set_curve(&mut entry.params, curve_key, merged);
+                }
+            }
+        }
+
         for (root, record) in roots.iter_mut() {
-            // 只有"这一轮**所有**该投影的 clip 都投影了"才算完整。少了任何一条，
-            // 它覆盖的那段帧就是**没有信息**，而不是"用户清空了曲线"。
             record.complete = expected.get(root).copied().unwrap_or(0)
                 == projected.get(root).copied().unwrap_or(0);
+            // 权威里没有这条用户曲线 ⇒ 用户明确清空过整条线；只有 complete 才允许删除。
+            if record.complete {
+                let mut intended = std::collections::BTreeSet::new();
+                for clip in &timeline.clips {
+                    let Some(identity) = identities.get(&clip.id) else {
+                        continue;
+                    };
+                    let Some(clip_root) = timeline.resolve_root_track_id(&clip.track_id) else {
+                        continue;
+                    };
+                    if clip_root != *root {
+                        continue;
+                    }
+                    if let Some(key) =
+                        authority_key(identity.item.as_deref(), &identity.modification)
+                    {
+                        if let Some(params) = self.authorities.get(&key) {
+                            intended.extend(params.edits.keys().cloned());
+                        }
+                    }
+                }
+                for key in &self
+                    .gaps
+                    .get(root)
+                    .map(|g| &g.curves)
+                    .into_iter()
+                    .flatten()
+                    .map(|(k, _)| k.clone())
+                    .collect::<Vec<_>>()
+                {
+                    intended.insert(key.clone());
+                }
+                for key in parameter_curves(&record.params)
+                    .into_iter()
+                    .map(|(key, _)| key)
+                {
+                    if matches!(
+                        key.as_str(),
+                        "pitch_edit" | "pitch_orig" | "dyn_orig" | "tension_orig"
+                    ) {
+                        continue;
+                    }
+                    if !intended.contains(&key) {
+                        record.cleared_curves.insert(key);
+                    }
+                }
+            }
         }
         Ok(roots)
     }
 
+    /// 接受当前投影上的真实编辑；未改动的曲线继续保留原始源坐标basis。
     /// 接受当前投影上的真实编辑；未改动的曲线继续保留原始源坐标basis。
     ///
     /// 【为什么保留一个"不要读数"的入口】生产路径必须走
@@ -1890,6 +2343,304 @@ impl ParameterAtlas {
 
     /// 只把相对旧GUI投影的delta送回源authority；重叠选区外保留该region自己的值。
     fn capture_inner(
+        &self,
+        timeline: &TimelineState,
+        identities: &BTreeMap<String, RegionIdentity>,
+        intent: WriteIntent<'_>,
+        placement: Placement,
+        report: &mut CaptureReport,
+    ) -> Result<Self, String> {
+        let previous_view = match &intent {
+            WriteIntent::User { baseline } => Some(*baseline),
+            WriteIntent::Derived => None,
+        };
+        // 派生写入没有用户意图：已有权威时只更新派生缓存，绝不把当前投影
+        // （可能已经是插值过的显示数组）当成新的源数据回写。
+        if matches!(intent, WriteIntent::Derived) && !self.authorities.is_empty() {
+            return Ok(self.clone());
+        }
+        let mut candidate = self.clone();
+        // 首次接触旧权威时先把整条 curves 折算成稀疏 edits；新写入永远只落 edits。
+        candidate.migrate_legacy_authority_edits();
+        candidate.capture_gaps_sparse(timeline, previous_view)?;
+        for clip in &timeline.clips {
+            let Some(identity) = identities.get(&clip.id) else {
+                continue;
+            };
+            if identity.source.is_empty()
+                || identity.modification.is_empty()
+                || clip.source_path.as_deref() != Some(identity.source.as_str())
+            {
+                hifishifter_kernel::log_limiter::emit_limited_key(
+                    log::Level::Warn,
+                    "ara.atlas.invalid-identity",
+                    format_args!(
+                        "[ara] clip {} has an invalid parameter identity this round; its curves \
+                         are not captured (other clips are unaffected)",
+                        clip.id
+                    ),
+                );
+                continue;
+            }
+            let Some(root) = timeline.resolve_root_track_id(&clip.track_id) else {
+                continue;
+            };
+            let Some(params) = timeline.params_by_root_track.get(&root) else {
+                candidate.regions.remove(&clip.id);
+                continue;
+            };
+            let Ok(geometry) = geometry(clip) else {
+                continue;
+            };
+            let frame_ms = params.frame_period_ms;
+            let (begin, _end) = frame_range(&geometry, frame_ms)?;
+            let view = previous_view
+                .and_then(|view| view.get(&root))
+                .filter(|view| view.frame_period_ms == frame_ms);
+            if previous_view.is_some_and(|view| !view.is_empty()) && view.is_none() {
+                hifishifter_kernel::log_limiter::emit_limited_key(
+                    log::Level::Warn,
+                    "ara.atlas.baseline-root-missing",
+                    format_args!(
+                        "[ara] line write skipped: no baseline array for root {root} this round \
+                         (the root id changed); clip {} keeps its authority unchanged instead of \
+                         treating the whole visible window as user input",
+                        clip.id
+                    ),
+                );
+                report.skipped_clips += 1;
+                continue;
+            }
+            let baseline_present = view.is_some();
+            // 编辑器没有改动任何用户曲线：这是几何刷新后的同一份投影，不能把
+            // 插值结果再写回源域（重复往返会逐次模糊曲线）。
+            if let Some(baseline) = view {
+                if baseline.pitch_edit == params.pitch_edit
+                    && baseline.tension_edit == params.tension_edit
+                    && baseline.extra_curves == params.extra_curves
+                {
+                    continue;
+                }
+            }
+            let protected = timeline
+                .selected_clip_id
+                .as_ref()
+                .and_then(|id| timeline.clips.iter().find(|selected| selected.id == *id))
+                .filter(|selected| {
+                    timeline
+                        .resolve_root_track_id(&selected.track_id)
+                        .as_deref()
+                        == Some(root.as_str())
+                        && selected.id != clip.id
+                })
+                .map(|selected| (selected.start_sec, selected.start_sec + selected.length_sec));
+            let desired = extract_edit_curves(params);
+            let baseline_edits = view.map(extract_edit_curves);
+            let key_for_anchor = authority_key(identity.item.as_deref(), &identity.modification);
+            let Some(key_for_anchor) = key_for_anchor else {
+                continue;
+            };
+            let existing = candidate
+                .authorities
+                .get(&key_for_anchor)
+                .map(|authority| {
+                    (
+                        authority.edits.clone(),
+                        authority.placement.clone(),
+                        authority.last_edit_seq,
+                    )
+                })
+                .or_else(|| {
+                    self.authorities.get(&key_for_anchor).map(|authority| {
+                        (
+                            authority.edits.clone(),
+                            authority.placement.clone(),
+                            authority.last_edit_seq,
+                        )
+                    })
+                });
+            let had_existing = existing.is_some();
+            let (mut edits, inherited_placement, last_seq) =
+                existing.unwrap_or_else(|| (BTreeMap::new(), placement.clone(), 0));
+            let mut keys = std::collections::BTreeSet::new();
+            keys.extend(edits.keys().cloned());
+            keys.extend(desired.curves.keys().cloned());
+            if let Some(baseline) = &baseline_edits {
+                keys.extend(baseline.curves.keys().cloned());
+            }
+            let mut changed = false;
+            for key in keys {
+                let old = edits.get(&key).cloned();
+                let desired_source = desired
+                    .get(&key)
+                    .map(|curve| {
+                        project_curve_to_source(curve, &key, &geometry, frame_ms, protected)
+                    })
+                    .transpose()?;
+                let baseline_source = baseline_edits
+                    .as_ref()
+                    .and_then(|baseline| baseline.get(&key))
+                    .map(|curve| project_curve_to_source(curve, &key, &geometry, frame_ms, None))
+                    .transpose()?;
+                let mut values = old
+                    .as_ref()
+                    .map(EditCurve::frame_values)
+                    .unwrap_or_default();
+                if baseline_present && baseline_source.is_none() && old.is_some() {
+                    report.no_baseline_curves += 1;
+                }
+                let mut removed = 0_usize;
+                if baseline_present {
+                    if let Some(baseline_curve) = &baseline_source {
+                        let desired_curve = desired_source.as_ref();
+                        let old_frames = values.keys().copied().collect::<Vec<_>>();
+                        for source_frame in old_frames {
+                            let source_sec = source_frame as f64 * frame_ms / 1000.0;
+                            let Some(project_sec) = geometry.map()?.source_to_project(source_sec)
+                            else {
+                                continue;
+                            };
+                            if project_sec < geometry.project_start - 1e-9
+                                || project_sec
+                                    > geometry.project_start + geometry.project_duration + 1e-9
+                            {
+                                continue;
+                            }
+                            if protected
+                                .is_some_and(|(lo, hi)| project_sec >= lo && project_sec <= hi)
+                            {
+                                continue;
+                            }
+                            let source_frame_f = source_frame as f64;
+                            let baseline_hit =
+                                baseline_curve.value_at(source_frame_f, &key).is_some();
+                            let desired_hit = desired_curve.is_some_and(|curve| {
+                                curve.value_at(source_frame_f, &key).is_some()
+                            });
+                            if baseline_hit && !desired_hit {
+                                values.remove(&source_frame);
+                                removed += 1;
+                            }
+                        }
+                    }
+                }
+                if let Some(desired_curve) = &desired_source {
+                    for (frame, value) in desired_curve.frame_values() {
+                        values.insert(frame, value);
+                    }
+                    changed = true;
+                }
+                let rebuilt = EditCurve::from_frame_values(frame_ms, &key, values);
+                let had_old = old.is_some_and(|curve| !curve.is_empty());
+                let had_baseline = baseline_source
+                    .as_ref()
+                    .is_some_and(|curve| !curve.is_empty());
+                if rebuilt.is_empty() {
+                    // 用户明确擦空（或旧曲线被证据删除）⇒ 保留一个空 key 作为
+                    // “这条线已经清空”的显式标记；下一次投影才能真的清除 GUI 数组。
+                    if had_old || had_baseline {
+                        edits.insert(key.clone(), rebuilt);
+                    } else {
+                        edits.remove(&key);
+                    }
+                } else {
+                    edits.insert(key.clone(), rebuilt);
+                    changed = true;
+                }
+                if removed > 0 {
+                    report.removed_frames += removed;
+                    changed = true;
+                }
+            }
+            // 第一次捕获没有显式编辑：不建立空权威，避免把“从没编辑”固化。
+            if edits.is_empty() && !had_existing {
+                continue;
+            }
+            let mut template = params.clone();
+            clear_curves(&mut template);
+            template.pitch_edit_user_modified = false;
+            let placement = match inherited_placement {
+                Placement::PinProject { ref frozen } if frozen.is_empty() => {
+                    Placement::pinned(geometry.clone())
+                }
+                other => other,
+            };
+            let next_seq = if changed {
+                last_seq.saturating_add(1).max(1)
+            } else {
+                last_seq
+            };
+            candidate.set_authority(
+                &key_for_anchor,
+                AuthorityParameters {
+                    edits,
+                    source: identity.source.clone(),
+                    curves: BTreeMap::new(),
+                    template,
+                    placement: placement.clone(),
+                    last_edit_seq: next_seq,
+                    unseen_rounds: 0,
+                    refused_rounds: 0,
+                },
+            );
+            let (edit_curves, edit_runs, edit_samples) = candidate
+                .authorities
+                .get(&key_for_anchor)
+                .map(|authority| {
+                    (
+                        authority.edits.len(),
+                        authority
+                            .edits
+                            .values()
+                            .map(|curve| curve.runs.len())
+                            .sum::<usize>(),
+                        authority
+                            .edits
+                            .values()
+                            .map(|curve| {
+                                curve.runs.iter().map(|run| run.values.len()).sum::<usize>()
+                            })
+                            .sum::<usize>(),
+                    )
+                })
+                .unwrap_or((0, 0, 0));
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "ara.atlas.line-write",
+                format_args!(
+                    "[ara] line write: root={root} key={key_for_anchor} placement={placement:?} \
+                     edit_curves={edit_curves} frames={begin}..{_end} baseline={} edit_runs={edit_runs} \
+                     edit_samples={edit_samples} accepted=1",
+                    if baseline_present { "present" } else { "absent" },
+                ),
+            );
+            candidate.regions.insert(
+                clip.id.clone(),
+                RegionParameters {
+                    identity: identity.clone(),
+                    root,
+                    current: geometry,
+                    live: true,
+                    template: candidate
+                        .authorities
+                        .get(&key_for_anchor)
+                        .map(|authority| authority.template.clone())
+                        .unwrap_or_default(),
+                    edits: candidate
+                        .authorities
+                        .get(&key_for_anchor)
+                        .map(|authority| authority.edits.clone())
+                        .unwrap_or_default(),
+                    curves: BTreeMap::new(),
+                },
+            );
+        }
+        candidate.validate()?;
+        Ok(candidate)
+    }
+
+    #[allow(dead_code)]
+    fn capture_legacy_inner(
         &self,
         timeline: &TimelineState,
         identities: &BTreeMap<String, RegionIdentity>,
@@ -2202,11 +2953,11 @@ impl ParameterAtlas {
                     // 这里只负责"新权威用当前设置播种"。
                     //
                     // 【为什么要补 `frozen`】旧存档的 `anchor: "Project"` 读进来是
-                    // `PinProject { frozen: None }`；第一次拿到活 clip 的几何时补上，
+                    // `PinProject { frozen: [] }`；第一次拿到活 clip 的几何时补上，
                     // 它此后就真的钉在那一刻了。
                     let placement = match candidate.authorities.get(&key) {
                         Some(existing) => match &existing.placement {
-                            Placement::PinProject { frozen: None } => {
+                            Placement::PinProject { frozen } if frozen.is_empty() => {
                                 Placement::pinned(geometry.clone())
                             }
                             other => other.clone(),
@@ -2226,9 +2977,12 @@ impl ParameterAtlas {
                     candidate.set_authority(
                         &key,
                         AuthorityParameters {
+                            edits: BTreeMap::new(),
+                            source: String::new(),
                             curves: written,
                             template: template.clone(),
                             placement: placement.clone(),
+                            last_edit_seq: 0,
                             // 正在被一条活 region 认领 ⇒ 宽限期清零。
                             unseen_rounds: 0,
                             refused_rounds,
@@ -2291,6 +3045,7 @@ impl ParameterAtlas {
                     current: geometry,
                     live: true,
                     template,
+                    edits: BTreeMap::new(),
                     curves,
                 },
             );
@@ -2302,6 +3057,7 @@ impl ParameterAtlas {
         Ok(candidate)
     }
     /// 仅更新current几何，不把投影结果当新源数据；返回每个clip独立参数供worker冻结。
+    #[cfg(test)]
     pub fn project(
         &self,
         timeline: &TimelineState,
@@ -2349,106 +3105,241 @@ impl ParameterAtlas {
         self.validate()?;
         let mut projected = BTreeMap::new();
         for clip in &timeline.clips {
-            // 【为什么身份/根缺席也只跳过】与下面几何失败同一条纪律。此前这两处
-            // `ok_or(...)?` 排在几何 `continue` 之前，于是"身份表/轨道身份这一轮还没
-            // 跟上"会让整个渲染输入准备失败（本函数在 `ara_render_input` 上）⇒
-            // 快照永不发布 ⇒ 声音停在旧版本。跳过这一条片段即可。
-            let Some(identity) = identities.get(&clip.id) else {
-                continue;
-            };
-            let Some(root) = timeline.resolve_root_track_id(&clip.track_id) else {
-                continue;
-            };
-            // 几何不可解只跳过该片段：否则整个渲染输入准备都会失败
-            // （本函数在 `ara_render_input` 上）。
-            //
-            // 【为什么不再 `mut`】投影不再改写几何 —— 输出索引的域由
-            // `CurveDomain::ClipLocal` 显式声明（见 `SourceCurve::project`），
-            // 几何保持它本来的绝对位置，采样坐标才能继续用真实项目时刻。
-            let Ok(geometry) = geometry(clip) else {
-                continue;
-            };
-            // 权威查表（modification persistentID），不做任何几何猜测。
-            let Some(authority) = self.authority(identity, &root, &geometry)? else {
-                continue;
-            };
-            // 【为什么这里不再把 `project_start` 归零】输出索引的域现在由
-            // `CurveDomain::ClipLocal` 显式声明（见 `SourceCurve::project`），
-            // 而采样坐标必须继续用该 clip 在工程里的**真实**位置。早先靠
-            // "把几何左端归零"来表达"输出是局部的"，那会连坐标一起抹掉 ——
-            // 工程域锚点（「锁定参数线」关闭）下右半段于是用局部 0..1 去读
-            // 绝对 1..2 的帧，整体偏移一个分割长度。归零这件事由索引域承担，
-            // 几何保持完整。
-            let mut params = authority.template().clone();
-            let frame_ms = params.frame_period_ms;
-            // 该 clip 的源窗落在权威曲线覆盖的源区间之外吗？
-            //
-            // 【为什么必须显式判一次】曲线相交为空时，`SourceCurve::project` 的每一帧
-            // 都取 `sample_at` 的界外分支 ⇒ 整条曲线退化成 `pad()`（音高归 0、
-            // `extra:volume` 归 1）。这与"用户从没编辑过"在数值上不可区分，
-            // 而两者的成因完全不同：一个是正常，一个是**源窗算错**或
-            // **归属接错**（后者正是"分割后参数整体偏移"的形状）。
-            // 真机上把这两者分开的唯一办法，就是在这里留一行带窗口数字的限流日志。
-            let missed: Vec<&str> = authority
-                .curves()
-                .iter()
-                .filter(|(_key, curve)| {
-                    let Some((lo, hi)) = curve.source_extent() else {
-                        return false;
-                    };
-                    let window = (
-                        geometry.source_start,
-                        geometry.source_start + geometry.source_duration,
-                    );
-                    window.1 < lo - 1e-6 || window.0 > hi + 1e-6
-                })
-                .map(|(key, _)| key.as_str())
-                .collect();
-            if !missed.is_empty() {
-                hifishifter_kernel::log_limiter::emit_limited_key(
-                    log::Level::Warn,
-                    "ara.render.split-source-window",
-                    format_args!(
-                        "[ara] clip {} {} placement={:?}: its source window [{:.6}, {:.6}] does not \
-                         intersect the authority curve cover(s) for {}; those curves project as \
-                         defaults this round",
-                        clip.id,
-                        identity.modification,
-                        authority.placement(fallback),
-                        geometry.source_start,
-                        geometry.source_start + geometry.source_duration,
-                        missed.join(", "),
-                    ),
-                );
+            if let Some(detail) = self.project_clip(timeline, identities, clip, local, fallback)? {
+                projected.insert(clip.id.clone(), detail.params);
             }
-            // 【读必须与写同源】这条曲线按**哪份几何**投影，由**它自己的放置策略**
-            // 决定（见 `Authority::placement`）。用调用方传进来的"当前设置"去读，
-            // 会在用户拨动「锁定参数线」之后按另一种映射解释同一个数组 —— 那正是
-            // "移动片段后参数线留在原地"的形状。`fallback` 因此退化为**旧存档的兜底**。
-            let placement = authority.placement(fallback).clone();
-            for (key, curve) in authority.curves() {
-                // 本曲线的输出索引域：局部投影 ⇒ clip 局部零点；否则绝对工程帧。
-                let out_domain = if local {
-                    CurveDomain::ClipLocal
-                } else {
-                    CurveDomain::Project
-                };
-                set_curve(
-                    &mut params,
-                    key,
-                    curve.project(&geometry, key, frame_ms, &placement, out_domain)?,
-                );
-            }
-            params.pitch_orig_key = None;
-            params.dyn_orig_key = None;
-            // 权威持有音高曲线 ⇒ 标记为"用户数据"。内核 `ensure_params_for_root` 会在
-            // `build_root_pitch_key` 变化时清 `pitch_edit`（该 key 把每条 clip 的
-            // id / start / length / 倍率都喂进哈希 ⇒ **任何一次分割都会改变它**）。
-            // 那是独立于图集的第二条重置路径，必须在这里挡住。
-            params.pitch_edit_user_modified = authority.has_pitch_curve();
-            projected.insert(clip.id.clone(), params);
         }
         Ok(projected)
+    }
+
+    /// 投影一条 clip；只跳过这一条，不让身份/几何的瞬时缺失整份失败。
+    fn project_clip(
+        &self,
+        timeline: &TimelineState,
+        identities: &BTreeMap<String, RegionIdentity>,
+        clip: &hifishifter_kernel::state::Clip,
+        local: bool,
+        fallback: &Placement,
+    ) -> Result<Option<ProjectedClip>, String> {
+        let Some(identity) = identities.get(&clip.id) else {
+            return Ok(None);
+        };
+        let Some(root) = timeline.resolve_root_track_id(&clip.track_id) else {
+            return Ok(None);
+        };
+        let Ok(geometry) = geometry(clip) else {
+            return Ok(None);
+        };
+        let Some(authority) = self.authority(identity, &root, &geometry)? else {
+            return Ok(None);
+        };
+        let placement = authority.placement(fallback).clone();
+        if authority.edits().is_some() {
+            self.project_sparse_clip(
+                timeline,
+                clip,
+                identity,
+                &root,
+                &geometry,
+                &placement,
+                authority.template(),
+                authority.edits().unwrap(),
+                local,
+            )
+        } else {
+            self.project_legacy_clip(clip, identity, &geometry, &placement, authority, local)
+        }
+    }
+
+    fn project_sparse_clip(
+        &self,
+        timeline: &TimelineState,
+        _clip: &hifishifter_kernel::state::Clip,
+        _identity: &RegionIdentity,
+        root: &str,
+        geometry: &RegionGeometry,
+        placement: &Placement,
+        template: &TrackParamsState,
+        edits: &BTreeMap<String, EditCurve>,
+        local: bool,
+    ) -> Result<Option<ProjectedClip>, String> {
+        let baseline = timeline
+            .params_by_root_track
+            .get(root)
+            .cloned()
+            .unwrap_or_else(|| template.clone());
+        let frame_ms = if baseline.frame_period_ms.is_finite() && baseline.frame_period_ms > 0.0 {
+            baseline.frame_period_ms
+        } else {
+            template.frame_period_ms
+        };
+        let (begin, end) = if local {
+            (
+                0,
+                ((geometry.project_duration * 1000. / frame_ms).ceil() as usize).max(1),
+            )
+        } else {
+            frame_range(geometry, frame_ms)?
+        };
+        let count = end.saturating_add(1);
+        let baseline_ready = !baseline.pitch_orig.is_empty() || !baseline.pitch_edit.is_empty();
+        let mut params = baseline;
+        params.frame_period_ms = frame_ms;
+        params.pitch_orig_key = None;
+        params.dyn_orig_key = None;
+        params.dyn_orig_source_key = None;
+        params.pending_pitch_offset = None;
+        // 派生原始值只从当前 baseline 读；GUI 根视图保留绝对工程帧，渲染局部
+        // 输出则把它切成 clip 局部数组。权威永远不写这两条曲线。
+        if local {
+            params.pitch_orig = sample_baseline_slice(
+                &params.pitch_orig,
+                "pitch_edit",
+                geometry,
+                frame_ms,
+                begin,
+                count,
+            );
+            params.dyn_orig = sample_baseline_slice(
+                &params.dyn_orig,
+                "dyn_orig",
+                geometry,
+                frame_ms,
+                begin,
+                count,
+            );
+            params.tension_orig = sample_baseline_slice(
+                &params.tension_orig,
+                "tension_orig",
+                geometry,
+                frame_ms,
+                begin,
+                count,
+            );
+        }
+
+        let pitch_defaults =
+            pitch_baseline_defaults(&params, geometry, frame_ms, begin, count, local);
+        let edit_pitch = edits.get("pitch_edit");
+        let (pitch_values, pitch_mask) =
+            compose_curve("pitch_edit", &pitch_defaults, edit_pitch, |frame| {
+                source_frame_for_output(geometry, placement, frame_ms, frame, local)
+            });
+        params.pitch_edit = pitch_values;
+        params.pitch_edit_user_modified = edits
+            .get("pitch_edit")
+            .is_some_and(|curve| !curve.is_empty());
+
+        // 未编辑的 tension / extras 必须是默认值，而不是上一轮投影留下的旧数组。
+        let tension_defaults = vec![0.0; count];
+        let (tension_values, tension_mask) = compose_curve(
+            "tension_edit",
+            &tension_defaults,
+            edits.get("tension_edit"),
+            |frame| source_frame_for_output(geometry, placement, frame_ms, frame, local),
+        );
+        params.tension_edit = tension_values;
+        params.extra_curves.clear();
+        let mut edited_frames = BTreeMap::new();
+        if !mask_is_empty(&pitch_mask) {
+            edited_frames.insert("pitch_edit".to_owned(), mask_ranges(&pitch_mask));
+        }
+        if !mask_is_empty(&tension_mask) {
+            edited_frames.insert("tension_edit".to_owned(), mask_ranges(&tension_mask));
+        }
+        for (key, edit) in edits {
+            let Some(name) = key.strip_prefix("extra:") else {
+                continue;
+            };
+            if edit.is_empty() {
+                continue;
+            }
+            let defaults = vec![pad(key); count];
+            let (values, mask) = compose_curve(key, &defaults, Some(edit), |frame| {
+                source_frame_for_output(geometry, placement, frame_ms, frame, local)
+            });
+            if !mask_is_empty(&mask) {
+                edited_frames.insert(key.clone(), mask_ranges(&mask));
+            }
+            params.extra_curves.insert(name.to_owned(), values);
+        }
+        // 即使没有 extra 编辑，也把 dyn 的哨兵显式写出来：GUI 上“没有 dyn 编辑”
+        // 必须显示为跟随原声，而不是沿用上一轮的旧数组。
+        if edits.get("extra:dyn").is_none() {
+            params
+                .extra_curves
+                .insert("dyn".to_owned(), vec![-1.0; count]);
+        }
+        Ok(Some(ProjectedClip {
+            params,
+            edited_frames,
+            baseline_ready,
+        }))
+    }
+
+    fn project_legacy_clip(
+        &self,
+        clip: &hifishifter_kernel::state::Clip,
+        identity: &RegionIdentity,
+        geometry: &RegionGeometry,
+        placement: &Placement,
+        authority: Authority<'_>,
+        local: bool,
+    ) -> Result<Option<ProjectedClip>, String> {
+        let mut params = authority.template().clone();
+        let frame_ms = params.frame_period_ms;
+        let missed: Vec<&str> = authority
+            .curves()
+            .iter()
+            .filter(|(_key, curve)| {
+                let Some((lo, hi)) = curve.source_extent() else {
+                    return false;
+                };
+                let window = (
+                    geometry.source_start,
+                    geometry.source_start + geometry.source_duration,
+                );
+                window.1 < lo - 1e-6 || window.0 > hi + 1e-6
+            })
+            .map(|(key, _)| key.as_str())
+            .collect();
+        if !missed.is_empty() {
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "ara.render.split-source-window",
+                format_args!(
+                    "[ara] clip {} {} placement={:?}: its source window [{:.6}, {:.6}] does not \
+                     intersect the authority curve cover(s) for {}; those curves project as \
+                     defaults this round",
+                    clip.id,
+                    identity.modification,
+                    placement,
+                    geometry.source_start,
+                    geometry.source_start + geometry.source_duration,
+                    missed.join(", "),
+                ),
+            );
+        }
+        for (key, curve) in authority.curves() {
+            let out_domain = if local {
+                CurveDomain::ClipLocal
+            } else {
+                CurveDomain::Project
+            };
+            set_curve(
+                &mut params,
+                key,
+                curve.project(geometry, key, frame_ms, placement, out_domain)?,
+            );
+        }
+        params.pitch_orig_key = None;
+        params.dyn_orig_key = None;
+        params.pitch_edit_user_modified = authority.has_pitch_curve();
+        Ok(Some(ProjectedClip {
+            params,
+            edited_frames: BTreeMap::new(),
+            baseline_ready: true,
+        }))
     }
     /// 原region key优先；拆分新key只能沿同modification/source与同root的唯一父源范围继承。
     fn find(
@@ -2655,6 +3546,33 @@ impl ParameterAtlas {
             {
                 return Err("invalid authority parameter template".into());
             }
+            for (key, curve) in &params.edits {
+                if key.is_empty()
+                    || !curve.frame_ms.is_finite()
+                    || !(0.1..=1000.).contains(&curve.frame_ms)
+                    || curve.runs.len() > 16384
+                {
+                    return Err("invalid authority edit curve".into());
+                }
+                let mut last = 0_usize;
+                for run in &curve.runs {
+                    let end = run
+                        .first_frame
+                        .checked_add(run.values.len())
+                        .ok_or("authority edit frame overflow")?;
+                    if run.values.is_empty()
+                        || run.first_frame < last
+                        || end > 1_000_000
+                        || run
+                            .values
+                            .iter()
+                            .any(|value| !value.is_finite() || value.abs() > 10000.)
+                    {
+                        return Err("invalid authority edit samples".into());
+                    }
+                    last = end;
+                }
+            }
         }
         if self.copy_seeds.len() > 16384
             || self
@@ -2773,7 +3691,29 @@ impl ParameterAtlas {
         Ok(())
     }
 
-    /// 只捕获clip外的用户delta；被移动clip遮住的旧空白编辑保持隐藏，移开后仍存在。
+    /// 只捕获 clip 外的用户编辑；被移动 clip 遮住的旧空白编辑保持隐藏，移开后仍存在。
+    fn capture_gaps_sparse(
+        &mut self,
+        timeline: &TimelineState,
+        previous: Option<&BTreeMap<String, TrackParamsState>>,
+    ) -> Result<(), String> {
+        let mut coverage = BTreeMap::<String, Vec<RegionGeometry>>::new();
+        for clip in &timeline.clips {
+            let root = timeline
+                .resolve_root_track_id(&clip.track_id)
+                .ok_or("unknown gap parameter root")?;
+            coverage.entry(root).or_default().push(RegionGeometry {
+                project_start: clip.start_sec,
+                project_duration: clip.length_sec,
+                source_start: clip.source_start_sec,
+                source_duration: clip.length_sec * clip.playback_rate as f64,
+                reversed: clip.reversed && !clip.loop_enabled,
+            });
+        }
+        self.capture_gap_roots_sparse(&timeline.params_by_root_track, &coverage, previous)
+    }
+
+    #[allow(dead_code)]
     fn capture_gaps(
         &mut self,
         timeline: &TimelineState,
@@ -2812,9 +3752,121 @@ impl ParameterAtlas {
                 .or_default()
                 .push(record.current.clone());
         }
-        self.capture_gap_roots(params, &coverage, None)?;
+        self.capture_gap_roots_sparse(params, &coverage, None)?;
         self.validate()
     }
+    fn capture_gap_roots_sparse(
+        &mut self,
+        params_by_root: &BTreeMap<String, TrackParamsState>,
+        coverage: &BTreeMap<String, Vec<RegionGeometry>>,
+        previous: Option<&BTreeMap<String, TrackParamsState>>,
+    ) -> Result<(), String> {
+        for (root, params) in params_by_root {
+            let frame_ms = params.frame_period_ms;
+            let mut template = params.clone();
+            clear_curves(&mut template);
+            template.pitch_edit_user_modified = false;
+            let old = self.gaps.get(root).cloned().unwrap_or(GapParameters {
+                template: template.clone(),
+                curves: BTreeMap::new(),
+            });
+            let desired = extract_edit_curves(params);
+            let prior_edits = previous
+                .and_then(|previous| previous.get(root))
+                .filter(|prior| prior.frame_period_ms == frame_ms)
+                .map(extract_edit_curves);
+            let mut count = existing_gap_count(&old, frame_ms)?;
+            for values in params.extra_curves.values() {
+                count = count.max(values.len());
+            }
+            count = count
+                .max(params.pitch_edit.len())
+                .max(params.tension_edit.len());
+            if count > 1_000_000 {
+                return Err("gap parameter frame budget exceeded".into());
+            }
+            let mut owned = vec![false; count];
+            for geometry in coverage.get(root).into_iter().flatten() {
+                if let Some((begin, end)) = covered_frame_range(geometry, frame_ms)? {
+                    if begin < count {
+                        owned[begin..=end.min(count - 1)].fill(true);
+                    }
+                }
+            }
+            let mut keys = std::collections::BTreeSet::new();
+            keys.extend(old.curves.keys().cloned());
+            keys.extend(desired.curves.keys().cloned());
+            if let Some(prior) = &prior_edits {
+                keys.extend(prior.curves.keys().cloned());
+            }
+            let mut curves = BTreeMap::new();
+            for key in keys {
+                let (mut values, mut valid) = old
+                    .curves
+                    .get(&key)
+                    .map(|curve| dense_gap(curve, &key, frame_ms, count))
+                    .transpose()?
+                    .unwrap_or_else(|| (vec![pad(&key); count], vec![false; count]));
+                if values.len() < count {
+                    values.resize(count, pad(&key));
+                    valid.resize(count, false);
+                }
+                if let Some(prior) = &prior_edits {
+                    if let Some(prior_curve) = prior.get(&key) {
+                        for frame in 0..count {
+                            if owned[frame] || !valid[frame] {
+                                continue;
+                            }
+                            if prior_curve.value_at(frame as f64, &key).is_some()
+                                && desired.get(&key).is_none_or(|curve| {
+                                    curve.value_at(frame as f64, &key).is_none()
+                                })
+                            {
+                                valid[frame] = false;
+                            }
+                        }
+                    }
+                }
+                if let Some(current) = desired.get(&key) {
+                    for (frame, value) in current.frame_values() {
+                        if frame < count && !owned[frame] {
+                            values[frame] = value;
+                            valid[frame] = true;
+                        }
+                    }
+                }
+                let mut spans = Vec::new();
+                let mut frame = 0;
+                while frame < count {
+                    if !valid[frame] {
+                        frame += 1;
+                        continue;
+                    }
+                    let first = frame;
+                    while frame < count && valid[frame] {
+                        frame += 1;
+                    }
+                    let reservation = crate::render::budget::global_budget()
+                        .reserve((frame - first) * 4)
+                        .ok_or("gap parameter memory budget exceeded")?;
+                    spans.push(GapSpan {
+                        first_frame: first,
+                        values: Arc::new(values[first..frame].to_vec()),
+                        reservation: Some(Arc::new(reservation)),
+                    });
+                }
+                if spans.is_empty() {
+                    continue;
+                }
+                curves.insert(key, GapCurve { frame_ms, spans });
+            }
+            self.gaps
+                .insert(root.clone(), GapParameters { template, curves });
+        }
+        Ok(())
+    }
+
+    #[allow(dead_code)]
     fn capture_gap_roots(
         &mut self,
         params_by_root: &BTreeMap<String, TrackParamsState>,
@@ -2933,7 +3985,7 @@ fn placement_for_lock(locked: bool) -> Placement {
     if locked {
         Placement::FollowMaterial
     } else {
-        Placement::PinProject { frozen: None }
+        Placement::PinProject { frozen: Vec::new() }
     }
 }
 
@@ -3021,6 +4073,41 @@ fn covered_frame_range(
 fn gap_values(curve: &GapCurve, key: &str, frame_ms: f64) -> Result<Vec<f32>, String> {
     Ok(dense_gap(curve, key, frame_ms, 0)?.0)
 }
+
+fn existing_gap_count(gaps: &GapParameters, frame_ms: f64) -> Result<usize, String> {
+    if !frame_ms.is_finite() || !(0.1..=1000.).contains(&frame_ms) {
+        return Err("invalid gap frame period".into());
+    }
+    let mut count = 0_usize;
+    for curve in gaps.curves.values() {
+        for span in &curve.spans {
+            let end = ((span.first_frame + span.values.len() - 1) as f64 * curve.frame_ms
+                / frame_ms)
+                .ceil() as usize;
+            count = count.max(end.saturating_add(1));
+        }
+    }
+    if count > 1_000_000 {
+        return Err("gap parameter frame budget exceeded".into());
+    }
+    Ok(count)
+}
+
+fn gap_ranges(curve: &GapCurve, frame_ms: f64) -> Result<Vec<std::ops::Range<usize>>, String> {
+    if !frame_ms.is_finite() || !(0.1..=1000.).contains(&frame_ms) {
+        return Err("invalid gap frame period".into());
+    }
+    let mut ranges = Vec::new();
+    for span in &curve.spans {
+        let begin = (span.first_frame as f64 * curve.frame_ms / frame_ms).ceil() as usize;
+        let end = ((span.first_frame + span.values.len() - 1) as f64 * curve.frame_ms / frame_ms)
+            .floor() as usize;
+        if begin <= end {
+            push_frame_range(&mut ranges, begin..end + 1);
+        }
+    }
+    Ok(ranges)
+}
 /// 空白层只在每个已保存片段内部按绝对时间重采样，不跨过原clip占用区插值。
 fn dense_gap(
     curve: &GapCurve,
@@ -3067,13 +4154,7 @@ fn dense_gap(
     Ok((values, valid))
 }
 pub(super) fn pad(key: &str) -> f32 {
-    if key == "extra:volume" || key == "extra:breath_gain" {
-        1.
-    } else if key == "extra:dyn" {
-        -1.
-    } else {
-        0.
-    }
+    default_pad_for_key(key)
 }
 /// 图集承载的曲线集合。
 ///
@@ -3082,6 +4163,110 @@ pub(super) fn pad(key: &str) -> f32 {
 /// 但投影契约（`project_roots` / `capture_inner` / 旧存档迁移）与合成夹具仍把它当作
 /// 一份可往返的曲线 —— 删掉会让"内容缓存尚未建立"的窗口里无 F0 可用。因此本轮保留，
 /// 只把渲染侧改成"内容缓存优先、工程域曲线兜底"。
+/// 把一批值里所有非默认帧转成一条稀疏编辑曲线（测试种子 / 旧记录迁移共用）。
+#[cfg(test)]
+fn edit_curve_from_values(
+    values: &[f32],
+    first_frame: usize,
+    frame_ms: f64,
+    key: &str,
+) -> Option<EditCurve> {
+    let mut curve = EditCurve::new(frame_ms);
+    let mut start: Option<usize> = None;
+    for (offset, value) in values.iter().copied().enumerate() {
+        let hit = is_edited_value(key, value, None, Some(default_pad_for_key(key)));
+        match (start, hit) {
+            (None, true) => start = Some(offset),
+            (Some(begin), false) => {
+                curve
+                    .runs
+                    .push(hifishifter_kernel::editor::param_edit::EditRun {
+                        first_frame: first_frame + begin,
+                        values: values[begin..offset].to_vec(),
+                    });
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(begin) = start {
+        curve
+            .runs
+            .push(hifishifter_kernel::editor::param_edit::EditRun {
+                first_frame: first_frame + begin,
+                values: values[begin..].to_vec(),
+            });
+    }
+    (!curve.is_empty()).then_some(curve)
+}
+
+/// 旧存档的整条曲线 -> 稀疏编辑。pitch 优先用同一份旧曲线里的 pitch_orig 做差；
+/// 没有 orig 时只能保守地把正 pitch 当编辑（v8 存档的迁移日志会说明这一点）。
+fn edits_from_source_curves(
+    curves: &BTreeMap<String, SourceCurve>,
+    frame_ms: f64,
+) -> BTreeMap<String, EditCurve> {
+    let mut edits = BTreeMap::new();
+    let pitch_orig = curves.get("pitch_orig");
+    for (key, curve) in curves {
+        if matches!(key.as_str(), "pitch_orig" | "dyn_orig" | "tension_orig") {
+            continue;
+        }
+        let mut out = EditCurve::new(frame_ms);
+        let mut start: Option<usize> = None;
+        for (index, value) in curve.values.iter().copied().enumerate() {
+            let frame = curve.first_frame + index;
+            let orig = if key == "pitch_edit" {
+                pitch_orig.and_then(|orig| orig.values.get(index).copied())
+            } else {
+                None
+            };
+            let hit = is_edited_value(key, value, orig, Some(default_pad_for_key(key)));
+            match (start, hit) {
+                (None, true) => start = Some(frame),
+                (Some(begin), false) => {
+                    let begin_offset = begin.saturating_sub(curve.first_frame);
+                    let end_offset = frame.saturating_sub(curve.first_frame);
+                    out.runs
+                        .push(hifishifter_kernel::editor::param_edit::EditRun {
+                            first_frame: begin,
+                            values: curve.values[begin_offset..end_offset].to_vec(),
+                        });
+                    start = None;
+                }
+                _ => {}
+            }
+        }
+        if let Some(begin) = start {
+            let begin_offset = begin.saturating_sub(curve.first_frame);
+            out.runs
+                .push(hifishifter_kernel::editor::param_edit::EditRun {
+                    first_frame: begin,
+                    values: curve.values[begin_offset..].to_vec(),
+                });
+        }
+        if !out.is_empty() {
+            edits.insert(key.clone(), out);
+        }
+    }
+    edits
+}
+
+/// GUI/分组可编辑的曲线集合（不含分析派生数组）。
+pub(super) fn editable_parameter_curves(params: &TrackParamsState) -> Vec<(String, &[f32])> {
+    let mut curves = vec![
+        ("pitch_edit".into(), params.pitch_edit.as_slice()),
+        ("tension_edit".into(), params.tension_edit.as_slice()),
+    ];
+    curves.extend(
+        params
+            .extra_curves
+            .iter()
+            .map(|(key, values)| (format!("extra:{key}"), values.as_slice())),
+    );
+    curves
+}
+
 pub(super) fn parameter_curves(params: &TrackParamsState) -> Vec<(String, &[f32])> {
     let mut curves = vec![
         ("pitch_orig".into(), params.pitch_orig.as_slice()),
@@ -3105,6 +4290,15 @@ fn clear_curves(params: &mut TrackParamsState) {
     params.tension_edit.clear();
     params.dyn_orig.clear();
     params.extra_curves.clear();
+    params.pitch_edit_user_modified = false;
+}
+
+/// 根视图重算前清掉所有用户可编辑曲线；派生原始值保留。
+fn clear_user_curves(params: &mut TrackParamsState) {
+    params.pitch_edit.clear();
+    params.tension_edit.clear();
+    params.extra_curves.clear();
+    params.pitch_edit_user_modified = false;
 }
 pub(super) fn set_curve(params: &mut TrackParamsState, key: &str, values: Vec<f32>) {
     match key {
@@ -3357,6 +4551,162 @@ fn sample_project_frames(values: &[f32], frame: f64, key: &str) -> f32 {
     } else {
         a + (b - a) * fraction
     }
+}
+
+/// 把一份**工程帧索引**的编辑曲线折算到源帧（捕获用）。
+fn project_curve_to_source(
+    curve: &EditCurve,
+    key: &str,
+    geometry: &RegionGeometry,
+    frame_ms: f64,
+    protected: Option<(f64, f64)>,
+) -> Result<EditCurve, String> {
+    let map = geometry.map()?;
+    let step = frame_ms / 1000.0;
+    let project_end = geometry.project_start + geometry.project_duration;
+    let source_lo = geometry
+        .source_start
+        .min(geometry.source_start + geometry.source_duration);
+    let source_hi = geometry
+        .source_start
+        .max(geometry.source_start + geometry.source_duration);
+    let first = (source_lo / step).floor().max(0.0) as usize;
+    let last = (source_hi / step).ceil().max(0.0) as usize;
+    if last >= 1_000_000 || last < first {
+        return Err("source parameter projection frame budget exceeded".into());
+    }
+    // **按源网格逐帧采样**，而不是把工程帧逐个 round 到源帧：拉伸时两者
+    // 不必整除，逐个 round 会在源域留下空帧，也会把斜坡变成平台。
+    let mut values = std::collections::BTreeMap::new();
+    for source_frame in first..=last {
+        let source_sec = source_frame as f64 * step;
+        let clamped = source_sec.clamp(source_lo, source_hi);
+        let Some(project_sec) = map
+            .source_to_project(clamped)
+            .or_else(|| ((clamped - source_hi).abs() < 1e-9).then_some(project_end))
+        else {
+            continue;
+        };
+        if project_sec < geometry.project_start - 1e-9 || project_sec > project_end + 1e-9 {
+            continue;
+        }
+        if protected.is_some_and(|(lo, hi)| project_sec >= lo && project_sec <= hi) {
+            continue;
+        }
+        let project_frame = project_sec * 1000.0 / frame_ms;
+        if let Some(value) = curve.value_at(project_frame, key) {
+            values.insert(source_frame, value);
+        }
+    }
+    Ok(EditCurve::from_frame_values(frame_ms, key, values))
+}
+
+fn mask_is_empty(mask: &[bool]) -> bool {
+    !mask.iter().any(|edited| *edited)
+}
+
+/// 把当前根 baseline 的派生数组切成 clip 局部数组（只用于渲染输入）。
+fn sample_baseline_slice(
+    values: &[f32],
+    key: &str,
+    geometry: &RegionGeometry,
+    frame_ms: f64,
+    begin: usize,
+    count: usize,
+) -> Vec<f32> {
+    if values.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(count);
+    for offset in 0..count {
+        let project_sec = geometry.project_start + (begin + offset) as f64 * frame_ms / 1000.0;
+        out.push(sample_project_frames(
+            values,
+            project_sec * 1000.0 / frame_ms,
+            key,
+        ));
+    }
+    out
+}
+
+/// pitch_edit 未编辑帧的默认值：当前分析出的 pitch_orig；分析尚未就绪时保留
+/// 上一份显示值，绝不把整条线写为零。
+fn pitch_baseline_defaults(
+    params: &TrackParamsState,
+    geometry: &RegionGeometry,
+    frame_ms: f64,
+    begin: usize,
+    count: usize,
+    local: bool,
+) -> Vec<f32> {
+    let source = if !params.pitch_orig.is_empty() {
+        params.pitch_orig.as_slice()
+    } else {
+        params.pitch_edit.as_slice()
+    };
+    if source.is_empty() {
+        return vec![0.0; count];
+    }
+    // 输出数组的索引域不同：local 从 0 起，project 用绝对工程帧。
+    // begin 只对 project 非零，因此默认值必须写回绝对下标，不能按 offset 顺序 push。
+    let mut out = vec![
+        0.0;
+        if local {
+            count
+        } else {
+            begin.saturating_add(count)
+        }
+    ];
+    for offset in 0..count {
+        let frame = begin + offset;
+        let project_sec = if local {
+            geometry.project_start + offset as f64 * frame_ms / 1000.0
+        } else {
+            frame as f64 * frame_ms / 1000.0
+        };
+        let index = if local { offset } else { frame };
+        out[index] = sample_project_frames(source, project_sec * 1000.0 / frame_ms, "pitch_edit");
+    }
+    out
+}
+
+/// 输出帧 -> 编辑曲线帧。FollowMaterial 用当前几何；PinProject 用覆盖该工程
+/// 时刻的冻结窗口。找不到窗口时返回 None（这一帧没有编辑）。
+fn source_frame_for_output(
+    geometry: &RegionGeometry,
+    placement: &Placement,
+    frame_ms: f64,
+    frame: usize,
+    local: bool,
+) -> Option<f64> {
+    let project_sec = if local {
+        geometry.project_start + frame as f64 * frame_ms / 1000.0
+    } else {
+        frame as f64 * frame_ms / 1000.0
+    };
+    // 工程根视图的数组从 0 开始，clip 之外的帧本来就没有编辑；不能把窗口外
+    // 的帧钳到窗口起点（那会把第一格编辑复制到整条空白区）。
+    let project_end = geometry.project_start + geometry.project_duration;
+    if local {
+        // 局部数组的帧数按 ceil 取整，最后一格可能略微越过窗口终点；渲染仍需要
+        // 这一格，夹回窗口内侧而不是返回默认值。
+        let _ = project_sec;
+    } else if project_sec < geometry.project_start - 1e-9 || project_sec > project_end + 1e-9 {
+        return None;
+    }
+    let project_sec = project_sec.clamp(
+        geometry.project_start,
+        (project_end - 1e-9).max(geometry.project_start),
+    );
+    let map = placement
+        .map_at_project(geometry, project_sec)
+        .ok()
+        .flatten()?;
+    let source_sec = map.project_to_source(project_sec).or_else(|| {
+        ((project_sec - project_end).abs() < 1e-9)
+            .then_some(geometry.source_start + geometry.source_duration)
+    })?;
+    Some(source_sec * 1000.0 / frame_ms)
 }
 
 /// 把一条**旧存档形状**的曲线折算成源域。
@@ -3618,6 +4968,33 @@ mod tests {
         serde_json::from_value(serde_json::json!({"frame_period_ms": 5.0})).unwrap()
     }
 
+    fn pitch_edit_values(authority: &AuthorityParameters) -> Vec<f32> {
+        authority
+            .edits
+            .get("pitch_edit")
+            .map(|curve| {
+                curve
+                    .runs
+                    .iter()
+                    .flat_map(|run| run.values.iter().copied())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn edit_samples(authority: &AuthorityParameters) -> usize {
+        authority
+            .edits
+            .values()
+            .map(|curve| curve.runs.iter().map(|run| run.values.len()).sum::<usize>())
+            .sum::<usize>()
+            + authority
+                .curves
+                .values()
+                .map(|curve| curve.values.iter().filter(|value| **value != 0.0).count())
+                .sum::<usize>()
+    }
+
     #[test]
     fn an_incomplete_root_projection_only_overwrites_its_own_frames() {
         let mut existing = root_params();
@@ -3636,7 +5013,10 @@ mod tests {
                     params: partial,
                     #[allow(clippy::single_range_in_vec_init)]
                     frames: [10..20].to_vec(),
+                    edited_frames: BTreeMap::new(),
                     complete: false,
+                    baseline_ready: true,
+                    cleared_curves: std::collections::BTreeSet::new(),
                 },
             )]),
         );
@@ -4066,6 +5446,7 @@ mod tests {
             ..Default::default()
         };
         params.pitch_edit = vec![60.; 6];
+        params.pitch_edit_user_modified = true;
         client
             .params_by_root_track
             .insert("a".into(), params.clone());
@@ -4693,6 +6074,7 @@ mod tests {
                     signature: String::new(),
                 },
                 root: "a".into(),
+                edits: BTreeMap::new(),
                 current: RegionGeometry {
                     project_start: 1.,
                     project_duration: 1.,
@@ -4724,7 +6106,7 @@ mod tests {
         assert!(
             matches!(
                 placement_for_lock(false),
-                Placement::PinProject { frozen: None }
+                Placement::PinProject { ref frozen } if frozen.is_empty()
             ),
             "不锁定 ⇒ 留在工程位置（冻结几何在第一次投影时补上）"
         );
@@ -4852,8 +6234,8 @@ mod tests {
         let ids = identities();
         let mut atlas = ParameterAtlas::default();
         atlas.seed_test_pitch_curve("mod:mod", 250., vec![60., 62., 64., 66.]);
-        let original = atlas.authorities["mod:mod"].curves["pitch_edit"].clone();
-        assert_eq!(original.domain, CurveDomain::Source, "锁定 ⇒ 源域");
+        let original = pitch_edit_values(&atlas.authorities["mod:mod"]);
+        assert_eq!(original, vec![60., 62., 64., 66.], "锁定 ⇒ 源域");
 
         // 锁定状态下，片段从 [1,2) 移到 [3,4)：曲线跟着走。
         let locked = atlas.project(&host(3., 1., 0., 1.), &ids).unwrap();
@@ -4861,10 +6243,15 @@ mod tests {
 
         // 拨到"不锁定"：只改元数据（冻结几何 = 此刻的 [1,2)），数据不动。
         let timeline = host(1., 1., 0., 1.);
-        let changed = atlas.set_placement(&timeline, &ids, &Placement::PinProject { frozen: None });
+        let changed = atlas.set_placement(
+            &timeline,
+            &ids,
+            &Placement::PinProject { frozen: Vec::new() },
+        );
         assert_eq!(changed, 1, "必须有一条权威被改");
         assert_eq!(
-            atlas.authorities["mod:mod"].curves["pitch_edit"].values, original.values,
+            pitch_edit_values(&atlas.authorities["mod:mod"]),
+            original,
             "拨开关不得改动任何一个采样"
         );
 
@@ -4886,7 +6273,8 @@ mod tests {
         let back = atlas.project(&host(1., 1., 0., 1.), &ids).unwrap();
         assert_eq!(&back["clip"].pitch_edit[4..8], &[60., 62., 64., 66.]);
         assert_eq!(
-            atlas.authorities["mod:mod"].curves["pitch_edit"].values, original.values,
+            pitch_edit_values(&atlas.authorities["mod:mod"]),
+            original,
             "来回拨开关必须逐帧回到原样"
         );
     }
@@ -5026,12 +6414,15 @@ mod tests {
         atlas.authorities.insert(
             "mod:mod".into(),
             AuthorityParameters {
+                edits: BTreeMap::new(),
+                source: String::new(),
                 curves,
                 template: TrackParamsState {
                     frame_period_ms: 250.,
                     ..Default::default()
                 },
                 placement: Placement::FollowMaterial,
+                last_edit_seq: 0,
                 unseen_rounds: 0,
                 refused_rounds: 0,
             },
@@ -5172,7 +6563,8 @@ mod tests {
             TrackParamsState {
                 frame_period_ms: 5.,
                 pitch_edit_user_modified: true,
-                pitch_orig: ramp.clone(),
+                // 夹具目标曲线与原始分析值不同；否则相等即“未编辑”（I10）。
+                pitch_orig: vec![0.; frames],
                 pitch_edit: ramp.clone(),
                 ..Default::default()
             },
@@ -5183,11 +6575,11 @@ mod tests {
             .authorities
             .get("mod:mod")
             .expect("权威按 modification persistentID 入库");
-        assert_eq!(
-            authority.curves["pitch_edit"].domain,
-            CurveDomain::Source,
-            "第七轮起捕获一律写源域"
+        assert!(
+            authority.curves.is_empty(),
+            "新权威只存稀疏 edits，不再写整条旧曲线"
         );
+        assert!(authority.edits.contains_key("pitch_edit"));
 
         // 左半段：工程 [0, 1)，源窗 [0, 1)。右半段：工程 [1, 2)，源窗 [1, 2)。
         // 两半的 source / modification 与父段完全相同 —— 这就是 Cubase 的形状。
@@ -5268,7 +6660,8 @@ mod tests {
             TrackParamsState {
                 frame_period_ms: 5.,
                 pitch_edit_user_modified: true,
-                pitch_orig: ramp.clone(),
+                // 夹具目标曲线与原始分析值不同；否则相等即“未编辑”（I10）。
+                pitch_orig: vec![0.; ramp.len()],
                 pitch_edit: ramp.clone(),
                 ..Default::default()
             },
@@ -5305,7 +6698,11 @@ mod tests {
 
         let before = followed.authorities["mod:mod"].curves.clone();
         let mut unlocked = followed;
-        unlocked.set_placement(&halves, &half_ids, &Placement::PinProject { frozen: None });
+        unlocked.set_placement(
+            &halves,
+            &half_ids,
+            &Placement::PinProject { frozen: Vec::new() },
+        );
         assert!(
             unlocked.authorities["mod:mod"]
                 .curves
@@ -5398,7 +6795,7 @@ mod tests {
             frame_ms,
             (0..16).map(|index| 60. + index as f32).collect(),
         );
-        let before = non_default_frames(&atlas.authorities["mod:mod"].curves);
+        let before = edit_samples(&atlas.authorities["mod:mod"]);
         assert!(before > 4, "夹具必须有一条足够长的曲线：{before}");
         // 视图里这条 clip 的整段都是默认值（0），且**没有基线**。
         let mut timeline = host(1., 1., 0., 1.);
@@ -5411,7 +6808,7 @@ mod tests {
             .params_by_root_track
             .insert("a".to_owned(), view.clone());
         let after_atlas = atlas.capture(&timeline, &ids).expect("捕获必须成功");
-        let after = non_default_frames(&after_atlas.authorities["mod:mod"].curves);
+        let after = edit_samples(&after_atlas.authorities["mod:mod"]);
         assert_eq!(
             after, before,
             "没有基线时任何减少都没有证据，必须被拒绝：before={before} after={after}"
@@ -5438,7 +6835,7 @@ mod tests {
             frame_ms,
             (0..16).map(|index| 60. + index as f32).collect(),
         );
-        let before = non_default_frames(&atlas.authorities["mod:mod"].curves);
+        let before = edit_samples(&atlas.authorities["mod:mod"]);
         assert_eq!(before, 16, "夹具：16 个非默认帧");
         let mut timeline = host(1., 1., 0., 1.);
         let projected = atlas.project(&timeline, &ids).expect("投影必须成功");
@@ -5458,7 +6855,7 @@ mod tests {
         let after_atlas = atlas
             .capture_changes_reporting(&timeline, &ids, &baseline, &mut report)
             .expect("捕获必须成功");
-        let after = non_default_frames(&after_atlas.authorities["mod:mod"].curves);
+        let after = edit_samples(&after_atlas.authorities["mod:mod"]);
         assert_eq!(
             after,
             before - 5,
@@ -5482,7 +6879,7 @@ mod tests {
         );
         // 窗口外的帧一格都不能少（擦除是局部的）。
         assert_eq!(
-            non_default_frames(&after_atlas.authorities["mod:mod"].curves),
+            edit_samples(&after_atlas.authorities["mod:mod"]),
             before - 5,
             "窗口外 11 格必须原样保留"
         );
@@ -5507,7 +6904,7 @@ mod tests {
             frame_ms,
             (0..16).map(|index| 60. + index as f32).collect(),
         );
-        let before = non_default_frames(&atlas.authorities["mod:mod"].curves);
+        let before = edit_samples(&atlas.authorities["mod:mod"]);
         assert!(before > 4, "夹具必须有一条非默认曲线：{before}");
         let mut timeline = host(1., 1., 0., 1.);
         // 基线里**有这个根**、但没有 `pitch_edit` 这条数组。
@@ -5528,7 +6925,7 @@ mod tests {
         let after_atlas = atlas
             .capture_changes_reporting(&timeline, &ids, &baseline, &mut report)
             .expect("捕获必须成功");
-        let after = non_default_frames(&after_atlas.authorities["mod:mod"].curves);
+        let after = edit_samples(&after_atlas.authorities["mod:mod"]);
         assert_eq!(
             after, before,
             "没有基线时不得改动任何一格：{before} -> {after}"
@@ -5538,10 +6935,11 @@ mod tests {
             "读数必须记下「没有基线」这件事"
         );
         assert_eq!(report.removed_frames, 0, "这一轮不该有任何帧被删");
-        assert_eq!(
-            after_atlas.authorities["mod:mod"].curves["pitch_edit"].domain,
-            CurveDomain::Source,
-            "曲线仍然是源域（数据与策略同源）"
+        assert!(
+            after_atlas.authorities["mod:mod"]
+                .edits
+                .contains_key("pitch_edit"),
+            "曲线仍然是源域稀疏编辑（数据与策略同源）"
         );
     }
 
@@ -5584,6 +6982,130 @@ mod tests {
         assert_eq!(
             unexplained, 5,
             "旧形状只能按计数判：8 格 -> 3 格 ⇒ 5 格没有证据"
+        );
+    }
+
+    #[test]
+    fn first_capture_stores_only_explicit_edits_and_never_derived_curves() {
+        let atlas = ParameterAtlas::default()
+            .capture(&edited(), &identities())
+            .unwrap();
+        let authority = &atlas.authorities["mod:mod"];
+        assert!(authority.curves.is_empty(), "新权威不再写整条 SourceCurve");
+        assert!(authority.edits.contains_key("pitch_edit"));
+        assert!(authority.edits.contains_key("extra:volume"));
+        for key in ["pitch_orig", "dyn_orig", "tension_orig"] {
+            assert!(
+                !authority.edits.contains_key(key),
+                "派生数组绝不能进入编辑权威：{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn volume_only_capture_does_not_create_pitch_authority() {
+        let mut timeline = host(0., 1., 0., 1.);
+        let mut params = TrackParamsState {
+            frame_period_ms: 250.,
+            pitch_orig: vec![57.; 4],
+            pitch_edit: vec![57.; 4],
+            ..Default::default()
+        };
+        params
+            .extra_curves
+            .insert("volume".into(), vec![1.0, 0.5, 0.8, 1.0]);
+        timeline.params_by_root_track.insert("a".into(), params);
+        let atlas = ParameterAtlas::default()
+            .capture(&timeline, &identities())
+            .unwrap();
+        let authority = &atlas.authorities["mod:mod"];
+        assert!(
+            !authority.edits.contains_key("pitch_edit"),
+            "只画 volume 不得创建 pitch 权威"
+        );
+        assert!(!authority.has_pitch_edits());
+        let root = atlas.project_roots(&timeline, &identities()).unwrap();
+        assert!(!root["a"].pitch_edit_user_modified);
+    }
+
+    #[test]
+    fn locked_move_uses_new_pitch_orig_for_unedited_frames() {
+        let mut atlas = ParameterAtlas::default();
+        atlas.seed_test_pitch_curve("mod:mod", 250., vec![60., 62.]);
+        let mut timeline = host(1., 2., 0., 2.);
+        timeline.project_sec = 3.;
+        timeline.params_by_root_track.insert(
+            "a".into(),
+            TrackParamsState {
+                frame_period_ms: 250.,
+                pitch_orig: vec![70.; 13],
+                ..Default::default()
+            },
+        );
+        let projected = atlas.project(&timeline, &identities()).unwrap();
+        let pitch = &projected["clip"].pitch_edit;
+        assert_eq!(&pitch[4..6], &[60., 62.], "编辑段跟随素材");
+        assert_eq!(pitch[8], 70., "未编辑帧取新的 pitch_orig，而不是旧快照");
+        assert_eq!(pitch[12], 70.);
+    }
+
+    #[test]
+    fn unlocked_move_keeps_edits_at_project_positions() {
+        let mut atlas = ParameterAtlas::default();
+        atlas.seed_test_pitch_curve_placed(
+            "mod:mod",
+            250.,
+            vec![60., 62.],
+            Placement::pinned(RegionGeometry {
+                project_start: 1.,
+                project_duration: 1.,
+                source_start: 0.,
+                source_duration: 1.,
+                reversed: false,
+            }),
+        );
+        let mut timeline = host(3., 1., 0., 1.);
+        timeline.project_sec = 4.;
+        timeline.params_by_root_track.insert(
+            "a".into(),
+            TrackParamsState {
+                frame_period_ms: 250.,
+                pitch_orig: vec![70.; 17],
+                ..Default::default()
+            },
+        );
+        let root = atlas.project_roots(&timeline, &identities()).unwrap();
+        assert_eq!(root["a"].pitch_edit[4], 60., "不锁定时编辑留在原工程位置");
+        assert_eq!(root["a"].pitch_edit[5], 62.);
+        assert_eq!(root["a"].pitch_edit[12], 70., "新位置显示新的原始值");
+    }
+
+    #[test]
+    fn repeated_projection_is_idempotent() {
+        let atlas = ParameterAtlas::default()
+            .capture(&edited(), &identities())
+            .unwrap();
+        let first = atlas.project(&host(1., 1., 0., 1.), &identities()).unwrap();
+        let second = atlas.project(&host(1., 1., 0., 1.), &identities()).unwrap();
+        assert_eq!(first["clip"].pitch_edit, second["clip"].pitch_edit);
+        assert_eq!(first["clip"].extra_curves, second["clip"].extra_curves);
+    }
+
+    #[test]
+    fn take_switch_with_a_different_source_does_not_project_the_old_authority() {
+        let atlas = ParameterAtlas::default()
+            .capture(&edited(), &identities())
+            .unwrap();
+        let mut ids = identities();
+        if let Some(identity) = ids.get_mut("clip") {
+            identity.source = "other-take-source".into();
+        }
+        let mut timeline = host(1., 1., 0., 1.);
+        timeline.clips[0].source_path = Some("other-take-source".into());
+        let projected = atlas.project(&timeline, &ids).unwrap();
+        assert!(
+            projected.is_empty(),
+            "item GUID 未变但 source 变了：旧 take 的权威不得投影到新 take"
         );
     }
 }

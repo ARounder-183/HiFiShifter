@@ -323,6 +323,9 @@ pub(crate) struct EditorSession {
     /// 与 `load_capture_timeline` 的 `kept` 机制是同一件事。owner 只负责在会话
     /// **还不存在**时把字节块暂存下来（见 `ExtensionOwner::pending_capture_edits`）。
     pub(super) pending_capture_edits: Mutex<Option<super::capture_edits::CaptureEdits>>,
+    /// 最近一批显式参数写入意图；capture 用它区分"用户真的写了这几帧"与
+    /// "几何刷新后整份视图看起来不同"。
+    pub(super) param_intents: Mutex<Vec<hifishifter_kernel::editor::ParamEditIntent>>,
     pub(super) history: Mutex<TimelineHistory>,
     pub(super) project: Mutex<ProjectState>,
     // 设置**不在**这里：它属于用户，不属于某一个 ARA 文档。此前它是本结构体的字段，
@@ -612,6 +615,7 @@ impl EditorSession {
             backing,
             timeline: Mutex::new(TimelineState::default()),
             pending_capture_edits: Mutex::new(None),
+            param_intents: Mutex::new(Vec::new()),
             history: Mutex::new(Default::default()),
             project: Mutex::new(initial_project),
             loaded: Mutex::new(Default::default()),
@@ -2197,7 +2201,7 @@ impl EditorSession {
                     // 整份重载，看起来又是对的 —— 两条路径在这里分叉。
                     let roots = {
                         let mut timeline = self.timeline.lock_or_recover();
-                        adopt_view_into_timeline(&mut timeline, view.params.as_ref());
+                        adopt_view_into_timeline(&mut timeline, view.param_roots.as_ref());
                         timeline.params_by_root_track.len()
                     };
                     hifishifter_kernel::log_limiter::emit_limited_key(
@@ -3112,6 +3116,13 @@ impl ParamHost for EditorSession {
                 link.mark_dirty();
             }
         }
+    }
+    fn note_param_edit(&self, intent: hifishifter_kernel::editor::ParamEditIntent) {
+        let mut intents = self.param_intents.lock_or_recover();
+        if intents.len() >= 256 {
+            intents.remove(0);
+        }
+        intents.push(intent);
     }
     fn publish_timeline(&self, timeline: TimelineState) {
         // 【为什么在分支之前】这是"时间线变了"的**唯一**统一信号：所有曲线写入
@@ -4242,7 +4253,7 @@ pub(crate) mod tests {
         restored.restore(&encoded).unwrap();
         assert_eq!(
             serde_json::from_slice::<Value>(&encoded).unwrap()["version"],
-            8
+            9
         );
         assert_eq!(
             restored.groups,
@@ -4802,6 +4813,7 @@ pub(crate) mod tests {
                 track.id.clone(),
                 hifishifter_kernel::state::TrackParamsState {
                     frame_period_ms: 5.,
+                    pitch_edit_user_modified: true,
                     pitch_edit: vec![if index == 0 { 60. } else { 67. }; 2],
                     ..Default::default()
                 },
@@ -5342,7 +5354,7 @@ pub(crate) mod tests {
         let encoded = owner.encode_state().unwrap(); // 真getState路径会flush，不只测手工barrier。
         let saved: Value = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(
-            saved["version"], 8,
+            saved["version"], 9,
             "权威参数按稳定宿主身份存档（v8：曲线按源帧索引）；旧 v2/v3 解码与范围回归另行保留"
         );
         assert_eq!(
@@ -6933,41 +6945,22 @@ mod host_selection_tests {
 /// 纯粹的移动永远等不到。
 fn adopt_view_into_timeline(
     timeline: &mut TimelineState,
-    params: &std::collections::BTreeMap<String, TrackParamsState>,
+    roots: &std::collections::BTreeMap<String, crate::editor::parameter_atlas::RootProjection>,
 ) {
-    if params.is_empty() {
+    if roots.is_empty() {
         // 这一轮投影一个根都没给出（身份表还没跟上）。整份清空会把用户看得见的
         // 曲线一次性抹掉，而下一轮未必立刻回来 —— 什么都不做才是安全的那一侧。
         return;
     }
-    for (root, projected) in params {
-        let entry = timeline
-            .params_by_root_track
-            .entry(root.clone())
-            .or_default();
-        // 【只换曲线】几何变了不等于素材变了：`pitch_orig_key` / `dyn_orig_key` /
-        // `pending_pitch_offset` 是会话自己的记账，一起换掉会让分析每次都判"缓存失效"，
-        // 于是一次拖动就触发一轮重分析。
-        entry.frame_period_ms = projected.frame_period_ms;
-        entry.pitch_edit = projected.pitch_edit.clone();
-        entry.tension_edit = projected.tension_edit.clone();
-        entry.extra_curves = projected.extra_curves.clone();
-        // 派生曲线（原线 / 原声基线）只在投影确实给出内容、或本地本来就是空的时候
-        // 才覆盖：否则一次"分析还没跑完"的投影会把已经算好的波形抹掉。
-        if !projected.pitch_orig.is_empty() || entry.pitch_orig.is_empty() {
-            entry.pitch_orig = projected.pitch_orig.clone();
-        }
-        if !projected.tension_orig.is_empty() || entry.tension_orig.is_empty() {
-            entry.tension_orig = projected.tension_orig.clone();
-        }
-        if !projected.dyn_orig.is_empty() || entry.dyn_orig.is_empty() {
-            entry.dyn_orig = projected.dyn_orig.clone();
-        }
-    }
-    // 投影里不再存在的根（片段被删）不该继续留在 UI 上。
-    timeline
-        .params_by_root_track
-        .retain(|root, _| params.contains_key(root));
+    // 非破坏合并：只覆盖投影真正拥有的帧；不按投影根集合裁剪，不整值替换，
+    // 不丢 `pitch_orig_key` / `dyn_orig_key` / `pending_pitch_offset` 会话记账。
+    crate::editor::parameter_atlas::merge_root_projection(
+        &mut timeline.params_by_root_track,
+        roots
+            .iter()
+            .map(|(root, projection)| (root.clone(), projection.clone()))
+            .collect(),
+    );
 }
 
 #[cfg(test)]
@@ -6983,10 +6976,25 @@ mod projection_adoption_tests {
         }
     }
 
-    fn projection(entries: &[(&str, TrackParamsState)]) -> BTreeMap<String, TrackParamsState> {
+    fn projection(
+        entries: &[(&str, TrackParamsState)],
+    ) -> BTreeMap<String, crate::editor::parameter_atlas::RootProjection> {
         entries
             .iter()
-            .map(|(root, value)| ((*root).to_owned(), value.clone()))
+            .map(|(root, value)| {
+                (
+                    (*root).to_owned(),
+                    crate::editor::parameter_atlas::RootProjection {
+                        params: value.clone(),
+                        #[allow(clippy::single_range_in_vec_init)]
+                        frames: [0..usize::MAX].to_vec(),
+                        edited_frames: BTreeMap::new(),
+                        complete: true,
+                        baseline_ready: true,
+                        cleared_curves: std::collections::BTreeSet::new(),
+                    },
+                )
+            })
             .collect()
     }
 
@@ -7004,8 +7012,8 @@ mod projection_adoption_tests {
         adopt_view_into_timeline(&mut timeline, &projection(&[("root", params(&[2.0, 2.0]))]));
         assert_eq!(
             timeline.params_by_root_track["root"].pitch_edit,
-            vec![2.0, 2.0],
-            "投影给出的曲线必须当场成为 GUI 的曲线"
+            vec![2.0, 2.0, 0.0],
+            "完整投影替换可编辑层；尾部旧用户值不能残留"
         );
     }
 
@@ -7048,9 +7056,9 @@ mod projection_adoption_tests {
         );
     }
 
-    /// **不变量：投影里消失的根不再留在界面上。**
+    /// **不变量：投影里暂时消失的根必须保留（部分投影不得删根）。**
     #[test]
-    fn a_root_that_left_the_projection_leaves_the_timeline() {
+    fn a_root_missing_from_a_partial_projection_is_kept() {
         let mut timeline = TimelineState::default();
         timeline
             .params_by_root_track
@@ -7059,7 +7067,7 @@ mod projection_adoption_tests {
             .params_by_root_track
             .insert("kept".to_owned(), params(&[1.0]));
         adopt_view_into_timeline(&mut timeline, &projection(&[("kept", params(&[2.0]))]));
-        assert!(!timeline.params_by_root_track.contains_key("gone"));
+        assert!(timeline.params_by_root_track.contains_key("gone"));
         assert!(timeline.params_by_root_track.contains_key("kept"));
     }
 

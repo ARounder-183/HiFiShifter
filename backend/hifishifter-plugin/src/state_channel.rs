@@ -497,10 +497,29 @@ impl EditState {
         }
         let mut merged = self.clone();
         merged.revision = self.revision.checked_add(1).ok_or("revision exhausted")?;
-        merged
-            .params
-            .retain(|id, _| !host_ids.contains(id.as_str()));
-        merged.params.extend(params.clone());
+        // 逐根合并：只覆盖客户端真的送来的根；缺席的根保留（部分载荷不得删根）。
+        for (id, incoming) in params {
+            let entry = merged.params.entry(id.clone()).or_default();
+            entry.frame_period_ms = incoming.frame_period_ms;
+            if incoming.pitch_edit_user_modified || !incoming.pitch_edit.is_empty() {
+                entry.pitch_edit = incoming.pitch_edit.clone();
+                entry.pitch_edit_user_modified = incoming.pitch_edit_user_modified;
+            }
+            entry.tension_edit = incoming.tension_edit.clone();
+            entry.extra_curves = incoming.extra_curves.clone();
+            entry.extra_params = incoming.extra_params.clone();
+            // 派生数组只用于显示回退；不与用户数据一起覆盖。
+            if entry.pitch_orig.is_empty() {
+                entry.pitch_orig = incoming.pitch_orig.clone();
+            }
+            if entry.tension_orig.is_empty() {
+                entry.tension_orig = incoming.tension_orig.clone();
+            }
+            if entry.dyn_orig.is_empty() {
+                entry.dyn_orig = incoming.dyn_orig.clone();
+            }
+        }
+        // 不按本次传入的 host 子集删根：调用方可能只提交工作区的一部分。
         merged
             .tracks
             .retain(|track| !host_ids.contains(track.id.as_str()));
@@ -518,14 +537,39 @@ impl EditState {
         // [`Self::unbound`]（"这条从来没被绑定过"），而不是 `needs_rebind`
         // （"整份还没关联"）—— 后者一旦为真就什么都不套，正是"全部参数丢失"的
         // 另一种写法。
-        timeline.params_by_root_track = self
-            .params
-            .iter()
-            .filter(|(id, _)| {
-                !self.unbound.contains(*id) && timeline.tracks.iter().any(|t| t.id == **id)
-            })
-            .map(|(id, p)| (id.clone(), p.clone()))
-            .collect();
+        // 逐根合并，而不是整份替换：客户端没有送来的根必须保留当前分析/投影；
+        // 派生数组（pitch_orig / dyn_orig / tension_orig）永远不从可编辑状态覆盖。
+        let existing = std::mem::take(&mut timeline.params_by_root_track);
+        let mut merged = existing
+            .into_iter()
+            .filter(|(id, _)| timeline.tracks.iter().any(|t| t.id == *id))
+            .collect::<BTreeMap<_, _>>();
+        for (id, params) in &self.params {
+            if self.unbound.contains(id) || !timeline.tracks.iter().any(|t| t.id == *id) {
+                continue;
+            }
+            let entry = merged.entry(id.clone()).or_default();
+            entry.frame_period_ms = params.frame_period_ms;
+            // 用户曲线取存档；空数组表示用户清空，必须允许。
+            if params.pitch_edit_user_modified || !params.pitch_edit.is_empty() {
+                entry.pitch_edit = params.pitch_edit.clone();
+                entry.pitch_edit_user_modified = params.pitch_edit_user_modified;
+            }
+            entry.tension_edit = params.tension_edit.clone();
+            entry.extra_curves = params.extra_curves.clone();
+            entry.extra_params = params.extra_params.clone();
+            // 派生数组只在目标为空时补入（首次恢复）；已有分析结果不覆盖。
+            if entry.pitch_orig.is_empty() {
+                entry.pitch_orig = params.pitch_orig.clone();
+            }
+            if entry.tension_orig.is_empty() {
+                entry.tension_orig = params.tension_orig.clone();
+            }
+            if entry.dyn_orig.is_empty() {
+                entry.dyn_orig = params.dyn_orig.clone();
+            }
+        }
+        timeline.params_by_root_track = merged;
         for track in &mut timeline.tracks {
             if self.unbound.contains(&track.id) {
                 continue;
@@ -565,7 +609,7 @@ impl EditState {
     /// 旧构建读新存档时那个字段会解析失败 —— 升代让它得到"这份存档由更新的插件保存"
     /// 这句**可行动**的话，而不是一条看不懂的 serde 错误。反过来，新构建读第 7 代及
     /// 更早的存档仍然完全正确（`basis` 有对象 ⇒ 走旧索引分支），因此**不需要折算**。
-    const CURRENT_STATE_VERSION: u64 = 8;
+    const CURRENT_STATE_VERSION: u64 = 9;
 
     /// 有版本且有界的组件state；旧空state保持默认编辑。
     pub fn encode(&self) -> Result<Vec<u8>, String> {
@@ -582,7 +626,7 @@ impl EditState {
         // 做不到这一点时，"拒绝写"不是保守，而是用整份数据去赌一条记录。
         // 无法绑定的条目现在由 `unbound` 承载：数据留着、不套用、不进 `bindings`。
         let version = if !self.atlas.authorities.is_empty() {
-            8
+            9
         } else if !self.clip_local.is_empty() {
             6
         } else if !self.groups.is_empty() {
@@ -600,6 +644,26 @@ impl EditState {
         // 又会被 `follow_geometry` 立刻覆盖。清掉它：存档只带权威。
         let mut trimmed = self.clone();
         trimmed.atlas.regions.clear();
+        // 新存档只带用户可编辑曲线：分析派生的 pitch_orig / dyn_orig /
+        // tension_orig 与未编辑的 pitch_edit 全部丢弃；旧权威的整条 curves
+        // 也已在本代迁移成 edits，不得再写回。
+        trimmed.params =
+            trimmed
+                .params
+                .into_iter()
+                .map(|(root, params)| {
+                    // 保留根的存在性（空轨也要能被认回），但清掉派生数组。
+                    let compact = crate::editor::capture_edits::compact_params(&params)
+                        .unwrap_or_else(|| TrackParamsState {
+                            frame_period_ms: params.frame_period_ms,
+                            ..Default::default()
+                        });
+                    (root, compact)
+                })
+                .collect();
+        for authority in trimmed.atlas.authorities.values_mut() {
+            authority.clear_legacy_curves();
+        }
         let bytes = serde_json::to_vec(&serde_json::json!({"version":version,"edits":trimmed}))
             .map_err(|e| e.to_string())?;
         if bytes.len() > hifishifter_host_link::MAX_COMPONENT_STATE {
@@ -633,6 +697,21 @@ impl EditState {
             serde_json::from_value(value["edits"].clone()).map_err(|e| e.to_string())?;
         restored.groups.validate()?;
         restored.validate_fades()?;
+        if version < 9 {
+            restored.atlas.migrate_legacy_authority_edits();
+            restored.params = restored
+                .params
+                .into_iter()
+                .map(|(root, params)| {
+                    let compact = crate::editor::capture_edits::compact_params(&params)
+                        .unwrap_or_else(|| TrackParamsState {
+                            frame_period_ms: params.frame_period_ms,
+                            ..Default::default()
+                        });
+                    (root, compact)
+                })
+                .collect();
+        }
         restored.atlas = restored.atlas.reserve_restored()?;
         if version == 1 && (!restored.params.is_empty() || !restored.tracks.is_empty()) {
             return Err("legacy ARA edits have no persistent identity; cannot restore by session track number".into());
@@ -775,6 +854,7 @@ mod tests {
             "track".into(),
             TrackParamsState {
                 frame_period_ms: 5.0,
+                pitch_edit_user_modified: true,
                 pitch_edit: vec![61.0, 63.0],
                 ..Default::default()
             },

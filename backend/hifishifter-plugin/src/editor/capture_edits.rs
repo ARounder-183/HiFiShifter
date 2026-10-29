@@ -186,7 +186,7 @@ pub(crate) fn capture(
 ///
 /// 【为什么派生数组不能存】它们由源 PCM 重新分析得到，长工程里比用户曲线大一个数量级；
 /// 组件 state 有 64 MiB 硬上限，把它们塞进去会让保存直接失败。
-fn compact_params(params: &TrackParamsState) -> Option<TrackParamsState> {
+pub(crate) fn compact_params(params: &TrackParamsState) -> Option<TrackParamsState> {
     let mut compact = params.clone();
     compact.pitch_orig.clear();
     compact.tension_orig.clear();

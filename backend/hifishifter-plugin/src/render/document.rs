@@ -40,6 +40,11 @@ pub(crate) struct WorkspaceView {
     /// 逐根轨参数：`edits.apply` 之后、编辑器真正拿到的那一份（文档 id 空间）。
     pub params:
         Arc<std::collections::BTreeMap<String, hifishifter_kernel::state::TrackParamsState>>,
+    /// 与 `params` 同代的按帧根投影；adopt 只合并它真正拥有的帧。
+    pub param_roots:
+        Arc<std::collections::BTreeMap<String, crate::editor::parameter_atlas::RootProjection>>,
+    /// 这份视图对应的 UI 几何代次。提交时与当前代次不一致就走重基/重试。
+    pub geometry_revision: u64,
 }
 
 /// ARA 文档存档通道的**读数**。
@@ -886,6 +891,8 @@ mod baseline_tests {
         let view = WorkspaceView {
             projection: "scope:abc".to_owned(),
             params: Arc::clone(&params),
+            param_roots: Arc::new(std::collections::BTreeMap::new()),
+            geometry_revision: 0,
         };
         let shared = Arc::new(view);
         assert!(
@@ -1713,9 +1720,17 @@ impl DocumentSession {
             edits.apply(&mut timeline);
         }
         let projection = self.workspace_projection_locked(&edits)?;
+        let param_roots = if edits.atlas.is_empty() {
+            std::collections::BTreeMap::new()
+        } else {
+            let identities = self.parameter_identities_locked(&timeline)?;
+            edits.atlas.project_root_records(&timeline, &identities)?
+        };
         Ok(Arc::new(WorkspaceView {
             projection,
             params: Arc::new(timeline.params_by_root_track),
+            param_roots: Arc::new(param_roots),
+            geometry_revision: geometry,
         }))
     }
     /// 原GUI改变素材选择只换可见source投影；不修改参数authority、history或渲染generation。
@@ -1892,9 +1907,19 @@ impl DocumentSession {
         // 【G1】这是编辑器**真正会看到**的那份参数视图 —— 连同它的指纹一起交出去。
         // 冲突重基的唯一基线就是它（见 `accept_workspace_edits_with_groups`）；
         // 它随快照一起返回，而不是按指纹存进某张表里等提交时查回来。
+        // 读路径不重投影，但仍把与当前数组同代的根投影交出去；adopt 只做
+        // 按帧合并，不会用一份默认值覆盖整根。
+        let param_roots = if edits.atlas.is_empty() {
+            std::collections::BTreeMap::new()
+        } else {
+            let identities = self.parameter_identities_locked(&timeline)?;
+            edits.atlas.project_root_records(&timeline, &identities)?
+        };
         let view = Arc::new(WorkspaceView {
             projection,
             params: Arc::new(timeline.params_by_root_track.clone()),
+            param_roots: Arc::new(param_roots),
+            geometry_revision: self.ui_geometry_revision.load(Ordering::Acquire),
         });
         Ok((
             WorkspaceSnapshot {
@@ -1968,6 +1993,16 @@ impl DocumentSession {
                 "{} {}",
                 crate::editor::errors::CONFLICT_PREFIX,
                 crate::editor::errors::MODEL_CHANGED
+            ));
+        }
+        let current_geometry = self.ui_geometry_revision.load(Ordering::Acquire);
+        if baseline.geometry_revision != current_geometry {
+            // 编辑期间宿主动了几何：旧基线里的数组已经不是同一份工程时刻，
+            // 用旧数组做差分会把几何差异当成用户改动写回源曲线。
+            return Err(format!(
+                "{} {}",
+                crate::editor::errors::CONFLICT_PREFIX,
+                "geometry changed before parameter commit"
             ));
         }
         let host = self.workspace_timeline_locked()?;
@@ -2045,9 +2080,17 @@ impl DocumentSession {
         // （仅限宿主轨道），所以 candidate.params 就是编辑器此刻显示的那份数组；
         // 指纹与它同代（同一份 candidate 算出）。调用方必须把它存回 `Loaded` ——
         // 类型上它不能"忘记"（返回值的唯一用途就是那个）。
+        let param_roots = if candidate.atlas.is_empty() {
+            std::collections::BTreeMap::new()
+        } else {
+            let identities = self.parameter_identities_locked(&host)?;
+            candidate.atlas.project_root_records(&host, &identities)?
+        };
         let view = Arc::new(WorkspaceView {
             projection,
             params: Arc::new(candidate.params.clone()),
+            param_roots: Arc::new(param_roots),
+            geometry_revision: self.ui_geometry_revision.load(Ordering::Acquire),
         });
         *edits = candidate;
         // 用户的参数编辑落盘了 ⇒ 告诉宿主"这些 modification 的持久状态变了"。

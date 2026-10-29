@@ -1530,13 +1530,22 @@ pub(super) fn dispatch(
         "stretch_track_linked_params" => {
             let a: StretchLinked = args(input)?;
             track_exists(session, &a.track_id)?;
+            let _ = a.checkpoint;
             if a.mappings.len() > 4096 {
                 return Err("stretch mapping budget exceeded".into());
             }
-            after_write(
-                session,
-                params::stretch_track_linked_params(session, a.track_id, a.mappings, a.checkpoint),
-            )
+            // ARA 模式下几何变化由 ParameterAtlas 的源域编辑投影完成；这里再改
+            // 一次本地数组会把已经投影过的曲线二次映射（偏移/截断/默认值）。
+            // 保留命令是为了独立 App 与旧前端兼容，但在插件内必须是显式 no-op。
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Info,
+                "ara.stretch.local-skip",
+                format_args!(
+                    "[ara] stretch_track_linked_params skipped in ARA mode; the atlas projects \
+                     source edits from the host geometry"
+                ),
+            );
+            Ok(serde_json::json!({"ok": true, "skipped": "ara-atlas"}))
         }
         "set_track_state" => {
             let object = input.as_object().ok_or("track arguments required")?;

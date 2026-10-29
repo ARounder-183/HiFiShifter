@@ -1,5 +1,5 @@
 //! 插件私有轨道参数分组：以真实轨道GUID保存关系，不读写REAPER folder、路由或轨道排序。
-use super::parameter_atlas::{pad, parameter_curves, set_curve};
+use super::parameter_atlas::{editable_parameter_curves, pad, set_curve};
 use hifishifter_kernel::state::{TimelineState, TrackParamsState};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -257,14 +257,14 @@ pub(crate) fn expand_parameter_changes(
         {
             return Err("private group parameter frame periods differ".into());
         }
-        let keys = parameter_curves(next)
+        let keys = editable_parameter_curves(next)
             .into_iter()
-            .chain(parameter_curves(&old))
+            .chain(editable_parameter_curves(&old))
             .map(|(key, _)| key)
             .collect::<BTreeSet<_>>();
         for key in keys {
             let curve = |params: &TrackParamsState| {
-                parameter_curves(params)
+                editable_parameter_curves(params)
                     .into_iter()
                     .find(|(name, _)| name == &key)
                     .map(|(_, values)| values.to_vec())
