@@ -1366,6 +1366,7 @@ impl EditorSession {
         // 【成对写】accept 返回的就是"编辑器此刻显示的视图"的下一份基线；
         // 不存它，下一次提交的基线就落后一代（旧实现正是在这里把指针推离缓存）。
         loaded.view = Some(versions.2);
+        self.param_intents.lock_or_recover().clear();
         Ok(())
     }
 

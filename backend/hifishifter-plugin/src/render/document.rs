@@ -1714,17 +1714,19 @@ impl DocumentSession {
         self.sync_placement_with_settings(&mut edits, &timeline);
         edits.apply(&mut timeline);
         let geometry = self.ui_geometry_revision.load(Ordering::Acquire);
+        let mut resynced_now = false;
         if self.resynced_geometry.load(Ordering::Acquire) != geometry {
             self.resync_parameter_view_locked(&mut edits, &timeline)?;
             self.resynced_geometry.store(geometry, Ordering::Release);
             edits.apply(&mut timeline);
+            resynced_now = true;
         }
         let projection = self.workspace_projection_locked(&edits)?;
-        let param_roots = if edits.atlas.is_empty() {
-            std::collections::BTreeMap::new()
-        } else {
+        let param_roots = if resynced_now && !edits.atlas.is_empty() {
             let identities = self.parameter_identities_locked(&timeline)?;
             edits.atlas.project_root_records(&timeline, &identities)?
+        } else {
+            std::collections::BTreeMap::new()
         };
         Ok(Arc::new(WorkspaceView {
             projection,
@@ -1909,12 +1911,9 @@ impl DocumentSession {
         // 它随快照一起返回，而不是按指纹存进某张表里等提交时查回来。
         // 读路径不重投影，但仍把与当前数组同代的根投影交出去；adopt 只做
         // 按帧合并，不会用一份默认值覆盖整根。
-        let param_roots = if edits.atlas.is_empty() {
-            std::collections::BTreeMap::new()
-        } else {
-            let identities = self.parameter_identities_locked(&timeline)?;
-            edits.atlas.project_root_records(&timeline, &identities)?
-        };
+        // 快照是读路径，不负责重投影；param_roots 只在 refresh_ui_geometry 的
+        // workspace_view 里生成，避免读一次工作区也去锁 host facts。
+        let param_roots = std::collections::BTreeMap::new();
         let view = Arc::new(WorkspaceView {
             projection,
             params: Arc::new(timeline.params_by_root_track.clone()),
@@ -2080,12 +2079,7 @@ impl DocumentSession {
         // （仅限宿主轨道），所以 candidate.params 就是编辑器此刻显示的那份数组；
         // 指纹与它同代（同一份 candidate 算出）。调用方必须把它存回 `Loaded` ——
         // 类型上它不能"忘记"（返回值的唯一用途就是那个）。
-        let param_roots = if candidate.atlas.is_empty() {
-            std::collections::BTreeMap::new()
-        } else {
-            let identities = self.parameter_identities_locked(&host)?;
-            candidate.atlas.project_root_records(&host, &identities)?
-        };
+        let param_roots = std::collections::BTreeMap::new();
         let view = Arc::new(WorkspaceView {
             projection,
             params: Arc::new(candidate.params.clone()),
