@@ -3424,6 +3424,12 @@ impl ParameterAtlas {
                 }
                 curves.insert(key, GapCurve { frame_ms, spans });
             }
+            // 没有空白编辑就不要留下空条目：一条空 gap 会让 atlas 看起来
+            // “非空”，从而把整份存档的代际判成带权威的那一档。
+            if curves.is_empty() {
+                self.gaps.remove(root);
+                continue;
+            }
             self.gaps
                 .insert(root.clone(), GapParameters { template, curves });
         }

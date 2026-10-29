@@ -700,6 +700,30 @@ impl EditState {
         restored.validate_fades()?;
         if version < 9 {
             restored.atlas.migrate_legacy_authority_edits();
+            // 第 9 代之前没有 pitch_edit_user_modified：旧载荷里的手绘音高必须
+            // 先被认出来，否则它既不会进权威，也会在下一次分析时被当成派生值清掉。
+            for params in restored.params.values_mut() {
+                if params.pitch_edit_user_modified || params.pitch_edit.is_empty() {
+                    continue;
+                }
+                let len = params.pitch_orig.len().min(params.pitch_edit.len());
+                let differs = (0..len).any(|frame| {
+                    let orig = params.pitch_orig[frame];
+                    let edit = params.pitch_edit[frame];
+                    edit.is_finite()
+                        && edit > 0.0
+                        && (!(orig.is_finite() && orig > 0.0) || (edit - orig).abs() > 1e-3)
+                });
+                // 没有原始基线可比时，任何非零目标都只能按“用户画的”解释。
+                let unproven = params.pitch_orig.is_empty()
+                    && params
+                        .pitch_edit
+                        .iter()
+                        .any(|value| value.is_finite() && *value != 0.0);
+                if differs || unproven {
+                    params.pitch_edit_user_modified = true;
+                }
+            }
             restored.params = restored
                 .params
                 .into_iter()
