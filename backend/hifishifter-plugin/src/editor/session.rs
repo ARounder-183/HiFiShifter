@@ -1945,9 +1945,10 @@ impl EditorSession {
         // 上一轮素材上卡死的分析结论不该跟着新素材走，否则新录的东西会被当成
         // "算不出来"，直接降级渲染（见 `analysis_abandoned` 的字段说明）。
         self.analysis_abandoned.lock_or_recover().clear();
-        // 【T1：不再清 `pitch_orig_key` / `dyn_orig_key`】这两个键的失效判据搬进了
-        // 基线层（`RootBaseline::pitch_key` / `dyn_key`）。在这里清显示层的键
-        // 只会让"分析完成"重新把整条数组写回显示数组 —— 那正是 R1 的起点。
+        // 【T1：这里**不再**清 `pitch_orig_key`】旧实现在加载时逐根清显示层的键，
+        // 那是 R1 的起点。失效判据现在归基线层：`RootBaseline::pitch_key` 与
+        // `build_root_pitch_key` 同源，分析流水线每次组装都会重算它。
+        // （同一源换 PCM 的失效尚未接上 —— 见 Plan §9.2 的未完成项。）
         self.rewrite_ids(&mut timeline, true);
         self.retain_display_waveforms(&mut timeline, false);
         document.present_host_inventory(&mut timeline, &self.namespace);
@@ -5498,9 +5499,13 @@ pub(crate) mod tests {
                 }
             }
         }
+        // 【为什么不能断言"含 64"】权威是**源域**的：工程帧上的一格要按 clip 的源
+        // 窗口重采样，两者不整除时落不到整数源帧上，读到的是相邻两格的插值
+        // （这里 60 → 60.07）。能保证的是"尾笔**参与了**这条曲线"，即曲线覆盖
+        // 两格以上、且最大值被它抬高。
         assert!(
-            samples.iter().any(|value| *value > 63.0),
-            "第二笔 64 必须落进权威：{samples:?}"
+            samples.len() >= 2 && samples.iter().cloned().fold(f64::MIN, f64::max) > 60.0,
+            "尾笔必须落进权威并抬高曲线：{samples:?}"
         );
         assert_eq!(
             editor.history.lock_or_recover().position,
