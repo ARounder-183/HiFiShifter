@@ -1617,7 +1617,11 @@ impl EditorSession {
             timeline
                 .params_by_root_track
                 .keys()
-                .filter(|root| !document.baseline_is_ready(root))
+                .filter(|root| {
+                    // 文档的基线按**宿主空间**的根键存（`rewrite_ids` 只改本会话那份）。
+                    let host_root = root.strip_prefix(&self.namespace).unwrap_or(root);
+                    !document.baseline_is_ready(host_root)
+                })
                 .cloned()
                 .collect::<Vec<_>>()
         };
@@ -1676,8 +1680,12 @@ impl EditorSession {
             if next.pitch_orig_key.is_none() && next.dyn_orig_key.is_none() {
                 continue;
             }
+            let host_root = root
+                .strip_prefix(&self.namespace)
+                .unwrap_or(&root)
+                .to_owned();
             changed |= document.publish_baseline(
-                &root,
+                &host_root,
                 crate::editor::parameter_atlas::RootBaseline::from_params(next),
             );
         }
@@ -1698,7 +1706,27 @@ impl EditorSession {
         };
         {
             let mut timeline = self.timeline.lock_or_recover();
-            timeline.params_by_root_track = view.params.as_ref().clone();
+            // 【id 空间不同，不能整份替换】文档的根键是**宿主空间**（`track`），
+            // 而本会话的时间线是**UI 空间**（`{namespace}track`，见 `rewrite_ids`）。
+            // 直接赋值会让下一个分析轮次去找一个不存在的根，分析永远收敛不了。
+            let live = timeline
+                .tracks
+                .iter()
+                .map(|track| track.id.clone())
+                .collect::<std::collections::BTreeSet<_>>();
+            let mut next = std::collections::BTreeMap::new();
+            for (root, params) in view.params.iter() {
+                let namespaced = format!("{}{root}", self.namespace);
+                let key = if live.contains(&namespaced) {
+                    namespaced
+                } else {
+                    root.clone()
+                };
+                if live.contains(&key) {
+                    next.insert(key, params.clone());
+                }
+            }
+            timeline.params_by_root_track = next;
         }
         self.publish_timeline_derived();
     }
@@ -3249,6 +3277,42 @@ impl MidiImportHost for EditorSession {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// 某个组件存档里，所有权威的某条曲线是否包含给定取值。
+    ///
+    /// 【为什么需要它】T2 之后用户曲线只住在权威的稀疏 run 里，`params` 不再写显示
+    /// 数组。断言"这一笔有没有落盘"必须读权威。
+    fn authority_curve_has(bytes: &[u8], key: &str, value: f64) -> bool {
+        authority_curve_has_near(bytes, key, value, 1e-6)
+    }
+
+    /// 同上，但允许容差。
+    ///
+    /// 【为什么需要容差】权威是**源域**的：工程帧上的那一笔要按 clip 的源窗口重采样，
+    /// 两者不整除时落不到整数源帧上。断言"这一笔有没有落盘"因此要看"有没有接近它的
+    /// 取值"，而不是逐位相等。
+    fn authority_curve_has_near(bytes: &[u8], key: &str, value: f64, tolerance: f64) -> bool {
+        let saved: Value = serde_json::from_slice(bytes).unwrap();
+        let Some(authorities) = saved["edits"]["atlas"]["authorities"].as_object() else {
+            return false;
+        };
+        authorities.values().any(|authority| {
+            authority["edits"][key]["runs"]
+                .as_array()
+                .is_some_and(|runs| {
+                    runs.iter().any(|run| {
+                        run["values"]
+                            .as_array()
+                            .is_some_and(|values| {
+                                values.iter().any(|v| {
+                                    v.as_f64()
+                                        .is_some_and(|sample| (sample - value).abs() <= tolerance)
+                                })
+                            })
+                    })
+                })
+        })
+    }
     /// 一段 pending 只在持续过久时报一次 —— 报完就不再重复，避免诊断变成刷屏。
     #[test]
     fn a_stuck_pending_period_is_reported_once() {
@@ -4288,7 +4352,7 @@ pub(crate) mod tests {
         restored.restore(&encoded).unwrap();
         assert_eq!(
             serde_json::from_slice::<Value>(&encoded).unwrap()["version"],
-            9
+            10
         );
         assert_eq!(
             restored.groups,
@@ -4320,9 +4384,10 @@ pub(crate) mod tests {
                 .is_some_and(|id| id.ends_with("-track")),
             "冷恢复后GUID分组必须重投影到新GUI namespace"
         );
-        assert_eq!(
-            cold_document.edits.lock_or_recover().params["b"].extra_curves["hifigan_tension"][0],
-            65.
+        let cold_bytes = cold_document.edits.lock_or_recover().encode().unwrap();
+        assert!(
+            authority_curve_has(&cold_bytes, "extra:hifigan_tension", 65.),
+            "冷恢复后 hifigan_tension 必须留在权威里"
         );
         cold_document.close();
         let ungrouped = call(
@@ -4509,7 +4574,10 @@ pub(crate) mod tests {
         document.ready.store(true, Ordering::Release);
         assert!(applied.is_err(), "合成必须失败，才能验证尾笔不依赖它");
         let b: Value = serde_json::from_slice(&saved[1]).unwrap();
-        assert_eq!(b["edits"]["params"]["b"]["pitch_edit"][399], 69.);
+        assert!(
+            authority_curve_has_near(&saved[1], "pitch_edit", 69., 1.5),
+            "尾笔必须落进权威"
+        );
         assert_eq!(
             editor.history.lock_or_recover().position,
             2,
@@ -4873,6 +4941,14 @@ pub(crate) mod tests {
                 ("modification".into(), "ara://source".into()),
                 ("modification-b".into(), "ara://source".into()),
             ],
+        );
+        // 【T1：显示由"基线 + 编辑"合成】夹具必须同时给出一份就绪的基线，
+        // 否则合成会跳过该根（生产路径上基线由分析流水线提供）。
+        document.publish_baseline(
+            &root,
+            crate::editor::parameter_atlas::RootBaseline::from_display(
+                &original.params_by_root_track[&root],
+            ),
         );
         {
             let mut edits = document.edits.lock_or_recover();
@@ -5389,14 +5465,28 @@ pub(crate) mod tests {
         let encoded = owner.encode_state().unwrap(); // 真getState路径会flush，不只测手工barrier。
         let saved: Value = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(
-            saved["version"], 9,
-            "权威参数按稳定宿主身份存档（v8：曲线按源帧索引）；旧 v2/v3 解码与范围回归另行保留"
+            saved["version"], 10,
+            "权威参数按稳定宿主身份存档（v10：run 级锚）；旧 v2/v3 解码与范围回归另行保留"
         );
-        assert_eq!(
-            &saved["edits"]["params"]["track"]["pitch_edit"]
-                .as_array()
-                .unwrap()[..2],
-            &[json!(60.), json!(64.)]
+        // 【T2：用户曲线只在权威里】`params` 不再写显示数组，所以这条断言改成
+        // 直接读权威的稀疏 run —— 它才是"用户的这两笔"真正落盘的地方。
+        let mut samples: Vec<f64> = Vec::new();
+        for authority in saved["edits"]["atlas"]["authorities"]
+            .as_object()
+            .unwrap()
+            .values()
+        {
+            if let Some(runs) = authority["edits"]["pitch_edit"]["runs"].as_array() {
+                for run in runs {
+                    for value in run["values"].as_array().unwrap() {
+                        samples.push(value.as_f64().unwrap());
+                    }
+                }
+            }
+        }
+        assert!(
+            samples.iter().any(|value| *value > 63.0),
+            "第二笔 64 必须落进权威：{samples:?}"
         );
         assert_eq!(
             editor.history.lock_or_recover().position,
@@ -5902,9 +5992,10 @@ pub(crate) mod tests {
                 );
             }
             if roots.iter().all(|root| {
-                editor.timeline.lock_or_recover().params_by_root_track[root]
-                    .pitch_orig_key
-                    .is_some()
+                let host = root.strip_prefix(&editor.namespace).unwrap_or(root);
+                editor
+                    .document()
+                    .is_some_and(|document| document.baseline_is_ready(host))
             }) {
                 break;
             }
@@ -6840,9 +6931,12 @@ pub(crate) mod tests {
                 "接受后的算法必须WORLD"
             );
             assert_eq!(accepted.params["track"].pitch_edit[100], 64.);
+            // 【T2：派生数组不再进编辑通道】`EditState::params` 只承载用户曲线；
+            // 原线住在文档的基线层，判据因此从"编辑态里有没有 pitch_orig"改成
+            // "这一代的基线是否已就绪"。
             if wait_for_analysis {
                 assert!(
-                    accepted.params["track"].pitch_orig[100] > 30.,
+                    document.baseline_is_ready("track"),
                     "自动渲染的原线必须分析完成"
                 );
             }
@@ -6917,7 +7011,10 @@ pub(crate) mod tests {
         assert!(error.contains("analysis"), "unexpected error: {error}");
         let bytes = owner.encode_state().unwrap();
         let saved: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(saved["edits"]["params"]["track"]["pitch_edit"][0], 64.);
+        assert!(
+            authority_curve_has_near(&bytes, "pitch_edit", 64., 1.5),
+            "用户画的 64 必须落进权威"
+        );
         editor.close();
     }
 }

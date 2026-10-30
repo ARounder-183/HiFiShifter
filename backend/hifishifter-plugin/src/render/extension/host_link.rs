@@ -498,6 +498,12 @@ impl ExtensionOwner {
         let mut resolved = edits.clone();
         resolved.reconcile(&document.track_bindings.lock_or_recover())?;
         resolved.apply(&mut timeline);
+        // 【渲染与 GUI 必须同源】派生原始值只住在基线层（`DocumentSession::baseline`）。
+        // 少了这一步，`project_local` 会拿到空的 `pitch_orig`：未编辑帧的默认值退化成
+        // 0、渲染器也失去"源基频"这条参考 —— 用户看到参数线画好了，却一个采样都没变。
+        // 【为什么在 apply 之后】apply 才建立根的参数条目；在它之前安装会被"目标为空"
+        // 的条目挡掉。
+        document.install_baseline_locked(&mut timeline);
         if !resolved.groups.is_empty() {
             // 空父轨也能承载参数组算法；不加入其音频clip，更不混入其它renderer的区域。
             let mut grouped_view = timeline.clone();

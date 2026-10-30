@@ -526,6 +526,13 @@ impl RootBaseline {
             }
         }
         baseline.ready = true;
+        // 夹具没有分析代次：给一个显式占位，让 `is_ready` 的"已盖章"判据成立。
+        if baseline.pitch_key.is_none() {
+            baseline.pitch_key = Some("display".to_owned());
+        }
+        if baseline.dyn_key.is_none() {
+            baseline.dyn_key = Some("display".to_owned());
+        }
         baseline
     }
 
@@ -541,10 +548,17 @@ impl RootBaseline {
     }
 
     /// 这一代基线是否可用于合成/捕获。
+    ///
+    /// 【判据为什么是"代次已盖章"而不是"数组非空"】分析流水线在真正跑完之前会写一条
+    /// **全零占位** `pitch_orig`（长度对、但没有 key）。把它当就绪，显示层会把整条
+    /// 音高线画成 0，渲染器拿到"原始 = 目标"，用户改了参数却听不到任何变化 ——
+    /// 这正是本轮修的那类"静默无效"。`pitch_key` 只在**组装收敛**时置位
+    /// （见 `pitch_analysis::schedule::maybe_schedule_pitch_orig`），所以它才是判据。
     pub(crate) fn is_ready(&self) -> bool {
         self.ready
             && self.frame_period_ms.is_finite()
             && (0.1..=1000.0).contains(&self.frame_period_ms)
+            && self.pitch_key.is_some()
     }
 
     /// 基线层的显示数组：未编辑帧就是派生原始值。
@@ -2413,6 +2427,9 @@ impl ParameterAtlas {
             baseline.entry(track.id.clone()).or_insert_with(|| RootBaseline {
                 frame_period_ms,
                 ready: true,
+                // 夹具没有分析代次：显式盖章，否则 `is_ready` 的"已组装"判据不成立。
+                pitch_key: Some("display".to_owned()),
+                dyn_key: Some("display".to_owned()),
                 ..Default::default()
             });
         }
