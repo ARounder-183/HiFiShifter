@@ -8,7 +8,7 @@ use hifishifter_kernel::editor::param_edit::{
 };
 use hifishifter_kernel::state::{TimelineState, TrackParamsState};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -677,6 +677,16 @@ fn curve_values_mut<'a>(params: &'a mut TrackParamsState, key: &str) -> Option<&
     }
 }
 
+/// 一条 run 的源时间跨度是否与某个源窗相交（用于"这一笔归哪条 clip"）。
+fn run_overlaps_window(run: &EditRun, frame_ms: f64, window_start: f64, window_end: f64) -> bool {
+    if !(frame_ms.is_finite() && frame_ms > 0.0) || run.values.is_empty() {
+        return false;
+    }
+    let start = run.first_frame as f64 * frame_ms / 1000.0;
+    let end = start + run.values.len() as f64 * frame_ms / 1000.0;
+    end >= window_start - 1e-9 && start <= window_end + 1e-9
+}
+
 /// 把当前几何折成一个锚（同窗口去重；超过上限时合并到最近的窗口）。
 fn intern_anchor(anchors: &mut Vec<EditAnchor>, root: &str, geometry: &RegionGeometry) -> u32 {
     /// 一条权威最多记多少个不同的工程窗口。超过之后合并到最近的窗口：
@@ -898,6 +908,14 @@ pub(crate) struct ParameterAtlas {
     /// ARA-only 宿主的复制谱系：新片段签名 → 种子的完整参数记录。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     ara_copy_seeds: BTreeMap<String, RegionParameters>,
+    /// 校验失败、暂时不参与投影与存档的权威键。
+    ///
+    /// 【为什么需要】一条权威坏掉（旧存档带进来的层内重叠、悬空锚）不该让**整份**
+    /// 图集不可写：`validate` 是所有写入与存档的门，一处失败会把用户之后每一次编辑
+    /// 都判成失败 —— 真机日志里连续 47 次 `invalid authority edit samples` 就是这个。
+    /// 隔离之后：不投影、不写存档、留在内存里等 `repair()` 修好。
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub(crate) quarantined: BTreeSet<String>,
 }
 
 /// 一条 clip 的投影结果：参数 + 这一轮由显式编辑赢下的帧。
@@ -1295,6 +1313,35 @@ impl ParameterAtlas {
     ///
     /// 返回是否真的播了种。父没有参数、子已经存在（含宿主直接复用父身份的别名情形）、
     /// 或键非法时都返回 `false` 且不改动任何状态 —— 保持"从没编辑过"的语义。
+    /// 用**父权威**给子权威播种（整份复制，含锚表）。
+    ///
+    /// 【为什么必须含锚】`from_record` 只搬 `edits`，`anchors` 是空表 —— 而 run 的
+    /// `anchor` 下标还指着父段那张表。子段于是拿到一批**悬空锚**，投影时一条都
+    /// 遍历不到：用户看到的就是"分割之后那半段的线没了 / 回到移动前的原值"。
+    /// 父权威缺席（旧存档、父段从没编辑过）时返回 `false`，由调用方退回旧路径。
+    fn seed_authority_from_record(
+        &mut self,
+        parent_item: Option<&str>,
+        modification: &str,
+        child_item: Option<&str>,
+    ) -> bool {
+        let Some(parent_key) = authority_key(parent_item, modification) else {
+            return false;
+        };
+        let Some(child_key) = authority_key(child_item, "") else {
+            return false;
+        };
+        if !self.seed_authority(&parent_key, &child_key) {
+            return false;
+        }
+        // 子段可能拿到新的 source identity；item 身份比旧 source 更强，清掉旧 source
+        // 以免投影时被判成"源不匹配"而整段不画。
+        if let Some(params) = self.authorities.get_mut(&child_key) {
+            params.source = String::new();
+        }
+        true
+    }
+
     pub(crate) fn seed_authority(&mut self, parent: &str, child: &str) -> bool {
         if parent.is_empty() || child.is_empty() || parent == child {
             return false;
@@ -1602,13 +1649,26 @@ impl ParameterAtlas {
                 return Err(error);
             }
             // 权威侧：复制回执直接给出新 item GUID ⇒ 播种 item 级权威。
-            if let Some(seed) = self.copy_seeds.get(item) {
-                let mut params = AuthorityParameters::from_record(seed, EditMode::FollowMaterial);
-                // 复制回执已给出新 item GUID；item 身份比旧 source 更强，不能因为
-                // 宿主给复制体换了 source identity 就把 seed 丢掉。
-                params.source = String::new();
-                if let Some(key) = authority_key(Some(item), "") {
-                    self.set_authority(&key, params);
+            // 优先**整份复制父权威**（含锚表）；父权威不在时才退回 per-clip 记录，
+            // 且退回时把锚降级成"跟随素材"，绝不留下悬空下标。
+            let seed = self.copy_seeds.get(item).cloned();
+            if let Some(seed) = seed {
+                let parent_item = seed.identity.item.clone();
+                let modification = seed.identity.modification.clone();
+                let seeded =
+                    self.seed_authority_from_record(parent_item.as_deref(), &modification, Some(item));
+                if !seeded {
+                    let mut params =
+                        AuthorityParameters::from_record(&seed, EditMode::FollowMaterial);
+                    params.source = String::new();
+                    for curve in params.edits.values_mut() {
+                        for run in &mut curve.runs {
+                            run.anchor = None;
+                        }
+                    }
+                    if let Some(key) = authority_key(Some(item), "") {
+                        self.set_authority(&key, params);
+                    }
                 }
             }
         }
@@ -1670,12 +1730,24 @@ impl ParameterAtlas {
         if let Some(mut seed) = seed {
             // 权威侧：分割回执给出右半段的新 item GUID（左半段沿用原 item 的 GUID，
             // 因此它自己的条目无需播种）⇒ 把父段参数整份播给右半段。
-            let mut params = AuthorityParameters::from_record(&seed, EditMode::FollowMaterial);
-            // 分割出的右半段可能拿到新的 source identity；item GUID 是宿主明确
-            // 给出的新身份，旧 source 不应阻止父曲线播种。
-            params.source = String::new();
-            if let Some(key) = authority_key(Some(right), "") {
-                self.set_authority(&key, params);
+            // 【为什么优先整份复制父权威】锚表必须跟着 run 一起走：只搬 edits 会让
+            // 右半段拿到悬空锚，投影时一条都遍历不到 —— 用户看到"分割后那半段回退"。
+            let modification = seed.identity.modification.clone();
+            let seeded =
+                self.seed_authority_from_record(Some(parent), &modification, Some(right));
+            if !seeded {
+                let mut params = AuthorityParameters::from_record(&seed, EditMode::FollowMaterial);
+                // 分割出的右半段可能拿到新的 source identity；item GUID 是宿主明确
+                // 给出的新身份，旧 source 不应阻止父曲线播种。
+                params.source = String::new();
+                for curve in params.edits.values_mut() {
+                    for run in &mut curve.runs {
+                        run.anchor = None;
+                    }
+                }
+                if let Some(key) = authority_key(Some(right), "") {
+                    self.set_authority(&key, params);
+                }
             }
             seed.live = false;
             self.regions.insert(format!("split-basis:{right}"), seed);
@@ -1995,7 +2067,10 @@ impl ParameterAtlas {
         identities: &BTreeMap<String, RegionIdentity>,
         wanted: EditMode,
     ) -> LockSync {
-        let mut live: BTreeMap<String, (String, RegionGeometry)> = BTreeMap::new();
+        // 【为什么按权威收集**全部**窗口】一条权威可以被多条 region 共享（分割、复制）。
+        // 每半段有自己的源窗与工程窗；只取"project_start 最小的一条"会把两半的笔画
+        // 钉到同一个窗口上 —— 用户看到的是"另一半的线跑到这边来了"。
+        let mut live: BTreeMap<String, Vec<(String, RegionGeometry)>> = BTreeMap::new();
         for clip in &timeline.clips {
             let Some(identity) = identities.get(&clip.id) else {
                 continue;
@@ -2009,11 +2084,9 @@ impl ParameterAtlas {
             let Ok(geometry) = geometry(clip) else {
                 continue;
             };
-            match live.get(&key) {
-                Some((_, known)) if known.project_start <= geometry.project_start => {}
-                _ => {
-                    live.insert(key, (root, geometry));
-                }
+            let windows = live.entry(key).or_default();
+            if !windows.iter().any(|(_, known)| known.equivalent(&geometry)) {
+                windows.push((root, geometry));
             }
         }
         let mut sync = LockSync::default();
@@ -2034,20 +2107,43 @@ impl ParameterAtlas {
                     }
                 }
                 EditMode::PinProject => match live.get(key) {
-                    Some((root, geometry)) => {
-                        let index = intern_anchor(&mut params.anchors, root, geometry);
-                        for curve in params.edits.values_mut() {
-                            for run in &mut curve.runs {
-                                if run.anchor.is_none() {
-                                    run.anchor = Some(index);
+                    Some(windows) if !windows.is_empty() => {
+                        for (root, geometry) in windows {
+                            let window_start = geometry.source_start;
+                            let window_end = geometry.source_start + geometry.source_duration;
+                            // 只有"这一笔真的落在这条 clip 的源窗里"才由它定位置。
+                            let needs_pin = params.edits.values().any(|curve| {
+                                curve.runs.iter().any(|run| {
+                                    run.anchor.is_none()
+                                        && run_overlaps_window(run, curve.frame_ms, window_start, window_end)
+                                })
+                            });
+                            if !needs_pin {
+                                continue;
+                            }
+                            let index = intern_anchor(&mut params.anchors, root, geometry);
+                            for curve in params.edits.values_mut() {
+                                let frame_ms = curve.frame_ms;
+                                for run in &mut curve.runs {
+                                    if run.anchor.is_some() {
+                                        continue;
+                                    }
+                                    if run_overlaps_window(run, frame_ms, window_start, window_end) {
+                                        run.anchor = Some(index);
+                                    }
                                 }
                             }
                         }
                     }
-                    None => sync.pending += 1,
+                    _ => sync.pending += 1,
                 },
             }
             params.lock.mode = wanted;
+            // 规范化：把"刚被钉进同一层"的笔画按帧合并/裁剪，保证层内有序无重叠。
+            // 没有这一步，反复拨开关会造出层内重叠，随后每一次写入都被校验拒绝。
+            for curve in params.edits.values_mut() {
+                curve.normalize();
+            }
             let runs_after = params
                 .edits
                 .values()
@@ -2367,6 +2463,9 @@ impl ParameterAtlas {
                 let Some(authority) = self.authorities.get(&key) else {
                     continue;
                 };
+                if self.quarantined.contains(&key) {
+                    continue;
+                }
                 if !authority.source.is_empty() && authority.source != identity.source {
                     continue;
                 }
@@ -2400,7 +2499,10 @@ impl ParameterAtlas {
                 }
             }
             // 3) 有锚层：钉在各自的工程窗口上（不要求有活 clip）。
-            for authority in self.authorities.values() {
+            for (authority_key, authority) in self.authorities.iter() {
+                if self.quarantined.contains(authority_key) {
+                    continue;
+                }
                 for (index, anchor) in authority.anchors.iter().enumerate() {
                     // 空 root = 尚未绑定（测试种子与旧存档迁移的中间态）。
                     if !anchor.root.is_empty() && anchor.root != root {
@@ -2598,6 +2700,8 @@ impl ParameterAtlas {
         // 首次接触旧权威时先把整条 curves 折算成稀疏 edits；新写入永远只落 edits。
         candidate.migrate_legacy_authority_edits();
         candidate.capture_gaps_sparse(timeline, Some(client_view))?;
+        // 本次真正写到的权威：只有它们需要后置校验（见函数末尾的隔离逻辑）。
+        let mut touched: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         for clip in &timeline.clips {
             let Some(identity) = identities.get(&clip.id) else {
                 continue;
@@ -2776,6 +2880,8 @@ impl ParameterAtlas {
                         }
                     }
                 }
+                // 这一笔真正落到源域的帧（窗口外的帧不属于本 clip，既不加也不删）。
+                let mut painted: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
                 if let Some(desired_source) = &desired_source {
                     for run in &desired_source.runs {
                         for (offset, value) in run.values.iter().copied().enumerate() {
@@ -2786,40 +2892,21 @@ impl ParameterAtlas {
                                 }
                             }
                             layer_values.insert(frame, value);
+                            painted.insert(frame);
                         }
                     }
                 }
                 let rebuilt =
                     EditCurve::from_frame_values_in_layer(frame_ms, &key, layer, layer_values);
+                // 【覆盖语义】先把当前层整层换掉，再把这一笔覆盖的源帧从**所有其它层**
+                // 删掉。用户在同一段素材上再画一次，意图是覆盖那几帧，不是再叠一份：
+                // 留着旧锚层会让同一批源帧在**另一个工程位置**再画一条同样的线 ——
+                // 那正是"移动之后线还在旧地方 / 分割之后又回退"的形状。
+                // 【为什么不能把当前层也算进来】那样刚写进去的笔画会被自己删掉。
                 curve.runs.retain(|run| run.anchor != layer);
+                curve.remove_frames_everywhere(&painted);
                 curve.runs.extend(rebuilt.runs.iter().cloned());
-                // 刚画过的源帧从**另一层**移除：用户最后一次的意图只有一个位置，
-                // 留着旧层会在另一个工程位置画出同一条线的副本。
-                if let Some(desired_source) = &desired_source {
-                    // 只清**另一层**：锁定（无锚）时清所有锚层，不锁定（有锚）时清无锚层。
-                    // 【为什么不能把当前层也算进来】那样刚写进去的笔画会被自己删掉 ——
-                    // 捕获"成功"但曲线是空的，正是"画完就消失"的形状。
-                    let stale_layers: std::collections::BTreeSet<Option<u32>> = if layer.is_none()
-                    {
-                        curve
-                            .runs
-                            .iter()
-                            .filter_map(|run| run.anchor)
-                            .map(Some)
-                            .collect()
-                    } else {
-                        [None].into_iter().collect()
-                    };
-                    for anchor in stale_layers {
-                        for run in &desired_source.runs {
-                            for offset in 0..run.values.len() {
-                                let frame = run.first_frame + offset;
-                                curve.remove_range_in_layer(frame, frame, anchor);
-                            }
-                        }
-                    }
-                }
-                curve.runs.sort_by_key(|run| (run.first_frame, run.anchor));
+                curve.normalize_layer(layer);
                 if curve.runs.is_empty() {
                     // 用户明确擦空（或旧曲线被证据删除）⇒ 保留一个空 key 作为
                     // "这条线已经清空"的显式标记；下一次投影才能真的清除 GUI 数组。
@@ -2862,6 +2949,7 @@ impl ParameterAtlas {
                     anchors.len(),
                 ),
             );
+            touched.insert(authority_key.clone());
             candidate.set_authority(
                 &authority_key,
                 AuthorityParameters {
@@ -2897,6 +2985,20 @@ impl ParameterAtlas {
                     curves: BTreeMap::new(),
                 },
             );
+        }
+        // 【失败隔离】只校验本次触碰到的权威。一条旧数据坏掉（层内重叠、悬空锚）
+        // 不该让这次编辑整体失败 —— 那会让用户"画一次、报一次错、之后再也画不上"。
+        for key in &touched {
+            if let Err(error) = candidate.validate_authority(key) {
+                hifishifter_kernel::log_limiter::emit_limited_key(
+                    log::Level::Warn,
+                    "ara.atlas.quarantine",
+                    format_args!(
+                        "[ara] parameter authority {key} was quarantined: {error}; the rest of this write landed"
+                    ),
+                );
+                candidate.quarantined.insert(key.clone());
+            }
         }
         candidate.validate()?;
         Ok(candidate)
@@ -3352,31 +3454,38 @@ impl ParameterAtlas {
             ),
         );
     }
-    /// 当前先保持原安全数量边界；source basis可序列化，但反序列化后也必须复验。
-    pub fn validate(&self) -> Result<(), String> {
-        if self.regions.len() > 16384 {
-            return Err("parameter atlas region budget exceeded".into());
+    /// 单条权威的形状校验。
+    ///
+    /// 【为什么把判据下沉到"一层一层"】跨层允许覆盖同一源帧（同一素材的多个工程
+    /// 位置），层内必须有序无重叠。旧的全局无重叠判据把合法的多层数据判成非法，
+    /// 于是每次"移动之后再画"都会被整份拒绝。
+    fn validate_authority_of(&self, authority: &str, params: &AuthorityParameters) -> Result<(), String> {
+        if !params.template.frame_period_ms.is_finite()
+            || params.template.frame_period_ms < 0.1
+            || params.template.frame_period_ms > 1000.
+        {
+            return Err("invalid authority parameter template".into());
         }
-        if self.authorities.len() > 16384 {
-            return Err("parameter atlas authority budget exceeded".into());
-        }
-        for params in self.authorities.values() {
-            if !params.template.frame_period_ms.is_finite()
-                || params.template.frame_period_ms < 0.1
-                || params.template.frame_period_ms > 1000.
+        for (key, curve) in &params.edits {
+            if key.is_empty()
+                || !curve.frame_ms.is_finite()
+                || !(0.1..=1000.).contains(&curve.frame_ms)
+                || curve.runs.len() > 16384
             {
-                return Err("invalid authority parameter template".into());
+                return Err("invalid authority edit curve".into());
             }
-            for (key, curve) in &params.edits {
-                if key.is_empty()
-                    || !curve.frame_ms.is_finite()
-                    || !(0.1..=1000.).contains(&curve.frame_ms)
-                    || curve.runs.len() > 16384
-                {
-                    return Err("invalid authority edit curve".into());
-                }
+            // 悬空锚 = 这段编辑永远不投影（分割播种丢锚就是这个形状）。宁可拒绝，
+            // 也不要把一批"看不见的 run"写进存档。
+            if curve
+                .runs
+                .iter()
+                .any(|run| run.anchor.is_some_and(|index| index as usize >= params.anchors.len()))
+            {
+                return Err(format!("dangling authority edit anchor on {authority}:{key}"));
+            }
+            for layer in curve.layers() {
                 let mut last = 0_usize;
-                for run in &curve.runs {
+                for run in curve.runs_in_layer(layer) {
                     let end = run
                         .first_frame
                         .checked_add(run.values.len())
@@ -3394,6 +3503,51 @@ impl ParameterAtlas {
                     last = end;
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// 单条权威（按键）的校验。
+    pub(crate) fn validate_authority(&self, authority: &str) -> Result<(), String> {
+        let Some(params) = self.authorities.get(authority) else {
+            return Ok(());
+        };
+        self.validate_authority_of(authority, params)
+    }
+
+    /// 修一遍：每条曲线按层规范化，再把已经修好的权威解除隔离。
+    ///
+    /// 【为什么在加载/恢复之后必须跑】历史存档（以及旧版本留在内存里的会话）可能
+    /// 带着层内重叠。规范化把它们合并成合法形状，用户不必手动删掉重画。
+    pub(crate) fn repair(&mut self) {
+        for params in self.authorities.values_mut() {
+            for curve in params.edits.values_mut() {
+                curve.normalize();
+            }
+        }
+        let keys = self.quarantined.iter().cloned().collect::<Vec<_>>();
+        for key in keys {
+            if self.validate_authority(&key).is_ok() {
+                self.quarantined.remove(&key);
+            }
+        }
+    }
+
+    /// 当前先保持原安全数量边界；source basis可序列化，但反序列化后也必须复验。
+    pub fn validate(&self) -> Result<(), String> {
+        if self.regions.len() > 16384 {
+            return Err("parameter atlas region budget exceeded".into());
+        }
+        if self.authorities.len() > 16384 {
+            return Err("parameter atlas authority budget exceeded".into());
+        }
+        for (authority, params) in self.authorities.iter() {
+            // 隔离中的权威不参与校验：它已经不投影、不写存档，一条坏数据不该让整份
+            // 图集永久不可写（见 `quarantine`）。
+            if self.quarantined.contains(authority) {
+                continue;
+            }
+            self.validate_authority_of(authority, params)?;
         }
         if self.copy_seeds.len() > 16384
             || self
@@ -6751,4 +6905,149 @@ mod tests {
         );
     }
 
+
+    // ===== 第 11 轮：层（layer）语义的回归 =====
+
+    /// **跨层重叠是合法形状，层内重叠不是。**
+    ///
+    /// 【为什么这条必须钉住】validate 曾经用「整条曲线无重叠」的判据校验**多层**
+    /// 数据。于是一次「移动之后再画」（同一批源帧落在两个锚层上）会让整份图集永久
+    /// 不可写 —— 真机日志里连续 47 次 invalid authority edit samples。
+    #[test]
+    fn validate_accepts_cross_layer_overlap_and_rejects_dangling_anchors() {
+        let ids = identities();
+        let mut atlas = ParameterAtlas::default().capture(&edited(), &ids).unwrap();
+        {
+            let authority = atlas.authorities.get_mut("mod:mod").unwrap();
+            authority.anchors = vec![EditAnchor {
+                root: "a".into(),
+                project_start_sec: 1.0,
+                project_duration_sec: 1.0,
+                source_start_sec: 0.0,
+                source_duration_sec: 1.0,
+                reversed: false,
+            }];
+            let curve = authority.edits.get_mut("pitch_edit").unwrap();
+            let first = curve.runs[0].first_frame;
+            let values = curve.runs[0].values.clone();
+            curve.runs.push(EditRun::anchored(first, values, 0));
+            curve.normalize();
+        }
+        assert!(atlas.validate().is_ok(), "跨层覆盖同一源帧是合法的");
+        // 悬空锚（run 指着一个不存在的锚）必须被拒绝：那段编辑永远不投影。
+        atlas.authorities.get_mut("mod:mod").unwrap().anchors.clear();
+        assert!(atlas.validate().is_err(), "悬空锚必须被拒绝");
+    }
+
+    /// **同一源帧上的第二笔必须覆盖旧锚层，而不是再叠一份。**
+    #[test]
+    fn a_second_stroke_replaces_the_previous_layer_at_the_same_source_frames() {
+        let ids = identities();
+        let first = edited();
+        let mut atlas = ParameterAtlas::default().capture(&first, &ids).unwrap();
+        atlas.set_placement(
+            &first,
+            &ids,
+            &Placement::PinProject { frozen: Vec::new() },
+        );
+        assert_eq!(atlas.authorities["mod:mod"].anchors.len(), 1, "不锁定 ⇒ 一个锚");
+
+        // 片段被移到 3 秒；用户在新位置把同一段源帧重画成 70。
+        let moved = host(3., 1., 0., 1.);
+        let mut client = moved.clone();
+        let mut params = first.params_by_root_track["a"].clone();
+        for value in params.pitch_edit.iter_mut() {
+            if *value > 0.0 {
+                *value = 70.0;
+            }
+        }
+        params.pitch_edit_user_modified = true;
+        client.params_by_root_track.insert("a".into(), params);
+
+        let after = atlas
+            .capture_changes(&client, &ids, &first.params_by_root_track)
+            .unwrap();
+        let curve = after.authorities["mod:mod"]
+            .edits
+            .get("pitch_edit")
+            .expect("第二笔必须落进权威");
+        let mut frames: Vec<usize> = curve
+            .runs
+            .iter()
+            .flat_map(|run| run.first_frame..=run.end_frame())
+            .collect();
+        let total = frames.len();
+        frames.sort_unstable();
+        frames.dedup();
+        assert_eq!(
+            frames.len(),
+            total,
+            "同一源帧不得同时留在两个层里（否则旧位置会再画一份）"
+        );
+        assert!(after.validate().is_ok(), "覆盖之后图集必须仍然合法");
+    }
+
+    /// **反复拨「锁定参数线」不得造出层内重叠。**
+    #[test]
+    fn toggling_the_lock_never_creates_an_intra_layer_overlap() {
+        let ids = identities();
+        let mut atlas = ParameterAtlas::default().capture(&edited(), &ids).unwrap();
+        for round in 0..3 {
+            atlas.set_placement(
+                &host(1., 1., 0., 1.),
+                &ids,
+                &Placement::PinProject { frozen: Vec::new() },
+            );
+            assert!(atlas.validate().is_ok(), "第 {} 轮：钉住之后必须合法", round);
+            atlas.set_placement(&host(3., 1., 0., 1.), &ids, &Placement::FollowMaterial);
+            assert!(atlas.validate().is_ok(), "第 {} 轮：放开之后必须合法", round);
+        }
+    }
+
+    /// **隔离一条坏权威之后，其余图集必须仍然可写、可修复。**
+    #[test]
+    fn a_quarantined_authority_does_not_block_validation_or_repair() {
+        let ids = identities();
+        let mut atlas = ParameterAtlas::default().capture(&edited(), &ids).unwrap();
+        {
+            let authority = atlas.authorities.get_mut("mod:mod").unwrap();
+            let curve = authority.edits.get_mut("pitch_edit").unwrap();
+            let run = curve.runs[0].clone();
+            // 人为造一个**层内**重叠（旧版本能写进去的形状）。
+            curve.runs.push(EditRun::new(run.first_frame, run.values.clone()));
+            curve.runs.sort_by_key(|run| run.first_frame);
+        }
+        assert!(atlas.validate().is_err(), "层内重叠必须被拒绝");
+        atlas.quarantined.insert("mod:mod".into());
+        assert!(atlas.validate().is_ok(), "隔离之后其余图集必须可写");
+        atlas.repair();
+        assert!(atlas.quarantined.is_empty(), "repair 之后必须解除隔离");
+        assert!(atlas.validate().is_ok());
+    }
+
+    /// **整份复制父权威时锚表必须跟着走。**
+    #[test]
+    fn seeding_a_clone_carries_the_anchor_table() {
+        let ids = identities();
+        let mut atlas = ParameterAtlas::default().capture(&edited(), &ids).unwrap();
+        atlas.set_placement(
+            &host(1., 1., 0., 1.),
+            &ids,
+            &Placement::PinProject { frozen: Vec::new() },
+        );
+        let anchors = atlas.authorities["mod:mod"].anchors.clone();
+        assert_eq!(anchors.len(), 1);
+        assert!(atlas.seed_authority("mod:mod", "mod:clone"));
+        let clone = &atlas.authorities["mod:clone"];
+        assert_eq!(clone.anchors, anchors, "子段必须拿到同一张锚表");
+        assert!(
+            clone
+                .edits
+                .values()
+                .flat_map(|curve| curve.runs.iter())
+                .all(|run| run.anchor.is_none_or(|index| (index as usize) < clone.anchors.len())),
+            "子段的 run 不得带悬空锚"
+        );
+        assert!(atlas.validate().is_ok());
+    }
 }
