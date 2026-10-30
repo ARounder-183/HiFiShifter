@@ -1711,7 +1711,9 @@ impl EditorSession {
             .iter()
             .map(|track| track.id.clone())
             .collect::<std::collections::BTreeSet<_>>();
-        let mut next = std::collections::BTreeMap::new();
+        // 【为什么是逐根补丁而不是整表替换】合成视图只包含"这一轮算得出来"的根
+        // （缺基线的根会被跳过）。整表替换会把缺席的根**直接删掉**，界面上的那条
+        // 参数线随之消失 —— 用户看到的就是"切屏回来线少了一条"。
         for (root, entry) in params.iter() {
             let namespaced = format!("{}{root}", self.namespace);
             let key = if live.contains(&namespaced) {
@@ -1720,10 +1722,9 @@ impl EditorSession {
                 root.clone()
             };
             if live.contains(&key) {
-                next.insert(key, entry.clone());
+                timeline.params_by_root_track.insert(key, entry.clone());
             }
         }
-        timeline.params_by_root_track = next;
     }
 
     /// 把文档合成出来的显示数组装进本会话的时间线（**只读**，不提交任何编辑）。
@@ -2246,7 +2247,10 @@ impl EditorSession {
             self.project_duration
                 .store(timeline.project_sec.to_bits(), Ordering::Release);
         }
-        self.ui_geometry_version.store(version, Ordering::Release);
+        // 【版本号必须在 adopt **成功之后**才推进】否则一次失败的 adopt 会把
+        // `ui_geometry_version` 推到最新，之后每轮都早退 —— 会话永久停在旧数组上，
+        // 用户看到的就是"切屏回来参数线回退"。
+        let mut adopted = !adopt_view;
         // 【take 事实也是几何】清单改写了 clip 的方向 / Loop / 窗口 ⇒ 图集几何变了 ⇒
         // 视图（`edits.params`）必须重建，基线必须跟着换。否则下一次提交会拿
         // "旧方向下的数组"当基线 —— 那正是"改完倒放再改参数，线整体错位"的形状。
@@ -2278,6 +2282,7 @@ impl EditorSession {
                         self.install_document_params(&mut timeline, view.params.as_ref());
                         timeline.params_by_root_track.len()
                     };
+                    adopted = true;
                     hifishifter_kernel::log_limiter::emit_limited_key(
                         log::Level::Warn,
                         "ara.projection",
@@ -2288,6 +2293,9 @@ impl EditorSession {
                     );
                 }
             }
+        }
+        if adopted {
+            self.ui_geometry_version.store(version, Ordering::Release);
         }
         self.notify_timeline();
     }
@@ -2556,10 +2564,82 @@ impl EditorSession {
         // （`ReversePolicy::Materialize`），排除反而会让它的 f0 全零 ⇒ 只剩气声。
         timeline
     }
+    /// 把「这一份 PCM 是哪一代」写进 clip 的内容指纹，并让过期原线失效。
+    ///
+    /// 【为什么必须做在会话里】宿主可以在**同一路径**下换一份内容（重新授权、替换素材、
+    /// ARA 重新交付 PCM）。文件签名（长度 / mtime）可能一点没变，分析缓存因此永远命中，
+    /// 用户看到"换了素材，参数线还是旧内容"。PCM 的 `version` 是唯一能回答这件事的读数，
+    /// 而它只在这里可见。
+    fn refresh_source_fingerprints(&self, timeline: &mut TimelineState) -> bool {
+        let Some(document) = self.document() else {
+            return false;
+        };
+        let sources = document.edit_sources.lock_or_recover();
+        let mut changed = false;
+        for clip in &mut timeline.clips {
+            let Some(path) = clip.source_path.clone() else {
+                continue;
+            };
+            let Some(pcm) = sources.get(&path) else {
+                continue;
+            };
+            // 内容指纹：PCM 代次 + 长度 + 前 4096 个采样的 FNV。
+            // 代次由发布方单调推进；采样哈希兜住"代次没变但内容被就地改写"的形状。
+            let mut stamp: u64 = 0xcbf2_9ce4_8422_2325;
+            for value in pcm
+                .planes
+                .iter()
+                .flat_map(|plane| plane.iter())
+                .take(4096)
+            {
+                stamp ^= u64::from(value.to_bits());
+                stamp = stamp.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            stamp ^= (pcm.planes.first().map(Vec::len).unwrap_or(0) as u64) << 1;
+            stamp ^= pcm.version.rotate_left(17);
+            if clip.source_file_fingerprint != Some(stamp) {
+                clip.source_file_fingerprint = Some(stamp);
+                changed = true;
+            }
+        }
+        changed
+    }
+
     /// 原分析实现可取消/join；每会话持有自己的worker，不推进全局generation。
     fn schedule_analysis(&self) {
         if self.closed.load(Ordering::Acquire) || !self.loaded.lock_or_recover().initialized {
             return;
+        }
+        {
+            let mut timeline = self.timeline.lock_or_recover();
+            let mut probe = timeline.clone();
+            if self.refresh_source_fingerprints(&mut probe) {
+                // 内容换代 ⇒ 这一代的原线作废。清键之后门禁会等新分析，而不是拿旧值
+                // 当"已应用"继续渲染。
+                let roots = probe
+                    .clips
+                    .iter()
+                    .filter_map(|clip| probe.resolve_root_track_id(&clip.track_id))
+                    .collect::<std::collections::BTreeSet<_>>();
+                for root in &roots {
+                    if let Some(params) = timeline.params_by_root_track.get_mut(root) {
+                        params.pitch_orig_key = None;
+                        params.dyn_orig_key = None;
+                    }
+                }
+                for (clip, fresh) in timeline.clips.iter_mut().zip(probe.clips.iter()) {
+                    clip.source_file_fingerprint = fresh.source_file_fingerprint.clone();
+                }
+                hifishifter_kernel::log_limiter::emit_limited_key(
+                    log::Level::Warn,
+                    "ara.source.content-changed",
+                    format_args!(
+                        "[ara] the host republished {} source(s) with new content; the cached \
+                         original pitch/level is invalidated and re-analysed",
+                        roots.len()
+                    ),
+                );
+            }
         }
         let mut workers = self.analysis_workers.lock_or_recover();
         let mut pending = Vec::new();
@@ -3275,7 +3355,14 @@ impl ParamHost for EditorSession {
                         ));
                     }
                 } else {
-                    *self.error.lock_or_recover() = Some(error);
+                    // 【为什么不再写 `self.error`】那个位置是"终态、需要用户处置"的。
+                    // 一次"这次没落上"放进去会让 `prepare_apply` 永久短路（渲染停摆），
+                    // 也会让 `after_write` 把之后每一次**成功**的写入都报成失败 ——
+                    // 前端于是把已经生效的笔画回滚掉，用户看到的就是"参数线回退"。
+                    *self.render_error.lock_or_recover() = Some(error.clone());
+                    if let Some(document) = self.document() {
+                        document.note_edit_dropped(error);
+                    }
                 }
             }
         }
@@ -5344,7 +5431,8 @@ pub(crate) mod tests {
                     client.clips.pop();
                 }
                 3 => client.clips[0].takes[0].source_path = Some("C:/private.wav".into()),
-                _ => client.clips[0].takes[0].playback_rate = 2.,
+                // 身份字段：把 clip 挂到另一条轨上等于换了一条片段，必须拒绝。
+                _ => client.clips[0].track_id = client.tracks[1].id.clone(),
             }
             assert!(document
                 .accept_workspace_edits(0, version, &client, &baseline)
@@ -5366,12 +5454,20 @@ pub(crate) mod tests {
         );
         assert_eq!(document.edits.lock_or_recover().revision, 0);
     }
+    /// **并发几何变化必须被吸收，但客户端改不动文档里的几何。**
+    ///
+    /// 【契约为什么变了】几何是宿主拥有的：用户画线期间宿主完全可能移动 / 拉伸 item。
+    /// 差分域是"编辑器看到的那份几何"（`capture` 的第一个参数），所以旧位置不会把
+    /// 用户的笔画写错帧。真正必须守住的是**文档几何只能由宿主改写** —— 客户端把它
+    /// 改成 42 s 之后，文档里仍是宿主那份。
     #[test]
-    fn workspace_accept_rejects_forged_geometry_before_changing_document_edits() {
+    fn workspace_accept_absorbs_a_stale_client_geometry_without_taking_it() {
         let (model, _owners, _ids) = workspace_fixture();
         let document = model.session();
         let baseline = document.workspace_view().unwrap();
-        let mut client = document.workspace_timeline().unwrap();
+        let host = document.workspace_timeline().unwrap();
+        let original_start = host.clips[0].start_sec;
+        let mut client = host.clone();
         client.clips[0].start_sec = 42.;
         assert!(
             document
@@ -5381,10 +5477,14 @@ pub(crate) mod tests {
                     &client,
                     &baseline
                 )
-                .is_err(),
-            "宿主几何必须拒绝而不是忽略"
+                .is_ok(),
+            "并发几何变化必须被吸收，而不是把用户的编辑整条丢弃"
         );
-        assert_eq!(document.edits.lock_or_recover().revision, 0);
+        assert_eq!(
+            document.workspace_timeline().unwrap().clips[0].start_sec,
+            original_start,
+            "文档几何仍由宿主决定，客户端改不动它"
+        );
     }
     #[test]
     fn workspace_global_solo_keeps_each_renderer_output_independent() {

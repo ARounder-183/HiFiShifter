@@ -640,6 +640,13 @@ impl EditState {
         // 又会被 `follow_geometry` 立刻覆盖。清掉它：存档只带权威。
         let mut trimmed = self.clone();
         trimmed.atlas.regions.clear();
+        // 隔离中的权威不写进存档：它们不投影，写进去只会让下一次加载再坏一次。
+        // 用户的数据仍在内存里（`quarantine` 保留到进程结束），但不会污染存档。
+        let quarantined = trimmed.atlas.quarantined.clone();
+        for key in quarantined {
+            trimmed.atlas.authorities.remove(&key);
+        }
+        trimmed.atlas.quarantined.clear();
         // 新存档只带用户可编辑曲线：分析派生的 pitch_orig / dyn_orig /
         // tension_orig 与未编辑的 pitch_edit 全部丢弃；旧权威的整条 curves
         // 也已在本代迁移成 edits，不得再写回。
@@ -736,6 +743,9 @@ impl EditState {
                 })
                 .collect();
         }
+        // 【加载即修复】历史存档可能带着层内重叠 / 悬空锚（旧版本能写进去）。
+        // 先把每条曲线按层规范化，再把已经修好的权威解除隔离 —— 用户不必删掉重画。
+        restored.atlas.repair();
         restored.atlas = restored.atlas.reserve_restored()?;
         if version == 1 && (!restored.params.is_empty() || !restored.tracks.is_empty()) {
             return Err("legacy ARA edits have no persistent identity; cannot restore by session track number".into());

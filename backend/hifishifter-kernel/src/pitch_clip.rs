@@ -545,6 +545,12 @@ fn build_clip_pitch_key(
     let (len, mtime) = file_sig(Path::new(source_path));
     hasher.update(&len.to_le_bytes());
     hasher.update(&mtime.to_le_bytes());
+    // 【为什么还要哈希 clip 的内容指纹】文件签名只回答"磁盘上那个文件变了没有"。
+    // 宿主可以**用同一路径换一份内容**（重新授权、替换素材、ARA 重新交付 PCM），
+    // 此时路径 / 长度 / mtime 都可能不变，缓存命中 ⇒ 分析永远不重跑 ⇒ 用户看到
+    // "换了素材，参数线还是旧内容"。插件在发布 PCM 时把代次写进这个字段，
+    // 它一变键就变，缓存自然失效。
+    hasher.update(&clip.source_file_fingerprint.unwrap_or(0).to_le_bytes());
     hasher.update(&quantize_u32(fp, 1000.0).to_le_bytes());
 
     let key = hasher.finalize().to_hex().to_string();

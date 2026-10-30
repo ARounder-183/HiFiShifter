@@ -604,14 +604,10 @@ fn after_write(session: &EditorSession, result: Value) -> Result<Value, String> 
         );
         return Err(message);
     }
-    if let Some(error) = session.error.lock_or_recover().clone() {
-        hifishifter_kernel::log_limiter::emit_limited_key(
-            log::Level::Warn,
-            "cmd_failed:write_session",
-            format_args!("[cmd] write rejected by session error: {error}"),
-        );
-        return Err(error);
-    }
+    // 【为什么不再读 `session.error`】写入命令的成败由 `result["ok"]` 回答。把会话级
+    // 错误当成"这次也失败了"会让一次历史失败永久污染之后每一次成功写入：前端收到
+    // Err 就把本地已经生效的笔画回滚，用户看到"画完就没了"。会话级错误现在只由
+    // `ensure_loaded` 这类**终态**失败设置，并通过 `get_state` 呈现给界面。
     session.emit("history_state", history_state(session));
     session.notify_timeline();
     Ok(result)
