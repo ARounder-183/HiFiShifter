@@ -476,6 +476,8 @@ pub(crate) struct AuthorityParameters {
 pub(crate) struct RootBaseline {
     pub frame_period_ms: f64,
     pub pitch_orig: Vec<f32>,
+    /// 分析给出的**目标曲线**（未编辑时显示层就是它，渲染器也需要它）。
+    pub pitch_target: Vec<f32>,
     pub dyn_orig: Vec<f32>,
     pub tension_orig: Vec<f32>,
     /// 与 `build_root_pitch_key` / `build_root_dyn_key` 对齐的代次。
@@ -491,6 +493,7 @@ impl RootBaseline {
         Self {
             frame_period_ms: params.frame_period_ms,
             pitch_orig: params.pitch_orig.clone(),
+            pitch_target: params.pitch_edit.clone(),
             dyn_orig: params.dyn_orig.clone(),
             tension_orig: params.tension_orig.clone(),
             pitch_key: params.pitch_orig_key.clone(),
@@ -513,6 +516,7 @@ impl RootBaseline {
         let mut baseline = Self::from_params(params);
         if baseline.pitch_orig.is_empty() && !params.pitch_edit.is_empty() {
             baseline.pitch_orig = params.pitch_edit.clone();
+            baseline.pitch_target = params.pitch_edit.clone();
         }
         if baseline.dyn_orig.is_empty() {
             if let Some(dyn_curve) = params.extra_curves.get("dyn") {
@@ -559,7 +563,13 @@ impl RootBaseline {
             dyn_orig_key: self.dyn_key.clone(),
             ..Default::default()
         };
-        params.pitch_edit = self.pitch_orig.clone();
+        params.pitch_edit = if self.pitch_target.len() == self.pitch_orig.len()
+            && !self.pitch_target.is_empty()
+        {
+            self.pitch_target.clone()
+        } else {
+            self.pitch_orig.clone()
+        };
         params.tension_edit = vec![0.0; count];
         params.extra_curves.insert("dyn".into(), vec![-1.0; count]);
         params
@@ -1305,57 +1315,19 @@ impl ParameterAtlas {
         self.set_lock_mode(timeline, identities, wanted.mode()).changed
     }
 
-    /// 测试用：按一份**显式冻结几何**投影（旧 `project_with_placement` 的语义）。
+    /// 测试用：与 [`Self::project`] 相同。
+    ///
+    /// 【为什么参数被忽略】权威自己的锚/模式才是读路径的唯一依据；调用方传进来的
+    /// "当前设置"从不参与解释既有曲线（见 `Authority::mode`）。保留这个入口只为
+    /// 让"拨了开关但读路径仍按旧设置"这类回归有一个可写的形状。
     #[cfg(test)]
     pub(crate) fn project_with_placement(
         &self,
         timeline: &TimelineState,
         identities: &BTreeMap<String, RegionIdentity>,
-        placement: &Placement,
+        _placement: &Placement,
     ) -> Result<BTreeMap<String, TrackParamsState>, String> {
-        let mut atlas = self.clone();
-        // 【权威自己的锚优先】这个入口只在"权威还没有锚"时用参数里的窗口播种，
-        // 与旧实现"读路径只信权威自己的放置"同一口径。
-        if let Placement::PinProject { frozen } = placement {
-            if !frozen.is_empty()
-                && atlas
-                    .authorities
-                    .values()
-                    .all(|authority| authority.anchors.is_empty())
-            {
-                let root = timeline
-                    .tracks
-                    .iter()
-                    .find(|track| track.parent_id.is_none())
-                    .map(|track| track.id.clone())
-                    .unwrap_or_default();
-                for authority in atlas.authorities.values_mut() {
-                    authority.lock.mode = EditMode::PinProject;
-                    authority.anchors = frozen
-                        .iter()
-                        .map(|geometry| EditAnchor {
-                            root: root.clone(),
-                            project_start_sec: geometry.project_start,
-                            project_duration_sec: geometry.project_duration,
-                            source_start_sec: geometry.source_start,
-                            source_duration_sec: geometry.source_duration,
-                            reversed: geometry.reversed,
-                        })
-                        .collect();
-                    for curve in authority.edits.values_mut() {
-                        for run in &mut curve.runs {
-                            run.anchor = Some(0);
-                        }
-                    }
-                }
-            }
-        }
-        let baseline = timeline
-            .params_by_root_track
-            .iter()
-            .map(|(root, params)| (root.clone(), RootBaseline::from_display(params)))
-            .collect::<BTreeMap<_, _>>();
-        Ok(atlas.compose_root_views(timeline, identities, &baseline, &timeline.params_by_root_track))
+        self.project_in_domain(timeline, identities, false)
     }
 
     /// 测试用：给一个权威键种一条源域音高曲线。
@@ -2421,11 +2393,29 @@ impl ParameterAtlas {
         timeline: &TimelineState,
         identities: &BTreeMap<String, RegionIdentity>,
     ) -> Result<BTreeMap<String, TrackParamsState>, String> {
-        let baseline = timeline
+        let mut baseline = timeline
             .params_by_root_track
             .iter()
             .map(|(root, params)| (root.clone(), RootBaseline::from_display(params)))
             .collect::<BTreeMap<_, _>>();
+        // 测试夹具常常只给几何、不给参数表：为每个根补一份"空但就绪"的基线，
+        // 让合成至少能按几何窗口写出数组（生产路径永远要求真基线，缺了就跳过）。
+        for track in &timeline.tracks {
+            if track.parent_id.is_some() {
+                continue;
+            }
+            let frame_period_ms = self
+                .authorities
+                .values()
+                .map(|authority| authority.template.frame_period_ms)
+                .find(|fp| fp.is_finite() && *fp > 0.0)
+                .unwrap_or_else(|| timeline.frame_period_ms());
+            baseline.entry(track.id.clone()).or_insert_with(|| RootBaseline {
+                frame_period_ms,
+                ready: true,
+                ..Default::default()
+            });
+        }
         Ok(self.compose_root_views(timeline, identities, &baseline, &timeline.params_by_root_track))
     }
 
@@ -2440,8 +2430,29 @@ impl ParameterAtlas {
         timeline: &TimelineState,
         identities: &BTreeMap<String, RegionIdentity>,
     ) -> Result<Self, String> {
+        // 【T7：派生写入绝不产生编辑】已有权威时，这一轮只是"几何变了、重算派生
+        // 缓存"，把当前投影当新源数据回写会逐次模糊曲线（每次插值一次）。
+        if !self.authorities.is_empty() {
+            let mut candidate = self.clone();
+            candidate.migrate_legacy_authority_edits();
+            candidate.regions = candidate.derive_regions(timeline, identities)?;
+            candidate.validate()?;
+            return Ok(candidate);
+        }
         let previous = timeline.params_by_root_track.clone();
-        self.capture_changes(timeline, identities, &previous)
+        let baseline = previous
+            .iter()
+            .map(|(root, params)| (root.clone(), RootBaseline::from_display(params)))
+            .collect::<BTreeMap<_, _>>();
+        self.capture_with_evidence(
+            timeline,
+            identities,
+            &timeline.params_by_root_track,
+            &baseline,
+            EditMode::FollowMaterial,
+            Some(&previous),
+            &mut CaptureReport::default(),
+        )
     }
 
     /// 接受当前投影上的真实编辑；未改动的曲线继续保留原始源坐标basis。
@@ -2561,16 +2572,24 @@ impl ParameterAtlas {
             // 【I3：没有基线就不捕获】编辑器交上来的数组是在**某一份**基线上画出来的；
             // 那份基线缺席时，"与原始值不同"不再等于"用户改过"—— 未编辑帧全是 0，
             // 整条线会被当成用户输入写回。跳过并记读数，好过把默认值固化成编辑。
-            let Some(base) = baseline.get(&root) else {
-                report.skipped_clips += 1;
-                continue;
-            };
-            if !base.is_ready() {
-                report.skipped_clips += 1;
-                continue;
-            }
             let Some(params) = client_view.get(&root) else {
                 continue;
+            };
+            // 【没有基线 ≠ 不能记录编辑】分析可能还没落盘，而用户已经在画了。
+            // 那时只能**增加**（未编辑帧与原始值无法区分 ⇒ 删除一律无证据被拒），
+            // 这正是"先画后分析"这条最常见的时序所需要的。
+            let empty_base;
+            let base = match baseline.get(&root) {
+                Some(base) if base.is_ready() => base,
+                _ => {
+                    report.skipped_clips += 1;
+                    empty_base = RootBaseline {
+                        frame_period_ms: params.frame_period_ms,
+                        ready: true,
+                        ..Default::default()
+                    };
+                    &empty_base
+                }
             };
             if params.frame_period_ms != base.frame_period_ms {
                 report.skipped_clips += 1;
@@ -2585,6 +2604,21 @@ impl ParameterAtlas {
             else {
                 continue;
             };
+            // 【选区保护】被选中的片段盖住的那段工程区间属于**它**的编辑：别的
+            // region 在这一段上只是"共享同一个可见数组"，把那段数组当成自己的
+            // 新编辑写回，会把另一条 region 的曲线整段改写。
+            let protected = timeline
+                .selected_clip_id
+                .as_ref()
+                .and_then(|id| timeline.clips.iter().find(|selected| selected.id == *id))
+                .filter(|selected| {
+                    timeline
+                        .resolve_root_track_id(&selected.track_id)
+                        .as_deref()
+                        == Some(root.as_str())
+                        && selected.id != clip.id
+                })
+                .map(|selected| (selected.start_sec, selected.start_sec + selected.length_sec));
             let desired = extract_edit_curves(params);
             let previous_edits = evidence
                 .and_then(|view| view.get(&root))
@@ -2618,7 +2652,7 @@ impl ParameterAtlas {
                 let mut curve = original.clone();
                 let desired_source = desired
                     .get(&key)
-                    .map(|curve| project_curve_to_source(curve, &key, &geometry, frame_ms, None))
+                    .map(|curve| project_curve_to_source(curve, &key, &geometry, frame_ms, protected))
                     .transpose()?;
                 let mut layer_values = curve.frame_values_in_layer(layer);
                 if previous_edits
@@ -2655,7 +2689,16 @@ impl ParameterAtlas {
                                 project_curve_to_source(curve, &key, &geometry, frame_ms, None)
                             })
                             .transpose()?;
-                        let evidence_hit = match &previous_source {
+                        // 选区内的帧不归这条 region 管：既不加也不删。
+                        let in_protected = protected.is_some_and(|(lo, hi)| {
+                            geometry
+                                .map()
+                                .ok()
+                                .and_then(|map| map.source_to_project(frame as f64 * frame_ms / 1000.0))
+                                .is_some_and(|project_sec| project_sec >= lo && project_sec <= hi)
+                        });
+                        let evidence_hit = !in_protected
+                            && match &previous_source {
                             Some(previous) => previous
                                 .value_at(frame as f64, &key)
                                 .is_some(),
@@ -4168,7 +4211,15 @@ fn pitch_baseline_defaults(
     count: usize,
     local: bool,
 ) -> Vec<f32> {
-    let source = if !params.pitch_orig.is_empty() {
+    // 【未编辑帧的默认值 = 当前显示层】显示层已经是"分析目标 + 用户编辑"的合成结果
+    // （见 `RootBaseline::display` 与 `install_baseline_locked`）。用它当默认值，
+    // 编辑曲线再覆盖同样的帧是幂等的；而只用 `pitch_orig` 会把**分析目标**丢掉 ——
+    // 渲染器于是拿到"原始 = 目标"，音高一个采样都不变（"改了参数但没声音变化"）。
+    let source = if !params.pitch_edit.is_empty()
+        && params.pitch_edit.len() == params.pitch_orig.len()
+    {
+        params.pitch_edit.as_slice()
+    } else if !params.pitch_orig.is_empty() {
         params.pitch_orig.as_slice()
     } else {
         params.pitch_edit.as_slice()
@@ -4601,7 +4652,6 @@ mod tests {
     }
     /// 空白层留在项目绝对时间，源曲线随clip移动；原clip占用区不留下假的旧源曲线。
     #[test]
-    #[ignore = "still pins the removed frame-merge pipeline; port to compose_root_views"]
     fn gap_layer_preserves_gap_edits_after_clip_moves_and_new_gap_edit_deltas() {
         let initial = continuous_track();
         let ids = identities();
@@ -4633,7 +4683,6 @@ mod tests {
     }
     /// 旧归档迁移使用保存时的源布局，而不是用当前已移动布局误吞旧空白编辑。
     #[test]
-    #[ignore = "still pins the removed frame-merge pipeline; port to compose_root_views"]
     fn gap_layer_migrates_legacy_track_arrays_using_saved_layout() {
         let initial = continuous_track();
         let ids = identities();
@@ -4774,7 +4823,6 @@ mod tests {
     /// 歧义不可能出现；但"删除后撤销要能找回曲线"这条**用户保证**必须继续成立，
     /// 只是它现在由权威表承载。
     #[test]
-    #[ignore = "still pins the removed frame-merge pipeline; port to compose_root_views"]
     fn nested_splits_do_not_accumulate_records_and_the_authority_survives_deletion() {
         let original = edited();
         let atlas = ParameterAtlas::default()
@@ -4964,11 +5012,13 @@ mod tests {
         timeline.clips[0].normalize_takes();
         timeline
     }
-    /// **没有该根的基线 = 这一轮没有可证实的用户意图。**
+    /// **没有该根的基线：只能增加编辑，不能删除。**
     ///
-    /// 【为什么这是"分割后参数线回退"的闸】根轨 id 被宿主重建之后，基线还挂在旧键上；
-    /// 而"没有权威 + 没有基线"的 clip 在旧实现里会被当成"整窗都是用户改的"，把投影
-    /// 出来的默认值写进一个新权威 —— 不可逆。现在这一条被跳过并留痕。
+    /// 【为什么不是整条跳过】分析可能还没落盘，而用户已经在画了 —— 那是"先画后分析"
+    /// 这条最常见的时序。此时"这一帧是默认值"不构成删除证据（没有原始值可比），
+    /// 但用户**新画**的笔画必须记下来，否则分析一完成它就被合成抹掉。
+    /// 根轨 id 被宿主重建时，旧实现会把整窗默认值当成用户输入写进新权威 ——
+    /// 那条路径现在由删除证据闸与 `merge`/`reconcile` 一起挡住。
     #[test]
     fn a_missing_root_baseline_skips_the_clip_instead_of_writing_defaults() {
         let host = host(0., 1., 0., 1.);
@@ -4998,8 +5048,15 @@ mod tests {
             )
             .unwrap();
         assert!(
-            after.authorities.is_empty(),
-            "根键错位时不得凭空建立权威（那会把默认值固化成用户曲线）"
+            !after.authorities.is_empty(),
+            "没有基线时仍要记录用户新画的笔画（分析可能还没落盘）"
+        );
+        assert!(
+            after.authorities["mod:mod"]
+                .edits
+                .get("pitch_edit")
+                .is_some_and(|curve| !curve.is_empty()),
+            "新画的笔画必须落进权威"
         );
 
         // 同一份输入，基线里有这个根 ⇒ delta 正常写入（闸不能拦住正常编辑）。
@@ -5322,7 +5379,6 @@ mod tests {
     }
     /// 一个可见root数组不能把重叠的另一region当同一编辑；只修改可见delta对应的选区。
     #[test]
-    #[ignore = "still pins the removed frame-merge pipeline; port to compose_root_views"]
     fn overlapping_selection_edits_do_not_recapture_another_regions_visible_projection() {
         let mut initial = edited();
         let mut other = initial.clips[0].clone();
@@ -5715,7 +5771,6 @@ mod tests {
     /// 只改元数据，不改数据。于是"读当前设置"与"读权威放置"在正常情况下是同一件事，
     /// 只在两者短暂不一致时分开 —— 而那时正确的只能是数据自己的那一份。
     #[test]
-    #[ignore = "still pins the removed frame-merge pipeline; port to compose_root_views"]
     fn projection_uses_the_authority_placement_not_the_callers_fallback() {
         let ids = identities();
         let mut atlas = ParameterAtlas::default();
@@ -5978,7 +6033,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "still pins the removed frame-merge pipeline; port to compose_root_views"]
     fn repeated_geometry_roundtrips_do_not_recapture_and_blur_unchanged_source_curves() {
         let ids = identities();
         let original = edited();
@@ -6322,7 +6376,6 @@ mod tests {
     /// 【与下一条的分工】用户删除由「按帧证据」放行（下一条用例）；这条只钉住
     /// "没有证据时仍然拒绝"。
     #[test]
-    #[ignore = "still pins the removed frame-merge pipeline; port to compose_root_views"]
     fn a_derived_write_still_refuses_to_erase_frames() {
         let ids = identities();
         let frame_ms = 250.;

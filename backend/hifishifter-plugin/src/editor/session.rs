@@ -1643,6 +1643,30 @@ impl EditorSession {
         // 显示时间线，再走"用户提交"漏斗回写文档 —— 于是"分析完成"被捕获成一次
         // 用户编辑（R5），未编辑帧被当成用户输入固化。现在它只发布基线：
         // 显示由合成产生，捕获只认编辑域的差分。
+        // 【采集会话没有宿主文档】显示时间线就是权威：分析结果直接落进去，
+        // 绝不能走"文档基线 + 合成"（那条路径要求一份宿主时间线）。
+        if self.is_capture() {
+            let mut timeline = self.timeline.lock_or_recover();
+            for root in roots {
+                let Some(next) = params.get(&root) else {
+                    continue;
+                };
+                let Some(current) = timeline.params_by_root_track.get_mut(&root) else {
+                    continue;
+                };
+                current.pitch_orig = next.pitch_orig.clone();
+                if !current.pitch_edit_user_modified {
+                    current.pitch_edit = next.pitch_edit.clone();
+                }
+                current.pitch_orig_key = next.pitch_orig_key.clone();
+                current.dyn_orig = next.dyn_orig.clone();
+                current.dyn_orig_key = next.dyn_orig_key.clone();
+                current.has_pitch_adjustment_active = next.has_pitch_adjustment_active;
+            }
+            drop(timeline);
+            self.publish_timeline_derived();
+            return;
+        }
         let mut changed = false;
         for root in roots {
             let Some(next) = params.get(&root) else {

@@ -1869,6 +1869,25 @@ impl DocumentSession {
             params.tension_orig = base.tension_orig.clone();
             params.pitch_orig_key = base.pitch_key.clone();
             params.dyn_orig_key = base.dyn_key.clone();
+            // 基线层同时是**显示层的底**：没有用户编辑时，`pitch_edit` 就是原始值
+            // （渲染器需要一个"目标曲线"，空数组等于"不处理"）。有用户编辑时绝不覆盖。
+            if !params.pitch_edit_user_modified {
+                params.pitch_edit = if base.pitch_target.len() == base.pitch_orig.len()
+                    && !base.pitch_target.is_empty()
+                {
+                    base.pitch_target.clone()
+                } else {
+                    base.pitch_orig.clone()
+                };
+            }
+            if params.tension_edit.len() < base.pitch_orig.len() {
+                params.tension_edit.resize(base.pitch_orig.len(), 0.0);
+            }
+            if !params.extra_curves.contains_key("dyn") {
+                params
+                    .extra_curves
+                    .insert("dyn".to_owned(), vec![-1.0; base.pitch_orig.len()]);
+            }
         }
     }
 
@@ -2139,7 +2158,9 @@ impl DocumentSession {
         // 看到的那份，判据就变成"当前视图与某个别的视图不同" —— 而"不同"里既有用户的
         // 编辑，也有宿主移动造成的几何差异、以及投影范围的变化。把它当成用户意图写回
         // 源曲线，就是用户看到的"编辑一下 clip，参数线被重置"。
-        let client_view = baseline.params.as_ref();
+        // 【客户端 = 编辑器这一轮交上来的数组】`baseline.params` 是**上一轮**的视图，
+        // 拿它当客户端等于"自己和自己比" —— 差分恒空，用户的笔画永远进不了权威。
+        let client_view = &client.params_by_root_track;
         let client_baseline = baseline.baseline.as_ref();
         // 新 run 打不打锚由**用户当前设置**决定；既有 run 的锚不受影响。
         let mode = crate::editor::parameter_atlas::lock_mode_from_settings()

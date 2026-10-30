@@ -688,11 +688,10 @@ pub fn extract_edit_curves(params: &TrackParamsState) -> EditCurveSet {
     };
     let mut curves = std::collections::BTreeMap::new();
 
-    // 【为什么也看 pitch_edit 本身】显示层里"未编辑"的 pitch_edit 就是 pitch_orig 的
-    // 逐帧副本；`pitch_orig` 缺席（分析未落盘 / 独立 App 的夹具）时，非零的
-    // pitch_edit 只可能是用户画的 —— 0 是"没有编辑"的哨兵。
-    if params.pitch_edit_user_modified || !params.pitch_orig.is_empty() || !params.pitch_edit.is_empty()
-    {
+    // 【为什么只信这个标记】`pitch_edit` 在未编辑时是**分析目标曲线**（等于
+    // `pitch_orig`，或用户导入的 MIDI 目标），它与原始值不同不代表用户改过 ——
+    // 拿它做差分会把"分析结果"整条当成编辑写回。标记由每一次真正的写入设置。
+    if params.pitch_edit_user_modified {
         scan_curve(
             &params.pitch_edit,
             "pitch_edit",
