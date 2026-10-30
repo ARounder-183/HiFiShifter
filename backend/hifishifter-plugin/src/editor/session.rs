@@ -4573,7 +4573,6 @@ pub(crate) mod tests {
         let applied = editor.apply(editor.submitted.load(Ordering::Acquire), None);
         document.ready.store(true, Ordering::Release);
         assert!(applied.is_err(), "合成必须失败，才能验证尾笔不依赖它");
-        let b: Value = serde_json::from_slice(&saved[1]).unwrap();
         assert!(
             authority_curve_has_near(&saved[1], "pitch_edit", 69., 1.5),
             "尾笔必须落进权威"
@@ -7010,7 +7009,6 @@ pub(crate) mod tests {
         let error = outcome.unwrap_err();
         assert!(error.contains("analysis"), "unexpected error: {error}");
         let bytes = owner.encode_state().unwrap();
-        let saved: Value = serde_json::from_slice(&bytes).unwrap();
         assert!(
             authority_curve_has_near(&bytes, "pitch_edit", 64., 1.5),
             "用户画的 64 必须落进权威"
