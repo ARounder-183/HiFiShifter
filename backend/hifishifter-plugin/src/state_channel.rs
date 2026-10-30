@@ -511,16 +511,10 @@ impl EditState {
             entry.tension_edit = incoming.tension_edit.clone();
             entry.extra_curves = incoming.extra_curves.clone();
             entry.extra_params = incoming.extra_params.clone();
-            // 派生数组只用于显示回退；不与用户数据一起覆盖。
-            if entry.pitch_orig.is_empty() {
-                entry.pitch_orig = incoming.pitch_orig.clone();
-            }
-            if entry.tension_orig.is_empty() {
-                entry.tension_orig = incoming.tension_orig.clone();
-            }
-            if entry.dyn_orig.is_empty() {
-                entry.dyn_orig = incoming.dyn_orig.clone();
-            }
+            // 【T2：派生数组永不从客户端进来】pitch_orig / dyn_orig / tension_orig 由
+            // 基线层唯一提供（`DocumentSession::publish_baseline`）。此前这里在
+            // "目标为空"时补入客户端的副本，于是"客户端拿旧一代分析结果回传"会覆盖
+            // 新基线 —— 用户看到的就是参数线回到旧的原始值。
         }
         // 不按本次传入的 host 子集删根：调用方可能只提交工作区的一部分。
         merged
@@ -561,16 +555,8 @@ impl EditState {
             entry.tension_edit = params.tension_edit.clone();
             entry.extra_curves = params.extra_curves.clone();
             entry.extra_params = params.extra_params.clone();
-            // 派生数组只在目标为空时补入（首次恢复）；已有分析结果不覆盖。
-            if entry.pitch_orig.is_empty() {
-                entry.pitch_orig = params.pitch_orig.clone();
-            }
-            if entry.tension_orig.is_empty() {
-                entry.tension_orig = params.tension_orig.clone();
-            }
-            if entry.dyn_orig.is_empty() {
-                entry.dyn_orig = params.dyn_orig.clone();
-            }
+            // 【T2：派生数组不从这里来】它们属于基线层；恢复路径由
+            // `publish_baseline` / `install_baseline_locked` 负责。
         }
         timeline.params_by_root_track = merged;
         for track in &mut timeline.tracks {
@@ -612,7 +598,7 @@ impl EditState {
     /// 旧构建读新存档时那个字段会解析失败 —— 升代让它得到"这份存档由更新的插件保存"
     /// 这句**可行动**的话，而不是一条看不懂的 serde 错误。反过来，新构建读第 7 代及
     /// 更早的存档仍然完全正确（`basis` 有对象 ⇒ 走旧索引分支），因此**不需要折算**。
-    const CURRENT_STATE_VERSION: u64 = 9;
+    const CURRENT_STATE_VERSION: u64 = 10;
 
     /// 有版本且有界的组件state；旧空state保持默认编辑。
     pub fn encode(&self) -> Result<Vec<u8>, String> {
@@ -629,7 +615,7 @@ impl EditState {
         // 做不到这一点时，"拒绝写"不是保守，而是用整份数据去赌一条记录。
         // 无法绑定的条目现在由 `unbound` 承载：数据留着、不套用、不进 `bindings`。
         let version = if !self.atlas.authorities.is_empty() {
-            9
+            10
         } else if !self.clip_local.is_empty() {
             6
         } else if !self.groups.is_empty() {
@@ -650,16 +636,24 @@ impl EditState {
         // 新存档只带用户可编辑曲线：分析派生的 pitch_orig / dyn_orig /
         // tension_orig 与未编辑的 pitch_edit 全部丢弃；旧权威的整条 curves
         // 也已在本代迁移成 edits，不得再写回。
+        let atlas_authoritative = !trimmed.atlas.authorities.is_empty();
         trimmed.params = trimmed
             .params
             .into_iter()
             .map(|(root, params)| {
                 // 保留根的存在性（空轨也要能被认回），只清派生数组：
                 // 用户曲线不能按"标记是否存在"推断丢弃（旧载荷没有那个标记）。
-                (
-                    root,
-                    crate::editor::capture_edits::strip_derived_curves(&params),
-                )
+                let mut params = crate::editor::capture_edits::strip_derived_curves(&params);
+                if atlas_authoritative {
+                    // 【T2：权威在时 params 只是显示缓存】把整条显示数组写进存档，
+                    // 读回来会被当成"用户编辑"—— 那正是第 9 轮之后仍然存在的
+                    // "存档一次、参数线回退一次"。
+                    params.pitch_edit.clear();
+                    params.tension_edit.clear();
+                    params.extra_curves.clear();
+                    params.pitch_edit_user_modified = false;
+                }
+                (root, params)
             })
             .collect();
         for authority in trimmed.atlas.authorities.values_mut() {
