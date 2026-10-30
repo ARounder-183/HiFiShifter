@@ -2632,6 +2632,36 @@ impl TimelineState {
         }
     }
 
+    /// 把一段区间填成**目标位置自己的原始值**（未编辑帧的归属）。
+    ///
+    /// 【为什么需要它】移动/拉伸一段带编辑的区间时，未编辑的帧不是"0"，而是
+    /// 目标位置这一代分析出的 `pitch_orig`。旧实现把整段显示数组搬过去，
+    /// 于是未编辑帧带的是**旧位置**的原始值（用户看到的"原始线还是旧的"）。
+    fn fill_curve_range(
+        curve: &mut Vec<f32>,
+        required_len: usize,
+        start_frame: usize,
+        end_frame: usize,
+        original: &[f32],
+        default_value: f32,
+    ) {
+        if curve.len() < required_len {
+            curve.resize(required_len, default_value);
+        }
+        let start = start_frame.min(curve.len());
+        let end = end_frame.min(curve.len());
+        if start >= end {
+            return;
+        }
+        for (offset, value) in curve[start..end].iter_mut().enumerate() {
+            *value = original
+                .get(start + offset)
+                .copied()
+                .filter(|sample| sample.is_finite())
+                .unwrap_or(default_value);
+        }
+    }
+
     fn write_curve_range(
         curve: &mut Vec<f32>,
         required_len: usize,
@@ -2673,22 +2703,36 @@ impl TimelineState {
         // pitch/tension 始终保持工程长度所以未受影响；这里统一改为
         // 不足处补参考值（pitch/tension 补 0，extra 补参数默认值）。
         let frame_count = end_frame.saturating_sub(start_frame);
+        // 【T11：搬的是**编辑**，不是显示数组】显示数组里未编辑的帧等于 pitch_orig，
+        // 直接整段搬走会把**旧的**原始值带到新位置（用户看到"移动之后原始线还是旧的"）。
+        // 先提取编辑曲线，再按"未编辑 = 默认值"渲染成 payload，接收侧才有机会用
+        // **目标位置自己的**原始值填满那些帧。
+        let edits = crate::editor::param_edit::extract_edit_curves(entry);
+        let dense = |key: &str, pad_value: f32| -> Vec<f32> {
+            let mut values = vec![pad_value; frame_count];
+            if let Some(curve) = edits.get(key) {
+                for (offset, value) in values.iter_mut().enumerate() {
+                    if let Some(sample) = curve.value_at((start_frame + offset) as f64, key) {
+                        *value = sample;
+                    }
+                }
+            }
+            values
+        };
         let pitch_edit = if entry.pitch_edit_user_modified {
-            Self::curve_slice(&entry.pitch_edit, start_frame, frame_count, 0.0)
+            dense("pitch_edit", 0.0)
         } else {
             Vec::new()
         };
-        let tension_edit = Self::curve_slice(&entry.tension_edit, start_frame, frame_count, 0.0);
+        let tension_edit = dense("tension_edit", 0.0);
         let extra_curves = entry
             .extra_curves
             .iter()
-            .map(|(param, curve)| {
+            .map(|(param, _)| {
+                let key = format!("extra:{param}");
                 let default_value =
                     crate::renderer::common_params::automation_curve_pad_value(kind, param);
-                (
-                    param.clone(),
-                    Self::curve_slice(curve, start_frame, frame_count, default_value),
-                )
+                (param.clone(), dense(&key, default_value))
             })
             .collect();
 
@@ -2791,11 +2835,14 @@ impl TimelineState {
 
         let required_len = entry.pitch_edit.len().max(end_frame);
         if has_pitch {
-            Self::clear_curve_range(
+            // 未编辑帧取**目标位置**的原始值；payload 里那些帧是 0（=没有编辑）。
+            let original = entry.pitch_orig.clone();
+            Self::fill_curve_range(
                 &mut entry.pitch_edit,
                 required_len,
                 start_frame,
                 end_frame,
+                &original,
                 0.0,
             );
         }
@@ -2814,6 +2861,22 @@ impl TimelineState {
                 &linked_params.pitch_edit,
                 0.0,
             );
+            // payload 里 0 = "这一帧没有编辑"（`pitch_edit` 的哨兵），不是数值。
+            // 把它写进目标会把刚填好的原始值盖成 0 —— 用户看到的就是"移动之后
+            // 未编辑的原始线整段消失"。这里按帧把哨兵还原成目标位置的原始值。
+            let original = entry.pitch_orig.clone();
+            for (offset, value) in linked_params.pitch_edit.iter().copied().enumerate() {
+                if value != 0.0 {
+                    continue;
+                }
+                let idx = start_frame.saturating_add(offset);
+                if idx >= entry.pitch_edit.len() {
+                    break;
+                }
+                if let Some(sample) = original.get(idx).copied() {
+                    entry.pitch_edit[idx] = sample;
+                }
+            }
         }
         Self::write_curve_range(
             &mut entry.tension_edit,
@@ -3043,11 +3106,24 @@ impl TimelineState {
         };
 
         // 写入前先取出旧范围快照，避免写/读互相覆盖。
+        // 【T11：重采样的是**编辑层**】显示数组里未编辑的帧等于旧 `pitch_orig`；
+        // 把它一起重采样会把旧原始值拉到新位置。这里只取编辑，未编辑帧留 0。
         let pitch_sources: Vec<Vec<f32>> = if pitch_user_modified {
+            let edits = crate::editor::param_edit::extract_edit_curves(entry);
             frame_mappings
                 .iter()
                 .map(|&(old_start, old_count, _, _)| {
-                    Self::curve_slice(&entry.pitch_edit, old_start, old_count, 0.0)
+                    let mut values = vec![0.0; old_count];
+                    if let Some(curve) = edits.get("pitch_edit") {
+                        for (offset, value) in values.iter_mut().enumerate() {
+                            if let Some(sample) =
+                                curve.value_at((old_start + offset) as f64, "pitch_edit")
+                            {
+                                *value = sample;
+                            }
+                        }
+                    }
+                    values
                 })
                 .collect()
         } else {
@@ -3133,6 +3209,24 @@ impl TimelineState {
                 };
                 for (offset, value) in values.into_iter().enumerate() {
                     curve[new_start.saturating_add(offset)] = value;
+                }
+            }
+        }
+
+        // 新范围里"没有编辑"的帧取**目标位置**这一代分析出的原始值。
+        if pitch_user_modified {
+            let original = entry.pitch_orig.clone();
+            for &(_, _, new_start, new_count) in &frame_mappings {
+                for offset in 0..new_count {
+                    let idx = new_start.saturating_add(offset);
+                    if idx >= entry.pitch_edit.len() {
+                        break;
+                    }
+                    if entry.pitch_edit[idx] == 0.0 {
+                        if let Some(value) = original.get(idx).copied() {
+                            entry.pitch_edit[idx] = value;
+                        }
+                    }
                 }
             }
         }
@@ -12329,4 +12423,59 @@ mod gain_split_tests {
             assert!((clip.audible_gain() - audible_before).abs() < 1e-6);
         }
     }
+    /// **T11：移动带编辑的片段时，未编辑帧取新位置的原始值。**
+    ///
+    /// 【为什么这条必须存在】独立 App 此前把整段 `pitch_edit` 切片搬走 —— 未编辑帧
+    /// 带的是**旧位置**的 `pitch_orig`。用户看到的是"移动之后，原始线还是旧的"。
+    /// 编辑帧的优先级高于未编辑帧（I8），所以它们必须原样落到新位置。
+    #[test]
+    fn app_move_recomposes_unedited_frames_from_the_new_pitch_orig() {
+        let mut tl = TimelineState::default();
+        let track_id = tl.tracks[0].id.clone();
+        let clip_id = tl.add_clip(
+            Some(track_id.clone()),
+            Some("MoveEdited".into()),
+            Some(0.0),
+            Some(2.0),
+            Some("C:/audio/a.mp3".into()),
+        );
+        let root = tl.resolve_root_track_id(&track_id).unwrap();
+        tl.ensure_params_for_root(&root);
+        let frames = 800usize; // 4 s @ 5 ms
+        {
+            let entry = tl.params_by_root_track.get_mut(&root).unwrap();
+            entry.pitch_orig = (0..frames).map(|i| 50.0 + i as f32 * 0.01).collect();
+            // 未编辑帧 = 原始值；只有旧范围 100..=120 是用户画的 70。
+            entry.pitch_edit = entry.pitch_orig.clone();
+            for frame in 100..=120 {
+                entry.pitch_edit[frame] = 70.0;
+            }
+            entry.pitch_edit_user_modified = true;
+        }
+        tl.move_clips(
+            &[MoveClipPayload {
+                clip_id,
+                start_sec: 1.0,
+                track_id: None,
+            }],
+            true,
+        );
+        let entry = tl.params_by_root_track.get(&root).unwrap();
+        assert!(
+            (entry.pitch_edit[300] - 70.0).abs() < 1e-4,
+            "编辑帧必须落到新位置（300），got {}",
+            entry.pitch_edit[300]
+        );
+        assert!(
+            (entry.pitch_edit[250] - entry.pitch_orig[250]).abs() < 1e-4,
+            "未编辑帧必须取新位置的原始值：{} vs {}",
+            entry.pitch_edit[250],
+            entry.pitch_orig[250]
+        );
+        assert!(
+            (entry.pitch_edit[200] - entry.pitch_orig[200]).abs() < 1e-4,
+            "新范围起点也必须是新原始值"
+        );
+    }
+
 }

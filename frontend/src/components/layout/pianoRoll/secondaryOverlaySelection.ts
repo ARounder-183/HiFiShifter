@@ -63,8 +63,20 @@ export function getVisibleSecondaryParamIds(args: {
  * @returns 新数组，长度 = `max(orig.length, edit.length)`；每个位置取有限的编辑值，
  *   否则取有限的原始值，两者都非有限时取 0。
  */
-export function resolveSecondaryOverlayValues(args: { orig: number[]; edit: number[] }): number[] {
+export function resolveSecondaryOverlayValues(args: {
+    orig: number[];
+    edit: number[];
+    /**
+     * 该参数的 `0` 是否是「没有编辑」的哨兵（pitch / tension 是；音量不是）。
+     *
+     * 【为什么需要它】主曲线一直把 0 读成"未编辑"并回退到原始值，副参数叠加此前
+     * 把 0 当成一个**合法的编辑值**，于是"用户从没碰过的那一段"在副参数上显示成
+     * 0（掉到底），与主曲线不一致。默认按哨兵处理，与主曲线同一条语义。
+     */
+    zeroMeansUnedited?: boolean;
+}): number[] {
     const { orig, edit } = args;
+    const zeroMeansUnedited = args.zeroMeansUnedited ?? true;
     const length = Math.max(orig.length, edit.length);
     const values = new Array<number>(length);
 
@@ -74,7 +86,10 @@ export function resolveSecondaryOverlayValues(args: { orig: number[]; edit: numb
         const hasEditValue = Number.isFinite(editValue);
         const hasOrigValue = Number.isFinite(origValue);
 
-        if (hasEditValue) {
+        const editIsSentinel =
+            zeroMeansUnedited && hasEditValue && editValue === 0 && hasOrigValue && origValue !== 0;
+
+        if (hasEditValue && !editIsSentinel) {
             values[index] = editValue;
         } else if (hasOrigValue) {
             values[index] = origValue;

@@ -736,6 +736,11 @@ pub fn restore_param_frames(
 
     match param.as_str() {
         "pitch" => {
+            // 【没有原始值就没有"初始化"】`pitch_orig` 缺席时写 0 会把整条线清零
+            // （用户看到的正是"点一下初始化，参数线掉到底"）。保留当前值，等基线到达。
+            if entry.pitch_orig.is_empty() {
+                return serde_json::json!({"ok": true, "pending": true});
+            }
             for i in 0..count {
                 let idx = start.saturating_add(i);
                 if idx >= entry.pitch_edit.len() {

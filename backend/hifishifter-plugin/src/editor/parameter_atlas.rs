@@ -1498,6 +1498,13 @@ impl ParameterAtlas {
                 params.unseen_rounds = 0;
                 return true;
             }
+            // 【T10：钉住的权威不随 clip 一起消失】用户把这一笔画在了工程位置上，
+            // 即使宿主删掉了片段，那条线仍然属于工程 —— 回收它就是"删片段把参数
+            // 一起删了"。只有用户自己清空（锚为空）之后才允许回收。
+            if params.has_anchors() {
+                params.unseen_rounds = 0;
+                return true;
+            }
             params.unseen_rounds = params.unseen_rounds.saturating_add(1);
             if params.unseen_rounds < ORPHAN_GRACE_ROUNDS {
                 return true;
