@@ -512,6 +512,11 @@ impl ExtensionOwner {
             for (root, params) in timeline.params_by_root_track.iter() {
                 // 【两条来源都要看】编辑可能在权威里（正常路径），也可能只在显示数组里
                 // （旧存档恢复、App 导入）。任一存在而基线缺席 ⇒ 等分析。
+                // 【为什么只看这两条】`pitch_edit` 在未编辑时是**分析目标曲线**，
+                // 它非空不代表用户改过（测试夹具与"先画后分析"都长这样）。用
+                // "曲线非空 + 原始值空"当编辑证据会把正常加载判成"等分析"，实测
+                // 会让三条 automatic-apply 用例整条停摆。用户编辑的权威判据只有
+                // 权威表里的锚层与 `pitch_edit_user_modified`。
                 let edited = resolved.atlas.has_pitch_edits_on(root)
                     || params.pitch_edit_user_modified;
                 if edited && !baseline.get(root).is_some_and(|entry| entry.is_ready()) {
