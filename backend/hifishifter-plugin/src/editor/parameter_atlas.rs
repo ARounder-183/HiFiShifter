@@ -2538,7 +2538,6 @@ impl ParameterAtlas {
         candidate.capture_gaps_sparse(timeline, Some(client_view))?;
         for clip in &timeline.clips {
             let Some(identity) = identities.get(&clip.id) else {
-                #[cfg(test)]
                 continue;
             };
             if identity.source.is_empty()
