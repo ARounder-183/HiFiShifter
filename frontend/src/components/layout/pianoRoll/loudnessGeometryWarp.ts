@@ -252,6 +252,16 @@ export interface LoudnessGeometryWarp {
     /** 该帧所属的曲线映射段（同上；pad 帧返回 {@link WARP_CURVE_PAD}）。 */
     curveSegment(frameF: number): number;
     /**
+     * 这条映射是否应当作用于**用户画出来的曲线**（`pitch_edit` / 音量与 dyn 的
+     * 编辑层），而不只是分析基线。
+     *
+     * 【为什么必须显式声明】「锁定参数线」关闭时，用户曲线被**钉在工程位置**上，
+     * 宿主移动片段不会带走它 —— 此时若预览还把编辑点按几何搬走，用户会看到
+     * "拖一下，线跟着动；松手又跳回去"。锁定时两者同向移动，才可以一起搬。
+     * 缺省（`undefined`）= 允许搬，保持旧行为。
+     */
+    movesUserCurves?: boolean;
+    /**
      * 该帧的映射是否**允许整数帧线性插值**（false ⇒ 必须逐值求值）。
      *
      * 【为什么需要】查表把每个整数帧的取值预先算好、查询时在相邻两帧之间线性插值。
@@ -430,6 +440,8 @@ export function createLoudnessGeometryWarp(args: {
     framePeriodMs: number;
     lockParamLines: boolean;
 }): LoudnessGeometryWarp | null {
+    // 锁定时编辑跟着素材走，预览可以一起搬；不锁定时编辑钉在工程位置，只搬基线。
+    const movesUserCurves = args.lockParamLines;
     const fp = args.framePeriodMs;
     if (!(fp > 0)) return null;
     const fps = 1000 / fp;
@@ -618,6 +630,7 @@ export function createLoudnessGeometryWarp(args: {
     };
 
     return {
+        movesUserCurves,
         baselineFrame(frameF) {
             const index = segmentAt(frameF);
             if (index < 0) return frameF;
