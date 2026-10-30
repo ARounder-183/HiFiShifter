@@ -383,6 +383,13 @@ impl EditState {
                 record.root = root.clone();
             }
         }
+        // 【锚也要跟着换根】`EditAnchor.root` 是**工程时间**的坐标系：根轨 id 变了
+        // （宿主重建 region sequence / 冷恢复后重新认领），锚就指向一个不存在的根。
+        // 合成按 `anchor.root == root` 过滤，于是那些"钉在工程位置"的笔画会整片消失 ——
+        // 用户看到的是"重开工程后，没锁定的那几笔没了"。
+        candidate.atlas.remap_anchor_roots(|root| {
+            mapping.get(root).map(|(next, _)| next.clone())
+        });
         // 【U-7：`gaps` 必须与 `params` 用同一条规则】
         //
         // "未锁定"的参数线里，**没有 clip 覆盖的那一段**住在这一层（`atlas.gaps`）。

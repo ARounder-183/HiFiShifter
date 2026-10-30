@@ -2244,6 +2244,23 @@ impl ParameterAtlas {
     /// 逐帧覆盖。旧实现要在"这一轮投影到了哪些帧"上做启发式合并，于是"某条 clip
     /// 这一轮没有身份"就会让半条轨道的默认值盖掉用户曲线。现在"未编辑帧"由基线
     /// 决定，不需要逐 clip 判断。
+    /// 把每个锚的根键按 `remap` 换一次（宿主重建序列 / 冷恢复重新认领）。
+    pub(crate) fn remap_anchor_roots<F>(&mut self, remap: F)
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        for authority in self.authorities.values_mut() {
+            for anchor in &mut authority.anchors {
+                if anchor.root.is_empty() {
+                    continue;
+                }
+                if let Some(next) = remap(&anchor.root) {
+                    anchor.root = next;
+                }
+            }
+        }
+    }
+
     /// 这一根上是否存在用户画的音高编辑（任何锚层）。
     ///
     /// 【用途】渲染门禁：有编辑但没有基线时不能渲染（见 `ara_render_input`）。
