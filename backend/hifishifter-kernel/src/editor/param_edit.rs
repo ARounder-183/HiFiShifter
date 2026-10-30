@@ -198,8 +198,12 @@ impl EditCurve {
         self.runs.is_empty()
     }
 
+    /// 末端帧（**所有层**的最大值）。
+    ///
+    /// 【为什么不是 `runs.last()`】run 按 `(first_frame, anchor)` 排序，跨层可以重叠；
+    /// 最后一条的末端不一定是整条曲线的末端。用 `max` 才是"这条曲线覆盖到哪"。
     pub fn end_frame(&self) -> Option<usize> {
-        self.runs.last().map(EditRun::end_frame)
+        self.runs.iter().map(EditRun::end_frame).max()
     }
 
     /// 一条曲线里属于某个锚层（`None` = 跟随素材）的 run。
@@ -225,24 +229,32 @@ impl EditCurve {
     }
 
     /// 任意层里取样（旧存档迁移与 App 用）。
+    ///
+    /// 【为什么倒序线性扫】`partition_point` 要求 run 按 `end_frame` 单调，而跨层重叠时
+    /// 这个前提不成立（同一层的 run 会被别的层隔开），它会跳过真正覆盖该帧的那一条。
+    /// 倒序找到的第一条是"后写入的那一段"，与"最新意图优先"一致。
     pub fn value_at(&self, frame: f64, key: &str) -> Option<f32> {
         if !frame.is_finite() {
             return None;
         }
-        let index = self
-            .runs
-            .partition_point(|run| (run.end_frame() as f64) < frame);
-        self.runs.get(index).and_then(|run| run.sample(frame, key))
+        self.runs
+            .iter()
+            .rev()
+            .find(|run| run.contains(frame))
+            .and_then(|run| run.sample(frame, key))
     }
 
     /// 只在某一层里取样。
+    ///
+    /// 一层里的 run 通常只有几条（一笔 = 一条），线性扫描既正确又便宜；
+    /// 跨层交错让任何基于"全局有序"的二分都失去前提。
     pub fn value_at_in_layer(&self, frame: f64, key: &str, anchor: Option<u32>) -> Option<f32> {
         if !frame.is_finite() {
             return None;
         }
-        let runs: Vec<&EditRun> = self.runs_in_layer(anchor).collect();
-        let index = runs.partition_point(|run| (run.end_frame() as f64) < frame);
-        runs.get(index).and_then(|run| run.sample(frame, key))
+        self.runs_in_layer(anchor)
+            .find(|run| run.contains(frame))
+            .and_then(|run| run.sample(frame, key))
     }
 
     /// 展开成逐帧 map，便于捕获时做并集/删除证据。
@@ -303,6 +315,117 @@ impl EditCurve {
             }
         }
         out
+    }
+
+    /// 这条曲线用到的所有层：`None`（跟随素材）在最前，其余按锚下标升序。
+    pub fn layers(&self) -> Vec<Option<u32>> {
+        let mut out: Vec<Option<u32>> = Vec::new();
+        for run in &self.runs {
+            if !out.contains(&run.anchor) {
+                out.push(run.anchor);
+            }
+        }
+        out.sort_by_key(|anchor| (anchor.is_some(), anchor.unwrap_or(0)));
+        out
+    }
+
+    /// 某一层的 run（便利入口；与 `runs_in_layer` 同义，供校验与诊断遍历）。
+    pub fn layer_slice(&self, anchor: Option<u32>) -> Vec<&EditRun> {
+        self.runs_in_layer(anchor).collect()
+    }
+
+    /// 规范化某一层：按帧排序、合并相邻、裁掉重叠（后写者胜）。
+    ///
+    /// 【为什么必须能裁】`set_lock_mode` 会把"无锚层"整体钉到某个锚上；若那个锚上
+    /// 已经有笔画，两层就落在同一个层里。不裁的话 `validate` 会认为这条曲线非法，
+    /// 而它本该是"用户最后画的那一笔赢"。
+    pub fn normalize_layer(&mut self, anchor: Option<u32>) {
+        let mut mine: Vec<EditRun> = self
+            .runs
+            .iter()
+            .filter(|run| run.anchor == anchor)
+            .cloned()
+            .collect();
+        mine.retain(|run| !run.values.is_empty());
+        mine.sort_by_key(|run| run.first_frame);
+        let mut merged: Vec<EditRun> = Vec::with_capacity(mine.len());
+        for run in mine {
+            let mut first = run.first_frame;
+            let mut values = run.values;
+            if let Some(previous) = merged.last_mut() {
+                let previous_end = previous.end_frame();
+                if first <= previous_end {
+                    // 重叠：后写者胜 —— 裁掉被覆盖的头部。
+                    let skip = previous_end + 1 - first;
+                    if skip >= values.len() {
+                        continue;
+                    }
+                    values.drain(..skip);
+                    first = previous_end + 1;
+                }
+                if first == previous_end + 1 {
+                    previous.values.extend(values);
+                    continue;
+                }
+            }
+            merged.push(EditRun {
+                first_frame: first,
+                values,
+                anchor,
+            });
+        }
+        self.runs.retain(|run| run.anchor != anchor);
+        self.runs.extend(merged);
+        self.runs.sort_by_key(|run| (run.first_frame, run.anchor));
+    }
+
+    /// 规范化所有层。
+    pub fn normalize(&mut self) {
+        for anchor in self.layers() {
+            self.normalize_layer(anchor);
+        }
+    }
+
+    /// 把给定源帧从**所有**层里删掉。
+    ///
+    /// 【为什么是"所有层"】用户在同一段素材上再画一次，意图是覆盖那几帧，不是
+    /// 再叠一份。只清"当前层"会让旧锚层的同一批帧继续投影到另一个工程位置 ——
+    /// 那正是"移动之后线还在旧地方"的形状。
+    pub fn remove_frames_everywhere(&mut self, frames: &std::collections::BTreeSet<usize>) {
+        if frames.is_empty() {
+            return;
+        }
+        let mut next: Vec<EditRun> = Vec::with_capacity(self.runs.len());
+        for run in &self.runs {
+            let mut start: Option<usize> = None;
+            let mut values: Vec<f32> = Vec::new();
+            for (offset, value) in run.values.iter().copied().enumerate() {
+                let frame = run.first_frame + offset;
+                if frames.contains(&frame) {
+                    if let Some(begin) = start.take() {
+                        next.push(EditRun {
+                            first_frame: begin,
+                            values: std::mem::take(&mut values),
+                            anchor: run.anchor,
+                        });
+                    }
+                    continue;
+                }
+                if start.is_none() {
+                    start = Some(frame);
+                }
+                values.push(value);
+            }
+            if let Some(begin) = start {
+                next.push(EditRun {
+                    first_frame: begin,
+                    values,
+                    anchor: run.anchor,
+                });
+            }
+        }
+        next.retain(|run| !run.values.is_empty());
+        self.runs = next;
     }
 
     pub fn covers(&self, first: usize, last: usize) -> bool {
@@ -1016,7 +1139,9 @@ mod tests {
         let mut curve = EditCurve::new(5.0);
         curve.runs.push(EditRun::new(0, vec![61.0]));
         curve.runs.push(EditRun::anchored(0, vec![64.0], 0));
-        assert_eq!(curve.value_at(0.0, "pitch_edit"), Some(61.0));
+        // "任意层"取样按**合成时的优先级**回答：锚层压过无锚层（见 `Rank`）。
+        // 分层读取仍然各拿各的 —— 这才是"两层互不覆盖"的真正判据。
+        assert_eq!(curve.value_at(0.0, "pitch_edit"), Some(64.0));
         assert_eq!(curve.value_at_in_layer(0.0, "pitch_edit", None), Some(61.0));
         assert_eq!(curve.value_at_in_layer(0.0, "pitch_edit", Some(0)), Some(64.0));
         assert_eq!(curve.runs_in_layer(None).count(), 1);
@@ -1049,4 +1174,59 @@ mod tests {
         assert_eq!(curve.runs.len(), 1);
     }
 
+
+    #[test]
+    fn normalize_layer_merges_adjacent_and_trims_overlap() {
+        let mut curve = EditCurve::new(5.0);
+        curve.runs.push(EditRun::new(0, vec![1.0, 2.0]));
+        curve.runs.push(EditRun::new(2, vec![3.0]));
+        curve.runs.push(EditRun::new(1, vec![9.0, 9.0]));
+        curve.normalize();
+        assert_eq!(curve.runs.len(), 1, "相邻的 run 必须合并成一条");
+        // 重叠段保留**先写入**的那一条（它是这一段原本的采样），后写入的只保留
+        // 未被覆盖的尾部 —— 这样"把两层钉进同一层"永远不会丢任何一帧数据。
+        assert_eq!(curve.runs[0].values, vec![1.0, 2.0, 9.0]);
+    }
+
+    #[test]
+    fn remove_frames_everywhere_clears_every_layer() {
+        let mut curve = EditCurve::new(5.0);
+        curve.runs.push(EditRun::new(0, vec![1.0; 5]));
+        curve.runs.push(EditRun::anchored(0, vec![2.0; 5], 0));
+        let frames = std::collections::BTreeSet::from([1_usize, 3]);
+        curve.remove_frames_everywhere(&frames);
+        for layer in [None, Some(0)] {
+            let values = curve.frame_values_in_layer(layer);
+            assert_eq!(values.keys().copied().collect::<Vec<_>>(), vec![0, 2, 4]);
+        }
+    }
+
+    #[test]
+    fn end_frame_is_the_max_over_all_layers() {
+        let mut curve = EditCurve::new(5.0);
+        curve.runs.push(EditRun::new(0, vec![1.0]));
+        curve.runs.push(EditRun::anchored(10, vec![2.0, 2.0], 0));
+        assert_eq!(curve.end_frame(), Some(11), "末端取所有层的最大值");
+    }
+
+    #[test]
+    fn value_at_in_layer_is_correct_with_interleaved_layers() {
+        let mut curve = EditCurve::new(5.0);
+        curve.runs.push(EditRun::new(0, vec![1.0, 1.0]));
+        curve.runs.push(EditRun::anchored(0, vec![2.0, 2.0], 0));
+        curve.runs.push(EditRun::new(10, vec![3.0]));
+        curve.runs.sort_by_key(|run| (run.first_frame, run.anchor));
+        assert_eq!(curve.value_at_in_layer(0.0, "pitch_edit", None), Some(1.0));
+        assert_eq!(curve.value_at_in_layer(0.0, "pitch_edit", Some(0)), Some(2.0));
+        assert_eq!(curve.value_at_in_layer(10.0, "pitch_edit", None), Some(3.0));
+    }
+
+    #[test]
+    fn layers_lists_follow_first_then_anchors_in_order() {
+        let mut curve = EditCurve::new(5.0);
+        curve.runs.push(EditRun::anchored(0, vec![1.0], 2));
+        curve.runs.push(EditRun::new(0, vec![1.0]));
+        curve.runs.push(EditRun::anchored(0, vec![1.0], 0));
+        assert_eq!(curve.layers(), vec![None, Some(0), Some(2)]);
+    }
 }
