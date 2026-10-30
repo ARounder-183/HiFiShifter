@@ -112,4 +112,22 @@ test("components/layout/pianoRoll/secondaryOverlaySelection.test.ts scripted che
     }
     assertDeepEqual(first, [1, 1, 1]);
     assertDeepEqual(second, [9, 9, 9]);
+
+    // 【T12：0 是"没有编辑"的哨兵】主曲线一直这么读；副参数叠加此前把 0 当成一个
+    // 合法编辑值，于是"用户从没碰过的那一段"在副参数上掉到底。
+    assertDeepEqual(
+        resolveSecondaryOverlayValues({ orig: [60, 60, 60], edit: [0, 64, 0] }),
+        [60, 64, 60],
+    );
+    // 原始值本来就是 0 时，0 不是"回退"的理由 —— 逐值相等，保持 0。
+    assertDeepEqual(resolveSecondaryOverlayValues({ orig: [0, 0], edit: [0, 3] }), [0, 3]);
+    // 显式关闭哨兵语义时，0 是一个合法的编辑值（音量一类参数）。
+    assertDeepEqual(
+        resolveSecondaryOverlayValues({
+            orig: [1, 1],
+            edit: [0, 1],
+            zeroMeansUnedited: false,
+        }),
+        [0, 1],
+    );
 });
