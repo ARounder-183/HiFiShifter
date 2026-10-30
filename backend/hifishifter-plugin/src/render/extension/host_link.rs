@@ -504,6 +504,24 @@ impl ExtensionOwner {
         // 【为什么在 apply 之后】apply 才建立根的参数条目；在它之前安装会被"目标为空"
         // 的条目挡掉。
         document.install_baseline_locked(&mut timeline);
+        // 【有编辑但没基线 ⇒ 不许渲染】没有 `pitch_orig` 就没有源基频：渲染器会把
+        // 用户曲线原样"应用"到一条没有参考的链路上，输出与原始音频逐采样相同 ——
+        // 界面显示已应用、音频一个采样都没变。等分析（actor 会重试），不要静默降级。
+        {
+            let baseline = document.baseline_snapshot();
+            for (root, params) in timeline.params_by_root_track.iter() {
+                // 【两条来源都要看】编辑可能在权威里（正常路径），也可能只在显示数组里
+                // （旧存档恢复、App 导入）。任一存在而基线缺席 ⇒ 等分析。
+                let edited = resolved.atlas.has_pitch_edits_on(root)
+                    || params.pitch_edit_user_modified;
+                if edited && !baseline.get(root).is_some_and(|entry| entry.is_ready()) {
+                    return Err(format!(
+                        "{}; pitch analysis pending for root {root}",
+                        crate::editor::errors::CONFLICT_PREFIX
+                    ));
+                }
+            }
+        }
         if !resolved.groups.is_empty() {
             // 空父轨也能承载参数组算法；不加入其音频clip，更不混入其它renderer的区域。
             let mut grouped_view = timeline.clone();
