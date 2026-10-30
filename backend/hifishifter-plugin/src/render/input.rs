@@ -559,6 +559,11 @@ impl RenderInput {
                 if cancel.load(Ordering::Acquire) {
                     return Err("host preparation cancelled".into());
                 }
+                // 【0 长度 clip 不是错误】宿主允许把 item 拖成 0 长度；它贡献静音，
+                // 不该让整条时间线渲染失败（旧实现会走到长度校验报 invalid kernel output）。
+                if clip.length_sec <= 0.0 {
+                    continue;
+                }
                 let mut view = timeline.clone();
                 view.clips = vec![clip.clone()];
                 let local = self.clip_parameters.get(&clip.id);
@@ -574,10 +579,16 @@ impl RenderInput {
                     (start, end)
                 };
                 let part_frames = ((hi - lo) * sample_rate as f64).round() as usize;
-                let (_, channels, _, part) = run(&view, lo, hi)?;
-                if channels != 2 || part.len() != part_frames * 2 {
+                let (_, channels, _, mut part) = run(&view, lo, hi)?;
+                if channels != 2 {
                     return Err("invalid region parameter output".into());
                 }
+                // 源尾被夹短时内核只会给出可读的那一段；缺的尾部按 ARA 的定义是静音。
+                // 补齐而不是报错：一个越界的源窗口绝不该赔上整条时间线。
+                if part.len() < part_frames * 2 {
+                    part.resize(part_frames * 2, 0.0);
+                }
+                part.truncate(part_frames * 2);
                 let offset = if local.is_some() {
                     ((clip.start_sec - start) * sample_rate as f64).round() as usize * 2
                 } else {
@@ -589,7 +600,13 @@ impl RenderInput {
             }
             (2, mixed)
         };
-        if channels != 2 || samples.len() != frames * 2 || samples.iter().any(|v| !v.is_finite()) {
+        // 请求范围可能比"能读到的源"更长（0 长度 / 源尾越界）：缺的部分是静音。
+        let mut samples = samples;
+        if samples.len() < frames * 2 {
+            samples.resize(frames * 2, 0.0);
+        }
+        samples.truncate(frames * 2);
+        if channels != 2 || samples.iter().any(|v| !v.is_finite()) {
             return Err("invalid kernel output".into());
         }
         Ok(samples)

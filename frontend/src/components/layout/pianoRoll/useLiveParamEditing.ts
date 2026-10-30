@@ -471,6 +471,11 @@ export function useLiveParamEditing(args: {
                 // refresh（paramsEpoch/滚动等）对账恢复。
                 clearLiveEditOverride();
                 invalidate();
+                // 【为什么要立刻再要一份】后端拒绝这次写入时，屏幕上还留着用户刚画的那一笔。
+                // 等下一次"自然"刷新（滚动 / paramsEpoch）意味着用户会先看到一条**并不存在**
+                // 的线，随后它又凭空消失 —— 那正是"画完就回退"的观感。这里主动要一次对账，
+                // 让屏幕在下一帧就回到后端的真实状态。
+                bumpRefreshToken();
                 console.error("[commitStroke] failed:", err);
             }
         },

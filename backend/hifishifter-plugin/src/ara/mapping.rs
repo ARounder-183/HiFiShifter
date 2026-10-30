@@ -944,12 +944,17 @@ fn ara_document_to_timeline_reporting_with_identities(
             );
         }
 
+        // 【为什么不把长度夹到"可渲染的源跨度"】工程长度是**宿主**的事实：插件里的
+        // clip 必须与宿主里那条 item 一样长，否则界面会显示一个比宿主短的片段。
+        // "源窗口被夹短"造成的样本缺口由渲染层补零（见 `render/input.rs`）：
+        // ARA 对"读到源尾之后"的定义就是静音，缺的那截不是错误。
+        let length_sec = region.duration_in_playback_time.max(0.0);
         clips.push(json!({
             "id": clip_id,
             "track_id": track_id,
             "name": clip_name,
             "start_sec": region.start_in_playback_time,
-            "length_sec": region.duration_in_playback_time,
+            "length_sec": length_sec,
             "active_take_id": take_id,
             "clip_playback_rate": 1.0,
             "takes": [{
