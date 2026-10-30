@@ -2204,6 +2204,24 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
             });
             let split = self.split_windows.lock_or_recover().get(&guid).cloned();
             let derived = split.and_then(|split| {
+                // 【一次性确认，不是永久覆盖】分割窗口表存在的唯一理由是"右半段的
+                // D_STARTOFFS 在分割瞬间不可信"。一旦子段之后被拉伸 / 移动，宿主读数
+                // 就是新的真值；继续用旧推导会把几何冻在分割那一刻 —— 真机日志里
+                // `derived [7.75,19.96] host [7.75,31.80]` 刷了 23 次就是这个。
+                if !crate::host::geometry::host_value_compatible(clip.length_sec, split.length_sec) {
+                    if self.split_windows.lock_or_recover().remove(&guid) {
+                        hifishifter_kernel::log_limiter::emit_limited_key(
+                            log::Level::Warn,
+                            "ara.split.window-dropped",
+                            format_args!(
+                                "[ara] split window for item {guid} no longer matches its host length \
+                                 ({:.6} vs {:.6}); the host reading is authoritative again",
+                                clip.length_sec, split.length_sec
+                            ),
+                        );
+                    }
+                    return None;
+                }
                 let left = facts.get(&split.left)?;
                 let left_host = left.host.as_ref()?;
                 let left_media = media_by_item.get(&split.left).copied().or_else(|| {

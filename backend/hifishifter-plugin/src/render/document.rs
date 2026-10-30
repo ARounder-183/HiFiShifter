@@ -206,6 +206,15 @@ impl SplitWindows {
         self.map.get(child)
     }
 
+    /// 摘掉一条登记（子段被拉伸 / 移动过 ⇒ 旧推导不再可信）。
+    pub(crate) fn remove(&mut self, child: &str) -> bool {
+        let removed = self.map.remove(child).is_some();
+        if removed {
+            self.order.retain(|key| key != child);
+        }
+        removed
+    }
+
     pub(crate) fn len(&self) -> usize {
         self.map.len()
     }
@@ -1859,12 +1868,17 @@ impl DocumentSession {
     ) {
         let baseline = self.baseline.lock_or_recover();
         for (root, base) in baseline.iter() {
-            let Some(params) = timeline.params_by_root_track.get_mut(root) else {
-                continue;
-            };
             if !base.is_ready() {
                 continue;
             }
+            // 【为什么是 entry 而不是 get_mut】渲染路径的时间线由 ARA 映射重建，
+            // `params_by_root_track` 里**不一定**已经有这个根。旧实现直接 `continue`，
+            // 于是基线（明明 ready）永远装不进去 ⇒ `pitch_orig` 为空 ⇒ 渲染器拿不到
+            // 源基频、整段透传宿主 PCM（真机日志里 21 次 `no usable source F0`）。
+            let params = timeline
+                .params_by_root_track
+                .entry(root.clone())
+                .or_default();
             params.frame_period_ms = base.frame_period_ms;
             params.pitch_orig = base.pitch_orig.clone();
             params.dyn_orig = base.dyn_orig.clone();
@@ -2070,6 +2084,61 @@ impl DocumentSession {
         }
         Ok(())
     }
+    /// 提交载荷的**身份**校验：只问"这是不是同一批 clip / 轨 / 素材"。
+    ///
+    /// 【为什么不是整份时间线相等】位置、长度、源窗、淡变、增益都是宿主拥有的字段；
+    /// 用户画线期间宿主完全可能移动 / 拉伸 item。把这些字段纳入判据，等于把一次正常
+    /// 的并发几何变化判成冲突（真机 15 分钟里 11 次 `Conflict: host geometry changed`）。
+    /// 身份不同才是真的冲突：那说明载荷来自另一份工程状态。
+    fn validate_workspace_identity(
+        host: &hifishifter_kernel::state::TimelineState,
+        client: &hifishifter_kernel::state::TimelineState,
+    ) -> Result<(), String> {
+        fn conflict(what: &str) -> Result<(), String> {
+            Err(format!(
+                "{} workspace {what} is read-only",
+                crate::editor::errors::CONFLICT_PREFIX
+            ))
+        }
+        let tracks = |timeline: &hifishifter_kernel::state::TimelineState| {
+            timeline
+                .tracks
+                .iter()
+                .map(|track| track.id.clone())
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        if tracks(host) != tracks(client) {
+            return conflict("track set");
+        }
+        let clips = |timeline: &hifishifter_kernel::state::TimelineState| {
+            timeline
+                .clips
+                .iter()
+                .map(|clip| clip.id.clone())
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        if clips(host) != clips(client) {
+            return conflict("clip set");
+        }
+        for clip in &client.clips {
+            let Some(original) = host.clips.iter().find(|known| known.id == clip.id) else {
+                return conflict("clip set");
+            };
+            let same_takes = original.takes.len() == clip.takes.len()
+                && original
+                    .takes
+                    .iter()
+                    .zip(clip.takes.iter())
+                    .all(|(a, b)| a.source_path == b.source_path);
+            if original.track_id != clip.track_id
+                || original.active_take_id != clip.active_take_id
+                || !same_takes
+            {
+                return conflict("clip identity");
+            }
+        }
+        Ok(())
+    }
     /// 全工作区在单事务校验scope/模型/曲线并接受；未知范围或几何不静默忽略。
     // 整批接受入口保留，供不分组调用方使用。
     #[cfg(test)]
@@ -2105,16 +2174,12 @@ impl DocumentSession {
                 crate::editor::errors::MODEL_CHANGED
             ));
         }
-        let current_geometry = self.ui_geometry_revision.load(Ordering::Acquire);
-        if baseline.geometry_revision != current_geometry {
-            // 编辑期间宿主动了几何：旧基线里的数组已经不是同一份工程时刻，
-            // 用旧数组做差分会把几何差异当成用户改动写回源曲线。
-            return Err(format!(
-                "{} {}",
-                crate::editor::errors::CONFLICT_PREFIX,
-                "geometry changed before parameter commit"
-            ));
-        }
+        // 【为什么不再按几何代次拒绝】差分域是**编辑器看到的那份几何**：`capture` 的
+        // 第一个参数就是 `client`，它带着用户画线时的 clip 窗口。宿主在这期间移动 /
+        // 拉伸 item 只影响"这一笔在工程上看起来在哪"，那是**投影**的职责，下一次
+        // `compose_root_views` 用新几何重算即可。旧实现在这里硬拒，于是用户每在宿主
+        // 里动一下 item、回到插件画一笔就撞一次 `Conflict: host geometry changed`
+        // （真机 15 分钟里 11 次）。可重基的并发几何变化不是冲突。
         let host = self.workspace_timeline_locked()?;
         // 【为什么这里用**检查版**取锁】这是"读改写并影响宿主"的路径：`candidate` 由
         // `edits` 推导，最后写回 `*edits`。若上一次持锁者在 `merge`/`capture_changes`
@@ -2150,7 +2215,15 @@ impl DocumentSession {
         // 上；拒绝 = 用户这次编辑整条丢弃）。现在基线随视图一起交付，这里只剩读数：
         // 投影动过没有，只决定日志里的 rebase=yes/no。
         let rebased = current_projection != baseline.projection;
-        Self::validate_workspace_geometry(&host, client)?;
+        // 几何代次只作**读数**：它变了不代表冲突（见上），但值得留在日志里 ——
+        // "宿主在画线期间动了几何"是排查参数线错位时最常需要的现场。
+        let geometry_moved =
+            baseline.geometry_revision != self.ui_geometry_revision.load(Ordering::Acquire);
+        // 【为什么只校验身份】位置 / 长度 / 源窗 / 淡变都是宿主拥有的字段，客户端
+        // 原样回传即可；把它们纳入"逐字相等"会让每一次宿主几何刷新都变成提交失败。
+        // 真正必须守住的是**身份**：不许借这份载荷新增 / 删除 clip 或轨，也不许把
+        // 一条 clip 换成另一段素材。
+        Self::validate_workspace_identity(&host, client)?;
         let mut candidate = edits.merge(&host, client, edits.revision)?;
         candidate.reconcile(&self.track_bindings.lock_or_recover())?;
         let identities = self.parameter_identities_locked(&host)?;
@@ -2183,11 +2256,26 @@ impl DocumentSession {
         self.note_capture_report(report);
         if rebased {
             log::info!(
-                "[ara] workspace rebase: baseline={} current={} roots={}",
+                "[ara] workspace rebase: baseline={} current={} roots={} geometry_moved={geometry_moved}",
                 &baseline.projection[..baseline.projection.len().min(8)],
                 &current_projection[..current_projection.len().min(8)],
                 baseline.params.len()
             );
+        }
+        // 【显示层唯一写者】`merge_params` 把客户端数组抄进了 `candidate.params`，而它
+        // 只对"用户看到的那份几何"成立。这里用**图集 + 基线 + 当前几何**重新合成一次：
+        // 输出恒等于纯函数的计算结果，任何一次过期数组都不可能留在显示层。
+        {
+            let baseline_now = self.baseline_snapshot();
+            let composed = candidate.atlas.compose_root_views(
+                &host,
+                &identities,
+                &baseline_now,
+                &candidate.params,
+            );
+            if !composed.is_empty() {
+                candidate.params = composed;
+            }
         }
         if let Some(groups) = groups {
             groups.validate()?;
