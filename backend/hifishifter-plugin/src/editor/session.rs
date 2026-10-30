@@ -1696,6 +1696,36 @@ impl EditorSession {
         }
     }
 
+    /// 把文档（宿主 id 空间）的根参数装进本会话（UI id 空间）的时间线。
+    ///
+    /// 【为什么必须映射而不是整份替换】文档的根键是 `track`，本会话的是
+    /// `{namespace}track`（见 `rewrite_ids`）。直接赋值会让根凭空消失：分析轮次
+    /// 找不到它、`pitch_orig_key` 永远是 None，界面停在"在分析"。
+    fn install_document_params(
+        &self,
+        timeline: &mut TimelineState,
+        params: &std::collections::BTreeMap<String, TrackParamsState>,
+    ) {
+        let live = timeline
+            .tracks
+            .iter()
+            .map(|track| track.id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut next = std::collections::BTreeMap::new();
+        for (root, entry) in params.iter() {
+            let namespaced = format!("{}{root}", self.namespace);
+            let key = if live.contains(&namespaced) {
+                namespaced
+            } else {
+                root.clone()
+            };
+            if live.contains(&key) {
+                next.insert(key, entry.clone());
+            }
+        }
+        timeline.params_by_root_track = next;
+    }
+
     /// 把文档合成出来的显示数组装进本会话的时间线（**只读**，不提交任何编辑）。
     fn refresh_display_from_document(&self) {
         let Some(document) = self.document() else {
@@ -1706,27 +1736,7 @@ impl EditorSession {
         };
         {
             let mut timeline = self.timeline.lock_or_recover();
-            // 【id 空间不同，不能整份替换】文档的根键是**宿主空间**（`track`），
-            // 而本会话的时间线是**UI 空间**（`{namespace}track`，见 `rewrite_ids`）。
-            // 直接赋值会让下一个分析轮次去找一个不存在的根，分析永远收敛不了。
-            let live = timeline
-                .tracks
-                .iter()
-                .map(|track| track.id.clone())
-                .collect::<std::collections::BTreeSet<_>>();
-            let mut next = std::collections::BTreeMap::new();
-            for (root, params) in view.params.iter() {
-                let namespaced = format!("{}{root}", self.namespace);
-                let key = if live.contains(&namespaced) {
-                    namespaced
-                } else {
-                    root.clone()
-                };
-                if live.contains(&key) {
-                    next.insert(key, params.clone());
-                }
-            }
-            timeline.params_by_root_track = next;
+            self.install_document_params(&mut timeline, view.params.as_ref());
         }
         self.publish_timeline_derived();
     }
@@ -2263,8 +2273,8 @@ impl EditorSession {
                     let roots = {
                         let mut timeline = self.timeline.lock_or_recover();
                         // 视图里的参数**就是**这一轮的完整显示（基线 + 编辑），
-                        // 因此整份装上即可 —— 不再需要"按帧合并"。
-                        timeline.params_by_root_track = view.params.as_ref().clone();
+                        // 因此整份装上即可 —— 但必须映射 id 空间（见 `install_document_params`）。
+                        self.install_document_params(&mut timeline, view.params.as_ref());
                         timeline.params_by_root_track.len()
                     };
                     hifishifter_kernel::log_limiter::emit_limited_key(
@@ -3220,6 +3230,11 @@ impl ParamHost for EditorSession {
             match self.submit_workspace_edit(&timeline) {
                 Ok(()) => {
                     *self.error.lock_or_recover() = None;
+                    // 【提交成功必须重合成】`publish_timeline` 只负责把用户的编辑写进
+                    // 权威；它此前**从不**请求渲染。于是"编辑被采纳"与"声音更新"之间
+                    // 只靠"分析刚好也变了"这条巧合连着 —— 分析已缓存时，界面显示已
+                    // 应用、声音永远停在旧版本（状态快照里 `pending=false`）。
+                    self.render_requested.store(true, Ordering::Release);
                     break;
                 }
                 Err(error) => {
@@ -7002,7 +7017,11 @@ pub(crate) mod tests {
             params.pitch_orig_key = None;
             editor.publish_timeline(timeline.clone());
         }
-        let outcome = editor.apply(0, None);
+        // 【为什么要先刷新基线】`publish_timeline` 改的是权威，`loaded.view` 还是旧的；
+        // 不刷新就会先撞上"workspace changed"，于是这条用例测的就不再是渲染门禁。
+        editor.refresh_baseline().unwrap();
+        let edit = editor.loaded.lock_or_recover().edit;
+        let outcome = editor.apply(edit, None);
         assert!(outcome.is_err(), "未分析的全零原线不能渲染原声并假报成功");
         // 【为什么把消息打进断言】"是错误"与"是**哪一种**错误"是两件事：前者可能来自
         // 任何一条守卫，只有后者才说明"渲染门禁在等分析"这条契约仍然成立。
