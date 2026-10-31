@@ -324,15 +324,26 @@ impl ExtensionOwner {
                     .assigned_timeline(&document)
                     .map_err(Self::invalid_edit)?;
                 candidate.apply(&mut curve_timeline);
-                candidate.atlas = edits
-                    .atlas
-                    .capture(
-                        &curve_timeline,
-                        &document
-                            .parameter_identities_locked(&curve_timeline)
-                            .map_err(Self::invalid_edit)?,
-                    )
-                    .map_err(Self::invalid_edit)?;
+                // 【曲线折回权威：**工程时间**差分】
+                //
+                // 旧实现把 `edit.params` 当成**源域**曲线的来源，于是它必须再解一次
+                // "这段显示对应哪段源" —— 而那正是分割 / 倒放 / 循环下解不对的那一步，
+                // 也是"编辑一下 clip，参数线被重置"的温床。权威活在工程时间上：显示
+                // 数组与 `compose_root_view` 的差，就是用户改的那几帧，位置一一对应。
+                {
+                    let baseline = document.baseline_snapshot();
+                    let geometry_revision =
+                        document.ui_geometry_revision.load(Ordering::Acquire);
+                    for (root, incoming) in &params {
+                        let Some(baseline) = baseline.get(root) else {
+                            continue;
+                        };
+                        candidate
+                            .authority
+                            .absorb_display(root, incoming, baseline, geometry_revision)
+                            .map_err(Self::invalid_edit)?;
+                    }
+                }
                 candidate
                     .reconcile(&document.track_bindings.lock_or_recover())
                     .map_err(Self::invalid_edit)?;

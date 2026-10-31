@@ -640,18 +640,12 @@ impl ModelHandle {
                 .filter(|modification| !modification.persistent_id.is_empty())
                 .map(|modification| modification.persistent_id.clone())
                 .collect::<std::collections::BTreeSet<_>>();
-            let reclaimed = self
-                .session
-                .edits
-                .lock_or_recover()
-                .atlas
-                .reclaim_orphans(&live);
-            if reclaimed > 0 {
-                log::info!(
-                    "[ara] reclaimed {reclaimed} orphan parameter authority set(s) whose \
-                     modification is no longer in the document graph"
-                );
-            }
+            // 【这里不再回收"孤儿权威"】图集按 modification 索引，所以"这个
+            // modification 不在图里了"是一条可判定的孤儿判据。权威按**根轨**索引，
+            // 而"这条轨这一轮没有 region"是正常状态（刚插插件、刚删光 item、宿主
+            // 还在交付几何）—— 按它删 run 就是把用户的曲线当垃圾。权威的回收由
+            // `EditState::apply` 的 unbound 规则处理：认不出是谁的条目数据留着、不套用。
+            let _ = &live;
         }
         // 【幂等：模型没变就不重算】宿主的编辑事务不是原子的，一次分割会送来多对
         // `beginEditing` / `endEditing`，每次 `end_editing` 都跑一遍全量重算 —— 实测
@@ -1047,8 +1041,8 @@ impl ModelHandle {
         let (authorities, derived, unbound) = {
             let edits = self.session.edits.lock_or_recover();
             (
-                edits.atlas.authorities.len(),
-                edits.atlas.regions.len(),
+                edits.authority.roots.len(),
+                edits.authority.run_count(),
                 edits.unbound.len(),
             )
         };
@@ -2234,22 +2228,13 @@ impl AudioModifications for ModelHandle {
         // 【为什么在这里加锁是安全的】本回调由宿主在 `begin_editing`…`end_editing`
         // 之间调用，而 `remap_and_log` 持 `edits` 时只跑纯投影、不回调宿主 ——
         // 不存在"持锁重入宿主"的环路。锁序纪律见 `render/document.rs` 头部注释。
-        if let (Some(parent_key), Some(child_key)) = (
-            crate::editor::parameter_atlas::authority_key(None, &parent_persistent_id),
-            crate::editor::parameter_atlas::authority_key(None, &child_persistent_id),
-        ) {
-            if self
-                .session
-                .edits
-                .lock_or_recover()
-                .atlas
-                .seed_authority(&parent_key, &child_key)
-            {
-                log::info!(
-                    "[ara] clone: parameters copied {parent_persistent_id} -> {child_persistent_id}"
-                );
-            }
-        }
+        // 【克隆 audio modification 不需要搬曲线】参数 run 活在工程时间上，与
+        // "它属于哪个 modification"无关：新 modification 上的 region 落在同一段
+        // 工程时间里，看到的自然就是同一批 run。此前这里要按 modification 键播种
+        // 一份源域曲线，是因为曲线存在源域、按 item/modification 索引。
+        log::info!(
+            "[ara] clone: modification cloned {parent_persistent_id} -> {child_persistent_id}"
+        );
         Ok(index)
     }
 
@@ -2288,16 +2273,10 @@ impl AudioModifications for ModelHandle {
                 let current = modification.persistent_id.clone();
                 self.session.register_modification_handle(&current, handle);
             }
-            // 【为什么权威表也必须跟着搬】参数权威按 modification persistentID 索引
-            // （`authority_key`），而这一句把 ID 换掉了。不搬就等于把这条 modification
-            // 的曲线孤儿化 —— 下一次投影查 `mod:{新ID}` 必然落空，用户看到参数被重置。
-            // 通知句柄与参数权威是**同一个键**的两种登记，必须一起搬。
-            let remap = [(previous.clone(), modification.persistent_id.clone())];
-            self.session
-                .edits
-                .lock_or_recover()
-                .atlas
-                .remap_authorities(&remap);
+            // 【曲线不需要搬】权威的键是 (root, param, 工程秒)，不是 modification id。
+            // 此前这里要把 `mod:{旧ID}` 下的曲线搬到新键，是因为曲线按 modification
+            // 索引；现在换 ID 只影响"这条 modification 叫什么"，与曲线无关。
+            let _ = &previous;
         }
         // persistentID 是 region 的引用键：它变了，session 的派生表必须立刻跟上，
         // 否则收口前的读取会拿旧键去查，把所有引用它的 region 判成 `UnknownModification`。
@@ -2653,7 +2632,7 @@ mod tests {
         let root = host.tracks[0].id.clone();
         document.publish_baseline(
             &root,
-            crate::editor::parameter_atlas::RootBaseline {
+            hifishifter_kernel::editor::param_authority::RootBaseline {
                 frame_period_ms: 100.,
                 pitch_orig: vec![57.; 6],
                 ready: true,
@@ -2912,36 +2891,29 @@ mod tests {
         assert!(model.remap_is_redundant());
     }
 
-    /// **`needs_rebind` 卡住时，投影必须被跳过且必须留痕（A6）。**
+
+    /// 卡住的 rebind 请求必须跳过**投影**，但几何与 PCM 照常发布。
     ///
-    /// 【为什么这是用户报障的根因之一】`needs_rebind` 是冷恢复/存档还原的标记，唯一
-    /// 清零点是 `EditState::reconcile`（`state_channel.rs:183`），而 `reconcile` 只被
-    /// 恢复路径调用。一次撤销/重载的恢复身份对不上，这个标记就停在 `true` —— 此后宿主里
-    /// **任何**编辑都只发布几何与 PCM，参数投影再也不跑。用户的原话是"无论宿主内怎么
-    /// 编辑，ARA 中都不能产生同步，只有把 ARA 插件完全删除再添加，才生效"。
+    /// 【为什么这条必须留下】"投影被跳过"与"整份收口失败"在用户侧是两种完全不同的
+    /// 故障：前者"界面有反应、曲线不动"，后者"什么都不同步"。日志里那句
+    /// `ara.rebind.stuck` 是唯一的区分点，而它只在`needs_rebind` 挡住投影时发出。
     ///
-    /// 本用例钉住两件事：
-    ///   1. 卡住时投影**确实没跑**（参数表没被投影结果改写）—— 这是现状，也是为什么
-    ///      它需要日志；
-    ///   2. 这种情况**留下了一条 warn**。没有第 2 条，第 1 条在真机上与"其它原因导致
-    ///      的不同步"完全无法区分（修 bug 只能靠猜）。
-    ///
-    /// 【为什么不断言日志内容】本测试床不捕获日志；断言靠的是可观察状态（曲线有没有
-    /// 被改写）。日志的存在由 `ara.rebind.stuck` 这个**限流键**本身保证 —— 它每窗口
-    /// 只发一条，因此即便在 Cubase 4 连送的收口里也不会刷屏。
+    /// 【为什么不断言日志内容】本测试床不捕获日志；断言靠的是可观察状态（时间线发布
+    /// 了、新几何生效了、`params` 没被写入）。日志的存在由那个**限流键**本身保证。
     #[test]
     fn a_stuck_rebind_request_skips_projection_and_says_so() {
         let (mut model, _key) = model_with_one_region();
         // 先正常收口一次，让时间线与 `remap_stamp` 就位。
         model.remap_and_log();
         assert!(model.timeline.is_some(), "夹具必须先能正常收口");
-        // 用户给这条 modification 画了一条曲线。
+        // 用户给这条根轨画了一条曲线（权威：工程时间的 run）。
         model
             .session
             .edits
             .lock_or_recover()
-            .atlas
-            .seed_test_pitch_curve("mod:host-mod-A", 250., vec![60., 62., 64., 66.]);
+            .authority
+            .write_range("ara-track-0", "pitch", 0, &[60., 62., 64., 66.], &[true; 4], 0.0)
+            .expect("seed the authority");
         // 模拟一次"恢复身份对不上"：`reconcile` 失败 ⇒ 标记留在 true。
         model.session.edits.lock_or_recover().needs_rebind = true;
 
@@ -2962,12 +2934,12 @@ mod tests {
             .expect("移动 region");
         model.remap_and_log();
 
-        // 1) 时间线照常发布：几何与 PCM 不受参数投影影响（这正是"界面有反应但曲线不动"）。
+        // 1) 时间线照常发布：几何与 PCM 不受参数投影影响。
         assert!(
             model.timeline.is_some(),
             "卡住时也必须继续发布时间线，否则用户连几何都看不到"
         );
-        // 2) 新几何确实生效了 —— 证明"不是整份收口失败"，只是投影这一支被跳过。
+        // 2) 新几何确实生效了 —— 证明"不是整份收口失败"。
         let start = model
             .session
             .timeline
@@ -2982,8 +2954,8 @@ mod tests {
         // 3) 投影没跑：权威仍在，但 `params` 里没有被投影出来的新曲线。
         let edits = model.session.edits.lock_or_recover();
         assert!(
-            edits.atlas.has_authority_parameters(None, "host-mod-A"),
-            "权威表本身必须保留（跳过投影不等于丢掉曲线）"
+            !edits.authority.is_pristine(),
+            "权威本身必须保留（跳过投影不等于丢掉曲线）"
         );
         assert!(
             edits.params.is_empty(),
@@ -3182,106 +3154,6 @@ mod tests {
         );
     }
 
-    /// **宿主分割后两个半段都保留父段参数**（用户报障的模型级回归）。
-    ///
-    /// 【为什么这是核心回归】旧设计按 `ara_region_signature`（含播放几何）认领曲线，
-    /// 分割一发生签名就变、谱系蒸发，两个半段都拿不到父段记录 —— 用户在 Cubase 里看到的
-    /// 就是"分割后参数被重置"。新设计把参数按稳定宿主身份持有：父段的源域曲线被整份播给
-    /// 两个半段（P1 `cloneAudioModification` 或 P2 结构 diff），投影各取所需。
-    #[test]
-    fn a_host_split_keeps_the_parent_parameters_on_both_halves() {
-        let (mut model, _parent_key) = model_with_one_region();
-        model.remap_and_log();
-        // 用户给父段画了一条音高曲线。
-        model
-            .session
-            .edits
-            .lock_or_recover()
-            .atlas
-            .seed_test_pitch_curve("mod:host-mod-A", 250., vec![60., 62., 64., 66.]);
-
-        // 宿主克隆 modification：`cloneAudioModification` 是 ARA 对"创建独立变体"的
-        // 专用原语（`ARAInterface.h:2653-2656`），因此它**就是**复制/分割回执。
-        let cloned = AudioModificationProperties::new(None, "host-mod-A-split").unwrap();
-        let source = 0_usize;
-        let clone_index = AudioModifications::clone_audio_modification(
-            &mut model,
-            &CreateContext::for_test(ApiGeneration::V2Final, 0x55),
-            &0_usize,
-            &source,
-            cloned,
-        )
-        .expect("克隆必须成功");
-        assert!(
-            model
-                .session
-                .edits
-                .lock_or_recover()
-                .atlas
-                .has_authority_parameters(None, "host-mod-A-split"),
-            "cloneAudioModification 是 ARA 给出的复制回执：父段参数必须播给新 modification"
-        );
-
-        // 宿主销毁父段、建两个相邻半段，两个半段都引用**克隆出来的** modification。
-        PlaybackRegions::destroy_playback_region(&mut model, 0_usize);
-        let mut sequence_identity = 0_u8;
-        // SAFETY: 只作不透明 model-ref 地址（同 `model_with_one_region`）。
-        let sequence_ref = unsafe {
-            ara2_bridge::core::ModelRef::from_raw(
-                (&raw mut sequence_identity).cast::<std::ffi::c_void>(),
-            )
-        }
-        .unwrap();
-        let sequence = 0_usize;
-        for (key, lo, hi) in [(0x11_u64, 0.0_f64, 0.25_f64), (0x22, 0.25, 0.5)] {
-            let properties = PlaybackRegionProperties::for_ara2(
-                0,
-                lo,
-                hi - lo,
-                lo,
-                hi - lo,
-                sequence_ref,
-                None,
-                None,
-            )
-            .unwrap();
-            let context = CreateContext::for_test(ApiGeneration::V2Final, key);
-            PlaybackRegions::create_playback_region(
-                &mut model,
-                &context,
-                &clone_index,
-                &sequence,
-                properties,
-            )
-            .expect("半段必须建得出来");
-        }
-        model.remap_and_log();
-
-        let timeline = model.timeline().unwrap().clone();
-        assert_eq!(timeline.clips.len(), 2, "两个半段都必须出现在时间线里");
-        let identities = model
-            .session
-            .parameter_identities_locked(&timeline)
-            .unwrap();
-        let atlas = model.session.edits.lock_or_recover().atlas.clone();
-        // 渲染路径用的就是 `project_local`：数组以片段自己的零点对齐。
-        let projected = atlas.project_local(&timeline, &identities).unwrap();
-        let mut heads = Vec::new();
-        for clip in &timeline.clips {
-            let params = projected
-                .get(&clip.id)
-                .unwrap_or_else(|| panic!("半段 {} 必须拿到参数", clip.id));
-            heads.push(params.pitch_edit[0]);
-        }
-        heads.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        // 父曲线在源域是 60,62,64,66（每 250ms 一格）。左半段消费源窗 [0,0.25) ⇒ 60；
-        // 右半段消费 [0.25,0.5) ⇒ 62。两个半段各自拿到**自己那段**，而不是被重置。
-        assert_eq!(
-            heads,
-            vec![60., 62.],
-            "分割后两个半段必须各自继承父段曲线的对应子段（用户报障的直接形状）"
-        );
-    }
 
     /// **宿主重复交付同一份几何**时不得失效渲染版本。
     ///

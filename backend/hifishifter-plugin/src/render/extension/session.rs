@@ -672,7 +672,7 @@ impl ExtensionOwner {
         let host = self.assigned_timeline(document)?;
         if host.tracks.is_empty() {
             // 空轨组件仍能恢复私有参数分组；不借零音频scope恢复其它轨的源曲线。
-            if saved.params.is_empty() && saved.tracks.is_empty() && saved.atlas.is_empty() {
+            if saved.params.is_empty() && saved.tracks.is_empty() && saved.authority.is_pristine() {
                 let mut edits = document.edits.lock_or_recover();
                 edits.groups = saved.groups.clone();
                 edits.revision = edits
@@ -767,30 +767,11 @@ impl ExtensionOwner {
                         .iter()
                         .map(|clip| clip.id.clone())
                         .collect::<BTreeSet<_>>();
-                    local.atlas.regions.retain(|id, _| clips.contains(id));
-                    // 权威表必须按**同一口径**裁剪：键从已裁剪的 regions 派生 —— 那正是本组件
-                    // 真实持有的片段身份。不裁剪会让一个组件把另一个组件的参数写进自己的存档
-                    // （两个组件共享同一 source/modification 身份时尤其明显）。
-                    let allowed_authorities = local
-                        .atlas
-                        .regions
-                        .values()
-                        .filter_map(|record| {
-                            crate::editor::parameter_atlas::authority_key(
-                                record.identity.item.as_deref(),
-                                &record.identity.modification,
-                            )
-                        })
-                        .collect::<BTreeSet<_>>();
-                    local
-                        .atlas
-                        .authorities
-                        .retain(|key, _| allowed_authorities.contains(key));
-                    local
-                        .atlas
-                        .copy_seeds
-                        .retain(|_, seed| allowed.contains(&seed.root));
-                    local.atlas.gaps.retain(|root, _| allowed.contains(root));
+                    // 【曲线按**根轨**裁剪】权威是 root 作用域的：一个组件只服务它被分配
+                    // 的那些轨，所以只保留这些根上的 run。不裁剪会让一个组件把另一个组件
+                    // 的参数写进自己的存档（两个组件共享同一 source/modification 身份时
+                    // 尤其明显）。
+                    local.authority.retain_roots(&allowed);
                     if !local.fades.is_empty() {
                         let items = document.fade_items_locked(&clips);
                         // 【为什么这里不再失败】fade 元数据在途时保留整份 fade 表；

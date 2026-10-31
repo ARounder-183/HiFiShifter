@@ -1,5 +1,5 @@
 //! 插件私有轨道参数分组：以真实轨道GUID保存关系，不读写REAPER folder、路由或轨道排序。
-use super::parameter_atlas::{editable_parameter_curves, pad, set_curve};
+use super::param_curves::{editable_parameter_curves, pad, set_curve};
 use hifishifter_kernel::state::{TimelineState, TrackParamsState};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};

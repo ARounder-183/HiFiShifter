@@ -38,11 +38,6 @@ pub(crate) struct EditState {
     pub tracks: Vec<Track>,
     #[serde(default)]
     pub bindings: TrackBindings,
-    #[serde(
-        default,
-        skip_serializing_if = "crate::editor::parameter_atlas::ParameterAtlas::is_empty"
-    )]
-    pub atlas: crate::editor::parameter_atlas::ParameterAtlas,
     /// REAPER稳定item GUID对应的HFS自有形状；不写回宿主shape/c/S字段。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub fades: BTreeMap<String, crate::fade::FadeStyle>,
@@ -188,7 +183,7 @@ impl EditState {
     pub fn is_pristine(&self) -> bool {
         self.params.is_empty()
             && self.tracks.is_empty()
-            && self.atlas.is_empty()
+            && self.authority.is_pristine()
             && self.fades.is_empty()
             && self.clip_local.is_empty()
     }
@@ -386,40 +381,10 @@ impl EditState {
                 .collect::<BTreeMap<_, _>>();
             candidate.authority.remap_roots(&root_map);
         }
-        for record in candidate.atlas.regions.values_mut() {
-            if let Some((root, _)) = mapping.get(&record.root) {
-                record.root = root.clone();
-            }
-        }
-        for record in candidate.atlas.copy_seeds.values_mut() {
-            if let Some((root, _)) = mapping.get(&record.root) {
-                record.root = root.clone();
-            }
-        }
-        // 【锚也要跟着换根】`EditAnchor.root` 是**工程时间**的坐标系：根轨 id 变了
-        // （宿主重建 region sequence / 冷恢复后重新认领），锚就指向一个不存在的根。
-        // 合成按 `anchor.root == root` 过滤，于是那些"钉在工程位置"的笔画会整片消失 ——
-        // 用户看到的是"重开工程后，没锁定的那几笔没了"。
-        candidate
-            .atlas
-            .remap_anchor_roots(|root| mapping.get(root).map(|(next, _)| next.clone()));
-        // 【U-7：`gaps` 必须与 `params` 用同一条规则】
-        //
-        // "未锁定"的参数线里，**没有 clip 覆盖的那一段**住在这一层（`atlas.gaps`）。
-        // round 23 修好了 `params` 的 unbound 保留，却漏了这里：宿主重建 region sequence
-        // ⇒ 根轨 id 变 ⇒ 这一层被整片清空。用户看到的是"那个 clip 附近的那段线没了" ——
-        // 而那正是他们最可能在两段音频之间画的那一段。
-        candidate.atlas.gaps = self
-            .atlas
-            .gaps
-            .iter()
-            .filter_map(|(root, params)| match mapping.get(root) {
-                Some((new, _)) => Some((new.clone(), params.clone())),
-                // 这一轮认不出是谁的 ⇒ 数据留着、不套用（与 `params` 同一纪律）。
-                None if candidate.unbound.contains(root) => Some((root.clone(), params.clone())),
-                None => None,
-            })
-            .collect();
+        // 【根轨 id 变了，曲线必须跟着换根】权威是 root 作用域的：宿主重建
+        // region sequence 时根轨 id 必然改变，不换根就等于"那一条轨的编辑全部消失"
+        // （用户报的"重开工程后曲线没了"）。`remap_roots` 在权威层做同一件事，
+        // 而且它是**唯一**一份需要换的东西 —— 曲线不再有第二份副本。
         candidate.needs_rebind = false;
         if !renamed.is_empty() {
             // 【为什么推进 revision】下一次 `ensure_loaded` 据此重读一份带新键的视图；
@@ -427,7 +392,7 @@ impl EditState {
             candidate.revision = candidate.revision.saturating_add(1);
             hifishifter_kernel::log_limiter::emit_limited_key(
                 log::Level::Warn,
-                "ara.atlas.root-renamed",
+                "ara.param.root-renamed",
                 format_args!(
                     "[ara] {} track record(s) followed the host's rebuilt sequence: {:?}",
                     renamed.len(),
@@ -623,7 +588,7 @@ impl EditState {
     /// 有版本且有界的组件state；旧空state保持默认编辑。
     pub fn encode(&self) -> Result<Vec<u8>, String> {
         self.groups.validate()?;
-        self.atlas.validate()?;
+        self.authority.validate()?;
         self.validate_fades()?;
         self.validate_clip_local()?;
         // 【为什么不再拒绝"没有身份"的条目】此前这里返回 `Err`，而它唯一的调用方
@@ -636,28 +601,10 @@ impl EditState {
         // 无法绑定的条目现在由 `unbound` 承载：数据留着、不套用、不进 `bindings`。
         // 【单一版本】内容不再决定版本号：格式只有一种，读的一侧只有一条路径。
         let version = Self::STATE_VERSION;
-        // 【为什么不直接序列化 `self`】`atlas.regions` 是**每帧派生**的投影缓存，它的
-        // 权威是 `atlas.authorities`。写出派生缓存会让同一份采样在存档里出现两次
-        // （曲线是 `Arc<Vec<f32>>`，内存里共享、序列化时各写一份），而它读回来之后
-        // 又会被 `follow_geometry` 立刻覆盖。清掉它：存档只带权威。
+        // 【存档只带权威】曲线只有一份（`authority`，工程时间的稀疏 run）。
+        // `params` 里的显示数组是**派生缓存**：写进去，读回来就会被当成"用户编辑"，
+        // 那正是"存档一次、参数线回退一次"的来源。
         let mut trimmed = self.clone();
-        trimmed.atlas.regions.clear();
-        if !trimmed.authority.is_pristine() {
-            // v11 唯一权威是 authority；atlas 只是读旧存档的兼容结构，不再写出。
-            trimmed.atlas = Default::default();
-        }
-        // 隔离中的权威不写进存档：它们不投影，写进去只会让下一次加载再坏一次。
-        // 用户的数据仍在内存里（`quarantine` 保留到进程结束），但不会污染存档。
-        let quarantined = trimmed.atlas.quarantined.clone();
-        for key in quarantined {
-            trimmed.atlas.authorities.remove(&key);
-        }
-        trimmed.atlas.quarantined.clear();
-        // 新存档只带用户可编辑曲线：分析派生的 pitch_orig / dyn_orig /
-        // tension_orig 与未编辑的 pitch_edit 全部丢弃；旧权威的整条 curves
-        // 也已在本代迁移成 edits，不得再写回。
-        let atlas_authoritative =
-            !trimmed.atlas.authorities.is_empty() || !trimmed.authority.is_pristine();
         let authority_present = !trimmed.authority.is_pristine();
         trimmed.params = trimmed
             .params
@@ -672,21 +619,15 @@ impl EditState {
                 } else {
                     crate::editor::capture_edits::strip_derived_curves(&params)
                 };
-                if atlas_authoritative {
-                    // 【T2：权威在时 params 只是显示缓存】把整条显示数组写进存档，
-                    // 读回来会被当成"用户编辑"—— 那正是第 9 轮之后仍然存在的
-                    // "存档一次、参数线回退一次"。
-                    params.pitch_edit.clear();
-                    params.tension_edit.clear();
-                    params.extra_curves.clear();
-                    params.pitch_edit_user_modified = false;
-                }
+                // 【T2：权威在时 params 只是显示缓存】把整条显示数组写进存档，
+                // 读回来会被当成"用户编辑"—— 那正是"存档一次、参数线回退一次"。
+                params.pitch_edit.clear();
+                params.tension_edit.clear();
+                params.extra_curves.clear();
+                params.pitch_edit_user_modified = false;
                 (root, params)
             })
             .collect();
-        for authority in trimmed.atlas.authorities.values_mut() {
-            authority.clear_legacy_curves();
-        }
         let bytes = serde_json::to_vec(&serde_json::json!({"version":version,"edits":trimmed}))
             .map_err(|e| e.to_string())?;
         if bytes.len() > hifishifter_host_link::MAX_COMPONENT_STATE {
@@ -721,47 +662,9 @@ impl EditState {
         restored.groups.validate()?;
         restored.validate_fades()?;
         restored.authority.sanitize();
-        if version < 9 {
-            restored.atlas.migrate_legacy_authority_edits();
-            // 第 9 代之前没有 pitch_edit_user_modified：旧载荷里的手绘音高必须
-            // 先被认出来，否则它既不会进权威，也会在下一次分析时被当成派生值清掉。
-            for params in restored.params.values_mut() {
-                if params.pitch_edit_user_modified || params.pitch_edit.is_empty() {
-                    continue;
-                }
-                let len = params.pitch_orig.len().min(params.pitch_edit.len());
-                let differs = (0..len).any(|frame| {
-                    let orig = params.pitch_orig[frame];
-                    let edit = params.pitch_edit[frame];
-                    edit.is_finite()
-                        && edit > 0.0
-                        && (!(orig.is_finite() && orig > 0.0) || (edit - orig).abs() > 1e-3)
-                });
-                // 没有原始基线可比时，任何非零目标都只能按“用户画的”解释。
-                let unproven = params.pitch_orig.is_empty()
-                    && params
-                        .pitch_edit
-                        .iter()
-                        .any(|value| value.is_finite() && *value != 0.0);
-                if differs || unproven {
-                    params.pitch_edit_user_modified = true;
-                }
-            }
-            restored.params = restored
-                .params
-                .into_iter()
-                .map(|(root, params)| {
-                    (
-                        root,
-                        crate::editor::capture_edits::strip_derived_curves(&params),
-                    )
-                })
-                .collect();
-        }
-        // 【加载即修复】历史存档可能带着层内重叠 / 悬空锚（旧版本能写进去）。
-        // 先把每条曲线按层规范化，再把已经修好的权威解除隔离 —— 用户不必删掉重画。
-        restored.atlas.repair();
-        restored.atlas = restored.atlas.reserve_restored()?;
+        // 【加载即修复】历史存档可能带着层内重叠（旧版本能写进去）。`sanitize` 在
+        // 上面已经跑过：无效 run 被丢弃、重叠被规范化 —— 读回来就是一份合法权威。
+        restored.authority.sanitize();
         if version == 1 && (!restored.params.is_empty() || !restored.tracks.is_empty()) {
             return Err("legacy ARA edits have no persistent identity; cannot restore by session track number".into());
         }

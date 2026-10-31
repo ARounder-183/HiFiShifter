@@ -1,12 +1,12 @@
-//! 原GUI媒体剪贴板的宿主执行层：保存真实item状态和源域曲线，不保存宿主指针。
+//! 原GUI媒体剪贴板的宿主执行层：保存真实 item 状态和**工程时间**曲线切片，不保存宿主指针。
 use super::{HostClipTarget, HostTrackTarget, NativeHost, RewrittenItem};
-use crate::editor::parameter_atlas::{ParameterAtlas, RegionParameters};
 use crate::editor::session::EditorSession;
 use crate::host::geometry::{host_value_compatible, HostClipGeometry};
 use crate::render::document::DocumentSession;
 use crate::render::extension::ExtensionOwner;
 use crate::sync::MutexExt;
-use hifishifter_kernel::state::Clip;
+use hifishifter_kernel::editor::param_authority::PlacedRun;
+use hifishifter_kernel::state::{Clip, TimelineState};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -20,12 +20,47 @@ const MAX_BYTES: usize = 32 * 1024 * 1024;
 struct ClipboardTrack {
     name: String,
 }
+/// 随片段一起复制走的**工程时间**曲线切片。
+///
+/// 【为什么是工程时间】曲线只以 `(root, param, 工程秒)` 存在。复制就是把"这段工程
+/// 时间里的 run"带走，粘贴时做一次线性重映射 —— 与 `GeometryOp::Copy` 同一条公式。
+/// 图集那套"源域曲线 + 锚"在这里多一层坐标换算，而换算恰恰是分割 / 倒放 / 循环下
+/// 唯一会错的那一步。
+#[derive(Serialize, Deserialize, Default)]
+struct ClipCurveSeed {
+    /// 复制那一刻片段的工程窗口。
+    start_sec: f64,
+    length_sec: f64,
+    /// 权威键（`pitch_edit` / `extra:dyn` …）→ 该窗口内的 run 切片。
+    runs: std::collections::BTreeMap<String, Vec<PlacedRun>>,
+}
+
+impl ClipCurveSeed {
+    fn is_empty(&self) -> bool {
+        self.runs.is_empty()
+    }
+    /// 形状自检：反序列化后的剪贴板来自**别的进程**，任何字段都不可信。
+    fn is_well_formed(&self) -> bool {
+        self.start_sec.is_finite()
+            && self.length_sec.is_finite()
+            && self.length_sec > 0.0
+            && self.runs.len() <= 64
+            && self.runs.values().flatten().all(|run| {
+                !run.values.is_empty()
+                    && run.values.len() <= 1 << 20
+                    && run.placement.start_sec.is_finite()
+                    && run.placement.seconds_per_frame.is_finite()
+                    && run.placement.seconds_per_frame > 0.0
+            })
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 struct ClipboardItem {
     track: usize,
     chunk: String,
     before: Clip,
-    seed: Option<RegionParameters>,
+    seed: Option<ClipCurveSeed>,
 }
 #[derive(Serialize, Deserialize)]
 struct ClipboardItems {
@@ -42,7 +77,7 @@ struct PasteItem {
     state: RewrittenItem,
     before: Clip,
     start_sec: f64,
-    seed: Option<RegionParameters>,
+    seed: Option<ClipCurveSeed>,
 }
 pub(crate) struct PastePlan {
     host: Arc<NativeHost>,
@@ -167,14 +202,7 @@ fn capture(
             .iter()
             .position(|track| track.id == clip.track_id)
             .ok_or("clipboard source track missing")?;
-        let seed = {
-            let _transaction = document.transaction.lock_or_recover();
-            document
-                .edits
-                .lock_or_recover()
-                .atlas
-                .split_seed(&target.geometry.item_id)
-        };
+        let seed = capture_curve_seed(&document, &clip);
         items.push(ClipboardItem {
             track,
             chunk,
@@ -198,6 +226,56 @@ fn capture(
     };
     Ok(object)
 }
+/// 取一段工程窗口内的全部曲线切片（复制侧）。
+///
+/// 【为什么按**根轨**取】权威是 root 作用域的：一条子轨的曲线其实存在它的根上。
+/// 按 `clip.track_id` 直接取会在子轨上取到空表，于是"复制带曲线"静默失效。
+fn capture_curve_seed(document: &DocumentSession, clip: &Clip) -> Option<ClipCurveSeed> {
+    let _transaction = document.transaction.lock_or_recover();
+    let edits = document.edits.lock_or_recover();
+    let timeline = document.timeline.lock_or_recover().clone()?;
+    let root = root_track_of(&timeline, &clip.track_id);
+    let authority = edits.authority.root(&root)?;
+    let start = clip.start_sec;
+    let length = clip.length_sec;
+    if !(start.is_finite() && length.is_finite() && length > 0.0) {
+        return None;
+    }
+    let mut runs = std::collections::BTreeMap::new();
+    for param in authority.runs.keys() {
+        let slices = edits
+            .authority
+            .runs_in_window(&root, param, start, start + length);
+        if !slices.is_empty() {
+            runs.insert(param.clone(), slices);
+        }
+    }
+    if runs.is_empty() {
+        return None;
+    }
+    Some(ClipCurveSeed {
+        start_sec: start,
+        length_sec: length,
+        runs,
+    })
+}
+
+/// 沿父链走到根轨（权威的作用域）。
+fn root_track_of(timeline: &TimelineState, track: &str) -> String {
+    let mut current = track.to_owned();
+    // 有界：父链损坏（环）时不能让复制挂死。
+    for _ in 0..64 {
+        let Some(node) = timeline.tracks.iter().find(|node| node.id == current) else {
+            break;
+        };
+        match node.parent_id.clone() {
+            Some(parent) => current = parent,
+            None => break,
+        }
+    }
+    current
+}
+
 /// 系统复制和Ctrl拖动共享宿主捕获，但Ctrl拖动不能覆盖用户已有参数/片段剪贴板。
 pub(crate) fn copy(
     owner: &Arc<ExtensionOwner>,
@@ -257,8 +335,11 @@ fn decode(bytes: &[u8]) -> Result<ClipboardItems, String> {
         {
             return Err("invalid clipboard clip geometry".into());
         }
-        if let Some(seed) = item.seed.take() {
-            item.seed = Some(ParameterAtlas::reserve_copy_seed(seed)?);
+        // 【为什么只做形状自检】剪贴板来自别的进程（甚至是另一台机器的复制）。
+        // 内容不需要"被认领"，它只是一段工程时间上的 run 切片；而形状必须可信，
+        // 否则一次粘贴就能往权威里灌进 NaN 窗口或天文数字的样本。
+        if item.seed.as_ref().is_some_and(|seed| !seed.is_well_formed()) {
+            return Err("invalid clipboard curve seed".into());
         }
     }
     if data
@@ -502,16 +583,18 @@ pub(crate) fn execute_paste(
                 .map(|track| track.id.clone())
         }
         .ok_or("new paste track has not entered host inventory")?;
-        // 粘贴的源几何复用参数图集的唯一窗口/方向解算（倒放窗口、方向都由它定），
-        // 只把项目起点换成粘贴落点 —— 不让这套规则在这里被抄成第二份。
-        let mut geometry = crate::editor::parameter_atlas::geometry(&item.before)?;
-        geometry.project_start = item.start_sec;
-        {
+        // 【曲线跟着片段走】源窗口是复制那一刻的工程窗口，目标窗口是粘贴落点 ——
+        // 两者之间只差一次线性重映射（`place_runs_from_window`）。这里不碰任何几何
+        // 解算：粘贴不改源窗口、不改方向，那两件事已经在 `before` 里冻结了。
+        if let Some(seed) = item.seed.as_ref().filter(|seed| !seed.is_empty()) {
             let _transaction = document.transaction.lock_or_recover();
             let mut edits = document.edits.lock_or_recover();
-            edits
-                .atlas
-                .register_copy(&item.state.item_guid, &root, geometry, item.seed)?;
+            edits.authority.place_runs_from_window(
+                &root,
+                (seed.start_sec, seed.start_sec + seed.length_sec),
+                (item.start_sec, item.start_sec + item.before.length_sec),
+                &seed.runs,
+            );
             edits.revision = edits
                 .revision
                 .checked_add(1)
@@ -521,13 +604,12 @@ pub(crate) fn execute_paste(
         let actual = match outcome {
             Ok(actual) => actual,
             Err(error) => {
-                let _transaction = document.transaction.lock_or_recover();
-                let mut edits = document.edits.lock_or_recover();
-                edits.atlas.copy_seeds.remove(&item.state.item_guid);
-                edits.revision = edits
-                    .revision
-                    .checked_add(1)
-                    .ok_or("edit revision exhausted")?;
+                // 【为什么这里不再回滚曲线】粘贴的曲线是**先落盘再建 item** 的：宿主
+                // 建 item 失败时那段工程窗口里确实多出了一段用户没听见的曲线，但它
+                // 落在**没有片段**的位置 —— 而那正是第三轮定下的合法状态（无 Clip 也能
+                // 有线）。回滚它需要一份"粘贴前"快照，而宿主 Undo 已经能把片段撤掉，
+                // 用户再擦一次那条线即可。用一次可能失败的减法去救一次已经失败的加法，
+                // 只会让失败路径更难推理。
                 return Err(format!(
                     "paste stopped after {} item(s): {error}; use host Undo to cancel",
                     created.len()

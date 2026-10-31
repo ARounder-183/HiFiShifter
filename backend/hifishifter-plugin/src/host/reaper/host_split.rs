@@ -131,22 +131,17 @@ pub(crate) fn execute(
     }
     let mut pairs = Vec::new();
     for target in targets {
-        let seed = {
-            let _transaction = document.transaction.lock_or_recover();
-            document
-                .edits
-                .lock_or_recover()
-                .atlas
-                .split_seed(&target.geometry.item_id)
-        };
         let pair = target.split_at(plan.position, authorized)?;
-        // 确切API回执建立右段→父item关系，重叠同源片段不走模糊祖先匹配。
+        // 【曲线不需要任何处理】分割在工程时间上不移动任何东西 —— 两半的 run 一个字节
+        // 都没变，界面上"分割点两侧都有线"是**默认结果**，不是一次继承。此前这里要
+        // `split_seed` + `register_split`，是因为曲线存在源域、按 item 索引；那份表示
+        // 已经随图集一起删除。
+        //
+        // 这里只需要推进一次 revision，让"编辑代次"表达"用户确实做了一次操作"
+        // （撤销点、自动渲染的重算都由它驱动）。
         {
             let _transaction = document.transaction.lock_or_recover();
             let mut edits = document.edits.lock_or_recover();
-            edits
-                .atlas
-                .register_split(&pair.0.item_id, &pair.1.item_id, seed)?;
             edits.revision = edits
                 .revision
                 .checked_add(1)

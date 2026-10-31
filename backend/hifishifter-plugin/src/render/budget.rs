@@ -88,12 +88,6 @@ impl Drop for Reservation {
     }
 }
 impl Reservation {
-    /// 已转交该持有者的实际额度，用于非实时诊断；不是重新读取全局used。
-    // 非实时诊断读取入口，保留。
-    #[cfg(test)]
-    pub fn bytes(&self) -> usize {
-        self.bytes
-    }
     /// 整批预检额度分给实际持有者，不重复收费；余额随临时工作域离开而退还。
     pub fn split_off(&mut self, bytes: usize) -> Option<Self> {
         self.bytes = self.bytes.checked_sub(bytes)?;

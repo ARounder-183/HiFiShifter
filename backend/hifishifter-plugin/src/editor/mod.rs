@@ -13,8 +13,7 @@ mod notebook;
 // 只在非测试构建里存在：唯一调用点 `EditorSession::run` 的空闲分支本身是
 // `#[cfg(not(test))]`（测试进程不该扫描/删除真实的用户临时目录）。
 pub(crate) mod capture_edits;
-#[allow(dead_code)]
-pub(crate) mod parameter_atlas;
+mod param_curves;
 // GUI 的另一半：文件对话框 / 在文件管理器中显示 / 用默认程序打开（按平台各一份）。
 pub(crate) mod gui;
 #[cfg(not(windows))]

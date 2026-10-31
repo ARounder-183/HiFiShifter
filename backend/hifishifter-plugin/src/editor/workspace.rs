@@ -706,6 +706,34 @@ impl DocumentSession {
                 });
             }
         }
+        // 【I-1 的运行时断言】一个宿主实体只允许一条 clip —— 而"clip 的 id 唯一"
+        // 是它的必要条件。这条读数此前**完全不存在**：重复 id 会让六张按 id 索引的
+        // 表同时换键（参数、几何台账、淡变、颜色、选中、剪贴板），而它的表现只是
+        // "某条片段的线跑到别处去了"。逐轮比对是 O(n log n)，比任何一次误判都便宜。
+        {
+            let mut ids = timeline
+                .clips
+                .iter()
+                .map(|clip| clip.id.as_str())
+                .collect::<Vec<_>>();
+            let total = ids.len();
+            ids.sort_unstable();
+            ids.dedup();
+            if ids.len() != total {
+                let mut duplicated = 0_usize;
+                hifishifter_kernel::log_limiter::emit_limited_key(
+                    log::Level::Warn,
+                    "ara.clip-identity",
+                    format_args!(
+                        "[ara] clip identity: clips={total} unique-ids={} duplicated={} \
+                         (I-1 violated; ids must be unique for the whole lifetime)",
+                        ids.len(),
+                        total - ids.len()
+                    ),
+                );
+                let _ = &mut duplicated;
+            }
+        }
         self.presentation_dupes.store(collapsed, Ordering::Release);
         if collapsed > 0 {
             // 【为什么这条是 Warn】它意味着"宿主里的一个实体被我们画成了多条 clip" ——

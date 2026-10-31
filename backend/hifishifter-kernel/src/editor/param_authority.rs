@@ -79,6 +79,38 @@ pub fn api_param_name(key: &str) -> &str {
     }
 }
 
+/// GUI / 分组**可编辑**的曲线集合（不含分析派生数组）。
+fn editable_display_curves(params: &TrackParamsState) -> Vec<(String, &[f32])> {
+    let mut curves = vec![
+        (PITCH_EDIT.to_owned(), params.pitch_edit.as_slice()),
+        (TENSION_EDIT.to_owned(), params.tension_edit.as_slice()),
+    ];
+    curves.extend(
+        params
+            .extra_curves
+            .iter()
+            .map(|(key, values)| (format!("extra:{key}"), values.as_slice())),
+    );
+    curves
+}
+
+/// 从一份显示参数里取某个权威键对应的数组。
+fn display_curve<'a>(params: &'a TrackParamsState, key: &str) -> Option<&'a [f32]> {
+    match key {
+        PITCH_EDIT => Some(params.pitch_edit.as_slice()),
+        TENSION_EDIT => Some(params.tension_edit.as_slice()),
+        other => other
+            .strip_prefix("extra:")
+            .and_then(|name| params.extra_curves.get(name))
+            .map(Vec::as_slice),
+    }
+}
+
+/// 两帧是否算"用户改过"（浮点尾差不该造出一条 run）。
+fn differs(a: f32, b: f32) -> bool {
+    !a.is_finite() || !b.is_finite() || (a - b).abs() > 1e-4
+}
+
 /// 一条 run 在项目时间轴上的放置。
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -496,6 +528,146 @@ impl ParamAuthority {
                         && run.placement.start_sec < hi - EPS
                 })
             })
+    }
+
+    /// 只保留给定根上的 run（逐实例存档裁剪用）。
+    ///
+    /// 【为什么需要它】组件状态是**逐实例**的存档：一个实例只服务它被分配的轨道，
+    /// 因此它写出的载荷只能带这些根。不裁剪会让一个实例把另一个实例的参数写进自己的
+    /// 存档，恢复时再灌回错误的轨。
+    pub fn retain_roots(&mut self, keep: &std::collections::BTreeSet<String>) {
+        let before = self.roots.len();
+        self.roots.retain(|root, _| keep.contains(root));
+        if self.roots.len() != before {
+            self.bump_revision();
+        }
+    }
+
+    /// 把"客户端交上来的显示数组"折回权威（**工程时间**差分）。
+    ///
+    /// 【为什么这是取代图集 `capture()` 的正确形式】图集把显示数组当成**源域**曲线的
+    /// 来源，于是它必须再解一次"这段显示对应哪段源" —— 而那正是分割 / 倒放 / 循环下
+    /// 解不对的那一步。权威本身就活在工程时间上：显示数组与 `compose_root_view` 的差，
+    /// 就是用户改的那几帧，位置一一对应，不需要任何映射。
+    ///
+    /// 只比较**可编辑**曲线（`pitch_edit` / `tension_edit` / `extra:*`）；分析派生数组
+    /// 不是用户输入，永远不参与。
+    ///
+    /// 【"改回默认值"怎么表达】`write_range` 的 `present` 位为 false 就表示"这一帧回到
+    /// 基线"，它同时会把该帧上已有的 run 切掉。所以判据只需 `is_edited_value`：
+    /// 值等于默认 ⇒ 不写（并清除），否则写入。
+    ///
+    /// 返回写入的**区间数**（连续改动的帧段）。
+    pub fn absorb_display(
+        &mut self,
+        root: &str,
+        incoming: &TrackParamsState,
+        baseline: &RootBaseline,
+        geometry_revision: u64,
+    ) -> Result<usize, String> {
+        let current = compose_root_view(root, self, baseline, geometry_revision);
+        let mut spans = 0usize;
+        for (key, values) in editable_display_curves(incoming) {
+            let Some(before) = display_curve(&current.params, &key) else {
+                continue;
+            };
+            if values.len() != before.len() {
+                // 长度不同说明客户端与后端不是同一份工程（或帧率变了）。整段丢弃比
+                // 按较短的一侧硬对齐安全：后者会把曲线尾部静默截断。
+                continue;
+            }
+            let default = default_value_for_key(&key);
+            let mut index = 0usize;
+            while index < values.len() {
+                if !differs(values[index], before[index]) {
+                    index += 1;
+                    continue;
+                }
+                let begin = index;
+                while index + 1 < values.len() && differs(values[index + 1], before[index + 1]) {
+                    index += 1;
+                }
+                let end = index + 1;
+                let span = &values[begin..end];
+                let present = span
+                    .iter()
+                    .map(|value| is_edited_value(&key, *value, default))
+                    .collect::<Vec<_>>();
+                self.write_range(root, &key, begin, span, &present, default)?;
+                spans += 1;
+                index = end;
+            }
+        }
+        Ok(spans)
+    }
+
+    /// 把一批**工程时间**曲线切片搬到另一个工程窗口（复制 / 粘贴）。
+    ///
+    /// 【为什么入参是切片而不是窗口】粘贴的源窗口可能已经不存在了（跨工程、源片段已
+    /// 删除）。剪贴板带着它复制那一刻的 run 切片走，粘贴时只做一次线性重映射 —— 与
+    /// `GeometryOp::Copy` 同一条公式，只是数据来自剪贴板而不是当前权威。
+    ///
+    /// 【为什么目标窗口先清】与复制同一语义：粘贴是"这一段现在归这份数据"，旧内容必须
+    /// 让位。否则两次粘贴会叠出两条互相覆盖的曲线，而"谁赢"取决于 run 的 `seq`。
+    ///
+    /// 返回落下的 run 条数。
+    pub fn place_runs_from_window(
+        &mut self,
+        target_root: &str,
+        source: (f64, f64),
+        target: (f64, f64),
+        runs: &BTreeMap<String, Vec<PlacedRun>>,
+    ) -> usize {
+        let (source_start, source_end) = source;
+        let (target_start, target_end) = target;
+        let source_span = source_end - source_start;
+        let target_span = target_end - target_start;
+        if !source_span.is_finite()
+            || !target_span.is_finite()
+            || source_span <= 0.0
+            || target_span <= 0.0
+            || !target_start.is_finite()
+        {
+            return 0;
+        }
+        let scale = target_span / source_span;
+        let mut placed = 0usize;
+        let mut incoming: BTreeMap<String, Vec<PlacedRun>> = BTreeMap::new();
+        for (key, slices) in runs {
+            for run in slices {
+                let seq = self.next_seq.max(1);
+                self.next_seq = seq.saturating_add(1);
+                incoming.entry(key.clone()).or_default().push(PlacedRun::new(
+                    seq,
+                    seq,
+                    run.values.clone(),
+                    RunPlacement {
+                        start_sec: target_start + (run.placement.start_sec - source_start) * scale,
+                        seconds_per_frame: run.placement.seconds_per_frame * scale,
+                    },
+                ));
+                placed += 1;
+            }
+        }
+        let target_authority = self.root_mut(target_root);
+        for existing in target_authority.runs.values_mut() {
+            let mut kept = Vec::new();
+            for run in existing.drain(..) {
+                split_outside_range(run, target_start, target_end, &mut kept);
+            }
+            *existing = kept;
+        }
+        for (key, mut placed_runs) in incoming {
+            target_authority
+                .runs
+                .entry(key)
+                .or_default()
+                .append(&mut placed_runs);
+        }
+        target_authority.runs.retain(|_, runs| !runs.is_empty());
+        self.roots.retain(|_, authority| !authority.is_empty());
+        self.bump_revision();
+        placed
     }
 
     /// 取某个工程窗口内的全部 run **切片**（剪贴板用）。

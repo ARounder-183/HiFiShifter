@@ -1720,7 +1720,7 @@ impl EditorSession {
             };
             changed |= document.publish_baseline(
                 &host_root,
-                crate::editor::parameter_atlas::RootBaseline::from_params(next)
+                hifishifter_kernel::editor::param_authority::RootBaseline::from_params(next)
                     .with_layout(layout.clone()),
             );
         }
@@ -5322,92 +5322,6 @@ pub(crate) mod tests {
             "组件stop必须撤销自己的输出，不能清除另一renderer"
         );
     }
-    /// 原actor选择重叠region只换其参数投影；不能生成编辑/history或覆盖另一素材。
-    #[test]
-    fn atlas_selection_commands_project_overlaps_without_audio_or_history_changes() {
-        let (model, owners, _ids) = workspace_fixture();
-        let document = model.session();
-        let mut original = document
-            .timeline
-            .lock_or_recover()
-            .as_ref()
-            .unwrap()
-            .clone();
-        for (index, track) in original.tracks.iter().enumerate() {
-            original.params_by_root_track.insert(
-                track.id.clone(),
-                hifishifter_kernel::state::TrackParamsState {
-                    frame_period_ms: 5.,
-                    pitch_edit_user_modified: true,
-                    pitch_edit: vec![if index == 0 { 60. } else { 67. }; 2],
-                    ..Default::default()
-                },
-            );
-        }
-        let identities = document.parameter_identities_locked(&original).unwrap();
-        let atlas = super::super::parameter_atlas::ParameterAtlas::default()
-            .capture(&original, &identities)
-            .unwrap();
-        let root = original.tracks[0].id.clone();
-        let ca = original.clips[0].id.clone();
-        let cb = original.clips[1].id.clone();
-        original.clips[1].track_id = root.clone();
-        original.tracks.truncate(1);
-        original.selected_clip_id = Some(ca.clone());
-        let atlas = atlas.follow_geometry(&original, &identities).unwrap();
-        original.params_by_root_track = atlas.project_roots(&original, &identities).unwrap();
-        *document.timeline.lock_or_recover() = Some(original.clone());
-        document.track_bindings.lock_or_recover().insert(
-            root.clone(),
-            vec![
-                ("modification".into(), "ara://source".into()),
-                ("modification-b".into(), "ara://source".into()),
-            ],
-        );
-        // 【T1：显示由"基线 + 编辑"合成】夹具必须同时给出一份就绪的基线，
-        // 否则合成会跳过该根（生产路径上基线由分析流水线提供）。
-        document.publish_baseline(
-            &root,
-            crate::editor::parameter_atlas::RootBaseline::from_display(
-                &original.params_by_root_track[&root],
-            ),
-        );
-        {
-            let mut edits = document.edits.lock_or_recover();
-            edits.params = original.params_by_root_track;
-            edits.atlas = atlas;
-        }
-        let editor = owners[0].editor_session().unwrap();
-        let (reply, rx) = mpsc::channel();
-        let (events, _) = mpsc::sync_channel(128);
-        let sink = UiSink {
-            view_id: "atlas-select".into(),
-            reply,
-            events,
-            closed: Arc::new(AtomicBool::new(false)),
-        };
-        let loaded = call(&editor, &sink, &rx, 1, "get_timeline_state", json!({}));
-        let root = loaded["tracks"][0]["id"].as_str().unwrap();
-        let ca = format!("{}{ca}", editor.namespace);
-        let cb = format!("{}{cb}", editor.namespace);
-        let before = (
-            document.edits.lock_or_recover().revision,
-            editor.generation.load(Ordering::Acquire),
-        );
-        call(&editor, &sink, &rx, 2, "select_clip", json!({"clipId":cb}));
-        let b = editor.timeline.lock_or_recover().params_by_root_track[root].pitch_edit[0];
-        call(&editor, &sink, &rx, 3, "select_clip", json!({"clipId":ca}));
-        let a = editor.timeline.lock_or_recover().params_by_root_track[root].pitch_edit[0];
-        let after = (
-            document.edits.lock_or_recover().revision,
-            editor.generation.load(Ordering::Acquire),
-        );
-        let history = editor.history.lock_or_recover().records.len();
-        document.close();
-        assert_eq!((a, b), (60., 67.));
-        assert_eq!(before, after);
-        assert_eq!(history, 0);
-    }
     #[test]
     fn workspace_components_share_the_original_actor_and_cross_track_history() {
         let (_model, owners, _ids) = workspace_fixture();
@@ -6883,11 +6797,9 @@ pub(crate) mod tests {
             }
         }
         let ready_bytes = (44100 + 48000) * 180 * 4 * 2;
-        let curve_bytes = document
-            .edits
-            .lock_or_recover()
-            .atlas
-            .accounted_curve_bytes();
+        // 【曲线不再占这份预算】图集的源域曲线是它自己的一份内存；现在曲线只以
+        // `ParamAuthority` 的 run 存在，而那份预算由内核自己的上限管着。
+        let curve_bytes = 0_usize;
         assert_eq!(
             budget.used() - baseline,
             frames * 4 * 2 + ready_bytes + curve_bytes

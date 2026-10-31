@@ -40,12 +40,6 @@ pub(crate) struct WorkspaceView {
     /// 逐根轨参数：`edits.apply` 之后、编辑器真正拿到的那一份（文档 id 空间）。
     pub params:
         Arc<std::collections::BTreeMap<String, hifishifter_kernel::state::TrackParamsState>>,
-    /// 与 `params` 同代的**分析基线**：提交闸用它判定"编辑器读到的那份原始值"。
-    ///
-    /// 【为什么基线必须随视图一起交付】捕获的差分是在**编辑域**做的：只有知道
-    /// "这一帧的原始值是什么"，才能区分"用户没碰"与"用户画回了默认值"。
-    pub baseline:
-        Arc<std::collections::BTreeMap<String, crate::editor::parameter_atlas::RootBaseline>>,
     /// 这份视图对应的 UI 几何代次。提交时与当前代次不一致就走重基/重试。
     pub geometry_revision: u64,
 }
@@ -90,12 +84,12 @@ impl ArchiveReading {
 /// 【为什么必须有】§1.3 列出的 11 条回退路径里，9 条**连字符串都没有**：写回被拒只留
 /// 一行限流日志，静默丢轨连日志都没有。用户唯一能做的事是"再画一次试试"，而这恰好
 /// 与"数据被抹平"最难区分。这里把同一批事实记成读数，让它进状态快照与诊断包。
+///
+/// 【为什么不再有"捕获读数"】那一栏统计的是图集 `capture()` 拒绝写回的曲线条数。
+/// 曲线现在只由显式写入（`set_param_frames`）产生，写入失败会直接变成一条命令
+/// 错误 —— 不再存在"悄悄没写进去"的中间态，因此这一栏没有可统计的对象。
 #[derive(Clone, Debug, Default)]
 pub(crate) struct EditHealth {
-    /// 最近一次用户编辑的捕获读数。
-    last: Option<crate::editor::parameter_atlas::CaptureReport>,
-    /// 累计被拒绝写回的曲线条数。
-    refused_total: u64,
     /// 累计"这次编辑没有被采纳"的次数（重放预算耗尽）。
     dropped_edits: u64,
     /// 最近一次被丢弃的编辑的可读原因。
@@ -103,21 +97,6 @@ pub(crate) struct EditHealth {
 }
 
 impl EditHealth {
-    /// 记一次捕获的读数。
-    fn record(&mut self, report: crate::editor::parameter_atlas::CaptureReport) {
-        self.refused_total = self
-            .refused_total
-            .saturating_add(report.refused.len() as u64);
-        if report.has_refusals() {
-            hifishifter_kernel::log_limiter::emit_limited_key(
-                log::Level::Warn,
-                "ara.atlas.capture-report",
-                format_args!("[ara] line write report: {}", report.summary()),
-            );
-        }
-        self.last = Some(report);
-    }
-
     /// 记一次"这次编辑没有被采纳"（重放预算耗尽）。
     fn drop_edit(&mut self, reason: String) {
         self.dropped_edits = self.dropped_edits.saturating_add(1);
@@ -127,8 +106,6 @@ impl EditHealth {
     /// 状态快照 / 诊断包的 JSON 形状。
     pub(crate) fn json(&self) -> serde_json::Value {
         serde_json::json!({
-            "last": self.last.as_ref().map(|report| report.json()),
-            "refusedTotal": self.refused_total,
             "droppedEdits": self.dropped_edits,
             "lastDrop": self.last_drop,
         })
@@ -684,7 +661,7 @@ pub(crate) struct DocumentSession {
     /// 里，于是"分析完成"与"编辑器回传"会互相覆盖 —— 用户看到的就是参数线随机回退。
     /// 这里只有一个写入口（[publish_baseline]），显示永远由它派生。
     pub(crate) baseline:
-        Mutex<std::collections::BTreeMap<String, crate::editor::parameter_atlas::RootBaseline>>,
+        Mutex<std::collections::BTreeMap<String, hifishifter_kernel::editor::param_authority::RootBaseline>>,
     /// ARA 变更通知队列，由 `runtime.rs` 在构建插件时注入。
     ///
     /// 【为什么必须有】宿主只保存"它知道变过"的部分。插件从不通知，只存增量的宿主
@@ -801,7 +778,6 @@ mod baseline_tests {
         let view = WorkspaceView {
             projection: "scope:abc".to_owned(),
             params: Arc::clone(&params),
-            baseline: Arc::new(std::collections::BTreeMap::new()),
             geometry_revision: 0,
         };
         let shared = Arc::new(view);
@@ -1399,7 +1375,11 @@ impl DocumentSession {
         // 【为什么必须重映射】persistentID 只保证**文档内**唯一，跨文档导入时宿主
         // 要求把存档 ID 映射到当前图里的 ID。不映射会把参数挂到一个不存在的键上 ——
         // 静默丢失，症状正是"重载工程后参数被重置"。
-        restored.atlas.remap_authorities(remap);
+        // 【曲线不按 modification 重映射】权威的键是 (root, param, 工程秒)；跨文档
+        // 导入要重映射的是**轨道身份**（由 `reconcile` 按 bindings 处理），与曲线无关。
+        // 图集时代这里必须把 `mod:{旧ID}` 下的曲线搬到新键，因为曲线按 modification
+        // 索引 —— 那份表示已经删除。
+        let _ = &remap;
         // 【G5】记下"它到达时我们在不在一次编辑会话里"：撤销/重做的还原会话在概念上
         // 就是一次编辑会话（`ARAInterface.h:2938-2943`），那是它**必须**覆盖在线
         // 状态的唯一权威证据。
@@ -1420,109 +1400,6 @@ impl DocumentSession {
             log::warn!("[ara] archive merge on arrival failed: {error}");
         }
         Ok(())
-    }
-
-    /// 调用方持document事务；仅从真实region边创建曲线身份，不从轨名/源路径推断。
-    ///
-    /// 【为什么不再对单个 clip 硬失败】此前这里对**任意一条** clip 的身份缺席直接
-    /// `Err`，而它在 `map` 内 ⇒ 整份身份表失败 ⇒ 所有 `project_*` / `follow_geometry`
-    /// 调用全部失败 ⇒ 整份投影与整份编辑被拒。这与本文件写在 `clip_id_for` 上的口径
-    /// 自相矛盾：那里已经把"region 已分配、`clip_ids` 还没重算"的窗口降级为按 key
-    /// 派生，而这里仍把它当致命错误。
-    ///
-    /// 现在逐条跳过并限流留痕：缺席的那一条 clip 不参与曲线投影（几何与音频不受影响），
-    /// 其余 clip 照常。返回类型保留 `Result` 是为了调用方签名不变 —— 本函数已不再
-    /// 因单条 clip 而失败。
-    pub(crate) fn parameter_identities_locked(
-        &self,
-        timeline: &hifishifter_kernel::state::TimelineState,
-    ) -> Result<
-        std::collections::BTreeMap<String, crate::editor::parameter_atlas::RegionIdentity>,
-        String,
-    > {
-        let ids = self.clip_ids.lock_or_recover();
-        let regions = self.regions.lock_or_recover();
-        let items = self.region_items.lock_or_recover();
-        let mut unresolved = 0_usize;
-        let mut first_unresolved: Option<String> = None;
-        let identities = timeline
-            .clips
-            .iter()
-            .filter_map(|clip| {
-                // 反查 region key：先查缓存，未命中时从 id 本身解析 —— clip id 由 key 派生
-                // （`ara-region-{key}`），所以它是自描述的。此前的硬错误
-                // （`missing actual region parameter edge`）会让"region 已分配、`clip_ids`
-                // 还没重算"这个窗口里的每次投影都失败。
-                let key = ids
-                    .iter()
-                    .find(|(_, id)| **id == clip.id)
-                    .map(|(key, _)| *key)
-                    .or_else(|| parse_region_key_from_clip_id(&clip.id));
-                let region = key
-                    .and_then(|key| regions.get(&key).map(|region| (key, region)))
-                    // 【按 key 直查缺席时，按"源 + 播放几何"反查】
-                    //
-                    // 少数情况下 clip id 派生出的 key 不在派生表里（宿主在收口前重投模型，
-                    // 或 region 刚被重建而 `region_keys` 还没跟上）。此前这种情况直接判
-                    // "无身份"，于是这一条 clip 本轮**不投影任何曲线** —— 用户看到的正是
-                    // "编辑之后这一段参数被重置"。
-                    //
-                    // clip 携带的 `source_path` 就是源 persistentID（映射层如此播种），
-                    // `start_sec` / `length_sec` 就是播放起止，三者足以在派生表里确定那条
-                    // region。多于一条匹配说明猜不出（同一源、同一窗口被重复放置），
-                    // 此时仍放弃 —— 不猜。
-                    .or_else(|| {
-                        let source = clip.source_path.as_deref()?;
-                        let mut matches = regions.iter().filter(|(_, region)| {
-                            region.audio_source_persistent_id == source
-                                && (region.start_in_playback_time - clip.start_sec).abs() <= 1e-6
-                                && (region.duration_in_playback_time - clip.length_sec).abs()
-                                    <= 1e-6
-                        });
-                        let (key, region) = matches.next()?;
-                        if matches.next().is_some() {
-                            return None;
-                        }
-                        Some((*key, region))
-                    });
-                let Some((key, region)) = region else {
-                    unresolved += 1;
-                    first_unresolved.get_or_insert_with(|| clip.id.clone());
-                    return None;
-                };
-                Some((
-                    clip.id.clone(),
-                    crate::editor::parameter_atlas::RegionIdentity {
-                        key,
-                        item: items.get(&key).cloned(),
-                        source: region.audio_source_persistent_id.clone(),
-                        modification: region.audio_modification_persistent_id.clone(),
-                        // 跨会话签名：只用 ARA 自己给的量，ARA-only 宿主上也有值
-                        // （`item` 在那种宿主上恒为 `None`，谱系全靠它）。
-                        signature:
-                            crate::editor::parameter_atlas::ParameterAtlas::ara_region_signature(
-                                &region.audio_source_persistent_id,
-                                &region.audio_modification_persistent_id,
-                                clip.start_sec,
-                                clip.length_sec,
-                            ),
-                    },
-                ))
-            })
-            .collect();
-        if unresolved > 0 {
-            hifishifter_kernel::log_limiter::emit_limited_key(
-                log::Level::Warn,
-                "ara.identity.unresolved-clip",
-                format_args!(
-                    "[ara] {unresolved} of {} clip(s) have no region identity this round \
-                     (first: {:?}); they project no curves until the derived tables catch up",
-                    timeline.clips.len(),
-                    first_unresolved
-                ),
-            );
-        }
-        Ok(identities)
     }
     /// 文档惰性持有唯一原编辑actor；actor只弱引用文档，组件不持第二份history。
     pub(crate) fn editor_session(
@@ -1718,11 +1595,9 @@ impl DocumentSession {
         self.compose_root_view_locked(&mut edits, &mut timeline)?;
         self.resynced_geometry.store(geometry, Ordering::Release);
         let projection = self.workspace_projection_locked(&edits)?;
-        let baseline = self.baseline_snapshot();
         Ok(Arc::new(WorkspaceView {
             projection,
             params: Arc::new(timeline.params_by_root_track),
-            baseline: Arc::new(baseline),
             geometry_revision: geometry,
         }))
     }
@@ -1803,7 +1678,7 @@ impl DocumentSession {
     /// 这一代基线的快照（随视图交付给提交闸）。
     pub(crate) fn baseline_snapshot(
         &self,
-    ) -> std::collections::BTreeMap<String, crate::editor::parameter_atlas::RootBaseline> {
+    ) -> std::collections::BTreeMap<String, hifishifter_kernel::editor::param_authority::RootBaseline> {
         self.baseline.lock_or_recover().clone()
     }
 
@@ -1814,7 +1689,7 @@ impl DocumentSession {
     pub(crate) fn publish_baseline(
         &self,
         root: &str,
-        baseline: crate::editor::parameter_atlas::RootBaseline,
+        baseline: hifishifter_kernel::editor::param_authority::RootBaseline,
     ) -> bool {
         let mut map = self.baseline.lock_or_recover();
         let changed = map.get(root).is_none_or(|old| {
@@ -2049,11 +1924,9 @@ impl DocumentSession {
         // 按帧合并，不会用一份默认值覆盖整根。
         // 快照是读路径，不负责重投影；param_roots 只在 refresh_ui_geometry 的
         // workspace_view 里生成，避免读一次工作区也去锁 host facts。
-        let baseline = self.baseline_snapshot();
         let view = Arc::new(WorkspaceView {
             projection,
             params: Arc::new(timeline.params_by_root_track.clone()),
-            baseline: Arc::new(baseline),
             geometry_revision: self.ui_geometry_revision.load(Ordering::Acquire),
         });
         Ok((
@@ -2237,7 +2110,10 @@ impl DocumentSession {
         Self::validate_workspace_identity(&host, client)?;
         let mut candidate = edits.merge(&host, client, edits.revision)?;
         candidate.reconcile(&self.track_bindings.lock_or_recover())?;
-        let identities = self.parameter_identities_locked(&host)?;
+        // 【不再有"per-clip 身份"这一层】它唯一的用途是把曲线按 clip 归属索引
+        // （`RegionIdentity`）。权威按根轨索引，曲线与 clip 的对应关系由**工程时间**
+        // 决定 —— 不需要一张身份表。`parameter_identities_locked` 随图集一起删除。
+
         // 【U-4：基线**只能**来自"编辑器真正读到的那一份"】
         //
         // `capture_changes` 只记录 `client` 与这一份的**差异**。基线一旦不是编辑器
@@ -2246,30 +2122,10 @@ impl DocumentSession {
         // 源曲线，就是用户看到的"编辑一下 clip，参数线被重置"。
         // 【客户端 = 编辑器这一轮交上来的数组】`baseline.params` 是**上一轮**的视图，
         // 拿它当客户端等于"自己和自己比" —— 差分恒空，用户的笔画永远进不了权威。
-        let client_view = &client.params_by_root_track;
-        let client_baseline = baseline.baseline.as_ref();
-        // 新 run 打不打锚由**用户当前设置**决定；既有 run 的锚不受影响。
-        let mode = crate::editor::parameter_atlas::lock_mode_from_settings()
-            .unwrap_or(crate::editor::parameter_atlas::EditMode::FollowMaterial);
 
-        // 【新权威路径】参数写入已经由显式 present 位图完成；这里只合并轨道设置/
-        // 分组等非曲线字段。绝不再把客户端整条显示数组做差分（那会把几何差异与
-        // 未编辑原值固化成编辑）。
-        if edits.authority.is_pristine() {
-            // 兼容旧测试/旧调用方：没有权威时仍走一次旧捕获，但生产命令不会到这里。
-            let mut report = crate::editor::parameter_atlas::CaptureReport::default();
-            candidate.atlas = edits.atlas.capture_changes_reporting(
-                client,
-                &identities,
-                client_view,
-                client_baseline,
-                mode,
-                &mut report,
-            )?;
-            self.note_capture_report(report);
-        } else {
-            candidate.atlas = edits.atlas.clone();
-        }
+        // 【曲线只由显式写入产生】`set_param_frames` 是唯一写入口（带 `present` 位图），
+        // 这里只合并轨道设置 / 分组等非曲线字段。绝不再把客户端整条显示数组做差分 ——
+        // 那会把几何差异与未编辑原值一起固化成编辑。
         if rebased {
             log::info!(
                 "[ara] workspace rebase: baseline={} current={} roots={} geometry_moved={geometry_moved}",
@@ -2278,29 +2134,19 @@ impl DocumentSession {
                 baseline.params.len()
             );
         }
-        // 【显示层唯一写者】权威 + 基线 + 当前几何重新合成；客户端数组只作为
-        // 旧路径的兼容输入，绝不可能成为显示层真相。
+        // 【显示层唯一写者】权威 + 基线 + 当前几何重新合成。客户端数组**不是**输入 ——
+        // 它只是"用户此刻看到的东西"，与权威的差由 `set_param_frames` 显式提交。
         {
             let mut composed = std::collections::BTreeMap::new();
-            if !candidate.authority.is_pristine() {
-                let roots = host
-                    .tracks
-                    .iter()
-                    .filter(|track| track.parent_id.is_none())
-                    .map(|track| track.id.clone())
-                    .collect::<Vec<_>>();
-                for root in roots {
-                    let view = self.compose_param_view_with(&host, &candidate, &root);
-                    composed.insert(root, view.params);
-                }
-            } else {
-                let baseline_now = self.baseline_snapshot();
-                composed = candidate.atlas.compose_root_views(
-                    &host,
-                    &identities,
-                    &baseline_now,
-                    &candidate.params,
-                );
+            let roots = host
+                .tracks
+                .iter()
+                .filter(|track| track.parent_id.is_none())
+                .map(|track| track.id.clone())
+                .collect::<Vec<_>>();
+            for root in roots {
+                let view = self.compose_param_view_with(&host, &candidate, &root);
+                composed.insert(root, view.params);
             }
             if !composed.is_empty() {
                 candidate.params = composed;
@@ -2315,11 +2161,9 @@ impl DocumentSession {
         // （仅限宿主轨道），所以 candidate.params 就是编辑器此刻显示的那份数组；
         // 指纹与它同代（同一份 candidate 算出）。调用方必须把它存回 `Loaded` ——
         // 类型上它不能"忘记"（返回值的唯一用途就是那个）。
-        let baseline = self.baseline_snapshot();
         let view = Arc::new(WorkspaceView {
             projection,
             params: Arc::new(candidate.params.clone()),
-            baseline: Arc::new(baseline),
             geometry_revision: self.ui_geometry_revision.load(Ordering::Acquire),
         });
         *edits = candidate;
@@ -2975,6 +2819,7 @@ impl DocumentSession {
             edits.tracks = host.tracks.clone();
         }
         let before = edits.authority.revision;
+        let runs_before = edits.authority.run_count();
         let revision = edits.authority.write_range(
             &root,
             param,
@@ -2989,13 +2834,20 @@ impl DocumentSession {
             // 显示缓存与权威同代更新；GUI 的下一帧不能读到上一代数组。
             let view = self.compose_param_view_with(&host, &edits, &root);
             edits.params.insert(root.clone(), view.params);
+            // 【`param.mutate` 是唯一的曲线改动读数】它把"谁改的"写进 `cause`：
+            // 用户操作（write）、撤销还原（restore）、几何事务（geometry）走的是三条
+            // 不同的路径，而此前它们在日志里完全同形 —— 于是一次"参数线自己变了"
+            // 根本无从归因。`runs=A->B` 给出这条根上的 run 条数变化，它是"多出一条
+            // 重叠的 run"这类内部错误的唯一廉价判据。
             hifishifter_kernel::log_limiter::emit_limited_key(
                 log::Level::Warn,
-                "ara.param.write",
+                "param.mutate",
                 format_args!(
-                    "[param] write root={root} param={param} range=[{start_frame}, {}) present={} rev={revision}",
+                    "[param] mutate cause=write root={root} param={param} range=[{start_frame}, {}) \
+                     present={} runs={runs_before}->{} rev={revision}",
                     start_frame as usize + normalized.len(),
-                    present.iter().filter(|value| **value).count()
+                    present.iter().filter(|value| **value).count(),
+                    edits.authority.run_count()
                 ),
             );
         }
@@ -3242,9 +3094,24 @@ impl DocumentSession {
         // 一起丢掉 —— 包括本次真正要保存的那几条 modification 参数。裁剪必须是
         // "从完整状态里挑出被选中的部分"，而不是"从空状态里填"。
         let mut partial = edits.clone();
-        // 参数权威是**逐 modification** 的状态：按筛选裁剪。
-        partial.atlas.retain_authorities_for(modifications);
-        partial.atlas.regions.clear();
+        // 【部分存档的裁剪口径：根轨】权威是 root 作用域的，而 ARA 的"选中部分"是按
+        // modification 选的。两者之间没有直接边，于是这里退一步：只要本实例此刻服务的
+        // 根轨上还有被选中的 modification 的 region，就保留那个根的全部曲线。
+        // 宁可多带一条轨的曲线，也不要按猜出来的边把用户数据裁掉。
+        let keep = self
+            .track_bindings
+            .lock_or_recover()
+            .iter()
+            .filter(|(_, members)| {
+                members
+                    .iter()
+                    .any(|(modification, _)| {
+                        modifications.is_none_or(|wanted| wanted.contains(modification))
+                    })
+            })
+            .map(|(root, _)| root.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        partial.authority.retain_roots(&keep);
         if !document_data {
             // 文档级状态没被选中 ⇒ 载荷里不带它，恢复端因此不会覆盖它。
             partial.params.clear();
@@ -3253,7 +3120,6 @@ impl DocumentSession {
             partial.fades.clear();
             partial.clip_local.clear();
             partial.groups = Default::default();
-            partial.atlas.gaps.clear();
         }
         match partial.encode() {
             Ok(bytes) => Ok(bytes),
@@ -3282,7 +3148,11 @@ impl DocumentSession {
             );
             return Ok(());
         }
-        restored.atlas.remap_authorities(remap);
+        // 【曲线不按 modification 重映射】权威的键是 (root, param, 工程秒)；跨文档
+        // 导入要重映射的是**轨道身份**（由 `reconcile` 按 bindings 处理），与曲线无关。
+        // 图集时代这里必须把 `mod:{旧ID}` 下的曲线搬到新键，因为曲线按 modification
+        // 索引 —— 那份表示已经删除。
+        let _ = &remap;
         self.pending_partial_restore
             .lock_or_recover()
             .push(restored);
@@ -3306,10 +3176,6 @@ impl DocumentSession {
             for (root, authority) in partial.authority.roots {
                 edits.authority.roots.insert(root, authority);
             }
-            for (key, params) in partial.atlas.authorities {
-                edits.atlas.set_authority(&key, params);
-            }
-            edits.atlas.gaps.extend(partial.atlas.gaps);
             edits.params.extend(partial.params);
             if !partial.groups.is_empty() {
                 edits.groups = partial.groups;
@@ -3688,14 +3554,6 @@ impl DocumentSession {
         reading.stored_bytes = bytes;
     }
 
-    /// 记一次用户编辑的捕获读数。
-    pub(crate) fn note_capture_report(
-        &self,
-        report: crate::editor::parameter_atlas::CaptureReport,
-    ) {
-        self.edit_health.lock_or_recover().record(report);
-    }
-
     /// 记一次"这次编辑没有被采纳"。
     pub(crate) fn note_edit_dropped(&self, reason: impl Into<String>) {
         let reason = reason.into();
@@ -3784,7 +3642,7 @@ impl DocumentSession {
             if self.baseline_is_ready(root) {
                 continue;
             }
-            let mut baseline = crate::editor::parameter_atlas::RootBaseline::from_params(params);
+            let mut baseline = hifishifter_kernel::editor::param_authority::RootBaseline::from_params(params);
             // 【布局键必须一起播种】不写它，`baseline_needs_rebuild` 会恒为真，
             // `baseline_for` 每一帧都会尝试从（此刻还冷的）内容缓存重建，然后把
             // 这份存档基线当成"过期"再退回 —— 冷恢复首帧的可听性全靠这份基线，
@@ -3807,11 +3665,6 @@ impl DocumentSession {
             .clips
             .iter()
             .map(|clip| clip.id.clone())
-            .collect::<std::collections::BTreeSet<_>>();
-        let track_ids = host
-            .tracks
-            .iter()
-            .map(|track| track.id.clone())
             .collect::<std::collections::BTreeSet<_>>();
         // 【G5：权威侧合并分两种，不能一律覆盖】
         //   * 在线状态是空的（冷启动）⇒ 整份装上，没有别的数据源；
@@ -3839,32 +3692,6 @@ impl DocumentSession {
                 ),
             );
         }
-        let mut kept_live = 0_usize;
-        for (key, params) in restored.atlas.authorities.clone() {
-            if authoritative || !merged.atlas.authorities.contains_key(&key) {
-                merged.atlas.set_authority(&key, params);
-            } else {
-                kept_live += 1;
-            }
-        }
-        if kept_live > 0 {
-            log::info!(
-                "[ara] restore kept {kept_live} live parameter set(s); the payload carries older \
-                 values for them and the live state is newer"
-            );
-        }
-        merged.atlas.regions.retain(|id, _| !clip_ids.contains(id));
-        merged.atlas.regions.extend(restored.atlas.regions);
-        merged
-            .atlas
-            .copy_seeds
-            .retain(|_, seed| !track_ids.contains(&seed.root));
-        merged.atlas.copy_seeds.extend(restored.atlas.copy_seeds);
-        merged
-            .atlas
-            .gaps
-            .retain(|root, _| !track_ids.contains(root));
-        merged.atlas.gaps.extend(restored.atlas.gaps);
         let items = self.fade_items_locked(&clip_ids);
         if !merged.fades.is_empty() && items.is_empty() && !clip_ids.is_empty() {
             // fade 归属元数据要等宿主几何刷新后才能算出来；这是一次可重试的暂缓。
