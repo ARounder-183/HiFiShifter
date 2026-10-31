@@ -130,8 +130,25 @@ pub(crate) fn execute(
         targets.push(target);
     }
     let mut pairs = Vec::new();
+    let total = targets.len();
     for target in targets {
-        let pair = target.split_at(plan.position, authorized)?;
+        // 【批内失败必须如实说"已经改了几条"】宿主的分割 API 一次只切一个 item，
+        // 没有"预演"这一步 —— 第 N 条失败时，前 N-1 条**已经真的切开了**。
+        // 旧实现把错误原样往上抛，调用方于是把它显示成"分割失败"，而工程其实已经
+        // 变了一半。这里把已完成数带上，并指出恢复手段。
+        //
+        // 【为什么不在失败时自动撤销】整批在同一个宿主 Undo 块里（见
+        // `client.rs` 的 `begin_request`），所以**一次**撤销就能回退整批。但撤销
+        // 必须在块**关闭之后**发，而块由调用方持有；在这里盲发一次
+        // `Undo_DoUndo` 有可能落在块内被宿主拒绝，或退掉用户上一步真正的编辑。
+        // 因此回滚动作留给用户，错误文案把话说明白。
+        let done = pairs.len();
+        let pair = target.split_at(plan.position, authorized).map_err(|error| {
+            format!(
+                "host split failed after {done} of {total} item(s) were already split: {error}; \
+                 one undo step in the host reverts the batch"
+            )
+        })?;
         // 【曲线不需要任何处理】分割在工程时间上不移动任何东西 —— 两半的 run 一个字节
         // 都没变，界面上"分割点两侧都有线"是**默认结果**，不是一次继承。此前这里要
         // `split_seed` + `register_split`，是因为曲线存在源域、按 item 索引；那份表示
