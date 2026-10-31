@@ -2527,23 +2527,33 @@ impl DocumentSession {
                     .unwrap_or(0)
             })
             .unwrap_or(0);
+        // 【硬上限】`run_frames` 由存档/宿主给出的 run 位置推导；一条越界的 run
+        // 就能把"需要的帧数"推到十亿级，随后 `resize` 直接申请数十 GB。
+        // 与内核的"参数帧预算"同量级取 1M 帧：正常工程（约 1.4 小时 @5ms）够用，
+        // 越界数据只会被截断显示，不会把进程打死。
+        const MAX_VIEW_FRAMES: usize = 1_000_000;
         let needed = timeline
             .target_param_frames(fp)
             .max(run_frames)
-            .max(baseline.frame_count());
+            .max(baseline.frame_count())
+            .min(MAX_VIEW_FRAMES);
         if baseline.frame_period_ms <= 0.0 || !baseline.frame_period_ms.is_finite() {
             baseline.frame_period_ms = fp;
         }
-        if baseline.pitch_orig.len() < needed {
+        // 【空曲线保持为空】空数组是“这一层没有基线”的明确语义，不是“一列零”。
+        // 尤其 `dyn_orig`：把它补成 0 会让 -1 哨兵被解析成 0 dB 目标，整条 clip
+        // 的混音增益变成 0（冷恢复后“有编辑、没声音”）。只有真实存在的曲线才按
+        // 需要的帧数补零，避免越界采样；缺席的层继续缺席，由渲染器的默认分支处理。
+        if !baseline.pitch_orig.is_empty() && baseline.pitch_orig.len() < needed {
             baseline.pitch_orig.resize(needed, 0.0);
         }
-        if baseline.pitch_target.len() < needed {
+        if !baseline.pitch_target.is_empty() && baseline.pitch_target.len() < needed {
             baseline.pitch_target.resize(needed, 0.0);
         }
-        if baseline.dyn_orig.len() < needed {
+        if !baseline.dyn_orig.is_empty() && baseline.dyn_orig.len() < needed {
             baseline.dyn_orig.resize(needed, 0.0);
         }
-        if baseline.tension_orig.len() < needed {
+        if !baseline.tension_orig.is_empty() && baseline.tension_orig.len() < needed {
             baseline.tension_orig.resize(needed, 0.0);
         }
         hifishifter_kernel::editor::param_authority::compose_root_view(
@@ -2809,6 +2819,11 @@ impl DocumentSession {
             .unwrap_or_else(|| vec![true; normalized.len()]);
         self.checkpoint_authority(checkpoint)?;
         let mut edits = self.edits.lock_or_recover();
+        // `EditState.tracks` 是轨道级设置的持久化容器；新权威写路径也必须
+        // 在第一次写入时把当前宿主轨道登记进去，否则存档/诊断会看到空轨道表。
+        if edits.tracks.is_empty() {
+            edits.tracks = host.tracks.clone();
+        }
         let before = edits.authority.revision;
         let revision = edits.authority.write_range(
             &root,
@@ -2821,6 +2836,9 @@ impl DocumentSession {
         let changed = revision != before;
         if changed {
             edits.revision = edits.revision.saturating_add(1);
+            // 显示缓存与权威同代更新；GUI 的下一帧不能读到上一代数组。
+            let view = self.compose_param_view_with(&host, &edits, &root);
+            edits.params.insert(root.clone(), view.params);
             hifishifter_kernel::log_limiter::emit_limited_key(
                 log::Level::Info,
                 "ara.param.write",
@@ -2922,6 +2940,10 @@ impl DocumentSession {
             }
         };
         if report.applied_deltas > 0 {
+            // 只推进编辑代次。派生显示由调用方在自己的时间线上重新合成
+            // （`materialize_views_locked` 会整份替换 `edits.params`，而这里拿到的
+            // `timeline` 可能是另一份宿主视图 —— 用它覆盖会把在线权威的根 id
+            // 写成宿主新 id，下一次 reconcile 会把这条轨判成"认不出"）。
             edits.revision = edits.revision.saturating_add(1);
         }
         let epoch = journal.epoch();
@@ -3534,6 +3556,20 @@ impl DocumentSession {
             );
             for (root, params) in views {
                 client.params_by_root_track.insert(root, params);
+            }
+        }
+        // 存档里的基线缓存不是编辑真相，却是冷恢复第一次渲染的“原始值”来源。
+        // 不在合入时装回文档基线，下面的 compose 只能看到空宿主时间线，生成的
+        // 显示数组会缺 pitch_orig；渲染器于是把用户曲线当成“没有源基频”而直通原音。
+        // 只补文档里还没有的根：在线分析已经发布的基线永远优先。
+        for (root, params) in &restored.params {
+            if self.baseline_is_ready(root) {
+                continue;
+            }
+            let baseline =
+                crate::editor::parameter_atlas::RootBaseline::from_params(params);
+            if baseline.is_ready() {
+                self.publish_baseline(root, baseline);
             }
         }
         let mut edits = self.edits.lock_or_recover();

@@ -2731,8 +2731,8 @@ impl TimelineState {
         let tension_edit = dense("tension_edit", 0.0);
         let extra_curves = entry
             .extra_curves
-            .iter()
-            .map(|(param, _)| {
+            .keys()
+            .map(|param| {
                 let key = format!("extra:{param}");
                 let default_value =
                     crate::renderer::common_params::automation_curve_pad_value(kind, param);

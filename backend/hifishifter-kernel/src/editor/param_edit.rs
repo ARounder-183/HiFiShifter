@@ -727,10 +727,10 @@ impl EditCurveSet {
 }
 
 /// 把一条曲线里属于某个锚层（`None` = 无锚层）的 run 取出来。
-pub fn runs_for_anchor<'a>(
-    curve: &'a EditCurve,
+pub fn runs_for_anchor(
+    curve: &EditCurve,
     anchor: Option<u32>,
-) -> impl Iterator<Item = &'a EditRun> {
+) -> impl Iterator<Item = &EditRun> {
     curve.runs_in_layer(anchor)
 }
 

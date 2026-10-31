@@ -670,10 +670,35 @@ pub fn compose_root_view(
     geometry_revision: u64,
 ) -> RootParamView {
     let mut params = baseline.display();
+    let fp = if authority.frame_period_ms.is_finite() && authority.frame_period_ms > 0.0 {
+        authority.frame_period_ms
+    } else {
+        baseline.frame_period_ms
+    };
+    // 权威 run 可以比分析基线更长（先画线、后分析，或冷启动只有存档 run）。
+    // 显示帧数必须由两者共同决定，否则 compose 会在 run 的第一帧前就 break。
+    let authority_frames = authority
+        .root(root)
+        .map(|root_authority| {
+            root_authority
+                .runs
+                .values()
+                .flat_map(|runs| runs.iter())
+                .map(|run| ((run.end_sec() * 1000.0 / fp.max(0.1)).ceil() as usize).saturating_add(1))
+                .max()
+                .unwrap_or(0)
+        })
+        .unwrap_or(0);
+    // 【上限】run 的工程位置来自存档/宿主，理论上可以很大；显示数组必须按
+    // 真实工程帧数分配，绝不能由一条越界的 run 决定长度（否则一次恢复就能
+    // 申请出数 GB）。1M 帧与内核既有的"参数帧预算"同量级。
+    const MAX_VIEW_FRAMES: usize = 1_000_000;
     let count = baseline
         .frame_count()
         .max(params.pitch_edit.len())
-        .max(params.tension_edit.len());
+        .max(params.tension_edit.len())
+        .max(authority_frames)
+        .min(MAX_VIEW_FRAMES);
     if count > 0 {
         params.pitch_edit.resize(count, 0.0);
         params.tension_edit.resize(count, 0.0);
@@ -692,11 +717,6 @@ pub fn compose_root_view(
             baseline_revision: baseline.revision,
             geometry_revision,
         };
-    };
-    let fp = if authority.frame_period_ms.is_finite() && authority.frame_period_ms > 0.0 {
-        authority.frame_period_ms
-    } else {
-        baseline.frame_period_ms
     };
     for (key, runs) in &root_authority.runs {
         if count == 0 {
@@ -769,16 +789,27 @@ pub fn compose_clip_params(
             .map(|index| values.get(index).copied().unwrap_or(pad))
             .collect()
     };
+    // 【空数组的语义是“这一层没有基线”，不是一列零】clip 局部数组是渲染器
+    // 判断“是否有原始值”的唯一入口：把空的 dyn_orig 补成 0 会让 DYN 的 -1
+    // 哨兵解析到 0 dB，整条 clip 被静音；pitch_orig 补零也会让“缺 F0”伪装成
+    // 合法源曲线。非空但较短的曲线仍按 0 补齐，避免越界采样。
+    let slice_optional = |values: &[f32]| -> Vec<f32> {
+        if values.is_empty() {
+            Vec::new()
+        } else {
+            slice(values, 0.0)
+        }
+    };
     let mut out = TrackParamsState {
         frame_period_ms: fp,
-        pitch_orig: slice(&view.params.pitch_orig, 0.0),
+        pitch_orig: slice_optional(&view.params.pitch_orig),
         pitch_edit: slice(&view.params.pitch_edit, 0.0),
         pitch_edit_user_modified: view.params.pitch_edit_user_modified,
-        tension_orig: slice(&view.params.tension_orig, 0.0),
+        tension_orig: slice_optional(&view.params.tension_orig),
         tension_edit: slice(&view.params.tension_edit, 0.0),
         ..Default::default()
     };
-    out.dyn_orig = slice(&view.params.dyn_orig, 0.0);
+    out.dyn_orig = slice_optional(&view.params.dyn_orig);
     for (key, curve) in &view.params.extra_curves {
         out.extra_curves.insert(
             key.clone(),

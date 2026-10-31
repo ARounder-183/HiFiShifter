@@ -1309,6 +1309,9 @@ pub(super) fn dispatch(
         }
         "get_history_state" => Ok(history_state(session)),
         "begin_undo_group" => {
+            // 组内写入用 `checkpoint:false`，因此"组开始前"的权威必须在这里先挂上；
+            // 否则 undo 找不到可恢复的快照，整组曲线会留在原位（右键重置后"没反应"）。
+            session.checkpoint_authority_step();
             let timeline = session.timeline.lock_or_recover();
             history::checkpoint(
                 &mut session.history.lock_or_recover(),

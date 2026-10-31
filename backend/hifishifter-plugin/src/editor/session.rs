@@ -2018,8 +2018,11 @@ impl EditorSession {
         };
         *self.error.lock_or_recover() = None;
         *self.render_error.lock_or_recover() = None;
-        self.applied
-            .store(self.generation.load(Ordering::Acquire), Ordering::Release);
+        // 【不要在这里宣告"音频已应用"】`applied` 的语义是"这一代的**音频**已经发布"，
+        // 而本函数只装载了编辑/时间线状态。旧实现在这里直接写 `applied = generation`，
+        // 于是任何一次重载（宿主回写、焦点切换、模型回调）都会把"还没重算的音频"
+        // 记成已应用 —— 自动渲染的等待循环因此提前放行，用户听到的是上一版声音。
+        // 真正的写入者是渲染完成分支（见 `complete_render` 的 Ok 分支）。
         self.peaks.lock_or_recover().clear();
         // snapshot返回后UI缓存可能再次更新，强制下一轮按短事务版本同步，不能吞掉该变化。
         self.ui_geometry_version.store(0, Ordering::Release);
@@ -3319,7 +3322,7 @@ impl EditorSession {
 
     /// 参数写入前的 undo 点：先把当前 authority 挂到当前位置，再把新步的占位
     /// 也填成“写入前”的权威；写入成功后再用 §note_authority_step§ 覆盖新步。
-    fn checkpoint_authority_step(&self) {
+    pub(super) fn checkpoint_authority_step(&self) {
         if self.suppress_history.load(Ordering::Acquire) {
             return;
         }
@@ -5008,10 +5011,22 @@ pub(crate) mod tests {
                 let local: Value = serde_json::from_slice(&owner.encode_state().unwrap()).unwrap();
                 assert_eq!(local["edits"]["tracks"].as_array().unwrap().len(), 1);
                 assert_eq!(local["edits"]["params"].as_object().unwrap().len(), 1);
-                assert_eq!(
-                    local["edits"]["params"][if index == 0 { "track" } else { "b" }]["pitch_edit"]
-                        [100],
-                    if index == 0 { 60. } else { b_midi }
+                // v11 起显示数组不再入档；权威 runs 才是唯一可恢复的编辑真相。
+                let root = if index == 0 { "track" } else { "b" };
+                let target = if index == 0 { 60. } else { b_midi };
+                let runs = local["edits"]["authority"]["roots"][root]["runs"]["pitch_edit"]
+                    .as_array()
+                    .unwrap();
+                assert!(
+                    runs.iter().any(|run| {
+                        run["values"].as_array().is_some_and(|values| {
+                            values
+                                .iter()
+                                .filter_map(Value::as_f64)
+                                .any(|value| (value - target).abs() <= 1.5)
+                        })
+                    }),
+                    "restored authority must contain pitch {target} for root {root}: {local}"
                 );
             }
             cold_document.close();
@@ -5821,18 +5836,18 @@ pub(crate) mod tests {
         let encoded = owner.encode_state().unwrap(); // 真getState路径会flush，不只测手工barrier。
         let saved: Value = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(
-            saved["version"], 10,
-            "权威参数按稳定宿主身份存档（v10：run 级锚）；旧 v2/v3 解码与范围回归另行保留"
+            saved["version"], 11,
+            "v11 只写项目时间权威；旧 v2..v10 的解码与迁移另行保留"
         );
         // 【T2：用户曲线只在权威里】`params` 不再写显示数组，所以这条断言改成
         // 直接读权威的稀疏 run —— 它才是"用户的这两笔"真正落盘的地方。
         let mut samples: Vec<f64> = Vec::new();
-        for authority in saved["edits"]["atlas"]["authorities"]
+        for authority in saved["edits"]["authority"]["roots"]
             .as_object()
             .unwrap()
             .values()
         {
-            if let Some(runs) = authority["edits"]["pitch_edit"]["runs"].as_array() {
+            if let Some(runs) = authority["runs"]["pitch_edit"].as_array() {
                 for run in runs {
                     for value in run["values"].as_array().unwrap() {
                         samples.push(value.as_f64().unwrap());
@@ -7302,7 +7317,7 @@ pub(crate) mod tests {
             }
         }
         let deadline = Instant::now() + Duration::from_secs(30);
-        while editor.applied.load(Ordering::Acquire) < 1 {
+        while editor.applied.load(Ordering::Acquire) < editor.generation.load(Ordering::Acquire) {
             assert!(
                 Instant::now() < deadline,
                 "WORLD automatic apply failed: {:?}",

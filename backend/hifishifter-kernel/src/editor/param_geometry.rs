@@ -194,7 +194,9 @@ impl GeometryDelta {
     }
 
     fn contains_old(&self, sec: f64) -> bool {
-        sec >= self.old.start_sec - EPS && sec < self.old.end_sec() - EPS
+        // 曲线最后一个采样点可以精确落在 clip 结束边界上；它仍属于这条 run，
+        // 必须跟着旧窗口一起变换。若用半开区间，末值会留在原位形成“残影”。
+        sec >= self.old.start_sec - EPS && sec <= self.old.end_sec() + EPS
     }
 
     fn rank(&self) -> (u64, u64) {

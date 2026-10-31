@@ -3045,33 +3045,40 @@ mod tests {
             );
         }
         let host = document.workspace_timeline().unwrap();
-        let mut client = host.clone();
-        let root = client.tracks[0].id.clone();
-        client.params_by_root_track.insert(
-            root.clone(),
-            hifishifter_kernel::state::TrackParamsState {
+        let root = host.tracks[0].id.clone();
+        document.publish_baseline(
+            &root,
+            crate::editor::parameter_atlas::RootBaseline {
                 frame_period_ms: 100.,
-                pitch_edit_user_modified: true,
                 pitch_orig: vec![57.; 6],
-                pitch_edit: vec![60., 61., 62., 63., 64., 65.],
                 ..Default::default()
             },
         );
-        let baseline = document.workspace_view().unwrap();
-        document
-            .accept_workspace_edits(
-                0,
-                document.revision.load(Ordering::Acquire),
-                &client,
-                &baseline,
-            )
-            .unwrap();
-        assert!(!document.edits.lock_or_recover().atlas.is_empty());
+        {
+            let mut edits = document.edits.lock_or_recover();
+            edits.authority.frame_period_ms = 100.;
+            edits
+                .authority
+                .write_range(
+                    &root,
+                    "pitch",
+                    0,
+                    &[60., 61., 62., 63., 64., 65.],
+                    &[true; 6],
+                    0.0,
+                )
+                .unwrap();
+            edits.revision = edits.revision.saturating_add(1);
+        }
+        assert!(!document.edits.lock_or_recover().authority.is_pristine());
+        // 生产路径在绑定/收口时已经用初始几何建立日志；这里是直接写权威的测试夹具，
+        // 必须先完成一次 observe，后面的 Move/Stretch 才有“旧窗口”可比较。
+        document.reconcile_parameter_geometry().unwrap();
         model.document.playback_regions[0].start_in_playback_time = 1.;
         model.document.playback_regions[0].duration_in_playback_time = 1.;
         model.document.playback_regions[0].is_timestretch_enabled = true;
         model.remap_and_log();
-        let pitch = document.edits.lock_or_recover().params[&root]
+        let pitch = document.workspace_view().unwrap().params[&root]
             .pitch_edit
             .clone();
         document.close();
