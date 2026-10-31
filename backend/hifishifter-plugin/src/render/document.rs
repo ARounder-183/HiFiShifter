@@ -404,7 +404,7 @@ pub(crate) struct DocumentSession {
     /// 授权，所以右半段可以立刻显示波形，不必等宿主为它重新分配 region。缺了这条，
     /// 分割后右半段会停在一段"等待 REAPER 提供音频"的占位里（用户报障过）。
     ///
-    /// 【为什么不复用 `ParameterAtlas::split_parents`】那份谱系服务的是**参数曲线**
+    /// 【为什么不复用图集时代的 `split_parents`】那份谱系服务的是**参数曲线**
     /// 继承，键与生命周期都挂在参数权威上；媒体派生是显示层的事，两件事不该共用一个
     /// 记录 —— 否则一方的清理会静默影响另一方。
     pub split_media_from: Mutex<HashMap<String, String>>,

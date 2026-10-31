@@ -1282,7 +1282,7 @@ mod tests {
     }
     /// 相同root的两个重叠区域保留独立源参数，不能用GUI单一数组覆盖两者。
     #[test]
-    fn source_parameter_atlas_overlapping_regions_keep_independent_audio_gains() {
+    fn source_parameters_of_overlapping_regions_keep_independent_audio_gains() {
         let seconds = 4.0 / 44100.;
         let mut timeline:TimelineState=serde_json::from_value(serde_json::json!({
             "tracks":[{"id":"track","name":"A","order":0}],"bpm":120,"project_sec":seconds,

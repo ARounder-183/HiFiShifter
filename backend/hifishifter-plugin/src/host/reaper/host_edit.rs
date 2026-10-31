@@ -433,7 +433,7 @@ impl EditorSession {
         // 又被图集投影整份替换（`EditState::apply`）—— 搬完的下一帧就被盖回去。于是
         // 那一行既没有用户可见效果，又让"锁定参数线"看起来时灵时不灵。
         //
-        // 现在曲线位置**只有一个**决定者：`ParameterAtlas::follow_geometry` 按**当前**
+        // 现在曲线位置**只有一个**决定者：`ParamAuthority` 的工程时间 run 按**当前**
         // 设置选锚点（见 `anchor_is_locked`）。它由几何的写回方调用（ARA 的 `end_editing`
         // 与原生扩展的几何刷新），而本函数正是"几何要变了"的那个信号源。
         //

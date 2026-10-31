@@ -2598,7 +2598,7 @@ fn host_colors_clamp_into_a_parseable_hex_string() {
 mod tests {
     /// 真实模型稳定收口必须重新投影编辑，不能只有数学helper通过而GUI/authority仍在旧位置。
     #[test]
-    fn source_parameter_atlas_moves_and_stretches_in_real_document_transactions() {
+    fn source_parameters_move_and_stretch_in_real_document_transactions() {
         use ara2_bridge::plugin::ExtensionRoles;
         let mut model = ModelHandle::new();
         model.document = identity_document(&["A"]);

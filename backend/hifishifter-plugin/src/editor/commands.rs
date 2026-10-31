@@ -1597,7 +1597,7 @@ pub(super) fn dispatch(
             if a.mappings.len() > 4096 {
                 return Err("stretch mapping budget exceeded".into());
             }
-            // ARA 模式下几何变化由 ParameterAtlas 的源域编辑投影完成；这里再改
+            // ARA 模式下几何变化由内核的几何事务（`GeometryOp::Move/Stretch`）完成；这里再改
             // 一次本地数组会把已经投影过的曲线二次映射（偏移/截断/默认值）。
             // 保留命令是为了独立 App 与旧前端兼容，但在插件内必须是显式 no-op。
             hifishifter_kernel::log_limiter::emit_limited_key(
