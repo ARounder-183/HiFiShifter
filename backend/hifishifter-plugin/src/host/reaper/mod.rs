@@ -182,6 +182,12 @@ pub(crate) struct NativeHost {
     /// 记录新条目时先丢掉所有索引大于它的旧记录，于是"用户回退后再编辑"造成的重编号
     /// 不会留下错位的时间。宿主的自有条目（不是本插件创建的）没有时间，读作 `null`。
     undo_entry_times: std::sync::Mutex<std::collections::BTreeMap<i32, u64>>,
+    /// 需要在宿主线程结束、但 `Drop` 发生在别的线程上的 Undo 块（项目指针）。
+    ///
+    /// 【为什么是队列】见 `HostUndoBlock::drop`：就地阻塞投递会在"Drop 跑在宿主
+    /// 线程正等的那把锁上"时自锁。队列由 [`NativeHost::drain_undo_ends`] 在宿主
+    /// 线程上排空。
+    undo_ends: std::sync::Mutex<Vec<usize>>,
     /// 本实例**持有**一个节拍引用（只有它为真时才在析构里减计数）。
     host_timer_held: std::sync::atomic::AtomicBool,
     /// 节拍此刻是否挂着（不论是谁挂的）。`refresh_host_transport_tick` 读它决定要不要自愈。
@@ -691,6 +697,7 @@ impl NativeHost {
             take_enum,
             folder,
             undo_entry_times: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            undo_ends: std::sync::Mutex::new(Vec::new()),
         })
     }
     /// 当前线程是不是宿主绑定线程（model/UI 线程）。
