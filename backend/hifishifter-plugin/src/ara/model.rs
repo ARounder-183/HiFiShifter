@@ -814,6 +814,7 @@ impl ModelHandle {
                             left: left_item.clone(),
                             offset_sec: offset,
                             length_sec: child.play_dur,
+                            rounds_left: crate::render::document::SPLIT_WINDOW_ROUNDS,
                         },
                     );
                 }

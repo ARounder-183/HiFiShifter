@@ -2246,6 +2246,9 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
                     item_facts.reversed,
                 )
             });
+            // 【有界寿命】分割窗口只覆盖"分割那一瞬间"；每一轮清单刷新都推进它的
+            // 寿命，耗尽后自动退回宿主读数（见 `SplitWindows::tick`）。
+            self.split_windows.lock_or_recover().tick(&guid);
             // 【读→写→读：读数只在**读**这一侧成立】镜像轴属于宿主的约定，而仓库里没有
             // 任何一处能证明 REAPER 用的是哪一条。把"宿主给的 soffs 经解算再折回去必须
             // 回到原值"变成一行运行时读数：残差为 0 ⇒ 约定正确；不为 0 ⇒ 约定反了，

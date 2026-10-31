@@ -163,7 +163,18 @@ pub(crate) struct SplitWindowSource {
     pub offset_sec: f64,
     /// 子段的播放长度（秒）。
     pub length_sec: f64,
+    /// 这条推导还能用几轮（见 `SplitWindows::tick`）。
+    pub rounds_left: u8,
 }
+
+/// 一次分割推导最多覆盖多少轮清单刷新。
+///
+/// 【为什么必须有上界】分割窗口的唯一职责是"分割那一瞬间右半段的 D_STARTOFFS
+/// 不可信"。宿主在之后任意一次刷新里给出的读数才是真值；旧实现只在
+/// `length_sec` 变化时才撤销条目，于是"长度没变、窗口变了"（滑源 / 宿主重算
+/// soffs）会让同一组 `derived != host` 读数刷上十几分钟 —— 音频与曲线一起冻在
+/// 错误窗口上，而且几何分类会因此退化成 TrimOrNone（锁定看起来又失效了）。
+pub(crate) const SPLIT_WINDOW_ROUNDS: u8 = 4;
 
 /// 已确认分割的子段窗口来源表：按 GUID 查取 + **插入序**淘汰最旧。
 ///
@@ -204,6 +215,30 @@ impl SplitWindows {
 
     pub(crate) fn get(&self, child: &str) -> Option<&SplitWindowSource> {
         self.map.get(child)
+    }
+
+    /// 推进一轮：寿命耗尽的条目自动摘除（返回是否摘掉）。
+    pub(crate) fn tick(&mut self, child: &str) -> bool {
+        let Some(entry) = self.map.get_mut(child) else {
+            return false;
+        };
+        entry.rounds_left = entry.rounds_left.saturating_sub(1);
+        if entry.rounds_left > 0 {
+            return false;
+        }
+        let removed = self.map.remove(child).is_some();
+        if removed {
+            self.order.retain(|key| key != child);
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "ara.split.window-expired",
+                format_args!(
+                    "[ara] split window for item {child} expired after {SPLIT_WINDOW_ROUNDS} \
+                     rounds; the host reading is authoritative again"
+                ),
+            );
+        }
+        removed
     }
 
     /// 摘掉一条登记（子段被拉伸 / 移动过 ⇒ 旧推导不再可信）。
@@ -750,6 +785,13 @@ pub(crate) struct DocumentSession {
     pub(crate) inventory_incomplete: std::sync::atomic::AtomicBool,
     /// clip id → 连续多少轮**完整**清单没见到它（幽灵 clip 的宽限期计数）。
     pub(crate) orphan_streak: Mutex<std::collections::HashMap<String, u32>>,
+    /// 本文档相关 item 几何的摘要（见 `refresh_ui_inventory`）。
+    ///
+    /// 【为什么不能直接用宿主的工程级变更计数】那个计数对**整个工程**有效：改速度、
+    /// 加标记、动别的轨都会让它前进。用它驱动 `render_epoch`，等于"别人动一下，
+    /// 我的在途渲染就作废" —— 工程越忙，自动渲染越难收敛。这里只对本文档枚举到的
+    /// `(item, 起点, 长度, take)` 求摘要，粒度与"渲染输入是否变了"对齐。
+    pub(crate) ui_geometry_digest: std::sync::atomic::AtomicU64,
     /// 最近一次几何事务的读数（诊断与状态栏）。
     pub(crate) last_geometry_report:
         Mutex<Option<hifishifter_kernel::editor::param_geometry::TransformReport>>,
@@ -863,6 +905,7 @@ mod split_windows_tests {
             left: "left".into(),
             offset_sec: 0.5,
             length_sec: 0.5,
+            rounds_left: SPLIT_WINDOW_ROUNDS,
         }
     }
 
@@ -893,6 +936,7 @@ mod split_windows_tests {
                 left: "renewed".into(),
                 offset_sec: 1.,
                 length_sec: 1.,
+                rounds_left: SPLIT_WINDOW_ROUNDS,
             },
         );
         assert_eq!(table.len(), SplitWindows::MAX_ENTRIES);
