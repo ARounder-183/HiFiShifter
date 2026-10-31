@@ -417,25 +417,33 @@ impl ParamAuthority {
     }
 
     /// 删除区间内所有编辑（右键重置/初始化）。
+    ///
+    /// 【为什么返回值带 `changed`】调用方据此决定"要不要压撤销点、要不要重渲染"。
+    /// 旧实现只回 revision，于是"什么都没擦"与"擦掉一条"在下游长得一模一样 ——
+    /// 空操作也会压一步撤销（用户按下去什么都不会发生）。
+    ///
+    /// 【为什么不受 `project_sec` 限制】run 活在**工程时间**，与 clip 无关。用户
+    /// 完全可以在最后一个 clip 之后再画一条线（写入路径一直允许），那么他也必须
+    /// 能把那条线擦掉。区间上限只有"一次请求最多擦多少帧"。
     pub fn restore_range(
         &mut self,
         root: &str,
         param: &str,
         start_frame: usize,
         frame_count: usize,
-    ) -> u64 {
+    ) -> (u64, bool) {
         if frame_count == 0 {
-            return self.revision;
+            return (self.revision, false);
         }
         let key = canonical_param_key(param);
         let fp = self.frame_period_sec();
         let start_sec = start_frame as f64 * fp;
         let end_sec = start_frame.saturating_add(frame_count) as f64 * fp;
         let Some(authority) = self.roots.get_mut(root) else {
-            return self.revision;
+            return (self.revision, false);
         };
         let Some(runs) = authority.runs.get_mut(&key) else {
-            return self.revision;
+            return (self.revision, false);
         };
         let before = runs_signature(runs);
         let mut kept = Vec::new();
@@ -453,6 +461,108 @@ impl ParamAuthority {
         }
         if changed {
             self.bump_revision();
+        }
+        (self.revision, changed)
+    }
+
+    /// 这个区间里有没有任何 run（"这次重置会不会真的改东西"）。
+    ///
+    /// 【为什么不看显示数组】`pitch_edit` / `tension_edit` 都是派生缓存；"有没有编辑"
+    /// 只由 run 回答。用显示数组判断会让"基线恰好等于某个值"被当成编辑。
+    pub fn has_runs_in(
+        &self,
+        root: &str,
+        param: &str,
+        start_frame: usize,
+        frame_count: usize,
+    ) -> bool {
+        if frame_count == 0 {
+            return false;
+        }
+        let key = canonical_param_key(param);
+        let fp = self.frame_period_sec();
+        if !fp.is_finite() || fp <= 0.0 {
+            return false;
+        }
+        let lo = start_frame as f64 * fp;
+        let hi = start_frame.saturating_add(frame_count) as f64 * fp;
+        self.roots
+            .get(root)
+            .and_then(|authority| authority.runs.get(&key))
+            .is_some_and(|runs| {
+                runs.iter().any(|run| {
+                    !run.values.is_empty()
+                        && run.span_end_sec() > lo + EPS
+                        && run.placement.start_sec < hi - EPS
+                })
+            })
+    }
+
+    /// 把一段编辑**克隆**到另一个工程窗口（宿主分割 / 复制）。
+    ///
+    /// 【为什么放在权威层而不是图集】分割谱系原本由 `ParameterAtlas` 的
+    /// `copy_seeds` / `split_parents` 承担 —— 那是第二套编辑表示。权威本身就能
+    /// 表达"这段曲线现在也存在于那个窗口"，只要按帧采样一次再写回。
+    ///
+    /// 【为什么按帧采样而不是搬 run】源窗口可能横跨多条 run、也可能被 `seq` 覆盖过；
+    /// 采样是唯一能把这些情况收敛成一条新 run 的做法，且结果与用户看到的一致。
+    /// 重叠裁决沿用 `write_range` 的规则（目标区间先被切掉）。
+    pub fn inherit_range(
+        &mut self,
+        root: &str,
+        param: &str,
+        source_start_frame: usize,
+        source_frames: usize,
+        target_start_frame: usize,
+        target_frames: usize,
+    ) -> u64 {
+        if source_frames == 0 || target_frames == 0 {
+            return self.revision;
+        }
+        let key = canonical_param_key(param);
+        let fp = self.frame_period_sec();
+        if !fp.is_finite() || fp <= 0.0 {
+            return self.revision;
+        }
+        let Some(runs) = self
+            .roots
+            .get(root)
+            .and_then(|authority| authority.runs.get(&key))
+            .cloned()
+        else {
+            return self.revision;
+        };
+        let frames = target_frames.min(source_frames);
+        let mut values = vec![0.0_f32; frames];
+        let mut present = vec![false; frames];
+        let mut any = false;
+        for (index, slot) in values.iter_mut().enumerate() {
+            let sec = (source_start_frame.saturating_add(index)) as f64 * fp;
+            // 后写者胜：与 `compose_root_view` 的 `seq` 规则一致。
+            let mut hit: Option<(u64, f32)> = None;
+            for run in &runs {
+                let Some(value) = run.value_at_project_sec(sec) else {
+                    continue;
+                };
+                if hit.is_none_or(|(seq, _)| run.seq >= seq) {
+                    hit = Some((run.seq, value));
+                }
+            }
+            if let Some((_, value)) = hit {
+                *slot = value;
+                present[index] = true;
+                any = true;
+            }
+        }
+        if !any {
+            return self.revision;
+        }
+        let default = default_value_for_key(&key);
+        if self
+            .write_range(root, param, target_start_frame, &values, &present, default)
+            .is_err()
+        {
+            return self.revision;
         }
         self.revision
     }
@@ -1075,6 +1185,120 @@ mod tests {
         assert_eq!(authority.revision, revision, "no-op restore must not bump");
         authority.restore_range("root", "pitch", 0, 1);
         assert!(authority.revision > revision);
+    }
+
+    /// 【第三轮 K1】clip 之外（工程任意位置）的 run 必须能被擦掉。
+    ///
+    /// 旧实现的夹取把"最后一个 clip 之后"变成不可擦区；用户报的"右键拖拽回弹"
+    /// 就是这条的直接后果。
+    #[test]
+    fn restore_outside_every_clip_erases_the_run() {
+        let mut authority = ParamAuthority::default();
+        // 帧 2000 = 10 s（fp=5ms），远超任何"clip 终点"。
+        authority
+            .write_range("root", "pitch", 2000, &[61.0; 10], &[true; 10], 0.0)
+            .unwrap();
+        assert!(authority.has_runs_in("root", "pitch", 2000, 10));
+        let (revision, changed) = authority.restore_range("root", "pitch", 2000, 10);
+        assert!(changed, "擦掉一条真实存在的 run 必须报告 changed");
+        assert!(revision > 0);
+        assert!(authority.roots.is_empty());
+        assert!(!authority.has_runs_in("root", "pitch", 2000, 10));
+    }
+
+    /// 【第三轮 K2】区间越界到"工程尾之后"仍然是合法擦除域。
+    #[test]
+    fn restore_beyond_project_end_is_not_a_noop() {
+        let mut authority = ParamAuthority::default();
+        authority
+            .write_range("root", "pitch", 500_000, &[70.0], &[true], 0.0)
+            .unwrap();
+        let (_, changed) = authority.restore_range("root", "pitch", 500_000, 1);
+        assert!(changed);
+        assert!(authority.is_pristine());
+    }
+
+    /// 【第三轮 K3】重复擦除是幂等的，第二次必须报 `changed == false`。
+    #[test]
+    fn restore_is_idempotent_and_reports_changed() {
+        let mut authority = ParamAuthority::default();
+        authority
+            .write_range("root", "pitch", 0, &[61.0; 4], &[true; 4], 0.0)
+            .unwrap();
+        let (first_rev, first) = authority.restore_range("root", "pitch", 0, 4);
+        assert!(first);
+        let (second_rev, second) = authority.restore_range("root", "pitch", 0, 4);
+        assert!(!second, "第二次擦同一个区间不能再报告 changed");
+        assert_eq!(first_rev, second_rev, "no-op 不得推进 revision");
+    }
+
+    /// 【第三轮 K4】整条轨一个 clip 都没有时，run 仍然要显示出来。
+    ///
+    /// `baseline.frame_count() == 0` 是"这条轨没有任何分析结果"，不是"没有可显示的帧"。
+    #[test]
+    fn compose_keeps_runs_outside_clips_visible() {
+        let mut authority = ParamAuthority::default();
+        authority
+            .write_range("root", "pitch", 100, &[55.0, 56.0, 57.0], &[true; 3], 0.0)
+            .unwrap();
+        let empty = RootBaseline {
+            frame_period_ms: 5.0,
+            ready: true,
+            pitch_key: Some("k".into()),
+            ..Default::default()
+        };
+        let view = compose_root_view("root", &authority, &empty, 0);
+        assert!(view.params.pitch_edit.len() >= 103);
+        assert_eq!(&view.params.pitch_edit[100..103], &[55.0, 56.0, 57.0]);
+        assert_eq!(&view.edited_mask("pitch")[100..103], &[true, true, true]);
+    }
+
+    /// 【第三轮 K5】写一笔再擦同一笔，权威回到 pristine（不留空根、不留空 run）。
+    #[test]
+    fn write_then_restore_round_trip_leaves_no_runs() {
+        let mut authority = ParamAuthority::default();
+        authority
+            .write_range("root", "pitch", 10, &[61.0, 62.0], &[true, true], 0.0)
+            .unwrap();
+        let (_, changed) = authority.restore_range("root", "pitch", 10, 2);
+        assert!(changed);
+        assert!(authority.is_pristine(), "空根必须被清掉");
+        assert_eq!(authority.roots.len(), 0);
+    }
+
+    /// 【第三轮 K6】空区间 / 不存在的根一律 `false`，绝不误报。
+    #[test]
+    fn has_runs_in_is_false_for_an_empty_range() {
+        let mut authority = ParamAuthority::default();
+        authority
+            .write_range("root", "pitch", 0, &[61.0], &[true], 0.0)
+            .unwrap();
+        assert!(!authority.has_runs_in("root", "pitch", 0, 0));
+        assert!(!authority.has_runs_in("missing", "pitch", 0, 10));
+        assert!(!authority.has_runs_in("root", "tension", 0, 10));
+        assert!(authority.has_runs_in("root", "pitch", 0, 1));
+    }
+
+    /// 【第三轮 K7】宿主分割：父段的重叠部分克隆给子段，并按新偏移重新放置。
+    #[test]
+    fn inherit_range_copies_the_overlap_and_offsets_it() {
+        let mut authority = ParamAuthority::default();
+        // 父段：帧 100..200 一条 61.0 的 run（0.5 s .. 1.0 s）。
+        authority
+            .write_range("root", "pitch", 100, &[61.0; 100], &[true; 100], 0.0)
+            .unwrap();
+        // 子段从父段的 150 帧处切出（0.75 s），搬到 0.25 s。
+        let revision = authority.inherit_range("root", "pitch", 150, 50, 50, 50);
+        assert!(revision > 0);
+        let runs = &authority.root("root").unwrap().runs[PITCH_EDIT];
+        assert_eq!(runs.len(), 2, "父段与子段各一条");
+        // 子段落在帧 50..100，值逐帧相同。
+        let child = runs
+            .iter()
+            .find(|run| (run.placement.start_sec - 0.25).abs() < 1e-9)
+            .expect("子段必须落在 0.25 s");
+        assert_eq!(child.values.len(), 50);
+        assert!(child.values.iter().all(|value| *value == 61.0));
     }
 
     #[test]

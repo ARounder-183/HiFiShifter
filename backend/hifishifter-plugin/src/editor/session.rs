@@ -3507,12 +3507,25 @@ impl ParamHost for EditorSession {
             .strip_prefix(&self.namespace)
             .unwrap_or(track_id)
             .to_owned();
-        if checkpoint {
+        // 【撤销点只在真的会改的时候压】旧实现无条件 `checkpoint_authority_step()`，
+        // 于是"什么都没擦"（区间里没有 run、或被夹成 0 帧）也会在撤销栈上留一步 ——
+        // 用户按下去什么都不会发生，却要多按一次撤销才能回去。
+        let will_change =
+            document.authority_has_runs_in(&host, param, start_frame, frame_count);
+        if checkpoint && will_change {
             self.checkpoint_authority_step();
         }
         let result =
             document.restore_authority_range(&host, param, start_frame, frame_count, false);
-        if result.is_ok() {
+        // 【只有真的改了才推动下游】`changed == false` 时刷新显示 / 标脏 / 请求渲染
+        // 全是无谓的：一次 no-op 右键会触发一次整份重合成与一次自动渲染。
+        let changed = result
+            .as_ref()
+            .ok()
+            .and_then(|value| value.get("changed"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        if result.is_ok() && changed {
             self.note_authority_step();
             self.refresh_display_from_document();
             self.mark_dirty();

@@ -998,6 +998,73 @@ mod tests {
         );
     }
 
+    fn document_with_one_empty_track(project_sec: f64) -> Arc<DocumentSession> {
+        let document = DocumentSession::new(9_001);
+        *document.timeline.lock_or_recover() = Some(
+            serde_json::from_value(serde_json::json!({
+                "tracks": [{"id": "track", "name": "t", "order": 0}],
+                "clips": [],
+                "bpm": 120.0,
+                "project_sec": project_sec,
+            }))
+            .unwrap(),
+        );
+        document
+    }
+
+    /// **【第三轮 P1】clip 之外的参数线必须能被擦掉。**
+    ///
+    /// 【为什么这是用户报的"右键拖拽回弹"】旧实现把重置区间夹到
+    /// `target_param_frames`（= 最后一个 clip 的终点）。整条轨没有 clip 时它就是 0，
+    /// 于是"在空白处画的线"永远 `count == 0` —— 返回 `ok:true` 却什么都没改，
+    /// 前端下一次取数就把线取回来。
+    #[test]
+    fn restore_authority_range_erases_a_line_outside_all_clips() {
+        let document = document_with_one_empty_track(2.0);
+        document
+            .write_authority_range("track", "pitch", 2_000, &[61.0; 10], Some(&[true; 10]), false)
+            .unwrap();
+        assert!(document.authority_has_runs_in("track", "pitch", 2_000, 10));
+        let value = document
+            .restore_authority_range("track", "pitch", 2_000, 10, false)
+            .unwrap();
+        assert_eq!(value["ok"], serde_json::json!(true));
+        assert_eq!(
+            value["changed"],
+            serde_json::json!(true),
+            "擦掉真实存在的 run 必须报告 changed"
+        );
+        assert!(!document.authority_has_runs_in("track", "pitch", 2_000, 10));
+        assert_eq!(document.authority_revision(), value["authority_revision"]);
+    }
+
+    /// **【第三轮 P2】越界到"工程尾之后"的区间同样是合法擦除域。**
+    #[test]
+    fn restore_authority_range_beyond_project_sec_still_erases() {
+        let document = document_with_one_empty_track(1.0);
+        document
+            .write_authority_range("track", "pitch", 5_000, &[70.0], Some(&[true]), false)
+            .unwrap();
+        let value = document
+            .restore_authority_range("track", "pitch", 5_000, 1, false)
+            .unwrap();
+        assert_eq!(value["changed"], serde_json::json!(true));
+        assert!(document.edits.lock_or_recover().authority.is_pristine());
+    }
+
+    /// **【第三轮 P4】重复擦除必须报 `changed == false`，且不推进 revision。**
+    #[test]
+    fn restore_reports_changed_false_when_nothing_was_edited() {
+        let document = document_with_one_empty_track(1.0);
+        let before = document.authority_revision();
+        let value = document
+            .restore_authority_range("track", "pitch", 0, 100, false)
+            .unwrap();
+        assert_eq!(value["changed"], serde_json::json!(false));
+        assert_eq!(value["authority_revision"], serde_json::json!(before));
+        assert_eq!(document.authority_revision(), before);
+    }
+
     /// **T7/T8：源暂时不可读不得删掉已发布的编辑侧 PCM。**
     ///
     /// 【为什么这是"后台切回前台之后 Clip 一直等音频"的回归】旧实现无论什么原因都先
@@ -2473,8 +2540,7 @@ impl DocumentSession {
             for publisher in &owner.snapshots {
                 publisher.collect_retired();
             }
-            let mut snapshots = input.render_with_progress(cancel.clone(), progress.clone())?;
-            super::snapshot::compact_prepared(&mut snapshots)?;
+            let snapshots = input.render_with_progress(cancel.clone(), progress.clone())?;
             prepared.push((owner, keys, snapshots));
         }
         let _transaction = self.transaction.lock_or_recover();
@@ -2504,7 +2570,7 @@ impl DocumentSession {
         for (owner, keys, snapshots) in prepared {
             for (publisher, snapshot) in owner.snapshots.iter().zip(snapshots) {
                 publisher
-                    .publish(snapshot)
+                    .publish_shared(snapshot)
                     .map_err(|e| format!("snapshot publish failed: {e:?}"))?;
             }
             owner.record_prepared(ticket.model, ticket.edit, ticket.epoch, ticket.scope, keys);
@@ -2543,6 +2609,28 @@ impl DocumentSession {
         let frame = self.geometry_frame(&host, false);
         let mut edits = self.edits.lock_or_recover();
         self.reconcile_parameter_geometry_locked(&frame, &mut edits)
+    }
+
+    /// 这个区间里有没有任何 run（"这次重置会不会真的改东西"）。
+    ///
+    /// 只取 `edits`，不取时间线 —— 不给锁序图加新边。
+    pub(crate) fn authority_has_runs_in(
+        &self,
+        track_id: &str,
+        param: &str,
+        start_frame: u32,
+        frame_count: u32,
+    ) -> bool {
+        let Ok(host) = self.workspace_timeline_locked() else {
+            return false;
+        };
+        let Some(root) = host.resolve_root_track_id(track_id) else {
+            return false;
+        };
+        let edits = self.edits.lock_or_recover();
+        edits
+            .authority
+            .has_runs_in(&root, param, start_frame as usize, frame_count as usize)
     }
 
     /// 当前权威是否在某根轨上有编辑（渲染/分析闸口用）。
@@ -2637,8 +2725,37 @@ impl DocumentSession {
         self.edits.lock_or_recover().authority.revision
     }
 
+    /// 把"权威 + 基线"合成进时间线（只读 `edits`，不写派生缓存）。
+    ///
+    /// 【为什么需要它】`materialize_views_locked` 还要把结果写回 `edits.params`，而
+    /// 分组视图 / 选中源这几条路径只借到 `&EditState`。语义与它完全相同：每个根轨
+    /// 一次 `compose_param_view_with`，整根替换。**这是唯一允许的第二处合成入口**，
+    /// 且它与 `materialize_views_locked` 调的是同一个纯函数 —— 不存在两套算法。
+    pub(crate) fn materialize_into(
+        &self,
+        timeline: &mut hifishifter_kernel::state::TimelineState,
+        edits: &crate::state_channel::EditState,
+    ) {
+        let roots = timeline
+            .tracks
+            .iter()
+            .filter(|track| track.parent_id.is_none())
+            .map(|track| track.id.clone())
+            .collect::<Vec<_>>();
+        let composed = roots
+            .into_iter()
+            .map(|root| {
+                let params = self.compose_param_view_with(timeline, edits, &root).params;
+                (root, params)
+            })
+            .collect::<Vec<_>>();
+        for (root, params) in composed {
+            timeline.params_by_root_track.insert(root, params);
+        }
+    }
+
     /// 为一条根轨合成参数视图；调用方已持有 §edits§ 时使用这个版本。
-    fn compose_param_view_with(
+    pub(crate) fn compose_param_view_with(
         &self,
         timeline: &hifishifter_kernel::state::TimelineState,
         edits: &crate::state_channel::EditState,
@@ -2996,6 +3113,18 @@ impl DocumentSession {
         Ok(serde_json::json!({"ok": true, "authority_revision": revision}))
     }
 
+    /// 一次重置请求最多擦多少帧。
+    ///
+    /// 【为什么不是 `project_sec`】run 活在工程时间、与 clip 无关；用户可以在最后一个
+    /// clip 之后再画一条线（写入路径一直允许），那么他也必须能擦掉它。旧实现把区间夹到
+    /// `target_param_frames`（= 最后一个 clip 的终点），于是"clip 之外"的重置永远
+    /// `count == 0` —— 返回 `ok:true` 却什么都没改，前端下一次取数就把线取回来了
+    /// （用户报的"回弹"）。
+    ///
+    /// 现在唯一的上限是"一次请求最多处理多少帧"，与 `write_range` 的
+    /// `MAX_RUN_VALUES` 同量级：再大也只是遍历现有 run，不分配内存。
+    const MAX_RESTORE_FRAMES: usize = 1_000_000;
+
     pub(crate) fn restore_authority_range(
         &self,
         track_id: &str,
@@ -3009,19 +3138,18 @@ impl DocumentSession {
         let root = host
             .resolve_root_track_id(track_id)
             .ok_or_else(|| "unknown parameter track".to_owned())?;
-        // 【区间夹取】右键拖拽的 count 来自指针帧，可以越界（视口负偏移、自动滚屏）。
-        // 越界本身不是错误，截断即可；但绝不能让它把工程外的帧也算进清除范围。
-        let target = host.target_param_frames(host.frame_period_ms());
-        let start = (start_frame as usize).min(target);
-        let count = (frame_count as usize).min(target.saturating_sub(start));
+        let start = start_frame as usize;
+        let count = (frame_count as usize).min(Self::MAX_RESTORE_FRAMES);
         if count == 0 {
-            return Ok(serde_json::json!({"ok": true, "authority_revision": self.authority_revision()}));
+            return Ok(serde_json::json!({
+                "ok": true,
+                "changed": false,
+                "authority_revision": self.authority_revision(),
+            }));
         }
         self.checkpoint_authority(checkpoint)?;
         let mut edits = self.edits.lock_or_recover();
-        let before = edits.authority.revision;
-        let revision = edits.authority.restore_range(&root, param, start, count);
-        let changed = revision != before;
+        let (revision, changed) = edits.authority.restore_range(&root, param, start, count);
         if changed {
             edits.revision = edits.revision.saturating_add(1);
             // 【显示必须与权威同代】旧实现只推进 revision，显示要等下一次
@@ -3042,7 +3170,11 @@ impl DocumentSession {
         if changed {
             self.notify_parameters_changed();
         }
-        Ok(serde_json::json!({"ok": true, "authority_revision": revision}))
+        Ok(serde_json::json!({
+            "ok": true,
+            "changed": changed,
+            "authority_revision": revision,
+        }))
     }
 
     /// 插件本地参数撤回占位：前端状态已由 history 记录驱动；这里只保证写入事务的
@@ -3747,43 +3879,10 @@ impl DocumentSession {
                 crate::render::extension::RestoreIdentityVerdict::Fatal => return Err(error),
             }
         }
-        restored.atlas.migrate_legacy_gaps(&restored.params)?;
-        let identities = self.parameter_identities_locked(host)?;
-        if restored.authority.is_pristine() && !restored.atlas.is_empty() {
-            restored.atlas.migrate_legacy_authority_edits();
-            let exported = restored
-                .atlas
-                .export_param_authority_for_timeline(host, &identities);
-            if !exported.is_pristine() {
-                restored.authority = exported;
-            }
-        }
-        let mut changed_geometry = false;
-        if !restored.atlas.is_empty() {
-            let rebound = restored.atlas.rebind(host, &identities)?;
-            changed_geometry = !restored.atlas.same_layout(&rebound);
-            restored.atlas = rebound;
-        }
-        let mut client = host.clone();
-        restored.apply(&mut client);
-        if restored.atlas.is_empty() && !restored.params.is_empty() {
-            // 旧 v2 只有项目帧：在首次真实绑定的宿主布局建立 source basis。
-            restored.atlas = crate::editor::parameter_atlas::ParameterAtlas::default()
-                .capture(&client, &identities)?;
-        }
-        if changed_geometry || !restored.atlas.is_empty() {
-            // 合成而不是"按帧合并"：基线来自宿主这一代的分析结果，编辑来自恢复的权威。
-            let baseline = crate::editor::parameter_atlas::RootBaseline::from_timeline(host);
-            let views = restored.atlas.compose_root_views(
-                host,
-                &identities,
-                &baseline,
-                &client.params_by_root_track,
-            );
-            for (root, params) in views {
-                client.params_by_root_track.insert(root, params);
-            }
-        }
+        // 【第三轮：恢复不再走图集】参数编辑只有一份表示（`authority`），显示由
+        // `compose_param_view_with` 在合并后统一合成（见本函数末尾）。旧实现这里还有
+        // 三段图集逻辑（迁移 gaps / 从图集导出权威 / 重新 capture），它们正是"恢复之后
+        // 一部分编辑看不见"的来源：图集与权威各说一套，而显示只认其中一套。
         // 存档里的基线缓存不是编辑真相，却是冷恢复第一次渲染的“原始值”来源。
         // 不在合入时装回文档基线，下面的 compose 只能看到空宿主时间线，生成的
         // 显示数组会缺 pitch_orig；渲染器于是把用户曲线当成“没有源基频”而直通原音。
@@ -3805,6 +3904,10 @@ impl DocumentSession {
                 self.publish_baseline(root, baseline);
             }
         }
+        // 【客户端 = 恢复后的时间线】`merge` 用它取轨道/片段设置与显示缓存；
+        // 曲线真相在下面的 `authority` 合并里（显示由 `compose_param_view_with` 重算）。
+        let mut client = host.clone();
+        restored.apply(&mut client);
         let mut edits = self.edits.lock_or_recover();
         let mut merged = edits.merge(host, &client, edits.revision)?;
         merged.groups = restored.groups.clone();
