@@ -187,6 +187,7 @@ mod tests {
     /// 基准 clip：字段取"常见值"，与 `pitch_editing` 的测试夹具同形。
     fn base_clip() -> Clip {
         Clip {
+            loop_period_sec: None,
             id: "clip-a".to_string(),
             takes: vec![],
             active_take_id: Some("take-1".to_string()),

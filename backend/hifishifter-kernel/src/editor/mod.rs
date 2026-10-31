@@ -1,4 +1,5 @@
 //! 独立app与插件共享的原编辑命令；平台只适配undo、dirty与音频发布副作用。
+pub mod assembly;
 pub mod capabilities;
 pub mod history;
 pub mod host;

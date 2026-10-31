@@ -1983,6 +1983,7 @@ pub(super) fn import_media_files_as_takes(
     let clip_name = takes[0].name.clone();
     let clip_id = crate::state::new_id("clip");
     let mut clip = crate::state::Clip {
+        loop_period_sec: None,
         id: clip_id.clone(),
         takes,
         active_take_id,

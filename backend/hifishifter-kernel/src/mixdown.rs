@@ -2690,6 +2690,7 @@ mod tests {
             let mut tl = TimelineState::default();
             let track_id = tl.tracks[0].id.clone();
             let clip = Clip {
+                loop_period_sec: None,
                 id: format!("clip_mode_{}", channel_mode),
                 group_id: None,
                 track_id,
@@ -2826,6 +2827,7 @@ mod tests {
             let mut tl = TimelineState::default();
             let track = tl.tracks[0].id.clone();
             let clip = Clip {
+                loop_period_sec: None,
                 id: "clip_qpreset".to_string(),
                 group_id: None,
                 track_id: track,
@@ -2947,6 +2949,7 @@ mod tests {
         let track = tl.tracks[0].id.clone();
         for (index, start) in [0.0f64, 0.5].into_iter().enumerate() {
             let clip = Clip {
+                loop_period_sec: None,
                 id: format!("clip_progress_{index}"),
                 group_id: None,
                 track_id: track.clone(),
@@ -3088,6 +3091,7 @@ mod tests {
         tl.params_by_root_track.insert(track_id.clone(), entry);
 
         let clip = Clip {
+            loop_period_sec: None,
             id: clip_id.to_string(),
             group_id: None,
             track_id: track_id.clone(),

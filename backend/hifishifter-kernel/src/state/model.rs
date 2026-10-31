@@ -86,9 +86,27 @@ pub fn clip_source_media_duration_sec(clip: &Clip) -> Option<f64> {
 /// 另一边 `clip_source_media_duration_sec(...).unwrap_or(source_end)`），
 /// 在元数据缺失/异常时会生成互不匹配的缓存键，导致拉伸结果永远无法命中。
 pub fn clip_loop_wrap_total_sec(clip: &Clip) -> f64 {
-    clip_source_media_duration_sec(clip)
+    clip_loop_period_sec(clip)
         .unwrap_or_else(|| clip.source_end_sec.max(clip.source_start_sec))
         .max(0.0)
+}
+
+/// 循环回绕周期的**唯一**取值：优先宿主读数（[`Clip::loop_period_sec`]），
+/// 其次媒体总时长。
+///
+/// 【为什么需要宿主读数这一层】REAPER 的循环源回绕的是 take 的**可播放区间**：
+/// 有 SOURCE SECTION 时是 section 长度，没有时才是整份媒体。内核只按媒体时长
+/// 回绕，于是"带 SECTION 的循环 take"周期偏大 —— 用户听到的是逐圈漂移的相位，
+/// 而波形看不出来。装配器把 section 长度写进 `loop_period_sec`，音频
+/// （[`clip_loop_wrap_total_sec`]）与音高曲线（[`clip_loop_cycle_span_sec`]）
+/// 就都从这一个入口取周期，不会再出现"音频与曲线各算一份、逐圈漂移"。
+///
+/// 返回 `None` = 周期未知（宿主没给 section、媒体时长也读不到）—— 调用方
+/// 保留自己的历史回退，**不要**把它当成零。
+pub fn clip_loop_period_sec(clip: &Clip) -> Option<f64> {
+    clip.loop_period_sec
+        .filter(|value| value.is_finite() && *value > 1e-9)
+        .or_else(|| clip_source_media_duration_sec(clip))
 }
 
 /// 非 Loop 正放 Clip 的**派生源终点**（REAPER 派生窗口模型）：
@@ -303,7 +321,9 @@ pub fn clip_loop_cycle_span_sec(clip: &Clip) -> Option<f64> {
     if !clip.loop_enabled {
         return None;
     }
-    let span = clip_source_media_duration_sec(clip)
+    // 【与音频同源】周期只从 [`clip_loop_period_sec`] 取，两处各算一份会让
+    // 音高曲线与音频逐圈漂开（听得出、看不出）。
+    let span = clip_loop_period_sec(clip)
         .unwrap_or_else(|| (clip.source_end_sec - clip.source_start_sec).abs());
     if span.is_finite() && span > 1e-9 {
         Some(span)
@@ -1710,6 +1730,18 @@ pub struct Clip {
     /// 是否在 pitch_orig 组装时填补 MIDI 音符之间的空隙。
     #[serde(default, skip_serializing)]
     pub midi_fill_gaps: bool,
+
+    /// 循环**回绕周期**（源域秒）；`None` = 按媒体总时长（历史行为）。
+    ///
+    /// 【它解决什么】内核的 Loop 数学按**整份媒体**取模，而 REAPER 的循环源回绕的是
+    /// take 的**可播放区间**：有 SOURCE SECTION 时是 section 长度。少了这个字段，
+    /// "带 SECTION 的循环 take"每一圈的相位都比宿主偏一点 —— 听得出、看不出。
+    ///
+    /// 【为什么是一个新字段而不是改语义】`None` 时两个既有取值函数的行为**逐位不变**
+    /// （见 [`clip_loop_period_sec`]），因此旧工程、独立 App 导入、纯 MIDI clip 全部
+    /// 不受影响；只有装配器明确知道 section 长度时才填它。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_period_sec: Option<f64>,
 }
 
 /// 旧命名曲线枚举 → （REAPER 浮点形状 id, 曲率）。
@@ -9021,6 +9053,7 @@ impl TimelineState {
         }
 
         let clip = Clip {
+            loop_period_sec: None,
             takes: vec![],
             active_take_id: None,
             id: id.clone(),
@@ -10226,6 +10259,7 @@ impl TimelineState {
         let name = sources[0].name.clone();
         let color = sources[0].color.clone();
         let mut packed = Clip {
+            loop_period_sec: None,
             id: packed_id.clone(),
             group_id: None,
             track_id,

@@ -503,6 +503,7 @@ mod tests {
     /// `Clip` 未实现 `Default`，必须完整构造）。
     fn make_clip(id: &str, start: f64, len: f64) -> Clip {
         Clip {
+            loop_period_sec: None,
             id: id.to_string(),
             takes: vec![],
             active_take_id: None,

@@ -523,6 +523,7 @@ fn create_midi_clip_from_file(
         .to_string();
 
     Ok(Clip {
+        loop_period_sec: None,
         takes: vec![],
         active_take_id: None,
         id: new_clip_id(),
@@ -933,6 +934,7 @@ pub fn import_vsp(data: &[u8], vsp_file_dir: &Path) -> Result<VspImportResult, S
                 let clip_index = hs_clips.len();
 
                 hs_clips.push(Clip {
+                    loop_period_sec: None,
                     takes: vec![],
                     active_take_id: None,
                     id: clip_id.clone(),
@@ -1057,6 +1059,7 @@ pub fn import_vsp(data: &[u8], vsp_file_dir: &Path) -> Result<VspImportResult, S
                 .to_string();
 
             hs_clips.push(Clip {
+                loop_period_sec: None,
                 takes: vec![],
                 active_take_id: None,
                 id: clip_id.clone(),
@@ -1717,6 +1720,7 @@ pub fn import_vsp_clipboard(
                 let clip_index = hs_clips.len();
 
                 hs_clips.push(Clip {
+                    loop_period_sec: None,
                     takes: vec![],
                     active_take_id: None,
                     id: clip_id.clone(),
@@ -1840,6 +1844,7 @@ pub fn import_vsp_clipboard(
                 .to_string();
 
             hs_clips.push(Clip {
+                loop_period_sec: None,
                 takes: vec![],
                 active_take_id: None,
                 id: clip_id.clone(),
@@ -2319,6 +2324,7 @@ fn import_vsp_clipboard_selected_tracks(
                 let clip_index = hs_clips.len();
 
                 hs_clips.push(Clip {
+                    loop_period_sec: None,
                     takes: vec![],
                     active_take_id: None,
                     id: clip_id.clone(),
@@ -2440,6 +2446,7 @@ fn import_vsp_clipboard_selected_tracks(
                 .to_string();
 
             hs_clips.push(Clip {
+                loop_period_sec: None,
                 takes: vec![],
                 active_take_id: None,
                 id: clip_id.clone(),

@@ -276,6 +276,27 @@ impl TakeGeometry {
     pub fn forward_window_end_sec(&self) -> Option<f64> {
         self.forward_source_window().map(ForwardWindow::end)
     }
+
+    /// 循环源的回绕周期（源域秒）：有 SECTION 时是段长，否则是媒体总长。
+    ///
+    /// 【为什么周期不是"窗口跨度"】REAPER 的循环源对**可播放区间**取模：建过
+    /// SOURCE SECTION 的 take，越过段尾就回到段首，而不是回到文件头。内核按媒体
+    /// 总长回绕时，每一圈的相位都会与宿主差 `section.start` 那么多 —— 听得出、
+    /// 看不出（波形是一整段，看不出相位）。
+    ///
+    /// 返回 `None` = 两者都不知道。此时调用方保留历史行为（按物化 PCM 的时长
+    /// 回绕），并应当留一行读数：**不知道**与"不循环"是两件不同的事。
+    pub fn loop_period_sec(&self) -> Option<f64> {
+        if let Some(length) = self
+            .section
+            .and_then(|section| section.length_sec)
+            .filter(|length| length.is_finite() && *length > 1e-9)
+        {
+            return Some(length);
+        }
+        self.media_duration_sec
+            .filter(|duration| duration.is_finite() && *duration > 1e-9)
+    }
 }
 
 /// 倒放 take 的**镜像轴**（秒）—— 读写两侧唯一的来源。

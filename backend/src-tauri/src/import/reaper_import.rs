@@ -1402,6 +1402,7 @@ fn process_item(
             let clip_index = clips.len();
 
             clips.push(Clip {
+                loop_period_sec: None,
                 takes: vec![],
                 active_take_id: None,
                 id: clip_id.clone(),
@@ -1589,6 +1590,7 @@ fn process_item(
         let clip_start = item_pos + time_offset;
 
         let mut clip = Clip {
+            loop_period_sec: None,
             takes: hs_takes,
             active_take_id,
             id: clip_id.clone(),
@@ -2241,6 +2243,7 @@ fn process_midi_item(
     };
 
     clips.push(Clip {
+        loop_period_sec: None,
         takes: vec![],
         active_take_id: None,
         id: clip_id.clone(),
