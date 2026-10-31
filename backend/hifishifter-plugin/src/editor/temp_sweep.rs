@@ -72,12 +72,23 @@ const RESCAN_EVERY: Duration = Duration::from_secs(60);
 const PID_REUSE_SLACK: Duration = Duration::from_secs(2);
 
 /// 一次扫描的读数。
+///
+/// 【为什么要把"为什么没删"也记下来】此前这一行只有 `dirs=150 stale=0`：它说明
+/// "扫了、没删"，但说明不了**为什么**没删。而真实原因是判据错了 —— 147 个目录的
+/// 属主进程早已退出，判据却认为它们都活着。把三种判定各自计数之后，下一轮真机
+/// 日志一眼就能看出是"全都判活着"还是"全都权限不足"。
 #[derive(Default, Clone, Copy)]
 struct ScanStats {
     /// 根目录下见到的子目录总数（无论死活）。
     dirs: usize,
     /// 判为陈旧、已进队的目录数。
     stale: usize,
+    /// 判为"属主已退出"的目录数。
+    gone: usize,
+    /// 判为"属主仍活着"的目录数。
+    alive: usize,
+    /// 探测失败（权限不足等）⇒ **保守保留**的目录数。
+    denied: usize,
 }
 
 /// 一次进程只建一份清扫队列。
@@ -135,8 +146,14 @@ pub(crate) fn sweep_step() -> bool {
             state.last_scan = now;
             if changed {
                 crate::gui_log_line(&format!(
-                    "webview profiles: dirs={} stale={} reclaimed={} failed={}",
-                    stats.dirs, stats.stale, state.reclaimed, state.failed
+                    "webview profiles: dirs={} gone={} alive={} denied={} stale={}                      reclaimed={} failed={}",
+                    stats.dirs,
+                    stats.gone,
+                    stats.alive,
+                    stats.denied,
+                    stats.stale,
+                    state.reclaimed,
+                    state.failed
                 ));
             }
             // 【为什么另起线程】把 7 GiB 走一遍要几秒。这条读数只服务诊断，绝不能
@@ -182,7 +199,51 @@ fn collect_stale_dirs() -> (VecDeque<PathBuf>, ScanStats) {
             &mut stats,
         );
     }
+    // 另外两处**无界增长**的缓存（本轮实测：`capture\` 5194 个文件 415 MiB、
+    // `transfer\` 4 个文件 24 MiB，全仓没有任何回收点）。它们与上面两个目录的差别
+    // 只是"判据从属主变成年龄"，因此复用同一个队列、同一次 tick —— 不新增线程。
+    collect_aged_files(
+        &hifishifter_kernel::config_location::local_data_subdir("capture"),
+        &[(".hfscap", STALE_AGE), (".part", Duration::from_secs(3600))],
+        &mut pending,
+    );
+    collect_aged_files(
+        &hifishifter_kernel::config_location::local_data_subdir("transfer"),
+        &[("", STALE_AGE)],
+        &mut pending,
+    );
     (pending, stats)
+}
+
+/// 把"超过给定年龄"的文件收进待删队列。
+///
+/// 【为什么是年龄而不是"同一个 take 只留最新一份"】`capture-{take}-{nonce}.hfscap`
+/// 的 take 是 GUID，本身带 `-`，与分隔符无法区分 —— 按前缀分组会在某一天把**两份
+/// 不同的**录制认成同一份，然后删掉正在用的那一份。而按年龄删除只依赖文件系统时间戳，
+/// 判错的后果是"多留几天"，不是"删掉活的数据"。
+fn collect_aged_files(root: &Path, rules: &[(&str, Duration)], pending: &mut VecDeque<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    let now = SystemTime::now();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if !kind.is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let age = rules
+            .iter()
+            .find(|(suffix, _)| suffix.is_empty() || name.ends_with(suffix))
+            .map(|(_, age)| *age);
+        let Some(age) = age else { continue };
+        if is_older_than(&path, now, age) {
+            pending.push_back(path);
+        }
+    }
 }
 
 fn collect_stale_in(
@@ -211,7 +272,20 @@ fn collect_stale_in(
         let removable = match pid_after_prefix(&name, prefix) {
             // 自己的目录当然要留（可能正被本次会话使用）。
             Some(pid) if pid == own => false,
-            Some(pid) => owner_is_gone(pid, &path),
+            Some(pid) => match owner_verdict(pid, &path) {
+                OwnerVerdict::Gone => {
+                    stats.gone += 1;
+                    true
+                }
+                OwnerVerdict::Alive => {
+                    stats.alive += 1;
+                    false
+                }
+                OwnerVerdict::Unknown => {
+                    stats.denied += 1;
+                    false
+                }
+            },
             None => is_older_than(&path, now, STALE_AGE),
         };
         if removable {
@@ -221,20 +295,29 @@ fn collect_stale_in(
     }
 }
 
-/// 属主进程是否已经不在了（或者这个 PID 现在是别的进程）。
-fn owner_is_gone(pid: u32, dir: &Path) -> bool {
-    match process_start_time(pid) {
-        // 进程不存在。
-        ProcessProbe::Missing => true,
+/// 属主进程的判定。
+enum OwnerVerdict {
+    /// 属主已退出（含"进程对象仍被钉住的僵尸态"与"PID 被更新的进程复用"）。
+    Gone,
+    /// 属主仍活着。
+    Alive,
+    /// 查不到（权限不足等）。**保守保留**。
+    Unknown,
+}
+
+fn owner_verdict(pid: u32, dir: &Path) -> OwnerVerdict {
+    match process_probe(pid) {
+        // 进程不存在，**或**它已经退出。
+        ProcessProbe::Gone => OwnerVerdict::Gone,
         // 查不到（权限不足等）：**不能**当成已退出。
-        ProcessProbe::Unknown => false,
-        ProcessProbe::Started(start) => {
+        ProcessProbe::Unknown => OwnerVerdict::Unknown,
+        ProcessProbe::Alive(start) => {
             // 目录的创建时刻就是属主进程创建它的时刻。若现在这个 PID 对应的进程
             // 比目录**还新**，那它不可能是属主 —— 这是 PID 复用的精确判据。
             match dir.metadata().ok().and_then(|meta| meta.created().ok()) {
-                Some(created) => start > created + PID_REUSE_SLACK,
+                Some(created) if start > created + PID_REUSE_SLACK => OwnerVerdict::Gone,
                 // 取不到创建时刻：退化为"活着就保留"。宁可漏删。
-                None => false,
+                _ => OwnerVerdict::Alive,
             }
         }
     }
@@ -245,8 +328,8 @@ fn owner_is_gone(pid: u32, dir: &Path) -> bool {
 /// 【为什么要三态】"查不到"与"不存在"必须分开：前者删目录会造成不可回滚的损坏，
 /// 后者不删只是多占磁盘。
 enum ProcessProbe {
-    Missing,
-    Started(SystemTime),
+    Gone,
+    Alive(SystemTime),
     Unknown,
 }
 
@@ -340,17 +423,36 @@ fn dir_usage(root: &Path) -> (usize, u64) {
     (dirs, bytes)
 }
 
-/// 属主进程的创建时刻。
+/// 属主进程的存活探测。
+///
+/// 【判据是**退出码**，不是"能不能打开"】这是本模块唯一一处真正的 bug 修正。
+///
+/// Windows 在进程退出后**不会立刻回收 PID 与进程对象** —— 只要还有别的对象引用着它
+/// （WebView2 的浏览器进程、任务管理器、一次未关闭的句柄），`OpenProcess` 依然
+/// **成功**，`GetProcessTimes` 依然返回**它生前的创建时间**。于是"能不能打开"这个
+/// 问题对僵尸进程对象**恒为真**。
+///
+/// 实测（本机 147 个 `view-*` 目录）：147 个属主 PID 全部已退出，而
+/// `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` 对它们**全部成功**、
+/// `GetProcessTimes` 全部返回生前创建时间 ⇒ 旧判据把 147 个目录全判成"活着"，
+/// 一个都不删（磁盘上攒了 7.4 GiB）。对照：本进程的 `GetExitCodeProcess` 是
+/// `STILL_ACTIVE`(259)，那 147 个是 0。
+///
+/// 因此正确判据是：**`GetExitCodeProcess` 返回 `STILL_ACTIVE` 才是活着**，
+/// 返回任何其它值（含 0）都是已退出。它对"僵尸对象"与"PID 复用"**同时**成立 ——
+/// 复用的 PID 是一个新进程，退出码是 259，而创建时间更晚（由调用方再判一次）。
 ///
 /// 【为什么用 `PROCESS_QUERY_LIMITED_INFORMATION`】`SYNCHRONIZE` 在跨完整性级别时
 /// 会被拒；而本函数要回答的是"这个 PID 现在是谁"，`QUERY_LIMITED_INFORMATION` 是
 /// 为此设计的最小权限。
 #[cfg(windows)]
-fn process_start_time(pid: u32) -> ProcessProbe {
+fn process_probe(pid: u32) -> ProcessProbe {
     use windows::Win32::Foundation::{CloseHandle, FILETIME};
     use windows::Win32::System::Threading::{
-        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        GetExitCodeProcess, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
     };
+    /// `GetExitCodeProcess` 表示"仍在运行"的唯一取值（`STILL_ACTIVE`）。
+    const STILL_ACTIVE_CODE: u32 = 259;
     // ERROR_INVALID_PARAMETER：PID 不存在。其它错误一律按"查不到"处理。
     const ERROR_INVALID_PARAMETER: i32 = 87;
     // SAFETY: 只查询内核对象；返回的句柄立即关闭。
@@ -359,12 +461,23 @@ fn process_start_time(pid: u32) -> ProcessProbe {
         Err(error) => {
             let code = error.code().0 & 0xFFFF;
             return if code == ERROR_INVALID_PARAMETER {
-                ProcessProbe::Missing
+                ProcessProbe::Gone
             } else {
                 ProcessProbe::Unknown
             };
         }
     };
+    // 【核心】退出码才是"这个 PID 代表的进程还在不在"的唯一判据。
+    let mut exit_code = 0u32;
+    let probed = unsafe { GetExitCodeProcess(handle, &mut exit_code) };
+    if probed.is_err() {
+        let _ = unsafe { CloseHandle(handle) };
+        return ProcessProbe::Unknown;
+    }
+    if exit_code != STILL_ACTIVE_CODE {
+        let _ = unsafe { CloseHandle(handle) };
+        return ProcessProbe::Gone;
+    }
     let mut created = FILETIME::default();
     let mut exited = FILETIME::default();
     let mut kernel = FILETIME::default();
@@ -377,7 +490,7 @@ fn process_start_time(pid: u32) -> ProcessProbe {
         return ProcessProbe::Unknown;
     }
     match filetime_to_system_time(created) {
-        Some(start) => ProcessProbe::Started(start),
+        Some(start) => ProcessProbe::Alive(start),
         None => ProcessProbe::Unknown,
     }
 }
@@ -396,7 +509,7 @@ fn filetime_to_system_time(time: windows::Win32::Foundation::FILETIME) -> Option
 
 /// 非 Windows 上没有 WebView2 形态；保留"属主一定活着"的安全默认，不误删。
 #[cfg(not(windows))]
-fn process_start_time(_pid: u32) -> ProcessProbe {
+fn process_probe(_pid: u32) -> ProcessProbe {
     ProcessProbe::Unknown
 }
 
