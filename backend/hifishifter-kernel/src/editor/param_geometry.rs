@@ -891,7 +891,23 @@ pub fn allocate_geometry_sequences(authority: &mut ParamAuthority, count: usize)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::editor::param_authority::ParamAuthority;
+    use crate::editor::param_authority::{compose_root_view, ParamAuthority, RootBaseline};
+
+    /// 一份"什么都没编辑"的基线（逐帧 60）。
+    fn baseline(count: usize) -> RootBaseline {
+        RootBaseline {
+            frame_period_ms: 5.0,
+            pitch_orig: vec![60.0; count],
+            dyn_orig: Vec::new(),
+            tension_orig: Vec::new(),
+            pitch_key: Some("k".into()),
+            dyn_key: None,
+            ready: true,
+            revision: 1,
+            analysis_pending: false,
+            ..Default::default()
+        }
+    }
 
     fn clip(start: f64, len: f64, source_start: f64, source_len: f64, rate: f64) -> ClipGeometry {
         ClipGeometry {
@@ -919,6 +935,89 @@ mod tests {
 
     fn delta(old: &ClipGeometry, new: &ClipGeometry) -> GeometryDelta {
         GeometryDelta::from_geometry(old, new, 0).unwrap()
+    }
+
+    /// **分割本身什么都不搬。**
+    ///
+    /// 【为什么这条必须存在】用户报的"分割之后右半段的参数线被重置"，根因是插件侧
+    /// 把分割当成一次几何事件、并试图把父段的曲线"喂"给右半段。这条用例钉死的是
+    /// 相反的事实：分割之后宿主给出的是**两条新的 clip**（源窗各自是父段的一半），
+    /// 而参数 run 活在工程时间上 —— 它既没被删、也没被移动，**根本不需要任何处理**。
+    ///
+    /// 判据取"分割前后 compose_root_view 逐帧相等"，因为那正是用户看见的东西。
+    #[test]
+    fn a_split_moves_nothing_and_needs_no_lineage() {
+        let mut authority = authority_with_run();
+        let before = compose_root_view("root", &authority, &baseline(20), 0);
+        // 宿主把 [0.0, 0.2) 一刀切成 [0.0, 0.1) 与 [0.1, 0.2)：两条新 clip，源窗各半。
+        // 它们与父段**没有**共同的内容窗口（各自只有一半），因此几何日志不会把它们
+        // 配对成 Move —— 这里显式断言这一点。
+        let parent = clip(0.0, 0.2, 0.0, 0.2, 1.0);
+        let left = clip(0.0, 0.1, 0.0, 0.1, 1.0);
+        let right = clip(0.1, 0.1, 0.1, 0.1, 1.0);
+        assert!(
+            GeometryDelta::from_geometry(&parent, &left, 0).is_none(),
+            "分割出的左半段不能被当成一次裁剪之外的几何事件"
+        );
+        assert!(
+            GeometryDelta::from_geometry(&parent, &right, 0).is_none(),
+            "分割出的右半段同理"
+        );
+        let report = apply_geometry_transaction(&mut authority, &[]).unwrap();
+        assert!(report.is_empty(), "没有 delta 就不该有任何搬运");
+        let after = compose_root_view("root", &authority, &baseline(20), 0);
+        assert_eq!(
+            before.params.pitch_edit, after.params.pitch_edit,
+            "分割前后曲线必须逐帧相等"
+        );
+        assert_eq!(authority.revision, before.authority_revision);
+    }
+
+    /// 分割之后拖动**右半段**：只有右半段的线跟着走，左半段原地不动。
+    ///
+    /// 【为什么这是锁关闭语义的完整表达】"线跟着素材走"只在用户真的搬动素材时发生；
+    /// 分割本身不搬。这条用例把两个动作分开验证：先分割（什么都不变），再移动右半段
+    /// （只有右半段那一段线被平移，且跨过分割点的那条 run 被切干净）。
+    #[test]
+    fn moving_one_half_after_a_split_leaves_the_other_half_in_place() {
+        let mut authority = ParamAuthority::default();
+        // 显式钉住帧周期：本用例的窗口算术全部以 10 ms 为单位。
+        authority.frame_period_ms = 10.0;
+        // 一条横跨分割点的 run：工程 [0.0, 0.3)，30 帧 × 10 ms。
+        authority
+            .write_range("root", "pitch", 0, &[61.0; 30], &[true; 30], 0.0)
+            .unwrap();
+        // 宿主在 0.1 s 处分割；右半段 [0.1, 0.2) 被拖到 [0.4, 0.5)。
+        let old = clip(0.1, 0.1, 0.1, 0.1, 1.0);
+        let new = clip(0.4, 0.1, 0.1, 0.1, 1.0);
+        apply_geometry_transaction(&mut authority, &[delta(&old, &new)]).unwrap();
+
+        let runs = &authority.roots["root"].runs["pitch_edit"];
+        // 左半段（含分割点左侧）必须原地不动。
+        let head = runs
+            .iter()
+            .find(|run| run.placement.start_sec.abs() < 1e-9)
+            .expect("左半段必须留在原位");
+        // 切点按半开区间取：正好落在 0.10 的那一帧属于**被搬走**的那一段。
+        assert_eq!(head.values, vec![61.0; 10], "[0.00, 0.09] 共 10 帧");
+        // 右半段必须出现在新位置。
+        let moved = runs
+            .iter()
+            .find(|run| (run.placement.start_sec - 0.4).abs() < 1e-9)
+            .expect("右半段必须跟着素材走");
+        // 被搬走的窗口两端都是闭的（`contains_old` 的约定）：0.10 与 0.20 都跟着走。
+        assert_eq!(moved.values, vec![61.0; 11], "[0.10, 0.20] 共 11 帧");
+        // 旧位置不得留下残影。
+        assert!(
+            !runs.iter().any(|run| (run.placement.start_sec - 0.1).abs() < 1e-9),
+            "搬走的那一段不能在旧位置留残影"
+        );
+        // 分割点右侧 0.2 s 之后的部分（不在被拖动的窗口里）必须留在原位。
+        let tail = runs
+            .iter()
+            .find(|run| (run.placement.start_sec - 0.21).abs() < 1e-9)
+            .expect("窗口之外的尾巴必须留在原位");
+        assert_eq!(tail.values, vec![61.0; 9], "[0.21, 0.29] 共 9 帧");
     }
 
     #[test]

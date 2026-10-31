@@ -498,6 +498,41 @@ impl ParamAuthority {
             })
     }
 
+    /// 取某个工程窗口内的全部 run **切片**（剪贴板用）。
+    ///
+    /// 【为什么返回切片而不是整条 run】窗口之外的部分不该被复制走 —— 一条 run 可能
+    /// 横跨整段工程。`slice_by_project_sec` 已经保证边界样本不重采样，因此"复制一次
+    /// 再粘贴"不会让曲线在多次往返里漂移。
+    ///
+    /// 【为什么按 `(start_sec, seq, id)` 排序】调用方要把这些片段重新落到目标窗口，
+    /// 而重叠裁决依赖顺序。源里本来就是按这个顺序排的，照搬即可 —— 重新排序会让
+    /// "后写者胜"的结论在复制前后不一致。
+    ///
+    /// 【为什么用秒而不是帧】剪贴板的窗口来自宿主几何（工程秒），帧号是另一套坐标；
+    /// 在这里转换一次，调用方就不必再关心 `frame_period`。
+    pub fn runs_in_window(
+        &self,
+        root: &str,
+        param: &str,
+        lo_sec: f64,
+        hi_sec: f64,
+    ) -> Vec<PlacedRun> {
+        if !lo_sec.is_finite() || !hi_sec.is_finite() || hi_sec < lo_sec {
+            return Vec::new();
+        }
+        let key = canonical_param_key(param);
+        let Some(runs) = self.roots.get(root).and_then(|authority| authority.runs.get(&key))
+        else {
+            return Vec::new();
+        };
+        let mut slices = runs
+            .iter()
+            .filter_map(|run| run.slice_by_project_sec(lo_sec, hi_sec))
+            .collect::<Vec<_>>();
+        slices.sort_by_key(|run| (run.placement.start_sec.to_bits(), run.seq, run.id));
+        slices
+    }
+
     /// 把一段编辑**克隆**到另一个工程窗口（宿主分割 / 复制）。
     ///
     /// 【为什么放在权威层而不是图集】分割谱系原本由 `ParameterAtlas` 的
@@ -1062,6 +1097,35 @@ mod tests {
 
             ..Default::default()
         }
+    }
+
+    /// 剪贴板取窗口：只交出与窗口相交的那一段，边界样本不丢也不重采样。
+    #[test]
+    fn runs_in_window_hands_out_exactly_the_intersecting_slice() {
+        let mut authority = ParamAuthority::default();
+        // 显式钉住帧周期：本用例的窗口算术全部以 10 ms 为单位。
+        authority.frame_period_ms = 10.0;
+        // 20 帧 × 10 ms = 工程 [0.0, 0.2)。
+        authority
+            .write_range("root", "pitch", 0, &[61.0; 20], &[true; 20], 0.0)
+            .unwrap();
+        // 窗口 [0.05, 0.12] ⇒ 帧 5..=12（两端都含），共 8 个样本。
+        let slice = authority.runs_in_window("root", "pitch", 0.05, 0.12);
+        assert_eq!(slice.len(), 1);
+        assert_eq!(slice[0].values.len(), 8, "边界样本必须两端都含");
+        assert!((slice[0].placement.start_sec - 0.05).abs() < 1e-9);
+        assert_eq!(slice[0].values, vec![61.0; 8]);
+        // 窗口完全在 run 之外 ⇒ 什么都不交。
+        assert!(authority
+            .runs_in_window("root", "pitch", 0.5, 0.6)
+            .is_empty());
+        // 反向 / 非有限窗口不 panic，也不交东西。
+        assert!(authority
+            .runs_in_window("root", "pitch", 0.6, 0.5)
+            .is_empty());
+        assert!(authority
+            .runs_in_window("root", "pitch", f64::NAN, 0.5)
+            .is_empty());
     }
 
     #[test]

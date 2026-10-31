@@ -78,9 +78,22 @@ pub fn enter(label: &'static str) -> BusyGuard {
 mod tests {
     use super::*;
 
+    /// 两个用例共用**进程级**的 `ACTIVE` 计数，必须串行跑。
+    ///
+    /// 【为什么必须显式串行】它们各自断言"从我进入到我离开"的深度，而 cargo 默认把
+    /// 同一个测试二进制里的用例并发跑 —— 于是 A 会看到 B 的 guard。此前的表现是
+    /// "单独跑全绿、整套跑偶发红"，而这种红既不指向产品缺陷、又会让每一次全量回归
+    /// 都要人判断一次"是不是又是那个已知的抖动"。
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        SERIAL.lock().unwrap_or_else(|error| error.into_inner())
+    }
+
     /// 计数是**可重入**的：两个诊断重叠时，先结束的那个不得解除静音。
     #[test]
     fn overlapping_diagnostics_keep_the_audio_muted_until_the_last_one_ends() {
+        let _serial = serial();
         assert!(!active());
         let first = enter("prewarm");
         assert!(active());
@@ -96,6 +109,7 @@ mod tests {
     /// guard 被 `?` 或提前 return 丢弃时同样会递减（Drop 保证）。
     #[test]
     fn a_dropped_guard_always_releases() {
+        let _serial = serial();
         {
             let _guard = enter("scoped");
             assert!(active());
