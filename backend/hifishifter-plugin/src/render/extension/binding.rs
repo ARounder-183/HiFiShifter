@@ -1426,29 +1426,6 @@ impl ExtensionOwner {
             *stamp.0.ui_inventory_sampled_at.lock_or_recover() = Some(std::time::Instant::now());
             return;
         }
-        // 【几何摘要】只覆盖"本文档枚举到的 item 几何"。用它决定要不要推进
-        // `render_epoch`：工程级变更计数会被无关编辑推动，粒度太粗。
-        let digest = {
-            let mut hash = 0xcbf2_9ce4_8422_2325_u64; // FNV-1a
-            let mut mix = |bytes: &[u8]| {
-                for byte in bytes {
-                    hash ^= u64::from(*byte);
-                    hash = hash.wrapping_mul(0x100_0000_01b3);
-                }
-            };
-            for track in tracks.values() {
-                mix(track.id.as_bytes());
-                for item in &track.items {
-                    mix(item.geometry.item_id.as_bytes());
-                    mix(&item.geometry.start_sec.to_bits().to_le_bytes());
-                    mix(&item.geometry.duration_sec.to_bits().to_le_bytes());
-                    mix(item.geometry.take_id.as_bytes());
-                }
-            }
-            hash
-        };
-        let digest_changed =
-            stamp.0.ui_geometry_digest.swap(digest, Ordering::AcqRel) != digest;
         stamp
             .0
             .ui_known_tracks
@@ -1509,7 +1486,7 @@ impl ExtensionOwner {
             // 渲染输入变了 ⇒ 文档级失效：推进 epoch 并通知**全部 owner**。
             // 不持 `transaction` 调用，避免与 `prepare_job` 的事务重入。
             stamp.0.invalidate_render_input();
-        } else if token_changed && digest_changed {
+        } else if token_changed {
             // 【为什么这一支**只**推进代次，不通知 owner】`invalidate_render_input`
             // 会调每个 owner 的 `prepare()`，而 `prepare()` 要投递到会话 actor。
             // 本函数可能正跑在**那条 actor 线程**上（`ensure_loaded` 的清单刷新），

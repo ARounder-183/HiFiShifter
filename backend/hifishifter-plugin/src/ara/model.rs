@@ -3068,6 +3068,7 @@ mod tests {
             crate::editor::parameter_atlas::RootBaseline {
                 frame_period_ms: 100.,
                 pitch_orig: vec![57.; 6],
+                ready: true,
                 ..Default::default()
             },
         );
@@ -3104,7 +3105,8 @@ mod tests {
             &pitch[10..21],
             &[60., 60.5, 61., 61.5, 62., 62.5, 63., 63.5, 64., 64.5, 65.]
         );
-        assert_eq!(pitch[0], 0., "旧位置不能继续遗留编辑");
+        // 旧位置只剩**原始曲线**（57）—— 用户画的那条（60）必须已经跟着 clip 走了。
+        assert_eq!(pitch[0], 57., "旧位置不能继续遗留编辑");
     }
     use super::*;
     use ara2_bridge::core::{RegionSequenceKind, Registry};

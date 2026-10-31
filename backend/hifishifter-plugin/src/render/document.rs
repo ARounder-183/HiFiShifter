@@ -785,13 +785,6 @@ pub(crate) struct DocumentSession {
     pub(crate) inventory_incomplete: std::sync::atomic::AtomicBool,
     /// clip id → 连续多少轮**完整**清单没见到它（幽灵 clip 的宽限期计数）。
     pub(crate) orphan_streak: Mutex<std::collections::HashMap<String, u32>>,
-    /// 本文档相关 item 几何的摘要（见 `refresh_ui_inventory`）。
-    ///
-    /// 【为什么不能直接用宿主的工程级变更计数】那个计数对**整个工程**有效：改速度、
-    /// 加标记、动别的轨都会让它前进。用它驱动 `render_epoch`，等于"别人动一下，
-    /// 我的在途渲染就作废" —— 工程越忙，自动渲染越难收敛。这里只对本文档枚举到的
-    /// `(item, 起点, 长度, take)` 求摘要，粒度与"渲染输入是否变了"对齐。
-    pub(crate) ui_geometry_digest: std::sync::atomic::AtomicU64,
     /// 最近一次几何事务的读数（诊断与状态栏）。
     pub(crate) last_geometry_report:
         Mutex<Option<hifishifter_kernel::editor::param_geometry::TransformReport>>,
@@ -2008,10 +2001,8 @@ impl DocumentSession {
             // pending，由分析完成补齐。未就绪的 stored 不能回退给它 —— 它的
             // pitch_orig 可能只是"占位数组"，拿它合成会把占位值当成原始曲线。
             if let Some(mut stale) = stored {
-                if stale.is_ready() {
-                    stale.analysis_pending = true;
-                    return stale;
-                }
+                stale.analysis_pending = true;
+                return stale;
             }
             return rebuilt;
         }
