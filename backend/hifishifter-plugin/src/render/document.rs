@@ -2004,10 +2004,14 @@ impl DocumentSession {
             rebuilt.ready = true;
         }
         if !rebuilt.ready {
-            // 内容缓存还没建立：保留上一份（可能过期）并标记 pending，由分析完成补齐。
+            // 内容缓存还没建立：保留上一份（**必须是真的就绪的那一份**）并标记
+            // pending，由分析完成补齐。未就绪的 stored 不能回退给它 —— 它的
+            // pitch_orig 可能只是"占位数组"，拿它合成会把占位值当成原始曲线。
             if let Some(mut stale) = stored {
-                stale.analysis_pending = true;
-                return stale;
+                if stale.is_ready() {
+                    stale.analysis_pending = true;
+                    return stale;
+                }
             }
             return rebuilt;
         }
