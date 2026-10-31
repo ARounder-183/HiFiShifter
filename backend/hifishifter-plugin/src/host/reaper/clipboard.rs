@@ -232,8 +232,10 @@ fn capture(
 /// 按 `clip.track_id` 直接取会在子轨上取到空表，于是"复制带曲线"静默失效。
 fn capture_curve_seed(document: &DocumentSession, clip: &Clip) -> Option<ClipCurveSeed> {
     let _transaction = document.transaction.lock_or_recover();
-    let edits = document.edits.lock_or_recover();
+    // 【锁序】文档声明的顺序是 `transaction → timeline → edits`。先取 `edits` 再取
+    // `timeline` 是反向的 —— 那条路在宿主并发刷新时会构成真实的死锁窗口。
     let timeline = document.timeline.lock_or_recover().clone()?;
+    let edits = document.edits.lock_or_recover();
     let root = root_track_of(&timeline, &clip.track_id);
     let authority = edits.authority.root(&root)?;
     let start = clip.start_sec;
