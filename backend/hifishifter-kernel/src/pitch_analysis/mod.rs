@@ -67,92 +67,93 @@ pub fn file_sig(path: &Path) -> (u64, u64) {
     (len, mtime_ms)
 }
 
-pub fn build_root_pitch_key(tl: &TimelineState, root_track_id: &str) -> String {
-    let bpm = if tl.bpm.is_finite() && tl.bpm > 0.0 {
-        tl.bpm
-    } else {
-        120.0
-    };
-
+/// 根布局键：clip 身份 / 工程位置 / 源窗口 / 速率 / 方向。只用于判断
+/// “是否需要从内容缓存重新组装根数组”，绝不用于判断“是否需要重跑音频分析”。
+pub fn build_root_pitch_layout_key(tl: &TimelineState, root_track_id: &str) -> String {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"pitch_orig_v2_clip_fuse");
-    hasher.update(root_track_id.as_bytes());
-    hasher.update(&quantize_u32(bpm, 1000.0).to_le_bytes());
+    hasher.update(b"pitch_root_layout_v1");
+    hasher.update(&quantize_u32(tl.frame_period_ms(), 1000.0).to_le_bytes());
+    let mut clips: Vec<&Clip> = tl
+        .clips
+        .iter()
+        .filter(|c| tl.resolve_root_track_id(&c.track_id).as_deref() == Some(root_track_id))
+        .collect();
+    clips.sort_by(|a, b| {
+        a.start_sec
+            .total_cmp(&b.start_sec)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    for clip in clips {
+        hasher.update(clip.id.as_bytes());
+        hasher.update(&quantize_u32(clip.start_sec, 1000.0).to_le_bytes());
+        hasher.update(&quantize_u32(clip.length_sec, 1000.0).to_le_bytes());
+        hasher.update(&quantize_u32(clip.playback_rate as f64, 10000.0).to_le_bytes());
+        hasher.update(&quantize_i64(clip.source_start_sec, 1000.0).to_le_bytes());
+        hasher.update(&quantize_u32(clip.source_end_sec, 1000.0).to_le_bytes());
+        hasher.update(&[u8::from(clip.muted)]);
+        hasher.update(&[u8::from(clip.loop_enabled)]);
+        hasher.update(&[u8::from(clip.reversed)]);
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
+pub fn build_root_pitch_key(tl: &TimelineState, root_track_id: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"pitch_orig_v3_content");
     hasher.update(&quantize_u32(tl.frame_period_ms(), 1000.0).to_le_bytes());
 
-    // Include track-level analysis config.
-    // 轨道不存在时按"默认配置"计（compose 关、默认算法）—— 不要用 `Unknown`
-    // 当哨兵：它现在是一个有明确执行语义的值（见 `PitchAnalysisAlgo::effective`），
-    // 拿来表达"没找到轨道"会让两件事共用一个名字。
     let (compose, algo) = tl
         .tracks
         .iter()
         .find(|t| t.id == root_track_id)
         .map(|t| (t.compose_enabled, t.pitch_analysis_algo.clone()))
         .unwrap_or((false, PitchAnalysisAlgo::default()));
-    hasher.update(&[if compose { 1 } else { 0 }]);
-    // 键按**实际执行**的算法取：`Unknown` 与默认算法行为完全相同，键也必须相同，
-    // 否则同一份配置会因工程里的拼写不同而各自缓存一遍。
+    hasher.update(&[u8::from(compose)]);
     hasher.update(algo.effective().id().as_bytes());
-
-    // Include detector availability so unavailable states can be cached and
-    // recomputed when the detector becomes available.
     if matches!(
         algo.effective(),
         PitchAnalysisAlgo::WorldDll | PitchAnalysisAlgo::NsfHifiganOnnx
     ) {
-        hasher.update(&[if crate::fcpe_onnx::is_available() {
-            1
-        } else {
-            0
-        }]);
+        hasher.update(&[u8::from(crate::fcpe_onnx::is_available())]);
     }
 
-    // Include each clip mapped to this root track.
-    // Sort by clip id for stability.
+    // 内容集合按（工程起点、源路径、源窗口）排序，但**不写入**工程位置。
+    // 移动 / 分割 / 裁剪因此不会让分析缓存失效；重新组装由布局键负责。
     let mut clips: Vec<&Clip> = tl
         .clips
         .iter()
         .filter(|c| tl.resolve_root_track_id(&c.track_id).as_deref() == Some(root_track_id))
         .collect();
-    clips.sort_by(|a, b| a.id.cmp(&b.id));
-
-    for c in clips {
-        hasher.update(c.id.as_bytes());
-        hasher.update(&quantize_u32(c.start_sec, 1000.0).to_le_bytes());
-        hasher.update(&quantize_u32(c.length_sec, 1000.0).to_le_bytes());
-        hasher.update(&quantize_u32(c.playback_rate as f64, 10000.0).to_le_bytes());
-        hasher.update(&quantize_i64(c.source_start_sec, 1000.0).to_le_bytes());
-        hasher.update(&quantize_u32(c.source_end_sec, 1000.0).to_le_bytes());
-        hasher.update(&[if c.muted { 1 } else { 0 }]);
-        hasher.update(&[if c.midi_fill_gaps { 1 } else { 0 }]);
-        // Loop（循环源）会改变 pitch_orig 的组装内容（回绕铺满），
-        // 必须参与缓存 key，否则切换 Loop 后旧曲线不会失效。
-        hasher.update(&[if c.loop_enabled { 1 } else { 0 }]);
-        // Loop 下 pitch_orig 组装方向依赖 reversed（schedule.rs 的
-        // anchor_r − i / anchor_f + i 锚点选择与回绕方向），翻转倒放后
-        // 必须使旧曲线失效，否则合成仍驱动翻转前的音高曲线。
-        hasher.update(&[if c.reversed { 1 } else { 0 }]);
-        if let Some(notes) = c.midi_note_data.as_ref() {
+    clips.sort_by(|a, b| {
+        a.source_path
+            .cmp(&b.source_path)
+            .then_with(|| a.source_start_sec.total_cmp(&b.source_start_sec))
+            .then_with(|| a.source_end_sec.total_cmp(&b.source_end_sec))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    for clip in clips {
+        hasher.update(&quantize_i64(clip.source_start_sec, 1000.0).to_le_bytes());
+        hasher.update(&quantize_u32(clip.source_end_sec, 1000.0).to_le_bytes());
+        hasher.update(&[u8::from(clip.loop_enabled)]);
+        hasher.update(&[u8::from(clip.reversed)]);
+        if let Some(notes) = clip.midi_note_data.as_ref() {
             for note in notes {
                 hasher.update(&quantize_u32(note.start_sec, 1000.0).to_le_bytes());
                 hasher.update(&quantize_u32(note.end_sec, 1000.0).to_le_bytes());
                 hasher.update(&quantize_i64(note.note as f64, 10000.0).to_le_bytes());
-                hasher.update(&[note.velocity]);
-                hasher.update(&[note.channel]);
+                hasher.update(&[note.velocity, note.channel]);
             }
         }
-        if let Some(sp) = c.source_path.as_deref() {
+        if let Some(sp) = clip.source_path.as_deref() {
             hasher.update(sp.as_bytes());
-            let p = Path::new(sp);
-            let (len, mtime) = file_sig(p);
+            let (len, mtime) = file_sig(Path::new(sp));
             hasher.update(&len.to_le_bytes());
             hasher.update(&mtime.to_le_bytes());
+            hasher.update(&clip.source_file_fingerprint.unwrap_or(0).to_le_bytes());
         } else {
             hasher.update(b"(no_source)");
         }
     }
-
     hasher.finalize().to_hex().to_string()
 }
 

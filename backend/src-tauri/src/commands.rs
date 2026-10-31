@@ -2460,6 +2460,7 @@ pub fn set_param_frames(
     start_frame: u32,
     values: Vec<f32>,
     checkpoint: Option<bool>,
+    present: Option<Vec<bool>>,
 ) -> serde_json::Value {
     {
         // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
@@ -2467,7 +2468,17 @@ pub fn set_param_frames(
         common::guard_command(
             "set_param_frames",
             serde_json::json!({ "ok": false, "error": "panic in command: set_param_frames" }),
-            || params::set_param_frames(&state, track_id, param, start_frame, values, checkpoint),
+            || {
+                params::set_param_frames(
+                    &state,
+                    track_id,
+                    param,
+                    start_frame,
+                    values,
+                    checkpoint,
+                    present,
+                )
+            },
         )
     }
 }

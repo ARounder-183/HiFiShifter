@@ -452,8 +452,9 @@ impl ExtensionOwner {
             .as_ref()
             .and_then(std::sync::Weak::upgrade)
             .is_some_and(|document| document.in_edit_session());
-        // 组件通道：这份载荷是**本实例**的存档，宿主用它做 undo / 复制轨 —— 恢复即权威。
-        restored.from_archive = false;
+        // 组件通道也是“外部载荷”：只有冷启动或编辑会话（undo/redo）才可覆盖。
+        // 重复的焦点切换/组件重交不能把旧数组盖到在线权威上。
+        restored.from_archive = true;
         // 【T-D5】同一份载荷已经合入过就别再排队：宿主重复交回同一份存档时（重开编辑器、
         // 撤销后重做、文档重建），重放只会重复劳动，并在失败时重新点燃"没读回来"。
         if Self::restore_digest(&restored).is_some_and(|digest| {

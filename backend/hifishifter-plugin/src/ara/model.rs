@@ -1329,57 +1329,30 @@ impl ModelHandle {
                 self.register_host_split_lineage();
                 {
                     let mut edits = self.session.edits.lock_or_recover();
-                    if !edits.atlas.is_empty() && !edits.needs_rebind {
-                        let projection = (|| {
-                            let identities = self.session.parameter_identities_locked(&timeline)?;
-                            // 【先换几何，再重建视图】`follow_geometry` 只做查表与派生缓存，
-                            // 真正的"视图"（`edits.params`）由 `resync_parameter_view_locked`
-                            // 重建 —— 两件事收口在同一个入口，避免"模型重算时重建、清单刷新
-                            // 时不重建"的分叉（那正是"分割后参数线停在旧几何"的根）。
-                            let followed = edits.atlas.follow_geometry(&timeline, &identities)?;
-                            edits.atlas = followed;
-                            // 【L2：视图不再在这里重建】这里的时间线是"刚映射出来的
-                            // 几何"，没有 `params_by_root_track` —— 拿它当基线投影，
-                            // 未编辑帧就会被写成默认值（参数线掉到底的成因）。
-                            // 显示由读路径 `compose_root_view_locked` 用**基线层**合成。
-                            // 无活动region的轨道可能只是mute；保留其曲线，不能当删除清空。
-                            edits
-                                .tracks
-                                .retain(|track| bindings.contains_key(&track.id));
-                            Ok::<_, String>(())
-                        })();
-                        match projection {
-                            Ok(()) => {}
-                            Err(error) => {
-                                // 【为什么不整份中止】参数投影失败只说明"曲线身份这次没能
-                                // 对齐"，几何与 PCM 都是好的。此前这里 `return`，于是
-                                // 连 `prepare_renderers()` 都不跑 —— `ready` 停在 `false`，
-                                // 而它只能由 `prepare_renderers` 置真，宿主若不重发
-                                // `end_editing` 就再也回不来（实例永久砖化）。
-                                // 现在只记一行、保留旧图集，继续把这份时间线发布出去。
-                                log::error!("[ara] source parameter projection conflict: {error}");
-                            }
+                    if !edits.needs_rebind {
+                        // 【唯一几何事务入口】锁定状态只在事务开始时读一次；关闭时
+                        // 这里只更新几何日志，权威哈希不变。分割/裁剪不产生 Move，
+                        // 因此也不会复制或重采样任何曲线。
+                        if let Err(error) = self
+                            .session
+                            .reconcile_parameter_geometry_locked(&timeline, &mut edits)
+                        {
+                            // 几何事务失败只影响这一轮参数放置；几何与 PCM 仍照常发布，
+                            // 下一轮用同一 delta 重试（journal 未提交）。
+                            log::error!("[ara] source parameter geometry deferred: {error}");
                         }
-                    } else if edits.needs_rebind {
-                        // 【为什么必须留痕】`needs_rebind` 是**冷恢复/存档还原**的标记，
-                        // 唯一的清零点是 `EditState::reconcile`（`state_channel.rs:183`），
-                        // 而 `reconcile` 只被恢复路径调用。一旦某次撤销/重载的恢复身份
-                        // 对不上，这个标记就停在 `true`：此后用户在宿主里做的**任何**编辑
-                        // 都只会发布几何与 PCM，参数投影再也不跑 —— 用户报的症状正是
-                        // "无论宿主里怎么编辑 ARA 都不同步，只有删掉插件再添加才好"。
-                        //
-                        // 【为什么不顺手把它清掉】清掉等于把一次冷恢复降级成普通合并：
-                        // `reconcile` 的 `needs_rebind` 分支正是用 `Err` 拒绝"按旧序号猜
-                        // 归属"的（想象一下：曲线被挂到另一条轨道上，然后写回宿主）。
-                        // 正确的下一步是**先诊断** —— 这一行 + A4 的收口读数正是为此。
+                        // 无活动region的轨道可能只是mute；保留其曲线，不能当删除清空。
+                        edits
+                            .tracks
+                            .retain(|track| bindings.contains_key(&track.id));
+                    } else {
                         hifishifter_kernel::log_limiter::emit_limited_key(
                             log::Level::Warn,
                             "ara.rebind.stuck",
                             format_args!(
-                                "[ara] parameter projection skipped: the loaded edit state still \
-                                 asks for a rebind ({} authority set(s)). Host edits will publish \
-                                 geometry and audio only until the pending restore is reconciled.",
-                                edits.atlas.authorities.len()
+                                "[ara] parameter geometry skipped: the loaded edit state still asks \
+                                 for a rebind ({} authority root(s)).",
+                                edits.authority.roots.len()
                             ),
                         );
                     }

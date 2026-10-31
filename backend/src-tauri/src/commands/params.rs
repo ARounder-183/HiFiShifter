@@ -48,8 +48,17 @@ pub(crate) fn set_param_frames(
     start_frame: u32,
     values: Vec<f32>,
     checkpoint: Option<bool>,
+    present: Option<Vec<bool>>,
 ) -> serde_json::Value {
-    params::set_param_frames(state, track_id, param, start_frame, values, checkpoint)
+    params::set_param_frames_with_present(
+        state,
+        track_id,
+        param,
+        start_frame,
+        values,
+        present,
+        checkpoint,
+    )
 }
 /// 恢复原参数，不改变原分块checkpoint契约。
 pub(crate) fn restore_param_frames(

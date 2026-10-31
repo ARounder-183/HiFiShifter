@@ -454,6 +454,8 @@ struct Frames {
     with_sentinel: Option<bool>,
     #[serde(default)]
     values: Vec<f32>,
+    /// 与 values 等长的显式编辑位图；缺省 = 全 true（旧前端兼容）。
+    present: Option<Vec<bool>>,
     checkpoint: Option<bool>,
 }
 #[derive(Deserialize)]
@@ -1463,12 +1465,13 @@ pub(super) fn dispatch(
             budget(a.start_frame, a.values.len())?;
             after_write(
                 session,
-                params::set_param_frames(
+                params::set_param_frames_with_present(
                     session,
                     a.track_id,
                     a.param,
                     a.start_frame,
                     a.values,
+                    a.present,
                     a.checkpoint,
                 ),
             )
@@ -1641,10 +1644,13 @@ pub(super) fn dispatch(
                 } else {
                     *timeline = next;
                 }
+                // 参数权威是独立历史层：显示数组不再作为快照回放。
                 drop(recorded);
-                session.mark_dirty();
-                session.publish_timeline(timeline.clone());
+                let timeline_for_publish = timeline.clone();
                 drop(timeline);
+                session.restore_authority_step(target);
+                session.mark_dirty();
+                session.publish_timeline(timeline_for_publish);
                 session.emit("history_state", history_state(session));
                 session.notify_timeline();
                 let mut payload = payload(session, false)?;

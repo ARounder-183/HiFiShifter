@@ -5,7 +5,9 @@ pub mod host;
 pub mod host_pcm;
 pub mod host_timeline;
 pub mod midi_import;
+pub mod param_authority;
 pub mod param_edit;
+pub mod param_geometry;
 pub mod params;
 pub mod selection;
 pub mod settings;
@@ -51,6 +53,50 @@ pub trait ParamHost {
     fn publish_timeline(&self, timeline: TimelineState);
     /// 记录一笔显式参数写入意图；默认实现供独立 App 忽略。
     fn note_param_edit(&self, _intent: ParamEditIntent) {}
+
+    /// 插件权威读入口。返回 Some 时内核不再读/写整条显示数组。
+    ///
+    /// 独立 App 保持 None，走原有 project-frame 数组语义；ARA 插件实现这一组方法。
+    fn read_authority_frames(
+        &self,
+        _track_id: &str,
+        _param: &str,
+        _start_frame: u32,
+        _frame_count: u32,
+        _stride: Option<u32>,
+        _with_sentinel: Option<bool>,
+        _binary: Option<bool>,
+    ) -> Option<Result<crate::models::ParamFramesPayload, String>> {
+        None
+    }
+
+    fn write_authority_frames(
+        &self,
+        _track_id: &str,
+        _param: &str,
+        _start_frame: u32,
+        _values: &[f32],
+        _present: Option<&[bool]>,
+        _checkpoint: bool,
+    ) -> Option<Result<serde_json::Value, String>> {
+        None
+    }
+
+    fn restore_authority_frames(
+        &self,
+        _track_id: &str,
+        _param: &str,
+        _start_frame: u32,
+        _frame_count: u32,
+        _checkpoint: bool,
+    ) -> Option<Result<serde_json::Value, String>> {
+        None
+    }
+
+    /// 当前权威 revision（插件用于在 UI 载荷里给前端水位）。
+    fn authority_revision(&self) -> u64 {
+        0
+    }
 }
 
 #[cfg(test)]

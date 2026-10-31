@@ -1,4 +1,5 @@
 //! 插件侧编辑状态；客户端只能提交参数，宿主的clip几何始终权威。
+use hifishifter_kernel::editor::param_authority::{is_edited_value, ParamAuthority};
 use hifishifter_kernel::state::{TimelineState, Track, TrackParamsState};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -28,6 +29,11 @@ pub(crate) struct ClipLocalState {
 #[derive(Default, Clone, Serialize, Deserialize)]
 pub(crate) struct EditState {
     pub revision: u64,
+    /// **唯一用户编辑权威**：项目时间的稀疏 run，不存显示数组、不存默认值。
+    #[serde(default)]
+    pub authority: ParamAuthority,
+    /// 兼容旧存档/旧测试的显示缓存；运行时任何读路径都不得把它当编辑真相。
+    #[serde(default)]
     pub params: BTreeMap<String, TrackParamsState>,
     pub tracks: Vec<Track>,
     #[serde(default)]
@@ -373,6 +379,13 @@ impl EditState {
             .collect();
         candidate.bindings = mapping.values().cloned().collect();
         candidate.unbound = unbound;
+        if !mapping.is_empty() {
+            let root_map = mapping
+                .iter()
+                .map(|(old, (new, _))| (old.clone(), new.clone()))
+                .collect::<BTreeMap<_, _>>();
+            candidate.authority.remap_roots(&root_map);
+        }
         for record in candidate.atlas.regions.values_mut() {
             if let Some((root, _)) = mapping.get(&record.root) {
                 record.root = root.clone();
@@ -387,9 +400,9 @@ impl EditState {
         // （宿主重建 region sequence / 冷恢复后重新认领），锚就指向一个不存在的根。
         // 合成按 `anchor.root == root` 过滤，于是那些"钉在工程位置"的笔画会整片消失 ——
         // 用户看到的是"重开工程后，没锁定的那几笔没了"。
-        candidate.atlas.remap_anchor_roots(|root| {
-            mapping.get(root).map(|(next, _)| next.clone())
-        });
+        candidate
+            .atlas
+            .remap_anchor_roots(|root| mapping.get(root).map(|(next, _)| next.clone()));
         // 【U-7：`gaps` 必须与 `params` 用同一条规则】
         //
         // "未锁定"的参数线里，**没有 clip 覆盖的那一段**住在这一层（`atlas.gaps`）。
@@ -593,6 +606,73 @@ impl EditState {
         }
     }
 
+    /// 把旧 params 数组迁移成项目时间 run。v11 之前只有整条显示数组；
+    /// 这里按"非默认且与基线不同"生成显式编辑，绝不把未编辑原值物化成 run。
+    fn migrate_legacy_params_to_authority(&mut self) {
+        let mut authority = ParamAuthority::default();
+        let mut frame_period = 5.0_f64;
+        for (root, params) in &self.params {
+            if params.frame_period_ms.is_finite() && params.frame_period_ms > 0.0 {
+                frame_period = params.frame_period_ms;
+            }
+            let fp = if params.frame_period_ms.is_finite() && params.frame_period_ms > 0.0 {
+                params.frame_period_ms
+            } else {
+                frame_period
+            };
+            authority.frame_period_ms = fp;
+            let migrate = |key: &str,
+                           values: &[f32],
+                           base: Option<&[f32]>,
+                           default: f32,
+                           authority: &mut ParamAuthority| {
+                if values.is_empty() {
+                    return;
+                }
+                let present = values
+                    .iter()
+                    .enumerate()
+                    .map(|(i, value)| {
+                        if !is_edited_value(key, *value, default) {
+                            return false;
+                        }
+                        match base.and_then(|base| base.get(i)) {
+                            Some(original) => (*value - *original).abs() > 1e-3,
+                            None => true,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let _ = authority.write_range(root, key, 0, values, &present, default);
+            };
+            migrate(
+                "pitch_edit",
+                &params.pitch_edit,
+                (!params.pitch_orig.is_empty()).then_some(params.pitch_orig.as_slice()),
+                0.0,
+                &mut authority,
+            );
+            migrate(
+                "tension_edit",
+                &params.tension_edit,
+                None,
+                0.0,
+                &mut authority,
+            );
+            for (name, curve) in &params.extra_curves {
+                let key = format!("extra:{name}");
+                let default = match name.as_str() {
+                    "dyn" => -1.0,
+                    "volume" | "breath_gain" => 1.0,
+                    _ => 0.0,
+                };
+                migrate(&key, curve, None, default, &mut authority);
+            }
+        }
+        if !authority.is_pristine() {
+            self.authority = authority;
+        }
+    }
+
     /// 本构建支持的**最高**状态 schema 代际。
     ///
     /// 【为什么 `encode` 不写这个常量】版本号在这里是**向后兼容**手段：只带 atlas 的
@@ -605,7 +685,7 @@ impl EditState {
     /// 旧构建读新存档时那个字段会解析失败 —— 升代让它得到"这份存档由更新的插件保存"
     /// 这句**可行动**的话，而不是一条看不懂的 serde 错误。反过来，新构建读第 7 代及
     /// 更早的存档仍然完全正确（`basis` 有对象 ⇒ 走旧索引分支），因此**不需要折算**。
-    const CURRENT_STATE_VERSION: u64 = 10;
+    const CURRENT_STATE_VERSION: u64 = 11;
 
     /// 有版本且有界的组件state；旧空state保持默认编辑。
     pub fn encode(&self) -> Result<Vec<u8>, String> {
@@ -621,7 +701,9 @@ impl EditState {
         // 契约应当是**往返对称**：`restore(encode(s))` 对任意 `s` 都能成功。
         // 做不到这一点时，"拒绝写"不是保守，而是用整份数据去赌一条记录。
         // 无法绑定的条目现在由 `unbound` 承载：数据留着、不套用、不进 `bindings`。
-        let version = if !self.atlas.authorities.is_empty() {
+        let version = if !self.authority.is_pristine() {
+            11
+        } else if !self.atlas.authorities.is_empty() {
             10
         } else if !self.clip_local.is_empty() {
             6
@@ -640,6 +722,10 @@ impl EditState {
         // 又会被 `follow_geometry` 立刻覆盖。清掉它：存档只带权威。
         let mut trimmed = self.clone();
         trimmed.atlas.regions.clear();
+        if !trimmed.authority.is_pristine() {
+            // v11 唯一权威是 authority；atlas 只是读旧存档的兼容结构，不再写出。
+            trimmed.atlas = Default::default();
+        }
         // 隔离中的权威不写进存档：它们不投影，写进去只会让下一次加载再坏一次。
         // 用户的数据仍在内存里（`quarantine` 保留到进程结束），但不会污染存档。
         let quarantined = trimmed.atlas.quarantined.clone();
@@ -650,14 +736,22 @@ impl EditState {
         // 新存档只带用户可编辑曲线：分析派生的 pitch_orig / dyn_orig /
         // tension_orig 与未编辑的 pitch_edit 全部丢弃；旧权威的整条 curves
         // 也已在本代迁移成 edits，不得再写回。
-        let atlas_authoritative = !trimmed.atlas.authorities.is_empty();
+        let atlas_authoritative =
+            !trimmed.atlas.authorities.is_empty() || !trimmed.authority.is_pristine();
+        let authority_present = !trimmed.authority.is_pristine();
         trimmed.params = trimmed
             .params
             .into_iter()
             .map(|(root, params)| {
                 // 保留根的存在性（空轨也要能被认回），只清派生数组：
                 // 用户曲线不能按"标记是否存在"推断丢弃（旧载荷没有那个标记）。
-                let mut params = crate::editor::capture_edits::strip_derived_curves(&params);
+                // 权威存在时保留分析基线（pitch_orig/dyn_orig），它是渲染“原始值”
+                // 的缓存；只清显示编辑数组。缺少基线的冷恢复会退回源 PCM 原始音高。
+                let mut params = if authority_present {
+                    params
+                } else {
+                    crate::editor::capture_edits::strip_derived_curves(&params)
+                };
                 if atlas_authoritative {
                     // 【T2：权威在时 params 只是显示缓存】把整条显示数组写进存档，
                     // 读回来会被当成"用户编辑"—— 那正是第 9 轮之后仍然存在的
@@ -706,6 +800,10 @@ impl EditState {
             serde_json::from_value(value["edits"].clone()).map_err(|e| e.to_string())?;
         restored.groups.validate()?;
         restored.validate_fades()?;
+        if version < 11 {
+            restored.migrate_legacy_params_to_authority();
+        }
+        restored.authority.sanitize();
         if version < 9 {
             restored.atlas.migrate_legacy_authority_edits();
             // 第 9 代之前没有 pitch_edit_user_modified：旧载荷里的手绘音高必须
@@ -1301,6 +1399,79 @@ mod tests {
         state.apply(&mut timeline);
         assert_eq!(timeline.tracks[0].volume, 1.0, "按槽位号猜归属是红线");
         assert!(timeline.params_by_root_track.is_empty());
+    }
+
+    /// v11 只写项目时间 authority：显示数组/旧 atlas 不得回灌成编辑。
+    #[test]
+    fn v11_round_trip_keeps_explicit_runs_and_drops_display_arrays() {
+        let mut state = EditState::default();
+        state.tracks.push(track_fixture("track"));
+        state
+            .authority
+            .write_range("track", "pitch", 2, &[61.0, 62.0], &[true, true], 0.0)
+            .unwrap();
+        state.params.insert(
+            "track".into(),
+            TrackParamsState {
+                frame_period_ms: 5.0,
+                pitch_edit: vec![99.0; 8],
+                ..Default::default()
+            },
+        );
+        let bytes = state.encode().unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["version"].as_u64(), Some(11));
+        assert!(
+            value["edits"]["atlas"]["authorities"]
+                .as_object()
+                .map_or(true, |map| map.is_empty()),
+            "authority 存在时 atlas 不得再写"
+        );
+        assert!(
+            value["edits"]["params"]["track"]["pitch_edit"]
+                .as_array()
+                .is_none_or(Vec::is_empty),
+            "显示数组不得进入存档"
+        );
+        let mut restored = EditState::default();
+        restored.restore(&bytes).unwrap();
+        assert_eq!(
+            restored.authority.roots["track"].runs["pitch_edit"][0].values,
+            [61.0, 62.0]
+        );
+        assert_eq!(
+            restored.authority.roots["track"].runs["pitch_edit"][0]
+                .placement
+                .start_sec,
+            0.01
+        );
+    }
+
+    /// 旧 v10 的 params 显示数组迁移成显式 run，原值不进入显示编辑。
+    #[test]
+    fn v10_params_migrate_only_non_default_frames_into_runs() {
+        let mut state = EditState::default();
+        state.params.insert(
+            "track".into(),
+            TrackParamsState {
+                frame_period_ms: 5.0,
+                pitch_orig: vec![60.0, 60.0, 60.0],
+                pitch_edit: vec![60.0, 61.0, 0.0],
+                pitch_edit_user_modified: true,
+                ..Default::default()
+            },
+        );
+        let value = serde_json::json!({
+            "version": 10,
+            "edits": serde_json::to_value(&state).unwrap(),
+        });
+        let bytes = serde_json::to_vec(&value).unwrap();
+        let mut restored = EditState::default();
+        restored.restore(&bytes).unwrap();
+        let runs = &restored.authority.roots["track"].runs["pitch_edit"];
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].values, [61.0]);
+        assert!((runs[0].placement.start_sec - 0.005).abs() < 1e-9);
     }
 
     #[test]

@@ -740,13 +740,18 @@ pub(crate) struct DocumentSession {
     /// 【为什么是「设置代次」而不是布尔】切换一次就要重新落一次；而"当前值是什么"
     /// 由 `settings_store::lock_param_lines()` 回答。用代次做缓存戳，热路径只付一次
     /// 原子读。初值取 `u64::MAX`：进程启动后的第一次调用必须真的落一次。
-    placement_revision: AtomicU64,
+    /// 运行时几何日志：锁定关闭时只在这里记账；锁定开启时才是参数事务的输入。
+    pub(crate) geometry_journal: Mutex<hifishifter_kernel::editor::param_geometry::GeometryJournal>,
+    /// 最近一次几何事务的读数（诊断与状态栏）。
+    pub(crate) last_geometry_report:
+        Mutex<Option<hifishifter_kernel::editor::param_geometry::TransformReport>>,
     /// 逐根轨的**分析基线**：派生原始值的唯一权威（见 `RootBaseline`）。
     ///
     /// 【为什么单独一层】派生值此前住在 `edits.params` / `timeline.params_by_root_track`
     /// 里，于是"分析完成"与"编辑器回传"会互相覆盖 —— 用户看到的就是参数线随机回退。
     /// 这里只有一个写入口（[publish_baseline]），显示永远由它派生。
-    pub(crate) baseline: Mutex<std::collections::BTreeMap<String, crate::editor::parameter_atlas::RootBaseline>>,
+    pub(crate) baseline:
+        Mutex<std::collections::BTreeMap<String, crate::editor::parameter_atlas::RootBaseline>>,
     /// ARA 变更通知队列，由 `runtime.rs` 在构建插件时注入。
     ///
     /// 【为什么必须有】宿主只保存"它知道变过"的部分。插件从不通知，只存增量的宿主
@@ -1618,6 +1623,20 @@ impl DocumentSession {
     ) -> Result<String, String> {
         let mut timeline = self.workspace_timeline_locked()?;
         edits.apply(&mut timeline);
+        // 指纹必须反映权威合成后的显示；否则用户一笔写入后投影不变，
+        // `workspace_view`/`accept_workspace_edits` 会拿旧水位判冲突。
+        if !edits.authority.is_pristine() {
+            let roots = timeline
+                .tracks
+                .iter()
+                .filter(|track| track.parent_id.is_none())
+                .map(|track| track.id.clone())
+                .collect::<Vec<_>>();
+            for root in roots {
+                let view = self.compose_param_view_with(&timeline, edits, &root);
+                timeline.params_by_root_track.insert(root, view.params);
+            }
+        }
         // 【为什么音阶也在指纹里】`ensure_loaded` 靠"版本没变 + 本指纹相同"早退
         // （`editor/session.rs:819-843`）。音阶与音阶变化点都是**会影响渲染结果**的
         // 插件自有状态（`scale-signature` 进渲染缓存键），却不在版本号里 —— 不进指纹
@@ -1729,7 +1748,6 @@ impl DocumentSession {
         let mut edits = self.edits.lock_or_recover();
         let mut timeline = self.workspace_timeline_locked()?;
         // 【锁序】`edits → timeline → baseline → host facts`（文档声明的顺序）。
-        self.sync_lock_mode(&mut edits, &timeline);
         edits.apply(&mut timeline);
         let geometry = self.ui_geometry_revision.load(Ordering::Acquire);
         self.compose_root_view_locked(&mut edits, &mut timeline)?;
@@ -1776,50 +1794,6 @@ impl DocumentSession {
     /// 【L5：代次只在**真的落地**之后推进】旧实现无论 `set_placement` 有没有改动都写
     /// stamp，于是"这一轮没有活几何"会让开关被永久吞掉。现在只要还有权威在等几何，
     /// 就不推进代次 —— 下一轮还会再试。
-    pub(crate) fn sync_lock_mode(
-        &self,
-        edits: &mut crate::state_channel::EditState,
-        timeline: &hifishifter_kernel::state::TimelineState,
-    ) -> usize {
-        // 【为什么存 `revision + 1`】0 必须能表示"从没落过"（进程刚启动时设置代次也是
-        // 0，直接用它会早退，于是初始设置永远不生效）。
-        let stamp = crate::settings_store::revision().wrapping_add(1);
-        if self.placement_revision.load(Ordering::Acquire) == stamp {
-            return 0;
-        }
-        // 【为什么可能拿到 None】测试里不读进程级设置（见 `lock_mode_from_settings`）。
-        let Some(wanted) = crate::editor::parameter_atlas::lock_mode_from_settings() else {
-            return 0;
-        };
-        let identities = match self.parameter_identities_locked(timeline) {
-            Ok(identities) => identities,
-            // 身份表这一轮还没跟上：不改任何东西，也不推进代次 —— 下一轮再试。
-            Err(_) => return 0,
-        };
-        let sync = edits.atlas.set_lock_mode(timeline, &identities, wanted);
-        if sync.pending == 0 {
-            self.placement_revision.store(stamp, Ordering::Release);
-        }
-        if sync.changed > 0 {
-            // 同一份数据在新映射下读出不同的值 ⇒ 渲染输入变了。
-            // 只推进代次：清快照会制造一段静音空窗，而重排本来就是异步的。
-            self.revision.fetch_add(1, Ordering::AcqRel);
-            self.render_epoch.fetch_add(1, Ordering::AcqRel);
-            hifishifter_kernel::log_limiter::emit_limited_key(
-                log::Level::Warn,
-                "ara.atlas.placement-changed",
-                format_args!(
-                    "[ara] lock mode: {} authorities={} anchored_runs={} pending={}",
-                    if wanted.is_locked() { "on" } else { "off" },
-                    sync.changed,
-                    sync.anchored_runs,
-                    sync.pending,
-                ),
-            );
-        }
-        sync.changed
-    }
-
     /// 从图集 + 基线**合成**这一轮每根轨的显示数组，并装进时间线。
     ///
     /// 【为什么必须与读视图在同一个事务里】`timeline.params_by_root_track` 既是编辑器
@@ -1834,30 +1808,7 @@ impl DocumentSession {
         edits: &mut crate::state_channel::EditState,
         timeline: &mut hifishifter_kernel::state::TimelineState,
     ) -> Result<(), String> {
-        if edits.atlas.is_empty() {
-            // 没有权威时也要把基线装进显示：否则分析完成之后 GUI 仍然读不到原始值。
-            self.install_baseline_locked(timeline);
-            return Ok(());
-        }
-        let identities = self.parameter_identities_locked(timeline)?;
-        let baseline = self.baseline.lock_or_recover();
-        let views = edits
-            .atlas
-            .compose_root_views(timeline, &identities, &baseline, &edits.params);
-        drop(baseline);
-        // 合成里缺席的根保留旧值（缺基线 / 帧周期不同代）；时间线里不存在的根删除。
-        let roots = timeline
-            .tracks
-            .iter()
-            .filter(|track| track.parent_id.is_none())
-            .map(|track| track.id.clone())
-            .collect::<std::collections::BTreeSet<_>>();
-        timeline
-            .params_by_root_track
-            .retain(|root, _| roots.contains(root));
-        for (root, params) in views {
-            timeline.params_by_root_track.insert(root, params);
-        }
+        self.materialize_views_locked(edits, timeline);
         Ok(())
     }
 
@@ -1871,10 +1822,6 @@ impl DocumentSession {
             if !base.is_ready() {
                 continue;
             }
-            // 【为什么是 entry 而不是 get_mut】渲染路径的时间线由 ARA 映射重建，
-            // `params_by_root_track` 里**不一定**已经有这个根。旧实现直接 `continue`，
-            // 于是基线（明明 ready）永远装不进去 ⇒ `pitch_orig` 为空 ⇒ 渲染器拿不到
-            // 源基频、整段透传宿主 PCM（真机日志里 21 次 `no usable source F0`）。
             let params = timeline
                 .params_by_root_track
                 .entry(root.clone())
@@ -1885,25 +1832,8 @@ impl DocumentSession {
             params.tension_orig = base.tension_orig.clone();
             params.pitch_orig_key = base.pitch_key.clone();
             params.dyn_orig_key = base.dyn_key.clone();
-            // 基线层同时是**显示层的底**：没有用户编辑时，`pitch_edit` 就是原始值
-            // （渲染器需要一个"目标曲线"，空数组等于"不处理"）。有用户编辑时绝不覆盖。
-            if !params.pitch_edit_user_modified {
-                params.pitch_edit = if base.pitch_target.len() == base.pitch_orig.len()
-                    && !base.pitch_target.is_empty()
-                {
-                    base.pitch_target.clone()
-                } else {
-                    base.pitch_orig.clone()
-                };
-            }
-            if params.tension_edit.len() < base.pitch_orig.len() {
-                params.tension_edit.resize(base.pitch_orig.len(), 0.0);
-            }
-            if !params.extra_curves.contains_key("dyn") {
-                params
-                    .extra_curves
-                    .insert("dyn".to_owned(), vec![-1.0; base.pitch_orig.len()]);
-            }
+            // **绝不写 pitch_edit / tension_edit / extra_curves**：这些是权威合成结果，
+            // 基线只提供 orig。旧实现在这里补显示值，正是“分析完成=一次用户编辑”的根。
         }
     }
 
@@ -1932,7 +1862,14 @@ impl DocumentSession {
                 || old.pitch_key != baseline.pitch_key
                 || old.dyn_key != baseline.dyn_key
         });
-        map.insert(root.to_owned(), baseline);
+        if changed {
+            let mut baseline = baseline;
+            baseline.revision = map
+                .get(root)
+                .map(|old| old.revision.saturating_add(1))
+                .unwrap_or(1);
+            map.insert(root.to_owned(), baseline);
+        }
         changed
     }
 
@@ -1985,17 +1922,14 @@ impl DocumentSession {
         // `workspace_timeline_locked` 本身不碰 `edits`，所以把顺序倒过来是安全的。
         let mut edits = self.edits.lock_or_recover();
         let mut timeline = self.workspace_timeline_locked()?;
-        // 设置变了 ⇒ 曲线的可见位置必须立刻改变（见 `sync_lock_mode`）。
-        self.sync_lock_mode(&mut edits, &timeline);
         edits.reconcile(&self.track_bindings.lock_or_recover())?;
         // 【为什么这里**不**重投影视图】`workspace_snapshot` 是**读**路径：它随时可能被
         // 编辑器 actor 的后台刷新调用，而一次读不能改变"待提交编辑"所依赖的指纹
         // （那会让并发的 apply 判成 workspace changed）。视图的重建放在两个真正的
         // "几何变了"的写点上：`remap_and_log` 与 `refresh_ui_geometry`。
         edits.apply(&mut timeline);
-        // 基线层是派生原始值的唯一来源：读路径也要把它装进显示，否则分析完成之后
-        // GUI 读到的 `pitch_orig` 仍是空数组。
-        self.install_baseline_locked(&mut timeline);
+        // 显示是 `(authority, baseline, geometry)` 的纯函数；读路径只物化派生缓存。
+        self.materialize_views_locked(&mut edits, &mut timeline);
         // 【为什么先只取一份 id 集合、立刻释放锁】`source_failures` 与 `edit_sources`
         // 此前从不同时持有；`media_in_flight_items` 的锁序是
         // `regions → region_items → source_failures`。在这里引入 `edit_sources →
@@ -2241,19 +2175,24 @@ impl DocumentSession {
         let mode = crate::editor::parameter_atlas::lock_mode_from_settings()
             .unwrap_or(crate::editor::parameter_atlas::EditMode::FollowMaterial);
 
-        // 【为什么走带读数的入口】"这次写回被拒了哪几条曲线"必须离开本函数 ——
-        // 它进状态快照与诊断包，用户与支持都看得见。丢掉读数的版本（
-        // `capture_changes`）只留给测试与不需要报告的调用方。
-        let mut report = crate::editor::parameter_atlas::CaptureReport::default();
-        candidate.atlas = edits.atlas.capture_changes_reporting(
-            client,
-            &identities,
-            client_view,
-            client_baseline,
-            mode,
-            &mut report,
-        )?;
-        self.note_capture_report(report);
+        // 【新权威路径】参数写入已经由显式 present 位图完成；这里只合并轨道设置/
+        // 分组等非曲线字段。绝不再把客户端整条显示数组做差分（那会把几何差异与
+        // 未编辑原值固化成编辑）。
+        if edits.authority.is_pristine() {
+            // 兼容旧测试/旧调用方：没有权威时仍走一次旧捕获，但生产命令不会到这里。
+            let mut report = crate::editor::parameter_atlas::CaptureReport::default();
+            candidate.atlas = edits.atlas.capture_changes_reporting(
+                client,
+                &identities,
+                client_view,
+                client_baseline,
+                mode,
+                &mut report,
+            )?;
+            self.note_capture_report(report);
+        } else {
+            candidate.atlas = edits.atlas.clone();
+        }
         if rebased {
             log::info!(
                 "[ara] workspace rebase: baseline={} current={} roots={} geometry_moved={geometry_moved}",
@@ -2262,17 +2201,30 @@ impl DocumentSession {
                 baseline.params.len()
             );
         }
-        // 【显示层唯一写者】`merge_params` 把客户端数组抄进了 `candidate.params`，而它
-        // 只对"用户看到的那份几何"成立。这里用**图集 + 基线 + 当前几何**重新合成一次：
-        // 输出恒等于纯函数的计算结果，任何一次过期数组都不可能留在显示层。
+        // 【显示层唯一写者】权威 + 基线 + 当前几何重新合成；客户端数组只作为
+        // 旧路径的兼容输入，绝不可能成为显示层真相。
         {
-            let baseline_now = self.baseline_snapshot();
-            let composed = candidate.atlas.compose_root_views(
-                &host,
-                &identities,
-                &baseline_now,
-                &candidate.params,
-            );
+            let mut composed = std::collections::BTreeMap::new();
+            if !candidate.authority.is_pristine() {
+                let roots = host
+                    .tracks
+                    .iter()
+                    .filter(|track| track.parent_id.is_none())
+                    .map(|track| track.id.clone())
+                    .collect::<Vec<_>>();
+                for root in roots {
+                    let view = self.compose_param_view_with(&host, &candidate, &root);
+                    composed.insert(root, view.params);
+                }
+            } else {
+                let baseline_now = self.baseline_snapshot();
+                composed = candidate.atlas.compose_root_views(
+                    &host,
+                    &identities,
+                    &baseline_now,
+                    &candidate.params,
+                );
+            }
             if !composed.is_empty() {
                 candidate.params = composed;
             }
@@ -2432,6 +2384,552 @@ impl DocumentSession {
         })
     }
 
+    /// 宿主几何刷新后调用：锁定开启时变换 run，关闭时只记账。
+    pub(crate) fn reconcile_parameter_geometry(
+        &self,
+    ) -> Result<hifishifter_kernel::editor::param_geometry::TransformReport, String> {
+        let _transaction = self.transaction.lock_or_recover();
+        let host = self.workspace_timeline_locked()?;
+        let mut edits = self.edits.lock_or_recover();
+        self.reconcile_parameter_geometry_locked(&host, &mut edits)
+    }
+
+    /// 当前权威是否在某根轨上有编辑（渲染/分析闸口用）。
+    pub(crate) fn authority_has_edits_on(&self, root: &str) -> bool {
+        self.edits
+            .lock_or_recover()
+            .authority
+            .root(root)
+            .is_some_and(|authority| !authority.is_empty())
+    }
+
+    /// 所有 clip 的渲染局部参数：从根视图切窗，不按源窗口重建曲线。
+    pub(crate) fn compose_clip_params_locked(
+        &self,
+        timeline: &hifishifter_kernel::state::TimelineState,
+        edits: &crate::state_channel::EditState,
+    ) -> Result<
+        std::collections::BTreeMap<String, hifishifter_kernel::state::TrackParamsState>,
+        String,
+    > {
+        let mut views = std::collections::BTreeMap::new();
+        let roots = timeline
+            .clips
+            .iter()
+            .filter_map(|clip| timeline.resolve_root_track_id(&clip.track_id))
+            .collect::<std::collections::BTreeSet<_>>();
+        for root in roots {
+            views.insert(
+                root.clone(),
+                self.compose_param_view_with(timeline, edits, &root),
+            );
+        }
+        Ok(timeline
+            .clips
+            .iter()
+            .filter_map(|clip| {
+                let root = timeline.resolve_root_track_id(&clip.track_id)?;
+                let view = views.get(&root)?;
+                Some((
+                    clip.id.clone(),
+                    hifishifter_kernel::editor::param_authority::compose_clip_params(
+                        view,
+                        clip,
+                        view.params.frame_period_ms,
+                    ),
+                ))
+            })
+            .collect())
+    }
+
+    /// 取一份权威快照（undo 步骤用）。
+    pub(crate) fn authority_snapshot(
+        &self,
+    ) -> hifishifter_kernel::editor::param_authority::ParamAuthority {
+        self.edits.lock_or_recover().authority.clone()
+    }
+
+    /// 用历史快照整体替换权威，然后失效派生视图。
+    pub(crate) fn replace_authority(
+        &self,
+        authority: hifishifter_kernel::editor::param_authority::ParamAuthority,
+    ) -> Result<(), String> {
+        let _transaction = self.transaction.lock_or_recover();
+        let mut edits = self.edits.lock_or_recover();
+        let mut authority = authority;
+        authority.sanitize();
+        edits.authority = authority;
+        edits.revision = edits.revision.saturating_add(1);
+        self.render_epoch.fetch_add(1, Ordering::AcqRel);
+        let mut host = self.workspace_timeline_locked()?;
+        self.materialize_views_locked(&mut edits, &mut host);
+        drop(edits);
+        self.notify_parameters_changed();
+        Ok(())
+    }
+
+    /// 当前参数权威 revision（前端水位；只读）。
+    pub(crate) fn authority_revision(&self) -> u64 {
+        self.edits.lock_or_recover().authority.revision
+    }
+
+    /// 为一条根轨合成参数视图；调用方已持有 §edits§ 时使用这个版本。
+    fn compose_param_view_with(
+        &self,
+        timeline: &hifishifter_kernel::state::TimelineState,
+        edits: &crate::state_channel::EditState,
+        root: &str,
+    ) -> hifishifter_kernel::editor::param_authority::RootParamView {
+        let fp = if edits.authority.frame_period_ms.is_finite()
+            && edits.authority.frame_period_ms > 0.0
+        {
+            edits.authority.frame_period_ms
+        } else {
+            timeline.frame_period_ms()
+        };
+        let stored_baseline = self.baseline.lock_or_recover().get(root).cloned();
+        let mut baseline = match stored_baseline {
+            Some(baseline) if baseline.is_ready() => baseline,
+            _ => {
+                let empty = hifishifter_kernel::state::TrackParamsState::default();
+                let mut fallback = timeline
+                    .params_by_root_track
+                    .get(root)
+                    .cloned()
+                    .unwrap_or(empty);
+                // 冷恢复/无编辑器会话时分析可能还没发布基线；按内容缓存同步组装
+                // pitch_orig，避免把“原始=0”送进渲染器导致用户编辑被当成无源。
+                if fallback.pitch_orig.is_empty() {
+                    if let Some((curve, _, _)) =
+                        hifishifter_kernel::pitch_analysis::schedule::assemble_pitch_orig_from_cache(
+                            timeline, root,
+                        )
+                    {
+                        if curve.iter().any(|value| *value > 0.0) {
+                            fallback.pitch_orig = curve;
+                        }
+                    }
+                }
+                hifishifter_kernel::editor::param_authority::RootBaseline::from_params(&fallback)
+            }
+        };
+        // 分析尚未给出数组时，权威仍必须能显示：用目标帧数撑出基线，未编辑帧是默认值。
+        let run_frames = edits
+            .authority
+            .root(root)
+            .map(|authority| {
+                authority
+                    .runs
+                    .values()
+                    .flat_map(|runs| runs.iter())
+                    .map(|run| ((run.end_sec() * 1000.0 / fp).ceil() as usize).saturating_add(1))
+                    .max()
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0);
+        let needed = timeline
+            .target_param_frames(fp)
+            .max(run_frames)
+            .max(baseline.frame_count());
+        if baseline.frame_period_ms <= 0.0 || !baseline.frame_period_ms.is_finite() {
+            baseline.frame_period_ms = fp;
+        }
+        if baseline.pitch_orig.len() < needed {
+            baseline.pitch_orig.resize(needed, 0.0);
+        }
+        if baseline.pitch_target.len() < needed {
+            baseline.pitch_target.resize(needed, 0.0);
+        }
+        if baseline.dyn_orig.len() < needed {
+            baseline.dyn_orig.resize(needed, 0.0);
+        }
+        if baseline.tension_orig.len() < needed {
+            baseline.tension_orig.resize(needed, 0.0);
+        }
+        hifishifter_kernel::editor::param_authority::compose_root_view(
+            root,
+            &edits.authority,
+            &baseline,
+            self.ui_geometry_revision.load(Ordering::Acquire),
+        )
+    }
+
+    /// 唯一把 §authority + baseline§ 写成显示数组的地方。只写派生缓存。
+    pub(crate) fn materialize_views_locked(
+        &self,
+        edits: &mut crate::state_channel::EditState,
+        timeline: &mut hifishifter_kernel::state::TimelineState,
+    ) -> std::collections::BTreeMap<
+        String,
+        hifishifter_kernel::editor::param_authority::RootParamView,
+    > {
+        let roots = timeline
+            .tracks
+            .iter()
+            .filter(|track| track.parent_id.is_none())
+            .map(|track| track.id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut views = std::collections::BTreeMap::new();
+        timeline
+            .params_by_root_track
+            .retain(|root, _| roots.contains(root) || edits.authority.roots.contains_key(root));
+        for root in roots {
+            let view = self.compose_param_view_with(timeline, edits, &root);
+            timeline
+                .params_by_root_track
+                .insert(root.clone(), view.params.clone());
+            views.insert(root, view);
+        }
+        edits.params = timeline.params_by_root_track.clone();
+        views
+    }
+
+    fn authority_param_default(
+        timeline: &hifishifter_kernel::state::TimelineState,
+        root: &str,
+        param: &str,
+    ) -> f32 {
+        use hifishifter_kernel::editor::param_authority::{
+            canonical_param_key, default_value_for_key, EXTRA_DYN, EXTRA_VOLUME,
+        };
+        let key = canonical_param_key(param);
+        if key == EXTRA_DYN {
+            return -1.0;
+        }
+        if key == EXTRA_VOLUME
+            || key == hifishifter_kernel::editor::param_authority::EXTRA_BREATH_GAIN
+        {
+            return 1.0;
+        }
+        let kind = timeline
+            .tracks
+            .iter()
+            .find(|track| track.id == root)
+            .map(|track| {
+                hifishifter_kernel::state::SynthPipelineKind::from_track_algo(
+                    &track.pitch_analysis_algo,
+                )
+            })
+            .unwrap_or(hifishifter_kernel::state::SynthPipelineKind::WorldVocoder);
+        hifishifter_kernel::renderer::common_params::automation_curve_pad_value(
+            kind,
+            key.strip_prefix("extra:").unwrap_or(param),
+        )
+        .max(default_value_for_key(&key))
+        .min(1.0)
+    }
+
+    fn normalize_authority_value(param: &str, value: f32, default: f32) -> f32 {
+        use hifishifter_kernel::editor::param_authority::canonical_param_key;
+        let key = canonical_param_key(param);
+        if !value.is_finite() {
+            return default;
+        }
+        match key.as_str() {
+            "pitch_edit" => {
+                if value == 0.0 {
+                    0.0
+                } else {
+                    value.clamp(1.0, 127.0)
+                }
+            }
+            "tension_edit" => value.clamp(-100.0, 100.0),
+            "extra:dyn" => {
+                if value < 0.0 {
+                    -1.0
+                } else {
+                    value.clamp(0.0, 1.0)
+                }
+            }
+            "extra:volume" | "extra:breath_gain" => value.clamp(0.0, 2.0),
+            _ => value,
+        }
+    }
+
+    /// 权威读：GUI 参数编辑器唯一入口。返回 orig/edit/edited 三平面。
+    pub(crate) fn read_authority_frames(
+        &self,
+        track_id: &str,
+        param: &str,
+        start_frame: u32,
+        frame_count: u32,
+        stride: Option<u32>,
+        with_sentinel: Option<bool>,
+        binary: Option<bool>,
+    ) -> Result<hifishifter_kernel::models::ParamFramesPayload, String> {
+        let _transaction = self.transaction.lock_or_recover();
+        let host = self.workspace_timeline_locked()?;
+        let root = host
+            .resolve_root_track_id(track_id)
+            .ok_or_else(|| "unknown parameter track".to_owned())?;
+        let edits = self.edits.lock_or_recover();
+        let fp = if edits.authority.frame_period_ms.is_finite()
+            && edits.authority.frame_period_ms > 0.0
+        {
+            edits.authority.frame_period_ms
+        } else {
+            host.frame_period_ms()
+        };
+        let view = self.compose_param_view_with(&host, &edits, &root);
+        let target = host.target_param_frames(fp);
+        let count = (frame_count as usize)
+            .max(1)
+            .min(target.saturating_add(1 << 20));
+        let step = stride.unwrap_or(1).max(1) as usize;
+        let key = hifishifter_kernel::editor::param_authority::canonical_param_key(param);
+        let mask = view.edited_mask(param);
+        let default = Self::authority_param_default(&host, &root, param);
+        let mut orig = Vec::with_capacity(count);
+        let mut edit = Vec::with_capacity(count);
+        let mut edited = Vec::with_capacity(count);
+        for i in 0..count {
+            let idx = (start_frame as usize).saturating_add(i.saturating_mul(step));
+            let (o, e) = match key.as_str() {
+                "pitch_edit" => {
+                    let o = view.params.pitch_orig.get(idx).copied().unwrap_or(0.0);
+                    let e = view.params.pitch_edit.get(idx).copied().unwrap_or(o);
+                    (o, if e == 0.0 && o != 0.0 { o } else { e })
+                }
+                "tension_edit" => (
+                    view.params.tension_orig.get(idx).copied().unwrap_or(0.0),
+                    view.params.tension_edit.get(idx).copied().unwrap_or(0.0),
+                ),
+                "extra:dyn" => {
+                    let o = view
+                        .params
+                        .dyn_orig
+                        .get(idx)
+                        .copied()
+                        .filter(|value| value.is_finite() && *value > 0.0)
+                        .unwrap_or(1.0);
+                    let raw = view
+                        .params
+                        .extra_curves
+                        .get("dyn")
+                        .and_then(|curve| curve.get(idx))
+                        .copied()
+                        .unwrap_or(-1.0);
+                    (o, if raw < 0.0 { o } else { raw })
+                }
+                _ => {
+                    let name = key.strip_prefix("extra:").unwrap_or(param);
+                    (
+                        default,
+                        view.params
+                            .extra_curves
+                            .get(name)
+                            .and_then(|curve| curve.get(idx))
+                            .copied()
+                            .unwrap_or(default),
+                    )
+                }
+            };
+            orig.push(o);
+            edit.push(e);
+            edited.push(mask.get(idx).copied().unwrap_or(false));
+        }
+        let edit_sentinel = if param == "dyn" && with_sentinel.unwrap_or(false) {
+            Some(edited.iter().map(|flag| !*flag).collect::<Vec<bool>>())
+        } else {
+            None
+        };
+        let mut payload = hifishifter_kernel::models::ParamFramesPayload {
+            ok: true,
+            root_track_id: root.clone(),
+            param: param.to_owned(),
+            frame_period_ms: fp,
+            start_frame,
+            orig,
+            edit,
+            edited,
+            authority_revision: view.authority_revision,
+            baseline_revision: view.baseline_revision,
+            geometry_revision: view.geometry_revision,
+            binary: None,
+            reference_kind: if matches!(param, "pitch" | "dyn") {
+                hifishifter_kernel::models::ParamReferenceKind::SourceCurve
+            } else {
+                hifishifter_kernel::models::ParamReferenceKind::DefaultValue
+            },
+            analysis_pending: Some(!self.baseline_is_ready(&root)),
+            analysis_progress: None,
+            pitch_edit_user_modified: (param == "pitch")
+                .then_some(view.params.pitch_edit_user_modified),
+            pitch_edit_backend_available: None,
+            edit_sentinel,
+            dyn_orig_key: (param == "dyn")
+                .then(|| {
+                    host.params_by_root_track
+                        .get(&root)?
+                        .dyn_orig_source_key
+                        .clone()
+                })
+                .flatten(),
+        };
+        if binary.unwrap_or(false) {
+            let encoded = hifishifter_kernel::editor::params::encode_pfb2(
+                &payload.orig,
+                &payload.edit,
+                &payload.edited,
+            );
+            payload.binary = Some(encoded);
+            payload.orig.clear();
+            payload.edit.clear();
+            payload.edited.clear();
+            // sentinel 已在构造前按显式编辑位图算好，不依赖已被清空的三平面。
+        }
+        Ok(payload)
+    }
+
+    /// 权威写：区间替换 + 显式 present 位图。绝不读取/写回整条显示数组。
+    pub(crate) fn write_authority_range(
+        &self,
+        track_id: &str,
+        param: &str,
+        start_frame: u32,
+        values: &[f32],
+        present: Option<&[bool]>,
+        checkpoint: bool,
+    ) -> Result<serde_json::Value, String> {
+        if present.is_some_and(|present| present.len() != values.len()) {
+            return Err("values/present length mismatch".into());
+        }
+        let _transaction = self.transaction.lock_or_recover();
+        let host = self.workspace_timeline_locked()?;
+        let root = host
+            .resolve_root_track_id(track_id)
+            .ok_or_else(|| "unknown parameter track".to_owned())?;
+        let default = Self::authority_param_default(&host, &root, param);
+        let normalized = values
+            .iter()
+            .map(|value| Self::normalize_authority_value(param, *value, default))
+            .collect::<Vec<_>>();
+        let present = present
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| vec![true; normalized.len()]);
+        self.checkpoint_authority(checkpoint)?;
+        let mut edits = self.edits.lock_or_recover();
+        let before = edits.authority.revision;
+        let revision = edits.authority.write_range(
+            &root,
+            param,
+            start_frame as usize,
+            &normalized,
+            &present,
+            default,
+        )?;
+        let changed = revision != before;
+        if changed {
+            edits.revision = edits.revision.saturating_add(1);
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Info,
+                "ara.param.write",
+                format_args!(
+                    "[param] write root={root} param={param} range=[{start_frame}, {}) present={} rev={revision}",
+                    start_frame as usize + normalized.len(),
+                    present.iter().filter(|value| **value).count()
+                ),
+            );
+        }
+        drop(edits);
+        if changed {
+            self.notify_parameters_changed();
+        }
+        Ok(serde_json::json!({"ok": true, "authority_revision": revision}))
+    }
+
+    pub(crate) fn restore_authority_range(
+        &self,
+        track_id: &str,
+        param: &str,
+        start_frame: u32,
+        frame_count: u32,
+        checkpoint: bool,
+    ) -> Result<serde_json::Value, String> {
+        let _transaction = self.transaction.lock_or_recover();
+        let host = self.workspace_timeline_locked()?;
+        let root = host
+            .resolve_root_track_id(track_id)
+            .ok_or_else(|| "unknown parameter track".to_owned())?;
+        self.checkpoint_authority(checkpoint)?;
+        let mut edits = self.edits.lock_or_recover();
+        let before = edits.authority.revision;
+        let revision =
+            edits
+                .authority
+                .restore_range(&root, param, start_frame as usize, frame_count as usize);
+        if revision != before {
+            edits.revision = edits.revision.saturating_add(1);
+        }
+        drop(edits);
+        if revision != before {
+            self.notify_parameters_changed();
+        }
+        Ok(serde_json::json!({"ok": true, "authority_revision": revision}))
+    }
+
+    /// 插件本地参数撤回占位：前端状态已由 history 记录驱动；这里只保证写入事务的
+    /// revision 前进，几何/轨道历史仍由既有 TimelineHistory 负责。
+    fn checkpoint_authority(&self, _checkpoint: bool) -> Result<(), String> {
+        // Undo 快照由 EditorSession 的 authority_history 负责；文档 revision 不是
+        // 参数版本，不能在这里推进（否则一次画线会被误判成宿主模型变化）。
+        Ok(())
+    }
+
+    /// 把当前宿主 clip 几何与日志做一次事务；锁定关闭只更新日志。
+    pub(crate) fn reconcile_parameter_geometry_locked(
+        &self,
+        timeline: &hifishifter_kernel::state::TimelineState,
+        edits: &mut crate::state_channel::EditState,
+    ) -> Result<hifishifter_kernel::editor::param_geometry::TransformReport, String> {
+        use hifishifter_kernel::editor::param_geometry::{
+            apply_geometry_transaction, ClipGeometry,
+        };
+        let current = timeline
+            .clips
+            .iter()
+            .filter_map(|clip| {
+                let root = timeline.resolve_root_track_id(&clip.track_id)?;
+                let mut geometry = ClipGeometry::from_clip(clip, &root, clip.id.clone());
+                if geometry.source_id.is_empty() {
+                    geometry.source_id = clip
+                        .source_path
+                        .clone()
+                        .unwrap_or_else(|| format!("identity:{}", clip.id));
+                }
+                Some(geometry)
+            })
+            .collect::<Vec<_>>();
+        if current.is_empty() && !timeline.clips.is_empty() {
+            return Ok(Default::default());
+        }
+        let locked = crate::settings_store::lock_param_lines();
+        let mut journal = self.geometry_journal.lock_or_recover();
+        let deltas = journal.diff(&current);
+        if !locked {
+            journal.observe_only(&current);
+            return Ok(Default::default());
+        }
+        let report = match apply_geometry_transaction(&mut edits.authority, &deltas) {
+            Ok(report) => report,
+            Err(error) => {
+                hifishifter_kernel::log_limiter::emit_limited_key(
+                    log::Level::Error,
+                    "ara.param.geometry-failed",
+                    format_args!("[param] geometry transaction deferred: {error}"),
+                );
+                return Err(error);
+            }
+        };
+        if report.applied_deltas > 0 {
+            edits.revision = edits.revision.saturating_add(1);
+        }
+        let epoch = journal.epoch();
+        journal.commit(&current, epoch);
+        *self.last_geometry_report.lock_or_recover() = Some(report.clone());
+        Ok(report)
+    }
+
     /// 按 ARA 2 的部分存档筛选产出载荷。
     ///
     /// 【为什么需要它】整份存档在"只改了一条 modification"时也要重写全部状态，而
@@ -2532,6 +3030,9 @@ impl DocumentSession {
         }
         let mut edits = self.edits.lock_or_recover();
         for partial in pending {
+            for (root, authority) in partial.authority.roots {
+                edits.authority.roots.insert(root, authority);
+            }
             for (key, params) in partial.atlas.authorities {
                 edits.atlas.set_authority(&key, params);
             }
@@ -3000,6 +3501,15 @@ impl DocumentSession {
         }
         restored.atlas.migrate_legacy_gaps(&restored.params)?;
         let identities = self.parameter_identities_locked(host)?;
+        if restored.authority.is_pristine() && !restored.atlas.is_empty() {
+            restored.atlas.migrate_legacy_authority_edits();
+            let exported = restored
+                .atlas
+                .export_param_authority_for_timeline(host, &identities);
+            if !exported.is_pristine() {
+                restored.authority = exported;
+            }
+        }
         let mut changed_geometry = false;
         if !restored.atlas.is_empty() {
             let rebound = restored.atlas.rebind(host, &identities)?;
@@ -3047,6 +3557,24 @@ impl DocumentSession {
             || edits.is_pristine()
             || restored.arrived_in_edit_session
             || self.authoritative_restore();
+        // 【唯一权威合并】冷启动/undo 才覆盖；其余只补在线不存在的 root。
+        let mut kept_live_roots = 0_usize;
+        for (root, authority) in restored.authority.roots.clone() {
+            if authoritative || !merged.authority.roots.contains_key(&root) {
+                merged.authority.roots.insert(root, authority);
+            } else {
+                kept_live_roots += 1;
+            }
+        }
+        if kept_live_roots > 0 {
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Info,
+                "ara.param.restore-stale",
+                format_args!(
+                    "[param] restore kept {kept_live_roots} live root(s); stale payload only filled missing roots"
+                ),
+            );
+        }
         let mut kept_live = 0_usize;
         for (key, params) in restored.atlas.authorities.clone() {
             if authoritative || !merged.atlas.authorities.contains_key(&key) {
@@ -3081,7 +3609,21 @@ impl DocumentSession {
         merged.fades.retain(|item, _| !items.contains(item));
         merged.fades.extend(restored.fades);
         merged.reconcile(&self.track_bindings.lock_or_recover())?;
+        merged.authority.sanitize();
+        // 恢复后的显示必须立刻由 authority 合成，不能沿用载荷里空的 params。
+        for root in host
+            .tracks
+            .iter()
+            .filter(|track| track.parent_id.is_none())
+            .map(|track| track.id.clone())
+            .collect::<Vec<_>>()
+        {
+            let view = self.compose_param_view_with(host, &merged, &root);
+            merged.params.insert(root, view.params);
+        }
         *edits = merged;
+        // 恢复换了参数权威 ⇒ 旧渲染快照不再代表用户数据；必须让准备队列重算。
+        self.render_epoch.fetch_add(1, Ordering::AcqRel);
         Ok(RestoreMerge::Merged)
     }
 

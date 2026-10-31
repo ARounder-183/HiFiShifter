@@ -901,6 +901,10 @@ pub struct TrackParamsState {
 
     #[serde(skip)]
     pub pitch_orig_key: Option<String>,
+    /// 根布局键：只回答“这些内容切片摆在哪些工程窗口”。布局变化触发**重新组装**，
+    /// 不触发重新分析（分析缓存按内容键复用）。
+    #[serde(skip)]
+    pub pitch_layout_key: Option<String>,
 
     /// 由 Reaper 导入产生的待应用音高偏移（半音）。
     /// 当 pitch_orig 分析完成后，pitch_edit = pitch_orig + 此偏移。
@@ -11575,9 +11579,11 @@ impl TimelineState {
             self.ensure_params_for_root(root);
             let key = crate::pitch_analysis::build_root_pitch_key(self, root);
 
+            let layout_key = crate::pitch_analysis::build_root_pitch_layout_key(self, root);
             if let Some(entry) = self.params_by_root_track.get_mut(*root) {
                 entry.pitch_orig = curve;
                 entry.pitch_orig_key = Some(key);
+                entry.pitch_layout_key = Some(layout_key);
                 entry.has_pitch_adjustment_active = has_pitch_adjustment;
                 if !entry.pitch_edit_user_modified {
                     entry.pitch_edit.clone_from(&entry.pitch_orig);
@@ -12477,5 +12483,4 @@ mod gain_split_tests {
             "新范围起点也必须是新原始值"
         );
     }
-
 }

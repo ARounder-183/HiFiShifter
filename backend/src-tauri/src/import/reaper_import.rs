@@ -1070,6 +1070,7 @@ fn convert_reaper_data(
                         tension_orig: Vec::new(),
                         tension_edit: Vec::new(),
                         pitch_orig_key: None,
+                        pitch_layout_key: None,
                         pending_pitch_offset: Some(offset_frames),
                         dyn_orig: Vec::new(),
                         dyn_orig_key: None,

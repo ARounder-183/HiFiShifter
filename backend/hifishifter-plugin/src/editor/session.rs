@@ -327,6 +327,14 @@ pub(crate) struct EditorSession {
     /// "几何刷新后整份视图看起来不同"。
     pub(super) param_intents: Mutex<Vec<hifishifter_kernel::editor::ParamEditIntent>>,
     pub(super) history: Mutex<TimelineHistory>,
+    /// 参数权威的逐步快照：history record index → authority。
+    /// 显示数组不再进历史；undo/redo 只回放这一层。
+    authority_history: Mutex<
+        std::collections::BTreeMap<
+            usize,
+            hifishifter_kernel::editor::param_authority::ParamAuthority,
+        >,
+    >,
     pub(super) project: Mutex<ProjectState>,
     // 设置**不在**这里：它属于用户，不属于某一个 ARA 文档。此前它是本结构体的字段，
     // 于是每个工程一份、初始化为出厂默认，换工程即丢。现在由进程级的
@@ -617,6 +625,7 @@ impl EditorSession {
             pending_capture_edits: Mutex::new(None),
             param_intents: Mutex::new(Vec::new()),
             history: Mutex::new(Default::default()),
+            authority_history: Mutex::new(std::collections::BTreeMap::new()),
             project: Mutex::new(initial_project),
             loaded: Mutex::new(Default::default()),
             // 渲染用的 PCM 暂存同样搬出 `%TEMP%`：磁盘清理在会话进行中删掉这些
@@ -2247,6 +2256,12 @@ impl EditorSession {
             self.project_duration
                 .store(timeline.project_sec.to_bits(), Ordering::Release);
         }
+        // 宿主清单已经换成这一轮几何：先做一次参数几何事务，再读派生视图。
+        // 失败时不推进版本，下一轮重试同一 delta。
+        if let Err(error) = document.reconcile_parameter_geometry() {
+            log::warn!("[ara] parameter geometry deferred: {error}");
+            return;
+        }
         // 【版本号必须在 adopt **成功之后**才推进】否则一次失败的 adopt 会把
         // `ui_geometry_version` 推到最新，之后每轮都早退 —— 会话永久停在旧数组上，
         // 用户看到的就是"切屏回来参数线回退"。
@@ -2586,12 +2601,7 @@ impl EditorSession {
             // 内容指纹：PCM 代次 + 长度 + 前 4096 个采样的 FNV。
             // 代次由发布方单调推进；采样哈希兜住"代次没变但内容被就地改写"的形状。
             let mut stamp: u64 = 0xcbf2_9ce4_8422_2325;
-            for value in pcm
-                .planes
-                .iter()
-                .flat_map(|plane| plane.iter())
-                .take(4096)
-            {
+            for value in pcm.planes.iter().flat_map(|plane| plane.iter()).take(4096) {
                 stamp ^= u64::from(value.to_bits());
                 stamp = stamp.wrapping_mul(0x0000_0100_0000_01b3);
             }
@@ -3236,6 +3246,22 @@ impl EditorSession {
             // 只让"没有被采纳"成为可查的事实。
             "edit_health":self.document().map(|document|document.edit_health_json())
                 .unwrap_or(serde_json::Value::Null),
+            "param_health":self.document().map(|document| {
+                let authority = document.authority_snapshot();
+                serde_json::json!({
+                    "authorityRevision": authority.revision,
+                    "roots": authority.roots.len(),
+                    "runs": authority.run_count(),
+                    "samples": authority.sample_count(),
+                    "hash": authority.content_hash(),
+                    "lastGeometry": document.last_geometry_report.lock_or_recover().as_ref().map(|report| serde_json::json!({
+                        "affected": report.affected_runs,
+                        "split": report.split_runs,
+                        "cleared": report.cleared_runs,
+                        "unknown": report.unknown,
+                    })),
+                })
+            }).unwrap_or(serde_json::Value::Null),
             "host_version":self.host_version.load(Ordering::Acquire),
             "error":self.error.lock_or_recover().clone().or_else(||self.render_error.lock_or_recover().clone()).or(host_error),"connected":!self.closed.load(Ordering::Acquire),
             "ready":self.loaded.lock_or_recover().initialized})
@@ -3244,7 +3270,208 @@ impl EditorSession {
         self.emit("plugin_apply_state", self.state());
     }
 }
+impl EditorSession {
+    /// 读参数前保证分析基线已经按当前 clip 布局重组装。
+    ///
+    /// 内容分析按源文件缓存；移动/分割/裁剪只改布局，因此这里只做同步拼装，
+    /// 不重跑 F0。拼装结果变化才发布基线（不会触发捕获）。
+    fn refresh_analysis_baseline_for_root(&self, host_root: &str, param: &str) {
+        if param != "pitch" && param != "dyn" {
+            return;
+        }
+        let preferred = format!("{}{host_root}", self.namespace);
+        let root = {
+            let timeline = self.timeline.lock_or_recover();
+            if timeline.tracks.iter().any(|track| track.id == preferred) {
+                preferred
+            } else if timeline.tracks.iter().any(|track| track.id == host_root) {
+                host_root.to_owned()
+            } else {
+                return;
+            }
+        };
+        if param == "pitch" {
+            hifishifter_kernel::pitch_analysis::maybe_schedule_pitch_orig(&self.timeline, &root);
+        }
+        if param == "dyn" {
+            hifishifter_kernel::pitch_analysis::maybe_schedule_dyn_orig(&self.timeline, &root);
+        }
+        let params = self
+            .timeline
+            .lock_or_recover()
+            .params_by_root_track
+            .get(&root)
+            .cloned();
+        if let (Some(params), Some(document)) = (params, self.document()) {
+            document.publish_baseline(
+                host_root,
+                hifishifter_kernel::editor::param_authority::RootBaseline::from_params(&params),
+            );
+        }
+    }
+
+    fn authority_step_snapshot(
+        &self,
+    ) -> Option<hifishifter_kernel::editor::param_authority::ParamAuthority> {
+        self.document()
+            .map(|document| document.authority_snapshot())
+    }
+
+    /// 参数写入前的 undo 点：先把当前 authority 挂到当前位置，再把新步的占位
+    /// 也填成“写入前”的权威；写入成功后再用 §note_authority_step§ 覆盖新步。
+    fn checkpoint_authority_step(&self) {
+        if self.suppress_history.load(Ordering::Acquire) {
+            return;
+        }
+        let Some(authority) = self.authority_step_snapshot() else {
+            return;
+        };
+        let timeline = self.timeline.lock_or_recover().clone();
+        let mut history = self.history.lock_or_recover();
+        let previous = history.position;
+        history::checkpoint(
+            &mut history,
+            &timeline,
+            HistoryOp::ParamCurve.key().into(),
+            || None,
+        );
+        let next = history.position;
+        drop(history);
+        let mut steps = self.authority_history.lock_or_recover();
+        steps.insert(previous, authority.clone());
+        steps.insert(next, authority);
+        // 历史分支被截断时，旧 index 的快照已无意义；保留有界即可。
+        let keep_from = next.saturating_sub(1);
+        steps.retain(|index, _| *index + 100 >= keep_from);
+    }
+
+    fn note_authority_step(&self) {
+        let Some(authority) = self.authority_step_snapshot() else {
+            return;
+        };
+        let position = self.history.lock_or_recover().position;
+        self.authority_history
+            .lock_or_recover()
+            .insert(position, authority);
+    }
+
+    pub(super) fn restore_authority_step(&self, target: usize) -> bool {
+        let authority = self
+            .authority_history
+            .lock_or_recover()
+            .get(&target)
+            .cloned();
+        let Some(authority) = authority else {
+            return false;
+        };
+        let Some(document) = self.document() else {
+            return false;
+        };
+        match document.replace_authority(authority) {
+            Ok(()) => {
+                self.refresh_display_from_document();
+                self.render_requested.store(true, Ordering::Release);
+                true
+            }
+            Err(error) => {
+                log::warn!("[ara] parameter history restore failed: {error}");
+                false
+            }
+        }
+    }
+}
+
 impl ParamHost for EditorSession {
+    fn read_authority_frames(
+        &self,
+        track_id: &str,
+        param: &str,
+        start_frame: u32,
+        frame_count: u32,
+        stride: Option<u32>,
+        with_sentinel: Option<bool>,
+        binary: Option<bool>,
+    ) -> Option<Result<hifishifter_kernel::models::ParamFramesPayload, String>> {
+        let document = self.document()?;
+        let host = track_id
+            .strip_prefix(&self.namespace)
+            .unwrap_or(track_id)
+            .to_owned();
+        self.refresh_analysis_baseline_for_root(&host, param);
+        Some(document.read_authority_frames(
+            &host,
+            param,
+            start_frame,
+            frame_count,
+            stride,
+            with_sentinel,
+            binary,
+        ))
+    }
+
+    fn write_authority_frames(
+        &self,
+        track_id: &str,
+        param: &str,
+        start_frame: u32,
+        values: &[f32],
+        present: Option<&[bool]>,
+        checkpoint: bool,
+    ) -> Option<Result<serde_json::Value, String>> {
+        let document = self.document()?;
+        let host = track_id
+            .strip_prefix(&self.namespace)
+            .unwrap_or(track_id)
+            .to_owned();
+        if checkpoint {
+            self.checkpoint_authority_step();
+        }
+        let result =
+            document.write_authority_range(&host, param, start_frame, values, present, false);
+        if result.is_ok() {
+            self.note_authority_step();
+            self.refresh_display_from_document();
+            self.mark_dirty();
+            self.render_requested.store(true, Ordering::Release);
+            self.publish_timeline_derived();
+        }
+        Some(result)
+    }
+
+    fn restore_authority_frames(
+        &self,
+        track_id: &str,
+        param: &str,
+        start_frame: u32,
+        frame_count: u32,
+        checkpoint: bool,
+    ) -> Option<Result<serde_json::Value, String>> {
+        let document = self.document()?;
+        let host = track_id
+            .strip_prefix(&self.namespace)
+            .unwrap_or(track_id)
+            .to_owned();
+        if checkpoint {
+            self.checkpoint_authority_step();
+        }
+        let result =
+            document.restore_authority_range(&host, param, start_frame, frame_count, false);
+        if result.is_ok() {
+            self.note_authority_step();
+            self.refresh_display_from_document();
+            self.mark_dirty();
+            self.render_requested.store(true, Ordering::Release);
+            self.publish_timeline_derived();
+        }
+        Some(result)
+    }
+
+    fn authority_revision(&self) -> u64 {
+        self.document()
+            .map(|document| document.authority_revision())
+            .unwrap_or(0)
+    }
+
     fn timeline(&self) -> &Mutex<TimelineState> {
         &self.timeline
     }
@@ -3396,6 +3623,22 @@ pub(crate) mod tests {
     /// 取值"，而不是逐位相等。
     fn authority_curve_has_near(bytes: &[u8], key: &str, value: f64, tolerance: f64) -> bool {
         let saved: Value = serde_json::from_slice(bytes).unwrap();
+        if let Some(roots) = saved["edits"]["authority"]["roots"].as_object() {
+            if roots.values().any(|root| {
+                root["runs"][key].as_array().is_some_and(|runs| {
+                    runs.iter().any(|run| {
+                        run["values"].as_array().is_some_and(|values| {
+                            values.iter().any(|v| {
+                                v.as_f64()
+                                    .is_some_and(|sample| (sample - value).abs() <= tolerance)
+                            })
+                        })
+                    })
+                })
+            }) {
+                return true;
+            }
+        }
         let Some(authorities) = saved["edits"]["atlas"]["authorities"].as_object() else {
             return false;
         };
@@ -3404,14 +3647,12 @@ pub(crate) mod tests {
                 .as_array()
                 .is_some_and(|runs| {
                     runs.iter().any(|run| {
-                        run["values"]
-                            .as_array()
-                            .is_some_and(|values| {
-                                values.iter().any(|v| {
-                                    v.as_f64()
-                                        .is_some_and(|sample| (sample - value).abs() <= tolerance)
-                                })
+                        run["values"].as_array().is_some_and(|values| {
+                            values.iter().any(|v| {
+                                v.as_f64()
+                                    .is_some_and(|sample| (sample - value).abs() <= tolerance)
                             })
+                        })
                     })
                 })
         })
@@ -7190,4 +7431,3 @@ mod host_selection_tests {
         editor.close();
     }
 }
-

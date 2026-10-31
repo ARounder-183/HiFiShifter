@@ -517,9 +517,12 @@ impl ExtensionOwner {
                 // "曲线非空 + 原始值空"当编辑证据会把正常加载判成"等分析"，实测
                 // 会让三条 automatic-apply 用例整条停摆。用户编辑的权威判据只有
                 // 权威表里的锚层与 `pitch_edit_user_modified`。
-                let edited = resolved.atlas.has_pitch_edits_on(root)
-                    || params.pitch_edit_user_modified;
-                if edited && !baseline.get(root).is_some_and(|entry| entry.is_ready()) {
+                let edited =
+                    document.authority_has_edits_on(root) || params.pitch_edit_user_modified;
+                let baseline_usable = baseline.get(root).is_some_and(|entry| entry.is_ready())
+                    || params.pitch_orig.iter().any(|value| *value > 0.0)
+                    || params.pitch_edit.iter().any(|value| *value > 0.0);
+                if edited && !baseline_usable {
                     return Err(format!(
                         "{}; pitch analysis pending for root {root}",
                         crate::editor::errors::CONFLICT_PREFIX
@@ -599,18 +602,13 @@ impl ExtensionOwner {
         let facts_pending =
             self.native_host().is_some() && document.ui_tracks.lock_or_recover().is_empty();
         let kernel_render = edited
+            || !resolved.authority.is_pristine()
             || stretch
             || owned_fade
             || reversed_clip
             || !resolved.groups.is_empty()
             || facts_pending;
-        let clip_parameters = if resolved.atlas.is_empty() {
-            Default::default()
-        } else {
-            resolved
-                .atlas
-                .project_local(&timeline, &document.parameter_identities_locked(&timeline)?)?
-        };
+        let clip_parameters = document.compose_clip_params_locked(&timeline, &resolved)?;
         let available = if kernel_render {
             document.edit_sources.lock_or_recover()
         } else {

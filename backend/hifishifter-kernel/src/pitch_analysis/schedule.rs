@@ -398,11 +398,14 @@ pub fn maybe_schedule_pitch_orig(
         tl.ensure_params_for_root(&job.root_track_id);
         let current_key = build_root_pitch_key(&tl, &job.root_track_id);
         if current_key == job.key {
+            let layout_key =
+                crate::pitch_analysis::build_root_pitch_layout_key(&tl, &job.root_track_id);
             if let Some(entry) = tl.params_by_root_track.get_mut(&job.root_track_id) {
                 if all_cache_hit {
                     // 全部命中：写入曲线、标记完成、通知前端
                     entry.pitch_orig = curve;
                     entry.pitch_orig_key = Some(job.key.clone());
+                    entry.pitch_layout_key = Some(layout_key);
                     entry.has_pitch_adjustment_active = has_pitch_adjustment;
 
                     // 应用 Reaper 导入的待定音高偏移

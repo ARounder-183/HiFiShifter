@@ -465,130 +465,7 @@ pub(crate) struct AuthorityParameters {
     refused_rounds: u32,
 }
 
-
-/// 一条根轨的**分析基线**：这一代几何下、由分析流水线产出的派生原始值。
-///
-/// 【为什么它必须是一层独立数据】派生值有三个可能的写者（分析完成、几何刷新、
-/// 旧存档恢复），而显示数组又会被编辑器整份回传。只要它们共用一个数组，
-/// "谁最后写"就决定了用户看到什么 —— 这正是参数线随机回退的根。把它独立成
-/// 一层，写入口只有一个（`DocumentSession::publish_baseline`），显示永远由它派生。
-#[derive(Clone, Debug, Default)]
-pub(crate) struct RootBaseline {
-    pub frame_period_ms: f64,
-    pub pitch_orig: Vec<f32>,
-    /// 分析给出的**目标曲线**（未编辑时显示层就是它，渲染器也需要它）。
-    pub pitch_target: Vec<f32>,
-    pub dyn_orig: Vec<f32>,
-    pub tension_orig: Vec<f32>,
-    /// 与 `build_root_pitch_key` / `build_root_dyn_key` 对齐的代次。
-    pub pitch_key: Option<String>,
-    pub dyn_key: Option<String>,
-    /// 三者是否都已是**当前几何**的产物。
-    pub ready: bool,
-}
-
-impl RootBaseline {
-    /// 从一份根参数快照取基线（分析完成时调用）。
-    pub(crate) fn from_params(params: &TrackParamsState) -> Self {
-        Self {
-            frame_period_ms: params.frame_period_ms,
-            pitch_orig: params.pitch_orig.clone(),
-            pitch_target: params.pitch_edit.clone(),
-            dyn_orig: params.dyn_orig.clone(),
-            tension_orig: params.tension_orig.clone(),
-            pitch_key: params.pitch_orig_key.clone(),
-            dyn_key: params.dyn_orig_key.clone(),
-            // 【就绪 = 这一代真的产出了原始值】数组全空说明分析还没落盘；这时
-            // "与原始值不同"不等于"用户改过"（未编辑帧全是 0），捕获必须跳过。
-            ready: !params.pitch_orig.is_empty()
-                || !params.dyn_orig.is_empty()
-                || !params.tension_orig.is_empty(),
-        }
-    }
-
-    /// 从一份**显示数组**构造基线（测试夹具与旧调用方）。
-    ///
-    /// 【为什么它和 `from_params` 不同】测试夹具通常只写 `pitch_edit`（"用户看到的
-    /// 那条线"），没有单独的 `pitch_orig`。这里把显示值当成原始值，于是"未编辑帧"
-    /// 就是夹具写的那条线 —— 与旧实现里 `pitch_baseline_defaults` 的回退同一口径。
-    /// 生产路径永远走 `from_params`（分析结果），不会走这条。
-    pub(crate) fn from_display(params: &TrackParamsState) -> Self {
-        let mut baseline = Self::from_params(params);
-        if baseline.pitch_orig.is_empty() && !params.pitch_edit.is_empty() {
-            baseline.pitch_orig = params.pitch_edit.clone();
-            baseline.pitch_target = params.pitch_edit.clone();
-        }
-        if baseline.dyn_orig.is_empty() {
-            if let Some(dyn_curve) = params.extra_curves.get("dyn") {
-                if dyn_curve.iter().any(|value| *value >= 0.0) {
-                    baseline.dyn_orig = dyn_curve.clone();
-                }
-            }
-        }
-        baseline.ready = true;
-        // 夹具没有分析代次：给一个显式占位，让 `is_ready` 的"已盖章"判据成立。
-        if baseline.pitch_key.is_none() {
-            baseline.pitch_key = Some("display".to_owned());
-        }
-        if baseline.dyn_key.is_none() {
-            baseline.dyn_key = Some("display".to_owned());
-        }
-        baseline
-    }
-
-    /// 从整条时间线取一份**宽松**基线（测试种子与 App 复用；不做代次判定）。
-    pub(crate) fn from_timeline(
-        timeline: &TimelineState,
-    ) -> BTreeMap<String, Self> {
-        timeline
-            .params_by_root_track
-            .iter()
-            .map(|(root, params)| (root.clone(), Self::from_params(params)))
-            .collect()
-    }
-
-    /// 这一代基线是否可用于合成/捕获。
-    ///
-    /// 【判据为什么是"代次已盖章"而不是"数组非空"】分析流水线在真正跑完之前会写一条
-    /// **全零占位** `pitch_orig`（长度对、但没有 key）。把它当就绪，显示层会把整条
-    /// 音高线画成 0，渲染器拿到"原始 = 目标"，用户改了参数却听不到任何变化 ——
-    /// 这正是本轮修的那类"静默无效"。`pitch_key` 只在**组装收敛**时置位
-    /// （见 `pitch_analysis::schedule::maybe_schedule_pitch_orig`），所以它才是判据。
-    pub(crate) fn is_ready(&self) -> bool {
-        self.ready
-            && self.frame_period_ms.is_finite()
-            && (0.1..=1000.0).contains(&self.frame_period_ms)
-            && self.pitch_key.is_some()
-    }
-
-    /// 基线层的显示数组：未编辑帧就是派生原始值。
-    pub(crate) fn display(&self) -> TrackParamsState {
-        let count = self
-            .pitch_orig
-            .len()
-            .max(self.dyn_orig.len())
-            .max(self.tension_orig.len());
-        let mut params = TrackParamsState {
-            frame_period_ms: self.frame_period_ms,
-            pitch_orig: self.pitch_orig.clone(),
-            dyn_orig: self.dyn_orig.clone(),
-            tension_orig: self.tension_orig.clone(),
-            pitch_orig_key: self.pitch_key.clone(),
-            dyn_orig_key: self.dyn_key.clone(),
-            ..Default::default()
-        };
-        params.pitch_edit = if self.pitch_target.len() == self.pitch_orig.len()
-            && !self.pitch_target.is_empty()
-        {
-            self.pitch_target.clone()
-        } else {
-            self.pitch_orig.clone()
-        };
-        params.tension_edit = vec![0.0; count];
-        params.extra_curves.insert("dyn".into(), vec![-1.0; count]);
-        params
-    }
-}
+pub(crate) use hifishifter_kernel::editor::param_authority::RootBaseline;
 
 /// 一次「锁定开关落地」的读数。
 #[derive(Clone, Copy, Debug, Default)]
@@ -648,7 +525,9 @@ fn write_frame(
     if !value.is_finite() {
         return;
     }
-    let slots = marks.entry(key.to_owned()).or_insert_with(|| vec![None; count]);
+    let slots = marks
+        .entry(key.to_owned())
+        .or_insert_with(|| vec![None; count]);
     if slots.len() <= frame {
         slots.resize(frame + 1, None);
     }
@@ -1373,7 +1252,8 @@ impl ParameterAtlas {
         identities: &BTreeMap<String, RegionIdentity>,
         wanted: &Placement,
     ) -> usize {
-        self.set_lock_mode(timeline, identities, wanted.mode()).changed
+        self.set_lock_mode(timeline, identities, wanted.mode())
+            .changed
     }
 
     /// 测试用：与 [`Self::project`] 相同。
@@ -1655,8 +1535,11 @@ impl ParameterAtlas {
             if let Some(seed) = seed {
                 let parent_item = seed.identity.item.clone();
                 let modification = seed.identity.modification.clone();
-                let seeded =
-                    self.seed_authority_from_record(parent_item.as_deref(), &modification, Some(item));
+                let seeded = self.seed_authority_from_record(
+                    parent_item.as_deref(),
+                    &modification,
+                    Some(item),
+                );
                 if !seeded {
                     let mut params =
                         AuthorityParameters::from_record(&seed, EditMode::FollowMaterial);
@@ -1733,8 +1616,7 @@ impl ParameterAtlas {
             // 【为什么优先整份复制父权威】锚表必须跟着 run 一起走：只搬 edits 会让
             // 右半段拿到悬空锚，投影时一条都遍历不到 —— 用户看到"分割后那半段回退"。
             let modification = seed.identity.modification.clone();
-            let seeded =
-                self.seed_authority_from_record(Some(parent), &modification, Some(right));
+            let seeded = self.seed_authority_from_record(Some(parent), &modification, Some(right));
             if !seeded {
                 let mut params = AuthorityParameters::from_record(&seed, EditMode::FollowMaterial);
                 // 分割出的右半段可能拿到新的 source identity；item GUID 是宿主明确
@@ -2115,7 +1997,12 @@ impl ParameterAtlas {
                             let needs_pin = params.edits.values().any(|curve| {
                                 curve.runs.iter().any(|run| {
                                     run.anchor.is_none()
-                                        && run_overlaps_window(run, curve.frame_ms, window_start, window_end)
+                                        && run_overlaps_window(
+                                            run,
+                                            curve.frame_ms,
+                                            window_start,
+                                            window_end,
+                                        )
                                 })
                             });
                             if !needs_pin {
@@ -2128,7 +2015,8 @@ impl ParameterAtlas {
                                     if run.anchor.is_some() {
                                         continue;
                                     }
-                                    if run_overlaps_window(run, frame_ms, window_start, window_end) {
+                                    if run_overlaps_window(run, frame_ms, window_start, window_end)
+                                    {
                                         run.anchor = Some(index);
                                     }
                                 }
@@ -2382,7 +2270,10 @@ impl ParameterAtlas {
         previous: &BTreeMap<String, TrackParamsState>,
     ) -> BTreeMap<String, TrackParamsState> {
         // 旧存档（只有 per-clip 记录或整条 `curves`）先折算进权威表，合成只认一种表示。
-        if self.authorities.values().any(|authority| !authority.curves.is_empty())
+        if self
+            .authorities
+            .values()
+            .any(|authority| !authority.curves.is_empty())
             || (self.authorities.is_empty() && !self.regions.is_empty())
         {
             let mut migrated = self.clone();
@@ -2424,11 +2315,7 @@ impl ParameterAtlas {
                 view.dyn_orig_source_key = old.dyn_orig_source_key.clone();
             }
             let frame_ms = view.frame_period_ms;
-            let count = view
-                .pitch_edit
-                .len()
-                .max(view.tension_edit.len())
-                .max(1);
+            let count = view.pitch_edit.len().max(view.tension_edit.len()).max(1);
             let mut marks: BTreeMap<String, Vec<Option<Rank>>> = BTreeMap::new();
             let mut pitch_edited = false;
             // 1) 空白编辑层（clip 之外的那一段）：工程帧数组，直接落。
@@ -2485,15 +2372,24 @@ impl ParameterAtlas {
                         for (offset, value) in run.values.iter().copied().enumerate() {
                             let source_frame = run.first_frame + offset;
                             let source_sec = source_frame as f64 * frame_ms / 1000.0;
-                            let Some(project_sec) = map.source_to_project(source_sec).or_else(|| {
-                                ((source_sec - geometry.source_start - geometry.source_duration).abs()
-                                    < 1e-9)
-                                    .then_some(geometry.project_start + geometry.project_duration)
-                            }) else {
+                            let Some(project_sec) =
+                                map.source_to_project(source_sec).or_else(|| {
+                                    ((source_sec
+                                        - geometry.source_start
+                                        - geometry.source_duration)
+                                        .abs()
+                                        < 1e-9)
+                                        .then_some(
+                                            geometry.project_start + geometry.project_duration,
+                                        )
+                                })
+                            else {
                                 continue;
                             };
                             let frame = (project_sec * 1000.0 / frame_ms).round().max(0.0) as usize;
-                            write_frame(&mut view, &mut marks, curve_key, frame, value, rank, count);
+                            write_frame(
+                                &mut view, &mut marks, curve_key, frame, value, rank, count,
+                            );
                         }
                     }
                 }
@@ -2560,16 +2456,23 @@ impl ParameterAtlas {
                 .map(|authority| authority.template.frame_period_ms)
                 .find(|fp| fp.is_finite() && *fp > 0.0)
                 .unwrap_or_else(|| timeline.frame_period_ms());
-            baseline.entry(track.id.clone()).or_insert_with(|| RootBaseline {
-                frame_period_ms,
-                ready: true,
-                // 夹具没有分析代次：显式盖章，否则 `is_ready` 的"已组装"判据不成立。
-                pitch_key: Some("display".to_owned()),
-                dyn_key: Some("display".to_owned()),
-                ..Default::default()
-            });
+            baseline
+                .entry(track.id.clone())
+                .or_insert_with(|| RootBaseline {
+                    frame_period_ms,
+                    ready: true,
+                    // 夹具没有分析代次：显式盖章，否则 `is_ready` 的"已组装"判据不成立。
+                    pitch_key: Some("display".to_owned()),
+                    dyn_key: Some("display".to_owned()),
+                    ..Default::default()
+                });
         }
-        Ok(self.compose_root_views(timeline, identities, &baseline, &timeline.params_by_root_track))
+        Ok(self.compose_root_views(
+            timeline,
+            identities,
+            &baseline,
+            &timeline.params_by_root_track,
+        ))
     }
 
     /// 从一条时间线的当前参数快照**播种**一份权威（测试、旧存档迁移与独立 App 复用）。
@@ -2803,11 +2706,15 @@ impl ParameterAtlas {
             keys.extend(desired.curves.keys().cloned());
             let mut changed = false;
             for key in keys {
-                let original = edits.remove(&key).unwrap_or_else(|| EditCurve::new(frame_ms));
+                let original = edits
+                    .remove(&key)
+                    .unwrap_or_else(|| EditCurve::new(frame_ms));
                 let mut curve = original.clone();
                 let desired_source = desired
                     .get(&key)
-                    .map(|curve| project_curve_to_source(curve, &key, &geometry, frame_ms, protected))
+                    .map(|curve| {
+                        project_curve_to_source(curve, &key, &geometry, frame_ms, protected)
+                    })
                     .transpose()?;
                 let mut layer_values = curve.frame_values_in_layer(layer);
                 if previous_edits
@@ -2849,19 +2756,19 @@ impl ParameterAtlas {
                             geometry
                                 .map()
                                 .ok()
-                                .and_then(|map| map.source_to_project(frame as f64 * frame_ms / 1000.0))
+                                .and_then(|map| {
+                                    map.source_to_project(frame as f64 * frame_ms / 1000.0)
+                                })
                                 .is_some_and(|project_sec| project_sec >= lo && project_sec <= hi)
                         });
                         let evidence_hit = !in_protected
                             && match &previous_source {
-                            Some(previous) => previous
-                                .value_at(frame as f64, &key)
-                                .is_some(),
-                            None => {
-                                client_covers(params, &key, &geometry, frame_ms, frame)
-                                    && (key != "pitch_edit" || !base.pitch_orig.is_empty())
-                            }
-                        };
+                                Some(previous) => previous.value_at(frame as f64, &key).is_some(),
+                                None => {
+                                    client_covers(params, &key, &geometry, frame_ms, frame)
+                                        && (key != "pitch_edit" || !base.pitch_orig.is_empty())
+                                }
+                            };
                         if evidence_hit {
                             layer_values.remove(&frame);
                             removed += 1;
@@ -2881,7 +2788,8 @@ impl ParameterAtlas {
                     }
                 }
                 // 这一笔真正落到源域的帧（窗口外的帧不属于本 clip，既不加也不删）。
-                let mut painted: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+                let mut painted: std::collections::BTreeSet<usize> =
+                    std::collections::BTreeSet::new();
                 if let Some(desired_source) = &desired_source {
                     for run in &desired_source.runs {
                         for (offset, value) in run.values.iter().copied().enumerate() {
@@ -2916,9 +2824,7 @@ impl ParameterAtlas {
                 } else {
                     edits.insert(key.clone(), curve);
                 }
-                if edits.get(&key).map(EditCurve::frame_values)
-                    != Some(original.frame_values())
-                {
+                if edits.get(&key).map(EditCurve::frame_values) != Some(original.frame_values()) {
                     changed = true;
                 }
                 if removed > 0 {
@@ -3027,7 +2933,10 @@ impl ParameterAtlas {
         local: bool,
     ) -> Result<BTreeMap<String, TrackParamsState>, String> {
         // 旧存档的整条 `curves` / per-clip 记录先折算成稀疏 `edits`：投影只认一种表示。
-        if self.authorities.values().any(|authority| !authority.curves.is_empty())
+        if self
+            .authorities
+            .values()
+            .any(|authority| !authority.curves.is_empty())
             || (self.authorities.is_empty() && !self.regions.is_empty())
         {
             let mut migrated = self.clone();
@@ -3133,7 +3042,9 @@ impl ParameterAtlas {
                 if !anchor.root.is_empty() && anchor.root != root {
                     continue;
                 }
-                let anchor_begin = (anchor.project_start_sec * 1000.0 / frame_ms).floor().max(0.0);
+                let anchor_begin = (anchor.project_start_sec * 1000.0 / frame_ms)
+                    .floor()
+                    .max(0.0);
                 let anchor_end =
                     ((anchor.project_start_sec + anchor.project_duration_sec) * 1000.0 / frame_ms)
                         .ceil()
@@ -3183,11 +3094,12 @@ impl ParameterAtlas {
         }
 
         let mut edited_frames = BTreeMap::new();
-        let mut compose_key = |key: &str, defaults: &[f32]| -> (Vec<f32>, Vec<bool>) {
+        let compose_key = |key: &str, defaults: &[f32]| -> (Vec<f32>, Vec<bool>) {
             let edit = edits.get(key);
-            let (mut values, mut mask) = compose_curve_in_layer(key, defaults, edit, None, |frame| {
-                source_frame_for_layer(geometry, None, frame_ms, frame, local)
-            });
+            let (mut values, mut mask) =
+                compose_curve_in_layer(key, defaults, edit, None, |frame| {
+                    source_frame_for_layer(geometry, None, frame_ms, frame, local)
+                });
             if let Some(edit) = edit {
                 for (index, anchor) in anchors.iter().enumerate() {
                     // 空 root = 尚未绑定（测试种子与旧存档迁移的中间态）。
@@ -3459,7 +3371,11 @@ impl ParameterAtlas {
     /// 【为什么把判据下沉到"一层一层"】跨层允许覆盖同一源帧（同一素材的多个工程
     /// 位置），层内必须有序无重叠。旧的全局无重叠判据把合法的多层数据判成非法，
     /// 于是每次"移动之后再画"都会被整份拒绝。
-    fn validate_authority_of(&self, authority: &str, params: &AuthorityParameters) -> Result<(), String> {
+    fn validate_authority_of(
+        &self,
+        authority: &str,
+        params: &AuthorityParameters,
+    ) -> Result<(), String> {
         if !params.template.frame_period_ms.is_finite()
             || params.template.frame_period_ms < 0.1
             || params.template.frame_period_ms > 1000.
@@ -3476,12 +3392,13 @@ impl ParameterAtlas {
             }
             // 悬空锚 = 这段编辑永远不投影（分割播种丢锚就是这个形状）。宁可拒绝，
             // 也不要把一批"看不见的 run"写进存档。
-            if curve
-                .runs
-                .iter()
-                .any(|run| run.anchor.is_some_and(|index| index as usize >= params.anchors.len()))
-            {
-                return Err(format!("dangling authority edit anchor on {authority}:{key}"));
+            if curve.runs.iter().any(|run| {
+                run.anchor
+                    .is_some_and(|index| index as usize >= params.anchors.len())
+            }) {
+                return Err(format!(
+                    "dangling authority edit anchor on {authority}:{key}"
+                ));
             }
             for layer in curve.layers() {
                 let mut last = 0_usize;
@@ -4420,15 +4337,14 @@ fn pitch_baseline_defaults(
     // （见 `RootBaseline::display` 与 `install_baseline_locked`）。用它当默认值，
     // 编辑曲线再覆盖同样的帧是幂等的；而只用 `pitch_orig` 会把**分析目标**丢掉 ——
     // 渲染器于是拿到"原始 = 目标"，音高一个采样都不变（"改了参数但没声音变化"）。
-    let source = if !params.pitch_edit.is_empty()
-        && params.pitch_edit.len() == params.pitch_orig.len()
-    {
-        params.pitch_edit.as_slice()
-    } else if !params.pitch_orig.is_empty() {
-        params.pitch_orig.as_slice()
-    } else {
-        params.pitch_edit.as_slice()
-    };
+    let source =
+        if !params.pitch_edit.is_empty() && params.pitch_edit.len() == params.pitch_orig.len() {
+            params.pitch_edit.as_slice()
+        } else if !params.pitch_orig.is_empty() {
+            params.pitch_orig.as_slice()
+        } else {
+            params.pitch_edit.as_slice()
+        };
     if source.is_empty() {
         return vec![0.0; count];
     }
@@ -4468,8 +4384,7 @@ fn output_project_sec(
         frame as f64 * frame_ms / 1000.0
     };
     let project_end = geometry.project_start + geometry.project_duration;
-    if !local && (project_sec < geometry.project_start - 1e-9 || project_sec > project_end + 1e-9)
-    {
+    if !local && (project_sec < geometry.project_start - 1e-9 || project_sec > project_end + 1e-9) {
         // 工程根视图的数组从 0 开始，clip 之外的帧本来就没有编辑；不能把窗口外
         // 的帧钳到窗口起点（那会把第一格编辑复制到整条空白区）。
         return None;
@@ -4769,6 +4684,184 @@ fn placement_for_lock(locked: bool) -> Placement {
         Placement::FollowMaterial
     } else {
         Placement::PinProject { frozen: Vec::new() }
+    }
+}
+
+impl ParameterAtlas {
+    /// v10 及以前：用**当前宿主几何**把源域权威展开成项目时间 run。
+    ///
+    /// 只用于读旧存档；新写入永远走 §ParamAuthority::write_range§。锚定的 run
+    /// 用锚自己的窗口；无锚 run 用当前 clip 几何。无法确定根/几何的片段跳过，
+    /// 绝不按轨道序号猜。
+    pub(crate) fn export_param_authority_for_timeline(
+        &self,
+        timeline: &TimelineState,
+        identities: &BTreeMap<String, RegionIdentity>,
+    ) -> hifishifter_kernel::editor::param_authority::ParamAuthority {
+        use hifishifter_kernel::editor::param_authority::{
+            default_value_for_key, is_edited_value, ParamAuthority, PlacedRun, RunPlacement,
+        };
+        let mut authority = ParamAuthority::default();
+        let mut seq = 1_u64;
+        let mut seen = std::collections::BTreeSet::new();
+        for clip in &timeline.clips {
+            let Some(identity) = identities.get(&clip.id) else {
+                continue;
+            };
+            let Some(root) = timeline.resolve_root_track_id(&clip.track_id) else {
+                continue;
+            };
+            let Ok(geometry) = geometry(clip) else {
+                continue;
+            };
+            let Ok(Some(Authority::Current(params))) = self.authority(identity, &root, &geometry)
+            else {
+                continue;
+            };
+            let dedupe = params as *const AuthorityParameters as usize;
+            if !seen.insert(dedupe) {
+                continue;
+            }
+            let frame_ms = if params.template.frame_period_ms.is_finite()
+                && params.template.frame_period_ms > 0.0
+            {
+                params.template.frame_period_ms
+            } else {
+                5.0
+            };
+            authority.frame_period_ms = frame_ms;
+            for (key, curve) in &params.edits {
+                let default = default_value_for_key(key);
+                for run in &curve.runs {
+                    let anchor = run
+                        .anchor
+                        .and_then(|index| params.anchors.get(index as usize));
+                    // 无锚 run 属于“当前几何”；锚定 run 属于锚自己的窗口。
+                    let (project_start, project_duration, source_start, source_duration, reversed) =
+                        if let Some(anchor) = anchor {
+                            if !anchor.root.is_empty() && anchor.root != root {
+                                continue;
+                            }
+                            (
+                                anchor.project_start_sec,
+                                anchor.project_duration_sec,
+                                anchor.source_start_sec,
+                                anchor.source_duration_sec,
+                                anchor.reversed,
+                            )
+                        } else {
+                            (
+                                geometry.project_start,
+                                geometry.project_duration,
+                                geometry.source_start,
+                                geometry.source_duration,
+                                geometry.reversed,
+                            )
+                        };
+                    if !source_duration.is_finite()
+                        || source_duration <= 0.0
+                        || !project_duration.is_finite()
+                        || project_duration <= 0.0
+                    {
+                        continue;
+                    }
+                    let source_sec = run.first_frame as f64 * curve.frame_ms / 1000.0;
+                    let mut t = ((source_sec - source_start) / source_duration).clamp(0.0, 1.0);
+                    if reversed {
+                        t = 1.0 - t;
+                    }
+                    let scale = project_duration / source_duration;
+                    let run_start = project_start + t * project_duration;
+                    let spf = (curve.frame_ms / 1000.0) * scale;
+                    let mut i = 0usize;
+                    while i < run.values.len() {
+                        if !is_edited_value(key, run.values[i], default) {
+                            i += 1;
+                            continue;
+                        }
+                        let begin = i;
+                        while i + 1 < run.values.len()
+                            && is_edited_value(key, run.values[i + 1], default)
+                        {
+                            i += 1;
+                        }
+                        let id = seq;
+                        seq = seq.saturating_add(1);
+                        authority
+                            .roots
+                            .entry(root.clone())
+                            .or_default()
+                            .runs
+                            .entry(key.clone())
+                            .or_default()
+                            .push(PlacedRun::new(
+                                id,
+                                id,
+                                run.values[begin..=i].to_vec(),
+                                RunPlacement {
+                                    start_sec: run_start + begin as f64 * spf,
+                                    seconds_per_frame: spf,
+                                },
+                            ));
+                        i += 1;
+                    }
+                }
+            }
+        }
+        // 空白编辑本来就是项目帧域：根键直接可用。
+        for (root, gap) in &self.gaps {
+            if !timeline.tracks.iter().any(|track| track.id == *root) {
+                continue;
+            }
+            let frame_ms =
+                if gap.template.frame_period_ms.is_finite() && gap.template.frame_period_ms > 0.0 {
+                    gap.template.frame_period_ms
+                } else {
+                    5.0
+                };
+            authority.frame_period_ms = frame_ms;
+            for (key, curve) in &gap.curves {
+                let default = default_value_for_key(key);
+                for span in &curve.spans {
+                    let mut i = 0usize;
+                    while i < span.values.len() {
+                        if !is_edited_value(key, span.values[i], default) {
+                            i += 1;
+                            continue;
+                        }
+                        let begin = i;
+                        while i + 1 < span.values.len()
+                            && is_edited_value(key, span.values[i + 1], default)
+                        {
+                            i += 1;
+                        }
+                        let id = seq;
+                        seq = seq.saturating_add(1);
+                        authority
+                            .roots
+                            .entry(root.clone())
+                            .or_default()
+                            .runs
+                            .entry(key.clone())
+                            .or_default()
+                            .push(PlacedRun::new(
+                                id,
+                                id,
+                                span.values[begin..=i].to_vec(),
+                                RunPlacement {
+                                    start_sec: (span.first_frame + begin) as f64 * curve.frame_ms
+                                        / 1000.0,
+                                    seconds_per_frame: curve.frame_ms / 1000.0,
+                                },
+                            ));
+                    }
+                }
+            }
+        }
+        authority.next_seq = seq.max(1);
+        let _ = authority.sanitize();
+        authority.revision = 1;
+        authority
     }
 }
 
@@ -6905,7 +6998,6 @@ mod tests {
         );
     }
 
-
     // ===== 第 11 轮：层（layer）语义的回归 =====
 
     /// **跨层重叠是合法形状，层内重叠不是。**
@@ -6935,7 +7027,12 @@ mod tests {
         }
         assert!(atlas.validate().is_ok(), "跨层覆盖同一源帧是合法的");
         // 悬空锚（run 指着一个不存在的锚）必须被拒绝：那段编辑永远不投影。
-        atlas.authorities.get_mut("mod:mod").unwrap().anchors.clear();
+        atlas
+            .authorities
+            .get_mut("mod:mod")
+            .unwrap()
+            .anchors
+            .clear();
         assert!(atlas.validate().is_err(), "悬空锚必须被拒绝");
     }
 
@@ -6945,12 +7042,12 @@ mod tests {
         let ids = identities();
         let first = edited();
         let mut atlas = ParameterAtlas::default().capture(&first, &ids).unwrap();
-        atlas.set_placement(
-            &first,
-            &ids,
-            &Placement::PinProject { frozen: Vec::new() },
+        atlas.set_placement(&first, &ids, &Placement::PinProject { frozen: Vec::new() });
+        assert_eq!(
+            atlas.authorities["mod:mod"].anchors.len(),
+            1,
+            "不锁定 ⇒ 一个锚"
         );
-        assert_eq!(atlas.authorities["mod:mod"].anchors.len(), 1, "不锁定 ⇒ 一个锚");
 
         // 片段被移到 3 秒；用户在新位置把同一段源帧重画成 70。
         let moved = host(3., 1., 0., 1.);
@@ -6998,9 +7095,17 @@ mod tests {
                 &ids,
                 &Placement::PinProject { frozen: Vec::new() },
             );
-            assert!(atlas.validate().is_ok(), "第 {} 轮：钉住之后必须合法", round);
+            assert!(
+                atlas.validate().is_ok(),
+                "第 {} 轮：钉住之后必须合法",
+                round
+            );
             atlas.set_placement(&host(3., 1., 0., 1.), &ids, &Placement::FollowMaterial);
-            assert!(atlas.validate().is_ok(), "第 {} 轮：放开之后必须合法", round);
+            assert!(
+                atlas.validate().is_ok(),
+                "第 {} 轮：放开之后必须合法",
+                round
+            );
         }
     }
 
@@ -7014,7 +7119,9 @@ mod tests {
             let curve = authority.edits.get_mut("pitch_edit").unwrap();
             let run = curve.runs[0].clone();
             // 人为造一个**层内**重叠（旧版本能写进去的形状）。
-            curve.runs.push(EditRun::new(run.first_frame, run.values.clone()));
+            curve
+                .runs
+                .push(EditRun::new(run.first_frame, run.values.clone()));
             curve.runs.sort_by_key(|run| run.first_frame);
         }
         assert!(atlas.validate().is_err(), "层内重叠必须被拒绝");
@@ -7045,7 +7152,9 @@ mod tests {
                 .edits
                 .values()
                 .flat_map(|curve| curve.runs.iter())
-                .all(|run| run.anchor.is_none_or(|index| (index as usize) < clone.anchors.len())),
+                .all(|run| run
+                    .anchor
+                    .is_none_or(|index| (index as usize) < clone.anchors.len())),
             "子段的 run 不得带悬空锚"
         );
         assert!(atlas.validate().is_ok());

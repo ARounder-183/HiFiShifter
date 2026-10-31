@@ -119,12 +119,18 @@ pub fn build_pitch_job(tl: &TimelineState, root_track_id: &str) -> Option<PitchJ
     let target = tl.target_param_frames(fp);
 
     let key = build_root_pitch_key(tl, root_track_id);
+    let layout_key = super::build_root_pitch_layout_key(tl, root_track_id);
 
-    // If already up-to-date, do nothing.
+    // If already up-to-date, do nothing. 内容键 + 布局键都必须一致：前者保证
+    // 不重跑分析，后者保证移动/分割/裁剪后会从同一份内容缓存重新组装。
     let is_up_to_date = tl
         .params_by_root_track
         .get(root_track_id)
-        .map(|e| e.pitch_orig_key.as_deref() == Some(&key) && e.pitch_orig.len() == target)
+        .map(|e| {
+            e.pitch_orig_key.as_deref() == Some(&key)
+                && e.pitch_layout_key.as_deref() == Some(&layout_key)
+                && e.pitch_orig.len() == target
+        })
         .unwrap_or(false);
     if is_up_to_date {
         return None;
@@ -219,10 +225,12 @@ mod tests {
     fn a_converged_root_is_not_pending() {
         let mut tl = timeline(true);
         let key = build_root_pitch_key(&tl, "root");
+        let layout_key = crate::pitch_analysis::build_root_pitch_layout_key(&tl, "root");
         let target = tl.target_param_frames(tl.frame_period_ms());
         {
             let params = tl.params_by_root_track.get_mut("root").unwrap();
             params.pitch_orig_key = Some(key);
+            params.pitch_layout_key = Some(layout_key);
             params.pitch_orig = vec![0.0; target];
         }
         assert!(!root_pitch_assembly_pending(&tl, "root"));
