@@ -590,8 +590,6 @@ impl RootBaseline {
                 || !params.tension_orig.is_empty(),
             revision: 1,
             analysis_pending: false,
-
-            ..Default::default()
         }
     }
 

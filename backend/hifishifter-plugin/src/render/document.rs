@@ -1287,6 +1287,7 @@ fn controllers() -> &'static Mutex<HashMap<usize, Weak<DocumentSession>>> {
 ///   * 宿主模型收口   ⇒ `model`
 ///   * 分配范围变化   ⇒ `scope`
 ///   * 几何 / 内容失效 ⇒ `epoch`
+///
 /// 旧实现把"编辑器上次读到的票据"（`loaded.edit` / `loaded.view.projection`）当守卫，
 /// 于是**每一次参数写入都会让下一次渲染必然 Conflict** —— 而写参数正是请求渲染的那件
 /// 事。票据必须由渲染入口自己取。
@@ -2795,6 +2796,7 @@ impl DocumentSession {
     }
 
     /// 权威读：GUI 参数编辑器唯一入口。返回 orig/edit/edited 三平面。
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn read_authority_frames(
         &self,
         track_id: &str,

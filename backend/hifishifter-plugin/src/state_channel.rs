@@ -1424,7 +1424,7 @@ mod tests {
         assert!(
             value["edits"]["atlas"]["authorities"]
                 .as_object()
-                .map_or(true, |map| map.is_empty()),
+                .is_none_or(|map| map.is_empty()),
             "authority 存在时 atlas 不得再写"
         );
         assert!(

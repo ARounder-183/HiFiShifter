@@ -2679,7 +2679,7 @@ impl EditorSession {
                     }
                 }
                 for (clip, fresh) in timeline.clips.iter_mut().zip(probe.clips.iter()) {
-                    clip.source_file_fingerprint = fresh.source_file_fingerprint.clone();
+                    clip.source_file_fingerprint = fresh.source_file_fingerprint;
                 }
                 hifishifter_kernel::log_limiter::emit_limited_key(
                     log::Level::Warn,

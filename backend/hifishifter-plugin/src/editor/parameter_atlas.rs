@@ -2589,6 +2589,7 @@ impl ParameterAtlas {
     }
 
     /// 捕获的实现；`evidence` 是"编辑器读到的那一份显示"（旧入口用它判删除证据）。
+    #[allow(clippy::too_many_arguments)]
     fn capture_with_evidence(
         &self,
         timeline: &TimelineState,
@@ -3004,6 +3005,7 @@ impl ParameterAtlas {
     /// 【为什么不读"当前模式"】模式只决定**新 run** 打不打锚。既有 run 的位置由它
     /// 自己的 `anchor` 决定，因此同一条权威可以同时有两种层 —— 这正是"移动之后再
     /// 画一笔"能落在两个不同位置的原因。
+    #[allow(clippy::too_many_arguments)]
     fn project_sparse_clip(
         &self,
         timeline: &TimelineState,
