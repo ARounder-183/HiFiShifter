@@ -1,5 +1,5 @@
 //! 插件侧编辑状态；客户端只能提交参数，宿主的clip几何始终权威。
-use hifishifter_kernel::editor::param_authority::{is_edited_value, ParamAuthority};
+use hifishifter_kernel::editor::param_authority::ParamAuthority;
 use hifishifter_kernel::state::{TimelineState, Track, TrackParamsState};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -606,86 +606,20 @@ impl EditState {
         }
     }
 
-    /// 把旧 params 数组迁移成项目时间 run。v11 之前只有整条显示数组；
-    /// 这里按"非默认且与基线不同"生成显式编辑，绝不把未编辑原值物化成 run。
-    fn migrate_legacy_params_to_authority(&mut self) {
-        let mut authority = ParamAuthority::default();
-        let mut frame_period = 5.0_f64;
-        for (root, params) in &self.params {
-            if params.frame_period_ms.is_finite() && params.frame_period_ms > 0.0 {
-                frame_period = params.frame_period_ms;
-            }
-            let fp = if params.frame_period_ms.is_finite() && params.frame_period_ms > 0.0 {
-                params.frame_period_ms
-            } else {
-                frame_period
-            };
-            authority.frame_period_ms = fp;
-            let migrate = |key: &str,
-                           values: &[f32],
-                           base: Option<&[f32]>,
-                           default: f32,
-                           authority: &mut ParamAuthority| {
-                if values.is_empty() {
-                    return;
-                }
-                let present = values
-                    .iter()
-                    .enumerate()
-                    .map(|(i, value)| {
-                        if !is_edited_value(key, *value, default) {
-                            return false;
-                        }
-                        match base.and_then(|base| base.get(i)) {
-                            Some(original) => (*value - *original).abs() > 1e-3,
-                            None => true,
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                let _ = authority.write_range(root, key, 0, values, &present, default);
-            };
-            migrate(
-                "pitch_edit",
-                &params.pitch_edit,
-                (!params.pitch_orig.is_empty()).then_some(params.pitch_orig.as_slice()),
-                0.0,
-                &mut authority,
-            );
-            migrate(
-                "tension_edit",
-                &params.tension_edit,
-                None,
-                0.0,
-                &mut authority,
-            );
-            for (name, curve) in &params.extra_curves {
-                let key = format!("extra:{name}");
-                let default = match name.as_str() {
-                    "dyn" => -1.0,
-                    "volume" | "breath_gain" => 1.0,
-                    _ => 0.0,
-                };
-                migrate(&key, curve, None, default, &mut authority);
-            }
-        }
-        if !authority.is_pristine() {
-            self.authority = authority;
-        }
-    }
 
-    /// 本构建支持的**最高**状态 schema 代际。
+    /// 本构建**唯一**认得的插件状态版本。
     ///
-    /// 【为什么 `encode` 不写这个常量】版本号在这里是**向后兼容**手段：只带 atlas 的
-    /// 载荷写 2、带 groups 写 5……旧构建（它只认自己那一代及更低）因此仍能读。写死最高
-    /// 代际会让所有旧构建一律拒绝，把"能读"变成"全丢"。这个常量只用于 `restore` 判断
-    /// "由更新的插件保存"。
+    /// 【为什么可以回退到 1】这份载荷只由 VST3 / ARA 插件读写，而 VST 版**从未发布**
+    /// 给终端用户（只在开发者机器上跑过）。此前那套 2/3/4/5/6/10/11 的阶梯，以及
+    /// `migrate_legacy_params_to_authority` / `migrate_legacy_authority_edits` /
+    /// `migrate_legacy_gaps` 这些迁移，全部只为"读回已经流通过的旧存档"存在 ——
+    /// 没有终端用户，就没有需要兼容的存档。留着它们只会让"当前格式到底有几代"
+    /// 变成一个没人答得清的问题。
     ///
-    /// 【为什么第 8 代必须升】第 8 代把权威曲线从"工程帧索引"改成"**源帧**索引"，
-    /// 并把 `SourceCurve.basis` 从对象改成 `null`（见 `SourceCurve::basis`）。
-    /// 旧构建读新存档时那个字段会解析失败 —— 升代让它得到"这份存档由更新的插件保存"
-    /// 这句**可行动**的话，而不是一条看不懂的 serde 错误。反过来，新构建读第 7 代及
-    /// 更早的存档仍然完全正确（`basis` 有对象 ⇒ 走旧索引分支），因此**不需要折算**。
-    const CURRENT_STATE_VERSION: u64 = 11;
+    /// 【边界：独立 App 不受影响】App 的工程文件是 `ProjectFile`（v6），与这份载荷
+    /// **不是同一个格式**；kernel 的 `TimelineState` / `TrackParamsState` 仍必须
+    /// 保持向后兼容（App 也读它们）。见第三轮方案的 §2.3.3。
+    const STATE_VERSION: u64 = 1;
 
     /// 有版本且有界的组件state；旧空state保持默认编辑。
     pub fn encode(&self) -> Result<Vec<u8>, String> {
@@ -701,21 +635,8 @@ impl EditState {
         // 契约应当是**往返对称**：`restore(encode(s))` 对任意 `s` 都能成功。
         // 做不到这一点时，"拒绝写"不是保守，而是用整份数据去赌一条记录。
         // 无法绑定的条目现在由 `unbound` 承载：数据留着、不套用、不进 `bindings`。
-        let version = if !self.authority.is_pristine() {
-            11
-        } else if !self.atlas.authorities.is_empty() {
-            10
-        } else if !self.clip_local.is_empty() {
-            6
-        } else if !self.groups.is_empty() {
-            5
-        } else if !self.fades.is_empty() {
-            4
-        } else if self.atlas.is_empty() {
-            2
-        } else {
-            3
-        };
+        // 【单一版本】内容不再决定版本号：格式只有一种，读的一侧只有一条路径。
+        let version = Self::STATE_VERSION;
         // 【为什么不直接序列化 `self`】`atlas.regions` 是**每帧派生**的投影缓存，它的
         // 权威是 `atlas.authorities`。写出派生缓存会让同一份采样在存档里出现两次
         // （曲线是 `Arc<Vec<f32>>`，内存里共享、序列化时各写一份），而它读回来之后
@@ -787,22 +708,19 @@ impl EditState {
         // `unsupported state version`，用户看到"编辑全没了"却不知道原因。版本高于本
         // 构建时明确说明"由更新的插件保存"，让人知道该升级而不是以为档坏了。
         let version = value["version"].as_u64().unwrap_or(0);
-        if version == 0 {
-            return Err("unsupported state version".into());
-        }
-        if version > Self::CURRENT_STATE_VERSION {
+        // 【单一版本，不做迁移】读到别的代际一律拒绝，并把"为什么没有迁移"说清楚 ——
+        // 用户（开发者）看到的是一句可行动的话，而不是一条 serde 报错或静默丢数据。
+        if version != Self::STATE_VERSION {
             return Err(format!(
-                "state was saved by a newer plugin version (state {version} > supported {})",
-                Self::CURRENT_STATE_VERSION
+                "plugin state v{version} cannot be read by this build (it reads v{} only); \
+                 the VST plug-in has not shipped yet, so no migration is provided",
+                Self::STATE_VERSION
             ));
         }
         let mut restored: Self =
             serde_json::from_value(value["edits"].clone()).map_err(|e| e.to_string())?;
         restored.groups.validate()?;
         restored.validate_fades()?;
-        if version < 11 {
-            restored.migrate_legacy_params_to_authority();
-        }
         restored.authority.sanitize();
         if version < 9 {
             restored.atlas.migrate_legacy_authority_edits();
@@ -1297,31 +1215,30 @@ mod tests {
         assert_eq!(state.revision, 1, "拒绝旧state保留现有编辑");
     }
 
-    /// 版本号是"最低够用的代际"（**向后兼容**手段），且"更新版保存的"与"损坏的"
-    /// 给出可区分的报错。
+    /// **【第三轮】存档只有一个版本号，别的代际一律拒绝并给出可行动的话。**
+    ///
+    /// VST 版从未发布 ⇒ 没有需要兼容的旧存档 ⇒ 版本阶梯与全部迁移都已删除。
+    /// 这条用例同时钉住"写的是 1"与"读别的代际时不静默"。
     #[test]
-    fn a_newer_state_version_is_reported_distinctly_from_corruption() {
+    fn a_foreign_state_version_is_rejected_with_an_actionable_message() {
         let mut state = EditState::default();
         let value: serde_json::Value = serde_json::from_slice(&state.encode().unwrap()).unwrap();
-        assert_eq!(
-            value["version"].as_u64(),
-            Some(2),
-            "空编辑只带 atlas 段 ⇒ 写最低代际 2，旧构建也能读"
-        );
-        // 更高版本：明确说"由更新的插件保存"，而不是含混的 unsupported。
-        let mut newer = value.clone();
-        newer["version"] = serde_json::json!(EditState::CURRENT_STATE_VERSION + 1);
+        assert_eq!(value["version"].as_u64(), Some(1), "唯一版本号必须是 1");
+        // 旧 v11 载荷（开发者机子上可能存在）：明确拒绝，且**不覆盖**在线状态。
+        let mut legacy = value.clone();
+        legacy["version"] = serde_json::json!(11);
         let error = state
-            .restore(&serde_json::to_vec(&newer).unwrap())
+            .restore(&serde_json::to_vec(&legacy).unwrap())
             .unwrap_err();
-        assert!(error.contains("newer plugin version"), "{error}");
-        // 缺版本：仍是"不支持"。
+        assert!(error.contains("cannot be read"), "{error}");
+        assert!(error.contains("no migration"), "{error}");
+        // 缺版本：同样是拒绝（version 0 != 1）。
         let mut missing = value.clone();
         missing.as_object_mut().unwrap().remove("version");
         assert!(state
             .restore(&serde_json::to_vec(&missing).unwrap())
             .unwrap_err()
-            .contains("unsupported"));
+            .contains("cannot be read"));
     }
 
     fn params_fixture() -> TrackParamsState {
@@ -1401,9 +1318,9 @@ mod tests {
         assert!(timeline.params_by_root_track.is_empty());
     }
 
-    /// v11 只写项目时间 authority：显示数组/旧 atlas 不得回灌成编辑。
+    /// v1 只写项目时间 authority：显示数组/旧 atlas 不得回灌成编辑。
     #[test]
-    fn v11_round_trip_keeps_explicit_runs_and_drops_display_arrays() {
+    fn v1_round_trip_keeps_explicit_runs_and_drops_display_arrays() {
         let mut state = EditState::default();
         state.tracks.push(track_fixture("track"));
         state
@@ -1420,7 +1337,7 @@ mod tests {
         );
         let bytes = state.encode().unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(value["version"].as_u64(), Some(11));
+        assert_eq!(value["version"].as_u64(), Some(1));
         assert!(
             value["edits"]["atlas"]["authorities"]
                 .as_object()
@@ -1445,33 +1362,6 @@ mod tests {
                 .start_sec,
             0.01
         );
-    }
-
-    /// 旧 v10 的 params 显示数组迁移成显式 run，原值不进入显示编辑。
-    #[test]
-    fn v10_params_migrate_only_non_default_frames_into_runs() {
-        let mut state = EditState::default();
-        state.params.insert(
-            "track".into(),
-            TrackParamsState {
-                frame_period_ms: 5.0,
-                pitch_orig: vec![60.0, 60.0, 60.0],
-                pitch_edit: vec![60.0, 61.0, 0.0],
-                pitch_edit_user_modified: true,
-                ..Default::default()
-            },
-        );
-        let value = serde_json::json!({
-            "version": 10,
-            "edits": serde_json::to_value(&state).unwrap(),
-        });
-        let bytes = serde_json::to_vec(&value).unwrap();
-        let mut restored = EditState::default();
-        restored.restore(&bytes).unwrap();
-        let runs = &restored.authority.roots["track"].runs["pitch_edit"];
-        assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].values, [61.0]);
-        assert!((runs[0].placement.start_sec - 0.005).abs() < 1e-9);
     }
 
     #[test]

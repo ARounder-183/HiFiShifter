@@ -415,19 +415,10 @@ impl DocumentSession {
         edits
             .groups
             .apply(timeline, &self.group_aliases(""), &host_owned);
-        if !edits.atlas.is_empty() {
-            let identities = self.parameter_identities_locked(timeline)?;
-            let baseline = self.baseline_snapshot();
-            let views = edits.atlas.compose_root_views(
-                timeline,
-                &identities,
-                &baseline,
-                &timeline.params_by_root_track,
-            );
-            for (root, params) in views {
-                timeline.params_by_root_track.insert(root, params);
-            }
-        }
+        // 【第三轮：显示只认权威】图集是第二套编辑表示，`compose_root_views` 会**整份
+        // 覆盖**这里已经合成好的数组 —— 而 authority 的编辑在那一路会被丢掉（用户看到的
+        // 是"某些曲线不见了"）。现在唯一合成入口是 `compose_param_view_with`。
+        self.materialize_into(timeline, edits);
         let roots = timeline
             .tracks
             .iter()
@@ -453,36 +444,12 @@ impl DocumentSession {
         let host_owned = self.host_folder_children.lock_or_recover().clone();
         edits.apply(&mut flat);
         self.add_group_view_tracks(&mut flat);
-        if !edits.atlas.is_empty() {
-            let identities = self.parameter_identities_locked(&flat)?;
-            let baseline = self.baseline_snapshot();
-            let views = edits.atlas.compose_root_views(
-                &flat,
-                &identities,
-                &baseline,
-                &flat.params_by_root_track,
-            );
-            for (root, params) in views {
-                flat.params_by_root_track.insert(root, params);
-            }
-        }
+        self.materialize_into(&mut flat, &edits);
         let mut grouped = flat.clone();
         groups
             .unwrap_or(&edits.groups)
             .apply(&mut grouped, &self.group_aliases(""), &host_owned);
-        if !edits.atlas.is_empty() {
-            let identities = self.parameter_identities_locked(&grouped)?;
-            let baseline = self.baseline_snapshot();
-            let views = edits.atlas.compose_root_views(
-                &grouped,
-                &identities,
-                &baseline,
-                &grouped.params_by_root_track,
-            );
-            for (root, params) in views {
-                grouped.params_by_root_track.insert(root, params);
-            }
-        }
+        self.materialize_into(&mut grouped, &edits);
         let roots = grouped
             .tracks
             .iter()
