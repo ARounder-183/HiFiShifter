@@ -413,6 +413,15 @@ pub(crate) struct EditorSession {
     processed: AtomicU64,
     pub(super) applied: AtomicU64,
     host_version: AtomicU64,
+    /// 上一次通知 GUI 时那**份时间线**的内容指纹（见
+    /// `hifishifter_kernel::state::timeline_fingerprint`）。
+    ///
+    /// 【为什么需要它】每条 `plugin_host_changed` 都让前端重取整份时间线（实测单条
+    /// 1.9 MB）。而这条通知的**来源**里有若干条是"某个内部版本号变了"，不是"用户能
+    /// 看出区别了" —— 于是环一旦闭合（通知 → 前端重取 → 重取推动上游 → 再通知）就
+    /// 停不下来：实测 2~4 份整图每秒，页面堆冲到 1 GB 以上，状态栏一直闪"加载中"。
+    /// 指纹把"要不要通知"从"谁调用了"换成"内容变了没有"。
+    notified_fingerprint: Mutex<Option<u64>>,
     ui_geometry_version: AtomicU64,
     project_duration: AtomicU64,
     pub(super) error: Mutex<Option<String>>,
@@ -666,6 +675,7 @@ impl EditorSession {
             processed: AtomicU64::new(0),
             applied: AtomicU64::new(0),
             host_version: AtomicU64::new(0),
+            notified_fingerprint: Mutex::new(None),
             ui_geometry_version: AtomicU64::new(0),
             project_duration: AtomicU64::new(0),
             error: Mutex::new(None),
@@ -2074,12 +2084,14 @@ impl EditorSession {
         self.ui_geometry_version.store(0, Ordering::Release);
         self.complete_cached_analysis();
         self.schedule_analysis();
-        self.render_requested.store(true, Ordering::Release);
-        self.host_version.fetch_add(1, Ordering::AcqRel);
-        self.emit(
-            "plugin_host_changed",
-            json!({"version":self.host_version.load(Ordering::Acquire)}),
-        );
+        // 【只有 GUI 真的会看到区别时才请求合成、才通知】见 `notified_fingerprint`。
+        //
+        // 此前这两件事无条件做：一次"版本号动了但内容没动"的重载会既排一次合成
+        // （`render_requested` ⇒ 状态栏的 `rendering=1` 永远为真 ⇒ 一直显示"加载中"）
+        // 又让前端重取一份整图。而重载本身可能就是被那份重取推动的 —— 环闭合。
+        if self.notify_timeline() {
+            self.render_requested.store(true, Ordering::Release);
+        }
         Ok(())
     }
 
@@ -3141,12 +3153,46 @@ impl EditorSession {
         }
     }
     /// 复用原GUI已订阅的刷新事件；共享选轨/曲线变化让所有视图重取同一个权威payload。
-    pub(super) fn notify_timeline(&self) {
+    ///
+    /// 【内容没变就不通知】判据是 [`Self::published_fingerprint`]：只要用户能看出
+    /// 区别的量没变，前端手上那份就是最新的 —— 再让它取一次只会多造一棵对象图。
+    /// 这条判据是"通知 → 前端重取 → 重取推动上游 → 再通知"那个环的**唯一**出口。
+    pub(super) fn notify_timeline(&self) -> bool {
+        let fingerprint = self.published_fingerprint();
+        {
+            let mut last = self.notified_fingerprint.lock_or_recover();
+            if *last == Some(fingerprint) {
+                return false;
+            }
+            *last = Some(fingerprint);
+        }
         self.host_version.fetch_add(1, Ordering::AcqRel);
         self.emit(
             "plugin_host_changed",
             json!({"version":self.host_version.load(Ordering::Acquire)}),
         );
+        true
+    }
+
+    /// "GUI 这一轮会看到什么"的指纹：时间线内容 + 两个宿主事实代次。
+    ///
+    /// 【为什么把两个原子也拌进来】`get_timeline_state` 的载荷里还有宿主几何代次与
+    /// 音频代次派生出来的装饰（`host_media`、`host_fades`）。它们变化时时间线本身
+    /// 可能一字不改，而界面必须刷新 —— 只比时间线会把这类更新吞掉。
+    fn published_fingerprint(&self) -> u64 {
+        let mut fingerprint =
+            hifishifter_kernel::state::timeline_fingerprint(&self.timeline.lock_or_recover());
+        if let Some(document) = self.document() {
+            fingerprint ^= document
+                .ui_geometry_revision
+                .load(Ordering::Acquire)
+                .rotate_left(17);
+            fingerprint ^= document
+                .editor_audio_revision
+                .load(Ordering::Acquire)
+                .rotate_left(33);
+        }
+        fingerprint
     }
     /// 一段 pending 持续多久之后才值得记一行。3 秒：短于它的是正常的一次应用往返。
     const PENDING_REPORT_AFTER: std::time::Duration = std::time::Duration::from_secs(3);

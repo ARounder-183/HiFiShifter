@@ -933,35 +933,15 @@ impl DocumentSession {
                 timeline.project_sec = timeline.project_sec.max(g.start_sec + g.duration_sec);
             }
         }
-        // 【item map：一个 item 到底对应几条 region】这是"循环延伸会不会多出 Clip"
-        // 这个问题的**唯一**直接读数，而此前完全没有。它同时给出三件事：
-        // ① 宿主报了几个 item、几个 region；② 有多少 region 认领到了 item（`bound`）；
-        // ③ 有没有 item 认领了**不止一条** region（`multi` / `max`）。
-        // 三者放在一行里，就不必再从"clip 数量对不上"反推是哪一环坏了。
-        {
-            let items = tracks.values().flat_map(|track| &track.items).count();
-            let regions = self.regions.lock_or_recover().len();
-            let bound_by_item = {
-                let pairs = self.region_items.lock_or_recover();
-                let mut counts = std::collections::HashMap::<String, usize>::new();
-                for item in pairs.values() {
-                    *counts.entry(item.clone()).or_default() += 1;
-                }
-                counts
-            };
-            let bound = bound_by_item.values().sum::<usize>().min(regions);
-            let multi = bound_by_item.values().filter(|count| **count > 1).count();
-            let max = bound_by_item.values().copied().max().unwrap_or(0);
-            hifishifter_kernel::log_limiter::emit_limited_key(
-                log::Level::Warn,
-                "ara.item-map",
-                format_args!(
-                    "[ara] item map: items={items} regions={regions} bound={bound} unbound={} \
-                     multi={multi} max_regions_per_item={max}",
-                    regions.saturating_sub(bound)
-                ),
-            );
-        }
+        // 【`[ara] item map` 已搬去 `DocumentSession::rebuild_timeline_locked`】
+        //
+        // 它此前在这里，从 `region_items` 反算 `max_regions_per_item`。而那张表的
+        // 写入方当时自己去重（一个 item 只留一条 region），于是这个字段**结构上恒为
+        // 1** —— 那行读数回答不了它被加进来要回答的问题。现在它从装配器的 `spans`
+        // 算，并且带 `attached` / `loops` / `unbound` 明细。
+        //
+        // 【为什么必须只有一处】两处都用同一个限流键 `ara.item-map`，两种格式会互相
+        // 压制 —— 真机日志里只剩先到的那一条。
         if !learned.is_empty() {
             let mut facts = self.media_facts.lock_or_recover();
             for (item, fact) in learned {

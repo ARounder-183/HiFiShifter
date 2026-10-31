@@ -2201,6 +2201,156 @@ pub struct TimelineState {
     pub disabled_group_ids: HashSet<String>,
 }
 
+/// 时间线的**内容指纹**：只要 GUI 会看到的量变了，它就变。
+///
+/// 【它解决什么】\`plugin_host_changed\` 会让前端重取整份时间线（实测单条 1.9 MB）。
+/// 此前每条通知都无条件推进 \`host_version\`，于是"宿主里什么都没变"也会触发一次全量
+/// 往返；而重取本身又会推动上游再走一遍 —— 环一旦闭合就停不下来（实测 2~4 份整图
+/// 每秒，页面堆冲到 1 GB 以上，状态栏一直闪"加载中"）。
+///
+/// 指纹只回答一个问题：**这份时间线与上一份相比，用户能看出区别吗**。
+/// 看不出 ⇒ 不通知：前端手上那份就是最新的。
+///
+/// 【覆盖范围】id、几何、轨道结构、take 列表、参数数组、音阶与速度。刻意**不**包含
+/// \`selected_*\` 与 \`playhead_sec\` —— 那是纯交互状态，选择事件与
+/// \`get_playback_state\` 已经各有一条通道；把它们并进来会让"点一下片段"也触发一次
+/// 整图重取。
+///
+/// 【为什么是 FNV-1a】这里要回答的是"这两份**几乎一样**的图有没有区别"，所以需要
+/// 对"相邻两次只有一两个字节不同"敏感、又足够快（每次通知都要算一遍）。密码学哈希
+/// 在这里只多花时间。
+pub fn timeline_fingerprint(timeline: &TimelineState) -> u64 {
+    struct Hasher(u64);
+    impl Hasher {
+        fn bytes(&mut self, bytes: &[u8]) {
+            for byte in bytes {
+                self.0 ^= u64::from(*byte);
+                self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+        fn u64(&mut self, value: u64) {
+            self.bytes(&value.to_le_bytes());
+        }
+        fn f64(&mut self, value: f64) {
+            // 非有限值全部折成同一个哨兵：它们对用户是同一件事（"没有值"），
+            // 而 NaN 的位模式有几十种，逐位比会让指纹在无变化时抖动。
+            self.u64(if value.is_finite() {
+                value.to_bits()
+            } else {
+                u64::MAX
+            });
+        }
+        fn flag(&mut self, value: bool) {
+            self.u64(u64::from(value));
+        }
+        fn text(&mut self, value: &str) {
+            self.u64(value.len() as u64);
+            self.bytes(value.as_bytes());
+        }
+        fn maybe(&mut self, value: Option<&str>) {
+            self.text(value.unwrap_or(""));
+        }
+        fn curve(&mut self, values: &[f32]) {
+            self.u64(values.len() as u64);
+            for value in values {
+                self.u64(u64::from(value.to_bits()));
+            }
+        }
+    }
+    let mut h = Hasher(0xcbf2_9ce4_8422_2325);
+    h.u64(timeline.tracks.len() as u64);
+    for track in &timeline.tracks {
+        h.text(&track.id);
+        h.text(&track.name);
+        h.u64(track.order as u64);
+        h.maybe(track.parent_id.as_deref());
+        h.flag(track.muted);
+        h.flag(track.solo);
+        h.f64(f64::from(track.volume));
+        h.flag(track.compose_enabled);
+        h.text(track.pitch_analysis_algo.id());
+        h.text(&track.color);
+    }
+    h.u64(timeline.clips.len() as u64);
+    for clip in &timeline.clips {
+        h.text(&clip.id);
+        h.text(&clip.track_id);
+        h.text(&clip.name);
+        h.f64(clip.start_sec);
+        h.f64(clip.length_sec);
+        h.f64(clip.source_start_sec);
+        h.f64(clip.source_end_sec);
+        h.f64(f64::from(clip.playback_rate));
+        h.f64(f64::from(clip.clip_playback_rate));
+        h.flag(clip.reversed);
+        h.flag(clip.loop_enabled);
+        h.flag(clip.muted);
+        h.f64(clip.loop_period_sec.unwrap_or(f64::NAN));
+        h.u64(clip.channel_mode as u64);
+        h.f64(f64::from(clip.gain));
+        h.f64(f64::from(clip.clip_gain));
+        h.f64(clip.fade_in_sec);
+        h.f64(clip.fade_out_sec);
+        h.f64(clip.fade_in_shape);
+        h.f64(clip.fade_out_shape);
+        h.f64(clip.fade_in_dir);
+        h.f64(clip.fade_out_dir);
+        h.f64(clip.fade_in_s);
+        h.f64(clip.fade_out_s);
+        h.f64(clip.snap_offset_sec);
+        h.maybe(clip.group_id.as_deref());
+        h.maybe(clip.source_path.as_deref());
+        h.maybe(clip.active_take_id.as_deref());
+        h.u64(clip.takes.len() as u64);
+        for take in &clip.takes {
+            h.text(&take.id);
+            h.text(&take.name);
+            h.maybe(take.source_path.as_deref());
+            h.f64(take.source_start_sec);
+            h.f64(take.source_end_sec);
+            h.f64(f64::from(take.playback_rate));
+            h.flag(take.reversed);
+            h.flag(take.loop_enabled);
+            h.u64(take.channel_mode as u64);
+        }
+    }
+    // 【选择必须进指纹】插件里没有单独的选择事件通道 —— 宿主改选区时 GUI 能拿到的
+    // 唯一信号就是 `plugin_host_changed`。把它排除在外，用户点一下片段界面就会停在
+    // 旧选区上。`playhead_sec` 则**不进**：它由 `get_playback_state` 单独送，且每帧
+    // 都在变。
+    h.maybe(timeline.selected_track_id.as_deref());
+    h.maybe(timeline.selected_clip_id.as_deref());
+    h.f64(timeline.bpm);
+    h.f64(timeline.project_sec);
+    h.u64(timeline.project_scale_notes.len() as u64);
+    h.bytes(&timeline.project_scale_notes);
+    h.u64(timeline.tempo_map.as_ref().map_or(0, Vec::len) as u64);
+    for point in timeline.tempo_map.iter().flatten() {
+        h.text(&point.id);
+        h.f64(point.position_sec);
+        h.f64(point.bpm);
+        h.u64(u64::from(point.numerator.unwrap_or(0)));
+        h.u64(u64::from(point.denominator.unwrap_or(0)));
+        h.u64(u64::from(point.scale.is_some()));
+    }
+    h.u64(timeline.params_by_root_track.len() as u64);
+    for (root, params) in &timeline.params_by_root_track {
+        h.text(root);
+        h.f64(params.frame_period_ms);
+        h.flag(params.pitch_edit_user_modified);
+        h.curve(&params.pitch_edit);
+        h.curve(&params.tension_edit);
+        let mut keys: Vec<&String> = params.extra_curves.keys().collect();
+        keys.sort();
+        h.u64(keys.len() as u64);
+        for key in keys {
+            h.text(key);
+            h.curve(&params.extra_curves[key]);
+        }
+    }
+    h.0
+}
+
 /// Deserialization default (older project files lack the field): the next
 /// track order starts at 1, matching `TimelineState::default()`.
 fn default_next_track_order() -> i32 {
@@ -12516,5 +12666,82 @@ mod gain_split_tests {
             (entry.pitch_edit[200] - entry.pitch_orig[200]).abs() < 1e-4,
             "新范围起点也必须是新原始值"
         );
+    }
+}
+
+#[cfg(test)]
+mod timeline_fingerprint_tests {
+    use super::*;
+
+    fn timeline() -> TimelineState {
+        serde_json::from_value(serde_json::json!({
+            "tracks": [{"id": "track", "name": "t", "order": 0}],
+            "clips": [{
+                "id": "ara-item-a", "track_id": "track", "name": "A",
+                "start_sec": 0.0, "length_sec": 2.0,
+                "takes": [{"id": "take", "source_start_sec": 0.0, "source_end_sec": 2.0}]
+            }],
+            "bpm": 120.0, "project_sec": 2.0
+        }))
+        .unwrap()
+    }
+
+    /// 同一份时间线算两次必须相同 —— 否则"没变"永远判不出来，通知就退化成原来的
+    /// 无条件广播。
+    #[test]
+    fn the_fingerprint_is_stable_for_identical_timelines() {
+        assert_eq!(timeline_fingerprint(&timeline()), timeline_fingerprint(&timeline()));
+    }
+
+    /// GUI 会看到的每一个量变化都必须改变指纹。这一条是"漏一个字段 = 界面停在旧值"
+    /// 的护栏：它比逐字段断言更宽，但足以抓住"新加了字段却忘了并进指纹"。
+    #[test]
+    fn every_user_visible_change_moves_the_fingerprint() {
+        let base = timeline_fingerprint(&timeline());
+        let mutations: Vec<(&str, fn(&mut TimelineState))> = vec![
+            ("clip geometry", |t| t.clips[0].start_sec = 1.0),
+            ("clip length", |t| t.clips[0].length_sec = 3.0),
+            ("clip name", |t| t.clips[0].name = "B".into()),
+            ("clip mute", |t| t.clips[0].muted = true),
+            ("clip loop", |t| t.clips[0].loop_enabled = true),
+            ("clip window", |t| t.clips[0].source_end_sec = 1.5),
+            ("take rate", |t| t.clips[0].takes[0].playback_rate = 2.0),
+            ("track name", |t| t.tracks[0].name = "u".into()),
+            ("track mute", |t| t.tracks[0].muted = true),
+            ("track volume", |t| t.tracks[0].volume = 0.5),
+            ("track order", |t| t.tracks[0].order = 3),
+            ("bpm", |t| t.bpm = 90.0),
+            ("project length", |t| t.project_sec = 9.0),
+            ("scale", |t| t.project_scale_notes = vec![0, 1]),
+            ("param curve", |t| {
+                t.params_by_root_track.insert(
+                    "track".into(),
+                    serde_json::from_value(serde_json::json!({"pitch_edit": [1.0, 2.0]}))
+                        .unwrap(),
+                );
+            }),
+        ];
+        for (label, mutate) in mutations {
+            let mut changed = timeline();
+            mutate(&mut changed);
+            assert_ne!(
+                timeline_fingerprint(&changed),
+                base,
+                "{label} 变化必须改变指纹，否则界面会停在旧值"
+            );
+        }
+    }
+
+    /// 选区必须进指纹（插件里没有别的通道把它送到 GUI），播放头**不**进
+    /// （它每帧都在变，且由 `get_playback_state` 单独送）。
+    #[test]
+    fn selection_moves_the_fingerprint_but_the_playhead_does_not() {
+        let base = timeline_fingerprint(&timeline());
+        let mut playhead = timeline();
+        playhead.playhead_sec = 42.0;
+        assert_eq!(timeline_fingerprint(&playhead), base);
+        let mut selected = timeline();
+        selected.selected_clip_id = Some("ara-item-a".into());
+        assert_ne!(timeline_fingerprint(&selected), base);
     }
 }
