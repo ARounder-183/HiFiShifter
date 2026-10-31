@@ -583,7 +583,22 @@ impl EditState {
     /// 【边界：独立 App 不受影响】App 的工程文件是 `ProjectFile`（v6），与这份载荷
     /// **不是同一个格式**；kernel 的 `TimelineState` / `TrackParamsState` 仍必须
     /// 保持向后兼容（App 也读它们）。见第三轮方案的 §2.3.3。
-    const STATE_VERSION: u64 = 1;
+    /// 存档代际。
+    ///
+    /// 【为什么从 1 升到 2】第 1 代有两个互相矛盾的约定同时存在：`encode` 写的是
+    /// `STATE_VERSION`（= 1），而 `restore` 把 `version == 1` 当成**旧格式**直接
+    /// 拒绝 —— 于是 `restore(encode(s))` 对任何非空存档都必然失败。而 `encode` 的
+    /// 调用方把失败降级成空载荷，宿主据此把用户的全部参数写成"没有编辑"。
+    ///
+    /// 症状正是用户报过的"存档一次、参数线回退一次"。它长期没被发现，是因为插件的
+    /// `cargo test` 二进制跑不完（见第五轮方案 §5.J 的 J1）—— 这一轮修好之后它
+    /// 立刻暴露成 10 条失败。
+    ///
+    /// 【为什么是"升版本"而不是"把 1 从旧格式名单里去掉"】第 1 代确实**已经**被写过
+    /// （开发机上流通过），而它的记录**没有持久身份**（按会话轨序号索引）。升到 2 之后，
+    /// 旧档会被明确拒绝并给出可行动的理由，而不是被按序号猜着恢复 —— 猜错的后果是
+    /// 把 A 轨的曲线套到 B 轨上。插件从未发布给终端用户，所以"不迁移"是允许的。
+    const STATE_VERSION: u64 = 2;
 
     /// 有版本且有界的组件state；旧空state保持默认编辑。
     pub fn encode(&self) -> Result<Vec<u8>, String> {
@@ -614,17 +629,23 @@ impl EditState {
                 // 用户曲线不能按"标记是否存在"推断丢弃（旧载荷没有那个标记）。
                 // 权威存在时保留分析基线（pitch_orig/dyn_orig），它是渲染“原始值”
                 // 的缓存；只清显示编辑数组。缺少基线的冷恢复会退回源 PCM 原始音高。
-                let mut params = if authority_present {
+                // 【T2：权威在时 params 只是显示缓存】把整条显示数组写进存档，
+                // 读回来会被当成"用户编辑"—— 那正是"存档一次、参数线回退一次"。
+                //
+                // 【权威**不在**时不能清】此时显示数组就是**唯一**的一份数据（旧载荷、
+                // 或还没迁移到权威的编辑）。此前这一句无条件执行，于是"曲线只在显示
+                // 数组里"的工程存档一次就永久丢掉它 —— 用户画了线、保存、重开就没了。
+                // 只剥真正的派生缓存（分析基线），那是可以重算的。
+                let params = if authority_present {
+                    let mut params = params;
+                    params.pitch_edit.clear();
+                    params.tension_edit.clear();
+                    params.extra_curves.clear();
+                    params.pitch_edit_user_modified = false;
                     params
                 } else {
                     crate::editor::capture_edits::strip_derived_curves(&params)
                 };
-                // 【T2：权威在时 params 只是显示缓存】把整条显示数组写进存档，
-                // 读回来会被当成"用户编辑"—— 那正是"存档一次、参数线回退一次"。
-                params.pitch_edit.clear();
-                params.tension_edit.clear();
-                params.extra_curves.clear();
-                params.pitch_edit_user_modified = false;
                 (root, params)
             })
             .collect();
@@ -665,9 +686,6 @@ impl EditState {
         // 【加载即修复】历史存档可能带着层内重叠（旧版本能写进去）。`sanitize` 在
         // 上面已经跑过：无效 run 被丢弃、重叠被规范化 —— 读回来就是一份合法权威。
         restored.authority.sanitize();
-        if version == 1 && (!restored.params.is_empty() || !restored.tracks.is_empty()) {
-            return Err("legacy ARA edits have no persistent identity; cannot restore by session track number".into());
-        }
         // 【为什么逐条降级而不是整份拒绝】此前这里只要有一条记录没有身份就 `Err`，
         // 而两条恢复通道对这个错误的处置都是"整份不恢复"：ARA 存档那条只 `log::error!`
         // 然后 `return Ok(())`（宿主以为成功），VST3 `setState` 那条把错误传上去
@@ -1107,25 +1125,37 @@ mod tests {
         state.reconcile(&identity).unwrap();
         assert_eq!(state.tracks[0].volume, 0.25);
         assert_eq!(state.bindings["track"].len(), 2);
+        // 第 1 代（按会话轨序号索引、没有持久身份）必须被明确拒绝 —— 它现在走的是
+        // "版本不等于当前代际"那一条，而不是一条单独的 legacy 分支（那条分支永远
+        // 到不了：版本检查在它之前就返回了）。
         let mut legacy =
             serde_json::from_slice::<serde_json::Value>(&state.encode().unwrap()).unwrap();
         legacy["version"] = serde_json::json!(1);
-        assert!(state
+        let error = state
             .restore(&serde_json::to_vec(&legacy).unwrap())
-            .unwrap_err()
-            .contains("legacy"));
+            .unwrap_err();
+        assert!(error.contains("cannot be read"), "{error}");
         assert_eq!(state.revision, 1, "拒绝旧state保留现有编辑");
     }
 
-    /// **【第三轮】存档只有一个版本号，别的代际一律拒绝并给出可行动的话。**
+    /// **【第五轮】存档只有一个版本号，别的代际一律拒绝并给出可行动的话。**
     ///
     /// VST 版从未发布 ⇒ 没有需要兼容的旧存档 ⇒ 版本阶梯与全部迁移都已删除。
-    /// 这条用例同时钉住"写的是 1"与"读别的代际时不静默"。
+    /// 这条用例同时钉住"写的是**当前**版本号"与"读别的代际时不静默"。
+    ///
+    /// 【为什么断言改成 `STATE_VERSION` 而不是字面量】上一轮把字面量 1 写死在这里，
+    /// 而 `restore` 又把 `version == 1` 当成旧格式拒绝 —— 两边各自"正确"，合起来
+    /// 就是 `restore(encode(s))` 永远失败（用户：存档一次、参数线回退一次）。
+    /// 断言直接引用常量，这类自相矛盾就不可能再被"两边都通过"掩盖。
     #[test]
     fn a_foreign_state_version_is_rejected_with_an_actionable_message() {
         let mut state = EditState::default();
         let value: serde_json::Value = serde_json::from_slice(&state.encode().unwrap()).unwrap();
-        assert_eq!(value["version"].as_u64(), Some(1), "唯一版本号必须是 1");
+        assert_eq!(
+            value["version"].as_u64(),
+            Some(EditState::STATE_VERSION),
+            "存档必须写当前版本号"
+        );
         // 旧 v11 载荷（开发者机子上可能存在）：明确拒绝，且**不覆盖**在线状态。
         let mut legacy = value.clone();
         legacy["version"] = serde_json::json!(11);
@@ -1134,7 +1164,7 @@ mod tests {
             .unwrap_err();
         assert!(error.contains("cannot be read"), "{error}");
         assert!(error.contains("no migration"), "{error}");
-        // 缺版本：同样是拒绝（version 0 != 1）。
+        // 缺版本：同样是拒绝（version 0 != STATE_VERSION）。
         let mut missing = value.clone();
         missing.as_object_mut().unwrap().remove("version");
         assert!(state
@@ -1220,9 +1250,9 @@ mod tests {
         assert!(timeline.params_by_root_track.is_empty());
     }
 
-    /// v1 只写项目时间 authority：显示数组/旧 atlas 不得回灌成编辑。
+    /// 存档只写项目时间 authority：显示数组/旧 atlas 不得回灌成编辑。
     #[test]
-    fn v1_round_trip_keeps_explicit_runs_and_drops_display_arrays() {
+    fn round_trip_keeps_explicit_runs_and_drops_display_arrays() {
         let mut state = EditState::default();
         state.tracks.push(track_fixture("track"));
         state
@@ -1239,7 +1269,7 @@ mod tests {
         );
         let bytes = state.encode().unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(value["version"].as_u64(), Some(1));
+        assert_eq!(value["version"].as_u64(), Some(EditState::STATE_VERSION));
         assert!(
             value["edits"]["atlas"]["authorities"]
                 .as_object()
