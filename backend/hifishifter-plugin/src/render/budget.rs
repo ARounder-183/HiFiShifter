@@ -42,7 +42,9 @@ fn physical_memory_bytes() -> Option<usize> {
             if pages <= 0 || page_size <= 0 {
                 return None;
             }
-            usize::try_from(pages).ok()?.checked_mul(usize::try_from(page_size).ok()?)
+            usize::try_from(pages)
+                .ok()?
+                .checked_mul(usize::try_from(page_size).ok()?)
         }
     }
     #[cfg(not(any(windows, all(unix, not(target_os = "macos")))))]

@@ -811,7 +811,9 @@ pub fn compose_root_view(
                 .runs
                 .values()
                 .flat_map(|runs| runs.iter())
-                .map(|run| ((run.end_sec() * 1000.0 / fp.max(0.1)).ceil() as usize).saturating_add(1))
+                .map(|run| {
+                    ((run.end_sec() * 1000.0 / fp.max(0.1)).ceil() as usize).saturating_add(1)
+                })
                 .max()
                 .unwrap_or(0)
         })

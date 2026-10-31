@@ -909,10 +909,13 @@ fn apply_host_pitch_edit(
                 log::Level::Warn,
                 "ara.render.f0-unavailable",
                 format_args!(
-                    "[ara] clip {} has a pitch edit but no usable source F0 (len={}); \
-                     skipping synthesis this round and passing the host PCM through",
+                    "[ara] clip {} has a pitch edit but no usable source F0 \
+                     (f0={}, orig={}, edit={}); skipping synthesis this round and passing \
+                     the host PCM through",
                     clip.id,
                     clip_midi.len(),
+                    entry.pitch_orig.len(),
+                    entry.pitch_edit.len(),
                 ),
             );
             return Ok(false);

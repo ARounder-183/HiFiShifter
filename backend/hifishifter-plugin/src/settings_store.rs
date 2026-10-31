@@ -155,6 +155,19 @@ pub fn lock_param_lines() -> bool {
         }
     }
     let value = settings().lock_param_lines;
+    // 【为什么在变化时打一行 WARN】"我以为锁定是开着的"这类报障此前只能靠猜：
+    // 几何事务日志里有一个 `locked=` 读数，但没有"它是什么时候变的"。这一行只在
+    // 值**真的变化**时出现（含进程内第一次读），所以不会刷屏。
+    if guard.is_none_or(|(_, previous)| previous != value) {
+        log::warn!(
+            "[settings] lock_param_lines={value} revision={revision} (parameter lines now {})",
+            if value {
+                "follow the material"
+            } else {
+                "stay at their project position"
+            }
+        );
+    }
     *guard = Some((revision, value));
     value
 }

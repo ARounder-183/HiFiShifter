@@ -630,6 +630,7 @@ impl ExtensionOwner {
                 // "工程速率秒"折回源自己的秒（见 `RenderInput::project_sample_rate`）。
                 project_sample_rate: Some(self.setup_sample_rate()).filter(|rate| *rate > 0.0),
                 clip_parameters,
+                window: None,
             },
         ))
     }

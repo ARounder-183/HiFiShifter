@@ -1022,7 +1022,8 @@ impl DocumentSession {
             let live = self.regions.lock_or_recover();
             let complete = self.inventory_is_complete();
             // 每个活 region 的**当前**呈现身份（`clip_ids` 的现值，缺席才退回 key 形态）。
-            let mut region_ids: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+            let mut region_ids: std::collections::BTreeSet<String> =
+                std::collections::BTreeSet::new();
             for key in live.keys() {
                 region_ids.insert(match presented.get(*key) {
                     Some(id) => id.to_owned(),

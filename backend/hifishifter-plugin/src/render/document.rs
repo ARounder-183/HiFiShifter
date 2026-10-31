@@ -3164,7 +3164,7 @@ impl DocumentSession {
             let view = self.compose_param_view_with(&host, &edits, &root);
             edits.params.insert(root.clone(), view.params);
             hifishifter_kernel::log_limiter::emit_limited_key(
-                log::Level::Info,
+                log::Level::Warn,
                 "ara.param.write",
                 format_args!(
                     "[param] write root={root} param={param} range=[{start_frame}, {}) present={} rev={revision}",
@@ -3225,7 +3225,7 @@ impl DocumentSession {
             let view = self.compose_param_view_with(&host, &edits, &root);
             edits.params.insert(root.clone(), view.params);
             hifishifter_kernel::log_limiter::emit_limited_key(
-                log::Level::Info,
+                log::Level::Warn,
                 "ara.param.restore",
                 format_args!(
                     "[param] restore root={root} param={param} range=[{start}, {}) rev={revision}",

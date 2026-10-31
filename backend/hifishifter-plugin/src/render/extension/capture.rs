@@ -68,6 +68,7 @@ impl ExtensionOwner {
             // 它的时间线每次都被宿主重建、clip 身份由 region key 派生 —— Capture 没有
             // 那个问题（见 `render/input.rs::mix_interleaved` 的第一支）。
             clip_parameters: std::collections::BTreeMap::new(),
+            window: None,
         };
         Ok((revision, edit, with_curves, input))
     }
