@@ -2688,7 +2688,7 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
 /// **静默空转**（返回 `None` ⇒ 整条 clip 被跳过），于是"界面上倒放窗口是镜像、
 /// 声音却是对的"—— 这正是用户报障的"倒放 Offset 逻辑不对"的根因之一。
 /// 按**后缀**取键，两种 id 都能命中。
-fn host_item_guid(clip_id: &str) -> Option<&str> {
+pub(crate) fn host_item_guid(clip_id: &str) -> Option<&str> {
     const ITEM_TAG: &str = "ara-item-";
     clip_id
         .rfind(ITEM_TAG)
@@ -2699,7 +2699,7 @@ fn host_item_guid(clip_id: &str) -> Option<&str> {
 ///
 /// 与 [`host_item_guid`] 同一手法（按后缀取键），因此编辑器时间线的命名空间前缀
 /// 不影响它。
-fn region_key_of(clip_id: &str) -> Option<u64> {
+pub(crate) fn region_key_of(clip_id: &str) -> Option<u64> {
     const REGION_TAG: &str = "ara-region-";
     clip_id
         .rfind(REGION_TAG)

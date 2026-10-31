@@ -11,11 +11,48 @@ use std::collections::{BTreeMap, BTreeSet};
 
 const EPS: f64 = 1e-9;
 
+/// 宿主几何的**稳定身份**。
+///
+/// 【为什么不用 `clip.id`】呈现层的 id 会在 `ara-region-{key}` 与 `ara-item-{guid}`
+/// 之间迁移（见 `ara::model::remap_and_log` 的认领循环）。用 id 做键，一次迁移就会让
+/// 几何日志"少一条、多一条"，下一次移动因此算不出 Move —— 用户看到的就是"锁开了
+/// 跟没开一样"。
+///
+/// 【为什么优先 item GUID】GUID 跨会话存活、且**移动不会改变它**；region key 只在本次
+/// 会话内稳定；`clip:{id}` 只是最后兜底（`ara-clip-N` 形态）。
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct GeometryKey(String);
+
+impl GeometryKey {
+    pub fn item(guid: &str) -> Self {
+        Self(format!("item:{guid}"))
+    }
+    pub fn region(key: u64) -> Self {
+        Self(format!("region:{key}"))
+    }
+    pub fn clip(id: &str) -> Self {
+        Self(format!("clip:{id}"))
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl std::fmt::Display for GeometryKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// 一条 Clip 在项目时间轴上的几何事实。身份键优先 item GUID，ARA-only 用稳定指纹。
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ClipGeometry {
-    pub key: String,
+    pub key: GeometryKey,
     pub root: String,
     pub project_start: f64,
     pub project_duration: f64,
@@ -50,7 +87,7 @@ impl ClipGeometry {
             && !self.source_id.is_empty()
     }
 
-    pub fn from_clip(clip: &Clip, root: &str, key: String) -> Self {
+    pub fn from_clip(clip: &Clip, root: &str, key: GeometryKey) -> Self {
         let source_start = clip.source_start_sec.max(0.0);
         let source_end = clip
             .source_end_sec
@@ -158,7 +195,7 @@ pub fn classify(old: &ClipGeometry, new: &ClipGeometry) -> GeometryOp {
 /// 一个已确认的几何变化。`priority` 用于重叠窗口的确定性裁决。
 #[derive(Clone, Debug, PartialEq)]
 pub struct GeometryDelta {
-    pub key: String,
+    pub key: GeometryKey,
     pub old_root: String,
     pub new_root: String,
     pub old: GeometryWindow,
@@ -343,6 +380,15 @@ pub fn apply_geometry_transaction(
             sanitize.dropped_runs
         ));
     }
+    // 【残影守卫】Move/Stretch 的每一帧都必须落到新位置；任何一帧被丢弃（例如目标
+    // 起点为负）都会在旧位置留下"搬不走的残影"。宁可整笔不生效，也不要留半条线。
+    if report.dropped_frames > 0 {
+        return Err(format!(
+            "geometry transaction would drop {} frame(s); the authority was left unchanged",
+            report.dropped_frames
+        ));
+    }
+    report.applied_deltas += active.len();
     // 复制必须在移动后的目标上执行，但源数据取事务开始前的快照。
     if !copies.is_empty() {
         let source_snapshot = authority.clone();
@@ -364,7 +410,6 @@ pub fn apply_geometry_transaction(
     candidate.revision = authority.revision.saturating_add(1);
     candidate.next_seq = candidate.next_seq.max(authority.next_seq);
     *authority = candidate;
-    report.applied_deltas = active.len();
     Ok(report)
 }
 
@@ -506,16 +551,63 @@ pub fn copy_geometry_window(
     Ok(report)
 }
 
+/// 两条几何是否描述**同一份素材窗口**（与"同一时刻"无关）。
+///
+/// 【为什么这是配对判据】宿主在移动 / 跨轨拖动时可能销毁并重建 region，clip 身份因此
+/// 变化，但"源文件 + 源窗口 + 速率 + 方向"逐项不变。满足这条的"消失 + 出现"就是一次
+/// **移动**，而不是"复制"。
+fn same_content(a: &ClipGeometry, b: &ClipGeometry) -> bool {
+    a.source_id == b.source_id
+        && (a.source_start - b.source_start).abs() <= 1e-6
+        && (a.source_duration - b.source_duration).abs() <= 1e-6
+        && (a.rate - b.rate).abs() <= 1e-9
+        && a.reversed == b.reversed
+}
+
+/// 一帧几何事实。
+///
+/// 【为什么需要 `complete`】"这一帧没看到某个 clip"有五种正常来源：呈现层过滤、
+/// scope 暂时为空、工作区身份迁移窗口、轨道全 mute、`is_well_formed` 失败。把它们
+/// 一律当成"clip 被删了"会让几何日志被**空帧清空** —— 那正是"锁定失效"的头号成因。
+/// 只有枚举方明确声明"这一帧覆盖了全部对象"时，才允许丢弃没见到的条目。
+#[derive(Clone, Debug, Default)]
+pub struct GeometryFrame {
+    pub clips: Vec<ClipGeometry>,
+    pub complete: bool,
+}
+
+impl GeometryFrame {
+    pub fn new(clips: Vec<ClipGeometry>, complete: bool) -> Self {
+        Self { clips, complete }
+    }
+
+    /// 完整帧（宿主清单枚举成功时的常态）。
+    pub fn complete(clips: Vec<ClipGeometry>) -> Self {
+        Self {
+            clips,
+            complete: true,
+        }
+    }
+
+    /// 不完整帧：只允许**新增/更新**，绝不剪枝。
+    pub fn partial(clips: Vec<ClipGeometry>) -> Self {
+        Self {
+            clips,
+            complete: false,
+        }
+    }
+}
+
 /// 运行时几何日志：不存档，可由宿主清单重建。只比较“旧日志 → 当前事实”。
 #[derive(Clone, Debug, Default)]
 pub struct GeometryJournal {
-    entries: BTreeMap<String, ClipGeometry>,
+    entries: BTreeMap<GeometryKey, ClipGeometry>,
     epoch: u64,
-    unknown_keys: BTreeSet<String>,
+    unknown_keys: BTreeSet<GeometryKey>,
 }
 
 impl GeometryJournal {
-    pub fn entries(&self) -> &BTreeMap<String, ClipGeometry> {
+    pub fn entries(&self) -> &BTreeMap<GeometryKey, ClipGeometry> {
         &self.entries
     }
 
@@ -523,94 +615,166 @@ impl GeometryJournal {
         self.epoch
     }
 
-    pub fn unknown_keys(&self) -> &BTreeSet<String> {
+    pub fn unknown_keys(&self) -> &BTreeSet<GeometryKey> {
         &self.unknown_keys
     }
 
-    /// 与当前清单比较，产出 Move/Stretch；新 key 不复制、消失 key 不删除权威。
-    pub fn diff(&mut self, current: &[ClipGeometry]) -> Vec<GeometryDelta> {
+    /// 与这一帧几何比较，产出 Move / Stretch / Copy。
+    ///
+    /// 【三条与旧实现的实质差别】
+    /// 1. **不在 `diff` 里剪枝**。"没看到"不等于"被删了"；日志的推进只发生在
+    ///    `commit` / `observe_only`（即"这一轮真的处理完了"），且完整帧才丢条目。
+    /// 2. **消失 ↔ 出现会配对成 Move**。身份迁移（region → item GUID）与"宿主销毁重建
+    ///    region 的移动"都表现为"一条消失、一条出现"，内容窗口完全一致。旧实现把它
+    ///    当 Copy，于是源保留 ⇒ 旧位置永远留着一条线。
+    /// 3. **Copy 只在源仍在当前帧时成立**。真正的复制/粘贴，源必然还在；源不在就不是
+    ///    复制，是移动。
+    pub fn diff(&mut self, frame: &GeometryFrame) -> Vec<GeometryDelta> {
         self.epoch = self.epoch.saturating_add(1);
-        let mut seen = BTreeSet::new();
-        let mut deltas = Vec::new();
-        for (order, geometry) in current.iter().enumerate() {
+        let mut current = BTreeMap::<GeometryKey, (usize, &ClipGeometry)>::new();
+        for (order, geometry) in frame.clips.iter().enumerate() {
             if geometry.key.is_empty() || !geometry.is_well_formed() {
                 self.unknown_keys.insert(geometry.key.clone());
                 continue;
             }
-            seen.insert(geometry.key.clone());
-            match self.entries.get(&geometry.key) {
-                Some(old) => {
-                    if let Some(mut delta) =
-                        GeometryDelta::from_geometry(old, geometry, order as u64)
-                    {
-                        delta.priority = if old.root == geometry.root { 1 } else { 2 };
-                        deltas.push(delta);
-                    }
-                }
-                None => {
-                    // 新身份：只接受**内容窗口完全一致**的唯一原 Clip 作为复制源。
-                    // 分割子段源窗是父段子集，不会命中；身份歧义则宁可少复制。
-                    let candidates = self
-                        .entries
-                        .values()
-                        .filter(|old| {
-                            old.source_id == geometry.source_id
-                                && (old.source_start - geometry.source_start).abs() <= 1e-6
-                                && (old.source_duration - geometry.source_duration).abs() <= 1e-6
-                                && (old.rate - geometry.rate).abs() <= 1e-9
-                                && (old.project_start - geometry.project_start).abs() > 1e-6
-                        })
-                        .collect::<Vec<_>>();
-                    if let [old] = candidates.as_slice() {
-                        deltas.push(GeometryDelta {
-                            key: geometry.key.clone(),
-                            old_root: old.root.clone(),
-                            new_root: geometry.root.clone(),
-                            old: GeometryWindow::new(old.project_start, old.project_duration),
-                            new: GeometryWindow::new(
-                                geometry.project_start,
-                                geometry.project_duration,
-                            ),
-                            op: GeometryOp::Copy {
-                                source: GeometryWindow::new(
-                                    old.project_start,
-                                    old.project_duration,
-                                ),
-                                target: GeometryWindow::new(
-                                    geometry.project_start,
-                                    geometry.project_duration,
-                                ),
-                            },
-                            priority: 0,
-                            order: order as u64,
-                        });
-                    }
-                }
+            current.insert(geometry.key.clone(), (order, geometry));
+        }
+        let mut deltas = Vec::new();
+        // ① 键相同的：正常分类（Move / Stretch / 其余丢弃）。
+        for (key, (order, geometry)) in &current {
+            let Some(old) = self.entries.get(key) else {
+                continue;
+            };
+            if let Some(mut delta) = GeometryDelta::from_geometry(old, geometry, *order as u64) {
+                delta.priority = if old.root == geometry.root { 1 } else { 2 };
+                deltas.push(delta);
             }
         }
-        self.entries.retain(|key, _| seen.contains(key));
+        // ② 消失 ↔ 出现：按内容窗口配对。
+        let vanished = self
+            .entries
+            .iter()
+            .filter(|(key, _)| !current.contains_key(*key))
+            .map(|(_, geometry)| geometry)
+            .collect::<Vec<_>>();
+        let appeared = current
+            .iter()
+            .filter(|(key, _)| !self.entries.contains_key(*key))
+            .map(|(_, (order, geometry))| (*order, *geometry))
+            .collect::<Vec<_>>();
+        let mut consumed = BTreeSet::<usize>::new();
+        let mut upgraded = BTreeSet::<GeometryKey>::new();
+        let mut paired = BTreeSet::<GeometryKey>::new();
+        let mut ambiguous = BTreeSet::<GeometryKey>::new();
+        for (order, fresh) in &appeared {
+            let candidates = vanished
+                .iter()
+                .enumerate()
+                .filter(|(index, old)| !consumed.contains(index) && same_content(old, fresh))
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            // 多个候选 ⇒ 不配对（宁可不动，也不要错搬）。但它仍然"可能是一次移动"，
+            // 因此绝不能在同一帧里再把它当成复制 —— 否则源保留、旧位置永远有线。
+            if candidates.len() > 1 {
+                ambiguous.insert(fresh.key.clone());
+                continue;
+            }
+            let [index] = candidates.as_slice() else {
+                continue;
+            };
+            let old = vanished[*index];
+            consumed.insert(*index);
+            paired.insert(fresh.key.clone());
+            let moved =
+                old.root != fresh.root || (fresh.project_start - old.project_start).abs() > EPS;
+            if moved {
+                let window_old = GeometryWindow::new(old.project_start, old.project_duration);
+                let window_new = GeometryWindow::new(fresh.project_start, fresh.project_duration);
+                if window_old.is_valid() && window_new.is_valid() {
+                    deltas.push(GeometryDelta {
+                        key: fresh.key.clone(),
+                        old_root: old.root.clone(),
+                        new_root: fresh.root.clone(),
+                        old: window_old,
+                        new: window_new,
+                        op: GeometryOp::Move {
+                            old: window_old,
+                            new: window_new,
+                        },
+                        priority: if old.root == fresh.root { 1 } else { 2 },
+                        order: *order as u64,
+                    });
+                }
+            } else {
+                // 只是身份升级（同一位置、同一内容）：不产生 delta，只换键。
+                upgraded.insert(fresh.key.clone());
+            }
+        }
+        // ③ 复制：源必须**仍在当前帧**里。
+        for (order, fresh) in &appeared {
+            if upgraded.contains(&fresh.key)
+                || paired.contains(&fresh.key)
+                || ambiguous.contains(&fresh.key)
+            {
+                continue;
+            }
+            let sources = current
+                .values()
+                .filter(|(_, geometry)| {
+                    geometry.key != fresh.key && same_content(geometry, fresh)
+                })
+                .map(|(_, geometry)| *geometry)
+                .collect::<Vec<_>>();
+            let [source] = sources.as_slice() else {
+                continue;
+            };
+            if (source.project_start - fresh.project_start).abs() <= EPS {
+                continue;
+            }
+            deltas.push(GeometryDelta {
+                key: fresh.key.clone(),
+                old_root: source.root.clone(),
+                new_root: fresh.root.clone(),
+                old: GeometryWindow::new(source.project_start, source.project_duration),
+                new: GeometryWindow::new(fresh.project_start, fresh.project_duration),
+                op: GeometryOp::Copy {
+                    source: GeometryWindow::new(source.project_start, source.project_duration),
+                    target: GeometryWindow::new(fresh.project_start, fresh.project_duration),
+                },
+                priority: 0,
+                order: *order as u64,
+            });
+        }
         deltas
     }
 
-    /// 只有事务成功后调用：把当前几何写入日志。
-    pub fn commit(&mut self, current: &[ClipGeometry], epoch: u64) {
-        self.entries = current
-            .iter()
-            .filter(|geometry| !geometry.key.is_empty() && geometry.is_well_formed())
-            .map(|geometry| {
-                let mut geometry = geometry.clone();
-                geometry.last_seen_epoch = epoch;
-                (geometry.key.clone(), geometry)
-            })
-            .collect();
+    /// 只有事务成功后调用：把这一帧几何并入日志。
+    ///
+    /// 完整帧整份替换（消失的条目随之丢弃）；不完整帧只做**并集**（绝不因为"这一轮
+    /// 没枚举到"而丢掉一条活着的 clip）。
+    pub fn commit(&mut self, frame: &GeometryFrame, epoch: u64) {
+        let mut next = if frame.complete {
+            BTreeMap::new()
+        } else {
+            self.entries.clone()
+        };
+        for geometry in &frame.clips {
+            if geometry.key.is_empty() || !geometry.is_well_formed() {
+                continue;
+            }
+            let mut geometry = geometry.clone();
+            geometry.last_seen_epoch = epoch;
+            next.insert(geometry.key.clone(), geometry);
+        }
+        self.entries = next;
         self.epoch = epoch.max(self.epoch);
         self.unknown_keys.clear();
     }
 
     /// 锁定关闭/事务失败时只更新日志（I5）。
-    pub fn observe_only(&mut self, current: &[ClipGeometry]) {
+    pub fn observe_only(&mut self, frame: &GeometryFrame) {
         let epoch = self.epoch.saturating_add(1);
-        self.commit(current, epoch);
+        self.commit(frame, epoch);
     }
 }
 
@@ -725,7 +889,7 @@ mod tests {
 
     fn clip(start: f64, len: f64, source_start: f64, source_len: f64, rate: f64) -> ClipGeometry {
         ClipGeometry {
-            key: "clip".into(),
+            key: GeometryKey::clip("clip"),
             root: "root".into(),
             project_start: start,
             project_duration: len,
@@ -913,10 +1077,157 @@ mod tests {
     fn journal_diff_is_one_shot_and_commit_advances_epoch() {
         let mut journal = GeometryJournal::default();
         let old = clip(0.0, 0.05, 0.0, 0.05, 1.0);
-        journal.commit(std::slice::from_ref(&old), 1);
+        journal.commit(&GeometryFrame::complete(vec![old.clone()]), 1);
         let new = clip(0.02, 0.05, 0.0, 0.05, 1.0);
-        assert_eq!(journal.diff(std::slice::from_ref(&new)).len(), 1);
-        journal.commit(std::slice::from_ref(&new), 2);
-        assert!(journal.diff(std::slice::from_ref(&new)).is_empty());
+        assert_eq!(journal.diff(&GeometryFrame::complete(vec![new.clone()])).len(), 1);
+        journal.commit(&GeometryFrame::complete(vec![new.clone()]), 2);
+        assert!(journal.diff(&GeometryFrame::complete(vec![new])).is_empty());
+    }
+
+    /// G1：空帧**不得**剪掉日志 —— 这是"锁定失效"的头号成因。
+    #[test]
+    fn empty_frame_never_prunes_the_journal() {
+        let mut journal = GeometryJournal::default();
+        let old = clip(0.0, 0.05, 0.0, 0.05, 1.0);
+        journal.commit(&GeometryFrame::complete(vec![old.clone()]), 1);
+        assert!(journal.diff(&GeometryFrame::partial(Vec::new())).is_empty());
+        assert_eq!(journal.entries().len(), 1, "partial empty frame pruned");
+        assert!(journal.diff(&GeometryFrame::complete(Vec::new())).is_empty());
+        assert_eq!(journal.entries().len(), 1, "diff must not prune at all");
+        journal.commit(&GeometryFrame::complete(Vec::new()), 2);
+        assert!(journal.entries().is_empty(), "complete empty frame must prune");
+    }
+
+    /// G2：不完整帧只允许新增/更新，绝不能因为"没枚举到"丢掉活着的条目。
+    #[test]
+    fn incomplete_frame_keeps_unseen_entries() {
+        let mut journal = GeometryJournal::default();
+        let a = clip(0.0, 0.05, 0.0, 0.05, 1.0);
+        let b = ClipGeometry {
+            key: GeometryKey::clip("b"),
+            ..a.clone()
+        };
+        journal.commit(&GeometryFrame::complete(vec![a.clone(), b.clone()]), 1);
+        journal.commit(&GeometryFrame::partial(vec![a.clone()]), 2);
+        assert_eq!(journal.entries().len(), 2, "partial commit must merge");
+        journal.commit(&GeometryFrame::complete(vec![a]), 3);
+        assert_eq!(journal.entries().len(), 1, "complete commit must replace");
+    }
+
+    /// G4：身份变了、素材没变 ⇒ 一次 **Move**（不是 Copy）。
+    #[test]
+    fn a_move_with_new_identity_becomes_a_move_not_a_copy() {
+        let mut journal = GeometryJournal::default();
+        let old = ClipGeometry {
+            key: GeometryKey::region(7),
+            ..clip(0.0, 0.05, 0.0, 0.05, 1.0)
+        };
+        journal.commit(&GeometryFrame::complete(vec![old.clone()]), 1);
+        let new = ClipGeometry {
+            key: GeometryKey::item("{GUID}"),
+            ..clip(0.20, 0.05, 0.0, 0.05, 1.0)
+        };
+        let deltas = journal.diff(&GeometryFrame::complete(vec![new]));
+        assert_eq!(deltas.len(), 1);
+        assert!(matches!(deltas[0].op, GeometryOp::Move { .. }));
+        let mut authority = authority_with_run();
+        apply_geometry_transaction(&mut authority, &deltas).unwrap();
+        // 旧窗口被清空、新窗口接上；窗口之外的样本原地保留（那是另一段时间）。
+        let runs = &authority.roots["root"].runs["pitch_edit"];
+        assert!(
+            runs.iter()
+                .all(|run| run.placement.start_sec >= 0.05 - 1e-9),
+            "no sample may stay inside the old window: {runs:?}"
+        );
+        assert!(
+            runs.iter()
+                .any(|run| (run.placement.start_sec - 0.20).abs() < 1e-9),
+            "the moved segment must land on the new position"
+        );
+    }
+
+    /// G5：只是身份升级（位置不变）⇒ 不产生 delta。
+    #[test]
+    fn an_identity_upgrade_produces_no_delta() {
+        let mut journal = GeometryJournal::default();
+        let old = ClipGeometry {
+            key: GeometryKey::region(7),
+            ..clip(0.0, 0.05, 0.0, 0.05, 1.0)
+        };
+        journal.commit(&GeometryFrame::complete(vec![old]), 1);
+        let new = ClipGeometry {
+            key: GeometryKey::item("{GUID}"),
+            ..clip(0.0, 0.05, 0.0, 0.05, 1.0)
+        };
+        assert!(journal.diff(&GeometryFrame::complete(vec![new.clone()])).is_empty());
+        journal.commit(&GeometryFrame::complete(vec![new]), 2);
+        assert_eq!(journal.entries().len(), 1);
+    }
+
+    /// G6：真正的复制（源仍在）⇒ Copy，源曲线逐字节不变。
+    #[test]
+    fn a_duplicate_keeps_the_source_curve() {
+        let mut journal = GeometryJournal::default();
+        let source = clip(0.0, 0.05, 0.0, 0.05, 1.0);
+        journal.commit(&GeometryFrame::complete(vec![source.clone()]), 1);
+        let copy = ClipGeometry {
+            key: GeometryKey::item("{COPY}"),
+            ..clip(0.20, 0.05, 0.0, 0.05, 1.0)
+        };
+        let deltas = journal.diff(&GeometryFrame::complete(vec![source, copy]));
+        assert_eq!(deltas.len(), 1);
+        assert!(matches!(deltas[0].op, GeometryOp::Copy { .. }));
+    }
+
+    /// G7：同内容多条同时出现 ⇒ 不猜。
+    #[test]
+    fn ambiguous_pairs_are_not_guessed() {
+        let mut journal = GeometryJournal::default();
+        let a = clip(0.0, 0.05, 0.0, 0.05, 1.0);
+        let b = ClipGeometry {
+            key: GeometryKey::clip("b"),
+            ..clip(0.10, 0.05, 0.0, 0.05, 1.0)
+        };
+        journal.commit(&GeometryFrame::complete(vec![a, b]), 1);
+        let a2 = ClipGeometry {
+            key: GeometryKey::item("{A}"),
+            ..clip(0.30, 0.05, 0.0, 0.05, 1.0)
+        };
+        let b2 = ClipGeometry {
+            key: GeometryKey::item("{B}"),
+            ..clip(0.40, 0.05, 0.0, 0.05, 1.0)
+        };
+        let deltas = journal.diff(&GeometryFrame::complete(vec![a2, b2]));
+        assert!(
+            deltas.is_empty(),
+            "two same-content pairs must not be guessed: {deltas:?}"
+        );
+    }
+
+    /// G9：applied_deltas 必须把 Copy 也算进去。
+    #[test]
+    fn geometry_transaction_reports_every_delta() {
+        let mut authority = authority_with_run();
+        let source = clip(0.0, 0.03, 0.0, 0.03, 1.0);
+        let copy = ClipGeometry {
+            key: GeometryKey::clip("copy"),
+            ..clip(0.10, 0.03, 0.0, 0.03, 1.0)
+        };
+        let delta = GeometryDelta {
+            key: copy.key.clone(),
+            old_root: "root".into(),
+            new_root: "root".into(),
+            old: GeometryWindow::new(0.0, 0.03),
+            new: GeometryWindow::new(0.10, 0.03),
+            op: GeometryOp::Copy {
+                source: GeometryWindow::new(0.0, 0.03),
+                target: GeometryWindow::new(0.10, 0.03),
+            },
+            priority: 0,
+            order: 0,
+        };
+        let report = apply_geometry_transaction(&mut authority, &[delta]).unwrap();
+        assert_eq!(report.applied_deltas, 1);
+        let _ = source;
     }
 }

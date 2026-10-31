@@ -2385,13 +2385,18 @@ impl DocumentSession {
     }
 
     /// 宿主几何刷新后调用：锁定开启时变换 run，关闭时只记账。
+    ///
+    /// 【为什么是 partial 帧】这里的 `workspace_timeline_locked` 已经按本实例的
+    /// assignment 过滤过；把它当完整帧会让"这一轮没分配到的 clip"从日志里消失。
+    /// 模型收口（`remap_and_log`）那条路径才提供完整帧。
     pub(crate) fn reconcile_parameter_geometry(
         &self,
     ) -> Result<hifishifter_kernel::editor::param_geometry::TransformReport, String> {
         let _transaction = self.transaction.lock_or_recover();
         let host = self.workspace_timeline_locked()?;
+        let frame = self.geometry_frame(&host, false);
         let mut edits = self.edits.lock_or_recover();
-        self.reconcile_parameter_geometry_locked(&host, &mut edits)
+        self.reconcile_parameter_geometry_locked(&frame, &mut edits)
     }
 
     /// 当前权威是否在某根轨上有编辑（渲染/分析闸口用）。
@@ -2894,21 +2899,47 @@ impl DocumentSession {
         Ok(())
     }
 
-    /// 把当前宿主 clip 几何与日志做一次事务；锁定关闭只更新日志。
-    pub(crate) fn reconcile_parameter_geometry_locked(
+    /// 一条 clip 的几何身份：item GUID 优先，其次 region key，最后才是 clip id。
+    ///
+    /// 【为什么不能直接用 `clip.id`】它会在 `ara-region-{key}` 与 `ara-item-{guid}`
+    /// 之间迁移；几何日志一旦按 id 建键，迁移就会让日志"少一条、多一条"，下一次移动
+    /// 因此算不出 Move（用户看到的正是"锁开了跟没开一样"）。
+    fn geometry_key_for(
+        clip: &hifishifter_kernel::state::Clip,
+        region_items: &std::collections::HashMap<u64, String>,
+    ) -> hifishifter_kernel::editor::param_geometry::GeometryKey {
+        use hifishifter_kernel::editor::param_geometry::GeometryKey;
+        if let Some(guid) = crate::editor::workspace::host_item_guid(&clip.id) {
+            return GeometryKey::item(guid);
+        }
+        if let Some(key) = parse_region_key_from_clip_id(&clip.id) {
+            if let Some(guid) = region_items.get(&key) {
+                return GeometryKey::item(guid);
+            }
+            return GeometryKey::region(key);
+        }
+        GeometryKey::clip(&clip.id)
+    }
+
+    /// 这一轮时间线的几何事实。
+    ///
+    /// `complete` 只能由"枚举覆盖了本文档全部 region"的调用方声明（模型收口）；呈现层
+    /// 过滤后的视图必须传 `false` —— 否则"这一轮没看到"会被当成"被删了"，几何日志被
+    /// 空帧清空。
+    pub(crate) fn geometry_frame(
         &self,
         timeline: &hifishifter_kernel::state::TimelineState,
-        edits: &mut crate::state_channel::EditState,
-    ) -> Result<hifishifter_kernel::editor::param_geometry::TransformReport, String> {
-        use hifishifter_kernel::editor::param_geometry::{
-            apply_geometry_transaction, ClipGeometry,
-        };
-        let current = timeline
+        complete: bool,
+    ) -> hifishifter_kernel::editor::param_geometry::GeometryFrame {
+        use hifishifter_kernel::editor::param_geometry::{ClipGeometry, GeometryFrame};
+        let region_items = self.region_items.lock_or_recover();
+        let clips = timeline
             .clips
             .iter()
             .filter_map(|clip| {
                 let root = timeline.resolve_root_track_id(&clip.track_id)?;
-                let mut geometry = ClipGeometry::from_clip(clip, &root, clip.id.clone());
+                let key = Self::geometry_key_for(clip, &region_items);
+                let mut geometry = ClipGeometry::from_clip(clip, &root, key);
                 if geometry.source_id.is_empty() {
                     geometry.source_id = clip
                         .source_path
@@ -2917,15 +2948,56 @@ impl DocumentSession {
                 }
                 Some(geometry)
             })
-            .collect::<Vec<_>>();
-        if current.is_empty() && !timeline.clips.is_empty() {
-            return Ok(Default::default());
-        }
+            .collect();
+        GeometryFrame::new(clips, complete)
+    }
+
+    /// 把这一帧宿主几何与日志做一次事务；锁定关闭只更新日志。
+    ///
+    /// 【为什么收 `GeometryFrame` 而不是裸数组】`complete` 是"能不能剪枝"的唯一判据。
+    /// 旧签名（`&[ClipGeometry]`）让"空帧"与"全部删除"长得一模一样，日志因此会被
+    /// 呈现层的任何一次过滤清空。
+    pub(crate) fn reconcile_parameter_geometry_locked(
+        &self,
+        frame: &hifishifter_kernel::editor::param_geometry::GeometryFrame,
+        edits: &mut crate::state_channel::EditState,
+    ) -> Result<hifishifter_kernel::editor::param_geometry::TransformReport, String> {
+        use hifishifter_kernel::editor::param_geometry::apply_geometry_transaction;
         let locked = crate::settings_store::lock_param_lines();
         let mut journal = self.geometry_journal.lock_or_recover();
-        let deltas = journal.diff(&current);
+        let deltas = journal.diff(frame);
+        // 【诊断】几何是"锁定失效"类问题的第一现场：这条读数回答"这一帧有几条
+        // clip、日志里有几条、算出了哪些 delta"。没有它，用户报"锁没生效"时只能
+        // 从代码反推哪一步断了（见 docs/superpowers/plans/…-round2.md §1.5）。
+        if !deltas.is_empty() || frame.clips.is_empty() {
+            let ops = deltas
+                .iter()
+                .map(|delta| {
+                    use hifishifter_kernel::editor::param_geometry::GeometryOp;
+                    let op = match delta.op {
+                        GeometryOp::Move { .. } => "move",
+                        GeometryOp::Stretch { .. } => "stretch",
+                        GeometryOp::Copy { .. } => "copy",
+                        GeometryOp::TrimOrNone => "trim",
+                        GeometryOp::Replace => "replace",
+                    };
+                    format!("{}:{op}", delta.key)
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "ara.geom.trace",
+                format_args!(
+                    "[geom] clips={} complete={} journal={} locked={locked} deltas=[{ops}]",
+                    frame.clips.len(),
+                    frame.complete,
+                    journal.entries().len(),
+                ),
+            );
+        }
         if !locked {
-            journal.observe_only(&current);
+            journal.observe_only(frame);
             return Ok(Default::default());
         }
         let report = match apply_geometry_transaction(&mut edits.authority, &deltas) {
@@ -2947,7 +3019,7 @@ impl DocumentSession {
             edits.revision = edits.revision.saturating_add(1);
         }
         let epoch = journal.epoch();
-        journal.commit(&current, epoch);
+        journal.commit(frame, epoch);
         *self.last_geometry_report.lock_or_recover() = Some(report.clone());
         Ok(report)
     }

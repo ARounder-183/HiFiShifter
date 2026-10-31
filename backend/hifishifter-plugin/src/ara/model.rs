@@ -1242,20 +1242,29 @@ impl ModelHandle {
                     owner.refresh_ui_inventory();
                 }
                 let transaction = session.transaction.lock_or_recover();
+                let claimed_ids: Option<std::collections::HashMap<u64, String>>;
                 {
                     let items = self.session.region_items.lock_or_recover();
-                    let mut ids = self.session.clip_ids.lock_or_recover();
+                    let ids = self.session.clip_ids.lock_or_recover();
+                    // 【R6：身份必须原子发布】这里只把"最终身份"算出来，**不**就地改
+                    // `clip_ids`。旧实现在循环里 `ids.insert(...)`，而 `session.timeline`
+                    // 要到几十行之后才重新发布 —— 中间那段窗口里 `clip_ids` 说
+                    // `ara-item-GUID`、已发布时间线说 `ara-region-N`，
+                    // `workspace_timeline_locked` 按 id 过滤会把**全部 clip 滤掉**：
+                    // 工作区时间线短暂为空 ⇒ 几何日志被清空（锁定失效）+ 呈现层误判。
+                    let mut final_ids = ids.clone();
                     let mut claimed = 0usize;
                     for clip in &mut timeline.clips {
                         if let Some((key, _)) = ids.iter().find(|(_, id)| **id == clip.id) {
                             if let Some(item) = items.get(key) {
                                 let key = *key;
                                 clip.id = format!("ara-item-{item}");
-                                ids.insert(key, clip.id.clone());
+                                final_ids.insert(key, clip.id.clone());
                                 claimed += 1;
                             }
                         }
                     }
+                    claimed_ids = Some(final_ids);
                     // 用户报障时最需要的一行：多少 clip 认领到了宿主 item GUID。
                     // 认领不到的会停在 `ara-clip-N`，随后被清单侧 retain 剔除 ——
                     // 这就是"子轨道 Item 没有变成真 Clip"的直接读数。
@@ -1333,9 +1342,10 @@ impl ModelHandle {
                         // 【唯一几何事务入口】锁定状态只在事务开始时读一次；关闭时
                         // 这里只更新几何日志，权威哈希不变。分割/裁剪不产生 Move，
                         // 因此也不会复制或重采样任何曲线。
+                        let frame = self.session.geometry_frame(&timeline, true);
                         if let Err(error) = self
                             .session
-                            .reconcile_parameter_geometry_locked(&timeline, &mut edits)
+                            .reconcile_parameter_geometry_locked(&frame, &mut edits)
                         {
                             // 几何事务失败只影响这一轮参数放置；几何与 PCM 仍照常发布，
                             // 下一轮用同一 delta 重试（journal 未提交）。
@@ -1368,6 +1378,12 @@ impl ModelHandle {
                 log::info!("[ara] {}", self.ledger.summary());
                 self.log_published_revisions(&timeline);
                 self.log_identity_readings(&timeline);
+                // 【R6】先写 `clip_ids`、紧接着写已发布时间线：两者的不一致窗口从
+                // "整个 remap 的后半段"缩短到"两次赋值之间"。读者要么看到 region 形态的
+                // 两张表，要么看到 item 形态的两张表。
+                if let Some(final_ids) = claimed_ids {
+                    *self.session.clip_ids.lock_or_recover() = final_ids;
+                }
                 *self.session.timeline.lock_or_recover() = Some(timeline.clone());
                 self.timeline = Some(timeline);
                 // 只有**成功发布**才记指纹：失败时留着旧指纹，下一次照常重试。
