@@ -27,6 +27,8 @@ export type ParamViewSegment = {
     referenceKind: ParamReferenceKind;
     orig: number[];
     edit: number[];
+    /** 显式编辑位图；true = 该帧有用户编辑，false = 取当前基线。 */
+    edited?: boolean[];
     /**
      * dyn 专用：后端 `edit_sentinel`「未画帧」位图，与 `edit` 逐帧对齐
      * （同一次取数、同一 stride）。

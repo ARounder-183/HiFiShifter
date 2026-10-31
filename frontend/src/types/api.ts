@@ -536,6 +536,11 @@ export interface ParamFramesPayload {
     start_frame: number;
     orig: number[];
     edit: number[];
+    /** 与 orig/edit 逐帧对齐的显式编辑位图（PFB2）。 */
+    edited?: boolean[];
+    authority_revision?: number;
+    baseline_revision?: number;
+    geometry_revision?: number;
     /**
      * 二进制编码的曲线数据（Base64）。`paramsApi.getParamFrames` 默认请求二进制
      * 并在 API 层解码成 `orig`/`edit`，正常情况下调用方不会见到该字段有值。

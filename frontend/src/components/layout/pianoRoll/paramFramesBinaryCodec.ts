@@ -4,11 +4,9 @@
  * 解析后端 `get_param_frames`（`binary=true`）返回的曲线数据。
  * 后端以 Base64 编码传输，本模块解码后按以下协议解析：
  *
- * 协议格式：[Header 8B] [orig f32[count]] [edit f32[count]]，小端序
- *
- * Header:
- *   bytes 0-3:  magic "PFB1" (4 bytes)
- *   bytes 4-7:  count (u32, little-endian) — orig/edit 各自的采样数
+ * 协议格式：
+ *   PFB2: [magic "PFB2"][count u32][flags u32][reserved u32][orig f32[count]][edit f32[count]][edited u8[count]]
+ *   PFB1: [magic "PFB1"][count u32][orig f32[count]][edit f32[count]]（只读兼容）
  *
  * 与后端 `commands/params.rs::encode_param_frames_binary` 配套，
  * 改动任一侧必须同步另一侧。
@@ -22,11 +20,13 @@
  *   · 解码用 DataView 一次性建 Float32Array 视图，接近零拷贝。
  */
 
-/** Header 字节数 */
-const HEADER_SIZE = 8;
+/** PFB1 Header 字节数 */
+const HEADER_V1_SIZE = 8;
+/** PFB2 Header 字节数（magic + count + flags + reserved） */
+const HEADER_V2_SIZE = 16;
 
-/** 魔数 "PFB1"（Param Frames Binary v1） */
-const MAGIC = "PFB1";
+const MAGIC_V1 = "PFB1";
+const MAGIC_V2 = "PFB2";
 
 /** 解码后的参数曲线二进制数据 */
 export interface ParamFramesBinary {
@@ -36,6 +36,8 @@ export interface ParamFramesBinary {
     orig: Float32Array;
     /** 编辑曲线（Float32Array，零拷贝视图） */
     edit: Float32Array;
+    /** 显式编辑位图（PFB2；PFB1 用 edit != orig 保守推导） */
+    edited: Uint8Array;
 }
 
 /**
@@ -61,36 +63,46 @@ export function base64ToArrayBuffer(base64: string): ArrayBuffer {
  * @returns 解码后的数据，或 null（数据无效时）
  */
 export function decodeParamFramesBinary(buffer: ArrayBuffer): ParamFramesBinary | null {
-    if (buffer.byteLength < HEADER_SIZE) return null;
+    if (buffer.byteLength < HEADER_V1_SIZE) return null;
 
     const view = new DataView(buffer);
-
     const magic = String.fromCharCode(
         view.getUint8(0),
         view.getUint8(1),
         view.getUint8(2),
         view.getUint8(3),
     );
-    if (magic !== MAGIC) return null;
 
+    if (magic === MAGIC_V2) {
+        if (buffer.byteLength < HEADER_V2_SIZE) return null;
+        const count = view.getUint32(4, true);
+        const flags = view.getUint32(8, true);
+        if (count === 0 || ((flags & ~1) !== 0 && flags !== 0)) return null;
+        const expectedSize = HEADER_V2_SIZE + count * 9;
+        if (buffer.byteLength < expectedSize) return null;
+        const orig = new Float32Array(buffer, HEADER_V2_SIZE, count);
+        const edit = new Float32Array(buffer, HEADER_V2_SIZE + count * 4, count);
+        const edited = new Uint8Array(buffer, HEADER_V2_SIZE + count * 8, count);
+        return { count, orig, edit, edited };
+    }
+
+    if (magic !== MAGIC_V1) return null;
     const count = view.getUint32(4, true);
-    const expectedSize = HEADER_SIZE + count * 4 * 2;
+    const expectedSize = HEADER_V1_SIZE + count * 4 * 2;
     if (count === 0 || buffer.byteLength < expectedSize) return null;
-
-    // Float32Array 视图（零拷贝，直接引用原始 buffer）
-    const orig = new Float32Array(buffer, HEADER_SIZE, count);
-    const edit = new Float32Array(buffer, HEADER_SIZE + count * 4, count);
-
-    return { count, orig, edit };
+    const orig = new Float32Array(buffer, HEADER_V1_SIZE, count);
+    const edit = new Float32Array(buffer, HEADER_V1_SIZE + count * 4, count);
+    const edited = new Uint8Array(count);
+    for (let i = 0; i < count; i += 1) edited[i] = edit[i] !== orig[i] ? 1 : 0;
+    return { count, orig, edit, edited };
 }
-
 /**
  * 从 Base64 编码字符串直接解码参数曲线数据。
  *
  * 便捷方法，合并 base64ToArrayBuffer + decodeParamFramesBinary。
  */
 export function decodeParamFramesFromBase64(base64: string): ParamFramesBinary | null {
-    if (!base64 || base64.length < HEADER_SIZE) return null;
+    if (!base64 || base64.length < 8) return null;
     let buffer: ArrayBuffer;
     try {
         buffer = base64ToArrayBuffer(base64);
@@ -109,12 +121,15 @@ export function decodeParamFramesFromBase64(base64: string): ParamFramesBinary |
 export function paramFramesBinaryToArrays(decoded: ParamFramesBinary): {
     orig: number[];
     edit: number[];
+    edited: boolean[];
 } {
     const orig = new Array<number>(decoded.count);
     const edit = new Array<number>(decoded.count);
+    const edited = new Array<boolean>(decoded.count);
     for (let i = 0; i < decoded.count; i += 1) {
         orig[i] = decoded.orig[i];
         edit[i] = decoded.edit[i];
+        edited[i] = decoded.edited[i] !== 0;
     }
-    return { orig, edit };
+    return { orig, edit, edited };
 }

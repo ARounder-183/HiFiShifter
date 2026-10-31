@@ -163,7 +163,17 @@ export async function applySelectionEditWithEdgeSmoothing(
         restoreDynSentinels(editedDense, (payload as ParamFramesPayload).edit_sentinel);
     }
 
-    await paramsApi.setParamFrames(trackId, param, extStart, editedDense, args.checkpoint ?? true);
+    // 显式编辑位图：未编辑帧不写回，避免把基线原值物化成用户编辑。
+    const editedMask = payload.edited ?? new Array<boolean>(editedDense.length).fill(true);
+    const present = editedDense.map((_, index) => editedMask[index] === true);
+    await paramsApi.setParamFrames(
+        trackId,
+        param,
+        extStart,
+        editedDense,
+        args.checkpoint ?? true,
+        present,
+    );
     return true;
 }
 

@@ -46,8 +46,8 @@ export const paramsApi = {
             if (!res || !encoded) return res;
             const decoded = decodeParamFramesFromBase64(encoded);
             if (!decoded) return res; // 解码失败 → 回退空数组，调用方按 not-ok 处理
-            const { orig, edit } = paramFramesBinaryToArrays(decoded);
-            return { ...res, orig, edit, binary: undefined };
+            const { orig, edit, edited } = paramFramesBinaryToArrays(decoded);
+            return { ...res, orig, edit, edited, binary: undefined };
         }),
 
     setParamFrames: (
@@ -56,8 +56,17 @@ export const paramsApi = {
         startFrame: number,
         values: number[],
         checkpoint?: boolean,
+        present?: boolean[],
     ) =>
-        invoke<{ ok: boolean }>("set_param_frames", trackId, param, startFrame, values, checkpoint),
+        invoke<{ ok: boolean; authority_revision?: number }>(
+            "set_param_frames",
+            trackId,
+            param,
+            startFrame,
+            values,
+            checkpoint,
+            present,
+        ),
 
     /**
      * 把「参数编辑器边缘拉伸」带来的选区变化登记到**当前那一步**历史记录上。

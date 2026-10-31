@@ -178,6 +178,16 @@ export function usePianoRollData(args: {
 
     const fetchDebounceRef = useRef<number | null>(null);
     const fetchReqIdRef = useRef(0);
+    // 权威水位：旧请求的响应即使比 fetchReqId 晚，也不能覆盖新编辑后的视图。
+    const lastAppliedAuthorityRevisionRef = useRef(0);
+    const acceptAuthorityRevision = (payload: ParamFramesPayload): boolean => {
+        const revision = Number(payload.authority_revision ?? 0);
+        if (revision > 0 && revision < lastAppliedAuthorityRevisionRef.current) return false;
+        if (revision > lastAppliedAuthorityRevisionRef.current) {
+            lastAppliedAuthorityRevisionRef.current = revision;
+        }
+        return true;
+    };
 
     /**
      * 当前参数（渲染期同步刷新）。
@@ -757,6 +767,7 @@ export function usePianoRollData(args: {
                     }
 
                     const payload = res as ParamFramesPayload;
+                    if (!acceptAuthorityRevision(payload)) return;
 
                     if (editParam === "pitch") {
                         const userModified = payload.pitch_edit_user_modified;
@@ -804,6 +815,7 @@ export function usePianoRollData(args: {
                         referenceKind: payload.reference_kind ?? "source_curve",
                         orig: (payload.orig ?? []).map((v) => Number(v) || 0),
                         edit: (payload.edit ?? []).map((v) => Number(v) || 0),
+                        edited: payload.edited ?? [],
                         // dyn 的「未画」位图随同一路取数返回（见 ParamViewSegment
                         // 的字段说明）；非 dyn 显式不携带。与 refreshNow 同口径 ——
                         // 本函数是主取数路径（挂载 / 去抖滚动缩放 / 编辑后重取），
@@ -942,6 +954,7 @@ export function usePianoRollData(args: {
             if (shouldFetchParam && paramRes?.ok) {
                 if (liveEditDeferral.defer()) return;
                 const payload = paramRes as ParamFramesPayload;
+                if (!acceptAuthorityRevision(payload)) return;
 
                 if (editParam === "pitch") {
                     const userModified = payload.pitch_edit_user_modified;
@@ -964,6 +977,7 @@ export function usePianoRollData(args: {
                     referenceKind: payload.reference_kind ?? "source_curve",
                     orig: (payload.orig ?? []).map((v) => Number(v) || 0),
                     edit: (payload.edit ?? []).map((v) => Number(v) || 0),
+                    edited: payload.edited ?? [],
                     // dyn 的「未画」位图随同一路取数返回（见 ParamViewSegment
                     // 的字段说明）；非 dyn 显式不携带。
                     editSentinel: isDynParam(editParam)
@@ -1071,6 +1085,7 @@ export function usePianoRollData(args: {
                                 referenceKind: payload.reference_kind ?? "source_curve",
                                 orig: (payload.orig ?? []).map((v) => Number(v) || 0),
                                 edit: (payload.edit ?? []).map((v) => Number(v) || 0),
+                                edited: payload.edited ?? [],
                                 editSentinel: isDynParam(secondaryReq.secondaryParam)
                                     ? (payload.edit_sentinel ?? undefined)
                                     : undefined,

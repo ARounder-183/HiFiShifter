@@ -460,7 +460,10 @@ export function useLiveParamEditing(args: {
                     }
                 }
 
-                await paramsApi.setParamFrames(trackId, editParam, minF, out, true);
+                // 这一笔完整覆盖 [minF, maxF]：present 全 true。显式位图让后端
+                // 不需要从显示数组差分猜测用户改了什么。
+                const present = new Array<boolean>(len).fill(true);
+                await paramsApi.setParamFrames(trackId, editParam, minF, out, true, present);
                 applyToParamViewDense(minF, out);
                 // 同上：不立刻撤下覆盖层，避免波形先退回旧快照再跳到新快照。
                 markLiveEditCommitted();
