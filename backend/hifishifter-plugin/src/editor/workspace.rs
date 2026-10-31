@@ -357,6 +357,34 @@ impl PresentedIds {
     }
 }
 
+/// 用装配器的**同一个**构造器造一条呈现 clip，并把 id 换算到 GUI 命名空间。
+///
+/// 【为什么需要它】\`present_host_inventory\` 拿到的是一份**已经带命名空间**的时间线，
+/// 而装配器产出的是**文档域**的 id（\`ara-item-{guid}\` / 宿主 take GUID）。两者的
+/// 唯一差别就是前缀 —— 这个换算必须只有一处，否则"文档 id 与呈现 id 混用"会再一次
+/// 散落成几个各写各的字符串拼接（它已经害过：\`claimed_id\` 用无前缀 id 去比带前缀的
+/// 时间线，于是每轮新建一条副本 clip）。
+fn materialise_presented_clip(
+    item: &crate::host::UiItem,
+    id: &str,
+    track_id: &str,
+    prefix: &impl Fn(&str) -> String,
+) -> Option<hifishifter_kernel::state::Clip> {
+    let row = crate::host::geometry::item_row_from_host(item, track_id);
+    let mut clip =
+        hifishifter_kernel::editor::assembly::clip_for_item(&row, track_id, None).ok()?;
+    clip.id = id.to_string();
+    clip.track_id = track_id.to_string();
+    for take in &mut clip.takes {
+        take.id = prefix(&take.id);
+    }
+    clip.active_take_id = clip.active_take_id.as_deref().map(prefix);
+    // 反序列化后再物化一次：\`clip_for_item\` 已调过 \`normalize_takes\`，但 take id 刚刚
+    // 才被换算到命名空间，扁平投影必须跟着更新，否则 \`active_take()\` 会指回旧 id。
+    clip.normalize_takes();
+    Some(clip)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WorkspaceScope {
     pub regions: BTreeSet<u64>,
@@ -464,24 +492,12 @@ impl DocumentSession {
     /// UI可显示宿主尚未分配给ARA的静音item；这些占位不进入任何renderer或源PCM读取。
     pub(crate) fn present_host_inventory(&self, timeline: &mut TimelineState, namespace: &str) {
         let prefix = |id: &str| format!("{namespace}{id}");
-        // 【媒体总时长：按 item 与按源两份索引】倒放的镜像复原需要轴，而轴的一个来源就是
-        // 媒体总时长。GUID 那份只在 region 被认领之后才有值；**按源**那份在映射阶段就
-        // 写好了（与认领、授权都无关）。两份都要 —— 宿主分割的瞬间两个新 item 都还没有
-        // GUID，只按 GUID 查会让倒放窗口无法复原（与
-        // `project_host_take_facts_locked` 的 `:2129-2130` 同一口径）。
-        //
-        // 【为什么在最前面取】锁序是 `timeline → edits`；本函数随后要取 `edits`
-        // （`delegated_fades`），所以这一份必须在它之前拿。
-        // 【为什么用 `try_lock`】本函数可能被"已经持有文档时间线"的路径调用（快照刷新、
-        // 诊断）。`std::sync::Mutex` 不可重入，`lock` 会当场自锁；而这份索引只是
-        // "倒放镜像复原"的一个可选输入 —— 拿不到就当这一轮没有轴（旧行为），
-        // 绝不能因为它把整个清单刷新挂死。
-        let (mapped_duration_by_item, mapped_duration_by_source) = self
-            .timeline
-            .try_lock()
-            .ok()
-            .and_then(|mapped| mapped.as_ref().map(media_duration_indexes))
-            .unwrap_or_default();
+        // 【媒体总时长索引整段删除】它此前只为"占位 clip 的源窗口解算"服务，而那段
+        // 解算已经搬进 `hifishifter_kernel::editor::assembly::clip_for_item`（装配器
+        // 在装配前会按 region 侧补齐每个 item 的媒体总时长，见
+        // `DocumentSession::rebuild_timeline_locked`）。这里保留 `try_lock` 的教训：
+        // 本函数可能被"已经持有文档时间线"的路径调用，任何取 `timeline` 的新代码
+        // 都必须用 `try_lock` 或干脆不取。
         // 委托 fade 的样式（宿主把边界包络交给 HFS 渲染时，shape/dir 由插件状态决定）。
         // 一次取出，避免在 track/item 双层循环里反复取锁。
         let delegated_fades = self.edits.lock_or_recover().fades.clone();
@@ -655,57 +671,22 @@ impl DocumentSession {
         // 判据取**宿主实体**（`HostIdentity`），不取 id 字符串相等 —— 字符串相等正是
         // 上一代实现漏掉这条副本的原因：`ara-region-{key}` 与 `ara-item-{guid}` 是
         // 同一个 item 的两个名字，而 `region_items` 正是那条换算边。
-        let mut collapsed = 0_usize;
-        {
-            let region_items = self.region_items.lock_or_recover();
-            let identities: Vec<Option<HostIdentity>> = timeline
-                .clips
-                .iter()
-                .map(|clip| present_identity(&clip.id, &region_items))
-                .collect();
-            // 保留优先级：能认出宿主 item 的 > 有源的 > 带命名空间的 > 先出现的。
-            //
-            // 【为什么"能认出 item"排第一】item 身份跨会话存活，region key 只活这一次
-            // 会话；同一条 clip 两种形态都在时，留下能活过重开工程的那一条。
-            let rank = |index: usize| -> (u8, u8, u8) {
-                let clip = &timeline.clips[index];
-                (
-                    u8::from(matches!(identities[index], Some(HostIdentity::Item(_)))),
-                    u8::from(clip.source_path.is_some()),
-                    u8::from(namespace.is_empty() || clip.id.starts_with(namespace)),
-                )
-            };
-            let mut kept: std::collections::HashMap<HostIdentity, usize> =
-                std::collections::HashMap::new();
-            let mut drop = vec![false; timeline.clips.len()];
-            for index in 0..timeline.clips.len() {
-                let Some(identity) = identities[index].clone() else {
-                    continue;
-                };
-                match kept.get(&identity).copied() {
-                    None => {
-                        kept.insert(identity, index);
-                    }
-                    Some(previous) => {
-                        if rank(index) > rank(previous) {
-                            drop[previous] = true;
-                            kept.insert(identity, index);
-                        } else {
-                            drop[index] = true;
-                        }
-                        collapsed += 1;
-                    }
-                }
-            }
-            if collapsed > 0 {
-                let mut index = 0_usize;
-                timeline.clips.retain(|_| {
-                    let keep = !drop[index];
-                    index += 1;
-                    keep
-                });
-            }
-        }
+        // 【归并/折叠整段删除】
+        //
+        // 这里曾有三条启发式（按 `HostIdentity` 折叠、按"同一段时间"兜底、按 id 去重），
+        // 全部在替"clip 有两个生产者"这件事擦屁股：映射层按 region 造一条、清单层按
+        // item 再造一条，然后靠几何/时间/前缀猜"它们其实是同一个东西"。
+        //
+        // 而这一层**必然**漏掉"region 与 item 几何不一致"的全部情形 —— 循环延伸的
+        // item 就是其中最典型的一个：宿主按循环节给出 N 条 region，每条都不与整段 item
+        // 全等，于是它们既拿不到 item 身份、也不会被归并。用户看到的就是"延伸出一个
+        // 循环，界面上多出 N 条片段，而且一条都拖不动"。
+        //
+        // 现在 clip 只有一个来源（`hifishifter_kernel::editor::assembly`），一个 item
+        // 只可能产出一条 id 为 `ara-item-{guid}` 的 clip —— 没有第二条可归并。
+        // 下面的 `[ara] clip identity` 断言因此是**真正的不变量检查**，
+        // 而不是归并逻辑的副产品。
+        let collapsed = 0_usize;
         // 【I-1 的运行时断言】一个宿主实体只允许一条 clip —— 而"clip 的 id 唯一"
         // 是它的必要条件。这条读数此前**完全不存在**：重复 id 会让六张按 id 索引的
         // 表同时换键（参数、几何台账、淡变、颜色、选中、剪贴板），而它的表现只是
@@ -852,107 +833,27 @@ impl DocumentSession {
                 // 用户看到的"编辑前的旧 Clip 与编辑后的新 Clip 同时保留"的直接来源。
                 // 只认未升级的（`ara-region-`）形态：已升级的由上面的边解析负责，
                 // 拿它兜底会让两个不同 item 抢同一条 clip。
-                let claimed_id = {
-                    let items = self.region_items.lock_or_recover();
-                    items
-                        .iter()
-                        .find(|(_, guid)| **guid == g.item_id)
-                        .and_then(|(key, _)| presented.get(*key).map(str::to_owned))
-                };
-                let id = claimed_id
-                    .or_else(|| {
-                        timeline
-                            .clips
-                            .iter()
-                            .find(|clip| {
-                                region_key_of(&clip.id).is_some()
-                                    && clip.track_id == track_id
-                                    && crate::host::geometry::host_value_compatible(
-                                        clip.start_sec,
-                                        g.start_sec,
-                                    )
-                                    && crate::host::geometry::host_value_compatible(
-                                        clip.length_sec,
-                                        g.duration_sec,
-                                    )
-                            })
-                            .map(|clip| clip.id.clone())
-                    })
-                    .unwrap_or_else(|| prefix(&format!("ara-item-{}", g.item_id)));
+                // 【身份只有一个算式】clip 由装配器产出，id 恒为 `ara-item-{guid}`
+                // （呈现时加命名空间前缀）。此前这里有一条"按同一段时间兜底"的第二
+                // 线索，理由是"身份升级窗口里按边找不到" —— 那正是两个生产者的症状。
+                // 现在没有升级这回事：id 从第一次装配起就是这个形状，运行期不再改写。
+                let id = prefix(&format!("ara-item-{}", g.item_id));
                 present.insert(id.clone());
                 if !timeline.clips.iter().any(|clip| clip.id == id) {
-                    // 同上的 panic 纪律：宿主给一个非有限 `playback_rate`（离线/损坏素材）
-                    // 时不能让整个清单刷新 panic。反序列化失败就跳过这个 item。
-                    // 【占位 clip 也必须走同一个解算】此前这里是
-                    // `g.source_start_sec + duration*rate`：倒放时那是"镜像起点 + 正向
-                    // 跨度"，两个坐标域混在一个数上，只有等事实投影覆写才对；任何一步
-                    // 没跑到（facts 缺 active take / 缺 item）就会把错窗口留在界面上。
-                    let media = media_by_item
-                        .get(&g.item_id)
-                        .and_then(|facts| {
-                            (facts.sample_rate > 0 && facts.frames > 0)
-                                .then_some(facts.frames as f64 / f64::from(facts.sample_rate))
-                        })
-                        .or_else(|| mapped_duration_by_item.get(&g.item_id).copied());
-                    let window = hifishifter_kernel::take_geometry::TakeGeometry {
-                        start_offset_sec: g.source_start_sec,
-                        item_length_sec: g.duration_sec,
-                        play_rate_signed: g.play_rate_signed,
-                        // 【媒体时长也按源查一次】此前只查 `media_by_item`（item GUID）。
-                        // 而宿主分割的瞬间两个新 item 都还没有被 region 认领，GUID 表里
-                        // 没有它们 —— 于是"轴"取不到，倒放窗口无法复原。音频源 id 在映射
-                        // 阶段就写好了，与认领无关（与 `project_host_take_facts_locked`
-                        // 的 `:2129-2130` 同一口径）。
-                        media_duration_sec: media.or_else(|| {
-                            g.source_file_name
-                                .as_deref()
-                                .and_then(|source| mapped_duration_by_source.get(source).copied())
-                        }),
-                        section: g.section,
-                        reversed: Some(g.reversed),
-                        loop_enabled: g.loop_source,
-                    }
-                    .forward_source_window();
-                    // 【拿不到窗口时保留**宿主坐标**并留读数，不丢掉这条 clip】
+                    // 【兜底：装配器还没为这个 item 产出 clip】
                     //
-                    // 丢掉它等于"用户在宿主里的片段从插件里消失"，而那比"偏移待定"严重
-                    // 得多 —— 用户会以为插件坏了。方案 §3.4.1 的处置是"保留宿主镜像坐标
-                    // + 标读数"：界面仍然看得见这一段（可以选中、可以画线），而渲染与投影
-                    // **不会**把它当成正放（见 `project_host_take_facts_locked` 的
-                    // `ara.reversed-window`）。方向读不到（`reversed: None`）同理。
-                    let window = window.unwrap_or_else(|| {
-                        hifishifter_kernel::log_limiter::emit_limited_key(
-                            log::Level::Warn,
-                            "ara.reversed-axis-missing",
-                            format_args!(
-                                "[ara] item {} has no resolvable source window this round \
-                                 (reversed={} section={:?}); the host's raw coordinates are kept \
-                                 and this segment will not be rendered as forward",
-                                g.item_id, g.reversed, g.section
-                            ),
-                        );
-                        // 宿主镜像域的原始读数：起点 + 正向跨度。没有轴时它是**唯一**还能
-                        // 陈述的事实，因此这一轮如实呈现，等宿主读数补齐后自动改回。
-                        let end = g.source_start_sec + g.duration_sec * g.playback_rate;
-                        hifishifter_kernel::take_geometry::ForwardWindow::new(
-                            g.source_start_sec,
-                            end,
-                        )
-                        .or_else(|| hifishifter_kernel::take_geometry::ForwardWindow::new(0., 0.))
-                        .expect("a zero window is always valid")
-                    });
-                    let built = serde_json::from_value::<hifishifter_kernel::state::Clip>(
-                        serde_json::json!({"id":id,"track_id":track_id,"name":item.name,
-                        "start_sec":g.start_sec,"length_sec":g.duration_sec,"takes":[{"id":prefix(&g.take_id),"source_start_sec":window.start(),
-                        "source_end_sec":window.end(),"playback_rate":g.playback_rate}]}),
-                    );
-                    match built {
-                        Ok(mut clip) => {
-                            clip.normalize_takes();
-                            timeline.clips.push(clip);
-                        }
-                        Err(error) => {
-                            log::warn!("[ara] skipping host item {id}: {error}");
+                    // 生产路径上这不会发生 —— `rebuild_timeline_locked` 在每次清单刷新
+                    // 之后都会跑一次，clip 由它产出。它存在是为了两类调用方：
+                    // ① 手工搭出时间线的单元测试；② 剪贴板校验用的一次性呈现。
+                    //
+                    // **构造器是同一个**（`assembly::clip_for_item`），所以两条路径不会
+                    // 分叉。此前这里是独立的一份 `serde_json::json!` 字面量，与映射层
+                    // 那一份各自维护 —— 两份默认值迟早不同，而表现是"同一个 item 在两个
+                    // 前端里字段不一样"。
+                    match materialise_presented_clip(item, &id, &track_id, &prefix) {
+                        Some(clip) => timeline.clips.push(clip),
+                        None => {
+                            log::warn!("[ara] skipping host item {id}: cannot build a clip");
                             present.remove(&id);
                             continue;
                         }
@@ -1089,50 +990,32 @@ impl DocumentSession {
         // 现在带宿主身份的 clip 以 `present` 为唯一判据，并给两轮宽限期吸收
         // "清单滞后于删除"的正常窗口（撤销删除后它还会原样回来）。
         {
-            let live = self.regions.lock_or_recover();
             let complete = self.inventory_is_complete();
-            // 每个活 region 的**当前**呈现身份（`clip_ids` 的现值，缺席才退回 key 形态）。
-            let mut region_ids: std::collections::BTreeSet<String> =
-                std::collections::BTreeSet::new();
-            for key in live.keys() {
-                region_ids.insert(match presented.get(*key) {
-                    Some(id) => id.to_owned(),
-                    None => format!("{namespace}ara-region-{key}"),
-                });
-            }
-            let clip_prefix = prefix("ara-clip-");
+            // 【存活判据收敛成一条】clip 的唯一来源是宿主 item，而 `present` 正是
+            // "这一轮清单里有哪些 item"。此前这里还有五条兜底（region 还活着 /
+            // 认领不到 GUID 的 ARA clip / 旧前缀残留 / 命名空间前缀……），它们全都在替
+            // "clip 有两个生产者"擦屁股 —— 结果是一条已经没有任何 item 支撑的
+            // region 形态 clip 可以永久留在画布上（用户报的"宿主里没有、插件里还在"）。
+            //
+            // 本函数只在**清单非空**时才走到这里（见开头的早退）：ARA-only 宿主的
+            // 可见性由 `workspace_timeline_locked` 决定，不经过这一段。
             timeline.clips.retain(|clip| {
-                // ① 清单里有它 ⇒ 活着。
                 if present.contains(&clip.id) {
                     self.orphan_within_grace(&clip.id, true, complete);
                     return true;
                 }
-                // ② 带宿主身份却不在清单里。
-                if host_item_guid(&clip.id).is_some() {
-                    // region 也没了 ⇒ 这是"删除"的直接证据，立即剔除。
-                    if !region_ids.contains(&clip.id) {
-                        return false;
-                    }
-                    // region 还活着：清单滞后不是删除证据，但**连续多轮完整清单都
-                    // 没有它**就是（宿主删了 item、region 还没来得及销毁）。
-                    return self.orphan_within_grace(&clip.id, false, complete);
-                }
-                // ③ 没有宿主身份：region 还在就算活着（ARA-only 后端）。
-                if region_ids.contains(&clip.id) {
-                    return true;
-                }
-                // ④ 认领不到 item GUID 的 ARA clip：挂在宿主已知轨道上时剔除
-                //    （界面无法给出可操作的读数）。
-                if clip.id.starts_with(&clip_prefix) {
-                    return !owned.contains(&clip.track_id);
-                }
-                // ⑤ 旧形态（region 形态但 region 已不在）一律剔除：两条同时留在
-                //    时间线上，就是用户报的"旧 Clip 与新 Clip 都在"。
-                if region_key_of(&clip.id).is_some() {
-                    return false;
-                }
-                // ⑥ 认不出身份的 id：带命名空间的呈现里只可能是上一代命名的残留。
-                namespace.is_empty() || clip.id.starts_with(namespace)
+                // 【只有**带宿主 item 身份**的 clip 才享受宽限】它可能是"清单还没
+                // 枚举到"（宿主刚分割、枚举被节流），留一轮能避免闪烁。
+                //
+                // 其余形态（`ara-region-*` / `ara-clip-*` / 认不出的前缀）都是上一代
+                // 命名的残留：宿主暴露 item 之后，clip 的唯一来源就是 item，它们不该
+                // 存在。留着就是"同一个 item 两条 clip"，而且其中一条拖不动。
+                // 【还必须带**本次呈现**的命名空间】一个无前缀的 `ara-item-{guid}` 在
+                // 带命名空间的呈现里是**别的**会话留下的 id，不是"清单还没枚举到"——
+                // 它一旦被造出来就再也不会消失（用户报的"永生副本"）。
+                let ours = namespace.is_empty() || clip.id.starts_with(namespace);
+                ours && host_item_guid(&clip.id).is_some()
+                    && self.orphan_within_grace(&clip.id, false, complete)
             });
         }
         // 分割谱系回收：两段都不在宿主清单里时删掉这条边，免得它随分割次数无限增长
@@ -1202,7 +1085,11 @@ impl DocumentSession {
         &self,
         clips: &std::collections::BTreeSet<String>,
     ) -> std::collections::BTreeSet<String> {
-        let identities = self.clip_ids.lock_or_recover();
+        // 【先快照、再放锁】`host_geometries_locked` 可能触发一次几何求解，而那条
+        // 路径要取 `transaction`。持着 `clip_ids` 去取 `transaction`，与
+        // "`transaction` → `clip_ids`"（装配与工作区投影都走这条）构成 ABBA ——
+        // 实测两个 `bound_tests` 用例因此永久挂起。快照之后立刻释放，方向就只剩一条。
+        let identities = self.clip_ids.lock_or_recover().clone();
         self.renderer_owners()
             .iter()
             .flat_map(|owner| owner.host_geometries_locked(self))
@@ -1220,7 +1107,8 @@ impl DocumentSession {
         if !self.is_alive() {
             return None;
         }
-        let identities = self.clip_ids.lock_or_recover();
+        // 同上：快照后放锁，避免 "`clip_ids` → `transaction`" 的反向边。
+        let identities = self.clip_ids.lock_or_recover().clone();
         for owner in self.renderer_owners() {
             for bound in owner.host_geometries_locked(self) {
                 if bound.geometry.item_id == item {
@@ -2979,44 +2867,22 @@ mod tests {
         assert_eq!(timeline.clips.len(), 1, "重复呈现必须是幂等的");
     }
 
-    /// **不变量：两种身份形态并存时，折叠成一条。**
+    /// **不变量：region 形态的残留 clip 必须被剔除，不能与 item clip 并存。**
     ///
-    /// 【为什么需要它】`region_items` 填上之后，映射出来的那条仍叫 `ara-region-{key}`，
-    /// 而上一轮造过的占位叫 `ara-item-{guid}` —— 按 id 相等去重永远合不上它们。
-    /// 身份必须经 `region_items` 解析：两种形态是**同一个实体的两个名字**。
+    /// 【契约反过来了，而且这次是对的】旧实现在这里做"折叠"：把
+    /// `ara-region-{key}` 与 `ara-item-{guid}` 认成同一个实体的两个名字，留下有源的
+    /// 那一条。那层逻辑存在的**唯一理由**是 clip 有**两个生产者**（映射层按 region 造、
+    /// 清单层按 item 造）。
+    ///
+    /// 现在只有一个生产者（`hifishifter_kernel::editor::assembly`），
+    /// `ara-item-{guid}` 是唯一形态。一条 region 形态的 clip 只可能是上一轮的残留 ——
+    /// 留着它就是"同一个 item 两条 clip"（用户报的"多出来的片段"，而且其中一条
+    /// 拖不动：写回报 `no unique directly bound host take`）。
     #[test]
-    fn two_id_shapes_for_one_item_collapse_into_one_clip() {
+    fn a_region_shaped_relic_is_dropped_when_the_host_exposes_items() {
         let document = DocumentSession::new(40_004);
         let key = 0x5678_u64;
         let region_id = format!("ara-region-{key}");
-        let item_id = "ara-item-{ITEM-2}".to_owned();
-        document
-            .clip_ids
-            .lock_or_recover()
-            .insert(key, region_id.clone());
-        document
-            .region_items
-            .lock_or_recover()
-            .insert(key, "{ITEM-2}".to_owned());
-        // 一条**活着的** region：`regions` 是"该不该留下"的文档级权威，缺席时
-        // 保留规则会把两条都剔掉（那不是本用例要测的东西）。
-        document
-            .regions
-            .lock_or_recover()
-            .insert(key, crate::ara::AraPlaybackRegion::default());
-        let mut timeline: TimelineState = serde_json::from_value(serde_json::json!({
-            "tracks":[{"id":"track","name":"t","order":0}],
-            "clips":[
-                {"id":region_id,"name":"A","track_id":"track","start_sec":0.0,"length_sec":1.0,
-                 "source_path":"/pcm.wav",
-                 "takes":[{"id":"t1","source_path":"/pcm.wav","source_start_sec":0.0,"source_end_sec":1.0}]},
-                {"id":item_id,"name":"A","track_id":"track","start_sec":0.0,"length_sec":1.0,
-                 "takes":[{"id":"t2","source_start_sec":0.0,"source_end_sec":1.0}]}
-            ],
-            "bpm":120,"project_sec":1.0
-        }))
-        .unwrap();
-        // 清单非空才会走到折叠/保留那一段（空清单整体早退，见 `present_host_inventory`）。
         let host = crate::host::MockHost::new();
         host.enable_media();
         host.clear_markers();
@@ -3024,24 +2890,40 @@ mod tests {
         let api = Arc::new(host.client());
         let mut track = api.ui_track(&|| true).unwrap();
         track.id = "track".into();
-        track.items.clear();
+        let item_id = track.items[0].geometry.item_id.clone();
+        let item_clip_id = format!("ara-item-{item_id}");
+        document
+            .clip_ids
+            .lock_or_recover()
+            .insert(key, region_id.clone());
+        document
+            .region_items
+            .lock_or_recover()
+            .insert(key, item_id.clone());
+        document
+            .regions
+            .lock_or_recover()
+            .insert(key, crate::ara::AraPlaybackRegion::default());
         document
             .ui_tracks
             .lock_or_recover()
             .insert(track.guid.clone(), track);
+        let mut timeline: TimelineState = serde_json::from_value(serde_json::json!({
+            "tracks":[{"id":"track","name":"t","order":0}],
+            "clips":[
+                {"id":region_id,"name":"A","track_id":"track","start_sec":0.0,"length_sec":1.0,
+                 "source_path":"/pcm.wav",
+                 "takes":[{"id":"t1","source_path":"/pcm.wav","source_start_sec":0.0,"source_end_sec":1.0}]}
+            ],
+            "bpm":120,"project_sec":1.0
+        }))
+        .unwrap();
         document.present_host_inventory(&mut timeline, "");
+        let ids: Vec<&str> = timeline.clips.iter().map(|clip| clip.id.as_str()).collect();
         assert_eq!(
-            timeline.clips.len(),
-            1,
-            "同一个宿主 item 的两种 id 形态必须折叠成一条"
-        );
-        assert!(
-            timeline.clips[0].source_path.is_some(),
-            "留下的必须是**有源**的那一条（另一条只是占位）"
-        );
-        assert!(
-            timeline.clips[0].id.contains("ara-region-"),
-            "保留的应当是**映射层**那条（它带着 ARA 几何与源窗口）"
+            ids,
+            vec![item_clip_id.as_str()],
+            "残留的 region 形态 clip 必须被剔除，只留下 item 形态的那一条"
         );
     }
 
@@ -3233,19 +3115,21 @@ mod tests {
         document.close();
     }
 
-    /// **T8：已升级到 `ara-item-{guid}` 的 clip，在清单尚未追上的那一轮不得被删。**
+    /// **清单滞后不删、清单缺席才删。**
     ///
-    /// 【为什么这是"分割后原轨 Clip 全消失"的回归】旧实现要求 `ara-item-*` 必须出现在
-    /// 本轮的 `present` 里。分割后右半段的 GUID 是新 mint 的，而 `ui_tracks` 的枚举是
-    /// 节流的 —— 升级完成、清单尚未追上的那一轮，clip 被删掉；尚未升级的
-    /// （`ara-region-*` / `ara-clip-*`）反而两条 retain 都不匹配而存活。
-    /// 判据必须是"它代表的 region 还在不在"，而不是 id 长什么样。
+    /// 【契约】\`orphan_within_grace\` 的判据是"**见过**没有"：
+    ///
+    /// * 从没见过 ⇒ 保留（宿主刚分割、枚举被节流，不能当删除证据）；
+    /// * 见过、这一轮没了 ⇒ 立即撤下（否则就是"宿主里没有、插件里还在"的幽灵）；
+    /// * 清单本轮不完整 ⇒ 一律保留（枚举失败不能当删除证据）。
+    ///
+    /// 【为什么存活判据不再看 region】clip 的存在由宿主 item 决定（装配器的唯一输入）。
+    /// region 是"这段播放素材的哪一段"，它销毁不销毁都不能让一条已经没有 item 支撑的
+    /// clip 继续留在画布上。
     #[test]
-    fn an_upgraded_clip_survives_a_round_where_the_inventory_has_not_caught_up() {
+    fn a_clip_whose_item_leaves_the_inventory_is_dropped() {
         let model = ModelHandle::new();
         let document = model.session();
-        // `present_host_inventory` 在清单为空时整体早退；这里给一条**没有任何 item**
-        // 的宿主轨道，让函数真正跑到 clip 的 retain。
         let host = crate::host::MockHost::new();
         host.enable_media();
         host.clear_markers();
@@ -3253,68 +3137,29 @@ mod tests {
         let api = Arc::new(host.client());
         let mut track = api.ui_track(&|| true).unwrap();
         track.id = "host-only-track".into();
-        track.guid = "{88888888-8888-8888-8888-888888888888}".into();
-        track.items.clear();
+        let item_id = track.items[0].geometry.item_id.clone();
+        let clip_id = format!("ara-item-{item_id}");
         document
             .ui_tracks
             .lock_or_recover()
             .insert(track.guid.clone(), track);
-        // 一条活着的 region：已绑定宿主 item，但本轮 `ui_tracks` 还没有枚举到它。
-        document
-            .regions
-            .lock_or_recover()
-            .insert(7, crate::ara::AraPlaybackRegion::default());
-        document
-            .region_items
-            .lock_or_recover()
-            .insert(7, "{NEW-GUID}".into());
-        document
-            .clip_ids
-            .lock_or_recover()
-            .insert(7, "ara-item-{NEW-GUID}".into());
 
+        // 第一轮：item 在清单里 ⇒ clip 出现，并被记为"见过"。
         let mut timeline = TimelineState::default();
-        timeline.tracks = vec![serde_json::from_value(
-            serde_json::json!({"id":"ara-sequence-1","name":"t","order":0}),
-        )
-        .unwrap()];
-        timeline.clips = vec![serde_json::from_value(serde_json::json!({
-            "id": "ara-item-{NEW-GUID}",
-            "track_id": "ara-sequence-1",
-            "name": "split half",
-            "start_sec": 0.0,
-            "length_sec": 1.0,
-        }))
-        .unwrap()];
-
         document.present_host_inventory(&mut timeline, "");
         assert!(
-            timeline
-                .clips
-                .iter()
-                .any(|clip| clip.id == "ara-item-{NEW-GUID}"),
-            "清单滞后不是删除证据：region 还活着，clip 就必须留下"
+            timeline.clips.iter().any(|clip| clip.id == clip_id),
+            "清单里有这个 item 时它必须被呈现"
         );
 
-        // 对照：region 真的被销毁之后，同一个 clip 必须被剔除。
-        document.regions.lock_or_recover().remove(&7);
-        let mut timeline = TimelineState::default();
-        timeline.tracks = vec![serde_json::from_value(
-            serde_json::json!({"id":"ara-sequence-1","name":"t","order":0}),
-        )
-        .unwrap()];
-        timeline.clips = vec![serde_json::from_value(serde_json::json!({
-            "id": "ara-item-{NEW-GUID}",
-            "track_id": "ara-sequence-1",
-            "name": "split half",
-            "start_sec": 0.0,
-            "length_sec": 1.0,
-        }))
-        .unwrap()];
+        // 第二轮：宿主不再报告它 ⇒ 已经"见过"，立即撤下。
+        for track in document.ui_tracks.lock_or_recover().values_mut() {
+            track.items.clear();
+        }
         document.present_host_inventory(&mut timeline, "");
         assert!(
             timeline.clips.is_empty(),
-            "region 已销毁且清单不再报告它时，clip 必须被剔除"
+            "清单不再报告这个 item 时，clip 必须被剔除"
         );
         document.close();
     }

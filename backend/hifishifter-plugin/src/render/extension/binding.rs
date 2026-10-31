@@ -719,17 +719,17 @@ impl ExtensionOwner {
                 None => unmatched.push(*key),
             }
         }
-        // 一个宿主 item 只能被**一个** region 认领。两条 region 绑到同一个 item 会让
-        // 后续所有写回指向同一对象：移动、切分、fade、音量互相覆盖，且没有任何一侧
-        // 会报错。
+        // 【"一个 item 只能被一个 region 认领"这条去重删掉了】
         //
-        // 【为什么不再"全部丢弃"】旧实现把重复认领的候选**全丢**，于是"同一位置两个
-        // 几何全等的 item"会两个都不绑定、两个 clip 一起消失（用户报障："片段凭空
-        // 没了"）。现在按 region key 的**稳定顺序**保留第一个认领者，其余照常记账 ——
-        // 至少不会一次丢掉全部；剩下的那个 region 仍走 unmatched，如实报出。
-        let mut seen = std::collections::HashSet::<String>::new();
+        // 它假设 region 与 item 是**一一对应**的。而 REAPER 对一个循环延伸的 item
+        // 按循环节给出**多条** region —— 每节一条。去重于是只留下第一条，其余
+        // region 既不在 `region_items` 里、也没有授权：用户看到"多出来的 Clip 拖不动"，
+        // 重开工程后那条正确的 Clip 还是静音的。
+        //
+        // 现在一条 item 合法地拥有 N 条 region，它们全部登记进 `region_items`。
+        // 唯一性由**绑定判据本身**保证（`unique_geometry_for_region` 的"最小跨 +
+        // 歧义即弃"），不再靠事后去重。
         let claimed = bound.len();
-        bound.retain(|entry| seen.insert(entry.geometry.item_id.clone()));
         // 一次说清、且只在读数变化时输出（见 `report_binding`）。此前这里是两条无条件
         // 日志（INFO + WARN），在 folder 父轨场景下以 10Hz 重放 35 分钟共 16,769 条。
         self.report_binding(&BindingReport {
@@ -1185,7 +1185,21 @@ impl ExtensionOwner {
         self.refresh_ui_inventory();
     }
     /// GUI清单按项目change/model/scope代次刷新，不每20ms枚举所有item，也不借活动工程。
+    /// 清单刷新的**入口**：先跑原来的采集，再在**所有内层早退之外**补一次装配。
+    ///
+    /// 【为什么必须包一层】采集函数有十余处提前 `return`（未授权、令牌未变、没有
+    /// 原生扩展……），每一处都是"这一轮清单没变"的合法结论。装配却只在**清单真的
+    /// 变了**时才需要 —— 而那件事由 `refresh_host_geometry` 里的一个标志表达。
+    /// 把装配塞进采集函数体，就得在每一处早退前重复判断一次；包一层只需要一处。
     pub(crate) fn refresh_ui_inventory(&self) {
+        self.refresh_ui_inventory_inner();
+        let Ok(stamp) = self.host_query_stamp() else {
+            return;
+        };
+        stamp.0.flush_inventory_rebuild();
+    }
+
+    fn refresh_ui_inventory_inner(&self) {
         let Ok(stamp) = self.host_query_stamp() else {
             return;
         };
@@ -1437,6 +1451,15 @@ impl ExtensionOwner {
         // 在下一次 `FACTS_REFRESH_INTERVAL` 到期时强制重采（见 `ui_inventory_sampled_at`）。
         *stamp.0.ui_inventory_sampled_at.lock_or_recover() = Some(std::time::Instant::now());
         stamp.0.ui_geometry_revision.fetch_add(1, Ordering::AcqRel);
+        // 【清单变了 ⇒ 装配输入 B 变了 ⇒ 需要重新装配】
+        //
+        // 这里**只置标志，不就地装配**。本函数会经由
+        // `host_geometries_locked` → `fade_items_locked` / `clip_for_host_item`
+        // 被调用，而那两处正持有 `clip_ids`；而装配要写 `clip_ids`。
+        // `std::sync::Mutex` 不可重入 —— 就地装配会当场自锁（实测：两个
+        // `bound_tests` 用例永久挂起）。真正的装配由
+        // `DocumentSession::flush_inventory_rebuild` 在**清单入口返回之后**做。
+        stamp.0.inventory_rebuild_due.store(true, Ordering::Release);
         *self.host_audio.lock_or_recover() = status;
         // 用户报障时最需要的一行：宿主清单里有多少 item，其中多少被 ARA region 认领。
         // 认领不到的那些只能以无源占位出现（见方案 Task 5.1 / R4）。

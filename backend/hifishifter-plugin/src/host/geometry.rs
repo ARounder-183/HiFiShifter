@@ -167,6 +167,74 @@ impl RenderFacts {
     }
 }
 
+/// 宿主清单里的一行 → 装配器认得的 item 行。
+///
+/// 【为什么这一层是纯翻译、不含判断】装配（"有哪些 clip"）与清单（"宿主里有什么"）
+/// 是两件事。把"读宿主"与"决定画什么"焊在一起，正是"同一个 item 被画成两条 clip"
+/// 的成因：两条路径各自对同一份宿主读数做了一次解释。这里只做形状转换，任何取舍都
+/// 归装配器（\`hifishifter_kernel::editor::assembly\`）。
+///
+/// 【为什么没有 take 时也要造一条】宿主没有 take 枚举接口时 \`UiItem::geometry\` 仍是
+/// **active take 的权威几何**（见该结构的说明）。空 take 列表会让装配器拿不到源窗口，
+/// 于是这条 clip 会显示成"偏移待定"——而它明明有几何。
+pub(crate) fn item_row_from_host(
+    item: &crate::host::UiItem,
+    track_id: &str,
+) -> hifishifter_kernel::editor::assembly::ItemRow {
+    use hifishifter_kernel::editor::assembly::{ItemRow, TakeRow};
+    use hifishifter_kernel::take_geometry::TakeGeometry;
+    let take_of = |geometry: &HostClipGeometry, name: &str, active: bool, reversed: bool| TakeRow {
+        id: geometry.take_id.clone(),
+        name: name.to_string(),
+        active,
+        geometry: TakeGeometry {
+            start_offset_sec: geometry.source_start_sec,
+            item_length_sec: geometry.duration_sec,
+            play_rate_signed: geometry.play_rate_signed,
+            // 媒体总时长由装配器在"挂一次"之后按 region 侧补齐（见
+            // \`DocumentSession::rebuild_timeline_locked\`）；这里只报清单**自己**知道的那份。
+            media_duration_sec: None,
+            section: geometry.section,
+            reversed: Some(reversed),
+            loop_enabled: geometry.loop_source,
+        },
+        channel_mode: geometry.channel_mode,
+    };
+    let mut takes: Vec<TakeRow> = item
+        .takes
+        .iter()
+        .map(|take| {
+            take_of(
+                &take.geometry,
+                &take.name,
+                take.active,
+                take.reversed,
+            )
+        })
+        .collect();
+    let active_take = item.takes.iter().position(|take| take.active);
+    if takes.is_empty() {
+        takes.push(take_of(
+            &item.geometry,
+            &item.name,
+            true,
+            item.geometry.reversed,
+        ));
+    }
+    ItemRow {
+        guid: item.geometry.item_id.clone(),
+        track_id: track_id.to_string(),
+        name: item.name.clone(),
+        start_sec: item.geometry.start_sec,
+        length_sec: item.geometry.duration_sec,
+        takes,
+        active_take: active_take.unwrap_or(0),
+        loop_source: item.geometry.loop_source,
+        muted: item.geometry.muted,
+        gain: item.geometry.item_gain,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::host_value_compatible;

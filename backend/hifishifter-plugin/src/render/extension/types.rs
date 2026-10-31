@@ -103,56 +103,135 @@ pub(super) fn compatible(a: f64, b: f64) -> bool {
 
 /// 在候选宿主 item 里为一条 ARA region 找**唯一**匹配的几何。
 ///
-/// 【为什么必须"唯一才采信"】ARA 侧没有 region → item 的显式边（见
-/// `crate::ara::mapping` 的 `LOST_FIELDS`）：`parent(2)` 只覆盖 FX 自己的那一个
-/// take，源 persistentID 会被多个 item 共享，名字/轨道序号按既有纪律不得用于猜
-/// 关联。因此只能按**几何**比对；而后续所有宿主写回都沿这条边定位 item —— 猜错
-/// 就是写到别的 item 上。所以 0 个匹配或多个匹配一律返回 `None`：宁可不绑定。
+/// 【判据从"四项几何全等"换成"包含 → 消歧 → 最小跨"】
 ///
-/// 四项都要相容：播放位置、播放时长、源内起点、播放速率。只比时间窗会在
-/// "同一位置的两条子轨各有一个 item"这种常见布局上直接产生歧义。
+/// ARA 侧没有 region → item 的显式边（见 \`crate::ara::mapping\` 的 \`LOST_FIELDS\`）：
+/// \`parent(2)\` 只覆盖 FX 自己的那一个 take，源 persistentID 会被多个 item 共享，
+/// 名字/轨道序号按既有纪律不得用于猜关联。因此只能按**几何**比对；而后续所有宿主
+/// 写回都沿这条边定位 item —— 猜错就是写到别的 item 上。
 ///
-/// 【`preferred` 是消歧而不是放宽】`preferred` 是这条 region **上一次**绑定的 item GUID。
-/// 复制粘贴的安全副本、同一素材的多个 item 会给出多个几何全等的候选；纯"唯一才采信"
-/// 会把它们**全部**判为歧义、两个都丢（用户看到片段凭空消失）。当且仅当候选里恰好有
-/// 一个 GUID 等于上次绑定时采信它 —— 这是**稳定性**，不是猜测：上一次的绑定本身就来自
-/// 一次唯一匹配，保持它不会把写回引到新的对象上。
+/// 旧判据要求"起点、长度、源起点、倍率四项全等且唯一"。它对**循环延伸**的 item
+/// 恒为假：宿主按循环节给出多条 region（每节一条），而 item 的 \`D_LENGTH\` 是整段。
+/// 于是这些 region 一条都绑不上 —— 写回报 \`no unique directly bound host take\`，
+/// 授权表里也没有它们（重开工程后那条 clip 是静音的）。
+///
+/// 现在的三级判据：
+///
+/// 1. **包含**：region 的播放区间必须落在 item 的播放区间之内。
+/// 2. **只在有多个 item 时才消歧**：先按倍率（\`durMod / durPlay\` vs \`D_PLAYRATE\`），
+///    再按源内起点。两个过滤都只在"结果非空"时才采信 —— 它们回答的是"这两条 item
+///    里哪一条"，而**只有一条候选时根本没有这个问题**。
+/// 3. **最小跨**：跨度最小的那条；相同取起点最小；再相同 ⇒ 判歧义、不绑。
+///
+/// 【为什么第 2 步必须先问"有几条"】循环 item 的 N 条 region 里，只有第一条的
+/// \`startInModificationTime\` 与 item 的 \`source_start_sec\` 对得上。无条件套用源内
+/// 起点过滤，会把第 2..N 条全判成"不匹配" —— 那正是旧实现的分母。而"只有一条候选"
+/// 时任何过滤都是多余的：没有别的 item 可争。
+///
+/// 【\`preferred\` 是消歧而不是放宽】\`preferred\` 是这条 region **上一次**绑定的 item
+/// GUID。复制粘贴的安全副本、同一素材的多个 item 会给出多个相容的候选；纯几何判据
+/// 会在它们之间来回跳。当且仅当候选里恰好有一个 GUID 等于上次绑定时采信它 ——
+/// 这是**稳定性**，不是猜测：上一次的绑定本身就来自一次唯一匹配，保持它不会把写回
+/// 引到新的对象上。
+///
+/// 【容差与装配器同一份】\`CONTAINMENT_EPS_SEC\` 同时被
+/// \`hifishifter_kernel::editor::assembly::region_belongs_to\` 使用 —— 绑定与装配
+/// 对"落不落在里面"给出不同答案，会让"能画出来但拖不动"重新出现。
 pub(super) fn unique_geometry_for_region(
     region: &crate::ara::AraPlaybackRegion,
     candidates: &[crate::host::geometry::HostClipGeometry],
     preferred: Option<&str>,
 ) -> Option<crate::host::geometry::HostClipGeometry> {
-    let playback_rate = if region.duration_in_playback_time > 0.0 {
-        region.duration_in_modification_time / region.duration_in_playback_time
-    } else {
-        f64::NAN
-    };
-    let matched: Vec<&crate::host::geometry::HostClipGeometry> = candidates
-        .iter()
-        .filter(|candidate| {
-            compatible(candidate.start_sec, region.start_in_playback_time)
-                && compatible(candidate.duration_sec, region.duration_in_playback_time)
-                && compatible(
-                    candidate.source_start_sec,
-                    region.start_in_modification_time,
-                )
-                && compatible(candidate.playback_rate, playback_rate)
-        })
-        .collect();
-    let first = *matched.first()?;
-    if matched.len() == 1 {
-        return Some(first.clone());
+    const EPS: f64 = hifishifter_kernel::editor::assembly::CONTAINMENT_EPS_SEC;
+    // 零长度 / 非有限的 region 没有内容可绑：绑上只会让写回瞄准一个"什么都没有"的
+    // 位置。映射层已经在 \`NonPositivePlaybackDuration\` 处拒过它，这里再守一次。
+    if !(region.duration_in_playback_time.is_finite() && region.duration_in_playback_time > 0.0) {
+        return None;
     }
-    // 有歧义：只有"上次绑定的那个"能打破它 —— 且它必须在候选里。
+    let region_start = region.start_in_playback_time;
+    let region_end = region_start + region.duration_in_playback_time;
+    if !(region_start.is_finite() && region_end.is_finite()) {
+        return None;
+    }
+    let contains = |candidate: &crate::host::geometry::HostClipGeometry| {
+        let item_start = candidate.start_sec;
+        let item_end = candidate.start_sec + candidate.duration_sec.max(0.0);
+        item_start.is_finite()
+            && item_end.is_finite()
+            && region_start >= item_start - EPS
+            && region_end <= item_end + EPS
+    };
+    // ① 上一次的绑定：它在候选里、且仍然包含这条 region ⇒ 直接采信。
     if let Some(preferred) = preferred {
-        if let Some(found) = matched
+        if let Some(found) = candidates
             .iter()
             .find(|candidate| candidate.item_id == preferred)
         {
-            return Some((*found).clone());
+            if contains(found) {
+                return Some(found.clone());
+            }
         }
     }
-    None
+    let mut pool: Vec<&crate::host::geometry::HostClipGeometry> =
+        candidates.iter().filter(|candidate| contains(candidate)).collect();
+    if pool.is_empty() {
+        return None;
+    }
+    // ② 只有一条候选时不必消歧（见函数文档的"为什么第 2 步必须先问有几条"）。
+    if pool.len() > 1 {
+        let rate = if region.duration_in_playback_time > 0.0 {
+            region.duration_in_modification_time / region.duration_in_playback_time
+        } else {
+            f64::NAN
+        };
+        let by_rate: Vec<_> = pool
+            .iter()
+            .copied()
+            .filter(|candidate| compatible(candidate.playback_rate, rate))
+            .collect();
+        if !by_rate.is_empty() {
+            pool = by_rate;
+        }
+    }
+    if pool.len() > 1 {
+        let by_source: Vec<_> = pool
+            .iter()
+            .copied()
+            .filter(|candidate| {
+                compatible(candidate.source_start_sec, region.start_in_modification_time)
+            })
+            .collect();
+        if !by_source.is_empty() {
+            pool = by_source;
+        }
+    }
+    // ③ 最小跨；跨度相同取起点最小；再相同 ⇒ 歧义。
+    let mut best: Option<(&crate::host::geometry::HostClipGeometry, f64, f64)> = None;
+    let mut ambiguous = false;
+    for candidate in pool {
+        let span = candidate.duration_sec.max(0.0);
+        let start = candidate.start_sec;
+        match best {
+            None => {
+                best = Some((candidate, span, start));
+                ambiguous = false;
+            }
+            Some((_, best_span, best_start)) => {
+                let same_span = (span - best_span).abs() <= EPS;
+                let same_start = (start - best_start).abs() <= EPS;
+                if same_span && same_start {
+                    ambiguous = true;
+                } else if span < best_span - EPS || (same_span && start < best_start) {
+                    best = Some((candidate, span, start));
+                    ambiguous = false;
+                }
+            }
+        }
+    }
+    if ambiguous {
+        return None;
+    }
+    best.map(|(candidate, _, _)| candidate.clone())
 }
 
 #[derive(Clone, PartialEq, Eq)]

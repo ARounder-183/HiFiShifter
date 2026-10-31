@@ -714,14 +714,25 @@ impl ModelHandle {
                 .map(|slot| !self.destroyed_sequences.contains(&slot))
                 .collect(),
         };
-        match crate::ara::mapping::ara_document_to_timeline_with_identities(&document, &identities)
-        {
-            Ok(outcome) => {
-                let crate::ara::mapping::MappingOutcome {
-                    mut timeline,
+        match crate::ara::mapping::ara_document_to_rows(&document, Some(&identities)) {
+            Ok(mapped) => {
+                let crate::ara::mapping::MappingRows {
+                    tracks: region_tracks,
+                    rows: region_rows,
                     clip_regions,
                     skipped,
-                } = outcome;
+                } = mapped;
+                let _ = &clip_regions;
+                // 【装配输入在这里落库】两条输入表各自只写自己那一份：ARA 侧写 region 表，
+                // 清单侧写 `ui_tracks`。**clip 不在这里产生** —— 它只在
+                // `DocumentSession::rebuild_timeline_locked` 里产生。这是"一个循环延伸的
+                // item 不会被画成 N 条片段"的结构性保证（见 `editor::assembly` 的模块文档）。
+                *self.session.region_rows.lock_or_recover() = region_rows.clone();
+                *self.session.region_tracks.lock_or_recover() = region_tracks.clone();
+                // 从这里起，这份时间线归装配器管（见 `DocumentSession::ara_model_seen`）。
+                self.session
+                    .ara_model_seen
+                    .store(true, std::sync::atomic::Ordering::Release);
                 if !skipped.is_empty() {
                     // 逐 region 跳过是**局部**问题：记一行明细，但会话继续可用。
                     // 这正是"一个零长度/MIDI item 打死整个插件"的修复点。
@@ -757,58 +768,28 @@ impl ModelHandle {
                 //
                 // 【锁序】此处持有 `transaction`（见上方），而文档声明的顺序是
                 // `transaction → timeline → edits → host facts`，先取 `edits` 合法。
-                let seeded: std::collections::BTreeSet<String> = self
-                    .session
-                    .edits
-                    .lock_or_recover()
-                    .tracks
-                    .iter()
-                    .map(|track| track.id.clone())
-                    .collect();
-                for track in &mut timeline.tracks {
-                    if seeded.contains(&track.id) {
-                        continue;
-                    }
-                    track.compose_enabled = true;
-                    track.pitch_analysis_algo =
-                        hifishifter_kernel::state::PitchAnalysisAlgo::NsfHifiganOnnx;
-                }
-                // 宿主本会话slot不随删除压缩；避免活着的clip因旧region销毁换身份。
+                // 【默认合成开关与 clip 身份都不在这里写了】
                 //
-                // 【为什么不再在这里重贴 clip.id】身份已在映射层按 region key 派生
-                // （`ara-region-{key}`），此处重贴成 `ara-clip-{N}` 会把稳定性又抹掉。
-                // 这里只负责把 key → clip id 的映射登记进 `clip_ids` 供反查。
+                // 轨道默认值（`compose_enabled` / 分析算法）随装配一起播种 —— 见
+                // `DocumentSession::rebuild_timeline_locked`。写在装配里而不是这里，
+                // 是因为装配现在会在**每次清单刷新**后重跑：只在 remap 里播种，
+                // 重跑一次就丢一次。
                 //
-                // 【为什么按 `clip_regions` 对齐而不是顺序 zip】映射层会逐 region 跳过
-                // 坏条目；顺序 zip 会在有跳过时整体错位，把身份挂到错误的 clip 上。
-                // `clip_regions[i]` 是该 clip 在**过滤后**文档里的下标，与 `region_keys` 同序。
-                let mut clip_ids = self.session.clip_ids.lock_or_recover();
-                clip_ids.clear();
-                for (clip, region_index) in timeline.clips.iter().zip(&clip_regions) {
-                    if let Some(key) = self.region_keys.get(*region_index).copied() {
-                        clip_ids.insert(key, clip.id.clone());
-                    }
-                }
-                drop(clip_ids);
+                // `clip_ids` 同理：它由装配结果的 `spans` 反算，是"region key → 当前
+                // clip id"的唯一写者。此前映射层与清单层各写一次，于是"身份升级"窗口里
+                // 两边各说一套，`workspace_timeline_locked` 按 id 过滤会把全部 clip 滤掉。
+                //
                 // 身份仅由真实region→sequence边与宿主persistentID构建，不从名字/序号推断。
-                let mut bindings: crate::state_channel::TrackBindings = timeline
-                    .tracks
+                let mut bindings: crate::state_channel::TrackBindings = region_tracks
                     .iter()
                     .map(|t| (t.id.clone(), vec![]))
                     .collect();
-                for region in &document.playback_regions {
-                    if let Some(index) = region.region_sequence_index {
-                        if let Some(track) = timeline.tracks.get(index) {
-                            // 【为什么不用 unwrap】`bindings` 由上面的 `timeline.tracks`
-                            // 直接构建，当前必然命中；但这条路径跑在 **ARA 模型线程**，
-                            // 未来任何一处 divergence 都会变成宿主进程里的硬 panic。
-                            if let Some(members) = bindings.get_mut(&track.id) {
-                                members.push((
-                                    region.audio_modification_persistent_id.clone(),
-                                    region.audio_source_persistent_id.clone(),
-                                ));
-                            }
-                        }
+                for row in &region_rows {
+                    // 【为什么不用 unwrap】`bindings` 由上面的 `region_tracks`
+                    // 直接构建；但这条路径跑在 **ARA 模型线程**，未来任何一处
+                    // divergence 都会变成宿主进程里的硬 panic。
+                    if let Some(members) = bindings.get_mut(&row.track_id) {
+                        members.push((row.modification_id.clone(), row.source_id.clone()));
                     }
                 }
                 for members in bindings.values_mut() {
@@ -816,8 +797,16 @@ impl ModelHandle {
                     members.dedup();
                 }
                 *self.session.track_bindings.lock_or_recover() = bindings.clone();
-                // getter可能重入ARA：先发布真实基础图、释放事务，再采集稳定item GUID。
-                *self.session.timeline.lock_or_recover() = Some(timeline.clone());
+                // getter可能重入ARA：先装配并发布真实基础图、释放事务，再采集宿主清单。
+                //
+                // 【这一刻发布的是 region 形态】清单还没来，所以 `assemble` 走的是
+                // "没有 item ⇒ 每条 region 一条 clip"的回退路径。它只活到下面
+                // `refresh_ui_inventory` 之后的那次重装 —— 那时 clip 变成 item 形态。
+                // 之所以还要发布它，是因为渲染/工作区路径在收口后立刻就会读时间线，
+                // 而"短暂的空图"会让它们把整份输入判成不可用。
+                if let Err(error) = self.session.rebuild_timeline_locked() {
+                    log::error!("[ara] timeline assembly failed before the inventory: {error}");
+                }
                 drop(transaction);
                 for owner in self.session.renderer_owners() {
                     owner.refresh_host_state_for_model();
@@ -826,41 +815,18 @@ impl ModelHandle {
                     owner.refresh_ui_inventory();
                 }
                 let transaction = session.transaction.lock_or_recover();
-                let claimed_ids: Option<std::collections::HashMap<u64, String>>;
-                {
-                    let items = self.session.region_items.lock_or_recover();
-                    let ids = self.session.clip_ids.lock_or_recover();
-                    // 【R6：身份必须原子发布】这里只把"最终身份"算出来，**不**就地改
-                    // `clip_ids`。旧实现在循环里 `ids.insert(...)`，而 `session.timeline`
-                    // 要到几十行之后才重新发布 —— 中间那段窗口里 `clip_ids` 说
-                    // `ara-item-GUID`、已发布时间线说 `ara-region-N`，
-                    // `workspace_timeline_locked` 按 id 过滤会把**全部 clip 滤掉**：
-                    // 工作区时间线短暂为空 ⇒ 几何日志被清空（锁定失效）+ 呈现层误判。
-                    let mut final_ids = ids.clone();
-                    let mut claimed = 0usize;
-                    for clip in &mut timeline.clips {
-                        if let Some((key, _)) = ids.iter().find(|(_, id)| **id == clip.id) {
-                            if let Some(item) = items.get(key) {
-                                let key = *key;
-                                clip.id = format!("ara-item-{item}");
-                                final_ids.insert(key, clip.id.clone());
-                                claimed += 1;
-                            }
-                        }
-                    }
-                    claimed_ids = Some(final_ids);
-                    // 用户报障时最需要的一行：多少 clip 认领到了宿主 item GUID。
-                    // 认领不到的会停在 `ara-clip-N`，随后被清单侧 retain 剔除 ——
-                    // 这就是"子轨道 Item 没有变成真 Clip"的直接读数。
-                    if claimed < timeline.clips.len() {
-                        log::warn!(
-                            "[ara] {} of {} clip(s) claimed a host item GUID; the rest keep \
-                             ara-clip ids and will not survive host inventory presentation",
-                            claimed,
-                            timeline.clips.len()
-                        );
-                    }
+                // 清单回来了 ⇒ 装配输入 B 变了 ⇒ 再装配一次。**这是 clip 变成 item 形态的
+                // 那一刻**：一个循环延伸的 item 在这里从"N 条每节一条的 region clip"
+                // 收敛成"一条整段的 item clip"。
+                if let Err(error) = self.session.rebuild_timeline_locked() {
+                    log::error!("[ara] timeline assembly failed after the inventory: {error}");
                 }
+                let timeline = self
+                    .session
+                    .timeline
+                    .lock_or_recover()
+                    .clone()
+                    .unwrap_or_default();
                 // 记下"授权这一刻"的 active take GUID。
                 //
                 // 【为什么在这里、而不是每次清单刷新都重记】ARA 的 playback region 指向
@@ -899,6 +865,35 @@ impl ModelHandle {
                     };
                     let mut takes = self.session.authorized_takes.lock_or_recover();
                     let mut sources = self.session.authorized_sources.lock_or_recover();
+                    // 【授权按 item 走，不再只经 `region_items` 反查】
+                    //
+                    // `region_items` 由**绑定**写入，而绑定的旧判据要求"region 与 item
+                    // 四项几何全等"—— 循环延伸的 item 按循环节给出多条 region，与整段
+                    // item **永远不全等**，于是它的 region 一条都绑不上 ⇒ 这个 item 没有
+                    // 授权 ⇒ `source_path` 永远为空 ⇒ **重开工程后那条 clip 是静音的**。
+                    //
+                    // 装配器的 `spans` 给的是"这条 clip 吃掉了哪几条 region"，与绑定
+                    // 无关、只由包含关系决定。于是循环 item 从第一轮起就有授权。
+                    let spans = self.session.assembly_spans.lock_or_recover().clone();
+                    for (clip_id, row_indices) in &spans {
+                        let Some(item) = crate::editor::workspace::host_item_guid(clip_id) else {
+                            continue;
+                        };
+                        for index in row_indices {
+                            let Some(row) = region_rows.get(*index) else {
+                                continue;
+                            };
+                            if row.key == 0 {
+                                continue;
+                            }
+                            if let Some(take) = take_by_item.get(item) {
+                                takes.insert(row.key, take.clone());
+                            }
+                            if let Some(source) = source_by_item.get(item) {
+                                sources.insert(row.key, source.clone());
+                            }
+                        }
+                    }
                     // 【为什么不再 `clear()`】这两张表按 region key 索引，key 的终点
                     // 只有两条：`destroy_playback_region` 逐 key 删除、
                     // `DocumentSession::close` 整表清空。一次 remap 看不到某个 key，
@@ -961,13 +956,9 @@ impl ModelHandle {
                 log::info!("[ara] {}", self.ledger.summary());
                 self.log_published_revisions(&timeline);
                 self.log_identity_readings(&timeline);
-                // 【R6】先写 `clip_ids`、紧接着写已发布时间线：两者的不一致窗口从
-                // "整个 remap 的后半段"缩短到"两次赋值之间"。读者要么看到 region 形态的
-                // 两张表，要么看到 item 形态的两张表。
-                if let Some(final_ids) = claimed_ids {
-                    *self.session.clip_ids.lock_or_recover() = final_ids;
-                }
-                *self.session.timeline.lock_or_recover() = Some(timeline.clone());
+                // 【`clip_ids` 与已发布时间线由装配器一次写成】它们的唯一写者是
+                // `rebuild_timeline_locked`，所以"两张表各说一套"的窗口在结构上不存在 ——
+                // 这里只记下本实例看到的那一份，供 `remap_is_redundant` 判"模型没变"。
                 self.timeline = Some(timeline);
                 // 只有**成功发布**才记指纹：失败时留着旧指纹，下一次照常重试。
                 self.remap_stamp = Some(fingerprint);

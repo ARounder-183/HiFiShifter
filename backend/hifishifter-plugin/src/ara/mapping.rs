@@ -11,9 +11,9 @@
 //! 已知丢失字段见 [`LOST_FIELDS`]：ARA 表达不到的输入一律**显式降级**，
 //! 不允许悄悄填默认值。
 
+use hifishifter_kernel::editor::assembly::{RegionRow, TrackRow};
 use hifishifter_kernel::state::TimelineState;
 use serde::Deserialize;
-use serde_json::{json, Value};
 use std::collections::HashMap;
 
 /// ARA 文档（对应探针 Task 1 采集的 JSON 形状）。
@@ -617,6 +617,23 @@ pub struct MappingOutcome {
     pub skipped: Vec<SkippedRegion>,
 }
 
+/// ARA 文档的**装配输入**：一张轨道表 + 一张 region 表。
+///
+/// 【为什么不是时间线】装配器（[`hifishifter_kernel::editor::assembly`]）是唯一决定
+/// "有哪些 clip"的地方。本结构只搬运 ARA 的读数 —— 一条 region 一行，**不是一条 clip**。
+/// 于是"循环延伸的 item 按循环节给出多条 region"不会再变成多条片段：它们挂在同一条
+/// item 上，产出的是**一条** clip。
+pub struct MappingRows {
+    /// 轨道表（region sequence → 模型轨道）。
+    pub tracks: Vec<TrackRow>,
+    /// region 表（每条成功的 playback region 一行）。
+    pub rows: Vec<RegionRow>,
+    /// 与 `rows` **一一对应**：该行来自 `doc.playback_regions` 的哪个下标。
+    pub clip_regions: Vec<usize>,
+    /// 被跳过的 region。
+    pub skipped: Vec<SkippedRegion>,
+}
+
 /// 调用方提供的**稳定身份**，按 `doc.playback_regions` 的下标对齐。
 ///
 /// 【为什么需要它】位置派生的身份（`ara-clip-{index+1}` / `ara-track-{N}`）在宿主
@@ -686,10 +703,39 @@ pub fn ara_document_to_timeline_reporting(
 }
 
 /// [`ara_document_to_timeline_reporting`] 的实现；`identities` 为 `None` 时用位置身份。
+/// [`ara_document_to_timeline_reporting`] 的实现；`identities` 为 `None` 时用位置身份。
+///
+/// 【为什么现在只是一层薄壳】造 clip 那一步已经搬进
+/// [`hifishifter_kernel::editor::assembly`]（装配器）。这里保留原签名，是为了让
+/// "只看 ARA 文档、不看宿主清单"的调用方（测试、诊断、ARA-only 宿主）继续拿到一份
+/// 时间线，且与旧实现的产物**逐字相同** —— 那条路径等价于 `assemble(&[], &rows)`。
 fn ara_document_to_timeline_reporting_with_identities(
     doc: &AraDocument,
     identities: Option<&MappingIdentities>,
 ) -> Result<MappingOutcome, MappingError> {
+    let mapped = ara_document_to_rows(doc, identities)?;
+    let assembly = hifishifter_kernel::editor::assembly::assemble(&[], &mapped.rows);
+    Ok(MappingOutcome {
+        timeline: assembly.timeline(&mapped.tracks, default_bpm()),
+        clip_regions: mapped.clip_regions,
+        skipped: mapped.skipped,
+    })
+}
+
+/// ARA 文档 → **装配输入**：一条 playback region 一行，**不是一条 clip**。
+///
+/// 【为什么要把"造 clip"这一步拿走】插件里同一个 Clip 曾经同时由 region 与宿主 item
+/// 两处产生，而两者之间的关联判据是"四项几何全等" —— 循环延伸的 item 按循环节给出
+/// 多条 region，与整段 item 永远不全等，于是它们既拿不到 item 身份、也不会被归并，
+/// 结果就是"延伸出一个循环，界面上多出 N 条片段"。装配器让 clip 只有一个来源，
+/// 本函数只负责把 ARA 的读数翻译成它认得的那张表。
+///
+/// 【折算口径全部留在这里】工程速率 / 源速率的换算、SECTION 与镜像窗口的解算、
+/// "落在源之外"的跳过与限流读数 —— 这些都是**映射**的事实，与装配无关。
+pub fn ara_document_to_rows(
+    doc: &AraDocument,
+    identities: Option<&MappingIdentities>,
+) -> Result<MappingRows, MappingError> {
     let project = resolve_project_rate(doc);
     let sources: HashMap<&str, &AraAudioSource> = doc
         .audio_sources
@@ -707,11 +753,11 @@ fn ara_document_to_timeline_reporting_with_identities(
         })
         .collect();
 
-    let mut tracks: Vec<Value> = Vec::new();
-    // 【为什么是 `Option`】已销毁的序列槽位在时间线上**不该出现**。宿主分割时
-    // 常销毁旧序列、建新序列；旧槽位若仍生成一条 `ara-track-{position}` 轨，
-    // 用户就会看到"原轨空了、新轨有片段"的两轨中间态。`None` 让该槽位不产生
-    // 轨道，但保留下标对齐（`ownership` 用的仍是未压缩的扁平槽位）。
+    let mut tracks: Vec<TrackRow> = Vec::new();
+    // 【为什么是 Option】已销毁的序列槽位在时间线上**不该出现**。宿主分割时
+    // 常销毁旧序列、建新序列；旧槽位若仍生成一条 ara-track-{position} 轨，
+    // 用户就会看到"原轨空了、新轨有片段"的两轨中间态。None 让该槽位不产生
+    // 轨道，但保留下标对齐（ownership 用的仍是未压缩的扁平槽位）。
     let mut track_ids: Vec<Option<String>> = Vec::new();
     let live_sequences = identities.map(|ids| ids.live_sequences.as_slice());
     for (position, sequence) in doc
@@ -728,11 +774,11 @@ fn ara_document_to_timeline_reporting_with_identities(
             track_ids.push(None);
             continue;
         }
-        // 【身份用宿主的 model-ref key，不是 persistentID】`ARARegionSequenceProperties`
-        // 只有 name / orderIndex / musicalContextRef / color（`ARAInterface.h:775-793`）
+        // 【身份用宿主的 model-ref key，不是 persistentID】ARARegionSequenceProperties
+        // 只有 name / orderIndex / musicalContextRef / color（ARAInterface.h:775-793）
         // —— **没有** persistentID（audio source / modification / processing algorithm
-        // 才有）。能拿到的稳定令牌是宿主的 model-ref key，由 `ModelHandle` 经
-        // `MappingIdentities` 传入；拿不到时才退回位置，后者会在宿主删掉一条序列之后
+        // 才有）。能拿到的稳定令牌是宿主的 model-ref key，由 ModelHandle 经
+        // MappingIdentities 传入；拿不到时才退回位置，后者会在宿主删掉一条序列之后
         // 让其余 track 的身份整体前移。
         let id = identities
             .and_then(|ids| ids.sequence_ids.get(position))
@@ -740,18 +786,18 @@ fn ara_document_to_timeline_reporting_with_identities(
             .map(|id| format!("ara-sequence-{id}"))
             .unwrap_or_else(|| format!("ara-track-{position}"));
         // 【为什么 order 取宿主的 orderIndex 而不是枚举序号】枚举序号是"宿主交给我们的
-        // 顺序"，而 `orderIndex` 是"宿主认为的轨道次序"。两者在宿主重排后不一致，而
-        // 内核按 `order` 排序（`state/model.rs` 的 `siblings.sort_by_key`）—— 用枚举
-        // 序号会让插件里的轨道顺序停在宿主重排之前。这里**只改排序值**：`track_ids`
-        // 仍按扁平位置排列，因为 `region_sequence_of` 返回的就是扁平下标，
+        // 顺序"，而 orderIndex 是"宿主认为的轨道次序"。两者在宿主重排后不一致，而
+        // 内核按 order 排序（state/model.rs 的 siblings.sort_by_key）—— 用枚举
+        // 序号会让插件里的轨道顺序停在宿主重排之前。这里**只改排序值**：track_ids
+        // 仍按扁平位置排列，因为 region_sequence_of 返回的就是扁平下标，
         // 重排数组会让 region→track 归属整体错位。
-        tracks.push(json!({
-            "id": id,
-            "name": sequence.name.clone().unwrap_or_default(),
-            "order": sequence.order_index,
+        tracks.push(TrackRow {
+            id: id.clone(),
+            name: sequence.name.clone().unwrap_or_default(),
+            order: sequence.order_index,
             // 轨道色取宿主给的序列色（无则空串 ⇒ 内核用默认色）。
-            "color": sequence.color.clone().unwrap_or_default(),
-        }));
+            color: sequence.color.clone().unwrap_or_default(),
+        });
         track_ids.push(Some(id));
     }
     // 第一条存活轨道：region 指向已销毁序列时的落点（同一批片段不能因为宿主
@@ -759,13 +805,13 @@ fn ara_document_to_timeline_reporting_with_identities(
     let fallback_track = track_ids.iter().flatten().next().cloned();
 
     let ownership = region_sequence_of(doc)?;
-    let mut clips: Vec<Value> = Vec::new();
+    let mut rows: Vec<RegionRow> = Vec::new();
     let mut clip_regions: Vec<usize> = Vec::new();
     let mut skipped: Vec<SkippedRegion> = Vec::new();
     for (index, region) in doc.playback_regions.iter().enumerate() {
         let sequence_index = ownership.get(index).copied().unwrap_or(0);
         // 【越界与"已销毁槽位"是两件事】越界说明文档本身不一致（宿主给了不存在的
-        // 下标）—— 跳过，与既有语义一致。已销毁槽位（`Some(None)`）则是宿主分割时
+        // 下标）—— 跳过，与既有语义一致。已销毁槽位（Some(None)）则是宿主分割时
         // 重建序列的常态：落回第一条存活轨道，片段不能因此整批消失。
         let track_id = match track_ids.get(sequence_index) {
             Some(slot) => slot.clone().or_else(|| fallback_track.clone()),
@@ -813,7 +859,7 @@ fn ara_document_to_timeline_reporting_with_identities(
         }
 
         // 【速率】宿主声明的时长比值，再乘"工程速率 / 源速率"的校正。后者修正的是
-        // "宿主按工程速率折算修改时长"这一事实（见 `region_playback_rate`）：
+        // "宿主按工程速率折算修改时长"这一事实（见 region_playback_rate）：
         // 48 kHz 素材进 44.1 kHz 工程且宿主不拉伸时，比值 1 × 44100/48000 = 0.91875。
         let playback_rate = region_playback_rate(
             region,
@@ -825,12 +871,12 @@ fn ara_document_to_timeline_reporting_with_identities(
         // 而所有参数表都按 clip id 索引 —— 那正是"编辑操作不更新 ARA"的直接机理。
         // key 是 ARA 在同一文档内保证稳定的令牌（宿主把它当作不透明句柄），
         // 销毁只摘除不复用已活 key，所以它不会因删除而重排。
-        let clip_id = identities
+        let key = identities
             .and_then(|ids| ids.region_keys.get(index).copied())
-            .filter(|key| *key != 0)
+            .filter(|key| *key != 0);
+        let clip_id = key
             .map(|key| format!("ara-region-{key}"))
             .unwrap_or_else(|| format!("ara-clip-{}", index + 1));
-        let take_id = format!("{clip_id}-take-1");
         let clip_name = region
             .name
             .clone()
@@ -839,33 +885,33 @@ fn ara_document_to_timeline_reporting_with_identities(
 
         // 【源窗口：整段工程区间一起折算，起点与终点必须同域】
         //
-        // 宿主给的 `startInModificationTime` 与 `durationInModificationTime` 同处**工程**速率域
-        // （素材率 ≠ 工程率时宿主把修改时间按工程速率折算 —— 见 `region_playback_rate` 的说明）。
-        // 内核消费的源跨度由 `durationPlay × playback_rate` 决定，而 `playback_rate` 里**已经含了**
-        // `projectRate / sourceRate` 这一项，所以终点的折算一直是**对的**，起点却不是 ——
+        // 宿主给的 startInModificationTime 与 durationInModificationTime 同处**工程**速率域
+        // （素材率 ≠ 工程率时宿主把修改时间按工程速率折算 —— 见 region_playback_rate 的说明）。
+        // 内核消费的源跨度由 durationPlay × playback_rate 决定，而 playback_rate 里**已经含了**
+        // projectRate / sourceRate 这一项，所以终点的折算一直是**对的**，起点却不是 ——
         // 这就是"分割越靠后越容易丢片段"的根因：
         //
         //     越界量 = startMod × (1 − projectRate / sourceRate)
         //
         // 实测 Cubase 15：48 kHz / 1526332 帧素材放进 44.1 kHz 工程，一条在
         // 10 / 16 / 20 / 22 / 26 / 28 / 30 s 处被连续分割的 region，日志里
-        // `consumed source window` 的越界量依次是
+        // consumed source window 的越界量依次是
         // 0.8125 / 1.3000 / 1.6250 / 1.7875 / 2.1125 / 2.2750 / 2.4375 s，
         // 与上式**逐条误差为 0**（0.08125 = 1 − 44100/48000）。起点 ≥ 31.1 s 的片段因此整条被判成
-        // "落在源外"（`SourceWindowOutsideSource`）而跳过 —— 用户看到的就是"分割后某个片段失踪"；
+        // "落在源外"（SourceWindowOutsideSource）而跳过 —— 用户看到的就是"分割后某个片段失踪"；
         // 未被跳过的那些则内容整体后移、长度偏短。
         //
-        // 【为什么起点用 `projectRate / sourceRate` 而不是 `playback_rate`】`playback_rate` 还含
-        // 宿主自带的拉伸比值（`durMod / durPlay`），对真正被拉伸过的 region 不等于速率校正分量。
+        // 【为什么起点用 projectRate / sourceRate 而不是 playback_rate】playback_rate 还含
+        // 宿主自带的拉伸比值（durMod / durPlay），对真正被拉伸过的 region 不等于速率校正分量。
         // **位置与拉伸无关**，所以起点只乘速率校正分量；终点仍走内核实际消费的跨度
-        // `durationPlay × playback_rate`（它恒等于 `durMod × projectRate/sourceRate`）。
+        // durationPlay × playback_rate（它恒等于 durMod × projectRate/sourceRate）。
         //
         // 【为什么夹而不是报错】拿不到速率时（宿主没通报），整个窗口都在工程秒域，夹是**保音高**的：
         // 源按自身速率播放，缺的部分留白（ARA 对"读到源尾之后"的定义就是静音）。此前这段越界
-        // 一路带到渲染校验，被 `SnapshotError::InvalidGeometry` 拒绝，而那是**致命**的：整条时间线
+        // 一路带到渲染校验，被 SnapshotError::InvalidGeometry 拒绝，而那是**致命**的：整条时间线
         // 一条片段都发布不出来。一个越界的源窗口绝不该赔上整条时间线。
         //
-        // 【为什么只在时长已知时才夹】`duration_seconds` 由 `sampleCount / sampleRate` 推出，
+        // 【为什么只在时长已知时才夹】duration_seconds 由 sampleCount / sampleRate 推出，
         // 宿主没给样本数时它是 0（"未知"，不是"零长"）。把未知当零长会把每条 region 都夹成空、
         // 进而全部跳过 —— 那比原来的致命拒绝还糟。
         let rate_known = project.rate.is_finite()
@@ -899,7 +945,7 @@ fn ara_document_to_timeline_reporting_with_identities(
             // 整条 region 都落在源之外：没有可读素材。这与"源不存在"同级 —— 记因、跳过，
             // 不发布一条空 take 让下游去猜。
             //
-            // 【为什么带上现场数字】此前只有 `index:reason`，下一轮取证必须靠日志反推是哪个窗口
+            // 【为什么带上现场数字】此前只有 index:reason，下一轮取证必须靠日志反推是哪个窗口
             // 越界（本轮的根因就是这么找到的）。把四个量直接打出来，下一次不必再反推。
             hifishifter_kernel::log_limiter::emit_limited_key(
                 log::Level::Warn,
@@ -921,10 +967,10 @@ fn ara_document_to_timeline_reporting_with_identities(
             });
             continue;
         }
-        // 【为什么带容差】终点是 `raw_start + durPlay × playback_rate` 算出来的，与
-        // `duration = sampleCount / sampleRate` 之间必然有**浮点尾差**（实测 Cubase：
-        // 整段素材的 region 打出 `[0.000000, 31.798583] exceeds (31.798583s)`，两者
-        // 只差最后一个 ulp）。原来的严格 `<` 让**每一条覆盖到源尾的 region** 都命中，
+        // 【为什么带容差】终点是 raw_start + durPlay × playback_rate 算出来的，与
+        // duration = sampleCount / sampleRate 之间必然有**浮点尾差**（实测 Cubase：
+        // 整段素材的 region 打出 [0.000000, 31.798583] exceeds (31.798583s)，两者
+        // 只差最后一个 ulp）。原来的严格 < 让**每一条覆盖到源尾的 region** 都命中，
         // 真机日志里刷了 187 次，把真正需要关注的越界淹掉。容差取一个源采样周期：
         // 亚采样的越界本来就是 ARA 定义的"读作静音"，不构成需要留痕的事实。
         let span_epsilon = 1.0 / source.sample_rate.max(1.0);
@@ -944,65 +990,39 @@ fn ara_document_to_timeline_reporting_with_identities(
             );
         }
 
-        // 【为什么不把长度夹到"可渲染的源跨度"】工程长度是**宿主**的事实：插件里的
-        // clip 必须与宿主里那条 item 一样长，否则界面会显示一个比宿主短的片段。
-        // "源窗口被夹短"造成的样本缺口由渲染层补零（见 `render/input.rs`）：
-        // ARA 对"读到源尾之后"的定义就是静音，缺的那截不是错误。
-        let length_sec = region.duration_in_playback_time.max(0.0);
-        clips.push(json!({
-            "id": clip_id,
-            "track_id": track_id,
-            "name": clip_name,
-            "start_sec": region.start_in_playback_time,
-            "length_sec": length_sec,
-            "active_take_id": take_id,
-            "clip_playback_rate": 1.0,
-            "takes": [{
-                "id": take_id,
-                "name": clip_name,
-                "source_path": source.persistent_id,
-                "source_start_sec": source_span_start,
-                "source_end_sec": source_span_end,
-                "playback_rate": playback_rate,
-                "source_sample_rate": source.sample_rate as u32,
-                "duration_sec": source.duration_seconds,
-                "source_channels": source.channel_count.max(0) as u16,
-            }],
-        }));
-        // 下标是**原文档下标**（`ara-clip-{index+1}` 与它一致），所以身份在
+        rows.push(RegionRow {
+            key: key.unwrap_or(0),
+            clip_id,
+            track_id,
+            start_sec: region.start_in_playback_time,
+            // 【为什么不把长度夹到"可渲染的源跨度"】工程长度是**宿主**的事实：插件里的
+            // clip 必须与宿主里那条 item 一样长，否则界面会显示一个比宿主短的片段。
+            // "源窗口被夹短"造成的样本缺口由渲染层补零（见 render/input.rs）：
+            // ARA 对"读到源尾之后"的定义就是静音，缺的那截不是错误。
+            duration_sec: region.duration_in_playback_time.max(0.0),
+            source_start_sec: source_span_start,
+            source_end_sec: source_span_end,
+            playback_rate,
+            name: clip_name,
+            source_id: source.persistent_id.clone(),
+            modification_id: region.audio_modification_persistent_id.clone(),
+            source_sample_rate: source.sample_rate,
+            source_duration_sec: source.duration_seconds,
+            source_channels: source.channel_count,
+        });
+        // 下标是**原文档下标**（ara-clip-{index+1} 与它一致），所以身份在
         // "中间有 region 被跳过"时也保持稳定 —— 不会因为跳过而整体前移。
         clip_regions.push(index);
     }
 
-    let project_sec = clips
-        .iter()
-        .map(|clip| {
-            let start = clip.get("start_sec").and_then(Value::as_f64).unwrap_or(0.0);
-            let length = clip
-                .get("length_sec")
-                .and_then(Value::as_f64)
-                .unwrap_or(0.0);
-            start + length
-        })
-        .fold(0.0_f64, f64::max);
-
-    let mut timeline: TimelineState = serde_json::from_value(json!({
-        "tracks": tracks,
-        "clips": clips,
-        "bpm": default_bpm(),
-        "project_sec": project_sec,
-    }))?;
-
-    // 把 take 物化到 Clip 的扁平投影 —— 与产品加载工程时走同一步。
-    for clip in &mut timeline.clips {
-        clip.normalize_takes();
-    }
-    Ok(MappingOutcome {
-        timeline,
+    Ok(MappingRows {
+        tracks,
+        rows,
         clip_regions,
         skipped,
     })
 }
+
 
 /// 一行可核对的摘要。
 ///

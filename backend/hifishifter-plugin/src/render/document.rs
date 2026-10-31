@@ -495,6 +495,35 @@ pub(crate) struct DocumentSession {
     /// PCM 可以晚于结构回调到达；不借用 model/scope 版本触发 GUI 资源补齐。
     pub editor_audio_revision: AtomicU64,
     pub timeline: Mutex<Option<hifishifter_kernel::state::TimelineState>>,
+    /// 装配器的**输入 A**：ARA 侧的 region 表（一条 playback region 一行）。
+    ///
+    /// 【为什么不是 clip】region 只回答"这段时间播放素材的哪一段"。clip 由
+    /// [`Self::rebuild_timeline_locked`] 唯一产生 —— 这是"一个循环延伸的 item
+    /// 不会再被画成 N 条片段"的结构性保证（见 `hifishifter_kernel::editor::assembly`）。
+    pub region_rows: Mutex<Vec<hifishifter_kernel::editor::assembly::RegionRow>>,
+    /// 装配器的**输入 A** 的轨道侧：region sequence → 模型轨道。
+    pub region_tracks: Mutex<Vec<hifishifter_kernel::editor::assembly::TrackRow>>,
+    /// 最近一次装配的 `spans`：clip id → 落在它里面的 region 行下标。
+    ///
+    /// 【为什么留一份】PCM 授权、媒体时长索引、`ara.item-map` 读数都要回答
+    /// "这条 item 的音频来自哪个 ARA 源"，而答案就在这张边上。它**不是**第二份
+    /// clip 集合：只有行下标，没有 clip。
+    pub assembly_spans: Mutex<std::collections::BTreeMap<String, Vec<usize>>>,
+    /// 最近一次装配里**没挂上任何 item** 的 region 行（不产生 clip，只进读数）。
+    pub assembly_unbound: Mutex<Vec<usize>>,
+    /// ARA 模型是否**已经交付过**至少一次。
+    ///
+    /// 【为什么需要】`rebuild_timeline_locked` 会在每次清单刷新后跑。而清单可能先于
+    /// ARA 模型到达（宿主加载工程、测试夹具手工塞 `ui_tracks`）—— 那时 region 表是空
+    /// 的，装配结果只会是一堆没有源窗口的占位。**用它当"这份时间线归不归我管"的判据**：
+    /// 模型从未交付过时，不动已经发布的时间线（否则"宿主里一切都在、插件里什么都没有"）。
+    pub ara_model_seen: std::sync::atomic::AtomicBool,
+    /// 清单变了、需要重新装配。
+    ///
+    /// 【为什么是"置标志 + 稍后装配"而不是就地装配】清单采集会被
+    /// `host_geometries_locked` → `fade_items_locked` / `clip_for_host_item` 调到，
+    /// 而那两处正持有 `clip_ids` —— 装配要写 `clip_ids`，就地做就是自锁。
+    pub inventory_rebuild_due: std::sync::atomic::AtomicBool,
     pub track_bindings: Mutex<crate::state_channel::TrackBindings>,
     pub revision: AtomicU64,
     pub render_epoch: AtomicU64,
@@ -1199,6 +1228,223 @@ impl DocumentSession {
             .insert(id.clone(), pcm.clone());
         self.sources.lock_or_recover().insert(id, pcm);
         self.editor_audio_revision.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// 宿主清单 → 装配器的**输入 B**（一条 item 一行）。
+    ///
+    /// 【为什么从 `ui_tracks` 现算而不是缓存一份】清单本身就是缓存
+    /// （`ui_inventory_stamp` 管它的代次），再存一份只会多出一个"两份缓存不同步"的
+    /// 失败模式。这里每次都从同一份清单派生，装配结果因此永远与"用户此刻在宿主里
+    /// 看到的东西"一致。
+    pub(crate) fn collect_item_rows(&self) -> Vec<hifishifter_kernel::editor::assembly::ItemRow> {
+        let tracks = self.ui_tracks.lock_or_recover();
+        tracks
+            .values()
+            .flat_map(|track| {
+                track
+                    .items
+                    .iter()
+                    .map(|item| crate::host::geometry::item_row_from_host(item, &track.id))
+            })
+            .collect()
+    }
+
+    /// 清单刷新之后补一次装配（由 `ExtensionOwner::refresh_ui_inventory` 调用）。
+    ///
+    /// 【为什么是"排空标志"】见 `inventory_rebuild_due` 的说明。标志由清单采集置位，
+    /// 本函数在**采集返回之后**才取 `transaction` 与 `timeline` —— 那时调用方已经
+    /// 释放了 `clip_ids`。
+    pub(crate) fn flush_inventory_rebuild(&self) {
+        if !self
+            .inventory_rebuild_due
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            return;
+        }
+        let _transaction = self.transaction.lock_or_recover();
+        if let Err(error) = self.rebuild_timeline_locked() {
+            log::warn!("[ara] timeline assembly on inventory refresh failed: {error}");
+        }
+    }
+
+    /// **唯一**的时间线重建入口 —— clip 集合只在这里产生。
+    ///
+    /// 【为什么必须只有一个入口】此前 clip 有两个生产者：`ara/mapping.rs` 按 playback
+    /// region 造一条，`present_host_inventory` 又按宿主 item 造一条。两者的关联判据是
+    /// "四项几何全等且唯一"，而 REAPER 对一个**循环延伸**的 item 按循环节给出多条
+    /// region —— 与整段 item 永远不全等。于是这些 region 既拿不到 item 身份、也不会被
+    /// 任何归并收走：界面上多出 N 条片段，而且一条都拖不动（写回报
+    /// `no unique directly bound host take`）。
+    ///
+    /// 现在：装配器决定"有哪些 clip"，本函数是它唯一的调用点；清单与 ARA 两侧都只写
+    /// 各自的**输入表**（`ui_tracks` / `region_rows`）。
+    ///
+    /// 【锁序】调用方必须已持有 `transaction`。本函数先取两张输入表（宿主事实层级），
+    /// 立刻释放，再取 `timeline` / `clip_ids` —— 与 `transaction → timeline → edits →
+    /// host facts` 同向。
+    pub(crate) fn rebuild_timeline_locked(&self) -> Result<(), String> {
+        use hifishifter_kernel::editor::assembly::{assemble, attach};
+        // 【模型没交付过 ⇒ 不动已发布的时间线】见 `ara_model_seen` 的说明。装配器的
+        // 输入只有两份，缺了 ARA 那一份时它只能给出"没有源窗口的占位" —— 用那份占位
+        // 盖掉一份真实的图，比不刷新糟得多。
+        if !self.ara_model_seen.load(std::sync::atomic::Ordering::Acquire)
+            && self
+                .timeline
+                .lock_or_recover()
+                .as_ref()
+                .is_some_and(|timeline| !timeline.clips.is_empty())
+        {
+            return Ok(());
+        }
+        let rows = self.region_rows.lock_or_recover().clone();
+        let tracks = self.region_tracks.lock_or_recover().clone();
+        let mut items = self.collect_item_rows();
+        // 【为什么要挂一次再装配】媒体总时长是**装配必需**的输入（倒放镜像轴、循环
+        // 回绕周期都要它），而它只有两个来源：宿主 `GetMediaSourceLength`（清单层）
+        // 或 ARA 的 `AudioSource.durationSeconds`（region 层，与授权无关、映射阶段就有）。
+        // item 侧不知道自己的 region，region 侧不知道自己的 item —— 所以先挂一次把
+        // 这份读数补上，再真正装配。`attach` 是纯函数，多跑一遍没有副作用。
+        let attached = attach(&items, &rows);
+        for (index, item) in items.iter_mut().enumerate() {
+            let media = attached
+                .iter()
+                .enumerate()
+                .find(|(_, owner)| **owner == Some(index))
+                .and_then(|(row_index, _)| rows.get(row_index))
+                .map(|row| row.source_duration_sec)
+                .filter(|duration| duration.is_finite() && *duration > 0.0);
+            let Some(media) = media else {
+                continue;
+            };
+            for take in &mut item.takes {
+                if take.geometry.media_duration_sec.is_none() {
+                    take.geometry.media_duration_sec = Some(media);
+                }
+            }
+        }
+        let assembly = assemble(&items, &rows);
+        // region key → clip id：由 `spans` 反算。**这是唯一写 `clip_ids` 的地方** ——
+        // 此前它由映射层与清单层各写一次，于是"身份升级"窗口里两边各说一套，
+        // `workspace_timeline_locked` 按 id 过滤会把全部 clip 滤掉。
+        let mut ids = std::collections::HashMap::new();
+        for (clip_id, row_indices) in &assembly.spans {
+            for index in row_indices {
+                if let Some(row) = rows.get(*index) {
+                    if row.key != 0 {
+                        ids.insert(row.key, clip_id.clone());
+                    }
+                }
+            }
+        }
+        let mut timeline = assembly.timeline(&tracks, crate::ara::mapping::default_bpm());
+        self.log_item_map(&assembly, &rows);
+        *self.clip_ids.lock_or_recover() = ids;
+        *self.assembly_spans.lock_or_recover() = assembly.spans.clone();
+        *self.assembly_unbound.lock_or_recover() = assembly.unbound.clone();
+        // 【默认合成开关：只对**没有持久化编辑记录**的轨道播种，不覆写用户的选择】
+        //
+        // 这段逻辑此前在 `remap_and_log` 里，只在 ARA 收口时跑一次。现在装配会在
+        // **每次清单刷新**后重跑 —— 留在那里就等于"每次重跑都丢一次"。挪到这里，
+        // 它才与"轨道从哪来"这件事同源。
+        //
+        // 锁序：`timeline → edits`（文档声明的层级）。先取 `timeline` 再取 `edits`。
+        {
+            let mut slot = self.timeline.lock_or_recover();
+            let seeded: std::collections::BTreeSet<String> = self
+                .edits
+                .lock_or_recover()
+                .tracks
+                .iter()
+                .map(|track| track.id.clone())
+                .collect();
+            for track in &mut timeline.tracks {
+                if seeded.contains(&track.id) {
+                    continue;
+                }
+                track.compose_enabled = true;
+                track.pitch_analysis_algo =
+                    hifishifter_kernel::state::PitchAnalysisAlgo::NsfHifiganOnnx;
+            }
+            *slot = Some(timeline);
+        }
+        Ok(())
+    }
+
+    /// `[ara] item map` —— **真读数**。
+    ///
+    /// 【为什么旧的那一行回答不了它被加进来要回答的问题】旧实现从 `region_items` 算
+    /// `max_regions_per_item`，而那张表的写入方自己去重（一个 item 只留一条 region）——
+    /// 于是这个字段**结构上恒为 1**，20 次读数无一例外。现在从装配器的 `spans` 算，
+    /// 它才是"一个 item 到底吃掉了几条 region"的真值；`unbound` 也是真的。
+    fn log_item_map(
+        &self,
+        assembly: &hifishifter_kernel::editor::assembly::Assembly,
+        rows: &[hifishifter_kernel::editor::assembly::RegionRow],
+    ) {
+        let items = assembly.clips.len();
+        let attached: usize = assembly.spans.values().map(Vec::len).sum();
+        let multi = assembly
+            .spans
+            .values()
+            .filter(|rows| rows.len() > 1)
+            .count();
+        let max = assembly.spans.values().map(Vec::len).max().unwrap_or(0);
+        let loops = assembly
+            .clips
+            .iter()
+            .filter(|clip| clip.loop_enabled)
+            .count();
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Info,
+            "ara.item-map",
+            format_args!(
+                "[ara] item map: items={items} regions={} attached={attached} unbound={}                  multi={multi} max_regions_per_item={max} loops={loops}",
+                rows.len(),
+                assembly.unbound.len()
+            ),
+        );
+        // 【为什么循环要单独一行】周期未知时内核会退化成"完全不循环、后半段静音"，
+        // 而那在插件里无法与"宿主没给音频"区分 —— 用户只会以为素材坏了。
+        for clip in assembly.clips.iter().filter(|clip| clip.loop_enabled) {
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Info,
+                "ara.loop",
+                format_args!(
+                    "[ara] loop clip {}: length={:.6} period={:?} media={:?} section={}",
+                    clip.id,
+                    clip.length_sec,
+                    clip.loop_period_sec,
+                    clip.takes
+                        .first()
+                        .and_then(|take| take.duration_sec),
+                    clip.loop_period_sec.is_some(),
+                ),
+            );
+        }
+        if !assembly.unknown_loop_period.is_empty() {
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "ara.loop-period-unknown",
+                format_args!(
+                    "[ara] {} loop clip(s) have no resolvable wrap period ({}); they will not                      loop — the host reported neither a source section nor a source length",
+                    assembly.unknown_loop_period.len(),
+                    assembly.unknown_loop_period.join(",")
+                ),
+            );
+        }
+        // 【挂不上的 region 必须能归因】它们不画、不渲染，只进读数；不报出来就等于
+        // "宿主给了、我们丢了"，而用户看到的只是"某一段不见了"。
+        for index in &assembly.unbound {
+            let Some(row) = rows.get(*index) else { continue };
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "ara.region.unbound",
+                format_args!(
+                    "[ara] playback region {} (start={:.6} duration={:.6} source={}) is not                      inside any host item this round; it produces no clip",
+                    row.key, row.start_sec, row.duration_sec, row.source_id
+                ),
+            );
+        }
     }
 
     /// region key → clip id；`clip_ids` 缺席时按映射层同一算式补出来。

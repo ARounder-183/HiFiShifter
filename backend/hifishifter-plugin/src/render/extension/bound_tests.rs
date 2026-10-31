@@ -1017,10 +1017,11 @@ fn task34_archived_v2_bytes_rebind_only_inside_the_component_scope() {
     for (index, id) in ["track", "b"].into_iter().enumerate() {
         let bytes = owners[index].encode_state().unwrap();
         let saved: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        // 组件 0 没有曲线 ⇒ 最低代际 2；组件 1 的旧 v2 曲线落在 clip 窗口之外，
-        // 因此它以“整轨参数 + 空白层”的形式保存（代际 3），而不是被伪造成 clip 权威：
-        // clip 只拥有它真正覆盖的帧，窗外编辑不能被它带走。
-        assert_eq!(saved["version"], if index == 0 { 2 } else { 3 });
+        // 【单一版本】组件状态只有一个代际（`EditState::STATE_VERSION`），内容不再
+        // 决定版本号 —— 此前那个"没有曲线 ⇒ 2 / 有曲线 ⇒ 3"的阶梯与全部迁移一起删掉了。
+        // 组件 1 的旧 v2 曲线落在 clip 窗口之外，因此它以"整轨参数 + 空白层"的形式
+        // 保存，而不是被伪造成 clip 权威：clip 只拥有它真正覆盖的帧。
+        assert_eq!(saved["version"].as_u64(), Some(2));
         assert_eq!(saved["edits"]["tracks"].as_array().unwrap().len(), 1);
         assert_eq!(saved["edits"]["tracks"][0]["id"], id);
         assert_eq!(saved["edits"]["bindings"].as_object().unwrap().len(), 1);
