@@ -506,11 +506,72 @@ struct PrivateTrackMove {
     parent_track_id: Option<String>,
 }
 
+/// 一份时间线载荷的**软**上限：超过它就自动降级为 lite。
+///
+/// 【为什么要软上限】硬上限（`client::RESPONSE_BUDGET`，8 MiB）在超限时只能如实
+/// 回一个错误 —— 界面于是永久停在上一份快照上：看起来能用，其实再也不更新。
+/// 软上限让同一次请求**降级**而不是失败：界面继续刷新，代价只是这一帧没有波形
+/// 预览与 MIDI 音符。
+const PAYLOAD_SOFT_LIMIT_BYTES: usize = 6 * 1024 * 1024;
+
+/// 估算一份**全量**载荷的序列化体积。
+///
+/// 【为什么估算而不是实测】实测要先把整个 `TimelineStatePayload` 序列化一遍 ——
+/// 而那正是最贵的一步，等于最坏情况下付两次代价。这里要回答的只是"是不是已经大到
+/// 离谱"，取主导项即可：`waveform_preview`（4096 个 f32 的数组）与
+/// `midi_note_data` 是唯一会随 clip **时长**线性增长的字段，其余全是定长标量。
+///
+/// 【为什么系数大于 1】JSON 里一个 f32 序列化成 8-12 个字符，解析成 JS 数字还要
+/// 再占 8 字节；一个 MIDI 音符是一个五字段对象，落在堆上约 100 字节。系数取"解析
+/// 后的堆占用"，因为那才是能把渲染进程打死的东西。
+fn estimated_full_payload_bytes(timeline: &hifishifter_kernel::state::model::TimelineState) -> usize {
+    // 轨道、工程元数据、tempo map、历史深度的粗略基数。
+    let mut bytes = 16 * 1024;
+    for clip in &timeline.clips {
+        // 每条 clip 的定长字段（id / 路径 / 淡变 / 速率 / 颜色 …）。
+        bytes += 1024;
+        bytes += clip.waveform_preview.as_ref().map_or(0, |w| w.len() * 12);
+        bytes += clip
+            .midi_note_data
+            .as_ref()
+            .map_or(0, |notes| notes.len() * 96);
+        for take in &clip.takes {
+            bytes += 256;
+            bytes += take
+                .midi_note_data
+                .as_ref()
+                .map_or(0, |notes| notes.len() * 96);
+        }
+    }
+    bytes
+}
+
 /// 构造原payload，包括真实本地dirty和历史深度，不伪造工程文件路径。
 pub(crate) fn payload(session: &EditorSession, lite: bool) -> Result<Value, String> {
     let (position, _) = session.transport();
     let timeline = session.timeline.lock_or_recover();
-    let mut payload = if lite {
+    // 【为什么在这里判，而不是在投递处判】只有这里还拿得到 `TimelineState` ——
+    // 一旦它变成 `Value`，"降级"就无从做起了。判据是**估算**体积（见上）。
+    let estimated = if lite {
+        0
+    } else {
+        estimated_full_payload_bytes(&timeline)
+    };
+    let degraded = !lite && estimated > PAYLOAD_SOFT_LIMIT_BYTES;
+    if degraded {
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Warn,
+            "gui_payload_lite",
+            format_args!(
+                "[gui] timeline payload degraded to lite: estimated {} KiB > {} KiB \
+                 (clips={}); waveform previews and MIDI notes are omitted from this frame",
+                estimated / 1024,
+                PAYLOAD_SOFT_LIMIT_BYTES / 1024,
+                timeline.clips.len()
+            ),
+        );
+    }
+    let mut payload = if lite || degraded {
         timeline.to_payload_lite()
     } else {
         timeline.to_payload()

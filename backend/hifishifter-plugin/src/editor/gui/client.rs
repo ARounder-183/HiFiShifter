@@ -226,6 +226,16 @@ pub(crate) struct EditorClient {
     last_transport_move_at: std::time::Instant,
     /// 上一次推送的位置（判断"动没动"用）。
     last_transport_position: f64,
+    /// 就绪之后累计投递给页面的字节数。
+    ///
+    /// 【为什么这条读数必须存在】一条消息的体积是渲染进程内存的直接输入，而它此前
+    /// **完全不可见**：出站只有一个 `bool`（投没投出去），投了多大没人知道。用户报的
+    /// Out of Memory 之所以只能靠猜，一半原因就在这里。
+    outbound_bytes: u64,
+    /// 上一次汇报时的累计值（用来"只在变化时打一行"）。
+    outbound_reported: u64,
+    /// 上一次汇报的时刻（汇报窗口见 [`OUTBOUND_REPORT_EVERY`]）。
+    outbound_at: std::time::Instant,
 }
 
 /// 让路的累计读数（见 `EditorClient::relay_stats`）。
@@ -301,6 +311,19 @@ const QUEUE_BUDGET: usize = 256;
 /// 失败，而界面此时已经是一张死图；继续投递只会让 `pending` 涨到预算上限、把后续
 /// 命令全部拒掉 —— 那是"看起来能用、其实全废"的形态。
 const POST_FAILURE_LIMIT: u32 = 8;
+
+/// 单条消息超过这个体积就单独落一行。
+///
+/// 【为什么是 1 MiB】正常的时间线刷新在几十到几百 KiB；跨过 1 MiB 说明这一条已经
+/// 是"大对象"级别 —— 它单独就能让渲染进程多占一份同量级的堆（JSON 解析的中间态
+/// 通常是载荷的两三倍）。这条日志是"载荷是不是元凶"的第一个判据。
+const BIG_MESSAGE_BYTES: usize = 1024 * 1024;
+
+/// 出站体积汇报的窗口。
+///
+/// 【为什么不是每条都打】时间线刷新是高频的，逐条打会把诊断文件刷满。累计体积是
+/// 单调量，每 60 s 落一个增量就足够画出"每秒多少 KiB"的斜率。
+const OUTBOUND_REPORT_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// 等宿主完成「编辑器 ↔ 处理器」握手的最长时间。
 ///
@@ -500,6 +523,9 @@ impl EditorClient {
             last_transport_at: std::time::Instant::now(),
             last_transport_move_at: std::time::Instant::now(),
             last_transport_position: f64::NAN,
+            outbound_bytes: 0,
+            outbound_reported: 0,
+            outbound_at: std::time::Instant::now(),
         }))
     }
 
@@ -534,6 +560,57 @@ impl EditorClient {
 
     pub(crate) fn is_dead(&self) -> bool {
         self.dead
+    }
+
+    /// 平台报告"渲染进程 / GPU 进程 / 浏览器进程没了"。
+    ///
+    /// 【为什么这比"投递连续失败"更早、更准】投递失败要等若干个 tick 才攒够结论，
+    /// 而且分不清"页面忙"与"页面死"。这条信号是 WebView2 自己给的结论，还带 kind /
+    /// reason / exit code —— 三者合起来才能回答"是不是 OOM"。
+    pub(crate) fn on_process_failed(&mut self, kind: &str, reason: &str, exit_code: i32) {
+        if self.closed {
+            return;
+        }
+        crate::gui_log_line(&format!(
+            "renderer failed kind={kind} reason={reason} exit=0x{exit_code:08X} \
+             (outbound since ready: {} bytes)",
+            self.outbound_bytes
+        ));
+        self.dead = true;
+    }
+
+    /// 页面自报的堆读数（每 15 s 一次，见前端 `reportPageHeap`）。
+    ///
+    /// 【为什么由页面报而不是原生取】Chromium 的 JS 堆只有页面自己看得见；
+    /// `performance.memory` 是唯一不需要 DevTools 协议的来源。有了这条曲线，
+    /// "内存单调上升"与"稳态抖动"才能被区分开 —— 而这是判断"是不是泄漏"的唯一依据。
+    pub(crate) fn on_page_heap(&mut self, used: u64, total: u64, nodes: u64, resources: u64) {
+        if self.closed {
+            return;
+        }
+        crate::gui_log_line(&format!(
+            "heap used={used} total={total} nodes={nodes} resources={resources}"
+        ));
+    }
+
+    /// 页面（重新）开始加载：把就绪门与投递计数复位，等下一次 `on_page_ready`。
+    ///
+    /// 【为什么必须清队列与 pending】旧页面的那些请求永远不会再有回执。留着它们，
+    /// 新页面要等它们超时（30 s）才能用上命令预算；而队列里的旧消息会在新页面就绪时
+    /// 一次性投出去，把"上一代界面"的状态灌进"这一代界面"。
+    pub(crate) fn reset_page(&mut self) {
+        self.ready = false;
+        self.queue.clear();
+        self.post_failures = 0;
+        self.dead = false;
+        self.reported_not_ready = false;
+        self.pending.clear();
+        self.outbound_bytes = 0;
+        self.outbound_reported = 0;
+        self.outbound_at = std::time::Instant::now();
+        self.opened_at = std::time::Instant::now();
+        // 端口由平台在重建时重新挂上；先摘掉，免得关闭过程中的迟到回调往旧端口写。
+        self.port = None;
     }
 
     /// 平台报告"页面已经没了"（WebKit 的 `web_process_terminated` / `load_failed`）。
@@ -616,6 +693,16 @@ impl EditorClient {
         };
         if port.post_message(text) {
             self.post_failures = 0;
+            self.outbound_bytes = self.outbound_bytes.saturating_add(text.len() as u64);
+            // 【为什么大消息要单独一行】它是唯一能在"渲染进程被一条消息打死"这类
+            // 事故里指出**是哪一条**的读数。
+            if text.len() >= BIG_MESSAGE_BYTES {
+                hifishifter_kernel::log_limiter::emit_limited_key(
+                    log::Level::Warn,
+                    "gui_big_outbound",
+                    format_args!("[gui] outbound big message bytes={}", text.len()),
+                );
+            }
             return true;
         }
         self.post_failures = self.post_failures.saturating_add(1);
@@ -895,9 +982,40 @@ pub(crate) fn tick(state: &Rc<RefCell<EditorClient>>) {
     ui_tick(state);
     host_heartbeat();
     push_transport(state);
+    report_outbound(state);
     if !state.borrow().closed {
         pump(state);
     }
+}
+
+/// 每 [`OUTBOUND_REPORT_EVERY`] 落一行"这一段时间往页面发了多少字节"。
+///
+/// 【为什么是**增量**而不是总量】总量只增不减，画不出斜率；而"每次宿主变更都重新
+/// 发一整份时间线"这种问题只有斜率能暴露。
+fn report_outbound(state: &Rc<RefCell<EditorClient>>) {
+    let mut state = state.borrow_mut();
+    if state.closed || state.outbound_bytes == state.outbound_reported {
+        return;
+    }
+    let elapsed = state.outbound_at.elapsed();
+    if elapsed < OUTBOUND_REPORT_EVERY {
+        return;
+    }
+    let delta = state.outbound_bytes - state.outbound_reported;
+    state.outbound_reported = state.outbound_bytes;
+    state.outbound_at = std::time::Instant::now();
+    let per_sec = delta as f64 / elapsed.as_secs_f64().max(0.001);
+    drop(state);
+    hifishifter_kernel::log_limiter::emit_limited_key(
+        log::Level::Warn,
+        "gui_outbound",
+        format_args!(
+            "[gui] outbound bytes={} over {:.1}s ({:.0} B/s)",
+            delta,
+            elapsed.as_secs_f64(),
+            per_sec
+        ),
+    );
 }
 
 pub(crate) fn pump(state: &Rc<RefCell<EditorClient>>) {
@@ -1438,6 +1556,23 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
         );
         return;
     };
+    // 页面的周期性内存自报：同样不进命令表（见 `protocol::PAGE_HEAP`）。
+    //
+    // 【为什么静默吞掉畸形读数】它是诊断通道，不是功能通道。一条缺字段的读数不该
+    // 让页面收到一个错误回执 —— 那只会让前端把"上报失败"当成需要处理的状态。
+    if request["command"] == protocol::PAGE_HEAP {
+        let args = &request["args"];
+        let field = |name: &str| args[name].as_f64().filter(|v| *v >= 0.0).unwrap_or(0.0) as u64;
+        let used = field("usedBytes");
+        let total = field("totalBytes");
+        let nodes = field("nodes");
+        let resources = field("resources");
+        state
+            .borrow_mut()
+            .on_page_heap(used, total, nodes, resources);
+        return;
+    }
+
     // 页面的第一句话：不进命令表，就地消费（见 `protocol::PAGE_READY`）。
     if request["command"] == protocol::PAGE_READY {
         // 【为什么要回一条回执】前端用 §invoke§ 发它（那是唯一现成的请求-响应通道），

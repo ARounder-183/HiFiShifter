@@ -3475,6 +3475,51 @@ function AppInner() {
     }, []);
 
     /*
+     * 页面内存自报：让原生侧看得见"渲染进程的堆在往哪走"。
+     *
+     * 【为什么必须由页面报】Chromium 的 JS 堆只有页面自己看得见；`performance.memory`
+     * 是唯一不需要 DevTools 协议的来源。此前原生侧对这块内存**完全盲** —— 用户报的
+     * Out of Memory 在插件日志里连一行都没有。
+     *
+     * 【为什么是 15 s】它是趋势读数而不是实时读数：更密只会把诊断文件刷满，更疏则会在
+     * 一次持续数分钟的爬升里只剩两三个点。
+     *
+     * 【为什么用 setInterval 而不是 requestAnimationFrame】窗口被遮挡或最小化时 rAF 会
+     * 停，而内存爬升不会 —— 恰恰是"开着但没人看"的那段时间最容易涨。
+     *
+     * 【为什么读不到就什么都不发】没有 `performance.memory` 时发全零会让曲线看起来像
+     * "内存掉到 0"，比没有读数更误导。
+     */
+    useEffect(() => {
+        if (!isPluginMode()) return;
+        const host = getPluginHost();
+        if (!host) return;
+        const report = () => {
+            const memory = (
+                performance as Performance & {
+                    memory?: { usedJSHeapSize: number; totalJSHeapSize: number };
+                }
+            ).memory;
+            if (!memory || !Number.isFinite(memory.usedJSHeapSize)) return;
+            void host
+                .invoke("plugin_heap", {
+                    usedBytes: memory.usedJSHeapSize,
+                    totalBytes: memory.totalJSHeapSize,
+                    // DOM 节点数是"界面自己长胖"的独立证据：堆在涨而节点数不变，
+                    // 说明是数据对象在累积；两者一起涨才是渲染层的形状。
+                    nodes: document.getElementsByTagName("*").length,
+                    // 资源条目数（脚本 / 字体 / 图片）。缓冲区上限 250，所以它只回答
+                    // "加载过多少"这一件事。
+                    resources: performance.getEntriesByType("resource").length,
+                })
+                .catch(() => undefined);
+        };
+        report();
+        const timer = setInterval(report, 15_000);
+        return () => clearInterval(timer);
+    }, []);
+
+    /*
      * 原生拖放：把"拖进窗口的文件"变成一次普通导入。
      *
      * 【为什么路径只能由原生给】WebKit 的 `File` 没有磁盘路径（沙箱），所以拖进来的

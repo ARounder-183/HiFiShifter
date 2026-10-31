@@ -45,6 +45,13 @@ pub(crate) const PAGE_URL: &str = "hfs-plugin://local/plugin.html";
 /// 得为它维护一个永不 resolve 的 promise。
 pub(crate) const PAGE_READY: &str = "plugin_ready";
 
+/// 页面的周期性内存自报（每 15 s 一次）。
+///
+/// 【为什么也要走"不进命令表"这条路】它和 [`PAGE_READY`] 一样是**诊断读数**：不需要
+/// 回执、不产生任何状态，只是把 `performance.memory` 交上来。走命令表就要给它编 id、
+/// 让前端维护一个永不 resolve 的 promise，而它 15 s 就一次。
+pub(crate) const PAGE_HEAP: &str = "plugin_heap";
+
 /// 校验一条页面消息，返回可用的请求对象。
 ///
 /// 【为什么返回 `Option` 而不是 `Result`】调用方（三个平台的回调）对"不合法"的处理
