@@ -5,7 +5,7 @@ use crate::ara::AraPlaybackRegion;
 use crate::audio_abi::AudioBusBuffers;
 use crate::sync::MutexExt;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// `reclaim` 等待 `registering` 归零的自旋上限（见 [`SnapshotPublisher::reclaim`]）。
@@ -353,6 +353,12 @@ pub(crate) struct SnapshotPublisher {
     ///
     /// 【它回答的是"发布过几次"，不是"内容变了没有"】需要后者时用 `content`。
     generation: AtomicU64,
+    /// 音频线程最后一次请求的工程样本位置（`i64::MIN` = 还没请求过）。
+    ///
+    /// 【为什么记在发布器上】窗口渲染要回答"播放头现在在哪"，而唯一知道答案的是
+    /// `copy_block_at`。音频线程只做一次 relaxed store（无锁、无分配），真正的
+    /// 判断留给会话 actor。
+    last_sample: AtomicI64,
     /// 当前快照的内容指纹（见 `PlaybackSnapshot::content_fingerprint`）。
     ///
     /// 【为什么它与 `generation` 并存】`generation` 仍要表达"发布过"（版本闸、
@@ -419,9 +425,32 @@ impl SnapshotPublisher {
             misses: AtomicU64::new(0),
             generation: AtomicU64::new(0),
             content: AtomicU64::new(0),
+            last_sample: AtomicI64::new(i64::MIN),
         }
     }
 
+    /// 音频线程最后一次请求的工程样本位置（秒）。`None` = 还没请求过。
+    pub(crate) fn last_sample_seconds(&self, rate: f64) -> Option<f64> {
+        let sample = self.last_sample.load(Ordering::Relaxed);
+        if sample == i64::MIN || !(rate.is_finite() && rate > 0.0) {
+            return None;
+        }
+        Some(sample as f64 / rate)
+    }
+    /// 当前快照覆盖的工程秒区间（`None` = 没有快照）。
+    pub(crate) fn current_span_seconds(&self, rate: f64) -> Option<(f64, f64)> {
+        if !(rate.is_finite() && rate > 0.0) {
+            return None;
+        }
+        let read = self.enter();
+        let snapshot = read.snapshot()?;
+        if snapshot.sample_rate == 0 || snapshot.left.is_empty() {
+            return None;
+        }
+        let start = snapshot.origin_sample as f64 / rate;
+        let end = (snapshot.origin_sample + snapshot.left.len() as i64) as f64 / rate;
+        Some((start, end))
+    }
     /// 当前快照代次（测试断言用；接缝淡化问的是下面的 `content`）。
     #[cfg(test)]
     pub(crate) fn generation(&self) -> u64 {
@@ -643,6 +672,8 @@ impl SnapshotPublisher {
         if output.num_channels == 0 || output.channel_buffers.is_null() {
             return false;
         }
+        // 【窗口渲染的锚点】只做一次 relaxed store：无锁、无分配、不碰任何快照。
+        self.last_sample.store(sample, Ordering::Relaxed);
         let read_guard = self.enter();
         // SAFETY: 本读区登记的快照在 `read_guard` 存活期间不会被回收（逐快照读者计数非零）。
         let snapshot = read_guard.snapshot();

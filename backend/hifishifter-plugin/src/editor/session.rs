@@ -1115,6 +1115,14 @@ impl EditorSession {
                         session.render_requested.store(true, Ordering::Release);
                         deadline = Some(Instant::now());
                     }
+                    // 【窗口渲染的补排】播放头走出当前快照的安全区（或整段装不下、
+                    // 当前窗口已经走完）时补一次。整段快照时这条恒为 false。
+                    if !session.render_requested.load(Ordering::Acquire)
+                        && owner.window_needs_rerender()
+                    {
+                        session.render_requested.store(true, Ordering::Release);
+                        deadline = Some(Instant::now());
+                    }
                     // 一次性诊断：素材在、结果不在，就把这件事写进日志（按代次去重）。
                     owner.report_pending_synthesis_once();
                     // 起播窗口的块级 trace：只在音频线程标记了可疑窗口时落一次。
@@ -3348,10 +3356,9 @@ impl EditorSession {
                 .get(&root)
                 .cloned()
                 .map(|params| {
-                    let layout =
-                        hifishifter_kernel::pitch_analysis::build_root_pitch_layout_key(
-                            &timeline, &root,
-                        );
+                    let layout = hifishifter_kernel::pitch_analysis::build_root_pitch_layout_key(
+                        &timeline, &root,
+                    );
                     (params, layout)
                 })
         };
@@ -3510,8 +3517,7 @@ impl ParamHost for EditorSession {
         // 【撤销点只在真的会改的时候压】旧实现无条件 `checkpoint_authority_step()`，
         // 于是"什么都没擦"（区间里没有 run、或被夹成 0 帧）也会在撤销栈上留一步 ——
         // 用户按下去什么都不会发生，却要多按一次撤销才能回去。
-        let will_change =
-            document.authority_has_runs_in(&host, param, start_frame, frame_count);
+        let will_change = document.authority_has_runs_in(&host, param, start_frame, frame_count);
         if checkpoint && will_change {
             self.checkpoint_authority_step();
         }

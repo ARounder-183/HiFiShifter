@@ -50,6 +50,13 @@ pub(crate) struct RenderInput {
     pub project_sample_rate: Option<f64>,
     /// 有atlas时为region局部零点参数，不是GUI绝对项目帧。
     pub clip_parameters: BTreeMap<String, hifishifter_kernel::state::TrackParamsState>,
+    /// 只渲染这个工程时间窗口（秒）。`None` = 整段。
+    ///
+    /// 【为什么需要它】整段物化的内存与**跨度**成正比。短工程走整段（与今天逐字节
+    /// 相同），长工程只渲播放头附近的一段 —— 跨度于是只决定"渲几段"，不再决定
+    /// "能不能渲"。窗口之外的帧在快照里**不声明覆盖**，由播放侧按既有规则退回
+    /// 宿主原声（见 `PlaybackSnapshot::covered`）。
+    pub window: Option<(f64, f64)>,
 }
 /// 输出帧域的"这些帧真的属于我们"覆盖区间（升序、不重叠，已夹进快照窗口）。
 ///
@@ -320,7 +327,17 @@ impl RenderInput {
         if !(start.is_finite() && end.is_finite()) || end <= start.max(0.0) {
             return Ok(empty_snapshots());
         }
-        let start = start.max(0.0);
+        let (mut start, mut end) = (start.max(0.0), end);
+        // 【窗口夹取】只改渲染范围，不改时间线：clip 之外的帧照样是静音/未覆盖。
+        if let Some((lo, hi)) = self.window {
+            if lo.is_finite() && hi.is_finite() && hi > lo {
+                start = start.max(lo.max(0.0));
+                end = end.min(hi);
+            }
+        }
+        if !(end.is_finite() && end > start) {
+            return Ok(empty_snapshots());
+        }
         let mut input = HashMap::new();
         let source_bytes = timeline
             .clips
@@ -348,7 +365,7 @@ impl RenderInput {
             return Err("snapshot size overflow".to_owned());
         }
         let frames = frames as usize;
-        let frame_counts = vec![frames];
+        let frame_counts = [frames];
         let outputs = frame_counts
             .iter()
             .try_fold(0_usize, |total, frames| total.checked_add(frames * 8))
@@ -442,6 +459,31 @@ impl RenderInput {
         let snapshot = Arc::new(snapshot);
         // 两个发布器共享同一份 PCM：一次渲染、一份内存，换率不需要重渲。
         Ok(vec![Arc::clone(&snapshot), snapshot])
+    }
+
+    /// 整段渲染大约需要多少字节（"整段能不能装下"的判定用）。
+    ///
+    /// 【为什么是估算】它只用来在"整段"与"窗口"之间做一次二选一；真正的预检仍由
+    /// `render_with_progress` 的 `required` 负责。估算偏高只会让窗口提前生效，
+    /// 偏低则由预检兜底（返回错误），不会静默出错。
+    pub fn estimate_bytes(&self, span_sec: f64) -> usize {
+        if !(span_sec.is_finite() && span_sec > 0.0) {
+            return 0;
+        }
+        let rate = f64::from(Self::native_sample_rate(self.project_rate()));
+        // 输出（left+right，8 字节/帧）+ 工作区（交错 samples，8 字节/帧）
+        // + 每个源的整份交错副本（按源率 × 声道 × 4）。
+        let source_per_sec: f64 = self
+            .sources
+            .values()
+            .map(|pcm| f64::from(pcm.sample_rate) * (pcm.planes.len().max(1) as f64) * 4.0)
+            .sum();
+        let per_sec = rate * 8.0 + rate * 8.0 + source_per_sec;
+        let bytes = per_sec * span_sec;
+        if !bytes.is_finite() || bytes >= usize::MAX as f64 {
+            return usize::MAX;
+        }
+        bytes as usize
     }
 
     /// 授权源 PCM → 混音器要的交错副本。
@@ -831,6 +873,7 @@ mod tests {
             sources: HashMap::from([("source".into(), source.clone())]),
             project_sample_rate: None,
             clip_parameters: BTreeMap::from([("clip".into(), params)]),
+            window: None,
         };
         let neural_before = hifishifter_kernel::nsf_hifigan_onnx::inference_runs();
         let separation_before = hifishifter_kernel::hnsep_onnx::separation_cache_stats().1;
@@ -925,6 +968,7 @@ mod tests {
             sources: HashMap::from([("source".into(), source)]),
             project_sample_rate: None,
             clip_parameters: BTreeMap::new(),
+            window: None,
         };
         let before = input.render(Arc::new(AtomicBool::new(false))).unwrap();
         let mut other = input.timeline.as_ref().unwrap().tracks[0].clone();
@@ -974,6 +1018,7 @@ mod tests {
             sources: HashMap::from([("source".into(), source.clone())]),
             project_sample_rate: None,
             clip_parameters: BTreeMap::new(),
+            window: None,
         };
         let snapshots = input.render(Arc::new(AtomicBool::new(false))).unwrap();
         for (snapshot, rate) in snapshots.iter().zip([44100, 48000]) {
@@ -1016,13 +1061,16 @@ mod tests {
         drop(source);
         assert_eq!(budget.used(), baseline);
     }
-    /// 大跨度在任何合成前明确预算失败，不能为通过长源门扩大512MiB或静默补零。
+    /// 大跨度在任何合成前明确预算失败，不能为通过长源门扩大预算或静默补零。
+    ///
+    /// 【为什么是 20 000 s】预算上限已按物理内存自适应（夹到 4 GiB），所以"大跨度"
+    /// 必须大到**任何**上限都装不下 —— 5.5 小时的稀疏工程约 17 GB。
     #[test]
     fn sparse_huge_span_is_rejected_before_any_large_render_allocation() {
         let mut timeline:TimelineState=serde_json::from_value(serde_json::json!({
-            "tracks":[{"id":"track","name":"Sparse voice","order":0,"pitch_analysis_algo":"none"}],"bpm":120,"project_sec":3601,
+            "tracks":[{"id":"track","name":"Sparse voice","order":0,"pitch_analysis_algo":"none"}],"bpm":120,"project_sec":20001,
             "clips":[{"id":"a","name":"A","track_id":"track","start_sec":0,"length_sec":1,"takes":[{"id":"ta","source_path":"source","source_end_sec":1}]},
-                {"id":"b","name":"B","track_id":"track","start_sec":3600,"length_sec":1,"takes":[{"id":"tb","source_path":"source","source_end_sec":1}]}]
+                {"id":"b","name":"B","track_id":"track","start_sec":20000,"length_sec":1,"takes":[{"id":"tb","source_path":"source","source_end_sec":1}]}]
         })).unwrap();
         for clip in &mut timeline.clips {
             clip.normalize_takes();
@@ -1043,10 +1091,11 @@ mod tests {
         };
         let input = RenderInput {
             timeline: Some(timeline),
-            regions: vec![region(0.), region(3600.)],
+            regions: vec![region(0.), region(20_000.)],
             sources: HashMap::from([("source".into(), source)]),
             project_sample_rate: None,
             clip_parameters: BTreeMap::new(),
+            window: None,
         };
         let budget = super::super::budget::global_budget();
         let baseline = budget.used();
@@ -1057,6 +1106,58 @@ mod tests {
         );
         assert_eq!(budget.used(), baseline);
     }
+    /// **【第三轮】窗口渲染只覆盖请求的那一段。**
+    ///
+    /// 【为什么钉死】这是"任意长度可渲"的最小不变量：跨度只决定渲几段，不决定
+    /// 快照里放多少帧。窗口之外的帧必须**不在**快照里（于是播放侧退回宿主原声），
+    /// 而不是被补成静音。
+    #[test]
+    fn a_render_window_covers_only_the_requested_span() {
+        let mut timeline: TimelineState = serde_json::from_value(serde_json::json!({
+            "tracks": [{"id": "track", "name": "t", "order": 0}],
+            "clips": [{"id": "clip", "track_id": "track", "name": "c",
+                "start_sec": 0.0, "length_sec": 10.0,
+                "takes": [{"id": "take", "source_path": "source",
+                    "source_start_sec": 0.0, "source_end_sec": 10.0, "playback_rate": 1.0}]}],
+            "bpm": 120.0, "project_sec": 10.0
+        }))
+        .unwrap();
+        timeline.clips[0].normalize_takes();
+        let source = Arc::new(SourcePcm {
+            covered: Vec::new(),
+            sample_rate: 44100,
+            planes: vec![vec![0.25; 441_000], vec![0.25; 441_000]],
+            version: 1,
+            _reservation: None,
+        });
+        let input = RenderInput {
+            timeline: Some(timeline),
+            regions: vec![AraPlaybackRegion {
+                audio_source_persistent_id: "source".into(),
+                duration_in_modification_time: 10.0,
+                duration_in_playback_time: 10.0,
+                ..Default::default()
+            }],
+            sources: HashMap::from([("source".into(), source)]),
+            project_sample_rate: Some(44100.0),
+            clip_parameters: BTreeMap::new(),
+            window: Some((2.0, 3.0)),
+        };
+        let snapshots = input.render(Arc::new(AtomicBool::new(false))).unwrap();
+        assert_eq!(snapshots.len(), 2);
+        assert!(Arc::ptr_eq(&snapshots[0], &snapshots[1]));
+        let snapshot = &snapshots[0];
+        assert_eq!(snapshot.sample_rate, 44100);
+        assert_eq!(snapshot.origin_sample, 2 * 44100);
+        assert_eq!(snapshot.left.len(), 44100);
+        assert_eq!(snapshot.right.len(), 44100);
+        // 窗口之外的帧不属于这份快照。
+        assert!(snapshot
+            .covered
+            .iter()
+            .all(|range| range.start >= 2 * 44100 && range.end <= 3 * 44100));
+    }
+
     /// 双输出率从同一HiFiGAN原生结果派生，整段HNSEP也只运行一次，不以WORLD外推。
     #[test]
     #[ignore = "真实CPU插件渲染输入诊断：显式运行"]
@@ -1112,6 +1213,7 @@ mod tests {
             )]),
             project_sample_rate: None,
             clip_parameters: BTreeMap::from([("clip".into(), parameters)]),
+            window: None,
         };
         let before = hifishifter_kernel::hnsep_onnx::separation_cache_stats();
         let began = std::time::Instant::now();
@@ -1221,6 +1323,7 @@ mod tests {
                 ("a".into(), params(0.5)),
                 ("b".into(), params(0.25)),
             ]),
+            window: None,
         };
         let output = input.render(Arc::new(AtomicBool::new(false))).unwrap();
         for (actual, want) in output[0].left.iter().zip([0.075_f32, 0.15, 0.225, 0.3]) {
@@ -1259,6 +1362,7 @@ mod tests {
             sources: HashMap::from([("source".into(), source)]),
             project_sample_rate: None,
             clip_parameters: BTreeMap::new(),
+            window: None,
         };
         let output = input.render(Arc::new(AtomicBool::new(false))).unwrap();
         assert_eq!(output[0].left.len(), 44100);
@@ -1352,6 +1456,7 @@ mod tests {
                 sources: HashMap::from([("source".into(), source)]),
                 project_sample_rate: None,
                 clip_parameters: BTreeMap::new(),
+                window: None,
             };
             let output = input
                 .render(Arc::new(AtomicBool::new(false)))
@@ -1387,6 +1492,7 @@ mod tests {
             sources: sources.clone(),
             project_sample_rate: None,
             clip_parameters: BTreeMap::new(),
+            window: None,
         };
         sources.insert(
             "fixture".into(),
@@ -1455,6 +1561,7 @@ mod tests {
             )]),
             project_sample_rate: None,
             clip_parameters: BTreeMap::new(),
+            window: None,
         };
         let cancel = Arc::new(AtomicBool::new(false));
         let sources = input.interleaved_sources(&timeline).unwrap();

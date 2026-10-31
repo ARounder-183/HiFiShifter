@@ -91,6 +91,29 @@ impl ExtensionOwner {
     pub(crate) fn has_prepared_snapshot(&self) -> bool {
         self.snapshots.iter().any(|publisher| publisher.is_ready())
     }
+    /// 播放头是否已经走出当前快照的安全区（窗口渲染的补排信号）。
+    ///
+    /// 【为什么由 actor 判】音频线程只记一个 `last_sample` 原子；"要不要重渲"是
+    /// 调度决策，只能在非实时线程做（实时回调里不许分配、不许抢锁）。
+    ///
+    /// 【为什么是 75 %】窗口渲染的代价是"重新算一段"，提前四分之一窗口开始补排，
+    /// 保证播放头走到窗口末尾之前新窗口已经就位。整段快照时这个判据恒为 false
+    /// （播放头永远落在覆盖区间里），行为与今天完全一致。
+    pub(crate) fn window_needs_rerender(&self) -> bool {
+        let rate = self.setup_sample_rate().max(1.0);
+        let Some(playhead) = self.snapshots[0].last_sample_seconds(rate) else {
+            return false;
+        };
+        let Some((start, end)) = self.snapshots[0].current_span_seconds(rate) else {
+            return false;
+        };
+        let len = end - start;
+        if !(len.is_finite() && len > 0.0) {
+            return false;
+        }
+        playhead < start - 1e-9 || playhead > start + len * 0.75
+    }
+
     /// 处理结果发布器是否对**实际会被读取的那一份**就绪。
     ///
     /// 【为什么不能固定查 `snapshots[0]`】真正被读的是

@@ -1022,7 +1022,14 @@ mod tests {
     fn restore_authority_range_erases_a_line_outside_all_clips() {
         let document = document_with_one_empty_track(2.0);
         document
-            .write_authority_range("track", "pitch", 2_000, &[61.0; 10], Some(&[true; 10]), false)
+            .write_authority_range(
+                "track",
+                "pitch",
+                2_000,
+                &[61.0; 10],
+                Some(&[true; 10]),
+                false,
+            )
             .unwrap();
         assert!(document.authority_has_runs_in("track", "pitch", 2_000, 10));
         let value = document
@@ -2021,7 +2028,9 @@ impl DocumentSession {
     ) -> hifishifter_kernel::editor::param_authority::RootBaseline {
         use hifishifter_kernel::editor::param_authority::RootBaseline;
         use hifishifter_kernel::pitch_analysis::schedule::assemble_pitch_orig_from_cache;
-        use hifishifter_kernel::pitch_analysis::{build_root_pitch_key, build_root_pitch_layout_key};
+        use hifishifter_kernel::pitch_analysis::{
+            build_root_pitch_key, build_root_pitch_layout_key,
+        };
         let layout = build_root_pitch_layout_key(timeline, root);
         let stored = self.baseline.lock_or_recover().get(root).cloned();
         if let Some(base) = &stored {
@@ -2503,6 +2512,62 @@ impl DocumentSession {
     ) -> Result<(), String> {
         self.apply_workspace_edits_with_progress(cancel, current, None)
     }
+    /// 这一轮该渲整段还是只渲播放头附近的一段。
+    ///
+    /// 【为什么需要】整段物化的内存与跨度成正比。跨度装得下就整段渲（与今天逐字节
+    /// 相同）；装不下就只渲播放头附近 —— 跨度于是只决定"渲几段"，不再决定"能不能渲"。
+    /// 窗口之外的帧在快照里不声明覆盖，播放侧按既有规则退回宿主原声。
+    ///
+    /// 【为什么锚在播放头】用户听到的是当前位置；把有限的内存花在他正在听的地方，
+    /// 比"从 0 开始渲一段然后永远听不到后面"有用得多。
+    fn plan_render_window(
+        &self,
+        input: &super::input::RenderInput,
+        owner: &ExtensionOwner,
+    ) -> Option<(f64, f64)> {
+        let timeline = input.timeline.as_ref()?;
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for clip in &timeline.clips {
+            if !(clip.start_sec.is_finite() && clip.length_sec.is_finite()) {
+                continue;
+            }
+            lo = lo.min(clip.start_sec);
+            hi = hi.max(clip.start_sec + clip.length_sec);
+        }
+        if !(lo.is_finite() && hi.is_finite()) {
+            return None;
+        }
+        let lo = lo.max(0.0);
+        if hi <= lo {
+            return None;
+        }
+        let budget = super::budget::global_budget();
+        let available = budget.limit().saturating_sub(budget.used());
+        if input.estimate_bytes(hi - lo) <= available {
+            // 整段装得下：保持今天的行为，逐字节不变。
+            return None;
+        }
+        let per_sec = input.estimate_bytes(1.0).max(1);
+        let window_sec = (available / per_sec).clamp(8, 120) as f64;
+        let rate = owner.setup_sample_rate().max(1.0);
+        let anchor = owner
+            .snapshots
+            .first()
+            .and_then(|publisher| publisher.last_sample_seconds(rate))
+            .unwrap_or(lo);
+        let start = (anchor - 2.0).max(lo);
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Warn,
+            "ara.render.window",
+            format_args!(
+                "[render] span={:.1}s does not fit in the PCM budget (available={available});                  rendering a {window_sec:.0}s window from {start:.1}s instead",
+                hi - lo
+            ),
+        );
+        Some((start, start + window_sec))
+    }
+
     pub(crate) fn apply_workspace_edits_with_progress(
         &self,
         cancel: Arc<AtomicBool>,
@@ -2536,10 +2601,12 @@ impl DocumentSession {
             return Err("automatic apply superseded".into());
         }
         let mut prepared = Vec::new();
-        for (owner, keys, input) in inputs {
+        for (owner, keys, mut input) in inputs {
             for publisher in &owner.snapshots {
                 publisher.collect_retired();
             }
+            let window = self.plan_render_window(&input, owner.as_ref());
+            input.window = window;
             let snapshots = input.render_with_progress(cancel.clone(), progress.clone())?;
             prepared.push((owner, keys, snapshots));
         }
@@ -3896,9 +3963,8 @@ impl DocumentSession {
             // `baseline_for` 每一帧都会尝试从（此刻还冷的）内容缓存重建，然后把
             // 这份存档基线当成"过期"再退回 —— 冷恢复首帧的可听性全靠这份基线，
             // 不能让它停在"每次都要重算一次"的状态上。
-            baseline.layout_key = Some(
-                hifishifter_kernel::pitch_analysis::build_root_pitch_layout_key(host, root),
-            );
+            baseline.layout_key =
+                Some(hifishifter_kernel::pitch_analysis::build_root_pitch_layout_key(host, root));
             baseline.content_key = params.pitch_orig_key.clone();
             if baseline.is_ready() {
                 self.publish_baseline(root, baseline);
