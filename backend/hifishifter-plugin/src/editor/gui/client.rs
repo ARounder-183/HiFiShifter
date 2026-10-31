@@ -1567,9 +1567,19 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
         let total = field("totalBytes");
         let nodes = field("nodes");
         let resources = field("resources");
-        state
-            .borrow_mut()
-            .on_page_heap(used, total, nodes, resources);
+        {
+            let mut state = state.borrow_mut();
+            state.on_page_heap(used, total, nodes, resources);
+            // 【必须回一条回执】前端用 `invoke` 发它，而 `invoke` 是一个
+            // 请求-响应通道：不回就等于让那个 promise 挂到 30 s 超时，并且占着
+            // `pending` 预算（32 条用满之后本视图会拒绝**一切**后续命令）。
+            // 15 s 一条的上报若不回执，半个会话就能把预算耗光 —— 那是"界面突然点不动"
+            // 的又一个成因。
+            state.post(
+                serde_json::json!({"version":1,"viewId":view_id,"id":id,"ok":true,
+                "value":serde_json::Value::Null}),
+            );
+        }
         return;
     }
 
