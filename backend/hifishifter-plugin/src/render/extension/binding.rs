@@ -1189,10 +1189,18 @@ impl ExtensionOwner {
         let Ok(stamp) = self.host_query_stamp() else {
             return;
         };
-        // 【完整性：先判假，成功走到末尾才置真】呈现层据此决定"清单里缺席"能不能
-        // 当成"宿主删掉了它"。任何提前 return 都必须留下 false，否则一次授权撤销
-        // 就会让整轨 clip 被误判成幽灵。
-        stamp.0.inventory_incomplete.store(true, Ordering::Release);
+        // 【完整性：只有**真的开始枚举**才判假，成功走到末尾才置真】
+        //
+        // 呈现层据此决定"清单里缺席"能不能当成"宿主删掉了它"。这里的时序是
+        // **整个机制的死穴**：本函数有十余处提前 return（未授权、令牌未变、没有
+        // 原生扩展……），而它们都是"这一轮什么都没发生"，不是"枚举没做完"。
+        // 此前那一句写在最前面，于是**任何一次早退都会把标志留在 false**，
+        // 而稳态下早退是绝大多数轮次 ⇒ `inventory_is_complete()` 几乎永远为假 ⇒
+        // "清单里没有它"这条删除证据永远不成立 ⇒ 孤儿 clip 永久留在画布上
+        // （用户报的"宿主里没有、插件里还在"）。
+        //
+        // 现在：早退**不动**这个标志（保持上一轮的结论），只在真正进入枚举循环
+        // 之前判假。
         let Some(host) = self.native_host() else {
             // 没有原生扩展接口 —— 这是 **ARA-only 宿主**（Studio One / Cubase / Nuendo /
             // Logic …）的正常形态，不是"不受支持"：时间线有内容、音频能出、参数能调，
@@ -1241,6 +1249,10 @@ impl ExtensionOwner {
         // 就不发布、不 bump `ui_geometry_revision`、不失效渲染 —— 兜底采样必须**无副作用**，
         // 否则空闲工程会被 1Hz 的假变更搅得前端反复重绘。
         let token_changed = stored != Some(token);
+        // 【枚举从这里开始】只有走到这一行，"清单不完整"才成立 —— 上面每一条
+        // 提前 return 都是"这一轮什么都没发生"，不该把结论改写成"枚举失败"
+        // （见本函数开头关于 `inventory_is_complete` 的说明）。
+        stamp.0.inventory_incomplete.store(true, Ordering::Release);
         let mut tracks = std::collections::BTreeMap::new();
         let mut seen = std::collections::BTreeSet::new();
         // 诊断计数：多少 item 认领到了 region（没认领的只能是无源占位）。
