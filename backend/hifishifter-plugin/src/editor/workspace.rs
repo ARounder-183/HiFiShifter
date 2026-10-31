@@ -636,6 +636,91 @@ impl DocumentSession {
                 .collect()
         };
         timeline.tracks.retain(|track| track.id != "track_main");
+        // 【T-S2-2：一个宿主身份只允许一条呈现 clip —— 而且必须在**清单投影之前**归并】
+        //
+        // 两个 region 认领同一个 item（循环延伸的 item 会按循环节给出多条 region）、
+        // 或身份升级那一轮新旧两种形态各有一条，都会让同一个宿主实体被画成多条 clip。
+        // 画布按数组顺序绘制，后画的盖住先画的 —— 而"后画的"很可能正是还没有源的那条。
+        //
+        // 【为什么必须挪到清单投影之前】这是"循环延伸的 item 在插件里多出若干 Clip"
+        // 的修法。旧顺序是**先**按 item 写几何、**再**归并重复；而归并保留哪一条的判据
+        // 里"有源"优先，于是幸存者很可能正是那条从没被写过 item 几何的 region clip ——
+        // 它保留的是自己那一圈的长度。循环延伸 4 圈的 item 因此在界面上被画成 1 条只有
+        // 一圈长的片段（其余被归并丢弃），而"多出来的那几条"正是用户看到的东西。
+        //
+        // 归并先行之后，item 的 `D_POSITION` / `D_LENGTH` 才会落到**幸存的那一条**上；
+        // 循环本身由 `loop_enabled` + 内核的整份媒体回绕表达。一个 item 永远只产出一条
+        // clip，这是 I-2。
+        //
+        // 判据取**宿主实体**（`HostIdentity`），不取 id 字符串相等 —— 字符串相等正是
+        // 上一代实现漏掉这条副本的原因：`ara-region-{key}` 与 `ara-item-{guid}` 是
+        // 同一个 item 的两个名字，而 `region_items` 正是那条换算边。
+        let mut collapsed = 0_usize;
+        {
+            let region_items = self.region_items.lock_or_recover();
+            let identities: Vec<Option<HostIdentity>> = timeline
+                .clips
+                .iter()
+                .map(|clip| present_identity(&clip.id, &region_items))
+                .collect();
+            // 保留优先级：能认出宿主 item 的 > 有源的 > 带命名空间的 > 先出现的。
+            //
+            // 【为什么"能认出 item"排第一】item 身份跨会话存活，region key 只活这一次
+            // 会话；同一条 clip 两种形态都在时，留下能活过重开工程的那一条。
+            let rank = |index: usize| -> (u8, u8, u8) {
+                let clip = &timeline.clips[index];
+                (
+                    u8::from(matches!(identities[index], Some(HostIdentity::Item(_)))),
+                    u8::from(clip.source_path.is_some()),
+                    u8::from(namespace.is_empty() || clip.id.starts_with(namespace)),
+                )
+            };
+            let mut kept: std::collections::HashMap<HostIdentity, usize> =
+                std::collections::HashMap::new();
+            let mut drop = vec![false; timeline.clips.len()];
+            for index in 0..timeline.clips.len() {
+                let Some(identity) = identities[index].clone() else {
+                    continue;
+                };
+                match kept.get(&identity).copied() {
+                    None => {
+                        kept.insert(identity, index);
+                    }
+                    Some(previous) => {
+                        if rank(index) > rank(previous) {
+                            drop[previous] = true;
+                            kept.insert(identity, index);
+                        } else {
+                            drop[index] = true;
+                        }
+                        collapsed += 1;
+                    }
+                }
+            }
+            if collapsed > 0 {
+                let mut index = 0_usize;
+                timeline.clips.retain(|_| {
+                    let keep = !drop[index];
+                    index += 1;
+                    keep
+                });
+            }
+        }
+        self.presentation_dupes.store(collapsed, Ordering::Release);
+        if collapsed > 0 {
+            // 【为什么这条是 Warn】它意味着"宿主里的一个实体被我们画成了多条 clip" ——
+            // 归并是对的，但产生重复本身就是缺陷的信号（循环延伸 / 多实例认领 /
+            // 身份升级窗口）。限流只压重复，不压信号。
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "ara.item-map.merged",
+                format_args!(
+                    "[ara] merged {collapsed} duplicate clip(s) into their host item: one item must \
+                     present exactly one clip; the one carrying media was kept"
+                ),
+            );
+        }
+
         // 这一轮学到的媒体事实（循环结束后一次性写回，避免在遍历中反复取锁）。
         let mut learned: Vec<(String, crate::editor::media_identity::PcmFacts)> = Vec::new();
         let mut present = std::collections::BTreeSet::new();
@@ -919,6 +1004,35 @@ impl DocumentSession {
                 timeline.project_sec = timeline.project_sec.max(g.start_sec + g.duration_sec);
             }
         }
+        // 【item map：一个 item 到底对应几条 region】这是"循环延伸会不会多出 Clip"
+        // 这个问题的**唯一**直接读数，而此前完全没有。它同时给出三件事：
+        // ① 宿主报了几个 item、几个 region；② 有多少 region 认领到了 item（`bound`）；
+        // ③ 有没有 item 认领了**不止一条** region（`multi` / `max`）。
+        // 三者放在一行里，就不必再从"clip 数量对不上"反推是哪一环坏了。
+        {
+            let items = tracks.values().flat_map(|track| &track.items).count();
+            let regions = self.regions.lock_or_recover().len();
+            let bound_by_item = {
+                let pairs = self.region_items.lock_or_recover();
+                let mut counts = std::collections::HashMap::<String, usize>::new();
+                for item in pairs.values() {
+                    *counts.entry(item.clone()).or_default() += 1;
+                }
+                counts
+            };
+            let bound = bound_by_item.values().sum::<usize>().min(regions);
+            let multi = bound_by_item.values().filter(|count| **count > 1).count();
+            let max = bound_by_item.values().copied().max().unwrap_or(0);
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "ara.item-map",
+                format_args!(
+                    "[ara] item map: items={items} regions={regions} bound={bound} unbound={} \
+                     multi={multi} max_regions_per_item={max}",
+                    regions.saturating_sub(bound)
+                ),
+            );
+        }
         if !learned.is_empty() {
             let mut facts = self.media_facts.lock_or_recover();
             for (item, fact) in learned {
@@ -930,78 +1044,6 @@ impl DocumentSession {
                     }
                 }
             }
-        }
-        // 【T-S2-2：一个宿主身份只允许一条呈现 clip】
-        //
-        // retain 保证"认得出身份的才留下"，但认得出的**两条**仍可能同时存在：两个
-        // region 认领同一个 item、或身份升级那一轮新旧两种形态各有一条。此时画布按
-        // 数组顺序绘制，后画的那条会盖住先画的 —— 而"后画的"很可能正是还没有源的
-        // 那条占位（它是在 `materialize` **之后**才被造出来的，因此永远拿不到波形）。
-        // 用户看到的就是"一条正常的 clip 被一条永远等音频的 clip 盖住"。
-        //
-        // 判据取**宿主实体**（`HostIdentity`），不取 id 字符串相等 —— 字符串相等正是
-        // 上一代实现漏掉这条副本的原因：`ara-region-{key}` 与 `ara-item-{guid}` 是
-        // 同一个 item 的两个名字，而 `region_items` 正是那条换算边。
-        let mut collapsed = 0_usize;
-        {
-            let region_items = self.region_items.lock_or_recover();
-            let identities: Vec<Option<HostIdentity>> = timeline
-                .clips
-                .iter()
-                .map(|clip| present_identity(&clip.id, &region_items))
-                .collect();
-            // 保留优先级：能认出宿主 item 的 > 有源的 > 带命名空间的 > 先出现的。
-            //
-            // 【为什么"能认出 item"排第一】item 身份跨会话存活，region key 只活这一次
-            // 会话；同一条 clip 两种形态都在时，留下能活过重开工程的那一条。
-            let rank = |index: usize| -> (u8, u8, u8) {
-                let clip = &timeline.clips[index];
-                (
-                    u8::from(matches!(identities[index], Some(HostIdentity::Item(_)))),
-                    u8::from(clip.source_path.is_some()),
-                    u8::from(namespace.is_empty() || clip.id.starts_with(namespace)),
-                )
-            };
-            let mut kept: std::collections::HashMap<HostIdentity, usize> =
-                std::collections::HashMap::new();
-            let mut drop = vec![false; timeline.clips.len()];
-            for index in 0..timeline.clips.len() {
-                let Some(identity) = identities[index].clone() else {
-                    continue;
-                };
-                match kept.get(&identity).copied() {
-                    None => {
-                        kept.insert(identity, index);
-                    }
-                    Some(previous) => {
-                        if rank(index) > rank(previous) {
-                            drop[previous] = true;
-                            kept.insert(identity, index);
-                        } else {
-                            drop[index] = true;
-                        }
-                        collapsed += 1;
-                    }
-                }
-            }
-            if collapsed > 0 {
-                let mut index = 0_usize;
-                timeline.clips.retain(|_| {
-                    let keep = !drop[index];
-                    index += 1;
-                    keep
-                });
-            }
-        }
-        self.presentation_dupes.store(collapsed, Ordering::Release);
-        if collapsed > 0 {
-            hifishifter_kernel::log_limiter::emit_limited_key(
-                log::Level::Warn,
-                "ara.inventory.duplicate-clip",
-                format_args!(
-                    "[ara] presentation collapsed {collapsed} duplicate clip(s): one host identity                      must present exactly one clip; the one with media was kept"
-                ),
-            );
         }
         // 【T8：clip 的去留按**实体**判定，不按 id 的字符串前缀】
         //
@@ -2274,7 +2316,20 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
                     );
                 }
             }
-            let window = derived.or(if clip.reversed { host_window } else { None });
+            // 【I-4：窗口**只有**宿主读数一个来源】
+            //
+            // 旧实现写的是 `derived.or(if clip.reversed { host_window } else { None })`
+            // —— 也就是说**只有倒放的 clip** 才采用宿主解算出的窗口，正放的 clip 一律
+            // 保留 ARA 映射阶段算出来的那一份。这条不对称带来的后果比它看起来严重：
+            // 循环延伸（`B_LOOPSRC`）的 item 在 `forward_source_window` 的 loop 分支里
+            // 会被解成"锚点 → 可用边界"的**完整**源区间（正是内核回绕需要的那个），
+            // 而正放 clip 根本走不到那条分支 —— 于是循环 item 拿到的是一条只有一圈长
+            // 的窗口，回绕周期因此错成"一圈"，用户看到的循环内容与原素材不符。
+            //
+            // 现在无条件取宿主读数：方向、循环、SECTION 三种语义由同一个解算器
+            // （`take_geometry`）一次算完，映射层的近似只作为"宿主读数缺席"时的兜底。
+            // 这也是 §4.5.2 的第 1 条。
+            let window = derived.or(host_window);
             if let Some(window) = window {
                 clip.source_start_sec = window.start();
                 clip.source_end_sec = window.end();
@@ -2560,6 +2615,50 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
             .clone()
             .ok_or("host timeline unavailable")?;
         timeline.clips.retain(|clip| clips.contains(&clip.id));
+        // 【一个 id 只允许一条 clip —— 渲染侧同样要归并】
+        //
+        // 两个 region 认领同一个 item 时，`clip_ids` 把两个 key 都映到**同一个** id，
+        // 于是 `clips` 集合里只有一个元素，而上面那条 `retain` 会把**两条** clip 都
+        // 留下。界面上（`present_host_inventory`）它们已被归并成一条，渲染侧却会
+        // 把同一段素材渲染两遍 —— 听到的是 +6 dB 的叠加，看到的是一条片段。
+        //
+        // 保留"有源"的那一条：没有源的那条渲染出来必然是静音，留着只会盖住有源的。
+        {
+            // 先算出"每个 id 该留哪一条"，再一次性过滤。**不能**在 retain 里读
+            // `timeline.clips`（它在 retain 期间被可变借用），所以判据必须提前冻结成
+            // 一张 (id → 索引) 表。
+            let mut best: std::collections::BTreeMap<String, usize> =
+                std::collections::BTreeMap::new();
+            for (index, clip) in timeline.clips.iter().enumerate() {
+                let better = match best.get(&clip.id) {
+                    None => true,
+                    // 已有的那条没源、而这条有 ⇒ 换成这条。
+                    Some(previous) => {
+                        timeline.clips[*previous].source_path.is_none() && clip.source_path.is_some()
+                    }
+                };
+                if better {
+                    best.insert(clip.id.clone(), index);
+                }
+            }
+            let dropped = timeline.clips.len() - best.len();
+            if dropped > 0 {
+                let mut index = 0_usize;
+                timeline.clips.retain(|clip| {
+                    let keep = best.get(&clip.id) == Some(&index);
+                    index += 1;
+                    keep
+                });
+                hifishifter_kernel::log_limiter::emit_limited_key(
+                    log::Level::Warn,
+                    "ara.render.duplicate-clip",
+                    format_args!(
+                        "[ara] render timeline dropped {dropped} duplicate clip(s): one host item \
+                         must render exactly once"
+                    ),
+                );
+            }
+        }
         // 分割派生：右半段的授权媒体借自父段。**渲染路径**过去没有这一步，于是界面显示
         // 正常、渲染出来的右半段却是无源静音（见 `derive_split_media`）。
         {
