@@ -692,6 +692,10 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
                 startFrame: args[2],
                 values: args[3],
                 checkpoint: args[4],
+                // `present` 是 paramsApi.setParamFrames 的第 6 个位置参数（显式编辑
+                // 位图）。漏映射会让后端把整段数组当成"用户改过的每一帧"——
+                // 未编辑帧被烘成显式编辑，之后分析更新 / 几何变化都不再跟随基线。
+                ...(args[5] !== undefined ? { present: args[5] } : {}),
             };
 
         case "restore_param_frames":

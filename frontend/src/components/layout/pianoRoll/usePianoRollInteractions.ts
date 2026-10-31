@@ -1074,9 +1074,22 @@ export function usePianoRollInteractions(args: {
                 framePeriodMs: fpMs,
                 valueFilter: editParam === "pitch" ? editablePitchValue : undefined,
             });
+            // 【只写回"原本就是用户编辑"的帧】`edit` 数组在未编辑帧上等于基线
+            // （`display()` 用 `pitch_orig` 播种），整段写回会把整条基线烘成显式
+            // 编辑 —— 之后分析更新不再生效、几何变化也会把这段"编辑"搬走。
+            const editedMask = payload.edited ?? [];
+            const present = smoothed.map((_, index) => editedMask[index] === true);
+            if (!present.some(Boolean)) return;
 
             try {
-                await paramsApi.setParamFrames(trackId, editParam, minF, smoothed, false);
+                await paramsApi.setParamFrames(
+                    trackId,
+                    editParam,
+                    minF,
+                    smoothed,
+                    false,
+                    present,
+                );
             } catch (err) {
                 // 绘制后的自动平滑是增强步骤：失败只跳过平滑与视图同步，
                 // 不产生 unhandledrejection（主提交 commitStroke 已自兜底）。

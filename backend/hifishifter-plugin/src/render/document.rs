@@ -2968,18 +2968,37 @@ impl DocumentSession {
         let root = host
             .resolve_root_track_id(track_id)
             .ok_or_else(|| "unknown parameter track".to_owned())?;
+        // 【区间夹取】右键拖拽的 count 来自指针帧，可以越界（视口负偏移、自动滚屏）。
+        // 越界本身不是错误，截断即可；但绝不能让它把工程外的帧也算进清除范围。
+        let target = host.target_param_frames(host.frame_period_ms());
+        let start = (start_frame as usize).min(target);
+        let count = (frame_count as usize).min(target.saturating_sub(start));
+        if count == 0 {
+            return Ok(serde_json::json!({"ok": true, "authority_revision": self.authority_revision()}));
+        }
         self.checkpoint_authority(checkpoint)?;
         let mut edits = self.edits.lock_or_recover();
         let before = edits.authority.revision;
-        let revision =
-            edits
-                .authority
-                .restore_range(&root, param, start_frame as usize, frame_count as usize);
-        if revision != before {
+        let revision = edits.authority.restore_range(&root, param, start, count);
+        let changed = revision != before;
+        if changed {
             edits.revision = edits.revision.saturating_add(1);
+            // 【显示必须与权威同代】旧实现只推进 revision，显示要等下一次
+            // workspace_view() —— 而右键重置之后紧接着的一次快照可能来自别的路径
+            // （渲染、诊断），用户看到的就是"松手又回来"。这里与写入路径同口径。
+            let view = self.compose_param_view_with(&host, &edits, &root);
+            edits.params.insert(root.clone(), view.params);
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Info,
+                "ara.param.restore",
+                format_args!(
+                    "[param] restore root={root} param={param} range=[{start}, {}) rev={revision}",
+                    start + count
+                ),
+            );
         }
         drop(edits);
-        if revision != before {
+        if changed {
             self.notify_parameters_changed();
         }
         Ok(serde_json::json!({"ok": true, "authority_revision": revision}))
