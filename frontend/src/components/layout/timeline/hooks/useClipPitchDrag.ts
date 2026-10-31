@@ -196,6 +196,7 @@ export function useClipPitchDrag(deps: {
                                 state.startFrame,
                                 values,
                                 false,
+                                new Array<boolean>(values.length).fill(true),
                             ),
                         )
                         .catch(() => undefined);
@@ -302,12 +303,14 @@ export function useClipPitchDrag(deps: {
                     // 末次预览已等于最终值时无需重复写入；currentCents 为 0
                     // （拖回原点）时必须显式写回，否则音频与 UI 分叉。
                     if (st.currentCents !== st.sentCents) {
+                        const finalValues = shiftPitchFrames(st.base, st.currentCents / 100);
                         await webApi.setParamFrames(
                             st.rootTrackId,
                             "pitch",
                             st.startFrame,
-                            shiftPitchFrames(st.base, st.currentCents / 100),
+                            finalValues,
                             false,
+                            new Array<boolean>(finalValues.length).fill(true),
                         );
                     }
                 } catch {

@@ -3295,6 +3295,8 @@ function AppInner() {
                                     extStart,
                                     editedDense,
                                     true,
+                                    // 这一笔整段都改过（选区平滑），每一帧都是显式编辑。
+                                    new Array<boolean>(editedDense.length).fill(true),
                                 );
                                 // 通知 PianoRoll 刷新曲线
                                 dispatch(checkpointHistory());

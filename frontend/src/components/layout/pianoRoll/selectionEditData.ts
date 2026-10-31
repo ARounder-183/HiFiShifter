@@ -352,6 +352,8 @@ export async function uploadFullResCurve(args: {
             startFrame + offset,
             chunk,
             isFirstChunk, // 仅首块打撤销点
+            // 整段都是"改动集合"：块内每一帧都是显式编辑。
+            new Array<boolean>(chunk.length).fill(true),
         );
         isFirstChunk = false;
         done += count;
@@ -389,12 +391,14 @@ export async function uploadFullResCurveSegments(args: {
         const values = segment.values;
         for (let offset = 0; offset < values.length; offset += CHUNK_FRAMES) {
             const count = Math.min(CHUNK_FRAMES, values.length - offset);
+            const chunk = values.slice(offset, offset + count);
             await paramsApi.setParamFrames(
                 trackId,
                 param,
                 startFrame + offset,
-                values.slice(offset, offset + count),
+                chunk,
                 isFirstChunk, // 整批仅首个实际写入打撤销点
+                new Array<boolean>(chunk.length).fill(true),
             );
             isFirstChunk = false;
             done += count;
