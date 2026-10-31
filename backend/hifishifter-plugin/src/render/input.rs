@@ -557,6 +557,25 @@ impl RenderInput {
             };
             render_mixdown_with_pcm(view, options, sources)
         };
+        // 把一个 clip 的**局部**渲染结果按工程位置累加进窗口缓冲。
+        //
+        // 【为什么偏移是 i64 而不是 usize】clip 可能**早于窗口起点**开始（播放头拖进
+        // 一条长 item 的中间、或按窗口分段渲染时）。此时 `clip.start - start` 是负数，
+        // 而 `as usize` 会把它**饱和成 0** —— 那段内容就被贴到窗口起点上，整段右移。
+        // 正确处置是跳过该 clip 前 `-delta` 帧，让窗口内的部分落在正确位置。
+        let place = |mixed: &mut [f32], part: Vec<f32>, clip_start: f64| {
+            let offset_frames = ((clip_start - start) * sample_rate as f64).round() as i64;
+            let skip_frames = offset_frames.min(0).unsigned_abs() as usize;
+            let dest = offset_frames.max(0) as usize * 2;
+            let skip_samples = (skip_frames * 2).min(part.len());
+            for (sum, value) in mixed
+                .iter_mut()
+                .skip(dest)
+                .zip(part.into_iter().skip(skip_samples))
+            {
+                *sum += value;
+            }
+        };
         // 项目数组只负责GUI；每个区域用自己的源参数跑原kernel，再按宿主位置累加。
         // 所有track仍保留原全局solo/父链，不能因为拆region丢掉另一轨solo。
         let (channels, samples) = if self.clip_parameters.is_empty() {
@@ -567,6 +586,7 @@ impl RenderInput {
             // 参数仍从局部零点投影，所有track保留全局solo/父链；只省去加到零缓冲的复制。
             let clip = &timeline.clips[0];
             let mut view = timeline.clone();
+            let local_params_present = self.clip_parameters.contains_key(&clip.id);
             let (lo, hi) = if let Some(params) = self.clip_parameters.get(&clip.id) {
                 let root = view
                     .resolve_root_track_id(&clip.track_id)
@@ -578,12 +598,22 @@ impl RenderInput {
             } else {
                 (start, end)
             };
-            let (_, channels, _, mut samples) = run(&view, lo, hi)?;
-            // 保留旧累加语义的signed-zero位形，不改变已归档PCM的零样本身份。
-            for sample in &mut samples {
-                *sample += 0_f32;
+            let (_, channels, _, samples) = run(&view, lo, hi)?;
+            // 【按窗口位置落位】参数分支渲染的是 `[0, clip.length]`（局部零点），
+            // 而调用方要的是 `[start, end]` 这一段 —— 两者只在"窗口起点恰好等于
+            // clip 起点"时重合。不落位就等于把整条 clip 贴到窗口起点上。
+            if local_params_present {
+                let mut mixed = vec![0_f32; frames * 2];
+                place(&mut mixed, samples, clip.start_sec);
+                (channels, mixed)
+            } else {
+                let mut samples = samples;
+                // 保留旧累加语义的signed-zero位形，不改变已归档PCM的零样本身份。
+                for sample in &mut samples {
+                    *sample += 0_f32;
+                }
+                (channels, samples)
             }
-            (channels, samples)
         } else {
             let mut mixed = vec![0_f32; frames * 2];
             for clip in &timeline.clips {
@@ -620,13 +650,14 @@ impl RenderInput {
                     part.resize(part_frames * 2, 0.0);
                 }
                 part.truncate(part_frames * 2);
-                let offset = if local.is_some() {
-                    ((clip.start_sec - start) * sample_rate as f64).round() as usize * 2
+                // 【落位与偏移同一份实现】见上面 `place` 的说明：负偏移必须**跳过**
+                // 前 `-delta` 帧，而不是饱和成 0 把内容贴到窗口起点。
+                if local.is_some() {
+                    place(&mut mixed, part, clip.start_sec);
                 } else {
-                    0
-                };
-                for (sum, value) in mixed.iter_mut().skip(offset).zip(part) {
-                    *sum += value;
+                    for (sum, value) in mixed.iter_mut().zip(part) {
+                        *sum += value;
+                    }
                 }
             }
             (2, mixed)
