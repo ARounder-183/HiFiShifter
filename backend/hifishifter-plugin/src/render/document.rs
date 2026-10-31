@@ -518,12 +518,6 @@ pub(crate) struct DocumentSession {
     /// 的，装配结果只会是一堆没有源窗口的占位。**用它当"这份时间线归不归我管"的判据**：
     /// 模型从未交付过时，不动已经发布的时间线（否则"宿主里一切都在、插件里什么都没有"）。
     pub ara_model_seen: std::sync::atomic::AtomicBool,
-    /// 清单变了、需要重新装配。
-    ///
-    /// 【为什么是"置标志 + 稍后装配"而不是就地装配】清单采集会被
-    /// `host_geometries_locked` → `fade_items_locked` / `clip_for_host_item` 调到，
-    /// 而那两处正持有 `clip_ids` —— 装配要写 `clip_ids`，就地做就是自锁。
-    pub inventory_rebuild_due: std::sync::atomic::AtomicBool,
     pub track_bindings: Mutex<crate::state_channel::TrackBindings>,
     pub revision: AtomicU64,
     pub render_epoch: AtomicU64,
@@ -1249,24 +1243,6 @@ impl DocumentSession {
             .collect()
     }
 
-    /// 清单刷新之后补一次装配（由 `ExtensionOwner::refresh_ui_inventory` 调用）。
-    ///
-    /// 【为什么是"排空标志"】见 `inventory_rebuild_due` 的说明。标志由清单采集置位，
-    /// 本函数在**采集返回之后**才取 `transaction` 与 `timeline` —— 那时调用方已经
-    /// 释放了 `clip_ids`。
-    pub(crate) fn flush_inventory_rebuild(&self) {
-        if !self
-            .inventory_rebuild_due
-            .swap(false, std::sync::atomic::Ordering::AcqRel)
-        {
-            return;
-        }
-        let _transaction = self.transaction.lock_or_recover();
-        if let Err(error) = self.rebuild_timeline_locked() {
-            log::warn!("[ara] timeline assembly on inventory refresh failed: {error}");
-        }
-    }
-
     /// **唯一**的时间线重建入口 —— clip 集合只在这里产生。
     ///
     /// 【为什么必须只有一个入口】此前 clip 有两个生产者：`ara/mapping.rs` 按 playback
@@ -1347,23 +1323,35 @@ impl DocumentSession {
         // **每次清单刷新**后重跑 —— 留在那里就等于"每次重跑都丢一次"。挪到这里，
         // 它才与"轨道从哪来"这件事同源。
         //
-        // 锁序：`timeline → edits`（文档声明的层级）。先取 `timeline` 再取 `edits`。
+        // 【轨道级设置从**上一轮时间线**继承，不读 `edits`】
+        //
+        // 装配只产出几何；合成开关 / 分析算法 / 音量 / 静音 / 独奏 / 私有分组父级都是
+        // **用户的设置**，重装一次不能把它们抹回默认值。
+        //
+        // 【为什么不读 `edits`】那会构成 "transaction → edits" 的反向边：工作区快照
+        // 走的是 "edits → transaction"，两条路一交叉就是 ABBA 死锁（实测两个
+        // `bound_tests` 用例因此永久挂起）。上一轮时间线里的值本来就是
+        // `edits.apply` 的产物，继承它等价，而且不碰第二把锁。
         {
             let mut slot = self.timeline.lock_or_recover();
-            let seeded: std::collections::BTreeSet<String> = self
-                .edits
-                .lock_or_recover()
-                .tracks
-                .iter()
-                .map(|track| track.id.clone())
-                .collect();
+            let previous = slot.clone();
             for track in &mut timeline.tracks {
-                if seeded.contains(&track.id) {
+                let Some(old) = previous
+                    .as_ref()
+                    .and_then(|previous| previous.tracks.iter().find(|old| old.id == track.id))
+                else {
+                    // 新出现的轨道才播种插件默认值（开箱即用）。
+                    track.compose_enabled = true;
+                    track.pitch_analysis_algo =
+                        hifishifter_kernel::state::PitchAnalysisAlgo::NsfHifiganOnnx;
                     continue;
-                }
-                track.compose_enabled = true;
-                track.pitch_analysis_algo =
-                    hifishifter_kernel::state::PitchAnalysisAlgo::NsfHifiganOnnx;
+                };
+                track.compose_enabled = old.compose_enabled;
+                track.pitch_analysis_algo = old.pitch_analysis_algo.clone();
+                track.volume = old.volume;
+                track.muted = old.muted;
+                track.solo = old.solo;
+                track.parent_id = old.parent_id.clone();
             }
             *slot = Some(timeline);
         }

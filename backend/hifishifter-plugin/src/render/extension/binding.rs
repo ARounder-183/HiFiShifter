@@ -1185,21 +1185,7 @@ impl ExtensionOwner {
         self.refresh_ui_inventory();
     }
     /// GUI清单按项目change/model/scope代次刷新，不每20ms枚举所有item，也不借活动工程。
-    /// 清单刷新的**入口**：先跑原来的采集，再在**所有内层早退之外**补一次装配。
-    ///
-    /// 【为什么必须包一层】采集函数有十余处提前 `return`（未授权、令牌未变、没有
-    /// 原生扩展……），每一处都是"这一轮清单没变"的合法结论。装配却只在**清单真的
-    /// 变了**时才需要 —— 而那件事由 `refresh_host_geometry` 里的一个标志表达。
-    /// 把装配塞进采集函数体，就得在每一处早退前重复判断一次；包一层只需要一处。
     pub(crate) fn refresh_ui_inventory(&self) {
-        self.refresh_ui_inventory_inner();
-        let Ok(stamp) = self.host_query_stamp() else {
-            return;
-        };
-        stamp.0.flush_inventory_rebuild();
-    }
-
-    fn refresh_ui_inventory_inner(&self) {
         let Ok(stamp) = self.host_query_stamp() else {
             return;
         };
@@ -1451,15 +1437,20 @@ impl ExtensionOwner {
         // 在下一次 `FACTS_REFRESH_INTERVAL` 到期时强制重采（见 `ui_inventory_sampled_at`）。
         *stamp.0.ui_inventory_sampled_at.lock_or_recover() = Some(std::time::Instant::now());
         stamp.0.ui_geometry_revision.fetch_add(1, Ordering::AcqRel);
-        // 【清单变了 ⇒ 装配输入 B 变了 ⇒ 需要重新装配】
+        // 【为什么这里**不**重新装配】
         //
-        // 这里**只置标志，不就地装配**。本函数会经由
+        // clip 集合由装配器在 `remap_and_log` 收口时产出，而那一轮之前会先调一次
+        // `refresh_ui_inventory`（见 `remap_and_log`）—— 清单的最新结果因此已经在
+        // 装配输入里。在这里再装配一次有两个代价：本函数会被
         // `host_geometries_locked` → `fade_items_locked` / `clip_for_host_item`
-        // 被调用，而那两处正持有 `clip_ids`；而装配要写 `clip_ids`。
-        // `std::sync::Mutex` 不可重入 —— 就地装配会当场自锁（实测：两个
-        // `bound_tests` 用例永久挂起）。真正的装配由
-        // `DocumentSession::flush_inventory_rebuild` 在**清单入口返回之后**做。
-        stamp.0.inventory_rebuild_due.store(true, Ordering::Release);
+        // 调到（那两处正持有 `clip_ids`，而装配要写它，`std::sync::Mutex` 不可重入），
+        // 也会被 `refresh_host_transport` 调到（那条路可能正持有 `transaction`）。
+        // 实测两个 `bound_tests` 用例因此永久挂起。
+        //
+        // 清单变化本身仍然立即生效：`present_host_inventory` 会把宿主的
+        // `D_POSITION` / `D_LENGTH` 投影到既有 clip 上，`project_host_item_geometry_locked`
+        // 会让渲染读到同一份几何。只有"item 的**增删**"需要重新装配，而那在 REAPER 里
+        // 必然伴随 region 的增删 ⇒ 必然收口。
         *self.host_audio.lock_or_recover() = status;
         // 用户报障时最需要的一行：宿主清单里有多少 item，其中多少被 ARA region 认领。
         // 认领不到的那些只能以无源占位出现（见方案 Task 5.1 / R4）。
