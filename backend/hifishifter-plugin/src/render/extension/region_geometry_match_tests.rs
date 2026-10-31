@@ -48,6 +48,7 @@ fn candidate(
         auto_fade_out_sec: 0.,
         loop_source: false,
         source_file_name: None,
+        source_length_sec: None,
     }
 }
 

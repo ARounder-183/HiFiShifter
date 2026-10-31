@@ -96,6 +96,17 @@ pub(super) struct TakeDirectionApi {
     ///
     /// 缺省时该回退不可用（与方向读取独立降级）：读不到文件名就退回"宁可不挂"。
     pub filename: Option<SourceFileName>,
+    /// `GetMediaSourceLength`：这份 take 的源**总时长**（秒）。
+    ///
+    /// 【为什么清单层必须自己拿到它】内核的两件事要它，而此前清单层只能向 ARA 借：
+    ///   * 倒放的**镜像轴**（`take_axis_sec`）—— 借不到时保留宿主镜像坐标，倒放片段
+    ///     就渲染不出来；
+    ///   * 循环源的**回绕周期** —— 借不到时周期退化成 clip 自身长度，等于**完全不循环**，
+    ///     后半段静音。真机上实测到过这条（`ara.loop-period-unknown`）。
+    ///
+    /// ARA 那份读数要求 region 已经认领到这个 item；而"宿主把 item 移出 region 的
+    /// 几何范围"是常态（拖动的那一瞬间）。宿主自己的读数没有这个前提。
+    pub length: Option<media::SourceLength>,
 }
 
 /// 一个 take 的**方向与段边界**读数（`PCM_Source_GetSectionInfo` 的三个出参）。
@@ -431,12 +442,14 @@ impl NativeHost {
         // `int GetMediaItemNumTakes(MediaItem*)` / `MediaItem_Take* GetMediaItemTake(MediaItem*, int)`。
         // 文件名读取器与方向读取器独立可选（各自降级），但都在函数体的 `Option` 上下文里查。
         let source_file_name = lookup!(c"GetMediaSourceFileName", SourceFileName);
+        let source_length = lookup!(c"GetMediaSourceLength", media::SourceLength);
         let take_direction = lookup!(c"GetMediaItemTake_Source", TakeSource)
             .zip(lookup!(c"PCM_Source_GetSectionInfo", SectionInfo))
             .map(|(source, section)| TakeDirectionApi {
                 source,
                 section,
                 filename: source_file_name,
+                length: source_length,
             });
         let take_enum = lookup!(c"GetMediaItemNumTakes", TakeCount)
             .zip(lookup!(c"GetMediaItemTake", TakeAt))
@@ -898,6 +911,47 @@ impl NativeHost {
     /// 不符 ⇒ 明明有音频却显示占位。文件名相同即可证明"同一份已授权 PCM"，可安全回退。
     ///
     /// 读不出来（API 缺失、源为空、路径为空）返回 `None` —— 调用方退回"宁可不挂"。
+    /// 这份 take 的源**总时长**（秒）；读不出来返回 `None`。
+    ///
+    /// 与 [`Self::take_source_file_name`] 同一束 API（`GetMediaItemTake_Source`），
+    /// 只是多查一个 `GetMediaSourceLength`。三条拒绝理由：
+    ///   * 源为空指针 / 形状校验失败；
+    ///   * 宿主把长度报成**四分音符**（`lengthIsQN`）—— 那不是秒，混进内核会把
+    ///     120 BPM 下的一个四分音符当成 0.5 s；
+    ///   * 长度非有限或非正。
+    pub(super) fn take_source_length(
+        &self,
+        take: *mut c_void,
+        authorized: &impl Fn() -> bool,
+    ) -> Option<f64> {
+        if !self.on_host_thread() {
+            return self
+                .on_host(|| self.take_source_length(take, authorized))
+                .unwrap_or(None);
+        }
+        let api = self.take_enum.as_ref()?.direction.as_ref()?;
+        let length_of = api.length?;
+        let geometry = self.geometry.as_ref()?;
+        let project = self.project(authorized).ok()?;
+        let source = checked(authorized, || unsafe { (api.source)(take) }).ok()?;
+        if source.is_null() {
+            return None;
+        }
+        if !checked(authorized, || unsafe {
+            (geometry.validate)(project, source, c"PCM_source*".as_ptr())
+        })
+        .ok()?
+        {
+            return None;
+        }
+        let mut quarter_notes = false;
+        let seconds = checked(authorized, || unsafe { length_of(source, &mut quarter_notes) }).ok()?;
+        if quarter_notes || !seconds.is_finite() || seconds <= 0.0 {
+            return None;
+        }
+        Some(seconds)
+    }
+
     pub(super) fn take_source_file_name(
         &self,
         take: *mut c_void,
@@ -1084,6 +1138,8 @@ impl NativeHost {
         let loop_source = boolean(iv(c"B_LOOPSRC")?)?;
         // 源文件路径：读不出来就是 `None`（回退身份不可用），不猜。
         let source_file_name = self.take_source_file_name(take, &authorized);
+        // 源总时长：清单层自己的读数，不依赖 ARA 是否已经认领到这个 item。
+        let source_length_sec = self.take_source_length(take, &authorized);
         // 方向与段边界来自**同一次** `PCM_Source_GetSectionInfo`。
         // 方向取两个来源的并集：宿主方向位 **或** 负速率 —— 与独立 App 的
         // `play_rate < 0 || section_mode > 0` 逐条对齐（见 `HostClipGeometry::play_rate_signed`）。
@@ -1184,6 +1240,7 @@ impl NativeHost {
             auto_fade_in_sec,
             auto_fade_out_sec,
             source_file_name,
+            source_length_sec,
         })
     }
 }
