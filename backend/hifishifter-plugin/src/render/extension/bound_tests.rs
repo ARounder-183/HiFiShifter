@@ -1269,13 +1269,9 @@ fn automatic_apply_releases_the_transaction_and_rechecks_model_and_edit_versions
                 _reservation: None,
             })
             .unwrap();
-        let projection = document.workspace_projection().unwrap();
         let baseline = document.workspace_view().unwrap();
         let calls = std::sync::atomic::AtomicUsize::new(0);
         let result = document.apply_workspace_edits(
-            0,
-            document.revision.load(Ordering::Acquire),
-            &projection,
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
             || {
                 if calls.fetch_add(1, Ordering::AcqRel) == 0 {

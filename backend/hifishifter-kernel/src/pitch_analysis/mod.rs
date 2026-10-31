@@ -67,6 +67,22 @@ pub fn file_sig(path: &Path) -> (u64, u64) {
     (len, mtime_ms)
 }
 
+/// clip id 的**布局身份**：剥掉宿主/命名空间前缀，只留 ARA 标签之后的部分。
+///
+/// 【为什么必须剥】同一份布局在两份时间线里 id 不同：文档是 `ara-item-{guid}`，
+/// 编辑器是 `hfs-ui-{pid}-{n}-ara-item-{guid}`。布局键若直接哈希 id，两份时间线
+/// 会算出不同的键 —— 文档刚发布的基线在编辑器侧立刻被判"布局变了"，于是每帧
+/// 重建一次；反之亦然。按标签后缀取键（与 `workspace::host_item_guid` 同一手法）
+/// 让两边得到同一个键。
+fn clip_layout_identity(clip_id: &str) -> &str {
+    for tag in ["ara-item-", "ara-region-", "ara-clip-"] {
+        if let Some(index) = clip_id.rfind(tag) {
+            return &clip_id[index + tag.len()..];
+        }
+    }
+    clip_id
+}
+
 /// 根布局键：clip 身份 / 工程位置 / 源窗口 / 速率 / 方向。只用于判断
 /// “是否需要从内容缓存重新组装根数组”，绝不用于判断“是否需要重跑音频分析”。
 pub fn build_root_pitch_layout_key(tl: &TimelineState, root_track_id: &str) -> String {
@@ -84,7 +100,7 @@ pub fn build_root_pitch_layout_key(tl: &TimelineState, root_track_id: &str) -> S
             .then_with(|| a.id.cmp(&b.id))
     });
     for clip in clips {
-        hasher.update(clip.id.as_bytes());
+        hasher.update(clip_layout_identity(&clip.id).as_bytes());
         hasher.update(&quantize_u32(clip.start_sec, 1000.0).to_le_bytes());
         hasher.update(&quantize_u32(clip.length_sec, 1000.0).to_le_bytes());
         hasher.update(&quantize_u32(clip.playback_rate as f64, 10000.0).to_le_bytes());

@@ -140,6 +140,16 @@ impl RetryState {
             return RenderAction::Retry(ANALYSIS_PENDING_RETRY);
         }
         self.analysis_pending_since = None;
+        // 【"被取代"不是错误】渲染期间用户又改了一笔 / 宿主又交付了一次几何 ⇒ 这次
+        // 结果作废、立刻重排。把它计入 streak 会让"连续编辑"退避到 5 秒一轮，
+        // 用户看到的就是"画完半天不响"。真正需要退避的只有失败（渲染报错、发布失败）。
+        if error == "automatic apply superseded"
+            || error == "Conflict: workspace changed during automatic apply"
+        {
+            self.streak = 0;
+            *session.render_error.lock_or_recover() = None;
+            return RenderAction::Retry(RENDER_RETRY_INTERVAL);
+        }
         self.streak = self.streak.saturating_add(1);
         // 预算内：快速重试（宿主的编辑事务通常会在这 1.2 秒内收口）。
         if self.streak < RENDER_RETRY_BUDGET {
@@ -1395,7 +1405,7 @@ impl EditorSession {
     }
 
     /// 原线缓存组装保留在actor；只把已确认的版本票据交给DSP线程，不并发修改timeline。
-    fn prepare_apply(&self) -> Result<(Arc<DocumentSession>, u64, u64, String), String> {
+    fn prepare_apply(&self) -> Result<(Arc<DocumentSession>, u64), String> {
         // 【R7：只有**终态**错误才短路自动渲染】瞬时冲突（`Conflict: …`）意味着"宿主
         // 在提交窗口里动过"，它必然收敛 —— 而 `self.error` 只在"提交成功"或
         // `ensure_loaded` 成功时被清空。于是**一次**冲突就能让音频停在旧版本，直到
@@ -1416,27 +1426,17 @@ impl EditorSession {
         if self.requires_analysis(&self.timeline.lock_or_recover()) {
             return Err("pitch analysis pending".into());
         }
-        let (edit, model, projection) = {
-            let loaded = self.loaded.lock_or_recover();
-            (
-                loaded.edit,
-                loaded.model,
-                loaded
-                    .view
-                    .as_ref()
-                    .map(|view| view.projection.clone())
-                    .unwrap_or_default(),
-            )
-        };
+        // 【票据不再从这里出】它是渲染入口（`apply_workspace_edits_with_progress`）
+        // 自己取的。`loaded` 的语义是"编辑器最后一次读工作区时的票据"，把它当渲染
+        // 守卫等于"用户每画一笔就让下一次渲染必然 Conflict"。
         let document = self.require_document()?;
-        Ok((document, edit, model, projection))
+        Ok((document, self.generation.load(Ordering::Acquire)))
     }
     fn start_render(self: &Arc<Self>, ticket: u64) -> Result<(), String> {
         if self.is_capture() {
             return self.start_capture_render(ticket);
         }
-        let (document, edit, model, projection) = self.prepare_apply()?;
-        let generation = self.generation.load(Ordering::Acquire);
+        let (document, generation) = self.prepare_apply()?;
         let cancel = Arc::new(AtomicBool::new(false));
         let current = self.clone();
         let job_cancel = cancel.clone();
@@ -1468,9 +1468,6 @@ impl EditorSession {
         );
         let worker = RenderTask::spawn(ticket, generation, cancel, move || {
             document.apply_workspace_edits_with_progress(
-                edit,
-                model,
-                &projection,
                 job_cancel.clone(),
                 || {
                     !job_cancel.load(Ordering::Acquire)
@@ -1542,11 +1539,8 @@ impl EditorSession {
         ticket: u64,
         progress: Option<hifishifter_kernel::mixdown::ProgressCallback>,
     ) -> Result<(), String> {
-        let (document, edit, model, projection) = self.prepare_apply()?;
+        let (document, _generation) = self.prepare_apply()?;
         document.apply_workspace_edits_with_progress(
-            edit,
-            model,
-            &projection,
             self.analysis_cancel.clone(),
             || {
                 !self.closed.load(Ordering::Acquire)
@@ -1621,16 +1615,12 @@ impl EditorSession {
             for root in active_roots {
                 timeline.ensure_params_for_root(&root);
             }
-            // 【判据搬进基线层】"这一根还没有当前几何的分析结果"由文档的基线层回答。
-            // 显示层的 `pitch_orig_key` 不再是判据 —— 它已经由合成写入。
+            // 【判据是布局键，不是"就绪没有"】"就绪"是一次性状态；布局一变它不会
+            // 变回未就绪，基线就永远停在旧布局（移动之后旧位置留着原曲线、新位置
+            // `pitch_orig = 0` ⇒ 渲染器判定"无源 F0"而直通原音）。
             timeline
                 .params_by_root_track
                 .keys()
-                .filter(|root| {
-                    // 文档的基线按**宿主空间**的根键存（`rewrite_ids` 只改本会话那份）。
-                    let host_root = root.strip_prefix(&self.namespace).unwrap_or(root);
-                    !document.baseline_is_ready(host_root)
-                })
                 .cloned()
                 .collect::<Vec<_>>()
         };
@@ -1651,6 +1641,22 @@ impl EditorSession {
             hifishifter_kernel::pitch_analysis::maybe_schedule_pitch_orig(&analysis, root);
             hifishifter_kernel::pitch_analysis::maybe_schedule_dyn_orig(&analysis, root);
         }
+        // 布局键必须取自**这一轮组装所用的**时间线：它与文档侧的键只差命名空间前缀，
+        // 而 `build_root_pitch_layout_key` 已经把前缀剥掉（见 `clip_layout_identity`）。
+        let layout_keys = {
+            let timeline = analysis.lock_or_recover();
+            roots
+                .iter()
+                .map(|root| {
+                    (
+                        root.clone(),
+                        hifishifter_kernel::pitch_analysis::build_root_pitch_layout_key(
+                            &timeline, root,
+                        ),
+                    )
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
         let params = analysis.into_inner().unwrap().params_by_root_track;
         // 【T1 / T7：分析完成只写**基线层**】旧实现把 pitch_orig / pitch_edit 直接写进
         // 显示时间线，再走"用户提交"漏斗回写文档 —— 于是"分析完成"被捕获成一次
@@ -1680,23 +1686,43 @@ impl EditorSession {
             self.publish_timeline_derived();
             return;
         }
+        // 【基线由"分析组装者"发布，但必须带上布局键】ARA 文档时间线里的
+        // `source_path` 是 ARA source 的 persistent id（不是文件路径），内容缓存按
+        // 真实文件路径建键 —— 因此文档侧自己组装不出来。真正能组装的只有本会话
+        // （它有清单给出的真实路径）。这里把组装结果连同布局键一起发布，文档侧的
+        // `baseline_for` 才能在布局未变时直接复用、在布局变了时知道要重建。
         let mut changed = false;
-        for root in roots {
-            let Some(next) = params.get(&root) else {
+        for root in &roots {
+            let Some(next) = params.get(root) else {
                 continue;
             };
-            // 键缺席 ⇒ 分析还没真的完成；这一轮不发布，下一轮还会再试。
+            // 【键缺席 ⇒ 分析还没真的完成】这一轮不发布，下一轮还会再试。
+            // 少了这条门，`pitch_analysis_algo = none` 的轨道也会被发布一份
+            // "全 0 但非空"的基线 —— 它会让渲染器误判"这条轨有参数要处理"，
+            // 从而走处理器路径并产出静音（本机回归实测）。
             if next.pitch_orig_key.is_none() && next.dyn_orig_key.is_none() {
                 continue;
             }
             let host_root = root
                 .strip_prefix(&self.namespace)
-                .unwrap_or(&root)
+                .unwrap_or(root)
                 .to_owned();
+            let Some(layout) = layout_keys.get(root) else {
+                continue;
+            };
             changed |= document.publish_baseline(
                 &host_root,
-                crate::editor::parameter_atlas::RootBaseline::from_params(next),
+                crate::editor::parameter_atlas::RootBaseline::from_params(next)
+                    .with_layout(layout.clone()),
             );
+        }
+        // 分析刚刚补齐（缓存从"部分命中"变成"全命中"）也要让显示与渲染重读一次：
+        // 基线的重建是懒的，没有这个信号就要等到下一次滚动/编辑才刷新。
+        if params
+            .values()
+            .any(|next| next.pitch_orig_key.is_some() || next.dyn_orig_key.is_some())
+        {
+            changed = true;
         }
         if changed {
             self.revision_bumps_analysis.fetch_add(1, Ordering::Relaxed);
@@ -1747,6 +1773,18 @@ impl EditorSession {
         {
             let mut timeline = self.timeline.lock_or_recover();
             self.install_document_params(&mut timeline, view.params.as_ref());
+        }
+        // 【票据必须一起前进】这份视图就是"编辑器此刻读到的"那一份；不同步
+        // `loaded`，下一次提交的差分基线就落后一代（把宿主几何差异当成用户改动），
+        // 而渲染入口也会拿到过期的 edit/model/scope。
+        if let Ok(versions) = document.editor_versions() {
+            let mut loaded = self.loaded.lock_or_recover();
+            if loaded.initialized {
+                loaded.edit = versions.0;
+                loaded.model = versions.1;
+                loaded.scope = versions.2;
+                loaded.view = Some(view);
+            }
         }
         self.publish_timeline_derived();
     }
@@ -3299,17 +3337,32 @@ impl EditorSession {
         if param == "dyn" {
             hifishifter_kernel::pitch_analysis::maybe_schedule_dyn_orig(&self.timeline, &root);
         }
-        let params = self
-            .timeline
-            .lock_or_recover()
-            .params_by_root_track
-            .get(&root)
-            .cloned();
-        if let (Some(params), Some(document)) = (params, self.document()) {
-            document.publish_baseline(
-                host_root,
-                hifishifter_kernel::editor::param_authority::RootBaseline::from_params(&params),
-            );
+        // 【发布的是"分析原线 + 布局键"，不是显示数组】`params.pitch_orig` 由
+        // `maybe_schedule_pitch_orig` 从内容缓存组装（与用户编辑无关）；`pitch_edit`
+        // 不参与（`from_params` 不读它）。布局键让文档侧的 `baseline_for` 在布局
+        // 未变时直接复用、变了就重建 —— 旧实现没有这个键，于是"就绪"变成一次性状态。
+        let snapshot = {
+            let timeline = self.timeline.lock_or_recover();
+            timeline
+                .params_by_root_track
+                .get(&root)
+                .cloned()
+                .map(|params| {
+                    let layout =
+                        hifishifter_kernel::pitch_analysis::build_root_pitch_layout_key(
+                            &timeline, &root,
+                        );
+                    (params, layout)
+                })
+        };
+        if let (Some((params, layout)), Some(document)) = (snapshot, self.document()) {
+            if params.pitch_orig_key.is_some() || params.dyn_orig_key.is_some() {
+                document.publish_baseline(
+                    host_root,
+                    hifishifter_kernel::editor::param_authority::RootBaseline::from_params(&params)
+                        .with_layout(layout),
+                );
+            }
         }
     }
 
@@ -5083,21 +5136,13 @@ pub(crate) mod tests {
         for owner in &owners {
             owner.stop_editor();
         }
-        let projection = document.workspace_projection().unwrap();
         let workspace = document.workspace_timeline().unwrap();
         assert!(workspace.tracks.is_empty());
         assert!(workspace.clips.is_empty());
         let began = Instant::now();
         editor.flush().unwrap();
-        let edit = document.edits.lock_or_recover().revision;
         document
-            .apply_workspace_edits(
-                edit,
-                document.revision.load(Ordering::Acquire),
-                &projection,
-                Arc::new(AtomicBool::new(false)),
-                || true,
-            )
+            .apply_workspace_edits(Arc::new(AtomicBool::new(false)), || true)
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(3);
         while editor.error.lock_or_recover().is_none() {

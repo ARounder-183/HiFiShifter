@@ -1234,6 +1234,25 @@ fn controllers() -> &'static Mutex<HashMap<usize, Weak<DocumentSession>>> {
     DOCUMENTS.get_or_init(Default::default)
 }
 
+/// 一次渲染的守卫票据：渲染**入口**处取得，收尾处复核。
+///
+/// 【为什么是四个计数器而不是投影指纹】渲染输入由 `ara_render_input` 从**文档自身**
+/// 构造，与"编辑器读到什么"无关；而任何会让输入失效的变化都必然推进这四个数之一：
+///   * 参数写入 / 撤销 ⇒ `edit`
+///   * 宿主模型收口   ⇒ `model`
+///   * 分配范围变化   ⇒ `scope`
+///   * 几何 / 内容失效 ⇒ `epoch`
+/// 旧实现把"编辑器上次读到的票据"（`loaded.edit` / `loaded.view.projection`）当守卫，
+/// 于是**每一次参数写入都会让下一次渲染必然 Conflict** —— 而写参数正是请求渲染的那件
+/// 事。票据必须由渲染入口自己取。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RenderTicket {
+    pub edit: u64,
+    pub model: u64,
+    pub scope: u64,
+    pub epoch: u64,
+}
+
 impl DocumentSession {
     pub(crate) fn publish_source_pcm(&self, id: String, pcm: Arc<super::source::SourcePcm>) {
         let _transaction = self.transaction.lock_or_recover();
@@ -1832,8 +1851,6 @@ impl DocumentSession {
             params.tension_orig = base.tension_orig.clone();
             params.pitch_orig_key = base.pitch_key.clone();
             params.dyn_orig_key = base.dyn_key.clone();
-            // **绝不写 pitch_edit / tension_edit / extra_curves**：这些是权威合成结果，
-            // 基线只提供 orig。旧实现在这里补显示值，正是“分析完成=一次用户编辑”的根。
         }
     }
 
@@ -1861,6 +1878,10 @@ impl DocumentSession {
                 || old.frame_period_ms != baseline.frame_period_ms
                 || old.pitch_key != baseline.pitch_key
                 || old.dyn_key != baseline.dyn_key
+                // 【布局键必须参与比较】数组完全相同时（例如只移动了 clip 但内容
+                // 恰好一致），键变了也意味着"这份基线描述的是旧布局"，必须重发。
+                || old.layout_key != baseline.layout_key
+                || old.content_key != baseline.content_key
         });
         if changed {
             let mut baseline = baseline;
@@ -1871,6 +1892,76 @@ impl DocumentSession {
             map.insert(root.to_owned(), baseline);
         }
         changed
+    }
+
+    /// 取一份**当前布局**的基线；必要时从内容缓存同步重组装并发布。
+    ///
+    /// 【为什么是纯函数式】输入只有 `timeline`（几何 + 轨道设置）与内容缓存。
+    /// 绝不读 `edits`、绝不读显示数组 —— 那正是"用户编辑被固化成原始值"的入口。
+    ///
+    /// 【为什么可以同步做】`assemble_*_from_cache` 只是按当前 clip 窗口把 per-clip
+    /// 缓存曲线搬进根数组（memcpy 级），不跑任何推理。代价与"取一次参数数组"同级。
+    pub(crate) fn baseline_for(
+        &self,
+        root: &str,
+        timeline: &hifishifter_kernel::state::TimelineState,
+    ) -> hifishifter_kernel::editor::param_authority::RootBaseline {
+        use hifishifter_kernel::editor::param_authority::RootBaseline;
+        use hifishifter_kernel::pitch_analysis::schedule::assemble_pitch_orig_from_cache;
+        use hifishifter_kernel::pitch_analysis::{build_root_pitch_key, build_root_pitch_layout_key};
+        let layout = build_root_pitch_layout_key(timeline, root);
+        let stored = self.baseline.lock_or_recover().get(root).cloned();
+        if let Some(base) = &stored {
+            if base.is_ready() && base.layout_key.as_deref() == Some(layout.as_str()) {
+                return base.clone();
+            }
+            // 【已有基线但布局变了】不要在这里反复尝试文档侧组装：ARA 文档时间线的
+            // `source_path` 是 ARA source 的 persistent id（不是文件路径），内容缓存
+            // 按真实路径建键，组装必然全 0；每帧重试等于每帧分配一条整长数组。
+            // 正确的做法是等分析侧（它有真实路径）发布带新布局键的基线。
+            if base.is_ready() && base.layout_key.is_some() {
+                let mut stale = base.clone();
+                stale.analysis_pending = true;
+                return stale;
+            }
+        }
+        let mut rebuilt = RootBaseline {
+            frame_period_ms: timeline.frame_period_ms(),
+            layout_key: Some(layout),
+            content_key: stored.as_ref().and_then(|base| base.content_key.clone()),
+            ..Default::default()
+        };
+        // 【全 0 不算就绪】`assemble_pitch_orig_from_cache` 在没有 clip 时也返回一列 0；
+        // 把它当 ready 会让 `mixdown` 的 `is_empty` 守卫失效（"看起来有源曲线、
+        // 实际全是 0" ⇒ 静音 / 纯气声）。必须有非零样本才算真的组装出来了。
+        if let Some((pitch, _, _)) = assemble_pitch_orig_from_cache(timeline, root) {
+            if pitch.iter().any(|value| *value > 0.0) {
+                rebuilt.pitch_orig = pitch;
+                rebuilt.content_key = Some(build_root_pitch_key(timeline, root));
+                rebuilt.pitch_key = rebuilt.content_key.clone();
+                rebuilt.ready = true;
+            }
+        }
+        let (dyn_curve, _) =
+            hifishifter_kernel::pitch_analysis::dyn_analysis::assemble_dyn_orig_from_cache(
+                timeline, root,
+            );
+        if dyn_curve.iter().any(|value| *value > 0.0) {
+            rebuilt.dyn_orig = dyn_curve;
+            rebuilt.dyn_key = Some(build_root_pitch_key(timeline, root));
+            rebuilt.ready = true;
+        }
+        if !rebuilt.ready {
+            // 内容缓存还没建立：保留上一份（可能过期）并标记 pending，由分析完成补齐。
+            if let Some(mut stale) = stored {
+                stale.analysis_pending = true;
+                return stale;
+            }
+            return rebuilt;
+        }
+        rebuilt.revision = 1;
+        self.publish_baseline(root, rebuilt.clone());
+        rebuilt
     }
 
     /// 这一根是否已经有一份**当前几何**的基线。
@@ -2256,49 +2347,29 @@ impl DocumentSession {
     #[cfg(test)]
     pub(crate) fn apply_workspace_edits(
         &self,
-        base_edit: u64,
-        base_model: u64,
-        previous: &str,
         cancel: Arc<AtomicBool>,
         current: impl Fn() -> bool,
     ) -> Result<(), String> {
-        self.apply_workspace_edits_with_progress(
-            base_edit, base_model, previous, cancel, current, None,
-        )
+        self.apply_workspace_edits_with_progress(cancel, current, None)
     }
     pub(crate) fn apply_workspace_edits_with_progress(
         &self,
-        base_edit: u64,
-        base_model: u64,
-        previous: &str,
         cancel: Arc<AtomicBool>,
         current: impl Fn() -> bool,
         progress: Option<hifishifter_kernel::mixdown::ProgressCallback>,
     ) -> Result<(), String> {
-        let (edit, epoch, scope, inputs) = {
+        let (ticket, inputs) = {
             let _transaction = self.transaction.lock_or_recover();
-            // 【为什么不再比较 `revision != base_model`】`revision` 是"模型被失效过几次"的
-            // 计数，宿主一次编辑会把它推进多次（分割在 ARA 侧是 destroy + create + create，
-            // 每次 `clear_renderers()` 都 +1）。用它做冲突判据，等于把"宿主正常的多次交付"
-            // 判成冲突：实测 Cubase 15 上这就报成 `Conflict: host model changed during
-            // automatic apply`，8 次重试后自动渲染永久停摆。
-            //
-            // 真正的正确性判据在下方复核段：`edits.revision` / `render_epoch` /
-            // `scope_revision` / `assigned_regions()` 任一变化都会走 `superseded`（可重试、
-            // 不写 error）。而 `render_epoch` 与 `revision` 是**同时**推进的
-            // （`clear_renderers` 是唯一同时推进两者的原语），所以这里去掉 `revision`
-            // 不丢任何信息 —— 只是不再做那个会误报的快速失败。
             if !self.is_alive() || !self.ready.load(Ordering::Acquire) {
                 return Err(format!(
                     "{} model changed during automatic apply",
                     crate::editor::errors::CONFLICT_PREFIX
                 ));
             }
+            // 【入口自取】这一刻之后发生的变化才叫"并发"；之前的变化（例如用户刚画完
+            // 那一笔）是这次渲染的**输入**，不是冲突。
+            let ticket = self.render_ticket_locked();
             let edits = self.edits.lock_or_recover().clone();
-            if edits.revision != base_edit || self.workspace_projection_locked(&edits)? != previous
-            {
-                return Err("Conflict: workspace changed during automatic apply".into());
-            }
             let inputs = self
                 .renderer_owners()
                 .into_iter()
@@ -2308,12 +2379,7 @@ impl DocumentSession {
                     Ok((owner, keys, input))
                 })
                 .collect::<Result<Vec<_>, String>>()?;
-            (
-                edits.revision,
-                self.render_epoch.load(Ordering::Acquire),
-                self.scope_revision.load(Ordering::Acquire),
-                inputs,
-            )
+            (ticket, inputs)
         };
         if !current() {
             return Err("automatic apply superseded".into());
@@ -2328,19 +2394,14 @@ impl DocumentSession {
             prepared.push((owner, keys, snapshots));
         }
         let _transaction = self.transaction.lock_or_recover();
-        // 复核只看"这份已算好的东西还能不能用"：活着、仍就绪，且下面那组
-        // 版本/分配没有变。`revision` 不参与 —— 理由同前一处（见上面的说明）。
+        // 复核只看"这份已算好的东西还能不能用"：活着、仍就绪，且票据没有变。
         if !self.is_alive() || !self.ready.load(Ordering::Acquire) {
             return Err(format!(
                 "{} model changed during automatic apply",
                 crate::editor::errors::CONFLICT_PREFIX
             ));
         }
-        if !current()
-            || self.edits.lock_or_recover().revision != edit
-            || self.render_epoch.load(Ordering::Acquire) != epoch
-            || self.scope_revision.load(Ordering::Acquire) != scope
-        {
+        if !current() || self.render_ticket_locked() != ticket {
             return Err("automatic apply superseded".into());
         }
         for (owner, keys, snapshots) in &prepared {
@@ -2362,10 +2423,11 @@ impl DocumentSession {
                     .publish(snapshot)
                     .map_err(|e| format!("snapshot publish failed: {e:?}"))?;
             }
-            owner.record_prepared(base_model, edit, epoch, scope, keys);
+            owner.record_prepared(ticket.model, ticket.edit, ticket.epoch, ticket.scope, keys);
         }
         Ok(())
     }
+
     /// 宿主专属API调用前核对真实文档仍存活，销毁后的view不能沿旧project指针查询。
     pub(crate) fn is_alive(&self) -> bool {
         self.alive.load(Ordering::Acquire)
@@ -2473,6 +2535,19 @@ impl DocumentSession {
         Ok(())
     }
 
+    /// 渲染守卫票据（调用方必须已持 `transaction`）。
+    ///
+    /// 只碰 `edits` 与四个原子量，**不取 timeline** —— 因此不会给锁序图
+    /// （`transaction → edits → timeline → clip_ids`）加新边。
+    pub(crate) fn render_ticket_locked(&self) -> RenderTicket {
+        RenderTicket {
+            edit: self.edits.lock_or_recover().revision,
+            model: self.revision.load(Ordering::Acquire),
+            scope: self.scope_revision.load(Ordering::Acquire),
+            epoch: self.render_epoch.load(Ordering::Acquire),
+        }
+    }
+
     /// 当前参数权威 revision（前端水位；只读）。
     pub(crate) fn authority_revision(&self) -> u64 {
         self.edits.lock_or_recover().authority.revision
@@ -2492,32 +2567,10 @@ impl DocumentSession {
         } else {
             timeline.frame_period_ms()
         };
-        let stored_baseline = self.baseline.lock_or_recover().get(root).cloned();
-        let mut baseline = match stored_baseline {
-            Some(baseline) if baseline.is_ready() => baseline,
-            _ => {
-                let empty = hifishifter_kernel::state::TrackParamsState::default();
-                let mut fallback = timeline
-                    .params_by_root_track
-                    .get(root)
-                    .cloned()
-                    .unwrap_or(empty);
-                // 冷恢复/无编辑器会话时分析可能还没发布基线；按内容缓存同步组装
-                // pitch_orig，避免把“原始=0”送进渲染器导致用户编辑被当成无源。
-                if fallback.pitch_orig.is_empty() {
-                    if let Some((curve, _, _)) =
-                        hifishifter_kernel::pitch_analysis::schedule::assemble_pitch_orig_from_cache(
-                            timeline, root,
-                        )
-                    {
-                        if curve.iter().any(|value| *value > 0.0) {
-                            fallback.pitch_orig = curve;
-                        }
-                    }
-                }
-                hifishifter_kernel::editor::param_authority::RootBaseline::from_params(&fallback)
-            }
-        };
+        // 【基线的唯一入口】按当前布局取；布局变了就地重组装（纯数组搬运）。
+        // 旧实现在这里读"上一次发布的基线"，于是移动 clip 之后仍然描述旧布局：
+        // 旧位置留着原曲线、新位置 `pitch_orig = 0`（渲染器判定"无源 F0"而直通原音）。
+        let mut baseline = self.baseline_for(root, timeline);
         // 分析尚未给出数组时，权威仍必须能显示：用目标帧数撑出基线，未编辑帧是默认值。
         let run_frames = edits
             .authority
@@ -2551,9 +2604,6 @@ impl DocumentSession {
         // 需要的帧数补零，避免越界采样；缺席的层继续缺席，由渲染器的默认分支处理。
         if !baseline.pitch_orig.is_empty() && baseline.pitch_orig.len() < needed {
             baseline.pitch_orig.resize(needed, 0.0);
-        }
-        if !baseline.pitch_target.is_empty() && baseline.pitch_target.len() < needed {
-            baseline.pitch_target.resize(needed, 0.0);
         }
         if !baseline.dyn_orig.is_empty() && baseline.dyn_orig.len() < needed {
             baseline.dyn_orig.resize(needed, 0.0);
@@ -3011,7 +3061,7 @@ impl DocumentSession {
                 return Err(error);
             }
         };
-        if report.applied_deltas > 0 {
+        if report.affected_runs > 0 {
             // 只推进编辑代次。派生显示由调用方在自己的时间线上重新合成
             // （`materialize_views_locked` 会整份替换 `edits.params`，而这里拿到的
             // `timeline` 可能是另一份宿主视图 —— 用它覆盖会把在线权威的根 id
@@ -3638,8 +3688,15 @@ impl DocumentSession {
             if self.baseline_is_ready(root) {
                 continue;
             }
-            let baseline =
-                crate::editor::parameter_atlas::RootBaseline::from_params(params);
+            let mut baseline = crate::editor::parameter_atlas::RootBaseline::from_params(params);
+            // 【布局键必须一起播种】不写它，`baseline_needs_rebuild` 会恒为真，
+            // `baseline_for` 每一帧都会尝试从（此刻还冷的）内容缓存重建，然后把
+            // 这份存档基线当成"过期"再退回 —— 冷恢复首帧的可听性全靠这份基线，
+            // 不能让它停在"每次都要重算一次"的状态上。
+            baseline.layout_key = Some(
+                hifishifter_kernel::pitch_analysis::build_root_pitch_layout_key(host, root),
+            );
+            baseline.content_key = params.pitch_orig_key.clone();
             if baseline.is_ready() {
                 self.publish_baseline(root, baseline);
             }

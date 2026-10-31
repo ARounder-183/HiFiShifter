@@ -279,6 +279,12 @@ pub fn apply_geometry_transaction(
     if active.is_empty() && copies.is_empty() {
         return Ok(TransformReport::default());
     }
+    // 【没有任何编辑时，几何事务必须是纯 no-op】否则一次"移动了 clip、但这条轨还没画过线"
+    // 也会把 authority.revision 推进一格 —— 那个代次是渲染守卫的一部分，于是每次宿主
+    // 移动都会让在途渲染变成 superseded（"尚未应用"的另一条成因）。
+    if authority.roots.is_empty() {
+        return Ok(TransformReport::default());
+    }
     let mut report = TransformReport::default();
     let mut kept_by_root = BTreeMap::<String, RootParamAuthority>::new();
     let mut moved_by_root = BTreeMap::<String, RootParamAuthority>::new();
@@ -980,7 +986,6 @@ mod tests {
             &crate::editor::param_authority::RootBaseline {
                 frame_period_ms: 5.0,
                 pitch_orig: vec![60.0; 120],
-                pitch_target: vec![60.0; 120],
                 dyn_orig: vec![],
                 tension_orig: vec![],
                 pitch_key: Some("k".into()),
@@ -988,6 +993,8 @@ mod tests {
                 ready: true,
                 revision: 1,
                 analysis_pending: false,
+
+                ..Default::default()
             },
             0,
         );
@@ -1059,7 +1066,6 @@ mod tests {
             &crate::editor::param_authority::RootBaseline {
                 frame_period_ms: 5.0,
                 pitch_orig: vec![60.0; 40],
-                pitch_target: vec![60.0; 40],
                 dyn_orig: vec![],
                 tension_orig: vec![],
                 pitch_key: Some("k".into()),
@@ -1067,6 +1073,8 @@ mod tests {
                 ready: true,
                 revision: 1,
                 analysis_pending: false,
+
+                ..Default::default()
             },
             0,
         );

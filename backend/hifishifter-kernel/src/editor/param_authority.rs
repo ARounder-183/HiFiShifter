@@ -535,14 +535,29 @@ impl RootParamView {
     }
 }
 
-/// 一条根轨的分析基线。仅由分析流水线发布，几何变化不得改写它。
+/// 一条根轨的分析基线。
+///
+/// 【它是什么】`pitch_orig` / `dyn_orig` 是**按工程帧索引**的数组，由内容缓存按当前
+/// clip 布局同步组装而来（见 `DocumentSession::baseline_for`）。它**不是**"分析结果
+/// 快照"：分析结果按内容寻址缓存，基线是"内容缓存 × 当前布局"的纯函数。
+///
+/// 【为什么必须带 `layout_key`】没有它，"移动了 clip"与"基线仍然有效"无法区分。
+/// 旧实现只在 `!baseline_is_ready()` 时发布一次，于是移动之后基线永远描述旧布局：
+/// 旧位置留着原曲线、新位置 `pitch_orig = 0`（渲染器判定"无源 F0"而直通原音）。
+///
+/// 【为什么删掉 `pitch_target`】它的值来自 `params.pitch_edit`（显示数组，含用户
+/// 编辑），是"用户编辑变成基线"的入口；而 `compose_clip_params` 从不切它。显示层的
+/// "未编辑帧"本来就该等于 `pitch_orig`。
 #[derive(Clone, Debug, Default)]
 pub struct RootBaseline {
     pub frame_period_ms: f64,
+    /// 这份数组是按哪一份 clip 布局排出来的（`build_root_pitch_layout_key`）。
+    pub layout_key: Option<String>,
+    /// 内容键（`build_root_pitch_key`）：只回答"要不要重跑分析"。
+    pub content_key: Option<String>,
     pub pitch_orig: Vec<f32>,
-    /// 分析给出的目标曲线（未编辑时显示层就是它，渲染器也需要它）。
-    pub pitch_target: Vec<f32>,
     pub dyn_orig: Vec<f32>,
+    /// 历史遗留字段（内核 `project.rs` 明确它从未参与渲染），只随存档搬运。
     pub tension_orig: Vec<f32>,
     pub pitch_key: Option<String>,
     pub dyn_key: Option<String>,
@@ -560,8 +575,11 @@ impl RootBaseline {
             } else {
                 DEFAULT_FRAME_PERIOD_MS
             },
+            // 布局键只有"组装者"知道；从参数表反推的基线一律标成未知，
+            // 由 `baseline_for` 在第一次用到时重建一次。
+            layout_key: None,
+            content_key: params.pitch_orig_key.clone(),
             pitch_orig: params.pitch_orig.clone(),
-            pitch_target: params.pitch_edit.clone(),
             dyn_orig: params.dyn_orig.clone(),
             tension_orig: params.tension_orig.clone(),
             pitch_key: params.pitch_orig_key.clone(),
@@ -572,14 +590,26 @@ impl RootBaseline {
                 || !params.tension_orig.is_empty(),
             revision: 1,
             analysis_pending: false,
+
+            ..Default::default()
         }
     }
 
+    /// 给这份基线打上布局键（由"按当前布局组装它"的那一方填写）。
+    pub fn with_layout(mut self, layout_key: String) -> Self {
+        self.layout_key = Some(layout_key);
+        self
+    }
+
+    /// 从**显示数组**反推一份基线。
+    ///
+    /// 【只给测试夹具与旧捕获路径用】生产路径的基线必须来自内容缓存（`baseline_for`）。
+    /// 这里会把 `pitch_edit` 当成 `pitch_orig` 填进去 —— 那正是"用户编辑被固化成
+    /// 原始值"的形状，绝不能出现在在线路径上。
     pub fn from_display(params: &TrackParamsState) -> Self {
         let mut baseline = Self::from_params(params);
         if baseline.pitch_orig.is_empty() && !params.pitch_edit.is_empty() {
             baseline.pitch_orig = params.pitch_edit.clone();
-            baseline.pitch_target = params.pitch_edit.clone();
         }
         if baseline.dyn_orig.is_empty() {
             if let Some(curve) = params.extra_curves.get("dyn") {
@@ -608,7 +638,6 @@ impl RootBaseline {
     pub fn frame_count(&self) -> usize {
         self.pitch_orig
             .len()
-            .max(self.pitch_target.len())
             .max(self.dyn_orig.len())
             .max(self.tension_orig.len())
     }
@@ -617,9 +646,7 @@ impl RootBaseline {
         self.ready
             && self.frame_period_ms.is_finite()
             && (0.1..=1000.0).contains(&self.frame_period_ms)
-            && (self.pitch_key.is_some()
-                || !self.pitch_orig.is_empty()
-                || !self.pitch_target.is_empty())
+            && (self.pitch_key.is_some() || !self.pitch_orig.is_empty())
     }
 
     pub fn is_ready_for(&self, key: &str) -> bool {
@@ -634,11 +661,7 @@ impl RootBaseline {
     /// 基线层的显示数组：未编辑帧就是派生原始值。
     pub fn display(&self) -> TrackParamsState {
         let count = self.frame_count();
-        let pitch_orig = if self.pitch_orig.is_empty() && !self.pitch_target.is_empty() {
-            self.pitch_target.clone()
-        } else {
-            self.pitch_orig.clone()
-        };
+        let pitch_orig = self.pitch_orig.clone();
         let mut params = TrackParamsState {
             frame_period_ms: self.frame_period_ms,
             pitch_orig: pitch_orig.clone(),
@@ -648,12 +671,8 @@ impl RootBaseline {
             dyn_orig_key: self.dyn_key.clone(),
             ..Default::default()
         };
-        params.pitch_edit =
-            if self.pitch_target.len() == pitch_orig.len() && !self.pitch_target.is_empty() {
-                self.pitch_target.clone()
-            } else {
-                pitch_orig.clone()
-            };
+        // 未编辑帧的"目标曲线"就是原始曲线 —— 编辑由 `compose_root_view` 的 run 覆写。
+        params.pitch_edit = pitch_orig;
         params.tension_edit = vec![0.0; count];
         params
             .extra_curves
@@ -923,7 +942,6 @@ mod tests {
         RootBaseline {
             frame_period_ms: 5.0,
             pitch_orig: vec![60.0; count],
-            pitch_target: vec![60.0; count],
             dyn_orig: vec![0.5; count],
             tension_orig: vec![0.0; count],
             pitch_key: Some("pitch".into()),
@@ -931,6 +949,8 @@ mod tests {
             ready: true,
             revision: 1,
             analysis_pending: false,
+
+            ..Default::default()
         }
     }
 
