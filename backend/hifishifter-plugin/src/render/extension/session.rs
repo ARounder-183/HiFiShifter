@@ -812,6 +812,17 @@ impl ExtensionOwner {
                     );
                 }
             }
+            // 存档携带分析基线缓存：它不是编辑真相，但冷恢复渲染需要“原始值”
+            // 才能计算用户曲线相对源音高的偏移。authority 仍只存显式编辑。
+            for (root, base) in document.baseline_snapshot() {
+                if let Some(params) = local.params.get_mut(&root) {
+                    params.pitch_orig = base.pitch_orig;
+                    params.dyn_orig = base.dyn_orig;
+                    params.tension_orig = base.tension_orig;
+                    params.pitch_orig_key = base.pitch_key;
+                    params.dyn_orig_key = base.dyn_key;
+                }
+            }
             match local.encode() {
                 Ok(bytes) => {
                     *self.last_ara_state.lock_or_recover() = Some(bytes.clone());
