@@ -129,7 +129,7 @@ impl<'a> Tape<'a> {
         &self,
         offset: usize,
         frames: usize,
-    ) -> impl Iterator<Item = (&'a Segment, usize, usize)> + '_ {
+    ) -> impl Iterator<Item = (&'a Segment, usize, usize, usize)> + '_ {
         let end = offset.saturating_add(frames);
         self.segments
             .iter()
@@ -138,9 +138,13 @@ impl<'a> Tape<'a> {
                 let base = *base;
                 let lo = offset.max(base);
                 let hi = end.min(base + segment.filled);
-                (lo < hi).then_some((*segment, lo - base, hi - base))
+                // 【为什么把 `base` 一起交出去】`lo` / `hi` 是**段内**下标，而调用方
+                // 需要的是"这一帧在磁带上的绝对位置"。不给 `base`，调用方就只能用
+                // "已经写了多少帧"去推 —— 而那个量在覆盖表有洞时**不再等于位置**：
+                // 每出现一个洞，洞之后的全部内容都会左移一个洞长（实测 0.4~0.7 s）。
+                (lo < hi).then_some((*segment, base, lo - base, hi - base))
             })
-            .flat_map(move |(segment, lo, hi)| {
+            .flat_map(move |(segment, base, lo, hi)| {
                 // 与 `covered_ranges` 同一口径：**只认我们真的拷过样本的帧**。
                 let samples = segment_ranges(
                     &segment.coverage,
@@ -153,7 +157,7 @@ impl<'a> Tape<'a> {
                     .filter_map(move |range| {
                         let a = lo.max(range.start);
                         let b = hi.min(range.end);
-                        (a < b).then_some((segment, a, b))
+                        (a < b).then_some((segment, base, a, b))
                     })
                     .collect::<Vec<_>>()
             })
@@ -553,15 +557,17 @@ pub(crate) fn raw_tape(takes: &[ProjectionTake<'_>]) -> Option<PlaybackSnapshot>
         let scale = tape.sample_rate.max(1) as f64 / rate as f64;
         let base = ((piece.span.start - start) as f64 * scale).round() as i64;
         let count = frames_of(&piece.span);
-        let mut written = 0usize;
-        for (segment, lo, hi) in tape.covered_slices(piece.offset, count) {
+        for (segment, segment_base, lo, hi) in tape.covered_slices(piece.offset, count) {
             let Some(source_left) = segment.planes.first() else {
-                written += hi - lo;
                 continue;
             };
             for local in lo..hi {
-                let target = base + (written as f64 * scale).round() as i64;
-                written += 1;
+                // 【洞不得让后面的样本前移】目标位置由**这一帧在磁带上的绝对位置**
+                // 决定（`segment_base + local`，再减掉片起点），而不是"已经写了多少帧"。
+                // 此前用后者：覆盖表里每出现一个洞，洞之后的全部内容就左移一个洞长 ——
+                // 实测 0.4~0.7 s 的整体错位，而且只在"有洞"的素材上出现。
+                let tape_frame = (segment_base + local) as i64 - piece.offset as i64;
+                let target = base + (tape_frame as f64 * scale).round() as i64;
                 if target < 0 || target as usize >= frames {
                     continue;
                 }
