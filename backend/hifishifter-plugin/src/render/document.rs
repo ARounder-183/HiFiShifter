@@ -6,7 +6,7 @@ use crate::sync::MutexExt;
 use ara2_bridge::companion::CompanionControllerBinding;
 use ara2_bridge::core::{ApiGeneration, AraError};
 use ara2_bridge::plugin::ExtensionControllerLease;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
@@ -145,114 +145,6 @@ pub(crate) enum RestoreMerge {
     Merged,
     /// 还缺东西（宿主图未重建 / fade 元数据在途），载荷必须留着下次再试。
     Waiting(String),
-}
-
-/// 一次**已确认**分割：子段 item GUID → 它在父段播放轴上的位置。
-///
-/// 【为什么记这个】分割后的两半必须**划分**父段窗口；而父段窗口是分割前真的在响的
-/// 那一段，与宿主怎么填右半段的 D_STARTOFFS 无关。记下"左段是哪个 item、子段在播放
-/// 轴上偏移多少、长度多少"，就能用共享解算把子段窗口推导出来（见
-/// `take_geometry::split_child_window`），宿主读数只作校验。
-///
-/// 【为什么按子段 GUID 索引】右半段是新 item；左半段沿用父段 GUID，不需要条目。
-#[derive(Clone, Debug)]
-pub(crate) struct SplitWindowSource {
-    /// 左段（沿用父段 GUID 的那一条）的 item GUID。
-    pub left: String,
-    /// 子段起点相对左段起点的**播放时间**偏移（秒）。
-    pub offset_sec: f64,
-    /// 子段的播放长度（秒）。
-    pub length_sec: f64,
-    /// 这条推导还能用几轮（见 `SplitWindows::tick`）。
-    pub rounds_left: u8,
-}
-
-/// 一次分割推导最多覆盖多少轮清单刷新。
-///
-/// 【为什么必须有上界】分割窗口的唯一职责是"分割那一瞬间右半段的 D_STARTOFFS
-/// 不可信"。宿主在之后任意一次刷新里给出的读数才是真值；旧实现只在
-/// `length_sec` 变化时才撤销条目，于是"长度没变、窗口变了"（滑源 / 宿主重算
-/// soffs）会让同一组 `derived != host` 读数刷上十几分钟 —— 音频与曲线一起冻在
-/// 错误窗口上，而且几何分类会因此退化成 TrimOrNone（锁定看起来又失效了）。
-pub(crate) const SPLIT_WINDOW_ROUNDS: u8 = 4;
-
-/// 已确认分割的子段窗口来源表：按 GUID 查取 + **插入序**淘汰最旧。
-///
-/// 【为什么淘汰最旧而不是整体清空】这张表是「从父段推导窗口」（`1cf39259`）的
-/// 唯一输入。整体清空会把长会话里**全部**已登记的窗口一次砸掉：之后任何需要
-/// 推导的分割段都退回宿主读数 —— 恰是那次修复要消灭的「右段偏移」故障形态，
-/// 且静默无日志。按插入序逐条淘汰，后登记的（正在参与本轮推导的）不受影响。
-#[derive(Default)]
-pub(crate) struct SplitWindows {
-    map: HashMap<String, SplitWindowSource>,
-    order: VecDeque<String>,
-}
-
-impl SplitWindows {
-    /// 一张文档最多登记多少条。宿主反复分割会持续产生新 item GUID，没有上界的
-    /// 话这张表随编辑次数无界增长；4096 条足够覆盖任何一次会话的分割历史，
-    /// 超出时丢最旧的 —— 它只是"推导窗口"的提示，条目被淘汰后退回宿主读数，
-    /// 不会让任何东西失效。
-    const MAX_ENTRIES: usize = 4096;
-
-    /// 重复登记是幂等的（刷新既有条目，不改变其插入序）。
-    fn insert(&mut self, child: String, source: SplitWindowSource) {
-        if !self.map.contains_key(&child) {
-            self.order.push_back(child.clone());
-            while self.order.len() > Self::MAX_ENTRIES {
-                let Some(oldest) = self.order.pop_front() else {
-                    break;
-                };
-                if self.map.remove(&oldest).is_some() {
-                    log::debug!(
-                        "[ara] split window table is full; evicted the oldest entry ({oldest})"
-                    );
-                }
-            }
-        }
-        self.map.insert(child, source);
-    }
-
-    pub(crate) fn get(&self, child: &str) -> Option<&SplitWindowSource> {
-        self.map.get(child)
-    }
-
-    /// 推进一轮：寿命耗尽的条目自动摘除（返回是否摘掉）。
-    pub(crate) fn tick(&mut self, child: &str) -> bool {
-        let Some(entry) = self.map.get_mut(child) else {
-            return false;
-        };
-        entry.rounds_left = entry.rounds_left.saturating_sub(1);
-        if entry.rounds_left > 0 {
-            return false;
-        }
-        let removed = self.map.remove(child).is_some();
-        if removed {
-            self.order.retain(|key| key != child);
-            hifishifter_kernel::log_limiter::emit_limited_key(
-                log::Level::Warn,
-                "ara.split.window-expired",
-                format_args!(
-                    "[ara] split window for item {child} expired after {SPLIT_WINDOW_ROUNDS} \
-                     rounds; the host reading is authoritative again"
-                ),
-            );
-        }
-        removed
-    }
-
-    /// 摘掉一条登记（子段被拉伸 / 移动过 ⇒ 旧推导不再可信）。
-    pub(crate) fn remove(&mut self, child: &str) -> bool {
-        let removed = self.map.remove(child).is_some();
-        if removed {
-            self.order.retain(|key| key != child);
-        }
-        removed
-    }
-
-    pub(crate) fn len(&self) -> usize {
-        self.map.len()
-    }
 }
 
 /// 一个 ARA 文档的共享状态。
@@ -726,8 +618,6 @@ pub(crate) struct DocumentSession {
     /// "宿主图还没长成"，那要等几百毫秒到几秒。没有退避就会在等待窗口里每帧跑一次
     /// rebind（O(曲线) 的工作）。
     archive_merge_next_attempt: Mutex<Option<std::time::Instant>>,
-    /// 已确认分割的子段窗口来源（见 [`SplitWindowSource`] 与 [`SplitWindows`]）。
-    pub split_windows: Mutex<SplitWindows>,
     /// 本实例**主动创建**的宿主轨道 GUID（`create_host_track` / 粘贴 / 导入建轨）。
     ///
     /// 【为什么必须有这张表】清单的轨道范围是「本轨 + folder 后代」（`ui_folder_tracks`），
@@ -887,54 +777,6 @@ impl MusicalProjectionKey {
 pub(crate) struct PluginMusicalProjection {
     pub project_scale_notes: Vec<u8>,
     pub tempo_map: Option<Vec<hifishifter_kernel::state::TempoPointData>>,
-}
-
-#[cfg(test)]
-mod split_windows_tests {
-    use super::*;
-
-    fn source() -> SplitWindowSource {
-        SplitWindowSource {
-            left: "left".into(),
-            offset_sec: 0.5,
-            length_sec: 0.5,
-            rounds_left: SPLIT_WINDOW_ROUNDS,
-        }
-    }
-
-    /// **不变量：表满时逐条淘汰最旧，而不是整体清空。**
-    ///
-    /// 【为什么钉死】整体清空会把长会话里全部已登记窗口一次砸掉，让后续分割段
-    /// 退回宿主读数 —— 正是 `1cf39259` 要消灭的「右段偏移」故障形态，且静默无日志。
-    #[test]
-    fn an_overflow_evicts_the_oldest_entry_instead_of_clearing_the_table() {
-        let mut table = SplitWindows::default();
-        for index in 0..(SplitWindows::MAX_ENTRIES + 3) {
-            table.insert(format!("child-{index}"), source());
-        }
-        assert_eq!(table.len(), SplitWindows::MAX_ENTRIES);
-        assert!(table.get("child-0").is_none(), "最旧的条目必须被逐出");
-        assert!(table.get("child-2").is_none());
-        assert!(
-            table.get("child-3").is_some(),
-            "未被逐出的旧条目必须保留（不清空全表）"
-        );
-        assert!(table
-            .get(&format!("child-{}", SplitWindows::MAX_ENTRIES + 2))
-            .is_some());
-        // 重复登记幂等：刷新内容，不新增条目。
-        table.insert(
-            "child-3".into(),
-            SplitWindowSource {
-                left: "renewed".into(),
-                offset_sec: 1.,
-                length_sec: 1.,
-                rounds_left: SPLIT_WINDOW_ROUNDS,
-            },
-        );
-        assert_eq!(table.len(), SplitWindows::MAX_ENTRIES);
-        assert_eq!(table.get("child-3").unwrap().left, "renewed");
-    }
 }
 
 #[cfg(test)]
@@ -1848,22 +1690,6 @@ impl DocumentSession {
             let excess = adopted.len() - MAX_ADOPTED;
             adopted.drain(..excess);
         }
-    }
-
-    /// 记下一次已确认分割的子段窗口来源（重复登记是幂等的；超上界丢最旧，见
-    /// [`SplitWindows`]）。
-    pub(crate) fn note_split_window(&self, child: &str, source: SplitWindowSource) {
-        if child.is_empty() {
-            return;
-        }
-        self.split_windows
-            .lock_or_recover()
-            .insert(child.to_owned(), source);
-    }
-
-    /// 当前登记了多少条"分割子段窗口来源"（诊断用）。
-    pub(crate) fn split_window_count(&self) -> usize {
-        self.split_windows.lock_or_recover().len()
     }
 
     /// 当前登记表快照（清单枚举用；返回副本以免持锁回调宿主）。

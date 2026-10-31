@@ -2167,17 +2167,6 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
                 )
             })
             .collect();
-        // 【为什么先取一份 item → 源】下面循环要可变借用 clips；而"分割子段从左段切"
-        // 需要左段的源（媒体时长按源索引）。先取成一张小表，循环里只读它。
-        let source_by_item: std::collections::HashMap<String, String> = timeline
-            .clips
-            .iter()
-            .filter_map(|clip| {
-                let guid = guid_of(&clip.id)?;
-                let source = clip.active_take().source_path.clone()?;
-                Some((guid, source))
-            })
-            .collect();
         for clip in &mut timeline.clips {
             // 【为什么按后缀取键】编辑器时间线的 id 带 GUI namespace 前缀，
             // `strip_prefix("ara-item-")` 在它上面恒为 `None` ⇒ 整条投影静默空转
@@ -2202,10 +2191,13 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
             // `hifishifter_kernel::take_geometry`，本处只负责喂宿主读数。
             // 它由宿主事实直接推导，**幂等**（不读入参 clip 的当前窗口），因此重认领/
             // 重建不会累积镜像。
-            // 【两级解算】① 有"已确认分割"的条目 ⇒ 从**左段**的窗口按播放轴切出来
-            // （左段的 D_STARTOFFS 分割不改，是两半里唯一可信的读数）；② 否则用宿主
-            // 读数（解算已修好倒放的镜像翻转）。分割子段即使方向是正放也走 ①——
-            // 正放子段的窗口同样必须与父段划分，而 ARA 报的只是它自己那一段。
+            // 【只有一个来源】宿主读数（解算已修好倒放的镜像翻转、Loop 的回绕锚点、
+            // SECTION 的边界）。此前还有第二条路：已确认分割的条目从**左段**窗口按播放
+            // 轴切出来（`SplitWindows`），理由是"右半段的 D_STARTOFFS 在分割瞬间不可信"。
+            // 那条路在本轮删除 —— 它只在"宿主读数不可信"这个前提成立时才必要，而真机
+            // 日志里 `derived` 与 `host` 的差异从来只在**起点**（终点恒等），说明宿主
+            // 读数本身是自洽的，不一致的是我们自己的镜像约定。多一条推导就多一处
+            // 需要与宿主对齐的数学，而它换来的只是"右半段看起来对了两轮"。
             let by_source = clip
                 .active_take()
                 .source_path
@@ -2217,48 +2209,6 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
                 host.to_geometry(media, item_facts.reversed, item_facts.loop_source)
                     .forward_source_window()
             });
-            let split = self.split_windows.lock_or_recover().get(&guid).cloned();
-            let derived = split.and_then(|split| {
-                // 【一次性确认，不是永久覆盖】分割窗口表存在的唯一理由是"右半段的
-                // D_STARTOFFS 在分割瞬间不可信"。一旦子段之后被拉伸 / 移动，宿主读数
-                // 就是新的真值；继续用旧推导会把几何冻在分割那一刻 —— 真机日志里
-                // `derived [7.75,19.96] host [7.75,31.80]` 刷了 23 次就是这个。
-                if !crate::host::geometry::host_value_compatible(clip.length_sec, split.length_sec) {
-                    if self.split_windows.lock_or_recover().remove(&guid) {
-                        hifishifter_kernel::log_limiter::emit_limited_key(
-                            log::Level::Warn,
-                            "ara.split.window-dropped",
-                            format_args!(
-                                "[ara] split window for item {guid} no longer matches its host length \
-                                 ({:.6} vs {:.6}); the host reading is authoritative again",
-                                clip.length_sec, split.length_sec
-                            ),
-                        );
-                    }
-                    return None;
-                }
-                let left = facts.get(&split.left)?;
-                let left_host = left.host.as_ref()?;
-                let left_media = media_by_item.get(&split.left).copied().or_else(|| {
-                    source_by_item
-                        .get(&split.left)
-                        .and_then(|source| media_by_source.get(source).copied())
-                });
-                let left_window = left_host
-                    .to_geometry(left_media, left.reversed, left.loop_source)
-                    .forward_source_window()?;
-                let rate = left_host.play_rate_signed.abs();
-                hifishifter_kernel::take_geometry::split_child_window(
-                    left_window,
-                    rate,
-                    split.offset_sec,
-                    split.length_sec,
-                    item_facts.reversed,
-                )
-            });
-            // 【有界寿命】分割窗口只覆盖"分割那一瞬间"；每一轮清单刷新都推进它的
-            // 寿命，耗尽后自动退回宿主读数（见 `SplitWindows::tick`）。
-            self.split_windows.lock_or_recover().tick(&guid);
             // 【读→写→读：读数只在**读**这一侧成立】镜像轴属于宿主的约定，而仓库里没有
             // 任何一处能证明 REAPER 用的是哪一条。把"宿主给的 soffs 经解算再折回去必须
             // 回到原值"变成一行运行时读数：残差为 0 ⇒ 约定正确；不为 0 ⇒ 约定反了，
@@ -2293,43 +2243,7 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
                     }
                 }
             }
-            if let (Some(derived), Some(host_window)) = (derived, host_window) {
-                let close = crate::host::geometry::host_value_compatible;
-                if !close(derived.start(), host_window.start())
-                    || !close(derived.end(), host_window.end())
-                {
-                    // 【为什么留一行 Warn】推导与宿主读数不一致 = "宿主换了折算口径"的
-                    // 第一个报警点。以推导为准（父段窗口是分割前真的在响的那一段），
-                    // 但差异必须可复盘。
-                    hifishifter_kernel::log_limiter::emit_limited_key(
-                        log::Level::Warn,
-                        "ara.split.window-mismatch",
-                        format_args!(
-                            "[ara] split window mismatch for item {guid}: derived \
-                             [{:.6},{:.6}] host [{:.6},{:.6}]; using the derived window so audio \
-                             and curves stay on the same geometry",
-                            derived.start(),
-                            derived.end(),
-                            host_window.start(),
-                            host_window.end(),
-                        ),
-                    );
-                }
-            }
-            // 【I-4：窗口**只有**宿主读数一个来源】
-            //
-            // 旧实现写的是 `derived.or(if clip.reversed { host_window } else { None })`
-            // —— 也就是说**只有倒放的 clip** 才采用宿主解算出的窗口，正放的 clip 一律
-            // 保留 ARA 映射阶段算出来的那一份。这条不对称带来的后果比它看起来严重：
-            // 循环延伸（`B_LOOPSRC`）的 item 在 `forward_source_window` 的 loop 分支里
-            // 会被解成"锚点 → 可用边界"的**完整**源区间（正是内核回绕需要的那个），
-            // 而正放 clip 根本走不到那条分支 —— 于是循环 item 拿到的是一条只有一圈长
-            // 的窗口，回绕周期因此错成"一圈"，用户看到的循环内容与原素材不符。
-            //
-            // 现在无条件取宿主读数：方向、循环、SECTION 三种语义由同一个解算器
-            // （`take_geometry`）一次算完，映射层的近似只作为"宿主读数缺席"时的兜底。
-            // 这也是 §4.5.2 的第 1 条。
-            let window = derived.or(host_window);
+            let window = host_window;
             if let Some(window) = window {
                 clip.source_start_sec = window.start();
                 clip.source_end_sec = window.end();

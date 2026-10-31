@@ -2006,7 +2006,6 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
                         serde_json::json!({
                             "projection":view.as_ref().map(|view|view.projection.chars().take(8).collect::<String>()).unwrap_or_default(),
                             "roots":view.as_ref().map(|view|view.params.len()).unwrap_or(0),
-                            "splitWindows":document.split_window_count(),
                         })
                     }).unwrap_or(serde_json::Value::Null),
                 });
