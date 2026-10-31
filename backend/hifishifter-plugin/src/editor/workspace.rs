@@ -1045,50 +1045,55 @@ impl DocumentSession {
         // 尚未升级的反而两条都不匹配而存活。这正是用户报的"原轨 Clip 全消失、
         // 新轨 Clip 健康"。
         //
-        // 正确的判据只有一条：**它代表的 region 还在不在**。`regions` 是文档级权威
-        // （`destroy_playback_region` 按 key 删除），而宿主清单的职责是新增/更新，
-        // 不是删除 —— 清单滞后不是"宿主删掉了它"的证据。
+        // 【R4：存活判据必须是"当前证据"】一条 clip 要么由**活着的 region** 支撑
+        // （ARA-only），要么由**当前清单里的 item** 支撑（原生）。旧实现只看 region：
+        // 宿主删掉 item 之后，只要 region 还没被 `destroyPlaybackRegion` 回收，这条
+        // clip 就永远留在画布上 —— 用户看到的正是"宿主里没有、插件里还在"的幽灵。
+        // 现在带宿主身份的 clip 以 `present` 为唯一判据，并给两轮宽限期吸收
+        // "清单滞后于删除"的正常窗口（撤销删除后它还会原样回来）。
         {
             let live = self.regions.lock_or_recover();
-            // 每个活 region 的**当前**呈现身份。
-            //
-            // 【为什么不再无条件塞 region 形态】那正是"身份升级之后旧形态仍被保留"的
-            // 成因：一条 region 同时有两种合法 id，而它们代表的是**同一个实体**。
-            // 当前身份只有一个 —— `clip_ids` 的现值（缺席时才退回 key 形态）。
-            let mut current: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+            let complete = self.inventory_is_complete();
+            // 每个活 region 的**当前**呈现身份（`clip_ids` 的现值，缺席才退回 key 形态）。
+            let mut region_ids: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
             for key in live.keys() {
-                current.insert(match presented.get(*key) {
+                region_ids.insert(match presented.get(*key) {
                     Some(id) => id.to_owned(),
                     None => format!("{namespace}ara-region-{key}"),
                 });
             }
-            // 清单里存在、但没有任何 region 认领的 item：占位 clip 就是它们的当前身份。
-            current.extend(present.iter().cloned());
             let clip_prefix = prefix("ara-clip-");
             timeline.clips.retain(|clip| {
-                if current.contains(&clip.id) {
+                // ① 清单里有它 ⇒ 活着。
+                if present.contains(&clip.id) {
+                    self.orphan_within_grace(&clip.id, true, complete);
                     return true;
                 }
+                // ② 带宿主身份却不在清单里。
+                if host_item_guid(&clip.id).is_some() {
+                    // region 也没了 ⇒ 这是"删除"的直接证据，立即剔除。
+                    if !region_ids.contains(&clip.id) {
+                        return false;
+                    }
+                    // region 还活着：清单滞后不是删除证据，但**连续多轮完整清单都
+                    // 没有它**就是（宿主删了 item、region 还没来得及销毁）。
+                    return self.orphan_within_grace(&clip.id, false, complete);
+                }
+                // ③ 没有宿主身份：region 还在就算活着（ARA-only 后端）。
+                if region_ids.contains(&clip.id) {
+                    return true;
+                }
+                // ④ 认领不到 item GUID 的 ARA clip：挂在宿主已知轨道上时剔除
+                //    （界面无法给出可操作的读数）。
                 if clip.id.starts_with(&clip_prefix) {
-                    // 没有宿主身份的 ARA clip：沿用旧语义 —— 挂在宿主已知轨道上时
-                    // 剔除（它认领不到 item GUID，界面无法给出可操作的读数）。
                     return !owned.contains(&clip.track_id);
                 }
-                // 【旧形态一律剔除】带宿主身份、却不在"当前身份集"里：它只可能是
-                // 身份升级**之前**的那条（region 形态）或升级**之后**的那条（item
-                // 形态）。两条同时留在时间线上，就是用户报的"旧 Clip 与新 Clip 都在"。
-                if host_item_guid(&clip.id).is_some() || region_key_of(&clip.id).is_some() {
+                // ⑤ 旧形态（region 形态但 region 已不在）一律剔除：两条同时留在
+                //    时间线上，就是用户报的"旧 Clip 与新 Clip 都在"。
+                if region_key_of(&clip.id).is_some() {
                     return false;
                 }
-                // 【T-S2-3：认不出身份的 id 一律不留】
-                //
-                // 走到这里说明 id 既不是本回合的 `{ns}ara-item-*` / `{ns}ara-region-*` /
-                // `{ns}ara-clip-*`。在**带命名空间**的呈现里，这只可能是上一代命名的
-                // 残留 —— 而它正是"同一个 item 两条 clip、其中一条永远等音频、还盖住
-                // 另一条"里那条永生的副本：旧 `claimed_id` 用无前缀 id 比带前缀时间线
-                // 恒不命中，于是每轮新建一条无前缀副本，而这条 `true` 又让它活下来。
-                // 判据只取"能不能认出身份"，不取"长得像不像 ARA id"：私有 clip 的 id
-                // 同样带命名空间，因此不受影响。
+                // ⑥ 认不出身份的 id：带命名空间的呈现里只可能是上一代命名的残留。
                 namespace.is_empty() || clip.id.starts_with(namespace)
             });
         }

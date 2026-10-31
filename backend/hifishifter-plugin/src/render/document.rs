@@ -742,6 +742,14 @@ pub(crate) struct DocumentSession {
     /// 原子读。初值取 `u64::MAX`：进程启动后的第一次调用必须真的落一次。
     /// 运行时几何日志：锁定关闭时只在这里记账；锁定开启时才是参数事务的输入。
     pub(crate) geometry_journal: Mutex<hifishifter_kernel::editor::param_geometry::GeometryJournal>,
+    /// 宿主清单枚举**正在失败/中途放弃**（默认 false = 清单可用）。
+    ///
+    /// 【为什么用反向语义】`DocumentSession` 用 `..Default::default()` 构造，
+    /// 而"清单可用"才是常态 —— 用一个默认 false 的"不完整"标记，就不必为它写
+    /// 手写 `Default`。枚举方在入口置 true、成功走到末尾置 false。
+    pub(crate) inventory_incomplete: std::sync::atomic::AtomicBool,
+    /// clip id → 连续多少轮**完整**清单没见到它（幽灵 clip 的宽限期计数）。
+    pub(crate) orphan_streak: Mutex<std::collections::HashMap<String, u32>>,
     /// 最近一次几何事务的读数（诊断与状态栏）。
     pub(crate) last_geometry_report:
         Mutex<Option<hifishifter_kernel::editor::param_geometry::TransformReport>>,
@@ -1970,6 +1978,42 @@ impl DocumentSession {
             .lock_or_recover()
             .get(root)
             .is_some_and(|baseline| baseline.is_ready())
+    }
+
+    /// 宿主清单是否可用（呈现层据此决定"缺席"能不能当"删除"）。
+    pub(crate) fn inventory_is_complete(&self) -> bool {
+        !self.inventory_incomplete.load(Ordering::Acquire)
+    }
+
+    /// 一条"带宿主身份、但本轮清单里没有"的 clip 要不要继续留在画布上。
+    ///
+    /// 【判据是"见过没有"，不是"连续几轮没见过"】
+    /// * **见过**（上一轮还在清单里）⇒ 现在没了就是**删除**，立即撤下；
+    /// * **从没见过** ⇒ 这是"清单还没枚举到它"（身份刚升级、枚举滞后），保留；
+    /// * 清单本轮**不完整** ⇒ 一律保留（枚举失败不能当删除证据）。
+    ///
+    /// 这条判据同时满足两个相反的真实需求：升级滞后必须留下（否则"原轨 clip
+    /// 全消失"），删除必须立刻消失（否则"幽灵 clip"）。权威一律不动 —— 撤销删除
+    /// 之后 clip 会带着曲线原样回来。
+    pub(crate) fn orphan_within_grace(&self, clip_id: &str, seen: bool, complete: bool) -> bool {
+        /// "从未见过"的哨兵：与"见过（0）"区分开。
+        const NEVER_SEEN: u32 = u32::MAX;
+        let mut streaks = self.orphan_streak.lock_or_recover();
+        if seen {
+            streaks.insert(clip_id.to_owned(), 0);
+            return true;
+        }
+        if !complete {
+            return true;
+        }
+        match streaks.get(clip_id).copied() {
+            Some(0) => false,
+            Some(_) => true,
+            None => {
+                streaks.insert(clip_id.to_owned(), NEVER_SEEN);
+                true
+            }
+        }
     }
 
     /// 从图集重新派生"视图"这一层（`timeline.params_by_root_track`）。

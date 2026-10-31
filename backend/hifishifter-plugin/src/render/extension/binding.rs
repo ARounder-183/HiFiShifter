@@ -1189,6 +1189,10 @@ impl ExtensionOwner {
         let Ok(stamp) = self.host_query_stamp() else {
             return;
         };
+        // 【完整性：先判假，成功走到末尾才置真】呈现层据此决定"清单里缺席"能不能
+        // 当成"宿主删掉了它"。任何提前 return 都必须留下 false，否则一次授权撤销
+        // 就会让整轨 clip 被误判成幽灵。
+        stamp.0.inventory_incomplete.store(true, Ordering::Release);
         let Some(host) = self.native_host() else {
             // 没有原生扩展接口 —— 这是 **ARA-only 宿主**（Studio One / Cubase / Nuendo /
             // Logic …）的正常形态，不是"不受支持"：时间线有内容、音频能出、参数能调，
@@ -1468,6 +1472,7 @@ impl ExtensionOwner {
         if let Err(error) = stamp.0.merge_archive_restore_locked() {
             log::warn!("[ara] archive merge on inventory refresh failed: {error}");
         }
+        stamp.0.inventory_incomplete.store(false, Ordering::Release);
         drop(_transaction);
         // 【纯几何变化也必须让渲染失效】`facts_changed` 只覆盖"方向 / 循环源 / 声道
         // 模式"这一批 ARA 表达不到的事实；而**位置与长度**同样会改变听感（片段搬到
