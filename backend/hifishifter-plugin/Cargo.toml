@@ -101,6 +101,8 @@ objc2-web-kit = { version = "0.3", features = [
 webview2-com = "0.39"
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com",
     "Win32_System_Diagnostics_ToolHelp",
+    # `GlobalMemoryStatusEx`：PCM 预算按物理内存自适应（见 `render/budget.rs`）。
+    "Win32_System_SystemInformation",
     "Win32_System_Threading", "Win32_System_LibraryLoader", "Win32_Graphics_Gdi",
     "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_Shell_Common"] }
 

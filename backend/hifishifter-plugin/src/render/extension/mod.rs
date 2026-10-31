@@ -35,7 +35,7 @@ use std::sync::{Arc, Mutex};
 
 // 被搬走的代码沿用了拆分前的 `super::document` 写法（拆分前 `super` 就是 `render`）。
 // 这里把用到的兄弟模块重新导出成本模块的名字，让移动保持逐字、可逐 token 核对。
-use super::{document, input, ownership, preparation, snapshot, transport};
+use super::{document, input, ownership, preparation, transport};
 
 mod ara;
 mod binding;

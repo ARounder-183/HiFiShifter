@@ -25,18 +25,17 @@ use std::sync::Arc;
 /// clip 全部几何非法 —— 它们都应当发布**同一份空快照**，而不是各自报错或各自拼一份。
 /// 此前只有第一种走了空快照，后两种（尤其"空列表"）撞上了 `unsupported host position`
 /// 这个**整份失败**的守卫。合并成一个具名函数后，这个语义只有一处定义。
-fn empty_snapshots() -> Vec<PlaybackSnapshot> {
-    [44100, 48000]
-        .into_iter()
-        .map(|sample_rate| PlaybackSnapshot {
-            sample_rate,
-            origin_sample: 0,
-            left: vec![],
-            right: vec![],
-            covered: Vec::new(),
-            _reservation: None,
-        })
-        .collect()
+fn empty_snapshots() -> Vec<Arc<PlaybackSnapshot>> {
+    // 空快照只做一份、两个发布器共享：内容为空，没有理由为"两档率"付两份账。
+    let empty = Arc::new(PlaybackSnapshot {
+        sample_rate: 44100,
+        origin_sample: 0,
+        left: vec![],
+        right: vec![],
+        covered: Vec::new(),
+        _reservation: None,
+    });
+    vec![Arc::clone(&empty), empty]
 }
 
 pub(crate) struct RenderInput {
@@ -202,28 +201,63 @@ pub(crate) struct ExportRequest<'a> {
 
 impl RenderInput {
     /// 本函数只消费冻结值；调用前必须已释放文档transaction。新模型只能取消/拒绝发布。
-    pub fn render(&self, cancel: Arc<AtomicBool>) -> Result<Vec<PlaybackSnapshot>, String> {
+    pub fn render(&self, cancel: Arc<AtomicBool>) -> Result<Vec<Arc<PlaybackSnapshot>>, String> {
         self.render_with_progress(cancel, None)
     }
+
+    /// 宿主声明的工程率（Hz）；缺席/非法时退回 44100。
+    fn project_rate(&self) -> u32 {
+        let rate = self.project_sample_rate.unwrap_or(44100.0);
+        if rate.is_finite() && rate > 0.0 {
+            rate.round().clamp(1.0, u32::MAX as f64) as u32
+        } else {
+            44100
+        }
+    }
+
+    /// 内部合成的**原生率**：44.1k 或 48k，取与宿主工程率同族的那一档。
+    ///
+    /// 【为什么只渲一档】旧实现固定渲 44.1k + 48k 两份，内存翻倍；而
+    /// `PlaybackSnapshot::copy_block` 本来就会把非原生率线性重采样。宿主率在
+    /// `setupProcessing` 里已经声明过，所以"渲哪一档"完全可判 —— 规则与
+    /// `ExtensionOwner::snapshot_index_for_rate` 逐字相同（先看整数倍，再取最近）。
+    /// 渲出来的那一份由**两个**发布器共享（`SnapshotPublisher::publish_shared`），
+    /// 于是"宿主换工程率"不需要重渲，也不需要第二份缓冲。
+    fn native_sample_rate(project_rate: u32) -> u32 {
+        let rate = f64::from(project_rate.max(1));
+        let integral_multiple = |base: f64| {
+            let ratio = rate / base;
+            ratio >= 1.0 && (ratio - ratio.round()).abs() <= 1e-6
+        };
+        if integral_multiple(44100.0) {
+            44100
+        } else if integral_multiple(48000.0) {
+            48000
+        } else if (rate - 44100.0).abs() <= (rate - 48000.0).abs() {
+            44100
+        } else {
+            48000
+        }
+    }
+
     pub fn render_with_progress(
         &self,
         cancel: Arc<AtomicBool>,
         progress: Option<hifishifter_kernel::mixdown::ProgressCallback>,
-    ) -> Result<Vec<PlaybackSnapshot>, String> {
+    ) -> Result<Vec<Arc<PlaybackSnapshot>>, String> {
         if cancel.load(Ordering::Acquire) {
             return Err("host preparation cancelled".into());
         }
         let Some(timeline) = &self.timeline else {
-            return [44100, 48000]
-                .into_iter()
-                .map(|rate| {
-                    if cancel.load(Ordering::Acquire) {
-                        return Err("host preparation cancelled".into());
-                    }
-                    mix_plain_regions(&self.regions, &self.sources, rate, self.project_sample_rate)
-                        .map_err(|e| format!("snapshot unavailable: {e:?}"))
-                })
-                .collect();
+            if cancel.load(Ordering::Acquire) {
+                return Err("host preparation cancelled".into());
+            }
+            let rate = Self::native_sample_rate(self.project_rate());
+            let snapshot =
+                mix_plain_regions(&self.regions, &self.sources, rate, self.project_sample_rate)
+                    .map_err(|e| format!("snapshot unavailable: {e:?}"))?;
+            let shared = Arc::new(snapshot);
+            return Ok(vec![Arc::clone(&shared), shared]);
         };
         if self.regions.is_empty() {
             return Ok(empty_snapshots());
@@ -234,12 +268,7 @@ impl RenderInput {
         // 96 kHz / 192 kHz 工程下写死 44.1k 会让 origin/end 算错，进而是整份快照错位。
         // `setupProcessing` 给出的就是权威工程率；缺席时退回 44100（既有默认档）。
         // 取整是因为这里只用它做秒→帧换算，与输出帧号同为整数域。
-        let project_rate = self.project_sample_rate.unwrap_or(44100.0);
-        let project_rate = if project_rate.is_finite() && project_rate > 0.0 {
-            project_rate.round().clamp(1.0, u32::MAX as f64) as u32
-        } else {
-            44100
-        };
+        let project_rate = self.project_rate();
         super::snapshot::validate_regions_with_fades(
             &self.regions,
             &self.sources,
@@ -312,19 +341,14 @@ impl RenderInput {
                     )
                     .ok_or_else(|| "host interleaved PCM size overflow".to_owned())
             })?;
-        // 两率最终PCM、源转交错副本、当前混音/region临时输出一起预检，失败不先做重推理。
-        // 此策略保留512MiB全局硬上限，不把旧30秒/64MiB探针常量直接放宽为无界分配。
-        let frame_counts = [44100_u32, 48000]
-            .map(|rate| {
-                let frames = ((end - start) * rate as f64).round();
-                if !frames.is_finite() || frames < 0. || frames >= usize::MAX as f64 / 8. {
-                    Err("snapshot size overflow".to_owned())
-                } else {
-                    Ok(frames as usize)
-                }
-            })
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()?;
+        // 只预检**一档**最终PCM：第二档采样率不再物化（见 `native_sample_rate`）。
+        let sample_rate = Self::native_sample_rate(project_rate);
+        let frames = ((end - start) * sample_rate as f64).round();
+        if !frames.is_finite() || frames < 0. || frames >= usize::MAX as f64 / 8. {
+            return Err("snapshot size overflow".to_owned());
+        }
+        let frames = frames as usize;
+        let frame_counts = vec![frames];
         let outputs = frame_counts
             .iter()
             .try_fold(0_usize, |total, frames| total.checked_add(frames * 8))
@@ -389,70 +413,35 @@ impl RenderInput {
                 },
             );
         }
-        let mut snapshots = Vec::new();
-        let model_rate_output = timeline
-            .clips
-            .iter()
-            .filter_map(|clip| timeline.resolve_root_track_id(&clip.track_id))
-            .any(|root| {
-                timeline.tracks.iter().any(|track| {
-                    track.id == root
-                        && track.pitch_analysis_algo
-                            == hifishifter_kernel::state::PitchAnalysisAlgo::NsfHifiganOnnx
-                })
-            });
-        for (sample_rate, frames) in [44100, 48000].into_iter().zip(frame_counts) {
-            if cancel.load(Ordering::Acquire) {
-                return Err("host preparation cancelled".into());
-            }
-            let reservation = batch
-                .split_off(frames * 8)
-                .ok_or("invalid render budget partition")?;
-            // HiFiGAN工作区只在模型原生44.1k合成一次，48k是便宜输出层，不重新跑HNSEP/神经网络。
-            // 纯非HiFiGAN路径保持旧采样率契约；只消费已经就绪的不可变PCM，仍在worker线程。
-            if model_rate_output && sample_rate == 48000 {
-                let native: &PlaybackSnapshot = &snapshots[0];
-                let mut left =
-                    hifishifter_kernel::mel_utils::linear_resample_mono(&native.left, 44100, 48000);
-                let mut right = hifishifter_kernel::mel_utils::linear_resample_mono(
-                    &native.right,
-                    44100,
-                    48000,
-                );
-                left.resize(frames, 0.);
-                right.resize(frames, 0.);
-                snapshots.push(PlaybackSnapshot {
-                    sample_rate,
-                    origin_sample: (start * sample_rate as f64).round() as i64,
-                    left,
-                    right,
-                    // 48 k 这一份是 44.1 k 的重采样，但**覆盖**是按时间算的：直接按
-                    // 本档率重算一次，比按比例缩放区间少一整类舍入错误。
-                    covered: snapshot_covered(timeline, &self.sources, start, end, sample_rate),
-                    _reservation: Some(reservation),
-                });
-                continue;
-            }
-            let samples = self.mix_interleaved(MixRequest {
-                timeline,
-                sources: &input,
-                start_sec: start,
-                end_sec: end,
-                sample_rate,
-                cancel: &cancel,
-                progress: progress.clone(),
-            })?;
-            debug_assert_eq!(samples.len(), frames * 2);
-            snapshots.push(PlaybackSnapshot {
-                sample_rate,
-                origin_sample: (start * sample_rate as f64).round() as i64,
-                left: samples.iter().step_by(2).copied().collect(),
-                right: samples.iter().skip(1).step_by(2).copied().collect(),
-                covered: snapshot_covered(timeline, &self.sources, start, end, sample_rate),
-                _reservation: Some(reservation),
-            });
-        }
-        Ok(snapshots)
+        let reservation = batch
+            .split_off(frames * 8)
+            .ok_or("invalid render budget partition")?;
+        let samples = self.mix_interleaved(MixRequest {
+            timeline,
+            sources: &input,
+            start_sec: start,
+            end_sec: end,
+            sample_rate,
+            cancel: &cancel,
+            progress: progress.clone(),
+        })?;
+        debug_assert_eq!(samples.len(), frames * 2);
+        let mut snapshot = PlaybackSnapshot {
+            sample_rate,
+            origin_sample: (start * sample_rate as f64).round() as i64,
+            left: samples.iter().step_by(2).copied().collect(),
+            right: samples.iter().skip(1).step_by(2).copied().collect(),
+            covered: snapshot_covered(timeline, &self.sources, start, end, sample_rate),
+            _reservation: Some(reservation),
+        };
+        // 【归并必须发生在包装成 Arc 之前】`compact_mono` 会原地释放右平面并退额度；
+        // 共享之后就没有唯一所有权了（见 `SnapshotPublisher::publish_shared`）。
+        snapshot
+            .compact_mono()
+            .map_err(|error| format!("invalid prepared snapshot: {error:?}"))?;
+        let snapshot = Arc::new(snapshot);
+        // 两个发布器共享同一份 PCM：一次渲染、一份内存，换率不需要重渲。
+        Ok(vec![Arc::clone(&snapshot), snapshot])
     }
 
     /// 授权源 PCM → 混音器要的交错副本。
@@ -846,7 +835,7 @@ mod tests {
         let neural_before = hifishifter_kernel::nsf_hifigan_onnx::inference_runs();
         let separation_before = hifishifter_kernel::hnsep_onnx::separation_cache_stats().1;
         let began = std::time::Instant::now();
-        let mut cold = input.render(Arc::new(AtomicBool::new(false))).unwrap();
+        let cold = input.render(Arc::new(AtomicBool::new(false))).unwrap();
         let cold_ms = began.elapsed().as_millis();
         let cold_neural = hifishifter_kernel::nsf_hifigan_onnx::inference_runs();
         let cold_separation = hifishifter_kernel::hnsep_onnx::separation_cache_stats().1;
@@ -859,7 +848,13 @@ mod tests {
             1,
             "HNSEP仍整段一次，不分块"
         );
-        for (snapshot, rate) in cold.iter().zip([44100, 48000]) {
+        // 【第三轮】只渲一档原生率（44.1k），两个发布器共享同一份缓冲。
+        assert_eq!(cold.len(), 2);
+        assert!(Arc::ptr_eq(&cold[0], &cold[1]), "两档必须共享同一份 PCM");
+        let rate = 44100usize;
+        {
+            let snapshot = &cold[0];
+            assert_eq!(snapshot.sample_rate, 44100);
             assert_eq!(snapshot.left.len(), rate * 180);
             assert_eq!(snapshot.right.len(), rate * 180);
             assert!(snapshot.left.iter().all(|sample| sample.is_finite()));
@@ -876,13 +871,8 @@ mod tests {
                 );
             }
         }
-        assert_eq!(
-            cold[1].left,
-            hifishifter_kernel::mel_utils::linear_resample_mono(&cold[0].left, 44100, 48000)
-        );
-        super::super::snapshot::compact_prepared(&mut cold).unwrap();
         let began = std::time::Instant::now();
-        let mut warm = input.render(Arc::new(AtomicBool::new(false))).unwrap();
+        let warm = input.render(Arc::new(AtomicBool::new(false))).unwrap();
         let warm_ms = began.elapsed().as_millis();
         assert_eq!(
             hifishifter_kernel::nsf_hifigan_onnx::inference_runs(),
@@ -892,11 +882,8 @@ mod tests {
             hifishifter_kernel::hnsep_onnx::separation_cache_stats().1,
             cold_separation
         );
-        super::super::snapshot::compact_prepared(&mut warm).unwrap();
-        for (cold, warm) in cold.iter().zip(&warm) {
-            assert_eq!(cold.left, warm.left);
-            assert_eq!(cold.right, warm.right);
-        }
+        assert_eq!(cold[0].left, warm[0].left);
+        assert_eq!(cold[0].right, warm[0].right);
         #[cfg(windows)]
         {
             let (working, peak, commit) = process_memory_profile();
@@ -1016,7 +1003,7 @@ mod tests {
         };
         let publisher = super::super::snapshot::SnapshotPublisher::default();
         let mut snapshots = snapshots;
-        publisher.publish(snapshots.pop().unwrap()).unwrap();
+        publisher.publish_shared(snapshots.pop().unwrap()).unwrap();
         assert!(unsafe { publisher.copy_block((48000 * 180 - 511) as i64, 48000, &mut bus, 513) });
         assert_eq!(&left[..511], &[0.25; 511]);
         assert_eq!(&right[..511], &[0.25; 511]);

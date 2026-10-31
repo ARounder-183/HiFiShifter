@@ -794,7 +794,7 @@ fn render_test_edits(
     owner: &ExtensionOwner,
     document: &super::super::document::DocumentSession,
     edits: &crate::state_channel::EditState,
-) -> Result<Vec<super::super::snapshot::PlaybackSnapshot>, String> {
+) -> Result<Vec<Arc<super::super::snapshot::PlaybackSnapshot>>, String> {
     let input = {
         let _transaction = document.transaction.lock_or_recover();
         owner.ara_render_input(document, edits, true)?.1

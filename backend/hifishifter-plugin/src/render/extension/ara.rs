@@ -512,8 +512,7 @@ impl ExtensionOwner {
         for publisher in &self.snapshots {
             publisher.collect_retired();
         }
-        let mut snapshots = input.render(cancel.clone())?;
-        super::snapshot::compact_prepared(&mut snapshots)?;
+        let snapshots = input.render(cancel.clone())?;
         let _transaction = document.transaction.lock_or_recover();
         if cancel.load(Ordering::Acquire) || !document.ready.load(Ordering::Acquire) {
             return Ok(());
@@ -538,7 +537,7 @@ impl ExtensionOwner {
         }
         for (publisher, snapshot) in self.snapshots.iter().zip(snapshots) {
             publisher
-                .publish(snapshot)
+                .publish_shared(snapshot)
                 .map_err(|e| format!("snapshot publish failed: {e:?}"))?;
         }
         self.record_prepared(model, edit, epoch, scope, keys.clone());

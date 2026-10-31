@@ -114,8 +114,7 @@ impl ExtensionOwner {
         // 那一段就是"素材在、结果还没算出来"；若它远大于 0.7 s，那 0.4 s 只能来自
         // 起播窗口。没有这个数时，两者在日志里完全同形。
         let render_started = std::time::Instant::now();
-        let mut snapshots = input.render(cancel)?;
-        super::snapshot::compact_prepared(&mut snapshots)?;
+        let snapshots = input.render(cancel)?;
         let render_ms = render_started.elapsed().as_millis() as u64;
         if self.is_closed() {
             return Ok(());
@@ -130,7 +129,7 @@ impl ExtensionOwner {
         }
         for (publisher, snapshot) in self.snapshots.iter().zip(snapshots) {
             publisher
-                .publish(snapshot)
+                .publish_shared(snapshot)
                 .map_err(|e| format!("snapshot publish failed: {e:?}"))?;
         }
         self.capture_prepared.store(version, Ordering::Release);

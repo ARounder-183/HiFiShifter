@@ -110,16 +110,6 @@ impl PlaybackSnapshot {
     }
 }
 
-/// 整批结果在下一renderer开始分配前归并，不能等全部大快照堆齐后才节省预算。
-pub(crate) fn compact_prepared(snapshots: &mut [PlaybackSnapshot]) -> Result<(), String> {
-    for snapshot in snapshots {
-        snapshot
-            .compact_mono()
-            .map_err(|error| format!("invalid prepared snapshot: {error:?}"))?;
-    }
-    Ok(())
-}
-
 /// 一次分层拷贝的**覆盖读数**：这一块里有多少帧不属于我们、宿主输入在那一段有没有信号。
 ///
 /// 【为什么由混音循环报告而不是调用方另算一遍】"哪一帧属于快照"这件事只在这里知道
@@ -341,7 +331,10 @@ pub(crate) fn mix_plain_regions(
 /// 分开：退役快照的计数一归零就能回收，不必等整个音频线程静默。
 struct RetainedSnapshot {
     readers: AtomicUsize,
-    snapshot: PlaybackSnapshot,
+    /// 【为什么是 `Arc`】一次渲染只产出一份 PCM，而**两个**发布器（44.1k / 48k 档）
+    /// 都要能读到它。用 `Arc` 共享同一份缓冲，既不用复制，也不用把其中一档留空 ——
+    /// 后者会让"宿主换了工程率"变成一段静音。见 `publish_shared`。
+    snapshot: Arc<PlaybackSnapshot>,
 }
 
 pub(crate) struct SnapshotPublisher {
@@ -468,6 +461,41 @@ impl SnapshotPublisher {
                     .ok_or(SnapshotError::BudgetExceeded)?,
             );
         }
+        let mut entry = Box::new(RetainedSnapshot {
+            readers: AtomicUsize::new(0),
+            snapshot: Arc::new(snapshot),
+        });
+        let pointer = &mut *entry as *mut RetainedSnapshot;
+        retained.0.push(entry);
+        retained.1 = total;
+        self.current.store(pointer, Ordering::SeqCst);
+        self.content.store(content, Ordering::Release);
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        self.reclaim(&mut retained);
+        Ok(())
+    }
+    /// 发布一份**已经被别处持有**的快照（两个发布器共享同一份 PCM）。
+    ///
+    /// 【为什么需要独立入口】`publish` 要 `compact_mono`（会原地改缓冲），而共享
+    /// 的 `Arc` 只能有一份所有权。调用方（渲染入口）在包装成 `Arc` **之前**已经
+    /// `compact_prepared` 过，因此这里只做几何校验与记账。
+    pub fn publish_shared(&self, snapshot: Arc<PlaybackSnapshot>) -> Result<(), SnapshotError> {
+        if (!snapshot.right.is_empty() && snapshot.left.len() != snapshot.right.len())
+            || snapshot.sample_rate == 0
+        {
+            return Err(SnapshotError::InvalidGeometry);
+        }
+        let content = snapshot.content_fingerprint();
+        let bytes = snapshot
+            .storage_bytes()
+            .ok_or(SnapshotError::BudgetExceeded)?;
+        let mut retained = self.retained.lock_or_recover();
+        self.reclaim(&mut retained);
+        let total = retained
+            .1
+            .checked_add(bytes)
+            .filter(|total| *total <= self.limit)
+            .ok_or(SnapshotError::BudgetExceeded)?;
         let mut entry = Box::new(RetainedSnapshot {
             readers: AtomicUsize::new(0),
             snapshot,
@@ -1177,7 +1205,7 @@ impl ReadSection {
             return None;
         }
         // SAFETY: 本 guard 存活期间 `snapshot` 指向的 Box 因读者计数非零不会被回收。
-        Some(unsafe { &(*self.snapshot).snapshot })
+        Some(unsafe { (*self.snapshot).snapshot.as_ref() })
     }
 }
 impl Drop for ReadSection {

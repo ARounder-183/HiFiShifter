@@ -361,10 +361,9 @@ impl ExtensionOwner {
                 for publisher in &owner.snapshots {
                     publisher.collect_retired();
                 }
-                let mut snapshots = input
+                let snapshots = input
                     .render(Arc::new(std::sync::atomic::AtomicBool::new(false)))
                     .map_err(Self::invalid_edit)?;
-                super::snapshot::compact_prepared(&mut snapshots).map_err(Self::invalid_edit)?;
                 prepared.push((owner, keys, snapshots));
             }
             // ── 提交：短事务内复核（渲染期间一切可能都变了）并发布 ──────────
@@ -415,7 +414,7 @@ impl ExtensionOwner {
             for (owner, keys, snapshots) in prepared {
                 for (publisher, snapshot) in owner.snapshots.iter().zip(snapshots) {
                     publisher
-                        .publish(snapshot)
+                        .publish_shared(snapshot)
                         .map_err(|error| format!("snapshot publish failed: {error:?}"))
                         .map_err(Self::invalid_edit)?;
                 }
