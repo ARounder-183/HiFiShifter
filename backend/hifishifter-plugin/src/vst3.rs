@@ -1955,7 +1955,7 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
         if probe.symbolic_sample_size == 0 && !probe.process_context.is_null() {
             // SAFETY: VST3 processContext 的完整 SDK 结构在当前回调期间存活。
             let context = unsafe { &*probe.process_context };
-            owner.observe_transport(context, probe.process_mode);
+            owner.observe_transport(context, probe.process_mode, probe.num_samples as usize);
             evidence = owner.capture_observe(probe, context);
         }
     }

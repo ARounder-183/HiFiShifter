@@ -111,17 +111,40 @@ pub(crate) struct TransportView {
     pub age_ms: u32,
     /// 有一次定位在飞（见 `SeekIntent`）。
     pub seek_pending: bool,
+    /// 单调递增的读数序号。
+    ///
+    /// 【为什么需要它】推送与轮询是**两条通道、一份语义**：同一次读数可能先经推送
+    /// 到达、再经轮询到达（或反过来）。此前只有轮询带 `_transportEpoch`，推送什么
+    /// 乱序判据都没有 —— 于是晚到的旧读数会把光标拽回去。序号由产生读数的那一刻
+    /// 分配，两条通道共用同一个单调量，乱序判据就只有一条。
+    pub sample_seq: u64,
 }
 
 impl TransportView {
-    /// 载荷用的 JSON；字段名与 `get_playback_state` 的既有字段一一对应。
-    pub(crate) fn to_json(self) -> serde_json::Value {
+    /// 推送载荷。**与 `get_playback_state` 同形**：前端只有一个 reducer，两条通道共用。
+    ///
+    /// 【为什么必须带 `ok`】此前这个载荷没有 `ok` 字段，而前端 reducer 的第一行是
+    /// `if (!payload.ok) { return; }` —— 于是所谓"50 Hz 无往返推送"**从未生效**，
+    /// 插件形态只剩 400 ms 轮询（日志里 `[playhead] samples: gap_p95=402ms` 就是它
+    /// 的指纹）。更糟的是测试夹具自己编了 `ok: true`，所以测试全绿 ——
+    /// **测试替身比生产载荷更"正确"，把缺陷整条盖住了**。
+    ///
+    /// 【为什么 `target` 恒为 `None`】插件形态没有"等待渲染的窗口"：渲染不改变宿主
+    /// 位置，因此不存在"引擎原地等待"这一档（见 reducer 的 `waiting_for_render`）。
+    pub(crate) fn to_json(self, duration_sec: f64, host_authoritative: bool) -> serde_json::Value {
         serde_json::json!({
-            "position_sec": self.position_sec,
+            "ok": true,
             "is_playing": self.playing,
+            "waiting_for_render": false,
+            "target": serde_json::Value::Null,
+            "base_sec": 0.0,
+            "position_sec": self.position_sec,
+            "duration_sec": duration_sec,
+            "host_authoritative": host_authoritative,
             "position_source": self.provenance.as_str(),
             "position_age_ms": self.age_ms,
             "seek_pending": self.seek_pending,
+            "sample_seq": self.sample_seq,
         })
     }
 }
@@ -195,6 +218,24 @@ pub(crate) struct TransportClock {
     stop_role: AtomicI32,
     /// 是否**收到过**任何宿主 process 上下文（不论播没播）。
     received: AtomicBool,
+    /// 最近一块声明的块长（帧）与采样率。
+    ///
+    /// 【为什么需要】"播放位还能活多久"必须由**宿主自己的块长**决定：块长 1024 @48k
+    /// 是 21 ms，块长 8192 @44.1k 是 186 ms。用常数会在长块宿主上过早判停、在短块
+    /// 宿主上让停播后的光标多走一大截。
+    last_block_frames: AtomicU32,
+    last_block_rate: AtomicU64,
+    /// 最近一次 `kPlaying == 0` 的块报的位置，以及它是否有效。
+    ///
+    /// 【为什么需要】VEGAS 停播时会送来几块 `kPlaying=0`、位置在 30 秒开外的块
+    /// （实测 67.0 / 70.83 / 75.25 / 79.125 秒，而真实位置只有 9.75~18.6 秒）。
+    /// 判据是"连续两次读数一致"，所以必须记住上一次停播读数。
+    parked_bits: AtomicU64,
+    parked_valid: AtomicBool,
+    /// 读数的单调序号（推送与轮询共用的乱序判据，见 [`TransportView::sample_seq`]）。
+    sample_seq: AtomicU64,
+    /// 工程时长（秒）。由会话在时间线变化时镜像过来，供推送载荷使用。
+    duration_sec: AtomicU64,
 }
 
 impl TransportClock {
@@ -241,6 +282,19 @@ impl TransportClock {
         self.host_at_ms.store(now_ms(), Ordering::Release);
         self.host_valid.store(true, Ordering::Release);
         self.last_known.store(position.to_bits(), Ordering::Release);
+        self.sample_seq.fetch_add(1, Ordering::Release);
+    }
+
+    /// 把工程时长镜像进来（推送载荷要它，而它只存在于会话里）。
+    pub fn publish_duration(&self, seconds: f64) {
+        if seconds.is_finite() && seconds >= 0. {
+            self.duration_sec.store(seconds.to_bits(), Ordering::Release);
+        }
+    }
+
+    /// 工程时长（秒）。
+    pub fn duration(&self) -> f64 {
+        f64::from_bits(self.duration_sec.load(Ordering::Acquire))
     }
 
     /// 记一次宿主采样失败（原因已由调用方分类）。
@@ -406,19 +460,91 @@ impl TransportClock {
             "last_stop_role":self.stop_role.load(Ordering::Relaxed)})
     }
 
+    /// 记下最近一块的**块长**（帧）与采样率（音频线程调用）。
+    ///
+    /// 【为什么不在 `update` 里】`ProcessContext` 不带帧数（那是 `ProcessData` 的字段），
+    /// 而 `update` 的签名被八处测试用着。单独一个入口让"播放位能活多久"这条判据
+    /// 有一个明确的写入点。
+    pub fn note_block_length(&self, frames: usize, rate: f64) {
+        if rate.is_finite() && rate > 0. {
+            self.last_block_rate.store(rate.to_bits(), Ordering::Release);
+            self.last_block_frames.store(
+                u32::try_from(frames).unwrap_or(u32::MAX),
+                Ordering::Release,
+            );
+        }
+    }
+
+    /// 播放位的寿命：块长的 4 倍，夹在 `[200 ms, 1000 ms]`。
+    ///
+    /// 【为什么是块长的倍数】播放中 `process()` 按缓冲率到达，"多久没有新块"就是
+    /// "多久没有音频了"。块长 1024 @48k → 21 ms → 200 ms（下限）；块长 8192 @44.1k
+    /// → 186 ms → 744 ms。
+    ///
+    /// 【为什么要有下限】宿主调度抖动、编辑器线程被抢，都可能让相邻两块间隔翻倍；
+    /// 200 ms 足以吸收它们，又短到用户察觉不到"停止后还在走"。
+    ///
+    /// 【为什么要有上限】离线/预取块可能有秒级长度，但它们的播放位不写这里
+    /// （`observe_transport` 只让 realtime 块写）。上限是防御性的。
+    fn block_playing_ttl_ms(&self) -> u32 {
+        let frames = u64::from(self.last_block_frames.load(Ordering::Acquire));
+        let rate = f64::from_bits(self.last_block_rate.load(Ordering::Acquire));
+        let block_ms = if rate > 0. && frames > 0 {
+            (frames as f64 * 1000. / rate).round() as u64
+        } else {
+            0
+        };
+        block_ms.saturating_mul(4).clamp(200, 1000) as u32
+    }
+
+    /// 一个 `kPlaying == 0` 的块，它的位置有没有资格移动光标。
+    ///
+    /// 【为什么不能一律采纳】实测 VEGAS 在停播时会送来几块 `kPlaying=0` 的块，位置是
+    /// 67.0 / 70.83 / 75.25 / 79.125 秒，而当时真实播放位置只有 9.75 ~ 18.6 秒；
+    /// 它们的 `projectTimeMusic` 也是冻结的。采纳它们 = 光标跳到 30 秒开外、下一次
+    /// 播放再跳回来 —— 用户报的"播放光标先是闪现到后边的位置，再闪现回来"。
+    ///
+    /// 【为什么判据是"两次一致"而不是幅度阈值】合法的 `kPlaying=0` 位置只有两类：
+    /// 停在原地（与上一次读数一致）与用户 seek（跳很远，但**连续两次读数一致**）。
+    /// 而 VEGAS 的假位置**每次停播都不同**（67.0 → 70.83 → 75.25 → 79.125）。
+    /// "两次一致"把这两类分开了，且不需要任何与宿主相关的常数。
+    fn parked_position_is_plausible(&self, seconds: f64) -> bool {
+        let last = f64::from_bits(self.last_known.load(Ordering::Acquire));
+        let same_as_last = (seconds - last).abs() <= MAX_PLAUSIBLE_ADVANCE_SEC;
+        let same_as_parked = self.parked_valid.load(Ordering::Acquire)
+            && (seconds - f64::from_bits(self.parked_bits.load(Ordering::Acquire))).abs() <= 1e-6;
+        same_as_last || same_as_parked
+    }
+
     /// VST3锁定header中kPlaying=1<<1；project_time_samples不需要音乐时间valid位。
     pub fn update(&self, context: &crate::audio_abi::ProcessContext) {
         if context.sample_rate.is_finite() && context.sample_rate > 0. {
             let seconds = context.project_time_samples as f64 / context.sample_rate;
             // 同 publish_host：音频线程报回的位置同样可以结算一次定位。
             self.settle_seek(seconds);
-            self.received.store(true, Ordering::Release);
+            // 【先读再写】"这是不是第一条读数"必须在本条写下去之前回答。
+            let first_reading = !self.received.swap(true, Ordering::AcqRel);
             // 块序号只递增；它是"音频走到了第几块"的唯一表达（见 HOST_STALE_BLOCKS）。
             self.audio_serial.fetch_add(1, Ordering::Release);
-            self.position.store(seconds.to_bits(), Ordering::Release);
-            self.last_known.store(seconds.to_bits(), Ordering::Release);
-            self.playing
-                .store(context.state & (1 << 1) != 0, Ordering::Release);
+            self.sample_seq.fetch_add(1, Ordering::Release);
+            let playing = context.state & (1 << 1) != 0;
+            // 【位置的可信域】`kPlaying == 1` 的块不需要判据：那时位置是真实的传输位置，
+            // 包括合法的 seek。`kPlaying == 0` 的块才需要能解释"它为什么在这里"。
+            //
+            // 【为什么第一条读数无条件采纳】还没有任何先前读数时，"它为什么在这里"这个
+            // 问题不存在 —— 它就是参考点。否则"宿主停在一个位置、插件刚被装上"这一档
+            // 会把真实位置当成假读数丢掉（光标停在 0，而宿主在 2 秒处）。
+            if playing || first_reading || self.parked_position_is_plausible(seconds) {
+                self.position.store(seconds.to_bits(), Ordering::Release);
+                self.last_known.store(seconds.to_bits(), Ordering::Release);
+            }
+            if playing {
+                self.parked_valid.store(false, Ordering::Release);
+            } else {
+                self.parked_bits.store(seconds.to_bits(), Ordering::Release);
+                self.parked_valid.store(true, Ordering::Release);
+            }
+            self.playing.store(playing, Ordering::Release);
             // 锁定ivstprocesscontext.h的kTempoValid=1<<10；不可用字段不能覆盖最后有效BPM。
             if context.state & (1 << 10) != 0 && context.tempo.is_finite() && context.tempo > 0. {
                 self.tempo.store(context.tempo.to_bits(), Ordering::Release);
@@ -534,6 +660,8 @@ impl TransportClock {
                 provenance: Provenance::SeekIntent,
                 age_ms: now.saturating_sub(at).min(u32::MAX as u64) as u32,
                 seek_pending: true,
+                // 定位意图不是一次"宿主读数"，序号由 `read_view_at` 统一填。
+                sample_seq: 0,
             });
         }
         if self
@@ -555,11 +683,23 @@ impl TransportClock {
 
     /// 一次完整的读数（测试用：显式给定时钟，避免依赖真实时间）。
     pub(crate) fn read_view_at(&self, now: u64) -> TransportView {
-        if let Some(view) = self.pending_seek_view(now) {
+        let sample_seq = self.sample_seq.load(Ordering::Acquire);
+        if let Some(mut view) = self.pending_seek_view(now) {
+            view.sample_seq = sample_seq;
             return view;
         }
         let host_fresh = self.host_is_fresh_at(now);
-        let block_playing = self.playing.load(Ordering::Acquire);
+        // 【播放位必须有寿命】`kPlaying` 是**最后一块**写下的值，而宿主停播时可能
+        // 干脆不再回调（VEGAS 就是如此：日志里 `playback_stops: 0`、`last_playing: true`、
+        // `position_age_ms: 1208`）。没有寿命，这个闩锁永远是真，前端于是按 1x 外推 ——
+        // 用户看到的是"停止后光标还要往前多走一小段"。
+        //
+        // 【为什么"回调停摆"比"位置没变"更强】播放中 `process()` 按缓冲率到达，
+        // **不存在合法的多秒空档**；而"位置没变"有合法反例（宿主预卷、块边界量化）。
+        // 所以：回调停摆 ⇒ 判停止；位置冻结但回调还在 ⇒ 只冻结光标，不判停止。
+        let block_age = self.block_age_ms(now);
+        let block_playing =
+            self.playing.load(Ordering::Acquire) && block_age <= self.block_playing_ttl_ms();
         let prefetch_playing = self.prefetch_playing_at(now);
         if host_fresh {
             let pose = self.host_pose.load(Ordering::Acquire);
@@ -579,24 +719,39 @@ impl TransportClock {
                     .saturating_sub(self.host_at_ms.load(Ordering::Acquire))
                     .min(u32::MAX as u64) as u32,
                 seek_pending: false,
+                sample_seq,
             };
         }
         let serial = self.audio_serial.load(Ordering::Acquire);
         if serial > 0 {
+            // 【播放位过期 ⇒ 这一档其实是 `Stale`】位置仍可沿用最后一次已知值（宿主可能
+            // 只是暂停了回调），但"在播"已经不成立；来源如实降级，读者据此知道这不是
+            // 一份新鲜读数。旧实现里 `Provenance::Stale` 与它的两处守卫都是死代码。
+            let stale = block_age > self.block_playing_ttl_ms();
             return TransportView {
                 position_sec: f64::from_bits(self.position.load(Ordering::Acquire)),
                 playing: block_playing || prefetch_playing,
-                provenance: Provenance::RealtimeBlock,
-                age_ms: self.block_age_ms(now),
+                provenance: if stale {
+                    Provenance::Stale
+                } else {
+                    Provenance::RealtimeBlock
+                },
+                age_ms: block_age,
                 seek_pending: false,
+                sample_seq,
             };
         }
+        // 【`Stale` 现在真的可达了】旧实现在 `serial > 0` 之后就再没有"音频块已过期"
+        // 这一档，于是 `Provenance::Stale` 与它的两处守卫都是死代码。播放位有了寿命
+        // 之后，"有块但块已经停了"必须自成一档：位置可以沿用（最后一次已知），
+        // 播放位必须为假。
         TransportView {
             position_sec: f64::from_bits(self.last_known.load(Ordering::Acquire)),
-            playing: block_playing || prefetch_playing,
+            playing: prefetch_playing,
             provenance: Provenance::Stale,
             age_ms: u32::MAX,
             seek_pending: false,
+            sample_seq,
         }
     }
 

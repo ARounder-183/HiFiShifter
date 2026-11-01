@@ -4,6 +4,8 @@ import { useAppSelector } from "../../../app/hooks";
 import { shallowEqual } from "react-redux";
 import { type TimelineViewportAccess } from "./hooks/timelineViewportAccess";
 import { useVisualPlayhead } from "../../../hooks/useVisualPlayhead";
+import { isTransportAdvancing } from "../../../features/session/selectors/transport";
+import { publishVisualPlayheadSec } from "../../../features/capture/visualPlayheadBus";
 import { computeAutoFollowScrollLeft } from "../../../utils/autoFollowScroll";
 
 export const TimelineTransportBridge = React.memo(function TimelineTransportBridge(props: {
@@ -41,6 +43,9 @@ export const TimelineTransportBridge = React.memo(function TimelineTransportBrid
             // 【为什么要带上它】`isPlaying` 是镜像，起播第一条采样到达之前是假的；
             // 而"位置真的在前进"可以由两条采样直接算出来（见 applyTransportSample）。
             positionAdvancing: state.session.runtime.positionAdvancing,
+            // 读数的年龄："宿主说在播"必须与"这个说法有多旧"一起读（见 selector）。
+            positionAgeMs: state.session.runtime.positionAgeMs,
+            playbackWaitingForRender: state.session.runtime.playbackWaitingForRender,
         }),
         // 无 shallowEqual 时每次 dispatch 都产生新对象引用，
         // 该桥接组件会在任意 store 更新（含 33Hz 播放轮询）时重渲染。
@@ -61,7 +66,9 @@ export const TimelineTransportBridge = React.memo(function TimelineTransportBrid
      * 而"我听到的是旧音频"是另一件事（状态栏的 `stale`）。把光标停住并不能让音频
      * 变新，只会让用户以为播放停了 —— 而音频其实在响。
      */
-    const isTransportAdvancing = transport.isPlaying || transport.positionAdvancing;
+    // 【唯一判据在 selector 里】见 `selectIsTransportAdvancing`：三处三个公式，
+    // 恰好在"位置冻结"这个场景互相分歧 —— 那正是"停止后光标还在走"。
+    const transportAdvancing = isTransportAdvancing(transport);
 
     useVisualPlayhead({
         syncedPlayheadSec: transport.playheadSec,
@@ -74,6 +81,8 @@ export const TimelineTransportBridge = React.memo(function TimelineTransportBrid
                 // 造成跳变。内核宿主也经 `playheadSec` getter 读同一份真值
                 // （见 `timelineKernelHost.readPlayheadSec`）。
                 visualPlayheadRef.current = visualPlayheadSec;
+                // 捕获带的右缘读这一份：它必须与光标同源，否则两者永远差一个轮询周期。
+                publishVisualPlayheadSec(visualPlayheadSec);
 
                 // 自动滚动先行：syncScrollLeft 内部会用 Redux 同步播放头（滞后于
                 // 视觉插值）重写播放头位置 —— 若先定位播放头再滚动，播放头每帧

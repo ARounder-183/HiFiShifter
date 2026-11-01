@@ -405,6 +405,23 @@ export interface SessionState {
          * 跟上宿主，与"谁认为在播"无关。
          */
         hostAuthoritative: boolean;
+        /**
+         * 最近一条采样的年龄（毫秒，后端 `position_age_ms`）；`null` = 后端没给。
+         *
+         * 【为什么它必须进状态】后端的 `isPlaying` 曾经是一个**永不过期的闩锁**：
+         * VEGAS 停播时直接停止调用 `process()`、不发 `kPlaying=0` 的块，于是它永远
+         * 为真，前端按 1x 外推 —— 用户看到的是"停止后光标还要往前多走一小段"。
+         * 后端现在给了播放位寿命（`block_playing_ttl_ms`），前端仍要用年龄兜一层：
+         * **两个独立的地方都错**才会出错。
+         */
+        positionAgeMs: number | null;
+        /**
+         * 最近一条被采纳采样的单调序号（后端 `sample_seq`）。
+         *
+         * 【为什么需要它】推送与轮询是同一份语义的两个来源；只按纪元去重拦不住
+         * "同一场播放里两条通道的先后"，晚到的旧读数会把光标拽回去。
+         */
+        lastTransportSeq: number;
         gpuBackend: string;
     };
 

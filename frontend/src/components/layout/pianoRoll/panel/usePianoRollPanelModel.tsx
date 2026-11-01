@@ -75,6 +75,7 @@ import {
 import { computeAutoFollowScrollLeft } from "../../../../utils/autoFollowScroll";
 import { readDevicePixelRatio } from "../../../../utils/devicePixelLine";
 import { useVisualPlayhead } from "../../../../hooks/useVisualPlayhead";
+import { isTransportAdvancing } from "../../../../features/session/selectors/transport";
 import {
     subscribeDevicePixelRatio,
     useDevicePixelRatio,
@@ -1182,16 +1183,14 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         }
     }, [pxPerSec]);
 
-    // 原地等待渲染（位置冻结）期间不得推进视觉插值（见 TimelinePanel 同名注释）。
-    const isTransportAdvancing =
-        s.runtime.isPlaying &&
-        !s.runtime.playbackWaitingForRender &&
-        s.runtime.playbackPositionSec > 1e-4;
+    // 【唯一判据在 selector 里】见 `isTransportAdvancing`：三处三个公式，恰好在
+    // "位置冻结"这个场景互相分歧 —— 那正是"停止后光标还在走"。
+    const transportAdvancing = isTransportAdvancing(s.runtime);
 
     useVisualPlayhead({
         syncedPlayheadSec: s.playheadSec,
         syncedAtMs: s.playheadSampledAtMs,
-        isTransportAdvancing,
+        isTransportAdvancing: transportAdvancing,
         onFrame: useCallback(
             (visualPlayheadSec: number) => {
                 visualPlayheadSecRef.current = visualPlayheadSec;

@@ -235,7 +235,12 @@ impl ExtensionOwner {
         self.is_non_playback() && self.playback_covered.load(Ordering::Acquire)
     }
     /// process只写有界原子诊断，JSON/日志全部由actor读取，暂不把候选计数当作根因。
-    pub(crate) fn observe_transport(&self, context: &crate::audio_abi::ProcessContext, mode: i32) {
+    pub(crate) fn observe_transport(
+        &self,
+        context: &crate::audio_abi::ProcessContext,
+        mode: i32,
+        frames: usize,
+    ) {
         if let Some(clock) = self.clock.get() {
             clock.observe(
                 context,
@@ -253,6 +258,8 @@ impl ExtensionOwner {
             // 写的那个位置就成了回落值。offline 早已被排除，prefetch 必须同样排除：
             // 它们都是"渲染进度"，不是"播放位置"。
             if mode == 0 {
+                // 【块长必须先记】播放位的寿命由它决定（见 `block_playing_ttl_ms`）。
+                clock.note_block_length(frames, context.sample_rate);
                 clock.update(context);
             } else if mode == 1 {
                 // 【为什么 prefetch 只投"播不播"这一票】它的位置是渲染进度（领先

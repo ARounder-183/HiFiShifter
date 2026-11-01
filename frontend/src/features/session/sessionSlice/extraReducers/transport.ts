@@ -25,6 +25,8 @@ export interface TransportSample {
     position_source?: string;
     position_age_ms?: number;
     seek_pending?: boolean;
+    /** 单调读数序号：推送与轮询共用的乱序判据（见后端 `TransportView::sample_seq`）。 */
+    sample_seq?: number;
 }
 
 /** 轮询采样携带的派发时刻（推送没有）。 */
@@ -245,6 +247,16 @@ function applyTransportSample(
     if (arg && typeof arg.epoch === "number" && arg.epoch !== state._transportEpoch) {
         return;
     }
+    // 【乱序防护的第二种形态：读数序号】纪元判的是"传输态有没有变"，它拦不住
+    // "同一场播放里两条通道的先后"。推送与轮询现在都带 `sample_seq`（后端在产生
+    // 读数的那一刻分配），序号更小的一律丢弃 —— 于是晚到的旧读数不会再拽回光标。
+    const sampleSeq = typeof payload.sample_seq === "number" ? payload.sample_seq : null;
+    if (sampleSeq !== null && sampleSeq <= state.runtime.lastTransportSeq) {
+        return;
+    }
+    if (sampleSeq !== null) {
+        state.runtime.lastTransportSeq = sampleSeq;
+    }
     // 【为什么不再看 `_pluginSeekRequestId`】"这次定位落地了没有"现在是**后端**的
     // 事实（`SeekIntent` 窗口，见 render/transport.rs）。前端替权威猜"再压多久"
     // 只会在命令回执早于宿主落地时把旧读数放进来 —— 那正是"跳过去又跳回来"。
@@ -261,6 +273,11 @@ function applyTransportSample(
     // 轮询节奏的唯一依据（见 `runtime.hostAuthoritative`）：它回答"这份位置
     // 是不是宿主给的"，与"谁认为在播"无关。
     state.runtime.hostAuthoritative = Boolean(payload.host_authoritative);
+    // 【读数年龄必须落到状态里】后端一直在算 `position_age_ms`，而全仓**零引用**。
+    // 它回答的是"这份读数有多旧"，正是"宿主停止后光标还在走"要用的那道闸门
+    // （见 `selectIsTransportAdvancing`）。
+    state.runtime.positionAgeMs =
+        typeof payload.position_age_ms === "number" ? payload.position_age_ms : null;
 
     // 原地等待采样：保持播放态、光标冻结 —— 不做时延外推（位置
     // 并未前进，外推会让光标按 IPC 时延缓慢漂移）、不改写

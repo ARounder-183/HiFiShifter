@@ -891,11 +891,13 @@ fn push_transport(state: &Rc<RefCell<EditorClient>>) {
             format_args!(
                 "[transport] trace: the host reports playing but the position has not moved for {} ms ({}); the editor keeps extrapolating at 1x",
                 frozen_for.as_millis(),
-                view.to_json()
+                view.to_json(clock.duration(), true)
             ),
         );
     }
-    push_view_event(state, "transport", view.to_json());
+    // 【载荷与 `get_playback_state` 同形】见 `TransportView::to_json`：缺 `ok` 的那一版
+    // 让前端 reducer 把**每一条**推送都丢掉了。
+    push_view_event(state, "transport", view.to_json(clock.duration(), true));
 }
 
 /// 宽限期到了还没绑定 ⇒ 试一次「进程内唯一活实例」兜底。

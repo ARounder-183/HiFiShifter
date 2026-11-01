@@ -1619,9 +1619,10 @@ impl EditorSession {
     /// 投影撤销项目缓存键时，源分析可能早已全量命中；由actor组装，不等GUI读取/新通知。
     /// 只消费clip分析缓存，不做神经推理；尚未齐全仍pending，用户目标曲线保持。
     fn complete_cached_analysis(&self) {
-        let Some(document) = self.document() else {
-            return;
-        };
+        // 【为什么不能在这里取文档】`document()` 只被后面"把基线发布到文档"那一步需要。
+        // 此前它挡在函数最前面，于是 Capture 形态（**永远没有文档**）在第一步就返回 ——
+        // 下面那段 `if self.is_capture()` 是**死代码**，`pitch_orig_key` 永不置位，界面
+        // 停在"正在分析音高"，60 秒后触发 `analysis_abandoned` 降级渲染。
         let roots = {
             let mut timeline = self.timeline.lock_or_recover();
             // 首次载入尚未 get_param_frames 时也必须有根状态，否则完成通知找不到接收原线的条目。
@@ -1696,6 +1697,7 @@ impl EditorSession {
                     current.pitch_edit = next.pitch_edit.clone();
                 }
                 current.pitch_orig_key = next.pitch_orig_key.clone();
+                current.pitch_assembly_partial = next.pitch_assembly_partial;
                 current.dyn_orig = next.dyn_orig.clone();
                 current.dyn_orig_key = next.dyn_orig_key.clone();
                 current.has_pitch_adjustment_active = next.has_pitch_adjustment_active;
@@ -1721,6 +1723,10 @@ impl EditorSession {
             if next.pitch_orig_key.is_none() && next.dyn_orig_key.is_none() {
                 continue;
             }
+            // 【到这里才需要文档】见函数开头：Capture 形态在上面的分支已经返回。
+            let Some(document) = self.document() else {
+                return;
+            };
             let host_root = root
                 .strip_prefix(&self.namespace)
                 .unwrap_or(root)
@@ -2048,8 +2054,7 @@ impl EditorSession {
             timeline.selected_clip_id = timeline.clips.first().map(|c| c.id.clone());
         }
         self.apply_host_selection(&mut timeline);
-        self.project_duration
-            .store(timeline.project_sec.to_bits(), Ordering::Release);
+        self.publish_duration(timeline.project_sec);
         self.clip_count
             .store(timeline.clips.len() as u64, Ordering::Release);
         *self.timeline.lock_or_recover() = timeline;
@@ -2241,8 +2246,7 @@ impl EditorSession {
         if timeline.selected_clip_id.is_none() {
             timeline.selected_clip_id = timeline.clips.first().map(|c| c.id.clone());
         }
-        self.project_duration
-            .store(timeline.project_sec.to_bits(), Ordering::Release);
+        self.publish_duration(timeline.project_sec);
         self.clip_count
             .store(timeline.clips.len() as u64, Ordering::Release);
         *self.timeline.lock_or_recover() = timeline;
@@ -2314,8 +2318,7 @@ impl EditorSession {
                     }
                 }
             }
-            self.project_duration
-                .store(timeline.project_sec.to_bits(), Ordering::Release);
+            self.publish_duration(timeline.project_sec);
         }
         // 宿主清单已经换成这一轮几何：先做一次参数几何事务，再读派生视图。
         // 失败时不推进版本，下一轮重试同一 delta。
@@ -2788,6 +2791,19 @@ impl EditorSession {
     /// 【为什么 owner 的时钟在这里就一定有值】它由 `setupProcessing` 装载
     /// （见 `ExtensionOwner::arm_capture_rendering` 的调用点），而那是宿主在任何
     /// `process` 之前的确定性时刻 —— 与窗口开没开无关。
+    /// 把工程时长同时写进本地原子与宿主时钟。
+    ///
+    /// 【为什么两处都要】`playback_state`（轮询）读本地那个；推送载荷由 GUI 线程直接从
+    /// 时钟构造，它读不到会话 —— 而两条通道的载荷必须**同形**，否则前端 reducer 就会
+    /// 为同一份语义写两套实现（那正是推送通道"缺 `ok` 就整条死掉"的成因）。
+    fn publish_duration(&self, seconds: f64) {
+        self.project_duration
+            .store(seconds.to_bits(), Ordering::Release);
+        if let Some(clock) = self.host_clock() {
+            clock.publish_duration(seconds);
+        }
+    }
+
     fn host_clock(&self) -> Option<Arc<crate::render::transport::TransportClock>> {
         match self.document() {
             Some(document) => Some(document.clock.clone()),
@@ -2848,6 +2864,9 @@ impl EditorSession {
             payload["position_source"] = json!(view.provenance.as_str());
             payload["position_age_ms"] = json!(view.age_ms);
             payload["seek_pending"] = json!(view.seek_pending);
+            // 【两条通道共用同一个乱序判据】推送与轮询是同一份语义的两个来源；
+            // 只有轮询带序号时，晚到的推送仍然能把光标拽回去。
+            payload["sample_seq"] = json!(view.sample_seq);
         }
         payload
     }
@@ -4091,6 +4110,7 @@ pub(crate) mod tests {
                     ..Default::default()
                 },
                 0,
+                512,
             );
             let (position, playing) = session.transport();
             assert!(playing, "宿主在播放必须如实报出");
@@ -4111,6 +4131,7 @@ pub(crate) mod tests {
                     ..Default::default()
                 },
                 0,
+                512,
             );
             assert!(!session.transport().1, "停止播放必须如实回落");
         }));

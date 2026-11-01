@@ -163,6 +163,8 @@ export const initialState: SessionState = {
         positionAdvancing: false,
         playbackDurationSec: 0,
         hostAuthoritative: false,
+        positionAgeMs: null,
+        lastTransportSeq: 0,
         gpuBackend: "",
     },
 
