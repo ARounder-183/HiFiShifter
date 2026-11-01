@@ -14,8 +14,9 @@ use super::*;
 /// 长度。这不是一个可以靠调容差修好的参数问题 —— 只要存在两只钟，就必须有一个仲裁，
 /// 而任何仲裁都会在某一种真实操作上判错。
 ///
-/// 现在只有一条规则（见 `note_stream_geometry` 的 R1–R4）：
-/// **宿主每报一次位置就以它为准；两次报告之间按收到的帧数前进；跨 pass 一律归零。**
+/// 现在只有三条规则（见 `note_stream_geometry` 的 A/B/C）：
+/// **宿主每报一次位置就以它为准；两次报告之间按收到的帧数前进（无上限）；
+/// 跨 pass 一律归零。**
 #[derive(Default)]
 pub(super) struct StreamGeometry {
     pub(super) seen: AtomicBool,
@@ -39,30 +40,35 @@ pub(super) struct StreamGeometry {
     /// 【为什么是"已送来的帧数"而不是"上一位置 + 本块长"】钉住的起点不一定落在第一个
     /// 块上；累加"已送来的帧数"让位置从一开始就对齐，而不必依赖 latch 在哪一块打开。
     pub(super) frames_since_anchor: AtomicU64,
-    /// 本 pass 里"**内容没变也可以按块长推进**"的剩余预算（帧）。`0` = 不推进。
+    /// 本 pass 里"位置由**计数器**给出"的连续帧数（宿主没有报新位置）。
     ///
-    /// 【为什么必须有它】宿主停播时会用**同一个位置**反复调 `process`。那时
-    /// `raw_start` 不动，但也没有任何证据说明时间在走 —— 按块长推进会让停播的光标
-    /// 一直"前进"，捕获于是把同一小段内容反复写成新素材（FL Studio 的既有回归）。
+    /// 【它是**事实**，不是额度】旧实现这里有**两笔预算**（`advance_limit` 与
+    /// `activity_budget`，都等于 `PRE_ROLL_CAP_SEC` = 1 秒）。预算不是判据：它既不能
+    /// 证明"时间在走"（超过 1 秒的真实播放会被切断 —— 非实时 FX 预览恰好卡在
+    /// 1.025 秒），也不能否证"时间在走"（宿主真的停播时它只是恰好用完）。
     ///
-    /// 唯一的例外是**起播窗口**：`kPlaying` 上升沿之后的前 1 秒里，前段往往是静音或
-    /// 持续音，内容证据还没到，但那段时间确实是播放时间。所以预算只在上升沿打开，
-    /// 并且只在**内容在变化**或**预算未耗尽**时才允许计数器前进。
+    /// 现在它只回答三个**可核对**的问题：
     ///
-    /// 【为什么它是帧数而不是布尔】"窗口有多宽"与"已经用掉多少"是同一件事的两面；
-    /// 存一个剩余量让两者不可能互相漂移。
-    pub(super) advance_limit: AtomicU32,
-    /// "内容在流动"这条证据还剩多少帧可信（只在 `playing == false` 时消耗）。
+    ///   1. `start_window`：本 pass 的计数器窗口还开着吗（静音也要放行的那一段）；
+    ///   2. `resync_limit_frames`：宿主下次报位置时，差值落在"我们可能错过多少帧"
+    ///      之内吗（之内 = 记账纠正，之外 = 时间基切换 / 真 seek）；
+    ///   3. `new_pass`：位置倒退时，本 pass 里计数器有没有权威（有 ⇒ 那是宿主换了
+    ///      **时间基**，不是 seek）。
     ///
-    /// 【为什么与 `advance_limit` 分开】两者管的是**不同的通路**：
+    /// 【为什么它必须单调无上限】连续音频被切成两截的唯一原因就是给这个数设了上限。
+    pub(super) counted_run: AtomicU64,
+    /// 本 pass 的**位置域偏移**：宿主读数与音频真实连续性之间的固定差（帧）。
     ///
-    ///   * `advance_limit` 只在上升沿打开，管"宿主还没开始报位置"；
-    ///   * `activity_budget` 在每次 `new_pass` 充满，管"宿主钉住位置但音频在流动"。
+    /// 【为什么需要它】VEGAS 的 Event 级 FX 在起播窗口里报**绝对工程位置**，窗口结束后
+    /// 改报**事件相对位置**（实测 `raw` 从 31.091 s 跳到 0）。音频是连续的，所以这不是
+    /// seek —— 但两个读数之间差了整整一个事件偏移。偏移量就是"计数器在本 pass 里
+    /// 权威了多久"：宿主的新域从**本 pass 的起点**重新起算。
     ///
-    /// 后者此前完全没有额度，于是宿主停播后仍在送预取音频时，计数器可以一路
-    /// 前进 —— 实测 3.4 s。把它绑到 pass 上（一次播放只有一个开头），语义与它
-    /// 所服务的起播窗口完全一致。
-    pub(super) activity_budget: AtomicU64,
+    /// 于是 `position = raw_start + domain_offset`，整条 take 落在新域里（Event 起点
+    /// = 工程起点），而音频一帧不丢。`new_pass` 时清零（新一次播放，宿主的域是权威）。
+    pub(super) domain_offset: AtomicI64,
+    /// 上一块的 `kPlaying`（"停播很久之后的上升沿"需要它）。
+    pub(super) last_playing: AtomicBool,
     /// 本流的 pass 序号（R1 递增）。`0` = 还没有过任何一块。
     pub(super) pass: AtomicU64,
     /// 锚点那一刻 `continuousTimeSamples` / `projectTimeMusic` 的读数。
@@ -159,8 +165,9 @@ pub(super) const ACTIVITY_MIN_CHANGES: u32 = 1;
 /// 一个 pass 里允许累积的**前导静音**上限（秒）。
 ///
 /// 【它约束什么，不约束什么】只约束 `trailing_silent_frames` 的累积与 `start_window`
-/// 的宽度（两者都是"这次播放刚开始"的证据）；**不约束位置推进**。VEGAS 的起播窗口
-/// 约 0.66 s，1 秒足够覆盖；超过 1 秒的静音由捕获侧的 resync 零桥接补齐。
+/// 的宽度（两者都是"这次播放刚开始"的证据）；**不约束位置推进** —— 这条纪律此前被
+/// 代码违反（同一个常数被当成两笔位置预算），非实时 FX 预览因此卡在恰好 1.000 秒。
+/// VEGAS 的起播窗口约 0.66 s，1 秒足够覆盖；超过 1 秒的静音由捕获侧的记账纠正补齐。
 pub(super) const PRE_ROLL_CAP_SEC: f64 = 1.0;
 impl StreamGeometry {
     /// 记录本块的内容指纹，回答"这一块与上一块是不是同一份内容"。
@@ -201,36 +208,67 @@ impl StreamGeometry {
     pub(super) fn activity_moving(&self) -> bool {
         self.activity_changed.load(Ordering::Acquire).count_ones() >= ACTIVITY_MIN_CHANGES
     }
+
+    /// 本块是否"音频在流动"（= 宿主确实在送时间上相邻的样本）。
+    ///
+    /// 【它是**唯一**的计数器判据】此前计数器要过两笔预算（`advance_limit` /
+    /// `activity_budget`）才肯推进，而预算把连续音频切在恰好 1.000 秒。判据换回事实
+    /// 之后，位置推进不再有任何与宿主无关的上限。
+    ///
+    /// 【为什么静音也算流动】真正的静音是宿主在送**全零**，那是一段休止（真实时间）；
+    /// 而"宿主重复投递同一段有内容的缓冲"是卡住。`unchanged_run` 已经能分开它们 ——
+    /// 它要求"逐块完全相同**且非零**"。
+    ///
+    /// 【为什么"卡住"必须单独判】FL Studio 停播时 `kPlaying` 仍为 1、内容逐块相同。
+    /// 只看"有信号"会把停播判成播放，计数器一路前进（实测 3.4 s）。
+    pub(super) fn flowing(&self) -> bool {
+        let silent = self.last_block_silent.load(Ordering::Acquire);
+        let stalled = self.unchanged_run.load(Ordering::Acquire) > 0 && !silent;
+        (self.activity_moving() || silent) && !stalled
+    }
 }
 
-/// 输入块的内容指纹（只用来回答"是不是同一份内容"）。
+/// 内容指纹一次扫描覆盖的帧数（块首固定长度）。
 ///
-/// 【为什么可以抽样】它不参与任何音频计算，只区分"这一块与上一块不同"。步长 8 让
-/// 成本降到每声道 `frames/8` 次读；而任何真正在流动的音频在 20 ms 内都不可能只在
-/// 未抽样的位置上变化。
+/// 【为什么是固定长度】指纹回答的是"这一块是不是上一块的**重复投递**"，而重复投递
+/// 的形状是整块相同（含块首）。取固定长度前缀让**块长交替**不再影响判据 ——
+/// VEGAS 的块长在 1200/848 之间交替（日志实测），把块长拌进指纹会让同一份内容
+/// 被判成"在变"，重复抑制彻底失效。
 ///
-/// 【为什么把块长也拌进去】宿主在停播时可能把块长缩小/放大而内容不变 —— 那不是
-/// 时间在前进。
-/// 本块是否全零（锁存推进只对静音块生效）。
-pub(super) fn block_is_silent(block: &crate::capture::recorder::InputBlock<'_>) -> bool {
-    block
-        .planes
-        .iter()
-        .flatten()
-        .all(|plane| plane.iter().all(|sample| *sample == 0.0))
-}
+/// 【为什么是 512 而不是抽样】旧实现每 8 个采样取一个点。对"内容真的相同"这个判据
+/// 来说抽样是**不安全**的：一个周期恰好整除抽样步长的信号（持续长音最常见的形状）
+/// 会被误判成静止。512 个**连续**采样要求信号在块边界上逐位重复，那对任何真实音频
+/// 都不成立。
+pub(super) const ACTIVITY_FINGERPRINT_FRAMES: usize = 512;
 
-pub(super) fn block_activity_hash(block: &crate::capture::recorder::InputBlock<'_>) -> u64 {
+/// 一次扫描同时给出"内容指纹"与"是否全零"。
+///
+/// 【为什么合并】两者都要遍历整块；分开写就是两遍。合并之后净成本比旧实现更低
+/// （旧实现也是两遍：一遍抽样算指纹、一遍判静音）。
+pub(super) fn block_fingerprint(block: &crate::capture::recorder::InputBlock<'_>) -> (u64, bool) {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    let mut silent = true;
     for plane in block.planes.iter().flatten() {
-        let mut index = 0;
-        while index < plane.len() {
-            hash ^= u64::from(plane[index].to_bits());
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-            index += 8;
+        for (index, sample) in plane.iter().enumerate() {
+            if *sample != 0.0 {
+                silent = false;
+            }
+            if index < ACTIVITY_FINGERPRINT_FRAMES {
+                hash ^= u64::from(sample.to_bits());
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
         }
     }
-    hash ^ (block.frames as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+    (hash, silent)
+}
+
+/// 本块是否全零（锁存推进只对静音块生效）。
+///
+/// 【为什么只剩测试在用】生产路径现在一次扫描同时拿到指纹与静音
+/// （见 [`block_fingerprint`]），再单独扫一遍只为判静音就是白跑一趟。
+#[cfg(test)]
+pub(super) fn block_is_silent(block: &crate::capture::recorder::InputBlock<'_>) -> bool {
+    block_fingerprint(block).1
 }
 
 /// 一条流在本块上的位置/相位结论。

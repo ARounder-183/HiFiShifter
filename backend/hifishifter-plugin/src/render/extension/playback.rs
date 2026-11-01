@@ -116,19 +116,33 @@ impl ExtensionOwner {
 
     /// 每流几何 + 有效位置 + 相位。音频线程调用：只读写原子，不分配。
     ///
-    /// # 四条规则（没有第五条）
+    /// # 三条规则（没有第四条，也没有任何预算）
     ///
     /// ```text
-    /// R1  新 pass（!had / playing_rising / recording_rising / raw_start < last_raw）
-    ///         ⇒ anchor = raw_start，计数器归零，position = raw_start
-    /// R2  宿主没报新位置（raw_start == last_raw）
-    ///         ⇒ position = anchor + 已送来的帧数
+    /// A  锚定：!had / playing_rising / recording_rising / cycle_wrap
+    ///         ⇒ domain_offset = 0，anchor = raw_start，counted_run = 0
+    /// B  续数：宿主没报新位置（raw_start == last_raw）
+    ///         ⇒ position = anchor + 已送来的帧数（**无上限**）
     ///            （若 continuousTimeSamples / projectTimeMusic 在前进，优先用它们）
-    /// R3  宿主报了新位置（raw_start != last_raw）
-    ///         ⇒ position = raw_start。宿主永远赢，永不"纠正"它
-    /// R4  任何 raw_start < last_raw
-    ///         ⇒ 按 R1 处理（新 pass）。**永不**当成"宿主读数滞后"
+    /// C  对账：宿主报了新位置（raw_start != last_raw）
+    ///         ⇒ position = raw_start + domain_offset（宿主永远赢，永不"纠正"它）
+    ///            差值交给捕获侧：落在 counted_run 之内 ⇒ 记账纠正；
+    ///            之外 ⇒ 时间基切换（首段平移）或真 seek（另起一段）
     /// ```
+    ///
+    /// # 位置倒退为什么不再一律是新 pass
+    ///
+    /// 「位置倒退」有两种成因，处置完全相反：
+    ///
+    ///   * 用户 seek / 循环回卷 —— 必须另起一段（新内容）；
+    ///   * 宿主改了**时间基**（VEGAS 的 Event 级 FX：起播窗口报绝对工程位置，窗口
+    ///     结束后改报事件相对位置）—— 音频是连续的，另起一段会把一段连续演奏劈成
+    ///     两段，时间线上于是出现"前 0.6 s 在 31 秒开外、其余在 0"的断层。
+    ///
+    /// 区分它们需要的不是位置，而是"计数器在本 pass 里有没有权威"：`counted_run > 0`
+    /// 说明宿主**有一段时间没报位置**，那么它现在报的这个数与旧读数**不同域**，
+    /// 不可比较。此时保留音频连续性，并记下两域之差（`domain_offset`）。
+    /// `counted_run == 0` 说明宿主一直在报位置，倒退只能是 seek。
     ///
     /// # 为什么删掉了 1.5 s 容差与"锁存偏移"
     ///
@@ -211,7 +225,11 @@ impl ExtensionOwner {
         let advance_before = geometry.frames_since_anchor.load(Ordering::Acquire);
         // 【为什么先读再判】`resync_limit_frames` 的语义是"计数器**可能**错过的范围"，
         // 必须用本块处理**之前**的累积值；本块一写就被清零了。
-        let counted_before = advance_before.saturating_add(frames as u64);
+        // 【为什么是 `counted_run` 而不是"自锚点以来送来的帧数"】后者在任何连续播放里
+        // 都等于块长，于是"计数器可能错过多少"退化成"一块" —— 一个与事实无关的常数。
+        // `counted_run` 只数**位置真的由计数器给出**的帧。
+        let counted_before = geometry.counted_run.load(Ordering::Acquire);
+        let domain_before = geometry.domain_offset.load(Ordering::Acquire);
 
         // 【循环回卷】只有循环播放才有"回卷"这个形状：块首回退，或块首不变而时间前进。
         let cycle_wrap = if time.cycle_active {
@@ -234,8 +252,15 @@ impl ExtensionOwner {
 
         let host_rewound = had && raw_start < last_raw;
         let host_moved = had && raw_start != last_raw;
-        // R1 + R4：新一次播放。回退**永远**是新 pass —— 它不是"读数滞后"。
-        let new_pass = !had || playing_rising || recording_rising || host_rewound;
+        // 【时间基切换 vs seek】见本函数的规则说明：计数器有权威 ⇒ 宿主有一段时间
+        // 没报位置 ⇒ 它现在报的这个数与旧读数**不同域**，不可比较。
+        let time_base_switch = host_rewound && counted_before > 0;
+        // A：新一次播放。回退只在**计数器没有权威**时才是新 pass。
+        let new_pass = !had
+            || playing_rising
+            || recording_rising
+            || cycle_wrap
+            || (host_rewound && !time_base_switch);
 
         // 本块位置的"锚 + 偏移"。R1/R3 时锚就是宿主刚报的值、偏移为 0；
         // R2 时锚保持不动、偏移是已送来的帧数。两条路径因此共用同一句
@@ -261,11 +286,11 @@ impl ExtensionOwner {
         let mut counted = false;
 
         if new_pass || host_moved {
-            // R1 / R3 / R4：宿主给了位置，它就是权威。
+            // A / C：宿主给了位置，它就是权威。
             //
-            // R3 的差值只做**记账**（`jumps` + `last_jump`），绝不参与位置的选取 ——
+            // 差值只做**记账**（`jumps` + `last_jump`），绝不参与位置的选取 ——
             // 那正是旧实现出错的地方。真正的纠正发生在捕获侧：它持有 `expected_next`，
-            // 才判得出"这个差值是桥接还是裁剪"。
+            // 才判得出"这个差值是记账纠正、时间基切换还是真 seek"。
             if host_moved && !new_pass {
                 let expected = anchor_before.saturating_add(advance_before as i64);
                 let jump = raw_start.saturating_sub(expected);
@@ -274,7 +299,42 @@ impl ExtensionOwner {
                     geometry.last_jump.store(jump, Ordering::Release);
                 }
             }
-            geometry.anchor.store(raw_start, Ordering::Release);
+            if new_pass {
+                // A：新一次播放。宿主的域重新成为权威。
+                geometry.domain_offset.store(0, Ordering::Release);
+                geometry.counted_run.store(0, Ordering::Release);
+                position = raw_start;
+                geometry.pass.fetch_add(1, Ordering::Relaxed);
+            } else if time_base_switch {
+                // 【时间基切换：把整条流挪到新域里】
+                //
+                // 偏移量取**计数器在本 pass 里权威的帧数**：宿主的新域从本 pass 的
+                // 起点重新起算（VEGAS 的 Event 级 FX：窗口结束后 `projectTimeSamples`
+                // 从"事件在工程里的绝对位置"变成"事件内的相对位置"，而后者的 0 就是
+                // 事件的起点，也就是本 pass 的起点）。
+                //
+                // 于是 `position = raw_start + counted_run` —— 音频一帧不丢，整条 take
+                // 落在新域里（Event 起点 = 工程起点）。捕获侧看到的是一个**超出记账
+                // 误差**的向后差值，于是把已经写下的首段整段平移（见 `rebase_counted_run`）。
+                let offset = counted_before.min(i64::MAX as u64) as i64;
+                geometry.domain_offset.store(offset, Ordering::Release);
+                position = raw_start.saturating_add(offset);
+                // 本块的位置不是宿主给的读数，是"宿主读数 + 域偏移"。
+                counted = true;
+                geometry.counted_blocks.fetch_add(1, Ordering::Relaxed);
+                geometry
+                    .counted_frames
+                    .fetch_add(frames as u64, Ordering::Relaxed);
+                geometry.position_resyncs.fetch_add(1, Ordering::Relaxed);
+                self.position_resyncs.fetch_add(1, Ordering::Relaxed);
+                geometry.counted_run.store(0, Ordering::Release);
+            } else {
+                // C：宿主报了新位置（同域）。差值落在 `counted_run` 之内是记账纠正，
+                // 之外是 seek —— 判决在捕获侧。
+                position = raw_start.saturating_add(domain_before);
+                geometry.counted_run.store(0, Ordering::Release);
+            }
+            geometry.anchor.store(position, Ordering::Release);
             geometry.continuous_anchor.store(
                 time.continuous.unwrap_or(last_continuous),
                 Ordering::Release,
@@ -287,91 +347,15 @@ impl ExtensionOwner {
             geometry
                 .frames_since_anchor
                 .store(frames as u64, Ordering::Release);
-            if new_pass {
-                // 【窗口只在上升沿打开】`!had` 单独不打开：第一块的位置本来就是宿主
-                // 给的，不需要推进；而"宿主重复投递同一位置"必须以不推进告终。
-                geometry.advance_limit.store(
-                    if playing_rising || recording_rising {
-                        pre_roll_cap.min(u64::from(u32::MAX)) as u32
-                    } else {
-                        0
-                    },
-                    Ordering::Release,
-                );
-                // 【活动额度随 pass 充满】一次播放只有一个开头，所以"内容在流动"这条
-                // 证据的可信长度也只有一个开头那么多。用完就不再借它。
-                geometry
-                    .activity_budget
-                    .store(pre_roll_cap, Ordering::Release);
-                geometry.pass.fetch_add(1, Ordering::Relaxed);
-            } else {
-                // R3：宿主报了新位置 ⇒ 计数器不再有权推进，窗口一并作废。
-                geometry.advance_limit.store(0, Ordering::Release);
-            }
-            position = raw_start;
         } else {
-            // R2：宿主没报新位置。用最好的宿主时钟，最后才是计数器。
+            // B：宿主没报新位置。用最好的宿主时钟，最后才是计数器（**无上限**）。
+            //
+            // 【为什么这里不再有预算】旧实现有两笔各 1 秒的额度：`advance_limit`
+            // （`kPlaying` 上升沿打开）与 `activity_budget`（每次 `new_pass` 充满）。
+            // 它们想回答的是"时间到底在不在走"，而那个问题 `flowing()` 回答得更好，
+            // 而且**不需要上限**：上限不是判据，它只是把连续音频切在恰好 1.000 秒
+            // （非实时 FX 预览的功能性截断就是这么来的）。
             let sane = (frames as i64).saturating_mul(4).max(64);
-            //
-            // 见到"逐块完全相同的非零内容"就当场把窗口作废 —— 那是停播重复投递的
-            // 形状，继续推进会让停播的光标一直"前进"（FL Studio 的既有回归）。
-            if repeated_nonzero
-                && advance < u64::from(geometry.advance_limit.load(Ordering::Acquire))
-            {
-                geometry.advance_limit.store(0, Ordering::Release);
-            }
-            let limit = u64::from(geometry.advance_limit.load(Ordering::Acquire));
-            let window_open = advance < limit;
-            // 【计数器凭什么有权推进】只有两种情形，且**两者都有明确预算**：
-            //
-            //   (a) 起播窗口（window_open）—— 本 pass 刚开始，宿主还没接管位置，
-            //       预算由 advance_limit 给（PRE_ROLL_CAP_SEC）。
-            //   (b) 真实播放（playing）且内容在流动 —— 宿主说 transport 在走，
-            //       位置读数可能滞后，用块长接着数是对的。
-            //
-            // 【为什么 (b) 必须带 playing】旧实现只看"内容在流动"，于是宿主
-            // **停播**（kPlaying 为假）却仍在送预取音频时，计数器照样一路前进 ——
-            // 实测一次跑掉 162992 帧（3.4 s），而宿主报的位置只挪了 1220 帧。
-            // 那 3.4 s 的偏移正是"反复播 0.7 s 内容完全对不上"：重播时我们从
-            // anchor + 偏移 读，读到的是素材里另一段。
-            //
-            // 【为什么不是"按秒数封顶"】封顶需要一个固定常数（比如 0.25 s），
-            // 而实测的 VEGAS 起播窗口是 0.66 s —— 任何小于它的常数都会把起播切断。
-            // 预算本来就该由"本 pass 是不是刚开始"给出，而不是一个与宿主无关的秒数。
-            // 【"内容在流动"这条证据也必须有限额】它是起播窗口的第二条通路：
-            // VEGAS 的起播窗口里宿主把位置钉在 0、却已经在按块长送音频，那时
-            // `playing_rising` 早已过去，`window_open` 也已用完，只有"内容在变"
-            // 还能说明时间在走。
-            //
-            // 但这条证据**无限用**就成了缺陷：宿主停播后仍在送预取音频时，内容
-            // 同样在变，计数器于是一路前进 —— 实测一次跑掉 162992 帧（3.4 s），
-            // 而宿主报的位置只挪了 1220 帧。那正是"反复播 0.7 s 内容完全对不上"。
-            //
-            // 所以给它与本 pass 起播窗口**同一份额度**：`activity_budget` 在
-            // `new_pass` 时充满，用一帧扣一帧。额度用完，位置就回到宿主报的那个点，
-            // 等宿主恢复报数由 R3 接管。
-            //
-            // 【为什么额度不能是"每次 pass 都重新充满"之外的东西】起播窗口本身就是
-            // 一次性的：一次播放只有一个开头。额度绑在 pass 上，语义与它完全一致。
-            // 【`kPlaying` 在这里的作用】它把"内容在流动"这条证据分成两种用法：
-            //
-            //   * 宿主说 transport 在走（`playing`）⇒ 位置读数滞后是常态，
-            //     计数器就是正确来源，**不设额度**；
-            //   * 宿主说没在走（停播 / 起播窗口）⇒ 位置才是权威，
-            //     只在"本 pass 刚开始"的额度内才允许猜。
-            //
-            // 现场日志里跑飞的那 3.4 s 全部发生在 `playing=0` 的块上，所以第二档
-            // 一收紧，漂移就没有了；而真实播放（`playing=1`）一个行为都没变。
-            let mut may_advance = window_open;
-            let mut uses_activity_budget = false;
-            if !may_advance && geometry.activity_moving() {
-                if playing {
-                    may_advance = true;
-                } else if geometry.activity_budget.load(Ordering::Acquire) >= frames as u64 {
-                    may_advance = true;
-                    uses_activity_budget = true;
-                }
-            }
             // 本块相对锚点的偏移；`advance` 是"按块长算，本块应该在哪"。
             let mut offset = advance as i64;
             let mut advanced = false;
@@ -411,30 +395,35 @@ impl ExtensionOwner {
                     }
                 }
             }
-            if !advanced && may_advance {
-                // 计数器：宿主没说，就按"收到了多少帧"接着数 —— 但只在有证据的时候。
+            if advanced {
+                // 位置来自宿主时钟：计数器没有权威。
+                geometry.counted_run.store(0, Ordering::Release);
+            } else if geometry.flowing() {
+                // 计数器：宿主没报位置，但音频确实在流动 —— 按"收到了多少帧"接着数。
+                //
+                // 【没有上限】唯一能证明"时间没走"的事实是"同一段**非零**内容被逐块
+                // 重复投递"（`flowing()` 里的 `stalled`），而它已经判过了。再叠一层
+                // 与宿主无关的帧数上限，只会把连续音频切在恰好那个常数上。
                 position = anchor.saturating_add(offset);
                 counted = true;
                 advanced = true;
-                if uses_activity_budget {
-                    geometry
-                        .activity_budget
-                        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |budget| {
-                            Some(budget.saturating_sub(frames as u64))
-                        })
-                        .ok();
-                }
                 geometry.counted_blocks.fetch_add(1, Ordering::Relaxed);
                 geometry
                     .counted_frames
                     .fetch_add(frames as u64, Ordering::Relaxed);
+                geometry.counted_run.fetch_add(frames as u64, Ordering::Relaxed);
             }
             if !advanced {
                 // 【停播：位置回到宿主报的那个点】没有任何证据说明时间在走，而宿主
                 // 反复投递的是同一个位置 —— 继续累加等于把停播时间算成播放时间，
                 // 捕获于是把同一小段反复写成新素材（FL Studio 的既有回归）。
+                //
+                // 【为什么要清 `counted_run`】计数器此刻**没有**留下任何仍然生效的
+                // 记账：位置就是锚点。留着它会让"停播很久之后的一次 seek"被误判成
+                // 时间基切换（那会把已经写下的首段整段平移走）。
                 position = anchor;
                 offset = 0;
+                geometry.counted_run.store(0, Ordering::Release);
             }
             geometry.frames_since_anchor.store(
                 offset.saturating_add(frames as i64).max(0) as u64,
@@ -447,11 +436,16 @@ impl ExtensionOwner {
         let mut discard_pre_roll = false;
         // 【停播静音 vs 起播窗口静音】两者都是"全零块"，但只有后者是播放时间。
         //
-        // 真正能区分它们的是**上升沿之前那一块的内容**：
+        // 真正能区分它们的是**上升沿之前那一块在做什么**：
         //   * 起播窗口：宿主先送**静音**，内容出现时才把播放位置置 1；
-        //   * 停播重复投递：宿主把**同一段有内容的音频**反复送。
-        // 所以判据是"计数器已经累积超过一个窗口 **且** 上一块不是静音"。
-        if (playing_rising || recording_rising) && advance_before > pre_roll_cap && !silent {
+        //   * 停播重复投递：宿主在**停播**状态下把同一段有内容的音频反复送。
+        // 旧判据是"计数器已经累积超过一个窗口"—— 那是一个额度而不是事实（而且它在
+        // 非实时预览 / 离线渲染里恒为真）。现在直接问上一块的 kPlaying。
+        if (playing_rising || recording_rising)
+            && !geometry.last_playing.load(Ordering::Acquire)
+            && !silent
+            && preceding_silent_frames > 0
+        {
             preceding_silent_frames = 0;
             discard_pre_roll = true;
         }
@@ -560,6 +554,7 @@ impl ExtensionOwner {
             Ordering::Release,
         );
         geometry.last_source.store(source.code(), Ordering::Release);
+        geometry.last_playing.store(playing, Ordering::Release);
         if stream == ProcessStream::Realtime {
             self.realtime_flow
                 .store(phase != TransportPhase::Resting, Ordering::Release);
@@ -589,7 +584,11 @@ impl ExtensionOwner {
             preceding_silent_frames,
             counted,
             discard_pre_roll,
-            start_window: advance < u64::from(geometry.advance_limit.load(Ordering::Acquire)),
+            // 【起播窗口 = 计数器此刻有权威，且它还没数满一个前导窗口】它只服务
+            // 门控的"窗口内静音也要放行"，**不约束位置推进**（见 PRE_ROLL_CAP_SEC）。
+            start_window: counted
+                && geometry.counted_run.load(Ordering::Acquire) > 0
+                && geometry.counted_run.load(Ordering::Acquire) <= pre_roll_cap,
             repeated_nonzero,
             position_source: source,
         }
@@ -643,11 +642,26 @@ impl ExtensionOwner {
             };
         }
         match evidence {
+            Some(_) => Self::emit_allowed(evidence),
+            // 没有上下文证据时退回宿主播放位（旧测试/退化路径）。
+            None => playing,
+        }
+    }
+
+    /// 本块是否允许写出内容。**三道门共用这一个谓词**。
+    ///
+    /// 【为什么必须只有一个】此前三道门各写各的：`capture_should_emit` 的第一道放行
+    /// 起播窗口（`start_window && !repeated_nonzero`），而 `capture_stage` 的第二道只看
+    /// `allow_output`，于是前者放行的每一块都被后者淡成零 —— "窗口内输出应当连续"
+    /// 这条承诺从未生效，用户听到的仍然是起播那一下咔。
+    ///
+    /// 【真值表】离线 / prefetch：永远允许（它们的输出稍后才被播放，此刻的传输状态
+    /// 与内容正确性无关，且重复请求可能是参数变化后的重算）。实时：`allow_output`
+    /// 为真，或本 pass 的计数器窗口还开着且内容不是"逐块相同的非零重复"。
+    pub(super) fn emit_allowed(evidence: Option<BlockEvidence>) -> bool {
+        match evidence {
             Some(evidence) => match evidence.stream {
-                ProcessStream::Offline => true,
-                // prefetch 的输出稍后才被播放；重复请求可能是参数变化后的重算，
-                // 抑制会留下旧结果。传输状态与重复判定都不适用于它。
-                ProcessStream::Prefetch => true,
+                ProcessStream::Offline | ProcessStream::Prefetch => true,
                 ProcessStream::Realtime => {
                     // 【为什么起播窗口要放行】窗口内的前段可能是静音；按
                     // `allow_output == false` 清掉它，内容出现时就是一次零→内容的
@@ -656,8 +670,7 @@ impl ExtensionOwner {
                     evidence.allow_output || (evidence.start_window && !evidence.repeated_nonzero)
                 }
             },
-            // 没有上下文证据时退回宿主播放位（旧测试/退化路径）。
-            None => playing,
+            None => true,
         }
     }
 
@@ -764,7 +777,10 @@ impl ExtensionOwner {
         // 【为什么零帧块不记】它是参数 flush，不代表时间轴在走。把它记成一次"内容
         // 变化"会让紧随其后的真实块被当成新素材（多出一块本不该有的位移）。
         if block.frames > 0 {
-            self.streams[stream.index()].note_activity(block_activity_hash(&block));
+            // 【一次扫描给出两个结论】内容指纹（重复投递判定）与静音（休止判定）
+            // 都要遍历整块；分开写就是两遍。见 `block_fingerprint`。
+            let (fingerprint, silent) = block_fingerprint(&block);
+            self.streams[stream.index()].note_activity(fingerprint);
             // 【T12：不再要求 `has_audio()`】宿主在 pre-roll 期间标 `silence_flags` /
             // 给空输入平面是**正常**的（`capture.rs` 的 `let silent = !block.has_audio();`
             // 就在用同一语义判定"这一块是静音"）。把它当成"没有证据"，等于告诉自己
@@ -773,7 +789,7 @@ impl ExtensionOwner {
             //
             // 注意：`has_audio()` 的其它读点（"这条总线接没接"）保持原样，本次只改
             // 沉默累积这一个调用点。
-            self.streams[stream.index()].note_block_silence(block_is_silent(&block));
+            self.streams[stream.index()].note_block_silence(silent);
         }
         // 【为什么位置是否推进要按流记】它决定"停播时要不要清输出"与捕获的
         // lookbehind。两条流的块会交替到达；跨流比较会把 prefetch 的移动当成
@@ -888,6 +904,7 @@ impl ExtensionOwner {
             allow_output,
             start_window: stream_block.start_window,
             repeated_nonzero: stream_block.repeated_nonzero,
+            cycle_wrap: stream_block.cycle_wrap,
             split,
         })
     }
@@ -991,6 +1008,11 @@ impl ExtensionOwner {
         if self.is_bound() || self.bound_once.load(Ordering::Acquire) {
             return true;
         }
+        // 【零帧块不参与门控】它是参数 flush，不代表时间轴在走；把它算进
+        // "连续多少块没推进"会让紧随其后的真实块被吞掉 10–20 ms。
+        if block.frames == 0 {
+            return true;
+        }
         match stream {
             ProcessStream::Offline => true,
             // prefetch 的输出稍后才被播放；重复请求可能是参数变化后的重算，
@@ -1001,10 +1023,12 @@ impl ExtensionOwner {
                     self.gate_resting_run.store(0, Ordering::Release);
                     return true;
                 }
+                // 【重复的判据只有"起点相同"】块长**不参与**：宿主的块长会变（实测
+                // VEGAS 在 1200/848 之间交替），而同一段内容被重复投递时起点不变。
+                // 把块长拌进来，重复抑制在块长交替的宿主上就完全失效 —— 停播时每块
+                // 都被当成新内容放行，用户听到的是固定光标处那一小段在循环。
                 let same = self.rt_last_emitted_valid.load(Ordering::Acquire)
-                    && self.rt_last_emitted_start.load(Ordering::Acquire) == position
-                    && self.rt_last_emitted_frames.load(Ordering::Acquire)
-                        == u32::try_from(block.frames).unwrap_or(u32::MAX);
+                    && self.rt_last_emitted_start.load(Ordering::Acquire) == position;
                 let quiet = phase == TransportPhase::Resting || same;
                 if !quiet {
                     self.gate_resting_run.store(0, Ordering::Release);
@@ -1091,6 +1115,11 @@ impl ExtensionOwner {
     ///    64 帧的交叉淡化足够；再淡一次反而多一次能量塌陷。
     pub(super) fn read_position_jump(&self, evidence: Option<BlockEvidence>) -> Option<u64> {
         let evidence = evidence?;
+        // 【循环回卷不是跳变】回卷让块首回到循环起点，而本函数的判据是"本块起点与
+        // 上一块终点的差"。不排除它，每一圈都会多装一次接缝淡化（每圈开头一下咔）。
+        if evidence.cycle_wrap {
+            return None;
+        }
         let previous = self.rt_last_read_position.load(Ordering::Acquire);
         let previous_frames = i64::from(self.rt_last_read_frames.load(Ordering::Acquire));
         if previous <= 0 || !self.rt_last_emitted_valid.load(Ordering::Acquire) {
@@ -1188,7 +1217,7 @@ impl ExtensionOwner {
         if output != CaptureOutput::Recording {
             if let Some(evidence) = evidence {
                 if evidence.stream == ProcessStream::Realtime
-                    && !evidence.allow_output
+                    && !Self::emit_allowed(Some(evidence))
                     && !self.is_bound()
                     && !self.bound_once.load(Ordering::Acquire)
                 {

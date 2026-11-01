@@ -885,7 +885,22 @@ impl CaptureStore {
                     continue;
                 }
             };
-            let sample_rate = segments[0].sample_rate;
+            // 【段数为 0 不能 panic】`sidecar::read` 对一份"头部完整、段表为空"的文件
+            // 会返回空 `Vec`，而这里此前直接 `segments[0]`。它发生在**宿主的 setState
+            // 线程**上、并穿过 C ABI —— 一次 panic 就是一次宿主崩溃，且完全无法归因。
+            // 与"逐条降级"的既有纪律一致：记成缺失，继续恢复下一条。
+            let Some(first) = segments.first() else {
+                log::warn!("[capture] take {id} restored zero segments; treating it as missing");
+                missing.push(MissingCapture {
+                    id,
+                    frames: entry["frames"].as_u64().unwrap_or(0),
+                    start_sec: entry["startSec"].as_f64(),
+                    end_sec: entry["endSec"].as_f64(),
+                    sample_rate: entry["sampleRate"].as_u64().unwrap_or(0) as u32,
+                });
+                continue;
+            };
+            let sample_rate = first.sample_rate;
             let (_, summary) = timeline::build(&segments, id, 120.0);
             self.takes.lock_or_recover().push(CaptureTake {
                 id,
@@ -1608,7 +1623,7 @@ impl CaptureStore {
             "[capture] take {id}: frames={} ({:.3}s) rate={} coverage={} gaps={} \
              lead_in={} ({:.3}s) first_signal_at={} pre_roll_frames={} pending_stashed={} \
              bridged_window_blocks={} resync_bridged_frames={} counted_blocks={} \
-             counted_frames={} falsified_lead_in={}",
+             counted_frames={} rebases={} rebased_frames={} falsified_lead_in={}",
             all.iter().map(|segment| segment.filled as u64).sum::<u64>(),
             all.iter().map(|segment| segment.filled as u64).sum::<u64>() as f64 / rate,
             sample_rate,
@@ -1626,6 +1641,8 @@ impl CaptureStore {
             diagnostics.resync_bridged_frames,
             diagnostics.counted_blocks,
             diagnostics.counted_frames,
+            diagnostics.rebases,
+            diagnostics.rebased_frames,
             u8::from(lead_in.falsified),
         );
         if diagnostics.pre_roll_frames == 0

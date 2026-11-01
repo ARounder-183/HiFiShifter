@@ -108,6 +108,19 @@ const LIMIT_WARNING_SEC: u64 = 10;
 const DECLICK_FRAMES: usize = 256;
 /// 向前桥接的上限（秒）。超过它就不是"记账纠正"，而是真实 seek。
 const MAX_BRIDGE_SEC: u64 = 2;
+/// 一次"整段平移"（rebase）愿意移动的最长音频（秒）。
+///
+/// 【它约束的是"愿意改动多少已录内容"，不是"偏移可以有多大"】偏移量按定义无界 ——
+/// 一个事件可以摆在工程的任意位置。给它常数上限，等于"偏移超过 N 秒的工程仍然错位"，
+/// 而那正是用户报的那一条。所以上限落在"被移动的音频长度"上：60 秒足够覆盖任何
+/// 单个事件的起播窗口（实测 0.665 s），又让最坏情况下的改动量有界。
+const REBASE_MAX_SEC: u64 = 60;
+/// 封口段缓冲在非音频线程上预先备好的容量（条）。
+///
+/// 【为什么是 4】非音频线程每个 tick 都会 `drain_sealed`，所以缓冲里通常只有
+/// 0~1 条；4 给足抖动余量，又不至于让每次换段都占着更多内存（每条是一整段 PCM
+/// 的 `Vec` 头，数据本身已经在 spares 里）。
+const SEALED_HEADROOM: usize = 4;
 
 /// 一个段的**结束原因**。它是用户可见诊断的一部分：为什么录到这里就断了。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -307,6 +320,24 @@ fn cover_range(
     coverage[*len] = range;
     *len += 1;
     true
+}
+
+/// 把"空表 = 整段都是我们的"这个**隐式**约定，在它第一次被拆开时**显式**写成 `0..upto`。
+///
+/// 【为什么必须有】[`cover_range`] 在 `len == 0` 时会直接把第一条区间写成 `coverage[0]`，
+/// 于是"之前那些帧"从"整段都算录到"变成了"一个洞"。实测**每一个 take** 的首块
+/// （lookbehind 提交的那一块）都因此变成 25 ms 的洞：播放时那 25 ms 回退宿主原声、
+/// 边界处再切一次源 —— 那就是用户从第三轮起就在报的"起播一次咔"。日志里它一直以
+/// `FALSIFIED LEAD-IN` 的 ERROR 形式自我举报（`falsified_lead_in=1`，每个 take 都有）。
+///
+/// 【为什么放在这里而不是只改 `cover_range`】`cover_range` 不知道 `upto` 是多少（那是
+/// 调用方才知道的"已经写到哪里"）。把它做成一个独立的、必须在 `cover_range` 之前调用
+/// 的显式步骤，任何新增的写入点只要照抄这两行就自动正确。
+fn claim_whole_before(coverage: &mut [std::ops::Range<usize>], len: &mut usize, upto: usize) {
+    if *len == 0 && upto > 0 {
+        coverage[0] = 0..upto;
+        *len = 1;
+    }
 }
 
 impl Segment {
@@ -824,6 +855,13 @@ pub(crate) struct CaptureDiagnostics {
     /// 也是下一轮排查"位置为什么会跳"时第一个要看的数。
     pub counted_blocks: u64,
     pub counted_frames: u64,
+    /// 首段整段平移的次数 / 累计平移帧数（时间基切换）。
+    ///
+    /// 【为什么必须可观测】它是"宿主换了时间基"这一事件的唯一证据。日志里出现
+    /// `rebases=1 rebased_frames=31568` 就说明那一次 Event 级 FX 的断层被正确识别成
+    /// 摆放错误（整段平移），而不是被切成两段。
+    pub rebases: u64,
+    pub rebased_frames: u64,
 }
 
 /// 捕获状态机。**只有音频线程写**；非音频线程在锁下补充备用缓冲与收走封口的段。
@@ -985,6 +1023,13 @@ pub(crate) struct Capture {
     /// 位置由插件接着数而写入的块数 / 帧数（见 `CaptureDiagnostics` 的同名字段）。
     pub counted_blocks: u64,
     pub counted_frames: u64,
+    /// 首段整段平移的次数 / 累计平移帧数（时间基切换，见 [`Self::rebase_counted_run`]）。
+    ///
+    /// 【为什么必须可观测】它是"宿主换了时间基"这一事件的唯一证据。现场日志里
+    /// 出现 `rebases=1 rebased_frames=31568` 就说明那一次 Event 级 FX 的断层被正确
+    /// 识别成了摆放错误，而不是被切成两段。
+    pub rebases: u64,
+    pub rebased_frames: u64,
 }
 
 impl Default for Capture {
@@ -1045,6 +1090,8 @@ impl Default for Capture {
             bridged_window_blocks: 0,
             counted_blocks: 0,
             counted_frames: 0,
+            rebases: 0,
+            rebased_frames: 0,
         }
     }
 }
@@ -1244,6 +1291,8 @@ impl Capture {
             pre_roll_frames: self.pre_roll_frames,
             counted_blocks: self.counted_blocks,
             counted_frames: self.counted_frames,
+            rebases: self.rebases,
+            rebased_frames: self.rebased_frames,
         }
     }
 
@@ -1272,8 +1321,15 @@ impl Capture {
     }
 
     /// 收走已封口的段（非音频线程）。
+    ///
+    /// 【为什么要在这里重新备好容量】`mem::take` 把 `sealed` 换成一个**零容量**的
+    /// `Vec`，于是音频线程上下一次 `sealed.push` 就是一次分配 —— 而它发生在音频
+    /// 线程上，且每次换段都会发生（8 秒一段）。这里（非音频线程）先备好容量，
+    /// 音频线程的 push 就落在既有容量里。
     pub(crate) fn drain_sealed(&mut self) -> Vec<Segment> {
-        std::mem::take(&mut self.sealed)
+        let taken = std::mem::take(&mut self.sealed);
+        self.sealed.reserve(SEALED_HEADROOM);
+        taken
     }
 
     /// 收走全部段：封口当前段 + 已封口的（promote 用，非音频线程）。
@@ -1872,6 +1928,14 @@ impl Capture {
         pending.loss = SegmentLoss::First;
         pending.closed = ClosedReason::Full;
         pending.peak = [0.0; 2];
+        // 【拷进来的帧就是"我们的"】与 `write_block` 同一口径：只有真的从宿主样本里
+        // 拷过才算录到。此前这里只拷样本、不登记覆盖，于是 `commit_pending` 把 pending
+        // 变成 active 时 `coverage_len == 0`（= 整段都算录到），紧接着的 `write_block`
+        // 一调 `cover_range` 就把哨兵覆盖成单区间 —— 首块那 1200 帧从此变成洞。
+        let transcribed = block
+            .planes
+            .iter()
+            .any(|plane| plane.is_some_and(|plane| plane.len() >= skip.saturating_add(writable)));
         for (channel, plane) in pending.planes.iter_mut().enumerate() {
             let target = &mut plane[..writable];
             match block.planes.get(channel).copied().flatten() {
@@ -1888,6 +1952,11 @@ impl Capture {
                 }
             });
             pending.peak[channel] = peak;
+        }
+        if transcribed
+            && !cover_range(&mut pending.coverage, &mut pending.coverage_len, 0..writable)
+        {
+            pending.coverage_overrun = true;
         }
         self.pendings[slot].key = Some(key);
         self.pendings[slot].ready = true;
@@ -2022,9 +2091,13 @@ impl Capture {
                 _ => target.fill(0.0),
             }
         }
-        if transcribed && !cover_range(&mut active.coverage, &mut active.coverage_len, offset..end)
-        {
-            active.coverage_overrun = true;
+        if transcribed {
+            // 【先转写哨兵】`len == 0` 的意思是"整段都算录到"；直接 `cover_range` 会把
+            // 它覆盖成单区间，于是 `0..offset` 从"录到了"变成"一个洞"。
+            claim_whole_before(&mut active.coverage, &mut active.coverage_len, offset);
+            if !cover_range(&mut active.coverage, &mut active.coverage_len, offset..end) {
+                active.coverage_overrun = true;
+            }
         }
         // 峰值只服务 UI；覆盖后保守地重算整段峰值，避免显示一个已经不存在的峰值。
         for (channel, plane) in active.planes.iter().enumerate() {
@@ -2120,6 +2193,75 @@ impl Capture {
         self.last_position = Some(new_start);
         self.last_written = None;
         self.overhang_trimmed_frames = self.overhang_trimmed_frames.saturating_add(dropped as u64);
+        true
+    }
+
+
+    /// 把"计数器窗口"整段平移，使它的**右端恰好落在** `new_end`。
+    ///
+    /// 返回 `true` = 平移成功且同一段可以继续写（`expected_next` 已对齐到 `new_end`）。
+    ///
+    /// 【为什么右端对齐而不是左端】宿主刚报的位置描述的是**本块**，也就是"计数器窗口
+    /// 之后紧接着的那一帧"。所以窗口的右端必须与它重合；左端由窗口长度反推。这正是
+    /// "时间基偏移"的定义：整段音频在工程上整体挪了一个偏移量。
+    ///
+    /// 【为什么只在首段】首段之前没有任何素材，平移不可能与别的内容重叠；中段之前有
+    /// 内容，平移会撕开与前面的连续性（那种情形仍走裁剪 / 另起一段，见调用点）。
+    ///
+    /// 【为什么平移量没有上限】平移量就是**时间基偏移**，按定义无界（一个事件可以在
+    /// 工程的任意位置）。给它常数上限，就等于"偏移超过 N 秒的工程仍然错位" —— 而那
+    /// 正是用户报的这一条。需要设上限的是"愿意移动多少音频"（[`REBASE_MAX_SEC`]），
+    /// 它决定最坏情况下我们改动了多少已录内容。
+    fn rebase_counted_run(&mut self, new_end: i64) -> bool {
+        // 【只在首段】见上面的说明。
+        if !self.sealed.is_empty() {
+            return false;
+        }
+        let sample_rate = self.sample_rate;
+        if sample_rate == 0 {
+            return false;
+        }
+        let Some(active) = self.active.as_mut() else {
+            return false;
+        };
+        let filled = active.filled;
+        if filled == 0 || filled as u64 > u64::from(sample_rate) * REBASE_MAX_SEC {
+            return false;
+        }
+        let end = active.origin.saturating_add(filled as i64);
+        let shift = new_end.saturating_sub(end);
+        if shift == 0 {
+            // 已经对齐：什么都不用做，但"同一段可以继续写"仍然成立。
+            self.expected_next = Some(new_end);
+            self.last_position = Some(new_end);
+            self.last_written = None;
+            return true;
+        }
+        let new_origin = active.origin.saturating_add(shift);
+        if new_origin < 0 {
+            // 平移后头部越界：只保留 `[0, …)` 的部分（与 `clamp_piece` 同一口径）。
+            let drop = (-new_origin) as usize;
+            if drop >= filled {
+                return false;
+            }
+            let keep = filled - drop;
+            for plane in active.planes.iter_mut() {
+                // 【为什么不是 `drain`】`copy_within` + `truncate` 不碰分配器、不跑
+                // 析构，是音频线程上唯一可以用的"丢弃前 N 项"写法。
+                plane.copy_within(drop..filled, 0);
+                plane.truncate(keep);
+            }
+            active.filled = keep;
+            retain_before(&mut active.coverage, &mut active.coverage_len, keep);
+            active.origin = 0;
+        } else {
+            active.origin = new_origin;
+        }
+        self.rebases = self.rebases.saturating_add(1);
+        self.rebased_frames = self.rebased_frames.saturating_add(shift.unsigned_abs());
+        self.expected_next = Some(new_end);
+        self.last_position = Some(new_end);
+        self.last_written = None;
         true
     }
 
@@ -2289,6 +2431,8 @@ impl Capture {
         // 可能差一小段。向前用静音桥接（缺的正是真实播放的静音），向后裁掉多记的尾巴；
         // 两种都继续同一段，不能因为一个记账误差把 take 切成两个 clip。
         let mut resync_continued = false;
+        // 本块是"整段平移"（时间基切换）的结果：它**不是**接缝，不该做淡入。
+        let mut rebased = false;
         if part == 0 {
             match self.expected_next {
                 Some(expected) => {
@@ -2304,18 +2448,28 @@ impl Capture {
                     // 那是为"没有上升沿的钉住窗口里 `last_source` 一直是 Project"
                     // 这个盲区打的补丁。现在位置与来源分开记账（`counted`），
                     // 盲区本身不存在了，旁证也就不需要了。
-                    let bridgeable = delta.unsigned_abs() <= limit
-                        && delta.unsigned_abs() <= u64::from(rate).saturating_mul(MAX_BRIDGE_SEC);
+                    let magnitude = delta.unsigned_abs();
+                    let bridge_limit = u64::from(rate).saturating_mul(MAX_BRIDGE_SEC);
+                    let bridgeable = magnitude <= limit && magnitude <= bridge_limit;
                     let correction = resync || (self.block_counted && bridgeable);
-                    if correction {
-                        if delta > 0
-                            && delta as u64 <= limit
-                            && (delta as u64) <= u64::from(rate).saturating_mul(MAX_BRIDGE_SEC)
-                        {
-                            self.fade_active_tail_out(DECLICK_FRAMES);
-                            resync_continued = self.advance_without_samples(delta as usize);
-                        } else if delta < 0 && delta.unsigned_abs() <= limit {
-                            resync_continued = self.trim_active_tail_exact(start);
+                    if correction && magnitude > 0 {
+                        if magnitude <= limit && (delta < 0 || magnitude <= bridge_limit) {
+                            // 【记账纠正】差值落在"计数器可能错过多少帧"之内：
+                            // 向前用静音桥接、向后裁掉多记的尾巴，两种都继续同一段。
+                            if delta > 0 {
+                                self.fade_active_tail_out(DECLICK_FRAMES);
+                                resync_continued = self.advance_without_samples(delta as usize);
+                            } else {
+                                resync_continued = self.trim_active_tail_exact(start);
+                            }
+                        } else if delta < 0 && self.rebase_counted_run(start) {
+                            // 【时间基切换】差值超出了"我们可能错过多少帧" —— 它不是
+                            // 记账误差，而是整段音频在工程上挪了一个偏移（VEGAS 的
+                            // Event 级 FX 在起播窗口结束后把绝对位置换成事件相对位置）。
+                            // 裁掉尾巴会**丢掉真实音频**，另起一段会在时间线上留下断层；
+                            // 唯一正确的处置是把首段整段平移，让它接上新位置。
+                            rebased = true;
+                            resync_continued = true;
                         }
                     }
                 }
@@ -2582,15 +2736,22 @@ impl Capture {
             self.counted_blocks = self.counted_blocks.saturating_add(1);
             self.counted_frames = self.counted_frames.saturating_add(writable as u64);
         }
-        if transcribed
-            && !cover_range(
+        if transcribed {
+            // 【先转写哨兵，再并入本块】见 `claim_whole_before`：不做这一步，首块
+            // （lookbehind 提交的那一块）会变成一个 25 ms 的洞。
+            claim_whole_before(
+                &mut active.coverage,
+                &mut active.coverage_len,
+                written_offset,
+            );
+            if !cover_range(
                 &mut active.coverage,
                 &mut active.coverage_len,
                 written_offset..written_offset + writable,
-            )
-        {
-            // 槽位用尽：退化为"整段都算录到"（旧语义）。不分配 —— 这是音频线程。
-            active.coverage_overrun = true;
+            ) {
+                // 槽位用尽：退化为"整段都算录到"（旧语义）。不分配 —— 这是音频线程。
+                active.coverage_overrun = true;
+            }
         }
         self.expected_next = Some(start + writable as i64);
         self.last_written = Some(raw);
@@ -2598,8 +2759,11 @@ impl Capture {
         self.last_position = self.expected_next;
         self.peak[0] = self.peak[0].max(active.peak[0]);
         self.peak[1] = self.peak[1].max(active.peak[1]);
-        if resync_continued {
+        if resync_continued && !rebased {
             // 桥接/裁剪后的第一块开头做淡入；与桥接前的淡出配对，接缝不再有阶跃。
+            //
+            // 【为什么平移之后不做】平移保留的是**连续音频**：上一帧与这一帧本来就
+            // 接着，再淡入一次就是一次凭空的凹陷。
             let fade = DECLICK_FRAMES.min(writable);
             if fade > 0 {
                 for plane in active.planes.iter_mut() {
