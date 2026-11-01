@@ -104,10 +104,40 @@ test("旧载荷（没有 runs）退回并集那一段", () => {
     expect(derived?.bands).toEqual([{ startSec: 0, endSec: 2 }]);
 });
 
-test("零长度区间被丢弃；全空时返回 null（没有可画的东西）", () => {
-    expect(
-        deriveCaptureBands(status({ runs: [{ startFrame: 5, endFrame: 5 }], positionFrame: 5 })),
-    ).toBeNull();
+test("零长度区间被丢弃，但仍返回位置（位置线不该跟着消失）", () => {
+    // 【为什么这条契约变了】此前 `bands.length === 0` 直接返回 `null`，`CaptureRangeLayer`
+    // 于是整层 `return null` —— 录制刚起或 seek 之后**连位置线一起消失**，用户以为
+    // 捕获停了。位置线不依赖任何一段已经成立。
+    const derived = deriveCaptureBands(
+        status({ runs: [{ startFrame: 5, endFrame: 5 }], positionFrame: 5 }),
+    );
+    expect(derived?.bands).toEqual([]);
+    expect(derived?.positionSec).toBeCloseTo(5 / 48_000, 9);
+});
+
+test("前向 seek 之后带子不得横跨空洞", () => {
+    // 宿主把光标跳到 30 秒时 `positionFrame` 立刻跳过去，而那里一个样本都没录。
+    // 无条件 `max(end, position)` 会把最后一段拉成 0..30 —— 一整条撒谎的带子。
+    const derived = deriveCaptureBands(
+        status({
+            runs: [{ startFrame: 0, endFrame: 48_000 }],
+            positionFrame: 1_440_000,
+        }),
+    );
+    expect(derived?.bands).toEqual([{ startSec: 0, endSec: 1 }]);
+});
+
+test("视觉播放头只补齐轮询间隙，且有上限", () => {
+    const base = status({ runs: [{ startFrame: 0, endFrame: 48_000 }], positionFrame: 48_000 });
+    // 视觉值只领先一点点 ⇒ 带子跟上去（这就是"不再一顿一顿"的那一段）。
+    expect(deriveCaptureBands(base, 1.05)?.bands).toEqual([{ startSec: 0, endSec: 1.05 }]);
+    // 视觉值离得很远（或本身就是陈旧的）⇒ 只延伸到上限。
+    expect(deriveCaptureBands(base, 5)?.bands).toEqual([
+        { startSec: 0, endSec: 1 + 0.3 },
+    ]);
+    // 不在录制中时完全不跟随：`standby` / `ready` 都不是"正在长出来"。
+    const standby = { ...base, state: "standby" as const, hostPlaying: false };
+    expect(deriveCaptureBands(standby, 5)?.bands).toEqual([{ startSec: 0, endSec: 1 }]);
 });
 
 test("采样率不可用时返回 null（不猜一个率去画）", () => {

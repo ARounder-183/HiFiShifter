@@ -38,6 +38,14 @@ export interface CaptureBands {
 }
 
 /**
+ * 捕获带右缘允许**领先**后端读数的最大秒数。
+ *
+ * 【为什么需要上界】视觉播放头自带 100 ms 外推；轮询到达时它会跳回真实值。留 3 倍
+ * 余量既能让带子与光标重合，又不会在前向 seek 之后把带子画进空洞。
+ */
+export const MAX_LEAD_SEC = 0.3;
+
+/**
  * 从一次状态快照里取出捕获区间列表。
  *
  * 【为什么 `positionSec` 只延长**最后一段**】后端报的 `endFrame` 是"已封口段的右端"，
@@ -45,7 +53,10 @@ export interface CaptureBands {
  * 看起来像卡住了。但把这个 `max` 应用到**每一段**就会让跳播之后所有历史段的右端都被
  * 拉到当前位置，等于又并成一整条 —— 那正是本函数要避免的错误。
  */
-export function deriveCaptureBands(status: CaptureStatus | null): CaptureBands | null {
+export function deriveCaptureBands(
+    status: CaptureStatus | null,
+    visualPlayheadSec?: number,
+): CaptureBands | null {
     const capture = status?.capture ?? null;
     if (capture === null) return null;
     const rate = capture.sampleRate;
@@ -64,12 +75,34 @@ export function deriveCaptureBands(status: CaptureStatus | null): CaptureBands |
         if (!(endSec > startSec)) continue;
         bands.push({ startSec, endSec });
     }
-    if (bands.length === 0) return null;
     bands.sort((a, b) => a.startSec - b.startSec);
 
     const positionSec = frameToSec(capture.positionFrame, rate);
+    // 【空列表也要返回】此前 `bands.length === 0` 直接 `null`，于是录制刚起或 seek
+    // 之后**连位置线一起消失** —— 用户以为捕获停了。位置线不依赖任何一段已经成立。
+    if (bands.length === 0) return { bands, positionSec };
+
     const last = bands[bands.length - 1];
-    if (positionSec > last.endSec) last.endSec = positionSec;
+    // 【右缘只能朝"刚录到的地方"延伸】此前无条件把最后一段拉到 `positionFrame`：
+    // 前向 seek 之后 `positionFrame` 立刻跳到新位置，而那里**一个样本都没录**，
+    // 带子于是横跨整个空洞。判据改成"位置落在最后一段的右缘附近"。
+    const withinReach =
+        positionSec >= last.endSec && positionSec <= last.endSec + MAX_LEAD_SEC;
+    if (withinReach) last.endSec = positionSec;
+    // 【视觉播放头只用来补齐轮询间隙】它比 `positionFrame` 新（60 Hz vs 5 Hz），
+    // 但仍必须服从同一条"不许横跨空洞"的纪律，并且延伸量有上限：视觉值自带
+    // 100 ms 外推，留 3 倍余量。
+    // 【只在"真的在录"时跟随】`standby`（已武装、宿主还没播）与 `ready`（录完了）
+    // 都不该让带子跟着光标长 —— 那会把"没在录"画成"在录"。
+    const following = status?.state === "recording" && Boolean(status.hostPlaying);
+    if (
+        following &&
+        typeof visualPlayheadSec === "number" &&
+        Number.isFinite(visualPlayheadSec)
+    ) {
+        const lead = Math.min(visualPlayheadSec, last.endSec + MAX_LEAD_SEC);
+        if (lead > last.endSec) last.endSec = lead;
+    }
     return { bands, positionSec: Math.max(positionSec, last.startSec) };
 }
 
