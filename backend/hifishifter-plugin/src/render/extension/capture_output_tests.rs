@@ -96,6 +96,7 @@ fn the_read_position_jump_is_a_pure_judgement() {
         allow_output: true,
         start_window: false,
         repeated_nonzero: false,
+        cycle_wrap: false,
         split: BlockSplit::whole(48_000, 256),
     };
     // ① 没有上一块 ⇒ 没有跳变。
@@ -140,6 +141,7 @@ fn a_contiguous_block_advance_is_not_a_jump() {
         allow_output: true,
         start_window: false,
         repeated_nonzero: false,
+        cycle_wrap: false,
         split: BlockSplit::whole(48_256, 256),
     };
     owner.mark_emitted_for_test();
@@ -833,6 +835,7 @@ fn the_start_window_keeps_the_output_open_across_pinned_silence() {
         allow_output: false,
         start_window: true,
         repeated_nonzero: false,
+        cycle_wrap: false,
         split: BlockSplit::whole(0, 512),
     };
     assert!(
@@ -901,6 +904,7 @@ fn prefetch_and_offline_never_look_stopped() {
             allow_output: false,
             start_window: false,
             repeated_nonzero: false,
+            cycle_wrap: false,
             split: BlockSplit::whole(0, 512),
         };
         assert!(
@@ -921,6 +925,7 @@ fn prefetch_and_offline_never_look_stopped() {
         allow_output: false,
         start_window: false,
         repeated_nonzero: false,
+        cycle_wrap: false,
         split: BlockSplit::whole(0, 512),
     };
     assert!(!owner.capture_should_emit(Some(realtime), false));
@@ -1076,10 +1081,16 @@ fn a_host_position_report_re_anchors_the_counter() {
         ..Default::default()
     };
     // 起播窗口：位置钉住，我们按块长接着数。
+    // 【为什么必须喂内容指纹】生产路径对每个非零帧块都会调 `note_activity`；
+    // 计数器"凭什么前进"的判据就是它（`flowing()`）。测试不喂就等于告诉插件
+    // "内容逐块相同"—— 那正是停播重复投递的形状，计数器理应不动。
+    owner.streams[ProcessStream::Realtime.index()].note_activity(0xA001);
     let first = owner.note_stream_block(ProcessStream::Realtime, &context, 512, true, false);
     assert_eq!(first.position, 0);
+    owner.streams[ProcessStream::Realtime.index()].note_activity(0xA002);
     let second = owner.note_stream_block(ProcessStream::Realtime, &context, 512, false, false);
     assert_eq!(second.position, 512, "钉住期间按块长前进");
+    owner.streams[ProcessStream::Realtime.index()].note_activity(0xA003);
     let third = owner.note_stream_block(ProcessStream::Realtime, &context, 512, false, false);
     assert_eq!(third.position, 1_024);
     // 宿主恢复报告：它说真实位置是 1 500，而我们数到了 1 024。
@@ -1505,8 +1516,7 @@ fn a_window_spanning_silence_and_live_audio_advances_the_whole_window() {
         "一次起播只开一个 pass"
     );
     assert!(
-        geometry.frames_since_anchor.load(Ordering::Acquire)
-            < u64::from(geometry.advance_limit.load(Ordering::Acquire)),
+        geometry.counted_run.load(Ordering::Acquire) <= (48_000.0 * PRE_ROLL_CAP_SEC) as u64,
         "40 块还在 1 s 窗口内：窗口仍然开着"
     );
     assert_eq!(
@@ -1599,9 +1609,9 @@ fn a_repeated_nonzero_block_closes_the_window_immediately() {
     }
     let geometry = &owner.streams[stream.index()];
     assert_eq!(
-        geometry.advance_limit.load(Ordering::Acquire),
+        geometry.counted_run.load(Ordering::Acquire),
         0,
-        "窗口必须因重复内容而当场作废"
+        "窗口必须因重复内容而当场作废（计数器一帧都没记过）"
     );
     assert_eq!(
         geometry.counted_blocks.load(Ordering::Acquire),
@@ -1971,6 +1981,7 @@ fn a_bound_instance_does_not_silence_a_prefetch_block_without_k_playing() {
         allow_output: false,
         start_window: false,
         repeated_nonzero: false,
+        cycle_wrap: false,
         split: BlockSplit::whole(0, 512),
     };
     assert!(
@@ -2110,23 +2121,26 @@ fn the_context_line_reports_the_host_time_fields() {
     assert!(line.contains("counted=0"), "{line}");
 }
 
-/// **宿主停播却仍在送预取音频时，计数器不得一路前进。**
+/// **计数器没有预算：宿主位置冻结、但音频在流动时，位置必须一直前进。**
 ///
-/// 【这是"反复播 0.7 s 内容完全对不上"的直接判据】现场日志里 `raw` 冻结在 99484、
-/// `playing=0`，而 `pos` 一路走到 262476 —— 漂移 162992 帧（3.4 s）。重播时我们从
-/// `anchor + 漂移` 读，读到的是素材里另一段，于是"0.7 s 的内容完全对不上"。
+/// 【这是问题 2 的正面验收】非实时事件 FX 的**预览**里，宿主 `kPlaying` 恒为 0、
+/// `projectTimeSamples` 恒为 7.375 s，唯一能推进位置的只有计数器。旧实现给它两笔
+/// 各 1 秒的预算（`advance_limit` / `activity_budget`），于是捕获在**恰好 1.000 秒**
+/// 处被切断：日志里 `counted_blocks=40 counted_frames=48000`（40 × 1200 = 48000），
+/// 随后位置弹回锚点并永久钉住 —— 用户听到的是 25 ms 一段的无限重复。
 ///
-/// 【为什么额度绑在 pass 上】"内容在流动"这条证据服务的本来就是**起播窗口**：
-/// 宿主把位置钉住、却已经在按块长送音频。一次播放只有一个开头，所以它的可信长度
-/// 也只该有一个开头那么多（`PRE_ROLL_CAP_SEC`）。
+/// 【为什么这一条与下一条并不矛盾】下一条钉的是"逐块完全相同的**非零**内容"（FL
+/// Studio 的停播形状）。两者的区别是**事实**：内容在变 ⇒ 时间在走；内容逐块相同
+/// ⇒ 时间没走。预算把这两件事混成了一个与宿主无关的秒数。
 #[test]
-fn a_frozen_host_stops_the_counter_once_the_start_window_is_spent() {
+fn the_counter_is_not_budgeted() {
     let owner = insert_owner();
     let stream = ProcessStream::Realtime;
     let rate = 48_000.0_f64;
     let frames = 512_usize;
-    let cap = (rate * PRE_ROLL_CAP_SEC).round() as i64;
-    // 起播：宿主把位置钉在 1000，且给了一个上升沿。
+    // 第一块只建立内容指纹的基线（生产路径同样如此：`note_activity` 在几何之前调用）。
+    owner.streams[stream.index()].note_activity(0xDEAD_BEEF);
+    owner.streams[stream.index()].note_block_silence(false);
     let first = owner.note_stream_geometry(
         stream,
         1_000,
@@ -2138,11 +2152,13 @@ fn a_frozen_host_stops_the_counter_once_the_start_window_is_spent() {
         false,
     );
     assert_eq!(first.position, 1_000, "起播块的位置就是宿主报的那个");
-    // 之后 200 块：宿主位置一直不动，而内容一直在变（预取音频）。
-    let mut last = first;
-    for index in 0..200_u64 {
+    let mut last = first.position;
+    // 3 秒（约 282 块）：远超旧实现那两笔 1 秒预算。
+    let blocks = (rate * 3.0 / frames as f64) as u64;
+    for index in 0..blocks {
         owner.streams[stream.index()].note_activity(index);
-        last = owner.note_stream_geometry(
+        owner.streams[stream.index()].note_block_silence(false);
+        let block = owner.note_stream_geometry(
             stream,
             1_000,
             frames,
@@ -2152,15 +2168,28 @@ fn a_frozen_host_stops_the_counter_once_the_start_window_is_spent() {
             false,
             false,
         );
+        assert_eq!(
+            block.position,
+            last + frames as i64,
+            "第 {index} 块必须紧接上一块（宿主位置冻结 + 内容在流动 ⇒ 计数器就是权威）"
+        );
+        last = block.position;
     }
-    let drifted = last.position - 1_000;
-    assert!(
-        drifted <= cap,
-        "停播时计数器最多只可信一个起播窗口：漂移 {drifted} 帧 > {cap} 帧",
+    assert_eq!(
+        last - 1_000,
+        (blocks * frames as u64) as i64,
+        "整段 3 秒都必须被数出来，一个块都不能少"
     );
-    assert!(
-        drifted > 0,
-        "起播窗口内仍然必须能推进（否则前 0.66 s 静音）"
+    let geometry = &owner.streams[stream.index()];
+    assert_eq!(
+        geometry.counted_frames.load(Ordering::Acquire),
+        blocks * frames as u64,
+        "计数器的帧数必须一直增长（旧实现卡在 48000）"
+    );
+    assert_eq!(
+        geometry.pass.load(Ordering::Acquire),
+        1,
+        "一次连续播放只有一个 pass"
     );
 }
 
@@ -2278,6 +2307,7 @@ fn realtime_output_silences_while_a_diagnostic_runs_and_offline_does_not() {
         allow_output: true,
         start_window: false,
         repeated_nonzero: false,
+        cycle_wrap: false,
         split: BlockSplit::whole(0, 512),
     };
     let offline = BlockEvidence {

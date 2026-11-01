@@ -1064,7 +1064,20 @@ impl ExtensionOwner {
         let Ok(slot) = self.document.try_lock() else {
             return;
         };
-        let document = slot.as_ref().and_then(std::sync::Weak::upgrade);
+        // 【为什么先看强引用计数】`Weak::upgrade` 会临时把强计数加一。如果那个 `Weak`
+        // 恰好是**最后一个**引用（文档已经被别处 drop、只剩这里的弱引用），升级就会
+        // 让我们成为最后一个持有者，而随后的 `drop(document)` 会在**这条线程**上跑
+        // `DocumentSession` 的析构 —— 它要释放整份时间线、参数曲线与缓存。
+        // 而这条线程就是音频线程：一次析构 = 一次不可预测的阻塞。
+        //
+        // 计数 > 1 说明还有别人活着，升级与释放都不会触发析构；否则这一次直接放弃
+        // （下一次块 10 ms 后还会来，而宽限期本来就是秒级）。
+        let alive = slot.as_ref().is_some_and(|weak| weak.strong_count() > 1);
+        let document = if alive {
+            slot.as_ref().and_then(std::sync::Weak::upgrade)
+        } else {
+            None
+        };
         drop(slot);
         let Some(document) = document else {
             return;

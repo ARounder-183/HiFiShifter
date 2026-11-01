@@ -979,15 +979,21 @@ impl SnapshotPublisher {
         // 【T1：真实覆盖边】没有 coverage 时只有首尾两条边（旧语义）；有 coverage 时
         // 每个"未覆盖 → 覆盖"的翻转点都是边。空洞的两侧都是宿主原声，本身不混合；
         // 要淡化的只有"原声 → 处理结果"这一种翻转。
-        let holes: Vec<std::ops::Range<i64>> = snapshot
-            .map(|snapshot| snapshot.covered.as_slice())
-            .unwrap_or(&[])
-            .windows(2)
-            .filter_map(|pair| {
+        // 【为什么是定长栈缓冲而不是 `Vec`】这里是**音频线程**：每块一次 `Vec` 分配就是
+        // 一次不可预测的延迟尖峰（而素材有洞时必然发生）。洞的个数有硬上界：
+        // `covered` 来自记录器的 `COVERAGE_SLOTS = 8` 个区间，最多 7 个洞。
+        const MAX_HOLES: usize = 8;
+        let mut holes: [std::ops::Range<i64>; MAX_HOLES] = std::array::from_fn(|_| 0..0);
+        let mut hole_count = 0_usize;
+        if let Some(snapshot) = snapshot {
+            for pair in snapshot.covered.windows(2) {
                 let (left, right) = (&pair[0], &pair[1]);
-                (left.end < right.start).then_some(left.end..right.start)
-            })
-            .collect();
+                if left.end < right.start && hole_count < MAX_HOLES {
+                    holes[hole_count] = left.end..right.start;
+                    hole_count += 1;
+                }
+            }
+        }
         let edge_gain = |position: i64| -> (f32, f32) {
             let start = start_edge;
             let end = end_edge;
@@ -1036,7 +1042,7 @@ impl SnapshotPublisher {
             // 【为什么入口的斜坡在洞**之前**】覆盖之外没有快照采样，边界之外只能是
             // 宿主原声；所以淡化必须发生在覆盖范围**之内** —— 在 `hole.start - end`
             // 处还是纯处理结果，到 `hole.start` 降到纯原声。
-            for hole in &holes {
+            for hole in &holes[..hole_count] {
                 let width = hole.end - hole.start;
                 // 【T-A1-3：洞宽决定用几条斜坡】
                 //

@@ -338,8 +338,11 @@ pub(crate) struct ExtensionOwner {
     /// `[capture] pass` / `[capture] clock` 两行的去重指纹（非实时线程用）。
     last_pass_diag: Mutex<Option<String>>,
     last_clock_diag: Mutex<Option<String>>,
-    /// `[capture] ctx` 的去重指纹（非实时线程用）。
-    last_ctx_diag: Mutex<Option<String>>,
+    /// `[capture] ctx` 的去重指纹与上一次打印时刻（非实时线程用）。
+    ///
+    /// 【为什么带时刻】指纹不含位置（见 `BlockTraceRing::last_context`），而位置才是
+    /// 用户真正想看的那一栏 —— 所以形状不变时也要每 `CONTEXT_SUMMARY_MS` 补一行。
+    last_ctx_diag: Mutex<Option<(String, std::time::Instant)>>,
     /// 输出写满审计的读数（`HIFISHIFTER_BUFFER_AUDIT=1`；音频线程只写原子）。
     buffer_audit_channels: AtomicU32,
     buffer_audit_frames: AtomicU32,

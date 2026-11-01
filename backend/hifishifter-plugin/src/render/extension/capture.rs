@@ -1,5 +1,13 @@
 //! 捕获通路：渲染输入、准备作业、输出仲裁与读数。
 use super::*;
+
+/// `[capture] ctx` 在形状不变时补一行的间隔。
+///
+/// 【为什么要有它】这一行的去重键不含位置（位置一直在走 ⇒ 按整行去重等于每块一行，
+/// 现场日志里它占 10162/26617 行）。但位置是用户真正想看的那一栏，所以形状不变时
+/// 也要定期补一行 —— 10 秒足够让人看见"宿主把位置钉在 7.375 s"，又不至于刷屏。
+const CONTEXT_SUMMARY_MS: std::time::Duration = std::time::Duration::from_secs(10);
+
 impl ExtensionOwner {
     /// Capture 形态的渲染准备（不经过 ARA 文档）。
     ///
@@ -404,6 +412,21 @@ impl ExtensionOwner {
     /// 【为什么量 `max_step` 而不是别的】"咔"在波形上就是相邻样本的一次大跳变。
     /// 峰值、RMS、过零率都看不见它 —— 一个 20 ms 的音乐片段可以峰值不变而中间
     /// 跳一下。相邻差分是唯一直接对应听感的读数。
+    /// 逐块"咔"账本是否开启（`HIFISHIFTER_CLICK_AUDIT=1`，默认关闭）。
+    ///
+    /// 【为什么必须可关】`record_click_sample` 每块都要把整个输出缓冲扫一遍
+    /// （两声道 × 块长），并且每次都在写 `[click]` 行。现场日志里 `[click]` 占了
+    /// 9801/26617 行 —— 一个诊断工具的成本高到会改变被观测的行为，它就不再是诊断。
+    /// 与 `HIFISHIFTER_BUFFER_AUDIT` 同一套开关纪律：读一次就缓存，默认关闭。
+    fn click_audit_enabled() -> bool {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ENABLED.get_or_init(|| {
+            std::env::var("HIFISHIFTER_CLICK_AUDIT")
+                .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+                .unwrap_or(false)
+        })
+    }
+
     pub(super) fn record_click_sample(
         &self,
         stream: ProcessStream,
@@ -413,6 +436,9 @@ impl ExtensionOwner {
         output: &crate::audio_abi::AudioBusBuffers,
         frames: usize,
     ) {
+        if !Self::click_audit_enabled() {
+            return;
+        }
         let channels = (output.num_channels as usize).min(2);
         let mut max_step = 0.0_f32;
         let mut peak = 0.0_f32;
@@ -505,14 +531,22 @@ impl ExtensionOwner {
         let Some(ring) = self.block_trace.get() else {
             return;
         };
-        let Some(line) = ring.last_context_line() else {
+        let Some((line, key)) = ring.last_context() else {
             return;
         };
+        // 【去重键不含位置】见 `BlockTraceRing::last_context`：按整行去重等于每块一行
+        // （位置一直在走 ⇒ 整行一直不同）。位置本身由每 `CONTEXT_SUMMARY_MS` 一行的
+        // 汇总负责，形状真的变了才值得单独一行。
+        let now = std::time::Instant::now();
         let mut last = self.last_ctx_diag.lock_or_recover();
-        if last.as_deref() != Some(line.as_str()) {
-            *last = Some(line.clone());
-            log::warn!("{line}");
+        let unchanged = last.as_ref().is_some_and(|(key_before, at)| {
+            key_before == &key && now.duration_since(*at) < CONTEXT_SUMMARY_MS
+        });
+        if unchanged {
+            return;
         }
+        *last = Some((key, now));
+        log::warn!("{line}");
     }
 
     /// 【B0】把 I-2 / I-3 的读数打成两行。**非实时线程**（UI 定时器）。
@@ -557,8 +591,22 @@ impl ExtensionOwner {
                 log::warn!("{line}");
             }
         }
-        let index = self.snapshot_index_for_rate(self.setup_sample_rate());
-        let geometry = &self.streams[index.min(2)];
+        // 【为什么按流遍历而不是挑一个下标】旧实现用 `snapshot_index_for_rate(工程率)`
+        // 去索引 `streams[]` —— 那是**快照发布器**的下标（0/1），不是进程流的下标
+        // （0=realtime/1=prefetch/2=offline）。48 kHz 工程因此永远读到 prefetch，
+        // 而实时流一个块都没被记过 ⇒ 这一行在现场日志里**一行都没打出来**。
+        for stream in [
+            ProcessStream::Realtime,
+            ProcessStream::Prefetch,
+            ProcessStream::Offline,
+        ] {
+            self.log_clock_line(stream);
+        }
+    }
+
+    /// 一条进程流的位置续接读数（非实时线程）。
+    fn log_clock_line(&self, stream: ProcessStream) {
+        let geometry = &self.streams[stream.index()];
         let blocks = geometry.blocks.load(Ordering::Acquire);
         if blocks == 0 {
             return;
@@ -573,7 +621,7 @@ impl ExtensionOwner {
             "[capture] clock: stream={} blocks={blocks} pass={} counted={} frames={} \
              jumps={} last_jump={} rewinds={} delta_min={} delta_max={} resyncs={} \
              rising={} continuous={} music={}",
-            index.min(2),
+            stream.as_str(),
             geometry.pass.load(Ordering::Acquire),
             geometry.counted_blocks.load(Ordering::Acquire),
             geometry.counted_frames.load(Ordering::Acquire),
