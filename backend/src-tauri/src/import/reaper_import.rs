@@ -356,6 +356,7 @@ fn build_audio_clip_take(
     };
 
     crate::state::ClipTake {
+        content_id: None,
         id: new_clip_id().replace("clip_", "take_"),
         name,
         gain: convert_volume(take_linear_gain(item, take, take_volume_overridden)),
@@ -1062,6 +1063,7 @@ fn convert_reaper_data(
                 params_by_root_track.insert(
                     track.id.clone(),
                     TrackParamsState {
+                        pitch_assembly_partial: false,
                         frame_period_ms,
                         pitch_orig: Vec::new(),
                         pitch_edit: Vec::new(),
@@ -1402,6 +1404,7 @@ fn process_item(
             let clip_index = clips.len();
 
             clips.push(Clip {
+                content_id: None,
                 loop_period_sec: None,
                 takes: vec![],
                 active_take_id: None,
@@ -1590,6 +1593,7 @@ fn process_item(
         let clip_start = item_pos + time_offset;
 
         let mut clip = Clip {
+            content_id: None,
             loop_period_sec: None,
             takes: hs_takes,
             active_take_id,
@@ -2243,6 +2247,7 @@ fn process_midi_item(
     };
 
     clips.push(Clip {
+        content_id: None,
         loop_period_sec: None,
         takes: vec![],
         active_take_id: None,

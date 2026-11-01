@@ -160,7 +160,14 @@ pub fn build_root_pitch_key(tl: &TimelineState, root_track_id: &str) -> String {
                 hasher.update(&[note.velocity, note.channel]);
             }
         }
-        if let Some(sp) = clip.source_path.as_deref() {
+        // 【内容身份优先】见 `Clip::content_id`：Capture 的素材是会话私有临时文件，
+        // 路径里的命名空间每个会话都不同。把它哈希进键，等于"每开一次窗口就把整份
+        // 音频重分析一遍"。发布方给的稳定标识才是内容身份；缺失时退回路径 + 文件
+        // 签名（老工程、外部拖入），行为与改动前一致。
+        if let Some(content_id) = clip.content_id.as_deref() {
+            hasher.update(b"(content)");
+            hasher.update(content_id.as_bytes());
+        } else if let Some(sp) = clip.source_path.as_deref() {
             hasher.update(sp.as_bytes());
             let (len, mtime) = file_sig(Path::new(sp));
             hasher.update(&len.to_le_bytes());

@@ -765,6 +765,7 @@ mod tests {
             source_file_mtime: None,
             source_file_size: None,
             source_file_fingerprint: None,
+            content_id: None,
             waveform_preview: None,
             pitch_range: None,
             gain: 1.0,

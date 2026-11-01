@@ -1818,6 +1818,7 @@ pub(super) fn add_clip_take_from_media(
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "Take".to_string());
     let mut take = crate::state::ClipTake {
+        content_id: None,
         id: crate::state::new_id("take"),
         name: name.filter(|n| !n.trim().is_empty()).unwrap_or(file_name),
         gain: 1.0,
@@ -1893,6 +1894,7 @@ pub(super) fn import_media_files_as_takes(
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "Take".to_string());
         let take = crate::state::ClipTake {
+            content_id: None,
             id: crate::state::new_id("take"),
             name: file_name.clone(),
             gain: 1.0,
@@ -1983,6 +1985,7 @@ pub(super) fn import_media_files_as_takes(
     let clip_name = takes[0].name.clone();
     let clip_id = crate::state::new_id("clip");
     let mut clip = crate::state::Clip {
+        content_id: None,
         loop_period_sec: None,
         id: clip_id.clone(),
         takes,

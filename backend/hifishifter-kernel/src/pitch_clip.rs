@@ -527,7 +527,11 @@ fn build_clip_pitch_key(
     _root_track_id: &str,
     frame_period_ms: f64,
 ) -> Option<ClipPitchKey> {
-    let source_path = clip.source_path.as_deref()?;
+    // 【两者都没有才放弃】内容身份可以独立于路径存在（Capture 的 take）。
+    let source_path = clip.source_path.as_deref();
+    if source_path.is_none() && clip.content_id.is_none() {
+        return None;
+    }
 
     let clip_timeline_len_sec = clip.length_sec.max(0.0);
     if !(clip_timeline_len_sec.is_finite() && clip_timeline_len_sec > 0.0) {
@@ -540,11 +544,22 @@ fn build_clip_pitch_key(
     // clip_id、root_track_id、bpm 均不参与 hash——相同源文件的多个 clip 共享同一缓存条目，
     // trim/rate 变化在推送/组装阶段按需截取+resample，无需重新分析。
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"clip_pitch_v4_fcpe_source_midi");
-    hasher.update(source_path.as_bytes());
-    let (len, mtime) = file_sig(Path::new(source_path));
-    hasher.update(&len.to_le_bytes());
-    hasher.update(&mtime.to_le_bytes());
+    hasher.update(b"clip_pitch_v5_content_identity");
+    // 【内容身份优先】见 `Clip::content_id`：Capture 的素材是**会话私有临时文件**
+    // （路径含 `hfs-ui-{pid}-{N}-`，`N` 每个会话自增），把它哈希进键等于"每开一次
+    // 窗口就把整份音频重分析一遍"。发布方给的稳定标识才是内容身份；只有它缺失时
+    // （老工程、外部拖入）才退回路径 + 文件签名 —— 行为与改动前一致。
+    if let Some(content_id) = clip.content_id.as_deref() {
+        hasher.update(b"(content)");
+        hasher.update(content_id.as_bytes());
+    } else if let Some(source_path) = source_path {
+        hasher.update(source_path.as_bytes());
+        let (len, mtime) = file_sig(Path::new(source_path));
+        hasher.update(&len.to_le_bytes());
+        hasher.update(&mtime.to_le_bytes());
+    } else {
+        hasher.update(b"(no_source)");
+    }
     // 【为什么还要哈希 clip 的内容指纹】文件签名只回答"磁盘上那个文件变了没有"。
     // 宿主可以**用同一路径换一份内容**（重新授权、替换素材、ARA 重新交付 PCM），
     // 此时路径 / 长度 / mtime 都可能不变，缓存命中 ⇒ 分析永远不重跑 ⇒ 用户看到
@@ -945,13 +960,16 @@ pub fn schedule_clip_pitch_jobs_scoped(
             },
         );
 
-        // 无论成功与否，先清除 inflight 标记
-        release_inflight(&job.inflight_key);
-
+        // 【为什么 inflight 要等到**写入之后**才释放】它此前在这里就被清掉了，而缓存
+        // 写入在十几行之后。那个窗口里 `maybe_schedule_pitch_orig` 会看到"没有 inflight、
+        // 也没有缓存"，于是又起一份全量分析 —— 而 `schedule_analysis` 在每一条命令
+        // （含纯读轮询）之后都会被调用。用户看到的是"分析永远做不完"。
+        //
         // 写缓存前再确认一次代次：进度事件与缓存写入之间仍可能发生工程切换，
         // 而写入是不可回滚的 —— 一旦写进全局缓存，条目在新工程里既不可达
         // 也无人清理。
         if cancelled() {
+            release_inflight(&job.inflight_key);
             log::warn!(
                 "[pitch_clip] thread: skipping cache store for clip '{}' (generation changed)",
                 job.clip.name
@@ -966,6 +984,8 @@ pub fn schedule_clip_pitch_jobs_scoped(
                 level: analysis.level,
             };
             store_clip_pitch_cache(cached);
+            // 【缓存落地之后才允许别人再调度】见上面的说明。
+            release_inflight(&job.inflight_key);
             // 通知引擎缓存已就绪，触发 snapshot rebuild。
             // 以内容哈希查找所有共享该源文件的 clip，逐一发送通知。
             let sharing_clip_ids: Vec<String> = tl_shared
@@ -996,6 +1016,9 @@ pub fn schedule_clip_pitch_jobs_scoped(
             // "正在自动应用"（用户报障）。记下这条结论之后，门禁不再为它等待：
             // 降级输出（内核在缺少原线时的既定回退）远好过一次白等。
             mark_unproducible(&job.ck.key);
+            // 这一支没有缓存可写，但 inflight 仍然必须释放 —— 否则"不可产出"的结论
+            // 永远不会被再试一次（负记忆本身是有寿命的）。
+            release_inflight(&job.inflight_key);
             log::warn!(
                 "[pitch_clip] clip '{}' produced no analysis data; the render gate will stop \
                  waiting for its original pitch line",

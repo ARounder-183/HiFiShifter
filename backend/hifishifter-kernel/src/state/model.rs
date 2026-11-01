@@ -966,6 +966,14 @@ pub struct TrackParamsState {
     #[serde(skip)]
     pub dyn_orig_source_key: Option<String>,
 
+    /// 上一次组装只命中了**部分** clip 的缓存（曲线因此没有更新）。
+    ///
+    /// 【为什么要与"内容未分析"分开】两者在界面上都表现为"这条线还没好"，但处置
+    /// 完全不同：前者只差一次缓存落地（曲线保持上一版是**正确**的），后者根本没有
+    /// 可画的数据。合成一个布尔就会导致"部分命中时把曲线写成 0"那种闪烁。
+    #[serde(skip)]
+    pub pitch_assembly_partial: bool,
+
     /// 声码器专属静态参数（key = ParamDescriptor::id，值为枚举整数转 f64）。
     /// 例："synth_mode" = 1.0（SYNTHMODE_MF）。
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -1175,6 +1183,20 @@ pub struct ClipTake {
     pub source_file_mtime: Option<u64>,
     #[serde(skip)]
     pub source_file_size: Option<u64>,
+    /// 内容身份：由**发布方**给出的、跨会话稳定的内容标识。
+    ///
+    /// 【为什么必须有它】分析缓存的键此前哈希的是 `source_path` + 文件元数据，而
+    /// Capture 的素材是**会话私有的临时文件**：路径形如
+    /// `<localdata>/pcm/hfs-ui-{pid}-{N}-/sources/source-{blake3}.wav`，其中 `N` 是
+    /// 每个 `EditorSession` 自增的序号，会话 Drop 时整个目录被删。于是**同一份音频
+    /// 换一个会话就换一个键** ⇒ 缓存全 miss ⇒ 整份重分析。现场表现就是"每次播放都
+    /// 重新分析音高、参数线闪一下"。
+    ///
+    /// 取值约定：Capture 写 `capture://{take}`，ARA 写源的 `persistentID`，
+    /// 普通文件写 `file://{规范化路径}`。缺失时（老工程、外部拖入）退回
+    /// `source_path` + 文件元数据 —— 行为与改动前一致。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_id: Option<String>,
 
     /// 波形预览与音高范围缓存（保存前由 `prepare_timeline_for_project_save` 清空）。
     #[serde(default)]
@@ -1268,6 +1290,7 @@ impl ClipTake {
             duration_sec: clip.duration_sec,
             duration_frames: clip.duration_frames,
             source_sample_rate: clip.source_sample_rate,
+            content_id: clip.content_id.clone(),
             source_file_fingerprint: clip.source_file_fingerprint,
             source_file_mtime: clip.source_file_mtime,
             source_file_size: clip.source_file_size,
@@ -1307,6 +1330,9 @@ impl ClipTake {
         clip.source_file_fingerprint = self.source_file_fingerprint;
         clip.source_file_mtime = self.source_file_mtime;
         clip.source_file_size = self.source_file_size;
+        // 【内容身份跟着 take 走】分析缓存的键读的是 clip 上的这一项（见
+        // `Clip::content_id`）；不投影的话它永远停在 None，键又退回私有路径。
+        clip.content_id = self.content_id.clone();
         clip.waveform_preview = self.waveform_preview.clone();
         clip.pitch_range = self.pitch_range.clone();
         clip.source_start_sec = self.source_start_sec;
@@ -1602,6 +1628,17 @@ pub struct Clip {
     /// 源文件内容指纹（active take 投影；权威值保存在对应 `ClipTake`）。
     #[serde(default, skip_serializing)]
     pub source_file_fingerprint: Option<u64>,
+    /// 内容身份（active take 投影；权威值保存在对应 `ClipTake`）。
+    ///
+    /// 【为什么分析缓存的键要读它】见 `ClipTake::content_id`：Capture 的素材是会话
+    /// 私有临时文件，路径里的命名空间每个会话都不同。把路径拌进内容键，等于"每开
+    /// 一次窗口就把整份音频重分析一遍"。
+    ///
+    /// 【为什么它必须能被序列化】会话侧的时间线是**经 JSON 重建**的（GUI 命名空间、
+    /// 素材路径重写都在那条路上）。`skip_serializing` 的字段会在重建时丢掉，于是键又
+    /// 退回私有路径 —— 那正是本轮要消灭的行为。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_id: Option<String>,
     /// 波形预览（active take 投影，保存前清空）。
     #[serde(default, skip_serializing)]
     pub waveform_preview: Option<Vec<f32>>,
@@ -1905,6 +1942,9 @@ impl Clip {
         }
         if projection.source_file_fingerprint.is_none() {
             projection.source_file_fingerprint = existing.source_file_fingerprint;
+        }
+        if projection.content_id.is_none() {
+            projection.content_id = existing.content_id;
         }
         self.active_take_id = Some(existing.id);
         self.takes[idx] = projection;
@@ -3609,18 +3649,19 @@ impl TimelineState {
 
         entry.frame_period_ms = fp;
 
-        // CRITICAL FIX: Detect stale pitch curves and clear them when clip/timeline changes.
-        // This prevents old pitch data from being displayed after clip replacement or timeline edits.
+        // 【缓存失效 ≠ 用户数据消失】这里此前把 `pitch_orig` 与 `pitch_edit` 一起清空。
+        // 而"键变了"只说明**我们手上的原线可能是旧的**，不说明用户画的那条线无效：
+        // 键会因为一次素材重发布、一次采样率变化、甚至一次会话重建而变。清空之后，
+        // 用户看到的是自己的曲线凭空消失，随后被重新分析的结果覆盖回一条**不一样**的
+        // 曲线 —— 一次可见的闪烁 + 一次数据丢失。
+        //
+        // 现在只把键置 None（下次组装会重算），曲线原样保留：绘制侧按 `pitch_orig_key`
+        // 是否为空决定透明度，重分析完成后被**更完整**的值替换。纪律：同一条根的
+        // `pitch_edit` 只允许被"更完整"的值替换，不允许被空值替换。
         let key_changed = entry.pitch_orig_key.as_deref() != Some(&expected_key);
 
         if key_changed && entry.pitch_orig_key.is_some() {
-            // Timeline/clip configuration changed - clear orig curves to force re-analysis
-            entry.pitch_orig.clear();
             entry.pitch_orig_key = None;
-            // 仅当用户未手动编辑时才清空 pitch_edit，保护用户的编辑成果
-            if !entry.pitch_edit_user_modified {
-                entry.pitch_edit.clear();
-            }
 
             if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1") {
                 log::warn!(
@@ -3888,11 +3929,16 @@ mod tests {
             "用户音高曲线必须保留（数组会被补齐到工程长度，但值不得被清掉）：{:?}",
             &entry.pitch_edit[..entry.pitch_edit.len().min(8)]
         );
-        // `resize_curve` 随后会把数组补齐到工程长度（填 0），所以"已清空"的形状是
-        // **全 0** 而不是空数组。
+        // 【契约变了：缓存失效 ≠ 用户数据消失】此前这里断言 `pitch_orig` 被清成全 0。
+        // 而"键变了"只说明**我们手上的原线可能是旧的**，不说明用户画的那条线无效：
+        // 键会因为一次素材重发布、一次采样率变化、甚至一次会话重建而变。清空之后
+        // 用户看到的是曲线凭空消失，随后被重新分析的结果覆盖回一条**不一样**的曲线
+        // —— 一次可见的闪烁 + 一次数据丢失。
+        //
+        // 现在只把键置 None（下次组装会重算），曲线原样保留。
         assert!(
-            entry.pitch_orig.iter().all(|v| *v == 0.),
-            "分析缓存仍应被清空以触发重分析：{:?}",
+            entry.pitch_orig[..4].iter().all(|v| *v == 57.),
+            "原线不得被清空（它仍是我们手上最可信的一份）：{:?}",
             &entry.pitch_orig[..entry.pitch_orig.len().min(8)]
         );
         assert_ne!(
@@ -9221,6 +9267,7 @@ impl TimelineState {
             source_file_mtime: computed_mtime,
             source_file_size: computed_size,
             source_file_fingerprint: computed_fp,
+            content_id: None,
             waveform_preview: computed_waveform,
             pitch_range: inherited
                 .as_ref()
@@ -10428,6 +10475,7 @@ impl TimelineState {
             source_file_mtime: None,
             source_file_size: None,
             source_file_fingerprint: None,
+            content_id: None,
             waveform_preview: None,
             pitch_range: None,
             gain: 1.0,

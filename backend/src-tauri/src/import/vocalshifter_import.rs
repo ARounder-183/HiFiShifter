@@ -523,6 +523,7 @@ fn create_midi_clip_from_file(
         .to_string();
 
     Ok(Clip {
+        content_id: None,
         loop_period_sec: None,
         takes: vec![],
         active_take_id: None,
@@ -934,6 +935,7 @@ pub fn import_vsp(data: &[u8], vsp_file_dir: &Path) -> Result<VspImportResult, S
                 let clip_index = hs_clips.len();
 
                 hs_clips.push(Clip {
+                    content_id: None,
                     loop_period_sec: None,
                     takes: vec![],
                     active_take_id: None,
@@ -1059,6 +1061,7 @@ pub fn import_vsp(data: &[u8], vsp_file_dir: &Path) -> Result<VspImportResult, S
                 .to_string();
 
             hs_clips.push(Clip {
+                content_id: None,
                 loop_period_sec: None,
                 takes: vec![],
                 active_take_id: None,
@@ -1184,6 +1187,7 @@ pub fn import_vsp(data: &[u8], vsp_file_dir: &Path) -> Result<VspImportResult, S
             params_by_root_track.insert(
                 track.id.clone(),
                 TrackParamsState {
+                    pitch_assembly_partial: false,
                     frame_period_ms,
                     pitch_orig: pitch_edit.clone(),
                     pitch_edit,
@@ -1720,6 +1724,7 @@ pub fn import_vsp_clipboard(
                 let clip_index = hs_clips.len();
 
                 hs_clips.push(Clip {
+                    content_id: None,
                     loop_period_sec: None,
                     takes: vec![],
                     active_take_id: None,
@@ -1844,6 +1849,7 @@ pub fn import_vsp_clipboard(
                 .to_string();
 
             hs_clips.push(Clip {
+                content_id: None,
                 loop_period_sec: None,
                 takes: vec![],
                 active_take_id: None,
@@ -1966,6 +1972,7 @@ pub fn import_vsp_clipboard(
             params_by_root_track.insert(
                 track_id.clone(),
                 TrackParamsState {
+                    pitch_assembly_partial: false,
                     frame_period_ms,
                     pitch_orig: pitch_edit.clone(),
                     pitch_edit,
@@ -2324,6 +2331,7 @@ fn import_vsp_clipboard_selected_tracks(
                 let clip_index = hs_clips.len();
 
                 hs_clips.push(Clip {
+                    content_id: None,
                     loop_period_sec: None,
                     takes: vec![],
                     active_take_id: None,
@@ -2446,6 +2454,7 @@ fn import_vsp_clipboard_selected_tracks(
                 .to_string();
 
             hs_clips.push(Clip {
+                content_id: None,
                 loop_period_sec: None,
                 takes: vec![],
                 active_take_id: None,
@@ -2564,6 +2573,7 @@ fn import_vsp_clipboard_selected_tracks(
             params_by_root_track.insert(
                 track.id.clone(),
                 TrackParamsState {
+                    pitch_assembly_partial: false,
                     frame_period_ms,
                     pitch_orig: pitch_edit.clone(),
                     pitch_edit,

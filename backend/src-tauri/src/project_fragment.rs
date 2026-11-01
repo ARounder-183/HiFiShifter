@@ -822,6 +822,7 @@ mod tests {
 
     fn clip(name: &str, track_id: &str, start_sec: f64, length_sec: f64) -> Clip {
         Clip {
+            content_id: None,
             loop_period_sec: None,
             id: format!("clip_{name}"),
             takes: vec![],

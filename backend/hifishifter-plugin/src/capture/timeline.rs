@@ -490,6 +490,10 @@ pub(crate) fn project(takes: &[ProjectionTake<'_>], bpm: f64) -> (TimelineState,
             "id": format!("{id}_take_1"),
             "name": name,
             "source_path": source,
+            // 【跨会话稳定的内容身份】`source` 是 `capture://{take}`；而会话侧还会把
+            // 素材路径重写成**会话私有**的物化路径（`hfs-ui-{pid}-{N}-`）。分析缓存的
+            // 键读这一项，于是同一份音频在重开窗口之后仍然命中同一份分析结果。
+            "content_id": source,
             "source_start_sec": source_start_sec,
             "source_end_sec": source_end_sec,
             "source_sample_rate": tape.sample_rate,

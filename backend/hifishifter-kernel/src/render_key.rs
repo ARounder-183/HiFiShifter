@@ -205,6 +205,7 @@ mod tests {
             source_file_mtime: Some(1_700_000_000),
             source_file_size: Some(123_456),
             source_file_fingerprint: Some(0xDEAD_BEEF),
+            content_id: None,
             waveform_preview: None,
             pitch_range: None,
             gain: 1.0,

@@ -2237,6 +2237,7 @@ mod tests {
         let mut timeline = TimelineState::default();
         let track_id = timeline.tracks[0].id.clone();
         timeline.clips.push(Clip {
+            content_id: None,
             loop_period_sec: None,
             takes: vec![],
             active_take_id: None,
