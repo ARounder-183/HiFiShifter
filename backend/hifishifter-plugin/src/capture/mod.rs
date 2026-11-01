@@ -708,6 +708,8 @@ impl CaptureStore {
     /// **宿主起播**决定（见 `capture.rs` 的文件头）。于是"先按录制、再按播放"这个
     /// 自然的操作顺序不再有任何代价 —— 这正是用户反馈里那条"必须先播放才能录"。
     pub(crate) fn start(&self) -> Result<(), String> {
+        // 【上一次录制留下的旁路块必须先清掉】见 `discard_bypass`。
+        self.discard_bypass();
         if self.is_armed() {
             return Ok(());
         }
@@ -758,8 +760,23 @@ impl CaptureStore {
         self.armed.store(false, Ordering::Release);
         self.capture_started.store(false, Ordering::Release);
         self.capture_stream.store(0, Ordering::Release);
+        self.discard_bypass();
         let segments = self.capture.lock_or_recover().finish(ClosedReason::Stopped);
         self.promote(segments)
+    }
+
+    /// 丢掉旁路槽里所有**还没补写**的块。
+    ///
+    /// 【为什么每个生命周期入口都要清】那些块是"上一次录制"在锁竞争时暂存下来的，
+    /// 它们的工程位置属于**上一张 take**。不清的话，下一次 `start()` 之后的第一块
+    /// 会先把它们补写进去 —— 于是新 take 的开头凭空多出一段旧位置的素材，而它在
+    /// 时间轴上的位置与这次的演奏毫无关系（用户看到的是"刚录的东西前面多了一截"）。
+    fn discard_bypass(&self) {
+        if let Some(mut slots) = crate::sync::try_lock_or_recover(&self.bypass) {
+            for block in slots.drain_pending() {
+                self.recycle(block);
+            }
+        }
     }
 
     /// 取消录制：丢弃本次捕获，不留 take。
@@ -767,6 +784,7 @@ impl CaptureStore {
         self.armed.store(false, Ordering::Release);
         self.capture_started.store(false, Ordering::Release);
         self.capture_stream.store(0, Ordering::Release);
+        self.discard_bypass();
         let mut capture = self.capture.lock_or_recover();
         let _ = capture.finish(ClosedReason::Stopped);
         *capture = Capture::default();
@@ -778,6 +796,7 @@ impl CaptureStore {
         self.armed.store(false, Ordering::Release);
         self.capture_started.store(false, Ordering::Release);
         self.capture_stream.store(0, Ordering::Release);
+        self.discard_bypass();
         *self.capture.lock_or_recover() = Capture::default();
         for take in self.takes.lock_or_recover().drain(..) {
             // 移入回收站而不是直接删：录了几分钟的东西被误删是不可接受的。

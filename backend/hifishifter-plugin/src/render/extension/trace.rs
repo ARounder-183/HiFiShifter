@@ -156,10 +156,11 @@ impl BlockTraceRing {
         record.seq.fetch_add(1, Ordering::Release);
     }
 
-    /// 最近一块的宿主上下文，格式化成 `[capture] ctx: …` 一行。
+    /// 最近一块的宿主上下文，格式化成 `[capture] ctx: …` 一行（测试用）。
     ///
-    /// 【为什么只有一块】它回答的是"宿主此刻给的是什么形状"，不是历史。需要历史时
-    /// 用 `snapshot`（诊断包里的块级 trace）。
+    /// 【为什么只剩测试在用】生产路径要的是"这一行的**形状**变了没有"，那需要
+    /// `last_context` 的第二个返回值；只取整行会让每块都算"变了"（行里有位置）。
+    #[cfg(test)]
     pub(super) fn last_context_line(&self) -> Option<String> {
         self.last_context().map(|(line, _)| line)
     }

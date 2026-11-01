@@ -1625,12 +1625,20 @@ unsafe extern "system" fn audio_setup_processing(
                 // **整条踢出链路**（用户看到"插件不见了"）。我们读不了 f64 平面，但可以在
                 // `process` 里按实际宽度静音（`silence_unsupported_sample_size`）—— 静音但在场
                 // 是可诊断的降级，优于静默消失。
-                crate::log_line(&format!(
-                "[vst3] setupProcessing: sampleSize={} is not 32-bit float; the plugin stays in the \
-                 chain and outputs silence (see silence_unsupported_sample_size).",
-                setup.symbolic_sample_size
-            ));
-                return K_RESULT_OK;
+                //
+                // 【为什么不再在这里 `return`】此前的早退把下面两件事一起跳过了：
+                // `set_setup_sample_rate`（`process` 选快照用的权威率）与
+                // `arm_capture_rendering`（宿主时钟 + 合成队列的装载）。于是"宿主用 64-bit
+                // 样本"这一档在日志里表现为**插件什么都不做**：没有时钟、没有捕获、没有一条
+                // 能指向原因的记录。现在照常走完 setup，只把"输出会是静音"说清楚。
+                //
+                // 【为什么日志是 WARN】它此前走 INFO，而默认日志级别看不到 —— 现场日志里
+                // `[vst3]` 行数为 **0**，用户报障时我们连"宿主声明了什么"都不知道。
+                log::warn!(
+                    "[vst3] setupProcessing: sampleSize={} is not 32-bit float; the plugin stays in \
+                     the chain and outputs silence (see silence_unsupported_sample_size)",
+                    setup.symbolic_sample_size
+                );
             }
             // 【接受域与 `render::source` 对齐（8k..=384k）】此前下限是 44.1k，理由是"内部快照
             // 永不降采样"。但宿主率低于 44.1k 时返回 `kResultFalse` 会让多数宿主把插件**整条
@@ -2791,8 +2799,10 @@ const NEED_SYSTEM_TIME: u32 = 1 << 0;
 const NEED_CONTINUOUS_TIME_SAMPLES: u32 = 1 << 1;
 /// `kProjectTimeMusicValid`：小节/拍显示，以及 Capture 的区间按小节对齐。
 const NEED_PROJECT_TIME_MUSIC: u32 = 1 << 2;
-/// `kBarPositionValid`：网格吸附（Capture 的 punch 区间要吸到小节线）。
-const NEED_BAR_POSITION_MUSIC: u32 = 1 << 3;
+// 【已删除 `NEED_BAR_POSITION_MUSIC`】注释写着"网格吸附要用小节线"，而全仓**没有
+// 任何读者**：吸附用的是 `projectTimeMusic` 与 `tempo`（见 `snap` 与 `TimeRuler`）。
+// 团队自己的纪律是"不消费就不要"——多要一位的代价是宿主为**每一个音频块**多算一份，
+// 而且不可检测。
 /// `kCycleValid`：Capture 的"只录循环区间"需要循环起止。
 const NEED_CYCLE_MUSIC: u32 = 1 << 4;
 /// `kTempoValid`：`TransportClock::tempo()` 的**唯一**来源。
@@ -2814,7 +2824,6 @@ pub(crate) fn process_context_requirements() -> u32 {
     NEED_SYSTEM_TIME
         | NEED_CONTINUOUS_TIME_SAMPLES
         | NEED_PROJECT_TIME_MUSIC
-        | NEED_BAR_POSITION_MUSIC
         | NEED_CYCLE_MUSIC
         | NEED_TEMPO
         | NEED_TIME_SIGNATURE

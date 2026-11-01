@@ -783,6 +783,105 @@ mod tests {
         }
     }
 
+    /// **一个 `kPlaying == 0` 的块不得移动光标。**
+    ///
+    /// 【为什么这是"光标闪现到后边再闪现回来"的直接判据】实测 VEGAS 停播时送来几块
+    /// `kPlaying=0` 的块，位置是 67.0 / 70.83 / 75.25 / 79.125 秒，而当时真实播放
+    /// 位置只有 9.75 ~ 18.6 秒。采纳它们 = 光标跳到 30 秒开外、下一次播放再跳回来。
+    #[test]
+    fn a_parked_host_position_may_not_move_the_cursor() {
+        let clock = TransportClock::default();
+        clock.update(&context(44100 * 10, true));
+        assert_eq!(clock.read().0, 10.0);
+        // 停播块带着一个不可能的位置（67 秒）。
+        clock.update(&context(44100 * 67, false));
+        assert_eq!(clock.read().0, 10.0, "假位置不得移动光标");
+        assert!(!clock.read().1, "但它确实是停播：播放位必须为假");
+        // 第二块又是另一个假位置 —— 仍然不得采纳。
+        clock.update(&context((44100.0 * 70.83) as i64, false));
+        assert_eq!(clock.read().0, 10.0);
+    }
+
+    /// **连续两次一致的停播读数必须被采纳**（那是用户 seek）。
+    ///
+    /// 【为什么判据是"两次一致"而不是幅度阈值】合法的 `kPlaying=0` 位置只有两类：
+    /// 停在原地（与上一次读数一致）与用户 seek（跳很远，但连续两次读数一致）。
+    /// 而 VEGAS 的假位置**每次停播都不同**。
+    #[test]
+    fn two_agreeing_parked_positions_do_move_it() {
+        let clock = TransportClock::default();
+        clock.update(&context(44100 * 10, true));
+        clock.update(&context(44100 * 40, false));
+        assert_eq!(clock.read().0, 10.0, "单块不足以说明这是 seek");
+        clock.update(&context(44100 * 40, false));
+        assert_eq!(clock.read().0, 40.0, "连续两次一致 ⇒ 采纳（用户把光标挪到了 40 秒）");
+    }
+
+    /// **播放位必须有寿命：回调停摆之后它要翻假。**
+    ///
+    /// 【为什么"回调停摆"比"位置没变"更强】播放中 `process()` 按缓冲率到达，不存在
+    /// 合法的多秒空档；而"位置没变"有合法反例（宿主预卷、块边界量化）。
+    #[test]
+    fn a_stale_block_playing_bit_expires() {
+        let clock = TransportClock::default();
+        clock.note_block_length(512, 44100.);
+        clock.update(&context(44100, true));
+        let fresh = clock.read_view_at(0);
+        assert!(fresh.playing, "刚到的块说在播就是真的");
+        // TTL = 4 × (512/44100 s) ≈ 46 ms，下限 200 ms。
+        let later = clock.read_view_at(400);
+        assert!(!later.playing, "回调停摆超过寿命之后必须判停止");
+        assert_eq!(later.provenance, Provenance::Stale, "并且如实降级来源");
+    }
+
+    /// **推送载荷必须带上前端 reducer 读的每一个键。**
+    ///
+    /// 【为什么这是契约测试】推送通道此前整条死掉，只因为载荷没有 `ok` —— 而
+    /// `sessionSlice.transportPush.test.ts` 的夹具**自己编了 `ok:true`**，所以测试全绿。
+    /// 测试替身比生产载荷更"正确"，把缺陷整条盖住了。这里直接断言生产载荷的键集合。
+    #[test]
+    fn the_push_payload_has_every_key_the_reducer_reads() {
+        let clock = TransportClock::default();
+        clock.publish_duration(120.0);
+        clock.update(&context(44100, true));
+        let payload = clock.read_view().to_json(clock.duration(), true);
+        for key in [
+            "ok",
+            "is_playing",
+            "waiting_for_render",
+            "target",
+            "base_sec",
+            "position_sec",
+            "duration_sec",
+            "host_authoritative",
+            "position_source",
+            "position_age_ms",
+            "seek_pending",
+            "sample_seq",
+        ] {
+            assert!(
+                payload.get(key).is_some(),
+                "推送载荷缺少 reducer 读取的键 {key}: {payload}"
+            );
+        }
+        assert_eq!(payload["ok"], true, "没有 ok 的话前端第一行就 return 了");
+        assert_eq!(payload["duration_sec"], 120.0);
+    }
+
+    /// **读数序号必须单调，且两条通道共用它。**
+    #[test]
+    fn the_sample_sequence_is_monotonic() {
+        let clock = TransportClock::default();
+        let mut last = clock.read_view().sample_seq;
+        for block in 1..=5i64 {
+            clock.update(&context(44100 * block, true));
+            let seq = clock.read_view().sample_seq;
+            assert!(seq > last, "每一次读数都要分配一个更大的序号：{seq} <= {last}");
+            last = seq;
+        }
+        clock.publish_host(9.0, true);
+        assert!(clock.read_view().sample_seq > last, "宿主采样同样推进序号");
+    }
     /// 真实工程时钟不受预取提前位置或其它clip停止覆盖，后退seek/loop仍能发布。
     #[test]
     fn actual_host_position_survives_prefetch_noise_and_accepts_backward_seeks() {

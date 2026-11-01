@@ -1799,11 +1799,55 @@ pub fn get_clips_for_root<'a>(tl: &'a TimelineState, root_track_id: &str) -> Vec
 #[cfg(test)]
 mod tests {
     use super::{
-        analyze_whole_source, assemble_nonloop_pitch_from_window, cached_pitch_bytes,
-        clip_pitch_cache_budget_bytes, clip_pitch_cache_entry_limit, clip_pitch_cache_max_entries,
-        compute_frame_levels, dyn_needs_level_analysis, dyn_panel_open_roots, global_cache,
-        trim_and_resample_midi, CachedClipPitch, UNBOUNDED_ENTRY_CAPACITY,
+        analyze_whole_source, assemble_nonloop_pitch_from_window, build_clip_pitch_key,
+        cached_pitch_bytes, clip_pitch_cache_budget_bytes, clip_pitch_cache_entry_limit,
+        clip_pitch_cache_max_entries, compute_frame_levels, dyn_needs_level_analysis,
+        dyn_panel_open_roots, global_cache, trim_and_resample_midi, CachedClipPitch,
+        UNBOUNDED_ENTRY_CAPACITY,
     };
+    use crate::state::{Clip, TimelineState};
+
+    /// **内容身份优先于会话私有物化路径。**
+    ///
+    /// 【为什么这是"每次播放都重新分析"的根因】Capture 的素材是会话私有临时文件：
+    /// 路径形如 `<localdata>/pcm/hfs-ui-{pid}-{N}-/sources/source-{blake3}.wav`，其中
+    /// `N` 是每个 `EditorSession` 自增的序号，会话 Drop 时整个目录被删。把路径哈希进
+    /// 内容键，等于"每开一次窗口就把整份音频重分析一遍"。
+    #[test]
+    fn a_pitch_key_ignores_the_private_materialisation_path() {
+        let tl = TimelineState::default();
+        let clip = |path: &str, content: Option<&str>| {
+            let mut clip = Clip {
+                length_sec: 4.0,
+                source_path: Some(path.to_string()),
+                ..Default::default()
+            };
+            clip.content_id = content.map(str::to_string);
+            clip
+        };
+        let a = clip("C:/pcm/hfs-ui-1-1-/sources/source-aaa.wav", Some("capture://7"));
+        let b = clip("C:/pcm/hfs-ui-9-2-/sources/source-bbb.wav", Some("capture://7"));
+        let key_a = build_clip_pitch_key(&tl, &a, "root", 5.0).unwrap().key;
+        let key_b = build_clip_pitch_key(&tl, &b, "root", 5.0).unwrap().key;
+        assert_eq!(key_a, key_b, "同一份内容换个会话目录必须命中同一份分析结果");
+
+        // 不同内容身份必须得到不同的键，否则两份素材会共享一份缓存。
+        let c = clip("C:/pcm/hfs-ui-1-1-/sources/source-aaa.wav", Some("capture://8"));
+        assert_ne!(
+            key_a,
+            build_clip_pitch_key(&tl, &c, "root", 5.0).unwrap().key,
+            "内容身份不同就是不同的内容"
+        );
+
+        // 没有内容身份时退回路径 + 文件签名（老工程 / 外部拖入），行为与改动前一致。
+        let d = clip("C:/pcm/hfs-ui-1-1-/sources/source-aaa.wav", None);
+        let e = clip("C:/pcm/hfs-ui-9-2-/sources/source-bbb.wav", None);
+        assert_ne!(
+            build_clip_pitch_key(&tl, &d, "root", 5.0).unwrap().key,
+            build_clip_pitch_key(&tl, &e, "root", 5.0).unwrap().key,
+            "没有内容身份时键必须仍然区分不同的源"
+        );
+    }
 
     /// Loop + 媒体时长未知 + 环绕窗口（start > end，split 产生）：
     /// 不得落入"空窗口"提前返回 —— 退化为整条缓存曲线回绕，输出非空

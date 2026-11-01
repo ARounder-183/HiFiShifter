@@ -413,8 +413,7 @@ pub(crate) fn project(takes: &[ProjectionTake<'_>], bpm: f64) -> (TimelineState,
     // 一个空轨，并以为录制漏了一条。
     timeline.tracks.clear();
     timeline.selected_track_id = Some(CAPTURE_TRACK_ID.to_owned());
-    timeline.tracks.push(
-        serde_json::from_value(json!({
+    let capture_track: hifishifter_kernel::state::Track = match serde_json::from_value(json!({
             "id": CAPTURE_TRACK_ID,
             "name": CAPTURE_TRACK_NAME,
             "order": 0,
@@ -429,9 +428,16 @@ pub(crate) fn project(takes: &[ProjectionTake<'_>], bpm: f64) -> (TimelineState,
             // 在没有曲线、没有效果、没有速率变化时返回假 —— 声码器根本不会跑。所以
             // 开启只让"画了线"生效，不让"没画线"变成另一种声音。
             "compose_enabled": true,
-        }))
-        .expect("Capture 轨道的必填字段是固定的"),
-    );
+        })) {
+        Ok(track) => track,
+        Err(error) => {
+            // 【降级而不是 panic】见片段那一处的说明：这条路径在宿主 UI 线程上。
+            // 没有捕获轨道就没有可放的片段，如实返回一份空时间线而不是崩溃。
+            log::error!("[capture] the capture track could not be built: {error}");
+            return (timeline, summary);
+        }
+    };
+    timeline.tracks.push(capture_track);
 
     let pieces = resolved_pieces(&tapes);
 
@@ -473,7 +479,7 @@ pub(crate) fn project(takes: &[ProjectionTake<'_>], bpm: f64) -> (TimelineState,
         // 内部边界交给 `edge_gain` 一份实现统一负责。
         let at_take_head = piece.offset == 0;
         let at_take_tail = piece.offset + frames >= tape.frames();
-        let mut clip: hifishifter_kernel::state::Clip = serde_json::from_value(json!({
+        let mut clip: hifishifter_kernel::state::Clip = match serde_json::from_value(json!({
             "id": id,
             "track_id": CAPTURE_TRACK_ID,
             "name": name,
@@ -481,12 +487,22 @@ pub(crate) fn project(takes: &[ProjectionTake<'_>], bpm: f64) -> (TimelineState,
             "length_sec": length_sec,
             "fade_in_sec": if at_take_head { edge_fade } else { 0.0 },
             "fade_out_sec": if at_take_tail { edge_fade } else { 0.0 },
-        }))
-        .expect("片段的必填字段是固定的");
+        })) {
+            Ok(clip) => clip,
+            Err(error) => {
+                log::error!("[capture] clip {id} could not be built: {error}");
+                continue;
+            }
+        };
+
         // 【为什么 `duration_*` 是整条带的长度】它是"这份媒体有多长"，而不是"这一片有多
         // 长"。片段自己的长度在 `length_sec` 里，两者此前混用同一个量，于是源窗一旦
         // 不等于整段（被切过之后就是如此）就自相矛盾。
-        let take: hifishifter_kernel::state::ClipTake = serde_json::from_value(json!({
+        // 【降级而不是 panic】`build` 在 `capture_status` 路径上被调用，而那条路径
+        // **在宿主 UI 线程上**、没有 `catch_unwind`：一次反序列化失败就穿过 C ABI
+        // 变成宿主崩溃，且完全无法归因。与"逐条降级"的既有纪律一致 —— 记一条 error，
+        // 跳过这一片，其余照常。
+        let take: hifishifter_kernel::state::ClipTake = match serde_json::from_value(json!({
             "id": format!("{id}_take_1"),
             "name": name,
             "source_path": source,
@@ -500,8 +516,13 @@ pub(crate) fn project(takes: &[ProjectionTake<'_>], bpm: f64) -> (TimelineState,
             "duration_sec": tape.frames() as f64 / rate,
             "duration_frames": tape.frames() as u64,
             "playback_rate": 1.0,
-        }))
-        .expect("take 的必填字段是固定的");
+        })) {
+            Ok(take) => take,
+            Err(error) => {
+                log::error!("[capture] take for clip {id} could not be built: {error}");
+                continue;
+            }
+        };
         clip.takes.push(take);
         clip.active_take_id = Some(format!("{id}_take_1"));
         clip.normalize_takes();
