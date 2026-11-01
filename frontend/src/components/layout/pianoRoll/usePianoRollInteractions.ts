@@ -1082,14 +1082,7 @@ export function usePianoRollInteractions(args: {
             if (!present.some(Boolean)) return;
 
             try {
-                await paramsApi.setParamFrames(
-                    trackId,
-                    editParam,
-                    minF,
-                    smoothed,
-                    false,
-                    present,
-                );
+                await paramsApi.setParamFrames(trackId, editParam, minF, smoothed, false, present);
             } catch (err) {
                 // 绘制后的自动平滑是增强步骤：失败只跳过平滑与视图同步，
                 // 不产生 unhandledrejection（主提交 commitStroke 已自兜底）。

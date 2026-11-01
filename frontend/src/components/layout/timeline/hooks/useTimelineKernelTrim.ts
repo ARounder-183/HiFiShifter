@@ -1076,8 +1076,7 @@ export function useTimelineKernelTrim({
                     }
                     // 锁定参数线：本次是否要搬曲线（决定取数闸门是否需要合上）。
                     const lockParamLines =
-                        canRewriteParamLinesLocally() &&
-                        sessionRef.current.lockParamLinesEnabled;
+                        canRewriteParamLinesLocally() && sessionRef.current.lockParamLinesEnabled;
                     // 闸门必须在落库派发**之前**合上（见 `loudnessFetchGate`）。
                     if (lockParamLines) holdLoudnessFetch();
                     const groupPersist = dispatch(setClipsStateBulkRemote({ updates })).unwrap();
@@ -1201,8 +1200,7 @@ export function useTimelineKernelTrim({
                 };
                 // 锁定参数线：本次是否要搬曲线（决定取数闸门是否需要合上）。
                 const lockParamLines =
-                    canRewriteParamLinesLocally() &&
-                    sessionRef.current.lockParamLinesEnabled;
+                    canRewriteParamLinesLocally() && sessionRef.current.lockParamLinesEnabled;
                 // 闸门必须在落库派发**之前**合上（见 `loudnessFetchGate`）。
                 if (lockParamLines) holdLoudnessFetch();
                 const persist = dispatch(setClipsStateBulkRemote({ updates: [next] })).unwrap();

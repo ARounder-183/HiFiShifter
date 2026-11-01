@@ -84,10 +84,7 @@ export const CaptureRangeLayer: React.FC<{
                 headRef.current.style.left = `${head.left}px`;
             }
             if (lastBandRef.current !== null && lastStartSec !== null && lastEndSec !== null) {
-                const endSec = Math.min(
-                    Math.max(visual, lastEndSec),
-                    lastEndSec + MAX_LEAD_SEC,
-                );
+                const endSec = Math.min(Math.max(visual, lastEndSec), lastEndSec + MAX_LEAD_SEC);
                 const left = Math.round(lastStartSec * pxPerSec * dpr) / dpr;
                 const right = Math.round(endSec * pxPerSec * dpr) / dpr;
                 lastBandRef.current.style.width = `${Math.max(1 / dpr, right - left)}px`;

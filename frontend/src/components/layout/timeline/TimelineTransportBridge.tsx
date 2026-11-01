@@ -66,14 +66,14 @@ export const TimelineTransportBridge = React.memo(function TimelineTransportBrid
      * 而"我听到的是旧音频"是另一件事（状态栏的 `stale`）。把光标停住并不能让音频
      * 变新，只会让用户以为播放停了 —— 而音频其实在响。
      */
-    // 【唯一判据在 selector 里】见 `selectIsTransportAdvancing`：三处三个公式，
-    // 恰好在"位置冻结"这个场景互相分歧 —— 那正是"停止后光标还在走"。
+    // 【唯一判据在 selector 里】见 `isTransportAdvancing`：三处三个公式，恰好
+    // 在"位置冻结"这个场景互相分歧 —— 那正是"停止后光标还在走"。
     const transportAdvancing = isTransportAdvancing(transport);
 
     useVisualPlayhead({
         syncedPlayheadSec: transport.playheadSec,
         syncedAtMs: transport.playheadSampledAtMs,
-        isTransportAdvancing,
+        isTransportAdvancing: transportAdvancing,
         onFrame: React.useCallback(
             (visualPlayheadSec: number) => {
                 // 同步共享 ref：缩放锚点（以播放头为锚时的锚点解析）读取的必须是

@@ -1817,11 +1817,15 @@ mod tests {
     fn a_pitch_key_ignores_the_private_materialisation_path() {
         let tl = TimelineState::default();
         let clip = |path: &str, content: Option<&str>| {
-            let mut clip = Clip {
-                length_sec: 4.0,
-                source_path: Some(path.to_string()),
-                ..Default::default()
-            };
+            let mut clip: Clip = serde_json::from_value(serde_json::json!({
+                "id": "clip-a",
+                "track_id": "root",
+                "name": "clip-a",
+                "start_sec": 0.0,
+                "length_sec": 4.0,
+                "source_path": path,
+            }))
+            .expect("clip fixture");
             clip.content_id = content.map(str::to_string);
             clip
         };

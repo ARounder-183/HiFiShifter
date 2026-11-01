@@ -83,6 +83,11 @@ export function registerRuntime(builder: ActionReducerMapBuilder<SessionState>) 
                     playbackTarget: payload.playback_target ?? null,
                     playbackPositionSec: state.runtime.playbackPositionSec,
                     positionAdvancing: state.runtime.positionAdvancing,
+                    // 【这两项必须跟着走】整份替换 `runtime` 时漏掉它们会让"读数有多旧"
+                    // 与乱序判据一起归零：前者会让停播后的光标重新按 1x 外推，后者会
+                    // 让已经丢过的旧读数重新被采纳。
+                    positionAgeMs: state.runtime.positionAgeMs,
+                    lastTransportSeq: state.runtime.lastTransportSeq,
                     playbackDurationSec: state.runtime.playbackDurationSec,
                     // 整份替换这个子对象时必须显式带上它，否则"宿主受控"这条读数
                     // 会被一次设备刷新静默清成 false（轮询节奏随之退回 400 ms）。

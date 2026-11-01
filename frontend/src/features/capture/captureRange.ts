@@ -86,8 +86,7 @@ export function deriveCaptureBands(
     // 【右缘只能朝"刚录到的地方"延伸】此前无条件把最后一段拉到 `positionFrame`：
     // 前向 seek 之后 `positionFrame` 立刻跳到新位置，而那里**一个样本都没录**，
     // 带子于是横跨整个空洞。判据改成"位置落在最后一段的右缘附近"。
-    const withinReach =
-        positionSec >= last.endSec && positionSec <= last.endSec + MAX_LEAD_SEC;
+    const withinReach = positionSec >= last.endSec && positionSec <= last.endSec + MAX_LEAD_SEC;
     if (withinReach) last.endSec = positionSec;
     // 【视觉播放头只用来补齐轮询间隙】它比 `positionFrame` 新（60 Hz vs 5 Hz），
     // 但仍必须服从同一条"不许横跨空洞"的纪律，并且延伸量有上限：视觉值自带
@@ -95,11 +94,7 @@ export function deriveCaptureBands(
     // 【只在"真的在录"时跟随】`standby`（已武装、宿主还没播）与 `ready`（录完了）
     // 都不该让带子跟着光标长 —— 那会把"没在录"画成"在录"。
     const following = status?.state === "recording" && Boolean(status.hostPlaying);
-    if (
-        following &&
-        typeof visualPlayheadSec === "number" &&
-        Number.isFinite(visualPlayheadSec)
-    ) {
+    if (following && typeof visualPlayheadSec === "number" && Number.isFinite(visualPlayheadSec)) {
         const lead = Math.min(visualPlayheadSec, last.endSec + MAX_LEAD_SEC);
         if (lead > last.endSec) last.endSec = lead;
     }
