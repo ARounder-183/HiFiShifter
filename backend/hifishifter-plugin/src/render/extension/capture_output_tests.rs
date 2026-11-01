@@ -1956,6 +1956,79 @@ fn the_emit_gate_fades_to_zero_instead_of_stepping() {
     assert_eq!(left[frames - 1], 0.0, "块内必须精确落到零");
 }
 
+/// **连续两次门控淡出，第二次必须从零开始（不得重放冻结的尾巴）。**
+///
+/// 【为什么这是那个"嗡鸣"的判据】`apply_gate_fade_out` 读的是尾巴里**最新**的那
+/// `fade` 帧（`DECLICK_HISTORY_FRAMES - fade ..`），而它此前只清**最旧**的 64 帧
+/// （`0..OUTPUT_DECLICK_FRAMES`）。于是第二块起，同一段冻结的尾巴被反复读出、反复
+/// 淡出：周期 = 块长（848 帧 ≈ 18 ms），听感是约 57 Hz 的嗡鸣，而 `any_signal`
+/// 恒为真还让宿主以为这一块有内容。
+#[test]
+fn the_gate_fade_clears_the_newest_tail() {
+    let owner = insert_owner();
+    let stream = ProcessStream::Realtime;
+    let frames = 8;
+    for channel in 0..2 {
+        for index in 0..super::DECLICK_HISTORY_FRAMES {
+            owner.declick[stream.index()].tail[channel][index]
+                .store(1.0_f32.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    let mut left = [1.0_f32; 8];
+    let mut right = [1.0_f32; 8];
+    let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
+    let mut bus = crate::audio_abi::AudioBusBuffers {
+        num_channels: 2,
+        silence_flags: 0,
+        channel_buffers: planes.as_mut_ptr(),
+    };
+    unsafe { owner.apply_gate_fade_out(stream, &mut bus, frames) };
+    assert!(left[0] > 0.0, "第一块应当从上一块的尾巴淡出");
+    // 第二块：尾巴已经被清零，所以整块必须是零（而不是同一段尾巴再淡一次）。
+    left.fill(1.0);
+    right.fill(1.0);
+    unsafe { owner.apply_gate_fade_out(stream, &mut bus, frames) };
+    assert!(
+        left.iter().all(|value| *value == 0.0),
+        "第二次门控必须输出纯零（旧实现会重放同一段冻结的尾巴）：{:?}",
+        &left[..]
+    );
+    assert_eq!(bus.silence_flags, 3, "全零时如实报静音位");
+}
+
+/// **块长变化不算内容变化。**
+///
+/// 【为什么这是重复抑制失效的直接原因】`block_activity_hash` 把块长拌进了指纹，
+/// 而 `allow_output_for` 的重复判据又要求块长**完全相等**。VEGAS 的块长在
+/// 1200/848 之间交替（日志实测），于是同一份内容被判成"在变"、`same` 每块为假、
+/// 停播时每块都被当成新内容放行。
+#[test]
+fn a_block_length_change_is_not_a_content_change() {
+    let samples: &'static [f32] = Box::leak(vec![0.25_f32; 1200].into_boxed_slice());
+    let long = crate::capture::recorder::InputBlock {
+        start: 0,
+        frames: 1200,
+        sample_rate: 48_000.0,
+        planes: [Some(&samples[..1200]), Some(&samples[..1200])],
+        playing: true,
+    };
+    let short = crate::capture::recorder::InputBlock {
+        start: 0,
+        frames: 848,
+        sample_rate: 48_000.0,
+        planes: [Some(&samples[..848]), Some(&samples[..848])],
+        playing: true,
+    };
+    let owner = insert_owner();
+    let geometry = &owner.streams[ProcessStream::Realtime.index()];
+    geometry.note_activity(block_fingerprint(&long).0);
+    geometry.note_activity(block_fingerprint(&short).0);
+    assert_eq!(
+        geometry.unchanged_run.load(std::sync::atomic::Ordering::Acquire),
+        1,
+        "同一份内容换个块长仍然是同一份内容"
+    );
+}
 /// **预取块不因 `kPlaying == 0` 被静音（bound 实例同样适用）。**
 ///
 /// 【为什么必须覆盖 bound】REAPER 的 ARA 播放渲染器就在预取流上工作；它会把输出
