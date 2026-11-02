@@ -92,7 +92,12 @@ fn owned_fade_shape_changes_kernel_pcm_and_state_roundtrip_and_undo_clears_it() 
     assert!((updated[0].left[index] - original[0].left[index]).abs() > 0.1);
     let saved = owners[0].encode_state().unwrap();
     let value: serde_json::Value = serde_json::from_slice(&saved).unwrap();
-    assert_eq!(value["version"], 4);
+    // 【为什么断言常量而不是字面量】与 `state_channel` 自己的用例同一口径：
+    // 字面量会在下一次提升代际时悄悄变成"测试要求旧格式"。
+    assert_eq!(
+        value["version"].as_u64(),
+        Some(crate::state_channel::EditState::STATE_VERSION)
+    );
     assert_eq!(value["edits"]["fades"].as_object().unwrap().len(), 1);
     owners[0].restore_state(&before).unwrap();
     assert!(

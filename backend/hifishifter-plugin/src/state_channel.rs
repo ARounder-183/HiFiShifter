@@ -598,7 +598,7 @@ impl EditState {
     /// （开发机上流通过），而它的记录**没有持久身份**（按会话轨序号索引）。升到 2 之后，
     /// 旧档会被明确拒绝并给出可行动的理由，而不是被按序号猜着恢复 —— 猜错的后果是
     /// 把 A 轨的曲线套到 B 轨上。插件从未发布给终端用户，所以"不迁移"是允许的。
-    const STATE_VERSION: u64 = 2;
+    pub(crate) const STATE_VERSION: u64 = 2;
 
     /// 有版本且有界的组件state；旧空state保持默认编辑。
     pub fn encode(&self) -> Result<Vec<u8>, String> {
