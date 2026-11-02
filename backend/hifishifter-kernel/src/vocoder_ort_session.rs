@@ -346,6 +346,28 @@ pub fn ep_settings_generation() -> u64 {
 }
 
 /// Set the runtime EP override. Pass `None` to clear the override.
+/// 异步会话预热的**进程级开关**（默认开）。
+///
+/// 【为什么需要它】`update_ort_ep` 的三份实现各自在**游离**线程里重建 ONNX 会话
+/// （秒级；GPU EP 首跑更久）。产品里这值得：它把秒级构建搬出了渲染/分析热路径。
+/// 但**测试进程不能有它**：Windows 上 libtest 跑完直接 `ExitProcess`，没有任何可用的
+/// 收尾钩子，于是进程会在预热线程正跑"建会话"的中途被拆掉 —— 实测插件测试二进制
+/// 即使每条用例都通过也以 `0xC0000005` 退出，VEH 抓到的崩溃线程名是
+/// `ort-session-prewarm-vocoder`、故障地址固定落在本 exe 内；关掉之后同一套用例
+/// 连续 5 次干净退出。会话本身仍会在首次真正使用时**惰性构建**，行为覆盖一点没少。
+static ASYNC_SESSION_PREWARM: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+
+/// 关掉/打开后台会话预热（见 [`ASYNC_SESSION_PREWARM`] 的说明）。
+pub fn set_async_session_prewarm(enabled: bool) {
+    ASYNC_SESSION_PREWARM.store(enabled, std::sync::atomic::Ordering::Release);
+}
+
+/// 后台会话预热是否允许启动。
+pub fn async_session_prewarm_enabled() -> bool {
+    ASYNC_SESSION_PREWARM.load(std::sync::atomic::Ordering::Acquire)
+}
+
 pub fn set_runtime_ep_override(ep: Option<String>) {
     let mut guard = RUNTIME_EP_OVERRIDE
         .get_or_init(|| Mutex::new(None))

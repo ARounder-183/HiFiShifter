@@ -46,7 +46,7 @@ impl StoreState {
         // 启动即下发一次：进程级消费方（ONNX 会话 / 拉伸默认值 / 导入策略）必须与
         // 磁盘上的取值一致。此前插件从不调用这些下发函数，于是"默认拉伸算法"
         // 这类设置在插件里是死的 —— 值存下来了，没有任何人读它。
-        hifishifter_kernel::ui_settings_apply::apply(&settings);
+        apply_to_process(&settings);
         Self {
             dir,
             settings,
@@ -64,6 +64,19 @@ impl StoreState {
         let Some(dir) = &self.dir else { return };
         hifishifter_kernel::config::save_frontend_prefs(dir, &self.prefs);
     }
+}
+
+/// 把一份设置下发给进程级消费方（ONNX 会话 / 拉伸默认值 / 导入策略 / 渲染缓存）。
+///
+/// 【为什么测试里先关掉异步预热】见 `hifishifter_kernel::vocoder_ort_session::
+/// set_async_session_prewarm`：测试进程结束时没有收尾钩子（Windows 上 libtest 直接
+/// `ExitProcess`），预热线程会在"建会话"中途被拆掉，让整个测试二进制以
+/// `0xC0000005` 退出 —— 即使每条用例都通过。会话仍会在首次真正使用时惰性构建，
+/// 用例覆盖的行为一点没少。
+fn apply_to_process(settings: &UiSettings) {
+    #[cfg(test)]
+    hifishifter_kernel::vocoder_ort_session::set_async_session_prewarm(false);
+    hifishifter_kernel::ui_settings_apply::apply(settings);
 }
 
 static STORE: Mutex<Option<StoreState>> = Mutex::new(None);
@@ -128,7 +141,7 @@ pub fn save_settings_patch(patch: &serde_json::Value) -> Result<UiSettings, Stri
         state.settings = next;
         state.persist_settings();
         // 下发到进程级消费方（ONNX 会话 / 拉伸默认值 / 导入策略）。
-        hifishifter_kernel::ui_settings_apply::apply(&state.settings);
+        apply_to_process(&state.settings);
         Ok(state.settings.clone())
     });
     if result.is_ok() {

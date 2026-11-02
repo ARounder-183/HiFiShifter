@@ -940,8 +940,12 @@ pub fn update_ort_ep(choice: &str, device_id: Option<i32>) {
     // 预编译 / CoreML 图编译）甚至因驱动问题失败 —— 预热把它移出渲染热路径，
     // 渲染线程只需等构建锁（且双重检查后直接复用预热结果，不再重复构建）。
     // 失败仅记录日志：下一次渲染请求的 load 会再次尝试构建。
+    // 【测试进程不能留游离构建线程】见 `async_session_prewarm_enabled`。
+    if !crate::vocoder_ort_session::async_session_prewarm_enabled() {
+        return;
+    }
     std::thread::Builder::new()
-        .name("ort-session-prewarm-vocoder".into())
+    .name("ort-session-prewarm-vocoder".into())
         .spawn(|| {
             if let Err(e) = get_or_init_shared_session() {
                 log::warn!("[nsf_hifigan] session pre-warm failed: {e}");

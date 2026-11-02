@@ -95,8 +95,9 @@ pub fn apply(settings: &UiSettings) -> AppliedChanges {
             .and_then(crate::vocoder_ort_session::dml_device_index_for_key);
         #[cfg(not(feature = "onnx"))]
         let device_index = None::<i32>;
-        // 三个模型模块各自持有会话；只重建取值真的变了的那一类也要全部走一遍，
-        // 因为 EP 是全局选择（`update_ort_ep` 内部按 EP 去重，重复调用是廉价的）。
+        // 三个模型模块各自持有会话，所以三类都要走一遍：EP 是**全局**选择。
+        // 去重在这里（`record` / `changes.inference_device_changed`），不在
+        // `update_ort_ep` 里面 —— 那三个函数每次调用都会清空会话并重新预热。
         crate::nsf_hifigan_onnx::update_ort_ep(&settings.ort_ep, device_index);
         crate::hnsep_onnx::update_ort_ep(&settings.ort_ep, device_index);
         crate::fcpe_onnx::update_ort_ep(&settings.ort_ep, device_index);
