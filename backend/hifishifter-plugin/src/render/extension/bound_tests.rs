@@ -1671,6 +1671,24 @@ fn two_renderer_case(shared_identity: bool) {
     ]);
     *document.track_bindings.lock_or_recover() = bindings.clone();
     document.ready.store(true, Ordering::Release);
+    // 【host-link 提交要有基线】`authority.absorb_display` 判"哪一帧是用户改的"靠的就是
+    // 基线（见 round-4 方案 §10.3：宿主外部编辑 = 对 `compose_root_view` 做工程时间差分）。
+    // 没有基线的根会被整条跳过 —— 这是 R5 定下的纪律（"没有基线"不等于"用户画了整条"），
+    // 于是夹具必须自己把基线备好，否则这条用例测的就不是隔离性而是"缺基线"。
+    for root in ["a", "b"] {
+        document.publish_baseline(
+            root,
+            hifishifter_kernel::editor::param_authority::RootBaseline::from_params(
+                &hifishifter_kernel::state::TrackParamsState {
+                    frame_period_ms: 5.0,
+                    // 帧数必须与客户端交上来的数组等长：`absorb_display` 只比对
+                    // 长度相同的曲线（长度不同 = 不是同一份工程，整段丢弃）。
+                    pitch_orig: vec![0.0; 2],
+                    ..Default::default()
+                },
+            ),
+        );
+    }
     let identities = [Box::new(0_u8), Box::new(0_u8)];
     let mut owners = Vec::new();
     for (index, id) in ["clip-a", "clip-b"].into_iter().enumerate() {
