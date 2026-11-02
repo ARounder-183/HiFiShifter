@@ -3010,6 +3010,55 @@ impl DocumentSession {
         Ok(payload)
     }
 
+    /// 私有分组里 `root` 的**全部后代根轨**（子、孙……）。
+    ///
+    /// 【为什么写路径必须展开】分组共享一条参数线（用户手册：「轨道组共享一套参数，
+    /// 子轨从根轨继承」）：GUI 只给分组根一条线，用户在它上面落笔时 `set_param_frames`
+    /// 报的是**根**的 id。而渲染与存档都按**物理轨**取参数 —— `workspace_timeline_locked`
+    /// 不带私有分组边（分组只存在于 `edits.groups` 的 GUID 树里）。子轨的权威不跟着写，
+    /// 用户看到的就是"画了只有根轨有声音，子轨没反应"。
+    ///
+    /// 【为什么只对分组根生效】子轨自己的偏移参数（cents / degree / formant）写的是
+    /// 子轨自己，那条路上没有后代；`root` 解析用的是宿主物理图，所以子轨永远解析成
+    /// 它自己。
+    ///
+    /// 【为什么要已访问集】分组树是用户手拖出来的，坏存档里可能有环。这里宁可少写
+    /// 一条轨，也不能让一次落笔把命令线程转死。
+    fn private_group_descendants(
+        &self,
+        edits: &crate::state_channel::EditState,
+        root: &str,
+    ) -> Vec<String> {
+        let aliases = self.group_aliases("");
+        // 两张方向相反的表：分组树按 GUID 存，宿主轨按 id 存，展开要来回换。
+        let guid_of = aliases
+            .iter()
+            .map(|(guid, id)| (id.as_str(), guid.as_str()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let id_of = aliases
+            .iter()
+            .map(|(guid, id)| (guid.as_str(), id.as_str()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let Some(&root_guid) = guid_of.get(root) else {
+            return Vec::new();
+        };
+        let mut visited = std::collections::BTreeSet::from([root_guid]);
+        let mut frontier = vec![root_guid];
+        let mut found = Vec::new();
+        while let Some(parent) = frontier.pop() {
+            for (guid, node) in &edits.groups.nodes {
+                if node.parent.as_deref() != Some(parent) || !visited.insert(guid.as_str()) {
+                    continue;
+                }
+                if let Some(id) = id_of.get(guid.as_str()) {
+                    found.push((*id).to_owned());
+                }
+                frontier.push(guid.as_str());
+            }
+        }
+        found
+    }
+
     /// 权威写：区间替换 + 显式 present 位图。绝不读取/写回整条显示数组。
     pub(crate) fn write_authority_range(
         &self,
@@ -3045,7 +3094,7 @@ impl DocumentSession {
         }
         let before = edits.authority.revision;
         let runs_before = edits.authority.run_count();
-        let revision = edits.authority.write_range(
+        edits.authority.write_range(
             &root,
             param,
             start_frame as usize,
@@ -3053,12 +3102,36 @@ impl DocumentSession {
             &present,
             default,
         )?;
+        // 【分组根落笔 = 整组落笔】理由见 `private_group_descendants`。
+        let group_roots = self.private_group_descendants(&edits, &root);
+        for child in &group_roots {
+            let child_default = Self::authority_param_default(&host, child, param);
+            let child_values = values
+                .iter()
+                .map(|value| Self::normalize_authority_value(param, *value, child_default))
+                .collect::<Vec<_>>();
+            if let Err(error) = edits.authority.write_range(
+                child,
+                param,
+                start_frame as usize,
+                &child_values,
+                &present,
+                child_default,
+            ) {
+                // 【一条子轨写不进去不该让整笔编辑失败】根已经写下了；把它降级成一行
+                // 日志，比让用户"画完了却收到一个错误、曲线又回弹"好。
+                log::warn!("[param] private group write to {child} failed: {error}");
+            }
+        }
+        let revision = edits.authority.revision;
         let changed = revision != before;
         if changed {
             edits.revision = edits.revision.saturating_add(1);
             // 显示缓存与权威同代更新；GUI 的下一帧不能读到上一代数组。
-            let view = self.compose_param_view_with(&host, &edits, &root);
-            edits.params.insert(root.clone(), view.params);
+            for target in std::iter::once(&root).chain(group_roots.iter()) {
+                let view = self.compose_param_view_with(&host, &edits, target);
+                edits.params.insert(target.clone(), view.params);
+            }
             // 【`param.mutate` 是唯一的曲线改动读数】它把"谁改的"写进 `cause`：
             // 用户操作（write）、撤销还原（restore）、几何事务（geometry）走的是三条
             // 不同的路径，而此前它们在日志里完全同形 —— 于是一次"参数线自己变了"
@@ -3069,9 +3142,10 @@ impl DocumentSession {
                 "param.mutate",
                 format_args!(
                     "[param] mutate cause=write root={root} param={param} range=[{start_frame}, {}) \
-                     present={} runs={runs_before}->{} rev={revision}",
+                     present={} group_roots={} runs={runs_before}->{} rev={revision}",
                     start_frame as usize + normalized.len(),
                     present.iter().filter(|value| **value).count(),
+                    group_roots.len(),
                     edits.authority.run_count()
                 ),
             );
@@ -3119,14 +3193,25 @@ impl DocumentSession {
         }
         self.checkpoint_authority(checkpoint)?;
         let mut edits = self.edits.lock_or_recover();
-        let (revision, changed) = edits.authority.restore_range(&root, param, start, count);
+        let (mut revision, mut changed) = edits.authority.restore_range(&root, param, start, count);
+        // 【分组根重置 = 整组重置】与写入同一条理由（见 `private_group_descendants`）：
+        // 右键"重置"作用的是分组共享的那一条线，子轨必须一起回到基线。
+        let group_roots = self.private_group_descendants(&edits, &root);
+        for child in &group_roots {
+            let (child_revision, child_changed) =
+                edits.authority.restore_range(child, param, start, count);
+            revision = revision.max(child_revision);
+            changed |= child_changed;
+        }
         if changed {
             edits.revision = edits.revision.saturating_add(1);
             // 【显示必须与权威同代】旧实现只推进 revision，显示要等下一次
             // workspace_view() —— 而右键重置之后紧接着的一次快照可能来自别的路径
             // （渲染、诊断），用户看到的就是"松手又回来"。这里与写入路径同口径。
-            let view = self.compose_param_view_with(&host, &edits, &root);
-            edits.params.insert(root.clone(), view.params);
+            for target in std::iter::once(&root).chain(group_roots.iter()) {
+                let view = self.compose_param_view_with(&host, &edits, target);
+                edits.params.insert(target.clone(), view.params);
+            }
             hifishifter_kernel::log_limiter::emit_limited_key(
                 log::Level::Warn,
                 "ara.param.restore",

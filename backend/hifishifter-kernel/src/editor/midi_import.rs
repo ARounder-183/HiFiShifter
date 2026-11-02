@@ -437,7 +437,11 @@ pub fn import_midi_to_pitch(
     tl.ensure_params_for_root(&root_track_id);
     let frame_period_ms = tl.frame_period_ms().max(0.1);
 
-    host.checkpoint_timeline(&tl, HistoryOp::ImportMidi);
+    // 【撤销点分两处压】权威路径的撤销点由 `write_authority_frames` 在**锁外**压
+    // （它要再取一次时间线锁），所以这里只给旧路径压。
+    if !host.uses_param_authority() {
+        host.checkpoint_timeline(&tl, HistoryOp::ImportMidi);
+    }
 
     let Some(entry) = tl.params_by_root_track.get_mut(&root_track_id) else {
         midi_log(format!(
@@ -446,6 +450,9 @@ pub fn import_midi_to_pitch(
         ));
         return serde_json::json!({"ok": false, "error": "params_missing"});
     };
+
+    // 【导入前的曲线留一份】权威路径要靠它算"这次导入改了哪几帧"（见文末）。
+    let before_curve = entry.pitch_edit.clone();
 
     // 计算对齐偏移量和写入范围
     //
@@ -580,8 +587,58 @@ pub fn import_midi_to_pitch(
         return serde_json::json!({"ok": false, "error": "no_frames_touched"});
     }
 
-    tl.sync_clip_takes_from_flat();
-    host.publish_timeline(tl.clone());
+    // 【导入后的曲线也留一份】权威路径写的是"差分出来的那一段"。
+    let after_curve = entry.pitch_edit.clone();
+    // 【两条路都必须在放手之前决定】权威路径**不能**持锁调用
+    // `write_authority_frames`（它会再取一次时间线锁压撤销点、刷新显示 ⇒ 自死锁）；
+    // 旧路径要的正是"放手之前"的那份快照。
+    let legacy_snapshot = if host.uses_param_authority() {
+        None
+    } else {
+        tl.sync_clip_takes_from_flat();
+        Some(tl.clone())
+    };
+    drop(tl);
+    match legacy_snapshot {
+        Some(snapshot) => host.publish_timeline(snapshot),
+        // 【插件：写进权威，而不是只写显示数组】
+        //
+        // `params_by_root_track` 在 ARA 形态下是 `(authority, baseline, geometry)` 的
+        // 派生缓存：`accept_workspace_edits_with_groups` 收尾会用权威重新合成它，于是
+        // "只改显示数组"的写入会被下一次合成抹掉 —— 用户点了导入、界面闪一下音符、
+        // 然后曲线自己回去了（Step 4A.4）。独立 App 与 Capture 没有权威，那里的时间线
+        // **就是**权威，照旧写数组并发布。
+        None => {
+            if let Some((start, values, present)) = pitch_write_window(&before_curve, &after_curve)
+            {
+                match host.write_authority_frames(
+                    &root_track_id,
+                    "pitch",
+                    start,
+                    &values,
+                    Some(&present),
+                    true,
+                ) {
+                    Some(Ok(_)) => {}
+                    Some(Err(error)) => {
+                        midi_log(format!(
+                            "import_midi_to_pitch: authority_write_failed error={error}"
+                        ));
+                        return serde_json::json!({"ok": false, "error": error});
+                    }
+                    None => {
+                        // 权威在半路消失（文档已销毁）：至少让界面看到这次导入。
+                        let snapshot = host
+                            .timeline()
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .clone();
+                        host.publish_timeline(snapshot);
+                    }
+                }
+            }
+        }
+    }
 
     if let Some(ref guid) = clipboard_guid {
         if !guid.is_empty() {
@@ -594,6 +651,26 @@ pub fn import_midi_to_pitch(
         "notes_imported": notes.len(),
         "frames_touched": touched,
     })
+}
+
+/// 导入前后差出的那一段：`(起始帧, 值, present 位图)`。
+///
+/// 【为什么 present 按"值是不是编辑"算，而不是按"值与导入前是否相同"】
+/// `ParamAuthority::write_range` 里 `present == false` 表示"这一帧回到基线"，
+/// 它**会**把该帧上已有的 run 切掉。而导入算完的这条曲线就是"导入之后应该显示的
+/// 样子"，所以窗口内逐帧照它的值判定：真音高 ⇒ 写，0（未设置）⇒ 清。
+/// 窗口本身由差分定界 —— 窗口之外一个 run 都不碰。
+fn pitch_write_window(before: &[f32], after: &[f32]) -> Option<(u32, Vec<f32>, Vec<bool>)> {
+    use crate::editor::param_authority::{default_value_for_key, is_edited_value, PITCH_EDIT};
+    let len = before.len().min(after.len());
+    let first = (0..len).find(|index| before[*index] != after[*index])?;
+    let last = (0..len).rev().find(|index| before[*index] != after[*index])?;
+    let values = after[first..=last].to_vec();
+    let present = values
+        .iter()
+        .map(|value| is_edited_value(PITCH_EDIT, *value, default_value_for_key(PITCH_EDIT)))
+        .collect();
+    Some((first as u32, values, present))
 }
 
 #[cfg(test)]

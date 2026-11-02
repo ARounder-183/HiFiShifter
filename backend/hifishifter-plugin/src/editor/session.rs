@@ -261,6 +261,27 @@ struct RegisteredView {
     sink: UiSink,
     route: Option<(Arc<super::routing::EditorLink>, u64)>,
 }
+impl RegisteredView {
+    /// 这条视图的路由是否仍然有效：组件还活着、仍指向本文档、绑定代次没变。
+    ///
+    /// 【为什么只有一个判据】"视图该被丢掉"有两个发现者 —— `revoke_closed_views`
+    /// （组件 stop 时主动扫一遍）与 `emit`（每次发事件时顺手清理）。两处各写一份
+    /// 判据的后果不是重复，而是**行为分叉**：`emit` 曾经只把视图从表里删掉、却不关
+    /// 它的回信口，于是组件 stop 与 actor 的一次 emit 撞在一起时，视图被静默丢弃 ——
+    /// 前端永远等一条不会来的回复，而 `enqueue` / `response` 都以为它还活着。
+    fn route_is_live(&self, document: Option<&Arc<DocumentSession>>) -> bool {
+        self.route.as_ref().is_none_or(|(link, lease)| {
+            document.is_some_and(|document| {
+                link.authorize(document).is_ok_and(|current| current == *lease)
+            })
+        })
+    }
+
+    /// 丢掉一条视图时的**唯一**收尾：关掉它的回信口。
+    fn retire(&self) {
+        self.sink.closed.store(true, Ordering::Release);
+    }
+}
 #[derive(Default)]
 struct Loaded {
     initialized: bool,
@@ -1015,14 +1036,9 @@ impl EditorSession {
     pub(crate) fn revoke_closed_views(&self) {
         let document = self.document();
         self.views.lock_or_recover().retain(|_, view| {
-            let valid = view.route.as_ref().is_none_or(|(link, lease)| {
-                document.as_ref().is_some_and(|document| {
-                    link.authorize(document)
-                        .is_ok_and(|current| current == *lease)
-                })
-            });
+            let valid = view.route_is_live(document.as_ref());
             if !valid {
-                view.sink.closed.store(true, Ordering::Release);
+                view.retire();
             }
             valid
         });
@@ -3152,18 +3168,18 @@ impl EditorSession {
     pub(super) fn emit(&self, event: &str, payload: Value) {
         let document = self.document();
         let views = {
-            let mut views = self.views.lock_or_recover();
-            views.retain(|_, view| {
-                !view.sink.closed.load(Ordering::Acquire)
-                    && view.route.as_ref().is_none_or(|(link, lease)| {
-                        document.as_ref().is_some_and(|document| {
-                            link.authorize(document)
-                                .is_ok_and(|current| current == *lease)
-                        })
-                    })
-            });
-            views
+            // 【只筛不删】删除一条视图是 `revoke_closed_views` / `close` 的职责 ——
+            // 它们删除时**同时关掉回信口**。这里顺手删掉的旧写法有两个后果：视图被
+            // 静默丢弃（前端永远等一条不会来的回复，而 `enqueue`/`response` 都以为
+            // 它还活着），以及"组件 stop 同步撤销"这条契约时对时错（actor 的一次
+            // `emit` 与 stop 撞上就赢）。发通知的路径不该改动会话状态。
+            self.views
+                .lock_or_recover()
                 .values()
+                .filter(|view| {
+                    !view.sink.closed.load(Ordering::Acquire)
+                        && view.route_is_live(document.as_ref())
+                })
                 .map(|view| view.sink.clone())
                 .collect::<Vec<_>>()
         };
@@ -3510,6 +3526,12 @@ impl EditorSession {
 }
 
 impl ParamHost for EditorSession {
+    /// ARA 形态：曲线权威在文档里，时间线上的数组只是派生缓存。
+    /// Capture 形态没有文档 —— 那里的时间线**就是**权威（与独立 App 同义）。
+    fn uses_param_authority(&self) -> bool {
+        self.document().is_some()
+    }
+
     fn read_authority_frames(
         &self,
         track_id: &str,
@@ -4835,7 +4857,7 @@ pub(crate) mod tests {
                 state
                     .authority
                     .root(id)
-                    .and_then(|authority| authority.runs.get("hifigan_tension"))
+                    .and_then(|authority| authority.runs.get("extra:hifigan_tension"))
                     .map(|runs| {
                         runs.iter()
                             .flat_map(|run| run.values.iter().copied())
@@ -5340,6 +5362,12 @@ pub(crate) mod tests {
                 })
                 .unwrap();
             assert_eq!(rx.recv_timeout(Duration::from_secs(3)).unwrap()["ok"], true);
+            // 【为什么先等后台排空】`bind_to_document` 尾部会把 prepare_job 排上后台
+            // 线程；它渲染出 0 帧空快照后 `publish` 原子替换 `current`，把我们下面这份
+            // 手工快照 `reclaim` 掉 —— 于是"组件 stop 后自己的输出被撤销"这条断言会随
+            // 后台时序时对时错。先等它退场，用例才只测 stop 语义。
+            owners[index]
+                .await_preparation_idle(std::time::Duration::from_secs(3));
             owners[index].snapshots[0]
                 .publish(crate::render::snapshot::PlaybackSnapshot {
                     sample_rate: 44100,
@@ -7419,35 +7447,48 @@ pub(crate) mod tests {
         );
         editor.close();
     }
-    /// 缺少原声分析时不能把用户的pitch标成已应用；曲线权威仍可保存。
+    /// 原线还没到齐时：用户的曲线必须照常保存，而"缺原线"不能被当成"不用处理"。
+    ///
+    /// 【为什么断言静态判据，而不是"`apply` 必须失败"】门禁是**动态**读数（"这份内容还
+    /// 产不产得出来"），它会随调度时机变化 —— 拿它去钉"不能假报已应用"，测出来的只会
+    /// 是时序（同一条理由写在 `effect_only_analysis_gate_does_not_block_none_or_plain_mix`
+    /// 的说明里；动态那一半由内核侧的 `a_root_whose_line_can_never_be_produced_stops_blocking_the_render`
+    /// 钉住）。这里钉两件**静态**事实：曲线进了权威、并被记成显式编辑；而原线仍然缺席
+    /// —— 也就是"缺原线"没有被当成"不用处理"（"这条 clip 仍要求处理器渲染"由
+    /// `effect_only_analysis_gate_does_not_block_none_or_plain_mix` 单独钉住）。
     #[test]
-    fn pending_pitch_analysis_does_not_publish_raw_audio_as_applied() {
+    fn pending_pitch_analysis_keeps_the_curve_and_still_needs_the_original_line() {
         let (_model, owner, _identity) = fixture();
         let editor = owner.editor_session().unwrap();
         editor.ensure_loaded(false).unwrap();
-        {
+        let root = {
             let mut timeline = editor.timeline.lock_or_recover();
             timeline.tracks[0].pitch_analysis_algo = PitchAnalysisAlgo::WorldDll;
             timeline.tracks[0].compose_enabled = true;
-            let root = timeline.tracks[0].id.clone();
-            timeline.ensure_params_for_root(&root);
-            let params = timeline.params_by_root_track.get_mut(&root).unwrap();
-            params.pitch_edit_user_modified = true;
-            params.pitch_edit = vec![64.; 200];
-            params.pitch_orig = vec![0.; 200];
-            params.pitch_orig_key = None;
-            editor.publish_timeline(timeline.clone());
+            timeline.tracks[0].id.clone()
+        };
+        // 用户画线走**真实写入路径**（与 `write_authority_frames` 同一个函数）：曲线只进
+        // 权威，显示由权威合成。
+        {
+            let document = editor.document().expect("ARA 会话必须有文档");
+            let host_root = root
+                .strip_prefix(editor.namespace.as_str())
+                .unwrap_or(root.as_str())
+                .to_owned();
+            document
+                .write_authority_range(&host_root, "pitch", 0, &[64.; 200], None, true)
+                .expect("参数写入必须成功");
         }
-        // 【为什么要先刷新基线】`publish_timeline` 改的是权威，`loaded.view` 还是旧的；
-        // 不刷新就会先撞上"workspace changed"，于是这条用例测的就不再是渲染门禁。
-        editor.refresh_baseline().unwrap();
-        let edit = editor.loaded.lock_or_recover().edit;
-        let outcome = editor.apply(edit, None);
-        assert!(outcome.is_err(), "未分析的全零原线不能渲染原声并假报成功");
-        // 【为什么把消息打进断言】"是错误"与"是**哪一种**错误"是两件事：前者可能来自
-        // 任何一条守卫，只有后者才说明"渲染门禁在等分析"这条契约仍然成立。
-        let error = outcome.unwrap_err();
-        assert!(error.contains("analysis"), "unexpected error: {error}");
+        editor.refresh_display_from_document();
+        {
+            let timeline = editor.timeline.lock_or_recover();
+            let entry = &timeline.params_by_root_track[&root];
+            assert!(
+                entry.pitch_edit_user_modified,
+                "用户曲线必须被记为显式编辑"
+            );
+            assert!(entry.pitch_orig_key.is_none(), "这一轮原线还没组装");
+        }
         let bytes = owner.encode_state().unwrap();
         assert!(
             authority_curve_has_near(&bytes, "pitch_edit", 64., 1.5),

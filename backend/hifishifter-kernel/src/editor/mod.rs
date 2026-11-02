@@ -55,6 +55,15 @@ pub trait ParamHost {
     /// 记录一笔显式参数写入意图；默认实现供独立 App 忽略。
     fn note_param_edit(&self, _intent: ParamEditIntent) {}
 
+    /// 参数权威是否在时间线**之外**（ARA 插件），而不是时间线本身（独立 App / Capture）。
+    ///
+    /// 【为什么需要一条显式能力位】导入类命令要在"写权威"与"写时间线数组"之间二选一，
+    /// 而两条路的**撤销点**压在不同地方（权威的撤销点要再取一次时间线锁，因此不能在
+    /// 持锁时压）。没有这条判据就只能先试写一次 —— 那会在失败时留下一个不该有的撤销步。
+    fn uses_param_authority(&self) -> bool {
+        false
+    }
+
     /// 插件权威读入口。返回 Some 时内核不再读/写整条显示数组。
     ///
     /// 独立 App 保持 None，走原有 project-frame 数组语义；ARA 插件实现这一组方法。

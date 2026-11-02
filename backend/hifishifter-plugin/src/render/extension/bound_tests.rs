@@ -968,95 +968,84 @@ fn an_edit_round_trips_through_the_workspace_file() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// 只读提取已提交REAPER旧归档的原始组件JSON，不调用当前encoder生成兼容证据。
-fn task34_archived_v2_states() -> Vec<Vec<u8>> {
-    use base64::Engine as _;
-    let mut chunks = Vec::new();
-    let mut states = Vec::new();
-    let mut inside = false;
-    for line in include_str!("../../../tests/fixtures/gui-keyboard-edited.RPP")
-        .lines()
-        .map(str::trim)
-    {
-        if line.starts_with("<VST ") {
-            inside = true;
-            chunks.clear();
-            continue;
-        }
-        if !inside {
-            continue;
-        }
-        if line == ">" {
-            let start = chunks
-                .windows(b"{\"edits\":".len())
-                .position(|bytes| bytes == b"{\"edits\":")
-                .unwrap();
-            let length = u32::from_le_bytes(chunks[start - 4..start].try_into().unwrap()) as usize;
-            states.push(chunks[start..start + length].to_vec());
-            inside = false;
-        } else {
-            chunks.extend(
-                base64::engine::general_purpose::STANDARD
-                    .decode(line)
-                    .unwrap(),
-            );
-        }
-    }
-    assert_eq!(
-        states.iter().map(Vec::len).collect::<Vec<_>>(),
-        [481, 22516]
-    );
-    states
-}
-
-/// 两条归档记录共享完全相同的旧source/modification身份，必须由真实assignment限定恢复目标。
+/// 两条组件记录共享完全相同的旧 source/modification 身份时，恢复目标只能由**真实
+/// assignment**（本实例被分配的 region）限定。
+///
+/// 【为什么不再喂归档里的旧字节】那份载荷的曲线只存在**显示数组**（`edits.params`）里，
+/// 而 `merge_restore_locked` 收尾一律用**权威**重新合成显示 —— 于是合入的最后一步把它
+/// 抹掉。这不是丢了一个用例，而是 round-4 §4.7.3 的结论：插件从未发布过，旧存档迁移
+/// **不需要**，唯一保留的形状是"当前编码器写出的载荷能被正确限定"。所以这里用
+/// `encode_state()` 现造两份组件载荷，把同一条契约钉在仍然存在的形状上。
 #[test]
-fn task34_archived_v2_bytes_rebind_only_inside_the_component_scope() {
-    let states = task34_archived_v2_states();
+fn task34_component_state_restore_is_scoped_by_the_real_assignment() {
     let (model, owners, _ids) = crate::editor::session::tests::workspace_fixture();
     let document = model.session();
-    let archived: serde_json::Value = serde_json::from_slice(&states[0]).unwrap();
-    let identity: Vec<(String, String)> =
-        serde_json::from_value(archived["edits"]["bindings"]["ara-track-0"].clone()).unwrap();
+    // 【为什么两条根用**同一个**身份】这正是"只能靠 assignment 区分"的场景：两份载荷
+    // 认不出谁是谁，唯一可靠的判据是本实例被分配了哪些轨。
+    let identity: Vec<(String, String)> = vec![(
+        "shared-mod".to_string(),
+        "ara://source".to_string(),
+    )];
     *document.track_bindings.lock_or_recover() = std::collections::BTreeMap::from([
         ("track".into(), identity.clone()),
         ("b".into(), identity.clone()),
     ]);
-    // 与宿主冷重建一致：完整图ready前暂存全部组件原始bytes，随后统一合入权威。
-    document.ready.store(false, Ordering::Release);
-    for (owner, bytes) in owners.iter().zip(&states) {
+    // 两份载荷各写一条**不同**的曲线：恢复时若串了轨，值会立刻对不上。
+    document
+        .write_authority_range("track", "pitch", 100, &[32.; 4], None, false)
+        .unwrap();
+    document
+        .write_authority_range("b", "pitch", 200, &[64.; 12], None, false)
+        .unwrap();
+    let states = owners
+        .iter()
+        .map(|owner| owner.encode_state().unwrap())
+        .collect::<Vec<_>>();
+
+    // 与宿主冷重建一致：完整图 ready 前暂存全部组件原始 bytes，随后统一合入权威。
+    let (cold_model, cold_owners, cold_ids) = crate::editor::session::tests::workspace_fixture();
+    let cold = cold_model.session();
+    *cold.track_bindings.lock_or_recover() = std::collections::BTreeMap::from([
+        ("track".into(), identity.clone()),
+        ("b".into(), identity.clone()),
+    ]);
+    cold.ready.store(false, Ordering::Release);
+    for (owner, bytes) in cold_owners.iter().zip(&states) {
         owner.restore_state(bytes).unwrap();
     }
-    document.prepare_renderers();
-    let accepted = document.edits.lock_or_recover().clone();
-    // 【T2：曲线只在权威里】旧归档的显示数组在合入时被搬进权威，所以这里读权威。
-    assert!(
-        authority_curve(&accepted, "track", "pitch_edit").is_empty(),
-        "旧A无曲线，不能借旧轨序号取到B曲线"
+    cold.prepare_renderers();
+    let accepted = cold.edits.lock_or_recover().clone();
+    assert_eq!(
+        authority_curve(&accepted, "track", "pitch_edit"),
+        vec![32.; 4],
+        "组件 A 的载荷只能落回它被分配的那条根"
     );
-    let b_curve = authority_curve(&accepted, "b", "pitch_edit");
-    assert_eq!(b_curve.len(), 800);
-    assert_eq!(&b_curve[200..212], &[64.; 12]);
+    assert_eq!(
+        authority_curve(&accepted, "b", "pitch_edit"),
+        vec![64.; 12],
+        "组件 B 的曲线既不能被写进 A 的根，也不能被 A 覆盖"
+    );
     assert!(accepted
         .tracks
         .iter()
         .all(|track| track.id == "track" || track.id == "b"));
     for (index, id) in ["track", "b"].into_iter().enumerate() {
-        let bytes = owners[index].encode_state().unwrap();
+        let bytes = cold_owners[index].encode_state().unwrap();
         let saved: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         // 【单一版本】组件状态只有一个代际（`EditState::STATE_VERSION`），内容不再
         // 决定版本号 —— 此前那个"没有曲线 ⇒ 2 / 有曲线 ⇒ 3"的阶梯与全部迁移一起删掉了。
-        // 组件 1 的旧 v2 曲线落在 clip 窗口之外，因此它以"整轨参数 + 空白层"的形式
-        // 保存，而不是被伪造成 clip 权威：clip 只拥有它真正覆盖的帧。
         assert_eq!(saved["version"].as_u64(), Some(2));
         assert_eq!(saved["edits"]["tracks"].as_array().unwrap().len(), 1);
         assert_eq!(saved["edits"]["tracks"][0]["id"], id);
         assert_eq!(saved["edits"]["bindings"].as_object().unwrap().len(), 1);
-        assert_eq!(saved["edits"]["params"].as_object().unwrap().len(), index);
+        // 【载荷只带自己那一条根】两个组件共享同一身份，裁剪判据只能是 assignment。
+        let params = saved["edits"]["params"].as_object().unwrap();
+        assert_eq!(params.len(), 1, "{saved}");
+        assert!(params.contains_key(id), "{saved}");
     }
-    // 真正扩大同一组件assignment，使两个完全相同身份同时进入候选集，必须拒绝合入。
-    let key = (&*_ids[1] as *const u8) as u64;
-    let raw = owners[0]
+    // 真正扩大同一组件 assignment，使两个完全相同身份同时进入候选集：只能不套用。
+    let key = (&*cold_ids[1] as *const u8) as u64;
+    let raw = cold_owners[0]
         .binding
         .lock_or_recover()
         .as_ref()
@@ -1069,32 +1058,26 @@ fn task34_archived_v2_bytes_rebind_only_inside_the_component_scope() {
             key as *mut _,
         );
     }
-    let before = document.edits.lock_or_recover().revision;
-    owners[0].restore_state(&states[1]).unwrap();
+    let before = cold.edits.lock_or_recover().revision;
+    cold_owners[0].restore_state(&states[1]).unwrap();
     // 【为什么不再要求失败】身份歧义只该让这一份恢复不套用，不该让宿主保存失败；
     // 权威仍保留原曲线（下面两条断言）。
-    assert!(owners[0].encode_state().is_ok(), "身份歧义不能让保存失败");
-    assert_eq!(document.edits.lock_or_recover().revision, before);
-    assert_eq!(
-        document.edits.lock_or_recover().params["b"].pitch_edit[200],
-        64.
-    );
-    // 缺少真实身份也不能按归档旧序号恢复；既有曲线留在权威中。
-    document.track_bindings.lock_or_recover().insert(
+    assert!(cold_owners[0].encode_state().is_ok(), "身份歧义不能让保存失败");
+    assert_eq!(cold.edits.lock_or_recover().revision, before);
+    assert_eq!(cold.edits.lock_or_recover().params["b"].pitch_edit[200], 64.);
+    // 缺少真实身份也不能按旧序号恢复；既有曲线留在权威中。
+    cold.track_bindings.lock_or_recover().insert(
         "track".into(),
         vec![("unknown-mod".into(), "ara://source".into())],
     );
-    document.track_bindings.lock_or_recover().insert(
+    cold.track_bindings.lock_or_recover().insert(
         "b".into(),
         vec![("unknown-b".into(), "ara://source".into())],
     );
-    // 【为什么不再要求失败】缺身份只该让这次恢复不套用；保存仍要成功，
-    // 权威保留原曲线（下面一条断言）。
-    assert!(owners[0].encode_state().is_ok(), "缺身份不能让保存失败");
-    assert_eq!(
-        document.edits.lock_or_recover().params["b"].pitch_edit[200],
-        64.
-    );
+    cold_owners[0].restore_state(&states[1]).unwrap();
+    assert!(cold_owners[0].encode_state().is_ok(), "缺身份不能让保存失败");
+    assert_eq!(cold.edits.lock_or_recover().params["b"].pitch_edit[200], 64.);
+    cold.close();
     document.close();
 }
 
