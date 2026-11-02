@@ -527,8 +527,16 @@ impl ExtensionOwner {
                 // "曲线非空 + 原始值空"当编辑证据会把正常加载判成"等分析"，实测
                 // 会让三条 automatic-apply 用例整条停摆。用户编辑的权威判据只有
                 // 权威表里的锚层与 `pitch_edit_user_modified`。
-                let edited =
-                    document.authority_has_edits_on(root) || params.pitch_edit_user_modified;
+                // 【为什么读冻结的 `edits` 而不是再锁一次 `document.edits`】本函数在
+                // 调用方的短事务里工作，`edits` 就是那一刻冻结的快照（各调用点都写作
+                // `document.edits.lock_or_recover().clone()`）。回头去锁活表既与本函数
+                // 其余输入不是同一代数据，也会在"调用方仍持有那把锁"的写法下**自锁**：
+                // `Mutex` 不可重入，整条渲染路径就此停死。
+                let edited = edits
+                    .authority
+                    .root(root)
+                    .is_some_and(|authority| !authority.is_empty())
+                    || params.pitch_edit_user_modified;
                 let baseline_usable = baseline.get(root).is_some_and(|entry| entry.is_ready())
                     || params.pitch_orig.iter().any(|value| *value > 0.0)
                     || params.pitch_edit.iter().any(|value| *value > 0.0);

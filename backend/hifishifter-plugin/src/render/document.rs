@@ -2604,15 +2604,6 @@ impl DocumentSession {
             .has_runs_in(&root, param, start_frame as usize, frame_count as usize)
     }
 
-    /// 当前权威是否在某根轨上有编辑（渲染/分析闸口用）。
-    pub(crate) fn authority_has_edits_on(&self, root: &str) -> bool {
-        self.edits
-            .lock_or_recover()
-            .authority
-            .root(root)
-            .is_some_and(|authority| !authority.is_empty())
-    }
-
     /// 所有 clip 的渲染局部参数：从根视图切窗，不按源窗口重建曲线。
     pub(crate) fn compose_clip_params_locked(
         &self,

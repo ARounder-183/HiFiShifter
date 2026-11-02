@@ -62,8 +62,11 @@ fn owned_fade_shape_changes_kernel_pcm_and_state_roundtrip_and_undo_clears_it() 
     let render = || {
         let input = {
             let _transaction = document.transaction.lock_or_recover();
-            owners[0]
-                .ara_render_input(&document, &document.edits.lock_or_recover(), true)
+            // 与生产路径同一写法：在短事务里冻结一份编辑快照再交出去。把
+            // `lock_or_recover()` 的守卫当参数直接传下去，等于在整个调用期间持有
+            // 这把不可重入的锁 —— 任何一次内部回读都会变成自锁。
+            let edits = document.edits.lock_or_recover().clone();
+            owners[0].ara_render_input(&document, &edits, true)
                 .unwrap()
                 .1
         };
@@ -193,9 +196,9 @@ fn host_fades_project_into_gui_and_refresh_without_reloading_or_baking_audio() {
     }
     let (keys, input) = {
         let _transaction = document.transaction.lock_or_recover();
-        owners[0]
-            .ara_render_input(&document, &document.edits.lock_or_recover(), true)
-            .unwrap()
+        // 同上：冻结一份快照，不在调用期间持有不可重入的编辑锁。
+        let edits = document.edits.lock_or_recover().clone();
+        owners[0].ara_render_input(&document, &edits, true).unwrap()
     };
     let canonical = input.timeline.unwrap().clips[0].fade_in_sec;
     let after = call("plugin_get_apply_state")["generation"].clone();
@@ -204,6 +207,7 @@ fn host_fades_project_into_gui_and_refresh_without_reloading_or_baking_audio() {
     assert_eq!(keys, vec![first]);
     assert_eq!(canonical, 0.);
 }
+
 /// 只打开editor-only入口时，也必须采集同文档隐藏playback owner的元数据。
 #[test]
 fn task38b_one_editor_refresh_collects_hidden_playback_metadata() {
