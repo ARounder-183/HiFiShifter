@@ -8,7 +8,7 @@
  */
 import { expect, test } from "vitest";
 
-import { deriveCaptureBands } from "./captureRange";
+import { MAX_LEAD_SEC, captureBandsAt, deriveCaptureBands } from "./captureRange";
 import type { CaptureStatus } from "./captureApi";
 
 /**
@@ -132,10 +132,33 @@ test("视觉播放头只补齐轮询间隙，且有上限", () => {
     // 视觉值只领先一点点 ⇒ 带子跟上去（这就是"不再一顿一顿"的那一段）。
     expect(deriveCaptureBands(base, 1.05)?.bands).toEqual([{ startSec: 0, endSec: 1.05 }]);
     // 视觉值离得很远（或本身就是陈旧的）⇒ 只延伸到上限。
-    expect(deriveCaptureBands(base, 5)?.bands).toEqual([{ startSec: 0, endSec: 1 + 0.3 }]);
+    expect(deriveCaptureBands(base, 5)?.bands).toEqual([
+        { startSec: 0, endSec: 1 + MAX_LEAD_SEC },
+    ]);
     // 不在录制中时完全不跟随：`standby` / `ready` 都不是"正在长出来"。
     const standby = { ...base, state: "standby" as const, hostPlaying: false };
     expect(deriveCaptureBands(standby, 5)?.bands).toEqual([{ startSec: 0, endSec: 1 }]);
+});
+
+test("★ 参数编辑器的带子必须跟着视觉播放头走（问题 4）", () => {
+    // 【旧实现上为什么红】参数编辑器只读 `getCaptureBands()`（非订阅快照，5 Hz），
+    // 而光标是 60 Hz 插值值 —— 于是带子每 200 ms 往前跳一格。时间轴那条早就接了
+    // 视觉播放头，同一个量在两个面板上走成两种节奏。
+    const base = status({ runs: [{ startFrame: 0, endFrame: 48_000 }], positionFrame: 48_000 });
+    expect(captureBandsAt(base, 1.2)?.bands).toEqual([{ startSec: 0, endSec: 1.2 }]);
+    // 没有视觉值时退回快照（与 `deriveCaptureBands` 同一条路径）。
+    expect(captureBandsAt(base, null)?.bands).toEqual([{ startSec: 0, endSec: 1 }]);
+});
+
+test("★ 宿主从不说自己在播时，带子照样要长（非实时预览）", () => {
+    // 【旧实现上为什么红】`following` 要求 `status.hostPlaying`，而"应用非实时事件
+    // FX"的预览里宿主把 `kPlaying` 全程留在 0 —— 于是带子永远不长，用户看到的是
+    // "捕获光标在动、带子不动"。
+    const previewing = {
+        ...status({ runs: [{ startFrame: 0, endFrame: 48_000 }], positionFrame: 48_000 }),
+        hostPlaying: false,
+    };
+    expect(deriveCaptureBands(previewing, 1.05)?.bands).toEqual([{ startSec: 0, endSec: 1.05 }]);
 });
 
 test("采样率不可用时返回 null（不猜一个率去画）", () => {

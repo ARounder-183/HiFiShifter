@@ -84,7 +84,14 @@ export const CaptureRangeLayer: React.FC<{
                 headRef.current.style.left = `${head.left}px`;
             }
             if (lastBandRef.current !== null && lastStartSec !== null && lastEndSec !== null) {
-                const endSec = Math.min(Math.max(visual, lastEndSec), lastEndSec + MAX_LEAD_SEC);
+                // 【右缘只在"紧接已录内容"时才延伸】与 `deriveCaptureBands` 的
+                // `withinReach` 同一条纪律：视觉值离得很远（前向 seek 之后它立刻跳过去，
+                // 而那里一个样本都没录）时，带子必须停在快照的右缘 —— 否则它横跨整个
+                // 空洞，等于撒谎。
+                const endSec =
+                    visual > lastEndSec && visual <= lastEndSec + MAX_LEAD_SEC
+                        ? visual
+                        : lastEndSec;
                 const left = Math.round(lastStartSec * pxPerSec * dpr) / dpr;
                 const right = Math.round(endSec * pxPerSec * dpr) / dpr;
                 lastBandRef.current.style.width = `${Math.max(1 / dpr, right - left)}px`;
@@ -131,7 +138,11 @@ export const CaptureRangeLayer: React.FC<{
                         position: "absolute",
                         left: band.left,
                         top,
-                        width: band.width,
+                        // 【最后一段的宽度只由 rAF 写】React 在每次轮询后重渲染时会把
+                        // inline `width` 写回**新快照**的右缘（≈ 旧值 + 0.2 s），而 rAF
+                        // 刚刚把它拉到了 +0.3 s —— 于是每 200 ms **后退 0.1 s 再重新长**。
+                        // 用户看到的"一顿一顿"里有一半是这道锯齿，不是 5 Hz 的台阶。
+                        ...(index === lastIndex ? {} : { width: band.width }),
                         height,
                         background: "var(--qt-danger-border)",
                         opacity: 0.45,

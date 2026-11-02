@@ -18,8 +18,12 @@ import { useSyncExternalStore } from "react";
 import { captureApi, captureError, type CaptureOptions, type CaptureStatus } from "./captureApi";
 import { pluginBootstrap } from "../../services/hostDetect";
 
-/** 轮询间隔：与后端录制读数的更新节奏一致（见 `capture/mod.rs` 的说明）。 */
-const POLL_MS = 200;
+/** 轮询间隔：与后端录制读数的更新节奏一致（见 `capture/mod.rs` 的说明）。
+ *
+ * 【为什么导出】捕获带的"允许领先量"（`MAX_LEAD_SEC`）必须由它算出来：两个数写在
+ * 两个文件里时，任何一方单独调整都会让带子先冻后跳（见 `captureRange` 的说明）。
+ */
+export const POLL_MS = 200;
 
 export interface CaptureSnapshot {
     status: CaptureStatus | null;
