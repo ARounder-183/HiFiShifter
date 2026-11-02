@@ -407,7 +407,9 @@ impl ExtensionOwner {
             // 现在它可能要等一次会话加载，而那个等待必须有上界 —— 上界就是
             // `OFFLINE_PREPARE_TIMEOUT`（宿主为它已经准备好了 15 秒）。
             loop {
-                self.capture_prepare_job(Arc::new(std::sync::atomic::AtomicBool::new(false)))?;
+                self.capture_prepare_job_offline(Arc::new(
+                    std::sync::atomic::AtomicBool::new(false),
+                ))?;
                 if !self.capture_session_pending() {
                     return Ok(());
                 }

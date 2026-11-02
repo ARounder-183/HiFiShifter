@@ -1313,6 +1313,11 @@ fn a_recorded_take_is_rendered_and_published_through_the_snapshot_reader() {
 
     owner.arm_capture_rendering();
     // 同步准备一次（生产路径由 UI 定时器排队驱动；这里直接调以免依赖线程调度）。
+    //
+    // 【为什么这里不要求会话已加载】实时通路的准备**不等待**会话加载：会话没加载完
+    // 时它照常发布一份"没有用户曲线"的结果（否则播放永远是直通），版本号里的
+    // `with_curves` 位保证会话一加载就会重算一次。只有离线准备才等
+    // （见 `capture_prepare_job_offline`）。
     owner
         .capture_prepare_job(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
             false,

@@ -336,7 +336,10 @@ fn export_audio_to_file(
         session
             .capture_owner()
             .ok_or("the Capture host is gone")?
-            .capture_render_input()?
+            // 【导出为什么要求带曲线】导出的产物用户会直接拿去用，而"会话还在加载"
+            // 意味着用户画好的曲线读不出来 —— 与其导出一份没有编辑的音频，不如让
+            // 用户稍等再按一次（`capture_session_pending` 的说明）。
+            .capture_render_input(true)?
             .ok_or("the editor session is still loading; try exporting again in a moment")?
             .3
     } else {

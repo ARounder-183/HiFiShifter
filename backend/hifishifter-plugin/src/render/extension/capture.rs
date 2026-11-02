@@ -32,15 +32,22 @@ impl ExtensionOwner {
     /// 【为什么"带不带曲线"要作为一项返回】会话还没加载时拿到的是**不含用户曲线**的
     /// 几何，而那时 `edit` 恒为 0 —— 若调用方把它当成"已准备"，会话加载之后版本不变、
     /// 这次渲染被跳过，用户画完线永远听不到变化（见 `capture_prepare_job` 的版本闸）。
-    /// 【三态】见 `capture_render_state`：`Ok(None)` = 会话正在加载，**这一趟不发布**。
+    /// `require_curves` 决定"会话正在加载"时要不要**放弃这一趟**：
+    ///
+    ///   * `true`（离线导出 / bounce）：放弃。那是**一次性**的机会，发布一份没有用户
+    ///     曲线的结果等于把"编辑没生效"烘焙进产物，用户永远发现不了。
+    ///   * `false`（实时播放）：照常发布。播放有无数次机会，而"什么都不发布"意味着
+    ///     **永远直通**（用户报的"关着窗口就没有处理结果"）。版本号里的
+    ///     `with_curves` 位保证会话一加载就会重算一次。
     pub(crate) fn capture_render_input(
         &self,
+        require_curves: bool,
     ) -> Result<Option<(u64, u64, bool, super::input::RenderInput)>, String> {
         if !self.capture.has_material() {
             return Err("no Capture material".into());
         }
         let revision = self.capture.revision();
-        if self.capture_session_pending() {
+        if require_curves && self.capture_session_pending() {
             return Ok(None);
         }
         let session = self
@@ -108,13 +115,31 @@ impl ExtensionOwner {
         &self,
         cancel: Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<(), String> {
+        self.capture_prepare_job_inner(cancel, false)
+    }
+
+    /// 离线准备：**要求**这一份结果带着用户曲线（见 `capture_render_input`）。
+    pub(crate) fn capture_prepare_job_offline(
+        &self,
+        cancel: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<(), String> {
+        self.capture_prepare_job_inner(cancel, true)
+    }
+
+    fn capture_prepare_job_inner(
+        &self,
+        cancel: Arc<std::sync::atomic::AtomicBool>,
+        require_curves: bool,
+    ) -> Result<(), String> {
         if !self.capture.has_material() {
             return Ok(());
         }
         // 【为什么这里也要补一次】命令那条路（`request_capture_reload`）只在用户动作时
         // 发生；从组件 state 恢复 take 的会话不走那里。这一份是兜底，且幂等。
         self.sync_raw_tape();
-        let Some((revision, edit, with_curves, input)) = self.capture_render_input()? else {
+        let Some((revision, edit, with_curves, input)) =
+            self.capture_render_input(require_curves)?
+        else {
             // 【会话正在加载：这一趟不发布】见 `capture_session_pending`。离线渲染只有
             // 一次机会，发布一份没有用户曲线的结果等于把"编辑没生效"烘焙进产物。
             // 返回 Ok 让调用方继续等（见 `prepare_offline_until` 的重试循环）。
