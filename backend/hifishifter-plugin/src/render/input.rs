@@ -1018,9 +1018,9 @@ mod tests {
             .iter()
             .all(|snapshot| snapshot.left.iter().all(|value| *value == 0.)));
     }
-    /// 三分钟普通人声经过授权kernel/两率快照后全尾就绪；内存按固定全局预算预检。
+    /// 三分钟普通人声经过授权kernel/单一原生率快照后全尾就绪；内存按固定全局预算预检。
     #[test]
-    fn three_minute_host_clip_prepares_both_rates_and_the_last_block_within_budget() {
+    fn three_minute_host_clip_prepares_the_shared_rate_and_the_last_block_within_budget() {
         let frames = 44100 * 180;
         let seconds = 180.;
         let budget = super::super::budget::global_budget();
@@ -1052,16 +1052,22 @@ mod tests {
             window: None,
         };
         let snapshots = input.render(Arc::new(AtomicBool::new(false))).unwrap();
-        for (snapshot, rate) in snapshots.iter().zip([44100, 48000]) {
-            assert_eq!(snapshot.left.len(), rate * 180);
-            assert_eq!(snapshot.right.len(), rate * 180);
-            assert!(snapshot
-                .left
-                .iter()
-                .all(|sample| (*sample - 0.25).abs() < 1e-6));
-        }
+        // 【只渲一档】两个发布器共享同一份 PCM（见 `native_sample_rate`）：工程率缺席
+        // 时按 44100 算，整段就是 44100 * 180 帧，第二档不再物化、也不占第二份账。
+        assert_eq!(snapshots.len(), 2);
+        assert!(Arc::ptr_eq(&snapshots[0], &snapshots[1]));
+        let snapshot = &snapshots[0];
+        assert_eq!(snapshot.sample_rate, 44100);
+        assert_eq!(snapshot.left.len(), 44100 * 180);
+        // 单声道源：右平面按 `compact_mono` 省掉（空 = 读左平面，不是右侧静音）。
+        assert!(snapshot.right.is_empty());
+        assert!(snapshot
+            .left
+            .iter()
+            .all(|sample| (*sample - 0.25).abs() < 1e-6));
+        // 源 PCM 一份 + 快照一份；快照已按 `compact_mono` 合并成单平面（右平面退额度）。
         let accounted = budget.used() - baseline;
-        assert_eq!(accounted, frames * 4 + (44100 + 48000) * 180 * 8);
+        assert_eq!(accounted, frames * 4 * 2);
         eprintln!(
             "long-host seconds=180 source_bytes={} ready_bytes={} accounted_peak={} hard_limit={}",
             frames * 4,
@@ -1181,7 +1187,8 @@ mod tests {
         assert_eq!(snapshot.sample_rate, 44100);
         assert_eq!(snapshot.origin_sample, 2 * 44100);
         assert_eq!(snapshot.left.len(), 44100);
-        assert_eq!(snapshot.right.len(), 44100);
+        // 两平面逐 bit 相同 ⇒ `compact_mono` 省掉右平面（空 = 读左平面）。
+        assert!(snapshot.right.is_empty());
         // 窗口之外的帧不属于这份快照。
         assert!(snapshot
             .covered
@@ -1397,7 +1404,8 @@ mod tests {
         };
         let output = input.render(Arc::new(AtomicBool::new(false))).unwrap();
         assert_eq!(output[0].left.len(), 44100);
-        assert_eq!(output[1].left.len(), 48000);
+        // 只渲宿主工程率那一档；两个发布器共享同一份 PCM。
+        assert!(Arc::ptr_eq(&output[0], &output[1]));
         for start in [0.2, 0.7] {
             let begin = (start * 44100.0) as usize;
             let count = 3528;
@@ -1540,7 +1548,8 @@ mod tests {
         let output = input.render(cancel.clone()).unwrap();
         assert_eq!(output[0].left, [0.1, 0.2, 0.3, 0.4]);
         assert_eq!(output[0].right, output[0].left);
-        assert_eq!(output[1].sample_rate, 48000);
+        // 只渲宿主工程率那一档（这里是 44100）；换率由 `copy_block` 重采样，不再物化。
+        assert_eq!(output[1].sample_rate, output[0].sample_rate);
         cancel.store(true, Ordering::Release);
         assert!(input.render(cancel).is_err());
     }

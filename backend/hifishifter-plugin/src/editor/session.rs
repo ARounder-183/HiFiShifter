@@ -4828,18 +4828,32 @@ pub(crate) mod tests {
             "set_param_frames",
             json!({"trackId":a,"param":"hifigan_tension","startFrame":0,"values":[65.],"checkpoint":true}),
         );
+        // 【T2：曲线只在权威里】显示数组不再承载用户曲线，读权威的稀疏 run。
         for id in ["track", "b"] {
-            assert_eq!(
-                document.edits.lock_or_recover().params[id].extra_curves["hifigan_tension"][0],
-                65.
+            let curve = {
+                let state = document.edits.lock_or_recover();
+                state
+                    .authority
+                    .root(id)
+                    .and_then(|authority| authority.runs.get("hifigan_tension"))
+                    .map(|runs| {
+                        runs.iter()
+                            .flat_map(|run| run.values.iter().copied())
+                            .collect::<Vec<f32>>()
+                    })
+                    .unwrap_or_default()
+            };
+            assert!(
+                curve.iter().any(|value| (*value - 65.).abs() < 1e-3),
+                "root {id} 的分组张力必须落进权威：{curve:?}"
             );
         }
         let encoded = owners[1].encode_state().unwrap();
         let mut restored = crate::state_channel::EditState::default();
         restored.restore(&encoded).unwrap();
         assert_eq!(
-            serde_json::from_slice::<Value>(&encoded).unwrap()["version"],
-            10
+            serde_json::from_slice::<Value>(&encoded).unwrap()["version"].as_u64(),
+            Some(crate::state_channel::EditState::STATE_VERSION)
         );
         assert_eq!(
             restored.groups,
@@ -5882,8 +5896,9 @@ pub(crate) mod tests {
         let encoded = owner.encode_state().unwrap(); // 真getState路径会flush，不只测手工barrier。
         let saved: Value = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(
-            saved["version"], 11,
-            "v11 只写项目时间权威；旧 v2..v10 的解码与迁移另行保留"
+            saved["version"].as_u64(),
+            Some(crate::state_channel::EditState::STATE_VERSION),
+            "组件状态只有一个代际（见 `EditState::STATE_VERSION`）"
         );
         // 【T2：用户曲线只在权威里】`params` 不再写显示数组，所以这条断言改成
         // 直接读权威的稀疏 run —— 它才是"用户的这两笔"真正落盘的地方。
@@ -6864,7 +6879,8 @@ pub(crate) mod tests {
                 publisher.collect_retired();
             }
         }
-        let ready_bytes = (44100 + 48000) * 180 * 4 * 2;
+        // 【只渲一档】两个发布器共享同一份 PCM，预算只按 44100 那一档记账。
+        let ready_bytes = 44100 * 180 * 4 * 2;
         // 【曲线不再占这份预算】图集的源域曲线是它自己的一份内存；现在曲线只以
         // `ParamAuthority` 的 run 存在，而那份预算由内核自己的上限管着。
         let curve_bytes = 0_usize;

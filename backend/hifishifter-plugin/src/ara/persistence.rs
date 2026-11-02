@@ -303,6 +303,13 @@ mod tests {
         use std::sync::atomic::Ordering;
         let source = DocumentSession::new(1);
         source.ready.store(true, Ordering::Release);
+        // 【为什么必须声明绑定】`encode_partial` 的裁剪口径是"本实例此刻服务的根轨"：
+        // 没有 binding 的根一律被 retain 掉（宁可少带，也不按猜的边裁用户数据）。
+        // 早先这里只写权威不写绑定，于是载荷本来就是空的 —— 用例在断言端才炸。
+        source.track_bindings.lock_or_recover().insert(
+            "root-a".into(),
+            vec![("a".into(), "ara://source".into())],
+        );
         source
             .edits
             .lock_or_recover()

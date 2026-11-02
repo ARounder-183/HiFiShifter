@@ -444,15 +444,27 @@ fn midi_import_writes_the_curve_but_never_a_local_clip() {
     assert_eq!(result["ok"], true, "{result}");
     assert!(result["frames_touched"].as_u64().unwrap() > 0);
 
-    let frames = dispatch(
-        &editor,
-        "get_param_frames",
-        json!({"trackId":track,"param":"pitch","startFrame":0,"frameCount":4,"binary":false}),
-    )
-    .unwrap();
-    assert_eq!(frames["ok"], true, "{frames}");
-    assert_eq!(frames["edit"][0], 60.0, "{frames}");
-    assert_eq!(frames["pitch_edit_user_modified"], true, "{frames}");
+    // 【为什么不再问 `get_param_frames`】那个读入口要把**工程帧**投影回源域，而投影
+    // 需要分析基线；本夹具没有分析，于是它恒报 `analysis_pending` 并回零 —— 那测的是
+    // 分析闸门，不是"MIDI 导入把曲线写进去了"。写没写进去只有权威说得准。
+    let curve = {
+        let document = editor.document().unwrap();
+        let state = document.edits.lock_or_recover();
+        state
+            .authority
+            .root(&track)
+            .and_then(|authority| authority.runs.get("pitch_edit"))
+            .map(|runs| {
+                runs.iter()
+                    .flat_map(|run| run.values.iter().copied())
+                    .collect::<Vec<f32>>()
+            })
+            .unwrap_or_default()
+    };
+    assert!(
+        curve.iter().any(|value| (*value - 60.).abs() < 1e-3),
+        "MIDI 导入必须把 60 写进权威：{curve:?}"
+    );
 
     std::fs::remove_dir_all(&dir).ok();
     editor.close();

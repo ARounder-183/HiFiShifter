@@ -502,7 +502,10 @@ fn task34_real_component_state_stream_flushes_and_saves_only_its_scope() {
         assert_eq!(stream.bytes.len(), length + 4);
         let saved: serde_json::Value = serde_json::from_slice(&stream.bytes[4..]).unwrap();
         // 权威参数按稳定宿主身份存档（v7）；仍须证明IBStream仅保存当前组件范围。
-        assert_eq!(saved["version"], 9);
+        assert_eq!(
+            saved["version"].as_u64(),
+            Some(crate::state_channel::EditState::STATE_VERSION)
+        );
         assert_eq!(saved["edits"]["tracks"].as_array().unwrap().len(), 1);
         assert_eq!(saved["edits"]["tracks"][0]["id"], id);
         assert_eq!(
@@ -513,18 +516,18 @@ fn task34_real_component_state_stream_flushes_and_saves_only_its_scope() {
         // `regions` 是每帧派生的投影缓存，**不进存档**；参数权威落在 `authorities`
         // 上，它同样必须只包含本组件的范围（两个组件的 modification 身份不同，
         // 因此各自的权威键也不同）。
-        let authorities = saved["edits"]["atlas"]["authorities"]
+        // 【图集已删】参数权威只住在 `edits.authority`，键是**根轨 id**（不再是
+        // modification 身份）：每个组件只能存它自己那一组根。
+        // 【没有曲线时权威整体缺席】`roots` 空表不序列化，pristine 权威在载荷里根本
+        // 不出现 —— 所以这里只能断言"出现的根都属于本组件"，不能要求恰好一条。
+        let roots = saved["edits"]["authority"]["roots"]
             .as_object()
-            .expect("v7 parameter authority");
-        assert_eq!(authorities.len(), 1);
+            .cloned()
+            .unwrap_or_default();
         assert!(
-            authorities.keys().all(|key| key.contains(if index == 0 {
-                "modification"
-            } else {
-                "modification-b"
-            })),
+            roots.keys().all(|key| key == id),
             "保存了另一个组件的参数权威：{:?}",
-            authorities.keys().collect::<Vec<_>>()
+            roots.keys().collect::<Vec<_>>()
         );
         assert_eq!(
             unsafe { (COMPONENT_VTBL.set_state)(components[index], (&raw mut stream).cast()) },

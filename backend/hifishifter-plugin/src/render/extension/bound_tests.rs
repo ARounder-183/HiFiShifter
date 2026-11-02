@@ -1,6 +1,22 @@
 //! `render/extension.rs` 的 `bound_tests` 测试（从内联模块纯搬到这里，`use super::*` 解析不变）。
 
 use super::*;
+/// 读某根轨在权威里的整条曲线（跨 run 平铺）。
+///
+/// 【为什么要这个助手】T2 之后用户曲线**只**住在 `ParamAuthority` 的稀疏 run 里，
+/// 显示数组 `params[...]` 不再承载它们 —— 断言必须问权威。
+fn authority_curve(state: &crate::state_channel::EditState, root: &str, key: &str) -> Vec<f32> {
+    state
+        .authority
+        .root(root)
+        .and_then(|authority| authority.runs.get(key))
+        .map(|runs| {
+            runs.iter()
+                .flat_map(|run| run.values.iter().copied())
+                .collect()
+        })
+        .unwrap_or_default()
+}
 /// 实际原kernel PCM必须随HFS形状变化；只委托head时不能又烘焙宿主tail。
 #[test]
 fn owned_fade_shape_changes_kernel_pcm_and_state_roundtrip_and_undo_clears_it() {
@@ -1013,12 +1029,14 @@ fn task34_archived_v2_bytes_rebind_only_inside_the_component_scope() {
     }
     document.prepare_renderers();
     let accepted = document.edits.lock_or_recover().clone();
+    // 【T2：曲线只在权威里】旧归档的显示数组在合入时被搬进权威，所以这里读权威。
     assert!(
-        !accepted.params.contains_key("track"),
+        authority_curve(&accepted, "track", "pitch_edit").is_empty(),
         "旧A无曲线，不能借旧轨序号取到B曲线"
     );
-    assert_eq!(accepted.params["b"].pitch_edit.len(), 800);
-    assert_eq!(&accepted.params["b"].pitch_edit[200..212], &[64.; 12]);
+    let b_curve = authority_curve(&accepted, "b", "pitch_edit");
+    assert_eq!(b_curve.len(), 800);
+    assert_eq!(&b_curve[200..212], &[64.; 12]);
     assert!(accepted
         .tracks
         .iter()
@@ -1733,9 +1751,10 @@ fn two_renderer_case(shared_identity: bool) {
     let mut restored = document.edits.lock_or_recover().clone();
     restored.reconcile(&bindings).unwrap();
     for (index, id) in ["a", "b"].into_iter().enumerate() {
+        // 【T2：曲线只在权威里】显示数组不再承载用户曲线，读权威的稀疏 run。
         assert_eq!(
-            restored.params[id].pitch_edit,
-            [61.0 + index as f32, 63.0 + index as f32]
+            authority_curve(&restored, id, "pitch_edit"),
+            vec![61.0 + index as f32, 63.0 + index as f32]
         );
         let output = render_test_edits(&owners[index], &document, &restored).unwrap();
         let factor = if index == 0 { 0.5 } else { 0.25 };
@@ -1755,18 +1774,25 @@ fn two_renderer_case(shared_identity: bool) {
         let b = assigned_view(&owners[1], &document);
         assert_eq!(a.tracks[0].volume, 0.5);
         assert_eq!(b.tracks[0].volume, 0.5);
+        // 【G5：在线根优先】宿主交回一份**旧**载荷时，合入只补在线状态里缺的根 ——
+        // 已经活着的根（a 与 b 都有自己的曲线）不得被载荷覆盖。这正是"复制插件后
+        // 另一条轨的曲线被改写"那条缺陷的判据。
         assert_eq!(
-            document.edits.lock_or_recover().params["b"].pitch_edit,
-            [61., 63.]
+            authority_curve(&document.edits.lock_or_recover(), "a", "pitch_edit"),
+            vec![61., 63.]
+        );
+        assert_eq!(
+            authority_curve(&document.edits.lock_or_recover(), "b", "pitch_edit"),
+            vec![62., 64.]
         );
         owners[1].restore_state(&second).unwrap();
         assert_eq!(
-            document.edits.lock_or_recover().params["a"].pitch_edit,
-            [61., 63.]
+            authority_curve(&document.edits.lock_or_recover(), "a", "pitch_edit"),
+            vec![61., 63.]
         );
         assert_eq!(
-            document.edits.lock_or_recover().params["b"].pitch_edit,
-            [62., 64.]
+            authority_curve(&document.edits.lock_or_recover(), "b", "pitch_edit"),
+            vec![62., 64.]
         );
         let editors: Vec<_> = owners
             .iter()
