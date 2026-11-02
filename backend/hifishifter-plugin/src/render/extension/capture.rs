@@ -32,13 +32,17 @@ impl ExtensionOwner {
     /// 【为什么"带不带曲线"要作为一项返回】会话还没加载时拿到的是**不含用户曲线**的
     /// 几何，而那时 `edit` 恒为 0 —— 若调用方把它当成"已准备"，会话加载之后版本不变、
     /// 这次渲染被跳过，用户画完线永远听不到变化（见 `capture_prepare_job` 的版本闸）。
+    /// 【三态】见 `capture_render_state`：`Ok(None)` = 会话正在加载，**这一趟不发布**。
     pub(crate) fn capture_render_input(
         &self,
-    ) -> Result<(u64, u64, bool, super::input::RenderInput), String> {
+    ) -> Result<Option<(u64, u64, bool, super::input::RenderInput)>, String> {
         if !self.capture.has_material() {
             return Err("no Capture material".into());
         }
         let revision = self.capture.revision();
+        if self.capture_session_pending() {
+            return Ok(None);
+        }
         let session = self
             .capture_session
             .get()
@@ -78,7 +82,26 @@ impl ExtensionOwner {
             clip_parameters: std::collections::BTreeMap::new(),
             window: None,
         };
-        Ok((revision, edit, with_curves, input))
+        Ok(Some((revision, edit, with_curves, input)))
+    }
+
+    /// 会话**存在但还没加载完**（窗口刚打开、actor 正在读盘/建模型）。
+    ///
+    /// 【为什么它不是"没有会话"】"没有会话"= 用户从没开过窗口 ⇒ 确实没有曲线可读，
+    /// 照常渲染是对的。"有会话但没加载" = 用户**有**曲线，只是还读不出来 ⇒ 这一趟
+    /// 渲染必须**放弃**：发布一份没有曲线的结果会让宿主把它烘焙进产物（离线只有
+    /// 一次机会），而下一拍就能拿到带曲线的版本。
+    ///
+    /// 此前这两种状态被合成一个"没有会话"分支（`with_curves = false`），于是
+    /// "窗口开过、actor 正在加载"时渲染会发布一份**没有用户编辑**的产物 —— 用户
+    /// 听到的正是"我改的东西没生效"。
+    pub(crate) fn capture_session_pending(&self) -> bool {
+        match self.capture_session.get() {
+            Some(Ok(session)) => !session.is_loaded(),
+            // 会话创建失败：那是终态，不是"还在加载"。让它走"没有会话"那一支，
+            // 免得离线渲染永远等一个不会到来的加载。
+            Some(Err(_)) | None => false,
+        }
     }
 
     pub(crate) fn capture_prepare_job(
@@ -91,7 +114,13 @@ impl ExtensionOwner {
         // 【为什么这里也要补一次】命令那条路（`request_capture_reload`）只在用户动作时
         // 发生；从组件 state 恢复 take 的会话不走那里。这一份是兜底，且幂等。
         self.sync_raw_tape();
-        let (revision, edit, with_curves, input) = self.capture_render_input()?;
+        let Some((revision, edit, with_curves, input)) = self.capture_render_input()? else {
+            // 【会话正在加载：这一趟不发布】见 `capture_session_pending`。离线渲染只有
+            // 一次机会，发布一份没有用户曲线的结果等于把"编辑没生效"烘焙进产物。
+            // 返回 Ok 让调用方继续等（见 `prepare_offline_until` 的重试循环）。
+            log::debug!("[capture] the editor session is still loading; the snapshot is deferred");
+            return Ok(());
+        };
         // 【T-S1-6】发布前把"素材里有多少个洞"变成可读的数（去重打印）。
         self.note_tape_coverage(&input);
         // 【为什么要版本闸】它被 UI 定时器与命令两条路径驱动；没有这道闸，一次 8 秒的
@@ -617,9 +646,14 @@ impl ExtensionOwner {
         // `counted=` 是"位置由计数器推进的块数"，`jumps=` 是"宿主报的位置与计数器
         // 不同"的次数。两者都大而 `rewinds` 为 0 是**健康**的：说明宿主确实钉住过
         // 位置，而每次它恢复报告时我们都跟上了。
+        // 【`resyncs` 与 `domain_switches` 为什么必须分开】前者是"宿主纠正了我们数出来
+        // 的位置"（记账误差，桥接/裁剪一段），后者是"宿主换了时间基"（整条 take 平移）。
+        // 共用一栏读数时，现场只能靠差值大小反推是哪一种 —— 而那个推断正是错的。
+        // `window_frames` 是"宿主说没在播却一直在送音频"的帧数，域切换的判据输入。
         let line = format!(
             "[capture] clock: stream={} blocks={blocks} pass={} counted={} frames={} \
              jumps={} last_jump={} rewinds={} delta_min={} delta_max={} resyncs={} \
+             domain_switches={} pass_frames={} window_frames={} \
              rising={} continuous={} music={}",
             stream.as_str(),
             geometry.pass.load(Ordering::Acquire),
@@ -631,6 +665,9 @@ impl ExtensionOwner {
             geometry.clock_delta_min.load(Ordering::Acquire),
             geometry.clock_delta_max.load(Ordering::Acquire),
             geometry.position_resyncs.load(Ordering::Acquire),
+            geometry.domain_switches.load(Ordering::Acquire),
+            geometry.pass_frames.load(Ordering::Acquire),
+            geometry.window_frames.load(Ordering::Acquire),
             geometry.rising_edges.load(Ordering::Acquire),
             geometry.continuous_used.load(Ordering::Acquire),
             geometry.music_used.load(Ordering::Acquire),

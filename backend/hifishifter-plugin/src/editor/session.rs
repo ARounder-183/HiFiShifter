@@ -4200,7 +4200,7 @@ pub(crate) mod tests {
         let owner = capture_owner_with_a_take();
         let session = owner.editor_session().unwrap();
         session.ensure_loaded(true).unwrap();
-        let (take, edit, with_curves, input) = owner.capture_render_input().unwrap();
+        let (take, edit, with_curves, input) = owner.capture_render_input().unwrap().unwrap();
         assert!(take > 0, "渲染输入必须绑定到活动 take");
         assert!(
             with_curves,
@@ -4226,7 +4226,7 @@ pub(crate) mod tests {
         let before = edit;
         session.mark_dirty();
         assert_ne!(
-            owner.capture_render_input().unwrap().1,
+            owner.capture_render_input().unwrap().unwrap().1,
             before,
             "参数写入必须推进渲染版本"
         );
@@ -4403,12 +4403,12 @@ pub(crate) mod tests {
         let session = owner.editor_session().unwrap();
         session.ensure_loaded(true).unwrap();
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let before = owner.capture_render_input().unwrap().1;
+            let before = owner.capture_render_input().unwrap().unwrap().1;
             // 模拟 `convert_mix_param` 的收尾：发布，但不标脏。
             let snapshot = session.timeline.lock_or_recover().clone();
             session.publish_timeline(snapshot);
             assert_ne!(
-                owner.capture_render_input().unwrap().1,
+                owner.capture_render_input().unwrap().unwrap().1,
                 before,
                 "发布过的时间线必须推进渲染版本，否则这类改动会被版本闸静默跳过"
             );

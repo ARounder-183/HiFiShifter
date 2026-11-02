@@ -398,7 +398,27 @@ impl ExtensionOwner {
         // 更不能因为"窗口没开过 ⇒ 形态未落定"就把静音烘焙进产物。与实时通路共用
         // "未绑定 + 有素材"这条证据（理由见 `prepare_job` 的同名分支）。
         if !self.is_bound() && self.capture.has_material() {
-            return self.capture_prepare_job(Arc::new(std::sync::atomic::AtomicBool::new(false)));
+            // 【为什么这里要**重试**】会话可能正在加载（用户刚打开工程 / actor 正在读盘）。
+            // 那时 `capture_prepare_job` 会**拒绝发布**一份没有用户曲线的结果 —— 那是对的，
+            // 因为离线渲染只有一次机会，发布出去就等于把"编辑没生效"烘焙进产物。
+            // 但"拒绝发布"之后必须**继续等**：立刻返回 Ok 会让宿主马上开始渲染。
+            //
+            // 【为什么 deadline 在这里终于有意义】此前这条分支"合成本身有界"，一次就够；
+            // 现在它可能要等一次会话加载，而那个等待必须有上界 —— 上界就是
+            // `OFFLINE_PREPARE_TIMEOUT`（宿主为它已经准备好了 15 秒）。
+            loop {
+                self.capture_prepare_job(Arc::new(std::sync::atomic::AtomicBool::new(false)))?;
+                if !self.capture_session_pending() {
+                    return Ok(());
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err(
+                        "offline preparation timed out waiting for the editor session to load"
+                            .into(),
+                    );
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
         }
         if !self.renders_playback() {
             return Ok(());

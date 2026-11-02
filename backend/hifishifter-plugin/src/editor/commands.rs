@@ -337,6 +337,7 @@ fn export_audio_to_file(
             .capture_owner()
             .ok_or("the Capture host is gone")?
             .capture_render_input()?
+            .ok_or("the editor session is still loading; try exporting again in a moment")?
             .3
     } else {
         let document = session.document().ok_or("the ARA document is closed")?;
