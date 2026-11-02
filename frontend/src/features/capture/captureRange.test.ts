@@ -132,9 +132,7 @@ test("视觉播放头只补齐轮询间隙，且有上限", () => {
     // 视觉值只领先一点点 ⇒ 带子跟上去（这就是"不再一顿一顿"的那一段）。
     expect(deriveCaptureBands(base, 1.05)?.bands).toEqual([{ startSec: 0, endSec: 1.05 }]);
     // 视觉值离得很远（或本身就是陈旧的）⇒ 只延伸到上限。
-    expect(deriveCaptureBands(base, 5)?.bands).toEqual([
-        { startSec: 0, endSec: 1 + MAX_LEAD_SEC },
-    ]);
+    expect(deriveCaptureBands(base, 5)?.bands).toEqual([{ startSec: 0, endSec: 1 + MAX_LEAD_SEC }]);
     // 不在录制中时完全不跟随：`standby` / `ready` 都不是"正在长出来"。
     const standby = { ...base, state: "standby" as const, hostPlaying: false };
     expect(deriveCaptureBands(standby, 5)?.bands).toEqual([{ startSec: 0, endSec: 1 }]);
