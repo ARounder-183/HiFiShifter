@@ -413,8 +413,18 @@ fn build_soundtouch() {
 
     let st_src = format!("{}/soundtouch-static/soundtouch", THIRD_PARTY);
 
-    // Re-run this script only when the SoundTouch source tree changes.
-    println!("cargo:rerun-if-changed={}", st_src);
+    // 【只 watch 真正的输入，不 watch 我们自己写的那棵树】
+    //
+    // 这棵树在构建过程中**会被本脚本写入**：Step 5 把构建产物 `SoundTouchDLL.dll`
+    // 回写到树根（给 tauri_build 做资源校验），首轮还会把 `SoundTouchDLL.rc` 与
+    // `CMakeLists.txt` 就地打补丁；`.git/` 也在里面（pin 校验会读它）。
+    // 早先这里 watch 的是整棵树，于是每次 cargo 都判定"源变了"：cmake configure +
+    // cmake build 每次都重跑（实测 ~1.5-2 s/次），产物一变还要连带重编内核、重链
+    // 90 MB 的插件测试二进制（~16 s/次）。下面只列真正的输入（C++ 源与头文件）；
+    // 产物回写与一次性补丁都不在 watch 集合里，循环从结构上消失。
+    for input in ["source", "include", "CMakeLists.txt"] {
+        println!("cargo:rerun-if-changed={}/{}", st_src, input);
+    }
 
     let st_src_path = Path::new(&st_src);
     if !st_src_path.join("CMakeLists.txt").exists() {
