@@ -625,4 +625,52 @@ pub(crate) struct BlockEvidence {
     pub capture_epoch: u64,
     /// 本块属于一个离线/冻结预览 pass（`ProcessingKind` 编码）。
     pub processing: u8,
+    /// 本块位置可以发布（`HostClock` 的 `position_trusted`）。
+    ///
+    /// 【为什么输出仲裁也需要它】`PendingAbsolute` 期间的绝对域预卷块既不是
+    /// “这一遍的正文”，也不是“上一张 take”；它只应该监听输入，不能被当成
+    /// 可以发布的位置。
+    pub position_trusted: bool,
+    /// 本块位置暂不发布（`PendingAbsolute`）。
+    pub publish_deferred: bool,
+    /// 本块由一次域切换开始：需要丢弃该本地位置之前的不连续前缀。
+    pub prune_before: i64,
+    /// 本块所属的全局 pass 序号（session 与 processing 共用）。
+    pub pass_sequence: u64,
+    /// 本块所属的传输代次（`reset_transport_session` / `capture_start` 推进）。
+    pub transport_generation: u64,
+    /// 本块来自一个冻结预览 pass。
+    pub preview: bool,
+}
+
+impl Default for BlockEvidence {
+    fn default() -> Self {
+        Self {
+            stream: ProcessStream::Realtime,
+            position: 0,
+            frames: 0,
+            playing: false,
+            recording: false,
+            playing_rising: false,
+            recording_rising: false,
+            phase: TransportPhase::Resting,
+            had_previous: false,
+            allow_output: true,
+            start_window: false,
+            transport_active: false,
+            transport_paused: false,
+            rebase_frames: 0,
+            cycle_wrap: false,
+            repeated_nonzero: false,
+            split: BlockSplit::default(),
+            capture_epoch: 0,
+            processing: 0,
+            position_trusted: true,
+            publish_deferred: false,
+            prune_before: 0,
+            pass_sequence: 0,
+            transport_generation: 0,
+            preview: false,
+        }
+    }
 }

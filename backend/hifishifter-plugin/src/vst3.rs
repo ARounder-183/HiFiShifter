@@ -1010,6 +1010,9 @@ impl Processor {
         // 【音频线程零分配】这两个开关用环境变量初始化（会分配 String）。
         // 在组件创建时（宿主 UI 线程）预热，音频回调第一次进入时就不再分配。
         let _ = buffer_audit_enabled();
+        // 【宿主身份必须在 create 解析一次】initialize 不一定会被调用，getName 也
+        // 可能返回 unknown；预览判定不能挂在一个只在 initialize 写的诊断字段上。
+        crate::editor::connection::resolve_and_record_host_identity();
         let extension_owner = Arc::new(ExtensionOwner::default());
         extension_owner.warm_audio_caches();
         let route = crate::editor::routing::RouteLease::new(&extension_owner);
@@ -1402,9 +1405,12 @@ unsafe extern "system" fn component_set_active(this: *mut c_void, state: i8) -> 
                 // 效果器"的直接证据 —— Cubase 实测正是如此，而此前日志里没有任何一行
                 // 直接说出这件事，得靠对比两个会话才能推断。
                 owner.note_component_activated();
-                // 重新激活后第一块不能继承上一轮的“位置/播放位”：否则同一 raw 的
-                // 第一块会被判成 Resting，输出继续读上一张 take（问题 3）。
-                owner.reset_transport_session("component_activated");
+                // 【预览跨失活保留 cursor】重新激活时若有一个挂起的预览，恢复它；
+                // 否则清掉上一轮的几何（同一 raw 的第一块会被判成 Resting，输出
+                // 继续读上一张 take —— 问题 3）。
+                if !owner.resume_processing_preview() {
+                    owner.reset_transport_session("component_activated");
+                }
                 // 后台/前台切换后宿主可能已重建几何或恢复源访问；主动枚举一次，
                 // 不等下一次 UI tick 的节流窗口。
                 owner.resume_resync();
@@ -1621,6 +1627,9 @@ unsafe extern "system" fn audio_setup_processing(
             }
             // SAFETY: this 是存活的音频接口；setupProcessing 在 process 之前调用。
             let owner = unsafe { &(*base_from_audio(this)).extension_owner };
+            // setupProcessing 是宿主 UI 线程上的确定时刻；在这里再解析一次身份，
+            // 让包装器/祖先链证据在第一次 process 之前就位（幂等）。
+            crate::editor::connection::resolve_and_record_host_identity();
             owner.set_setup_process_mode(setup.process_mode);
             // 诊断：宿主声明的单块上限（不是分配上限；当前实现不依赖它分配）。
             owner.note_max_samples_per_block(setup.max_samples_per_block);
@@ -1732,7 +1741,16 @@ unsafe extern "system" fn audio_set_processing(this: *mut c_void, state: i8) -> 
             let owner = unsafe { &(*base_from_audio(this)).extension_owner };
             if state == 0 {
                 owner.record_processing_stop();
-                owner.note_processing_stopped();
+                if owner.processing_pass_is_preview() {
+                    // 【预览只挂起】VEGAS 的非实时预览完全可能在每个 chunk 之间调用
+                    // setProcessing(false)。结束 pass 会把 cursor/几何清空，下一块只能
+                    // 重新从候选开始 —— 看起来就是“只录了 1 秒”。
+                    owner.suspend_processing_preview("setProcessing(false)");
+                } else {
+                    owner.note_processing_stopped();
+                }
+            } else if owner.resume_processing_preview() {
+                // 恢复挂起的预览：cursor 与 pass 原样接上。
             } else if owner.setup_process_mode() == 2 {
                 // 【离线预览的第二个入口】有些宿主（含 VEGAS 的“应用非实时事件 FX”）
                 // 在 setup 时声明 mode=2，但直到 setProcessing(true) 才真正开始预览。
@@ -1989,10 +2007,18 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
             let context = unsafe { &*probe.process_context };
             let effective_position =
                 owner.note_offline_block(context, probe.process_mode, probe.num_samples as usize);
-            if !owner.processing_pass_active() {
-                owner.observe_transport(context, probe.process_mode, probe.num_samples as usize);
-            }
+            // 【观察顺序：捕获先、宿主采样后】捕获决定本块位置是否可信；宿主采样通道
+            // 必须看到同一个结论，否则 PendingAbsolute 期间它仍会把绝对位置画出去。
             evidence = owner.capture_observe(probe, context, effective_position);
+            if !owner.processing_pass_active() {
+                let position_trusted = evidence.is_some_and(|evidence| evidence.position_trusted);
+                owner.observe_transport(
+                    context,
+                    probe.process_mode,
+                    probe.num_samples as usize,
+                    position_trusted,
+                );
+            }
         }
     }
     match shape {

@@ -149,9 +149,9 @@ impl ExtensionOwner {
     /// 参与只会把 cursor 与宿主读数搅在一起。
     pub(super) fn note_processing_block(
         &self,
-        _stream: ProcessStream,
+        stream: ProcessStream,
         context: &crate::audio_abi::ProcessContext,
-        _frames: usize,
+        frames: usize,
         processing: ProcessingBlock,
     ) -> StreamBlock {
         let offline = processing.kind == ProcessingKind::Offline;
@@ -160,6 +160,50 @@ impl ExtensionOwner {
         } else {
             TimebaseKind::PreviewLocal
         };
+        // 【处理 pass 也必须推进本流的几何】旧实现直接构造 StreamBlock，不更新
+        // StreamGeometry 的 pass / session_phase / last_position：读游标跳变判据仍拿
+        // 实时流的 pass 比较，预览确认时的 raw→cursor 跳变只能靠 force_declick 兜，
+        // 而 `latch_rung` 的 pass 不前进，预览 pass 切换时旧档位可能继续。
+        let geometry = &self.streams[stream.index()];
+        if processing.new_pass {
+            geometry.pass.fetch_add(1, Ordering::AcqRel);
+        }
+        let end = processing.local_start.saturating_add(frames as i64);
+        let frames32 = u32::try_from(frames).unwrap_or(u32::MAX);
+        geometry.seen.store(true, Ordering::Release);
+        geometry
+            .last_start
+            .store(processing.local_start, Ordering::Release);
+        geometry.last_frames.store(frames32, Ordering::Release);
+        geometry.last_end.store(end, Ordering::Release);
+        geometry
+            .last_position
+            .store(processing.local_start, Ordering::Release);
+        geometry
+            .last_raw_start
+            .store(context.project_time_samples, Ordering::Release);
+        geometry
+            .timebase_kind
+            .store(timebase.code(), Ordering::Release);
+        geometry.timebase_offset.store(0, Ordering::Release);
+        geometry
+            .session_epoch
+            .store(processing.pass_id, Ordering::Release);
+        geometry.session_phase.store(
+            if offline {
+                SessionPhase::OfflineRolling.code()
+            } else {
+                SessionPhase::Rolling.code()
+            },
+            Ordering::Release,
+        );
+        geometry.session_frames.store(
+            geometry
+                .session_frames
+                .load(Ordering::Acquire)
+                .saturating_add(frames as u64),
+            Ordering::Release,
+        );
         StreamBlock {
             position: processing.local_start,
             raw_start: context.project_time_samples,
@@ -188,6 +232,12 @@ impl ExtensionOwner {
             transport_active: true,
             new_epoch: processing.new_pass,
             rebase_frames: processing.rebase_frames,
+            prune_before: 0,
+            // 预览 cursor 是本 pass 的本地时间轴，从第一块起就可信。
+            position_trusted: true,
+            publish_deferred: false,
+            transport_generation: self.transport_generation.load(Ordering::Acquire),
+            preview: !offline,
             timebase,
         }
     }
@@ -293,6 +343,12 @@ impl ExtensionOwner {
                 transport_active: false,
                 new_epoch: false,
                 rebase_frames: 0,
+                prune_before: 0,
+                // 零帧块不写样本：位置也不该发布（否则一次参数 flush 会把光标推到 raw）。
+                position_trusted: false,
+                publish_deferred: true,
+                transport_generation: self.transport_generation.load(Ordering::Acquire),
+                preview: false,
                 timebase: TimebaseKind::from_code(geometry.timebase_kind.load(Ordering::Acquire))
                     .unwrap_or(TimebaseKind::Unknown),
             };
@@ -351,6 +407,19 @@ impl ExtensionOwner {
             || (!playing
                 && (playing_rising || recording_rising)
                 && phase_before != SessionPhase::Starting);
+        // 【本次 take 的第一个有权块必须在 HostClock 之前、用 raw 记录】
+        // 它是 Event 域切换唯一可靠的绝对起点（choose_origin）；晚一步记录，
+        // HostClock 处理首块时看不到它；用 block.start（有效位置）则会在 R2 记账
+        // 推进过的块上得到错的 origin。
+        let transport_start = playing || playing_rising || recording_rising || !had;
+        // 【只在还没记到时写】预览 pass 会先更新几何（had=true），但捕获侧仍需要
+        // 第一个有权块的 raw 作为 Event 起点；用捕获存储自己的“未知”状态判断。
+        if self.capture().is_armed()
+            && transport_start
+            && self.capture().capture_origin_raw().is_none()
+        {
+            self.capture().note_capture_origin(raw_start);
+        }
         let mut clock_state = geometry.load_clock_state();
         let clock = clock_state.observe(ClockInput {
             raw_start,
@@ -370,9 +439,17 @@ impl ExtensionOwner {
             persisted_event_origin: self.event_origin_samples(),
             music: time.music,
             tempo: time.tempo,
+            capture_armed: self.capture().is_armed(),
+            transport_start,
         });
         if let Some(origin) = clock.event_origin {
-            self.note_event_origin(origin);
+            // 一次确认过的域切换（switched + Event）比“从持久化状态恢复”更可信。
+            let confidence = if clock.switched && clock.domain.is_event() {
+                2
+            } else {
+                1
+            };
+            self.note_event_origin(origin, confidence);
         }
         let mut session = TransportSession {
             epoch: geometry.session_epoch.load(Ordering::Acquire),
@@ -399,8 +476,12 @@ impl ExtensionOwner {
         // A：新一次播放。域切换不是新 pass；真 seek / 新 epoch / 循环回卷才是。
         // 【Starting 里的上升沿不是新 pass】那是 pre-roll -> 正文；从 Rolling 里的
         // 上升沿则是新一次起播（宿主可能没有先送 kPlaying=0 的块）。
-        let playing_edge_new_pass = playing_rising && phase_before != SessionPhase::Starting;
+        // 【域切换不是新 pass】VEGAS Event FX 的 kPlaying 上升沿同时是域切换；
+        // 把它当新 pass 会把一条连续演奏切成两段（第一段留在绝对域）。
+        let playing_edge_new_pass =
+            playing_rising && phase_before != SessionPhase::Starting && !clock.switched;
         let new_pass = new_epoch || clock.seek || cycle_wrap || playing_edge_new_pass;
+
         let time_base_switch = clock.switched;
         let rebase_frames = clock.rebase_frames;
         let timebase_after = timebase_of(clock.domain);
@@ -758,6 +839,11 @@ impl ExtensionOwner {
             transport_active,
             new_epoch,
             rebase_frames,
+            prune_before: clock.prune_before,
+            position_trusted: clock.position_trusted,
+            publish_deferred: clock.publish_deferred,
+            transport_generation: self.transport_generation.load(Ordering::Acquire),
+            preview: false,
             timebase: TimebaseKind::from_code(geometry.timebase_kind.load(Ordering::Acquire))
                 .unwrap_or(TimebaseKind::Unknown),
         }
@@ -776,6 +862,9 @@ impl ExtensionOwner {
     /// 本函数只写原子量，可从音频线程调用（setProcessing(false) 就是音频线程）。
     pub(crate) fn reset_transport_session(&self, reason: &str) {
         let _ = reason;
+        // 【输出权威】同一 capture 会话里停止再播时 capture epoch 不变；只有这个
+        // 代次能告诉输出仲裁“这一块属于上一遍”。
+        self.transport_generation.fetch_add(1, Ordering::AcqRel);
         for stream in [
             ProcessStream::Realtime,
             ProcessStream::Prefetch,
@@ -837,6 +926,7 @@ impl ExtensionOwner {
     ///
     /// 【为什么 ARA 实例恒为假】它的输出语义由 ARA 通路决定，这个守卫必须对它完全无效
     /// （见 `a_bound_instance_keeps_its_output`）。返回假 ⇒ 保持"停播即静音"的既有行为。
+    #[allow(dead_code)]
     pub(crate) fn capture_transport_running(&self) -> bool {
         if self.is_bound() || self.bound_once.load(Ordering::Acquire) {
             return false;
@@ -1033,11 +1123,13 @@ impl ExtensionOwner {
         // 实时流“在前进”的证据（用户听到的开头小段循环）。
         // 【处理 pass 必须先于 HostClock】mode=0 的冻结预览 raw 固定、kPlaying=0；
         // 若先走实时会话，它会在 1 秒起播窗口后被判成 Paused，预览永远只录 1 秒。
-        let repeated_nonzero = self.streams[stream.index()]
-            .unchanged_run
-            .load(Ordering::Acquire)
-            > 0
-            && !block_silent;
+        let stream_time = StreamTime::from_context(context);
+        let phase_before = SessionPhase::from_code(
+            self.streams[stream.index()]
+                .session_phase
+                .load(Ordering::Acquire),
+        )
+        .unwrap_or_default();
         let processing = if let Some(position) = requested_position {
             Some(ProcessingBlock {
                 kind: ProcessingKind::Offline,
@@ -1046,21 +1138,42 @@ impl ExtensionOwner {
                 rebase_frames: 0,
                 new_pass: position == 0,
             })
+        } else if stream != ProcessStream::Realtime {
+            // prefetch 的 raw 是渲染进度，不是播放头；从它进入预览会把 cursor 建在
+            // 错误的位置上。预览只认实时流。
+            None
         } else {
-            self.processing_pass.note_preview_block(
+            // 预览确认要知道 HostClock 此刻在哪个域：Event 域里候选块写的是
+            // 本地位置（raw - origin），确认时不能再平移一次。
+            let clock_domain = self.streams[stream.index()].clock_domain();
+            let clock_is_local = clock_domain.is_event();
+            let clock_offset = clock_domain.local_offset();
+            let clock_pending = clock_domain == ClockDomain::PendingAbsolute;
+            match self.processing_pass.note_preview_block(
                 mode,
                 context.project_time_samples,
                 block.frames,
                 rate,
                 block_fingerprint_value,
                 block_silent,
-                repeated_nonzero,
                 playing,
                 self.capture_preview_allowed(),
+                phase_before,
+                capture.capture_started(),
+                self.setup_process_mode(),
                 self.event_origin_samples(),
-            )
+                stream_time.music,
+                stream_time.tempo,
+                clock_is_local,
+                clock_offset,
+                clock_pending,
+                &self.pass_sequence,
+            ) {
+                PreviewDecision::Block(processing) => Some(processing),
+                PreviewDecision::None => None,
+            }
         };
-        let stream_block = if let Some(processing) = processing {
+        let mut stream_block = if let Some(processing) = processing {
             self.capture()
                 .set_preview_active(processing.kind == ProcessingKind::FrozenPreview);
             self.note_processing_block(stream, context, block.frames, processing)
@@ -1075,6 +1188,20 @@ impl ExtensionOwner {
                 Some(effective_position),
             )
         };
+        // 【候选期间位置不可发布】HostClock 可能已经把 PendingAbsolute 探针走完
+        // 并落成 Project；但预览还没确认，把宿主光标（现场 70.375 s）画出去就是
+        // 用户看到的那次跳变。候选确认后由处理 pass 的 cursor 接管发布。
+        if self.processing_pass.phase() == PreviewPhase::Candidate {
+            // 候选块仍要写进 take：确认时整条 take 会平移 -origin，这些块正好落在
+            // cursor 上；不写就会丢掉预览的开头 0.75 s。位置由 HostClock 给（Pending
+            // 期间是 raw / R2 记账），所以这里只补“有权写入”，不改位置。
+            stream_block.transport_active = true;
+            // 静音候选块的位置可能没有推进；相位必须显式置成 Rolling，否则
+            // on_block_with_context 的 Resting 早退会把它挡在写入之前。
+            stream_block.phase = TransportPhase::Rolling;
+            stream_block.position_trusted = false;
+            stream_block.publish_deferred = true;
+        }
         if stream_block.new_pass {
             self.clear_rung_latch();
         }
@@ -1150,6 +1277,17 @@ impl ExtensionOwner {
                     discard_pre_roll: index == 0 && stream_block.discard_pre_roll,
                     // 记账域位置：起播窗口里宿主位置被钉住，`part.position` 已经是插件
                     // 按块长推进后的值，与宿主管道域不同（见 `BlockContext` 的说明）。
+                    raw_start: stream_block.raw_start,
+                    position_trusted: stream_block.position_trusted,
+                    publish_deferred: stream_block.publish_deferred,
+                    prune_before: if index == 0 {
+                        stream_block.prune_before
+                    } else {
+                        0
+                    },
+                    pass_sequence: self.pass_sequence.load(Ordering::Acquire),
+                    transport_generation: stream_block.transport_generation,
+                    preview: stream_block.preview,
                 },
             );
             outcome = if index == 0 {
@@ -1169,12 +1307,17 @@ impl ExtensionOwner {
             } else if !self.capture.is_armed() && stream != ProcessStream::Offline {
                 // 未武装的实时块不贡献 Capture 时钟；否则每个宿主块都会推进
                 // sample_seq，前端会把空采样当成新读数。
+            } else if !stream_block.position_trusted {
+                // 【证据不足不发布】PendingAbsolute 期间宿主报的是绝对域预卷
+                // （现场 60.000 s）；把它画出去就是用户看到的“光标跳到 60 s 再跳回”。
+                // 保持上一位置，等域解析完成再发布。
+                clock.hold_capture();
             } else {
                 clock.publish_capture_block(
                     stream_block.position as f64 / rate.max(1.0),
-                    recording || stream == ProcessStream::Offline,
+                    recording || stream == ProcessStream::Offline || stream_block.preview,
                     stream == ProcessStream::Offline,
-                    self.processing_pass.is_preview(),
+                    stream_block.preview,
                     self.capture().capture_epoch(),
                 );
             }
@@ -1195,7 +1338,7 @@ impl ExtensionOwner {
             allow_output,
             outcome.code(),
             capture.capture_started(),
-            StreamTime::from_context(context),
+            stream_time,
             rate,
             stream_block.counted,
         );
@@ -1223,6 +1366,12 @@ impl ExtensionOwner {
             split,
             capture_epoch: self.capture().capture_epoch(),
             processing: processing.map_or(0, |block| block.kind.code()),
+            position_trusted: stream_block.position_trusted,
+            publish_deferred: stream_block.publish_deferred,
+            prune_before: stream_block.prune_before,
+            pass_sequence: self.pass_sequence.load(Ordering::Acquire),
+            transport_generation: stream_block.transport_generation,
+            preview: stream_block.preview,
         })
     }
 
@@ -1438,6 +1587,12 @@ impl ExtensionOwner {
             // 循环回卷与时间基切换都让块首变化，但音频是连续的；那不是读游标跳变。
             return None;
         }
+        // 【不可信的位置不参与判据】PendingAbsolute 的预卷块位置可能仍在绝对域，
+        // 拿它和上一块比只会制造一次假跳变。预览 cursor 是另一条本地时间轴，
+        // 与实时流的读游标无关。
+        if !evidence.position_trusted || evidence.preview {
+            return None;
+        }
         // 【起播窗口里的位置纠正不是 seek】宿主可能在 pre-roll 里先报一个陈旧位置，
         // 再回到真实播放头；那不是读游标跳变，不该装一次起播淡入。
         if evidence.start_window {
@@ -1635,6 +1790,7 @@ fn timebase_of(domain: ClockDomain) -> TimebaseKind {
     match domain {
         ClockDomain::Unknown => TimebaseKind::Unknown,
         ClockDomain::Project => TimebaseKind::ProjectAbsolute,
+        ClockDomain::PendingAbsolute => TimebaseKind::Unknown,
         ClockDomain::Event {
             raw_domain: super::host_clock::RawDomain::Absolute,
             ..

@@ -201,6 +201,12 @@ pub(crate) struct TransportClock {
     capture_serial: AtomicU64,
     capture_seen_serial: AtomicU64,
     capture_seen_at_ms: AtomicU64,
+    /// 位置暂不可发布（PendingAbsolute 的绝对域预卷）。
+    ///
+    /// 【为什么需要它】宿主采样通道与 Capture 通道是两条独立的来源：只压住 Capture
+    /// 位置，observe_transport 仍会把 60.000 s 画到界面上。hold 是一个显式状态，
+    /// 让 read_view_at 在两条通道都新鲜时仍返回“冻结在上一位置”。
+    capture_hold: AtomicBool,
     /// 定位意图：目标 / 请求时刻 / 请求时的播放位 / 代数。
     seek_target: AtomicU64,
     seek_at_ms: AtomicU64,
@@ -411,6 +417,7 @@ impl TransportClock {
         if !position_sec.is_finite() {
             return;
         }
+        self.capture_hold.store(false, Ordering::Release);
         self.capture_position_bits
             .store(position_sec.to_bits(), Ordering::Release);
         self.capture_playing.store(playing, Ordering::Release);
@@ -421,8 +428,21 @@ impl TransportClock {
         self.sample_seq.fetch_add(1, Ordering::Release);
     }
 
+    /// 位置暂不可发布：冻结 UI 在上一已知位置，等域解析完成。
+    ///
+    /// 【为什么不是“不更新”】宿主采样通道仍会写 host_pose；只要它新鲜，
+    /// read_view_at 就会把它画出去。hold 必须在读取侧短路两条通道。
+    pub fn hold_capture(&self) {
+        self.capture_hold.store(true, Ordering::Release);
+        self.playing.store(false, Ordering::Release);
+        self.capture_playing.store(false, Ordering::Release);
+        self.capture_serial.fetch_add(1, Ordering::Release);
+        self.sample_seq.fetch_add(1, Ordering::Release);
+    }
+
     /// 显式结束 Capture/离线播放位（setProcessing(false) / setActive(false)）。
     pub fn clear_capture(&self) {
+        self.capture_hold.store(false, Ordering::Release);
         self.capture_playing.store(false, Ordering::Release);
         self.capture_offline.store(false, Ordering::Release);
         self.capture_preview.store(false, Ordering::Release);
@@ -807,6 +827,17 @@ impl TransportClock {
     /// 一次完整的读数（测试用：显式给定时钟，避免依赖真实时间）。
     pub(crate) fn read_view_at(&self, now: u64) -> TransportView {
         let sample_seq = self.sample_seq.load(Ordering::Acquire);
+        if self.capture_hold.load(Ordering::Acquire) {
+            // 【两条通道一起压住】宿主采样可能比 hold 更新；只压 Capture 位置不够。
+            return TransportView {
+                position_sec: f64::from_bits(self.last_known.load(Ordering::Acquire)),
+                playing: false,
+                provenance: Provenance::Stale,
+                age_ms: 0,
+                seek_pending: false,
+                sample_seq,
+            };
+        }
         if let Some(view) = self.capture_view_at(now, sample_seq) {
             return view;
         }

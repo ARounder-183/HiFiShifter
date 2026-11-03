@@ -104,6 +104,7 @@ fn the_read_position_jump_is_a_pure_judgement() {
         processing: 0,
         transport_active: true,
         transport_paused: false,
+        ..Default::default()
     };
     // ① 没有上一块 ⇒ 没有跳变。
     assert_eq!(owner.read_position_jump(Some(evidence)), None);
@@ -154,6 +155,7 @@ fn a_contiguous_block_advance_is_not_a_jump() {
         processing: 0,
         transport_active: true,
         transport_paused: false,
+        ..Default::default()
     };
     owner.mark_emitted_for_test();
     owner.note_read_position_for_test(48_000);
@@ -364,10 +366,10 @@ fn the_output_arbiter_degrades_instead_of_going_silent() {
     owner.capture().start().unwrap();
     assert_eq!(
         owner.capture_output(),
-        CaptureOutput::Processed,
-        "武装之后、宿主还没播的那一段是**待命**：没有任何素材在产生，因此没有\
-         「用旧内容盖住新演奏」的风险。此时仍须输出处理结果 —— 否则用户画完参数线\
-         听不到任何变化（「参数线不生效」）"
+        CaptureOutput::Recording,
+        "武装之后每一块都只监听输入：armed 路径不再读上一张 take 的 processed\
+         （同一次 capture 会话里停止再播时 capture epoch 不变，旧实现据此把上一轮\
+         缓存盖在新演奏上）。试听旧 take 只属于未武装的待命"
     );
     // 宿主开始播放 ⇒ 立刻回到直通，否则捕获会把我们自己的输出录进去
     // （in-place 宿主里输入与输出是同一块缓冲）。
@@ -767,6 +769,7 @@ fn a_new_capture_epoch_start_block_is_recording_not_the_previous_result() {
         split: BlockSplit::whole(0, 512),
         capture_epoch: owner.capture().capture_epoch(),
         processing: 0,
+        ..Default::default()
     };
     assert_eq!(
         owner.capture_output_with(Some(evidence)),
@@ -776,9 +779,13 @@ fn a_new_capture_epoch_start_block_is_recording_not_the_previous_result() {
     owner.capture().cancel();
 }
 
-/// **待命时重复块最终回到处理结果。**
+/// **武装待命只监听输入，不读上一张 take。**
+///
+/// 【契约变更（第二轮）】armed 路径不再有“读旧 take”的分支：同一次 capture 会话里
+/// 停止再播时 capture epoch 不变，旧实现据此合法地返回上一张 take 的 processed 快照，
+/// 新一遍的前 250 ms 于是永远在放上一轮缓存。试听旧 take 只属于**未武装**的待命。
 #[test]
-fn armed_standby_returns_to_the_processed_result() {
+fn armed_standby_monitors_the_input() {
     let owner = insert_owner();
     record(&owner, 256);
     owner.sync_raw_tape();
@@ -799,10 +806,25 @@ fn armed_standby_returns_to_the_processed_result() {
     });
     assert_eq!(
         owner.capture_output(),
-        CaptureOutput::Processed,
-        "待命不是录制：重复块必须回到处理结果（否则参数线又不生效）"
+        CaptureOutput::Recording,
+        "武装待命必须监听输入；上一张 take 只在未武装时试听"
     );
     owner.capture().cancel();
+}
+
+/// **未武装的待命仍能试听上一张 take 的处理结果。**
+#[test]
+fn unarmed_standby_auditions_the_previous_result() {
+    let owner = insert_owner();
+    record(&owner, 256);
+    owner.sync_raw_tape();
+    owner.snapshots[0].publish(processed_snapshot()).unwrap();
+    owner.snapshots[1].publish(processed_snapshot()).unwrap();
+    owner
+        .capture_ready_revision
+        .store(owner.capture.revision(), Ordering::Release);
+    assert!(!owner.capture.is_armed());
+    assert_eq!(owner.capture_output(), CaptureOutput::Processed);
 }
 
 /// **块级 trace 能区分“kPlaying 滞后但位置在推进”的起播窗口。**
@@ -902,6 +924,7 @@ fn the_start_window_keeps_the_output_open_across_pinned_silence() {
         processing: 0,
         transport_active: true,
         transport_paused: false,
+        ..Default::default()
     };
     assert!(
         owner.capture_should_emit(Some(evidence), false),
@@ -976,6 +999,7 @@ fn prefetch_and_offline_never_look_stopped() {
             processing: 0,
             transport_active: true,
             transport_paused: false,
+            ..Default::default()
         };
         assert!(
             owner.capture_should_emit(Some(evidence), false),
@@ -1002,6 +1026,7 @@ fn prefetch_and_offline_never_look_stopped() {
         processing: 0,
         transport_active: true,
         transport_paused: false,
+        ..Default::default()
     };
     assert!(!owner.capture_should_emit(Some(realtime), false));
     assert!(owner.capture_should_emit(
@@ -2138,6 +2163,7 @@ fn a_bound_instance_does_not_silence_a_prefetch_block_without_k_playing() {
         processing: 0,
         transport_active: true,
         transport_paused: false,
+        ..Default::default()
     };
     assert!(
         owner.capture_should_emit(Some(prefetch), false),
@@ -2469,6 +2495,7 @@ fn realtime_output_silences_while_a_diagnostic_runs_and_offline_does_not() {
         processing: 0,
         transport_active: true,
         transport_paused: false,
+        ..Default::default()
     };
     let offline = BlockEvidence {
         stream: ProcessStream::Offline,

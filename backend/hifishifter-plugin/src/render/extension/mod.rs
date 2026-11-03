@@ -473,11 +473,26 @@ pub(crate) struct ExtensionOwner {
     capture: crate::capture::CaptureStore,
     /// 离线/冻结预览 pass 的本地 cursor（每个 pass 从 0 开始）。
     processing_pass: ProcessingPass,
-    /// 实例级事实：Event FX 的事件在工程里的绝对起点（`i64::MIN` = 未知）。
+    /// 实例级事实：Event FX 的事件在工程里的绝对起点（`0` = 未知；存储值是 origin + 1）。
     ///
     /// 【为什么放在 owner 上】它必须跨传输会话保留，并且要在音频线程无锁可读；
     /// 组件 state 的清单里持久化同一份值。
     event_origin_samples: AtomicI64,
+    /// 事件起点的置信度（`0` = 未知 / `1` = 暂定 / `2` = 确认）。
+    ///
+    /// 【为什么需要它】复制/粘贴 Event FX 会把上一事件的 origin 带过来；只写一次的
+    /// 旧实现让一个错误的 0 永远赢。组件 state 与确认过的域切换用 2 覆盖旧值。
+    event_origin_confidence: AtomicU8,
+    /// 全局单调的 pass 序号（传输会话与处理 pass 共用）。
+    ///
+    /// 【为什么需要】`Capture::begin_transport_pass` 只比较 epoch 数值；两套计数器
+    /// 都从 1 开始时会撞号，新 pass 被当成同一个 pass 而跳过封口/清 pending。
+    pass_sequence: AtomicU64,
+    /// 传输代次：`reset_transport_session` / `capture_start` 推进。
+    ///
+    /// 【为什么不能复用 capture epoch】同一次 capture 会话里停止再播时 capture epoch
+    /// 不变；输出仲裁必须能识别“这一块属于上一遍”。
+    transport_generation: AtomicU64,
     /// 最近一次 setupProcessing 声明的 process mode。
     setup_process_mode: AtomicI32,
     /// 最近一次为 Capture 发布快照的 take 号（`0` = 还没发过）。

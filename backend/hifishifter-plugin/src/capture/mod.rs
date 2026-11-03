@@ -586,6 +586,7 @@ impl CaptureStore {
     }
 
     /// 本世代是否已经写下过样本。
+    #[allow(dead_code)]
     pub(crate) fn capture_epoch_has_samples(&self) -> bool {
         self.capture_epoch_has_samples.load(Ordering::Acquire)
     }
@@ -893,7 +894,37 @@ impl CaptureStore {
         self.preview_active.store(false, Ordering::Release);
         self.discard_bypass();
         let segments = self.capture.lock_or_recover().finish(ClosedReason::Stopped);
-        self.promote(segments)
+        let result = self.promote(segments);
+        // 【会话边界】下一张 take 的第一个有权块必须重新决定 origin；留着上一张的
+        // 值会让 choose_origin 用一个属于上一遍的绝对起点。
+        self.capture_origin_raw.store(i64::MIN, Ordering::Release);
+        self.capture_epoch_has_samples
+            .store(false, Ordering::Release);
+        result
+    }
+
+    /// 结束一个冻结预览 pass：promote 已经录下的段，并保持武装等待下一次预览。
+    ///
+    /// 【为什么不能直接 stop()】VEGAS 的预览会在 chunk 之间调用 setProcessing(false)；
+    /// 如果每次挂起都停止录制，用户每预览一次都要重新按录制键。这里只结束**这一遍**
+    /// 的 take，武装状态保持不变，下一次预览直接开始。
+    pub(crate) fn end_preview(&self) -> Result<u64, String> {
+        let was_armed = self.is_armed();
+        self.armed.store(false, Ordering::Release);
+        self.clear_stream_flags();
+        self.preview_active.store(false, Ordering::Release);
+        self.discard_bypass();
+        let segments = self.capture.lock_or_recover().finish(ClosedReason::Stopped);
+        let result = self.promote(segments);
+        self.capture_origin_raw.store(i64::MIN, Ordering::Release);
+        self.capture_epoch_has_samples
+            .store(false, Ordering::Release);
+        if was_armed {
+            if let Err(error) = self.start() {
+                log::warn!("[capture] could not re-arm after a preview pass: {error}");
+            }
+        }
+        result
     }
 
     /// 丢掉旁路槽里所有**还没补写**的块。
@@ -923,6 +954,7 @@ impl CaptureStore {
         let mut capture = self.capture.lock_or_recover();
         let _ = capture.finish(ClosedReason::Stopped);
         *capture = Capture::default();
+        self.capture_origin_raw.store(i64::MIN, Ordering::Release);
         self.last_closed.store(0, Ordering::Release);
     }
 
@@ -941,6 +973,7 @@ impl CaptureStore {
                 sidecar::remove(&path);
             }
         }
+        self.capture_origin_raw.store(i64::MIN, Ordering::Release);
         self.material_present.store(false, Ordering::Release);
         self.material_epoch.store(0, Ordering::Release);
         self.bump_revision();
@@ -1219,11 +1252,9 @@ impl CaptureStore {
             self.recording_active.store(false, Ordering::Release);
             return CaptureBlockOutcome::Idle;
         }
-        // 【本次 take 的第一个有权块】必须在任何 Resting/重复/锁竞争早退之前记录：
-        // 它是 Event FX 域切换唯一可靠的绝对起点（见 HostClock 的 pick_event_origin）。
-        if ctx.transport_active || ctx.start_window {
-            self.note_capture_origin(block.start);
-        }
+        // 【本次 take 的第一个有权块】由 note_stream_geometry 在 HostClock 之前用
+        // **宿主原始读数**记录（见那里的说明）。这里不能再记一次 block.start：
+        // 那是有效位置（R2 可能推进过），不是 raw。
         // 【T19：先把上一轮竞争留下的块补写进去】补写必须在**拿到锁之后**做，
         // 否则补写本身又可能失败。顺序固定：先补旧的，再写新的。
         // 【为什么 try 而不是等】这把锁的另一个持有者是非音频侧的诊断读数

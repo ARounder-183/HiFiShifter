@@ -1117,6 +1117,9 @@ impl EditorSession {
                 // `start()` 会把它们覆盖掉 —— "到点自动停"于是变成"到点丢掉"。
                 if let Some(owner) = session.capture_owner() {
                     owner.capture().service();
+                    // 【预览收尾】setProcessing(false) 只挂起；宿主真的不再送块时，
+                    // 由这个非音频心跳在 2 秒后 promote 并释放 cursor（音频线程不读墙钟）。
+                    owner.tick_preview_quiet();
                     // 【为什么原始磁带也要在这里补】它此前只在**用户动作**上发布
                     // （`capture_stop` / 清空 / 删 take 都走 `request_capture_reload`）。
                     // 而 take 还有第二条来源：宿主重开工程时从组件 state 的清单恢复
@@ -4145,6 +4148,7 @@ pub(crate) mod tests {
                 },
                 0,
                 512,
+                true,
             );
             let (position, playing) = session.transport();
             assert!(playing, "宿主在播放必须如实报出");
@@ -4166,6 +4170,7 @@ pub(crate) mod tests {
                 },
                 0,
                 512,
+                true,
             );
             assert!(!session.transport().1, "停止播放必须如实回落");
         }));

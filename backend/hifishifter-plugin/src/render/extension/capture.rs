@@ -136,7 +136,9 @@ impl ExtensionOwner {
         // 预览（VEGAS 的“应用非实时事件 FX”就是一例）。只看 setup mode 会漏掉；
         // `offline_pass_active` 由第一个 mode=2 块置位，随后 actor 的普通准备
         // 就必须走 require_curves 版本，不能再发布“只有几何”的快照。
-        let require_curves = self.offline_pass_active() || self.setup_process_mode() == 2;
+        let require_curves = self.offline_pass_active()
+            || self.processing_pass.is_preview()
+            || self.setup_process_mode() == 2;
         if require_curves {
             if let Some(session) = self.capture_session_if_initialized() {
                 session.request_reload();
@@ -335,67 +337,44 @@ impl ExtensionOwner {
             return CaptureOutput::Untouched;
         }
         if !self.capture.is_armed() {
-            // 未武装：保留既有“有素材就播结果”的契约。
+            // 未武装：保留既有“有素材就播结果”的契约（待命试听上一张 take）。
             if !self.capture.has_material() {
                 return CaptureOutput::PassThrough;
             }
             return self.capture_candidate_output(evidence);
         }
 
-        let epoch = self.capture.capture_epoch();
-        // 没有本块证据的旧入口（capture_output / 诊断）：保留“位置流在推进
-        // ⇒ 正在录”的既有契约。生产路径永远带证据。
-        if evidence.is_none() && self.capture_transport_running() {
+        // 【armed 路径没有“读旧 take”的分支】这是问题 3 的核心：
+        // 同一次 capture 会话里停止再播时 capture epoch 不变，旧实现据此合法地返回
+        // 上一张 take 的 processed 快照，新一遍前 250 ms 于是永远在放上一轮缓存。
+        // 现在权威是 transport 代次：本遍的每一块都只监听输入。
+        let generation = self.transport_generation.load(Ordering::Acquire);
+        let Some(evidence) = evidence else {
+            // 没有本块证据的旧入口（capture_output / 诊断）：监听输入。
             return CaptureOutput::Recording;
-        }
-        if let Some(evidence) = evidence {
-            if evidence.capture_epoch == epoch {
-                if evidence.processing != 0
-                    || evidence.transport_active
-                    || evidence.start_window
-                    || matches!(
-                        evidence.phase,
-                        TransportPhase::Start | TransportPhase::Rolling
-                    )
-                {
-                    return CaptureOutput::Recording;
-                }
-                if evidence.transport_paused {
-                    // 【为什么暂停时仍监听输入】当前这一遍的素材还在 Capture 里、
-                    // 尚未 promote，没有任何已发布的快照能代表它；此时读 processed
-                    // 只会读到上一张 take。监听输入是唯一诚实的输出。
-                    if self.capture.capture_epoch_has_samples()
-                        && self.capture.current_material_epoch() == epoch
-                    {
-                        return self.capture_candidate_output(Some(evidence));
-                    }
-                    return CaptureOutput::Recording;
-                }
-                // Resting 且没有 transport 证据：这一块不是“这一遍在播”，
-                // 但也不能拿旧 take 顶替 —— 继续监听输入。
-                if self.capture.capture_epoch_has_samples() {
-                    return CaptureOutput::Recording;
-                }
+        };
+        if evidence.transport_generation != generation {
+            // 旧代次的迟到块（prefetch / 补写）：不能替本遍作决定，也不能读旧 take。
+            return if evidence.transport_active {
+                CaptureOutput::Recording
             } else {
-                // 旧世代的迟到块（prefetch / 补写）：不能替当前世代作决定。
-                return if evidence.transport_active {
-                    CaptureOutput::Recording
-                } else {
-                    CaptureOutput::PassThrough
-                };
-            }
+                CaptureOutput::PassThrough
+            };
         }
-
-        // 待命：武装之后、本世代第一块有权块之前。此时没有任何新素材在产生，
-        // 用户仍应听到上一张 take 的处理结果（既有契约）。
-        if !self.capture.capture_epoch_has_samples() && self.capture.has_material() {
-            return self.capture_candidate_output(evidence);
-        }
+        // 本遍的块：无论 kPlaying、相位、是否已写样本，输出都是这一遍的输入。
+        // 暂停时读上一张 take 的那条分支已经删除（见上）。
         CaptureOutput::Recording
     }
 
     /// 当前可播的素材档位（Processed / Raw / PendingSynthesis）。
+    ///
+    /// 【只允许未武装调用】armed 路径必须监听本遍输入；读旧 take 只属于待命试听。
+    /// 违反这条就会回到问题 3（停止再播的前 250 ms 放上一轮缓存）。
     fn capture_candidate_output(&self, evidence: Option<BlockEvidence>) -> CaptureOutput {
+        debug_assert!(
+            !self.capture.is_armed(),
+            "capture_candidate_output must not be used while armed"
+        );
         let candidate = if self.processed_ready() {
             CaptureOutput::Processed
         } else if self.raw_tape_ready() {
@@ -455,6 +434,12 @@ impl ExtensionOwner {
             return candidate;
         };
         if evidence.stream != ProcessStream::Realtime {
+            return candidate;
+        }
+        // 【armed 时不锁存】武装期间每一块都是本遍输入，锁存旧档位只会把上一遍的
+        // 内容源带进新一遍。只有未武装的试听路径才需要“一次播放一个源”。
+        if self.capture.is_armed() {
+            self.rung_locked.store(0, Ordering::Release);
             return candidate;
         }
         if candidate == CaptureOutput::Recording {

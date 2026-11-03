@@ -28,6 +28,44 @@ impl Default for BoundaryTail {
     }
 }
 
+/// `i64` 原子量的“未知位置”初值。
+///
+/// 【为什么需要包装类型】`AtomicI64::default()` 是 0，而 0 是合法位置
+/// （Event/Track 在工程 0）。直接 derive 会把“从未写过”读成 `Some(0)`，
+/// 首块于是被误判成 `Event{origin: 0}`。
+pub(super) struct NoPosition(AtomicI64);
+
+impl Default for NoPosition {
+    fn default() -> Self {
+        Self(AtomicI64::new(NO_POSITION))
+    }
+}
+
+impl std::ops::Deref for NoPosition {
+    type Target = AtomicI64;
+
+    fn deref(&self) -> &AtomicI64 {
+        &self.0
+    }
+}
+
+/// `projectTimeMusic` 的“未知”初值（NaN）。
+pub(super) struct NoMusic(AtomicU64);
+
+impl Default for NoMusic {
+    fn default() -> Self {
+        Self(AtomicU64::new(f64::NAN.to_bits()))
+    }
+}
+
+impl std::ops::Deref for NoMusic {
+    type Target = AtomicU64;
+
+    fn deref(&self) -> &AtomicU64 {
+        &self.0
+    }
+}
+
 #[derive(Default)]
 pub(super) struct StreamGeometry {
     pub(super) seen: AtomicBool,
@@ -176,11 +214,16 @@ pub(super) struct StreamGeometry {
     // ── HostClock（单一本地时间轴）──────────────────────────────────
     /// 当前坐标域（`ClockDomain::code`）。
     pub(super) clock_domain: AtomicU8,
-    /// 事件在工程里的绝对起点（`i64::MIN` = 未知）。
-    pub(super) clock_event_origin: AtomicI64,
-    /// 本次 take 第一个有权块的原始位置（`i64::MIN` = 未知）。
-    pub(super) clock_capture_origin: AtomicI64,
-    pub(super) clock_session_first_raw: AtomicI64,
+    /// 事件在工程里的绝对起点（`NO_POSITION` = 未知）。
+    pub(super) clock_event_origin: NoPosition,
+    /// 本次 take 第一个有权块的原始位置（`NO_POSITION` = 未知）。
+    pub(super) clock_capture_origin: NoPosition,
+    pub(super) clock_session_first_raw: NoPosition,
+    /// `PendingAbsolute` 的首块 raw 与同一块的 `projectTimeMusic` 位模式。
+    pub(super) clock_pending_raw: AtomicI64,
+    pub(super) clock_pending_music_bits: NoMusic,
+    /// 上一块的 `projectTimeMusic`（判断“读数换了尺子”）。
+    pub(super) clock_last_music_bits: NoMusic,
     pub(super) clock_event_max_local: AtomicI64,
     pub(super) clock_last_raw: AtomicI64,
     pub(super) clock_last_local_end: AtomicI64,
@@ -214,12 +257,22 @@ pub(super) const ACTIVITY_MIN_CHANGES: u32 = 1;
 /// 代码违反（同一个常数被当成两笔位置预算），非实时 FX 预览因此卡在恰好 1.000 秒。
 /// VEGAS 的起播窗口约 0.66 s，1 秒足够覆盖；超过 1 秒的静音由捕获侧的记账纠正补齐。
 pub(super) const PRE_ROLL_CAP_SEC: f64 = 1.0;
+/// “未知位置”的哨兵。
+///
+/// 【为什么不能用 0】Event 在工程 0、Track 在工程 0、Event 内从 0 起播都是合法形状。
+/// 用 0 当哨兵会把它们读成“未知”，域在 `Event{origin: 0}` 与 `Unknown` 之间抖动，
+/// `provisional`、`event_max_local`、`pick_event_origin` 全部跟着抖。
+pub(super) const NO_POSITION: i64 = i64::MIN;
+
+fn position_option(value: i64) -> Option<i64> {
+    (value != NO_POSITION).then_some(value)
+}
+
 impl StreamGeometry {
-    /// 从原子量重建 HostClock 状态（音频线程，无锁）。
-    pub(super) fn load_clock_state(&self) -> ClockState {
-        let origin = self.clock_event_origin.load(Ordering::Acquire);
-        let origin = (origin > 0).then_some(origin);
-        let domain = match self.clock_domain.load(Ordering::Acquire) {
+    /// 读回上一个块解析出的域（带真实 origin）。
+    pub(super) fn clock_domain(&self) -> ClockDomain {
+        let origin = position_option(self.clock_event_origin.load(Ordering::Acquire));
+        match self.clock_domain.load(Ordering::Acquire) {
             1 => ClockDomain::Project,
             2 => origin.map_or(ClockDomain::Unknown, |origin| ClockDomain::Event {
                 origin,
@@ -229,15 +282,27 @@ impl StreamGeometry {
                 origin,
                 raw_domain: RawDomain::Relative,
             }),
+            4 => ClockDomain::PendingAbsolute,
             _ => ClockDomain::Unknown,
-        };
-        let capture_origin = self.clock_capture_origin.load(Ordering::Acquire);
-        let session_first = self.clock_session_first_raw.load(Ordering::Acquire);
+        }
+    }
+
+    /// 从原子量重建 HostClock 状态（音频线程，无锁）。
+    pub(super) fn load_clock_state(&self) -> ClockState {
+        let origin = position_option(self.clock_event_origin.load(Ordering::Acquire));
+        let domain = self.clock_domain();
+        let capture_origin = position_option(self.clock_capture_origin.load(Ordering::Acquire));
+        let session_first = position_option(self.clock_session_first_raw.load(Ordering::Acquire));
+        let pending_music = f64::from_bits(self.clock_pending_music_bits.load(Ordering::Acquire));
+        let last_music = f64::from_bits(self.clock_last_music_bits.load(Ordering::Acquire));
         ClockState {
             domain,
             event_origin: origin,
-            capture_origin_raw: (capture_origin > 0).then_some(capture_origin),
-            session_first_raw: (session_first > 0).then_some(session_first),
+            capture_origin_raw: capture_origin,
+            session_first_raw: session_first,
+            pending_raw: self.clock_pending_raw.load(Ordering::Acquire),
+            pending_music: pending_music.is_finite().then_some(pending_music),
+            last_music: last_music.is_finite().then_some(last_music),
             event_max_local: self.clock_event_max_local.load(Ordering::Acquire),
             last_raw: self.clock_last_raw.load(Ordering::Acquire),
             last_local_end: self.clock_last_local_end.load(Ordering::Acquire),
@@ -255,11 +320,25 @@ impl StreamGeometry {
         self.clock_domain
             .store(state.domain.code(), Ordering::Release);
         self.clock_event_origin
-            .store(state.event_origin.unwrap_or(0), Ordering::Release);
-        self.clock_capture_origin
-            .store(state.capture_origin_raw.unwrap_or(0), Ordering::Release);
-        self.clock_session_first_raw
-            .store(state.session_first_raw.unwrap_or(0), Ordering::Release);
+            .store(state.event_origin.unwrap_or(NO_POSITION), Ordering::Release);
+        self.clock_capture_origin.store(
+            state.capture_origin_raw.unwrap_or(NO_POSITION),
+            Ordering::Release,
+        );
+        self.clock_session_first_raw.store(
+            state.session_first_raw.unwrap_or(NO_POSITION),
+            Ordering::Release,
+        );
+        self.clock_pending_raw
+            .store(state.pending_raw, Ordering::Release);
+        self.clock_pending_music_bits.store(
+            state.pending_music.unwrap_or(f64::NAN).to_bits(),
+            Ordering::Release,
+        );
+        self.clock_last_music_bits.store(
+            state.last_music.unwrap_or(f64::NAN).to_bits(),
+            Ordering::Release,
+        );
         self.clock_event_max_local
             .store(state.event_max_local, Ordering::Release);
         self.clock_last_raw.store(state.last_raw, Ordering::Release);
@@ -493,6 +572,16 @@ pub(super) struct StreamBlock {
     pub(super) new_epoch: bool,
     /// 域切换时整条 take 需要平移的帧数；0 = 不是域切换。
     pub(super) rebase_frames: i64,
+    /// 域切换后需要丢弃的、位于该本地位置之前的不连续前缀（0 = 不裁剪）。
+    pub(super) prune_before: i64,
+    /// 本块位置可以发布给 UI / 输出仲裁。
+    pub(super) position_trusted: bool,
+    /// 本块位置暂不发布（`PendingAbsolute`）。
+    pub(super) publish_deferred: bool,
+    /// 本块所属的传输代次（`reset_transport_session` 推进）。
+    pub(super) transport_generation: u64,
+    /// 本块来自一个冻结预览 pass。
+    pub(super) preview: bool,
     /// 本块生效的宿主时基（诊断）。
     pub(super) timebase: TimebaseKind,
 }

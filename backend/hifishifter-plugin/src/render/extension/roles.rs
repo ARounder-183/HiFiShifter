@@ -240,6 +240,7 @@ impl ExtensionOwner {
         context: &crate::audio_abi::ProcessContext,
         mode: i32,
         frames: usize,
+        position_trusted: bool,
     ) {
         if let Some(clock) = self.clock.get() {
             clock.observe(
@@ -260,7 +261,13 @@ impl ExtensionOwner {
             if mode == 0 {
                 // 【块长必须先记】播放位的寿命由它决定（见 `block_playing_ttl_ms`）。
                 clock.note_block_length(frames, context.sample_rate);
-                clock.update(context);
+                if position_trusted {
+                    clock.update(context);
+                } else {
+                    // 【证据不足不写位置】PendingAbsolute 期间宿主报的是绝对域预卷
+                    // （现场 60.000 s）。写进去就是用户看到的光标跳变；只冻结。
+                    clock.hold_capture();
+                }
             } else if mode == 1 {
                 // 【为什么 prefetch 只投"播不播"这一票】它的位置是渲染进度（领先
                 // 播放头约 1~1.5 秒），但 kPlaying 位与 realtime 块同源。把两者拆开

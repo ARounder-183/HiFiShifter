@@ -131,19 +131,47 @@ impl HostIdentity {
 /// 与具体实例无关。只在识别成功时写一次。
 static HOST_IS_VEGAS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// 是否已经成功解析过一次宿主身份（诊断；`false` = 只有 unknown）。
+static HOST_IDENTITY_RESOLVED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+/// “首次识别结果”是否已经打过日志（避免每次 setupProcessing 都刷一行）。
+static HOST_IDENTITY_REPORTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// 记录一次识别结果（只由 `resolve_and_record_host_identity` 调用）。
 pub(crate) fn note_identity(identity: &HostIdentity) {
     let display = identity.display.to_ascii_lowercase();
     let is_vegas = display.contains("vegas")
         || display.contains("acid")
         || display.contains("sound forge")
-        || identity
-            .evidence
-            .iter()
-            .any(|item| item.name.to_ascii_lowercase().contains("sfvstwrap"));
+        || identity.evidence.iter().any(|item| {
+            let name = item.name.to_ascii_lowercase();
+            name.contains("sfvstwrap")
+                || name.contains("audio_plugin_scan_server")
+                || name.contains("vegas")
+        });
+    if identity.display != "unknown" {
+        HOST_IDENTITY_RESOLVED.store(true, std::sync::atomic::Ordering::Release);
+    }
     if is_vegas {
         HOST_IS_VEGAS.store(true, std::sync::atomic::Ordering::Release);
     }
+    // 【为什么用 WARN】默认日志级别看不到 INFO；而“宿主到底被认成谁”正是预览
+    // 判定唯一的先验。现场日志文件名是 plugin-unknown.log，这一行能直接回答它。
+    if !HOST_IDENTITY_REPORTED.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        log::warn!(
+            "[host] identity resolved at create/setup: display=\"{}\" vegas_family={} evidence={}",
+            identity.display,
+            is_vegas,
+            identity.evidence.len()
+        );
+    }
+}
+
+/// 是否已经解析出非 unknown 的宿主身份。
+#[allow(dead_code)]
+pub(crate) fn identity_resolved() -> bool {
+    HOST_IDENTITY_RESOLVED.load(std::sync::atomic::Ordering::Acquire)
 }
 
 /// 当前进程的宿主是否属于 VEGAS Creative Software 家族。

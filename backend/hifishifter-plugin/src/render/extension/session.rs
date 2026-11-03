@@ -420,7 +420,10 @@ impl ExtensionOwner {
                 // 那是两件独立的用户资产，而参数是更贵的那一份。
                 Ok(value) => {
                     if let Some(origin) = value["eventOriginSamples"].as_i64() {
-                        self.note_event_origin(origin);
+                        // 【组件 state 是“确认过”的事实】它可以覆盖一个暂定的
+                        // origin（复制/粘贴 Event FX 时旧值必须能被纠正）。
+                        // 它是否属于当前宿主读数由 HostClock 每块校验。
+                        self.note_event_origin(origin, 2);
                     }
                     if let Err(error) = self.capture.restore_manifest(&value) {
                         log::warn!("[capture] manifest restore failed: {error}");

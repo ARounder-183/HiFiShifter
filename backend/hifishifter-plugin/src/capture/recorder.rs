@@ -712,6 +712,7 @@ impl BlockSplit {
 
 /// 一块音频的进程流上下文（与样本视图分开：`InputBlock` 仍然只描述音频）。
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub(crate) struct BlockContext {
     pub stream: ProcessStream,
     /// 本块所属的捕获世代。
@@ -787,6 +788,23 @@ pub(crate) struct BlockContext {
     /// 可能已经从停播块暂存了前导值。只靠"本块的值是 0"无法撤销它，
     /// 必须显式要求丢弃。
     pub discard_pre_roll: bool,
+    /// 本块宿主原始读数（`projectTimeSamples`）。
+    ///
+    /// 【为什么需要它】`start` 是**有效位置**（R2 记账可能推进过）；域切换要的是
+    /// 宿主原始读数，用它才能定出事件起点。
+    pub raw_start: i64,
+    /// 本块位置可以发布（`HostClock::position_trusted`）。
+    pub position_trusted: bool,
+    /// 本块位置暂不发布（`PendingAbsolute`）。
+    pub publish_deferred: bool,
+    /// 域切换后需要丢弃的、位于该本地位置之前的不连续前缀（0 = 不裁剪）。
+    pub prune_before: i64,
+    /// 本块所属的全局 pass 序号。
+    pub pass_sequence: u64,
+    /// 本块所属的传输代次。
+    pub transport_generation: u64,
+    /// 本块来自一个冻结预览 pass。
+    pub preview: bool,
 }
 
 impl BlockContext {
@@ -824,6 +842,13 @@ impl BlockContext {
             preceding_silent_frames: 0,
             counted: false,
             discard_pre_roll: false,
+            raw_start: 0,
+            position_trusted: true,
+            publish_deferred: false,
+            prune_before: 0,
+            pass_sequence: 0,
+            transport_generation: 0,
+            preview: false,
         }
     }
 }
@@ -1687,6 +1712,7 @@ impl Capture {
                         epoch: ctx.epoch,
                         new_epoch: false,
                         rebase_frames: 0,
+                        prune_before: 0,
                     },
                 );
             }
@@ -1753,6 +1779,7 @@ impl Capture {
                 epoch: ctx.epoch,
                 new_epoch: ctx.new_epoch,
                 rebase_frames: ctx.rebase_frames,
+                prune_before: ctx.prune_before,
             },
         )
     }
@@ -1975,6 +2002,7 @@ impl Capture {
             epoch,
             new_epoch,
             rebase_frames,
+            prune_before,
         } = evidence;
         self.block_preceding_silent = preceding_silent_frames;
         self.block_counted = counted;
@@ -1986,7 +2014,14 @@ impl Capture {
         // 判定之前，否则一次域切换会被误读成巨大的 Gap/Backward 并切成两段。
         if part == 0 && rebase_frames != 0 {
             let _ = self.rebase_take(rebase_frames);
+            // 【必须与 rebase 原子完成】只平移不裁剪会把绝对域预卷留在 take 开头，
+            // 形成一段与正文不连续的假前缀（现场 0.68 s + 67.7 ms 洞）。
+            if prune_before > 0 {
+                self.prune_before(prune_before);
+            }
             self.phase = CapturePhase::Recording;
+        } else if part == 0 && prune_before > 0 {
+            self.prune_before(prune_before);
         }
         // 【为什么取 max 而不是覆盖】内容块读到的是完整跨度（它之前累积的静音），
         // 紧随其后的连续块读到的是 0；覆盖会把已经观察到的跨度抹掉。只增不减
@@ -2478,6 +2513,9 @@ impl Capture {
             moved_any |= moved;
             dropped_total = dropped_total.saturating_add(dropped);
         }
+        // 【空段必须删掉】平移可能把一段整段裁掉（filled = 0）；sidecar 会把它
+        // 写成 frames=0 的幽灵段，投影也会多出一个零长度 clip。
+        self.sealed.retain(|segment| segment.filled > 0);
         if let Some(active) = self.active.as_mut() {
             let (moved, dropped) = shift_segment(active, shift);
             moved_any |= moved;
@@ -2522,6 +2560,16 @@ impl Capture {
         if let Some(end) = active_end {
             self.expected_next = Some(end);
             self.last_position = Some(end);
+        } else if let Some(end) = self
+            .sealed
+            .iter()
+            .map(|segment| segment.origin.saturating_add(segment.filled as i64))
+            .max()
+        {
+            // 【必须接上已封口段的终点】否则下一次 write_block 会以 0 为段原点，
+            // 把确认块写到 take 开头（预览确认时正好会踩中）。
+            self.expected_next = Some(end);
+            self.last_position = Some(end);
         } else if let Some(position) = self.last_position {
             self.last_position = Some(position.saturating_add(shift));
             self.expected_next = None;
@@ -2540,6 +2588,123 @@ impl Capture {
         self.rebased_frames = self.rebased_frames.saturating_add(shift.unsigned_abs());
         self.phase = CapturePhase::Recording;
         true
+    }
+
+    /// 丢弃域切换后位于 `limit` 之前的、与正文不连续的前缀。
+    ///
+    /// 【为什么必须与 rebase 一起做】`rebase_take` 只平移。VEGAS Event FX 的
+    /// 绝对域预卷块平移后会落在 `0..32768`，而第一个相对域块在 `36016`；
+    /// 中间 3248 帧没有内容。只平移不裁剪，take 开头就留下 0.68 s 假内容 + 一个洞。
+    ///
+    /// 规则：
+    ///   * `end == limit`：邻接，保留（Event 从起点播放时的预卷属于正文）；
+    ///   * `end < limit`：不连续前缀，整段丢弃；
+    ///   * `origin < limit < end`：裁头到 `limit`；
+    ///   * 其它：保留。
+    fn prune_before(&mut self, limit: i64) -> bool {
+        if limit <= 0 {
+            return false;
+        }
+        let mut dropped = 0_u64;
+        let mut segments_changed = false;
+        // 返回 (保留, 有改动, 丢弃帧数)；不捕获任何可变状态，避免 retain_mut 的借用冲突。
+        let apply = |segment: &mut Segment| -> (bool, bool, u64) {
+            if segment.filled == 0 {
+                return (false, true, 0);
+            }
+            let end = segment.origin.saturating_add(segment.filled as i64);
+            if end <= limit {
+                if end == limit {
+                    return (true, false, 0);
+                }
+                return (false, true, segment.filled as u64);
+            }
+            if segment.origin < limit {
+                let drop = usize::try_from(limit - segment.origin).unwrap_or(usize::MAX);
+                if drop >= segment.filled {
+                    return (false, true, segment.filled as u64);
+                }
+                let keep = segment.filled - drop;
+                for plane in segment.planes.iter_mut() {
+                    let capacity = plane.len();
+                    plane.copy_within(drop..segment.filled, 0);
+                    plane.truncate(keep);
+                    plane.resize(capacity, 0.0);
+                }
+                segment.filled = keep;
+                segment.origin = limit;
+                retain_after(&mut segment.coverage, &mut segment.coverage_len, drop);
+                return (true, true, drop as u64);
+            }
+            (true, false, 0)
+        };
+
+        self.sealed.retain_mut(|segment| {
+            let (keep, changed, drop) = apply(segment);
+            dropped = dropped.saturating_add(drop);
+            segments_changed |= changed;
+            keep
+        });
+        if let Some(active) = self.active.as_mut() {
+            let (keep, changed, drop) = apply(active);
+            dropped = dropped.saturating_add(drop);
+            segments_changed |= changed;
+            if !keep {
+                self.active = None;
+            }
+        }
+        for pending in &mut self.pendings {
+            if let Some(buffer) = pending.buffer.as_mut() {
+                let (keep, changed, drop) = apply(buffer);
+                dropped = dropped.saturating_add(drop);
+                segments_changed |= changed;
+                if !keep {
+                    // 【不能释放预分配缓冲】它要在下一块继续使用；只把内容清空。
+                    buffer.origin = 0;
+                    buffer.filled = 0;
+                    buffer.coverage_len = 0;
+                    pending.ready = false;
+                    pending.stream = None;
+                }
+            }
+            // 旧键 = 旧起点；裁剪之后它不再代表任何真实块。
+            pending.key = None;
+        }
+        // 候选读数：选举与交接用 last_end == start 判连续，必须跟着裁。
+        for candidate in &mut self.candidates {
+            if !candidate.seen {
+                continue;
+            }
+            if candidate.last_end < limit {
+                candidate.seen = false;
+            } else if candidate.last_start < limit {
+                candidate.last_start = limit;
+            }
+        }
+        self.captured_frames = self.captured_frames.saturating_sub(dropped);
+        self.last_written = None;
+        self.window_anchor = None;
+        self.current_loop_start = self.current_loop_start.filter(|start| *start >= limit);
+        let active_end = self
+            .active
+            .as_ref()
+            .map(|segment| segment.origin.saturating_add(segment.filled as i64));
+        let kept_end = self
+            .sealed
+            .iter()
+            .chain(self.active.iter())
+            .map(|segment| segment.origin.saturating_add(segment.filled as i64))
+            .max();
+        self.expected_next = active_end.or(kept_end);
+        self.last_position = self.expected_next;
+        if segments_changed {
+            // 【前导静音必须重算】被裁/丢的那一段正是 take 的第一段；它的 pre-roll
+            // 不再属于这张 take。新首段（第一个相对块）自己会带来新的前导值。
+            self.take_pre_roll = 0;
+            self.take_pre_roll_taken = true;
+            self.pre_roll_frames = 0;
+        }
+        segments_changed || dropped > 0
     }
 
     /// 把 active 段的原点设到 `origin`（**还没有** active 时用它起段）。
@@ -3147,6 +3312,8 @@ pub(crate) struct BlockEvidence {
     pub new_epoch: bool,
     /// 域切换时整条 take 需要平移的帧数。
     pub rebase_frames: i64,
+    /// 域切换后需要丢弃的、位于该本地位置之前的不连续前缀（0 = 不裁剪）。
+    pub prune_before: i64,
 }
 /// 封口：把平面截到实际写入长度，让"平面长度 == 段长度"成为交付不变式。
 ///
@@ -3288,6 +3455,13 @@ mod tests {
             preceding_silent_frames: 0,
             counted: false,
             discard_pre_roll: false,
+            raw_start: 0,
+            position_trusted: true,
+            publish_deferred: false,
+            prune_before: 0,
+            pass_sequence: 0,
+            transport_generation: 0,
+            preview: false,
         }
     }
 
