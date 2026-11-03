@@ -42,9 +42,10 @@ mod binding;
 mod capture;
 mod declick;
 mod diagnostics;
+mod host_clock;
 mod host_link;
-mod offline;
 mod playback;
+mod processing_pass;
 mod restore;
 mod roles;
 mod session;
@@ -55,6 +56,7 @@ mod transport_session;
 mod types;
 
 // 值类型与诊断环的读数在本模块名下重新导出：子模块与测试模块都按裸名引用它们。
+use processing_pass::*;
 use restore::*;
 use stream::*;
 use trace::*;
@@ -315,6 +317,9 @@ pub(crate) struct ExtensionOwner {
     rung_locked: AtomicU8,
     /// 锁存所属的 pass 序号（与 `StreamGeometry::pass` 同一口径）。
     rung_pass: AtomicU64,
+    /// 锁存所属的捕获世代 / take 世代（问题 3：跨会话旧档位不得继续生效）。
+    rung_capture_epoch: AtomicU64,
+    rung_take_epoch: AtomicU64,
     position_resyncs: AtomicU64,
     cycle_wraps: AtomicU64,
     cycle_wrap_unknown: AtomicU64,
@@ -466,8 +471,13 @@ pub(crate) struct ExtensionOwner {
     /// 【为什么每个实例一份而不是进程一份】同一文档上可能有两个实例，一个在录、
     /// 一个在放；共享存储会让它们互相覆盖对方的 take。
     capture: crate::capture::CaptureStore,
-    /// 离线 pass 的本地 cursor（每个 pass 从 0 开始）。
-    offline_pass: OfflinePass,
+    /// 离线/冻结预览 pass 的本地 cursor（每个 pass 从 0 开始）。
+    processing_pass: ProcessingPass,
+    /// 实例级事实：Event FX 的事件在工程里的绝对起点（`i64::MIN` = 未知）。
+    ///
+    /// 【为什么放在 owner 上】它必须跨传输会话保留，并且要在音频线程无锁可读；
+    /// 组件 state 的清单里持久化同一份值。
+    event_origin_samples: AtomicI64,
     /// 最近一次 setupProcessing 声明的 process mode。
     setup_process_mode: AtomicI32,
     /// 最近一次为 Capture 发布快照的 take 号（`0` = 还没发过）。
@@ -559,5 +569,7 @@ mod extension_roles_tests;
 mod host_audio_state_tests;
 #[cfg(test)]
 mod host_geometries_tests;
+#[cfg(test)]
+mod host_sequence_tests;
 #[cfg(test)]
 mod region_geometry_match_tests;

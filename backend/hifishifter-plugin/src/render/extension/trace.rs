@@ -245,7 +245,7 @@ impl BlockTraceRing {
         let key = format!(
             "stream={} mode={mode} state=0x{state:x} frames={frames} phase={phase} \
              playing={} rising={} cycle={} had_prev={} cycle_meta={} cont={}{} \
-             music={}{} tempo={}{} rate={rate:.0} counted={} capture={} emitted={}",
+             music={}{} tempo={}{} rate={rate:.0} counted={} allow_output={} outcome={}",
             ProcessStream::from_code(stream).map_or("?", |value| value.as_str()),
             u8::from(playing),
             u8::from(playing_rising),
@@ -263,15 +263,15 @@ impl BlockTraceRing {
             if tempo_valid { tempo } else { 0.0 },
             if tempo_valid { "(valid)" } else { "(absent)" },
             u8::from(counted),
-            emitted,
+            u8::from(emitted),
             capture,
         );
         let line = format!(
             "[capture] ctx: stream={} mode={mode} state=0x{state:x} \
              raw={raw_start} pos={position} delta={} frames={frames} phase={phase} \
              playing={} rising={} cycle={} had_prev={} \
-             cycle_meta={} cont={}{} music={}{} tempo={}{} rate={rate:.0} counted={} capture={} \
-             emitted={}",
+             cycle_meta={} cont={}{} music={}{} tempo={}{} rate={rate:.0} counted={} allow_output={} \
+             outcome={}",
             ProcessStream::from_code(stream).map_or("?", |value| value.as_str()),
             position.saturating_sub(raw_start),
             u8::from(playing),
@@ -290,7 +290,7 @@ impl BlockTraceRing {
             if tempo_valid { tempo } else { 0.0 },
             if tempo_valid { "(valid)" } else { "(absent)" },
             u8::from(counted),
-            emitted,
+            u8::from(emitted),
             capture,
         );
         Some((line, key))

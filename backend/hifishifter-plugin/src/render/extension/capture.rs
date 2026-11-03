@@ -315,65 +315,93 @@ impl ExtensionOwner {
     }
 
     /// 与 [`Self::capture_output`] 相同，但使用**本块**的流/播放证据。
+    ///
+    /// # 四层仲裁（问题 3 的修复点）
+    ///
+    /// 旧实现先问“是不是在录”，而那个判据在 Resting 上早退；随后只要有素材就读
+    /// **上一张 take** 的 processed 快照。于是“停止 -> 再播”的前 250 ms 永远在放
+    /// 上一轮缓存。现在判据是**捕获世代**：
+    ///
+    /// 1. 本世代、本块有权推进（transport_active / start_window / Start|Rolling）
+    ///    ⇒ 一定是这一遍的输入，输出 `Recording`；
+    /// 2. 本世代、已停播（Paused）⇒ 这一遍已经录到东西才允许回放它，否则 `Recording`；
+    /// 3. 旧世代的迟到块 ⇒ 不能替当前世代作决定；有权推进时仍按 `Recording`；
+    /// 4. 没有本块证据 ⇒ 只有“待命”（本世代还没写下任何样本）才允许试听上一张 take。
     pub(crate) fn capture_output_with(&self, evidence: Option<BlockEvidence>) -> CaptureOutput {
         // 【为什么 ARA 实例完全不走这里】它的素材由 ARA 逐个 region 授权，"区间外静音"
         // 是那条通路的既有语义（宿主自己的原声已被 ARA 取代）。这一条必须排在武装之前：
         // 形态一旦是 ARA，任何 Capture 结论都不适用。
-        //
-        // 【已知边界】`bound_once` 为真而文档已关的实例（宿主绑定过 ARA、文档后来又关掉）
-        // 在这里仍然判成"不介入"。那种实例在界面上本来就是终态（`editor_session` 会以
-        // DOCUMENT_CLOSED 收场，整页显示"会话不可用"），所以它不是"有界面却不出声"的
-        // 现场；要收掉这条边界得先给"文档是否还活着"一个**无锁**读数（音频线程不能取
-        // `document` 那把锁），那是独立一期的事。
         if self.is_bound() || self.bound_once.load(Ordering::Acquire) {
             return CaptureOutput::Untouched;
         }
-        /*
-         * 【为什么"武装"不再直接等于"录制中"】武装之后、宿主开始播放之前是**待命**：
-         * 那段时间里没有任何素材在产生，所以"用旧内容盖住新演奏"这个风险根本不存在
-         * （那正是录制中要直通的理由）。而此前 `is_armed()` 直接返回 `Recording` ⇒
-         * 待命期输出直通宿主原声，用户画完参数线听不到任何变化 —— 表现就是
-         * **"参数线不生效"**，而界面只说"等待播放"，两件事对不上。
-         *
-         * 一旦宿主开始播放就立刻回到 `Recording`：捕获读的是输入总线，而输出可能写进
-         * 同一块缓冲（in-place 宿主），直通才不会让捕获录到我们自己的输出。
-         * `capture_observe` 在 `capture_stage` 之前更新 `host_playing`，所以起播的
-         * 第一块就已经是 `Recording`，捕获读到的是宿主原声。
-         */
-        // 【为什么把块流证据也算进"录制中"】`kPlaying` 可能在起播第一块才滞后置位；
-        // 只按 `capture_started || host_playing` 判断时，那一块会被当成"待命"，
-        // 输出上一版 `Processed` —— 旧内容盖在新演奏上。位置流在推进时按录制中直通，
-        // 最多在几何变化的瞬间多直通一块；重复块随即回到 `Processed`，待命语义不变。
-        // 没有本块证据的调用（旧测试/旧入口）退回实例级实时流读数；生产路径
-        // 永远由 `capture_observe` 提供证据，因此不会读到另一条流的结论。
-        let recording = if evidence.is_some() {
-            self.capture.is_recording_with_evidence(evidence)
-        } else {
-            self.capture
-                .is_recording_with_flow(self.capture_transport_running())
-        };
-        if recording {
+        if !self.capture.is_armed() {
+            // 未武装：保留既有“有素材就播结果”的契约。
+            if !self.capture.has_material() {
+                return CaptureOutput::PassThrough;
+            }
+            return self.capture_candidate_output(evidence);
+        }
+
+        let epoch = self.capture.capture_epoch();
+        // 没有本块证据的旧入口（capture_output / 诊断）：保留“位置流在推进
+        // ⇒ 正在录”的既有契约。生产路径永远带证据。
+        if evidence.is_none() && self.capture_transport_running() {
             return CaptureOutput::Recording;
         }
-        if !self.capture.has_material() {
-            // 【为什么没有素材就一定透传】"不要覆盖一个正常渲染的 ARA 实例的输出"
-            // 这条契约由上面的 `is_bound()` 守卫负责：有活的文档时这里根本走不到。
-            // 此前这里还额外要求"形态已落定为 Capture"，于是窗口没开过、宽限期未过的
-            // 会话（`Undetermined`）在**任何素材之前**都是静音 —— 用户把插件插到一条
-            // 有声音的轨道上，得到的是"整条轨哑了"。
-            // 插件的诚实默认是**透明**：直到它真的录到了东西，才对声音负责。
-            return CaptureOutput::PassThrough;
+        if let Some(evidence) = evidence {
+            if evidence.capture_epoch == epoch {
+                if evidence.processing != 0
+                    || evidence.transport_active
+                    || evidence.start_window
+                    || matches!(
+                        evidence.phase,
+                        TransportPhase::Start | TransportPhase::Rolling
+                    )
+                {
+                    return CaptureOutput::Recording;
+                }
+                if evidence.transport_paused {
+                    // 【为什么暂停时仍监听输入】当前这一遍的素材还在 Capture 里、
+                    // 尚未 promote，没有任何已发布的快照能代表它；此时读 processed
+                    // 只会读到上一张 take。监听输入是唯一诚实的输出。
+                    if self.capture.capture_epoch_has_samples()
+                        && self.capture.current_material_epoch() == epoch
+                    {
+                        return self.capture_candidate_output(Some(evidence));
+                    }
+                    return CaptureOutput::Recording;
+                }
+                // Resting 且没有 transport 证据：这一块不是“这一遍在播”，
+                // 但也不能拿旧 take 顶替 —— 继续监听输入。
+                if self.capture.capture_epoch_has_samples() {
+                    return CaptureOutput::Recording;
+                }
+            } else {
+                // 旧世代的迟到块（prefetch / 补写）：不能替当前世代作决定。
+                return if evidence.transport_active {
+                    CaptureOutput::Recording
+                } else {
+                    CaptureOutput::PassThrough
+                };
+            }
         }
+
+        // 待命：武装之后、本世代第一块有权块之前。此时没有任何新素材在产生，
+        // 用户仍应听到上一张 take 的处理结果（既有契约）。
+        if !self.capture.capture_epoch_has_samples() && self.capture.has_material() {
+            return self.capture_candidate_output(evidence);
+        }
+        CaptureOutput::Recording
+    }
+
+    /// 当前可播的素材档位（Processed / Raw / PendingSynthesis）。
+    fn capture_candidate_output(&self, evidence: Option<BlockEvidence>) -> CaptureOutput {
         let candidate = if self.processed_ready() {
             CaptureOutput::Processed
         } else if self.raw_tape_ready() {
-            // 【为什么在这里置位】有素材、但处理结果不是当前代次 ⇒ 该有一次合成在跑。
-            // 音频线程只记一个原子；调度仍由会话 actor 完成（见 `render_wanted`）。
             self.render_wanted.store(true, Ordering::Release);
             CaptureOutput::Raw
         } else {
-            // 素材存在但两份都还没发布（刚录完、后台还没跑完）：透传宿主原声，但**如实**
-            // 报成"等待合成"，而不是与"没有素材"共用同一个名字。
             self.render_wanted.store(true, Ordering::Release);
             CaptureOutput::PendingSynthesis
         };
@@ -387,6 +415,9 @@ impl ExtensionOwner {
     /// **另一份素材** —— 继续沿用等于用旧录音盖住新演奏。
     pub(crate) fn clear_rung_latch(&self) {
         self.rung_locked.store(0, Ordering::Release);
+        self.rung_pass.store(0, Ordering::Release);
+        self.rung_capture_epoch.store(0, Ordering::Release);
+        self.rung_take_epoch.store(0, Ordering::Release);
     }
 
     /// 把本块的候选档位**锁存到本 pass**（I-2：一次播放只有一个内容源）。
@@ -433,13 +464,22 @@ impl ExtensionOwner {
         let pass = self.streams[ProcessStream::Realtime.index()]
             .pass
             .load(Ordering::Acquire);
+        let capture_epoch = self.capture.capture_epoch();
+        let take_epoch = self.capture.current_material_epoch();
         let locked = self.rung_locked.load(Ordering::Acquire);
-        if locked != 0 && self.rung_pass.load(Ordering::Acquire) == pass {
-            // 本 pass 已经选过：沿用，不重新仲裁。
+        if locked != 0
+            && self.rung_pass.load(Ordering::Acquire) == pass
+            && self.rung_capture_epoch.load(Ordering::Acquire) == capture_epoch
+            && self.rung_take_epoch.load(Ordering::Acquire) == take_epoch
+        {
+            // 本 pass / 本捕获世代已经选过：沿用，不重新仲裁。
             return CaptureOutput::from_code(locked).unwrap_or(candidate);
         }
         self.rung_locked.store(candidate.code(), Ordering::Release);
         self.rung_pass.store(pass, Ordering::Release);
+        self.rung_capture_epoch
+            .store(capture_epoch, Ordering::Release);
+        self.rung_take_epoch.store(take_epoch, Ordering::Release);
         candidate
     }
 
@@ -519,6 +559,11 @@ impl ExtensionOwner {
     /// （两声道 × 块长），并且每次都在写 `[click]` 行。现场日志里 `[click]` 占了
     /// 9801/26617 行 —— 一个诊断工具的成本高到会改变被观测的行为，它就不再是诊断。
     /// 与 `HIFISHIFTER_BUFFER_AUDIT` 同一套开关纪律：读一次就缓存，默认关闭。
+    /// 预热音频线程会读取的一次性开关（组件创建时调用，避免首块分配）。
+    pub(crate) fn warm_audio_caches(&self) {
+        let _ = Self::click_audit_enabled();
+    }
+
     fn click_audit_enabled() -> bool {
         static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         *ENABLED.get_or_init(|| {

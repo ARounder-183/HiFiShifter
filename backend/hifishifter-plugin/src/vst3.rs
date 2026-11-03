@@ -1007,7 +1007,11 @@ impl Processor {
     /// 这样多个实例不会互相抢同一次绑定。
     fn create() -> Option<Box<Processor>> {
         let runtime = crate::runtime::runtime()?;
+        // 【音频线程零分配】这两个开关用环境变量初始化（会分配 String）。
+        // 在组件创建时（宿主 UI 线程）预热，音频回调第一次进入时就不再分配。
+        let _ = buffer_audit_enabled();
         let extension_owner = Arc::new(ExtensionOwner::default());
+        extension_owner.warm_audio_caches();
         let route = crate::editor::routing::RouteLease::new(&extension_owner);
         // 【为什么把 factory/roles 交给 HostEntry】companion 的 "already bound" 是
         // 处理器级的：宿主重开工程会复用同一个 `Processor`，而上一份文档关闭后
@@ -1398,6 +1402,9 @@ unsafe extern "system" fn component_set_active(this: *mut c_void, state: i8) -> 
                 // 效果器"的直接证据 —— Cubase 实测正是如此，而此前日志里没有任何一行
                 // 直接说出这件事，得靠对比两个会话才能推断。
                 owner.note_component_activated();
+                // 重新激活后第一块不能继承上一轮的“位置/播放位”：否则同一 raw 的
+                // 第一块会被判成 Resting，输出继续读上一张 take（问题 3）。
+                owner.reset_transport_session("component_activated");
                 // 后台/前台切换后宿主可能已重建几何或恢复源访问；主动枚举一次，
                 // 不等下一次 UI tick 的节流窗口。
                 owner.resume_resync();
@@ -1982,7 +1989,9 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
             let context = unsafe { &*probe.process_context };
             let effective_position =
                 owner.note_offline_block(context, probe.process_mode, probe.num_samples as usize);
-            owner.observe_transport(context, probe.process_mode, probe.num_samples as usize);
+            if !owner.processing_pass_active() {
+                owner.observe_transport(context, probe.process_mode, probe.num_samples as usize);
+            }
             evidence = owner.capture_observe(probe, context, effective_position);
         }
     }
@@ -2022,8 +2031,13 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
                 // 直接清零会在块首留下一次阶跃（正是用户听到的"咔"）。与门控清零
                 // 走同一条去咔路径：从上一块尾巴淡到零，其余帧写零。
                 // 该函数自己写满整块，因此**不能**再调 `clear_outputs`。
-                let stream = crate::capture::recorder::ProcessStream::from_mode(data.process_mode)
-                    .unwrap_or(crate::capture::recorder::ProcessStream::Realtime);
+                let Some(stream) =
+                    crate::capture::recorder::ProcessStream::from_mode(data.process_mode)
+                else {
+                    // 未知 process_mode：不能冒充实时流去写 capture/去咔状态。
+                    let _ = unsafe { crate::audio_abi::clear_outputs(data) };
+                    return K_RESULT_OK;
+                };
                 let frames = data.num_samples as usize;
                 let outputs = data.outputs;
                 if outputs.is_null() {
@@ -2085,6 +2099,12 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
                         data.num_samples as usize,
                     );
                 }
+                return K_RESULT_OK;
+            }
+            // 【未知 process_mode 必须拒绝】SDK 只定义 0/1/2；把它当成 Realtime 会
+            // 把离线/未知流写进实时捕获与门控状态。透传是最诚实的降级。
+            if crate::capture::recorder::ProcessStream::from_mode(data.process_mode).is_none() {
+                let _ = unsafe { crate::audio_abi::pass_through(data) };
                 return K_RESULT_OK;
             }
             // 【Capture 通路】在快照输出之前插入。它要么自己写完输出（`Handled`），要么

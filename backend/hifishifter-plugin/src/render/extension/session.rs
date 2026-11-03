@@ -419,6 +419,9 @@ impl ExtensionOwner {
                 // 【为什么清单失败只记日志】PCM 丢了不该让参数曲线也读不出来 ——
                 // 那是两件独立的用户资产，而参数是更贵的那一份。
                 Ok(value) => {
+                    if let Some(origin) = value["eventOriginSamples"].as_i64() {
+                        self.note_event_origin(origin);
+                    }
                     if let Err(error) = self.capture.restore_manifest(&value) {
                         log::warn!("[capture] manifest restore failed: {error}");
                     }
@@ -902,10 +905,17 @@ impl ExtensionOwner {
         edits: Vec<u8>,
         capture_edits: Option<Vec<u8>>,
     ) -> Result<Vec<u8>, String> {
-        let capture = self.capture.manifest();
+        let mut capture = self.capture.manifest();
+        // 事件起点是实例级事实，必须随组件 state 持久化：宿主下一次只报绝对域时，
+        // 插件仍能把它映射回事件本地时间轴。
+        if let Some(origin) = self.event_origin_samples() {
+            capture["eventOriginSamples"] = serde_json::json!(origin);
+        }
         let has_takes = capture["takes"]
             .as_array()
             .is_some_and(|takes| !takes.is_empty());
+        // 事件起点即使还没有 take 也要持久化：下一次播放宿主可能只报绝对域。
+        let has_capture_meta = has_takes || self.event_origin_samples().is_some();
         // 【为什么没有 Capture 数据时返回**裸** `EditState` 字节】两重理由：
         //
         // 1. 那些实例没有任何额外信息要存，套一层容器纯是开销；
@@ -916,12 +926,12 @@ impl ExtensionOwner {
         // 于是格式变成"有 Capture 数据才是容器，否则是历史格式"，而 `decode`
         // 两种都认。这条不对称是有意的：新信息需要新格式，旧信息不需要。
         let capture_edits = capture_edits.filter(|bytes| !bytes.is_empty());
-        if !has_takes && capture_edits.is_none() {
+        if !has_capture_meta && capture_edits.is_none() {
             return Ok(edits);
         }
         Ok(crate::component_state::ComponentState {
             edits,
-            capture: has_takes.then(|| capture.to_string().into_bytes()),
+            capture: has_capture_meta.then(|| capture.to_string().into_bytes()),
             capture_edits,
         }
         .encode())

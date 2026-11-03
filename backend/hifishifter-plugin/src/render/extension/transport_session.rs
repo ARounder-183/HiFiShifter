@@ -5,7 +5,14 @@
 //! 假象。这里把它们收敛成一个状态机：只有 Starting（有界起播窗口）或 Rolling
 //! 允许时间前进；Paused 与 Stopped 一律冻结。
 //!
-//! 本模块是纯函数，不碰宿主、不取锁；音频线程只需要把上一相位与本块事实喂进来。
+//! 【本轮的职责收缩】它只回答“这是不是同一次播放、何时冻结”。坐标域由
+//! `HostClock` 回答，离线/冻结预览由 `ProcessingPass` 回答。三者顺序固定：
+//! ProcessingPass -> HostClock -> TransportSession。
+//!
+//! 【为什么 Starting -> Rolling 不递增 epoch】VEGAS Event FX 的域切换恰好发生在
+//! kPlaying 上升沿：pre-roll 的绝对域块先打开 Starting 窗口，下一块 kPlaying 置位
+//! 并切到相对域。若这里把上升沿判成新会话，域切换就永远没有机会执行 —— 现场
+//! 那 0.68 秒绝对域首段正是这样留下的。
 
 /// 传输会话的相位。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -20,7 +27,7 @@ pub(crate) enum SessionPhase {
     Paused,
     /// 用户停止 / 离线 pass 结束。
     Stopped,
-    /// 离线 pass 的本地游标。
+    /// 离线 pass 的本地游标（由 ProcessingPass 驱动，保留编码兼容）。
     OfflineRolling,
 }
 
@@ -111,6 +118,7 @@ pub(crate) struct SessionDecision {
 }
 
 impl TransportSession {
+    #[cfg(test)]
     pub(crate) fn with_rate(rate: f64) -> Self {
         let mut session = Self::default();
         if rate.is_finite() && rate > 0.0 {
@@ -143,15 +151,22 @@ impl TransportSession {
         }
 
         if input.playing {
-            if !self.last_playing
-                || self.phase == SessionPhase::Idle
-                || self.phase == SessionPhase::Stopped
-            {
-                self.epoch = self.epoch.saturating_add(1);
-                self.session_frames = 0;
-                new_epoch = true;
+            match self.phase {
+                // 真正的新起播：从 Idle / Paused / Stopped 进入 Rolling。
+                SessionPhase::Idle | SessionPhase::Paused | SessionPhase::Stopped => {
+                    self.epoch = self.epoch.saturating_add(1);
+                    self.session_frames = 0;
+                    self.phase = SessionPhase::Rolling;
+                    new_epoch = true;
+                }
+                // 【关键】pre-roll 与正文是同一次演奏：不新开 epoch。
+                SessionPhase::Starting => {
+                    self.phase = SessionPhase::Rolling;
+                }
+                SessionPhase::Rolling | SessionPhase::OfflineRolling => {
+                    self.phase = SessionPhase::Rolling;
+                }
             }
-            self.phase = SessionPhase::Rolling;
             self.session_frames = self.session_frames.saturating_add(u64::from(input.frames));
             transport_active = true;
         } else if input.playing_rising || input.recording_rising {
@@ -174,10 +189,8 @@ impl TransportSession {
             start_window_open = true;
             transport_active = true;
             self.session_frames = self.session_frames.saturating_add(u64::from(input.frames));
-        } else {
-            if self.phase != SessionPhase::Idle {
-                self.phase = SessionPhase::Paused;
-            }
+        } else if self.phase != SessionPhase::Idle {
+            self.phase = SessionPhase::Paused;
         }
 
         if input.host_reset && self.phase == SessionPhase::Rolling {
@@ -192,14 +205,6 @@ impl TransportSession {
             transport_active,
             start_window_open,
         }
-    }
-
-    /// 强制停止（setProcessing(false) / setActive(false)）。
-    #[allow(dead_code)]
-    pub(crate) fn stop(&mut self) {
-        self.phase = SessionPhase::Stopped;
-        self.last_playing = false;
-        self.session_frames = 0;
     }
 }
 
@@ -229,14 +234,28 @@ mod tests {
     }
 
     #[test]
-    fn a_new_playing_edge_is_a_new_epoch() {
+    fn a_new_playing_edge_from_paused_is_a_new_epoch() {
         let mut session = TransportSession::with_rate(48_000.0);
         let first = session.observe(input(true, true, 512));
         assert!(first.new_epoch);
         session.observe(input(false, false, 512));
         let second = session.observe(input(true, true, 512));
         assert!(second.new_epoch, "每次重新起播都必须开新 epoch");
-        assert_ne!(first.phase, SessionPhase::Paused);
+        assert_ne!(second.phase, SessionPhase::Paused);
+    }
+
+    /// 问题 1 的直接回归：pre-roll 打开 Starting，kPlaying 上升沿进入 Rolling
+    /// **不得**递增 epoch，否则 HostClock 会把它当成新会话而跳过域切换。
+    #[test]
+    fn starting_to_rolling_keeps_the_epoch() {
+        let mut session = TransportSession::with_rate(48_000.0);
+        let first = session.observe(input(false, true, 848));
+        assert_eq!(first.phase, SessionPhase::Starting);
+        assert!(first.new_epoch);
+        let second = session.observe(input(true, true, 848));
+        assert_eq!(second.phase, SessionPhase::Rolling);
+        assert!(!second.new_epoch);
+        assert!(second.transport_active);
     }
 
     #[test]

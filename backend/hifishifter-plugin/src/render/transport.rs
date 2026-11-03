@@ -85,6 +85,8 @@ pub(crate) enum Provenance {
     CaptureBlock,
     /// 离线 pass 的本地 cursor。
     OfflineBlock,
+    /// 冻结预览 pass 的本地 cursor（VEGAS 非实时事件 FX）。
+    PreviewBlock,
     /// 以上都没有：位置是上一次的残值。
     Stale,
 }
@@ -98,6 +100,7 @@ impl Provenance {
             Provenance::SeekIntent => "seek",
             Provenance::CaptureBlock => "capture",
             Provenance::OfflineBlock => "offline",
+            Provenance::PreviewBlock => "preview",
             Provenance::Stale => "stale",
         }
     }
@@ -193,6 +196,8 @@ pub(crate) struct TransportClock {
     capture_position_bits: AtomicU64,
     capture_playing: AtomicBool,
     capture_offline: AtomicBool,
+    capture_preview: AtomicBool,
+    capture_epoch: AtomicU64,
     capture_serial: AtomicU64,
     capture_seen_serial: AtomicU64,
     capture_seen_at_ms: AtomicU64,
@@ -395,7 +400,14 @@ impl TransportClock {
     /// 【为什么它必须进入 TransportClock】Event FX 捕获时宿主 kPlaying 常常为 0，
     /// 而捕获本身仍在按块推进；如果不把这条 clock 发布出去，前端只能读 5 Hz 的
     /// capture 快照，带子和光标就会一顿一顿。离线 pass 同理。
-    pub fn publish_capture_block(&self, position_sec: f64, playing: bool, offline: bool) {
+    pub fn publish_capture_block(
+        &self,
+        position_sec: f64,
+        playing: bool,
+        offline: bool,
+        preview: bool,
+        epoch: u64,
+    ) {
         if !position_sec.is_finite() {
             return;
         }
@@ -403,6 +415,8 @@ impl TransportClock {
             .store(position_sec.to_bits(), Ordering::Release);
         self.capture_playing.store(playing, Ordering::Release);
         self.capture_offline.store(offline, Ordering::Release);
+        self.capture_preview.store(preview, Ordering::Release);
+        self.capture_epoch.store(epoch, Ordering::Release);
         self.capture_serial.fetch_add(1, Ordering::Release);
         self.sample_seq.fetch_add(1, Ordering::Release);
     }
@@ -411,6 +425,7 @@ impl TransportClock {
     pub fn clear_capture(&self) {
         self.capture_playing.store(false, Ordering::Release);
         self.capture_offline.store(false, Ordering::Release);
+        self.capture_preview.store(false, Ordering::Release);
         self.capture_serial.fetch_add(1, Ordering::Release);
         self.sample_seq.fetch_add(1, Ordering::Release);
     }
@@ -441,6 +456,7 @@ impl TransportClock {
             return None;
         }
         let offline = self.capture_offline.load(Ordering::Acquire);
+        let preview = self.capture_preview.load(Ordering::Acquire);
         let position = f64::from_bits(self.capture_position_bits.load(Ordering::Acquire));
         if !position.is_finite() {
             return None;
@@ -448,7 +464,9 @@ impl TransportClock {
         Some(TransportView {
             position_sec: position,
             playing: true,
-            provenance: if offline {
+            provenance: if preview {
+                Provenance::PreviewBlock
+            } else if offline {
                 Provenance::OfflineBlock
             } else {
                 Provenance::CaptureBlock
@@ -536,6 +554,8 @@ impl TransportClock {
             "prefetch_playing":self.prefetch_playing.load(Ordering::Acquire),
             "capture_playing":self.capture_playing.load(Ordering::Acquire),
             "capture_offline":self.capture_offline.load(Ordering::Acquire),
+            "capture_preview":self.capture_preview.load(Ordering::Acquire),
+            "capture_epoch":self.capture_epoch.load(Ordering::Acquire),
             "capture_position_sec":f64::from_bits(self.capture_position_bits.load(Ordering::Acquire)),
             "capture_callbacks":self.capture_serial.load(Ordering::Acquire),
             "prefetch_callbacks":self.prefetch.load(Ordering::Relaxed),"offline_callbacks":self.offline.load(Ordering::Relaxed),
@@ -1222,16 +1242,16 @@ mod tests {
     fn capture_blocks_publish_a_local_playhead_and_stop_cleanly() {
         let clock = TransportClock::default();
         let t0 = now_ms();
-        clock.publish_capture_block(7.5, true, false);
+        clock.publish_capture_block(7.5, true, false, false, 1);
         let view = clock.read_view_at(t0);
         assert_eq!(view.position_sec, 7.5);
         assert!(view.playing);
         assert_eq!(view.provenance, Provenance::CaptureBlock);
         // 停播：下一条发布 playing=false，读取端不得继续外推。
-        clock.publish_capture_block(7.5, false, false);
+        clock.publish_capture_block(7.5, false, false, false, 1);
         assert!(!clock.read_view_at(t0).playing);
         // 离线 pass 的来源要能与实时捕获区分。
-        clock.publish_capture_block(1.25, true, true);
+        clock.publish_capture_block(1.25, true, true, false, 1);
         assert_eq!(clock.read_view_at(t0).provenance, Provenance::OfflineBlock);
         clock.clear_capture();
         assert!(!clock.read_view_at(t0).playing);

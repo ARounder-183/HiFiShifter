@@ -1,81 +1,5 @@
 //! `ExtensionOwner` 周边的值类型：几何缓存、绑定读数、作用域、宿主音频读数、形态与捕获结论。
 use super::*;
-/// 一次离线渲染 pass 的本地游标。
-///
-/// 【为什么必须有它】离线渲染没有可信的宿主播放头：VEGAS 的“应用非实时事件 FX”
-/// 把当前工程光标当 projectTimeSamples 送进来，而那与 VST 工程 0 不是同一个东西。
-/// 每个 pass 从 0 开始按块长推进，输出与预览都读这个 cursor。
-#[derive(Default)]
-pub(crate) struct OfflinePass {
-    active: AtomicBool,
-    pass_id: AtomicU64,
-    cursor_frames: AtomicI64,
-    start_raw: AtomicI64,
-    sample_rate: AtomicU32,
-    /// 上一次 process 的 mode（用来发现 mode 离开 2）。
-    last_mode: AtomicU8,
-}
-
-impl OfflinePass {
-    /// 每个 process 块调用一次；返回本块使用的本地位置，并在末尾推进 cursor。
-    pub(crate) fn note_block(
-        &self,
-        mode: i32,
-        raw_start: i64,
-        frames: usize,
-        sample_rate: f64,
-    ) -> Option<i64> {
-        let previous_mode = self
-            .last_mode
-            .swap(mode.clamp(0, 2) as u8, Ordering::AcqRel) as i32;
-        if mode != 2 {
-            if previous_mode == 2 {
-                self.active.store(false, Ordering::Release);
-            }
-            return None;
-        }
-        if !self.active.swap(true, Ordering::AcqRel) {
-            self.pass_id.fetch_add(1, Ordering::AcqRel);
-            self.cursor_frames.store(0, Ordering::Release);
-            self.start_raw.store(raw_start, Ordering::Release);
-            if sample_rate.is_finite() && sample_rate > 0.0 {
-                self.sample_rate
-                    .store(sample_rate.round() as u32, Ordering::Release);
-            }
-        }
-        let position = self.cursor_frames.load(Ordering::Acquire);
-        self.cursor_frames
-            .fetch_add(frames as i64, Ordering::AcqRel);
-        Some(position)
-    }
-
-    pub(crate) fn end(&self) {
-        self.active.store(false, Ordering::Release);
-        self.cursor_frames.store(0, Ordering::Release);
-        self.last_mode.store(0, Ordering::Release);
-    }
-
-    pub(crate) fn is_active(&self) -> bool {
-        self.active.load(Ordering::Acquire)
-    }
-
-    pub(crate) fn pass_id(&self) -> u64 {
-        self.pass_id.load(Ordering::Acquire)
-    }
-
-    pub(crate) fn cursor_frames(&self) -> i64 {
-        self.cursor_frames.load(Ordering::Acquire)
-    }
-
-    pub(crate) fn start_raw(&self) -> i64 {
-        self.start_raw.load(Ordering::Acquire)
-    }
-
-    pub(crate) fn sample_rate(&self) -> u32 {
-        self.sample_rate.load(Ordering::Acquire)
-    }
-}
-
 /// 只读元数据供非实时读者消费；UI/model采集，音频线程不访问此缓存或锁owner。
 ///
 /// `value` 是**逐 region** 的绑定列表，不是一个实例一个几何：挂在 REAPER folder
@@ -653,6 +577,7 @@ pub(crate) enum SnapshotSource {
 /// `host_playing`，而另一条进程流或另一个线程可以在两次读之间覆盖结论。这个值由
 /// `capture_observe` 算出，原样交给 `capture_stage` 与记录器。
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub(crate) struct BlockEvidence {
     pub stream: ProcessStream,
     /// 本块的有效工程起点（可能来自 continuous/music 回退）。
@@ -677,6 +602,10 @@ pub(crate) struct BlockEvidence {
     /// 清掉它，内容出现时就是一次零→内容的阶跃（"咔"）。窗口本身就是"宿主刚
     /// 开始播放"的证据，窗口开着时输出应当连续。
     pub start_window: bool,
+    /// 本块是否有权推进位置 / 写捕获（`StreamBlock::transport_active`）。
+    pub transport_active: bool,
+    /// 本块所在会话已停播（kPlaying 已落）。
+    pub transport_paused: bool,
     /// 本块由一次时间基切换开始：整条 take 被平移，音频仍连续，不是读游标跳变。
     pub rebase_frames: i64,
     /// 本块由一次循环回卷开始（块首可以与上一块相同）。
@@ -692,4 +621,8 @@ pub(crate) struct BlockEvidence {
     pub repeated_nonzero: bool,
     /// 循环边界切分（1 或 2 段）。
     pub split: BlockSplit,
+    /// 本块所属的捕获世代（`CaptureStore::capture_epoch`）。
+    pub capture_epoch: u64,
+    /// 本块属于一个离线/冻结预览 pass（`ProcessingKind` 编码）。
+    pub processing: u8,
 }

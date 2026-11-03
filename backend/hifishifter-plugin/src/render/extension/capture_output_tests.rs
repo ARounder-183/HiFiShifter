@@ -100,6 +100,10 @@ fn the_read_position_jump_is_a_pure_judgement() {
         cycle_wrap: false,
         rebase_frames: 0,
         split: BlockSplit::whole(48_000, 256),
+        capture_epoch: 1,
+        processing: 0,
+        transport_active: true,
+        transport_paused: false,
     };
     // ① 没有上一块 ⇒ 没有跳变。
     assert_eq!(owner.read_position_jump(Some(evidence)), None);
@@ -146,6 +150,10 @@ fn a_contiguous_block_advance_is_not_a_jump() {
         cycle_wrap: false,
         rebase_frames: 0,
         split: BlockSplit::whole(48_256, 256),
+        capture_epoch: 1,
+        processing: 0,
+        transport_active: true,
+        transport_paused: false,
     };
     owner.mark_emitted_for_test();
     owner.note_read_position_for_test(48_000);
@@ -160,6 +168,10 @@ fn a_contiguous_block_advance_is_not_a_jump() {
         position: 96_000,
         rebase_frames: 0,
         split: BlockSplit::whole(96_000, 256),
+        capture_epoch: 1,
+        processing: 0,
+        transport_active: true,
+        transport_paused: false,
         ..evidence
     };
     assert_eq!(owner.read_position_jump(Some(jumped)), Some(47_744));
@@ -720,6 +732,50 @@ fn an_armed_lagging_start_does_not_play_the_previous_result() {
     owner.capture().cancel();
 }
 
+/// **新捕获世代的第一块必须监听输入，不能读上一张 take。**
+///
+/// 【问题 3 的直接回归】停止 -> 再播的第一块没有 kPlaying 上升沿、位置也可能与
+/// 停止前相同；旧实现据此回到 Processed，而那份快照属于上一张 take。
+#[test]
+fn a_new_capture_epoch_start_block_is_recording_not_the_previous_result() {
+    let owner = insert_owner();
+    record(&owner, 256);
+    owner.sync_raw_tape();
+    owner.snapshots[0].publish(processed_snapshot()).unwrap();
+    owner.snapshots[1].publish(processed_snapshot()).unwrap();
+    owner
+        .capture_ready_revision
+        .store(owner.capture.revision(), Ordering::Release);
+    owner.capture().start().unwrap();
+    let evidence = BlockEvidence {
+        stream: ProcessStream::Realtime,
+        position: 0,
+        frames: 512,
+        playing: true,
+        recording: false,
+        playing_rising: false,
+        recording_rising: false,
+        phase: TransportPhase::Start,
+        had_previous: true,
+        allow_output: true,
+        start_window: false,
+        transport_active: true,
+        transport_paused: false,
+        repeated_nonzero: false,
+        cycle_wrap: false,
+        rebase_frames: 0,
+        split: BlockSplit::whole(0, 512),
+        capture_epoch: owner.capture().capture_epoch(),
+        processing: 0,
+    };
+    assert_eq!(
+        owner.capture_output_with(Some(evidence)),
+        CaptureOutput::Recording,
+        "新世代的第一块必须监听输入，不能读上一张 take 的 processed 快照"
+    );
+    owner.capture().cancel();
+}
+
 /// **待命时重复块最终回到处理结果。**
 #[test]
 fn armed_standby_returns_to_the_processed_result() {
@@ -842,6 +898,10 @@ fn the_start_window_keeps_the_output_open_across_pinned_silence() {
         cycle_wrap: false,
         rebase_frames: 0,
         split: BlockSplit::whole(0, 512),
+        capture_epoch: 1,
+        processing: 0,
+        transport_active: true,
+        transport_paused: false,
     };
     assert!(
         owner.capture_should_emit(Some(evidence), false),
@@ -912,6 +972,10 @@ fn prefetch_and_offline_never_look_stopped() {
             cycle_wrap: false,
             rebase_frames: 0,
             split: BlockSplit::whole(0, 512),
+            capture_epoch: 1,
+            processing: 0,
+            transport_active: true,
+            transport_paused: false,
         };
         assert!(
             owner.capture_should_emit(Some(evidence), false),
@@ -934,6 +998,10 @@ fn prefetch_and_offline_never_look_stopped() {
         cycle_wrap: false,
         rebase_frames: 0,
         split: BlockSplit::whole(0, 512),
+        capture_epoch: 1,
+        processing: 0,
+        transport_active: true,
+        transport_paused: false,
     };
     assert!(!owner.capture_should_emit(Some(realtime), false));
     assert!(owner.capture_should_emit(
@@ -2066,6 +2134,10 @@ fn a_bound_instance_does_not_silence_a_prefetch_block_without_k_playing() {
         cycle_wrap: false,
         rebase_frames: 0,
         split: BlockSplit::whole(0, 512),
+        capture_epoch: 1,
+        processing: 0,
+        transport_active: true,
+        transport_paused: false,
     };
     assert!(
         owner.capture_should_emit(Some(prefetch), false),
@@ -2393,6 +2465,10 @@ fn realtime_output_silences_while_a_diagnostic_runs_and_offline_does_not() {
         cycle_wrap: false,
         rebase_frames: 0,
         split: BlockSplit::whole(0, 512),
+        capture_epoch: 1,
+        processing: 0,
+        transport_active: true,
+        transport_paused: false,
     };
     let offline = BlockEvidence {
         stream: ProcessStream::Offline,

@@ -37,10 +37,12 @@ pub(crate) fn handle(
                 return Err("capture_not_applicable_ara".into());
             }
             capture.start()?;
+            owner.reset_transport_session("capture_start");
             Ok(status_json(owner))
         }
         "capture_stop" => {
             let take = capture.stop()?;
+            owner.reset_transport_session("capture_stop");
             // 录完立刻重投影并排一次合成：用户按下停止之后期待听到处理结果，而不是等
             // 下一次某个不相关的动作把它带起来。
             owner.request_capture_reload();
@@ -48,10 +50,12 @@ pub(crate) fn handle(
         }
         "capture_cancel" => {
             capture.cancel();
+            owner.reset_transport_session("capture_cancel");
             Ok(status_json(owner))
         }
         "capture_clear" => {
             capture.clear();
+            owner.reset_transport_session("capture_clear");
             // 时间线要跟着变空（否则界面还留着已经删掉的片段）。
             owner.request_capture_reload();
             Ok(status_json(owner))

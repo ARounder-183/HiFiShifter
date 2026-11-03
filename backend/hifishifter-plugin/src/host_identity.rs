@@ -125,6 +125,32 @@ impl HostIdentity {
     }
 }
 
+/// 进程级“宿主属于 VEGAS Creative Software 家族”的读数。
+///
+/// 【为什么是全局原子】音频线程要无锁判断是否允许冻结预览；宿主身份是进程级事实，
+/// 与具体实例无关。只在识别成功时写一次。
+static HOST_IS_VEGAS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 记录一次识别结果（只由 `resolve_and_record_host_identity` 调用）。
+pub(crate) fn note_identity(identity: &HostIdentity) {
+    let display = identity.display.to_ascii_lowercase();
+    let is_vegas = display.contains("vegas")
+        || display.contains("acid")
+        || display.contains("sound forge")
+        || identity
+            .evidence
+            .iter()
+            .any(|item| item.name.to_ascii_lowercase().contains("sfvstwrap"));
+    if is_vegas {
+        HOST_IS_VEGAS.store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// 当前进程的宿主是否属于 VEGAS Creative Software 家族。
+pub(crate) fn is_vegas_family() -> bool {
+    HOST_IS_VEGAS.load(std::sync::atomic::Ordering::Acquire)
+}
+
 /// 别名表：**子串**匹配（小写、去扩展名），新增宿主 = 加一行。
 ///
 /// 用子串而不是全等：vegas180.exe / VEGAS Pro 21 / FL64.exe 这些变体必须命中同一条。

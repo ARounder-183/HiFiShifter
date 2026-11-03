@@ -1,4 +1,5 @@
 //! 每条进程流的块几何、活动窗口与输出接缝状态（音频线程读写，无锁）。
+use super::host_clock::{ClockDomain, ClockState, Continuity, RawDomain};
 use super::timebase::TimebaseKind;
 use super::*;
 
@@ -18,6 +19,15 @@ use super::*;
 /// 现在只有三条规则（见 `note_stream_geometry` 的 A/B/C）：
 /// **宿主每报一次位置就以它为准；两次报告之间按收到的帧数前进（无上限）；
 /// 跨 pass 一律归零。**
+/// 边界探针的 128 帧尾巴（原子量数组没有 `Default`，这里手写一次）。
+pub(super) struct BoundaryTail(pub(super) [AtomicU32; 128]);
+
+impl Default for BoundaryTail {
+    fn default() -> Self {
+        Self(std::array::from_fn(|_| AtomicU32::new(0)))
+    }
+}
+
 #[derive(Default)]
 pub(super) struct StreamGeometry {
     pub(super) seen: AtomicBool,
@@ -162,6 +172,26 @@ pub(super) struct StreamGeometry {
     /// 【为什么还需要它】它不参与位置推进，只作为诊断读数与"停播重复投递"的
     /// 判据：窗口内有多少块是静音，用来判断宿主起播窗口的形状。
     pub(super) last_block_silent: AtomicBool,
+
+    // ── HostClock（单一本地时间轴）──────────────────────────────────
+    /// 当前坐标域（`ClockDomain::code`）。
+    pub(super) clock_domain: AtomicU8,
+    /// 事件在工程里的绝对起点（`i64::MIN` = 未知）。
+    pub(super) clock_event_origin: AtomicI64,
+    /// 本次 take 第一个有权块的原始位置（`i64::MIN` = 未知）。
+    pub(super) clock_capture_origin: AtomicI64,
+    pub(super) clock_session_first_raw: AtomicI64,
+    pub(super) clock_event_max_local: AtomicI64,
+    pub(super) clock_last_raw: AtomicI64,
+    pub(super) clock_last_local_end: AtomicI64,
+    pub(super) clock_last_frames: AtomicU32,
+    pub(super) clock_session_frames: AtomicU64,
+    pub(super) clock_continuity: AtomicU8,
+    pub(super) clock_provisional: AtomicBool,
+    /// 音频边界探针的尾巴（最近 128 帧，f32 位模式）。
+    pub(super) boundary_tail: BoundaryTail,
+    pub(super) boundary_tail_len: AtomicU32,
+    pub(super) boundary_last: AtomicU8,
 }
 
 /// "音频在流动"的观测窗口（块数）。
@@ -185,6 +215,136 @@ pub(super) const ACTIVITY_MIN_CHANGES: u32 = 1;
 /// VEGAS 的起播窗口约 0.66 s，1 秒足够覆盖；超过 1 秒的静音由捕获侧的记账纠正补齐。
 pub(super) const PRE_ROLL_CAP_SEC: f64 = 1.0;
 impl StreamGeometry {
+    /// 从原子量重建 HostClock 状态（音频线程，无锁）。
+    pub(super) fn load_clock_state(&self) -> ClockState {
+        let origin = self.clock_event_origin.load(Ordering::Acquire);
+        let origin = (origin > 0).then_some(origin);
+        let domain = match self.clock_domain.load(Ordering::Acquire) {
+            1 => ClockDomain::Project,
+            2 => origin.map_or(ClockDomain::Unknown, |origin| ClockDomain::Event {
+                origin,
+                raw_domain: RawDomain::Absolute,
+            }),
+            3 => origin.map_or(ClockDomain::Unknown, |origin| ClockDomain::Event {
+                origin,
+                raw_domain: RawDomain::Relative,
+            }),
+            _ => ClockDomain::Unknown,
+        };
+        let capture_origin = self.clock_capture_origin.load(Ordering::Acquire);
+        let session_first = self.clock_session_first_raw.load(Ordering::Acquire);
+        ClockState {
+            domain,
+            event_origin: origin,
+            capture_origin_raw: (capture_origin > 0).then_some(capture_origin),
+            session_first_raw: (session_first > 0).then_some(session_first),
+            event_max_local: self.clock_event_max_local.load(Ordering::Acquire),
+            last_raw: self.clock_last_raw.load(Ordering::Acquire),
+            last_local_end: self.clock_last_local_end.load(Ordering::Acquire),
+            last_frames: self.clock_last_frames.load(Ordering::Acquire),
+            session_frames: self.clock_session_frames.load(Ordering::Acquire),
+            last_continuity: Continuity::from_code(self.clock_continuity.load(Ordering::Acquire)),
+            provisional: self.clock_provisional.load(Ordering::Acquire),
+            last_playing: self.last_playing.load(Ordering::Acquire),
+            start_window_open: self.session_phase.load(Ordering::Acquire) == 1,
+        }
+    }
+
+    /// 把 HostClock 状态写回原子量。
+    pub(super) fn store_clock_state(&self, state: &ClockState) {
+        self.clock_domain
+            .store(state.domain.code(), Ordering::Release);
+        self.clock_event_origin
+            .store(state.event_origin.unwrap_or(0), Ordering::Release);
+        self.clock_capture_origin
+            .store(state.capture_origin_raw.unwrap_or(0), Ordering::Release);
+        self.clock_session_first_raw
+            .store(state.session_first_raw.unwrap_or(0), Ordering::Release);
+        self.clock_event_max_local
+            .store(state.event_max_local, Ordering::Release);
+        self.clock_last_raw.store(state.last_raw, Ordering::Release);
+        self.clock_last_local_end
+            .store(state.last_local_end, Ordering::Release);
+        self.clock_last_frames
+            .store(state.last_frames, Ordering::Release);
+        self.clock_session_frames
+            .store(state.session_frames, Ordering::Release);
+        self.clock_continuity
+            .store(state.last_continuity.code(), Ordering::Release);
+        self.clock_provisional
+            .store(state.provisional, Ordering::Release);
+    }
+
+    /// 会话边界：只清会话级读数，保留实例级事件起点。
+    pub(super) fn reset_clock_session(&self) {
+        let mut state = self.load_clock_state();
+        state.reset_session();
+        self.store_clock_state(&state);
+        self.boundary_tail_len.store(0, Ordering::Release);
+        self.boundary_last
+            .store(Continuity::Unknown.code(), Ordering::Release);
+    }
+
+    /// 音频边界连续性探针。
+    ///
+    /// 【为什么不是“尾部与头部做点积”】相邻块在时间上并不重叠，连续音频的
+    /// 尾/头也不会相似。真正可判的是**边界处的一阶差分**：连续信号的下一帧应当
+    /// 落在上一帧的局部斜率附近；一次 seek 会把两条不相干的波形硬接在一起。
+    /// 探针只做 128 帧的局部能量与一步差分，静音返回 Unknown。
+    pub(super) fn note_boundary(&self, plane: Option<&[f32]>) -> Continuity {
+        const WINDOW: usize = 128;
+        let Some(plane) = plane.filter(|plane| plane.len() >= 2) else {
+            self.boundary_tail_len.store(0, Ordering::Release);
+            return Continuity::Unknown;
+        };
+        let head_len = plane.len().min(WINDOW);
+        let head = &plane[..head_len];
+        let head_energy: f64 = head.iter().map(|v| f64::from(*v) * f64::from(*v)).sum();
+        let head_rms = (head_energy / head_len as f64).sqrt();
+        let tail_len = self.boundary_tail_len.load(Ordering::Acquire) as usize;
+        let mut continuity = Continuity::Unknown;
+        if tail_len >= 2 && head_len >= 1 {
+            let mut tail = [0.0_f32; WINDOW];
+            for (index, slot) in self.boundary_tail.0.iter().take(tail_len).enumerate() {
+                tail[index] = f32::from_bits(slot.load(Ordering::Acquire));
+            }
+            let tail = &tail[..tail_len];
+            let tail_energy: f64 = tail.iter().map(|v| f64::from(*v) * f64::from(*v)).sum();
+            let tail_rms = (tail_energy / tail_len as f64).sqrt();
+            let scale = tail_rms.max(head_rms);
+            if scale > 1e-6 {
+                let last = tail[tail_len - 1];
+                let previous = tail[tail_len - 2];
+                let step = (head[0] - last).abs();
+                let slope = (last - previous).abs();
+                let reference = slope.max(scale as f32);
+                let ratio = step / reference.max(1e-6);
+                continuity = if ratio <= 0.75 {
+                    Continuity::Continuous
+                } else if ratio >= 2.0 {
+                    Continuity::Discontinuous
+                } else {
+                    Continuity::Unknown
+                };
+            }
+        }
+        let start = plane.len().saturating_sub(WINDOW);
+        let tail_slice = &plane[start..];
+        for (index, slot) in self.boundary_tail.0.iter().enumerate() {
+            let value = tail_slice.get(index).copied().unwrap_or(0.0);
+            slot.store(value.to_bits(), Ordering::Release);
+        }
+        self.boundary_tail_len
+            .store(tail_slice.len() as u32, Ordering::Release);
+        self.boundary_last
+            .store(continuity.code(), Ordering::Release);
+        continuity
+    }
+
+    pub(super) fn boundary_continuity(&self) -> Continuity {
+        Continuity::from_code(self.boundary_last.load(Ordering::Acquire))
+    }
+
     /// 记录本块的内容指纹，回答"这一块与上一块是不是同一份内容"。
     pub(super) fn note_activity(&self, hash: u64) -> bool {
         let previous_valid = self.activity_hash_valid.swap(true, Ordering::AcqRel);
