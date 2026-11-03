@@ -275,6 +275,16 @@ impl ProcessingPass {
         self.pass_id.load(Ordering::Acquire)
     }
 
+    /// 非音频线程的诊断读数：`(phase, origin, cursor)`。
+    pub(crate) fn preview_state(&self) -> (u8, Option<i64>, i64) {
+        let origin = self.origin_raw.load(Ordering::Acquire);
+        (
+            self.phase().code(),
+            (origin != NO_POSITION).then_some(origin),
+            self.cursor_frames.load(Ordering::Acquire),
+        )
+    }
+
     /// 显式离线块（process_mode=2）。返回本块的本地 cursor。
     pub(crate) fn note_offline_block(
         &self,

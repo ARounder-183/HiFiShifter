@@ -697,7 +697,7 @@ impl ExtensionOwner {
             // ARA 实例不走 Capture 仲裁：这两行的数字对它是无意义的零。
             return;
         }
-        if !self.capture.has_material() {
+        if !self.capture.has_material() && !self.processing_pass.is_preview() {
             return;
         }
         let switches = self.rung_switches.load(Ordering::Acquire);
@@ -707,9 +707,14 @@ impl ExtensionOwner {
         let output = self.capture_output();
         let prepared = self.capture_prepared.load(Ordering::Acquire);
         let ready = self.capture_ready_revision.load(Ordering::Acquire);
+        // 【真机诊断】预览 pass 的相位 / 原点 / 游标：回答“它有没有确认、从哪开始、
+        // 走到哪”。没有这一行，1 s 截断只能靠用户复述。
+        let (preview_phase, preview_origin, preview_cursor) = self.processing_pass.preview_state();
         let line = format!(
             "[capture] pass: take={} prepared={prepared} ready_revision={ready} \
-             output={} switches={switches} pass_switches={pass_switches} last={}->{}",
+             output={} switches={switches} pass_switches={pass_switches} last={}->{} \
+             preview_phase={preview_phase} preview_origin={preview_origin:?} \
+             preview_cursor={preview_cursor}",
             self.capture.revision(),
             output.as_str(),
             CaptureOutput::from_code(from as u8).map_or("none", |value| value.as_str()),
