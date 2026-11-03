@@ -470,7 +470,11 @@ impl ExtensionOwner {
             offline: is_offline,
             frames: frames32,
         });
-        let transport_active = decision.transport_active || playing || is_offline;
+        // 【预览候选也算有权推进】候选期间宿主 kPlaying=0，但它送来的正是预览
+        // 要录的音频；不把候选算进来，起播窗口一过位置就冻结，预览只剩 1 秒。
+        let preview_candidate = self.processing_pass.phase() == PreviewPhase::Candidate;
+        let transport_active =
+            decision.transport_active || playing || is_offline || preview_candidate;
         let new_epoch = decision.new_epoch;
         let start_window_open = decision.start_window_open;
         // A：新一次播放。域切换不是新 pass；真 seek / 新 epoch / 循环回卷才是。
@@ -1192,13 +1196,8 @@ impl ExtensionOwner {
         // 并落成 Project；但预览还没确认，把宿主光标（现场 70.375 s）画出去就是
         // 用户看到的那次跳变。候选确认后由处理 pass 的 cursor 接管发布。
         if self.processing_pass.phase() == PreviewPhase::Candidate {
-            // 候选块仍要写进 take：确认时整条 take 会平移 -origin，这些块正好落在
-            // cursor 上；不写就会丢掉预览的开头 0.75 s。位置由 HostClock 给（Pending
-            // 期间是 raw / R2 记账），所以这里只补“有权写入”，不改位置。
-            stream_block.transport_active = true;
-            // 静音候选块的位置可能没有推进；相位必须显式置成 Rolling，否则
-            // on_block_with_context 的 Resting 早退会把它挡在写入之前。
-            stream_block.phase = TransportPhase::Rolling;
+            // 候选块由 HostClock 按 raw / R2 记账写入（transport_active 已在
+            // note_stream_geometry 里由“候选”这一事实打开）；位置在确认前不可发布。
             stream_block.position_trusted = false;
             stream_block.publish_deferred = true;
         }
