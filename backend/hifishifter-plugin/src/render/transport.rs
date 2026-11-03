@@ -418,6 +418,10 @@ impl TransportClock {
             return;
         }
         self.capture_hold.store(false, Ordering::Release);
+        // Capture 位置也是一份“已知位置”：hold / 停止之后回落到 last_known 时，
+        // 光标应当停在本地时间轴，而不是跳回宿主预卷的 60 s。
+        self.last_known
+            .store(position_sec.to_bits(), Ordering::Release);
         self.capture_position_bits
             .store(position_sec.to_bits(), Ordering::Release);
         self.capture_playing.store(playing, Ordering::Release);
