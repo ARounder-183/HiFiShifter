@@ -21,8 +21,10 @@ export interface TransportSample {
     position_sec?: number;
     duration_sec?: number;
     host_authoritative?: boolean;
-    /** 这个读数是谁给的：host / block / seek / stale（见后端 Provenance）。 */
+    /** 这个读数是谁给的：host / block / seek / capture / offline / stale（见后端 Provenance）。 */
     position_source?: string;
+    /** 同 position_source；显式命名，供前端按“捕获时钟”分支处理。 */
+    transport_source?: string;
     position_age_ms?: number;
     seek_pending?: boolean;
     /** 单调读数序号：推送与轮询共用的乱序判据（见后端 `TransportView::sample_seq`）。 */
@@ -278,6 +280,7 @@ function applyTransportSample(
     // （见 `selectIsTransportAdvancing`）。
     state.runtime.positionAgeMs =
         typeof payload.position_age_ms === "number" ? payload.position_age_ms : null;
+    state.runtime.transportSource = payload.transport_source ?? payload.position_source ?? "host";
 
     // 原地等待采样：保持播放态、光标冻结 —— 不做时延外推（位置
     // 并未前进，外推会让光标按 IPC 时延缓慢漂移）、不改写

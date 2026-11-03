@@ -34,6 +34,8 @@ export interface CaptureCapture {
     startFrame: number;
     endFrame: number;
     positionFrame: number;
+    /** 最近一块的帧数（后端给；用于自适应捕获带右缘）。 */
+    blockFrames?: number;
     sampleRate: number;
     /**
      * 已覆盖区间的**列表**（升序、互不相交、相邻已合并）。
@@ -110,6 +112,8 @@ export interface CaptureStatus {
      * "已录 0.0 秒"会让待命看起来像失败（用户反馈里的"点了录制没反应"）。
      */
     state: "empty" | "standby" | "recording" | "ready";
+    /** Capture 自身相位：standby / starting / recording / paused / stopped。 */
+    phase?: string;
     /** 已武装但宿主还没播过（= `state === "standby"` 的布尔形式）。 */
     standby: boolean;
     recording: CaptureRecording | null;

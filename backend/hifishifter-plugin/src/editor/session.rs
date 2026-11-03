@@ -272,7 +272,8 @@ impl RegisteredView {
     fn route_is_live(&self, document: Option<&Arc<DocumentSession>>) -> bool {
         self.route.as_ref().is_none_or(|(link, lease)| {
             document.is_some_and(|document| {
-                link.authorize(document).is_ok_and(|current| current == *lease)
+                link.authorize(document)
+                    .is_ok_and(|current| current == *lease)
             })
         })
     }
@@ -2184,6 +2185,17 @@ impl EditorSession {
         )?;
         // 先命名空间化，再按键对曲线 —— 保留的那份键已经是命名空间化的。
         self.rewrite_ids(&mut timeline, true);
+        // 【内容身份跟着 PCM 走】Capture 的分析缓存键优先读 content_id；这里再写
+        // 内容哈希指纹，保证“同 take 号、不同内容”必定 miss，“同内容、不同 take”
+        // 必定 hit。ARA 的指纹由 refresh_source_fingerprints 负责，这里只服务 Capture。
+        let fingerprints = owner.capture().content_fingerprints();
+        for clip in &mut timeline.clips {
+            if let Some(content_id) = clip.content_id.as_deref() {
+                if let Some(stamp) = fingerprints.get(content_id) {
+                    clip.source_file_fingerprint = Some(*stamp);
+                }
+            }
+        }
         let roots = timeline
             .clips
             .iter()
@@ -4222,8 +4234,7 @@ pub(crate) mod tests {
         let owner = capture_owner_with_a_take();
         let session = owner.editor_session().unwrap();
         session.ensure_loaded(true).unwrap();
-        let (take, edit, with_curves, input) =
-            owner.capture_render_input(true).unwrap().unwrap();
+        let (take, edit, with_curves, input) = owner.capture_render_input(true).unwrap().unwrap();
         assert!(take > 0, "渲染输入必须绑定到活动 take");
         assert!(
             with_curves,
@@ -5366,8 +5377,7 @@ pub(crate) mod tests {
             // 线程；它渲染出 0 帧空快照后 `publish` 原子替换 `current`，把我们下面这份
             // 手工快照 `reclaim` 掉 —— 于是"组件 stop 后自己的输出被撤销"这条断言会随
             // 后台时序时对时错。先等它退场，用例才只测 stop 语义。
-            owners[index]
-                .await_preparation_idle(std::time::Duration::from_secs(3));
+            owners[index].await_preparation_idle(std::time::Duration::from_secs(3));
             owners[index].snapshots[0]
                 .publish(crate::render::snapshot::PlaybackSnapshot {
                     sample_rate: 44100,
@@ -7483,10 +7493,7 @@ pub(crate) mod tests {
         {
             let timeline = editor.timeline.lock_or_recover();
             let entry = &timeline.params_by_root_track[&root];
-            assert!(
-                entry.pitch_edit_user_modified,
-                "用户曲线必须被记为显式编辑"
-            );
+            assert!(entry.pitch_edit_user_modified, "用户曲线必须被记为显式编辑");
             assert!(entry.pitch_orig_key.is_none(), "这一轮原线还没组装");
         }
         let bytes = owner.encode_state().unwrap();

@@ -71,6 +71,23 @@ impl ExtensionOwner {
             // （见 `capture_prepare_job` 的 `with_curves` 位）。
             None => (self.capture.session_timeline().0, 0, false),
         };
+        if require_curves && !with_curves {
+            log::debug!(
+                "[capture] offline render requested curves but no editor session is loaded; deferring"
+            );
+            return Ok(None);
+        }
+        // 【内容身份跟着 PCM 走】Capture 的分析缓存键优先读 content_id；这里把
+        // 内容哈希也写进 clip 的内容指纹，保证“同 take 号、不同内容”必定 miss，
+        // “同内容、不同 take”必定 hit。ARA 的指纹由 refresh_source_fingerprints 负责。
+        let fingerprints = self.capture.content_fingerprints();
+        for clip in &mut timeline.clips {
+            if let Some(content_id) = clip.content_id.as_deref() {
+                if let Some(stamp) = fingerprints.get(content_id) {
+                    clip.source_file_fingerprint = Some(*stamp);
+                }
+            }
+        }
         let trimmed = crate::capture::timeline::clamp_timeline_to_project(&mut timeline);
         if trimmed > 0 {
             log::warn!(
@@ -115,7 +132,17 @@ impl ExtensionOwner {
         &self,
         cancel: Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<(), String> {
-        self.capture_prepare_job_inner(cancel, false)
+        // 【离线块之后的实时准备也必须带曲线】宿主可能用 setup mode=0 进入离线
+        // 预览（VEGAS 的“应用非实时事件 FX”就是一例）。只看 setup mode 会漏掉；
+        // `offline_pass_active` 由第一个 mode=2 块置位，随后 actor 的普通准备
+        // 就必须走 require_curves 版本，不能再发布“只有几何”的快照。
+        let require_curves = self.offline_pass_active() || self.setup_process_mode() == 2;
+        if require_curves {
+            if let Some(session) = self.capture_session_if_initialized() {
+                session.request_reload();
+            }
+        }
+        self.capture_prepare_job_inner(cancel, require_curves)
     }
 
     /// 离线准备：**要求**这一份结果带着用户曲线（见 `capture_render_input`）。
@@ -124,6 +151,26 @@ impl ExtensionOwner {
         cancel: Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<(), String> {
         self.capture_prepare_job_inner(cancel, true)
+    }
+
+    /// 离线渲染是否已经拥有“带当前编辑代次”的完整快照。
+    ///
+    /// 【为什么不能只看 capture_session_pending】它只回答“会话在不在加载”。
+    /// 版本闸还必须确认发布的快照属于当前的 (take, edit, with_curves) 组合；
+    /// 否则参数线刚改完就点“确定”时，会把上一版曲线烘焙进产物。
+    pub(crate) fn capture_offline_ready(&self) -> Result<bool, String> {
+        if !self.capture.has_material() {
+            return Ok(true);
+        }
+        let Some((revision, edit, with_curves, _)) = self.capture_render_input(true)? else {
+            return Ok(false);
+        };
+        if !with_curves {
+            return Ok(false);
+        }
+        let version = revision ^ (edit << 32);
+        Ok(self.capture_prepared.load(Ordering::Acquire) == version
+            && self.snapshots.iter().all(|snapshot| snapshot.is_ready()))
     }
 
     fn capture_prepare_job_inner(

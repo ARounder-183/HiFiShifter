@@ -87,6 +87,7 @@ export function registerRuntime(builder: ActionReducerMapBuilder<SessionState>) 
                     // 与乱序判据一起归零：前者会让停播后的光标重新按 1x 外推，后者会
                     // 让已经丢过的旧读数重新被采纳。
                     positionAgeMs: state.runtime.positionAgeMs,
+                    transportSource: state.runtime.transportSource,
                     lastTransportSeq: state.runtime.lastTransportSeq,
                     playbackDurationSec: state.runtime.playbackDurationSec,
                     // 整份替换这个子对象时必须显式带上它，否则"宿主受控"这条读数

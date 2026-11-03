@@ -96,6 +96,14 @@ impl<'a> Tape<'a> {
         self.frames
     }
 
+    /// 内容身份：优先取 promote 写入的内容哈希；旧档/测试夹具退回 take 号。
+    pub(crate) fn source_key(&self) -> String {
+        self.segments
+            .first()
+            .and_then(|segment| segment.source_key.clone())
+            .unwrap_or_else(|| source_id(self.take))
+    }
+
     /// 把带上 `[offset, offset + frames)` 这一段切成"每段一段"的切片。
     ///
     /// 产出 `(段, 段内起点, 段内终点)`，按带内顺序。落在带外的部分被裁掉 ——
@@ -414,21 +422,21 @@ pub(crate) fn project(takes: &[ProjectionTake<'_>], bpm: f64) -> (TimelineState,
     timeline.tracks.clear();
     timeline.selected_track_id = Some(CAPTURE_TRACK_ID.to_owned());
     let capture_track: hifishifter_kernel::state::Track = match serde_json::from_value(json!({
-            "id": CAPTURE_TRACK_ID,
-            "name": CAPTURE_TRACK_NAME,
-            "order": 0,
-            // 【为什么这条轨道默认开启合成】`compose_enabled` 是"要不要处理这条轨"的
-            // 总开关：关着的时候 `hifigan_effect_flags` 一律返回全假、效果曲线被
-            // `gate_hifigan_effect_curves` 整条剥掉（设计如此：听到未经改动的原音频）。
-            // 而这条轨道**只为被处理而存在** —— 它是插件自己造出来的编辑轨，宿主那边
-            // 没有任何"原声"语义需要保留。默认关着会让"画完参数线不生效"成为默认行为，
-            // 而界面上只有一个不说原因的空结果。
-            //
-            // 【为什么默认开启不改变"还没画线时"的声音】`does_clip_need_processor_render`
-            // 在没有曲线、没有效果、没有速率变化时返回假 —— 声码器根本不会跑。所以
-            // 开启只让"画了线"生效，不让"没画线"变成另一种声音。
-            "compose_enabled": true,
-        })) {
+        "id": CAPTURE_TRACK_ID,
+        "name": CAPTURE_TRACK_NAME,
+        "order": 0,
+        // 【为什么这条轨道默认开启合成】`compose_enabled` 是"要不要处理这条轨"的
+        // 总开关：关着的时候 `hifigan_effect_flags` 一律返回全假、效果曲线被
+        // `gate_hifigan_effect_curves` 整条剥掉（设计如此：听到未经改动的原音频）。
+        // 而这条轨道**只为被处理而存在** —— 它是插件自己造出来的编辑轨，宿主那边
+        // 没有任何"原声"语义需要保留。默认关着会让"画完参数线不生效"成为默认行为，
+        // 而界面上只有一个不说原因的空结果。
+        //
+        // 【为什么默认开启不改变"还没画线时"的声音】`does_clip_need_processor_render`
+        // 在没有曲线、没有效果、没有速率变化时返回假 —— 声码器根本不会跑。所以
+        // 开启只让"画了线"生效，不让"没画线"变成另一种声音。
+        "compose_enabled": true,
+    })) {
         Ok(track) => track,
         Err(error) => {
             // 【降级而不是 panic】见片段那一处的说明：这条路径在宿主 UI 线程上。
@@ -458,7 +466,7 @@ pub(crate) fn project(takes: &[ProjectionTake<'_>], bpm: f64) -> (TimelineState,
         }
         summary.covered_frames += frames as u64;
         index += 1;
-        let source = source_id(tape.take);
+        let source = tape.source_key();
         let start_sec = piece.span.start as f64 / rate;
         let length_sec = frames as f64 / rate;
         let source_start_sec = piece.offset as f64 / rate;
@@ -882,6 +890,8 @@ mod tests {
             filled: values.len(),
             loss: SegmentLoss::First,
             loop_start: None,
+            pass_id: 0,
+            source_key: None,
             peak: [0.0; 2],
             closed: ClosedReason::Stopped,
             coverage: std::array::from_fn(|_| 0..0),

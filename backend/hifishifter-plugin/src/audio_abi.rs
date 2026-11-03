@@ -29,7 +29,7 @@ pub(crate) struct ProcessData {
 }
 
 #[repr(C)]
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 pub(crate) struct Chord {
     pub key_note: u8,
     pub root_note: u8,
@@ -37,7 +37,7 @@ pub(crate) struct Chord {
 }
 
 #[repr(C)]
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 pub(crate) struct FrameRate {
     pub frames_per_second: u32,
     pub flags: u32,
@@ -75,7 +75,7 @@ pub(crate) const PROCESS_CONTEXT_CONTINUOUS_VALID: u32 = 1 << 17;
 
 /// 完整 SDK 时间上下文；project_time_samples 始终有效，不依赖音乐时间有效位。
 #[repr(C)]
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 pub(crate) struct ProcessContext {
     pub state: u32,
     pub sample_rate: f64,

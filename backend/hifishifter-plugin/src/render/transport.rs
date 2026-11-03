@@ -81,6 +81,10 @@ pub(crate) enum Provenance {
     RealtimeBlock,
     /// 我们自己请求的定位还没被宿主确认（见 `SeekIntent`）。
     SeekIntent,
+    /// Capture 录制块推进的本地播放头（Event FX 的 kPlaying 可能为 0）。
+    CaptureBlock,
+    /// 离线 pass 的本地 cursor。
+    OfflineBlock,
     /// 以上都没有：位置是上一次的残值。
     Stale,
 }
@@ -92,6 +96,8 @@ impl Provenance {
             Provenance::HostSample => "host",
             Provenance::RealtimeBlock => "block",
             Provenance::SeekIntent => "seek",
+            Provenance::CaptureBlock => "capture",
+            Provenance::OfflineBlock => "offline",
             Provenance::Stale => "stale",
         }
     }
@@ -142,6 +148,7 @@ impl TransportView {
             "duration_sec": duration_sec,
             "host_authoritative": host_authoritative,
             "position_source": self.provenance.as_str(),
+            "transport_source": self.provenance.as_str(),
             "position_age_ms": self.age_ms,
             "seek_pending": self.seek_pending,
             "sample_seq": self.sample_seq,
@@ -182,6 +189,13 @@ pub(crate) struct TransportClock {
     prefetch_serial: AtomicU64,
     prefetch_seen_serial: AtomicU64,
     prefetch_seen_at_ms: AtomicU64,
+    /// Capture 块推进的本地位置 / 播放位 / 是否离线。
+    capture_position_bits: AtomicU64,
+    capture_playing: AtomicBool,
+    capture_offline: AtomicBool,
+    capture_serial: AtomicU64,
+    capture_seen_serial: AtomicU64,
+    capture_seen_at_ms: AtomicU64,
     /// 定位意图：目标 / 请求时刻 / 请求时的播放位 / 代数。
     seek_target: AtomicU64,
     seek_at_ms: AtomicU64,
@@ -288,7 +302,8 @@ impl TransportClock {
     /// 把工程时长镜像进来（推送载荷要它，而它只存在于会话里）。
     pub fn publish_duration(&self, seconds: f64) {
         if seconds.is_finite() && seconds >= 0. {
-            self.duration_sec.store(seconds.to_bits(), Ordering::Release);
+            self.duration_sec
+                .store(seconds.to_bits(), Ordering::Release);
         }
     }
 
@@ -375,6 +390,75 @@ impl TransportClock {
         self.prefetch_serial.fetch_add(1, Ordering::Release);
     }
 
+    /// 发布一块 Capture / 离线 pass 的本地有效位置。
+    ///
+    /// 【为什么它必须进入 TransportClock】Event FX 捕获时宿主 kPlaying 常常为 0，
+    /// 而捕获本身仍在按块推进；如果不把这条 clock 发布出去，前端只能读 5 Hz 的
+    /// capture 快照，带子和光标就会一顿一顿。离线 pass 同理。
+    pub fn publish_capture_block(&self, position_sec: f64, playing: bool, offline: bool) {
+        if !position_sec.is_finite() {
+            return;
+        }
+        self.capture_position_bits
+            .store(position_sec.to_bits(), Ordering::Release);
+        self.capture_playing.store(playing, Ordering::Release);
+        self.capture_offline.store(offline, Ordering::Release);
+        self.capture_serial.fetch_add(1, Ordering::Release);
+        self.sample_seq.fetch_add(1, Ordering::Release);
+    }
+
+    /// 显式结束 Capture/离线播放位（setProcessing(false) / setActive(false)）。
+    pub fn clear_capture(&self) {
+        self.capture_playing.store(false, Ordering::Release);
+        self.capture_offline.store(false, Ordering::Release);
+        self.capture_serial.fetch_add(1, Ordering::Release);
+        self.sample_seq.fetch_add(1, Ordering::Release);
+    }
+
+    /// Capture 播放位的新鲜度：与 prefetch 同一套“块序号 + 读者打戳”规则。
+    fn capture_playing_at(&self, now: u64) -> bool {
+        if !self.capture_playing.load(Ordering::Acquire) {
+            return false;
+        }
+        // 离线块可能很长（6 秒），不能用实时块的 TTL 判它过期；pass 结束由
+        // `clear_capture` 显式收尾。
+        if self.capture_offline.load(Ordering::Acquire) {
+            return true;
+        }
+        let serial = self.capture_serial.load(Ordering::Acquire);
+        let seen = self.capture_seen_serial.load(Ordering::Acquire);
+        if serial != seen {
+            self.capture_seen_serial.store(serial, Ordering::Release);
+            self.capture_seen_at_ms.store(now, Ordering::Release);
+            return true;
+        }
+        let at = self.capture_seen_at_ms.load(Ordering::Acquire);
+        at != 0 && now.saturating_sub(at) <= u64::from(self.block_playing_ttl_ms())
+    }
+
+    fn capture_view_at(&self, now: u64, sample_seq: u64) -> Option<TransportView> {
+        if !self.capture_playing_at(now) {
+            return None;
+        }
+        let offline = self.capture_offline.load(Ordering::Acquire);
+        let position = f64::from_bits(self.capture_position_bits.load(Ordering::Acquire));
+        if !position.is_finite() {
+            return None;
+        }
+        Some(TransportView {
+            position_sec: position,
+            playing: true,
+            provenance: if offline {
+                Provenance::OfflineBlock
+            } else {
+                Provenance::CaptureBlock
+            },
+            age_ms: 0,
+            seek_pending: false,
+            sample_seq,
+        })
+    }
+
     /// 停处理的实例来源也需记录；调用者可能是瞬时clip renderer，并不等于宿主整体停止。
     pub fn observe_stop(&self, writer: u64, role: i32) {
         self.stops.fetch_add(1, Ordering::Relaxed);
@@ -428,7 +512,10 @@ impl TransportClock {
         let now = now_ms();
         let host_fresh = self.host_is_fresh_at(now);
         let host_playing = host_fresh && (self.host_pose.load(Ordering::Acquire) & 1 != 0);
-        host_playing || self.playing.load(Ordering::Acquire) || self.prefetch_playing_at(now)
+        host_playing
+            || self.playing.load(Ordering::Acquire)
+            || self.prefetch_playing_at(now)
+            || self.capture_playing_at(now)
     }
 
     /// 仅非实时actor查询，JSON分配绝不进入process/setProcessing。
@@ -447,6 +534,10 @@ impl TransportClock {
             "seek_unsettled":self.seek_unsettled.load(Ordering::Relaxed),
             "sample_failures":self.sample_failures.load(Ordering::Relaxed),
             "prefetch_playing":self.prefetch_playing.load(Ordering::Acquire),
+            "capture_playing":self.capture_playing.load(Ordering::Acquire),
+            "capture_offline":self.capture_offline.load(Ordering::Acquire),
+            "capture_position_sec":f64::from_bits(self.capture_position_bits.load(Ordering::Acquire)),
+            "capture_callbacks":self.capture_serial.load(Ordering::Acquire),
             "prefetch_callbacks":self.prefetch.load(Ordering::Relaxed),"offline_callbacks":self.offline.load(Ordering::Relaxed),
             "writer_switches":self.switches.load(Ordering::Relaxed),"backwards_while_playing":self.backwards.load(Ordering::Relaxed),
             "last_writer":self.writer.load(Ordering::Relaxed),"last_role":self.role.load(Ordering::Relaxed),
@@ -467,11 +558,10 @@ impl TransportClock {
     /// 有一个明确的写入点。
     pub fn note_block_length(&self, frames: usize, rate: f64) {
         if rate.is_finite() && rate > 0. {
-            self.last_block_rate.store(rate.to_bits(), Ordering::Release);
-            self.last_block_frames.store(
-                u32::try_from(frames).unwrap_or(u32::MAX),
-                Ordering::Release,
-            );
+            self.last_block_rate
+                .store(rate.to_bits(), Ordering::Release);
+            self.last_block_frames
+                .store(u32::try_from(frames).unwrap_or(u32::MAX), Ordering::Release);
         }
     }
 
@@ -565,7 +655,20 @@ impl TransportClock {
     }
 
     pub fn stopped(&self) {
+        // 单实例停处理：只清本实例音频块投票。宿主采样属于**宿主传输**，其它实例
+        // 仍可能在播，不能在这里篡改。
         self.playing.store(false, Ordering::Release);
+    }
+
+    /// 整个 VST 实例停止处理 / 失活：冻结所有本地来源（含新鲜宿主采样里的播放位）。
+    pub fn freeze_transport(&self) {
+        self.stopped();
+        self.prefetch_playing.store(false, Ordering::Release);
+        let pose = self.host_pose.load(Ordering::Acquire);
+        if pose & 1 != 0 {
+            self.host_pose.store(pose & !1, Ordering::Release);
+        }
+        self.sample_seq.fetch_add(1, Ordering::Release);
     }
 
     /// 没有有效宿主tempo时返回None，由映射初始值兜底。
@@ -684,6 +787,9 @@ impl TransportClock {
     /// 一次完整的读数（测试用：显式给定时钟，避免依赖真实时间）。
     pub(crate) fn read_view_at(&self, now: u64) -> TransportView {
         let sample_seq = self.sample_seq.load(Ordering::Acquire);
+        if let Some(view) = self.capture_view_at(now, sample_seq) {
+            return view;
+        }
         if let Some(mut view) = self.pending_seek_view(now) {
             view.sample_seq = sample_seq;
             return view;
@@ -713,7 +819,9 @@ impl TransportClock {
             // 就把位置纠回来，而"该走的时候不走"是看得见的卡顿。
             return TransportView {
                 position_sec: f64::from_bits(pose & !1),
-                playing: pose & 1 != 0 || block_playing || prefetch_playing,
+                // 【prefetch 只作 fallback】宿主采样新鲜时说“停”就是停；不能让一个
+                // 300 ms 残值的 prefetch 播放位把它复活。见下方无 host 分支。
+                playing: pose & 1 != 0 || block_playing,
                 provenance: Provenance::HostSample,
                 age_ms: now
                     .saturating_sub(self.host_at_ms.load(Ordering::Acquire))
@@ -730,7 +838,7 @@ impl TransportClock {
             let stale = block_age > self.block_playing_ttl_ms();
             return TransportView {
                 position_sec: f64::from_bits(self.position.load(Ordering::Acquire)),
-                playing: block_playing || prefetch_playing,
+                playing: block_playing,
                 provenance: if stale {
                     Provenance::Stale
                 } else {
@@ -814,7 +922,11 @@ mod tests {
         clock.update(&context(44100 * 40, false));
         assert_eq!(clock.read().0, 10.0, "单块不足以说明这是 seek");
         clock.update(&context(44100 * 40, false));
-        assert_eq!(clock.read().0, 40.0, "连续两次一致 ⇒ 采纳（用户把光标挪到了 40 秒）");
+        assert_eq!(
+            clock.read().0,
+            40.0,
+            "连续两次一致 ⇒ 采纳（用户把光标挪到了 40 秒）"
+        );
     }
 
     /// **播放位必须有寿命：回调停摆之后它要翻假。**
@@ -876,7 +988,10 @@ mod tests {
         for block in 1..=5i64 {
             clock.update(&context(44100 * block, true));
             let seq = clock.read_view().sample_seq;
-            assert!(seq > last, "每一次读数都要分配一个更大的序号：{seq} <= {last}");
+            assert!(
+                seq > last,
+                "每一次读数都要分配一个更大的序号：{seq} <= {last}"
+            );
             last = seq;
         }
         clock.publish_host(9.0, true);
@@ -1100,6 +1215,26 @@ mod tests {
         assert_eq!(clock.read_view().provenance, Provenance::HostSample);
         clock.request_seek(2.0);
         assert_eq!(clock.read_view().provenance, Provenance::SeekIntent);
+    }
+
+    /// Capture / 离线 pass 的本地时钟必须能驱动前端，且停止发布后立刻失效。
+    #[test]
+    fn capture_blocks_publish_a_local_playhead_and_stop_cleanly() {
+        let clock = TransportClock::default();
+        let t0 = now_ms();
+        clock.publish_capture_block(7.5, true, false);
+        let view = clock.read_view_at(t0);
+        assert_eq!(view.position_sec, 7.5);
+        assert!(view.playing);
+        assert_eq!(view.provenance, Provenance::CaptureBlock);
+        // 停播：下一条发布 playing=false，读取端不得继续外推。
+        clock.publish_capture_block(7.5, false, false);
+        assert!(!clock.read_view_at(t0).playing);
+        // 离线 pass 的来源要能与实时捕获区分。
+        clock.publish_capture_block(1.25, true, true);
+        assert_eq!(clock.read_view_at(t0).provenance, Provenance::OfflineBlock);
+        clock.clear_capture();
+        assert!(!clock.read_view_at(t0).playing);
     }
 
     /// 采样失败必须留下计数，而不是被 if let Ok 吞掉。

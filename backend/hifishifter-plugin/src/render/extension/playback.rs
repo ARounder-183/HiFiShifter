@@ -1,4 +1,6 @@
 //! 播放记账：流位置、门控、块分割与输出放行，以及它自己的两个切片助手。
+use super::timebase::{classify_domain_switch, TimebaseKind};
+use super::transport_session::{SessionInput, SessionPhase, TransportSession};
 use super::*;
 impl ExtensionOwner {
     /// 取走"该重新合成一次"的意图（非音频线程调用；见 [`Self::render_wanted`]）。
@@ -95,6 +97,30 @@ impl ExtensionOwner {
         playing_rising: bool,
         recording_rising: bool,
     ) -> StreamBlock {
+        // 旧测试入口模拟的是“宿主在走”，没有 kPlaying 位；生产路径走 `_at`，
+        // 不受这里影响。给测试上下文补上播放位，保持原有 3 秒计数器语义。
+        let mut forced = *context;
+        forced.state |= crate::audio_abi::PROCESS_CONTEXT_PLAYING;
+        self.note_stream_block_at(
+            stream,
+            &forced,
+            frames,
+            playing_rising,
+            recording_rising,
+            None,
+        )
+    }
+
+    /// 与 note_stream_block 相同，但允许调用方给出**本地有效位置**（离线 cursor）。
+    pub(super) fn note_stream_block_at(
+        &self,
+        stream: ProcessStream,
+        context: &crate::audio_abi::ProcessContext,
+        frames: usize,
+        playing_rising: bool,
+        recording_rising: bool,
+        effective_position: Option<i64>,
+    ) -> StreamBlock {
         let rate = if context.sample_rate.is_finite() && context.sample_rate > 0.0 {
             context.sample_rate
         } else {
@@ -102,7 +128,7 @@ impl ExtensionOwner {
         };
         self.note_stream_geometry(
             stream,
-            context.project_time_samples,
+            effective_position.unwrap_or(context.project_time_samples),
             frames,
             rate,
             StreamTime::from_context(context),
@@ -211,6 +237,12 @@ impl ExtensionOwner {
                     geometry.last_source.load(Ordering::Acquire),
                 )
                 .unwrap_or(PositionSource::Project),
+                epoch: geometry.session_epoch.load(Ordering::Acquire),
+                transport_active: false,
+                new_epoch: false,
+                rebase_frames: 0,
+                timebase: TimebaseKind::from_code(geometry.timebase_kind.load(Ordering::Acquire))
+                    .unwrap_or(TimebaseKind::Unknown),
             };
         }
         let frames32 = u32::try_from(frames).unwrap_or(u32::MAX);
@@ -229,7 +261,6 @@ impl ExtensionOwner {
         // 都等于块长，于是"计数器可能错过多少"退化成"一块" —— 一个与事实无关的常数。
         // `counted_run` 只数**位置真的由计数器给出**的帧。
         let counted_before = geometry.counted_run.load(Ordering::Acquire);
-        let domain_before = geometry.domain_offset.load(Ordering::Acquire);
 
         // 【循环回卷】只有循环播放才有"回卷"这个形状：块首回退，或块首不变而时间前进。
         let cycle_wrap = if time.cycle_active {
@@ -252,15 +283,59 @@ impl ExtensionOwner {
 
         let host_rewound = had && raw_start < last_raw;
         let host_moved = had && raw_start != last_raw;
-        // 【时间基切换 vs seek】见本函数的规则说明：计数器有权威 ⇒ 宿主有一段时间
-        // 没报位置 ⇒ 它现在报的这个数与旧读数**不同域**，不可比较。
-        let time_base_switch = host_rewound && counted_before > 0;
-        // A：新一次播放。回退只在**计数器没有权威**时才是新 pass。
-        let new_pass = !had
-            || playing_rising
-            || recording_rising
-            || cycle_wrap
-            || (host_rewound && !time_base_switch);
+        let timebase_before =
+            TimebaseKind::from_code(geometry.timebase_kind.load(Ordering::Acquire))
+                .unwrap_or(TimebaseKind::Unknown);
+        let offset_before = geometry.timebase_offset.load(Ordering::Acquire);
+        let session_frames_before = geometry.session_frames.load(Ordering::Acquire);
+        let last_frames_before = u64::from(geometry.last_frames.load(Ordering::Acquire));
+        let previous_local_end = last_position.saturating_add(last_frames_before as i64);
+        // 【域切换先于会话判定】VEGAS Event FX 的坐标域切换在音频上是**连续**的，
+        // 不能先把它记成一次 seek / 新 epoch —— 那会把已经录下的首段留在绝对域里。
+        let domain_switch = if cycle_wrap || time.cycle_active || !host_moved {
+            // 循环回卷是「同一把尺子上的回退」，不是域切换。
+            None
+        } else {
+            classify_domain_switch(
+                timebase_before,
+                session_frames_before,
+                rate,
+                raw_start,
+                previous_local_end,
+                had,
+                playing_rising || recording_rising,
+            )
+        };
+        let is_offline = stream == ProcessStream::Offline;
+        let phase_before = SessionPhase::from_code(geometry.session_phase.load(Ordering::Acquire))
+            .unwrap_or_default();
+        let mut session = TransportSession {
+            epoch: geometry.session_epoch.load(Ordering::Acquire),
+            phase: phase_before,
+            session_frames: session_frames_before,
+            last_playing: geometry.last_playing.load(Ordering::Acquire),
+            max_start_window_frames: pre_roll_cap,
+        };
+        let decision = session.observe(SessionInput {
+            // 离线 pass 有自己的 cursor；它不需要 kPlaying 也必须在走。
+            playing: playing || is_offline,
+            // 【首块也开一个有界起点窗口】VEGAS 可能先送 0.6 s 音频、kPlaying 才置位；
+            // 窗口只有 1 秒，超过仍冻结。它不是“无限计数器”，只是起播容差。
+            playing_rising: playing_rising || recording_rising || (!had && !playing && !is_offline),
+            recording_rising,
+            host_reset: host_rewound && domain_switch.is_none(),
+            offline: is_offline,
+            frames: frames32,
+        });
+        let transport_active = decision.transport_active || playing || is_offline;
+        let new_epoch = decision.new_epoch;
+        let start_window_open = decision.start_window_open;
+        // A：新一次播放。域切换不是新 pass；真 seek / 上升沿 / 循环回卷才是。
+        let new_pass = new_epoch || playing_rising || recording_rising || cycle_wrap;
+        let time_base_switch = domain_switch.is_some();
+        let rebase_frames = domain_switch
+            .map(|switch| switch.shift(previous_local_end))
+            .unwrap_or(0);
 
         // 本块位置的"锚 + 偏移"。R1/R3 时锚就是宿主刚报的值、偏移为 0；
         // R2 时锚保持不动、偏移是已送来的帧数。两条路径因此共用同一句
@@ -285,13 +360,18 @@ impl ExtensionOwner {
         };
         let mut counted = false;
 
-        if new_pass || host_moved {
+        if !transport_active {
+            // 【冻结】kPlaying=0 且不在有界起点窗口里：位置不得前进。宿主在停播时
+            // 仍会送块，甚至送变化的内容/静音；那些都不是播放时间。位置取最后
+            // 一个真实位置，而不是宿主此刻报的读数（VEGAS 停播时会报远处假位置）。
+            if had {
+                position = last_position;
+            }
+            geometry.counted_run.store(0, Ordering::Release);
+            geometry.frames_since_anchor.store(0, Ordering::Release);
+        } else if new_pass || host_moved || time_base_switch {
             // A / C：宿主给了位置，它就是权威。
-            //
-            // 差值只做**记账**（`jumps` + `last_jump`），绝不参与位置的选取 ——
-            // 那正是旧实现出错的地方。真正的纠正发生在捕获侧：它持有 `expected_next`，
-            // 才判得出"这个差值是记账纠正、时间基切换还是真 seek"。
-            if host_moved && !new_pass {
+            if host_moved && !new_pass && !time_base_switch {
                 let expected = anchor_before.saturating_add(advance_before as i64);
                 let jump = raw_start.saturating_sub(expected);
                 if jump != 0 {
@@ -303,35 +383,29 @@ impl ExtensionOwner {
                 // A：新一次播放。宿主的域重新成为权威。
                 geometry.domain_offset.store(0, Ordering::Release);
                 geometry.counted_run.store(0, Ordering::Release);
+                geometry
+                    .timebase_kind
+                    .store(TimebaseKind::Unknown.code(), Ordering::Release);
+                geometry.timebase_offset.store(0, Ordering::Release);
                 position = raw_start;
                 geometry.pass.fetch_add(1, Ordering::Relaxed);
             } else if time_base_switch {
-                // 【时间基切换：把整条流挪到新域里】
-                //
-                // 偏移量取**计数器在本 pass 里权威的帧数**：宿主的新域从本 pass 的
-                // 起点重新起算（VEGAS 的 Event 级 FX：窗口结束后 `projectTimeSamples`
-                // 从"事件在工程里的绝对位置"变成"事件内的相对位置"，而后者的 0 就是
-                // 事件的起点，也就是本 pass 的起点）。
-                //
-                // 于是 `position = raw_start + counted_run` —— 音频一帧不丢，整条 take
-                // 落在新域里（Event 起点 = 工程起点）。捕获侧看到的是一个**超出记账
-                // 误差**的向后差值，于是把已经写下的首段整段平移（见 `rebase_counted_run`）。
-                let offset = counted_before.min(i64::MAX as u64) as i64;
-                geometry.domain_offset.store(offset, Ordering::Release);
-                position = raw_start.saturating_add(offset);
-                // 本块的位置不是宿主给的读数，是"宿主读数 + 域偏移"。
-                counted = true;
-                geometry.counted_blocks.fetch_add(1, Ordering::Relaxed);
+                // 【时间基切换：把整条流挪到新域里】不是 seek，不能新开段。
+                let switch = domain_switch.expect("time_base_switch implies a switch");
+                position = switch.new_local();
+                let offset = position.saturating_sub(raw_start);
                 geometry
-                    .counted_frames
-                    .fetch_add(frames as u64, Ordering::Relaxed);
+                    .timebase_kind
+                    .store(switch.kind().code(), Ordering::Release);
+                geometry.timebase_offset.store(offset, Ordering::Release);
+                geometry.last_rebase.store(rebase_frames, Ordering::Release);
+                geometry.rebase_count.fetch_add(1, Ordering::Relaxed);
+                geometry.counted_run.store(0, Ordering::Release);
                 geometry.position_resyncs.fetch_add(1, Ordering::Relaxed);
                 self.position_resyncs.fetch_add(1, Ordering::Relaxed);
-                geometry.counted_run.store(0, Ordering::Release);
             } else {
-                // C：宿主报了新位置（同域）。差值落在 `counted_run` 之内是记账纠正，
-                // 之外是 seek —— 判决在捕获侧。
-                position = raw_start.saturating_add(domain_before);
+                // C：宿主报了新位置（同域）。
+                position = raw_start.saturating_add(offset_before);
                 geometry.counted_run.store(0, Ordering::Release);
             }
             geometry.anchor.store(position, Ordering::Release);
@@ -343,25 +417,15 @@ impl ExtensionOwner {
                 time.music.unwrap_or(last_music).to_bits(),
                 Ordering::Release,
             );
-            // 【锚点在本块起点上】本块的偏移是 0，下一块（若连续）是一块长。
             geometry
                 .frames_since_anchor
                 .store(frames as u64, Ordering::Release);
         } else {
             // B：宿主没报新位置。用最好的宿主时钟，最后才是计数器（**无上限**）。
-            //
-            // 【为什么这里不再有预算】旧实现有两笔各 1 秒的额度：`advance_limit`
-            // （`kPlaying` 上升沿打开）与 `activity_budget`（每次 `new_pass` 充满）。
-            // 它们想回答的是"时间到底在不在走"，而那个问题 `flowing()` 回答得更好，
-            // 而且**不需要上限**：上限不是判据，它只是把连续音频切在恰好 1.000 秒
-            // （非实时 FX 预览的功能性截断就是这么来的）。
             let sane = (frames as i64).saturating_mul(4).max(64);
-            // 本块相对锚点的偏移；`advance` 是"按块长算，本块应该在哪"。
             let mut offset = advance as i64;
             let mut advanced = false;
             if !time.cycle_active {
-                // 【宿主时钟优先，且它是**绝对**的】位置 = 锚点 + (当前读数 − 锚点读数)。
-                // 不与计数器叠加 —— 叠加会把同一段时间算两遍。
                 if let Some(continuous) = time.continuous {
                     let from_anchor = continuous
                         .saturating_sub(geometry.continuous_anchor.load(Ordering::Acquire));
@@ -396,14 +460,9 @@ impl ExtensionOwner {
                 }
             }
             if advanced {
-                // 位置来自宿主时钟：计数器没有权威。
                 geometry.counted_run.store(0, Ordering::Release);
-            } else if geometry.flowing() {
-                // 计数器：宿主没报位置，但音频确实在流动 —— 按"收到了多少帧"接着数。
-                //
-                // 【没有上限】唯一能证明"时间没走"的事实是"同一段**非零**内容被逐块
-                // 重复投递"（`flowing()` 里的 `stalled`），而它已经判过了。再叠一层
-                // 与宿主无关的帧数上限，只会把连续音频切在恰好那个常数上。
+            } else if transport_active && geometry.flowing() {
+                // 计数器：只在 transport_active 时才有权推进。停播块永远走不到这里。
                 position = anchor.saturating_add(offset);
                 counted = true;
                 advanced = true;
@@ -411,18 +470,16 @@ impl ExtensionOwner {
                 geometry
                     .counted_frames
                     .fetch_add(frames as u64, Ordering::Relaxed);
-                geometry.counted_run.fetch_add(frames as u64, Ordering::Relaxed);
+                geometry
+                    .counted_run
+                    .fetch_add(frames as u64, Ordering::Relaxed);
             }
             if !advanced {
-                // 【停播：位置回到宿主报的那个点】没有任何证据说明时间在走，而宿主
-                // 反复投递的是同一个位置 —— 继续累加等于把停播时间算成播放时间，
-                // 捕获于是把同一小段反复写成新素材（FL Studio 的既有回归）。
-                //
-                // 【为什么要清 `counted_run`】计数器此刻**没有**留下任何仍然生效的
-                // 记账：位置就是锚点。留着它会让"停播很久之后的一次 seek"被误判成
-                // 时间基切换（那会把已经写下的首段整段平移走）。
                 position = anchor;
                 offset = 0;
+                // 停播期间送来的帧不是播放时间；下一次真正流动时必须从当前锚点
+                // 重新起算，而不是把停播时长一次性加到位置上。
+                geometry.frames_since_anchor.store(0, Ordering::Release);
                 geometry.counted_run.store(0, Ordering::Release);
             }
             geometry.frames_since_anchor.store(
@@ -464,7 +521,10 @@ impl ExtensionOwner {
 
         // ── 相位 ──────────────────────────────────────────────────────
         let activity_moving = geometry.activity_moving();
-        let phase = if !had {
+        let phase = if !transport_active {
+            geometry.same_start.fetch_add(1, Ordering::AcqRel);
+            TransportPhase::Resting
+        } else if !had {
             geometry.same_start.store(0, Ordering::Release);
             geometry.extension_used.store(false, Ordering::Release);
             TransportPhase::Start
@@ -555,9 +615,32 @@ impl ExtensionOwner {
         );
         geometry.last_source.store(source.code(), Ordering::Release);
         geometry.last_playing.store(playing, Ordering::Release);
+        geometry
+            .session_phase
+            .store(decision.phase.code(), Ordering::Release);
+        geometry
+            .session_epoch
+            .store(session.epoch, Ordering::Release);
+        geometry
+            .session_frames
+            .store(session.session_frames, Ordering::Release);
         if stream == ProcessStream::Realtime {
             self.realtime_flow
                 .store(phase != TransportPhase::Resting, Ordering::Release);
+        }
+        // 第一次真正有权的块把 Unknown 落成 ProjectAbsolute：Event FX 的首段在
+        // 切换前本来就报绝对位置，落成 project 不会改变映射，只让诊断可读。
+        if transport_active && is_offline {
+            geometry
+                .timebase_kind
+                .store(TimebaseKind::OfflineLocal.code(), Ordering::Release);
+        } else if transport_active
+            && TimebaseKind::from_code(geometry.timebase_kind.load(Ordering::Acquire))
+                == Some(TimebaseKind::Unknown)
+        {
+            geometry
+                .timebase_kind
+                .store(TimebaseKind::ProjectAbsolute.code(), Ordering::Release);
         }
 
         // 【resync：宿主纠正了我们数出来的位置】这不是 seek，是记账纠正 —— 真正的
@@ -565,6 +648,7 @@ impl ExtensionOwner {
         let resync = had
             && !time.cycle_active
             && !new_pass
+            && !time_base_switch
             && host_moved
             && (counted_before > 0
                 || matches!(
@@ -586,11 +670,15 @@ impl ExtensionOwner {
             discard_pre_roll,
             // 【起播窗口 = 计数器此刻有权威，且它还没数满一个前导窗口】它只服务
             // 门控的"窗口内静音也要放行"，**不约束位置推进**（见 PRE_ROLL_CAP_SEC）。
-            start_window: counted
-                && geometry.counted_run.load(Ordering::Acquire) > 0
-                && geometry.counted_run.load(Ordering::Acquire) <= pre_roll_cap,
+            start_window: start_window_open,
             repeated_nonzero,
             position_source: source,
+            epoch: session.epoch,
+            transport_active,
+            new_epoch,
+            rebase_frames,
+            timebase: TimebaseKind::from_code(geometry.timebase_kind.load(Ordering::Acquire))
+                .unwrap_or(TimebaseKind::Unknown),
         }
     }
 
@@ -737,11 +825,14 @@ impl ExtensionOwner {
         &self,
         data: *mut crate::audio_abi::ProcessData,
         context: &crate::audio_abi::ProcessContext,
+        effective_position: Option<i64>,
     ) -> Option<BlockEvidence> {
         let capture = self.capture();
         // SAFETY: 调用方保证 data 在本回调期间可读。
         let mode = unsafe { (*data).process_mode };
-        let stream = ProcessStream::from_mode(mode);
+        let Some(stream) = ProcessStream::from_mode(mode) else {
+            return None;
+        };
         // 【为什么离线也要记】它决定前端显示哪一条引导：走过 bounce 的宿主可以
         // "点一次 Capture 然后导出"，而实时宿主必须真的播一遍。
         if stream == ProcessStream::Offline {
@@ -761,9 +852,9 @@ impl ExtensionOwner {
         let recording = context.state & crate::audio_abi::PROCESS_CONTEXT_RECORDING != 0;
         // SAFETY: 与 `audio_process_inner` 同一份宿主提供的 ProcessData；`capture_view`
         // 的切片只在本次回调内有效，而消费方同步读完就返回。
-        let block = unsafe {
-            crate::audio_abi::capture_view(data, context.project_time_samples, rate, playing)
-        };
+        let effective_position = effective_position.unwrap_or(context.project_time_samples);
+        let block =
+            unsafe { crate::audio_abi::capture_view(data, effective_position, rate, playing) };
         // 【为什么未武装也要观察】观察位描述"宿主实际做了什么"，而录制按钮的门
         // （`canCapture`）读的正是 `saw_context`。此前观察发生在武装**之后**，于是
         // "必须先录一次才能录"——按钮永远是灰的，Capture 在所有宿主上都用不了。
@@ -794,15 +885,19 @@ impl ExtensionOwner {
         // 【为什么位置是否推进要按流记】它决定"停播时要不要清输出"与捕获的
         // lookbehind。两条流的块会交替到达；跨流比较会把 prefetch 的移动当成
         // 实时流“在前进”的证据（用户听到的开头小段循环）。
-        let stream_block = self.note_stream_block(
+        let stream_block = self.note_stream_block_at(
             stream,
             context,
             block.frames,
             playing_rising,
             recording_rising,
+            Some(effective_position),
         );
-        // `kPlaying` 上升沿意味着一次新的播放会话：允许同一区间再出音一次。
-        if stream == ProcessStream::Realtime && playing_rising {
+        if stream_block.new_pass {
+            self.clear_rung_latch();
+        }
+        // 新播放会话：允许同一区间再出音一次。
+        if stream == ProcessStream::Realtime && (playing_rising || stream_block.new_epoch) {
             self.rt_last_emitted_valid.store(false, Ordering::Release);
             // 【为什么帧数也要清】起播第一块与停播最后一块可能同起点、同长度；
             // 只清 `valid` 已经足够，但把帧数一并归零让"下一次比较"不依赖旧值。
@@ -812,7 +907,7 @@ impl ExtensionOwner {
             self.rt_last_read_position.store(0, Ordering::Release);
         }
         let split = self.block_split(context, block.frames, rate, stream_block.position);
-        let cycle_start = self.cycle_start_position(context, rate);
+        let cycle_start = self.cycle_start_position(context, rate, stream_block.position);
         let allow_output = self.allow_output_for(
             stream,
             &block,
@@ -848,6 +943,15 @@ impl ExtensionOwner {
                     cycle_wrap: stream_block.cycle_wrap,
                     cycle_start,
                     new_pass: stream_block.new_pass,
+                    transport_active: stream_block.transport_active,
+                    start_window: stream_block.start_window,
+                    epoch: stream_block.epoch,
+                    new_epoch: index == 0 && stream_block.new_epoch,
+                    rebase_frames: if index == 0 {
+                        stream_block.rebase_frames
+                    } else {
+                        0
+                    },
                     part: index.min(u8::MAX as usize) as u8,
                     advancing: stream_block.activity_moving,
                     resync: stream_block.resync,
@@ -870,6 +974,25 @@ impl ExtensionOwner {
             } else {
                 combine_capture_outcomes(outcome, part_outcome)
             };
+        }
+        let _ = stream_block.timebase;
+        // 【Capture / 离线本地时钟】Event FX 捕获时 kPlaying 可能全程为 0，
+        // 而捕获仍在按块推进；把这条本地位置发布给 TransportClock，前端才能
+        // 用 60 Hz 视觉播放头画带子。停播/未录制时 playing=false，不贡献播放位。
+        if let Some(clock) = self.clock.get() {
+            let recording = matches!(outcome, crate::capture::CaptureBlockOutcome::Capturing);
+            if stream == ProcessStream::Prefetch {
+                // prefetch 的位置是渲染进度，不是播放头；不能发布到 UI。
+            } else if !self.capture.is_armed() && stream != ProcessStream::Offline {
+                // 未武装的实时块不贡献 Capture 时钟；否则每个宿主块都会推进
+                // sample_seq，前端会把空采样当成新读数。
+            } else {
+                clock.publish_capture_block(
+                    stream_block.position as f64 / rate.max(1.0),
+                    recording || stream == ProcessStream::Offline,
+                    stream == ProcessStream::Offline,
+                );
+            }
         }
         self.note_block_trace(
             context.state,
@@ -905,6 +1028,7 @@ impl ExtensionOwner {
             start_window: stream_block.start_window,
             repeated_nonzero: stream_block.repeated_nonzero,
             cycle_wrap: stream_block.cycle_wrap,
+            rebase_frames: stream_block.rebase_frames,
             split,
         })
     }
@@ -917,6 +1041,7 @@ impl ExtensionOwner {
         &self,
         context: &crate::audio_abi::ProcessContext,
         rate: f64,
+        position: i64,
     ) -> Option<i64> {
         let time = StreamTime::from_context(context);
         if !time.cycle_active || !time.cycle_valid {
@@ -927,7 +1052,7 @@ impl ExtensionOwner {
         };
         let beats = music - time.cycle_start_music;
         let frames = (beats * 60.0 / tempo * rate).round() as i64;
-        Some(context.project_time_samples.saturating_sub(frames).max(0))
+        Some(position.saturating_sub(frames).max(0))
     }
 
     /// 计算循环边界切分。只有在 cycle 元数据完整、且本块确实横跨 loop 终点时才切。
@@ -967,15 +1092,14 @@ impl ExtensionOwner {
             return BlockSplit::whole(position, frames);
         }
         let to_end = to_end as usize;
-        let wrapped = context
-            .project_time_samples
+        let wrapped = position
             .saturating_add(to_end as i64)
             .saturating_sub(length)
             .max(0);
         self.cycle_splits.fetch_add(1, Ordering::Relaxed);
         BlockSplit::split(
             SubBlock {
-                position: context.project_time_samples,
+                position,
                 input_offset: 0,
                 frames: to_end,
             },
@@ -1117,7 +1241,8 @@ impl ExtensionOwner {
         let evidence = evidence?;
         // 【循环回卷不是跳变】回卷让块首回到循环起点，而本函数的判据是"本块起点与
         // 上一块终点的差"。不排除它，每一圈都会多装一次接缝淡化（每圈开头一下咔）。
-        if evidence.cycle_wrap {
+        if evidence.cycle_wrap || evidence.rebase_frames != 0 {
+            // 循环回卷与时间基切换都让块首变化，但音频是连续的；那不是读游标跳变。
             return None;
         }
         let previous = self.rt_last_read_position.load(Ordering::Acquire);

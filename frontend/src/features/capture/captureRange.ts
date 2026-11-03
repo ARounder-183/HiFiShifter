@@ -35,6 +35,8 @@ export interface CaptureBands {
     bands: CaptureBand[];
     /** 当前位置（工程秒）：捕获中唯一"在动"的东西。 */
     positionSec: number;
+    /** 带右缘允许领先的最大秒数（由后端块长自适应）。 */
+    leadSec: number;
 }
 
 /**
@@ -78,15 +80,20 @@ export function deriveCaptureBands(
     bands.sort((a, b) => a.startSec - b.startSec);
 
     const positionSec = frameToSec(capture.positionFrame, rate);
+    const blockFrames =
+        typeof capture.blockFrames === "number" && capture.blockFrames > 0
+            ? capture.blockFrames
+            : 0;
+    const leadSec = blockFrames > 0 ? Math.max(0.3, (4 * blockFrames) / rate) : MAX_LEAD_SEC;
     // 【空列表也要返回】此前 `bands.length === 0` 直接 `null`，于是录制刚起或 seek
     // 之后**连位置线一起消失** —— 用户以为捕获停了。位置线不依赖任何一段已经成立。
-    if (bands.length === 0) return { bands, positionSec };
+    if (bands.length === 0) return { bands, positionSec, leadSec };
 
     const last = bands[bands.length - 1];
     // 【右缘只能朝"刚录到的地方"延伸】此前无条件把最后一段拉到 `positionFrame`：
     // 前向 seek 之后 `positionFrame` 立刻跳到新位置，而那里**一个样本都没录**，
     // 带子于是横跨整个空洞。判据改成"位置落在最后一段的右缘附近"。
-    const withinReach = positionSec >= last.endSec && positionSec <= last.endSec + MAX_LEAD_SEC;
+    const withinReach = positionSec >= last.endSec && positionSec <= last.endSec + leadSec;
     if (withinReach) last.endSec = positionSec;
     // 【视觉播放头只用来补齐轮询间隙】它比 `positionFrame` 新（60 Hz vs 5 Hz），
     // 但仍必须服从同一条"不许横跨空洞"的纪律，并且延伸量有上限：视觉值自带
@@ -98,10 +105,10 @@ export function deriveCaptureBands(
     // 光标在动、带子不动"。录制中就是录制中：带子该长。
     const following = status?.state === "recording";
     if (following && typeof visualPlayheadSec === "number" && Number.isFinite(visualPlayheadSec)) {
-        const lead = Math.min(visualPlayheadSec, last.endSec + MAX_LEAD_SEC);
+        const lead = Math.min(visualPlayheadSec, last.endSec + leadSec);
         if (lead > last.endSec) last.endSec = lead;
     }
-    return { bands, positionSec: Math.max(positionSec, last.startSec) };
+    return { bands, positionSec: Math.max(positionSec, last.startSec), leadSec };
 }
 
 /**

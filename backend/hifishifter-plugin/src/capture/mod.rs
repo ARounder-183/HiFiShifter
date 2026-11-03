@@ -36,7 +36,8 @@ use crate::render::snapshot::PlaybackSnapshot;
 use crate::render::source::SourcePcm;
 use crate::sync::MutexExt;
 use recorder::{
-    BlockContext, Capture, CaptureOutcome, ClosedReason, ProcessStream, Segment, TransportPhase,
+    BlockContext, Capture, CaptureOutcome, CapturePhase, ClosedReason, ProcessStream, Segment,
+    TransportPhase,
 };
 use timeline::ProjectionTake;
 // 【为什么单独 re-export】编辑器会话的测试要按真实形状喂音频块（`on_block`），
@@ -102,6 +103,9 @@ impl Default for CaptureOptions {
 pub(crate) struct CaptureTake {
     pub id: u64,
     pub sample_rate: u32,
+    /// 内容身份（由 PCM 派生，take_id 不参与）。
+    pub content_id: String,
+    pub content_hash: [u8; 32],
     pub segments: Vec<Segment>,
     /// 本次录制自己的摘要（面板的 take 列表用它）。
     ///
@@ -163,6 +167,8 @@ pub(crate) struct CaptureSpan {
     pub end_frame: i64,
     /// 当前块首（= 实时右边缘）。
     pub position_frame: i64,
+    /// 最近一块的帧数（前端据此自适应捕获带右缘）。
+    pub block_frames: u32,
     pub sample_rate: u32,
     /// 已覆盖区间的**列表**（升序、互不相交、相邻已合并）。
     ///
@@ -235,6 +241,8 @@ pub(crate) struct MaterialSpan {
 pub(crate) struct CaptureStatus {
     /// `"empty"` / `"standby"` / `"recording"` / `"ready"`。
     pub state: &'static str,
+    /// Capture 自身的相位（standby/starting/recording/paused/stopped）。
+    pub phase: &'static str,
     /// 已武装但宿主还没播过：**等的是用户去按播放**，不是在积累素材。
     ///
     /// 【为什么与 `state == "recording"` 分开】两者对用户是完全不同的等待。
@@ -289,6 +297,8 @@ pub(crate) struct CaptureStore {
     /// `on_block` 里镜像（那里本来就持有锁），其余写入点是 `start`/`stop`/`cancel`/`clear`
     /// 这些非音频路径。
     capture_started: AtomicBool,
+    /// 本块是否真的在写（音频线程镜像；停播时立即清零）。
+    recording_active: AtomicBool,
     /// 捕获状态。音频线程只 `try_lock` —— 拿不到就跳过这一块并计数，
     /// **绝不阻塞**。非音频线程持有它做补缓冲/收段/promote。
     capture: Mutex<Capture>,
@@ -370,6 +380,7 @@ impl Default for CaptureStore {
         Self {
             armed: AtomicBool::new(false),
             capture_started: AtomicBool::new(false),
+            recording_active: AtomicBool::new(false),
             capture: Mutex::new(Capture::default()),
             takes: Mutex::new(Vec::new()),
             missing: Mutex::new(Vec::new()),
@@ -479,6 +490,28 @@ impl BypassSlots {
         self.slots.iter().filter(|slot| slot.is_some()).count()
     }
 }
+/// 由 PCM 内容哈希生成稳定的内容 id。
+pub(crate) fn content_id_for_hash(hash: &[u8; 32]) -> String {
+    let mut hex = String::with_capacity(64);
+    for byte in hash {
+        use std::fmt::Write as _;
+        let _ = write!(&mut hex, "{byte:02x}");
+    }
+    format!("capture://blake3:{hex}")
+}
+
+fn parse_content_hash(value: &str) -> Option<[u8; 32]> {
+    if value.len() != 64 {
+        return None;
+    }
+    let mut bytes = [0_u8; 32];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        let text = std::str::from_utf8(pair).ok()?;
+        bytes[index] = u8::from_str_radix(text, 16).ok()?;
+    }
+    Some(bytes)
+}
+
 impl CaptureStore {
     /// 音频线程早退用的廉价判据。
     pub(crate) fn is_armed(&self) -> bool {
@@ -492,6 +525,11 @@ impl CaptureStore {
     /// （见 `ExtensionOwner::capture_output`）。
     pub(crate) fn capture_started(&self) -> bool {
         self.capture_started.load(Ordering::Acquire)
+    }
+
+    /// 本块是否真的在写。与 capture_started（历史单调位）分开，停播时立即为假。
+    pub(crate) fn recording_active(&self) -> bool {
+        self.recording_active.load(Ordering::Acquire)
     }
 
     /// 宿主**此刻**是否在播放（面板读数；任一未绑定进程流说在播即算在播）。
@@ -543,7 +581,7 @@ impl CaptureStore {
     /// 【首块的 flow 不算录制证据】`flow == true && had_previous == false` 只说明
     /// 这是本流的第一块；把它当起播会让“武装后宿主还钉在光标处”的第一个块直通一次。
     pub(crate) fn is_recording_with_flow(&self, flow: bool) -> bool {
-        self.is_armed() && (self.capture_started() || self.capture_stream_playing() || flow)
+        self.is_armed() && (self.recording_active() || self.capture_stream_playing() || flow)
     }
 
     /// 带“本块证据”的录制判定（输出仲裁的唯一入口）。
@@ -553,6 +591,11 @@ impl CaptureStore {
     ) -> bool {
         if !self.is_armed() {
             return false;
+        }
+        // 离线 pass 的“在播”是渲染进度，不是用户正在录。未武装时一律按非录制处理，
+        // 否则预览会把处理结果清成静音；武装时只有真的在写才按录制处理。
+        if evidence.is_some_and(|evidence| evidence.stream == ProcessStream::Offline) {
+            return self.recording_active();
         }
         // 【Resting 是“位置没动”的最强证据】即使捕获流上一块的 kPlaying 还是 1，
         // 同一块首的重复也不能被当成“仍在录制”。上升沿例外：真正的起播首块可以与
@@ -565,7 +608,7 @@ impl CaptureStore {
                 return false;
             }
         }
-        if self.capture_started() || self.capture_stream_playing() {
+        if self.recording_active() || self.capture_stream_playing() {
             return true;
         }
         evidence.is_some_and(|evidence| {
@@ -711,8 +754,23 @@ impl CaptureStore {
         // 【上一次录制留下的旁路块必须先清掉】见 `discard_bypass`。
         self.discard_bypass();
         if self.is_armed() {
-            return Ok(());
+            // 【重复按录制不是幂等 no-op】上一张 take 已经写过素材时，必须先把
+            // 它 finish/promote，再开新 take；否则新一遍会被写进同一段，听起来
+            // 像上一遍的延伸。纯待命（还没播过）才允许幂等重置。
+            let has_material = self.recording_active()
+                || self.capture_started()
+                || self.capture.lock_or_recover().is_started();
+            if has_material {
+                let _ = self.stop();
+            } else {
+                *self.capture.lock_or_recover() = Capture::default();
+                self.capture_started.store(false, Ordering::Release);
+                self.recording_active.store(false, Ordering::Release);
+                self.capture_stream.store(0, Ordering::Release);
+                self.armed.store(false, Ordering::Release);
+            }
         }
+        self.finish_auto_stopped();
         let rate = self.project_rate.load(Ordering::Acquire);
         if rate <= 0 {
             return Err(
@@ -721,10 +779,6 @@ impl CaptureStore {
                     .into(),
             );
         }
-        // 【为什么在这里先收尾】`service()` 会自动 promote 自己停下的捕获，但万一它还没
-        // 跑过（插件窗口从未打开 ⇒ 会话 actor 从未创建），那些段就会在下面被
-        // `capture.start` 覆盖掉 —— 静默的数据丢失。收尾把它变成一次正常的 take。
-        self.finish_auto_stopped();
         let options = self.options();
         let capacity = ((options.segment_sec * rate as f64).round() as usize).max(1);
         // 【为什么上限在这里换算成帧】`max_duration_sec` 是用户单位（秒），而音频线程
@@ -750,15 +804,28 @@ impl CaptureStore {
         // 新的一次录制：上一次的停止原因不再与用户相关。
         self.last_closed.store(0, Ordering::Release);
         self.capture_started.store(false, Ordering::Release);
+        self.recording_active.store(false, Ordering::Release);
         self.capture_stream.store(0, Ordering::Release);
         self.armed.store(true, Ordering::Release);
         Ok(())
+    }
+
+    /// 宿主停止处理：只暂停，不结束 take。
+    pub(crate) fn pause(&self) {
+        self.recording_active.store(false, Ordering::Release);
+        self.capture_stream.store(0, Ordering::Release);
+        // setProcessing 可能在音频线程上调用：拿不到锁就只撤回原子读数，
+        // 真正的 phase 会在下一次 transport_active=false 的块上冻结。
+        if let Ok(mut capture) = self.capture.try_lock() {
+            capture.pause();
+        }
     }
 
     /// 停止录制并 promote 成一个 take。
     pub(crate) fn stop(&self) -> Result<u64, String> {
         self.armed.store(false, Ordering::Release);
         self.capture_started.store(false, Ordering::Release);
+        self.recording_active.store(false, Ordering::Release);
         self.capture_stream.store(0, Ordering::Release);
         self.discard_bypass();
         let segments = self.capture.lock_or_recover().finish(ClosedReason::Stopped);
@@ -783,6 +850,7 @@ impl CaptureStore {
     pub(crate) fn cancel(&self) {
         self.armed.store(false, Ordering::Release);
         self.capture_started.store(false, Ordering::Release);
+        self.recording_active.store(false, Ordering::Release);
         self.capture_stream.store(0, Ordering::Release);
         self.discard_bypass();
         let mut capture = self.capture.lock_or_recover();
@@ -795,6 +863,7 @@ impl CaptureStore {
     pub(crate) fn clear(&self) {
         self.armed.store(false, Ordering::Release);
         self.capture_started.store(false, Ordering::Release);
+        self.recording_active.store(false, Ordering::Release);
         self.capture_stream.store(0, Ordering::Release);
         self.discard_bypass();
         *self.capture.lock_or_recover() = Capture::default();
@@ -850,6 +919,8 @@ impl CaptureStore {
                     // 语义是"最近一次录制"。读回时只用于显示，不再决定渲染什么。
                     "active": Some(take.id) == latest,
                     "sampleRate": take.sample_rate,
+                    "contentId": take.content_id,
+                    "contentHash": take.content_hash.iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
                     "frames": frames,
                     "startSec": start_sec,
                     "endSec": end_sec,
@@ -886,8 +957,8 @@ impl CaptureStore {
             {
                 continue;
             }
-            let segments = match sidecar::read(&path) {
-                Ok(segments) => segments,
+            let (mut segments, read_hash) = match sidecar::read_with_hash(&path) {
+                Ok(value) => value,
                 Err(error) => {
                     log::warn!("[capture] take {id} could not be restored: {error}");
                     // 【为什么把失败也报出来】这条路径最常见的成因不是"文件损坏"，而是
@@ -920,10 +991,23 @@ impl CaptureStore {
                 continue;
             };
             let sample_rate = first.sample_rate;
+            let content_hash = entry["contentHash"]
+                .as_str()
+                .and_then(parse_content_hash)
+                .unwrap_or(read_hash);
+            let content_id = entry["contentId"]
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| content_id_for_hash(&content_hash));
+            for segment in &mut segments {
+                segment.source_key = Some(content_id.clone());
+            }
             let (_, summary) = timeline::build(&segments, id, 120.0);
             self.takes.lock_or_recover().push(CaptureTake {
                 id,
                 sample_rate,
+                content_id,
+                content_hash,
                 segments,
                 summary,
                 // 侧车格式不携带前导帧数（它只是段 PCM 的落盘副本）。恢复的 take
@@ -1053,6 +1137,9 @@ impl CaptureStore {
         ctx: BlockContext,
     ) -> CaptureBlockOutcome {
         if !self.is_armed() {
+            // 未武装时任何残留的“正在写”都必须撤回；离线预览也必须走输出仲裁的
+            // 处理结果分支，而不是被上一轮录制的 recording_active 误判成录制中。
+            self.recording_active.store(false, Ordering::Release);
             return CaptureBlockOutcome::Idle;
         }
         // 【T19：先把上一轮竞争留下的块补写进去】补写必须在**拿到锁之后**做，
@@ -1110,11 +1197,16 @@ impl CaptureStore {
             CaptureOutcome::Captured | CaptureOutcome::SilentInput => {
                 // 镜像"已经开始录"这个事实给无锁读者（输出仲裁）。
                 self.capture_started.store(true, Ordering::Release);
+                self.recording_active.store(true, Ordering::Release);
                 CaptureBlockOutcome::Capturing
             }
             CaptureOutcome::NoPosition => CaptureBlockOutcome::NoPosition,
             // 待命或暂停：本块没写。**不改任何状态** —— 这正是"停播不结束录制"的落点。
-            CaptureOutcome::NotPlaying => CaptureBlockOutcome::NotPlaying,
+            CaptureOutcome::NotPlaying => {
+                // 停播：输出仲裁立刻回到处理结果，捕获不再增长。
+                self.recording_active.store(false, Ordering::Release);
+                CaptureBlockOutcome::NotPlaying
+            }
             // 同一区间被重复投递：不是新素材，但也不是“宿主没在播”。
             CaptureOutcome::Repeated => CaptureBlockOutcome::Repeated,
             CaptureOutcome::RateChanged
@@ -1339,6 +1431,7 @@ impl CaptureStore {
         let started = capture.is_started();
         CaptureReadings {
             started,
+            phase: capture.phase(),
             limit_warning: capture.limit_warning(),
             // 【为什么待命期没有录制读数】那些读数（已录帧数、峰值、分段数）在宿主播放
             // 之前全是零，而"已录 0.0 秒"正是用户把待命误读成失败的那句话。待命的答案
@@ -1355,6 +1448,7 @@ impl CaptureStore {
                 start_frame: span.start,
                 end_frame: span.end,
                 position_frame: capture.last_position().unwrap_or(span.end),
+                block_frames: capture.last_block_frames(),
                 sample_rate,
                 runs: capture.covered_runs(),
             }),
@@ -1479,8 +1573,15 @@ impl CaptureStore {
         // 【为什么"待命"是独立一档】武装之后、宿主播放之前，素材一定还是零 —— 而那与
         // "正在录"是两种不同的等待：前者等用户去按播放，后者在积累素材。合成一句
         // "已录 0.0 秒"会让待命看起来像失败（用户反馈里的"点了录制没反应"）。
+        let phase = if armed {
+            readings.phase
+        } else if take_count > 0 {
+            CapturePhase::Stopped
+        } else {
+            CapturePhase::Standby
+        };
         let state = if armed {
-            if readings.started {
+            if phase.is_recording() {
                 "recording"
             } else {
                 "standby"
@@ -1492,7 +1593,8 @@ impl CaptureStore {
         };
         CaptureStatus {
             state,
-            standby: armed && !readings.started,
+            phase: phase.as_str(),
+            standby: armed && !phase.is_recording(),
             recording: readings.recording,
             capture: readings.span,
             material: self.material_summary(),
@@ -1573,6 +1675,19 @@ impl CaptureStore {
         self.with_projection(sources_for)
     }
 
+    /// 内容 id -> 稳定的分析指纹（取 BLAKE3 前 8 字节）。
+    pub(crate) fn content_fingerprints(&self) -> HashMap<String, u64> {
+        self.takes
+            .lock_or_recover()
+            .iter()
+            .map(|take| {
+                let bytes = &take.content_hash[..8];
+                let stamp = u64::from_le_bytes(bytes.try_into().expect("8 bytes"));
+                (take.content_id.clone(), stamp)
+            })
+            .collect()
+    }
+
     /// 素材的**未处理** PCM，做成一份可直接发布的快照（"原始磁带"）。
     ///
     /// 【为什么用 `PlaybackSnapshot` 的形状】处理结果与原始磁带同形，于是音频线程只有
@@ -1603,6 +1718,11 @@ impl CaptureStore {
         }
         let id = self.next_take_id.fetch_add(1, Ordering::AcqRel);
         let sample_rate = all[0].sample_rate;
+        let content_hash = sidecar::content_hash(&all);
+        let content_id = content_id_for_hash(&content_hash);
+        for segment in &mut all {
+            segment.source_key = Some(content_id.clone());
+        }
         // 【为什么这条日志是必需的】round 16 的 T1 让前导静音能进入段首，但没有任何
         // 读数回答"它到底有没有进入"。`pre_roll_frames == 0` 而这次确实走过起播窗口
         // （有块被暂存 / 窗口被桥接）时，快照的覆盖起点就落在**内容起点**而不是
@@ -1680,7 +1800,7 @@ impl CaptureStore {
         // 写；放在 `getState` 里就等于在宿主每次自动保存时都写一遍。而 promote 是
         // 用户刚做完的动作，等它有明确的语义（"我刚录完"），且只发生一次。
         let sidecar = sidecar::default_dir().and_then(|dir| {
-            match sidecar::write(&dir, id, &all) {
+            match sidecar::write_with_hash(&dir, id, &content_hash, &all) {
                 Ok(path) => Some(path),
                 Err(error) => {
                     // 落盘失败不该丢掉这次录制：内存里那份仍然可用，只是重启后不在。
@@ -1692,6 +1812,8 @@ impl CaptureStore {
         let take = CaptureTake {
             id,
             sample_rate,
+            content_id,
+            content_hash,
             segments: all,
             summary,
             pre_roll_frames: diagnostics.pre_roll_frames,
@@ -1714,6 +1836,7 @@ impl CaptureStore {
 struct CaptureReadings {
     /// 宿主是否已经播过至少一块（`false` = 待命）。
     started: bool,
+    phase: recorder::CapturePhase,
     /// 距单次录制上限不足 10 秒。
     limit_warning: bool,
     /// 录制中读数（未武装时 `None`）。
@@ -1770,6 +1893,8 @@ fn allocate_spare(capacity: usize, channels: u8) -> Option<Segment> {
         filled: 0,
         loss: recorder::SegmentLoss::First,
         loop_start: None,
+        pass_id: 0,
+        source_key: None,
         peak: [0.0; 2],
         closed: ClosedReason::Full,
         coverage: std::array::from_fn(|_| 0..0),
@@ -1794,7 +1919,7 @@ fn sources_for(takes: &[ProjectionTake<'_>]) -> HashMap<String, Arc<SourcePcm>> 
         .iter()
         .map(|tape| {
             (
-                timeline::source_id(tape.take),
+                tape.source_key(),
                 Arc::new(SourcePcm {
                     // 【T-S1-1：覆盖跟着源一起走】`concat_planes` 把"我们没拿到样本"
                     // 的帧写成数字零；不带覆盖的话，下游无法把那段零与"用户真的安静"
@@ -2085,6 +2210,34 @@ mod tests {
         );
     }
 
+    /// 已录过素材时再次按录制：先 promote 旧 take，再开新 take。
+    #[test]
+    fn starting_again_finishes_the_previous_take_instead_of_extending_it() {
+        let store = store();
+        store.start().unwrap();
+        let samples: &'static [f32] = Box::leak(vec![0.2_f32; 512].into_boxed_slice());
+        store.on_block(InputBlock {
+            start: 0,
+            frames: 512,
+            sample_rate: 48_000.0,
+            planes: [Some(samples), Some(samples)],
+            playing: true,
+        });
+        // 第二次按录制：旧 take 必须先落袋，不能把新一遍续在旧段上。
+        store.start().unwrap();
+        assert_eq!(store.status().take_count, 1);
+        store.on_block(InputBlock {
+            start: 0,
+            frames: 512,
+            sample_rate: 48_000.0,
+            planes: [Some(samples), Some(samples)],
+            playing: true,
+        });
+        let id = store.stop().unwrap();
+        assert_eq!(store.status().take_count, 2);
+        assert!(id >= 2);
+    }
+
     /// 取消录制不留 take。
     #[test]
     fn cancelling_leaves_no_take() {
@@ -2276,6 +2429,8 @@ mod tests {
             filled: 512,
             loss: recorder::SegmentLoss::First,
             loop_start: None,
+            pass_id: 0,
+            source_key: None,
             peak: [0.4; 2],
             closed: ClosedReason::Stopped,
             coverage: std::array::from_fn(|_| 0..0),

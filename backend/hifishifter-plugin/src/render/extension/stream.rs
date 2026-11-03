@@ -1,4 +1,5 @@
 //! 每条进程流的块几何、活动窗口与输出接缝状态（音频线程读写，无锁）。
+use super::timebase::TimebaseKind;
 use super::*;
 
 /// 一条进程流自己的块几何（音频线程写，无锁）。
@@ -69,6 +70,20 @@ pub(super) struct StreamGeometry {
     pub(super) domain_offset: AtomicI64,
     /// 上一块的 `kPlaying`（"停播很久之后的上升沿"需要它）。
     pub(super) last_playing: AtomicBool,
+    /// 传输会话的相位（见 `transport_session::SessionPhase`）。
+    pub(super) session_phase: AtomicU8,
+    /// 传输会话序号。每次新的播放 / 离线 pass 递增。
+    pub(super) session_epoch: AtomicU64,
+    /// 本会话已经收到的帧数（用于 2 秒域切换窗口与 1 秒起点窗口）。
+    pub(super) session_frames: AtomicU64,
+    /// 当前宿主时基（见 `timebase::TimebaseKind`）。
+    pub(super) timebase_kind: AtomicU8,
+    /// 本地域偏移：local = raw + offset。
+    pub(super) timebase_offset: AtomicI64,
+    /// 最近一次整条 take 平移的帧数（诊断；正 = 向右）。
+    pub(super) last_rebase: AtomicI64,
+    /// 整条 take 平移次数。
+    pub(super) rebase_count: AtomicU64,
     /// 本流的 pass 序号（R1 递增）。`0` = 还没有过任何一块。
     pub(super) pass: AtomicU64,
     /// 锚点那一刻 `continuousTimeSamples` / `projectTimeMusic` 的读数。
@@ -310,6 +325,16 @@ pub(super) struct StreamBlock {
     /// R1–R4），所以这个字段只回答"宿主用哪个字段给的"。它**不**影响覆盖 ——
     /// 覆盖只回答"这一段样本我们拷过吗"。
     pub(super) position_source: PositionSource,
+    /// 本块所属传输 epoch。捕获侧用它判断是否跨会话。
+    pub(super) epoch: u64,
+    /// 本块是否有权推进位置/写捕获（kPlaying、离线 pass 或有界起点窗口）。
+    pub(super) transport_active: bool,
+    /// 本块开始的传输会话是否是新 epoch。
+    pub(super) new_epoch: bool,
+    /// 域切换时整条 take 需要平移的帧数；0 = 不是域切换。
+    pub(super) rebase_frames: i64,
+    /// 本块生效的宿主时基（诊断）。
+    pub(super) timebase: TimebaseKind,
 }
 
 /// 本块可用的宿主时间字段（全部可选；缺失时退回工程位置）。

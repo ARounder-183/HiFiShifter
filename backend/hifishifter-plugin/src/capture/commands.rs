@@ -118,6 +118,7 @@ fn status_json(owner: &Arc<ExtensionOwner>) -> Value {
             "startFrame": capture.start_frame,
             "endFrame": capture.end_frame,
             "positionFrame": capture.position_frame,
+            "blockFrames": capture.block_frames,
             "sampleRate": capture.sample_rate,
             "runs": runs,
         })
@@ -171,6 +172,7 @@ fn status_json(owner: &Arc<ExtensionOwner>) -> Value {
         .collect::<Vec<_>>();
     json!({
         "state": status.state,
+        "phase": status.phase,
         "missingTakes": missing,
         // 【为什么"待命"是一个独立读数】武装之后、宿主播放之前，素材一定还是零 —— 而那
         // 与"正在录"是两种不同的等待：前者等用户去按播放，后者在积累素材。前端据此

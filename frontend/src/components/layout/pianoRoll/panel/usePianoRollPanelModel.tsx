@@ -76,6 +76,7 @@ import { computeAutoFollowScrollLeft } from "../../../../utils/autoFollowScroll"
 import { readDevicePixelRatio } from "../../../../utils/devicePixelLine";
 import { useVisualPlayhead } from "../../../../hooks/useVisualPlayhead";
 import { isTransportAdvancing } from "../../../../features/session/selectors/transport";
+import { publishVisualPlayheadSec } from "../../../../features/capture/visualPlayheadBus";
 import {
     subscribeDevicePixelRatio,
     useDevicePixelRatio,
@@ -1194,6 +1195,9 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         onFrame: useCallback(
             (visualPlayheadSec: number) => {
                 visualPlayheadSecRef.current = visualPlayheadSec;
+                // 参数编辑器单独可见时也必须把视觉时钟广播给捕获带；
+                // TimelineTransportBridge 可能没有挂载。
+                publishVisualPlayheadSec(visualPlayheadSec);
                 // 标尺播放头线**不在这里写**：它由内核在帧提交里按内核视口写，
                 // 与 GL 主体播放头同源同帧（见 `sync.rulerPlayheadLine` 的说明）。
                 // 这里曾用面板的 `pxPerSecRef` 写同一条线 —— 面板缩放与内核缩放

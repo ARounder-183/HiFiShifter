@@ -23,7 +23,7 @@
  */
 import React from "react";
 
-import { MAX_LEAD_SEC, useCaptureBands } from "../../../features/capture/captureRange";
+import { useCaptureBands } from "../../../features/capture/captureRange";
 import { readVisualPlayheadSec } from "../../../features/capture/visualPlayheadBus";
 import { useDevicePixelRatio } from "../../../hooks/useDevicePixelRatio";
 import { verticalHairlineGeometry } from "../../../utils/devicePixelLine";
@@ -74,6 +74,7 @@ export const CaptureRangeLayer: React.FC<{
     // 轮询到达时它会跳回真实值 —— 有上限就不会画进空洞）。
     const lastStartSec = lastBand?.startSec ?? null;
     const lastEndSec = lastBand?.endSec ?? null;
+    const leadSec = capture?.leadSec ?? 0.3;
     React.useEffect(() => {
         if (!(pxPerSec > 0)) return undefined;
         let frame = 0;
@@ -89,9 +90,7 @@ export const CaptureRangeLayer: React.FC<{
                 // 而那里一个样本都没录）时，带子必须停在快照的右缘 —— 否则它横跨整个
                 // 空洞，等于撒谎。
                 const endSec =
-                    visual > lastEndSec && visual <= lastEndSec + MAX_LEAD_SEC
-                        ? visual
-                        : lastEndSec;
+                    visual > lastEndSec && visual <= lastEndSec + leadSec ? visual : lastEndSec;
                 const left = Math.round(lastStartSec * pxPerSec * dpr) / dpr;
                 const right = Math.round(endSec * pxPerSec * dpr) / dpr;
                 lastBandRef.current.style.width = `${Math.max(1 / dpr, right - left)}px`;
@@ -100,7 +99,7 @@ export const CaptureRangeLayer: React.FC<{
         };
         frame = requestAnimationFrame(tick);
         return () => cancelAnimationFrame(frame);
-    }, [pxPerSec, dpr, lastStartSec, lastEndSec]);
+    }, [pxPerSec, dpr, lastStartSec, lastEndSec, leadSec]);
 
     if (capture === null) return null;
     if (!(pxPerSec > 0)) return null;

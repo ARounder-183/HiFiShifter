@@ -1406,6 +1406,7 @@ unsafe extern "system" fn component_set_active(this: *mut c_void, state: i8) -> 
                     owner.is_ara_bound()
                 ));
             } else {
+                owner.note_component_deactivated();
                 crate::log_line(&format!("IComponent::setActive({state})"));
             }
             K_RESULT_OK
@@ -1613,6 +1614,7 @@ unsafe extern "system" fn audio_setup_processing(
             }
             // SAFETY: this 是存活的音频接口；setupProcessing 在 process 之前调用。
             let owner = unsafe { &(*base_from_audio(this)).extension_owner };
+            owner.set_setup_process_mode(setup.process_mode);
             // 诊断：宿主声明的单块上限（不是分配上限；当前实现不依赖它分配）。
             owner.note_max_samples_per_block(setup.max_samples_per_block);
             // 【为什么不再按采样率拒绝】此前只认 44.1/48k，其余 `kResultFalse` —— 而多数宿主
@@ -1720,8 +1722,23 @@ unsafe extern "system" fn audio_set_processing(this: *mut c_void, state: i8) -> 
             if this.is_null() {
                 return K_INVALID_ARGUMENT;
             }
+            let owner = unsafe { &(*base_from_audio(this)).extension_owner };
             if state == 0 {
-                unsafe { &(*base_from_audio(this)).extension_owner }.record_processing_stop();
+                owner.record_processing_stop();
+                owner.note_processing_stopped();
+            } else if owner.setup_process_mode() == 2 {
+                // 【离线预览的第二个入口】有些宿主（含 VEGAS 的“应用非实时事件 FX”）
+                // 在 setup 时声明 mode=2，但直到 setProcessing(true) 才真正开始预览。
+                // 这里同步准备一次；失败仍返回 OK，让宿主保留插件（产物会静音但可诊断）。
+                let started = std::time::Instant::now();
+                if let Err(error) = owner.prepare_offline_until(
+                    started + crate::render::extension::OFFLINE_PREPARE_TIMEOUT,
+                ) {
+                    crate::log_line(&format!(
+                        "Offline preparation at setProcessing(true) failed after {:?}: {error}",
+                        started.elapsed()
+                    ));
+                }
             }
             K_RESULT_OK
         })
@@ -1963,8 +1980,10 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
         if probe.symbolic_sample_size == 0 && !probe.process_context.is_null() {
             // SAFETY: VST3 processContext 的完整 SDK 结构在当前回调期间存活。
             let context = unsafe { &*probe.process_context };
+            let effective_position =
+                owner.note_offline_block(context, probe.process_mode, probe.num_samples as usize);
             owner.observe_transport(context, probe.process_mode, probe.num_samples as usize);
-            evidence = owner.capture_observe(probe, context);
+            evidence = owner.capture_observe(probe, context, effective_position);
         }
     }
     match shape {
@@ -2003,7 +2022,8 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
                 // 直接清零会在块首留下一次阶跃（正是用户听到的"咔"）。与门控清零
                 // 走同一条去咔路径：从上一块尾巴淡到零，其余帧写零。
                 // 该函数自己写满整块，因此**不能**再调 `clear_outputs`。
-                let stream = crate::capture::recorder::ProcessStream::from_mode(data.process_mode);
+                let stream = crate::capture::recorder::ProcessStream::from_mode(data.process_mode)
+                    .unwrap_or(crate::capture::recorder::ProcessStream::Realtime);
                 let frames = data.num_samples as usize;
                 let outputs = data.outputs;
                 if outputs.is_null() {

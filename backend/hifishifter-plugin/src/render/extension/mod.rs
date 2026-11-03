@@ -43,12 +43,15 @@ mod capture;
 mod declick;
 mod diagnostics;
 mod host_link;
+mod offline;
 mod playback;
 mod restore;
 mod roles;
 mod session;
 mod stream;
+mod timebase;
 mod trace;
+mod transport_session;
 mod types;
 
 // 值类型与诊断环的读数在本模块名下重新导出：子模块与测试模块都按裸名引用它们。
@@ -463,6 +466,10 @@ pub(crate) struct ExtensionOwner {
     /// 【为什么每个实例一份而不是进程一份】同一文档上可能有两个实例，一个在录、
     /// 一个在放；共享存储会让它们互相覆盖对方的 take。
     capture: crate::capture::CaptureStore,
+    /// 离线 pass 的本地 cursor（每个 pass 从 0 开始）。
+    offline_pass: OfflinePass,
+    /// 最近一次 setupProcessing 声明的 process mode。
+    setup_process_mode: AtomicI32,
     /// 最近一次为 Capture 发布快照的 take 号（`0` = 还没发过）。
     ///
     /// 【为什么需要它】`prepare()` 由 UI 定时器每 20ms 驱动一次，而一次合成要好几秒。

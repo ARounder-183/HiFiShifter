@@ -415,6 +415,8 @@ export interface SessionState {
          * **两个独立的地方都错**才会出错。
          */
         positionAgeMs: number | null;
+        /** 最近一条采样的来源：host / block / seek / capture / offline / stale。 */
+        transportSource: string;
         /**
          * 最近一条被采纳采样的单调序号（后端 `sample_seq`）。
          *

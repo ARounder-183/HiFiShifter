@@ -6,6 +6,7 @@
 
 use super::*;
 use crate::capture::InputBlock;
+use crate::render::extension::timebase::TimebaseKind;
 
 /// 一个"宿主把本插件当普通插入"的 owner：从未绑定、形态未定、窗口也没开过。
 ///
@@ -97,6 +98,7 @@ fn the_read_position_jump_is_a_pure_judgement() {
         start_window: false,
         repeated_nonzero: false,
         cycle_wrap: false,
+        rebase_frames: 0,
         split: BlockSplit::whole(48_000, 256),
     };
     // ① 没有上一块 ⇒ 没有跳变。
@@ -142,6 +144,7 @@ fn a_contiguous_block_advance_is_not_a_jump() {
         start_window: false,
         repeated_nonzero: false,
         cycle_wrap: false,
+        rebase_frames: 0,
         split: BlockSplit::whole(48_256, 256),
     };
     owner.mark_emitted_for_test();
@@ -155,6 +158,7 @@ fn a_contiguous_block_advance_is_not_a_jump() {
     // 但真的错位仍然要判出来：预期续接 48_256，本块却从 96_000 开始。
     let jumped = BlockEvidence {
         position: 96_000,
+        rebase_frames: 0,
         split: BlockSplit::whole(96_000, 256),
         ..evidence
     };
@@ -836,6 +840,7 @@ fn the_start_window_keeps_the_output_open_across_pinned_silence() {
         start_window: true,
         repeated_nonzero: false,
         cycle_wrap: false,
+        rebase_frames: 0,
         split: BlockSplit::whole(0, 512),
     };
     assert!(
@@ -905,6 +910,7 @@ fn prefetch_and_offline_never_look_stopped() {
             start_window: false,
             repeated_nonzero: false,
             cycle_wrap: false,
+            rebase_frames: 0,
             split: BlockSplit::whole(0, 512),
         };
         assert!(
@@ -926,6 +932,7 @@ fn prefetch_and_offline_never_look_stopped() {
         start_window: false,
         repeated_nonzero: false,
         cycle_wrap: false,
+        rebase_frames: 0,
         split: BlockSplit::whole(0, 512),
     };
     assert!(!owner.capture_should_emit(Some(realtime), false));
@@ -2024,7 +2031,9 @@ fn a_block_length_change_is_not_a_content_change() {
     geometry.note_activity(block_fingerprint(&long).0);
     geometry.note_activity(block_fingerprint(&short).0);
     assert_eq!(
-        geometry.unchanged_run.load(std::sync::atomic::Ordering::Acquire),
+        geometry
+            .unchanged_run
+            .load(std::sync::atomic::Ordering::Acquire),
         1,
         "同一份内容换个块长仍然是同一份内容"
     );
@@ -2055,6 +2064,7 @@ fn a_bound_instance_does_not_silence_a_prefetch_block_without_k_playing() {
         start_window: false,
         repeated_nonzero: false,
         cycle_wrap: false,
+        rebase_frames: 0,
         split: BlockSplit::whole(0, 512),
     };
     assert!(
@@ -2196,7 +2206,7 @@ fn the_context_line_reports_the_host_time_fields() {
 
 /// **计数器没有预算：宿主位置冻结、但音频在流动时，位置必须一直前进。**
 ///
-/// 【这是问题 2 的正面验收】非实时事件 FX 的**预览**里，宿主 `kPlaying` 恒为 0、
+/// 【这是问题 2 的正面验收】非实时事件 FX 的**离线预览**（process mode 2）里，宿主 `kPlaying` 恒为 0、
 /// `projectTimeSamples` 恒为 7.375 s，唯一能推进位置的只有计数器。旧实现给它两笔
 /// 各 1 秒的预算（`advance_limit` / `activity_budget`），于是捕获在**恰好 1.000 秒**
 /// 处被切断：日志里 `counted_blocks=40 counted_frames=48000`（40 × 1200 = 48000），
@@ -2208,7 +2218,7 @@ fn the_context_line_reports_the_host_time_fields() {
 #[test]
 fn the_counter_is_not_budgeted() {
     let owner = insert_owner();
-    let stream = ProcessStream::Realtime;
+    let stream = ProcessStream::Offline;
     let rate = 48_000.0_f64;
     let frames = 512_usize;
     // 第一块只建立内容指纹的基线（生产路径同样如此：`note_activity` 在几何之前调用）。
@@ -2381,6 +2391,7 @@ fn realtime_output_silences_while_a_diagnostic_runs_and_offline_does_not() {
         start_window: false,
         repeated_nonzero: false,
         cycle_wrap: false,
+        rebase_frames: 0,
         split: BlockSplit::whole(0, 512),
     };
     let offline = BlockEvidence {
@@ -2411,4 +2422,57 @@ fn realtime_output_silences_while_a_diagnostic_runs_and_offline_does_not() {
         !ExtensionOwner::diagnostic_silence_applies(Some(realtime)),
         "最后一个诊断离开后必须恢复"
     );
+}
+
+/// **Event FX 域切换：首段绝对位置必须整体平移到事件本地域，且不另起 pass。**
+#[test]
+fn event_relative_switch_maps_the_event_start_to_local_zero() {
+    let owner = insert_owner();
+    let rate = 48_000.0_f64;
+    let frames = 512_usize;
+    let event_start = 31_091_i64 * 48;
+    owner.streams[ProcessStream::Realtime.index()].note_activity(1);
+    let first = owner.note_stream_geometry(
+        ProcessStream::Realtime,
+        event_start,
+        frames,
+        rate,
+        StreamTime::default(),
+        true,
+        false,
+        true,
+    );
+    assert_eq!(first.position, event_start);
+    assert!(first.new_pass);
+    owner.streams[ProcessStream::Realtime.index()].note_activity(2);
+    let second = owner.note_stream_geometry(
+        ProcessStream::Realtime,
+        event_start + frames as i64,
+        frames,
+        rate,
+        StreamTime::default(),
+        false,
+        false,
+        true,
+    );
+    assert_eq!(second.position, event_start + frames as i64);
+    owner.streams[ProcessStream::Realtime.index()].note_activity(3);
+    let switched = owner.note_stream_geometry(
+        ProcessStream::Realtime,
+        frames as i64,
+        frames,
+        rate,
+        StreamTime::default(),
+        false,
+        false,
+        true,
+    );
+    assert_eq!(switched.position, frames as i64, "Event 起点 = 本地 0");
+    assert!(!switched.new_pass, "域切换不是新的传输会话");
+    assert_eq!(
+        switched.rebase_frames,
+        -(event_start + frames as i64),
+        "整条 take 必须平移 -event_start"
+    );
+    assert_eq!(switched.timebase, TimebaseKind::EventRelative);
 }

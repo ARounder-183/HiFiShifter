@@ -336,7 +336,7 @@ impl ExtensionOwner {
         // 【为什么只在有素材时才建】会话会起一个线程、初始化模型并建临时目录
         // （`EditorSession::new_with`）。一个插在母线上、用户早已忘记的实例不该在
         // 每次 `setupProcessing` 上都付这份代价；而没有素材时它也没有任何东西可渲染。
-        if self.capture.has_material() {
+        if self.capture.has_material() || self.pending_capture_edits.lock_or_recover().is_some() {
             if let Ok(session) = self.clone().capture_session() {
                 // 让 actor 下一轮加载时间线并排一次渲染（幂等：已加载时它只推票据）。
                 session.request_reload();
@@ -390,32 +390,36 @@ impl ExtensionOwner {
         }
     }
     /// 仅SDK规定UI线程的kOffline setup调用；不在事务锁内等待，不把旧快照当最新版本。
-    pub(crate) fn prepare_offline_until(&self, deadline: std::time::Instant) -> Result<(), String> {
+    pub(crate) fn prepare_offline_until(
+        self: &Arc<Self>,
+        deadline: std::time::Instant,
+    ) -> Result<(), String> {
         // 【为什么 Capture 要在这里同步准备】bounce / 导出是 Capture 的**第二条通路**，
         // 而它是宿主跑得最快的一次 —— 插件没有第二次机会。这里必须同步把结果准备好，
         // 否则产物里是静音。`deadline` 对它无意义：没有文档事务可等，合成本身有界。
         // 【为什么判据与 `prepare_job` 同一份】离线只跑一趟，没有第二次机会，所以这里
         // 更不能因为"窗口没开过 ⇒ 形态未落定"就把静音烘焙进产物。与实时通路共用
         // "未绑定 + 有素材"这条证据（理由见 `prepare_job` 的同名分支）。
-        if !self.is_bound() && self.capture.has_material() {
-            // 【为什么这里要**重试**】会话可能正在加载（用户刚打开工程 / actor 正在读盘）。
-            // 那时 `capture_prepare_job` 会**拒绝发布**一份没有用户曲线的结果 —— 那是对的，
-            // 因为离线渲染只有一次机会，发布出去就等于把"编辑没生效"烘焙进产物。
-            // 但"拒绝发布"之后必须**继续等**：立刻返回 Ok 会让宿主马上开始渲染。
-            //
-            // 【为什么 deadline 在这里终于有意义】此前这条分支"合成本身有界"，一次就够；
-            // 现在它可能要等一次会话加载，而那个等待必须有上界 —— 上界就是
-            // `OFFLINE_PREPARE_TIMEOUT`（宿主为它已经准备好了 15 秒）。
+        let needs_capture = !self.is_bound()
+            && (self.capture.has_material()
+                || self.pending_capture_edits.lock_or_recover().is_some());
+        if needs_capture {
+            // 【关键：先确保会话存在】离线实例可能从未打开过 GUI，曲线只在
+            // `pending_capture_edits` 里。没有会话时捕获通路会退回“只有几何”的
+            // 时间线，并把 with_curves=false 发布出去 —— 那正是“参数线不生效”。
+            // capture_session 会把 pending edits 投递给 actor，并请求加载。
+            if let Ok(session) = self.clone().capture_session() {
+                session.request_reload();
+            }
+            let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
             loop {
-                self.capture_prepare_job_offline(Arc::new(
-                    std::sync::atomic::AtomicBool::new(false),
-                ))?;
-                if !self.capture_session_pending() {
+                self.capture_prepare_job_offline(cancel.clone())?;
+                if self.capture_offline_ready()? {
                     return Ok(());
                 }
                 if std::time::Instant::now() >= deadline {
                     return Err(
-                        "offline preparation timed out waiting for the editor session to load"
+                        "offline preparation timed out waiting for the capture session/curves"
                             .into(),
                     );
                 }
