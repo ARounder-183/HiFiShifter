@@ -671,14 +671,9 @@ impl ExtensionOwner {
         // `counted=` 是"位置由计数器推进的块数"，`jumps=` 是"宿主报的位置与计数器
         // 不同"的次数。两者都大而 `rewinds` 为 0 是**健康**的：说明宿主确实钉住过
         // 位置，而每次它恢复报告时我们都跟上了。
-        // 【`resyncs` 与 `domain_switches` 为什么必须分开】前者是"宿主纠正了我们数出来
-        // 的位置"（记账误差，桥接/裁剪一段），后者是"宿主换了时间基"（整条 take 平移）。
-        // 共用一栏读数时，现场只能靠差值大小反推是哪一种 —— 而那个推断正是错的。
-        // `window_frames` 是"宿主说没在播却一直在送音频"的帧数，域切换的判据输入。
         let line = format!(
             "[capture] clock: stream={} blocks={blocks} pass={} counted={} frames={} \
              jumps={} last_jump={} rewinds={} delta_min={} delta_max={} resyncs={} \
-             domain_switches={} pass_frames={} window_frames={} \
              rising={} continuous={} music={}",
             stream.as_str(),
             geometry.pass.load(Ordering::Acquire),
@@ -690,9 +685,6 @@ impl ExtensionOwner {
             geometry.clock_delta_min.load(Ordering::Acquire),
             geometry.clock_delta_max.load(Ordering::Acquire),
             geometry.position_resyncs.load(Ordering::Acquire),
-            geometry.domain_switches.load(Ordering::Acquire),
-            geometry.pass_frames.load(Ordering::Acquire),
-            geometry.window_frames.load(Ordering::Acquire),
             geometry.rising_edges.load(Ordering::Acquire),
             geometry.continuous_used.load(Ordering::Acquire),
             geometry.music_used.load(Ordering::Acquire),

@@ -571,12 +571,6 @@ impl ExtensionOwner {
                     last_source,
                     PositionSource::Continuous | PositionSource::Music
                 ));
-        if resync {
-            // 【记账纠正单独计数】见 `log_clock_line` 里 `resyncs` 与 `domain_switches`
-            // 的分工：前者是"宿主纠正了我们数出来的位置"，后者是"宿主换了时间基"。
-            geometry.position_resyncs.fetch_add(1, Ordering::Relaxed);
-            self.position_resyncs.fetch_add(1, Ordering::Relaxed);
-        }
         StreamBlock {
             position,
             raw_start,
