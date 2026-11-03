@@ -112,8 +112,8 @@ export interface CaptureStatus {
      * "已录 0.0 秒"会让待命看起来像失败（用户反馈里的"点了录制没反应"）。
      */
     state: "empty" | "standby" | "recording" | "ready";
-    /** Capture 自身相位：standby / starting / recording / paused / stopped。 */
-    phase?: string;
+    /** Capture 自身相位：standby / starting / recording / paused / stopped / preview。 */
+    phase?: "standby" | "starting" | "recording" | "paused" | "stopped" | "preview" | string;
     /** 已武装但宿主还没播过（= `state === "standby"` 的布尔形式）。 */
     standby: boolean;
     recording: CaptureRecording | null;

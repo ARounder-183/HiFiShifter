@@ -53,7 +53,11 @@ export const isTransportAdvancing = (runtime: TransportAdvanceInput): boolean =>
     // 捕获 / 离线 pass 的时钟由后端 CaptureBlock 发布，与宿主 kPlaying 无关。
     // 它们仍在“推进”时可以让视觉播放头以 60 Hz 前进；位置冻结时 positionAdvancing
     // 为 false，光标仍会停住（停止后不漂移的同一道闸门）。
-    if (runtime.transportSource === "capture" || runtime.transportSource === "offline") {
+    if (
+        runtime.transportSource === "capture" ||
+        runtime.transportSource === "offline" ||
+        runtime.transportSource === "preview"
+    ) {
         return runtime.isPlaying && fresh;
     }
     // 【kPlaying 不是前进判据】FL Studio 停播时仍置 kPlaying=1，位置钉住；如果

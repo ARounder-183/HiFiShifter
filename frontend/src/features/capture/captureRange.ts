@@ -103,7 +103,8 @@ export function deriveCaptureBands(
     // 【为什么不再要求 `hostPlaying`】"应用非实时事件 FX" / 非实时预览里宿主从不说
     // 自己在播（`kPlaying` 全程为 0），带子于是**永远不长** —— 用户看到的是"捕获
     // 光标在动、带子不动"。录制中就是录制中：带子该长。
-    const following = status?.state === "recording";
+    const following =
+        status?.state === "recording" || status?.phase === "preview" || status?.phase === "offline";
     if (following && typeof visualPlayheadSec === "number" && Number.isFinite(visualPlayheadSec)) {
         const lead = Math.min(visualPlayheadSec, last.endSec + leadSec);
         if (lead > last.endSec) last.endSec = lead;
