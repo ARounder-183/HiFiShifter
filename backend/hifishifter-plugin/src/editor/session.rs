@@ -6011,14 +6011,31 @@ pub(crate) mod tests {
             });
         let playback =
             super::super::commands::dispatch(&editor, "get_playback_state", json!({})).unwrap();
-        let timeline =
-            super::super::commands::dispatch(&editor, "get_timeline_state", json!({})).unwrap();
+        // 【为什么播放位置是立即断言、而时间线要等】两者走的是不同的通路：播放状态
+        // 直接读时钟投影（同步），时间线是后台投影线程写进 `editor.timeline` 的快照。
+        // 立刻断言快照，在空闲机器上 20 ms 内就对，在 4 核 runner 上就会输给投影线程 ——
+        // 实测 CI 上这条偶发失败、本地连跑三次全过。判据因此写成"最终会一致"，与
+        // 同文件 `host_changes_and_bpm_sync_automatically_without_reloading` 一致。
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let playhead = loop {
+            let timeline =
+                super::super::commands::dispatch(&editor, "get_timeline_state", json!({})).unwrap();
+            if timeline["playhead_sec"].as_f64() == Some(2.) {
+                break timeline["playhead_sec"].clone();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "时间线播放头没有跟上宿主时钟: {}",
+                timeline["playhead_sec"]
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
         editor.close();
         assert_eq!(
             playback["base_sec"].as_f64().unwrap() + playback["position_sec"].as_f64().unwrap(),
             2.
         );
-        assert_eq!(timeline["playhead_sec"], 2.);
+        assert_eq!(playhead, 2.);
     }
     /// 宿主tempo/geometry通知必须在无人点击重新载入时进入原GUI。
     #[test]
