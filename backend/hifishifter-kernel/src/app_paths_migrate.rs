@@ -16,7 +16,7 @@
 //!
 //! 【为什么要原子锁】App 与插件可能**同时**启动（用户在 DAW 里打开插件，而 App 正
 //! 好在跑）。两个进程同时搬同一个目录，轻则半途失败，重则两份都不完整。锁用
-//! `create_dir» 的原子性，抢不到的一方等对方写完标记后按"已完成"处理。
+//! `create_dir` 的原子性，抢不到的一方等对方写完标记后按"已完成"处理。
 
 use crate::app_paths::{self, LegacyRoot};
 use std::path::{Path, PathBuf};
@@ -128,7 +128,7 @@ impl MigrationReport {
 /// 执行（或确认已执行）v2 布局迁移。**幂等**，可以在每次启动时无条件调用。
 ///
 /// 调用点必须是两个宿主中**最早**的一处（早于日志初始化、早于任何设置读写）：
-/// 日志初始化会创建 `HiFiShifter\logs»，一旦它先跑，旧日志目录就会被判成"新旧并存"。
+/// 日志初始化会创建 `HiFiShifter\logs`，一旦它先跑，旧日志目录就会被判成"新旧并存"。
 pub fn ensure_layout_v2() -> MigrationReport {
     let Some(local_root) = app_paths::local_data_dir() else {
         return MigrationReport::new(MigrationOutcome::Unavailable);
@@ -247,7 +247,7 @@ fn apply_redirects(root: &LegacyRoot) {
     }
 }
 
-/// 把 `from» 整棵树搬到 `to»。
+/// 把 `from` 整棵树搬到 `to`。
 ///
 /// 优先同卷 rename（原子、瞬时）；失败时退化为"逐文件拷贝 → 校验 → 删旧"。
 fn move_tree(from: &Path, to: &Path) -> Result<(), String> {
@@ -342,7 +342,7 @@ fn wait_for_marker(marker: &Path, timeout: Duration) -> bool {
     marker.exists()
 }
 
-/// 原子锁：`create_dir» 成功即持有，Drop 时删除。
+/// 原子锁：`create_dir` 成功即持有，Drop 时删除。
 struct LockGuard(PathBuf);
 
 impl LockGuard {

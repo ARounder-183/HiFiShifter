@@ -155,7 +155,7 @@ impl Drop for WindowData {
 
 /// WebView2 的出站端口：页面还没建好时 `post_message` 返回 `false`。
 pub(super) struct WindowsPort {
-    /// 建窗之后才填（§WindowData§ 必须先于 §CreateWindowExW§ 存在）。
+    /// 建窗之后才填（`WindowData` 必须先于 `CreateWindowExW` 存在）。
     hwnd: Cell<HWND>,
     /// 控制器是**异步**到的；它到达之前一切投递都只能报"投不出去"。
     controller: RefCell<Option<ICoreWebView2Controller>>,

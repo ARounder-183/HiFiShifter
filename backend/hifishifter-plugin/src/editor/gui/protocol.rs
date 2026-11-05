@@ -9,7 +9,7 @@
 //! 改另一端，放在同一个目录里才能被同一次评审看到。
 
 //
-// 【为什么 Windows 上允许 §dead_code§】本文件的消费者是 macOS/Linux 的两个原语
+// 【为什么 Windows 上允许 `dead_code`】本文件的消费者是 macOS/Linux 的两个原语
 // （自定义 scheme + 导航白名单）。Windows 用 WebView2 的虚拟主机映射，走不到它们，
 // 但判据必须继续编译 —— 否则等到那个平台时才腐烂。
 #![cfg_attr(windows, allow(dead_code))]

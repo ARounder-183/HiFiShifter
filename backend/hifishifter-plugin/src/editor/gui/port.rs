@@ -1,7 +1,7 @@
 //! 端口层：**平台无关**的两个 trait 与一个能力自述。
 //!
-//! 【为什么 Windows 上有一批 §dead_code§】本文件的消费者是 macOS/Linux 的两个原语
-//! （自定义 scheme、导航白名单、§FloatingWindow§ 降级）。Windows 用 WebView2 的虚拟
+//! 【为什么 Windows 上有一批 `dead_code`】本文件的消费者是 macOS/Linux 的两个原语
+//! （自定义 scheme、导航白名单、`FloatingWindow` 降级）。Windows 用 WebView2 的虚拟
 //! 主机，走不到它们 —— 但它们**必须**继续编译，否则等到那个平台时才腐烂。
 #![cfg_attr(windows, allow(dead_code))]
 //!

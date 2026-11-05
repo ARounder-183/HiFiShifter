@@ -3477,7 +3477,7 @@ impl EditorSession {
     }
 
     /// 参数写入前的 undo 点：先把当前 authority 挂到当前位置，再把新步的占位
-    /// 也填成“写入前”的权威；写入成功后再用 §note_authority_step§ 覆盖新步。
+    /// 也填成“写入前”的权威；写入成功后再用 `note_authority_step` 覆盖新步。
     pub(super) fn checkpoint_authority_step(&self) {
         if self.suppress_history.load(Ordering::Acquire) {
             return;

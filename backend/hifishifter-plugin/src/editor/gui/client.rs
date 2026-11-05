@@ -183,7 +183,7 @@ pub(crate) struct EditorClient {
     /// 已按下未松开的共享编辑键（去重用）。
     ///
     /// 【为什么 Linux 上是死字段】那里键盘事件直达 WebView，宿主根本不会把 Ctrl+C
-    /// 交给 §IPlugView::keyDown§，于是 §forward_edit_key§ 永远不会被调用。
+    /// 交给 `IPlugView::keyDown`，于是 `forward_edit_key` 永远不会被调用。
     #[cfg_attr(all(unix, not(target_os = "macos")), allow(dead_code))]
     forwarded_keys: HashSet<char>,
     host_replies: std::collections::HashMap<u64, HostReply>,
@@ -1587,7 +1587,7 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
 
     // 页面的第一句话：不进命令表，就地消费（见 `protocol::PAGE_READY`）。
     if request["command"] == protocol::PAGE_READY {
-        // 【为什么要回一条回执】前端用 §invoke§ 发它（那是唯一现成的请求-响应通道），
+        // 【为什么要回一条回执】前端用 `invoke` 发它（那是唯一现成的请求-响应通道），
         // 不回就等于让那个 promise 挂到 30 秒超时 —— 一条"证明通道能用"的消息
         // 自己先超时，是最糟的第一印象。
         let mut state = state.borrow_mut();

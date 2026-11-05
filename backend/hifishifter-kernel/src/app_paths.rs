@@ -1,8 +1,8 @@
 //! 全部**用户级**目录的唯一计算点：独立 App 与 VST3/ARA 插件都调它。
 //!
 //! 【为什么必须有这一处】"用户数据放哪儿"此前分散在三处：App 用 Tauri 的
-//! `app_config_dir()» / `app_cache_dir()» / `app_log_dir()»，插件自己拼
-//! `com.arounder.hifishifter/HiFiShifter»，内核的 `logfile» 又拼了第三份。代价是
+//! `app_config_dir()` / `app_cache_dir()` / `app_log_dir()`，插件自己拼
+//! `com.arounder.hifishifter/HiFiShifter`，内核的 `logfile` 又拼了第三份。代价是
 //! 两个形态的目录只要有一处算错，症状就只是"设置不共享""日志不见了"—— 没有报错，
 //! 只能靠用户描述猜。现在路径只有这一处计算，**没有第二处可以算错**。
 //!
@@ -10,31 +10,31 @@
 //!
 //! | 用途 | Windows | macOS | Linux |
 //! | --- | --- | --- | --- |
-//! | 设置（漫游） | `%APPDATA%\HiFiShifter» | `~/Library/Application Support/HiFiShifter» | `$XDG_CONFIG_HOME/HiFiShifter» |
-//! | 本地数据 | `%LOCALAPPDATA%\HiFiShifter» | `~/Library/Application Support/HiFiShifter» | `$XDG_DATA_HOME/HiFiShifter» |
-//! | 缓存 | `%LOCALAPPDATA%\HiFiShifter\cache» | `~/Library/Caches/HiFiShifter» | `$XDG_CACHE_HOME/HiFiShifter» |
-//! | 日志 | `%LOCALAPPDATA%\HiFiShifter\logs» | `~/Library/Logs/HiFiShifter» | `$XDG_STATE_HOME/HiFiShifter/logs» |
-//! | WebView profile | `%LOCALAPPDATA%\HiFiShifter\EBWebView» | 跟随 Tauri 默认 | 跟随 Tauri 默认 |
-//! | 共享模型库 | `%PROGRAMDATA%\HiFiShifter\models\<版本>» | 无 | 无 |
+//! | 设置（漫游） | `%APPDATA%\HiFiShifter` | `~/Library/Application Support/HiFiShifter` | `$XDG_CONFIG_HOME/HiFiShifter` |
+//! | 本地数据 | `%LOCALAPPDATA%\HiFiShifter` | `~/Library/Application Support/HiFiShifter` | `$XDG_DATA_HOME/HiFiShifter` |
+//! | 缓存 | `%LOCALAPPDATA%\HiFiShifter\cache` | `~/Library/Caches/HiFiShifter` | `$XDG_CACHE_HOME/HiFiShifter` |
+//! | 日志 | `%LOCALAPPDATA%\HiFiShifter\logs` | `~/Library/Logs/HiFiShifter` | `$XDG_STATE_HOME/HiFiShifter/logs` |
+//! | WebView profile | `%LOCALAPPDATA%\HiFiShifter\EBWebView` | 跟随 Tauri 默认 | 跟随 Tauri 默认 |
+//! | 共享模型库 | `%PROGRAMDATA%\HiFiShifter\models\<版本>` | 无 | 无 |
 //!
-//! 【为什么目录名是 `HiFiShifter» 而不是 identifier】`com.arounder.hifishifter» 是
+//! 【为什么目录名是 `HiFiShifter` 而不是 identifier】`com.arounder.hifishifter` 是
 //! **身份**（安装器、签名、更新源、WebView 数据目录归属），它对用户不可见；而用户
-//! 要在资源管理器里找自己的东西时，看到的是 `%APPDATA%\HiFiShifter»。历史布局把身份
+//! 要在资源管理器里找自己的东西时，看到的是 `%APPDATA%\HiFiShifter`。历史布局把身份
 //! 当成了目录名，于是用户拿到的是一串反向域名 —— 这一层在 v2 布局里消失，**身份本身
 //! 一个字都没改**（改它等于换一个产品）。
 //!
 //! 【为什么 macOS 的设置与本地数据同目录】macOS 没有 Roaming/Local 之分，
-//! `Application Support» 就是两者共同的家；硬拆成两个目录只会造出一个用户永远
+//! `Application Support` 就是两者共同的家；硬拆成两个目录只会造出一个用户永远
 //! 找不到的第二处。
 //!
-//! 【旧布局怎么办】见 `crate::app_paths_migrate»：两个宿主在启动最早期各跑一次
-//! 一次性迁移，把 `com.arounder.hifishifter\…» 搬到新根。
+//! 【旧布局怎么办】见 `crate::app_paths_migrate`：两个宿主在启动最早期各跑一次
+//! 一次性迁移，把 `com.arounder.hifishifter\…` 搬到新根。
 
 use std::path::{Component, Path, PathBuf};
 
 /// 产品目录名。
 ///
-/// 与 `bundle.identifier» 无关：identifier 是**身份**，这是给人看的目录名。
+/// 与 `bundle.identifier` 无关：identifier 是**身份**，这是给人看的目录名。
 pub const PRODUCT_DIR: &str = "HiFiShifter";
 
 /// 布局标记文件：存在于**本地数据根**下，表示 v2 迁移已完成。
@@ -90,7 +90,7 @@ fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
-/// XDG 目录：环境变量优先，缺省 `~/<fallback>»。
+/// XDG 目录：环境变量优先，缺省 `~/<fallback>`。
 #[cfg(all(unix, not(target_os = "macos")))]
 fn xdg_base(variable: &str, fallback: &str) -> Option<PathBuf> {
     std::env::var_os(variable)
@@ -154,7 +154,7 @@ pub fn local_data_dir() -> Option<PathBuf> {
 /// 缓存目录（波形峰值、整段渲染 PCM）。
 ///
 /// 【为什么与本地数据分开】这些文件是**派生物**：删掉只会变慢，不会丢数据。独立成
-/// 一层，用户与系统清理工具才能安全地"清缓存"，而不必猜 `HiFiShifter\» 里哪几个
+/// 一层，用户与系统清理工具才能安全地"清缓存"，而不必猜 `HiFiShifter\` 里哪几个
 /// 子目录可以动。
 pub fn cache_dir() -> Option<PathBuf> {
     #[cfg(windows)]
@@ -197,9 +197,9 @@ pub fn log_dir() -> Option<PathBuf> {
 /// **全机共享**数据目录（只有 Windows 有）。
 ///
 /// 【为什么共享模型库必须落到这里】安装器以管理员身份运行。若它把 152 MB 模型写进
-/// `%LOCALAPPDATA%»，在"标准用户 + 输入管理员密码"这种提权方式下写的就是**管理员**
+/// `%LOCALAPPDATA%`，在"标准用户 + 输入管理员密码"这种提权方式下写的就是**管理员**
 /// 的配置目录，而真正运行插件的是标准用户 —— 插件找不到模型，且失败方式只是"推理
-/// 不可用"，极难归因。`%PROGRAMDATA%» 没有这个问题：谁提权都能写对位置，所有用户
+/// 不可用"，极难归因。`%PROGRAMDATA%` 没有这个问题：谁提权都能写对位置，所有用户
 /// 都读得到，且默认允许普通用户创建子目录（运行时发布模型因此也不需要提权）。
 ///
 /// 【为什么非 Windows 是 None】Linux/macOS 交付的是 AppImage / DMG 里的自包含
@@ -243,7 +243,7 @@ pub fn shared_data_subdir(name: &str) -> Option<PathBuf> {
 /// 一条"旧位置 → 新位置"的映射。
 ///
 /// 同时服务两件事：一次性迁移（`app_paths_migrate`）与工程里历史绝对路径的读时
-/// 重映射（`project::resolve_source_paths_on_open»）。两件事必须用**同一份**映射 ——
+/// 重映射（`project::resolve_source_paths_on_open`）。两件事必须用**同一份**映射 ——
 /// 否则"迁移搬到了 A，重映射却指向 B"，症状是老工程打开后素材缺失。
 #[derive(Debug, Clone)]
 pub struct LegacyRoot {
@@ -251,8 +251,8 @@ pub struct LegacyRoot {
     pub from: PathBuf,
     /// 该旧根在新布局下的落点。
     pub to: PathBuf,
-    /// 根内子项的重定向（缓存拆分：`hifishifter\waveform_peaks_cache» →
-    /// `HiFiShifter\cache\waveform_peaks_cache»）。
+    /// 根内子项的重定向（缓存拆分：`hifishifter\waveform_peaks_cache` →
+    /// `HiFiShifter\cache\waveform_peaks_cache`）。
     pub redirects: Vec<(String, PathBuf)>,
 }
 
@@ -275,7 +275,7 @@ impl LegacyRoot {
 
 /// 历史布局的各个根（**迁移**与**读时重映射**的唯一事实来源）。
 ///
-/// 只列出确实存在的形态：环境变量缺失（例如没有 `APPDATA»）时对应项直接不出现，
+/// 只列出确实存在的形态：环境变量缺失（例如没有 `APPDATA`）时对应项直接不出现，
 /// 调用方不需要再判空。
 pub fn legacy_roots() -> Vec<LegacyRoot> {
     let mut roots: Vec<LegacyRoot> = Vec::new();
@@ -401,13 +401,13 @@ pub fn legacy_roots() -> Vec<LegacyRoot> {
 
 /// 把「应用私有目录」的历史绝对路径映射到当前路径。
 ///
-/// 【为什么需要读时重映射】工程文件里存的是**绝对**路径（`take.source_path»），
+/// 【为什么需要读时重映射】工程文件里存的是**绝对**路径（`take.source_path`），
 /// 迁移把素材搬走之后，旧工程就指向了不存在的位置 —— 用户看到的是"素材缺失"，
 /// 而文件明明就在硬盘上。这里只做**读时**映射，不写回：用户下次保存时路径自然
 /// 更新，而在此之前打开旧工程的行为与从前完全一致。
 ///
 /// 命中条件与返回：
-/// - 路径落在 `legacy_roots()» 的某个旧根之下，且映射后的文件**存在** → 返回新路径；
+/// - 路径落在 `legacy_roots()` 的某个旧根之下，且映射后的文件**存在** → 返回新路径；
 /// - 命中旧根但新位置没有这个文件 → 返回 None（保持原路径，走既有"缺失文件"流程）；
 /// - 不命中任何旧根（用户自己的素材路径）→ 返回 None（一个字都不动）。
 pub fn remap_legacy_app_path(path: &str) -> Option<PathBuf> {
@@ -496,7 +496,7 @@ mod tests {
         }
     }
 
-    /// 缓存与日志必须与本地数据分开：`HiFiShifter\cache» / `HiFiShifter\logs» 是
+    /// 缓存与日志必须与本地数据分开：`HiFiShifter\cache` / `HiFiShifter\logs` 是
     /// 用户与清理工具能安全识别的两层，混进本地数据就再也分不出来。
     #[test]
     fn caches_and_logs_live_below_the_local_root() {

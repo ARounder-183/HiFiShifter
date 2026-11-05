@@ -131,7 +131,7 @@ static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
 /// 只记一次"宿主回调不再做宿主侧工作"的说明。
 static ONCE_HOST_TICK: std::sync::Once = std::sync::Once::new();
 
-/// 回执泵已跑的节拍数（见 §tick§ 里的说明）。
+/// 回执泵已跑的节拍数（见 `tick` 里的说明）。
 static TICKS: AtomicU64 = AtomicU64::new(0);
 /// 存活视图数（跨线程可读；`VIEWS` 是 thread_local，问不出别的线程）。
 static LIVE_VIEWS: AtomicUsize = AtomicUsize::new(0);
@@ -148,13 +148,13 @@ thread_local! {
 struct View {
     client: Rc<RefCell<EditorClient>>,
     port: Rc<LinuxPort>,
-    /// 嵌进宿主时我们自己的 X 窗口 id（§0§ = 浮窗）。resize 要直接对它发 X 请求。
+    /// 嵌进宿主时我们自己的 X 窗口 id（`0` = 浮窗）。resize 要直接对它发 X 请求。
     embedded_xid: u64,
     /// 泵是否就跑在**宿主 UI 线程**上（情形 A）。
     ///
-    /// 【为什么必须区分】§client::tick§ 会碰宿主 API（§flush_dirty§ / 宿主时钟 /
+    /// 【为什么必须区分】`client::tick` 会碰宿主 API（`flush_dirty` / 宿主时钟 /
     /// 让路状态机），只有宿主线程能调；情形 B 的节拍在私有 GTK 线程上，只能
-    /// §client::pump§（纯投递）。搞反了是"在错误线程上调宿主"—— 最难查的一类。
+    /// `client::pump`（纯投递）。搞反了是"在错误线程上调宿主"—— 最难查的一类。
     on_host_thread: bool,
     /// `GtkPlug`（XEmbed）或 `GtkWindow`（浮窗）。
     container: gtk::Widget,
@@ -305,7 +305,7 @@ enum Control {
     Close {
         token: usize,
     },
-    /// 只在情形 B：建视图并回报 §(token, 实际做到的保真度)§。
+    /// 只在情形 B：建视图并回报 `(token, 实际做到的保真度)`。
     Attach {
         request: AttachRequest,
         reply: SyncSender<Result<(usize, GuiFidelity), String>>,
@@ -980,8 +980,8 @@ fn start_gui_thread() -> Result<GuiThread, String> {
         .name("hfs-gui".into())
         .spawn(move || {
             // 【为什么不调 `gtk::init()`】本 crate 打开了 `unsafe-assume-initialized`，
-            // 于是 §gtk::init()§ 会认为"已经初始化"并直接返回 —— 它**不会**真的去初始化。
-            // 情形 B 里我们才是那个初始化者，所以显式调 §gtk_init_check§（argc/argv 允许
+            // 于是 `gtk::init()` 会认为"已经初始化"并直接返回 —— 它**不会**真的去初始化。
+            // 情形 B 里我们才是那个初始化者，所以显式调 `gtk_init_check`（argc/argv 允许
             // 为 NULL，GTK 文档明写）。
             //
             // SAFETY: 只在尚未初始化 GDK 的进程里、在本模块自建的线程上调用一次。
@@ -1111,7 +1111,7 @@ fn tick_inner() -> glib::ControlFlow {
     for (client, on_host_thread) in clients {
         if on_host_thread {
             // 情形 A：节拍就在宿主线程上，于是宿主侧的事（私有状态通知、宿主时钟、
-            // 让路状态机）能在这里做 —— 与 Windows 的 §WM_TIMER§、macOS 的 §NSTimer§ 等价。
+            // 让路状态机）能在这里做 —— 与 Windows 的 `WM_TIMER`、macOS 的 `NSTimer` 等价。
             client::tick(&client);
         } else {
             // 情形 B：这里不是宿主线程。**宿主 API 一律不碰** —— 宿主侧的心跳由
@@ -1547,7 +1547,7 @@ fn attach_view(
                             let surface = match result {
                                 Ok(surface) => surface,
                                 Err(error) => {
-                                    // 【为什么要打错误文本】§snapshot§ 失败就是"WebKit 拿不出渲染
+                                    // 【为什么要打错误文本】`snapshot` 失败就是"WebKit 拿不出渲染
                                     // 结果"，那正是黑屏的机制。错误信息里写着它卡在哪一步
                                     //（进程崩溃 / 没有可绘制的帧 / 区域为空）。
                                     crate::gui_log_line(&format!(
@@ -1599,8 +1599,8 @@ fn attach_view(
 /// 每进程 profile 目录同义）：偏好靠后端配置文件持久化，WebView 自己不该往
 /// 用户的 `~/.local/share` 里写东西。
 fn web_context(assets: &std::path::Path) -> webkit2gtk::WebContext {
-    // 【为什么是 thread_local 而不是 §static§】§WebContext§ 是 GObject（§!Send§），
-    // 塞进 §OnceLock§ 会要求它 §Send + Sync§ —— 那等于对 GObject 撒谎。
+    // 【为什么是 thread_local 而不是 `static`】`WebContext` 是 GObject（`!Send`），
+    // 塞进 `OnceLock` 会要求它 `Send + Sync` —— 那等于对 GObject 撒谎。
     // 每个拥有视图的线程各一份，正好也是"GTK 对象只属于一条线程"的写照。
     CONTEXT.with(|slot| {
         let mut slot = slot.borrow_mut();
@@ -1684,7 +1684,7 @@ fn install_policy(webview: &webkit2gtk::WebView, client: &Rc<RefCell<EditorClien
                 if let Some(navigation) =
                     decision.downcast_ref::<webkit2gtk::NavigationPolicyDecision>()
                 {
-                    // §request()§ 自 WebKit 2.6 起废弃，用 §navigation_action().request()§。
+                    // `request()` 自 WebKit 2.6 起废弃，用 `navigation_action().request()`。
                     let allowed = navigation
                         .navigation_action()
                         .and_then(|action| action.request())

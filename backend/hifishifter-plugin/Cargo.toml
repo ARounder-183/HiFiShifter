@@ -68,7 +68,7 @@ gdk = { version = "0.18", features = ["unsafe-assume-initialized"] }
 # `v2_8`（脚本消息通道）、`v2_16`（ephemeral WebContext）、`v2_22`
 # （`JSCValue`）一并打开 —— 这些正是本模块用到的最低 API 面。
 webkit2gtk = { version = "2.0", features = ["v2_40"] }
-# §JSCValue → &str§（脚本消息通道只传字符串，见 §gui/bridge.js§）。同样是 Cargo.lock 里
+# `JSCValue → &str`（脚本消息通道只传字符串，见 `gui/bridge.js`）。同样是 Cargo.lock 里
 # 已有的版本（webkit2gtk 自己依赖它）。
 javascriptcore-rs = "1.1"
 

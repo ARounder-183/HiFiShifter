@@ -207,9 +207,9 @@ struct SchemeIvars {
 }
 define_class!(
     #[unsafe(super(NSObject))]
-    // 【为什么也标 MainThreadOnly】§WKURLSchemeHandler§ 的回调由 WebKit 在主线程发出，
-    // 而 §alloc(marker)§ 这种构造方式只有 MainThreadOnly 的类才有 —— 标上它，构造与
-    // 调用就都落在同一套约束里，不需要再写一个 §unsafe impl Send§。
+    // 【为什么也标 MainThreadOnly】`WKURLSchemeHandler` 的回调由 WebKit 在主线程发出，
+    // 而 `alloc(marker)` 这种构造方式只有 MainThreadOnly 的类才有 —— 标上它，构造与
+    // 调用就都落在同一套约束里，不需要再写一个 `unsafe impl Send`。
     #[thread_kind = MainThreadOnly]
     #[ivars = SchemeIvars]
     struct HFSSchemeHandler;
@@ -257,8 +257,8 @@ fn serve_asset(root: &std::path::Path, task: &ProtocolObject<dyn WKURLSchemeTask
         &NSString::from_str(&body.len().to_string()),
     );
     let version = NSString::from_str("HTTP/1.1");
-    // 【为什么状态码要显式转型】§statusCode:§ 是 §NSInteger§（isize），我们算出来的是
-    // §i32§；不转就是一条类型错误，而不是隐式提升。
+    // 【为什么状态码要显式转型】`statusCode:` 是 `NSInteger`（isize），我们算出来的是
+    // `i32`；不转就是一条类型错误，而不是隐式提升。
     let response = NSHTTPURLResponse::initWithURL_statusCode_HTTPVersion_headerFields(
         NSHTTPURLResponse::alloc(),
         &url,
@@ -591,7 +591,7 @@ fn close_view(token: usize) {
     // 死代码，每开/关一次窗口泄漏一整个 WKWebView（第 5 轮审查 P1-4）。`View`
     // 自持的 Retained 不受端口关闭影响。
     let webview = view.webview.clone();
-    // SAFETY: 全部在 §removed()§ 的主线程调用路径上，且顺序正确（先摘 handler，
+    // SAFETY: 全部在 `removed()` 的主线程调用路径上，且顺序正确（先摘 handler，
     // 再停加载、摘 delegate）。
     unsafe {
         let controller = webview.configuration().userContentController();

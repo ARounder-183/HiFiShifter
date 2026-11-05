@@ -599,7 +599,7 @@ pub fn set_param_frames(
     )
 }
 
-/// 写入参数帧：§present§ 是显式编辑位图；插件权威路径只认它，不做整条数组差分。
+/// 写入参数帧：`present` 是显式编辑位图；插件权威路径只认它，不做整条数组差分。
 pub fn set_param_frames_with_present(
     state: &impl ParamHost,
     track_id: String,

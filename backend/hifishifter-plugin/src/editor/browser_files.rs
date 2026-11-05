@@ -670,9 +670,9 @@ mod tests {
 
 /// 原生真实文件夹选择器，不用选文件后取父目录，也不接受虚拟Shell位置。
 ///
-/// 【为什么参数是 §NativeWindow§（§usize§）而不是 §HWND§】三个平台的句柄互不相干，
-/// 而调用方是**平台无关**的 §gui/client.rs§。整数在平台实现内部再变回 §HWND§ /
-/// §NSView*§ / §GtkWidget*§ —— 那一步是唯一知道类型的地方。
+/// 【为什么参数是 `NativeWindow`（`usize`）而不是 `HWND`】三个平台的句柄互不相干，
+/// 而调用方是**平台无关**的 `gui/client.rs`。整数在平台实现内部再变回 `HWND` /
+/// `NSView*` / `GtkWidget*` —— 那一步是唯一知道类型的地方。
 #[cfg(windows)]
 pub(super) fn pick_directory(
     window: crate::editor::gui::NativeWindow,
@@ -774,9 +774,9 @@ pub(super) fn pick_save_path(
     }
 }
 
-/// macOS / Linux 的另存为对话框（§GtkFileChooserNative§ / §NSSavePanel§）。
+/// macOS / Linux 的另存为对话框（`GtkFileChooserNative` / `NSSavePanel`）。
 ///
-/// 取消返回 §Ok(None)§，与 Windows 同一约定（见 §platform_services§ 的模块注释）。
+/// 取消返回 `Ok(None)`，与 Windows 同一约定（见 `platform_services` 的模块注释）。
 #[cfg(not(windows))]
 pub(super) fn pick_save_path(
     _window: crate::editor::gui::NativeWindow,

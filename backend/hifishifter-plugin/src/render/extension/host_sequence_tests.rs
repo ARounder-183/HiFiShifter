@@ -1,7 +1,7 @@
 //! 宿主序列集成测试：用真实块序列重放现场日志里的 VEGAS 形状。
 //!
-//! 这些用例不碰宿主、不碰音频设备；它们只把 §note_stream_geometry§ 与
-//! §CaptureStore::on_block_with_context§ 串起来，验证“几何 -> 捕获”这一条链。
+//! 这些用例不碰宿主、不碰音频设备；它们只把 `note_stream_geometry` 与
+//! `CaptureStore::on_block_with_context` 串起来，验证“几何 -> 捕获”这一条链。
 
 use super::*;
 use crate::capture::recorder::BlockContext;

@@ -1866,7 +1866,7 @@ impl DocumentSession {
     ///
     /// 【为什么它在投影之前跑】设置变了 ⇒ 曲线的**可见位置**必须立刻改变，而这不需要
     /// 一次模型收口、不需要烘焙、也不需要用户先分割一次。旧实现只在
-    /// «remap_and_log»（模型收口）里读这个设置，于是"移动 item 不跟随、分割之后才对"。
+    /// `remap_and_log`（模型收口）里读这个设置，于是"移动 item 不跟随、分割之后才对"。
     ///
     /// 【为什么按设置代次早退】本函数在每次读工作区时都被调用（33–400 ms 一次）。
     /// 代次没变时它只付一次原子读的代价。
@@ -2723,7 +2723,7 @@ impl DocumentSession {
         }
     }
 
-    /// 为一条根轨合成参数视图；调用方已持有 §edits§ 时使用这个版本。
+    /// 为一条根轨合成参数视图；调用方已持有 `edits` 时使用这个版本。
     pub(crate) fn compose_param_view_with(
         &self,
         timeline: &hifishifter_kernel::state::TimelineState,
@@ -2789,7 +2789,7 @@ impl DocumentSession {
         )
     }
 
-    /// 唯一把 §authority + baseline§ 写成显示数组的地方。只写派生缓存。
+    /// 唯一把 `authority + baseline` 写成显示数组的地方。只写派生缓存。
     pub(crate) fn materialize_views_locked(
         &self,
         edits: &mut crate::state_channel::EditState,
