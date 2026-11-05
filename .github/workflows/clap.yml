@@ -47,12 +47,21 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./scripts/setup/prepare-plugin-sdks.ps1
+      # 【为什么按 commit 取而不是按分支】pin 的是 commit，分支 tip 早就走远了；
+      # `--branch 1.1.9` + 比对 HEAD 的写法在 runner 上必然不等（实测两次都红）。
+      # 这里与 scripts/setup/prepare-plugin-sdks.ps1 取的是同一份 pin。
       - name: Verify CLAP SDK pin (Unix)
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          git clone --depth 1 --branch 1.1.9 https://github.com/free-audio/clap.git third_party/sdk/clap
-          test "$(git -C third_party/sdk/clap rev-parse HEAD)" = "$(python -c "import json; print(json.load(open('scripts/env/plugin-sdks.json'))['clap']['commit'])")"
+          set -euo pipefail
+          commit="$(python3 -c "import json; print(json.load(open('scripts/env/plugin-sdks.json'))['clap']['commit'])")"
+          rm -rf third_party/sdk/clap
+          git init -q third_party/sdk/clap
+          git -C third_party/sdk/clap remote add origin https://github.com/free-audio/clap.git
+          git -C third_party/sdk/clap fetch -q --depth 1 origin "$commit"
+          git -C third_party/sdk/clap checkout -q --detach FETCH_HEAD
+          test "$(git -C third_party/sdk/clap rev-parse HEAD)" = "$commit"
       - name: Fetch model weights
         run: python scripts/setup/fetch-models.py
         shell: bash
