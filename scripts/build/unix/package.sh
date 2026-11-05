@@ -57,14 +57,21 @@ usage() {
 USAGE
 }
 
+# 【为什么要同时认 --x=v 与 --x v】工作流里写的是空格形式（可读性更好），
+# 而命令行上 `--profile=dist` 更常见。只认一种的代价是 CI 上一句
+# "未知参数：--profile" —— 那正是第一次把 package.sh 接进 build.yml 时踩到的。
 while [ $# -gt 0 ]; do
     case "$1" in
         --formats=*)      FORMATS="${1#*=}"; shift ;;
+        --formats)        [ $# -ge 2 ] || die "--formats 需要值"; FORMATS="$2"; shift 2 ;;
         --profile=*)      PROFILE="${1#*=}"; shift ;;
+        --profile)        [ $# -ge 2 ] || die "--profile 需要值"; PROFILE="$2"; shift 2 ;;
         --out=*)          OUT_DIR="${1#*=}"; shift ;;
+        --out)            [ $# -ge 2 ] || die "--out 需要值"; OUT_DIR="$2"; shift 2 ;;
         --reuse-frontend) REUSE_FRONTEND=1; shift ;;
         --no-verify)      SKIP_VERIFY=1; shift ;;
         --merge-arch=*)   MERGE_ARCH="${1#*=}"; shift ;;
+        --merge-arch)     [ $# -ge 2 ] || die "--merge-arch 需要值"; MERGE_ARCH="$2"; shift 2 ;;
         -h|--help)        usage; exit 0 ;;
         *)                die "未知参数：$1（--help 看用法）" ;;
     esac
