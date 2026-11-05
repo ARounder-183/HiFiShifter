@@ -23,11 +23,12 @@ use objc2::{
     define_class, msg_send, AllocAnyThread, DefinedClass, MainThreadMarker, MainThreadOnly,
 };
 use objc2_app_kit::{
-    NSAutoresizingMaskOptions, NSDragOperation, NSDraggingDestination, NSDraggingInfo, NSView,
+    NSAutoresizingMaskOptions, NSDragOperation, NSDraggingDestination, NSDraggingInfo,
+    NSPasteboardType, NSPasteboardTypeFileURL, NSView,
 };
 use objc2_foundation::{
-    NSData, NSHTTPURLResponse, NSMutableDictionary, NSRunLoop, NSRunLoopCommonModes, NSString,
-    NSTimer, NSURLRequest, NSURL,
+    NSArray, NSData, NSError, NSHTTPURLResponse, NSMutableDictionary, NSRunLoop,
+    NSRunLoopCommonModes, NSString, NSTimer, NSURLRequest, NSURL,
 };
 use objc2_web_kit::{
     WKNavigation, WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate,
@@ -37,6 +38,7 @@ use objc2_web_kit::{
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
@@ -71,10 +73,12 @@ define_class!(
         #[unsafe(method(userContentController:didReceiveScriptMessage:))]
         fn did_receive(&self, _controller: &WKUserContentController, message: &WKScriptMessage) {
             // 只接受主 frame 的字符串消息：与 Windows 的 `Source` 来源校验同义。
-            if !message.frameInfo().isMainFrame() {
+            // SAFETY: 两个访问器都只读；回调由 WebKit 在主线程上发出。
+            let is_main_frame = unsafe { message.frameInfo().isMainFrame() };
+            if !is_main_frame {
                 return;
             }
-            let body = message.body();
+            let body = unsafe { message.body() };
             let Ok(text) = body.downcast::<NSString>() else {
                 return;
             };
@@ -173,31 +177,38 @@ define_class!(
 
         #[unsafe(method(performDragOperation:))]
         fn perform_drop(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
-            let pasteboard = sender.draggingPasteboard();
-            // SAFETY: `NSPasteboardTypeFileURL` 是 AppKit 提供的常量字符串。
-            let Some(text) = pasteboard.stringForType(unsafe { NSPasteboardTypeFileURL }) else {
-                return false;
-            };
-            let Some(url) = NSURL::URLWithString(&text) else {
-                return false;
-            };
-            let Some(path) = url.path() else {
-                return false;
-            };
-            let path = std::path::PathBuf::from(path.to_string());
-            // 拖一个已删除的文件进来是常见操作；不存在就当没发生。
-            if !path.is_file() {
-                return false;
-            }
-            let client = self.ivars().client.clone();
-            let view_id = client.borrow().view_id.clone();
-            client.borrow_mut().post(serde_json::json!({
-                "version": 1,
-                "viewId": view_id,
-                "event": "native_drop",
-                "payload": { "paths": [path.to_string_lossy()] },
-            }));
-            true
+            // 【为什么包一层立即执行的闭包】`define_class!` 把方法体内联进一个
+            // `extern "C-unwind" fn ... -> Bool` 的 imp 函数，方法体里的 `return` 会从
+            // **那个**函数返回 —— 于是 `return false` 被要求是 `Bool` 而不是 `bool`。
+            // 闭包把 `return` 收回到自己的作用域，整个方法体就只剩一个 `bool` 表达式。
+            (|| -> bool {
+                let pasteboard = sender.draggingPasteboard();
+                // SAFETY: `NSPasteboardTypeFileURL` 是 AppKit 提供的常量字符串。
+                let file_url_type = unsafe { NSPasteboardTypeFileURL };
+                let Some(text) = pasteboard.stringForType(file_url_type) else {
+                    return false;
+                };
+                let Some(url) = NSURL::URLWithString(&text) else {
+                    return false;
+                };
+                let Some(path) = url.path() else {
+                    return false;
+                };
+                let path = std::path::PathBuf::from(path.to_string());
+                // 拖一个已删除的文件进来是常见操作；不存在就当没发生。
+                if !path.is_file() {
+                    return false;
+                }
+                let client = self.ivars().client.clone();
+                let view_id = client.borrow().view_id.clone();
+                client.borrow_mut().post(serde_json::json!({
+                    "version": 1,
+                    "viewId": view_id,
+                    "event": "native_drop",
+                    "payload": { "paths": [path.to_string_lossy()] },
+                }));
+                true
+            })()
         }
     }
 );
@@ -248,14 +259,16 @@ fn serve_asset(root: &std::path::Path, task: &ProtocolObject<dyn WKURLSchemeTask
         None => (404, "text/plain", format!("not found: {path}").into_bytes()),
     };
     let headers = NSMutableDictionary::<NSString, NSString>::new();
-    headers.insert(
-        &NSString::from_str("Content-Type"),
-        &NSString::from_str(mime),
-    );
-    headers.insert(
-        &NSString::from_str("Content-Length"),
-        &NSString::from_str(&body.len().to_string()),
-    );
+    // 【为什么要先绑到局部变量再 `&*`】`NSMutableDictionary::insert` 的键是泛型
+    // `&CopiedKey`，解引用强转只对**具体类型**生效；直接写 `&NSString::from_str(..)`
+    // 得到的是 `&Retained<NSString>`，而 `Retained` 既不是 `NSCopying` 也不是
+    // `CopyingHelper`，于是报两条看着毫不相干的 trait 错误。
+    let content_type = NSString::from_str("Content-Type");
+    let content_length = NSString::from_str("Content-Length");
+    let mime = NSString::from_str(mime);
+    let length = NSString::from_str(&body.len().to_string());
+    headers.insert(&*content_type, &mime);
+    headers.insert(&*content_length, &length);
     let version = NSString::from_str("HTTP/1.1");
     // 【为什么状态码要显式转型】`statusCode:` 是 `NSInteger`（isize），我们算出来的是
     // `i32`；不转就是一条类型错误，而不是隐式提升。
@@ -301,7 +314,7 @@ impl EditorPort for MacPort {
         let script = NSString::from_str(&protocol::js_expression(text));
         // SAFETY: 回调只记日志；它不持有任何 Rust 借用。
         unsafe {
-            let handler = RcBlock::new(move |_value: *mut AnyObject, error: *mut AnyObject| {
+            let handler = RcBlock::new(move |_value: *mut AnyObject, error: *mut NSError| {
                 if !error.is_null() {
                     crate::gui_log_line("page delivery failed");
                 }
@@ -424,7 +437,7 @@ impl MacHost {
         let scheme: Retained<HFSSchemeHandler> = unsafe { msg_send![super(scheme), init] };
         unsafe {
             configuration.setURLSchemeHandler_forURLScheme(
-                ProtocolObject::from_ref(&*scheme),
+                Some(ProtocolObject::from_ref(&*scheme)),
                 &NSString::from_str(protocol::SCHEME),
             );
         }
@@ -516,7 +529,7 @@ impl MacHost {
 
         // 20 ms 回执泵
         let weak = Rc::downgrade(&client);
-        let block = RcBlock::new(move |_timer: *mut NSTimer| {
+        let block = RcBlock::new(move |_timer: NonNull<NSTimer>| {
             if let Some(client) = weak.upgrade() {
                 client::tick(&client);
             }

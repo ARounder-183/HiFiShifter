@@ -58,7 +58,7 @@ pub(crate) fn create_for(
     }
     #[cfg(target_os = "macos")]
     {
-        let _ = embedded;
+        let _ = (embedded, frame);
         Ok(Rc::new(macos::MacHost::attach(
             parent, width, height, link,
         )?))
