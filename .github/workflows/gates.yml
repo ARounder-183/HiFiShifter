@@ -279,8 +279,15 @@ jobs:
   # 读到对方的 PCM：实测 4 线程挂 9 条、2 线程换 3 条挂、1 线程 918 条全过。这是测试
   # 夹具之间的污染，不是产品里的竞态；插件自身的并发由各测试内部的渲染线程驱动，
   # 与 libtest 的线程数无关。并发复跑保留在 rust-test 那一档（内核 + 其余 crate）。
+  #
+  # 【为什么按 scope 收窄】这条 job 此前不看 scope，于是 `vst3-unix.yml`
+  # （scope: frontend，只想要一份 frontend-dist）也要先等一遍 Windows 插件单测 ——
+  # 而 Windows 单测的权威入口是 push 触发的 `plugin-gates.yml`（scope: plugin），
+  # 同一份判据在那边一定会跑。让一条 Unix 产物流水线卡在一个与它无关、且已知会偶发
+  # 挂死的 Windows 任务上，只会把"插件产物坏了"和"Windows 测试机卡住了"混成同一个红灯。
   plugin-gates:
     name: Plugin tests (push feedback)
+    if: inputs.scope == 'all' || inputs.scope == 'plugin'
     runs-on: windows-latest
     timeout-minutes: 60
     env:
