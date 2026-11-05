@@ -44,34 +44,38 @@ jobs:
   vst3-unix:
     name: VST3 ${{ matrix.name }}
     needs: gates
-    # 【矩阵随事件变化】PR 只跑 linux-x86_64 / macos-arm64：够证明"改动没把两个架构
-    # 的构建脚本弄坏"；tag 与手动触发跑全量四平台（发布产物必须齐全）。
-    if: matrix.pr || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
+        # 【矩阵随事件变化】PR 只跑 linux-x86_64 / macos-arm64：够证明"改动没把两个架构
+        # 的构建脚本弄坏"；tag 与手动触发跑全量四平台（发布产物必须齐全）。
+        #
+        # 【为什么用 exclude 而不是在 job 的 if 里读 matrix.pr】job 级 if 拿不到 matrix
+        # 上下文（GitHub 判定整个工作流文件无效，连解析都过不去），只有 step 级 if 才有。
+        # matrix 本身是可以用表达式算的，所以"PR 不跑的那两个"从矩阵里剔掉。
+        # `A && B || ''` 是 GitHub 表达式的三元写法：非 PR 时这条不匹配任何条目。
         include:
           - name: linux-x86_64
-            pr: true
             os: ubuntu-24.04
             platform: linux-x86_64
           - name: linux-aarch64
-            pr: false
             os: ubuntu-24.04-arm
             platform: linux-aarch64
           # macOS 两个架构分开出包，不做 universal2：arm64 走 CoreML + WebGPU，
           # x86_64 走 ort-tract(CPU)，链接的是**不同的** ONNX 后端；lipo 只会把两份
           # 静态推理运行时塞进同一个文件（体积翻倍），换不来任何一个架构的性能。
           - name: macos-arm64
-            pr: true
             os: macos-15
             platform: macos-arm64
           - name: macos-x86_64
-            pr: false
             os: macos-15-intel
             platform: macos-x86_64
+        # PR 上剔掉的两项（tag 与手动触发时 `|| ''` 让它们不匹配任何条目）。
+        exclude:
+          - name: ${{ github.event_name == 'pull_request' && 'linux-aarch64' || '' }}
+          - name: ${{ github.event_name == 'pull_request' && 'macos-x86_64' || '' }}
     steps:
       - uses: actions/checkout@v6
 

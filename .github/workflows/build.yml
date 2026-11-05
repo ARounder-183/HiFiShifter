@@ -66,7 +66,6 @@ jobs:
     if: >-
       always() && needs.gates.result == 'success'
       && (needs.assert-version.result == 'success' || needs.assert-version.result == 'skipped')
-      && (matrix.pr || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
     runs-on: ${{ matrix.os }}
     # 六平台矩阵：单个入口的最长构建（交叉编译 + 打包）120 分钟封顶。
     timeout-minutes: 180
@@ -86,42 +85,46 @@ jobs:
         # 【矩阵随事件变化】PR 只跑三平台（够证明"改动没把某个平台编译弄坏"），
         # tag 跑全量六平台（发布产物必须齐全）。此前矩阵与触发条件无关，于是每个
         # PR 都要付六份 checkout + 六份编译，而其中三个平台从没有单独红过。
+        #
+        # 【为什么用 exclude 而不是在 job 的 if 里读 matrix.pr】job 级 if 拿不到 matrix
+        # 上下文（GitHub 判定整个工作流文件无效，连解析都过不去），只有 step 级 if 才有。
+        # matrix 本身是可以用表达式算的，所以"PR 不跑的那三个"从矩阵里剔掉。
+        # `&& … || ''` 是 GitHub 表达式的三元写法：非 PR 时这条不匹配任何条目。
         include:
           # Windows — DirectML + WebGPU baked into ort dependency
           - name: windows-x86_64
-            pr: true
             os: windows-latest
             cargo_target: x86_64-pc-windows-msvc
             cargo_extra: "-- --locked --profile dist"                      # default features: onnx + vslib
           - name: windows-arm64
-            pr: false
             os: windows-11-arm
             cargo_target: aarch64-pc-windows-msvc
             cargo_extra: "-- --locked --profile dist --no-default-features --features onnx"   # vslib is x86_64-only
 
           # macOS — CoreML + WebGPU on ARM64, CPU on x86_64 (baked into ort deps)
           - name: macos-arm64
-            pr: true
             os: macos-latest
             cargo_target: aarch64-apple-darwin
             cargo_extra: "-- --locked --profile dist --no-default-features --features onnx"
           - name: macos-x86_64
-            pr: false
             os: macos-15-intel
             cargo_target: x86_64-apple-darwin
             cargo_extra: "-- --locked --profile dist --no-default-features --features onnx"
 
           # Linux — WebGPU (Dawn/Vulkan backend); vslib excluded
           - name: linux-x86_64
-            pr: true
             os: ubuntu-24.04
             cargo_target: x86_64-unknown-linux-gnu
             cargo_extra: "-- --locked --profile dist --no-default-features --features onnx"
           - name: linux-arm64
-            pr: false
             os: ubuntu-24.04-arm
             cargo_target: aarch64-unknown-linux-gnu
             cargo_extra: "-- --locked --profile dist --no-default-features --features onnx"
+        # PR 上剔掉的三项（tag 与手动触发时 `|| ''` 让它们不匹配任何条目）。
+        exclude:
+          - name: ${{ github.event_name == 'pull_request' && 'windows-arm64' || '' }}
+          - name: ${{ github.event_name == 'pull_request' && 'macos-x86_64' || '' }}
+          - name: ${{ github.event_name == 'pull_request' && 'linux-arm64' || '' }}
 
     steps:
       - uses: actions/checkout@v6
