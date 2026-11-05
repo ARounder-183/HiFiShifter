@@ -99,25 +99,42 @@ function Get-CargoCommand([string]$kind, [int]$Threads = 0) {
             }
         }
         'test' {
-            $target = if ($Package) { "-p $Package" } else { '--workspace' }
             $threads = if ($Threads -gt 0) { $Threads } elseif ($TestMode -eq 'parallel') { 4 } else { 1 }
-            # 【为什么整 workspace 并发跑时要排除 hifishifter-plugin】内核的缓存是进程级的：
-            # 合成片段缓存、pitch 缓存、模型路径都拿文档 / 片段 id 当键（生产里一个进程只有
-            # 一个工程，这样最省）。libtest 的 --test-threads 会把多个测试塞进同一个进程，
-            # 两个测试用同名 id 就互相读到对方的 PCM：实测 4 线程挂 9 条、2 线程换 3 条挂、
-            # 1 线程 918 条全过。这是测试夹具之间的污染，不是产品里的竞态 —— 插件自己的并发
-            # 由各测试内部的渲染线程驱动，与 libtest 的线程数无关。并发复跑留给内核。
-            $exclude = ''
-            if (!$Package -and $threads -gt 1) { $exclude = ' --exclude hifishifter-plugin' }
+            # 【为什么插件测试按模块拆成多个进程】插件的 lib 测试是**一个进程跑 800+ 条**，
+            # 而进程级的全局状态会一路累积（渲染缓存、pitch 缓存、宿主 marshal 队列、
+            # 模型会话）。在 4 核 runner 上，跑到 host::reaper::host_edit 那一段时偶发死锁：
+            # 日志停在 host_edit::tests::a_poisoned_editor_timeline_refuses_host_edits 之后，
+            # 然后一直挂到 60 分钟上限（本地 16 核跑同一份代码 168 秒全绿）。
+            # 每个模块一个进程，继承的状态就只剩该模块自己的；挂死时也一眼看得出是哪个模块。
+            $pluginChunks = @('ara::', 'capture::', 'editor::', 'host::', 'render::', 'vst3::')
+            $skips = if ($skipArgs.Count -gt 0) { ' ' + ($skipArgs -join ' ') } else { '' }
+            $pluginRun = (!$Package -or $Package -eq 'hifishifter-plugin')
+
             # 【为什么测试前要先 build 一次】tests/vst3_exports.rs 会 dlopen 产出的 cdylib
             # 来断言导出表，而 `cargo test` 只编测试用的 rlib，不产出 .dll —— 干净检出上
-            # 那条用例必然找不到文件（它自己的报错也写着"先跑 cargo build"）。CI 第一次真
-            # 跑插件测试就撞在这里。并发复跑已经排除插件，不需要再 build 一遍。
-            if (!$exclude -and (!$Package -or $Package -eq 'hifishifter-plugin')) {
+            # 那条用例必然找不到文件（它自己的报错也写着"先跑 cargo build"）。
+            if ($pluginRun -and $threads -le 1) {
                 Write-Output "$prefix cargo build --locked --manifest-path $manifest -p hifishifter-plugin"
             }
-            $skips = if ($skipArgs.Count -gt 0) { ' ' + ($skipArgs -join ' ') } else { '' }
-            Write-Output "$prefix cargo test --locked --manifest-path $manifest $target$exclude -- --test-threads=$threads$skips"
+
+            if ($pluginRun -and $threads -le 1) {
+                # 先跑"除插件以外的一切"（含内核），再按模块把插件拆开。
+                if (!$Package) {
+                    Write-Output "$prefix cargo test --locked --manifest-path $manifest --workspace --exclude hifishifter-plugin -- --test-threads=1$skips"
+                }
+                foreach ($chunk in $pluginChunks) {
+                    Write-Output "$prefix cargo test --locked --manifest-path $manifest -p hifishifter-plugin -- $chunk --test-threads=1$skips"
+                }
+                # 兜底：不属于任何模块前缀的用例（crate 根上的 tests::）与集成测试目标。
+                $chunkSkips = ($pluginChunks | ForEach-Object { "--skip $_" }) -join ' '
+                Write-Output "$prefix cargo test --locked --manifest-path $manifest -p hifishifter-plugin -- --test-threads=1 $chunkSkips$skips"
+            }
+            else {
+                $target = if ($Package) { "-p $Package" } else { '--workspace' }
+                $exclude = ''
+                if (!$Package -and $threads -gt 1) { $exclude = ' --exclude hifishifter-plugin' }
+                Write-Output "$prefix cargo test --locked --manifest-path $manifest $target$exclude -- --test-threads=$threads$skips"
+            }
         }
     }
 }
