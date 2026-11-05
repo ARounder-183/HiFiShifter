@@ -35,7 +35,7 @@
   串行跑得通不代表正确：本仓最容易出事的地方（重算与自动应用的版本竞态、快照发布与
   读者回收）全部是并发敏感的。
 - `-Only fmt|clippy|test`：拆成独立 job 时用。
-- `-Package <crate>`：只跑一个 crate（插件并发门禁用）。
+- `-Package <crate>`：只跑一个 crate（插件并发门禁用）；`hifishifter-plugin-core` 是格式无关层，新增格式 crate 后一并加入依赖树/版本守卫。
 
 ## 产物门禁留在产物流水线
 

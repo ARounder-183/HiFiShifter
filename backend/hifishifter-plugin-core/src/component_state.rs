@@ -40,7 +40,7 @@ const VERSION: u32 = 1;
 
 /// 一次组件 state 的载荷。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct ComponentState {
+pub struct ComponentState {
     /// `EditState::encode()` 的输出。
     pub edits: Vec<u8>,
     /// Capture 清单 JSON；`None` = 这个实例没有 Capture 数据。
@@ -51,7 +51,7 @@ pub(crate) struct ComponentState {
 
 impl ComponentState {
     /// 编码成宿主存取的字节块。
-    pub(crate) fn encode(&self) -> Vec<u8> {
+    pub fn encode(&self) -> Vec<u8> {
         let capture = self.capture.as_deref().unwrap_or(&[]);
         let capture_edits = self.capture_edits.as_deref().unwrap_or(&[]);
         let mut out = Vec::with_capacity(
@@ -69,7 +69,7 @@ impl ComponentState {
     }
 
     /// 解析字节块。**没有魔数时整块按 `EditState` 处理**（版本化之前的历史格式）。
-    pub(crate) fn decode(bytes: &[u8]) -> Result<Self, String> {
+    pub fn decode(bytes: &[u8]) -> Result<Self, String> {
         if bytes.len() < MAGIC.len() || &bytes[..MAGIC.len()] != MAGIC {
             // 历史格式：整块就是 `EditState`。
             return Ok(Self {

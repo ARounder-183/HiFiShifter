@@ -2082,6 +2082,7 @@ dependencies = [
  "hifishifter-clipboard",
  "hifishifter-host-link",
  "hifishifter-kernel",
+ "hifishifter-plugin-core",
  "javascriptcore-rs",
  "libc",
  "log",
@@ -2096,6 +2097,19 @@ dependencies = [
  "webview2-com",
  "windows",
  "zip",
+]
+
+[[package]]
+name = "hifishifter-plugin-core"
+version = "0.2.0-beta"
+dependencies = [
+ "hifishifter-kernel",
+ "libc",
+ "log",
+ "serde",
+ "serde_json",
+ "webview2-com",
+ "windows",
 ]
 
 [[package]]

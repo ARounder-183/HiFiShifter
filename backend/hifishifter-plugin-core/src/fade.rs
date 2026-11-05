@@ -2,7 +2,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub(crate) struct FadeStyle {
+pub struct FadeStyle {
     pub in_shape: f64,
     pub out_shape: f64,
     pub in_dir: f64,

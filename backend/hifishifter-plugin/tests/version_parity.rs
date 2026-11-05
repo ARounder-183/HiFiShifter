@@ -77,6 +77,7 @@ fn every_version_source_agrees_with_the_plugin_crate() {
         "backend/src-tauri/tauri.conf.json",
         "backend/src-tauri/tauri.conf.dist-dev.json",
         "backend/src-tauri/Cargo.toml",
+        "backend/hifishifter-plugin-core/Cargo.toml",
         "frontend/package.json",
         "frontend/package-lock.json",
     ];

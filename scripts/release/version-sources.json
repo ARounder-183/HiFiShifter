@@ -34,6 +34,11 @@
             "occurrences": 1
         },
         {
+            "path": "backend/hifishifter-plugin-core/Cargo.toml",
+            "pattern": "(?ms)(\\[package\\].*?^\\s*version\\s*=\\s*\")([^\"]+)(\")",
+            "occurrences": 1
+        },
+        {
             "path": "backend/Cargo.lock",
             "pattern": "(?ms)(\\[\\[package\\]\\]\\s*name\\s*=\\s*\"HiFiShifter\"\\s*version\\s*=\\s*\")([^\"]+)(\")",
             "occurrences": 1,
@@ -45,6 +50,12 @@
             "pattern": "(?ms)(\\[\\[package\\]\\]\\s*name\\s*=\\s*\"hifishifter-plugin\"\\s*version\\s*=\\s*\")([^\"]+)(\")",
             "occurrences": 1,
             "id": "backend/Cargo.lock (hifishifter-plugin)"
+        },
+        {
+            "path": "backend/Cargo.lock",
+            "pattern": "(?ms)(\\[\\[package\\]\\]\\s*name\\s*=\\s*\"hifishifter-plugin-core\"\\s*version\\s*=\\s*\")([^\"]+)(\")",
+            "occurrences": 1,
+            "id": "backend/Cargo.lock (hifishifter-plugin-core)"
         }
     ]
 }

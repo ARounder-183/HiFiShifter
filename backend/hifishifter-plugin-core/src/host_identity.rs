@@ -139,7 +139,7 @@ static HOST_IDENTITY_REPORTED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 /// 记录一次识别结果（只由 `resolve_and_record_host_identity` 调用）。
-pub(crate) fn note_identity(identity: &HostIdentity) {
+pub fn note_identity(identity: &HostIdentity) {
     let display = identity.display.to_ascii_lowercase();
     let is_vegas = display.contains("vegas")
         || display.contains("acid")
@@ -170,12 +170,12 @@ pub(crate) fn note_identity(identity: &HostIdentity) {
 
 /// 是否已经解析出非 unknown 的宿主身份。
 #[allow(dead_code)]
-pub(crate) fn identity_resolved() -> bool {
+pub fn identity_resolved() -> bool {
     HOST_IDENTITY_RESOLVED.load(std::sync::atomic::Ordering::Acquire)
 }
 
 /// 当前进程的宿主是否属于 VEGAS Creative Software 家族。
-pub(crate) fn is_vegas_family() -> bool {
+pub fn is_vegas_family() -> bool {
     HOST_IS_VEGAS.load(std::sync::atomic::Ordering::Acquire)
 }
 

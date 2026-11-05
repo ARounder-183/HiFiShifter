@@ -58,18 +58,18 @@ pub mod ara;
 mod ara_entry;
 mod audio_abi;
 mod capture;
-mod component_state;
+pub use hifishifter_plugin_core::component_state;
 mod diagnostics;
 mod editor;
-mod fade;
-mod host_identity;
-mod plugin_log_name;
+pub use hifishifter_plugin_core::fade;
+pub use hifishifter_plugin_core::host_identity;
+pub use hifishifter_plugin_core::plugin_log_name;
 pub mod render;
 mod runtime;
 mod settings_store;
 mod state_channel;
 mod state_stream;
-mod sync;
+pub use hifishifter_plugin_core::sync;
 #[cfg(test)]
 mod test_allocator;
 #[cfg(test)]
@@ -79,7 +79,7 @@ mod vst3;
 use std::ffi::c_void;
 
 /// VST3 类名。**必须与 ARA 工厂的 plugInName 一致** —— ARA 的 VST3 配对规则要求如此。
-pub(crate) const CLASS_NAME: &str = "HiFiShifter";
+pub use hifishifter_plugin_core::CLASS_NAME;
 pub(crate) mod host;
 /// 版本号（展示用）。
 ///
@@ -89,10 +89,10 @@ pub(crate) mod host;
 /// 「关于」对话框报出不同版本（已经真实发生过一次）。`tests/version_parity.rs`
 /// 再把 Cargo.toml / package.json 等其余副本钉在这一个值上。
 pub(crate) const VERSION: &str = env!("HFS_PRODUCT_VERSION");
-/// ARA 工厂的持久 ID。
-pub(crate) const FACTORY_ID: &str = "com.hifishifter.ara";
 /// ARA 文档归档 ID。
-pub(crate) const ARCHIVE_ID: &str = "com.hifishifter.ara.archive";
+pub use hifishifter_plugin_core::ARCHIVE_ID;
+/// ARA 工厂的持久 ID。
+pub use hifishifter_plugin_core::FACTORY_ID;
 
 /// 「关于」对话框与诊断包里的**形态标识**。
 ///
@@ -121,10 +121,13 @@ pub(crate) fn plugin_form_label(
 /// `<本地根>\logs` 并立刻写文件；迁移的判据是"新旧根同时存在就绝不合并"，
 /// 日志目录先被建出来，旧日志就再也搬不过来了。
 fn ensure_layout_v2_once() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
+    // 【为什么在钩子之后才迁移】日志初始化会先建 logs 目录，而迁移判据是
+    // 「新旧根同时存在就不合并」；钩子必须先登记，否则每个入口都要重复这段顺序。
+    hifishifter_plugin_core::set_layout_migration_hook(|| {
         hifishifter_kernel::app_paths_migrate::ensure_layout_v2().log_summary("plugin");
     });
+    hifishifter_plugin_core::set_product_version(crate::VERSION);
+    hifishifter_plugin_core::ensure_layout_v2_once();
 }
 
 /// 写一行诊断信息。
@@ -154,18 +157,7 @@ pub(crate) fn gui_log_line(message: &str) {
 /// `K_NO_INTERFACE`、refcount 该回计数、视图创建该回 null），原语不该替调用方猜。
 /// 拦下的 panic 统一记入日志（带 payload 文本），诊断有据可查。
 pub(crate) fn guard_ffi<R>(fallback: R, f: impl FnOnce() -> R) -> R {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
-        Ok(value) => value,
-        Err(payload) => {
-            let message = payload
-                .downcast_ref::<&str>()
-                .map(|s| (*s).to_string())
-                .or_else(|| payload.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "unknown panic payload".to_string());
-            log::error!("[ffi-guard] panic contained at FFI boundary: {message}");
-            fallback
-        }
-    }
+    hifishifter_plugin_core::guard_ffi(fallback, f)
 }
 
 /// VST3 模块入口：返回 `IPluginFactory*`。
