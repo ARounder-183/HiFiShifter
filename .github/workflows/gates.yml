@@ -179,6 +179,12 @@ jobs:
     if: inputs.scope == 'all'
     runs-on: windows-latest
     timeout-minutes: 120
+    env:
+      # 【为什么钉死 CPU EP】托管运行器没有 GPU，而 ort 默认在 Windows 上先试 DirectML：
+      # 设备创建失败后要等一轮超时才会退到 CPU，用例之间因此出现几十秒的空档，
+      # 偶尔还会卡在设备初始化上不再返回（整条 job 挂到 60 分钟上限）。测试判的是
+      # 逻辑，不是 GPU 性能，所以直接把 EP 钉成 cpu。
+      HIFISHIFTER_ORT_EP: cpu
     defaults:
       run:
         shell: pwsh
@@ -253,6 +259,8 @@ jobs:
     name: Plugin tests (push feedback)
     runs-on: windows-latest
     timeout-minutes: 60
+    env:
+      HIFISHIFTER_ORT_EP: cpu
     defaults:
       run:
         shell: pwsh
