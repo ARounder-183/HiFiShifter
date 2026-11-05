@@ -312,6 +312,7 @@ ONNX Runtime 바이너리는 ort crate의 `download-binaries` 기능으로 빌�
 
 - 확장(Extension) API: [docs/extension-api.md](../../docs/extension-api.md)
 - UI 문구 스타일 가이드(i18n Style Guide): [docs/i18n/style-guide.md](../../docs/i18n/style-guide.md)
+- 모델 가중치(가져오기 및 배포): [docs/models.md](../../docs/models.md)
 
 ## 감사의 말
 

@@ -312,6 +312,7 @@ ONNX Runtimeのバイナリは、ort crateの `download-binaries` 機能によ�
 
 - 拡張（Extension）API：[docs/extension-api.md](../../docs/extension-api.md)
 - i18n スタイルガイド：[docs/i18n/style-guide.md](../../docs/i18n/style-guide.md)
+- モデルの重み（取得とリリース）：[docs/models.md](../../docs/models.md)
 
 ## 謝辞
 

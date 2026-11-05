@@ -23,8 +23,15 @@ $manifestPath = Join-Path $manifestModels 'models.json'
 # 补丁输入（由 scripts/build/generate-coreml-pads-patch.py 生成、产物入库）——它改变
 # 推理输入的构造方式，必须参与版本计算：换模型忘了重新生成清单时，这里是唯一
 # 会红的地方。`config.json` / `config.yaml` 是模型自带的配置 —— 它们一起改才叫
-# "换模型"，因此一并纳入。目录里的临时产物（models.json 自身）不纳入。
-$manifestExcluded = @('models.json')
+# "换模型"，因此一并纳入。
+#
+# 不纳入的是两类**本地产物**：
+# - `models.json` 自身（本脚本的输出物）；
+# - `pc_nsf_hifigan_coreml.onnx`：macOS 的 build.rs 由 `pc_nsf_hifigan.onnx` 改写出的
+#   CoreML 变体（backend/src-tauri/build.rs::generate_coreml_model_variant）。它是构建
+#   产物而非源权重 —— 登记它就等于要求 Windows/Linux 也装 56 MB 用不上的权重，而且
+#   版本号会取决于"这台机器编没编过 macOS 目标"。
+$manifestExcluded = @('models.json', 'pc_nsf_hifigan_coreml.onnx')
 
 $manifestFiles = @()
 foreach ($manifestFile in Get-ChildItem -LiteralPath $manifestModels -Recurse -File |

@@ -314,6 +314,7 @@ For developers:
 
 - Extension API: [docs/extension-api.md](../../docs/extension-api.md)
 - UI text style guide (i18n Style Guide): [docs/i18n/style-guide.md](../../docs/i18n/style-guide.md)
+- Model weights (fetching and publishing): [docs/models.md](../../docs/models.md)
 
 ## Acknowledgements
 

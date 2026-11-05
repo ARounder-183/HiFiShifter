@@ -345,6 +345,7 @@ ONNX Runtime 二进制文件由 ort crate 在编译时通过 `download-binaries`
 
 - 扩展（Extension）API：[docs/extension-api.md](docs/extension-api.md)
 - 界面文案风格指南（i18n Style Guide）：[docs/i18n/style-guide.md](docs/i18n/style-guide.md)
+- 模型权重（获取与发布）：[docs/models.md](docs/models.md)
 
 ## 致谢
 
