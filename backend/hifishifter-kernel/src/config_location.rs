@@ -1,62 +1,27 @@
 //! 用户配置目录的解析：独立 App 与 ARA 插件必须落在**同一个目录**。
 //!
-//! 【为什么需要它】App 通过 Tauri 的 `app_config_dir()` 拿路径，而插件没有 Tauri
-//! （依赖树守卫明令禁止）。插件此前干脆不落盘 —— 设置纯内存，换个 REAPER 工程或
-//! 重启一次就回到出厂默认。让插件自己"猜"一个路径同样不行：猜错就等于两套设置，
-//! 用户在 App 里调好的外观与快捷键在插件里全部失效。
+//! 【这个模块现在只做转发】路径的**唯一**计算点是 [crate::app_paths]：那里同时
+//! 定义设置、本机数据、缓存、日志与共享库五个根，并给出三平台一张表。本模块保留
+//! 既有公开函数名（`default_config_dir` / `resolve` / `local_data_subdir` …），因此
+//! 调用点一个都不用改 —— 但**没有第二份实现**可以漂移。
 //!
-//! 因此路径只有这一处计算，两个宿主都调用它。各平台的结果与 Tauri 的
-//! `app_config_dir()/HiFiShifter` 逐一对应：
+//! 【为什么这件事重要】App 通过 Tauri 拿路径，而插件没有 Tauri（依赖树守卫明令禁止）。
+//! 插件此前干脆不落盘 —— 设置纯内存，换个 REAPER 工程或重启一次就回到出厂默认。
+//! 让插件自己"猜"一个路径同样不行：猜错就等于两套设置，用户在 App 里调好的外观与
+//! 快捷键在插件里全部失效。路径只有这一处计算，两个宿主都调用它。
 //!
-//! | 平台 | 路径 |
-//! | --- | --- |
-//! | Windows | `%APPDATA%\com.arounder.hifishifter\HiFiShifter` |
-//! | macOS | `~/Library/Application Support/com.arounder.hifishifter/HiFiShifter` |
-//! | Linux | `$XDG_CONFIG_HOME/com.arounder.hifishifter/HiFiShifter`（缺省 `~/.config`） |
-//!
-//! 【为什么放在 Roaming 而不是 Local】这是既有布局（App 一直写在这里），改位置
-//! 等于让存量用户丢一次设置；插件加入不该有这种代价。
+//! 各平台结果见 [crate::app_paths] 的模块注释（Windows 是
+//! `%APPDATA%\HiFiShifter`，macOS 是 `~/Library/Application Support/HiFiShifter`，
+//! Linux 是 `$XDG_CONFIG_HOME/HiFiShifter`）。
 
 use std::path::{Path, PathBuf};
 
-/// Tauri 的 `identifier`，也是本目录的一级名字。
-const APP_IDENTIFIER: &str = "com.arounder.hifishifter";
-/// 配置子目录名（与 App 历史布局一致）。
-const CONFIG_SUBDIR: &str = "HiFiShifter";
-
-/// 覆盖配置目录的环境变量。
-///
-/// 【为什么必须有】插件与内核的单元测试跑在开发机上，如果它们写真实的用户配置，
-/// 一次 `cargo test` 就会改掉开发者自己的设置；并行测试之间也会互相踩。有了这个
-/// 变量，每个测试指向自己的临时目录，落盘逻辑才可测。
-pub const CONFIG_DIR_ENV: &str = "HIFISHIFTER_CONFIG_DIR";
+pub use crate::app_paths::CONFIG_DIR_ENV;
 
 /// 平台默认的配置目录；无法确定时返回 `None`（不 panic —— 设置存不下不该让
 /// 宿主进程起不来）。
 pub fn default_config_dir() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        let base = std::env::var_os("APPDATA")?;
-        Some(PathBuf::from(base).join(APP_IDENTIFIER).join(CONFIG_SUBDIR))
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let home = std::env::var_os("HOME")?;
-        Some(
-            PathBuf::from(home)
-                .join("Library")
-                .join("Application Support")
-                .join(APP_IDENTIFIER)
-                .join(CONFIG_SUBDIR),
-        )
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        let base = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-        Some(base.join(APP_IDENTIFIER).join(CONFIG_SUBDIR))
-    }
+    crate::app_paths::config_dir()
 }
 
 /// 解析配置目录：显式参数 > 环境变量 > 平台默认。
@@ -67,13 +32,7 @@ pub fn resolve(explicit: Option<&Path>) -> Option<PathBuf> {
     if let Some(path) = explicit {
         return Some(path.to_path_buf());
     }
-    if let Some(raw) = std::env::var_os(CONFIG_DIR_ENV) {
-        let raw = raw.to_string_lossy().trim().to_owned();
-        if !raw.is_empty() {
-            return Some(PathBuf::from(raw));
-        }
-    }
-    default_config_dir()
+    crate::app_paths::config_dir()
 }
 
 /// 解析并确保目录存在（失败时返回原因，调用方决定是报错还是静默降级）。
@@ -86,43 +45,11 @@ pub fn resolve_and_create(explicit: Option<&Path>) -> Result<PathBuf, String> {
 
 /// 平台默认的**本机**数据目录（缓存 / 临时工作文件），与漫游的配置目录分开。
 ///
-/// 【为什么不能用 `%TEMP%`】WebView2 的用户数据目录与渲染用的 PCM 暂存原先都放在
-/// 系统临时目录里。那不是"临时"能形容的问题：
-/// - Windows 磁盘清理会在**会话进行中**删除 `%TEMP%` 下的内容 —— 正在运行的
-///   WebView2 用户数据目录被删掉是崩溃隐患，不只是"设置丢了"；
-/// - `%TEMP%` 可能被策略指向内存盘或每次登录重建的目录。
-///
-/// 放在本机数据目录下，这些文件的生命周期就由我们自己决定（见各调用点的清理）。
-///
-/// | 平台 | 路径 |
-/// | --- | --- |
-/// | Windows | `%LOCALAPPDATA%\com.arounder.hifishifter\HiFiShifter` |
-/// | macOS | `~/Library/Caches/com.arounder.hifishifter/HiFiShifter` |
-/// | Linux | `$XDG_CACHE_HOME/com.arounder.hifishifter/HiFiShifter`（缺省 `~/.cache`） |
+/// 见 [crate::app_paths::local_data_dir]：Windows 是 `%LOCALAPPDATA%\HiFiShifter`，
+/// macOS 是 `~/Library/Application Support/HiFiShifter`，Linux 是
+/// `$XDG_DATA_HOME/HiFiShifter`。
 pub fn default_local_data_dir() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        let base = std::env::var_os("LOCALAPPDATA")?;
-        Some(PathBuf::from(base).join(APP_IDENTIFIER).join(CONFIG_SUBDIR))
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let home = std::env::var_os("HOME")?;
-        Some(
-            PathBuf::from(home)
-                .join("Library")
-                .join("Caches")
-                .join(APP_IDENTIFIER)
-                .join(CONFIG_SUBDIR),
-        )
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        let base = std::env::var_os("XDG_CACHE_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
-        Some(base.join(APP_IDENTIFIER).join(CONFIG_SUBDIR))
-    }
+    crate::app_paths::local_data_dir()
 }
 
 /// 本机数据目录下的一个子目录；解析不出来时退回系统临时目录。
@@ -130,68 +57,31 @@ pub fn default_local_data_dir() -> Option<PathBuf> {
 /// 【为什么保留临时目录兜底】缺 `LOCALAPPDATA` 时宁可用临时目录也不能让插件起不来 ——
 /// 一个跑得起来但清理不完美的会话，好过一个打不开的窗口。
 pub fn local_data_subdir(name: &str) -> PathBuf {
-    match default_local_data_dir() {
-        Some(base) => base.join(name),
-        None => std::env::temp_dir().join("hifishifter").join(name),
-    }
+    crate::app_paths::local_data_subdir(name)
 }
 
-/// 平台默认的**全机共享**数据目录。
+/// 平台默认的**全机共享**数据目录（只有 Windows 有，其余为 `None`）。
 ///
-/// 【为什么共享模型库必须用它，而不是用户目录】安装器以管理员身份运行。若它把
-/// 152 MB 模型写进 `%LOCALAPPDATA%`，在"标准用户 + 输入管理员密码"这种提权方式下
-/// 写的就是**管理员**的配置目录，而真正运行插件的是标准用户 —— 插件找不到模型，
-/// 且失败方式只是"推理不可用"，极难归因。`%PROGRAMDATA%` 没有这个问题：谁提权都能
-/// 写对位置，所有用户都读得到。
-///
-/// 【非管理员也能建】`%PROGRAMDATA%` 默认允许 Users 创建子目录，因此运行时（App
-/// 首次启动时发布模型）不需要提权。
-///
-/// | 平台 | 路径 |
-/// | --- | --- |
-/// | Windows | `%PROGRAMDATA%\HiFiShifter` |
-/// | macOS | `/Library/Application Support/HiFiShifter`（不可写时调用方回退） |
-/// | Linux | `/var/lib/hifishifter`（同上） |
+/// 理由见 [crate::app_paths::shared_data_dir] 与 [crate::model_store] 的模块文档。
 pub fn default_shared_data_dir() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        let base = std::env::var_os("PROGRAMDATA")?;
-        Some(PathBuf::from(base).join(CONFIG_SUBDIR))
-    }
-    #[cfg(not(windows))]
-    {
-        // 非 Windows 平台没有插件的交付流程（ARA 侧只做 Windows x64），共享库仅作为
-        // 内核 API 存在；调用方会在不可写时退回用户目录。
-        None
-    }
+    crate::app_paths::shared_data_dir()
 }
 
-/// 全机共享数据目录下的一个子目录；不可用时退回用户本机数据目录。
-///
-/// 【为什么回退是"用户目录"而不是临时目录】共享模型库可能很大（152 MB），落在临时
-/// 目录会被磁盘清理删掉，下次启动又得重建；退回用户目录至少是稳定的。
-pub fn shared_data_subdir(name: &str) -> PathBuf {
-    match default_shared_data_dir() {
-        Some(base) => base.join(name),
-        None => local_data_subdir(name),
-    }
+/// 共享数据目录下的一个子目录；非 Windows 或不可用时为 `None`。
+pub fn shared_data_subdir(name: &str) -> Option<PathBuf> {
+    crate::app_paths::shared_data_subdir(name)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
     /// `HIFISHIFTER_CONFIG_DIR` 是**进程级**全局量，而 cargo 默认并行跑用例：一个用例
     /// `set_var`、另一个同时把它设成空值、第一个再去读，就会落到平台默认 —— 表现为
-    /// 随机失败的"环境变量没生效"。改动它的用例都先取这把锁，让"写入-读取-清除"成为
-    /// 临界区。（锁中毒按既有 `lock_or_recover` 纪律恢复，不 panic。）
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
+    /// 随机失败的"环境变量没生效"。改动它的用例都先取这把锁（**全 crate 共用一把**，
+    /// 见 `crate::test_env`）。
     fn env_guard() -> std::sync::MutexGuard<'static, ()> {
-        ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        crate::test_env::guard()
     }
 
     /// 显式参数优先于环境变量：App 传自己的路径时必须用它。
@@ -224,20 +114,27 @@ mod tests {
         let resolved = resolve(None);
         std::env::remove_var(CONFIG_DIR_ENV);
         assert_ne!(resolved, Some(PathBuf::new()));
-        assert_eq!(resolved, default_config_dir());
+        assert_eq!(resolved, crate::app_paths::config_dir());
     }
 
-    /// 平台默认路径必须以 `<identifier>/HiFiShifter` 收尾 —— 这正是 App 一直
-    /// 使用的目录；插件算错一层就会与 App 分家，而症状只是"设置不共享"。
+    /// 平台默认路径必须以产品目录名收尾 —— 这正是两个宿主共用的目录；算错一层
+    /// 就会与对方分家，而症状只是"设置不共享"。
     #[test]
-    fn the_platform_default_matches_the_historical_app_layout() {
+    fn the_platform_default_names_the_product() {
         let Some(dir) = default_config_dir() else {
             // 环境缺少 HOME/APPDATA 时无从判定，跳过（CI 上两者都在）。
             return;
         };
         assert!(
-            dir.ends_with(Path::new(APP_IDENTIFIER).join(CONFIG_SUBDIR)),
-            "配置目录 {dir:?} 不再以 {APP_IDENTIFIER}/{CONFIG_SUBDIR} 收尾，插件会与 App 分家"
+            dir.ends_with(crate::app_paths::PRODUCT_DIR),
+            "配置目录 {dir:?} 不再以 {} 收尾，插件会与 App 分家",
+            crate::app_paths::PRODUCT_DIR
+        );
+        // 历史的一层 identifier 目录必须**不再出现**：它是 v2 布局的重点。
+        assert!(
+            !dir.to_string_lossy()
+                .contains(crate::app_paths::LEGACY_IDENTIFIER),
+            "配置目录 {dir:?} 仍带着历史 identifier 一层"
         );
     }
 
@@ -249,5 +146,20 @@ mod tests {
         let created = resolve_and_create(Some(&dir)).expect("create config dir");
         assert!(created.is_dir());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// App 与插件解析到的必须是**同一个**目录 —— 这是本模块存在的全部理由。
+    ///
+    /// 【为什么这条不测两个 crate】两个宿主调用的就是同一个函数；能漂移的只有
+    /// "谁算了第二遍"。这条把"转发"钉死：只要 config_location 还是一条转发，
+    /// 两侧就不可能分家。
+    #[test]
+    fn the_app_and_the_plugin_resolve_the_same_directory() {
+        assert_eq!(default_config_dir(), crate::app_paths::config_dir());
+        assert_eq!(
+            crate::logfile::log_dir(),
+            crate::app_paths::log_dir(),
+            "日志目录也必须由同一个根算出来（两个宿主写进同一目录）"
+        );
     }
 }

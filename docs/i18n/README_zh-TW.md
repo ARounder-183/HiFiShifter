@@ -254,11 +254,11 @@ ONNX Runtime 二進位檔案由 ort crate 在編譯時透過 `download-binaries`
 
 應用程式會自動將執行日誌寫入系統標準日誌目錄，無需任何命令列參數：
 
-| 系統 | 日誌目錄 |
-| --- | --- |
-| Windows | `%LOCALAPPDATA%\com.arounder.hifishifter\logs` |
-| macOS | `~/Library/Logs/com.arounder.hifishifter` |
-| Linux | `~/.local/share/com.arounder.hifishifter/logs` |
+| 系統    | 日誌目錄                           |
+| ------- | ---------------------------------- |
+| Windows | `%LOCALAPPDATA%\HiFiShifter\logs`  |
+| macOS   | `~/Library/Logs/HiFiShifter`       |
+| Linux   | `$XDG_STATE_HOME/HiFiShifter/logs` |
 
 - 在應用程式內透過 **說明 → 開啟日誌資料夾** 可以直接定位日誌；**說明 → 匯出診斷資訊** 可以一鍵產生診斷套件（系統資訊 + 全部日誌 + 推理裝置基準測試結果），提交 issue 時附上即可。
 - 日誌依大小自動輪替：單一檔案上限 8 MiB，預設保留 3 份歷史（`hifishifter.1.log` ~ `hifishifter.3.log`）。
@@ -274,6 +274,20 @@ ONNX Runtime 二進位檔案由 ort crate 在編譯時透過 `download-binaries`
 - 環境變數 `HIFISHIFTER_SAFE_GL=1`：GPU 驅動有問題、介面起不來時使用，關閉 WebKit 合成器並強制軟體渲染（能出介面，繪製會變慢）。
 - 啟動日誌固定有兩行圖形診斷：`[linux] session:`（GTK 後端／`DISPLAY`／`WAYLAND_DISPLAY`／是否 AppImage）與 `[linux] egl:`（EGL vendor 與版本）。回報圖形相關 issue 時請附上這兩行。
 - 在終端機執行 `HiFiShifter --benchmark`：直接執行推理裝置基準測試並輸出 JSON 結果。
+
+### 資料目錄
+
+除日誌之外，其餘使用者資料的位置如下（獨立 App 與外掛共用同一套目錄）：
+
+| 用途 | Windows | macOS | Linux |
+| --- | --- | --- | --- |
+| 設定 | `%APPDATA%\HiFiShifter` | `~/Library/Application Support/HiFiShifter` | `$XDG_CONFIG_HOME/HiFiShifter`（預設 `~/.config/HiFiShifter`） |
+| 快取（波形 / 整段算圖） | `%LOCALAPPDATA%\HiFiShifter\cache` | `~/Library/Caches/HiFiShifter` | `$XDG_CACHE_HOME/HiFiShifter`（預設 `~/.cache/HiFiShifter`） |
+| 未儲存工作階段的匯入素材 | `%LOCALAPPDATA%\HiFiShifter\unsaved\<工作階段>` | `~/Library/Application Support/HiFiShifter/unsaved/<工作階段>` | `$XDG_DATA_HOME/HiFiShifter/unsaved/<工作階段>` |
+| 共用模型庫（僅 Windows，由安裝程式寫入） | `%PROGRAMDATA%\HiFiShifter\models\<版本>` | — | — |
+
+- 已儲存工程的匯入素材放在工程檔旁的 `<工程名>_media` 目錄裡，連同工程一起拷走即可。
+- 從舊版升級時，首次啟動會自動把原本的 `com.arounder.hifishifter` 目錄搬到新位置；若新舊目錄同時存在則**不合併**（兩邊原樣保留），並在日誌留下一行說明。
 
 ## 文件
 

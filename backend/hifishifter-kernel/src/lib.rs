@@ -61,6 +61,10 @@
 )]
 
 // ── 出口与基础设施 ──────────────────────────────────────────────────────────
+// 用户级目录的**唯一**计算点（App 与插件共用），以及随之而来的一次性迁移。
+// 两者必须排在最前：任何落盘模块都建立在它们给出的路径之上。
+pub mod app_paths;
+pub mod app_paths_migrate;
 pub mod build_info;
 pub mod byte_budget_cache;
 pub mod config_location;
@@ -242,6 +246,25 @@ pub mod vslib;
 
 // ── 节拍器（`EngineCommand` 的载荷类型在这里）──────────────────────────────
 pub mod metronome;
+
+// ── 测试用的进程级环境变量锁 ────────────────────────────────────────────────
+//
+// `std::env::set_var` 是**进程级**的，而 cargo 默认并行跑用例。多个模块都要改
+// `HIFISHIFTER_*` 变量时必须共用同一把锁 —— 两个模块各自声明一把等于没加锁，
+// 而那正是"环境变量没生效"类偶发失败的成因。
+#[cfg(test)]
+pub(crate) mod test_env {
+    use std::sync::{Mutex, MutexGuard};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// 取锁（中毒按既有 `lock_or_recover` 纪律恢复，不 panic）。
+    pub(crate) fn guard() -> MutexGuard<'static, ()> {
+        ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
 
 // ── 测试专用的分配计量 ──────────────────────────────────────────────────────
 //

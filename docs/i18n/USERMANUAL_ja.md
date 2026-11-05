@@ -826,11 +826,11 @@ REAPER は ARA プラグインを**トラック単位**で管理します。プ�
 
 HiFiShifter は実行ログを自動的に OS 標準のログディレクトリへ書き込みます。コマンドライン引数は不要です。問題が発生した場合は、ログファイルを添付して報告すると調査に役立ちます：
 
-| OS      | ログディレクトリ                               |
-| ------- | ---------------------------------------------- |
-| Windows | `%LOCALAPPDATA%\com.arounder.hifishifter\logs` |
-| macOS   | `~/Library/Logs/com.arounder.hifishifter`      |
-| Linux   | `~/.local/share/com.arounder.hifishifter/logs` |
+| OS      | ログディレクトリ                   |
+| ------- | ---------------------------------- |
+| Windows | `%LOCALAPPDATA%\HiFiShifter\logs`  |
+| macOS   | `~/Library/Logs/HiFiShifter`       |
+| Linux   | `$XDG_STATE_HOME/HiFiShifter/logs` |
 
 - `ヘルプ → ログフォルダーを開く` でログファイルの場所を直接開けます。
 - プラグイン（ARA）のログはスタンドアロン版と**同じフォルダー・同じ書式・同じローテーション**で、ファイル名は `plugin.log` です。どちらもバージョン番号・日付・時刻が入るため、まとめて提出できます。
@@ -838,6 +838,20 @@ HiFiShifter は実行ログを自動的に OS 標準のログディレクトリ�
 - ログはサイズに応じて自動ローテーションされます：1 ファイル上限 8 MiB、履歴は 3 世代まで保持（`hifishifter.1.log` ~ `hifishifter.3.log`）。
     - 繰り返し発生するエラー / 警告は自動的にスロットリングされます：同じ位置のログは 10 秒ごとに最大 1 件出力され、抑制された件数は次の出力前に `[throttled]` 行で補記されます。
 - フロントエンドとバックエンドのエラーは同じログファイルに記録されるため、1 つのファイルで時系列に沿って調査できます。
+
+### データディレクトリ
+
+ログ以外のユーザーデータは次の場所にあります（スタンドアロン版とプラグインは同じディレクトリを共有します）:
+
+| 用途 | Windows | macOS | Linux |
+| --- | --- | --- | --- |
+| 設定 | `%APPDATA%\HiFiShifter` | `~/Library/Application Support/HiFiShifter` | `$XDG_CONFIG_HOME/HiFiShifter`（既定 `~/.config/HiFiShifter`） |
+| キャッシュ（波形 / レンダー） | `%LOCALAPPDATA%\HiFiShifter\cache` | `~/Library/Caches/HiFiShifter` | `$XDG_CACHE_HOME/HiFiShifter`（既定 `~/.cache/HiFiShifter`） |
+| 未保存セッションの取り込み素材 | `%LOCALAPPDATA%\HiFiShifter\unsaved\<セッション>` | `~/Library/Application Support/HiFiShifter/unsaved/<セッション>` | `$XDG_DATA_HOME/HiFiShifter/unsaved/<セッション>` |
+| 共有モデルライブラリ（Windows のみ・インストーラーが書き込み） | `%PROGRAMDATA%\HiFiShifter\models\<バージョン>` | — | — |
+
+- 保存済みプロジェクトの取り込み素材は、プロジェクトファイルの隣の `<プロジェクト名>_media` ディレクトリに入ります。プロジェクトごとコピーしてください。
+- 旧バージョンから更新した場合、初回起動時に旧 `com.arounder.hifishifter` ディレクトリが新しい場所へ移動されます。新旧が同時に存在する場合は**統合しません**（どちらもそのまま残します）。ログに 1 行記録されます。
 
 ### Linux でウィンドウが表示されない／ダブルクリックしても何も起きない
 

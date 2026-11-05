@@ -826,11 +826,11 @@ If you are used to editing in the standalone app, you can also let it connect to
 
 HiFiShifter automatically writes its run log to the platform-standard log directory — no command-line flags required. When you run into a problem, attaching the log file(s) to an issue helps a lot with diagnosis:
 
-| OS      | Log directory                                  |
-| ------- | ---------------------------------------------- |
-| Windows | `%LOCALAPPDATA%\com.arounder.hifishifter\logs` |
-| macOS   | `~/Library/Logs/com.arounder.hifishifter`      |
-| Linux   | `~/.local/share/com.arounder.hifishifter/logs` |
+| OS      | Log directory                      |
+| ------- | ---------------------------------- |
+| Windows | `%LOCALAPPDATA%\HiFiShifter\logs`  |
+| macOS   | `~/Library/Logs/HiFiShifter`       |
+| Linux   | `$XDG_STATE_HOME/HiFiShifter/logs` |
 
 - Use `Help → Open Log Folder` to jump straight to the log files.
 - The plugin (ARA) log shares the app's **folder, format and rotation**, and is named `plugin.log`. Both logs carry the version, date and time, so they can be submitted together.
@@ -838,6 +838,20 @@ HiFiShifter automatically writes its run log to the platform-standard log direct
 - Logs rotate automatically by size: 8 MiB per file, with up to 3 historical copies kept (`hifishifter.1.log` ~ `hifishifter.3.log`).
     - Frequently repeating errors / warnings are throttled automatically: a given log site emits at most one message per 10-second window, and suppressed messages are summarized in a `[throttled]` line before the next one.
 - Frontend and backend errors are written to the same log file, so a single file tells the whole story in chronological order.
+
+### Data directories
+
+Besides the logs, the user data lives here (the standalone app and the plug-in share the same directories):
+
+| Purpose | Windows | macOS | Linux |
+| --- | --- | --- | --- |
+| Settings | `%APPDATA%\HiFiShifter` | `~/Library/Application Support/HiFiShifter` | `$XDG_CONFIG_HOME/HiFiShifter` (default `~/.config/HiFiShifter`) |
+| Caches (waveform / render) | `%LOCALAPPDATA%\HiFiShifter\cache` | `~/Library/Caches/HiFiShifter` | `$XDG_CACHE_HOME/HiFiShifter` (default `~/.cache/HiFiShifter`) |
+| Imported media of unsaved sessions | `%LOCALAPPDATA%\HiFiShifter\unsaved\<session>` | `~/Library/Application Support/HiFiShifter/unsaved/<session>` | `$XDG_DATA_HOME/HiFiShifter/unsaved/<session>` |
+| Shared model library (Windows only, written by the installer) | `%PROGRAMDATA%\HiFiShifter\models\<version>` | — | — |
+
+- Imported media of a saved project lives in a `<project name>_media` folder next to the project file; copy the project together with that folder.
+- When upgrading from an older version, the first launch moves the old `com.arounder.hifishifter` directories to the new locations. If both the old and the new directory exist, they are **not merged** (both are left untouched) and a note is written to the log.
 
 ### The window does not come up on Linux / double-click does nothing
 

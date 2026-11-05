@@ -402,8 +402,10 @@ mod tests {
             .unwrap_or_default()
             .to_owned();
         assert!(name.starts_with("plugin-"), "{name}");
+        // 目录里必须出现**产品目录名**（v2 布局）；历史上这里断言的是 identifier 那
+        // 一层，它正是"用户拿到一串反向域名"的成因。
         assert!(log_directory()
             .to_string_lossy()
-            .contains("com.arounder.hifishifter"));
+            .contains(hifishifter_kernel::app_paths::PRODUCT_DIR));
     }
 }

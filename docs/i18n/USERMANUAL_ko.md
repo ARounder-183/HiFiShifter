@@ -826,11 +826,11 @@ REAPER는 ARA 플러그인을 **트랙 단위**로 관리합니다. 플러그인
 
 HiFiShifter는 실행 로그를 OS 표준 로그 디렉터리에 자동으로 기록합니다. 명령줄 인수가 필요하지 않습니다. 문제가 발생하면 로그 파일을 첨부해 보고하면 원인 파악에 큰 도움이 됩니다:
 
-| OS      | 로그 디렉터리                                  |
-| ------- | ---------------------------------------------- |
-| Windows | `%LOCALAPPDATA%\com.arounder.hifishifter\logs` |
-| macOS   | `~/Library/Logs/com.arounder.hifishifter`      |
-| Linux   | `~/.local/share/com.arounder.hifishifter/logs` |
+| OS      | 로그 디렉터리                      |
+| ------- | ---------------------------------- |
+| Windows | `%LOCALAPPDATA%\HiFiShifter\logs`  |
+| macOS   | `~/Library/Logs/HiFiShifter`       |
+| Linux   | `$XDG_STATE_HOME/HiFiShifter/logs` |
 
 - `도움말 → 로그 폴더 열기` 메뉴로 로그 파일 위치를 바로 열 수 있습니다.
 - 플러그인(ARA) 로그는 앱과 **같은 폴더·같은 형식·같은 로테이션**을 쓰며 파일 이름은 `plugin.log`입니다. 두 로그 모두 버전·날짜·시각을 담고 있어 함께 첨부하기 좋습니다.
@@ -838,6 +838,20 @@ HiFiShifter는 실행 로그를 OS 표준 로그 디렉터리에 자동으로 �
 - 로그는 크기 기준으로 자동 순환됩니다: 파일당 최대 8 MiB, 최대 3개의 이전 파일 보관 (`hifishifter.1.log` ~ `hifishifter.3.log`).
     - 반복되는 오류 / 경고는 자동으로 스로틀링됩니다: 동일한 위치의 로그는 10초 창당 최대 1건만 출력되며, 억제된 건수는 다음 출력 전에 `[throttled]` 행으로 보완 기록됩니다.
 - 프런트엔드와 백엔드 오류가 모두 동일한 로그 파일에 기록되어 하나의 파일로 시간순 추적이 가능합니다.
+
+### 데이터 디렉터리
+
+로그 외의 사용자 데이터는 다음 위치에 있습니다(독립 실행형 앱과 플러그인이 같은 디렉터리를 공유합니다):
+
+| 용도 | Windows | macOS | Linux |
+| --- | --- | --- | --- |
+| 설정 | `%APPDATA%\HiFiShifter` | `~/Library/Application Support/HiFiShifter` | `$XDG_CONFIG_HOME/HiFiShifter`(기본 `~/.config/HiFiShifter`) |
+| 캐시(파형 / 렌더) | `%LOCALAPPDATA%\HiFiShifter\cache` | `~/Library/Caches/HiFiShifter` | `$XDG_CACHE_HOME/HiFiShifter`(기본 `~/.cache/HiFiShifter`) |
+| 저장되지 않은 세션의 가져온 미디어 | `%LOCALAPPDATA%\HiFiShifter\unsaved\<세션>` | `~/Library/Application Support/HiFiShifter/unsaved/<세션>` | `$XDG_DATA_HOME/HiFiShifter/unsaved/<세션>` |
+| 공유 모델 라이브러리(Windows 전용, 설치 프로그램이 기록) | `%PROGRAMDATA%\HiFiShifter\models\<버전>` | — | — |
+
+- 저장된 프로젝트의 가져온 미디어는 프로젝트 파일 옆의 `<프로젝트 이름>_media` 디렉터리에 들어갑니다. 프로젝트와 함께 복사하면 됩니다.
+- 이전 버전에서 업그레이드하면 첫 실행 시 기존 `com.arounder.hifishifter` 디렉터리가 새 위치로 이동합니다. 옛 디렉터리와 새 디렉터리가 동시에 존재하면 **병합하지 않고**(양쪽 모두 그대로 둡니다) 로그에 한 줄 남깁니다.
 
 ### Linux 에서 창이 뜨지 않음 / 더블클릭해도 반응 없음
 

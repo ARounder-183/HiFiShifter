@@ -19,16 +19,9 @@ pub(crate) fn initialize_models() {
         return;
     };
     match hifishifter_kernel::model_store::resolve_and_register(&directory) {
-        Ok(origin) => crate::log_line(&format!(
-            "models: {} ({:?}{})",
-            origin.dir.display(),
-            origin.source,
-            if origin.published {
-                ", just published"
-            } else {
-                ""
-            }
-        )),
+        // 来源描述由内核统一给（来源 + 目录 + 版本 + 是否刚发布）：App 与插件的
+        // 日志行必须长得一样，否则"模型到底从哪儿来的"每次都要分两处读。
+        Ok(origin) => crate::log_line(&format!("models: {}", origin.describe())),
         // 模型不可用不该让插件窗口起不来：编辑与界面照常，推理相关的操作各自报错。
         Err(error) => crate::log_line(&format!("models unavailable: {error}")),
     }

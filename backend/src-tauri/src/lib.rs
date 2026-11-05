@@ -275,6 +275,11 @@ pub use hifishifter_kernel::model_paths::{
     set_hnsep_model_dir, set_nsf_hifigan_model_dir,
 };
 
+// 用户级目录的**唯一**计算点（App 与插件共用）以及一次性布局迁移。
+// 在这里再导出，是给 `main.rs` 用的：迁移必须早于日志初始化，而日志初始化发生在
+// `run()` 之前 —— 那条调用链只看得到 `backend_lib::`。
+pub use hifishifter_kernel::{app_paths, app_paths_migrate};
+
 pub fn nsf_hifigan_onnx_probe() -> Result<String, String> {
     // Probe ONNX model availability.
     #[cfg(feature = "onnx")]
@@ -302,8 +307,57 @@ pub fn run_vocoder_benchmark_cli() -> Result<String, String> {
     }
 }
 
+/// 把内核算出来的用户级目录装进 Tauri 的 `appDirectoriesOverride`。
+///
+/// 【为什么用这个开关，而不是逐个 API 改】Tauri 的 `app_config_dir` /
+/// `app_data_dir` / `app_local_data_dir` / `app_cache_dir` / `app_log_dir` **以及
+/// Windows/Linux 上 WebView 的默认数据目录**都从这一处取值。逐个改调用点的话，
+/// 漏掉的那一处只会表现为"某个缓存又写回旧目录了"，而没人会去查一个不报错的东西。
+///
+/// 【为什么同时设 data 与 config】Tauri 的 `app_data_dir` 是"漫游数据"，与设置是
+/// 同一个家（`%APPDATA%\HiFiShifter`）；不设它就会退回
+/// `%APPDATA%\com.arounder.hifishifter` —— 那正是我们要消失的那一层。
+fn app_directories_override() -> Option<tauri::utils::config::AppDirectoriesOverride> {
+    use tauri::utils::config::{AppDirectoriesOverride, AppDirectoryOverrides};
+
+    let config = hifishifter_kernel::app_paths::config_dir();
+    let local_data = hifishifter_kernel::app_paths::local_data_dir();
+    let cache = hifishifter_kernel::app_paths::cache_dir();
+    let log = hifishifter_kernel::app_paths::log_dir();
+    if config.is_none() && local_data.is_none() && cache.is_none() && log.is_none() {
+        return None;
+    }
+    Some(AppDirectoriesOverride::Directories(AppDirectoryOverrides {
+        data: config.clone(),
+        config,
+        local_data,
+        cache,
+        log,
+    }))
+}
+
+fn apply_app_directories_override(app: &mut tauri::utils::config::AppConfig) {
+    match app_directories_override() {
+        Some(value) => app.app_directories_override = Some(value),
+        // 极简环境（没有 APPDATA/HOME）：保持 Tauri 的默认位置，至少还能跑起来。
+        None => log::warn!("app directories unavailable; keeping Tauri's default locations"),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // ── 一次性布局迁移（兜底调用）──────────────────────────────────────────
+    // 权威调用点在 main() 的最前面（早于日志初始化）；这里再兜一次是为了让
+    // **任何**启动路径（测试、将来的 CLI）也不会漏掉它。标记存在时它是一次
+    // 纯 stat，代价可以忽略。
+    hifishifter_kernel::app_paths_migrate::ensure_layout_v2().log_summary("app");
+
+    // ── 目录覆盖：在 Builder 之前注入 ──────────────────────────────────────
+    // 见 `app_directories_override` 的说明。窗口配置里**不要**设 `dataDirectory`：
+    // Tauri 文档明确它不受 override 影响，设了就会把 WebView 数据留在旧位置。
+    let mut context = tauri::generate_context!();
+    apply_app_directories_override(&mut context.config_mut().app);
+
     tauri::Builder::default()
         .manage(state::AppState::default())
         .manage(link_bridge::LinkBridge::default())
@@ -316,21 +370,8 @@ pub fn run() {
             if let Ok(res_dir) = app.path().resource_dir() {
                 match hifishifter_kernel::model_store::resolve_and_register(&res_dir.join("models"))
                 {
-                    Ok(origin) => log::info!(
-                        "models: {:?} ({}{})",
-                        origin.dir,
-                        match origin.source {
-                            hifishifter_kernel::model_store::ModelSource::Override =>
-                                "HIFISHIFTER_MODELS_DIR",
-                            hifishifter_kernel::model_store::ModelSource::Shared => "shared store",
-                            hifishifter_kernel::model_store::ModelSource::Bundle => "bundle",
-                        },
-                        if origin.published {
-                            ", just published"
-                        } else {
-                            ""
-                        }
-                    ),
+                    // 来源描述由内核统一给（来源 + 目录 + 版本 + 是否刚发布）。
+                    Ok(origin) => log::info!("models: {}", origin.describe()),
                     // 模型不可用不该阻止应用启动：界面要能打开，用户才有机会看到
                     // 诊断信息；推理相关的操作会各自报错。
                     Err(error) => log::warn!("models unavailable: {error}"),
@@ -371,11 +412,16 @@ pub fn run() {
             crate::hnsep_onnx::ensure_background_prewarm();
 
             // Prefer the OS-level app cache dir so peaks persist across runs.
+            //
+            // 【为什么不再拼一层 `hifishifter`】`app_cache_dir()` 现在已经是
+            // `%LOCALAPPDATA%\HiFiShifter\cache`（由 `app_paths` 注入的目录覆盖），
+            // 再拼一层会得到 `cache\hifishifter\waveform_peaks_cache` —— 叠床架屋，
+            // 而且与 schema 里写的落点不一致。
             let base = app
                 .path()
                 .app_cache_dir()
                 .unwrap_or_else(|_| hfspeaks_v2::default_cache_dir());
-            let dir = base.join("hifishifter").join("waveform_peaks_cache");
+            let dir = base.join("waveform_peaks_cache");
             {
                 let mut d = state
                     .waveform_cache_dir
@@ -388,7 +434,7 @@ pub fn run() {
             // 渲染缓存与波形缓存同源（同一用户缓存根），使"重新打开工程不再
             // 重新合成"具备持久化落点；具体设置（开关/容量/自定义目录）在
             // 应用 UI 设置时下发（见下方 load_ui_settings）。
-            let render_cache_base = base.join("hifishifter").join("render_cache");
+            let render_cache_base = base.join("render_cache");
             crate::render_cache::init(render_cache_base);
 
             // 加载持久化的最近工程列表。
@@ -828,7 +874,7 @@ pub fn run() {
             commands::ui_kv_put,
             commands::ui_kv_delete,
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while building tauri application")
         .run(|app_handle, event| {
             if let tauri::RunEvent::Exit = event {
@@ -851,4 +897,73 @@ pub fn run() {
                 crate::hnsep_onnx::drop_shared_session();
             }
         });
+}
+
+#[cfg(test)]
+mod path_layout_tests {
+    use super::*;
+
+    /// 目录覆盖必须**逐项**等于内核算出来的路径。
+    ///
+    /// 【为什么在 app 侧再断言一遍】内核保证"它算得对"，这一条保证"它真的被装进
+    /// Tauri 了"。两者之间只有 `app_directories_override` 一次赋值，而漏掉它的
+    /// 症状（缓存又写回 `%LOCALAPPDATA%\com.arounder.hifishifter`）不会报错。
+    #[test]
+    fn the_directory_override_matches_the_kernel_layout() {
+        let mut app = tauri::utils::config::AppConfig::default();
+        apply_app_directories_override(&mut app);
+        let Some(tauri::utils::config::AppDirectoriesOverride::Directories(dirs)) =
+            app.app_directories_override
+        else {
+            panic!("expected a per-directory override");
+        };
+        assert_eq!(dirs.config, hifishifter_kernel::app_paths::config_dir());
+        assert_eq!(
+            dirs.local_data,
+            hifishifter_kernel::app_paths::local_data_dir()
+        );
+        assert_eq!(dirs.cache, hifishifter_kernel::app_paths::cache_dir());
+        assert_eq!(dirs.log, hifishifter_kernel::app_paths::log_dir());
+        // 漫游数据与设置同一个家：否则 `app_data_dir` 会把 identifier 那一层带回来。
+        assert_eq!(dirs.data, dirs.config);
+    }
+
+    /// 窗口配置里**不许**出现 `dataDirectory`。
+    ///
+    /// 【为什么这条是硬约束】Tauri 文档明确：`dataDirectory` 是
+    /// `appDirectoriesOverride` **唯一管不到的**一项。谁哪天为了让某个窗口单独
+    /// 隔离数据而加上它，那个窗口的 WebView 数据就会永远留在旧位置 —— 而且没有
+    /// 任何报错。
+    #[test]
+    fn no_window_pins_its_own_data_directory() {
+        for (label, raw) in [
+            ("tauri.conf.json", include_str!("../tauri.conf.json")),
+            (
+                "tauri.windows.conf.json",
+                include_str!("../tauri.windows.conf.json"),
+            ),
+            (
+                "tauri.macos.conf.json",
+                include_str!("../tauri.macos.conf.json"),
+            ),
+            (
+                "tauri.linux.conf.json",
+                include_str!("../tauri.linux.conf.json"),
+            ),
+        ] {
+            let config: serde_json::Value =
+                serde_json::from_str(raw).unwrap_or_else(|e| panic!("{label}: {e}"));
+            if let Some(windows) = config
+                .pointer("/app/windows")
+                .and_then(|value| value.as_array())
+            {
+                for window in windows {
+                    assert!(
+                        window.get("dataDirectory").is_none(),
+                        "{label} 里某个窗口设了 dataDirectory：它不受 appDirectoriesOverride 影响"
+                    );
+                }
+            }
+        }
+    }
 }

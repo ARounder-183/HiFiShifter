@@ -825,11 +825,11 @@ REAPER 按**轨道**管理 ARA 插件：它只会把插件所在**那一条轨�
 
 HiFiShifter 会自动把运行日志写入系统标准日志目录，无需任何命令行参数。遇到问题时，把日志文件提交给开发者即可帮助定位：
 
-| 系统    | 日志目录                                       |
-| ------- | ---------------------------------------------- |
-| Windows | `%LOCALAPPDATA%\com.arounder.hifishifter\logs` |
-| macOS   | `~/Library/Logs/com.arounder.hifishifter`      |
-| Linux   | `~/.local/share/com.arounder.hifishifter/logs` |
+| 系统    | 日志目录                           |
+| ------- | ---------------------------------- |
+| Windows | `%LOCALAPPDATA%\HiFiShifter\logs`  |
+| macOS   | `~/Library/Logs/HiFiShifter`       |
+| Linux   | `$XDG_STATE_HOME/HiFiShifter/logs` |
 
 - 通过 `帮助 → 打开日志文件夹` 可以直接定位日志文件。
 - 插件（ARA）的日志与独立 App **同目录、同格式、同样轮转**，文件名是 `plugin.log`；两份日志都会带上版本号、日期与时间戳，便于一起打包提交。
@@ -837,6 +837,20 @@ HiFiShifter 会自动把运行日志写入系统标准日志目录，无需任�
 - 日志按大小自动轮转：单个文件上限 8 MiB，默认保留 3 份历史（`hifishifter.1.log` ~ `hifishifter.3.log`）。
     - 高频重复的错误 / 警告会自动限流：同一位置的日志默认每 10 秒最多输出一条，被抑制的条数会在下一条输出前以 `[throttled]` 汇总行补记。
 - 前端与后端的错误都会统一记录在同一份日志文件里，方便按时间轴对照排查。
+
+### 数据目录
+
+除日志之外，其余用户数据的位置如下（独立 App 与插件共用同一套目录）：
+
+| 用途 | Windows | macOS | Linux |
+| --- | --- | --- | --- |
+| 设置 | `%APPDATA%\HiFiShifter` | `~/Library/Application Support/HiFiShifter` | `$XDG_CONFIG_HOME/HiFiShifter`（缺省 `~/.config/HiFiShifter`） |
+| 缓存（波形 / 整段渲染） | `%LOCALAPPDATA%\HiFiShifter\cache` | `~/Library/Caches/HiFiShifter` | `$XDG_CACHE_HOME/HiFiShifter`（缺省 `~/.cache/HiFiShifter`） |
+| 未保存会话的导入素材 | `%LOCALAPPDATA%\HiFiShifter\unsaved\<会话>` | `~/Library/Application Support/HiFiShifter/unsaved/<会话>` | `$XDG_DATA_HOME/HiFiShifter/unsaved/<会话>` |
+| 共享模型库（仅 Windows，由安装器写入） | `%PROGRAMDATA%\HiFiShifter\models\<版本>` | — | — |
+
+- 已保存工程的导入素材放在工程文件旁边的 `<工程名>_media` 目录里，随工程一起拷走即可。
+- 从旧版本升级时，首次启动会自动把原来的 `com.arounder.hifishifter` 目录搬到新位置；若新旧目录同时存在则**不合并**（两边原样保留），并在日志里记一条说明。
 
 ### Linux 上窗口起不来 / 双击没反应
 

@@ -111,6 +111,22 @@ pub(crate) fn plugin_form_label(
     }
 }
 
+/// 用户级目录的一次性布局迁移（**每个宿主进程只跑一次**）。
+///
+/// 【为什么由插件来跑】用户可能只装插件、从不打开独立 App（REAPER 用户很常见）。
+/// 那时迁移只能由插件触发，否则他们的设置与 PCM 暂存永远留在
+/// `com.arounder.hifishifter\` 那一层下面。
+///
+/// 【为什么必须早于 `diagnostics::init()`】日志初始化会创建
+/// `<本地根>\logs` 并立刻写文件；迁移的判据是"新旧根同时存在就绝不合并"，
+/// 日志目录先被建出来，旧日志就再也搬不过来了。
+fn ensure_layout_v2_once() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        hifishifter_kernel::app_paths_migrate::ensure_layout_v2().log_summary("plugin");
+    });
+}
+
 /// 写一行诊断信息。
 ///
 /// 【为什么不用 `println!`】插件跑在宿主进程里，stdout 通常无处可去。`log` 会走宿主
@@ -159,6 +175,7 @@ pub(crate) fn guard_ffi<R>(fallback: R, f: impl FnOnce() -> R) -> R {
 #[no_mangle]
 pub extern "system" fn GetPluginFactory() -> *mut c_void {
     crate::guard_ffi(std::ptr::null_mut(), || {
+        crate::ensure_layout_v2_once();
         diagnostics::init();
         // 【为什么在工厂入口打一行】宿主扫描插件也会走到这里。有了这一行，日志就能
         // 区分"宿主只是扫描了我"与"宿主真的在用我" —— 前者之后再没有任何行是正常的。
@@ -190,6 +207,7 @@ pub extern "system" fn GetPluginFactory() -> *mut c_void {
 /// 跳过也不要带着坏 runtime 插进 N 个轨道。
 fn module_initialize() -> bool {
     crate::guard_ffi(false, || {
+        crate::ensure_layout_v2_once();
         diagnostics::init();
         editor::resources::initialize_models();
         let _ = runtime::runtime();

@@ -254,11 +254,11 @@ ONNX Runtime 바이너리는 ort crate의 `download-binaries` 기능으로 빌�
 
 앱은 실행 로그를 OS 표준 로그 디렉터리에 자동으로 기록합니다. 명령줄 인수가 필요하지 않습니다:
 
-| OS | 로그 디렉터리 |
-| --- | --- |
-| Windows | `%LOCALAPPDATA%\com.arounder.hifishifter\logs` |
-| macOS | `~/Library/Logs/com.arounder.hifishifter` |
-| Linux | `~/.local/share/com.arounder.hifishifter/logs` |
+| OS      | 로그 디렉터리                      |
+| ------- | ---------------------------------- |
+| Windows | `%LOCALAPPDATA%\HiFiShifter\logs`  |
+| macOS   | `~/Library/Logs/HiFiShifter`       |
+| Linux   | `$XDG_STATE_HOME/HiFiShifter/logs` |
 
 - 앱 내부의 **도움말 → 로그 폴더 열기** 메뉴로 로그 위치를 바로 열 수 있고, **도움말 → 진단 정보 내보내기...** 메뉴로 시스템 정보 + 전체 로그 + 추론 장치 벤치마크 결과가 담긴 진단 패키지를 한 번에 생성할 수 있습니다. 이슈 등록 시 첨부해 주세요.
 - 로그는 크기 기준으로 자동 순환됩니다: 파일당 최대 8 MiB, 최대 3개의 이전 파일 보관 (`hifishifter.1.log` ~ `hifishifter.3.log`).
@@ -274,6 +274,20 @@ ONNX Runtime 바이너리는 ort crate의 `download-binaries` 기능으로 빌�
 - 환경 변수 `HIFISHIFTER_SAFE_GL=1`: GPU 드라이버 문제로 창이 뜨지 않을 때 WebKit 컴포지터를 끄고 소프트웨어 렌더링으로 실행합니다(표시는 되지만 느립니다).
 - 시작 로그에는 항상 두 줄의 진단이 남습니다: `[linux] session:`(GTK 백엔드 / `DISPLAY` / `WAYLAND_DISPLAY` / AppImage) 와 `[linux] egl:`(EGL vendor 와 버전). 그래픽 관련 이슈에 첨부해 주세요.
 - 터미널에서 `HiFiShifter --benchmark` 실행: 추론 장치 벤치마크를 실행하고 JSON 결과를 출력합니다.
+
+### 데이터 디렉터리
+
+로그 외의 사용자 데이터는 다음 위치에 있습니다(독립 실행형 앱과 플러그인이 같은 디렉터리를 공유합니다):
+
+| 용도 | Windows | macOS | Linux |
+| --- | --- | --- | --- |
+| 설정 | `%APPDATA%\HiFiShifter` | `~/Library/Application Support/HiFiShifter` | `$XDG_CONFIG_HOME/HiFiShifter`(기본 `~/.config/HiFiShifter`) |
+| 캐시(파형 / 렌더) | `%LOCALAPPDATA%\HiFiShifter\cache` | `~/Library/Caches/HiFiShifter` | `$XDG_CACHE_HOME/HiFiShifter`(기본 `~/.cache/HiFiShifter`) |
+| 저장되지 않은 세션의 가져온 미디어 | `%LOCALAPPDATA%\HiFiShifter\unsaved\<세션>` | `~/Library/Application Support/HiFiShifter/unsaved/<세션>` | `$XDG_DATA_HOME/HiFiShifter/unsaved/<세션>` |
+| 공유 모델 라이브러리(Windows 전용, 설치 프로그램이 기록) | `%PROGRAMDATA%\HiFiShifter\models\<버전>` | — | — |
+
+- 저장된 프로젝트의 가져온 미디어는 프로젝트 파일 옆의 `<프로젝트 이름>_media` 디렉터리에 들어갑니다. 프로젝트와 함께 복사하면 됩니다.
+- 이전 버전에서 업그레이드하면 첫 실행 시 기존 `com.arounder.hifishifter` 디렉터리가 새 위치로 이동합니다. 옛 디렉터리와 새 디렉터리가 동시에 존재하면 **병합하지 않고**(양쪽 모두 그대로 둡니다) 로그에 한 줄 남깁니다.
 
 ## 문서
 

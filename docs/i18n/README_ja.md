@@ -254,11 +254,11 @@ ONNX Runtimeのバイナリは、ort crateの `download-binaries` 機能によ�
 
 アプリは実行ログを自動的に OS 標準のログディレクトリへ書き込みます。コマンドライン引数は不要です：
 
-| OS | ログディレクトリ |
-| --- | --- |
-| Windows | `%LOCALAPPDATA%\com.arounder.hifishifter\logs` |
-| macOS | `~/Library/Logs/com.arounder.hifishifter` |
-| Linux | `~/.local/share/com.arounder.hifishifter/logs` |
+| OS      | ログディレクトリ                   |
+| ------- | ---------------------------------- |
+| Windows | `%LOCALAPPDATA%\HiFiShifter\logs`  |
+| macOS   | `~/Library/Logs/HiFiShifter`       |
+| Linux   | `$XDG_STATE_HOME/HiFiShifter/logs` |
 
 - アプリ内の **ヘルプ → ログフォルダーを開く** でログの場所を直接開けます。**ヘルプ → 診断情報をエクスポート...** では、システム情報・全ログ・推論デバイスのベンチマーク結果を含む診断パッケージをワンクリックで生成できます。issue 報告時に添付してください。
 - ログはサイズに応じて自動ローテーションされます：1 ファイル上限 8 MiB、履歴は 3 世代まで保持（`hifishifter.1.log` ~ `hifishifter.3.log`）。
@@ -274,6 +274,20 @@ ONNX Runtimeのバイナリは、ort crateの `download-binaries` 機能によ�
 - 環境変数 `HIFISHIFTER_SAFE_GL=1`：GPU ドライバに問題があり起動しない場合に、WebKit のコンポジターを止めてソフトウェア描画にします（表示は可能、描画は低速）。
 - 起動ログには必ず 2 行の診断が残ります：`[linux] session:`（GTK バックエンド / `DISPLAY` / `WAYLAND_DISPLAY` / AppImage）と `[linux] egl:`（EGL の vendor とバージョン）。描画関連の issue には添付してください。
 - ターミナルで `HiFiShifter --benchmark` を実行：推論デバイスのベンチマークを実行し、JSON 結果を出力します。
+
+### データディレクトリ
+
+ログ以外のユーザーデータは次の場所にあります（スタンドアロン版とプラグインは同じディレクトリを共有します）:
+
+| 用途 | Windows | macOS | Linux |
+| --- | --- | --- | --- |
+| 設定 | `%APPDATA%\HiFiShifter` | `~/Library/Application Support/HiFiShifter` | `$XDG_CONFIG_HOME/HiFiShifter`（既定 `~/.config/HiFiShifter`） |
+| キャッシュ（波形 / レンダー） | `%LOCALAPPDATA%\HiFiShifter\cache` | `~/Library/Caches/HiFiShifter` | `$XDG_CACHE_HOME/HiFiShifter`（既定 `~/.cache/HiFiShifter`） |
+| 未保存セッションの取り込み素材 | `%LOCALAPPDATA%\HiFiShifter\unsaved\<セッション>` | `~/Library/Application Support/HiFiShifter/unsaved/<セッション>` | `$XDG_DATA_HOME/HiFiShifter/unsaved/<セッション>` |
+| 共有モデルライブラリ（Windows のみ・インストーラーが書き込み） | `%PROGRAMDATA%\HiFiShifter\models\<バージョン>` | — | — |
+
+- 保存済みプロジェクトの取り込み素材は、プロジェクトファイルの隣の `<プロジェクト名>_media` ディレクトリに入ります。プロジェクトごとコピーしてください。
+- 旧バージョンから更新した場合、初回起動時に旧 `com.arounder.hifishifter` ディレクトリが新しい場所へ移動されます。新旧が同時に存在する場合は**統合しません**（どちらもそのまま残します）。ログに 1 行記録されます。
 
 ## ドキュメント
 
