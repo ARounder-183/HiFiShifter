@@ -63,7 +63,10 @@ hfs_numeric_version() {
 # NEEDED 也不会存在 libwebgpu_dawn.so —— 列进来会让构建在该平台上永远失败。
 hfs_runtime_deps() {
     if [ "$HFS_OS" = "linux" ]; then
-        if [ "$HFS_PLATFORM_ARCH" = "arm64" ]; then
+        # 【为什么判 HFS_ARCH 而不是 HFS_PLATFORM_ARCH】后者在 Linux/arm64 上被改名成
+        # "aarch64"（dpkg 的叫法，产物名沿用它），与 "arm64" 永远不相等 —— 这条分支
+        # 因此一次都没命中过，linux-aarch64 会去要一个该平台根本没有的 dawn。
+        if [ "$HFS_ARCH" = "arm64" ]; then
             printf '%s\n' "libSoundTouchDLL.so"
         else
             printf '%s\n' "libSoundTouchDLL.so" "libwebgpu_dawn.so"
