@@ -21,7 +21,15 @@ impl FormatState for InstanceState {
         Ok(())
     }
     fn save(&self) -> Result<Vec<u8>, String> {
-        Ok(self.0.lock().unwrap_or_else(|e| e.into_inner()).clone())
+        let stored = self.0.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if stored.is_empty() {
+            // 【为什么新实例也要写出字节】宿主把"0 字节"理解成"这个插件没有 state"，
+            // 而解码端又会把零字节当成裸 `EditState`（历史分支）。同一个工程在 CLAP
+            // 与 VST3 之间来回打开时，两边就会给出不同的字节块。写一个合法的空容器，
+            // 两个格式对"空状态"的表示就一致了。
+            return Ok(ComponentState::default().encode());
+        }
+        Ok(stored)
     }
 }
 
@@ -131,6 +139,19 @@ mod tests {
         assert!(state.load(&bytes).is_ok());
         assert_eq!(state.save().unwrap(), bytes);
     }
+    #[test]
+    fn a_fresh_instance_saves_a_valid_empty_container() {
+        // 新实例从未 load 过任何东西，但 save 仍必须交出可解码的字节：零字节在宿主
+        // 侧等价于"没有 state"，而解码端会把它当成裸 EditState。
+        let state = InstanceState::default();
+        let bytes = state.save().unwrap();
+        assert!(!bytes.is_empty(), "a fresh instance must still write a container");
+        assert!(ComponentState::decode(&bytes).is_ok());
+        // 宿主会反复保存：第二次必须逐字相同。
+        state.load(&bytes).unwrap();
+        assert_eq!(state.save().unwrap(), bytes);
+    }
+
     #[test]
     fn a_bare_legacy_blob_is_still_accepted() {
         let state = InstanceState::default();

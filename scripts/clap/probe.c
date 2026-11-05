@@ -61,8 +61,11 @@ typedef struct {
     const void *in_events, *out_events;
 } clap_process_t;
 
-typedef struct { int64_t (*write)(const void *, const void *, uint64_t); } clap_ostream_t;
-typedef struct { int64_t (*read)(const void *, void *, uint64_t); } clap_istream_t;
+/* ctx 必须排在函数指针前面：CLAP 的 stream 结构以 ctx 开头（clap/stream.h）。
+   少了这个字段，插件会从错误的偏移读 write —— 症状是 state.save 永远返回 false，
+   而"保存失败"与"插件没有 state 扩展"在宿主日志里长得一模一样。 */
+typedef struct { void *ctx; int64_t (*write)(const void *, const void *, uint64_t); } clap_ostream_t;
+typedef struct { void *ctx; int64_t (*read)(const void *, void *, uint64_t); } clap_istream_t;
 typedef struct {
     int (*save)(const void *, const void *);
     int (*load)(const void *, const void *);
@@ -136,7 +139,7 @@ int main(int argc, char **argv) {
     const clap_plugin_state_t *state_ext =
         (const clap_plugin_state_t *)plugin->get_extension(plugin, "clap.state");
     if (state_ext && state_ext->save && state_ext->load) {
-        clap_ostream_t ostream = {stream_write}; clap_istream_t istream = {stream_read};
+        clap_ostream_t ostream = {NULL, stream_write}; clap_istream_t istream = {NULL, stream_read};
         if (!state_ext->save(plugin, &ostream) || saved_len == 0) { fprintf(stderr, "state.save failed\n"); return 1; }
         loaded_len = 0;
         if (!state_ext->load(plugin, &istream) || loaded_len != saved_len) { fprintf(stderr, "state.load failed\n"); return 1; }
