@@ -68,6 +68,11 @@ hfs_runtime_deps() {
         else
             printf '%s\n' "libSoundTouchDLL.so" "libwebgpu_dawn.so"
         fi
+    elif [ "$HFS_ARCH" = "x86_64" ]; then
+        # macOS Intel 走 ort 的 alternative-backend（纯 Rust 的 tract，见 kernel 的
+        # Cargo.toml）：既不链接 libonnxruntime，也不链接 dawn。把 dawn 列进来会让
+        # 这条腿在"缺少运行时依赖"上失败，而产物其实没有任何问题。
+        printf '%s\n' "libSoundTouchDLL.dylib"
     else
         printf '%s\n' "libSoundTouchDLL.dylib" "libwebgpu_dawn.dylib"
     fi
