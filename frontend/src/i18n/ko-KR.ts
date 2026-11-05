@@ -2268,7 +2268,8 @@ export const koKR = {
         "HiFiShifter를 설치하기 전에 REAPER와 플러그인 호스트 프로세스를 종료하세요.",
     installer_err_tasklist:
         "REAPER가 종료되었는지 확인할 수 없습니다. REAPER를 닫고 설치 프로그램을 다시 실행하세요.",
-    installer_clap_dir_text: "DAW가 검사하는 CLAP 폴더를 선택하세요. 플러그인은 HiFiShifter.clap 단일 파일로 설치됩니다.",
+    installer_clap_dir_text:
+        "DAW가 검사하는 CLAP 폴더를 선택하세요. 플러그인은 HiFiShifter.clap 단일 파일로 설치됩니다.",
     installer_err_app_running:
         "HiFiShifter가 실행 중입니다. 종료한 뒤 설치 프로그램을 다시 실행하세요.",
     installer_uninstall_reaper_open: "HiFiShifter를 제거하기 전에 REAPER를 종료하세요.",

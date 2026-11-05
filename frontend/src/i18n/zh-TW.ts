@@ -2212,7 +2212,8 @@ export const zhTW = {
     installer_err_not_x64: "HiFiShifter 需要 64 位元 Windows。",
     installer_err_reaper_open: "請先完全結束 REAPER 及其外掛裝載程序，再安裝 HiFiShifter。",
     installer_err_tasklist: "無法確認 REAPER 已結束。請關閉 REAPER 後重新執行安裝程式。",
-    installer_clap_dir_text: "請選擇 DAW 會掃描的 CLAP 資料夾。外掛會以 HiFiShifter.clap 單檔的形式裝在其中。",
+    installer_clap_dir_text:
+        "請選擇 DAW 會掃描的 CLAP 資料夾。外掛會以 HiFiShifter.clap 單檔的形式裝在其中。",
     installer_err_app_running: "HiFiShifter 正在執行。請關閉它後重新執行安裝程式。",
     installer_uninstall_reaper_open: "請先結束 REAPER，再卸載 HiFiShifter。",
     installer_component_app: "HiFiShifter（獨立 App）",

@@ -2298,7 +2298,8 @@ export const jaJP = {
         "HiFiShifter をインストールする前に、REAPER とそのプラグインホストを終了してください。",
     installer_err_tasklist:
         "REAPER が終了したことを確認できませんでした。REAPER を閉じてからインストーラーを再実行してください。",
-    installer_clap_dir_text: "DAW がスキャンする CLAP フォルダーを選んでください。プラグインは HiFiShifter.clap の単一ファイルとしてインストールされます。",
+    installer_clap_dir_text:
+        "DAW がスキャンする CLAP フォルダーを選んでください。プラグインは HiFiShifter.clap の単一ファイルとしてインストールされます。",
     installer_err_app_running:
         "HiFiShifter が実行中です。終了してからインストーラーを再実行してください。",
     installer_uninstall_reaper_open:

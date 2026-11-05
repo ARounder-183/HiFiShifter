@@ -2208,7 +2208,8 @@ export const zhCN = {
     installer_err_not_x64: "HiFiShifter 需要 64 位 Windows。",
     installer_err_reaper_open: "请先完全退出 REAPER 及其插件宿主进程，再安装 HiFiShifter。",
     installer_err_tasklist: "无法确认 REAPER 已退出。请关闭 REAPER 后重新运行安装程序。",
-    installer_clap_dir_text: "请选择 DAW 会扫描的 CLAP 文件夹。插件会以 HiFiShifter.clap 单文件的形式装在其中。",
+    installer_clap_dir_text:
+        "请选择 DAW 会扫描的 CLAP 文件夹。插件会以 HiFiShifter.clap 单文件的形式装在其中。",
     installer_err_app_running: "HiFiShifter 正在运行。请关闭它后重新运行安装程序。",
     installer_uninstall_reaper_open: "请先退出 REAPER，再卸载 HiFiShifter。",
     installer_component_app: "HiFiShifter（独立 App）",
