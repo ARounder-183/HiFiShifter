@@ -145,7 +145,10 @@ mod tests {
         // 侧等价于"没有 state"，而解码端会把它当成裸 EditState。
         let state = InstanceState::default();
         let bytes = state.save().unwrap();
-        assert!(!bytes.is_empty(), "a fresh instance must still write a container");
+        assert!(
+            !bytes.is_empty(),
+            "a fresh instance must still write a container"
+        );
         assert!(ComponentState::decode(&bytes).is_ok());
         // 宿主会反复保存：第二次必须逐字相同。
         state.load(&bytes).unwrap();

@@ -230,7 +230,7 @@ fn x11_serve(
     context: Arc<X11Context>,
     entries: Arc<RwLock<Vec<ClipboardEntry>>>,
     refresh: Receiver<()>,
-    owner_slot: &'static Mutex<Option<Arc<X11Owner>>>
+    owner_slot: &'static Mutex<Option<Arc<X11Owner>>>,
 ) {
     // 【为什么按 (requestor, property) 键控】只按 property atom 键控时，两个
     // 粘贴方用同名 property（如都叫 XCLIP_OUT）会互相覆盖 —— 后到的把先到的
