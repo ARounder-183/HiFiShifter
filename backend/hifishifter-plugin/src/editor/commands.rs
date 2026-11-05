@@ -528,7 +528,9 @@ const PAYLOAD_SOFT_LIMIT_BYTES: usize = 6 * 1024 * 1024;
 /// 【为什么系数大于 1】JSON 里一个 f32 序列化成 8-12 个字符，解析成 JS 数字还要
 /// 再占 8 字节；一个 MIDI 音符是一个五字段对象，落在堆上约 100 字节。系数取"解析
 /// 后的堆占用"，因为那才是能把渲染进程打死的东西。
-fn estimated_full_payload_bytes(timeline: &hifishifter_kernel::state::model::TimelineState) -> usize {
+fn estimated_full_payload_bytes(
+    timeline: &hifishifter_kernel::state::model::TimelineState,
+) -> usize {
     // 轨道、工程元数据、tempo map、历史深度的粗略基数。
     let mut bytes = 16 * 1024;
     for clip in &timeline.clips {

@@ -3489,7 +3489,7 @@ mod tests {
         // 8 帧容量 ⇒ 第一段已封口；再来一块进入第二段。
         let (_, view) = block(31_008, 4, 48_000.0);
         capture.on_block(view);
-        assert!(capture.sealed.len() >= 1);
+        assert!(!capture.sealed.is_empty());
         assert!(capture.rebase_take(-31_000));
         for segment in capture.sealed.iter().chain(capture.active.iter()) {
             assert!(segment.origin >= 0, "rebase 后不得有负起点");

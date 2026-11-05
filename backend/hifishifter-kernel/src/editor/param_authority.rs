@@ -637,15 +637,19 @@ impl ParamAuthority {
             for run in slices {
                 let seq = self.next_seq.max(1);
                 self.next_seq = seq.saturating_add(1);
-                incoming.entry(key.clone()).or_default().push(PlacedRun::new(
-                    seq,
-                    seq,
-                    run.values.clone(),
-                    RunPlacement {
-                        start_sec: target_start + (run.placement.start_sec - source_start) * scale,
-                        seconds_per_frame: run.placement.seconds_per_frame * scale,
-                    },
-                ));
+                incoming
+                    .entry(key.clone())
+                    .or_default()
+                    .push(PlacedRun::new(
+                        seq,
+                        seq,
+                        run.values.clone(),
+                        RunPlacement {
+                            start_sec: target_start
+                                + (run.placement.start_sec - source_start) * scale,
+                            seconds_per_frame: run.placement.seconds_per_frame * scale,
+                        },
+                    ));
                 placed += 1;
             }
         }
@@ -693,7 +697,10 @@ impl ParamAuthority {
             return Vec::new();
         }
         let key = canonical_param_key(param);
-        let Some(runs) = self.roots.get(root).and_then(|authority| authority.runs.get(&key))
+        let Some(runs) = self
+            .roots
+            .get(root)
+            .and_then(|authority| authority.runs.get(&key))
         else {
             return Vec::new();
         };

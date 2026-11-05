@@ -1829,14 +1829,23 @@ mod tests {
             clip.content_id = content.map(str::to_string);
             clip
         };
-        let a = clip("C:/pcm/hfs-ui-1-1-/sources/source-aaa.wav", Some("capture://7"));
-        let b = clip("C:/pcm/hfs-ui-9-2-/sources/source-bbb.wav", Some("capture://7"));
+        let a = clip(
+            "C:/pcm/hfs-ui-1-1-/sources/source-aaa.wav",
+            Some("capture://7"),
+        );
+        let b = clip(
+            "C:/pcm/hfs-ui-9-2-/sources/source-bbb.wav",
+            Some("capture://7"),
+        );
         let key_a = build_clip_pitch_key(&tl, &a, "root", 5.0).unwrap().key;
         let key_b = build_clip_pitch_key(&tl, &b, "root", 5.0).unwrap().key;
         assert_eq!(key_a, key_b, "同一份内容换个会话目录必须命中同一份分析结果");
 
         // 不同内容身份必须得到不同的键，否则两份素材会共享一份缓存。
-        let c = clip("C:/pcm/hfs-ui-1-1-/sources/source-aaa.wav", Some("capture://8"));
+        let c = clip(
+            "C:/pcm/hfs-ui-1-1-/sources/source-aaa.wav",
+            Some("capture://8"),
+        );
         assert_ne!(
             key_a,
             build_clip_pitch_key(&tl, &c, "root", 5.0).unwrap().key,

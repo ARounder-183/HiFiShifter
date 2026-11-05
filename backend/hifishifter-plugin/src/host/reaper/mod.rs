@@ -952,7 +952,10 @@ impl NativeHost {
             return None;
         }
         let mut quarter_notes = false;
-        let seconds = checked(authorized, || unsafe { length_of(source, &mut quarter_notes) }).ok()?;
+        let seconds = checked(authorized, || unsafe {
+            length_of(source, &mut quarter_notes)
+        })
+        .ok()?;
         if quarter_notes || !seconds.is_finite() || seconds <= 0.0 {
             return None;
         }

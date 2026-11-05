@@ -215,14 +215,7 @@ pub(crate) fn item_row_from_host(
     let mut takes: Vec<TakeRow> = item
         .takes
         .iter()
-        .map(|take| {
-            take_of(
-                &take.geometry,
-                &take.name,
-                take.active,
-                take.reversed,
-            )
-        })
+        .map(|take| take_of(&take.geometry, &take.name, take.active, take.reversed))
         .collect();
     let active_take = item.takes.iter().position(|take| take.active);
     if takes.is_empty() {

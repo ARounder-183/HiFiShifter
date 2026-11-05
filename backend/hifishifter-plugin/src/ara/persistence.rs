@@ -266,8 +266,14 @@ mod tests {
             // 【两条根轨，各绑一条 modification】部分存档按 **modification** 选择，
             // 而权威按 **根轨** 存储 —— 两者之间只有 `track_bindings` 这条边。
             *document.track_bindings.lock_or_recover() = std::collections::BTreeMap::from([
-                ("root-a".to_owned(), vec![("a".to_owned(), "src".to_owned())]),
-                ("root-b".to_owned(), vec![("b".to_owned(), "src".to_owned())]),
+                (
+                    "root-a".to_owned(),
+                    vec![("a".to_owned(), "src".to_owned())],
+                ),
+                (
+                    "root-b".to_owned(),
+                    vec![("b".to_owned(), "src".to_owned())],
+                ),
             ]);
             let mut edits = document.edits.lock_or_recover();
             edits
@@ -306,10 +312,10 @@ mod tests {
         // 【为什么必须声明绑定】`encode_partial` 的裁剪口径是"本实例此刻服务的根轨"：
         // 没有 binding 的根一律被 retain 掉（宁可少带，也不按猜的边裁用户数据）。
         // 早先这里只写权威不写绑定，于是载荷本来就是空的 —— 用例在断言端才炸。
-        source.track_bindings.lock_or_recover().insert(
-            "root-a".into(),
-            vec![("a".into(), "ara://source".into())],
-        );
+        source
+            .track_bindings
+            .lock_or_recover()
+            .insert("root-a".into(), vec![("a".into(), "ara://source".into())]);
         source
             .edits
             .lock_or_recover()
@@ -331,10 +337,7 @@ mod tests {
             edits.authority.root("root-a").is_some(),
             "部分存档的根必须合入"
         );
-        assert!(
-            !edits.authority.is_pristine(),
-            "合入之后权威不得是空的"
-        );
+        assert!(!edits.authority.is_pristine(), "合入之后权威不得是空的");
     }
 
     /// **宿主先重建图、后给存档：恢复到达时可能一个 owner 都没有。**
@@ -426,7 +429,10 @@ mod tests {
                     "root-partial".to_owned(),
                     vec![("partial".to_owned(), "src".to_owned())],
                 ),
-                ("root-full".to_owned(), vec![("full".to_owned(), "src".to_owned())]),
+                (
+                    "root-full".to_owned(),
+                    vec![("full".to_owned(), "src".to_owned())],
+                ),
             ]);
             let mut edits = document.edits.lock_or_recover();
             edits

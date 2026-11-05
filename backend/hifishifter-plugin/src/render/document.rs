@@ -683,8 +683,12 @@ pub(crate) struct DocumentSession {
     /// 【为什么单独一层】派生值此前住在 `edits.params` / `timeline.params_by_root_track`
     /// 里，于是"分析完成"与"编辑器回传"会互相覆盖 —— 用户看到的就是参数线随机回退。
     /// 这里只有一个写入口（[publish_baseline]），显示永远由它派生。
-    pub(crate) baseline:
-        Mutex<std::collections::BTreeMap<String, hifishifter_kernel::editor::param_authority::RootBaseline>>,
+    pub(crate) baseline: Mutex<
+        std::collections::BTreeMap<
+            String,
+            hifishifter_kernel::editor::param_authority::RootBaseline,
+        >,
+    >,
     /// ARA 变更通知队列，由 `runtime.rs` 在构建插件时注入。
     ///
     /// 【为什么必须有】宿主只保存"它知道变过"的部分。插件从不通知，只存增量的宿主
@@ -1263,7 +1267,9 @@ impl DocumentSession {
         // 【模型没交付过 ⇒ 不动已发布的时间线】见 `ara_model_seen` 的说明。装配器的
         // 输入只有两份，缺了 ARA 那一份时它只能给出"没有源窗口的占位" —— 用那份占位
         // 盖掉一份真实的图，比不刷新糟得多。
-        if !self.ara_model_seen.load(std::sync::atomic::Ordering::Acquire)
+        if !self
+            .ara_model_seen
+            .load(std::sync::atomic::Ordering::Acquire)
             && self
                 .timeline
                 .lock_or_recover()
@@ -1402,9 +1408,7 @@ impl DocumentSession {
                     clip.id,
                     clip.length_sec,
                     clip.loop_period_sec,
-                    clip.takes
-                        .first()
-                        .and_then(|take| take.duration_sec),
+                    clip.takes.first().and_then(|take| take.duration_sec),
                     clip.loop_period_sec.is_some(),
                 ),
             );
@@ -1423,7 +1427,9 @@ impl DocumentSession {
         // 【挂不上的 region 必须能归因】它们不画、不渲染，只进读数；不报出来就等于
         // "宿主给了、我们丢了"，而用户看到的只是"某一段不见了"。
         for index in &assembly.unbound {
-            let Some(row) = rows.get(*index) else { continue };
+            let Some(row) = rows.get(*index) else {
+                continue;
+            };
             hifishifter_kernel::log_limiter::emit_limited_key(
                 log::Level::Warn,
                 "ara.region.unbound",
@@ -1912,7 +1918,8 @@ impl DocumentSession {
     /// 这一代基线的快照（随视图交付给提交闸）。
     pub(crate) fn baseline_snapshot(
         &self,
-    ) -> std::collections::BTreeMap<String, hifishifter_kernel::editor::param_authority::RootBaseline> {
+    ) -> std::collections::BTreeMap<String, hifishifter_kernel::editor::param_authority::RootBaseline>
+    {
         self.baseline.lock_or_recover().clone()
     }
 
@@ -3413,11 +3420,9 @@ impl DocumentSession {
             .lock_or_recover()
             .iter()
             .filter(|(_, members)| {
-                members
-                    .iter()
-                    .any(|(modification, _)| {
-                        modifications.is_none_or(|wanted| wanted.contains(modification))
-                    })
+                members.iter().any(|(modification, _)| {
+                    modifications.is_none_or(|wanted| wanted.contains(modification))
+                })
             })
             .map(|(root, _)| root.clone())
             .collect::<std::collections::BTreeSet<_>>();
@@ -3952,7 +3957,8 @@ impl DocumentSession {
             if self.baseline_is_ready(root) {
                 continue;
             }
-            let mut baseline = hifishifter_kernel::editor::param_authority::RootBaseline::from_params(params);
+            let mut baseline =
+                hifishifter_kernel::editor::param_authority::RootBaseline::from_params(params);
             // 【布局键必须一起播种】不写它，`baseline_needs_rebuild` 会恒为真，
             // `baseline_for` 每一帧都会尝试从（此刻还冷的）内容缓存重建，然后把
             // 这份存档基线当成"过期"再退回 —— 冷恢复首帧的可听性全靠这份基线，

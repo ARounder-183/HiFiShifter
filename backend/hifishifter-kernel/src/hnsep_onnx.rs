@@ -291,7 +291,7 @@ pub fn update_ort_ep(_choice: &str, _device_id: Option<i32>) {
         return;
     }
     std::thread::Builder::new()
-    .name("ort-session-prewarm-hnsep".into())
+        .name("ort-session-prewarm-hnsep".into())
         .spawn(|| {
             if let Err(e) = get_or_init_shared_session() {
                 log::warn!("[hnsep] session pre-warm failed: {e}");

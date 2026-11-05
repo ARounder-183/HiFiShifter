@@ -451,7 +451,9 @@ impl ModelHandle {
             }
         }
         if registered > 0 {
-            log::info!("[ara] split media lineage: {registered} child item(s) borrow their parent's media");
+            log::info!(
+                "[ara] split media lineage: {registered} child item(s) borrow their parent's media"
+            );
         }
     }
 
@@ -2882,7 +2884,6 @@ mod tests {
         assert!(model.remap_is_redundant());
     }
 
-
     /// 卡住的 rebind 请求必须跳过**投影**，但几何与 PCM 照常发布。
     ///
     /// 【为什么这条必须留下】"投影被跳过"与"整份收口失败"在用户侧是两种完全不同的
@@ -2903,7 +2904,14 @@ mod tests {
             .edits
             .lock_or_recover()
             .authority
-            .write_range("ara-track-0", "pitch", 0, &[60., 62., 64., 66.], &[true; 4], 0.0)
+            .write_range(
+                "ara-track-0",
+                "pitch",
+                0,
+                &[60., 62., 64., 66.],
+                &[true; 4],
+                0.0,
+            )
             .expect("seed the authority");
         // 模拟一次"恢复身份对不上"：`reconcile` 失败 ⇒ 标记留在 true。
         model.session.edits.lock_or_recover().needs_rebind = true;
@@ -3144,7 +3152,6 @@ mod tests {
                 .collect::<Vec<_>>()
         );
     }
-
 
     /// **宿主重复交付同一份几何**时不得失效渲染版本。
     ///

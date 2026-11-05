@@ -577,10 +577,7 @@ mod tests {
                     &format!("guid-{index}"),
                     index as f64,
                     1.0,
-                    vec![take(
-                        "t",
-                        geometry(0.0, 1.0, Some(3.0), None, false, false),
-                    )],
+                    vec![take("t", geometry(0.0, 1.0, Some(3.0), None, false, false))],
                 )
             })
             .collect();
@@ -603,10 +600,7 @@ mod tests {
             "loop",
             0.0,
             12.0,
-            vec![take(
-                "t",
-                geometry(0.0, 12.0, Some(3.0), None, false, true),
-            )],
+            vec![take("t", geometry(0.0, 12.0, Some(3.0), None, false, true))],
         );
         host.loop_source = true;
         let rows: Vec<RegionRow> = (0..4)
@@ -839,7 +833,10 @@ mod tests {
                 "a",
                 0.0,
                 4.0,
-                vec![take("t1", geometry(0.0, 4.0, Some(9.0), None, false, false))],
+                vec![take(
+                    "t1",
+                    geometry(0.0, 4.0, Some(9.0), None, false, false),
+                )],
             ),
             item(
                 "b",

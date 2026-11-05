@@ -340,7 +340,11 @@ fn decode(bytes: &[u8]) -> Result<ClipboardItems, String> {
         // 【为什么只做形状自检】剪贴板来自别的进程（甚至是另一台机器的复制）。
         // 内容不需要"被认领"，它只是一段工程时间上的 run 切片；而形状必须可信，
         // 否则一次粘贴就能往权威里灌进 NaN 窗口或天文数字的样本。
-        if item.seed.as_ref().is_some_and(|seed| !seed.is_well_formed()) {
+        if item
+            .seed
+            .as_ref()
+            .is_some_and(|seed| !seed.is_well_formed())
+        {
             return Err("invalid clipboard curve seed".into());
         }
     }

@@ -2444,7 +2444,8 @@ unknown={unknown} clips={total} facts={} dupes={} notready=[{}]",
                     None => true,
                     // 已有的那条没源、而这条有 ⇒ 换成这条。
                     Some(previous) => {
-                        timeline.clips[*previous].source_path.is_none() && clip.source_path.is_some()
+                        timeline.clips[*previous].source_path.is_none()
+                            && clip.source_path.is_some()
                     }
                 };
                 if better {

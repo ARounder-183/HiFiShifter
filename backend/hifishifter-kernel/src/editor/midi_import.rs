@@ -664,7 +664,9 @@ fn pitch_write_window(before: &[f32], after: &[f32]) -> Option<(u32, Vec<f32>, V
     use crate::editor::param_authority::{default_value_for_key, is_edited_value, PITCH_EDIT};
     let len = before.len().min(after.len());
     let first = (0..len).find(|index| before[*index] != after[*index])?;
-    let last = (0..len).rev().find(|index| before[*index] != after[*index])?;
+    let last = (0..len)
+        .rev()
+        .find(|index| before[*index] != after[*index])?;
     let values = after[first..=last].to_vec();
     let present = values
         .iter()

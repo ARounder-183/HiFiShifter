@@ -143,12 +143,14 @@ pub(crate) fn execute(
         // `Undo_DoUndo` 有可能落在块内被宿主拒绝，或退掉用户上一步真正的编辑。
         // 因此回滚动作留给用户，错误文案把话说明白。
         let done = pairs.len();
-        let pair = target.split_at(plan.position, authorized).map_err(|error| {
-            format!(
+        let pair = target
+            .split_at(plan.position, authorized)
+            .map_err(|error| {
+                format!(
                 "host split failed after {done} of {total} item(s) were already split: {error}; \
                  one undo step in the host reverts the batch"
             )
-        })?;
+            })?;
         // 【曲线不需要任何处理】分割在工程时间上不移动任何东西 —— 两半的 run 一个字节
         // 都没变，界面上"分割点两侧都有线"是**默认结果**，不是一次继承。此前这里要
         // `split_seed` + `register_split`，是因为曲线存在源域、按 item 索引；那份表示

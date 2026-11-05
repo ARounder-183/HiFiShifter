@@ -239,7 +239,7 @@ pub fn update_ort_ep(_choice: &str, _device_id: Option<i32>) {
         return;
     }
     std::thread::Builder::new()
-    .name("ort-session-prewarm-fcpe".into())
+        .name("ort-session-prewarm-fcpe".into())
         .spawn(|| {
             if let Err(e) = get_or_init_shared_session() {
                 log::warn!("[fcpe] session pre-warm failed: {e}");

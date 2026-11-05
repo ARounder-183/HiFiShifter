@@ -726,9 +726,7 @@ impl GeometryJournal {
             }
             let sources = current
                 .values()
-                .filter(|(_, geometry)| {
-                    geometry.key != fresh.key && same_content(geometry, fresh)
-                })
+                .filter(|(_, geometry)| geometry.key != fresh.key && same_content(geometry, fresh))
                 .map(|(_, geometry)| *geometry)
                 .collect::<Vec<_>>();
             let [source] = sources.as_slice() else {
@@ -1009,7 +1007,9 @@ mod tests {
         assert_eq!(moved.values, vec![61.0; 11], "[0.10, 0.20] 共 11 帧");
         // 旧位置不得留下残影。
         assert!(
-            !runs.iter().any(|run| (run.placement.start_sec - 0.1).abs() < 1e-9),
+            !runs
+                .iter()
+                .any(|run| (run.placement.start_sec - 0.1).abs() < 1e-9),
             "搬走的那一段不能在旧位置留残影"
         );
         // 分割点右侧 0.2 s 之后的部分（不在被拖动的窗口里）必须留在原位。
@@ -1186,7 +1186,12 @@ mod tests {
         let old = clip(0.0, 0.05, 0.0, 0.05, 1.0);
         journal.commit(&GeometryFrame::complete(vec![old.clone()]), 1);
         let new = clip(0.02, 0.05, 0.0, 0.05, 1.0);
-        assert_eq!(journal.diff(&GeometryFrame::complete(vec![new.clone()])).len(), 1);
+        assert_eq!(
+            journal
+                .diff(&GeometryFrame::complete(vec![new.clone()]))
+                .len(),
+            1
+        );
         journal.commit(&GeometryFrame::complete(vec![new.clone()]), 2);
         assert!(journal.diff(&GeometryFrame::complete(vec![new])).is_empty());
     }
@@ -1199,10 +1204,15 @@ mod tests {
         journal.commit(&GeometryFrame::complete(vec![old.clone()]), 1);
         assert!(journal.diff(&GeometryFrame::partial(Vec::new())).is_empty());
         assert_eq!(journal.entries().len(), 1, "partial empty frame pruned");
-        assert!(journal.diff(&GeometryFrame::complete(Vec::new())).is_empty());
+        assert!(journal
+            .diff(&GeometryFrame::complete(Vec::new()))
+            .is_empty());
         assert_eq!(journal.entries().len(), 1, "diff must not prune at all");
         journal.commit(&GeometryFrame::complete(Vec::new()), 2);
-        assert!(journal.entries().is_empty(), "complete empty frame must prune");
+        assert!(
+            journal.entries().is_empty(),
+            "complete empty frame must prune"
+        );
     }
 
     /// G2：不完整帧只允许新增/更新，绝不能因为"没枚举到"丢掉活着的条目。
@@ -1266,7 +1276,9 @@ mod tests {
             key: GeometryKey::item("{GUID}"),
             ..clip(0.0, 0.05, 0.0, 0.05, 1.0)
         };
-        assert!(journal.diff(&GeometryFrame::complete(vec![new.clone()])).is_empty());
+        assert!(journal
+            .diff(&GeometryFrame::complete(vec![new.clone()]))
+            .is_empty());
         journal.commit(&GeometryFrame::complete(vec![new]), 2);
         assert_eq!(journal.entries().len(), 1);
     }

@@ -542,7 +542,8 @@ impl EditCurve {
         }
         let mut next = Vec::new();
         for run in &self.runs {
-            if run.anchor != anchor || run.end_frame() < first_frame || run.first_frame > last_frame {
+            if run.anchor != anchor || run.end_frame() < first_frame || run.first_frame > last_frame
+            {
                 next.push(run.clone());
                 continue;
             }
@@ -627,7 +628,8 @@ impl EditCurve {
                 }
                 (Some(_), Some(value)) => values.push(value),
                 (Some(begin), None) => {
-                    out.runs.push(EditRun::new(begin, std::mem::take(&mut values)));
+                    out.runs
+                        .push(EditRun::new(begin, std::mem::take(&mut values)));
                     start = None;
                 }
                 (None, None) => {}
@@ -662,7 +664,8 @@ impl EditCurve {
                 }
                 (Some(_), Some(value)) => values.push(value),
                 (Some(begin), None) => {
-                    out.runs.push(EditRun::new(begin, std::mem::take(&mut values)));
+                    out.runs
+                        .push(EditRun::new(begin, std::mem::take(&mut values)));
                     start = None;
                 }
                 (None, None) => {}
@@ -727,10 +730,7 @@ impl EditCurveSet {
 }
 
 /// 把一条曲线里属于某个锚层（`None` = 无锚层）的 run 取出来。
-pub fn runs_for_anchor(
-    curve: &EditCurve,
-    anchor: Option<u32>,
-) -> impl Iterator<Item = &EditRun> {
+pub fn runs_for_anchor(curve: &EditCurve, anchor: Option<u32>) -> impl Iterator<Item = &EditRun> {
     curve.runs_in_layer(anchor)
 }
 
@@ -785,14 +785,18 @@ fn scan_curve<F>(
         match (start, hit) {
             (None, true) => start = Some(frame),
             (Some(begin), false) => {
-                curve.runs.push(EditRun::new(begin, values[begin..frame].to_vec()));
+                curve
+                    .runs
+                    .push(EditRun::new(begin, values[begin..frame].to_vec()));
                 start = None;
             }
             _ => {}
         }
     }
     if let Some(begin) = start {
-        curve.runs.push(EditRun::new(begin, values[begin..].to_vec()));
+        curve
+            .runs
+            .push(EditRun::new(begin, values[begin..].to_vec()));
     }
     if !curve.is_empty() {
         curves.insert(key.to_owned(), curve);
@@ -926,7 +930,8 @@ where
             }
             (Some(_), Some(value)) => values.push(value),
             (Some(begin), None) => {
-                out.runs.push(EditRun::new(begin, std::mem::take(&mut values)));
+                out.runs
+                    .push(EditRun::new(begin, std::mem::take(&mut values)));
                 start = None;
             }
             (None, None) => {}
@@ -999,12 +1004,12 @@ mod tests {
                 EditRun {
                     first_frame: 0,
                     values: vec![1.0],
-                anchor: None,
+                    anchor: None,
                 },
                 EditRun {
                     first_frame: 10,
                     values: vec![3.0],
-                anchor: None,
+                    anchor: None,
                 },
             ],
         };
@@ -1020,7 +1025,7 @@ mod tests {
             runs: vec![EditRun {
                 first_frame: 10,
                 values: vec![1.0; 10],
-            anchor: None,
+                anchor: None,
             }],
         };
         curve.remove_range(12, 15);
@@ -1037,7 +1042,7 @@ mod tests {
             runs: vec![EditRun {
                 first_frame: 2,
                 values: vec![9.0],
-            anchor: None,
+                anchor: None,
             }],
         };
         let (values, edited) = compose_curve("tension_edit", &[0.0; 5], Some(&edit), |frame| {
@@ -1054,7 +1059,7 @@ mod tests {
             runs: vec![EditRun {
                 first_frame: 0,
                 values: vec![60.0, 62.0, 64.0],
-            anchor: None,
+                anchor: None,
             }],
         };
         let stretched = curve.stretch_window(0.0, 2.0, 0.0, 4.0, "pitch_edit");
@@ -1072,7 +1077,7 @@ mod tests {
             runs: vec![EditRun {
                 first_frame: 0,
                 values: vec![60.0, 62.0, 64.0],
-            anchor: None,
+                anchor: None,
             }],
         };
         let reversed = curve.reverse_window(0.0, 2.0, "pitch_edit");
@@ -1113,17 +1118,12 @@ mod tests {
         curve.runs.push(EditRun::anchored(800, vec![64.0], 0));
         let pinned = anchor("root", 4.0, 0.005, 4.0, false);
         // 钉住的这一笔仍然只出现在它被画的那一段工程时间上。
-        let (values, edited) = compose_curve_in_layer(
-            "pitch_edit",
-            &[60.0; 3],
-            Some(&curve),
-            Some(0),
-            |frame| {
+        let (values, edited) =
+            compose_curve_in_layer("pitch_edit", &[60.0; 3], Some(&curve), Some(0), |frame| {
                 pinned
                     .project_to_source(4.0 + frame as f64 * 0.005)
                     .map(|source_sec| source_sec * 1000.0 / 5.0)
-            },
-        );
+            });
         assert_eq!(values, vec![64.0, 60.0, 60.0]);
         assert_eq!(edited, vec![true, false, false]);
         // 无锚层看不到它：锁定状态下这一笔必须跟着素材，而不是留在旧位置。
@@ -1143,7 +1143,10 @@ mod tests {
         // 分层读取仍然各拿各的 —— 这才是"两层互不覆盖"的真正判据。
         assert_eq!(curve.value_at(0.0, "pitch_edit"), Some(64.0));
         assert_eq!(curve.value_at_in_layer(0.0, "pitch_edit", None), Some(61.0));
-        assert_eq!(curve.value_at_in_layer(0.0, "pitch_edit", Some(0)), Some(64.0));
+        assert_eq!(
+            curve.value_at_in_layer(0.0, "pitch_edit", Some(0)),
+            Some(64.0)
+        );
         assert_eq!(curve.runs_in_layer(None).count(), 1);
         assert_eq!(curve.runs_in_layer(Some(0)).count(), 1);
     }
@@ -1173,7 +1176,6 @@ mod tests {
         curve.remove_range_in_layer(0, 100, None);
         assert_eq!(curve.runs.len(), 1);
     }
-
 
     #[test]
     fn normalize_layer_merges_adjacent_and_trims_overlap() {
@@ -1217,7 +1219,10 @@ mod tests {
         curve.runs.push(EditRun::new(10, vec![3.0]));
         curve.runs.sort_by_key(|run| (run.first_frame, run.anchor));
         assert_eq!(curve.value_at_in_layer(0.0, "pitch_edit", None), Some(1.0));
-        assert_eq!(curve.value_at_in_layer(0.0, "pitch_edit", Some(0)), Some(2.0));
+        assert_eq!(
+            curve.value_at_in_layer(0.0, "pitch_edit", Some(0)),
+            Some(2.0)
+        );
         assert_eq!(curve.value_at_in_layer(10.0, "pitch_edit", None), Some(3.0));
     }
 

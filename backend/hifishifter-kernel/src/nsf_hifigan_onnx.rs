@@ -945,7 +945,7 @@ pub fn update_ort_ep(choice: &str, device_id: Option<i32>) {
         return;
     }
     std::thread::Builder::new()
-    .name("ort-session-prewarm-vocoder".into())
+        .name("ort-session-prewarm-vocoder".into())
         .spawn(|| {
             if let Err(e) = get_or_init_shared_session() {
                 log::warn!("[nsf_hifigan] session pre-warm failed: {e}");

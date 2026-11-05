@@ -82,7 +82,8 @@ fn owned_fade_shape_changes_kernel_pcm_and_state_roundtrip_and_undo_clears_it() 
             // `lock_or_recover()` 的守卫当参数直接传下去，等于在整个调用期间持有
             // 这把不可重入的锁 —— 任何一次内部回读都会变成自锁。
             let edits = document.edits.lock_or_recover().clone();
-            owners[0].ara_render_input(&document, &edits, true)
+            owners[0]
+                .ara_render_input(&document, &edits, true)
                 .unwrap()
                 .1
         };
@@ -142,7 +143,6 @@ use ara2_bridge::companion::vst3::ffi::{ara2_vst3_plugin_entry_bind, ARA2_VST3_O
 use ara2_bridge::companion::{CompanionFactory, CompanionRoles};
 use ara2_bridge::plugin::{FactoryBuilder, PluginBuilder};
 use ara2_bridge::sys::*;
-
 
 /// 有宿主fade缓存后，快照/活actor装饰自动变化；不推进音频generation，不再烘焙普通fade。
 #[test]
@@ -982,10 +982,8 @@ fn task34_component_state_restore_is_scoped_by_the_real_assignment() {
     let document = model.session();
     // 【为什么两条根用**同一个**身份】这正是"只能靠 assignment 区分"的场景：两份载荷
     // 认不出谁是谁，唯一可靠的判据是本实例被分配了哪些轨。
-    let identity: Vec<(String, String)> = vec![(
-        "shared-mod".to_string(),
-        "ara://source".to_string(),
-    )];
+    let identity: Vec<(String, String)> =
+        vec![("shared-mod".to_string(), "ara://source".to_string())];
     *document.track_bindings.lock_or_recover() = std::collections::BTreeMap::from([
         ("track".into(), identity.clone()),
         ("b".into(), identity.clone()),
@@ -1062,9 +1060,15 @@ fn task34_component_state_restore_is_scoped_by_the_real_assignment() {
     cold_owners[0].restore_state(&states[1]).unwrap();
     // 【为什么不再要求失败】身份歧义只该让这一份恢复不套用，不该让宿主保存失败；
     // 权威仍保留原曲线（下面两条断言）。
-    assert!(cold_owners[0].encode_state().is_ok(), "身份歧义不能让保存失败");
+    assert!(
+        cold_owners[0].encode_state().is_ok(),
+        "身份歧义不能让保存失败"
+    );
     assert_eq!(cold.edits.lock_or_recover().revision, before);
-    assert_eq!(cold.edits.lock_or_recover().params["b"].pitch_edit[200], 64.);
+    assert_eq!(
+        cold.edits.lock_or_recover().params["b"].pitch_edit[200],
+        64.
+    );
     // 缺少真实身份也不能按旧序号恢复；既有曲线留在权威中。
     cold.track_bindings.lock_or_recover().insert(
         "track".into(),
@@ -1075,8 +1079,14 @@ fn task34_component_state_restore_is_scoped_by_the_real_assignment() {
         vec![("unknown-b".into(), "ara://source".into())],
     );
     cold_owners[0].restore_state(&states[1]).unwrap();
-    assert!(cold_owners[0].encode_state().is_ok(), "缺身份不能让保存失败");
-    assert_eq!(cold.edits.lock_or_recover().params["b"].pitch_edit[200], 64.);
+    assert!(
+        cold_owners[0].encode_state().is_ok(),
+        "缺身份不能让保存失败"
+    );
+    assert_eq!(
+        cold.edits.lock_or_recover().params["b"].pitch_edit[200],
+        64.
+    );
     cold.close();
     document.close();
 }
@@ -2181,7 +2191,6 @@ fn actual_document_retains_bound_storage_after_owner_is_dropped() {
     drop(model);
     // 模型终止后所有 owner 都已释放，此后不得再访问 raw。
 }
-
 
 /// 形态判定：**激活之前不能落定**，激活之后过宽限期才落定成 Capture。
 ///

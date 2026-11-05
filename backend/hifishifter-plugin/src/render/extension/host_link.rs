@@ -332,8 +332,7 @@ impl ExtensionOwner {
                 // 数组与 `compose_root_view` 的差，就是用户改的那几帧，位置一一对应。
                 {
                     let baseline = document.baseline_snapshot();
-                    let geometry_revision =
-                        document.ui_geometry_revision.load(Ordering::Acquire);
+                    let geometry_revision = document.ui_geometry_revision.load(Ordering::Acquire);
                     for (root, incoming) in &params {
                         let Some(baseline) = baseline.get(root) else {
                             continue;
