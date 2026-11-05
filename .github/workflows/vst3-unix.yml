@@ -49,13 +49,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 【矩阵随事件变化】PR 只跑 linux-x86_64 / macos-arm64：够证明"改动没把两个架构
-        # 的构建脚本弄坏"；tag 与手动触发跑全量四平台（发布产物必须齐全）。
-        #
-        # 【为什么用 exclude 而不是在 job 的 if 里读 matrix.pr】job 级 if 拿不到 matrix
-        # 上下文（GitHub 判定整个工作流文件无效，连解析都过不去），只有 step 级 if 才有。
-        # matrix 本身是可以用表达式算的，所以"PR 不跑的那两个"从矩阵里剔掉。
-        # `A && B || ''` 是 GitHub 表达式的三元写法：非 PR 时这条不匹配任何条目。
+        # 【为什么这里没有 exclude】本工作流曾经用
+        # `exclude: [{name: ${{ github.event_name == 'pull_request' && 'linux-aarch64' || '' }}}]`
+        # 让 PR 只跑两个平台。结果是**整个 job 一个实例都没被创建**：运行记录里只有
+        # gates，vst3-unix 连一行都没有，而同一份写法在 build.yml 里是好的。与其继续猜
+        # GitHub 的矩阵展开规则，不如让四个平台都跑 —— 这条工作流只在 PR / tag /
+        # 手动触发时启动，多两个并行 leg 的代价远小于"什么都没跑却说绿了"。
         include:
           - name: linux-x86_64
             os: ubuntu-24.04
@@ -72,10 +71,6 @@ jobs:
           - name: macos-x86_64
             os: macos-15-intel
             platform: macos-x86_64
-        # PR 上剔掉的两项（tag 与手动触发时 `|| ''` 让它们不匹配任何条目）。
-        exclude:
-          - name: ${{ github.event_name == 'pull_request' && 'linux-aarch64' || '' }}
-          - name: ${{ github.event_name == 'pull_request' && 'macos-x86_64' || '' }}
     steps:
       - uses: actions/checkout@v6
 
