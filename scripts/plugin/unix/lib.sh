@@ -209,6 +209,36 @@ hfs_check_no_dangling() {
     [ -z "$dangling" ] || hfs_die "产物里有悬空符号链接：$dangling"
 }
 
+# cargo 构建失败时的现场回放。**不退出**：调用方保留自己的 [vst3] / [clap] 前缀。
+# <log-file> <exit-status>
+#
+# 【为什么要先找 error 行】build script 的 panic 写在日志**中段**：cargo 会让并行的作业
+# 跑完才退出，所以它后面还跟着几百行原生依赖（World 的 C++）的编译告警。只回放末尾，
+# 得到的现场就是"一堆 warning + 退出码 101"，看上去像没有任何原因 —— vst3-unix.yml
+# 为此被误判成 OOM 过一轮，直到把完整日志翻出来才看见真正的 panic。
+hfs_report_build_failure() {
+    local log="$1" status="$2" first_line window
+    if [ ! -f "$log" ]; then
+        printf '[plugin] 没有构建日志：%s\n' "$log" >&2
+        return 0
+    fi
+    if [ "$status" -eq 137 ] || [ "$status" -eq 143 ]; then
+        printf '[plugin] 进程被信号杀死（exit %s）：runner 内存或磁盘不足。\n' "$status" >&2
+    fi
+    # CARGO_TERM_COLOR=never 是这条判据成立的前提（否则行首是转义序列）。
+    first_line="$(grep -n -m1 -E '^error(\[|:)' "$log" 2>/dev/null | cut -d: -f1 || true)"
+    if [ -n "$first_line" ]; then
+        window=$((first_line + 40))
+        printf '[plugin] 日志里第一处 error（第 %s 行起）：\n' "$first_line" >&2
+        sed -n "${first_line},${window}p" "$log" >&2
+        printf '[plugin] 日志末尾 20 行：\n' >&2
+        tail -20 "$log" >&2
+    else
+        printf '[plugin] 日志里没有 error 行，末尾 120 行：\n' >&2
+        tail -120 "$log" >&2
+    fi
+}
+
 # <output.tar.gz> <workdir> <entry>...
 hfs_tarball() {
     local out="$1" work="$2"

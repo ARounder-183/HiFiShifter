@@ -56,6 +56,7 @@ while [ $# -gt 0 ]; do
         --stage)          STAGE="$2"; shift 2 ;;
         --profile=*)      PROFILE="${1#*=}"; shift ;;
         --out=*)          OUT_DIR="${1#*=}"; shift ;;
+        --out)            OUT_DIR="$2"; shift 2 ;;
         --reuse-frontend) REUSE_FRONTEND=1; shift ;;
         --no-verify)      SKIP_VERIFY=1; shift ;;
         -h|--help)        usage; exit 0 ;;
@@ -99,12 +100,13 @@ stage_build() {
     mkdir -p "$OUT_DIR"
     local cargo_log="$TARGET_DIR/cargo-clap.log"
     mkdir -p "$(dirname "$cargo_log")"
-    # 退出码单独取：被 OOM killer 打死时 cargo 不会留下任何 error 行（见 vst3 的同名注释）。
+    # 退出码单独取、颜色强制关掉、失败时按 error 行定位：原因见 lib.sh 的
+    # hfs_report_build_failure 与 vst3/unix/build.sh 的同名注释。
     local status=0
-    cargo build --manifest-path "$BACKEND_DIR/Cargo.toml" -p hifishifter-clap \
-        --profile "$PROFILE" --locked >"$cargo_log" 2>&1 || status=$?
+    CARGO_TERM_COLOR=never cargo build --manifest-path "$BACKEND_DIR/Cargo.toml" \
+        -p hifishifter-clap --profile "$PROFILE" --locked >"$cargo_log" 2>&1 || status=$?
     if [ "$status" -ne 0 ]; then
-        tail -120 "$cargo_log" >&2
+        hfs_report_build_failure "$cargo_log" "$status"
         die "编译失败（exit $status），完整日志：$cargo_log"
     fi
     local lib="$TARGET_DIR/$PROFILE_DIR/$CARGO_LIB"

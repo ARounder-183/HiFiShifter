@@ -61,6 +61,7 @@ while [ $# -gt 0 ]; do
         --stage)         STAGE="$2"; shift 2 ;;
         --profile=*)     PROFILE="${1#*=}"; shift ;;
         --out=*)         OUT_DIR="${1#*=}"; shift ;;
+        --out)           OUT_DIR="$2"; shift 2 ;;
         --skip-frontend) SKIP_FRONTEND=1; shift ;;
         --install)       WANT_INSTALL=1; shift ;;
         --no-verify)     SKIP_VERIFY=1; shift ;;
@@ -108,6 +109,12 @@ pin() {
     python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]][sys.argv[3]])' "$SDK_PINS" "$1" "$2"
 }
 
+# 可选字段：没有就输出空行（CLAP 是纯头文件 SDK，pin 里就没有 submodule）。
+pin_opt() {
+    python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]].get(sys.argv[3], ""))' \
+        "$SDK_PINS" "$1" "$2"
+}
+
 for tool in git python3 tar; do
     command -v "$tool" >/dev/null 2>&1 || die "缺少必需工具：$tool"
 done
@@ -119,9 +126,41 @@ log "平台 $BUNDLE_TAG｜版本 $PRODUCT_VERSION｜profile $PROFILE｜输出 $O
 # ara2-bridge 的 build.rs 会对两个 SDK 做 triple 校验（仓库 + commit + tree），工作区
 # 一脏就拒绝编译。所以这里不"尽力而为"：tree 对不上直接失败，而不是让 cargo 在 20 分钟
 # 后以一个看不懂的 panic 结束。
+
+# 子模块按 pin 校验，规则与主检出完全一致（commit + tree 都要对得上）。
+#
+# 【为什么这一步不能省】vst3sdk 的 pluginterfaces 是**子模块**：主检出里只有一个 gitlink，
+# `git checkout` 不会写出 pluginterfaces/base/funknown.h。缺了它，
+# ara2-bridge-companion 的 build.rs 会在 `pluginterfaces/base/funknown.h` 处 panic ——
+# 而那条报错被几百行 World 的 C++ 告警埋在中间，cargo 的退出码又只是 101，
+# 现场看起来就是"编译失败但没有任何错误信息"。
+sync_submodule() {
+    local name="$1" dir="$2" sub="$3" commit="$4" tree="$5"
+    local subdir="$dir/$sub" actual
+    [ -n "$commit" ] && [ -n "$tree" ] || die "$name 的 pin 缺少 submoduleCommit / submoduleTree"
+
+    # 【为什么要分两条命令】未初始化时 .git 还不存在，只有 `submodule update --init`
+    # 能把它拉下来；已初始化时再传 --depth 只是无谓的网络往返。
+    # 不用数组拼参数：macOS 自带 bash 3.2 在 set -u 下展开空数组会直接中止。
+    if [ -e "$subdir/.git" ]; then
+        git -C "$dir" submodule update --init --force -- "$sub" >/dev/null 2>&1 \
+            || die "$name：子模块 $sub 同步失败"
+    else
+        log "取 $name 子模块 $sub@${commit:0:12}"
+        git -C "$dir" submodule update --init --depth 1 --force -- "$sub" >/dev/null 2>&1 \
+            || die "$name：子模块 $sub 拉取失败"
+    fi
+
+    actual="$(git -C "$subdir" rev-parse HEAD 2>/dev/null || true)"
+    [ "$actual" = "$commit" ] || die "$name 的子模块 $sub 与 pin 不符：期望 $commit，实际 ${actual:-（缺失）}"
+    actual="$(git -C "$subdir" rev-parse 'HEAD^{tree}')"
+    [ "$actual" = "$tree" ] || die "$name 的子模块 $sub tree 与 pin 不符：期望 $tree，实际 $actual"
+    log "$name 子模块 $sub 校验通过（${commit:0:12}）"
+}
+
 sync_sdk() {
     local name="$1" subdir="$2"
-    local repo commit tree dir actual_tree
+    local repo commit tree dir actual_tree sub
     repo="$(pin "$name" repository)"
     commit="$(pin "$name" commit)"
     tree="$(pin "$name" tree)"
@@ -143,14 +182,19 @@ sync_sdk() {
     actual_tree="$(git -C "$dir" rev-parse "HEAD^{tree}")"
     [ "$actual_tree" = "$tree" ] || die "$name 的 tree 与 pin 不符：期望 $tree，实际 $actual_tree"
     log "$name 校验通过（$(git -C "$dir" rev-parse --short HEAD)）"
+
+    # pin 里有 submodule 字段才处理（CLAP 这种纯头文件 SDK 没有子模块）。
+    sub="$(pin_opt "$name" submodule)"
+    if [ -n "$sub" ]; then
+        sync_submodule "$name" "$dir" "$sub" \
+            "$(pin_opt "$name" submoduleCommit)" "$(pin_opt "$name" submoduleTree)"
+    fi
 }
 
 stage_sdk() {
     step "准备 ARA / VST3 SDK"
+    # 两个 SDK 的子模块（ARA_API / pluginterfaces）由 sync_sdk 按 pin 一并校验。
     sync_sdk ara ARA_SDK
-    # ARA_API 是 ARA_SDK 的子模块，ara2-bridge 同样会对它做 triple 校验。
-    git -C "$REPO_ROOT/third_party/sdk/ARA_SDK" submodule update --init --recursive >/dev/null 2>&1 \
-        || die "ARA_API 子模块拉取失败"
     sync_sdk vst3 vst3sdk
     export ARA_SDK_DIR="$REPO_ROOT/third_party/sdk/ARA_SDK"
     export ARA_VST3_SDK_DIR="$REPO_ROOT/third_party/sdk/vst3sdk"
@@ -218,14 +262,15 @@ stage_build() {
     mkdir -p "$OUT_DIR" "$(dirname "$CARGO_LOG")"
     # --locked：构建必须证明"提交的锁"能编译，而不是现解一棵依赖树。
     # 输出进日志：本 crate 在 Unix 上有近两百条 Windows 专属代码的 dead_code 告警，
-    # 直接刷屏会把真正的错误推出视野；失败时回放末尾。
-    # 【为什么把退出码单独取出来】被 OOM killer 打死时 cargo 来不及写任何 error 行，
-    # 日志停在一句 warning 上，看上去像"没有任何原因"。退出码 137 是 SIGKILL 的唯一线索。
+    # 直接刷屏会把真正的错误推出视野。
+    # 【为什么强制 CARGO_TERM_COLOR=never】CI 上 CARGO_TERM_COLOR=always，日志里每条
+    # 都带着转义序列，"^error" 就再也匹配不到了 —— 下面的错误定位会整个失效。
+    # 【为什么把退出码单独取出来】被信号打死时 cargo 来不及写 error 行，退出码是唯一线索。
     local status=0
-    cargo build --manifest-path "$BACKEND_DIR/Cargo.toml" -p hifishifter-plugin \
-        --profile "$PROFILE" --locked >"$CARGO_LOG" 2>&1 || status=$?
+    CARGO_TERM_COLOR=never cargo build --manifest-path "$BACKEND_DIR/Cargo.toml" \
+        -p hifishifter-plugin --profile "$PROFILE" --locked >"$CARGO_LOG" 2>&1 || status=$?
     if [ "$status" -ne 0 ]; then
-        tail -120 "$CARGO_LOG" >&2
+        hfs_report_build_failure "$CARGO_LOG" "$status"
         die "编译失败（exit $status），完整日志：$CARGO_LOG"
     fi
     log "编译完成（$(grep -c "^warning" "$CARGO_LOG" || true) 条 warning；日志 $CARGO_LOG）"
