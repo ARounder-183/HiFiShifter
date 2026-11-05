@@ -101,10 +101,17 @@ if [ "$HOST_OS" = "linux" ]; then
     done <<< "$LINKAGE"
 else
     LINKAGE="$(otool -L "$MODULE" 2>&1 || true)"
+    # 【为什么要跳过自己】otool -L 的第一条"依赖"其实是模块自己的 install name
+    # （LC_ID_DYLIB），链接时写的是构建机上的绝对路径 —— 它不是依赖，却会在这条
+    # "有没有指向包外部的东西"的判据里自己举报自己。用 otool -D 精确取出它。
+    SELF_ID="$(otool -D "$MODULE" 2>/dev/null | tail -n +2 | head -1 || true)"
     while IFS= read -r linkage_line; do
         dep="$(printf "%s" "$linkage_line" | sed -E "s/^[[:space:]]*//; s/ \(compatibility.*$//")"
         [ -z "$dep" ] && continue
         case "$dep" in
+            # otool -L 的第一条是模块自己的 install name（LC_ID_DYLIB），不是依赖。
+            "$MODULE") continue ;;
+            "$SELF_ID") continue ;;
             /usr/lib/*|/System/*) continue ;;
             @rpath/*|@loader_path/*)
                 # @rpath 的条目必须能在 Frameworks 里找到实体，否则照样加载失败。
