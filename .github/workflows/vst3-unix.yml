@@ -148,7 +148,13 @@ jobs:
       # 以及宿主握手（插件按本平台 IID 布局拿到 IReaperHostApplication —— Windows 上
       # 永远看不出这一条的问题，见 scripts/vst3/unix/host_iid_probe.c）。
       # 构建逻辑只在 scripts/vst3/unix/ 里存在一份，CI 不重复实现任何一步。
+      # 【为什么限制并发】插件与它的原生依赖（World 的 C++、ARA bridge 的模板）在
+      # 4 核 runner 上并行编译时会把内存打满：第一次真跑这条流水线时，四个平台都在
+      # World 编译结束、kernel 开始编译的瞬间被 OOM killer 打死，日志停在一句 warning
+      # 上，cargo 连 error 行都没来得及写。两个并发足够，时间成本远低于重跑一次。
       - name: Build, verify and package
+        env:
+          CARGO_BUILD_JOBS: "2"
         run: bash scripts/vst3/unix/build.sh
 
       # hfs-gui 的 clippy 门禁：它是 workspace 外的交付物，build.sh 只证明"能编

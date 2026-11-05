@@ -219,10 +219,14 @@ stage_build() {
     # --locked：构建必须证明"提交的锁"能编译，而不是现解一棵依赖树。
     # 输出进日志：本 crate 在 Unix 上有近两百条 Windows 专属代码的 dead_code 告警，
     # 直接刷屏会把真正的错误推出视野；失败时回放末尾。
-    if ! cargo build --manifest-path "$BACKEND_DIR/Cargo.toml" -p hifishifter-plugin \
-            --profile "$PROFILE" --locked >"$CARGO_LOG" 2>&1; then
-        tail -60 "$CARGO_LOG" >&2
-        die "编译失败，完整日志：$CARGO_LOG"
+    # 【为什么把退出码单独取出来】被 OOM killer 打死时 cargo 来不及写任何 error 行，
+    # 日志停在一句 warning 上，看上去像"没有任何原因"。退出码 137 是 SIGKILL 的唯一线索。
+    local status=0
+    cargo build --manifest-path "$BACKEND_DIR/Cargo.toml" -p hifishifter-plugin \
+        --profile "$PROFILE" --locked >"$CARGO_LOG" 2>&1 || status=$?
+    if [ "$status" -ne 0 ]; then
+        tail -120 "$CARGO_LOG" >&2
+        die "编译失败（exit $status），完整日志：$CARGO_LOG"
     fi
     log "编译完成（$(grep -c "^warning" "$CARGO_LOG" || true) 条 warning；日志 $CARGO_LOG）"
     local lib="$TARGET_DIR/$PROFILE_DIR/$CARGO_LIB"

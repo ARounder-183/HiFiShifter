@@ -99,10 +99,13 @@ stage_build() {
     mkdir -p "$OUT_DIR"
     local cargo_log="$TARGET_DIR/cargo-clap.log"
     mkdir -p "$(dirname "$cargo_log")"
-    if ! cargo build --manifest-path "$BACKEND_DIR/Cargo.toml" -p hifishifter-clap \
-            --profile "$PROFILE" --locked >"$cargo_log" 2>&1; then
-        tail -60 "$cargo_log" >&2
-        die "编译失败，完整日志：$cargo_log"
+    # 退出码单独取：被 OOM killer 打死时 cargo 不会留下任何 error 行（见 vst3 的同名注释）。
+    local status=0
+    cargo build --manifest-path "$BACKEND_DIR/Cargo.toml" -p hifishifter-clap \
+        --profile "$PROFILE" --locked >"$cargo_log" 2>&1 || status=$?
+    if [ "$status" -ne 0 ]; then
+        tail -120 "$cargo_log" >&2
+        die "编译失败（exit $status），完整日志：$cargo_log"
     fi
     local lib="$TARGET_DIR/$PROFILE_DIR/$CARGO_LIB"
     [ -f "$lib" ] || die "编译成功但找不到产物：$lib"
