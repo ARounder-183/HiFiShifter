@@ -19,7 +19,7 @@ public static class ClapProbe {
     [DllImport("kernel32.dll")] public static extern bool FreeLibrary(IntPtr module);
 }
 "@
-Add-Type -TypeDefinition $signature
+if (!("ClapProbe" -as [type])) { Add-Type -TypeDefinition $signature }
 $handle = [ClapProbe]::LoadLibrary($ModulePath)
 if ($handle -eq [IntPtr]::Zero) { throw "LoadLibrary failed for $ModulePath" }
 try {
