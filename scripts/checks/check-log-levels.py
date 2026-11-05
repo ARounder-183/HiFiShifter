@@ -24,6 +24,12 @@ import pathlib
 import re
 import sys
 
+# 【为什么把 stdout 钉成 UTF-8】Windows 上 Python 的 stdout 跟随 ANSI 代码页（中文系统
+# 是 GBK、英文系统是 cp1252），而本脚本发现违规时会打印中文说明 —— CI 第一次真跑这条
+# 门禁就崩在 UnicodeEncodeError 上：真正的违规清单一条都没进日志，红的是编码而不是规则。
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+
 ROOT = pathlib.Path(__file__).resolve().parents[2] / 'backend'
 SKIP_DIRS = {'target', 'third_party', 'node_modules'}
 
