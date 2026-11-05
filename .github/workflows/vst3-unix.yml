@@ -86,13 +86,21 @@ jobs:
       # （见 editor/gui/linux.rs）。不装它，pkg-config 会在编译插件时直接失败 ——
       # 与"装了也不会被链接"的旧状态正好相反。约 200 MB，换来的是插件窗口在这条
       # 流水线上真的被编译过一次。
+      #
+      # 【为什么还要装 mesa-vulkan-drivers】产物链接了 ort 的 WebGPU 后端（dawn →
+      # Vulkan）。runner 上没有任何 Vulkan ICD，dawn 初始化必然失败
+      # （vkCreateInstance: Found no drivers!），随后插件单测**在退出时 SIGSEGV**：
+      # 56 条用例全绿、退出码却是 11。装上 mesa 的软件光栅器（lavapipe）之后
+      # vkCreateInstance 能成功，进程就不再走"初始化失败后销毁"那条路径 —— 有驱动的
+      # 本地环境跑同一份测试从不崩，这是目前唯一与现象吻合的差别。
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake pkg-config libxcb1-dev libssl-dev python3 file \
-            libgtk-3-dev libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev
+            libgtk-3-dev libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev \
+            mesa-vulkan-drivers
 
       # 权重不在仓库里：以清单哈希为键缓存解压结果（模型一换键就变）。
       - name: Cache model weights
