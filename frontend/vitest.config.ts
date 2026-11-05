@@ -41,6 +41,11 @@ export default mergeConfig(
             //   // @vitest-environment jsdom
             environment: "node",
             setupFiles: ["./src/test/setup.ts"],
+            // 【为什么 CI 上允许一次重试】427 个测试文件在 4 核 runner 上并发，
+            // 5 s 的超时断言和个别依赖模块级单例的用例会偶发失败 —— 实测两次
+            // 流水线红在不同的用例上，而两条单独跑都是绿的。真回归两次都会红，
+            // 所以重试一次不会把判据变成"碰运气"，只把噪声挡在外面。
+            retry: process.env.CI ? 1 : 0,
         },
     }),
 );
