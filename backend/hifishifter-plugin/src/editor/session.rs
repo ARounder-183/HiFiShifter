@@ -3785,6 +3785,15 @@ impl MidiImportHost for EditorSession {
 pub(crate) mod tests {
     use super::*;
 
+    /// 等后台投影线程"追上来"的上限。
+    ///
+    /// 【为什么是 30 秒】这些断言判的是**最终一致**：宿主时钟或文档改动最终反映到
+    /// `editor.timeline`，而投影是另一个线程在做。4 核 runner 跑整包测试时 CPU 是满的，
+    /// 5 秒的窗口实测会输掉（`host_cursor_is_absolute_once_and_tracks_stopped_seeks`
+    /// 在 CI 上偶发红、本地连跑全过）。30 秒对"真的挂了"仍然是一道明确判据，而且同
+    /// 文件里等后台收敛的用例本来就有用 30 / 60 秒的。
+    const PROJECTION_CATCH_UP: Duration = Duration::from_secs(30);
+
     /// 某个组件存档里，所有权威的某条曲线是否包含给定取值。
     ///
     /// 【为什么需要它】T2 之后用户曲线只住在权威的稀疏 run 里，`params` 不再写显示
@@ -5874,7 +5883,7 @@ pub(crate) mod tests {
             "set_track_state",
             json!({"trackId":track,"solo":true,"volume":0.5}),
         );
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + PROJECTION_CATCH_UP;
         while editor.applied.load(Ordering::Acquire) < 1 {
             assert!(
                 Instant::now() < deadline,
@@ -6016,7 +6025,7 @@ pub(crate) mod tests {
         // 立刻断言快照，在空闲机器上 20 ms 内就对，在 4 核 runner 上就会输给投影线程 ——
         // 实测 CI 上这条偶发失败、本地连跑三次全过。判据因此写成"最终会一致"，与
         // 同文件 `host_changes_and_bpm_sync_automatically_without_reloading` 一致。
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + PROJECTION_CATCH_UP;
         let playhead = loop {
             let timeline =
                 super::super::commands::dispatch(&editor, "get_timeline_state", json!({})).unwrap();
@@ -6071,7 +6080,7 @@ pub(crate) mod tests {
         let document = model.session();
         document.timeline.lock_or_recover().as_mut().unwrap().clips[0].start_sec = 2.;
         document.revision.fetch_add(1, Ordering::AcqRel);
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + PROJECTION_CATCH_UP;
         loop {
             let synced = editor.timeline.lock_or_recover().clone();
             if synced.clips[0].start_sec == 2. && synced.bpm == 150. {
