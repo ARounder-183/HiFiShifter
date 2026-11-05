@@ -214,6 +214,13 @@ jobs:
       # 跳过清单只有一份（scripts/checks/test-skips.txt，[unix] 前缀的条目在这里生效）。
       # 此前这里有四条 --skip 写死在 YAML 里，与 build.yml / vst3.yml 的各一条互不知情。
       - name: Run plugin unit tests
+        env:
+          # 托管 runner 没有 GPU。ort 默认的 "auto" 会先试 WebGPU，dawn 初始化在无显卡的
+          # 机器上必然失败（vkCreateInstance: Found no drivers），然后**进程在退出时
+          # SIGSEGV** —— 56 条用例全绿、退出码却是 11，看上去像测试挂了。
+          # 判的是逻辑，不是 GPU 性能，所以直接钉成 cpu（与 gates.yml 的 Windows 测试
+          # job 同一条理由）。
+          HIFISHIFTER_ORT_EP: cpu
         run: |
           timeout 3300 pwsh -NoProfile -File scripts/checks/run-rust-gates.ps1 -Only test -Package hifishifter-plugin -Platform unix
 
