@@ -44,11 +44,11 @@ jobs:
           path: third_party/sdk
           key: plugin-sdks-${{ hashFiles('scripts/env/plugin-sdks.json') }}
       - name: Prepare pinned SDKs (Windows)
-        if: runner.os == "Windows"
+        if: runner.os == 'Windows'
         shell: pwsh
         run: ./scripts/setup/prepare-plugin-sdks.ps1
       - name: Verify CLAP SDK pin (Unix)
-        if: runner.os != "Windows"
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           git clone --depth 1 --branch 1.1.9 https://github.com/free-audio/clap.git third_party/sdk/clap
@@ -57,10 +57,10 @@ jobs:
         run: python scripts/setup/fetch-models.py
         shell: bash
       - name: Build CLAP (Unix)
-        if: runner.os != "Windows"
+        if: runner.os != 'Windows'
         run: bash scripts/clap/unix/build.sh all
       - name: Build CLAP (Windows)
-        if: runner.os == "Windows"
+        if: runner.os == 'Windows'
         shell: pwsh
         run: pwsh scripts/clap/windows/build.ps1
       - uses: actions/upload-artifact@v7

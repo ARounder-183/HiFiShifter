@@ -147,6 +147,23 @@ Test-Invariant '工作流里没有内联的测试判据' {
     '.github/workflows'
 }
 
+# GitHub 的表达式只认单引号字符串。写成 `if: runner.os == "Windows"` 时**整个工作流
+# 文件被判无效**：触发时只得到一条 0 秒、名字显示成文件路径的失败记录，任何 step 都没跑。
+# 这个坑已经踩过三次（build.yml / vst3-unix.yml / clap.yml），所以判据是"if: 行里不许出现
+# 双引号"—— 条件里本来也没有需要双引号的场合。
+Test-Invariant '工作流条件用单引号字符串' {
+    $offenders = @()
+    foreach ($file in Get-ChildItem (Join-Path $root '.github\workflows') -Filter *.yml -File) {
+        foreach ($line in Get-Content -LiteralPath $file.FullName) {
+            if ($line -notmatch '^\s*if:') { continue }
+            if ($line.Contains('"')) { $offenders += "$($file.Name): $($line.Trim())" }
+        }
+    }
+    if ($offenders.Count) { throw ('if: 里的字符串必须用单引号：' + ($offenders -join ' | ')) }
+    '.github/workflows'
+}
+
+
 # 前端 invoke.ts 的 switch 是前端能发出的全部方法名。其中任何一个若两边后端都不派发，
 # 症状是"控件能点、点了没反应"——静默失效，且不会有编译错误。
 Test-Invariant '前端 invoke 面都有后端命令承接' {
