@@ -142,14 +142,24 @@ fn import_audio_bytes_error(message: &str) -> crate::models::TimelineStatePayloa
     payload
 }
 
-/// 持久化的「导入媒体」目录（`<config_dir>/imported_media/`）。
+/// 导入素材的落点：工程素材目录 / 未保存会话目录（见 `hifishifter_kernel::media_paths`）。
 ///
 /// 【为什么不用临时目录】拖放导入走 `import_audio_bytes`：浏览器只给字节流，
-/// 落盘后的文件就是该 clip 的**唯一**副本。`%TEMP%/hifishifter/` 在每次启动时
-/// 被清理，会让「导入 → 保存工程 → 重启」直接丢掉素材（源文件无从恢复）。
-/// 因此这里落到持久目录，启动清理不再触碰这些文件。
-fn persistent_import_dir(state: &AppState) -> Option<std::path::PathBuf> {
-    let dir = state.config_dir.get()?.join("imported_media");
+/// 落盘后的文件就是该 clip 的**唯一**副本。`%TEMP%/hifishifter/` 在每次启动时被清理，
+/// 会让「导入 → 保存工程 → 重启」直接丢掉素材（源文件无从恢复）。
+///
+/// 【为什么不再放设置目录】历史实现把文件写进 `<设置目录>/imported_media/` ——
+/// 设置目录里躺着几百 MB 音频，工程搬走后素材还钉在这台机器上。现在的规则是：
+/// 工程已保存 → `<工程目录>/<工程名>_media/`；工程未保存 → `<本地根>/unsaved/<会话>/`。
+fn import_target_dir(state: &AppState) -> Option<std::path::PathBuf> {
+    let project_path = state.current_project_path();
+    let local_root = hifishifter_kernel::app_paths::local_data_dir();
+    let session = state.import_session_id().to_string();
+    let dir = hifishifter_kernel::media_paths::import_target_dir(
+        project_path.as_deref(),
+        local_root.as_deref(),
+        &session,
+    )?;
     std::fs::create_dir_all(&dir).ok()?;
     Some(dir)
 }
@@ -217,9 +227,10 @@ pub(super) fn import_audio_bytes(
     };
 
     let ext = import_file_extension(&file_name);
-    // 优先落持久目录：这里的文件是 clip 的唯一副本，不能放进启动即清理的临时目录。
-    // 仅当 config_dir 不可用（极端降级）时才退回临时目录。
-    let path = match persistent_import_dir(&state) {
+    // 落点见 `import_target_dir`：工程素材目录 / 未保存会话目录。这里的文件是 clip
+    // 的唯一副本，绝不能放进启动即清理的临时目录。
+    // 仅当两者都不可用（极端降级：没有工程路径、也解析不出本地数据根）时才退回临时目录。
+    let path = match import_target_dir(&state) {
         Some(dir) => dir.join(format!("import_{}.{}", Uuid::new_v4().simple(), ext)),
         None => ensure_temp_dir()
             .ok()
@@ -228,8 +239,12 @@ pub(super) fn import_audio_bytes(
     };
 
     if let Err(e) = fs::write(&path, &bytes) {
+        // 文案必须说出**实际落点**：用户看到"写不进去"时，第一件想知道的就是写到哪、
+        // 以及去哪儿找。顺带指出工程素材目录，是因为多半是那个位置没有写权限
+        // （工程放在只读共享盘上）。
         return import_audio_bytes_error(&format!(
-            "failed to write imported file to temp dir: {e}"
+            "failed to write imported file to {}: {e} (imported media is stored next to the project, in the <project name>_media folder)",
+            path.display()
         ));
     }
 
@@ -258,11 +273,13 @@ pub(super) fn import_audio_bytes(
         Some(None) => Some(tl.add_track(Some("Track".to_string()), None, None)),
     };
 
+    // 磁盘名是 import_<uuid>.<ext>（避免同名覆盖），显示名用用户看到的原始文件名。
     tl.import_audio_item(
         &path.display().to_string(),
         resolved_track_id,
         start_sec,
         channel_decision,
+        Some(file_name.as_str()),
     );
     state.audio_engine.update_timeline(tl.clone());
     let mut payload = tl.to_payload();
@@ -355,7 +372,14 @@ pub(super) fn import_audio_item(
         Some(None) => Some(tl.add_track(Some("Track".to_string()), None, None)),
     };
 
-    tl.import_audio_item(&source_path, resolved_track_id, start_sec, channel_decision);
+    // 按路径导入：显示名就是磁盘文件名，不需要额外指定。
+    tl.import_audio_item(
+        &source_path,
+        resolved_track_id,
+        start_sec,
+        channel_decision,
+        None,
+    );
     state.audio_engine.update_timeline(tl.clone());
     let mut payload = tl.to_payload();
     payload.project = Some(state.project_meta_payload());

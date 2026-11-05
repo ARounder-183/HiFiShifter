@@ -774,6 +774,79 @@ fn save_project_archive_to_zip_inner(
     Ok(get_timeline_state_from_ref(state))
 }
 
+/// 把「未保存会话」里的导入素材搬进**工程素材目录**，并改写时间线里的绝对路径。
+///
+/// 【为什么必须在构造快照之前】`prepare_source_paths_for_save` 会按
+/// `take.source_path` 计算 `source_path_relative`。路径不先改对，写进工程的就是指向
+/// 临时会话目录（或一台机器上的绝对路径）的相对路径 —— 下次打开必然缺文件，而
+/// 那时用户已经删掉了原来的会话。
+///
+/// 【为什么改写 take 之后还要 apply_to_clip】`Clip` 上的媒体字段是 active take 的
+/// **内存投影**，而保存路径的第一步是 `sync_clip_takes_from_flat()`（投影 → take）。
+/// 只改 take 不改投影，那次同步会把旧路径写回来。
+///
+/// 失败只记日志：素材没搬走时工程仍然保存得下来（路径留在会话目录里，文件还在），
+/// 而"因为搬不动一个音频文件就拒绝保存工程"是不可接受的。
+fn adopt_unsaved_media(state: &AppState, project_path: &Path) {
+    let Some(session_dir) = state.import_session_dir() else {
+        return;
+    };
+    if !session_dir.is_dir() {
+        return;
+    }
+    let Some(target_dir) = hifishifter_kernel::media_paths::project_media_dir(project_path) else {
+        return;
+    };
+
+    let moved = match hifishifter_kernel::media_paths::move_directory(&session_dir, &target_dir) {
+        Ok(moved) => moved,
+        Err(error) => {
+            log::warn!(
+                "[import] could not adopt unsaved media into {}: {error}",
+                target_dir.display()
+            );
+            return;
+        }
+    };
+    if moved == 0 {
+        let _ = std::fs::remove_dir(&session_dir);
+        return;
+    }
+
+    let mut rewritten = 0usize;
+    {
+        let mut timeline = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
+        for clip in &mut timeline.clips {
+            for take in &mut clip.takes {
+                let Some(source_path) = take.source_path.clone() else {
+                    continue;
+                };
+                if let Some(rebased) = hifishifter_kernel::media_paths::rebase_path(
+                    &source_path,
+                    &session_dir,
+                    &target_dir,
+                ) {
+                    take.source_path = Some(rebased);
+                    rewritten += 1;
+                }
+            }
+            let active_take = clip
+                .active_take_id
+                .as_deref()
+                .and_then(|id| clip.takes.iter().find(|take| take.id == id))
+                .or_else(|| clip.takes.first())
+                .cloned();
+            if let Some(take) = active_take {
+                take.apply_to_clip(clip);
+            }
+        }
+    }
+    log::info!(
+        "[import] adopted {moved} unsaved media file(s) into {} ({rewritten} path(s) rewritten)",
+        target_dir.display()
+    );
+}
+
 pub(crate) fn save_project_to_path_inner(
     state: &AppState,
     window: &Window,
@@ -781,6 +854,9 @@ pub(crate) fn save_project_to_path_inner(
 ) -> Result<crate::models::TimelineStatePayload, String> {
     let path = PathBuf::from(&project_path);
     let name = project_name_from_path(&path);
+    // 先把未保存会话的素材收进工程素材目录：这一步会改写 take.source_path，
+    // 必须在任何"按路径生成相对路径"的步骤之前。
+    adopt_unsaved_media(state, &path);
     // 记事本附件：按正文引用清理未引用条目，再构建快照 —— 顺序不能反，
     // 否则登记表里还留着已被删掉的条目（字节内嵌在工程文件里，随之一起变大）。
     crate::commands::notebook::prepare_assets_for_save(state);

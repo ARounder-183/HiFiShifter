@@ -236,6 +236,7 @@ pub mod take_geometry;
 pub mod clip_rendering_state;
 pub mod config;
 pub mod folder_scan;
+pub mod media_paths;
 pub mod notebook_assets;
 pub mod project;
 pub mod temp_manager;

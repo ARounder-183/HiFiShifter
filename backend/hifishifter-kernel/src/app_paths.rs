@@ -434,7 +434,10 @@ pub fn remap_with(roots: &[LegacyRoot], path: &str) -> Option<PathBuf> {
 }
 
 /// 逐组件去掉前缀；Windows 上大小写不敏感（用户目录的大小写随系统语言变化）。
-fn strip_prefix_ci(path: &Path, prefix: &Path) -> Option<PathBuf> {
+///
+/// 对 crate 内公开：`media_paths::rebase_path` 用同一套比较规则，否则"迁移认得
+/// 的路径"与"搬家认得的路径"会在大小写上分叉。
+pub(crate) fn strip_prefix_ci(path: &Path, prefix: &Path) -> Option<PathBuf> {
     let mut path_components = path.components();
     for prefix_component in prefix.components() {
         let component = path_components.next()?;

@@ -3895,6 +3895,43 @@ impl TimelineState {
 mod tests {
     use super::*;
 
+    /// 拖放导入的显示名必须是**原始文件名**，而不是磁盘上的 \`import_<uuid>\`。
+    ///
+    /// 【为什么这条是用户可见的正确性】拖进来的音频块此前一律叫 \`import_a1b2c3d4\`
+    /// —— 用户在时间线上完全认不出哪个是哪个，而磁盘名恰恰是为了避免同名覆盖才
+    /// 变成 UUID 的。两者必须分开表达。
+    #[test]
+    fn import_audio_item_uses_the_display_name_for_the_clip() {
+        let dir = std::env::temp_dir().join(format!("hfs-display-name-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("import_deadbeef.wav");
+        std::fs::write(&path, b"RIFF").unwrap();
+
+        let mut timeline = TimelineState::default();
+        let track = timeline.add_track(Some("Track".to_string()), None, None);
+        timeline.import_audio_item(
+            &path.to_string_lossy(),
+            Some(track.clone()),
+            Some(0.0),
+            crate::channel_policy::ChannelResolution::NOOP,
+            Some("01 Take.wav"),
+        );
+        assert_eq!(timeline.clips[0].name, "01 Take.wav");
+
+        // 不传显示名时退回磁盘文件名（按路径导入走这条路）。
+        timeline.import_audio_item(
+            &path.to_string_lossy(),
+            Some(track),
+            Some(0.0),
+            crate::channel_policy::ChannelResolution::NOOP,
+            None,
+        );
+        assert_eq!(timeline.clips[1].name, "import_deadbeef.wav");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 串行化触及进程级“同步编辑所有 Take”开关的测试：该设置是全局原子，
     /// 无 per-test 作用域，并行测试会互相踩踏（一个测试把开关改回 true 时，
     /// 另一个正在断言“关闭同步”行为的测试就会读到错误的值）。
@@ -12172,18 +12209,29 @@ impl TimelineState {
     /// `channel_decision` 由调用方在**锁外**按导入声道策略预先算好
     /// （见 `crate::channel_policy::precompute_decision`）：本函数在持锁状态
     /// 下运行，绝不能在此解码音频。`ChannelResolution::NOOP` 表示什么都不写。
+    ///
+    /// `display_name` 是 clip 的**显示名**；为 `None` 时退回磁盘文件名。拖放导入
+    /// 的磁盘名是 `import_<uuid>.wav`（避免同名覆盖），用户看到的却应该是
+    /// `01.wav` —— 两者必须分开表达，否则每个拖进来的音频块都叫 import_xxxx。
     pub fn import_audio_item(
         &mut self,
         audio_path: &str,
         track_id: Option<String>,
         start_sec: Option<f64>,
         channel_decision: crate::channel_policy::ChannelResolution,
+        display_name: Option<&str>,
     ) {
-        let name = Path::new(audio_path)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("Audio")
-            .to_string();
+        let name = display_name
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                Path::new(audio_path)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("Audio")
+                    .to_string()
+            });
 
         let mut duration_sec: Option<f64> = None;
         let mut duration_frames: Option<u64> = None;
@@ -12738,7 +12786,10 @@ mod timeline_fingerprint_tests {
     /// 无条件广播。
     #[test]
     fn the_fingerprint_is_stable_for_identical_timelines() {
-        assert_eq!(timeline_fingerprint(&timeline()), timeline_fingerprint(&timeline()));
+        assert_eq!(
+            timeline_fingerprint(&timeline()),
+            timeline_fingerprint(&timeline())
+        );
     }
 
     /// GUI 会看到的每一个量变化都必须改变指纹。这一条是"漏一个字段 = 界面停在旧值"
@@ -12764,8 +12815,7 @@ mod timeline_fingerprint_tests {
             ("param curve", |t| {
                 t.params_by_root_track.insert(
                     "track".into(),
-                    serde_json::from_value(serde_json::json!({"pitch_edit": [1.0, 2.0]}))
-                        .unwrap(),
+                    serde_json::from_value(serde_json::json!({"pitch_edit": [1.0, 2.0]})).unwrap(),
                 );
             }),
         ];

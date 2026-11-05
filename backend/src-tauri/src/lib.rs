@@ -602,6 +602,25 @@ pub fn run() {
             // 启动时清理上次遗留的临时文件（后台线程，不阻塞启动）
             temp_manager::cleanup_stale_temp_files();
 
+            // 未保存会话的导入素材：只保留最近 7 天用过的会话目录。
+            // 【为什么按会话而不是按文件】一个会话目录就是"一次没保存的编辑"，
+            // 里面的文件互相引用；按文件龄删会留下半个工程。后台线程，不阻塞启动。
+            std::thread::spawn(|| {
+                let Some(root) = hifishifter_kernel::app_paths::local_data_dir() else {
+                    return;
+                };
+                let (removed, bytes) = hifishifter_kernel::media_paths::prune_unsaved_sessions(
+                    &root,
+                    hifishifter_kernel::media_paths::UNSAVED_SESSION_TTL,
+                );
+                if removed > 0 {
+                    log::info!(
+                        "[import] pruned {removed} expired unsaved session(s), freed {:.1} MB",
+                        bytes as f64 / (1024.0 * 1024.0)
+                    );
+                }
+            });
+
             Ok(())
         })
         // 在窗口事件中监听 CloseRequested，保存窗口状态到配置目录

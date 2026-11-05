@@ -701,6 +701,36 @@ mod tests {
         assert!(!is_json_project_path(Path::new("noext")));
     }
 
+    /// 工程素材目录里的素材必须按**相对路径**写进工程文件。
+    ///
+    /// 【为什么这条是"工程可搬走"的判据】相对路径落在工程旁边的 \`<工程名>_media\`
+    /// 目录里，工程连同这个目录一起拷走就还能打开；写成绝对路径则换个目录就断。
+    #[test]
+    fn relative_path_is_written_for_project_media() {
+        let root = std::env::temp_dir().join(format!("hfs-project-media-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("song_media")).unwrap();
+        let media = root.join("song_media").join("import_abcd.wav");
+        std::fs::write(&media, b"RIFF").unwrap();
+
+        let mut tl = timeline();
+        let track = tl.add_track(Some("Track".to_string()), None, None);
+        tl.add_clip(
+            Some(track),
+            Some("take.wav".to_string()),
+            Some(0.0),
+            Some(1.0),
+            Some(media.display().to_string()),
+        );
+
+        let prepared = prepare_source_paths_for_save(tl, &root.join("song.hshp"));
+        assert_eq!(
+            prepared.clips[0].takes[0].source_path_relative.as_deref(),
+            Some("song_media/import_abcd.wav")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// 旧布局下的绝对路径必须被**读时**映射到当前布局（迁移之后老工程仍能打开）。
     #[test]
     fn a_legacy_app_path_is_remapped_when_the_project_opens() {
