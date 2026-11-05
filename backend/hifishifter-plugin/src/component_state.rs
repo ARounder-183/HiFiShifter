@@ -81,7 +81,7 @@ impl ComponentState {
         let mut cursor = MAGIC.len();
         let version = read_u32(bytes, &mut cursor)?;
         // 【为什么只认一个版本】格式已重置（见文件头）。不匹配只可能是两种情况：
-        // 更旧的构建写下的（本机残留），或更新的构建写下的（用户降级了应用）。
+        // 更旧的构建写下的（本地残留），或更新的构建写下的（用户降级了应用）。
         // 两者都无从按当前形状解析，明确拒绝并说清方向才是可执行的。
         if version != VERSION {
             return Err(format!(

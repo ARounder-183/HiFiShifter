@@ -103,7 +103,7 @@ Test-Invariant '合并安装器注册卸载项、清理受管目录、模型走�
 }
 
 # 合并安装器的默认分支必须是"提权 + HKLM + Common Files"：HFS_TEST_MODE 那一段是给
-# 开发机跑闭环用的（装到当前用户、ARP 写 HKCU）。谁把测试分支写成默认，发布产物就会
+# 测试模式跑闭环用的（装到当前用户、ARP 写 HKCU）。谁把测试分支写成默认，发布产物就会
 # 装到用户目录、且在"程序和功能"里查不到。
 Test-Invariant '合并安装器默认走 per-machine 安装' {
     $nsi = Get-RepoText 'scripts/release/merged-installer.nsi'

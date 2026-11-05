@@ -222,7 +222,7 @@ const mockUiSettings: Record<string, unknown> = {
     lockParamLines: true,
     paramEditorSeekPlayhead: true,
     paramEditorSyncTimeline: true,
-    // 参数编辑器上次使用的工具（与拖动方向同属"本机记忆"，见 `UiSettings`）。
+    // 参数编辑器上次使用的工具（与拖动方向同属"本地记忆"，见 `UiSettings`）。
     paramEditorTool: "draw",
     autoReloadModifiedMedia: true,
     // MIDI 导入对话框的出厂默认（与 App.tsx 的本地初始状态一致）。

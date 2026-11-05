@@ -6,8 +6,8 @@ job 都要 checkout 一次（一次 PR 约 11 次）。仓库里只保留清单
 `backend/src-tauri/resources/models/models.json`（1.5 KB）。
 
 【为什么是 .py 而不是 .ps1】同一份实现要在三个平台上跑（build.ps1 / vst3/unix/build.sh
-/ CI），而本仓已有 Python 门禁脚本（scripts/checks/check-*.py），三个平台的 runner 与
-开发机上都装了它。两份实现（ps1 + sh）只会分叉，且分叉的后果是"某一个平台的构建悄悄
+/ CI）。本仓的门禁脚本（scripts/checks/check-*.py）已经依赖 Python，三个平台的 runner
+也都预装，没有一个平台需要额外装东西。两份实现（ps1 + sh）只会分叉，分叉的后果是"某一个平台的构建悄悄
 用着旧权重"。
 
 【完整性判据与运行时一致】逐文件比对**字节数 + sha256**，数据来源就是 models.json
@@ -53,7 +53,7 @@ DEFAULT_BASE_URL = "https://github.com/ARounder-183/HiFiShifter/releases/downloa
 # pc_nsf_hifigan.onnx 改写成 CoreML 变体（backend/src-tauri/build.rs::
 # generate_coreml_model_variant），产物落在同一棵资源树里。它由构建自动生成 ——
 # 进了清单就意味着 Windows/Linux 白装 56 MB 用不上的权重，而且版本号会取决于
-# "这台机器有没有编过 macOS 目标"。打包时按清单取文件，它天然被排除；这里只是
+# "构建环境里有没有编过 macOS 目标"。打包时按清单取文件，它天然被排除；这里只是
 # 别把它报成"多余文件"。
 GENERATED_ARTIFACTS = frozenset({"nsf_hifigan/pc_nsf_hifigan_coreml.onnx"})
 
@@ -182,7 +182,7 @@ def build_asset(destination: Path, manifest: dict) -> None:
     """把清单列出的文件写成一个可复算的 zip（发布资产）。
 
     【为什么不用右键"压缩为 zip"】资产的身份就是它的 sha256：上传之后任何人重打一遍
-    包、比一下哈希，就知道自己手上是不是同一份权重。而资源管理器会写进本机时间戳、
+    包、比一下哈希，就知道自己手上是不是同一份权重。而资源管理器会写进打包那一刻的时间戳、
     用不定的条目顺序 —— 同一份权重每次得到不同字节，那个哈希就没有意义了。
 
     【为什么存而不压】deflate 的字节流随 zlib 版本变化，跨机器就不再可复算；而 ONNX

@@ -266,7 +266,7 @@ mod tests {
     fn delivery_expressions_survive_hostile_payloads() {
         let payload = serde_json::json!({
             "name": "it's a \\ test",
-            "path": "C:\\Users\\z\\a.wav",
+            "path": "C:\\Users\\someone\\a.wav",
             "note": "line1\nline2\u{2028}end",
         })
         .to_string();

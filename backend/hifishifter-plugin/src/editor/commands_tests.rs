@@ -339,7 +339,7 @@ fn export_pitch_to_midi_validates_the_output_path() {
 /// 【为什么必须在写剪贴板**之前**拒绝】写回去的字节随后会被粘贴链路解码。放行
 /// 任意字节等于让一个"看起来像暂存块"的东西变成一次必然失败的粘贴 —— 而剪贴板
 /// 已经被覆盖，用户原来的内容也回不来了。这里只测拒绝路径：正例要真的写系统剪贴板，
-/// 那是本机环境的事，不是单元测试该碰的。
+/// 那是本地环境的事，不是单元测试该碰的。
 #[test]
 fn notebook_write_clipboard_payload_rejects_foreign_bytes() {
     let (_model, owner, _id) = crate::editor::session::tests::fixture();

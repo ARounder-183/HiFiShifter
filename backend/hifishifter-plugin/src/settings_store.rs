@@ -25,7 +25,7 @@ use std::sync::Mutex;
 pub const LOCALE_KEY: &str = "hifishifter.locale";
 
 struct StoreState {
-    /// 配置目录；`None` 表示这台机器上解析不出来 —— 此时设置只在内存里生效，
+    /// 配置目录；`None` 表示系统没有给出这些目录 —— 此时设置只在内存里生效，
     /// 不影响本次会话使用，只是重启后丢失。
     dir: Option<PathBuf>,
     settings: UiSettings,

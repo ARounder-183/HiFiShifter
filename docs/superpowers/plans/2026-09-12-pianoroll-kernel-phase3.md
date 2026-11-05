@@ -11,7 +11,7 @@
 **Spec:** `docs/superpowers/specs/2026-09-12-pianoroll-kernel-migration-design.md`
 **Phase 2 record:** `docs/superpowers/plans/2026-09-12-pianoroll-kernel-phase2.md`
 
-**Note on the frame-time claim (read R5 before promising anything):** Phase 3 is expected to reduce JS→native call counts, **not** frame time. Reconnaissance found no measurable frame-time headroom to reclaim on this machine, so the plan's exit metrics are call counts and pixel parity. See R5 for the control-group measurement that established this.
+**Note on the frame-time claim (read R5 before promising anything):** Phase 3 is expected to reduce JS→native call counts, **not** frame time. Reconnaissance found no measurable frame-time headroom to reclaim, so the plan's exit metrics are call counts and pixel parity. See R5 for the control-group measurement that established this.
 
 ---
 

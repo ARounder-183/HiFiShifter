@@ -2556,7 +2556,7 @@ pub struct BenchmarkResults {
     /// True when the ORT build **exposes** the DirectML provider.
     ///
     /// 注意这是**能力**，不是**结果**：DLL 里有 `DmlExecutionProvider` 并不代表
-    /// 这台机器能跑。能否真的跑通由 `dml_median_ms`（有数字）与 `dml_error`
+    /// 真的能跑。能否跑通由 `dml_median_ms`（有数字）与 `dml_error`
     /// （为什么没有）表达 —— 把两者混为一谈会让 UI 永远显示"DirectML 可用"，
     /// 而实测一次都没跑成。
     pub dml_available: bool,

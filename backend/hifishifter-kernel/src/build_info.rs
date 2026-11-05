@@ -49,7 +49,7 @@ pub fn repo_url() -> Option<&'static str> {
 /// - `None`               —— 没有任何 build script 注入过这个变量。
 ///
 /// 【为什么需要它】`commit_full()` 为 `None` 有两种成因，处置完全不同：
-/// "这台机器没装 git"不该让门禁测试变红，而"build script 根本没接上"必须让它变红。
+/// "构建环境里没有 git"不该让门禁测试变红，而"build script 根本没接上"必须让它变红。
 /// 只有把"探测跑过没有"单独记下来，测试才能区分二者 —— 而"内核 crate 从来没有
 /// build script"正是本仓库真实发生过的缺陷。
 pub fn probe() -> Option<&'static str> {

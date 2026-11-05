@@ -30,7 +30,7 @@ $manifestPath = Join-Path $manifestModels 'models.json'
 # - `pc_nsf_hifigan_coreml.onnx`：macOS 的 build.rs 由 `pc_nsf_hifigan.onnx` 改写出的
 #   CoreML 变体（backend/src-tauri/build.rs::generate_coreml_model_variant）。它是构建
 #   产物而非源权重 —— 登记它就等于要求 Windows/Linux 也装 56 MB 用不上的权重，而且
-#   版本号会取决于"这台机器编没编过 macOS 目标"。
+#   版本号会取决于"构建环境里编没编过 macOS 目标"。
 $manifestExcluded = @('models.json', 'pc_nsf_hifigan_coreml.onnx')
 
 $manifestFiles = @()

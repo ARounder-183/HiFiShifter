@@ -53,8 +53,8 @@ fn git_output(args: &[&str]) -> Option<String> {
 /// - **在 PATH 上，但这个目录不是 git 仓库**（GitHub 源码 zip）⇒ 这是**预期**的
 ///   非 git 构建，注入空值是正确行为。
 ///
-/// 混成一句"没有 commit"会让门禁测试无法判断"注入接线断了"（真缺陷）与"这台机器
-/// 没装 git"（环境），于是要么误报、要么被无条件跳过。`--version` 是唯一能回答
+/// 混成一句"没有 commit"会让门禁测试无法判断"注入接线断了"（真缺陷）与"构建环境
+/// 里没有 git"（环境），于是要么误报、要么被无条件跳过。`--version` 是唯一能回答
 /// "可执行文件在不在"的调用，且不依赖 cwd。
 fn git_is_runnable() -> bool {
     std::process::Command::new("git")

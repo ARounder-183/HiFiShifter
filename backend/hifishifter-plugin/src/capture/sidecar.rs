@@ -67,7 +67,7 @@ use std::path::{Path, PathBuf};
 const MAGIC: &[u8; 8] = b"HFSXFERC";
 /// 载荷版本：v2 增加内容身份哈希。
 const VERSION: u32 = 2;
-/// v1 是重置后的第一版（无内容哈希）；只读兼容，用来读开发机上已有的文件。
+/// v1 是重置后的第一版（无内容哈希）；只读兼容，用来读早期构建留下的文件。
 const LEGACY_VERSION: u32 = 1;
 /// 尾部摘要长度。
 const DIGEST_LEN: usize = 32;
@@ -81,7 +81,7 @@ const TEMP_EXT: &str = "hfscap.part";
 /// 最终文件的扩展名。
 const FILE_EXT: &str = "hfscap";
 
-/// sidecar 目录：本机数据目录下的 `capture/`。
+/// sidecar 目录：本地数据目录下的 `capture/`。
 ///
 /// 【为什么不是配置目录】配置目录会随用户配置漫游/同步，而这是可能上百 MB 的缓存；
 /// 把它放进同步目录是给用户的网络与配额添麻烦。

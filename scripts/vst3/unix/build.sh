@@ -233,7 +233,7 @@ ensure_toolchain() {
         log "钉死的 $pinned 未安装；复用 stable（rustc 版本相同）"
         return 0
     fi
-    die "本机没有 rustup 工具链 $pinned（rust-toolchain.toml 钉死）。
+    die "找不到 rustup 工具链 $pinned（rust-toolchain.toml 钉死）。
   有网络时：rustup toolchain install $pinned
   或临时指定：export RUSTUP_TOOLCHAIN=<已装工具链名>"
 }

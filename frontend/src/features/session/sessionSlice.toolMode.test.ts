@@ -9,7 +9,7 @@ import type { ToolMode } from "./sessionTypes.ts";
  * 参数编辑器的工具选择：
  * - 三个字段（`toolMode` / `toolModeGroup` / `drawToolMode`）必须由同一次切换一起
  *   写对 —— `drawToolMode` 是"按 `Tab` 回跳到哪个绘制工具"的依据，漏写就回不去；
- * - 它属于"本机记忆"，要从设置里读回，且野值不得污染状态。
+ * - 它属于"本地记忆"，要从设置里读回，且野值不得污染状态。
  */
 test("features/session/sessionSlice.toolMode.test.ts tool mode state and hydration", () => {
     function assertEqual(actual: unknown, expected: unknown, label: string): void {

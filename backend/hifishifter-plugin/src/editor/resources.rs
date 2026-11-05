@@ -127,7 +127,7 @@ fn model_directory() -> Result<PathBuf, String> {
 ///
 /// 【`HIFISHIFTER_PLUGIN_EDITOR_ASSETS` 覆盖】开发时前端产物在 `frontend/dist`，
 /// 与 bundle 的相对位置无关。这个变量**只接受绝对路径**：相对路径会随宿主的 CWD
-/// 变化，而那正是"开发机能开、用户机白屏"的经典成因。
+/// 变化，而那正是"开发环境能开、用户机白屏"的经典成因。
 pub(crate) fn frontend_directory() -> Result<PathBuf, String> {
     if let Some(path) = std::env::var_os("HIFISHIFTER_PLUGIN_EDITOR_ASSETS") {
         let path = PathBuf::from(path);

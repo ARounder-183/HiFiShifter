@@ -3218,7 +3218,7 @@ mod tests {
 
         // 渲染缓存的目录/开关是**进程级全局状态**，而本套件里其它用例（以及
         // `render_cache` 自身的用例）都可能改动它。每一步前都重新确立本测试的
-        // 目录与开关，断言因此不依赖"当前恰好还是我的设置"。
+        // 目录与开关，断言因此不依赖"当前恰好还是上一次的设置"。
         let setup_cache = || {
             crate::render_cache::init(dir.join("render_cache"));
             crate::render_cache::apply_settings(&crate::config::RenderCacheSettings::default());

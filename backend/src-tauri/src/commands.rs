@@ -3735,7 +3735,7 @@ pub async fn save_ui_settings(
 //
 // 【为什么 App 也要走这条通道】这些偏好原先只写在 App 自己的 localStorage 里，
 // 插件读不到 —— 于是"在 App 里调好的外观与快捷键"进插件就没了。两边写同一份
-// 配置文件后，偏好随用户走而不是随形态走。localStorage 退化为本机缓存
+// 配置文件后，偏好随用户走而不是随形态走。localStorage 退化为本地缓存
 // （见 frontend/src/services/uiStorage.ts）。
 
 #[tauri::command(rename_all = "camelCase")]

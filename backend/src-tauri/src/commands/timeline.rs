@@ -149,7 +149,7 @@ fn import_audio_bytes_error(message: &str) -> crate::models::TimelineStatePayloa
 /// 会让「导入 → 保存工程 → 重启」直接丢掉素材（源文件无从恢复）。
 ///
 /// 【为什么不再放设置目录】历史实现把文件写进 `<设置目录>/imported_media/` ——
-/// 设置目录里躺着几百 MB 音频，工程搬走后素材还钉在这台机器上。现在的规则是：
+/// 设置目录里躺着几百 MB 音频，工程搬走后素材还钉在原机器上。现在的规则是：
 /// 工程已保存 → `<工程目录>/<工程名>_media/`；工程未保存 → `<本地根>/unsaved/<会话>/`。
 fn import_target_dir(state: &AppState) -> Option<std::path::PathBuf> {
     let project_path = state.current_project_path();

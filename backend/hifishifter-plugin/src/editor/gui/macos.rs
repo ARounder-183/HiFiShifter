@@ -146,7 +146,7 @@ define_class!(
 /// "有行为"的视图：它什么都不画，只负责把拖进来的文件翻译成 `native_drop` 事件。
 ///
 /// 【为什么只认 `public.file-url` 的字符串形式】多文件要 `readObjectsForClasses:options:`
-/// （一个 `NSArray<AnyClass>` + `NSArray` 的向下转型），而本机没有任何 macOS 可以验证
+/// （一个 `NSArray<AnyClass>` + `NSArray` 的向下转型），而本地没有任何 macOS 可以验证
 /// 那串类型体操。`public.file-url` 对 Finder 拖出的**每一个**文件都在，取第一条路径
 /// 就能让"拖一个 wav 进来"成立 —— 拿不到就返回 `false`，与今天（完全没有拖放）
 /// 一样，不会有更坏的形态。

@@ -1,4 +1,4 @@
-/* gui_probe.c —— 实测 GTK3/WebKitGTK 在本机（WSLg）能不能真的画出来。
+/* gui_probe.c —— 实测 GTK3/WebKitGTK 在当前环境（如 WSLg）能不能真的画出来。
  *
  * 四件事，任何一件不成立，插件窗口就是"空面板"：
  *   1. GTK3 能不能在某个 GDK 后端上初始化

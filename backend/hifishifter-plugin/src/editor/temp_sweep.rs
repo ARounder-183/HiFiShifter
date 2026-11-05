@@ -1,8 +1,8 @@
-//! 本机数据目录里临时子目录的**分片**清扫。
+//! 本地数据目录里临时子目录的**分片**清扫。
 //!
 //! 【为什么需要】`pcm/{namespace}` 与 `webview/{profile}` 都按会话/进程新建目录，只在
 //! `Drop` 时清理。宿主被强杀、插件被卸载、进程崩溃时 `Drop` 不跑，这些目录就永久留下
-//! —— 实测本机攒到 `webview` 147 个目录约 7.1 GiB，全仓没有任何回收点。启动时按
+//! —— 实测用户机器上能攒到 `webview` 147 个目录约 7.1 GiB，全仓没有任何回收点。启动时按
 //! "属主进程是否还活着"扫一遍，把已退出进程的目录删掉。
 //!
 //! 【为什么必须分片】`remove_dir_all` 在 Windows 上不是常数时间：WebView2 profile 是
@@ -138,7 +138,7 @@ pub(crate) fn sweep_step() -> bool {
         if due {
             let (pending, stats) = collect_stale_dirs();
             // 【只在变化时打】稳态下每 60 s 都会扫到同样的读数，逐次打日志会把
-            // 诊断文件刷满。首次扫描必须打（那是"这台机器上到底攒了多少"的唯一读数）。
+            // 诊断文件刷满。首次扫描必须打（那是"这里到底攒了多少"的唯一读数）。
             let changed = !state.scanned || stats.dirs != state.stats.dirs || stats.stale > 0;
             state.pending = pending;
             state.stats = stats;
@@ -432,7 +432,7 @@ fn dir_usage(root: &Path) -> (usize, u64) {
 /// **成功**，`GetProcessTimes` 依然返回**它生前的创建时间**。于是"能不能打开"这个
 /// 问题对僵尸进程对象**恒为真**。
 ///
-/// 实测（本机 147 个 `view-*` 目录）：147 个属主 PID 全部已退出，而
+/// 实测（某台机器 147 个 `view-*` 目录）：147 个属主 PID 全部已退出，而
 /// `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` 对它们**全部成功**、
 /// `GetProcessTimes` 全部返回生前创建时间 ⇒ 旧判据把 147 个目录全判成"活着"，
 /// 一个都不删（磁盘上攒了 7.4 GiB）。对照：本进程的 `GetExitCodeProcess` 是

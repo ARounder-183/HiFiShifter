@@ -1,7 +1,7 @@
 //! 用户配置目录的解析：独立 App 与 ARA 插件必须落在**同一个目录**。
 //!
 //! 【这个模块现在只做转发】路径的**唯一**计算点是 [crate::app_paths]：那里同时
-//! 定义设置、本机数据、缓存、日志与共享库五个根，并给出三平台一张表。本模块保留
+//! 定义设置、本地数据、缓存、日志与共享库五个根，并给出三平台一张表。本模块保留
 //! 既有公开函数名（`default_config_dir` / `resolve` / `local_data_subdir` …），因此
 //! 调用点一个都不用改 —— 但**没有第二份实现**可以漂移。
 //!
@@ -43,7 +43,7 @@ pub fn resolve_and_create(explicit: Option<&Path>) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-/// 平台默认的**本机**数据目录（缓存 / 临时工作文件），与漫游的配置目录分开。
+/// 平台默认的**本地**数据目录（缓存 / 临时工作文件），与漫游的配置目录分开。
 ///
 /// 见 [crate::app_paths::local_data_dir]：Windows 是 `%LOCALAPPDATA%\HiFiShifter`，
 /// macOS 是 `~/Library/Application Support/HiFiShifter`，Linux 是
@@ -52,7 +52,7 @@ pub fn default_local_data_dir() -> Option<PathBuf> {
     crate::app_paths::local_data_dir()
 }
 
-/// 本机数据目录下的一个子目录；解析不出来时退回系统临时目录。
+/// 本地数据目录下的一个子目录；解析不出来时退回系统临时目录。
 ///
 /// 【为什么保留临时目录兜底】缺 `LOCALAPPDATA` 时宁可用临时目录也不能让插件起不来 ——
 /// 一个跑得起来但清理不完美的会话，好过一个打不开的窗口。

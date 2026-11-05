@@ -147,7 +147,7 @@ function compareWithCollator(collator: Intl.Collator, a: string, b: string): num
  * 本工厂用于让依赖语系的分支可被确定性测试：`"zh-CN"` 下 ICU 对汉字按拼音排序
  * （甲 jiǎ 在 乙 yǐ 之前），`"en-US"` 下退化为码点序（乙 U+4E59 在 甲 U+7532
  * 之前），两者结果相反 —— 不固定区域时，断言会随宿主默认区域漂移（CI runner
- * 是 en-US，开发机常见 zh-CN）。
+ * 是 en-US，开发环境常见 zh-CN）。
  */
 export function createFileNameComparator(locale?: string | string[]): FileNameComparator {
     const collator = buildLetterCollator(locale);

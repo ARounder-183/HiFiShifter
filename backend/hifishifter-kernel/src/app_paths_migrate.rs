@@ -1,8 +1,8 @@
 //! 历史布局 → v2 布局的一次性迁移。
 //!
 //! 【为什么迁移必须自己做、不能"就地兼容"】旧布局把数据放在
-//! `%APPDATA%\com.arounder.hifishifter\HiFiShifter»（设置）与
-//! `%LOCALAPPDATA%\com.arounder.hifishifter\hifishifter»（缓存 + 本机数据）下。
+//! `%APPDATA%\com.arounder.hifishifter\HiFiShifter`（设置）与
+//! `%LOCALAPPDATA%\com.arounder.hifishifter\hifishifter`（缓存 + 本地数据）下。
 //! 永远兼容旧路径意味着**每个新用户**也要为那段历史付代价：目录里永远有一串反向
 //! 域名。搬一次、留个标记，之后所有代码只需要认识一套路径。
 //!
@@ -417,11 +417,11 @@ mod tests {
         std::fs::write(path, bytes).unwrap();
     }
 
-    /// 设置搬过去、缓存被**拆到**缓存根、其余本机数据留在本地根。
+    /// 设置搬过去、缓存被**拆到**缓存根、其余本地数据留在本地根。
     #[test]
     fn migrates_settings_and_splits_cache_from_local_data() {
         let scratch = Scratch::new("split");
-        // 【为什么分成两个父目录】真实布局里设置住在 Roaming、本机数据住在 Local；
+        // 【为什么分成两个父目录】真实布局里设置住在 Roaming、本地数据住在 Local；
         // 两者的叶子同名不同大小写（HiFiShifter / hifishifter），放在同一个父目录下
         // 在 Windows 上就是**同一个目录**（文件系统大小写不敏感），测试会测到别的东西。
         let legacy_config = scratch
@@ -461,7 +461,7 @@ mod tests {
         let report = run_migration(&roots, &scratch.marker(), &scratch.lock());
         assert_eq!(report.outcome, MigrationOutcome::Migrated, "{report:?}");
         assert!(new_config.join("app_config.json").is_file(), "设置没搬过去");
-        assert!(new_local.join("pcm/a.raw").is_file(), "本机数据没搬过去");
+        assert!(new_local.join("pcm/a.raw").is_file(), "本地数据没搬过去");
         assert!(
             new_cache.join("waveform_peaks_cache/a.hfs").is_file(),
             "波形缓存应被拆到缓存根"

@@ -756,10 +756,10 @@ pub(super) fn create(
     // 定时器驱动 —— 但它要求我们同时把 Gdk 的 X 连接 fd 注册给宿主（否则 GTK 收不到
     // 输入，窗口会"画一次就冻住"）。这两步里任何一步在真宿主上不如预期，代价都是
     // 一个**冻住的界面**，而现在的情形 B（私有 GTK 线程 + 浮窗）虽然降级但确实能用。
-    // 本机没有任何提供 IRunLoop 的宿主可以验证，所以这里只把"宿主有没有这条路"
+    // 本地没有任何提供 IRunLoop 的宿主可以验证，所以这里只把"宿主有没有这条路"
     // 记进日志 —— 报障日志里有这一行，下一次就能拿着真实证据决定要不要翻这个开关。
     //
-    // 【抄错 IID 会怎样】只会让探测恒为 §false§，也就是永远走情形 B —— 不会崩、
+    // 【抄错 IID 会怎样】只会让探测恒为 `false`，也就是永远走情形 B —— 不会崩、
     // 不会静默改行为。这条探测是纯只读的：拿到接口立刻释放，不注册任何东西。
     let run_loop = probe_run_loop(frame);
     crate::gui_log_line(&format!(
@@ -830,9 +830,9 @@ pub(super) fn create(
         crate::gui_log_line("pinning GDK_BACKEND=x11 so the host's X11 window can be embedded");
     }
     //
-    // 【为什么这里不返回 §Err§】"这台机器上没有可用的 GTK/WebKit"是一个**环境事实**，
+    // 【为什么这里不返回 `Err`】"当前环境没有可用的 GTK/WebKit"是一个**环境事实**，
     // 不是一个错误：宿主应当看到空面板 + 一行可搜到的日志，而不是一个没人读的字符串。
-    // 真正的编程错误（父窗口为空、线程身份不对）仍然走 §Err§。
+    // 真正的编程错误（父窗口为空、线程身份不对）仍然走 `Err`。
     let thread = match gui_thread() {
         Ok(thread) => thread,
         Err(_) => {

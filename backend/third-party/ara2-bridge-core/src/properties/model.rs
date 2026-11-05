@@ -923,7 +923,7 @@ impl PlaybackRegionProperties {
     // 给上游补 getter，要么自己重写一整层 ARA 文档控制器委托。这里选前者。
     //
     // 补丁是**纯增量**的（只加读访问器，不动任何现有行为），因此
-    // `[patch.crates-io]` 之后其余 ara2-bridge crate 的行为与本机未打补丁时一致。
+    // `[patch.crates-io]` 之后其余 ara2-bridge crate 的行为与未打补丁时一致。
     // 上游若补了同名 getter，删掉这一段即可。
 
     /// 播放区间在 **modification** 时间轴上的起点（秒）。

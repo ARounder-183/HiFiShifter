@@ -856,7 +856,7 @@ pub(super) fn dispatch(
                 }
                 timeline.select_clip(id);
             }
-            // 只有已授权clip才切换源曲线，未就绪的显示占位绝不读本机原文件。
+            // 只有已授权clip才切换源曲线，未就绪的显示占位绝不读本地原文件。
             let authorized = {
                 let timeline = session.timeline.lock_or_recover();
                 timeline.selected_clip_id.as_ref().is_none_or(|id| {
@@ -877,7 +877,7 @@ pub(super) fn dispatch(
             return Ok(session.playback_state());
         }
         // 共振峰工具窗口：命令名与载荷和独立 App **逐字段同形**，前端不必按模式分支。
-        // 音频来自宿主授权的 PCM（插件禁止读本机文件），切片/倒放/下混与 App 共用
+        // 音频来自宿主授权的 PCM（插件禁止读本地文件），切片/倒放/下混与 App 共用
         // kernel 的 `formant_cache::analyze_clip_formants_from_interleaved`。
         "analyze_clip_formants" => return value(session.analyze_clip_formants(&input)?),
         "plugin_refresh" => {

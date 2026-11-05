@@ -42,9 +42,9 @@ pub const LAYOUT_MARKER: &str = ".layout-v2.json";
 
 /// 覆盖配置目录的环境变量。
 ///
-/// 【为什么必须有】插件与内核的单元测试跑在开发机上，如果它们写真实的用户配置，
-/// 一次 `cargo test» 就会改掉开发者自己的设置；并行测试之间也会互相踩。有了这个
-/// 变量，每个测试指向自己的临时目录，落盘逻辑才可测。
+/// 【为什么必须有】插件与内核的单元测试跑在任何一台机器上，如果它们写真实的用户
+/// 配置，一次 `cargo test` 就会改掉运行测试那个人的设置；并行测试之间也会互相踩。
+/// 有了这个变量，每个测试指向自己的临时目录，落盘逻辑才可测。
 pub const CONFIG_DIR_ENV: &str = "HIFISHIFTER_CONFIG_DIR";
 
 /// 覆盖日志目录的环境变量（两个宿主同名同义）。
@@ -71,10 +71,10 @@ fn roaming_base() -> Option<PathBuf> {
     std::env::var_os("APPDATA").map(PathBuf::from)
 }
 
-/// Windows 的**本机**数据根。
+/// Windows 的**本地**数据根。
 ///
-/// `LOCALAPPDATA» 是标准变量；极简环境（CI 容器、测试沙箱）可能没有它，此时按同一
-/// 语义回退到 `%USERPROFILE%\AppData\Local»。
+/// `LOCALAPPDATA` 是标准变量；极简环境（CI 容器、测试沙箱）可能没有它，此时按同一
+/// 语义回退到 `%USERPROFILE%\AppData\Local`。
 #[cfg(windows)]
 fn local_base() -> Option<PathBuf> {
     std::env::var_os("LOCALAPPDATA")
@@ -122,15 +122,15 @@ pub fn config_dir() -> Option<PathBuf> {
     }
 }
 
-/// 本机数据目录（PCM 暂存、捕获、传输、插件记事本…）。
+/// 本地数据目录（PCM 暂存、捕获、传输、插件记事本…）。
 ///
-/// 【为什么不能用 `%TEMP%»】WebView2 的用户数据目录与渲染用的 PCM 暂存原先都放在
+/// 【为什么不能用 `%TEMP%`】WebView2 的用户数据目录与渲染用的 PCM 暂存原先都放在
 /// 系统临时目录里。那不是"临时"能形容的问题：
-/// - Windows 磁盘清理会在**会话进行中**删除 `%TEMP%» 下的内容 —— 正在运行的
+/// - Windows 磁盘清理会在**会话进行中**删除 `%TEMP%` 下的内容 —— 正在运行的
 ///   WebView2 用户数据目录被删掉是崩溃隐患，不只是"设置丢了"；
-/// - `%TEMP%» 可能被策略指向内存盘或每次登录重建的目录。
+/// - `%TEMP%` 可能被策略指向内存盘或每次登录重建的目录。
 ///
-/// 放在本机数据目录下，这些文件的生命周期就由我们自己决定。
+/// 放在本地数据目录下，这些文件的生命周期就由我们自己决定。
 pub fn local_data_dir() -> Option<PathBuf> {
     #[cfg(windows)]
     {
@@ -222,9 +222,9 @@ pub fn shared_data_dir() -> Option<PathBuf> {
     }
 }
 
-/// 本机数据目录下的一个子目录；解析不出来时退回系统临时目录。
+/// 本地数据目录下的一个子目录；解析不出来时退回系统临时目录。
 ///
-/// 【为什么保留临时目录兜底】缺 `LOCALAPPDATA» 时宁可用临时目录也不能让插件起不来 ——
+/// 【为什么保留临时目录兜底】缺 `LOCALAPPDATA` 时宁可用临时目录也不能让插件起不来 ——
 /// 一个跑得起来但清理不完美的会话，好过一个打不开的窗口。
 pub fn local_data_subdir(name: &str) -> PathBuf {
     match local_data_dir() {
@@ -486,7 +486,7 @@ mod tests {
             ("log", log_dir()),
         ] {
             let Some(dir) = dir else {
-                // 环境缺少 HOME/APPDATA 时无从判定，跳过（CI 与本机两者都在）。
+                // 环境缺少 HOME/APPDATA 时无从判定，跳过（CI 与本地开发都会命中）。
                 continue;
             };
             assert!(

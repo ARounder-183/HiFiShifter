@@ -1259,7 +1259,7 @@ impl Capture {
     ///
     /// `capacity_frames` 是单段容量；`spares` 是调用方**预先分配好**的备用缓冲
     /// （每个都是空的、长度为容量的平面）；`pendings` 是两条流各自的 lookbehind
-    /// 专用缓冲（`None` = 本机预算不足，关闭该流的 lookbehind）；`max_frames` 是
+    /// 专用缓冲（`None` = 预算不足，关闭该流的 lookbehind）；`max_frames` 是
     /// 本次录制的帧数上限（`0` = 不限）。非音频线程调用。
     pub(crate) fn start(
         &mut self,

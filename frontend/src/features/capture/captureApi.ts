@@ -88,9 +88,9 @@ export interface CaptureOptions {
 }
 
 /**
- * 清单里有、但**本机读不出来**的捕获音频。
+ * 清单里有、但**本地读不出来**的捕获音频。
  *
- * 【为什么这是一条产品信息而不是诊断读数】sidecar 落在本机缓存目录，清单随宿主工程
+ * 【为什么这是一条产品信息而不是诊断读数】sidecar 落在本地缓存目录，清单随宿主工程
  * 走 —— 把工程拷到另一台机器时音频不会跟过去。没有这一项，用户只会看到"参数还在、
  * 声音没了"，且不知道为什么。
  */
@@ -122,7 +122,7 @@ export interface CaptureStatus {
     hasMaterial: boolean;
     span: CaptureSpan | null;
     takes: CaptureTake[];
-    /** 本机缺失的捕获音频（空 = 全都恢复了）。 */
+    /** 本地缺失的捕获音频（空 = 全都恢复了）。 */
     missingTakes: CaptureMissingTake[];
     options: CaptureOptions;
     takeCount: number;

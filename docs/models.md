@@ -85,7 +85,7 @@ gh release create models-d342aa989cee `
 gh release edit models-d342aa989cee --draft=false
 ```
 
-没有 `gh`（本机就没装）就在网页上做同样的事：Releases → Draft a new release → tag 填
+没有 `gh` 就在网页上做同样的事：Releases → Draft a new release → tag 填
 `models-d342aa989cee`、target 选 `develop` → 附上两个文件 → 勾 **Set as a pre-release** →
 Publish。网页上"新建 release"本来就是 draft，先别点 Publish 就对了。
 
@@ -161,7 +161,7 @@ CI 替你跑同一件事的另一半：`build.yml` 的每个 job 都在编译前
 | 覆盖已发布 tag 的资产 | 同一个版本号对应两份字节。CI 的缓存键（`hashFiles(models.json)`）不变，会继续用旧权重；用户下到的也可能是旧的 |
 | 用"压缩为 zip"生成资产 | 时间戳与条目顺序不定 → 每次 sha256 都不同，发布物失去身份 |
 | 把权重提交回 git | checkout 从 150 MB 起步（一次 PR 十几次），且缓存键与内容无关 |
-| 把 CoreML 变体打进资产 | Windows/Linux 白装 56 MB 用不上的权重；版本号还会取决于"这台机器编没编过 macOS 目标"（`--package` 因此把它列入已知构建产物） |
+| 把 CoreML 变体打进资产 | Windows/Linux 白装 56 MB 用不上的权重；版本号还会取决于"构建环境里编没编过 macOS 目标"（`--package` 因此把它列入已知构建产物） |
 | 删除旧版本的 release | 老 App 与老的 CI 提交再也取不到对应版本。资产是内容寻址的，旧 tag 必须永久保留 |
 
 ## 镜像与离线

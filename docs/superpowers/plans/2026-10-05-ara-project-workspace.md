@@ -17,7 +17,7 @@
 
 ## Global Constraints
 
-- 仅 `E:/code/HiFiShifter/.worktrees/ara-plugin`、`codex/ara-plugin`，不 push、不 add -A、不动 SDK/registry。
+- 仅主仓库的 `.worktrees/ara-plugin`、`codex/ara-plugin`，不 push、不 add -A、不动 SDK/registry。
 - Windows x64/REAPER7.81、44100/48000Hz、mono/stereo、≤30秒/源；不新增倒放/stretch/content fades。
 - 原内嵌 spec 的有界队列/512MiB共享预算/实时零IO推理等待/独立 app 兼容约束全部保留。
 - 不改宿主顶层/父窗口，不强杀、不热覆盖；Computer Use 检测到用户输入时先停输入并重新观察。

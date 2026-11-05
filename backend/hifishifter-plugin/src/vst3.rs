@@ -6,7 +6,7 @@
 //! 插件实例化，走 `capture` 通路。两条路共用本文件的工厂与组件实现。渲染调度、
 //! 快照输出与编辑器生命周期都在本文件与 `render/`、`editor/` 模块里落地。
 //!
-//! 这里为什么手写 vtbl 而不引入 `vst3-sys`：本机 cargo 缓存里没有 VST3 绑定，
+//! 这里为什么手写 vtbl 而不引入 `vst3-sys`：cargo 缓存里没有现成的 VST3 绑定，
 //! 且只用得到少量接口。vtbl 的槽位顺序、结构体布局与调用约定都按锁定的
 //! VST3 SDK `v3.8.0_build_66` 头文件逐条对齐（`ipluginbase.h` / `ivstcomponent.h` /
 //! `ivstaudioprocessor.h` / `funknown.h`）。ARA 侧的接口（`IMainFactory`、

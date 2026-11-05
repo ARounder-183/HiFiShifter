@@ -157,7 +157,7 @@ fn status_json(owner: &Arc<ExtensionOwner>) -> Value {
             })
         })
         .collect::<Vec<_>>();
-    // 【为什么把"清单里有、本机没有"的音频发出来】工程被拷到另一台机器时 sidecar
+    // 【为什么把"清单里有、本地没有"的音频发出来】工程被拷到另一台机器时 sidecar
     // 不会跟过去；界面必须能说清"丢了哪几段、共多久"，而不是只留一条日志。
     let missing = owner
         .capture()

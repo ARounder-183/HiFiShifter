@@ -14,7 +14,7 @@
  * 与后端（耐久 + 共享）。
  *
  * 【为什么只同步列在白名单里的键】`localStorage` 里还有一堆调试开关
- * （`hifishifter.debugDnd` / `frameProfiler` / `perfProject`…）。它们属于本机、
+ * （`hifishifter.debugDnd` / `frameProfiler` / `perfProject`…）。它们属于本地、
  * 本次调试，不该跟着用户配置走。
  *
  * 【为什么本模块不 import `hostCapabilities`】它间接依赖 i18n 提供者（React 组件
@@ -32,7 +32,7 @@ const PREFIX = "hifishifter.";
  * 需要同步到后端的键。
  *
  * 【维护须知】新增"用户会感知、且希望换形态后仍然生效"的偏好时，把键名加进来。
- * 只是本机调试用的开关不要加。
+ * 只是本地调试用的开关不要加。
  */
 export const PERSISTED_UI_KEYS: readonly string[] = [
     // 界面语言
@@ -165,7 +165,7 @@ function localRemove(key: string): void {
     }
 }
 
-/** 枚举本机缓存里全部 `hifishifter.*` 键（迁移用）。 */
+/** 枚举本地缓存里全部 `hifishifter.*` 键（迁移用）。 */
 function localSnapshot(): Record<string, string> {
     const snapshot: Record<string, string> = {};
     try {
@@ -226,13 +226,13 @@ export async function flushUiStorage(): Promise<void> {
 
 // ── 对外接口 ───────────────────────────────────────────────────────────
 
-/** 读取一个偏好值（同步，走本机缓存）。 */
+/** 读取一个偏好值（同步，走本地缓存）。 */
 export function readUiValue(key: string): string | null {
     return localGet(modeKey(key));
 }
 
 /**
- * 写入一个偏好值：同步更新本机缓存，并按需排队提交到后端。
+ * 写入一个偏好值：同步更新本地缓存，并按需排队提交到后端。
  *
  * 非白名单键退化为普通 `localStorage` 写入 —— 调用方不必区分"这个键要不要同步"。
  * 调用方始终传**基础键名**；分形态的改名由 [`modeKey`] 统一处理。
@@ -258,15 +258,15 @@ export function removeUiValue(key: string): void {
 }
 
 /**
- * 启动时把后端偏好灌回本机缓存。
+ * 启动时把后端偏好灌回本地缓存。
  *
  * 【为什么"灌回"而不是"改成异步读"】同步读取点太多（含模块加载期的），把读改成
  * 异步会迫使它们重排时序。灌回之后所有既有同步读取照旧，只是值已经是后端那份。
  *
- * 【一次性迁移】本机缓存里有、后端没有的键，视为升级前留下的值，提交上去。
+ * 【一次性迁移】本地缓存里有、后端没有的键，视为升级前留下的值，提交上去。
  * 反方向不迁移：后端有值时以后端为准（它才是跨形态共享的那一份）。
  *
- * 任何失败都静默降级为本机缓存 —— 后端不可用不该让界面起不来。
+ * 任何失败都静默降级为本地缓存 —— 后端不可用不该让界面起不来。
  */
 export async function hydrateUiStorage(): Promise<void> {
     const active = resolveTransport();
@@ -286,7 +286,7 @@ export async function hydrateUiStorage(): Promise<void> {
         localSet(key, value);
     }
 
-    // 升级迁移：本机有、后端没有的键提交上去。
+    // 升级迁移：本地有、后端没有的键提交上去。
     const migration: Record<string, string> = {};
     for (const [key, value] of Object.entries(local)) {
         if (!(key in remote)) migration[key] = value;

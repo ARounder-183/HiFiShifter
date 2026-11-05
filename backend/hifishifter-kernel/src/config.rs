@@ -573,7 +573,7 @@ pub struct UiSettings {
     /// 参数编辑器上次使用的工具（`select` / `draw` / `line` / `vibrato`）。
     ///
     /// `None` = 从未设置过（旧配置没有这一项），由前端回落出厂默认（绘制工具）。
-    /// 与拖动方向同属"本机记忆"，因此不需要配置迁移。
+    /// 与拖动方向同属"本地记忆"，因此不需要配置迁移。
     #[serde(default)]
     pub param_editor_tool: Option<String>,
     #[serde(default, alias = "edgeSmoothnessPercent")]

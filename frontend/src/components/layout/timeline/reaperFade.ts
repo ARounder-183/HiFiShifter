@@ -94,7 +94,7 @@ const shapeSpecCache = new Map<number, ShapeSpec>();
 const SHAPE_SPEC_CACHE_MAX = 64;
 
 /**
- * 各预设的世界轴参数（待校准：与本机 REAPER 并排比对后微调 p0/z/k）。
+ * 各预设的世界轴参数（待校准：与真实 REAPER 并排比对后微调 p0/z/k）。
  * k 已按"线性点 z 处 e=1"约束反解（见模块头注释）。
  */
 const POWER_ANCHORS: Record<number, { p0: number; u0: number; k: number }> = {
