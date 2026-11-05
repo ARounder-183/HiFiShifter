@@ -31,6 +31,11 @@ import time
 import urllib.error
 import urllib.request
 
+# Windows 的 stdout 跟随 ANSI 代码页（英文系统是 cp1252、中文系统是 GBK），打印中文会
+# UnicodeEncodeError 打死进程 —— 真正的结论一条都进不了日志，红的是编码而不是规则。
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+
 OSV_BATCH = "https://api.osv.dev/v1/querybatch"
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 CARGO_LOCK = ROOT / "backend" / "Cargo.lock"

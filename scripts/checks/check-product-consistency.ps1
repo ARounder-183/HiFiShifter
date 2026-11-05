@@ -167,6 +167,22 @@ Test-Invariant '含非 ASCII 的 PowerShell 脚本都带 UTF-8 BOM' {
     if ($offenders.Count) { throw ('以下脚本含非 ASCII 却没有 UTF-8 BOM：' + ($offenders -join ' | ')) }
     'scripts/'
 }
+
+# Python 在 Windows 上的 stdout 跟随 ANSI 代码页（英文 runner 是 cp1252、中文系统是 GBK）。
+# 打印一句中文就会 UnicodeEncodeError 打死进程，真正的结论一条也进不了日志 —— 门禁红的是
+# 编码，不是它要守的规则。这个坑已经踩过两次（限流日志门禁、版本号门禁），判据因此写成
+# "源码里有非 ASCII 就必须把 stdout 钉成 UTF-8"，而不是逐个脚本去记。
+Test-Invariant '含非 ASCII 的 Python 脚本把 stdout 钉成 UTF-8' {
+    $offenders = @()
+    foreach ($file in Get-ChildItem (Join-Path $root 'scripts') -Recurse -File -Include *.py) {
+        $text = [IO.File]::ReadAllText($file.FullName, [Text.Encoding]::UTF8)
+        if ($text -notmatch '[^\x00-\x7f]') { continue }
+        if ($text -notmatch "reconfigure\(encoding='utf-8'") { $offenders += $file.FullName.Substring($root.Length + 1) }
+    }
+    if ($offenders.Count) { throw ('以下脚本含非 ASCII 却没有把 stdout 钉成 UTF-8：' + ($offenders -join ' | ')) }
+    'scripts/**/*.py'
+}
+
 Write-Host ''
 if ($failed.Count) {
     Write-Host "$($failed.Count) check(s) failed:" -ForegroundColor Red

@@ -25,6 +25,11 @@ import os
 import re
 import sys
 
+# Windows 的 stdout 跟随 ANSI 代码页（英文系统是 cp1252、中文系统是 GBK），打印中文会
+# UnicodeEncodeError 打死进程 —— 真正的结论一条都进不了日志，红的是编码而不是规则。
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+
 GUARD_MARKERS = ('guard_ffi(', 'catch_unwind', 'boundary(')
 sig_re = re.compile(r'^[ ]*(?:pub )?(?:unsafe )?extern "(?:system|C|C-unwind)" fn (\w+)\(', re.M)
 # All paths come from this file's own location. Scan roots are relative to
