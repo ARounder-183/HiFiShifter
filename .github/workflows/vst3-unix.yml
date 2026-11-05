@@ -1,6 +1,6 @@
 name: HiFiShifter VST3 (macOS / Linux)
 
-# 与 `vst3.yml`（Windows）**并列**，而不是它的跨平台版。
+# 与 build.yml（Windows 合并安装器）**并列**：这边只负责 Unix 的插件产物。
 #
 # 【为什么另起一条流水线】Windows 那条的组织方式是 MSVC 环境导入 + WebView2 + NSIS
 # 安装器；Unix 这边没有一样是共通的：构建脚本是 bash、产物是 .vst3 bundle + tar.gz、
@@ -10,10 +10,10 @@ name: HiFiShifter VST3 (macOS / Linux)
 # 两条流水线共享的只有两条约定：产物命名（HiFiShifter_v<版本>_<os>-<arch>-vst3）
 # 与「门禁必须真的跑」。
 
-# 【为什么不在 push 时跑】直接 push develop 的插件门禁由 vst3.yml（Windows）承担；
-# Unix 这条是三平台矩阵 + SDK 拉取，push 触发的成本不成比例，保持 PR/tag 触发。
-# 代价是直接 push 的 Unix 侧行为差异（如 6262b933 记载的宿主夹具崩溃）要到
-# 下一个 PR 才暴露 —— 已知且有记录，属有意取舍。
+# 【为什么不在 push 时跑】直接 push develop 的插件反馈由 plugin-gates.yml 承担；
+# Unix 这条是四平台矩阵 + SDK 拉取，push 触发的成本不成比例，保持 PR/tag 触发。
+# 代价是直接 push 的 Unix 侧行为差异（如 6262b933 记载的宿主夹具崩溃）要到下一个
+# PR 才暴露 —— 已知且有记录，属有意取舍。
 on:
   workflow_dispatch:
   pull_request:
@@ -29,35 +29,24 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # fmt 不编译、不下载 SDK，几十秒覆盖全部 crate。放在这条流水线里，是为了让
-  # 「只改了 Unix 构建脚本」的 PR 不必去等 Windows 那条六平台流水线。
-  rust-fmt:
-    name: Check Rust formatting
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v6
-      - name: Setup Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          cache: false
-          rustflags: ""
-      - name: Check rustfmt
-        run: |
-          cargo fmt --manifest-path backend/Cargo.toml --all --check
-          # hfs-gui（VST3 的独立渲染进程，随 bundle 交付用户）在 backend workspace
-          # 之外，上面的 fmt 覆盖不到 —— 2026-10 审查时它正因不在任何门禁内而
-          # 积累了一处 rustfmt 漂移。
-          cargo fmt --manifest-path backend/hfs-gui/Cargo.toml --all --check
+  # 前端产物来自 gates.yml 的 frontend job —— 同一份 frontend/dist 不该在每条流水线上
+  # 各构建一遍（版本还各不相同）。跨工作流的 artifact 不共享，所以要显式 `uses:`。
+  gates:
+    uses: ./.github/workflows/gates.yml
+    with:
+      scope: frontend
 
   # 【为什么 clippy 不在这里】本 crate 有一半是 Windows 专属（WebView2 编辑器、REAPER
   # 宿主扩展）。在 Unix 上那半边只留下成百条 dead_code 告警：把它们静音会让
   # `-D warnings` 失去意义，放开判死又会让这条流水线长期红着没人看。clippy 的权威
-  # 仍然是 Windows 的 build.yml / vst3.yml —— 它们编译的是同一份源码。Unix 这边的
-  # 判据是「能不能产出并加载」，那由 build.sh 的 verify 阶段负责。
+  # 仍然是 gates.yml（Windows，编译的是同一份源码）。Unix 这边的判据是
+  # 「能不能产出并加载」，那由 build.sh 的 verify 阶段负责。
   vst3-unix:
     name: VST3 ${{ matrix.name }}
-    needs: rust-fmt
+    needs: gates
+    # 【矩阵随事件变化】PR 只跑 linux-x86_64 / macos-arm64：够证明"改动没把两个架构
+    # 的构建脚本弄坏"；tag 与手动触发跑全量四平台（发布产物必须齐全）。
+    if: matrix.pr || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     strategy:
@@ -65,18 +54,22 @@ jobs:
       matrix:
         include:
           - name: linux-x86_64
+            pr: true
             os: ubuntu-24.04
             platform: linux-x86_64
           - name: linux-aarch64
+            pr: false
             os: ubuntu-24.04-arm
             platform: linux-aarch64
           # macOS 两个架构分开出包，不做 universal2：arm64 走 CoreML + WebGPU，
           # x86_64 走 ort-tract(CPU)，链接的是**不同的** ONNX 后端；lipo 只会把两份
           # 静态推理运行时塞进同一个文件（体积翻倍），换不来任何一个架构的性能。
           - name: macos-arm64
+            pr: true
             os: macos-15
             platform: macos-arm64
           - name: macos-x86_64
+            pr: false
             os: macos-15-intel
             platform: macos-x86_64
     steps:
@@ -108,20 +101,20 @@ jobs:
           brew install cmake || true
 
       # 【为什么必须钉 Node 版本】bundle 里的前端是 `npm run build` 产出的，而 vite 8
-      # 用 rolldown 打包，其原生绑定声明 engines: ^20.19.0 || >=22.12.0。
-      # 不满足时**没有一条报错说得清原因**：Node 18 报
-      # "node:util does not provide an export named 'styleText'"；Node 22.11 更糟 ——
-      # npm 会静默跳过那个可选的原生绑定，于是报
-      # "Cannot find module '@rolldown/binding-linux-x64-gnu'"。
-      # runner 自带的 node 版本随镜像漂移，所以这里钉死并复用 npm 缓存。
-      # 与 build.yml / vst3.yml 统一到 24：同一份前端不该在不同流水线上用
-      # 不同的大版本构建（22.12 是 vite 8 的最低可用线，历史遗留）。
-      - name: Setup Node
-        uses: actions/setup-node@v6
+      # 前端产物由 gates.yml 的 frontend job 构建一次并以 artifact 分发 —— 同一份
+      # frontend/dist 不该在四条流水线上各构建一遍（版本还各不相同）。
+      - name: Download frontend artifact
+        uses: actions/download-artifact@v8
         with:
-          node-version: "24"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
+          name: frontend-dist
+          path: frontend-dist
+
+      - name: Extract frontend dist
+        run: |
+          set -euo pipefail
+          ZIP=$(ls frontend-dist | grep -E "\.zip$" || true)
+          if [ -z "$ZIP" ]; then echo "No zip artifact found in frontend-dist"; ls -la frontend-dist; exit 1; fi
+          unzip -o frontend-dist/$ZIP -d .
 
       # 桥接脚本是**手写的 JS**，语法错的表现是插件窗口一片空白。
       # 一条 `node --check` 就能把它挡在合并之前。
@@ -197,14 +190,11 @@ jobs:
       # `render/extension` 里没有任何 `cfg(windows)`，所以不是没编进去，是运行时
       # 行为不同（第三条是偶发，不是必挂）。在此之前它们连跑到断言的机会都没有 —— 宿主夹具在 Linux 上必崩
       # （见 6262b933）。两条按 issue 单独修，门禁先立起来。
+      # 跳过清单只有一份（scripts/checks/test-skips.txt，[unix] 前缀的条目在这里生效）。
+      # 此前这里有四条 --skip 写死在 YAML 里，与 build.yml / vst3.yml 的各一条互不知情。
       - name: Run plugin unit tests
         run: |
-          timeout 1500 cargo test --manifest-path backend/Cargo.toml --locked \
-            -p hifishifter-plugin --lib -- --test-threads=1 \
-            --skip task34_tail_and_shared_undo_save_restore_both_world_tracks_without_gui \
-            --skip effective_item_mute_projects_to_gui_and_gates_real_process_without_inference \
-            --skip automatic_apply_releases_the_transaction_and_rechecks_model_and_edit_versions \
-            --skip pending_pitch_analysis_does_not_publish_raw_audio_as_applied
+          timeout 1500 pwsh -NoProfile -File scripts/checks/run-rust-gates.ps1 -Only test -Package hifishifter-plugin -Platform unix
 
       - name: Upload build diagnostics on failure
         if: failure()

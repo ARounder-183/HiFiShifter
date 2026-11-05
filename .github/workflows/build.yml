@@ -1,16 +1,21 @@
 name: HiFiShifter Cross-Platform Build (Windows, macOS, Linux)
 
-# 【为什么不在 push 时跑】vst3.yml（Windows 插件门禁）已对 push develop 开闸，
-# 覆盖了直接推送工作流里最有价值的插件侧反馈；本流水线是六平台构建矩阵 +
-# workspace 测试，push 触发的成本（每小时级 runner 额度）远超直接 push 场景
-# 的收益，因此保持 PR/workflow_dispatch 触发。若要调整，与 vst3-unix.yml 一起改。
+# 产物流水线：把**已经过门禁的树**变成可交付的东西。
+#
+# 【门禁去哪了】源码级检查（静态约定 / 前端 / fmt / clippy / 单测 / testkit）全部在
+# gates.yml 里，本流水线 `uses:` 它。此前两边各写一份、参数还不一样，于是同一条用例
+# 可以在一条流水线上绿、在另一条上红。判据现在只有一处。
+#
+# 【触发】PR 跑三平台（windows-x86_64 / macos-arm64 / linux-x86_64）；`v*` tag 与手动
+# 触发跑全量六平台。直接 push develop 的插件反馈由 plugin-gates.yml 承担 —— 它是轻的
+# （不编译产物），而六平台矩阵按小时计。
 on:
   workflow_dispatch:
   pull_request:
     branches: [main, develop]
+  push:
+    tags: ["v*"]
 
-# 与 vst3.yml 保持同一套策略：同一分支上的新推送取消旧运行（六平台矩阵很贵），
-# 且只申请只读内容权限 —— 构建不需要写仓库。
 permissions:
   contents: read
 
@@ -19,317 +24,49 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # ── 产品一致性守卫 ──────────────────────────────────────────────────────
+  # ── 门禁：源码级检查全部交给 gates.yml ──────────────────────────────────
   #
-  # 【为什么单独一个 job 且不依赖任何构建】它检查的是**跨文件**约定：版本号在四个
-  # 文件里一致、安装器文案与词表一致、模型清单与真实文件一致、交付链路不引用一次性
-  # 探针目录……这些都没有编译期保护，破坏了只会在用户那里表现为"版本显示不对""设置
-  # 丢了""多占 150 MB"。几十秒跑完，因此每次 PR 都跑，而不是等到打包时才炸。
-  product-consistency:
-    name: Product consistency
-    runs-on: windows-latest
-    timeout-minutes: 15
-    defaults:
-      run:
-        shell: pwsh
-    steps:
-      - uses: actions/checkout@v6
+  # 【为什么抽成可复用工作流】此前 fmt / clippy / test / 前端门禁 / 产品一致性散在
+  # build.yml 与 vst3.yml 两处，参数互不相同（--offline / --jobs / --skip 各写一遍），
+  # 同一条用例可以在一条流水线上绿、在另一条上红。现在只有一处定义，
+  # build.yml / plugin-gates.yml 都 `uses:` 它，判据因此不可能分叉。
+  #
+  # 【为什么 backend 要 needs 它】产物流水线跑的应当是"已经过门禁的树"：否则一个
+  # 格式化违规会先在六平台矩阵上烧掉一小时，再在一个完全无关的 lint job 上失败。
+  gates:
+    uses: ./.github/workflows/gates.yml
+    # 产物流水线需要 frontend-dist 这个 artifact，因此跑全量门禁。
+    with:
+      scope: all
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: '24'
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: Install frontend deps (installer string generator uses esbuild)
-        run: npm --prefix frontend ci
-
-      - name: Check product consistency
-        run: ./scripts/checks/check-product-consistency.ps1
-
-  frontend-build:
-    name: Build Frontend
+  # tag 与版本号必须对上：release 产物里的文件名、安装器的 DisplayVersion、
+  # 关于对话框全都读同一个版本号，而 tag 是唯一"人手工敲"的那一处。
+  assert-version:
+    name: Assert tag matches version
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
-    # 其余 job 都有超时；最重的 frontend/backend 反而没有（默认 360 分钟）——
-    # 挂起时单个 job 要等 6 小时才失败（vst3-unix.yml 的注释记录过这个亏）。
-    timeout-minutes: 20
-    outputs:
-      artifact-name: frontend-dist
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: "24"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: Install and build frontend
+      - name: Compare tag and tauri.conf.json version
         run: |
-          npm --prefix frontend ci
-          npm --prefix frontend run build
-
-      - name: Lint frontend
-        # 用预算门禁而不是裸 lint：警告预算（只许降不许升）的权威执行在 vitest 的
-        # lintBudget.test.ts，但那里要等整套测试跑完；这一步提前几分钟给出反馈。
-        run: npm --prefix frontend run lint:budget
-
-      - name: Check frontend formatting
-        run: npm --prefix frontend run format:check
-
-      - name: Run frontend unit tests
-        run: npm --prefix frontend run test
-
-      - name: Archive frontend dist
-        run: |
-          cd frontend
-          if [ -d dist ]; then zip -r ../frontend-dist.zip dist; else echo "No dist produced"; exit 1; fi
-
-      - name: Upload frontend artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: frontend-dist
-          path: frontend-dist.zip
-
-  # ── Rust 静态检查 ────────────────────────────────────────────────────────
-  #
-  # 【为什么与 backend 构建 job 分开】backend job 是六平台矩阵、单次数十分钟；
-  # 把 lint/test 塞进去会让"改一行前端文案"也等半小时。这两个 job 跑在单一平台上，
-  # 几分钟出结果。
-  #
-  # 【为什么 fmt 单独一个 ubuntu job】rustfmt 不需要编译，也不需要 ARA/VST3 SDK，
-  # 因此这一个 job 就覆盖了**全部五个 crate（含 hifishifter-plugin）**，成本却只有
-  # 几十秒。它是本仓唯一"零成本全覆盖"的检查。
-  #
-  # 【为什么 clippy/test 必须在 Windows】`hifishifter-plugin` 的 build.rs 要求
-  # `ARA_VST3_SDK_DIR` / `ARA_SDK_DIR`，且它本身是 Windows 的 ARA/VST3 目标 ——
-  # SDK 准备脚本 `scripts/setup/prepare-plugin-sdks.ps1` 与 `vst3.yml` 的整套流程都建在
-  # Windows 上。两个 job 共用一份 SDK 缓存，避免重复下载。
-  rust-fmt:
-    name: Check Rust formatting
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    defaults:
-      run:
-        working-directory: backend
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Setup Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-          # 不传 toolchain：让 action 读 rust-toolchain.toml（已钉具体版本）—— 本机、
-          # CI、每个矩阵入口共用同一把尺子，fmt 门禁的判据不再随 "stable" 漂移。
-        with:
-          cache: false
-          # 该 action 默认 `-D warnings`；格式化检查与警告无关，置空以免被牵连。
-          rustflags: ''
-
-      # hfs-gui 在 workspace 之外（backend/Cargo.toml 的 exclude），`--all`
-      # 覆盖不到它；它曾因此积累 rustfmt 漂移（见 vst3-unix.yml 的同款步骤）。
-      - name: Check rustfmt (workspace)
-        run: cargo fmt --all --check
-
-      - name: Check rustfmt (hfs-gui, outside the workspace)
-        run: cargo fmt --manifest-path hfs-gui/Cargo.toml --all --check
-
-  rust-clippy:
-    name: Clippy (workspace)
-    runs-on: windows-latest
-    timeout-minutes: 60
-    defaults:
-      run:
-        shell: pwsh
-    steps:
-      - uses: actions/checkout@v6
-
-      # SDK 路径的唯一事实来源在 scripts/env/sdk-env.ps1；直接 cargo 调用（不经过构建脚本）
-      # 需要这里导出的 ARA_SDK_DIR / ARA_VST3_SDK_DIR。
-      - name: Configure pinned SDK paths
-        run: |
-          . ./scripts/env/sdk-env.ps1
-          Set-SdkEnvironment
-          Add-Content -Path $env:GITHUB_ENV -Value "ARA_SDK_DIR=$env:ARA_SDK_DIR"
-          Add-Content -Path $env:GITHUB_ENV -Value "ARA_VST3_SDK_DIR=$env:ARA_VST3_SDK_DIR"
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: '24'
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-
-      # app crate 的 build.rs 需要 `frontend/dist`（存在则跳过构建，缺失则自己跑
-      # `npm run build`）。这里显式构建一次，避免把前端构建失败伪装成 clippy 失败。
-      - name: Build frontend dist
-        run: |
-          npm --prefix frontend ci
-          if ($LASTEXITCODE -ne 0) { throw 'Frontend dependency installation failed.' }
-          npm --prefix frontend run build
-          if ($LASTEXITCODE -ne 0) { throw 'Frontend build failed.' }
-
-      - name: Setup Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          cache: false
-          rustflags: ''
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: backend -> target
-          shared-key: rust-clippy-windows-x64
-          cache-on-failure: true
-
-      - name: Cache pinned plugin SDKs
-        uses: actions/cache@v5
-        with:
-          path: third_party/sdk
-          key: plugin-sdks-${{ hashFiles('scripts/env/plugin-sdks.json') }}
-
-      - name: Install pinned ARA and VST3 SDKs
-        run: ./scripts/setup/prepare-plugin-sdks.ps1
-
-      # 告警已清零（清仓时是 190 条），因此这里判死：**告警即失败**。
-      #
-      # 【为什么现在可以判死】此前 CI 用 `RUSTFLAGS: "-Awarnings"` 把整个 workspace
-      # 的告警一起静音，190 条长期不可见（其中含死代码与恒真断言）。现在改成分层：
-      # 有意识接受的风格类 lint 逐条写在两个 crate 根部的 `#![allow(…)]` 里并附理由，
-      # 其余一律默认告警 —— 于是 `-D warnings` 拦到的都是真问题。
-      - name: Run clippy
-        run: |
-          . ./scripts/env/msvc-env.ps1
-          # --locked：build.yml 必须证明"提交的锁"能编译，而不是 CI 临时解析出的依赖树
-          # （vst3.yml 一直如此，两边门禁因此等价）。
-          cargo clippy --locked --manifest-path backend/Cargo.toml --workspace --all-targets -- -D warnings
-          if ($LASTEXITCODE -ne 0) { throw 'Clippy reported warnings or errors.' }
-          # 纯 Rust 形态（无 onnx / vslib）此前从未被 CI 编译过 —— 未来做轻量形态或
-          # 重排 cfg 门控时，破坏只会先在用户处爆发。分钟级成本，单独钉住。
-          cargo clippy --locked --manifest-path backend/Cargo.toml -p hifishifter-kernel --no-default-features --all-targets -- -D warnings
-          if ($LASTEXITCODE -ne 0) { throw 'Kernel no-default-features clippy failed.' }
-
-  rust-test:
-    name: Rust tests (workspace)
-    runs-on: windows-latest
-    timeout-minutes: 120
-    defaults:
-      run:
-        shell: pwsh
-    steps:
-      - uses: actions/checkout@v6
-
-      # SDK 路径的唯一事实来源在 scripts/env/sdk-env.ps1；直接 cargo 调用（不经过构建脚本）
-      # 需要这里导出的 ARA_SDK_DIR / ARA_VST3_SDK_DIR。
-      - name: Configure pinned SDK paths
-        run: |
-          . ./scripts/env/sdk-env.ps1
-          Set-SdkEnvironment
-          Add-Content -Path $env:GITHUB_ENV -Value "ARA_SDK_DIR=$env:ARA_SDK_DIR"
-          Add-Content -Path $env:GITHUB_ENV -Value "ARA_VST3_SDK_DIR=$env:ARA_VST3_SDK_DIR"
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: '24'
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: Build frontend dist
-        run: |
-          npm --prefix frontend ci
-          if ($LASTEXITCODE -ne 0) { throw 'Frontend dependency installation failed.' }
-          npm --prefix frontend run build
-          if ($LASTEXITCODE -ne 0) { throw 'Frontend build failed.' }
-
-      - name: Setup Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          cache: false
-          rustflags: ''
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: backend -> target
-          # 与 rust-clippy 分开：两个 job 同 key 互写缓存条目，先完成者独占，
-          # 后者常态吃不到自己形状的缓存（全量编译 15-25 分钟）。
-          shared-key: rust-test-windows-x64
-          cache-on-failure: true
-
-      - name: Cache pinned plugin SDKs
-        uses: actions/cache@v5
-        with:
-          path: third_party/sdk
-          key: plugin-sdks-${{ hashFiles('scripts/env/plugin-sdks.json') }}
-
-      - name: Install pinned ARA and VST3 SDKs
-        run: ./scripts/setup/prepare-plugin-sdks.ps1
-
-      # `--test-threads=1`：本仓有进程级分配计量测试（`alloc_probe`），其前置条件
-      # 就是串行运行（见 `backend/src-tauri/src/lib.rs` 的 `measure_peak_alloc` 说明）。
-      # --skip：`pending_pitch_analysis_…` 间歇性失败/挂死（与本流水线无关的插件已知
-      # 问题），门禁先收口；根因按 docs/plans/2026-10-27-audit-repair-round2.md
-      # §1.3 / §7 批次 8 跟踪，修复后移除。
-      - name: Run workspace tests
-        run: |
-          . ./scripts/env/msvc-env.ps1
-          cargo test --locked --manifest-path backend/Cargo.toml --workspace -- --test-threads=1 --skip pending_pitch_analysis_does_not_publish_raw_audio_as_applied
-          if ($LASTEXITCODE -ne 0) { throw 'Workspace tests failed.' }
-
-  # vendored 的 ara2-bridge-testkit（见 backend/third-party/ara2-bridge-testkit/PATCHED.md）。
-  #
-  # 【为什么单开一个 job】cpp-interop 会把 Celemony 的 ARA_Library / ARA_Examples 编成
-  # C++（约 24 个源文件），既慢又需要额外的 SDK 子模块。产品 workspace 的测试不该被它
-  # 拖慢，也不该因它而红。它测的是本仓**打过补丁**的 core/plugin 与 C++ 参考实现的双向
-  # 互操作，因此必须用 `-WithTestkit` 把 ARA_Library / ARA_Examples（含嵌套 3rdParty）拉齐。
-  ara2-bridge-testkit:
-    name: ARA bridge testkit (cpp-interop)
-    runs-on: windows-latest
-    timeout-minutes: 60
-    defaults:
-      run:
-        shell: pwsh
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Setup Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          cache: false
-          rustflags: ''
-
-      - name: Cache pinned plugin SDKs
-        uses: actions/cache@v5
-        with:
-          path: third_party/sdk
-          key: plugin-sdks-${{ hashFiles('scripts/env/plugin-sdks.json') }}
-
-      - name: Install pinned SDKs with testkit submodules
-        run: ./scripts/setup/prepare-plugin-sdks.ps1 -WithTestkit
-
-      # 直接 cargo 调用需要这里导出的 ARA_SDK_DIR（build.rs 读它定位 ARA_API）。
-      #
-      # 只跑确定性目标：cpp_interop（C++ 双向配对）、plugin_contract（54 槽回调契约）、
-      # coverage_join（接口覆盖报告与当前补丁是否一致）。并发/实时类测试（realtime、
-      # *_concurrency）留给本地手动跑，避免在 CI 负载下引入偶发红。
-      - name: Run testkit contract and C++ interop tests
-        run: |
-          . ./scripts/env/msvc-env.ps1
-          . ./scripts/env/sdk-env.ps1
-          Set-SdkEnvironment
-          Push-Location backend/third-party/ara2-bridge-testkit
-          cargo test --locked --features cpp-interop --test cpp_interop
-          if ($LASTEXITCODE -ne 0) { throw 'cpp_interop failed.' }
-          cargo test --locked --test plugin_contract
-          if ($LASTEXITCODE -ne 0) { throw 'plugin_contract failed.' }
-          cargo test --locked --test coverage_join
-          if ($LASTEXITCODE -ne 0) { throw 'coverage_join failed.' }
-          Pop-Location
+          set -euo pipefail
+          TAG="${GITHUB_REF#refs/tags/v}"
+          VER="$(node -p "require('./backend/src-tauri/tauri.conf.json').version")"
+          if [ "$TAG" != "$VER" ]; then
+            echo "::error::tag v$TAG does not match version $VER"
+            exit 1
+          fi
+          echo "tag v$TAG matches version $VER"
 
   backend:
     name: Build Backend (${{ matrix.name }})
-    needs: frontend-build
+    needs: [gates, assert-version]
+    # assert-version 只在 tag 上存在；非 tag 运行时它是 skipped，不该拦住构建。
+    if: >-
+      always() && needs.gates.result == 'success'
+      && (needs.assert-version.result == 'success' || needs.assert-version.result == 'skipped')
+      && (matrix.pr || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
     runs-on: ${{ matrix.os }}
     # 六平台矩阵：单个入口的最长构建（交叉编译 + 打包）120 分钟封顶。
     timeout-minutes: 180
@@ -346,33 +83,42 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # 【矩阵随事件变化】PR 只跑三平台（够证明"改动没把某个平台编译弄坏"），
+        # tag 跑全量六平台（发布产物必须齐全）。此前矩阵与触发条件无关，于是每个
+        # PR 都要付六份 checkout + 六份编译，而其中三个平台从没有单独红过。
         include:
           # Windows — DirectML + WebGPU baked into ort dependency
           - name: windows-x86_64
+            pr: true
             os: windows-latest
             cargo_target: x86_64-pc-windows-msvc
             cargo_extra: "-- --locked --profile dist"                      # default features: onnx + vslib
           - name: windows-arm64
+            pr: false
             os: windows-11-arm
             cargo_target: aarch64-pc-windows-msvc
             cargo_extra: "-- --locked --profile dist --no-default-features --features onnx"   # vslib is x86_64-only
 
           # macOS — CoreML + WebGPU on ARM64, CPU on x86_64 (baked into ort deps)
           - name: macos-arm64
+            pr: true
             os: macos-latest
             cargo_target: aarch64-apple-darwin
             cargo_extra: "-- --locked --profile dist --no-default-features --features onnx"
           - name: macos-x86_64
+            pr: false
             os: macos-15-intel
             cargo_target: x86_64-apple-darwin
             cargo_extra: "-- --locked --profile dist --no-default-features --features onnx"
 
           # Linux — WebGPU (Dawn/Vulkan backend); vslib excluded
           - name: linux-x86_64
+            pr: true
             os: ubuntu-24.04
             cargo_target: x86_64-unknown-linux-gnu
             cargo_extra: "-- --locked --profile dist --no-default-features --features onnx"
           - name: linux-arm64
+            pr: false
             os: ubuntu-24.04-arm
             cargo_target: aarch64-unknown-linux-gnu
             cargo_extra: "-- --locked --profile dist --no-default-features --features onnx"
@@ -500,17 +246,42 @@ jobs:
 
       # ── Build + bundle ─────────────────────────────────────────────────
 
-      - name: Build and bundle (Windows)
-        if: runner.os == 'Windows'
+      # ── Windows x86_64：唯一的合并安装器 ────────────────────────────────
+      #
+      # 【为什么不再用 tauri-action】Windows 只交付一个安装器，它要装两个位置
+      # （App 与 VST3）、并且独占写入共享模型库 —— Tauri 的打包器给不了这些
+      # （见 scripts/release/merged-installer.nsi 的头部注释）。build.ps1 负责
+      # 编译、组装、校验、打安装器，CI 只是调用它。
+      - name: Build, gate and package (Windows x86_64)
+        if: runner.os == 'Windows' && matrix.cargo_target == 'x86_64-pc-windows-msvc'
+        env:
+          HIFISHIFTER_SKIP_FRONTEND_BUILD: "1"
+        run: |
+          . ./scripts/env/sdk-env.ps1
+          Set-SdkEnvironment
+          ./scripts/build/build.ps1 -Target All -SkipFrontend
+          if ($LASTEXITCODE -ne 0) { throw 'build.ps1 failed.' }
+
+      # ── 安装器闭环门禁 ────────────────────────────────────────────────
+      #
+      # 装 → 查（ARP / 模型库 / 无 .onnx / VST3 只有清单）→ 重装（幂等）→ 卸载 → 查。
+      # 安装器是所有失败方式都静默的那类东西，只有真跑一遍再逐条断言才看得见。
+      - name: Installer gate (Windows x86_64)
+        if: runner.os == 'Windows' && matrix.cargo_target == 'x86_64-pc-windows-msvc'
+        run: ./scripts/checks/check-installer.ps1
+
+      # ── Windows arm64：App-only ────────────────────────────────────────
+      #
+      # 插件的原生 loader 与 vslib 都是 x86_64，arm64 上没有 VST3 载荷可装；
+      # 因此这里让 Tauri 打一个纯 App 的 NSIS 安装器（--no-bundle 之外的常规路径）。
+      - name: Build and bundle (Windows arm64)
+        if: runner.os == 'Windows' && matrix.cargo_target != 'x86_64-pc-windows-msvc'
         uses: tauri-apps/tauri-action@v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HIFISHIFTER_SKIP_FRONTEND_BUILD: "1"
         with:
           projectPath: backend/src-tauri
-          # Do NOT pass --target: every runner in this matrix is native to its
-          # target architecture (windows-11-arm is a native ARM64 runner), so
-          # cargo builds for the host default target and writes to
           args: ${{ matrix.cargo_extra }}
 
       - name: Build and bundle (macOS)
@@ -736,23 +507,7 @@ jobs:
           HIFISHIFTER_SMOKE_REQUIRED=1 bash scripts/build/linux-appimage.sh package "$RELEASE_DIR"
         shell: bash
 
-      # ── Portable directory (Windows) ─────────────────────────────────
-
-      - name: Stage portable directory (Windows)
-        if: runner.os == 'Windows'
-        working-directory: ${{ github.workspace }}
-        run: |
-          # tauri-action 已经产出 exe 与 DLL；这里只按便携包的布局铺一份目录。
-          # 0 字节的 vslib_x64.dll 是 arm64 上的占位符，不进产物。
-          $release = "${{ steps.tauri-release-dir.outputs.release-dir }}"
-          New-Item -ItemType Directory -Force HiFiShifter\models | Out-Null
-          Copy-Item "$release\HiFiShifter.exe" HiFiShifter
-          Get-ChildItem "$release" -Filter *.dll |
-            Where-Object { $_.Length -gt 0 -and $_.Name -ne 'hifishifter_plugin.dll' } |
-            Copy-Item -Destination HiFiShifter
-          Copy-Item backend\src-tauri\resources\models\* HiFiShifter\models -Recurse
-          Copy-Item LICENSE, licenses HiFiShifter -Recurse
-        shell: pwsh
+      # 便携包由 build.ps1 直接产出（自包含：模型全量随包），YAML 不再重复铺目录。
 
       # ── LICENSE alongside artifacts ──────────────────────────────────
 
@@ -856,8 +611,19 @@ jobs:
 
       # ── Upload artifacts ───────────────────────────────────────────────
 
-      - name: Upload installer (Windows)
-        if: runner.os == 'Windows'
+      - name: Upload installer (Windows x86_64, merged)
+        if: runner.os == 'Windows' && matrix.cargo_target == 'x86_64-pc-windows-msvc'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.artifact-name-win-installer.outputs.artifact-name }}
+          # 只上传一个安装器：这就是"Windows 只有一个交付形态"的执行点。
+          path: |
+            dist/*-setup.exe
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload installer (Windows arm64, app only)
+        if: runner.os == 'Windows' && matrix.cargo_target != 'x86_64-pc-windows-msvc'
         uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.artifact-name-win-installer.outputs.artifact-name }}
@@ -866,14 +632,15 @@ jobs:
             ${{ steps.tauri-release-dir.outputs.release-dir }}/bundle/nsis/LICENSE
           if-no-files-found: error
 
-      - name: Upload portable (Windows)
-        if: runner.os == 'Windows'
+      - name: Upload portable (Windows x86_64)
+        if: runner.os == 'Windows' && matrix.cargo_target == 'x86_64-pc-windows-msvc'
         uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.artifact-name-win-portable.outputs.artifact-name }}
           path: |
-            HiFiShifter/**
-          if-no-files-found: warn
+            dist/*portable*.zip
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Upload DMG (macOS)
         if: runner.os == 'macOS'

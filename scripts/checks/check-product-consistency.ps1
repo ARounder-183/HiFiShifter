@@ -131,6 +131,22 @@ Test-Invariant 'Windows 只有一个安装器且模型只装一份' {
     'build.ps1 → merged-installer.nsi（--no-bundle）'
 }
 
+# 判据只允许存在于脚本里。工作流的 YAML 里出现 --skip / --test-threads / --offline，
+# 就说明有人又在那里"就地打补丁" —— 而那正是跳过失控的起点（同一个测试在一条流水线
+# 被跳过、在另一条没被跳过，而没人知道哪条算数）。
+Test-Invariant '工作流里没有内联的测试判据' {
+    $offenders = @()
+    foreach ($file in Get-ChildItem (Join-Path $root '.github\workflows') -Filter *.yml -File) {
+        foreach ($line in Get-Content -LiteralPath $file.FullName) {
+            # 注释里提到这些词是允许的（说明历史原因），判据只看代码。
+            $code = ($line -split '#', 2)[0]
+            if ($code -match '--skip|--test-threads|--offline') { $offenders += "$($file.Name): $($line.Trim())" }
+        }
+    }
+    if ($offenders.Count) { throw ('判据必须写进 scripts/checks/：' + ($offenders -join ' | ')) }
+    '.github/workflows'
+}
+
 # 前端 invoke.ts 的 switch 是前端能发出的全部方法名。其中任何一个若两边后端都不派发，
 # 症状是"控件能点、点了没反应"——静默失效，且不会有编译错误。
 Test-Invariant '前端 invoke 面都有后端命令承接' {

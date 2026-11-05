@@ -1,0 +1,314 @@
+name: Gates
+
+# 源码级门禁的**唯一**定义处。build.yml 与 plugin-gates.yml 都 `uses:` 它。
+#
+# 【为什么要抽出来】此前 build.yml 与 vst3.yml 各自实现了一遍 fmt / clippy / test /
+# 前端门禁，参数并不相同（--offline / --jobs / --skip 各写一遍），也没有任何东西保证
+# 两者等价：一条用例可以在一条流水线上绿、在另一条上红，而"哪条才算数"没人说得清。
+# 现在判据只在这里，参数只由 scripts/checks/run-*.ps1 给出。
+#
+# 【为什么产物门禁不在这里】安装器闭环、AppImage 冒烟、DMG 校验都必须先有产物 ——
+# 它们属于产物流水线（build.yml / vst3-unix.yml），搬进这里只会让本工作流也变成
+# "要么什么都验不了、要么把六平台全编一遍"。
+on:
+  workflow_call:
+    inputs:
+      # all      = 全量门禁（build.yml 用）
+      # frontend = 只出 frontend-dist（vst3-unix.yml 只需要这份产物）
+      # plugin   = 静态 + 插件并发门禁（push 反馈用）
+      scope:
+        type: string
+        required: false
+        default: all
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gates-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── 静态门禁：不编译、不联网、几十秒 ──────────────────────────────────
+  #
+  # 【为什么每次都跑（含 plugin 档）】它检查的是跨文件约定：版本号在五个文件里一致、
+  # 安装器文案与五语词表一致、模型清单与真实文件一致、FFI 入口都带 panic 守卫……
+  # 这些都没有编译期保护，破坏了只会在用户那里表现为"版本显示不对""日志里什么都没有"。
+  static:
+    name: Static gates
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # 安装器文案生成器用 esbuild（装在 frontend 下）。
+      - name: Install frontend deps
+        run: npm --prefix frontend ci
+
+      - name: Run static gates
+        run: ./scripts/checks/run-static-gates.ps1
+
+  # ── 前端门禁 + 产物 artifact ───────────────────────────────────────────
+  #
+  # 【为什么产物在这里出】clippy / test / 各平台打包都要 frontend/dist（app 的 build.rs
+  # 缺它会自己跑 npm build，失败会被伪装成 clippy 失败）。只构建一次、以 artifact
+  # 分发，六平台矩阵才不用各自重跑一遍 vite。
+  frontend:
+    name: Frontend gates
+    if: inputs.scope == 'all' || inputs.scope == 'frontend'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend deps
+        run: npm --prefix frontend ci
+
+      - name: Run frontend gates
+        run: bash scripts/checks/run-frontend-gates.sh
+
+      - name: Archive frontend dist
+        run: |
+          cd frontend
+          if [ ! -d dist ]; then echo "No dist produced"; exit 1; fi
+          zip -r ../frontend-dist.zip dist
+
+      - name: Upload frontend artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: frontend-dist
+          path: frontend-dist.zip
+          retention-days: 7
+
+  # ── Rust：格式 ─────────────────────────────────────────────────────────
+  #
+  # rustfmt 不需要编译、不需要 SDK，ubuntu 上几十秒覆盖**全部五个 crate**
+  # （含 workspace 之外的 hfs-gui 与 Windows 专属的 hifishifter-plugin）。
+  rust-fmt:
+    name: Rust formatting
+    if: inputs.scope == 'all'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+          rustflags: ''
+
+      - name: Run rustfmt gate
+        run: pwsh -NoProfile -File scripts/checks/run-rust-gates.ps1 -Only fmt
+
+  # ── Rust：clippy ───────────────────────────────────────────────────────
+  #
+  # 【为什么必须在 Windows】hifishifter-plugin 的 build.rs 要求 ARA/VST3 SDK，
+  # 且它本身是 Windows 的 ARA/VST3 目标；SDK 准备脚本与其余插件流程都建在 Windows 上。
+  #
+  # 告警已清零（清仓时是 190 条），因此这里判死：**告警即失败**。
+  rust-clippy:
+    name: Clippy
+    if: inputs.scope == 'all'
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download frontend artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: frontend-dist
+          path: frontend-dist
+
+      - name: Extract frontend dist
+        run: |
+          $zip = Get-ChildItem -Path frontend-dist -Filter *.zip | Select-Object -First 1
+          if (-not $zip) { throw 'No zip artifact found in frontend-dist' }
+          Expand-Archive -Path $zip.FullName -DestinationPath . -Force
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+          rustflags: ''
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend -> target
+          shared-key: gates-clippy-windows-x64
+          cache-on-failure: true
+
+      - name: Cache pinned plugin SDKs
+        uses: actions/cache@v5
+        with:
+          path: third_party/sdk
+          key: plugin-sdks-${{ hashFiles('scripts/env/plugin-sdks.json') }}
+
+      - name: Install pinned ARA and VST3 SDKs
+        run: ./scripts/setup/prepare-plugin-sdks.ps1
+
+      - name: Run clippy gate
+        run: ./scripts/checks/run-rust-gates.ps1 -Only clippy -Profile full
+
+  # ── Rust：测试 ─────────────────────────────────────────────────────────
+  rust-test:
+    name: Rust tests
+    if: inputs.scope == 'all'
+    runs-on: windows-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download frontend artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: frontend-dist
+          path: frontend-dist
+
+      - name: Extract frontend dist
+        run: |
+          $zip = Get-ChildItem -Path frontend-dist -Filter *.zip | Select-Object -First 1
+          if (-not $zip) { throw 'No zip artifact found in frontend-dist' }
+          Expand-Archive -Path $zip.FullName -DestinationPath . -Force
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+          rustflags: ''
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend -> target
+          shared-key: gates-test-windows-x64
+          cache-on-failure: true
+
+      - name: Cache pinned plugin SDKs
+        uses: actions/cache@v5
+        with:
+          path: third_party/sdk
+          key: plugin-sdks-${{ hashFiles('scripts/env/plugin-sdks.json') }}
+
+      - name: Install pinned ARA and VST3 SDKs
+        run: ./scripts/setup/prepare-plugin-sdks.ps1
+
+      # full：额外跑 no-default-features 的 clippy 与一次并发测试复跑。
+      # --test-threads=1 掩盖并发问题，而本仓最容易出事的地方（重算与自动应用的版本
+      # 竞态、快照发布与读者回收）全部是并发敏感的；串行跑得通不代表正确。
+      - name: Run Rust gate (full)
+        run: ./scripts/checks/run-rust-gates.ps1 -Profile full
+
+  # ── 插件并发门禁（push develop 的快速反馈）─────────────────────────────
+  #
+  # 取代原 vst3.yml 的 push 反馈职能：只跑"最容易在直接 push 时落进仓库"的那一组
+  # （FFI 守卫已在 static 里、插件单测在并发模式下复跑一遍），不产出任何产物。
+  plugin-gates:
+    name: Plugin concurrency gates
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+          rustflags: ''
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend -> target
+          shared-key: gates-plugin-windows-x64
+          cache-on-failure: true
+
+      - name: Cache pinned plugin SDKs
+        uses: actions/cache@v5
+        with:
+          path: third_party/sdk
+          key: plugin-sdks-${{ hashFiles('scripts/env/plugin-sdks.json') }}
+
+      - name: Install pinned ARA and VST3 SDKs
+        run: ./scripts/setup/prepare-plugin-sdks.ps1
+
+      - name: Run plugin tests concurrently
+        run: ./scripts/checks/run-rust-gates.ps1 -Only test -Package hifishifter-plugin -TestMode parallel
+
+  # ── ARA bridge testkit（C++ 互操作）─────────────────────────────────────
+  #
+  # 【为什么单开一个 job】cpp-interop 会把 Celemony 的 ARA_Library / ARA_Examples 编成
+  # C++（约 24 个源文件），既慢又需要额外的 SDK 子模块。产品 workspace 的测试不该被它
+  # 拖慢，也不该因它而红。它测的是本仓**打过补丁**的 core/plugin 与 C++ 参考实现的双向
+  # 互操作，因此必须用 -WithTestkit 把 ARA_Library / ARA_Examples（含嵌套 3rdParty）拉齐。
+  testkit:
+    name: ARA bridge testkit (cpp-interop)
+    if: inputs.scope == 'all'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+          rustflags: ''
+
+      - name: Cache pinned plugin SDKs
+        uses: actions/cache@v5
+        with:
+          path: third_party/sdk
+          key: plugin-sdks-${{ hashFiles('scripts/env/plugin-sdks.json') }}
+
+      - name: Install pinned SDKs with testkit submodules
+        run: ./scripts/setup/prepare-plugin-sdks.ps1 -WithTestkit
+
+      # 只跑确定性目标：cpp_interop（C++ 双向配对）、plugin_contract（54 槽回调契约）、
+      # coverage_join（接口覆盖报告与当前补丁是否一致）。并发/实时类测试（realtime、
+      # *_concurrency）留给本地手动跑，避免在 CI 负载下引入偶发红。
+      - name: Run testkit contract and C++ interop tests
+        run: |
+          . ./scripts/env/msvc-env.ps1
+          . ./scripts/env/sdk-env.ps1
+          Set-SdkEnvironment
+          Push-Location backend/third-party/ara2-bridge-testkit
+          cargo test --locked --features cpp-interop --test cpp_interop
+          if ($LASTEXITCODE -ne 0) { throw 'cpp_interop failed.' }
+          cargo test --locked --test plugin_contract
+          if ($LASTEXITCODE -ne 0) { throw 'plugin_contract failed.' }
+          cargo test --locked --test coverage_join
+          if ($LASTEXITCODE -ne 0) { throw 'coverage_join failed.' }
+          Pop-Location
