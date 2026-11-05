@@ -104,7 +104,12 @@ export const initialState: SessionState = {
     playbackRateVersion: 0,
 
     playheadSec: 0,
-    playheadLocalAtMs: 0,
+    // 【为什么不是 0】这个字段是"本地最后一次写光标的时刻"（performance.now() 的毫秒数），
+    // 停止态采样用它判断"用户刚拖过/刚 seek 过"，300 ms 内不改写光标。初值 0 会让
+    // **进程启动后的前 300 ms** 一律被当成"刚写过"：宿主在启动时给的定位被静默丢掉，
+    // 而这段窗口恰好是测试与首帧最容易落进去的地方（CI 上这条用例因此稳定失败）。
+    // 负无穷表示"从来没有写过"，差值恒为正无穷，判据只在真的写过之后才成立。
+    playheadLocalAtMs: Number.NEGATIVE_INFINITY,
     playheadSampledAtMs: 0,
     pendingPlayheadRevealSec: null,
     tracks: [

@@ -648,7 +648,11 @@ test("features/session/sessionSlice.playheadGuard.test.ts polls are refused whil
             duration_sec: 200,
         }) as any;
 
-    const syncArgs = { epoch: 0, dispatchedAtMs: performance.now() };
+    // 【为什么是函数而不是常量】`dispatchedAtMs` 参与"采样外推"：reducer 用
+    // (现在 - 派发时刻) 推算光标又走了多远。常量会让这个差值随测试自身耗时增长，
+    // 于是断言 50.6±0.001 的用例在慢机器上会因为 1 ms 的测试开销而失败。
+    // 每次派发现取时间，差值恒 ≈ 0，容差才真的在测"外推逻辑"而不是"测试跑多快"。
+    const syncArgs = () => ({ epoch: 0, dispatchedAtMs: performance.now() });
 
     // 阻塞式预渲染进行中：陈旧"未播放"采样被拒采，播放状态与光标不受影响。
     {
@@ -658,7 +662,7 @@ test("features/session/sessionSlice.playheadGuard.test.ts polls are refused whil
         );
         const next = reducer(
             started,
-            syncPlaybackState.fulfilled(syncPayload(false, 50), "req", syncArgs),
+            syncPlaybackState.fulfilled(syncPayload(false, 50), "req", syncArgs()),
         );
         assertEqual(next.runtime.isPlaying, true, "blocking prerender window refuses stale polls");
         assertEqual(next.playheadSec, 50, "blocking prerender window never moves the playhead");
@@ -672,7 +676,7 @@ test("features/session/sessionSlice.playheadGuard.test.ts polls are refused whil
         );
         const next = reducer(
             started,
-            syncPlaybackState.fulfilled(syncPayload(true, 50.02), "req", syncArgs),
+            syncPlaybackState.fulfilled(syncPayload(true, 50.02), "req", syncArgs()),
         );
         if (!(Math.abs(Number(next.playheadSec) - 50.02) <= 0.05)) {
             throw new Error(
@@ -693,7 +697,7 @@ test("features/session/sessionSlice.playheadGuard.test.ts polls are refused whil
         );
         const next = reducer(
             ended,
-            syncPlaybackState.fulfilled(syncPayload(false, 50.09), "req", syncArgs),
+            syncPlaybackState.fulfilled(syncPayload(false, 50.09), "req", syncArgs()),
         );
         assertEqual(next.playheadSec, 50.09, "after the render ends polls apply again");
     }
@@ -736,7 +740,11 @@ test("features/session/sessionSlice.playheadGuard.test.ts background render even
             duration_sec: 200,
         }) as any;
 
-    const syncArgs = { epoch: 0, dispatchedAtMs: performance.now() };
+    // 【为什么是函数而不是常量】`dispatchedAtMs` 参与"采样外推"：reducer 用
+    // (现在 - 派发时刻) 推算光标又走了多远。常量会让这个差值随测试自身耗时增长，
+    // 于是断言 50.6±0.001 的用例在慢机器上会因为 1 ms 的测试开销而失败。
+    // 每次派发现取时间，差值恒 ≈ 0，容差才真的在测"外推逻辑"而不是"测试跑多快"。
+    const syncArgs = () => ({ epoch: 0, dispatchedAtMs: performance.now() });
 
     // 前台预渲染 active 期间，后台渲染完成（active=false, target=background）：
     // 拒采窗口必须保持关闭，陈旧"未播放"采样不得应用。
@@ -751,7 +759,7 @@ test("features/session/sessionSlice.playheadGuard.test.ts background render even
         );
         const next = reducer(
             bgDone,
-            syncPlaybackState.fulfilled(syncPayload(false, 50), "req", syncArgs),
+            syncPlaybackState.fulfilled(syncPayload(false, 50), "req", syncArgs()),
         );
         assertEqual(
             next.runtime.isPlaying,
@@ -777,7 +785,7 @@ test("features/session/sessionSlice.playheadGuard.test.ts background render even
         );
         const next = reducer(
             fgDone,
-            syncPlaybackState.fulfilled(syncPayload(false, 50.09), "req", syncArgs),
+            syncPlaybackState.fulfilled(syncPayload(false, 50.09), "req", syncArgs()),
         );
         assertEqual(next.playheadSec, 50.09, "after the blocking render ends polls apply again");
     }
@@ -791,7 +799,7 @@ test("features/session/sessionSlice.playheadGuard.test.ts background render even
         );
         const next = reducer(
             started,
-            syncPlaybackState.fulfilled(syncPayload(false, 50), "req", syncArgs),
+            syncPlaybackState.fulfilled(syncPayload(false, 50), "req", syncArgs()),
         );
         assertEqual(next.playheadSec, 50, "legacy payload still opens the blocking window");
     }
@@ -1034,7 +1042,11 @@ test("features/session/sessionSlice.playheadGuard.test.ts case-a wait zeroes the
             position_sec: positionSec,
             duration_sec: 200,
         }) as any;
-    const syncArgs = { epoch: 0, dispatchedAtMs: performance.now() };
+    // 【为什么是函数而不是常量】`dispatchedAtMs` 参与"采样外推"：reducer 用
+    // (现在 - 派发时刻) 推算光标又走了多远。常量会让这个差值随测试自身耗时增长，
+    // 于是断言 50.6±0.001 的用例在慢机器上会因为 1 ms 的测试开销而失败。
+    // 每次派发现取时间，差值恒 ≈ 0，容差才真的在测"外推逻辑"而不是"测试跑多快"。
+    const syncArgs = () => ({ epoch: 0, dispatchedAtMs: performance.now() });
 
     // 播放中正常前进（positionSec=50.6 已应用）。
     const playing = reducer(
@@ -1043,14 +1055,14 @@ test("features/session/sessionSlice.playheadGuard.test.ts case-a wait zeroes the
             playheadSec: 50.5,
             runtime: { ...base.runtime, isPlaying: true, playbackPositionSec: 50.5 },
         },
-        syncPlaybackState.fulfilled(syncPayload(true, 50.6, false), "req", syncArgs),
+        syncPlaybackState.fulfilled(syncPayload(true, 50.6, false), "req", syncArgs()),
     );
     assertEqual(playing.runtime.playbackPositionSec, 50.6, "playing poll advances position");
 
     // 引擎冻结（等待采样）：positionSec 归零、标志置位、光标原地冻结。
     const waited = reducer(
         playing,
-        syncPlaybackState.fulfilled(syncPayload(true, 50.62, true), "req", syncArgs),
+        syncPlaybackState.fulfilled(syncPayload(true, 50.62, true), "req", syncArgs()),
     );
     assertEqual(waited.runtime.playbackWaitingForRender, true, "waiting sample sets the flag");
     assertEqual(
@@ -1064,7 +1076,7 @@ test("features/session/sessionSlice.playheadGuard.test.ts case-a wait zeroes the
     // 恢复采样：等待标志清除、光标从冻结位置继续推进。
     const resumed = reducer(
         waited,
-        syncPlaybackState.fulfilled(syncPayload(true, 50.62, false), "req", syncArgs),
+        syncPlaybackState.fulfilled(syncPayload(true, 50.62, false), "req", syncArgs()),
     );
     assertEqual(resumed.runtime.playbackWaitingForRender, false, "resume clears the flag");
     assertNear(resumed.playheadSec, 50.62, "resume advances from the frozen position");
@@ -1073,11 +1085,11 @@ test("features/session/sessionSlice.playheadGuard.test.ts case-a wait zeroes the
     // 冻结必须恢复（positionSec 重新归零）。
     const raced = reducer(
         resumed,
-        syncPlaybackState.fulfilled(syncPayload(true, 50.63, false), "req", syncArgs),
+        syncPlaybackState.fulfilled(syncPayload(true, 50.63, false), "req", syncArgs()),
     );
     const refrozen = reducer(
         raced,
-        syncPlaybackState.fulfilled(syncPayload(true, 50.63, true), "req", syncArgs),
+        syncPlaybackState.fulfilled(syncPayload(true, 50.63, true), "req", syncArgs()),
     );
     assertEqual(
         refrozen.runtime.playbackWaitingForRender,
