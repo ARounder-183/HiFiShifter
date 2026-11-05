@@ -34,7 +34,9 @@ $built = Join-Path $root "backend\target\$profile"
 $dist = Join-Path $root 'dist'
 $version = (Get-Content backend\src-tauri\tauri.conf.json -Raw | ConvertFrom-Json).version
 $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }
-$licenses = @('LICENSE', 'licenses\COPYING.LGPL-2.1', 'licenses\SOUNDTOUCH-CHANGES.md')
+# 发行物随附的许可：根 LICENSE（MIT + 第三方清单）与 licenses\ 目录（各许可全文与声明）。
+# 只有一处清单，App 与插件共用，避免两套打包路径各记一份。
+$licenses = @('LICENSE', 'licenses')
 New-Item -ItemType Directory -Force $dist | Out-Null
 
 # ── 前端 ────────────────────────────────────────────────────────────────────
@@ -124,7 +126,7 @@ if ($Target -ne 'Plugin') {
         if (Test-Path "$built\$dll") { Copy-Item "$built\$dll" $portable }
     }
     Copy-Item backend\src-tauri\resources\models "$portable\models" -Recurse
-    Copy-Item $licenses $portable
+    Copy-Item $licenses $portable -Recurse
 
     $portableZip = Join-Path $dist "HiFiShifter-v$version-portable-win-$arch.zip"
     Remove-Item $portableZip -Force -ErrorAction SilentlyContinue
@@ -170,7 +172,7 @@ if ($Target -ne 'App') {
     Assert-Ok '安装器文案生成'
 
     $setup = Join-Path $dist ('HiFiShifter_v' + $version + '_windows-x86_64-vst3-setup.exe')
-    & $makensis /INPUTCHARSET UTF8 "/DPLUGIN_BUNDLE=$stagedBundle" "/DPLUGIN_VERSION=$version" "/DOUTPUT_FILE=$setup" "/DHFS_LICENSE=$(Join-Path $root 'LICENSE')" "/DHFS_LGPL=$(Join-Path $root 'licenses\COPYING.LGPL-2.1')" "/DHFS_ST_CHANGES=$(Join-Path $root 'licenses\SOUNDTOUCH-CHANGES.md')" "/DHFS_MODELS=$(Join-Path $stage 'models')" "/DHFS_MODELS_VERSION=$modelsVersion" (Join-Path $PSScriptRoot '..\release\vst3-installer.nsi')
+    & $makensis /INPUTCHARSET UTF8 "/DPLUGIN_BUNDLE=$stagedBundle" "/DPLUGIN_VERSION=$version" "/DOUTPUT_FILE=$setup" "/DHFS_LICENSE=$(Join-Path $root 'LICENSE')" "/DHFS_LICENSES=$(Join-Path $root 'licenses')" "/DHFS_MODELS=$(Join-Path $stage 'models')" "/DHFS_MODELS_VERSION=$modelsVersion" (Join-Path $PSScriptRoot '..\release\vst3-installer.nsi')
     Assert-Ok '插件安装器编译'
     Remove-Item $stage -Recurse -Force
     Write-Host "插件安装器：$setup" -ForegroundColor Green

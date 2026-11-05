@@ -26,7 +26,9 @@ SOFTWARE.
 
 The MIT license above applies only to the original code of this project.
 Bundled third-party libraries, models, and model weights remain governed by
-their own licenses as listed below.
+their own licenses as listed below. The corresponding license texts and
+notices ship in the licenses/ directory (see licenses/README.md); entries that
+point there name the exact file.
 
 1. Signalsmith Stretch
    Copyright (c) 2022 Geraint Luff / Signalsmith Audio Ltd.
@@ -47,8 +49,10 @@ their own licenses as listed below.
 4. SoundTouch - audio time-stretching / pitch-shifting library
    Copyright (c) Olli Parviainen
    License: GNU Lesser General Public License v2.1 (LGPL-2.1).
-   Linked dynamically as SoundTouchDLL and built from the upstream source
-   (tag 2.3.3); the license text and source are available at
+   Linked dynamically as SoundTouchDLL and built from the unmodified upstream
+   source (tag 2.3.3), shipped as a separate file next to the executable /
+   plug-in so it can be replaced by any interface-compatible build. License
+   text: licenses/COPYING.LGPL-2.1. Source:
    https://codeberg.org/soundtouch/soundtouch and
    https://www.surina.net/soundtouch/
 
@@ -73,6 +77,7 @@ their own licenses as listed below.
    International). These weights are NOT covered by this project's MIT
    license and may not be used for commercial purposes. See the NOTICE and
    STATEMENTS files under third_party/pc_nsf_hifigan_44.1k_hop512_128bin_2025.02/
+   Notice: licenses/NSF-HiGAN-vocoder-NOTICE.txt
    https://openvpi.github.io/vocoders/
 
 9. rusty_mp3 - Pure-Rust MP3 (MPEG-1/2/2.5 Layer III) decoder + encoder
@@ -92,8 +97,9 @@ their own licenses as listed below.
 
 12. ARA SDK (ARA_API headers)
    Copyright (c) Celemony Software & Melodyne development team
-   License: Apache License 2.0. Built from the revision pinned in
-   scripts/env/plugin-sdks.json; source at https://github.com/Celemony/ARA_SDK
+   License: Apache License 2.0 (text: licenses/Apache-2.0.txt). Built from the
+   revision pinned in scripts/env/plugin-sdks.json; source at
+   https://github.com/Celemony/ARA_SDK
 
 13. VST3 SDK (pluginterfaces headers)
    Copyright (c) Steinberg Media Technologies GmbH

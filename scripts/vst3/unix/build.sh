@@ -383,17 +383,18 @@ stage_package() {
     rm -rf "$stage"
     mkdir -p "$stage"
     cp -R "$BUNDLE_DIR" "$stage/"
-    # 许可证随产物走：ARA SDK 是 Apache-2.0，VST3 SDK 自 3.8.0 起是 MIT，
-    # SoundTouch 是 LGPL-2.1（动态链接 + 本仓的修改说明）。缺一份就是许可瑕疵。
+    # 许可证随产物走：根 LICENSE（MIT + 第三方清单）+ licenses/ 目录（全文与声明）。
+    # SoundTouch 是 LGPL-2.1（动态链接、上游未修改），ARA SDK 是 Apache-2.0，
+    # 声码器权重是 CC BY-NC-SA 4.0 —— 缺任何一份都是许可瑕疵。
     local extra
-    for extra in LICENSE licenses/COPYING.LGPL-2.1 licenses/SOUNDTOUCH-CHANGES.md; do
-        [ -f "$REPO_ROOT/$extra" ] || die "缺少许可证文件：$extra"
-        cp "$REPO_ROOT/$extra" "$stage/"
+    for extra in LICENSE licenses; do
+        [ -e "$REPO_ROOT/$extra" ] || die "缺少许可证：$extra"
+        cp -R "$REPO_ROOT/$extra" "$stage/"
     done
 
     local tarball="$OUT_DIR/$ARTIFACT_BASE.tar.gz"
     rm -f "$tarball"
-    ( cd "$stage" && tar -czf "$tarball" "$API_NAME.vst3" LICENSE COPYING.LGPL-2.1 SOUNDTOUCH-CHANGES.md )
+    ( cd "$stage" && tar -czf "$tarball" "$API_NAME.vst3" LICENSE licenses )
     rm -rf "$stage"
     local digest
     digest="$(sha256_of "$tarball")"

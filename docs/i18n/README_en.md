@@ -298,4 +298,8 @@ This project uses code or model architectures from the following open-source lib
 
 ## License
 
-This project is released under the [MIT License](../../LICENSE).
+The project's own code is released under the [MIT License](../../LICENSE). License texts and
+notices for the bundled third-party components ship in [`licenses/`](../../licenses/README.md):
+SoundTouch (LGPL-2.1, dynamically linked, unmodified upstream), ARA SDK and others (Apache-2.0),
+and the DiffSinger vocoder weights (CC BY-NC-SA 4.0, non-commercial only). The Third-Party Notices
+in [LICENSE](../../LICENSE) list every component.

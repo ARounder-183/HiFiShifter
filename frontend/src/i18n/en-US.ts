@@ -790,7 +790,7 @@ export const enUS = {
     about_copied: "Copied to clipboard",
     about_third_party_title: "Third-party licenses",
     about_third_party_note:
-        "Bundled libraries and model weights keep their own licenses (see the LICENSE file for the full list). The NSF-HiFiGAN vocoder weights are CC BY-NC-SA 4.0 - non-commercial use only.",
+        "Bundled libraries and model weights keep their own licenses (component list in the LICENSE file, full texts in the licenses folder). The NSF-HiFiGAN vocoder weights are CC BY-NC-SA 4.0 - non-commercial use only.",
     clip_badge_rate_tip: "Rate",
     clip_badge_gain_tip: "Gain",
     clip_rate_editor_title: "Edit Playback Rate",
@@ -2277,7 +2277,7 @@ export const enUS = {
     installer_publisher: "ARounder",
     installer_welcome_title: "Welcome to the HiFiShifter VST3 Setup",
     installer_welcome_text:
-        "This installs the HiFiShifter VST3/ARA plug-in into the VST3 folder you choose.\nClose REAPER first: the installer must not replace a plug-in that is currently loaded.\nSettings are shared with the standalone app.\nThe bundled NSF-HiFiGAN vocoder weights are CC BY-NC-SA 4.0 - non-commercial use only.",
+        "This installs the HiFiShifter VST3/ARA plug-in into the VST3 folder you choose.\nClose REAPER first: the installer must not replace a plug-in that is currently loaded.\nSettings are shared with the standalone app.\nThe bundled NSF-HiFiGAN vocoder weights are CC BY-NC-SA 4.0 - non-commercial use only.\nLicense texts are installed next to the plug-in: LICENSE and the licenses folder.",
     installer_dir_text:
         "Choose the VST3 folder that REAPER scans. The plug-in is installed as a HiFiShifter.vst3 folder inside it.",
     installer_installing: "Installing HiFiShifter VST3...",

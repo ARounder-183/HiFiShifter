@@ -331,4 +331,7 @@ ONNX Runtime 二进制文件由 ort crate 在编译时通过 `download-binaries`
 
 ## License
 
-本项目基于 [MIT License](LICENSE) 发布。
+本项目的原创代码基于 [MIT License](LICENSE) 发布。发行物随附第三方组件的许可全文与声明，
+见 [`licenses/`](licenses/README.md)：SoundTouch（LGPL-2.1，动态链接、未修改的上游版本）、
+ARA SDK 等（Apache-2.0）、DiffSinger 声码器权重（CC BY-NC-SA 4.0，仅限非商业使用）。
+[LICENSE](LICENSE) 里的 Third-Party Notices 是完整的组件清单。

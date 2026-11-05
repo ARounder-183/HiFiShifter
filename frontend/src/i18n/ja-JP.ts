@@ -660,7 +660,7 @@ export const jaJP = {
     about_copied: "クリップボードにコピーしました",
     about_third_party_title: "サードパーティライセンス",
     about_third_party_note:
-        "同梱ライブラリとモデル重みはそれぞれ元のライセンスが適用されます（一覧は LICENSE ファイル参照）。NSF-HiFiGAN ボコーダー重みは CC BY-NC-SA 4.0 で、非商用用途に限ります。",
+        "同梱ライブラリとモデル重みはそれぞれ元のライセンスが適用されます（一覧は LICENSE ファイル、全文は licenses フォルダー参照）。NSF-HiFiGAN ボコーダー重みは CC BY-NC-SA 4.0 で、非商用用途に限ります。",
     clip_badge_rate_tip: "レート",
     clip_badge_gain_tip: "ゲイン",
     clip_rate_editor_title: "再生速度を編集",
@@ -2288,7 +2288,7 @@ export const jaJP = {
     installer_publisher: "ARounder",
     installer_welcome_title: "HiFiShifter VST3 セットアップへようこそ",
     installer_welcome_text:
-        "選択した VST3 フォルダーに HiFiShifter VST3/ARA プラグインをインストールします。\n先に REAPER を終了してください。読み込み中のプラグインは上書きされません。\n設定は単体アプリと共有されます。\n同梱の NSF-HiFiGAN ボコーダー重みは CC BY-NC-SA 4.0 で、非商用用途に限ります。",
+        "選択した VST3 フォルダーに HiFiShifter VST3/ARA プラグインをインストールします。\n先に REAPER を終了してください。読み込み中のプラグインは上書きされません。\n設定は単体アプリと共有されます。\n同梱の NSF-HiFiGAN ボコーダー重みは CC BY-NC-SA 4.0 で、非商用用途に限ります。\nライセンス全文はプラグインと一緒に LICENSE と licenses フォルダーへインストールされます。",
     installer_dir_text:
         "REAPER がスキャンする VST3 フォルダーを選んでください。プラグインは HiFiShifter.vst3 フォルダーとしてインストールされます。",
     installer_installing: "HiFiShifter VST3 をインストールしています...",

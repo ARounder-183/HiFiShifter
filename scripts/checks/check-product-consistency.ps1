@@ -68,6 +68,24 @@ Test-Invariant '安装器文案与五语词表一致' {
     'scripts/release/installer/installer_strings.nsh'
 }
 
+# 许可全文是"少一份也不报错"的那类东西：打包脚本只拷目录，文件名只在 README 里出现。
+# 改名或漏文件的结果是某个发行物静默少一份义务披露 —— 因此在这里钉死清单。
+Test-Invariant '随包许可清单齐全（LICENSE + licenses\ 目录）' {
+    $required = @(
+        'LICENSE',
+        'licenses\README.md',
+        'licenses\COPYING.LGPL-2.1',
+        'licenses\Apache-2.0.txt',
+        'licenses\NSF-HiGAN-vocoder-NOTICE.txt'
+    )
+    foreach ($file in $required) {
+        if (!(Test-Path -LiteralPath (Join-Path $root $file))) { throw "缺少随包许可文件：$file" }
+    }
+    $nsi = Get-RepoText 'scripts/release/vst3-installer.nsi'
+    if ($nsi -notmatch 'HFS_LICENSES') { throw 'vst3-installer.nsi 不再安装 licenses\ 目录' }
+    'LICENSE + licenses\（LGPL-2.1 / Apache-2.0 / CC BY-NC-SA 声明）'
+}
+
 # 这几条都是"手改回去就静默丢一个用户可见能力"的地方：没有卸载项、重复安装堆积资产、
 # 模型又回到 bundle 里各存一份。
 Test-Invariant '安装器注册卸载项、清理受管目录、模型走共享库' {

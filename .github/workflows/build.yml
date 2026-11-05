@@ -751,14 +751,14 @@ jobs:
             Where-Object { $_.Length -gt 0 -and $_.Name -ne 'hifishifter_plugin.dll' } |
             Copy-Item -Destination HiFiShifter
           Copy-Item backend\src-tauri\resources\models\* HiFiShifter\models -Recurse
-          Copy-Item LICENSE, licenses\COPYING.LGPL-2.1, licenses\SOUNDTOUCH-CHANGES.md HiFiShifter
+          Copy-Item LICENSE, licenses HiFiShifter -Recurse
         shell: pwsh
 
       # ── LICENSE alongside artifacts ──────────────────────────────────
 
-      # Place LICENSE next to the DMG/AppImage and the Windows installer so
-      # the uploaded artifacts ship with it. The portable directory already
-      # includes LICENSE (staged above).
+      # Place LICENSE and the licenses/ folder next to the DMG/AppImage and the
+      # Windows installer so the uploaded artifacts ship with them. The portable
+      # directory already includes both (staged above).
       - name: Stage LICENSE next to bundles/installer
         if: steps.tauri-release-dir.outputs.release-dir != ''
         shell: bash
@@ -776,7 +776,8 @@ jobs:
             exit 0
           fi
           cp -f LICENSE "$COPY_TARGET/LICENSE"
-          echo "Staged $COPY_TARGET/LICENSE"
+          cp -Rf licenses "$COPY_TARGET/licenses"
+          echo "Staged $COPY_TARGET/LICENSE and $COPY_TARGET/licenses"
 
       # ── Artifact naming ───────────────────────────────────────────────
 

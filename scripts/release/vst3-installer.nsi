@@ -51,18 +51,16 @@ ${UnStrStr}
   !define HFS_REAPER_GUARD
 !endif
 
-; LICENSE 的路径由打包脚本以绝对路径传入（`/DHFS_LICENSE=…`）。默认值 `..\..\LICENSE`
-; 只在从仓库的 `scripts\release\` 目录编译时成立 —— 那种"靠相对位置猜"的写法在测试副本上
-; 会指向不存在的文件，报出来的却只是一句 `no files found`。
+; LICENSE 与 `licenses\` 目录的路径由打包脚本以绝对路径传入（`/DHFS_LICENSE=…`、
+; `/DHFS_LICENSES=…`）。默认值 `..\..\…` 只在从仓库的 `scripts\release\` 目录编译时
+; 成立 —— 那种"靠相对位置猜"的写法在测试副本上会指向不存在的文件，报出来的却只是
+; 一句 `no files found`。
 !ifndef HFS_LICENSE
   !define HFS_LICENSE "..\..\LICENSE"
 !endif
-; LGPL-2.1 全文与 SoundTouch 构建期补丁披露（路径由打包脚本传入，默认值同上口径）。
-!ifndef HFS_LGPL
-  !define HFS_LGPL "..\..\licenses\COPYING.LGPL-2.1"
-!endif
-!ifndef HFS_ST_CHANGES
-  !define HFS_ST_CHANGES "..\..\licenses\SOUNDTOUCH-CHANGES.md"
+; 第三方许可全文与声明（LGPL-2.1 / Apache-2.0 / CC BY-NC-SA 4.0），见 licenses\README.md。
+!ifndef HFS_LICENSES
+  !define HFS_LICENSES "..\..\licenses"
 !endif
 
 ; 共享模型库的两个参数由打包脚本传入（`/DHFS_MODELS=…` `/DHFS_MODELS_VERSION=…`）。
@@ -256,8 +254,12 @@ Section "$(HFS_NAME)" SEC_PLUGIN
   ; 【为什么不动 `models\`】用户可能自行替换模型（换声码器等）。那是数据不是产物。
   RMDir /r "$INSTDIR\${PLUGIN_SUBDIR}\Contents\Resources\frontend"
   RMDir /r "$INSTDIR\${PLUGIN_SUBDIR}\Contents\x86_64-win"
-  ; 早期版本把构建文档与独立 App 的页面一起塞进了 Resources；它们已经不再交付，
-  ; 但**已安装**的副本不会自己消失，因此在这里顺手清掉。
+  ; 早期版本把构建文档、独立 App 的页面，以及 LGPL 全文 / SoundTouch 变更说明
+  ; 直接放在 Resources 根目录；它们都已不再交付（许可现在整组住在 `licenses\` 下，
+  ; 变更说明则随"未修改上游"一起消失）。**已安装**的旧副本不会自己消失，因此在这里
+  ; 顺手清掉 —— 否则升级后的机器上会同时存在"根目录的孤立许可"和 `licenses\` 的完整一套。
+  Delete "$INSTDIR\${PLUGIN_SUBDIR}\Contents\Resources\COPYING.LGPL-2.1"
+  Delete "$INSTDIR\${PLUGIN_SUBDIR}\Contents\Resources\SOUNDTOUCH-CHANGES.md"
   Delete "$INSTDIR\${PLUGIN_SUBDIR}\Contents\Resources\VST3-BUILD.md"
   Delete "$INSTDIR\${PLUGIN_SUBDIR}\Contents\Resources\frontend\index.html"
   Delete "$INSTDIR\${PLUGIN_SUBDIR}\Contents\Resources\frontend\detached.html"
@@ -268,8 +270,9 @@ Section "$(HFS_NAME)" SEC_PLUGIN
   File /r "${PLUGIN_BUNDLE}\*"
   SetOutPath "$INSTDIR\${PLUGIN_SUBDIR}\Contents\Resources"
   File "${HFS_LICENSE}"
-  File "${HFS_LGPL}"
-  File "${HFS_ST_CHANGES}"
+  ; 许可全文按目录整体安装：音频库、SDK、模型权重各自一份，加一份 README 说明谁归谁。
+  SetOutPath "$INSTDIR\${PLUGIN_SUBDIR}\Contents\Resources\licenses"
+  File /r "${HFS_LICENSES}\*"
 
   ; ── 卸载信息 ────────────────────────────────────────────────────────
   ;

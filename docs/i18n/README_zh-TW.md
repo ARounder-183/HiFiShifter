@@ -298,4 +298,7 @@ ONNX Runtime 二進位檔案由 ort crate 在編譯時透過 `download-binaries`
 
 ## 授權條款
 
-本專案基於 [MIT 授權條款](../../LICENSE) 發布。
+本專案的原始碼基於 [MIT 授權條款](../../LICENSE) 發布。發行物隨附第三方元件的授權全文與聲明，
+見 [`licenses/`](../../licenses/README.md)：SoundTouch（LGPL-2.1，動態連結、未修改的上游版本）、
+ARA SDK 等（Apache-2.0）、DiffSinger 聲碼器權重（CC BY-NC-SA 4.0，僅限非商業使用）。
+[LICENSE](../../LICENSE) 的 Third-Party Notices 是完整的元件清單。

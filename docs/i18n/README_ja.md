@@ -298,4 +298,8 @@ ONNX Runtimeのバイナリは、ort crateの `download-binaries` 機能によ�
 
 ## ライセンス
 
-このプロジェクトは [MITライセンス](../../LICENSE) の下で公開されています。
+プロジェクト自身のコードは [MITライセンス](../../LICENSE) の下で公開されています。同梱する
+サードパーティコンポーネントのライセンス全文と告知は [`licenses/`](../../licenses/README.md) に
+あります：SoundTouch（LGPL-2.1、動的リンク、未改変の上流版）、ARA SDK ほか（Apache-2.0）、
+DiffSinger ボコーダー重み（CC BY-NC-SA 4.0、非商用のみ）。コンポーネントの完全な一覧は
+[LICENSE](../../LICENSE) の Third-Party Notices にあります。

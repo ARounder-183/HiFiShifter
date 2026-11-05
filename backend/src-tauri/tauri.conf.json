@@ -32,7 +32,10 @@
                 "installMode": "both"
             }
         },
+        "licenseFile": "../../LICENSE",
         "resources": {
+            "../../LICENSE": "LICENSE",
+            "../../licenses": "licenses/",
             "resources/models/nsf_hifigan/config.json": "models/nsf_hifigan/config.json",
             "resources/models/hnsep/hnsep.onnx": "models/hnsep/hnsep.onnx",
             "resources/models/hnsep/config.yaml": "models/hnsep/config.yaml",

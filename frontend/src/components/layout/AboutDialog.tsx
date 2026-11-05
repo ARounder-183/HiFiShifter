@@ -213,8 +213,9 @@ export function AboutDialog({ open, onOpenChange }: AboutDialogProps) {
                     ) : null}
                     {/*
                      * 第三方许可：组件名与许可证号是专名/编号，不进 i18n；标题与
-                     * 说明走词典（五语目录）。完整清单与文本见发行物内的 LICENSE
-                     * （含 SOUNDTOUCH-CHANGES.md / COPYING.LGPL-2.1）。
+                     * 说明走词典（五语目录）。权威清单是发行物内的 LICENSE，
+                     * 各许可全文与声明在其旁边的 licenses 目录（licenses/README.md
+                     * 说明哪份文件对应哪个组件）。
                      */}
                     <Flex direction="column" gap="1">
                         <span className="hs-type-muted">{tf("about_third_party_title")}</span>
