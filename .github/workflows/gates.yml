@@ -179,6 +179,12 @@ jobs:
       - name: Install pinned ARA and VST3 SDKs
         run: ./scripts/setup/prepare-plugin-sdks.ps1
 
+      # tauri.windows.conf.json 把 resources/DirectML.dll 列进 bundle.resources，而
+      # tauri-build 在 build.rs 里就校验它；这份 DLL 是 ort 解包出来的产物，干净检出
+      # 上没有。不补这一步，clippy / test 会死在 build script 里，看起来像代码坏了。
+      - name: Provide DirectML.dll resource
+        run: ./scripts/setup/fetch-directml.ps1
+
       - name: Run clippy gate
         run: ./scripts/checks/run-rust-gates.ps1 -Only clippy -Profile full
 
@@ -250,6 +256,12 @@ jobs:
       - name: Fetch model weights
         run: python scripts/setup/fetch-models.py
         shell: bash
+
+      # tauri.windows.conf.json 把 resources/DirectML.dll 列进 bundle.resources，而
+      # tauri-build 在 build.rs 里就校验它；这份 DLL 是 ort 解包出来的产物，干净检出
+      # 上没有。不补这一步，clippy / test 会死在 build script 里，看起来像代码坏了。
+      - name: Provide DirectML.dll resource
+        run: ./scripts/setup/fetch-directml.ps1
 
       # full：额外跑 no-default-features 的 clippy 与一次并发测试复跑。
       # --test-threads=1 掩盖并发问题，而本仓最容易出事的地方（重算与自动应用的版本
