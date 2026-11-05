@@ -58,13 +58,20 @@ $manifest = 'backend/Cargo.toml'
 $skipArgs = @()
 foreach ($name in Get-Skips) { $skipArgs += @('--skip', $name) }
 
-function Get-CargoCommand([string]$kind) {
+# $Threads 覆盖 TestMode 的线程数：并发复跑要用同一份命令、只换这一个参数。
+function Get-CargoCommand([string]$kind, [int]$Threads = 0) {
     # 【为什么逐条 Write-Output 而不是 return @(...)】PowerShell 的 return 会把数组
     # 原样塞进输出流的一个对象里，调用方 foreach 只会拿到"一个数组"（打印出来是空格
     # 拼接的一行）。逐条写出去，管道才会自然展开成多条命令。
+    # 【为什么每一条 cargo 命令前面都要先设环境】ara2-bridge 的 build.rs 在缺少
+    # ARA_SDK_DIR / ARA_VST3_SDK_DIR 时会直接 panic。这两个变量的唯一来源是
+    # scripts/env/sdk-env.ps1；不在这里设，失败就发生在"编译到一半、由 build script
+    # 抛出"，看起来像源码坏了。CI 的 plugin-gates 第一次真跑插件单测时就是这样红的。
     $msvc = Join-Path $root 'scripts\env\msvc-env.ps1'
+    $sdkEnv = Join-Path $root 'scripts/env/sdk-env.ps1'
     $prefix = ''
-    if (Test-Path $msvc) { $prefix = ". $msvc;" }
+    if (Test-Path $msvc) { $prefix += ". '$msvc';" }
+    if (Test-Path $sdkEnv) { $prefix += ". '$sdkEnv'; Set-SdkEnvironment;" }
     switch ($kind) {
         'fmt' {
             # hfs-gui（VST3 的独立渲染进程）在 backend workspace 之外，--all 覆盖不到它；
@@ -83,9 +90,17 @@ function Get-CargoCommand([string]$kind) {
         }
         'test' {
             $target = if ($Package) { "-p $Package" } else { '--workspace' }
-            $threads = if ($TestMode -eq 'parallel') { '4' } else { '1' }
+            $threads = if ($Threads -gt 0) { $Threads } elseif ($TestMode -eq 'parallel') { 4 } else { 1 }
+            # 【为什么整 workspace 并发跑时要排除 hifishifter-plugin】内核的缓存是进程级的：
+            # 合成片段缓存、pitch 缓存、模型路径都拿文档 / 片段 id 当键（生产里一个进程只有
+            # 一个工程，这样最省）。libtest 的 --test-threads 会把多个测试塞进同一个进程，
+            # 两个测试用同名 id 就互相读到对方的 PCM：实测 4 线程挂 9 条、2 线程换 3 条挂、
+            # 1 线程 918 条全过。这是测试夹具之间的污染，不是产品里的竞态 —— 插件自己的并发
+            # 由各测试内部的渲染线程驱动，与 libtest 的线程数无关。并发复跑留给内核。
+            $exclude = ''
+            if (!$Package -and $threads -gt 1) { $exclude = ' --exclude hifishifter-plugin' }
             $skips = if ($skipArgs.Count -gt 0) { ' ' + ($skipArgs -join ' ') } else { '' }
-            Write-Output "$prefix cargo test --locked --manifest-path $manifest $target -- --test-threads=$threads$skips"
+            Write-Output "$prefix cargo test --locked --manifest-path $manifest $target$exclude -- --test-threads=$threads$skips"
         }
     }
 }
@@ -103,9 +118,9 @@ if ($PrintCommand) {
         foreach ($command in @(Get-CargoCommand $kind)) { Write-Output $command }
     }
     if ($Profile -eq 'full' -and ($Only -eq 'all' -or $Only -eq 'test') -and !$Package) {
-        # full 档多一条并发复跑：--test-threads=1 会掩盖竞态，而插件最容易出事的地方
+        # full 档多一条并发复跑：--test-threads=1 会掩盖竞态，而内核最容易出事的地方
         # （重算与自动应用的版本竞态、快照发布与读者回收）全部是并发敏感的。
-        Write-Output (@(Get-CargoCommand 'test')[0] -replace '--test-threads=1', '--test-threads=4')
+        Write-Output (Get-CargoCommand 'test' -Threads 4)
     }
     exit 0
 }
@@ -121,7 +136,7 @@ foreach ($kind in $kinds) {
 
 if ($Profile -eq 'full' -and ($Only -eq 'all' -or $Only -eq 'test') -and !$Package) {
     Write-Host '== test (concurrent)' -ForegroundColor Cyan
-    $concurrent = @(Get-CargoCommand 'test')[0] -replace '--test-threads=1', '--test-threads=4'
+    $concurrent = Get-CargoCommand 'test' -Threads 4
     Write-Host "   $concurrent" -ForegroundColor DarkGray
     Invoke-Expression $concurrent
     if ($LASTEXITCODE) { throw "concurrent cargo test failed (exit $LASTEXITCODE)" }

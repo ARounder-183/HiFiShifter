@@ -228,9 +228,16 @@ jobs:
   # ── 插件并发门禁（push develop 的快速反馈）─────────────────────────────
   #
   # 取代原 vst3.yml 的 push 反馈职能：只跑"最容易在直接 push 时落进仓库"的那一组
-  # （FFI 守卫已在 static 里、插件单测在并发模式下复跑一遍），不产出任何产物。
+  # （FFI 守卫已在 static 里、插件单测），不产出任何产物。
+  #
+  # 【为什么插件单测在这里是串行跑的】内核的缓存是**进程级**的：合成片段缓存、pitch
+  # 缓存、模型路径都以文档 / 片段 id 为键 —— 生产里一个进程只有一个工程，这样最省。
+  # libtest 的 --test-threads 会把多个测试塞进同一个进程，两个测试用同名 id 就会互相
+  # 读到对方的 PCM：实测 4 线程挂 9 条、2 线程换 3 条挂、1 线程 918 条全过。这是测试
+  # 夹具之间的污染，不是产品里的竞态；插件自身的并发由各测试内部的渲染线程驱动，
+  # 与 libtest 的线程数无关。并发复跑保留在 rust-test 那一档（内核 + 其余 crate）。
   plugin-gates:
-    name: Plugin concurrency gates
+    name: Plugin tests (push feedback)
     runs-on: windows-latest
     timeout-minutes: 60
     defaults:
@@ -261,8 +268,8 @@ jobs:
       - name: Install pinned ARA and VST3 SDKs
         run: ./scripts/setup/prepare-plugin-sdks.ps1
 
-      - name: Run plugin tests concurrently
-        run: ./scripts/checks/run-rust-gates.ps1 -Only test -Package hifishifter-plugin -TestMode parallel
+      - name: Run plugin tests
+        run: ./scripts/checks/run-rust-gates.ps1 -Only test -Package hifishifter-plugin
 
   # ── ARA bridge testkit（C++ 互操作）─────────────────────────────────────
   #
