@@ -312,7 +312,14 @@ pub(crate) fn scoped<R: Send, F: FnOnce() -> R>(
 }
 
 /// 等一次投递完成；超时且尚未开始就放弃。
+///
+/// 【为什么按 deadline 而不是"醒一次就判超时"】`Condvar::wait_timeout` 允许**虚假唤醒**：
+/// 它可能不到点就返回。旧实现醒来看到 `Pending` 就放弃，于是宿主只是"还没轮到泵"的一次
+/// 抖动会被当成"没人取件"，投递方拿到 `Unpicked` —— 测试 `scoped_times_out_when_nobody_pumps`
+/// 在 4 核 runner 上偶发失败正是这个（实测 elapsed 不到 250 ms 就返回了）。
+/// 现在只有真的过了 deadline 才放弃；被提前唤醒就重新判状态继续等。
 fn wait(slot: &Slot) -> Result<(), HostThreadError> {
+    let deadline = Instant::now() + HOST_THREAD_TIMEOUT;
     let mut state = slot.state.lock().unwrap_or_else(|error| error.into_inner());
     loop {
         match &*state {
@@ -321,19 +328,28 @@ fn wait(slot: &Slot) -> Result<(), HostThreadError> {
             SlotState::Abandoned => return Err(HostThreadError::Abandoned),
             SlotState::Pending | SlotState::Running => {}
         }
-        let (next, _) = slot
+        // 已经开始执行 ⇒ 必须等它跑完（没有 deadline），否则被借用的数据会在执行中途失效。
+        let remaining = if matches!(&*state, SlotState::Running) {
+            HOST_THREAD_TIMEOUT
+        } else {
+            deadline.saturating_duration_since(Instant::now())
+        };
+        let (next, timed_out) = slot
             .ready
-            .wait_timeout(state, HOST_THREAD_TIMEOUT)
+            .wait_timeout(state, remaining)
             .unwrap_or_else(|error| error.into_inner());
         state = next;
+        if !timed_out.timed_out() {
+            // 被通知唤醒：重新判状态，不把"醒来"当成"超时"。
+            continue;
+        }
         match &*state {
             SlotState::Done => return Ok(()),
-            // 任务还没开始 —— 现在放弃是安全的：它被取出时会看到这个状态并直接返回。
+            // 到点且任务还没开始 —— 现在放弃是安全的：它被取出时会看到这个状态并直接返回。
             SlotState::Pending => {
                 *state = SlotState::Abandoned;
                 return Err(HostThreadError::Unpicked);
             }
-            // 已经开始执行 ⇒ 必须等它跑完，否则被借用的数据会在执行中途失效。
             SlotState::Running => continue,
             SlotState::Panicked => return Err(HostThreadError::Panicked),
             SlotState::Abandoned => return Err(HostThreadError::Abandoned),
