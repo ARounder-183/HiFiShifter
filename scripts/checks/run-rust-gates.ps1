@@ -71,7 +71,12 @@ function Get-CargoCommand([string]$kind, [int]$Threads = 0) {
     $sdkEnv = Join-Path $root 'scripts/env/sdk-env.ps1'
     $sdkRoot = Join-Path $root 'third_party/sdk'
     $prefix = ''
-    if (Test-Path $msvc) { $prefix += ". '$msvc';" }
+    # 【为什么判平台】msvc-env.ps1 读 ${env:ProgramFiles(x86)}，在 Linux 上是 null，
+    # Join-Path 会当场抛 "Cannot bind argument to parameter Path because it is null"。
+    # 而 PowerShell 在 Unix 上把 \ 也当分隔符，Test-Path 又会命中，于是 fmt 那一档
+    # （Linux，不编译任何东西）被这条导入整个打死。
+    $onWindows = [IO.Path]::DirectorySeparatorChar -eq '\'
+    if ($onWindows -and (Test-Path $msvc)) { $prefix += ". '$msvc';" }
     # 【为什么还要判 SDK 目录在不在】fmt 那一档（Linux）不装 SDK，也不编译任何东西；
     # 此时 Set-SdkEnvironment 会把两个空路径塞进环境变量，反而把一次纯格式检查变成
     # "Cannot bind argument to parameter Path because it is null"。SDK 没准备好时不设，
