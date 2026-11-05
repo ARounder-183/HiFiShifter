@@ -22,6 +22,8 @@ job 都要 checkout 一次（一次 PR 约 11 次）。仓库里只保留清单
     python scripts/setup/fetch-models.py --base-url URL # 换一个下载源（镜像）
 
 用法（发布新权重，一年几次；流程见 docs/models.md）：
+    python scripts/setup/fetch-models.py --write-manifest      # 按目录里的真实文件重写 models.json
+    python scripts/setup/fetch-models.py --check-manifest      # 只校验 models.json 是否最新（CI 用）
     python scripts/setup/fetch-models.py --package             # 打出可复算的 release 资产
     python scripts/setup/fetch-models.py --verify-archive ZIP  # 校验某个 zip 是否等于这份清单
 """
@@ -61,6 +63,12 @@ GENERATED_ARTIFACTS = frozenset({"nsf_hifigan/pc_nsf_hifigan_coreml.onnx"})
 # 逐字节相同，sha256 才有资格当发布物的身份。
 ZIP_DATE_TIME = (1980, 1, 1, 0, 0, 0)
 
+# 不参与清单的文件：本脚本自己的输出，加上已知的构建产物。两者都按**文件名**排除 —
+# 与历史实现（PowerShell 版）一致，因此同一棵目录树在这里和在那边得到同一份清单。
+MANIFEST_EXCLUDED_NAMES = frozenset({"models.json"}) | frozenset(
+    entry.rsplit("/", 1)[-1] for entry in GENERATED_ARTIFACTS
+)
+
 
 def load_manifest() -> dict:
     if not MANIFEST.is_file():
@@ -77,19 +85,89 @@ def sha256_of(path: Path) -> str:
     return digest.hexdigest()
 
 
-def derive_version(manifest: dict) -> str:
-    """重算清单应当有的版本号（算法与 scripts/build/write-models-manifest.ps1 相同）。
+def manifest_sort_key(entry: dict) -> str:
+    """清单的排序键：完整路径形式（分隔符是反斜杠）。
 
-    【为什么打包前要重算一遍】version 是清单里**唯一不能手写**的字段，而它同时决定
-    release 的 tag 与 CI 的缓存键。重算一次，手改过的清单会在打包时当场失败，而不是
-    变成一份"版本号与内容无关"的资产被发出去。两份实现万一哪天分叉，表现是拒绝打包
-    （fail closed），不是发错东西。
+    【为什么是反斜杠】版本号是「路径 + sha256」逐行拼接后的哈希，顺序变了就是另一个
+    版本号。历史实现按 PowerShell 的「完整路径」排序，而完整路径里只有分隔符是反斜杠 ——
+    这里对齐它，已有的 models.json 才能在两种实现之间逐字节对上。
     """
-    # 排序键用反斜杠形式：PowerShell 那边按「完整路径」排序，而完整路径里只有分隔符
-    # 是反斜杠。这里对齐它，免得两种排序在个别文件名上给出不同顺序。
-    entries = sorted(manifest["files"], key=lambda item: item["path"].replace("/", "\\"))
+    return entry["path"].replace("/", "\\")
+
+
+def derive_version(files: list[dict]) -> str:
+    """重算版本号：所有 (路径, sha256) 排序后拼接、取 sha256 的前 12 位。
+
+    【为什么每一处都要重算】version 是清单里**唯一不能手写**的字段，而它同时决定
+    release 的 tag 与 CI 的缓存键。生成、校验、打包三条路都从内容重算，手改过的清单
+    会当场失败，而不是变成一份"版本号与内容无关"的资产被发出去。
+    """
+    entries = sorted(files, key=manifest_sort_key)
     lines = "\n".join(f"{entry['path']} {entry['sha256']}" for entry in entries)
     return hashlib.sha256(lines.encode("utf-8")).hexdigest()[:12]
+
+
+def collect_manifest_entries() -> list[dict]:
+    """扫一遍权重目录，返回清单条目（路径 / 字节数 / 大写 sha256）。
+
+    【为什么 sha256 是大写】历史清单是 PowerShell 的 Get-FileHash 写的，它给大写。
+    大小写在比较时都按小写归一（见 verify_hashes），但**存储**保持原样，免得同一份
+    权重在两次生成之间整份 diff。
+    """
+    entries = [
+        {
+            "path": path.relative_to(MODELS_DIR).as_posix(),
+            "bytes": path.stat().st_size,
+            "sha256": sha256_of(path).upper(),
+        }
+        for path in MODELS_DIR.rglob("*")
+        if path.is_file() and path.name not in MANIFEST_EXCLUDED_NAMES
+    ]
+    entries.sort(key=manifest_sort_key)
+    return entries
+
+
+def write_manifest() -> int:
+    """按目录里的真实文件重写 models.json（版本号 = 内容哈希）。"""
+    entries = collect_manifest_entries()
+    if not entries:
+        print(
+            f"{MODELS_DIR} 里没有可登记的模型文件：先跑 python scripts/setup/fetch-models.py",
+            file=sys.stderr,
+        )
+        return 1
+    version = derive_version(entries)
+    text = json.dumps({"version": version, "files": entries}, ensure_ascii=False, indent=4) + "\n"
+    with MANIFEST.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(text)
+    print(f"已写入 {MANIFEST}（版本 {version}，{len(entries)} 个文件）")
+    return 0
+
+
+def check_manifest() -> int:
+    """只比版本号：版本号就是文件内容的哈希，它一致则清单必然一致。
+
+    【为什么权重缺失时算通过】干净 clone 里只有 models.json —— 那是正常状态，不是
+    回归。清单与权重的对账只有在取到权重之后才可能。
+    """
+    if not MANIFEST.is_file():
+        print(f"缺少模型清单：{MANIFEST}（它必须在仓库里）", file=sys.stderr)
+        return 1
+    entries = collect_manifest_entries()
+    if not entries:
+        print("models.json 检查跳过：权重还没取（跑 scripts/setup/fetch-models.py）")
+        return 0
+    manifest = load_manifest()
+    expected = derive_version(entries)
+    if manifest["version"] != expected:
+        print(
+            f"models.json 过期（清单 {manifest['version']}，重算 {expected}）："
+            "跑 python scripts/setup/fetch-models.py --write-manifest",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"models.json 是最新的（版本 {expected}）")
+    return 0
 
 
 def missing_files(models_dir: Path, manifest: dict) -> list[str]:
@@ -117,8 +195,8 @@ def verify_hashes(models_dir: Path, manifest: dict) -> list[str]:
             problems.append(f"missing {entry['path']}")
             continue
         actual = sha256_of(path)
-        # 【为什么按小写比】清单由 write-models-manifest.ps1 生成，Get-FileHash 给的是
-        # 大写十六进制；hexdigest() 给的是小写。两边都是同一个哈希，直接比字符会让
+        # 【为什么按小写比】清单里的哈希是大写十六进制（历史实现是 PowerShell 的
+        # Get-FileHash），hexdigest() 给的是小写。两边都是同一个哈希，直接比字符会让
         # 每一份**正确**的权重都判成"校验失败"。
         if actual != entry["sha256"].lower():
             problems.append(f"sha256 {entry['path']}: {actual} != {entry['sha256']}")
@@ -250,7 +328,7 @@ def package_asset(destination: Path, manifest: dict) -> int:
     if not problems:
         problems = verify_hashes(MODELS_DIR, manifest)
     if not problems:
-        derived = derive_version(manifest)
+        derived = derive_version(manifest["files"])
         if derived != version:
             problems.append(f"清单的 version {version} 与内容重算值 {derived} 不符（清单被手改过）")
     if problems:
@@ -258,7 +336,7 @@ def package_asset(destination: Path, manifest: dict) -> int:
         for problem in problems:
             print(f"  {problem}", file=sys.stderr)
         print(
-            "  权重改过就重生成清单：pwsh -File scripts/build/write-models-manifest.ps1\n"
+            "  权重改过就重生成清单：python scripts/setup/fetch-models.py --write-manifest\n"
             "  没改过就先补齐权重：python scripts/setup/fetch-models.py",
             file=sys.stderr,
         )
@@ -282,6 +360,16 @@ def package_asset(destination: Path, manifest: dict) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description="取 / 打包 HiFiShifter 的模型权重")
     parser.add_argument("--check", action="store_true", help="只检查是否完整（缺则退出码 1）")
+    parser.add_argument(
+        "--write-manifest",
+        action="store_true",
+        help="按目录里的真实文件重写 models.json（版本号 = 内容哈希）",
+    )
+    parser.add_argument(
+        "--check-manifest",
+        action="store_true",
+        help="只校验 models.json 是否最新（权重缺失时跳过，退出码 0）",
+    )
     parser.add_argument("--source", type=Path, help="从本地模型目录拷贝")
     parser.add_argument("--archive", type=Path, help="从本地 zip 解压")
     parser.add_argument(
@@ -303,6 +391,12 @@ def main() -> int:
         help="release 资产的基地址（镜像用；也可设 HIFISHIFTER_MODELS_BASE_URL）",
     )
     args = parser.parse_args()
+
+    # 这两个模式自己读 / 写清单，不需要先加载它（干净 clone 里权重还没有）。
+    if args.write_manifest:
+        return write_manifest()
+    if args.check_manifest:
+        return check_manifest()
 
     manifest = load_manifest()
     version = manifest["version"]

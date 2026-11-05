@@ -28,43 +28,58 @@ function Get-RepoText($relative) {
     Get-Content -LiteralPath (Join-Path $root $relative) -Raw
 }
 
+# 统一的外部工具调用：工具没装时给一句可行动的话（而不是一条原生报错），退出码检查
+# 也搬到这里 —— 此前每个调用点各写一遍 `if ($LASTEXITCODE)`，漏一处就是静默通过。
+function Invoke-Tool([string]$tool, [string[]]$arguments) {
+    $command = Get-Command $tool -ErrorAction SilentlyContinue
+    if (!$command) {
+        throw "找不到 $tool（见 scripts/setup/install_deps_windows.ps1 / install_deps_macos.sh / install_deps_linux.sh）"
+    }
+    $output = & $command.Source @arguments 2>&1
+    if ($LASTEXITCODE) {
+        throw "$tool 失败（退出码 $LASTEXITCODE）：$($output -join ' | ')"
+    }
+    $output
+}
+
 Write-Host 'Product consistency checks' -ForegroundColor Cyan
 
-# 版本号散在五个文件里，漏改一处不会编译失败，只会让某个界面报出别的版本。
+# 版本号散在多个文件里（清单见 scripts/release/version-sources.json），漏改一处不会编译
+# 失败，只会让某个界面报出别的版本 —— 或者让插件在「程序和功能」里显示另一个版本号。
+# 每一条按清单里的 occurrences 逐处比对：package-lock 的第二处、Cargo.lock 的两条都算数。
 Test-Invariant '产品版本在全部来源中一致' {
-    $json = '(?m)("version"\s*:\s*")([^"]+)(")'
-    $cargo = '(?ms)(\[package\].*?^\s*version\s*=\s*")([^"]+)(")'
-    $sources = [ordered]@{
-        'frontend/package.json'                      = @('frontend\package.json', $json)
-        'backend/src-tauri/tauri.conf.json'          = @('backend\src-tauri\tauri.conf.json', $json)
-        'backend/src-tauri/tauri.conf.dist-dev.json' = @('backend\src-tauri\tauri.conf.dist-dev.json', $json)
-        'backend/src-tauri/Cargo.toml'               = @('backend\src-tauri\Cargo.toml', $cargo)
-        'backend/hifishifter-plugin/Cargo.toml'      = @('backend\hifishifter-plugin\Cargo.toml', $cargo)
-    }
+    $sources = Get-Content -LiteralPath (Join-Path $root 'scripts/release/version-sources.json') -Raw -Encoding utf8 | ConvertFrom-Json
     $found = [ordered]@{}
-    foreach ($source in $sources.GetEnumerator()) {
-        $match = [regex]::Match((Get-RepoText $source.Value[0]), $source.Value[1])
-        if (!$match.Success) { throw "$($source.Key) 里找不到版本字段" }
-        $found[$source.Key] = $match.Groups[2].Value
+    foreach ($source in $sources.sources) {
+        $occurrences = [int]$source.occurrences
+        $matches = [regex]::Matches((Get-RepoText $source.path), $source.pattern)
+        if ($matches.Count -lt $occurrences) {
+            throw "$($source.path) 里只找到 $($matches.Count) 处版本字段，清单要求 $occurrences 处"
+        }
+        for ($i = 0; $i -lt $occurrences; $i++) {
+            $name = if ($source.id) { $source.id } else { $source.path }
+            $label = if ($occurrences -eq 1) { $name } else { "$name #$($i + 1)" }
+            $found[$label] = $matches[$i].Groups[2].Value
+        }
     }
     $distinct = @($found.Values | Select-Object -Unique)
     if ($distinct.Count -ne 1) {
         $report = ($found.GetEnumerator() | ForEach-Object { "$($_.Key) = $($_.Value)" }) -join ' | '
         throw "版本号不一致（跑 scripts/release/set-version.ps1）：$report"
     }
-    "全部来源 = $($distinct[0])"
+    "全部来源 = $($distinct[0])（$($found.Count) 处）"
 }
 
 # models.json 的版本号由模型内容派生，运行时靠它判断共享模型库里的那一份能不能用。
+# 权重不在干净 clone 里时，--check-manifest 会打印"检查跳过"并返回 0 —— 那是正常状态，
+# 不是回归（清单与权重的对账只在取到权重之后才可能）。
 Test-Invariant '模型清单与真实模型文件一致' {
-    & (Join-Path $root 'scripts\build\write-models-manifest.ps1') -Check
-    if (!$?) { throw 'models.json 过期（跑 scripts/build/write-models-manifest.ps1）' }
-    'backend/src-tauri/resources/models/models.json'
+    $output = Invoke-Tool 'python' @((Join-Path $root 'scripts/setup/fetch-models.py'), '--check-manifest')
+    ($output | Where-Object { $_ } | Select-Object -Last 1)
 }
 
 Test-Invariant '安装器文案与五语词表一致' {
-    & node (Join-Path $root 'scripts/release/build-installer-strings.mjs') --check
-    if ($LASTEXITCODE) { throw 'installer_strings.nsh 与词表不一致（跑 node scripts/release/build-installer-strings.mjs）' }
+    Invoke-Tool 'node' @((Join-Path $root 'scripts/release/build-installer-strings.mjs'), '--check') | Out-Null
     'scripts/release/installer/installer_strings.nsh'
 }
 
@@ -150,8 +165,7 @@ Test-Invariant '工作流里没有内联的测试判据' {
 # 前端 invoke.ts 的 switch 是前端能发出的全部方法名。其中任何一个若两边后端都不派发，
 # 症状是"控件能点、点了没反应"——静默失效，且不会有编译错误。
 Test-Invariant '前端 invoke 面都有后端命令承接' {
-    $output = & python (Join-Path $root 'scripts/checks/check-command-gating.py') 2>&1
-    if ($LASTEXITCODE) { throw ($output -join ' | ') }
+    $output = Invoke-Tool 'python' @((Join-Path $root 'scripts/checks/check-command-gating.py'))
     ($output | Select-Object -First 1)
 }
 

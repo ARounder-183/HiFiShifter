@@ -7,7 +7,7 @@
 这条线上只有三件事必须绝对正确，其余都是细节：
 
 1. **版本号 = 内容哈希。** `models.json` 的 `version` 由
-   `scripts/build/write-models-manifest.ps1` 从每个文件的 sha256 汇总得出（12 位）。没有人
+   `scripts/setup/fetch-models.py --write-manifest` 从每个文件的 sha256 汇总得出（12 位）。没有人
    手写它，因此"模型换了、版本号忘了改"这件事不可能发生。
 2. **资产的字节可复算。** 同一份权重在任何机器上打出来的 zip 逐字节相同 —— 所以它的
    sha256 才配当发布物的身份（`fetch-models.py --package` 保证这一点）。
@@ -17,7 +17,7 @@
 
 | 位置 | 谁写 | 谁读 |
 | --- | --- | --- |
-| `backend/src-tauri/resources/models/`（工作树） | `scripts/setup/fetch-models.py` | 构建脚本、`write-models-manifest.ps1` |
+| `backend/src-tauri/resources/models/`（工作树） | `scripts/setup/fetch-models.py` | 构建脚本、`--write-manifest` |
 | App / VST3 bundle 里的 `models/models.json` | `build.ps1`、`vst3/unix/build.sh`（只拷清单） | 运行时 `model_store`，用来判断共享库能不能用 |
 | 共享模型库 `%PROGRAMDATA%\HiFiShifter\models\<version>`（仅 Windows） | 合并安装器（独占写） | App 与插件（只读） |
 | macOS / Linux bundle 的 `Contents/Resources/models/` | 构建（自包含，权重随包） | 运行时直接读 |
@@ -48,9 +48,9 @@ backend/src-tauri/resources/models/
 
 ### 1. 生成清单
 
-```powershell
-pwsh -File scripts/build/write-models-manifest.ps1
-# wrote …/models.json (version d342aa989cee, 6 files)
+```bash
+python scripts/setup/fetch-models.py --write-manifest
+# 已写入 …/models.json（版本 d342aa989cee，6 个文件）
 ```
 
 版本号变了 = 真的换了权重；没变 = 你只是把同一份清单重新生成了一次。**不要手改
@@ -58,7 +58,7 @@ pwsh -File scripts/build/write-models-manifest.ps1
 
 ### 2. 打包并自检
 
-```powershell
+```bash
 python scripts/setup/fetch-models.py --package
 # 资产 dist/models/models-d342aa989cee.zip（151.6 MB）
 #   sha256 9750177077373869ebe0d4904b6b71674f82b032bb84ebd1ea30842c4042c6cc
@@ -179,13 +179,13 @@ CI 替你跑同一件事的另一半：`build.yml` 的每个 job 都在编译前
 | `下载失败：HTTP Error 404` | tag / 资产名不对，或 release 还是 draft | `gh release view models-<v> --json assets`；draft 就先 publish |
 | `模型权重校验失败：sha256 …` | 下载被截断、镜像是旧的，或手上是另一版权重 | 删掉本地这几个文件重取；与本文件第 2 步打印的 sha256 比对 |
 | `源目录缺少 X` | `--source` 指到了 `models\` 的上一层 | 指向同时含 `fcpe/`、`hnsep/`、`nsf_hifigan/` 的目录 |
-| `清单的 version … 与内容重算值 … 不符` | 手改过清单，或改了权重没重生成 | `pwsh -File scripts/build/write-models-manifest.ps1` |
+| `清单的 version … 与内容重算值 … 不符` | 手改过清单，或改了权重没重生成 | `python scripts/setup/fetch-models.py --write-manifest` |
 | `警告：X 不在清单里，不会进资产` | 新加了模型文件但没重生成清单 | 同上，确认后重打包 |
 | `build.yml` 在"Fetch model weights"红 | 清单已合并但资产没发（顺序反了） | 补发对应 tag 的资产，重跑 job |
 
 ## 发布前自检
 
-- [ ] 权重是最终字节，`write-models-manifest.ps1` 跑过（版本号符合预期）
+- [ ] 权重是最终字节，`fetch-models.py --write-manifest` 跑过（版本号符合预期）
 - [ ] `--package` 与 `--verify-archive` 都通过
 - [ ] release 是 pre-release；tag 与资产名都是 `models-<version>`
 - [ ] 线上资产下载回来 `--verify-archive` 通过

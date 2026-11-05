@@ -347,7 +347,7 @@ stage_bundle() {
 
     cp -R "$REPO_ROOT/backend/src-tauri/resources/models/." "$BUNDLE_DIR/Contents/Resources/models/"
     [ -f "$BUNDLE_DIR/Contents/Resources/models/models.json" ] \
-        || die "模型清单缺失：先跑 scripts/build/write-models-manifest.ps1 生成 models.json"
+        || die "模型清单缺失：先跑 python3 scripts/setup/fetch-models.py --write-manifest 生成 models.json"
 
     if [ "$HOST_OS" = "macos" ]; then
         write_info_plist

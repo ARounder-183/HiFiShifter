@@ -553,7 +553,7 @@ SectionEnd
 ; 装进 %PROGRAMDATA% 之后，App 与插件都从这一份读（见 model_store），用户只为完全
 ; 相同的 152 MB 付一次磁盘。
 ;
-; 【为什么目录名带版本号】版本由模型内容派生（scripts/build/write-models-manifest.ps1）。
+; 【为什么目录名带版本号】版本由模型内容派生（scripts/setup/fetch-models.py --write-manifest）。
 ; 升级时新版本落新目录，旧代码不会读到新权重；也正因为如此，同版本已存在就能安全跳过
 ; ——重装不必再写 152 MB。
 Section "$(HFS_COMPONENT_MODELS)"
