@@ -100,7 +100,19 @@ fn release_controller(raw: *const ARADocumentControllerInstance) {
 /// REAPER / Melodyne；2.0 **Final**（4）列出 Pro Tools。Cubase 15 实测崩在这条路上。
 #[test]
 fn every_host_generation_in_our_range_yields_a_real_controller() {
-    for generation in [ApiGeneration::V2Draft, ApiGeneration::V2Final] {
+    // 【为什么不写死这两代】区间本身是平台相关的（aarch64 的 ARA 头文件不暴露 2.0 Final
+    // 之前的枚举值，见 `runtime::lowest_supported_generation`）。从**运行时工厂记录**
+    // 读回区间再逐代驱动，用例才真的在钉"我们声明了什么就必须做到什么"。
+    let (lowest, highest) = advertised_range();
+    let generations: Vec<_> = ApiGeneration::ALL
+        .into_iter()
+        .filter(|generation| *generation >= lowest && *generation <= highest)
+        .collect();
+    assert!(
+        !generations.is_empty(),
+        "声明区间 {lowest:?}..={highest:?} 里一代都没有"
+    );
+    for generation in generations {
         let factory = probe_factory();
         factory
             .entry()

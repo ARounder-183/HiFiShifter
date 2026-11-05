@@ -180,10 +180,18 @@ fn the_advertised_ara_generation_range_covers_hosts_and_stays_honest() {
     // 所以先把两个值拷进局部变量。
     let lowest = factory.lowestSupportedApiGeneration;
     let highest = factory.highestSupportedApiGeneration;
+    // 【为什么不是写死 V2Draft】aarch64 的 ARA 头文件不暴露 2.0 Final 之前的枚举值
+    // （见 `runtime::lowest_supported_generation`）。写死会让这条断言在 arm64 上必红，
+    // 而它要钉住的其实是"下界取本平台能给的最低一代"，不是某个具体数字。
+    let expected_lowest = if ApiGeneration::V2Draft.supported_on_target() {
+        ApiGeneration::V2Draft
+    } else {
+        ApiGeneration::V2Final
+    };
     assert_eq!(
         lowest,
-        ApiGeneration::V2Draft.as_raw(),
-        "最低代数必须覆盖 2.0 Draft —— SDK 明确列出 Cubase/Nuendo 使用这一代"
+        expected_lowest.as_raw(),
+        "最低代数必须是本平台能声明的最低一代（x86_64 上就是覆盖 Cubase/Nuendo 的 2.0 Draft）"
     );
     assert_eq!(
         highest,
