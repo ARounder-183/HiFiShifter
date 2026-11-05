@@ -105,7 +105,7 @@ if [ "$HOST_OS" = "linux" ]; then
     # LD_LIBRARY_PATH —— 那是宿主进程的环境，我们无权要求。
     RUNPATH="$(readelf -d "$MODULE" 2>/dev/null | sed -n 's/.*(\(RPATH\|RUNPATH\)).*\[\(.*\)\]/\2/p' || true)"
     case ":$RUNPATH:" in
-        *':$ORIGIN'*) ok "rpath 含 \$ORIGIN（$RUNPATH）" ;;
+        *':$ORIGIN'*) ok "rpath 含 \$ORIGIN（${RUNPATH}）" ;;
         *) bad "模块没有 \$ORIGIN 的 rpath（当前：${RUNPATH:-无}）" ;;
     esac
 else

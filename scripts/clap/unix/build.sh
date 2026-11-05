@@ -91,11 +91,11 @@ else
 fi
 ARTIFACT="$OUT_DIR/${API_NAME}_v${PRODUCT_VERSION}_${HFS_TAG}-clap.tar.gz"
 
-log "平台 $HFS_TAG｜版本 $PRODUCT_VERSION｜profile $PROFILE｜输出 $OUT_DIR"
+log "平台 ${HFS_TAG}｜版本 ${PRODUCT_VERSION}｜profile ${PROFILE}｜输出 $OUT_DIR"
 
 # ── 阶段 1：编译 ─────────────────────────────────────────────────────────────
 stage_build() {
-    step "编译 hifishifter-clap（profile=$PROFILE）"
+    step "编译 hifishifter-clap（profile=${PROFILE}）"
     command -v cargo >/dev/null 2>&1 || die "缺少 cargo"
     mkdir -p "$OUT_DIR"
     local cargo_log="$TARGET_DIR/cargo-clap.log"
@@ -107,11 +107,11 @@ stage_build() {
         -p hifishifter-clap --profile "$PROFILE" --locked >"$cargo_log" 2>&1 || status=$?
     if [ "$status" -ne 0 ]; then
         hfs_report_build_failure "$cargo_log" "$status"
-        die "编译失败（exit $status），完整日志：$cargo_log"
+        die "编译失败（exit ${status}），完整日志：$cargo_log"
     fi
     local lib="$TARGET_DIR/$PROFILE_DIR/$CARGO_LIB"
     [ -f "$lib" ] || die "编译成功但找不到产物：$lib"
-    log "产物 $lib（$(du -h "$lib" | cut -f1)）"
+    log "产物 ${lib}（$(du -h "$lib" | cut -f1)）"
 }
 
 # ── 阶段 2：前端产物 ─────────────────────────────────────────────────────────
@@ -139,9 +139,9 @@ stage_frontend() {
 # 之前的 CLAP 脚本只拷了模块，于是 ldd 报 not found、macOS 的 dlopen 直接
 # Library not loaded: @rpath/libSoundTouchDLL.dylib —— 承诺在代码里，兑现没人做。
 stage_bundle() {
-    step "组装 CLAP（$HFS_TAG）"
+    step "组装 CLAP（${HFS_TAG}）"
     local lib="$TARGET_DIR/$PROFILE_DIR/$CARGO_LIB"
-    [ -f "$lib" ] || die "缺少编译产物：$lib（先跑 --stage=build）"
+    [ -f "$lib" ] || die "缺少编译产物：${lib}（先跑 --stage=build）"
 
     rm -rf "$OUT_DIR/clap"
     if [ "$HFS_OS" = "linux" ]; then

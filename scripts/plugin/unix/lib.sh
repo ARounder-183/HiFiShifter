@@ -85,11 +85,11 @@ hfs_stage_runtime_deps() {
     while IFS= read -r dep; do
         [ -n "$dep" ] || continue
         src="$target/$dep"
-        [ -e "$src" ] || hfs_die "缺少运行时依赖 $src（先编译：ort 的 copy-dylibs 会把它放在 target 目录下）"
+        [ -e "$src" ] || hfs_die "缺少运行时依赖 ${src}（先编译：ort 的 copy-dylibs 会把它放在 target 目录下）"
         # -L：ORT 的 dawn 在 target 下是指向 ~/.cache 的符号链接，直接 cp 会在压缩包里
         # 留下一个悬空链接（用户机上指向不存在的路径）。
         cp -Lf "$src" "$dest/$dep"
-        hfs_log "依赖 $dep（$(du -h "$dest/$dep" | cut -f1)）"
+        hfs_log "依赖 ${dep}（$(du -h "$dest/$dep" | cut -f1)）"
     done <<< "$(hfs_runtime_deps)"
 }
 
@@ -152,7 +152,7 @@ hfs_write_info_plist() {
         printf '  <key>HiFiShifterVersion</key><string>%s</string>\n' "$version"
         printf '</dict>\n</plist>\n'
     } >"$path"
-    hfs_log "Info.plist 已生成（CFBundleVersion=$numeric）"
+    hfs_log "Info.plist 已生成（CFBundleVersion=${numeric}）"
 }
 
 # 签名身份：默认 ad-hoc（arm64 上未签名的 Mach-O 根本加载不了）。发布签名与公证由
@@ -191,7 +191,7 @@ hfs_assert_rpath() {
         command -v readelf >/dev/null 2>&1 || { hfs_log "SKIP rpath：没有 readelf"; return 0; }
         paths="$(readelf -d "$module" 2>/dev/null | sed -n 's/.*(\(RPATH\|RUNPATH\)).*\[\(.*\)\]/\2/p' | tr '\n' ':')"
         case ":$paths" in
-            *':$ORIGIN'*) hfs_log "rpath 含 \$ORIGIN（$paths）"; return 0 ;;
+            *':$ORIGIN'*) hfs_log "rpath 含 \$ORIGIN（${paths}）"; return 0 ;;
         esac
         hfs_die "模块没有 \$ORIGIN 的 rpath（当前：${paths:-无}）：用户机上依赖会解析失败"
     else

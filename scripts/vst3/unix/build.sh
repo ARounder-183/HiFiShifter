@@ -119,7 +119,7 @@ for tool in git python3 tar; do
     command -v "$tool" >/dev/null 2>&1 || die "缺少必需工具：$tool"
 done
 
-log "平台 $BUNDLE_TAG｜版本 $PRODUCT_VERSION｜profile $PROFILE｜输出 $OUT_DIR"
+log "平台 ${BUNDLE_TAG}｜版本 ${PRODUCT_VERSION}｜profile ${PROFILE}｜输出 $OUT_DIR"
 
 # ── 阶段 1：SDK ──────────────────────────────────────────────────────────────
 #
@@ -144,17 +144,17 @@ sync_submodule() {
     # 不用数组拼参数：macOS 自带 bash 3.2 在 set -u 下展开空数组会直接中止。
     if [ -e "$subdir/.git" ]; then
         git -C "$dir" submodule update --init --force -- "$sub" >/dev/null 2>&1 \
-            || die "$name：子模块 $sub 同步失败"
+            || die "${name}：子模块 $sub 同步失败"
     else
         log "取 $name 子模块 $sub@${commit:0:12}"
         git -C "$dir" submodule update --init --depth 1 --force -- "$sub" >/dev/null 2>&1 \
-            || die "$name：子模块 $sub 拉取失败"
+            || die "${name}：子模块 $sub 拉取失败"
     fi
 
     actual="$(git -C "$subdir" rev-parse HEAD 2>/dev/null || true)"
-    [ "$actual" = "$commit" ] || die "$name 的子模块 $sub 与 pin 不符：期望 $commit，实际 ${actual:-（缺失）}"
+    [ "$actual" = "$commit" ] || die "$name 的子模块 $sub 与 pin 不符：期望 ${commit}，实际 ${actual:-（缺失）}"
     actual="$(git -C "$subdir" rev-parse 'HEAD^{tree}')"
-    [ "$actual" = "$tree" ] || die "$name 的子模块 $sub tree 与 pin 不符：期望 $tree，实际 $actual"
+    [ "$actual" = "$tree" ] || die "$name 的子模块 $sub tree 与 pin 不符：期望 ${tree}，实际 $actual"
     log "$name 子模块 $sub 校验通过（${commit:0:12}）"
 }
 
@@ -176,11 +176,11 @@ sync_sdk() {
         log "取 $name${commit:0:12}"
         git -C "$dir" fetch --depth 1 origin "$commit" >/dev/null 2>&1 \
             || git -C "$dir" fetch origin "$commit" >/dev/null 2>&1 \
-            || die "$name：无法从 $repo 取得 commit $commit"
+            || die "${name}：无法从 $repo 取得 commit $commit"
     fi
     git -C "$dir" checkout -q --detach --force "$commit"
     actual_tree="$(git -C "$dir" rev-parse "HEAD^{tree}")"
-    [ "$actual_tree" = "$tree" ] || die "$name 的 tree 与 pin 不符：期望 $tree，实际 $actual_tree"
+    [ "$actual_tree" = "$tree" ] || die "$name 的 tree 与 pin 不符：期望 ${tree}，实际 $actual_tree"
     log "$name 校验通过（$(git -C "$dir" rev-parse --short HEAD)）"
 
     # pin 里有 submodule 字段才处理（CLAP 这种纯头文件 SDK 没有子模块）。
@@ -249,13 +249,13 @@ ensure_toolchain() {
         log "钉死的 $pinned 未安装；复用 stable（rustc 版本相同）"
         return 0
     fi
-    die "找不到 rustup 工具链 $pinned（rust-toolchain.toml 钉死）。
+    die "找不到 rustup 工具链 ${pinned}（rust-toolchain.toml 钉死）。
   有网络时：rustup toolchain install $pinned
   或临时指定：export RUSTUP_TOOLCHAIN=<已装工具链名>"
 }
 
 stage_build() {
-    step "编译 hifishifter-plugin（profile=$PROFILE）"
+    step "编译 hifishifter-plugin（profile=${PROFILE}）"
     command -v cargo >/dev/null 2>&1 || die "缺少 cargo"
     ensure_toolchain
     log "$(rustc -V 2>/dev/null || echo 'rustc 版本未知')"
@@ -271,12 +271,12 @@ stage_build() {
         -p hifishifter-plugin --profile "$PROFILE" --locked >"$CARGO_LOG" 2>&1 || status=$?
     if [ "$status" -ne 0 ]; then
         hfs_report_build_failure "$CARGO_LOG" "$status"
-        die "编译失败（exit $status），完整日志：$CARGO_LOG"
+        die "编译失败（exit ${status}），完整日志：$CARGO_LOG"
     fi
-    log "编译完成（$(grep -c "^warning" "$CARGO_LOG" || true) 条 warning；日志 $CARGO_LOG）"
+    log "编译完成（$(grep -c "^warning" "$CARGO_LOG" || true) 条 warning；日志 ${CARGO_LOG}）"
     local lib="$TARGET_DIR/$PROFILE_DIR/$CARGO_LIB"
     [ -f "$lib" ] || die "编译成功但找不到产物：$lib"
-    log "产物 $lib（$(du -h "$lib" | cut -f1)）"
+    log "产物 ${lib}（$(du -h "$lib" | cut -f1)）"
 }
 
 # ── 阶段 4：组装 bundle ──────────────────────────────────────────────────────
@@ -303,9 +303,9 @@ stage_models_fetch() {
 }
 
 stage_bundle() {
-    step "组装 $API_NAME.vst3（$BUNDLE_TAG）"
+    step "组装 $API_NAME.vst3（${BUNDLE_TAG}）"
     local lib="$TARGET_DIR/$PROFILE_DIR/$CARGO_LIB"
-    [ -f "$lib" ] || die "缺少编译产物：$lib（先跑 --stage=build）"
+    [ -f "$lib" ] || die "缺少编译产物：${lib}（先跑 --stage=build）"
 
     rm -rf "$BUNDLE_DIR"
     mkdir -p "$BUNDLE_DIR/$MODULE_SUBDIR" "$BUNDLE_DIR/$RUNTIME_LIB_SUBDIR" \
@@ -331,7 +331,7 @@ stage_bundle() {
 # ── 阶段 5：自检 ─────────────────────────────────────────────────────────────
 stage_verify() {
     step "验证 bundle"
-    [ -d "$BUNDLE_DIR" ] || die "还没有 bundle：$BUNDLE_DIR（先跑 --stage=bundle）"
+    [ -d "$BUNDLE_DIR" ] || die "还没有 bundle：${BUNDLE_DIR}（先跑 --stage=bundle）"
     bash "$SCRIPT_DIR/verify.sh" "$BUNDLE_DIR"
 }
 
@@ -340,7 +340,7 @@ stage_verify() {
 # 默认不执行：往用户的插件目录写东西不该是"构建"的隐含副作用。
 stage_install() {
     step "安装到用户的 VST3 目录"
-    [ -d "$BUNDLE_DIR" ] || die "还没有 bundle：$BUNDLE_DIR（先跑 --stage=bundle）"
+    [ -d "$BUNDLE_DIR" ] || die "还没有 bundle：${BUNDLE_DIR}（先跑 --stage=bundle）"
     local target
     if [ "$HFS_OS" = "macos" ]; then
         target="$HOME/Library/Audio/Plug-Ins/VST3"

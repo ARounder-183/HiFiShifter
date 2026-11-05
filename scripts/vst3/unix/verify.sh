@@ -72,7 +72,7 @@ for symbol in $REQUIRED_SYMBOLS; do
     if printf "%s" "$SYMBOLS" | grep -Eq "(^|[[:space:]])_?${symbol}$"; then
         ok "$symbol"
     else
-        bad "缺少导出符号 $symbol（宿主会显示 0 个类，且不报错）"
+        bad "缺少导出符号 ${symbol}（宿主会显示 0 个类，且不报错）"
     fi
 done
 

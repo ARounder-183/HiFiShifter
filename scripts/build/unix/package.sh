@@ -82,7 +82,7 @@ PRODUCT_VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]
 readonly PRODUCT_VERSION
 ARTIFACT_BASE="$OUT_DIR/HiFiShifter_v${PRODUCT_VERSION}_${HFS_TAG}-plugins"
 
-log "平台 $HFS_TAG｜版本 $PRODUCT_VERSION｜格式 $FORMATS｜profile $PROFILE"
+log "平台 ${HFS_TAG}｜版本 ${PRODUCT_VERSION}｜格式 ${FORMATS}｜profile $PROFILE"
 
 wants() {
     case ",$FORMATS," in
@@ -146,7 +146,7 @@ merge_arch() {
     [ "$HFS_OS" = "macos" ] || die "--merge-arch 只在 macOS 上有意义"
     command -v lipo >/dev/null 2>&1 || die "缺少 lipo（需要 Xcode 命令行工具）"
     [ -d "$other" ] || die "--merge-arch 指向的目录不存在：$other"
-    step "合并 universal（$other）"
+    step "合并 universal（${other}）"
     while IFS= read -r rel; do
         [ -f "$other/$rel" ] || continue
         file -b "$OUT_DIR/$rel" | grep -q 'Mach-O' || continue
