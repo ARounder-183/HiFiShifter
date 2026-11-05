@@ -30,8 +30,10 @@ if [ -z "$BIN" ]; then
 fi
 echo "测试二进制：$BIN"
 
+# 【为什么默认按整组重放】崩溃需要"同一个进程里跑过前面上百条用例"这个前提 ——
+# 单独跑那条可疑用例是过得去的（实测 71 秒通过）。只重放单条用例等于什么都测不到。
 if [ $# -eq 0 ]; then
-    set -- 'editor::session::tests::a_drawn_curve_reaches_the_processed_output' 'vst3::'
+    set -- 'editor::' 'vst3::'
 fi
 
 for filter in "$@"; do
