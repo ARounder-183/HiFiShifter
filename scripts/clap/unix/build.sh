@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # CLAP 的 Unix 构建：编译 cdylib -> 单文件 .clap / macOS bundle -> 自检 -> dist/ tar.gz。
 set -euo pipefail
-root="$(cd "$(dirname "$0")/../.." && pwd)"
+# 本脚本在 scripts/clap/unix/ 下，仓库根是它的上三级。写成两级会 cd 到 scripts/，
+# 随后 cargo 报 "manifest path backend/Cargo.toml does not exist"（CI 上就是这样红的）。
+root="$(cd "$(dirname "$0")/../../.." && pwd)"
 cd "$root"
 stage="${1:-all}"
 version="$(python -c "import json; print(json.load(open('backend/src-tauri/tauri.conf.json'))['version'])" 2>/dev/null || echo dev)"
