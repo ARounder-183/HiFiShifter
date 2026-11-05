@@ -1388,29 +1388,21 @@ impl DocumentSession {
             .iter()
             .filter(|clip| clip.loop_enabled)
             .count();
-        hifishifter_kernel::log_limiter::emit_limited_key(
-            log::Level::Info,
-            "ara.item-map",
-            format_args!(
-                "[ara] item map: items={items} regions={} attached={attached} unbound={}                  multi={multi} max_regions_per_item={max} loops={loops}",
-                rows.len(),
-                assembly.unbound.len()
-            ),
+        log::info!(
+            "[ara] item map: items={items} regions={} attached={attached} unbound={}                  multi={multi} max_regions_per_item={max} loops={loops}",
+            rows.len(),
+            assembly.unbound.len()
         );
         // 【为什么循环要单独一行】周期未知时内核会退化成"完全不循环、后半段静音"，
         // 而那在插件里无法与"宿主没给音频"区分 —— 用户只会以为素材坏了。
         for clip in assembly.clips.iter().filter(|clip| clip.loop_enabled) {
-            hifishifter_kernel::log_limiter::emit_limited_key(
-                log::Level::Info,
-                "ara.loop",
-                format_args!(
-                    "[ara] loop clip {}: length={:.6} period={:?} media={:?} section={}",
-                    clip.id,
-                    clip.length_sec,
-                    clip.loop_period_sec,
-                    clip.takes.first().and_then(|take| take.duration_sec),
-                    clip.loop_period_sec.is_some(),
-                ),
+            log::info!(
+                "[ara] loop clip {}: length={:.6} period={:?} media={:?} section={}",
+                clip.id,
+                clip.length_sec,
+                clip.loop_period_sec,
+                clip.takes.first().and_then(|take| take.duration_sec),
+                clip.loop_period_sec.is_some(),
             );
         }
         if !assembly.unknown_loop_period.is_empty() {
@@ -4000,12 +3992,8 @@ impl DocumentSession {
             }
         }
         if kept_live_roots > 0 {
-            hifishifter_kernel::log_limiter::emit_limited_key(
-                log::Level::Info,
-                "ara.param.restore-stale",
-                format_args!(
-                    "[param] restore kept {kept_live_roots} live root(s); stale payload only filled missing roots"
-                ),
+            log::info!(
+                "[param] restore kept {kept_live_roots} live root(s); stale payload only filled missing roots"
             );
         }
         let items = self.fade_items_locked(&clip_ids);
