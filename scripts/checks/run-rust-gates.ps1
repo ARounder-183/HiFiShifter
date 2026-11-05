@@ -69,9 +69,14 @@ function Get-CargoCommand([string]$kind, [int]$Threads = 0) {
     # 抛出"，看起来像源码坏了。CI 的 plugin-gates 第一次真跑插件单测时就是这样红的。
     $msvc = Join-Path $root 'scripts\env\msvc-env.ps1'
     $sdkEnv = Join-Path $root 'scripts/env/sdk-env.ps1'
+    $sdkRoot = Join-Path $root 'third_party/sdk'
     $prefix = ''
     if (Test-Path $msvc) { $prefix += ". '$msvc';" }
-    if (Test-Path $sdkEnv) { $prefix += ". '$sdkEnv'; Set-SdkEnvironment;" }
+    # 【为什么还要判 SDK 目录在不在】fmt 那一档（Linux）不装 SDK，也不编译任何东西；
+    # 此时 Set-SdkEnvironment 会把两个空路径塞进环境变量，反而把一次纯格式检查变成
+    # "Cannot bind argument to parameter Path because it is null"。SDK 没准备好时不设，
+    # 需要它的 clippy / test 会在 build script 里给出更准确的报错。
+    if ((Test-Path $sdkEnv) -and (Test-Path $sdkRoot)) { $prefix += ". '$sdkEnv'; Set-SdkEnvironment;" }
     switch ($kind) {
         'fmt' {
             # hfs-gui（VST3 的独立渲染进程）在 backend workspace 之外，--all 覆盖不到它；
