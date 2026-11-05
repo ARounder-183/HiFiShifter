@@ -171,6 +171,34 @@ static char *slurp(const char *path) {
     return buffer;
 }
 
+static void hex16(const unsigned char *bytes, char out[33]) {
+    static const char digits[] = "0123456789abcdef";
+    for (int i = 0; i < 16; i++) {
+        out[i * 2] = digits[(bytes[i] >> 4) & 0xF];
+        out[i * 2 + 1] = digits[bytes[i] & 0xF];
+    }
+    out[32] = 0;
+}
+
+/* 把插件自己的日志尾巴打出来。
+ *
+ * 【为什么 createInstance 失败也要打】"工厂回了 kNoInterface"有两种完全不同的成因：
+ * 它不认识这个 IID，或者它认识、但对象建不出来（Processor::create() 在 ARA 运行时
+ * 初始化失败时也回同一个码）。只看返回值分不出是哪一种，而插件日志里那句
+ * "factory createInstance cid=... iid=..." 与随后的行能直接分开它们。
+ */
+static void dump_log(const char *path) {
+    char *log = slurp(path);
+    if (!log) {
+        printf("  (没有插件日志：%s)\n", path);
+        return;
+    }
+    size_t length = strlen(log);
+    size_t from = length > 3000 ? length - 3000 : 0;
+    printf("\n---- 插件日志（尾部）----\n%s\n--------------------------\n", log + from);
+    free(log);
+}
+
 static int failures = 0;
 static void expect(const char *haystack, const char *needle, const char *what) {
     if (haystack && strstr(haystack, needle)) {
@@ -234,10 +262,19 @@ int main(int argc, char **argv) {
 
     unsigned char component_iid[16];
     platform_iid(IID_COMPONENT, component_iid);
+    char log_path[1100];
+    snprintf(log_path, sizeof log_path, "%s/plugin-unknown.log", workdir);
     void *component = NULL;
     tresult result = ((CreateInstanceFn)VT(factory)[6])(
         factory, (const char *)component_cid, (const char *)component_iid, &component);
-    if (result != OK || !component) { printf("createInstance failed: %d\n", result); return 2; }
+    if (result != OK || !component) {
+        char cid_hex[33], iid_hex[33];
+        hex16(component_cid, cid_hex);
+        hex16(component_iid, iid_hex);
+        printf("createInstance failed: %d\n  cid=%s\n  iid=%s（本平台布局）\n", result, cid_hex, iid_hex);
+        dump_log(log_path);
+        return 1;
+    }
 
     /* initialize 是插件拿宿主应用接口的地方：IHostApplication 与原生扩展都在这里绑。 */
     ((InitializeFn)VT(component)[3])(component, ha_object);
@@ -247,8 +284,6 @@ int main(int argc, char **argv) {
 
     CALL(component, 2, ReleaseFn, component);
 
-    char log_path[1100];
-    snprintf(log_path, sizeof log_path, "%s/plugin-unknown.log", workdir);
     char *log = slurp(log_path);
     if (!log) {
         printf("  FAIL 没有日志：%s\n", log_path);
