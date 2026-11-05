@@ -14,7 +14,10 @@
 set -euo pipefail
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-readonly BUNDLE="${1:?用法：verify.sh <path/to/HiFiShifter.vst3>}"
+# 【为什么要先转成绝对路径】第 3 节用 "$BUNDLE"/* 判断"依赖是否落在包内"，
+# 而 ldd 给的是绝对路径。传相对路径时前缀永远对不上，两个包内依赖会被误报成泄漏 ——
+# 本地按 README 的写法跑一次就会红，CI 上却因为传的是绝对路径而绿。
+readonly BUNDLE="$(cd -- "${1:?用法：verify.sh <path/to/HiFiShifter.vst3>}" && pwd)"
 
 FAILED=0
 ok()   { printf "  \033[32m✓\033[0m %s\n" "$*"; }

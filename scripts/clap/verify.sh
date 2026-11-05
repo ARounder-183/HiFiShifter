@@ -1,65 +1,293 @@
 #!/usr/bin/env bash
-# CLAP 产物自检：只信外部证据（文件、导出符号、动态依赖、黑盒 dlopen、前端与模型清单）。
-# 用法：scripts/clap/verify.sh <path-to-HiFiShifter.clap|bundle> [--allow-ara]
+# ─────────────────────────────────────────────────────────────────────────────
+# HiFiShifter CLAP 产物自检（macOS / Linux）。
+#
+#     scripts/clap/verify.sh <path/to/HiFiShifter.clap>
+#
+# macOS 上这个路径是 bundle 目录，Linux 上是单文件模块。
+#
+# 判据与 VST3 那条流水线同源：**只信外部证据** —— 符号表、动态段、真的 dlopen 一次
+# 并跑完 process 与 state 往返，而不是"构建脚本说它没问题"。
+#
+#   1 布局  2 导出符号  3 依赖自洽  4 黑盒加载  5 macOS bundle 元数据
+#   6 打包卫生  7 前端产物  8 模型清单
+# ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-bundle="${1:-}"
-allow_ara="${2:-}"
-if [[ -z "$bundle" ]]; then echo "usage: $0 <bundle> [--allow-ara]" >&2; exit 2; fi
-[[ -e "$bundle" ]] || { echo "FAIL 1 layout: $bundle does not exist" >&2; exit 1; }
-echo "OK   1 layout: $bundle"
+readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly TARGET="${1:?用法：verify.sh <path/to/HiFiShifter.clap>}"
+
+FAILED=0
+ok()   { printf "  \033[32m✓\033[0m %s\n" "$*"; }
+bad()  { printf "  \033[31m✗\033[0m %s\n" "$*"; FAILED=1; }
+note() { printf "    %s\n" "$*"; }
+
+[ -e "$TARGET" ] || { printf "产物不存在：%s\n" "$TARGET" >&2; exit 2; }
 
 case "$(uname -s)" in
-  Darwin) module="$bundle/Contents/MacOS/HiFiShifter";;
-  *) module="$bundle";;
+    Linux)  HOST_OS="linux" ;;
+    Darwin) HOST_OS="macos" ;;
+    *)      printf "不支持的平台\n" >&2; exit 2 ;;
 esac
-[[ -f "$module" ]] || { echo "FAIL 2 module: $module is missing" >&2; exit 1; }
-if command -v nm >/dev/null 2>&1; then
-  if [[ "$(uname -s)" == "Darwin" ]]; then nm -gU "$module" | grep -q "clap_entry";
-  else nm -D --defined-only "$module" | grep -q "clap_entry"; fi
-  echo "OK   2 exports: clap_entry"
-else echo "SKIP 2 exports: nm unavailable"; fi
 
-if command -v ldd >/dev/null 2>&1; then
-  if ldd "$module" | grep -q "not found"; then echo "FAIL 3 dependencies: unresolved libraries" >&2; exit 1; fi
-  echo "OK   3 dependencies: no unresolved libraries"
-elif command -v otool >/dev/null 2>&1; then
-  otool -L "$module" >/dev/null && echo "OK   3 dependencies: otool listed the module"
-else echo "SKIP 3 dependencies: no ldd/otool"; fi
+if [ "$HOST_OS" = "linux" ]; then
+    # Linux 的 CLAP 是单文件：同级还有一个 <stem>-resources 目录。
+    if [ -d "$TARGET" ]; then MODULE="$TARGET/HiFiShifter.clap"; else MODULE="$TARGET"; fi
+    BUNDLE_DIR="$(cd -- "$(dirname -- "$MODULE")" && pwd)"
+    RESOURCES="$BUNDLE_DIR/HiFiShifter-resources"
+else
+    # macOS 的 CLAP 是 bundle：Contents/MacOS + Contents/Frameworks + Contents/Resources。
+    if [ -d "$TARGET" ]; then BUNDLE_DIR="$(cd -- "$TARGET" && pwd)"; else BUNDLE_DIR="$(cd -- "$(dirname -- "$TARGET")/../.." && pwd)"; fi
+    MODULE="$BUNDLE_DIR/Contents/MacOS/HiFiShifter"
+    RESOURCES="$BUNDLE_DIR/Contents/Resources"
+fi
 
-cc="${CC:-cc}"
-probe_bin="$(mktemp)"
-if "$cc" -o "$probe_bin" "$(dirname "$0")/probe.c" -ldl 2>/dev/null; then
-  "$probe_bin" "$module" | tee /tmp/hifishifter-clap-probe.log
-  grep -q "plugin_id=com.hifishifter.clap" /tmp/hifishifter-clap-probe.log
-  ! grep -q "ara:required" /tmp/hifishifter-clap-probe.log
-  echo "OK   4 black-box load: descriptor is readable"
-  grep -q "ara_factory=absent" /tmp/hifishifter-clap-probe.log
-  echo "OK   5 capability: no ARA factory in the Capture-only stage"
-  ! grep -q "ara:supported" /tmp/hifishifter-clap-probe.log
-  ! grep -q "ara:required" /tmp/hifishifter-clap-probe.log
-  echo "OK   8 capability: Capture-only, no ARA claim"
-  rm -f "$probe_bin"
-else echo "SKIP 4 black-box load: C compiler unavailable"; fi
+printf "\n[clap:verify] %s\n" "$MODULE"
 
-if [[ "$(uname -s)" == "Darwin" ]]; then
-  [[ -f "$bundle/Contents/Info.plist" ]] || { echo "FAIL 5 metadata: Info.plist missing" >&2; exit 1; }
-  echo "OK   5 metadata: Info.plist"
-else echo "OK   5 metadata: single-file CLAP layout"; fi
+# ── 1. 布局 ──────────────────────────────────────────────────────────────────
+printf "\n1) 布局\n"
+if [ -f "$MODULE" ]; then
+    ok "模块存在：$MODULE"
+else
+    bad "找不到模块：$MODULE"
+    printf "\n布局不对，后续检查没有意义。\n" >&2
+    exit 1
+fi
+if [ "$HOST_OS" = "linux" ]; then
+    # 单文件 CLAP 没有 Contents/，资源按 <stem>-resources 与模块同级（见 plugin-core 的
+    # ResourceLayout::Sibling）。少了这个目录，插件的 frontend_dir() 会在第一次打开
+    # 编辑器时返回错误 —— 宿主侧表现为"窗口空白"，日志里一行都没有。
+    if [ -d "$RESOURCES" ]; then ok "资源目录与模块同级：$(basename "$RESOURCES")"
+    else bad "缺少同级资源目录：$RESOURCES"; fi
+else
+    if [ -d "$RESOURCES" ]; then ok "bundle 内有 Contents/Resources"
+    else bad "缺少 Contents/Resources"; fi
+fi
+[ -f "$RESOURCES/models/models.json" ] && ok "模型清单存在" || bad "缺少 models/models.json"
 
-resources="$bundle/Contents/Resources"
-[[ -d "$bundle" ]] && [[ -d "$resources" ]] && resources="$resources" || resources="$(dirname "$module")/HiFiShifter-resources"
-if [[ -d "$resources/frontend" ]]; then
-  [[ -f "$resources/frontend/plugin.html" ]] || { echo "FAIL 6 frontend: plugin.html missing" >&2; exit 1; }
-  ! grep -R "https\?://" "$resources/frontend/plugin.html" >/dev/null
-  echo "OK   6 frontend: plugin.html has no remote reference"
-else echo "SKIP 6 frontend: not packaged in this stage"; fi
+# ── 2. 导出符号 ──────────────────────────────────────────────────────────────
+printf "\n2) 导出符号\n"
+if [ "$HOST_OS" = "linux" ]; then
+    SYMBOLS="$(nm -D --defined-only "$MODULE" 2>/dev/null || true)"
+else
+    SYMBOLS="$(nm -gU "$MODULE" 2>/dev/null || true)"
+fi
+if printf "%s" "$SYMBOLS" | grep -Eq "(^|[[:space:]])_?clap_entry$"; then
+    ok "clap_entry"
+else
+    bad "缺少导出符号 clap_entry（宿主会认为这不是一个 CLAP 插件）"
+fi
 
-if [[ -d "$resources/models" ]]; then
-  [[ -f "$resources/models/models.json" ]] || { echo "FAIL 7 models: models.json missing" >&2; exit 1; }
-  ! find "$resources/models" -name "*.onnx" | grep -q .
-  echo "OK   7 models: manifest only, no bundled weights"
-else echo "SKIP 7 models: not packaged in this stage"; fi
+# ── 3. 依赖自洽 ──────────────────────────────────────────────────────────────
+#
+# 判据：每一条动态依赖要么在包内，要么是**系统库**（/lib、/usr/lib 前缀）。
+# 其余一律算泄漏 —— 构建机上的绝对路径在用户机上必然不存在。
+printf "\n3) 动态依赖\n"
+ESCAPED=()
+if [ "$HOST_OS" = "linux" ]; then
+    LINKAGE="$(ldd "$MODULE" 2>&1 || true)"
+    if printf "%s" "$LINKAGE" | grep -q "not found"; then
+        bad "有依赖解析不到："
+        printf "%s\n" "$LINKAGE" | grep "not found" | sed "s/^/    /"
+    else
+        ok "ldd 全部解析成功"
+    fi
+    while IFS= read -r linkage_line; do
+        dep="$(printf "%s" "$linkage_line" | sed -n "s/.*=> \(\/[^ ]*\).*/\1/p")"
+        [ -z "$dep" ] && continue
+        case "$dep" in
+            "$BUNDLE_DIR"/*) continue ;;
+            /lib/*|/lib64/*|/usr/lib/*|/usr/lib64/*) continue ;;
+            *) ESCAPED+=("$dep") ;;
+        esac
+    done <<< "$LINKAGE"
+    # 依赖躺在模块旁边，就必须有 \$ORIGIN 的搜索路径；否则用户机上只能靠
+    # LD_LIBRARY_PATH —— 那是宿主进程的环境，我们无权要求。
+    RUNPATH="$(readelf -d "$MODULE" 2>/dev/null | sed -n 's/.*(\(RPATH\|RUNPATH\)).*\[\(.*\)\]/\2/p' || true)"
+    case ":$RUNPATH:" in
+        *':$ORIGIN'*) ok "rpath 含 \$ORIGIN（$RUNPATH）" ;;
+        *) bad "模块没有 \$ORIGIN 的 rpath（当前：${RUNPATH:-无}）" ;;
+    esac
+else
+    LINKAGE="$(otool -L "$MODULE" 2>&1 || true)"
+    while IFS= read -r linkage_line; do
+        dep="$(printf "%s" "$linkage_line" | sed -E "s/^[[:space:]]*//; s/ \(compatibility.*$//")"
+        [ -z "$dep" ] && continue
+        case "$dep" in
+            /usr/lib/*|/System/*) continue ;;
+            @rpath/*|@loader_path/*)
+                base="$(basename "$dep")"
+                [ -f "$BUNDLE_DIR/Contents/Frameworks/$base" ] \
+                    || bad "依赖 $base 声明为 $dep 但 Contents/Frameworks 里没有它"
+                ;;
+            *) ESCAPED+=("$dep") ;;
+        esac
+    done <<< "$(printf "%s\n" "$LINKAGE" | tail -n +2)"
+    if otool -l "$MODULE" 2>/dev/null | grep -A2 'LC_RPATH' | grep -q '@loader_path'; then
+        ok "rpath 含 @loader_path"
+    else
+        bad "模块没有 @loader_path 的 rpath"
+    fi
+fi
+if [ ${#ESCAPED[@]} -eq 0 ]; then
+    ok "没有指向包外部的非系统依赖"
+else
+    bad "以下依赖指向包外部（用户机上大概率不存在）："
+    printf "    %s\n" "${ESCAPED[@]}"
+fi
 
+# ── 4. 黑盒加载 ──────────────────────────────────────────────────────────────
+#
+# 探针真的走一遍 dlopen → init → 工厂 → 实例 → activate → process（逐样本比对直通）
+# → state 存取往返，最后断言 ARA 工厂缺席。任何一条不过都说明"能编译"与"能用"之间
+# 还有距离。
+printf "\n4) 黑盒加载（dlopen → entry → 工厂 → 实例 → process → state）\n"
+PROBE_DIR="$(mktemp -d)"
+trap 'rm -rf "$PROBE_DIR"' EXIT
+EXTRA_LIBS=""
+[ "$HOST_OS" = "linux" ] && EXTRA_LIBS="-ldl"
+if cc -O1 -Wall -o "$PROBE_DIR/probe" "$SCRIPT_DIR/probe.c" $EXTRA_LIBS 2>"$PROBE_DIR/cc.log"; then
+    if "$PROBE_DIR/probe" "$MODULE" >"$PROBE_DIR/out.log" 2>&1; then
+        ok "模块可加载，工厂与实例可用"
+        sed "s/^/    /" "$PROBE_DIR/out.log"
+        grep -q "plugin_id=com.hifishifter.clap" "$PROBE_DIR/out.log" || bad "描述符 id 不是 com.hifishifter.clap"
+        grep -q "process=ok" "$PROBE_DIR/out.log" || bad "process 没有跑通（直通比对失败）"
+        grep -q "ara_factory=absent" "$PROBE_DIR/out.log" || bad "本阶段不应暴露 ARA 工厂"
+        if grep -q "feature=ara" "$PROBE_DIR/out.log"; then
+            bad "描述符声明了 ARA feature（本阶段是 Capture-only）"
+        fi
+    else
+        bad "黑盒加载失败："
+        sed "s/^/    /" "$PROBE_DIR/out.log"
+    fi
+else
+    bad "探针编译失败（需要 C 编译器）："
+    sed "s/^/    /" "$PROBE_DIR/cc.log"
+fi
 
-echo "All CLAP checks passed."
+# ── 5. macOS bundle 元数据 ───────────────────────────────────────────────────
+if [ "$HOST_OS" = "macos" ]; then
+    printf "\n5) macOS bundle 元数据\n"
+    PLIST="$BUNDLE_DIR/Contents/Info.plist"
+    if [ -f "$PLIST" ]; then
+        ok "Info.plist 存在"
+        EXEC_NAME="$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$PLIST" 2>/dev/null || true)"
+        if [ -n "$EXEC_NAME" ] && [ -f "$BUNDLE_DIR/Contents/MacOS/$EXEC_NAME" ]; then
+            ok "CFBundleExecutable=$EXEC_NAME 指向真实文件"
+        else
+            bad "CFBundleExecutable 缺失或指向不存在的文件（宿主不会加载这个 bundle）"
+        fi
+    else
+        bad "缺少 Contents/Info.plist"
+    fi
+    if codesign --verify --strict "$BUNDLE_DIR" >/dev/null 2>&1; then
+        ok "签名有效"
+    else
+        bad "签名校验失败（arm64 上无法加载）"
+    fi
+else
+    printf "\n5) macOS bundle 元数据 —— 本平台不适用\n"
+fi
+
+# ── 6. 打包卫生 ──────────────────────────────────────────────────────────────
+printf "\n6) 打包卫生\n"
+DANGLING="$(find "$BUNDLE_DIR" -type l ! -exec test -e {} \; -print 2>/dev/null || true)"
+if [ -z "$DANGLING" ]; then
+    ok "没有悬空符号链接"
+else
+    bad "存在悬空符号链接："
+    printf "%s\n" "$DANGLING" | sed "s/^/    /"
+fi
+MODULE_KIND="$(file -b "$MODULE" 2>/dev/null || echo unknown)"
+if [ "$HOST_OS" = "linux" ]; then
+    case "$MODULE_KIND" in
+        *ELF*shared\ object*) ok "模块是 ELF 共享库" ;;
+        *) bad "模块不是 ELF 共享库：$MODULE_KIND" ;;
+    esac
+else
+    case "$MODULE_KIND" in
+        *Mach-O*) ok "模块是 Mach-O" ;;
+        *) bad "模块不是 Mach-O：$MODULE_KIND" ;;
+    esac
+fi
+
+# ── 7. 前端产物 ──────────────────────────────────────────────────────────────
+#
+# 缺一个 asset 的包是最常见的漏项，而它的表现是"插件窗口一片空白" —— 宿主不报错，
+# 日志里也没有一行。三条判据：有没有 html、html 引用的 js/css 在不在、有没有远程引用。
+printf "\n7) 前端产物\n"
+FRONTEND="$RESOURCES/frontend"
+if [ -s "$FRONTEND/plugin.html" ]; then
+    ok "plugin.html 存在（$(du -h "$FRONTEND/plugin.html" | cut -f1)）"
+else
+    bad "缺少或为空的 frontend/plugin.html"
+fi
+MISSING_ASSETS=""
+if [ -s "$FRONTEND/plugin.html" ]; then
+    while IFS= read -r asset; do
+        [ -z "$asset" ] && continue
+        case "$asset" in
+            /*) rel="${asset#/}" ;;
+            *)  rel="$asset" ;;
+        esac
+        [ -f "$FRONTEND/$rel" ] || MISSING_ASSETS="$MISSING_ASSETS $rel"
+    done <<< "$(grep -oE '(src|href)="[^"]+[.](js|css)"' "$FRONTEND/plugin.html" \
+        | sed -E 's/^(src|href)="//; s/"$//' || true)"
+fi
+if [ -z "$MISSING_ASSETS" ]; then
+    ok "html 引用的 js/css 都在包内"
+else
+    bad "html 引用了不存在的资源：$MISSING_ASSETS"
+fi
+REMOTE=""
+if [ -d "$FRONTEND" ]; then
+    HTML_REMOTE="$(grep -rInE "(src|href)[[:space:]]*=[[:space:]]*[\"']https?://" --include=*.html "$FRONTEND" 2>/dev/null || true)"
+    CSS_REMOTE="$(grep -rInE "url\([[:space:]]*[\"']?https?://" --include=*.css "$FRONTEND" 2>/dev/null || true)"
+    REMOTE="$(printf "%s\n%s\n" "$HTML_REMOTE" "$CSS_REMOTE" | sed "/^$/d")"
+fi
+if [ -z "$REMOTE" ]; then
+    ok "html/css 里没有远程引用"
+else
+    note "下列位置引用了远程资源："
+    printf "%s\n" "$REMOTE" | sed "s/^/    /"
+    bad "前端产物里有远程引用（离线打开会失败）"
+fi
+
+# ── 8. 模型自包含 ────────────────────────────────────────────────────────────
+#
+# Unix 没有安装器拥有的共享模型库（见 model_store 的模块文档：非 Windows 上
+# shared_store_dir 返回 None），插件直接用 bundle 里的副本。所以判据不是"没有权重"，
+# 而是"清单里的每个文件都在" —— 少一个的表现是推理静默降级，宿主与日志都不会报错。
+printf "\n8) 模型自包含\n"
+if [ -f "$RESOURCES/models/models.json" ]; then
+    ok "models.json 存在"
+    if command -v python3 >/dev/null 2>&1; then
+        if python3 - "$RESOURCES/models" <<'PY'
+import json, os, sys
+root = sys.argv[1]
+with open(os.path.join(root, "models.json"), encoding="utf-8") as fh:
+    manifest = json.load(fh)
+missing = [f["path"] for f in manifest.get("files", []) if not os.path.isfile(os.path.join(root, f["path"]))]
+if missing:
+    print("missing: " + ", ".join(missing))
+    sys.exit(1)
+print("files=%d version=%s" % (len(manifest.get("files", [])), manifest.get("version")))
+PY
+        then
+            ok "清单里的文件都在包里"
+        else
+            bad "清单引用的模型文件缺失（推理会静默降级）"
+        fi
+    else
+        note "SKIP：没有 python3，无法核对清单"
+    fi
+else
+    bad "缺少 models/models.json"
+fi
+
+if [ "$FAILED" = "0" ]; then
+    printf "\n[clap:verify] 全部通过\n\n"
+    exit 0
+fi
+printf "\n[clap:verify] 有检查未通过\n\n" >&2
+exit 1
