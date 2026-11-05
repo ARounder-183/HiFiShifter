@@ -102,8 +102,16 @@ if ($Target -eq 'All' -or $Target -eq 'Plugin') {
     $bundle = Join-Path $dist 'HiFiShifter.vst3'
     $module = Join-Path $bundle 'Contents\x86_64-win'
     $resources = Join-Path $bundle 'Contents\Resources'
+    # 【为什么两个目录都要整个重建，而不是往里补】两条原因叠在一起：
+    #   1. Vite 的 chunk 带内容哈希，Copy-Item 只写不删 —— 不清空就会把上一轮的 chunk
+    #      再留一份，bundle 随每次构建单调增长（安装器在用户机器上做的正是同一件事）；
+    #   2. Copy-Item 的语义坑：目标目录已存在时，它把**源目录本身**拷进去，于是第二次
+    #      构建得到 assets\assets，第三次得到 assets\assets\assets —— 直接报"项已经存在"。
+    # 先 Reset 再拷内容，两个问题一起消失，构建因此是幂等的。
     Reset-Directory $module
-    New-Item -ItemType Directory -Force "$resources\frontend", "$resources\models" | Out-Null
+    Reset-Directory "$resources\frontend"
+    Reset-Directory "$resources\models"
+    New-Item -ItemType Directory -Force "$resources\frontend\assets" | Out-Null
 
     Copy-Item "$built\hifishifter_plugin.dll" "$module\HiFiShifterEngine.dll"
     # DLL 白名单刻意不含 vslib：它是独立 App 的闭源运行时，插件不分发。
@@ -114,7 +122,7 @@ if ($Target -eq 'All' -or $Target -eq 'Plugin') {
     # 只拷插件入口与它引用的 chunk。index.html / detached.html / waveform-test.html
     # 属于独立 App 与开发页面，进了插件 bundle 既是死重量也让目录清单没法对账。
     Copy-Item frontend\dist\plugin.html "$resources\frontend"
-    Copy-Item frontend\dist\assets "$resources\frontend\assets" -Recurse
+    Copy-Item frontend\dist\assets\* "$resources\frontend\assets" -Recurse
     Copy-Item backend\src-tauri\icons\icon.ico "$resources\frontend"
 
     # 【为什么 bundle 里只有清单、没有权重】安装器把权重写进
