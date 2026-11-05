@@ -188,6 +188,18 @@ try {
         'no .onnx under INSTDIR'
     }
 
+    Assert-That '许可全文与声明落到 LICENSE 里写的路径' {
+        foreach ($rel in 'LICENSE', 'licenses\README.md', 'licenses\COPYING.LGPL-2.1', 'licenses\Apache-2.0.txt') {
+            if (!(Test-Path (Join-Path $installDir $rel))) { throw "App 缺少 $rel" }
+        }
+        $vst3Resources = Join-Path $vst3Dir 'HiFiShifter.vst3\Contents\Resources'
+        foreach ($rel in 'LICENSE', 'licenses\README.md') {
+            if (!(Test-Path (Join-Path $vst3Resources $rel))) { throw "VST3 缺少 $rel" }
+        }
+        if (Test-Path (Join-Path $installDir 'licenses\licenses')) { throw '许可目录多套了一层：licenses\licenses' }
+        'App 与 VST3 各一份 LICENSE + licenses\'
+    }
+
     Assert-That 'VST3 的 Resources\models 只有 models.json' {
         $models = Join-Path $vst3Dir 'HiFiShifter.vst3\Contents\Resources\models'
         if (!(Test-Path $models)) { throw "缺少 $models" }

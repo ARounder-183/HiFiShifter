@@ -43,7 +43,7 @@ ${StrTrimNewLines}
   !error "APP_DIR is required (staged standalone app payload)"
 !endif
 !ifndef VST3_DIR
-  !error "VST3_DIR is required (assembled HiFiShifter.vst3)"
+  !error "VST3_DIR is required (contents of the assembled HiFiShifter.vst3)"
 !endif
 !ifndef MODELS_DIR
   !error "MODELS_DIR is required (full model weights)"

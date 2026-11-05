@@ -162,7 +162,12 @@ function Write-AppPayload {
 function Write-Vst3Stage {
     $vst3 = Join-Path $stage 'vst3'
     Reset-Directory $vst3
-    Copy-Item (Join-Path $dist 'HiFiShifter.vst3') $vst3 -Recurse
+    # 【为什么拷的是 bundle 的内容，而不是 HiFiShifter.vst3 这个目录】安装器的落点是
+    # $HfsVst3Dir\${VST3_SUBDIR}，再用 File /r "${VST3_DIR}\*" 把暂存区的东西铺进去。
+    # 若整个目录进暂存区，用户机器上就会多套一层
+    # （…\VST3\HiFiShifter.vst3\HiFiShifter.vst3\Contents），而宿主只认
+    # <名字>.vst3\Contents\<架构>\<名字>.vst3 —— 插件会安静地"装好了但扫不到"。
+    Copy-Item "$dist\HiFiShifter.vst3\*" $vst3 -Recurse
     Write-Host "VST3 载荷：$vst3" -ForegroundColor Green
 }
 
@@ -179,7 +184,9 @@ function Write-LicenseStage {
     Copy-Item LICENSE $license
     $dir = Join-Path $stage 'licenses'
     Reset-Directory $dir
-    Copy-Item licenses $dir -Recurse
+    # 拷内容而不是目录：Reset-Directory 已经把 $dir 建好了，再拷 licenses 目录本身
+    # 会变成 licenses\licenses\README.md —— 而 LICENSE 里写的路径是 licenses/README.md。
+    Copy-Item 'licenses\*' $dir -Recurse
 
     # 【为什么许可页要单独一份带 BOM 的副本】NSIS 的 LicenseData 在**编译期**把文件读成
     # UTF-16 存进安装器：文件带 BOM 才按 UTF-8 解码，不带就按编译所在机器的 ANSI 代码页

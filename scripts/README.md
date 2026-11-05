@@ -28,7 +28,7 @@ Windows 只有一条构建命令，它按顺序做完：前端 → App → VST3 
 ```
 
 产物全在 `dist/`：`HiFiShifter.vst3`、`HiFiShifter-v<版本>-portable-win-<arch>.zip`、
-`HiFiShifter_v<版本>_windows-x86_64-vst3.zip`、两个 NSIS 安装器。
+`HiFiShifter_v<版本>_windows-<arch>-setup.exe`（App、VST3 与模型只装一份的合并安装器）。
 
 macOS / Linux 的 VST3 构建不经过 PowerShell：
 
