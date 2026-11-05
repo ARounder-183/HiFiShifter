@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
     canonicalKeyFromEvent,
@@ -7,6 +7,13 @@ import {
     physicalKeyFromEvent,
 } from "./keybindingMatch";
 import type { Keybinding } from "./types";
+
+/*
+ * 这个文件钉的是“非 macOS 的 Ctrl 绑定”语义；若跟随宿主平台，
+ * macOS 上会把 ctrl 映射错，测试结果因机器而异。显式固定为非 Mac，
+ * 平台分支本身由其它覆盖 mac 的用例负责。
+ */
+vi.mock("../../utils/platform", () => ({ IS_MAC: false }));
 
 /** 构造键盘事件（仅填充匹配所需的字段）。 */
 function keyEvent(

@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 /// 算法标识：改算法时必须同时升版本，旧缓存与合并引用才能正确失效。
 pub const SYLLABLE_ALGORITHM: &str = "level_vad+pitch_stability+spectral_onset";
-pub const SYLLABLE_ALGORITHM_VERSION: u32 = 1;
+pub const SYLLABLE_ALGORITHM_VERSION: u32 = 2;
 
 /// 源域音节区间（秒）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -66,6 +66,9 @@ pub struct SyllableConfig {
     pub silence_floor: f64,
     pub pitch_jump_semitones: f64,
     pub min_probation_sec: f64,
+    /// 长段内“弱边界”的最小间隔。弱边界只在没有明确音节起点时用于拆开
+    /// 持续发声，避免把整句长音压成一个不可编辑的巨块。
+    pub weak_boundary_min_gap_sec: f64,
 }
 
 impl Default for SyllableConfig {
@@ -76,6 +79,7 @@ impl Default for SyllableConfig {
             silence_floor: 0.008,
             pitch_jump_semitones: 0.8,
             min_probation_sec: 0.035,
+            weak_boundary_min_gap_sec: 0.28,
         }
     }
 }
@@ -256,6 +260,74 @@ fn collect_candidates(
             });
         }
     }
+
+    /*
+     * 持续发声段往往没有明显能量起音，也没有达到半音级的音高跳变：
+     * 一个长元音、连续滑音或长句会被判成一个巨大区间。这里补一组**弱候选**：
+     * 音高变化速度的局部峰、音高台阶（不足半音但仍在运动）、以及短时能量起伏。
+     *
+     * 弱候选从不抢占强候选：后续 `split_region` 先放强边界，弱边界只用于
+     * 填充仍然超过最大时长的区段。这样不会把颤音或正常连音切成碎片。
+     */
+    let mut prev_pitch = 0.0f64;
+    for i in 1..pitch.len() {
+        let p = pitch[i] as f64;
+        if !p.is_finite() || p <= 0.0 {
+            prev_pitch = 0.0;
+            continue;
+        }
+        let prev = pitch[i - 1] as f64;
+        if !prev.is_finite() || prev <= 0.0 {
+            prev_pitch = p;
+            continue;
+        }
+        let delta = p - prev;
+        let previous_delta = if prev_pitch > 0.0 {
+            prev - prev_pitch
+        } else {
+            delta
+        };
+        let turn = (delta - previous_delta).abs();
+        let pitch_velocity = delta.abs();
+        let pitch_turn_strength = if turn >= 0.035 {
+            (turn / 0.35).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let pitch_step_strength = if pitch_velocity >= 0.12 && pitch_velocity < pitch_jump {
+            (pitch_velocity / pitch_jump).clamp(0.0, 1.0) * 0.55
+        } else {
+            0.0
+        };
+        let level_window = if level.is_empty() {
+            0.0
+        } else {
+            let lo = i.saturating_sub(2);
+            let hi = (i + 3).min(level.len());
+            let mean = level[lo..hi]
+                .iter()
+                .map(|value| (*value as f64).max(0.0))
+                .sum::<f64>()
+                / (hi - lo).max(1) as f64;
+            if mean <= 1e-9 {
+                0.0
+            } else {
+                let variation = level[lo..hi]
+                    .iter()
+                    .map(|value| ((*value as f64).max(0.0) - mean).abs())
+                    .fold(0.0f64, f64::max);
+                (variation / mean).clamp(0.0, 1.0) * 0.22
+            }
+        };
+        let strength = (pitch_turn_strength * 0.55 + pitch_step_strength + level_window).min(0.6);
+        if strength >= 0.06 {
+            out.push(BoundaryCandidate {
+                sec: (frame_offset as f64 + i as f64 + 0.5) * frame_period_ms / 1000.0,
+                strength,
+            });
+        }
+        prev_pitch = p;
+    }
     out
 }
 
@@ -271,8 +343,14 @@ fn split_region(
         return Vec::new();
     }
     let mut cuts: Vec<f64> = Vec::new();
+    let mut weak_cuts: Vec<f64> = Vec::new();
     for candidate in candidates {
+        let is_weak = candidate.strength < 0.18;
         if candidate.sec <= start_sec + min_span_sec || candidate.sec >= end_sec - min_span_sec {
+            continue;
+        }
+        if is_weak {
+            weak_cuts.push(candidate.sec);
             continue;
         }
         if let Some(last) = cuts.last() {
@@ -293,6 +371,7 @@ fn split_region(
         cuts.push(candidate.sec);
     }
     cuts.sort_by(f64::total_cmp);
+    weak_cuts.sort_by(f64::total_cmp);
 
     let mut points = Vec::with_capacity(cuts.len() + 2);
     points.push(start_sec);
@@ -305,17 +384,33 @@ fn split_region(
     }
     points.push(end_sec);
 
-    // 候选切完之后，对每个区间再做一次最长段拆分；否则“整段一个超长块”
-    // 会绕过 max_span，长素材因此变成不可操作的巨大块。
+    /*
+     * 强候选切完之后，超长区段优先落在距离中点最近的**弱候选**上；没有弱候选时
+     * 才均分。这样连续长音也能获得贴近真实音高拐点的边界，而不是机械等距。
+     */
     let mut bounded_points = Vec::with_capacity(points.len());
     bounded_points.push(points[0]);
     for window in points.windows(2) {
         let a = window[0];
         let b = window[1];
-        let pieces = ((b - a) / max_span_sec).ceil().max(1.0) as usize;
-        let step = (b - a) / pieces as f64;
-        for index in 1..pieces {
-            bounded_points.push(a + step * index as f64);
+        if b - a <= max_span_sec + 1e-9 {
+            bounded_points.push(b);
+            continue;
+        }
+        let pieces = ((b - a) / max_span_sec).ceil().max(2.0) as usize;
+        let target_step = (b - a) / pieces as f64;
+        let min_gap = min_span_sec.max(target_step * 0.35);
+        let mut cursor = a;
+        for piece in 1..pieces {
+            let ideal = a + target_step * piece as f64;
+            let picked = weak_cuts
+                .iter()
+                .copied()
+                .filter(|cut| *cut > cursor + min_gap && *cut < b - min_gap)
+                .min_by(|left, right| (left - ideal).abs().total_cmp(&(right - ideal).abs()));
+            let next = picked.unwrap_or(ideal);
+            bounded_points.push(next);
+            cursor = next;
         }
         bounded_points.push(b);
     }
@@ -351,6 +446,59 @@ fn merge_touching_spans(spans: Vec<SyllableSpan>) -> Vec<SyllableSpan> {
         out.push(span);
     }
     out
+}
+
+/// 把分析得到的发声段补齐到可见窗口，同时保留真实音节边界。
+///
+/// 这里只做两件事：裁到窗口、填未覆盖的静音间隙。**绝不合并相邻段**：
+/// 分析器已经把 `max_span_sec` 内的音节切开，若显示层再把首尾相接的段并起来，
+/// 长素材会重新退化成整段一个块。真正重叠的段由调用方或前端最终的
+/// “不得重叠”不变量处理，不在这里做二次归并。
+pub fn fill_spans_without_merging(
+    spans: &[SyllableSpan],
+    window_start: f64,
+    window_end: f64,
+) -> Vec<SyllableSpan> {
+    if !(window_start.is_finite() && window_end.is_finite() && window_end > window_start + 1e-9) {
+        return Vec::new();
+    }
+    let mut clipped = spans
+        .iter()
+        .filter_map(|span| {
+            let start = span.start_sec.max(window_start).min(window_end);
+            let end = span.end_sec.max(window_start).min(window_end);
+            (end > start + 1e-9).then_some(SyllableSpan {
+                start_sec: start,
+                end_sec: end,
+            })
+        })
+        .collect::<Vec<_>>();
+    clipped.sort_by(|a, b| a.start_sec.total_cmp(&b.start_sec));
+    let mut filled = Vec::with_capacity(clipped.len().saturating_mul(2));
+    let mut cursor = window_start;
+    for span in clipped {
+        if span.start_sec > cursor + 1e-9 {
+            filled.push(SyllableSpan {
+                start_sec: cursor,
+                end_sec: span.start_sec,
+            });
+        }
+        let start = span.start_sec.max(cursor);
+        if span.end_sec > start + 1e-9 {
+            filled.push(SyllableSpan {
+                start_sec: start,
+                end_sec: span.end_sec,
+            });
+            cursor = span.end_sec;
+        }
+    }
+    if window_end > cursor + 1e-9 {
+        filled.push(SyllableSpan {
+            start_sec: cursor,
+            end_sec: window_end,
+        });
+    }
+    filled
 }
 
 #[cfg(test)]
@@ -416,5 +564,45 @@ mod tests {
         for pair in spans.windows(2) {
             assert!(pair[0].end_sec <= pair[1].start_sec + 1e-9);
         }
+    }
+
+    #[test]
+    fn long_constant_vowel_gets_multiple_blocks() {
+        let fps = 200.0;
+        let frames = (fps * 8.0) as usize;
+        let level = vec![0.3f32; frames];
+        let pitch = (0..frames)
+            .map(|i| {
+                let t = i as f64 / fps;
+                60.0 + ((t * 1.7).sin() * 0.6) as f32
+            })
+            .collect::<Vec<_>>();
+        let spans = estimate_syllable_spans(&level, &pitch, 5.0, SyllableConfig::default());
+        assert!(
+            spans.len() >= 5,
+            "8 秒持续长音至少应切成多段，实际 {} 段",
+            spans.len()
+        );
+        assert!(spans
+            .iter()
+            .all(|span| span.end_sec - span.start_sec <= 1.4 + 1e-9));
+    }
+
+    #[test]
+    fn filling_preserves_adjacent_algorithm_boundaries() {
+        let spans = vec![
+            SyllableSpan {
+                start_sec: 0.5,
+                end_sec: 1.0,
+            },
+            SyllableSpan {
+                start_sec: 1.0,
+                end_sec: 1.5,
+            },
+        ];
+        let filled = fill_spans_without_merging(&spans, 0.0, 2.0);
+        assert_eq!(filled.len(), 4, "首尾静音要补，但两个音节不能被并成一块");
+        assert!((filled[1].end_sec - 1.0).abs() < 1e-9);
+        assert!((filled[2].start_sec - 1.0).abs() < 1e-9);
     }
 }

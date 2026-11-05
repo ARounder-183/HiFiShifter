@@ -153,8 +153,6 @@ export function projectSourceSpansToTimeline(clip: ParamBlockSourceClip): Array<
      */
     const base: ParamBlockSourceClip = {
         ...clip,
-        // 音频 Clip 的可见窗口是 `[0, lengthSec)`；未显式给边界时按它推导，
-        // 避免在测试 / 旧载荷里把 `sourceStartSec` 缺省成 0 后错误重复循环。
         sourceStartSec: Math.max(0, finite(clip.sourceStartSec ?? 0, 0)),
         sourceEndSec: (() => {
             const start = Math.max(0, finite(clip.sourceStartSec ?? 0, 0));
@@ -340,6 +338,14 @@ export function paramBlockMergeMessageKey(
 export const MIN_AUTO_BLOCK_SEC = 0.02;
 /** mock 音节块的默认时长（秒）：足够宽到能点中、又能看到“多个相邻块”。 */
 export const MOCK_SYLLABLE_SEC = 0.55;
+/**
+ * 分析结果的最大块时长（秒）。
+ *
+ * 这是**显示层保底**，不是新的音节识别算法：上游已经判出的边界全部保留，
+ * 只有单个区间仍超过上限时才继续等分。旧工程没有分析区间时不会触发它，
+ * 仍保持“一个 Clip 一个块”的兼容语义。
+ */
+export const MAX_ANALYSIS_BLOCK_SEC = 1.4;
 /** 块高 = 半音行高（键盘键高）的倍数。纵向缩放时跟着键高一起缩放。 */
 export const PARAM_BLOCK_ROW_HEIGHT_MULTIPLIER = 1.5;
 
@@ -351,6 +357,57 @@ function clipSpan(clip: ParamBlockSourceClip): ParamBlockMember {
     const startSec = Math.max(0, finite(clip.startSec, 0));
     const endSec = Math.max(startSec, startSec + Math.max(0, finite(clip.lengthSec, 0)));
     return { clipId: clip.id, startSec, endSec };
+}
+
+/**
+ * 超过上限的分析区间再细分。
+ *
+ * 用等分而不是固定 1.4 秒硬切，保证最后一段不会只剩一两帧；所有子段仍首尾
+ * 相接，不制造人为间隙，也不改变块的代表值算法。
+ */
+function boundAnalysisSpans(
+    spans: ReadonlyArray<{ startSec: number; endSec: number }>,
+): Array<{ startSec: number; endSec: number }> {
+    const out: Array<{ startSec: number; endSec: number }> = [];
+    for (const span of spans) {
+        const startSec = span.startSec;
+        const endSec = span.endSec;
+        const durationSec = endSec - startSec;
+        if (!(durationSec > MAX_ANALYSIS_BLOCK_SEC + 1e-9)) {
+            out.push({ startSec, endSec });
+            continue;
+        }
+        const pieces = Math.ceil(durationSec / MAX_ANALYSIS_BLOCK_SEC);
+        const step = durationSec / pieces;
+        for (let index = 0; index < pieces; index += 1) {
+            out.push({
+                startSec: startSec + step * index,
+                endSec: index === pieces - 1 ? endSec : startSec + step * (index + 1),
+            });
+        }
+    }
+    return out;
+}
+
+/**
+ * 把源域音节按最大时长预切，再整体投影到时间线。
+ *
+ * 必须先在**源域**切：若先投影再切，子段仍共享原音节下标，合并记录无法区分；
+ * 源域下标是持久化合并与块身份的唯一稳定基准。切完之后的每个子段都是一条
+ * 独立音节，因此 `sourceIndex` 指向的是切分后的数组。
+ */
+function projectBoundedSourceSpansToTimeline(
+    clip: ParamBlockSourceClip,
+): Array<{ startSec: number; endSec: number; sourceIndex: number }> {
+    const rawSpans = clip.sourceSyllableSpansSec ?? [];
+    if (rawSpans.length === 0) return [];
+    const bounded = boundAnalysisSpans(
+        rawSpans.map(([startSec, endSec]) => ({ startSec, endSec })),
+    );
+    return projectSourceSpansToTimeline({
+        ...clip,
+        sourceSyllableSpansSec: bounded.map(({ startSec, endSec }) => [startSec, endSec] as const),
+    }).map((span, sourceIndex) => ({ ...span, sourceIndex }));
 }
 
 /**
@@ -406,25 +463,24 @@ export function autoBlocksForClips(
          * `sourceSyllableSpansSec`。用源域数组自投射得到一一对应的工程区间，
          * 这是块身份与持久化合并的共同基准。
          */
-        const projectedFromSource =
+        const rawProjectedFromSource =
             (clip.sourceSyllableSpansSec?.length ?? 0) > 0
                 ? projectSourceSpansToTimeline(clip)
                 : [];
+        const projectedFromSource =
+            rawProjectedFromSource.length > 0 ? projectBoundedSourceSpansToTimeline(clip) : [];
         const effectiveSpans =
             projectedFromSource.length > 0
-                ? projectedFromSource.map((span, sourceIndex) => ({
-                      ...span,
-                      // 逐段投影保留一一对应；循环内不再二次投影求下标。
-                      sourceIndex,
-                  }))
+                ? projectedFromSource
                 : effective.map((span, index) => ({ ...span, sourceIndex: index }));
         effectiveSpans.sort((a, b) => a.startSec - b.startSec);
         for (let index = 0; index < effectiveSpans.length; index += 1) {
             const span = effectiveSpans[index];
-            const sourceSpan =
-                clip.sourceSyllableSpansSec?.[span.sourceIndex >= 0 ? span.sourceIndex : index];
             const hasSourceSpan =
                 clip.sourceSyllableSpansSec !== undefined && clip.sourceSyllableSpansSec.length > 0;
+            const sourceSpan = hasSourceSpan
+                ? clip.sourceSyllableSpansSec?.[span.sourceIndex]
+                : undefined;
             /*
              * 纯测试 / 旧来源只给了工程秒 `syllableSpansSec`（没有源域数组）时，
              * 仍按工程秒校核；真实音频链路总会同时提供 `sourceSyllableSpansSec`。
@@ -442,8 +498,12 @@ export function autoBlocksForClips(
             const sourceStartForMatchSec = sourceStart;
             const sourceEndForMatchSec = sourceEnd;
             const memberSyllableId = `${clip.takeId ?? clip.id}:${sourceStart.toFixed(3)}:${sourceEnd.toFixed(3)}`;
+            const blockIdSourceIndex =
+                projectedFromSource.length > 0
+                    ? `${hasSourceSpan ? "source" : "timeline"}:${sourceStart.toFixed(3)}:${sourceEnd.toFixed(3)}:${span.startSec.toFixed(3)}:${span.endSec.toFixed(3)}`
+                    : `${span.sourceIndex}`;
             blocks.push({
-                id: `auto:${clip.id}:${index}`,
+                id: `auto:${clip.id}:${blockIdSourceIndex}`,
                 rootTrackId,
                 kind: "auto",
                 members: [
@@ -495,13 +555,18 @@ export function blocksAreAdjacent(a: ParamBlock, b: ParamBlock): boolean {
 }
 
 /** 是否已存在把这组 Clip 全部覆盖的合并块。 */
-function hasSameMergedBlock(state: ParamBlockState, blockIds: readonly string[]): boolean {
+function hasSameMergedBlock(
+    state: ParamBlockState,
+    blockIds: readonly string[],
+    mergedId: string,
+): boolean {
     const wanted = new Set(blockIds);
     return state.mergedBlocks.some(
         (merged) =>
-            merged.blockIds !== undefined &&
-            merged.blockIds.length === wanted.size &&
-            merged.blockIds.every((id) => wanted.has(id)),
+            merged.id === mergedId ||
+            (merged.blockIds !== undefined &&
+                merged.blockIds.length === wanted.size &&
+                merged.blockIds.every((id) => wanted.has(id))),
     );
 }
 
@@ -534,11 +599,19 @@ export function mergeParamBlocks(args: {
         }
     }
 
+    /*
+     * 合并 id 必须由**成员稳定引用**生成，不能由当前数组顺序或当前派生 id 拼成。
+     * 拖动提交后自动块可能重新排序；若 id 跟着变，选中态、上下文菜单与持久化
+     * 记录会在两套块集合之间来回切，表现为块在两个位置闪烁。
+     */
+    const stableIds = ordered
+        .flatMap((block) => block.members.map((member) => member.syllableId ?? member.clipId))
+        .sort();
     const blockIds = ordered.map((block) => block.id);
-    if (hasSameMergedBlock(args.state, blockIds)) {
+    const mergedId = overlapGroupId(stableIds);
+    if (hasSameMergedBlock(args.state, blockIds, mergedId)) {
         return { ok: false, reason: "already_merged" };
     }
-
     return {
         ok: true,
         state: {
@@ -546,7 +619,7 @@ export function mergeParamBlocks(args: {
             mergedBlocks: [
                 ...args.state.mergedBlocks,
                 {
-                    id: `merged:${blockIds.join("+")}`,
+                    id: mergedId,
                     blockIds,
                 },
             ],

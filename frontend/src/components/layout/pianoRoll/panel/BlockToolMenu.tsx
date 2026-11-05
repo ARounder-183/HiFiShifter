@@ -155,7 +155,7 @@ export function BlockToolMenu({ m }: Props) {
                         <span className="hs-menu__label-text">
                             {tf("param_blocks_merge_overlaps")}
                         </span>
-                        <span className="hs-type-caption" style={{ color: "var(--gray-11)" }}>
+                        <span className="hs-type-caption" style={{ color: "var(--qt-text-muted)" }}>
                             {tf("param_blocks_merge_auto_hint")}
                         </span>
                     </span>
@@ -179,7 +179,9 @@ export function BlockToolMenu({ m }: Props) {
                         className="hs-type-caption"
                         style={{
                             padding: "4px 8px",
-                            color: paramBlockMessage ? "var(--amber-11)" : "var(--gray-11)",
+                            color: paramBlockMessage
+                                ? "var(--qt-warning-text)"
+                                : "var(--qt-text-muted)",
                         }}
                     >
                         {paramBlockMessage === null

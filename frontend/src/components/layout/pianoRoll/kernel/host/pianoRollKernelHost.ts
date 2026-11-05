@@ -1202,6 +1202,12 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             averageValue: number;
             centerYPx: number;
         }> = [];
+        /*
+         * 拖动期间，参与拖动的块已经由面板冻结成**各自的矩形**（见
+         * `paramBlockSpecForDragSnapshot`）。宿主只按每个块自己的区间采样，
+         * 不再把多选块合并成一个跨整个选区的矩形：否则两个不相邻的块会被
+         * 画成一块横跨中间空白的大块。
+         */
         let liveBlocks = spec.blocks.map((block) => {
             const liveValue =
                 samples === null

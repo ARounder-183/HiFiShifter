@@ -64,6 +64,7 @@ import {
     projectSourceSpansToTimeline,
     resolveParamBlockSnapDelta,
     unmergeParamBlocks,
+    type ParamBlockMember,
     type ParamBlockState,
 } from "../paramBlocks";
 import { makeLoudnessAmplitudeMap } from "../PianoRollWaveformSurface";
@@ -2151,10 +2152,54 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     });
 
     const handleEditActionRef = useRef<(op: string) => void>(() => {});
+    type ParamBlockDragSnapshot = {
+        readonly key: string;
+        readonly ids: ReadonlySet<string>;
+        readonly members: readonly ParamBlockMember[];
+        readonly blocks: readonly {
+            readonly id: string;
+            readonly startSec: number;
+            readonly endSec: number;
+            readonly anchorValue: number | null;
+            readonly merged: boolean;
+        }[];
+        readonly baseValues: readonly number[];
+        readonly startFrame: number;
+        readonly stride: number;
+        readonly framePeriodMs: number;
+    };
+    const paramBlockSpecForDragSnapshotRef = useRef<
+        ((snapshot: ParamBlockDragSnapshot) => PianoRollParamBlockSpec | null) | null
+    >(null);
     // Stable callback that delegates to the latest handleEditOp via ref
     const stableEditAction = useCallback((op: string) => {
         handleEditActionRef.current(op);
     }, []);
+    /** 让宿主下一次绘制读到刚更新的拖动快照，而不是等某个 React 状态变化。 */
+    const invalidateParamBlockSpec = useCallback(() => {
+        const snapshot = paramBlockDragSnapshotRef.current;
+        const pv = paramViewRef.current;
+        if (snapshot !== null && pv !== null && snapshot.key === pv.key) {
+            kernelDataRef.current.paramBlocks =
+                paramBlockSpecForDragSnapshotRef.current?.(snapshot) ?? null;
+            const live = liveEditOverrideRef.current;
+            kernelDataRef.current.paramBlockSamples = {
+                /*
+                 * 代表值必须来自**手势起点**的曲线窗口。提交期间后端可能先把
+                 * `paramView` 换成新快照；若这里改读新窗口，冻结块的区间与
+                 * 数组下标会短暂错配，块本体就会在两帧位置之间跳。
+                 */
+                values:
+                    live !== null && live.key === snapshot.key ? live.edit : snapshot.baseValues,
+                startFrame: snapshot.startFrame,
+                stride: snapshot.stride,
+                framePeriodMs: snapshot.framePeriodMs,
+                isPitch: editParam === "pitch",
+                param: editParam,
+            };
+        }
+        invalidate();
+    }, [editParam, invalidate, kernelDataRef, liveEditOverrideRef, paramViewRef]);
     const paramBlockPointerRef = useRef<
         (args: {
             sec: number;
@@ -2172,6 +2217,14 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             pointerValue: (clientY: number) => number;
         }) => boolean
     >(() => false);
+    /**
+     * 正在拖动的块几何快照。
+     *
+     * 手势开始时冻结成员区间与起点曲线；拖动过程中宿主只读这份快照，不再
+     * 每帧从“当前派生块集合”重算。否则合并记录、自动重叠归并与提交后的
+     * paramView 刷新会在同一帧给出两套几何，正是块在两个位置快速闪烁的来源。
+     */
+    const paramBlockDragSnapshotRef = useRef<ParamBlockDragSnapshot | null>(null);
     /** 块命中容差（CSS px）：触摸 / 笔比鼠标更容易漂，分别给不同容差。 */
     const paramBlockHitSlopPx = 4;
 
@@ -2673,6 +2726,86 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         () => new Set(activeSelectedParamBlockIds),
         [activeSelectedParamBlockIds],
     );
+    const paramBlockSpecForDragSnapshot = useCallback(
+        (snapshot: ParamBlockDragSnapshot): PianoRollParamBlockSpec | null => {
+            if (snapshot.blocks.length === 0) return null;
+            return {
+                param: editParam,
+                valueMin: bounds.min,
+                valueMax: bounds.max,
+                valueToY: (value, heightPx) => valueToY(editParam, value, heightPx),
+                blocks: [
+                    ...snapshot.blocks.map((block) => ({
+                        id: block.id,
+                        startSec: block.startSec,
+                        endSec: block.endSec,
+                        averageValue: block.anchorValue,
+                        selected: true,
+                        merged: block.merged,
+                    })),
+                    ...paramBlocksWithValues
+                        .filter((block) => !snapshot.ids.has(block.id))
+                        .map((block) => ({
+                            id: block.id,
+                            startSec: block.startSec,
+                            endSec: block.endSec,
+                            averageValue: block.averageValue,
+                            selected: false,
+                            merged: block.kind === "merged",
+                        })),
+                ],
+                borderRgba: parseRgbaColor(
+                    normalizeCssColor(
+                        themeMode === "dark" ? "rgba(124,198,236,0.95)" : "rgba(31,103,160,0.95)",
+                    ),
+                ),
+                selectedRgba: parseRgbaColor(
+                    normalizeCssColor(
+                        themeMode === "dark" ? "rgba(210,242,255,1)" : "rgba(0,72,128,1)",
+                    ),
+                ),
+                mergedRgba: parseRgbaColor(
+                    normalizeCssColor(
+                        themeMode === "dark" ? "rgba(124,198,236,0.95)" : "rgba(31,103,160,0.95)",
+                    ),
+                ),
+                labelRgba: parseRgbaColor(
+                    normalizeCssColor(
+                        themeMode === "dark" ? "rgba(244,251,255,0.92)" : "rgba(235,247,255,0.92)",
+                    ),
+                ),
+                selectedLabelRgba: parseRgbaColor(
+                    normalizeCssColor(
+                        themeMode === "dark" ? "rgba(255,255,255,1)" : "rgba(255,255,255,1)",
+                    ),
+                ),
+                fillRgba: parseRgbaColor(
+                    normalizeCssColor(
+                        themeMode === "dark" ? "rgba(57,111,145,0.90)" : "rgba(107,158,192,0.84)",
+                    ),
+                ),
+                selectedFillRgba: parseRgbaColor(
+                    normalizeCssColor(
+                        themeMode === "dark" ? "rgba(49,132,180,0.98)" : "rgba(54,132,184,0.96)",
+                    ),
+                ),
+                mergedFillRgba: parseRgbaColor(
+                    normalizeCssColor(
+                        themeMode === "dark" ? "rgba(57,111,145,0.90)" : "rgba(107,158,192,0.84)",
+                    ),
+                ),
+                topHighlightRgba: parseRgbaColor(
+                    normalizeCssColor(
+                        themeMode === "dark" ? "rgba(255,255,255,0.11)" : "rgba(255,255,255,0.20)",
+                    ),
+                ),
+                cornerRadiusPx: 2,
+                topHighlightPx: 1,
+            };
+        },
+        [bounds.max, bounds.min, editParam, paramBlocksWithValues, themeMode, valueToY],
+    );
+    paramBlockSpecForDragSnapshotRef.current = paramBlockSpecForDragSnapshot;
     const beginParamBlockDrag = useCallback(
         (args: {
             anchorBlockId: string;
@@ -2723,6 +2856,23 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 block.members.map((member) => ({ ...member })),
             );
             const dragBlocks = [{ members: dragMembers }];
+            paramBlockDragSnapshotRef.current = {
+                key: pv.key,
+                ids: new Set(dragIds),
+                members: dragMembers.map((member) => ({ ...member })),
+                blocks: selectedBlocks.map((block) => ({
+                    id: block.id,
+                    startSec: block.startSec,
+                    endSec: block.endSec,
+                    anchorValue: block.averageValue,
+                    merged: block.kind === "merged",
+                })),
+                baseValues: startBase,
+                startFrame: pv.startFrame,
+                stride: pv.stride,
+                framePeriodMs: pv.framePeriodMs,
+            };
+            invalidateParamBlockSpec();
             const startClientY = args.clientY;
             /*
              * 拖动起点直接取块的代表值（主簇中心），不用指针落在块内的任意
@@ -2874,6 +3024,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                     rafId = null;
                 }
                 if (reason === "cancel" || !didDrag) {
+                    paramBlockDragSnapshotRef.current = null;
+                    invalidateParamBlockSpec();
                     resetLiveEditPreview(paramViewRef.current ?? pv);
                     invalidate();
                     return;
@@ -2981,9 +3133,10 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                     } catch (error) {
                         console.error("[pianoRoll] block drag commit failed", error);
                     } finally {
+                        paramBlockDragSnapshotRef.current = null;
                         endSelectionParamEdit();
                         if (liveEditActiveRef) liveEditActiveRef.current = false;
-                        invalidate();
+                        invalidateParamBlockSpec();
                     }
                 })();
             };
@@ -3003,6 +3156,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             editParam,
             effectiveProjectScale,
             invalidate,
+            invalidateParamBlockSpec,
             liveEditActiveRef,
             liveEditOverrideRef,
             mergedKeybindings,
@@ -3171,6 +3325,10 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     }, [paramBlockState.mergedBlocks, persistParamBlockMerges, selectedParamBlockIdSet]);
     paramBlockPointerRef.current = onParamBlockPointerDown;
     const paramBlockSpec = useMemo<PianoRollParamBlockSpec | null>(() => {
+        const dragSnapshot = paramBlockDragSnapshotRef.current;
+        if (dragSnapshot !== null && dragSnapshot.key === paramView?.key) {
+            return paramBlockSpecForDragSnapshot(dragSnapshot);
+        }
         const visible = paramBlockToolActive || paramBlocksVisible;
         if (!visible) return null;
         if (paramBlocksWithValues.length === 0) return null;
@@ -3264,6 +3422,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         bounds.min,
         bounds.max,
         editParam,
+        paramBlockSpecForDragSnapshot,
         valueToY,
     ]);
     const drawParamBlocks = useCallback(
@@ -3301,7 +3460,13 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
          * 仍是同一数组的最新内容。
          */
         drawParamBlocks(paramBlockSpec);
-    }, [drawParamBlocks, paramBlockSpec, paramView, liveEditOverrideRef]);
+    }, [
+        drawParamBlocks,
+        paramBlockSpec,
+        paramView,
+        liveEditOverrideRef,
+        paramBlockDragSnapshotRef,
+    ]);
     useLayoutEffect(() => {
         // 块层与曲线同属“内容坐标 → 视口投影”的图层；初次挂载时 host 可能
         // 晚于本 effect 创建，补一帧请求避免块停在首帧之前。

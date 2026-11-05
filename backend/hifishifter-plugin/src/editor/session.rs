@@ -319,51 +319,7 @@ fn fill_visible_source_window(
     spans: &[hifishifter_kernel::pitch_analysis::SyllableSpan],
     window: (f64, f64),
 ) -> Vec<hifishifter_kernel::pitch_analysis::SyllableSpan> {
-    let (window_start, window_end) = window;
-    if !(window_start.is_finite() && window_end.is_finite() && window_end > window_start + 1e-9) {
-        return Vec::new();
-    }
-    let mut clipped = spans
-        .iter()
-        .filter_map(|span| {
-            let start = span.start_sec.max(window_start).min(window_end);
-            let end = span.end_sec.max(window_start).min(window_end);
-            (end > start + 1e-9).then_some(hifishifter_kernel::pitch_analysis::SyllableSpan {
-                start_sec: start,
-                end_sec: end,
-            })
-        })
-        .collect::<Vec<_>>();
-    clipped.sort_by(|a, b| a.start_sec.total_cmp(&b.start_sec));
-    let mut merged: Vec<hifishifter_kernel::pitch_analysis::SyllableSpan> = Vec::new();
-    for span in clipped {
-        if let Some(last) = merged.last_mut() {
-            if span.start_sec <= last.end_sec + 1e-9 {
-                last.end_sec = last.end_sec.max(span.end_sec);
-                continue;
-            }
-        }
-        merged.push(span);
-    }
-    let mut filled = Vec::new();
-    let mut cursor = window_start;
-    for span in merged {
-        if span.start_sec > cursor + 1e-9 {
-            filled.push(hifishifter_kernel::pitch_analysis::SyllableSpan {
-                start_sec: cursor,
-                end_sec: span.start_sec,
-            });
-        }
-        filled.push(span.clone());
-        cursor = span.end_sec;
-    }
-    if window_end > cursor + 1e-9 {
-        filled.push(hifishifter_kernel::pitch_analysis::SyllableSpan {
-            start_sec: cursor,
-            end_sec: window_end,
-        });
-    }
-    filled
+    hifishifter_kernel::pitch_analysis::fill_spans_without_merging(spans, window.0, window.1)
 }
 /// 单个可取消DSP任务；编辑actor只收结果，计算线程不改GUI历史或参数权威。
 struct RenderTask {

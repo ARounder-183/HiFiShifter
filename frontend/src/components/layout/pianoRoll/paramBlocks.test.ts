@@ -11,6 +11,7 @@ import {
     materializeParamBlocks,
     mergeParamBlocks,
     mergeOverlappingParamBlocks,
+    MAX_ANALYSIS_BLOCK_SEC,
     MOCK_SYLLABLE_SEC,
     modeCenterOfValues,
     nearestParamBlockByTime,
@@ -116,6 +117,28 @@ describe("autoBlocksForClips", () => {
 
     it("没有显式 mock 标志时不擅自切分音频 Clip", () => {
         expect(autoBlocksForClips("root-a", [clip("audio", 0, 2)])).toHaveLength(1);
+    });
+
+    it("真实分析区间超过上限时继续拆段，子段保持源域身份", () => {
+        const blocks = autoBlocksForClips("root-a", [
+            {
+                id: "audio-long",
+                trackId: "root-a",
+                takeId: "take-long",
+                startSec: 0,
+                lengthSec: 6,
+                sourceStartSec: 0,
+                sourceEndSec: 6,
+                sourceSyllableSpansSec: [[0, 6]],
+            },
+        ]);
+        expect(blocks.length).toBeGreaterThanOrEqual(5);
+        expect(
+            blocks.every((block) => block.endSec - block.startSec <= MAX_ANALYSIS_BLOCK_SEC + 1e-9),
+        ).toBe(true);
+        // 源域先切段：每个子块都有自己的源域区间，首尾相接且覆盖原段。
+        expect(blocks[0].members[0]?.sourceStartSec).toBeCloseTo(0, 6);
+        expect(blocks.at(-1)?.members[0]?.sourceEndSec).toBeCloseTo(6, 6);
     });
 });
 
@@ -752,6 +775,33 @@ describe("param block drag", () => {
         });
         expect(first).toEqual(second);
         expect(first[0].values).toEqual([61, 61]);
+    });
+
+    it("合并块与成员块重叠时，预览只写一次合并区间", () => {
+        const segments = buildParamBlockPreviewSegments({
+            blocks: [
+                {
+                    members: [
+                        { clipId: "a", startSec: 0, endSec: 1 },
+                        { clipId: "a", startSec: 0.5, endSec: 1.5 },
+                    ],
+                },
+            ],
+            framePeriodMs: 10,
+            param: "pitch",
+            anchorValue: 60,
+            valueDelta: 1,
+            pv: {
+                startFrame: 0,
+                stride: 1,
+                edit: [60, 60, 60],
+                orig: [60, 60, 60],
+            },
+        });
+        expect(segments).toHaveLength(1);
+        // 预览基准只覆盖窗口内 3 帧；窗口外保持 0，不伪造曲线值。
+        expect(segments[0].values.slice(0, 3)).toEqual([61, 61, 61]);
+        expect(segments[0].values.slice(3).every((value) => value === 0)).toBe(true);
     });
 
     it("第二次拖动可以建立在第一次已提交曲线上，而不是原始曲线", () => {
