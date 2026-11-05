@@ -245,7 +245,10 @@ jobs:
       # 容易崩的两组各重放一遍，打印所有线程的栈；没有 gdb 就直接跳过。
       - name: Backtrace the test crash
         if: failure()
-        run: bash scripts/checks/backtrace-plugin-test-crash.sh
+        run: |
+          # ubuntu-24.04 镜像里没有 gdb（脚本自己会判一次），失败时临时装上。
+          command -v gdb >/dev/null 2>&1 || sudo apt-get install -y --no-install-recommends gdb
+          bash scripts/checks/backtrace-plugin-test-crash.sh
 
       - name: Upload build diagnostics on failure
         if: failure()

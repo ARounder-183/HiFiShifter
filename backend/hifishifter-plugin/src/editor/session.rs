@@ -3794,6 +3794,15 @@ pub(crate) mod tests {
     /// 文件里等后台收敛的用例本来就有用 30 / 60 秒的。
     const PROJECTION_CATCH_UP: Duration = Duration::from_secs(30);
 
+    /// 等 actor 回执的上限。
+    ///
+    /// 【为什么不是 5 秒】这些用例往 actor 投一条命令、再等它回信。命令本身可能是
+    /// "两条长轨原子更新"这类要真算几十秒的活，而 runner 同时在跑另外几百条用例。
+    /// `linux-aarch64` 上 `two_long_tracks_update_atomically_with_old_ready_audio_inside_pcm_budget`
+    /// 就是在这里 5 秒超时的（本模块的 `call` 助手）。等不到仍然是失败，只是不再把
+    /// "机器慢"判成"actor 挂了"。
+    const ACTOR_REPLY_TIMEOUT: Duration = Duration::from_secs(30);
+
     /// 某个组件存档里，所有权威的某条曲线是否包含给定取值。
     ///
     /// 【为什么需要它】T2 之后用户曲线只住在权威的稀疏 run 里，`params` 不再写显示
@@ -4683,7 +4692,7 @@ pub(crate) mod tests {
                 link: None,
             })
             .unwrap();
-        let result = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+        let result = receiver.recv_timeout(ACTOR_REPLY_TIMEOUT).unwrap();
         assert_eq!(result["id"], id);
         assert_eq!(result["ok"], true, "{result}");
         result["value"].clone()
@@ -5246,7 +5255,7 @@ pub(crate) mod tests {
         // 模型变化后仍发布最后一份时间线：这是 ensure_loaded 的既定语义
         // （见 an_observed_change_without_end_editing_keeps_publishing）。
         // 继续发布不代表丢掉本地曲线，下面的本地曲线断言仍然有效。
-        let published = receivers[0].recv_timeout(Duration::from_secs(5)).unwrap();
+        let published = receivers[0].recv_timeout(ACTOR_REPLY_TIMEOUT).unwrap();
         assert_eq!(published["ok"], true, "{published}");
         let local = editor.timeline.lock_or_recover();
         assert_eq!(local.params_by_root_track[ta].pitch_edit[100], 60.);
@@ -5508,7 +5517,7 @@ pub(crate) mod tests {
                     link: Some(link),
                 })
                 .unwrap();
-            let result = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+            let result = receiver.recv_timeout(ACTOR_REPLY_TIMEOUT).unwrap();
             assert_eq!(result["id"], id);
             assert_eq!(result["ok"], true, "{result}");
             result["value"].clone()
@@ -5613,8 +5622,8 @@ pub(crate) mod tests {
         link.bind(std::process::id() as i64, rb.token()).unwrap();
         drop(held);
         let mut results = [
-            receiver.recv_timeout(Duration::from_secs(5)).unwrap(),
-            receiver.recv_timeout(Duration::from_secs(5)).unwrap(),
+            receiver.recv_timeout(ACTOR_REPLY_TIMEOUT).unwrap(),
+            receiver.recv_timeout(ACTOR_REPLY_TIMEOUT).unwrap(),
         ];
         results.sort_by_key(|r| r["id"].as_u64().unwrap());
         assert_eq!(
@@ -5656,7 +5665,7 @@ pub(crate) mod tests {
             })
             .unwrap();
         assert_eq!(
-            receiver.recv_timeout(Duration::from_secs(5)).unwrap()["ok"],
+            receiver.recv_timeout(ACTOR_REPLY_TIMEOUT).unwrap()["ok"],
             true
         );
         let (reply, _) = mpsc::channel();
