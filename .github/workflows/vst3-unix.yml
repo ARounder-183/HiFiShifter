@@ -245,15 +245,7 @@ jobs:
       # 容易崩的两组各重放一遍，打印所有线程的栈；没有 gdb 就直接跳过。
       - name: Backtrace the test crash
         if: failure()
-        run: |
-          command -v gdb >/dev/null 2>&1 || { echo "没有 gdb，跳过"; exit 0; }
-          BIN=$(ls -t backend/target/debug/deps/hifishifter_plugin-* 2>/dev/null | grep -v '\.d$' | head -1)
-          [ -n "$BIN" ] || { echo "没有测试二进制，跳过"; exit 0; }
-          for filter in 'editor::session::tests::a_drawn_curve_reaches_the_processed_output' 'vst3::'; do
-            echo "::group::gdb $filter"
-            gdb -batch -ex run -ex "thread apply all bt 15" --args "$BIN" "$filter" --test-threads=1 || true
-            echo "::endgroup::"
-          done
+        run: bash scripts/checks/backtrace-plugin-test-crash.sh
 
       - name: Upload build diagnostics on failure
         if: failure()
