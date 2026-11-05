@@ -222,7 +222,14 @@ jobs:
           # job 同一条理由）。
           HIFISHIFTER_ORT_EP: cpu
         run: |
-          timeout 3300 pwsh -NoProfile -File scripts/checks/run-rust-gates.ps1 -Only test -Package hifishifter-plugin -Platform unix
+          # 【为什么不是直接写 timeout】macOS 上没有 GNU 的 timeout（coreutils 不预装），
+          # 那一步会以 127 "command not found" 结束 —— 看起来像测试挂了，其实一个用例
+          # 都没跑。有 timeout 就把卡死判在 55 分钟，没有就交给 job 的 timeout-minutes。
+          if command -v timeout >/dev/null 2>&1; then
+            timeout 3300 pwsh -NoProfile -File scripts/checks/run-rust-gates.ps1 -Only test -Package hifishifter-plugin -Platform unix
+          else
+            pwsh -NoProfile -File scripts/checks/run-rust-gates.ps1 -Only test -Package hifishifter-plugin -Platform unix
+          fi
 
       - name: Upload build diagnostics on failure
         if: failure()
