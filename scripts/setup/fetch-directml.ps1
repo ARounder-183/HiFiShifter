@@ -18,12 +18,21 @@ $dst = Join-Path $root 'backend\src-tauri\resources\DirectML.dll'
 if ([IO.Path]::DirectorySeparatorChar -ne '\') { Write-Host 'DirectML 只在 Windows 上需要，跳过'; return }
 if (Test-Path -LiteralPath $dst) { Write-Host "DirectML.dll 已就绪：$dst"; return }
 
+# 【为什么还要 Test-Path 一遍】ort 在 target 里放的是**符号链接**；缓存目录被清理后
+# 链接就悬空了，Get-ChildItem 仍然列得出来，Copy-Item 却会报 "Could not find a part
+# of the path"。悬空的、读不出的都跳过，落到 NuGet 那条路上。
 $cached = Get-ChildItem (Join-Path $root 'backend\target') -Recurse -Filter DirectML.dll -File -ErrorAction SilentlyContinue |
+    Where-Object { Test-Path -LiteralPath $_.FullName -PathType Leaf } |
     Sort-Object Length -Descending | Select-Object -First 1
 if ($cached) {
-    Copy-Item $cached.FullName $dst
-    Write-Host "DirectML.dll 取自构建缓存：$($cached.FullName)"
-    return
+    try {
+        Copy-Item -LiteralPath $cached.FullName $dst -ErrorAction Stop
+        Write-Host "DirectML.dll 取自构建缓存：$($cached.FullName)"
+        return
+    }
+    catch {
+        Write-Host "构建缓存里的那一份读不出来，改走 NuGet：$($_.Exception.Message)"
+    }
 }
 
 # 版本必须与 ort 解包的那份一致（见 Microsoft.AI.DirectML NuGet）。
