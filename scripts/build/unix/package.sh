@@ -177,6 +177,10 @@ package_linux() {
         rm -rf "$stage/HiFiShifter-resources/models"
         cp -al "$stage/HiFiShifter.vst3/Contents/Resources/models" "$stage/HiFiShifter-resources/models"
     fi
+    # 【为什么要判空】macOS 自带的是 bash 3.2，${arr[@]} 在数组为空时会以
+    # "unbound variable" 退出（set -u）。空数组只可能来自 --formats 写错，
+    # 那种情况给一句人话，而不是让用户去猜数组展开。
+    [ ${#entries[@]} -gt 0 ] || die "没有选中任何格式：--formats=$FORMATS"
     cp "$REPO_ROOT/scripts/plugin/unix/install.sh" "$stage/install.sh"
     chmod +x "$stage/install.sh"
     hfs_stage_licenses "$stage" "$REPO_ROOT"
