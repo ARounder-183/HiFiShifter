@@ -115,6 +115,9 @@ function Get-CargoCommand([string]$kind, [int]$Threads = 0) {
             # 那条用例必然找不到文件（它自己的报错也写着"先跑 cargo build"）。
             if ($pluginRun -and $threads -le 1) {
                 Write-Output "$prefix cargo build --locked --manifest-path $manifest -p hifishifter-plugin"
+                # clap 的导出表用例同样 dlopen 产出的 cdylib（hifishifter_clap.dll），
+                # 而 cargo test 只编测试用的 rlib —— 与 vst3_exports 是同一个坑。
+                Write-Output "$prefix cargo build --locked --manifest-path $manifest -p hifishifter-clap"
             }
 
             if ($pluginRun -and $threads -le 1) {
