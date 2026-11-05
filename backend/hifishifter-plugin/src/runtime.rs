@@ -89,7 +89,7 @@ pub struct Runtime {
 /// `kNoInterface`。插件在 aarch64 上一个实例都建不出来 —— linux-aarch64 的握手探针
 /// 报的就是这个（`createInstance failed: -2147467262`），macOS arm64 同样如此，
 /// 而那边 verify 的第 8 项跳过，所以它只会在宿主里表现成"这个插件 0 个类"。
-fn lowest_supported_generation() -> ApiGeneration {
+pub(crate) fn lowest_supported_generation() -> ApiGeneration {
     if ApiGeneration::V2Draft.supported_on_target() {
         ApiGeneration::V2Draft
     } else {

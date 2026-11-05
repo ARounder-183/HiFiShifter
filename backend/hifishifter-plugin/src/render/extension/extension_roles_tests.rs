@@ -28,7 +28,10 @@ fn every_assigned_role_is_served_and_unassigned_ones_are_suppressed() {
     let raw = owner
         .bind_to_document(
             document.clone(),
-            ApiGeneration::V2Draft,
+            // 【为什么不用写死的 V2Draft】aarch64 的 ARA 头文件不暴露 2.0 Final 之前的
+            // 枚举值，绑定会直接失败（见 `runtime::lowest_supported_generation`）。
+            // 这条用例判的是**角色分配**，与代数无关，取本平台能给的最低一代即可。
+            crate::runtime::lowest_supported_generation(),
             ExtensionRoles::all(),
             ExtensionRoles::EDITOR_RENDERER | ExtensionRoles::EDITOR_VIEW,
             None,
