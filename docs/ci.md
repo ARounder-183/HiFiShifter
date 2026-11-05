@@ -3,14 +3,14 @@
 六条工作流，各管一件事。判断"我的改动该看哪条"只需问两个问题：**它是不是源码级约定**、
 **它要不要产物**。
 
-| 工作流 | 触发 | 职责 | 产物 |
-| --- | --- | --- | --- |
-| `gates.yml` | 被调用 / 手动 | 源码级门禁：静态约定、前端、fmt、clippy、单测、testkit | `frontend-dist` |
-| `plugin-gates.yml` | push `develop`、PR | 直接 push 时的插件快速反馈（static + 插件并发单测） | 无 |
-| `build.yml` | PR、`v*` tag、手动 | 六平台 App 产物；Windows x64 出一个合并安装器 + 便携包 | 安装器 / DMG / AppImage / 便携包 |
-| `vst3-unix.yml` | PR、`v*` tag、手动 | Linux/macOS 的 VST3 bundle（dlopen 黑盒验证） | `*.tar.gz` + `*.sha256` |
-| `clap.yml` | PR、`v*` tag、手动 | Linux/macOS/Windows 的 CLAP 模块（导出符号 + 黑盒加载） | `HiFiShifter.clap` / bundle |
-| `security.yml` | 每周 + 依赖变更 | 依赖漏洞扫描 | 无 |
+| 工作流             | 触发               | 职责                                                                  | 产物                                                   |
+| ------------------ | ------------------ | --------------------------------------------------------------------- | ------------------------------------------------------ |
+| `gates.yml`        | 被调用 / 手动      | 源码级门禁：静态约定、前端、fmt、clippy、单测、testkit                | `frontend-dist`                                        |
+| `plugin-gates.yml` | push `develop`、PR | 直接 push 时的插件快速反馈（static + 插件并发单测）                   | 无                                                     |
+| `build.yml`        | PR、`v*` tag、手动 | 六平台 App 产物；Windows x64 出一个合并安装器 + 便携包；Unix 出插件包 | 安装器 / DMG / AppImage / 便携包 / 插件 `tar.gz`·`pkg` |
+| `vst3-unix.yml`    | PR、`v*` tag、手动 | Linux/macOS 的 VST3 bundle（dlopen 黑盒验证）                         | `*.tar.gz` + `*.sha256`                                |
+| `clap.yml`         | PR、`v*` tag、手动 | Linux/macOS/Windows 的 CLAP 模块（导出符号 + 黑盒加载）               | `HiFiShifter.clap` / bundle                            |
+| `security.yml`     | 每周 + 依赖变更    | 依赖漏洞扫描                                                          | 无                                                     |
 
 ## 为什么门禁只有一处
 
@@ -43,6 +43,23 @@
 安装器闭环（装 → 查 → 重装 → 卸载 → 查）、许可页里多语言文本的编码、AppImage 冒烟、
 DMG 里的 dylib 校验都必须**先有产物**。它们属于 `build.yml` / `vst3-unix.yml`：搬进
 `gates.yml` 只会让门禁要么什么都验不了、要么把六平台全编一遍。
+
+## Unix 插件怎么分发
+
+构建按格式分开、分发统一：
+
+- **构建**：`scripts/vst3/unix/build.sh` 与 `scripts/clap/unix/build.sh` 各管自己的
+  crate 与布局（VST3 在 Linux 上也是 `Contents/<arch>-linux/` 的 bundle，CLAP 在 Linux
+  上是单文件、在 macOS 上才是 bundle）。平台规则只有一份实现：
+  `scripts/plugin/unix/lib.sh`。
+- **分发**：`scripts/build/unix/package.sh` 编译一次前端，把两个格式装进同一个产物 ——
+  Linux 是带 `install.sh` 的 `tar.gz`，macOS 是装到 `/Library/Audio/Plug-Ins` 的
+  `pkg`。`build.yml` 的 macOS / Linux 腿在 App 之后调它，因此 App 与插件的版本不可能错配。
+- **门禁**仍由 `vst3-unix.yml` 与 `clap.yml` 承担：它们只回答"能产出、能加载"，
+  不负责分发形态。
+
+签名与公证：默认 ad-hoc（够本机与 CI 验证）。要分发给陌生用户，必须给 macOS 腿配
+`HIFISHIFTER_CODESIGN_IDENTITY` 与 `HIFISHIFTER_NOTARY_PROFILE`，否则 Gatekeeper 会拦。
 
 ## 触发与矩阵
 
@@ -86,6 +103,7 @@ Linux/macOS 暴露、且不是这轮适配引入的）：
 资产取（缓存键是 `models.json` 的哈希，模型一换键就变），因此**清单的改动必须在上传资产
 之后合并**：资产不存在时脚本退出 1，六平台会一起红而不是某条 lint 红。发布流程（打包、
 `gh release`、验证、顺序）见 [`models.md`](models.md)。
+
 ## 分支保护
 
 required checks（仓库设置里配，不在本文件里）：

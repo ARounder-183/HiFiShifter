@@ -65,9 +65,23 @@ jobs:
       - name: Fetch model weights
         run: python scripts/setup/fetch-models.py
         shell: bash
+      # 前端产物来自 gates.yml 的 frontend job。CLAP 的包与 VST3 同构地带一份
+      # frontend/ 与 models.json：少了它，自检里的"窗口空白"判据就成了空跑。
+      - name: Download frontend artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: frontend-dist
+          path: frontend-dist
+      - name: Extract frontend dist (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          ZIP=$(ls frontend-dist | grep -E "\.zip$" || true)
+          if [ -z "$ZIP" ]; then echo "No zip artifact found in frontend-dist"; ls -la frontend-dist; exit 1; fi
+          unzip frontend-dist/$ZIP -d frontend
       - name: Build CLAP (Unix)
         if: runner.os != 'Windows'
-        run: bash scripts/clap/unix/build.sh all
+        run: bash scripts/clap/unix/build.sh --reuse-frontend
       - name: Build CLAP (Windows)
         if: runner.os == 'Windows'
         shell: pwsh

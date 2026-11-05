@@ -551,6 +551,18 @@ jobs:
           cp -Rf licenses "$COPY_TARGET/licenses"
           echo "Staged $COPY_TARGET/LICENSE and $COPY_TARGET/licenses"
 
+      # ── 插件产物（Unix）─────────────────────────────────────────────
+      #
+      # 【为什么和 App 在同一条腿里出】App 与插件共用文档格式、模型清单版本与前端
+      # 产物；同一次构建里产出两种产物，版本不可能错配。格式自己的门禁仍由
+      # vst3-unix.yml 与 clap.yml 承担 —— 它们只回答"能产出、能加载"，不负责分发。
+      - name: Package plug-ins (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/build/unix/package.sh --profile dist --reuse-frontend
+
       # ── Artifact naming ───────────────────────────────────────────────
 
       - name: Determine bundles artifact name (non-Windows)
@@ -658,6 +670,18 @@ jobs:
             dist/*portable*.zip
           if-no-files-found: error
           retention-days: 30
+
+      - name: Upload plug-in package (Unix)
+        if: runner.os != 'Windows'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.artifact-name-nonwindows.outputs.artifact-name }}-plugins
+          path: |
+            dist/HiFiShifter_*_plugins.tar.gz
+            dist/HiFiShifter_*_plugins.tar.gz.sha256
+            dist/HiFiShifter_*_plugins.pkg
+            dist/HiFiShifter_*_plugins.pkg.sha256
+          if-no-files-found: error
 
       - name: Upload DMG (macOS)
         if: runner.os == 'macOS'
