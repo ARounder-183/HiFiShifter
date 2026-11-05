@@ -119,6 +119,12 @@ point there name the exact file.
    License: MIT
    https://github.com/microsoft/DirectML
 
+16. CLAP (CLever Audio Plugin) headers
+   Copyright (c) 2021-2025 Timo Kaluza and the CLAP contributors
+   License: MIT. The SDK headers are pinned to tag 1.1.9 by
+   scripts/env/plugin-sdks.json and used in source form to define the CLAP ABI.
+   https://github.com/free-audio/clap
+
 NON-COMMERCIAL WEIGHTS NOTE: item 8 (pc_nsf_hifigan) is CC BY-NC-SA 4.0 and
 therefore ships under a non-commercial license. Redistribution of this
 application (including the VST3 installer) is for non-commercial use with

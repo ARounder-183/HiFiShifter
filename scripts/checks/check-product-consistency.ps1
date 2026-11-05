@@ -81,6 +81,8 @@ Test-Invariant '随包许可清单齐全（LICENSE + licenses\ 目录）' {
     }
     $nsi = Get-RepoText 'scripts/release/merged-installer.nsi'
     if ($nsi -notmatch 'HFS_LICENSES') { throw 'merged-installer.nsi 不再安装 licenses\ 目录' }
+    $license = Get-RepoText 'LICENSE'
+    if ($license -notmatch 'CLAP \(CLever Audio Plugin\) headers') { throw 'LICENSE 未登记 CLAP SDK 的第三方许可' }
     'LICENSE + licenses\（LGPL-2.1 / Apache-2.0 / CC BY-NC-SA 声明）'
 }
 

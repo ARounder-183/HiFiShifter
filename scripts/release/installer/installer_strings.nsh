@@ -5,7 +5,7 @@
 ; 会因与本文件不一致而失败。
 
 ; 语言：en-US→English、zh-CN→SimpChinese、zh-TW→TradChinese、ja-JP→Japanese、ko-KR→Korean
-; 词条：21 条 × 5 种语言
+; 词条：23 条 × 5 种语言
 
 ; installer_app_dir_text
 LangString HFS_APP_DIR_TEXT ${LANG_ENGLISH} "Choose where the standalone app is installed."
@@ -14,12 +14,26 @@ LangString HFS_APP_DIR_TEXT ${LANG_TRADCHINESE} "請選擇獨立 App 的安裝�
 LangString HFS_APP_DIR_TEXT ${LANG_JAPANESE} "スタンドアロン版のインストール先を選んでください。"
 LangString HFS_APP_DIR_TEXT ${LANG_KOREAN} "독립 실행형 앱의 설치 위치를 선택하세요."
 
+; installer_clap_dir_text
+LangString HFS_CLAP_DIR_TEXT ${LANG_ENGLISH} "Choose the CLAP folder scanned by your DAW. HiFiShifter.clap is installed as a single file inside it."
+LangString HFS_CLAP_DIR_TEXT ${LANG_SIMPCHINESE} "请选择 DAW 会扫描的 CLAP 文件夹。插件会以 HiFiShifter.clap 单文件的形式装在其中。"
+LangString HFS_CLAP_DIR_TEXT ${LANG_TRADCHINESE} "請選擇 DAW 會掃描的 CLAP 資料夾。外掛會以 HiFiShifter.clap 單檔的形式裝在其中。"
+LangString HFS_CLAP_DIR_TEXT ${LANG_JAPANESE} "DAW がスキャンする CLAP フォルダーを選んでください。プラグインは HiFiShifter.clap の単一ファイルとしてインストールされます。"
+LangString HFS_CLAP_DIR_TEXT ${LANG_KOREAN} "DAW가 검사하는 CLAP 폴더를 선택하세요. 플러그인은 HiFiShifter.clap 단일 파일로 설치됩니다."
+
 ; installer_component_app
 LangString HFS_COMPONENT_APP ${LANG_ENGLISH} "HiFiShifter (standalone app)"
 LangString HFS_COMPONENT_APP ${LANG_SIMPCHINESE} "HiFiShifter（独立 App）"
 LangString HFS_COMPONENT_APP ${LANG_TRADCHINESE} "HiFiShifter（獨立 App）"
 LangString HFS_COMPONENT_APP ${LANG_JAPANESE} "HiFiShifter（スタンドアロン版）"
 LangString HFS_COMPONENT_APP ${LANG_KOREAN} "HiFiShifter(독립 실행형 앱)"
+
+; installer_component_clap
+LangString HFS_COMPONENT_CLAP ${LANG_ENGLISH} "CLAP plug-in (Capture-only)"
+LangString HFS_COMPONENT_CLAP ${LANG_SIMPCHINESE} "CLAP 插件（仅 Capture）"
+LangString HFS_COMPONENT_CLAP ${LANG_TRADCHINESE} "CLAP 外掛（僅 Capture）"
+LangString HFS_COMPONENT_CLAP ${LANG_JAPANESE} "CLAP プラグイン（Capture のみ）"
+LangString HFS_COMPONENT_CLAP ${LANG_KOREAN} "CLAP 플러그인(Capture 전용)"
 
 ; installer_component_models
 LangString HFS_COMPONENT_MODELS ${LANG_ENGLISH} "Shared model library"

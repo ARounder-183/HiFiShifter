@@ -21,7 +21,8 @@ if command -v nm >/dev/null 2>&1; then
 else echo "SKIP 2 exports: nm unavailable"; fi
 
 if command -v ldd >/dev/null 2>&1; then
-  ldd "$module" | grep -v "not found" >/dev/null && echo "OK   3 dependencies: no unresolved libraries"
+  if ldd "$module" | grep -q "not found"; then echo "FAIL 3 dependencies: unresolved libraries" >&2; exit 1; fi
+  echo "OK   3 dependencies: no unresolved libraries"
 elif command -v otool >/dev/null 2>&1; then
   otool -L "$module" >/dev/null && echo "OK   3 dependencies: otool listed the module"
 else echo "SKIP 3 dependencies: no ldd/otool"; fi
@@ -31,11 +32,13 @@ probe_bin="$(mktemp)"
 if "$cc" -o "$probe_bin" "$(dirname "$0")/probe.c" -ldl 2>/dev/null; then
   "$probe_bin" "$module" | tee /tmp/hifishifter-clap-probe.log
   grep -q "plugin_id=com.hifishifter.clap" /tmp/hifishifter-clap-probe.log
-  grep -q "ara:supported" /tmp/hifishifter-clap-probe.log
   ! grep -q "ara:required" /tmp/hifishifter-clap-probe.log
-  echo "OK   4 black-box load: descriptor and ARA feature are honest"
-  if [[ "$allow_ara" == "--allow-ara" ]]; then grep -q "ara_factory=present" /tmp/hifishifter-clap-probe.log;
-  else grep -q "ara_factory=present" /tmp/hifishifter-clap-probe.log && echo "OK   5 ARA discovery available (instance binding not wired)"; fi
+  echo "OK   4 black-box load: descriptor is readable"
+  grep -q "ara_factory=absent" /tmp/hifishifter-clap-probe.log
+  echo "OK   5 capability: no ARA factory in the Capture-only stage"
+  ! grep -q "ara:supported" /tmp/hifishifter-clap-probe.log
+  ! grep -q "ara:required" /tmp/hifishifter-clap-probe.log
+  echo "OK   8 capability: Capture-only, no ARA claim"
   rm -f "$probe_bin"
 else echo "SKIP 4 black-box load: C compiler unavailable"; fi
 
@@ -58,10 +61,5 @@ if [[ -d "$resources/models" ]]; then
   echo "OK   7 models: manifest only, no bundled weights"
 else echo "SKIP 7 models: not packaged in this stage"; fi
 
-# 第 8 项：阶段 1 的诚实判据。当前产物暴露 entry 级 ARA 发现，但实例绑定尚未接线；
-# 探针的 descriptor 必须含 ara:supported，且绝不声明 ara:required。
-grep -q "ara:supported" /tmp/hifishifter-clap-probe.log
-! grep -q "ara:required" /tmp/hifishifter-clap-probe.log
-echo "OK   8 capability: optional ARA, instance extension unwired"
 
 echo "All CLAP checks passed."

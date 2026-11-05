@@ -9,6 +9,8 @@ on:
 jobs:
   gates:
     uses: ./.github/workflows/gates.yml
+    with:
+      scope: frontend
     secrets: inherit
 
   build:
@@ -25,15 +27,35 @@ jobs:
             platform: windows-x86_64
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Prepare SDK pins
-        if: runner.os != "Windows"
-        run: python3 scripts/setup/fetch-models.py --check
-      - name: Prepare SDK pins (Windows)
+      - uses: actions/checkout@v6
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+          rustflags: ''
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend -> target
+          shared-key: clap-${{ matrix.platform }}
+      - name: Cache pinned SDKs
+        uses: actions/cache@v5
+        with:
+          path: third_party/sdk
+          key: plugin-sdks-${{ hashFiles('scripts/env/plugin-sdks.json') }}
+      - name: Prepare pinned SDKs (Windows)
         if: runner.os == "Windows"
         shell: pwsh
-        run: pwsh scripts/setup/prepare-plugin-sdks.ps1
+        run: ./scripts/setup/prepare-plugin-sdks.ps1
+      - name: Verify CLAP SDK pin (Unix)
+        if: runner.os != "Windows"
+        shell: bash
+        run: |
+          git clone --depth 1 --branch 1.1.9 https://github.com/free-audio/clap.git third_party/sdk/clap
+          test "$(git -C third_party/sdk/clap rev-parse HEAD)" = "$(python -c "import json; print(json.load(open('scripts/env/plugin-sdks.json'))['clap']['commit'])")"
+      - name: Fetch model weights
+        run: python scripts/setup/fetch-models.py
+        shell: bash
       - name: Build CLAP (Unix)
         if: runner.os != "Windows"
         run: bash scripts/clap/unix/build.sh all
@@ -41,9 +63,10 @@ jobs:
         if: runner.os == "Windows"
         shell: pwsh
         run: pwsh scripts/clap/windows/build.ps1
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: clap-${{ matrix.platform }}
-          path: dist/clap/**
+          path: |
+            dist/clap/**
+            dist/HiFiShifter_*clap*
           if-no-files-found: warn
-

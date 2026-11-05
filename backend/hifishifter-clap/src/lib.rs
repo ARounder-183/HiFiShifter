@@ -7,7 +7,12 @@
 #![deny(missing_docs)]
 // ABI 结构体是 C 头文件的逐字段镜像；字段语义在对应 CLAP 头文件里，不在 Rust 侧重复。
 #![allow(missing_docs)]
-#![allow(clippy::items_after_test_module, clippy::new_without_default)]
+#![allow(
+    clippy::items_after_test_module,
+    clippy::new_without_default,
+    // 按声道下标逐帧读取/写入是实时缓冲的语义本身；迭代器会掩盖通道索引。
+    clippy::needless_range_loop,
+)]
 pub mod abi;
 pub mod ara;
 pub mod audio;

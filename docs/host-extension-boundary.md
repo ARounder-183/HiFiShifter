@@ -128,6 +128,25 @@ ARA 侧改了时间拉伸 / 内容淡化，插件会继续用旧配置渲染。
 
 ---
 
+## 3.1 CLAP（Capture-only 外壳，阶段 1）
+
+当前 `hifishifter-clap` 是可被 CLAP 1.1.9 宿主扫描与加载的普通插入效果器：
+
+| 能力 | 状态 | 契约原因 |
+| --- | --- | --- |
+| 实例化 / 激活 / process / 保存 state / 销毁 | 有 | `clap.plugin-factory` + `clap.state` + `clap.audio-ports` |
+| transport 读数 | 按事件如实给 | 只从 `clap_event_transport_t` 读播放/录音/循环/拍号；`steady_time` 不推断播放 |
+| 离线 bounce | 按扩展如实给 | 只从 `clap.render` 的 `CLAP_RENDER_OFFLINE` 置位 |
+| ARA 工厂 / 实例扩展 | **不暴露** | 共享 ARA 文档模型仍在 VST3 外壳里；暴露不能创建控制器的工厂会让宿主写穿空指针 |
+| `ara:supported` / `ara:required` | 都不声明 | descriptor 只描述已履行的能力 |
+| 内嵌 WebView / 宿主心跳 | 未提供 | core 的 GUI 原语还依赖 VST3 的 `IPlugFrame` / `IRunLoop`；CLAP 需要一套 `GuiAttach` 实现 |
+| 写回 / 分割 / 建轨 / 宿主撤销 / take / folder | 不可用 | 与 ARA-only 相同：REAPER 原生扩展是 VST3 COM 专属，CLAP 没有对应接口 |
+
+**这张表是阶段 1 的契约，不是缺陷清单**：阶段 2 只有把共享 ARA 运行时抽进 core、接好
+`ClapAraPluginAdapter` 的六个生命周期观察点并跑完真机验收，才允许把 ARA 能力写回 descriptor。
+
+---
+
 ## 4. 可选的跨宿主增强
 
 **剪贴板**可以换成 ARA 原生的实现（源 id + modification + region 属性 + 私有参数块），
@@ -158,3 +177,4 @@ ARA 侧改了时间拉伸 / 内容淡化，插件会继续用旧配置渲染。
 | 身份 / 能力词汇表 | `backend/hifishifter-kernel/src/editor/host.rs` |
 | 丢失字段登记 | `backend/hifishifter-plugin/src/ara/mapping.rs`（`LOST_FIELDS`） |
 | 渲染事实 | `backend/hifishifter-plugin/src/host/geometry.rs` |
+| CLAP 外壳 | `backend/hifishifter-clap/` |

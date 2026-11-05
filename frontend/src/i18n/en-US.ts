@@ -2287,10 +2287,12 @@ export const enUS = {
         "Quit REAPER and its plug-in host processes before installing HiFiShifter.",
     installer_err_tasklist:
         "Could not confirm that REAPER has exited. Close REAPER and run the installer again.",
+    installer_clap_dir_text: "Choose the CLAP folder scanned by your DAW. HiFiShifter.clap is installed as a single file inside it.",
     installer_err_app_running: "HiFiShifter is running. Close it and run the installer again.",
     installer_uninstall_reaper_open: "Quit REAPER before uninstalling HiFiShifter.",
     installer_component_app: "HiFiShifter (standalone app)",
     installer_component_vst3: "VST3 / ARA plug-in",
+    installer_component_clap: "CLAP plug-in (Capture-only)",
     installer_component_models: "Shared model library",
     installer_component_shortcuts: "Start menu and desktop shortcuts",
     installer_component_models_install: "Installing the shared model library...",

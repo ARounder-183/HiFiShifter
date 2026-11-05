@@ -45,6 +45,9 @@ ${StrTrimNewLines}
 !ifndef VST3_DIR
   !error "VST3_DIR is required (contents of the assembled HiFiShifter.vst3)"
 !endif
+!ifndef CLAP_FILE
+  !error "CLAP_FILE is required (assembled HiFiShifter.clap module)"
+!endif
 !ifndef MODELS_DIR
   !error "MODELS_DIR is required (full model weights)"
 !endif
@@ -80,8 +83,10 @@ ${StrTrimNewLines}
 !define SEC_VST3 1
 !define SEC_MODELS 2
 !define SEC_SHORTCUTS 3
+!define SEC_CLAP 4
 
 !define VST3_SUBDIR "HiFiShifter.vst3"
+!define CLAP_FILENAME "HiFiShifter.clap"
 !define ARP_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\HiFiShifter"
 ; 旧版插件安装器留下的卸载项：本安装器接管模型库与插件目录，成功后把它清掉。
 !define LEGACY_VST3_ARP_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\HiFiShifterVST3"
@@ -105,11 +110,13 @@ ${StrTrimNewLines}
   RequestExecutionLevel user
   !define HFS_ARP_ROOT HKCU
   !define HFS_DEFAULT_VST3_DIR "$LOCALAPPDATA\HiFiShifterInstallerTest\VST3"
+  !define HFS_DEFAULT_CLAP_DIR "$LOCALAPPDATA\HiFiShifterInstallerTest\CLAP"
 !else
   InstallDir "$PROGRAMFILES64\HiFiShifter"
   RequestExecutionLevel admin
   !define HFS_ARP_ROOT HKLM
   !define HFS_DEFAULT_VST3_DIR "$COMMONFILES64\VST3"
+  !define HFS_DEFAULT_CLAP_DIR "$COMMONFILES64\CLAP"
   !define HFS_REAPER_GUARD
 !endif
 
@@ -134,6 +141,7 @@ ShowInstDetails show
 !insertmacro MUI_PAGE_COMPONENTS
 !insertmacro MUI_PAGE_DIRECTORY
 Page custom HfsVst3Page HfsVst3PageLeave
+Page custom HfsClapPage HfsClapPageLeave
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_PAGE_FINISH
 
@@ -154,6 +162,9 @@ Name "$(HFS_NAME)"
 Var HfsVst3Dialog
 Var HfsVst3Input
 Var HfsVst3Dir
+Var HfsClapDialog
+Var HfsClapInput
+Var HfsClapDir
 Var HfsIsRepair
 Var HfsModelRoot
 Var HfsVerifyRoot
@@ -182,10 +193,37 @@ Function HfsVst3Page
   nsDialogs::Show
 FunctionEnd
 
+Function HfsClapPage
+  SectionGetFlags ${SEC_CLAP} $0
+  IntOp $0 $0 & ${SF_SELECTED}
+  ${If} $0 == 0
+    Abort
+  ${EndIf}
+  !insertmacro MUI_HEADER_TEXT "$(HFS_COMPONENT_CLAP)" "$(HFS_CLAP_DIR_TEXT)"
+  nsDialogs::Create 1018
+  Pop $HfsClapDialog
+  ${If} $HfsClapDialog == error
+    Abort
+  ${EndIf}
+  ${NSD_CreateLabel} 0 0 100% 24u "$(HFS_CLAP_DIR_TEXT)"
+  Pop $0
+  ${NSD_CreateDirRequest} 0 26u 100% 12u "$HfsClapDir"
+  Pop $HfsClapInput
+  nsDialogs::Show
+FunctionEnd
+
+Function HfsClapPageLeave
+  ${NSD_GetText} $HfsClapInput $HfsClapDir
+  ${If} $HfsClapDir == ""
+    StrCpy $HfsClapDir "${HFS_DEFAULT_CLAP_DIR}"
+  ${EndIf}
+FunctionEnd
+
 Function HfsVst3PageLeave
   ${NSD_GetText} $HfsVst3Input $HfsVst3Dir
   ${If} $HfsVst3Dir == ""
     StrCpy $HfsVst3Dir "${HFS_DEFAULT_VST3_DIR}"
+  StrCpy $HfsClapDir "${HFS_DEFAULT_CLAP_DIR}"
   ${EndIf}
 FunctionEnd
 
@@ -447,6 +485,10 @@ Function un.onInit
   ${If} $HfsVst3Dir == ""
     StrCpy $HfsVst3Dir "${HFS_DEFAULT_VST3_DIR}"
   ${EndIf}
+  ReadRegStr $HfsClapDir ${HFS_ARP_ROOT} "${ARP_KEY}" "ClapDir"
+  ${If} $HfsClapDir == ""
+    StrCpy $HfsClapDir "${HFS_DEFAULT_CLAP_DIR}"
+  ${EndIf}
 
   !ifdef HFS_REAPER_GUARD
     Call un.HfsReaperRunning
@@ -510,6 +552,7 @@ Section "$(HFS_COMPONENT_APP)"
   WriteRegStr ${HFS_ARP_ROOT} "${ARP_KEY}" "Publisher" "$(HFS_PUBLISHER)"
   WriteRegStr ${HFS_ARP_ROOT} "${ARP_KEY}" "InstallLocation" "$INSTDIR"
   WriteRegStr ${HFS_ARP_ROOT} "${ARP_KEY}" "Vst3Dir" "$HfsVst3Dir"
+  WriteRegStr ${HFS_ARP_ROOT} "${ARP_KEY}" "ClapDir" "$HfsClapDir"
   ; 不带 _?=：让卸载器按默认行为把自己复制到临时目录再运行，从而能删掉自身。
   WriteRegStr ${HFS_ARP_ROOT} "${ARP_KEY}" "UninstallString" '"${UNINSTALLER}"'
   WriteRegStr ${HFS_ARP_ROOT} "${ARP_KEY}" "QuietUninstallString" '"${UNINSTALLER}" /S'
@@ -615,10 +658,19 @@ Section "$(HFS_COMPONENT_SHORTCUTS)"
   SetShellVarContext current
 SectionEnd
 
+Section "$(HFS_COMPONENT_CLAP)"
+  SetOutPath "$HfsClapDir"
+  Delete "$HfsClapDir\${CLAP_FILENAME}"
+  File "/oname=${CLAP_FILENAME}" "${CLAP_FILE}"
+  WriteRegStr ${HFS_ARP_ROOT} "${ARP_KEY}" "ClapDir" "$HfsClapDir"
+SectionEnd
+
+
 ; ── 卸载 ────────────────────────────────────────────────────────────────
 Section "Uninstall"
   ; 只删自己：$HfsVst3Dir 是 Common Files\VST3，里面还有别人的插件。
   RMDir /r "$HfsVst3Dir\${VST3_SUBDIR}"
+  Delete "$HfsClapDir\${CLAP_FILENAME}"
   ; App 目录整个属于本产品（与 Tauri 安装器的行为一致）。
   RMDir /r "$INSTDIR"
 

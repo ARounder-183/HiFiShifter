@@ -6,7 +6,6 @@
 
 use crate::abi::{clap_audio_buffer_t, clap_process_t, CLAP_SECTIME_FACTOR};
 use hifishifter_plugin_core::format::{AudioBlock, ChannelPlane, SampleWidth, TransportFrame};
-use hifishifter_plugin_core::resource_root;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -102,85 +101,100 @@ pub unsafe fn process_block(process: &clap_process_t) -> bool {
     if frames == 0 {
         return true;
     }
-    let inputs = unsafe { buffers(process.audio_inputs, process.audio_inputs_count) };
-    let outputs = unsafe { buffers_mut(process.audio_outputs, process.audio_outputs_count) };
-    let Some(inputs) = inputs else { return false };
-    let Some(outputs) = outputs else { return false };
+    let Some(inputs) = (unsafe { buffers(process.audio_inputs, process.audio_inputs_count) })
+    else {
+        return false;
+    };
+    let Some(outputs) =
+        (unsafe { buffers_mut(process.audio_outputs, process.audio_outputs_count) })
+    else {
+        return false;
+    };
     let outputs: &[clap_audio_buffer_t] = outputs;
     // F64 不处理：保守地把输出写零，但仍返回成功（与 VST3 kSample64 同口径）。
-    let f64_width = inputs
+    if inputs
         .iter()
         .chain(outputs.iter())
-        .any(|b| !b.data64.is_null());
-    if f64_width {
+        .any(|b| !b.data64.is_null())
+    {
         for output in outputs {
             unsafe { clear_f64(output, frames) };
         }
         return true;
     }
-    let mut in_planes = Vec::with_capacity(2);
+    // 固定 2 声道平面数组：音频回调不分配、不拷贝整块 PCM。
+    let mut in_planes = [ChannelPlane {
+        ptr: std::ptr::null_mut(),
+        frames: 0,
+    }; 2];
+    let mut in_count = 0usize;
     if let Some(buffer) = inputs.first() {
         for channel in 0..(buffer.channel_count as usize).min(2) {
-            let ptr = unsafe { plane_ptr32(buffer, channel, frames) };
-            let Some(ptr) = ptr else { return false };
-            in_planes.push(ChannelPlane {
+            let Some(ptr) = (unsafe { plane_ptr32(buffer, channel) }) else {
+                return false;
+            };
+            in_planes[in_count] = ChannelPlane {
                 ptr: ptr.cast::<c_void>(),
                 frames,
-            });
+            };
+            in_count += 1;
         }
     }
-    let mut out_planes = Vec::with_capacity(2);
-    let out_channels = outputs.first().map_or(0, |b| b.channel_count as usize);
-    if out_channels == 0 {
+    let Some(output) = outputs.first() else {
+        return false;
+    };
+    let channel_count = (output.channel_count as usize).min(2);
+    if channel_count == 0 {
         return false;
     }
-    for channel in 0..out_channels {
-        let ptr = unsafe {
-            plane_ptr32_mut(
-                &outputs[channel / out_channels.max(1)],
-                channel.min(out_channels - 1),
-                frames,
-            )
+    let mut out_planes = [ChannelPlane {
+        ptr: std::ptr::null_mut(),
+        frames: 0,
+    }; 2];
+    for channel in 0..channel_count {
+        let Some(ptr) = (unsafe { plane_ptr32_mut(output, channel) }) else {
+            return false;
         };
-        let Some(ptr) = ptr else { return false };
-        out_planes.push(ChannelPlane {
+        out_planes[channel] = ChannelPlane {
             ptr: ptr.cast::<c_void>(),
             frames,
-        });
+        };
     }
-    let in_place = out_planes
-        .iter()
-        .any(|out| in_planes.iter().any(|input| input.ptr == out.ptr));
-    // Core 的中性契约只描述布局；真正的 Capture/render 消费在宿主面接通之前一律透传。
+    let in_place = out_planes[..channel_count].iter().any(|out| {
+        in_planes[..in_count]
+            .iter()
+            .any(|input| input.ptr == out.ptr)
+    });
     let _block = AudioBlock {
         frames,
         sample_width: SampleWidth::F32,
-        input: &in_planes,
-        output: &mut out_planes,
+        input: &in_planes[..in_count],
+        output: &mut out_planes[..channel_count],
         in_place,
     };
-    // 保守直通：先用输入平面构造快照，再写输出，保证 in-place 时先读后写。
-    let snapshot: Vec<Vec<f32>> = in_planes
-        .iter()
-        .map(|p| unsafe { std::slice::from_raw_parts(p.ptr.cast::<f32>(), p.frames).to_vec() })
-        .collect();
-    for (index, plane) in out_planes.iter_mut().enumerate() {
-        let source = snapshot.get(index).or_else(|| snapshot.first());
-        let target =
-            unsafe { std::slice::from_raw_parts_mut(plane.ptr.cast::<f32>(), plane.frames) };
-        if let Some(source) = source {
-            if source.len() == target.len() {
-                target.copy_from_slice(source);
-            } else if source.len() == 1 {
-                target.fill(source[0]);
-            } else {
-                target.fill(0.0);
-            }
+    // 保守直通：逐帧先读两个源样本再写输出；in-place 与声道交换都安全。
+    for frame in 0..frames {
+        let left = if in_count > 0 {
+            unsafe { *in_planes[0].ptr.cast::<f32>().add(frame) }
         } else {
-            target.fill(0.0);
+            0.0
+        };
+        let right = if in_count > 1 {
+            unsafe { *in_planes[1].ptr.cast::<f32>().add(frame) }
+        } else {
+            left
+        };
+        let values = [left, right, (left + right) * 0.5];
+        for channel in 0..channel_count {
+            let target = unsafe { out_planes[channel].ptr.cast::<f32>().add(frame) };
+            let value = if channel_count == 1 {
+                values[2]
+            } else {
+                values[channel]
+            };
+            unsafe { target.write(value) };
         }
     }
-    let _ = resource_root::layout();
     true
 }
 
@@ -208,24 +222,14 @@ unsafe fn buffers_mut(
     }
     Some(unsafe { std::slice::from_raw_parts_mut(ptr, count as usize) })
 }
-unsafe fn plane_ptr32(
-    buffer: &clap_audio_buffer_t,
-    channel: usize,
-    frames: usize,
-) -> Option<*mut f32> {
-    let _ = frames;
+unsafe fn plane_ptr32(buffer: &clap_audio_buffer_t, channel: usize) -> Option<*mut f32> {
     if buffer.data32.is_null() || channel >= buffer.channel_count as usize {
         return None;
     }
     let ptr = unsafe { *buffer.data32.add(channel) };
     (!ptr.is_null()).then_some(ptr)
 }
-unsafe fn plane_ptr32_mut(
-    buffer: &clap_audio_buffer_t,
-    channel: usize,
-    frames: usize,
-) -> Option<*mut f32> {
-    let _ = frames;
+unsafe fn plane_ptr32_mut(buffer: &clap_audio_buffer_t, channel: usize) -> Option<*mut f32> {
     if buffer.data32.is_null() || channel >= buffer.channel_count as usize {
         return None;
     }

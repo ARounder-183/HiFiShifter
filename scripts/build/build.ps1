@@ -139,6 +139,17 @@ if ($Configuration -eq 'Debug') {
     return
 }
 
+if ($Target -eq 'All' -or $Target -eq 'Plugin' -or $Target -eq 'Clap') {
+    $clapArgs = @('build', '--manifest-path', 'backend\Cargo.toml', '-p', 'hifishifter-clap')
+    if ($Configuration -eq 'Release') { $clapArgs += '--release' }
+    cargo @clapArgs
+    Assert-Ok 'CLAP 模块构建'
+    $clapModule = Join-Path $built 'hifishifter_clap.dll'
+    if (!(Test-Path $clapModule)) { throw "缺少 $clapModule" }
+    Copy-Item $clapModule (Join-Path $dist 'HiFiShifter.clap') -Force
+    & .\scripts\clap\windows\verify.ps1 -ModulePath (Join-Path $dist 'HiFiShifter.clap')
+}
+
 # ── 安装器暂存 ──────────────────────────────────────────────────────────────
 #
 # 【为什么暂存目录是"可复用"的】-Target Installer 只重打安装器（改一句文案、换一个
@@ -169,6 +180,12 @@ function Write-Vst3Stage {
     # <名字>.vst3\Contents\<架构>\<名字>.vst3 —— 插件会安静地"装好了但扫不到"。
     Copy-Item "$dist\HiFiShifter.vst3\*" $vst3 -Recurse
     Write-Host "VST3 载荷：$vst3" -ForegroundColor Green
+}
+
+function Write-ClapStage {
+    $clap = Join-Path $stage 'HiFiShifter.clap'
+    Copy-Item (Join-Path $dist 'HiFiShifter.clap') $clap -Force
+    Write-Host "CLAP 载荷：$clap" -ForegroundColor Green
 }
 
 function Write-ModelsStage {
@@ -247,6 +264,7 @@ function Get-WebView2Bootstrapper {
 
 if ($Target -eq 'All' -or $Target -eq 'App') { Write-AppPayload }
 if ($Target -eq 'All' -or $Target -eq 'Plugin') { Write-Vst3Stage }
+if ($Target -eq 'All' -or $Target -eq 'Plugin' -or $Target -eq 'Clap') { Write-ClapStage }
 
 if ($Target -ne 'Installer') {
     Write-ModelsStage
@@ -255,7 +273,7 @@ if ($Target -ne 'Installer') {
 }
 
 if ($Target -eq 'Installer') {
-    foreach ($required in 'app', 'vst3', 'models', 'licenses', 'LICENSE', 'license-page.txt', 'models-verify.nsh') {
+    foreach ($required in 'app', 'vst3', 'HiFiShifter.clap', 'models', 'licenses', 'LICENSE', 'license-page.txt', 'models-verify.nsh') {
         if (!(Test-Path (Join-Path $stage $required))) {
             throw "dist\_stage\installer 缺少 $required：先跑 .\scripts\build\build.ps1 -Target All"
         }
@@ -284,6 +302,7 @@ Remove-Item $setup -Force -ErrorAction SilentlyContinue
 & $makensis /INPUTCHARSET UTF8 `
     "/DAPP_DIR=$(Join-Path $stage 'app')" `
     "/DVST3_DIR=$(Join-Path $stage 'vst3')" `
+    "/DCLAP_FILE=$(Join-Path $stage 'HiFiShifter.clap')" `
     "/DMODELS_DIR=$(Join-Path $stage 'models')" `
     "/DMODELS_VERSION=$modelsVersion" `
     "/DMODELS_VERIFY=$(Join-Path $stage 'models-verify.nsh')" `

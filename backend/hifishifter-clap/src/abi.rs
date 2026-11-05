@@ -226,7 +226,7 @@ pub const CLAP_EXT_RENDER: &[u8] = b"clap.render\0";
 pub const CLAP_EXT_AUDIO_PORTS: &[u8] = b"clap.audio-ports\0";
 /// `clap.gui` 扩展 ID。
 pub const CLAP_EXT_GUI: &[u8] = b"clap.gui\0";
-/// `ara:supported`（绝不声明 `ara:required`）。
+/// 阶段 2 启用 ARA 时才声明 `ara:supported`；Capture-only 外壳绝不谎报能力。
 pub const FEATURE_ARA_SUPPORTED: &[u8] = b"ara:supported\0";
 /// 插件分类：音频效果器。
 pub const FEATURE_AUDIO_EFFECT: &[u8] = b"audio-effect\0";
@@ -250,7 +250,10 @@ pub const PLUGIN_ID_STR: &str = "com.hifishifter.clap";
 
 /// 静态函数/指针数组的 Sync 包装。
 #[repr(transparent)]
-pub struct StaticPtrArray(pub [*const c_char; 5]);
+pub struct StaticPtrArray(pub [*const c_char; 4]);
 // SAFETY: 只读静态表，见模块头。
 unsafe impl Sync for StaticPtrArray {}
 unsafe impl Send for StaticPtrArray {}
+
+/// 由 build.rs 从产品版本单一来源注入的静态 C 字符串。
+pub const PRODUCT_VERSION_CSTR: &[u8] = concat!(env!("HFS_PRODUCT_VERSION"), "\0").as_bytes();

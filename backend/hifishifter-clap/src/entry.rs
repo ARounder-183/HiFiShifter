@@ -1,37 +1,31 @@
 //! CLAP 模块入口：descriptor、工厂、实例生命周期与扩展分发。
 //!
-//! 【为什么 ARA 工厂在 init 时建立】ARACLAP.h 要求工厂指针与 `get_plugin_id` 在
-//! `deinit()` 之前常驻；`ClapAraEntry` 用 Box 固定地址并泄漏到进程结束。
+//! 【为什么阶段 1 不暴露 ARA】`ara:supported` 意味着宿主可以按 ARACLAP.h 去要
+//! ARAFactory 与实例扩展。当前共享文档模型仍在 VST3 外壳里，交一个不能创建控制器的
+//! 工厂会让宿主写穿空指针；所以 descriptor 不声明 ARA，entry 也不给 ARA factory。
 
 use crate::abi::cstr;
 use crate::abi::*;
-use crate::{audio, gui, state};
-use ara2_bridge::companion::clap::sys::{
-    CLAP_EXT_ARA_FACTORY, CLAP_EXT_ARA_FACTORY_COMPAT, CLAP_PLUGIN_FACTORY_ID,
-};
-use ara2_bridge::companion::clap::ClapAraEntry;
-use ara2_bridge::companion::CompanionFactory;
-use ara2_bridge::core::{ApiGeneration, PlaybackTransformationFlags};
-use ara2_bridge::plugin::{Factory as AraFactory, FactoryBuilder, FactoryCapabilities};
+use crate::{audio, state};
+/// 标准插件工厂 ID。
+const CLAP_PLUGIN_FACTORY_ID: &str = "clap.plugin-factory";
 use hifishifter_plugin_core::resource_root::{self, ResourceLayout};
 use std::ffi::{c_char, c_void, CStr};
 use std::sync::OnceLock;
 
 /// 产品版本（每个格式 cdylib 各自注入，但来自同一个 tauri.conf.json）。
 pub const VERSION: &str = env!("HFS_PRODUCT_VERSION");
-/// ARA 工厂持久 ID：按 D8 默认带格式后缀，避免与 VST3 工厂在同一进程里配对歧义。
+/// 阶段 2 定稿的 ARA 工厂 ID（带格式后缀，避免与 VST3 同进程配对歧义）。
 pub const ARA_FACTORY_ID: &str = "com.hifishifter.ara.clap";
-/// ARA 文档归档 ID。
+/// 阶段 2 定稿的 ARA 文档归档 ID。
 pub const ARA_ARCHIVE_ID: &str = "com.hifishifter.ara.archive.clap";
 
-static ARA_ENTRY: OnceLock<Option<&'static ClapAraEntry<'static>>> = OnceLock::new();
 static MODULE_PATH: OnceLock<String> = OnceLock::new();
 
 static FEATURES: StaticPtrArray = StaticPtrArray([
     cstr(FEATURE_AUDIO_EFFECT),
     cstr(FEATURE_PITCH_CORRECTION),
     cstr(FEATURE_STEREO),
-    cstr(FEATURE_ARA_SUPPORTED),
     std::ptr::null(),
 ]);
 static DESCRIPTOR: clap_plugin_descriptor_t = clap_plugin_descriptor_t {
@@ -42,7 +36,7 @@ static DESCRIPTOR: clap_plugin_descriptor_t = clap_plugin_descriptor_t {
     url: cstr(URL),
     manual_url: cstr(URL),
     support_url: cstr(URL),
-    version: { c"0.2.0-beta".as_ptr().cast() },
+    version: { cstr(PRODUCT_VERSION_CSTR) },
     description: cstr(DESCRIPTION),
     features: FEATURES.0.as_ptr(),
 };
@@ -77,7 +71,6 @@ unsafe extern "C" fn entry_init(plugin_path: *const c_char) -> bool {
         hifishifter_plugin_core::set_product_version(VERSION);
         hifishifter_plugin_core::set_layout_migration_hook(|| {});
         hifishifter_plugin_core::ensure_layout_v2_once();
-        let _ = ara_entry();
         true
     })
 }
@@ -100,45 +93,8 @@ unsafe extern "C" fn entry_get_factory(factory_id: *const c_char) -> *const c_vo
         if id == CLAP_PLUGIN_FACTORY_ID {
             return (&raw const FACTORY).cast::<c_void>();
         }
-        if id == CLAP_EXT_ARA_FACTORY || id == CLAP_EXT_ARA_FACTORY_COMPAT {
-            if let Some(entry) = ara_entry() {
-                return entry.as_raw().cast::<c_void>();
-            }
-        }
         std::ptr::null()
     })
-}
-
-fn ara_entry() -> Option<&'static ClapAraEntry<'static>> {
-    ARA_ENTRY
-        .get_or_init(|| {
-            let factory: &'static AraFactory = Box::leak(Box::new(
-                FactoryBuilder::new(ARA_FACTORY_ID, ARA_ARCHIVE_ID)
-                    .display(
-                        "HiFiShifter",
-                        "HiFiShifter",
-                        "https://github.com/ARounder-183/HiFiShifter",
-                        VERSION,
-                    )
-                    .generations(ApiGeneration::V2Draft, ApiGeneration::V2Final)
-                    .capabilities(
-                        FactoryCapabilities::default().with_playback_transformations(
-                            PlaybackTransformationFlags::TIMESTRETCH
-                                | PlaybackTransformationFlags::REFLECT_TEMPO,
-                        ),
-                    )
-                    .build()
-                    .ok()?,
-            ));
-            // SAFETY: factory 泄漏到进程结束，其 ARAFactory 与 companion 关联同寿。
-            let association = unsafe {
-                CompanionFactory::from_raw(crate::abi::PLUGIN_ID_STR, &*factory.as_raw()).ok()?
-            };
-            let entry = ClapAraEntry::new([association]).ok()?;
-            Some(Box::leak(Box::new(entry)))
-        })
-        .as_ref()
-        .copied()
 }
 
 unsafe extern "C" fn factory_count(_factory: *const clap_plugin_factory_t) -> u32 {
@@ -327,7 +283,6 @@ unsafe extern "C" fn plugin_get_extension(
         };
         match id {
             "clap.state" => return (&raw const state::STATE_EXT).cast(),
-            "clap.gui" => return (&raw const gui::GUI_EXT).cast(),
             "clap.render" => return (&raw const RENDER_EXT).cast(),
             "clap.audio-ports" => return (&raw const PORTS_EXT).cast(),
             "clap.timer-support" => return (&raw const TIMER_EXT).cast(),
@@ -345,13 +300,13 @@ unsafe extern "C" fn on_main_thread(_plugin: *const clap_plugin_t) {
 mod tests {
     use super::*;
     #[test]
-    fn the_descriptor_advertises_optional_ara_but_never_requires_it() {
-        let features = unsafe { std::slice::from_raw_parts(DESCRIPTOR.features, 4) };
+    fn a_capture_only_descriptor_does_not_advertise_ara() {
+        let features = unsafe { std::slice::from_raw_parts(DESCRIPTOR.features, 3) };
         let strings: Vec<&str> = features
             .iter()
             .map(|p| unsafe { CStr::from_ptr(*p) }.to_str().unwrap())
             .collect();
-        assert!(strings.contains(&"ara:supported"));
+        assert!(!strings.contains(&"ara:supported"));
         assert!(!strings.contains(&"ara:required"));
     }
     #[test]

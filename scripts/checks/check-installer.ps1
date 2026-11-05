@@ -61,7 +61,7 @@ Assert-That "安装器体积小于 $MaxSizeMb MB（模型只装一份）" {
 }
 
 # ── 编译测试模式安装器（与发布安装器同一份脚本、同一份载荷）─────────────────
-foreach ($required in 'app', 'vst3', 'models', 'licenses', 'LICENSE', 'license-page.txt', 'models-verify.nsh') {
+foreach ($required in 'app', 'vst3', 'HiFiShifter.clap', 'models', 'licenses', 'LICENSE', 'license-page.txt', 'models-verify.nsh') {
     if (!(Test-Path (Join-Path $stage $required))) { throw "dist\_stage\installer 缺少 $required" }
 }
 $manifest = Get-Content (Join-Path $root 'backend\src-tauri\resources\models\models.json') -Raw | ConvertFrom-Json
@@ -147,6 +147,7 @@ $nsisArgs = @(
     '/INPUTCHARSET', 'UTF8', '/DHFS_TEST_MODE',
     "/DAPP_DIR=$(Join-Path $stage 'app')",
     "/DVST3_DIR=$(Join-Path $stage 'vst3')",
+    "/DCLAP_FILE=$(Join-Path $stage 'HiFiShifter.clap')",
     "/DMODELS_DIR=$(Join-Path $stage 'models')",
     "/DMODELS_VERSION=$($manifest.version)",
     "/DMODELS_VERIFY=$(Join-Path $stage 'models-verify.nsh')",
@@ -165,6 +166,7 @@ if ($LASTEXITCODE) { throw "测试模式安装器编译失败（退出码 $LASTE
 $testRoot = Join-Path $env:LOCALAPPDATA 'HiFiShifterInstallerTest'
 $installDir = Join-Path $testRoot 'App'
 $vst3Dir = Join-Path $testRoot 'VST3'
+$clapDir = Join-Path $testRoot 'CLAP'
 $modelRoot = Join-Path $env:ProgramData 'HiFiShifter\models'
 $modelDir = Join-Path $modelRoot $manifest.version
 $arpKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\HiFiShifter'
@@ -200,6 +202,10 @@ try {
         'App 与 VST3 各一份 LICENSE + licenses\'
     }
 
+    Assert-That 'CLAP 组件装到自己的目录' {
+        if (!(Test-Path (Join-Path $clapDir 'HiFiShifter.clap'))) { throw 'CLAP 模块没有安装到选定目录' }
+        'installed'
+    }
     Assert-That 'VST3 的 Resources\models 只有 models.json' {
         $models = Join-Path $vst3Dir 'HiFiShifter.vst3\Contents\Resources\models'
         if (!(Test-Path $models)) { throw "缺少 $models" }
@@ -236,6 +242,10 @@ try {
 
     Assert-That '卸载后 App 目录消失' {
         if (Test-Path $installDir) { throw "目录仍存在：$installDir" }
+        'gone'
+    }
+    Assert-That '卸载后 CLAP 文件消失' {
+        if (Test-Path (Join-Path $clapDir 'HiFiShifter.clap')) { throw 'HiFiShifter.clap 仍存在' }
         'gone'
     }
     Assert-That '卸载后 VST3 目录消失' {
