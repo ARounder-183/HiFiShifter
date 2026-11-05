@@ -219,6 +219,19 @@ jobs:
       - name: Install pinned ARA and VST3 SDKs
         run: ./scripts/setup/prepare-plugin-sdks.ps1
 
+      # 【为什么测试 job 也要取权重】插件与内核的用例会真的跑一次 pitch 分析与声码器：
+      # 权重不在仓库里（见 docs/models.md），缺了不会报错，只是分析永远不完成 ——
+      # 表现是"WORLD automatic apply failed"或一段全零 PCM，看起来像 DSP 坏了。
+      - name: Cache model weights
+        uses: actions/cache@v5
+        with:
+          path: backend/src-tauri/resources/models
+          key: models-${{ hashFiles('backend/src-tauri/resources/models/models.json') }}
+
+      - name: Fetch model weights
+        run: python scripts/setup/fetch-models.py
+        shell: bash
+
       # full：额外跑 no-default-features 的 clippy 与一次并发测试复跑。
       # --test-threads=1 掩盖并发问题，而本仓最容易出事的地方（重算与自动应用的版本
       # 竞态、快照发布与读者回收）全部是并发敏感的；串行跑得通不代表正确。
@@ -267,6 +280,19 @@ jobs:
 
       - name: Install pinned ARA and VST3 SDKs
         run: ./scripts/setup/prepare-plugin-sdks.ps1
+
+      # 【为什么测试 job 也要取权重】插件与内核的用例会真的跑一次 pitch 分析与声码器：
+      # 权重不在仓库里（见 docs/models.md），缺了不会报错，只是分析永远不完成 ——
+      # 表现是"WORLD automatic apply failed"或一段全零 PCM，看起来像 DSP 坏了。
+      - name: Cache model weights
+        uses: actions/cache@v5
+        with:
+          path: backend/src-tauri/resources/models
+          key: models-${{ hashFiles('backend/src-tauri/resources/models/models.json') }}
+
+      - name: Fetch model weights
+        run: python scripts/setup/fetch-models.py
+        shell: bash
 
       - name: Run plugin tests
         run: ./scripts/checks/run-rust-gates.ps1 -Only test -Package hifishifter-plugin
