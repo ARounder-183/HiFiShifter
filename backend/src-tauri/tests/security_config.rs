@@ -149,7 +149,7 @@ fn collect_references(dir: &Path, root: &Path, out: &mut Vec<String>) {
             collect_references(&path, root, out);
             continue;
         }
-        // 版本号清单是 .json：它现在承担了原来写在 set-version.ps1 里的那份路径表，
+        // 版本号清单是 .json：它承担了原来硬写在一个 PowerShell 脚本里的那份路径表，
         // 所以扫描面必须包含 json，否则"谁引用了开发配置"就漏掉了这一处。
         let relevant = matches!(
             path.extension().and_then(|ext| ext.to_str()),

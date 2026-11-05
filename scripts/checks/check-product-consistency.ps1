@@ -46,28 +46,11 @@ Write-Host 'Product consistency checks' -ForegroundColor Cyan
 
 # 版本号散在多个文件里（清单见 scripts/release/version-sources.json），漏改一处不会编译
 # 失败，只会让某个界面报出别的版本 —— 或者让插件在「程序和功能」里显示另一个版本号。
-# 每一条按清单里的 occurrences 逐处比对：package-lock 的第二处、Cargo.lock 的两条都算数。
+# 写入与校验共用 scripts/release/version.py，按清单里的 occurrences 逐处比对：
+# package-lock 的第二处、Cargo.lock 的两条都算数。
 Test-Invariant '产品版本在全部来源中一致' {
-    $sources = Get-Content -LiteralPath (Join-Path $root 'scripts/release/version-sources.json') -Raw -Encoding utf8 | ConvertFrom-Json
-    $found = [ordered]@{}
-    foreach ($source in $sources.sources) {
-        $occurrences = [int]$source.occurrences
-        $matches = [regex]::Matches((Get-RepoText $source.path), $source.pattern)
-        if ($matches.Count -lt $occurrences) {
-            throw "$($source.path) 里只找到 $($matches.Count) 处版本字段，清单要求 $occurrences 处"
-        }
-        for ($i = 0; $i -lt $occurrences; $i++) {
-            $name = if ($source.id) { $source.id } else { $source.path }
-            $label = if ($occurrences -eq 1) { $name } else { "$name #$($i + 1)" }
-            $found[$label] = $matches[$i].Groups[2].Value
-        }
-    }
-    $distinct = @($found.Values | Select-Object -Unique)
-    if ($distinct.Count -ne 1) {
-        $report = ($found.GetEnumerator() | ForEach-Object { "$($_.Key) = $($_.Value)" }) -join ' | '
-        throw "版本号不一致（跑 scripts/release/set-version.ps1）：$report"
-    }
-    "全部来源 = $($distinct[0])（$($found.Count) 处）"
+    $output = Invoke-Tool 'python' @((Join-Path $root 'scripts/release/version.py'), '--check')
+    ($output | Where-Object { $_ } | Select-Object -Last 1)
 }
 
 # models.json 的版本号由模型内容派生，运行时靠它判断共享模型库里的那一份能不能用。
