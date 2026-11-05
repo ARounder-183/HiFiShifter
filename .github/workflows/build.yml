@@ -221,6 +221,20 @@ jobs:
           pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\setup\install_deps_windows.ps1 -SkipFrontend
         shell: pwsh
 
+      # ── 模型权重 ───────────────────────────────────────────────────────
+      #
+      # 权重（151.6 MB）不在仓库里：checkout 因此从 150 MB 起步变成几 MB。以清单
+      # 哈希为键缓存解压结果 —— 模型一换键就变，不会取到旧权重。
+      - name: Cache model weights
+        uses: actions/cache@v5
+        with:
+          path: backend/src-tauri/resources/models
+          key: models-${{ hashFiles('backend/src-tauri/resources/models/models.json') }}
+
+      - name: Fetch model weights
+        run: python scripts/setup/fetch-models.py
+        shell: bash
+
       # ── SoundTouch source ──────────────────────────────────────────────
 
       - name: Clone SoundTouch source

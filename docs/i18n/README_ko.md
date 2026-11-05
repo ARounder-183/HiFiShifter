@@ -182,6 +182,21 @@ git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.gi
 git -C soundtouch rev-parse HEAD
 ```
 
+#### 모델 가중치(필요할 때 받기)
+
+저장소에는 매니페스트 `backend/src-tauri/resources/models/models.json`(1.5 KB)만 커밋됩니다.
+151.6 MB의 가중치는 릴리스 자산 `models-<매니페스트 버전>.zip`으로 배포됩니다(버전은 내용
+해시이므로 오래된 파일을 받으면 파일별 검증에서 즉시 실패합니다). 빌드 스크립트가 가져오기
+스크립트를 자동으로 호출하며, 멱등이고 이미 완전하면 디렉터리 스캔만 합니다:
+
+```bash
+python scripts/setup/fetch-models.py                # 없으면 받기
+python scripts/setup/fetch-models.py --check        # 확인만
+python scripts/setup/fetch-models.py --source DIR   # 오프라인: 기존 모델 폴더에서 복사
+```
+
+`HIFISHIFTER_MODELS_BASE_URL`로 미러를 지정할 수 있습니다.
+
 ### 4. 개발 및 빌드
 
 ```bash
@@ -197,7 +212,7 @@ cargo tauri build
 cargo tauri build --bundles appimage -- --no-default-features --features onnx
 # 또는 보조 스크립트 사용: bash scripts/build/build-linux-appimage.sh
 
-# Windows 포터블 ZIP
+# Windows: 통합 설치 프로그램(App + VST3 + 모델 라이브러리) + 포터블 ZIP
 .\build.bat
 
 # VST3 only

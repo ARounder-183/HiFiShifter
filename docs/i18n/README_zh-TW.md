@@ -182,6 +182,20 @@ git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.gi
 git -C soundtouch rev-parse HEAD
 ```
 
+#### 模型權重（按需取得）
+
+倉庫裡只提交清單 `backend/src-tauri/resources/models/models.json`（1.5 KB）；151.6 MB 的權重
+作為 release 資產 `models-<清單版本>.zip` 分發（版本號是內容雜湊，取錯版本會在逐檔驗證裡
+立刻失敗）。建置腳本會自動呼叫取權重腳本 —— 它是幂等的，已完整時只做一次目錄掃描：
+
+```bash
+python scripts/setup/fetch-models.py                # 缺就取
+python scripts/setup/fetch-models.py --check        # 只檢查
+python scripts/setup/fetch-models.py --source DIR   # 離網：從既有模型目錄複製
+```
+
+`HIFISHIFTER_MODELS_BASE_URL` 可以指向鏡像站台。
+
 ### 4. 開發與構建
 
 ```bash
@@ -197,7 +211,7 @@ cargo tauri build
 cargo tauri build --bundles appimage -- --no-default-features --features onnx
 # 或使用輔助腳本：bash scripts/build/build-linux-appimage.sh
 
-# Windows 可攜版 ZIP
+# Windows：合併安裝程式（App + VST3 + 模型庫）+ 可攜版 ZIP
 .\build.bat
 
 # VST3 only

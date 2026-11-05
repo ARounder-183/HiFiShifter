@@ -36,7 +36,16 @@ foreach ($manifestFile in Get-ChildItem -LiteralPath $manifestModels -Recurse -F
         sha256 = (Get-FileHash -LiteralPath $manifestFile.FullName -Algorithm SHA256).Hash
     }
 }
-if (!$manifestFiles.Count) { throw "No model files found under $manifestModels" }
+if (!$manifestFiles.Count) {
+    # 权重自 v0.2 起不再进仓库（scripts/setup/fetch-models.py）：干净 clone 里只有
+    # models.json，因此"没有可登记的文件"是**正常状态**，不是回归。-Check 跳过即可；
+    # 只有真的要生成清单时才必须有权重。
+    if ($Check) {
+        Write-Output 'models.json check skipped: weights are not fetched (run scripts/setup/fetch-models.py)'
+        return
+    }
+    throw "No model files found under $manifestModels"
+}
 
 # 版本 = 所有 (路径, sha256) 汇总后的哈希前 12 位。路径参与计算，因此"改名"也算变更。
 $manifestLines = @($manifestFiles | ForEach-Object { "$($_.path) $($_.sha256)" })

@@ -64,6 +64,11 @@ done
 
 case "$STAGE" in
     all|sdk|frontend|build|bundle|verify|install|package) ;;
+
+# 模型权重不在仓库里（见 scripts/setup/fetch-models.py）：缺了就取，已有则是一次
+# 目录扫描。CI 用 actions/cache 以清单哈希为键缓存结果，因此这里通常什么都不做。
+step "模型权重"
+python3 "$REPO_ROOT/scripts/setup/fetch-models.py"
     *) die "--stage 只能是 all|sdk|frontend|build|bundle|verify|install|package，收到：$STAGE" ;;
 esac
 

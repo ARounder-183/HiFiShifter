@@ -207,6 +207,20 @@ $env:HIFISHIFTER_OFFLINE = '1'
 缓存，以及已安装的 `frontend/node_modules`。缓存或镜像与 pin 不一致时，取源会快速失败并
 指出该跑哪条命令，而不是让 git 去联网。
 
+#### 模型权重（按需获取）
+
+仓库里只提交清单 `backend/src-tauri/resources/models/models.json`（1.5 KB）；151.6 MB 的权重
+作为 release 资产 `models-<清单版本>.zip` 分发（版本号是内容哈希，取错版本会在逐文件校验里
+立刻失败）。构建脚本会自动调用取权重脚本 —— 它是幂等的，已完整时只做一次目录扫描：
+
+```bash
+python scripts/setup/fetch-models.py                # 缺就取
+python scripts/setup/fetch-models.py --check        # 只检查
+python scripts/setup/fetch-models.py --source DIR   # 离网：从已有模型目录拷贝
+```
+
+`HIFISHIFTER_MODELS_BASE_URL` 可以指向一个镜像站点。
+
 ### 4. 开发与构建
 
 ```bash
@@ -222,17 +236,18 @@ cargo tauri build
 cargo tauri build --bundles appimage -- --no-default-features --features onnx
 # 或使用辅助脚本：bash scripts/build/build-linux-appimage.sh
 
-# Windows：App + VST3（便携 ZIP、VST3 ZIP、两个 NSIS 安装器），产物全在 dist\
+# Windows：合并安装器（App + VST3 + 模型库）+ 便携 ZIP，产物全在 dist\
 .\build.bat
 
-# 只出 VST3 / 只出 App
+# 只出 VST3 / 只出 App / 只重打安装器
 .\build.bat -Target Plugin
 .\build.bat -Target App
+.\build.bat -Target Installer
 ```
 
 AppImage 的打包内容由 `scripts/build/linux-appimage.sh` 统一决定，CI 与本地共用同一份逻辑：先把 WebKitGTK / GStreamer / GL / Wayland 这些**必须由宿主提供**的库从包里剪掉，再用 `ldd` 断言可执行文件确实解析到宿主的副本，然后重新打包并做一次无头启动冒烟。需要单独复用某一步时：`bash scripts/build/linux-appimage.sh package <Tauri 产物目录>`（或 `verify <AppDir>` 只做断言）。
 
-双击 `build.bat` 就是一次完整构建（App + VST3）；参数见 `scripts/build/build.ps1`。
+双击 `build.bat` 就是一次完整构建（合并安装器 + 便携包）；参数见 `scripts/build/build.ps1`。
 
 前端启动模式可通过环境变量 `TAURI_UI_MODE` 切换：
 

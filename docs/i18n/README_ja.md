@@ -182,6 +182,21 @@ git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.gi
 git -C soundtouch rev-parse HEAD
 ```
 
+#### モデルの重み（必要時に取得）
+
+リポジトリに入るのはマニフェスト `backend/src-tauri/resources/models/models.json`（1.5 KB）だけです。
+151.6 MB の重みは release アセット `models-<マニフェストのバージョン>.zip` として配布されます
+（バージョンは内容ハッシュなので、古い版を取るとファイル単位の検証で即座に失敗します）。
+ビルドスクリプトが取得スクリプトを自動で呼びます（冪等で、揃っていればディレクトリ走査のみ）：
+
+```bash
+python scripts/setup/fetch-models.py                # 無ければ取得
+python scripts/setup/fetch-models.py --check        # 確認のみ
+python scripts/setup/fetch-models.py --source DIR   # オフライン：既存のモデルフォルダーからコピー
+```
+
+`HIFISHIFTER_MODELS_BASE_URL` でミラーを指定できます。
+
 ### 4. 開発とビルド
 
 ```bash
@@ -197,7 +212,7 @@ cargo tauri build
 cargo tauri build --bundles appimage -- --no-default-features --features onnx
 # 補助スクリプトも利用可: bash scripts/build/build-linux-appimage.sh
 
-# Windows ポータブル ZIP
+# Windows: 統合インストーラー（App + VST3 + モデルライブラリ）+ ポータブル ZIP
 .\build.bat
 
 # VST3 only

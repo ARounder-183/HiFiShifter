@@ -182,6 +182,21 @@ git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.gi
 git -C soundtouch rev-parse HEAD
 ```
 
+#### Model weights (fetched on demand)
+
+Only the manifest `backend/src-tauri/resources/models/models.json` (1.5 KB) is committed. The
+151.6 MB of weights ship as the release asset `models-<manifest version>.zip` — the version is a
+content hash, so a stale download fails the per-file check immediately. The build scripts call the
+fetch script for you; it is idempotent and only scans the directory when everything is present:
+
+```bash
+python scripts/setup/fetch-models.py                # fetch when missing
+python scripts/setup/fetch-models.py --check        # check only
+python scripts/setup/fetch-models.py --source DIR   # offline: copy from an existing folder
+```
+
+Set `HIFISHIFTER_MODELS_BASE_URL` to point at a mirror.
+
 ### 4. Development and Build
 
 ```bash
@@ -197,16 +212,18 @@ cargo tauri build
 cargo tauri build --bundles appimage -- --no-default-features --features onnx
 # Or use the helper script: bash scripts/build/build-linux-appimage.sh
 
-# Windows portable ZIP
+# Windows: merged installer (app + VST3 + model library) and portable ZIP
 .\build.bat
 
-# VST3 only
+# VST3 only / app only / repack the installer
 .\build.bat -Target Plugin
+.\build.bat -Target App
+.\build.bat -Target Installer
 ```
 
 What goes into the AppImage is decided in one place, `scripts/build/linux-appimage.sh`, shared by CI and local builds: libraries that the host must provide (WebKitGTK, GStreamer, GL, Wayland) are pruned from the bundle, `ldd` then asserts the binary really resolves them from the host, and the repacked image is smoke-tested headlessly. Run one step on its own with `bash scripts/build/linux-appimage.sh package <tauri-release-dir>` (or `verify <AppDir>`).
 
-Double-clicking `build.bat` runs a full build (App + VST3); switches are documented in `scripts/build/build.ps1`.
+Double-clicking `build.bat` runs a full build (merged installer + portable ZIP); switches are documented in `scripts/build/build.ps1`.
 
 You can switch the frontend startup mode via the `TAURI_UI_MODE` environment variable:
 
