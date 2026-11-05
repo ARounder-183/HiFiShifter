@@ -61,7 +61,7 @@ Assert-That "安装器体积小于 $MaxSizeMb MB（模型只装一份）" {
 }
 
 # ── 编译测试模式安装器（与发布安装器同一份脚本、同一份载荷）─────────────────
-foreach ($required in 'app', 'vst3', 'models', 'licenses', 'LICENSE', 'models-verify.nsh') {
+foreach ($required in 'app', 'vst3', 'models', 'licenses', 'LICENSE', 'license-page.txt', 'models-verify.nsh') {
     if (!(Test-Path (Join-Path $stage $required))) { throw "dist\_stage\installer 缺少 $required" }
 }
 $manifest = Get-Content (Join-Path $root 'backend\src-tauri\resources\models\models.json') -Raw | ConvertFrom-Json
@@ -70,6 +70,76 @@ if (!(Test-Path $bootstrapper)) { throw "缺少 WebView2 bootstrapper：$bootstr
 
 $testInstaller = Join-Path $env:TEMP ('hfs-installer-gate-' + [Guid]::NewGuid().ToString('N') + '.exe')
 $makensis = Get-Makensis
+
+# ── 许可页的编码 ────────────────────────────────────────────────────────────
+#
+# 【为什么这条判据是"编译产物里的字节"】NSIS 的 LicenseData 在**编译期**把文件读成
+# UTF-16 存进安装器：文件带 BOM 才按 UTF-8 解码，不带就按**编译所在机器的 ANSI 代码页**
+# 解码。后者编译零告警、装完也能打开，只是许可页里 θ 变成"胃"、日文假名整段丢失 ——
+# 只有真的把产物拆开看才拦得住，所以下面用一个不压缩的空安装器复现这条路径。
+$licensePage = Join-Path $stage 'license-page.txt'
+
+Assert-That '许可页用的是带 BOM 的副本，而不是随包的 LICENSE' {
+    $bom = [IO.File]::ReadAllBytes($licensePage)
+    if ($bom.Length -lt 3 -or $bom[0] -ne 0xEF -or $bom[1] -ne 0xBB -or $bom[2] -ne 0xBF) {
+        throw 'license-page.txt 没有 UTF-8 BOM：NSIS 会按 ANSI 解码，非 ASCII 字符全部丢失'
+    }
+    $nsi = [IO.File]::ReadAllText((Join-Path $root 'scripts\release\merged-installer.nsi'),
+        (New-Object Text.UTF8Encoding($false)))
+    if (!$nsi.Contains('MUI_PAGE_LICENSE "${HFS_LICENSE_PAGE}"')) {
+        throw 'merged-installer.nsi 的许可页不再使用 ${HFS_LICENSE_PAGE}'
+    }
+    'BOM + HFS_LICENSE_PAGE'
+}
+
+Assert-That '许可页把 LICENSE 原样嵌成 UTF-16（一个字符都不丢）' {
+    $text = [IO.File]::ReadAllText($licensePage, (New-Object Text.UTF8Encoding($false)))
+    $probe = Join-Path $env:TEMP ('hfs-license-probe-' + [Guid]::NewGuid().ToString('N'))
+    $probeNsi = $probe + '.nsi'
+    $probeExe = $probe + '.exe'
+    # 探针：只有许可页、不压缩（压缩后的数据块没法按字节搜）、零载荷，几百毫秒。
+    $probeScript = @(
+        'Unicode true'
+        'SetCompress off'
+        '!include "MUI2.nsh"'
+        'Name "hfs-license-probe"'
+        ('OutFile "{0}"' -f $probeExe)
+        'InstallDir "$TEMP\hfs-license-probe"'
+        'RequestExecutionLevel user'
+        ('!insertmacro MUI_PAGE_LICENSE "{0}"' -f $licensePage)
+        '!insertmacro MUI_PAGE_INSTFILES'
+        '!insertmacro MUI_LANGUAGE "English"'
+        'Section'
+        'SectionEnd'
+    ) -join "`r`n"
+    [IO.File]::WriteAllText($probeNsi, $probeScript, (New-Object Text.UTF8Encoding($true)))
+    try {
+        & $makensis /V1 $probeNsi | Out-Null
+        if ($LASTEXITCODE) { throw "许可页探针编译失败（退出码 $LASTEXITCODE）" }
+        $bytes = [IO.File]::ReadAllBytes($probeExe)
+        # 文本块落在奇数偏移上也是合法的，两种对齐各解一遍。
+        $oddLength = ($bytes.Length - 1) - (($bytes.Length - 1) % 2)
+        $views = @(
+            [Text.Encoding]::Unicode.GetString($bytes),
+            [Text.Encoding]::Unicode.GetString($bytes, 1, $oddLength)
+        )
+        $checked = 0
+        foreach ($line in ($text -split "`r?`n")) {
+            $needle = $line.Trim()
+            if ($needle -notmatch '[^\x00-\x7f]') { continue }
+            $checked++
+            $found = $false
+            foreach ($view in $views) {
+                if ($view.IndexOf($needle, [StringComparison]::Ordinal) -ge 0) { $found = $true; break }
+            }
+            if (!$found) { throw "安装器里丢了这一行（编译期按 ANSI 解码了）：$needle" }
+        }
+        "$checked 行含非 ASCII 的文本原样嵌入"
+    }
+    finally {
+        Remove-Item $probeNsi, $probeExe -Force -ErrorAction SilentlyContinue
+    }
+}
 
 # 【为什么用参数数组而不是续行符】PowerShell 的续行符是反引号，脚本里出现得越多，
 # 就越容易被编辑器 / 格式化工具吃掉一个空格而变成"命令在行尾无声结束"。
@@ -81,6 +151,7 @@ $nsisArgs = @(
     "/DMODELS_VERSION=$($manifest.version)",
     "/DMODELS_VERIFY=$(Join-Path $stage 'models-verify.nsh')",
     "/DHFS_LICENSE=$(Join-Path $stage 'LICENSE')",
+    "/DHFS_LICENSE_PAGE=$(Join-Path $stage 'license-page.txt')",
     "/DHFS_LICENSES=$(Join-Path $stage 'licenses')",
     "/DOUTPUT_FILE=$testInstaller",
     '/DAPP_VERSION=0.0.0-installer-gate',

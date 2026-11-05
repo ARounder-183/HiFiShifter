@@ -143,7 +143,7 @@ if ($Configuration -eq 'Debug') {
 #
 # 【为什么暂存目录是"可复用"的】-Target Installer 只重打安装器（改一句文案、换一个
 # WebView2 bootstrapper）时不该重新编译 Rust。约定：dist\_stage\installer 里放
-# app\ / vst3\ / models\ / LICENSE / licenses\ / models-verify.nsh，全部由本脚本产出。
+# app\ / vst3\ / models\ / LICENSE / license-page.txt / licenses\ / models-verify.nsh，全部由本脚本产出。
 
 function Write-AppPayload {
     $app = Join-Path $stage 'app'
@@ -180,6 +180,18 @@ function Write-LicenseStage {
     $dir = Join-Path $stage 'licenses'
     Reset-Directory $dir
     Copy-Item licenses $dir -Recurse
+
+    # 【为什么许可页要单独一份带 BOM 的副本】NSIS 的 LicenseData 在**编译期**把文件读成
+    # UTF-16 存进安装器：文件带 BOM 才按 UTF-8 解码，不带就按编译所在机器的 ANSI 代码页
+    # 解码。LICENSE 是无 BOM 的 UTF-8，于是中文 Windows 上编出来的安装包会把 θ 显示成
+    # "胃"、把日文假名整段丢掉，而编译不报错（只有打开许可页才看得见）。
+    # 随包的 LICENSE 必须与仓库逐字节相同（用户和工具都会比对），所以这几 K 字节的副本
+    # 只喂给许可页：读取用严格 UTF-8（LICENSE 若不是合法 UTF-8，这里当场失败），写出带 BOM。
+    $page = Join-Path $stage 'license-page.txt'
+    $strictUtf8 = New-Object Text.UTF8Encoding($false, $true)
+    [IO.File]::WriteAllText($page, [IO.File]::ReadAllText((Join-Path $root 'LICENSE'), $strictUtf8),
+        (New-Object Text.UTF8Encoding($true)))
+
     Write-Host "许可载荷：$stage" -ForegroundColor Green
 }
 
@@ -236,7 +248,7 @@ if ($Target -ne 'Installer') {
 }
 
 if ($Target -eq 'Installer') {
-    foreach ($required in 'app', 'vst3', 'models', 'licenses', 'LICENSE', 'models-verify.nsh') {
+    foreach ($required in 'app', 'vst3', 'models', 'licenses', 'LICENSE', 'license-page.txt', 'models-verify.nsh') {
         if (!(Test-Path (Join-Path $stage $required))) {
             throw "dist\_stage\installer 缺少 $required：先跑 .\scripts\build\build.ps1 -Target All"
         }
@@ -269,6 +281,7 @@ Remove-Item $setup -Force -ErrorAction SilentlyContinue
     "/DMODELS_VERSION=$modelsVersion" `
     "/DMODELS_VERIFY=$(Join-Path $stage 'models-verify.nsh')" `
     "/DHFS_LICENSE=$(Join-Path $stage 'LICENSE')" `
+    "/DHFS_LICENSE_PAGE=$(Join-Path $stage 'license-page.txt')" `
     "/DHFS_LICENSES=$(Join-Path $stage 'licenses')" `
     "/DOUTPUT_FILE=$setup" `
     "/DAPP_VERSION=$version" `

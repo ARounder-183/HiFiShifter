@@ -57,6 +57,9 @@ ${StrTrimNewLines}
 !ifndef HFS_LICENSE
   !error "HFS_LICENSE is required"
 !endif
+!ifndef HFS_LICENSE_PAGE
+  !error "HFS_LICENSE_PAGE is required (UTF-8 with BOM)"
+!endif
 !ifndef HFS_LICENSES
   !error "HFS_LICENSES is required"
 !endif
@@ -120,7 +123,14 @@ ShowInstDetails show
 ; 安装器与卸载器的页面都必须在语言声明之前（MUI 在加载第一个语言时插入界面函数，
 ; 那一刻它要知道有没有卸载器）。
 !insertmacro MUI_PAGE_WELCOME
-!insertmacro MUI_PAGE_LICENSE "${HFS_LICENSE}"
+
+; 【为什么许可页看的不是随包的那份 LICENSE】NSIS 的 LicenseData 在**编译期**把文件读成
+; UTF-16 存进安装器：文件带 BOM 才按 UTF-8 解码，不带就按**编译所在机器的 ANSI 代码页**
+; 解码。LICENSE 是无 BOM 的 UTF-8，于是在中文 Windows 上编译出来的安装包里 θ 变成"胃"、
+; 日文假名整段丢失 —— 而且编译一声不响，只有打开许可页才看得见。
+; 所以 build.ps1 另写一份带 BOM 的 license-page.txt 专供这一页；HFS_LICENSE 仍是与仓库
+; 逐字节相同的那份，负责装进用户磁盘。
+!insertmacro MUI_PAGE_LICENSE "${HFS_LICENSE_PAGE}"
 !insertmacro MUI_PAGE_COMPONENTS
 !insertmacro MUI_PAGE_DIRECTORY
 Page custom HfsVst3Page HfsVst3PageLeave
