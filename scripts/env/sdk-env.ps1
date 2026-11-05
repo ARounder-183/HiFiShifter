@@ -35,4 +35,5 @@ function Set-SdkEnvironment {
     $sdkRoot = Get-SdkCacheRoot
     $env:ARA_SDK_DIR = Join-Path $sdkRoot 'ARA_SDK'
     $env:ARA_VST3_SDK_DIR = Join-Path $sdkRoot 'vst3sdk'
+    $env:HIFISHIFTER_CLAP_SDK_DIR = Join-Path $sdkRoot 'clap'
 }

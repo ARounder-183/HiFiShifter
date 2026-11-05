@@ -10,6 +10,7 @@
 | `build/`   | 构建：Windows 的 `build.ps1`、Linux AppImage、macOS DMG、CoreML 补丁。                                                                                                      |
 | `release/` | 发布物：VST3 的 NSIS 安装器（`.nsi` + 五语词表）、版本号同步（`version.py` + 落盘清单 `version-sources.json`）。                                                |
 | `checks/`  | CI 门禁：FFI panic 守卫、日志级别、命令接线、产品一致性、依赖通告扫描；`-Package hifishifter-plugin-core` 只跑格式无关层。                                                   |
+| `clap/`    | CLAP 自检与构建：`probe.c`（黑盒 dlopen）、`verify.sh`、`unix/build.sh`、`windows/build.ps1`。                                                            |
 | `vst3/`    | 自检与 Unix 构建：`windows/verify.ps1`（导出表 + 依赖 + 黑盒加载）、`unix/build.sh`、`unix/verify.sh`。                                                                     |
 | `dev/`     | 开发期辅助：`tauri dev` 的前端启动脚本、音高分析内存计量。                                                                                                                  |
 

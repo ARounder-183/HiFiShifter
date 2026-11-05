@@ -21,6 +21,8 @@ function Test-SdkIdentity($path, $commit, $tree) {
 
 function Test-SdkPin($path, $pin) {
     if (!(Test-SdkIdentity $path $pin.commit $pin.tree)) { return $false }
+    # CLAP 是纯头文件 SDK，没有子模块；缺该字段时只校验主检出。
+    if (!$pin.submodule) { return $true }
     Test-SdkIdentity (Join-Path $path $pin.submodule) $pin.submoduleCommit $pin.submoduleTree
 }
 
@@ -55,11 +57,13 @@ function Get-SdkCheckout($name, $pin) {
     Invoke-Git 'git remote add' @('-C', $target, 'remote', 'add', 'origin', $pin.repository)
     Invoke-Git 'git fetch' @('-C', $target, 'fetch', '--depth', '1', 'origin', $pin.commit)
     Invoke-Git 'git checkout' @('-C', $target, '-c', 'core.autocrlf=false', 'checkout', '--detach', 'FETCH_HEAD')
-    Invoke-Git 'git submodule' @('-C', $target, '-c', 'core.autocrlf=false', 'submodule', 'update', '--init', '--depth', '1', '--', $pin.submodule)
+    if ($pin.submodule) {
+        Invoke-Git 'git submodule' @('-C', $target, '-c', 'core.autocrlf=false', 'submodule', 'update', '--init', '--depth', '1', '--', $pin.submodule)
+    }
     if (!(Test-SdkPin $target $pin)) { throw "下载的检出与 pin 不一致：$name" }
 }
 
-foreach ($entry in @(@('ARA_SDK', $sdkPins.ara), @('vst3sdk', $sdkPins.vst3))) {
+foreach ($entry in @(@('ARA_SDK', $sdkPins.ara), @('vst3sdk', $sdkPins.vst3), @('clap', $sdkPins.clap))) {
     Get-SdkCheckout $entry[0] $entry[1]
 }
 

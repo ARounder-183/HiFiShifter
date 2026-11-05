@@ -1,6 +1,6 @@
 # CI 流水线
 
-五条工作流，各管一件事。判断"我的改动该看哪条"只需问两个问题：**它是不是源码级约定**、
+六条工作流，各管一件事。判断"我的改动该看哪条"只需问两个问题：**它是不是源码级约定**、
 **它要不要产物**。
 
 | 工作流 | 触发 | 职责 | 产物 |
@@ -9,6 +9,7 @@
 | `plugin-gates.yml` | push `develop`、PR | 直接 push 时的插件快速反馈（static + 插件并发单测） | 无 |
 | `build.yml` | PR、`v*` tag、手动 | 六平台 App 产物；Windows x64 出一个合并安装器 + 便携包 | 安装器 / DMG / AppImage / 便携包 |
 | `vst3-unix.yml` | PR、`v*` tag、手动 | Linux/macOS 的 VST3 bundle（dlopen 黑盒验证） | `*.tar.gz` + `*.sha256` |
+| `clap.yml` | PR、`v*` tag、手动 | Linux/macOS/Windows 的 CLAP 模块（导出符号 + 黑盒加载） | `HiFiShifter.clap` / bundle |
 | `security.yml` | 每周 + 依赖变更 | 依赖漏洞扫描 | 无 |
 
 ## 为什么门禁只有一处
@@ -35,7 +36,7 @@
   串行跑得通不代表正确：本仓最容易出事的地方（重算与自动应用的版本竞态、快照发布与
   读者回收）全部是并发敏感的。
 - `-Only fmt|clippy|test`：拆成独立 job 时用。
-- `-Package <crate>`：只跑一个 crate（插件并发门禁用）；`hifishifter-plugin-core` 是格式无关层，新增格式 crate 后一并加入依赖树/版本守卫。
+- `-Package <crate>`：只跑一个 crate（插件并发门禁用）；`hifishifter-plugin-core` / `hifishifter-clap` 分别是格式无关层与 CLAP 外壳。
 
 ## 产物门禁留在产物流水线
 

@@ -1,0 +1,26 @@
+# HiFiShifter 的 CLAP 1.1.9 插件外壳。
+#
+# 【为什么不带 VST3 companion】CLAP 阶段 1 用 Capture 通路验证宿主面；ARA 阶段 2
+# 才开 ara2-bridge 的 clap feature。两者都不需要 VST3 SDK。
+[package]
+name = "hifishifter-clap"
+version = "0.2.0-beta"
+edition = "2021"
+publish = false
+description = "CLAP plug-in shell for HiFiShifter"
+
+[lib]
+name = "hifishifter_clap"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+hifishifter-plugin-core = { path = "../hifishifter-plugin-core" }
+log = { version = "0.4", features = ["std"] }
+# ARA-over-CLAP：companion 的 clap feature 只用 checked-in 1.1.9 声明，无外部 SDK。
+ara2-bridge = { version = "0.3.0", features = ["clap"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_LibraryLoader"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

@@ -15,7 +15,11 @@ use std::process::Command;
 ///
 /// 【为什么是列表而不是写死一个 -p】以后每新增一个格式 crate，漏加到这份守卫
 /// 就等于给它开了一块「可以引入 app runtime」的空白区。
-const PLUGIN_CRATES: &[&str] = &["hifishifter-plugin", "hifishifter-plugin-core"];
+const PLUGIN_CRATES: &[&str] = &[
+    "hifishifter-plugin",
+    "hifishifter-plugin-core",
+    "hifishifter-clap",
+];
 
 fn assert_clean_tree(package: &str, all_features: bool) {
     let manifest = env!("CARGO_MANIFEST_DIR");

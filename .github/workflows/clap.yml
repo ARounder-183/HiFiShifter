@@ -1,0 +1,49 @@
+name: CLAP plug-in
+
+on:
+  pull_request:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  gates:
+    uses: ./.github/workflows/gates.yml
+    secrets: inherit
+
+  build:
+    needs: gates
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux-x86_64
+          - os: macos-15
+            platform: macos-arm64
+          - os: windows-2022
+            platform: windows-x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Prepare SDK pins
+        if: runner.os != "Windows"
+        run: python3 scripts/setup/fetch-models.py --check
+      - name: Prepare SDK pins (Windows)
+        if: runner.os == "Windows"
+        shell: pwsh
+        run: pwsh scripts/setup/prepare-plugin-sdks.ps1
+      - name: Build CLAP (Unix)
+        if: runner.os != "Windows"
+        run: bash scripts/clap/unix/build.sh all
+      - name: Build CLAP (Windows)
+        if: runner.os == "Windows"
+        shell: pwsh
+        run: pwsh scripts/clap/windows/build.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clap-${{ matrix.platform }}
+          path: dist/clap/**
+          if-no-files-found: warn
+
