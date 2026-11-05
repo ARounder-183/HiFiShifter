@@ -224,6 +224,16 @@ pub(crate) fn disable_directml(device: Option<i32>, reason: &str) {
     }
 }
 
+/// 非 Windows 上的空实现。
+///
+/// 【为什么要有】`nsf_hifigan_onnx` 的"超时后按 active_ep 分派"是一段**跨平台**的
+/// match，里面必须写得出 `disable_directml` 这个名字。只给 Windows 实现的话，
+/// Linux / macOS 上整个 kernel 编不过（clap 的 Unix 构建就是这样红的）。
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn disable_directml(device: Option<i32>, reason: &str) {
+    let _ = (device, reason);
+}
+
 /// 撤销某台设备的禁用（基准测试实测跑通时调用）。
 ///
 /// 【为什么必须能撤销】旧实现只能"重启应用重试" —— 用户明明刚在基准测试里看到
