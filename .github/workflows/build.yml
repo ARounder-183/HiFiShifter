@@ -526,9 +526,6 @@ jobs:
       - name: Package plug-ins (Unix)
         if: runner.os != 'Windows'
         shell: bash
-        env:
-          # 与 vst3-unix.yml 同因：4 核 runner 上并行编译原生依赖会 OOM。
-          CARGO_BUILD_JOBS: "2"
         run: |
           set -euo pipefail
           bash scripts/build/unix/package.sh --profile dist --reuse-frontend

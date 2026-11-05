@@ -148,13 +148,14 @@ jobs:
       # 以及宿主握手（插件按本平台 IID 布局拿到 IReaperHostApplication —— Windows 上
       # 永远看不出这一条的问题，见 scripts/vst3/unix/host_iid_probe.c）。
       # 构建逻辑只在 scripts/vst3/unix/ 里存在一份，CI 不重复实现任何一步。
-      # 【为什么限制并发】插件与它的原生依赖（World 的 C++、ARA bridge 的模板）在
-      # 4 核 runner 上并行编译时会把内存打满：第一次真跑这条流水线时，四个平台都在
-      # World 编译结束、kernel 开始编译的瞬间被 OOM killer 打死，日志停在一句 warning
-      # 上，cargo 连 error 行都没来得及写。两个并发足够，时间成本远低于重跑一次。
+      #
+      # 【这条流水线在修好矩阵之前一条 job 都没跑过】第一次真跑时四个平台全红在
+      # 「编译失败（exit 101），日志末尾只有 World 的 C++ 告警」：那是
+      # ara2-bridge-companion 的 build.rs 在报 pluginterfaces 子模块缺失，panic 写在
+      # 日志中段、被几百行告警埋住了。当时把它当成 runner 的 OOM，加了
+      # CARGO_BUILD_JOBS=2 —— 误判，并发度不是原因。真正修掉的是
+      # scripts/vst3/unix/build.sh 的 sync_submodule，以及失败时按 error 行回放现场。
       - name: Build, verify and package
-        env:
-          CARGO_BUILD_JOBS: "2"
         run: bash scripts/vst3/unix/build.sh
 
       # hfs-gui 的 clippy 门禁：它是 workspace 外的交付物，build.sh 只证明"能编
@@ -184,7 +185,12 @@ jobs:
       # 红灯、也拿到可复现的产物**。反过来会让一次偶发失败连产物一起吞掉。
       #
       # `timeout`：本 crate 的单元测试里有等待后台线程收敛的用例，卡死过一次就是
-      # 6 小时的 job。宁可 25 分钟后明确失败，也不要挂到超时上限。
+      # 6 小时的 job。宁可 55 分钟后明确失败，也不要挂到超时上限。
+      #
+      # 【为什么是 55 而不是 25】这一步跑的是 **debug** 构建，而上面的产物步骤只产
+      # release —— 第一次跑时 target/debug 是空的，四核 runner 上要现编整棵依赖树
+      # （含 WebKitGTK 与 ORT 的绑定）。25 分钟会把"冷启动"判成"挂死"。缓存起来之后
+      # 这一步是分钟级的；挂死仍然会被 `timeout` 判掉，只是判据从 25 分钟变成 55 分钟。
       #
       # 【为什么有三条 skip】三条都只能在 Unix 上暴露，且都不是本次适配引入的；
       #
@@ -209,7 +215,7 @@ jobs:
       # 此前这里有四条 --skip 写死在 YAML 里，与 build.yml / vst3.yml 的各一条互不知情。
       - name: Run plugin unit tests
         run: |
-          timeout 1500 pwsh -NoProfile -File scripts/checks/run-rust-gates.ps1 -Only test -Package hifishifter-plugin -Platform unix
+          timeout 3300 pwsh -NoProfile -File scripts/checks/run-rust-gates.ps1 -Only test -Package hifishifter-plugin -Platform unix
 
       - name: Upload build diagnostics on failure
         if: failure()

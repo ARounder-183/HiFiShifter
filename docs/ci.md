@@ -52,6 +52,12 @@ DMG 里的 dylib 校验都必须**先有产物**。它们属于 `build.yml` / `v
   crate 与布局（VST3 在 Linux 上也是 `Contents/<arch>-linux/` 的 bundle，CLAP 在 Linux
   上是单文件、在 macOS 上才是 bundle）。平台规则只有一份实现：
   `scripts/plugin/unix/lib.sh`。
+- **SDK 的子模块也要按 pin 校验**。`vst3sdk` 的 `pluginterfaces` 与 `ARA_SDK` 的
+  `ARA_API` 都是子模块：只 checkout 主仓库，磁盘上只有一个空的 gitlink，
+  `ara2-bridge-companion` 的 build.rs 会当场 panic。这条 panic 写在 cargo 日志的**中段**
+  （后面还跟着几百行 World 的 C++ 告警），所以构建失败时 `hfs_report_build_failure`
+  先按 `^error` 定位、再回放末尾 —— 只 `tail` 会得到"一堆 warning + exit 101"这种
+  看起来没有原因的现场。
 - **分发**：`scripts/build/unix/package.sh` 编译一次前端，把两个格式装进同一个产物 ——
   Linux 是带 `install.sh` 的 `tar.gz`，macOS 是装到 `/Library/Audio/Plug-Ins` 的
   `pkg`。`build.yml` 的 macOS / Linux 腿在 App 之后调它，因此 App 与插件的版本不可能错配。
@@ -64,7 +70,9 @@ DMG 里的 dylib 校验都必须**先有产物**。它们属于 `build.yml` / `v
 ## 触发与矩阵
 
 - PR：`build.yml` 只跑三个平台（windows-x86_64 / macos-arm64 / linux-x86_64）——
-  够证明"改动没把某个平台编坏"；`vst3-unix.yml` 只跑 linux-x86_64 / macos-arm64。
+  够证明"改动没把某个平台编坏"。`vst3-unix.yml` 四个平台全跑：它曾经用矩阵
+  `exclude` 里的表达式做同样的裁剪，结果整个 job 一个实例都没被创建（运行记录里连
+  一行都没有），所以那边不再做任何裁剪。
 - `v*` tag：全量六平台 + 全量 Unix 矩阵。
 - tag 与版本号必须一致：`build.yml` 的 `assert-version` 用
   `backend/src-tauri/tauri.conf.json` 的 `version` 比对 tag，不一致直接停。
