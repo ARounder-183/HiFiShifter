@@ -198,15 +198,15 @@ cargo tauri build --bundles appimage -- --no-default-features --features onnx
 # Or use the helper script: bash scripts/build/build-linux-appimage.sh
 
 # Windows portable ZIP
-.\scripts\build\pack-portable.ps1 -SkipBuild
+.\build.bat
 
-# Windows VST3 ZIP + installer (a complete Release delivery already exists)
-.\scripts\build\pack-portable.ps1 -PackageTarget Plugin -SkipBuild -Installer
+# VST3 only
+.\build.bat -Target Plugin
 ```
 
 What goes into the AppImage is decided in one place, `scripts/build/linux-appimage.sh`, shared by CI and local builds: libraries that the host must provide (WebKitGTK, GStreamer, GL, Wayland) are pruned from the bundle, `ldd` then asserts the binary really resolves them from the host, and the repacked image is smoke-tested headlessly. Run one step on its own with `bash scripts/build/linux-appimage.sh package <tauri-release-dir>` (or `verify <AppDir>`).
 
-Double-clicking `pack-portable.bat` lets you choose App, VST3 or both; see `scripts/build/pack-portable.ps1` and the scripts under `scripts/` for the available switches.
+Double-clicking `build.bat` runs a full build (App + VST3); switches are documented in `scripts/build/build.ps1`.
 
 You can switch the frontend startup mode via the `TAURI_UI_MODE` environment variable:
 

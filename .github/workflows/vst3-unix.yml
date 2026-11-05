@@ -160,15 +160,15 @@ jobs:
       # 免得 artifact 列表里四个平台长成一模一样。
       - name: Determine artifact name
         id: artifact-name
-        run: echo "base=$(basename .build-tmp/vst3-unix/*.tar.gz .tar.gz)" >> "$GITHUB_OUTPUT"
+        run: echo "base=$(basename dist/*.tar.gz .tar.gz)" >> "$GITHUB_OUTPUT"
 
       - name: Upload VST3 bundle
         uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.artifact-name.outputs.base }}
           path: |
-            .build-tmp/vst3-unix/*.tar.gz
-            .build-tmp/vst3-unix/*.sha256
+            dist/*.tar.gz
+            dist/*.sha256
           if-no-files-found: error
           retention-days: 30
 
@@ -212,6 +212,6 @@ jobs:
         with:
           name: vst3-${{ matrix.platform }}-diagnostics
           path: |
-            .build-tmp/vst3-unix/*.log
+            backend/target/cargo-build.log
           if-no-files-found: ignore
           retention-days: 7

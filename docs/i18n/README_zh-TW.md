@@ -198,15 +198,15 @@ cargo tauri build --bundles appimage -- --no-default-features --features onnx
 # 或使用輔助腳本：bash scripts/build/build-linux-appimage.sh
 
 # Windows 可攜版 ZIP
-.\scripts\build\pack-portable.ps1 -SkipBuild
+.\build.bat
 
-# Windows VST3 ZIP + 安裝程式（已有完整 Release 交付）
-.\scripts\build\pack-portable.ps1 -PackageTarget Plugin -SkipBuild -Installer
+# VST3 only
+.\build.bat -Target Plugin
 ```
 
 AppImage 的打包內容由 `scripts/build/linux-appimage.sh` 統一決定，CI 與本地共用同一份邏輯：先將 WebKitGTK / GStreamer / GL / Wayland 這些**必須由系統提供**的函式庫從包裡剪掉，再用 `ldd` 斷言執行檔確實解析到系統的副本，然後重新打包並做一次無頭啟動冒煙。需要單獨重用某一步時：`bash scripts/build/linux-appimage.sh package <Tauri 產物目錄>`（或 `verify <AppDir>` 只做斷言）。
 
-雙擊 `pack-portable.bat` 可選擇 App、VST3 或兩者；可用參數見 `scripts/build/pack-portable.ps1` 與 `scripts/` 下的構建腳本。
+雙擊 `build.bat` 會一次構建 App 與 VST3；可用參數見 `scripts/build/build.ps1`。
 
 前端啟動模式可透過環境變數 `TAURI_UI_MODE` 切換：
 

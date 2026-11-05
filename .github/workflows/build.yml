@@ -149,7 +149,9 @@ jobs:
       - name: Configure pinned SDK paths
         run: |
           . ./scripts/env/sdk-env.ps1
-          Export-SdkEnvironment
+          Set-SdkEnvironment
+          Add-Content -Path $env:GITHUB_ENV -Value "ARA_SDK_DIR=$env:ARA_SDK_DIR"
+          Add-Content -Path $env:GITHUB_ENV -Value "ARA_VST3_SDK_DIR=$env:ARA_VST3_SDK_DIR"
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -222,7 +224,9 @@ jobs:
       - name: Configure pinned SDK paths
         run: |
           . ./scripts/env/sdk-env.ps1
-          Export-SdkEnvironment
+          Set-SdkEnvironment
+          Add-Content -Path $env:GITHUB_ENV -Value "ARA_SDK_DIR=$env:ARA_SDK_DIR"
+          Add-Content -Path $env:GITHUB_ENV -Value "ARA_VST3_SDK_DIR=$env:ARA_VST3_SDK_DIR"
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -738,17 +742,23 @@ jobs:
         if: runner.os == 'Windows'
         working-directory: ${{ github.workspace }}
         run: |
-          # Builds run natively without --target and use the dist profile, so
-          # Workspace artifacts land in backend/target/dist — no triple path.
-          # The script detects the artifact directory itself.
-          pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\build\pack-portable.ps1 -SkipBuild -NoZip -OutputDir "${{ github.workspace }}"
+          # tauri-action 已经产出 exe 与 DLL；这里只按便携包的布局铺一份目录。
+          # 0 字节的 vslib_x64.dll 是 arm64 上的占位符，不进产物。
+          $release = "${{ steps.tauri-release-dir.outputs.release-dir }}"
+          New-Item -ItemType Directory -Force HiFiShifter\models | Out-Null
+          Copy-Item "$release\HiFiShifter.exe" HiFiShifter
+          Get-ChildItem "$release" -Filter *.dll |
+            Where-Object { $_.Length -gt 0 -and $_.Name -ne 'hifishifter_plugin.dll' } |
+            Copy-Item -Destination HiFiShifter
+          Copy-Item backend\src-tauri\resources\models\* HiFiShifter\models -Recurse
+          Copy-Item LICENSE, licenses\COPYING.LGPL-2.1, licenses\SOUNDTOUCH-CHANGES.md HiFiShifter
         shell: pwsh
 
       # ── LICENSE alongside artifacts ──────────────────────────────────
 
       # Place LICENSE next to the DMG/AppImage and the Windows installer so
       # the uploaded artifacts ship with it. The portable directory already
-      # includes LICENSE via pack-portable.ps1.
+      # includes LICENSE (staged above).
       - name: Stage LICENSE next to bundles/installer
         if: steps.tauri-release-dir.outputs.release-dir != ''
         shell: bash

@@ -51,10 +51,12 @@ $manifestJson = [ordered]@{ version = $manifestVersion; files = $manifestFiles }
 $manifestText = ($manifestJson -replace "`r`n", "`n") + "`n"
 
 if ($Check) {
+    # 只比版本号：版本号就是文件内容的哈希，它一致则清单必然一致。比原始文本会把
+    # ConvertTo-Json 在不同 PowerShell 版本下的空白差异也当成"过期"。
     if (!(Test-Path -LiteralPath $manifestPath)) { throw "Missing $manifestPath; run scripts/build/write-models-manifest.ps1" }
-    $manifestCurrent = (Get-Content -LiteralPath $manifestPath -Raw) -replace "`r`n", "`n"
-    if ($manifestCurrent -ne $manifestText) {
-        throw "models.json is stale; run scripts/build/write-models-manifest.ps1"
+    $manifestCurrent = (Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json).version
+    if ($manifestCurrent -ne $manifestVersion) {
+        throw "models.json is stale (has $manifestCurrent, expected $manifestVersion); run scripts/build/write-models-manifest.ps1"
     }
     Write-Output "models.json is up to date (version $manifestVersion)"
     return

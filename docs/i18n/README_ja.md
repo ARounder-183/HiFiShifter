@@ -198,15 +198,15 @@ cargo tauri build --bundles appimage -- --no-default-features --features onnx
 # 補助スクリプトも利用可: bash scripts/build/build-linux-appimage.sh
 
 # Windows ポータブル ZIP
-.\scripts\build\pack-portable.ps1 -SkipBuild
+.\build.bat
 
-# Windows VST3 ZIP + インストーラー（完全な Release 交付あり）
-.\scripts\build\pack-portable.ps1 -PackageTarget Plugin -SkipBuild -Installer
+# VST3 only
+.\build.bat -Target Plugin
 ```
 
 AppImage に含める内容は `scripts/build/linux-appimage.sh` の一箇所で決まります（CI とローカルで共通）。ホストが提供すべきライブラリ（WebKitGTK / GStreamer / GL / Wayland）を削除し、`ldd` でホスト側の実体を参照していることを検証したうえで、再パックとヘッドレス起動のスモークテストを行います。個別に実行するには `bash scripts/build/linux-appimage.sh package <tauri-release-dir>`（`verify <AppDir>` で検証のみ）。
 
-`pack-portable.bat` をダブルクリックすると、App・VST3・両方を選べます。指定できるオプションは `scripts/build/pack-portable.ps1` と `scripts/` 配下のビルドスクリプトを参照してください。
+`build.bat` をダブルクリックすると App と VST3 をまとめてビルドします。指定できるオプションは `scripts/build/build.ps1` を参照してください。
 
 `TAURI_UI_MODE` 環境変数でフロントエンドの起動モードを切り替えられます：
 

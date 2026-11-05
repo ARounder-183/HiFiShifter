@@ -196,13 +196,13 @@ npm --prefix frontend ci
 .\scripts\setup\export-sdk-mirror.ps1
 #    也可直接写到 U 盘 / 局域网共享：-MirrorDirectory E:\hfs-sdk-mirror
 
-# 2) 在离网机器上指向该镜像并构建（-Offline 禁止一切取源联网）
+# 2) 在离网机器上指向该镜像并构建（HIFISHIFTER_OFFLINE=1 禁止一切取源联网）
 $env:HIFISHIFTER_SDK_MIRROR = 'E:\hfs-sdk-mirror'
-.\scripts\setup\prepare-plugin-sdks.ps1 -Offline
-.\pack-portable.bat -Offline
+$env:HIFISHIFTER_OFFLINE = '1'
+.\build.bat
 ```
 
-`-Offline`（或环境变量 `HIFISHIFTER_OFFLINE=1`）同时作用于 SDK 取源、SoundTouch 自动克隆
+`HIFISHIFTER_OFFLINE=1` 同时作用于 SDK 取源、SoundTouch 自动克隆
 与 `cargo`（走本地 registry 缓存）。因此离网构建还需具备：一次联网构建留下的 Cargo 依赖
 缓存，以及已安装的 `frontend/node_modules`。缓存或镜像与 pin 不一致时，取源会快速失败并
 指出该跑哪条命令，而不是让 git 去联网。
@@ -222,17 +222,17 @@ cargo tauri build
 cargo tauri build --bundles appimage -- --no-default-features --features onnx
 # 或使用辅助脚本：bash scripts/build/build-linux-appimage.sh
 
-# Windows 便携版 ZIP
-.\scripts\build\pack-portable.ps1 -SkipBuild
+# Windows：App + VST3（便携 ZIP、VST3 ZIP、两个 NSIS 安装器），产物全在 dist\
+.\build.bat
 
-# Windows VST3 ZIP + 安装器（已有完整 Release 交付）
-.\scripts\build\pack-portable.ps1 -PackageTarget Plugin -SkipBuild -Installer
+# 只出 VST3 / 只出 App
+.\build.bat -Target Plugin
+.\build.bat -Target App
 ```
 
 AppImage 的打包内容由 `scripts/build/linux-appimage.sh` 统一决定，CI 与本地共用同一份逻辑：先把 WebKitGTK / GStreamer / GL / Wayland 这些**必须由宿主提供**的库从包里剪掉，再用 `ldd` 断言可执行文件确实解析到宿主的副本，然后重新打包并做一次无头启动冒烟。需要单独复用某一步时：`bash scripts/build/linux-appimage.sh package <Tauri 产物目录>`（或 `verify <AppDir>` 只做断言）。
 
-双击 `pack-portable.bat` 可选择 App、VST3 或两者；可用参数见 `scripts/build/pack-portable.ps1`
-与 `scripts/` 下的构建脚本。
+双击 `build.bat` 就是一次完整构建（App + VST3）；参数见 `scripts/build/build.ps1`。
 
 前端启动模式可通过环境变量 `TAURI_UI_MODE` 切换：
 
