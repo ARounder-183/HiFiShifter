@@ -81,22 +81,54 @@ Test-Invariant '随包许可清单齐全（LICENSE + licenses\ 目录）' {
     foreach ($file in $required) {
         if (!(Test-Path -LiteralPath (Join-Path $root $file))) { throw "缺少随包许可文件：$file" }
     }
-    $nsi = Get-RepoText 'scripts/release/vst3-installer.nsi'
-    if ($nsi -notmatch 'HFS_LICENSES') { throw 'vst3-installer.nsi 不再安装 licenses\ 目录' }
+    $nsi = Get-RepoText 'scripts/release/merged-installer.nsi'
+    if ($nsi -notmatch 'HFS_LICENSES') { throw 'merged-installer.nsi 不再安装 licenses\ 目录' }
     'LICENSE + licenses\（LGPL-2.1 / Apache-2.0 / CC BY-NC-SA 声明）'
 }
 
 # 这几条都是"手改回去就静默丢一个用户可见能力"的地方：没有卸载项、重复安装堆积资产、
 # 模型又回到 bundle 里各存一份。
-Test-Invariant '安装器注册卸载项、清理受管目录、模型走共享库' {
-    $nsi = Get-RepoText 'scripts/release/vst3-installer.nsi'
-    foreach ($required in 'WriteUninstaller', 'UninstallString', 'InstallLocation', 'HFS_MODELS_VERSION') {
-        if ($nsi -notmatch [regex]::Escape($required)) { throw "vst3-installer.nsi 缺少 $required" }
+Test-Invariant '合并安装器注册卸载项、清理受管目录、模型走共享库' {
+    $nsi = Get-RepoText 'scripts/release/merged-installer.nsi'
+    foreach ($required in 'WriteUninstaller', 'UninstallString', 'InstallLocation', 'MODELS_VERSION', 'APP_VERSION') {
+        if ($nsi -notmatch [regex]::Escape($required)) { throw "merged-installer.nsi 缺少 $required" }
     }
     if ($nsi -notmatch 'RMDir /r .*Resources\\frontend') {
-        throw 'vst3-installer.nsi 不再清理 Contents\Resources\frontend —— 重复安装会重新堆积资产'
+        throw 'merged-installer.nsi 不再清理 Contents\Resources\frontend —— 重复安装会重新堆积资产'
+    }
+    if ($nsi -notmatch 'RMDir /r "\$INSTDIR\\models"') {
+        throw 'merged-installer.nsi 不再清理安装目录里的 models\ —— 从旧安装器升级会永久多占 150 MB'
     }
     'WriteUninstaller / UninstallString / 目录对账 / 共享模型库'
+}
+
+# 合并安装器的默认分支必须是"提权 + HKLM + Common Files"：HFS_TEST_MODE 那一段是给
+# 开发机跑闭环用的（装到当前用户、ARP 写 HKCU）。谁把测试分支写成默认，发布产物就会
+# 装到用户目录、且在"程序和功能"里查不到。
+Test-Invariant '合并安装器默认走 per-machine 安装' {
+    $nsi = Get-RepoText 'scripts/release/merged-installer.nsi'
+    $ifdef = $nsi.IndexOf('!ifdef HFS_TEST_MODE')
+    $else = $nsi.IndexOf('!else', $ifdef)
+    $endif = $nsi.IndexOf('!endif', $else)
+    if ($ifdef -lt 0 -or $else -lt 0 -or $endif -lt 0) { throw 'merged-installer.nsi 的 HFS_TEST_MODE 分支不完整' }
+    $release = $nsi.Substring($else, $endif - $else)
+    foreach ($required in 'RequestExecutionLevel admin', '!define HFS_ARP_ROOT HKLM', 'COMMONFILES64') {
+        if ($release -notmatch [regex]::Escape($required)) { throw "发布分支缺少 $required" }
+    }
+    'admin / HKLM / CommonFiles64'
+}
+
+# Windows 只交付一个安装器：构建脚本必须用 --no-bundle 自打安装器，且 bundle 里只带
+# models.json（权重由安装器写进 ProgramData）。这两个条件任一破掉，用户就会为同一份
+# 152 MB 权重付第二次磁盘 —— 而产物看起来完全正常。
+Test-Invariant 'Windows 只有一个安装器且模型只装一份' {
+    $build = Get-RepoText 'scripts/build/build.ps1'
+    if ($build -notmatch '--no-bundle') { throw 'build.ps1 不再用 --no-bundle（Tauri 打包器会把模型塞回 App 目录）' }
+    if ($build -notmatch 'merged-installer\.nsi') { throw 'build.ps1 不再调用 merged-installer.nsi' }
+    if ($build -match 'Copy-Item\s+"\$modelsSource\\\$(model|\*)') {
+        throw 'build.ps1 又把模型权重拷进 bundle 了'
+    }
+    'build.ps1 → merged-installer.nsi（--no-bundle）'
 }
 
 # 前端 invoke.ts 的 switch 是前端能发出的全部方法名。其中任何一个若两边后端都不派发，

@@ -2284,19 +2284,33 @@ export const jaJP = {
     fade_shape_axes_owned_by_host:
         "ホストのフェード軸バージョンを読み取れないため、形状プリセットは使えません。下のカーブ調整をお使いください",
     // ── インストーラー（NSIS）────────────────────────────────────────────
-    installer_name: "HiFiShifter VST3",
+    installer_name: "HiFiShifter",
     installer_publisher: "ARounder",
-    installer_welcome_title: "HiFiShifter VST3 セットアップへようこそ",
+    installer_welcome_title: "HiFiShifter セットアップへようこそ",
     installer_welcome_text:
-        "選択した VST3 フォルダーに HiFiShifter VST3/ARA プラグインをインストールします。\n先に REAPER を終了してください。読み込み中のプラグインは上書きされません。\n設定は単体アプリと共有されます。\n同梱の NSF-HiFiGAN ボコーダー重みは CC BY-NC-SA 4.0 で、非商用用途に限ります。\nライセンス全文はプラグインと一緒に LICENSE と licenses フォルダーへインストールされます。",
+        "HiFiShifter のスタンドアロン版と VST3/ARA プラグインをインストールします。両者は同じモデルライブラリを共有するため、150 MB の重みは一度しか書き込まれません。\n続行する前に REAPER と HiFiShifter を終了してください。読み込み中のファイルは上書きされません。\n設定・キャッシュ・ログはユーザーフォルダーにあり、アンインストールしても残ります。\n同梱の NSF-HiFiGAN ボコーダー重みは CC BY-NC-SA 4.0 で、非商用用途に限ります。ライセンス全文は LICENSE と licenses フォルダーにインストールされます。",
+    installer_app_dir_text: "スタンドアロン版のインストール先を選んでください。",
     installer_dir_text:
         "REAPER がスキャンする VST3 フォルダーを選んでください。プラグインは HiFiShifter.vst3 フォルダーとしてインストールされます。",
-    installer_installing: "HiFiShifter VST3 をインストールしています...",
-    installer_err_not_x64: "このプラグインには 64 ビット版 Windows が必要です。",
+    installer_installing: "HiFiShifter をインストールしています...",
+    installer_err_not_x64: "HiFiShifter には 64 ビット版 Windows が必要です。",
     installer_err_reaper_open:
-        "HiFiShifter VST3 をインストールする前に、REAPER とそのプラグインホストを終了してください。",
+        "HiFiShifter をインストールする前に、REAPER とそのプラグインホストを終了してください。",
     installer_err_tasklist:
         "REAPER が終了したことを確認できませんでした。REAPER を閉じてからインストーラーを再実行してください。",
+    installer_err_app_running:
+        "HiFiShifter が実行中です。終了してからインストーラーを再実行してください。",
     installer_uninstall_reaper_open:
-        "HiFiShifter VST3 をアンインストールする前に REAPER を終了してください。",
+        "HiFiShifter をアンインストールする前に REAPER を終了してください。",
+    installer_component_app: "HiFiShifter（スタンドアロン版）",
+    installer_component_vst3: "VST3 / ARA プラグイン",
+    installer_component_models: "共有モデルライブラリ",
+    installer_component_shortcuts: "スタートメニューとデスクトップのショートカット",
+    installer_component_models_install: "共有モデルライブラリをインストールしています...",
+    installer_component_models_skip: "共有モデルライブラリは最新です。スキップします。",
+    installer_webview2_install_failed:
+        "WebView2 ランタイムをインストールできませんでした。Microsoft のサイトからインストールしてから再実行してください。",
+    installer_models_verify_failed:
+        "共有モデルライブラリのコピー後の検証に失敗しました。もう一度インストーラーを実行してください。繰り返し失敗する場合はシステムドライブの空き容量を確認してください。",
+    installer_repair_done: "修復が完了しました。共有モデルライブラリは揃っています。",
 } as const;

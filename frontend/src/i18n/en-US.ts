@@ -2273,18 +2273,31 @@ export const enUS = {
     // 词表已经有五语齐全 + 格式合规的门禁，把文案放进来，"新增一种语言"就自动生效，
     // 漏翻译也会在构建安装器时失败 —— 而不是等到用户看到半截翻译。
     // `tools/build-installer-strings.mjs` 把这一组抽成 NSIS 的 `LangString`。
-    installer_name: "HiFiShifter VST3",
+    installer_name: "HiFiShifter",
     installer_publisher: "ARounder",
-    installer_welcome_title: "Welcome to the HiFiShifter VST3 Setup",
+    installer_welcome_title: "Welcome to the HiFiShifter Setup",
     installer_welcome_text:
-        "This installs the HiFiShifter VST3/ARA plug-in into the VST3 folder you choose.\nClose REAPER first: the installer must not replace a plug-in that is currently loaded.\nSettings are shared with the standalone app.\nThe bundled NSF-HiFiGAN vocoder weights are CC BY-NC-SA 4.0 - non-commercial use only.\nLicense texts are installed next to the plug-in: LICENSE and the licenses folder.",
+        "This installs the HiFiShifter standalone app and the VST3/ARA plug-in. Both share one model library, so the 150 MB of weights is written once.\nClose REAPER and HiFiShifter before continuing: the installer must not replace files that are currently loaded.\nSettings, caches and logs live in your user profile - uninstalling keeps them.\nThe bundled NSF-HiFiGAN vocoder weights are CC BY-NC-SA 4.0 - non-commercial use only. License texts are installed as LICENSE and the licenses folder.",
+    installer_app_dir_text: "Choose where the standalone app is installed.",
     installer_dir_text:
         "Choose the VST3 folder that REAPER scans. The plug-in is installed as a HiFiShifter.vst3 folder inside it.",
-    installer_installing: "Installing HiFiShifter VST3...",
-    installer_err_not_x64: "This plug-in requires 64-bit Windows.",
+    installer_installing: "Installing HiFiShifter...",
+    installer_err_not_x64: "HiFiShifter requires 64-bit Windows.",
     installer_err_reaper_open:
-        "Quit REAPER and its plug-in host processes before installing HiFiShifter VST3.",
+        "Quit REAPER and its plug-in host processes before installing HiFiShifter.",
     installer_err_tasklist:
         "Could not confirm that REAPER has exited. Close REAPER and run the installer again.",
-    installer_uninstall_reaper_open: "Quit REAPER before uninstalling HiFiShifter VST3.",
+    installer_err_app_running: "HiFiShifter is running. Close it and run the installer again.",
+    installer_uninstall_reaper_open: "Quit REAPER before uninstalling HiFiShifter.",
+    installer_component_app: "HiFiShifter (standalone app)",
+    installer_component_vst3: "VST3 / ARA plug-in",
+    installer_component_models: "Shared model library",
+    installer_component_shortcuts: "Start menu and desktop shortcuts",
+    installer_component_models_install: "Installing the shared model library...",
+    installer_component_models_skip: "The shared model library is already up to date; skipping.",
+    installer_webview2_install_failed:
+        "The WebView2 runtime could not be installed. Install it from Microsoft's website and run the installer again.",
+    installer_models_verify_failed:
+        "The shared model library could not be verified after copying. Run the installer again; if it keeps failing, check the free space on your system drive.",
+    installer_repair_done: "Repair finished. The shared model library is complete.",
 } as const;

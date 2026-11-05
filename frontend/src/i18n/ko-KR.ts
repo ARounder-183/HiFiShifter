@@ -2254,18 +2254,32 @@ export const koKR = {
     fade_shape_axes_owned_by_host:
         "호스트의 페이드 축 버전을 읽을 수 없어 모양 프리셋을 쓸 수 없습니다. 아래 곡률 슬라이더를 사용하세요",
     // ── 설치 프로그램(NSIS) ─────────────────────────────────────────────
-    installer_name: "HiFiShifter VST3",
+    installer_name: "HiFiShifter",
     installer_publisher: "ARounder",
-    installer_welcome_title: "HiFiShifter VST3 설치를 시작합니다",
+    installer_welcome_title: "HiFiShifter 설치를 시작합니다",
     installer_welcome_text:
-        "선택한 VST3 폴더에 HiFiShifter VST3/ARA 플러그인을 설치합니다.\n먼저 REAPER를 종료하세요. 로드 중인 플러그인은 덮어쓰지 않습니다.\n설정은 독립 실행형 앱과 공유됩니다.\n번들된 NSF-HiFiGAN 보코더 가중치는 CC BY-NC-SA 4.0 라이선스로 비상업적 용도로만 사용할 수 있습니다.\n라이선스 전문은 플러그인과 함께 LICENSE 및 licenses 폴더에 설치됩니다.",
+        "HiFiShifter 독립 실행형 앱과 VST3/ARA 플러그인을 설치합니다. 두 형태는 하나의 모델 라이브러리를 공유하므로 150 MB 가중치는 한 번만 기록됩니다.\n계속하기 전에 REAPER와 HiFiShifter를 종료하세요. 로드 중인 파일은 덮어쓰지 않습니다.\n설정, 캐시, 로그는 사용자 폴더에 있으며 제거해도 유지됩니다.\n번들된 NSF-HiFiGAN 보코더 가중치는 CC BY-NC-SA 4.0 라이선스로 비상업적 용도로만 사용할 수 있습니다. 라이선스 전문은 LICENSE 및 licenses 폴더에 설치됩니다.",
+    installer_app_dir_text: "독립 실행형 앱의 설치 위치를 선택하세요.",
     installer_dir_text:
         "REAPER가 검사하는 VST3 폴더를 선택하세요. 플러그인은 HiFiShifter.vst3 폴더로 설치됩니다.",
-    installer_installing: "HiFiShifter VST3 설치 중...",
-    installer_err_not_x64: "이 플러그인은 64비트 Windows가 필요합니다.",
+    installer_installing: "HiFiShifter 설치 중...",
+    installer_err_not_x64: "HiFiShifter는 64비트 Windows가 필요합니다.",
     installer_err_reaper_open:
-        "HiFiShifter VST3를 설치하기 전에 REAPER와 플러그인 호스트 프로세스를 종료하세요.",
+        "HiFiShifter를 설치하기 전에 REAPER와 플러그인 호스트 프로세스를 종료하세요.",
     installer_err_tasklist:
         "REAPER가 종료되었는지 확인할 수 없습니다. REAPER를 닫고 설치 프로그램을 다시 실행하세요.",
-    installer_uninstall_reaper_open: "HiFiShifter VST3를 제거하기 전에 REAPER를 종료하세요.",
+    installer_err_app_running:
+        "HiFiShifter가 실행 중입니다. 종료한 뒤 설치 프로그램을 다시 실행하세요.",
+    installer_uninstall_reaper_open: "HiFiShifter를 제거하기 전에 REAPER를 종료하세요.",
+    installer_component_app: "HiFiShifter(독립 실행형 앱)",
+    installer_component_vst3: "VST3 / ARA 플러그인",
+    installer_component_models: "공유 모델 라이브러리",
+    installer_component_shortcuts: "시작 메뉴 및 바탕 화면 바로 가기",
+    installer_component_models_install: "공유 모델 라이브러리 설치 중...",
+    installer_component_models_skip: "공유 모델 라이브러리가 최신입니다. 건너뜁니다.",
+    installer_webview2_install_failed:
+        "WebView2 런타임을 설치하지 못했습니다. Microsoft 웹사이트에서 설치한 뒤 다시 실행하세요.",
+    installer_models_verify_failed:
+        "공유 모델 라이브러리를 복사한 뒤 검증에 실패했습니다. 설치 프로그램을 다시 실행하세요. 계속 실패하면 시스템 드라이브의 여유 공간을 확인하세요.",
+    installer_repair_done: "복구가 완료되었습니다. 공유 모델 라이브러리가 갖춰졌습니다.",
 } as const;

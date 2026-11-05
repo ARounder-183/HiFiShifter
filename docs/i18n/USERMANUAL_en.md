@@ -741,7 +741,7 @@ The plugin is currently a Windows x64 build and has only been verified against R
 
 There are two ways to install the plugin; pick either one:
 
-- **Installer (recommended)**: run `HiFiShifter_v<version>_windows-x86_64-vst3-setup.exe`. The wizard follows the system UI language, lets you choose the VST3 directory, installs the models into the machine-wide shared library (see [Model Files and Sharing](#model-files-and-sharing)), and registers an uninstall entry under Windows "Programs and Features / Installed apps". The installer first confirms that REAPER and its plugin host process have exited.
+- **Installer (recommended)**: run `HiFiShifter_v<version>_windows-x86_64-setup.exe`. **One package installs both the standalone app and the VST3/ARA plug-in**: the wizard follows the system UI language, lets you pick the app and VST3 directories separately, writes the models once (machine-wide shared library, see [Model Files and Sharing](#model-files-and-sharing)), and registers a **single** uninstall entry under Windows "Programs and Features / Installed apps". The installer first confirms that REAPER and HiFiShifter have exited.
 - **Manual copy**: close REAPER and put the **entire** `HiFiShifter.vst3` folder into a VST3 directory (for example `C:\Program Files\Common Files\VST3`), or add its parent directory to REAPER's VST scan path. Do not copy only the individual files inside the folder — the interface, models and runtime dependencies all live in that folder. This approach writes nothing to the registry; to uninstall, just delete the folder.
 
 Both ways require the WebView2 runtime and the VC++ x64 runtime to be installed.
@@ -816,7 +816,7 @@ Parameter editing works exactly as in the standalone app (see the [Parameter Edi
 - Parameters did not take effect, or differ after reopening the project: keep a copy of the project and the error text shown in the status bar; do not overwrite the project or force a reload repeatedly.
 - An out-of-memory notice appears: it means the harmonic separation did not run this time, and the `Harmonic Separation`-related results are not silently dropped; use shorter material or turn `Harmonic Separation` off first.
 - To submit logs or troubleshoot: the plugin log and the standalone app's log live in the **same folder** (the plugin writes `plugin.log`, the app writes `hifishifter.log`; different names, so neither overwrites the other and each rotates on its own). The menu `Help → Open Log Folder` opens that folder for you; if the host environment does not allow it, the path is shown so you can copy it. `Help → Export Diagnostics...` and `Options → Inference Device Benchmark` belong to the standalone app and are not available in the plugin.
-- Uninstalling: if you installed via the installer, uninstall HiFiShifter VST3 from Windows "Programs and Features / Installed apps"; if you copied the folder by hand, just delete the `HiFiShifter.vst3` folder. In both cases the settings and the shared model library are kept (see [Model Files and Sharing](#model-files-and-sharing)).
+- Uninstalling: if you installed via the installer, uninstall HiFiShifter from Windows "Programs and Features / Installed apps"; if you copied the folder by hand, just delete the `HiFiShifter.vst3` folder. In both cases the settings and the shared model library are kept (see [Model Files and Sharing](#model-files-and-sharing)).
 
 ### Connecting to the Host from the Standalone App
 
