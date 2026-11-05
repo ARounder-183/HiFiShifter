@@ -495,7 +495,8 @@ impl MacHost {
         }
 
         // 消息通道 + 两份 document-start 脚本（桥接**先于** bootstrap）
-        let controller = configuration.userContentController();
+        // SAFETY: 只读访问器；configuration 在本次调用期间存活。
+        let controller = unsafe { configuration.userContentController() };
         let script_handler = HFSScriptHandler::alloc(marker).set_ivars(ScriptIvars {
             client: client.clone(),
         });
