@@ -139,6 +139,13 @@ jobs:
       # 每个 Rust job 都要再构建一遍前端，失败时还会伪装成"clippy 失败"。
       HIFISHIFTER_SKIP_FRONTEND_BUILD: "1"
       HIFISHIFTER_SKIP_CARGO_CHECK: "1"
+      # 【为什么清空 bundle.resources】tauri-build 在 build.rs 里校验清单里的每个文件，
+      # 而那份清单是**打包用**的：150 MB 模型、cmake 产出的 SoundTouchDLL、ort 解包的
+      # DirectML.dll —— 干净检出上一个都没有，于是 clippy / cargo test 死在 build script
+      # 里，报"资源不存在"，看起来像代码坏了。门禁不打包，清空即可；真正的打包走
+      # build.ps1 与 build.yml，那里资源齐全。TAURI_CONFIG 是覆盖式合并：数组会把
+      # tauri.windows.conf.json 里的映射整段替换掉（本地已验证：模型与 DLL 都移走也能过）。
+      TAURI_CONFIG: '{"bundle":{"resources":[]}}'
     defaults:
       run:
         shell: pwsh
@@ -179,11 +186,6 @@ jobs:
       - name: Install pinned ARA and VST3 SDKs
         run: ./scripts/setup/prepare-plugin-sdks.ps1
 
-      # tauri.windows.conf.json 把 resources/DirectML.dll 列进 bundle.resources，而
-      # tauri-build 在 build.rs 里就校验它；这份 DLL 是 ort 解包出来的产物，干净检出
-      # 上没有。不补这一步，clippy / test 会死在 build script 里，看起来像代码坏了。
-      - name: Provide DirectML.dll resource
-        run: ./scripts/setup/fetch-directml.ps1
 
       - name: Run clippy gate
         run: ./scripts/checks/run-rust-gates.ps1 -Only clippy -Profile full
@@ -204,6 +206,8 @@ jobs:
       # frontend/dist 来自 artifact；不设这个开关，build.rs 会再跑一遍 npm build。
       HIFISHIFTER_SKIP_FRONTEND_BUILD: "1"
       HIFISHIFTER_SKIP_CARGO_CHECK: "1"
+      # 同上：门禁不打包，清空资源清单，免得 build.rs 去校验还不存在的模型与 DLL。
+      TAURI_CONFIG: '{"bundle":{"resources":[]}}'
     defaults:
       run:
         shell: pwsh
@@ -257,11 +261,6 @@ jobs:
         run: python scripts/setup/fetch-models.py
         shell: bash
 
-      # tauri.windows.conf.json 把 resources/DirectML.dll 列进 bundle.resources，而
-      # tauri-build 在 build.rs 里就校验它；这份 DLL 是 ort 解包出来的产物，干净检出
-      # 上没有。不补这一步，clippy / test 会死在 build script 里，看起来像代码坏了。
-      - name: Provide DirectML.dll resource
-        run: ./scripts/setup/fetch-directml.ps1
 
       # full：额外跑 no-default-features 的 clippy 与一次并发测试复跑。
       # --test-threads=1 掩盖并发问题，而本仓最容易出事的地方（重算与自动应用的版本
