@@ -246,6 +246,11 @@ pub(crate) fn enable_directml(device: Option<i32>) {
     let _ = device;
 }
 
+/// 非 Windows 构建下 DirectML 不存在；保留同名入口，避免调用方按运行期
+/// `active_ep()` 分派时产生平台相关的编译缺口。语义是 no-op。
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn disable_directml(_device: Option<i32>, _reason: &str) {}
+
 #[cfg(target_os = "windows")]
 fn describe_dml_device(device: Option<i32>) -> String {
     match device {

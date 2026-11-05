@@ -58,7 +58,11 @@ export function handleScrollerKeyDown(deps: Deps, e: KeyboardEvent<HTMLDivElemen
             {
                 const meta = ACTION_META[actionId];
                 // paramEditorSelect-scoped actions only work with "select" tool
-                if (meta?.scopedContext === "paramEditorSelect" && toolMode !== "select") {
+                if (
+                    meta?.scopedContext === "paramEditorSelect" &&
+                    toolMode !== "select" &&
+                    toolMode !== "block"
+                ) {
                     continue;
                 }
                 const op = actionId.replace("edit.", "");

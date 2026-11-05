@@ -189,7 +189,7 @@ impl UiSink {
             let _ = self.reply.send(value);
         }
     }
-    fn event(&self, value: Value) {
+    pub(crate) fn event(&self, value: Value) {
         if !self.closed.load(Ordering::Acquire) {
             let _ = self.events.try_send(value);
         }
@@ -204,6 +204,13 @@ pub(crate) struct UiRequest {
 }
 enum Job {
     Request(UiRequest, Option<u64>),
+    /// ARA/VST3 的 GUI 请求先进入 actor 冻结快照；worker 随后只拿到 owned 数据。
+    ///
+    /// 【为什么不直接把它派到慢车道】`begin_syllable_analysis` 要读时间线、校验
+    /// 授权路径并登记 in-flight，这些都只属于 actor。外层 `enqueue` 若直接提交
+    /// 慢任务，就会在 UI 线程上碰会话锁，既违反复核边界，也会把真正的派发藏在
+    /// 两条线程之间。
+    EnqueueSyllableAnalysis(UiRequest, Option<u64>),
     Barrier(mpsc::Sender<()>),
     /// 只唤醒 actor 回到循环顶部，不携带命令、不推进任何票据。
     ///
@@ -212,7 +219,151 @@ enum Job {
     /// 永远追不上的位置（见 `request_reload` 的说明）。专用唤醒把"叫醒"与
     /// "记账"彻底分开。
     Wake,
+    /// 慢车道算完的结果，只能在 actor 上提交。
+    ///
+    /// 【为什么载荷里带请求身份】分析是异步的，提交时的时间线可能已经换过
+    /// Clip/Take/源。actor 必须在提交前用同一份身份复核，过期结果直接丢弃；
+    /// 身份记录也负责“同一 Clip/Take 只跑一次”的去重，以及每个请求只回执一次。
+    SyllableAnalysis(SyllableAnalysisCompletion),
     Close,
+}
+
+/// 一次音节分析的**不可变快照**。
+///
+/// 【为什么要在入队前冻结】worker 不许持有 `&EditorSession`，也不能在会话锁内
+/// 解码音频。actor 只取计算需要的 owned 数据；工作线程算完后，提交闸再拿这里的
+/// 身份与当前时间线比对 —— 只有完全一致才允许写回。
+pub(crate) struct SyllableAnalysisRequest {
+    pub clip_id: String,
+    pub take_id: String,
+    pub source_path: String,
+    pub source_digest: String,
+    pub frame_period_ms: f64,
+    pub root_track_id: String,
+    /// 会话内可见的源域窗口。分析结果在这里裁齐并补间隙。
+    pub source_window: (f64, f64),
+    /// worker 用的 owned 时间线快照；只包含该 Clip 的几何与源。
+    pub snapshot: TimelineState,
+}
+
+impl Clone for SyllableAnalysisRequest {
+    fn clone(&self) -> Self {
+        Self {
+            clip_id: self.clip_id.clone(),
+            take_id: self.take_id.clone(),
+            source_path: self.source_path.clone(),
+            source_digest: self.source_digest.clone(),
+            frame_period_ms: self.frame_period_ms,
+            root_track_id: self.root_track_id.clone(),
+            source_window: self.source_window,
+            snapshot: self.snapshot.clone(),
+        }
+    }
+}
+
+pub(crate) struct SyllableAnalysisCompletion {
+    pub request: SyllableAnalysisRequest,
+    pub result: Result<Value, String>,
+}
+
+/// 在途分析的目标视图。
+///
+/// 【为什么同键只保留一个 sink】前端会因重载/重试重复发同一条命令。相同
+/// Clip/Take 不应并发解码两次；后到的请求挂到同一条任务上，完成时一并回执。
+struct SyllableAnalysisWaiter {
+    id: u64,
+    sink: UiSink,
+}
+
+struct SyllableAnalysisFlight {
+    source_path: String,
+    source_digest: String,
+    waiters: Vec<SyllableAnalysisWaiter>,
+}
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SyllableAnalysisWorkerResult {
+    clip_id: String,
+    take_id: String,
+    #[serde(default)]
+    source_spans_sec: Vec<hifishifter_kernel::pitch_analysis::SyllableSpan>,
+    algorithm: String,
+    algorithm_version: u32,
+    analyzed: bool,
+}
+
+/// 音节分析结果的身份摘要。
+///
+/// 这里刻意不读宿主原文件：插件的 `source_path` 已是本会话物化的授权 PCM。
+/// 摘要只用于判断“这份授权副本还是不是分析时那一份”，不参与路径授权。
+pub(super) fn syllable_source_digest(
+    source_path: &str,
+    take: &hifishifter_kernel::state::ClipTake,
+    frame_period_ms: f64,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"take_syllable_v2");
+    hasher.update(source_path.as_bytes());
+    hasher.update(&take.duration_frames.unwrap_or(0).to_le_bytes());
+    hasher.update(&take.source_sample_rate.unwrap_or(0).to_le_bytes());
+    hasher.update(&((frame_period_ms.max(0.1) * 1000.0).round() as u32).to_le_bytes());
+    hasher.finalize().to_hex().to_string()
+}
+
+/// 把算法检测到的有声区间裁到当前 Clip 的可见源窗口，并补齐间隙。
+///
+/// 【为什么块必须连续铺满】用户要求“重叠的块必须合并、连续块不出现人为间隙”。
+/// 算法只返回发声段；静音若被留空，前端会回退成“整段一个块”，反而把停顿也
+/// 覆盖进去。这里以可见窗口为边界，把检测区间裁剪、排序、合并，然后补满间隙。
+fn fill_visible_source_window(
+    spans: &[hifishifter_kernel::pitch_analysis::SyllableSpan],
+    window: (f64, f64),
+) -> Vec<hifishifter_kernel::pitch_analysis::SyllableSpan> {
+    let (window_start, window_end) = window;
+    if !(window_start.is_finite() && window_end.is_finite() && window_end > window_start + 1e-9) {
+        return Vec::new();
+    }
+    let mut clipped = spans
+        .iter()
+        .filter_map(|span| {
+            let start = span.start_sec.max(window_start).min(window_end);
+            let end = span.end_sec.max(window_start).min(window_end);
+            (end > start + 1e-9).then_some(hifishifter_kernel::pitch_analysis::SyllableSpan {
+                start_sec: start,
+                end_sec: end,
+            })
+        })
+        .collect::<Vec<_>>();
+    clipped.sort_by(|a, b| a.start_sec.total_cmp(&b.start_sec));
+    let mut merged: Vec<hifishifter_kernel::pitch_analysis::SyllableSpan> = Vec::new();
+    for span in clipped {
+        if let Some(last) = merged.last_mut() {
+            if span.start_sec <= last.end_sec + 1e-9 {
+                last.end_sec = last.end_sec.max(span.end_sec);
+                continue;
+            }
+        }
+        merged.push(span);
+    }
+    let mut filled = Vec::new();
+    let mut cursor = window_start;
+    for span in merged {
+        if span.start_sec > cursor + 1e-9 {
+            filled.push(hifishifter_kernel::pitch_analysis::SyllableSpan {
+                start_sec: cursor,
+                end_sec: span.start_sec,
+            });
+        }
+        filled.push(span.clone());
+        cursor = span.end_sec;
+    }
+    if window_end > cursor + 1e-9 {
+        filled.push(hifishifter_kernel::pitch_analysis::SyllableSpan {
+            start_sec: cursor,
+            end_sec: window_end,
+        });
+    }
+    filled
 }
 /// 单个可取消DSP任务；编辑actor只收结果，计算线程不改GUI历史或参数权威。
 struct RenderTask {
@@ -346,6 +497,15 @@ pub(crate) struct EditorSession {
     analysis_workers: Mutex<Vec<std::thread::JoinHandle<()>>>,
     views: Mutex<HashMap<String, RegisteredView>>,
     pub(super) generation: AtomicU64,
+    /// 音节分析的 in-flight 去重表（键 = clip + take）。
+    ///
+    /// 【为什么是会话级而不是全局】分析读的是本会话的授权 PCM；两个文档可能持有
+    /// 同名 Clip，却指向不同源。以会话为界既避免跨文档误合并，也能在会话关闭时
+    /// 随 actor 一起清空。
+    syllable_flights: Mutex<HashMap<(String, String), SyllableAnalysisFlight>>,
+    /// 被后一份快照取代的分析请求。它们的结果会照常回到 actor，但只用来回执；
+    /// 因为源/请求身份已经不匹配，绝不能覆盖当前时间线。
+    superseded_syllables: Mutex<HashMap<(String, String), Vec<SyllableAnalysisWaiter>>>,
     /// 时间线代次：`mark_dirty`（编辑）与 `publish_timeline`（发布）**任一**都推进它。
     ///
     /// 【为什么必须是两者的并集】Capture 的渲染版本闸以它为据，而它要回答的是
@@ -627,6 +787,8 @@ impl EditorSession {
             analysis_sender,
             analysis_updates: Mutex::new(analysis_updates),
             views: Mutex::new(HashMap::new()),
+            syllable_flights: Mutex::new(HashMap::new()),
+            superseded_syllables: Mutex::new(HashMap::new()),
             analysis_cancel: Arc::new(AtomicBool::new(false)),
             analysis_workers: Mutex::new(Vec::new()),
             generation: AtomicU64::new(0),
@@ -912,19 +1074,27 @@ impl EditorSession {
         // 上面那些校验（租约、view 身份、closed）已经全部做完 —— 分流发生在它们**之后**，
         // 不绕过任何安全判据。
         if super::commands::is_slow(&request.command) {
-            let command = request.command.clone();
-            let args = request.args.clone();
-            super::slow_lane::submit(super::slow_lane::SlowTask {
-                id: request.id,
-                command: request.command,
-                sink: sink.clone(),
-                work: Box::new(move || {
-                    super::commands::dispatch_slow(&command, &args).unwrap_or_else(|| {
-                        Err("command is not dispatchable on the slow lane".into())
-                    })
-                }),
-            })?; // 队列满 ⇒ Err ⇒ 视图层立刻回执（不让调用方等到超时）
-                 // 与普通命令一样登记 view：`emit_state` 等事件仍要能到这个视图。
+            if request.command == "analyze_clip_syllables" {
+                // 冻结时间线必须发生在 actor 上。这里先排一次内部请求，
+                // 真正派发慢任务在 actor 的 EnqueueSyllableAnalysis 分支里完成。
+                self.queue
+                    .try_send(Job::EnqueueSyllableAnalysis(request, lease))
+                    .map_err(|error| format!("editor queue unavailable: {error}"))?;
+            } else {
+                let command = request.command.clone();
+                let args = request.args.clone();
+                super::slow_lane::submit(super::slow_lane::SlowTask::reply(
+                    request.id,
+                    request.command,
+                    sink.clone(),
+                    Box::new(move || {
+                        super::commands::dispatch_slow(&command, &args).unwrap_or_else(|| {
+                            Err("command is not dispatchable on the slow lane".into())
+                        })
+                    }),
+                ))?;
+            }
+            // 与普通命令一样登记 view：`emit_state` 等事件仍要能到这个视图。
             views.insert(sink.view_id.clone(), RegisteredView { sink, route });
             return Ok(());
         }
@@ -1003,6 +1173,7 @@ impl EditorSession {
             views.clear();
         }
         self.analysis_cancel.store(true, Ordering::Release);
+        self.fail_pending_syllable_analyses(&crate::editor::errors::DOCUMENT_CLOSED.error());
         self.cancel_render();
         self.submitted.fetch_add(1, Ordering::AcqRel);
         let _ = self.queue.send(Job::Close);
@@ -1215,6 +1386,107 @@ impl EditorSession {
                 // 一次重载是"用户确实做了个动作"，因此把重试预算也重新武装：
                 // 否则此前失败过的合成会因预算耗尽而拒绝这一次的新请求。
                 Ok(Job::Wake) => retry.rearm(),
+                Ok(Job::SyllableAnalysis(completion)) => {
+                    let Some(session) = weak.upgrade() else {
+                        break;
+                    };
+                    session.commit_syllable_analysis(completion);
+                    session.emit_state();
+                }
+                Ok(Job::EnqueueSyllableAnalysis(request, lease)) => {
+                    let Some(session) = weak.upgrade() else {
+                        break;
+                    };
+                    if session.closed.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let response = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        if let Some(link) = &request.link {
+                            if let Some(document) = session.document() {
+                                if Some(link.authorize(&document)?) != lease {
+                                    return Err(
+                                        crate::editor::errors::ROUTE_CHANGED_WHILE_QUEUED.error()
+                                    );
+                                }
+                            } else if lease.is_some() {
+                                return Err(
+                                    crate::editor::errors::ROUTE_CHANGED_WHILE_QUEUED.error()
+                                );
+                            }
+                            let views = session.views.lock_or_recover();
+                            match views.get(&request.sink.view_id) {
+                                Some(view)
+                                    if !Arc::ptr_eq(&view.sink.closed, &request.sink.closed) =>
+                                {
+                                    return Err("editor view identity mismatch".into());
+                                }
+                                None if !request.sink.closed.load(Ordering::Acquire) => {
+                                    return Err("editor view closed or unknown".into());
+                                }
+                                _ => {}
+                            }
+                        }
+                        let clip_id = request
+                            .args
+                            .get("clipId")
+                            .and_then(Value::as_str)
+                            .ok_or("clipId missing")?
+                            .to_owned();
+                        let Some(analysis) =
+                            session.begin_syllable_analysis(&clip_id, request.id, &request.sink)?
+                        else {
+                            // 同一 Clip/Take 已有在途分析：`begin` 已把本请求
+                            // 登记为 waiter，等那条任务完成后统一回执。
+                            return Ok(());
+                        };
+                        // 这一条即使后来失败，也必须把前端 promise 结掉；派发失败
+                        // 的错误收口在下面的 `if let Err(error)` 分支里，先保留
+                        // request 身份供它按 viewId + id 清掉在途登记。
+                        let commit_id = request.id;
+                        let commit_request = analysis.clone();
+                        let commit_session = Arc::downgrade(&session);
+                        super::slow_lane::submit(super::slow_lane::SlowTask::commit(
+                            commit_id,
+                            "analyze_clip_syllables".into(),
+                            Box::new(move || super::commands::analyze_syllables(analysis)),
+                            Box::new(move |result| {
+                                if let Some(session) = commit_session.upgrade() {
+                                    session.request_syllable_commit(&commit_request, result);
+                                }
+                            }),
+                        ))
+                    }))
+                    .unwrap_or_else(|_| Err("syllable analysis dispatch panicked".into()));
+                    if let Err(error) = response {
+                        // 派发失败发生在分析登记之后：必须释放 in-flight 表，
+                        // 否则后续重试永远命中同一键、拿不到新请求。
+                        let keys = self
+                            .syllable_flights
+                            .lock_or_recover()
+                            .iter()
+                            .filter(|(_, flight)| {
+                                flight.waiters.iter().any(|waiter| {
+                                    waiter.id == request.id
+                                        && waiter.sink.view_id == request.sink.view_id
+                                })
+                            })
+                            .map(|(key, _)| key.clone())
+                            .collect::<Vec<_>>();
+                        for key in keys {
+                            self.syllable_flights.lock_or_recover().remove(&key);
+                        }
+                        let response = json!({
+                            "version":1,
+                            "viewId":request.sink.view_id,
+                            "id":request.id,
+                            "ok":false,
+                            "errorKind":super::classify_error(&error),
+                            "errorCode":super::errors::terminal_error_code(&error),
+                            "error":error,
+                        });
+                        request.sink.response(response);
+                    }
+                }
                 Ok(Job::Request(request, lease)) => {
                     let Some(session) = weak.upgrade() else {
                         break;
@@ -2105,6 +2377,40 @@ impl EditorSession {
             self.project_duration
                 .store(timeline.project_sec.to_bits(), Ordering::Release);
         }
+        // 音节分析写在 live timeline 的 Take 上，而 UI 清单投影会用宿主几何
+        // 重写 takes。凡是被重建但仍存在同 Clip/Take 的条目，若源摘要未变，
+        // 就从存档副本重新播种一次；否则一次几何刷新会让刚算出的块“消失”，
+        // 前端再次分析，形成看起来像卡死的闭环。
+        {
+            let edits = match self.document() {
+                Some(document) => document.edits.lock_or_recover().clone(),
+                None => return,
+            };
+            let mut timeline = self.timeline.lock_or_recover();
+            for clip in &mut timeline.clips {
+                for take in &mut clip.takes {
+                    if take.syllable_analysis.is_some() {
+                        continue;
+                    }
+                    let key = super::state_channel::TakeSyllableKey {
+                        clip_id: clip.id.clone(),
+                        take_id: take.id.clone(),
+                    };
+                    if let Some(analysis) = edits.take_syllables.get(&key) {
+                        let source_path = take
+                            .source_path
+                            .as_deref()
+                            .or(clip.source_path.as_deref())
+                            .unwrap_or_default();
+                        let digest =
+                            syllable_source_digest(source_path, take, timeline.frame_period_ms());
+                        if analysis.is_current(&digest) {
+                            take.syllable_analysis = Some(analysis.clone());
+                        }
+                    }
+                }
+            }
+        }
         self.ui_geometry_version.store(version, Ordering::Release);
         // 【take 事实也是几何】清单改写了 clip 的方向 / Loop / 窗口 ⇒ 图集几何变了 ⇒
         // 视图（`edits.params`）必须重建，基线必须跟着换。否则下一次提交会拿
@@ -2311,6 +2617,408 @@ impl EditorSession {
             Err("source is not authorized by this ARA session".into())
         }
     }
+
+    /// 为一次音节分析冻结 owned 快照，并把请求登记为在途。
+    ///
+    /// 【为什么授权判定必须在这里做】worker 不能访问 `reverse_paths` /
+    /// `display_waveforms`；它拿到的路径在离开 actor 之前就必须已经通过
+    /// `check_source`。之后即使授权表变化，提交闸仍会复核 Clip/Take/源身份。
+    pub(super) fn begin_syllable_analysis(
+        &self,
+        clip_id: &str,
+        id: u64,
+        sink: &UiSink,
+    ) -> Result<Option<SyllableAnalysisRequest>, String> {
+        let timeline = self.timeline.lock_or_recover();
+        let clip = timeline
+            .clips
+            .iter()
+            .find(|clip| clip.id == clip_id)
+            .ok_or("clip_not_found")?;
+        let take = clip.active_take();
+        let key = (clip.id.clone(), take.id.clone());
+        let source_path = take
+            .source_path
+            .clone()
+            .or_else(|| clip.source_path.clone())
+            .ok_or("source_not_authorized")?;
+        self.check_source(&source_path)?;
+        let frame_period_ms = timeline.frame_period_ms().max(0.1);
+        let source_digest = syllable_source_digest(&source_path, take, frame_period_ms);
+        {
+            let mut flights = self.syllable_flights.lock_or_recover();
+            if let Some(flight) = flights.get_mut(&key) {
+                // 同一份源、同一分析版本才允许挂到在途任务；源换了就代表旧结果
+                // 已经无意义，必须让旧提交闸失效并重新分析。
+                if flight.source_path == source_path && flight.source_digest == source_digest {
+                    if !flight
+                        .waiters
+                        .iter()
+                        .any(|waiter| waiter.id == id && waiter.sink.view_id == sink.view_id)
+                    {
+                        flight.waiters.push(SyllableAnalysisWaiter {
+                            id,
+                            sink: sink.clone(),
+                        });
+                    }
+                    return Ok(None);
+                }
+                // 旧快照在途时源已换：只回错误会让前端永远等不到新结果。
+                // 先移除旧在途记录（其提交会因身份对不上而作废），再为当前源
+                // 重新冻结一份请求，完成“最后一次请求获胜”。
+                if let Some(old) = flights.remove(&key) {
+                    self.superseded_syllables
+                        .lock_or_recover()
+                        .entry(key.clone())
+                        .or_default()
+                        .extend(old.waiters);
+                }
+            }
+        }
+        let (window_start, window_end) = hifishifter_kernel::state::clip_playback_window_sec(clip);
+        let mut snapshot = TimelineState::default();
+        snapshot.bpm = timeline.bpm;
+        snapshot.project_sec = timeline.project_sec;
+        // 计算只需要 Clip 的几何与源；不需要整份轨道表。
+        snapshot.tracks.clear();
+        let mut frozen = clip.clone();
+        frozen.normalize_takes();
+        snapshot.clips = vec![frozen];
+        let request = SyllableAnalysisRequest {
+            clip_id: clip.id.clone(),
+            take_id: take.id.clone(),
+            source_path,
+            source_digest,
+            frame_period_ms,
+            root_track_id: timeline
+                .resolve_root_track_id(&clip.track_id)
+                .unwrap_or_default(),
+            source_window: (
+                window_start.min(window_end).max(0.0),
+                window_start.max(window_end),
+            ),
+            snapshot,
+        };
+        self.syllable_flights.lock_or_recover().insert(
+            key,
+            SyllableAnalysisFlight {
+                source_path: request.source_path.clone(),
+                source_digest: request.source_digest.clone(),
+                waiters: vec![SyllableAnalysisWaiter {
+                    id,
+                    sink: sink.clone(),
+                }],
+            },
+        );
+        Ok(Some(request))
+    }
+
+    /// 把一次慢车道分析结果送回 actor。
+    ///
+    /// 【为什么走专用 Job】它是“计算完成”而不是“用户编辑”，不能借用普通请求队列
+    /// 的票据推进；同时必须排在已经到达的编辑之后，提交时才能看到最新时间线。
+    pub(super) fn request_syllable_commit(
+        self: &Arc<Self>,
+        request: &SyllableAnalysisRequest,
+        result: Result<Value, String>,
+    ) {
+        if self.closed.load(Ordering::Acquire) {
+            return;
+        }
+        // 队列满/会话正忙时不能把完成消息丢掉：丢掉就意味着前端那条 promise
+        // 永远等不到回执。用阻塞 send 交给 actor；actor 一定在消费（不会在
+        // worker 上等待自己），而慢车道串行保证这里只有一个提交者。
+        let _ = self
+            .queue
+            .send(Job::SyllableAnalysis(SyllableAnalysisCompletion {
+                request: request.clone(),
+                result,
+            }));
+    }
+
+    /// 丢弃全部在途分析的 waiter 并回一条可诊断的终态。
+    ///
+    /// 【为什么必须有】会话关闭、文档销毁或源授权撤销时，慢车道可能还要几十秒
+    /// 才完成；前端 promise 不能等它。终态回执同时让 UI 停止自动重试。
+    pub(super) fn fail_pending_syllable_analyses(&self, error: &str) {
+        let waiters = self
+            .syllable_flights
+            .lock_or_recover()
+            .drain()
+            .flat_map(|(_, flight)| flight.waiters)
+            .chain(
+                self.superseded_syllables
+                    .lock_or_recover()
+                    .drain()
+                    .flat_map(|(_, waiters)| waiters),
+            )
+            .collect::<Vec<_>>();
+        let kind = super::classify_error(error);
+        let code = super::errors::terminal_error_code(error);
+        for waiter in waiters {
+            waiter.sink.response(json!({
+                "version":1,
+                "viewId":waiter.sink.view_id,
+                "id":waiter.id,
+                "ok":false,
+                "errorKind":kind,
+                "errorCode":code,
+                "error":error,
+            }));
+        }
+    }
+
+    /// 提交音节分析：复核身份、补齐可见窗口、写回 active Take。
+    ///
+    /// 一个 Clip/Take 可以有多个 waiter（重开面板 / 重试命令），但每个请求
+    /// 必须且只能收到一条终态；被后一份快照取代的 waiter 单独回“已被取代”。
+    ///
+    /// 这里不进入用户曲线撤销栈：分析是可重算缓存，不是用户的编辑动作。
+    fn commit_syllable_analysis(&self, completion: SyllableAnalysisCompletion) {
+        if self.closed.load(Ordering::Acquire) {
+            self.fail_pending_syllable_analyses(&crate::editor::errors::DOCUMENT_CLOSED.error());
+            return;
+        }
+        let SyllableAnalysisCompletion { request, result } = completion;
+        let key = (request.clip_id.clone(), request.take_id.clone());
+        let mut superseded_waiters = self
+            .superseded_syllables
+            .lock_or_recover()
+            .remove(&key)
+            .unwrap_or_default();
+        let flight = match self.syllable_flights.lock_or_recover().remove(&key) {
+            Some(flight) => flight,
+            None => {
+                let stale_waiters = superseded_waiters
+                    .into_iter()
+                    .filter(|waiter| {
+                        // 新请求的 waiter 仍在活跃 flight 里；这里只回执被替换掉
+                        // 的那一批，避免同一个 id 收到两条终态。
+                        !self
+                            .syllable_flights
+                            .lock_or_recover()
+                            .get(&key)
+                            .is_some_and(|active| {
+                                active.waiters.iter().any(|current| {
+                                    current.id == waiter.id
+                                        && current.sink.view_id == waiter.sink.view_id
+                                })
+                            })
+                    })
+                    .collect::<Vec<_>>();
+                for waiter in stale_waiters {
+                    waiter.sink.response(json!({
+                        "version":1,
+                        "viewId":waiter.sink.view_id,
+                        "id":waiter.id,
+                        "ok":false,
+                        "errorKind":"terminal",
+                        "errorCode":null,
+                        "error":"syllable analysis was superseded by a newer request",
+                    }));
+                }
+                return;
+            }
+        };
+        let outcome = match result {
+            Err(error) => Err(format!("analysis_failed: {error}")),
+            Ok(value) => self.commit_syllable_value(&request, value),
+        };
+        let (ok, value, error) = match outcome {
+            Ok(value) => (true, value, None),
+            Err(error) => (false, Value::Null, Some(error)),
+        };
+        // 过期身份不是"后端暂时忙"，而是这份结果已经被当前 Clip/Take 拒收。
+        // 标成 terminal 以免前端持续自动重试；错误文案自身仍保留可诊断细节。
+        let stale = error
+            .as_deref()
+            .is_some_and(|message| message.contains("stale syllable analysis result"));
+        // 被后一份快照取代的只有“旧请求”的 waiter。当前 flight 的 waiter 才
+        // 拿得到真实结果；旧 waiter 必须收到明确的终态，且不能把旧结果当成
+        // 当前请求的成功。
+        for waiter in superseded_waiters {
+            waiter.sink.response(json!({
+                "version":1,
+                "viewId":waiter.sink.view_id,
+                "id":waiter.id,
+                "ok":false,
+                "errorKind":"terminal",
+                "errorCode":null,
+                "error":"syllable analysis was superseded by a newer request",
+            }));
+        }
+        // 在途表已在上方原子移除，再回执：前端收到 ok 后立刻刷新时，
+        // 不会撞上旧的“正在分析”表项并被误判为新的并发请求。
+        if flight.waiters.is_empty() {
+            return;
+        }
+        let response = if ok {
+            json!({
+                "version":1,
+                "viewId":"", "id":0,
+                "ok":true,
+                "value":value,
+            })
+        } else {
+            let error = error.clone().unwrap_or_else(|| "analysis_failed".into());
+            let kind = if stale {
+                "terminal"
+            } else {
+                super::classify_error(&error)
+            };
+            json!({
+                "version":1,
+                "viewId":"", "id":0,
+                "ok":false,
+                "errorKind":kind,
+                "errorCode":super::errors::terminal_error_code(&error),
+                "error":error,
+            })
+        };
+        for waiter in flight.waiters {
+            let mut response = response.clone();
+            if let Some(object) = response.as_object_mut() {
+                object.insert("viewId".into(), json!(waiter.sink.view_id));
+                object.insert("id".into(), json!(waiter.id));
+            }
+            waiter.sink.response(response);
+            if ok {
+                waiter.sink.event(json!({
+                    "version":1,
+                    "viewId":waiter.sink.view_id,
+                    "event":"plugin_host_changed",
+                    "payload":{"version":self.host_version.load(Ordering::Acquire)},
+                }));
+            }
+        }
+    }
+
+    /// 校验并写入一份分析结果。任何身份变化都让结果作废，绝不覆盖新数据。
+    fn commit_syllable_value(
+        &self,
+        request: &SyllableAnalysisRequest,
+        value: Value,
+    ) -> Result<Value, String> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err("editor session closed".into());
+        }
+        let parsed: SyllableAnalysisWorkerResult = serde_json::from_value(value)
+            .map_err(|error| format!("invalid syllable analysis result: {error}"))?;
+        if parsed.clip_id != request.clip_id || parsed.take_id != request.take_id {
+            return Err("stale syllable analysis result".into());
+        }
+        // 空算法名/非法版本不能进工程：它会让下次 `is_current` 永远为假，
+        // 前端又看到“未分析”，形成重复分析的闭环。worker 是纯计算，坏结果
+        // 应在提交闸直接丢弃。
+        if parsed.algorithm.is_empty()
+            || parsed.algorithm_version == 0
+            || parsed.source_spans_sec.len() > 20000
+        {
+            return Err("invalid syllable analysis result".into());
+        }
+        let (current_source, digest) = {
+            let timeline = self.timeline.lock_or_recover();
+            let clip = timeline
+                .clips
+                .iter()
+                .find(|clip| clip.id == request.clip_id)
+                .ok_or("stale syllable analysis result: clip removed")?;
+            if clip.active_take().id != request.take_id {
+                return Err("stale syllable analysis result: active take changed".into());
+            }
+            let current_source = clip
+                .active_take()
+                .source_path
+                .as_deref()
+                .or(clip.source_path.as_deref())
+                .ok_or("stale syllable analysis result: source removed")?
+                .to_owned();
+            let digest = syllable_source_digest(
+                &current_source,
+                clip.active_take(),
+                request.frame_period_ms,
+            );
+            (current_source, digest)
+        };
+        if current_source != request.source_path {
+            return Err("stale syllable analysis result: source changed".into());
+        }
+        if digest != request.source_digest {
+            return Err("stale syllable analysis result: source digest changed".into());
+        }
+        let spans = fill_visible_source_window(&parsed.source_spans_sec, request.source_window);
+        if !parsed.analyzed || spans.is_empty() {
+            // 分析没检出发声段时保留现有缓存；前端会按“无区间”回退整段。
+            // 不把旧结果清空，避免一次 FCPE 缺席把已保存的块整片抹掉。
+            return self.syllable_reply(&request.clip_id, &request.take_id, None);
+        }
+        let analysis = hifishifter_kernel::pitch_analysis::TakeSyllableAnalysis {
+            algorithm: parsed.algorithm,
+            algorithm_version: parsed.algorithm_version,
+            source_digest: request.source_digest.clone(),
+            source_spans_sec: spans
+                .into_iter()
+                .map(|span| hifishifter_kernel::pitch_analysis::SyllableSpan {
+                    start_sec: span.start_sec,
+                    end_sec: span.end_sec,
+                })
+                .collect(),
+        };
+        let mut timeline = self.timeline.lock_or_recover();
+        let clip = timeline
+            .clips
+            .iter_mut()
+            .find(|clip| clip.id == request.clip_id)
+            .ok_or("stale syllable analysis result: clip removed")?;
+        let take = clip
+            .takes
+            .iter_mut()
+            .find(|take| take.id == request.take_id)
+            .ok_or("stale syllable analysis result: take removed")?;
+        take.syllable_analysis = Some(analysis);
+        // `EditState` 是下一份 getState / ARA 存档的另一份权威副本；
+        // 写入当刻就同步进去，避免 UI 几何刷新或宿主保存之前缓存凭空消失。
+        if let Some(document) = self.document() {
+            document
+                .edits
+                .lock_or_recover()
+                .capture_take_syllables(&timeline);
+        }
+        // 分析是缓存而非用户编辑：不建撤销点，但必须推进版本、标脏并通知视图。
+        self.mark_dirty();
+        if let Some(entry) = timeline
+            .params_by_root_track
+            .get_mut(&request.root_track_id)
+        {
+            entry.prune_param_block_merges(&timeline.clips);
+        }
+        let reply = Self::syllable_reply(&request.clip_id, &request.take_id, Some(&analysis))?;
+        self.notify_timeline();
+        Ok(reply)
+    }
+
+    fn syllable_reply(
+        clip_id: &str,
+        take_id: &str,
+        analysis: Option<&hifishifter_kernel::pitch_analysis::TakeSyllableAnalysis>,
+    ) -> Result<Value, String> {
+        Ok(json!({
+            "ok": true,
+            "clipId": clip_id,
+            "takeId": take_id,
+            "sourceSpansSec": analysis.map(|a| a.source_spans_sec.iter().map(|s| {
+                json!({"startSec": s.start_sec, "endSec": s.end_sec})
+            }).collect::<Vec<_>>()).unwrap_or_default(),
+            "algorithm": analysis.map(|a| a.algorithm.clone()).unwrap_or_else(|| {
+                hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM.to_string()
+            }),
+            "algorithmVersion": analysis
+                .map(|a| a.algorithm_version)
+                .unwrap_or(hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM_VERSION),
+            "analyzed": analysis.is_some(),
+        }))
+    }
+
     /// mute只撤销播放分配，不撤销已经生成的显示波形；take更换/真实删除不沿旧缓存猜。
     fn retain_display_waveforms(&self, timeline: &mut TimelineState, restore: bool) {
         let Some(document) = self.document() else {
@@ -3890,6 +4598,166 @@ pub(crate) mod tests {
         document.close();
     }
 
+    /// **音节分析只写回 actor 内的 active Take，且可见窗口被补成连续块。**
+    ///
+    /// 这条测试覆盖第二批最关键的语义：worker 不能在别处改状态；actor 提交前
+    /// 必须复核身份，并在可见窗口内补齐未检测到的间隙，避免前端回退成“整段
+    /// 一个块”。
+    #[test]
+    fn syllable_analysis_commit_fills_the_visible_window_and_is_not_history() {
+        let (_model, owner, _identity) = fixture();
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        let clip_id = editor.timeline.lock_or_recover().clips[0].id.clone();
+        let track_id = editor.timeline.lock_or_recover().tracks[0].id.clone();
+        let take_id = editor.timeline.lock_or_recover().clips[0]
+            .active_take()
+            .id
+            .clone();
+        let frame_period_ms = editor.timeline.lock_or_recover().frame_period_ms();
+        let source_path = editor.timeline.lock_or_recover().clips[0]
+            .active_take()
+            .source_path
+            .clone()
+            .unwrap();
+        let digest = {
+            let timeline = editor.timeline.lock_or_recover();
+            syllable_source_digest(
+                &source_path,
+                timeline.clips[0].active_take(),
+                frame_period_ms,
+            )
+        };
+        let request = SyllableAnalysisRequest {
+            clip_id: clip_id.clone(),
+            take_id: take_id.clone(),
+            source_path,
+            source_digest: digest,
+            frame_period_ms,
+            root_track_id: track_id,
+            source_window: (0.0, 4.0 / 44100.0),
+            snapshot: editor.timeline.lock_or_recover().clone(),
+        };
+        editor.syllable_flights.lock_or_recover().insert(
+            (clip_id.clone(), take_id.clone()),
+            SyllableAnalysisFlight {
+                source_path: request.source_path.clone(),
+                source_digest: request.source_digest.clone(),
+                waiters: Vec::new(),
+            },
+        );
+        let value = json!({
+            "clipId": clip_id,
+            "takeId": take_id,
+            "sourceSpansSec": [{"startSec": 0.001, "endSec": 0.002}],
+            "algorithm": hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM,
+            "algorithmVersion": hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM_VERSION,
+            "analyzed": true,
+        });
+        let history_before = editor.history.lock_or_recover().records.len();
+        let digest = request.source_digest.clone();
+        let clip_id_for_assert = clip_id.clone();
+        editor.commit_syllable_analysis(SyllableAnalysisCompletion {
+            request,
+            result: Ok(value),
+        });
+        let timeline = editor.timeline.lock_or_recover();
+        let analysis = timeline.clips[0]
+            .active_take()
+            .syllable_analysis
+            .as_ref()
+            .expect("分析结果必须写回 active take");
+        assert_eq!(
+            analysis.source_spans_sec.len(),
+            3,
+            "检测段 + 首尾静音间隙必须被补成连续块"
+        );
+        assert!((analysis.source_spans_sec[0].start_sec - 0.0).abs() < 1e-9);
+        assert!((analysis.source_spans_sec[2].end_sec - 4.0 / 44100.0).abs() < 1e-9);
+        assert_eq!(analysis.source_digest, digest);
+        let query = super::super::commands::dispatch(
+            &editor,
+            "get_clip_syllable_spans",
+            json!({"clipId": clip_id_for_assert}),
+        )
+        .expect("查询已提交缓存");
+        assert_eq!(query["analyzed"], true);
+        assert_eq!(query["sourceSpansSec"].as_array().unwrap().len(), 3);
+        drop(timeline);
+        assert_eq!(
+            editor.history.lock_or_recover().records.len(),
+            history_before,
+            "分析缓存不是用户编辑，不得产生撤销步"
+        );
+        editor.close();
+    }
+
+    /// 过期分析不得覆盖换源后的新 Take。
+    #[test]
+    fn a_stale_syllable_result_is_dropped_without_touching_the_timeline() {
+        let (_model, owner, _identity) = fixture();
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        let (clip_id, take_id, source_path) = {
+            let timeline = editor.timeline.lock_or_recover();
+            let clip = &timeline.clips[0];
+            (
+                clip.id.clone(),
+                clip.active_take().id.clone(),
+                clip.active_take().source_path.clone().unwrap(),
+            )
+        };
+        let request = SyllableAnalysisRequest {
+            clip_id: clip_id.clone(),
+            take_id: take_id.clone(),
+            source_path: source_path.clone(),
+            source_digest: "old".into(),
+            frame_period_ms: 5.0,
+            root_track_id: String::new(),
+            source_window: (0.0, 1.0),
+            snapshot: TimelineState::default(),
+        };
+        let value = json!({
+            "clipId": clip_id,
+            "takeId": take_id,
+            "sourceSpansSec": [{"startSec": 0.1, "endSec": 0.2}],
+            "algorithm": hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM,
+            "algorithmVersion": hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM_VERSION,
+            "analyzed": true,
+        });
+        let error = editor.commit_syllable_value(&request, value).unwrap_err();
+        assert!(error.contains("stale"), "{error}");
+        assert!(
+            editor.timeline.lock_or_recover().clips[0]
+                .active_take()
+                .syllable_analysis
+                .is_none(),
+            "过期结果不得写入"
+        );
+        editor.close();
+    }
+
+    /// 分析结果的身份只由本会话物化的授权 PCM 决定，且结果不再写全局渲染缓存。
+    #[test]
+    fn syllable_analysis_digest_tracks_take_source_identity() {
+        let clip: hifishifter_kernel::state::ClipTake = serde_json::from_value(json!({
+            "id":"take",
+            "source_path":"/tmp/hfs/pcm/sources/source.a.wav",
+            "source_start_sec":0.0,
+            "source_end_sec":1.0
+        }))
+        .unwrap();
+        let mut with_frames = clip.clone();
+        with_frames.duration_frames = Some(44100);
+        with_frames.source_sample_rate = Some(44100);
+        let first = syllable_source_digest("/tmp/hfs/pcm/sources/source.a.wav", &with_frames, 5.0);
+        let same = syllable_source_digest("/tmp/hfs/pcm/sources/source.a.wav", &with_frames, 5.0);
+        let different_source =
+            syllable_source_digest("/tmp/hfs/pcm/sources/source.b.wav", &with_frames, 5.0);
+        assert_eq!(first, same);
+        assert_ne!(first, different_source);
+    }
+
     /// 两真实组件使用同源的不同区域，测试原actor而不是拼接UI快照。
     pub(crate) fn workspace_fixture() -> (ModelHandle, Vec<Arc<ExtensionOwner>>, Vec<Box<u8>>) {
         let (model, a, first) = fixture();
@@ -5340,6 +6208,87 @@ pub(crate) mod tests {
         // 幂等：同样的方向再投影一次不得继续变化（否则每轮清单刷新都会重载）。
         let again = document.workspace_projection().unwrap();
         assert_eq!(after, again, "同一份渲染事实必须产生同一个指纹");
+        owner.editor_session().unwrap().close();
+    }
+
+    /// **音高分析缓存写入时同步 EditState 的音节副本。**
+    ///
+    /// ARA 重建会用宿主几何重写 Take；只写 live timeline 会让下一轮
+    /// `edits.apply` 用旧副本覆盖刚分析出的块。这里验证提交当刻两处一致。
+    #[test]
+    fn a_committed_syllable_result_is_captured_into_the_document_edits() {
+        let (model, owner, _identity) = fixture();
+        let document = model.session();
+        let editor = owner.editor_session().unwrap();
+        editor.ensure_loaded(false).unwrap();
+        let timeline = editor.timeline.lock_or_recover().clone();
+        let clip = &timeline.clips[0];
+        let take = clip.active_take().clone();
+        let analysis = hifishifter_kernel::pitch_analysis::TakeSyllableAnalysis {
+            algorithm: hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM.into(),
+            algorithm_version: hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM_VERSION,
+            source_digest: syllable_source_digest(
+                take.source_path.as_deref().unwrap_or_default(),
+                &take,
+                timeline.frame_period_ms(),
+            ),
+            source_spans_sec: vec![hifishifter_kernel::pitch_analysis::SyllableSpan {
+                start_sec: 0.0,
+                end_sec: 0.001,
+            }],
+        };
+        {
+            let mut live = editor.timeline.lock_or_recover();
+            live.clips[0].takes[0].syllable_analysis = Some(analysis.clone());
+            document
+                .edits
+                .lock_or_recover()
+                .capture_take_syllables(&live);
+        }
+        assert_eq!(
+            document.edits.lock_or_recover().take_syllables.get(
+                &super::state_channel::TakeSyllableKey {
+                    clip_id: clip.id.clone(),
+                    take_id: take.id.clone(),
+                }
+            ),
+            Some(&analysis)
+        );
+        editor.close();
+    }
+
+    /// **不变量：音节缓存也必须改变工作区指纹。**
+    ///
+    /// 【为什么】`ensure_loaded` 的早退依据是版本 + 投影指纹；分析结果存进
+    /// `edits.take_syllables` 后，如果指纹不变，下一次 `apply` 前就先早退，
+    /// UI 永远看不到新区间，自动分析又会被再次触发。
+    #[test]
+    fn take_syllables_participate_in_the_workspace_projection() {
+        let (model, owner, _identity) = fixture();
+        let document = model.session();
+        let before = document.workspace_projection().unwrap();
+        document.edits.lock_or_recover().take_syllables.insert(
+            super::state_channel::TakeSyllableKey {
+                clip_id: "clip".into(),
+                take_id: "take".into(),
+            },
+            hifishifter_kernel::pitch_analysis::TakeSyllableAnalysis {
+                algorithm: hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM.into(),
+                algorithm_version: hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM_VERSION,
+                source_digest: "digest".into(),
+                source_spans_sec: vec![hifishifter_kernel::pitch_analysis::SyllableSpan {
+                    start_sec: 0.0,
+                    end_sec: 0.1,
+                }],
+            },
+        );
+        let after = document.workspace_projection().unwrap();
+        assert_ne!(before, after, "分析缓存必须参与工作区指纹");
+        assert_eq!(
+            document.workspace_projection().unwrap(),
+            after,
+            "同一份音节缓存必须产生稳定指纹"
+        );
         owner.editor_session().unwrap().close();
     }
 

@@ -946,9 +946,78 @@ pub struct TrackParamsState {
     /// 例："synth_mode" = 1.0（SYNTHMODE_MF）。
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub extra_params: HashMap<String, f64>,
+
+    /// 用户手动合并的参数块（工程 v7 起持久化；旧工程缺省为空）。
+    ///
+    /// 自动分析结果与自动重叠归并**不写入这里**：前者是 Take 缓存，后者是
+    /// 每次派生都可重算的视图。这里只记录用户明确执行过的合并意图。成员使用
+    /// `(clip_id, take_id, syllable_id)`，不存数组序号，重分析后仍能校核。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub param_block_merges: Vec<ParamBlockMergeRecord>,
+}
+
+/// 一个被手动合并的块组。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ParamBlockMergeRecord {
+    pub merged_group_id: String,
+    /// 合并组成员。字段名从 v7 初稿沿用 `member_refs`；成员本身携带源域秒，
+    /// 不再依赖自动数组序号。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub member_refs: Vec<ParamBlockMemberRef>,
+}
+
+/// 合并组的稳定成员引用。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParamBlockMemberRef {
+    pub clip_id: String,
+    pub take_id: String,
+    pub syllable_id: String,
+    /// 源域秒坐标：用于校核音节身份。绝不能存工程秒 —— Clip 移动后工程秒就变了。
+    #[serde(default)]
+    pub source_start_sec: f64,
+    #[serde(default)]
+    pub source_end_sec: f64,
 }
 
 impl TrackParamsState {
+    /// 删除指向已不存在 Clip / Take / 音节块的合并成员。
+    ///
+    /// 合并记录是**用户意图**，但成员引用只有在对应块仍存在时才有意义。
+    /// Clip 删除、Take 删除、音节重分析导致边界变化后，悬空引用会让下一次
+    /// materialize 误把别的块当成同一组成员。这里在写入/加载边界统一校核：
+    /// 保留仍有效的成员，少于两个成员的组整组丢弃。
+    pub fn prune_param_block_merges(&mut self, clips: &[Clip]) {
+        use std::collections::HashMap;
+        let mut valid: HashMap<(&str, &str), Vec<&crate::pitch_analysis::SyllableSpan>> =
+            HashMap::new();
+        for clip in clips {
+            for take in &clip.takes {
+                let spans = take
+                    .syllable_analysis
+                    .as_ref()
+                    .map(|a| a.source_spans_sec.iter().collect::<Vec<_>>())
+                    .unwrap_or_default();
+                valid.insert((clip.id.as_str(), take.id.as_str()), spans);
+            }
+        }
+        for record in &mut self.param_block_merges {
+            record.member_refs.retain(|member| {
+                let Some(spans) = valid.get(&(member.clip_id.as_str(), member.take_id.as_str()))
+                else {
+                    return false;
+                };
+                spans.iter().any(|span| {
+                    // 音节 id 已含源域区间；这里再校核秒值，防止旧 id 复用。
+                    (span.start_sec - member.source_start_sec).abs() < 1e-3
+                        && (span.end_sec - member.source_end_sec).abs() < 1e-3
+                })
+            });
+        }
+        self.param_block_merges.retain(|r| r.member_refs.len() >= 2);
+    }
+
     /// 保存工程文件时，没有任何用户数据需要持久化的状态。
     ///
     /// 全零/空的 pitch、tension 和自动化曲线在反序列化后与默认状态语义一致，
@@ -961,6 +1030,7 @@ impl TrackParamsState {
             && self.tension_edit.is_empty()
             && self.extra_curves.is_empty()
             && self.extra_params.is_empty()
+            && self.param_block_merges.is_empty()
     }
 }
 
@@ -1205,6 +1275,14 @@ pub struct ClipTake {
     #[serde(default, skip_serializing_if = "is_false")]
     pub midi_fill_gaps: bool,
 
+    /// 源域音节边界估计（工程 v7 起持久化；旧工程缺省为空）。
+    ///
+    /// 这是**可重算缓存**：源文件或算法版本变化时可整体重算。但它与纯显示缓存
+    /// 不同 —— 用户手动合并引用了其中的稳定音节 ID，保存后应立刻可恢复，
+    /// 因此不能像波形预览那样在落盘前清空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub syllable_analysis: Option<crate::pitch_analysis::TakeSyllableAnalysis>,
+
     // ── Take 级拉伸标记 / 包络（预留，Phase 2 起消费） ──
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stretch_markers: Vec<ClipStretchMarker>,
@@ -1261,6 +1339,7 @@ impl ClipTake {
             channel_decision: None,
             midi_note_data: clip.midi_note_data.clone(),
             midi_fill_gaps: clip.midi_fill_gaps,
+            syllable_analysis: None,
             stretch_markers: Vec::new(),
             envelopes: None,
         }
@@ -1857,6 +1936,9 @@ impl Clip {
         projection.name = existing.name.clone();
         projection.stretch_markers = existing.stretch_markers;
         projection.envelopes = existing.envelopes;
+        // 音节分析是 Take 的权威数据，不在 Clip 投影里。必须显式继承，
+        // 否则每次 sync（加载 / 保存 / 拖动）都会把它抹掉，重开工程就丢块。
+        projection.syllable_analysis = existing.syllable_analysis;
         // 判定档案是 Take 的权威数据，不在投影里：必须显式继承，否则每一次
         // `sync_clip_takes_from_flat()`（加载/编辑/保存路径上到处都是）都会把
         // 它抹成 None，折叠结论随之丢失并反复重判。
@@ -2227,6 +2309,8 @@ pub enum HistoryOp {
     ParamStatic,
     ParamStretch,
     ParamPaste,
+    /// 参数块的合并 / 解合并。
+    ParamBlockMerge,
     ImportMidi,
     EditMidi,
     ImportVocalShifter,
@@ -2288,6 +2372,7 @@ impl HistoryOp {
             HistoryOp::ParamStatic => "param_static",
             HistoryOp::ParamStretch => "param_stretch",
             HistoryOp::ParamPaste => "param_paste",
+            HistoryOp::ParamBlockMerge => "param_block_merge",
             HistoryOp::ImportMidi => "import_midi",
             HistoryOp::EditMidi => "edit_midi",
             HistoryOp::ImportVocalShifter => "import_vocalshifter",

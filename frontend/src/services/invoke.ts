@@ -319,7 +319,19 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
             return { clipId: args[0] };
 
         case "analyze_clip_formants":
+        case "get_clip_syllable_spans":
+        case "analyze_clip_syllables":
             return { clipId: args[0] };
+
+        case "get_param_block_merges":
+            return { rootTrackId: args[0] };
+
+        case "set_param_block_merges":
+            return {
+                rootTrackId: args[0],
+                records: args[1],
+                checkpoint: args[2] ?? true,
+            };
 
         case "apply_clip_linked_params":
             return {

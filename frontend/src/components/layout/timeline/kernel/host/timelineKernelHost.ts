@@ -4061,9 +4061,43 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         });
     }
 
+    /**
+     * 命中 clip 的 header 被同轨前序块遮住的像素宽度。
+     *
+     * 与模型侧 `coveredUntilPx` 同一口径（所有前序块末端最大值，再钳到自身宽度）；
+     * 这里按需现算，供 `hitClipHeaderControl` 过滤“看不见的控件”。命中端不能只
+     * 看紧邻前序的重叠段，否则更早的长 Clip 压过来仍会点到看不见的按钮。
+     */
+    function coveredUntilPxOf(hit: {
+        readonly clip: HitTestClip;
+        readonly trackIndex: number;
+    }): number {
+        const view = scroll.get();
+        const track = hitTracks[hit.trackIndex];
+        if (track === undefined) return 0;
+        const list = hitClipsByTrack.get(track.id) ?? [];
+        const clipWidthPx = Math.max(1, hit.clip.lengthSec * view.pxPerSec);
+        let coveredUntilSec = Number.NEGATIVE_INFINITY;
+        for (const other of list) {
+            if (other.id === hit.clip.id) continue;
+            const startsBefore =
+                other.startSec < hit.clip.startSec - 1e-9 ||
+                (Math.abs(other.startSec - hit.clip.startSec) <= 1e-9 &&
+                    String(other.id) < String(hit.clip.id));
+            if (!startsBefore) continue;
+            coveredUntilSec = Math.max(coveredUntilSec, other.startSec + other.lengthSec);
+        }
+        if (!Number.isFinite(coveredUntilSec)) return 0;
+        return Math.max(
+            0,
+            Math.min(clipWidthPx, (coveredUntilSec - hit.clip.startSec) * view.pxPerSec),
+        );
+    }
+
     function resolveHeaderControl(hit: {
         readonly clip: HitTestClip;
         readonly region: ClipHitRegion;
+        readonly trackIndex: number;
         readonly localX: number;
         readonly localY: number;
     }): ClipHeaderControl {
@@ -4077,6 +4111,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             clipWidthPx,
             style,
             headerHeightPx: CLIP_HEADER_HEIGHT,
+            coveredUntilPx: coveredUntilPxOf(hit),
         });
     }
 
@@ -6309,9 +6344,25 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             const clipLeftPx = clip.startSec * view.pxPerSec;
             const rowTopPx = rowIndex * view.rowHeight;
             if (field === "name") {
-                const left = clipLeftPx + style.leadingControlsWidth;
-                const available =
-                    clipWidthPx - style.leadingControlsWidth - style.trailingReservePx;
+                const hitClip: HitTestClip = {
+                    id: clip.id,
+                    trackId: clip.trackId,
+                    startSec: clip.startSec,
+                    lengthSec: clip.lengthSec,
+                    muted: clip.muted,
+                    gain: clipItemGain(clip),
+                    playbackRate: clip.playbackRate,
+                    name: clip.name,
+                    groupId: clip.groupId,
+                    isMidiClip: clip.midiNoteCount != null,
+                };
+                const visibleLeftPx = coveredUntilPxOf({
+                    clip: hitClip,
+                    trackIndex: rowIndex,
+                });
+                const nameLeftPx = Math.max(style.leadingControlsWidth, visibleLeftPx);
+                const left = clipLeftPx + nameLeftPx;
+                const available = clipWidthPx - nameLeftPx - style.trailingReservePx;
                 return {
                     contentLeftPx: left,
                     contentTopPx: rowTopPx,

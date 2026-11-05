@@ -164,6 +164,13 @@ export type TimelineCanvasClipModel = {
      */
     leadingOverlapPx?: number;
     /**
+     * 本 clip 的 header 被**任何前序同轨 clip** 遮住的宽度（clip 内相对坐标）。
+     *
+     * 与 `leadingOverlapPx` 不同：后者只描述与紧邻前序的等权混合；header 必须按
+     * 所有前序块的并集裁剪，否则更早的长 clip 压过来时名称 / 徽标仍会重影。
+     */
+    coveredUntilPx?: number;
+    /**
      * 静音检测预览区段（像素，相对 clip 左缘）。
      *
      * 与旧实现 `ClipItem` 的红色覆盖层同源：后端给出的是**工程秒**区间，这里按
@@ -625,6 +632,31 @@ export function buildSparseClipRenderModel(args: {
     const multiSelectedSet =
         args.multiSelectedClipIds.length > 0 ? new Set(args.multiSelectedClipIds) : null;
 
+    /**
+     * 每个 Clip 的“前导遮挡右边界”（秒）。
+     *
+     * 与下方“重叠区可编辑性”共用同一套排序口径。header 必须按**所有前序块的
+     * 并集**裁剪；`leadingOverlapSecByClipId` 只描述与紧邻前序的等权混合，不能
+     * 用来回答“名称 / 徽标是否被更早的长 Clip 压住”。
+     */
+    const coveredUntilSecByClipId = new Map<string, number>();
+    for (const trackClips of Object.values(args.visibleTrackClipsById)) {
+        if (trackClips.length < 2) continue;
+        const sorted = trackClips.slice().sort((a, b) => {
+            const byStart = a.startSec - b.startSec;
+            if (Math.abs(byStart) > 1e-9) return byStart;
+            return String(a.id) < String(b.id) ? -1 : String(a.id) > String(b.id) ? 1 : 0;
+        });
+        let previousEnd = Number.NEGATIVE_INFINITY;
+        for (const clip of sorted) {
+            const end = clip.startSec + clip.lengthSec;
+            if (previousEnd > clip.startSec + 1e-9) {
+                coveredUntilSecByClipId.set(clip.id, Math.min(end, previousEnd));
+            }
+            previousEnd = Math.max(previousEnd, end);
+        }
+    }
+
     // 重叠区可编辑性：把“同轨道存在重叠”的两个 clip 都加入 DOM overlay。
     // 否则重叠时只有“后绘制/选中的那个”有 DOM 边缘/淡入淡出手柄，较早 clip 的
     // 边缘（延长截短/拉伸/淡入淡出）完全不可达。配合 ClipItem 去掉会建立独立层叠
@@ -724,6 +756,18 @@ export function buildSparseClipRenderModel(args: {
                 args.axis,
                 args.leadingOverlapSecByClipId?.[clip.id] ?? 0,
             ),
+            coveredUntilPx: (() => {
+                const coveredUntilSec = coveredUntilSecByClipId.get(clip.id);
+                if (coveredUntilSec === undefined) return 0;
+                const clipLeftPx = secToContentPx(args.axis, clip.startSec);
+                return Math.max(
+                    0,
+                    Math.min(
+                        durationToWidthPx(args.axis, clip.lengthSec),
+                        secToContentPx(args.axis, coveredUntilSec) - clipLeftPx,
+                    ),
+                );
+            })(),
             silenceSpansPx: buildSilenceSpansPx({
                 axis: args.axis,
                 clipStartSec: clip.startSec,

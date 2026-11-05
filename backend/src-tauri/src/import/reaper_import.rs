@@ -383,6 +383,7 @@ fn build_audio_clip_take(
         )),
         midi_note_data: None,
         midi_fill_gaps: false,
+        syllable_analysis: None,
         stretch_markers: Vec::new(),
         envelopes: None,
     }
@@ -1070,6 +1071,7 @@ fn convert_reaper_data(
                         dyn_orig_source_key: None,
                         extra_curves: Default::default(),
                         extra_params: Default::default(),
+                        param_block_merges: Vec::new(),
                     },
                 );
             }

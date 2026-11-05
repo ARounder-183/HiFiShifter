@@ -81,6 +81,8 @@ pub(crate) use hifishifter_kernel::midi_export;
 pub(crate) use hifishifter_kernel::midi_export::TempoTickConverter;
 #[path = "commands/formant.rs"]
 mod formant;
+#[path = "commands/syllable.rs"]
+mod syllable;
 #[path = "commands/notebook.rs"]
 mod notebook;
 #[path = "commands/onnx_status.rs"]
@@ -1208,6 +1210,59 @@ pub async fn analyze_clip_formants(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+// ===================== clip syllable analysis =====================
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_clip_syllable_spans(
+    state: State<'_, AppState>,
+    clip_id: String,
+) -> Result<syllable::ClipSyllableAnalysisPayload, String> {
+    common::guard_command(
+        "get_clip_syllable_spans",
+        Err("panic in command: get_clip_syllable_spans".to_string()),
+        || syllable::get_clip_syllable_spans(state, clip_id),
+    )
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn analyze_clip_syllables(
+    app: tauri::AppHandle,
+    clip_id: String,
+) -> Result<syllable::ClipSyllableAnalysisPayload, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        syllable::analyze_clip_syllables(state, clip_id)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_param_block_merges(
+    state: State<'_, AppState>,
+    root_track_id: String,
+) -> serde_json::Value {
+    common::guard_json_command(
+        "get_param_block_merges",
+        || match syllable::get_param_block_merges(state, root_track_id) {
+            Ok(records) => serde_json::json!({ "ok": true, "records": records }),
+            Err(error) => serde_json::json!({ "ok": false, "error": error }),
+        },
+    )
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_param_block_merges(
+    state: State<'_, AppState>,
+    root_track_id: String,
+    records: Vec<syllable::ParamBlockMergeRecordPayload>,
+    checkpoint: Option<bool>,
+) -> serde_json::Value {
+    common::guard_json_command("set_param_block_merges", || {
+        syllable::set_param_block_merges(state, root_track_id, records, checkpoint)
+    })
 }
 
 // ===================== waveform v2 (二进制 mipmap) =====================

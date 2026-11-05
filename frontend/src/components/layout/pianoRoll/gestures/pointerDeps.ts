@@ -40,6 +40,50 @@ import type { MutableRefObject, PointerEvent as ReactPointerEvent, RefObject } f
 
 /** 手势回调需要的上下文（各自按需 `Pick`）。 */
 export type PointerDeps = {
+    /**
+     * 块编辑工具命中。
+     *
+     * 返回 true 表示这次按下已由块层消费，参数线手势不再启动。
+     */
+    onParamBlockPointerDown: (args: {
+        sec: number;
+        localY: number;
+        clientY: number;
+        clientX: number;
+        add: boolean;
+        toggle: boolean;
+        pointerType: string;
+        pointerId: number;
+        captureTarget: HTMLCanvasElement;
+        setActivePointerGestureEnd: (endGesture: () => void) => void;
+        clearActivePointerGestureEnd: (endGesture?: () => void) => void;
+        /** 画布高度（CSS px）：把指针 y 换算到值域。 */
+        canvasHeightPx: number;
+        /** 点击值域的纵向映射。 */
+        yToValue: (param: string, y: number, h: number) => number;
+        /** 当前吸附开关与步长。 */
+        blockSnapEnabled: boolean;
+        blockSnapStep: number;
+        blockSnapScale?: ScaleLike | null;
+        /** 实时的指针值（用于折算纵向拖动偏移）。 */
+        pointerValue: (clientY: number) => number;
+        /** 屏幕 clientX → 内容秒（用于判断块时间范围）。 */
+        secAtClientX: (clientX: number) => number;
+        /** 吸附开关（拖动中可随修饰键变化）。 */
+        isSnapToggleModifierHeld: (event: {
+            ctrlKey: boolean;
+            shiftKey: boolean;
+            altKey: boolean;
+            metaKey?: boolean;
+        }) => boolean;
+        /** 拖动参数偏移的网格步长。 */
+        /** 当前参数名（决定 dyn 等乘性语义）。 */
+        editParam: string;
+        /** 参数网格步长（吸附拖动用）。 */
+        gridStep: number;
+        /** 是否为右键：命中块时打开块菜单，不启动拖动。 */
+        contextMenu: boolean;
+    }) => boolean;
     activePointerGestureEndRef: RefObject<(() => void) | null>;
     applyDenseToLiveEdit: (
         pv: ParamViewSegment,
@@ -111,6 +155,7 @@ export type PointerDeps = {
         },
         _dragTarget?: HTMLCanvasElement | null,
     ) => { adjustedClientX: number; adjustedClientY: number };
+    currentParamQuantizeUnit: number;
     currentParamRange: { min: number; max: number } | undefined;
     dispatch: AppDispatch;
     disposeFineAdjustedPointerState: (

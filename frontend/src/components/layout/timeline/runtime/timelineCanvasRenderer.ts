@@ -292,6 +292,8 @@ export function drawTimelineCanvas(
             snapOffsetPx?: number;
             /** 前导重叠区宽度（像素，从左缘起算）。>0 时上 clip 在该区域半透。 */
             leadingOverlapPx?: number;
+            /** header 被任何前序同轨 Clip 遮挡的宽度（像素，从左缘起算）。 */
+            coveredUntilPx?: number;
             /** 静音检测预览区段（像素，相对 clip 左缘）：半透明红色覆盖。 */
             silenceSpansPx?: Array<{ leftPx: number; widthPx: number }>;
             /** 多 Take lane 分界线的 y 偏移（相对 body 顶部，CSS px）。 */
@@ -510,6 +512,7 @@ export function drawTimelineCanvas(
         bodyHeight: number;
         radius: number;
         leadingOverlapPx: number;
+        coveredUntilPx: number;
         isGroupActive: boolean;
         isGroupDisabled: boolean;
         /** 右缘是否紧贴下一个同轨 clip（需要画分隔缝）。 */
@@ -567,10 +570,15 @@ export function drawTimelineCanvas(
         const radius = Math.max(0, Math.min(CLIP_CORNER_RADIUS_PX, clipWidth / 2, clipHeight / 2));
         // 前导重叠区（被同轨前一个 clip 压住的部分）宽度。
         const leadingOverlapPx = Math.max(0, Math.min(clipWidth - 1, clip.leadingOverlapPx ?? 0));
+        const coveredUntilPx = Math.max(
+            0,
+            Math.min(clipWidth - 1, clip.coveredUntilPx ?? clip.leadingOverlapPx ?? 0),
+        );
         const baseAlpha = style.mutedAlpha;
 
         const fills: FillOp[] = [];
-        if (leadingOverlapPx > 0.5) {
+        const overlapForBodyPx = Math.max(leadingOverlapPx, coveredUntilPx);
+        if (overlapForBodyPx > 0.5) {
             // 重叠区半透，让下 clip 的色块/波形透出（避免两层不透明色块
             // 叠加成脏色）。左右两段各自只保留外侧的圆角。
             fills.push({
@@ -578,16 +586,16 @@ export function drawTimelineCanvas(
                 alpha: baseAlpha * 0.55,
                 x: clipLeft,
                 y: clipTop,
-                w: leadingOverlapPx,
+                w: overlapForBodyPx,
                 h: headerHeight,
                 radii: [radius, 0, 0, 0],
             });
             fills.push({
                 style: style.headerFill,
                 alpha: baseAlpha,
-                x: clipLeft + leadingOverlapPx,
+                x: clipLeft + overlapForBodyPx,
                 y: clipTop,
-                w: clipWidth - leadingOverlapPx,
+                w: clipWidth - overlapForBodyPx,
                 h: headerHeight,
                 radii: [0, radius, 0, 0],
             });
@@ -596,16 +604,16 @@ export function drawTimelineCanvas(
                 alpha: baseAlpha * 0.55,
                 x: clipLeft,
                 y: bodyTop,
-                w: leadingOverlapPx,
+                w: overlapForBodyPx,
                 h: bodyHeight,
                 radii: [0, 0, 0, radius],
             });
             fills.push({
                 style: style.bodyFill,
                 alpha: baseAlpha,
-                x: clipLeft + leadingOverlapPx,
+                x: clipLeft + overlapForBodyPx,
                 y: bodyTop,
-                w: clipWidth - leadingOverlapPx,
+                w: clipWidth - overlapForBodyPx,
                 h: bodyHeight,
                 radii: [0, 0, radius, 0],
             });
@@ -725,6 +733,7 @@ export function drawTimelineCanvas(
             bodyHeight,
             radius,
             leadingOverlapPx,
+            coveredUntilPx,
             isGroupActive,
             isGroupDisabled,
             hasSeam,
@@ -736,7 +745,7 @@ export function drawTimelineCanvas(
             strokes,
             // 屏障：前导重叠会盖住前一个 clip；编组外圈描边会伸出自身矩形
             // 2px 盖住邻居。二者都必须先提交此前已排入的批次。
-            barrier: leadingOverlapPx > 0.5 || isGroupActive,
+            barrier: overlapForBodyPx > 0.5 || isGroupActive,
         };
     }
 
@@ -747,6 +756,11 @@ export function drawTimelineCanvas(
         const bodyTop = item.bodyTop;
         const bodyHeight = item.bodyHeight;
         const radius = item.radius;
+        const headerLayout = {
+            visibleLeftPx: item.coveredUntilPx,
+            nameLeftPx: Math.max(style.leadingControlsWidth, item.coveredUntilPx),
+            nameRightPx: Math.max(0, clipWidth - style.trailingReservePx),
+        };
 
         ctx.globalAlpha = style.mutedAlpha;
 
@@ -776,7 +790,7 @@ export function drawTimelineCanvas(
             ctx.restore();
         }
 
-        if (style.showGainKnob) {
+        if (style.showGainKnob && headerLayout.visibleLeftPx <= style.gainKnobCenterOffsetX) {
             const knobCenterX = clipLeft + style.gainKnobCenterOffsetX;
             const knobCenterY = clipTop + style.gainKnobCenterOffsetY;
             ctx.fillStyle = style.gainKnobFill;
@@ -803,7 +817,7 @@ export function drawTimelineCanvas(
             ctx.stroke();
         }
 
-        if (style.showChainBadge) {
+        if (style.showChainBadge && headerLayout.visibleLeftPx <= style.chainBadgeOffsetX) {
             const badgeX = clipLeft + style.chainBadgeOffsetX;
             const badgeY = clipTop + style.chainBadgeOffsetY;
             const badgeW = style.chainBadgeWidth;
@@ -850,7 +864,7 @@ export function drawTimelineCanvas(
             }
         }
 
-        if (style.showMuteBadge) {
+        if (style.showMuteBadge && headerLayout.visibleLeftPx <= style.muteBadgeOffsetX) {
             const badgeX = clipLeft + style.muteBadgeOffsetX;
             const badgeY = clipTop + style.muteBadgeOffsetY;
             ctx.beginPath();
@@ -878,7 +892,7 @@ export function drawTimelineCanvas(
             ctx.textAlign = "start";
         }
 
-        if (style.showFormantBadge) {
+        if (style.showFormantBadge && headerLayout.visibleLeftPx <= style.formantBadgeOffsetX) {
             const badgeX = clipLeft + style.formantBadgeOffsetX;
             const badgeY = clipTop + style.formantBadgeOffsetY;
             ctx.beginPath();
@@ -906,24 +920,28 @@ export function drawTimelineCanvas(
             ctx.textAlign = "start";
         }
 
-        if (style.showGainLabel) {
+        const gainLabelLeftPx = clipWidth - style.gainLabelWidth - 6;
+        const rateLabelLeftPx = gainLabelLeftPx - style.rateLabelWidth - 8;
+        if (style.showGainLabel && gainLabelLeftPx >= headerLayout.visibleLeftPx) {
             ctx.fillStyle = style.textFill;
             ctx.font = `10px ${fontFamily}`;
             ctx.textBaseline = "middle";
             // 宽度取自样式解析（而非现场 measureText）：命中端
             // （`clipHeaderControls`）消费同一个值来划标签命中区，两处必须是
             // 同一份数据，否则「看到的」与「可点的」会漂移。
-            const gainX = clipLeft + clipWidth - style.gainLabelWidth - 6;
-            if (style.showPlaybackRate) {
-                const rateX = gainX - style.rateLabelWidth - 8;
+            const gainX = clipLeft + gainLabelLeftPx;
+            if (style.showPlaybackRate && rateLabelLeftPx >= headerLayout.visibleLeftPx) {
+                const rateX = clipLeft + rateLabelLeftPx;
                 ctx.fillText(style.playbackRateLabel, rateX, clipTop + 9);
             }
             ctx.fillText(style.gainLabel, gainX, clipTop + 9);
         }
 
         if (!clip.isRenaming && style.showName && style.displayName.length > 0) {
-            const textStartX = clipLeft + style.leadingControlsWidth;
-            const textEndX = style.showGainLabel
+            const textStartX = clipLeft + headerLayout.nameLeftPx;
+            const gainLabelVisible =
+                style.showGainLabel && gainLabelLeftPx >= headerLayout.visibleLeftPx;
+            const textEndX = gainLabelVisible
                 ? clipLeft + clipWidth - style.trailingReservePx + 4
                 : clipLeft + clipWidth - 8;
             const availableWidth = Math.max(0, textEndX - textStartX);

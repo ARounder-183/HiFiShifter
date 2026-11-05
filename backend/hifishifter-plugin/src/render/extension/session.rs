@@ -871,6 +871,13 @@ impl ExtensionOwner {
                 );
             }
             let mut local = edits.clone();
+            // 分析结果写在 live 时间线的 take 字段；`EditState` 是另一份存档权威。
+            // 保存前收一次，否则本次分析永远进不了下一次 getState / ARA 存档。
+            let live_timeline = document.workspace_timeline().ok();
+            if let Some(timeline) = live_timeline.as_ref() {
+                local.capture_take_syllables(timeline);
+                local.prune_take_syllables(timeline);
+            }
             match self.assigned_timeline(&document) {
                 Ok(host) => {
                     let allowed: BTreeSet<_> = host.tracks.iter().map(|t| t.id.clone()).collect();
@@ -905,6 +912,9 @@ impl ExtensionOwner {
                         .copy_seeds
                         .retain(|_, seed| allowed.contains(&seed.root));
                     local.atlas.gaps.retain(|root, _| allowed.contains(root));
+                    // 音节缓存按 Clip 身份裁剪；与 atlas.regions 同一口径，避免
+                    // 一个组件把别的组件 / 已删除片段的缓存写进自己的存档。
+                    local.prune_take_syllable_clips(&clips);
                     if !local.fades.is_empty() {
                         let items = document.fade_items_locked(&clips);
                         // 【为什么这里不再失败】fade 元数据在途时保留整份 fade 表；

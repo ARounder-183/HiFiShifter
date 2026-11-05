@@ -1475,6 +1475,9 @@ impl DocumentSession {
             timeline.tracks,
             &edits.fades,
             &edits.groups,
+            // 音节缓存会让 `edits.apply` 改写 Take；不进指纹时，首次分析后
+            // `ensure_loaded` 的“版本未变”早退会让 UI 永远看不到新区间。
+            &edits.take_syllables,
             &timeline.project_scale_notes,
             &timeline.tempo_map,
             // 【为什么渲染事实也进指纹】`ensure_loaded` 靠"版本没变 + 本指纹相同"早退。

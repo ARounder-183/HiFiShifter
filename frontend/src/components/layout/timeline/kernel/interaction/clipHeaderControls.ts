@@ -86,6 +86,13 @@ export interface ClipHeaderControlArgs {
     readonly style: ClipHeaderControlStyle;
     /** header 高度（CSS px）：超出则不命中任何控件。缺省 16。 */
     readonly headerHeightPx?: number;
+    /**
+     * header 被同轨前序 Clip 遮挡的宽度（clip 内相对坐标，CSS px）。
+     *
+     * 被遮挡段里的控件不画也不可点：否则用户会点到“看不见的按钮”，而
+     * 重叠区的 header 文本 / 徽标重影正是这样来的。
+     */
+    readonly coveredUntilPx?: number;
 }
 
 /** 徽标命中容差（CSS px）：比视觉边界各外扩一点，短按更容易点中。 */
@@ -147,11 +154,17 @@ export function hitClipHeaderControl(args: ClipHeaderControlArgs): ClipHeaderCon
     const x = args.localX;
     const y = args.localY;
     const clipWidthPx = Math.max(1, args.clipWidthPx);
+    const coveredUntilPx = Number.isFinite(args.coveredUntilPx)
+        ? Math.max(0, args.coveredUntilPx as number)
+        : 0;
+    const isVisible = (leftPx: number, widthPx = 0): boolean =>
+        leftPx >= coveredUntilPx - 1e-6 && leftPx + widthPx > coveredUntilPx + 1e-6;
 
     // ── 左侧徽标（矩形，顺序：静音 → 共振峰 → 链）──
     // 三者互不重叠，顺序只影响「边界被容差覆盖」时的归属；取视觉上更常用的在前。
     if (
         style.showMuteBadge &&
+        isVisible(style.muteBadgeOffsetX, style.muteBadgeWidth) &&
         inRect(
             x,
             y,
@@ -166,6 +179,7 @@ export function hitClipHeaderControl(args: ClipHeaderControlArgs): ClipHeaderCon
     }
     if (
         style.showFormantBadge &&
+        isVisible(style.formantBadgeOffsetX, style.formantBadgeWidth) &&
         inRect(
             x,
             y,
@@ -180,6 +194,7 @@ export function hitClipHeaderControl(args: ClipHeaderControlArgs): ClipHeaderCon
     }
     if (
         style.showChainBadge &&
+        isVisible(style.chainBadgeOffsetX, style.chainBadgeWidth) &&
         inRect(
             x,
             y,
@@ -194,7 +209,7 @@ export function hitClipHeaderControl(args: ClipHeaderControlArgs): ClipHeaderCon
     }
 
     // ── 增益旋钮（圆形）──
-    if (style.showGainKnob) {
+    if (style.showGainKnob && isVisible(style.gainKnobCenterOffsetX, style.gainKnobRadius)) {
         const dx = x - style.gainKnobCenterOffsetX;
         const dy = y - style.gainKnobCenterOffsetY;
         const radius = Math.max(0, style.gainKnobRadius) + KNOB_SLOP_PX;
@@ -209,6 +224,7 @@ export function hitClipHeaderControl(args: ClipHeaderControlArgs): ClipHeaderCon
             const rateRight = gainLeft - RATE_LABEL_GAP_PX;
             const rateLeft = rateRight - Math.max(0, style.rateLabelWidth);
             if (
+                isVisible(rateLeft, rateRight - rateLeft) &&
                 x >= rateLeft - BADGE_SLOP_PX &&
                 x <= rateRight + BADGE_SLOP_PX &&
                 Math.abs(y - LABEL_BASELINE_OFFSET_Y) <= LABEL_HIT_HALF_HEIGHT_PX
@@ -217,6 +233,7 @@ export function hitClipHeaderControl(args: ClipHeaderControlArgs): ClipHeaderCon
             }
         }
         if (
+            isVisible(gainLeft, gainRight - gainLeft) &&
             x >= gainLeft - BADGE_SLOP_PX &&
             x <= gainRight + BADGE_SLOP_PX &&
             Math.abs(y - LABEL_BASELINE_OFFSET_Y) <= LABEL_HIT_HALF_HEIGHT_PX
@@ -227,7 +244,7 @@ export function hitClipHeaderControl(args: ClipHeaderControlArgs): ClipHeaderCon
 
     // ── 名称区（左侧控件与右侧标签之间）──
     if (!style.showName) return null;
-    const nameLeft = style.leadingControlsWidth;
+    const nameLeft = Math.max(style.leadingControlsWidth, coveredUntilPx);
     const nameRight = clipWidthPx - style.trailingReservePx + 4;
     // 可用宽度过窄时视为无名称区（绘制端同样要求 > 12px 才画名称）。
     if (nameRight - nameLeft <= NAME_MIN_WIDTH_PX) return null;

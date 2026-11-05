@@ -104,7 +104,12 @@ impl SynthConfig {
 /// 张力，打开 v5 及更早的工程时会自动置位该开关（见
 /// [`crate::state::TimelineState::migrate_legacy_breath_separation`]）；
 /// 该迁移**仅对 < v6 生效**，因此用户此后手动关闭开关的选择会持久保留。
-pub const CURRENT_PROJECT_FILE_VERSION: u32 = 6;
+///
+/// v7：`ClipTake.syllable_analysis`（源域音节区间）与
+/// `TrackParamsState.param_block_merges`（用户合并意图）。两者都有
+/// `serde(default)` / `skip_serializing_if`，v6 及更早工程读成“未分析、
+/// 无手动合并”，不迁移、不改写既有参数；v7 写出的字段对旧版本是可忽略的附加数据。
+pub const CURRENT_PROJECT_FILE_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -446,6 +451,12 @@ pub fn prepare_timeline_for_project_save(
         // 空曲线与缺失 key 语义相同（都取参数默认值）。
         params.extra_curves.retain(|_, curve| !curve.is_empty());
     }
+    // 合并成员指向的 Clip / Take / 音节区间必须仍然存在；失效成员清掉，
+    // 少于两个成员的组合整组丢弃。避免重分析 / 删除后误合并别的块。
+    let clips = tl.clips.iter().cloned().collect::<Vec<_>>();
+    for params in tl.params_by_root_track.values_mut() {
+        params.prune_param_block_merges(&clips);
+    }
 
     // 精简后没有任何用户数据的 root-track 参数记录直接删除；
     // 打开工程时会按需用 ensure_params_for_root 重新创建。
@@ -685,6 +696,210 @@ mod tests {
             assert_eq!(loaded.name, "roundtrip");
             assert!((loaded.timeline.bpm - 143.5).abs() < 1e-9);
         }
+    }
+
+    /// v7 新字段：旧文件缺省为空；新文件往返保留源域音节与合并意图。
+    #[test]
+    fn v7_syllable_and_block_merge_fields_round_trip_and_default_on_legacy_json() {
+        let legacy: ProjectFile = serde_json::from_value(serde_json::json!({
+            "version": 6,
+            "name": "legacy",
+            "timeline": {
+                "tracks": [],
+                "clips": [],
+                "bpm": 120.0,
+                "project_sec": 1.0
+            },
+            "base_scale": "C",
+            "beats_per_bar": 4,
+            "time_signature_denominator": 4,
+            "grid_size": "1/4"
+        }))
+        .expect("v6 without v7 fields must load");
+        assert!(legacy.timeline.params_by_root_track.is_empty());
+
+        let mut pf = project("v7");
+        let take = crate::state::ClipTake {
+            id: "take".into(),
+            name: "take".into(),
+            gain: 1.0,
+            source_path: None,
+            source_path_relative: None,
+            duration_sec: None,
+            duration_frames: None,
+            source_sample_rate: None,
+            source_file_fingerprint: None,
+            source_file_mtime: None,
+            source_file_size: None,
+            waveform_preview: None,
+            pitch_range: None,
+            source_start_sec: 0.0,
+            source_end_sec: 0.0,
+            playback_rate: 1.0,
+            reversed: false,
+            loop_enabled: false,
+            channel_mode: 0,
+            source_channels: None,
+            channel_decision: None,
+            midi_note_data: None,
+            midi_fill_gaps: false,
+            syllable_analysis: Some(crate::pitch_analysis::TakeSyllableAnalysis {
+                algorithm: crate::pitch_analysis::SYLLABLE_ALGORITHM.into(),
+                algorithm_version: crate::pitch_analysis::SYLLABLE_ALGORITHM_VERSION,
+                source_digest: "digest".into(),
+                source_spans_sec: vec![crate::pitch_analysis::SyllableSpan {
+                    start_sec: 0.1,
+                    end_sec: 0.3,
+                }],
+            }),
+            stretch_markers: vec![],
+            envelopes: None,
+        };
+        pf.timeline.clips.push(crate::state::Clip {
+            id: "clip".into(),
+            group_id: None,
+            track_id: "track".into(),
+            name: "clip".into(),
+            start_sec: 0.0,
+            length_sec: 1.0,
+            color: "blue".into(),
+            takes: vec![take],
+            active_take_id: Some("take".into()),
+            clip_playback_rate: 1.0,
+            source_path: None,
+            source_path_relative: None,
+            duration_sec: None,
+            duration_frames: None,
+            source_sample_rate: None,
+            source_file_mtime: None,
+            source_file_size: None,
+            source_file_fingerprint: None,
+            waveform_preview: None,
+            pitch_range: None,
+            gain: 1.0,
+            clip_gain: 1.0,
+            muted: false,
+            source_start_sec: 0.0,
+            source_end_sec: 0.0,
+            playback_rate: 1.0,
+            reversed: false,
+            channel_mode: 0,
+            source_channels: None,
+            loop_enabled: false,
+            snap_offset_sec: 0.0,
+            fade_in_sec: 0.0,
+            fade_out_sec: 0.0,
+            fade_in_curve: "sine".into(),
+            fade_out_curve: "sine".into(),
+            fade_in_shape: 0.0,
+            fade_out_shape: 0.0,
+            fade_in_dir: 0.0,
+            fade_out_dir: 0.0,
+            fade_in_s: 0.0,
+            fade_out_s: 0.0,
+            auto_fade_in_sec: 0.0,
+            auto_fade_out_sec: 0.0,
+            extra_curves: None,
+            extra_params: None,
+            formant_morph: None,
+            midi_note_data: None,
+            midi_fill_gaps: false,
+        });
+        pf.timeline.params_by_root_track.insert(
+            "track".into(),
+            crate::state::TrackParamsState {
+                param_block_merges: vec![crate::state::ParamBlockMergeRecord {
+                    merged_group_id: "group".into(),
+                    member_refs: vec![crate::state::ParamBlockMemberRef {
+                        clip_id: "clip".into(),
+                        take_id: "take".into(),
+                        syllable_id: "syl".into(),
+                        source_start_sec: 0.1,
+                        source_end_sec: 0.3,
+                    }],
+                }],
+                ..Default::default()
+            },
+        );
+        let json = serde_json::to_vec(&pf).unwrap();
+        let loaded: ProjectFile = serde_json::from_slice(&json).unwrap();
+        assert_eq!(loaded.version, 7);
+        assert_eq!(
+            loaded.timeline.clips[0].takes[0]
+                .syllable_analysis
+                .as_ref()
+                .unwrap()
+                .source_spans_sec[0]
+                .end_sec,
+            0.3
+        );
+        assert_eq!(
+            loaded.timeline.params_by_root_track["track"].param_block_merges[0].member_refs[0]
+                .syllable_id,
+            "syl"
+        );
+    }
+
+    #[test]
+    fn prune_merges_drops_dangling_members_and_keeps_valid_groups() {
+        fn make_clip() -> crate::state::Clip {
+            let mut tl = timeline();
+            let id = tl.add_clip(None, Some("clip".into()), Some(0.0), Some(1.0), None);
+            tl.clips.into_iter().find(|c| c.id == id).unwrap()
+        }
+        let mut params = crate::state::TrackParamsState::default();
+        params
+            .param_block_merges
+            .push(crate::state::ParamBlockMergeRecord {
+                merged_group_id: "group".into(),
+                member_refs: vec![
+                    crate::state::ParamBlockMemberRef {
+                        clip_id: "clip".into(),
+                        take_id: "take".into(),
+                        syllable_id: "a".into(),
+                        source_start_sec: 0.1,
+                        source_end_sec: 0.3,
+                    },
+                    crate::state::ParamBlockMemberRef {
+                        clip_id: "clip".into(),
+                        take_id: "take".into(),
+                        syllable_id: "b".into(),
+                        source_start_sec: 0.3,
+                        source_end_sec: 0.5,
+                    },
+                    crate::state::ParamBlockMemberRef {
+                        clip_id: "gone".into(),
+                        take_id: "take".into(),
+                        syllable_id: "c".into(),
+                        source_start_sec: 0.5,
+                        source_end_sec: 0.7,
+                    },
+                ],
+            });
+        let mut clip = make_clip();
+        let mut take = crate::state::ClipTake::from_clip(&clip);
+        take.id = "take".into();
+        take.syllable_analysis = Some(crate::pitch_analysis::TakeSyllableAnalysis {
+            algorithm: crate::pitch_analysis::SYLLABLE_ALGORITHM.into(),
+            algorithm_version: crate::pitch_analysis::SYLLABLE_ALGORITHM_VERSION,
+            source_digest: "digest".into(),
+            source_spans_sec: vec![
+                crate::pitch_analysis::SyllableSpan {
+                    start_sec: 0.1,
+                    end_sec: 0.3,
+                },
+                crate::pitch_analysis::SyllableSpan {
+                    start_sec: 0.3,
+                    end_sec: 0.5,
+                },
+            ],
+        });
+        clip.id = "clip".into();
+        clip.takes = vec![take];
+        clip.active_take_id = Some("take".into());
+        params.prune_param_block_merges(&[clip]);
+        assert_eq!(params.param_block_merges.len(), 1);
+        assert_eq!(params.param_block_merges[0].member_refs.len(), 2);
     }
 
     #[test]

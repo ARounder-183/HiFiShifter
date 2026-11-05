@@ -151,4 +151,61 @@ describe("hitClipHeaderControl", () => {
             }),
         ).toBe(null);
     });
+
+    it("重叠区里被前序 Clip 遮住的左徽标与旋钮既不可见也不可点", () => {
+        // 前序块在 clip 内遮住 [0, 60)：链徽标 [28,48] 完全消失；
+        // 静音徽标 [50,70] 只有右半边露出来，也不允许“半个按钮”可点。
+        const style = makeStyle();
+        expect(
+            hitClipHeaderControl({
+                localX: 38,
+                localY: 10,
+                clipWidthPx: CLIP_WIDTH,
+                style,
+                coveredUntilPx: 60,
+            }),
+        ).toBe(null);
+        expect(
+            hitClipHeaderControl({
+                localX: 15,
+                localY: 10,
+                clipWidthPx: CLIP_WIDTH,
+                style,
+                coveredUntilPx: 60,
+            }),
+        ).toBe(null);
+    });
+
+    it("重叠区边界之后仍保留可见徽标与名称的命中", () => {
+        expect(
+            hitClipHeaderControl({
+                localX: 80,
+                localY: 10,
+                clipWidthPx: CLIP_WIDTH,
+                style: makeStyle(),
+                coveredUntilPx: 72,
+            }),
+        ).toBe("formant");
+        expect(
+            hitClipHeaderControl({
+                localX: 150,
+                localY: 9,
+                clipWidthPx: CLIP_WIDTH,
+                style: makeStyle(),
+                coveredUntilPx: 100,
+            }),
+        ).toBe("name");
+    });
+
+    it("重叠段压到右侧标签时标签不可点", () => {
+        expect(
+            hitClipHeaderControl({
+                localX: 274,
+                localY: 9,
+                clipWidthPx: CLIP_WIDTH,
+                style: makeStyle(),
+                coveredUntilPx: 260,
+            }),
+        ).toBe(null);
+    });
 });
