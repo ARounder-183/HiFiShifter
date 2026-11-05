@@ -67,7 +67,7 @@ unsafe extern "C" fn entry_init(plugin_path: *const c_char) -> bool {
                 resource_root::set_module_path(path).ok();
             }
         }
-        resource_root::set_layout(ResourceLayout::Sibling).ok();
+        resource_root::set_layout(ResourceLayout::for_clap()).ok();
         hifishifter_plugin_core::set_product_version(VERSION);
         hifishifter_plugin_core::set_layout_migration_hook(|| {});
         hifishifter_plugin_core::ensure_layout_v2_once();

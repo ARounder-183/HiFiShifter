@@ -15,6 +15,22 @@ pub enum ResourceLayout {
     Sibling,
 }
 
+impl ResourceLayout {
+    /// CLAP 的布局随 OS 变：macOS 是 bundle（`Contents/Resources`），Linux 与 Windows
+    /// 是单文件模块（同级 `<stem>-resources`）。把这条规则放在这里而不是散在入口里，
+    /// 是因为它同时被两处消费：模块入口登记布局、测试断言布局。
+    pub const fn for_clap() -> Self {
+        #[cfg(target_os = "macos")]
+        {
+            Self::BundleContents
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Self::Sibling
+        }
+    }
+}
+
 static LAYOUT: OnceLock<ResourceLayout> = OnceLock::new();
 static MODULE_PATH: OnceLock<PathBuf> = OnceLock::new();
 
@@ -123,6 +139,16 @@ mod tests {
             frontend,
             Path::new("/plug/HiFiShifter.vst3/Contents/Resources/frontend")
         );
+    }
+
+    #[test]
+    fn clap_layout_follows_the_platform_bundle_rule() {
+        // macOS 的 .clap 是 bundle，资源在 Contents/Resources；Linux/Windows 是单文件，
+        // 资源在同级 <stem>-resources。写错这一条的后果不是报错，而是"窗口一片空白"。
+        #[cfg(target_os = "macos")]
+        assert_eq!(ResourceLayout::for_clap(), ResourceLayout::BundleContents);
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(ResourceLayout::for_clap(), ResourceLayout::Sibling);
     }
 
     #[test]
