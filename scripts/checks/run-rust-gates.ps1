@@ -99,6 +99,13 @@ function Get-CargoCommand([string]$kind, [int]$Threads = 0) {
             # 由各测试内部的渲染线程驱动，与 libtest 的线程数无关。并发复跑留给内核。
             $exclude = ''
             if (!$Package -and $threads -gt 1) { $exclude = ' --exclude hifishifter-plugin' }
+            # 【为什么测试前要先 build 一次】tests/vst3_exports.rs 会 dlopen 产出的 cdylib
+            # 来断言导出表，而 `cargo test` 只编测试用的 rlib，不产出 .dll —— 干净检出上
+            # 那条用例必然找不到文件（它自己的报错也写着"先跑 cargo build"）。CI 第一次真
+            # 跑插件测试就撞在这里。并发复跑已经排除插件，不需要再 build 一遍。
+            if (!$exclude -and (!$Package -or $Package -eq 'hifishifter-plugin')) {
+                Write-Output "$prefix cargo build --locked --manifest-path $manifest -p hifishifter-plugin"
+            }
             $skips = if ($skipArgs.Count -gt 0) { ' ' + ($skipArgs -join ' ') } else { '' }
             Write-Output "$prefix cargo test --locked --manifest-path $manifest $target$exclude -- --test-threads=$threads$skips"
         }
