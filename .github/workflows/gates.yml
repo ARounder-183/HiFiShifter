@@ -133,6 +133,12 @@ jobs:
     needs: frontend
     runs-on: windows-latest
     timeout-minutes: 90
+    env:
+      # 【为什么要跳过前端构建】src-tauri 的 build.rs 在 frontend/dist 缺失时会自己跑
+      # npm build；这里 dist 是 frontend job 的 artifact，已经解好了。不设这个开关，
+      # 每个 Rust job 都要再构建一遍前端，失败时还会伪装成"clippy 失败"。
+      HIFISHIFTER_SKIP_FRONTEND_BUILD: "1"
+      HIFISHIFTER_SKIP_CARGO_CHECK: "1"
     defaults:
       run:
         shell: pwsh
@@ -189,6 +195,9 @@ jobs:
       # 偶尔还会卡在设备初始化上不再返回（整条 job 挂到 60 分钟上限）。测试判的是
       # 逻辑，不是 GPU 性能，所以直接把 EP 钉成 cpu。
       HIFISHIFTER_ORT_EP: cpu
+      # frontend/dist 来自 artifact；不设这个开关，build.rs 会再跑一遍 npm build。
+      HIFISHIFTER_SKIP_FRONTEND_BUILD: "1"
+      HIFISHIFTER_SKIP_CARGO_CHECK: "1"
     defaults:
       run:
         shell: pwsh
