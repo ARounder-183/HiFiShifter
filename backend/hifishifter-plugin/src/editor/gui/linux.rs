@@ -1470,13 +1470,14 @@ fn attach_view(
         let weak = Rc::downgrade(&client);
         window.connect_delete_event(move |_, _| {
             // 由 GTK 主循环的 C 栈调用；panic 拦成"继续销毁"（与正常路径同值）。
+            // 【为什么 `Proceed` 有两个来源】一个是 panic 兜底值，一个是正常路径的返回值：
+            // 窗口的销毁交给 `close_view`（它要同时摘掉注册表与节拍），这里只负责关客户端。
             crate::guard_ffi(gtk::glib::Propagation::Proceed, || {
                 if let Some(client) = weak.upgrade() {
                     client.borrow_mut().close();
                 }
-            });
-            // 【为什么 `Proceed`】窗口的销毁交给 `close_view`（它要同时摘掉注册表与节拍）。
-            gtk::glib::Propagation::Proceed
+                gtk::glib::Propagation::Proceed
+            })
         });
         window.show_all();
     }
@@ -1655,6 +1656,10 @@ fn install_messages(manager: &webkit2gtk::UserContentManager, client: &Rc<RefCel
     let weak = Rc::downgrade(client);
     manager.connect_script_message_received(None, move |_, result| {
         // 该闭包由 WebKitGTK 的 C 栈调用（同 `tick` 的守卫理由）。
+        // 【为什么要再 clone 一次】外层是 `Fn`（信号会反复触发），内层 `move` 闭包
+        // 会消费捕获的 `weak`；不 clone 就编不过（E0507），而 clone 的代价是一次
+        // 引用计数自增。
+        let weak = weak.clone();
         crate::guard_ffi((), move || {
             let Some(client) = weak.upgrade() else {
                 return;
@@ -1726,6 +1731,7 @@ fn install_policy(webview: &webkit2gtk::WebView, client: &Rc<RefCell<EditorClien
     let weak = Rc::downgrade(client);
     webview.connect_load_failed(move |_, _, uri, error| {
         // false = 把失败交给 WebKit 的默认处理（与原闭包的返回值一致）。
+        let weak = weak.clone();
         crate::guard_ffi(false, move || {
             crate::gui_log_line(&format!("page load failed for {uri}: {error}"));
             if let Some(client) = weak.upgrade() {
@@ -1753,6 +1759,7 @@ fn install_drop(webview: &webkit2gtk::WebView, client: &Rc<RefCell<EditorClient>
     let weak = Rc::downgrade(client);
     webview.connect_drag_data_received(move |_, _, _, _, data, _, _| {
         // 由 GTK 拖放机制的 C 栈调用（同 `tick` 的守卫理由）。
+        let weak = weak.clone();
         crate::guard_ffi((), move || {
             let Some(client) = weak.upgrade() else {
                 return;
