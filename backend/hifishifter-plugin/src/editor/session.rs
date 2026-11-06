@@ -4095,7 +4095,7 @@ pub(crate) mod tests {
                 break;
             }
             assert!(Instant::now() < deadline);
-            std::thread::sleep(Duration::from_millis(1));
+            std::thread::yield_now();
         }
         document.close();
     }
