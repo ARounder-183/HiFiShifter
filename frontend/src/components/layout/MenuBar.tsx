@@ -100,6 +100,7 @@ const VibratoDialog = lazy(() =>
 import { ChannelImportDialog } from "./ChannelImportDialog";
 import { PenInputDialog } from "./PenInputDialog";
 import { SearchSettingsDialog } from "./SearchSettingsDialog";
+import { ParamBlockSettingsDialog } from "./ParamBlockSettingsDialog";
 import { RecordingSettingsDialog } from "./RecordingSettingsDialog";
 const BenchmarkDialog = lazy(() =>
     import("./BenchmarkDialog").then((module) => ({ default: module.BenchmarkDialog })),
@@ -215,6 +216,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
     const [kbDialogOpen, setKbDialogOpen] = useState(false);
     const [timeDisplaySettingsOpen, setTimeDisplaySettingsOpen] = useState(false);
     const [snapSettingsOpen, setSnapSettingsOpen] = useState(false);
+    const [paramBlockSettingsOpen, setParamBlockSettingsOpen] = useState(false);
     const [exportDialogOpen, setExportDialogOpen] = useState(false);
     const [autoBackupDialogOpen, setAutoBackupDialogOpen] = useState(false);
     const [recordingDialogOpen, setRecordingDialogOpen] = useState(false);
@@ -1470,6 +1472,9 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                     <DropdownMenu.Item onSelect={() => setSnapSettingsOpen(true)}>
                         {tf("snap_grid_settings_title")}
                     </DropdownMenu.Item>
+                    <DropdownMenu.Item onSelect={() => setParamBlockSettingsOpen(true)}>
+                        {tf("param_block_settings_title")}
+                    </DropdownMenu.Item>
 
                     {/* Search matching settings — 作用于全部搜索面，因此与
                         吸附/网格同级，而不是塞进某个面板自己的设置页。 */}
@@ -1629,6 +1634,10 @@ export const MenuBar: React.FC<MenuBarProps> = ({
             />
 
             <SnapGridSettingsDialog open={snapSettingsOpen} onOpenChange={setSnapSettingsOpen} />
+            <ParamBlockSettingsDialog
+                open={paramBlockSettingsOpen}
+                onOpenChange={setParamBlockSettingsOpen}
+            />
 
             {exportDialogOpen ? (
                 <Suspense fallback={null}>

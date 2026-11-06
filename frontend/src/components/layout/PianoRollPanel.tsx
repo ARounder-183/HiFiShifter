@@ -25,7 +25,6 @@ import { usePianoRollPanelModel } from "./pianoRoll/panel/usePianoRollPanelModel
 import { ParamToolbar } from "./pianoRoll/panel/ParamToolbar";
 import { EditorArea } from "./pianoRoll/panel/EditorArea";
 import { PanelOverlays } from "./pianoRoll/panel/PanelOverlays";
-import { ParamBlockAnalysisProgress } from "./pianoRoll/panel/ParamBlockAnalysisProgress";
 
 /**
  * 参数编辑器面板的 props。
@@ -58,10 +57,6 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
         >
             <ParamToolbar m={m} />
             <EditorArea m={m} />
-            <ParamBlockAnalysisProgress
-                enabled={m.paramBlockToolActive || m.paramBlocksVisible}
-                visible={m.paramBlockToolActive}
-            />
             <PanelOverlays m={m} />
         </Flex>
     );

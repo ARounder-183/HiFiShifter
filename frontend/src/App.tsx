@@ -100,6 +100,7 @@ import { PitchAnalysisProvider } from "./contexts/PitchAnalysisContext";
 import { PitchAnalysisStatusChip } from "./components/layout/PitchAnalysisStatusChip";
 import { ParamDataLoadingChip } from "./components/layout/ParamDataLoadingChip";
 import { AppStatusProgressChips } from "./components/layout/AppStatusProgressChips";
+import { ParamBlockAnalysisStatus } from "./components/layout/pianoRoll/panel/ParamBlockAnalysisStatus";
 import { appStatusProgressBus } from "./utils/appStatusProgressBus";
 const FileBrowserPanel = lazy(() =>
     import("./components/layout/FileBrowserPanel").then((module) => ({
@@ -4611,6 +4612,8 @@ function AppInner() {
                         逐 clip 的进度事件不参与本组件重渲染
                         （见 PitchAnalysisStatusChip 的说明）。 */}
                     <PitchAnalysisStatusChip />
+                    {/* 音符块（GAME / VAD）分析：与音高进度同一状态栏槽位。 */}
+                    <ParamBlockAnalysisStatus enabled />
                     {/* 参数曲线取数提示：**独立订阅**外部 store，不参与本组件重渲染
                         （见 ParamDataLoadingChip 的说明）。 */}
                     <ParamDataLoadingChip />

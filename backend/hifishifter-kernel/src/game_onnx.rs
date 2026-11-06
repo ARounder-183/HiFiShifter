@@ -259,7 +259,7 @@ mod ort_impl {
                 let path = dir.join(name);
                 let (session, _ep) = crate::vocoder_ort_session::build_ort_session(
                     &path,
-                    crate::vocoder_ort_session::OrtSessionRole::PitchDetector,
+                    crate::vocoder_ort_session::OrtSessionRole::Game,
                 )?;
                 Ok(session)
             };
@@ -832,5 +832,31 @@ mod tests {
         assert!(syllable_spans_for_window(&events, 0.0, 3.0)
             .iter()
             .any(|(start, end)| *end > *start + 0.1));
+    }
+
+    /// 诊断用：逐个加载 GAME 子模型，显式要求 CoreML，打印实际 EP。
+    ///
+    /// 不参与默认测试：需要本机 GAME 权重与 macOS CoreML。用它回答“GAME
+    /// 有没有真的走 CoreML”，而不是靠上层回退后的最终 EP 猜。
+    #[test]
+    #[ignore = "requires the GAME ONNX weights and macOS CoreML"]
+    fn coreml_ep_probe_for_each_game_submodel() {
+        let dir = resolve_model_dir().expect("GAME model directory");
+        for name in [
+            "encoder.onnx",
+            "segmenter.onnx",
+            "estimator.onnx",
+            "bd2dur.onnx",
+            "dur2bd.onnx",
+        ] {
+            match crate::vocoder_ort_session::build_ort_session_with_ep(
+                &dir.join(name),
+                crate::vocoder_ort_session::OrtSessionRole::Game,
+                Some("coreml"),
+            ) {
+                Ok((_session, ep)) => eprintln!("[game-coreml] {name} ep={ep}"),
+                Err(error) => eprintln!("[game-coreml] {name} error={error}"),
+            }
+        }
     }
 }

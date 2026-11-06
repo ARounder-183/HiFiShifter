@@ -390,6 +390,13 @@ export interface PianoRollKernelHost {
         readonly averageValue: number;
         /** 与像素同源的块中心 y（CSS px，视口坐标）。 */
         readonly centerYPx: number;
+        /** 相接块边界的圆滑手柄；null = 该块右侧没有相接邻居。 */
+        readonly transitionHandle?: {
+            readonly sec: number;
+            readonly leftId: string;
+            readonly rightId: string;
+            readonly widthSec: number;
+        } | null;
     }>;
     /**
      * 按当前外部边界重新钳制两轴位置。
@@ -1201,6 +1208,12 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             heightPx: number;
             averageValue: number;
             centerYPx: number;
+            transitionHandle?: {
+                readonly sec: number;
+                readonly leftId: string;
+                readonly rightId: string;
+                readonly widthSec: number;
+            } | null;
         }> = [];
         /*
          * 拖动期间，参与拖动的块已经由面板冻结成**各自的矩形**（见
@@ -1261,6 +1274,7 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                 heightPx,
                 averageValue: value,
                 centerYPx: topPx + heightPx / 2,
+                transitionHandle: block.transitionHandle ?? null,
             });
             return {
                 ...block,
@@ -1297,6 +1311,7 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             selectedFillRgba: spec.selectedFillRgba,
             mergedFillRgba: spec.mergedFillRgba,
             topHighlightRgba: spec.topHighlightRgba,
+            handleRgba: spec.selectedRgba,
             topHighlightPx: spec.topHighlightPx,
             cornerRadiusPx: spec.cornerRadiusPx,
         });
@@ -1304,7 +1319,11 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         glBlockTextQuads = glGlyphs !== null ? glGlyphs.build(scene.labels) : [];
         if (items.length === 0 && scene.fills.length === 0) return;
         const needed =
-            (items.length + scene.fills.length + scene.highlights.length) * CLIP_INSTANCE_FLOATS;
+            (items.length +
+                scene.fills.length +
+                scene.highlights.length +
+                scene.handles.length) *
+            CLIP_INSTANCE_FLOATS;
         if (glBlockInstances.length < needed) glBlockInstances = new Float32Array(needed);
         // 先填充、再边框：音符块的底必须是圆角柔色，边框最后压在上面。
         let writeIndex = 0;
@@ -1318,6 +1337,10 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         }
         for (const item of items) {
             writeFlatInstance(glBlockInstances, writeIndex, item);
+            writeIndex += 1;
+        }
+        for (const handle of scene.handles) {
+            writeBoxFillInstance(glBlockInstances, writeIndex, handle);
             writeIndex += 1;
         }
         glBlockUploadedCount = writeIndex;

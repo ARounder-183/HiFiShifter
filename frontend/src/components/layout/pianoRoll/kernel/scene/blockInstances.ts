@@ -32,6 +32,10 @@ export interface ParamBlockRectInput {
     readonly contiguousEnd?: boolean;
     readonly selected: boolean;
     readonly merged: boolean;
+    readonly transitionHandle?: {
+        readonly sec: number;
+        readonly widthSec: number;
+    } | null;
     /** 块内平均参数文字；缺省不画。 */
     readonly label?: string;
 }
@@ -55,6 +59,8 @@ export interface ParamBlockInstanceArgs {
     readonly selectedFillRgba?: Rgba;
     /** 顶部高光色；缺省半透白。 */
     readonly topHighlightRgba?: Rgba;
+    /** 块间圆滑手柄色；缺省用 selectedRgba。 */
+    readonly handleRgba?: Rgba;
     /** 顶部高光厚度（CSS px）；0 = 不画。 */
     readonly topHighlightPx?: number;
     /** 块的圆角半径（CSS px）。 */
@@ -79,7 +85,11 @@ export interface ParamBlockScene {
     readonly fills: readonly ParamBlockFillInstance[];
     /** 顶部 1px 高光；排在填充之后、描边之前，做出音符的受光边。 */
     readonly highlights: readonly ParamBlockFillInstance[];
+    /** 相接块圆滑手柄；画在块和曲线之上，方便抓住。 */
+    readonly handles: readonly ParamBlockFillInstance[];
 }
+
+const HANDLE_RADIUS_PX = 4;
 
 /**
  * 块填充实例：`FlatInstance` 的布局没有圆角，为了让块像音符，这里扩一个可选
@@ -121,6 +131,7 @@ export function buildParamBlockScene(args: ParamBlockInstanceArgs): ParamBlockSc
     const labels: ParamBlockLabel[] = [];
     const fills: ParamBlockFillInstance[] = [];
     const highlights: ParamBlockFillInstance[] = [];
+    const handles: ParamBlockFillInstance[] = [];
     for (const block of blocks) {
         const startSec = Math.min(block.startSec, block.endSec);
         const endSec = Math.max(block.startSec, block.endSec);
@@ -240,6 +251,19 @@ export function buildParamBlockScene(args: ParamBlockInstanceArgs): ParamBlockSc
                         : args.labelRgba,
             });
         }
+        if (block.transitionHandle !== undefined && block.transitionHandle !== null) {
+            const handleX = secToViewportPx(axis, block.transitionHandle.sec);
+            if (handleX >= -HANDLE_RADIUS_PX && handleX <= axis.viewportWidthPx + HANDLE_RADIUS_PX) {
+                handles.push({
+                    x: handleX - HANDLE_RADIUS_PX,
+                    y: top + h / 2 - HANDLE_RADIUS_PX,
+                    w: HANDLE_RADIUS_PX * 2,
+                    h: HANDLE_RADIUS_PX * 2,
+                    rgba: args.handleRgba ?? args.selectedRgba,
+                    radius: HANDLE_RADIUS_PX,
+                });
+            }
+        }
     }
-    return { items, labels, fills, highlights };
+    return { items, labels, fills, highlights, handles };
 }

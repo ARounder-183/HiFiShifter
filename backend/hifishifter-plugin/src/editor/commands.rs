@@ -768,7 +768,15 @@ struct IntervalEditInput {
     #[serde(default)]
     block_ids: Vec<String>,
     #[serde(default)]
+    explicit: bool,
+    #[serde(default)]
     deleted: bool,
+    #[serde(default)]
+    manual: bool,
+    #[serde(default)]
+    value: Option<f64>,
+    #[serde(default)]
+    transition_sec: f64,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1251,6 +1259,8 @@ pub(super) fn dispatch(
                                 "memberEndSec": edit.member_end_sec,
                                 "blockIds": edit.block_ids,
                                 "deleted": edit.deleted,
+                                "manual": edit.manual,
+                                "value": edit.value,
                             })
                         })
                         .collect::<Vec<_>>()
@@ -1317,7 +1327,11 @@ pub(super) fn dispatch(
                         member_start_sec: edit.member_start_sec,
                         member_end_sec: edit.member_end_sec,
                         block_ids: edit.block_ids,
+                        explicit: edit.explicit,
                         deleted: edit.deleted,
+                        manual: edit.manual,
+                        value: edit.value,
+                        transition_sec: edit.transition_sec,
                     })
                     .filter(|edit| {
                         let width = edit.end_sec - edit.start_sec;

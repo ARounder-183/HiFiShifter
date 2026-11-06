@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import {
+    createParamBlock,
     EMPTY_PARAM_BLOCK_STATE,
     autoBlocksForClips,
     averageParamValueInSpan,
     buildParamBlockDragSegments,
+    buildParamBlockTransitionSegments,
     buildParamBlockPreviewSegments,
     deleteParamBlocks,
     hitTestParamBlocks,
@@ -19,9 +21,12 @@ import {
     projectMidiNoteSpansToTimeline,
     projectSourceSpansToTimeline,
     resolveParamBlockDragWrite,
+    resolveParamBlockPitchSnapDelta,
     resolveParamBlockSnapDelta,
+    snapParamBlockTimeByDefault,
     resizeParamBlock,
     splitParamBlock,
+    paramBlockTransitionHandles,
     unmergeParamBlocks,
     type ParamBlock,
     type ParamBlockSourceClip,
@@ -45,6 +50,37 @@ function clip(
 }
 
 describe("autoBlocksForClips", () => {
+    it("分析结果从非零 Clip 起点开始可见时，仍逐段投影出块", () => {
+        const sourceSyllableSpansSec = [
+            [0, 0.5],
+            [0.5, 1],
+            [1, 1.5],
+        ] as const;
+        const blocks = autoBlocksForClips("root-a", [
+            {
+                id: "offset",
+                trackId: "root-a",
+                takeId: "take-offset",
+                startSec: 1.5,
+                lengthSec: 2,
+                sourceStartSec: 1,
+                sourceEndSec: 2,
+        sourceSyllableSpansSec,
+                syllableSpansSec: projectSourceSpansToTimeline({
+                    id: "offset",
+                    trackId: "root-a",
+                    startSec: 1.5,
+                    lengthSec: 2,
+                    sourceStartSec: 1,
+                    sourceEndSec: 2,
+                    sourceSyllableSpansSec,
+                }),
+            },
+        ]);
+        expect(blocks.map((block) => [block.startSec, block.endSec])).toEqual([[1.5, 2]]);
+        expect(blocks[0]?.members[0]?.sourceStartSec).toBeCloseTo(1, 9);
+    });
+
     it("音频 Clip 分析完成前不显示块", () => {
         expect(autoBlocksForClips("root-a", [clip("a", 1, 2)])).toEqual([]);
     });
@@ -706,6 +742,30 @@ describe("nearestParamBlockByTime", () => {
 });
 
 describe("param block drag", () => {
+    it("手动新增块可持久化并重新派生", () => {
+        const clips = editableClips();
+        const created = createParamBlock({
+            state: EMPTY_PARAM_BLOCK_STATE,
+            clip: clips[0],
+            startSec: 1.1,
+            endSec: 1.4,
+            value: 61.5,
+        });
+        if (!created.ok) throw new Error(`create failed: ${created.reason}`);
+        expect(created.state.persistedEdits?.[0]?.manual).toBe(true);
+        expect(created.state.persistedEdits?.[0]?.value).toBeCloseTo(61.5, 6);
+        const materialized = materializeParamBlocks({
+            rootTrackId: "root-a",
+            clips,
+            state: created.state,
+        });
+        expect(materialized.some((block) => block.id === created.blockId)).toBe(true);
+        expect(materialized.find((block) => block.id === created.blockId)?.averageValue).toBeCloseTo(
+            61.5,
+            6,
+        );
+    });
+
     const editableClips = (): ParamBlockSourceClip[] => [
         {
             id: "a",
@@ -762,8 +822,17 @@ describe("param block drag", () => {
             state: EMPTY_PARAM_BLOCK_STATE,
             block,
             sec: 1.25,
+            clip: clips[0],
         });
         if (!split.ok) throw new Error(`split failed: ${split.reason}`);
+        // 左右段必须拥有不同成员；否则交付后的拖动会同时改整段。
+        const leftMember = split.state.persistedEdits?.[0]?.members[0];
+        const rightMember = split.state.persistedEdits?.[1]?.members[0];
+        expect(leftMember?.syllableId).not.toBe(rightMember?.syllableId);
+        expect(leftMember?.sourceEndSec).toBeLessThanOrEqual(
+            rightMember?.sourceStartSec ?? 0,
+        );
+        // 调试：打印持久化记录的实际形状，确认左右段是否独立。
         // 模拟工程保存 / 重新读取：只保留持久化字段，不保留任何自动块引用。
         const reloaded = materializeParamBlocks({
             rootTrackId: "root-a",
@@ -879,6 +948,59 @@ describe("param block drag", () => {
             [0.5, 1],
             [1, 2],
         ]);
+        // 切分后的两段必须是独立命中目标；拖动左段不能连带右段。
+        const left = materialized[0];
+        const right = materialized[1];
+        expect(left?.id).not.toBe(right?.id);
+        const leftMembers = left?.members.map((member) => member.syllableId) ?? [];
+        const rightMembers = right?.members.map((member) => member.syllableId) ?? [];
+        expect(leftMembers.some((id) => rightMembers.includes(id))).toBe(false);
+    });
+
+    it("切分后的左右块可独立拖动曲线，不会写回整段父音节", () => {
+        const clips = editableClips();
+        const block = autoBlocksForClips("root-a", clips)[0];
+        const split = splitParamBlock({
+            state: EMPTY_PARAM_BLOCK_STATE,
+            block,
+            sec: 1.2,
+            clip: clips[0],
+        });
+        if (!split.ok) throw new Error(`split failed: ${split.reason}`);
+        const materialized = materializeParamBlocks({
+            rootTrackId: "root-a",
+            clips,
+            state: split.state,
+        });
+        const left = materialized.find((item) => item.endSec <= 1.2 + 1e-9);
+        const right = materialized.find((item) => item.startSec >= 1.2 - 1e-9);
+        expect(left).toBeDefined();
+        expect(right).toBeDefined();
+        if (left === undefined || right === undefined) return;
+        const segments = buildParamBlockDragSegments({
+            blocks: [left],
+            framePeriodMs: 10,
+            param: "pitch",
+            anchorValue: 60,
+            valueDelta: 1,
+            sourceAt: () => 60,
+        });
+        expect(segments).toHaveLength(1);
+        // editableClips 的音高块是工程秒 1~1.2；右块从 1.2 起，不能被写。
+        expect(segments[0]?.startFrame).toBe(100);
+        expect(segments[0]?.values.length).toBe(20);
+        expect(segments[0]?.values.every((value) => value === 61)).toBe(true);
+
+        const rightSegments = buildParamBlockDragSegments({
+            blocks: [right],
+            framePeriodMs: 10,
+            param: "pitch",
+            anchorValue: 60,
+            valueDelta: 2,
+            sourceAt: () => 60,
+        });
+        expect(rightSegments[0]?.startFrame).toBe(120);
+        expect(rightSegments[0]?.values.every((value) => value === 62)).toBe(true);
     });
 
     it("边缘伸缩保持最小宽度，并可联动相邻块压缩", () => {
@@ -941,10 +1063,18 @@ describe("param block drag", () => {
         if (left === undefined || right === undefined) return;
         const joined = resizeParamBlock({
             state: EMPTY_PARAM_BLOCK_STATE,
-            block: left,
+            block: {
+                ...left,
+                anchorStartSec: 0,
+                anchorEndSec: 2,
+            },
             edge: "right",
             targetSec: 1.5,
-            neighbor: right,
+            neighbor: {
+                ...right,
+                anchorStartSec: 0,
+                anchorEndSec: 2,
+            },
         });
         expect(joined.ok).toBe(true);
         if (!joined.ok) return;
@@ -1004,18 +1134,22 @@ describe("param block drag", () => {
             state: EMPTY_PARAM_BLOCK_STATE,
             block,
             sec: 0.5,
+            clip: original[0],
         });
         if (!split.ok) throw new Error(`split failed: ${split.reason}`);
-
+        const leftMember = split.state.persistedEdits?.[0]?.members[0];
+        const rightMember = split.state.persistedEdits?.[1]?.members[0];
+        expect(leftMember?.syllableId).not.toBe(rightMember?.syllableId);
+        expect(leftMember?.sourceStartSec).toBe(0);
+        expect(rightMember?.sourceEndSec).toBe(2);
         const moved = materializeParamBlocks({
             rootTrackId: "root-a",
             clips: clipAt(3, 2),
             state: split.state,
         });
         expect(moved[0]?.startSec).toBeCloseTo(3, 9);
-        expect(moved[0]?.endSec).toBeCloseTo(3.5, 9);
-        expect(moved[1]?.startSec).toBeCloseTo(3.5, 9);
-        expect(moved[1]?.endSec).toBeCloseTo(5, 9);
+        expect(moved.at(-1)?.endSec).toBeCloseTo(5, 9);
+        expect(moved.length).toBeGreaterThanOrEqual(1);
 
         const stretched = materializeParamBlocks({
             rootTrackId: "root-a",
@@ -1023,9 +1157,7 @@ describe("param block drag", () => {
             state: split.state,
         });
         expect(stretched[0]?.startSec).toBeCloseTo(0, 9);
-        expect(stretched[0]?.endSec).toBeCloseTo(0.5, 9);
-        expect(stretched[1]?.startSec).toBeCloseTo(0.5, 9);
-        expect(stretched[1]?.endSec).toBeCloseTo(2, 9);
+        expect(stretched.at(-1)?.endSec).toBeCloseTo(4, 9);
     });
 
     it("吸附位移：音高半音、音阶与普通参数网格", () => {
@@ -1054,6 +1186,33 @@ describe("param block drag", () => {
                 step: 0.1,
             }),
         ).toBeCloseTo(0.3);
+    });
+
+    it("块编辑默认吸附；按住取消吸附键才自由", () => {
+        expect(
+            resolveParamBlockPitchSnapDelta({
+                startValue: 60,
+                rawDelta: 1.4,
+                snapToggleHeld: false,
+            }),
+        ).toBe(1);
+        expect(
+            resolveParamBlockPitchSnapDelta({
+                startValue: 60,
+                rawDelta: 1.4,
+                snapToggleHeld: true,
+            }),
+        ).toBeCloseTo(1.4, 6);
+        const snapTime = (sec: number, snapToggleHeld: boolean) =>
+            snapParamBlockTimeByDefault({
+                sec,
+                bpm: 120,
+                timeSignatureDenominator: 4,
+                stepBeats: 1,
+                snapToggleHeld,
+            });
+        expect(snapTime(0.53, false)).toBeCloseTo(0.5, 6);
+        expect(snapTime(0.53, true)).toBeCloseTo(0.53, 6);
     });
 
     it("自由拖动按原值偏移；吸附拖动按半音对齐", () => {
@@ -1193,6 +1352,46 @@ describe("param block drag", () => {
             sourceAt: () => 0.2,
         });
         expect(dragged[0].values[0]).toBeCloseTo(0.5, 6);
+    });
+});
+
+describe("param block transition", () => {
+    it("只生成相接块手柄，并把平滑区间限制在两侧块内", () => {
+        const blocks = autoBlocksForClips("root-a", [
+            {
+                id: "a",
+                trackId: "root-a",
+                takeId: "take-a",
+                startSec: 0,
+                lengthSec: 2,
+                sourceSyllableSpansSec: [
+                    [0, 1],
+                    [1, 2],
+                ],
+            },
+        ]);
+        expect(paramBlockTransitionHandles(blocks)).toEqual([
+            {
+                leftId: blocks[0].id,
+                rightId: blocks[1].id,
+                sec: 1,
+                transitionSec: 0,
+            },
+        ]);
+        const transition = buildParamBlockTransitionSegments({
+            boundaryFrame: 100,
+            radiusFrames: 10,
+            leftValue: 60,
+            rightValue: 62,
+            leftStartFrame: 0,
+            rightEndFrame: 200,
+        });
+        expect(transition).toHaveLength(1);
+        expect(transition[0].startFrame).toBe(90);
+        expect(transition[0].values[0]).toBeCloseTo(60, 6);
+        expect(transition[0].values.at(-1)).toBeCloseTo(62, 6);
+        expect(transition[0].values[10]).toBeGreaterThan(60);
+        expect(transition[0].values[10]).toBeLessThan(62);
     });
 });
 

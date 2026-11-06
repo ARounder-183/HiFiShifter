@@ -225,6 +225,14 @@ export function resolveEditOpRoute(
     op: EditOp | string,
     toolMode?: string,
 ): EditOpChannel | null {
+    /*
+     * 参数块工具拥有 `S`：切的是块，不是上方时间轴 Clip。
+     * 这条必须在统一编辑路由里，而不是散落在某个 keydown 监听中；
+     * 菜单 / 快捷键 / 事件派发都经过这里，才能保证只有块被切分。
+     */
+    if (op === "split" && surface === "pianoRoll" && toolMode === "block") {
+        return "hifi:editOp";
+    }
     switch (op) {
         case "copy":
         case "cut":

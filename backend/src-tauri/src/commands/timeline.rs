@@ -274,16 +274,40 @@ pub(super) fn import_audio_bytes(
     };
 
     // 磁盘名是 import_<uuid>.<ext>（避免同名覆盖），显示名用用户看到的原始文件名。
-    tl.import_audio_item(
+    let clip_id = tl.import_audio_item(
         &path.display().to_string(),
         resolved_track_id,
         start_sec,
         channel_decision,
         Some(file_name.as_str()),
     );
+    // 只有开了 Compose 的根轨道才需要 GAME。导入完成时先入队；模型推理
+    // 放到后台线程，避免把 200MB 音频的导入命令卡在推理上。
+    let root_id = tl
+        .clips
+        .iter()
+        .find(|clip| clip.id == clip_id)
+        .and_then(|clip| tl.resolve_root_track_id(&clip.track_id));
+    let schedule_syllables = if let Some(root_id) = root_id {
+        if tl
+            .tracks
+            .iter()
+            .any(|track| track.id == root_id && track.compose_enabled)
+        {
+            Some(clip_id)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     state.audio_engine.update_timeline(tl.clone());
     let mut payload = tl.to_payload();
     payload.project = Some(state.project_meta_payload());
+    drop(tl);
+    if let Some(clip_id) = schedule_syllables {
+        crate::commands::syllable::start_clip_syllables(&state, clip_id);
+    }
     payload
 }
 
@@ -373,16 +397,31 @@ pub(super) fn import_audio_item(
     };
 
     // 按路径导入：显示名就是磁盘文件名，不需要额外指定。
-    tl.import_audio_item(
+    let clip_id = tl.import_audio_item(
         &source_path,
         resolved_track_id,
         start_sec,
         channel_decision,
         None,
     );
+    let schedule_syllables = tl
+        .clips
+        .iter()
+        .find(|clip| clip.id == clip_id)
+        .and_then(|clip| tl.resolve_root_track_id(&clip.track_id))
+        .filter(|root_id| {
+            tl.tracks
+                .iter()
+                .any(|track| track.id == *root_id && track.compose_enabled)
+        })
+        .map(|_| clip_id);
     state.audio_engine.update_timeline(tl.clone());
     let mut payload = tl.to_payload();
     payload.project = Some(state.project_meta_payload());
+    drop(tl);
+    if let Some(clip_id) = schedule_syllables {
+        crate::commands::syllable::start_clip_syllables(&state, clip_id);
+    }
     payload
 }
 

@@ -227,6 +227,13 @@ export interface PianoRollParamBlockSpec {
         readonly contiguousEnd?: boolean;
         readonly selected: boolean;
         readonly merged: boolean;
+        /** 相接块边界上的圆滑手柄；只对有邻居的块出现。 */
+        readonly transitionHandle?: {
+            readonly sec: number;
+            readonly leftId: string;
+            readonly rightId: string;
+            readonly widthSec: number;
+        } | null;
         /** 块内平均参数文字；缺省不画（由绘制端按块宽 / 高再决定是否省略）。 */
         readonly label?: string;
     }[];

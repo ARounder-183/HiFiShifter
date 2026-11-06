@@ -163,7 +163,15 @@ export interface ParamBlockIntervalEditPayload {
     memberStartSec?: number;
     memberEndSec?: number;
     blockIds?: string[];
+    /** 新扁平块记录；旧工程缺省，加载时走旧兼容分支。 */
+    explicit?: boolean;
     deleted?: boolean;
+    /** 用户手动新增的块；不经自动音节成员校核。 */
+    manual?: boolean;
+    /** 手动新增块的高度锚点。 */
+    value?: number | null;
+    /** 块间圆滑宽度（秒）；0 / 缺省 = 硬切换。 */
+    transitionSec?: number;
 }
 
 export const timelineApi = {

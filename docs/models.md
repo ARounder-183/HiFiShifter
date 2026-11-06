@@ -54,6 +54,12 @@ GAME 自动音符分块权重可用
 权重许可与声码器一致为 **CC BY-NC-SA 4.0**，声明见
 [`licenses/GAME-NOTICE.txt`](../licenses/GAME-NOTICE.txt)。
 
+GAME 与音高 / 声码器模型共用 EP 选择逻辑：默认 `auto`，Windows 的 `auto` / `gpu`
+走 DirectML，macOS Apple Silicon 走 CoreML（失败再尝试 WebGPU），Linux x86_64 走
+WebGPU。单独覆盖时设置 `HIFISHIFTER_GAME_ORT_EP=cpu|gpu|directml|coreml|webgpu`；
+会话创建失败会回退 CPU，分块流程继续可用。日志中的 `OrtSessionRole::Game` 与
+`ep=...` 是实际后端判据。
+
 放进去之后**就别再动**：任何一次字节改动都会得到一个新版本号。新增或替换权重时，
 [`../licenses/README.md`](../licenses/README.md) 里对应的模型出处与许可也要跟着改 ——
 许可是发行物的一部分。

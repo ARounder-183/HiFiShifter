@@ -51,6 +51,10 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+fn is_zero_f64(value: &f64) -> bool {
+    value.abs() < 1e-12
+}
+
 /// Clip 源媒体的总时长（秒）：优先 `duration_frames / source_sample_rate`，
 /// 回退 `duration_sec`；均不可用时返回 None。
 ///
@@ -1033,9 +1037,21 @@ pub struct ParamBlockIntervalEdit {
     /// 编辑所作用的自动块 id；切分后左右段共享它。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub block_ids: Vec<String>,
+    /// 新扁平块记录：切分后的左右段是同级独立块，不通过 `block_ids` 建立父子关系。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub explicit: bool,
     /// 该编辑段是否被用户从块编辑视图删除（保留曲线与源音符）。
     #[serde(default, skip_serializing_if = "is_false")]
     pub deleted: bool,
+    /// 用户手动新增的块；不要求存在自动音节成员。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub manual: bool,
+    /// 手动新增块的高度锚点（当前参数值）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<f64>,
+    /// 块间圆滑宽度（秒）；0 / 缺省 = 硬切换。
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub transition_sec: f64,
 }
 
 impl TrackParamsState {
@@ -1083,21 +1099,30 @@ impl TrackParamsState {
                 };
                 spans.iter().any(|(start_sec, end_sec)| {
                     // 音节 id 已含源域区间；这里再校核秒值，防止旧 id 复用。
-                    (*start_sec - member.source_start_sec).abs() < 1e-3
-                        && (*end_sec - member.source_end_sec).abs() < 1e-3
+                    member.source_start_sec >= start_sec - 1e-3
+                        && member.source_end_sec <= end_sec + 1e-3
                 })
             });
         }
         self.param_block_merges.retain(|r| r.member_refs.len() >= 2);
         for record in &mut self.param_block_interval_edits {
+            if record.manual {
+                record.member_refs.retain(|member| {
+                    clips.iter().any(|clip| {
+                        clip.id == member.clip_id
+                            && clip.takes.iter().any(|take| take.id == member.take_id)
+                    })
+                });
+                continue;
+            }
             record.member_refs.retain(|member| {
                 let Some(spans) = valid.get(&(member.clip_id.as_str(), member.take_id.as_str()))
                 else {
                     return false;
                 };
                 spans.iter().any(|(start_sec, end_sec)| {
-                    (*start_sec - member.source_start_sec).abs() < 1e-3
-                        && (*end_sec - member.source_end_sec).abs() < 1e-3
+                    member.source_start_sec >= start_sec - 1e-3
+                        && member.source_end_sec <= end_sec + 1e-3
                 })
             });
             let width = record.end_sec - record.start_sec;
@@ -12370,7 +12395,7 @@ impl TimelineState {
         start_sec: Option<f64>,
         channel_decision: crate::channel_policy::ChannelResolution,
         display_name: Option<&str>,
-    ) {
+    ) -> String {
         let name = display_name
             .map(str::trim)
             .filter(|name| !name.is_empty())
@@ -12487,6 +12512,7 @@ impl TimelineState {
                 }
             }
         }
+        clip_id
     }
 
     /// 将目标 Clip 的源媒体替换为新文件。

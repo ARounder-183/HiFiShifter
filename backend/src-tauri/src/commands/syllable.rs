@@ -10,6 +10,7 @@ use hifishifter_kernel::pitch_analysis::{
 };
 use serde::Deserialize;
 use serde::Serialize;
+use tauri::Manager;
 use tauri::State;
 
 #[derive(Debug, Clone, Serialize)]
@@ -67,7 +68,15 @@ pub struct ParamBlockIntervalEditPayload {
     #[serde(default)]
     pub block_ids: Vec<String>,
     #[serde(default)]
+    pub explicit: bool,
+    #[serde(default)]
     pub deleted: bool,
+    #[serde(default)]
+    pub manual: bool,
+    #[serde(default)]
+    pub value: Option<f64>,
+    #[serde(default)]
+    pub transition_sec: f64,
 }
 
 fn source_digest(clip: &crate::state::Clip, frame_period_ms: f64) -> String {
@@ -112,6 +121,48 @@ fn payload(
             .unwrap_or(SYLLABLE_ALGORITHM_VERSION),
         analyzed: analysis.is_some(),
     }
+}
+
+/// 后台补齐一个已导入 Clip 的 GAME/VAD 区间。
+///
+/// 导入路径只负责把媒体落盘与创建 Clip；模型推理不在命令线程里跑，也不依赖
+/// 前端是否停留在参数面板。调用方先检查根轨道 Compose，本函数只处理“有源、
+/// 非 MIDI、尚无当前分析缓存”的 Clip。
+pub(super) fn schedule_clip_syllables(state: &AppState, clip_id: String) {
+    /*
+     * 导入完成时根轨道通常还没开 Compose（用户是导入后才去参数面板打开）。
+     * 但“打开块层”不能因此变成永久不分析：先只登记一次待分析意图；真正
+     * 触发仍由参数面板在 Compose 打开且块可见时发起。这样未使用的轨道不会
+     * 预跑 GAME，而正在编辑的轨道也不会卡在“没有块”。
+     */
+    let Some(clip) = state
+        .timeline
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clips
+        .iter()
+        .find(|clip| clip.id == clip_id)
+        .cloned()
+    else {
+        return;
+    };
+    if clip.source_path.is_none() || clip.midi_note_data.is_some() {
+        return;
+    }
+    log::info!("[syllable] queued pending analysis for clip {}", clip.id);
+}
+
+/// 真正启动后台音节分析（由“块可见 + Compose 开启”的显式请求调用）。
+pub(super) fn start_clip_syllables(state: &AppState, clip_id: String) {
+    let Some(app) = state.app_handle.get().cloned() else {
+        return;
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let state: State<'_, AppState> = app.state();
+        if let Err(error) = analyze_clip_syllables_inner(state, clip_id) {
+            log::warn!("background syllable analysis failed: {error}");
+        }
+    });
 }
 
 /// 只读查询：没有已存分析时不会触发重新计算。
@@ -171,6 +222,20 @@ fn analyze_clip_syllables_inner(
     if take.midi_note_data.as_ref().is_some_and(|n| !n.is_empty()) || clip.source_path.is_none() {
         set_syllable_analysis_progress(None);
         return Ok(payload(&clip, &take.id, take.syllable_analysis.as_ref()));
+    }
+    /*
+     * 幂等：时间线刷新可能在同一 Clip 上重复发起分析。已有当前缓存时
+     * 直接返回，不重复加载 GAME，也不把 `active` 进度重新打回 2%。
+     */
+    if let Some(analysis) = take
+        .syllable_analysis
+        .as_ref()
+        .filter(|a| a.is_current(&digest))
+    {
+        if !analysis.source_spans_sec.is_empty() {
+            set_syllable_analysis_progress(None);
+            return Ok(payload(&clip, &take.id, Some(analysis)));
+        }
     }
 
     let window = hifishifter_kernel::state::clip_playback_window_sec(&clip);
@@ -354,7 +419,11 @@ pub(super) fn get_param_block_merges(
                     member_start_sec: edit.member_start_sec,
                     member_end_sec: edit.member_end_sec,
                     block_ids: edit.block_ids.clone(),
+                    explicit: edit.explicit,
                     deleted: edit.deleted,
+                    manual: edit.manual,
+                    value: edit.value,
+                    transition_sec: edit.transition_sec,
                 })
                 .collect()
         })
@@ -419,7 +488,11 @@ pub(super) fn set_param_block_merges(
                     member_start_sec: edit.member_start_sec,
                     member_end_sec: edit.member_end_sec,
                     block_ids: edit.block_ids,
+                    explicit: edit.explicit,
                     deleted: edit.deleted,
+                    manual: edit.manual,
+                    value: edit.value,
+                    transition_sec: edit.transition_sec,
                 })
                 .filter(|edit| {
                     let width = edit.end_sec - edit.start_sec;

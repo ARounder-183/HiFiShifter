@@ -388,6 +388,9 @@ const sessionSlice = createSlice({
         setPitchSnapToleranceCents(state, action: PayloadAction<number>) {
             state.pitchSnapToleranceCents = clamp(action.payload, 0, 1000);
         },
+        setParamBlockFollowPitch(state, action: PayloadAction<boolean>) {
+            state.paramBlockFollowPitch = action.payload;
+        },
         setScaleHighlightMode(state, action: PayloadAction<"always" | "off">) {
             state.scaleHighlightMode = action.payload;
         },
@@ -1225,6 +1228,7 @@ const sessionSlice = createSlice({
 });
 
 export const {
+    setParamBlockFollowPitch,
     beginInteraction,
     endInteraction,
     setTrackName,

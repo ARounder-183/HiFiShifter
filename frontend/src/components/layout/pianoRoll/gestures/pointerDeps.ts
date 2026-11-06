@@ -67,6 +67,10 @@ export type PointerDeps = {
         blockSnapScale?: ScaleLike | null;
         /** 实时的指针值（用于折算纵向拖动偏移）。 */
         pointerValue: (clientY: number) => number;
+        /** 按下时的 Alt 状态；块工具用 Alt+上下拖缩放块内音高。 */
+        altKey?: boolean;
+        /** 按下时的 Shift 状态；块编辑临时取消吸附（按 settings 绑定）。 */
+        shiftKey?: boolean;
         /** 屏幕 clientX → 内容秒（用于判断块时间范围）。 */
         secAtClientX: (clientX: number) => number;
         /** 吸附开关（拖动中可随修饰键变化）。 */

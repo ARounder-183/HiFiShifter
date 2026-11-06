@@ -75,6 +75,13 @@ fn smoke_probe_frames(role: OrtSessionRole) -> usize {
         OrtSessionRole::Separator => 32,
         OrtSessionRole::Vocoder => VOCODER_SMOKE_FRAMES,
         OrtSessionRole::PitchDetector => PITCH_SMOKE_FRAMES,
+        /*
+         * GAME encoder 的 `waveform` 不是 mel 帧数，而是采样点；内部还要做
+         * 2048 点 STFT + reflect pad。32/256 个采样点会在 `Pad` 阶段直接失败。
+         * 1 秒采样既超过窗口长度，又足以覆盖一次真实推理，且不会让自检
+         * 变成对整首歌跑一遍。
+         */
+        OrtSessionRole::Game => crate::game_onnx::GAME_SAMPLE_RATE as usize,
     }
 }
 
@@ -291,7 +298,7 @@ pub fn disable_coreml(reason: &str) {
 /// - A persistent model cache avoids recompiling the CoreML model on every
 ///   session creation (can take tens of seconds for this 56 MB model).
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-fn build_coreml_ep() -> ort::ep::CoreML {
+fn build_coreml_ep(role: OrtSessionRole) -> ort::ep::CoreML {
     use ort::ep::coreml::{ComputeUnits, ModelFormat};
 
     let mut ep = ort::ep::CoreML::default()
@@ -301,7 +308,19 @@ fn build_coreml_ep() -> ort::ep::CoreML {
         // stride(16,1) kernel(16,1) breaks the ANE).  CPUAndGPU keeps the
         // model on the Metal GPU where these layers run correctly.
         .with_compute_units(ComputeUnits::CPUAndGPU)
-        .with_model_format(ModelFormat::MLProgram)
+        /*
+         * GAME encoder 的 MLProgram 分区在 `ffn1/ln2/MatMul` 上实测报
+         * `Compute MatMul dimension mismatch`；同一个模型用旧的
+         * NeuralNetwork 格式可以通过 CoreML 自检，并与 WebGPU 结果一致。
+         *
+         * 只对 GAME 切换格式：HiFi-GAN 等既有模型继续用 MLProgram，避免
+         * 无证据地改变已经稳定的 GPU 路径。
+         */
+        .with_model_format(if role == OrtSessionRole::Game {
+            ModelFormat::NeuralNetwork
+        } else {
+            ModelFormat::MLProgram
+        })
         // Keep FP32 accumulation: HiFi-GAN audio quality is sensitive to
         // low-precision GPU accumulation.
         .with_low_precision_accumulation_on_gpu(false)
@@ -873,7 +892,7 @@ pub fn dml_device_index_for_key(key: &str) -> Option<i32> {
 fn default_ep_for_role(role: OrtSessionRole) -> &'static str {
     match role {
         OrtSessionRole::Separator => "cpu",
-        OrtSessionRole::Vocoder | OrtSessionRole::PitchDetector => "auto",
+        OrtSessionRole::Vocoder | OrtSessionRole::PitchDetector | OrtSessionRole::Game => "auto",
     }
 }
 
@@ -892,6 +911,7 @@ fn ep_choice_for_role(role: OrtSessionRole) -> String {
         OrtSessionRole::Vocoder => "HIFISHIFTER_HIFIGAN_ORT_EP",
         OrtSessionRole::PitchDetector => "HIFISHIFTER_FCPE_ORT_EP",
         OrtSessionRole::Separator => "HIFISHIFTER_HNSEP_ORT_EP",
+        OrtSessionRole::Game => "HIFISHIFTER_GAME_ORT_EP",
     };
     if let Ok(val) = std::env::var(role_env) {
         let v = val.trim().to_ascii_lowercase();
@@ -943,6 +963,8 @@ pub enum OrtSessionRole {
     PitchDetector,
     /// HNSEP harmonic+noise separation — medium model, share GPU with vocoder.
     Separator,
+    /// GAME note segmenter — five linked ONNX graphs.
+    Game,
 }
 
 // ── EP registration helpers ──────────────────────────────────────────────
@@ -1067,8 +1089,9 @@ fn try_register_webgpu_ep(
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn try_register_coreml_ep(
     builder: ort::session::builder::SessionBuilder,
+    role: OrtSessionRole,
 ) -> Result<(ort::session::builder::SessionBuilder, &'static str), String> {
-    let build_result = std::panic::catch_unwind(|| build_coreml_ep().build());
+    let build_result = std::panic::catch_unwind(|| build_coreml_ep(role).build());
     let ep = match build_result {
         Ok(ep) => ep,
         Err(panic) => {
@@ -1372,7 +1395,7 @@ fn build_session_inner(
         if choice != "webgpu" && !coreml_disabled() {
             match Session::builder() {
                 Ok(builder) => {
-                    match try_register_coreml_ep(builder) {
+                    match try_register_coreml_ep(builder, role) {
                         Ok((b, ep)) => {
                             match build_gpu_session_finalize(b, onnx_path, role, "CoreML") {
                             Ok(session) => return Ok((session, ep.to_string(), None)),
@@ -1437,17 +1460,37 @@ fn smoke_test_gpu_session(
 
     // Collect f32 tensor input metadata first so the `session` borrow ends
     // before the session is moved into the helper thread below.
-    let mut plans: Vec<(String, Vec<usize>)> = Vec::new();
+    let mut plans: Vec<(String, Vec<usize>, ort::value::TensorElementType)> = Vec::new();
     for input in session.inputs() {
+        let input_name = input.name().to_string();
         let (tensor_ty, shape) = match input.dtype() {
             ValueType::Tensor { ty, shape, .. } => (ty, shape),
             _ => continue,
         };
-        if *tensor_ty != ort::value::TensorElementType::Float32 {
+        /*
+         * GAME 的 maskT / maskN 是 Bool。只给 Float32 造探针会让这些输入
+         * 缺失，CoreML/WebGPU 自检必然报 `Missing Input: maskN` 并回退 CPU。
+         * 自检必须按模型声明的 dtype 造张量，否则“EP 不可用”的结论是假的。
+         */
+        /*
+         * GAME 的 `language` / `radius` 是 Int64 标量或向量。漏掉 Int64 会让
+         * 自检缺少真实模型要求的输入，CoreML/WebGPU 被误判为不可用。
+         */
+        if !matches!(
+            *tensor_ty,
+            ort::value::TensorElementType::Float32
+                | ort::value::TensorElementType::Bool
+                | ort::value::TensorElementType::Int64
+        ) {
             continue;
         }
+        /*
+         * 空 shape 是**合法标量**（GAME 的 threshold/radius）。以前这里跳过
+         * 零维输入，导致自检缺少模型要求的标量，EP 自检必然失败。
+         * 只有形状里真的含 0 才跳过。
+         */
         if shape.contains(&0) {
-            continue; // scalar or zero-dim - skip
+            continue;
         }
         // Replace dynamic dimensions (-1) with realistic test values:
         //   dim 0 -> 1 (batch),  other dims -> the role's probe length.
@@ -1456,6 +1499,16 @@ fn smoke_test_gpu_session(
         // {1,2048,1}"), so use a length the model accepts;
         // see `smoke_probe_frames` for why it is role-dependent.
         let fallback_dim = smoke_probe_frames(role) as i64;
+        /*
+         * GAME 的 `waveform` 是原始采样轴，其它输入是 10ms 帧轴（`T` / `N`）。
+         * 不能把 44.1k 采样长度套到 `maskT` 等帧轴上：那会被自检构造出
+         * 44100 帧的巨型跨步张量，既慢又会与模型内部的序列形状错配。
+         */
+        /*
+         * 44.1k / 441 采样一个 10ms 帧，因此只取 1/100 秒的帧轴；
+         * `waveform` 是采样轴，保留完整 1 秒。两者差 100 倍，不能共用。
+         */
+        let game_frame_dim = ((fallback_dim as f64) / 100.0).floor().max(128.0) as i64;
         let test_shape: Vec<usize> = shape
             .iter()
             .enumerate()
@@ -1465,11 +1518,15 @@ fn smoke_test_gpu_session(
                 } else if i == 0 {
                     1
                 } else {
-                    fallback_dim as usize
+                    (if role == OrtSessionRole::Game && input_name != "waveform" {
+                        game_frame_dim
+                    } else {
+                        fallback_dim
+                    }) as usize
                 }
             })
             .collect();
-        plans.push((input.name().to_string(), test_shape));
+        plans.push((input_name, test_shape, *tensor_ty));
     }
     log::warn!(
         "ort_session[{role:?}]: smoke stage=inputs_planned count={} elapsed_ms={}",
@@ -1477,18 +1534,31 @@ fn smoke_test_gpu_session(
         smoke_started.elapsed().as_millis()
     );
     let mut input_pairs: Vec<(String, ort::value::Value)> = Vec::with_capacity(plans.len());
-    for (name, test_shape) in plans {
+    for (name, test_shape, tensor_ty) in plans {
         let total: usize = test_shape.iter().product::<usize>().max(1);
         // Use a non-zero f0: this model's f0 pre-processing computes a
         // differential that becomes the Pad "pads" input, and an all-zero f0
         // produces an empty/zero-sized tensor that crashes ORT's buffer
         // reuse ("{1,0,112}", "{1,4096,1} vs {1,4096,4096}").  440 Hz is a
         // realistic mid-range pitch and keeps every intermediate shape valid.
-        let fill = if name == "f0" { 440.0f32 } else { 0.0f32 };
-        let data: Vec<f32> = vec![fill; total];
-        let tensor = Tensor::from_array((test_shape, data.into_boxed_slice()))
-            .map_err(|e| format!("smoke test: tensor '{name}' creation failed: {e}"))?;
-        input_pairs.push((name, tensor.into()));
+        let tensor: ort::value::Value = if tensor_ty == ort::value::TensorElementType::Bool {
+            Tensor::from_array((test_shape, vec![true; total].into_boxed_slice()))
+                .map_err(|e| format!("smoke test: tensor '{name}' creation failed: {e}"))?
+                .into()
+        } else if tensor_ty == ort::value::TensorElementType::Int64 {
+            // GAME `language` 的默认英语编号是 1，`radius` 使用生产默认 2。
+            let fill = if name == "language" { 1i64 } else { 2i64 };
+            Tensor::from_array((test_shape, vec![fill; total].into_boxed_slice()))
+                .map_err(|e| format!("smoke test: tensor '{name}' creation failed: {e}"))?
+                .into()
+        } else {
+            let fill = if name == "f0" { 440.0f32 } else { 0.0f32 };
+            let data: Vec<f32> = vec![fill; total];
+            Tensor::from_array((test_shape, data.into_boxed_slice()))
+                .map_err(|e| format!("smoke test: tensor '{name}' creation failed: {e}"))?
+                .into()
+        };
+        input_pairs.push((name, tensor));
     }
 
     if input_pairs.is_empty() {
@@ -1938,7 +2008,7 @@ fn cpu_intra_threads(role: OrtSessionRole) -> usize {
         .max(2);
     let base = match role {
         OrtSessionRole::Separator => cores,
-        OrtSessionRole::Vocoder | OrtSessionRole::PitchDetector => {
+        OrtSessionRole::Vocoder | OrtSessionRole::PitchDetector | OrtSessionRole::Game => {
             if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
                 cores
             } else {
@@ -2149,7 +2219,7 @@ fn probe_coreml_ep_available() -> bool {
     let result =
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match Session::builder() {
             Ok(builder) => {
-                let ep = build_coreml_ep().build();
+                let ep = build_coreml_ep(OrtSessionRole::Vocoder).build();
                 match builder.with_execution_providers([ep]) {
                     Ok(_) => {
                         log::warn!("ort_session: probe_coreml_ep - AVAILABLE");

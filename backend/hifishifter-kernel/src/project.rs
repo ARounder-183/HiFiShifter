@@ -844,7 +844,11 @@ mod tests {
                     member_start_sec: 0.0,
                     member_end_sec: 0.3,
                     block_ids: vec!["auto:clip:0".into()],
+                    explicit: false,
                     deleted: false,
+                    manual: false,
+                    value: None,
+                    transition_sec: 0.0,
                 }],
                 ..Default::default()
             },
@@ -883,6 +887,7 @@ mod tests {
             }))
             .expect("legacy interval edit should deserialize");
         assert!(!edit.deleted);
+        assert!(!edit.explicit);
     }
 
     #[test]
@@ -942,7 +947,6 @@ mod tests {
         clip.id = "clip".into();
         clip.takes = vec![take];
         clip.active_take_id = Some("take".into());
-        let actual_clip_id = clip.id.clone();
         params.prune_param_block_merges(&[clip]);
         assert_eq!(params.param_block_merges.len(), 1);
         assert_eq!(params.param_block_merges[0].member_refs.len(), 2);
@@ -992,7 +996,11 @@ mod tests {
                 member_start_sec: 0.0,
                 member_end_sec: 0.25,
                 block_ids: vec!["auto:clip:midi".into()],
+                explicit: false,
                 deleted: false,
+                manual: false,
+                value: None,
+                transition_sec: 0.0,
             });
         params.prune_param_block_merges(&[clip]);
         assert_eq!(params.param_block_interval_edits.len(), 1);

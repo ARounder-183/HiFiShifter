@@ -254,6 +254,11 @@ describe("resolveEditOpRoute（编辑操作的表面兜底层）", () => {
         }
     });
 
+    it("参数块工具下 split 归参数编辑器，不切上方 Clip", () => {
+        expect(resolveEditOpRoute("pianoRoll", "split", "block")).toBe("hifi:editOp");
+        expect(resolveEditOpRoute("timeline", "split", "block")).toBe("hifi:timelineEditOp");
+    });
+
     it("未收录的操作返回 null（调用方走各自固定通道）", () => {
         expect(resolveEditOpRoute("pianoRoll", "pasteVocalShifter")).toBeNull();
         expect(resolveEditOpRoute("timeline", "shiftParamUp")).toBeNull();

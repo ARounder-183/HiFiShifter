@@ -68,6 +68,7 @@ type Props = {
         | "onCanvasPointerMoveForBlocks"
         | "paddedContentWidth"
         | "paramValuePreview"
+        | "paramBlockMarquee"
         | "pianoRollAmplitudeMap"
         | "prTickAxis"
         | "pxPerBeat"
@@ -425,6 +426,17 @@ export function EditorArea({ m }: Props) {
                                     className="absolute inset-0 pointer-events-none"
                                     aria-hidden
                                 />
+                                {m.paramBlockMarquee !== null ? (
+                                    <div
+                                        className="pointer-events-none absolute border border-qt-accent bg-qt-accent/15"
+                                        style={{
+                                            left: m.paramBlockMarquee.leftPx,
+                                            top: m.paramBlockMarquee.topPx,
+                                            width: m.paramBlockMarquee.widthPx,
+                                            height: m.paramBlockMarquee.heightPx,
+                                        }}
+                                    />
+                                ) : null}
                                 {/* 指针旁的实时读数：**参数值 + 颤音拖拽状态合成一个
                                     气泡**。两者曾经各弹一个，颤音那个还压在值上面，
                                     用户只能看到后弹出的那个 —— 合成之后第一行是参数值

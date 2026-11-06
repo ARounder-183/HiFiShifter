@@ -348,10 +348,13 @@ export function handleCanvasPointerDown(
                     captureTarget: e.currentTarget,
                     setActivePointerGestureEnd,
                     clearActivePointerGestureEnd,
-                    add: false,
+                    // 新增块用同一个多选修饰键起步：修饰键 + 空白拖拽。
+                    add: isModifierActive(paramMultiSelectKb, e.nativeEvent),
                     // 沿用参数编辑器的多选键（默认 Ctrl / Cmd），与选区语义一致。
                     toggle: isModifierActive(paramMultiSelectKb, e.nativeEvent),
                     pointerType: e.nativeEvent.pointerType,
+                    altKey: e.altKey,
+                    shiftKey: e.shiftKey,
                     yToValue,
                     canvasHeightPx: rect.height,
                     blockSnapEnabled: isEffectivePitchSnapActive(e.nativeEvent),
