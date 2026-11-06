@@ -49,7 +49,11 @@ pub(crate) struct EditState {
     /// 键必须同时含 Clip 与 Take 身份：ARA 的 clip 会在每次 `ensure_loaded` 中
     /// 按宿主几何重建，只有跨重建稳定的 id 才能校核。值仍是内核的
     /// `TakeSyllableAnalysis`，因此算法版本 / 源文件摘要的失效判断只有一份。
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        with = "take_syllable_map",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
     pub take_syllables:
         BTreeMap<TakeSyllableKey, hifishifter_kernel::pitch_analysis::TakeSyllableAnalysis>,
     /// 跨组件共享的插件私有参数分组；GUID关系不参与REAPER folder或音频路由。
@@ -105,6 +109,45 @@ pub(crate) struct EditState {
 pub(crate) struct TakeSyllableKey {
     pub clip_id: String,
     pub take_id: String,
+}
+
+/// JSON 对象的键只能是字符串；音节缓存以稳定结构体为键，因此编码成有序的
+/// `(key, value)` 数组。这样既不把两个身份字段拼成不可逆字符串，也保持确定性排序。
+pub(crate) mod take_syllable_map {
+    use super::BTreeMap;
+    use super::TakeSyllableKey;
+    use serde::de::Error as _;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    type TakeSyllables =
+        BTreeMap<TakeSyllableKey, hifishifter_kernel::pitch_analysis::TakeSyllableAnalysis>;
+
+    pub(crate) fn serialize<S>(map: &TakeSyllables, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        map.iter()
+            .map(|(key, analysis)| (key, analysis))
+            .collect::<Vec<_>>()
+            .serialize(serializer)
+    }
+
+    pub(crate) fn deserialize<'de, D>(deserializer: D) -> Result<TakeSyllables, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let entries = Vec::<(
+            TakeSyllableKey,
+            hifishifter_kernel::pitch_analysis::TakeSyllableAnalysis,
+        )>::deserialize(deserializer)?;
+        let mut map = BTreeMap::new();
+        for (key, analysis) in entries {
+            if map.insert(key, analysis).is_some() {
+                return Err(D::Error::custom("duplicate take syllable key"));
+            }
+        }
+        Ok(map)
+    }
 }
 
 /// 一次冷恢复身份匹配的三种结论（见 [`pick_binding`]）。

@@ -74,7 +74,11 @@ pub(crate) struct CaptureEdits {
     ///
     /// 键是**稳定身份**（不含会话命名空间）；值里是源域区间。手动合并记录要
     /// 靠它校核成员是否仍存在，因此不能只存曲线。
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        with = "crate::state_channel::take_syllable_map",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
     pub take_syllables:
         BTreeMap<CaptureTakeKey, hifishifter_kernel::pitch_analysis::TakeSyllableAnalysis>,
     /// 根轨 → 手动合并/切开意图。曲线里没有这两类“块意图”的表示。
@@ -85,11 +89,7 @@ pub(crate) struct CaptureEdits {
         BTreeMap<String, Vec<hifishifter_kernel::state::ParamBlockIntervalEdit>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub(crate) struct CaptureTakeKey {
-    pub clip_id: String,
-    pub take_id: String,
-}
+pub(crate) type CaptureTakeKey = crate::state_channel::TakeSyllableKey;
 
 impl CaptureEdits {
     pub(crate) fn encode(&self) -> Result<Vec<u8>, String> {
@@ -731,20 +731,24 @@ mod tests {
                 },
             ],
         };
-        timeline.clips.push(hifishifter_kernel::state::Clip {
-            id: "clip".into(),
-            track_id: "capture-track".into(),
-            name: "clip".into(),
-            length_sec: 1.0,
-            takes: vec![hifishifter_kernel::state::ClipTake {
-                id: "take".into(),
-                name: "take".into(),
-                syllable_analysis: Some(analysis.clone()),
-                ..Default::default()
-            }],
-            active_take_id: Some("take".into()),
-            ..Default::default()
-        });
+        let take: hifishifter_kernel::state::ClipTake = serde_json::from_value(serde_json::json!({
+        "id": "take",
+        "name": "take",
+        "syllable_analysis": analysis,
+        }))
+        .unwrap();
+        timeline.clips.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "clip",
+                "track_id": "capture-track",
+                "name": "clip",
+                "start_sec": 0.0,
+                "length_sec": 1.0,
+                "takes": [take],
+                "active_take_id": "take",
+            }))
+            .unwrap(),
+        );
         let members = [(0.1, 0.3), (0.3, 0.6)]
             .into_iter()
             .enumerate()
@@ -785,6 +789,10 @@ mod tests {
 
         let mut target = TimelineState::default();
         target.tracks = timeline.tracks.clone();
+        // Capture geometry comes from the freshly projected capture store, not
+        // from the edits payload. Model that here so syllable-cache seeding has
+        // the Clip/Take identities it is designed to match.
+        target.clips = timeline.clips.clone();
         apply(&mut target, &restored);
         assert_eq!(target.clips[0].takes[0].syllable_analysis, Some(analysis));
         assert_eq!(

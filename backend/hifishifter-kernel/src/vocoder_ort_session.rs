@@ -1314,12 +1314,18 @@ fn build_session_inner(
             );
             return build_cpu_session(onnx_path, role, &choice).map(|(s, ep)| (s, ep, None));
         }
-        // DirectML with strict mode first, then with fallback
-        match build_dml_session_inner(onnx_path, role, &choice, true, device) {
-            Ok((session, ep)) => return Ok((session, ep, device)),
-            Err(e) => log::error!(
-                "ort_session[{role:?}]: strict DirectML failed (will retry with CPU fallback): {e}"
-            ),
+        // DirectML with strict mode first, then with fallback. GAME's estimator
+        // deliberately places some semantic boundary nodes on CPU; forcing
+        // strict mode makes ORT's graph partitioner crash natively instead of
+        // returning a normal unsupported-node error. Build that graph directly
+        // with CPU fallback, matching HachiTune's DirectML setup.
+        if role != OrtSessionRole::Game {
+            match build_dml_session_inner(onnx_path, role, &choice, true, device) {
+                Ok((session, ep)) => return Ok((session, ep, device)),
+                Err(e) => log::error!(
+                    "ort_session[{role:?}]: strict DirectML failed (will retry with CPU fallback): {e}"
+                ),
+            }
         }
         // 烟测超时会把该设备标记为不可用（见 disable_directml）——
         // 此时第二次尝试无需再建会话，直接走 CPU，避免第二次超时冻结。
@@ -1807,6 +1813,18 @@ fn build_dml_session_inner(
         );
     }
 
+    // GAME 的 estimator 图包含 DirectML/CPU 边界，且依赖 boundaries/maskN
+    // 之间的联合语义。用全 true 的合成张量做预检会在 ORT 的原生执行层触发
+    // access violation，真实输入反而可以由 DirectML + CPU fallback 正常分区
+    // 执行。这里与 HachiTune 的 DirectML 路径保持一致：注册 provider 后直接
+    // 使用真实模型输入，不对这类多图模型做合成烟测。
+    if role == OrtSessionRole::Game {
+        log::warn!(
+            "ort_session[{role:?}]: skipping synthetic DirectML smoke test; validation uses the GAME graph's real inputs"
+        );
+        return Ok((session, selected.to_string()));
+    }
+
     match smoke_test_gpu_session(session, role, "DirectML", device) {
         Ok(s) => session = s,
         Err(e) => {
@@ -1842,6 +1860,35 @@ fn create_dml_session(
         onnx_path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(),
         env_ep_choice(),
     );
+
+    // GAME is a chain of five independent graphs. Their dynamic tensor axes and
+    // CPU/DirectML partition boundaries differ from the vocoder's optimized
+    // static-shape setup. Keep ORT's normal graph optimization and memory
+    // pattern, as HachiTune does for its DirectML session. In particular, do not
+    // enable device-allocated initializers or disable graph optimization for
+    // these graphs.
+    if role == OrtSessionRole::Game {
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .max(2);
+        let mut builder = builder
+            .with_optimization_level(GraphOptimizationLevel::All)
+            .map_err(|e| format!("set GAME graph optimization level failed: {e}"))?
+            .with_memory_pattern(true)
+            .map_err(|e| format!("enable GAME memory pattern failed: {e}"))?
+            .with_parallel_execution(true)
+            .map_err(|e| format!("enable GAME parallel execution failed: {e}"))?
+            .with_inter_threads(2)
+            .map_err(|e| format!("set GAME inter-op threads failed: {e}"))?
+            .with_intra_threads(cores)
+            .map_err(|e| format!("set GAME intra-op threads failed: {e}"))?;
+        let t_create = std::time::Instant::now();
+        let session = builder
+            .commit_from_file(onnx_path)
+            .map_err(|e| format!("load GAME ONNX into DirectML session failed: {e}"))?;
+        return Ok((session, selected, cores, t_create.elapsed().as_millis()));
+    }
 
     // ── DirectML-specific config ────────────────────────────────────────
     let builder = builder

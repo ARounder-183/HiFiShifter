@@ -859,4 +859,31 @@ mod tests {
             }
         }
     }
+
+    /// 诊断用：逐个加载 GAME 子模型，显式要求 DirectML，打印实际 EP。
+    ///
+    /// 不参与默认测试：需要本机 GAME 权重与 Windows DirectML。保持独立进程运行，
+    /// 这样某个 ORT/provider 组合发生原生崩溃时仍能先从输出定位到具体模型。
+    #[test]
+    #[ignore = "requires the GAME ONNX weights and Windows DirectML"]
+    fn directml_ep_probe_for_each_game_submodel() {
+        let dir = resolve_model_dir().expect("GAME model directory");
+        for name in [
+            "encoder.onnx",
+            "segmenter.onnx",
+            "estimator.onnx",
+            "bd2dur.onnx",
+            "dur2bd.onnx",
+        ] {
+            eprintln!("[game-directml] probing {name}");
+            match crate::vocoder_ort_session::build_ort_session_with_ep(
+                &dir.join(name),
+                crate::vocoder_ort_session::OrtSessionRole::Game,
+                Some("directml"),
+            ) {
+                Ok((_session, ep)) => eprintln!("[game-directml] {name} ep={ep}"),
+                Err(error) => eprintln!("[game-directml] {name} error={error}"),
+            }
+        }
+    }
 }

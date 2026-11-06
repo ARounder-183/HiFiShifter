@@ -1736,6 +1736,10 @@ impl DocumentSession {
         // 【为什么可以整体哈希】音阶点的 id 是确定性的（见
         // `plugin_musical_projection`），宿主读数带 1e-6 阈值，所以"内容没变 ⇒
         // 指纹相同"成立，不会造成每轮重载。
+        // `take_syllables` uses a two-field struct key, which JSON objects cannot
+        // encode. Hash the BTreeMap iterator as ordered pairs; its ordering is
+        // deterministic and preserves all cache identity/content fields.
+        let take_syllables = edits.take_syllables.iter().collect::<Vec<_>>();
         let bytes = serde_json::to_vec(&(
             timeline.params_by_root_track,
             timeline.tracks,
@@ -1743,7 +1747,7 @@ impl DocumentSession {
             &edits.groups,
             // 音节缓存会让 `edits.apply` 改写 Take；不进指纹时，首次分析后
             // `ensure_loaded` 的“版本未变”早退会让 UI 永远看不到新区间。
-            &edits.take_syllables,
+            take_syllables,
             &timeline.project_scale_notes,
             &timeline.tempo_map,
             // 【为什么渲染事实也进指纹】`ensure_loaded` 靠"版本没变 + 本指纹相同"早退。
