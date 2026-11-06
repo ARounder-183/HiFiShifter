@@ -111,7 +111,7 @@ DMG 里的 dylib 校验都必须**先有产物**。它们属于 `build.yml` / `v
 
 ## 已知的测试跳过
 
-`scripts/checks/test-skips.txt` 是权威清单。当前四类（全部是 `[unix]`，都只在
+`scripts/checks/test-skips.txt` 是权威清单。当前五类（全部是 `[unix]`，都只在
 Linux/macOS 暴露、且不是这轮适配引入的）：
 
 - `task34_tail_and_shared_undo_save_restore_both_world_tracks_without_gui`：
@@ -125,6 +125,9 @@ Linux/macOS 暴露、且不是这轮适配引入的）：
   宿主移动后等不到新 PCM，`state()` 显示 `analysis_pending=false` / `generation=0` /
   `audible_state=current` —— 重分析根本没发布，5 秒与 30 秒两种上限都超时，不是等得不够
   久。与上一条同属 Unix 渲染夹具的后台填充链：单跑能过、整组跑偶发不发布。
+- `async_dsp_completion_retains_ticket_generation_and_cancellation`：
+  `complete_render()` 在 30 秒上限内一直返回 `None`（DSP worker 的 reply 始终 `Empty`），
+  单跑 0.00 秒通过、整组 `editor::` 在负载下偶发。同属上面那条后台填充链。
 
 外加一条全平台的 `pending_pitch_analysis_does_not_publish_raw_audio_as_applied`
 （间歇挂死，根因按 `docs/plans/2026-10-27-audit-repair-round2.md` §1.3 / §7 批次 8 跟踪）。

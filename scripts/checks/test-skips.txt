@@ -18,3 +18,4 @@ pending_pitch_analysis_does_not_publish_raw_audio_as_applied — docs/plans/2026
 [unix] effective_item_mute_projects_to_gui_and_gates_real_process_without_inference — docs/ci.md 已知的测试跳过 — 静音→有声的去咔没有落成淡入（缓冲原样留在静音值）。
 [unix] automatic_apply_releases_the_transaction_and_rechecks_model_and_edit_versions — docs/ci.md 已知的测试跳过 — 偶发（单独连跑 3 次：1 过 2 挂）：快照已发布、块却还没被后台渲染填上；Windows 侧根因已修，Unix 夹具尚未按修复后的形态复验。
 [unix] host_move_without_local_generation_reapplies_and_reuses_analysis_file — docs/ci.md 已知的测试跳过 — 宿主移动后等不到新 PCM：state 显示 analysis_pending=false / generation=0 / audible_state=current，说明重分析根本没发布（不是等得不够久，5s 与 30s 上限都超时）。与上一条同属 Unix 渲染夹具的后台填充链，单独跑能过、整组跑偶发不发布。
+[unix] async_dsp_completion_retains_ticket_generation_and_cancellation — docs/ci.md 已知的测试跳过 — RenderTask 的 reply 一直 try_recv 到 Empty：30s 上限内 complete_render() 始终返回 None，DSP worker 的结果没被发布。单跑 0.00s 通过，整组 editor:: 在负载下的 macOS x86_64 / Linux 上偶发。同属 Unix 渲染夹具的后台填充链。
