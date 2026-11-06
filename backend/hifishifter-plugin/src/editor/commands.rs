@@ -346,6 +346,25 @@ mod lane_tests {
         };
         let timeline = call(1, "get_timeline_state", json!({}));
         let track = timeline["tracks"][0]["id"].as_str().unwrap().to_owned();
+        let clip = timeline["clips"][0]["id"].as_str().unwrap().to_owned();
+        let take = timeline["clips"][0]["takes"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        {
+            let mut timeline = editor.timeline.lock_or_recover();
+            timeline.clips[0].takes[0].syllable_analysis =
+                Some(hifishifter_kernel::pitch_analysis::TakeSyllableAnalysis {
+                    algorithm: hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM.into(),
+                    algorithm_version:
+                        hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM_VERSION,
+                    source_digest: "param-block-test".into(),
+                    source_spans_sec: vec![hifishifter_kernel::pitch_analysis::SyllableSpan {
+                        start_sec: 0.0,
+                        end_sec: 0.001,
+                    }],
+                });
+        }
         let payload = call(
             2,
             "set_param_block_merges",
@@ -354,17 +373,17 @@ mod lane_tests {
                 "records": [{
                     "mergedGroupId": "merged:v7",
                     "memberRefs": [
-                        {"clipId":"clip","takeId":"take","syllableId":"a","sourceStartSec":0.1,"sourceEndSec":0.3},
-                        {"clipId":"clip","takeId":"take","syllableId":"b","sourceStartSec":0.3,"sourceEndSec":0.6}
+                        {"clipId":clip.clone(),"takeId":take.clone(),"syllableId":"a","sourceStartSec":0.0,"sourceEndSec":0.00004},
+                        {"clipId":clip.clone(),"takeId":take.clone(),"syllableId":"b","sourceStartSec":0.00004,"sourceEndSec":0.00008}
                     ]
                 }],
                 "intervalEdits": [{
                     "editId": "edit:v7",
                     "memberRefs": [
-                        {"clipId":"clip","takeId":"take","syllableId":"a","sourceStartSec":0.1,"sourceEndSec":0.3}
+                        {"clipId":clip.clone(),"takeId":take.clone(),"syllableId":"a","sourceStartSec":0.0,"sourceEndSec":0.00004}
                     ],
-                    "startSec": 0.1,
-                    "endSec": 0.25
+                    "startSec": 0.0,
+                    "endSec": 0.03
                 }],
                 "checkpoint": true
             }),
@@ -377,7 +396,7 @@ mod lane_tests {
             "查询必须返回与 App 同形的 records 数组"
         );
         assert_eq!(read["intervalEdits"][0]["editId"], "edit:v7");
-        assert_eq!(read["intervalEdits"][0]["endSec"], 0.25);
+        assert_eq!(read["intervalEdits"][0]["endSec"], 0.03);
         // 通道容量足够容纳本测试产生的 history/state 事件；不读取内容。
     }
 }
@@ -736,7 +755,7 @@ struct StretchLinked {
     mappings: Vec<hifishifter_kernel::state::StretchLinkedRangeSec>,
     checkpoint: Option<bool>,
 }
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct MergeRecordInput {
     merged_group_id: String,
@@ -744,7 +763,7 @@ struct MergeRecordInput {
     member_refs: Vec<MergeMemberInput>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct MergeMemberInput {
     clip_id: String,

@@ -33,7 +33,7 @@ use super::session::UiSink;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock};
 
 /// 队列槽位数。在途上限 = 队列 4 + 正在执行 1 = **5**。
 ///

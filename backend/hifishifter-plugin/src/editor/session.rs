@@ -1485,7 +1485,7 @@ impl EditorSession {
                     if let Err(error) = response {
                         // 派发失败发生在分析登记之后：必须释放 in-flight 表，
                         // 否则后续重试永远命中同一键、拿不到新请求。
-                        let keys = self
+                        let keys = session
                             .syllable_flights
                             .lock_or_recover()
                             .iter()
@@ -1498,7 +1498,7 @@ impl EditorSession {
                             .map(|(key, _)| key.clone())
                             .collect::<Vec<_>>();
                         for key in keys {
-                            self.syllable_flights.lock_or_recover().remove(&key);
+                            session.syllable_flights.lock_or_recover().remove(&key);
                         }
                         let response = json!({
                             "version":1,
@@ -3022,7 +3022,7 @@ impl EditorSession {
         }
         let SyllableAnalysisCompletion { request, result } = completion;
         let key = (request.clip_id.clone(), request.take_id.clone());
-        let mut superseded_waiters = self
+        let superseded_waiters = self
             .superseded_syllables
             .lock_or_recover()
             .remove(&key)
@@ -3191,7 +3191,7 @@ impl EditorSession {
         if !parsed.analyzed || spans.is_empty() {
             // 分析没检出发声段时保留现有缓存；前端会按“无区间”回退整段。
             // 不把旧结果清空，避免一次 FCPE 缺席把已保存的块整片抹掉。
-            return self.syllable_reply(&request.clip_id, &request.take_id, None);
+            return Self::syllable_reply(&request.clip_id, &request.take_id, None);
         }
         let analysis = hifishifter_kernel::pitch_analysis::TakeSyllableAnalysis {
             algorithm: parsed.algorithm,
@@ -3216,24 +3216,31 @@ impl EditorSession {
             .iter_mut()
             .find(|take| take.id == request.take_id)
             .ok_or("stale syllable analysis result: take removed")?;
-        take.syllable_analysis = Some(analysis);
-        // `EditState` 是下一份 getState / ARA 存档的另一份权威副本；
-        // 写入当刻就同步进去，避免 UI 几何刷新或宿主保存之前缓存凭空消失。
+        take.syllable_analysis = Some(analysis.clone());
+        let TimelineState {
+            clips,
+            params_by_root_track,
+            ..
+        } = &mut *timeline;
+        if let Some(entry) = params_by_root_track.get_mut(&request.root_track_id) {
+            entry.prune_param_block_merges(clips);
+        }
+        let reply = Self::syllable_reply(&request.clip_id, &request.take_id, Some(&analysis))?;
+        // Never take `document.edits` while holding `self.timeline`: workspace
+        // projection uses edits -> timeline order. Keep the same lock order here
+        // and update only the committed Take after releasing the timeline.
+        drop(timeline);
         if let Some(document) = self.document() {
-            document
-                .edits
-                .lock_or_recover()
-                .capture_take_syllables(&timeline);
+            document.edits.lock_or_recover().take_syllables.insert(
+                crate::state_channel::TakeSyllableKey {
+                    clip_id: request.clip_id.clone(),
+                    take_id: request.take_id.clone(),
+                },
+                analysis.clone(),
+            );
         }
         // 分析是缓存而非用户编辑：不建撤销点，但必须推进版本、标脏并通知视图。
         self.mark_dirty();
-        if let Some(entry) = timeline
-            .params_by_root_track
-            .get_mut(&request.root_track_id)
-        {
-            entry.prune_param_block_merges(&timeline.clips);
-        }
-        let reply = Self::syllable_reply(&request.clip_id, &request.take_id, Some(&analysis))?;
         self.notify_timeline();
         Ok(reply)
     }
@@ -5461,7 +5468,7 @@ pub(crate) mod tests {
         let value = json!({
             "clipId": clip_id,
             "takeId": take_id,
-            "sourceSpansSec": [{"startSec": 0.001, "endSec": 0.002}],
+            "sourceSpansSec": [{"startSec": 0.00002, "endSec": 0.00004}],
             "algorithm": hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM,
             "algorithmVersion": hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM_VERSION,
             "analyzed": true,
@@ -5487,6 +5494,7 @@ pub(crate) mod tests {
         assert!((analysis.source_spans_sec[0].start_sec - 0.0).abs() < 1e-9);
         assert!((analysis.source_spans_sec[2].end_sec - 4.0 / 44100.0).abs() < 1e-9);
         assert_eq!(analysis.source_digest, digest);
+        drop(timeline);
         let query = super::super::commands::dispatch(
             &editor,
             "get_clip_syllable_spans",
@@ -5495,7 +5503,6 @@ pub(crate) mod tests {
         .expect("查询已提交缓存");
         assert_eq!(query["analyzed"], true);
         assert_eq!(query["sourceSpansSec"].as_array().unwrap().len(), 3);
-        drop(timeline);
         assert_eq!(
             editor.history.lock_or_recover().records.len(),
             history_before,
@@ -7057,7 +7064,7 @@ pub(crate) mod tests {
         }
         assert_eq!(
             document.edits.lock_or_recover().take_syllables.get(
-                &super::state_channel::TakeSyllableKey {
+                &crate::state_channel::TakeSyllableKey {
                     clip_id: clip.id.clone(),
                     take_id: take.id.clone(),
                 }
@@ -7078,7 +7085,7 @@ pub(crate) mod tests {
         let document = model.session();
         let before = document.workspace_projection().unwrap();
         document.edits.lock_or_recover().take_syllables.insert(
-            super::state_channel::TakeSyllableKey {
+            crate::state_channel::TakeSyllableKey {
                 clip_id: "clip".into(),
                 take_id: "take".into(),
             },
