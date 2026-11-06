@@ -399,11 +399,8 @@ void main() {
     // 基础色：header 区（y < headerH）用 header 色，其余用 body 色。
     vec4 base = v_local.y < v_headerH ? v_headerColor : v_bodyColor;
 
-    /*
-     * 前导重叠只淡化 body：重叠区上方显示的是后一个 Clip 的 header，header
-     * 不能再被自己的前导重叠字段二次压暗。Canvas2D 路径保持同一分工。
-     */
-    if (v_overlapPx > 0.0 && v_local.x < v_overlapPx && v_local.y >= v_headerH) {
+    // 前导重叠区：按 0.55 倍 alpha 变淡（与 Canvas2D 路径一致）。
+    if (v_overlapPx > 0.0 && v_local.x < v_overlapPx) {
         base.a *= 0.55;
     }
 

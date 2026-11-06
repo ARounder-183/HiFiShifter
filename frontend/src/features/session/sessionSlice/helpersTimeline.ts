@@ -145,9 +145,6 @@ export function applyTimelineState(
                 }),
             ),
             midiFillGaps: clip.midi_fill_gaps ?? false,
-            syllableSpansSec: clip.takes
-                ?.find((take) => take.id === (clip.active_take_id ?? clip.takes?.[0]?.id))
-                ?.syllable_spans_sec?.map(([startSec, endSec]) => ({ startSec, endSec })),
             groupId: clip.group_id ?? undefined,
         };
 

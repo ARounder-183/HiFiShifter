@@ -41,13 +41,6 @@ export type ParamViewSegment = {
     editSentinel?: boolean[];
 };
 
-/** 参数块（音节块）的会话级状态；第一版不写入工程文件。 */
-export type ParamBlockToolState = {
-    readonly active: boolean;
-    readonly overlayVisible: boolean;
-    readonly selectedBlockIds: readonly string[];
-};
-
 export type ParamMorphPointKind = "left" | "mid1" | "mid2" | "right";
 
 export type ParamMorphControlPoint = {

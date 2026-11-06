@@ -33,7 +33,7 @@ use super::session::UiSink;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock};
 
 /// 队列槽位数。在途上限 = 队列 4 + 正在执行 1 = **5**。
 ///
@@ -53,52 +53,14 @@ pub(crate) struct SlowTask {
     pub id: u64,
     /// 仅用于日志与诊断，**不参与**分发决策（分发决策在 commands::lane）。
     pub command: String,
-    /// 回执目标。`None` = 计算完成后再由会话 actor 提交并回执。
-    ///
-    /// 【为什么不提供第二种 sink】“慢任务直接回执”和“算完回 actor 提交”
-    /// 的差别必须写在类型里：后者若仍带 sink，worker 就多了一条能绕过提交闸的
-    /// 回执路径，而唯一回执恰恰是这里最难用测试守住的不变量。
-    pub sink: Option<UiSink>,
+    pub sink: UiSink,
     /// 真正的活。
     ///
     /// 【必须只捕获 owned 数据】Value / String / PathBuf / Arc<DocumentSession> 都可以；
     /// 绝不能捕获 &EditorSession、Rc 或 BrowserState —— 见模块头的铁律。Send 约束挡不住
     /// 这种误用，所以它是纪律 + 代码评审的一部分。
-    pub work: SlowTaskWork,
-    /// 计算完成后的提交动作。只在 `sink == None` 时使用。
-    pub commit: Option<SlowTaskCommit>,
+    pub work: Box<dyn FnOnce() -> Result<Value, String> + Send>,
 }
-
-impl SlowTask {
-    pub(crate) fn reply(id: u64, command: String, sink: UiSink, work: SlowTaskWork) -> Self {
-        Self {
-            id,
-            command,
-            sink: Some(sink),
-            work,
-            commit: None,
-        }
-    }
-
-    /// 车道只负责计算；回执必须由 `commit` 在 actor 上发出。
-    pub(crate) fn commit(
-        id: u64,
-        command: String,
-        work: SlowTaskWork,
-        commit: SlowTaskCommit,
-    ) -> Self {
-        Self {
-            id,
-            command,
-            sink: None,
-            work,
-            commit: Some(commit),
-        }
-    }
-}
-
-pub(crate) type SlowTaskWork = Box<dyn FnOnce() -> Result<Value, String> + Send>;
-pub(crate) type SlowTaskCommit = Box<dyn FnOnce(Result<Value, String>) + Send>;
 
 /// 车道与它的线程共享的记账。
 ///
@@ -248,7 +210,6 @@ fn worker(receiver: Receiver<SlowTask>, shared: std::sync::Arc<Shared>) {
             command,
             sink,
             work,
-            commit,
         } = task;
         let started = std::time::Instant::now();
         shared.begin(&command);
@@ -259,30 +220,22 @@ fn worker(receiver: Receiver<SlowTask>, shared: std::sync::Arc<Shared>) {
         // 长任务里的 panic 既不能带走宿主进程，也不能让调用方永远等不到回执。
         let outcome = run_task(work);
         let ok = outcome.is_ok();
+        let response = match outcome {
+            Ok(value) => {
+                json!({"version":1,"viewId":sink.view_id,"id":id,"ok":true,"value":value})
+            }
+            // 与 actor / 视图层同一条协议：终态错误必须带 errorKind，否则前端无法区分
+            // 「稍后重试」与「会话已结束」。
+            Err(error) => json!({"version":1,"viewId":sink.view_id,"id":id,"ok":false,
+                "errorKind":super::classify_error(&error),
+                "errorCode":super::errors::terminal_error_code(&error),"error":error}),
+        };
         log::info!(
             "[ara] slow lane: finished {command} (id={id}) in {}ms ok={ok}",
             started.elapsed().as_millis()
         );
-        match (sink, commit) {
-            (Some(sink), _) => {
-                let response = match outcome {
-                    Ok(value) => {
-                        json!({"version":1,"viewId":sink.view_id,"id":id,"ok":true,"value":value})
-                    }
-                    // 与 actor / 视图层同一条协议：终态错误必须带 errorKind，否则前端无法区分
-                    // 「稍后重试」与「会话已结束」。
-                    Err(error) => json!({"version":1,"viewId":sink.view_id,"id":id,"ok":false,
-                        "errorKind":super::classify_error(&error),
-                        "errorCode":super::errors::terminal_error_code(&error),"error":error}),
-                };
-                // 唯一回执出口。视图已关闭时 response 自己丢弃（见 UiSink）。
-                sink.response(response);
-            }
-            (None, Some(commit)) => commit(outcome),
-            (None, None) => {
-                log::error!("[ara] slow lane: {command} (id={id}) has no reply or commit path");
-            }
-        }
+        // 唯一回执出口。视图已关闭时 response 自己丢弃（见 UiSink）。
+        sink.response(response);
         shared.end();
     }
 }
@@ -352,9 +305,8 @@ pub(crate) mod tests {
         lane.submit(SlowTask {
             id: 7,
             command: "run_vocoder_benchmark".into(),
-            sink: Some(sink),
+            sink,
             work: Box::new(|| Ok(json!({"cpuMedianMs": 1.0}))),
-            commit: None,
         })
         .expect("submit");
         let reply = replies
@@ -384,9 +336,8 @@ pub(crate) mod tests {
         lane.submit(SlowTask {
             id: 8,
             command: "run_vocoder_benchmark".into(),
-            sink: Some(sink),
+            sink,
             work: Box::new(|| Err("model file missing".to_string())),
-            commit: None,
         })
         .expect("submit");
         let reply = replies
@@ -406,9 +357,8 @@ pub(crate) mod tests {
         lane.submit(SlowTask {
             id: 9,
             command: "run_vocoder_benchmark".into(),
-            sink: Some(sink),
+            sink,
             work: Box::new(|| panic!("driver exploded")),
-            commit: None,
         })
         .expect("submit");
         let reply = replies
@@ -424,9 +374,8 @@ pub(crate) mod tests {
         lane.submit(SlowTask {
             id: 10,
             command: "run_vocoder_benchmark".into(),
-            sink: Some(sink),
+            sink,
             work: Box::new(|| Ok(json!({"ok":true}))),
-            commit: None,
         })
         .expect("submit after panic");
         let reply = replies
@@ -454,7 +403,7 @@ pub(crate) mod tests {
             lane.submit(SlowTask {
                 id,
                 command: "run_vocoder_benchmark".into(),
-                sink: Some(sink),
+                sink,
                 work: Box::new(move || {
                     let now = live.fetch_add(1, Ordering::AcqRel) + 1;
                     peak.fetch_max(now, Ordering::AcqRel);
@@ -462,7 +411,6 @@ pub(crate) mod tests {
                     live.fetch_sub(1, Ordering::AcqRel);
                     Ok(json!({"id":id}))
                 }),
-                commit: None,
             })
             .expect("submit");
         }
@@ -486,12 +434,11 @@ pub(crate) mod tests {
         lane.submit(SlowTask {
             id: 1,
             command: "run_vocoder_benchmark".into(),
-            sink: Some(sink),
+            sink,
             work: Box::new(move || {
                 let _ = held.lock().expect("gate").recv();
                 Ok(json!({}))
             }),
-            commit: None,
         })
         .expect("first submit");
         // 一直填到被拒：worker 可能已经取走第一条，所以"还差几条"取决于时序，
@@ -503,9 +450,8 @@ pub(crate) mod tests {
             match lane.submit(SlowTask {
                 id,
                 command: "run_vocoder_benchmark".into(),
-                sink: Some(sink),
+                sink,
                 work: Box::new(|| Ok(json!({}))),
-                commit: None,
             }) {
                 Ok(()) => blockers.push(replies),
                 Err(error) => {
@@ -536,9 +482,8 @@ pub(crate) mod tests {
         lane.submit(SlowTask {
             id: 11,
             command: "run_vocoder_benchmark".into(),
-            sink: Some(sink),
+            sink,
             work: Box::new(|| Ok(json!({"ok":true}))),
-            commit: None,
         })
         .expect("submit");
         assert!(
@@ -548,36 +493,5 @@ pub(crate) mod tests {
             "关闭的视图不该收到回执"
         );
         assert_eq!(lane.snapshot()["inFlight"], 0, "回执后必须清零在途计数");
-    }
-
-    /// **不变量：提交型慢任务不自行回执，计算结果只交给 commit 一次。**
-    ///
-    /// 【为什么这是音节分析的前置条件】worker 不能写时间线；它必须把结果送回
-    /// actor，让 actor 复核 Clip/Take/源之后才提交。若 worker 仍持有 sink，它就有
-    /// 一条绕过复核、提前回执的捷径，前端会在数据尚未落库时刷新。
-    #[test]
-    fn a_commit_task_hands_the_result_back_once_without_a_direct_reply() {
-        let lane = Lane::new().expect("车道线程必须能启动");
-        let (committed_tx, committed_rx) = std::sync::mpsc::channel();
-        lane.submit(SlowTask::commit(
-            12,
-            "analyze_clip_syllables".into(),
-            Box::new(|| Ok(json!({"spans":[1,2]}))),
-            Box::new(move |outcome| {
-                committed_tx.send(outcome).expect("commit receiver");
-            }),
-        ))
-        .expect("submit");
-        let outcome = committed_rx
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .expect("commit");
-        assert_eq!(outcome.unwrap()["spans"], json!([1, 2]));
-        assert!(
-            committed_rx
-                .recv_timeout(std::time::Duration::from_millis(100))
-                .is_err(),
-            "提交型任务只能交回一次"
-        );
-        assert_eq!(lane.snapshot()["inFlight"], 0);
     }
 }

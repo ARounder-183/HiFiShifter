@@ -598,55 +598,6 @@ pub fn get_clip_level_global(
         .map(|cached| cached.level.clone())
 }
 
-/// 分析音频的逐帧电平与 MIDI 音高（仅在缓存未命中时同步计算）。
-///
-/// 供音节分析这类**用户显式触发**的一次性任务使用；常规渲染路径仍应通过
-/// `schedule_clip_pitch_jobs` 异步预热，避免把解码塞进 UI 热路径。
-pub fn analyze_clip_for_syllables(
-    tl: &TimelineState,
-    clip: &Clip,
-    root_track_id: &str,
-    frame_period_ms: f64,
-) -> Option<(Vec<f32>, Vec<f32>)> {
-    if let (Some(level), Some(pitch)) = (
-        get_clip_level_global(tl, clip, root_track_id, frame_period_ms),
-        get_clip_pitch_midi_global(tl, clip, root_track_id, frame_period_ms),
-    ) {
-        return Some((level, pitch));
-    }
-    let analysis = analyze_clip_pitch_and_level(tl, clip, root_track_id, frame_period_ms)?;
-    if analysis.level.is_empty() {
-        return None;
-    }
-    Some((analysis.level, analysis.midi))
-}
-
-/// 音节分析专用的逐帧电平/音高提取。
-///
-/// 与 [`analyze_clip_for_syllables`] 的区别只有一条：**不把结果写入全局
-/// 渲染缓存**。音频分析始终在慢车道 worker 上跑，而全局缓存是渲染线程也在
-/// 读写的共享资源；让一次显式分析把整份长素材塞进渲染缓存，既会挤掉真正
-/// 需要的条目，也会让“分析失败”留下半份看似可用的缓存。
-pub fn analyze_clip_for_syllables_isolated(
-    tl: &TimelineState,
-    clip: &Clip,
-    root_track_id: &str,
-    frame_period_ms: f64,
-    cancelled: &dyn Fn() -> bool,
-) -> Option<(Vec<f32>, Vec<f32>)> {
-    let analysis = analyze_clip_pitch_and_level_cancellable(
-        tl,
-        clip,
-        root_track_id,
-        frame_period_ms,
-        cancelled,
-    )?;
-    if analysis.level.is_empty() {
-        return None;
-    }
-    Some((analysis.level, analysis.midi))
-}
-
 /// 查询 clip 的音高（MIDI）缓存。缓存命中但音高缺失（FCPE 不可用时仍会缓存电平）
 /// 时返回 `None`。
 ///

@@ -1494,10 +1494,6 @@ textarea {
     font-size: var(--font-size-1);
     line-height: 16px;
 }
-.param-pill__seg--block-icon {
-    min-width: 24px;
-    padding-inline: 3px;
-}
 .param-pill__seg--chev {
     min-width: 20px;
     padding-inline: 2px 4px;

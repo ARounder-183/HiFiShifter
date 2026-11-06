@@ -443,7 +443,6 @@ describe("resolveVibratoPresetSwitch", () => {
             ctrlKey: false,
             shiftKey: false,
             altKey: false,
-            metaKey: false,
             ...extra,
         }) as KeyboardEvent;
 

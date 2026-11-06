@@ -22,7 +22,6 @@
 import {
     buildTimelineClipVisualStyle,
     CLIP_CORNER_RADIUS_PX,
-    ellipsizeClipNameToWidth,
     resolveFontFamily,
     resolveThemeColor,
     timelineLaneBackgroundCss,
@@ -40,10 +39,6 @@ import {
 } from "./timelineClipGlRenderer.js";
 import { hostFadeDisplay, visualFadeGain } from "../hostFadeDisplay.js";
 import { drawLoopMarkers } from "../../../../utils/loopRender.js";
-import {
-    isClipHeaderControlVisible,
-    resolveClipHeaderLayout,
-} from "../kernel/interaction/clipHeaderLayout.js";
 
 /** 自适应细分产出的一段折线（端点按 `t0` 升序排列）。 */
 export interface FadeCurveSampleSegment {
@@ -297,10 +292,6 @@ export function drawTimelineCanvas(
             snapOffsetPx?: number;
             /** 前导重叠区宽度（像素，从左缘起算）。>0 时上 clip 在该区域半透。 */
             leadingOverlapPx?: number;
-            /** header 被任何前序同轨 Clip 遮挡的宽度（像素，从左缘起算）。 */
-            coveredUntilPx?: number;
-            /** header 尾部被后序同轨 Clip 覆盖的宽度（clip 内相对坐标）。 */
-            trailingHeaderOverlapPx?: number;
             /** 静音检测预览区段（像素，相对 clip 左缘）：半透明红色覆盖。 */
             silenceSpansPx?: Array<{ leftPx: number; widthPx: number }>;
             /** 多 Take lane 分界线的 y 偏移（相对 body 顶部，CSS px）。 */
@@ -519,8 +510,6 @@ export function drawTimelineCanvas(
         bodyHeight: number;
         radius: number;
         leadingOverlapPx: number;
-        coveredUntilPx: number;
-        trailingHeaderOverlapPx: number;
         isGroupActive: boolean;
         isGroupDisabled: boolean;
         /** 右缘是否紧贴下一个同轨 clip（需要画分隔缝）。 */
@@ -578,46 +567,45 @@ export function drawTimelineCanvas(
         const radius = Math.max(0, Math.min(CLIP_CORNER_RADIUS_PX, clipWidth / 2, clipHeight / 2));
         // 前导重叠区（被同轨前一个 clip 压住的部分）宽度。
         const leadingOverlapPx = Math.max(0, Math.min(clipWidth - 1, clip.leadingOverlapPx ?? 0));
-        const coveredUntilPx = Math.max(
-            0,
-            Math.min(clipWidth - 1, clip.coveredUntilPx ?? clip.leadingOverlapPx ?? 0),
-        );
-        const trailingHeaderOverlapPx = Math.max(
-            0,
-            Math.min(clipWidth - 1, clip.trailingHeaderOverlapPx ?? 0),
-        );
         const baseAlpha = style.mutedAlpha;
 
         const fills: FillOp[] = [];
-        const visibleHeaderWidth = Math.max(0, clipWidth - trailingHeaderOverlapPx);
-        const overlapForBodyPx = Math.max(leadingOverlapPx, coveredUntilPx);
-        if (overlapForBodyPx > 0.5) {
-            // header 在重叠区完整显示：后一个 Clip 的 header 不能被自己的
-            // 前导重叠字段压暗。body 仍保留半透，让下层波形/色块透出。
+        if (leadingOverlapPx > 0.5) {
+            // 重叠区半透，让下 clip 的色块/波形透出（避免两层不透明色块
+            // 叠加成脏色）。左右两段各自只保留外侧的圆角。
+            fills.push({
+                style: style.headerFill,
+                alpha: baseAlpha * 0.55,
+                x: clipLeft,
+                y: clipTop,
+                w: leadingOverlapPx,
+                h: headerHeight,
+                radii: [radius, 0, 0, 0],
+            });
             fills.push({
                 style: style.headerFill,
                 alpha: baseAlpha,
-                x: clipLeft,
+                x: clipLeft + leadingOverlapPx,
                 y: clipTop,
-                w: visibleHeaderWidth,
+                w: clipWidth - leadingOverlapPx,
                 h: headerHeight,
-                radii: [radius, radius, 0, 0],
+                radii: [0, radius, 0, 0],
             });
             fills.push({
                 style: style.bodyFill,
                 alpha: baseAlpha * 0.55,
                 x: clipLeft,
                 y: bodyTop,
-                w: overlapForBodyPx,
+                w: leadingOverlapPx,
                 h: bodyHeight,
                 radii: [0, 0, 0, radius],
             });
             fills.push({
                 style: style.bodyFill,
                 alpha: baseAlpha,
-                x: clipLeft + overlapForBodyPx,
+                x: clipLeft + leadingOverlapPx,
                 y: bodyTop,
-                w: clipWidth - overlapForBodyPx,
+                w: clipWidth - leadingOverlapPx,
                 h: bodyHeight,
                 radii: [0, 0, radius, 0],
             });
@@ -628,7 +616,7 @@ export function drawTimelineCanvas(
                 alpha: baseAlpha,
                 x: clipLeft,
                 y: clipTop,
-                w: visibleHeaderWidth,
+                w: clipWidth,
                 h: headerHeight,
                 radii: [radius, radius, 0, 0],
             });
@@ -737,8 +725,6 @@ export function drawTimelineCanvas(
             bodyHeight,
             radius,
             leadingOverlapPx,
-            coveredUntilPx,
-            trailingHeaderOverlapPx,
             isGroupActive,
             isGroupDisabled,
             hasSeam,
@@ -750,14 +736,19 @@ export function drawTimelineCanvas(
             strokes,
             // 屏障：前导重叠会盖住前一个 clip；编组外圈描边会伸出自身矩形
             // 2px 盖住邻居。二者都必须先提交此前已排入的批次。
-            barrier: overlapForBodyPx > 0.5 || isGroupActive,
+            barrier: leadingOverlapPx > 0.5 || isGroupActive,
         };
     }
 
     /** 绘制无法合批的逐 clip 细节（旋钮 / 徽标 / 文字 / 淡变 / 吸附三角）。 */
     function drawClipDetails(item: PreparedClip): void {
-        // 后序 Clip 在自己的前导重叠区**仍显示 header**；只有前序 Clip 的尾部
-        // 需要收边。因此绘制端不再用前导遮挡区隐藏控件。
+        const { clip, style } = item;
+        const { left: clipLeft, top: clipTop, width: clipWidth, height: clipHeight } = item;
+        const bodyTop = item.bodyTop;
+        const bodyHeight = item.bodyHeight;
+        const radius = item.radius;
+
+        ctx.globalAlpha = style.mutedAlpha;
 
         /*
          * 「等待宿主音频」占位：body 画斜纹底。
@@ -768,35 +759,24 @@ export function drawTimelineCanvas(
          *
          * 裁剪到 body 的圆角矩形：斜线不能溢到 header 或相邻 clip 上。
          */
-        drawClipHeader(item);
-        drawClipBodyDetails(item);
-    }
+        if (item.clip.awaitingHostAudio) {
+            ctx.save();
+            ctx.beginPath();
+            ctx.roundRect(clipLeft, bodyTop, clipWidth, bodyHeight, [0, 0, radius, radius]);
+            ctx.clip();
+            ctx.strokeStyle = darkMode ? "rgba(255, 255, 255, 0.18)" : "rgba(24, 28, 36, 0.14)";
+            ctx.lineWidth = 1;
+            const step = 7;
+            for (let x = clipLeft - bodyHeight; x < clipLeft + clipWidth; x += step) {
+                ctx.beginPath();
+                ctx.moveTo(x, bodyTop + bodyHeight);
+                ctx.lineTo(x + bodyHeight, bodyTop);
+                ctx.stroke();
+            }
+            ctx.restore();
+        }
 
-    /** 重叠区最后一遍只重绘 header，避免把 body 的淡变/吸附标记搬到 header 上层。 */
-    function drawClipHeader(item: PreparedClip): void {
-        const { clip, style } = item;
-        const { left: clipLeft, top: clipTop, width: clipWidth } = item;
-        const headerLayout = resolveClipHeaderLayout({
-            clipWidthPx: clipWidth,
-            trailingOverlapPx: item.trailingHeaderOverlapPx,
-            leadingControlsWidth: style.leadingControlsWidth,
-            showGainLabel: style.showGainLabel,
-            showPlaybackRate: style.showPlaybackRate,
-            gainLabelWidth: style.gainLabelWidth,
-            rateLabelWidth: style.rateLabelWidth,
-        });
-        ctx.globalAlpha = style.mutedAlpha;
-
-        if (
-            style.showGainKnob &&
-            isClipHeaderControlVisible(
-                {
-                    leftPx: style.gainKnobCenterOffsetX - style.gainKnobRadius,
-                    widthPx: style.gainKnobRadius * 2,
-                },
-                headerLayout,
-            )
-        ) {
+        if (style.showGainKnob) {
             const knobCenterX = clipLeft + style.gainKnobCenterOffsetX;
             const knobCenterY = clipTop + style.gainKnobCenterOffsetY;
             ctx.fillStyle = style.gainKnobFill;
@@ -811,25 +791,19 @@ export function drawTimelineCanvas(
             ctx.arc(knobCenterX, knobCenterY, 1.7, 0, Math.PI * 2);
             ctx.fill();
             const angle = ((style.gainKnobAngleDeg - 90) * Math.PI) / 180;
-            const outerX = knobCenterX + Math.cos(angle) * (style.gainKnobRadius - 1.1);
-            const outerY = knobCenterY + Math.sin(angle) * (style.gainKnobRadius - 1.1);
-            const innerX = knobCenterX + Math.cos(angle) * 1.6;
-            const innerY = knobCenterY + Math.sin(angle) * 1.6;
+            const indicatorOuterX = knobCenterX + Math.cos(angle) * (style.gainKnobRadius - 1.1);
+            const indicatorOuterY = knobCenterY + Math.sin(angle) * (style.gainKnobRadius - 1.1);
+            const indicatorInnerX = knobCenterX + Math.cos(angle) * 1.6;
+            const indicatorInnerY = knobCenterY + Math.sin(angle) * 1.6;
             ctx.beginPath();
             ctx.strokeStyle = style.gainKnobIndicator;
             ctx.lineWidth = 1.2;
-            ctx.moveTo(innerX, innerY);
-            ctx.lineTo(outerX, outerY);
+            ctx.moveTo(indicatorInnerX, indicatorInnerY);
+            ctx.lineTo(indicatorOuterX, indicatorOuterY);
             ctx.stroke();
         }
 
-        if (
-            style.showChainBadge &&
-            isClipHeaderControlVisible(
-                { leftPx: style.chainBadgeOffsetX, widthPx: style.chainBadgeWidth },
-                headerLayout,
-            )
-        ) {
+        if (style.showChainBadge) {
             const badgeX = clipLeft + style.chainBadgeOffsetX;
             const badgeY = clipTop + style.chainBadgeOffsetY;
             const badgeW = style.chainBadgeWidth;
@@ -837,6 +811,7 @@ export function drawTimelineCanvas(
             const badgeR = style.chainBadgeRadius;
             const badgeCx = badgeX + badgeW / 2;
             const badgeCy = badgeY + badgeH / 2;
+
             ctx.beginPath();
             ctx.roundRect(badgeX, badgeY, badgeW, badgeH, badgeR);
             ctx.fillStyle = style.chainBadgeFill;
@@ -844,6 +819,8 @@ export function drawTimelineCanvas(
             ctx.strokeStyle = style.chainBadgeStroke;
             ctx.lineWidth = 1;
             ctx.stroke();
+
+            // Simple chain-link icon: two overlapping circles with a connecting bar
             ctx.strokeStyle = style.chainBadgeTextFill;
             ctx.lineWidth = 1.5;
             ctx.lineCap = "round";
@@ -858,9 +835,11 @@ export function drawTimelineCanvas(
             ctx.stroke();
             ctx.beginPath();
             ctx.moveTo(leftCx + linkR * 0.5, badgeCy - 1);
-            ctx.lineTo(rightCx - linkR * 0.5, badgeCy);
+            ctx.lineTo(rightCx - linkR * 0.5, badgeCy + 0);
             ctx.stroke();
             ctx.lineCap = "butt";
+
+            // Draw diagonal slash when group is disabled
             if (item.isGroupDisabled) {
                 ctx.beginPath();
                 ctx.strokeStyle = style.chainBadgeStroke;
@@ -871,75 +850,84 @@ export function drawTimelineCanvas(
             }
         }
 
-        for (const [visible, leftPx, widthPx, yPx, label, fillStyle, strokeStyle, textFill] of [
-            [
-                style.showMuteBadge,
-                style.muteBadgeOffsetX,
-                style.muteBadgeWidth,
-                style.muteBadgeOffsetY,
-                style.muteBadgeLabel,
-                style.muteBadgeFill,
-                style.muteBadgeStroke,
-                style.muteBadgeTextFill,
-            ],
-            [
-                style.showFormantBadge,
-                style.formantBadgeOffsetX,
-                style.formantBadgeWidth,
-                style.formantBadgeOffsetY,
-                style.formantBadgeLabel,
-                style.formantBadgeFill,
-                style.formantBadgeStroke,
-                style.formantBadgeTextFill,
-            ],
-        ] as const) {
-            if (!visible || !isClipHeaderControlVisible({ leftPx, widthPx }, headerLayout)) {
-                continue;
-            }
-            const heightPx =
-                leftPx === style.muteBadgeOffsetX
-                    ? style.muteBadgeHeight
-                    : style.formantBadgeHeight;
-            const radius =
-                leftPx === style.muteBadgeOffsetX
-                    ? style.muteBadgeRadius
-                    : style.formantBadgeRadius;
-            const badgeX = clipLeft + leftPx;
-            const badgeY = clipTop + yPx;
+        if (style.showMuteBadge) {
+            const badgeX = clipLeft + style.muteBadgeOffsetX;
+            const badgeY = clipTop + style.muteBadgeOffsetY;
             ctx.beginPath();
-            ctx.roundRect(badgeX, badgeY, widthPx, heightPx, radius);
-            ctx.fillStyle = fillStyle;
+            ctx.roundRect(
+                badgeX,
+                badgeY,
+                style.muteBadgeWidth,
+                style.muteBadgeHeight,
+                style.muteBadgeRadius,
+            );
+            ctx.fillStyle = style.muteBadgeFill;
             ctx.fill();
-            ctx.strokeStyle = strokeStyle;
+            ctx.strokeStyle = style.muteBadgeStroke;
             ctx.lineWidth = 1;
             ctx.stroke();
-            ctx.fillStyle = textFill;
+            ctx.fillStyle = style.muteBadgeTextFill;
             ctx.font = `bold 9px ${fontFamily}`;
             ctx.textBaseline = "middle";
             ctx.textAlign = "center";
-            ctx.fillText(label, badgeX + widthPx / 2, badgeY + heightPx / 2 + 0.5);
+            ctx.fillText(
+                style.muteBadgeLabel,
+                badgeX + style.muteBadgeWidth / 2,
+                badgeY + style.muteBadgeHeight / 2 + 0.5,
+            );
             ctx.textAlign = "start";
         }
 
-        if (style.showGainLabel && headerLayout.gainLabelVisible) {
+        if (style.showFormantBadge) {
+            const badgeX = clipLeft + style.formantBadgeOffsetX;
+            const badgeY = clipTop + style.formantBadgeOffsetY;
+            ctx.beginPath();
+            ctx.roundRect(
+                badgeX,
+                badgeY,
+                style.formantBadgeWidth,
+                style.formantBadgeHeight,
+                style.formantBadgeRadius,
+            );
+            ctx.fillStyle = style.formantBadgeFill;
+            ctx.fill();
+            ctx.strokeStyle = style.formantBadgeStroke;
+            ctx.lineWidth = 1;
+            ctx.stroke();
+            ctx.fillStyle = style.formantBadgeTextFill;
+            ctx.font = `bold 9px ${fontFamily}`;
+            ctx.textBaseline = "middle";
+            ctx.textAlign = "center";
+            ctx.fillText(
+                style.formantBadgeLabel,
+                badgeX + style.formantBadgeWidth / 2,
+                badgeY + style.formantBadgeHeight / 2 + 0.5,
+            );
+            ctx.textAlign = "start";
+        }
+
+        if (style.showGainLabel) {
             ctx.fillStyle = style.textFill;
             ctx.font = `10px ${fontFamily}`;
             ctx.textBaseline = "middle";
-            if (style.showPlaybackRate && headerLayout.rateLabelVisible) {
-                ctx.fillText(
-                    style.playbackRateLabel,
-                    clipLeft + headerLayout.rateLabelLeftPx,
-                    clipTop + 9,
-                );
+            // 宽度取自样式解析（而非现场 measureText）：命中端
+            // （`clipHeaderControls`）消费同一个值来划标签命中区，两处必须是
+            // 同一份数据，否则「看到的」与「可点的」会漂移。
+            const gainX = clipLeft + clipWidth - style.gainLabelWidth - 6;
+            if (style.showPlaybackRate) {
+                const rateX = gainX - style.rateLabelWidth - 8;
+                ctx.fillText(style.playbackRateLabel, rateX, clipTop + 9);
             }
-            ctx.fillText(style.gainLabel, clipLeft + headerLayout.gainLabelLeftPx, clipTop + 9);
+            ctx.fillText(style.gainLabel, gainX, clipTop + 9);
         }
 
-        if (!clip.isRenaming && style.showName && headerLayout.nameVisible) {
-            const textStartX = clipLeft + headerLayout.nameLeftPx;
-            const availableWidth = headerLayout.nameWidthPx;
-            const name = ellipsizeClipNameToWidth(clip.name, availableWidth, fontFamily);
-            if (name.length > 0) {
+        if (!clip.isRenaming && style.showName && style.displayName.length > 0) {
+            const textStartX = clipLeft + style.leadingControlsWidth;
+            const textEndX = style.showGainLabel
+                ? clipLeft + clipWidth - style.trailingReservePx + 4
+                : clipLeft + clipWidth - 8;
+            const availableWidth = Math.max(0, textEndX - textStartX);
+            if (availableWidth > 12) {
                 ctx.save();
                 ctx.beginPath();
                 ctx.rect(textStartX, clipTop, availableWidth, item.headerHeight);
@@ -947,21 +935,10 @@ export function drawTimelineCanvas(
                 ctx.fillStyle = style.textFill;
                 ctx.font = `12px ${fontFamily}`;
                 ctx.textBaseline = "middle";
-                ctx.fillText(name, textStartX, clipTop + 9);
+                ctx.fillText(style.displayName, textStartX, clipTop + 9);
                 ctx.restore();
             }
         }
-        ctx.globalAlpha = 1;
-    }
-
-    /** 绘制 body 级细节（淡变、渐变角、吸附三角）。 */
-    function drawClipBodyDetails(item: PreparedClip): void {
-        const { clip, style } = item;
-        const { left: clipLeft, top: clipTop, width: clipWidth, height: clipHeight } = item;
-        const bodyTop = item.bodyTop;
-        const bodyHeight = item.bodyHeight;
-        const radius = item.radius;
-        ctx.globalAlpha = style.mutedAlpha;
 
         // ── 淡入淡出 ────────────────────────────────────────────
         // 压暗区：原实现依赖外层圆角裁剪来收住下方两角，这里改用每角独立
@@ -1272,19 +1249,8 @@ export function drawTimelineCanvas(
         right: number;
     }> = [];
 
-    /**
-     * 重叠区 header 需要在所有块面提交后重绘。
-     *
-     * 后一个 Clip 的 header 属于重叠区上层；但它的块面与细节批可能被前一个
-     * Clip 的后续批次盖住，因此 header 背景和内容必须最后统一落笔。
-     */
-    const overlapHeaderItems: PreparedClip[] = [];
-
     for (const clip of args.clips) {
         const item = prepareClip(clip);
-        if (item.trailingHeaderOverlapPx > 0.5 || item.leadingOverlapPx > 0.5) {
-            overlapHeaderItems.push(item);
-        }
         if (item.barrier) flushBatch();
         pending.push(item);
         if (clip.silenceSpansPx !== undefined) {
@@ -1335,32 +1301,6 @@ export function drawTimelineCanvas(
     }
     flushBatch();
 
-    /*
-     * 重叠区 header 最后重绘：后一个 Clip 的 header 必须展示在重叠区上方。
-     * 只按“后序 Clip”自身范围裁剪，前序 Clip 的尾部文字已由共享布局收边。
-     * 每个 Clip 只在自己的可见 header 段内落笔：后序 Clip 覆盖前序尾部时，
-     * 前序 Clip 的 header 不会越过重叠起点。
-     */
-    for (const item of overlapHeaderItems) {
-        const { style } = item;
-        const visibleHeaderWidth = Math.max(0, item.width - item.trailingHeaderOverlapPx);
-        if (visibleHeaderWidth <= 0) continue;
-        ctx.save();
-        ctx.beginPath();
-        ctx.roundRect(item.left, item.top, visibleHeaderWidth, item.headerHeight, [
-            item.radius,
-            item.radius,
-            0,
-            0,
-        ]);
-        ctx.clip();
-        ctx.globalAlpha = style.mutedAlpha;
-        ctx.fillStyle = style.headerFill;
-        ctx.fillRect(item.left, item.top, visibleHeaderWidth, item.headerHeight);
-        ctx.globalAlpha = 1;
-        drawClipDetails(item);
-        ctx.restore();
-    }
     if (silenceOverlays.length > 0) {
         // 与旧实现 `ClipItem` 的红色覆盖层同源：半透明红，覆盖 clip 的 body 区
         // （不含 header，避免盖住名称 / 徽标等可交互标记）。

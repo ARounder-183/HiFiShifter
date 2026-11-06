@@ -38,12 +38,6 @@ test("features/session/sessionSlice.toolMode.test.ts tool mode state and hydrati
     assertEqual(toSelect.toolModeGroup, "select", "选择工具：分组");
     assertEqual(toSelect.drawToolMode, "vibrato", "选择工具：保留上次的绘制工具（供 Tab 回跳）");
 
-    // ── 切到块工具：单独分组，仍保留上次的绘制工具 ──
-    const toBlock = reducer(toVibrato, setToolMode("block"));
-    assertEqual(toBlock.toolMode, "block", "块工具：toolMode");
-    assertEqual(toBlock.toolModeGroup, "block", "块工具：分组");
-    assertEqual(toBlock.drawToolMode, "vibrato", "块工具：保留上次的绘制工具");
-
     // ── 水合：从设置里读回 ──
     // （这里只关心工具三字段，其余字段与这条断言无关。）
     const hydrate = (paramEditorTool: unknown) =>
@@ -52,15 +46,15 @@ test("features/session/sessionSlice.toolMode.test.ts tool mode state and hydrati
             loadUiSettings.fulfilled({ paramEditorTool } as UiSettings, "req", undefined),
         );
 
-    for (const mode of ["select", "draw", "line", "vibrato", "block"] as const) {
+    for (const mode of ["select", "draw", "line", "vibrato"] as const) {
         const state = hydrate(mode);
         assertEqual(state.toolMode, mode, `水合 ${mode}：toolMode`);
         assertEqual(
             state.toolModeGroup,
-            mode === "select" ? "select" : mode === "block" ? "block" : "draw",
+            mode === "select" ? "select" : "draw",
             `水合 ${mode}：分组`,
         );
-        if (mode !== "select" && mode !== "block") {
+        if (mode !== "select") {
             assertEqual(state.drawToolMode, mode, `水合 ${mode}：绘制工具`);
         }
     }
@@ -83,7 +77,7 @@ test("features/session/sessionSlice.toolMode.test.ts tool mode state and hydrati
  */
 test("features/session/sessionSlice.toolMode.test.ts every tool survives a round trip", () => {
     const base = reducer(undefined, { type: "@@INIT" });
-    const all: ToolMode[] = ["select", "draw", "line", "vibrato", "block"];
+    const all: ToolMode[] = ["select", "draw", "line", "vibrato"];
     for (const mode of all) {
         const persisted = reducer(base, setToolMode(mode));
         const restored = reducer(

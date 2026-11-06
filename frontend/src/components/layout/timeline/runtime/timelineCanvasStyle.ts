@@ -81,30 +81,6 @@ export function measureTextWidth(text: string, fontStyle: string, fontFamily: st
     return text.length * sizePx * 0.55;
 }
 
-/** 按可用像素宽度截断名称并补省略号；供 header 布局复用。 */
-export function ellipsizeClipNameToWidth(
-    text: string,
-    availableWidthPx: number,
-    fontFamily: string,
-): string {
-    if (!(availableWidthPx > 0)) return "";
-    if (measureTextWidth(text, NAME_FONT_STYLE, fontFamily) <= availableWidthPx) return text;
-    const suffix = "...";
-    if (measureTextWidth(suffix, NAME_FONT_STYLE, fontFamily) > availableWidthPx) return "";
-    let lo = 0;
-    let hi = text.length;
-    while (lo < hi) {
-        const mid = Math.ceil((lo + hi) / 2);
-        const candidate = `${text.slice(0, mid)}${suffix}`;
-        if (measureTextWidth(candidate, NAME_FONT_STYLE, fontFamily) <= availableWidthPx) {
-            lo = mid;
-        } else {
-            hi = mid - 1;
-        }
-    }
-    return lo > 0 ? `${text.slice(0, lo)}${suffix}` : "";
-}
-
 /**
  * 读取当前字体族（`--qt-font-family`）。
  *

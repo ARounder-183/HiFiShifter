@@ -191,57 +191,6 @@ let mockSelectedTrackId: string | null = null;
 const mockTakeChannelModes = new Map<string, number>();
 
 /**
- * mock 的参数写入覆盖：`track|param` → 稀疏帧值。
- *
- * `get_param_frames` 由确定性函数现场生成曲线。若 `set_param_frames` 不保存写入，
- * 拖块 / 画笔一旦触发权威刷新，曲线会瞬间回到原值，看起来像手势没有生效。
- * 这里保存写过的帧，读取时叠加到合成曲线上，使 mock 的编辑闭环与真实后端一致。
- */
-const mockParamWrites = new Map<string, Map<number, number>>();
-
-/** mock 的 v7 音节块分析：按固定 0.55s 切片，仅浏览器实验用。 */
-const mockSyllableSpans = new Map<string, Array<{ startSec: number; endSec: number }>>();
-
-/** mock 的 v7 手动合并记录（root track → 记录）。 */
-const mockParamBlockMerges = new Map<
-    string,
-    Array<{
-        mergedGroupId: string;
-        memberRefs: Array<{
-            clipId: string;
-            takeId: string;
-            syllableId: string;
-            startSec: number;
-            endSec: number;
-        }>;
-    }>
->();
-
-/** mock 的 v7 手动切分 / 伸缩记录（root track → 记录）。 */
-const mockParamBlockEdits = new Map<
-    string,
-    Array<{
-        editId: string;
-        memberRefs: Array<{
-            clipId: string;
-            takeId: string;
-            syllableId: string;
-            sourceStartSec: number;
-            sourceEndSec: number;
-        }>;
-        startSec: number;
-        endSec: number;
-        memberStartSec?: number;
-        memberEndSec?: number;
-        blockIds?: string[];
-    }>
->();
-
-function mockParamWriteKey(trackId: string, param: string): string {
-    return `${trackId}\u0000${param}`;
-}
-
-/**
  * 假 UI 设置（内存里的"配置文件"），默认值与 sessionSlice 的出厂初始值同口径。
  *
  * 此前兜底返回 `{ ok: true }`，所有读设置的面板（MIDI 导入对话框、参数编辑器、
@@ -443,17 +392,6 @@ function buildMockTimeline(): Record<string, unknown> {
                                   name: "Take 1",
                                   source_path: `/mock/audio-${trackIndex + 1}.wav`,
                                   channel_mode: mockTakeChannelModes.get(`${trackId}-take-1`) ?? 0,
-                                  syllable_spans_sec: mockSyllableSpans.has(`${trackId}-clip-1`)
-                                      ? mockSyllableSpans
-                                            .get(`${trackId}-clip-1`)!
-                                            .map(
-                                                (span) =>
-                                                    [span.startSec, span.endSec] as [
-                                                        number,
-                                                        number,
-                                                    ],
-                                            )
-                                      : undefined,
                               },
                               {
                                   id: `${trackId}-take-2`,
@@ -462,37 +400,8 @@ function buildMockTimeline(): Record<string, unknown> {
                                   channel_mode: mockTakeChannelModes.get(`${trackId}-take-2`) ?? 0,
                               },
                           ]
-                        : [
-                              // 旧 mock 只给多 Take 的首条 clip 造 Take；其它 clip 的
-                              // `takes` 为空时，前端会走 flat 投影，音节块永远读不到
-                              // 区间，自动分析因此永远判成“还没有区间”。
-                              // 这里给每条音频 clip 补一个与 flat 投影一致的 Take；
-                              // 它不改变时间轴几何，只让缓存有地方挂。
-                              {
-                                  id: `${trackId}-clip-${index + 1}-take-1`,
-                                  name: "Take 1",
-                                  source_path: `/mock/audio-${trackIndex + 1}.wav`,
-                                  source_start_sec: 0,
-                                  source_end_sec: lengthSec,
-                                  syllable_spans_sec: mockSyllableSpans.has(
-                                      `${trackId}-clip-${index + 1}`,
-                                  )
-                                      ? mockSyllableSpans
-                                            .get(`${trackId}-clip-${index + 1}`)!
-                                            .map(
-                                                (span) =>
-                                                    [span.startSec, span.endSec] as [
-                                                        number,
-                                                        number,
-                                                    ],
-                                            )
-                                      : undefined,
-                              },
-                          ],
-                active_take_id:
-                    trackIndex === 0 && index === 0
-                        ? `${trackId}-take-1`
-                        : `${trackId}-clip-${index + 1}-take-1`,
+                        : [],
+                active_take_id: trackIndex === 0 && index === 0 ? `${trackId}-take-1` : undefined,
             });
             cursor += lengthSec + gapSec;
         }
@@ -533,63 +442,6 @@ function buildHandlers(): Record<string, (...args: unknown[]) => unknown> {
      */
     const timeline = buildMockTimeline();
     return {
-        get_clip_syllable_spans: (...args: unknown[]) => {
-            const clipId = String(args[0] ?? "");
-            const spans = mockSyllableSpans.get(clipId) ?? [];
-            return {
-                ok: true,
-                clipId,
-                takeId: `${clipId}_take_1`,
-                sourceSpansSec: spans,
-                algorithm: "level_vad+pitch_stability+spectral_onset",
-                algorithmVersion: 1,
-                analyzed: spans.length > 0,
-            };
-        },
-        analyze_clip_syllables: (...args: unknown[]) => {
-            const clipId = String(args[0] ?? "");
-            const mockTimeline = buildMockTimeline() as {
-                clips?: Array<{ id: string; duration_sec?: number; length_sec?: number }>;
-            };
-            const clip = mockTimeline.clips?.find((item) => item.id === clipId);
-            // mock 源文件比 clip 长（见 buildMockTimeline 的 duration_sec = length + 8）。
-            // 音节区间按 clip 可见长度生成，避免把不可见尾部也画成块。
-            const duration = Number(clip?.length_sec ?? 0) || 4;
-            const spans: Array<{ startSec: number; endSec: number }> = [];
-            // 浏览器实验用：把每个 clip 切成 4 个等长音节，保证块数可数、可拖动。
-            const count = Math.max(1, Math.min(4, Math.ceil(duration / 1.2)));
-            const step = duration / count;
-            for (let index = 0; index < count; index += 1) {
-                const startSec = index * step;
-                spans.push({ startSec, endSec: Math.min(duration, startSec + step) });
-            }
-            mockSyllableSpans.set(clipId, spans);
-            return {
-                ok: true,
-                clipId,
-                takeId: `${clipId}_take_1`,
-                sourceSpansSec: spans,
-                algorithm: "level_vad+pitch_stability+spectral_onset",
-                algorithmVersion: 1,
-                analyzed: spans.length > 0,
-            };
-        },
-        get_param_block_merges: (...args: unknown[]) => ({
-            ok: true,
-            records: mockParamBlockMerges.get(String(args[0] ?? "")) ?? [],
-            intervalEdits: mockParamBlockEdits.get(String(args[0] ?? "")) ?? [],
-        }),
-        set_param_block_merges: (...args: unknown[]) => {
-            mockParamBlockMerges.set(
-                String(args[0] ?? ""),
-                Array.isArray(args[1]) ? (args[1] as never[]) : [],
-            );
-            mockParamBlockEdits.set(
-                String(args[0] ?? ""),
-                Array.isArray(args[2]) ? (args[2] as never[]) : [],
-            );
-            return { ok: true };
-        },
         ping: () => ({ ok: true }),
         get_runtime_info: () => ({
             ok: true,
@@ -802,16 +654,14 @@ function buildHandlers(): Record<string, (...args: unknown[]) => unknown> {
             const fpMs = 5;
             const orig: number[] = new Array(frameCount);
             const edit: number[] = new Array(frameCount);
-            const writes = mockParamWrites.get(mockParamWriteKey(trackId, param));
             for (let i = 0; i < frameCount; i += 1) {
                 const frame = startFrame + i * stride;
-                const written = writes?.get(frame);
                 const t = (frame * fpMs) / 1000;
                 if (param === "volume") {
                     // 0..2 的乘性音量曲线（含缓慢起伏与一小段静音）。
                     const v = 1 + 0.45 * Math.sin(t * 0.35) + 0.15 * Math.sin(t * 2.1);
                     orig[i] = v;
-                    edit[i] = written ?? v;
+                    edit[i] = v;
                     continue;
                 }
                 if (param === "dyn") {
@@ -819,7 +669,7 @@ function buildHandlers(): Record<string, (...args: unknown[]) => unknown> {
                     const base = 0.5 + 0.35 * Math.sin(t * 0.21) + 0.1 * Math.sin(t * 1.3);
                     const baseline = Math.max(0.05, base);
                     orig[i] = baseline;
-                    edit[i] = written ?? baseline * (1 + 0.6 * Math.sin(t * 0.17));
+                    edit[i] = baseline * (1 + 0.6 * Math.sin(t * 0.17));
                     continue;
                 }
                 // 长趋势 + 颤音 + 周期性跳变：让曲线有真实的拐角与折返
@@ -829,7 +679,7 @@ function buildHandlers(): Record<string, (...args: unknown[]) => unknown> {
                     Math.sin(t * 7.9) * 0.9 +
                     (Math.floor(t / 6) % 2 === 0 ? 0 : 4);
                 orig[i] = base;
-                edit[i] = written ?? base + Math.sin(t * 1.7) * 1.2;
+                edit[i] = base + Math.sin(t * 1.7) * 1.2;
             }
             return {
                 ok: true,
@@ -845,25 +695,6 @@ function buildHandlers(): Record<string, (...args: unknown[]) => unknown> {
                 pitch_edit_user_modified: false,
                 pitch_edit_backend_available: true,
             };
-        },
-        set_param_frames: (...args: unknown[]) => {
-            const trackId = String(args[0] ?? "");
-            const param = String(args[1] ?? "");
-            const startFrame = Math.max(0, Math.floor(Number(args[2] ?? 0)));
-            const values = Array.isArray(args[3]) ? (args[3] as unknown[]) : [];
-            if (!trackId || !param) return { ok: false, error: "mock: track/param required" };
-            const key = mockParamWriteKey(trackId, param);
-            let writes = mockParamWrites.get(key);
-            if (writes === undefined) {
-                writes = new Map<number, number>();
-                mockParamWrites.set(key, writes);
-            }
-            for (let index = 0; index < values.length; index += 1) {
-                const value = Number(values[index]);
-                if (!Number.isFinite(value)) continue;
-                writes.set(startFrame + index, value);
-            }
-            return { ok: true };
         },
         set_transport: () => ({ ok: true }),
         set_project_length: () => ({ ok: true }),
@@ -1086,21 +917,4 @@ export function installMockBackend(): void {
     });
 
     (window as unknown as { pywebview?: { api: unknown } }).pywebview = { api };
-    // 自动化调试出口：当前预览页确已安装 mock 后端（同页可读调用轨迹与写入参数）。
-    (window as unknown as { __hifiMockInstalled?: boolean }).__hifiMockInstalled = true;
-    // 浏览器实验页的诊断出口：无 DevTools 时也能从页面状态回答
-    // “mock 是否装好、时间线请求是否真的回来”。
-    (
-        window as unknown as {
-            __hifiMockDebugState?: { syllableSpans: Map<string, unknown> };
-        }
-    ).__hifiMockDebugState = { syllableSpans: mockSyllableSpans };
-    (
-        window as unknown as {
-            __hifiMockDebug?: {
-                writes: Map<string, Map<number, number>>;
-                calls: string[];
-            };
-        }
-    ).__hifiMockDebug = { writes: mockParamWrites, calls };
 }

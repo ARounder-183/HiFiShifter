@@ -112,8 +112,6 @@ pub(crate) fn derive_split_media(
         if clip.takes.is_empty() {
             let mut take = hifishifter_kernel::state::ClipTake::from_clip(clip);
             apply_take_media(&mut take, &media);
-            // 分割派生不改变分析所依据的源内容；借媒体的同时保留父段的音节缓存。
-            take.syllable_analysis = media.syllable_analysis.clone();
             clip.takes.push(take);
             clip.active_take_id = clip.takes.first().map(|take| take.id.clone());
         } else {
@@ -220,7 +218,6 @@ fn sync_host_takes(
                 "channel_decision": old.and_then(|take| take.channel_decision),
                 "midi_note_data": old.and_then(|take| take.midi_note_data.clone()),
                 "midi_fill_gaps": old.is_some_and(|take| take.midi_fill_gaps),
-                "syllable_analysis": old.and_then(|take| take.syllable_analysis.clone()),
                 "stretch_markers": old.map(|take| take.stretch_markers.clone()).unwrap_or_default(),
                 "envelopes": old.and_then(|take| take.envelopes.clone()),
             })

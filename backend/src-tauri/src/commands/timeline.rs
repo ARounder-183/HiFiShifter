@@ -1873,7 +1873,6 @@ pub(super) fn add_clip_take_from_media(
         channel_decision: None,
         midi_note_data: None,
         midi_fill_gaps: false,
-        syllable_analysis: None,
         stretch_markers: Vec::new(),
         envelopes: None,
     };
@@ -1950,7 +1949,6 @@ pub(super) fn import_media_files_as_takes(
             channel_decision: None,
             midi_note_data: None,
             midi_fill_gaps: false,
-            syllable_analysis: None,
             stretch_markers: Vec::new(),
             envelopes: None,
         };

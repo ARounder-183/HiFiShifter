@@ -1,13 +1,6 @@
-import { test, vi } from "vitest";
+import { test } from "vitest";
 
 import { dockDragHint, dockModifierHint, dockModifierLabel } from "./dockTooltips.ts";
-
-/*
- * 本文件钉的是“primary 修饰键可读文本必须被解析出来”这一契约；当断言写死
- * Ctrl 时，不能同时依赖宿主平台（macOS 的 primary 是 ⌘）。显式模拟非 Mac，
- * 跨平台保持同一套断言。
- */
-vi.mock("../../utils/platform", () => ({ IS_MAC: false, IS_LINUX: true }));
 
 function assertEqual<T>(actual: T, expected: T, label: string): void {
     const a = JSON.stringify(actual);

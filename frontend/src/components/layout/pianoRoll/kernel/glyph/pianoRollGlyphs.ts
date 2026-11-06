@@ -276,9 +276,6 @@ export function createPianoRollGlyphs(options: {
             const quads: GlyphQuad[] = [];
             for (const request of requests) {
                 if (request.text.length === 0) continue;
-                // 空字体是坏输入：`measure` 已拒绝，但这里再挡一次，避免其
-                // 进入 layout 缓存后让后续所有文字共享同一测量结果。
-                if (request.fontKey.trim() === "") continue;
                 const fontSize = fontSizeOf(request.fontKey);
                 const run: GlyphRun = layout.layout(request.text, request.fontKey, Infinity);
                 if (run.glyphs.length === 0) continue;

@@ -31,8 +31,6 @@
  * 2. **速率先于增益**：两个标签相邻且速率在增益左侧，先判增益会把速率的左半边吞掉。
  */
 
-import { resolveClipHeaderLayout } from "./clipHeaderLayout";
-
 /** header 内的可交互控件；`null` = 未命中任何控件。 */
 export type ClipHeaderControl =
     "mute" | "formant" | "chain" | "gain-knob" | "gain-label" | "rate-label" | "name" | null;
@@ -88,8 +86,6 @@ export interface ClipHeaderControlArgs {
     readonly style: ClipHeaderControlStyle;
     /** header 高度（CSS px）：超出则不命中任何控件。缺省 16。 */
     readonly headerHeightPx?: number;
-    /** 右侧被后序同轨 Clip 覆盖的宽度；前序 Clip 的尾部标签在此收边。 */
-    readonly trailingHeaderOverlapPx?: number;
 }
 
 /** 徽标命中容差（CSS px）：比视觉边界各外扩一点，短按更容易点中。 */
@@ -103,6 +99,15 @@ const LABEL_HIT_HALF_HEIGHT_PX = 7;
 
 /** 标签基线中心的 y 偏移（与绘制端 `clipTop + 9` 同源）。 */
 const LABEL_BASELINE_OFFSET_Y = 9;
+
+/** 标签与 clip 右缘的间距（与绘制端 `clipWidth - width - 6` 同源）。 */
+const GAIN_LABEL_RIGHT_INSET_PX = 6;
+
+/** 速率标签与增益标签的间距（与绘制端 `gainX - width - 8` 同源）。 */
+const RATE_LABEL_GAP_PX = 8;
+
+/** 名称区的最小可用宽度（与绘制端「> 12px 才画」同源）。 */
+const NAME_MIN_WIDTH_PX = 12;
 
 /**
  * 判定点是否落在矩形内（含外扩容差）。
@@ -142,25 +147,11 @@ export function hitClipHeaderControl(args: ClipHeaderControlArgs): ClipHeaderCon
     const x = args.localX;
     const y = args.localY;
     const clipWidthPx = Math.max(1, args.clipWidthPx);
-    const headerLayout = resolveClipHeaderLayout({
-        clipWidthPx,
-        trailingOverlapPx: Number.isFinite(args.trailingHeaderOverlapPx)
-            ? Math.max(0, args.trailingHeaderOverlapPx as number)
-            : 0,
-        leadingControlsWidth: style.leadingControlsWidth,
-        showGainLabel: style.showGainLabel,
-        showPlaybackRate: style.showPlaybackRate,
-        gainLabelWidth: style.gainLabelWidth,
-        rateLabelWidth: style.rateLabelWidth,
-    });
-    const isVisible = (leftPx: number, widthPx = 0): boolean =>
-        leftPx >= 0 && widthPx > 0 && leftPx + widthPx <= headerLayout.visibleRightPx + 1e-6;
 
     // ── 左侧徽标（矩形，顺序：静音 → 共振峰 → 链）──
     // 三者互不重叠，顺序只影响「边界被容差覆盖」时的归属；取视觉上更常用的在前。
     if (
         style.showMuteBadge &&
-        isVisible(style.muteBadgeOffsetX, style.muteBadgeWidth) &&
         inRect(
             x,
             y,
@@ -175,7 +166,6 @@ export function hitClipHeaderControl(args: ClipHeaderControlArgs): ClipHeaderCon
     }
     if (
         style.showFormantBadge &&
-        isVisible(style.formantBadgeOffsetX, style.formantBadgeWidth) &&
         inRect(
             x,
             y,
@@ -190,7 +180,6 @@ export function hitClipHeaderControl(args: ClipHeaderControlArgs): ClipHeaderCon
     }
     if (
         style.showChainBadge &&
-        isVisible(style.chainBadgeOffsetX, style.chainBadgeWidth) &&
         inRect(
             x,
             y,
@@ -205,7 +194,7 @@ export function hitClipHeaderControl(args: ClipHeaderControlArgs): ClipHeaderCon
     }
 
     // ── 增益旋钮（圆形）──
-    if (style.showGainKnob && isVisible(style.gainKnobCenterOffsetX, style.gainKnobRadius)) {
+    if (style.showGainKnob) {
         const dx = x - style.gainKnobCenterOffsetX;
         const dy = y - style.gainKnobCenterOffsetY;
         const radius = Math.max(0, style.gainKnobRadius) + KNOB_SLOP_PX;
@@ -214,13 +203,12 @@ export function hitClipHeaderControl(args: ClipHeaderControlArgs): ClipHeaderCon
 
     // ── 右侧标签（右对齐，基线中心 y = 9）──
     if (style.showGainLabel) {
-        const gainRight = headerLayout.gainLabelRightPx;
-        const gainLeft = headerLayout.gainLabelLeftPx;
+        const gainRight = clipWidthPx - GAIN_LABEL_RIGHT_INSET_PX;
+        const gainLeft = gainRight - Math.max(0, style.gainLabelWidth);
         if (style.showPlaybackRate) {
-            const rateRight = headerLayout.rateLabelRightPx;
-            const rateLeft = headerLayout.rateLabelLeftPx;
+            const rateRight = gainLeft - RATE_LABEL_GAP_PX;
+            const rateLeft = rateRight - Math.max(0, style.rateLabelWidth);
             if (
-                headerLayout.rateLabelVisible &&
                 x >= rateLeft - BADGE_SLOP_PX &&
                 x <= rateRight + BADGE_SLOP_PX &&
                 Math.abs(y - LABEL_BASELINE_OFFSET_Y) <= LABEL_HIT_HALF_HEIGHT_PX
@@ -229,7 +217,6 @@ export function hitClipHeaderControl(args: ClipHeaderControlArgs): ClipHeaderCon
             }
         }
         if (
-            headerLayout.gainLabelVisible &&
             x >= gainLeft - BADGE_SLOP_PX &&
             x <= gainRight + BADGE_SLOP_PX &&
             Math.abs(y - LABEL_BASELINE_OFFSET_Y) <= LABEL_HIT_HALF_HEIGHT_PX
@@ -240,8 +227,11 @@ export function hitClipHeaderControl(args: ClipHeaderControlArgs): ClipHeaderCon
 
     // ── 名称区（左侧控件与右侧标签之间）──
     if (!style.showName) return null;
-    if (!headerLayout.nameVisible) return null;
-    if (x >= headerLayout.nameLeftPx && x <= headerLayout.nameRightPx) return "name";
+    const nameLeft = style.leadingControlsWidth;
+    const nameRight = clipWidthPx - style.trailingReservePx + 4;
+    // 可用宽度过窄时视为无名称区（绘制端同样要求 > 12px 才画名称）。
+    if (nameRight - nameLeft <= NAME_MIN_WIDTH_PX) return null;
+    if (x >= nameLeft && x <= nameRight) return "name";
 
     return null;
 }

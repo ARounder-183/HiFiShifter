@@ -470,8 +470,7 @@ fn paste_vsp_project(state: &AppState, path: &std::path::Path) -> serde_json::Va
                 .map(|t| crate::state::SynthPipelineKind::from_track_algo(&t.pitch_analysis_algo))
                 .unwrap_or(crate::state::SynthPipelineKind::NsfHifiganOnnx);
             if let Some(existing) = tl.params_by_root_track.get_mut(track_id) {
-                // 轨道已有用户音高 → 保留用户帧，只接纳新数据落在“尚无编辑”的帧。
-                // 直接按帧覆写会把用户在相同时间范围内调好的音高替换成导入值。
+                // 轨道已有 pitch 数据 → 合并非零区域
                 if new_params.pitch_edit_user_modified {
                     let len = existing.pitch_edit.len().max(new_params.pitch_edit.len());
                     if existing.pitch_edit.len() < len {
@@ -479,11 +478,7 @@ fn paste_vsp_project(state: &AppState, path: &std::path::Path) -> serde_json::Va
                         existing.pitch_orig.resize(len, 0.0);
                     }
                     for (i, &v) in new_params.pitch_edit.iter().enumerate() {
-                        if v <= 0.0 || i >= existing.pitch_edit.len() {
-                            continue;
-                        }
-                        let existing_value = existing.pitch_edit[i];
-                        if !(existing_value.is_finite() && existing_value.abs() > 1e-6) {
+                        if v > 0.0 && i < existing.pitch_edit.len() {
                             existing.pitch_edit[i] = v;
                         }
                     }

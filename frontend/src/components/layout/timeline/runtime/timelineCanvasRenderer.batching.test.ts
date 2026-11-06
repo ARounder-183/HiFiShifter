@@ -70,7 +70,6 @@ class RecordingContext {
     /** 每次 fill/stroke 的调用序号，用于判断批次边界。 */
     opSequence: string[] = [];
     linePoints: Array<[number, number]> = [];
-    fillTexts: Array<{ text: string; x: number; y: number }> = [];
 
     private pendingRects: RecordedRect[] = [];
     private pendingRect: RecordedRect | null = null;
@@ -141,9 +140,7 @@ class RecordingContext {
     measureText(text: string): { width: number } {
         return { width: text.length * 6 };
     }
-    fillText(text: string, x: number, y: number): void {
-        this.fillTexts.push({ text, x, y });
-    }
+    fillText(): void {}
 }
 
 /** 构造一个 clip 模型。 */
@@ -347,84 +344,6 @@ describe("drawTimelineCanvas 合批", () => {
         );
         // 中间插入一个重叠 clip ⇒ 批次被切成两段，填充调用数应显著增加。
         expect(withOverlap).toBeGreaterThan(plain);
-    });
-
-    it("后一个 Clip 的 header 不因前导重叠被压暗", async () => {
-        const { drawTimelineCanvas } = await load();
-        drawTimelineCanvas(ctx as unknown as CanvasRenderingContext2D, {
-            width: 600,
-            height: 90,
-            clips: [
-                clip({
-                    id: "later",
-                    leftPx: 100,
-                    widthPx: 300,
-                    leadingOverlapPx: 80,
-                }),
-            ],
-            fontFamily: "sans-serif",
-            darkMode: true,
-        });
-        const headerFills = ctx.fillCalls.flatMap((call) =>
-            call.rects
-                .filter((rect) => Math.abs(rect.h - 18) < 1e-6 && rect.y === 0)
-                .map((rect) => ({ w: rect.w, alpha: call.alpha })),
-        );
-        expect(headerFills).toContainEqual(expect.objectContaining({ w: 300, alpha: 1 }));
-        expect(headerFills.some((fill) => fill.alpha < 1)).toBe(false);
-    });
-
-    it("前一个 Clip 的 header 背景只画到尾部重叠起点", async () => {
-        const { drawTimelineCanvas } = await load();
-        drawTimelineCanvas(ctx as unknown as CanvasRenderingContext2D, {
-            width: 600,
-            height: 90,
-            clips: [
-                clip({
-                    id: "earlier",
-                    leftPx: 0,
-                    widthPx: 300,
-                    trailingHeaderOverlapPx: 100,
-                }),
-            ],
-            fontFamily: "sans-serif",
-            darkMode: true,
-        });
-        const headerFills = ctx.fillCalls.flatMap((call) =>
-            call.rects
-                .filter((rect) => Math.abs(rect.h - 18) < 1e-6 && rect.y === 0)
-                .map((rect) => rect.w),
-        );
-        expect(headerFills).toContain(200);
-        expect(headerFills).not.toContain(300);
-    });
-
-    it("前一个 Clip 的名称与右侧标签在尾部重叠边界前收边", async () => {
-        const { drawTimelineCanvas } = await load();
-        drawTimelineCanvas(ctx as unknown as CanvasRenderingContext2D, {
-            width: 600,
-            height: 90,
-            clips: [
-                clip({
-                    id: "earlier",
-                    leftPx: 0,
-                    widthPx: 300,
-                    name: "CONTROL ROOM",
-                    gain: 2,
-                    playbackRate: 2,
-                    trailingHeaderOverlapPx: 100,
-                }),
-            ],
-            fontFamily: "sans-serif",
-            darkMode: true,
-        });
-        const tailTexts = ctx.fillTexts.filter(
-            (item) => item.y === 9 && (item.text.includes("dB") || item.text.startsWith("x")),
-        );
-        expect(tailTexts.length).toBeGreaterThan(0);
-        for (const item of tailTexts) {
-            expect(item.x).toBeLessThanOrEqual(194);
-        }
     });
 
     it("编组激活会切断批次（外圈描边会伸出自身矩形）", async () => {

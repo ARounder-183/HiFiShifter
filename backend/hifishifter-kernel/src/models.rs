@@ -85,16 +85,10 @@ pub struct TimelineClipTake {
     pub midi_note_data: Option<Vec<MidiNoteEvent>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub midi_fill_gaps: Option<bool>,
-    /// 源域音节区间；前端据此派生参数块，不重复做时间映射。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub syllable_spans_sec: Option<Vec<[f64; 2]>>,
 }
 
 impl TimelineClipTake {
-    /// 转换 Take 投影；`include_midi` 只控制 MIDI 音符是否随载荷下发。
-    ///
-    /// 参数块的音节区间不是 MIDI 内容，lite 轮询也必须携带；否则前端每次
-    /// 常规刷新都会看到“尚未分析”，再触发一次慢车道分析。
+    /// 完整转换（含 MIDI 音符数据）—— 用于全量 payload。
     pub fn from_take(take: &crate::state::ClipTake, include_midi: bool) -> Self {
         Self {
             id: take.id.clone(),
@@ -122,15 +116,6 @@ impl TimelineClipTake {
             } else {
                 None
             },
-            // 音节区间是参数块的前端输入，不是 MIDI 内容。它必须在 lite
-            // 轮询里照常下发，否则插件/App 的常规刷新会把刚写回的缓存
-            // 当成“尚未分析”，触发无限重分析（编辑器表现为卡死）。
-            syllable_spans_sec: take.syllable_analysis.as_ref().map(|a| {
-                a.source_spans_sec
-                    .iter()
-                    .map(|span| [span.start_sec, span.end_sec])
-                    .collect()
-            }),
         }
     }
 }

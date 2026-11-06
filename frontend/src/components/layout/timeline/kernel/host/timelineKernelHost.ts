@@ -82,7 +82,6 @@ import { noteFadeLinePointerDown } from "../../hooks/fadeLineClickGesture";
 import { effectiveFadeSec, hitClipFadeTarget } from "../interaction/fadeTargets";
 import type { FadeContextSide } from "../../FadeContextMenu";
 import { hitOverlapControl } from "../interaction/overlapControls";
-import { resolveClipHeaderLayout } from "../interaction/clipHeaderLayout";
 import { hitInactiveTakeLane } from "../../takeLanes";
 import { isPluginMode } from "../../../../../services/hostCapabilities";
 import { resolveHorizontalWheelZoom } from "../../runtime/timelineScrollRange";
@@ -4062,41 +4061,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         });
     }
 
-    /**
-     * header 尾部被后序同轨 Clip 覆盖的像素宽度。
-     *
-     * 与模型侧 `trailingHeaderOverlapPx` 同一口径：取所有后序块中
-     * `startSec` 的最小值，再钳到本 Clip 的宽度。命中端用它把前一个 Clip
-     * 的尾部标签与名称收在重叠起点之前。
-     */
-    function trailingHeaderOverlapPxOf(hit: {
-        readonly clip: HitTestClip;
-        readonly trackIndex: number;
-    }): number {
-        const view = scroll.get();
-        const track = hitTracks[hit.trackIndex];
-        if (track === undefined) return 0;
-        const list = hitClipsByTrack.get(track.id) ?? [];
-        const clipWidthPx = Math.max(1, hit.clip.lengthSec * view.pxPerSec);
-        const clipEndSec = hit.clip.startSec + hit.clip.lengthSec;
-        let coveredFromSec = Number.POSITIVE_INFINITY;
-        for (const other of list) {
-            if (other.id === hit.clip.id) continue;
-            const startsAfter =
-                other.startSec > hit.clip.startSec + 1e-9 ||
-                (Math.abs(other.startSec - hit.clip.startSec) <= 1e-9 &&
-                    String(other.id) > String(hit.clip.id));
-            if (!startsAfter || other.startSec >= clipEndSec - 1e-9) continue;
-            coveredFromSec = Math.min(coveredFromSec, other.startSec);
-        }
-        if (!Number.isFinite(coveredFromSec)) return 0;
-        return Math.max(0, Math.min(clipWidthPx, (clipEndSec - coveredFromSec) * view.pxPerSec));
-    }
-
     function resolveHeaderControl(hit: {
         readonly clip: HitTestClip;
         readonly region: ClipHitRegion;
-        readonly trackIndex: number;
         readonly localX: number;
         readonly localY: number;
     }): ClipHeaderControl {
@@ -4110,7 +4077,6 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             clipWidthPx,
             style,
             headerHeightPx: CLIP_HEADER_HEIGHT,
-            trailingHeaderOverlapPx: trailingHeaderOverlapPxOf(hit),
         });
     }
 
@@ -6343,32 +6309,9 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             const clipLeftPx = clip.startSec * view.pxPerSec;
             const rowTopPx = rowIndex * view.rowHeight;
             if (field === "name") {
-                const hitClip: HitTestClip = {
-                    id: clip.id,
-                    trackId: clip.trackId,
-                    startSec: clip.startSec,
-                    lengthSec: clip.lengthSec,
-                    muted: clip.muted,
-                    gain: clipItemGain(clip),
-                    playbackRate: clip.playbackRate,
-                    name: clip.name,
-                    groupId: clip.groupId,
-                    isMidiClip: clip.midiNoteCount != null,
-                };
-                const headerLayout = resolveClipHeaderLayout({
-                    clipWidthPx,
-                    trailingOverlapPx: trailingHeaderOverlapPxOf({
-                        clip: hitClip,
-                        trackIndex: rowIndex,
-                    }),
-                    leadingControlsWidth: style.leadingControlsWidth,
-                    showGainLabel: style.showGainLabel,
-                    showPlaybackRate: style.showPlaybackRate,
-                    gainLabelWidth: style.gainLabelWidth,
-                    rateLabelWidth: style.rateLabelWidth,
-                });
-                const left = clipLeftPx + headerLayout.nameLeftPx;
-                const available = headerLayout.nameWidthPx;
+                const left = clipLeftPx + style.leadingControlsWidth;
+                const available =
+                    clipWidthPx - style.leadingControlsWidth - style.trailingReservePx;
                 return {
                     contentLeftPx: left,
                     contentTopPx: rowTopPx,
@@ -6376,48 +6319,15 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 };
             }
             if (field === "gain") {
-                const headerLayout = resolveClipHeaderLayout({
-                    clipWidthPx,
-                    trailingOverlapPx: trailingHeaderOverlapPxOf({
-                        clip: {
-                            id: clip.id,
-                            trackId: clip.trackId,
-                            startSec: clip.startSec,
-                            lengthSec: clip.lengthSec,
-                        },
-                        trackIndex: rowIndex,
-                    }),
-                    leadingControlsWidth: style.leadingControlsWidth,
-                    showGainLabel: style.showGainLabel,
-                    showPlaybackRate: style.showPlaybackRate,
-                    gainLabelWidth: style.gainLabelWidth,
-                    rateLabelWidth: style.rateLabelWidth,
-                });
                 return {
-                    contentLeftPx: clipLeftPx + headerLayout.gainLabelLeftPx,
+                    contentLeftPx: clipLeftPx + clipWidthPx - style.gainLabelWidth - 6,
                     contentTopPx: rowTopPx,
                     widthPx: 72,
                 };
             }
-            const headerLayout = resolveClipHeaderLayout({
-                clipWidthPx,
-                trailingOverlapPx: trailingHeaderOverlapPxOf({
-                    clip: {
-                        id: clip.id,
-                        trackId: clip.trackId,
-                        startSec: clip.startSec,
-                        lengthSec: clip.lengthSec,
-                    },
-                    trackIndex: rowIndex,
-                }),
-                leadingControlsWidth: style.leadingControlsWidth,
-                showGainLabel: style.showGainLabel,
-                showPlaybackRate: style.showPlaybackRate,
-                gainLabelWidth: style.gainLabelWidth,
-                rateLabelWidth: style.rateLabelWidth,
-            });
             return {
-                contentLeftPx: clipLeftPx + headerLayout.rateLabelLeftPx,
+                contentLeftPx:
+                    clipLeftPx + clipWidthPx - style.gainLabelWidth - style.rateLabelWidth - 14,
                 contentTopPx: rowTopPx,
                 widthPx: 72,
             };

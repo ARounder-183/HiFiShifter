@@ -55,10 +55,6 @@ export interface ClipInstanceClip {
     readonly groupId?: string;
     readonly trackColor?: string;
     readonly leadingOverlapPx?: number;
-    /** header 被任何前序同轨 Clip 遮挡的宽度（clip 内相对坐标）。 */
-    readonly coveredUntilPx?: number;
-    /** header 尾部被后序同轨 Clip 覆盖的宽度（绘制的标签收边用）。 */
-    readonly trailingHeaderOverlapPx?: number;
     readonly isMidiClip?: boolean;
 }
 
@@ -222,15 +218,7 @@ export function createClipInstanceBuilder(): ClipInstanceBuilder {
                 buildClipBodyInstance(
                     buffer,
                     index,
-                    {
-                        ...clip,
-                        // 块面按“被前序块遮挡”的并集处理，而不只按紧邻前序的等权
-                        // 混合段。否则更早的长 Clip 仍会把后一个 Clip 的 header 画满。
-                        leadingOverlapPx: Math.max(
-                            clip.leadingOverlapPx ?? 0,
-                            clip.coveredUntilPx ?? 0,
-                        ),
-                    },
+                    clip,
                     style,
                     seamClipIds.has(clip.id) ? args.seamColor : null,
                 );

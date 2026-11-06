@@ -122,28 +122,6 @@ export function drawPianoRollFrame(deps: DrawFrameDeps): void {
     // 【必须是唯一来源】曲线已归 GL（Canvas2D 侧 `skipCurves` 恒为 true），
     // 置 null 等于曲线无人绘制。
     kernelDataRef.current.curves = buildCurveLayers(drawAxis);
-    /*
-     * 参数块与曲线同源采样。
-     *
-     * 拖动块时写入的是 live override 的**原地数组**，React 不会提交；
-     * 每帧在这里重新指向它，块的高度与落点才会与曲线同一帧变化。
-     */
-    const liveForBlocks = liveEditOverrideRef.current;
-    const liveForBlocksApplies = liveForBlocks !== null && liveForBlocks.key === paramView?.key;
-    kernelDataRef.current.paramBlockSamples =
-        paramView === null
-            ? null
-            : {
-                  values:
-                      liveForBlocksApplies && liveForBlocks !== null
-                          ? liveForBlocks.edit
-                          : paramView.edit,
-                  startFrame: paramView.startFrame,
-                  stride: paramView.stride,
-                  framePeriodMs: paramView.framePeriodMs,
-                  isPitch: editParam === "pitch",
-                  param: editParam,
-              };
 
     // 叠加层镜像（播放头）必须**每帧**更新：播放头用的是插值的
     // 视觉值 `visualPlayheadSecRef`，它不由 React 渲染驱动（见下方注释），
