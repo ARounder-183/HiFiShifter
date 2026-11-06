@@ -370,17 +370,15 @@ export function handleCanvasPointerDown(
                     gridStep: 1,
                 });
                 if (consumed) {
+                    /*
+                     * 左键不要 preventDefault：Pointer Events 规范下这会抑制
+                     * 兼容 mouse 事件，双击（dblclick）就永远不会派发。
+                     * 指针捕获也由具体手势安装；单击本身不捕获，否则 pointerup
+                     * 会被重定向，浏览器无法把两次点击合成为 dblclick。
+                     */
                     if (e.button === 2) {
                         e.preventDefault();
                         e.stopPropagation();
-                    }
-                    // 命中块：块层自己接管指针；命中回调已经用同一次按下的几何
-                    // 开始拖动，不依赖 React 尚未提交的选中状态。先捕获，避免
-                    // 指针移出画布后丢失 move。
-                    try {
-                        e.currentTarget.setPointerCapture(e.pointerId);
-                    } catch {
-                        // 浏览器已释放该指针（极端取消场景）；手势仍可继续。
                     }
                     return;
                 }

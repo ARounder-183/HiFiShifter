@@ -62,7 +62,12 @@ import {
 import { buildPolylineVertices } from "../../../renderKernel/gl/polylineGeometry";
 import { buildSelectionBandInstances } from "../scene/selectionBandInstances";
 import { buildParamBlockScene } from "../scene/blockInstances";
-import { blockRowHeightPx, modeCenterOfValuesInSamples } from "../../paramBlocks";
+import {
+    blockRowHeightPx,
+    modeCenterOfValuesInSamples,
+    projectParamBlockCenterY,
+    PARAM_BLOCK_ROW_HEIGHT_MULTIPLIER,
+} from "../../paramBlocks";
 import { decimatePolylinePoints } from "../../../renderKernel/gl/polylineDecimation";
 import {
     projectClipboardPreviewPoints,
@@ -1196,7 +1201,6 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         const target = glHandle.resize(viewportWidthPx, viewportHeightPx, readDevicePixelRatio());
         if (spec === null || spec === undefined) return;
         if (spec.blocks.length === 0) return;
-        const domain = data().valueDomain;
         const liveView = data().valueViewport ?? null;
         const param = spec.param;
         const samples = data().paramBlockSamples ?? null;
@@ -1223,13 +1227,18 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
          */
         let liveBlocks = spec.blocks.map((block) => {
             const liveValue =
-                samples === null
-                    ? null
-                    : modeCenterOfValuesInSamples(block.startSec, block.endSec, samples);
+                block.displayCenterValue !== null &&
+                block.displayCenterValue !== undefined &&
+                Number.isFinite(block.displayCenterValue)
+                    ? block.displayCenterValue
+                    : samples === null
+                      ? null
+                      : modeCenterOfValuesInSamples(block.startSec, block.endSec, samples);
             const value = liveValue ?? block.averageValue ?? null;
+            const displayValue = value;
             if (
-                value == null ||
-                !Number.isFinite(value) ||
+                displayValue == null ||
+                !Number.isFinite(displayValue) ||
                 liveView == null ||
                 !Number.isFinite(liveView.center) ||
                 !Number.isFinite(liveView.span) ||
@@ -1237,23 +1246,21 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             ) {
                 return block;
             }
-            const span = Math.max(1e-9, liveView.span);
-            const min = Math.max(
-                domain.min,
-                Math.min(domain.max - span, liveView.center - span / 2),
-            );
             /*
-             * 与曲线的唯一投影口径一致：pitch 的 MIDI 值画在 N 键中心，
-             * 因此加 0.5 半音再投影。若块不加，块中心会比曲线低半格。
-             *
-             * 采样源可能来自曲线数组（live）或纯几何测试的 `averageValue`；
-             * 前者与曲线投影同口径，后者也只用于几何断言。拖动结束后的
-             * `paramView` 同样表示“曲线值”，因此统一加 0.5。
+             * 块中心的唯一投影口径：交给共用函数处理 pitch 的 +0.5，
+             * 再走与曲线同一个 valueToY。这里不能自己展开 normalized：
+             * 那样既会漏半键补偿，也会在非整数行高时和曲线错位。
              */
-            const normalized =
-                param === "pitch" ? (value + 0.5 - min) / span : (value - min) / span;
+            const centerYPx = projectParamBlockCenterY({
+                param,
+                value: displayValue,
+                heightPx: viewportHeightPx,
+                valueToY: spec.valueToY ?? data().grid?.valueToY ?? (() => viewportHeightPx / 2),
+                /* 实时拖动 / 过渡预览必须连续；普通显示吸附到行心。 */
+                snapToSemitone: block.displayCenterSnapToSemitone !== false,
+            });
             /*
-             * 块高恒为当前参数一行的 1.5 倍，由**本帧**投影求值；纵向缩放
+             * 块高恒为当前参数一行的 1.2 倍，由**本帧**投影求值；纵向缩放
              * 会同时改变键高、曲线与块高。不沿用 React 快照里的 heightPx。
              */
             const heightPx = blockRowHeightPx(
@@ -1262,24 +1269,35 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                 param,
             );
             /*
+             * 时间伸缩 / 过渡预览期间，面板传入手势起点的块高快照。
+             * 它必须覆盖“按当前实时行高重算”，否则曲线预览改变代表值时
+             * 块会随视觉重心上下漂移；持久化仍只保存时间区间。
+             */
+            const displayHeightPx =
+                Number.isFinite(block.displayHeightPx) && (block.displayHeightPx as number) > 0
+                    ? (block.displayHeightPx as number)
+                    : Number.isFinite(spec.rowHeightPx) && (spec.rowHeightPx as number) > 0
+                      ? (spec.rowHeightPx as number) * PARAM_BLOCK_ROW_HEIGHT_MULTIPLIER
+                      : heightPx;
+            /*
              * 只由 live 曲线的代表值决定纵向位置；不叠加指针像素位移。
              * 拖动已把预览写进 live 曲线，再叠加会与最终值错位。
              */
-            const topPx = (1 - normalized) * viewportHeightPx - heightPx / 2;
+            const topPx = centerYPx - displayHeightPx / 2;
             hitRects.push({
                 id: block.id,
                 startSec: block.startSec,
                 endSec: block.endSec,
                 topPx,
-                heightPx,
-                averageValue: value,
-                centerYPx: topPx + heightPx / 2,
+                heightPx: displayHeightPx,
+                averageValue: displayValue,
+                centerYPx,
                 transitionHandle: block.transitionHandle ?? null,
             });
             return {
                 ...block,
-                averageValue: value,
-                heightPx,
+                averageValue: displayValue,
+                heightPx: displayHeightPx,
                 topPx,
             };
         });
@@ -1312,6 +1330,9 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             mergedFillRgba: spec.mergedFillRgba,
             topHighlightRgba: spec.topHighlightRgba,
             handleRgba: spec.selectedRgba,
+            transitionRgba: spec.transitionRgba,
+            transitionPointRgba: spec.transitionPointRgba,
+            transitionPointRadiusPx: spec.transitionPointRadiusPx,
             topHighlightPx: spec.topHighlightPx,
             cornerRadiusPx: spec.cornerRadiusPx,
         });
@@ -1319,10 +1340,7 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         glBlockTextQuads = glGlyphs !== null ? glGlyphs.build(scene.labels) : [];
         if (items.length === 0 && scene.fills.length === 0) return;
         const needed =
-            (items.length +
-                scene.fills.length +
-                scene.highlights.length +
-                scene.handles.length) *
+            (items.length + scene.fills.length + scene.highlights.length + scene.handles.length) *
             CLIP_INSTANCE_FLOATS;
         if (glBlockInstances.length < needed) glBlockInstances = new Float32Array(needed);
         // 先填充、再边框：音符块的底必须是圆角柔色，边框最后压在上面。
@@ -1345,6 +1363,35 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         }
         glBlockUploadedCount = writeIndex;
         glSelectionProgram.render(glBlockInstances, glBlockUploadedCount, target, 0, 0);
+        /*
+         * 过渡曲线与常规曲线共用 polyline program：一次上传、一次 draw call，
+         * 且与块在同一帧里投影。端点点已在上面作为圆角实例画出。
+         */
+        if (glCurveProgram !== null) {
+            const color = spec.transitionRgba;
+            if (color !== undefined) {
+                for (const points of scene.transitions) {
+                    if (points.length < 2) continue;
+                    const vertices = buildPolylineVertices({
+                        points,
+                        lineWidth: 1.5,
+                        miterLimit: 10,
+                    });
+                    if (vertices.length === 0) continue;
+                    glCurveProgram.draw({
+                        vertices,
+                        vertexCount: vertices.length / 4,
+                        target,
+                        viewOriginX: 0,
+                        viewOriginY: 0,
+                        halfWidthPx: 0.75,
+                        color,
+                        aaWidthPx: 1 / readDevicePixelRatio(),
+                        dash: null,
+                    });
+                }
+            }
+        }
         if (glGlyphProgram !== null && glGlyphs !== null && glBlockTextQuads.length > 0) {
             // 块标签可能与轴文字共用图集页；只上传本帧新增的页，避免每帧重传纹理。
             for (const page of glGlyphs.consumeDirtyPages()) {

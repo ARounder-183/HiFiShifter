@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { createTimelineAxis } from "../renderKernel/timelineAxis";
+import { buildParamBlockScene } from "./kernel/scene/blockInstances";
 
 import {
     createParamBlock,
@@ -7,9 +9,17 @@ import {
     averageParamValueInSpan,
     buildParamBlockDragSegments,
     buildParamBlockTransitionSegments,
+    buildParamBlockTransitionPreview,
+    compressedNeighborSpan,
     buildParamBlockPreviewSegments,
+    blocksCoveredByParamBlockCreate,
     deleteParamBlocks,
     hitTestParamBlocks,
+    hitTestParamBlockEdges,
+    hitTestParamBlockTransitionHandles,
+    PARAM_BLOCK_TRANSITION_HANDLE_OUTSET_Y_PX,
+    PARAM_BLOCK_TRANSITION_HANDLE_OUTSET_X_PX,
+    paramBlockCursorForHover,
     layoutParamBlockRects,
     materializeParamBlocks,
     mergeParamBlocks,
@@ -20,16 +30,27 @@ import {
     PARAM_BLOCK_ROW_HEIGHT_MULTIPLIER,
     projectMidiNoteSpansToTimeline,
     projectSourceSpansToTimeline,
+    previewParamBlockCreateLayout,
+    paramBlockResizeCandidates,
+    projectParamBlockResizeDisplay,
+    canReleaseParamBlockDragCommit,
+    resolveParamBlockCommitDisplayCenter,
     resolveParamBlockDragWrite,
     resolveParamBlockPitchSnapDelta,
+    resolveParamBlockCreateSpan,
+    resolveParamBlockResizePlan,
+    resolveParamBlockResizeTarget,
     resolveParamBlockSnapDelta,
     snapParamBlockTimeByDefault,
+    setParamBlockTransition,
     resizeParamBlock,
+    shouldRemoveResizedParamBlock,
     splitParamBlock,
     paramBlockTransitionHandles,
     unmergeParamBlocks,
     type ParamBlock,
     type ParamBlockSourceClip,
+    type ParamBlockState,
 } from "./paramBlocks";
 
 function clip(
@@ -65,7 +86,7 @@ describe("autoBlocksForClips", () => {
                 lengthSec: 2,
                 sourceStartSec: 1,
                 sourceEndSec: 2,
-        sourceSyllableSpansSec,
+                sourceSyllableSpansSec,
                 syllableSpansSec: projectSourceSpansToTimeline({
                     id: "offset",
                     trackId: "root-a",
@@ -265,10 +286,7 @@ describe("projectMidiNoteSpansToTimeline", () => {
 
 describe("mergeParamBlocks", () => {
     it("同组相邻块可合并", () => {
-        const blocks = autoBlocksForClips("root-a", [
-            clip("a", 0, 2, [0]),
-            clip("b", 2, 2, [2]),
-        ]);
+        const blocks = autoBlocksForClips("root-a", [clip("a", 0, 2, [0]), clip("b", 2, 2, [2])]);
         const result = mergeParamBlocks({
             state: EMPTY_PARAM_BLOCK_STATE,
             blocks,
@@ -281,10 +299,7 @@ describe("mergeParamBlocks", () => {
     });
 
     it("中间有真实空隙时拒绝合并", () => {
-        const blocks = autoBlocksForClips("root-a", [
-            clip("a", 0, 2, [0]),
-            clip("b", 3, 2, [3]),
-        ]);
+        const blocks = autoBlocksForClips("root-a", [clip("a", 0, 2, [0]), clip("b", 3, 2, [3])]);
         const result = mergeParamBlocks({
             state: EMPTY_PARAM_BLOCK_STATE,
             blocks,
@@ -296,9 +311,7 @@ describe("mergeParamBlocks", () => {
     it("跨根轨道组拒绝合并", () => {
         const blocks = [
             ...autoBlocksForClips("root-a", [clip("a", 0, 2, [0])]),
-            ...autoBlocksForClips("root-b", [
-                { ...clip("b", 2, 2, [2]), trackId: "root-b" },
-            ]),
+            ...autoBlocksForClips("root-b", [{ ...clip("b", 2, 2, [2]), trackId: "root-b" }]),
         ];
         expect(
             mergeParamBlocks({
@@ -524,7 +537,7 @@ describe("layoutParamBlockRects", () => {
 
     const valueToY = (value: number) => 200 - value * 2;
 
-    it("块高是 1.5 倍行高，不随均值变化", () => {
+    it("块高是 1.2 倍行高，不随均值变化", () => {
         const rects = layoutParamBlockRects({
             blocks: [block("low", 60), block("high", 72)],
             valueToY,
@@ -590,6 +603,72 @@ describe("layoutParamBlockRects", () => {
         if (!before || !after) return;
         expect(after.heightPx).toBe(before.heightPx);
         expect(after.topPx).not.toBe(before.topPx);
+    });
+
+    it("pitch 块中心与音高线共用 valueToY(midi + 0.5)", () => {
+        const pitchValueToY = (value: number) => 1400 - value * 20;
+        const rects = layoutParamBlockRects({
+            blocks: [block("p", 60), block("p2", 61)],
+            valueToY: pitchValueToY,
+            param: "pitch",
+            viewportHeightPx: 400,
+            minValue: 0,
+            maxValue: 127,
+            selectedBlockIds: new Set(),
+            rowHeightPx: 20,
+            // 纵向滚动后仍须与曲线同源，不能被另一个值域公式覆盖。
+            valueDomain: { min: 0, max: 127, center: 40, span: 60 },
+        });
+        expect(rects.find((rect) => rect.id === "p")?.centerYPx).toBeCloseTo(
+            pitchValueToY(60.5),
+            9,
+        );
+        expect(rects.find((rect) => rect.id === "p2")?.centerYPx).toBeCloseTo(
+            pitchValueToY(61.5),
+            9,
+        );
+    });
+
+    it("pitch 块显示中心吸附到最近半音行心，拖动预览可保持连续", () => {
+        const valueToY = (value: number) => 1400 - value * 20;
+        const rounded = layoutParamBlockRects({
+            blocks: [block("p", 60.4)],
+            valueToY,
+            param: "pitch",
+            viewportHeightPx: 400,
+            minValue: 0,
+            maxValue: 127,
+            selectedBlockIds: new Set(),
+            rowHeightPx: 20,
+        })[0];
+        expect(rounded?.centerYPx).toBeCloseTo(valueToY(60.5), 9);
+
+        const continuous = layoutParamBlockRects({
+            blocks: [{ ...block("p", 60.4), displayCenterSnapToSemitone: false }],
+            valueToY,
+            param: "pitch",
+            viewportHeightPx: 400,
+            minValue: 0,
+            maxValue: 127,
+            selectedBlockIds: new Set(),
+            rowHeightPx: 20,
+        })[0];
+        expect(continuous?.centerYPx).toBeCloseTo(valueToY(60.9), 9);
+    });
+
+    it("非 pitch 块不额外加半键偏移", () => {
+        const valueToY = (value: number) => 300 - value * 10;
+        const rect = layoutParamBlockRects({
+            blocks: [block("loud", 0.5)],
+            valueToY,
+            param: "loudness",
+            viewportHeightPx: 300,
+            minValue: 0,
+            maxValue: 2,
+            selectedBlockIds: new Set(),
+            rowHeightPx: 10,
+        })[0];
+        expect(rect?.centerYPx).toBeCloseTo(valueToY(0.5), 9);
     });
 
     it("缺均值 / 非有限值不产生可见块矩形", () => {
@@ -760,10 +839,9 @@ describe("param block drag", () => {
             state: created.state,
         });
         expect(materialized.some((block) => block.id === created.blockId)).toBe(true);
-        expect(materialized.find((block) => block.id === created.blockId)?.averageValue).toBeCloseTo(
-            61.5,
-            6,
-        );
+        expect(
+            materialized.find((block) => block.id === created.blockId)?.averageValue,
+        ).toBeCloseTo(61.5, 6);
     });
 
     const editableClips = (): ParamBlockSourceClip[] => [
@@ -829,9 +907,7 @@ describe("param block drag", () => {
         const leftMember = split.state.persistedEdits?.[0]?.members[0];
         const rightMember = split.state.persistedEdits?.[1]?.members[0];
         expect(leftMember?.syllableId).not.toBe(rightMember?.syllableId);
-        expect(leftMember?.sourceEndSec).toBeLessThanOrEqual(
-            rightMember?.sourceStartSec ?? 0,
-        );
+        expect(leftMember?.sourceEndSec).toBeLessThanOrEqual(rightMember?.sourceStartSec ?? 0);
         // 调试：打印持久化记录的实际形状，确认左右段是否独立。
         // 模拟工程保存 / 重新读取：只保留持久化字段，不保留任何自动块引用。
         const reloaded = materializeParamBlocks({
@@ -1158,6 +1234,11 @@ describe("param block drag", () => {
         });
         expect(stretched[0]?.startSec).toBeCloseTo(0, 9);
         expect(stretched.at(-1)?.endSec).toBeCloseTo(4, 9);
+        // 切分点也必须随 Container 等比例缩放，而不是停在 0.5。
+        expect(stretched.map((item) => [item.startSec, item.endSec])).toEqual([
+            [0, 1],
+            [1, 4],
+        ]);
     });
 
     it("吸附位移：音高半音、音阶与普通参数网格", () => {
@@ -1213,6 +1294,32 @@ describe("param block drag", () => {
             });
         expect(snapTime(0.53, false)).toBeCloseTo(0.5, 6);
         expect(snapTime(0.53, true)).toBeCloseTo(0.53, 6);
+    });
+
+    it("吸附拖动按块中心的绝对行心落点，而不是只取整位移量", () => {
+        // 起点中心不是整数时，位移 0 也应收敛到最近行心。
+        expect(
+            resolveParamBlockPitchSnapDelta({
+                startValue: 60.4,
+                rawDelta: 0,
+                snapToggleHeld: false,
+            }),
+        ).toBeCloseTo(-0.4, 6);
+        expect(
+            resolveParamBlockPitchSnapDelta({
+                startValue: 60.4,
+                rawDelta: 0.52,
+                snapToggleHeld: false,
+            }),
+        ).toBeCloseTo(0.6, 6);
+        // 取消吸附：连续跟随，不再吸到行心。
+        expect(
+            resolveParamBlockPitchSnapDelta({
+                startValue: 60.4,
+                rawDelta: 0.52,
+                snapToggleHeld: true,
+            }),
+        ).toBeCloseTo(0.52, 6);
     });
 
     it("自由拖动按原值偏移；吸附拖动按半音对齐", () => {
@@ -1380,18 +1487,819 @@ describe("param block transition", () => {
         ]);
         const transition = buildParamBlockTransitionSegments({
             boundaryFrame: 100,
-            radiusFrames: 10,
-            leftValue: 60,
-            rightValue: 62,
+            widthFrames: 10,
+            targetValue: 62,
             leftStartFrame: 0,
             rightEndFrame: 200,
+            leftValue: 60,
+            rightValue: 62,
+            // 两侧原曲线都在起伏；过渡应保留走势并按权重拉向 target。
+            sourceAt: (frame) => 60 + Math.abs(frame - 100) * 0.01,
         });
         expect(transition).toHaveLength(1);
+        // 相接点左右各 10 帧；两端都保留原曲线，中心附近被拉向目标值。
         expect(transition[0].startFrame).toBe(90);
-        expect(transition[0].values[0]).toBeCloseTo(60, 6);
-        expect(transition[0].values.at(-1)).toBeCloseTo(62, 6);
-        expect(transition[0].values[10]).toBeGreaterThan(60);
-        expect(transition[0].values[10]).toBeLessThan(62);
+        expect(transition[0].values).toHaveLength(20);
+        // 相接点本身保留两侧原值（权重 0），两侧峰值被拉向目标值。
+        expect(transition[0].values[0]).toBeCloseTo(60.1, 6);
+        // 最右端回到右块原曲线（62.1 附近），说明是扭曲而非整段覆盖。
+        expect(transition[0].values.at(-1)).toBeGreaterThan(60.1);
+        expect(transition[0].values[10]).toBeCloseTo(62, 6);
+    });
+});
+
+describe("param block pointer geometry", () => {
+    const px = (sec: number) => sec * 100;
+
+    it("边缘热区按像素命中，窄块中间仍是块体而不是缩放", () => {
+        const blocks = [{ id: "a", startSec: 1, endSec: 1.2, topPx: 100, heightPx: 24 }];
+        expect(
+            hitTestParamBlockEdges({
+                blocks,
+                clientX: 102,
+                localY: 110,
+                secToX: px,
+                hitPx: 6,
+            }),
+        ).toMatchObject({ block: { id: "a" }, edge: "left" });
+        expect(
+            hitTestParamBlockEdges({
+                blocks,
+                clientX: 113,
+                localY: 110,
+                secToX: px,
+                hitPx: 6,
+            }),
+        ).toBeNull();
+    });
+
+    it("相接边界的左右端点归属稳定，手柄命中优先于普通块体", () => {
+        const blocks = [
+            {
+                id: "a",
+                startSec: 1,
+                endSec: 2,
+                topPx: 100,
+                heightPx: 24,
+                transitionHandle: {
+                    sec: 2,
+                    leftId: "a",
+                    rightId: "b",
+                    widthSec: 0.1,
+                },
+            },
+            { id: "b", startSec: 2, endSec: 3, topPx: 130, heightPx: 24 },
+        ];
+        expect(
+            hitTestParamBlockEdges({
+                blocks,
+                clientX: 201,
+                localY: 110,
+                secToX: px,
+                hitPx: 6,
+            }),
+        ).toMatchObject({ block: { id: "a" }, edge: "right" });
+        expect(
+            hitTestParamBlockTransitionHandles({
+                blocks,
+                clientX: 200 + PARAM_BLOCK_TRANSITION_HANDLE_OUTSET_X_PX,
+                localY: 100 - PARAM_BLOCK_TRANSITION_HANDLE_OUTSET_Y_PX,
+                secToX: px,
+            }),
+        ).toMatchObject({ leftId: "a", rightId: "b", widthSec: 0.1 });
+        // 右边界本身仍属于伸缩热区；手柄在它外侧，不能互抢。
+        expect(
+            hitTestParamBlockTransitionHandles({
+                blocks,
+                clientX: 200 + PARAM_BLOCK_TRANSITION_HANDLE_OUTSET_X_PX,
+                localY: 100 + PARAM_BLOCK_TRANSITION_HANDLE_OUTSET_Y_PX,
+                secToX: px,
+            }),
+        ).toBeNull();
+        expect(paramBlockCursorForHover("transition")).toBe("ew-resize");
+        expect(paramBlockCursorForHover("right-edge")).toBe("ew-resize");
+    });
+
+    it("延展与创建在拖动中实时吸附网格，取消吸附时按指针连续落点", () => {
+        const grid = (sec: number) => Math.round(sec * 4) / 4;
+        expect(
+            resolveParamBlockResizeTarget({
+                edge: "right",
+                startSec: 1,
+                endSec: 2,
+                rawTargetSec: 2.36,
+                snapToGrid: grid,
+                minBlockSec: 0.04,
+            }),
+        ).toBe(2.25);
+        // 右边缘可以越过右邻居起点继续压缩；边界在邻居终点处才停。
+        expect(
+            resolveParamBlockResizeTarget({
+                edge: "right",
+                startSec: 1,
+                endSec: 2,
+                rawTargetSec: 2.6,
+                snapToGrid: grid,
+                minBlockSec: 0.04,
+                neighborStartSec: 2,
+                neighborEndSec: 2.5,
+            }),
+        ).toBe(2.5);
+        expect(
+            resolveParamBlockCreateSpan({
+                anchorSec: 1.1,
+                pointerSec: 1.6,
+                snapToGrid: grid,
+                snapEnabled: true,
+                minBlockSec: 0.04,
+            }),
+        ).toEqual({ startSec: 1, endSec: 1.5 });
+        expect(
+            resolveParamBlockCreateSpan({
+                anchorSec: 1.1,
+                pointerSec: 1.6,
+                snapToGrid: grid,
+                snapEnabled: false,
+                minBlockSec: 0.04,
+            }),
+        ).toEqual({ startSec: 1.1, endSec: 1.6 });
+    });
+
+    it("缩到最小宽度以内时删除，创建块压住旧块时旧块整块让位", () => {
+        expect(
+            shouldRemoveResizedParamBlock({
+                pointerSec: 1.02,
+                startSec: 1,
+                endSec: 2,
+                edge: "right",
+                minBlockSec: 0.04,
+            }),
+        ).toBe(true);
+        expect(
+            shouldRemoveResizedParamBlock({
+                pointerSec: 1.5,
+                startSec: 1,
+                endSec: 2,
+                edge: "right",
+                minBlockSec: 0.04,
+            }),
+        ).toBe(false);
+
+        const blocks = [{ id: "old", startSec: 1, endSec: 2, averageValue: 60, selected: false }];
+        expect(
+            blocksCoveredByParamBlockCreate({
+                blocks,
+                startSec: 1.2,
+                endSec: 1.6,
+            }),
+        ).toEqual(["old"]);
+        expect(
+            previewParamBlockCreateLayout({
+                blocks,
+                startSec: 1.2,
+                endSec: 1.6,
+                createId: "__create__",
+                value: 62,
+            }).map((block) => block.id),
+        ).toEqual(["__create__"]);
+    });
+
+    it("同一条相接边只保存一份过渡宽度，不串到下一个块", () => {
+        const clip = {
+            id: "a",
+            trackId: "root-a",
+            takeId: "take-a",
+            startSec: 0,
+            lengthSec: 3,
+            sourceStartSec: 0,
+            sourceEndSec: 3,
+            sourceSyllableSpansSec: [
+                [0, 1],
+                [1, 2],
+                [2, 3],
+            ],
+        } as const;
+        const blocks = autoBlocksForClips("root-a", [clip]);
+        expect(blocks).toHaveLength(3);
+        const [first, second, third] = blocks;
+        if (first === undefined || second === undefined || third === undefined) return;
+        const transition = setParamBlockTransition({
+            state: EMPTY_PARAM_BLOCK_STATE,
+            left: first,
+            right: second,
+            transitionSec: 0.25,
+        });
+        if (!transition.ok) throw new Error(transition.reason);
+        // 只写左块；右块自身记录不携带同一宽度。
+        expect(transition.state.persistedEdits).toHaveLength(1);
+        expect(transition.state.persistedEdits?.[0]?.id).toBe(first.id);
+        const materialized = materializeParamBlocks({
+            rootTrackId: "root-a",
+            clips: [clip],
+            state: transition.state,
+        });
+        const handles = paramBlockTransitionHandles(materialized);
+        expect(handles).toHaveLength(2);
+        expect(handles.map((handle) => handle.transitionSec)).toEqual([0.25, 0]);
+        expect(handles[1]?.leftId).toBe(second.id);
+        expect(handles[1]?.rightId).toBe(third.id);
+    });
+
+    it("手柄拖动预览在相接点两侧扭曲原曲线，而不是覆盖成直线", () => {
+        const preview = buildParamBlockTransitionPreview({
+            boundaryFrame: 100,
+            widthFrames: 8,
+            targetValue: 62,
+            leftStartFrame: 100,
+            rightEndFrame: 160,
+            leftValue: 60,
+            rightValue: 61,
+            paramView: {
+                startFrame: 100,
+                stride: 1,
+                // 右侧原曲线本身有起伏；预览应保留一部分而不是直接变成直线。
+                edit: [60, 61, 60, 61, 60, 61, 60, 61, 60, 61],
+            },
+        });
+        expect(preview).toHaveLength(1);
+        expect(preview[0]?.startFrame).toBe(100);
+        expect(preview[0]?.values).toHaveLength(8);
+        // 相接点本身权重最大；峰值把原曲线拉向目标值。
+        expect(preview[0]?.values[0]).toBe(62);
+        expect(preview[0]?.values[1]).toBeGreaterThan(61);
+        expect(preview[0]?.values[1]).toBeLessThan(62);
+    });
+
+    it("拉手柄只改过渡曲线，不改块高与代表值", () => {
+        const left = {
+            id: "left",
+            startSec: 0,
+            endSec: 1,
+            topPx: 100,
+            heightPx: 19.2,
+            averageValue: 60,
+            selected: true,
+            merged: false,
+        };
+        const right = {
+            id: "right",
+            startSec: 1,
+            endSec: 2,
+            topPx: 130,
+            heightPx: 19.2,
+            averageValue: 62,
+            selected: false,
+            merged: false,
+        };
+        const scene = buildParamBlockScene({
+            axis: createTimelineAxis({ pxPerSec: 100, scrollLeftPx: 0, viewportWidthPx: 400 }),
+            viewportHeightPx: 300,
+            blocks: [
+                {
+                    ...left,
+                    transitionHandle: {
+                        sec: 1,
+                        leftId: "left",
+                        rightId: "right",
+                        widthSec: 0.2,
+                    },
+                },
+                right,
+            ],
+            borderRgba: [0, 0, 0, 1],
+            selectedRgba: [0, 0, 1, 1],
+            mergedRgba: [1, 1, 1, 1],
+            fillRgba: [0.5, 0.5, 0.5, 1],
+            transitionRgba: [0, 0, 1, 1],
+        });
+        expect(scene.fills.map((fill) => fill.h)).toHaveLength(2);
+        expect(scene.fills[0]?.h).toBeCloseTo(19.2, 9);
+        expect(scene.fills[1]?.h).toBeCloseTo(19.2, 9);
+        // 过渡手柄/曲线不参与填充层，块高只由行高决定。
+        expect(scene.handles.every((handle) => handle.h !== 19.2)).toBe(true);
+    });
+
+    it("吸附后越过邻居起点时仍可继续拉，允许完整覆盖邻块", () => {
+        const span = compressedNeighborSpan({
+            edge: "right",
+            neighborStartSec: 1,
+            neighborEndSec: 1.2,
+            resizedEdgeSec: 1.3,
+            minBlockSec: 0.04,
+        });
+        expect(span).not.toBeNull();
+        expect(span?.startSec).toBeCloseTo(1.16, 6);
+        expect(span?.endSec).toBeCloseTo(1.2, 6);
+        // 目标再远也只停在“邻居终点 − 最小宽度”。
+        const plan = resolveParamBlockResizePlan({
+            edge: "right",
+            blockStartSec: 0,
+            blockEndSec: 1,
+            targetSec: 1.8,
+            neighbors: [{ id: "b", startSec: 1, endSec: 1.2 }],
+            minBlockSec: 0.04,
+        });
+        expect(plan.block).toEqual({ startSec: 0, endSec: 1.8 });
+        expect(plan.neighbors).toEqual([
+            { id: "b", startSec: 1, endSec: 1.2, remove: true },
+        ]);
+    });
+
+    it("左右扩展时，两侧邻居都在预览与提交中同步缩短", () => {
+        const right = compressedNeighborSpan({
+            edge: "right",
+            neighborStartSec: 2,
+            neighborEndSec: 3,
+            resizedEdgeSec: 2.3,
+            minBlockSec: 0.04,
+        });
+        expect(right).toMatchObject({ startSec: 2.3, endSec: 3 });
+        const left = compressedNeighborSpan({
+            edge: "left",
+            neighborStartSec: 0,
+            neighborEndSec: 1,
+            resizedEdgeSec: 0.7,
+            minBlockSec: 0.04,
+        });
+        expect(left).toMatchObject({ startSec: 0, endSec: 0.7 });
+    });
+
+    it("连续块的相等边界也能解析为邻居，左右伸缩计划严格首尾相接", () => {
+        const blocks = autoBlocksForClips("root-a", [
+            {
+                id: "a",
+                trackId: "root-a",
+                takeId: "take-a",
+                startSec: 0,
+                lengthSec: 3,
+                sourceStartSec: 0,
+                sourceEndSec: 3,
+                sourceSyllableSpansSec: [
+                    [0, 1],
+                    [1, 2],
+                    [2, 3],
+                ],
+            },
+        ]);
+        const [left, middle, right] = blocks;
+        expect(left).toBeDefined();
+        expect(middle).toBeDefined();
+        expect(right).toBeDefined();
+        if (left === undefined || middle === undefined || right === undefined) return;
+
+        expect(paramBlockResizeCandidates(blocks, left, "right").map((b) => b.id)).toEqual([
+            middle.id,
+            right.id,
+        ]);
+        expect(paramBlockResizeCandidates(blocks, middle, "left").map((b) => b.id)).toEqual([
+            left.id,
+        ]);
+        expect(paramBlockResizeCandidates(blocks, right, "left").map((b) => b.id)).toEqual([
+            middle.id,
+            left.id,
+        ]);
+
+        const extendRight = resolveParamBlockResizePlan({
+            edge: "right",
+            blockStartSec: left.startSec,
+            blockEndSec: left.endSec,
+            targetSec: 1.4,
+            neighbors: [middle, right],
+            minBlockSec: 0.04,
+        });
+        expect(extendRight.block).toEqual({ startSec: 0, endSec: 1.4 });
+        expect(extendRight.neighbors).toEqual([
+            {
+                id: middle.id,
+                startSec: 1.4,
+                endSec: 2,
+                remove: false,
+            },
+        ]);
+
+        const extendLeft = resolveParamBlockResizePlan({
+            edge: "left",
+            blockStartSec: right.startSec,
+            blockEndSec: right.endSec,
+            targetSec: 1.6,
+            neighbors: [middle, left],
+            minBlockSec: 0.04,
+        });
+        expect(extendLeft.block).toEqual({ startSec: 1.6, endSec: 3 });
+        expect(extendLeft.neighbors).toEqual([
+            {
+                id: middle.id,
+                startSec: 1,
+                endSec: 1.6,
+                remove: false,
+            },
+        ]);
+    });
+
+    it("共享计划提交后仍是两个同级块，不会在重建时被合并", () => {
+        const clips: ParamBlockSourceClip[] = [
+            {
+                id: "a",
+                trackId: "root-a",
+                takeId: "take-a",
+                startSec: 0,
+                lengthSec: 2,
+                sourceStartSec: 0,
+                sourceEndSec: 2,
+                sourceSyllableSpansSec: [
+                    [0, 1],
+                    [1, 2],
+                ],
+            },
+        ];
+        const [left, right] = autoBlocksForClips("root-a", clips);
+        expect(left).toBeDefined();
+        expect(right).toBeDefined();
+        if (left === undefined || right === undefined) return;
+        const plan = resolveParamBlockResizePlan({
+            edge: "right",
+            blockStartSec: left.startSec,
+            blockEndSec: left.endSec,
+            targetSec: 1.6,
+            neighbors: [right],
+            minBlockSec: 0.04,
+        });
+        const result = resizeParamBlock({
+            state: EMPTY_PARAM_BLOCK_STATE,
+            block: left,
+            edge: "right",
+            targetSec: plan.block.endSec,
+            targetSpan: plan.block,
+            neighborSpans: plan.neighbors,
+            neighborBlocks: [right],
+        });
+        if (!result.ok) throw new Error(result.reason);
+        const materialized = materializeParamBlocks({
+            rootTrackId: "root-a",
+            clips,
+            state: result.state,
+        });
+        expect(materialized).toHaveLength(2);
+        expect(materialized.map((block) => [block.startSec, block.endSec])).toEqual([
+            [0, 1.6],
+            [1.6, 2],
+        ]);
+        expect(materialized.every((block) => block.kind !== "merged")).toBe(true);
+    });
+
+    it("连续多次从左右伸缩都不会越过边界、消失或并成一个大块", () => {
+        const clips: ParamBlockSourceClip[] = [
+            {
+                id: "a",
+                trackId: "root-a",
+                takeId: "take-a",
+                startSec: 0,
+                lengthSec: 3,
+                sourceStartSec: 0,
+                sourceEndSec: 3,
+                sourceSyllableSpansSec: [
+                    [0, 1],
+                    [1, 2],
+                    [2, 3],
+                ],
+            },
+        ];
+        let state: ParamBlockState = { ...EMPTY_PARAM_BLOCK_STATE };
+        let view = materializeParamBlocks({ rootTrackId: "root-a", clips, state });
+        expect(view).toHaveLength(3);
+
+        // 左块右扩，压短中间块。
+        const first = view[0];
+        const middle = view[1];
+        const right = view[2];
+        if (first === undefined || middle === undefined || right === undefined) return;
+        const plan1 = resolveParamBlockResizePlan({
+            edge: "right",
+            blockStartSec: first.startSec,
+            blockEndSec: first.endSec,
+            targetSec: 1.7,
+            neighbors: [middle, right],
+            minBlockSec: 0.04,
+        });
+        const edit1 = resizeParamBlock({
+            state,
+            block: first,
+            edge: "right",
+            targetSec: plan1.block.endSec,
+            targetSpan: plan1.block,
+            neighborSpans: plan1.neighbors,
+            neighborBlocks: [middle, right],
+        });
+        if (!edit1.ok) throw new Error(edit1.reason);
+        state = edit1.state;
+        view = materializeParamBlocks({ rootTrackId: "root-a", clips, state });
+        expect(view.map((block) => [block.startSec, block.endSec])).toEqual([
+            [0, 1.7],
+            [1.7, 2],
+            [2, 3],
+        ]);
+
+        // 再从右侧块向左扩：先压短中间块，右侧块必须覆盖完整中间块。
+        const firstAfter = view[0];
+        const middleAfter = view[1];
+        const rightAfter = view[2];
+        if (firstAfter === undefined || middleAfter === undefined || rightAfter === undefined) {
+            return;
+        }
+        const plan2 = resolveParamBlockResizePlan({
+            edge: "left",
+            blockStartSec: rightAfter.startSec,
+            blockEndSec: rightAfter.endSec,
+            targetSec: 1.0,
+            neighbors: [middleAfter, firstAfter],
+            minBlockSec: 0.04,
+        });
+        const edit2 = resizeParamBlock({
+            state,
+            block: rightAfter,
+            edge: "left",
+            targetSec: plan2.block.startSec,
+            targetSpan: plan2.block,
+            neighborSpans: plan2.neighbors,
+            neighborBlocks: [middleAfter, firstAfter],
+        });
+        if (!edit2.ok) throw new Error(edit2.reason);
+        state = edit2.state;
+        view = materializeParamBlocks({ rootTrackId: "root-a", clips, state });
+        // 右侧块左扩到 1.0 时完整覆盖中间块，并压缩左块到 1.0；
+        // 结果应只剩两个独立块，不能再出现中间残段或合并块。
+        expect(view).toHaveLength(2);
+        expect(view.map((block) => [block.startSec, block.endSec])).toEqual([
+            [0, 1],
+            [1, 3],
+        ]);
+        expect(view.every((block) => block.kind !== "merged")).toBe(true);
+        expect(view.every((block) => block.endSec - block.startSec >= 0.04 - 1e-9)).toBe(true);
+        // 所有端点都落在连续边界上，没有重叠。
+        for (let index = 1; index < view.length; index += 1) {
+            expect(view[index]?.startSec).toBeCloseTo(view[index - 1]?.endSec ?? NaN, 9);
+        }
+    });
+
+    it("向右扩可以跨过真实空隙，并一次缩短 / 吞并多个右侧块", () => {
+        const clips: ParamBlockSourceClip[] = [
+            {
+                id: "a",
+                trackId: "root-a",
+                takeId: "take-a",
+                startSec: 0,
+                lengthSec: 6,
+                sourceStartSec: 0,
+                sourceEndSec: 6,
+                sourceSyllableSpansSec: [
+                    [0, 1],
+                    [1, 2],
+                    [3, 4],
+                    [5, 6],
+                ],
+            },
+        ];
+        let state: ParamBlockState = { ...EMPTY_PARAM_BLOCK_STATE };
+        const initial = materializeParamBlocks({ rootTrackId: "root-a", clips, state });
+        const [first, second, third] = initial;
+        if (first === undefined || second === undefined || third === undefined) return;
+
+        const extend = resolveParamBlockResizePlan({
+            edge: "right",
+            blockStartSec: first.startSec,
+            blockEndSec: first.endSec,
+            targetSec: 3.6,
+            neighbors: paramBlockResizeCandidates(initial, first, "right"),
+            minBlockSec: 0.04,
+        });
+        expect(extend.neighbors).toEqual([
+            {
+                id: second.id,
+                startSec: 1,
+                endSec: 2,
+                remove: true,
+            },
+            {
+                id: third.id,
+                startSec: 3.6,
+                endSec: 4,
+                remove: false,
+            },
+        ]);
+        const edit = resizeParamBlock({
+            state,
+            block: first,
+            edge: "right",
+            targetSec: extend.block.endSec,
+            targetSpan: extend.block,
+            neighborSpans: extend.neighbors,
+            neighborBlocks: initial,
+        });
+        if (!edit.ok) throw new Error(edit.reason);
+        state = edit.state;
+        const result = materializeParamBlocks({ rootTrackId: "root-a", clips, state });
+        expect(result.map((block) => [block.startSec, block.endSec])).toEqual([
+            [0, 3.6],
+            [3.6, 4],
+            [5, 6],
+        ]);
+        // 完整覆盖的中间块不能从自动块池复活。
+        expect(result.some((block) => block.id === second.id)).toBe(false);
+    });
+
+    it("预览删除后拉回：当前块和已吞并邻居都能从手势起点恢复", () => {
+        const base = [
+            { id: "self", startSec: 0, endSec: 1 },
+            { id: "a", startSec: 1, endSec: 2 },
+            { id: "b", startSec: 2, endSec: 3 },
+        ];
+        const removeSelf = projectParamBlockResizeDisplay({
+            baseBlocks: base,
+            blockId: "self",
+            plan: resolveParamBlockResizePlan({
+                edge: "right",
+                blockStartSec: 0,
+                blockEndSec: 1,
+                targetSec: 0,
+                neighbors: base.slice(1),
+                minBlockSec: 0.04,
+            }),
+        });
+        expect(removeSelf.map((block) => block.id)).toEqual(["a", "b"]);
+
+        const removeNeighbors = projectParamBlockResizeDisplay({
+            baseBlocks: base,
+            blockId: "self",
+            plan: resolveParamBlockResizePlan({
+                edge: "right",
+                blockStartSec: 0,
+                blockEndSec: 1,
+                targetSec: 2.8,
+                neighbors: base.slice(1),
+                minBlockSec: 0.04,
+            }),
+        });
+        expect(removeNeighbors.map((block) => block.id)).toEqual(["self", "b"]);
+
+        // 同一份起点 + 指针拉回，删除结果必须可逆，不能依赖上一帧列表。
+        const restored = projectParamBlockResizeDisplay({
+            baseBlocks: base,
+            blockId: "self",
+            plan: resolveParamBlockResizePlan({
+                edge: "right",
+                blockStartSec: 0,
+                blockEndSec: 1,
+                targetSec: 1.4,
+                neighbors: base.slice(1),
+                minBlockSec: 0.04,
+            }),
+        });
+        expect(restored).toEqual([
+            { id: "self", startSec: 0, endSec: 1.4, selected: true },
+            { id: "a", startSec: 1.4, endSec: 2, selected: false },
+            { id: "b", startSec: 2, endSec: 3, selected: false },
+        ]);
+    });
+
+    it("纵向拖动提交后只在曲线同步或超时才释放交接快照", () => {
+        // 提交未完成：无论曲线如何都不能撤掉快照，否则会按旧主簇闪回。
+        expect(
+            canReleaseParamBlockDragCommit({
+                committed: false,
+                startedAt: 0,
+                now: 10,
+                curveSettled: true,
+            }),
+        ).toBe(false);
+        // 已提交但 paramView 还是手势起点窗口：继续保留快照。
+        expect(
+            canReleaseParamBlockDragCommit({
+                committed: true,
+                startedAt: 100,
+                now: 200,
+                curveSettled: false,
+            }),
+        ).toBe(false);
+        // 新窗口接上：可以释放。
+        expect(
+            canReleaseParamBlockDragCommit({
+                committed: true,
+                startedAt: 100,
+                now: 200,
+                curveSettled: true,
+            }),
+        ).toBe(true);
+        // 本地回显复用同一个 key：只要窗口里已经是提交值，也可以释放。
+        expect(
+            canReleaseParamBlockDragCommit({
+                committed: true,
+                startedAt: 100,
+                now: 200,
+                curveSettled: false,
+                valuesApplied: true,
+            }),
+        ).toBe(true);
+        // 异常路径兜底：超时也释放，不能永久锁住块。
+        expect(
+            canReleaseParamBlockDragCommit({
+                committed: true,
+                startedAt: 100,
+                now: 1400,
+                curveSettled: false,
+                timeoutMs: 1200,
+            }),
+        ).toBe(true);
+    });
+
+    it("松手交接中心与普通显示使用同一个吸附行心", () => {
+        expect(
+            resolveParamBlockCommitDisplayCenter({
+                rawCenter: 60.4,
+                param: "pitch",
+                continuous: false,
+            }),
+        ).toBe(60);
+        expect(
+            resolveParamBlockCommitDisplayCenter({
+                rawCenter: 60.6,
+                param: "pitch",
+                continuous: false,
+            }),
+        ).toBe(61);
+        // 按住取消吸附 / Alt 缩放保持连续，不能二次取整。
+        expect(
+            resolveParamBlockCommitDisplayCenter({
+                rawCenter: 60.4,
+                param: "pitch",
+                continuous: true,
+            }),
+        ).toBeCloseTo(60.4, 9);
+        // 非 pitch 参数不吸附。
+        expect(
+            resolveParamBlockCommitDisplayCenter({
+                rawCenter: 0.42,
+                param: "loudness",
+                continuous: false,
+            }),
+        ).toBeCloseTo(0.42, 9);
+    });
+
+    it("像素级端点误差不会被误判为重叠块", () => {
+        const base = autoBlocksForClips("root-a", [
+            {
+                id: "a",
+                trackId: "root-a",
+                takeId: "take-a",
+                startSec: 0,
+                lengthSec: 2,
+                sourceStartSec: 0,
+                sourceEndSec: 2,
+                sourceSyllableSpansSec: [
+                    [0, 1],
+                    [1, 2],
+                ],
+            },
+        ]);
+        const state: ParamBlockState = {
+            mergedBlocks: [],
+            persistedMerges: [],
+            persistedEdits: base.map((block, index) => ({
+                id: block.id,
+                members: block.members.map((member) => ({
+                    clipId: member.clipId,
+                    takeId: member.takeId ?? "take-a",
+                    syllableId: member.syllableId ?? `${index}`,
+                    sourceStartSec: member.sourceStartSec ?? 0,
+                    sourceEndSec: member.sourceEndSec ?? 1,
+                })),
+                startSec: index === 0 ? 0 : 1 + 5e-9,
+                endSec: index === 0 ? 1 : 2,
+                memberStartSec: 0,
+                memberEndSec: 2,
+                explicit: true,
+                blockIds: [block.id],
+            })),
+        };
+        const materialized = materializeParamBlocks({
+            rootTrackId: "root-a",
+            clips: [
+                {
+                    id: "a",
+                    trackId: "root-a",
+                    takeId: "take-a",
+                    startSec: 0,
+                    lengthSec: 2,
+                    sourceStartSec: 0,
+                    sourceEndSec: 2,
+                    sourceSyllableSpansSec: [
+                        [0, 1],
+                        [1, 2],
+                    ],
+                },
+            ],
+            state,
+        });
+        expect(materialized).toHaveLength(2);
     });
 });
 
@@ -1417,10 +2325,7 @@ describe("mergeOverlappingParamBlocks", () => {
         expect(
             mergeOverlappingParamBlocks({
                 state: EMPTY_PARAM_BLOCK_STATE,
-                blocks: autoBlocksForClips("root-a", [
-                    clip("a", 0, 1, [0]),
-                    clip("b", 1, 1, [1]),
-                ]),
+                blocks: autoBlocksForClips("root-a", [clip("a", 0, 1, [0]), clip("b", 1, 1, [1])]),
             }),
         ).toEqual({ ok: false, reason: "nothing_to_merge" });
     });
@@ -1730,11 +2635,7 @@ describe("overlap-free materialization", () => {
     });
 
     it("手动合并组与自动重叠组相交时，最终仍不产生重叠块", () => {
-        const clips = [
-            clip("a", 0, 1, [0]),
-            clip("b", 0.5, 1, [0.5]),
-            clip("c", 1.2, 1, [1.2]),
-        ];
+        const clips = [clip("a", 0, 1, [0]), clip("b", 0.5, 1, [0.5]), clip("c", 1.2, 1, [1.2])];
         const auto = autoBlocksForClips("root-a", clips);
         const manual = mergeParamBlocks({
             state: EMPTY_PARAM_BLOCK_STATE,

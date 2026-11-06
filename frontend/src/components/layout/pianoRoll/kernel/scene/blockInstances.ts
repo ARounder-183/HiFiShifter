@@ -6,6 +6,11 @@
  */
 import { secToViewportPx, type TimelineAxis } from "../../../renderKernel/timelineAxis";
 import type { Rgba } from "../../../renderKernel/instanceTypes";
+import {
+    PARAM_BLOCK_TRANSITION_HANDLE_LINE_LENGTH_PX,
+    PARAM_BLOCK_TRANSITION_HANDLE_OUTSET_X_PX,
+    PARAM_BLOCK_TRANSITION_HANDLE_OUTSET_Y_PX,
+} from "../../paramBlocks";
 import type { GridInstance } from "./gridInstances";
 
 /** 块标签请求（与参数编辑器字形层的 `TextRequest` 同形；此处避免运行时依赖）。 */
@@ -31,9 +36,15 @@ export interface ParamBlockRectInput {
     readonly contiguousStart?: boolean;
     readonly contiguousEnd?: boolean;
     readonly selected: boolean;
+    /** 当前被指针悬停 / 正在拖动的块；只影响手柄显示强度。 */
+    readonly hovered?: boolean;
+    /** 悬停在同一相接边界上；只强化该处手柄，不改变可见性规则。 */
+    readonly transitionHovered?: boolean;
     readonly merged: boolean;
     readonly transitionHandle?: {
         readonly sec: number;
+        readonly leftId: string;
+        readonly rightId: string;
         readonly widthSec: number;
     } | null;
     /** 块内平均参数文字；缺省不画。 */
@@ -61,12 +72,21 @@ export interface ParamBlockInstanceArgs {
     readonly topHighlightRgba?: Rgba;
     /** 块间圆滑手柄色；缺省用 selectedRgba。 */
     readonly handleRgba?: Rgba;
+    /** 手柄的柔光底 / 握持线色；缺省由 handleRgba 派生。 */
+    readonly handleGlowRgba?: Rgba;
+    readonly handleGripRgba?: Rgba;
     /** 顶部高光厚度（CSS px）；0 = 不画。 */
     readonly topHighlightPx?: number;
     /** 块的圆角半径（CSS px）。 */
     readonly cornerRadiusPx?: number;
     /** 边框厚度（CSS px）；缺省 1。第一版块只是“可见的边界”，不抢曲线。 */
     readonly borderWidthPx?: number;
+    /** 块间过渡曲线颜色；缺省不画。 */
+    readonly transitionRgba?: Rgba;
+    /** 过渡曲线的端点圆点颜色；缺省复用 `transitionRgba`。 */
+    readonly transitionPointRgba?: Rgba;
+    /** 端点圆点半径（CSS px）；缺省 2.5。 */
+    readonly transitionPointRadiusPx?: number;
 }
 
 const DEFAULT_BORDER_PX = 1;
@@ -87,9 +107,20 @@ export interface ParamBlockScene {
     readonly highlights: readonly ParamBlockFillInstance[];
     /** 相接块圆滑手柄；画在块和曲线之上，方便抓住。 */
     readonly handles: readonly ParamBlockFillInstance[];
+    /** 块间过渡曲线：贝塞尔采样后的折线（视口坐标）。 */
+    readonly transitions: readonly (readonly ParamBlockPoint[])[];
 }
 
-const HANDLE_RADIUS_PX = 4;
+export interface ParamBlockPoint {
+    readonly x: number;
+    readonly y: number;
+}
+
+/** 圆滑手柄：块右边界外侧上方的圆点 + 横线，左右拖动控制过渡宽度。 */
+const HANDLE_DIAMETER_PX = 7;
+const HANDLE_GLOW_DIAMETER_PX = 11;
+/** 过渡贝塞尔曲线的采样数；曲线很短时也足够平滑。 */
+const TRANSITION_CURVE_STEPS = 24;
 
 /**
  * 块填充实例：`FlatInstance` 的布局没有圆角，为了让块像音符，这里扩一个可选
@@ -132,6 +163,12 @@ export function buildParamBlockScene(args: ParamBlockInstanceArgs): ParamBlockSc
     const fills: ParamBlockFillInstance[] = [];
     const highlights: ParamBlockFillInstance[] = [];
     const handles: ParamBlockFillInstance[] = [];
+    const transitions: ParamBlockPoint[][] = [];
+    /*
+     * 过渡曲线需要一次算出左右块的代表高度。先按 id 建索引，避免在每个块
+     * 的循环里对全部块 `find`，长工程下会退化成平方复杂度。
+     */
+    const blockById = new Map(blocks.map((block) => [block.id, block]));
     for (const block of blocks) {
         const startSec = Math.min(block.startSec, block.endSec);
         const endSec = Math.max(block.startSec, block.endSec);
@@ -252,18 +289,126 @@ export function buildParamBlockScene(args: ParamBlockInstanceArgs): ParamBlockSc
             });
         }
         if (block.transitionHandle !== undefined && block.transitionHandle !== null) {
-            const handleX = secToViewportPx(axis, block.transitionHandle.sec);
-            if (handleX >= -HANDLE_RADIUS_PX && handleX <= axis.viewportWidthPx + HANDLE_RADIUS_PX) {
+            const handleSecX = secToViewportPx(axis, block.transitionHandle.sec);
+            /*
+             * 手柄不是“每个相接边界”的装饰：它只属于当前正在编辑的块。
+             * 块层收到完整的相接关系，但只有块自身被选中（或正在悬停该
+             * 边界）才画，避免选中一个块后整排边界都冒出控件。
+             */
+            const visible = block.selected || block.transitionHovered === true;
+            /*
+             * 手柄圆点中心与右边界对齐，只向上抬到块外。以前向右偏移 18px，
+             * 既容易被下一个块遮住，也会和块边缘缩放热区抢指针。
+             */
+            const handleX = handleSecX + PARAM_BLOCK_TRANSITION_HANDLE_OUTSET_X_PX;
+            const handleY = rawTop - PARAM_BLOCK_TRANSITION_HANDLE_OUTSET_Y_PX;
+            if (
+                visible &&
+                handleX >= -HANDLE_GLOW_DIAMETER_PX &&
+                handleX <= axis.viewportWidthPx + HANDLE_GLOW_DIAMETER_PX
+            ) {
+                const handleRgba = args.handleRgba ?? args.selectedRgba;
+                const active = block.selected || block.transitionHovered === true;
+                // 横线：从圆点向左伸出，读起来像“水平拖动的滑块”。
+                const lineGripRgba = args.handleGripRgba ?? [
+                    handleRgba[0],
+                    handleRgba[1],
+                    handleRgba[2],
+                    0.72,
+                ];
                 handles.push({
-                    x: handleX - HANDLE_RADIUS_PX,
-                    y: top + h / 2 - HANDLE_RADIUS_PX,
-                    w: HANDLE_RADIUS_PX * 2,
-                    h: HANDLE_RADIUS_PX * 2,
-                    rgba: args.handleRgba ?? args.selectedRgba,
-                    radius: HANDLE_RADIUS_PX,
+                    x: handleX - PARAM_BLOCK_TRANSITION_HANDLE_LINE_LENGTH_PX,
+                    y: handleY - 0.5,
+                    w: PARAM_BLOCK_TRANSITION_HANDLE_LINE_LENGTH_PX,
+                    h: 1,
+                    rgba: lineGripRgba,
+                    radius: 0.5,
+                });
+                // 柔光底：略大于圆点，让它在任何块底色上都可辨认。
+                handles.push({
+                    x: handleX - HANDLE_GLOW_DIAMETER_PX / 2,
+                    y: handleY - HANDLE_GLOW_DIAMETER_PX / 2,
+                    w: HANDLE_GLOW_DIAMETER_PX,
+                    h: HANDLE_GLOW_DIAMETER_PX,
+                    rgba: args.handleGlowRgba ?? [
+                        handleRgba[0],
+                        handleRgba[1],
+                        handleRgba[2],
+                        active ? 0.22 : 0.12,
+                    ],
+                    radius: HANDLE_GLOW_DIAMETER_PX / 2,
+                });
+                // 圆点：真正表达“这里是过渡边界”。
+                handles.push({
+                    x: handleX - HANDLE_DIAMETER_PX / 2,
+                    y: handleY - HANDLE_DIAMETER_PX / 2,
+                    w: HANDLE_DIAMETER_PX,
+                    h: HANDLE_DIAMETER_PX,
+                    rgba: handleRgba,
+                    radius: HANDLE_DIAMETER_PX / 2,
+                });
+            }
+            /*
+             * widthSec = 0 是“硬切换”，仍画一小段很短的曲线作为可视提示，
+             * 与 OpenUtau 的音高轨迹一致；真正增大平滑宽度时再向右展开。
+             */
+            const transitionWidthPx = Math.max(8, block.transitionHandle.widthSec * axis.pxPerSec);
+            const rightBlock = blockById.get(block.transitionHandle.rightId);
+            /*
+             * 贝塞尔只作用在相接点**右侧**：左侧块自己的音高线保持不变。
+             * 起点圆点就是相接点，曲线向右展开；右侧块在原曲线基础上被拉向
+             * 目标值，而不是被一条独立线覆盖。
+             */
+            const leftY = rawTop + Math.max(1, block.heightPx) / 2;
+            const rightY =
+                rightBlock === undefined
+                    ? leftY
+                    : rightBlock.topPx + Math.max(1, rightBlock.heightPx) / 2;
+            if (
+                handleSecX < -transitionWidthPx ||
+                handleSecX > axis.viewportWidthPx + transitionWidthPx
+            ) {
+                continue;
+            }
+            const startX = handleSecX - transitionWidthPx;
+            const endX = handleSecX + transitionWidthPx;
+            if (args.transitionRgba !== undefined && endX >= 0 && startX <= axis.viewportWidthPx) {
+                const curve: ParamBlockPoint[] = [];
+                for (let index = 0; index <= TRANSITION_CURVE_STEPS; index += 1) {
+                    const t = index / TRANSITION_CURVE_STEPS;
+                    const oneMinusT = 1 - t;
+                    // 三次贝塞尔，控制点沿水平方向；高度由两端代表值决定。
+                    const cp1X = startX + (endX - startX) / 3;
+                    const cp2X = startX + ((endX - startX) * 2) / 3;
+                    const x =
+                        oneMinusT * oneMinusT * oneMinusT * startX +
+                        3 * oneMinusT * oneMinusT * t * cp1X +
+                        3 * oneMinusT * t * t * cp2X +
+                        t * t * t * endX;
+                    const y =
+                        oneMinusT * oneMinusT * oneMinusT * leftY +
+                        3 * oneMinusT * oneMinusT * t * ((leftY + rightY) / 2) +
+                        3 * oneMinusT * t * t * ((leftY + rightY) / 2) +
+                        t * t * t * rightY;
+                    curve.push({ x, y });
+                }
+                transitions.push(curve);
+                /*
+                 * 即使块被视口纵向裁掉，相接点圆点仍应可见；这里单独画
+                 * 起点圆点，不依赖 `handles` 的手柄选中态。
+                 */
+                const pointRgba = args.transitionPointRgba ?? args.transitionRgba;
+                const pointRadius = Math.max(0.5, args.transitionPointRadiusPx ?? 2.5);
+                handles.push({
+                    x: startX - pointRadius,
+                    y: leftY - pointRadius,
+                    w: pointRadius * 2,
+                    h: pointRadius * 2,
+                    rgba: pointRgba,
+                    radius: pointRadius,
                 });
             }
         }
     }
-    return { items, labels, fills, highlights, handles };
+    return { items, labels, fills, highlights, handles, transitions };
 }

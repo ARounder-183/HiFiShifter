@@ -284,4 +284,71 @@ describe("buildParamBlockInstances", () => {
         expect(scene.highlights).toHaveLength(1);
         expect(scene.items).toHaveLength(4);
     });
+
+    it("选中块的过渡手柄位于右边界外侧上方，由圆点 + 横线组成", () => {
+        const scene = buildParamBlockScene({
+            axis,
+            viewportHeightPx: 400,
+            blocks: [
+                {
+                    id: "a",
+                    startSec: 1,
+                    endSec: 2,
+                    topPx: 100,
+                    heightPx: 24,
+                    selected: true,
+                    merged: false,
+                    transitionHandle: { sec: 2, leftId: "a", rightId: "b", widthSec: 0.1 },
+                },
+                {
+                    id: "b",
+                    startSec: 2,
+                    endSec: 3,
+                    topPx: 130,
+                    heightPx: 24,
+                    selected: false,
+                    merged: false,
+                },
+            ],
+            borderRgba: rgba,
+            selectedRgba,
+            mergedRgba,
+            transitionRgba: selectedRgba,
+        });
+        // 横线 + 柔光 + 圆点 + 相接点圆点：共 4 个实例。
+        expect(scene.handles).toHaveLength(4);
+        // 圆点中心与右边界对齐，只向上抬到块外：右边界 x=200、块顶 y=100。
+        expect(scene.handles[0]).toMatchObject({ x: 192, y: 93.5, w: 8, h: 1 });
+        expect(scene.handles[1]).toMatchObject({ x: 194.5, y: 88.5, w: 11, h: 11 });
+        expect(scene.handles[2]).toMatchObject({ x: 196.5, y: 90.5, w: 7, h: 7 });
+        expect(scene.handles[2].rgba).toBe(selectedRgba);
+        expect(scene.transitions).toHaveLength(1);
+        // 过渡以相接点为中心向两侧展开：0.1s × 100px/s = 每侧 10px。
+        expect(scene.transitions[0]?.[0]).toMatchObject({ x: 190, y: 112 });
+        expect(scene.transitions[0]?.at(-1)).toMatchObject({ x: 210, y: 142 });
+    });
+
+    it("未选中的相接块不画手柄，避免整层出现铆钉", () => {
+        const scene = buildParamBlockScene({
+            axis,
+            viewportHeightPx: 400,
+            blocks: [
+                {
+                    id: "a",
+                    startSec: 1,
+                    endSec: 2,
+                    topPx: 100,
+                    heightPx: 24,
+                    selected: false,
+                    merged: false,
+                    transitionHandle: { sec: 2, leftId: "a", rightId: "b", widthSec: 0.1 },
+                },
+            ],
+            borderRgba: rgba,
+            selectedRgba,
+            mergedRgba,
+        });
+        expect(scene.handles).toEqual([]);
+        expect(scene.transitions).toEqual([]);
+    });
 });

@@ -41,7 +41,7 @@ import { TOOLBAR_MAX_TIER } from "../toolbarOverflow";
 import { useToolbarOverflowTier } from "../useToolbarOverflowTier";
 import { selectionBoundingSpan } from "../paramSelection";
 import { usePianoRollData } from "../usePianoRollData";
-import { fetchFullResCurve, uploadFullResCurveSegments } from "../selectionEditData";
+import { fetchFullResCurve, readPvRange, uploadFullResCurveSegments } from "../selectionEditData";
 import { startPointerGesture } from "../gestures/pointerGesture";
 import {
     beginSelectionParamEdit,
@@ -58,25 +58,45 @@ import {
     deleteParamBlocks,
     isParamBlockDeleted,
     formatParamBlockLabel,
+    paramBlockCursorForHover,
+    hitTestParamBlockEdges,
+    hitTestParamBlockTransitionHandles,
     hitTestParamBlocks,
+    hitTestParamBlocksAtPoint,
     materializeParamBlocks,
+    modeCenterOfValuesInSamples,
     mergeParamBlocks,
     mergeOverlappingParamBlocks,
+    paramBlockResizeCandidates,
+    projectParamBlockResizeDisplay,
+    canReleaseParamBlockDragCommit,
+    resolveParamBlockCommitDisplayCenter,
     nearestParamBlockByTime,
     paramBlockMergeMessageKey,
     projectMidiNoteSpansToTimeline,
     projectSourceSpansToTimeline,
     resolveParamBlockSnapDelta,
     resolveParamBlockPitchSnapDelta,
+    resolveParamBlockCreateSpan,
+    resolveParamBlockResizePlan,
+    resolveParamBlockResizeTarget,
     snapParamBlockTimeByDefault,
     unmergeParamBlocks,
     resizeParamBlock,
+    removeParamBlockAtMinWidth,
     restoreDeletedParamBlocks,
     splitParamBlock,
     setParamBlockTransition,
     buildParamBlockTransitionSegments,
-    paramBlockTransitionHandles,
+    buildParamBlockTransitionPreview,
+    PARAM_BLOCK_TRANSITION_HANDLE_OUTSET_X_PX,
+    PARAM_BLOCK_TRANSITION_HANDLE_OUTSET_Y_PX,
+    sortedParamBlockTransitionHandles,
+    sortParamBlocksByTime,
     createParamBlock,
+    clipAtParamBlockCreateSpan,
+    resolveCreatedParamBlockValue,
+    previewParamBlockCreateLayout,
     type ParamBlock,
     type ParamBlockMember,
     type ParamBlockState,
@@ -2223,36 +2243,70 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         ((snapshot: ParamBlockDragSnapshot) => PianoRollParamBlockSpec | null) | null
     >(null);
     /**
-     * 块间圆滑手柄写入：取边界两侧全分辨率曲线，按两块的当前代表值做
-     * C1 平滑过渡。只写边界 ± width 的帧，不复制整块曲线。
+     * 块间圆滑手柄写入：**只改写右块**相接点之后的 `width` 帧。
+     *
+     * 过渡不是覆盖原曲线，而是从右块原曲线出发、按 smoothstep 权重拉向
+     * 右块目标值；左块及其左侧帧始终不写。
      */
     const persistTransitionCurve = useCallback(
         async (
             left: ParamBlock,
             right: ParamBlock,
             widthSec: number,
+            options?: { readonly restoreOriginal?: boolean },
         ): Promise<void> => {
-            if (!rootTrackId || editParam !== "pitch" || widthSec <= 1e-6) return;
+            if (!rootTrackId || editParam !== "pitch") return;
+            if (widthSec <= 1e-6 && options?.restoreOriginal !== true) return;
             const framePeriodMs = paramViewRef.current?.framePeriodMs ?? 5;
             const boundaryFrame = Math.round((left.endSec * 1000) / framePeriodMs);
-            const radiusFrames = Math.max(1, Math.round((widthSec * 1000) / framePeriodMs));
-            const startFrame = Math.max(
-                0,
-                Math.round((left.startSec * 1000) / framePeriodMs),
-            );
+            const widthFrames = Math.max(1, Math.round((widthSec * 1000) / framePeriodMs));
+            const startFrame = Math.max(0, Math.floor((left.startSec * 1000) / framePeriodMs));
             const endFrame = Math.max(
-                startFrame,
+                boundaryFrame,
                 Math.round((right.endSec * 1000) / framePeriodMs) - 1,
             );
             const leftValue = left.averageValue ?? 60;
             const rightValue = right.averageValue ?? 60;
+            // 取相接点左右各 width 帧的原曲线；两侧都参与混合，但都保留原走势。
+            const source = await fetchFullResCurve({
+                trackId: rootTrackId,
+                param: "pitch",
+                startFrame: Math.max(startFrame, boundaryFrame - widthFrames),
+                endFrame: Math.min(endFrame, boundaryFrame + widthFrames - 1),
+                paramView: paramViewRef.current,
+            });
+            const committedAt = (frame: number): number =>
+                Number(source.values[frame - source.startFrame]) || rightValue;
+            /*
+             * 双击恢复：过渡曲线本身已经写进 live / 后端，只把宽度置 0
+             * 不会自动还原它。这里必须用**提交态原曲线**覆盖同一段，
+             * 否则用户看到的扭曲会残留到下一次重绘。
+             */
+            if (options?.restoreOriginal === true) {
+                const pv = paramViewRef.current;
+                const restoreStart = Math.max(startFrame, boundaryFrame - widthFrames);
+                const restoreEnd = Math.min(endFrame, boundaryFrame + widthFrames - 1);
+                const original = pv === null ? null : readPvRange(pv, restoreStart, restoreEnd);
+                if (original !== null && original.length > 0) {
+                    await uploadFullResCurveSegments({
+                        trackId: rootTrackId,
+                        param: "pitch",
+                        segments: [{ startFrame: restoreStart, values: original }],
+                    });
+                    bumpRefreshToken();
+                }
+                return;
+            }
+            const sourceAt = committedAt;
             const segments = buildParamBlockTransitionSegments({
                 boundaryFrame,
-                radiusFrames,
-                leftValue,
-                rightValue,
+                widthFrames,
+                targetValue: rightValue,
                 leftStartFrame: startFrame,
                 rightEndFrame: endFrame,
+                leftValue,
+                rightValue,
+                sourceAt,
             });
             if (segments.length === 0) return;
             await uploadFullResCurveSegments({
@@ -2273,9 +2327,85 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         readonly endSec: number;
         readonly neighborStartSec: number | null;
         readonly neighborEndSec: number | null;
-        readonly neighbor: ParamBlock | null;
+        readonly resizeCandidates: readonly ParamBlock[];
+        /** 手势起点的完整块几何；每帧从它重新投影，已删除块不会永久丢失。 */
+        readonly baseBlockSpans: readonly {
+            readonly id: string;
+            readonly startSec: number;
+            readonly endSec: number;
+            readonly selected?: boolean;
+        }[];
         targetSec: number;
+        /** 本帧完整伸缩计划；预览 / 宿主刷新 / 提交共用。 */
+        resizePlan: ReturnType<typeof resolveParamBlockResizePlan> | null;
+        /** 手势起点左右块的代表值/高度；仅用于锁定预览，不提交。 */
+        readonly displayCenterValue?: number | null;
+        readonly displayHeightPx?: number | null;
+        /** 新建块的实时纵向值（只用于 `__create__` 预览）。 */
+        readonly value?: number | null;
     } | null>(null);
+    /**
+     * 边缘伸缩刚提交后的短前向快照。
+     *
+     * `applyParamBlockEdit` 通过 React state 提交，宿主却可能在同一次 pointerup
+     * 后先绘一帧旧派生几何；用户会看到“松手闪回旧位置，再跳到新位置”。
+     * 这里冻结刚提交的两个块区间，直到下一次派生真正包含它们。
+     */
+    const paramBlockCommittedSpanRef = useRef<{
+        readonly blockId: string;
+        readonly blockSpan: { readonly startSec: number; readonly endSec: number };
+        readonly neighbors: readonly {
+            readonly id: string;
+            readonly startSec: number;
+            readonly endSec: number;
+            readonly remove: boolean;
+        }[];
+        readonly expiresAt: number;
+    } | null>(null);
+    /**
+     * 纵向块拖动提交后的交接。
+     *
+     * 松手提交期间，曲线的 live 值已经到位，但 `paramView` 快照可能晚一帧。
+     * 若此刻清拖动快照，宿主会按旧主簇画一次，块就闪回原位。这里保留快照与
+     * 松手时的显示中心，直到曲线窗口同步或超时。
+     */
+    const paramBlockDragCommitRef = useRef<{
+        readonly blockId: string;
+        readonly center: number;
+        readonly key: string;
+        readonly startedAt: number;
+        /** 提交值所在的窗口起点 / 步长；同 key 本地回显也能确认已落盘。 */
+        readonly startFrame: number;
+        readonly stride: number;
+        committedValues?: readonly (readonly [number, number])[];
+        committed: boolean;
+    } | null>(null);
+    /**
+     * `Alt + 上下拖` 时的块显示中心。
+     *
+     * 音高缩放只改变块内起伏，不改变块所在的音高。宿主的代表值默认来自实时
+     * 曲线主簇；曲线被缩放后主簇可能变化半格，块就会在提交与重取之间上下浮动。
+     * 手势期间及提交后的重取窗口内锁定这个值，松手后再由一次稳定的代表值接替。
+     */
+    const paramBlockDisplayCenterLockRef = useRef<{
+        readonly blockId: string;
+        readonly center: number;
+        /** 锁存值是否仍需吸附到行心；吸附拖动提交时为 false（已取整）。 */
+        readonly snapToSemitone: boolean;
+        releasedAt: number;
+    } | null>(null);
+    useEffect(() => {
+        // 参数 / 轨道切换代表换了一个编辑上下文；旧块的显示锁定不能跨上下文。
+        paramBlockDisplayCenterLockRef.current = null;
+    }, [editParam, rootTrackId]);
+    const paramBlockClickCandidateRef = useRef<{
+        readonly blockId: string;
+        readonly token: string;
+        readonly at: number;
+    } | null>(null);
+    const hoveredParamBlockIdRef = useRef<string | null>(null);
+    const hoveredTransitionIdRef = useRef<string | null>(null);
+    const paramBlockDoubleClickTokenRef = useRef(0);
     // Stable callback that delegates to the latest handleEditOp via ref
     const stableEditAction = useCallback((op: string) => {
         handleEditActionRef.current(op);
@@ -2286,6 +2416,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     >(null);
     const paramBlockStateRef = useRef<ParamBlockState>(EMPTY_PARAM_BLOCK_STATE);
     /** 让宿主下一次绘制读到刚更新的拖动快照，而不是等某个 React 状态变化。 */
+    const latestParamBlockSpecRef = useRef<PianoRollParamBlockSpec | null>(null);
     const invalidateParamBlockSpec = useCallback(() => {
         const snapshot = paramBlockDragSnapshotRef.current;
         const pv = paramViewRef.current;
@@ -2307,6 +2438,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 isPitch: editParam === "pitch",
                 param: editParam,
             };
+        } else {
+            kernelDataRef.current.paramBlocks = latestParamBlockSpecRef.current;
         }
         invalidate();
     }, [editParam, invalidate, kernelDataRef, liveEditOverrideRef, paramViewRef]);
@@ -2630,6 +2763,17 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     /** 块工具来自现有工具状态；切换离开时清掉块选择，避免“看不见但还选中”。 */
     const paramBlockToolActive = s.toolMode === "block";
     const [paramBlocksVisible, setParamBlocksVisible] = useState(false);
+    /**
+     * 显式打破 `paramBlockSpec` 的 memo 缓存。
+     *
+     * 拖拽快照是 ref：开始拖动写入、松手清空，二者都不会让 memo 重算。
+     * 若某次渲染恰好缓存了“快照存在”的无手柄几何，清空 ref 后必须换一个
+     * 依赖值才能回到正常派生。
+     */
+    const [paramBlockStructureTick, setParamBlockStructureTick] = useState(0);
+    const bumpParamBlockStructure = useCallback(() => {
+        setParamBlockStructureTick((value) => value + 1);
+    }, []);
     const [paramBlockState, setParamBlockState] =
         useState<ParamBlockState>(EMPTY_PARAM_BLOCK_STATE);
     const [selectedParamBlockIds, setSelectedParamBlockIds] = useState<string[]>([]);
@@ -2664,6 +2808,87 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     const autoAnalysisAttemptsRef = useRef<Set<string>>(new Set());
     /** 本地刚提交、尚未被同一次异步读取回包的块编辑代次。 */
     const paramBlockEditSeqRef = useRef(0);
+    /**
+     * 历史位置镜像。块编辑的 persist 写入会打后端撤销点，但 React 的
+     * `paramBlockState` 不会自动回读；只在历史深度变化时 reload，避免普通
+     * 重渲染或拖动中的每次进度提交都发一轮 IPC。
+     */
+    const paramBlockHistoryKeyRef = useRef(`${s.historyUndoDepth}:${s.historyRedoDepth}`);
+    const paramBlockHistoryReloadSeqRef = useRef(0);
+    useEffect(() => {
+        const key = `${s.historyUndoDepth}:${s.historyRedoDepth}`;
+        if (paramBlockHistoryKeyRef.current === key) return;
+        paramBlockHistoryKeyRef.current = key;
+        if (!rootTrackId) return;
+        const reloadSeq = ++paramBlockHistoryReloadSeqRef.current;
+        /*
+         * 撤销 / 重做 / 拖历史后，块记录由后端权威时间线回退。前端若继续
+         * 持有旧列表，会出现“曲线回去了、块还在”的假状态；这里重新拉取
+         * merges + intervalEdits，并同步 bump 取数代次，保证界面与数据同源。
+         */
+        paramBlockEditSeqRef.current += 1;
+        void timelineApi
+            .getParamBlockMerges(rootTrackId)
+            .then(({ records, intervalEdits }) => {
+                if (paramBlockHistoryReloadSeqRef.current !== reloadSeq) return;
+                setParamBlockState((state) => ({
+                    ...state,
+                    persistedMerges: records.map((record) => ({
+                        id: record.mergedGroupId,
+                        members: record.memberRefs.map((member) => ({
+                            clipId: member.clipId,
+                            takeId: member.takeId,
+                            syllableId: member.syllableId,
+                            sourceStartSec: member.sourceStartSec,
+                            sourceEndSec: member.sourceEndSec,
+                        })),
+                    })),
+                    persistedEdits: intervalEdits.map((edit) => ({
+                        id: edit.editId,
+                        members: edit.memberRefs.map((member) => ({
+                            clipId: member.clipId,
+                            takeId: member.takeId,
+                            syllableId: member.syllableId,
+                            sourceStartSec: member.sourceStartSec,
+                            sourceEndSec: member.sourceEndSec,
+                        })),
+                        startSec: edit.startSec,
+                        endSec: edit.endSec,
+                        memberStartSec: edit.memberStartSec,
+                        memberEndSec: edit.memberEndSec,
+                        blockIds: edit.blockIds,
+                        explicit: edit.explicit,
+                        deleted: edit.deleted,
+                        manual: edit.manual,
+                        value: edit.value,
+                        transitionSec: edit.transitionSec,
+                    })),
+                }));
+                // 撤销/重做换掉了底层曲线：丢掉等旧快照的 live 覆盖层，避免它
+                // 在下一帧按旧基准把回退后的数据又盖回去。
+                const pv = paramViewRef.current;
+                if (pv !== null) resetLiveEditPreview(pv);
+                setSelectedParamBlockIds([]);
+                bumpParamBlockStructure();
+                bumpRefreshToken();
+                invalidate();
+            })
+            .catch(() => {
+                // 旧后端没有该命令时保持会话态；不能因为一次读取失败把块层清空。
+            });
+    }, [
+        bumpParamBlockStructure,
+        bumpRefreshToken,
+        invalidate,
+        rootTrackId,
+        resetLiveEditPreview,
+        s.historyRedoDepth,
+        s.historyUndoDepth,
+    ]);
+    useEffect(() => {
+        // 撤销/重做会整批替换块记录；刚提交的伸缩交接快照不能跨历史版本生效。
+        paramBlockCommittedSpanRef.current = null;
+    }, [rootTrackId, s.historyRedoDepth, s.historyUndoDepth]);
     /*
      * 持久化合并不在组件状态里：从工程参数读取，写入时走带撤销点的命令。
      * 只在根轨道切换 / 历史推进时刷新；拖动块本身不触发网络请求。
@@ -2671,6 +2896,11 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     useEffect(() => {
         if (!rootTrackId) return;
         const requestSeq = paramBlockEditSeqRef.current;
+        /*
+         * 块谱面可见性只决定“是否显示 / 分配 block 编辑 UI”；音节分析本身
+         * 需要“块工具打开”或“眼睛打开”任一即可。进入块工具时眼睛会同步打开，
+         * 但显隐 effect 与这个分析 effect 的提交顺序不应决定是否分析。
+         */
         const blocksEnabled = paramBlocksVisible;
         const requestedClipIds = new Set<string>();
         /*
@@ -2688,12 +2918,12 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         const audioClips =
             blocksEnabled && pitchEnabled
                 ? paramBlockClips.filter(
-                  (clip) =>
-                      clip.trackId.length > 0 &&
-                      (clip.midiNoteData?.length ?? 0) === 0 &&
-                      !paramBlockSyllableSpans.has(clip.id) &&
-                      Boolean(clip.sourcePath) &&
-                      !autoAnalysisAttemptsRef.current.has(clip.id),
+                      (clip) =>
+                          clip.trackId.length > 0 &&
+                          (clip.midiNoteData?.length ?? 0) === 0 &&
+                          !paramBlockSyllableSpans.has(clip.id) &&
+                          Boolean(clip.sourcePath) &&
+                          !autoAnalysisAttemptsRef.current.has(clip.id),
                   )
                 : [];
         for (const clip of audioClips) autoAnalysisAttemptsRef.current.add(clip.id);
@@ -2886,12 +3116,10 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                      * 块身份、Clip 移动后的投影、后端保存校核使用同一基准。
                      */
                     sourceSyllableSpansSec: clip.midiNoteData?.length
-                        ? clip.midiNoteData.map(
-                              (note) => [note.startSec, note.endSec] as const,
-                          )
-                        : paramBlockSyllableSpans.get(clip.id)?.map(
-                              (span) => [span.startSec, span.endSec] as const,
-                          ),
+                        ? clip.midiNoteData.map((note) => [note.startSec, note.endSec] as const)
+                        : paramBlockSyllableSpans
+                              .get(clip.id)
+                              ?.map((span) => [span.startSec, span.endSec] as const),
                     syllableSpansSec: clip.midiNoteData
                         ? projectMidiNoteSpansToTimeline(clip)
                         : paramBlockSyllableSpans.get(clip.id)
@@ -2902,13 +3130,9 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                 lengthSec: clip.lengthSec,
                                 sourceSyllableSpansSec: paramBlockSyllableSpans
                                     .get(clip.id)
-                                    ?.map(
-                                    (span) => [span.startSec, span.endSec] as const,
-                                ),
+                                    ?.map((span) => [span.startSec, span.endSec] as const),
                                 takeId:
-                                    clip.activeTakeId ??
-                                    clip.takes?.[0]?.id ??
-                                    `${clip.id}_take_1`,
+                                    clip.activeTakeId ?? clip.takes?.[0]?.id ?? `${clip.id}_take_1`,
                                 sourceStartSec: clip.sourceStartSec,
                                 sourceEndSec: clip.sourceEndSec,
                                 playbackRate: clip.playbackRate,
@@ -2946,10 +3170,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         paramBlocksForPanelRef.current = paramBlocksForPanel;
     }, [paramBlocksForPanel]);
     const paramBlocksWithValues = useMemo(() => {
-        const valueBounds = getParamValueBoundsForScrollbarImpl(
-            { processorParamsRef },
-            editParam,
-        );
+        const valueBounds = getParamValueBoundsForScrollbarImpl({ processorParamsRef }, editParam);
         /*
          * 没有曲线（例如尚未取到参数样本）时，块仍然要能以中性高度显示。
          * `layoutParamBlockRects` 会跳过 `averageValue === null` 的块；旧逻辑
@@ -2971,7 +3192,9 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         const isPitchParam = editParam === "pitch";
         return paramBlocksForPanel.map((block) => ({
             ...block,
+            manualValue: block.manualValue ?? null,
             averageValue:
+                block.manualValue ??
                 averageParamValueInSpan({
                     startSec: block.startSec,
                     endSec: block.endSec,
@@ -3031,6 +3254,18 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                         themeMode === "dark" ? "rgba(124,198,236,0.95)" : "rgba(31,103,160,0.95)",
                     ),
                 ),
+                // 过渡曲线与手柄同色系，和 OpenUtau 的音高轨迹一致。
+                transitionRgba: parseRgbaColor(
+                    normalizeCssColor(
+                        themeMode === "dark" ? "rgba(219,246,255,0.92)" : "rgba(0,94,156,0.90)",
+                    ),
+                ),
+                transitionPointRgba: parseRgbaColor(
+                    normalizeCssColor(
+                        themeMode === "dark" ? "rgba(255,255,255,1)" : "rgba(0,66,112,1)",
+                    ),
+                ),
+                transitionPointRadiusPx: 2.5,
                 selectedRgba: parseRgbaColor(
                     normalizeCssColor(
                         themeMode === "dark" ? "rgba(210,242,255,1)" : "rgba(0,72,128,1)",
@@ -3134,13 +3369,31 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             );
             const dragBlocks = [{ members: dragMembers }];
             const pitchScaleDrag =
-                editParam === "pitch" &&
-                (args as { pitchScale?: boolean }).pitchScale === true;
+                editParam === "pitch" && (args as { pitchScale?: boolean }).pitchScale === true;
             const pitchScaleCenter =
-                selectedBlocks.length === 1
-                    ? (selectedBlocks[0]?.averageValue ?? null)
-                    : null;
+                selectedBlocks.length === 1 ? (selectedBlocks[0]?.averageValue ?? null) : null;
             const pitchScaleValues = pitchScaleDrag ? startBase.slice() : null;
+            /*
+             * 音高缩放**不移动块**。曲线被缩放后，主簇代表值可能变化；若块继续
+             * 按实时主簇投影，会在预览、提交和重取之间上下浮动。锁住按下瞬间的
+             * 显示中心，直到下一次非缩放的块手势 / 参数切换。
+             */
+            if (pitchScaleDrag && pitchScaleCenter !== null && Number.isFinite(pitchScaleCenter)) {
+                paramBlockDisplayCenterLockRef.current = {
+                    blockId: args.anchorBlockId,
+                    center: pitchScaleCenter,
+                    snapToSemitone: false,
+                    releasedAt: Number.NaN,
+                };
+            } else if (!pitchScaleDrag) {
+                paramBlockDisplayCenterLockRef.current = null;
+            }
+            /*
+             * 不可在这里清空 hover 状态：拖动一开始，`kernelDataRef` 会被
+             * 拖拽快照覆盖，快照里通常没有手柄。若同时把 hover 归零，已经被
+             * 选中的块会在下一帧失去所有手柄，用户松开后也要等重新 hover
+             * 才恢复。拖动结束时统一清理即可。
+             */
             paramBlockDragSnapshotRef.current = {
                 key: pv.key,
                 ids: new Set(dragIds),
@@ -3273,14 +3526,11 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                               const endFrame = Math.max(
                                   startFrame,
                                   Math.round(
-                                      ((selectedBlocks.at(-1)?.endSec ?? 0) * 1000) /
-                                          framePeriodMs,
+                                      ((selectedBlocks.at(-1)?.endSec ?? 0) * 1000) / framePeriodMs,
                                   ) - 1,
                               );
                               const stride = Math.max(1, pv.stride);
-                              const sliceStart = Math.floor(
-                                  (startFrame - pv.startFrame) / stride,
-                              );
+                              const sliceStart = Math.floor((startFrame - pv.startFrame) / stride);
                               const sliceEnd = Math.ceil((endFrame - pv.startFrame) / stride);
                               const source = startBase.slice(
                                   Math.max(0, sliceStart),
@@ -3387,8 +3637,19 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                     rafId = null;
                 }
                 if (reason === "cancel" || !didDrag) {
+                    if (pitchScaleDrag) paramBlockDisplayCenterLockRef.current = null;
+                    /*
+                     * 单击只改 React 选中态；不能同时留下一个拖拽快照，否则
+                     * 紧随其后的 hover / 右键仍会读到“拖动中”的旧几何。
+                     * 真实拖动由下面的异步提交负责释放快照。
+                     */
                     paramBlockDragSnapshotRef.current = null;
-                    invalidateParamBlockSpec();
+                    /*
+                     * `paramBlockSpec` 的缓存键必须变化，否则清空 ref 后
+                     * React 会复用上次“快照存在”时算出的无手柄几何。
+                     * 递增一个纯序号，让下一个 render 重新走正常派生。
+                     */
+                    bumpParamBlockStructure();
                     resetLiveEditPreview(paramViewRef.current ?? pv);
                     invalidate();
                     return;
@@ -3412,7 +3673,76 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 const commitPv = pv;
                 const commitBlocks = dragBlocks;
                 const commitDelta = lastDelta;
+                /*
+                 * 纵向拖动的落点由 live 曲线主簇决定。松手后先锁住这个显示
+                 * 中心，并保留拖动快照；否则提交的异步间隙里会先按旧主簇画
+                 * 一帧，用户看到块在原位与落点之间闪一下。
+                 */
+                const commitCenterBlockId = args.anchorBlockId;
+                const rawCommitCenter = pitchScaleDrag
+                    ? null
+                    : (() => {
+                          const live = liveEditOverrideRef.current;
+                          const pvNow = paramViewRef.current;
+                          if (pvNow === null) return null;
+                          const anchor = modeCenterOfValuesInSamples(
+                              selectedBlocks[0]?.startSec ?? 0,
+                              selectedBlocks[0]?.endSec ?? 0,
+                              {
+                                  values:
+                                      live !== null && live.key === pvNow.key
+                                          ? live.edit
+                                          : pvNow.edit,
+                                  startFrame: pvNow.startFrame,
+                                  stride: pvNow.stride,
+                                  framePeriodMs: pvNow.framePeriodMs,
+                                  isPitch: editParam === "pitch",
+                                  param: editParam,
+                              },
+                          );
+                          return anchor !== null && Number.isFinite(anchor) ? anchor : null;
+                      })();
+                /*
+                 * 交接锁存必须使用**最终显示中心**，而不是未吸附的曲线主簇。
+                 * 普通绘制会把 pitch 中心吸到最近半音行心；若这里锁住 60.4，
+                 * 松手后曲线到位的瞬间就会先显示 60.4、再跳到 60，形成闪烁。
+                 */
+                const commitCenter = resolveParamBlockCommitDisplayCenter({
+                    rawCenter: rawCommitCenter,
+                    param: editParam,
+                    continuous: pitchScaleDrag || lastSnapToggleHeld,
+                });
+                const commitStartedAt = performance.now();
+                if (commitCenter !== null) {
+                    paramBlockDisplayCenterLockRef.current = {
+                        blockId: commitCenterBlockId,
+                        center: commitCenter,
+                        snapToSemitone: false,
+                        releasedAt: Number.NaN,
+                    };
+                }
+                paramBlockDragCommitRef.current = {
+                    blockId: commitCenterBlockId,
+                    center: commitCenter ?? 0,
+                    key: pv.key,
+                    startedAt: commitStartedAt,
+                    startFrame: pv.startFrame,
+                    stride: pv.stride,
+                    committed: false,
+                };
+                const releaseCenterLock = () => {
+                    const lock = paramBlockDisplayCenterLockRef.current;
+                    if (lock !== null && lock.blockId === args.anchorBlockId) {
+                        /*
+                         * 不在提交完成的同一任务里立刻释放：那会先闪回主簇位置，
+                         * 等取数回来再恢复。保留一个短暂的交接窗口，让块持续停在
+                         * 用户松手时的位置；下一次普通块手势或参数切换再清除。
+                         */
+                        lock.releasedAt = performance.now();
+                    }
+                };
                 if (!beginSelectionParamEdit()) {
+                    releaseCenterLock();
                     resetLiveEditPreview(paramViewRef.current ?? pv);
                     invalidate();
                     return;
@@ -3531,12 +3861,36 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                         }
                         onParamCommitSucceeded();
                         bumpRefreshToken();
+                        const handoff = paramBlockDragCommitRef.current;
+                        if (handoff !== null) {
+                            handoff.committed = true;
+                            /*
+                             * 记下本窗口内提交后的下标→值，供释放判定确认本地
+                             * 回显已经生效；`key` 不变时也不能提前撤快照。
+                             */
+                            const values = new Map<number, number>();
+                            for (const window of commitSegments) {
+                                for (let i = 0; i < window.values.length; i += 1) {
+                                    const frame = window.startFrame + i;
+                                    const index = Math.round(
+                                        (frame - handoff.startFrame) / Math.max(1, handoff.stride),
+                                    );
+                                    if (index >= 0) values.set(index, window.values[i] as number);
+                                }
+                            }
+                            handoff.committedValues = [...values.entries()].sort(
+                                (a, b) => a[0] - b[0],
+                            );
+                        }
                     } catch (error) {
                         console.error("[pianoRoll] block drag commit failed", error);
                     } finally {
-                        paramBlockDragSnapshotRef.current = null;
                         endSelectionParamEdit();
                         if (liveEditActiveRef) liveEditActiveRef.current = false;
+                        /*
+                         * 快照不能在这里立刻释放。留在 ref 中，由下一次绘制
+                         * 根据“提交完成 + 曲线窗口同步 / 超时”统一收尾。
+                         */
                         invalidateParamBlockSpec();
                     }
                 })();
@@ -3554,6 +3908,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         [
             applyDenseToLiveEdit,
             bumpRefreshToken,
+            bumpParamBlockStructure,
             editParam,
             effectiveProjectScale,
             invalidate,
@@ -3593,7 +3948,9 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             shiftKey?: boolean;
         }) => {
             if (!paramBlockToolActive) return false;
-            const framedHits = hostRef.current?.getParamBlockHitRects() ?? [];
+            const framedHits = sortParamBlocksByTime(
+                hostRef.current?.getParamBlockHitRects() ?? [],
+            );
             const noSnapKeyHeld = (event: {
                 ctrlKey: boolean;
                 shiftKey: boolean;
@@ -3607,7 +3964,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                     isModifierActive(noSnapKb, event)
                 );
             };
-            const hitRect = hitTestParamBlocks({
+            const hitRect = hitTestParamBlocksAtPoint({
                 blocks: framedHits,
                 sec: hit.sec,
                 localY: hit.localY,
@@ -3618,191 +3975,49 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                         : paramBlockHitSlopPx,
             });
             /*
-             * 宿主首帧尚未产出块几何时（工具刚切换 / 数据刚到），不能用空矩形
-             * 集合当成“点在空白”。改为按时间就近命中，保证第一次点击就能选中，
-             * 而不是要点两次。
+             * 手柄优先于块体：它画在右边界外侧，已经离开块矩形。若先做块体
+             * 命中，手柄区域会被当成空白，后面的手柄手势永远进不去。
+             * 手柄可见时即可拖，不要求块已经选中。
              */
-            const fallbackBlock =
-                hitRect === null && framedHits.length === 0
-                    ? nearestParamBlockByTime(
-                          paramBlocksWithValues,
-                          hit.sec,
-                          paramBlockHitSlopPx / Math.max(1, pxPerSecRef.current),
-                      )
-                    : null;
-            const hitId = hitRect?.id ?? fallbackBlock?.id ?? null;
-            if (hitId === null) {
-                /*
-                 * 在空白处按住并横向拖 = 新建块。它必须发生在块工具内，
-                 * 且达到最小宽度后才提交；短点击仍然只是清空选择。
-                 */
-                if (paramBlockToolActive && hit.add) {
-                    const createStartSec = hit.sec;
-                    const createStartClientX = hit.clientX;
-                    const snapCreateAt = (sec: number, noSnap: boolean): number => {
-                        return snapParamBlockTimeByDefault({
-                            sec,
-                            bpm: s.bpm,
-                            timeSignatureDenominator: s.project.timeSignatureDenominator,
-                            stepBeats: gridStepBeats(s.project.gridSize),
-                            snapToggleHeld: noSnap,
-                        });
-                    };
-                    const noSnapKb = firstBinding(mergedKeybindings["modifier.clipNoSnap"]);
-                    const createNoSnap = (event: {
-                        shiftKey: boolean;
-                        altKey: boolean;
-                        ctrlKey: boolean;
-                        metaKey: boolean;
-                    }) =>
-                        noSnapKb !== undefined &&
-                        !isNoneBinding(noSnapKb) &&
-                        isModifierActive(noSnapKb, event);
-                    let createStartSnappedSec = snapCreateAt(createStartSec, false);
-                    let createTargetSec = createStartSnappedSec;
-                    let createActivated = false;
-                    startPointerGesture({
-                        pointerId: hit.pointerId,
-                        captureTarget: hit.captureTarget,
-                        onMove: (event) => {
-                            const dx = event.clientX - createStartClientX;
-                            if (!createActivated) {
-                                if (Math.abs(dx) < 4) return;
-                                createActivated = true;
-                            }
-                            const target =
-                                createStartSec + dx / Math.max(1e-9, pxPerSecRef.current);
-                            const noSnap = createNoSnap(event);
-                            createStartSnappedSec = snapCreateAt(createStartSec, noSnap);
-                            createTargetSec = snapCreateAt(target, noSnap);
-                            if (noSnap) createStartSnappedSec = createStartSec;
-                            paramBlockResizeRef.current = {
-                                blockId: "__create__",
-                                edge: "right",
-                                pointerClientX: createStartClientX,
-                                startSec: Math.min(createStartSnappedSec, createTargetSec),
-                                endSec: Math.max(createStartSnappedSec, createTargetSec),
-                                neighborStartSec: null,
-                                neighborEndSec: null,
-                                neighbor: null,
-                                targetSec: createTargetSec,
-                            };
-                            const liveSpec =
-                                kernelDataRef.current.paramBlocks ?? paramBlockSpec;
-                            if (liveSpec !== null) {
-                                kernelDataRef.current.paramBlocks = {
-                                    ...liveSpec,
-                                    blocks: [
-                                        ...liveSpec.blocks.filter(
-                                            (block) => block.id !== "__create__",
-                                        ),
-                                        {
-                                            id: "__create__",
-                                            startSec: Math.min(
-                                                createStartSnappedSec,
-                                                createTargetSec,
-                                            ),
-                                            endSec: Math.max(
-                                                createStartSnappedSec,
-                                                createTargetSec,
-                                            ),
-                                            averageValue:
-                                                liveSpec.blocks[0]?.averageValue ?? null,
-                                            selected: true,
-                                            merged: false,
-                                        },
-                                    ],
-                                };
-                            }
-                            invalidate();
-                        },
-                        onEnd: (reason) => {
-                            if (reason === "up" && createActivated) {
-                                const clip = paramBlockClips
-                                    .filter((candidate) =>
-                                        createTargetSec >= candidate.startSec &&
-                                        createStartSnappedSec <=
-                                            candidate.startSec + candidate.lengthSec,
-                                    )
-                                    .sort((a, b) => a.startSec - b.startSec)[0];
-                                if (clip !== undefined) {
-                                    const value =
-                                        paramBlocksWithValues.find(
-                                            (block) =>
-                                                block.startSec <= createStartSnappedSec &&
-                                                block.endSec >= createStartSnappedSec,
-                                        )?.averageValue ?? null;
-                                    applyParamBlockEditRef.current?.(
-                                        createParamBlock({
-                                            state: paramBlockStateRef.current,
-                                            clip,
-                                            startSec: Math.min(
-                                                createStartSnappedSec,
-                                                createTargetSec,
-                                            ),
-                                            endSec: Math.max(
-                                                createStartSnappedSec,
-                                                createTargetSec,
-                                            ),
-                                            value,
-                                            existingBlocks: paramBlocksWithValues,
-                                        }),
-                                    );
-                                    if (s.paramBlockFollowPitch && editParam === "pitch") {
-                                        const createdBlock = {
-                                            id: "__created__",
-                                            rootTrackId: rootTrackId ?? "",
-                                            kind: "auto" as const,
-                                            members: [],
-                                            startSec: Math.min(
-                                                createStartSnappedSec,
-                                                createTargetSec,
-                                            ),
-                                            endSec: Math.max(
-                                                createStartSnappedSec,
-                                                createTargetSec,
-                                            ),
-                                            averageValue: value,
-                                        };
-                                        void normalizeParamBlockPitchRef.current(createdBlock);
-                                    }
-                                }
-                            }
-                            paramBlockResizeRef.current = null;
-                            invalidate();
-                        },
-                        registerEnd: hit.setActivePointerGestureEnd,
-                        clearEnd: hit.clearActivePointerGestureEnd,
-                    });
-                    return true;
-                }
-                setSelectedParamBlockIds([]);
-                setParamBlockMessage(null);
-                setParamBlockContextMenu(null);
-                return true;
-            }
-            const fullBlock = paramBlocksWithValues.find((block) => block.id === hitId);
-            if (fullBlock === undefined) return true;
-            setParamBlockMessage(null);
+            const axisForHandle = hostRef.current?.getAxis();
+            const touchedHandle =
+                axisForHandle === undefined
+                    ? null
+                    : hitTestParamBlockTransitionHandles({
+                          blocks: framedHits,
+                          clientX: hit.clientX - hit.captureTarget.getBoundingClientRect().left,
+                          localY: hit.localY,
+                          secToX: (sec) =>
+                              sec * axisForHandle.pxPerSec - axisForHandle.scrollLeftPx,
+                          outsetPx: PARAM_BLOCK_TRANSITION_HANDLE_OUTSET_X_PX,
+                          outsetYPx: PARAM_BLOCK_TRANSITION_HANDLE_OUTSET_Y_PX,
+                      });
+            const handleEdgeHit =
+                axisForHandle === undefined
+                    ? null
+                    : hitTestParamBlockEdges({
+                          blocks: framedHits,
+                          clientX: hit.clientX - hit.captureTarget.getBoundingClientRect().left,
+                          localY: hit.localY,
+                          secToX: (sec) =>
+                              sec * axisForHandle.pxPerSec - axisForHandle.scrollLeftPx,
+                          hitPx: 8,
+                      });
             /*
-             * 相接块边界的圆滑手柄：只在块高中心 ±6px 命中，避免抢占正常的
-             * 块体拖动。上下拖调过渡宽度，左右拖不改时间边界。
+             * 手柄圆点与左侧块的右边界共线，横向命中区必然覆盖那条伸缩热区。
+             * 因此不能因为“命中了左块右边界”就放弃手柄；只有指针落在**另一块**
+             * （通常是右邻居）的左边界附近，才应优先让边缘伸缩接管。
              */
-            const handleRects = framedHits
-                .filter((rect) => rect.transitionHandle != null)
-                .flatMap((rect) => {
-                    const handle = rect.transitionHandle;
-                    if (handle === null || handle === undefined) return [];
-                    return [{ ...handle, topPx: rect.topPx, heightPx: rect.heightPx }];
-                });
-            const touchedHandle = handleRects.find(
-                (handle) =>
-                    Math.abs(hit.sec - handle.sec) <=
-                        Math.max(0.01, 6 / Math.max(1, pxPerSecRef.current)) &&
-                    hit.localY >= handle.topPx + handle.heightPx / 2 - 7 &&
-                    hit.localY <= handle.topPx + handle.heightPx / 2 + 7,
-            );
-            if (touchedHandle !== undefined && !hit.contextMenu) {
+            const handleStealsEdge =
+                handleEdgeHit !== null &&
+                touchedHandle !== null &&
+                handleEdgeHit.block.id !== touchedHandle.leftId;
+            /*
+             * 手柄在右边界正上方；当它离右块的左边界很近时，用户真正想抓的
+             * 可能是左边界。边缘（左/右边界）在这些位置优先：手柄只在
+             * 不落在任何边缘热区内时才接管。
+             */
+            if (touchedHandle !== null && !handleStealsEdge && !hit.contextMenu) {
                 const leftBlock = paramBlocksWithValues.find(
                     (block) => block.id === touchedHandle.leftId,
                 );
@@ -3810,10 +4025,97 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                     (block) => block.id === touchedHandle.rightId,
                 );
                 if (leftBlock !== undefined && rightBlock !== undefined) {
-                    const startY = hit.clientY;
+                    hit.captureTarget.setPointerCapture?.(hit.pointerId);
+                    const startX = hit.clientX;
                     const startWidth = Math.max(0, touchedHandle.widthSec);
                     let targetWidth = startWidth;
                     let activated = false;
+                    let lastClientX = startX;
+                    const transitionFramePeriodMs = paramViewRef.current?.framePeriodMs ?? 5;
+                    /*
+                     * 手柄拖动只改过渡曲线，不改两个块的高度。
+                     * 手势开始时冻结两块代表值与行高，防止 live 主簇变化
+                     * 让块跟随新重心上下漂移；松手后由正式派生值接替。
+                     */
+                    const lockedLeftCenter = leftBlock.averageValue;
+                    const lockedRightCenter = rightBlock.averageValue;
+                    const lockedHeightPx =
+                        hostRef.current
+                            ?.getParamBlockHitRects()
+                            .find((rect) => rect.id === leftBlock.id)?.heightPx ?? null;
+                    const transitionBoundaryFrame = Math.round(
+                        (rightBlock.startSec * 1000) / transitionFramePeriodMs,
+                    );
+                    const transitionStartBase = (() => {
+                        const pv = paramViewRef.current;
+                        if (pv === null) return null;
+                        ensureLiveEditBase(pv);
+                        // 过渡以相接点为对称中心：冻结两侧最大宽度内的原曲线。
+                        const leftMaxFrames = Math.max(
+                            1,
+                            Math.ceil(
+                                ((leftBlock.endSec - leftBlock.startSec) * 1000) /
+                                    transitionFramePeriodMs,
+                            ),
+                        );
+                        const rightMaxFrames = Math.max(
+                            1,
+                            Math.ceil(
+                                ((rightBlock.endSec - rightBlock.startSec) * 1000) /
+                                    transitionFramePeriodMs,
+                            ),
+                        );
+                        const readStart = Math.max(0, transitionBoundaryFrame - leftMaxFrames);
+                        const readEnd = Math.min(
+                            Math.round((rightBlock.endSec * 1000) / transitionFramePeriodMs) - 1,
+                            transitionBoundaryFrame + rightMaxFrames,
+                        );
+                        return {
+                            pv,
+                            base: readPvRange(pv, readStart, readEnd),
+                            readStart,
+                        };
+                    })();
+                    const applyTransitionPreview = (widthSec: number) => {
+                        const frozen = transitionStartBase;
+                        const pv = paramViewRef.current;
+                        if (frozen === null || pv === null) return;
+                        const source = frozen.pv;
+                        const widthFrames = Math.max(
+                            1,
+                            Math.round((widthSec * 1000) / transitionFramePeriodMs),
+                        );
+                        const segments = buildParamBlockTransitionPreview({
+                            boundaryFrame: transitionBoundaryFrame,
+                            widthFrames,
+                            targetValue: rightBlock.averageValue ?? leftBlock.averageValue ?? 60,
+                            leftStartFrame: Math.max(
+                                0,
+                                Math.floor((leftBlock.startSec * 1000) / transitionFramePeriodMs),
+                            ),
+                            rightEndFrame:
+                                Math.round((rightBlock.endSec * 1000) / transitionFramePeriodMs) -
+                                1,
+                            leftValue: leftBlock.averageValue ?? 60,
+                            rightValue: rightBlock.averageValue ?? 60,
+                            paramView: {
+                                startFrame: frozen.readStart,
+                                stride: source.stride,
+                                edit: frozen.base,
+                            },
+                        });
+                        for (const segment of segments) {
+                            applyDenseToLiveEdit(
+                                pv,
+                                segment.startFrame,
+                                segment.values,
+                                pv.startFrame,
+                                segment.startFrame + segment.values.length - 1,
+                                "draw",
+                            );
+                        }
+                        requestWaveformRepaint();
+                    };
                     const transitionGesture = startPointerGesture({
                         pointerId: hit.pointerId,
                         captureTarget: hit.captureTarget,
@@ -3822,22 +4124,46 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                 transitionGesture.end();
                                 return;
                             }
-                            const dy = event.clientY - startY;
-                            if (!activated && Math.abs(dy) < 3) return;
-                            activated = true;
+                            const dx = event.clientX - startX;
+                            lastClientX = event.clientX;
+                            if (!activated) {
+                                if (Math.abs(dx) < 3) return;
+                                activated = true;
+                            }
                             const perSec = pxPerSecRef.current;
                             targetWidth = Math.max(
                                 0,
                                 Math.min(
-                                    Math.min(
-                                        leftBlock.endSec - leftBlock.startSec,
-                                        rightBlock.endSec - rightBlock.startSec,
-                                    ) / 2,
-                                    startWidth + dy / Math.max(1, perSec),
+                                    (rightBlock.endSec - rightBlock.startSec) / 2,
+                                    startWidth - dx / Math.max(1, perSec),
                                 ),
                             );
-                            const liveSpec =
-                                kernelDataRef.current.paramBlocks ?? paramBlockSpec;
+                            const widthSpec = kernelDataRef.current.paramBlocks ?? paramBlockSpec;
+                            if (widthSpec !== null) {
+                                kernelDataRef.current.paramBlocks = {
+                                    ...widthSpec,
+                                    blocks: widthSpec.blocks.map((block) =>
+                                        block.id === touchedHandle.leftId ||
+                                        block.id === touchedHandle.rightId
+                                            ? {
+                                                  ...block,
+                                                  displayCenterValue:
+                                                      block.id === touchedHandle.leftId
+                                                          ? lockedLeftCenter
+                                                          : lockedRightCenter,
+                                                  displayHeightPx: lockedHeightPx,
+                                              }
+                                            : block,
+                                    ),
+                                };
+                            }
+                            applyTransitionPreview(targetWidth);
+                            /*
+                             * 每次先写冻结块高 / 中心，再把新手柄宽度叠到同一份
+                             * 规格上；从 ref 重读会在 React 重绘的间隙拿到旧手柄，
+                             * 拉动时就会在两个宽度之间闪。
+                             */
+                            const liveSpec = kernelDataRef.current.paramBlocks ?? widthSpec;
                             if (liveSpec !== null) {
                                 kernelDataRef.current.paramBlocks = {
                                     ...liveSpec,
@@ -3857,7 +4183,23 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                             invalidate();
                         },
                         onEnd: (reason) => {
+                            if (reason === "up" && !activated) {
+                                const dx = lastClientX - startX;
+                                if (Math.abs(dx) >= 3) {
+                                    activated = true;
+                                    const perSec = pxPerSecRef.current;
+                                    targetWidth = Math.max(
+                                        0,
+                                        Math.min(
+                                            (rightBlock.endSec - rightBlock.startSec) / 2,
+                                            startWidth - dx / Math.max(1, perSec),
+                                        ),
+                                    );
+                                }
+                            }
                             if (reason === "up" && activated) {
+                                paramBlockDragSnapshotRef.current = null;
+                                invalidateParamBlockSpec();
                                 applyParamBlockEditRef.current?.(
                                     setParamBlockTransition({
                                         state: paramBlockStateRef.current,
@@ -3866,11 +4208,10 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                         transitionSec: targetWidth,
                                     }),
                                 );
-                                void persistTransitionCurve(
-                                    leftBlock,
-                                    rightBlock,
-                                    targetWidth,
-                                );
+                                void persistTransitionCurve(leftBlock, rightBlock, targetWidth);
+                            } else {
+                                const pvNow = paramViewRef.current;
+                                if (pvNow !== null) resetLiveEditPreview(pvNow);
                             }
                             invalidate();
                         },
@@ -3880,6 +4221,228 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                     return true;
                 }
             }
+            /*
+             * 宿主首帧尚未产出块几何时（工具刚切换 / 数据刚到），不能用空矩形
+             * 集合当成“点在空白”。改为按时间就近命中，保证第一次点击就能选中，
+             * 而不是要点两次。
+             */
+            const fallbackBlock =
+                hitRect === null && framedHits.length === 0
+                    ? nearestParamBlockByTime(
+                          paramBlocksWithValues.map((block) => ({
+                              id: block.id,
+                              startSec: block.startSec,
+                              endSec: block.endSec,
+                          })),
+                          hit.sec,
+                          paramBlockHitSlopPx / Math.max(1, pxPerSecRef.current),
+                      )
+                    : null;
+            const hitId = hitRect?.id ?? fallbackBlock?.id ?? null;
+            if (hitId === null) {
+                /*
+                 * 在空白处按住并横向拖 = 新建块。它必须发生在块工具内，
+                 * 且达到最小宽度后才提交；短点击仍然只是清空选择。
+                 */
+                if (paramBlockToolActive && hit.add) {
+                    const createStartSec = hit.sec;
+                    const createStartClientX = hit.clientX;
+                    const createStartClientY = hit.clientY;
+                    const createStartValue = hit.pointerValue(createStartClientY);
+                    const snapCreateAt = (sec: number, noSnap: boolean): number => {
+                        return snapParamBlockTimeByDefault({
+                            sec,
+                            bpm: s.bpm,
+                            timeSignatureDenominator: s.project.timeSignatureDenominator,
+                            stepBeats: gridStepBeats(s.project.gridSize),
+                            snapToggleHeld: noSnap,
+                        });
+                    };
+                    const noSnapKb = firstBinding(mergedKeybindings["modifier.clipNoSnap"]);
+                    const createNoSnap = (event: {
+                        shiftKey: boolean;
+                        altKey: boolean;
+                        ctrlKey: boolean;
+                        metaKey: boolean;
+                    }) =>
+                        noSnapKb !== undefined &&
+                        !isNoneBinding(noSnapKb) &&
+                        isModifierActive(noSnapKb, event);
+                    let createSpan = resolveParamBlockCreateSpan({
+                        anchorSec: createStartSec,
+                        pointerSec: createStartSec,
+                        snapToGrid: (sec) => snapCreateAt(sec, false),
+                        snapEnabled: true,
+                        minBlockSec: Math.max(0.04, 2 / Math.max(1, pxPerSecRef.current)),
+                    });
+                    let createCommitted = false;
+                    let createActivated = false;
+                    const createId = `edit:manual:${hit.sec.toFixed(3)}:${performance.now().toFixed(0)}`;
+                    let createValue = createStartValue;
+                    startPointerGesture({
+                        pointerId: hit.pointerId,
+                        captureTarget: hit.captureTarget,
+                        onMove: (event) => {
+                            if ((event.buttons & 1) !== 1) return;
+                            const dx = event.clientX - createStartClientX;
+                            const dy = event.clientY - createStartClientY;
+                            if (!createActivated) {
+                                if (Math.abs(dx) < 4 && Math.abs(dy) < 4) return;
+                                createActivated = true;
+                            }
+                            const noSnap = createNoSnap(event);
+                            const axis = hostRef.current?.getAxis();
+                            if (axis === undefined) return;
+                            const canvasRect = hit.captureTarget.getBoundingClientRect();
+                            const pointerSec = viewportPxToSec(
+                                axis,
+                                event.clientX - canvasRect.left,
+                            );
+                            /*
+                             * 起点在按下时吸附；当前端点逐帧吸附，因此拖动中
+                             * 的块宽就是最终宽度。按住取消吸附键时只放开当前端点，
+                             * 起点仍保持用户已经看到的网格位置。
+                             */
+                            createSpan = resolveParamBlockCreateSpan({
+                                anchorSec: createStartSec,
+                                pointerSec,
+                                snapToGrid: (sec) => snapCreateAt(sec, false),
+                                snapEnabled: !noSnap,
+                                minBlockSec: Math.max(0.04, 2 / Math.max(1, pxPerSecRef.current)),
+                            });
+                            /*
+                             * 上下移动 = 新建块的目标音高 / 参数值。
+                             *
+                             * 值必须按当前指针重新投影，不能用 `pointerValue(clientY)`
+                             * 的增量：它内部已经减去 pitch 的 0.5 半键视觉偏移，作为
+                             * “曲线值”使用会把整个新块压低半键。这里直接读指针所在
+                             * 行，再按半音 / 网格吸附。
+                             */
+                            const axisValue = yToValue(
+                                editParam,
+                                event.clientY - canvasRect.top,
+                                canvasRect.height,
+                            );
+                            createValue = resolveCreatedParamBlockValue({
+                                pointerValue: editParam === "pitch" ? axisValue - 0.5 : axisValue,
+                                param: editParam,
+                                snapToggleHeld: noSnap,
+                            });
+                            paramBlockResizeRef.current = {
+                                blockId: "__create__",
+                                edge: "right",
+                                pointerClientX: createStartClientX,
+                                startSec: createSpan.startSec,
+                                endSec: createSpan.endSec,
+                                neighborStartSec: null,
+                                neighborEndSec: null,
+                                resizeCandidates: [],
+                                baseBlockSpans: [],
+                                resizePlan: null,
+                                targetSec: createSpan.endSec,
+                                value: createValue,
+                            };
+                            const liveSpec = kernelDataRef.current.paramBlocks ?? paramBlockSpec;
+                            if (liveSpec !== null) {
+                                const preview = previewParamBlockCreateLayout({
+                                    blocks: liveSpec.blocks,
+                                    startSec: createSpan.startSec,
+                                    endSec: createSpan.endSec,
+                                    createId: "__create__",
+                                    value: createValue,
+                                });
+                                kernelDataRef.current.paramBlocks = {
+                                    ...liveSpec,
+                                    blocks: preview.map((block) => ({
+                                        ...block,
+                                        merged: false,
+                                        selected: block.id === "__create__",
+                                        displayCenterValue:
+                                            block.id === "__create__"
+                                                ? createValue
+                                                : (block.displayCenterValue ?? null),
+                                    })),
+                                };
+                            }
+                            /*
+                             * 宿主只在下一帧按 kernelData 重画；这里不能只
+                             * `invalidate()`，否则创建中的块要等松手才出现。
+                             */
+                            hostRef.current?.paintNow();
+                            invalidate();
+                        },
+                        onEnd: (reason) => {
+                            if (
+                                (reason === "up" || reason === "cancel") &&
+                                createActivated &&
+                                !createCommitted
+                            ) {
+                                createCommitted = true;
+                                const clip =
+                                    clipAtParamBlockCreateSpan({
+                                        clips: paramBlockClips,
+                                        startSec: createSpan.startSec,
+                                        endSec: createSpan.endSec,
+                                    }) ?? undefined;
+                                if (clip !== undefined) {
+                                    applyParamBlockEditRef.current?.(
+                                        createParamBlock({
+                                            state: paramBlockStateRef.current,
+                                            clip,
+                                            blockId: createId,
+                                            startSec: createSpan.startSec,
+                                            endSec: createSpan.endSec,
+                                            value: createValue,
+                                            existingBlocks: paramBlocksWithValues,
+                                        }),
+                                    );
+                                    if (s.paramBlockFollowPitch && editParam === "pitch") {
+                                        const createdBlock = {
+                                            id: "__created__",
+                                            rootTrackId: rootTrackId ?? "",
+                                            kind: "auto" as const,
+                                            members: [],
+                                            startSec: createSpan.startSec,
+                                            endSec: createSpan.endSec,
+                                            averageValue: createValue,
+                                        };
+                                        void normalizeParamBlockPitchRef.current(createdBlock);
+                                    }
+                                    setSelectedParamBlockIds([createId]);
+                                }
+                            }
+                            paramBlockResizeRef.current = null;
+                            bumpParamBlockStructure();
+                            invalidate();
+                        },
+                        registerEnd: hit.setActivePointerGestureEnd,
+                        clearEnd: hit.clearActivePointerGestureEnd,
+                    });
+                    return true;
+                }
+                setSelectedParamBlockIds([]);
+                setParamBlockMessage(null);
+                setParamBlockContextMenu(null);
+                return true;
+            }
+            const fullBlock = paramBlocksWithValues.find((block) => block.id === hitId);
+            if (fullBlock === undefined) return true;
+            setParamBlockMessage(null);
+            if (hit.contextMenu) {
+                paramBlockClickCandidateRef.current = null;
+            }
+            /* 命中优先级：手柄已在上方入口处理；这里只剩边缘缩放 > 块体。 */
+            const axis = hostRef.current?.getAxis();
+            const edgeHit =
+                axis === undefined
+                    ? null
+                    : hitTestParamBlockEdges({
+                          blocks: framedHits.filter((rect) => rect.id === fullBlock.id),
+                          clientX: hit.clientX - hit.captureTarget.getBoundingClientRect().left,
+                          localY: hit.localY,
+                          secToX: (sec) => sec * axis.pxPerSec - axis.scrollLeftPx,
+                          hitPx: 8,
+                      });
             if (hit.contextMenu) {
                 /*
                  * 右键块开始框选；右键空白仍由曲线菜单处理。
@@ -3931,8 +4494,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                             rect.topPx + rect.heightPx >= topLocal,
                                     )
                                     .filter((rect) => {
-                                        const startPx =
-                                            (rect.startSec ?? 0) * pxPerSecRef.current;
+                                        const startPx = (rect.startSec ?? 0) * pxPerSecRef.current;
                                         const endPx = (rect.endSec ?? 0) * pxPerSecRef.current;
                                         return endPx >= leftLocal && startPx <= rightLocal;
                                     })
@@ -3947,40 +4509,65 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 });
                 return true;
             }
-            /*
-             * 边缘缩放只留 2px 热区，并在第一次水平移动超过 3px 后才真正
-             * 接管手势。否则用户在块边缘附近上下拖音高时会被误判成缩放，
-             * 参数线反而完全不动。
-             */
-            const edgeHitPx = 2;
-            const edgeToleranceSec = edgeHitPx / Math.max(1, pxPerSecRef.current);
-            const resizeEdge =
-                Math.abs(hit.sec - fullBlock.startSec) <= edgeToleranceSec
-                    ? "left"
-                    : Math.abs(hit.sec - fullBlock.endSec) <= edgeToleranceSec
-                      ? "right"
-                      : null;
-            if (resizeEdge !== null) {
-                const neighbor = paramBlocksWithValues
-                    .filter((block) => block.id !== fullBlock.id)
-                    .filter((block) =>
-                        resizeEdge === "left"
-                            ? block.endSec <= fullBlock.startSec + 1e-6
-                            : block.startSec >= fullBlock.endSec - 1e-6,
-                    )
-                    .sort((a, b) =>
-                        resizeEdge === "left" ? b.endSec - a.endSec : a.startSec - b.startSec,
-                    )[0];
+            if (edgeHit !== null) {
+                const resizeEdge = edgeHit.edge;
+                /*
+                 * 一次伸缩可能跨过空隙、连续覆盖多个块。候选集按拖动方向
+                 * 由近到远排列，最终哪些块缩短 / 删除由共享计划决定。
+                 */
+                const resizeCandidates = paramBlockResizeCandidates(
+                    paramBlocksWithValues,
+                    fullBlock,
+                    resizeEdge,
+                );
+                const resizePlan = resolveParamBlockResizePlan({
+                    edge: resizeEdge,
+                    blockStartSec: fullBlock.startSec,
+                    blockEndSec: fullBlock.endSec,
+                    targetSec: resizeEdge === "left" ? fullBlock.startSec : fullBlock.endSec,
+                    neighbors: resizeCandidates,
+                    minBlockSec: Math.max(0.04, 2 / Math.max(1, pxPerSecRef.current)),
+                });
                 const gestureRef = {
                     blockId: fullBlock.id,
                     edge: resizeEdge,
                     pointerClientX: hit.clientX,
                     startSec: fullBlock.startSec,
                     endSec: fullBlock.endSec,
-                    neighborStartSec: neighbor?.startSec ?? null,
-                    neighborEndSec: neighbor?.endSec ?? null,
-                    neighbor: neighbor === undefined ? null : neighbor,
-                    targetSec: resizeEdge === "left" ? fullBlock.startSec : fullBlock.endSec,
+                    neighborStartSec: resizeCandidates[0]?.startSec ?? null,
+                    neighborEndSec: resizeCandidates[0]?.endSec ?? null,
+                    resizeCandidates,
+                    baseBlockSpans:
+                        hostRef.current
+                            ?.getParamBlockHitRects()
+                            .map((rect) => ({
+                                id: rect.id,
+                                startSec: rect.startSec,
+                                endSec: rect.endSec,
+                            })) ?? [
+                            {
+                                id: fullBlock.id,
+                                startSec: fullBlock.startSec,
+                                endSec: fullBlock.endSec,
+                            },
+                            ...resizeCandidates.map((block) => ({
+                                id: block.id,
+                                startSec: block.startSec,
+                                endSec: block.endSec,
+                            })),
+                        ],
+                    resizePlan,
+                    displayCenterValue: fullBlock.averageValue,
+                    // 块高按当前行高冻结（1.2 × row），A snapshot 的 heightPx 在
+                    // spec 里是视口坐标，可直接沿用；缺省时由 kernel 按本帧行高重算。
+                    displayHeightPx:
+                        hostRef.current
+                            ?.getParamBlockHitRects()
+                            .find((rect) => rect.id === fullBlock.id)?.heightPx ?? null,
+                    targetSec:
+                        resizeEdge === "left"
+                            ? resizePlan.block.startSec
+                            : resizePlan.block.endSec,
                 } as NonNullable<typeof paramBlockResizeRef.current>;
                 paramBlockResizeRef.current = gestureRef;
                 let activateResize = false;
@@ -4007,54 +4594,89 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                         const targetSec =
                             (gestureRef.edge === "left" ? gestureRef.startSec : gestureRef.endSec) +
                             dx / Math.max(1e-9, pxPerSecRef.current);
-                        const snappedTargetSec = snapParamBlockTimeByDefault({
-                            sec: targetSec,
-                            bpm: s.bpm,
-                            timeSignatureDenominator: s.project.timeSignatureDenominator,
-                            stepBeats: gridStepBeats(s.project.gridSize),
-                            snapToggleHeld: noSnapKeyHeld(event),
+                        const minBlockSec = Math.max(0.04, 2 / Math.max(1, pxPerSecRef.current));
+                        const snappedTarget = resolveParamBlockResizeTarget({
+                            edge: gestureRef.edge,
+                            startSec: gestureRef.startSec,
+                            endSec: gestureRef.endSec,
+                            rawTargetSec: targetSec,
+                            unclampedTargetSec: targetSec,
+                            snapToGrid: (sec) =>
+                                noSnapKeyHeld(event)
+                                    ? sec
+                                    : snapParamBlockTimeByDefault({
+                                          sec,
+                                          bpm: s.bpm,
+                                          timeSignatureDenominator:
+                                              s.project.timeSignatureDenominator,
+                                          stepBeats: gridStepBeats(s.project.gridSize),
+                                          snapToggleHeld: false,
+                                      }),
+                            minBlockSec,
+                            neighborStartSec: gestureRef.neighborStartSec,
+                            neighborEndSec: gestureRef.neighborEndSec,
+                        });
+                        gestureRef.resizePlan = resolveParamBlockResizePlan({
+                            edge: gestureRef.edge,
+                            blockStartSec: gestureRef.startSec,
+                            blockEndSec: gestureRef.endSec,
+                            targetSec: snappedTarget,
+                            neighbors: gestureRef.resizeCandidates,
+                            minBlockSec,
                         });
                         gestureRef.targetSec =
                             gestureRef.edge === "left"
-                                ? Math.min(
-                                      gestureRef.startSec - 0.04,
-                                      Math.max(
-                                          gestureRef.neighborEndSec ?? Number.NEGATIVE_INFINITY,
-                                          snappedTargetSec,
-                                      ),
-                                  )
-                                : Math.max(
-                                      gestureRef.endSec + 0.04,
-                                      Math.min(
-                                          gestureRef.neighborStartSec ?? Number.POSITIVE_INFINITY,
-                                          snappedTargetSec,
-                                      ),
-                                  );
+                                ? gestureRef.resizePlan.block.startSec
+                                : gestureRef.resizePlan.block.endSec;
                         /*
                          * 拖动中直接刷新宿主块规格。`invalidate()` 只重绘现有
                          * GL 实例，不会重算 React memo；边缘必须在 onMove 里
                          * 立刻写新几何，否则要等松手后的状态提交才动。
                          */
-                        const liveSpec =
-                            kernelDataRef.current.paramBlocks ?? paramBlockSpec;
+                        const liveSpec = kernelDataRef.current.paramBlocks ?? paramBlockSpec;
                         if (liveSpec !== null) {
+                            const plan = gestureRef.resizePlan;
+                            if (plan === null) return;
+                            /*
+                             * 每帧都从**手势起点**重新投影；不能从上一帧 live
+                             * 列表继续，否则块一旦被判定删除，后续再拉回来时
+                             * 已经没有源块，预览会永远缺失到松手。
+                             */
+                            const displayBlocks = projectParamBlockResizeDisplay({
+                                baseBlocks: gestureRef.baseBlockSpans,
+                                blockId: gestureRef.blockId,
+                                plan,
+                            });
+                            const displayById = new Map(
+                                displayBlocks.map((block) => [block.id, block]),
+                            );
                             kernelDataRef.current.paramBlocks = {
                                 ...liveSpec,
-                                blocks: liveSpec.blocks.map((block) =>
-                                    block.id === gestureRef.blockId
-                                        ? {
-                                              ...block,
-                                              startSec:
-                                                  gestureRef.edge === "left"
-                                                      ? gestureRef.targetSec
-                                                      : gestureRef.startSec,
-                                              endSec:
-                                                  gestureRef.edge === "right"
-                                                      ? gestureRef.targetSec
-                                                      : gestureRef.endSec,
-                                          }
-                                        : block,
-                                ),
+                                blocks: gestureRef.baseBlockSpans.flatMap((base) => {
+                                    const shown = displayById.get(base.id);
+                                    if (shown === undefined) return [];
+                                    const original =
+                                        liveSpec.blocks.find((block) => block.id === base.id) ??
+                                        latestParamBlockSpecRef.current?.blocks.find(
+                                            (block) => block.id === base.id,
+                                        );
+                                    return [
+                                        {
+                                            ...(original ?? {
+                                                id: base.id,
+                                                averageValue: null,
+                                                selected: false,
+                                                merged: false,
+                                            }),
+                                            startSec: shown.startSec,
+                                            endSec: shown.endSec,
+                                            selected:
+                                                shown.selected ||
+                                                (original?.selected === true &&
+                                                    base.id !== gestureRef.blockId),
+                                        },
+                                    ];
+                                }),
                             };
                         }
                         invalidate();
@@ -4064,19 +4686,45 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                             (block) => block.id === gestureRef.blockId,
                         );
                         if (reason === "up" && activateResize && latest !== undefined) {
-                            applyParamBlockEditRef.current?.(
-                                resizeParamBlock({
-                                    state: paramBlockStateRef.current,
-                                    block: latest,
-                                    edge: gestureRef.edge,
-                                    targetSec: gestureRef.targetSec,
-                                    neighborStartSec: gestureRef.neighborStartSec,
-                                    neighborEndSec: gestureRef.neighborEndSec,
-                                    neighbor: gestureRef.neighbor,
-                                }),
+                            const minBlockSec = Math.max(
+                                0.04,
+                                2 / Math.max(1, pxPerSecRef.current),
                             );
+                            const plan = gestureRef.resizePlan;
+                            const removeSelf = plan?.removeBlock === true;
+                            if (!removeSelf && plan !== null) {
+                                paramBlockCommittedSpanRef.current = {
+                                    blockId: latest.id,
+                                    blockSpan: plan.block,
+                                    neighbors: plan.neighbors,
+                                    expiresAt: performance.now() + 800,
+                                };
+                            }
+                            applyParamBlockEditRef.current?.(
+                                removeSelf
+                                    ? removeParamBlockAtMinWidth({
+                                          state: paramBlockStateRef.current,
+                                          block: latest,
+                                      })
+                                    : resizeParamBlock({
+                                          state: paramBlockStateRef.current,
+                                          block: latest,
+                                          edge: gestureRef.edge,
+                                          targetSec: gestureRef.targetSec,
+                                          targetSpan: plan?.block ?? null,
+                                          neighborSpans: plan?.neighbors,
+                                          neighborBlocks: gestureRef.resizeCandidates,
+                                          minBlockSec,
+                                      }),
+                            );
+                            if (removeSelf) {
+                                setSelectedParamBlockIds((ids) =>
+                                    ids.filter((id) => id !== latest.id),
+                                );
+                            }
                         }
                         paramBlockResizeRef.current = null;
+                        bumpParamBlockStructure();
                         invalidate();
                     },
                     registerEnd: hit.setActivePointerGestureEnd,
@@ -4100,13 +4748,30 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                   : [fullBlock.id];
             setParamBlockContextMenu(null);
             setSelectedParamBlockIds(dragSelection);
+            bumpParamBlockStructure();
+            if (!hit.contextMenu) {
+                paramBlockDoubleClickTokenRef.current += 1;
+                paramBlockClickCandidateRef.current = {
+                    blockId: fullBlock.id,
+                    token: `block:${paramBlockDoubleClickTokenRef.current}`,
+                    at: performance.now(),
+                };
+            }
             /*
              * Alt + 上下拖 = 块内音高缩放。Alt 是参数编辑器已有的参数
              * 修饰键（拉伸/精细调整都是它），但块工具下它只作用在块身上：
              * 不会进入块平移，也不改变块的起止时间。
              */
-            const pitchScaleGesture =
-                editParam === "pitch" && hit.altKey === true;
+            const pitchScaleGesture = editParam === "pitch" && hit.altKey === true;
+            if (pitchScaleGesture && fullBlock.averageValue !== null) {
+                paramBlockDisplayCenterLockRef.current = {
+                    blockId: fullBlock.id,
+                    center: fullBlock.averageValue,
+                    snapToSemitone: false,
+                    releasedAt: Number.NaN,
+                };
+                invalidateParamBlockSpec();
+            }
             /*
              * 用**这一次按下已经命中的块**开始拖动，而不是等 React 把选中状态
              * 提交后再回头找。否则首次按住块时 selected 还是上一帧的空集合，
@@ -4134,6 +4799,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         [
             editParam,
             beginParamBlockDrag,
+            bumpParamBlockStructure,
             invalidate,
             paramBlockClips,
             paramBlockToolActive,
@@ -4253,7 +4919,11 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     const applyParamBlockEdit = useCallback(
         (result: ReturnType<typeof splitParamBlock>, onSuccess?: () => void) => {
             if (!result.ok) {
-                setParamBlockMessage("param_blocks_split_too_short");
+                setParamBlockMessage(
+                    result.reason === "too_short"
+                        ? "param_blocks_split_too_short"
+                        : "param_blocks_delete_blocked",
+                );
                 return;
             }
             setParamBlockState(result.state);
@@ -4290,10 +4960,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                     clip: paramBlockClips.find((clip) =>
                         selected.members.some((member) => member.clipId === clip.id),
                     ),
-                    minBlockSec: Math.max(
-                        0.04,
-                        2 / Math.max(1, pxPerSecRef.current),
-                    ),
+                    minBlockSec: Math.max(0.04, 2 / Math.max(1, pxPerSecRef.current)),
                 }),
                 () => setSelectedParamBlockIds([]),
             );
@@ -4342,20 +5009,15 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             });
             bumpRefreshToken();
         },
-        [
-            bumpRefreshToken,
-            editParam,
-            paramView,
-            rootTrackId,
-        ],
+        [bumpRefreshToken, editParam, paramView, rootTrackId],
     );
     const normalizeParamBlockPitchRef = useRef(normalizeParamBlockPitch);
     normalizeParamBlockPitchRef.current = normalizeParamBlockPitch;
     /**
-     * 双击块 = 在指针位置切开当前块。
+     * 双击块 = 把整块音高归一到最近半音。切分保留右键菜单 / S 键。
      *
-     * 用双击而不是右键菜单作为主入口，是因为切分位置本身就是指针的时间点；
-     * 右键仍保留同一动作，方便精确地在已知时间点操作。只在块工具激活时生效。
+     * 块工具下 pointerdown 会接管指针，但左键不能调用 preventDefault，
+     * 否则兼容 mouse 事件被抑制、dblclick 永远不派发。
      */
     const onCanvasDoubleClick = useCallback(
         (event: React.MouseEvent<HTMLCanvasElement>) => {
@@ -4363,58 +5025,176 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             const rect = event.currentTarget.getBoundingClientRect();
             const axis = hostRef.current?.getAxis();
             if (axis === undefined) return;
-            const sec = viewportPxToSec(axis, event.clientX - rect.left);
+            const localX = event.clientX - rect.left;
+            const localY = event.clientY - rect.top;
+            /*
+             * 双击手柄 = 恢复原始状态：
+             * 1. 删除这条相接关系的 transitionSec 覆盖，块回到默认硬切换；
+             * 2. 从当前相接点向两侧写回**提交态原曲线**，撤掉手柄扭曲。
+             *
+             * 必须先判手柄、再判块，否则手柄位于块顶上方，会被块体双击
+             * 分支漏掉（或误当成“音高归一化”）。
+             */
+            const transitionHandle = hitTestParamBlockTransitionHandles({
+                blocks: sortParamBlocksByTime(hostRef.current?.getParamBlockHitRects() ?? []),
+                clientX: localX,
+                localY,
+                secToX: (value) => value * axis.pxPerSec - axis.scrollLeftPx,
+                outsetPx: PARAM_BLOCK_TRANSITION_HANDLE_OUTSET_X_PX,
+                outsetYPx: PARAM_BLOCK_TRANSITION_HANDLE_OUTSET_Y_PX,
+            });
+            if (transitionHandle !== null) {
+                const leftBlock = paramBlocksWithValues.find(
+                    (item) => item.id === transitionHandle.leftId,
+                );
+                const rightBlock = paramBlocksWithValues.find(
+                    (item) => item.id === transitionHandle.rightId,
+                );
+                if (leftBlock !== undefined && rightBlock !== undefined) {
+                    event.preventDefault();
+                    paramBlockClickCandidateRef.current = null;
+                    applyParamBlockEditRef.current?.(
+                        setParamBlockTransition({
+                            state: paramBlockStateRef.current,
+                            left: leftBlock,
+                            right: rightBlock,
+                            transitionSec: 0,
+                        }),
+                    );
+                    /*
+                     * 过渡曲线不是音频数据，撤销它需要写回提交态原值；
+                     * 宽度 0 的提交函数会同时清空 live 覆盖并按帧恢复
+                     * 相接点两侧的曲线。
+                     */
+                    void persistTransitionCurve(leftBlock, rightBlock, 0, {
+                        restoreOriginal: true,
+                    });
+                    invalidateParamBlockSpec();
+                    return;
+                }
+            }
+            const sec = viewportPxToSec(axis, localX);
+            /*
+             * 双击事件在块工具里可能被 pointerdown 的“选中 + 捕获”抢先处理；
+             * 这里同时接受“本次指针下的实时矩形命中”和“刚刚按下的块候选”，
+             * 后者只按稳定 block id 找到当前派生块，绝不使用过期的几何。
+             */
+            const framedHits = sortParamBlocksByTime(
+                hostRef.current?.getParamBlockHitRects() ?? [],
+            );
             const hit = hitTestParamBlocks({
-                blocks: hostRef.current?.getParamBlockHitRects() ?? [],
+                blocks: framedHits,
                 sec,
-                localY: event.clientY - rect.top,
+                localY,
                 slopPx: paramBlockHitSlopPx,
             });
-            if (hit === null) return;
-            /*
-             * 块主体任意位置都可双击切分：双击不会移动块，和上下拖动不冲突。
-             * 右键“在此切开”保留同一动作，并提供不依赖双击时序的入口。
-             */
-            const block = paramBlocksWithValues.find((item) => item.id === hit.id);
+            const candidate = paramBlockClickCandidateRef.current;
+            const candidateBlock =
+                candidate === null || performance.now() - candidate.at > 700
+                    ? null
+                    : (paramBlocksWithValues.find((item) => item.id === candidate.blockId) ?? null);
+            const candidateHit =
+                candidateBlock !== null &&
+                sec >= candidateBlock.startSec &&
+                sec <= candidateBlock.endSec
+                    ? candidateBlock
+                    : null;
+            const blockId = hit?.id ?? candidateHit?.id ?? null;
+            if (blockId === null) return;
+            const block = paramBlocksWithValues.find((item) => item.id === blockId);
             if (block === undefined) return;
+            paramBlockClickCandidateRef.current = null;
             void normalizeParamBlockPitchRef.current(block);
             event.preventDefault();
         },
-        [
-            hostRef,
-            paramBlockHitSlopPx,
-            paramBlockToolActive,
-            paramBlocksWithValues,
-        ],
+        [hostRef, paramBlockHitSlopPx, paramBlockToolActive, paramBlocksWithValues],
     );
     const onCanvasPointerMoveForBlocks = useCallback(
         (event: React.PointerEvent<HTMLCanvasElement>) => {
-            if (!paramBlockToolActive || event.buttons !== 0) return false;
+            if (!paramBlockToolActive) return false;
+            if (event.buttons !== 0) {
+                // 手势期间保持拖动光标；由 pointerup 的默认光标接替。
+                setCanvasCursor(
+                    paramBlockResizeRef.current?.blockId === "__create__"
+                        ? "crosshair"
+                        : "grabbing",
+                );
+                return true;
+            }
             const rect = event.currentTarget.getBoundingClientRect();
+            const localX = event.clientX - rect.left;
+            const localY = event.clientY - rect.top;
             const axis = hostRef.current?.getAxis();
-            if (axis === undefined) return;
-            const sec = viewportPxToSec(axis, event.clientX - rect.left);
+            if (axis === undefined) return false;
+            const sec = viewportPxToSec(axis, localX);
+            const framedHits = hostRef.current?.getParamBlockHitRects() ?? [];
+            const secToX = (value: number) => value * axis.pxPerSec - axis.scrollLeftPx;
+            const transition = hitTestParamBlockTransitionHandles({
+                // 手柄可见时即可抓住；首次 hover 不依赖块已选中。
+                blocks: framedHits,
+                clientX: localX,
+                localY,
+                secToX,
+                outsetPx: PARAM_BLOCK_TRANSITION_HANDLE_OUTSET_X_PX,
+                outsetYPx: PARAM_BLOCK_TRANSITION_HANDLE_OUTSET_Y_PX,
+            });
+            if (transition !== null) {
+                setCanvasCursor(paramBlockCursorForHover("transition"));
+                hoveredParamBlockIdRef.current = transition.leftId;
+                hoveredTransitionIdRef.current = transition.leftId;
+                return true;
+            }
             const hit = hitTestParamBlocks({
-                blocks: hostRef.current?.getParamBlockHitRects() ?? [],
+                blocks: framedHits,
                 sec,
-                localY: event.clientY - rect.top,
+                localY,
                 slopPx: paramBlockHitSlopPx,
             });
             if (hit === null) return false;
             const block = paramBlocksWithValues.find((item) => item.id === hit.id);
             if (block === undefined) return false;
-            const edgePx = 3;
-            const toleranceSec = edgePx / Math.max(1, pxPerSecRef.current);
+            const edge = hitTestParamBlockEdges({
+                blocks: framedHits,
+                clientX: localX,
+                localY,
+                secToX,
+                hitPx: 8,
+            });
+            /* 手柄在右边缘外侧上方，已在上面优先处理；这里只剩边缘与块体。 */
             setCanvasCursor(
-                Math.abs(sec - block.startSec) <= toleranceSec ||
-                    Math.abs(sec - block.endSec) <= toleranceSec
-                    ? "ew-resize"
-                    : "grab",
+                paramBlockCursorForHover(
+                    edge !== null ? (edge.edge === "left" ? "left-edge" : "right-edge") : "body",
+                ),
             );
+            /*
+             * 悬停状态只用于光标与局部强调；它不重建块数据，避免在一次普通
+             * hover 里改变手柄的可见性结构。
+             */
+            const nextHoverBlockId = null;
+            const nextTransitionId = null;
+            if (
+                hoveredParamBlockIdRef.current !== nextHoverBlockId ||
+                hoveredTransitionIdRef.current !== nextTransitionId
+            ) {
+                /*
+                 * Hover is computed from the **host's frame geometry**, while
+                 * `invalidateParamBlockSpec()` rebuilds from React state. The two
+                 * can disagree for a frame (selection commit is async), and the
+                 * rebuilt spec may drop every transition handle. Keep the refs for
+                 * visual hover only; do not invalidate the structural spec here.
+                 */
+                hoveredParamBlockIdRef.current = nextHoverBlockId;
+                hoveredTransitionIdRef.current = nextTransitionId;
+            }
             return true;
         },
-        // eslint-disable-next-line react-hooks/exhaustive-deps -- hostRef/pxPerSecRef 是事件期只读的稳定 ref；其 current 变化不应重建回调。
-        [paramBlockHitSlopPx, paramBlockToolActive, paramBlocksWithValues, setCanvasCursor],
+        [
+            paramBlockHitSlopPx,
+            paramBlockToolActive,
+            paramBlocksWithValues,
+            selectedParamBlockIdSet,
+            setCanvasCursor,
+        ],
     );
     paramBlockPointerRef.current = onParamBlockPointerDown;
     useEffect(() => {
@@ -4455,10 +5235,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                         clip: paramBlockClips.find((clip) =>
                             selected.members.some((member) => member.clipId === clip.id),
                         ),
-                        minBlockSec: Math.max(
-                            0.04,
-                            2 / Math.max(1, pxPerSecRef.current),
-                        ),
+                        minBlockSec: Math.max(0.04, 2 / Math.max(1, pxPerSecRef.current)),
                     }),
                 );
                 return;
@@ -4480,7 +5257,46 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         selectedParamBlockIdSet,
         selectedParamBlockIds.length,
     ]);
+    /**
+     * 块层数据是命令式写入宿主的；用受控 effect 在选中集合变化时立即冲刷，
+     * 避免 React 选择态已经更新、宿主仍持有上一个 spec 的情况。
+     */
+    useEffect(() => {
+        hostRef.current?.invalidate();
+    }, [hostRef, selectedParamBlockIds]);
     const paramBlockSpec = useMemo<PianoRollParamBlockSpec | null>(() => {
+        /*
+         * 提交后的交接：快照一直保留到 `paramView` 真正包含松手时的值，
+         * 或超时兜底；这样绘制顺序不会露出旧主簇那一帧。
+         */
+        if (paramBlockDragCommitRef.current !== null) {
+            const handoff = paramBlockDragCommitRef.current;
+            const pvNow = paramViewRef.current;
+            const curveSettled = pvNow !== null && pvNow.key !== handoff.key;
+            const valuesApplied =
+                pvNow !== null &&
+                handoff.committedValues !== undefined &&
+                handoff.committedValues.length > 0 &&
+                handoff.committedValues.every(([index, value]) => {
+                    const current = pvNow.edit[index];
+                    return (
+                        Number.isFinite(current) &&
+                        Math.abs((current as number) - value) <= 1e-6
+                    );
+                });
+            if (
+                canReleaseParamBlockDragCommit({
+                    committed: handoff.committed,
+                    startedAt: handoff.startedAt,
+                    now: performance.now(),
+                    curveSettled,
+                    valuesApplied,
+                })
+            ) {
+                paramBlockDragCommitRef.current = null;
+                paramBlockDragSnapshotRef.current = null;
+            }
+        }
         /*
          * 边缘伸缩 / 新建块的预览必须优先于拖拽快照。以前这里先检查
          * `paramBlockDragSnapshotRef`，而它的 key 与 `paramView.key` 相同，
@@ -4489,10 +5305,11 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
          */
         const resizing = paramBlockResizeRef.current;
         if (resizing !== null && paramView !== null) {
-            const resizeStart = resizing.edge === "left" ? resizing.targetSec : resizing.startSec;
-            const resizeEnd = resizing.edge === "right" ? resizing.targetSec : resizing.endSec;
+            const resizeStart = resizing.resizePlan?.block.startSec ?? resizing.startSec;
+            const resizeEnd = resizing.resizePlan?.block.endSec ?? resizing.endSec;
             if (resizing.blockId === "__create__") {
                 const value =
+                    resizing.value ??
                     averageParamValueInSpan({
                         startSec: Math.min(resizeStart, resizeEnd),
                         endSec: Math.max(resizeStart, resizeEnd),
@@ -4538,9 +5355,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                     ),
                     selectedRgba: parseRgbaColor(
                         normalizeCssColor(
-                            themeMode === "dark"
-                                ? "rgba(210,242,255,1)"
-                                : "rgba(0,72,128,1)",
+                            themeMode === "dark" ? "rgba(210,242,255,1)" : "rgba(0,72,128,1)",
                         ),
                     ),
                     mergedRgba: parseRgbaColor(
@@ -4596,51 +5411,66 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 valueMax: bounds.max,
                 valueToY: (value, heightPx) => valueToY(editParam, value, heightPx),
                 /*
-                 * 压缩邻居也要在同一帧换边界；只改被拖块会让右边缘越过
-                 * 邻居后再“弹回”，看起来不像连续延展。
+                 * 预览每帧从手势起点重新投影，而不是从上一帧的可见块继续。
+                 * 否则块被判定删除后会从源集合里消失，指针再拉回来也无法恢复。
                  */
-                blocks: paramBlocksWithValues.map((block) => {
-                    if (block.id === resizing.blockId) {
-                        return {
+                blocks: (() => {
+                    const plan = resizing.resizePlan;
+                    if (plan === null) {
+                        return paramBlocksWithValues.map((block) => ({
                             id: block.id,
-                            startSec: resizeStart,
-                            endSec: Math.max(resizeStart, resizeEnd),
-                            averageValue: block.averageValue,
-                            selected: true,
-                            merged: block.kind === "merged",
-                        };
-                    }
-                    const neighbor = resizing.neighbor;
-                    if (neighbor !== null && block.id === neighbor.id) {
-                        return {
-                            id: block.id,
-                            startSec:
-                                resizing.edge === "right"
-                                    ? Math.max(resizing.targetSec, block.startSec)
-                                    : block.startSec,
-                            endSec:
-                                resizing.edge === "left"
-                                    ? Math.min(resizing.targetSec, block.endSec)
-                                    : block.endSec,
+                            startSec: block.startSec,
+                            endSec: block.endSec,
                             averageValue: block.averageValue,
                             selected: false,
                             merged: block.kind === "merged",
-                        };
+                        }));
                     }
-                    return {
-                        id: block.id,
-                        startSec: block.startSec,
-                        endSec: block.endSec,
-                        averageValue: block.averageValue,
-                        selected: false,
-                        merged: block.kind === "merged",
-                    };
-                }),
+                    const display = projectParamBlockResizeDisplay({
+                        baseBlocks: resizing.baseBlockSpans,
+                        blockId: resizing.blockId,
+                        plan,
+                    });
+                    return display.map((shown) => {
+                        const block = paramBlocksWithValues.find(
+                            (candidate) => candidate.id === shown.id,
+                        );
+                        return {
+                            id: shown.id,
+                            startSec: shown.startSec,
+                            endSec: shown.endSec,
+                            averageValue: block?.averageValue ?? null,
+                            displayCenterValue:
+                                shown.id === resizing.blockId
+                                    ? (resizing.displayCenterValue ?? null)
+                                    : null,
+                            /* 时间伸缩不改音高，显示中心保持吸附行心。 */
+                            displayCenterSnapToSemitone: true,
+                            displayHeightPx:
+                                shown.id === resizing.blockId
+                                    ? (resizing.displayHeightPx ?? null)
+                                    : null,
+                            selected: shown.selected,
+                            merged: block?.kind === "merged",
+                        };
+                    });
+                })(),
                 borderRgba: parseRgbaColor(
                     normalizeCssColor(
                         themeMode === "dark" ? "rgba(124,198,236,0.95)" : "rgba(31,103,160,0.95)",
                     ),
                 ),
+                transitionRgba: parseRgbaColor(
+                    normalizeCssColor(
+                        themeMode === "dark" ? "rgba(219,246,255,0.92)" : "rgba(0,94,156,0.90)",
+                    ),
+                ),
+                transitionPointRgba: parseRgbaColor(
+                    normalizeCssColor(
+                        themeMode === "dark" ? "rgba(255,255,255,1)" : "rgba(0,66,112,1)",
+                    ),
+                ),
+                transitionPointRadiusPx: 2.5,
                 selectedRgba: parseRgbaColor(
                     normalizeCssColor(
                         themeMode === "dark" ? "rgba(210,242,255,1)" : "rgba(0,72,128,1)",
@@ -4685,14 +5515,34 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         if (dragSnapshot !== null && dragSnapshot.key === paramView?.key) {
             return paramBlockSpecForDragSnapshot(dragSnapshot);
         }
+        /*
+         * 提交后的短暂交接：只有当前派生还没有反映刚提交的区间时才用快照
+         * 覆盖。一旦 state 更新到位，块会自然走正常派生，不会永久钉住。
+         */
+        const committed = paramBlockCommittedSpanRef.current;
+        if (committed !== null) {
+            const now = performance.now();
+            const current = paramBlocksWithValues.find((block) => block.id === committed.blockId);
+            const settled =
+                current !== undefined &&
+                Math.abs(current.startSec - committed.blockSpan.startSec) <= 1e-6 &&
+                Math.abs(current.endSec - committed.blockSpan.endSec) <= 1e-6;
+            if (now > committed.expiresAt || settled) {
+                paramBlockCommittedSpanRef.current = null;
+            }
+        }
+        const committedSpans = paramBlockCommittedSpanRef.current;
         const visible = paramBlockToolActive || paramBlocksVisible;
         if (!visible) return null;
         if (paramBlocksWithValues.length === 0) return null;
         if (!paramView) return null;
-        const transitionWidthById = new Map(
-            paramBlockTransitionHandles(paramBlocksWithValues).flatMap((handle) => [
-                [handle.leftId, handle.transitionSec] as const,
-                [handle.rightId, handle.transitionSec] as const,
+        const sortedBlocks = paramBlocksWithValues
+            .slice()
+            .sort((a, b) => a.startSec - b.startSec || a.endSec - b.endSec);
+        const transitionByLeftId = new Map(
+            sortedParamBlockTransitionHandles(paramBlocksWithValues).map((handle) => [
+                handle.leftId,
+                handle,
             ]),
         );
         return {
@@ -4700,27 +5550,44 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             valueMin: bounds.min,
             valueMax: bounds.max,
             valueToY: (value, heightPx) => valueToY(editParam, value, heightPx),
-            blocks: paramBlocksWithValues.map((block, blockIndex, allBlocks) => {
+            blocks: sortedBlocks
+                .map<PianoRollParamBlockSpec["blocks"][number] | null>(
+                    (block, blockIndex, allBlocks) => {
                 const previous = allBlocks[blockIndex - 1];
                 const next = allBlocks[blockIndex + 1];
                 const contiguousStart =
                     previous !== undefined && Math.abs(previous.endSec - block.startSec) < 1e-6;
                 const contiguousEnd =
                     next !== undefined && Math.abs(next.startSec - block.endSec) < 1e-6;
+                const connected = transitionByLeftId.get(block.id);
                 const transitionHandle =
-                    next !== undefined && contiguousEnd
+                    connected !== undefined
                         ? {
-                              sec: block.endSec,
-                              leftId: block.id,
-                              rightId: next.id,
-                              widthSec: transitionWidthById.get(block.id) ?? 0,
+                              sec: connected.sec,
+                              leftId: connected.leftId,
+                              rightId: connected.rightId,
+                              // 该相接关系只挂在这个左块上；不要按右块 id 回查，
+                              // 否则同一宽度会串到右块的另一条边界。
+                              widthSec: connected.transitionSec,
                           }
                         : null;
                 const ordinal = blockIndex + 1;
-                return {
+                const committedSpan =
+                    committedSpans?.blockId === block.id
+                        ? committedSpans.blockSpan
+                        : (committedSpans?.neighbors.find((item) => item.id === block.id) ??
+                          null);
+                        if (
+                            committedSpan !== null &&
+                            "remove" in committedSpan &&
+                            committedSpan.remove
+                        ) {
+                            return null;
+                        }
+                        return {
                     id: block.id,
-                    startSec: block.startSec,
-                    endSec: block.endSec,
+                    startSec: committedSpan?.startSec ?? block.startSec,
+                    endSec: committedSpan?.endSec ?? block.endSec,
                     topPx: 0,
                     heightPx: 0,
                     averageValue: block.averageValue,
@@ -4730,13 +5597,29 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                     selected: selectedParamBlockIdSet.has(block.id),
                     merged: block.kind === "merged",
                     label: formatParamBlockLabel(block.averageValue, ordinal, editParam),
-                };
-            }),
+                        };
+                    },
+                )
+                .filter(
+                    (block): block is PianoRollParamBlockSpec["blocks"][number] =>
+                        block !== null,
+                ),
             borderRgba: parseRgbaColor(
                 normalizeCssColor(
                     themeMode === "dark" ? "rgba(124,198,236,0.95)" : "rgba(31,103,160,0.95)",
                 ),
             ),
+            transitionRgba: parseRgbaColor(
+                normalizeCssColor(
+                    themeMode === "dark" ? "rgba(219,246,255,0.92)" : "rgba(0,94,156,0.90)",
+                ),
+            ),
+            transitionPointRgba: parseRgbaColor(
+                normalizeCssColor(
+                    themeMode === "dark" ? "rgba(255,255,255,1)" : "rgba(0,66,112,1)",
+                ),
+            ),
+            transitionPointRadiusPx: 2.5,
             selectedRgba: parseRgbaColor(
                 normalizeCssColor(
                     themeMode === "dark" ? "rgba(210,242,255,1)" : "rgba(0,72,128,1)",
@@ -4788,6 +5671,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         paramBlockToolActive,
         paramBlocksVisible,
         paramBlocksWithValues,
+        paramBlockStructureTick,
+        // 选中集合决定手柄归属；tick 负责“快照由有变无”的显式失效。
         selectedParamBlockIdSet,
         valueToY,
         paramView,
@@ -4797,9 +5682,67 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         editParam,
         paramBlockSpecForDragSnapshot,
     ]);
+    latestParamBlockSpecRef.current = paramBlockSpec;
     const drawParamBlocks = useCallback(
         (spec: PianoRollParamBlockSpec | null) => {
-            kernelDataRef.current.paramBlocks = spec;
+            const lock = paramBlockDisplayCenterLockRef.current;
+            /*
+             * 锁只在音高缩放后的短暂交接窗口内继续生效。时间到后，下一次绘制
+             * 主动清除，让块恢复按实时主簇定位；不需要等某个 React 状态恰好变化。
+             */
+            if (
+                lock !== null &&
+                Number.isFinite(lock.releasedAt) &&
+                performance.now() - lock.releasedAt > 1200
+            ) {
+                paramBlockDisplayCenterLockRef.current = null;
+            }
+            const activeLock = paramBlockDisplayCenterLockRef.current;
+            const hoveredBlockId = hoveredParamBlockIdRef.current;
+            const hoveredTransitionId = hoveredTransitionIdRef.current;
+            kernelDataRef.current.paramBlocks =
+                spec === null
+                    ? spec
+                    : {
+                          ...spec,
+                          blocks: spec.blocks.map((block) =>
+                              (() => {
+                                  /*
+                                   * 新块的代表值来自显式创建（manualValue）；曲线主簇只在
+                                   * 没有显式值时才可用。`displayCenterValue` 是 `Alt`
+                                   * 缩放期间的一次性交接值，不能永久盖住实时曲线。
+                                   */
+                                  const pinned =
+                                      paramBlocksWithValues.find((item) => item.id === block.id)
+                                          ?.manualValue ?? null;
+                                  const withLock =
+                                      activeLock !== null && block.id === activeLock.blockId
+                                          ? {
+                                                ...block,
+                                                displayCenterValue: activeLock.center,
+                                                displayCenterSnapToSemitone:
+                                                    activeLock.snapToSemitone,
+                                            }
+                                          : pinned !== null
+                                            ? {
+                                                  ...block,
+                                                  displayCenterValue: pinned,
+                                                  displayCenterSnapToSemitone: true,
+                                              }
+                                            : block;
+                                  if (hoveredBlockId === null && hoveredTransitionId === null) {
+                                      return withLock;
+                                  }
+                                  return {
+                                      ...withLock,
+                                      hovered: withLock.id === hoveredBlockId,
+                                      transitionHovered:
+                                          hoveredTransitionId !== null &&
+                                          withLock.id === hoveredTransitionId,
+                                  };
+                              })(),
+                          ),
+                      };
             /*
              * 块的实时采样与曲线同源：优先读 live override（拖动块 / 绘制
              * 曲线时原地更新），否则读已提交的 paramView。宿主每帧重算主簇，

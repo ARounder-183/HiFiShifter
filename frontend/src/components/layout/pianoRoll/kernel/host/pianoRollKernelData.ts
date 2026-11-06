@@ -204,6 +204,13 @@ export interface PianoRollParamBlockSpec {
     readonly param: string;
     /** 值 → 视口 y 的投影（块高随纵向缩放）。 */
     readonly valueToY?: (value: number, heightPx: number) => number;
+    /**
+     * 当前行高（块高 = 1.2 × 行高）。
+     *
+     * 面板用它冻结手势起点高度；宿主仍优先使用每个块自己的
+     * `displayHeightPx`，避免个别块的高度锁定互相串。
+     */
+    readonly rowHeightPx?: number;
     readonly blocks: readonly {
         readonly id: string;
         readonly startSec: number;
@@ -222,6 +229,23 @@ export interface PianoRollParamBlockSpec {
          * 这样纵向拖动时块与曲线、键盘窗同帧移动，不会固定在旧 topPx。
          */
         readonly averageValue?: number | null;
+        /**
+         * 块纵向位置的显式显示值。
+         *
+         * 只用于“块内音高缩放”这类**不改变块中心**的手势：曲线起伏被缩放后，
+         * 主簇中心会轻微移动；若宿主继续按实时样本重算，块会在提交前后来回跳。
+         * 设置后仍由实时值域投影，只跳过代表值重算。
+         */
+        readonly displayCenterValue?: number | null;
+        /**
+         * 块中心是否吸附到半音行心。
+         *
+         * pitch 默认 true；按住取消吸附键纵向拖动时显式 false，让块连续跟随。
+         * `displayCenterValue` 已由手势锁定时同样传 false，避免二次取整。
+         */
+        readonly displayCenterSnapToSemitone?: boolean;
+        /** 本次手势锁定的块高（CSS px）；只用于时间伸缩预览，不写回数据。 */
+        readonly displayHeightPx?: number | null;
         /** 时间上是否与相邻块相接；相接处不画竖向分隔，连续块看起来是一整条。 */
         readonly contiguousStart?: boolean;
         readonly contiguousEnd?: boolean;
@@ -229,9 +253,9 @@ export interface PianoRollParamBlockSpec {
         readonly merged: boolean;
         /** 相接块边界上的圆滑手柄；只对有邻居的块出现。 */
         readonly transitionHandle?: {
-            readonly sec: number;
             readonly leftId: string;
             readonly rightId: string;
+            readonly sec: number;
             readonly widthSec: number;
         } | null;
         /** 块内平均参数文字；缺省不画（由绘制端按块宽 / 高再决定是否省略）。 */
@@ -250,6 +274,12 @@ export interface PianoRollParamBlockSpec {
     /** 顶部高光厚度（CSS px）。 */
     readonly topHighlightPx?: number;
     readonly cornerRadiusPx?: number;
+    /** 块间过渡曲线颜色；缺省不画。 */
+    readonly transitionRgba?: readonly [number, number, number, number];
+    /** 过渡曲线的端点圆点颜色；缺省复用 `transitionRgba`。 */
+    readonly transitionPointRgba?: readonly [number, number, number, number];
+    /** 端点圆点半径（CSS px）；缺省 2.5。 */
+    readonly transitionPointRadiusPx?: number;
 }
 
 /**
