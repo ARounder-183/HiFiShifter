@@ -171,6 +171,25 @@ ARA 侧改了时间拉伸 / 内容淡化，插件会继续用旧配置渲染。
 真机宿主的扫描、录音、WebView、保存重开与 ARA 配对仍按 `docs/plugin-host-survey.md`
 保持「未测」，阶段 2 / 3 的 No-Go 结论不变。
 
+### 阶段 2 的可执行前置（已就绪，但不是 ARA 能力）
+
+`backend/hifishifter-clap/tests/ara_discovery.rs` 用 `ara2-bridge-companion` 的
+**真实** CLAP 类型钉住四件以后接线时必须正确、且改错就要等到宿主里才暴露的事：
+
+- `ARACLAP.h` 的四个扩展 ID（entry 工厂稳定/兼容、实例扩展稳定/兼容）与
+  `ara:supported` 常量逐字一致；
+- `ClapAraEntry::new` 能由 descriptor ID 构造出恰好一条工厂关联，
+  `get_factory_count` / `get_ara_factory` / `get_plugin_id` 三个回调可用；
+- 宿主侧 `ClapAraHostFactory::discover` 读回的 `plugin_id` 与 descriptor
+  `com.hifishifter.clap` 逐字相同（ARA-over-CLAP 的配对键）；
+- 阶段 1 对这四个 ID 的查询**仍然全部返回 null**。
+
+companion 的 `clap` feature 只挂在 `[dev-dependencies]`：它是纯 checked-in 声明，
+不需要 ARA/VST3/AudioUnit SDK，也不进 `cargo tree -p hifishifter-clap --edges normal`
+（仍是 34 个 crate）。因此这**不是**"ARA 已暴露"，只是把阶段 2 的 ID 与发现表
+契约提前验完。真正放行仍缺：共享 ARA 运行时从 VST3 外壳解耦、六个 `observe_*`
+生命周期接线、以及支持 ARA-over-CLAP 的宿主上读 region / 渲染 / 存读编辑的真机验收。
+
 
 ### 契约层的依赖边界
 

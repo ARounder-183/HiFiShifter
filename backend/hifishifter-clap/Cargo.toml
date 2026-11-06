@@ -26,3 +26,5 @@ libc = "0.2"
 
 [dev-dependencies]
 serde_json = "1"
+ara2-bridge-companion = { version = "0.3.0", features = ["clap"] }
+ara2-bridge-sys = "0.3.0"

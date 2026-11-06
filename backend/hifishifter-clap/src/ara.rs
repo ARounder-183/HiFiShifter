@@ -1,13 +1,21 @@
-//! CLAP 的 ARA 发现层（阶段 2）。
+//! CLAP 的 ARA 发现层（阶段 2 前置）。
 //!
-//! 【能力边界】entry 级 `ClapAraEntry` 暴露进程级工厂，宿主可以读取 ARA 元数据；
-//! 实例级 `clap_ara_plugin_extension` 需要把每个 CLAP 实例绑到产品 ARA 文档控制器，
-//! 那要求共享的文档模型/渲染器在 core 中可用。此处如实把未接线的实例扩展返回 null，
-//! 而不是交一个会让宿主写穿的假接口。黑盒探针把这条断言出来。
+//! 【能力边界】阶段 1 的 descriptor 不声明 `ara:supported`，entry 不暴露
+//! `ClapAraEntry`，实例不返回 `clap_ara_plugin_extension`：三者都如实缺席。
+//! 原因不是"忘了接"，而是共享 ARA 文档模型/渲染器仍在 VST3 外壳里，交一个没有
+//! 控制器 backing 的 `ARAFactory` 会让宿主按 ARA 契约写穿空指针。
+//!
+//! 本模块把 `ARACLAP.h` 钉死的四个扩展 ID 收在一处，供阶段 2 接线时复用；
+//! `tests/ara_discovery.rs` 用 `ara2-bridge-companion` 的**真实** CLAP 类型
+//! 核对这些常量与工厂发现表的 ABI，确保接线那天不会从错误的 ID 开始。
 
 use crate::abi::clap_plugin_t;
 use std::ffi::{c_char, c_void};
 
+/// entry 级 ARA 工厂扩展 ID（`ARACLAP.h` 的稳定 ID）。
+pub const CLAP_EXT_ARA_FACTORY: &str = "org.ara-audio.ara.factory/2";
+/// entry 级 draft 兼容 ID（上游注明 2026 年可能移除，只作可选兼容）。
+pub const CLAP_EXT_ARA_FACTORY_COMPAT: &str = "org.ara-audio.ara.factory.draft/2";
 /// 稳定实例扩展 ID。
 pub const CLAP_EXT_ARA_PLUGIN_EXTENSION: &str = "org.ara-audio.ara.pluginextension/2";
 /// draft 兼容 ID（上游注明 2026 年可能移除，只作可选兼容）。
@@ -16,16 +24,27 @@ pub const CLAP_EXT_ARA_PLUGIN_EXTENSION_COMPAT: &str = "org.ara-audio.ara.plugin
 /// 返回静态 C 字符串，避免每次扩展查询分配。
 fn static_id(id: &str) -> *const c_char {
     match id {
+        CLAP_EXT_ARA_FACTORY => c"org.ara-audio.ara.factory/2".as_ptr().cast(),
+        CLAP_EXT_ARA_FACTORY_COMPAT => c"org.ara-audio.ara.factory.draft/2".as_ptr().cast(),
         CLAP_EXT_ARA_PLUGIN_EXTENSION => c"org.ara-audio.ara.pluginextension/2".as_ptr().cast(),
         _ => c"org.ara-audio.ara.pluginextension.draft/2".as_ptr().cast(),
     }
 }
 
-/// 实例扩展目前未接线；返回 null 是诚实的失败值。
+/// ARA 扩展查询：阶段 1 一律返回 null。
+///
+/// 【为什么连 entry 级工厂也不给】descriptor 不声明 `ara:supported`，宿主不该来问；
+/// 万一问了，返回 null 也比交一个没有文档控制器 backing 的 `ARAFactory` 安全 ——
+/// 宿主会按 ARA 契约去调用工厂回调，那是一次空指针写穿。
 pub fn get_extension(_plugin: *const clap_plugin_t, id: &str) -> *const c_void {
-    if id == CLAP_EXT_ARA_PLUGIN_EXTENSION || id == CLAP_EXT_ARA_PLUGIN_EXTENSION_COMPAT {
+    if matches!(
+        id,
+        CLAP_EXT_ARA_FACTORY
+            | CLAP_EXT_ARA_FACTORY_COMPAT
+            | CLAP_EXT_ARA_PLUGIN_EXTENSION
+            | CLAP_EXT_ARA_PLUGIN_EXTENSION_COMPAT
+    ) {
         let _ = static_id(id);
-        return std::ptr::null();
     }
     std::ptr::null()
 }
