@@ -64,6 +64,20 @@ Assert-That "安装器体积小于 $MaxSizeMb MB（模型只装一份）" {
 foreach ($required in 'app', 'vst3', 'HiFiShifter.clap', 'models', 'licenses', 'LICENSE', 'license-page.txt', 'models-verify.nsh') {
     if (!(Test-Path (Join-Path $stage $required))) { throw "dist\_stage\installer 缺少 $required" }
 }
+
+# 【为什么钉死架构白名单】dist\HiFiShifter.vst3 是跨平台共用的 bundle，Linux/macOS
+# 构建会往 Contents 里留下 x86_64-linux / MacOS 等目录。Windows 打包若用 Copy-Item *
+# -Recurse，这些别平台的 .so/.dylib（约 57 MB）就会被 NSIS 一起打进安装器。
+# 编译前先查暂存区：只要出现白名单以外的架构目录就失败，别等装到用户机器上才发现。
+Assert-That 'VST3 暂存区只含 Windows 架构' {
+    $contents = Join-Path $stage 'vst3\Contents'
+    if (!(Test-Path -LiteralPath $contents)) { throw "缺少 $contents" }
+    $allowed = @('Resources', 'x86_64-win')
+    $foreign = @(Get-ChildItem -LiteralPath $contents -Directory |
+        Where-Object { $allowed -notcontains $_.Name })
+    if ($foreign.Count) { throw "暂存区混入非 Windows 架构目录：$($foreign.Name -join ', ')" }
+    $allowed -join ', '
+}
 $manifest = Get-Content (Join-Path $root 'backend\src-tauri\resources\models\models.json') -Raw | ConvertFrom-Json
 $bootstrapper = Join-Path $root 'dist\_cache\MicrosoftEdgeWebview2Setup.exe'
 if (!(Test-Path $bootstrapper)) { throw "缺少 WebView2 bootstrapper：$bootstrapper（先跑 build.ps1）" }
@@ -157,6 +171,7 @@ $nsisArgs = @(
     "/DOUTPUT_FILE=$testInstaller",
     '/DAPP_VERSION=0.0.0-installer-gate',
     "/DWEBVIEW2_BOOTSTRAPPER=$bootstrapper",
+    "/DHFS_ICON=$(Join-Path $root 'backend\src-tauri\icons\icon.ico')",
     (Join-Path $root 'scripts\release\merged-installer.nsi')
 )
 & $makensis @nsisArgs
@@ -167,11 +182,29 @@ $testRoot = Join-Path $env:LOCALAPPDATA 'HiFiShifterInstallerTest'
 $installDir = Join-Path $testRoot 'App'
 $vst3Dir = Join-Path $testRoot 'VST3'
 $clapDir = Join-Path $testRoot 'CLAP'
-$modelRoot = Join-Path $env:ProgramData 'HiFiShifter\models'
+# 测试模式的模型根由 HFS_MODEL_ROOT 指定（user 权限不触发 UAC 虚拟化）；
+# 发布模式仍是 %ProgramData%\HiFiShifter\models，由 admin 安装器写入。
+$modelRoot = Join-Path $env:APPDATA 'HiFiShifterTest\models'
 $modelDir = Join-Path $modelRoot $manifest.version
 $arpKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\HiFiShifter'
 
+# 默认卸载保留一切用户数据的测试标记：只创建两个以本次 run 唯一命名的文件，
+# 绝不删用户的整个目录。一个放派生物目录（logs）、一个放用户数据目录（unsaved），
+# 静默卸载默认不勾选任何清理选项，两者都应保留。"勾选才清理"的分支由独立的
+# 卸载选项探针验证（un.onInit 默认值 + 选项页 leave 回调）。
+$userProfileRoot = Join-Path $env:LOCALAPPDATA 'HiFiShifter'
+$gateTag = 'hfs-uninstall-gate-' + [Guid]::NewGuid().ToString('N').Substring(0, 12)
+$disposableMarker = Join-Path $userProfileRoot "logs\$gateTag.txt"
+$userDataMarker = Join-Path $userProfileRoot "unsaved\$gateTag.txt"
+# 模型库标记：断言只验证"卸载器不删模型库里的东西"，不依赖安装阶段是否成功建库。
+$modelMarker = Join-Path $modelDir "$gateTag.txt"
+
 Remove-Item $testRoot -Recurse -Force -ErrorAction SilentlyContinue
+# 测试模式专用的模型根：每次跑都从干净状态开始，避免上一轮的 .staging 让安装器
+# 误判"已完整"而跳过写库。绝不碰发布模式的 %ProgramData%\HiFiShifter。
+if (Test-Path (Join-Path $env:APPDATA 'HiFiShifterTest')) {
+    Remove-Item (Join-Path $env:APPDATA 'HiFiShifterTest') -Recurse -Force -ErrorAction SilentlyContinue
+}
 
 try {
     Write-Host '  安装（静默）...' -ForegroundColor DarkGray
@@ -206,6 +239,15 @@ try {
         if (!(Test-Path (Join-Path $clapDir 'HiFiShifter.clap'))) { throw 'CLAP 模块没有安装到选定目录' }
         'installed'
     }
+    # 安装器真的把别平台二进制装进来了也会在这里被抓到（编译前查暂存区、装完查落地）。
+    Assert-That 'VST3 落地点只含 Windows 架构' {
+        $installedContents = Join-Path $vst3Dir 'HiFiShifter.vst3\Contents'
+        $allowed = @('Resources', 'x86_64-win')
+        $foreign = @(Get-ChildItem -LiteralPath $installedContents -Directory |
+            Where-Object { $allowed -notcontains $_.Name })
+        if ($foreign.Count) { throw "落地目录混入非 Windows 架构目录：$($foreign.Name -join ', ')" }
+        $allowed -join ', '
+    }
     Assert-That 'VST3 的 Resources\models 只有 models.json' {
         $models = Join-Path $vst3Dir 'HiFiShifter.vst3\Contents\Resources\models'
         if (!(Test-Path $models)) { throw "缺少 $models" }
@@ -234,6 +276,12 @@ try {
     }
 
     Write-Host '  卸载（静默）...' -ForegroundColor DarkGray
+    New-Item -ItemType Directory -Force (Split-Path $disposableMarker -Parent) | Out-Null
+    New-Item -ItemType Directory -Force (Split-Path $userDataMarker -Parent) | Out-Null
+    Set-Content -LiteralPath $disposableMarker -Value 'disposable'
+    Set-Content -LiteralPath $userDataMarker -Value 'keep'
+    New-Item -ItemType Directory -Force (Split-Path $modelMarker -Parent) | Out-Null
+    Set-Content -LiteralPath $modelMarker -Value 'keep'
     $uninstaller = Join-Path $installDir 'uninstall.exe'
     if (!(Test-Path $uninstaller)) { throw '缺少 uninstall.exe' }
     Start-Process -FilePath $uninstaller -ArgumentList '/S' -Wait | Out-Null
@@ -256,14 +304,25 @@ try {
         if (Test-Path $arpKey) { throw "注册表键仍存在：$arpKey" }
         'gone'
     }
-    Assert-That '卸载后模型库消失（没有别的安装引用它）' {
-        if (Test-Path $modelDir) { throw "模型目录仍存在：$modelDir" }
-        'gone'
+    # 【为什么默认断言是"保留"】卸载选项默认都不勾选：卸载只是移除程序，
+    # 不该抹掉渲染缓存（重装排障时要复用）与日志（定位上次故障的唯一线索）。
+    # 模型库同理，保留后重装同版本可直接复用，装新版由 HfsModelsGc 自己 GC。
+    Assert-That '卸载默认保留共享模型库（勾选才清理）' {
+        if (!(Test-Path -LiteralPath $modelMarker)) { throw "模型库标记被误删：$modelMarker" }
+        'kept'
+    }
+    Assert-That '卸载默认保留缓存与日志' {
+        if (!(Test-Path -LiteralPath $disposableMarker)) { throw "派生物标记被误删：$disposableMarker" }
+        if (!(Test-Path -LiteralPath $userDataMarker)) { throw "用户数据标记被误删：$userDataMarker" }
+        'kept'
     }
 }
 finally {
     Remove-Item $testRoot -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item $testInstaller -Force -ErrorAction SilentlyContinue
+    Remove-Item $disposableMarker, $userDataMarker -Force -ErrorAction SilentlyContinue
+    # 测试模式模型根是门禁专用的，整目录清掉，不留 .staging。
+    Remove-Item (Join-Path $env:APPDATA 'HiFiShifterTest') -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 Write-Host ''

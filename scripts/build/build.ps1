@@ -186,7 +186,33 @@ function Write-Vst3Stage {
     # 若整个目录进暂存区，用户机器上就会多套一层
     # （…\VST3\HiFiShifter.vst3\HiFiShifter.vst3\Contents），而宿主只认
     # <名字>.vst3\Contents\<架构>\<名字>.vst3 —— 插件会安静地"装好了但扫不到"。
-    Copy-Item "$dist\HiFiShifter.vst3\*" $vst3 -Recurse
+    #
+    # 【为什么按架构白名单拷，而不是 Copy-Item * -Recurse】dist\HiFiShifter.vst3 是
+    # 跨平台共用的 bundle：Linux/macOS 构建往 Contents\x86_64-linux 或 Contents\MacOS
+    # 写，Windows 构建往 Contents\x86_64-win 写，两端都共用同一个 Contents\Resources。
+    # 直接 -Recurse 会把上一次别平台留下的整个架构目录（约 57 MB 的 .so/.dylib）一起
+    # 拷进 Windows 安装器，宿主扫描时看到的是一堆无法加载的二进制。只取本平台需要的
+    # 两个目录，别的架构无论谁留下的都进不了暂存区。
+    $bundle = Join-Path $dist 'HiFiShifter.vst3'
+    $contents = Join-Path $bundle 'Contents'
+    $winModule = Join-Path $contents 'x86_64-win'
+    $resources = Join-Path $contents 'Resources'
+    foreach ($required in $winModule, $resources) {
+        if (!(Test-Path -LiteralPath $required)) {
+            throw "VST3 bundle 缺少 $required：先跑 .\scripts\build\build.ps1 -Target Plugin"
+        }
+    }
+    New-Item -ItemType Directory -Force (Join-Path $vst3 'Contents') | Out-Null
+    Copy-Item $winModule (Join-Path $vst3 'Contents\x86_64-win') -Recurse
+    Copy-Item $resources (Join-Path $vst3 'Contents\Resources') -Recurse
+
+    # 兜底：暂存区里只允许出现 x86_64-win 这一个架构目录。若将来新增别的本平台架构，
+    # 要在这里显式加入白名单，而不是把 Copy-Item * 放回来。
+    $foreign = @(Get-ChildItem (Join-Path $vst3 'Contents') -Directory |
+        Where-Object { $_.Name -ne 'Resources' -and $_.Name -ne 'x86_64-win' })
+    if ($foreign.Count) {
+        throw "VST3 暂存区混入了非 Windows 架构目录：$($foreign.Name -join ', ')"
+    }
     Write-Host "VST3 载荷：$vst3" -ForegroundColor Green
 }
 
@@ -320,6 +346,7 @@ Remove-Item $setup -Force -ErrorAction SilentlyContinue
     "/DOUTPUT_FILE=$setup" `
     "/DAPP_VERSION=$version" `
     "/DWEBVIEW2_BOOTSTRAPPER=$bootstrapper" `
+    "/DHFS_ICON=$(Join-Path $root 'backend\src-tauri\icons\icon.ico')" `
     (Join-Path $PSScriptRoot '..\release\merged-installer.nsi')
 Assert-Ok '安装器编译'
 Write-Host "安装器：$setup" -ForegroundColor Green
