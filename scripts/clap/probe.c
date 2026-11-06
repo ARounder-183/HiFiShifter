@@ -5,6 +5,7 @@
  */
 #include <dlfcn.h>
 #include <stdint.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -12,7 +13,7 @@ typedef struct { uint32_t major, minor, revision; } clap_version_t;
 typedef struct { const void *(*get_plugin_count_placeholder)(void); } unused_t;
 typedef struct {
     clap_version_t clap_version;
-    int (*init)(const char *);
+    bool (*init)(const char *);
     void (*deinit)(void);
     const void *(*get_factory)(const char *);
 } clap_plugin_entry_t;
@@ -30,11 +31,11 @@ typedef struct {
 typedef struct {
     const clap_plugin_descriptor_t *desc;
     void *plugin_data;
-    int (*init)(const void *);
+    bool (*init)(const void *);
     void (*destroy)(const void *);
-    int (*activate)(const void *, double, uint32_t, uint32_t);
+    bool (*activate)(const void *, double, uint32_t, uint32_t);
     void (*deactivate)(const void *);
-    int (*start_processing)(const void *);
+    bool (*start_processing)(const void *);
     void (*stop_processing)(const void *);
     void (*reset)(const void *);
     int (*process)(const void *, const void *);
@@ -67,27 +68,34 @@ typedef struct {
 typedef struct { void *ctx; int64_t (*write)(const void *, const void *, uint64_t); } clap_ostream_t;
 typedef struct { void *ctx; int64_t (*read)(const void *, void *, uint64_t); } clap_istream_t;
 typedef struct {
-    int (*save)(const void *, const void *);
-    int (*load)(const void *, const void *);
+    bool (*save)(const void *, const void *);
+    bool (*load)(const void *, const void *);
 } clap_plugin_state_t;
 
 static unsigned char saved_state[4096];
+static unsigned char first_state[4096];
 static size_t saved_len = 0, loaded_len = 0;
 
 static clap_host_t host = { {1,1,9}, NULL, "probe", "HiFiShifter", "https://example.invalid", "1",
     NULL, NULL, NULL, NULL };
 
+/* 每次只接受 7 字节：clap/stream.h 明确允许宿主限制单次读写的字节数，
+   插件必须循环推进。用这个假宿主复现"短写丢尾部 / 短读把状态截断"。 */
+#define STREAM_CHUNK 7
 static int64_t stream_write(const void *stream, const void *buffer, uint64_t size) {
     (void)stream;
-    if (saved_len + size > sizeof(saved_state)) return -1;
-    memcpy(saved_state + saved_len, buffer, size); saved_len += size; return (int64_t)size;
+    uint64_t count = size < STREAM_CHUNK ? size : STREAM_CHUNK;
+    if (saved_len + count > sizeof(saved_state)) return -1;
+    memcpy(saved_state + saved_len, buffer, (size_t)count); saved_len += (size_t)count;
+    return (int64_t)count;
 }
 static int64_t stream_read(const void *stream, void *buffer, uint64_t size) {
     (void)stream;
     size_t remaining = saved_len - loaded_len;
-    size_t count = size < remaining ? size : remaining;
-    if (count) memcpy(buffer, saved_state + loaded_len, count);
-    loaded_len += count; return (int64_t)count;
+    uint64_t count = size < STREAM_CHUNK ? size : STREAM_CHUNK;
+    if (count > remaining) count = remaining;
+    if (count) memcpy(buffer, saved_state + loaded_len, (size_t)count);
+    loaded_len += (size_t)count; return (int64_t)count;
 }
 
 int main(int argc, char **argv) {
@@ -116,6 +124,20 @@ int main(int argc, char **argv) {
     printf("plugin_id=%s plugin_name=%s version=%s\n", desc->id, desc->name, desc->version);
     if (desc->features) {
         for (const char *const *feature = desc->features; *feature; ++feature) printf("feature=%s\n", *feature);
+        /* 阶段 1 是 Capture-only：descriptor 绝不声明任一 ARA 能力，也绝不要求 ARA。
+           宿主若看到 ara:required，会直接拒绝为这个插件建立实例。 */
+        for (const char *const *feature = desc->features; *feature; ++feature) {
+            if (strncmp(*feature, "ara:", 4) == 0) {
+                fprintf(stderr, "unexpected ARA feature: %s\n", *feature);
+                entry->deinit(); return 1;
+            }
+        }
+    }
+    /* 工厂只能报一个插件；get_plugin_descriptor(1) 必须返回 null，否则
+       宿主扫描索引会越界。 */
+    if (factory->get_plugin_descriptor(factory, 1) != NULL) {
+        fprintf(stderr, "get_plugin_descriptor(1) should return null\n");
+        entry->deinit(); return 1;
     }
     const clap_plugin_t *plugin = (const clap_plugin_t *)factory->create_plugin(
         factory, (const void *)&host, "com.hifishifter.clap");
@@ -138,13 +160,38 @@ int main(int argc, char **argv) {
     printf("process=ok state_extension=");
     const clap_plugin_state_t *state_ext =
         (const clap_plugin_state_t *)plugin->get_extension(plugin, "clap.state");
-    if (state_ext && state_ext->save && state_ext->load) {
+    /* 【为什么必须要求它存在】打印 "absent" 再返回 0 等于把"没有 state 扩展"
+       当成合格产物：宿主保存工程时不会写任何字节，重开后编辑全丢，而自检
+       依然是绿的。这一条判据把"能力缺席"变成硬失败。 */
+    if (!state_ext || !state_ext->save || !state_ext->load) {
+        fprintf(stderr, "clap.state is missing or incomplete\n"); return 1;
+    }
+    {
         clap_ostream_t ostream = {NULL, stream_write}; clap_istream_t istream = {NULL, stream_read};
         if (!state_ext->save(plugin, &ostream) || saved_len == 0) { fprintf(stderr, "state.save failed\n"); return 1; }
+        size_t first_len = saved_len;
+        /* 同一实例连续保存必须给出同一份字节：宿主会反复写工程。
+           先把第一次结果拷出来，再让第二次写回同一个缓冲区做逐字比较。 */
+        memcpy(first_state, saved_state, first_len);
+        saved_len = 0;
+        if (!state_ext->save(plugin, &ostream) || saved_len != first_len ||
+            memcmp(first_state, saved_state, first_len) != 0) {
+            fprintf(stderr, "state.save is not deterministic\n"); return 1;
+        }
         loaded_len = 0;
         if (!state_ext->load(plugin, &istream) || loaded_len != saved_len) { fprintf(stderr, "state.load failed\n"); return 1; }
         printf("round-trip(%zu bytes)\n", saved_len);
-    } else printf("absent\n");
+    }
+    /* 其余扩展必须如实返回：未接线的扩展返回 null 是允许的，但声明过的
+       render / audio-ports / timer-support 三类宿主能力不能凭空消失。 */
+    printf("render_extension=%s\n", plugin->get_extension(plugin, "clap.render") ? "present" : "absent");
+    printf("audio_ports_extension=%s\n", plugin->get_extension(plugin, "clap.audio-ports") ? "present" : "absent");
+    printf("timer_support_extension=%s\n", plugin->get_extension(plugin, "clap.timer-support") ? "present" : "absent");
+    printf("gui_extension=%s\n", plugin->get_extension(plugin, "clap.gui") ? "present" : "absent");
+    /* 阶段 1 明确不返回 clap.gui：交一个假的嵌入视图比不提供 GUI 更危险。 */
+    if (plugin->get_extension(plugin, "clap.gui")) {
+        fprintf(stderr, "clap.gui must not be advertised by a Capture-only shell\n"); return 1;
+    }
     if (plugin->stop_processing) plugin->stop_processing(plugin);
     plugin->deactivate(plugin);
     plugin->destroy(plugin);

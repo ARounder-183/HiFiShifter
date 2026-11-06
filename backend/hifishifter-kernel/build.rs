@@ -340,7 +340,7 @@ fn soundtouch_pinned_commit() -> String {
 /// 【为什么连"未修改"也要查】发行物里的 `SoundTouchDLL` 声称是"未修改的上游库"，
 /// 随包因此只放 LGPL 全文、不放变更说明。这个声称只有靠构建期断言才守得住：旧版本的
 /// build.rs 会在原地改 `SoundTouchDLL.rc` 与 `CMakeLists.txt`，一台保留了旧检出的
-/// 构建机会继续用被改过的源码编出 DLL —— 产物与声明不符，而症状只是"许可里少了一页"。
+/// 编译环境会继续用被改过的源码编出 DLL —— 产物与声明不符，而症状只是"许可里少了一页"。
 /// 这里只看被跟踪的源码（`--untracked-files=no` + 路径过滤）：Step 5 回写的 DLL 是
 /// 产物，不算改动。
 ///
@@ -453,7 +453,7 @@ fn copy_dir_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
 /// 资源编译器用的 `afxres.h` 替身（构建期 include shim）。
 ///
 /// 上游 `source/SoundTouchDLL/SoundTouchDLL.rc` 第一段就 `#include "afxres.h"` ——
-/// 那是 MFC 的头，构建机没装 MFC 就编不过。以前的做法是**就地改上游文件**，代价是
+/// 那是 MFC 的头，编译环境没装 MFC 就编不过。以前的做法是**就地改上游文件**，代价是
 /// 发行物里的 SoundTouchDLL 成了"修改过的库"：LGPL-2.1 §2(b) 要求每个被改的文件都
 /// 带变更声明，于是每个发行包都得塞一份 SOUNDTOUCH-CHANGES.md。
 ///

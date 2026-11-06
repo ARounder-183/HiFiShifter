@@ -2009,6 +2009,7 @@ dependencies = [
  "hifishifter-plugin-core",
  "libc",
  "log",
+ "serde_json",
  "windows",
 ]
 
@@ -2113,13 +2114,8 @@ dependencies = [
 name = "hifishifter-plugin-core"
 version = "0.2.0-beta"
 dependencies = [
- "hifishifter-kernel",
- "libc",
  "log",
- "serde",
  "serde_json",
- "webview2-com",
- "windows",
 ]
 
 [[package]]

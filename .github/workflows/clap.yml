@@ -65,6 +65,12 @@ jobs:
       - name: Fetch model weights
         run: python scripts/setup/fetch-models.py
         shell: bash
+      # 【为什么显式导出】clap_layout 的 ABI oracle 读这个变量定位钉住的 1.1.9
+      # 头文件；Unix job 是 git fetch 下来的，不经过 sdk-env.ps1 的 Set-SdkEnvironment。
+      - name: Point the CLAP ABI oracle at the pinned SDK
+        if: runner.os != 'Windows'
+        shell: bash
+        run: echo "HIFISHIFTER_CLAP_SDK_DIR=$GITHUB_WORKSPACE/third_party/sdk/clap" >> "$GITHUB_ENV"
       # 前端产物来自 gates.yml 的 frontend job。CLAP 的包与 VST3 同构地带一份
       # frontend/ 与 models.json：少了它，自检里的"窗口空白"判据就成了空跑。
       - name: Download frontend artifact

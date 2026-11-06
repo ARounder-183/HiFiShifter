@@ -22,11 +22,7 @@
 
 #[allow(missing_docs)]
 pub mod component_state;
-#[allow(missing_docs)]
-pub mod fade;
 pub mod format;
-#[allow(missing_docs)]
-pub mod host_identity;
 #[allow(missing_docs)]
 pub mod plugin_log_name;
 pub mod resource_root;

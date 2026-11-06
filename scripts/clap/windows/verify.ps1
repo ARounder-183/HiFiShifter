@@ -27,4 +27,15 @@ try {
     if ($entry -eq [IntPtr]::Zero) { throw "clap_entry not found by LoadLibrary" }
     Write-Host "OK   black-box load: clap_entry resolved"
 } finally { [void][ClapProbe]::FreeLibrary($handle) }
+# 【为什么 Windows 也要跑 ABI oracle】这里的 LoadLibrary 只证明符号存在；
+# 手写 #[repr(C)] 与官方头文件的字段偏移必须再比一次，否则 cl.exe / MSVC ABI 下的
+# 对齐差异（例如 clap_process_t 的 8 字节填充）不会被发现。
+$root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\..\.."))
+. (Join-Path $root "scripts\env\sdk-env.ps1"); Set-SdkEnvironment
+Push-Location (Join-Path $root "backend")
+try { cargo test -p hifishifter-clap --test clap_layout --locked -- --nocapture }
+finally { Pop-Location }
+if ($LASTEXITCODE) { throw "CLAP ABI layout oracle failed" }
+Write-Host "OK   abi: CLAP 1.1.9 layout matches the pinned SDK"
+
 Write-Host "All Windows CLAP checks passed."

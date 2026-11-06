@@ -81,7 +81,7 @@ fi
 # ── 3. 依赖自洽 ──────────────────────────────────────────────────────────────
 #
 # 判据：每一条动态依赖要么在包内，要么是**系统库**（/lib、/usr/lib 前缀）。
-# 其余一律算泄漏 —— 构建机上的绝对路径在用户机上必然不存在。
+# 其余一律算泄漏 —— 编译环境的绝对路径在目标系统上必然不存在。
 printf "\n3) 动态依赖\n"
 ESCAPED=()
 if [ "$HOST_OS" = "linux" ]; then
@@ -111,7 +111,7 @@ if [ "$HOST_OS" = "linux" ]; then
 else
     LINKAGE="$(otool -L "$MODULE" 2>&1 || true)"
     # 【为什么要跳过自己】otool -L 的第一条"依赖"其实是模块自己的 install name
-    # （LC_ID_DYLIB），链接时写的是构建机上的绝对路径 —— 它不是依赖，却会在这条
+    # （LC_ID_DYLIB），链接时写的是编译环境的绝对路径 —— 它不是依赖，却会在这条
     # "有没有指向包外部的东西"的判据里自己举报自己。用 otool -D 精确取出它。
     SELF_ID="$(otool -D "$MODULE" 2>/dev/null | tail -n +2 | head -1 || true)"
     while IFS= read -r linkage_line; do
@@ -119,7 +119,7 @@ else
         [ -z "$dep" ] && continue
         case "$dep" in
             # 【为什么要跳过自己】otool -L 的第一条"依赖"其实是模块自己的 install name
-            # （LC_ID_DYLIB），链接时写的是构建机上的绝对路径。它不是依赖，但在
+            # （LC_ID_DYLIB），链接时写的是编译环境的绝对路径。它不是依赖，但在
             # "有没有指向包外部的东西"这条判据里会自己举报自己。
             "$MODULE") continue ;;
             "$SELF_ID") continue ;;
@@ -165,6 +165,14 @@ if cc -O1 -Wall -o "$PROBE_DIR/probe" "$SCRIPT_DIR/probe.c" $EXTRA_LIBS 2>"$PROB
         if grep -q "feature=ara" "$PROBE_DIR/out.log"; then
             bad "描述符声明了 ARA feature（本阶段是 Capture-only）"
         fi
+        # 【为什么逐项断言扩展】探针打印 "absent" 后返回 0 是老版判据的漏洞：
+        # 少了 clap.state 的产物照样绿，宿主保存工程时编辑全丢。现在把"必须存在"
+        # 与"必须缺席"都写成硬判据，避免能力声明与自检互相放水。
+        grep -q "round-trip([0-9]* bytes)" "$PROBE_DIR/out.log" || bad "state 往返没有跑通"
+        grep -q "render_extension=present" "$PROBE_DIR/out.log" || bad "clap.render 扩展缺失"
+        grep -q "audio_ports_extension=present" "$PROBE_DIR/out.log" || bad "clap.audio-ports 扩展缺失"
+        grep -q "timer_support_extension=present" "$PROBE_DIR/out.log" || bad "clap.timer-support 扩展缺失"
+        grep -q "gui_extension=absent" "$PROBE_DIR/out.log" || bad "本阶段不应返回 clap.gui 扩展"
     else
         bad "黑盒加载失败："
         sed "s/^/    /" "$PROBE_DIR/out.log"

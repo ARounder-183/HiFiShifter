@@ -144,7 +144,7 @@ mod tests {
         );
 
         match probe {
-            // 构建机没装 git / git 不在 PATH：环境问题，不判失败。
+            // 编译环境没装 git / git 不在 PATH：环境问题，不判失败。
             // 但仍要确认"空值"这条路径自洽（否则运行时会显示半个身份）。
             "no-git" => {
                 assert!(commit_full().is_none(), "git 不可用时不得有 commit");

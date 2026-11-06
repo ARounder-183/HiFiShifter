@@ -2,8 +2,9 @@
 //!
 //! 【为什么是手写声明】`ara2-bridge-companion` 只 checked-in 了 ARA-over-CLAP 的结构，
 //! 不含完整的 `clap_process_t` / `clap_plugin_t`。这里按 `third_party/sdk/clap` 的
-//! 1.1.9 头文件逐字段复刻，且只声明本产物实际消费的部分；每个 `#[repr(C)]` 的
-//! 字段顺序由 `tests/clap_layout.rs` 与头文件常量共同钉住。
+//! 1.1.9 头文件逐字段复刻；字段顺序、尺寸与对齐由 `tests/clap_layout.rs` 用**同一份
+//! 钉住的官方头文件**编译出原生 oracle 后逐项比对（`clap_layout.c` 输出 JSON）。
+//! 手写声明与黑盒探针是同一份假设的两份拷贝，只有原生头文件能打破两者互相印证的盲区。
 //! 【禁止外部 SDK】不链接 CLAP 的 C 库：CLAP 是纯头文件 ABI，宿主按 `clap_entry` 加载。
 
 #![allow(non_camel_case_types)]

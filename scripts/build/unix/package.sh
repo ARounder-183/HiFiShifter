@@ -21,7 +21,7 @@
 #
 # 签名与公证：设置 HIFISHIFTER_CODESIGN_IDENTITY 后，macOS 用 Developer ID 签名，
 # 并可用 HIFISHIFTER_NOTARY_PROFILE 走 notarytool 公证 + stapler 装订。默认 ad-hoc
-# 签名 —— 够本机与 CI 验证，不够分发给陌生用户（Gatekeeper 会拦）。
+# 签名 —— 仅够 CI 自检，不够分发给陌生用户（Gatekeeper 会拦）。
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -232,7 +232,7 @@ package_macos() {
             log "未设置 HIFISHIFTER_NOTARY_PROFILE：跳过公证（用户首次加载会被 Gatekeeper 拦）"
         fi
     else
-        log "ad-hoc 签名：仅够本机与 CI 验证，分发前必须换成 Developer ID"
+        log "ad-hoc 签名：仅够 CI 自检，分发前必须换成 Developer ID"
     fi
     local digest
     digest="$(hfs_sha256 "$ARTIFACT_BASE.pkg")"

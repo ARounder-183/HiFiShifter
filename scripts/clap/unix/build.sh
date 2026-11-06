@@ -170,6 +170,13 @@ stage_bundle() {
 # ── 阶段 4：自检 ─────────────────────────────────────────────────────────────
 stage_verify() {
     step "验证 CLAP 产物"
+    # 【为什么先跑 ABI oracle】verify.sh 的黑盒探针和 Rust 的 #[repr(C)] 是同一份
+    # 布局假设的两份拷贝：两者以同一种方式写错时，dlopen 与直通照样通过，而真实
+    # 宿主按官方头文件传进来的结构会被错位解读。让钉住的 CLAP SDK 头文件自己算
+    # size/align/offset，是唯一能打破这个闭环的证据。CLAP 工作流已经把 SDK 取到
+    # third_party/sdk/clap，cargo test 里的 clap_layout 用例会编译并比对它。
+    step "CLAP 1.1.9 ABI 布局 oracle"
+    (cd "$BACKEND_DIR" && cargo test -p hifishifter-clap --test clap_layout --locked -- --nocapture)
     bash "$SCRIPT_DIR/../verify.sh" "$MODULE"
 }
 

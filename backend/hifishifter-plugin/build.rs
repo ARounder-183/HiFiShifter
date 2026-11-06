@@ -24,7 +24,7 @@ fn main() {
     link_runtime_search_paths();
 }
 
-/// 让本 cdylib 只依赖**同 bundle 内**的共享库，不依赖构建机的任何绝对路径。
+/// 让本 cdylib 只依赖**同 bundle 内**的共享库，不依赖编译环境的任何绝对路径。
 ///
 /// 【为什么必须写在这里】kernel 的 build script 里确实有 `-Wl,-rpath,$ORIGIN`，
 /// 但 kernel 只是 rlib：cargo 对非 cdylib/bin 目标的 `cargo:rustc-link-arg` 是**丢弃**的，

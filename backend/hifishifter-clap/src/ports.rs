@@ -13,8 +13,9 @@ pub struct AudioPortInfo {
 }
 #[repr(C)]
 pub struct PortsExt {
-    count: Option<unsafe extern "C" fn(*const clap_plugin_t, bool) -> u32>,
-    get: Option<unsafe extern "C" fn(*const clap_plugin_t, u32, bool, *mut AudioPortInfo) -> bool>,
+    pub count: Option<unsafe extern "C" fn(*const clap_plugin_t, bool) -> u32>,
+    pub get:
+        Option<unsafe extern "C" fn(*const clap_plugin_t, u32, bool, *mut AudioPortInfo) -> bool>,
 }
 impl Default for PortsExt {
     fn default() -> Self {

@@ -9,7 +9,7 @@
 | `plugin-gates.yml` | push `develop`、PR | 直接 push 时的插件快速反馈（static + 插件并发单测）                   | 无                                                     |
 | `build.yml`        | PR、`v*` tag、手动 | 六平台 App 产物；Windows x64 出一个合并安装器 + 便携包；Unix 出插件包 | 安装器 / DMG / AppImage / 便携包 / 插件 `tar.gz`·`pkg` |
 | `vst3-unix.yml`    | PR、`v*` tag、手动 | Linux/macOS 的 VST3 bundle（dlopen 黑盒验证）                         | `*.tar.gz` + `*.sha256`                                |
-| `clap.yml`         | PR、`v*` tag、手动 | Linux/macOS/Windows 的 CLAP 模块（导出符号 + 黑盒加载）               | `HiFiShifter.clap` / bundle                            |
+| `clap.yml`         | PR、`v*` tag、手动 | Linux/macOS/Windows 的 CLAP 模块（ABI 布局 oracle + 导出符号 + 黑盒加载） | `HiFiShifter.clap` / bundle                            |
 | `security.yml`     | 每周 + 依赖变更    | 依赖漏洞扫描                                                          | 无                                                     |
 
 ## 为什么门禁只有一处
@@ -61,10 +61,16 @@ DMG 里的 dylib 校验都必须**先有产物**。它们属于 `build.yml` / `v
 - **分发**：`scripts/build/unix/package.sh` 编译一次前端，把两个格式装进同一个产物 ——
   Linux 是带 `install.sh` 的 `tar.gz`，macOS 是装到 `/Library/Audio/Plug-Ins` 的
   `pkg`。`build.yml` 的 macOS / Linux 腿在 App 之后调它，因此 App 与插件的版本不可能错配。
+- **CLAP 出包前先跑 ABI oracle**：`scripts/clap/unix/build.sh --stage=verify` 先执行
+  `cargo test -p hifishifter-clap --test clap_layout`，让钉住的 CLAP 1.1.9 头文件编译出
+  原生布局 JSON，与 Rust 手写 `#[repr(C)]` 逐字段比对；Windows 由
+  `scripts/clap/windows/verify.ps1` 跑同一个用例。手写声明与黑盒探针是同一份假设的
+  两份拷贝，只有原生头文件能防止它们互相印证一个错误的布局。
+
 - **门禁**仍由 `vst3-unix.yml` 与 `clap.yml` 承担：它们只回答"能产出、能加载"，
   不负责分发形态。
 
-签名与公证：默认 ad-hoc（够本机与 CI 验证）。要分发给陌生用户，必须给 macOS 腿配
+签名与公证：默认 ad-hoc（仅够 CI 自检）。要分发给陌生用户，必须给 macOS 腿配
 `HIFISHIFTER_CODESIGN_IDENTITY` 与 `HIFISHIFTER_NOTARY_PROFILE`，否则 Gatekeeper 会拦。
 
 ## 触发与矩阵

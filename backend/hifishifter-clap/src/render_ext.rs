@@ -2,8 +2,8 @@
 use crate::abi::{clap_plugin_t, CLAP_RENDER_OFFLINE, CLAP_RENDER_REALTIME};
 #[repr(C)]
 pub struct RenderExt {
-    has_hard_realtime_requirement: Option<unsafe extern "C" fn(*const clap_plugin_t) -> bool>,
-    set: Option<unsafe extern "C" fn(*const clap_plugin_t, i32) -> bool>,
+    pub has_hard_realtime_requirement: Option<unsafe extern "C" fn(*const clap_plugin_t) -> bool>,
+    pub set: Option<unsafe extern "C" fn(*const clap_plugin_t, i32) -> bool>,
 }
 impl Default for RenderExt {
     fn default() -> Self {

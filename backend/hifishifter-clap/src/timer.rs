@@ -2,7 +2,7 @@
 use crate::abi::clap_plugin_t;
 #[repr(C)]
 pub struct TimerExt {
-    on_timer: Option<unsafe extern "C" fn(*const clap_plugin_t, u32)>,
+    pub on_timer: Option<unsafe extern "C" fn(*const clap_plugin_t, u32)>,
 }
 impl Default for TimerExt {
     fn default() -> Self {

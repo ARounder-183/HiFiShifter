@@ -145,6 +145,40 @@ ARA 侧改了时间拉伸 / 内容淡化，插件会继续用旧配置渲染。
 **这张表是阶段 1 的契约，不是缺陷清单**：阶段 2 只有把共享 ARA 运行时抽进 core、接好
 `ClapAraPluginAdapter` 的六个生命周期观察点并跑完真机验收，才允许把 ARA 能力写回 descriptor。
 
+### 产物侧的工程证据（非真机宿主结论）
+
+以下三条由产物自检与 cargo 用例覆盖，**不等价于**"已在 Bitwig / REAPER 里加载过"：
+
+- **ABI 布局**：`backend/hifishifter-clap/tests/clap_layout.c` 用 `plugin-sdks.json`
+  钉住的 CLAP 1.1.9 头文件编译原生 oracle，`clap_layout.rs` 逐项比对全部
+  `#[repr(C)]` 结构的 size / align / 字段偏移（含 `clap_process_t` 的
+  `transport` 指针、`clap_event_transport_t`、GUI/state/ports/render/timer 扩展表）。
+  手写声明与黑盒探针不再互相印证同一份可能出错的假设。
+- **宿主流**：`clap/stream.h` 允许宿主限制单次读/写字节数；`state.rs` 循环推进，
+  短读不当成 EOF、短写不丢尾部、零进度与负数判失败，并有 64 MiB 上限防止挂死。
+  `scripts/clap/probe.c` 用每次 7 字节的假宿主实际复现这条路径。
+- **能力诚实性**：黑盒探针把 `clap.state` / `clap.render` / `clap.audio-ports` /
+  `clap.timer-support` 必须存在、`clap.gui` 必须缺席、descriptor 不得含任何
+  `ara:` feature、ARA 工厂必须缺席都写成硬失败；`verify.sh` 逐项断言探针输出。
+  打印 "absent" 后照常返回成功的老判据不再成立。
+
+真机宿主的扫描、录音、WebView、保存重开与 ARA 配对仍按 `docs/plugin-host-survey.md`
+保持「未测」，阶段 2 / 3 的 No-Go 结论不变。
+
+
+### 契约层的依赖边界
+
+`hifishifter-plugin-core` 只持有纯数据契约（时间块、音频平面、组件 state、资源根、
+FFI panic 守卫），产品依赖只有 `log`。两条容易回退的归属规则：
+
+- `fade`（校验 `hifishifter_kernel::fade_curves` 的形状接受域）与
+  `host_identity`（Windows ToolHelp 进程探测 / VST3 宿主名证据）是 **VST3 专属**，
+  留在 `hifishifter-plugin`；core 曾把它们连同 WebView2 / Windows API / ONNX /
+  SoundTouch 一起机械复制进来，结果一个只做字节转发的 CLAP 外壳也要链接整个推理内核。
+- 格式 crate 不得因为「core 有了」就继承宿主专属依赖。新增格式时先问"这个模块是否
+  被至少一个非 VST3 格式消费"，答不出就留在 VST3。`no_tauri_in_dependency_tree.rs`
+  与 `cargo tree -p <格式>` 是这条边界的判据。
+
 ---
 
 ## 4. 可选的跨宿主增强

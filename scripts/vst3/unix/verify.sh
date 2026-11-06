@@ -79,7 +79,7 @@ done
 # ── 3. 依赖自洽 ──────────────────────────────────────────────────────────────
 #
 # 判据：每一条动态依赖要么在 bundle 内，要么是**系统库**（/lib、/usr/lib 前缀）。
-# 其余一律算泄漏 —— 构建机上的绝对路径在用户机上必然不存在。
+# 其余一律算泄漏 —— 编译环境的绝对路径在目标系统上必然不存在。
 printf "\n3) 动态依赖\n"
 ESCAPED=()
 if [ "$HOST_OS" = "linux" ]; then
@@ -102,7 +102,7 @@ if [ "$HOST_OS" = "linux" ]; then
 else
     LINKAGE="$(otool -L "$MODULE" 2>&1 || true)"
     # 【为什么要跳过自己】otool -L 的第一条"依赖"其实是模块自己的 install name
-    # （LC_ID_DYLIB），链接时写的是构建机上的绝对路径 —— 它不是依赖，却会在这条
+    # （LC_ID_DYLIB），链接时写的是编译环境的绝对路径 —— 它不是依赖，却会在这条
     # "有没有指向包外部的东西"的判据里自己举报自己。用 otool -D 精确取出它。
     SELF_ID="$(otool -D "$MODULE" 2>/dev/null | tail -n +2 | head -1 || true)"
     while IFS= read -r linkage_line; do

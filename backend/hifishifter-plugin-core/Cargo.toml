@@ -1,8 +1,15 @@
-# HiFiShifter 插件的格式无关层。
+# HiFiShifter 插件的格式无关契约层。
 #
 # 【为什么单独一个 crate】VST3 / CLAP / AU 的模块入口、缓冲布局与宿主握手各不相同，
-# 但时间上下文、组件 state、资源目录规则是同一套。把它们放在 rlib 里，格式 crate 只做适配，
+# 但时间上下文、组件 state、资源目录规则与 FFI panic 守卫是同一套。格式 crate 只做适配，
 # 不复制语义。这里刻意不启用 ara2-bridge 的任何 companion feature：feature 由最终 cdylib 决定。
+#
+# 【为什么依赖表只有 log】本 crate 曾把 VST3 的 GUI 平台依赖与 hifishifter-kernel
+# 一并机械复制进来：一个只做字节容器与时间契约的 rlib 会因此把 WebView2 / Windows API /
+# ONNX / SoundTouch 拖进**每一个**格式的依赖图，CLAP 的 Capture-only 外壳也不例外。
+# 宿主专属的 fade 校验（依赖内核曲线族）与进程身份探测（依赖 Windows ToolHelp）已经
+# 移回 VST3 crate；core 里剩下的模块只用标准库与 log。删依赖的同时也删掉了
+# "链接器会从传递依赖里拿到 libc" 那类不再成立的注释 —— 契约层不需要任何平台 ABI。
 [package]
 name = "hifishifter-plugin-core"
 version = "0.2.0-beta"
@@ -16,36 +23,6 @@ crate-type = ["rlib"]
 
 [dependencies]
 log = { version = "0.4", features = ["std"] }
-serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
 serde_json = "1"
-hifishifter-kernel = { path = "../hifishifter-kernel", default-features = false, features = ["onnx"] }
-
-[target.'cfg(unix)'.dependencies]
-# Unix 上「本模块在哪个 bundle 里」只能靠 `dladdr` 反查（见 editor/resources.rs）。
-# kernel 已经为 `statvfs` 声明过同一份 libc；这里是插件自己的直接依赖，
-# 不靠传递依赖 —— 传递依赖一旦被上游裁剪，失败会发生在链接期而不是编译期。
-libc = "0.2"
-
-# ── Unix 内嵌编辑器（见 docs/plans/2026-10-24-plugin-unix-gui-plan.md `11.1）──
-#
-# 【为什么这些不是新依赖】它们是 tauri/wry 的**传递依赖**，版本早已被 workspace 的
-# Cargo.lock 钉住（gtk 0.18.2 / webkit2gtk 2.0.2 / glib 0.18.5 / objc2 0.6.5 …）。
-# 这里只是把它们从"传递"提升为"直接"，因此 Cargo.lock 一行都不变。
-#
-# 【为什么不违反 tests/no_tauri_in_dependency_tree】那份判据禁的是
-# `tauri* / wry* / HiFiShifter* / cpal*` —— 这四个都不在下表里。
-#
-# 【Linux 的构建前提】`webkit2gtk` 会让 `pkg-config` 要求
-# `libwebkit2gtk-4.1-dev` 与 `libgtk-3-dev`。CI 的 vst3-unix.yml 已经安装它们
-# （此前刻意不装，因为当时没有 GUI；这条注释随 GUI 一起更新）。
-
-[target.'cfg(windows)'.dependencies]
-# 二期仅原生WebView2，没有Tauri/wry主循环；与 workspace 其余部分同版（0.39 ↔ windows-core 0.62）。
-webview2-com = "0.39"
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com",
-    "Win32_System_Diagnostics_ToolHelp",
-    # `GlobalMemoryStatusEx`：PCM 预算按物理内存自适应（见 `render/budget.rs`）。
-    "Win32_System_SystemInformation",
-    "Win32_System_Threading", "Win32_System_LibraryLoader", "Win32_Graphics_Gdi",
-    "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_Shell_Common"] }
-

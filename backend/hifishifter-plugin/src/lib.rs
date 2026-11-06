@@ -61,8 +61,10 @@ mod capture;
 pub use hifishifter_plugin_core::component_state;
 mod diagnostics;
 mod editor;
-pub use hifishifter_plugin_core::fade;
-pub use hifishifter_plugin_core::host_identity;
+#[allow(missing_docs)]
+pub mod fade;
+#[allow(missing_docs)]
+pub mod host_identity;
 pub use hifishifter_plugin_core::plugin_log_name;
 pub mod render;
 mod runtime;
