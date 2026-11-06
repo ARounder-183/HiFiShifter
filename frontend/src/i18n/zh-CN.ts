@@ -484,6 +484,8 @@ export const zhCN = {
     hifigan_tension_requires_separation: "请开启「气声分离」以编辑张力",
     breath_gain_label: "气声音量",
     hifigan_tension_label: "张力",
+    hifigan_growl_requires_separation: "请开启「气声分离」以编辑怒音",
+    hifigan_growl_label: "怒音",
     formant_shift_label: "共振峰偏移",
     volume_label: "音量",
     dyn_label: "动态",
@@ -505,6 +507,7 @@ export const zhCN = {
     param_btn_pan: "声像",
     param_btn_formant: "共振峰",
     param_btn_tension: "张力",
+    param_btn_growl: "怒音",
     param_btn_breathiness: "气声强度",
 
     status_ready: "就绪",

@@ -989,8 +989,10 @@ fn apply_host_pitch_edit(
             edit > 0.0 && (edit - orig).abs() > 1e-3
         });
     let effects_active = extra_curves.iter().any(|(name, curve)| {
-        matches!(name.as_str(), "formant_shift_cents" | "hifigan_tension")
-            && curve.iter().any(|v| v.abs() > 1e-3)
+        matches!(
+            name.as_str(),
+            "formant_shift_cents" | "hifigan_tension" | "hifigan_growl"
+        ) && curve.iter().any(|v| v.abs() > 1e-3)
     }) || crate::pitch_editing::clip_breath_active(timeline, clip);
     let handles_stretch = crate::pitch_editing::processor_should_handle_stretch(timeline, clip);
     let rate = if handles_stretch {
@@ -1613,6 +1615,13 @@ fn render_mixdown_internal(
                 crate::pitch_editing::hifigan_tension_active_for_clip(entry, clip, clip_start_sec)
             })
             .unwrap_or(false);
+        let clip_growl_active = timeline
+            .resolve_root_track_id(&clip.track_id)
+            .and_then(|root| timeline.params_by_root_track.get(&root))
+            .map(|entry| {
+                crate::pitch_editing::hifigan_growl_active_for_clip(entry, clip, clip_start_sec)
+            })
+            .unwrap_or(false);
         let reuse_key = if sources.is_none()
             && export_render_cache_reuse_enabled()
             && opts.apply_pitch_edit
@@ -1620,6 +1629,7 @@ fn render_mixdown_internal(
             && pre_silence_sec <= 1e-6
             && (playback_rate - 1.0).abs() <= 1e-6
             && !clip_tension_active
+            && !clip_growl_active
             && segment.len() == clip_total_frames * 2
         {
             export_clip_render_cache_key(timeline, clip, out_rate, scale_signature.as_str())

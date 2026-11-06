@@ -163,6 +163,7 @@ pub mod synth_clip_cache;
 pub mod formant_cache;
 pub mod formant_morph;
 pub mod glottal_rd;
+pub mod growl;
 pub mod hnsep_dsp;
 #[cfg(feature = "onnx")]
 mod hnsep_resources;

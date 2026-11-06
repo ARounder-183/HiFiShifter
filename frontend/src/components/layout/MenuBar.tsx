@@ -326,6 +326,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                 return 100;
             case "breath_gain":
             case "hifigan_tension":
+            case "hifigan_growl":
                 return 0.05;
             case "pan":
                 return 0.1;

@@ -168,7 +168,7 @@ export function getParamToolbarRank(paramId: string, algo: string | undefined | 
     // 未识别的轨道会"取到 nsf-hifigan 的参数、却按 world 的顺序排"。
     switch (resolveEffectivePitchAlgo(algo)) {
         case "nsf_hifigan_onnx":
-            // 音高、共振峰、气声音量、张力、音量、动态、声像
+            // 音高、共振峰、气声音量、张力、怒音、音量、动态、声像
             switch (paramId) {
                 case "formant_shift_cents":
                     return 10;
@@ -176,6 +176,8 @@ export function getParamToolbarRank(paramId: string, algo: string | undefined | 
                     return 20;
                 case "hifigan_tension":
                     return 30;
+                case "hifigan_growl":
+                    return 40;
                 case "volume":
                     return 90;
                 case "dyn":

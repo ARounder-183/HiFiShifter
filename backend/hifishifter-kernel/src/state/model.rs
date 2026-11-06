@@ -3967,6 +3967,7 @@ impl TimelineState {
     /// # 判据
     /// 曲线**偏离默认值**才算"用户真的编辑过"：
     /// - `hifigan_tension` 默认 `0.0`
+    /// - `hifigan_growl` 默认 `0.0`
     /// - `breath_gain` 默认 `1.0`
     ///
     /// 刻意不用"曲线是否存在"作为判据：空曲线与全默认值曲线语义等价，
@@ -4012,6 +4013,7 @@ impl TimelineState {
 
         let has_edited_curves = |curves: &std::collections::HashMap<String, Vec<f32>>| {
             curve_edited(curves.get("hifigan_tension"), 0.0)
+                || curve_edited(curves.get("hifigan_growl"), 0.0)
                 || curve_edited(curves.get("breath_gain"), 1.0)
         };
 

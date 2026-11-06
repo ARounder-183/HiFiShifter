@@ -485,6 +485,8 @@ export const zhTW = {
     hifigan_tension_requires_separation: "請開啟「氣聲分離」以編輯張力",
     breath_gain_label: "氣聲音量",
     hifigan_tension_label: "張力",
+    hifigan_growl_requires_separation: "請開啟「氣聲分離」以編輯怒音",
+    hifigan_growl_label: "怒音",
     formant_shift_label: "共振峰偏移",
     volume_label: "音量",
     dyn_label: "動態",
@@ -506,6 +508,7 @@ export const zhTW = {
     param_btn_pan: "聲相",
     param_btn_formant: "共振峰",
     param_btn_tension: "張力",
+    param_btn_growl: "怒音",
     param_btn_breathiness: "氣聲強度",
 
     status_ready: "就緒",

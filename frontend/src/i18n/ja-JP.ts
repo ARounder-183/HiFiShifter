@@ -511,6 +511,8 @@ export const jaJP = {
         "「ハーモニック分離」をオンにするとテンションを編集できます",
     breath_gain_label: "ブレスゲイン",
     hifigan_tension_label: "テンション",
+    hifigan_growl_requires_separation: "「ハーモニック分離」をオンにするとグロウルを編集できます",
+    hifigan_growl_label: "グロウル",
     formant_shift_label: "フォルマントシフト",
     volume_label: "ボリューム",
     dyn_label: "ダイナミクス",
@@ -532,6 +534,7 @@ export const jaJP = {
     param_btn_pan: "PAN",
     param_btn_formant: "FRM",
     param_btn_tension: "TEN",
+    param_btn_growl: "GRL",
     param_btn_breathiness: "BNS",
 
     status_ready: "準備完了",

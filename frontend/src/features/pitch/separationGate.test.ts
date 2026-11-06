@@ -1,7 +1,7 @@
 /**
  * `separationGate` 的单测。
  *
- * 覆盖「气声分离开关闭 ⇒ 气声音量与张力被门禁」的判据，以及 `editParam`
+ * 覆盖「气声分离开关闭 ⇒ 气声音量、张力与怒音被门禁」的判据，以及 `editParam`
  * 回退的收敛性。这些是 UI 门禁与后端剥离共同依赖的口径 ——
  * 阈值若与后端 `extra_param_enabled` 分叉，会出现"UI 可用但后端已剥离"
  * （用户画了没效果）或"UI 置灰但实际生效"（用户以为没效果却听到了）。
@@ -25,9 +25,10 @@ import {
 } from "./separationGate";
 
 describe("separationGate", () => {
-    it("把气声音量与张力列为被门禁参数，且不含共振峰", () => {
+    it("把气声音量、张力与怒音列为被门禁参数，且不含共振峰", () => {
         expect(SEPARATION_GATED_PARAMS).toContain("breath_gain");
         expect(SEPARATION_GATED_PARAMS).toContain("hifigan_tension");
+        expect(SEPARATION_GATED_PARAMS).toContain("hifigan_growl");
         // 共振峰走 mel 阶段的 keyShift，与 HNSEP 无关，必须不受门禁。
         expect(SEPARATION_GATED_PARAMS).not.toContain("formant_shift_cents");
     });
@@ -44,11 +45,13 @@ describe("separationGate", () => {
         expect(isSeparationEnabled(undefined, 1)).toBe(true);
     });
 
-    it("开关关闭时门禁两个参数，开启时都放行", () => {
+    it("开关关闭时门禁三个参数，开启时都放行", () => {
         expect(isGatedBySeparation("breath_gain", false)).toBe(true);
         expect(isGatedBySeparation("hifigan_tension", false)).toBe(true);
+        expect(isGatedBySeparation("hifigan_growl", false)).toBe(true);
         expect(isGatedBySeparation("breath_gain", true)).toBe(false);
         expect(isGatedBySeparation("hifigan_tension", true)).toBe(false);
+        expect(isGatedBySeparation("hifigan_growl", true)).toBe(false);
     });
 
     it("开关关闭也不门禁共振峰与其它参数", () => {
@@ -60,6 +63,7 @@ describe("separationGate", () => {
     it("editParam 停在被门禁参数上时回退到 pitch", () => {
         expect(findBlockedEditParam("breath_gain", false, "pitch")).toBe("pitch");
         expect(findBlockedEditParam("hifigan_tension", false, "pitch")).toBe("pitch");
+        expect(findBlockedEditParam("hifigan_growl", false, "pitch")).toBe("pitch");
     });
 
     it("开关开启或参数未被门禁时不回退", () => {
@@ -109,8 +113,13 @@ describe("separationGate", () => {
     });
 
     describe("Compose 门禁（只影响合成参数，不影响混音参数）", () => {
-        it("Compose 关闭时，共振峰/气声/张力都不可用", () => {
-            for (const id of ["formant_shift_cents", "breath_gain", "hifigan_tension"]) {
+        it("Compose 关闭时，共振峰/气声/张力/怒音都不可用", () => {
+            for (const id of [
+                "formant_shift_cents",
+                "breath_gain",
+                "hifigan_tension",
+                "hifigan_growl",
+            ]) {
                 expect(isGatedByCompose(id, false)).toBe(true);
             }
         });
@@ -122,7 +131,7 @@ describe("separationGate", () => {
         });
 
         it("音量/声相/动态等混音级参数**不**受 Compose 门禁", () => {
-            // 需求口径：Compose 只影响音高、共振峰、气声、张力；
+            // 需求口径：Compose 只影响音高、共振峰、气声、张力、怒音；
             // 音量与声相是混音级参数，未开 Compose 也要生效。
             for (const id of ["volume", "pan", "dyn", "pitch"]) {
                 expect(isGatedByCompose(id, false)).toBe(false);
@@ -147,12 +156,13 @@ describe("separationGate", () => {
 
     describe("firstGatedParamId（分离开关渲染在被门禁组的组首）", () => {
         it("按工具栏顺序取最左的被门禁参数", () => {
-            // nsf-hifigan 的实际顺序：音高、共振峰、气声、张力、音量、声像。
+            // nsf-hifigan 的实际顺序：音高、共振峰、气声、张力、怒音、音量、声像。
             // 开关应落在「气声」之前 —— 即这一组的组首，而不是算法下拉之前。
             const ordered = [
                 "formant_shift_cents",
                 "breath_gain",
                 "hifigan_tension",
+                "hifigan_growl",
                 "volume",
                 "dyn",
                 "pan",
@@ -182,17 +192,22 @@ describe("separationGate", () => {
         });
     });
 
-    describe("gatedParamHideOrder（逐个让位的顺序：先张力后气声）", () => {
-        it("按工具栏顺序取逆序 —— 先隐藏右侧的张力，再隐藏气声", () => {
+    describe("gatedParamHideOrder（逐个让位的顺序：从右到左）", () => {
+        it("按工具栏顺序取逆序 —— 先隐藏右侧的怒音，再张力、气声", () => {
             // 气声药丸左侧挂着分离开关（不能隐藏），先让气声会让开关独自悬空。
             const ordered = [
                 "formant_shift_cents",
                 "breath_gain",
                 "hifigan_tension",
+                "hifigan_growl",
                 "volume",
                 "pan",
             ];
-            expect(gatedParamHideOrder(ordered)).toEqual(["hifigan_tension", "breath_gain"]);
+            expect(gatedParamHideOrder(ordered)).toEqual([
+                "hifigan_growl",
+                "hifigan_tension",
+                "breath_gain",
+            ]);
         });
 
         it("只有一个被门禁参数时就是它自己", () => {

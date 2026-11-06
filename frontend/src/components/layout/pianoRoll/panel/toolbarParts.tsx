@@ -127,8 +127,8 @@ export type ParamToolbarPillProps = {
     /**
      * 参数是否不可用（置灰、不可选中）。
      *
-     * 当前用途：气声分离开关闭时，`breath_gain` 与 `hifigan_tension` 都依赖分离，
-     * 因此不可编辑、也不参与合成。注意**只禁用标签的选中**，眼睛（曲线显隐）
+     * 当前用途：气声分离开关闭时，`breath_gain`、`hifigan_tension` 与
+     * `hifigan_growl` 都依赖分离，因此不可编辑、也不参与合成。注意**只禁用标签的选中**，眼睛（曲线显隐）
      * 仍然可用 —— 曲线需要保持可见，见下方 `disabled` 分支的说明。
      */
     disabled?: boolean;

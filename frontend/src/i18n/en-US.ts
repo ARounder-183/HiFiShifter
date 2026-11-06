@@ -644,6 +644,8 @@ export const enUS = {
     hifigan_tension_requires_separation: "Turn on Harmonic Separation to edit Tension",
     breath_gain_label: "Breath Gain",
     hifigan_tension_label: "Tension",
+    hifigan_growl_requires_separation: "Turn on Harmonic Separation to edit Growl",
+    hifigan_growl_label: "Growl",
     formant_shift_label: "Formant Shift",
     volume_label: "Volume",
     dyn_label: "Dynamics",
@@ -665,6 +667,7 @@ export const enUS = {
     param_btn_pan: "PAN",
     param_btn_formant: "FRM",
     param_btn_tension: "TEN",
+    param_btn_growl: "GRL",
     param_btn_breathiness: "BNS",
 
     status_ready: "Ready",

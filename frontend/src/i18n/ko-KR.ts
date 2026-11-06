@@ -575,6 +575,8 @@ export const koKR = {
     hifigan_tension_requires_separation: "「하모닉 분리」를 켜야 텐션을 편집할 수 있습니다",
     breath_gain_label: "브레스 게인",
     hifigan_tension_label: "텐션",
+    hifigan_growl_requires_separation: "「하모닉 분리」를 켜야 그로울을 편집할 수 있습니다",
+    hifigan_growl_label: "그로울",
     formant_shift_label: "포먼트 시프트",
     volume_label: "볼륨",
     dyn_label: "다이내믹",
@@ -596,6 +598,7 @@ export const koKR = {
     param_btn_pan: "PAN",
     param_btn_formant: "FRM",
     param_btn_tension: "TEN",
+    param_btn_growl: "GRL",
     param_btn_breathiness: "BNS",
 
     status_ready: "준비됨",
