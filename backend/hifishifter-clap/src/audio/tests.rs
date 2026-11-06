@@ -24,13 +24,14 @@ fn transport(flags: u32, seconds: f64) -> clap_event_transport_t {
 
 #[test]
 fn a_stopped_host_does_not_infer_playing_from_steady_time() {
-    set_sample_rate(48_000.0);
-    set_render_mode(0);
+    let state = AudioState::default();
+    state.set_sample_rate(48_000.0);
+    state.set_render_mode(0);
     let event = transport(transport_flags::HAS_SECONDS_TIMELINE, 2.0);
     let process = clap_process_t { steady_time: 96_000, frames_count: 128, transport: &event,
         audio_inputs: std::ptr::null(), audio_outputs: std::ptr::null_mut(),
         audio_inputs_count: 0, audio_outputs_count: 0, in_events: std::ptr::null(), out_events: std::ptr::null() };
-    let frame = to_transport_frame(&process);
+    let frame = state.to_transport_frame(&process);
     assert_eq!(frame.playing, Some(false));
     assert_eq!(frame.project_time_samples, 96_000);
     assert!(frame_is_trustworthy(&frame));
@@ -38,11 +39,12 @@ fn a_stopped_host_does_not_infer_playing_from_steady_time() {
 
 #[test]
 fn a_host_without_transport_is_not_trusted() {
-    set_sample_rate(48_000.0);
+    let state = AudioState::default();
+    state.set_sample_rate(48_000.0);
     let process = clap_process_t { steady_time: 100, frames_count: 128, transport: std::ptr::null(),
         audio_inputs: std::ptr::null(), audio_outputs: std::ptr::null_mut(),
         audio_inputs_count: 0, audio_outputs_count: 0, in_events: std::ptr::null(), out_events: std::ptr::null() };
-    let frame = to_transport_frame(&process);
+    let frame = state.to_transport_frame(&process);
     assert_eq!(frame.playing, None);
     assert!(!frame.position_trusted);
     assert!(!frame_is_trustworthy(&frame));
@@ -50,16 +52,17 @@ fn a_host_without_transport_is_not_trusted() {
 
 #[test]
 fn offline_render_is_only_reported_when_the_host_says_so() {
-    set_sample_rate(48_000.0);
-    set_render_mode(0);
-    assert!(!to_transport_frame(&clap_process_t { steady_time: 0, frames_count: 0, transport: std::ptr::null(),
+    let state = AudioState::default();
+    state.set_sample_rate(48_000.0);
+    state.set_render_mode(0);
+    assert!(!state.to_transport_frame(&clap_process_t { steady_time: 0, frames_count: 0, transport: std::ptr::null(),
         audio_inputs: std::ptr::null(), audio_outputs: std::ptr::null_mut(), audio_inputs_count: 0,
         audio_outputs_count: 0, in_events: std::ptr::null(), out_events: std::ptr::null() }).offline);
-    set_render_mode(crate::abi::CLAP_RENDER_OFFLINE);
-    assert!(to_transport_frame(&clap_process_t { steady_time: 0, frames_count: 0, transport: std::ptr::null(),
+    state.set_render_mode(crate::abi::CLAP_RENDER_OFFLINE);
+    assert!(state.to_transport_frame(&clap_process_t { steady_time: 0, frames_count: 0, transport: std::ptr::null(),
         audio_inputs: std::ptr::null(), audio_outputs: std::ptr::null_mut(), audio_inputs_count: 0,
         audio_outputs_count: 0, in_events: std::ptr::null(), out_events: std::ptr::null() }).offline);
-    set_render_mode(0);
+    state.set_render_mode(0);
 }
 
 #[test]
@@ -95,4 +98,31 @@ fn f64_is_silenced_but_still_succeeds() {
         audio_inputs_count: 1, audio_outputs_count: 1, in_events: std::ptr::null(), out_events: std::ptr::null() };
     assert!(unsafe { process_block(&process) });
     assert_eq!(left, vec![0.0; 4]);
+}
+
+#[test]
+fn two_instances_keep_independent_sample_rates_and_render_modes() {
+    // 【为什么这条是硬判据】此前采样率/render/transport 都是进程级 static：
+    // 同一宿主进程里第二个实例 activate 会覆盖第一个，工程位置换算与离线
+    // 标记全部串台。多实例是 DAW 的常态，不是边界情况。
+    let realtime = AudioState::default();
+    realtime.set_sample_rate(48_000.0);
+    assert!(realtime.set_render_mode(crate::abi::CLAP_RENDER_REALTIME));
+
+    let offline = AudioState::default();
+    offline.set_sample_rate(96_000.0);
+    assert!(offline.set_render_mode(crate::abi::CLAP_RENDER_OFFLINE));
+
+    let process = clap_process_t {
+        steady_time: 0, frames_count: 0, transport: std::ptr::null(),
+        audio_inputs: std::ptr::null(), audio_outputs: std::ptr::null_mut(),
+        audio_inputs_count: 0, audio_outputs_count: 0,
+        in_events: std::ptr::null(), out_events: std::ptr::null(),
+    };
+    assert_eq!(realtime.sample_rate(), 48_000.0);
+    assert!(!realtime.to_transport_frame(&process).offline);
+    assert_eq!(offline.sample_rate(), 96_000.0);
+    assert!(offline.to_transport_frame(&process).offline);
+    assert_eq!(realtime.capture_observations(), (false, false));
+    assert_eq!(offline.capture_observations(), (false, true));
 }

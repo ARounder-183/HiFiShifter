@@ -11,6 +11,7 @@ use crate::{audio, state};
 const CLAP_PLUGIN_FACTORY_ID: &str = "clap.plugin-factory";
 use hifishifter_plugin_core::resource_root::{self, ResourceLayout};
 use std::ffi::{c_char, c_void, CStr};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 /// 产品版本（每个格式 cdylib 各自注入，但来自同一个 tauri.conf.json）。
@@ -77,7 +78,7 @@ unsafe extern "C" fn entry_init(plugin_path: *const c_char) -> bool {
 
 unsafe extern "C" fn entry_deinit() {
     hifishifter_plugin_core::guard_ffi((), || {
-        audio::set_render_mode(CLAP_RENDER_REALTIME);
+        crate::log_host::clear();
         log::info!("[clap] module shutdown");
     })
 }
@@ -116,10 +117,21 @@ unsafe extern "C" fn factory_descriptor(
 /// 一个 CLAP 实例的全部可变状态。
 pub struct Instance {
     pub state: state::InstanceState,
+    /// 本实例的音频时间状态（采样率 / render 模式 / transport 观察值）。
+    /// 绝不放到进程级 static：同一宿主进程里多实例会互相覆盖。
+    pub audio: audio::AudioState,
     pub host: *const clap_host_t,
     pub plugin: *const clap_plugin_t,
     /// 阶段 2 的实例级 ARA 适配器；未接线前恒为 None。
     pub ara: Option<()>,
+    /// `plugin->init` 是否已成功。CLAP 规定每个实例只调一次。
+    pub initialized: AtomicBool,
+    /// `plugin->activate` 是否已成功；`process` 必须在此之后。
+    pub active: AtomicBool,
+    /// `start_processing` / `stop_processing` 之间。
+    pub processing: AtomicBool,
+    /// `process` 是否正在执行（防同一实例并发进入音频回调）。
+    pub in_process: AtomicBool,
 }
 
 unsafe extern "C" fn create_plugin(
@@ -139,9 +151,14 @@ unsafe extern "C" fn create_plugin(
         }
         let instance = Box::new(Instance {
             state: state::InstanceState::default(),
+            audio: audio::AudioState::default(),
             host,
             plugin: std::ptr::null(),
             ara: None,
+            initialized: AtomicBool::new(false),
+            active: AtomicBool::new(false),
+            processing: AtomicBool::new(false),
+            in_process: AtomicBool::new(false),
         });
         let plugin = Box::new(clap_plugin_t {
             desc: &raw const DESCRIPTOR,
@@ -189,13 +206,22 @@ pub unsafe fn instance_mut(plugin: *const clap_plugin_t) -> &'static mut Instanc
 
 unsafe extern "C" fn plugin_init(plugin: *const clap_plugin_t) -> bool {
     hifishifter_plugin_core::guard_ffi(false, || {
-        let Some(host) =
-            (unsafe { plugin.as_ref() }).and_then(|p| unsafe { instance(p) }.map(|i| i.host))
-        else {
+        let Some(instance) = (unsafe { crate::instance(plugin) }) else {
             return false;
         };
-        let _ = host;
+        // CLAP: init() is called exactly once per instance, on the main thread.
+        // A second call is a host bug; returning false is safer than re-running
+        // side effects (logger registration, ARA attach) twice.
+        if instance.initialized.swap(true, Ordering::AcqRel) {
+            log::warn!("[clap] duplicate plugin.init rejected");
+            return false;
+        }
+        if instance.host.is_null() {
+            return false;
+        }
+        crate::log_host::install(instance.host);
         crate::ara::attach(plugin);
+        log::info!("[clap] instance initialized");
         true
     })
 }
@@ -206,6 +232,13 @@ unsafe extern "C" fn plugin_destroy(plugin: *const clap_plugin_t) {
         }
         let data = unsafe { (*plugin).plugin_data };
         if !data.is_null() {
+            if let Some(instance) = unsafe { crate::instance(plugin) } {
+                // destroy() requires !active. Refuse to free a live audio instance.
+                if instance.active.load(Ordering::Acquire) {
+                    log::error!("[clap] destroy called while active; leaking instead of crashing");
+                    return;
+                }
+            }
             unsafe { drop(Box::from_raw(data.cast::<Instance>())) };
         }
         unsafe { drop(Box::from_raw(plugin.cast_mut())) };
@@ -218,28 +251,74 @@ unsafe extern "C" fn plugin_activate(
     max: u32,
 ) -> bool {
     hifishifter_plugin_core::guard_ffi(false, || {
-        if !sample_rate.is_finite() || sample_rate <= 0.0 || min == 0 || max < min {
+        let Some(instance) = (unsafe { crate::instance(plugin) }) else {
+            return false;
+        };
+        if !instance.initialized.load(Ordering::Acquire) {
+            log::error!("[clap] activate before init rejected");
             return false;
         }
-        audio::set_sample_rate(sample_rate);
+        if instance.active.swap(true, Ordering::AcqRel) {
+            log::error!("[clap] duplicate activate rejected");
+            return false;
+        }
+        if !sample_rate.is_finite() || sample_rate <= 0.0 || min == 0 || max < min {
+            instance.active.store(false, Ordering::Release);
+            return false;
+        }
+        instance.audio.set_sample_rate(sample_rate);
         crate::ara::observe_activation(plugin);
+        log::info!("[clap] activated at {sample_rate} Hz, block {min}..={max}");
         true
     })
 }
 unsafe extern "C" fn plugin_deactivate(plugin: *const clap_plugin_t) {
-    hifishifter_plugin_core::guard_ffi((), || crate::ara::observe_deactivation(plugin))
+    hifishifter_plugin_core::guard_ffi((), || {
+        let Some(instance) = (unsafe { crate::instance(plugin) }) else {
+            return;
+        };
+        if instance.processing.load(Ordering::Acquire) {
+            log::error!("[clap] deactivate while processing rejected");
+            return;
+        }
+        if !instance.active.swap(false, Ordering::AcqRel) {
+            log::warn!("[clap] deactivate on an inactive instance");
+            return;
+        }
+        instance.audio.set_render_mode(CLAP_RENDER_REALTIME);
+        crate::ara::observe_deactivation(plugin);
+    })
 }
 unsafe extern "C" fn start_processing(plugin: *const clap_plugin_t) -> bool {
     hifishifter_plugin_core::guard_ffi(false, || {
+        let Some(instance) = (unsafe { crate::instance(plugin) }) else {
+            return false;
+        };
+        if !instance.active.load(Ordering::Acquire)
+            || instance.processing.swap(true, Ordering::AcqRel)
+        {
+            log::error!("[clap] start_processing in an invalid state rejected");
+            return false;
+        }
         crate::ara::observe_processing(plugin);
         true
     })
 }
-unsafe extern "C" fn stop_processing(_plugin: *const clap_plugin_t) {
-    hifishifter_plugin_core::guard_ffi((), || ())
+unsafe extern "C" fn stop_processing(plugin: *const clap_plugin_t) {
+    hifishifter_plugin_core::guard_ffi((), || {
+        if let Some(instance) = unsafe { crate::instance(plugin) } {
+            instance.processing.store(false, Ordering::Release);
+        }
+    })
 }
-unsafe extern "C" fn reset_processing(_plugin: *const clap_plugin_t) {
-    hifishifter_plugin_core::guard_ffi((), || ())
+unsafe extern "C" fn reset_processing(plugin: *const clap_plugin_t) {
+    hifishifter_plugin_core::guard_ffi((), || {
+        // reset() clears processing state but keeps the activation. Nothing is
+        // buffered across blocks in this shell, so there is no DSP state to drop.
+        if let Some(instance) = unsafe { crate::instance(plugin) } {
+            let _ = instance;
+        }
+    })
 }
 
 unsafe extern "C" fn plugin_process(
@@ -250,23 +329,41 @@ unsafe extern "C" fn plugin_process(
         if process.is_null() {
             return CLAP_PROCESS_ERROR;
         }
-        let Some(process) = (unsafe { process.as_ref() }) else {
+        let Some(instance) = (unsafe { crate::instance(plugin) }) else {
             return CLAP_PROCESS_ERROR;
         };
-        let frame = audio::to_transport_frame(process);
-        log::trace!(
-            "[clap] block frames={} trusted={} playing={:?} offline={}",
-            process.frames_count,
-            frame.position_trusted,
-            frame.playing,
-            frame.offline
-        );
-        crate::ara::observe_processing(plugin);
-        if unsafe { audio::process_block(process) } {
-            CLAP_PROCESS_CONTINUE
-        } else {
-            CLAP_PROCESS_ERROR
+        // [audio-thread & active_state & processing_state]: refuse any other
+        // combination instead of silently reading a half-initialised state.
+        if !instance.active.load(Ordering::Acquire) || !instance.processing.load(Ordering::Acquire)
+        {
+            log::error!("[clap] process outside the active/processing state rejected");
+            return CLAP_PROCESS_ERROR;
         }
+        if instance.in_process.swap(true, Ordering::AcqRel) {
+            log::error!("[clap] concurrent process on one instance rejected");
+            return CLAP_PROCESS_ERROR;
+        }
+        let result = (|| {
+            let Some(process) = (unsafe { process.as_ref() }) else {
+                return CLAP_PROCESS_ERROR;
+            };
+            let frame = instance.audio.to_transport_frame(process);
+            log::trace!(
+                "[clap] block frames={} trusted={} playing={:?} offline={}",
+                process.frames_count,
+                frame.position_trusted,
+                frame.playing,
+                frame.offline
+            );
+            crate::ara::observe_processing(plugin);
+            if unsafe { audio::process_block(process) } {
+                CLAP_PROCESS_CONTINUE
+            } else {
+                CLAP_PROCESS_ERROR
+            }
+        })();
+        instance.in_process.store(false, Ordering::Release);
+        result
     })
 }
 
@@ -286,6 +383,8 @@ unsafe extern "C" fn plugin_get_extension(
             "clap.render" => return (&raw const RENDER_EXT).cast(),
             "clap.audio-ports" => return (&raw const PORTS_EXT).cast(),
             "clap.timer-support" => return (&raw const TIMER_EXT).cast(),
+            "clap.latency" => return (&raw const crate::latency_tail::LATENCY_EXT).cast(),
+            "clap.tail" => return (&raw const crate::latency_tail::TAIL_EXT).cast(),
             _ => {}
         }
         crate::ara::get_extension(plugin, id)
@@ -299,6 +398,129 @@ unsafe extern "C" fn on_main_thread(_plugin: *const clap_plugin_t) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    /// 造一个与宿主给的形状完全一致的实例记录，用于直接跑生命周期回调。
+    /// 返回的 `clap_plugin_t` 保持在栈上；测试结束前手动释放 `Instance`。
+    fn fixture() -> (clap_plugin_t, *mut Instance) {
+        let instance = Box::into_raw(Box::new(Instance {
+            state: state::InstanceState::default(),
+            audio: audio::AudioState::default(),
+            host: std::ptr::null(),
+            plugin: std::ptr::null(),
+            ara: None,
+            initialized: AtomicBool::new(false),
+            active: AtomicBool::new(false),
+            processing: AtomicBool::new(false),
+            in_process: AtomicBool::new(false),
+        }));
+        let plugin = clap_plugin_t {
+            desc: std::ptr::null(),
+            plugin_data: instance.cast(),
+            init: None,
+            destroy: None,
+            activate: None,
+            deactivate: None,
+            start_processing: None,
+            stop_processing: None,
+            reset: None,
+            process: None,
+            get_extension: None,
+            on_main_thread: None,
+        };
+        (plugin, instance)
+    }
+    fn release(plugin: &mut clap_plugin_t, instance: *mut Instance) {
+        plugin.plugin_data = std::ptr::null_mut();
+        unsafe { drop(Box::from_raw(instance)) };
+    }
+
+    #[test]
+    fn activate_requires_init_and_rejects_duplicates() {
+        let (mut plugin, instance) = fixture();
+        let ptr: *const clap_plugin_t = &raw const plugin;
+        // 未 init 就 activate：必须拒绝。
+        assert!(!unsafe { plugin_activate(ptr, 48_000.0, 1, 512) });
+        // 用一个假的 host 让 init 通过（log_host::install 会安全跳过空扩展）。
+        let host = crate::abi::clap_host_t {
+            clap_version: CLAP_VERSION,
+            host_data: std::ptr::null_mut(),
+            name: c"probe".as_ptr(),
+            vendor: c"probe".as_ptr(),
+            url: c"probe".as_ptr(),
+            version: c"1".as_ptr(),
+            get_extension: None,
+            request_restart: None,
+            request_process: None,
+            request_callback: None,
+        };
+        unsafe { (*instance).host = &raw const host };
+        assert!(unsafe { plugin_init(ptr) });
+        assert!(!unsafe { plugin_init(ptr) }, "duplicate init must fail");
+        assert!(unsafe { plugin_activate(ptr, 48_000.0, 1, 512) });
+        assert!(
+            !unsafe { plugin_activate(ptr, 48_000.0, 1, 512) },
+            "duplicate activate must fail"
+        );
+        assert!(unsafe { start_processing(ptr) });
+        assert!(
+            !unsafe { start_processing(ptr) },
+            "duplicate start_processing must fail"
+        );
+        unsafe {
+            stop_processing(ptr);
+            plugin_deactivate(ptr);
+        }
+        release(&mut plugin, instance);
+    }
+
+    #[test]
+    fn process_is_rejected_before_start_processing() {
+        let (mut plugin, instance) = fixture();
+        let ptr: *const clap_plugin_t = &raw const plugin;
+        let host = crate::abi::clap_host_t {
+            clap_version: CLAP_VERSION,
+            host_data: std::ptr::null_mut(),
+            name: c"probe".as_ptr(),
+            vendor: c"probe".as_ptr(),
+            url: c"probe".as_ptr(),
+            version: c"1".as_ptr(),
+            get_extension: None,
+            request_restart: None,
+            request_process: None,
+            request_callback: None,
+        };
+        unsafe { (*instance).host = &raw const host };
+        assert!(unsafe { plugin_init(ptr) });
+        assert!(unsafe { plugin_activate(ptr, 48_000.0, 1, 512) });
+        let process = clap_process_t {
+            steady_time: 0,
+            frames_count: 0,
+            transport: std::ptr::null(),
+            audio_inputs: std::ptr::null(),
+            audio_outputs: std::ptr::null_mut(),
+            audio_inputs_count: 0,
+            audio_outputs_count: 0,
+            in_events: std::ptr::null(),
+            out_events: std::ptr::null(),
+        };
+        assert_eq!(
+            unsafe { plugin_process(ptr, &raw const process) },
+            CLAP_PROCESS_ERROR,
+            "process before start_processing must fail"
+        );
+        assert!(unsafe { start_processing(ptr) });
+        assert_eq!(
+            unsafe { plugin_process(ptr, &raw const process) },
+            CLAP_PROCESS_CONTINUE
+        );
+        unsafe {
+            stop_processing(ptr);
+            plugin_deactivate(ptr);
+        }
+        release(&mut plugin, instance);
+    }
+
     #[test]
     fn a_capture_only_descriptor_does_not_advertise_ara() {
         let features = unsafe { std::slice::from_raw_parts(DESCRIPTOR.features, 3) };

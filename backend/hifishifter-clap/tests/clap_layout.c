@@ -145,6 +145,12 @@ int main(void) {
     FIELD_LAYOUT(clap_host_gui_t, request_show);
     FIELD_LAYOUT(clap_host_gui_t, request_hide);
     FIELD_LAYOUT(clap_host_gui_t, closed);
+    TYPE_LAYOUT(clap_host_log_t);
+    FIELD_LAYOUT(clap_host_log_t, log);
+    TYPE_LAYOUT(clap_plugin_latency_t);
+    FIELD_LAYOUT(clap_plugin_latency_t, get);
+    TYPE_LAYOUT(clap_plugin_tail_t);
+    FIELD_LAYOUT(clap_plugin_tail_t, get);
     printf("\"end\":0}\n");
     return 0;
 }

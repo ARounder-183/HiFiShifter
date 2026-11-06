@@ -21,13 +21,17 @@ impl RenderExt {
 unsafe extern "C" fn hard(_p: *const clap_plugin_t) -> bool {
     hifishifter_plugin_core::guard_ffi(false, || false)
 }
-unsafe extern "C" fn set(_p: *const clap_plugin_t, mode: i32) -> bool {
+unsafe extern "C" fn set(plugin: *const clap_plugin_t, mode: i32) -> bool {
     hifishifter_plugin_core::guard_ffi(false, || {
         if mode != CLAP_RENDER_REALTIME && mode != CLAP_RENDER_OFFLINE {
             return false;
         }
-        crate::audio::set_render_mode(mode);
-        true
+        // 【为什么按实例】一个进程里可能有实时与离线两个实例同时存在；
+        // 全局标记会让其中一个读到另一个的模式。
+        let Some(instance) = (unsafe { crate::instance(plugin) }) else {
+            return false;
+        };
+        instance.audio.set_render_mode(mode)
     })
 }
 
@@ -40,20 +44,24 @@ mod tests {
     use super::*;
     #[test]
     fn offline_is_not_inferred_from_realtime() {
-        assert!(unsafe { set(std::ptr::null(), CLAP_RENDER_REALTIME) });
+        let state = crate::audio::AudioState::default();
+        let process = crate::abi::clap_process_t {
+            steady_time: 0,
+            frames_count: 0,
+            transport: std::ptr::null(),
+            audio_inputs: std::ptr::null(),
+            audio_outputs: std::ptr::null_mut(),
+            audio_inputs_count: 0,
+            audio_outputs_count: 0,
+            in_events: std::ptr::null(),
+            out_events: std::ptr::null(),
+        };
+        assert!(state.set_render_mode(CLAP_RENDER_REALTIME));
+        assert!(!state.to_transport_frame(&process).offline);
         assert!(
-            !crate::audio::to_transport_frame(&crate::abi::clap_process_t {
-                steady_time: 0,
-                frames_count: 0,
-                transport: std::ptr::null(),
-                audio_inputs: std::ptr::null(),
-                audio_outputs: std::ptr::null_mut(),
-                audio_inputs_count: 0,
-                audio_outputs_count: 0,
-                in_events: std::ptr::null(),
-                out_events: std::ptr::null()
-            })
-            .offline
+            !state.set_render_mode(99),
+            "unknown render modes must be rejected"
         );
+        assert!(!state.to_transport_frame(&process).offline);
     }
 }

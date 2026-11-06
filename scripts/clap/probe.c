@@ -76,8 +76,26 @@ static unsigned char saved_state[4096];
 static unsigned char first_state[4096];
 static size_t saved_len = 0, loaded_len = 0;
 
+/* 假宿主实现：clap.log 把插件日志收进下面的数组，用来证明 logger 真的接上了。 */
+typedef struct { void (*log)(const void *, int32_t, const char *); } clap_host_log_t;
+typedef struct { uint32_t (*get)(const void *); } clap_plugin_latency_t;
+typedef struct { uint32_t (*get)(const void *); } clap_plugin_tail_t;
+static char host_log[8192]; static size_t host_log_len = 0;
+static void host_log_write(const void *host, int32_t severity, const char *msg) {
+    (void)host; (void)severity;
+    size_t n = strlen(msg);
+    if (host_log_len + n + 1 >= sizeof(host_log)) return;
+    memcpy(host_log + host_log_len, msg, n); host_log_len += n;
+    host_log[host_log_len++] = '\n';
+}
+static clap_host_log_t host_log_ext = { host_log_write };
+static const void *host_get_extension(const void *host, const char *id) {
+    (void)host;
+    if (strcmp(id, "clap.log") == 0) return &host_log_ext;
+    return NULL;
+}
 static clap_host_t host = { {1,1,9}, NULL, "probe", "HiFiShifter", "https://example.invalid", "1",
-    NULL, NULL, NULL, NULL };
+    host_get_extension, NULL, NULL, NULL };
 
 /* 每次只接受 7 字节：clap/stream.h 明确允许宿主限制单次读写的字节数，
    插件必须循环推进。用这个假宿主复现"短写丢尾部 / 短读把状态截断"。 */
@@ -188,6 +206,16 @@ int main(int argc, char **argv) {
     printf("audio_ports_extension=%s\n", plugin->get_extension(plugin, "clap.audio-ports") ? "present" : "absent");
     printf("timer_support_extension=%s\n", plugin->get_extension(plugin, "clap.timer-support") ? "present" : "absent");
     printf("gui_extension=%s\n", plugin->get_extension(plugin, "clap.gui") ? "present" : "absent");
+    const clap_plugin_latency_t *latency = (const clap_plugin_latency_t *)plugin->get_extension(plugin, "clap.latency");
+    const clap_plugin_tail_t *tail = (const clap_plugin_tail_t *)plugin->get_extension(plugin, "clap.tail");
+    printf("latency_extension=%s latency=%u\n", latency && latency->get ? "present" : "absent",
+        latency && latency->get ? latency->get(plugin) : 999);
+    printf("tail_extension=%s tail=%u\n", tail && tail->get ? "present" : "absent",
+        tail && tail->get ? tail->get(plugin) : 999);
+    if (!latency || !latency->get || latency->get(plugin) != 0) { fprintf(stderr, "clap.latency must report 0\n"); return 1; }
+    if (!tail || !tail->get || tail->get(plugin) != 0) { fprintf(stderr, "clap.tail must report 0\n"); return 1; }
+    printf("host_log_bytes=%zu\n", host_log_len);
+    if (host_log_len == 0) { fprintf(stderr, "clap.log was never delivered to the host\n"); return 1; }
     /* 阶段 1 明确不返回 clap.gui：交一个假的嵌入视图比不提供 GUI 更危险。 */
     if (plugin->get_extension(plugin, "clap.gui")) {
         fprintf(stderr, "clap.gui must not be advertised by a Capture-only shell\n"); return 1;

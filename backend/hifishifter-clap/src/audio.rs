@@ -4,91 +4,109 @@
 //! 的提示，不是「全静音且缓冲仍可读」；把提示当门控会让录音与输出一起静音。这里一律
 //! **总是读、总是写满**：只处理 F32，F64 保守静音并返回成功；in-place 时先读后写。
 
-use crate::abi::{clap_audio_buffer_t, clap_process_t, CLAP_SECTIME_FACTOR};
+use crate::abi::{clap_audio_buffer_t, clap_process_t, CLAP_RENDER_OFFLINE, CLAP_SECTIME_FACTOR};
 use hifishifter_plugin_core::format::{AudioBlock, ChannelPlane, SampleWidth, TransportFrame};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-/// 最近一次激活声明的采样率（Hz 的位模式）。
-static SAMPLE_RATE: AtomicU64 = AtomicU64::new(0);
-/// `clap_plugin_render::set(CLAP_RENDER_OFFLINE)` 的观察结果。
-static OFFLINE_RENDER: AtomicBool = AtomicBool::new(false);
-/// 「宿主是否给过 transport」的观察结果（Capture bootstrap 如实上报）。
-static SAW_TRANSPORT: AtomicBool = AtomicBool::new(false);
-/// 「宿主是否给过离线 render」的观察结果。
-static SAW_OFFLINE: AtomicBool = AtomicBool::new(false);
-
-/// 记录一次激活的采样率。
-pub fn set_sample_rate(rate: f64) {
-    SAMPLE_RATE.store(rate.to_bits(), Ordering::Release);
-}
-/// 记录一次 render 模式；只把 `CLAP_RENDER_OFFLINE` 当作离线证据。
-pub fn set_render_mode(mode: i32) {
-    let offline = mode == crate::abi::CLAP_RENDER_OFFLINE;
-    OFFLINE_RENDER.store(offline, Ordering::Release);
-    if offline {
-        SAW_OFFLINE.store(true, Ordering::Release);
-    }
-}
-/// Capture bootstrap 的能力读数。
-pub fn capture_observations() -> (bool, bool) {
-    (
-        SAW_TRANSPORT.load(Ordering::Acquire),
-        SAW_OFFLINE.load(Ordering::Acquire),
-    )
-}
-/// 本产物观察到过 transport 事件（用于黑盒探针打印，不用于假装播放）。
-pub fn saw_transport() -> bool {
-    SAW_TRANSPORT.load(Ordering::Acquire)
-}
-/// 本产物观察到过离线 render 模式。
-pub fn saw_offline() -> bool {
-    SAW_OFFLINE.load(Ordering::Acquire)
-}
-
-/// 把 CLAP 的时间读数转换为中性 `TransportFrame`。
+/// 一个 CLAP 实例的音频时间状态。
 ///
-/// `steady_time` 在停播与重放时仍会前进，因此**绝不**拿它的变化推断播放状态。
-/// 工程位置只从 transport 事件的 `song_pos_seconds` 换算；没有事件就 `position_trusted=false`。
-pub fn to_transport_frame(process: &clap_process_t) -> TransportFrame {
-    let sample_rate = f64::from_bits(SAMPLE_RATE.load(Ordering::Acquire));
-    let offline = OFFLINE_RENDER.load(Ordering::Acquire);
-    let steady = (process.steady_time >= 0).then_some(process.steady_time);
-    let Some(transport) = (unsafe { process.transport.as_ref() }) else {
-        return TransportFrame {
-            project_time_samples: 0,
+/// 【为什么不是进程级 static】采样率、`clap.render` 模式与 transport 观察值都随
+/// **实例**走：同一个 DAW 进程里两条轨道各插一个本插件，一个 48 kHz 实时、一个
+/// 96 kHz 离线 bounce 是完全正常的。此前的全局 `SAMPLE_RATE` / `OFFLINE_RENDER`
+/// 会让后 activate 的实例覆盖前一个，结果是错的工程位置换算、错的离线标记，
+/// 以及"这条轨明明在实时播放却被标成离线"。状态放在 `Instance` 里，
+/// 每个 `process` 只读自己的那一份。
+#[derive(Debug, Default)]
+pub struct AudioState {
+    /// 本实例激活声明的采样率（Hz 的位模式）；0 = 尚未激活。
+    sample_rate: AtomicU64,
+    /// `clap_plugin_render::set` 给出的当前模式是否为离线。
+    offline_render: AtomicBool,
+    /// 本实例是否收到过 transport 事件（Capture bootstrap 如实上报）。
+    saw_transport: AtomicBool,
+    /// 本实例是否收到过离线 render 模式。
+    saw_offline: AtomicBool,
+}
+
+impl AudioState {
+    /// 记录一次激活的采样率。
+    pub fn set_sample_rate(&self, rate: f64) {
+        self.sample_rate.store(rate.to_bits(), Ordering::Release);
+    }
+
+    /// 取本实例的采样率；未激活时是 0（`frame_is_trustworthy` 会拒绝该块）。
+    pub fn sample_rate(&self) -> f64 {
+        f64::from_bits(self.sample_rate.load(Ordering::Acquire))
+    }
+
+    /// 记录一次 render 模式；只把 `CLAP_RENDER_OFFLINE` 当作离线证据。
+    /// 传入未定义的模式返回 `false`，不改动状态。
+    pub fn set_render_mode(&self, mode: i32) -> bool {
+        if mode != crate::abi::CLAP_RENDER_REALTIME && mode != CLAP_RENDER_OFFLINE {
+            return false;
+        }
+        let offline = mode == CLAP_RENDER_OFFLINE;
+        self.offline_render.store(offline, Ordering::Release);
+        if offline {
+            self.saw_offline.store(true, Ordering::Release);
+        }
+        true
+    }
+
+    /// Capture bootstrap 的能力读数（是否见过 transport / 是否见过离线 render）。
+    pub fn capture_observations(&self) -> (bool, bool) {
+        (
+            self.saw_transport.load(Ordering::Acquire),
+            self.saw_offline.load(Ordering::Acquire),
+        )
+    }
+
+    /// 把 CLAP 的时间读数转换为中性 `TransportFrame`。
+    ///
+    /// `steady_time` 在停播与重放时仍会前进，因此**绝不**拿它的变化推断播放状态。
+    /// 工程位置只从 transport 事件的 `song_pos_seconds` 换算；没有事件就
+    /// `position_trusted=false`。采样率与离线标记都取自本实例，不读进程级全局。
+    pub fn to_transport_frame(&self, process: &clap_process_t) -> TransportFrame {
+        let sample_rate = self.sample_rate();
+        let offline = self.offline_render.load(Ordering::Acquire);
+        let steady = (process.steady_time >= 0).then_some(process.steady_time);
+        let Some(transport) = (unsafe { process.transport.as_ref() }) else {
+            return TransportFrame {
+                project_time_samples: 0,
+                sample_rate,
+                playing: None,
+                recording: None,
+                cycle_active: None,
+                tempo: None,
+                time_sig_num: None,
+                time_sig_den: None,
+                steady_time: steady,
+                offline,
+                position_trusted: false,
+            };
+        };
+        self.saw_transport.store(true, Ordering::Release);
+        let has_seconds = transport.flags & crate::abi::transport_flags::HAS_SECONDS_TIMELINE != 0;
+        let seconds = transport.song_pos_seconds as f64 / CLAP_SECTIME_FACTOR;
+        let position = (has_seconds && seconds.is_finite() && seconds >= 0.0)
+            .then(|| (seconds * sample_rate).round() as i64);
+        TransportFrame {
+            project_time_samples: position.unwrap_or(0),
             sample_rate,
-            playing: None,
-            recording: None,
-            cycle_active: None,
-            tempo: None,
-            time_sig_num: None,
-            time_sig_den: None,
+            playing: Some(transport.flags & crate::abi::transport_flags::IS_PLAYING != 0),
+            recording: Some(transport.flags & crate::abi::transport_flags::IS_RECORDING != 0),
+            cycle_active: Some(transport.flags & crate::abi::transport_flags::IS_LOOP_ACTIVE != 0),
+            tempo: (transport.flags & crate::abi::transport_flags::HAS_TEMPO != 0)
+                .then_some(transport.tempo),
+            time_sig_num: (transport.flags & crate::abi::transport_flags::HAS_TIME_SIGNATURE != 0)
+                .then_some(i32::from(transport.tsig_num)),
+            time_sig_den: (transport.flags & crate::abi::transport_flags::HAS_TIME_SIGNATURE != 0)
+                .then_some(i32::from(transport.tsig_denom)),
             steady_time: steady,
             offline,
-            position_trusted: false,
-        };
-    };
-    SAW_TRANSPORT.store(true, Ordering::Release);
-    let has_seconds = transport.flags & crate::abi::transport_flags::HAS_SECONDS_TIMELINE != 0;
-    let seconds = transport.song_pos_seconds as f64 / CLAP_SECTIME_FACTOR;
-    let position = (has_seconds && seconds.is_finite() && seconds >= 0.0)
-        .then(|| (seconds * sample_rate).round() as i64);
-    TransportFrame {
-        project_time_samples: position.unwrap_or(0),
-        sample_rate,
-        playing: Some(transport.flags & crate::abi::transport_flags::IS_PLAYING != 0),
-        recording: Some(transport.flags & crate::abi::transport_flags::IS_RECORDING != 0),
-        cycle_active: Some(transport.flags & crate::abi::transport_flags::IS_LOOP_ACTIVE != 0),
-        tempo: (transport.flags & crate::abi::transport_flags::HAS_TEMPO != 0)
-            .then_some(transport.tempo),
-        time_sig_num: (transport.flags & crate::abi::transport_flags::HAS_TIME_SIGNATURE != 0)
-            .then_some(i32::from(transport.tsig_num)),
-        time_sig_den: (transport.flags & crate::abi::transport_flags::HAS_TIME_SIGNATURE != 0)
-            .then_some(i32::from(transport.tsig_denom)),
-        steady_time: steady,
-        offline,
-        position_trusted: position.is_some(),
+            position_trusted: position.is_some(),
+        }
     }
 }
 

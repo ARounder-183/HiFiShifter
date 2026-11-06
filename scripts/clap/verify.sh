@@ -173,6 +173,9 @@ if cc -O1 -Wall -o "$PROBE_DIR/probe" "$SCRIPT_DIR/probe.c" $EXTRA_LIBS 2>"$PROB
         grep -q "audio_ports_extension=present" "$PROBE_DIR/out.log" || bad "clap.audio-ports 扩展缺失"
         grep -q "timer_support_extension=present" "$PROBE_DIR/out.log" || bad "clap.timer-support 扩展缺失"
         grep -q "gui_extension=absent" "$PROBE_DIR/out.log" || bad "本阶段不应返回 clap.gui 扩展"
+        grep -q "latency_extension=present latency=0" "$PROBE_DIR/out.log" || bad "clap.latency 必须如实返回 0"
+        grep -q "tail_extension=present tail=0" "$PROBE_DIR/out.log" || bad "clap.tail 必须如实返回 0"
+        grep -Eq "host_log_bytes=[1-9][0-9]*" "$PROBE_DIR/out.log" || bad "宿主没有收到任何 clap.log 日志"
     else
         bad "黑盒加载失败："
         sed "s/^/    /" "$PROBE_DIR/out.log"

@@ -134,7 +134,9 @@ ARA 侧改了时间拉伸 / 内容淡化，插件会继续用旧配置渲染。
 
 | 能力 | 状态 | 契约原因 |
 | --- | --- | --- |
-| 实例化 / 激活 / process / 保存 state / 销毁 | 有 | `clap.plugin-factory` + `clap.state` + `clap.audio-ports` |
+| 实例化 / 激活 / process / 保存 state / 销毁 | 有 | `clap.plugin-factory` + `clap.state` + `clap.audio-ports`；生命周期按 CLAP 状态机严格校验 |
+| 延迟 / 尾音 | 如实为 0 | `clap.latency` + `clap.tail`；逐帧直通、不缓存样本，0 是唯一正确答案 |
+| 宿主日志 | 有 | `clap.log`：`plugin.init` 后查询 `clap_host_log` 并装上 logger，诊断不再静默丢弃 |
 | transport 读数 | 按事件如实给 | 只从 `clap_event_transport_t` 读播放/录音/循环/拍号；`steady_time` 不推断播放 |
 | 离线 bounce | 按扩展如实给 | 只从 `clap.render` 的 `CLAP_RENDER_OFFLINE` 置位 |
 | ARA 工厂 / 实例扩展 | **不暴露** | 共享 ARA 文档模型仍在 VST3 外壳里；暴露不能创建控制器的工厂会让宿主写穿空指针 |
@@ -147,7 +149,7 @@ ARA 侧改了时间拉伸 / 内容淡化，插件会继续用旧配置渲染。
 
 ### 产物侧的工程证据（非真机宿主结论）
 
-以下三条由产物自检与 cargo 用例覆盖，**不等价于**"已在 Bitwig / REAPER 里加载过"：
+以下各条由产物自检与 cargo 用例覆盖，**不等价于**"已在 Bitwig / REAPER 里加载过"：
 
 - **ABI 布局**：`backend/hifishifter-clap/tests/clap_layout.c` 用 `plugin-sdks.json`
   钉住的 CLAP 1.1.9 头文件编译原生 oracle，`clap_layout.rs` 逐项比对全部
@@ -157,10 +159,14 @@ ARA 侧改了时间拉伸 / 内容淡化，插件会继续用旧配置渲染。
 - **宿主流**：`clap/stream.h` 允许宿主限制单次读/写字节数；`state.rs` 循环推进，
   短读不当成 EOF、短写不丢尾部、零进度与负数判失败，并有 64 MiB 上限防止挂死。
   `scripts/clap/probe.c` 用每次 7 字节的假宿主实际复现这条路径。
+- **每实例状态**：采样率、`clap.render` 模式与 transport 观察值从进程级 static 移到
+  `Instance::audio`。同一宿主进程里两个实例（不同采样率 / 一个实时一个离线）不再
+  互相覆盖；`process` 在未 `activate` / 未 `start_processing` / 并发进入时明确拒绝。
 - **能力诚实性**：黑盒探针把 `clap.state` / `clap.render` / `clap.audio-ports` /
   `clap.timer-support` 必须存在、`clap.gui` 必须缺席、descriptor 不得含任何
   `ara:` feature、ARA 工厂必须缺席都写成硬失败；`verify.sh` 逐项断言探针输出。
-  打印 "absent" 后照常返回成功的老判据不再成立。
+  探针自身实现 `clap.log` 假宿主并断言收到日志、`clap.latency` / `clap.tail`
+  必须返回 0。打印 "absent" 后照常返回成功的老判据不再成立。
 
 真机宿主的扫描、录音、WebView、保存重开与 ARA 配对仍按 `docs/plugin-host-survey.md`
 保持「未测」，阶段 2 / 3 的 No-Go 结论不变。

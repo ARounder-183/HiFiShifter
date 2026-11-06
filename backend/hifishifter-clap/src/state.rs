@@ -330,9 +330,14 @@ mod tests {
     fn state_round_trips_through_the_c_abi_with_short_streams() {
         let instance = Box::into_raw(Box::new(Instance {
             state: InstanceState::default(),
+            audio: crate::audio::AudioState::default(),
             host: std::ptr::null(),
             plugin: std::ptr::null(),
             ara: None,
+            initialized: std::sync::atomic::AtomicBool::new(false),
+            active: std::sync::atomic::AtomicBool::new(false),
+            processing: std::sync::atomic::AtomicBool::new(false),
+            in_process: std::sync::atomic::AtomicBool::new(false),
         }));
         let plugin = clap_plugin_t {
             desc: std::ptr::null(),

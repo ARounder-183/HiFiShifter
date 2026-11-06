@@ -438,6 +438,20 @@ fn rust_clap_layout_matches_the_pinned_native_sdk() {
         "clap_event_header_t.type",
         offset_of!(clap_event_header_t, type_)
     );
+    type HostLog = hifishifter_clap::log_host::ClapHostLog;
+    type Latency = hifishifter_clap::latency_tail::LatencyExt;
+    type Tail = hifishifter_clap::latency_tail::TailExt;
+    check!(layout, "clap_host_log_t.size", size_of::<HostLog>());
+    check!(layout, "clap_host_log_t.log", offset_of!(HostLog, log));
+    check!(layout, "clap_plugin_latency_t.size", size_of::<Latency>());
+    check!(
+        layout,
+        "clap_plugin_latency_t.get",
+        offset_of!(Latency, get)
+    );
+    check!(layout, "clap_plugin_tail_t.size", size_of::<Tail>());
+    check!(layout, "clap_plugin_tail_t.get", offset_of!(Tail, get));
+
     // `Option<fn>` 与原生函数指针同宽：整张表能被逐槽比对的前提。
     assert_eq!(
         size_of::<Option<unsafe extern "C" fn()>>(),

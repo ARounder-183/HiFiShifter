@@ -1,7 +1,10 @@
 //! HiFiShifter 的 CLAP 插件外壳。
 //!
 //! 【边界】本 crate 只认识 CLAP 1.1.9 的模块入口与扩展；时间/缓冲/状态/资源规则
-//! 一律经 `hifishifter-plugin-core`。ARA 工厂通过 `ara2-bridge` 的 CLAP companion 暴露，
+//! 一律经 `hifishifter-plugin-core`。
+//!
+//! 【能力边界】阶段 1 是 Capture-only：descriptor 不声明 `ara:supported`，
+//! entry 不暴露 ARA 工厂，实例不返回 ARA 扩展。共享 ARA 文档模型仍在 VST3 外壳里。
 //! 不链接 VST3 SDK、不带 Tauri/wry/app runtime。
 
 #![deny(missing_docs)]
@@ -18,6 +21,8 @@ pub mod ara;
 pub mod audio;
 pub mod entry;
 pub mod gui;
+pub mod latency_tail;
+pub mod log_host;
 pub mod ports;
 pub mod render_ext;
 pub mod state;
