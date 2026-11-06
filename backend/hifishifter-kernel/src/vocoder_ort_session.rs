@@ -941,9 +941,12 @@ fn global_env_ep_choice() -> Option<String> {
 
 /// True when the process is explicitly pinned to CPU-only inference.
 ///
-/// `HIFISHIFTER_ORT_EP=cpu` is stronger than an EP *preference*: headless CI
-/// runners and audio hosts use it to keep the GPU runtimes out of the
-/// process.  Two things used to defeat that intent.  The persisted UI
+/// `HIFISHIFTER_ORT_EP=cpu` is stronger than an EP *preference*: headless
+/// Linux CI runners and audio hosts use it to keep the GPU runtimes out of
+/// the process.  It is deliberately scoped to Linux in `vst3-unix.yml` —
+/// macOS uses Dawn/Metal and must keep its normal `auto` path, because
+/// skipping the GPU probe there changes ORT initialization ordering enough
+/// to hang the editor test chunk.  Two things used to defeat that intent.  The persisted UI
 /// setting defaults to `"auto"`, and the runtime override is consulted
 /// before the env var, so a first `ui_settings_apply::apply()` silently
 /// replaced `cpu` with `auto` and built a real WebGPU session.

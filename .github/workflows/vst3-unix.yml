@@ -223,21 +223,37 @@ jobs:
       # 此前这里有四条 --skip 写死在 YAML 里，与 build.yml / vst3.yml 的各一条互不知情。
       - name: Run plugin unit tests
         env:
-          # 托管 runner 没有 GPU。`cpu` 是**硬钉**：不仅会话不建 GPU EP，连
-          # `diagnose_available_providers()` 的 WebGPU 探测都不做 —— 注册那个 EP 本身
-          # 就会启动 Dawn/Tint 的着色器编译线程，在只有 Lavapipe 的 runner 上把堆写坏
+          # Linux runner 上唯一的 Vulkan 设备是 Lavapipe。`cpu` 是**硬钉**：不仅
+          # 会话不建 GPU EP，连 `diagnose_available_providers()` 的 WebGPU 探测都不做
+          # —— 注册那个 EP 本身就会启动 Dawn/Tint 的着色器编译线程，把堆写坏
           # （free(): unaligned chunk detected in tcache 2 → SIGABRT）。此前 UI 设置的
-          # 默认 "auto" 会通过运行时覆盖把这个环境变量顶掉，所以内核现在让 cpu-only
-          # 优先于一切偏好。判的是逻辑，不是 GPU 性能。
-          HIFISHIFTER_ORT_EP: cpu
+          # 默认 "auto" 会通过运行时覆盖把这个环境变量顶掉，所以内核让 cpu-only
+          # 优先于一切偏好。
+          #
+          # 【为什么 macOS 必须留在 auto】Dawn 在 macOS 上走 Metal，没有 Lavapipe 那类
+          # 问题；前一轮 auto 下 editor:: 181 条用例 152 秒正常跑完。把 cpu 也套到
+          # macOS 上后，GPU 探测被整体跳过、ORT 初始化时序随之改变，editor:: 跑到
+          # a_slow_command_replies_without_touching_the_actor_queue 就永久挂住
+          # （实测 37 分钟无输出）。所以这个钉只属于 Linux。
+          HIFISHIFTER_ORT_EP: ${{ runner.os == 'Linux' && 'cpu' || 'auto' }}
         run: |
-          # 【为什么不是直接写 timeout】macOS 上没有 GNU 的 timeout（coreutils 不预装），
-          # 那一步会以 127 "command not found" 结束 —— 看起来像测试挂了，其实一个用例
-          # 都没跑。有 timeout 就把卡死判在 55 分钟，没有就交给 job 的 timeout-minutes。
+          # 【为什么两条分支都要限时】macOS 没有 GNU timeout（coreutils 不预装），
+          # 直接写 timeout 会以 127 结束、看起来像测试挂了其实一条都没跑；但不加
+          # 限时又会让真正的挂死一直等到 job 的 timeout-minutes。GNU 分支用 timeout，
+          # macOS 分支用 python3 起一个新进程组、超时后整组 kill —— 子 cargo 进程
+          # 也在组里，不会被留成孤儿。
           if command -v timeout >/dev/null 2>&1; then
             timeout 3300 pwsh -NoProfile -File scripts/checks/run-rust-gates.ps1 -Only test -Package hifishifter-plugin -Platform unix
           else
-            pwsh -NoProfile -File scripts/checks/run-rust-gates.ps1 -Only test -Package hifishifter-plugin -Platform unix
+            python3 -c '
+          import os, signal, subprocess, sys
+          p = subprocess.Popen(sys.argv[1:], start_new_session=True)
+          try:
+              sys.exit(p.wait(timeout=3300))
+          except subprocess.TimeoutExpired:
+              os.killpg(p.pid, signal.SIGKILL)
+              sys.exit(124)
+          ' pwsh -NoProfile -File scripts/checks/run-rust-gates.ps1 -Only test -Package hifishifter-plugin -Platform unix
           fi
 
       # 【为什么要有这一步】测试进程被信号打死时，cargo 只留下一句
