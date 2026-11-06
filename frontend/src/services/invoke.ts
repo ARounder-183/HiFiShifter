@@ -135,8 +135,10 @@ async function waitForPyWebviewApi(timeoutMs: number): Promise<PyWebviewApi | nu
         function finish() {
             if (done) return;
             done = true;
-            window.removeEventListener("pywebviewready", onReady as any);
-            document.removeEventListener("pywebviewready", onReady as any);
+            if (typeof window !== "undefined") {
+                window.removeEventListener("pywebviewready", onReady as any);
+                document.removeEventListener("pywebviewready", onReady as any);
+            }
             clearInterval(pollId);
             clearTimeout(timeoutId);
             resolve();
@@ -146,23 +148,34 @@ async function waitForPyWebviewApi(timeoutMs: number): Promise<PyWebviewApi | nu
             finish();
         }
 
-        const pollId = window.setInterval(() => {
+        // Use the global timer functions rather than `window.setInterval`: in a
+        // jsdom test the window can be torn down before the timeout fires, and a
+        // window-scoped interval then throws `ReferenceError: window is not
+        // defined` after every test has already passed.  Global timers keep the
+        // ids valid so `finish()` can always clear them.
+        const pollId = setInterval(() => {
+            if (typeof window === "undefined") {
+                clearInterval(pollId);
+                return;
+            }
             if (window.pywebview?.api) finish();
         }, 25);
 
-        const timeoutId = window.setTimeout(
+        const timeoutId = setTimeout(
             () => {
                 finish();
             },
             Math.max(0, timeoutMs),
         );
 
-        window.addEventListener("pywebviewready", onReady as any, {
-            once: true,
-        });
-        document.addEventListener("pywebviewready", onReady as any, {
-            once: true,
-        });
+        if (typeof window !== "undefined") {
+            window.addEventListener("pywebviewready", onReady as any, {
+                once: true,
+            });
+            document.addEventListener("pywebviewready", onReady as any, {
+                once: true,
+            });
+        }
     });
 
     const api = window.pywebview?.api as PyWebviewApi | undefined;
