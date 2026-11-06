@@ -57,6 +57,8 @@ export interface ClipInstanceClip {
     readonly leadingOverlapPx?: number;
     /** header 被任何前序同轨 Clip 遮挡的宽度（clip 内相对坐标）。 */
     readonly coveredUntilPx?: number;
+    /** header 尾部被后序同轨 Clip 覆盖的宽度（绘制的标签收边用）。 */
+    readonly trailingHeaderOverlapPx?: number;
     readonly isMidiClip?: boolean;
 }
 

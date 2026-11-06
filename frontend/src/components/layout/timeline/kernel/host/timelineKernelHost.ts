@@ -82,6 +82,7 @@ import { noteFadeLinePointerDown } from "../../hooks/fadeLineClickGesture";
 import { effectiveFadeSec, hitClipFadeTarget } from "../interaction/fadeTargets";
 import type { FadeContextSide } from "../../FadeContextMenu";
 import { hitOverlapControl } from "../interaction/overlapControls";
+import { resolveClipHeaderLayout } from "../interaction/clipHeaderLayout";
 import { hitInactiveTakeLane } from "../../takeLanes";
 import { isPluginMode } from "../../../../../services/hostCapabilities";
 import { resolveHorizontalWheelZoom } from "../../runtime/timelineScrollRange";
@@ -4062,13 +4063,13 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     }
 
     /**
-     * 命中 clip 的 header 被同轨前序块遮住的像素宽度。
+     * header 尾部被后序同轨 Clip 覆盖的像素宽度。
      *
-     * 与模型侧 `coveredUntilPx` 同一口径（所有前序块末端最大值，再钳到自身宽度）；
-     * 这里按需现算，供 `hitClipHeaderControl` 过滤“看不见的控件”。命中端不能只
-     * 看紧邻前序的重叠段，否则更早的长 Clip 压过来仍会点到看不见的按钮。
+     * 与模型侧 `trailingHeaderOverlapPx` 同一口径：取所有后序块中
+     * `startSec` 的最小值，再钳到本 Clip 的宽度。命中端用它把前一个 Clip
+     * 的尾部标签与名称收在重叠起点之前。
      */
-    function coveredUntilPxOf(hit: {
+    function trailingHeaderOverlapPxOf(hit: {
         readonly clip: HitTestClip;
         readonly trackIndex: number;
     }): number {
@@ -4077,21 +4078,19 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         if (track === undefined) return 0;
         const list = hitClipsByTrack.get(track.id) ?? [];
         const clipWidthPx = Math.max(1, hit.clip.lengthSec * view.pxPerSec);
-        let coveredUntilSec = Number.NEGATIVE_INFINITY;
+        const clipEndSec = hit.clip.startSec + hit.clip.lengthSec;
+        let coveredFromSec = Number.POSITIVE_INFINITY;
         for (const other of list) {
             if (other.id === hit.clip.id) continue;
-            const startsBefore =
-                other.startSec < hit.clip.startSec - 1e-9 ||
+            const startsAfter =
+                other.startSec > hit.clip.startSec + 1e-9 ||
                 (Math.abs(other.startSec - hit.clip.startSec) <= 1e-9 &&
-                    String(other.id) < String(hit.clip.id));
-            if (!startsBefore) continue;
-            coveredUntilSec = Math.max(coveredUntilSec, other.startSec + other.lengthSec);
+                    String(other.id) > String(hit.clip.id));
+            if (!startsAfter || other.startSec >= clipEndSec - 1e-9) continue;
+            coveredFromSec = Math.min(coveredFromSec, other.startSec);
         }
-        if (!Number.isFinite(coveredUntilSec)) return 0;
-        return Math.max(
-            0,
-            Math.min(clipWidthPx, (coveredUntilSec - hit.clip.startSec) * view.pxPerSec),
-        );
+        if (!Number.isFinite(coveredFromSec)) return 0;
+        return Math.max(0, Math.min(clipWidthPx, (clipEndSec - coveredFromSec) * view.pxPerSec));
     }
 
     function resolveHeaderControl(hit: {
@@ -4111,7 +4110,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             clipWidthPx,
             style,
             headerHeightPx: CLIP_HEADER_HEIGHT,
-            coveredUntilPx: coveredUntilPxOf(hit),
+            trailingHeaderOverlapPx: trailingHeaderOverlapPxOf(hit),
         });
     }
 
@@ -6356,13 +6355,20 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                     groupId: clip.groupId,
                     isMidiClip: clip.midiNoteCount != null,
                 };
-                const visibleLeftPx = coveredUntilPxOf({
-                    clip: hitClip,
-                    trackIndex: rowIndex,
+                const headerLayout = resolveClipHeaderLayout({
+                    clipWidthPx,
+                    trailingOverlapPx: trailingHeaderOverlapPxOf({
+                        clip: hitClip,
+                        trackIndex: rowIndex,
+                    }),
+                    leadingControlsWidth: style.leadingControlsWidth,
+                    showGainLabel: style.showGainLabel,
+                    showPlaybackRate: style.showPlaybackRate,
+                    gainLabelWidth: style.gainLabelWidth,
+                    rateLabelWidth: style.rateLabelWidth,
                 });
-                const nameLeftPx = Math.max(style.leadingControlsWidth, visibleLeftPx);
-                const left = clipLeftPx + nameLeftPx;
-                const available = clipWidthPx - nameLeftPx - style.trailingReservePx;
+                const left = clipLeftPx + headerLayout.nameLeftPx;
+                const available = headerLayout.nameWidthPx;
                 return {
                     contentLeftPx: left,
                     contentTopPx: rowTopPx,
@@ -6370,15 +6376,48 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 };
             }
             if (field === "gain") {
+                const headerLayout = resolveClipHeaderLayout({
+                    clipWidthPx,
+                    trailingOverlapPx: trailingHeaderOverlapPxOf({
+                        clip: {
+                            id: clip.id,
+                            trackId: clip.trackId,
+                            startSec: clip.startSec,
+                            lengthSec: clip.lengthSec,
+                        },
+                        trackIndex: rowIndex,
+                    }),
+                    leadingControlsWidth: style.leadingControlsWidth,
+                    showGainLabel: style.showGainLabel,
+                    showPlaybackRate: style.showPlaybackRate,
+                    gainLabelWidth: style.gainLabelWidth,
+                    rateLabelWidth: style.rateLabelWidth,
+                });
                 return {
-                    contentLeftPx: clipLeftPx + clipWidthPx - style.gainLabelWidth - 6,
+                    contentLeftPx: clipLeftPx + headerLayout.gainLabelLeftPx,
                     contentTopPx: rowTopPx,
                     widthPx: 72,
                 };
             }
+            const headerLayout = resolveClipHeaderLayout({
+                clipWidthPx,
+                trailingOverlapPx: trailingHeaderOverlapPxOf({
+                    clip: {
+                        id: clip.id,
+                        trackId: clip.trackId,
+                        startSec: clip.startSec,
+                        lengthSec: clip.lengthSec,
+                    },
+                    trackIndex: rowIndex,
+                }),
+                leadingControlsWidth: style.leadingControlsWidth,
+                showGainLabel: style.showGainLabel,
+                showPlaybackRate: style.showPlaybackRate,
+                gainLabelWidth: style.gainLabelWidth,
+                rateLabelWidth: style.rateLabelWidth,
+            });
             return {
-                contentLeftPx:
-                    clipLeftPx + clipWidthPx - style.gainLabelWidth - style.rateLabelWidth - 14,
+                contentLeftPx: clipLeftPx + headerLayout.rateLabelLeftPx,
                 contentTopPx: rowTopPx,
                 widthPx: 72,
             };

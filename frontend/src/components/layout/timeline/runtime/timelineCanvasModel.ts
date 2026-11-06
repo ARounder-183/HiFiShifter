@@ -171,6 +171,13 @@ export type TimelineCanvasClipModel = {
      */
     coveredUntilPx?: number;
     /**
+     * header 尾部被后序同轨 Clip 覆盖的宽度（clip 内相对坐标）。
+     *
+     * 后序 Clip 仍显示自己的 header；前序 Clip 的名称与 dB / 倍率标签必须在
+     * 这个边界之前收边并左移。
+     */
+    trailingHeaderOverlapPx?: number;
+    /**
      * 静音检测预览区段（像素，相对 clip 左缘）。
      *
      * 与旧实现 `ClipItem` 的红色覆盖层同源：后端给出的是**工程秒**区间，这里按
@@ -640,6 +647,7 @@ export function buildSparseClipRenderModel(args: {
      * 用来回答“名称 / 徽标是否被更早的长 Clip 压住”。
      */
     const coveredUntilSecByClipId = new Map<string, number>();
+    const trailingHeaderOverlapSecByClipId = new Map<string, number>();
     for (const trackClips of Object.values(args.visibleTrackClipsById)) {
         if (trackClips.length < 2) continue;
         const sorted = trackClips.slice().sort((a, b) => {
@@ -654,6 +662,15 @@ export function buildSparseClipRenderModel(args: {
                 coveredUntilSecByClipId.set(clip.id, Math.min(end, previousEnd));
             }
             previousEnd = Math.max(previousEnd, end);
+        }
+        let nextStartSec = Number.POSITIVE_INFINITY;
+        for (let index = sorted.length - 1; index >= 0; index -= 1) {
+            const clip = sorted[index];
+            if (clip === undefined) continue;
+            if (nextStartSec < clip.startSec + clip.lengthSec - 1e-9) {
+                trailingHeaderOverlapSecByClipId.set(clip.id, nextStartSec);
+            }
+            nextStartSec = Math.min(nextStartSec, clip.startSec);
         }
     }
 
@@ -765,6 +782,18 @@ export function buildSparseClipRenderModel(args: {
                     Math.min(
                         durationToWidthPx(args.axis, clip.lengthSec),
                         secToContentPx(args.axis, coveredUntilSec) - clipLeftPx,
+                    ),
+                );
+            })(),
+            trailingHeaderOverlapPx: (() => {
+                const coveredFromSec = trailingHeaderOverlapSecByClipId.get(clip.id);
+                if (coveredFromSec === undefined) return 0;
+                const clipEndPx = secToContentPx(args.axis, clip.startSec + clip.lengthSec);
+                return Math.max(
+                    0,
+                    Math.min(
+                        durationToWidthPx(args.axis, clip.lengthSec),
+                        clipEndPx - secToContentPx(args.axis, coveredFromSec),
                     ),
                 );
             })(),

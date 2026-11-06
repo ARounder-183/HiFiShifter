@@ -194,9 +194,19 @@ test("components/layout/timeline/runtime/timelineCanvasModel.test.ts scripted ch
         });
         const byId = new Map(overlapModel.drawClips.map((clip) => [clip.id, clip]));
         assertEqual(byId.get("earlier")?.coveredUntilPx ?? 0, 0, "earlier clip is not covered");
+        assertEqual(
+            byId.get("earlier")?.trailingHeaderOverlapPx,
+            200,
+            "earlier clip tail header is covered by the later clip",
+        );
         // earlier = [100,500)，later = [300,700)：later 的前 200px 被压住，
         // header 必须从这里开始裁剪，不能按紧邻前序的等权混合段另算一份。
         assertEqual(byId.get("later")?.coveredUntilPx, 200, "later clip header covered width");
+        assertEqual(
+            byId.get("later")?.trailingHeaderOverlapPx ?? 0,
+            0,
+            "later clip header retains its leading overlap",
+        );
     }
 });
 
