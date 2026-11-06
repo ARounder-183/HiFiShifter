@@ -36,6 +36,8 @@ export function useTimelineViewportController({
         syncScrollLeft,
         setScrollLeftState,
         trackIdFromClientY,
+        dropTrackIndexFromClientY,
+        dropRowFractionFromClientY,
         rowHeight,
         sessionRef,
         // 复用 `useTimelineState` 创建的那一份实例：访问器只包同一对 ref，
@@ -99,6 +101,50 @@ export function useTimelineViewportController({
             return tracks[idx]?.id ?? null;
         },
         [rowHeight, sessionRef, trackIdFromClientY, kernelHostRef],
+    );
+
+    /**
+     * 拖放专用：按宿主矩形 + 自绘 scrollTop 求轨道下标。
+     *
+     * 与 `resolveTrackIdAtClientY` 的差别只在越界语义：轨道下方返回
+     * `tracks.length`（预览画在幽灵行 / 导入新建轨道），轨道上方钳到 0。
+     * 不能返回 null 让调用方各自猜——那正是"预览在末行、导入却到了第一轨"的来源。
+     */
+    const resolveDropTrackIndexAtClientY = React.useCallback(
+        (clientY: number): number => {
+            const host = kernelHostRef.current;
+            const rect = host === null ? null : host.getContainerRect();
+            if (host === null || rect === null) {
+                return dropTrackIndexFromClientY(clientY);
+            }
+            const y = clientY - rect.top + host.getViewport().scrollTop;
+            const tracks = sessionRef.current.tracks;
+            const idx = Math.floor(y / Math.max(1, rowHeight));
+            return Math.max(0, Math.min(tracks.length, idx));
+        },
+        [dropTrackIndexFromClientY, kernelHostRef, rowHeight, sessionRef],
+    );
+
+    /** 拖放专用：轨道区内返回 id，轨道下方返回 null（新建轨道）。 */
+    const resolveDropTrackIdAtClientY = React.useCallback(
+        (clientY: number): string | null => {
+            const tracks = sessionRef.current.tracks;
+            const idx = resolveDropTrackIndexAtClientY(clientY);
+            return idx >= 0 && idx < tracks.length ? (tracks[idx]?.id ?? null) : null;
+        },
+        [resolveDropTrackIndexAtClientY, sessionRef],
+    );
+
+    /** 拖放专用：目标行内纵向比例（末行下半行判新轨用）。 */
+    const resolveDropRowFractionAtClientY = React.useCallback(
+        (clientY: number): number => {
+            const host = kernelHostRef.current;
+            const rect = host === null ? null : host.getContainerRect();
+            if (host === null || rect === null) return dropRowFractionFromClientY(clientY);
+            const y = Math.max(0, clientY - rect.top + host.getViewport().scrollTop);
+            return Math.min(1, Math.max(0, (y % Math.max(1, rowHeight)) / Math.max(1, rowHeight)));
+        },
+        [dropRowFractionFromClientY, kernelHostRef, rowHeight],
     );
 
     /**
@@ -262,6 +308,9 @@ export function useTimelineViewportController({
         viewportAccess,
         viewportAccessRef,
         resolveTrackIdAtClientY,
+        resolveDropTrackIdAtClientY,
+        resolveDropTrackIndexAtClientY,
+        resolveDropRowFractionAtClientY,
         handleKernelScrollLeftCommit,
         handleKernelZoomRequest,
         handleRulerWheel,

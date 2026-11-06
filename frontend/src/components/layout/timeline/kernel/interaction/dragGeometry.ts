@@ -291,3 +291,111 @@ export function isContentYBelowTracks(
     const y = Math.max(0, Number.isFinite(contentY) ? contentY : 0);
     return Math.floor(y / safeRowHeight) > trackCount - 1;
 }
+
+/**
+ * 拖放几何：把「屏幕坐标」换算为「轨道下标 + 内容坐标」。
+ *
+ * 【为什么单独抽出来】素材拖入的落点由三个坐标源合成：内核容器的屏幕矩形、
+ * 内核自绘的 scrollLeft/scrollTop、以及当前缩放。面板侧过去直接写在同一段
+ * 事件回调里，测试只能靠肉眼；更糟的是，只要其中任一项在每个 render 期换成
+ * 新闭包而监听没有重注册，就会悄悄回到**首次挂载时**的行高 / 缩放。
+ *
+ * 本函数只做几何，不碰 React / DOM；调用方负责提供量测值。
+ *
+ * 【边界语义】
+ * - 指针在容器矩形之外：仍然换算（拖放事件在边缘可能略超出 1px），由纵向
+ *   下标决定是否落到哨兵行 / 返回 `null`；
+ * - 纵向落在全部轨道之下：`trackIndex = tracks.length`，表示「新建轨道」。
+ *   这与旧实现的 `trackIdFromClientY` 返回 null 表达同一件事，但保留了下标，
+ *   便于预览画在幽灵行而不是第一行；
+ * - 纵向落在轨道上方（负值）：`trackIndex = 0`、`sec` 钳到 0。这是"拖到标尺
+ *   上"的常见情形，不能把文件丢到不存在的前一行。
+ */
+export interface DropGeometryArgs {
+    /** 指针屏幕坐标 x（CSS px）。 */
+    readonly clientX: number;
+    /** 指针屏幕坐标 y（CSS px）。 */
+    readonly clientY: number;
+    /** 内核容器的屏幕矩形。 */
+    readonly containerRect: {
+        readonly left: number;
+        readonly top: number;
+        readonly right?: number;
+        readonly bottom?: number;
+    };
+    /** 内核当前横向滚动（CSS px）。 */
+    readonly scrollLeft: number;
+    /** 内核当前纵向滚动（CSS px）。 */
+    readonly scrollTop: number;
+    /** 当前横向缩放（px/秒）。 */
+    readonly pxPerSec: number;
+    /** 当前轨道行高（CSS px）。 */
+    readonly rowHeight: number;
+    /** 轨道总数。 */
+    readonly trackCount: number;
+}
+
+/** 拖放几何结果。 */
+export interface DropGeometryResult {
+    /** 工程时间（秒，恒 >= 0）。 */
+    readonly sec: number;
+    /** 指针的内容坐标 x（CSS px）。 */
+    readonly contentX: number;
+    /** 指针的内容坐标 y（CSS px）；落在轨道上方时为 0。 */
+    readonly contentY: number;
+    /**
+     * 命中的轨道下标；`trackCount` 表示全部轨道之下的「新建轨道」哨兵行。
+     *
+     * 只有 `trackCount === 0` 时可能为 0 但无对应轨道，调用方应结合
+     * `trackCount` 判断。
+     */
+    readonly trackIndex: number;
+    /** 是否落在全部轨道之下（新建轨道）。 */
+    readonly belowTracks: boolean;
+    /**
+     * 指针在目标行内的纵向比例 `[0, 1]`。
+     *
+     * 用于「末轨底边附近的边界」类判定：调用方按自己的业务决定阈值（时间轴
+     * 素材拖放取 1.0，即越过底边才算新建轨道），几何层不藏业务常量。
+     */
+    readonly rowFractionY: number;
+}
+
+/**
+ * 把屏幕坐标换算为拖放落点几何。
+ *
+ * @param args 量测值与指针坐标。
+ * @returns 落点几何；数值非法时退化为安全值（不产生 NaN）。
+ */
+export function resolveDropGeometry(args: DropGeometryArgs): DropGeometryResult {
+    const pxPerSec = Number.isFinite(args.pxPerSec) && args.pxPerSec > 0 ? args.pxPerSec : 1;
+    const rowHeight = Number.isFinite(args.rowHeight) && args.rowHeight > 0 ? args.rowHeight : 1;
+    const rectLeft = Number.isFinite(args.containerRect.left) ? args.containerRect.left : 0;
+    const rectTop = Number.isFinite(args.containerRect.top) ? args.containerRect.top : 0;
+    const scrollLeft = Number.isFinite(args.scrollLeft) ? Math.max(0, args.scrollLeft) : 0;
+    const scrollTop = Number.isFinite(args.scrollTop) ? Math.max(0, args.scrollTop) : 0;
+    const clientX = Number.isFinite(args.clientX) ? args.clientX : rectLeft;
+    const clientY = Number.isFinite(args.clientY) ? args.clientY : rectTop;
+    const trackCount = Number.isFinite(args.trackCount)
+        ? Math.max(0, Math.floor(args.trackCount))
+        : 0;
+
+    const rawContentX = scrollLeft + (clientX - rectLeft);
+    const rawContentY = scrollTop + (clientY - rectTop);
+    const contentX = Math.max(0, rawContentX);
+    const contentY = Math.max(0, rawContentY);
+    const sec = contentX / pxPerSec;
+    const rawTrackIndex = Math.floor(contentY / rowHeight);
+    const trackIndex = trackCount === 0 ? 0 : Math.max(0, Math.min(trackCount, rawTrackIndex));
+    const rowFractionY =
+        rowHeight > 0 ? Math.min(1, Math.max(0, (contentY % rowHeight) / rowHeight)) : 0;
+
+    return {
+        sec,
+        contentX,
+        contentY,
+        trackIndex,
+        belowTracks: trackCount > 0 && trackIndex >= trackCount,
+        rowFractionY,
+    };
+}

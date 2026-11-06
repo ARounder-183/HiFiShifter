@@ -103,7 +103,12 @@ import {
     WHEEL_ZOOM_IN_FACTOR,
     WHEEL_ZOOM_OUT_FACTOR,
 } from "../../constants";
-import { hitTest, type ClipHitRegion, type HitTestClip } from "../interaction/hitTest";
+import {
+    downgradeOverlapHitForPlainLeftPress,
+    hitTest,
+    type ClipHitRegion,
+    type HitTestClip,
+} from "../interaction/hitTest";
 import type { SeekGesturePhase } from "../interaction/seekGesture";
 import {
     isContentYBelowTracks,
@@ -3675,6 +3680,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 localX: contentX - target.startSec * view.pxPerSec,
                 localY: hit.localY,
                 partnerClipId: overlap.partnerClipId,
+                laterClipId: overlap.laterClipId,
                 fadeIsLine: overlap.fadeIsLine,
                 fromOverlapRegion: true,
             };
@@ -4005,6 +4011,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      */
     type KernelHit = ReturnType<typeof hitTest> & {
         readonly partnerClipId?: string;
+        /** 重叠区里**后一个** clip 的 id（普通左键的选中目标）。 */
+        readonly laterClipId?: string;
         /**
          * 淡变命中是否为包络线本体（`false` = 区域边缘竖线）。
          *
@@ -4125,7 +4133,61 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     }
 
     function startPrimaryGesture(event: PointerEvent): void {
-        const hit = hitAt(event.clientX, event.clientY);
+        /*
+         * 左键的「无修饰键点击」优先归 clip 本体。
+         *
+         * 【为什么】重叠区里 `hitAt` 会按**位置**把命中改写为边缘 / 淡变包络，
+         * 这些控件在无修饰键单击时只改淡变长度或曲率 —— 用户实际感受到的是
+         * 「这段 clip 左键点不动，只能右键」。右键路径（`dispatchContextMenuAt`）
+         * 仍保留淡变专属菜单的优先级；左键只在**确实按住了编辑修饰键**时才让
+         * 控件接管，否则落到 clip 本体（选中 / 拖动）。
+         *
+         * 例外：header 控件（静音 / 链 / 共振峰 / 旋钮 / 徽标）仍是独立控件，
+         * 不能因为这条规则被吞进 clip 拖动。它们由 `resolveHeaderControl` 识别。
+         */
+        const rawHit = hitAt(event.clientX, event.clientY);
+        const modifiers = {
+            altKey: event.altKey,
+            ctrlKey: event.ctrlKey,
+            metaKey: event.metaKey,
+            shiftKey: event.shiftKey,
+        };
+        const plainLeftOverlap =
+            rawHit.kind === "clip" &&
+            rawHit.fromOverlapRegion === true &&
+            rawHit.region !== "header" &&
+            !modifiers.altKey &&
+            !modifiers.ctrlKey &&
+            !modifiers.metaKey &&
+            !modifiers.shiftKey;
+        /*
+         * 重叠区普通左键选中**后一个** clip（视觉上压在上面的那个），而不是
+         * 控件归属的 clip。控件归属仍用于右键淡变菜单与带修饰键的编辑。
+         */
+        const laterClip =
+            plainLeftOverlap && rawHit.laterClipId !== undefined
+                ? data().clips.find((clip) => clip.id === rawHit.laterClipId)
+                : undefined;
+        const hitWithTarget =
+            plainLeftOverlap && laterClip !== undefined
+                ? {
+                      ...rawHit,
+                      clip: {
+                          ...rawHit.clip,
+                          id: laterClip.id,
+                          trackId: laterClip.trackId,
+                          startSec: laterClip.startSec,
+                          lengthSec: laterClip.lengthSec,
+                          muted: laterClip.muted,
+                          gain: clipItemGain(laterClip),
+                          playbackRate: laterClip.playbackRate,
+                          name: laterClip.name,
+                          groupId: laterClip.groupId,
+                          isMidiClip: laterClip.midiNoteCount != null,
+                      },
+                  }
+                : rawHit;
+        const hit = downgradeOverlapHitForPlainLeftPress(hitWithTarget, modifiers);
         if (hit.kind === "clip" && interactions?.geometryReadOnly) {
             const intercepted = interactions.onClipPointerDownIntercept?.({
                 clipId: hit.clip.id,
