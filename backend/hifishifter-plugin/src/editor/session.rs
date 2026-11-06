@@ -4081,7 +4081,12 @@ pub(crate) mod tests {
             assert!(active.is_none());
             *active = Some(job);
         }
-        let deadline = Instant::now() + Duration::from_secs(1);
+        // The render worker is a real OS thread; on a loaded CI runner it can
+        // take well over a second to observe the cancel flag and publish its
+        // result.  Use the shared actor deadline instead of a 1 s busy-wait —
+        // the invariant under test is the ticket/generation/cancel payload,
+        // not how quickly the scheduler runs.
+        let deadline = Instant::now() + ACTOR_REPLY_TIMEOUT;
         loop {
             if let Some((generation, ticket, cancelled, result)) = editor.complete_render() {
                 assert_eq!((generation, ticket), (17, 41));
