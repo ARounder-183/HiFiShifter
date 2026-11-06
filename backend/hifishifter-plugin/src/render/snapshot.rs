@@ -5,7 +5,7 @@ use crate::ara::AraPlaybackRegion;
 use crate::audio_abi::AudioBusBuffers;
 use crate::sync::MutexExt;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// `reclaim` 等待 `registering` 归零的自旋上限（见 [`SnapshotPublisher::reclaim`]）。
@@ -108,16 +108,6 @@ impl PlaybackSnapshot {
             .checked_add(self.right.len())?
             .checked_mul(4)
     }
-}
-
-/// 整批结果在下一renderer开始分配前归并，不能等全部大快照堆齐后才节省预算。
-pub(crate) fn compact_prepared(snapshots: &mut [PlaybackSnapshot]) -> Result<(), String> {
-    for snapshot in snapshots {
-        snapshot
-            .compact_mono()
-            .map_err(|error| format!("invalid prepared snapshot: {error:?}"))?;
-    }
-    Ok(())
 }
 
 /// 一次分层拷贝的**覆盖读数**：这一块里有多少帧不属于我们、宿主输入在那一段有没有信号。
@@ -341,7 +331,10 @@ pub(crate) fn mix_plain_regions(
 /// 分开：退役快照的计数一归零就能回收，不必等整个音频线程静默。
 struct RetainedSnapshot {
     readers: AtomicUsize,
-    snapshot: PlaybackSnapshot,
+    /// 【为什么是 `Arc`】一次渲染只产出一份 PCM，而**两个**发布器（44.1k / 48k 档）
+    /// 都要能读到它。用 `Arc` 共享同一份缓冲，既不用复制，也不用把其中一档留空 ——
+    /// 后者会让"宿主换了工程率"变成一段静音。见 `publish_shared`。
+    snapshot: Arc<PlaybackSnapshot>,
 }
 
 pub(crate) struct SnapshotPublisher {
@@ -360,6 +353,12 @@ pub(crate) struct SnapshotPublisher {
     ///
     /// 【它回答的是"发布过几次"，不是"内容变了没有"】需要后者时用 `content`。
     generation: AtomicU64,
+    /// 音频线程最后一次请求的工程样本位置（`i64::MIN` = 还没请求过）。
+    ///
+    /// 【为什么记在发布器上】窗口渲染要回答"播放头现在在哪"，而唯一知道答案的是
+    /// `copy_block_at`。音频线程只做一次 relaxed store（无锁、无分配），真正的
+    /// 判断留给会话 actor。
+    last_sample: AtomicI64,
     /// 当前快照的内容指纹（见 `PlaybackSnapshot::content_fingerprint`）。
     ///
     /// 【为什么它与 `generation` 并存】`generation` 仍要表达"发布过"（版本闸、
@@ -426,9 +425,32 @@ impl SnapshotPublisher {
             misses: AtomicU64::new(0),
             generation: AtomicU64::new(0),
             content: AtomicU64::new(0),
+            last_sample: AtomicI64::new(i64::MIN),
         }
     }
 
+    /// 音频线程最后一次请求的工程样本位置（秒）。`None` = 还没请求过。
+    pub(crate) fn last_sample_seconds(&self, rate: f64) -> Option<f64> {
+        let sample = self.last_sample.load(Ordering::Relaxed);
+        if sample == i64::MIN || !(rate.is_finite() && rate > 0.0) {
+            return None;
+        }
+        Some(sample as f64 / rate)
+    }
+    /// 当前快照覆盖的工程秒区间（`None` = 没有快照）。
+    pub(crate) fn current_span_seconds(&self, rate: f64) -> Option<(f64, f64)> {
+        if !(rate.is_finite() && rate > 0.0) {
+            return None;
+        }
+        let read = self.enter();
+        let snapshot = read.snapshot()?;
+        if snapshot.sample_rate == 0 || snapshot.left.is_empty() {
+            return None;
+        }
+        let start = snapshot.origin_sample as f64 / rate;
+        let end = (snapshot.origin_sample + snapshot.left.len() as i64) as f64 / rate;
+        Some((start, end))
+    }
     /// 当前快照代次（测试断言用；接缝淡化问的是下面的 `content`）。
     #[cfg(test)]
     pub(crate) fn generation(&self) -> u64 {
@@ -468,6 +490,41 @@ impl SnapshotPublisher {
                     .ok_or(SnapshotError::BudgetExceeded)?,
             );
         }
+        let mut entry = Box::new(RetainedSnapshot {
+            readers: AtomicUsize::new(0),
+            snapshot: Arc::new(snapshot),
+        });
+        let pointer = &mut *entry as *mut RetainedSnapshot;
+        retained.0.push(entry);
+        retained.1 = total;
+        self.current.store(pointer, Ordering::SeqCst);
+        self.content.store(content, Ordering::Release);
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        self.reclaim(&mut retained);
+        Ok(())
+    }
+    /// 发布一份**已经被别处持有**的快照（两个发布器共享同一份 PCM）。
+    ///
+    /// 【为什么需要独立入口】`publish` 要 `compact_mono`（会原地改缓冲），而共享
+    /// 的 `Arc` 只能有一份所有权。调用方（渲染入口）在包装成 `Arc` **之前**已经
+    /// `compact_prepared` 过，因此这里只做几何校验与记账。
+    pub fn publish_shared(&self, snapshot: Arc<PlaybackSnapshot>) -> Result<(), SnapshotError> {
+        if (!snapshot.right.is_empty() && snapshot.left.len() != snapshot.right.len())
+            || snapshot.sample_rate == 0
+        {
+            return Err(SnapshotError::InvalidGeometry);
+        }
+        let content = snapshot.content_fingerprint();
+        let bytes = snapshot
+            .storage_bytes()
+            .ok_or(SnapshotError::BudgetExceeded)?;
+        let mut retained = self.retained.lock_or_recover();
+        self.reclaim(&mut retained);
+        let total = retained
+            .1
+            .checked_add(bytes)
+            .filter(|total| *total <= self.limit)
+            .ok_or(SnapshotError::BudgetExceeded)?;
         let mut entry = Box::new(RetainedSnapshot {
             readers: AtomicUsize::new(0),
             snapshot,
@@ -615,6 +672,8 @@ impl SnapshotPublisher {
         if output.num_channels == 0 || output.channel_buffers.is_null() {
             return false;
         }
+        // 【窗口渲染的锚点】只做一次 relaxed store：无锁、无分配、不碰任何快照。
+        self.last_sample.store(sample, Ordering::Relaxed);
         let read_guard = self.enter();
         // SAFETY: 本读区登记的快照在 `read_guard` 存活期间不会被回收（逐快照读者计数非零）。
         let snapshot = read_guard.snapshot();
@@ -920,15 +979,21 @@ impl SnapshotPublisher {
         // 【T1：真实覆盖边】没有 coverage 时只有首尾两条边（旧语义）；有 coverage 时
         // 每个"未覆盖 → 覆盖"的翻转点都是边。空洞的两侧都是宿主原声，本身不混合；
         // 要淡化的只有"原声 → 处理结果"这一种翻转。
-        let holes: Vec<std::ops::Range<i64>> = snapshot
-            .map(|snapshot| snapshot.covered.as_slice())
-            .unwrap_or(&[])
-            .windows(2)
-            .filter_map(|pair| {
+        // 【为什么是定长栈缓冲而不是 `Vec`】这里是**音频线程**：每块一次 `Vec` 分配就是
+        // 一次不可预测的延迟尖峰（而素材有洞时必然发生）。洞的个数有硬上界：
+        // `covered` 来自记录器的 `COVERAGE_SLOTS = 8` 个区间，最多 7 个洞。
+        const MAX_HOLES: usize = 8;
+        let mut holes: [std::ops::Range<i64>; MAX_HOLES] = std::array::from_fn(|_| 0..0);
+        let mut hole_count = 0_usize;
+        if let Some(snapshot) = snapshot {
+            for pair in snapshot.covered.windows(2) {
                 let (left, right) = (&pair[0], &pair[1]);
-                (left.end < right.start).then_some(left.end..right.start)
-            })
-            .collect();
+                if left.end < right.start && hole_count < MAX_HOLES {
+                    holes[hole_count] = left.end..right.start;
+                    hole_count += 1;
+                }
+            }
+        }
         let edge_gain = |position: i64| -> (f32, f32) {
             let start = start_edge;
             let end = end_edge;
@@ -977,7 +1042,7 @@ impl SnapshotPublisher {
             // 【为什么入口的斜坡在洞**之前**】覆盖之外没有快照采样，边界之外只能是
             // 宿主原声；所以淡化必须发生在覆盖范围**之内** —— 在 `hole.start - end`
             // 处还是纯处理结果，到 `hole.start` 降到纯原声。
-            for hole in &holes {
+            for hole in &holes[..hole_count] {
                 let width = hole.end - hole.start;
                 // 【T-A1-3：洞宽决定用几条斜坡】
                 //
@@ -1177,7 +1242,7 @@ impl ReadSection {
             return None;
         }
         // SAFETY: 本 guard 存活期间 `snapshot` 指向的 Box 因读者计数非零不会被回收。
-        Some(unsafe { &(*self.snapshot).snapshot })
+        Some(unsafe { (*self.snapshot).snapshot.as_ref() })
     }
 }
 impl Drop for ReadSection {

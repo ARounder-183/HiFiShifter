@@ -97,6 +97,14 @@ pub(crate) struct HostClipGeometry {
     /// （复制 take、切换 active take）时，GUID 对不上但文件相同 —— 同一份已授权 PCM，
     /// 可以安全地把授权媒体挂上去，而不是让明明有音频的片段显示占位。
     pub source_file_name: Option<String>,
+    /// 这份 take 的源**总时长**（秒，`GetMediaSourceLength`）；读不出来为 `None`。
+    ///
+    /// 【为什么清单层要自己拿它】内核有两件事离不开它，而此前插件只能向 ARA 借：
+    /// 倒放的**镜像轴**与循环源的**回绕周期**。ARA 那份读数要求 region 已经认领到这个
+    /// item —— 而"宿主刚把 item 拖出 region 的几何范围"是常态，于是那一刻倒放窗口复原
+    /// 不出来、循环周期退化成 clip 自身长度（= 完全不循环、后半段静音，真机上实测到过）。
+    /// 宿主自己的读数没有这个前提。
+    pub source_length_sec: Option<f64>,
 }
 
 /// 此key来自唯一真实assignment；GUID不是用来搜索/猜测ARA对应关系的。
@@ -164,6 +172,71 @@ impl RenderFacts {
         Self {
             items: items.into_iter().collect(),
         }
+    }
+}
+
+/// 宿主清单里的一行 → 装配器认得的 item 行。
+///
+/// 【为什么这一层是纯翻译、不含判断】装配（"有哪些 clip"）与清单（"宿主里有什么"）
+/// 是两件事。把"读宿主"与"决定画什么"焊在一起，正是"同一个 item 被画成两条 clip"
+/// 的成因：两条路径各自对同一份宿主读数做了一次解释。这里只做形状转换，任何取舍都
+/// 归装配器（`hifishifter_kernel::editor::assembly`）。
+///
+/// 【为什么没有 take 时也要造一条】宿主没有 take 枚举接口时 `UiItem::geometry` 仍是
+/// **active take 的权威几何**（见该结构的说明）。空 take 列表会让装配器拿不到源窗口，
+/// 于是这条 clip 会显示成"偏移待定"——而它明明有几何。
+pub(crate) fn item_row_from_host(
+    item: &crate::host::UiItem,
+    track_id: &str,
+) -> hifishifter_kernel::editor::assembly::ItemRow {
+    use hifishifter_kernel::editor::assembly::{ItemRow, TakeRow};
+    use hifishifter_kernel::take_geometry::TakeGeometry;
+    let take_of = |geometry: &HostClipGeometry, name: &str, active: bool, reversed: bool| TakeRow {
+        id: geometry.take_id.clone(),
+        name: name.to_string(),
+        active,
+        geometry: TakeGeometry {
+            start_offset_sec: geometry.source_start_sec,
+            item_length_sec: geometry.duration_sec,
+            play_rate_signed: geometry.play_rate_signed,
+            // 【宿主自己报的源总长优先】它来自 `GetMediaSourceLength`，不依赖 ARA
+            // 是否已经认领到这个 item —— 于是"宿主刚把 item 拖出 region 的几何范围"
+            // 那一刻，倒放的镜像轴与循环的回绕周期仍然是已知的（真机上观测到过
+            // `ara.loop-period-unknown`：那一条 clip 因此完全不循环、后半段静音）。
+            // 读不到才留 `None`，由装配器在"挂过一次 region"之后按 ARA 侧补齐（见
+            // `DocumentSession::rebuild_timeline_locked`）。
+            media_duration_sec: geometry.source_length_sec,
+            section: geometry.section,
+            reversed: Some(reversed),
+            loop_enabled: geometry.loop_source,
+        },
+        channel_mode: geometry.channel_mode,
+    };
+    let mut takes: Vec<TakeRow> = item
+        .takes
+        .iter()
+        .map(|take| take_of(&take.geometry, &take.name, take.active, take.reversed))
+        .collect();
+    let active_take = item.takes.iter().position(|take| take.active);
+    if takes.is_empty() {
+        takes.push(take_of(
+            &item.geometry,
+            &item.name,
+            true,
+            item.geometry.reversed,
+        ));
+    }
+    ItemRow {
+        guid: item.geometry.item_id.clone(),
+        track_id: track_id.to_string(),
+        name: item.name.clone(),
+        start_sec: item.geometry.start_sec,
+        length_sec: item.geometry.duration_sec,
+        takes,
+        active_take: active_take.unwrap_or(0),
+        loop_source: item.geometry.loop_source,
+        muted: item.geometry.muted,
+        gain: item.geometry.item_gain,
     }
 }
 

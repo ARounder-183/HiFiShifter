@@ -16,7 +16,7 @@
 
 1. **测试基线**：当前 `848 passed / 2 failed`（133 文件）。2 项失败是 `frontend/src/features/keybindings/keybindingMatch.test.ts` 的「默认 Shift 变体」与「Ctrl 微调变体」，**既有问题、与本分支无关**（已在 `develop` worktree 复现）。本计划完成后期望约 **823 passed / 2 failed**（`featureFlag.test.ts` 的 25 项随开关删除）。**验收判据是"除明确删除的用例外无新失败"，不是数字不降。**
 2. **不要推送。** 用户明确要求只提交、不推送。分支 `feature/timeline-unified-render-kernel` **无 upstream**。
-3. **本项目注释即设计记录**（见 `~/.dsh/AGENTS.md` §4/§5）：每个文件头必须有「主要内容 / 作用 / 与其他模块的关系」，每个关键函数必须有流程与特殊说明。**修改代码必须同步改注释**，陈旧注释算实质缺陷。
+3. **本项目注释即设计记录**（见项目的注释约定）：每个文件头必须有「主要内容 / 作用 / 与其他模块的关系」，每个关键函数必须有流程与特殊说明。**修改代码必须同步改注释**，陈旧注释算实质缺陷。
 4. **dev server**：用户自己的 `tauri dev` 占 5173；本计划的浏览器验证用 **5174**（若未运行，见任务 0 步骤 3 启动）。
 5. **注释里的行号**仅供定位；改动会让行号漂移，以代码内容为准。
 
@@ -1346,7 +1346,7 @@ const browser = await chromium.launch({
     channel: "chrome",
     headless: true,
     // SwiftShader = ANGLE 的纯 CPU 后端；enable-unsafe-swiftshader 允许在无 GPU
-    // 时使用它（Chrome 曾默认禁用）；disable-gpu-sandbox 是本机直接启动所必需。
+    // 时使用它（Chrome 曾默认禁用）；disable-gpu-sandbox 是本地直接启动所必需。
     args: [
         "--force-device-scale-factor=2",
         "--enable-unsafe-swiftshader",

@@ -14,7 +14,8 @@
 //!
 //! ```text
 //! magic     8 字节  "HFSXFERC"
-//! version   u32     = 1
+//! version   u32     = 2
+//! hash      32 字节 BLAKE3（采样内容 + 采样率 + 声道 + 帧数；take_id 不参与）
 //! segments  u32
 //! 每段:
 //!   origin   i64    工程采样起点
@@ -64,8 +65,10 @@ use std::path::{Path, PathBuf};
 /// 【为什么仍然占满 8 字节】`MAGIC.len()` 参与最小长度判据，8 是齐整字长，
 /// 且 `&[u8; 8]` 与旧类型一致 —— 改动面最小。
 const MAGIC: &[u8; 8] = b"HFSXFERC";
-/// 载荷版本（重置后的第一版）。
-const VERSION: u32 = 1;
+/// 载荷版本：v2 增加内容身份哈希。
+const VERSION: u32 = 2;
+/// v1 是重置后的第一版（无内容哈希）；只读兼容，用来读早期构建留下的文件。
+const LEGACY_VERSION: u32 = 1;
 /// 尾部摘要长度。
 const DIGEST_LEN: usize = 32;
 /// 单次读取允许的最大帧数（防一个损坏的长度字段撑爆内存）。
@@ -78,7 +81,7 @@ const TEMP_EXT: &str = "hfscap.part";
 /// 最终文件的扩展名。
 const FILE_EXT: &str = "hfscap";
 
-/// sidecar 目录：本机数据目录下的 `capture/`。
+/// sidecar 目录：本地数据目录下的 `capture/`。
 ///
 /// 【为什么不是配置目录】配置目录会随用户配置漫游/同步，而这是可能上百 MB 的缓存；
 /// 把它放进同步目录是给用户的网络与配额添麻烦。
@@ -125,13 +128,48 @@ fn take_nonce(take_id: u64) -> String {
     hasher.finalize().to_hex()[..16].to_string()
 }
 
+/// 由采样内容派生内容身份。
+///
+/// 【为什么不含 take_id】take_id 是实例级计数器，跨工程/跨会话会复用；把它编进
+/// 内容身份会让“同一份 PCM 换个 take 号”变成新的分析缓存，而“take 号相同、内容
+/// 不同”仍会命中旧缓存。内容身份必须只由采样内容 + 采样率 + 声道数 + 帧数决定。
+pub(crate) fn content_hash(segments: &[Segment]) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"hfs-capture-content-v2");
+    for segment in segments {
+        hasher.update(&segment.sample_rate.to_le_bytes());
+        hasher.update(&(segment.planes.len() as u32).to_le_bytes());
+        hasher.update(&(segment.filled as u64).to_le_bytes());
+        for plane in &segment.planes {
+            // 逐样本喂给 BLAKE3，避免在 promote 时再复制一整份 PCM。
+            for sample in plane.iter().take(segment.filled) {
+                hasher.update(&sample.to_le_bytes());
+            }
+        }
+    }
+    *hasher.finalize().as_bytes()
+}
+
 /// 把段写成 sidecar。返回实际写入的路径。
+#[cfg(test)]
 pub(crate) fn write(dir: &Path, take_id: u64, segments: &[Segment]) -> Result<PathBuf, String> {
+    let hash = content_hash(segments);
+    write_with_hash(dir, take_id, &hash, segments)
+}
+
+/// 用调用方已经算好的内容哈希写 sidecar（promote 路径用，避免重复扫 PCM）。
+pub(crate) fn write_with_hash(
+    dir: &Path,
+    take_id: u64,
+    hash: &[u8; 32],
+    segments: &[Segment],
+) -> Result<PathBuf, String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     let path = take_path(dir, take_id, &take_nonce(take_id));
     let mut payload = Vec::new();
     payload.extend_from_slice(MAGIC);
     payload.extend_from_slice(&VERSION.to_le_bytes());
+    payload.extend_from_slice(hash);
     payload.extend_from_slice(&(segments.len() as u32).to_le_bytes());
     for segment in segments {
         let channels = segment.planes.len() as u32;
@@ -184,7 +222,13 @@ pub(crate) fn write(dir: &Path, take_id: u64, segments: &[Segment]) -> Result<Pa
 /// 【错误文案为什么是可执行的】重置格式之后，开发者自己机器上还留着旧版文件。
 /// 一句"`unsupported version 5`"只会让人去翻代码；这里直接说明"这是重置前构建留下的"
 /// 并给出下一步（删掉或重录）。
+#[cfg(test)]
 pub(crate) fn read(path: &Path) -> Result<Vec<Segment>, String> {
+    read_with_hash(path).map(|(segments, _)| segments)
+}
+
+/// 读 sidecar 并同时返回内容哈希。
+pub(crate) fn read_with_hash(path: &Path) -> Result<(Vec<Segment>, [u8; 32]), String> {
     let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     if bytes.len() < MAGIC.len() + 4 + 4 + DIGEST_LEN {
         return Err(format!("{}: truncated capture sidecar", path.display()));
@@ -207,13 +251,23 @@ pub(crate) fn read(path: &Path) -> Result<Vec<Segment>, String> {
         ));
     }
     let version = cursor.u32()?;
-    if version != VERSION {
+    if version != VERSION && version != LEGACY_VERSION {
         return Err(format!(
             "{}: capture sidecar version {version}, this build writes {VERSION} \
              (stale file from a pre-reset build?); delete it or re-capture",
             path.display()
         ));
     }
+    let stored_hash: Option<[u8; 32]> = if version >= 2 {
+        Some(
+            cursor
+                .take(32)?
+                .try_into()
+                .map_err(|_| format!("{}: truncated content hash", path.display()))?,
+        )
+    } else {
+        None
+    };
     let count = cursor.u32()? as usize;
     let mut segments = Vec::with_capacity(count.min(1024));
     for _ in 0..count {
@@ -279,6 +333,8 @@ pub(crate) fn read(path: &Path) -> Result<Vec<Segment>, String> {
             // 谎报 `None`（"连续"）会让界面显示一条不存在的连续性保证。
             loss: SegmentLoss::First,
             loop_start,
+            pass_id: 0,
+            source_key: None,
             peak: [0.0; 2],
             closed: ClosedReason::Stopped,
             coverage,
@@ -287,7 +343,8 @@ pub(crate) fn read(path: &Path) -> Result<Vec<Segment>, String> {
             _reservation: None,
         });
     }
-    Ok(segments)
+    let hash = stored_hash.unwrap_or_else(|| content_hash(&segments));
+    Ok((segments, hash))
 }
 
 /// 删除一个 sidecar。
@@ -357,6 +414,8 @@ mod tests {
             filled: values.len(),
             loss: SegmentLoss::First,
             loop_start: None,
+            pass_id: 0,
+            source_key: None,
             peak: [0.0; 2],
             closed: ClosedReason::Stopped,
             coverage: std::array::from_fn(|_| 0..0),
@@ -376,6 +435,16 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("hfs-sidecar-{}-{seq}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// 内容身份只由 PCM 决定：同内容同 hash，不同内容不同 hash；take 号不参与。
+    #[test]
+    fn content_hash_is_content_addressed() {
+        let first = vec![segment(0, &[0.1, 0.2])];
+        let same = vec![segment(99, &[0.1, 0.2])];
+        let different = vec![segment(0, &[0.1, 0.3])];
+        assert_eq!(content_hash(&first), content_hash(&same));
+        assert_ne!(content_hash(&first), content_hash(&different));
     }
 
     /// 往返：几何、采样率与样本值必须逐位一致。

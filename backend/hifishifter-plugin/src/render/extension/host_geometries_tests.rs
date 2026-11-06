@@ -53,15 +53,19 @@ fn only_the_regions_matching_a_host_item_are_bound() {
     document.close();
 }
 
-/// 两条 region 都指向同一个 item ⇒ 只保留**一个**认领者，绝不留下两个指向同一
-/// 对象的绑定。
+/// 两条 region 都落在同一个 item 之内 ⇒ **两条都绑定**。
 ///
-/// 【为什么不"两个都丢"】旧实现把重复认领的候选**全部**丢弃，于是"同一位置两个
-/// 几何全等的 item"会让两个 clip 一起消失（用户报障："片段凭空没了"）。现在按
-/// region key 的稳定顺序保留第一个认领者：仍然满足"一个 item 只归一个 region"
-/// （后续写回不会互相覆盖），但不会一次丢掉全部。
+/// 【契约变了，而且这次是对的】旧契约是"一个 item 只能被一个 region 认领"，
+/// 于是写入方自己去重（`bound.retain(seen.insert(item_id))`）。它假设 region 与
+/// item 一一对应 —— 而 REAPER 对一个**循环延伸**的 item 按循环节给出多条 region
+/// （每节一条）。去重只留下第一条，其余 region 既没有身份、也没有 PCM 授权：
+/// 用户看到"多出来的 Clip 拖不动"，重开工程后那条正确的 Clip 还是静音的。
+///
+/// 现在一条 item 合法地拥有 N 条 region，它们全部登记进 `region_items`。
+/// 唯一性由**绑定判据本身**保证（`unique_geometry_for_region` 的"最小跨 +
+/// 歧义即弃"），不再靠事后去重。
 #[test]
-fn two_regions_claiming_one_item_keep_exactly_one_owner() {
+fn two_regions_inside_one_item_both_bind() {
     let (model, owners, ids) = crate::editor::session::tests::workspace_fixture();
     let document = model.session();
     let owner = &owners[0];
@@ -86,12 +90,15 @@ fn two_regions_claiming_one_item_keep_exactly_one_owner() {
     }
     let bound = owner
         .host_geometries()
-        .expect("重复认领必须留下恰好一个绑定，不能整组丢弃");
-    assert_eq!(bound.len(), 1, "一个 item 只能归一个 region");
-    assert!(
-        bound[0].region_key == first || bound[0].region_key == second,
-        "保留的必须是其中一个真实认领者"
-    );
+        .expect("同一个 item 的两条 region 必须都能绑定");
+    assert_eq!(bound.len(), 2, "循环 item 合法地拥有多条 region");
+    let keys: Vec<u64> = bound.iter().map(|entry| entry.region_key).collect();
+    assert!(keys.contains(&first) && keys.contains(&second));
+    let items: std::collections::BTreeSet<&str> = bound
+        .iter()
+        .map(|entry| entry.geometry.item_id.as_str())
+        .collect();
+    assert_eq!(items.len(), 1, "两条 region 指向的是同一个宿主 item");
     document.close();
 }
 

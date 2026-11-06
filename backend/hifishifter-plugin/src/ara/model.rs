@@ -131,14 +131,7 @@ pub struct ModelHandle {
     /// `create_playback_region` 的说明），只能靠"ARA 在同一文档内给同一对象稳定指针"
     /// 这一事实来推。顺序按首次出现，与宿主创建顺序一致。
     sequence_index_by_model_ref: HashMap<usize, usize>,
-    /// 还没收齐的宿主分割（跨帧候选，见 `SplitCandidate`）。
-    split_candidates: Vec<SplitCandidate>,
-    /// 上一帧映射时的 region 集合快照，供宿主分割的**结构 diff** 使用。
-    ///
-    /// 【为什么需要它】GUI 分割会显式 `register_split`，而宿主分割（REAPER 里按 S）
-    /// 只表现为"一个 region 消失 + 两个 region 出现"，没有任何显式谱系 ⇒ 参数曲线
-    /// 只能靠几何兜底猜祖先，兄弟半段会互相污染（用户报障：分割后 Clip 内产生偏移）。
-    /// 记下上一帧就能按**只用 ARA 自己给的量**识别分割（见 `register_host_split_lineage`）。
+    /// 上一帧的 region 集合快照，供"分割后子段借父段媒体"的识别使用。
     lineage_frame: Vec<RegionFrame>,
     /// 上一次成功重算所消费的模型指纹（见 [`ModelHandle::remap_and_log`]）。
     ///
@@ -187,34 +180,20 @@ type RemapInput = (
     bool,
 );
 
-/// 一帧里一个活 region 的 ARA 几何（宿主分割结构 diff 的输入）。
+/// 一帧里一个活 region 的 ARA 几何。
+///
+/// 【只服务一件事】"分割后子段借父段媒体"。曲线**不需要**它 —— 参数 run 活在工程
+/// 时间上，分割不移动任何东西在工程上的位置（见 `register_split_media` 的说明）。
 #[derive(Clone, PartialEq)]
 struct RegionFrame {
     key: u64,
     item: Option<String>,
     audio_source: String,
-    audio_modification: String,
-    mod_start: f64,
-    mod_dur: f64,
     play_start: f64,
     play_dur: f64,
 }
 
 impl RegionFrame {
-    /// 跨会话稳定的 region 签名（见 `ParameterAtlas::ara_region_signature`）。
-    ///
-    /// 【为什么分割谱系需要它】`register_host_split` 此前要求三个半段都有 item GUID，
-    /// 而 GUID 只在有原生扩展时才拿得到 —— Cubase 上恒为空，于是每次分割都退到几何
-    /// 兜底，兄弟半段互相污染。签名只用 ARA 自己给的量，任何宿主都能算。
-    fn signature(&self) -> String {
-        crate::editor::parameter_atlas::ParameterAtlas::ara_region_signature(
-            &self.audio_source,
-            &self.audio_modification,
-            self.play_start,
-            self.play_dur,
-        )
-    }
-
     /// 身份判据：同一个 region 在两次映射之间几何不变时视为"同一帧的同一个对象"。
     ///
     /// 【为什么不用 region key】`allocate_region` 复用已销毁的最小槽位，分割后的左半段
@@ -222,88 +201,11 @@ impl RegionFrame {
     fn geometry(&self) -> (String, u64, u64, u64, u64) {
         (
             self.audio_source.clone(),
-            self.mod_start.to_bits(),
-            self.mod_dur.to_bits(),
             self.play_start.to_bits(),
             self.play_dur.to_bits(),
+            self.item.as_deref().unwrap_or_default().len() as u64,
+            self.key,
         )
-    }
-
-    /// 这条 region 的参数权威键（item GUID 优先，否则 modification）。
-    fn authority_key(&self) -> Option<String> {
-        crate::editor::parameter_atlas::authority_key(
-            self.item.as_deref(),
-            &self.audio_modification,
-        )
-    }
-}
-
-/// 一次**尚未收齐**的宿主分割：父段 + 已经见到的子段。
-///
-/// 【为什么需要它】结构 diff 只能比较"上一帧"与"这一帧"。宿主把一次分割拆成两轮交付
-/// 时（先缩短左段、再创建右段），第一轮只看到 1 个子段（`split_children` 要求至少两段），
-/// 第二轮又没有"消失的父段" —— 两条路都不登记，右侧半段从此没有任何参数权威。
-///
-/// 【为什么是"有界记忆"而不是放宽判据】判据仍然是`子段们**划分**了父段区间`（与单帧
-/// 版本等价），只是把"同一帧"换成"最多 N 轮之内"。相邻不是父子，划分才是。
-struct SplitCandidate {
-    parent: RegionFrame,
-    children: Vec<RegionFrame>,
-    rounds_left: u8,
-}
-
-/// 一次分割最多等多少轮 remap（宿主通常 1~2 轮，8 轮足以覆盖节流与乱序）。
-const SPLIT_CANDIDATE_ROUNDS: u8 = 8;
-/// 同时跟踪多少条未收齐的分割（长会话里反复分割不会无界增长）。
-const MAX_SPLIT_CANDIDATES: usize = 32;
-
-impl SplitCandidate {
-    /// 这个子段是否属于本候选（同源、播放区间与源窗口都落在父段内）。
-    fn admits(&self, child: &RegionFrame) -> bool {
-        if child.audio_source != self.parent.audio_source {
-            return false;
-        }
-        let inside_play = child.play_start >= self.parent.play_start - 1e-6
-            && child.play_start + child.play_dur
-                <= self.parent.play_start + self.parent.play_dur + 1e-6;
-        let inside_mod = child.mod_start >= self.parent.mod_start - 1e-6
-            && child.mod_start + child.mod_dur
-                <= self.parent.mod_start + self.parent.mod_dur + 1e-6;
-        inside_play && inside_mod
-    }
-
-    /// 把本帧出现的、还没登记过的子段吸收进来（按 (play_start, play_dur) 去重）。
-    fn absorb(&mut self, appeared: &[RegionFrame]) {
-        for child in appeared {
-            if !self.admits(child) {
-                continue;
-            }
-            let duplicate = self.children.iter().any(|known| {
-                known.play_start.to_bits() == child.play_start.to_bits()
-                    && known.play_dur.to_bits() == child.play_dur.to_bits()
-            });
-            if !duplicate {
-                self.children.push(child.clone());
-            }
-        }
-        self.children
-            .sort_by(|a, b| a.play_start.total_cmp(&b.play_start));
-    }
-
-    /// 子段集合是否**划分**了父段的播放区间（首尾相接、合起来覆盖父段）。
-    fn partitions_parent(&self) -> bool {
-        let close = crate::host::geometry::host_value_compatible;
-        if self.children.len() < 2 {
-            return false;
-        }
-        let mut cursor = self.parent.play_start;
-        for child in &self.children {
-            if !close(child.play_start, cursor) {
-                return false;
-            }
-            cursor = child.play_start + child.play_dur;
-        }
-        close(cursor, self.parent.play_start + self.parent.play_dur)
     }
 }
 
@@ -368,7 +270,6 @@ impl Default for ModelHandle {
             destroyed_regions: HashSet::new(),
             sequence_index_by_model_ref: HashMap::new(),
             lineage_frame: Vec::new(),
-            split_candidates: Vec::new(),
             remap_stamp: None,
             ledger: std::sync::Arc::new(ara2_bridge::plugin::GraphLedger::default()),
         }
@@ -466,7 +367,7 @@ impl ModelHandle {
         Ok(index)
     }
 
-    /// 当前帧的活 region 几何快照（宿主分割结构 diff 的输入）。
+    /// 当前帧的活 region 几何快照（"分割后子段借父段媒体"的输入）。
     fn region_frames(&self) -> Vec<RegionFrame> {
         let items = self.session.region_items.lock_or_recover();
         self.document
@@ -480,9 +381,6 @@ impl ModelHandle {
                     key,
                     item: items.get(&key).cloned(),
                     audio_source: region.audio_source_persistent_id.clone(),
-                    audio_modification: region.audio_modification_persistent_id.clone(),
-                    mod_start: region.start_in_modification_time,
-                    mod_dur: region.duration_in_modification_time,
                     play_start: region.start_in_playback_time,
                     play_dur: region.duration_in_playback_time,
                 })
@@ -490,379 +388,73 @@ impl ModelHandle {
             .collect()
     }
 
-    /// 一次分割的子段集合（只用 ARA 自己给的量判定）。
+    /// 分割之后，让子段借用父段的**媒体身份**。
     ///
-    /// 【为什么不再要求"恰好两段且左右相邻"】旧判据（`is_host_split`）只认
-    /// "1 个 region 消失 + 恰好 2 个出现、且左右源窗严格相邻"。一次多刀分割（N 段）、
-    /// 或宿主在分割里顺带做了一点别的事，都不满足 —— 于是谱系一条都不登记，曲线退到
-    /// 几何兜底。新判据只要求四件事，全部可判定：
+    /// 【为什么只剩这一件事】曲线曾经也在这里"播种"：右半段被显式喂一份父段的源域
+    /// 曲线，靠几何再裁。而参数 run 活在**工程时间**上 —— 分割不移动任何东西在工程上
+    /// 的位置，所以曲线**不需要**任何处理。删掉播种之后，这一层唯一还有内容的事实是
+    /// "子段与父段同源"：分割瞬间子段还没有自己的 ARA region，也就没有授权 PCM，借
+    /// 父段的媒体身份能让它立刻有波形（见 `derive_split_media`）。它服务的是**音频
+    /// 授权**，不是参数归属 —— 两者此前混在一起，正是"分割后曲线重置"的温床。
     ///
-    /// 1. 同一条 `audio_source`；
-    /// 2. 每个子段的源窗落在父段源窗内；
-    /// 3. **至少两段**（一段不是分割）；
-    /// 4. 按源窗起点排序后**首尾相接且合起来覆盖父段源窗** —— 这一条把
-    ///    "删掉一段 + 无关地新建了别的"排除掉，是本判据的安全边界。
-    fn split_children<'a>(
-        parent: &RegionFrame,
-        appeared: &[&'a RegionFrame],
-    ) -> Vec<&'a RegionFrame> {
-        let close = crate::host::geometry::host_value_compatible;
-        let mut children = appeared
-            .iter()
-            .copied()
-            .filter(|child| {
-                child.audio_source == parent.audio_source
-                    && child.mod_start >= parent.mod_start - 1e-6
-                    && child.mod_start + child.mod_dur <= parent.mod_start + parent.mod_dur + 1e-6
-            })
-            .collect::<Vec<_>>();
-        if children.len() < 2 {
-            return Vec::new();
-        }
-        children.sort_by(|a, b| {
-            a.mod_start
-                .partial_cmp(&b.mod_start)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        let mut cursor = parent.mod_start;
-        for child in &children {
-            if !close(child.mod_start, cursor) {
-                return Vec::new();
-            }
-            cursor = child.mod_start + child.mod_dur;
-        }
-        if !close(cursor, parent.mod_start + parent.mod_dur) {
-            return Vec::new();
-        }
-        children
-    }
-
-    /// 宿主分割的**结构 diff**：比较上一帧与当前帧的 region 集合，识别"父段消失、
-    /// 若干子段出现"，并把谱系登记成与 GUI 分割相同的形状
-    /// （`split_parents` + `split_seed` + `split_media_from`）。
-    ///
-    /// 【为什么必须有它】GUI 分割走 `host_split::execute`，显式 `register_split`；而宿主
-    /// 分割（REAPER 里按 S）只表现为 region 的销毁与创建，**一个谱系都不写** ⇒ 右半段
-    /// 落到几何兜底层，兄弟半段被当成合法祖先，曲线整体平移一个分割长度（用户报障：
-    /// 宿主分割后 Clip 内产生偏移）。
-    ///
-    /// 【为什么没有 seed 就不登记】`register_split` 的 seed 是父段（分割前）的**完整**
-    /// 窗口，右半段靠它做包含判定。父段没有曲线记录时（用户从没编辑过它）没有谱系可
-    /// 继承，此时退回几何兜底，与本次改动之前完全一致 —— 宁可不登记，也不要造一条
-    /// 解析不出祖先的假谱系。
-    fn register_host_split_lineage(&mut self) {
+    /// 【为什么不需要"跨帧候选"】旧实现要给每个候选等满 8 轮、收齐"至少两段且首尾
+    /// 相接覆盖父段"才肯登记，因为曲线继承要求父段窗口是**完整**的。媒体借用没有这个
+    /// 要求：只要"这一条新 region 落在某个刚消失的 region 的播放区间里、且同源"，
+    /// 借用就是安全的（同一份文件、同一段素材）。于是跨帧状态、轮数上限、候选表全部
+    /// 消失，只剩一次前后帧比较。
+    fn register_split_media(&mut self) {
         let current = self.region_frames();
         let previous = std::mem::take(&mut self.lineage_frame);
-        let mut appeared: Vec<RegionFrame> = Vec::new();
-        let mut fresh: Vec<SplitCandidate> = Vec::new();
-        if !previous.is_empty() {
-            let current_geometry: HashSet<_> = current.iter().map(RegionFrame::geometry).collect();
-            let previous_geometry: HashSet<_> =
-                previous.iter().map(RegionFrame::geometry).collect();
-            let disappeared = previous
-                .iter()
-                .filter(|frame| !current_geometry.contains(&frame.geometry()))
-                .cloned()
-                .collect::<Vec<_>>();
-            appeared = current
-                .iter()
-                .filter(|frame| !previous_geometry.contains(&frame.geometry()))
-                .cloned()
-                .collect();
-            for parent in disappeared {
-                // 【入表资格】本帧至少有一个新 region 与父段的**播放轴**区间相交。
-                //
-                // 纯删除、撤销、移动同样表现为"region 消失"，但没有子段会在父段的
-                // 区间里出现 —— 为它们建候选只会换来若干轮后的过期 Warn（误导
-                // 排障：用户每删一个 item 就看到一条"分割失败"），还会在批量
-                // 编辑时把正在跨帧收齐的真分割候选挤出上限表。
-                // 残余：裁剪边缘也会走"消失 + 交叠出现"，仍会产生候选并在
-                // 收不齐时过期 —— 与收紧前一致，但 Warn 已限流且携带父段读数。
-                let intersects_an_appeared = appeared.iter().any(|frame| {
-                    frame.play_start < parent.play_start + parent.play_dur
-                        && parent.play_start < frame.play_start + frame.play_dur
-                });
-                if !intersects_an_appeared {
-                    // 【为什么留痕】被门挡掉的主体是纯删除/撤销，但"删父段与建子段
-                    // 被宿主拆进两次模型交付"的**真分割**也会走到这里 —— 那种情形
-                    // 静默退回几何兜底且无任何日志。Debug 计数让它在日志里可辨，
-                    // 攒到真机证据再决定是否放宽为跨帧资格（见
-                    // docs/plans/2026-10-27-audit-repair-round2.md §3.5）。
-                    hifishifter_kernel::log_limiter::emit_limited_key(
-                        log::Level::Debug,
-                        "ara.split.gate-skipped",
-                        format_args!(
-                            "[ara] split candidate skipped: parent ara-region-{} vanished \
-                             with no intersecting child this frame",
-                            parent.key
-                        ),
-                    );
+        self.lineage_frame = current.clone();
+        if previous.is_empty() {
+            return;
+        }
+        let current_geometry: HashSet<_> = current.iter().map(RegionFrame::geometry).collect();
+        let previous_geometry: HashSet<_> = previous.iter().map(RegionFrame::geometry).collect();
+        let disappeared = previous
+            .iter()
+            .filter(|frame| !current_geometry.contains(&frame.geometry()))
+            .collect::<Vec<_>>();
+        let appeared = current
+            .iter()
+            .filter(|frame| !previous_geometry.contains(&frame.geometry()))
+            .collect::<Vec<_>>();
+        if disappeared.is_empty() || appeared.is_empty() {
+            return;
+        }
+        let mut registered = 0_usize;
+        for parent in disappeared {
+            let Some(parent_item) = parent.item.as_deref() else {
+                continue;
+            };
+            for child in &appeared {
+                let Some(child_item) = child.item.as_deref() else {
+                    continue;
+                };
+                // 沿用父 item GUID 的那一段自己就带着媒体，无需借用。
+                if child_item == parent_item || child.audio_source != parent.audio_source {
                     continue;
                 }
-                let refs = appeared.iter().collect::<Vec<_>>();
-                let children = Self::split_children(&parent, &refs)
-                    .into_iter()
-                    .cloned()
-                    .collect::<Vec<_>>();
-                fresh.push(SplitCandidate {
-                    parent,
-                    children,
-                    rounds_left: SPLIT_CANDIDATE_ROUNDS,
-                });
-            }
-        }
-        // 【先吸收、后收口】老候选拿本帧的新子段（跨帧送达）；新候选可能本帧就齐。
-        let mut kept: Vec<SplitCandidate> = Vec::new();
-        let mut settled: Vec<SplitCandidate> = Vec::new();
-        let mut expired = 0_usize;
-        let mut expired_keys: Vec<String> = Vec::new();
-        for mut candidate in std::mem::take(&mut self.split_candidates) {
-            candidate.absorb(&appeared);
-            if candidate.partitions_parent() {
-                settled.push(candidate);
-                continue;
-            }
-            candidate.rounds_left = candidate.rounds_left.saturating_sub(1);
-            if candidate.rounds_left == 0 {
-                expired += 1;
-                // 过期 Warn 携带前几个父段读数：只报数量时，用户侧无从把这条
-                // Warn 对回到"刚才做了什么"。
-                if expired_keys.len() < 4 {
-                    expired_keys.push(format!("ara-region-{}", candidate.parent.key));
-                }
-            } else {
-                kept.push(candidate);
-            }
-        }
-        let fresh_count = fresh.len();
-        for mut candidate in fresh {
-            candidate.absorb(&appeared);
-            if candidate.partitions_parent() {
-                settled.push(candidate);
-            } else {
-                kept.push(candidate);
-            }
-        }
-        if kept.len() > MAX_SPLIT_CANDIDATES {
-            // 挤出策略：先淘汰**最旧的**「还没有任何子段」的候选（多轮收不齐的
-            // 最不可能完成），不足以覆盖时再按最旧淘汰 —— 一批删除/移动不该把
-            // 正在跨帧收齐的真分割候选挤出去。
-            let mut evicted = 0_usize;
-            let excess = kept.len() - MAX_SPLIT_CANDIDATES;
-            kept.retain(|candidate| {
-                if evicted < excess && candidate.children.is_empty() {
-                    evicted += 1;
-                    return false;
-                }
-                true
-            });
-            let excess = kept.len().saturating_sub(MAX_SPLIT_CANDIDATES);
-            kept.drain(..excess);
-        }
-        self.split_candidates = kept;
-        for candidate in &settled {
-            let refs = candidate.children.iter().collect::<Vec<_>>();
-            self.register_host_split(&candidate.parent, &refs);
-        }
-        if !settled.is_empty() {
-            // 【为什么打一行】"谱系登记成功"与"退回几何兜底"在用户侧是同一个画面，
-            // 只有这行日志能把"这次分割到底有没有继承参数"变成可核对的事实。
-            log::info!(
-                "[ara] split lineage registered: {} candidate(s), parent=ara-region-{}, \
-                 children={} (fresh={fresh_count})",
-                settled.len(),
-                settled[0].parent.key,
-                settled.iter().map(|c| c.children.len()).sum::<usize>(),
-            );
-        }
-        if expired > 0 {
-            let samples = if expired_keys.is_empty() {
-                String::new()
-            } else {
-                format!(" (e.g. {})", expired_keys.join(", "))
-            };
-            hifishifter_kernel::log_limiter::emit_limited_key(
-                log::Level::Warn,
-                "ara.split.pending-expired",
-                format_args!(
-                    "[ara] {expired} host split candidate(s) never completed within \
-                     {SPLIT_CANDIDATE_ROUNDS} remaps{samples}; their children keep the \
-                     geometric fallback"
-                ),
-            );
-        }
-        self.lineage_frame = current;
-    }
-
-    /// 登记一次宿主分割（父段 + 全部子段）：曲线谱系尽力而为，媒体身份无条件登记。
-    fn register_host_split(&mut self, parent: &RegionFrame, children: &[&RegionFrame]) {
-        // 【P2：结构 diff 给出的父】宿主不调用 `cloneAudioModification` 时（或调用顺序
-        // 不可预期时），分割只表现为"父段 region 消失、若干子段 region 出现"。这里用父
-        // region 的 modification 播种**每个子段各自**的 modification。
-        //
-        // 【为什么每个子段都要播】此前只有右半段有种子（`register_ara_split` 的
-        // `right_signature`），左半段靠"region key 槽位复用"的巧合继承 —— 而
-        // `allocate_region` 复用已销毁槽位，那是巧合而非保证。
-        //
-        // 【为什么这一层对两种宿主都跑】它只用 ARA 自己给的量（region 的
-        // `audio_modification` persistentID），不依赖 item GUID，也不依赖任何原生扩展。
-        // 有 GUID 的宿主走下面两条既有谱系，无 GUID 的宿主此前只能落几何兜底 ——
-        // 现在两条路都先把 modification 播好，兜底层因此不再被需要。
-        {
-            let mut edits = self.session.edits.lock_or_recover();
-            let parent_key = parent.authority_key();
-            for child in children {
-                let child_key = child.authority_key();
-                if let (Some(parent_key), Some(child_key)) = (parent_key.as_deref(), child_key) {
-                    if edits.atlas.seed_authority(parent_key, &child_key) {
-                        edits.revision = edits.revision.saturating_add(1);
-                    }
-                }
-            }
-        }
-        // 【谱系边本身也要记】权威已经播好了（上面那块），但 `split_parents` 是诊断与
-        // `find()` 旧路径的唯一读数：`register_split` 需要 per-clip 种子才建它，而
-        // 新路径的种子是**权威**、不是 per-clip 记录。不补这一步，日志里会出现
-        // "曲线继承成功但没有任何谱系边"的自相矛盾形状。
-        if let Some(parent_item) = parent.item.as_deref() {
-            let mut edits = self.session.edits.lock_or_recover();
-            for child in children {
-                if let Some(child_item) = child.item.as_deref() {
-                    if child_item != parent_item {
-                        edits.atlas.note_split_parent(parent_item, child_item);
-                    }
-                }
-            }
-        }
-        // 【ARA-only 宿主的谱系】没有 item GUID 时（Cubase / Nuendo / Studio One 的常态）
-        // 改按 region 签名登记。此前这里直接 return，于是那些宿主上每次分割都退到几何
-        // 兜底，兄弟半段被当成合法祖先 —— 用户看到
-        // `Conflict: ambiguous source parameter ancestry`，或曲线整体平移一个分割长度。
-        //
-        // 【为什么签名版也要求 seed】与 item 版同口径：seed 是父段**完整**窗口，
-        // 子段靠包含判定继承。父段没有曲线记录时没有可继承的东西，退回几何兜底
-        // 与改动前完全一致 —— 宁可不登记，也不要造一条解析不出祖先的假谱系。
-        let has_guids = parent.item.is_some() && children.iter().all(|child| child.item.is_some());
-        if !has_guids {
-            let mut edits = self.session.edits.lock_or_recover();
-            if let Some(seed) = edits.atlas.ara_split_seed(&parent.signature()) {
-                let seed = seed.clone();
-                for child in children {
-                    match edits.atlas.register_ara_split(
-                        &parent.signature(),
-                        &child.signature(),
-                        Some(seed.clone()),
-                    ) {
-                        Ok(()) => edits.revision = edits.revision.saturating_add(1),
-                        Err(error) => {
-                            log::warn!("[ara] ARA split lineage not registered: {error}")
-                        }
-                    }
-                }
-            }
-            drop(edits);
-            // 【为什么 ARA-only 上**不**登记 `split_media_from`】那条边按 clip id 索引，
-            // 而它的消费方 `derive_split_media` 要先在时间线里找到**父段**才能继承 ——
-            // 但父段在**同一帧**已被销毁（`remap_and_log` 只发布存活 region），
-            // 于是这条边永远读不到，只是把表撑大（且键是会被复用的 region key，
-            // 见 `allocate_region`，复用后会指向语义完全不同的"父段"）。
-            //
-            // 【为什么不需要它】映射层对**每一条**存活 region 都写了 `source_path` 与
-            // 完整 take（`ara/mapping.rs`），PCM 又按 `audio_source.persistent_id` 共享
-            // ⇒ 子段与父段同源，PCM 早已在位。也就是说 ARA-only 宿主上派生是**多余的**。
-            log::info!(
-                "[ara] ARA split detected: parent=ara-region-{} children={}",
-                parent.key,
-                children.len()
-            );
-            return;
-        }
-        let Some(parent_item) = parent.item.as_deref() else {
-            // 有原生扩展但清单还没认领：此时两个系统都给不出稳定键，只能等下一次。
-            return;
-        };
-        // 媒体派生谱系的锚点：沿用父 item GUID 的那一段（原生分割里通常是左半段），
-        // 它才是"还活着的、有媒体授权的那一条"。找不到就退回第一个子段。
-        let anchor_item = children
-            .iter()
-            .filter_map(|child| child.item.as_deref())
-            .find(|item| *item == parent_item)
-            .or_else(|| children.iter().find_map(|child| child.item.as_deref()));
-        // 【登记子段窗口来源】左段（沿用父 item GUID 的那一条）的窗口是**可信的**：
-        // 分割不改它的 D_STARTOFFS。子段按播放轴偏移从它切出来，宿主读数只作校验 ——
-        // 右半段的 D_STARTOFFS 才是会被分割推过镜像中点的那个量。
-        if let Some(left) = children
-            .iter()
-            .find(|child| child.item.as_deref() == Some(parent_item))
-            .or_else(|| children.first())
-        {
-            if let Some(left_item) = left.item.clone() {
-                for child in children {
-                    let Some(child_item) = child.item.as_deref() else {
-                        continue;
-                    };
-                    if child_item == left_item {
-                        continue;
-                    }
-                    let offset = child.play_start - left.play_start;
-                    if !(offset.is_finite() && offset > 1e-9) {
-                        continue;
-                    }
-                    self.session.note_split_window(
-                        child_item,
-                        crate::render::document::SplitWindowSource {
-                            left: left_item.clone(),
-                            offset_sec: offset,
-                            length_sec: child.play_dur,
-                        },
-                    );
-                }
-            }
-        }
-        let mut edits = self.session.edits.lock_or_recover();
-        // 曲线谱系：只有父段有 live 曲线可继承时才登记（`register_split` 的 seed 是
-        // 父段完整窗口，子段靠它做包含判定）。
-        //
-        // 【为什么不再 `return`】此前 seed 缺失会连**媒体派生谱系**一起跳过，子段
-        // 因此既无曲线祖先也无媒体身份 —— 波形要等下一次授权才出现。媒体身份只依赖
-        // "子段与父段同源"，与父段有没有曲线无关，两者必须解耦。
-        let seed = edits.atlas.split_seed(parent_item);
-        for child in children {
-            let Some(child_item) = child.item.as_deref() else {
-                continue;
-            };
-            // 沿用父 item GUID 的那一段自己就带着父段的权威，无需播种。
-            if child_item == parent_item {
-                continue;
-            }
-            if let Some(seed) = seed.clone() {
-                match edits
-                    .atlas
-                    .register_split(parent_item, child_item, Some(seed))
+                // 【判据是"包含"而不是"相邻"】相邻不是父子：一次删除 + 一次无关的新建
+                // 也可能相邻。只有落在父段播放区间**之内**的子段才可能是它的分割产物。
+                if child.play_start < parent.play_start - 1e-6
+                    || child.play_start + child.play_dur
+                        > parent.play_start + parent.play_dur + 1e-6
                 {
-                    Ok(()) => edits.revision = edits.revision.saturating_add(1),
-                    Err(error) => log::warn!("[ara] host split lineage not registered: {error}"),
+                    continue;
                 }
+                self.session
+                    .split_media_from
+                    .lock_or_recover()
+                    .insert(child_item.to_owned(), parent_item.to_owned());
+                registered += 1;
             }
         }
-        drop(edits);
-        // 媒体派生谱系：子段的源与父段是同一个文件（父段已授权 ⇒ 子段立刻有波形）。
-        if let Some(anchor_item) = anchor_item {
-            for child in children {
-                if let Some(child_item) = child.item.as_deref() {
-                    if child_item != anchor_item {
-                        self.session
-                            .split_media_from
-                            .lock_or_recover()
-                            .insert(child_item.to_owned(), anchor_item.to_owned());
-                    }
-                }
-            }
+        if registered > 0 {
+            log::info!(
+                "[ara] split media lineage: {registered} child item(s) borrow their parent's media"
+            );
         }
-        log::info!(
-            "[ara] host split detected: parent={parent_item} children={}",
-            children.len()
-        );
     }
 
     /// 当前累积到的 ARA 文档（供映射与测试）。
@@ -1050,18 +642,12 @@ impl ModelHandle {
                 .filter(|modification| !modification.persistent_id.is_empty())
                 .map(|modification| modification.persistent_id.clone())
                 .collect::<std::collections::BTreeSet<_>>();
-            let reclaimed = self
-                .session
-                .edits
-                .lock_or_recover()
-                .atlas
-                .reclaim_orphans(&live);
-            if reclaimed > 0 {
-                log::info!(
-                    "[ara] reclaimed {reclaimed} orphan parameter authority set(s) whose \
-                     modification is no longer in the document graph"
-                );
-            }
+            // 【这里不再回收"孤儿权威"】图集按 modification 索引，所以"这个
+            // modification 不在图里了"是一条可判定的孤儿判据。权威按**根轨**索引，
+            // 而"这条轨这一轮没有 region"是正常状态（刚插插件、刚删光 item、宿主
+            // 还在交付几何）—— 按它删 run 就是把用户的曲线当垃圾。权威的回收由
+            // `EditState::apply` 的 unbound 规则处理：认不出是谁的条目数据留着、不套用。
+            let _ = &live;
         }
         // 【幂等：模型没变就不重算】宿主的编辑事务不是原子的，一次分割会送来多对
         // `beginEditing` / `endEditing`，每次 `end_editing` 都跑一遍全量重算 —— 实测
@@ -1130,14 +716,25 @@ impl ModelHandle {
                 .map(|slot| !self.destroyed_sequences.contains(&slot))
                 .collect(),
         };
-        match crate::ara::mapping::ara_document_to_timeline_with_identities(&document, &identities)
-        {
-            Ok(outcome) => {
-                let crate::ara::mapping::MappingOutcome {
-                    mut timeline,
+        match crate::ara::mapping::ara_document_to_rows(&document, Some(&identities)) {
+            Ok(mapped) => {
+                let crate::ara::mapping::MappingRows {
+                    tracks: region_tracks,
+                    rows: region_rows,
                     clip_regions,
                     skipped,
-                } = outcome;
+                } = mapped;
+                let _ = &clip_regions;
+                // 【装配输入在这里落库】两条输入表各自只写自己那一份：ARA 侧写 region 表，
+                // 清单侧写 `ui_tracks`。**clip 不在这里产生** —— 它只在
+                // `DocumentSession::rebuild_timeline_locked` 里产生。这是"一个循环延伸的
+                // item 不会被画成 N 条片段"的结构性保证（见 `editor::assembly` 的模块文档）。
+                *self.session.region_rows.lock_or_recover() = region_rows.clone();
+                *self.session.region_tracks.lock_or_recover() = region_tracks.clone();
+                // 从这里起，这份时间线归装配器管（见 `DocumentSession::ara_model_seen`）。
+                self.session
+                    .ara_model_seen
+                    .store(true, std::sync::atomic::Ordering::Release);
                 if !skipped.is_empty() {
                     // 逐 region 跳过是**局部**问题：记一行明细，但会话继续可用。
                     // 这正是"一个零长度/MIDI item 打死整个插件"的修复点。
@@ -1173,58 +770,28 @@ impl ModelHandle {
                 //
                 // 【锁序】此处持有 `transaction`（见上方），而文档声明的顺序是
                 // `transaction → timeline → edits → host facts`，先取 `edits` 合法。
-                let seeded: std::collections::BTreeSet<String> = self
-                    .session
-                    .edits
-                    .lock_or_recover()
-                    .tracks
-                    .iter()
-                    .map(|track| track.id.clone())
-                    .collect();
-                for track in &mut timeline.tracks {
-                    if seeded.contains(&track.id) {
-                        continue;
-                    }
-                    track.compose_enabled = true;
-                    track.pitch_analysis_algo =
-                        hifishifter_kernel::state::PitchAnalysisAlgo::NsfHifiganOnnx;
-                }
-                // 宿主本会话slot不随删除压缩；避免活着的clip因旧region销毁换身份。
+                // 【默认合成开关与 clip 身份都不在这里写了】
                 //
-                // 【为什么不再在这里重贴 clip.id】身份已在映射层按 region key 派生
-                // （`ara-region-{key}`），此处重贴成 `ara-clip-{N}` 会把稳定性又抹掉。
-                // 这里只负责把 key → clip id 的映射登记进 `clip_ids` 供反查。
+                // 轨道默认值（`compose_enabled` / 分析算法）随装配一起播种 —— 见
+                // `DocumentSession::rebuild_timeline_locked`。写在装配里而不是这里，
+                // 是因为装配现在会在**每次清单刷新**后重跑：只在 remap 里播种，
+                // 重跑一次就丢一次。
                 //
-                // 【为什么按 `clip_regions` 对齐而不是顺序 zip】映射层会逐 region 跳过
-                // 坏条目；顺序 zip 会在有跳过时整体错位，把身份挂到错误的 clip 上。
-                // `clip_regions[i]` 是该 clip 在**过滤后**文档里的下标，与 `region_keys` 同序。
-                let mut clip_ids = self.session.clip_ids.lock_or_recover();
-                clip_ids.clear();
-                for (clip, region_index) in timeline.clips.iter().zip(&clip_regions) {
-                    if let Some(key) = self.region_keys.get(*region_index).copied() {
-                        clip_ids.insert(key, clip.id.clone());
-                    }
-                }
-                drop(clip_ids);
+                // `clip_ids` 同理：它由装配结果的 `spans` 反算，是"region key → 当前
+                // clip id"的唯一写者。此前映射层与清单层各写一次，于是"身份升级"窗口里
+                // 两边各说一套，`workspace_timeline_locked` 按 id 过滤会把全部 clip 滤掉。
+                //
                 // 身份仅由真实region→sequence边与宿主persistentID构建，不从名字/序号推断。
-                let mut bindings: crate::state_channel::TrackBindings = timeline
-                    .tracks
+                let mut bindings: crate::state_channel::TrackBindings = region_tracks
                     .iter()
                     .map(|t| (t.id.clone(), vec![]))
                     .collect();
-                for region in &document.playback_regions {
-                    if let Some(index) = region.region_sequence_index {
-                        if let Some(track) = timeline.tracks.get(index) {
-                            // 【为什么不用 unwrap】`bindings` 由上面的 `timeline.tracks`
-                            // 直接构建，当前必然命中；但这条路径跑在 **ARA 模型线程**，
-                            // 未来任何一处 divergence 都会变成宿主进程里的硬 panic。
-                            if let Some(members) = bindings.get_mut(&track.id) {
-                                members.push((
-                                    region.audio_modification_persistent_id.clone(),
-                                    region.audio_source_persistent_id.clone(),
-                                ));
-                            }
-                        }
+                for row in &region_rows {
+                    // 【为什么不用 unwrap】`bindings` 由上面的 `region_tracks`
+                    // 直接构建；但这条路径跑在 **ARA 模型线程**，未来任何一处
+                    // divergence 都会变成宿主进程里的硬 panic。
+                    if let Some(members) = bindings.get_mut(&row.track_id) {
+                        members.push((row.modification_id.clone(), row.source_id.clone()));
                     }
                 }
                 for members in bindings.values_mut() {
@@ -1232,8 +799,16 @@ impl ModelHandle {
                     members.dedup();
                 }
                 *self.session.track_bindings.lock_or_recover() = bindings.clone();
-                // getter可能重入ARA：先发布真实基础图、释放事务，再采集稳定item GUID。
-                *self.session.timeline.lock_or_recover() = Some(timeline.clone());
+                // getter可能重入ARA：先装配并发布真实基础图、释放事务，再采集宿主清单。
+                //
+                // 【这一刻发布的是 region 形态】清单还没来，所以 `assemble` 走的是
+                // "没有 item ⇒ 每条 region 一条 clip"的回退路径。它只活到下面
+                // `refresh_ui_inventory` 之后的那次重装 —— 那时 clip 变成 item 形态。
+                // 之所以还要发布它，是因为渲染/工作区路径在收口后立刻就会读时间线，
+                // 而"短暂的空图"会让它们把整份输入判成不可用。
+                if let Err(error) = self.session.rebuild_timeline_locked() {
+                    log::error!("[ara] timeline assembly failed before the inventory: {error}");
+                }
                 drop(transaction);
                 for owner in self.session.renderer_owners() {
                     owner.refresh_host_state_for_model();
@@ -1242,32 +817,18 @@ impl ModelHandle {
                     owner.refresh_ui_inventory();
                 }
                 let transaction = session.transaction.lock_or_recover();
-                {
-                    let items = self.session.region_items.lock_or_recover();
-                    let mut ids = self.session.clip_ids.lock_or_recover();
-                    let mut claimed = 0usize;
-                    for clip in &mut timeline.clips {
-                        if let Some((key, _)) = ids.iter().find(|(_, id)| **id == clip.id) {
-                            if let Some(item) = items.get(key) {
-                                let key = *key;
-                                clip.id = format!("ara-item-{item}");
-                                ids.insert(key, clip.id.clone());
-                                claimed += 1;
-                            }
-                        }
-                    }
-                    // 用户报障时最需要的一行：多少 clip 认领到了宿主 item GUID。
-                    // 认领不到的会停在 `ara-clip-N`，随后被清单侧 retain 剔除 ——
-                    // 这就是"子轨道 Item 没有变成真 Clip"的直接读数。
-                    if claimed < timeline.clips.len() {
-                        log::warn!(
-                            "[ara] {} of {} clip(s) claimed a host item GUID; the rest keep \
-                             ara-clip ids and will not survive host inventory presentation",
-                            claimed,
-                            timeline.clips.len()
-                        );
-                    }
+                // 清单回来了 ⇒ 装配输入 B 变了 ⇒ 再装配一次。**这是 clip 变成 item 形态的
+                // 那一刻**：一个循环延伸的 item 在这里从"N 条每节一条的 region clip"
+                // 收敛成"一条整段的 item clip"。
+                if let Err(error) = self.session.rebuild_timeline_locked() {
+                    log::error!("[ara] timeline assembly failed after the inventory: {error}");
                 }
+                let timeline = self
+                    .session
+                    .timeline
+                    .lock_or_recover()
+                    .clone()
+                    .unwrap_or_default();
                 // 记下"授权这一刻"的 active take GUID。
                 //
                 // 【为什么在这里、而不是每次清单刷新都重记】ARA 的 playback region 指向
@@ -1306,6 +867,35 @@ impl ModelHandle {
                     };
                     let mut takes = self.session.authorized_takes.lock_or_recover();
                     let mut sources = self.session.authorized_sources.lock_or_recover();
+                    // 【授权按 item 走，不再只经 `region_items` 反查】
+                    //
+                    // `region_items` 由**绑定**写入，而绑定的旧判据要求"region 与 item
+                    // 四项几何全等"—— 循环延伸的 item 按循环节给出多条 region，与整段
+                    // item **永远不全等**，于是它的 region 一条都绑不上 ⇒ 这个 item 没有
+                    // 授权 ⇒ `source_path` 永远为空 ⇒ **重开工程后那条 clip 是静音的**。
+                    //
+                    // 装配器的 `spans` 给的是"这条 clip 吃掉了哪几条 region"，与绑定
+                    // 无关、只由包含关系决定。于是循环 item 从第一轮起就有授权。
+                    let spans = self.session.assembly_spans.lock_or_recover().clone();
+                    for (clip_id, row_indices) in &spans {
+                        let Some(item) = crate::editor::workspace::host_item_guid(clip_id) else {
+                            continue;
+                        };
+                        for index in row_indices {
+                            let Some(row) = region_rows.get(*index) else {
+                                continue;
+                            };
+                            if row.key == 0 {
+                                continue;
+                            }
+                            if let Some(take) = take_by_item.get(item) {
+                                takes.insert(row.key, take.clone());
+                            }
+                            if let Some(source) = source_by_item.get(item) {
+                                sources.insert(row.key, source.clone());
+                            }
+                        }
+                    }
                     // 【为什么不再 `clear()`】这两张表按 region key 索引，key 的终点
                     // 只有两条：`destroy_playback_region` 逐 key 删除、
                     // `DocumentSession::close` 整表清空。一次 remap 看不到某个 key，
@@ -1323,65 +913,40 @@ impl ModelHandle {
                         }
                     }
                 }
-                // 宿主分割的结构 diff 必须在**参数投影之前**跑：投影会 `follow_geometry`
-                // 并把父段记录置为非活，届时 `split_seed` 就取不到父段窗口了（见
-                // `register_host_split_lineage`）。
-                self.register_host_split_lineage();
                 {
                     let mut edits = self.session.edits.lock_or_recover();
-                    if !edits.atlas.is_empty() && !edits.needs_rebind {
-                        let projection = (|| {
-                            let identities = self.session.parameter_identities_locked(&timeline)?;
-                            // 【先换几何，再重建视图】`follow_geometry` 只做查表与派生缓存，
-                            // 真正的"视图"（`edits.params`）由 `resync_parameter_view_locked`
-                            // 重建 —— 两件事收口在同一个入口，避免"模型重算时重建、清单刷新
-                            // 时不重建"的分叉（那正是"分割后参数线停在旧几何"的根）。
-                            let followed = edits.atlas.follow_geometry(&timeline, &identities)?;
-                            edits.atlas = followed;
-                            self.session
-                                .resync_parameter_view_locked(&mut edits, &timeline)?;
-                            // 无活动region的轨道可能只是mute；保留其曲线，不能当删除清空。
-                            edits
-                                .tracks
-                                .retain(|track| bindings.contains_key(&track.id));
-                            Ok::<_, String>(())
-                        })();
-                        match projection {
-                            Ok(()) => {}
-                            Err(error) => {
-                                // 【为什么不整份中止】参数投影失败只说明"曲线身份这次没能
-                                // 对齐"，几何与 PCM 都是好的。此前这里 `return`，于是
-                                // 连 `prepare_renderers()` 都不跑 —— `ready` 停在 `false`，
-                                // 而它只能由 `prepare_renderers` 置真，宿主若不重发
-                                // `end_editing` 就再也回不来（实例永久砖化）。
-                                // 现在只记一行、保留旧图集，继续把这份时间线发布出去。
-                                log::error!("[ara] source parameter projection conflict: {error}");
-                            }
+                    if !edits.needs_rebind {
+                        // 【唯一几何事务入口】锁定状态只在事务开始时读一次；关闭时
+                        // 这里只更新几何日志，权威哈希不变。分割/裁剪不产生 Move，
+                        // 因此也不会复制或重采样任何曲线。
+                        let frame = self.session.geometry_frame(&timeline, true);
+                        if let Err(error) = self
+                            .session
+                            .reconcile_parameter_geometry_locked(&frame, &mut edits)
+                        {
+                            // 几何事务失败只影响这一轮参数放置；几何与 PCM 仍照常发布，
+                            // 下一轮用同一 delta 重试（journal 未提交）。
+                            log::error!("[ara] source parameter geometry deferred: {error}");
                         }
-                    } else if edits.needs_rebind {
-                        // 【为什么必须留痕】`needs_rebind` 是**冷恢复/存档还原**的标记，
-                        // 唯一的清零点是 `EditState::reconcile`（`state_channel.rs:183`），
-                        // 而 `reconcile` 只被恢复路径调用。一旦某次撤销/重载的恢复身份
-                        // 对不上，这个标记就停在 `true`：此后用户在宿主里做的**任何**编辑
-                        // 都只会发布几何与 PCM，参数投影再也不跑 —— 用户报的症状正是
-                        // "无论宿主里怎么编辑 ARA 都不同步，只有删掉插件再添加才好"。
-                        //
-                        // 【为什么不顺手把它清掉】清掉等于把一次冷恢复降级成普通合并：
-                        // `reconcile` 的 `needs_rebind` 分支正是用 `Err` 拒绝"按旧序号猜
-                        // 归属"的（想象一下：曲线被挂到另一条轨道上，然后写回宿主）。
-                        // 正确的下一步是**先诊断** —— 这一行 + A4 的收口读数正是为此。
+                        // 无活动region的轨道可能只是mute；保留其曲线，不能当删除清空。
+                        edits
+                            .tracks
+                            .retain(|track| bindings.contains_key(&track.id));
+                    } else {
                         hifishifter_kernel::log_limiter::emit_limited_key(
                             log::Level::Warn,
                             "ara.rebind.stuck",
                             format_args!(
-                                "[ara] parameter projection skipped: the loaded edit state still \
-                                 asks for a rebind ({} authority set(s)). Host edits will publish \
-                                 geometry and audio only until the pending restore is reconciled.",
-                                edits.atlas.authorities.len()
+                                "[ara] parameter geometry skipped: the loaded edit state still asks \
+                                 for a rebind ({} authority root(s)).",
+                                edits.authority.roots.len()
                             ),
                         );
                     }
                 }
+                // 【媒体派生必须在参数投影之前】`derive_split_media` 的消费方在清单刷新
+                // 里读这张表；曲线不再需要它（见 `register_split_media` 的说明）。
+                self.register_split_media();
                 if let Err(error) = self.session.edits.lock_or_recover().reconcile(&bindings) {
                     log::error!("[ara] edit identity unresolved: {error}");
                 }
@@ -1393,7 +958,9 @@ impl ModelHandle {
                 log::info!("[ara] {}", self.ledger.summary());
                 self.log_published_revisions(&timeline);
                 self.log_identity_readings(&timeline);
-                *self.session.timeline.lock_or_recover() = Some(timeline.clone());
+                // 【`clip_ids` 与已发布时间线由装配器一次写成】它们的唯一写者是
+                // `rebuild_timeline_locked`，所以"两张表各说一套"的窗口在结构上不存在 ——
+                // 这里只记下本实例看到的那一份，供 `remap_is_redundant` 判"模型没变"。
                 self.timeline = Some(timeline);
                 // 只有**成功发布**才记指纹：失败时留着旧指纹，下一次照常重试。
                 self.remap_stamp = Some(fingerprint);
@@ -1467,8 +1034,8 @@ impl ModelHandle {
         let (authorities, derived, unbound) = {
             let edits = self.session.edits.lock_or_recover();
             (
-                edits.atlas.authorities.len(),
-                edits.atlas.regions.len(),
+                edits.authority.roots.len(),
+                edits.authority.run_count(),
                 edits.unbound.len(),
             )
         };
@@ -2654,22 +2221,13 @@ impl AudioModifications for ModelHandle {
         // 【为什么在这里加锁是安全的】本回调由宿主在 `begin_editing`…`end_editing`
         // 之间调用，而 `remap_and_log` 持 `edits` 时只跑纯投影、不回调宿主 ——
         // 不存在"持锁重入宿主"的环路。锁序纪律见 `render/document.rs` 头部注释。
-        if let (Some(parent_key), Some(child_key)) = (
-            crate::editor::parameter_atlas::authority_key(None, &parent_persistent_id),
-            crate::editor::parameter_atlas::authority_key(None, &child_persistent_id),
-        ) {
-            if self
-                .session
-                .edits
-                .lock_or_recover()
-                .atlas
-                .seed_authority(&parent_key, &child_key)
-            {
-                log::info!(
-                    "[ara] clone: parameters copied {parent_persistent_id} -> {child_persistent_id}"
-                );
-            }
-        }
+        // 【克隆 audio modification 不需要搬曲线】参数 run 活在工程时间上，与
+        // "它属于哪个 modification"无关：新 modification 上的 region 落在同一段
+        // 工程时间里，看到的自然就是同一批 run。此前这里要按 modification 键播种
+        // 一份源域曲线，是因为曲线存在源域、按 item/modification 索引。
+        log::info!(
+            "[ara] clone: modification cloned {parent_persistent_id} -> {child_persistent_id}"
+        );
         Ok(index)
     }
 
@@ -2708,16 +2266,10 @@ impl AudioModifications for ModelHandle {
                 let current = modification.persistent_id.clone();
                 self.session.register_modification_handle(&current, handle);
             }
-            // 【为什么权威表也必须跟着搬】参数权威按 modification persistentID 索引
-            // （`authority_key`），而这一句把 ID 换掉了。不搬就等于把这条 modification
-            // 的曲线孤儿化 —— 下一次投影查 `mod:{新ID}` 必然落空，用户看到参数被重置。
-            // 通知句柄与参数权威是**同一个键**的两种登记，必须一起搬。
-            let remap = [(previous.clone(), modification.persistent_id.clone())];
-            self.session
-                .edits
-                .lock_or_recover()
-                .atlas
-                .remap_authorities(&remap);
+            // 【曲线不需要搬】权威的键是 (root, param, 工程秒)，不是 modification id。
+            // 此前这里要把 `mod:{旧ID}` 下的曲线搬到新键，是因为曲线按 modification
+            // 索引；现在换 ID 只影响"这条 modification 叫什么"，与曲线无关。
+            let _ = &previous;
         }
         // persistentID 是 region 的引用键：它变了，session 的派生表必须立刻跟上，
         // 否则收口前的读取会拿旧键去查，把所有引用它的 region 判成 `UnknownModification`。
@@ -3039,7 +2591,7 @@ fn host_colors_clamp_into_a_parseable_hex_string() {
 mod tests {
     /// 真实模型稳定收口必须重新投影编辑，不能只有数学helper通过而GUI/authority仍在旧位置。
     #[test]
-    fn source_parameter_atlas_moves_and_stretches_in_real_document_transactions() {
+    fn source_parameters_move_and_stretch_in_real_document_transactions() {
         use ara2_bridge::plugin::ExtensionRoles;
         let mut model = ModelHandle::new();
         model.document = identity_document(&["A"]);
@@ -3070,33 +2622,41 @@ mod tests {
             );
         }
         let host = document.workspace_timeline().unwrap();
-        let mut client = host.clone();
-        let root = client.tracks[0].id.clone();
-        client.params_by_root_track.insert(
-            root.clone(),
-            hifishifter_kernel::state::TrackParamsState {
+        let root = host.tracks[0].id.clone();
+        document.publish_baseline(
+            &root,
+            hifishifter_kernel::editor::param_authority::RootBaseline {
                 frame_period_ms: 100.,
-                pitch_edit_user_modified: true,
                 pitch_orig: vec![57.; 6],
-                pitch_edit: vec![60., 61., 62., 63., 64., 65.],
+                ready: true,
                 ..Default::default()
             },
         );
-        let baseline = document.workspace_view().unwrap();
-        document
-            .accept_workspace_edits(
-                0,
-                document.revision.load(Ordering::Acquire),
-                &client,
-                &baseline,
-            )
-            .unwrap();
-        assert!(!document.edits.lock_or_recover().atlas.is_empty());
+        {
+            let mut edits = document.edits.lock_or_recover();
+            edits.authority.frame_period_ms = 100.;
+            edits
+                .authority
+                .write_range(
+                    &root,
+                    "pitch",
+                    0,
+                    &[60., 61., 62., 63., 64., 65.],
+                    &[true; 6],
+                    0.0,
+                )
+                .unwrap();
+            edits.revision = edits.revision.saturating_add(1);
+        }
+        assert!(!document.edits.lock_or_recover().authority.is_pristine());
+        // 生产路径在绑定/收口时已经用初始几何建立日志；这里是直接写权威的测试夹具，
+        // 必须先完成一次 observe，后面的 Move/Stretch 才有“旧窗口”可比较。
+        document.reconcile_parameter_geometry().unwrap();
         model.document.playback_regions[0].start_in_playback_time = 1.;
         model.document.playback_regions[0].duration_in_playback_time = 1.;
         model.document.playback_regions[0].is_timestretch_enabled = true;
         model.remap_and_log();
-        let pitch = document.edits.lock_or_recover().params[&root]
+        let pitch = document.workspace_view().unwrap().params[&root]
             .pitch_edit
             .clone();
         document.close();
@@ -3105,7 +2665,8 @@ mod tests {
             &pitch[10..21],
             &[60., 60.5, 61., 61.5, 62., 62.5, 63., 63.5, 64., 64.5, 65.]
         );
-        assert_eq!(pitch[0], 0., "旧位置不能继续遗留编辑");
+        // 旧位置只剩**原始曲线**（57）—— 用户画的那条（60）必须已经跟着 clip 走了。
+        assert_eq!(pitch[0], 57., "旧位置不能继续遗留编辑");
     }
     use super::*;
     use ara2_bridge::core::{RegionSequenceKind, Registry};
@@ -3143,26 +2704,6 @@ mod tests {
             });
         }
         doc
-    }
-
-    fn frame(
-        item: &str,
-        audio_source: &str,
-        mod_start: f64,
-        mod_dur: f64,
-        play_start: f64,
-        play_dur: f64,
-    ) -> RegionFrame {
-        RegionFrame {
-            key: 0,
-            item: Some(item.to_string()),
-            audio_source: audio_source.to_string(),
-            audio_modification: "mod".to_string(),
-            mod_start,
-            mod_dur,
-            play_start,
-            play_dur,
-        }
     }
 
     /// **新建 region 必须推进渲染版本。**
@@ -3343,36 +2884,35 @@ mod tests {
         assert!(model.remap_is_redundant());
     }
 
-    /// **`needs_rebind` 卡住时，投影必须被跳过且必须留痕（A6）。**
+    /// 卡住的 rebind 请求必须跳过**投影**，但几何与 PCM 照常发布。
     ///
-    /// 【为什么这是用户报障的根因之一】`needs_rebind` 是冷恢复/存档还原的标记，唯一
-    /// 清零点是 `EditState::reconcile`（`state_channel.rs:183`），而 `reconcile` 只被
-    /// 恢复路径调用。一次撤销/重载的恢复身份对不上，这个标记就停在 `true` —— 此后宿主里
-    /// **任何**编辑都只发布几何与 PCM，参数投影再也不跑。用户的原话是"无论宿主内怎么
-    /// 编辑，ARA 中都不能产生同步，只有把 ARA 插件完全删除再添加，才生效"。
+    /// 【为什么这条必须留下】"投影被跳过"与"整份收口失败"在用户侧是两种完全不同的
+    /// 故障：前者"界面有反应、曲线不动"，后者"什么都不同步"。日志里那句
+    /// `ara.rebind.stuck` 是唯一的区分点，而它只在`needs_rebind` 挡住投影时发出。
     ///
-    /// 本用例钉住两件事：
-    ///   1. 卡住时投影**确实没跑**（参数表没被投影结果改写）—— 这是现状，也是为什么
-    ///      它需要日志；
-    ///   2. 这种情况**留下了一条 warn**。没有第 2 条，第 1 条在真机上与"其它原因导致
-    ///      的不同步"完全无法区分（修 bug 只能靠猜）。
-    ///
-    /// 【为什么不断言日志内容】本测试床不捕获日志；断言靠的是可观察状态（曲线有没有
-    /// 被改写）。日志的存在由 `ara.rebind.stuck` 这个**限流键**本身保证 —— 它每窗口
-    /// 只发一条，因此即便在 Cubase 4 连送的收口里也不会刷屏。
+    /// 【为什么不断言日志内容】本测试床不捕获日志；断言靠的是可观察状态（时间线发布
+    /// 了、新几何生效了、`params` 没被写入）。日志的存在由那个**限流键**本身保证。
     #[test]
     fn a_stuck_rebind_request_skips_projection_and_says_so() {
         let (mut model, _key) = model_with_one_region();
         // 先正常收口一次，让时间线与 `remap_stamp` 就位。
         model.remap_and_log();
         assert!(model.timeline.is_some(), "夹具必须先能正常收口");
-        // 用户给这条 modification 画了一条曲线。
+        // 用户给这条根轨画了一条曲线（权威：工程时间的 run）。
         model
             .session
             .edits
             .lock_or_recover()
-            .atlas
-            .seed_test_pitch_curve("mod:host-mod-A", 250., vec![60., 62., 64., 66.]);
+            .authority
+            .write_range(
+                "ara-track-0",
+                "pitch",
+                0,
+                &[60., 62., 64., 66.],
+                &[true; 4],
+                0.0,
+            )
+            .expect("seed the authority");
         // 模拟一次"恢复身份对不上"：`reconcile` 失败 ⇒ 标记留在 true。
         model.session.edits.lock_or_recover().needs_rebind = true;
 
@@ -3393,12 +2933,12 @@ mod tests {
             .expect("移动 region");
         model.remap_and_log();
 
-        // 1) 时间线照常发布：几何与 PCM 不受参数投影影响（这正是"界面有反应但曲线不动"）。
+        // 1) 时间线照常发布：几何与 PCM 不受参数投影影响。
         assert!(
             model.timeline.is_some(),
             "卡住时也必须继续发布时间线，否则用户连几何都看不到"
         );
-        // 2) 新几何确实生效了 —— 证明"不是整份收口失败"，只是投影这一支被跳过。
+        // 2) 新几何确实生效了 —— 证明"不是整份收口失败"。
         let start = model
             .session
             .timeline
@@ -3413,8 +2953,8 @@ mod tests {
         // 3) 投影没跑：权威仍在，但 `params` 里没有被投影出来的新曲线。
         let edits = model.session.edits.lock_or_recover();
         assert!(
-            edits.atlas.has_authority_parameters(None, "host-mod-A"),
-            "权威表本身必须保留（跳过投影不等于丢掉曲线）"
+            !edits.authority.is_pristine(),
+            "权威本身必须保留（跳过投影不等于丢掉曲线）"
         );
         assert!(
             edits.params.is_empty(),
@@ -3613,107 +3153,6 @@ mod tests {
         );
     }
 
-    /// **宿主分割后两个半段都保留父段参数**（用户报障的模型级回归）。
-    ///
-    /// 【为什么这是核心回归】旧设计按 `ara_region_signature`（含播放几何）认领曲线，
-    /// 分割一发生签名就变、谱系蒸发，两个半段都拿不到父段记录 —— 用户在 Cubase 里看到的
-    /// 就是"分割后参数被重置"。新设计把参数按稳定宿主身份持有：父段的源域曲线被整份播给
-    /// 两个半段（P1 `cloneAudioModification` 或 P2 结构 diff），投影各取所需。
-    #[test]
-    fn a_host_split_keeps_the_parent_parameters_on_both_halves() {
-        let (mut model, _parent_key) = model_with_one_region();
-        model.remap_and_log();
-        // 用户给父段画了一条音高曲线。
-        model
-            .session
-            .edits
-            .lock_or_recover()
-            .atlas
-            .seed_test_pitch_curve("mod:host-mod-A", 250., vec![60., 62., 64., 66.]);
-
-        // 宿主克隆 modification：`cloneAudioModification` 是 ARA 对"创建独立变体"的
-        // 专用原语（`ARAInterface.h:2653-2656`），因此它**就是**复制/分割回执。
-        let cloned = AudioModificationProperties::new(None, "host-mod-A-split").unwrap();
-        let source = 0_usize;
-        let clone_index = AudioModifications::clone_audio_modification(
-            &mut model,
-            &CreateContext::for_test(ApiGeneration::V2Final, 0x55),
-            &0_usize,
-            &source,
-            cloned,
-        )
-        .expect("克隆必须成功");
-        assert!(
-            model
-                .session
-                .edits
-                .lock_or_recover()
-                .atlas
-                .has_authority_parameters(None, "host-mod-A-split"),
-            "cloneAudioModification 是 ARA 给出的复制回执：父段参数必须播给新 modification"
-        );
-
-        // 宿主销毁父段、建两个相邻半段，两个半段都引用**克隆出来的** modification。
-        PlaybackRegions::destroy_playback_region(&mut model, 0_usize);
-        let mut sequence_identity = 0_u8;
-        // SAFETY: 只作不透明 model-ref 地址（同 `model_with_one_region`）。
-        let sequence_ref = unsafe {
-            ara2_bridge::core::ModelRef::from_raw(
-                (&raw mut sequence_identity).cast::<std::ffi::c_void>(),
-            )
-        }
-        .unwrap();
-        let sequence = 0_usize;
-        for (key, lo, hi) in [(0x11_u64, 0.0_f64, 0.25_f64), (0x22, 0.25, 0.5)] {
-            let properties = PlaybackRegionProperties::for_ara2(
-                0,
-                lo,
-                hi - lo,
-                lo,
-                hi - lo,
-                sequence_ref,
-                None,
-                None,
-            )
-            .unwrap();
-            let context = CreateContext::for_test(ApiGeneration::V2Final, key);
-            PlaybackRegions::create_playback_region(
-                &mut model,
-                &context,
-                &clone_index,
-                &sequence,
-                properties,
-            )
-            .expect("半段必须建得出来");
-        }
-        model.remap_and_log();
-
-        let timeline = model.timeline().unwrap().clone();
-        assert_eq!(timeline.clips.len(), 2, "两个半段都必须出现在时间线里");
-        let identities = model
-            .session
-            .parameter_identities_locked(&timeline)
-            .unwrap();
-        let atlas = model.session.edits.lock_or_recover().atlas.clone();
-        // 渲染路径用的就是 `project_local`：数组以片段自己的零点对齐。
-        let projected = atlas.project_local(&timeline, &identities).unwrap();
-        let mut heads = Vec::new();
-        for clip in &timeline.clips {
-            let params = projected
-                .get(&clip.id)
-                .unwrap_or_else(|| panic!("半段 {} 必须拿到参数", clip.id));
-            heads.push(params.pitch_edit[0]);
-        }
-        heads.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        // 父曲线在源域是 60,62,64,66（每 250ms 一格）。左半段消费源窗 [0,0.25) ⇒ 60；
-        // 右半段消费 [0.25,0.5) ⇒ 62。两个半段各自拿到**自己那段**，而不是被重置。
-        assert_eq!(
-            heads,
-            vec![60., 62.],
-            "分割后两个半段必须各自继承父段曲线的对应子段（用户报障的直接形状）"
-        );
-    }
-
     /// **宿主重复交付同一份几何**时不得失效渲染版本。
     ///
     /// 【为什么用容差而不是 `!=`】宿主折算工程速率后会把同一份几何重复回调，两个数可能
@@ -3781,376 +3220,6 @@ mod tests {
         );
     }
 
-    /// 分割判据只认"同源 + 子段源窗都在父段内 + 首尾相接覆盖父段整段"，且至少两段。
-    ///
-    /// 【为什么放宽了旧判据】旧版要求"恰好两段且左右源窗严格相邻"，一次多刀分割
-    /// （N 段）就不满足，谱系一条都不登记。新判据只保留**可判定**的覆盖关系。
-    #[test]
-    fn host_split_detection_requires_contiguous_windows_on_one_source() {
-        let parent = frame("{P}", "src", 0., 1., 0., 1.);
-        let left = frame("{P}", "src", 0., 0.5, 0., 0.5);
-        let right = frame("{R}", "src", 0.5, 0.5, 0.5, 0.5);
-        assert_eq!(
-            ModelHandle::split_children(&parent, &[&left, &right]).len(),
-            2,
-            "两段相邻且覆盖父段 ⇒ 是一次分割"
-        );
-
-        // 一次多刀分割（N 段）也认 —— 旧判据在这里会一条谱系都不登记。
-        let third = frame("{S}", "src", 0.75, 0.25, 0.75, 0.25);
-        let half = frame("{R}", "src", 0.5, 0.25, 0.5, 0.25);
-        assert_eq!(
-            ModelHandle::split_children(&parent, &[&left, &half, &third]).len(),
-            3,
-            "三段首尾相接同样是一次分割"
-        );
-
-        // 源窗不连续（中间缺一段）⇒ 不是一次分割。
-        let gapped = frame("{R}", "src", 0.6, 0.4, 0.5, 0.5);
-        assert!(ModelHandle::split_children(&parent, &[&left, &gapped]).is_empty());
-        // 不同源 ⇒ 不是同一次分割。
-        let other_source = frame("{R}", "other", 0.5, 0.5, 0.5, 0.5);
-        assert!(ModelHandle::split_children(&parent, &[&left, &other_source]).is_empty());
-        // 半段之和与父窗口不符 ⇒ 不是分割（例如只是一次裁切）。
-        let wrong_total = frame("{R}", "src", 0.5, 0.2, 0.5, 0.5);
-        assert!(ModelHandle::split_children(&parent, &[&left, &wrong_total]).is_empty());
-        // 只有一段 ⇒ 不是分割。
-        assert!(ModelHandle::split_children(&parent, &[&left]).is_empty());
-        // 子段源窗超出父段 ⇒ 不是分割。
-        let overflow = frame("{R}", "src", 0.5, 0.8, 0.5, 0.8);
-        assert!(ModelHandle::split_children(&parent, &[&left, &overflow]).is_empty());
-    }
-
-    /// 结构 diff 必须把宿主分割登记成与 GUI 分割相同的形状。
-    ///
-    /// 【为什么这条最要紧】宿主分割只表现为"1 个 region 消失 + 2 个出现"，没有任何显式
-    /// 谱系。不登记的话右半段落到几何兜底层，兄弟半段被当成合法祖先，曲线整体平移一个
-    /// 分割长度 —— 正是用户报障的"宿主分割后 Clip 内产生偏移"。
-    #[test]
-    fn a_host_split_registers_the_same_lineage_shape_as_a_gui_split() {
-        use crate::editor::parameter_atlas::{ParameterAtlas, RegionIdentity};
-        const PARENT: &str = "{11111111-1111-1111-1111-111111111111}";
-        const RIGHT: &str = "{22222222-2222-2222-2222-222222222222}";
-
-        let mut model = ModelHandle::new();
-        model.document = identity_document(&["A"]);
-        // 父段有一条 live 的曲线记录（`split_seed` 只认 live 记录）。
-        let mut timeline = TimelineState::default();
-        timeline.tracks.push(
-            serde_json::from_value(serde_json::json!({"id":"ara-track-0","name":"A","order":0}))
-                .unwrap(),
-        );
-        timeline.clips.push(
-            serde_json::from_value(serde_json::json!({
-                "id":"ara-clip-1","track_id":"ara-track-0","name":"C","start_sec":0.,"length_sec":1.,
-                "takes":[{"id":"t","source_path":"src","source_end_sec":1.}]
-            }))
-            .unwrap(),
-        );
-        timeline.bpm = 120.;
-        timeline.project_sec = 1.;
-        for clip in &mut timeline.clips {
-            clip.normalize_takes();
-        }
-        timeline.params_by_root_track.insert(
-            "ara-track-0".into(),
-            hifishifter_kernel::state::TrackParamsState {
-                frame_period_ms: 100.,
-                pitch_orig: vec![57.; 6],
-                pitch_edit: vec![60., 61., 62., 63., 64., 65.],
-                ..Default::default()
-            },
-        );
-        let identities = std::collections::BTreeMap::from([(
-            "ara-clip-1".to_string(),
-            RegionIdentity {
-                key: 1,
-                item: Some(PARENT.to_string()),
-                source: "src".into(),
-                modification: "mod".into(),
-                signature: String::new(),
-            },
-        )]);
-        model.session.edits.lock_or_recover().atlas = ParameterAtlas::default()
-            .capture(&timeline, &identities)
-            .unwrap();
-
-        // 上一帧：一个父 region。
-        model.lineage_frame = vec![frame(PARENT, "src", 0., 1., 0., 1.)];
-        // 当前帧：父 region 消失，左半段（沿用父段 item GUID）+ 右半段（新 GUID）出现。
-        model.document.playback_regions = vec![
-            AraPlaybackRegion {
-                audio_source_persistent_id: "src".into(),
-                audio_modification_persistent_id: "mod-left".into(),
-                start_in_modification_time: 0.,
-                duration_in_modification_time: 0.5,
-                start_in_playback_time: 0.,
-                duration_in_playback_time: 0.5,
-                ..Default::default()
-            },
-            AraPlaybackRegion {
-                audio_source_persistent_id: "src".into(),
-                audio_modification_persistent_id: "mod-right".into(),
-                start_in_modification_time: 0.5,
-                duration_in_modification_time: 0.5,
-                start_in_playback_time: 0.5,
-                duration_in_playback_time: 0.5,
-                ..Default::default()
-            },
-        ];
-        model.region_keys = vec![7, 8];
-        {
-            let mut items = model.session.region_items.lock_or_recover();
-            items.insert(7, PARENT.to_string());
-            items.insert(8, RIGHT.to_string());
-        }
-
-        model.register_host_split_lineage();
-
-        let edits = model.session.edits.lock_or_recover();
-        assert_eq!(
-            edits.atlas.split_parent_of(RIGHT),
-            Some(PARENT),
-            "右半段必须显式继承左半段（= 父段）"
-        );
-        assert!(
-            edits.atlas.has_split_basis(RIGHT),
-            "父段的完整窗口必须以 seed 形式保留，右半段靠它做包含判定"
-        );
-        drop(edits);
-        assert_eq!(
-            model
-                .session
-                .split_media_from
-                .lock_or_recover()
-                .get(RIGHT)
-                .map(String::as_str),
-            Some(PARENT),
-            "媒体派生谱系也要登记（右半段借父段媒体）"
-        );
-        // 本帧成为下一帧的基线。
-        assert_eq!(model.lineage_frame.len(), 2);
-    }
-
-    /// **一次分割分两轮送达：右半段仍然要拿到父段的参数权威。**
-    ///
-    /// 【为什么这条是回归】结构 diff 只看"上一帧 vs 这一帧"。宿主先把父段缩短成左段、
-    /// 下一轮才创建右段时，第一轮只有一个子段（`split_children` 要求至少两段），
-    /// 第二轮又没有"消失的父段" —— 旧实现两条路都不登记，右半段从此没有权威。
-    /// 现在候选会跨轮记住父段窗口，等右段出现再收口。
-    #[test]
-    fn a_split_delivered_in_two_rounds_still_seeds_the_right_half() {
-        const PARENT: &str = "{AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA}";
-        const RIGHT: &str = "{BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB}";
-
-        let mut model = ModelHandle::new();
-        model.document = identity_document(&["A"]);
-        model
-            .session
-            .edits
-            .lock_or_recover()
-            .atlas
-            .seed_test_pitch_curve(&format!("item:{PARENT}"), 100., vec![61.; 8]);
-
-        let region = |mod_start: f64, mod_dur: f64, play_start: f64| AraPlaybackRegion {
-            audio_source_persistent_id: "src".into(),
-            audio_modification_persistent_id: "mod".into(),
-            start_in_modification_time: mod_start,
-            duration_in_modification_time: mod_dur,
-            start_in_playback_time: play_start,
-            duration_in_playback_time: mod_dur,
-            ..Default::default()
-        };
-
-        // 第一轮：父段消失，只有左段（沿用父 item GUID）。
-        model.lineage_frame = vec![frame(PARENT, "src", 0., 1., 0., 1.)];
-        model.document.playback_regions = vec![region(0., 0.5, 0.)];
-        model.region_keys = vec![7];
-        {
-            let mut items = model.session.region_items.lock_or_recover();
-            items.insert(7, PARENT.to_string());
-        }
-        model.register_host_split_lineage();
-        assert_eq!(
-            model.split_candidates.len(),
-            1,
-            "一轮没齐的分割必须留在候选里，而不是被丢掉"
-        );
-
-        // 第二轮：右段出现（新 GUID）。父段仍在候选里，跨帧收口。
-        model.document.playback_regions.push(region(0.5, 0.5, 0.5));
-        model.region_keys.push(8);
-        model
-            .session
-            .region_items
-            .lock_or_recover()
-            .insert(8, RIGHT.to_string());
-        model.register_host_split_lineage();
-
-        let edits = model.session.edits.lock_or_recover();
-        assert_eq!(
-            edits.atlas.split_parent_of(RIGHT),
-            Some(PARENT),
-            "右半段必须显式继承父段"
-        );
-        assert!(
-            edits.atlas.has_authority_parameters(Some(RIGHT), "mod"),
-            "跨帧收口后必须把父段的权威播给右半段"
-        );
-        assert!(
-            model.split_candidates.is_empty(),
-            "收口后候选必须清掉，不能每帧重复登记"
-        );
-        drop(edits);
-        // 右段的窗口来源必须登记：它是"从父段切"这条推导的唯一输入。
-        assert_eq!(model.session.split_window_count(), 1);
-        let windows = model.session.split_windows.lock_or_recover();
-        let source = windows
-            .get(RIGHT)
-            .expect("right half must have a window source");
-        assert_eq!(source.left, PARENT);
-        assert!((source.offset_sec - 0.5).abs() < 1e-9);
-        assert!((source.length_sec - 0.5).abs() < 1e-9);
-    }
-
-    /// **不变量：纯删除不是分割，不得产生候选、更不得刷过期 Warn。**
-    ///
-    /// 【为什么钉死】"父段消失"对分割与删除是同一个形状；没有入表资格判定时，
-    /// 用户每删一个 item 都会留下一个永远收不齐的候选，若干轮 remap 后刷一条
-    /// "split candidate never completed" 的 Warn —— 误导排障，还占用上限表。
-    #[test]
-    fn a_plain_delete_never_becomes_a_split_candidate() {
-        const PARENT: &str = "{AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA}";
-        let mut model = ModelHandle::new();
-        // 上一帧：一个父 region。当前帧：它直接消失，没有任何新 region。
-        model.lineage_frame = vec![frame(PARENT, "src", 0., 1., 0., 1.)];
-        model.document.playback_regions = Vec::new();
-        model.register_host_split_lineage();
-        assert!(
-            model.split_candidates.is_empty(),
-            "父段消失且无新 region 时不得产生分割候选"
-        );
-        // 后续帧同样干净：没有候选，也就没有轮次倒计时与过期 Warn。
-        model.register_host_split_lineage();
-        assert!(model.split_candidates.is_empty());
-    }
-
-    /// **不变量：候选表满员时，先淘汰最旧的「无子段」候选，不牺牲正在跨帧收齐的。**
-    ///
-    /// 【为什么钉死】一批删除/移动曾把真分割候选挤出表（旧策略无差别丢最旧），
-    /// 右半段退回几何兜底 —— 旧故障回归且无日志。
-    #[test]
-    fn candidate_overflow_evicts_childless_entries_first() {
-        let mut model = ModelHandle::new();
-        // 直构 MAX+1 个候选：MAX 个无子段（最旧在头部）+ 1 个已收到子段。
-        let mut candidates: Vec<SplitCandidate> = (0..MAX_SPLIT_CANDIDATES)
-            .map(|index| SplitCandidate {
-                parent: frame(
-                    &format!("p{index}"),
-                    "src",
-                    index as f64,
-                    1.,
-                    index as f64,
-                    1.,
-                ),
-                children: Vec::new(),
-                rounds_left: SPLIT_CANDIDATE_ROUNDS,
-            })
-            .collect();
-        candidates.push(SplitCandidate {
-            parent: frame("p-with-child", "src", 100., 1., 100., 1.),
-            // 半段不算完整划分：这个候选仍需后续帧补齐右半段。
-            children: vec![frame("c-left", "src", 100., 0.5, 100., 0.5)],
-            rounds_left: SPLIT_CANDIDATE_ROUNDS,
-        });
-        model.split_candidates = candidates;
-        // 本帧无任何变化：候选不收口也不新增，只走轮次递减与挤出。
-        model.register_host_split_lineage();
-        assert_eq!(model.split_candidates.len(), MAX_SPLIT_CANDIDATES);
-        assert!(
-            !model
-                .split_candidates
-                .iter()
-                .any(|c| c.parent.item.as_deref() == Some("p0")),
-            "最旧的无子段候选必须先被淘汰"
-        );
-        assert!(
-            model
-                .split_candidates
-                .iter()
-                .any(|c| c.parent.item.as_deref() == Some("p-with-child")),
-            "正在跨帧收齐的候选不得被无子段候选的淘汰波及"
-        );
-    }
-
-    /// 父段**没有** live 曲线时：曲线谱系不登记（没有可继承的 seed），但**媒体身份必须
-    /// 照常登记**。
-    ///
-    /// 【为什么单独钉住】此前 `split_seed` 取不到就 `return`，连 `split_media_from` 一起
-    /// 跳过 ⇒ 右半段既无曲线祖先也无媒体身份，波形要等下一次授权才出现。媒体身份只依赖
-    /// "父段与右半段同源"，与父段有没有曲线无关。
-    #[test]
-    fn a_host_split_without_a_curve_still_registers_media_identity() {
-        const PARENT: &str = "{33333333-3333-3333-3333-333333333333}";
-        const RIGHT: &str = "{44444444-4444-4444-4444-444444444444}";
-
-        let mut model = ModelHandle::new();
-        model.document = identity_document(&["A"]);
-        // 刻意不 `capture` 任何曲线：父段没有 live 记录 ⇒ `split_seed` 返回 None。
-
-        model.lineage_frame = vec![frame(PARENT, "src", 0., 1., 0., 1.)];
-        model.document.playback_regions = vec![
-            AraPlaybackRegion {
-                audio_source_persistent_id: "src".into(),
-                audio_modification_persistent_id: "mod-left".into(),
-                start_in_modification_time: 0.,
-                duration_in_modification_time: 0.5,
-                start_in_playback_time: 0.,
-                duration_in_playback_time: 0.5,
-                ..Default::default()
-            },
-            AraPlaybackRegion {
-                audio_source_persistent_id: "src".into(),
-                audio_modification_persistent_id: "mod-right".into(),
-                start_in_modification_time: 0.5,
-                duration_in_modification_time: 0.5,
-                start_in_playback_time: 0.5,
-                duration_in_playback_time: 0.5,
-                ..Default::default()
-            },
-        ];
-        model.region_keys = vec![7, 8];
-        {
-            let mut items = model.session.region_items.lock_or_recover();
-            items.insert(7, PARENT.to_string());
-            items.insert(8, RIGHT.to_string());
-        }
-
-        model.register_host_split_lineage();
-
-        let edits = model.session.edits.lock_or_recover();
-        assert!(
-            !edits.atlas.has_authority_parameters(Some(RIGHT), "mod"),
-            "父段没有曲线时不得凭空造一份权威"
-        );
-        assert_eq!(
-            edits.atlas.split_parent_of(RIGHT),
-            Some(PARENT),
-            "谱系边仍然要记：它是诊断与旧路径的唯一读数"
-        );
-        drop(edits);
-        assert_eq!(
-            model
-                .session
-                .split_media_from
-                .lock_or_recover()
-                .get(RIGHT)
-                .map(String::as_str),
-            Some(PARENT),
-            "媒体身份与曲线 seed 解耦，必须照常登记"
-        );
-    }
-
     /// 保存后新建图的序号不可决定旧编辑归属；共同source由真正modification身份区分。
     #[test]
     fn persisted_b_edits_follow_host_identity_after_deleting_a_and_reordering_creation() {
@@ -4164,6 +3233,7 @@ mod tests {
             "ara-track-1".into(),
             hifishifter_kernel::state::TrackParamsState {
                 frame_period_ms: 5.0,
+                pitch_edit_user_modified: true,
                 pitch_edit: vec![62.0, 64.0],
                 ..Default::default()
             },

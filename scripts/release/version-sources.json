@@ -1,0 +1,72 @@
+{
+    "canonical": "backend/src-tauri/tauri.conf.json",
+    "sources": [
+        {
+            "path": "frontend/package.json",
+            "pattern": "(\"version\"\\s*:\\s*\")([^\"]+)(\")",
+            "occurrences": 1
+        },
+        {
+            "path": "frontend/package-lock.json",
+            "pattern": "(\"version\"\\s*:\\s*\")([^\"]+)(\")",
+            "occurrences": 2,
+            "why": "顶层 version 与 packages[\"\"].version 是产品版本；其余 version 都是依赖"
+        },
+        {
+            "path": "backend/src-tauri/tauri.conf.json",
+            "pattern": "(\"version\"\\s*:\\s*\")([^\"]+)(\")",
+            "occurrences": 1
+        },
+        {
+            "path": "backend/src-tauri/tauri.conf.dist-dev.json",
+            "pattern": "(\"version\"\\s*:\\s*\")([^\"]+)(\")",
+            "occurrences": 1
+        },
+        {
+            "path": "backend/src-tauri/Cargo.toml",
+            "pattern": "(?ms)(\\[package\\].*?^\\s*version\\s*=\\s*\")([^\"]+)(\")",
+            "occurrences": 1,
+            "why": "只认 [package] 段里的 version；[dependencies] 里也有同名字段"
+        },
+        {
+            "path": "backend/hifishifter-plugin/Cargo.toml",
+            "pattern": "(?ms)(\\[package\\].*?^\\s*version\\s*=\\s*\")([^\"]+)(\")",
+            "occurrences": 1
+        },
+        {
+            "path": "backend/hifishifter-plugin-core/Cargo.toml",
+            "pattern": "(?ms)(\\[package\\].*?^\\s*version\\s*=\\s*\")([^\"]+)(\")",
+            "occurrences": 1
+        },
+        {
+            "path": "backend/hifishifter-clap/Cargo.toml",
+            "pattern": "(?ms)(\\[package\\].*?^\\s*version\\s*=\\s*\")([^\"]+)(\")",
+            "occurrences": 1
+        },
+        {
+            "path": "backend/Cargo.lock",
+            "pattern": "(?ms)(\\[\\[package\\]\\]\\s*name\\s*=\\s*\"HiFiShifter\"\\s*version\\s*=\\s*\")([^\"]+)(\")",
+            "occurrences": 1,
+            "why": "锁文件里两个自有 package 各一条，插件那条在下面",
+            "id": "backend/Cargo.lock (HiFiShifter)"
+        },
+        {
+            "path": "backend/Cargo.lock",
+            "pattern": "(?ms)(\\[\\[package\\]\\]\\s*name\\s*=\\s*\"hifishifter-plugin\"\\s*version\\s*=\\s*\")([^\"]+)(\")",
+            "occurrences": 1,
+            "id": "backend/Cargo.lock (hifishifter-plugin)"
+        },
+        {
+            "path": "backend/Cargo.lock",
+            "pattern": "(?ms)(\\[\\[package\\]\\]\\s*name\\s*=\\s*\"hifishifter-plugin-core\"\\s*version\\s*=\\s*\")([^\"]+)(\")",
+            "occurrences": 1,
+            "id": "backend/Cargo.lock (hifishifter-plugin-core)"
+        },
+        {
+            "path": "backend/Cargo.lock",
+            "pattern": "(?ms)(\\[\\[package\\]\\]\\s*name\\s*=\\s*\"hifishifter-clap\"\\s*version\\s*=\\s*\")([^\"]+)(\")",
+            "occurrences": 1,
+            "id": "backend/Cargo.lock (hifishifter-clap)"
+        }
+    ]
+}

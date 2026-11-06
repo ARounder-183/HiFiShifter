@@ -81,12 +81,12 @@ pub(crate) use hifishifter_kernel::midi_export;
 pub(crate) use hifishifter_kernel::midi_export::TempoTickConverter;
 #[path = "commands/formant.rs"]
 mod formant;
-#[path = "commands/syllable.rs"]
-mod syllable;
 #[path = "commands/notebook.rs"]
 mod notebook;
 #[path = "commands/onnx_status.rs"]
 mod onnx_status;
+#[path = "commands/syllable.rs"]
+mod syllable;
 // 多选区帧窗口已搬进内核（`hifishifter_kernel::editor::selection`）：MIDI 导入在
 // ARA 插件侧也要用同一套语义，不能只在 App 里成立。别名保留原模块路径，调用点不动。
 pub(crate) use hifishifter_kernel::editor::selection as param_selection_window;
@@ -1236,7 +1236,7 @@ pub async fn analyze_clip_syllables(
         syllable::analyze_clip_syllables(state, clip_id)
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| format!("syllable analysis worker failed: {e}"))?
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2524,6 +2524,7 @@ pub fn set_param_frames(
     start_frame: u32,
     values: Vec<f32>,
     checkpoint: Option<bool>,
+    present: Option<Vec<bool>>,
 ) -> serde_json::Value {
     {
         // 【panic 守卫】同步命令在 WebView IPC 线程内联执行：panic 越过
@@ -2531,7 +2532,17 @@ pub fn set_param_frames(
         common::guard_command(
             "set_param_frames",
             serde_json::json!({ "ok": false, "error": "panic in command: set_param_frames" }),
-            || params::set_param_frames(&state, track_id, param, start_frame, values, checkpoint),
+            || {
+                params::set_param_frames(
+                    &state,
+                    track_id,
+                    param,
+                    start_frame,
+                    values,
+                    checkpoint,
+                    present,
+                )
+            },
         )
     }
 }
@@ -3788,7 +3799,7 @@ pub async fn save_ui_settings(
 //
 // 【为什么 App 也要走这条通道】这些偏好原先只写在 App 自己的 localStorage 里，
 // 插件读不到 —— 于是"在 App 里调好的外观与快捷键"进插件就没了。两边写同一份
-// 配置文件后，偏好随用户走而不是随形态走。localStorage 退化为本机缓存
+// 配置文件后，偏好随用户走而不是随形态走。localStorage 退化为本地缓存
 // （见 frontend/src/services/uiStorage.ts）。
 
 #[tauri::command(rename_all = "camelCase")]

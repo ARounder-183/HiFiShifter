@@ -182,6 +182,21 @@ git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.gi
 git -C soundtouch rev-parse HEAD
 ```
 
+#### モデルの重み（必要時に取得）
+
+リポジトリに入るのはマニフェスト `backend/src-tauri/resources/models/models.json`（1.5 KB）だけです。
+151.6 MB の重みは release アセット `models-<マニフェストのバージョン>.zip` として配布されます
+（バージョンは内容ハッシュなので、古い版を取るとファイル単位の検証で即座に失敗します）。
+ビルドスクリプトが取得スクリプトを自動で呼びます（冪等で、揃っていればディレクトリ走査のみ）：
+
+```bash
+python scripts/setup/fetch-models.py                # 無ければ取得
+python scripts/setup/fetch-models.py --check        # 確認のみ
+python scripts/setup/fetch-models.py --source DIR   # オフライン：既存のモデルフォルダーからコピー
+```
+
+`HIFISHIFTER_MODELS_BASE_URL` でミラーを指定できます。
+
 ### 4. 開発とビルド
 
 ```bash
@@ -197,16 +212,16 @@ cargo tauri build
 cargo tauri build --bundles appimage -- --no-default-features --features onnx
 # 補助スクリプトも利用可: bash scripts/build/build-linux-appimage.sh
 
-# Windows ポータブル ZIP
-.\scripts\build\pack-portable.ps1 -SkipBuild
+# Windows: 統合インストーラー（App + VST3 + モデルライブラリ）+ ポータブル ZIP
+.\build.bat
 
-# Windows VST3 ZIP + インストーラー（完全な Release 交付あり）
-.\scripts\build\pack-portable.ps1 -PackageTarget Plugin -SkipBuild -Installer
+# VST3 only
+.\build.bat -Target Plugin
 ```
 
 AppImage に含める内容は `scripts/build/linux-appimage.sh` の一箇所で決まります（CI とローカルで共通）。ホストが提供すべきライブラリ（WebKitGTK / GStreamer / GL / Wayland）を削除し、`ldd` でホスト側の実体を参照していることを検証したうえで、再パックとヘッドレス起動のスモークテストを行います。個別に実行するには `bash scripts/build/linux-appimage.sh package <tauri-release-dir>`（`verify <AppDir>` で検証のみ）。
 
-`pack-portable.bat` をダブルクリックすると、App・VST3・両方を選べます。指定できるオプションは `scripts/build/pack-portable.ps1` と `scripts/` 配下のビルドスクリプトを参照してください。
+`build.bat` をダブルクリックすると App と VST3 をまとめてビルドします。指定できるオプションは `scripts/build/build.ps1` を参照してください。
 
 `TAURI_UI_MODE` 環境変数でフロントエンドの起動モードを切り替えられます：
 
@@ -254,11 +269,11 @@ ONNX Runtimeのバイナリは、ort crateの `download-binaries` 機能によ�
 
 アプリは実行ログを自動的に OS 標準のログディレクトリへ書き込みます。コマンドライン引数は不要です：
 
-| OS | ログディレクトリ |
-| --- | --- |
-| Windows | `%LOCALAPPDATA%\com.arounder.hifishifter\logs` |
-| macOS | `~/Library/Logs/com.arounder.hifishifter` |
-| Linux | `~/.local/share/com.arounder.hifishifter/logs` |
+| OS      | ログディレクトリ                   |
+| ------- | ---------------------------------- |
+| Windows | `%LOCALAPPDATA%\HiFiShifter\logs`  |
+| macOS   | `~/Library/Logs/HiFiShifter`       |
+| Linux   | `$XDG_STATE_HOME/HiFiShifter/logs` |
 
 - アプリ内の **ヘルプ → ログフォルダーを開く** でログの場所を直接開けます。**ヘルプ → 診断情報をエクスポート...** では、システム情報・全ログ・推論デバイスのベンチマーク結果を含む診断パッケージをワンクリックで生成できます。issue 報告時に添付してください。
 - ログはサイズに応じて自動ローテーションされます：1 ファイル上限 8 MiB、履歴は 3 世代まで保持（`hifishifter.1.log` ~ `hifishifter.3.log`）。
@@ -275,6 +290,20 @@ ONNX Runtimeのバイナリは、ort crateの `download-binaries` 機能によ�
 - 起動ログには必ず 2 行の診断が残ります：`[linux] session:`（GTK バックエンド / `DISPLAY` / `WAYLAND_DISPLAY` / AppImage）と `[linux] egl:`（EGL の vendor とバージョン）。描画関連の issue には添付してください。
 - ターミナルで `HiFiShifter --benchmark` を実行：推論デバイスのベンチマークを実行し、JSON 結果を出力します。
 
+### データディレクトリ
+
+ログ以外のユーザーデータは次の場所にあります（スタンドアロン版とプラグインは同じディレクトリを共有します）:
+
+| 用途 | Windows | macOS | Linux |
+| --- | --- | --- | --- |
+| 設定 | `%APPDATA%\HiFiShifter` | `~/Library/Application Support/HiFiShifter` | `$XDG_CONFIG_HOME/HiFiShifter`（既定 `~/.config/HiFiShifter`） |
+| キャッシュ（波形 / レンダー） | `%LOCALAPPDATA%\HiFiShifter\cache` | `~/Library/Caches/HiFiShifter` | `$XDG_CACHE_HOME/HiFiShifter`（既定 `~/.cache/HiFiShifter`） |
+| 未保存セッションの取り込み素材 | `%LOCALAPPDATA%\HiFiShifter\unsaved\<セッション>` | `~/Library/Application Support/HiFiShifter/unsaved/<セッション>` | `$XDG_DATA_HOME/HiFiShifter/unsaved/<セッション>` |
+| 共有モデルライブラリ（Windows のみ・インストーラーが書き込み） | `%PROGRAMDATA%\HiFiShifter\models\<バージョン>` | — | — |
+
+- 保存済みプロジェクトの取り込み素材は、プロジェクトファイルの隣の `<プロジェクト名>_media` ディレクトリに入ります。プロジェクトごとコピーしてください。
+- 旧バージョンから更新した場合、初回起動時に旧 `com.arounder.hifishifter` ディレクトリが新しい場所へ移動されます。新旧が同時に存在する場合は**統合しません**（どちらもそのまま残します）。ログに 1 行記録されます。
+
 ## ドキュメント
 
 - ユーザーマニュアル：[简体中文](../../docs/i18n/USERMANUAL.md) · [繁體中文](USERMANUAL_zh-TW.md) · [English](USERMANUAL_en.md) · [日本語](USERMANUAL_ja.md) · [한국어](USERMANUAL_ko.md)
@@ -283,6 +312,7 @@ ONNX Runtimeのバイナリは、ort crateの `download-binaries` 機能によ�
 
 - 拡張（Extension）API：[docs/extension-api.md](../../docs/extension-api.md)
 - i18n スタイルガイド：[docs/i18n/style-guide.md](../../docs/i18n/style-guide.md)
+- モデルの重み（取得とリリース）：[docs/models.md](../../docs/models.md)
 
 ## 謝辞
 
@@ -298,4 +328,8 @@ ONNX Runtimeのバイナリは、ort crateの `download-binaries` 機能によ�
 
 ## ライセンス
 
-このプロジェクトは [MITライセンス](../../LICENSE) の下で公開されています。
+プロジェクト自身のコードは [MITライセンス](../../LICENSE) の下で公開されています。同梱する
+サードパーティコンポーネントのライセンス全文と告知は [`licenses/`](../../licenses/README.md) に
+あります：SoundTouch（LGPL-2.1、動的リンク、未改変の上流版）、ARA SDK ほか（Apache-2.0）、
+DiffSinger ボコーダー重み（CC BY-NC-SA 4.0、非商用のみ）。コンポーネントの完全な一覧は
+[LICENSE](../../LICENSE) の Third-Party Notices にあります。

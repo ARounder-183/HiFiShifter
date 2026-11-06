@@ -1,7 +1,75 @@
-//! 源 PCM 与全部 renderer 退役快照共用的进程级 512 MiB 硬预算。
+//! 源 PCM 与全部 renderer 退役快照共用的进程级 PCM 预算。
+//!
+//! 【为什么不再是写死的 512 MiB】那个常数是"先导版"的探针上限，而 PCM 需求与
+//! **素材长度**成正比：一段 165 s 的立体声在旧实现里要 248 MB（两档采样率 + 工作区 +
+//! 源交错副本），512 MiB 只够两分半。用户报的 `render PCM budget exceeded` 就是
+//! 这条硬墙 —— 而且它是**永久失败**：跨度没变，重试多少次都一样。
+//!
+//! 现在上限按物理内存给（1/4，夹在 512 MiB..4 GiB 之间），环境变量
+//! `HIFISHIFTER_VST_PCM_BUDGET_MB` 可覆盖。下限仍是 512 MiB —— 绝不比今天更小。
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
+
+/// 预算下限（= 旧实现的固定上限）。
+const MIN_LIMIT_BYTES: usize = 512 * 1024 * 1024;
+/// 预算上限（防止在超大内存机器上抬到荒唐的值）。
+const MAX_LIMIT_BYTES: usize = 4 * 1024 * 1024 * 1024;
+
+/// 物理内存总量（字节）。取不到时返回 `None`，调用方退回下限。
+fn physical_memory_bytes() -> Option<usize> {
+    #[cfg(windows)]
+    {
+        use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+        // SAFETY: 结构体按 SDK 定义清零后由系统填写；只读 `ullTotalPhys`。
+        unsafe {
+            let mut status = MEMORYSTATUSEX {
+                dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32,
+                ..Default::default()
+            };
+            if GlobalMemoryStatusEx(&mut status).is_err() {
+                return None;
+            }
+            usize::try_from(status.ullTotalPhys).ok()
+        }
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        // SAFETY: `sysconf` 只读系统常数，无副作用。
+        unsafe {
+            let pages = libc::sysconf(libc::_SC_PHYS_PAGES);
+            let page_size = libc::sysconf(libc::_SC_PAGESIZE);
+            if pages <= 0 || page_size <= 0 {
+                return None;
+            }
+            usize::try_from(pages)
+                .ok()?
+                .checked_mul(usize::try_from(page_size).ok()?)
+        }
+    }
+    #[cfg(not(any(windows, all(unix, not(target_os = "macos")))))]
+    {
+        None
+    }
+}
+
+/// 本次进程的 PCM 预算上限。
+fn adaptive_limit() -> usize {
+    if let Some(mb) = std::env::var("HIFISHIFTER_VST_PCM_BUDGET_MB")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+    {
+        return usize::try_from(mb)
+            .ok()
+            .and_then(|mb| mb.checked_mul(1024 * 1024))
+            .unwrap_or(MAX_LIMIT_BYTES);
+    }
+    let Some(physical) = physical_memory_bytes() else {
+        return MIN_LIMIT_BYTES;
+    };
+    (physical / 4).clamp(MIN_LIMIT_BYTES, MAX_LIMIT_BYTES)
+}
 
 #[derive(Debug)]
 pub(crate) struct MemoryBudget {
@@ -20,12 +88,6 @@ impl Drop for Reservation {
     }
 }
 impl Reservation {
-    /// 已转交该持有者的实际额度，用于非实时诊断；不是重新读取全局used。
-    // 非实时诊断读取入口，保留。
-    #[cfg(test)]
-    pub fn bytes(&self) -> usize {
-        self.bytes
-    }
     /// 整批预检额度分给实际持有者，不重复收费；余额随临时工作域离开而退还。
     pub fn split_off(&mut self, bytes: usize) -> Option<Self> {
         self.bytes = self.bytes.checked_sub(bytes)?;
@@ -71,7 +133,7 @@ pub(crate) fn global_budget() -> &'static Arc<MemoryBudget> {
         Arc::new(MemoryBudget {
             used: AtomicUsize::new(0),
             peak: AtomicUsize::new(0),
-            limit: 512 * 1024 * 1024,
+            limit: adaptive_limit(),
         })
     })
 }

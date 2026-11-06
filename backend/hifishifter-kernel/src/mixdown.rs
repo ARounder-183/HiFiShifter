@@ -909,10 +909,13 @@ fn apply_host_pitch_edit(
                 log::Level::Warn,
                 "ara.render.f0-unavailable",
                 format_args!(
-                    "[ara] clip {} has a pitch edit but no usable source F0 (len={}); \
-                     skipping synthesis this round and passing the host PCM through",
+                    "[ara] clip {} has a pitch edit but no usable source F0 \
+                     (f0={}, orig={}, edit={}); skipping synthesis this round and passing \
+                     the host PCM through",
                     clip.id,
                     clip_midi.len(),
+                    entry.pitch_orig.len(),
+                    entry.pitch_edit.len(),
                 ),
             );
             return Ok(false);
@@ -2687,6 +2690,7 @@ mod tests {
             let mut tl = TimelineState::default();
             let track_id = tl.tracks[0].id.clone();
             let clip = Clip {
+                loop_period_sec: None,
                 id: format!("clip_mode_{}", channel_mode),
                 group_id: None,
                 track_id,
@@ -2706,6 +2710,7 @@ mod tests {
                 source_file_mtime: None,
                 source_file_size: None,
                 source_file_fingerprint: None,
+                content_id: None,
                 waveform_preview: None,
                 pitch_range: None,
                 gain: 1.0,
@@ -2823,6 +2828,7 @@ mod tests {
             let mut tl = TimelineState::default();
             let track = tl.tracks[0].id.clone();
             let clip = Clip {
+                loop_period_sec: None,
                 id: "clip_qpreset".to_string(),
                 group_id: None,
                 track_id: track,
@@ -2842,6 +2848,7 @@ mod tests {
                 source_file_mtime: None,
                 source_file_size: None,
                 source_file_fingerprint: None,
+                content_id: None,
                 waveform_preview: None,
                 pitch_range: None,
                 gain: 1.0,
@@ -2944,6 +2951,7 @@ mod tests {
         let track = tl.tracks[0].id.clone();
         for (index, start) in [0.0f64, 0.5].into_iter().enumerate() {
             let clip = Clip {
+                loop_period_sec: None,
                 id: format!("clip_progress_{index}"),
                 group_id: None,
                 track_id: track.clone(),
@@ -2963,6 +2971,7 @@ mod tests {
                 source_file_mtime: None,
                 source_file_size: None,
                 source_file_fingerprint: None,
+                content_id: None,
                 waveform_preview: None,
                 pitch_range: None,
                 gain: 1.0,
@@ -3085,6 +3094,7 @@ mod tests {
         tl.params_by_root_track.insert(track_id.clone(), entry);
 
         let clip = Clip {
+            loop_period_sec: None,
             id: clip_id.to_string(),
             group_id: None,
             track_id: track_id.clone(),
@@ -3104,6 +3114,7 @@ mod tests {
             source_file_mtime: None,
             source_file_size: None,
             source_file_fingerprint: None,
+            content_id: None,
             waveform_preview: None,
             pitch_range: None,
             gain: 1.0,
@@ -3207,7 +3218,7 @@ mod tests {
 
         // 渲染缓存的目录/开关是**进程级全局状态**，而本套件里其它用例（以及
         // `render_cache` 自身的用例）都可能改动它。每一步前都重新确立本测试的
-        // 目录与开关，断言因此不依赖"当前恰好还是我的设置"。
+        // 目录与开关，断言因此不依赖"当前恰好还是上一次的设置"。
         let setup_cache = || {
             crate::render_cache::init(dir.join("render_cache"));
             crate::render_cache::apply_settings(&crate::config::RenderCacheSettings::default());

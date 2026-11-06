@@ -940,6 +940,10 @@ pub fn update_ort_ep(choice: &str, device_id: Option<i32>) {
     // 预编译 / CoreML 图编译）甚至因驱动问题失败 —— 预热把它移出渲染热路径，
     // 渲染线程只需等构建锁（且双重检查后直接复用预热结果，不再重复构建）。
     // 失败仅记录日志：下一次渲染请求的 load 会再次尝试构建。
+    // 【测试进程不能留游离构建线程】见 `async_session_prewarm_enabled`。
+    if !crate::vocoder_ort_session::async_session_prewarm_enabled() {
+        return;
+    }
     std::thread::Builder::new()
         .name("ort-session-prewarm-vocoder".into())
         .spawn(|| {
@@ -2552,7 +2556,7 @@ pub struct BenchmarkResults {
     /// True when the ORT build **exposes** the DirectML provider.
     ///
     /// 注意这是**能力**，不是**结果**：DLL 里有 `DmlExecutionProvider` 并不代表
-    /// 这台机器能跑。能否真的跑通由 `dml_median_ms`（有数字）与 `dml_error`
+    /// 真的能跑。能否跑通由 `dml_median_ms`（有数字）与 `dml_error`
     /// （为什么没有）表达 —— 把两者混为一谈会让 UI 永远显示"DirectML 可用"，
     /// 而实测一次都没跑成。
     pub dml_available: bool,

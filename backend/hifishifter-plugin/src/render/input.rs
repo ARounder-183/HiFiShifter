@@ -25,18 +25,17 @@ use std::sync::Arc;
 /// clip 全部几何非法 —— 它们都应当发布**同一份空快照**，而不是各自报错或各自拼一份。
 /// 此前只有第一种走了空快照，后两种（尤其"空列表"）撞上了 `unsupported host position`
 /// 这个**整份失败**的守卫。合并成一个具名函数后，这个语义只有一处定义。
-fn empty_snapshots() -> Vec<PlaybackSnapshot> {
-    [44100, 48000]
-        .into_iter()
-        .map(|sample_rate| PlaybackSnapshot {
-            sample_rate,
-            origin_sample: 0,
-            left: vec![],
-            right: vec![],
-            covered: Vec::new(),
-            _reservation: None,
-        })
-        .collect()
+fn empty_snapshots() -> Vec<Arc<PlaybackSnapshot>> {
+    // 空快照只做一份、两个发布器共享：内容为空，没有理由为"两档率"付两份账。
+    let empty = Arc::new(PlaybackSnapshot {
+        sample_rate: 44100,
+        origin_sample: 0,
+        left: vec![],
+        right: vec![],
+        covered: Vec::new(),
+        _reservation: None,
+    });
+    vec![Arc::clone(&empty), empty]
 }
 
 pub(crate) struct RenderInput {
@@ -51,6 +50,13 @@ pub(crate) struct RenderInput {
     pub project_sample_rate: Option<f64>,
     /// 有atlas时为region局部零点参数，不是GUI绝对项目帧。
     pub clip_parameters: BTreeMap<String, hifishifter_kernel::state::TrackParamsState>,
+    /// 只渲染这个工程时间窗口（秒）。`None` = 整段。
+    ///
+    /// 【为什么需要它】整段物化的内存与**跨度**成正比。短工程走整段（与今天逐字节
+    /// 相同），长工程只渲播放头附近的一段 —— 跨度于是只决定"渲几段"，不再决定
+    /// "能不能渲"。窗口之外的帧在快照里**不声明覆盖**，由播放侧按既有规则退回
+    /// 宿主原声（见 `PlaybackSnapshot::covered`）。
+    pub window: Option<(f64, f64)>,
 }
 /// 输出帧域的"这些帧真的属于我们"覆盖区间（升序、不重叠，已夹进快照窗口）。
 ///
@@ -202,28 +208,63 @@ pub(crate) struct ExportRequest<'a> {
 
 impl RenderInput {
     /// 本函数只消费冻结值；调用前必须已释放文档transaction。新模型只能取消/拒绝发布。
-    pub fn render(&self, cancel: Arc<AtomicBool>) -> Result<Vec<PlaybackSnapshot>, String> {
+    pub fn render(&self, cancel: Arc<AtomicBool>) -> Result<Vec<Arc<PlaybackSnapshot>>, String> {
         self.render_with_progress(cancel, None)
     }
+
+    /// 宿主声明的工程率（Hz）；缺席/非法时退回 44100。
+    fn project_rate(&self) -> u32 {
+        let rate = self.project_sample_rate.unwrap_or(44100.0);
+        if rate.is_finite() && rate > 0.0 {
+            rate.round().clamp(1.0, u32::MAX as f64) as u32
+        } else {
+            44100
+        }
+    }
+
+    /// 内部合成的**原生率**：44.1k 或 48k，取与宿主工程率同族的那一档。
+    ///
+    /// 【为什么只渲一档】旧实现固定渲 44.1k + 48k 两份，内存翻倍；而
+    /// `PlaybackSnapshot::copy_block` 本来就会把非原生率线性重采样。宿主率在
+    /// `setupProcessing` 里已经声明过，所以"渲哪一档"完全可判 —— 规则与
+    /// `ExtensionOwner::snapshot_index_for_rate` 逐字相同（先看整数倍，再取最近）。
+    /// 渲出来的那一份由**两个**发布器共享（`SnapshotPublisher::publish_shared`），
+    /// 于是"宿主换工程率"不需要重渲，也不需要第二份缓冲。
+    fn native_sample_rate(project_rate: u32) -> u32 {
+        let rate = f64::from(project_rate.max(1));
+        let integral_multiple = |base: f64| {
+            let ratio = rate / base;
+            ratio >= 1.0 && (ratio - ratio.round()).abs() <= 1e-6
+        };
+        if integral_multiple(44100.0) {
+            44100
+        } else if integral_multiple(48000.0) {
+            48000
+        } else if (rate - 44100.0).abs() <= (rate - 48000.0).abs() {
+            44100
+        } else {
+            48000
+        }
+    }
+
     pub fn render_with_progress(
         &self,
         cancel: Arc<AtomicBool>,
         progress: Option<hifishifter_kernel::mixdown::ProgressCallback>,
-    ) -> Result<Vec<PlaybackSnapshot>, String> {
+    ) -> Result<Vec<Arc<PlaybackSnapshot>>, String> {
         if cancel.load(Ordering::Acquire) {
             return Err("host preparation cancelled".into());
         }
         let Some(timeline) = &self.timeline else {
-            return [44100, 48000]
-                .into_iter()
-                .map(|rate| {
-                    if cancel.load(Ordering::Acquire) {
-                        return Err("host preparation cancelled".into());
-                    }
-                    mix_plain_regions(&self.regions, &self.sources, rate, self.project_sample_rate)
-                        .map_err(|e| format!("snapshot unavailable: {e:?}"))
-                })
-                .collect();
+            if cancel.load(Ordering::Acquire) {
+                return Err("host preparation cancelled".into());
+            }
+            let rate = Self::native_sample_rate(self.project_rate());
+            let snapshot =
+                mix_plain_regions(&self.regions, &self.sources, rate, self.project_sample_rate)
+                    .map_err(|e| format!("snapshot unavailable: {e:?}"))?;
+            let shared = Arc::new(snapshot);
+            return Ok(vec![Arc::clone(&shared), shared]);
         };
         if self.regions.is_empty() {
             return Ok(empty_snapshots());
@@ -234,12 +275,7 @@ impl RenderInput {
         // 96 kHz / 192 kHz 工程下写死 44.1k 会让 origin/end 算错，进而是整份快照错位。
         // `setupProcessing` 给出的就是权威工程率；缺席时退回 44100（既有默认档）。
         // 取整是因为这里只用它做秒→帧换算，与输出帧号同为整数域。
-        let project_rate = self.project_sample_rate.unwrap_or(44100.0);
-        let project_rate = if project_rate.is_finite() && project_rate > 0.0 {
-            project_rate.round().clamp(1.0, u32::MAX as f64) as u32
-        } else {
-            44100
-        };
+        let project_rate = self.project_rate();
         super::snapshot::validate_regions_with_fades(
             &self.regions,
             &self.sources,
@@ -291,7 +327,17 @@ impl RenderInput {
         if !(start.is_finite() && end.is_finite()) || end <= start.max(0.0) {
             return Ok(empty_snapshots());
         }
-        let start = start.max(0.0);
+        let (mut start, mut end) = (start.max(0.0), end);
+        // 【窗口夹取】只改渲染范围，不改时间线：clip 之外的帧照样是静音/未覆盖。
+        if let Some((lo, hi)) = self.window {
+            if lo.is_finite() && hi.is_finite() && hi > lo {
+                start = start.max(lo.max(0.0));
+                end = end.min(hi);
+            }
+        }
+        if !(end.is_finite() && end > start) {
+            return Ok(empty_snapshots());
+        }
         let mut input = HashMap::new();
         let source_bytes = timeline
             .clips
@@ -312,19 +358,14 @@ impl RenderInput {
                     )
                     .ok_or_else(|| "host interleaved PCM size overflow".to_owned())
             })?;
-        // 两率最终PCM、源转交错副本、当前混音/region临时输出一起预检，失败不先做重推理。
-        // 此策略保留512MiB全局硬上限，不把旧30秒/64MiB探针常量直接放宽为无界分配。
-        let frame_counts = [44100_u32, 48000]
-            .map(|rate| {
-                let frames = ((end - start) * rate as f64).round();
-                if !frames.is_finite() || frames < 0. || frames >= usize::MAX as f64 / 8. {
-                    Err("snapshot size overflow".to_owned())
-                } else {
-                    Ok(frames as usize)
-                }
-            })
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()?;
+        // 只预检**一档**最终PCM：第二档采样率不再物化（见 `native_sample_rate`）。
+        let sample_rate = Self::native_sample_rate(project_rate);
+        let frames = ((end - start) * sample_rate as f64).round();
+        if !frames.is_finite() || frames < 0. || frames >= usize::MAX as f64 / 8. {
+            return Err("snapshot size overflow".to_owned());
+        }
+        let frames = frames as usize;
+        let frame_counts = [frames];
         let outputs = frame_counts
             .iter()
             .try_fold(0_usize, |total, frames| total.checked_add(frames * 8))
@@ -389,70 +430,60 @@ impl RenderInput {
                 },
             );
         }
-        let mut snapshots = Vec::new();
-        let model_rate_output = timeline
-            .clips
-            .iter()
-            .filter_map(|clip| timeline.resolve_root_track_id(&clip.track_id))
-            .any(|root| {
-                timeline.tracks.iter().any(|track| {
-                    track.id == root
-                        && track.pitch_analysis_algo
-                            == hifishifter_kernel::state::PitchAnalysisAlgo::NsfHifiganOnnx
-                })
-            });
-        for (sample_rate, frames) in [44100, 48000].into_iter().zip(frame_counts) {
-            if cancel.load(Ordering::Acquire) {
-                return Err("host preparation cancelled".into());
-            }
-            let reservation = batch
-                .split_off(frames * 8)
-                .ok_or("invalid render budget partition")?;
-            // HiFiGAN工作区只在模型原生44.1k合成一次，48k是便宜输出层，不重新跑HNSEP/神经网络。
-            // 纯非HiFiGAN路径保持旧采样率契约；只消费已经就绪的不可变PCM，仍在worker线程。
-            if model_rate_output && sample_rate == 48000 {
-                let native: &PlaybackSnapshot = &snapshots[0];
-                let mut left =
-                    hifishifter_kernel::mel_utils::linear_resample_mono(&native.left, 44100, 48000);
-                let mut right = hifishifter_kernel::mel_utils::linear_resample_mono(
-                    &native.right,
-                    44100,
-                    48000,
-                );
-                left.resize(frames, 0.);
-                right.resize(frames, 0.);
-                snapshots.push(PlaybackSnapshot {
-                    sample_rate,
-                    origin_sample: (start * sample_rate as f64).round() as i64,
-                    left,
-                    right,
-                    // 48 k 这一份是 44.1 k 的重采样，但**覆盖**是按时间算的：直接按
-                    // 本档率重算一次，比按比例缩放区间少一整类舍入错误。
-                    covered: snapshot_covered(timeline, &self.sources, start, end, sample_rate),
-                    _reservation: Some(reservation),
-                });
-                continue;
-            }
-            let samples = self.mix_interleaved(MixRequest {
-                timeline,
-                sources: &input,
-                start_sec: start,
-                end_sec: end,
-                sample_rate,
-                cancel: &cancel,
-                progress: progress.clone(),
-            })?;
-            debug_assert_eq!(samples.len(), frames * 2);
-            snapshots.push(PlaybackSnapshot {
-                sample_rate,
-                origin_sample: (start * sample_rate as f64).round() as i64,
-                left: samples.iter().step_by(2).copied().collect(),
-                right: samples.iter().skip(1).step_by(2).copied().collect(),
-                covered: snapshot_covered(timeline, &self.sources, start, end, sample_rate),
-                _reservation: Some(reservation),
-            });
+        let reservation = batch
+            .split_off(frames * 8)
+            .ok_or("invalid render budget partition")?;
+        let samples = self.mix_interleaved(MixRequest {
+            timeline,
+            sources: &input,
+            start_sec: start,
+            end_sec: end,
+            sample_rate,
+            cancel: &cancel,
+            progress: progress.clone(),
+        })?;
+        debug_assert_eq!(samples.len(), frames * 2);
+        let mut snapshot = PlaybackSnapshot {
+            sample_rate,
+            origin_sample: (start * sample_rate as f64).round() as i64,
+            left: samples.iter().step_by(2).copied().collect(),
+            right: samples.iter().skip(1).step_by(2).copied().collect(),
+            covered: snapshot_covered(timeline, &self.sources, start, end, sample_rate),
+            _reservation: Some(reservation),
+        };
+        // 【归并必须发生在包装成 Arc 之前】`compact_mono` 会原地释放右平面并退额度；
+        // 共享之后就没有唯一所有权了（见 `SnapshotPublisher::publish_shared`）。
+        snapshot
+            .compact_mono()
+            .map_err(|error| format!("invalid prepared snapshot: {error:?}"))?;
+        let snapshot = Arc::new(snapshot);
+        // 两个发布器共享同一份 PCM：一次渲染、一份内存，换率不需要重渲。
+        Ok(vec![Arc::clone(&snapshot), snapshot])
+    }
+
+    /// 整段渲染大约需要多少字节（"整段能不能装下"的判定用）。
+    ///
+    /// 【为什么是估算】它只用来在"整段"与"窗口"之间做一次二选一；真正的预检仍由
+    /// `render_with_progress` 的 `required` 负责。估算偏高只会让窗口提前生效，
+    /// 偏低则由预检兜底（返回错误），不会静默出错。
+    pub fn estimate_bytes(&self, span_sec: f64) -> usize {
+        if !(span_sec.is_finite() && span_sec > 0.0) {
+            return 0;
         }
-        Ok(snapshots)
+        let rate = f64::from(Self::native_sample_rate(self.project_rate()));
+        // 输出（left+right，8 字节/帧）+ 工作区（交错 samples，8 字节/帧）
+        // + 每个源的整份交错副本（按源率 × 声道 × 4）。
+        let source_per_sec: f64 = self
+            .sources
+            .values()
+            .map(|pcm| f64::from(pcm.sample_rate) * (pcm.planes.len().max(1) as f64) * 4.0)
+            .sum();
+        let per_sec = rate * 8.0 + rate * 8.0 + source_per_sec;
+        let bytes = per_sec * span_sec;
+        if !bytes.is_finite() || bytes >= usize::MAX as f64 {
+            return usize::MAX;
+        }
+        bytes as usize
     }
 
     /// 授权源 PCM → 混音器要的交错副本。
@@ -526,6 +557,25 @@ impl RenderInput {
             };
             render_mixdown_with_pcm(view, options, sources)
         };
+        // 把一个 clip 的**局部**渲染结果按工程位置累加进窗口缓冲。
+        //
+        // 【为什么偏移是 i64 而不是 usize】clip 可能**早于窗口起点**开始（播放头拖进
+        // 一条长 item 的中间、或按窗口分段渲染时）。此时 `clip.start - start` 是负数，
+        // 而 `as usize` 会把它**饱和成 0** —— 那段内容就被贴到窗口起点上，整段右移。
+        // 正确处置是跳过该 clip 前 `-delta` 帧，让窗口内的部分落在正确位置。
+        let place = |mixed: &mut [f32], part: Vec<f32>, clip_start: f64| {
+            let offset_frames = ((clip_start - start) * sample_rate as f64).round() as i64;
+            let skip_frames = offset_frames.min(0).unsigned_abs() as usize;
+            let dest = offset_frames.max(0) as usize * 2;
+            let skip_samples = (skip_frames * 2).min(part.len());
+            for (sum, value) in mixed
+                .iter_mut()
+                .skip(dest)
+                .zip(part.into_iter().skip(skip_samples))
+            {
+                *sum += value;
+            }
+        };
         // 项目数组只负责GUI；每个区域用自己的源参数跑原kernel，再按宿主位置累加。
         // 所有track仍保留原全局solo/父链，不能因为拆region丢掉另一轨solo。
         let (channels, samples) = if self.clip_parameters.is_empty() {
@@ -536,6 +586,7 @@ impl RenderInput {
             // 参数仍从局部零点投影，所有track保留全局solo/父链；只省去加到零缓冲的复制。
             let clip = &timeline.clips[0];
             let mut view = timeline.clone();
+            let local_params_present = self.clip_parameters.contains_key(&clip.id);
             let (lo, hi) = if let Some(params) = self.clip_parameters.get(&clip.id) {
                 let root = view
                     .resolve_root_track_id(&clip.track_id)
@@ -547,17 +598,32 @@ impl RenderInput {
             } else {
                 (start, end)
             };
-            let (_, channels, _, mut samples) = run(&view, lo, hi)?;
-            // 保留旧累加语义的signed-zero位形，不改变已归档PCM的零样本身份。
-            for sample in &mut samples {
-                *sample += 0_f32;
+            let (_, channels, _, samples) = run(&view, lo, hi)?;
+            // 【按窗口位置落位】参数分支渲染的是 `[0, clip.length]`（局部零点），
+            // 而调用方要的是 `[start, end]` 这一段 —— 两者只在"窗口起点恰好等于
+            // clip 起点"时重合。不落位就等于把整条 clip 贴到窗口起点上。
+            if local_params_present {
+                let mut mixed = vec![0_f32; frames * 2];
+                place(&mut mixed, samples, clip.start_sec);
+                (channels, mixed)
+            } else {
+                let mut samples = samples;
+                // 保留旧累加语义的signed-zero位形，不改变已归档PCM的零样本身份。
+                for sample in &mut samples {
+                    *sample += 0_f32;
+                }
+                (channels, samples)
             }
-            (channels, samples)
         } else {
             let mut mixed = vec![0_f32; frames * 2];
             for clip in &timeline.clips {
                 if cancel.load(Ordering::Acquire) {
                     return Err("host preparation cancelled".into());
+                }
+                // 【0 长度 clip 不是错误】宿主允许把 item 拖成 0 长度；它贡献静音，
+                // 不该让整条时间线渲染失败（旧实现会走到长度校验报 invalid kernel output）。
+                if clip.length_sec <= 0.0 {
+                    continue;
                 }
                 let mut view = timeline.clone();
                 view.clips = vec![clip.clone()];
@@ -574,22 +640,35 @@ impl RenderInput {
                     (start, end)
                 };
                 let part_frames = ((hi - lo) * sample_rate as f64).round() as usize;
-                let (_, channels, _, part) = run(&view, lo, hi)?;
-                if channels != 2 || part.len() != part_frames * 2 {
+                let (_, channels, _, mut part) = run(&view, lo, hi)?;
+                if channels != 2 {
                     return Err("invalid region parameter output".into());
                 }
-                let offset = if local.is_some() {
-                    ((clip.start_sec - start) * sample_rate as f64).round() as usize * 2
+                // 源尾被夹短时内核只会给出可读的那一段；缺的尾部按 ARA 的定义是静音。
+                // 补齐而不是报错：一个越界的源窗口绝不该赔上整条时间线。
+                if part.len() < part_frames * 2 {
+                    part.resize(part_frames * 2, 0.0);
+                }
+                part.truncate(part_frames * 2);
+                // 【落位与偏移同一份实现】见上面 `place` 的说明：负偏移必须**跳过**
+                // 前 `-delta` 帧，而不是饱和成 0 把内容贴到窗口起点。
+                if local.is_some() {
+                    place(&mut mixed, part, clip.start_sec);
                 } else {
-                    0
-                };
-                for (sum, value) in mixed.iter_mut().skip(offset).zip(part) {
-                    *sum += value;
+                    for (sum, value) in mixed.iter_mut().zip(part) {
+                        *sum += value;
+                    }
                 }
             }
             (2, mixed)
         };
-        if channels != 2 || samples.len() != frames * 2 || samples.iter().any(|v| !v.is_finite()) {
+        // 请求范围可能比"能读到的源"更长（0 长度 / 源尾越界）：缺的部分是静音。
+        let mut samples = samples;
+        if samples.len() < frames * 2 {
+            samples.resize(frames * 2, 0.0);
+        }
+        samples.truncate(frames * 2);
+        if channels != 2 || samples.iter().any(|v| !v.is_finite()) {
             return Err("invalid kernel output".into());
         }
         Ok(samples)
@@ -825,11 +904,12 @@ mod tests {
             sources: HashMap::from([("source".into(), source.clone())]),
             project_sample_rate: None,
             clip_parameters: BTreeMap::from([("clip".into(), params)]),
+            window: None,
         };
         let neural_before = hifishifter_kernel::nsf_hifigan_onnx::inference_runs();
         let separation_before = hifishifter_kernel::hnsep_onnx::separation_cache_stats().1;
         let began = std::time::Instant::now();
-        let mut cold = input.render(Arc::new(AtomicBool::new(false))).unwrap();
+        let cold = input.render(Arc::new(AtomicBool::new(false))).unwrap();
         let cold_ms = began.elapsed().as_millis();
         let cold_neural = hifishifter_kernel::nsf_hifigan_onnx::inference_runs();
         let cold_separation = hifishifter_kernel::hnsep_onnx::separation_cache_stats().1;
@@ -842,7 +922,13 @@ mod tests {
             1,
             "HNSEP仍整段一次，不分块"
         );
-        for (snapshot, rate) in cold.iter().zip([44100, 48000]) {
+        // 【第三轮】只渲一档原生率（44.1k），两个发布器共享同一份缓冲。
+        assert_eq!(cold.len(), 2);
+        assert!(Arc::ptr_eq(&cold[0], &cold[1]), "两档必须共享同一份 PCM");
+        let rate = 44100usize;
+        {
+            let snapshot = &cold[0];
+            assert_eq!(snapshot.sample_rate, 44100);
             assert_eq!(snapshot.left.len(), rate * 180);
             assert_eq!(snapshot.right.len(), rate * 180);
             assert!(snapshot.left.iter().all(|sample| sample.is_finite()));
@@ -859,13 +945,8 @@ mod tests {
                 );
             }
         }
-        assert_eq!(
-            cold[1].left,
-            hifishifter_kernel::mel_utils::linear_resample_mono(&cold[0].left, 44100, 48000)
-        );
-        super::super::snapshot::compact_prepared(&mut cold).unwrap();
         let began = std::time::Instant::now();
-        let mut warm = input.render(Arc::new(AtomicBool::new(false))).unwrap();
+        let warm = input.render(Arc::new(AtomicBool::new(false))).unwrap();
         let warm_ms = began.elapsed().as_millis();
         assert_eq!(
             hifishifter_kernel::nsf_hifigan_onnx::inference_runs(),
@@ -875,11 +956,8 @@ mod tests {
             hifishifter_kernel::hnsep_onnx::separation_cache_stats().1,
             cold_separation
         );
-        super::super::snapshot::compact_prepared(&mut warm).unwrap();
-        for (cold, warm) in cold.iter().zip(&warm) {
-            assert_eq!(cold.left, warm.left);
-            assert_eq!(cold.right, warm.right);
-        }
+        assert_eq!(cold[0].left, warm[0].left);
+        assert_eq!(cold[0].right, warm[0].right);
         #[cfg(windows)]
         {
             let (working, peak, commit) = process_memory_profile();
@@ -921,6 +999,7 @@ mod tests {
             sources: HashMap::from([("source".into(), source)]),
             project_sample_rate: None,
             clip_parameters: BTreeMap::new(),
+            window: None,
         };
         let before = input.render(Arc::new(AtomicBool::new(false))).unwrap();
         let mut other = input.timeline.as_ref().unwrap().tracks[0].clone();
@@ -939,9 +1018,9 @@ mod tests {
             .iter()
             .all(|snapshot| snapshot.left.iter().all(|value| *value == 0.)));
     }
-    /// 三分钟普通人声经过授权kernel/两率快照后全尾就绪；内存按固定全局预算预检。
+    /// 三分钟普通人声经过授权kernel/单一原生率快照后全尾就绪；内存按固定全局预算预检。
     #[test]
-    fn three_minute_host_clip_prepares_both_rates_and_the_last_block_within_budget() {
+    fn three_minute_host_clip_prepares_the_shared_rate_and_the_last_block_within_budget() {
         let frames = 44100 * 180;
         let seconds = 180.;
         let budget = super::super::budget::global_budget();
@@ -970,18 +1049,25 @@ mod tests {
             sources: HashMap::from([("source".into(), source.clone())]),
             project_sample_rate: None,
             clip_parameters: BTreeMap::new(),
+            window: None,
         };
         let snapshots = input.render(Arc::new(AtomicBool::new(false))).unwrap();
-        for (snapshot, rate) in snapshots.iter().zip([44100, 48000]) {
-            assert_eq!(snapshot.left.len(), rate * 180);
-            assert_eq!(snapshot.right.len(), rate * 180);
-            assert!(snapshot
-                .left
-                .iter()
-                .all(|sample| (*sample - 0.25).abs() < 1e-6));
-        }
+        // 【只渲一档】两个发布器共享同一份 PCM（见 `native_sample_rate`）：工程率缺席
+        // 时按 44100 算，整段就是 44100 * 180 帧，第二档不再物化、也不占第二份账。
+        assert_eq!(snapshots.len(), 2);
+        assert!(Arc::ptr_eq(&snapshots[0], &snapshots[1]));
+        let snapshot = &snapshots[0];
+        assert_eq!(snapshot.sample_rate, 44100);
+        assert_eq!(snapshot.left.len(), 44100 * 180);
+        // 单声道源：右平面按 `compact_mono` 省掉（空 = 读左平面，不是右侧静音）。
+        assert!(snapshot.right.is_empty());
+        assert!(snapshot
+            .left
+            .iter()
+            .all(|sample| (*sample - 0.25).abs() < 1e-6));
+        // 源 PCM 一份 + 快照一份；快照已按 `compact_mono` 合并成单平面（右平面退额度）。
         let accounted = budget.used() - baseline;
-        assert_eq!(accounted, frames * 4 + (44100 + 48000) * 180 * 8);
+        assert_eq!(accounted, frames * 4 * 2);
         eprintln!(
             "long-host seconds=180 source_bytes={} ready_bytes={} accounted_peak={} hard_limit={}",
             frames * 4,
@@ -999,7 +1085,7 @@ mod tests {
         };
         let publisher = super::super::snapshot::SnapshotPublisher::default();
         let mut snapshots = snapshots;
-        publisher.publish(snapshots.pop().unwrap()).unwrap();
+        publisher.publish_shared(snapshots.pop().unwrap()).unwrap();
         assert!(unsafe { publisher.copy_block((48000 * 180 - 511) as i64, 48000, &mut bus, 513) });
         assert_eq!(&left[..511], &[0.25; 511]);
         assert_eq!(&right[..511], &[0.25; 511]);
@@ -1012,13 +1098,16 @@ mod tests {
         drop(source);
         assert_eq!(budget.used(), baseline);
     }
-    /// 大跨度在任何合成前明确预算失败，不能为通过长源门扩大512MiB或静默补零。
+    /// 大跨度在任何合成前明确预算失败，不能为通过长源门扩大预算或静默补零。
+    ///
+    /// 【为什么是 20 000 s】预算上限已按物理内存自适应（夹到 4 GiB），所以"大跨度"
+    /// 必须大到**任何**上限都装不下 —— 5.5 小时的稀疏工程约 17 GB。
     #[test]
     fn sparse_huge_span_is_rejected_before_any_large_render_allocation() {
         let mut timeline:TimelineState=serde_json::from_value(serde_json::json!({
-            "tracks":[{"id":"track","name":"Sparse voice","order":0,"pitch_analysis_algo":"none"}],"bpm":120,"project_sec":3601,
+            "tracks":[{"id":"track","name":"Sparse voice","order":0,"pitch_analysis_algo":"none"}],"bpm":120,"project_sec":20001,
             "clips":[{"id":"a","name":"A","track_id":"track","start_sec":0,"length_sec":1,"takes":[{"id":"ta","source_path":"source","source_end_sec":1}]},
-                {"id":"b","name":"B","track_id":"track","start_sec":3600,"length_sec":1,"takes":[{"id":"tb","source_path":"source","source_end_sec":1}]}]
+                {"id":"b","name":"B","track_id":"track","start_sec":20000,"length_sec":1,"takes":[{"id":"tb","source_path":"source","source_end_sec":1}]}]
         })).unwrap();
         for clip in &mut timeline.clips {
             clip.normalize_takes();
@@ -1039,10 +1128,11 @@ mod tests {
         };
         let input = RenderInput {
             timeline: Some(timeline),
-            regions: vec![region(0.), region(3600.)],
+            regions: vec![region(0.), region(20_000.)],
             sources: HashMap::from([("source".into(), source)]),
             project_sample_rate: None,
             clip_parameters: BTreeMap::new(),
+            window: None,
         };
         let budget = super::super::budget::global_budget();
         let baseline = budget.used();
@@ -1053,6 +1143,59 @@ mod tests {
         );
         assert_eq!(budget.used(), baseline);
     }
+    /// **【第三轮】窗口渲染只覆盖请求的那一段。**
+    ///
+    /// 【为什么钉死】这是"任意长度可渲"的最小不变量：跨度只决定渲几段，不决定
+    /// 快照里放多少帧。窗口之外的帧必须**不在**快照里（于是播放侧退回宿主原声），
+    /// 而不是被补成静音。
+    #[test]
+    fn a_render_window_covers_only_the_requested_span() {
+        let mut timeline: TimelineState = serde_json::from_value(serde_json::json!({
+            "tracks": [{"id": "track", "name": "t", "order": 0}],
+            "clips": [{"id": "clip", "track_id": "track", "name": "c",
+                "start_sec": 0.0, "length_sec": 10.0,
+                "takes": [{"id": "take", "source_path": "source",
+                    "source_start_sec": 0.0, "source_end_sec": 10.0, "playback_rate": 1.0}]}],
+            "bpm": 120.0, "project_sec": 10.0
+        }))
+        .unwrap();
+        timeline.clips[0].normalize_takes();
+        let source = Arc::new(SourcePcm {
+            covered: Vec::new(),
+            sample_rate: 44100,
+            planes: vec![vec![0.25; 441_000], vec![0.25; 441_000]],
+            version: 1,
+            _reservation: None,
+        });
+        let input = RenderInput {
+            timeline: Some(timeline),
+            regions: vec![AraPlaybackRegion {
+                audio_source_persistent_id: "source".into(),
+                duration_in_modification_time: 10.0,
+                duration_in_playback_time: 10.0,
+                ..Default::default()
+            }],
+            sources: HashMap::from([("source".into(), source)]),
+            project_sample_rate: Some(44100.0),
+            clip_parameters: BTreeMap::new(),
+            window: Some((2.0, 3.0)),
+        };
+        let snapshots = input.render(Arc::new(AtomicBool::new(false))).unwrap();
+        assert_eq!(snapshots.len(), 2);
+        assert!(Arc::ptr_eq(&snapshots[0], &snapshots[1]));
+        let snapshot = &snapshots[0];
+        assert_eq!(snapshot.sample_rate, 44100);
+        assert_eq!(snapshot.origin_sample, 2 * 44100);
+        assert_eq!(snapshot.left.len(), 44100);
+        // 两平面逐 bit 相同 ⇒ `compact_mono` 省掉右平面（空 = 读左平面）。
+        assert!(snapshot.right.is_empty());
+        // 窗口之外的帧不属于这份快照。
+        assert!(snapshot
+            .covered
+            .iter()
+            .all(|range| range.start >= 2 * 44100 && range.end <= 3 * 44100));
+    }
+
     /// 双输出率从同一HiFiGAN原生结果派生，整段HNSEP也只运行一次，不以WORLD外推。
     #[test]
     #[ignore = "真实CPU插件渲染输入诊断：显式运行"]
@@ -1108,6 +1251,7 @@ mod tests {
             )]),
             project_sample_rate: None,
             clip_parameters: BTreeMap::from([("clip".into(), parameters)]),
+            window: None,
         };
         let before = hifishifter_kernel::hnsep_onnx::separation_cache_stats();
         let began = std::time::Instant::now();
@@ -1176,7 +1320,7 @@ mod tests {
     }
     /// 相同root的两个重叠区域保留独立源参数，不能用GUI单一数组覆盖两者。
     #[test]
-    fn source_parameter_atlas_overlapping_regions_keep_independent_audio_gains() {
+    fn source_parameters_of_overlapping_regions_keep_independent_audio_gains() {
         let seconds = 4.0 / 44100.;
         let mut timeline:TimelineState=serde_json::from_value(serde_json::json!({
             "tracks":[{"id":"track","name":"A","order":0}],"bpm":120,"project_sec":seconds,
@@ -1217,6 +1361,7 @@ mod tests {
                 ("a".into(), params(0.5)),
                 ("b".into(), params(0.25)),
             ]),
+            window: None,
         };
         let output = input.render(Arc::new(AtomicBool::new(false))).unwrap();
         for (actual, want) in output[0].left.iter().zip([0.075_f32, 0.15, 0.225, 0.3]) {
@@ -1255,10 +1400,12 @@ mod tests {
             sources: HashMap::from([("source".into(), source)]),
             project_sample_rate: None,
             clip_parameters: BTreeMap::new(),
+            window: None,
         };
         let output = input.render(Arc::new(AtomicBool::new(false))).unwrap();
         assert_eq!(output[0].left.len(), 44100);
-        assert_eq!(output[1].left.len(), 48000);
+        // 只渲宿主工程率那一档；两个发布器共享同一份 PCM。
+        assert!(Arc::ptr_eq(&output[0], &output[1]));
         for start in [0.2, 0.7] {
             let begin = (start * 44100.0) as usize;
             let count = 3528;
@@ -1348,6 +1495,7 @@ mod tests {
                 sources: HashMap::from([("source".into(), source)]),
                 project_sample_rate: None,
                 clip_parameters: BTreeMap::new(),
+                window: None,
             };
             let output = input
                 .render(Arc::new(AtomicBool::new(false)))
@@ -1383,6 +1531,7 @@ mod tests {
             sources: sources.clone(),
             project_sample_rate: None,
             clip_parameters: BTreeMap::new(),
+            window: None,
         };
         sources.insert(
             "fixture".into(),
@@ -1399,7 +1548,8 @@ mod tests {
         let output = input.render(cancel.clone()).unwrap();
         assert_eq!(output[0].left, [0.1, 0.2, 0.3, 0.4]);
         assert_eq!(output[0].right, output[0].left);
-        assert_eq!(output[1].sample_rate, 48000);
+        // 只渲宿主工程率那一档（这里是 44100）；换率由 `copy_block` 重采样，不再物化。
+        assert_eq!(output[1].sample_rate, output[0].sample_rate);
         cancel.store(true, Ordering::Release);
         assert!(input.render(cancel).is_err());
     }
@@ -1451,6 +1601,7 @@ mod tests {
             )]),
             project_sample_rate: None,
             clip_parameters: BTreeMap::new(),
+            window: None,
         };
         let cancel = Arc::new(AtomicBool::new(false));
         let sources = input.interleaved_sources(&timeline).unwrap();

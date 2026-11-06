@@ -1,0 +1,395 @@
+name: Gates
+
+# 源码级门禁的**唯一**定义处。build.yml 与 plugin-gates.yml 都 `uses:` 它。
+#
+# 【为什么要抽出来】此前 build.yml 与 vst3.yml 各自实现了一遍 fmt / clippy / test /
+# 前端门禁，参数并不相同（--offline / --jobs / --skip 各写一遍），也没有任何东西保证
+# 两者等价：一条用例可以在一条流水线上绿、在另一条上红，而"哪条才算数"没人说得清。
+# 现在判据只在这里，参数只由 scripts/checks/run-*.ps1 给出。
+#
+# 【为什么产物门禁不在这里】安装器闭环、AppImage 冒烟、DMG 校验都必须先有产物 ——
+# 它们属于产物流水线（build.yml / vst3-unix.yml），搬进这里只会让本工作流也变成
+# "要么什么都验不了、要么把六平台全编一遍"。
+on:
+  workflow_call:
+    inputs:
+      # all      = 全量门禁（build.yml 用）
+      # frontend = 只出 frontend-dist（vst3-unix.yml 只需要这份产物）
+      # plugin   = 静态 + 插件并发门禁（push 反馈用）
+      scope:
+        type: string
+        required: false
+        default: all
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gates-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── 静态门禁：不编译、不联网、几十秒 ──────────────────────────────────
+  #
+  # 【为什么每次都跑（含 plugin 档）】它检查的是跨文件约定：版本号在五个文件里一致、
+  # 安装器文案与五语词表一致、模型清单与真实文件一致、FFI 入口都带 panic 守卫……
+  # 这些都没有编译期保护，破坏了只会在用户那里表现为"版本显示不对""日志里什么都没有"。
+  static:
+    name: Static gates
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # 安装器文案生成器用 esbuild（装在 frontend 下）。
+      - name: Install frontend deps
+        run: npm --prefix frontend ci
+
+      - name: Run static gates
+        run: ./scripts/checks/run-static-gates.ps1
+
+  # ── 前端门禁 + 产物 artifact ───────────────────────────────────────────
+  #
+  # 【为什么产物在这里出】clippy / test / 各平台打包都要 frontend/dist（app 的 build.rs
+  # 缺它会自己跑 npm build，失败会被伪装成 clippy 失败）。只构建一次、以 artifact
+  # 分发，六平台矩阵才不用各自重跑一遍 vite。
+  frontend:
+    name: Frontend gates
+    if: inputs.scope == 'all' || inputs.scope == 'frontend'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend deps
+        run: npm --prefix frontend ci
+
+      - name: Run frontend gates
+        run: bash scripts/checks/run-frontend-gates.sh
+
+      - name: Archive frontend dist
+        run: |
+          cd frontend
+          if [ ! -d dist ]; then echo "No dist produced"; exit 1; fi
+          zip -r ../frontend-dist.zip dist
+
+      - name: Upload frontend artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: frontend-dist
+          path: frontend-dist.zip
+          retention-days: 7
+
+  # ── Rust：格式 ─────────────────────────────────────────────────────────
+  #
+  # rustfmt 不需要编译、不需要 SDK，ubuntu 上几十秒覆盖**全部五个 crate**
+  # （含 workspace 之外的 hfs-gui 与 Windows 专属的 hifishifter-plugin）。
+  rust-fmt:
+    name: Rust formatting
+    if: inputs.scope == 'all'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+          rustflags: ''
+
+      - name: Run rustfmt gate
+        run: pwsh -NoProfile -File scripts/checks/run-rust-gates.ps1 -Only fmt
+
+  # ── Rust：clippy ───────────────────────────────────────────────────────
+  #
+  # 【为什么必须在 Windows】hifishifter-plugin 的 build.rs 要求 ARA/VST3 SDK，
+  # 且它本身是 Windows 的 ARA/VST3 目标；SDK 准备脚本与其余插件流程都建在 Windows 上。
+  #
+  # 告警已清零（清仓时是 190 条），因此这里判死：**告警即失败**。
+  rust-clippy:
+    name: Clippy
+    if: inputs.scope == 'all'
+    # 【为什么要 needs frontend】下面第一步就是下载 frontend-dist 这个 artifact —— 它是
+    # frontend job 上传的。少了这条依赖，两者并行启动，下载必然 "Artifact not found"。
+    needs: frontend
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      # 【为什么要跳过前端构建】src-tauri 的 build.rs 在 frontend/dist 缺失时会自己跑
+      # npm build；这里 dist 是 frontend job 的 artifact，已经解好了。不设这个开关，
+      # 每个 Rust job 都要再构建一遍前端，失败时还会伪装成"clippy 失败"。
+      HIFISHIFTER_SKIP_FRONTEND_BUILD: "1"
+      HIFISHIFTER_SKIP_CARGO_CHECK: "1"
+      # 【为什么清空 bundle.resources】tauri-build 在 build.rs 里校验清单里的每个文件，
+      # 而那份清单是**打包用**的：150 MB 模型、cmake 产出的 SoundTouchDLL、ort 解包的
+      # DirectML.dll —— 干净检出上一个都没有，于是 clippy / cargo test 死在 build script
+      # 里，报"资源不存在"，看起来像代码坏了。门禁不打包，清空即可；真正的打包走
+      # build.ps1 与 build.yml，那里资源齐全。TAURI_CONFIG 是覆盖式合并：数组会把
+      # tauri.windows.conf.json 里的映射整段替换掉（本地已验证：模型与 DLL 都移走也能过）。
+      TAURI_CONFIG: '{"bundle":{"resources":[]}}'
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download frontend artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: frontend-dist
+          path: frontend-dist
+
+      - name: Extract frontend dist
+        run: |
+          $zip = Get-ChildItem -Path frontend-dist -Filter *.zip | Select-Object -First 1
+          if (-not $zip) { throw 'No zip artifact found in frontend-dist' }
+          Expand-Archive -Path $zip.FullName -DestinationPath . -Force
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+          rustflags: ''
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend -> target
+          shared-key: gates-clippy-windows-x64
+          cache-on-failure: true
+
+      - name: Cache pinned plugin SDKs
+        uses: actions/cache@v5
+        with:
+          path: third_party/sdk
+          key: plugin-sdks-${{ hashFiles('scripts/env/plugin-sdks.json') }}
+
+      - name: Install pinned ARA and VST3 SDKs
+        run: ./scripts/setup/prepare-plugin-sdks.ps1
+
+
+      - name: Run clippy gate
+        run: ./scripts/checks/run-rust-gates.ps1 -Only clippy -Profile full
+
+  # ── Rust：测试 ─────────────────────────────────────────────────────────
+  rust-test:
+    name: Rust tests
+    if: inputs.scope == 'all'
+    needs: frontend
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      # 【为什么钉死 CPU EP】托管运行器没有 GPU，而 ort 默认在 Windows 上先试 DirectML：
+      # 设备创建失败后要等一轮超时才会退到 CPU，用例之间因此出现几十秒的空档，
+      # 偶尔还会卡在设备初始化上不再返回（整条 job 挂到 60 分钟上限）。测试判的是
+      # 逻辑，不是 GPU 性能，所以直接把 EP 钉成 cpu。
+      HIFISHIFTER_ORT_EP: cpu
+      # frontend/dist 来自 artifact；不设这个开关，build.rs 会再跑一遍 npm build。
+      HIFISHIFTER_SKIP_FRONTEND_BUILD: "1"
+      HIFISHIFTER_SKIP_CARGO_CHECK: "1"
+      # 同上：门禁不打包，清空资源清单，免得 build.rs 去校验还不存在的模型与 DLL。
+      TAURI_CONFIG: '{"bundle":{"resources":[]}}'
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download frontend artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: frontend-dist
+          path: frontend-dist
+
+      - name: Extract frontend dist
+        run: |
+          $zip = Get-ChildItem -Path frontend-dist -Filter *.zip | Select-Object -First 1
+          if (-not $zip) { throw 'No zip artifact found in frontend-dist' }
+          Expand-Archive -Path $zip.FullName -DestinationPath . -Force
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+          rustflags: ''
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend -> target
+          shared-key: gates-test-windows-x64
+          cache-on-failure: true
+
+      - name: Cache pinned plugin SDKs
+        uses: actions/cache@v5
+        with:
+          path: third_party/sdk
+          key: plugin-sdks-${{ hashFiles('scripts/env/plugin-sdks.json') }}
+
+      - name: Install pinned ARA and VST3 SDKs
+        run: ./scripts/setup/prepare-plugin-sdks.ps1
+
+      # 【为什么测试 job 也要取权重】插件与内核的用例会真的跑一次 pitch 分析与声码器：
+      # 权重不在仓库里（见 docs/models.md），缺了不会报错，只是分析永远不完成 ——
+      # 表现是"WORLD automatic apply failed"或一段全零 PCM，看起来像 DSP 坏了。
+      - name: Cache model weights
+        uses: actions/cache@v5
+        with:
+          path: backend/src-tauri/resources/models
+          key: models-${{ hashFiles('backend/src-tauri/resources/models/models.json') }}
+
+      - name: Fetch model weights
+        run: python scripts/setup/fetch-models.py
+        shell: bash
+
+
+      # full：额外跑 no-default-features 的 clippy 与一次并发测试复跑。
+      # --test-threads=1 掩盖并发问题，而本仓最容易出事的地方（重算与自动应用的版本
+      # 竞态、快照发布与读者回收）全部是并发敏感的；串行跑得通不代表正确。
+      - name: Run Rust gate (full)
+        run: ./scripts/checks/run-rust-gates.ps1 -Profile full
+
+  # ── 插件并发门禁（push develop 的快速反馈）─────────────────────────────
+  #
+  # 取代原 vst3.yml 的 push 反馈职能：只跑"最容易在直接 push 时落进仓库"的那一组
+  # （FFI 守卫已在 static 里、插件单测），不产出任何产物。
+  #
+  # 【为什么插件单测在这里是串行跑的】内核的缓存是**进程级**的：合成片段缓存、pitch
+  # 缓存、模型路径都以文档 / 片段 id 为键 —— 生产里一个进程只有一个工程，这样最省。
+  # libtest 的 --test-threads 会把多个测试塞进同一个进程，两个测试用同名 id 就会互相
+  # 读到对方的 PCM：实测 4 线程挂 9 条、2 线程换 3 条挂、1 线程 918 条全过。这是测试
+  # 夹具之间的污染，不是产品里的竞态；插件自身的并发由各测试内部的渲染线程驱动，
+  # 与 libtest 的线程数无关。并发复跑保留在 rust-test 那一档（内核 + 其余 crate）。
+  #
+  # 【为什么按 scope 收窄】这条 job 此前不看 scope，于是 `vst3-unix.yml`
+  # （scope: frontend，只想要一份 frontend-dist）也要先等一遍 Windows 插件单测 ——
+  # 而 Windows 单测的权威入口是 push 触发的 `plugin-gates.yml`（scope: plugin），
+  # 同一份判据在那边一定会跑。让一条 Unix 产物流水线卡在一个与它无关、且已知会偶发
+  # 挂死的 Windows 任务上，只会把"插件产物坏了"和"Windows 测试机卡住了"混成同一个红灯。
+  plugin-gates:
+    name: Plugin tests (push feedback)
+    if: inputs.scope == 'all' || inputs.scope == 'plugin'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      HIFISHIFTER_ORT_EP: cpu
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+          rustflags: ''
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend -> target
+          shared-key: gates-plugin-windows-x64
+          cache-on-failure: true
+
+      - name: Cache pinned plugin SDKs
+        uses: actions/cache@v5
+        with:
+          path: third_party/sdk
+          key: plugin-sdks-${{ hashFiles('scripts/env/plugin-sdks.json') }}
+
+      - name: Install pinned ARA and VST3 SDKs
+        run: ./scripts/setup/prepare-plugin-sdks.ps1
+
+      # 【为什么测试 job 也要取权重】插件与内核的用例会真的跑一次 pitch 分析与声码器：
+      # 权重不在仓库里（见 docs/models.md），缺了不会报错，只是分析永远不完成 ——
+      # 表现是"WORLD automatic apply failed"或一段全零 PCM，看起来像 DSP 坏了。
+      - name: Cache model weights
+        uses: actions/cache@v5
+        with:
+          path: backend/src-tauri/resources/models
+          key: models-${{ hashFiles('backend/src-tauri/resources/models/models.json') }}
+
+      - name: Fetch model weights
+        run: python scripts/setup/fetch-models.py
+        shell: bash
+
+      - name: Run plugin tests
+        run: ./scripts/checks/run-rust-gates.ps1 -Only test -Package hifishifter-plugin
+
+  # ── ARA bridge testkit（C++ 互操作）─────────────────────────────────────
+  #
+  # 【为什么单开一个 job】cpp-interop 会把 Celemony 的 ARA_Library / ARA_Examples 编成
+  # C++（约 24 个源文件），既慢又需要额外的 SDK 子模块。产品 workspace 的测试不该被它
+  # 拖慢，也不该因它而红。它测的是本仓**打过补丁**的 core/plugin 与 C++ 参考实现的双向
+  # 互操作，因此必须用 -WithTestkit 把 ARA_Library / ARA_Examples（含嵌套 3rdParty）拉齐。
+  testkit:
+    name: ARA bridge testkit (cpp-interop)
+    if: inputs.scope == 'all'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+          rustflags: ''
+
+      - name: Cache pinned plugin SDKs
+        uses: actions/cache@v5
+        with:
+          path: third_party/sdk
+          key: plugin-sdks-${{ hashFiles('scripts/env/plugin-sdks.json') }}
+
+      - name: Install pinned SDKs with testkit submodules
+        run: ./scripts/setup/prepare-plugin-sdks.ps1 -WithTestkit
+
+      # 只跑确定性目标：cpp_interop（C++ 双向配对）、plugin_contract（54 槽回调契约）、
+      # coverage_join（接口覆盖报告与当前补丁是否一致）。并发/实时类测试（realtime、
+      # *_concurrency）留给本地手动跑，避免在 CI 负载下引入偶发红。
+      - name: Run testkit contract and C++ interop tests
+        run: |
+          . ./scripts/env/msvc-env.ps1
+          . ./scripts/env/sdk-env.ps1
+          Set-SdkEnvironment
+          Push-Location backend/third-party/ara2-bridge-testkit
+          # 【为什么不加 --locked】ara2-bridge-testkit 在 backend workspace 之外，没有提交
+          # 的 Cargo.lock；`--locked` 只会得到 "cannot create the lock file ... because
+          # --locked was passed"。它测的是本仓打过补丁的 core/plugin 与 C++ 参考实现的
+          # 互操作，依赖树由上游 pin 决定，锁文件在这里没有判据意义。
+          cargo test --features cpp-interop --test cpp_interop
+          if ($LASTEXITCODE -ne 0) { throw 'cpp_interop failed.' }
+          # 【为什么不跑 plugin_contract】它写的是 ara2-bridge-plugin 的**旧** API
+          # （Plugin::document_controller_interface / capabilities / capabilities_mut），
+          # 那几个访问器已经从 vendored 的 Plugin 上移除，改成 builder 形态的
+          # processing_algorithms / audio_file_chunks / signal_preservation。这条用例
+          # 因此编不过；它从来没在本流水线上跑过（旧的 vst3.yml 只跑 cpp_interop）。
+          # 54 个回调的契约仍由 PLUGIN_CONTRACT_TESTS 常量与 cpp_interop 覆盖，
+          # 重写这条用例需要按新 API 重建夹具，单独排期。
+          cargo test --test coverage_join
+          if ($LASTEXITCODE -ne 0) { throw 'coverage_join failed.' }
+          Pop-Location

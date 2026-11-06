@@ -105,11 +105,14 @@ impl SynthConfig {
 /// [`crate::state::TimelineState::migrate_legacy_breath_separation`]）；
 /// 该迁移**仅对 < v6 生效**，因此用户此后手动关闭开关的选择会持久保留。
 ///
-/// v7：`ClipTake.syllable_analysis`（源域音节区间）与
-/// `TrackParamsState.param_block_merges`（用户合并意图）。两者都有
-/// `serde(default)` / `skip_serializing_if`，v6 及更早工程读成“未分析、
-/// 无手动合并”，不迁移、不改写既有参数；v7 写出的字段对旧版本是可忽略的附加数据。
-pub const CURRENT_PROJECT_FILE_VERSION: u32 = 7;
+/// `ClipTake.syllable_analysis`（源域音节区间）与
+/// `TrackParamsState.param_block_merges`（用户合并意图）都是可选附加字段：
+/// `serde(default)` / `skip_serializing_if` 让它们对旧版本可忽略。
+///
+/// 【为什么不升 v7】旧 App 遇到更高的 `version` 会直接拒绝打开工程文件。
+/// 仅新增可选字段不构成“必须新构建才能读”的格式变化，升代只会让回退到旧
+/// 构建的用户失去整份工程，而收益为零。
+pub const CURRENT_PROJECT_FILE_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -494,7 +497,13 @@ pub fn resolve_source_paths_on_open(
             let mut missing_display_abs: Option<String> = None;
 
             if let Some(sp) = source_path_raw.as_ref() {
-                let p = PathBuf::from(sp);
+                // 历史绝对路径的**读时**重映射：布局迁移（见 `crate::app_paths_migrate`）
+                // 把 `imported_media` 之类的素材搬走后，旧工程里的绝对路径会指向不存在的
+                // 旧根。只映射 app_paths 认识的旧根（用户自己的素材路径一个字都不动），
+                // 且映射后的文件必须真的存在 —— 否则保持原路径，走既有"缺失文件"流程。
+                // 这里**不写回**：用户下次保存工程时路径自然更新。
+                let p = crate::app_paths::remap_legacy_app_path(sp)
+                    .unwrap_or_else(|| PathBuf::from(sp));
                 if p.is_absolute() {
                     if p.exists() {
                         resolved_absolute = Some(p.to_string_lossy().to_string());
@@ -698,9 +707,9 @@ mod tests {
         }
     }
 
-    /// v7 新字段：旧文件缺省为空；新文件往返保留源域音节与合并意图。
+    /// 音箱块新字段：旧文件缺省为空；新文件往返保留源域音节与合并意图。
     #[test]
-    fn v7_syllable_and_block_merge_fields_round_trip_and_default_on_legacy_json() {
+    fn optional_syllable_and_block_merge_fields_round_trip_and_default_on_legacy_json() {
         let legacy: ProjectFile = serde_json::from_value(serde_json::json!({
             "version": 6,
             "name": "legacy",
@@ -715,10 +724,10 @@ mod tests {
             "time_signature_denominator": 4,
             "grid_size": "1/4"
         }))
-        .expect("v6 without v7 fields must load");
+        .expect("v6 without optional block fields must load");
         assert!(legacy.timeline.params_by_root_track.is_empty());
 
-        let mut pf = project("v7");
+        let mut pf = project("blocks");
         let take = crate::state::ClipTake {
             id: "take".into(),
             name: "take".into(),
@@ -731,6 +740,7 @@ mod tests {
             source_file_fingerprint: None,
             source_file_mtime: None,
             source_file_size: None,
+            content_id: None,
             waveform_preview: None,
             pitch_range: None,
             source_start_sec: 0.0,
@@ -774,6 +784,7 @@ mod tests {
             source_file_mtime: None,
             source_file_size: None,
             source_file_fingerprint: None,
+            content_id: None,
             waveform_preview: None,
             pitch_range: None,
             gain: 1.0,
@@ -786,6 +797,7 @@ mod tests {
             channel_mode: 0,
             source_channels: None,
             loop_enabled: false,
+            loop_period_sec: None,
             snap_offset_sec: 0.0,
             fade_in_sec: 0.0,
             fade_out_sec: 0.0,
@@ -838,7 +850,7 @@ mod tests {
         );
         let json = serde_json::to_vec(&pf).unwrap();
         let loaded: ProjectFile = serde_json::from_slice(&json).unwrap();
-        assert_eq!(loaded.version, 7);
+        assert_eq!(loaded.version, 6);
         assert_eq!(
             loaded.timeline.clips[0].takes[0]
                 .syllable_analysis
@@ -927,6 +939,128 @@ mod tests {
         assert!(is_json_project_path(Path::new("a.JSON")));
         assert!(!is_json_project_path(Path::new("a.hfs")));
         assert!(!is_json_project_path(Path::new("noext")));
+    }
+
+    /// 工程素材目录里的素材必须按**相对路径**写进工程文件。
+    ///
+    /// 【为什么这条是"工程可搬走"的判据】相对路径落在工程旁边的 \`<工程名>_media\`
+    /// 目录里，工程连同这个目录一起拷走就还能打开；写成绝对路径则换个目录就断。
+    #[test]
+    fn relative_path_is_written_for_project_media() {
+        let root = std::env::temp_dir().join(format!("hfs-project-media-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("song_media")).unwrap();
+        let media = root.join("song_media").join("import_abcd.wav");
+        std::fs::write(&media, b"RIFF").unwrap();
+
+        let mut tl = timeline();
+        let track = tl.add_track(Some("Track".to_string()), None, None);
+        tl.add_clip(
+            Some(track),
+            Some("take.wav".to_string()),
+            Some(0.0),
+            Some(1.0),
+            Some(media.display().to_string()),
+        );
+
+        let prepared = prepare_source_paths_for_save(tl, &root.join("song.hshp"));
+        assert_eq!(
+            prepared.clips[0].takes[0].source_path_relative.as_deref(),
+            Some("song_media/import_abcd.wav")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 旧布局下的绝对路径必须被**读时**映射到当前布局（迁移之后老工程仍能打开）。
+    #[test]
+    fn a_legacy_app_path_is_remapped_when_the_project_opens() {
+        let _guard = crate::test_env::guard();
+        let root = std::env::temp_dir().join(format!("hfs-project-remap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("imported_media")).unwrap();
+        let media = root.join("imported_media").join("take.wav");
+        std::fs::write(&media, b"RIFF").unwrap();
+
+        std::env::set_var(crate::app_paths::CONFIG_DIR_ENV, &root);
+        let legacy = crate::app_paths::legacy_roots()
+            .into_iter()
+            .find(|legacy| legacy.to == root)
+            .expect("配置旧根应当存在");
+
+        let mut tl = timeline();
+        let track = tl.add_track(Some("Track".to_string()), None, None);
+        let legacy_path = legacy.from.join("imported_media").join("take.wav");
+        tl.add_clip(
+            Some(track),
+            Some("take.wav".to_string()),
+            Some(0.0),
+            Some(1.0),
+            Some(legacy_path.display().to_string()),
+        );
+
+        let (resolved, missing) = resolve_source_paths_on_open(tl, &root.join("song.hshp"));
+        std::env::remove_var(crate::app_paths::CONFIG_DIR_ENV);
+
+        assert!(missing.is_empty(), "素材应当已经找到：{missing:?}");
+        assert_eq!(
+            resolved.clips[0].source_path.as_deref(),
+            Some(media.to_string_lossy().as_ref())
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 命中旧根但新位置没有这个文件时：保持原路径（走既有缺失流程），**不要**编一个
+    /// 不存在的路径出来。
+    #[test]
+    fn a_legacy_path_without_a_new_file_is_left_alone() {
+        let _guard = crate::test_env::guard();
+        let root =
+            std::env::temp_dir().join(format!("hfs-project-remap-miss-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        std::env::set_var(crate::app_paths::CONFIG_DIR_ENV, &root);
+        let legacy = crate::app_paths::legacy_roots()
+            .into_iter()
+            .find(|legacy| legacy.to == root)
+            .expect("配置旧根应当存在");
+        let legacy_path = legacy.from.join("imported_media").join("gone.wav");
+
+        let mut tl = timeline();
+        let track = tl.add_track(Some("Track".to_string()), None, None);
+        tl.add_clip(
+            Some(track),
+            Some("gone.wav".to_string()),
+            Some(0.0),
+            Some(1.0),
+            Some(legacy_path.display().to_string()),
+        );
+
+        let (resolved, missing) = resolve_source_paths_on_open(tl, &root.join("song.hshp"));
+        std::env::remove_var(crate::app_paths::CONFIG_DIR_ENV);
+
+        assert_eq!(
+            resolved.clips[0].source_path.as_deref(),
+            Some(legacy_path.to_string_lossy().as_ref())
+        );
+        assert_eq!(missing.len(), 1, "缺失文件必须照实上报");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 用户自己的素材路径（不在任何"应用私有旧根"之下）一个字都不许动。
+    ///
+    /// 【为什么用临时目录当"用户素材"】它在三个平台上都是绝对路径、且一定不落在
+    /// `com.arounder.hifishifter` 之下；写死 `/home/user/...` 在 Windows 上根本不是
+    /// 绝对路径，测的就不是同一件事了。
+    #[test]
+    fn a_user_media_path_is_never_remapped() {
+        let user_path = std::env::temp_dir()
+            .join("hfs-user-media")
+            .join("mysong.wav");
+        assert_eq!(
+            crate::app_paths::remap_legacy_app_path(&user_path.to_string_lossy()),
+            None
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 name: HiFiShifter VST3 (macOS / Linux)
 
-# 与 `vst3.yml`（Windows）**并列**，而不是它的跨平台版。
+# 与 build.yml（Windows 合并安装器）**并列**：这边只负责 Unix 的插件产物。
 #
 # 【为什么另起一条流水线】Windows 那条的组织方式是 MSVC 环境导入 + WebView2 + NSIS
 # 安装器；Unix 这边没有一样是共通的：构建脚本是 bash、产物是 .vst3 bundle + tar.gz、
@@ -10,10 +10,10 @@ name: HiFiShifter VST3 (macOS / Linux)
 # 两条流水线共享的只有两条约定：产物命名（HiFiShifter_v<版本>_<os>-<arch>-vst3）
 # 与「门禁必须真的跑」。
 
-# 【为什么不在 push 时跑】直接 push develop 的插件门禁由 vst3.yml（Windows）承担；
-# Unix 这条是三平台矩阵 + SDK 拉取，push 触发的成本不成比例，保持 PR/tag 触发。
-# 代价是直接 push 的 Unix 侧行为差异（如 6262b933 记载的宿主夹具崩溃）要到
-# 下一个 PR 才暴露 —— 已知且有记录，属有意取舍。
+# 【为什么不在 push 时跑】直接 push develop 的插件反馈由 plugin-gates.yml 承担；
+# Unix 这条是四平台矩阵 + SDK 拉取，push 触发的成本不成比例，保持 PR/tag 触发。
+# 代价是直接 push 的 Unix 侧行为差异（如 6262b933 记载的宿主夹具崩溃）要到下一个
+# PR 才暴露 —— 已知且有记录，属有意取舍。
 on:
   workflow_dispatch:
   pull_request:
@@ -29,40 +29,32 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # fmt 不编译、不下载 SDK，几十秒覆盖全部 crate。放在这条流水线里，是为了让
-  # 「只改了 Unix 构建脚本」的 PR 不必去等 Windows 那条六平台流水线。
-  rust-fmt:
-    name: Check Rust formatting
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v6
-      - name: Setup Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          cache: false
-          rustflags: ""
-      - name: Check rustfmt
-        run: |
-          cargo fmt --manifest-path backend/Cargo.toml --all --check
-          # hfs-gui（VST3 的独立渲染进程，随 bundle 交付用户）在 backend workspace
-          # 之外，上面的 fmt 覆盖不到 —— 2026-10 审查时它正因不在任何门禁内而
-          # 积累了一处 rustfmt 漂移。
-          cargo fmt --manifest-path backend/hfs-gui/Cargo.toml --all --check
+  # 前端产物来自 gates.yml 的 frontend job —— 同一份 frontend/dist 不该在每条流水线上
+  # 各构建一遍（版本还各不相同）。跨工作流的 artifact 不共享，所以要显式 `uses:`。
+  gates:
+    uses: ./.github/workflows/gates.yml
+    with:
+      scope: frontend
 
   # 【为什么 clippy 不在这里】本 crate 有一半是 Windows 专属（WebView2 编辑器、REAPER
   # 宿主扩展）。在 Unix 上那半边只留下成百条 dead_code 告警：把它们静音会让
   # `-D warnings` 失去意义，放开判死又会让这条流水线长期红着没人看。clippy 的权威
-  # 仍然是 Windows 的 build.yml / vst3.yml —— 它们编译的是同一份源码。Unix 这边的
-  # 判据是「能不能产出并加载」，那由 build.sh 的 verify 阶段负责。
+  # 仍然是 gates.yml（Windows，编译的是同一份源码）。Unix 这边的判据是
+  # 「能不能产出并加载」，那由 build.sh 的 verify 阶段负责。
   vst3-unix:
     name: VST3 ${{ matrix.name }}
-    needs: rust-fmt
+    needs: gates
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
+        # 【为什么这里没有 exclude】本工作流曾经用
+        # `exclude: [{name: ${{ github.event_name == 'pull_request' && 'linux-aarch64' || '' }}}]`
+        # 让 PR 只跑两个平台。结果是**整个 job 一个实例都没被创建**：运行记录里只有
+        # gates，vst3-unix 连一行都没有，而同一份写法在 build.yml 里是好的。与其继续猜
+        # GitHub 的矩阵展开规则，不如让四个平台都跑 —— 这条工作流只在 PR / tag /
+        # 手动触发时启动，多两个并行 leg 的代价远小于"什么都没跑却说绿了"。
         include:
           - name: linux-x86_64
             os: ubuntu-24.04
@@ -94,13 +86,31 @@ jobs:
       # （见 editor/gui/linux.rs）。不装它，pkg-config 会在编译插件时直接失败 ——
       # 与"装了也不会被链接"的旧状态正好相反。约 200 MB，换来的是插件窗口在这条
       # 流水线上真的被编译过一次。
+      #
+      # 【为什么还要装 mesa-vulkan-drivers】产物链接了 ort 的 WebGPU 后端（dawn →
+      # Vulkan）。runner 上没有任何 Vulkan ICD，dawn 初始化必然失败
+      # （vkCreateInstance: Found no drivers!），随后插件单测**在退出时 SIGSEGV**：
+      # 56 条用例全绿、退出码却是 11。装上 mesa 的软件光栅器（lavapipe）之后
+      # vkCreateInstance 能成功，进程就不再走"初始化失败后销毁"那条路径 —— 有驱动的
+      # 本地环境跑同一份测试从不崩，这是目前唯一与现象吻合的差别。
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake pkg-config libxcb1-dev libssl-dev python3 file \
-            libgtk-3-dev libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev
+            libgtk-3-dev libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev \
+            mesa-vulkan-drivers
+
+      # 权重不在仓库里：以清单哈希为键缓存解压结果（模型一换键就变）。
+      - name: Cache model weights
+        uses: actions/cache@v5
+        with:
+          path: backend/src-tauri/resources/models
+          key: models-${{ hashFiles('backend/src-tauri/resources/models/models.json') }}
+
+      - name: Fetch model weights
+        run: python3 scripts/setup/fetch-models.py
 
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
@@ -108,20 +118,20 @@ jobs:
           brew install cmake || true
 
       # 【为什么必须钉 Node 版本】bundle 里的前端是 `npm run build` 产出的，而 vite 8
-      # 用 rolldown 打包，其原生绑定声明 engines: ^20.19.0 || >=22.12.0。
-      # 不满足时**没有一条报错说得清原因**：Node 18 报
-      # "node:util does not provide an export named 'styleText'"；Node 22.11 更糟 ——
-      # npm 会静默跳过那个可选的原生绑定，于是报
-      # "Cannot find module '@rolldown/binding-linux-x64-gnu'"。
-      # runner 自带的 node 版本随镜像漂移，所以这里钉死并复用 npm 缓存。
-      # 与 build.yml / vst3.yml 统一到 24：同一份前端不该在不同流水线上用
-      # 不同的大版本构建（22.12 是 vite 8 的最低可用线，历史遗留）。
-      - name: Setup Node
-        uses: actions/setup-node@v6
+      # 前端产物由 gates.yml 的 frontend job 构建一次并以 artifact 分发 —— 同一份
+      # frontend/dist 不该在四条流水线上各构建一遍（版本还各不相同）。
+      - name: Download frontend artifact
+        uses: actions/download-artifact@v8
         with:
-          node-version: "24"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
+          name: frontend-dist
+          path: frontend-dist
+
+      - name: Extract frontend dist
+        run: |
+          set -euo pipefail
+          ZIP=$(ls frontend-dist | grep -E "\.zip$" || true)
+          if [ -z "$ZIP" ]; then echo "No zip artifact found in frontend-dist"; ls -la frontend-dist; exit 1; fi
+          unzip -o frontend-dist/$ZIP -d .
 
       # 桥接脚本是**手写的 JS**，语法错的表现是插件窗口一片空白。
       # 一条 `node --check` 就能把它挡在合并之前。
@@ -146,6 +156,13 @@ jobs:
       # 以及宿主握手（插件按本平台 IID 布局拿到 IReaperHostApplication —— Windows 上
       # 永远看不出这一条的问题，见 scripts/vst3/unix/host_iid_probe.c）。
       # 构建逻辑只在 scripts/vst3/unix/ 里存在一份，CI 不重复实现任何一步。
+      #
+      # 【这条流水线在修好矩阵之前一条 job 都没跑过】第一次真跑时四个平台全红在
+      # 「编译失败（exit 101），日志末尾只有 World 的 C++ 告警」：那是
+      # ara2-bridge-companion 的 build.rs 在报 pluginterfaces 子模块缺失，panic 写在
+      # 日志中段、被几百行告警埋住了。当时把它当成 runner 的 OOM，加了
+      # CARGO_BUILD_JOBS=2 —— 误判，并发度不是原因。真正修掉的是
+      # scripts/vst3/unix/build.sh 的 sync_submodule，以及失败时按 error 行回放现场。
       - name: Build, verify and package
         run: bash scripts/vst3/unix/build.sh
 
@@ -160,15 +177,15 @@ jobs:
       # 免得 artifact 列表里四个平台长成一模一样。
       - name: Determine artifact name
         id: artifact-name
-        run: echo "base=$(basename .build-tmp/vst3-unix/*.tar.gz .tar.gz)" >> "$GITHUB_OUTPUT"
+        run: echo "base=$(basename dist/*.tar.gz .tar.gz)" >> "$GITHUB_OUTPUT"
 
       - name: Upload VST3 bundle
         uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.artifact-name.outputs.base }}
           path: |
-            .build-tmp/vst3-unix/*.tar.gz
-            .build-tmp/vst3-unix/*.sha256
+            dist/*.tar.gz
+            dist/*.sha256
           if-no-files-found: error
           retention-days: 30
 
@@ -176,7 +193,12 @@ jobs:
       # 红灯、也拿到可复现的产物**。反过来会让一次偶发失败连产物一起吞掉。
       #
       # `timeout`：本 crate 的单元测试里有等待后台线程收敛的用例，卡死过一次就是
-      # 6 小时的 job。宁可 25 分钟后明确失败，也不要挂到超时上限。
+      # 6 小时的 job。宁可 55 分钟后明确失败，也不要挂到超时上限。
+      #
+      # 【为什么是 55 而不是 25】这一步跑的是 **debug** 构建，而上面的产物步骤只产
+      # release —— 第一次跑时 target/debug 是空的，四核 runner 上要现编整棵依赖树
+      # （含 WebKitGTK 与 ORT 的绑定）。25 分钟会把"冷启动"判成"挂死"。缓存起来之后
+      # 这一步是分钟级的；挂死仍然会被 `timeout` 判掉，只是判据从 25 分钟变成 55 分钟。
       #
       # 【为什么有三条 skip】三条都只能在 Unix 上暴露，且都不是本次适配引入的；
       #
@@ -197,14 +219,36 @@ jobs:
       # `render/extension` 里没有任何 `cfg(windows)`，所以不是没编进去，是运行时
       # 行为不同（第三条是偶发，不是必挂）。在此之前它们连跑到断言的机会都没有 —— 宿主夹具在 Linux 上必崩
       # （见 6262b933）。两条按 issue 单独修，门禁先立起来。
+      # 跳过清单只有一份（scripts/checks/test-skips.txt，[unix] 前缀的条目在这里生效）。
+      # 此前这里有四条 --skip 写死在 YAML 里，与 build.yml / vst3.yml 的各一条互不知情。
       - name: Run plugin unit tests
+        env:
+          # 托管 runner 没有 GPU。ort 默认的 "auto" 会先试 WebGPU，dawn 初始化在无显卡的
+          # 机器上必然失败（vkCreateInstance: Found no drivers），然后**进程在退出时
+          # SIGSEGV** —— 56 条用例全绿、退出码却是 11，看上去像测试挂了。
+          # 判的是逻辑，不是 GPU 性能，所以直接钉成 cpu（与 gates.yml 的 Windows 测试
+          # job 同一条理由）。
+          HIFISHIFTER_ORT_EP: cpu
         run: |
-          timeout 1500 cargo test --manifest-path backend/Cargo.toml --locked \
-            -p hifishifter-plugin --lib -- --test-threads=1 \
-            --skip task34_tail_and_shared_undo_save_restore_both_world_tracks_without_gui \
-            --skip effective_item_mute_projects_to_gui_and_gates_real_process_without_inference \
-            --skip automatic_apply_releases_the_transaction_and_rechecks_model_and_edit_versions \
-            --skip pending_pitch_analysis_does_not_publish_raw_audio_as_applied
+          # 【为什么不是直接写 timeout】macOS 上没有 GNU 的 timeout（coreutils 不预装），
+          # 那一步会以 127 "command not found" 结束 —— 看起来像测试挂了，其实一个用例
+          # 都没跑。有 timeout 就把卡死判在 55 分钟，没有就交给 job 的 timeout-minutes。
+          if command -v timeout >/dev/null 2>&1; then
+            timeout 3300 pwsh -NoProfile -File scripts/checks/run-rust-gates.ps1 -Only test -Package hifishifter-plugin -Platform unix
+          else
+            pwsh -NoProfile -File scripts/checks/run-rust-gates.ps1 -Only test -Package hifishifter-plugin -Platform unix
+          fi
+
+      # 【为什么要有这一步】测试进程被信号打死时，cargo 只留下一句
+      # "signal: 11, SIGSEGV"，连是哪个用例都没说 —— 而"哪一段崩的"决定了排查方向
+      # （渲染路径的堆损坏与退出时的析构是两回事）。这一步只在失败时跑，用 gdb 把最
+      # 容易崩的两组各重放一遍，打印所有线程的栈；没有 gdb 就直接跳过。
+      - name: Backtrace the test crash
+        if: failure()
+        run: |
+          # ubuntu-24.04 镜像里没有 gdb（脚本自己会判一次），失败时临时装上。
+          command -v gdb >/dev/null 2>&1 || sudo apt-get install -y --no-install-recommends gdb
+          bash scripts/checks/backtrace-plugin-test-crash.sh
 
       - name: Upload build diagnostics on failure
         if: failure()
@@ -212,6 +256,6 @@ jobs:
         with:
           name: vst3-${{ matrix.platform }}-diagnostics
           path: |
-            .build-tmp/vst3-unix/*.log
+            backend/target/cargo-build.log
           if-no-files-found: ignore
           retention-days: 7

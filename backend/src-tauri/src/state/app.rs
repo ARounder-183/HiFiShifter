@@ -141,6 +141,13 @@ pub struct AppState {
 
     /// 启动参数传入的待打开工程路径（一次性消费）。
     pub pending_startup_project_path: Mutex<Option<String>>,
+
+    /// 本次运行的「未保存导入会话」id（惰性生成一次）。
+    ///
+    /// 【为什么以"进程"为边界】未保存工程的导入素材需要一个家，而"这次运行"就是
+    /// 最自然的边界：同一进程内的多批导入进同一个会话目录；重启后旧会话按
+    /// 7 天期限回收（见 `media_paths::prune_unsaved_sessions`）。
+    pub import_session: OnceLock<String>,
 }
 
 impl Default for AppState {
@@ -188,6 +195,7 @@ impl AppState {
             recording_starting: std::sync::atomic::AtomicBool::new(false),
             config_dir: OnceLock::new(),
             pending_startup_project_path: Mutex::new(None),
+            import_session: OnceLock::new(),
         }
     }
 }
@@ -197,6 +205,36 @@ impl AppState {
         self.timeline_version
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
             .saturating_add(1)
+    }
+
+    /// 当前工程的绝对路径（工程未保存时为 `None`）。
+    ///
+    /// 【为什么要有这个读法】导入素材的落点取决于"工程是否已保存"（见
+    /// `hifishifter_kernel::media_paths`）。让调用点各自去锁 `project` 会分散
+    /// 这个判断，也会把锁的持有时间拉长到命令体里。
+    pub fn current_project_path(&self) -> Option<std::path::PathBuf> {
+        let project = self.project.lock().unwrap_or_else(|e| e.into_inner());
+        project.path.as_ref().map(std::path::PathBuf::from)
+    }
+
+    /// 未保存导入会话的 id（进程内稳定）。
+    pub fn import_session_id(&self) -> &str {
+        self.import_session.get_or_init(|| {
+            format!(
+                "{}-{}",
+                chrono::Local::now().format("%Y%m%d-%H%M%S"),
+                &uuid::Uuid::new_v4().simple().to_string()[..8]
+            )
+        })
+    }
+
+    /// 未保存导入会话目录（本地数据根不可用时为 `None`）。
+    pub fn import_session_dir(&self) -> Option<std::path::PathBuf> {
+        let root = hifishifter_kernel::app_paths::local_data_dir()?;
+        Some(hifishifter_kernel::media_paths::unsaved_session_dir(
+            &root,
+            self.import_session_id(),
+        ))
     }
 
     pub fn set_pending_startup_project_path(&self, path: Option<String>) {

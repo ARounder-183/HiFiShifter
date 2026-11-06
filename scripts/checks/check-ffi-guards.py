@@ -25,6 +25,11 @@ import os
 import re
 import sys
 
+# Windows 的 stdout 跟随 ANSI 代码页（英文系统是 cp1252、中文系统是 GBK），打印中文会
+# UnicodeEncodeError 打死进程 —— 真正的结论一条都进不了日志，红的是编码而不是规则。
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+
 GUARD_MARKERS = ('guard_ffi(', 'catch_unwind', 'boundary(')
 sig_re = re.compile(r'^[ ]*(?:pub )?(?:unsafe )?extern "(?:system|C|C-unwind)" fn (\w+)\(', re.M)
 # All paths come from this file's own location. Scan roots are relative to
@@ -236,8 +241,25 @@ def baseline_gate(backend_root, pattern, baseline_file, label):
     return 0
 
 
+def format_crate_roots():
+    """All host-loaded plug-in crates, derived from workspace members.
+
+    【Why not just PLUGIN_SRC】A second format crate (CLAP / AU) has its own
+    host callbacks. Scanning only the original VST3 src/ would let an
+    unguarded extern through with a green gate - the exact blind spot this
+    gate exists to close.
+    """
+    prefixes = ("hifishifter-plugin", "hifishifter-clap", "hifishifter-au")
+    roots = [r for r in scan_roots() if r.split("/")[0].startswith(prefixes)]
+    if not roots:
+        raise SystemExit("check-ffi-guards: no plug-in format crate found")
+    return roots
+
+
 def main():
-    rc = ffi_guard_gate(PLUGIN_SRC)
+    rc = 0
+    for root_rel in format_crate_roots():
+        rc |= ffi_guard_gate(os.path.join(BACKEND_ROOT, root_rel))
     rc |= baseline_gate(BACKEND_ROOT, r'\.lock\(\)\.unwrap\(\)',
                         'baseline-lock-unwrap.txt', 'lock().unwrap()')
     rc |= baseline_gate(BACKEND_ROOT, r'error\.contains\(',

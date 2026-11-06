@@ -6,7 +6,7 @@ use crate::sync::MutexExt;
 use ara2_bridge::companion::CompanionControllerBinding;
 use ara2_bridge::core::{ApiGeneration, AraError};
 use ara2_bridge::plugin::ExtensionControllerLease;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
@@ -40,70 +40,88 @@ pub(crate) struct WorkspaceView {
     /// 逐根轨参数：`edits.apply` 之后、编辑器真正拿到的那一份（文档 id 空间）。
     pub params:
         Arc<std::collections::BTreeMap<String, hifishifter_kernel::state::TrackParamsState>>,
+    /// 这份视图对应的 UI 几何代次。提交时与当前代次不一致就走重基/重试。
+    pub geometry_revision: u64,
 }
 
-/// 一次**已确认**分割：子段 item GUID → 它在父段播放轴上的位置。
+/// ARA 文档存档通道的**读数**。
 ///
-/// 【为什么记这个】分割后的两半必须**划分**父段窗口；而父段窗口是分割前真的在响的
-/// 那一段，与宿主怎么填右半段的 D_STARTOFFS 无关。记下"左段是哪个 item、子段在播放
-/// 轴上偏移多少、长度多少"，就能用共享解算把子段窗口推导出来（见
-/// `take_geometry::split_child_window`），宿主读数只作校验。
+/// 【为什么需要它】这条通道的四个回调此前只有 `log::info!`，而 release 的默认级别是
+/// `Warn` —— 用户机器上一条都不落盘。于是"宿主到底有没有走存档通道"这个问题在真机上
+/// **无法回答**：修法完全取决于它（存档通道 ≠ VST3 组件状态通道），而证据链在第一步
+/// 就断了。这里把同一批事实记成读数，让它同时出现在日志（限流 WARN）与诊断包里。
 ///
-/// 【为什么按子段 GUID 索引】右半段是新 item；左半段沿用父段 GUID，不需要条目。
-#[derive(Clone, Debug)]
-pub(crate) struct SplitWindowSource {
-    /// 左段（沿用父段 GUID 的那一条）的 item GUID。
-    pub left: String,
-    /// 子段起点相对左段起点的**播放时间**偏移（秒）。
-    pub offset_sec: f64,
-    /// 子段的播放长度（秒）。
-    pub length_sec: f64,
+/// 【为什么在文档上】`storeDocumentToArchive` / `beginRestoringDocumentFromArchive`
+/// 是**文档控制器**的回调，它们的读数天然是文档级的。
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ArchiveReading {
+    /// 宿主最近一次交回来的字节数。
+    restored_bytes: usize,
+    /// 我们最近一次交给宿主的字节数。
+    stored_bytes: usize,
+    /// 最近一次保存是否走了「交回旧载荷」那条分支（I3），以及累计次数。
+    unmerged_returns: u32,
+    /// 最近一次"存档已合入"的单调毫秒（0 = 还没合入过）。
+    merged_at_ms: u64,
 }
 
-/// 已确认分割的子段窗口来源表：按 GUID 查取 + **插入序**淘汰最旧。
-///
-/// 【为什么淘汰最旧而不是整体清空】这张表是「从父段推导窗口」（`1cf39259`）的
-/// 唯一输入。整体清空会把长会话里**全部**已登记的窗口一次砸掉：之后任何需要
-/// 推导的分割段都退回宿主读数 —— 恰是那次修复要消灭的「右段偏移」故障形态，
-/// 且静默无日志。按插入序逐条淘汰，后登记的（正在参与本轮推导的）不受影响。
-#[derive(Default)]
-pub(crate) struct SplitWindows {
-    map: HashMap<String, SplitWindowSource>,
-    order: VecDeque<String>,
+impl ArchiveReading {
+    /// 诊断包 / 状态栏读的 JSON 形状。
+    pub(crate) fn json(&self, pending: bool, pending_reason: Option<String>) -> serde_json::Value {
+        serde_json::json!({
+            "restoredBytes": self.restored_bytes,
+            "storedBytes": self.stored_bytes,
+            "unmergedReturns": self.unmerged_returns,
+            "mergedAtMs": self.merged_at_ms,
+            "pending": pending,
+            "pendingReason": pending_reason,
+        })
+    }
 }
 
-impl SplitWindows {
-    /// 一张文档最多登记多少条。宿主反复分割会持续产生新 item GUID，没有上界的
-    /// 话这张表随编辑次数无界增长；4096 条足够覆盖任何一次会话的分割历史，
-    /// 超出时丢最旧的 —— 它只是"推导窗口"的提示，条目被淘汰后退回宿主读数，
-    /// 不会让任何东西失效。
-    const MAX_ENTRIES: usize = 4096;
+/// "你的这次编辑有没有被采纳"的**读数**。
+///
+/// 【为什么必须有】§1.3 列出的 11 条回退路径里，9 条**连字符串都没有**：写回被拒只留
+/// 一行限流日志，静默丢轨连日志都没有。用户唯一能做的事是"再画一次试试"，而这恰好
+/// 与"数据被抹平"最难区分。这里把同一批事实记成读数，让它进状态快照与诊断包。
+///
+/// 【为什么不再有"捕获读数"】那一栏统计的是图集 `capture()` 拒绝写回的曲线条数。
+/// 曲线现在只由显式写入（`set_param_frames`）产生，写入失败会直接变成一条命令
+/// 错误 —— 不再存在"悄悄没写进去"的中间态，因此这一栏没有可统计的对象。
+#[derive(Clone, Debug, Default)]
+pub(crate) struct EditHealth {
+    /// 累计"这次编辑没有被采纳"的次数（重放预算耗尽）。
+    dropped_edits: u64,
+    /// 最近一次被丢弃的编辑的可读原因。
+    last_drop: Option<String>,
+}
 
-    /// 重复登记是幂等的（刷新既有条目，不改变其插入序）。
-    fn insert(&mut self, child: String, source: SplitWindowSource) {
-        if !self.map.contains_key(&child) {
-            self.order.push_back(child.clone());
-            while self.order.len() > Self::MAX_ENTRIES {
-                let Some(oldest) = self.order.pop_front() else {
-                    break;
-                };
-                if self.map.remove(&oldest).is_some() {
-                    log::debug!(
-                        "[ara] split window table is full; evicted the oldest entry ({oldest})"
-                    );
-                }
-            }
-        }
-        self.map.insert(child, source);
+impl EditHealth {
+    /// 记一次"这次编辑没有被采纳"（重放预算耗尽）。
+    fn drop_edit(&mut self, reason: String) {
+        self.dropped_edits = self.dropped_edits.saturating_add(1);
+        self.last_drop = Some(reason);
     }
 
-    pub(crate) fn get(&self, child: &str) -> Option<&SplitWindowSource> {
-        self.map.get(child)
+    /// 状态快照 / 诊断包的 JSON 形状。
+    pub(crate) fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "droppedEdits": self.dropped_edits,
+            "lastDrop": self.last_drop,
+        })
     }
+}
 
-    pub(crate) fn len(&self) -> usize {
-        self.map.len()
-    }
+/// 一次存档合入的结论。
+///
+/// 【为什么要把"还在等"与"失败"分开】宿主的图在重开工程时是**逐块**长出来的：
+/// 存档到达时 region 往往还没交付。那时身份对不上不是失败，而是"还没长成"。
+/// 两种结论的处置相反：一个必须留着载荷再试，一个必须报出来。
+pub(crate) enum RestoreMerge {
+    /// 已合入（`edits` 已更新）。
+    Merged,
+    /// 还缺东西（宿主图未重建 / fade 元数据在途），载荷必须留着下次再试。
+    Waiting(String),
 }
 
 /// 一个 ARA 文档的共享状态。
@@ -386,7 +404,7 @@ pub(crate) struct DocumentSession {
     /// 授权，所以右半段可以立刻显示波形，不必等宿主为它重新分配 region。缺了这条，
     /// 分割后右半段会停在一段"等待 REAPER 提供音频"的占位里（用户报障过）。
     ///
-    /// 【为什么不复用 `ParameterAtlas::split_parents`】那份谱系服务的是**参数曲线**
+    /// 【为什么不复用图集时代的 `split_parents`】那份谱系服务的是**参数曲线**
     /// 继承，键与生命周期都挂在参数权威上；媒体派生是显示层的事，两件事不该共用一个
     /// 记录 —— 否则一方的清理会静默影响另一方。
     pub split_media_from: Mutex<HashMap<String, String>>,
@@ -477,6 +495,29 @@ pub(crate) struct DocumentSession {
     /// PCM 可以晚于结构回调到达；不借用 model/scope 版本触发 GUI 资源补齐。
     pub editor_audio_revision: AtomicU64,
     pub timeline: Mutex<Option<hifishifter_kernel::state::TimelineState>>,
+    /// 装配器的**输入 A**：ARA 侧的 region 表（一条 playback region 一行）。
+    ///
+    /// 【为什么不是 clip】region 只回答"这段时间播放素材的哪一段"。clip 由
+    /// [`Self::rebuild_timeline_locked`] 唯一产生 —— 这是"一个循环延伸的 item
+    /// 不会再被画成 N 条片段"的结构性保证（见 `hifishifter_kernel::editor::assembly`）。
+    pub region_rows: Mutex<Vec<hifishifter_kernel::editor::assembly::RegionRow>>,
+    /// 装配器的**输入 A** 的轨道侧：region sequence → 模型轨道。
+    pub region_tracks: Mutex<Vec<hifishifter_kernel::editor::assembly::TrackRow>>,
+    /// 最近一次装配的 `spans`：clip id → 落在它里面的 region 行下标。
+    ///
+    /// 【为什么留一份】PCM 授权、媒体时长索引、`ara.item-map` 读数都要回答
+    /// "这条 item 的音频来自哪个 ARA 源"，而答案就在这张边上。它**不是**第二份
+    /// clip 集合：只有行下标，没有 clip。
+    pub assembly_spans: Mutex<std::collections::BTreeMap<String, Vec<usize>>>,
+    /// 最近一次装配里**没挂上任何 item** 的 region 行（不产生 clip，只进读数）。
+    pub assembly_unbound: Mutex<Vec<usize>>,
+    /// ARA 模型是否**已经交付过**至少一次。
+    ///
+    /// 【为什么需要】`rebuild_timeline_locked` 会在每次清单刷新后跑。而清单可能先于
+    /// ARA 模型到达（宿主加载工程、测试夹具手工塞 `ui_tracks`）—— 那时 region 表是空
+    /// 的，装配结果只会是一堆没有源窗口的占位。**用它当"这份时间线归不归我管"的判据**：
+    /// 模型从未交付过时，不动已经发布的时间线（否则"宿主里一切都在、插件里什么都没有"）。
+    pub ara_model_seen: std::sync::atomic::AtomicBool,
     pub track_bindings: Mutex<crate::state_channel::TrackBindings>,
     pub revision: AtomicU64,
     pub render_epoch: AtomicU64,
@@ -571,8 +612,12 @@ pub(crate) struct DocumentSession {
     /// 判定）已经完整实现并测试过（`ExtensionOwner::merge_pending_restore`）。存档通道
     /// 只是**另一个来源**，不该有第二份实现 —— 两份实现迟早会漂移。
     pub pending_archive_restore: Mutex<Option<crate::state_channel::EditState>>,
-    /// 已确认分割的子段窗口来源（见 [`SplitWindowSource`] 与 [`SplitWindows`]）。
-    pub split_windows: Mutex<SplitWindows>,
+    /// 下一次允许尝试合入文档级存档的时刻（退避）。
+    ///
+    /// 【为什么需要】合入会在工作区快照上被重试（33–400 ms 一次），而失败原因是
+    /// "宿主图还没长成"，那要等几百毫秒到几秒。没有退避就会在等待窗口里每帧跑一次
+    /// rebind（O(曲线) 的工作）。
+    archive_merge_next_attempt: Mutex<Option<std::time::Instant>>,
     /// 本实例**主动创建**的宿主轨道 GUID（`create_host_track` / 粘贴 / 导入建轨）。
     ///
     /// 【为什么必须有这张表】清单的轨道范围是「本轨 + folder 后代」（`ui_folder_tracks`），
@@ -607,6 +652,43 @@ pub(crate) struct DocumentSession {
     /// 现在 `ready == false` 时返回这份快照；恢复到达时也会先写一份，保证
     /// "恢复后还没合入就保存"不会把编辑覆盖成空。
     pub archive_cache: Mutex<Option<Vec<u8>>>,
+    /// ARA 文档存档通道的读数（见 [`ArchiveReading`]）。
+    ///
+    /// 【为什么与 `archive_cache` 分开】那个字段是**数据**（要原样交回宿主），这个
+    /// 字段是**证据**（通道有没有被调用、交回了多少字节、合入发生在什么时候）。
+    /// 把两者混在一起，就得在读数据时顺带改证据。
+    pub archive_reading: Mutex<ArchiveReading>,
+    /// 用户编辑的采纳读数（见 [`EditHealth`]）。
+    pub edit_health: Mutex<EditHealth>,
+    /// 最近一次把「锁定参数线」应用到既有权威时的设置代次。
+    ///
+    /// 【为什么是「设置代次」而不是布尔】切换一次就要重新落一次；而"当前值是什么"
+    /// 由 `settings_store::lock_param_lines()` 回答。用代次做缓存戳，热路径只付一次
+    /// 原子读。初值取 `u64::MAX`：进程启动后的第一次调用必须真的落一次。
+    /// 运行时几何日志：锁定关闭时只在这里记账；锁定开启时才是参数事务的输入。
+    pub(crate) geometry_journal: Mutex<hifishifter_kernel::editor::param_geometry::GeometryJournal>,
+    /// 宿主清单枚举**正在失败/中途放弃**（默认 false = 清单可用）。
+    ///
+    /// 【为什么用反向语义】`DocumentSession` 用 `..Default::default()` 构造，
+    /// 而"清单可用"才是常态 —— 用一个默认 false 的"不完整"标记，就不必为它写
+    /// 手写 `Default`。枚举方在入口置 true、成功走到末尾置 false。
+    pub(crate) inventory_incomplete: std::sync::atomic::AtomicBool,
+    /// clip id → 连续多少轮**完整**清单没见到它（幽灵 clip 的宽限期计数）。
+    pub(crate) orphan_streak: Mutex<std::collections::HashMap<String, u32>>,
+    /// 最近一次几何事务的读数（诊断与状态栏）。
+    pub(crate) last_geometry_report:
+        Mutex<Option<hifishifter_kernel::editor::param_geometry::TransformReport>>,
+    /// 逐根轨的**分析基线**：派生原始值的唯一权威（见 `RootBaseline`）。
+    ///
+    /// 【为什么单独一层】派生值此前住在 `edits.params` / `timeline.params_by_root_track`
+    /// 里，于是"分析完成"与"编辑器回传"会互相覆盖 —— 用户看到的就是参数线随机回退。
+    /// 这里只有一个写入口（[publish_baseline]），显示永远由它派生。
+    pub(crate) baseline: Mutex<
+        std::collections::BTreeMap<
+            String,
+            hifishifter_kernel::editor::param_authority::RootBaseline,
+        >,
+    >,
     /// ARA 变更通知队列，由 `runtime.rs` 在构建插件时注入。
     ///
     /// 【为什么必须有】宿主只保存"它知道变过"的部分。插件从不通知，只存增量的宿主
@@ -702,52 +784,6 @@ pub(crate) struct PluginMusicalProjection {
 }
 
 #[cfg(test)]
-mod split_windows_tests {
-    use super::*;
-
-    fn source() -> SplitWindowSource {
-        SplitWindowSource {
-            left: "left".into(),
-            offset_sec: 0.5,
-            length_sec: 0.5,
-        }
-    }
-
-    /// **不变量：表满时逐条淘汰最旧，而不是整体清空。**
-    ///
-    /// 【为什么钉死】整体清空会把长会话里全部已登记窗口一次砸掉，让后续分割段
-    /// 退回宿主读数 —— 正是 `1cf39259` 要消灭的「右段偏移」故障形态，且静默无日志。
-    #[test]
-    fn an_overflow_evicts_the_oldest_entry_instead_of_clearing_the_table() {
-        let mut table = SplitWindows::default();
-        for index in 0..(SplitWindows::MAX_ENTRIES + 3) {
-            table.insert(format!("child-{index}"), source());
-        }
-        assert_eq!(table.len(), SplitWindows::MAX_ENTRIES);
-        assert!(table.get("child-0").is_none(), "最旧的条目必须被逐出");
-        assert!(table.get("child-2").is_none());
-        assert!(
-            table.get("child-3").is_some(),
-            "未被逐出的旧条目必须保留（不清空全表）"
-        );
-        assert!(table
-            .get(&format!("child-{}", SplitWindows::MAX_ENTRIES + 2))
-            .is_some());
-        // 重复登记幂等：刷新内容，不新增条目。
-        table.insert(
-            "child-3".into(),
-            SplitWindowSource {
-                left: "renewed".into(),
-                offset_sec: 1.,
-                length_sec: 1.,
-            },
-        );
-        assert_eq!(table.len(), SplitWindows::MAX_ENTRIES);
-        assert_eq!(table.get("child-3").unwrap().left, "renewed");
-    }
-}
-
-#[cfg(test)]
 mod baseline_tests {
     use super::*;
 
@@ -769,6 +805,7 @@ mod baseline_tests {
         let view = WorkspaceView {
             projection: "scope:abc".to_owned(),
             params: Arc::clone(&params),
+            geometry_revision: 0,
         };
         let shared = Arc::new(view);
         assert!(
@@ -804,6 +841,80 @@ mod tests {
             document.last_content_change.lock_or_recover().is_some(),
             "撤销渲染许可必须记下观察时刻，否则会被误判成宿主冲突"
         );
+    }
+
+    fn document_with_one_empty_track(project_sec: f64) -> Arc<DocumentSession> {
+        let document = DocumentSession::new(9_001);
+        *document.timeline.lock_or_recover() = Some(
+            serde_json::from_value(serde_json::json!({
+                "tracks": [{"id": "track", "name": "t", "order": 0}],
+                "clips": [],
+                "bpm": 120.0,
+                "project_sec": project_sec,
+            }))
+            .unwrap(),
+        );
+        document
+    }
+
+    /// **【第三轮 P1】clip 之外的参数线必须能被擦掉。**
+    ///
+    /// 【为什么这是用户报的"右键拖拽回弹"】旧实现把重置区间夹到
+    /// `target_param_frames`（= 最后一个 clip 的终点）。整条轨没有 clip 时它就是 0，
+    /// 于是"在空白处画的线"永远 `count == 0` —— 返回 `ok:true` 却什么都没改，
+    /// 前端下一次取数就把线取回来。
+    #[test]
+    fn restore_authority_range_erases_a_line_outside_all_clips() {
+        let document = document_with_one_empty_track(2.0);
+        document
+            .write_authority_range(
+                "track",
+                "pitch",
+                2_000,
+                &[61.0; 10],
+                Some(&[true; 10]),
+                false,
+            )
+            .unwrap();
+        assert!(document.authority_has_runs_in("track", "pitch", 2_000, 10));
+        let value = document
+            .restore_authority_range("track", "pitch", 2_000, 10, false)
+            .unwrap();
+        assert_eq!(value["ok"], serde_json::json!(true));
+        assert_eq!(
+            value["changed"],
+            serde_json::json!(true),
+            "擦掉真实存在的 run 必须报告 changed"
+        );
+        assert!(!document.authority_has_runs_in("track", "pitch", 2_000, 10));
+        assert_eq!(document.authority_revision(), value["authority_revision"]);
+    }
+
+    /// **【第三轮 P2】越界到"工程尾之后"的区间同样是合法擦除域。**
+    #[test]
+    fn restore_authority_range_beyond_project_sec_still_erases() {
+        let document = document_with_one_empty_track(1.0);
+        document
+            .write_authority_range("track", "pitch", 5_000, &[70.0], Some(&[true]), false)
+            .unwrap();
+        let value = document
+            .restore_authority_range("track", "pitch", 5_000, 1, false)
+            .unwrap();
+        assert_eq!(value["changed"], serde_json::json!(true));
+        assert!(document.edits.lock_or_recover().authority.is_pristine());
+    }
+
+    /// **【第三轮 P4】重复擦除必须报 `changed == false`，且不推进 revision。**
+    #[test]
+    fn restore_reports_changed_false_when_nothing_was_edited() {
+        let document = document_with_one_empty_track(1.0);
+        let before = document.authority_revision();
+        let value = document
+            .restore_authority_range("track", "pitch", 0, 100, false)
+            .unwrap();
+        assert_eq!(value["changed"], serde_json::json!(false));
+        assert_eq!(value["authority_revision"], serde_json::json!(before));
+        assert_eq!(document.authority_revision(), before);
     }
 
     /// **T7/T8：源暂时不可读不得删掉已发布的编辑侧 PCM。**
@@ -1087,6 +1198,26 @@ fn controllers() -> &'static Mutex<HashMap<usize, Weak<DocumentSession>>> {
     DOCUMENTS.get_or_init(Default::default)
 }
 
+/// 一次渲染的守卫票据：渲染**入口**处取得，收尾处复核。
+///
+/// 【为什么是四个计数器而不是投影指纹】渲染输入由 `ara_render_input` 从**文档自身**
+/// 构造，与"编辑器读到什么"无关；而任何会让输入失效的变化都必然推进这四个数之一：
+///   * 参数写入 / 撤销 ⇒ `edit`
+///   * 宿主模型收口   ⇒ `model`
+///   * 分配范围变化   ⇒ `scope`
+///   * 几何 / 内容失效 ⇒ `epoch`
+///
+/// 旧实现把"编辑器上次读到的票据"（`loaded.edit` / `loaded.view.projection`）当守卫，
+/// 于是**每一次参数写入都会让下一次渲染必然 Conflict** —— 而写参数正是请求渲染的那件
+/// 事。票据必须由渲染入口自己取。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RenderTicket {
+    pub edit: u64,
+    pub model: u64,
+    pub scope: u64,
+    pub epoch: u64,
+}
+
 impl DocumentSession {
     pub(crate) fn publish_source_pcm(&self, id: String, pcm: Arc<super::source::SourcePcm>) {
         let _transaction = self.transaction.lock_or_recover();
@@ -1096,7 +1227,214 @@ impl DocumentSession {
         self.sources.lock_or_recover().insert(id, pcm);
         self.editor_audio_revision.fetch_add(1, Ordering::AcqRel);
     }
-    /// region key → clip id；`clip_ids` 缺席时按映射层同一算式补出来。    ///
+
+    /// 宿主清单 → 装配器的**输入 B**（一条 item 一行）。
+    ///
+    /// 【为什么从 `ui_tracks` 现算而不是缓存一份】清单本身就是缓存
+    /// （`ui_inventory_stamp` 管它的代次），再存一份只会多出一个"两份缓存不同步"的
+    /// 失败模式。这里每次都从同一份清单派生，装配结果因此永远与"用户此刻在宿主里
+    /// 看到的东西"一致。
+    pub(crate) fn collect_item_rows(&self) -> Vec<hifishifter_kernel::editor::assembly::ItemRow> {
+        let tracks = self.ui_tracks.lock_or_recover();
+        tracks
+            .values()
+            .flat_map(|track| {
+                track
+                    .items
+                    .iter()
+                    .map(|item| crate::host::geometry::item_row_from_host(item, &track.id))
+            })
+            .collect()
+    }
+
+    /// **唯一**的时间线重建入口 —— clip 集合只在这里产生。
+    ///
+    /// 【为什么必须只有一个入口】此前 clip 有两个生产者：`ara/mapping.rs` 按 playback
+    /// region 造一条，`present_host_inventory` 又按宿主 item 造一条。两者的关联判据是
+    /// "四项几何全等且唯一"，而 REAPER 对一个**循环延伸**的 item 按循环节给出多条
+    /// region —— 与整段 item 永远不全等。于是这些 region 既拿不到 item 身份、也不会被
+    /// 任何归并收走：界面上多出 N 条片段，而且一条都拖不动（写回报
+    /// `no unique directly bound host take`）。
+    ///
+    /// 现在：装配器决定"有哪些 clip"，本函数是它唯一的调用点；清单与 ARA 两侧都只写
+    /// 各自的**输入表**（`ui_tracks` / `region_rows`）。
+    ///
+    /// 【锁序】调用方必须已持有 `transaction`。本函数先取两张输入表（宿主事实层级），
+    /// 立刻释放，再取 `timeline` / `clip_ids` —— 与 `transaction → timeline → edits →
+    /// host facts` 同向。
+    pub(crate) fn rebuild_timeline_locked(&self) -> Result<(), String> {
+        use hifishifter_kernel::editor::assembly::{assemble, attach};
+        // 【模型没交付过 ⇒ 不动已发布的时间线】见 `ara_model_seen` 的说明。装配器的
+        // 输入只有两份，缺了 ARA 那一份时它只能给出"没有源窗口的占位" —— 用那份占位
+        // 盖掉一份真实的图，比不刷新糟得多。
+        if !self
+            .ara_model_seen
+            .load(std::sync::atomic::Ordering::Acquire)
+            && self
+                .timeline
+                .lock_or_recover()
+                .as_ref()
+                .is_some_and(|timeline| !timeline.clips.is_empty())
+        {
+            return Ok(());
+        }
+        let rows = self.region_rows.lock_or_recover().clone();
+        let tracks = self.region_tracks.lock_or_recover().clone();
+        let mut items = self.collect_item_rows();
+        // 【为什么要挂一次再装配】媒体总时长是**装配必需**的输入（倒放镜像轴、循环
+        // 回绕周期都要它），而它只有两个来源：宿主 `GetMediaSourceLength`（清单层）
+        // 或 ARA 的 `AudioSource.durationSeconds`（region 层，与授权无关、映射阶段就有）。
+        // item 侧不知道自己的 region，region 侧不知道自己的 item —— 所以先挂一次把
+        // 这份读数补上，再真正装配。`attach` 是纯函数，多跑一遍没有副作用。
+        let attached = attach(&items, &rows);
+        for (index, item) in items.iter_mut().enumerate() {
+            let media = attached
+                .iter()
+                .enumerate()
+                .find(|(_, owner)| **owner == Some(index))
+                .and_then(|(row_index, _)| rows.get(row_index))
+                .map(|row| row.source_duration_sec)
+                .filter(|duration| duration.is_finite() && *duration > 0.0);
+            let Some(media) = media else {
+                continue;
+            };
+            for take in &mut item.takes {
+                if take.geometry.media_duration_sec.is_none() {
+                    take.geometry.media_duration_sec = Some(media);
+                }
+            }
+        }
+        let assembly = assemble(&items, &rows);
+        // region key → clip id：由 `spans` 反算。**这是唯一写 `clip_ids` 的地方** ——
+        // 此前它由映射层与清单层各写一次，于是"身份升级"窗口里两边各说一套，
+        // `workspace_timeline_locked` 按 id 过滤会把全部 clip 滤掉。
+        let mut ids = std::collections::HashMap::new();
+        for (clip_id, row_indices) in &assembly.spans {
+            for index in row_indices {
+                if let Some(row) = rows.get(*index) {
+                    if row.key != 0 {
+                        ids.insert(row.key, clip_id.clone());
+                    }
+                }
+            }
+        }
+        let mut timeline = assembly.timeline(&tracks, crate::ara::mapping::default_bpm());
+        self.log_item_map(&assembly, &rows);
+        *self.clip_ids.lock_or_recover() = ids;
+        *self.assembly_spans.lock_or_recover() = assembly.spans.clone();
+        *self.assembly_unbound.lock_or_recover() = assembly.unbound.clone();
+        // 【默认合成开关：只对**没有持久化编辑记录**的轨道播种，不覆写用户的选择】
+        //
+        // 这段逻辑此前在 `remap_and_log` 里，只在 ARA 收口时跑一次。现在装配会在
+        // **每次清单刷新**后重跑 —— 留在那里就等于"每次重跑都丢一次"。挪到这里，
+        // 它才与"轨道从哪来"这件事同源。
+        //
+        // 【轨道级设置从**上一轮时间线**继承，不读 `edits`】
+        //
+        // 装配只产出几何；合成开关 / 分析算法 / 音量 / 静音 / 独奏 / 私有分组父级都是
+        // **用户的设置**，重装一次不能把它们抹回默认值。
+        //
+        // 【为什么不读 `edits`】那会构成 "transaction → edits" 的反向边：工作区快照
+        // 走的是 "edits → transaction"，两条路一交叉就是 ABBA 死锁（实测两个
+        // `bound_tests` 用例因此永久挂起）。上一轮时间线里的值本来就是
+        // `edits.apply` 的产物，继承它等价，而且不碰第二把锁。
+        {
+            let mut slot = self.timeline.lock_or_recover();
+            let previous = slot.clone();
+            for track in &mut timeline.tracks {
+                let Some(old) = previous
+                    .as_ref()
+                    .and_then(|previous| previous.tracks.iter().find(|old| old.id == track.id))
+                else {
+                    // 新出现的轨道才播种插件默认值（开箱即用）。
+                    track.compose_enabled = true;
+                    track.pitch_analysis_algo =
+                        hifishifter_kernel::state::PitchAnalysisAlgo::NsfHifiganOnnx;
+                    continue;
+                };
+                track.compose_enabled = old.compose_enabled;
+                track.pitch_analysis_algo = old.pitch_analysis_algo.clone();
+                track.volume = old.volume;
+                track.muted = old.muted;
+                track.solo = old.solo;
+                track.parent_id = old.parent_id.clone();
+            }
+            *slot = Some(timeline);
+        }
+        Ok(())
+    }
+
+    /// `[ara] item map` —— **真读数**。
+    ///
+    /// 【为什么旧的那一行回答不了它被加进来要回答的问题】旧实现从 `region_items` 算
+    /// `max_regions_per_item`，而那张表的写入方自己去重（一个 item 只留一条 region）——
+    /// 于是这个字段**结构上恒为 1**，20 次读数无一例外。现在从装配器的 `spans` 算，
+    /// 它才是"一个 item 到底吃掉了几条 region"的真值；`unbound` 也是真的。
+    fn log_item_map(
+        &self,
+        assembly: &hifishifter_kernel::editor::assembly::Assembly,
+        rows: &[hifishifter_kernel::editor::assembly::RegionRow],
+    ) {
+        let items = assembly.clips.len();
+        let attached: usize = assembly.spans.values().map(Vec::len).sum();
+        let multi = assembly
+            .spans
+            .values()
+            .filter(|rows| rows.len() > 1)
+            .count();
+        let max = assembly.spans.values().map(Vec::len).max().unwrap_or(0);
+        let loops = assembly
+            .clips
+            .iter()
+            .filter(|clip| clip.loop_enabled)
+            .count();
+        log::info!(
+            "[ara] item map: items={items} regions={} attached={attached} unbound={}                  multi={multi} max_regions_per_item={max} loops={loops}",
+            rows.len(),
+            assembly.unbound.len()
+        );
+        // 【为什么循环要单独一行】周期未知时内核会退化成"完全不循环、后半段静音"，
+        // 而那在插件里无法与"宿主没给音频"区分 —— 用户只会以为素材坏了。
+        for clip in assembly.clips.iter().filter(|clip| clip.loop_enabled) {
+            log::info!(
+                "[ara] loop clip {}: length={:.6} period={:?} media={:?} section={}",
+                clip.id,
+                clip.length_sec,
+                clip.loop_period_sec,
+                clip.takes.first().and_then(|take| take.duration_sec),
+                clip.loop_period_sec.is_some(),
+            );
+        }
+        if !assembly.unknown_loop_period.is_empty() {
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "ara.loop-period-unknown",
+                format_args!(
+                    "[ara] {} loop clip(s) have no resolvable wrap period ({}); they will not                      loop — the host reported neither a source section nor a source length",
+                    assembly.unknown_loop_period.len(),
+                    assembly.unknown_loop_period.join(",")
+                ),
+            );
+        }
+        // 【挂不上的 region 必须能归因】它们不画、不渲染，只进读数；不报出来就等于
+        // "宿主给了、我们丢了"，而用户看到的只是"某一段不见了"。
+        for index in &assembly.unbound {
+            let Some(row) = rows.get(*index) else {
+                continue;
+            };
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "ara.region.unbound",
+                format_args!(
+                    "[ara] playback region {} (start={:.6} duration={:.6} source={}) is not                      inside any host item this round; it produces no clip",
+                    row.key, row.start_sec, row.duration_sec, row.source_id
+                ),
+            );
+        }
+    }
+
+    /// region key → clip id；`clip_ids` 缺席时按映射层同一算式补出来。
+    ///
     /// 【为什么必须补而不是报错】`clip_ids` 由 `remap_and_log` 整体重写，而 region 的
     /// 分配（`addPlaybackRegion`）发生在**那之前**。两者之间任何一次渲染、提交或投影
     /// 都会查到缺席。把这个窗口从"致命错误"降成"按 key 派生"—— 派生的 id 与映射层
@@ -1159,10 +1497,15 @@ impl DocumentSession {
                 .iter()
                 .find_map(|owner| owner.pending_restore_bytes());
             if let Some(bytes) = cached.or(pending) {
-                log::warn!(
-                    "[ara] archive store returns the unmerged payload ({} byte(s)); the saved \
-                     parameters are preserved instead of being replaced by the in-memory state",
-                    bytes.len()
+                self.note_archive_unmerged(bytes.len());
+                hifishifter_kernel::log_limiter::emit_limited_key(
+                    log::Level::Warn,
+                    "ara.archive.unmerged-returned",
+                    format_args!(
+                        "[ara] archive store returns the unmerged payload ({} byte(s)); the saved \
+                         parameters are preserved instead of being replaced by the in-memory state",
+                        bytes.len()
+                    ),
                 );
                 return Ok(bytes);
             }
@@ -1205,6 +1548,7 @@ impl DocumentSession {
         match edits.encode() {
             Ok(bytes) => {
                 *self.archive_cache.lock_or_recover() = Some(bytes.clone());
+                self.note_archive_stored(bytes.len());
                 Ok(bytes)
             }
             Err(error) => {
@@ -1248,6 +1592,7 @@ impl DocumentSession {
         // 此时若宿主再保存一次，旧实现会用空 `edits` 重编码并覆盖 cache —— 磁盘上
         // 从此只剩默认值。先把原始字节存下来，`encode_archive` 才有东西可以还回去。
         *self.archive_cache.lock_or_recover() = Some(bytes.to_vec());
+        self.note_archive_restored(bytes.len());
         let mut restored = crate::state_channel::EditState::default();
         // 【为什么解码失败也只记日志】宿主把 `beginRestoringDocumentFromArchive`
         // 的失败当成"整份文档恢复失败"：region 不再交付、界面永远停在
@@ -1262,7 +1607,11 @@ impl DocumentSession {
         // 【为什么必须重映射】persistentID 只保证**文档内**唯一，跨文档导入时宿主
         // 要求把存档 ID 映射到当前图里的 ID。不映射会把参数挂到一个不存在的键上 ——
         // 静默丢失，症状正是"重载工程后参数被重置"。
-        restored.atlas.remap_authorities(remap);
+        // 【曲线不按 modification 重映射】权威的键是 (root, param, 工程秒)；跨文档
+        // 导入要重映射的是**轨道身份**（由 `reconcile` 按 bindings 处理），与曲线无关。
+        // 图集时代这里必须把 `mod:{旧ID}` 下的曲线搬到新键，因为曲线按 modification
+        // 索引 —— 那份表示已经删除。
+        let _ = &remap;
         // 【G5】记下"它到达时我们在不在一次编辑会话里"：撤销/重做的还原会话在概念上
         // 就是一次编辑会话（`ARAInterface.h:2938-2943`），那是它**必须**覆盖在线
         // 状态的唯一权威证据。
@@ -1276,110 +1625,13 @@ impl DocumentSession {
         // ② 它是"我们的"字节，而宿主下一次保存会把它当成权威 —— 一旦合并逻辑还有
         //    缺陷，被固化的就是我们的误解，而不是用户的数据。
         *self.pending_archive_restore.lock_or_recover() = Some(restored);
-        Ok(())
-    }
-
-    /// 调用方持document事务；仅从真实region边创建曲线身份，不从轨名/源路径推断。
-    ///
-    /// 【为什么不再对单个 clip 硬失败】此前这里对**任意一条** clip 的身份缺席直接
-    /// `Err`，而它在 `map` 内 ⇒ 整份身份表失败 ⇒ 所有 `project_*` / `follow_geometry`
-    /// 调用全部失败 ⇒ 整份投影与整份编辑被拒。这与本文件写在 `clip_id_for` 上的口径
-    /// 自相矛盾：那里已经把"region 已分配、`clip_ids` 还没重算"的窗口降级为按 key
-    /// 派生，而这里仍把它当致命错误。
-    ///
-    /// 现在逐条跳过并限流留痕：缺席的那一条 clip 不参与曲线投影（几何与音频不受影响），
-    /// 其余 clip 照常。返回类型保留 `Result` 是为了调用方签名不变 —— 本函数已不再
-    /// 因单条 clip 而失败。
-    pub(crate) fn parameter_identities_locked(
-        &self,
-        timeline: &hifishifter_kernel::state::TimelineState,
-    ) -> Result<
-        std::collections::BTreeMap<String, crate::editor::parameter_atlas::RegionIdentity>,
-        String,
-    > {
-        let ids = self.clip_ids.lock_or_recover();
-        let regions = self.regions.lock_or_recover();
-        let items = self.region_items.lock_or_recover();
-        let mut unresolved = 0_usize;
-        let mut first_unresolved: Option<String> = None;
-        let identities = timeline
-            .clips
-            .iter()
-            .filter_map(|clip| {
-                // 反查 region key：先查缓存，未命中时从 id 本身解析 —— clip id 由 key 派生
-                // （`ara-region-{key}`），所以它是自描述的。此前的硬错误
-                // （`missing actual region parameter edge`）会让"region 已分配、`clip_ids`
-                // 还没重算"这个窗口里的每次投影都失败。
-                let key = ids
-                    .iter()
-                    .find(|(_, id)| **id == clip.id)
-                    .map(|(key, _)| *key)
-                    .or_else(|| parse_region_key_from_clip_id(&clip.id));
-                let region = key
-                    .and_then(|key| regions.get(&key).map(|region| (key, region)))
-                    // 【按 key 直查缺席时，按"源 + 播放几何"反查】
-                    //
-                    // 少数情况下 clip id 派生出的 key 不在派生表里（宿主在收口前重投模型，
-                    // 或 region 刚被重建而 `region_keys` 还没跟上）。此前这种情况直接判
-                    // "无身份"，于是这一条 clip 本轮**不投影任何曲线** —— 用户看到的正是
-                    // "编辑之后这一段参数被重置"。
-                    //
-                    // clip 携带的 `source_path` 就是源 persistentID（映射层如此播种），
-                    // `start_sec` / `length_sec` 就是播放起止，三者足以在派生表里确定那条
-                    // region。多于一条匹配说明猜不出（同一源、同一窗口被重复放置），
-                    // 此时仍放弃 —— 不猜。
-                    .or_else(|| {
-                        let source = clip.source_path.as_deref()?;
-                        let mut matches = regions.iter().filter(|(_, region)| {
-                            region.audio_source_persistent_id == source
-                                && (region.start_in_playback_time - clip.start_sec).abs() <= 1e-6
-                                && (region.duration_in_playback_time - clip.length_sec).abs()
-                                    <= 1e-6
-                        });
-                        let (key, region) = matches.next()?;
-                        if matches.next().is_some() {
-                            return None;
-                        }
-                        Some((*key, region))
-                    });
-                let Some((key, region)) = region else {
-                    unresolved += 1;
-                    first_unresolved.get_or_insert_with(|| clip.id.clone());
-                    return None;
-                };
-                Some((
-                    clip.id.clone(),
-                    crate::editor::parameter_atlas::RegionIdentity {
-                        key,
-                        item: items.get(&key).cloned(),
-                        source: region.audio_source_persistent_id.clone(),
-                        modification: region.audio_modification_persistent_id.clone(),
-                        // 跨会话签名：只用 ARA 自己给的量，ARA-only 宿主上也有值
-                        // （`item` 在那种宿主上恒为 `None`，谱系全靠它）。
-                        signature:
-                            crate::editor::parameter_atlas::ParameterAtlas::ara_region_signature(
-                                &region.audio_source_persistent_id,
-                                &region.audio_modification_persistent_id,
-                                clip.start_sec,
-                                clip.length_sec,
-                            ),
-                    },
-                ))
-            })
-            .collect();
-        if unresolved > 0 {
-            hifishifter_kernel::log_limiter::emit_limited_key(
-                log::Level::Warn,
-                "ara.identity.unresolved-clip",
-                format_args!(
-                    "[ara] {unresolved} of {} clip(s) have no region identity this round \
-                     (first: {:?}); they project no curves until the derived tables catch up",
-                    timeline.clips.len(),
-                    first_unresolved
-                ),
-            );
+        // 【触发点①：存档到达】此前合并只有一个入口（`prepare_renderers`），而它在
+        // "宿主不再收口"时不会再来 —— 于是载荷永远躺在队列里。这里排一次尝试：
+        // 图已经就绪的场合（撤销、切屏）当场就能合入。
+        if let Err(error) = self.merge_archive_restore() {
+            log::warn!("[ara] archive merge on arrival failed: {error}");
         }
-        Ok(identities)
+        Ok(())
     }
     /// 文档惰性持有唯一原编辑actor；actor只弱引用文档，组件不持第二份history。
     pub(crate) fn editor_session(
@@ -1461,6 +1713,20 @@ impl DocumentSession {
     ) -> Result<String, String> {
         let mut timeline = self.workspace_timeline_locked()?;
         edits.apply(&mut timeline);
+        // 指纹必须反映权威合成后的显示；否则用户一笔写入后投影不变，
+        // `workspace_view`/`accept_workspace_edits` 会拿旧水位判冲突。
+        if !edits.authority.is_pristine() {
+            let roots = timeline
+                .tracks
+                .iter()
+                .filter(|track| track.parent_id.is_none())
+                .map(|track| track.id.clone())
+                .collect::<Vec<_>>();
+            for root in roots {
+                let view = self.compose_param_view_with(&timeline, edits, &root);
+                timeline.params_by_root_track.insert(root, view.params);
+            }
+        }
         // 【为什么音阶也在指纹里】`ensure_loaded` 靠"版本没变 + 本指纹相同"早退
         // （`editor/session.rs:819-843`）。音阶与音阶变化点都是**会影响渲染结果**的
         // 插件自有状态（`scale-signature` 进渲染缓存键），却不在版本号里 —— 不进指纹
@@ -1538,22 +1804,6 @@ impl DocumentSession {
         }
     }
 
-    /// 记下一次已确认分割的子段窗口来源（重复登记是幂等的；超上界丢最旧，见
-    /// [`SplitWindows`]）。
-    pub(crate) fn note_split_window(&self, child: &str, source: SplitWindowSource) {
-        if child.is_empty() {
-            return;
-        }
-        self.split_windows
-            .lock_or_recover()
-            .insert(child.to_owned(), source);
-    }
-
-    /// 当前登记了多少条"分割子段窗口来源"（诊断用）。
-    pub(crate) fn split_window_count(&self) -> usize {
-        self.split_windows.lock_or_recover().len()
-    }
-
     /// 当前登记表快照（清单枚举用；返回副本以免持锁回调宿主）。
     pub(crate) fn adopted_track_ids(&self) -> Vec<String> {
         self.adopted_tracks.lock_or_recover().clone()
@@ -1574,17 +1824,16 @@ impl DocumentSession {
         let _transaction = self.transaction.lock_or_recover();
         let mut edits = self.edits.lock_or_recover();
         let mut timeline = self.workspace_timeline_locked()?;
+        // 【锁序】`edits → timeline → baseline → host facts`（文档声明的顺序）。
         edits.apply(&mut timeline);
         let geometry = self.ui_geometry_revision.load(Ordering::Acquire);
-        if self.resynced_geometry.load(Ordering::Acquire) != geometry {
-            self.resync_parameter_view_locked(&mut edits, &timeline)?;
-            self.resynced_geometry.store(geometry, Ordering::Release);
-            edits.apply(&mut timeline);
-        }
+        self.compose_root_view_locked(&mut edits, &mut timeline)?;
+        self.resynced_geometry.store(geometry, Ordering::Release);
         let projection = self.workspace_projection_locked(&edits)?;
         Ok(Arc::new(WorkspaceView {
             projection,
             params: Arc::new(timeline.params_by_root_track),
+            geometry_revision: geometry,
         }))
     }
     /// 原GUI改变素材选择只换可见source投影；不修改参数authority、history或渲染generation。
@@ -1608,27 +1857,228 @@ impl DocumentSession {
         self.project_private_group_view(&mut grouped, &edits)?;
         Ok(grouped.params_by_root_track)
     }
-    /// 从图集重新派生"视图"这一层（`edits.params`）。
+    /// 把「锁定参数线」的当前设置落到**既有**权威上（纯元数据、幂等）。
     ///
-    /// 【为什么必须与读视图在同一个事务里】`edits.params` 既是编辑器看到的数组，
-    /// 也是 `workspace_projection_locked` 指纹的一部分。只要几何变了（方向 / Loop /
-    /// 裁剪 / 分割）而这一层没重建，指纹就与"编辑器真正看到的"脱钩 —— 那正是
-    /// "参数线停在旧方向"与"提交闸在错误的时间点判定冲突"的同一个根。
+    /// 【为什么它在投影之前跑】设置变了 ⇒ 曲线的**可见位置**必须立刻改变，而这不需要
+    /// 一次模型收口、不需要烘焙、也不需要用户先分割一次。旧实现只在
+    /// `remap_and_log`（模型收口）里读这个设置，于是"移动 item 不跟随、分割之后才对"。
     ///
-    /// 【为什么按帧合并】投影可能只覆盖半条根轨（某条 clip 这一轮没有身份）。整值
-    /// 替换会用"一段默认值 + 半条真曲线"盖掉用户原来的整条曲线。
+    /// 【为什么按设置代次早退】本函数在每次读工作区时都被调用（33–400 ms 一次）。
+    /// 代次没变时它只付一次原子读的代价。
+    ///
+    /// 【L5：代次只在**真的落地**之后推进】旧实现无论 `set_placement` 有没有改动都写
+    /// stamp，于是"这一轮没有活几何"会让开关被永久吞掉。现在只要还有权威在等几何，
+    /// 就不推进代次 —— 下一轮还会再试。
+    /// 从图集 + 基线**合成**这一轮每根轨的显示数组，并装进时间线。
+    ///
+    /// 【为什么必须与读视图在同一个事务里】`timeline.params_by_root_track` 既是编辑器
+    /// 看到的数组，也是 `workspace_projection_locked` 指纹的一部分。只要几何变了
+    /// （方向 / Loop / 裁剪 / 分割）而这一层没重建，指纹就与"编辑器真正看到的"脱钩 ——
+    /// 那正是"参数线停在旧方向"与"提交闸在错误的时间点判定冲突"的同一个根。
+    ///
+    /// 【为什么是"整根替换"而不是"按帧合并"】合成的输入已经包含基线层：未编辑帧就是
+    /// 这一代分析结果。因此输出**就是**完整显示，不需要再猜"这一轮哪些帧有信息"。
+    pub(crate) fn compose_root_view_locked(
+        &self,
+        edits: &mut crate::state_channel::EditState,
+        timeline: &mut hifishifter_kernel::state::TimelineState,
+    ) -> Result<(), String> {
+        self.materialize_views_locked(edits, timeline);
+        Ok(())
+    }
+
+    /// 把基线层装进时间线的派生字段（显示层的唯一来源）。
+    pub(crate) fn install_baseline_locked(
+        &self,
+        timeline: &mut hifishifter_kernel::state::TimelineState,
+    ) {
+        let baseline = self.baseline.lock_or_recover();
+        for (root, base) in baseline.iter() {
+            if !base.is_ready() {
+                continue;
+            }
+            let params = timeline
+                .params_by_root_track
+                .entry(root.clone())
+                .or_default();
+            params.frame_period_ms = base.frame_period_ms;
+            params.pitch_orig = base.pitch_orig.clone();
+            params.dyn_orig = base.dyn_orig.clone();
+            params.tension_orig = base.tension_orig.clone();
+            params.pitch_orig_key = base.pitch_key.clone();
+            params.dyn_orig_key = base.dyn_key.clone();
+        }
+    }
+
+    /// 这一代基线的快照（随视图交付给提交闸）。
+    pub(crate) fn baseline_snapshot(
+        &self,
+    ) -> std::collections::BTreeMap<String, hifishifter_kernel::editor::param_authority::RootBaseline>
+    {
+        self.baseline.lock_or_recover().clone()
+    }
+
+    /// 发布一条根轨的新基线（分析流水线的**唯一**写入口）。
+    ///
+    /// 【为什么不在这里发通知】它可能跑在 ARA 模型线程上；回调宿主会重入。
+    /// 通知由调用方在事务外发（见 `EditorSession::complete_cached_analysis`）。
+    pub(crate) fn publish_baseline(
+        &self,
+        root: &str,
+        baseline: hifishifter_kernel::editor::param_authority::RootBaseline,
+    ) -> bool {
+        let mut map = self.baseline.lock_or_recover();
+        let changed = map.get(root).is_none_or(|old| {
+            old.pitch_orig != baseline.pitch_orig
+                || old.dyn_orig != baseline.dyn_orig
+                || old.tension_orig != baseline.tension_orig
+                || old.frame_period_ms != baseline.frame_period_ms
+                || old.pitch_key != baseline.pitch_key
+                || old.dyn_key != baseline.dyn_key
+                // 【布局键必须参与比较】数组完全相同时（例如只移动了 clip 但内容
+                // 恰好一致），键变了也意味着"这份基线描述的是旧布局"，必须重发。
+                || old.layout_key != baseline.layout_key
+                || old.content_key != baseline.content_key
+        });
+        if changed {
+            let mut baseline = baseline;
+            baseline.revision = map
+                .get(root)
+                .map(|old| old.revision.saturating_add(1))
+                .unwrap_or(1);
+            map.insert(root.to_owned(), baseline);
+        }
+        changed
+    }
+
+    /// 取一份**当前布局**的基线；必要时从内容缓存同步重组装并发布。
+    ///
+    /// 【为什么是纯函数式】输入只有 `timeline`（几何 + 轨道设置）与内容缓存。
+    /// 绝不读 `edits`、绝不读显示数组 —— 那正是"用户编辑被固化成原始值"的入口。
+    ///
+    /// 【为什么可以同步做】`assemble_*_from_cache` 只是按当前 clip 窗口把 per-clip
+    /// 缓存曲线搬进根数组（memcpy 级），不跑任何推理。代价与"取一次参数数组"同级。
+    pub(crate) fn baseline_for(
+        &self,
+        root: &str,
+        timeline: &hifishifter_kernel::state::TimelineState,
+    ) -> hifishifter_kernel::editor::param_authority::RootBaseline {
+        use hifishifter_kernel::editor::param_authority::RootBaseline;
+        use hifishifter_kernel::pitch_analysis::schedule::assemble_pitch_orig_from_cache;
+        use hifishifter_kernel::pitch_analysis::{
+            build_root_pitch_key, build_root_pitch_layout_key,
+        };
+        let layout = build_root_pitch_layout_key(timeline, root);
+        let stored = self.baseline.lock_or_recover().get(root).cloned();
+        if let Some(base) = &stored {
+            if base.is_ready() && base.layout_key.as_deref() == Some(layout.as_str()) {
+                return base.clone();
+            }
+            // 【已有基线但布局变了】不要在这里反复尝试文档侧组装：ARA 文档时间线的
+            // `source_path` 是 ARA source 的 persistent id（不是文件路径），内容缓存
+            // 按真实路径建键，组装必然全 0；每帧重试等于每帧分配一条整长数组。
+            // 正确的做法是等分析侧（它有真实路径）发布带新布局键的基线。
+            if base.is_ready() && base.layout_key.is_some() {
+                let mut stale = base.clone();
+                stale.analysis_pending = true;
+                return stale;
+            }
+        }
+        let mut rebuilt = RootBaseline {
+            frame_period_ms: timeline.frame_period_ms(),
+            layout_key: Some(layout),
+            content_key: stored.as_ref().and_then(|base| base.content_key.clone()),
+            ..Default::default()
+        };
+        // 【全 0 不算就绪】`assemble_pitch_orig_from_cache` 在没有 clip 时也返回一列 0；
+        // 把它当 ready 会让 `mixdown` 的 `is_empty` 守卫失效（"看起来有源曲线、
+        // 实际全是 0" ⇒ 静音 / 纯气声）。必须有非零样本才算真的组装出来了。
+        if let Some((pitch, _, _)) = assemble_pitch_orig_from_cache(timeline, root) {
+            if pitch.iter().any(|value| *value > 0.0) {
+                rebuilt.pitch_orig = pitch;
+                rebuilt.content_key = Some(build_root_pitch_key(timeline, root));
+                rebuilt.pitch_key = rebuilt.content_key.clone();
+                rebuilt.ready = true;
+            }
+        }
+        let (dyn_curve, _) =
+            hifishifter_kernel::pitch_analysis::dyn_analysis::assemble_dyn_orig_from_cache(
+                timeline, root,
+            );
+        if dyn_curve.iter().any(|value| *value > 0.0) {
+            rebuilt.dyn_orig = dyn_curve;
+            rebuilt.dyn_key = Some(build_root_pitch_key(timeline, root));
+            rebuilt.ready = true;
+        }
+        if !rebuilt.ready {
+            // 内容缓存还没建立：保留上一份（**必须是真的就绪的那一份**）并标记
+            // pending，由分析完成补齐。未就绪的 stored 不能回退给它 —— 它的
+            // pitch_orig 可能只是"占位数组"，拿它合成会把占位值当成原始曲线。
+            if let Some(mut stale) = stored {
+                stale.analysis_pending = true;
+                return stale;
+            }
+            return rebuilt;
+        }
+        rebuilt.revision = 1;
+        self.publish_baseline(root, rebuilt.clone());
+        rebuilt
+    }
+
+    /// 这一根是否已经有一份**当前几何**的基线。
+    pub(crate) fn baseline_is_ready(&self, root: &str) -> bool {
+        self.baseline
+            .lock_or_recover()
+            .get(root)
+            .is_some_and(|baseline| baseline.is_ready())
+    }
+
+    /// 宿主清单是否可用（呈现层据此决定"缺席"能不能当"删除"）。
+    pub(crate) fn inventory_is_complete(&self) -> bool {
+        !self.inventory_incomplete.load(Ordering::Acquire)
+    }
+
+    /// 一条"带宿主身份、但本轮清单里没有"的 clip 要不要继续留在画布上。
+    ///
+    /// 【判据是"见过没有"，不是"连续几轮没见过"】
+    /// * **见过**（上一轮还在清单里）⇒ 现在没了就是**删除**，立即撤下；
+    /// * **从没见过** ⇒ 这是"清单还没枚举到它"（身份刚升级、枚举滞后），保留；
+    /// * 清单本轮**不完整** ⇒ 一律保留（枚举失败不能当删除证据）。
+    ///
+    /// 这条判据同时满足两个相反的真实需求：升级滞后必须留下（否则"原轨 clip
+    /// 全消失"），删除必须立刻消失（否则"幽灵 clip"）。权威一律不动 —— 撤销删除
+    /// 之后 clip 会带着曲线原样回来。
+    pub(crate) fn orphan_within_grace(&self, clip_id: &str, seen: bool, complete: bool) -> bool {
+        /// "从未见过"的哨兵：与"见过（0）"区分开。
+        const NEVER_SEEN: u32 = u32::MAX;
+        let mut streaks = self.orphan_streak.lock_or_recover();
+        if seen {
+            streaks.insert(clip_id.to_owned(), 0);
+            return true;
+        }
+        if !complete {
+            return true;
+        }
+        match streaks.get(clip_id).copied() {
+            Some(0) => false,
+            Some(_) => true,
+            None => {
+                streaks.insert(clip_id.to_owned(), NEVER_SEEN);
+                true
+            }
+        }
+    }
+
+    /// 从图集重新派生"视图"这一层（`timeline.params_by_root_track`）。
     pub(crate) fn resync_parameter_view_locked(
         &self,
         edits: &mut crate::state_channel::EditState,
-        timeline: &hifishifter_kernel::state::TimelineState,
+        timeline: &mut hifishifter_kernel::state::TimelineState,
     ) -> Result<(), String> {
-        if edits.atlas.is_empty() || edits.needs_rebind {
+        if edits.needs_rebind {
             return Ok(());
         }
-        let identities = self.parameter_identities_locked(timeline)?;
-        let roots = edits.atlas.project_root_records(timeline, &identities)?;
-        crate::editor::parameter_atlas::merge_root_projection(&mut edits.params, roots);
-        Ok(())
+        self.compose_root_view_locked(edits, timeline)
     }
 
     /// 短事务同时冻结授权、参数、PCM和三个版本，分析副本的文件IO由actor随后执行。
@@ -1640,6 +2090,12 @@ impl DocumentSession {
         // 于是一份坏存档会让整份工作区快照失败 ⇒ 界面停在空时间线（用户看到的不是
         // "参数没读回来"，而是"什么都没有"）。恢复的载荷与显示的载荷是两件事：
         // 前者失败只该改读数，后者必须照常产出。
+        // 【触发点④：兜底心跳】编辑器每 33–400 ms 读一次工作区。合入失败的唯一成因是
+        // "宿主图还没长成"，而那一刻一定会过去 —— 让这条既有心跳把它带过去，比另开
+        // 一个定时器简单，也不会在宿主静止时白跑（内部有 1 s 退避）。
+        if let Err(error) = self.merge_archive_restore_locked() {
+            log::warn!("[ara] archive merge on snapshot failed: {error}");
+        }
         for owner in self.renderer_owners() {
             if let Err(error) = owner.merge_pending_restore(self) {
                 log::warn!("[ara] instance state unresolved: {error}");
@@ -1660,6 +2116,8 @@ impl DocumentSession {
         // （那会让并发的 apply 判成 workspace changed）。视图的重建放在两个真正的
         // "几何变了"的写点上：`remap_and_log` 与 `refresh_ui_geometry`。
         edits.apply(&mut timeline);
+        // 显示是 `(authority, baseline, geometry)` 的纯函数；读路径只物化派生缓存。
+        self.materialize_views_locked(&mut edits, &mut timeline);
         // 【为什么先只取一份 id 集合、立刻释放锁】`source_failures` 与 `edit_sources`
         // 此前从不同时持有；`media_in_flight_items` 的锁序是
         // `regions → region_items → source_failures`。在这里引入 `edit_sources →
@@ -1698,9 +2156,14 @@ impl DocumentSession {
         // 【G1】这是编辑器**真正会看到**的那份参数视图 —— 连同它的指纹一起交出去。
         // 冲突重基的唯一基线就是它（见 `accept_workspace_edits_with_groups`）；
         // 它随快照一起返回，而不是按指纹存进某张表里等提交时查回来。
+        // 读路径不重投影，但仍把与当前数组同代的根投影交出去；adopt 只做
+        // 按帧合并，不会用一份默认值覆盖整根。
+        // 快照是读路径，不负责重投影；param_roots 只在 refresh_ui_geometry 的
+        // workspace_view 里生成，避免读一次工作区也去锁 host facts。
         let view = Arc::new(WorkspaceView {
             projection,
             params: Arc::new(timeline.params_by_root_track.clone()),
+            geometry_revision: self.ui_geometry_revision.load(Ordering::Acquire),
         });
         Ok((
             WorkspaceSnapshot {
@@ -1741,6 +2204,61 @@ impl DocumentSession {
         }
         Ok(())
     }
+    /// 提交载荷的**身份**校验：只问"这是不是同一批 clip / 轨 / 素材"。
+    ///
+    /// 【为什么不是整份时间线相等】位置、长度、源窗、淡变、增益都是宿主拥有的字段；
+    /// 用户画线期间宿主完全可能移动 / 拉伸 item。把这些字段纳入判据，等于把一次正常
+    /// 的并发几何变化判成冲突（真机 15 分钟里 11 次 `Conflict: host geometry changed`）。
+    /// 身份不同才是真的冲突：那说明载荷来自另一份工程状态。
+    fn validate_workspace_identity(
+        host: &hifishifter_kernel::state::TimelineState,
+        client: &hifishifter_kernel::state::TimelineState,
+    ) -> Result<(), String> {
+        fn conflict(what: &str) -> Result<(), String> {
+            Err(format!(
+                "{} workspace {what} is read-only",
+                crate::editor::errors::CONFLICT_PREFIX
+            ))
+        }
+        let tracks = |timeline: &hifishifter_kernel::state::TimelineState| {
+            timeline
+                .tracks
+                .iter()
+                .map(|track| track.id.clone())
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        if tracks(host) != tracks(client) {
+            return conflict("track set");
+        }
+        let clips = |timeline: &hifishifter_kernel::state::TimelineState| {
+            timeline
+                .clips
+                .iter()
+                .map(|clip| clip.id.clone())
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        if clips(host) != clips(client) {
+            return conflict("clip set");
+        }
+        for clip in &client.clips {
+            let Some(original) = host.clips.iter().find(|known| known.id == clip.id) else {
+                return conflict("clip set");
+            };
+            let same_takes = original.takes.len() == clip.takes.len()
+                && original
+                    .takes
+                    .iter()
+                    .zip(clip.takes.iter())
+                    .all(|(a, b)| a.source_path == b.source_path);
+            if original.track_id != clip.track_id
+                || original.active_take_id != clip.active_take_id
+                || !same_takes
+            {
+                return conflict("clip identity");
+            }
+        }
+        Ok(())
+    }
     /// 全工作区在单事务校验scope/模型/曲线并接受；未知范围或几何不静默忽略。
     // 整批接受入口保留，供不分组调用方使用。
     #[cfg(test)]
@@ -1771,10 +2289,17 @@ impl DocumentSession {
         let model = self.revision.load(Ordering::Acquire);
         if model != base_model {
             return Err(format!(
-                "{} model changed; local curves preserved",
-                crate::editor::errors::CONFLICT_PREFIX
+                "{} {}",
+                crate::editor::errors::CONFLICT_PREFIX,
+                crate::editor::errors::MODEL_CHANGED
             ));
         }
+        // 【为什么不再按几何代次拒绝】差分域是**编辑器看到的那份几何**：`capture` 的
+        // 第一个参数就是 `client`，它带着用户画线时的 clip 窗口。宿主在这期间移动 /
+        // 拉伸 item 只影响"这一笔在工程上看起来在哪"，那是**投影**的职责，下一次
+        // `compose_root_views` 用新几何重算即可。旧实现在这里硬拒，于是用户每在宿主
+        // 里动一下 item、回到插件画一笔就撞一次 `Conflict: host geometry changed`
+        // （真机 15 分钟里 11 次）。可重基的并发几何变化不是冲突。
         let host = self.workspace_timeline_locked()?;
         // 【为什么这里用**检查版**取锁】这是"读改写并影响宿主"的路径：`candidate` 由
         // `edits` 推导，最后写回 `*edits`。若上一次持锁者在 `merge`/`capture_changes`
@@ -1810,28 +2335,58 @@ impl DocumentSession {
         // 上；拒绝 = 用户这次编辑整条丢弃）。现在基线随视图一起交付，这里只剩读数：
         // 投影动过没有，只决定日志里的 rebase=yes/no。
         let rebased = current_projection != baseline.projection;
-        Self::validate_workspace_geometry(&host, client)?;
+        // 几何代次只作**读数**：它变了不代表冲突（见上），但值得留在日志里 ——
+        // "宿主在画线期间动了几何"是排查参数线错位时最常需要的现场。
+        let geometry_moved =
+            baseline.geometry_revision != self.ui_geometry_revision.load(Ordering::Acquire);
+        // 【为什么只校验身份】位置 / 长度 / 源窗 / 淡变都是宿主拥有的字段，客户端
+        // 原样回传即可；把它们纳入"逐字相等"会让每一次宿主几何刷新都变成提交失败。
+        // 真正必须守住的是**身份**：不许借这份载荷新增 / 删除 clip 或轨，也不许把
+        // 一条 clip 换成另一段素材。
+        Self::validate_workspace_identity(&host, client)?;
         let mut candidate = edits.merge(&host, client, edits.revision)?;
         candidate.reconcile(&self.track_bindings.lock_or_recover())?;
-        let identities = self.parameter_identities_locked(&host)?;
+        // 【不再有"per-clip 身份"这一层】它唯一的用途是把曲线按 clip 归属索引
+        // （`RegionIdentity`）。权威按根轨索引，曲线与 clip 的对应关系由**工程时间**
+        // 决定 —— 不需要一张身份表。`parameter_identities_locked` 随图集一起删除。
+
         // 【U-4：基线**只能**来自"编辑器真正读到的那一份"】
         //
         // `capture_changes` 只记录 `client` 与这一份的**差异**。基线一旦不是编辑器
         // 看到的那份，判据就变成"当前视图与某个别的视图不同" —— 而"不同"里既有用户的
         // 编辑，也有宿主移动造成的几何差异、以及投影范围的变化。把它当成用户意图写回
         // 源曲线，就是用户看到的"编辑一下 clip，参数线被重置"。
-        let previous_view = baseline.params.as_ref();
+        // 【客户端 = 编辑器这一轮交上来的数组】`baseline.params` 是**上一轮**的视图，
+        // 拿它当客户端等于"自己和自己比" —— 差分恒空，用户的笔画永远进不了权威。
 
-        candidate.atlas = edits
-            .atlas
-            .capture_changes(client, &identities, previous_view)?;
+        // 【曲线只由显式写入产生】`set_param_frames` 是唯一写入口（带 `present` 位图），
+        // 这里只合并轨道设置 / 分组等非曲线字段。绝不再把客户端整条显示数组做差分 ——
+        // 那会把几何差异与未编辑原值一起固化成编辑。
         if rebased {
             log::info!(
-                "[ara] workspace rebase: baseline={} current={} roots={}",
+                "[ara] workspace rebase: baseline={} current={} roots={} geometry_moved={geometry_moved}",
                 &baseline.projection[..baseline.projection.len().min(8)],
                 &current_projection[..current_projection.len().min(8)],
                 baseline.params.len()
             );
+        }
+        // 【显示层唯一写者】权威 + 基线 + 当前几何重新合成。客户端数组**不是**输入 ——
+        // 它只是"用户此刻看到的东西"，与权威的差由 `set_param_frames` 显式提交。
+        {
+            let mut composed = std::collections::BTreeMap::new();
+            let roots = host
+                .tracks
+                .iter()
+                .filter(|track| track.parent_id.is_none())
+                .map(|track| track.id.clone())
+                .collect::<Vec<_>>();
+            for root in roots {
+                let view = self.compose_param_view_with(&host, &candidate, &root);
+                composed.insert(root, view.params);
+            }
+            if !composed.is_empty() {
+                candidate.params = composed;
+            }
         }
         if let Some(groups) = groups {
             groups.validate()?;
@@ -1845,6 +2400,7 @@ impl DocumentSession {
         let view = Arc::new(WorkspaceView {
             projection,
             params: Arc::new(candidate.params.clone()),
+            geometry_revision: self.ui_geometry_revision.load(Ordering::Acquire),
         });
         *edits = candidate;
         // 用户的参数编辑落盘了 ⇒ 告诉宿主"这些 modification 的持久状态变了"。
@@ -1857,49 +2413,85 @@ impl DocumentSession {
     #[cfg(test)]
     pub(crate) fn apply_workspace_edits(
         &self,
-        base_edit: u64,
-        base_model: u64,
-        previous: &str,
         cancel: Arc<AtomicBool>,
         current: impl Fn() -> bool,
     ) -> Result<(), String> {
-        self.apply_workspace_edits_with_progress(
-            base_edit, base_model, previous, cancel, current, None,
-        )
+        self.apply_workspace_edits_with_progress(cancel, current, None)
     }
+    /// 这一轮该渲整段还是只渲播放头附近的一段。
+    ///
+    /// 【为什么需要】整段物化的内存与跨度成正比。跨度装得下就整段渲（与今天逐字节
+    /// 相同）；装不下就只渲播放头附近 —— 跨度于是只决定"渲几段"，不再决定"能不能渲"。
+    /// 窗口之外的帧在快照里不声明覆盖，播放侧按既有规则退回宿主原声。
+    ///
+    /// 【为什么锚在播放头】用户听到的是当前位置；把有限的内存花在他正在听的地方，
+    /// 比"从 0 开始渲一段然后永远听不到后面"有用得多。
+    fn plan_render_window(
+        &self,
+        input: &super::input::RenderInput,
+        owner: &ExtensionOwner,
+    ) -> Option<(f64, f64)> {
+        let timeline = input.timeline.as_ref()?;
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for clip in &timeline.clips {
+            if !(clip.start_sec.is_finite() && clip.length_sec.is_finite()) {
+                continue;
+            }
+            lo = lo.min(clip.start_sec);
+            hi = hi.max(clip.start_sec + clip.length_sec);
+        }
+        if !(lo.is_finite() && hi.is_finite()) {
+            return None;
+        }
+        let lo = lo.max(0.0);
+        if hi <= lo {
+            return None;
+        }
+        let budget = super::budget::global_budget();
+        let available = budget.limit().saturating_sub(budget.used());
+        if input.estimate_bytes(hi - lo) <= available {
+            // 整段装得下：保持今天的行为，逐字节不变。
+            return None;
+        }
+        let per_sec = input.estimate_bytes(1.0).max(1);
+        let window_sec = (available / per_sec).clamp(8, 120) as f64;
+        let rate = owner.setup_sample_rate().max(1.0);
+        let anchor = owner
+            .snapshots
+            .first()
+            .and_then(|publisher| publisher.last_sample_seconds(rate))
+            .unwrap_or(lo);
+        let start = (anchor - 2.0).max(lo);
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Warn,
+            "ara.render.window",
+            format_args!(
+                "[render] span={:.1}s does not fit in the PCM budget (available={available});                  rendering a {window_sec:.0}s window from {start:.1}s instead",
+                hi - lo
+            ),
+        );
+        Some((start, start + window_sec))
+    }
+
     pub(crate) fn apply_workspace_edits_with_progress(
         &self,
-        base_edit: u64,
-        base_model: u64,
-        previous: &str,
         cancel: Arc<AtomicBool>,
         current: impl Fn() -> bool,
         progress: Option<hifishifter_kernel::mixdown::ProgressCallback>,
     ) -> Result<(), String> {
-        let (edit, epoch, scope, inputs) = {
+        let (ticket, inputs) = {
             let _transaction = self.transaction.lock_or_recover();
-            // 【为什么不再比较 `revision != base_model`】`revision` 是"模型被失效过几次"的
-            // 计数，宿主一次编辑会把它推进多次（分割在 ARA 侧是 destroy + create + create，
-            // 每次 `clear_renderers()` 都 +1）。用它做冲突判据，等于把"宿主正常的多次交付"
-            // 判成冲突：实测 Cubase 15 上这就报成 `Conflict: host model changed during
-            // automatic apply`，8 次重试后自动渲染永久停摆。
-            //
-            // 真正的正确性判据在下方复核段：`edits.revision` / `render_epoch` /
-            // `scope_revision` / `assigned_regions()` 任一变化都会走 `superseded`（可重试、
-            // 不写 error）。而 `render_epoch` 与 `revision` 是**同时**推进的
-            // （`clear_renderers` 是唯一同时推进两者的原语），所以这里去掉 `revision`
-            // 不丢任何信息 —— 只是不再做那个会误报的快速失败。
             if !self.is_alive() || !self.ready.load(Ordering::Acquire) {
                 return Err(format!(
                     "{} model changed during automatic apply",
                     crate::editor::errors::CONFLICT_PREFIX
                 ));
             }
+            // 【入口自取】这一刻之后发生的变化才叫"并发"；之前的变化（例如用户刚画完
+            // 那一笔）是这次渲染的**输入**，不是冲突。
+            let ticket = self.render_ticket_locked();
             let edits = self.edits.lock_or_recover().clone();
-            if edits.revision != base_edit || self.workspace_projection_locked(&edits)? != previous
-            {
-                return Err("Conflict: workspace changed during automatic apply".into());
-            }
             let inputs = self
                 .renderer_owners()
                 .into_iter()
@@ -1909,39 +2501,30 @@ impl DocumentSession {
                     Ok((owner, keys, input))
                 })
                 .collect::<Result<Vec<_>, String>>()?;
-            (
-                edits.revision,
-                self.render_epoch.load(Ordering::Acquire),
-                self.scope_revision.load(Ordering::Acquire),
-                inputs,
-            )
+            (ticket, inputs)
         };
         if !current() {
             return Err("automatic apply superseded".into());
         }
         let mut prepared = Vec::new();
-        for (owner, keys, input) in inputs {
+        for (owner, keys, mut input) in inputs {
             for publisher in &owner.snapshots {
                 publisher.collect_retired();
             }
-            let mut snapshots = input.render_with_progress(cancel.clone(), progress.clone())?;
-            super::snapshot::compact_prepared(&mut snapshots)?;
+            let window = self.plan_render_window(&input, owner.as_ref());
+            input.window = window;
+            let snapshots = input.render_with_progress(cancel.clone(), progress.clone())?;
             prepared.push((owner, keys, snapshots));
         }
         let _transaction = self.transaction.lock_or_recover();
-        // 复核只看"这份已算好的东西还能不能用"：活着、仍就绪，且下面那组
-        // 版本/分配没有变。`revision` 不参与 —— 理由同前一处（见上面的说明）。
+        // 复核只看"这份已算好的东西还能不能用"：活着、仍就绪，且票据没有变。
         if !self.is_alive() || !self.ready.load(Ordering::Acquire) {
             return Err(format!(
                 "{} model changed during automatic apply",
                 crate::editor::errors::CONFLICT_PREFIX
             ));
         }
-        if !current()
-            || self.edits.lock_or_recover().revision != edit
-            || self.render_epoch.load(Ordering::Acquire) != epoch
-            || self.scope_revision.load(Ordering::Acquire) != scope
-        {
+        if !current() || self.render_ticket_locked() != ticket {
             return Err("automatic apply superseded".into());
         }
         for (owner, keys, snapshots) in &prepared {
@@ -1960,13 +2543,14 @@ impl DocumentSession {
         for (owner, keys, snapshots) in prepared {
             for (publisher, snapshot) in owner.snapshots.iter().zip(snapshots) {
                 publisher
-                    .publish(snapshot)
+                    .publish_shared(snapshot)
                     .map_err(|e| format!("snapshot publish failed: {e:?}"))?;
             }
-            owner.record_prepared(base_model, edit, epoch, scope, keys);
+            owner.record_prepared(ticket.model, ticket.edit, ticket.epoch, ticket.scope, keys);
         }
         Ok(())
     }
+
     /// 宿主专属API调用前核对真实文档仍存活，销毁后的view不能沿旧project指针查询。
     pub(crate) fn is_alive(&self) -> bool {
         self.alive.load(Ordering::Acquire)
@@ -1983,6 +2567,804 @@ impl DocumentSession {
             // 冷恢复后首轮跳过的窗口由 restore 路径自己的 inventory 推进兜住。
             ..Default::default()
         })
+    }
+
+    /// 宿主几何刷新后调用：锁定开启时变换 run，关闭时只记账。
+    ///
+    /// 【为什么是 partial 帧】这里的 `workspace_timeline_locked` 已经按本实例的
+    /// assignment 过滤过；把它当完整帧会让"这一轮没分配到的 clip"从日志里消失。
+    /// 模型收口（`remap_and_log`）那条路径才提供完整帧。
+    pub(crate) fn reconcile_parameter_geometry(
+        &self,
+    ) -> Result<hifishifter_kernel::editor::param_geometry::TransformReport, String> {
+        let _transaction = self.transaction.lock_or_recover();
+        let host = self.workspace_timeline_locked()?;
+        let frame = self.geometry_frame(&host, false);
+        let mut edits = self.edits.lock_or_recover();
+        self.reconcile_parameter_geometry_locked(&frame, &mut edits)
+    }
+
+    /// 这个区间里有没有任何 run（"这次重置会不会真的改东西"）。
+    ///
+    /// 只取 `edits`，不取时间线 —— 不给锁序图加新边。
+    pub(crate) fn authority_has_runs_in(
+        &self,
+        track_id: &str,
+        param: &str,
+        start_frame: u32,
+        frame_count: u32,
+    ) -> bool {
+        let Ok(host) = self.workspace_timeline_locked() else {
+            return false;
+        };
+        let Some(root) = host.resolve_root_track_id(track_id) else {
+            return false;
+        };
+        let edits = self.edits.lock_or_recover();
+        edits
+            .authority
+            .has_runs_in(&root, param, start_frame as usize, frame_count as usize)
+    }
+
+    /// 所有 clip 的渲染局部参数：从根视图切窗，不按源窗口重建曲线。
+    pub(crate) fn compose_clip_params_locked(
+        &self,
+        timeline: &hifishifter_kernel::state::TimelineState,
+        edits: &crate::state_channel::EditState,
+    ) -> Result<
+        std::collections::BTreeMap<String, hifishifter_kernel::state::TrackParamsState>,
+        String,
+    > {
+        let mut views = std::collections::BTreeMap::new();
+        let roots = timeline
+            .clips
+            .iter()
+            .filter_map(|clip| timeline.resolve_root_track_id(&clip.track_id))
+            .collect::<std::collections::BTreeSet<_>>();
+        for root in roots {
+            views.insert(
+                root.clone(),
+                self.compose_param_view_with(timeline, edits, &root),
+            );
+        }
+        Ok(timeline
+            .clips
+            .iter()
+            .filter_map(|clip| {
+                let root = timeline.resolve_root_track_id(&clip.track_id)?;
+                let view = views.get(&root)?;
+                Some((
+                    clip.id.clone(),
+                    hifishifter_kernel::editor::param_authority::compose_clip_params(
+                        view,
+                        clip,
+                        view.params.frame_period_ms,
+                    ),
+                ))
+            })
+            .collect())
+    }
+
+    /// 取一份权威快照（undo 步骤用）。
+    pub(crate) fn authority_snapshot(
+        &self,
+    ) -> hifishifter_kernel::editor::param_authority::ParamAuthority {
+        self.edits.lock_or_recover().authority.clone()
+    }
+
+    /// 用历史快照整体替换权威，然后失效派生视图。
+    pub(crate) fn replace_authority(
+        &self,
+        authority: hifishifter_kernel::editor::param_authority::ParamAuthority,
+    ) -> Result<(), String> {
+        let _transaction = self.transaction.lock_or_recover();
+        let mut edits = self.edits.lock_or_recover();
+        let mut authority = authority;
+        authority.sanitize();
+        edits.authority = authority;
+        edits.revision = edits.revision.saturating_add(1);
+        self.render_epoch.fetch_add(1, Ordering::AcqRel);
+        let mut host = self.workspace_timeline_locked()?;
+        self.materialize_views_locked(&mut edits, &mut host);
+        drop(edits);
+        self.notify_parameters_changed();
+        Ok(())
+    }
+
+    /// 渲染守卫票据（调用方必须已持 `transaction`）。
+    ///
+    /// 只碰 `edits` 与四个原子量，**不取 timeline** —— 因此不会给锁序图
+    /// （`transaction → edits → timeline → clip_ids`）加新边。
+    pub(crate) fn render_ticket_locked(&self) -> RenderTicket {
+        RenderTicket {
+            edit: self.edits.lock_or_recover().revision,
+            model: self.revision.load(Ordering::Acquire),
+            scope: self.scope_revision.load(Ordering::Acquire),
+            epoch: self.render_epoch.load(Ordering::Acquire),
+        }
+    }
+
+    /// 当前参数权威 revision（前端水位；只读）。
+    pub(crate) fn authority_revision(&self) -> u64 {
+        self.edits.lock_or_recover().authority.revision
+    }
+
+    /// 把"权威 + 基线"合成进时间线（只读 `edits`，不写派生缓存）。
+    ///
+    /// 【为什么需要它】`materialize_views_locked` 还要把结果写回 `edits.params`，而
+    /// 分组视图 / 选中源这几条路径只借到 `&EditState`。语义与它完全相同：每个根轨
+    /// 一次 `compose_param_view_with`，整根替换。**这是唯一允许的第二处合成入口**，
+    /// 且它与 `materialize_views_locked` 调的是同一个纯函数 —— 不存在两套算法。
+    pub(crate) fn materialize_into(
+        &self,
+        timeline: &mut hifishifter_kernel::state::TimelineState,
+        edits: &crate::state_channel::EditState,
+    ) {
+        let roots = timeline
+            .tracks
+            .iter()
+            .filter(|track| track.parent_id.is_none())
+            .map(|track| track.id.clone())
+            .collect::<Vec<_>>();
+        let composed = roots
+            .into_iter()
+            .map(|root| {
+                let params = self.compose_param_view_with(timeline, edits, &root).params;
+                (root, params)
+            })
+            .collect::<Vec<_>>();
+        for (root, params) in composed {
+            timeline.params_by_root_track.insert(root, params);
+        }
+    }
+
+    /// 为一条根轨合成参数视图；调用方已持有 `edits` 时使用这个版本。
+    pub(crate) fn compose_param_view_with(
+        &self,
+        timeline: &hifishifter_kernel::state::TimelineState,
+        edits: &crate::state_channel::EditState,
+        root: &str,
+    ) -> hifishifter_kernel::editor::param_authority::RootParamView {
+        let fp = if edits.authority.frame_period_ms.is_finite()
+            && edits.authority.frame_period_ms > 0.0
+        {
+            edits.authority.frame_period_ms
+        } else {
+            timeline.frame_period_ms()
+        };
+        // 【基线的唯一入口】按当前布局取；布局变了就地重组装（纯数组搬运）。
+        // 旧实现在这里读"上一次发布的基线"，于是移动 clip 之后仍然描述旧布局：
+        // 旧位置留着原曲线、新位置 `pitch_orig = 0`（渲染器判定"无源 F0"而直通原音）。
+        let mut baseline = self.baseline_for(root, timeline);
+        // 分析尚未给出数组时，权威仍必须能显示：用目标帧数撑出基线，未编辑帧是默认值。
+        let run_frames = edits
+            .authority
+            .root(root)
+            .map(|authority| {
+                authority
+                    .runs
+                    .values()
+                    .flat_map(|runs| runs.iter())
+                    .map(|run| ((run.end_sec() * 1000.0 / fp).ceil() as usize).saturating_add(1))
+                    .max()
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0);
+        // 【硬上限】`run_frames` 由存档/宿主给出的 run 位置推导；一条越界的 run
+        // 就能把"需要的帧数"推到十亿级，随后 `resize` 直接申请数十 GB。
+        // 与内核的"参数帧预算"同量级取 1M 帧：正常工程（约 1.4 小时 @5ms）够用，
+        // 越界数据只会被截断显示，不会把进程打死。
+        const MAX_VIEW_FRAMES: usize = 1_000_000;
+        let needed = timeline
+            .target_param_frames(fp)
+            .max(run_frames)
+            .max(baseline.frame_count())
+            .min(MAX_VIEW_FRAMES);
+        if baseline.frame_period_ms <= 0.0 || !baseline.frame_period_ms.is_finite() {
+            baseline.frame_period_ms = fp;
+        }
+        // 【空曲线保持为空】空数组是“这一层没有基线”的明确语义，不是“一列零”。
+        // 尤其 `dyn_orig`：把它补成 0 会让 -1 哨兵被解析成 0 dB 目标，整条 clip
+        // 的混音增益变成 0（冷恢复后“有编辑、没声音”）。只有真实存在的曲线才按
+        // 需要的帧数补零，避免越界采样；缺席的层继续缺席，由渲染器的默认分支处理。
+        if !baseline.pitch_orig.is_empty() && baseline.pitch_orig.len() < needed {
+            baseline.pitch_orig.resize(needed, 0.0);
+        }
+        if !baseline.dyn_orig.is_empty() && baseline.dyn_orig.len() < needed {
+            baseline.dyn_orig.resize(needed, 0.0);
+        }
+        if !baseline.tension_orig.is_empty() && baseline.tension_orig.len() < needed {
+            baseline.tension_orig.resize(needed, 0.0);
+        }
+        hifishifter_kernel::editor::param_authority::compose_root_view(
+            root,
+            &edits.authority,
+            &baseline,
+            self.ui_geometry_revision.load(Ordering::Acquire),
+        )
+    }
+
+    /// 唯一把 `authority + baseline` 写成显示数组的地方。只写派生缓存。
+    pub(crate) fn materialize_views_locked(
+        &self,
+        edits: &mut crate::state_channel::EditState,
+        timeline: &mut hifishifter_kernel::state::TimelineState,
+    ) -> std::collections::BTreeMap<
+        String,
+        hifishifter_kernel::editor::param_authority::RootParamView,
+    > {
+        let roots = timeline
+            .tracks
+            .iter()
+            .filter(|track| track.parent_id.is_none())
+            .map(|track| track.id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut views = std::collections::BTreeMap::new();
+        timeline
+            .params_by_root_track
+            .retain(|root, _| roots.contains(root) || edits.authority.roots.contains_key(root));
+        for root in roots {
+            let view = self.compose_param_view_with(timeline, edits, &root);
+            timeline
+                .params_by_root_track
+                .insert(root.clone(), view.params.clone());
+            views.insert(root, view);
+        }
+        edits.params = timeline.params_by_root_track.clone();
+        views
+    }
+
+    fn authority_param_default(
+        timeline: &hifishifter_kernel::state::TimelineState,
+        root: &str,
+        param: &str,
+    ) -> f32 {
+        use hifishifter_kernel::editor::param_authority::{
+            canonical_param_key, default_value_for_key, EXTRA_DYN, EXTRA_VOLUME,
+        };
+        let key = canonical_param_key(param);
+        if key == EXTRA_DYN {
+            return -1.0;
+        }
+        if key == EXTRA_VOLUME
+            || key == hifishifter_kernel::editor::param_authority::EXTRA_BREATH_GAIN
+        {
+            return 1.0;
+        }
+        let kind = timeline
+            .tracks
+            .iter()
+            .find(|track| track.id == root)
+            .map(|track| {
+                hifishifter_kernel::state::SynthPipelineKind::from_track_algo(
+                    &track.pitch_analysis_algo,
+                )
+            })
+            .unwrap_or(hifishifter_kernel::state::SynthPipelineKind::WorldVocoder);
+        hifishifter_kernel::renderer::common_params::automation_curve_pad_value(
+            kind,
+            key.strip_prefix("extra:").unwrap_or(param),
+        )
+        .max(default_value_for_key(&key))
+        .min(1.0)
+    }
+
+    fn normalize_authority_value(param: &str, value: f32, default: f32) -> f32 {
+        use hifishifter_kernel::editor::param_authority::canonical_param_key;
+        let key = canonical_param_key(param);
+        if !value.is_finite() {
+            return default;
+        }
+        match key.as_str() {
+            "pitch_edit" => {
+                if value == 0.0 {
+                    0.0
+                } else {
+                    value.clamp(1.0, 127.0)
+                }
+            }
+            "tension_edit" => value.clamp(-100.0, 100.0),
+            "extra:dyn" => {
+                if value < 0.0 {
+                    -1.0
+                } else {
+                    value.clamp(0.0, 1.0)
+                }
+            }
+            "extra:volume" | "extra:breath_gain" => value.clamp(0.0, 2.0),
+            _ => value,
+        }
+    }
+
+    /// 权威读：GUI 参数编辑器唯一入口。返回 orig/edit/edited 三平面。
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn read_authority_frames(
+        &self,
+        track_id: &str,
+        param: &str,
+        start_frame: u32,
+        frame_count: u32,
+        stride: Option<u32>,
+        with_sentinel: Option<bool>,
+        binary: Option<bool>,
+    ) -> Result<hifishifter_kernel::models::ParamFramesPayload, String> {
+        let _transaction = self.transaction.lock_or_recover();
+        let host = self.workspace_timeline_locked()?;
+        let root = host
+            .resolve_root_track_id(track_id)
+            .ok_or_else(|| "unknown parameter track".to_owned())?;
+        let edits = self.edits.lock_or_recover();
+        let fp = if edits.authority.frame_period_ms.is_finite()
+            && edits.authority.frame_period_ms > 0.0
+        {
+            edits.authority.frame_period_ms
+        } else {
+            host.frame_period_ms()
+        };
+        let view = self.compose_param_view_with(&host, &edits, &root);
+        let target = host.target_param_frames(fp);
+        let count = (frame_count as usize)
+            .max(1)
+            .min(target.saturating_add(1 << 20));
+        let step = stride.unwrap_or(1).max(1) as usize;
+        let key = hifishifter_kernel::editor::param_authority::canonical_param_key(param);
+        let mask = view.edited_mask(param);
+        let default = Self::authority_param_default(&host, &root, param);
+        let mut orig = Vec::with_capacity(count);
+        let mut edit = Vec::with_capacity(count);
+        let mut edited = Vec::with_capacity(count);
+        for i in 0..count {
+            let idx = (start_frame as usize).saturating_add(i.saturating_mul(step));
+            let (o, e) = match key.as_str() {
+                "pitch_edit" => {
+                    let o = view.params.pitch_orig.get(idx).copied().unwrap_or(0.0);
+                    let e = view.params.pitch_edit.get(idx).copied().unwrap_or(o);
+                    (o, if e == 0.0 && o != 0.0 { o } else { e })
+                }
+                "tension_edit" => (
+                    view.params.tension_orig.get(idx).copied().unwrap_or(0.0),
+                    view.params.tension_edit.get(idx).copied().unwrap_or(0.0),
+                ),
+                "extra:dyn" => {
+                    let o = view
+                        .params
+                        .dyn_orig
+                        .get(idx)
+                        .copied()
+                        .filter(|value| value.is_finite() && *value > 0.0)
+                        .unwrap_or(1.0);
+                    let raw = view
+                        .params
+                        .extra_curves
+                        .get("dyn")
+                        .and_then(|curve| curve.get(idx))
+                        .copied()
+                        .unwrap_or(-1.0);
+                    (o, if raw < 0.0 { o } else { raw })
+                }
+                _ => {
+                    let name = key.strip_prefix("extra:").unwrap_or(param);
+                    (
+                        default,
+                        view.params
+                            .extra_curves
+                            .get(name)
+                            .and_then(|curve| curve.get(idx))
+                            .copied()
+                            .unwrap_or(default),
+                    )
+                }
+            };
+            orig.push(o);
+            edit.push(e);
+            edited.push(mask.get(idx).copied().unwrap_or(false));
+        }
+        let edit_sentinel = if param == "dyn" && with_sentinel.unwrap_or(false) {
+            Some(edited.iter().map(|flag| !*flag).collect::<Vec<bool>>())
+        } else {
+            None
+        };
+        let mut payload = hifishifter_kernel::models::ParamFramesPayload {
+            ok: true,
+            root_track_id: root.clone(),
+            param: param.to_owned(),
+            frame_period_ms: fp,
+            start_frame,
+            orig,
+            edit,
+            edited,
+            authority_revision: view.authority_revision,
+            baseline_revision: view.baseline_revision,
+            geometry_revision: view.geometry_revision,
+            binary: None,
+            reference_kind: if matches!(param, "pitch" | "dyn") {
+                hifishifter_kernel::models::ParamReferenceKind::SourceCurve
+            } else {
+                hifishifter_kernel::models::ParamReferenceKind::DefaultValue
+            },
+            analysis_pending: Some(!self.baseline_is_ready(&root)),
+            analysis_progress: None,
+            pitch_edit_user_modified: (param == "pitch")
+                .then_some(view.params.pitch_edit_user_modified),
+            pitch_edit_backend_available: None,
+            edit_sentinel,
+            dyn_orig_key: (param == "dyn")
+                .then(|| {
+                    host.params_by_root_track
+                        .get(&root)?
+                        .dyn_orig_source_key
+                        .clone()
+                })
+                .flatten(),
+        };
+        if binary.unwrap_or(false) {
+            let encoded = hifishifter_kernel::editor::params::encode_pfb2(
+                &payload.orig,
+                &payload.edit,
+                &payload.edited,
+            );
+            payload.binary = Some(encoded);
+            payload.orig.clear();
+            payload.edit.clear();
+            payload.edited.clear();
+            // sentinel 已在构造前按显式编辑位图算好，不依赖已被清空的三平面。
+        }
+        Ok(payload)
+    }
+
+    /// 私有分组里 `root` 的**全部后代根轨**（子、孙……）。
+    ///
+    /// 【为什么写路径必须展开】分组共享一条参数线（用户手册：「轨道组共享一套参数，
+    /// 子轨从根轨继承」）：GUI 只给分组根一条线，用户在它上面落笔时 `set_param_frames`
+    /// 报的是**根**的 id。而渲染与存档都按**物理轨**取参数 —— `workspace_timeline_locked`
+    /// 不带私有分组边（分组只存在于 `edits.groups` 的 GUID 树里）。子轨的权威不跟着写，
+    /// 用户看到的就是"画了只有根轨有声音，子轨没反应"。
+    ///
+    /// 【为什么只对分组根生效】子轨自己的偏移参数（cents / degree / formant）写的是
+    /// 子轨自己，那条路上没有后代；`root` 解析用的是宿主物理图，所以子轨永远解析成
+    /// 它自己。
+    ///
+    /// 【为什么要已访问集】分组树是用户手拖出来的，坏存档里可能有环。这里宁可少写
+    /// 一条轨，也不能让一次落笔把命令线程转死。
+    fn private_group_descendants(
+        &self,
+        edits: &crate::state_channel::EditState,
+        root: &str,
+    ) -> Vec<String> {
+        let aliases = self.group_aliases("");
+        // 两张方向相反的表：分组树按 GUID 存，宿主轨按 id 存，展开要来回换。
+        let guid_of = aliases
+            .iter()
+            .map(|(guid, id)| (id.as_str(), guid.as_str()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let id_of = aliases
+            .iter()
+            .map(|(guid, id)| (guid.as_str(), id.as_str()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let Some(&root_guid) = guid_of.get(root) else {
+            return Vec::new();
+        };
+        let mut visited = std::collections::BTreeSet::from([root_guid]);
+        let mut frontier = vec![root_guid];
+        let mut found = Vec::new();
+        while let Some(parent) = frontier.pop() {
+            for (guid, node) in &edits.groups.nodes {
+                if node.parent.as_deref() != Some(parent) || !visited.insert(guid.as_str()) {
+                    continue;
+                }
+                if let Some(id) = id_of.get(guid.as_str()) {
+                    found.push((*id).to_owned());
+                }
+                frontier.push(guid.as_str());
+            }
+        }
+        found
+    }
+
+    /// 权威写：区间替换 + 显式 present 位图。绝不读取/写回整条显示数组。
+    pub(crate) fn write_authority_range(
+        &self,
+        track_id: &str,
+        param: &str,
+        start_frame: u32,
+        values: &[f32],
+        present: Option<&[bool]>,
+        checkpoint: bool,
+    ) -> Result<serde_json::Value, String> {
+        if present.is_some_and(|present| present.len() != values.len()) {
+            return Err("values/present length mismatch".into());
+        }
+        let _transaction = self.transaction.lock_or_recover();
+        let host = self.workspace_timeline_locked()?;
+        let root = host
+            .resolve_root_track_id(track_id)
+            .ok_or_else(|| "unknown parameter track".to_owned())?;
+        let default = Self::authority_param_default(&host, &root, param);
+        let normalized = values
+            .iter()
+            .map(|value| Self::normalize_authority_value(param, *value, default))
+            .collect::<Vec<_>>();
+        let present = present
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| vec![true; normalized.len()]);
+        self.checkpoint_authority(checkpoint)?;
+        let mut edits = self.edits.lock_or_recover();
+        // `EditState.tracks` 是轨道级设置的持久化容器；新权威写路径也必须
+        // 在第一次写入时把当前宿主轨道登记进去，否则存档/诊断会看到空轨道表。
+        if edits.tracks.is_empty() {
+            edits.tracks = host.tracks.clone();
+        }
+        let before = edits.authority.revision;
+        let runs_before = edits.authority.run_count();
+        edits.authority.write_range(
+            &root,
+            param,
+            start_frame as usize,
+            &normalized,
+            &present,
+            default,
+        )?;
+        // 【分组根落笔 = 整组落笔】理由见 `private_group_descendants`。
+        let group_roots = self.private_group_descendants(&edits, &root);
+        for child in &group_roots {
+            let child_default = Self::authority_param_default(&host, child, param);
+            let child_values = values
+                .iter()
+                .map(|value| Self::normalize_authority_value(param, *value, child_default))
+                .collect::<Vec<_>>();
+            if let Err(error) = edits.authority.write_range(
+                child,
+                param,
+                start_frame as usize,
+                &child_values,
+                &present,
+                child_default,
+            ) {
+                // 【一条子轨写不进去不该让整笔编辑失败】根已经写下了；把它降级成一行
+                // 日志，比让用户"画完了却收到一个错误、曲线又回弹"好。
+                log::warn!("[param] private group write to {child} failed: {error}");
+            }
+        }
+        let revision = edits.authority.revision;
+        let changed = revision != before;
+        if changed {
+            edits.revision = edits.revision.saturating_add(1);
+            // 显示缓存与权威同代更新；GUI 的下一帧不能读到上一代数组。
+            for target in std::iter::once(&root).chain(group_roots.iter()) {
+                let view = self.compose_param_view_with(&host, &edits, target);
+                edits.params.insert(target.clone(), view.params);
+            }
+            // 【`param.mutate` 是唯一的曲线改动读数】它把"谁改的"写进 `cause`：
+            // 用户操作（write）、撤销还原（restore）、几何事务（geometry）走的是三条
+            // 不同的路径，而此前它们在日志里完全同形 —— 于是一次"参数线自己变了"
+            // 根本无从归因。`runs=A->B` 给出这条根上的 run 条数变化，它是"多出一条
+            // 重叠的 run"这类内部错误的唯一廉价判据。
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "param.mutate",
+                format_args!(
+                    "[param] mutate cause=write root={root} param={param} range=[{start_frame}, {}) \
+                     present={} group_roots={} runs={runs_before}->{} rev={revision}",
+                    start_frame as usize + normalized.len(),
+                    present.iter().filter(|value| **value).count(),
+                    group_roots.len(),
+                    edits.authority.run_count()
+                ),
+            );
+        }
+        drop(edits);
+        if changed {
+            self.notify_parameters_changed();
+        }
+        Ok(serde_json::json!({"ok": true, "authority_revision": revision}))
+    }
+
+    /// 一次重置请求最多擦多少帧。
+    ///
+    /// 【为什么不是 `project_sec`】run 活在工程时间、与 clip 无关；用户可以在最后一个
+    /// clip 之后再画一条线（写入路径一直允许），那么他也必须能擦掉它。旧实现把区间夹到
+    /// `target_param_frames`（= 最后一个 clip 的终点），于是"clip 之外"的重置永远
+    /// `count == 0` —— 返回 `ok:true` 却什么都没改，前端下一次取数就把线取回来了
+    /// （用户报的"回弹"）。
+    ///
+    /// 现在唯一的上限是"一次请求最多处理多少帧"，与 `write_range` 的
+    /// `MAX_RUN_VALUES` 同量级：再大也只是遍历现有 run，不分配内存。
+    const MAX_RESTORE_FRAMES: usize = 1_000_000;
+
+    pub(crate) fn restore_authority_range(
+        &self,
+        track_id: &str,
+        param: &str,
+        start_frame: u32,
+        frame_count: u32,
+        checkpoint: bool,
+    ) -> Result<serde_json::Value, String> {
+        let _transaction = self.transaction.lock_or_recover();
+        let host = self.workspace_timeline_locked()?;
+        let root = host
+            .resolve_root_track_id(track_id)
+            .ok_or_else(|| "unknown parameter track".to_owned())?;
+        let start = start_frame as usize;
+        let count = (frame_count as usize).min(Self::MAX_RESTORE_FRAMES);
+        if count == 0 {
+            return Ok(serde_json::json!({
+                "ok": true,
+                "changed": false,
+                "authority_revision": self.authority_revision(),
+            }));
+        }
+        self.checkpoint_authority(checkpoint)?;
+        let mut edits = self.edits.lock_or_recover();
+        let (mut revision, mut changed) = edits.authority.restore_range(&root, param, start, count);
+        // 【分组根重置 = 整组重置】与写入同一条理由（见 `private_group_descendants`）：
+        // 右键"重置"作用的是分组共享的那一条线，子轨必须一起回到基线。
+        let group_roots = self.private_group_descendants(&edits, &root);
+        for child in &group_roots {
+            let (child_revision, child_changed) =
+                edits.authority.restore_range(child, param, start, count);
+            revision = revision.max(child_revision);
+            changed |= child_changed;
+        }
+        if changed {
+            edits.revision = edits.revision.saturating_add(1);
+            // 【显示必须与权威同代】旧实现只推进 revision，显示要等下一次
+            // workspace_view() —— 而右键重置之后紧接着的一次快照可能来自别的路径
+            // （渲染、诊断），用户看到的就是"松手又回来"。这里与写入路径同口径。
+            for target in std::iter::once(&root).chain(group_roots.iter()) {
+                let view = self.compose_param_view_with(&host, &edits, target);
+                edits.params.insert(target.clone(), view.params);
+            }
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "ara.param.restore",
+                format_args!(
+                    "[param] restore root={root} param={param} range=[{start}, {}) rev={revision}",
+                    start + count
+                ),
+            );
+        }
+        drop(edits);
+        if changed {
+            self.notify_parameters_changed();
+        }
+        Ok(serde_json::json!({
+            "ok": true,
+            "changed": changed,
+            "authority_revision": revision,
+        }))
+    }
+
+    /// 插件本地参数撤回占位：前端状态已由 history 记录驱动；这里只保证写入事务的
+    /// revision 前进，几何/轨道历史仍由既有 TimelineHistory 负责。
+    fn checkpoint_authority(&self, _checkpoint: bool) -> Result<(), String> {
+        // Undo 快照由 EditorSession 的 authority_history 负责；文档 revision 不是
+        // 参数版本，不能在这里推进（否则一次画线会被误判成宿主模型变化）。
+        Ok(())
+    }
+
+    /// 一条 clip 的几何身份：item GUID 优先，其次 region key，最后才是 clip id。
+    ///
+    /// 【为什么不能直接用 `clip.id`】它会在 `ara-region-{key}` 与 `ara-item-{guid}`
+    /// 之间迁移；几何日志一旦按 id 建键，迁移就会让日志"少一条、多一条"，下一次移动
+    /// 因此算不出 Move（用户看到的正是"锁开了跟没开一样"）。
+    fn geometry_key_for(
+        clip: &hifishifter_kernel::state::Clip,
+        region_items: &std::collections::HashMap<u64, String>,
+    ) -> hifishifter_kernel::editor::param_geometry::GeometryKey {
+        use hifishifter_kernel::editor::param_geometry::GeometryKey;
+        if let Some(guid) = crate::editor::workspace::host_item_guid(&clip.id) {
+            return GeometryKey::item(guid);
+        }
+        if let Some(key) = parse_region_key_from_clip_id(&clip.id) {
+            if let Some(guid) = region_items.get(&key) {
+                return GeometryKey::item(guid);
+            }
+            return GeometryKey::region(key);
+        }
+        GeometryKey::clip(&clip.id)
+    }
+
+    /// 这一轮时间线的几何事实。
+    ///
+    /// `complete` 只能由"枚举覆盖了本文档全部 region"的调用方声明（模型收口）；呈现层
+    /// 过滤后的视图必须传 `false` —— 否则"这一轮没看到"会被当成"被删了"，几何日志被
+    /// 空帧清空。
+    pub(crate) fn geometry_frame(
+        &self,
+        timeline: &hifishifter_kernel::state::TimelineState,
+        complete: bool,
+    ) -> hifishifter_kernel::editor::param_geometry::GeometryFrame {
+        use hifishifter_kernel::editor::param_geometry::{ClipGeometry, GeometryFrame};
+        let region_items = self.region_items.lock_or_recover();
+        let clips = timeline
+            .clips
+            .iter()
+            .filter_map(|clip| {
+                let root = timeline.resolve_root_track_id(&clip.track_id)?;
+                let key = Self::geometry_key_for(clip, &region_items);
+                let mut geometry = ClipGeometry::from_clip(clip, &root, key);
+                if geometry.source_id.is_empty() {
+                    geometry.source_id = clip
+                        .source_path
+                        .clone()
+                        .unwrap_or_else(|| format!("identity:{}", clip.id));
+                }
+                Some(geometry)
+            })
+            .collect();
+        GeometryFrame::new(clips, complete)
+    }
+
+    /// 把这一帧宿主几何与日志做一次事务；锁定关闭只更新日志。
+    ///
+    /// 【为什么收 `GeometryFrame` 而不是裸数组】`complete` 是"能不能剪枝"的唯一判据。
+    /// 旧签名（`&[ClipGeometry]`）让"空帧"与"全部删除"长得一模一样，日志因此会被
+    /// 呈现层的任何一次过滤清空。
+    pub(crate) fn reconcile_parameter_geometry_locked(
+        &self,
+        frame: &hifishifter_kernel::editor::param_geometry::GeometryFrame,
+        edits: &mut crate::state_channel::EditState,
+    ) -> Result<hifishifter_kernel::editor::param_geometry::TransformReport, String> {
+        use hifishifter_kernel::editor::param_geometry::apply_geometry_transaction;
+        let locked = crate::settings_store::lock_param_lines();
+        let mut journal = self.geometry_journal.lock_or_recover();
+        let deltas = journal.diff(frame);
+        // 【诊断】几何是"锁定失效"类问题的第一现场：这条读数回答"这一帧有几条
+        // clip、日志里有几条、算出了哪些 delta"。没有它，用户报"锁没生效"时只能
+        // 从代码反推哪一步断了（见 docs/superpowers/plans/…-round2.md §1.5）。
+        if !deltas.is_empty() || frame.clips.is_empty() {
+            let ops = deltas
+                .iter()
+                .map(|delta| {
+                    use hifishifter_kernel::editor::param_geometry::GeometryOp;
+                    let op = match delta.op {
+                        GeometryOp::Move { .. } => "move",
+                        GeometryOp::Stretch { .. } => "stretch",
+                        GeometryOp::Copy { .. } => "copy",
+                        GeometryOp::TrimOrNone => "trim",
+                        GeometryOp::Replace => "replace",
+                    };
+                    format!("{}:{op}", delta.key)
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "ara.geom.trace",
+                format_args!(
+                    "[geom] clips={} complete={} journal={} locked={locked} deltas=[{ops}]",
+                    frame.clips.len(),
+                    frame.complete,
+                    journal.entries().len(),
+                ),
+            );
+        }
+        if !locked {
+            journal.observe_only(frame);
+            return Ok(Default::default());
+        }
+        let report = match apply_geometry_transaction(&mut edits.authority, &deltas) {
+            Ok(report) => report,
+            Err(error) => {
+                hifishifter_kernel::log_limiter::emit_limited_key(
+                    log::Level::Error,
+                    "ara.param.geometry-failed",
+                    format_args!("[param] geometry transaction deferred: {error}"),
+                );
+                return Err(error);
+            }
+        };
+        if report.affected_runs > 0 {
+            // 只推进编辑代次。派生显示由调用方在自己的时间线上重新合成
+            // （`materialize_views_locked` 会整份替换 `edits.params`，而这里拿到的
+            // `timeline` 可能是另一份宿主视图 —— 用它覆盖会把在线权威的根 id
+            // 写成宿主新 id，下一次 reconcile 会把这条轨判成"认不出"）。
+            edits.revision = edits.revision.saturating_add(1);
+        }
+        let epoch = journal.epoch();
+        journal.commit(frame, epoch);
+        *self.last_geometry_report.lock_or_recover() = Some(report.clone());
+        Ok(report)
     }
 
     /// 按 ARA 2 的部分存档筛选产出载荷。
@@ -2024,9 +3406,22 @@ impl DocumentSession {
         // 一起丢掉 —— 包括本次真正要保存的那几条 modification 参数。裁剪必须是
         // "从完整状态里挑出被选中的部分"，而不是"从空状态里填"。
         let mut partial = edits.clone();
-        // 参数权威是**逐 modification** 的状态：按筛选裁剪。
-        partial.atlas.retain_authorities_for(modifications);
-        partial.atlas.regions.clear();
+        // 【部分存档的裁剪口径：根轨】权威是 root 作用域的，而 ARA 的"选中部分"是按
+        // modification 选的。两者之间没有直接边，于是这里退一步：只要本实例此刻服务的
+        // 根轨上还有被选中的 modification 的 region，就保留那个根的全部曲线。
+        // 宁可多带一条轨的曲线，也不要按猜出来的边把用户数据裁掉。
+        let keep = self
+            .track_bindings
+            .lock_or_recover()
+            .iter()
+            .filter(|(_, members)| {
+                members.iter().any(|(modification, _)| {
+                    modifications.is_none_or(|wanted| wanted.contains(modification))
+                })
+            })
+            .map(|(root, _)| root.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        partial.authority.retain_roots(&keep);
         if !document_data {
             // 文档级状态没被选中 ⇒ 载荷里不带它，恢复端因此不会覆盖它。
             partial.params.clear();
@@ -2035,7 +3430,6 @@ impl DocumentSession {
             partial.fades.clear();
             partial.clip_local.clear();
             partial.groups = Default::default();
-            partial.atlas.gaps.clear();
         }
         match partial.encode() {
             Ok(bytes) => Ok(bytes),
@@ -2064,7 +3458,11 @@ impl DocumentSession {
             );
             return Ok(());
         }
-        restored.atlas.remap_authorities(remap);
+        // 【曲线不按 modification 重映射】权威的键是 (root, param, 工程秒)；跨文档
+        // 导入要重映射的是**轨道身份**（由 `reconcile` 按 bindings 处理），与曲线无关。
+        // 图集时代这里必须把 `mod:{旧ID}` 下的曲线搬到新键，因为曲线按 modification
+        // 索引 —— 那份表示已经删除。
+        let _ = &remap;
         self.pending_partial_restore
             .lock_or_recover()
             .push(restored);
@@ -2085,10 +3483,9 @@ impl DocumentSession {
         }
         let mut edits = self.edits.lock_or_recover();
         for partial in pending {
-            for (key, params) in partial.atlas.authorities {
-                edits.atlas.set_authority(&key, params);
+            for (root, authority) in partial.authority.roots {
+                edits.authority.roots.insert(root, authority);
             }
-            edits.atlas.gaps.extend(partial.atlas.gaps);
             edits.params.extend(partial.params);
             if !partial.groups.is_empty() {
                 edits.groups = partial.groups;
@@ -2414,37 +3811,24 @@ impl DocumentSession {
             .filter_map(|lease| lease.owner.upgrade())
             .filter(|owner| !owner.is_closed())
             .collect::<Vec<_>>();
-        // 【ARA 存档的落点】存档恢复在模型图重建之前到达，那时还没有 owner 可合并，
-        // 所以载荷暂存在文档级。现在图已就绪，把它交给**第一个** owner 的既有合并
-        // 路径 —— 编辑权威是文档共享的，交给谁合并都一样（合并写的是 `document.edits`）。
-        // 部分存档先合入（它是按键合并，不会覆盖整份状态），再走整份存档的合并路径。
+        // 【ARA 存档的落点：由**文档**合并，不再交给某个 owner】
+        //
+        // 载荷是**文档级**的（`storeDocumentToArchive` 是文档控制器的回调），而合入
+        // 判据此前是**逐实例**的（只认本实例被分配的 region）。工程里只要有两条轨有
+        // 参数编辑，"不属于本实例的那条轨"就会 reconcile 成 Unobserved ⇒ 载荷永久
+        // pending ⇒ 而 I3 守卫又让此后所有新编辑都不落盘。用户的原话是"编辑了也白忙活"。
+        //
+        // 现在合入只有一个入口：`merge_archive_restore_locked`（候选集是整份
+        // `track_bindings`）。部分存档先合入（按键合并，不会覆盖整份状态），再走整份。
         self.merge_partial_restores();
-        // 【为什么这里要把 `take()` 与"放回去"分成两次独立的取锁】此前写成
-        // `if let Some(restored) = self.pending_archive_restore.lock_or_recover().take()`
-        // —— 那个 guard 活到整个 `if let` 块结束，而 `None` 分支里又要
-        // `*self.pending_archive_restore.lock_or_recover() = Some(restored)`。
-        // `std::sync::Mutex` 不可重入，于是"没有任何 renderer 绑定时"当场自锁：
-        // `prepare_renderers` 永久挂住，本文档再不响应任何宿主编缉。
-        // 用户报的症状正是"无论宿主里怎么编辑，ARA 中都不能同步，只有把插件删掉再
-        // 添加才好" —— 撤销/重载会送来存档还原，而还原到达时经常还没有 renderer。
-        let held_back = self.pending_archive_restore.lock_or_recover().take();
-        if let Some(restored) = held_back {
-            match owners.first() {
-                // 【为什么只暂存、不在这里刷新】本函数已经持有 `transaction`，而刷新要取
-                // 同一把不可重入的锁 —— 那会当场自锁（用户报的"重开 ARA 工程宿主未
-                // 响应"）。合入由紧随其后的 `merge_pending_restore` 循环完成。
-                Some(owner) => owner.stash_archive_restore(restored),
-                None => {
-                    // 没有任何 owner：把载荷放回去，等下一次收口再试。
-                    log::warn!(
-                        "[ara] archive restore held back: no renderer is bound yet; it will be \
-                         applied on the next prepare"
-                    );
-                    *self.pending_archive_restore.lock_or_recover() = Some(restored);
-                }
-            }
+        // 【为什么这里是 `_locked`】本函数已经持有 `transaction`，而公开入口要取同一把
+        // 不可重入的锁 —— 那会当场自锁（用户报的"重开 ARA 工程宿主未响应"）。
+        match self.merge_archive_restore_locked() {
+            Ok(true) => log::info!("[ara] document archive merged into the edit authority"),
+            Ok(false) => {}
+            Err(error) => log::warn!("[ara] document archive merge failed: {error}"),
         }
-        // 先统一恢复全部组件权威，再允许任何后台任务捕获共享revision。
+
         for owner in &owners {
             if let Err(error) = owner.merge_pending_restore(self) {
                 log::warn!("[ara] instance state unresolved: {error}");
@@ -2457,6 +3841,267 @@ impl DocumentSession {
         for owner in owners {
             owner.refresh_host_state_for_model();
             owner.prepare();
+        }
+    }
+
+    /// 记一次"宿主交回了存档"（证据，不是数据）。
+    pub(crate) fn note_archive_restored(&self, bytes: usize) {
+        self.archive_reading.lock_or_recover().restored_bytes = bytes;
+    }
+
+    /// 记一次"我们交给宿主一份存档"。
+    pub(crate) fn note_archive_stored(&self, bytes: usize) {
+        self.archive_reading.lock_or_recover().stored_bytes = bytes;
+    }
+
+    /// 记一次"这次保存交回的是**旧载荷**"（I3 分支）。
+    ///
+    /// 【为什么必须计数而不是只打日志】它是"编辑落不了盘"的唯一直接证据。用户报的
+    /// "编辑了也白忙活"就是它连续发生；一个累计数让"偶发"与"一直"在诊断包里可分。
+    pub(crate) fn note_archive_unmerged(&self, bytes: usize) {
+        let mut reading = self.archive_reading.lock_or_recover();
+        reading.unmerged_returns = reading.unmerged_returns.saturating_add(1);
+        reading.stored_bytes = bytes;
+    }
+
+    /// 记一次"这次编辑没有被采纳"。
+    pub(crate) fn note_edit_dropped(&self, reason: impl Into<String>) {
+        let reason = reason.into();
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Error,
+            "ara.edit.dropped",
+            format_args!("[ara] edit not applied: {reason}"),
+        );
+        self.edit_health.lock_or_recover().drop_edit(reason);
+    }
+
+    /// 编辑采纳读数（状态快照与诊断包共用）。
+    pub(crate) fn edit_health_json(&self) -> serde_json::Value {
+        self.edit_health.lock_or_recover().json()
+    }
+
+    /// 记一次"存档已合入"。
+    pub(crate) fn note_archive_merged(&self) {
+        self.archive_reading.lock_or_recover().merged_at_ms = Self::monotonic_ms();
+    }
+
+    /// 存档通道的读数（诊断包与状态栏共用）。
+    pub(crate) fn archive_reading(&self) -> serde_json::Value {
+        let pending = self.pending_archive_restore.lock_or_recover().is_some()
+            || self
+                .renderer_owners()
+                .iter()
+                .any(|owner| owner.has_pending_restore());
+        let reason = self
+            .pending_archive_restore
+            .lock_or_recover()
+            .as_ref()
+            .map(|_| "document-payload-not-merged".to_owned())
+            .or_else(|| {
+                self.renderer_owners()
+                    .iter()
+                    .find_map(|owner| owner.restore_pending_reason())
+            });
+        self.archive_reading.lock_or_recover().json(pending, reason)
+    }
+
+    /// 把一份存档载荷合入**文档级**编辑权威。
+    ///
+    /// 【为什么在文档上，而不是在某个实例上】`storeDocumentToArchive` 是**文档控制器**
+    /// 的回调，载荷覆盖整份文档；而合入判据此前是**逐实例**的（只认本实例被分配的
+    /// region）。工程里只要有两条轨有参数编辑，"不属于本实例的那条轨"就会 reconcile
+    /// 成 Unobserved ⇒ 载荷永久 pending ⇒ 而"有未合入载荷就不许覆盖存档"的守卫又让
+    /// 此后**所有新编辑都不落盘**。这正是"编辑了也白忙活"的机理。
+    ///
+    /// 【为什么候选集是整份 `track_bindings`】`track_bindings` 由真实 sequence 边写入，
+    /// 是**文档级**的归属事实。按实例分配范围收窄它是 VST3 组件状态的语义，不是存档的。
+    ///
+    /// 【调用方必须持 `transaction`】本函数会取 `edits` 与宿主事实，锁序是
+    /// `transaction → timeline → edits → host facts`。
+    pub(crate) fn merge_restore_locked(
+        &self,
+        saved: &crate::state_channel::EditState,
+        host: &hifishifter_kernel::state::TimelineState,
+        bindings: &crate::state_channel::TrackBindings,
+    ) -> Result<RestoreMerge, String> {
+        let mut restored = saved.clone();
+        // 【T18：身份对不上是"还在等"，不是"失败"】`reconcile` 的契约是严格的：
+        // 任何一条旧轨在新图里找不到唯一身份就 `Err`（猜测归属会把参数挂到别人的
+        // 轨道上）。但"对不上"有两种成因，处置相反：存档坏了 ⇒ 真失败；宿主**这一次**
+        // 的图还没长成 ⇒ 该继续等。
+        if let Err(error) = restored.reconcile(bindings) {
+            match crate::render::extension::ExtensionOwner::classify_restore_identity_error(&error)
+            {
+                crate::render::extension::RestoreIdentityVerdict::AwaitingHostGraph => {
+                    return Ok(RestoreMerge::Waiting(format!(
+                        "host-graph-not-rebuilt: {error}"
+                    )))
+                }
+                crate::render::extension::RestoreIdentityVerdict::Fatal => return Err(error),
+            }
+        }
+        // 【第三轮：恢复不再走图集】参数编辑只有一份表示（`authority`），显示由
+        // `compose_param_view_with` 在合并后统一合成（见本函数末尾）。旧实现这里还有
+        // 三段图集逻辑（迁移 gaps / 从图集导出权威 / 重新 capture），它们正是"恢复之后
+        // 一部分编辑看不见"的来源：图集与权威各说一套，而显示只认其中一套。
+        // 存档里的基线缓存不是编辑真相，却是冷恢复第一次渲染的“原始值”来源。
+        // 不在合入时装回文档基线，下面的 compose 只能看到空宿主时间线，生成的
+        // 显示数组会缺 pitch_orig；渲染器于是把用户曲线当成“没有源基频”而直通原音。
+        // 只补文档里还没有的根：在线分析已经发布的基线永远优先。
+        for (root, params) in &restored.params {
+            if self.baseline_is_ready(root) {
+                continue;
+            }
+            let mut baseline =
+                hifishifter_kernel::editor::param_authority::RootBaseline::from_params(params);
+            // 【布局键必须一起播种】不写它，`baseline_needs_rebuild` 会恒为真，
+            // `baseline_for` 每一帧都会尝试从（此刻还冷的）内容缓存重建，然后把
+            // 这份存档基线当成"过期"再退回 —— 冷恢复首帧的可听性全靠这份基线，
+            // 不能让它停在"每次都要重算一次"的状态上。
+            baseline.layout_key =
+                Some(hifishifter_kernel::pitch_analysis::build_root_pitch_layout_key(host, root));
+            baseline.content_key = params.pitch_orig_key.clone();
+            if baseline.is_ready() {
+                self.publish_baseline(root, baseline);
+            }
+        }
+        // 【客户端 = 恢复后的时间线】`merge` 用它取轨道/片段设置与显示缓存；
+        // 曲线真相在下面的 `authority` 合并里（显示由 `compose_param_view_with` 重算）。
+        let mut client = host.clone();
+        restored.apply(&mut client);
+        let mut edits = self.edits.lock_or_recover();
+        let mut merged = edits.merge(host, &client, edits.revision)?;
+        merged.groups = restored.groups.clone();
+        let clip_ids = host
+            .clips
+            .iter()
+            .map(|clip| clip.id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        // 【G5：权威侧合并分两种，不能一律覆盖】
+        //   * 在线状态是空的（冷启动）⇒ 整份装上，没有别的数据源；
+        //   * 载荷到达时我们在一次编辑会话里（撤销/重做）⇒ 覆盖，undo 必须生效；
+        //   * 其余（宿主交回一份旧载荷）⇒ 按键补缺，只补在线状态里没有的键。
+        let authoritative = !restored.from_archive
+            || edits.is_pristine()
+            || restored.arrived_in_edit_session
+            || self.authoritative_restore();
+        // 【唯一权威合并】冷启动/undo 才覆盖；其余只补在线不存在的 root。
+        let mut kept_live_roots = 0_usize;
+        for (root, authority) in restored.authority.roots.clone() {
+            if authoritative || !merged.authority.roots.contains_key(&root) {
+                merged.authority.roots.insert(root, authority);
+            } else {
+                kept_live_roots += 1;
+            }
+        }
+        // 音节缓存不是编辑权威，而是一份**可重建的派生缓存**：冷恢复/undo 才整份
+        // 继承；普通旧载荷只补在线缺失的 Clip/Take，绝不抹掉刚算出的结果。
+        if authoritative {
+            merged.take_syllables = restored.take_syllables.clone();
+        } else {
+            for (key, analysis) in &restored.take_syllables {
+                merged
+                    .take_syllables
+                    .entry(key.clone())
+                    .or_insert_with(|| analysis.clone());
+            }
+        }
+        merged.validate_take_syllables()?;
+        if kept_live_roots > 0 {
+            log::info!(
+                "[param] restore kept {kept_live_roots} live root(s); stale payload only filled missing roots"
+            );
+        }
+        let items = self.fade_items_locked(&clip_ids);
+        if !merged.fades.is_empty() && items.is_empty() && !clip_ids.is_empty() {
+            // fade 归属元数据要等宿主几何刷新后才能算出来；这是一次可重试的暂缓。
+            return Ok(RestoreMerge::Waiting("fade-metadata-pending".into()));
+        }
+        merged.fades.retain(|item, _| !items.contains(item));
+        merged.fades.extend(restored.fades);
+        merged.reconcile(&self.track_bindings.lock_or_recover())?;
+        merged.authority.sanitize();
+        // 恢复后的显示必须立刻由 authority 合成，不能沿用载荷里空的 params。
+        for root in host
+            .tracks
+            .iter()
+            .filter(|track| track.parent_id.is_none())
+            .map(|track| track.id.clone())
+            .collect::<Vec<_>>()
+        {
+            let view = self.compose_param_view_with(host, &merged, &root);
+            merged.params.insert(root, view.params);
+        }
+        *edits = merged;
+        // 恢复换了参数权威 ⇒ 旧渲染快照不再代表用户数据；必须让准备队列重算。
+        self.render_epoch.fetch_add(1, Ordering::AcqRel);
+        Ok(RestoreMerge::Merged)
+    }
+
+    /// 尝试把**文档级** ARA 存档载荷合入（幂等，自带事务）。
+    ///
+    /// 【为什么要自带事务】它有四个触发点（存档到达 / 实例绑定 / 清单推进 / 模型收口），
+    /// 其中两个在文档事务之外。带上事务让调用点不必各自记住这件事。
+    pub(crate) fn merge_archive_restore(&self) -> Result<bool, String> {
+        let _transaction = self.transaction.lock_or_recover();
+        self.merge_archive_restore_locked()
+    }
+
+    /// 调用方持 `transaction` 的版本（见 [`Self::merge_archive_restore`]）。
+    pub(crate) fn merge_archive_restore_locked(&self) -> Result<bool, String> {
+        // 【为什么要退避】它在工作区快照（33–400 ms 一次）上被重试。没有退避就会在
+        // "宿主图还没长成"的几秒里每帧跑一次 rebind（那是 O(曲线) 的工作）。
+        const RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+        if !self.ready.load(Ordering::Acquire) {
+            return Ok(false);
+        }
+        if self.pending_archive_restore.lock_or_recover().is_none() {
+            return Ok(false);
+        }
+        {
+            let now = std::time::Instant::now();
+            let mut next = self.archive_merge_next_attempt.lock_or_recover();
+            if next.is_some_and(|at| now < at) {
+                return Ok(false);
+            }
+            *next = Some(now + RETRY_INTERVAL);
+        }
+        let Some(saved) = self.pending_archive_restore.lock_or_recover().take() else {
+            return Ok(false);
+        };
+        let Some(host) = self.timeline.lock_or_recover().clone() else {
+            *self.pending_archive_restore.lock_or_recover() = Some(saved);
+            return Ok(false);
+        };
+        let bindings = self.track_bindings.lock_or_recover().clone();
+        let outcome = self.merge_restore_locked(&saved, &host, &bindings);
+        match outcome {
+            Ok(RestoreMerge::Merged) => {
+                self.note_archive_merged();
+                // 【合入之后必须重投影一次】合入是"权威刚换了"，而视图重建只在"几何
+                // 代次变了"时发生。不补这一步，重开工程后第一帧仍然看不见曲线。
+                let mut edits = self.edits.lock_or_recover();
+                let mut host = host;
+                if let Err(error) = self.resync_parameter_view_locked(&mut edits, &mut host) {
+                    log::warn!("[ara] parameter view resync after archive merge failed: {error}");
+                }
+                drop(edits);
+                *self.archive_merge_next_attempt.lock_or_recover() = None;
+                Ok(true)
+            }
+            Ok(RestoreMerge::Waiting(reason)) => {
+                *self.pending_archive_restore.lock_or_recover() = Some(saved);
+                hifishifter_kernel::log_limiter::emit_limited_key(
+                    log::Level::Warn,
+                    "ara.archive.merge-waiting",
+                    format_args!("[ara] archive payload is held: {reason}"),
+                );
+                Ok(false)
+            }
+            Err(error) => {
+                *self.pending_archive_restore.lock_or_recover() = Some(saved);
+                Err(error)
+            }
         }
     }
 
@@ -2888,6 +4533,15 @@ clips_src={clips_src} dupes={dupes}}}"
     /// 因此这里取事务没有正确性收益，却会在这个 20 ms 定时器路径上多抢一次文档锁，
     /// 并让调用方无法"持事务阻止后台渲染"（测试与离线 setup 都依赖这个手法）。
     /// 锁序也因此更简单：本函数只取 `renderers`，不参与"事务 → renderers"的嵌套。
+    /// 只推进渲染代次，**不**通知 owner（见 `refresh_ui_inventory` 的说明）。
+    ///
+    /// 【为什么需要它】纯几何变化（宿主移动 / 裁剪 item）会让已发布的快照不再对应
+    /// 当前时间线，但重排必须由定时器驱动 —— 在清单刷新的调用栈上直接 `prepare()`
+    /// 会自锁（那条栈可能就在会话 actor 上，而 `prepare` 要投递回同一个 actor）。
+    pub(crate) fn note_render_geometry_changed(&self) {
+        self.render_epoch.fetch_add(1, Ordering::AcqRel);
+    }
+
     pub fn invalidate_render_input(&self) {
         self.render_epoch.fetch_add(1, Ordering::AcqRel);
         let owners = self

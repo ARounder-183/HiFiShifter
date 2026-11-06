@@ -14,7 +14,7 @@
 import { useSyncExternalStore } from "react";
 
 import { frameToSec, type CaptureStatus } from "./captureApi";
-import { getCaptureSnapshot, subscribeCapture } from "./captureStore";
+import { POLL_MS, getCaptureSnapshot, subscribeCapture } from "./captureStore";
 
 export { subscribeCapture };
 
@@ -35,7 +35,17 @@ export interface CaptureBands {
     bands: CaptureBand[];
     /** 当前位置（工程秒）：捕获中唯一"在动"的东西。 */
     positionSec: number;
+    /** 带右缘允许领先的最大秒数（由后端块长自适应）。 */
+    leadSec: number;
 }
+
+/**
+ * 捕获带右缘允许**领先**后端读数的最大秒数。
+ *
+ * 【为什么需要上界】视觉播放头自带 100 ms 外推；轮询到达时它会跳回真实值。留 3 倍
+ * 余量既能让带子与光标重合，又不会在前向 seek 之后把带子画进空洞。
+ */
+export const MAX_LEAD_SEC = Math.max(0.3, (2.5 * POLL_MS) / 1000);
 
 /**
  * 从一次状态快照里取出捕获区间列表。
@@ -45,7 +55,10 @@ export interface CaptureBands {
  * 看起来像卡住了。但把这个 `max` 应用到**每一段**就会让跳播之后所有历史段的右端都被
  * 拉到当前位置，等于又并成一整条 —— 那正是本函数要避免的错误。
  */
-export function deriveCaptureBands(status: CaptureStatus | null): CaptureBands | null {
+export function deriveCaptureBands(
+    status: CaptureStatus | null,
+    visualPlayheadSec?: number,
+): CaptureBands | null {
     const capture = status?.capture ?? null;
     if (capture === null) return null;
     const rate = capture.sampleRate;
@@ -64,13 +77,39 @@ export function deriveCaptureBands(status: CaptureStatus | null): CaptureBands |
         if (!(endSec > startSec)) continue;
         bands.push({ startSec, endSec });
     }
-    if (bands.length === 0) return null;
     bands.sort((a, b) => a.startSec - b.startSec);
 
     const positionSec = frameToSec(capture.positionFrame, rate);
+    const blockFrames =
+        typeof capture.blockFrames === "number" && capture.blockFrames > 0
+            ? capture.blockFrames
+            : 0;
+    const leadSec = blockFrames > 0 ? Math.max(0.3, (4 * blockFrames) / rate) : MAX_LEAD_SEC;
+    // 【空列表也要返回】此前 `bands.length === 0` 直接 `null`，于是录制刚起或 seek
+    // 之后**连位置线一起消失** —— 用户以为捕获停了。位置线不依赖任何一段已经成立。
+    if (bands.length === 0) return { bands, positionSec, leadSec };
+
     const last = bands[bands.length - 1];
-    if (positionSec > last.endSec) last.endSec = positionSec;
-    return { bands, positionSec: Math.max(positionSec, last.startSec) };
+    // 【右缘只能朝"刚录到的地方"延伸】此前无条件把最后一段拉到 `positionFrame`：
+    // 前向 seek 之后 `positionFrame` 立刻跳到新位置，而那里**一个样本都没录**，
+    // 带子于是横跨整个空洞。判据改成"位置落在最后一段的右缘附近"。
+    const withinReach = positionSec >= last.endSec && positionSec <= last.endSec + leadSec;
+    if (withinReach) last.endSec = positionSec;
+    // 【视觉播放头只用来补齐轮询间隙】它比 `positionFrame` 新（60 Hz vs 5 Hz），
+    // 但仍必须服从同一条"不许横跨空洞"的纪律，并且延伸量有上限：视觉值自带
+    // 100 ms 外推，留 3 倍余量。
+    // 【只在"真的在录"时跟随】`standby`（已武装、宿主还没播）与 `ready`（录完了）
+    // 都不该让带子跟着光标长 —— 那会把"没在录"画成"在录"。
+    // 【为什么不再要求 `hostPlaying`】"应用非实时事件 FX" / 非实时预览里宿主从不说
+    // 自己在播（`kPlaying` 全程为 0），带子于是**永远不长** —— 用户看到的是"捕获
+    // 光标在动、带子不动"。录制中就是录制中：带子该长。
+    const following =
+        status?.state === "recording" || status?.phase === "preview" || status?.phase === "offline";
+    if (following && typeof visualPlayheadSec === "number" && Number.isFinite(visualPlayheadSec)) {
+        const lead = Math.min(visualPlayheadSec, last.endSec + leadSec);
+        if (lead > last.endSec) last.endSec = lead;
+    }
+    return { bands, positionSec: Math.max(positionSec, last.startSec), leadSec };
 }
 
 /**
@@ -102,6 +141,26 @@ function snapshotBands(): CaptureBands | null {
  */
 export function getCaptureBands(): CaptureBands | null {
     return snapshotBands();
+}
+
+/**
+ * 用**视觉播放头**把最后一段的右缘补到"此刻"。
+ *
+ * 【为什么参数编辑器必须走这一条】它按帧提交绘制，拿不到"React 渲染期"的任何值，
+ * 只能读非订阅快照。而快照是 **5 Hz** 的：只按它画，带子每 200 ms 往前跳一格 ——
+ * 用户说的"一顿一顿"就是它。时间轴那条带子早就接了视觉播放头，参数编辑器这条
+ * 一直没接，于是同一个量在两个面板上走成两种节奏。
+ */
+export function captureBandsAt(
+    status: CaptureStatus | null,
+    visualPlayheadSec: number | null,
+): CaptureBands | null {
+    return deriveCaptureBands(status, visualPlayheadSec ?? undefined);
+}
+
+/** `captureBandsAt` 的免参数版：自己取当前快照（参数编辑器的逐帧路径用）。 */
+export function getCaptureBandsAt(visualPlayheadSec: number | null): CaptureBands | null {
+    return captureBandsAt(getCaptureSnapshot().status, visualPlayheadSec);
 }
 
 /** 订阅捕获区间。两个面板都调用它，因此看到的必然是同一份。 */

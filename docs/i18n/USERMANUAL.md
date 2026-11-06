@@ -740,7 +740,7 @@ HiFiShifter 支持直接在时间轴上录音。录音时可以从当前播放�
 
 插件有两种装法，任选其一：
 
-- **安装器（推荐）**：运行 `HiFiShifter_v<版本>_windows-x86_64-vst3-setup.exe`。向导跟随系统界面语言，可以自选 VST3 目录；模型会装进全机共享库（见[模型文件与共享](#模型文件与共享)），并在 Windows 的「程序和功能 / 已安装的应用」里注册卸载项。安装器会先确认 REAPER 及其插件宿主进程已经退出。
+- **安装器（推荐）**：运行 `HiFiShifter_v<版本>_windows-x86_64-setup.exe`。**一个安装包同时装上独立 App 与 VST3/ARA 插件**：向导跟随系统界面语言，可以分别选择 App 与 VST3 两个目录；模型只装一遍（全机共享库，见[模型文件与共享](#模型文件与共享)），并在 Windows 的「程序和功能 / 已安装的应用」里注册**一个**卸载项。安装器会先确认 REAPER 与 HiFiShifter 均已退出。
 - **手动拷贝**：关闭 REAPER，把**整个** `HiFiShifter.vst3` 文件夹放入一个 VST3 目录（例如 `C:\Program Files\Common Files\VST3`），或把它的父目录加入 REAPER 的 VST 扫描路径。不要只复制文件夹里的单个文件 —— 界面、模型与运行依赖都在这个文件夹里。这种装法不写注册表，卸载时手动删除该文件夹即可。
 
 两种装法都需要已安装 WebView2 运行时与 VC++ x64 运行库。
@@ -779,7 +779,7 @@ REAPER 按**轨道**管理 ARA 插件：它只会把插件所在**那一条轨�
 - 当宿主开放控制能力时，`停止` 与 `播放 / 暂停` 按钮用于控制 REAPER 的播放；播放头以 REAPER 工程的位置为准，BPM 也由 REAPER 决定。宿主不提供播放控制时整组按钮不出现。
 - 工具栏上的 `BPM` / 拍号输入框、节拍器按钮与录音按钮在插件里不出现 —— 它们是宿主的权威读数或宿主的命令，REAPER 自己的界面就在显示与操作它们。
 - 片段上的淡变声音由 REAPER 处理；界面里显示的是 HiFiShifter 自己的示意包络。悬停提示与独立 App 一样只给三个量（形状 / 长度 / 曲率），不显示宿主的 `c=` / `S=` 读数 —— 那对用户没有可行动的信息。曲线不要求与 REAPER 逐点一致。
-- 速度映射在插件里**可用，但只编辑音阶那一轴**：速度映射就是"随时间变化的音阶"的存储，而音阶是 HiFiShifter 自有的（REAPER 没有工程调号概念）。变化点里的 `BPM` 与拍号是宿主的权威读数，在对话框里显示为只读；插件也不会自动匹配宿主的速度映射（REAPER 不向 ARA 插件提供速度 / 拍号内容，本机实测见 `probe/ara/README.md` 的 F-2）。音阶变化点存在插件自己的设置里。
+- 速度映射在插件里**可用，但只编辑音阶那一轴**：速度映射就是"随时间变化的音阶"的存储，而音阶是 HiFiShifter 自有的（REAPER 没有工程调号概念）。变化点里的 `BPM` 与拍号是宿主的权威读数，在对话框里显示为只读；插件也不会自动匹配宿主的速度映射（REAPER 不向 ARA 插件提供速度 / 拍号内容，实测见 `probe/ara/README.md` 的 F-2）。音阶变化点存在插件自己的设置里。
 - 循环源（REAPER 的"循环源"开关）会被如实读入并写回：插件按 REAPER 的循环语义渲染，右键菜单里的 `循环` / `取消循环` 可用。
 - 倒放**不参与**插件处理：ARA 不提供反向音频，插件渲染不出正确内容。这类片段照常显示（带倒放标记），右键菜单的倒放项禁用并说明原因，请在 REAPER 里操作。
 - 片段没有音频时，提示会说明**原因**：`正在等待 REAPER 完成音频分配`（刚分割 / 裁切 / 粘贴后的正常在途）、`等待 REAPER 提供音频`（该片段拿不到音频，例如 FX 挂在轨道组父轨上）、`由 REAPER 倒放；HiFiShifter 不处理这一条`。分割出来的片段会立刻继承父段的音频，不会长时间停在占位。
@@ -815,7 +815,7 @@ REAPER 按**轨道**管理 ARA 插件：它只会把插件所在**那一条轨�
 - 参数没有生效，或重新打开工程后不一致：保留工程副本和状态栏上的错误信息，先不要覆盖工程，也不要反复强制重新载入。
 - 出现内存不足的提示：表示这次没有执行气声分离，`气声分离` 相关的效果不会被静默忽略；可以改用更短的素材，或先关闭 `气声分离`。
 - 需要提交日志或排查问题：插件日志与独立 App 的日志**放在同一个目录**（插件是 `plugin.log`，独立 App 是 `hifishifter.log`，文件名不同，互不覆盖、各自轮转）。菜单 `帮助 → 打开日志文件夹` 会替你打开这个文件夹；若宿主环境不允许，则显示路径供你复制。`帮助 → 导出诊断信息...` 与 `选项 → 推理设备基准测试` 属于独立 App，插件里不可用。
-- 卸载：装的是安装器版本时，在 Windows 的「程序和功能 / 已安装的应用」里卸载 HiFiShifter VST3；手动拷贝的版本删除 `HiFiShifter.vst3` 文件夹即可。两种情况下设置与共享模型库都会保留（见[模型文件与共享](#模型文件与共享)）。
+- 卸载：装的是安装器版本时，在 Windows 的「程序和功能 / 已安装的应用」里卸载 HiFiShifter；手动拷贝的版本删除 `HiFiShifter.vst3` 文件夹即可。两种情况下设置与共享模型库都会保留（见[模型文件与共享](#模型文件与共享)）。
 
 ### 从独立 App 连接宿主
 
@@ -825,11 +825,11 @@ REAPER 按**轨道**管理 ARA 插件：它只会把插件所在**那一条轨�
 
 HiFiShifter 会自动把运行日志写入系统标准日志目录，无需任何命令行参数。遇到问题时，把日志文件提交给开发者即可帮助定位：
 
-| 系统    | 日志目录                                       |
-| ------- | ---------------------------------------------- |
-| Windows | `%LOCALAPPDATA%\com.arounder.hifishifter\logs` |
-| macOS   | `~/Library/Logs/com.arounder.hifishifter`      |
-| Linux   | `~/.local/share/com.arounder.hifishifter/logs` |
+| 系统    | 日志目录                           |
+| ------- | ---------------------------------- |
+| Windows | `%LOCALAPPDATA%\HiFiShifter\logs`  |
+| macOS   | `~/Library/Logs/HiFiShifter`       |
+| Linux   | `$XDG_STATE_HOME/HiFiShifter/logs` |
 
 - 通过 `帮助 → 打开日志文件夹` 可以直接定位日志文件。
 - 插件（ARA）的日志与独立 App **同目录、同格式、同样轮转**，文件名是 `plugin.log`；两份日志都会带上版本号、日期与时间戳，便于一起打包提交。
@@ -837,6 +837,20 @@ HiFiShifter 会自动把运行日志写入系统标准日志目录，无需任�
 - 日志按大小自动轮转：单个文件上限 8 MiB，默认保留 3 份历史（`hifishifter.1.log` ~ `hifishifter.3.log`）。
     - 高频重复的错误 / 警告会自动限流：同一位置的日志默认每 10 秒最多输出一条，被抑制的条数会在下一条输出前以 `[throttled]` 汇总行补记。
 - 前端与后端的错误都会统一记录在同一份日志文件里，方便按时间轴对照排查。
+
+### 数据目录
+
+除日志之外，其余用户数据的位置如下（独立 App 与插件共用同一套目录）：
+
+| 用途 | Windows | macOS | Linux |
+| --- | --- | --- | --- |
+| 设置 | `%APPDATA%\HiFiShifter` | `~/Library/Application Support/HiFiShifter` | `$XDG_CONFIG_HOME/HiFiShifter`（缺省 `~/.config/HiFiShifter`） |
+| 缓存（波形 / 整段渲染） | `%LOCALAPPDATA%\HiFiShifter\cache` | `~/Library/Caches/HiFiShifter` | `$XDG_CACHE_HOME/HiFiShifter`（缺省 `~/.cache/HiFiShifter`） |
+| 未保存会话的导入素材 | `%LOCALAPPDATA%\HiFiShifter\unsaved\<会话>` | `~/Library/Application Support/HiFiShifter/unsaved/<会话>` | `$XDG_DATA_HOME/HiFiShifter/unsaved/<会话>` |
+| 共享模型库（仅 Windows，由安装器写入） | `%PROGRAMDATA%\HiFiShifter\models\<版本>` | — | — |
+
+- 已保存工程的导入素材放在工程文件旁边的 `<工程名>_media` 目录里，随工程一起拷走即可。
+- 从旧版本升级时，首次启动会自动把原来的 `com.arounder.hifishifter` 目录搬到新位置；若新旧目录同时存在则**不合并**（两边原样保留），并在日志里记一条说明。
 
 ### Linux 上窗口起不来 / 双击没反应
 

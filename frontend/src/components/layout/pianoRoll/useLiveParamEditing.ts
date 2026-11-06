@@ -463,7 +463,10 @@ export function useLiveParamEditing(args: {
                     }
                 }
 
-                await paramsApi.setParamFrames(trackId, editParam, minF, out, true);
+                // 这一笔完整覆盖 [minF, maxF]：present 全 true。显式位图让后端
+                // 不需要从显示数组差分猜测用户改了什么。
+                const present = new Array<boolean>(len).fill(true);
+                await paramsApi.setParamFrames(trackId, editParam, minF, out, true, present);
                 applyToParamViewDense(minF, out);
                 // 同上：不立刻撤下覆盖层，避免波形先退回旧快照再跳到新快照。
                 markLiveEditCommitted();
@@ -474,6 +477,11 @@ export function useLiveParamEditing(args: {
                 // refresh（paramsEpoch/滚动等）对账恢复。
                 clearLiveEditOverride();
                 invalidate();
+                // 【为什么要立刻再要一份】后端拒绝这次写入时，屏幕上还留着用户刚画的那一笔。
+                // 等下一次"自然"刷新（滚动 / paramsEpoch）意味着用户会先看到一条**并不存在**
+                // 的线，随后它又凭空消失 —— 那正是"画完就回退"的观感。这里主动要一次对账，
+                // 让屏幕在下一帧就回到后端的真实状态。
+                bumpRefreshToken();
                 console.error("[commitStroke] failed:", err);
             }
         },

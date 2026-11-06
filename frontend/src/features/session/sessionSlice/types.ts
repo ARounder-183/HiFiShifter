@@ -388,7 +388,42 @@ export interface SessionState {
         playbackWaitingForRender: boolean;
         playbackTarget: string | null;
         playbackPositionSec: number;
+        /**
+         * 宿主说在播、且位置真的在前进（由两次连续采样算出）。
+         *
+         * 【为什么与 `isPlaying` 并存】`isPlaying` 是"宿主说在播"的镜像，起播第一条
+         * 采样到达之前它是假的；而视觉推进不能等它 —— 那正是"跳到位之后卡一会儿"。
+         */
+        positionAdvancing: boolean;
         playbackDurationSec: number;
+        /**
+         * 最近一次播放采样是不是**宿主在回答**（后端 `host_authoritative`）。
+         *
+         * 【为什么它必须进状态】轮询节奏此前只看 `isPlaying` —— 而那是前端镜像，
+         * 起播那一瞬还是 false。于是采样停在 400 ms，光标只能一格一格地挪
+         * （"跳到位之后卡一会儿"）。`host_authoritative` 一旦为真，采样节奏就必须
+         * 跟上宿主，与"谁认为在播"无关。
+         */
+        hostAuthoritative: boolean;
+        /**
+         * 最近一条采样的年龄（毫秒，后端 `position_age_ms`）；`null` = 后端没给。
+         *
+         * 【为什么它必须进状态】后端的 `isPlaying` 曾经是一个**永不过期的闩锁**：
+         * VEGAS 停播时直接停止调用 `process()`、不发 `kPlaying=0` 的块，于是它永远
+         * 为真，前端按 1x 外推 —— 用户看到的是"停止后光标还要往前多走一小段"。
+         * 后端现在给了播放位寿命（`block_playing_ttl_ms`），前端仍要用年龄兜一层：
+         * **两个独立的地方都错**才会出错。
+         */
+        positionAgeMs: number | null;
+        /** 最近一条采样的来源：host / block / seek / capture / offline / stale。 */
+        transportSource: string;
+        /**
+         * 最近一条被采纳采样的单调序号（后端 `sample_seq`）。
+         *
+         * 【为什么需要它】推送与轮询是同一份语义的两个来源；只按纪元去重拦不住
+         * "同一场播放里两条通道的先后"，晚到的旧读数会把光标拽回去。
+         */
+        lastTransportSeq: number;
         gpuBackend: string;
     };
 
@@ -414,7 +449,7 @@ export interface SessionState {
      *
      * 【为什么单独存一份名单，而不是给预设加 `enabled` 字段】系统预设在代码里、
      * 用户预设在设置里，两者都要能被停用；而预设对象还会被导出成预设文件，往里塞
-     * 一个"本机是否启用"的字段会让文件携带与它无关的本地状态。停用只影响本机的
+     * 一个"本地是否启用"的字段会让文件携带与它无关的本地状态。停用只影响本地的
      * 工具栏列表与循环切换，因此单独记一份 id 名单最干净。
      */
     disabledVibratoPresetIds: string[];
@@ -424,7 +459,7 @@ export interface SessionState {
      * 【为什么在设置里，而不是预设字段】它回答的是"这一次把颤音挂到哪条线上"，
      * 与"颤音长什么样"无关：用户先定摆放方式、再挑预设，换预设不该把它换掉；
      * 预设库、拖拽工具、预设文件也都用不到它（见 `BaselineMode` 的说明）。
-     * 于是它作为**本机记忆**存在设置里，下次打开「添加颤音」还是上次选的那个。
+     * 于是它作为**本地记忆**存在设置里，下次打开「添加颤音」还是上次选的那个。
      */
     vibratoBaseline: BaselineMode;
     /**
@@ -565,8 +600,6 @@ export interface SessionState {
      * `_latestHistoryOpRequestId` / seekPlayhead 的乱序防护同理。
      */
     _transportEpoch: number;
-    /** 插件seek写入未结束时不接纳同代但仍在旧位置的宿主轮询。 */
-    _pluginSeekRequestId: string | null;
 
     /**
      * 最近一次 stop/pause 命令**开始瞬间**的真实播放状态（由

@@ -96,6 +96,14 @@ impl<'a> Tape<'a> {
         self.frames
     }
 
+    /// 内容身份：优先取 promote 写入的内容哈希；旧档/测试夹具退回 take 号。
+    pub(crate) fn source_key(&self) -> String {
+        self.segments
+            .first()
+            .and_then(|segment| segment.source_key.clone())
+            .unwrap_or_else(|| source_id(self.take))
+    }
+
     /// 把带上 `[offset, offset + frames)` 这一段切成"每段一段"的切片。
     ///
     /// 产出 `(段, 段内起点, 段内终点)`，按带内顺序。落在带外的部分被裁掉 ——
@@ -129,7 +137,7 @@ impl<'a> Tape<'a> {
         &self,
         offset: usize,
         frames: usize,
-    ) -> impl Iterator<Item = (&'a Segment, usize, usize)> + '_ {
+    ) -> impl Iterator<Item = (&'a Segment, usize, usize, usize)> + '_ {
         let end = offset.saturating_add(frames);
         self.segments
             .iter()
@@ -138,9 +146,13 @@ impl<'a> Tape<'a> {
                 let base = *base;
                 let lo = offset.max(base);
                 let hi = end.min(base + segment.filled);
-                (lo < hi).then_some((*segment, lo - base, hi - base))
+                // 【为什么把 `base` 一起交出去】`lo` / `hi` 是**段内**下标，而调用方
+                // 需要的是"这一帧在磁带上的绝对位置"。不给 `base`，调用方就只能用
+                // "已经写了多少帧"去推 —— 而那个量在覆盖表有洞时**不再等于位置**：
+                // 每出现一个洞，洞之后的全部内容都会左移一个洞长（实测 0.4~0.7 s）。
+                (lo < hi).then_some((*segment, base, lo - base, hi - base))
             })
-            .flat_map(move |(segment, lo, hi)| {
+            .flat_map(move |(segment, base, lo, hi)| {
                 // 与 `covered_ranges` 同一口径：**只认我们真的拷过样本的帧**。
                 let samples = segment_ranges(
                     &segment.coverage,
@@ -153,7 +165,7 @@ impl<'a> Tape<'a> {
                     .filter_map(move |range| {
                         let a = lo.max(range.start);
                         let b = hi.min(range.end);
-                        (a < b).then_some((segment, a, b))
+                        (a < b).then_some((segment, base, a, b))
                     })
                     .collect::<Vec<_>>()
             })
@@ -409,25 +421,31 @@ pub(crate) fn project(takes: &[ProjectionTake<'_>], bpm: f64) -> (TimelineState,
     // 一个空轨，并以为录制漏了一条。
     timeline.tracks.clear();
     timeline.selected_track_id = Some(CAPTURE_TRACK_ID.to_owned());
-    timeline.tracks.push(
-        serde_json::from_value(json!({
-            "id": CAPTURE_TRACK_ID,
-            "name": CAPTURE_TRACK_NAME,
-            "order": 0,
-            // 【为什么这条轨道默认开启合成】`compose_enabled` 是"要不要处理这条轨"的
-            // 总开关：关着的时候 `hifigan_effect_flags` 一律返回全假、效果曲线被
-            // `gate_hifigan_effect_curves` 整条剥掉（设计如此：听到未经改动的原音频）。
-            // 而这条轨道**只为被处理而存在** —— 它是插件自己造出来的编辑轨，宿主那边
-            // 没有任何"原声"语义需要保留。默认关着会让"画完参数线不生效"成为默认行为，
-            // 而界面上只有一个不说原因的空结果。
-            //
-            // 【为什么默认开启不改变"还没画线时"的声音】`does_clip_need_processor_render`
-            // 在没有曲线、没有效果、没有速率变化时返回假 —— 声码器根本不会跑。所以
-            // 开启只让"画了线"生效，不让"没画线"变成另一种声音。
-            "compose_enabled": true,
-        }))
-        .expect("Capture 轨道的必填字段是固定的"),
-    );
+    let capture_track: hifishifter_kernel::state::Track = match serde_json::from_value(json!({
+        "id": CAPTURE_TRACK_ID,
+        "name": CAPTURE_TRACK_NAME,
+        "order": 0,
+        // 【为什么这条轨道默认开启合成】`compose_enabled` 是"要不要处理这条轨"的
+        // 总开关：关着的时候 `hifigan_effect_flags` 一律返回全假、效果曲线被
+        // `gate_hifigan_effect_curves` 整条剥掉（设计如此：听到未经改动的原音频）。
+        // 而这条轨道**只为被处理而存在** —— 它是插件自己造出来的编辑轨，宿主那边
+        // 没有任何"原声"语义需要保留。默认关着会让"画完参数线不生效"成为默认行为，
+        // 而界面上只有一个不说原因的空结果。
+        //
+        // 【为什么默认开启不改变"还没画线时"的声音】`does_clip_need_processor_render`
+        // 在没有曲线、没有效果、没有速率变化时返回假 —— 声码器根本不会跑。所以
+        // 开启只让"画了线"生效，不让"没画线"变成另一种声音。
+        "compose_enabled": true,
+    })) {
+        Ok(track) => track,
+        Err(error) => {
+            // 【降级而不是 panic】见片段那一处的说明：这条路径在宿主 UI 线程上。
+            // 没有捕获轨道就没有可放的片段，如实返回一份空时间线而不是崩溃。
+            log::error!("[capture] the capture track could not be built: {error}");
+            return (timeline, summary);
+        }
+    };
+    timeline.tracks.push(capture_track);
 
     let pieces = resolved_pieces(&tapes);
 
@@ -448,7 +466,7 @@ pub(crate) fn project(takes: &[ProjectionTake<'_>], bpm: f64) -> (TimelineState,
         }
         summary.covered_frames += frames as u64;
         index += 1;
-        let source = source_id(tape.take);
+        let source = tape.source_key();
         let start_sec = piece.span.start as f64 / rate;
         let length_sec = frames as f64 / rate;
         let source_start_sec = piece.offset as f64 / rate;
@@ -469,7 +487,7 @@ pub(crate) fn project(takes: &[ProjectionTake<'_>], bpm: f64) -> (TimelineState,
         // 内部边界交给 `edge_gain` 一份实现统一负责。
         let at_take_head = piece.offset == 0;
         let at_take_tail = piece.offset + frames >= tape.frames();
-        let mut clip: hifishifter_kernel::state::Clip = serde_json::from_value(json!({
+        let mut clip: hifishifter_kernel::state::Clip = match serde_json::from_value(json!({
             "id": id,
             "track_id": CAPTURE_TRACK_ID,
             "name": name,
@@ -477,23 +495,42 @@ pub(crate) fn project(takes: &[ProjectionTake<'_>], bpm: f64) -> (TimelineState,
             "length_sec": length_sec,
             "fade_in_sec": if at_take_head { edge_fade } else { 0.0 },
             "fade_out_sec": if at_take_tail { edge_fade } else { 0.0 },
-        }))
-        .expect("片段的必填字段是固定的");
+        })) {
+            Ok(clip) => clip,
+            Err(error) => {
+                log::error!("[capture] clip {id} could not be built: {error}");
+                continue;
+            }
+        };
+
         // 【为什么 `duration_*` 是整条带的长度】它是"这份媒体有多长"，而不是"这一片有多
         // 长"。片段自己的长度在 `length_sec` 里，两者此前混用同一个量，于是源窗一旦
         // 不等于整段（被切过之后就是如此）就自相矛盾。
-        let take: hifishifter_kernel::state::ClipTake = serde_json::from_value(json!({
+        // 【降级而不是 panic】`build` 在 `capture_status` 路径上被调用，而那条路径
+        // **在宿主 UI 线程上**、没有 `catch_unwind`：一次反序列化失败就穿过 C ABI
+        // 变成宿主崩溃，且完全无法归因。与"逐条降级"的既有纪律一致 —— 记一条 error，
+        // 跳过这一片，其余照常。
+        let take: hifishifter_kernel::state::ClipTake = match serde_json::from_value(json!({
             "id": format!("{id}_take_1"),
             "name": name,
             "source_path": source,
+            // 【跨会话稳定的内容身份】`source` 是 `capture://{take}`；而会话侧还会把
+            // 素材路径重写成**会话私有**的物化路径（`hfs-ui-{pid}-{N}-`）。分析缓存的
+            // 键读这一项，于是同一份音频在重开窗口之后仍然命中同一份分析结果。
+            "content_id": source,
             "source_start_sec": source_start_sec,
             "source_end_sec": source_end_sec,
             "source_sample_rate": tape.sample_rate,
             "duration_sec": tape.frames() as f64 / rate,
             "duration_frames": tape.frames() as u64,
             "playback_rate": 1.0,
-        }))
-        .expect("take 的必填字段是固定的");
+        })) {
+            Ok(take) => take,
+            Err(error) => {
+                log::error!("[capture] take for clip {id} could not be built: {error}");
+                continue;
+            }
+        };
         clip.takes.push(take);
         clip.active_take_id = Some(format!("{id}_take_1"));
         clip.normalize_takes();
@@ -553,15 +590,17 @@ pub(crate) fn raw_tape(takes: &[ProjectionTake<'_>]) -> Option<PlaybackSnapshot>
         let scale = tape.sample_rate.max(1) as f64 / rate as f64;
         let base = ((piece.span.start - start) as f64 * scale).round() as i64;
         let count = frames_of(&piece.span);
-        let mut written = 0usize;
-        for (segment, lo, hi) in tape.covered_slices(piece.offset, count) {
+        for (segment, segment_base, lo, hi) in tape.covered_slices(piece.offset, count) {
             let Some(source_left) = segment.planes.first() else {
-                written += hi - lo;
                 continue;
             };
             for local in lo..hi {
-                let target = base + (written as f64 * scale).round() as i64;
-                written += 1;
+                // 【洞不得让后面的样本前移】目标位置由**这一帧在磁带上的绝对位置**
+                // 决定（`segment_base + local`，再减掉片起点），而不是"已经写了多少帧"。
+                // 此前用后者：覆盖表里每出现一个洞，洞之后的全部内容就左移一个洞长 ——
+                // 实测 0.4~0.7 s 的整体错位，而且只在"有洞"的素材上出现。
+                let tape_frame = (segment_base + local) as i64 - piece.offset as i64;
+                let target = base + (tape_frame as f64 * scale).round() as i64;
                 if target < 0 || target as usize >= frames {
                     continue;
                 }
@@ -851,6 +890,8 @@ mod tests {
             filled: values.len(),
             loss: SegmentLoss::First,
             loop_start: None,
+            pass_id: 0,
+            source_key: None,
             peak: [0.0; 2],
             closed: ClosedReason::Stopped,
             coverage: std::array::from_fn(|_| 0..0),

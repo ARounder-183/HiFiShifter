@@ -6,7 +6,7 @@
 //! 插件实例化，走 `capture` 通路。两条路共用本文件的工厂与组件实现。渲染调度、
 //! 快照输出与编辑器生命周期都在本文件与 `render/`、`editor/` 模块里落地。
 //!
-//! 这里为什么手写 vtbl 而不引入 `vst3-sys`：本机 cargo 缓存里没有 VST3 绑定，
+//! 这里为什么手写 vtbl 而不引入 `vst3-sys`：cargo 缓存里没有现成的 VST3 绑定，
 //! 且只用得到少量接口。vtbl 的槽位顺序、结构体布局与调用约定都按锁定的
 //! VST3 SDK `v3.8.0_build_66` 头文件逐条对齐（`ipluginbase.h` / `ivstcomponent.h` /
 //! `ivstaudioprocessor.h` / `funknown.h`）。ARA 侧的接口（`IMainFactory`、
@@ -1007,7 +1007,14 @@ impl Processor {
     /// 这样多个实例不会互相抢同一次绑定。
     fn create() -> Option<Box<Processor>> {
         let runtime = crate::runtime::runtime()?;
+        // 【音频线程零分配】这两个开关用环境变量初始化（会分配 String）。
+        // 在组件创建时（宿主 UI 线程）预热，音频回调第一次进入时就不再分配。
+        let _ = buffer_audit_enabled();
+        // 【宿主身份必须在 create 解析一次】initialize 不一定会被调用，getName 也
+        // 可能返回 unknown；预览判定不能挂在一个只在 initialize 写的诊断字段上。
+        crate::editor::connection::resolve_and_record_host_identity();
         let extension_owner = Arc::new(ExtensionOwner::default());
+        extension_owner.warm_audio_caches();
         let route = crate::editor::routing::RouteLease::new(&extension_owner);
         // 【为什么把 factory/roles 交给 HostEntry】companion 的 "already bound" 是
         // 处理器级的：宿主重开工程会复用同一个 `Processor`，而上一份文档关闭后
@@ -1398,6 +1405,12 @@ unsafe extern "system" fn component_set_active(this: *mut c_void, state: i8) -> 
                 // 效果器"的直接证据 —— Cubase 实测正是如此，而此前日志里没有任何一行
                 // 直接说出这件事，得靠对比两个会话才能推断。
                 owner.note_component_activated();
+                // 【预览跨失活保留 cursor】重新激活时若有一个挂起的预览，恢复它；
+                // 否则清掉上一轮的几何（同一 raw 的第一块会被判成 Resting，输出
+                // 继续读上一张 take —— 问题 3）。
+                if !owner.resume_processing_preview() {
+                    owner.reset_transport_session("component_activated");
+                }
                 // 后台/前台切换后宿主可能已重建几何或恢复源访问；主动枚举一次，
                 // 不等下一次 UI tick 的节流窗口。
                 owner.resume_resync();
@@ -1406,6 +1419,7 @@ unsafe extern "system" fn component_set_active(this: *mut c_void, state: i8) -> 
                     owner.is_ara_bound()
                 ));
             } else {
+                owner.note_component_deactivated();
                 crate::log_line(&format!("IComponent::setActive({state})"));
             }
             K_RESULT_OK
@@ -1613,6 +1627,10 @@ unsafe extern "system" fn audio_setup_processing(
             }
             // SAFETY: this 是存活的音频接口；setupProcessing 在 process 之前调用。
             let owner = unsafe { &(*base_from_audio(this)).extension_owner };
+            // setupProcessing 是宿主 UI 线程上的确定时刻；在这里再解析一次身份，
+            // 让包装器/祖先链证据在第一次 process 之前就位（幂等）。
+            crate::editor::connection::resolve_and_record_host_identity();
+            owner.set_setup_process_mode(setup.process_mode);
             // 诊断：宿主声明的单块上限（不是分配上限；当前实现不依赖它分配）。
             owner.note_max_samples_per_block(setup.max_samples_per_block);
             // 【为什么不再按采样率拒绝】此前只认 44.1/48k，其余 `kResultFalse` —— 而多数宿主
@@ -1625,12 +1643,20 @@ unsafe extern "system" fn audio_setup_processing(
                 // **整条踢出链路**（用户看到"插件不见了"）。我们读不了 f64 平面，但可以在
                 // `process` 里按实际宽度静音（`silence_unsupported_sample_size`）—— 静音但在场
                 // 是可诊断的降级，优于静默消失。
-                crate::log_line(&format!(
-                "[vst3] setupProcessing: sampleSize={} is not 32-bit float; the plugin stays in the \
-                 chain and outputs silence (see silence_unsupported_sample_size).",
-                setup.symbolic_sample_size
-            ));
-                return K_RESULT_OK;
+                //
+                // 【为什么不再在这里 `return`】此前的早退把下面两件事一起跳过了：
+                // `set_setup_sample_rate`（`process` 选快照用的权威率）与
+                // `arm_capture_rendering`（宿主时钟 + 合成队列的装载）。于是"宿主用 64-bit
+                // 样本"这一档在日志里表现为**插件什么都不做**：没有时钟、没有捕获、没有一条
+                // 能指向原因的记录。现在照常走完 setup，只把"输出会是静音"说清楚。
+                //
+                // 【为什么日志是 WARN】它此前走 INFO，而默认日志级别看不到 —— 现场日志里
+                // `[vst3]` 行数为 **0**，用户报障时我们连"宿主声明了什么"都不知道。
+                log::warn!(
+                    "[vst3] setupProcessing: sampleSize={} is not 32-bit float; the plugin stays in \
+                     the chain and outputs silence (see silence_unsupported_sample_size)",
+                    setup.symbolic_sample_size
+                );
             }
             // 【接受域与 `render::source` 对齐（8k..=384k）】此前下限是 44.1k，理由是"内部快照
             // 永不降采样"。但宿主率低于 44.1k 时返回 `kResultFalse` 会让多数宿主把插件**整条
@@ -1712,8 +1738,32 @@ unsafe extern "system" fn audio_set_processing(this: *mut c_void, state: i8) -> 
             if this.is_null() {
                 return K_INVALID_ARGUMENT;
             }
+            let owner = unsafe { &(*base_from_audio(this)).extension_owner };
             if state == 0 {
-                unsafe { &(*base_from_audio(this)).extension_owner }.record_processing_stop();
+                owner.record_processing_stop();
+                if owner.processing_pass_is_preview() {
+                    // 【预览只挂起】VEGAS 的非实时预览完全可能在每个 chunk 之间调用
+                    // setProcessing(false)。结束 pass 会把 cursor/几何清空，下一块只能
+                    // 重新从候选开始 —— 看起来就是“只录了 1 秒”。
+                    owner.suspend_processing_preview("setProcessing(false)");
+                } else {
+                    owner.note_processing_stopped();
+                }
+            } else if owner.resume_processing_preview() {
+                // 恢复挂起的预览：cursor 与 pass 原样接上。
+            } else if owner.setup_process_mode() == 2 {
+                // 【离线预览的第二个入口】有些宿主（含 VEGAS 的“应用非实时事件 FX”）
+                // 在 setup 时声明 mode=2，但直到 setProcessing(true) 才真正开始预览。
+                // 这里同步准备一次；失败仍返回 OK，让宿主保留插件（产物会静音但可诊断）。
+                let started = std::time::Instant::now();
+                if let Err(error) = owner.prepare_offline_until(
+                    started + crate::render::extension::OFFLINE_PREPARE_TIMEOUT,
+                ) {
+                    crate::log_line(&format!(
+                        "Offline preparation at setProcessing(true) failed after {:?}: {error}",
+                        started.elapsed()
+                    ));
+                }
             }
             K_RESULT_OK
         })
@@ -1955,8 +2005,20 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
         if probe.symbolic_sample_size == 0 && !probe.process_context.is_null() {
             // SAFETY: VST3 processContext 的完整 SDK 结构在当前回调期间存活。
             let context = unsafe { &*probe.process_context };
-            owner.observe_transport(context, probe.process_mode);
-            evidence = owner.capture_observe(probe, context);
+            let effective_position =
+                owner.note_offline_block(context, probe.process_mode, probe.num_samples as usize);
+            // 【观察顺序：捕获先、宿主采样后】捕获决定本块位置是否可信；宿主采样通道
+            // 必须看到同一个结论，否则 PendingAbsolute 期间它仍会把绝对位置画出去。
+            evidence = owner.capture_observe(probe, context, effective_position);
+            if !owner.processing_pass_active() {
+                let position_trusted = evidence.is_some_and(|evidence| evidence.position_trusted);
+                owner.observe_transport(
+                    context,
+                    probe.process_mode,
+                    probe.num_samples as usize,
+                    position_trusted,
+                );
+            }
         }
     }
     match shape {
@@ -1995,7 +2057,13 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
                 // 直接清零会在块首留下一次阶跃（正是用户听到的"咔"）。与门控清零
                 // 走同一条去咔路径：从上一块尾巴淡到零，其余帧写零。
                 // 该函数自己写满整块，因此**不能**再调 `clear_outputs`。
-                let stream = crate::capture::recorder::ProcessStream::from_mode(data.process_mode);
+                let Some(stream) =
+                    crate::capture::recorder::ProcessStream::from_mode(data.process_mode)
+                else {
+                    // 未知 process_mode：不能冒充实时流去写 capture/去咔状态。
+                    let _ = unsafe { crate::audio_abi::clear_outputs(data) };
+                    return K_RESULT_OK;
+                };
                 let frames = data.num_samples as usize;
                 let outputs = data.outputs;
                 if outputs.is_null() {
@@ -2057,6 +2125,12 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
                         data.num_samples as usize,
                     );
                 }
+                return K_RESULT_OK;
+            }
+            // 【未知 process_mode 必须拒绝】SDK 只定义 0/1/2；把它当成 Realtime 会
+            // 把离线/未知流写进实时捕获与门控状态。透传是最诚实的降级。
+            if crate::capture::recorder::ProcessStream::from_mode(data.process_mode).is_none() {
+                let _ = unsafe { crate::audio_abi::pass_through(data) };
                 return K_RESULT_OK;
             }
             // 【Capture 通路】在快照输出之前插入。它要么自己写完输出（`Handled`），要么
@@ -2791,8 +2865,10 @@ const NEED_SYSTEM_TIME: u32 = 1 << 0;
 const NEED_CONTINUOUS_TIME_SAMPLES: u32 = 1 << 1;
 /// `kProjectTimeMusicValid`：小节/拍显示，以及 Capture 的区间按小节对齐。
 const NEED_PROJECT_TIME_MUSIC: u32 = 1 << 2;
-/// `kBarPositionValid`：网格吸附（Capture 的 punch 区间要吸到小节线）。
-const NEED_BAR_POSITION_MUSIC: u32 = 1 << 3;
+// 【已删除 `NEED_BAR_POSITION_MUSIC`】注释写着"网格吸附要用小节线"，而全仓**没有
+// 任何读者**：吸附用的是 `projectTimeMusic` 与 `tempo`（见 `snap` 与 `TimeRuler`）。
+// 团队自己的纪律是"不消费就不要"——多要一位的代价是宿主为**每一个音频块**多算一份，
+// 而且不可检测。
 /// `kCycleValid`：Capture 的"只录循环区间"需要循环起止。
 const NEED_CYCLE_MUSIC: u32 = 1 << 4;
 /// `kTempoValid`：`TransportClock::tempo()` 的**唯一**来源。
@@ -2814,7 +2890,6 @@ pub(crate) fn process_context_requirements() -> u32 {
     NEED_SYSTEM_TIME
         | NEED_CONTINUOUS_TIME_SAMPLES
         | NEED_PROJECT_TIME_MUSIC
-        | NEED_BAR_POSITION_MUSIC
         | NEED_CYCLE_MUSIC
         | NEED_TEMPO
         | NEED_TIME_SIGNATURE

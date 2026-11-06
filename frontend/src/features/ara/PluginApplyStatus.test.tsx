@@ -152,7 +152,10 @@ test("a ready host offers the reload action and reports the applied state", asyn
 test("reloading with unapplied edits requires an explicit confirmation", async () => {
     invokeMock.mockResolvedValue(hostState({ pending: true }));
     await render();
-    expect(text()).toContain(enUS.plugin_apply_pending);
+    // 【为什么不再断言某句文案】`pending` 现在**不驱动任何文案**：它混合了素材物化
+    // 与后台刷新这两件用户感知不到的事。判据改成"有未应用的编辑 ⇒ 强制重载要确认"，
+    // 而那件事由下面的对话框断言。
+    //
     // 首次轮询也会重取一次时间轴（宿主版本号第一次见到）；下面只看增量。
     const before = refreshes;
 
@@ -179,4 +182,32 @@ test("reloading a clean host goes straight through without a dialog", async () =
     await click(button(enUS.plugin_apply_reload_host));
     expect(document.body.querySelector('[role="dialog"]')).toBeNull();
     expect(invokeMock).toHaveBeenCalledWith("plugin_refresh", false);
+});
+
+/*
+ * 【为什么这四条必须存在】`pending / analysis_pending / rendering_active` 三个分量
+ * 混在一起时，状态栏在**每一次播放开始**都会说「正在自动应用…」—— 而那一刻后台
+ * 跑的只是素材物化，用户什么都没改。四种读数各自对应一个用户能感知的后果，
+ * 任何一条读错都会让状态栏再次变成噪音。
+ */
+// 【为什么拆成四条用例】同一个用例里多次 `render()` 不会重新挂载组件，
+// 而 store 的 `publish` 只把快照推给**当前**订阅者 —— 第一条之后界面就停在
+// `preparing` 上了。每条用例各自挂载一次，才是"每种读数显示什么"的真判据。
+test.each([
+    ["preparing", "plugin_apply_waiting_host"],
+    ["stale", "plugin_apply_rendering"],
+    ["awaiting-analysis", "plugin_apply_analyzing"],
+    ["current", "plugin_apply_applied"],
+] as const)("audible_state=%s 只说它自己那件事", async (audibleState, expectedKey) => {
+    invokeMock.mockResolvedValue(hostState({ audible_state: audibleState }));
+    await render();
+    expect(text()).toContain(enUS[expectedKey]);
+});
+
+test("播放开始时的内务工作不再说「正在应用」", async () => {
+    // 后端如实报告"输出就是当前编辑"，同时 `pending` 为真（素材仍在物化）。
+    // 状态栏必须**沉默于这件事** —— 它没有用户可感知的后果。
+    invokeMock.mockResolvedValue(hostState({ audible_state: "current", pending: true }));
+    await render();
+    expect(text()).toContain(enUS.plugin_apply_applied);
 });

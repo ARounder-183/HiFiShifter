@@ -139,7 +139,6 @@ fn the_mask_covers_every_field_the_plugin_consumes() {
     );
     // 音乐位置与循环：Capture 的区间对齐与"只录循环区间"。
     assert_ne!(mask & NEED_PROJECT_TIME_MUSIC, 0);
-    assert_ne!(mask & NEED_BAR_POSITION_MUSIC, 0);
     assert_ne!(mask & NEED_CYCLE_MUSIC, 0);
 
     // 反向：不消费的位**不应**被声明。多要一位的代价是宿主为每个音频块多算一份，

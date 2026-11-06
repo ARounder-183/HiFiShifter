@@ -5,7 +5,7 @@
  * 1. 白名单里的键写入后端（否则"设置换形态就丢"这个 bug 会悄悄回来）；
  * 2. 白名单外的键**不**写入后端（调试开关不该跟着用户配置走）；
  * 3. 去抖合并：连续多次写同一键只提交一次；
- * 4. hydrate 以后端为准，但把本机独有的键迁上去（升级路径）；
+ * 4. hydrate 以后端为准，但把本地独有的键迁上去（升级路径）；
  * 5. 后端不可用时静默降级，不抛错 —— 界面起不来比设置丢更糟。
  */
 // @vitest-environment jsdom
@@ -110,7 +110,7 @@ describe("后端同步", () => {
         await flushUiStorage();
 
         expect(transport.puts).toEqual([]);
-        // 但本机缓存仍然写进去了：调试开关照旧生效。
+        // 但本地缓存仍然写进去了：调试开关照旧生效。
         expect(readUiValue(DEBUG_KEY)).toBe("1");
     });
 
@@ -171,7 +171,7 @@ describe("后端同步", () => {
 });
 
 describe("hydrate", () => {
-    test("后端值覆盖本机缓存", async () => {
+    test("后端值覆盖本地缓存", async () => {
         localStorage.setItem(LOCALE_KEY, "en-US");
         setUiStorageTransportForTest(recordingTransport({ [LOCALE_KEY]: "ko-KR" }));
 
@@ -180,7 +180,7 @@ describe("hydrate", () => {
         expect(readUiValue(LOCALE_KEY)).toBe("ko-KR");
     });
 
-    test("本机独有的键被迁到后端（升级路径）", async () => {
+    test("本地独有的键被迁到后端（升级路径）", async () => {
         localStorage.setItem(KEYBINDINGS_KEY, '{"a":1}');
         const transport = recordingTransport({ [LOCALE_KEY]: "ja-JP" });
         setUiStorageTransportForTest(transport);
@@ -200,7 +200,7 @@ describe("hydrate", () => {
         expect(transport.puts).toEqual([]);
     });
 
-    test("后端读取失败时保留本机缓存，不抛错", async () => {
+    test("后端读取失败时保留本地缓存，不抛错", async () => {
         const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
         localStorage.setItem(LOCALE_KEY, "en-US");
         setUiStorageTransportForTest({

@@ -4,6 +4,8 @@ import { useAppSelector } from "../../../app/hooks";
 import { shallowEqual } from "react-redux";
 import { type TimelineViewportAccess } from "./hooks/timelineViewportAccess";
 import { useVisualPlayhead } from "../../../hooks/useVisualPlayhead";
+import { isTransportAdvancing } from "../../../features/session/selectors/transport";
+import { publishVisualPlayheadSec } from "../../../features/capture/visualPlayheadBus";
 import { computeAutoFollowScrollLeft } from "../../../utils/autoFollowScroll";
 
 export const TimelineTransportBridge = React.memo(function TimelineTransportBridge(props: {
@@ -38,26 +40,40 @@ export const TimelineTransportBridge = React.memo(function TimelineTransportBrid
             playheadSec: state.session.playheadSec,
             playheadSampledAtMs: state.session.playheadSampledAtMs,
             isPlaying: state.session.runtime.isPlaying,
+            // 【为什么要带上它】`isPlaying` 是镜像，起播第一条采样到达之前是假的；
+            // 而"位置真的在前进"可以由两条采样直接算出来（见 applyTransportSample）。
+            positionAdvancing: state.session.runtime.positionAdvancing,
+            // 读数的年龄："宿主说在播"必须与"这个说法有多旧"一起读（见 selector）。
+            positionAgeMs: state.session.runtime.positionAgeMs,
             playbackWaitingForRender: state.session.runtime.playbackWaitingForRender,
-            playbackPositionSec: state.session.runtime.playbackPositionSec,
         }),
         // 无 shallowEqual 时每次 dispatch 都产生新对象引用，
         // 该桥接组件会在任意 store 更新（含 33Hz 播放轮询）时重渲染。
         shallowEqual,
     );
 
-    // 原地等待渲染（位置冻结）期间不得推进视觉插值：否则 RAF 会以 1x 从
-    // 冻结前锚点持续外推整个等待时长，恢复采样到达时光标大幅回跳
-    // （往复跳动的根源）。positionSec 条件是等待标志缺省时的兼容兜底。
-    const isTransportAdvancing =
-        transport.isPlaying &&
-        !transport.playbackWaitingForRender &&
-        transport.playbackPositionSec > 1e-4;
+    /*
+     * 【光标必须满足的唯一不变量】只要宿主说在播放，光标就按 1x 前进；宿主的位置
+     * 读数只用来**纠偏**，不用来决定"要不要前进"。
+     *
+     * 旧判据有三个开关：`isPlaying`、`!playbackWaitingForRender`、
+     * `playbackPositionSec > 1e-4`。而这三个都可能在**起播那一瞬**短暂为假：
+     *   * 第一次采样带回位置时 `is_playing` 仍是 false（或在 0 秒）；
+     *   * 预渲染守卫把 `playbackWaitingForRender` 置真几百毫秒。
+     * 于是光标"跳到位 → 冻住 → 再一格一格地走"—— 正是用户报的那条。
+     *
+     * 【为什么去掉"等待渲染"这一条也不违反原来的约束】不变量说"宿主在播就前进"，
+     * 而"我听到的是旧音频"是另一件事（状态栏的 `stale`）。把光标停住并不能让音频
+     * 变新，只会让用户以为播放停了 —— 而音频其实在响。
+     */
+    // 【唯一判据在 selector 里】见 `isTransportAdvancing`：三处三个公式，恰好
+    // 在"位置冻结"这个场景互相分歧 —— 那正是"停止后光标还在走"。
+    const transportAdvancing = isTransportAdvancing(transport);
 
     useVisualPlayhead({
         syncedPlayheadSec: transport.playheadSec,
         syncedAtMs: transport.playheadSampledAtMs,
-        isTransportAdvancing,
+        isTransportAdvancing: transportAdvancing,
         onFrame: React.useCallback(
             (visualPlayheadSec: number) => {
                 // 同步共享 ref：缩放锚点（以播放头为锚时的锚点解析）读取的必须是
@@ -65,6 +81,8 @@ export const TimelineTransportBridge = React.memo(function TimelineTransportBrid
                 // 造成跳变。内核宿主也经 `playheadSec` getter 读同一份真值
                 // （见 `timelineKernelHost.readPlayheadSec`）。
                 visualPlayheadRef.current = visualPlayheadSec;
+                // 捕获带的右缘读这一份：它必须与光标同源，否则两者永远差一个轮询周期。
+                publishVisualPlayheadSec(visualPlayheadSec);
 
                 // 自动滚动先行：syncScrollLeft 内部会用 Redux 同步播放头（滞后于
                 // 视觉插值）重写播放头位置 —— 若先定位播放头再滚动，播放头每帧

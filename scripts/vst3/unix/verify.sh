@@ -14,7 +14,10 @@
 set -euo pipefail
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-readonly BUNDLE="${1:?用法：verify.sh <path/to/HiFiShifter.vst3>}"
+# 【为什么要先转成绝对路径】第 3 节用 "$BUNDLE"/* 判断"依赖是否落在包内"，
+# 而 ldd 给的是绝对路径。传相对路径时前缀永远对不上，两个包内依赖会被误报成泄漏 ——
+# 本地按 README 的写法跑一次就会红，CI 上却因为传的是绝对路径而绿。
+readonly BUNDLE="$(cd -- "${1:?用法：verify.sh <path/to/HiFiShifter.vst3>}" && pwd)"
 
 FAILED=0
 ok()   { printf "  \033[32m✓\033[0m %s\n" "$*"; }
@@ -69,7 +72,7 @@ for symbol in $REQUIRED_SYMBOLS; do
     if printf "%s" "$SYMBOLS" | grep -Eq "(^|[[:space:]])_?${symbol}$"; then
         ok "$symbol"
     else
-        bad "缺少导出符号 $symbol（宿主会显示 0 个类，且不报错）"
+        bad "缺少导出符号 ${symbol}（宿主会显示 0 个类，且不报错）"
     fi
 done
 
@@ -98,10 +101,17 @@ if [ "$HOST_OS" = "linux" ]; then
     done <<< "$LINKAGE"
 else
     LINKAGE="$(otool -L "$MODULE" 2>&1 || true)"
+    # 【为什么要跳过自己】otool -L 的第一条"依赖"其实是模块自己的 install name
+    # （LC_ID_DYLIB），链接时写的是构建机上的绝对路径 —— 它不是依赖，却会在这条
+    # "有没有指向包外部的东西"的判据里自己举报自己。用 otool -D 精确取出它。
+    SELF_ID="$(otool -D "$MODULE" 2>/dev/null | tail -n +2 | head -1 || true)"
     while IFS= read -r linkage_line; do
         dep="$(printf "%s" "$linkage_line" | sed -E "s/^[[:space:]]*//; s/ \(compatibility.*$//")"
         [ -z "$dep" ] && continue
         case "$dep" in
+            # otool -L 的第一条是模块自己的 install name（LC_ID_DYLIB），不是依赖。
+            "$MODULE") continue ;;
+            "$SELF_ID") continue ;;
             /usr/lib/*|/System/*) continue ;;
             @rpath/*|@loader_path/*)
                 # @rpath 的条目必须能在 Frameworks 里找到实体，否则照样加载失败。

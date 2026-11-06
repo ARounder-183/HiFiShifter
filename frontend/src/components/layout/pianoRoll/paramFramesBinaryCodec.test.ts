@@ -97,6 +97,39 @@ test("components/layout/pianoRoll/paramFramesBinaryCodec.test.ts scripted checks
         assertEqual(decodeParamFramesFromBase64(btoa(bin)), null, "zero count");
     }
 
+    // ── PFB2：orig/edit/edited 三平面 ─────────────────────────────────────
+    {
+        const orig = [60, 61, 62];
+        const edit = [64, 61, 62];
+        const edited = [1, 0, 0];
+        const bytes: number[] = [];
+        const pushF32 = (v: number) => {
+            const b = new Uint8Array(4);
+            new DataView(b.buffer).setFloat32(0, v, true);
+            bytes.push(...b);
+        };
+        const pushU32 = (v: number) => {
+            const b = new Uint8Array(4);
+            new DataView(b.buffer).setUint32(0, v, true);
+            bytes.push(...b);
+        };
+        bytes.push(0x50, 0x46, 0x42, 0x32); // "PFB2"
+        pushU32(orig.length);
+        pushU32(0);
+        pushU32(0);
+        for (const v of orig) pushF32(v);
+        for (const v of edit) pushF32(v);
+        for (const v of edited) bytes.push(v);
+        let bin = "";
+        for (const b of bytes) bin += String.fromCharCode(b);
+        const decoded = decodeParamFramesFromBase64(btoa(bin));
+        if (!decoded) throw new Error("PFB2 should decode");
+        const arrays = paramFramesBinaryToArrays(decoded);
+        assertEqual(arrays.edited[0], true, "PFB2 edited[0]");
+        assertEqual(arrays.edited[1], false, "PFB2 edited[1]");
+        assertEqual(arrays.edit[0], 64, "PFB2 edit[0]");
+    }
+
     {
         // 声明 count=4 但数据被截断
         const good = decodeParamFramesFromBase64(encodePlanar([1, 2, 3, 4], [5, 6, 7, 8]));

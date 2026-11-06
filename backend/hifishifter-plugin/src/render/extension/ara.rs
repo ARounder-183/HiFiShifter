@@ -228,6 +228,12 @@ impl ExtensionOwner {
             renderer.refresh_ui_inventory();
             renderer.prepare();
         }
+        // 【触发点②：实例绑定】重开工程时"先给存档、再交付模型"，而存档到达那一刻
+        // 还没有任何 owner —— 于是合并的唯一入口（`prepare_renderers`）要等宿主收口。
+        // 绑定是**图已经长出来**的第一个确定时刻，在这里补一次尝试。
+        if let Err(error) = document.merge_archive_restore() {
+            log::warn!("[ara] archive merge after binding failed: {error}");
+        }
         // 【T8：把图读数打出来】绑定成功的那一刻宿主的图通常还没建（region 在之后才到），
         // 所以这一行几乎总是全零 —— 它的价值在于**当它停在零**：下一次重启报障时，
         // 若这里 ctx=0，说明宿主要么没发图、要么被我们拒了，不必再从位掩码反推。
@@ -330,7 +336,7 @@ impl ExtensionOwner {
         // 【为什么只在有素材时才建】会话会起一个线程、初始化模型并建临时目录
         // （`EditorSession::new_with`）。一个插在母线上、用户早已忘记的实例不该在
         // 每次 `setupProcessing` 上都付这份代价；而没有素材时它也没有任何东西可渲染。
-        if self.capture.has_material() {
+        if self.capture.has_material() || self.pending_capture_edits.lock_or_recover().is_some() {
             if let Ok(session) = self.clone().capture_session() {
                 // 让 actor 下一轮加载时间线并排一次渲染（幂等：已加载时它只推票据）。
                 session.request_reload();
@@ -384,15 +390,41 @@ impl ExtensionOwner {
         }
     }
     /// 仅SDK规定UI线程的kOffline setup调用；不在事务锁内等待，不把旧快照当最新版本。
-    pub(crate) fn prepare_offline_until(&self, deadline: std::time::Instant) -> Result<(), String> {
+    pub(crate) fn prepare_offline_until(
+        self: &Arc<Self>,
+        deadline: std::time::Instant,
+    ) -> Result<(), String> {
         // 【为什么 Capture 要在这里同步准备】bounce / 导出是 Capture 的**第二条通路**，
         // 而它是宿主跑得最快的一次 —— 插件没有第二次机会。这里必须同步把结果准备好，
         // 否则产物里是静音。`deadline` 对它无意义：没有文档事务可等，合成本身有界。
         // 【为什么判据与 `prepare_job` 同一份】离线只跑一趟，没有第二次机会，所以这里
         // 更不能因为"窗口没开过 ⇒ 形态未落定"就把静音烘焙进产物。与实时通路共用
         // "未绑定 + 有素材"这条证据（理由见 `prepare_job` 的同名分支）。
-        if !self.is_bound() && self.capture.has_material() {
-            return self.capture_prepare_job(Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        let needs_capture = !self.is_bound()
+            && (self.capture.has_material()
+                || self.pending_capture_edits.lock_or_recover().is_some());
+        if needs_capture {
+            // 【关键：先确保会话存在】离线实例可能从未打开过 GUI，曲线只在
+            // `pending_capture_edits` 里。没有会话时捕获通路会退回“只有几何”的
+            // 时间线，并把 with_curves=false 发布出去 —— 那正是“参数线不生效”。
+            // capture_session 会把 pending edits 投递给 actor，并请求加载。
+            if let Ok(session) = self.clone().capture_session() {
+                session.request_reload();
+            }
+            let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            loop {
+                self.capture_prepare_job_offline(cancel.clone())?;
+                if self.capture_offline_ready()? {
+                    return Ok(());
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err(
+                        "offline preparation timed out waiting for the capture session/curves"
+                            .into(),
+                    );
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
         }
         if !self.renders_playback() {
             return Ok(());
@@ -506,8 +538,7 @@ impl ExtensionOwner {
         for publisher in &self.snapshots {
             publisher.collect_retired();
         }
-        let mut snapshots = input.render(cancel.clone())?;
-        super::snapshot::compact_prepared(&mut snapshots)?;
+        let snapshots = input.render(cancel.clone())?;
         let _transaction = document.transaction.lock_or_recover();
         if cancel.load(Ordering::Acquire) || !document.ready.load(Ordering::Acquire) {
             return Ok(());
@@ -532,7 +563,7 @@ impl ExtensionOwner {
         }
         for (publisher, snapshot) in self.snapshots.iter().zip(snapshots) {
             publisher
-                .publish(snapshot)
+                .publish_shared(snapshot)
                 .map_err(|e| format!("snapshot publish failed: {e:?}"))?;
         }
         self.record_prepared(model, edit, epoch, scope, keys.clone());

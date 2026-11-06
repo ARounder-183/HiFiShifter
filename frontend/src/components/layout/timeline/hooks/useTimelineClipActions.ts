@@ -38,7 +38,11 @@ import {
     toggleGroupDisabledRemote,
 } from "../../../../features/session/thunks/timelineThunks";
 import { webApi } from "../../../../services/webviewApi";
-import { canClipboardHostClips, isPluginMode } from "../../../../services/hostCapabilities";
+import {
+    canClipboardHostClips,
+    canRewriteParamLinesLocally,
+    isPluginMode,
+} from "../../../../services/hostCapabilities";
 import { waveformMipmapStore } from "../../../../utils/waveformMipmapStore";
 import { snapTimelinePosition } from "../../../../utils/timelineSnapping";
 import { computeAutoCrossfadeFromPayload } from "./autoCrossfade";
@@ -1128,7 +1132,7 @@ export function useTimelineClipActions(
             );
             // “锁定参数线”：后端应用新长度后，将旧范围的参数线时域映射到
             // 新范围，并 bump 参数纪元让参数编辑器重新拉取。
-            if (mappingsByRootTrack.size > 0) {
+            if (canRewriteParamLinesLocally() && mappingsByRootTrack.size > 0) {
                 const stretchTasks = Array.from(mappingsByRootTrack, ([trackId, mappings]) =>
                     paramsApi.stretchTrackLinkedParams(trackId, mappings, false),
                 );

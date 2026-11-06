@@ -315,7 +315,7 @@ export function usePianoRollFrameAssembly({
     }, [loudnessSnapshotFetchSeq, clearCommittedLiveEditOverride]);
 
     // Clip 音高拖拽（修饰键 + 波形垂直拖拽）的实时预览桥：拖拽侧以节流
-    // 后端预览写入修改 pitch 参数线；这里把同一音分偏移实时应用到本机
+    // 后端预览写入修改 pitch 参数线；这里把同一音分偏移实时应用到本地
     // live 覆盖层，画布立即渲染拖拽结果 —— 与选择工具在选区内垂直拖拽的
     // 实时编辑同一渲染路径。仅当前参数为"音高"时生效（其余参数无法展示
     // 音高曲线；选区设定仍由 selectClipParamRange 完成）。

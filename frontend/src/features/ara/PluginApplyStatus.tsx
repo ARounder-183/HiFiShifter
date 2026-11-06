@@ -62,32 +62,47 @@ export function PluginApplyStatus({
         sessionCode === ERROR_CODE.ARA_NOT_BOUND
             ? t("plugin_ara_not_bound")
             : t("plugin_apply_session_ended");
+    /*
+     * 【色调也只跟着 `audible_state` 走】旧判据里的 `state?.pending` 会让状态片在
+     * **每一次**播放开始都亮成"进行中"，而那一刻后台跑的只是素材物化 —— 用户看到的
+     * 是一盏与自己的操作无关的灯。`waiting` 同理：它不是"在应用你的编辑"。
+     */
     const tone = terminal
         ? "danger"
         : error
           ? "danger"
-          : reloading || state?.pending
+          : reloading
             ? "accent"
-            : state?.ready
-              ? "success"
-              : "neutral";
+            : state?.audible_state === "preparing" ||
+                state?.audible_state === "stale" ||
+                state?.audible_state === "awaiting-analysis"
+              ? "accent"
+              : state?.ready
+                ? "success"
+                : "neutral";
     /*
-     * 【为什么要按"在等什么"分档】"正在自动应用..."是一句没有信息量的话：它既不说
-     * 进度、也不说还要多久，更不说"现在听到的是什么"。而这三件事后端全都知道 ——
-     * 尤其是**音高分析**，它是这条链路上唯一会持续很久的一步（几分钟素材的神经分析
-     * 本来就慢），却和"在合成"共用同一句话，于是用户无法区分"卡住了"与"在正常跑"。
+     * 【只读 `audible_state`】它的语义是「你听到的是不是当前编辑」，与状态栏要回答的
+     * 问题**同一个**。逐个读 `ready` / `analysis_pending` / `rendering_active` /
+     * `pending` 是把"后台在忙"当成"你听到的是旧的"—— 那正是「正在自动应用…」的依据，
+     * 而它覆盖的其实是素材物化与后台刷新，用户当时什么都没改。
+     *
+     * 【为什么还留 `ready` 那一档】后端没给 `audible_state`（旧版本后端 / 首帧）时，
+     * 「有没有可服务的输出」仍然只有 `ready` 能回答。它是兜底，不是主判据。
      */
+    const audibleState = state?.audible_state;
     const label = terminal
         ? terminalLabel
-        : !state?.ready
+        : audibleState === "preparing"
           ? t("plugin_apply_waiting_host")
-          : state.analysis_pending
-            ? t("plugin_apply_analyzing")
-            : state.rendering_active
-              ? t("plugin_apply_rendering")
-              : state.pending
-                ? t("plugin_apply_pending")
-                : t("plugin_apply_applied");
+          : audibleState === "stale"
+            ? t("plugin_apply_rendering")
+            : audibleState === "awaiting-analysis"
+              ? t("plugin_apply_analyzing")
+              : audibleState === "current"
+                ? t("plugin_apply_applied")
+                : !state?.ready
+                  ? t("plugin_apply_waiting_host")
+                  : t("plugin_apply_applied");
     /*
      * 修订数与长说明都进 tooltip：它们在状态栏里没有位置，但"为什么还没应用"
      * 恰恰要靠它们判断 —— 塞进片里会把状态栏撑成一条跑道。

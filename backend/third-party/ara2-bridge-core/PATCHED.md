@@ -31,7 +31,7 @@
 ## 影响面
 
 - 只加读访问器，不改任何既有行为；`[patch.crates-io]` 之后其余 ara2-bridge crate
-  的行为与本机未打补丁时一致。
+  的行为与未打补丁时一致。
 - 上游若补了同名 getter，删掉 `src/properties/model.rs` 里那段标注为"本地补丁"的代码、
   删掉 `backend/Cargo.toml` 的 `[patch.crates-io]` 段、删掉本目录即可。
 

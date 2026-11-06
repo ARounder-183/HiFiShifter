@@ -308,6 +308,11 @@ fn build_signalsmith_stretch() {
 /// 重打 tag 或 codeberg 供给链事故会直接进入音频时基代码，且两次构建产物可能不同。
 /// clone（或复用已有检出）后对 pin 校验 HEAD，不一致即失败。pin 升级走
 /// plugin-sdks.json 的评审 diff。
+///
+/// 【build.rs 不再改上游任何文件】以前这里会就地给 `SoundTouchDLL.rc` 与
+/// `CMakeLists.txt` 打补丁；现在补丁全部消失（rc 的 MFC 头用 include shim 顶替，
+/// CMake 策略用 `-DCMAKE_POLICY_VERSION_MINIMUM` 顶替），检出因此可以与上游逐字节
+/// 一致 —— 这也是"发行物只带 LGPL 全文、不带变更说明"的前提。
 const SOUNDTOUCH_PIN_JSON: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../scripts/env/plugin-sdks.json"
@@ -330,11 +335,20 @@ fn soundtouch_pinned_commit() -> String {
         .to_string()
 }
 
-/// 校验 SoundTouch 检出的 HEAD 与 pin 一致；无 `.git` 的检出版本无法核对，跳过。
-fn verify_soundtouch_pin(st_src_path: &Path) {
+/// 校验 SoundTouch 检出：HEAD 必须是 pin 的那次提交，且**源码未被改动**。
+///
+/// 【为什么连"未修改"也要查】发行物里的 `SoundTouchDLL` 声称是"未修改的上游库"，
+/// 随包因此只放 LGPL 全文、不放变更说明。这个声称只有靠构建期断言才守得住：旧版本的
+/// build.rs 会在原地改 `SoundTouchDLL.rc` 与 `CMakeLists.txt`，一台保留了旧检出的
+/// 构建机会继续用被改过的源码编出 DLL —— 产物与声明不符，而症状只是"许可里少了一页"。
+/// 这里只看被跟踪的源码（`--untracked-files=no` + 路径过滤）：Step 5 回写的 DLL 是
+/// 产物，不算改动。
+///
+/// 无 `.git` 的检出版本（离线镜像导入）两项都无法核对，跳过并留一条警告。
+fn verify_soundtouch_checkout(st_src_path: &Path) {
     let pinned = soundtouch_pinned_commit();
     if !st_src_path.join(".git").exists() {
-        println!("cargo:warning=[soundtouch] source has no .git; skipping pin verification");
+        println!("cargo:warning=[soundtouch] source has no .git; skipping pin and pristine checks");
         return;
     }
     // safe.directory=*：检出可能由不同用户/WSL 创建（Windows 的 dubious ownership）。
@@ -359,6 +373,34 @@ fn verify_soundtouch_pin(st_src_path: &Path) {
         );
     }
     println!("cargo:warning=[soundtouch] pin verified: {head}");
+
+    let dirty = Command::new("git")
+        .args([
+            "-c",
+            "safe.directory=*",
+            "-C",
+            st_src_path.to_str().expect("[soundtouch] src path"),
+            "status",
+            "--porcelain",
+            "--untracked-files=no",
+            "--",
+            "source",
+            "include",
+            "CMakeLists.txt",
+        ])
+        .output()
+        .expect("[soundtouch] failed to run git status");
+    let dirty = String::from_utf8_lossy(&dirty.stdout).trim().to_string();
+    if !dirty.is_empty() {
+        panic!(
+            "[soundtouch] checkout is not pristine - these tracked source files were modified:\n{dirty}\n\
+             The shipped SoundTouchDLL must be built from unmodified upstream source (that is why \
+             only COPYING.LGPL-2.1 ships, with no change notice). Delete the checkout \
+             (backend/src-tauri/third_party/soundtouch-static/soundtouch) and rebuild to re-clone \
+             the pinned revision."
+        );
+    }
+    println!("cargo:warning=[soundtouch] checkout is pristine (upstream sources unmodified)");
 }
 
 /// 本地 SDK 镜像根：`HIFISHIFTER_SDK_MIRROR`，否则仓库根的 `third_party/sdk-mirror`。
@@ -408,13 +450,57 @@ fn copy_dir_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// 资源编译器用的 `afxres.h` 替身（构建期 include shim）。
+///
+/// 上游 `source/SoundTouchDLL/SoundTouchDLL.rc` 第一段就 `#include "afxres.h"` ——
+/// 那是 MFC 的头，构建机没装 MFC 就编不过。以前的做法是**就地改上游文件**，代价是
+/// 发行物里的 SoundTouchDLL 成了"修改过的库"：LGPL-2.1 §2(b) 要求每个被改的文件都
+/// 带变更声明，于是每个发行包都得塞一份 SOUNDTOUCH-CHANGES.md。
+///
+/// 现在只改**编译器的搜索路径**：在 OUT_DIR 里生成同名头文件，再用
+/// `CMAKE_RC_FLAGS=/I<dir>` 把它排进 rc.exe 的 include 路径。上游源码树因此与
+/// 2.3.3 逐字节一致，分发时只需要 LGPL 全文，不需要任何变更披露。
+///
+/// 【为什么不能改 CMakeLists 加 include_directories】那同样是在改上游文件；
+/// `CMAKE_RC_FLAGS` 是**调用方**的配置，源码不动。
+///
+/// 【为什么是 `-1`】`afxres.h` 里 `IDC_STATIC` 就是 `-1`（标准控件的空 ID）。
+const RC_SHIM_AFXRES_H: &str = r#"/* Generated at build time by backend/hifishifter-kernel/build.rs - do not edit.
+ *
+ * Stand-in for the MFC header that SoundTouch's SoundTouchDLL.rc includes.
+ * The SoundTouch source tree stays byte-for-byte identical to upstream 2.3.3;
+ * this directory is only added to the resource compiler's include path.
+ */
+#ifndef HFS_RC_SHIM_AFXRES_H
+#define HFS_RC_SHIM_AFXRES_H
+
+#include <windows.h>
+
+#ifndef IDC_STATIC
+#define IDC_STATIC -1
+#endif
+
+#endif /* HFS_RC_SHIM_AFXRES_H */
+"#;
+
 fn build_soundtouch() {
     println!("cargo:warning=[kernel-native] starting build_soundtouch...");
 
     let st_src = format!("{}/soundtouch-static/soundtouch", THIRD_PARTY);
 
-    // Re-run this script only when the SoundTouch source tree changes.
-    println!("cargo:rerun-if-changed={}", st_src);
+    // 【只 watch 真正的输入，不 watch 我们自己写的那棵树】
+    //
+    // 这棵树在构建过程中**仍会被写入一处**：Step 5 把构建产物 `SoundTouchDLL.dll`
+    // 回写到树根（给 tauri_build 做资源校验）；`.git/` 也在里面（pin 校验与"未修改"
+    // 校验都要读它）。**源码本身一个字节都不改** —— 资源脚本缺的那个 MFC 头由
+    // `soundtouch_rc_shim` 补上，见下文。
+    // 早先这里 watch 的是整棵树，于是每次 cargo 都判定"源变了"：cmake configure +
+    // cmake build 每次都重跑（实测 ~1.5-2 s/次），产物一变还要连带重编内核、重链
+    // 90 MB 的插件测试二进制（~16 s/次）。下面只列真正的输入（C++ 源与头文件）；
+    // 产物回写不在 watch 集合里，循环从结构上消失。
+    for input in ["source", "include", "CMakeLists.txt"] {
+        println!("cargo:rerun-if-changed={}/{}", st_src, input);
+    }
 
     let st_src_path = Path::new(&st_src);
     if !st_src_path.join("CMakeLists.txt").exists() {
@@ -435,7 +521,7 @@ fn build_soundtouch() {
             copy_dir_tree(&mirror_entry, st_src_path)
                 .expect("[soundtouch] failed to import source from the local mirror");
             println!("cargo:warning=[soundtouch] SoundTouch source imported from the mirror");
-            verify_soundtouch_pin(st_src_path);
+            verify_soundtouch_checkout(st_src_path);
         } else if sdk_offline_requested() {
             eprintln!("\n========================================");
             eprintln!("ERROR: SoundTouch source is missing and offline mode is on!");
@@ -484,15 +570,16 @@ fn build_soundtouch() {
                 panic!("SoundTouch source clone failed. See error message above for instructions.");
             }
             println!("cargo:warning=[soundtouch] SoundTouch source cloned successfully");
-            verify_soundtouch_pin(st_src_path);
+            verify_soundtouch_checkout(st_src_path);
         }
     } else {
         // 已有检出同样校验：本地残留的旧 clone 不该静默参与构建。
-        verify_soundtouch_pin(st_src_path);
+        verify_soundtouch_checkout(st_src_path);
     }
 
-    // Only re-run if build.rs itself changes - the SoundTouch source tree is modified
-    // during the build (cmake outputs, .rc patching) which would cause an infinite rebuild loop.
+    // Only re-run if build.rs itself changes - the SoundTouch source tree is written to
+    // during the build (cmake outputs, the built DLL copied back to its root) which would
+    // cause an infinite rebuild loop.
     println!("cargo:rerun-if-changed=build.rs");
 
     let target = std::env::var("TARGET").unwrap_or_default();
@@ -506,57 +593,6 @@ fn build_soundtouch() {
     let is_windows = target_os == "windows";
     let is_apple = target_os == "macos";
 
-    // Patch SoundTouchDLL.rc to use windows.h instead of afxres.h (MFC header not always available)
-    if is_windows {
-        let rc_file = st_src_path
-            .join("source")
-            .join("SoundTouchDLL")
-            .join("SoundTouchDLL.rc");
-        if rc_file.exists() {
-            let content = std::fs::read_to_string(&rc_file)
-                .expect("[soundtouch] failed to read SoundTouchDLL.rc");
-            // Only write if the file actually needs patching to avoid triggering Tauri's file watcher.
-            if content.contains("afxres.h") && !content.contains("#include <windows.h>") {
-                let patched = content.replace("#include \"afxres.h\"", "#include <windows.h>");
-                // IDC_STATIC is normally defined in afxres.h as -1
-                let patched = if !patched.contains("IDC_STATIC") {
-                    patched.replace(
-                        "#include <windows.h>",
-                        "#include <windows.h>\n#ifndef IDC_STATIC\n#define IDC_STATIC -1\n#endif",
-                    )
-                } else {
-                    patched
-                };
-                if patched != content {
-                    std::fs::write(&rc_file, &patched)
-                        .expect("[soundtouch] failed to write patched SoundTouchDLL.rc");
-                    println!(
-                        "cargo:warning=[soundtouch] patched SoundTouchDLL.rc to use windows.h"
-                    );
-                }
-            }
-        }
-    }
-
-    // Patch SoundTouch CMakeLists.txt - cmake_minimum_required(VERSION 3.1) is
-    // deprecated in CMake ≥3.27 and a hard error in CMake ≥4.0.  Bump to 3.5.
-    {
-        let cmake_file = st_src_path.join("CMakeLists.txt");
-        if cmake_file.exists() {
-            let content = std::fs::read_to_string(&cmake_file)
-                .expect("[soundtouch] failed to read CMakeLists.txt");
-            let patched = content.replace(
-                "cmake_minimum_required(VERSION 3.1)",
-                "cmake_minimum_required(VERSION 3.5)",
-            );
-            if patched != content {
-                std::fs::write(&cmake_file, &patched)
-                    .expect("[soundtouch] failed to write patched CMakeLists.txt");
-                println!("cargo:warning=[soundtouch] patched CMakeLists.txt: cmake_minimum_required 3.1 → 3.5");
-            }
-        }
-    }
-
     println!(
         "cargo:warning=[soundtouch] is_windows={} is_apple={}",
         is_windows, is_apple
@@ -569,6 +605,25 @@ fn build_soundtouch() {
         build_dir.display()
     );
 
+    // 资源脚本的 include shim：只有 Windows 会编 .rc，占位目录也只在那里生成。
+    //
+    // 【内容必须逐字节稳定】build.rs 每次编译都会跑；内容一样就不重写，免得 rc.exe
+    // 的依赖时间戳被无谓刷新（会连带触发资源重新编译）。
+    let rc_shim_dir = Path::new(&out_dir).join("soundtouch_rc_shim");
+    if is_windows {
+        let shim_header = rc_shim_dir.join("afxres.h");
+        if std::fs::read_to_string(&shim_header).ok().as_deref() != Some(RC_SHIM_AFXRES_H) {
+            std::fs::create_dir_all(&rc_shim_dir)
+                .expect("[soundtouch] failed to create the RC include shim directory");
+            std::fs::write(&shim_header, RC_SHIM_AFXRES_H)
+                .expect("[soundtouch] failed to write the RC include shim");
+            println!(
+                "cargo:warning=[soundtouch] wrote RC include shim: {}",
+                shim_header.display()
+            );
+        }
+    }
+
     // Step 1: CMake configure - build SoundTouchDLL as a shared library.
     let mut cfg = Command::new("cmake");
     cfg.arg("-S").arg(st_src_path);
@@ -576,6 +631,13 @@ fn build_soundtouch() {
     cfg.arg("-DCMAKE_POLICY_VERSION_MINIMUM=3.5");
     cfg.arg("-DCMAKE_BUILD_TYPE=Release");
     cfg.arg("-DSOUNDTOUCH_DLL=ON");
+    if is_windows {
+        // 引号是给 rc.exe 的：OUT_DIR 可能落在带空格的路径下（用户名里带空格很常见）。
+        cfg.arg(format!(
+            "-DCMAKE_RC_FLAGS:STRING=/I\"{}\"",
+            rc_shim_dir.display()
+        ));
+    }
 
     if is_apple {
         cfg.arg("-DCMAKE_INSTALL_NAME_DIR=@rpath");

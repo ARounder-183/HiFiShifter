@@ -53,10 +53,18 @@ impl Persistence for ArchivePersistence {
             log::error!("[ara] document archive restore failed: {error}");
             AraError::InvalidState("ARA document archive could not be decoded")
         })?;
-        log::info!(
-            "[ara] document archive restored: {} byte(s); edits are held until the model graph \
-             is ready",
-            bytes.len()
+        // 【为什么是 Warn 而不是 Info】这条通道此前只有 log::info!，而 release 的默认
+        // 级别是 Warn（见 diagnostics.rs）—— 用户机器上一条都不落盘，于是
+        // "宿主到底有没有走 ARA 存档通道"在真机上**无法回答**。而修法完全取决于它
+        // （存档通道 ≠ VST3 组件状态通道）。限流只压重复，不压信号。
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Warn,
+            "ara.archive.restored",
+            format_args!(
+                "[ara] document archive restored: {} byte(s); edits are held until the model \
+                 graph is ready",
+                bytes.len()
+            ),
         );
         Ok(())
     }
@@ -65,14 +73,23 @@ impl Persistence for ArchivePersistence {
         let Some(document) = self.document.upgrade() else {
             // 文档已释放 ⇒ 没有编辑可存。返回空载荷而不是失败：宿主对失败的反应是提示
             // 用户"插件存档失败"，而这里并没有失败。
-            log::info!("[ara] document archive requested after teardown; storing empty");
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "ara.archive.teardown",
+                format_args!("[ara] document archive requested after teardown; storing empty"),
+            );
             return Ok(Vec::new());
         };
         let bytes = document.encode_archive().map_err(|error| {
             log::error!("[ara] document archive store failed: {error}");
             AraError::InvalidState("ARA document archive could not be encoded")
         })?;
-        log::info!("[ara] document archive stored: {} byte(s)", bytes.len());
+        // 同 restore_document：这一行是"宿主确实走存档通道"的唯一证据。
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Warn,
+            "ara.archive.stored",
+            format_args!("[ara] document archive stored: {} byte(s)", bytes.len()),
+        );
         Ok(bytes)
     }
 }
@@ -118,9 +135,14 @@ impl PartialPersistence for ArchivePersistence {
             log::error!("[ara] partial archive restore failed: {error}");
             AraError::InvalidState("ARA partial archive could not be decoded")
         })?;
-        log::info!(
-            "[ara] partial archive restored: {} byte(s); it is merged by key once the model graph              is ready",
-            bytes.len()
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Warn,
+            "ara.archive.partial-restored",
+            format_args!(
+                "[ara] partial archive restored: {} byte(s); it is merged by key once the model \
+                 graph is ready",
+                bytes.len()
+            ),
         );
         Ok(())
     }
@@ -153,10 +175,14 @@ impl PartialPersistence for ArchivePersistence {
                 log::error!("[ara] partial archive store failed: {error}");
                 AraError::InvalidState("ARA partial archive could not be encoded")
             })?;
-        log::info!(
-            "[ara] partial archive stored: {} byte(s); {} modification(s) selected",
-            bytes.len(),
-            modifications.as_ref().map_or(0, BTreeSet::len)
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Warn,
+            "ara.archive.partial-stored",
+            format_args!(
+                "[ara] partial archive stored: {} byte(s); {} modification(s) selected",
+                bytes.len(),
+                modifications.as_ref().map_or(0, BTreeSet::len)
+            ),
         );
         Ok(bytes)
     }
@@ -237,23 +263,38 @@ mod tests {
         let document = DocumentSession::new(1);
         document.ready.store(true, Ordering::Release);
         {
+            // 【两条根轨，各绑一条 modification】部分存档按 **modification** 选择，
+            // 而权威按 **根轨** 存储 —— 两者之间只有 `track_bindings` 这条边。
+            *document.track_bindings.lock_or_recover() = std::collections::BTreeMap::from([
+                (
+                    "root-a".to_owned(),
+                    vec![("a".to_owned(), "src".to_owned())],
+                ),
+                (
+                    "root-b".to_owned(),
+                    vec![("b".to_owned(), "src".to_owned())],
+                ),
+            ]);
             let mut edits = document.edits.lock_or_recover();
             edits
-                .atlas
-                .seed_test_pitch_curve("mod:a", 250., vec![60., 62.]);
+                .authority
+                .write_range("root-a", "pitch", 0, &[60., 62.], &[true; 2], 0.0)
+                .unwrap();
             edits
-                .atlas
-                .seed_test_pitch_curve("mod:b", 250., vec![64., 66.]);
+                .authority
+                .write_range("root-b", "pitch", 0, &[64., 66.], &[true; 2], 0.0)
+                .unwrap();
         }
         let selected = std::collections::BTreeSet::from(["a".to_owned()]);
         let bytes = document.encode_partial(Some(&selected), false).unwrap();
         let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        let authorities = payload["edits"]["atlas"]["authorities"]
-            .as_object()
-            .unwrap();
-        assert_eq!(authorities.len(), 1, "只应带上被选中的那一条");
-        assert!(authorities.contains_key("mod:a"));
-        assert!(!authorities.contains_key("mod:b"));
+        // 【为什么解码回 `EditState` 而不是直接读 JSON 路径】断言的是"哪些根活下来"，
+        // 不是某个字段叫什么名字。按名字读会让一次重命名把测试变成假绿。
+        let trimmed: crate::state_channel::EditState =
+            serde_json::from_value(payload["edits"].clone()).unwrap();
+        assert_eq!(trimmed.authority.roots.len(), 1, "只应带上被选中的那一条");
+        assert!(trimmed.authority.root("root-a").is_some());
+        assert!(trimmed.authority.root("root-b").is_none());
         // 文档级状态没被选中 ⇒ 载荷里不带它（恢复端因此不会覆盖它）。
         assert!(payload["edits"]["params"].as_object().unwrap().is_empty());
     }
@@ -268,28 +309,35 @@ mod tests {
         use std::sync::atomic::Ordering;
         let source = DocumentSession::new(1);
         source.ready.store(true, Ordering::Release);
-        source.edits.lock_or_recover().atlas.seed_test_pitch_curve(
-            "mod:archive-a",
-            250.,
-            vec![60., 62.],
-        );
+        // 【为什么必须声明绑定】`encode_partial` 的裁剪口径是"本实例此刻服务的根轨"：
+        // 没有 binding 的根一律被 retain 掉（宁可少带，也不按猜的边裁用户数据）。
+        // 早先这里只写权威不写绑定，于是载荷本来就是空的 —— 用例在断言端才炸。
+        source
+            .track_bindings
+            .lock_or_recover()
+            .insert("root-a".into(), vec![("a".into(), "ara://source".into())]);
+        source
+            .edits
+            .lock_or_recover()
+            .authority
+            .write_range("root-a", "pitch", 0, &[60., 62.], &[true; 2], 0.0)
+            .unwrap();
         let bytes = source.encode_partial(None, false).unwrap();
 
         let target = DocumentSession::new(2);
         target.ready.store(true, Ordering::Release);
-        target
-            .restore_archive_partial(&bytes, &[("archive-a".into(), "current-a".into())])
-            .unwrap();
+        target.restore_archive_partial(&bytes, &[]).unwrap();
         target.prepare_renderers();
         let edits = target.edits.lock_or_recover();
+        // 【这条用例的口径变了】它原本钉的是"曲线按 modification ID 重映射"。
+        // 权威的键是 (root, param, 工程秒)，跨文档导入要重映射的是**轨道身份**
+        // （由 `reconcile` 按 bindings 处理）—— 曲线本身没有需要搬的 ID。
+        // 因此现在钉的是同一件事的另一半：载荷**确实合入**了，且带着它的曲线。
         assert!(
-            edits.atlas.has_authority_parameters(None, "current-a"),
-            "必须按 current ID 合入"
+            edits.authority.root("root-a").is_some(),
+            "部分存档的根必须合入"
         );
-        assert!(
-            !edits.atlas.has_authority_parameters(None, "archive-a"),
-            "不得留下存档 ID"
-        );
+        assert!(!edits.authority.is_pristine(), "合入之后权威不得是空的");
     }
 
     /// **宿主先重建图、后给存档：恢复到达时可能一个 owner 都没有。**
@@ -312,19 +360,21 @@ mod tests {
         document
             .edits
             .lock_or_recover()
-            .atlas
-            .seed_test_pitch_curve("mod:held", 250., vec![60., 62.]);
+            .authority
+            .write_range("root-held", "pitch", 0, &[60., 62.], &[true; 2], 0.0)
+            .unwrap();
         // 【为什么载荷来自**另一份**文档】存档到达的目标文档本来就不是发出它的那一个
         // （重开工程 = 新文档；撤销 = 另一条通道）。同一份文档"存完立刻读回"会被
         // 回声判据识别成"宿主把刚才那份还给我"并忽略 —— 那是 G5 的**正确**行为，
         // 而本用例要钉的是"没有 owner 时载荷不被丢掉"，所以载荷必须真的来自别处。
         let source = DocumentSession::new(70);
         source.ready.store(true, Ordering::Release);
-        source.edits.lock_or_recover().atlas.seed_test_pitch_curve(
-            "mod:held",
-            250.,
-            vec![60., 62.],
-        );
+        source
+            .edits
+            .lock_or_recover()
+            .authority
+            .write_range("root-held", "pitch", 0, &[60., 62.], &[true; 2], 0.0)
+            .unwrap();
         let mut provider = ArchivePersistence::new(&source);
         let bytes = provider.store_document().expect("archive encodes");
         let mut consumer = ArchivePersistence::new(&document);
@@ -373,27 +423,42 @@ mod tests {
         let document = DocumentSession::new(8);
         document.ready.store(true, Ordering::Release);
         {
+            // 两条根轨各绑一条 modification：部分载荷按 modification 选择。
+            *document.track_bindings.lock_or_recover() = std::collections::BTreeMap::from([
+                (
+                    "root-partial".to_owned(),
+                    vec![("partial".to_owned(), "src".to_owned())],
+                ),
+                (
+                    "root-full".to_owned(),
+                    vec![("full".to_owned(), "src".to_owned())],
+                ),
+            ]);
             let mut edits = document.edits.lock_or_recover();
             edits
-                .atlas
-                .seed_test_pitch_curve("mod:partial", 250., vec![60., 62.]);
+                .authority
+                .write_range("root-partial", "pitch", 0, &[60., 62.], &[true; 2], 0.0)
+                .unwrap();
             edits
-                .atlas
-                .seed_test_pitch_curve("mod:full", 250., vec![70., 72.]);
+                .authority
+                .write_range("root-full", "pitch", 0, &[70., 72.], &[true; 2], 0.0)
+                .unwrap();
         }
-        // 部分载荷只带 `mod:partial`（它的值故意与整份那份不同，便于区分谁赢）。
+        // 部分载荷只带 `root-partial`（它的值故意与整份那份不同，便于区分谁赢）。
         let partial = document
             .encode_partial(
                 Some(&std::collections::BTreeSet::from(["partial".to_owned()])),
                 false,
             )
             .unwrap();
-        // 整份载荷同时带上两条权威。
+        // 整份载荷同时带上两条根。
         let mut full = crate::state_channel::EditState::default();
-        full.atlas
-            .seed_test_pitch_curve("mod:partial", 250., vec![61., 63.]);
-        full.atlas
-            .seed_test_pitch_curve("mod:full", 250., vec![71., 73.]);
+        full.authority
+            .write_range("root-partial", "pitch", 0, &[61., 63.], &[true; 2], 0.0)
+            .unwrap();
+        full.authority
+            .write_range("root-full", "pitch", 0, &[71., 73.], &[true; 2], 0.0)
+            .unwrap();
         let full = full.encode().unwrap();
 
         // 注意入队顺序故意**倒着**来：先整份、后部分。
@@ -403,11 +468,11 @@ mod tests {
         document.prepare_renderers();
         let edits = document.edits.lock_or_recover();
         assert!(
-            edits.atlas.has_authority_parameters(None, "partial"),
-            "部分存档带上的键必须存活（它不得被整份存档冲掉）"
+            edits.authority.root("root-partial").is_some(),
+            "部分存档带上的根必须存活（它不得被整份存档冲掉）"
         );
         assert!(
-            edits.atlas.has_authority_parameters(None, "full"),
+            edits.authority.root("root-full").is_some(),
             "整份存档的状态也必须合入"
         );
     }
@@ -431,8 +496,9 @@ mod tests {
         {
             let mut edits = document.edits.lock_or_recover();
             edits
-                .atlas
-                .seed_test_pitch_curve("mod:keep", 250., vec![60., 62.]);
+                .authority
+                .write_range("root-keep", "pitch", 0, &[60., 62.], &[true; 2], 0.0)
+                .unwrap();
         }
         // 坏载荷：不是本插件的存档格式 ⇒ 忽略并返回成功。
         // 【为什么不能报错】宿主把恢复失败当成"整份文档恢复失败"，会中止 region 交付；
@@ -458,8 +524,9 @@ mod tests {
             document
                 .edits
                 .lock_or_recover()
-                .atlas
-                .has_authority_parameters(None, "keep"),
+                .authority
+                .root("root-keep")
+                .is_some(),
             "failed 恢复不得顺手清掉已有的参数权威"
         );
     }

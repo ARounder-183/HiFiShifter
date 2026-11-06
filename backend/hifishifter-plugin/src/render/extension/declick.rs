@@ -262,6 +262,16 @@ impl ExtensionOwner {
             }
         }
 
+        // 【单声道总线：把 0 号通道的尾巴镜像到 1 号】`arm_seam` 的淡化状态是立体声的
+        // （它无条件下标 0/1），而单声道总线只写 0 号。不镜像就等于拿**上一轮播放**
+        // 留下的残值做交叉淡化 —— 那是一次凭空的噪声，且完全不可归因。
+        if channels == 1 {
+            for index in 0..DECLICK_HISTORY_FRAMES {
+                let value = state.tail[0][index].load(Ordering::Relaxed);
+                state.tail[1][index].store(value, Ordering::Relaxed);
+            }
+        }
+
         // 【B0】把这一块的形状记进账本。音频线程：只写原子量。
         //
         // 【为什么放在最后】这里读到的就是**已经输出**的样本（去咔之后），于是
@@ -342,11 +352,14 @@ impl ExtensionOwner {
         output.silence_flags = if any_signal {
             0
         } else {
-            (1_u64 << declared.min(64)) - 1
+            crate::audio_abi::silence_mask(declared)
         };
-        // 尾巴与输出源一起归零：下一块从静音起，不需要（也不该）再交叉淡化。
+        // 【必须清整段历史，而不是只清最旧的 64 帧】淡出读的是 `base = 历史长度 - fade`
+        // —— 也就是**最新**的那一段；此前这里清的是 `0..64`（最旧的一段），于是第二块
+        // 起会把同一段冻结的尾巴反复读出、反复淡出：周期 = 块长（848 帧 ≈ 18 ms），
+        // 听感是约 57 Hz 的嗡鸣，而 `any_signal` 恒为真还让宿主以为这一块有内容。
         for channel in 0..declared.min(2) {
-            for index in 0..OUTPUT_DECLICK_FRAMES {
+            for index in 0..DECLICK_HISTORY_FRAMES {
                 state.tail[channel][index].store(0, Ordering::Relaxed);
             }
         }
@@ -361,5 +374,9 @@ impl ExtensionOwner {
             Ordering::Release,
         );
         state.last_token.store(0, Ordering::Release);
+        // 【本块已经"去咔"过了】`force_declick` 是一次**一次性**请求：正常通路在
+        // `apply_output_declick` 里消费它。门控通路不经过那里，于是它会泄漏到下一块，
+        // 让一次本该已经发生的去咔在内容恢复时**再发生一次**（听感是恢复那一下的咔）。
+        self.force_declick[stream.index()].store(false, Ordering::Release);
     }
 }

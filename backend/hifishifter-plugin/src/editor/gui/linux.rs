@@ -131,7 +131,7 @@ static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
 /// 只记一次"宿主回调不再做宿主侧工作"的说明。
 static ONCE_HOST_TICK: std::sync::Once = std::sync::Once::new();
 
-/// 回执泵已跑的节拍数（见 §tick§ 里的说明）。
+/// 回执泵已跑的节拍数（见 `tick` 里的说明）。
 static TICKS: AtomicU64 = AtomicU64::new(0);
 /// 存活视图数（跨线程可读；`VIEWS` 是 thread_local，问不出别的线程）。
 static LIVE_VIEWS: AtomicUsize = AtomicUsize::new(0);
@@ -148,13 +148,13 @@ thread_local! {
 struct View {
     client: Rc<RefCell<EditorClient>>,
     port: Rc<LinuxPort>,
-    /// 嵌进宿主时我们自己的 X 窗口 id（§0§ = 浮窗）。resize 要直接对它发 X 请求。
+    /// 嵌进宿主时我们自己的 X 窗口 id（`0` = 浮窗）。resize 要直接对它发 X 请求。
     embedded_xid: u64,
     /// 泵是否就跑在**宿主 UI 线程**上（情形 A）。
     ///
-    /// 【为什么必须区分】§client::tick§ 会碰宿主 API（§flush_dirty§ / 宿主时钟 /
+    /// 【为什么必须区分】`client::tick` 会碰宿主 API（`flush_dirty` / 宿主时钟 /
     /// 让路状态机），只有宿主线程能调；情形 B 的节拍在私有 GTK 线程上，只能
-    /// §client::pump§（纯投递）。搞反了是"在错误线程上调宿主"—— 最难查的一类。
+    /// `client::pump`（纯投递）。搞反了是"在错误线程上调宿主"—— 最难查的一类。
     on_host_thread: bool,
     /// `GtkPlug`（XEmbed）或 `GtkWindow`（浮窗）。
     container: gtk::Widget,
@@ -305,7 +305,7 @@ enum Control {
     Close {
         token: usize,
     },
-    /// 只在情形 B：建视图并回报 §(token, 实际做到的保真度)§。
+    /// 只在情形 B：建视图并回报 `(token, 实际做到的保真度)`。
     Attach {
         request: AttachRequest,
         reply: SyncSender<Result<(usize, GuiFidelity), String>>,
@@ -756,10 +756,10 @@ pub(super) fn create(
     // 定时器驱动 —— 但它要求我们同时把 Gdk 的 X 连接 fd 注册给宿主（否则 GTK 收不到
     // 输入，窗口会"画一次就冻住"）。这两步里任何一步在真宿主上不如预期，代价都是
     // 一个**冻住的界面**，而现在的情形 B（私有 GTK 线程 + 浮窗）虽然降级但确实能用。
-    // 本机没有任何提供 IRunLoop 的宿主可以验证，所以这里只把"宿主有没有这条路"
+    // 本地没有任何提供 IRunLoop 的宿主可以验证，所以这里只把"宿主有没有这条路"
     // 记进日志 —— 报障日志里有这一行，下一次就能拿着真实证据决定要不要翻这个开关。
     //
-    // 【抄错 IID 会怎样】只会让探测恒为 §false§，也就是永远走情形 B —— 不会崩、
+    // 【抄错 IID 会怎样】只会让探测恒为 `false`，也就是永远走情形 B —— 不会崩、
     // 不会静默改行为。这条探测是纯只读的：拿到接口立刻释放，不注册任何东西。
     let run_loop = probe_run_loop(frame);
     crate::gui_log_line(&format!(
@@ -830,9 +830,9 @@ pub(super) fn create(
         crate::gui_log_line("pinning GDK_BACKEND=x11 so the host's X11 window can be embedded");
     }
     //
-    // 【为什么这里不返回 §Err§】"这台机器上没有可用的 GTK/WebKit"是一个**环境事实**，
+    // 【为什么这里不返回 `Err`】"当前环境没有可用的 GTK/WebKit"是一个**环境事实**，
     // 不是一个错误：宿主应当看到空面板 + 一行可搜到的日志，而不是一个没人读的字符串。
-    // 真正的编程错误（父窗口为空、线程身份不对）仍然走 §Err§。
+    // 真正的编程错误（父窗口为空、线程身份不对）仍然走 `Err`。
     let thread = match gui_thread() {
         Ok(thread) => thread,
         Err(_) => {
@@ -980,8 +980,8 @@ fn start_gui_thread() -> Result<GuiThread, String> {
         .name("hfs-gui".into())
         .spawn(move || {
             // 【为什么不调 `gtk::init()`】本 crate 打开了 `unsafe-assume-initialized`，
-            // 于是 §gtk::init()§ 会认为"已经初始化"并直接返回 —— 它**不会**真的去初始化。
-            // 情形 B 里我们才是那个初始化者，所以显式调 §gtk_init_check§（argc/argv 允许
+            // 于是 `gtk::init()` 会认为"已经初始化"并直接返回 —— 它**不会**真的去初始化。
+            // 情形 B 里我们才是那个初始化者，所以显式调 `gtk_init_check`（argc/argv 允许
             // 为 NULL，GTK 文档明写）。
             //
             // SAFETY: 只在尚未初始化 GDK 的进程里、在本模块自建的线程上调用一次。
@@ -1111,7 +1111,7 @@ fn tick_inner() -> glib::ControlFlow {
     for (client, on_host_thread) in clients {
         if on_host_thread {
             // 情形 A：节拍就在宿主线程上，于是宿主侧的事（私有状态通知、宿主时钟、
-            // 让路状态机）能在这里做 —— 与 Windows 的 §WM_TIMER§、macOS 的 §NSTimer§ 等价。
+            // 让路状态机）能在这里做 —— 与 Windows 的 `WM_TIMER`、macOS 的 `NSTimer` 等价。
             client::tick(&client);
         } else {
             // 情形 B：这里不是宿主线程。**宿主 API 一律不碰** —— 宿主侧的心跳由
@@ -1470,13 +1470,14 @@ fn attach_view(
         let weak = Rc::downgrade(&client);
         window.connect_delete_event(move |_, _| {
             // 由 GTK 主循环的 C 栈调用；panic 拦成"继续销毁"（与正常路径同值）。
+            // 【为什么 `Proceed` 有两个来源】一个是 panic 兜底值，一个是正常路径的返回值：
+            // 窗口的销毁交给 `close_view`（它要同时摘掉注册表与节拍），这里只负责关客户端。
             crate::guard_ffi(gtk::glib::Propagation::Proceed, || {
                 if let Some(client) = weak.upgrade() {
                     client.borrow_mut().close();
                 }
-            });
-            // 【为什么 `Proceed`】窗口的销毁交给 `close_view`（它要同时摘掉注册表与节拍）。
-            gtk::glib::Propagation::Proceed
+                gtk::glib::Propagation::Proceed
+            })
         });
         window.show_all();
     }
@@ -1547,7 +1548,7 @@ fn attach_view(
                             let surface = match result {
                                 Ok(surface) => surface,
                                 Err(error) => {
-                                    // 【为什么要打错误文本】§snapshot§ 失败就是"WebKit 拿不出渲染
+                                    // 【为什么要打错误文本】`snapshot` 失败就是"WebKit 拿不出渲染
                                     // 结果"，那正是黑屏的机制。错误信息里写着它卡在哪一步
                                     //（进程崩溃 / 没有可绘制的帧 / 区域为空）。
                                     crate::gui_log_line(&format!(
@@ -1599,8 +1600,8 @@ fn attach_view(
 /// 每进程 profile 目录同义）：偏好靠后端配置文件持久化，WebView 自己不该往
 /// 用户的 `~/.local/share` 里写东西。
 fn web_context(assets: &std::path::Path) -> webkit2gtk::WebContext {
-    // 【为什么是 thread_local 而不是 §static§】§WebContext§ 是 GObject（§!Send§），
-    // 塞进 §OnceLock§ 会要求它 §Send + Sync§ —— 那等于对 GObject 撒谎。
+    // 【为什么是 thread_local 而不是 `static`】`WebContext` 是 GObject（`!Send`），
+    // 塞进 `OnceLock` 会要求它 `Send + Sync` —— 那等于对 GObject 撒谎。
     // 每个拥有视图的线程各一份，正好也是"GTK 对象只属于一条线程"的写照。
     CONTEXT.with(|slot| {
         let mut slot = slot.borrow_mut();
@@ -1655,6 +1656,10 @@ fn install_messages(manager: &webkit2gtk::UserContentManager, client: &Rc<RefCel
     let weak = Rc::downgrade(client);
     manager.connect_script_message_received(None, move |_, result| {
         // 该闭包由 WebKitGTK 的 C 栈调用（同 `tick` 的守卫理由）。
+        // 【为什么要再 clone 一次】外层是 `Fn`（信号会反复触发），内层 `move` 闭包
+        // 会消费捕获的 `weak`；不 clone 就编不过（E0507），而 clone 的代价是一次
+        // 引用计数自增。
+        let weak = weak.clone();
         crate::guard_ffi((), move || {
             let Some(client) = weak.upgrade() else {
                 return;
@@ -1684,7 +1689,7 @@ fn install_policy(webview: &webkit2gtk::WebView, client: &Rc<RefCell<EditorClien
                 if let Some(navigation) =
                     decision.downcast_ref::<webkit2gtk::NavigationPolicyDecision>()
                 {
-                    // §request()§ 自 WebKit 2.6 起废弃，用 §navigation_action().request()§。
+                    // `request()` 自 WebKit 2.6 起废弃，用 `navigation_action().request()`。
                     let allowed = navigation
                         .navigation_action()
                         .and_then(|action| action.request())
@@ -1726,6 +1731,7 @@ fn install_policy(webview: &webkit2gtk::WebView, client: &Rc<RefCell<EditorClien
     let weak = Rc::downgrade(client);
     webview.connect_load_failed(move |_, _, uri, error| {
         // false = 把失败交给 WebKit 的默认处理（与原闭包的返回值一致）。
+        let weak = weak.clone();
         crate::guard_ffi(false, move || {
             crate::gui_log_line(&format!("page load failed for {uri}: {error}"));
             if let Some(client) = weak.upgrade() {
@@ -1753,6 +1759,7 @@ fn install_drop(webview: &webkit2gtk::WebView, client: &Rc<RefCell<EditorClient>
     let weak = Rc::downgrade(client);
     webview.connect_drag_data_received(move |_, _, _, _, data, _, _| {
         // 由 GTK 拖放机制的 C 栈调用（同 `tick` 的守卫理由）。
+        let weak = weak.clone();
         crate::guard_ffi((), move || {
             let Some(client) = weak.upgrade() else {
                 return;

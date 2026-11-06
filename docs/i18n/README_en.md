@@ -182,6 +182,21 @@ git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.gi
 git -C soundtouch rev-parse HEAD
 ```
 
+#### Model weights (fetched on demand)
+
+Only the manifest `backend/src-tauri/resources/models/models.json` (1.5 KB) is committed. The
+151.6 MB of weights ship as the release asset `models-<manifest version>.zip` — the version is a
+content hash, so a stale download fails the per-file check immediately. The build scripts call the
+fetch script for you; it is idempotent and only scans the directory when everything is present:
+
+```bash
+python scripts/setup/fetch-models.py                # fetch when missing
+python scripts/setup/fetch-models.py --check        # check only
+python scripts/setup/fetch-models.py --source DIR   # offline: copy from an existing folder
+```
+
+Set `HIFISHIFTER_MODELS_BASE_URL` to point at a mirror.
+
 ### 4. Development and Build
 
 ```bash
@@ -197,16 +212,18 @@ cargo tauri build
 cargo tauri build --bundles appimage -- --no-default-features --features onnx
 # Or use the helper script: bash scripts/build/build-linux-appimage.sh
 
-# Windows portable ZIP
-.\scripts\build\pack-portable.ps1 -SkipBuild
+# Windows: merged installer (app + VST3 + model library) and portable ZIP
+.\build.bat
 
-# Windows VST3 ZIP + installer (a complete Release delivery already exists)
-.\scripts\build\pack-portable.ps1 -PackageTarget Plugin -SkipBuild -Installer
+# VST3 only / app only / repack the installer
+.\build.bat -Target Plugin
+.\build.bat -Target App
+.\build.bat -Target Installer
 ```
 
 What goes into the AppImage is decided in one place, `scripts/build/linux-appimage.sh`, shared by CI and local builds: libraries that the host must provide (WebKitGTK, GStreamer, GL, Wayland) are pruned from the bundle, `ldd` then asserts the binary really resolves them from the host, and the repacked image is smoke-tested headlessly. Run one step on its own with `bash scripts/build/linux-appimage.sh package <tauri-release-dir>` (or `verify <AppDir>`).
 
-Double-clicking `pack-portable.bat` lets you choose App, VST3 or both; see `scripts/build/pack-portable.ps1` and the scripts under `scripts/` for the available switches.
+Double-clicking `build.bat` runs a full build (merged installer + portable ZIP); switches are documented in `scripts/build/build.ps1`.
 
 You can switch the frontend startup mode via the `TAURI_UI_MODE` environment variable:
 
@@ -254,11 +271,11 @@ ONNX Runtime binaries are automatically downloaded by the ort crate at build tim
 
 The app automatically writes its run log to the platform-standard log directory — no command-line flags required:
 
-| OS | Log directory |
-| --- | --- |
-| Windows | `%LOCALAPPDATA%\com.arounder.hifishifter\logs` |
-| macOS | `~/Library/Logs/com.arounder.hifishifter` |
-| Linux | `~/.local/share/com.arounder.hifishifter/logs` |
+| OS      | Log directory                      |
+| ------- | ---------------------------------- |
+| Windows | `%LOCALAPPDATA%\HiFiShifter\logs`  |
+| macOS   | `~/Library/Logs/HiFiShifter`       |
+| Linux   | `$XDG_STATE_HOME/HiFiShifter/logs` |
 
 - Inside the app, use **Help → Open Log Folder** to jump straight to the logs, or **Help → Export Diagnostics** to generate a diagnostics package (system info + all logs + inference-device benchmark results) to attach to an issue.
 - Logs rotate automatically by size: 8 MiB per file, with up to 3 historical copies kept (`hifishifter.1.log` ~ `hifishifter.3.log`).
@@ -275,6 +292,20 @@ Advanced options:
 - Two graphics diagnostics lines are always logged at startup: `[linux] session:` (GTK backend / `DISPLAY` / `WAYLAND_DISPLAY` / AppImage) and `[linux] egl:` (EGL vendor and version). Please attach them to graphics-related issues.
 - Run `HiFiShifter --benchmark` in a terminal: run the inference-device benchmark and print JSON results.
 
+### Data directories
+
+Besides the logs, the user data lives here (the standalone app and the plug-in share the same directories):
+
+| Purpose | Windows | macOS | Linux |
+| --- | --- | --- | --- |
+| Settings | `%APPDATA%\HiFiShifter` | `~/Library/Application Support/HiFiShifter` | `$XDG_CONFIG_HOME/HiFiShifter` (default `~/.config/HiFiShifter`) |
+| Caches (waveform / render) | `%LOCALAPPDATA%\HiFiShifter\cache` | `~/Library/Caches/HiFiShifter` | `$XDG_CACHE_HOME/HiFiShifter` (default `~/.cache/HiFiShifter`) |
+| Imported media of unsaved sessions | `%LOCALAPPDATA%\HiFiShifter\unsaved\<session>` | `~/Library/Application Support/HiFiShifter/unsaved/<session>` | `$XDG_DATA_HOME/HiFiShifter/unsaved/<session>` |
+| Shared model library (Windows only, written by the installer) | `%PROGRAMDATA%\HiFiShifter\models\<version>` | — | — |
+
+- Imported media of a saved project lives in a `<project name>_media` folder next to the project file; copy the project together with that folder.
+- When upgrading from an older version, the first launch moves the old `com.arounder.hifishifter` directories to the new locations. If both the old and the new directory exist, they are **not merged** (both are left untouched) and a note is written to the log.
+
 ## Documentation
 
 - User manual: [简体中文](../../docs/i18n/USERMANUAL.md) · [繁體中文](USERMANUAL_zh-TW.md) · [English](USERMANUAL_en.md) · [日本語](USERMANUAL_ja.md) · [한국어](USERMANUAL_ko.md)
@@ -283,6 +314,7 @@ For developers:
 
 - Extension API: [docs/extension-api.md](../../docs/extension-api.md)
 - UI text style guide (i18n Style Guide): [docs/i18n/style-guide.md](../../docs/i18n/style-guide.md)
+- Model weights (fetching and publishing): [docs/models.md](../../docs/models.md)
 
 ## Acknowledgements
 
@@ -298,4 +330,8 @@ This project uses code or model architectures from the following open-source lib
 
 ## License
 
-This project is released under the [MIT License](../../LICENSE).
+The project's own code is released under the [MIT License](../../LICENSE). License texts and
+notices for the bundled third-party components ship in [`licenses/`](../../licenses/README.md):
+SoundTouch (LGPL-2.1, dynamically linked, unmodified upstream), ARA SDK and others (Apache-2.0),
+and the DiffSinger vocoder weights (CC BY-NC-SA 4.0, non-commercial only). The Third-Party Notices
+in [LICENSE](../../LICENSE) list every component.

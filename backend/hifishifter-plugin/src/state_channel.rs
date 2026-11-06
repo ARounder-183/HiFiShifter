@@ -1,4 +1,5 @@
 //! 插件侧编辑状态；客户端只能提交参数，宿主的clip几何始终权威。
+use hifishifter_kernel::editor::param_authority::ParamAuthority;
 use hifishifter_kernel::state::{TimelineState, Track, TrackParamsState};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -28,15 +29,15 @@ pub(crate) struct ClipLocalState {
 #[derive(Default, Clone, Serialize, Deserialize)]
 pub(crate) struct EditState {
     pub revision: u64,
+    /// **唯一用户编辑权威**：项目时间的稀疏 run，不存显示数组、不存默认值。
+    #[serde(default)]
+    pub authority: ParamAuthority,
+    /// 兼容旧存档/旧测试的显示缓存；运行时任何读路径都不得把它当编辑真相。
+    #[serde(default)]
     pub params: BTreeMap<String, TrackParamsState>,
     pub tracks: Vec<Track>,
     #[serde(default)]
     pub bindings: TrackBindings,
-    #[serde(
-        default,
-        skip_serializing_if = "crate::editor::parameter_atlas::ParameterAtlas::is_empty"
-    )]
-    pub atlas: crate::editor::parameter_atlas::ParameterAtlas,
     /// REAPER稳定item GUID对应的HFS自有形状；不写回宿主shape/c/S字段。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub fades: BTreeMap<String, crate::fade::FadeStyle>,
@@ -200,7 +201,7 @@ impl EditState {
     pub fn is_pristine(&self) -> bool {
         self.params.is_empty()
             && self.tracks.is_empty()
-            && self.atlas.is_empty()
+            && self.authority.is_pristine()
             && self.fades.is_empty()
             && self.clip_local.is_empty()
             && self.take_syllables.is_empty()
@@ -419,33 +420,17 @@ impl EditState {
             .collect();
         candidate.bindings = mapping.values().cloned().collect();
         candidate.unbound = unbound;
-        for record in candidate.atlas.regions.values_mut() {
-            if let Some((root, _)) = mapping.get(&record.root) {
-                record.root = root.clone();
-            }
+        if !mapping.is_empty() {
+            let root_map = mapping
+                .iter()
+                .map(|(old, (new, _))| (old.clone(), new.clone()))
+                .collect::<BTreeMap<_, _>>();
+            candidate.authority.remap_roots(&root_map);
         }
-        for record in candidate.atlas.copy_seeds.values_mut() {
-            if let Some((root, _)) = mapping.get(&record.root) {
-                record.root = root.clone();
-            }
-        }
-        // 【U-7：`gaps` 必须与 `params` 用同一条规则】
-        //
-        // "未锁定"的参数线里，**没有 clip 覆盖的那一段**住在这一层（`atlas.gaps`）。
-        // round 23 修好了 `params` 的 unbound 保留，却漏了这里：宿主重建 region sequence
-        // ⇒ 根轨 id 变 ⇒ 这一层被整片清空。用户看到的是"那个 clip 附近的那段线没了" ——
-        // 而那正是他们最可能在两段音频之间画的那一段。
-        candidate.atlas.gaps = self
-            .atlas
-            .gaps
-            .iter()
-            .filter_map(|(root, params)| match mapping.get(root) {
-                Some((new, _)) => Some((new.clone(), params.clone())),
-                // 这一轮认不出是谁的 ⇒ 数据留着、不套用（与 `params` 同一纪律）。
-                None if candidate.unbound.contains(root) => Some((root.clone(), params.clone())),
-                None => None,
-            })
-            .collect();
+        // 【根轨 id 变了，曲线必须跟着换根】权威是 root 作用域的：宿主重建
+        // region sequence 时根轨 id 必然改变，不换根就等于"那一条轨的编辑全部消失"
+        // （用户报的"重开工程后曲线没了"）。`remap_roots` 在权威层做同一件事，
+        // 而且它是**唯一**一份需要换的东西 —— 曲线不再有第二份副本。
         candidate.needs_rebind = false;
         if !renamed.is_empty() {
             // 【为什么推进 revision】下一次 `ensure_loaded` 据此重读一份带新键的视图；
@@ -453,7 +438,7 @@ impl EditState {
             candidate.revision = candidate.revision.saturating_add(1);
             hifishifter_kernel::log_limiter::emit_limited_key(
                 log::Level::Warn,
-                "ara.atlas.root-renamed",
+                "ara.param.root-renamed",
                 format_args!(
                     "[ara] {} track record(s) followed the host's rebuilt sequence: {:?}",
                     renamed.len(),
@@ -543,10 +528,26 @@ impl EditState {
         }
         let mut merged = self.clone();
         merged.revision = self.revision.checked_add(1).ok_or("revision exhausted")?;
+        // 组件作用域：本组件 host 视图里的根由这一份载荷重新定义，其余根保留。
         merged
             .params
             .retain(|id, _| !host_ids.contains(id.as_str()));
-        merged.params.extend(params.clone());
+        for (id, incoming) in params {
+            let entry = merged.params.entry(id.clone()).or_default();
+            entry.frame_period_ms = incoming.frame_period_ms;
+            if incoming.pitch_edit_user_modified || !incoming.pitch_edit.is_empty() {
+                entry.pitch_edit = incoming.pitch_edit.clone();
+                entry.pitch_edit_user_modified = incoming.pitch_edit_user_modified;
+            }
+            entry.tension_edit = incoming.tension_edit.clone();
+            entry.extra_curves = incoming.extra_curves.clone();
+            entry.extra_params = incoming.extra_params.clone();
+            // 【T2：派生数组永不从客户端进来】pitch_orig / dyn_orig / tension_orig 由
+            // 基线层唯一提供（`DocumentSession::publish_baseline`）。此前这里在
+            // "目标为空"时补入客户端的副本，于是"客户端拿旧一代分析结果回传"会覆盖
+            // 新基线 —— 用户看到的就是参数线回到旧的原始值。
+        }
+        // 不按本次传入的 host 子集删根：调用方可能只提交工作区的一部分。
         merged
             .tracks
             .retain(|track| !host_ids.contains(track.id.as_str()));
@@ -564,14 +565,31 @@ impl EditState {
         // [`Self::unbound`]（"这条从来没被绑定过"），而不是 `needs_rebind`
         // （"整份还没关联"）—— 后者一旦为真就什么都不套，正是"全部参数丢失"的
         // 另一种写法。
-        timeline.params_by_root_track = self
-            .params
-            .iter()
-            .filter(|(id, _)| {
-                !self.unbound.contains(*id) && timeline.tracks.iter().any(|t| t.id == **id)
-            })
-            .map(|(id, p)| (id.clone(), p.clone()))
-            .collect();
+        // 逐根合并，而不是整份替换：客户端没有送来的根必须保留当前分析/投影；
+        // 派生数组（pitch_orig / dyn_orig / tension_orig）永远不从可编辑状态覆盖。
+        let existing = std::mem::take(&mut timeline.params_by_root_track);
+        let mut merged = existing
+            .into_iter()
+            .filter(|(id, _)| timeline.tracks.iter().any(|t| t.id == *id))
+            .collect::<BTreeMap<_, _>>();
+        for (id, params) in &self.params {
+            if self.unbound.contains(id) || !timeline.tracks.iter().any(|t| t.id == *id) {
+                continue;
+            }
+            let entry = merged.entry(id.clone()).or_default();
+            entry.frame_period_ms = params.frame_period_ms;
+            // 用户曲线取存档；空数组表示用户清空，必须允许。
+            if params.pitch_edit_user_modified || !params.pitch_edit.is_empty() {
+                entry.pitch_edit = params.pitch_edit.clone();
+                entry.pitch_edit_user_modified = params.pitch_edit_user_modified;
+            }
+            entry.tension_edit = params.tension_edit.clone();
+            entry.extra_curves = params.extra_curves.clone();
+            entry.extra_params = params.extra_params.clone();
+            // 【T2：派生数组不从这里来】它们属于基线层；恢复路径由
+            // `publish_baseline` / `install_baseline_locked` 负责。
+        }
+        timeline.params_by_root_track = merged;
         for track in &mut timeline.tracks {
             if self.unbound.contains(&track.id) {
                 continue;
@@ -689,27 +707,40 @@ impl EditState {
             .retain(|key, _| clips.contains(&key.clip_id));
     }
 
-    /// 本构建支持的**最高**状态 schema 代际。
+    /// 本构建**唯一**认得的插件状态版本。
     ///
-    /// 【为什么 `encode` 不写这个常量】版本号在这里是**向后兼容**手段：只带 atlas 的
-    /// 载荷写 2、带 groups 写 5……旧构建（它只认自己那一代及更低）因此仍能读。写死最高
-    /// 代际会让所有旧构建一律拒绝，把"能读"变成"全丢"。这个常量只用于 `restore` 判断
-    /// "由更新的插件保存"。
+    /// 【为什么可以回退到 1】这份载荷只由 VST3 / ARA 插件读写，而 VST 版**从未发布**
+    /// 给终端用户（只在开发者机器上跑过）。此前那套 2/3/4/5/6/10/11 的阶梯，以及
+    /// `migrate_legacy_params_to_authority` / `migrate_legacy_authority_edits` /
+    /// `migrate_legacy_gaps` 这些迁移，全部只为"读回已经流通过的旧存档"存在 ——
+    /// 没有终端用户，就没有需要兼容的存档。留着它们只会让"当前格式到底有几代"
+    /// 变成一个没人答得清的问题。
+    /// 【边界：独立 App 不受影响】App 的工程文件是 `ProjectFile`（v6），与这份载荷
+    /// **不是同一个格式**；kernel 的 `TimelineState` / `TrackParamsState` 仍必须
+    /// 保持向后兼容（App 也读它们）。见第三轮方案的 §2.3.3。
     ///
-    /// 【为什么第 8 代必须升】第 8 代把权威曲线从"工程帧索引"改成"**源帧**索引"，
-    /// 并把 `SourceCurve.basis` 从对象改成 `null`（见 `SourceCurve::basis`）。
-    /// 旧构建读新存档时那个字段会解析失败 —— 升代让它得到"这份存档由更新的插件保存"
-    /// 这句**可行动**的话，而不是一条看不懂的 serde 错误。反过来，新构建读第 7 代及
-    /// 更早的存档仍然完全正确（`basis` 有对象 ⇒ 走旧索引分支），因此**不需要折算**。
+    /// 【为什么从 1 升到 2】第 1 代有两个互相矛盾的约定同时存在：`encode` 写的是
+    /// `STATE_VERSION`（= 1），而 `restore` 把 `version == 1` 当成**旧格式**直接
+    /// 拒绝 —— 于是 `restore(encode(s))` 对任何非空存档都必然失败。而 `encode` 的
+    /// 调用方把失败降级成空载荷，宿主据此把用户的全部参数写成"没有编辑"。
     ///
-    /// 【第 9 代】新增 `take_syllables`（源域音节缓存）。它是可选字段，旧构建
-    /// 读到会忽略；新构建读第 8 代及更早存档时该表为空，块回退为整段 / MIDI 音符。
-    const CURRENT_STATE_VERSION: u64 = 9;
+    /// 症状正是用户报过的"存档一次、参数线回退一次"。它长期没被发现，是因为插件的
+    /// `cargo test` 二进制跑不完（见第五轮方案 §5.J 的 J1）—— 这一轮修好之后它
+    /// 立刻暴露成 10 条失败。
+    ///
+    /// 【为什么是"升版本"而不是"把 1 从旧格式名单里去掉"】第 1 代确实**已经**被写过
+    /// （早期构建确实写过），而它的记录**没有持久身份**（按会话轨序号索引）。升到 2 之后，
+    /// 旧档会被明确拒绝并给出可行动的理由，而不是被按序号猜着恢复 —— 猜错的后果是
+    /// 把 A 轨的曲线套到 B 轨上。插件从未发布给终端用户，所以"不迁移"是允许的。
+    ///
+    /// 【音节缓存不升代际】`take_syllables` 缺省为空，是**可选缓存**；升代会让已经
+    /// 写出的第 2 代载荷被整份拒绝，而缺少缓存最多回退成整段 / MIDI 音符。
+    pub(crate) const STATE_VERSION: u64 = 2;
 
     /// 有版本且有界的组件state；旧空state保持默认编辑。
     pub fn encode(&self) -> Result<Vec<u8>, String> {
         self.groups.validate()?;
-        self.atlas.validate()?;
+        self.authority.validate()?;
         self.validate_fades()?;
         self.validate_clip_local()?;
         self.validate_take_syllables()?;
@@ -721,27 +752,41 @@ impl EditState {
         // 契约应当是**往返对称**：`restore(encode(s))` 对任意 `s` 都能成功。
         // 做不到这一点时，"拒绝写"不是保守，而是用整份数据去赌一条记录。
         // 无法绑定的条目现在由 `unbound` 承载：数据留着、不套用、不进 `bindings`。
-        let version = if !self.take_syllables.is_empty() {
-            9
-        } else if !self.atlas.authorities.is_empty() {
-            8
-        } else if !self.clip_local.is_empty() {
-            6
-        } else if !self.groups.is_empty() {
-            5
-        } else if !self.fades.is_empty() {
-            4
-        } else if self.atlas.is_empty() {
-            2
-        } else {
-            3
-        };
-        // 【为什么不直接序列化 `self`】`atlas.regions` 是**每帧派生**的投影缓存，它的
-        // 权威是 `atlas.authorities`。写出派生缓存会让同一份采样在存档里出现两次
-        // （曲线是 `Arc<Vec<f32>>`，内存里共享、序列化时各写一份），而它读回来之后
-        // 又会被 `follow_geometry` 立刻覆盖。清掉它：存档只带权威。
+        // 【单一版本】内容不再决定版本号：格式只有一种，读的一侧只有一条路径。
+        let version = Self::STATE_VERSION;
+        // 【存档只带权威】曲线只有一份（`authority`，工程时间的稀疏 run）。
+        // `params` 里的显示数组是**派生缓存**：写进去，读回来就会被当成"用户编辑"，
+        // 那正是"存档一次、参数线回退一次"的来源。
         let mut trimmed = self.clone();
-        trimmed.atlas.regions.clear();
+        let authority_present = !trimmed.authority.is_pristine();
+        trimmed.params = trimmed
+            .params
+            .into_iter()
+            .map(|(root, params)| {
+                // 保留根的存在性（空轨也要能被认回），只清派生数组：
+                // 用户曲线不能按"标记是否存在"推断丢弃（旧载荷没有那个标记）。
+                // 权威存在时保留分析基线（pitch_orig/dyn_orig），它是渲染“原始值”
+                // 的缓存；只清显示编辑数组。缺少基线的冷恢复会退回源 PCM 原始音高。
+                // 【T2：权威在时 params 只是显示缓存】把整条显示数组写进存档，
+                // 读回来会被当成"用户编辑"—— 那正是"存档一次、参数线回退一次"。
+                //
+                // 【权威**不在**时不能清】此时显示数组就是**唯一**的一份数据（旧载荷、
+                // 或还没迁移到权威的编辑）。此前这一句无条件执行，于是"曲线只在显示
+                // 数组里"的工程存档一次就永久丢掉它 —— 用户画了线、保存、重开就没了。
+                // 只剥真正的派生缓存（分析基线），那是可以重算的。
+                let params = if authority_present {
+                    let mut params = params;
+                    params.pitch_edit.clear();
+                    params.tension_edit.clear();
+                    params.extra_curves.clear();
+                    params.pitch_edit_user_modified = false;
+                    params
+                } else {
+                    crate::editor::capture_edits::strip_derived_curves(&params)
+                };
+                (root, params)
+            })
+            .collect();
         let bytes = serde_json::to_vec(&serde_json::json!({"version":version,"edits":trimmed}))
             .map_err(|e| e.to_string())?;
         if bytes.len() > hifishifter_host_link::MAX_COMPONENT_STATE {
@@ -762,23 +807,23 @@ impl EditState {
         // `unsupported state version`，用户看到"编辑全没了"却不知道原因。版本高于本
         // 构建时明确说明"由更新的插件保存"，让人知道该升级而不是以为档坏了。
         let version = value["version"].as_u64().unwrap_or(0);
-        if version == 0 {
-            return Err("unsupported state version".into());
-        }
-        if version > Self::CURRENT_STATE_VERSION {
+        // 【单一版本，不做迁移】读到别的代际一律拒绝，并把"为什么没有迁移"说清楚 ——
+        // 用户（开发者）看到的是一句可行动的话，而不是一条 serde 报错或静默丢数据。
+        if version != Self::STATE_VERSION {
             return Err(format!(
-                "state was saved by a newer plugin version (state {version} > supported {})",
-                Self::CURRENT_STATE_VERSION
+                "plugin state v{version} cannot be read by this build (it reads v{} only); \
+                 the VST plug-in has not shipped yet, so no migration is provided",
+                Self::STATE_VERSION
             ));
         }
         let mut restored: Self =
             serde_json::from_value(value["edits"].clone()).map_err(|e| e.to_string())?;
         restored.groups.validate()?;
         restored.validate_fades()?;
-        restored.atlas = restored.atlas.reserve_restored()?;
-        if version == 1 && (!restored.params.is_empty() || !restored.tracks.is_empty()) {
-            return Err("legacy ARA edits have no persistent identity; cannot restore by session track number".into());
-        }
+        restored.authority.sanitize();
+        // 【加载即修复】历史存档可能带着层内重叠（旧版本能写进去）。`sanitize` 在
+        // 上面已经跑过：无效 run 被丢弃、重叠被规范化 —— 读回来就是一份合法权威。
+        restored.authority.sanitize();
         // 【为什么逐条降级而不是整份拒绝】此前这里只要有一条记录没有身份就 `Err`，
         // 而两条恢复通道对这个错误的处置都是"整份不恢复"：ARA 存档那条只 `log::error!`
         // 然后 `return Ok(())`（宿主以为成功），VST3 `setState` 那条把错误传上去
@@ -902,7 +947,7 @@ mod tests {
         assert_eq!(edits.take_syllables.get(&keys), Some(&syllable_analysis()));
         let bytes = edits.encode().expect("encode");
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(value["version"], 9);
+        assert_eq!(value["version"], 2);
         let mut restored = EditState::default();
         restored.restore(&bytes).expect("restore");
         assert_eq!(restored.take_syllables.len(), 1);
@@ -997,6 +1042,7 @@ mod tests {
             "track".into(),
             TrackParamsState {
                 frame_period_ms: 5.0,
+                pitch_edit_user_modified: true,
                 pitch_edit: vec![61.0, 63.0],
                 ..Default::default()
             },
@@ -1297,41 +1343,52 @@ mod tests {
         state.reconcile(&identity).unwrap();
         assert_eq!(state.tracks[0].volume, 0.25);
         assert_eq!(state.bindings["track"].len(), 2);
+        // 第 1 代（按会话轨序号索引、没有持久身份）必须被明确拒绝 —— 它现在走的是
+        // "版本不等于当前代际"那一条，而不是一条单独的 legacy 分支（那条分支永远
+        // 到不了：版本检查在它之前就返回了）。
         let mut legacy =
             serde_json::from_slice::<serde_json::Value>(&state.encode().unwrap()).unwrap();
         legacy["version"] = serde_json::json!(1);
-        assert!(state
+        let error = state
             .restore(&serde_json::to_vec(&legacy).unwrap())
-            .unwrap_err()
-            .contains("legacy"));
+            .unwrap_err();
+        assert!(error.contains("cannot be read"), "{error}");
         assert_eq!(state.revision, 1, "拒绝旧state保留现有编辑");
     }
 
-    /// 版本号是"最低够用的代际"（**向后兼容**手段），且"更新版保存的"与"损坏的"
-    /// 给出可区分的报错。
+    /// **【第五轮】存档只有一个版本号，别的代际一律拒绝并给出可行动的话。**
+    ///
+    /// VST 版从未发布 ⇒ 没有需要兼容的旧存档 ⇒ 版本阶梯与全部迁移都已删除。
+    /// 这条用例同时钉住"写的是**当前**版本号"与"读别的代际时不静默"。
+    ///
+    /// 【为什么断言改成 `STATE_VERSION` 而不是字面量】上一轮把字面量 1 写死在这里，
+    /// 而 `restore` 又把 `version == 1` 当成旧格式拒绝 —— 两边各自"正确"，合起来
+    /// 就是 `restore(encode(s))` 永远失败（用户：存档一次、参数线回退一次）。
+    /// 断言直接引用常量，这类自相矛盾就不可能再被"两边都通过"掩盖。
     #[test]
-    fn a_newer_state_version_is_reported_distinctly_from_corruption() {
+    fn a_foreign_state_version_is_rejected_with_an_actionable_message() {
         let mut state = EditState::default();
         let value: serde_json::Value = serde_json::from_slice(&state.encode().unwrap()).unwrap();
         assert_eq!(
             value["version"].as_u64(),
-            Some(2),
-            "空编辑只带 atlas 段 ⇒ 写最低代际 2，旧构建也能读"
+            Some(EditState::STATE_VERSION),
+            "存档必须写当前版本号"
         );
-        // 更高版本：明确说"由更新的插件保存"，而不是含混的 unsupported。
-        let mut newer = value.clone();
-        newer["version"] = serde_json::json!(EditState::CURRENT_STATE_VERSION + 1);
+        // 旧 v11 载荷（开发者机子上可能存在）：明确拒绝，且**不覆盖**在线状态。
+        let mut legacy = value.clone();
+        legacy["version"] = serde_json::json!(11);
         let error = state
-            .restore(&serde_json::to_vec(&newer).unwrap())
+            .restore(&serde_json::to_vec(&legacy).unwrap())
             .unwrap_err();
-        assert!(error.contains("newer plugin version"), "{error}");
-        // 缺版本：仍是"不支持"。
+        assert!(error.contains("cannot be read"), "{error}");
+        assert!(error.contains("no migration"), "{error}");
+        // 缺版本：同样是拒绝（version 0 != STATE_VERSION）。
         let mut missing = value.clone();
         missing.as_object_mut().unwrap().remove("version");
         assert!(state
             .restore(&serde_json::to_vec(&missing).unwrap())
             .unwrap_err()
-            .contains("unsupported"));
+            .contains("cannot be read"));
     }
 
     fn params_fixture() -> TrackParamsState {
@@ -1409,6 +1466,52 @@ mod tests {
         state.apply(&mut timeline);
         assert_eq!(timeline.tracks[0].volume, 1.0, "按槽位号猜归属是红线");
         assert!(timeline.params_by_root_track.is_empty());
+    }
+
+    /// 存档只写项目时间 authority：显示数组/旧 atlas 不得回灌成编辑。
+    #[test]
+    fn round_trip_keeps_explicit_runs_and_drops_display_arrays() {
+        let mut state = EditState::default();
+        state.tracks.push(track_fixture("track"));
+        state
+            .authority
+            .write_range("track", "pitch", 2, &[61.0, 62.0], &[true, true], 0.0)
+            .unwrap();
+        state.params.insert(
+            "track".into(),
+            TrackParamsState {
+                frame_period_ms: 5.0,
+                pitch_edit: vec![99.0; 8],
+                ..Default::default()
+            },
+        );
+        let bytes = state.encode().unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["version"].as_u64(), Some(EditState::STATE_VERSION));
+        assert!(
+            value["edits"]["atlas"]["authorities"]
+                .as_object()
+                .is_none_or(|map| map.is_empty()),
+            "authority 存在时 atlas 不得再写"
+        );
+        assert!(
+            value["edits"]["params"]["track"]["pitch_edit"]
+                .as_array()
+                .is_none_or(Vec::is_empty),
+            "显示数组不得进入存档"
+        );
+        let mut restored = EditState::default();
+        restored.restore(&bytes).unwrap();
+        assert_eq!(
+            restored.authority.roots["track"].runs["pitch_edit"][0].values,
+            [61.0, 62.0]
+        );
+        assert_eq!(
+            restored.authority.roots["track"].runs["pitch_edit"][0]
+                .placement
+                .start_sec,
+            0.01
+        );
     }
 
     #[test]

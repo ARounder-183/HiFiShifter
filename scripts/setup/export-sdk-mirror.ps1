@@ -9,8 +9,8 @@
 #
 # 之后在离网机器上：
 #   $env:HIFISHIFTER_SDK_MIRROR = 'E:\hfs-sdk-mirror'
-#   .\scripts\setup\prepare-plugin-sdks.ps1 -Offline
-#   .\pack-portable.bat -Offline
+#   $env:HIFISHIFTER_OFFLINE = '1'
+#   .\build.bat
 [CmdletBinding()]
 param([string]$MirrorDirectory, [switch]$WithTestkit)
 $ErrorActionPreference = 'Stop'

@@ -35,23 +35,28 @@ use std::sync::{Arc, Mutex};
 
 // 被搬走的代码沿用了拆分前的 `super::document` 写法（拆分前 `super` 就是 `render`）。
 // 这里把用到的兄弟模块重新导出成本模块的名字，让移动保持逐字、可逐 token 核对。
-use super::{document, input, ownership, preparation, snapshot, transport};
+use super::{document, input, ownership, preparation, transport};
 
 mod ara;
 mod binding;
 mod capture;
 mod declick;
 mod diagnostics;
+mod host_clock;
 mod host_link;
 mod playback;
+mod processing_pass;
 mod restore;
 mod roles;
 mod session;
 mod stream;
+mod timebase;
 mod trace;
+mod transport_session;
 mod types;
 
 // 值类型与诊断环的读数在本模块名下重新导出：子模块与测试模块都按裸名引用它们。
+use processing_pass::*;
 use restore::*;
 use stream::*;
 use trace::*;
@@ -60,8 +65,8 @@ use types::*;
 // 这些类型本来就是 `pub(crate)`（别的模块按 `render::extension::X` 引用），搬家后
 // 必须在本模块名下重新导出，否则它们的可见面会静默窄一层。
 pub(crate) use types::{
-    BlockEvidence, CaptureOutput, CaptureStage, HostAudioState, InstanceMode, ScopeSource,
-    SnapshotSource,
+    BlockEvidence, CaptureOutput, CaptureStage, HostAudioState, InstanceMode,
+    RestoreIdentityVerdict, ScopeSource, SnapshotSource,
 };
 
 /// 原生接口与只读元数据属于真实组件，缓存不跨其文档/分配/host变更复用。
@@ -312,6 +317,9 @@ pub(crate) struct ExtensionOwner {
     rung_locked: AtomicU8,
     /// 锁存所属的 pass 序号（与 `StreamGeometry::pass` 同一口径）。
     rung_pass: AtomicU64,
+    /// 锁存所属的捕获世代 / take 世代（问题 3：跨会话旧档位不得继续生效）。
+    rung_capture_epoch: AtomicU64,
+    rung_take_epoch: AtomicU64,
     position_resyncs: AtomicU64,
     cycle_wraps: AtomicU64,
     cycle_wrap_unknown: AtomicU64,
@@ -338,8 +346,11 @@ pub(crate) struct ExtensionOwner {
     /// `[capture] pass` / `[capture] clock` 两行的去重指纹（非实时线程用）。
     last_pass_diag: Mutex<Option<String>>,
     last_clock_diag: Mutex<Option<String>>,
-    /// `[capture] ctx` 的去重指纹（非实时线程用）。
-    last_ctx_diag: Mutex<Option<String>>,
+    /// `[capture] ctx` 的去重指纹与上一次打印时刻（非实时线程用）。
+    ///
+    /// 【为什么带时刻】指纹不含位置（见 `BlockTraceRing::last_context`），而位置才是
+    /// 用户真正想看的那一栏 —— 所以形状不变时也要每 `CONTEXT_SUMMARY_MS` 补一行。
+    last_ctx_diag: Mutex<Option<(String, std::time::Instant)>>,
     /// 输出写满审计的读数（`HIFISHIFTER_BUFFER_AUDIT=1`；音频线程只写原子）。
     buffer_audit_channels: AtomicU32,
     buffer_audit_frames: AtomicU32,
@@ -460,6 +471,30 @@ pub(crate) struct ExtensionOwner {
     /// 【为什么每个实例一份而不是进程一份】同一文档上可能有两个实例，一个在录、
     /// 一个在放；共享存储会让它们互相覆盖对方的 take。
     capture: crate::capture::CaptureStore,
+    /// 离线/冻结预览 pass 的本地 cursor（每个 pass 从 0 开始）。
+    processing_pass: ProcessingPass,
+    /// 实例级事实：Event FX 的事件在工程里的绝对起点（`0` = 未知；存储值是 origin + 1）。
+    ///
+    /// 【为什么放在 owner 上】它必须跨传输会话保留，并且要在音频线程无锁可读；
+    /// 组件 state 的清单里持久化同一份值。
+    event_origin_samples: AtomicI64,
+    /// 事件起点的置信度（`0` = 未知 / `1` = 暂定 / `2` = 确认）。
+    ///
+    /// 【为什么需要它】复制/粘贴 Event FX 会把上一事件的 origin 带过来；只写一次的
+    /// 旧实现让一个错误的 0 永远赢。组件 state 与确认过的域切换用 2 覆盖旧值。
+    event_origin_confidence: AtomicU8,
+    /// 全局单调的 pass 序号（传输会话与处理 pass 共用）。
+    ///
+    /// 【为什么需要】`Capture::begin_transport_pass` 只比较 epoch 数值；两套计数器
+    /// 都从 1 开始时会撞号，新 pass 被当成同一个 pass 而跳过封口/清 pending。
+    pass_sequence: AtomicU64,
+    /// 传输代次：`reset_transport_session` / `capture_start` 推进。
+    ///
+    /// 【为什么不能复用 capture epoch】同一次 capture 会话里停止再播时 capture epoch
+    /// 不变；输出仲裁必须能识别“这一块属于上一遍”。
+    transport_generation: AtomicU64,
+    /// 最近一次 setupProcessing 声明的 process mode。
+    setup_process_mode: AtomicI32,
     /// 最近一次为 Capture 发布快照的 take 号（`0` = 还没发过）。
     ///
     /// 【为什么需要它】`prepare()` 由 UI 定时器每 20ms 驱动一次，而一次合成要好几秒。
@@ -549,5 +584,7 @@ mod extension_roles_tests;
 mod host_audio_state_tests;
 #[cfg(test)]
 mod host_geometries_tests;
+#[cfg(test)]
+mod host_sequence_tests;
 #[cfg(test)]
 mod region_geometry_match_tests;

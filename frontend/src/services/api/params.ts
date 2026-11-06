@@ -46,18 +46,35 @@ export const paramsApi = {
             if (!res || !encoded) return res;
             const decoded = decodeParamFramesFromBase64(encoded);
             if (!decoded) return res; // 解码失败 → 回退空数组，调用方按 not-ok 处理
-            const { orig, edit } = paramFramesBinaryToArrays(decoded);
-            return { ...res, orig, edit, binary: undefined };
+            const { orig, edit, edited } = paramFramesBinaryToArrays(decoded);
+            return { ...res, orig, edit, edited, binary: undefined };
         }),
 
+    /**
+     * 写参数曲线。
+     *
+     * `present` 是**显式编辑位图**：`present[i] === false` 的帧回到基线（不是"写一个
+     * 等于基线的值"）。它现在是**必填**参数 —— 旧实现给了默认值 `all true`，于是任何
+     * 新调用点只要忘了传，整段窗口里"用户没碰过的帧"都会被烘成硬编辑，之后分析更新 /
+     * 几何变化都不再跟随基线。必填让每个调用点都必须表态。
+     */
     setParamFrames: (
         trackId: string,
         param: string,
         startFrame: number,
         values: number[],
-        checkpoint?: boolean,
+        checkpoint: boolean | undefined,
+        present: boolean[],
     ) =>
-        invoke<{ ok: boolean }>("set_param_frames", trackId, param, startFrame, values, checkpoint),
+        invoke<{ ok: boolean; authority_revision?: number }>(
+            "set_param_frames",
+            trackId,
+            param,
+            startFrame,
+            values,
+            checkpoint,
+            present,
+        ),
 
     /**
      * 把「参数编辑器边缘拉伸」带来的选区变化登记到**当前那一步**历史记录上。

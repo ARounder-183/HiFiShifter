@@ -1190,6 +1190,8 @@ mod tests {
         let root = tl.tracks[0].id.clone();
         tl.tracks[0].pitch_analysis_algo = crate::state::PitchAnalysisAlgo::NsfHifiganOnnx;
         tl.clips.push(Clip {
+            content_id: None,
+            loop_period_sec: None,
             takes: vec![],
             active_take_id: None,
             clip_playback_rate: 1.0,

@@ -6,6 +6,7 @@
 
 use super::*;
 use crate::capture::InputBlock;
+use crate::render::extension::timebase::TimebaseKind;
 
 /// 一个"宿主把本插件当普通插入"的 owner：从未绑定、形态未定、窗口也没开过。
 ///
@@ -96,7 +97,14 @@ fn the_read_position_jump_is_a_pure_judgement() {
         allow_output: true,
         start_window: false,
         repeated_nonzero: false,
+        cycle_wrap: false,
+        rebase_frames: 0,
         split: BlockSplit::whole(48_000, 256),
+        capture_epoch: 1,
+        processing: 0,
+        transport_active: true,
+        transport_paused: false,
+        ..Default::default()
     };
     // ① 没有上一块 ⇒ 没有跳变。
     assert_eq!(owner.read_position_jump(Some(evidence)), None);
@@ -140,7 +148,14 @@ fn a_contiguous_block_advance_is_not_a_jump() {
         allow_output: true,
         start_window: false,
         repeated_nonzero: false,
+        cycle_wrap: false,
+        rebase_frames: 0,
         split: BlockSplit::whole(48_256, 256),
+        capture_epoch: 1,
+        processing: 0,
+        transport_active: true,
+        transport_paused: false,
+        ..Default::default()
     };
     owner.mark_emitted_for_test();
     owner.note_read_position_for_test(48_000);
@@ -153,7 +168,12 @@ fn a_contiguous_block_advance_is_not_a_jump() {
     // 但真的错位仍然要判出来：预期续接 48_256，本块却从 96_000 开始。
     let jumped = BlockEvidence {
         position: 96_000,
+        rebase_frames: 0,
         split: BlockSplit::whole(96_000, 256),
+        capture_epoch: 1,
+        processing: 0,
+        transport_active: true,
+        transport_paused: false,
         ..evidence
     };
     assert_eq!(owner.read_position_jump(Some(jumped)), Some(47_744));
@@ -346,10 +366,10 @@ fn the_output_arbiter_degrades_instead_of_going_silent() {
     owner.capture().start().unwrap();
     assert_eq!(
         owner.capture_output(),
-        CaptureOutput::Processed,
-        "武装之后、宿主还没播的那一段是**待命**：没有任何素材在产生，因此没有\
-         「用旧内容盖住新演奏」的风险。此时仍须输出处理结果 —— 否则用户画完参数线\
-         听不到任何变化（「参数线不生效」）"
+        CaptureOutput::Recording,
+        "武装之后每一块都只监听输入：armed 路径不再读上一张 take 的 processed\
+         （同一次 capture 会话里停止再播时 capture epoch 不变，旧实现据此把上一轮\
+         缓存盖在新演奏上）。试听旧 take 只属于未武装的待命"
     );
     // 宿主开始播放 ⇒ 立刻回到直通，否则捕获会把我们自己的输出录进去
     // （in-place 宿主里输入与输出是同一块缓冲）。
@@ -714,9 +734,58 @@ fn an_armed_lagging_start_does_not_play_the_previous_result() {
     owner.capture().cancel();
 }
 
-/// **待命时重复块最终回到处理结果。**
+/// **新捕获世代的第一块必须监听输入，不能读上一张 take。**
+///
+/// 【问题 3 的直接回归】停止 -> 再播的第一块没有 kPlaying 上升沿、位置也可能与
+/// 停止前相同；旧实现据此回到 Processed，而那份快照属于上一张 take。
 #[test]
-fn armed_standby_returns_to_the_processed_result() {
+fn a_new_capture_epoch_start_block_is_recording_not_the_previous_result() {
+    let owner = insert_owner();
+    record(&owner, 256);
+    owner.sync_raw_tape();
+    owner.snapshots[0].publish(processed_snapshot()).unwrap();
+    owner.snapshots[1].publish(processed_snapshot()).unwrap();
+    owner
+        .capture_ready_revision
+        .store(owner.capture.revision(), Ordering::Release);
+    owner.capture().start().unwrap();
+    let evidence = BlockEvidence {
+        stream: ProcessStream::Realtime,
+        position: 0,
+        frames: 512,
+        playing: true,
+        recording: false,
+        playing_rising: false,
+        recording_rising: false,
+        phase: TransportPhase::Start,
+        had_previous: true,
+        allow_output: true,
+        start_window: false,
+        transport_active: true,
+        transport_paused: false,
+        repeated_nonzero: false,
+        cycle_wrap: false,
+        rebase_frames: 0,
+        split: BlockSplit::whole(0, 512),
+        capture_epoch: owner.capture().capture_epoch(),
+        processing: 0,
+        ..Default::default()
+    };
+    assert_eq!(
+        owner.capture_output_with(Some(evidence)),
+        CaptureOutput::Recording,
+        "新世代的第一块必须监听输入，不能读上一张 take 的 processed 快照"
+    );
+    owner.capture().cancel();
+}
+
+/// **武装待命只监听输入，不读上一张 take。**
+///
+/// 【契约变更（第二轮）】armed 路径不再有“读旧 take”的分支：同一次 capture 会话里
+/// 停止再播时 capture epoch 不变，旧实现据此合法地返回上一张 take 的 processed 快照，
+/// 新一遍的前 250 ms 于是永远在放上一轮缓存。试听旧 take 只属于**未武装**的待命。
+#[test]
+fn armed_standby_monitors_the_input() {
     let owner = insert_owner();
     record(&owner, 256);
     owner.sync_raw_tape();
@@ -737,10 +806,25 @@ fn armed_standby_returns_to_the_processed_result() {
     });
     assert_eq!(
         owner.capture_output(),
-        CaptureOutput::Processed,
-        "待命不是录制：重复块必须回到处理结果（否则参数线又不生效）"
+        CaptureOutput::Recording,
+        "武装待命必须监听输入；上一张 take 只在未武装时试听"
     );
     owner.capture().cancel();
+}
+
+/// **未武装的待命仍能试听上一张 take 的处理结果。**
+#[test]
+fn unarmed_standby_auditions_the_previous_result() {
+    let owner = insert_owner();
+    record(&owner, 256);
+    owner.sync_raw_tape();
+    owner.snapshots[0].publish(processed_snapshot()).unwrap();
+    owner.snapshots[1].publish(processed_snapshot()).unwrap();
+    owner
+        .capture_ready_revision
+        .store(owner.capture.revision(), Ordering::Release);
+    assert!(!owner.capture.is_armed());
+    assert_eq!(owner.capture_output(), CaptureOutput::Processed);
 }
 
 /// **块级 trace 能区分“kPlaying 滞后但位置在推进”的起播窗口。**
@@ -833,7 +917,14 @@ fn the_start_window_keeps_the_output_open_across_pinned_silence() {
         allow_output: false,
         start_window: true,
         repeated_nonzero: false,
+        cycle_wrap: false,
+        rebase_frames: 0,
         split: BlockSplit::whole(0, 512),
+        capture_epoch: 1,
+        processing: 0,
+        transport_active: true,
+        transport_paused: false,
+        ..Default::default()
     };
     assert!(
         owner.capture_should_emit(Some(evidence), false),
@@ -901,7 +992,14 @@ fn prefetch_and_offline_never_look_stopped() {
             allow_output: false,
             start_window: false,
             repeated_nonzero: false,
+            cycle_wrap: false,
+            rebase_frames: 0,
             split: BlockSplit::whole(0, 512),
+            capture_epoch: 1,
+            processing: 0,
+            transport_active: true,
+            transport_paused: false,
+            ..Default::default()
         };
         assert!(
             owner.capture_should_emit(Some(evidence), false),
@@ -921,7 +1019,14 @@ fn prefetch_and_offline_never_look_stopped() {
         allow_output: false,
         start_window: false,
         repeated_nonzero: false,
+        cycle_wrap: false,
+        rebase_frames: 0,
         split: BlockSplit::whole(0, 512),
+        capture_epoch: 1,
+        processing: 0,
+        transport_active: true,
+        transport_paused: false,
+        ..Default::default()
     };
     assert!(!owner.capture_should_emit(Some(realtime), false));
     assert!(owner.capture_should_emit(
@@ -1076,10 +1181,16 @@ fn a_host_position_report_re_anchors_the_counter() {
         ..Default::default()
     };
     // 起播窗口：位置钉住，我们按块长接着数。
+    // 【为什么必须喂内容指纹】生产路径对每个非零帧块都会调 `note_activity`；
+    // 计数器"凭什么前进"的判据就是它（`flowing()`）。测试不喂就等于告诉插件
+    // "内容逐块相同"—— 那正是停播重复投递的形状，计数器理应不动。
+    owner.streams[ProcessStream::Realtime.index()].note_activity(0xA001);
     let first = owner.note_stream_block(ProcessStream::Realtime, &context, 512, true, false);
     assert_eq!(first.position, 0);
+    owner.streams[ProcessStream::Realtime.index()].note_activity(0xA002);
     let second = owner.note_stream_block(ProcessStream::Realtime, &context, 512, false, false);
     assert_eq!(second.position, 512, "钉住期间按块长前进");
+    owner.streams[ProcessStream::Realtime.index()].note_activity(0xA003);
     let third = owner.note_stream_block(ProcessStream::Realtime, &context, 512, false, false);
     assert_eq!(third.position, 1_024);
     // 宿主恢复报告：它说真实位置是 1 500，而我们数到了 1 024。
@@ -1505,8 +1616,7 @@ fn a_window_spanning_silence_and_live_audio_advances_the_whole_window() {
         "一次起播只开一个 pass"
     );
     assert!(
-        geometry.frames_since_anchor.load(Ordering::Acquire)
-            < u64::from(geometry.advance_limit.load(Ordering::Acquire)),
+        geometry.counted_run.load(Ordering::Acquire) <= (48_000.0 * PRE_ROLL_CAP_SEC) as u64,
         "40 块还在 1 s 窗口内：窗口仍然开着"
     );
     assert_eq!(
@@ -1599,9 +1709,9 @@ fn a_repeated_nonzero_block_closes_the_window_immediately() {
     }
     let geometry = &owner.streams[stream.index()];
     assert_eq!(
-        geometry.advance_limit.load(Ordering::Acquire),
+        geometry.counted_run.load(Ordering::Acquire),
         0,
-        "窗口必须因重复内容而当场作废"
+        "窗口必须因重复内容而当场作废（计数器一帧都没记过）"
     );
     assert_eq!(
         geometry.counted_blocks.load(Ordering::Acquire),
@@ -1946,6 +2056,81 @@ fn the_emit_gate_fades_to_zero_instead_of_stepping() {
     assert_eq!(left[frames - 1], 0.0, "块内必须精确落到零");
 }
 
+/// **连续两次门控淡出，第二次必须从零开始（不得重放冻结的尾巴）。**
+///
+/// 【为什么这是那个"嗡鸣"的判据】`apply_gate_fade_out` 读的是尾巴里**最新**的那
+/// `fade` 帧（`DECLICK_HISTORY_FRAMES - fade ..`），而它此前只清**最旧**的 64 帧
+/// （`0..OUTPUT_DECLICK_FRAMES`）。于是第二块起，同一段冻结的尾巴被反复读出、反复
+/// 淡出：周期 = 块长（848 帧 ≈ 18 ms），听感是约 57 Hz 的嗡鸣，而 `any_signal`
+/// 恒为真还让宿主以为这一块有内容。
+#[test]
+fn the_gate_fade_clears_the_newest_tail() {
+    let owner = insert_owner();
+    let stream = ProcessStream::Realtime;
+    let frames = 8;
+    for channel in 0..2 {
+        for index in 0..super::DECLICK_HISTORY_FRAMES {
+            owner.declick[stream.index()].tail[channel][index]
+                .store(1.0_f32.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    let mut left = [1.0_f32; 8];
+    let mut right = [1.0_f32; 8];
+    let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
+    let mut bus = crate::audio_abi::AudioBusBuffers {
+        num_channels: 2,
+        silence_flags: 0,
+        channel_buffers: planes.as_mut_ptr(),
+    };
+    unsafe { owner.apply_gate_fade_out(stream, &mut bus, frames) };
+    assert!(left[0] > 0.0, "第一块应当从上一块的尾巴淡出");
+    // 第二块：尾巴已经被清零，所以整块必须是零（而不是同一段尾巴再淡一次）。
+    left.fill(1.0);
+    right.fill(1.0);
+    unsafe { owner.apply_gate_fade_out(stream, &mut bus, frames) };
+    assert!(
+        left.iter().all(|value| *value == 0.0),
+        "第二次门控必须输出纯零（旧实现会重放同一段冻结的尾巴）：{:?}",
+        &left[..]
+    );
+    assert_eq!(bus.silence_flags, 3, "全零时如实报静音位");
+}
+
+/// **块长变化不算内容变化。**
+///
+/// 【为什么这是重复抑制失效的直接原因】`block_activity_hash` 把块长拌进了指纹，
+/// 而 `allow_output_for` 的重复判据又要求块长**完全相等**。VEGAS 的块长在
+/// 1200/848 之间交替（日志实测），于是同一份内容被判成"在变"、`same` 每块为假、
+/// 停播时每块都被当成新内容放行。
+#[test]
+fn a_block_length_change_is_not_a_content_change() {
+    let samples: &'static [f32] = Box::leak(vec![0.25_f32; 1200].into_boxed_slice());
+    let long = crate::capture::recorder::InputBlock {
+        start: 0,
+        frames: 1200,
+        sample_rate: 48_000.0,
+        planes: [Some(&samples[..1200]), Some(&samples[..1200])],
+        playing: true,
+    };
+    let short = crate::capture::recorder::InputBlock {
+        start: 0,
+        frames: 848,
+        sample_rate: 48_000.0,
+        planes: [Some(&samples[..848]), Some(&samples[..848])],
+        playing: true,
+    };
+    let owner = insert_owner();
+    let geometry = &owner.streams[ProcessStream::Realtime.index()];
+    geometry.note_activity(block_fingerprint(&long).0);
+    geometry.note_activity(block_fingerprint(&short).0);
+    assert_eq!(
+        geometry
+            .unchanged_run
+            .load(std::sync::atomic::Ordering::Acquire),
+        1,
+        "同一份内容换个块长仍然是同一份内容"
+    );
+}
 /// **预取块不因 `kPlaying == 0` 被静音（bound 实例同样适用）。**
 ///
 /// 【为什么必须覆盖 bound】REAPER 的 ARA 播放渲染器就在预取流上工作；它会把输出
@@ -1971,7 +2156,14 @@ fn a_bound_instance_does_not_silence_a_prefetch_block_without_k_playing() {
         allow_output: false,
         start_window: false,
         repeated_nonzero: false,
+        cycle_wrap: false,
+        rebase_frames: 0,
         split: BlockSplit::whole(0, 512),
+        capture_epoch: 1,
+        processing: 0,
+        transport_active: true,
+        transport_paused: false,
+        ..Default::default()
     };
     assert!(
         owner.capture_should_emit(Some(prefetch), false),
@@ -2110,23 +2302,26 @@ fn the_context_line_reports_the_host_time_fields() {
     assert!(line.contains("counted=0"), "{line}");
 }
 
-/// **宿主停播却仍在送预取音频时，计数器不得一路前进。**
+/// **计数器没有预算：宿主位置冻结、但音频在流动时，位置必须一直前进。**
 ///
-/// 【这是"反复播 0.7 s 内容完全对不上"的直接判据】现场日志里 `raw` 冻结在 99484、
-/// `playing=0`，而 `pos` 一路走到 262476 —— 漂移 162992 帧（3.4 s）。重播时我们从
-/// `anchor + 漂移` 读，读到的是素材里另一段，于是"0.7 s 的内容完全对不上"。
+/// 【这是问题 2 的正面验收】非实时事件 FX 的**离线预览**（process mode 2）里，宿主 `kPlaying` 恒为 0、
+/// `projectTimeSamples` 恒为 7.375 s，唯一能推进位置的只有计数器。旧实现给它两笔
+/// 各 1 秒的预算（`advance_limit` / `activity_budget`），于是捕获在**恰好 1.000 秒**
+/// 处被切断：日志里 `counted_blocks=40 counted_frames=48000`（40 × 1200 = 48000），
+/// 随后位置弹回锚点并永久钉住 —— 用户听到的是 25 ms 一段的无限重复。
 ///
-/// 【为什么额度绑在 pass 上】"内容在流动"这条证据服务的本来就是**起播窗口**：
-/// 宿主把位置钉住、却已经在按块长送音频。一次播放只有一个开头，所以它的可信长度
-/// 也只该有一个开头那么多（`PRE_ROLL_CAP_SEC`）。
+/// 【为什么这一条与下一条并不矛盾】下一条钉的是"逐块完全相同的**非零**内容"（FL
+/// Studio 的停播形状）。两者的区别是**事实**：内容在变 ⇒ 时间在走；内容逐块相同
+/// ⇒ 时间没走。预算把这两件事混成了一个与宿主无关的秒数。
 #[test]
-fn a_frozen_host_stops_the_counter_once_the_start_window_is_spent() {
+fn the_counter_is_not_budgeted() {
     let owner = insert_owner();
-    let stream = ProcessStream::Realtime;
+    let stream = ProcessStream::Offline;
     let rate = 48_000.0_f64;
     let frames = 512_usize;
-    let cap = (rate * PRE_ROLL_CAP_SEC).round() as i64;
-    // 起播：宿主把位置钉在 1000，且给了一个上升沿。
+    // 第一块只建立内容指纹的基线（生产路径同样如此：`note_activity` 在几何之前调用）。
+    owner.streams[stream.index()].note_activity(0xDEAD_BEEF);
+    owner.streams[stream.index()].note_block_silence(false);
     let first = owner.note_stream_geometry(
         stream,
         1_000,
@@ -2138,11 +2333,13 @@ fn a_frozen_host_stops_the_counter_once_the_start_window_is_spent() {
         false,
     );
     assert_eq!(first.position, 1_000, "起播块的位置就是宿主报的那个");
-    // 之后 200 块：宿主位置一直不动，而内容一直在变（预取音频）。
-    let mut last = first;
-    for index in 0..200_u64 {
+    let mut last = first.position;
+    // 3 秒（约 282 块）：远超旧实现那两笔 1 秒预算。
+    let blocks = (rate * 3.0 / frames as f64) as u64;
+    for index in 0..blocks {
         owner.streams[stream.index()].note_activity(index);
-        last = owner.note_stream_geometry(
+        owner.streams[stream.index()].note_block_silence(false);
+        let block = owner.note_stream_geometry(
             stream,
             1_000,
             frames,
@@ -2152,15 +2349,28 @@ fn a_frozen_host_stops_the_counter_once_the_start_window_is_spent() {
             false,
             false,
         );
+        assert_eq!(
+            block.position,
+            last + frames as i64,
+            "第 {index} 块必须紧接上一块（宿主位置冻结 + 内容在流动 ⇒ 计数器就是权威）"
+        );
+        last = block.position;
     }
-    let drifted = last.position - 1_000;
-    assert!(
-        drifted <= cap,
-        "停播时计数器最多只可信一个起播窗口：漂移 {drifted} 帧 > {cap} 帧",
+    assert_eq!(
+        last - 1_000,
+        (blocks * frames as u64) as i64,
+        "整段 3 秒都必须被数出来，一个块都不能少"
     );
-    assert!(
-        drifted > 0,
-        "起播窗口内仍然必须能推进（否则前 0.66 s 静音）"
+    let geometry = &owner.streams[stream.index()];
+    assert_eq!(
+        geometry.counted_frames.load(Ordering::Acquire),
+        blocks * frames as u64,
+        "计数器的帧数必须一直增长（旧实现卡在 48000）"
+    );
+    assert_eq!(
+        geometry.pass.load(Ordering::Acquire),
+        1,
+        "一次连续播放只有一个 pass"
     );
 }
 
@@ -2278,7 +2488,14 @@ fn realtime_output_silences_while_a_diagnostic_runs_and_offline_does_not() {
         allow_output: true,
         start_window: false,
         repeated_nonzero: false,
+        cycle_wrap: false,
+        rebase_frames: 0,
         split: BlockSplit::whole(0, 512),
+        capture_epoch: 1,
+        processing: 0,
+        transport_active: true,
+        transport_paused: false,
+        ..Default::default()
     };
     let offline = BlockEvidence {
         stream: ProcessStream::Offline,
@@ -2308,4 +2525,57 @@ fn realtime_output_silences_while_a_diagnostic_runs_and_offline_does_not() {
         !ExtensionOwner::diagnostic_silence_applies(Some(realtime)),
         "最后一个诊断离开后必须恢复"
     );
+}
+
+/// **Event FX 域切换：首段绝对位置必须整体平移到事件本地域，且不另起 pass。**
+#[test]
+fn event_relative_switch_maps_the_event_start_to_local_zero() {
+    let owner = insert_owner();
+    let rate = 48_000.0_f64;
+    let frames = 512_usize;
+    let event_start = 31_091_i64 * 48;
+    owner.streams[ProcessStream::Realtime.index()].note_activity(1);
+    let first = owner.note_stream_geometry(
+        ProcessStream::Realtime,
+        event_start,
+        frames,
+        rate,
+        StreamTime::default(),
+        true,
+        false,
+        true,
+    );
+    assert_eq!(first.position, event_start);
+    assert!(first.new_pass);
+    owner.streams[ProcessStream::Realtime.index()].note_activity(2);
+    let second = owner.note_stream_geometry(
+        ProcessStream::Realtime,
+        event_start + frames as i64,
+        frames,
+        rate,
+        StreamTime::default(),
+        false,
+        false,
+        true,
+    );
+    assert_eq!(second.position, event_start + frames as i64);
+    owner.streams[ProcessStream::Realtime.index()].note_activity(3);
+    let switched = owner.note_stream_geometry(
+        ProcessStream::Realtime,
+        frames as i64,
+        frames,
+        rate,
+        StreamTime::default(),
+        false,
+        false,
+        true,
+    );
+    assert_eq!(switched.position, frames as i64, "Event 起点 = 本地 0");
+    assert!(!switched.new_pass, "域切换不是新的传输会话");
+    assert_eq!(
+        switched.rebase_frames,
+        -(event_start + frames as i64),
+        "整条 take 必须平移 -event_start"
+    );
+    assert_eq!(switched.timebase, TimebaseKind::EventRelative);
 }

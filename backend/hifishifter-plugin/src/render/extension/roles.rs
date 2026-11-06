@@ -91,6 +91,29 @@ impl ExtensionOwner {
     pub(crate) fn has_prepared_snapshot(&self) -> bool {
         self.snapshots.iter().any(|publisher| publisher.is_ready())
     }
+    /// 播放头是否已经走出当前快照的安全区（窗口渲染的补排信号）。
+    ///
+    /// 【为什么由 actor 判】音频线程只记一个 `last_sample` 原子；"要不要重渲"是
+    /// 调度决策，只能在非实时线程做（实时回调里不许分配、不许抢锁）。
+    ///
+    /// 【为什么是 75 %】窗口渲染的代价是"重新算一段"，提前四分之一窗口开始补排，
+    /// 保证播放头走到窗口末尾之前新窗口已经就位。整段快照时这个判据恒为 false
+    /// （播放头永远落在覆盖区间里），行为与今天完全一致。
+    pub(crate) fn window_needs_rerender(&self) -> bool {
+        let rate = self.setup_sample_rate().max(1.0);
+        let Some(playhead) = self.snapshots[0].last_sample_seconds(rate) else {
+            return false;
+        };
+        let Some((start, end)) = self.snapshots[0].current_span_seconds(rate) else {
+            return false;
+        };
+        let len = end - start;
+        if !(len.is_finite() && len > 0.0) {
+            return false;
+        }
+        playhead < start - 1e-9 || playhead > start + len * 0.75
+    }
+
     /// 处理结果发布器是否对**实际会被读取的那一份**就绪。
     ///
     /// 【为什么不能固定查 `snapshots[0]`】真正被读的是
@@ -212,7 +235,13 @@ impl ExtensionOwner {
         self.is_non_playback() && self.playback_covered.load(Ordering::Acquire)
     }
     /// process只写有界原子诊断，JSON/日志全部由actor读取，暂不把候选计数当作根因。
-    pub(crate) fn observe_transport(&self, context: &crate::audio_abi::ProcessContext, mode: i32) {
+    pub(crate) fn observe_transport(
+        &self,
+        context: &crate::audio_abi::ProcessContext,
+        mode: i32,
+        frames: usize,
+        position_trusted: bool,
+    ) {
         if let Some(clock) = self.clock.get() {
             clock.observe(
                 context,
@@ -230,7 +259,21 @@ impl ExtensionOwner {
             // 写的那个位置就成了回落值。offline 早已被排除，prefetch 必须同样排除：
             // 它们都是"渲染进度"，不是"播放位置"。
             if mode == 0 {
-                clock.update(context);
+                // 【块长必须先记】播放位的寿命由它决定（见 `block_playing_ttl_ms`）。
+                clock.note_block_length(frames, context.sample_rate);
+                if position_trusted {
+                    clock.update(context);
+                } else {
+                    // 【证据不足不写位置】PendingAbsolute 期间宿主报的是绝对域预卷
+                    // （现场 60.000 s）。写进去就是用户看到的光标跳变；只冻结。
+                    clock.hold_capture();
+                }
+            } else if mode == 1 {
+                // 【为什么 prefetch 只投"播不播"这一票】它的位置是渲染进度（领先
+                // 播放头约 1~1.5 秒），但 kPlaying 位与 realtime 块同源。把两者拆开
+                // 之后，ARA 形态下的编辑器实例终于有了一个可信的播放位 —— 它的音频
+                // 块恒为零，而宿主采样只在 REAPER 这类宿主里存在。
+                clock.observe_prefetch_playing(context.state & (1 << 1) != 0);
             }
         }
     }

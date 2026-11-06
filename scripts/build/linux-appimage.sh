@@ -334,7 +334,7 @@ cmd_smoke() {
         printf '%s\n' '--- 冒烟输出 ---' >&2
         cat "$log" >&2
         rm -f "$log"
-        die "AppImage 启动失败（退出码 $rc）"
+        die "AppImage 启动失败（退出码 ${rc}）"
     fi
 
     local failed=0

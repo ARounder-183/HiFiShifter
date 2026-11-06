@@ -264,7 +264,7 @@ impl Fixture {
     pub fn enable_connection_host(&self) {
         self.connection_host.set(true);
     }
-    /// 让假宿主按"另一种布局"比较 IID（见 §NativeHost::from_context§ 的兜底重试）。
+    /// 让假宿主按"另一种布局"比较 IID（见 `NativeHost::from_context` 的兜底重试）。
     pub fn force_alternate_iid_layout(&self) {
         self.alternate_iid_layout.set(true);
     }

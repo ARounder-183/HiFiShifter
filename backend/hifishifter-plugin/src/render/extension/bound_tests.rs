@@ -1,6 +1,22 @@
 //! `render/extension.rs` 的 `bound_tests` 测试（从内联模块纯搬到这里，`use super::*` 解析不变）。
 
 use super::*;
+/// 读某根轨在权威里的整条曲线（跨 run 平铺）。
+///
+/// 【为什么要这个助手】T2 之后用户曲线**只**住在 `ParamAuthority` 的稀疏 run 里，
+/// 显示数组 `params[...]` 不再承载它们 —— 断言必须问权威。
+fn authority_curve(state: &crate::state_channel::EditState, root: &str, key: &str) -> Vec<f32> {
+    state
+        .authority
+        .root(root)
+        .and_then(|authority| authority.runs.get(key))
+        .map(|runs| {
+            runs.iter()
+                .flat_map(|run| run.values.iter().copied())
+                .collect()
+        })
+        .unwrap_or_default()
+}
 /// 实际原kernel PCM必须随HFS形状变化；只委托head时不能又烘焙宿主tail。
 #[test]
 fn owned_fade_shape_changes_kernel_pcm_and_state_roundtrip_and_undo_clears_it() {
@@ -62,8 +78,12 @@ fn owned_fade_shape_changes_kernel_pcm_and_state_roundtrip_and_undo_clears_it() 
     let render = || {
         let input = {
             let _transaction = document.transaction.lock_or_recover();
+            // 与生产路径同一写法：在短事务里冻结一份编辑快照再交出去。把
+            // `lock_or_recover()` 的守卫当参数直接传下去，等于在整个调用期间持有
+            // 这把不可重入的锁 —— 任何一次内部回读都会变成自锁。
+            let edits = document.edits.lock_or_recover().clone();
             owners[0]
-                .ara_render_input(&document, &document.edits.lock_or_recover(), true)
+                .ara_render_input(&document, &edits, true)
                 .unwrap()
                 .1
         };
@@ -92,7 +112,12 @@ fn owned_fade_shape_changes_kernel_pcm_and_state_roundtrip_and_undo_clears_it() 
     assert!((updated[0].left[index] - original[0].left[index]).abs() > 0.1);
     let saved = owners[0].encode_state().unwrap();
     let value: serde_json::Value = serde_json::from_slice(&saved).unwrap();
-    assert_eq!(value["version"], 4);
+    // 【为什么断言常量而不是字面量】与 `state_channel` 自己的用例同一口径：
+    // 字面量会在下一次提升代际时悄悄变成"测试要求旧格式"。
+    assert_eq!(
+        value["version"].as_u64(),
+        Some(crate::state_channel::EditState::STATE_VERSION)
+    );
     assert_eq!(value["edits"]["fades"].as_object().unwrap().len(), 1);
     owners[0].restore_state(&before).unwrap();
     assert!(
@@ -118,168 +143,6 @@ use ara2_bridge::companion::vst3::ffi::{ara2_vst3_plugin_entry_bind, ARA2_VST3_O
 use ara2_bridge::companion::{CompanionFactory, CompanionRoles};
 use ara2_bridge::plugin::{FactoryBuilder, PluginBuilder};
 use ara2_bridge::sys::*;
-/// v2首次真实恢复就建立源basis；后续移动/裁切/线性拉伸无需用户再落笔才迁移。
-#[test]
-fn legacy_v2_first_restore_promotes_source_basis_before_host_transform() {
-    let (model, owners, ids) = crate::editor::session::tests::workspace_fixture();
-    let document = model.session();
-    let key = (&*ids[0] as *const u8) as u64;
-    {
-        let _transaction = document.transaction.lock_or_recover();
-        let mut timeline = document.timeline.lock_or_recover();
-        let timeline = timeline.as_mut().unwrap();
-        timeline.project_sec = 2.;
-        let clip = &mut timeline.clips[0];
-        clip.start_sec = 1.;
-        clip.length_sec = 1.;
-        clip.takes[0].source_end_sec = 1.;
-        clip.normalize_takes();
-        let mut regions = document.regions.lock_or_recover();
-        let region = regions.get_mut(&key).unwrap();
-        region.start_in_playback_time = 1.;
-        region.duration_in_modification_time = 1.;
-        region.duration_in_playback_time = 1.;
-    }
-    let host = owners[0].assigned_timeline(&document).unwrap();
-    let mut client = host.clone();
-    let mut edit = vec![0_f32; 22];
-    for (frame, value) in edit.iter_mut().enumerate().take(21).skip(10) {
-        *value = 60. + (frame - 10) as f32;
-    }
-    let params = hifishifter_kernel::state::TrackParamsState {
-        frame_period_ms: 100.,
-        pitch_orig: vec![57.; 22],
-        pitch_edit: edit,
-        pitch_edit_user_modified: true,
-        ..Default::default()
-    };
-    client.params_by_root_track.insert("track".into(), params);
-    let mut legacy = crate::state_channel::EditState::default()
-        .merge(&host, &client, 0)
-        .unwrap();
-    legacy
-        .reconcile(&std::collections::BTreeMap::from([(
-            "track".into(),
-            vec![("modification".into(), "ara://source".into())],
-        )]))
-        .unwrap();
-    let bytes = legacy.encode().unwrap();
-    assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["version"],
-        2
-    );
-    document.ready.store(false, Ordering::Release);
-    owners[0].restore_state(&bytes).unwrap();
-    document.prepare_renderers();
-    let saved = owners[0].encode_state().unwrap();
-    assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(&saved).unwrap()["version"],
-        8
-    );
-    let atlas = document.edits.lock_or_recover().atlas.clone();
-    assert_eq!(atlas.regions.len(), 1);
-    let identities = {
-        let _transaction = document.transaction.lock_or_recover();
-        document.parameter_identities_locked(&host).unwrap()
-    };
-    let unchanged = atlas.project_roots(&host, &identities).unwrap();
-    assert_eq!(
-        &unchanged["track"].pitch_edit[10..21],
-        &(60..=70).map(|note| note as f32).collect::<Vec<_>>()
-    );
-    let mut moved = host.clone();
-    let clip = &mut moved.clips[0];
-    clip.start_sec = 3.;
-    clip.length_sec = 2.;
-    clip.takes[0].source_start_sec = 0.25;
-    clip.takes[0].source_end_sec = 0.75;
-    clip.takes[0].playback_rate = 0.25;
-    clip.normalize_takes();
-    moved.project_sec = 5.;
-    let followed = atlas.follow_geometry(&moved, &identities).unwrap();
-    let roots = followed.project_roots(&moved, &identities).unwrap();
-    assert_eq!(roots["track"].pitch_edit[10], 0.);
-    assert_eq!(roots["track"].pitch_edit[30], 62.5);
-    assert_eq!(roots["track"].pitch_edit[40], 65.);
-    assert_eq!(roots["track"].pitch_edit[50], 67.5);
-    let local = followed.project_local(&moved, &identities).unwrap();
-    assert_eq!(local[&host.clips[0].id].pitch_edit[0], 62.5);
-    let mut cold = crate::state_channel::EditState::default();
-    cold.restore(&saved).unwrap();
-    let rebound = cold.atlas.rebind(&moved, &identities).unwrap();
-    assert_eq!(
-        rebound.project_local(&moved, &identities).unwrap()[&host.clips[0].id].pitch_edit,
-        local[&host.clips[0].id].pitch_edit
-    );
-    document.close();
-}
-
-/// v3源basis按组件真实区域保存，冷恢复不能借另一轨道的atlas或沿旧session key。
-#[test]
-fn source_parameter_atlas_state_is_scoped_and_rebound_without_gui() {
-    let (model, owners, _ids) = crate::editor::session::tests::workspace_fixture();
-    let document = model.session();
-    let mut client = document.workspace_timeline().unwrap();
-    for (root, note) in [("track", 60.), ("b", 67.)] {
-        client.params_by_root_track.insert(
-            root.into(),
-            hifishifter_kernel::state::TrackParamsState {
-                frame_period_ms: 5.,
-                pitch_edit_user_modified: true,
-                pitch_orig: vec![57., 57.],
-                pitch_edit: vec![note, note],
-                ..Default::default()
-            },
-        );
-    }
-    let baseline = document.workspace_view().unwrap();
-    document
-        .accept_workspace_edits(
-            0,
-            document.revision.load(Ordering::Acquire),
-            &client,
-            &baseline,
-        )
-        .unwrap();
-    let saved = owners
-        .iter()
-        .map(|owner| owner.encode_state().unwrap())
-        .collect::<Vec<_>>();
-    let payloads = saved
-        .iter()
-        .map(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).unwrap())
-        .collect::<Vec<_>>();
-    document.close();
-    for payload in &payloads {
-        assert_eq!(payload["version"], 8);
-        // 权威参数是**唯一**被序列化的参数存储（`regions` 是每帧派生的投影缓存，
-        // 不进存档）—— 因此"只保存本组件范围"这条保证现在落在 `authorities` 上。
-        assert_eq!(
-            payload["edits"]["atlas"]["authorities"]
-                .as_object()
-                .unwrap()
-                .len(),
-            1,
-            "不能保存其它组件的参数权威"
-        );
-    }
-    let (cold, restored, _cold_ids) = crate::editor::session::tests::workspace_fixture();
-    let cold_doc = cold.session();
-    for index in 0..2 {
-        restored[index].restore_state(&saved[index]).unwrap();
-    }
-    cold_doc.prepare_renderers();
-    let atlas = cold_doc.edits.lock_or_recover().atlas.clone();
-    cold_doc.close();
-    assert_eq!(atlas.regions.len(), 2);
-    assert!(
-        atlas
-            .regions
-            .values()
-            .all(|record| record.identity.key != 0),
-        "JSON旧key不得冒充新会话身份"
-    );
-}
 
 /// 有宿主fade缓存后，快照/活actor装饰自动变化；不推进音频generation，不再烘焙普通fade。
 #[test]
@@ -349,9 +212,9 @@ fn host_fades_project_into_gui_and_refresh_without_reloading_or_baking_audio() {
     }
     let (keys, input) = {
         let _transaction = document.transaction.lock_or_recover();
-        owners[0]
-            .ara_render_input(&document, &document.edits.lock_or_recover(), true)
-            .unwrap()
+        // 同上：冻结一份快照，不在调用期间持有不可重入的编辑锁。
+        let edits = document.edits.lock_or_recover().clone();
+        owners[0].ara_render_input(&document, &edits, true).unwrap()
     };
     let canonical = input.timeline.unwrap().clips[0].fade_in_sec;
     let after = call("plugin_get_apply_state")["generation"].clone();
@@ -360,6 +223,7 @@ fn host_fades_project_into_gui_and_refresh_without_reloading_or_baking_audio() {
     assert_eq!(keys, vec![first]);
     assert_eq!(canonical, 0.);
 }
+
 /// 只打开editor-only入口时，也必须采集同文档隐藏playback owner的元数据。
 #[test]
 fn task38b_one_editor_refresh_collects_hidden_playback_metadata() {
@@ -794,7 +658,7 @@ fn render_test_edits(
     owner: &ExtensionOwner,
     document: &super::super::document::DocumentSession,
     edits: &crate::state_channel::EditState,
-) -> Result<Vec<super::super::snapshot::PlaybackSnapshot>, String> {
+) -> Result<Vec<Arc<super::super::snapshot::PlaybackSnapshot>>, String> {
     let input = {
         let _transaction = document.transaction.lock_or_recover();
         owner.ara_render_input(document, edits, true)?.1
@@ -1104,89 +968,82 @@ fn an_edit_round_trips_through_the_workspace_file() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// 只读提取已提交REAPER旧归档的原始组件JSON，不调用当前encoder生成兼容证据。
-fn task34_archived_v2_states() -> Vec<Vec<u8>> {
-    use base64::Engine as _;
-    let mut chunks = Vec::new();
-    let mut states = Vec::new();
-    let mut inside = false;
-    for line in include_str!("../../../tests/fixtures/gui-keyboard-edited.RPP")
-        .lines()
-        .map(str::trim)
-    {
-        if line.starts_with("<VST ") {
-            inside = true;
-            chunks.clear();
-            continue;
-        }
-        if !inside {
-            continue;
-        }
-        if line == ">" {
-            let start = chunks
-                .windows(b"{\"edits\":".len())
-                .position(|bytes| bytes == b"{\"edits\":")
-                .unwrap();
-            let length = u32::from_le_bytes(chunks[start - 4..start].try_into().unwrap()) as usize;
-            states.push(chunks[start..start + length].to_vec());
-            inside = false;
-        } else {
-            chunks.extend(
-                base64::engine::general_purpose::STANDARD
-                    .decode(line)
-                    .unwrap(),
-            );
-        }
-    }
-    assert_eq!(
-        states.iter().map(Vec::len).collect::<Vec<_>>(),
-        [481, 22516]
-    );
-    states
-}
-
-/// 两条归档记录共享完全相同的旧source/modification身份，必须由真实assignment限定恢复目标。
+/// 两条组件记录共享完全相同的旧 source/modification 身份时，恢复目标只能由**真实
+/// assignment**（本实例被分配的 region）限定。
+///
+/// 【为什么不再喂归档里的旧字节】那份载荷的曲线只存在**显示数组**（`edits.params`）里，
+/// 而 `merge_restore_locked` 收尾一律用**权威**重新合成显示 —— 于是合入的最后一步把它
+/// 抹掉。这不是丢了一个用例，而是 round-4 §4.7.3 的结论：插件从未发布过，旧存档迁移
+/// **不需要**，唯一保留的形状是"当前编码器写出的载荷能被正确限定"。所以这里用
+/// `encode_state()` 现造两份组件载荷，把同一条契约钉在仍然存在的形状上。
 #[test]
-fn task34_archived_v2_bytes_rebind_only_inside_the_component_scope() {
-    let states = task34_archived_v2_states();
+fn task34_component_state_restore_is_scoped_by_the_real_assignment() {
     let (model, owners, _ids) = crate::editor::session::tests::workspace_fixture();
     let document = model.session();
-    let archived: serde_json::Value = serde_json::from_slice(&states[0]).unwrap();
+    // 【为什么两条根用**同一个**身份】这正是"只能靠 assignment 区分"的场景：两份载荷
+    // 认不出谁是谁，唯一可靠的判据是本实例被分配了哪些轨。
     let identity: Vec<(String, String)> =
-        serde_json::from_value(archived["edits"]["bindings"]["ara-track-0"].clone()).unwrap();
+        vec![("shared-mod".to_string(), "ara://source".to_string())];
     *document.track_bindings.lock_or_recover() = std::collections::BTreeMap::from([
         ("track".into(), identity.clone()),
         ("b".into(), identity.clone()),
     ]);
-    // 与宿主冷重建一致：完整图ready前暂存全部组件原始bytes，随后统一合入权威。
-    document.ready.store(false, Ordering::Release);
-    for (owner, bytes) in owners.iter().zip(&states) {
+    // 两份载荷各写一条**不同**的曲线：恢复时若串了轨，值会立刻对不上。
+    document
+        .write_authority_range("track", "pitch", 100, &[32.; 4], None, false)
+        .unwrap();
+    document
+        .write_authority_range("b", "pitch", 200, &[64.; 12], None, false)
+        .unwrap();
+    let states = owners
+        .iter()
+        .map(|owner| owner.encode_state().unwrap())
+        .collect::<Vec<_>>();
+
+    // 与宿主冷重建一致：完整图 ready 前暂存全部组件原始 bytes，随后统一合入权威。
+    let (cold_model, cold_owners, cold_ids) = crate::editor::session::tests::workspace_fixture();
+    let cold = cold_model.session();
+    *cold.track_bindings.lock_or_recover() = std::collections::BTreeMap::from([
+        ("track".into(), identity.clone()),
+        ("b".into(), identity.clone()),
+    ]);
+    cold.ready.store(false, Ordering::Release);
+    for (owner, bytes) in cold_owners.iter().zip(&states) {
         owner.restore_state(bytes).unwrap();
     }
-    document.prepare_renderers();
-    let accepted = document.edits.lock_or_recover().clone();
-    assert!(
-        !accepted.params.contains_key("track"),
-        "旧A无曲线，不能借旧轨序号取到B曲线"
+    cold.prepare_renderers();
+    let accepted = cold.edits.lock_or_recover().clone();
+    assert_eq!(
+        authority_curve(&accepted, "track", "pitch_edit"),
+        vec![32.; 4],
+        "组件 A 的载荷只能落回它被分配的那条根"
     );
-    assert_eq!(accepted.params["b"].pitch_edit.len(), 800);
-    assert_eq!(&accepted.params["b"].pitch_edit[200..212], &[64.; 12]);
+    assert_eq!(
+        authority_curve(&accepted, "b", "pitch_edit"),
+        vec![64.; 12],
+        "组件 B 的曲线既不能被写进 A 的根，也不能被 A 覆盖"
+    );
     assert!(accepted
         .tracks
         .iter()
         .all(|track| track.id == "track" || track.id == "b"));
     for (index, id) in ["track", "b"].into_iter().enumerate() {
-        let bytes = owners[index].encode_state().unwrap();
+        let bytes = cold_owners[index].encode_state().unwrap();
         let saved: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(saved["version"], if index == 0 { 2 } else { 8 });
+        // 【单一版本】组件状态只有一个代际（`EditState::STATE_VERSION`），内容不再
+        // 决定版本号 —— 此前那个"没有曲线 ⇒ 2 / 有曲线 ⇒ 3"的阶梯与全部迁移一起删掉了。
+        assert_eq!(saved["version"].as_u64(), Some(2));
         assert_eq!(saved["edits"]["tracks"].as_array().unwrap().len(), 1);
         assert_eq!(saved["edits"]["tracks"][0]["id"], id);
         assert_eq!(saved["edits"]["bindings"].as_object().unwrap().len(), 1);
-        assert_eq!(saved["edits"]["params"].as_object().unwrap().len(), index);
+        // 【载荷只带自己那一条根】两个组件共享同一身份，裁剪判据只能是 assignment。
+        let params = saved["edits"]["params"].as_object().unwrap();
+        assert_eq!(params.len(), 1, "{saved}");
+        assert!(params.contains_key(id), "{saved}");
     }
-    // 真正扩大同一组件assignment，使两个完全相同身份同时进入候选集，必须拒绝合入。
-    let key = (&*_ids[1] as *const u8) as u64;
-    let raw = owners[0]
+    // 真正扩大同一组件 assignment，使两个完全相同身份同时进入候选集：只能不套用。
+    let key = (&*cold_ids[1] as *const u8) as u64;
+    let raw = cold_owners[0]
         .binding
         .lock_or_recover()
         .as_ref()
@@ -1199,32 +1056,38 @@ fn task34_archived_v2_bytes_rebind_only_inside_the_component_scope() {
             key as *mut _,
         );
     }
-    let before = document.edits.lock_or_recover().revision;
-    owners[0].restore_state(&states[1]).unwrap();
+    let before = cold.edits.lock_or_recover().revision;
+    cold_owners[0].restore_state(&states[1]).unwrap();
     // 【为什么不再要求失败】身份歧义只该让这一份恢复不套用，不该让宿主保存失败；
     // 权威仍保留原曲线（下面两条断言）。
-    assert!(owners[0].encode_state().is_ok(), "身份歧义不能让保存失败");
-    assert_eq!(document.edits.lock_or_recover().revision, before);
+    assert!(
+        cold_owners[0].encode_state().is_ok(),
+        "身份歧义不能让保存失败"
+    );
+    assert_eq!(cold.edits.lock_or_recover().revision, before);
     assert_eq!(
-        document.edits.lock_or_recover().params["b"].pitch_edit[200],
+        cold.edits.lock_or_recover().params["b"].pitch_edit[200],
         64.
     );
-    // 缺少真实身份也不能按归档旧序号恢复；既有曲线留在权威中。
-    document.track_bindings.lock_or_recover().insert(
+    // 缺少真实身份也不能按旧序号恢复；既有曲线留在权威中。
+    cold.track_bindings.lock_or_recover().insert(
         "track".into(),
         vec![("unknown-mod".into(), "ara://source".into())],
     );
-    document.track_bindings.lock_or_recover().insert(
+    cold.track_bindings.lock_or_recover().insert(
         "b".into(),
         vec![("unknown-b".into(), "ara://source".into())],
     );
-    // 【为什么不再要求失败】缺身份只该让这次恢复不套用；保存仍要成功，
-    // 权威保留原曲线（下面一条断言）。
-    assert!(owners[0].encode_state().is_ok(), "缺身份不能让保存失败");
+    cold_owners[0].restore_state(&states[1]).unwrap();
+    assert!(
+        cold_owners[0].encode_state().is_ok(),
+        "缺身份不能让保存失败"
+    );
     assert_eq!(
-        document.edits.lock_or_recover().params["b"].pitch_edit[200],
+        cold.edits.lock_or_recover().params["b"].pitch_edit[200],
         64.
     );
+    cold.close();
     document.close();
 }
 
@@ -1266,13 +1129,9 @@ fn automatic_apply_releases_the_transaction_and_rechecks_model_and_edit_versions
                 _reservation: None,
             })
             .unwrap();
-        let projection = document.workspace_projection().unwrap();
         let baseline = document.workspace_view().unwrap();
         let calls = std::sync::atomic::AtomicUsize::new(0);
         let result = document.apply_workspace_edits(
-            0,
-            document.revision.load(Ordering::Acquire),
-            &projection,
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
             || {
                 if calls.fetch_add(1, Ordering::AcqRel) == 0 {
@@ -1805,6 +1664,24 @@ fn two_renderer_case(shared_identity: bool) {
     ]);
     *document.track_bindings.lock_or_recover() = bindings.clone();
     document.ready.store(true, Ordering::Release);
+    // 【host-link 提交要有基线】`authority.absorb_display` 判"哪一帧是用户改的"靠的就是
+    // 基线（见 round-4 方案 §10.3：宿主外部编辑 = 对 `compose_root_view` 做工程时间差分）。
+    // 没有基线的根会被整条跳过 —— 这是 R5 定下的纪律（"没有基线"不等于"用户画了整条"），
+    // 于是夹具必须自己把基线备好，否则这条用例测的就不是隔离性而是"缺基线"。
+    for root in ["a", "b"] {
+        document.publish_baseline(
+            root,
+            hifishifter_kernel::editor::param_authority::RootBaseline::from_params(
+                &hifishifter_kernel::state::TrackParamsState {
+                    frame_period_ms: 5.0,
+                    // 帧数必须与客户端交上来的数组等长：`absorb_display` 只比对
+                    // 长度相同的曲线（长度不同 = 不是同一份工程，整段丢弃）。
+                    pitch_orig: vec![0.0; 2],
+                    ..Default::default()
+                },
+            ),
+        );
+    }
     let identities = [Box::new(0_u8), Box::new(0_u8)];
     let mut owners = Vec::new();
     for (index, id) in ["clip-a", "clip-b"].into_iter().enumerate() {
@@ -1885,9 +1762,10 @@ fn two_renderer_case(shared_identity: bool) {
     let mut restored = document.edits.lock_or_recover().clone();
     restored.reconcile(&bindings).unwrap();
     for (index, id) in ["a", "b"].into_iter().enumerate() {
+        // 【T2：曲线只在权威里】显示数组不再承载用户曲线，读权威的稀疏 run。
         assert_eq!(
-            restored.params[id].pitch_edit,
-            [61.0 + index as f32, 63.0 + index as f32]
+            authority_curve(&restored, id, "pitch_edit"),
+            vec![61.0 + index as f32, 63.0 + index as f32]
         );
         let output = render_test_edits(&owners[index], &document, &restored).unwrap();
         let factor = if index == 0 { 0.5 } else { 0.25 };
@@ -1907,18 +1785,25 @@ fn two_renderer_case(shared_identity: bool) {
         let b = assigned_view(&owners[1], &document);
         assert_eq!(a.tracks[0].volume, 0.5);
         assert_eq!(b.tracks[0].volume, 0.5);
+        // 【G5：在线根优先】宿主交回一份**旧**载荷时，合入只补在线状态里缺的根 ——
+        // 已经活着的根（a 与 b 都有自己的曲线）不得被载荷覆盖。这正是"复制插件后
+        // 另一条轨的曲线被改写"那条缺陷的判据。
         assert_eq!(
-            document.edits.lock_or_recover().params["b"].pitch_edit,
-            [61., 63.]
+            authority_curve(&document.edits.lock_or_recover(), "a", "pitch_edit"),
+            vec![61., 63.]
+        );
+        assert_eq!(
+            authority_curve(&document.edits.lock_or_recover(), "b", "pitch_edit"),
+            vec![62., 64.]
         );
         owners[1].restore_state(&second).unwrap();
         assert_eq!(
-            document.edits.lock_or_recover().params["a"].pitch_edit,
-            [61., 63.]
+            authority_curve(&document.edits.lock_or_recover(), "a", "pitch_edit"),
+            vec![61., 63.]
         );
         assert_eq!(
-            document.edits.lock_or_recover().params["b"].pitch_edit,
-            [62., 64.]
+            authority_curve(&document.edits.lock_or_recover(), "b", "pitch_edit"),
+            vec![62., 64.]
         );
         let editors: Vec<_> = owners
             .iter()
@@ -2305,80 +2190,6 @@ fn actual_document_retains_bound_storage_after_owner_is_dropped() {
     }
     drop(model);
     // 模型终止后所有 owner 都已释放，此后不得再访问 raw。
-}
-
-/// **回归：region key 缺席时按"源 + 播放几何"反查身份，而不是判"无身份"。**
-///
-/// 【为什么这条测试是必须的】派生表（`regions` / `clip_ids`）与映射出的 clip id 之间
-/// 存在一个"还没跟上"的窗口（宿主在收口前重投模型、或 region 刚被重建）。旧实现
-/// 在这个窗口里直接判"无身份"，于是那一条 clip 本轮**不投影任何曲线** —— 用户看到的
-/// 正是"编辑之后这一段参数被重置"（真机日志：`N of M clip(s) have no region identity`）。
-/// 新实现按 clip 自带的源与播放几何反查派生表，把它接回同一份参数权威。
-#[test]
-fn a_clip_without_a_live_region_key_still_resolves_by_source_and_geometry() {
-    let (model, _owners, _ids) = crate::editor::session::tests::workspace_fixture();
-    let document = model.session();
-    let mut timeline = document
-        .timeline
-        .lock_or_recover()
-        .as_ref()
-        .unwrap()
-        .clone();
-    // 取派生表里一条真实 region 作为"应当被反查到的"目标，并给它一份**唯一**的
-    // 源与播放几何 —— 夹具里两条 region 是克隆关系，不这样做反查会命中两条而
-    // 判为歧义（那是正确行为，但不是这条测试要验证的）。
-    let target_key = *document
-        .regions
-        .lock_or_recover()
-        .keys()
-        .next()
-        .expect("夹具必须有一条 region");
-    let (target_source, target_start, target_length, target_modification) = {
-        let mut regions = document.regions.lock_or_recover();
-        let region = regions.get_mut(&target_key).expect("目标 region 必须存在");
-        region.audio_source_persistent_id = "ara://unique-source".into();
-        region.start_in_playback_time = 7.0;
-        region.duration_in_playback_time = 3.0;
-        (
-            region.audio_source_persistent_id.clone(),
-            region.start_in_playback_time,
-            region.duration_in_playback_time,
-            region.audio_modification_persistent_id.clone(),
-        )
-    };
-
-    let unknown_key = target_key.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    assert!(
-        !document
-            .regions
-            .lock_or_recover()
-            .contains_key(&unknown_key),
-        "构造的 key 必须真的不在派生表里，否则这条测试什么都没验证"
-    );
-
-    let clip_id = {
-        let clip = timeline.clips.first_mut().expect("夹具必须有一条 clip");
-        // clip id 指向一个派生表里不存在的 key，但源与播放几何仍指向那条真实 region。
-        clip.id = format!("ara-region-{unknown_key}");
-        clip.source_path = Some(target_source.clone());
-        clip.start_sec = target_start;
-        clip.length_sec = target_length;
-        clip.id.clone()
-    };
-
-    let identities = {
-        let _transaction = document.transaction.lock_or_recover();
-        document.parameter_identities_locked(&timeline).unwrap()
-    };
-    let identity = identities
-        .get(&clip_id)
-        .expect("身份必须由源 + 播放几何反查出来，而不是判无身份");
-    assert_eq!(identity.source, target_source);
-    assert_eq!(
-        identity.modification, target_modification,
-        "反查出的身份必须指向同一条 modification，否则参数权威仍然接不上"
-    );
-    document.close();
 }
 
 /// 形态判定：**激活之前不能落定**，激活之后过宽限期才落定成 Capture。

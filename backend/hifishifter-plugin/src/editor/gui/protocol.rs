@@ -9,7 +9,7 @@
 //! 改另一端，放在同一个目录里才能被同一次评审看到。
 
 //
-// 【为什么 Windows 上允许 §dead_code§】本文件的消费者是 macOS/Linux 的两个原语
+// 【为什么 Windows 上允许 `dead_code`】本文件的消费者是 macOS/Linux 的两个原语
 // （自定义 scheme + 导航白名单）。Windows 用 WebView2 的虚拟主机映射，走不到它们，
 // 但判据必须继续编译 —— 否则等到那个平台时才腐烂。
 #![cfg_attr(windows, allow(dead_code))]
@@ -44,6 +44,13 @@ pub(crate) const PAGE_URL: &str = "hfs-plugin://local/plugin.html";
 /// 日志（`[gui] page ready after 143ms`）。让它走命令表就要给它编一个 id，然后前端
 /// 得为它维护一个永不 resolve 的 promise。
 pub(crate) const PAGE_READY: &str = "plugin_ready";
+
+/// 页面的周期性内存自报（每 15 s 一次）。
+///
+/// 【为什么也要走"不进命令表"这条路】它和 [`PAGE_READY`] 一样是**诊断读数**：不需要
+/// 回执、不产生任何状态，只是把 `performance.memory` 交上来。走命令表就要给它编 id、
+/// 让前端维护一个永不 resolve 的 promise，而它 15 s 就一次。
+pub(crate) const PAGE_HEAP: &str = "plugin_heap";
 
 /// 校验一条页面消息，返回可用的请求对象。
 ///
@@ -259,7 +266,7 @@ mod tests {
     fn delivery_expressions_survive_hostile_payloads() {
         let payload = serde_json::json!({
             "name": "it's a \\ test",
-            "path": "C:\\Users\\z\\a.wav",
+            "path": "C:\\Users\\someone\\a.wav",
             "note": "line1\nline2\u{2028}end",
         })
         .to_string();

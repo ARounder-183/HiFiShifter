@@ -1,5 +1,13 @@
 //! 捕获通路：渲染输入、准备作业、输出仲裁与读数。
 use super::*;
+
+/// `[capture] ctx` 在形状不变时补一行的间隔。
+///
+/// 【为什么要有它】这一行的去重键不含位置（位置一直在走 ⇒ 按整行去重等于每块一行，
+/// 现场日志里它占 10162/26617 行）。但位置是用户真正想看的那一栏，所以形状不变时
+/// 也要定期补一行 —— 10 秒足够让人看见"宿主把位置钉在 7.375 s"，又不至于刷屏。
+const CONTEXT_SUMMARY_MS: std::time::Duration = std::time::Duration::from_secs(10);
+
 impl ExtensionOwner {
     /// Capture 形态的渲染准备（不经过 ARA 文档）。
     ///
@@ -24,13 +32,24 @@ impl ExtensionOwner {
     /// 【为什么"带不带曲线"要作为一项返回】会话还没加载时拿到的是**不含用户曲线**的
     /// 几何，而那时 `edit` 恒为 0 —— 若调用方把它当成"已准备"，会话加载之后版本不变、
     /// 这次渲染被跳过，用户画完线永远听不到变化（见 `capture_prepare_job` 的版本闸）。
+    /// `require_curves` 决定"会话正在加载"时要不要**放弃这一趟**：
+    ///
+    ///   * `true`（离线导出 / bounce）：放弃。那是**一次性**的机会，发布一份没有用户
+    ///     曲线的结果等于把"编辑没生效"烘焙进产物，用户永远发现不了。
+    ///   * `false`（实时播放）：照常发布。播放有无数次机会，而"什么都不发布"意味着
+    ///     **永远直通**（用户报的"关着窗口就没有处理结果"）。版本号里的
+    ///     `with_curves` 位保证会话一加载就会重算一次。
     pub(crate) fn capture_render_input(
         &self,
-    ) -> Result<(u64, u64, bool, super::input::RenderInput), String> {
+        require_curves: bool,
+    ) -> Result<Option<(u64, u64, bool, super::input::RenderInput)>, String> {
         if !self.capture.has_material() {
             return Err("no Capture material".into());
         }
         let revision = self.capture.revision();
+        if require_curves && self.capture_session_pending() {
+            return Ok(None);
+        }
         let session = self
             .capture_session
             .get()
@@ -52,6 +71,23 @@ impl ExtensionOwner {
             // （见 `capture_prepare_job` 的 `with_curves` 位）。
             None => (self.capture.session_timeline().0, 0, false),
         };
+        if require_curves && !with_curves {
+            log::debug!(
+                "[capture] offline render requested curves but no editor session is loaded; deferring"
+            );
+            return Ok(None);
+        }
+        // 【内容身份跟着 PCM 走】Capture 的分析缓存键优先读 content_id；这里把
+        // 内容哈希也写进 clip 的内容指纹，保证“同 take 号、不同内容”必定 miss，
+        // “同内容、不同 take”必定 hit。ARA 的指纹由 refresh_source_fingerprints 负责。
+        let fingerprints = self.capture.content_fingerprints();
+        for clip in &mut timeline.clips {
+            if let Some(content_id) = clip.content_id.as_deref() {
+                if let Some(stamp) = fingerprints.get(content_id) {
+                    clip.source_file_fingerprint = Some(*stamp);
+                }
+            }
+        }
         let trimmed = crate::capture::timeline::clamp_timeline_to_project(&mut timeline);
         if trimmed > 0 {
             log::warn!(
@@ -68,13 +104,81 @@ impl ExtensionOwner {
             // 它的时间线每次都被宿主重建、clip 身份由 region key 派生 —— Capture 没有
             // 那个问题（见 `render/input.rs::mix_interleaved` 的第一支）。
             clip_parameters: std::collections::BTreeMap::new(),
+            window: None,
         };
-        Ok((revision, edit, with_curves, input))
+        Ok(Some((revision, edit, with_curves, input)))
+    }
+
+    /// 会话**存在但还没加载完**（窗口刚打开、actor 正在读盘/建模型）。
+    ///
+    /// 【为什么它不是"没有会话"】"没有会话"= 用户从没开过窗口 ⇒ 确实没有曲线可读，
+    /// 照常渲染是对的。"有会话但没加载" = 用户**有**曲线，只是还读不出来 ⇒ 这一趟
+    /// 渲染必须**放弃**：发布一份没有曲线的结果会让宿主把它烘焙进产物（离线只有
+    /// 一次机会），而下一拍就能拿到带曲线的版本。
+    ///
+    /// 此前这两种状态被合成一个"没有会话"分支（`with_curves = false`），于是
+    /// "窗口开过、actor 正在加载"时渲染会发布一份**没有用户编辑**的产物 —— 用户
+    /// 听到的正是"我改的东西没生效"。
+    pub(crate) fn capture_session_pending(&self) -> bool {
+        match self.capture_session.get() {
+            Some(Ok(session)) => !session.is_loaded(),
+            // 会话创建失败：那是终态，不是"还在加载"。让它走"没有会话"那一支，
+            // 免得离线渲染永远等一个不会到来的加载。
+            Some(Err(_)) | None => false,
+        }
     }
 
     pub(crate) fn capture_prepare_job(
         &self,
         cancel: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<(), String> {
+        // 【离线块之后的实时准备也必须带曲线】宿主可能用 setup mode=0 进入离线
+        // 预览（VEGAS 的“应用非实时事件 FX”就是一例）。只看 setup mode 会漏掉；
+        // `offline_pass_active` 由第一个 mode=2 块置位，随后 actor 的普通准备
+        // 就必须走 require_curves 版本，不能再发布“只有几何”的快照。
+        let require_curves = self.offline_pass_active()
+            || self.processing_pass.is_preview()
+            || self.setup_process_mode() == 2;
+        if require_curves {
+            if let Some(session) = self.capture_session_if_initialized() {
+                session.request_reload();
+            }
+        }
+        self.capture_prepare_job_inner(cancel, require_curves)
+    }
+
+    /// 离线准备：**要求**这一份结果带着用户曲线（见 `capture_render_input`）。
+    pub(crate) fn capture_prepare_job_offline(
+        &self,
+        cancel: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<(), String> {
+        self.capture_prepare_job_inner(cancel, true)
+    }
+
+    /// 离线渲染是否已经拥有“带当前编辑代次”的完整快照。
+    ///
+    /// 【为什么不能只看 capture_session_pending】它只回答“会话在不在加载”。
+    /// 版本闸还必须确认发布的快照属于当前的 (take, edit, with_curves) 组合；
+    /// 否则参数线刚改完就点“确定”时，会把上一版曲线烘焙进产物。
+    pub(crate) fn capture_offline_ready(&self) -> Result<bool, String> {
+        if !self.capture.has_material() {
+            return Ok(true);
+        }
+        let Some((revision, edit, with_curves, _)) = self.capture_render_input(true)? else {
+            return Ok(false);
+        };
+        if !with_curves {
+            return Ok(false);
+        }
+        let version = revision ^ (edit << 32);
+        Ok(self.capture_prepared.load(Ordering::Acquire) == version
+            && self.snapshots.iter().all(|snapshot| snapshot.is_ready()))
+    }
+
+    fn capture_prepare_job_inner(
+        &self,
+        cancel: Arc<std::sync::atomic::AtomicBool>,
+        require_curves: bool,
     ) -> Result<(), String> {
         if !self.capture.has_material() {
             return Ok(());
@@ -82,7 +186,15 @@ impl ExtensionOwner {
         // 【为什么这里也要补一次】命令那条路（`request_capture_reload`）只在用户动作时
         // 发生；从组件 state 恢复 take 的会话不走那里。这一份是兜底，且幂等。
         self.sync_raw_tape();
-        let (revision, edit, with_curves, input) = self.capture_render_input()?;
+        let Some((revision, edit, with_curves, input)) =
+            self.capture_render_input(require_curves)?
+        else {
+            // 【会话正在加载：这一趟不发布】见 `capture_session_pending`。离线渲染只有
+            // 一次机会，发布一份没有用户曲线的结果等于把"编辑没生效"烘焙进产物。
+            // 返回 Ok 让调用方继续等（见 `prepare_offline_until` 的重试循环）。
+            log::debug!("[capture] the editor session is still loading; the snapshot is deferred");
+            return Ok(());
+        };
         // 【T-S1-6】发布前把"素材里有多少个洞"变成可读的数（去重打印）。
         self.note_tape_coverage(&input);
         // 【为什么要版本闸】它被 UI 定时器与命令两条路径驱动；没有这道闸，一次 8 秒的
@@ -114,8 +226,7 @@ impl ExtensionOwner {
         // 那一段就是"素材在、结果还没算出来"；若它远大于 0.7 s，那 0.4 s 只能来自
         // 起播窗口。没有这个数时，两者在日志里完全同形。
         let render_started = std::time::Instant::now();
-        let mut snapshots = input.render(cancel)?;
-        super::snapshot::compact_prepared(&mut snapshots)?;
+        let snapshots = input.render(cancel)?;
         let render_ms = render_started.elapsed().as_millis() as u64;
         if self.is_closed() {
             return Ok(());
@@ -130,7 +241,7 @@ impl ExtensionOwner {
         }
         for (publisher, snapshot) in self.snapshots.iter().zip(snapshots) {
             publisher
-                .publish(snapshot)
+                .publish_shared(snapshot)
                 .map_err(|e| format!("snapshot publish failed: {e:?}"))?;
         }
         self.capture_prepared.store(version, Ordering::Release);
@@ -206,65 +317,70 @@ impl ExtensionOwner {
     }
 
     /// 与 [`Self::capture_output`] 相同，但使用**本块**的流/播放证据。
+    ///
+    /// # 四层仲裁（问题 3 的修复点）
+    ///
+    /// 旧实现先问“是不是在录”，而那个判据在 Resting 上早退；随后只要有素材就读
+    /// **上一张 take** 的 processed 快照。于是“停止 -> 再播”的前 250 ms 永远在放
+    /// 上一轮缓存。现在判据是**捕获世代**：
+    ///
+    /// 1. 本世代、本块有权推进（transport_active / start_window / Start|Rolling）
+    ///    ⇒ 一定是这一遍的输入，输出 `Recording`；
+    /// 2. 本世代、已停播（Paused）⇒ 这一遍已经录到东西才允许回放它，否则 `Recording`；
+    /// 3. 旧世代的迟到块 ⇒ 不能替当前世代作决定；有权推进时仍按 `Recording`；
+    /// 4. 没有本块证据 ⇒ 只有“待命”（本世代还没写下任何样本）才允许试听上一张 take。
     pub(crate) fn capture_output_with(&self, evidence: Option<BlockEvidence>) -> CaptureOutput {
         // 【为什么 ARA 实例完全不走这里】它的素材由 ARA 逐个 region 授权，"区间外静音"
         // 是那条通路的既有语义（宿主自己的原声已被 ARA 取代）。这一条必须排在武装之前：
         // 形态一旦是 ARA，任何 Capture 结论都不适用。
-        //
-        // 【已知边界】`bound_once` 为真而文档已关的实例（宿主绑定过 ARA、文档后来又关掉）
-        // 在这里仍然判成"不介入"。那种实例在界面上本来就是终态（`editor_session` 会以
-        // DOCUMENT_CLOSED 收场，整页显示"会话不可用"），所以它不是"有界面却不出声"的
-        // 现场；要收掉这条边界得先给"文档是否还活着"一个**无锁**读数（音频线程不能取
-        // `document` 那把锁），那是独立一期的事。
         if self.is_bound() || self.bound_once.load(Ordering::Acquire) {
             return CaptureOutput::Untouched;
         }
-        /*
-         * 【为什么"武装"不再直接等于"录制中"】武装之后、宿主开始播放之前是**待命**：
-         * 那段时间里没有任何素材在产生，所以"用旧内容盖住新演奏"这个风险根本不存在
-         * （那正是录制中要直通的理由）。而此前 `is_armed()` 直接返回 `Recording` ⇒
-         * 待命期输出直通宿主原声，用户画完参数线听不到任何变化 —— 表现就是
-         * **"参数线不生效"**，而界面只说"等待播放"，两件事对不上。
-         *
-         * 一旦宿主开始播放就立刻回到 `Recording`：捕获读的是输入总线，而输出可能写进
-         * 同一块缓冲（in-place 宿主），直通才不会让捕获录到我们自己的输出。
-         * `capture_observe` 在 `capture_stage` 之前更新 `host_playing`，所以起播的
-         * 第一块就已经是 `Recording`，捕获读到的是宿主原声。
-         */
-        // 【为什么把块流证据也算进"录制中"】`kPlaying` 可能在起播第一块才滞后置位；
-        // 只按 `capture_started || host_playing` 判断时，那一块会被当成"待命"，
-        // 输出上一版 `Processed` —— 旧内容盖在新演奏上。位置流在推进时按录制中直通，
-        // 最多在几何变化的瞬间多直通一块；重复块随即回到 `Processed`，待命语义不变。
-        // 没有本块证据的调用（旧测试/旧入口）退回实例级实时流读数；生产路径
-        // 永远由 `capture_observe` 提供证据，因此不会读到另一条流的结论。
-        let recording = if evidence.is_some() {
-            self.capture.is_recording_with_evidence(evidence)
-        } else {
-            self.capture
-                .is_recording_with_flow(self.capture_transport_running())
-        };
-        if recording {
+        if !self.capture.is_armed() {
+            // 未武装：保留既有“有素材就播结果”的契约（待命试听上一张 take）。
+            if !self.capture.has_material() {
+                return CaptureOutput::PassThrough;
+            }
+            return self.capture_candidate_output(evidence);
+        }
+
+        // 【armed 路径没有“读旧 take”的分支】这是问题 3 的核心：
+        // 同一次 capture 会话里停止再播时 capture epoch 不变，旧实现据此合法地返回
+        // 上一张 take 的 processed 快照，新一遍前 250 ms 于是永远在放上一轮缓存。
+        // 现在权威是 transport 代次：本遍的每一块都只监听输入。
+        let generation = self.transport_generation.load(Ordering::Acquire);
+        let Some(evidence) = evidence else {
+            // 没有本块证据的旧入口（capture_output / 诊断）：监听输入。
             return CaptureOutput::Recording;
+        };
+        if evidence.transport_generation != generation {
+            // 旧代次的迟到块（prefetch / 补写）：不能替本遍作决定，也不能读旧 take。
+            return if evidence.transport_active {
+                CaptureOutput::Recording
+            } else {
+                CaptureOutput::PassThrough
+            };
         }
-        if !self.capture.has_material() {
-            // 【为什么没有素材就一定透传】"不要覆盖一个正常渲染的 ARA 实例的输出"
-            // 这条契约由上面的 `is_bound()` 守卫负责：有活的文档时这里根本走不到。
-            // 此前这里还额外要求"形态已落定为 Capture"，于是窗口没开过、宽限期未过的
-            // 会话（`Undetermined`）在**任何素材之前**都是静音 —— 用户把插件插到一条
-            // 有声音的轨道上，得到的是"整条轨哑了"。
-            // 插件的诚实默认是**透明**：直到它真的录到了东西，才对声音负责。
-            return CaptureOutput::PassThrough;
-        }
+        // 本遍的块：无论 kPlaying、相位、是否已写样本，输出都是这一遍的输入。
+        // 暂停时读上一张 take 的那条分支已经删除（见上）。
+        CaptureOutput::Recording
+    }
+
+    /// 当前可播的素材档位（Processed / Raw / PendingSynthesis）。
+    ///
+    /// 【只允许未武装调用】armed 路径必须监听本遍输入；读旧 take 只属于待命试听。
+    /// 违反这条就会回到问题 3（停止再播的前 250 ms 放上一轮缓存）。
+    fn capture_candidate_output(&self, evidence: Option<BlockEvidence>) -> CaptureOutput {
+        debug_assert!(
+            !self.capture.is_armed(),
+            "capture_candidate_output must not be used while armed"
+        );
         let candidate = if self.processed_ready() {
             CaptureOutput::Processed
         } else if self.raw_tape_ready() {
-            // 【为什么在这里置位】有素材、但处理结果不是当前代次 ⇒ 该有一次合成在跑。
-            // 音频线程只记一个原子；调度仍由会话 actor 完成（见 `render_wanted`）。
             self.render_wanted.store(true, Ordering::Release);
             CaptureOutput::Raw
         } else {
-            // 素材存在但两份都还没发布（刚录完、后台还没跑完）：透传宿主原声，但**如实**
-            // 报成"等待合成"，而不是与"没有素材"共用同一个名字。
             self.render_wanted.store(true, Ordering::Release);
             CaptureOutput::PendingSynthesis
         };
@@ -278,6 +394,9 @@ impl ExtensionOwner {
     /// **另一份素材** —— 继续沿用等于用旧录音盖住新演奏。
     pub(crate) fn clear_rung_latch(&self) {
         self.rung_locked.store(0, Ordering::Release);
+        self.rung_pass.store(0, Ordering::Release);
+        self.rung_capture_epoch.store(0, Ordering::Release);
+        self.rung_take_epoch.store(0, Ordering::Release);
     }
 
     /// 把本块的候选档位**锁存到本 pass**（I-2：一次播放只有一个内容源）。
@@ -317,6 +436,12 @@ impl ExtensionOwner {
         if evidence.stream != ProcessStream::Realtime {
             return candidate;
         }
+        // 【armed 时不锁存】武装期间每一块都是本遍输入，锁存旧档位只会把上一遍的
+        // 内容源带进新一遍。只有未武装的试听路径才需要“一次播放一个源”。
+        if self.capture.is_armed() {
+            self.rung_locked.store(0, Ordering::Release);
+            return candidate;
+        }
         if candidate == CaptureOutput::Recording {
             self.rung_locked.store(0, Ordering::Release);
             return candidate;
@@ -324,13 +449,22 @@ impl ExtensionOwner {
         let pass = self.streams[ProcessStream::Realtime.index()]
             .pass
             .load(Ordering::Acquire);
+        let capture_epoch = self.capture.capture_epoch();
+        let take_epoch = self.capture.current_material_epoch();
         let locked = self.rung_locked.load(Ordering::Acquire);
-        if locked != 0 && self.rung_pass.load(Ordering::Acquire) == pass {
-            // 本 pass 已经选过：沿用，不重新仲裁。
+        if locked != 0
+            && self.rung_pass.load(Ordering::Acquire) == pass
+            && self.rung_capture_epoch.load(Ordering::Acquire) == capture_epoch
+            && self.rung_take_epoch.load(Ordering::Acquire) == take_epoch
+        {
+            // 本 pass / 本捕获世代已经选过：沿用，不重新仲裁。
             return CaptureOutput::from_code(locked).unwrap_or(candidate);
         }
         self.rung_locked.store(candidate.code(), Ordering::Release);
         self.rung_pass.store(pass, Ordering::Release);
+        self.rung_capture_epoch
+            .store(capture_epoch, Ordering::Release);
+        self.rung_take_epoch.store(take_epoch, Ordering::Release);
         candidate
     }
 
@@ -404,6 +538,26 @@ impl ExtensionOwner {
     /// 【为什么量 `max_step` 而不是别的】"咔"在波形上就是相邻样本的一次大跳变。
     /// 峰值、RMS、过零率都看不见它 —— 一个 20 ms 的音乐片段可以峰值不变而中间
     /// 跳一下。相邻差分是唯一直接对应听感的读数。
+    /// 逐块"咔"账本是否开启（`HIFISHIFTER_CLICK_AUDIT=1`，默认关闭）。
+    ///
+    /// 【为什么必须可关】`record_click_sample` 每块都要把整个输出缓冲扫一遍
+    /// （两声道 × 块长），并且每次都在写 `[click]` 行。现场日志里 `[click]` 占了
+    /// 9801/26617 行 —— 一个诊断工具的成本高到会改变被观测的行为，它就不再是诊断。
+    /// 与 `HIFISHIFTER_BUFFER_AUDIT` 同一套开关纪律：读一次就缓存，默认关闭。
+    /// 预热音频线程会读取的一次性开关（组件创建时调用，避免首块分配）。
+    pub(crate) fn warm_audio_caches(&self) {
+        let _ = Self::click_audit_enabled();
+    }
+
+    fn click_audit_enabled() -> bool {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ENABLED.get_or_init(|| {
+            std::env::var("HIFISHIFTER_CLICK_AUDIT")
+                .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+                .unwrap_or(false)
+        })
+    }
+
     pub(super) fn record_click_sample(
         &self,
         stream: ProcessStream,
@@ -413,6 +567,9 @@ impl ExtensionOwner {
         output: &crate::audio_abi::AudioBusBuffers,
         frames: usize,
     ) {
+        if !Self::click_audit_enabled() {
+            return;
+        }
         let channels = (output.num_channels as usize).min(2);
         let mut max_step = 0.0_f32;
         let mut peak = 0.0_f32;
@@ -505,14 +662,22 @@ impl ExtensionOwner {
         let Some(ring) = self.block_trace.get() else {
             return;
         };
-        let Some(line) = ring.last_context_line() else {
+        let Some((line, key)) = ring.last_context() else {
             return;
         };
+        // 【去重键不含位置】见 `BlockTraceRing::last_context`：按整行去重等于每块一行
+        // （位置一直在走 ⇒ 整行一直不同）。位置本身由每 `CONTEXT_SUMMARY_MS` 一行的
+        // 汇总负责，形状真的变了才值得单独一行。
+        let now = std::time::Instant::now();
         let mut last = self.last_ctx_diag.lock_or_recover();
-        if last.as_deref() != Some(line.as_str()) {
-            *last = Some(line.clone());
-            log::warn!("{line}");
+        let unchanged = last.as_ref().is_some_and(|(key_before, at)| {
+            key_before == &key && now.duration_since(*at) < CONTEXT_SUMMARY_MS
+        });
+        if unchanged {
+            return;
         }
+        *last = Some((key, now));
+        log::warn!("{line}");
     }
 
     /// 【B0】把 I-2 / I-3 的读数打成两行。**非实时线程**（UI 定时器）。
@@ -532,7 +697,7 @@ impl ExtensionOwner {
             // ARA 实例不走 Capture 仲裁：这两行的数字对它是无意义的零。
             return;
         }
-        if !self.capture.has_material() {
+        if !self.capture.has_material() && !self.processing_pass.is_preview() {
             return;
         }
         let switches = self.rung_switches.load(Ordering::Acquire);
@@ -542,9 +707,14 @@ impl ExtensionOwner {
         let output = self.capture_output();
         let prepared = self.capture_prepared.load(Ordering::Acquire);
         let ready = self.capture_ready_revision.load(Ordering::Acquire);
+        // 【真机诊断】预览 pass 的相位 / 原点 / 游标：回答“它有没有确认、从哪开始、
+        // 走到哪”。没有这一行，1 s 截断只能靠用户复述。
+        let (preview_phase, preview_origin, preview_cursor) = self.processing_pass.preview_state();
         let line = format!(
             "[capture] pass: take={} prepared={prepared} ready_revision={ready} \
-             output={} switches={switches} pass_switches={pass_switches} last={}->{}",
+             output={} switches={switches} pass_switches={pass_switches} last={}->{} \
+             preview_phase={preview_phase} preview_origin={preview_origin:?} \
+             preview_cursor={preview_cursor}",
             self.capture.revision(),
             output.as_str(),
             CaptureOutput::from_code(from as u8).map_or("none", |value| value.as_str()),
@@ -557,8 +727,22 @@ impl ExtensionOwner {
                 log::warn!("{line}");
             }
         }
-        let index = self.snapshot_index_for_rate(self.setup_sample_rate());
-        let geometry = &self.streams[index.min(2)];
+        // 【为什么按流遍历而不是挑一个下标】旧实现用 `snapshot_index_for_rate(工程率)`
+        // 去索引 `streams[]` —— 那是**快照发布器**的下标（0/1），不是进程流的下标
+        // （0=realtime/1=prefetch/2=offline）。48 kHz 工程因此永远读到 prefetch，
+        // 而实时流一个块都没被记过 ⇒ 这一行在现场日志里**一行都没打出来**。
+        for stream in [
+            ProcessStream::Realtime,
+            ProcessStream::Prefetch,
+            ProcessStream::Offline,
+        ] {
+            self.log_clock_line(stream);
+        }
+    }
+
+    /// 一条进程流的位置续接读数（非实时线程）。
+    fn log_clock_line(&self, stream: ProcessStream) {
+        let geometry = &self.streams[stream.index()];
         let blocks = geometry.blocks.load(Ordering::Acquire);
         if blocks == 0 {
             return;
@@ -573,7 +757,7 @@ impl ExtensionOwner {
             "[capture] clock: stream={} blocks={blocks} pass={} counted={} frames={} \
              jumps={} last_jump={} rewinds={} delta_min={} delta_max={} resyncs={} \
              rising={} continuous={} music={}",
-            index.min(2),
+            stream.as_str(),
             geometry.pass.load(Ordering::Acquire),
             geometry.counted_blocks.load(Ordering::Acquire),
             geometry.counted_frames.load(Ordering::Acquire),

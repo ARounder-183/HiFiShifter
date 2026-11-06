@@ -96,6 +96,17 @@ pub(super) struct TakeDirectionApi {
     ///
     /// 缺省时该回退不可用（与方向读取独立降级）：读不到文件名就退回"宁可不挂"。
     pub filename: Option<SourceFileName>,
+    /// `GetMediaSourceLength`：这份 take 的源**总时长**（秒）。
+    ///
+    /// 【为什么清单层必须自己拿到它】内核的两件事要它，而此前清单层只能向 ARA 借：
+    ///   * 倒放的**镜像轴**（`take_axis_sec`）—— 借不到时保留宿主镜像坐标，倒放片段
+    ///     就渲染不出来；
+    ///   * 循环源的**回绕周期** —— 借不到时周期退化成 clip 自身长度，等于**完全不循环**，
+    ///     后半段静音。真机上实测到过这条（`ara.loop-period-unknown`）。
+    ///
+    /// ARA 那份读数要求 region 已经认领到这个 item；而"宿主把 item 移出 region 的
+    /// 几何范围"是常态（拖动的那一瞬间）。宿主自己的读数没有这个前提。
+    pub length: Option<media::SourceLength>,
 }
 
 /// 一个 take 的**方向与段边界**读数（`PCM_Source_GetSectionInfo` 的三个出参）。
@@ -171,8 +182,20 @@ pub(crate) struct NativeHost {
     /// 记录新条目时先丢掉所有索引大于它的旧记录，于是"用户回退后再编辑"造成的重编号
     /// 不会留下错位的时间。宿主的自有条目（不是本插件创建的）没有时间，读作 `null`。
     undo_entry_times: std::sync::Mutex<std::collections::BTreeMap<i32, u64>>,
-    /// 本实例是否真的把节拍挂上了（只有挂上过才在析构时摘）。
-    host_timer: bool,
+    /// 需要在宿主线程结束、但 `Drop` 发生在别的线程上的 Undo 块（项目指针）。
+    ///
+    /// 【为什么是队列】见 `HostUndoBlock::drop`：就地阻塞投递会在"Drop 跑在宿主
+    /// 线程正等的那把锁上"时自锁。队列由 [`NativeHost::drain_undo_ends`] 在宿主
+    /// 线程上排空。
+    undo_ends: std::sync::Mutex<Vec<usize>>,
+    /// 本实例**持有**一个节拍引用（只有它为真时才在析构里减计数）。
+    host_timer_held: std::sync::atomic::AtomicBool,
+    /// 节拍此刻是否挂着（不论是谁挂的）。`refresh_host_transport_tick` 读它决定要不要自愈。
+    host_timer_ok: std::sync::atomic::AtomicBool,
+    /// 挂节拍用的宿主入口（`plugin_register`）；`None` = 宿主没提供，自愈无从谈起。
+    plugin_register: Option<PluginRegister>,
+    /// 下一次允许重试挂节的时刻（退避，避免 50 Hz 地撞宿主）。
+    host_timer_retry_at: std::sync::Mutex<Option<std::time::Instant>>,
     /// 到这个时刻（Unix 毫秒）之前不再尝试投递 —— 见 `on_host` 的熔断说明。
     host_unreachable_until: std::sync::atomic::AtomicU64,
 }
@@ -184,6 +207,55 @@ impl NativeHost {
     /// 同一个宿主接口重建适配器"；没有这个读数就只能猜。
     pub(crate) fn bound_thread(&self) -> std::thread::ThreadId {
         self.thread
+    }
+
+    /// 宿主节拍此刻挂着吗。
+    pub(crate) fn host_timer_attached(&self) -> bool {
+        self.host_timer_ok
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// 再试一次挂载宿主节拍（幂等；5 秒退避）。
+    ///
+    /// 【为什么需要它】`acquire` 只在 `from_context` 里调用一次，失败就只剩一行 WARN。
+    /// 而"节拍没挂上"的后果是**每次宿主调用白等 250 ms 再熔断** —— 光标不跟手、
+    /// 清单不刷新，全都长这个样子。视图定时器是唯一还会跑的节拍，让它每 5 秒补一次。
+    pub(crate) fn ensure_host_timer(&self) {
+        if self
+            .host_timer_ok
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return;
+        }
+        let Some(register) = self.plugin_register else {
+            return;
+        };
+        {
+            let mut next = self
+                .host_timer_retry_at
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let now = std::time::Instant::now();
+            if next.is_some_and(|at| now < at) {
+                return;
+            }
+            *next = Some(now + std::time::Duration::from_secs(5));
+        }
+        // 【为什么先看"别人挂没挂"】节拍是进程级的：另一个实例可能已经挂上了。
+        // 那时我们只需要知道"泵在跑"，不需要也不应该再持一个引用（否则析构时会
+        // 把别人的节拍摘掉 —— 见 `host_timer::acquire` 的返回值约定）。
+        if host_timer::attached() {
+            self.host_timer_ok
+                .store(true, std::sync::atomic::Ordering::Release);
+            return;
+        }
+        if host_timer::acquire(register) {
+            self.host_timer_held
+                .store(true, std::sync::atomic::Ordering::Release);
+            self.host_timer_ok
+                .store(true, std::sync::atomic::Ordering::Release);
+            log::warn!("[reaper-host] host-thread pump re-attached by the view timer");
+        }
     }
 
     /// 宿主用哪一套淡化轴（`Some(true)` = 7.81+ 的连续 curvature/S 两轴）。
@@ -214,8 +286,10 @@ impl NativeHost {
 /// 析构时把宿主节拍摘掉 —— 回调指针指向本模块的代码，模块卸载后再被调用就是崩溃。
 impl Drop for NativeHost {
     fn drop(&mut self) {
-        if self.host_timer {
-            self.host_timer = false;
+        if self
+            .host_timer_held
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
             host_timer::release();
         }
     }
@@ -374,12 +448,14 @@ impl NativeHost {
         // `int GetMediaItemNumTakes(MediaItem*)` / `MediaItem_Take* GetMediaItemTake(MediaItem*, int)`。
         // 文件名读取器与方向读取器独立可选（各自降级），但都在函数体的 `Option` 上下文里查。
         let source_file_name = lookup!(c"GetMediaSourceFileName", SourceFileName);
+        let source_length = lookup!(c"GetMediaSourceLength", media::SourceLength);
         let take_direction = lookup!(c"GetMediaItemTake_Source", TakeSource)
             .zip(lookup!(c"PCM_Source_GetSectionInfo", SectionInfo))
             .map(|(source, section)| TakeDirectionApi {
                 source,
                 section,
                 filename: source_file_name,
+                length: source_length,
             });
         let take_enum = lookup!(c"GetMediaItemNumTakes", TakeCount)
             .zip(lookup!(c"GetMediaItemTake", TakeAt))
@@ -592,16 +668,18 @@ impl NativeHost {
         let plugin_register = lookup!(c"plugin_register", PluginRegister);
         // 【为什么要在这里挂节拍】`from_context` 只在宿主的 model/UI 线程上被调用
         // （`setActive` / 初始化），而 `plugin_register` 的注册动作本身要求宿主线程。
-        let host_timer = match plugin_register {
-            Some(register) => {
-                host_timer::acquire(register);
-                true
-            }
+        let host_timer_held = match plugin_register {
+            Some(register) => host_timer::acquire(register),
             None => false,
         };
         Some(Self {
             _interface: interface,
-            host_timer,
+            host_timer_held: std::sync::atomic::AtomicBool::new(host_timer_held),
+            host_timer_ok: std::sync::atomic::AtomicBool::new(
+                host_timer_held || host_timer::attached(),
+            ),
+            plugin_register,
+            host_timer_retry_at: std::sync::Mutex::new(None),
             host_unreachable_until: std::sync::atomic::AtomicU64::new(0),
             thread: std::thread::current().id(),
             project: std::sync::atomic::AtomicUsize::new(project as usize),
@@ -619,6 +697,7 @@ impl NativeHost {
             take_enum,
             folder,
             undo_entry_times: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            undo_ends: std::sync::Mutex::new(Vec::new()),
         })
     }
     /// 当前线程是不是宿主绑定线程（model/UI 线程）。
@@ -839,6 +918,50 @@ impl NativeHost {
     /// 不符 ⇒ 明明有音频却显示占位。文件名相同即可证明"同一份已授权 PCM"，可安全回退。
     ///
     /// 读不出来（API 缺失、源为空、路径为空）返回 `None` —— 调用方退回"宁可不挂"。
+    /// 这份 take 的源**总时长**（秒）；读不出来返回 `None`。
+    ///
+    /// 与 [`Self::take_source_file_name`] 同一束 API（`GetMediaItemTake_Source`），
+    /// 只是多查一个 `GetMediaSourceLength`。三条拒绝理由：
+    ///   * 源为空指针 / 形状校验失败；
+    ///   * 宿主把长度报成**四分音符**（`lengthIsQN`）—— 那不是秒，混进内核会把
+    ///     120 BPM 下的一个四分音符当成 0.5 s；
+    ///   * 长度非有限或非正。
+    pub(super) fn take_source_length(
+        &self,
+        take: *mut c_void,
+        authorized: &impl Fn() -> bool,
+    ) -> Option<f64> {
+        if !self.on_host_thread() {
+            return self
+                .on_host(|| self.take_source_length(take, authorized))
+                .unwrap_or(None);
+        }
+        let api = self.take_enum.as_ref()?.direction.as_ref()?;
+        let length_of = api.length?;
+        let geometry = self.geometry.as_ref()?;
+        let project = self.project(authorized).ok()?;
+        let source = checked(authorized, || unsafe { (api.source)(take) }).ok()?;
+        if source.is_null() {
+            return None;
+        }
+        if !checked(authorized, || unsafe {
+            (geometry.validate)(project, source, c"PCM_source*".as_ptr())
+        })
+        .ok()?
+        {
+            return None;
+        }
+        let mut quarter_notes = false;
+        let seconds = checked(authorized, || unsafe {
+            length_of(source, &mut quarter_notes)
+        })
+        .ok()?;
+        if quarter_notes || !seconds.is_finite() || seconds <= 0.0 {
+            return None;
+        }
+        Some(seconds)
+    }
+
     pub(super) fn take_source_file_name(
         &self,
         take: *mut c_void,
@@ -1025,6 +1148,8 @@ impl NativeHost {
         let loop_source = boolean(iv(c"B_LOOPSRC")?)?;
         // 源文件路径：读不出来就是 `None`（回退身份不可用），不猜。
         let source_file_name = self.take_source_file_name(take, &authorized);
+        // 源总时长：清单层自己的读数，不依赖 ARA 是否已经认领到这个 item。
+        let source_length_sec = self.take_source_length(take, &authorized);
         // 方向与段边界来自**同一次** `PCM_Source_GetSectionInfo`。
         // 方向取两个来源的并集：宿主方向位 **或** 负速率 —— 与独立 App 的
         // `play_rate < 0 || section_mode > 0` 逐条对齐（见 `HostClipGeometry::play_rate_signed`）。
@@ -1125,6 +1250,7 @@ impl NativeHost {
             auto_fade_in_sec,
             auto_fade_out_sec,
             source_file_name,
+            source_length_sec,
         })
     }
 }

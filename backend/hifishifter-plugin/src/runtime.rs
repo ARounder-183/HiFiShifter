@@ -79,6 +79,24 @@ pub struct Runtime {
 /// `createAudioSourceContentReader`，也没有发起任何分析请求 —— 它压根没问过内容。
 /// 真正的成因是 `createAudioModification` 把宿主传来的 null hostRef 当成了硬错误。
 /// 探针因此删除，不留一个已经答完的问题的答案。
+/// 本平台能声明的**最低** ARA 代数。
+///
+/// 【为什么不能写死 2.0 Draft】aarch64 上的 ARA 头文件不暴露 2.0 Final 之前的枚举值，
+/// `ara2_bridge` 的 `ApiGeneration::supported_on_target` 正是这么判的，而
+/// `Factory::build()` 见到不支持的下界会直接回 `Unsupported`。那个失败的后果不是
+/// "少一代"，而是**整个运行时建不起来**：`runtime()` 返回 `None` →
+/// `Processor::create()` 返回 `None` → 工厂对**任何** `createInstance` 都回
+/// `kNoInterface`。插件在 aarch64 上一个实例都建不出来 —— linux-aarch64 的握手探针
+/// 报的就是这个（`createInstance failed: -2147467262`），macOS arm64 同样如此，
+/// 而那边 verify 的第 8 项跳过，所以它只会在宿主里表现成"这个插件 0 个类"。
+pub(crate) fn lowest_supported_generation() -> ApiGeneration {
+    if ApiGeneration::V2Draft.supported_on_target() {
+        ApiGeneration::V2Draft
+    } else {
+        ApiGeneration::V2Final
+    }
+}
+
 fn factory_capabilities() -> FactoryCapabilities {
     FactoryCapabilities::default().with_playback_transformations(
         PlaybackTransformationFlags::TIMESTRETCH | PlaybackTransformationFlags::REFLECT_TEMPO,
@@ -123,7 +141,7 @@ impl Runtime {
             // ARA-2-Final-专属的控制器能力（`processing_algorithms` / `licensing` /
             // `audio_file_chunks` / `signal_preservation` 一个都没用），因此不会撞上
             // 库的"能力需要 2.0 Final"拒绝。
-            .generations(ApiGeneration::V2Draft, ApiGeneration::V2Final)
+            .generations(lowest_supported_generation(), ApiGeneration::V2Final)
             // 【为什么必须广告 `REFLECT_TEMPO`】宿主在**创建每条 playback region** 时给出
             // transformation flags，而库会拿它跟这里声明的集合做子集校验：
             //

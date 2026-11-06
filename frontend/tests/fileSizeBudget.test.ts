@@ -22,7 +22,9 @@ const LIMITS: Record<string, number> = {
 
 test("超大文件只降不升", () => {
     for (const [file, max] of Object.entries(LIMITS)) {
-        const lines = readFileSync(join(process.cwd(), file), "utf8").split("\n").length;
+        // 末尾换行不是一行；按实际内容行计数，避免"恰好等于预算"被误判超一行。
+        const text = readFileSync(join(process.cwd(), file), "utf8").replace(/\r?\n$/, "");
+        const lines = text.length === 0 ? 0 : text.split(/\r?\n/).length;
         expect(lines, file + " 行数超过预算；请拆分而不是继续增长").toBeLessThanOrEqual(max);
     }
 });

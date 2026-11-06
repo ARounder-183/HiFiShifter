@@ -1,0 +1,29 @@
+name: Plugin gates (push)
+
+# 直接 push develop 时的插件侧快速反馈。
+#
+# 【为什么需要它】本仓的实际工作流是直接 push develop（不走 PR）。只有 PR 触发时，
+# FFI 守卫 / 插件并发单测这些最有价值的门禁会整段形同虚设 —— 2026-10 的 FFI 守卫
+# 回归正是这样落进仓库的。原 vst3.yml 承担了这个角色，但它同时还要编译打包插件，
+# 而产物本身只在 tag 上才有人要。
+#
+# 现在这条工作流只做一件事：调用 gates.yml 的 plugin 档（静态门禁 + 插件并发测试），
+# 不产出任何产物。产物侧由 build.yml（tag）负责。
+on:
+  push:
+    branches: [develop]
+  pull_request:
+    branches: [main, develop]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: plugin-gates-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gates:
+    uses: ./.github/workflows/gates.yml
+    with:
+      scope: plugin

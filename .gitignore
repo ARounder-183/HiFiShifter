@@ -242,6 +242,15 @@ third_party/sdk/
 # 本地 SDK 镜像（scripts/setup/export-sdk-mirror.ps1 产物）：离网取源用的可拷贝缓存，同样不提交。
 third_party/sdk-mirror/
 
+# ── 模型权重 ──────────────────────────────────────────────────────────────
+# 权重（151.6 MB / 7 个文件）不再进仓库：它们让一次 checkout 就是 150 MB，而
+# 每个 CI job 都要 checkout 一次。现在只保留清单 models.json（1.5 KB），权重按
+# 内容派生的版本号从 release 资产取（scripts/setup/fetch-models.py，幂等）。
+# 版本号 = models.json 的 version = 所有文件 sha256 的汇总，因此"取错版本"在
+# 解压后的逐文件校验里必然暴露。
+backend/src-tauri/resources/models/*
+!backend/src-tauri/resources/models/models.json
+
 # 运行时模型只认 backend/src-tauri/resources/models/（解析路径从不查 third_party/，
 # 见 vocoder/hnsep_onnx.rs::resolve_model_path）。下面是曾经误入库的死重副本：
 # 本地留存、不再跟踪。来源与校验信息见各目录的 NOTICE / README。

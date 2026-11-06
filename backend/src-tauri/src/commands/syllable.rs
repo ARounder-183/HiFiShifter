@@ -5,9 +5,9 @@ use hifishifter_kernel::pitch_analysis::syllable::{
     estimate_syllable_spans, SyllableConfig, TakeSyllableAnalysis, SYLLABLE_ALGORITHM,
     SYLLABLE_ALGORITHM_VERSION,
 };
+use serde::Deserialize;
 use serde::Serialize;
 use tauri::State;
-use serde::Deserialize;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -161,8 +161,7 @@ pub(super) fn analyze_clip_syllables(
 
     // 采样率由现有缓存决定（44.1 kHz）；本函数不会重复解码。
     let (level, pitch) =
-        crate::pitch_clip::analyze_clip_for_syllables(&tl, &clip, &root, fp)
-            .unwrap_or_default();
+        crate::pitch_clip::analyze_clip_for_syllables(&tl, &clip, &root, fp).unwrap_or_default();
     let spans = if level.is_empty() {
         Vec::new()
     } else {
@@ -203,7 +202,13 @@ pub(super) fn analyze_clip_syllables(
 pub(super) fn get_param_block_merges(
     state: State<'_, AppState>,
     root_track_id: String,
-) -> Result<(Vec<ParamBlockMergeRecordPayload>, Vec<ParamBlockIntervalEditPayload>), String> {
+) -> Result<
+    (
+        Vec<ParamBlockMergeRecordPayload>,
+        Vec<ParamBlockIntervalEditPayload>,
+    ),
+    String,
+> {
     let tl = state
         .timeline
         .lock()

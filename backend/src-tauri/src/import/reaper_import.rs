@@ -180,7 +180,9 @@ fn take_geometry(
         play_rate_signed: take.play_rate.first().copied().unwrap_or(1.0),
         media_duration_sec,
         section,
-        reversed: is_reversed,
+        // 【为什么是 `Some`】App 的方向判据是 `play_rate < 0 || section_mode > 0`，
+        // 两个来源都在 `.rpp` 里读得到 —— 这一侧永远**知道**方向。
+        reversed: Some(is_reversed),
         loop_enabled: is_loop,
     }
 }
@@ -340,7 +342,11 @@ fn build_audio_clip_take(
     // 镜像读数"或"正放 Loop 锚点被钳到段末端"时出现，见
     // `hifishifter_kernel::take_geometry` 的边界测试。
     let window = take_geometry(take, item.length, duration_sec, item_reversed, item_loop)
-        .forward_source_window();
+        .forward_source_window()
+        // 【为什么这里可以 `expect`】.rpp 给出了方向，媒体时长来自**已解码的文件**
+        // （调用方保证），于是轴必然存在。这是本仓库里唯一"两个输入都在手"的路径 ——
+        // 它也因此是本方案的对拍基准。
+        .expect("an imported take always has a direction and a decoded media duration");
     let (source_start, source_end) = (window.start(), window.end());
 
     let name = if take.name.trim().is_empty() {
@@ -350,6 +356,7 @@ fn build_audio_clip_take(
     };
 
     crate::state::ClipTake {
+        content_id: None,
         id: new_clip_id().replace("clip_", "take_"),
         name,
         gain: convert_volume(take_linear_gain(item, take, take_volume_overridden)),
@@ -1057,6 +1064,7 @@ fn convert_reaper_data(
                 params_by_root_track.insert(
                     track.id.clone(),
                     TrackParamsState {
+                        pitch_assembly_partial: false,
                         frame_period_ms,
                         pitch_orig: Vec::new(),
                         pitch_edit: Vec::new(),
@@ -1065,6 +1073,7 @@ fn convert_reaper_data(
                         tension_orig: Vec::new(),
                         tension_edit: Vec::new(),
                         pitch_orig_key: None,
+                        pitch_layout_key: None,
                         pending_pitch_offset: Some(offset_frames),
                         dyn_orig: Vec::new(),
                         dyn_orig_key: None,
@@ -1398,6 +1407,8 @@ fn process_item(
             let clip_index = clips.len();
 
             clips.push(Clip {
+                content_id: None,
+                loop_period_sec: None,
                 takes: vec![],
                 active_take_id: None,
                 id: clip_id.clone(),
@@ -1539,7 +1550,8 @@ fn process_item(
         // （见 `take_geometry`），两条导入路径不可能再分叉。
         let effective_rate = play_rate;
         let window = take_geometry(take, item_length, duration_sec, item_reversed, item_loop)
-            .forward_source_window();
+            .forward_source_window()
+            .expect("an imported take always has a direction and a decoded media duration");
         let (source_start, source_end) = (window.start(), window.end());
         // 构造全部 take（default + 显式 TAKE 块），active take 由选择规则决定。
         let mut hs_takes: Vec<crate::state::ClipTake> = Vec::new();
@@ -1584,6 +1596,8 @@ fn process_item(
         let clip_start = item_pos + time_offset;
 
         let mut clip = Clip {
+            content_id: None,
+            loop_period_sec: None,
             takes: hs_takes,
             active_take_id,
             id: clip_id.clone(),
@@ -2236,6 +2250,8 @@ fn process_midi_item(
     };
 
     clips.push(Clip {
+        content_id: None,
+        loop_period_sec: None,
         takes: vec![],
         active_take_id: None,
         id: clip_id.clone(),
@@ -2379,8 +2395,9 @@ mod tests {
             ..ReaperTake::default()
         };
         let window = |item_length: f64, media: Option<f64>, reversed: bool, is_loop: bool| {
-            let window =
-                take_geometry(&take, item_length, media, reversed, is_loop).forward_source_window();
+            let window = take_geometry(&take, item_length, media, reversed, is_loop)
+                .forward_source_window()
+                .expect("the fixture always has a direction");
             (window.start(), window.end())
         };
 
@@ -2539,7 +2556,9 @@ mod tests {
             s_offs: 2.0,
             ..ReaperTake::default()
         };
-        let window = take_geometry(&take, 3.0, None, false, true).forward_source_window();
+        let window = take_geometry(&take, 3.0, None, false, true)
+            .forward_source_window()
+            .expect("forward takes need no axis");
         let (start, end) = (window.start(), window.end());
         assert!((start - 2.0).abs() < 1e-9);
         assert!((end - 5.0).abs() < 1e-9);

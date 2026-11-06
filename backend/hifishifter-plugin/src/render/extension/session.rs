@@ -419,6 +419,12 @@ impl ExtensionOwner {
                 // 【为什么清单失败只记日志】PCM 丢了不该让参数曲线也读不出来 ——
                 // 那是两件独立的用户资产，而参数是更贵的那一份。
                 Ok(value) => {
+                    if let Some(origin) = value["eventOriginSamples"].as_i64() {
+                        // 【组件 state 是“确认过”的事实】它可以覆盖一个暂定的
+                        // origin（复制/粘贴 Event FX 时旧值必须能被纠正）。
+                        // 它是否属于当前宿主读数由 HostClock 每块校验。
+                        self.note_event_origin(origin, 2);
+                    }
                     if let Err(error) = self.capture.restore_manifest(&value) {
                         log::warn!("[capture] manifest restore failed: {error}");
                     }
@@ -452,8 +458,9 @@ impl ExtensionOwner {
             .as_ref()
             .and_then(std::sync::Weak::upgrade)
             .is_some_and(|document| document.in_edit_session());
-        // 组件通道：这份载荷是**本实例**的存档，宿主用它做 undo / 复制轨 —— 恢复即权威。
-        restored.from_archive = false;
+        // 组件通道也是“外部载荷”：只有冷启动或编辑会话（undo/redo）才可覆盖。
+        // 重复的焦点切换/组件重交不能把旧数组盖到在线权威上。
+        restored.from_archive = true;
         // 【T-D5】同一份载荷已经合入过就别再排队：宿主重复交回同一份存档时（重开编辑器、
         // 撤销后重做、文档重建），重放只会重复劳动，并在失败时重新点燃"没读回来"。
         if Self::restore_digest(&restored).is_some_and(|digest| {
@@ -471,33 +478,6 @@ impl ExtensionOwner {
         Ok(())
     }
 
-    /// 暂存 ARA 存档恢复出来的编辑，交给本 owner 的既有合并路径。
-    ///
-    /// 【为什么不直接写 `document.edits`】合并要做身份重绑、冲突判定、`needs_rebind`
-    /// 处理 —— 这些都在 `merge_pending_restore` 里，而且已经过测试。存档通道只是另一个
-    /// 来源，走同一条路才不会出现两份会漂移的实现。
-    ///
-    /// 【为什么覆盖已有的 `pending_restore`】VST3 组件状态与 ARA 存档携带的是同一份
-    /// `EditState`。两者同时到达时后到的应当胜出（它是宿主更晚保存的那份）；而 ARA 存档
-    /// 在宿主重载工程时是权威来源。
-    ///
-    /// 【为什么这里**不**刷新文档】唯一的调用点是 `DocumentSession::prepare_renderers`，
-    /// 它已经持有 `transaction`，而刷新要取同一把不可重入的锁 —— 那就是用户报的
-    /// "重开工程宿主未响应"。合入由 `prepare_renderers` 紧随其后的
-    /// `merge_pending_restore` 循环完成，所以这里只负责**暂存**。
-    pub(crate) fn stash_archive_restore(&self, restored: crate::state_channel::EditState) {
-        // 【T-D5】与 `restore_state` 同一条纪律：已经合入过的同一份载荷不再重放。
-        if Self::restore_digest(&restored).is_some_and(|digest| {
-            *self.restore_applied_digest.lock_or_recover() == Some(digest)
-                && !self.has_pending_restore()
-        }) {
-            log::info!("[ara] archive payload unchanged since the last merge; not replaying it");
-            return;
-        }
-        *self.pending_restore.lock_or_recover() = Some(restored);
-        self.reset_restore_budget();
-        self.note_restore_pending();
-    }
     /// 新载荷到达 ⇒ 等待账从头开始（否则上一份载荷用完的 10 s 会立刻压到这一份上）。
     pub(super) fn reset_restore_budget(&self) {
         self.restore_attempts.store(0, Ordering::Relaxed);
@@ -638,6 +618,8 @@ impl ExtensionOwner {
                     }
                 } else {
                     self.note_restore_applied();
+                    // 存档通道的读数：合入发生的时刻（诊断包里回答"到底合进去了没有"）。
+                    document.note_archive_merged();
                     if let Some(digest) = pending_digest {
                         *self.restore_applied_digest.lock_or_recover() = Some(digest);
                     }
@@ -663,7 +645,7 @@ impl ExtensionOwner {
     /// （`state_channel` 不依赖本模块的错误类型），三条身份错误都带 `identity`：
     /// "ARA edit identity missing…" / "…missing or ambiguous in rebuilt host graph" /
     /// "ARA saved edit identities are ambiguous…"。其余错误（修订号耗尽）是真失败。
-    pub(super) fn classify_restore_identity_error(error: &str) -> RestoreIdentityVerdict {
+    pub(crate) fn classify_restore_identity_error(error: &str) -> RestoreIdentityVerdict {
         // 【为什么是 `identit` 而不是 `identity`】`state_channel` 的三条措辞分别是
         // "identity missing"、"identity missing or ambiguous" 与
         // **"identities are ambiguous"** —— 第三条是复数，用全词会漏掉它，
@@ -696,7 +678,7 @@ impl ExtensionOwner {
         let host = self.assigned_timeline(document)?;
         if host.tracks.is_empty() {
             // 空轨组件仍能恢复私有参数分组；不借零音频scope恢复其它轨的源曲线。
-            if saved.params.is_empty() && saved.tracks.is_empty() && saved.atlas.is_empty() {
+            if saved.params.is_empty() && saved.tracks.is_empty() && saved.authority.is_pristine() {
                 let mut edits = document.edits.lock_or_recover();
                 edits.groups = saved.groups.clone();
                 edits.revision = edits
@@ -709,120 +691,30 @@ impl ExtensionOwner {
             }
             return Ok(());
         }
+        // 【候选集只收本实例被分配的轨道】组件状态是**逐实例**的存档：它只带本实例
+        // 服务的那些轨。文档级存档走 `DocumentSession::merge_archive_restore`，
+        // 候选集是整份 `track_bindings` —— 两条通道的视野本来就不同。
         let allowed: BTreeSet<_> = host.tracks.iter().map(|t| t.id.clone()).collect();
-        let bindings = document
+        let bindings: crate::state_channel::TrackBindings = document
             .track_bindings
             .lock_or_recover()
             .iter()
             .filter(|(id, _)| allowed.contains(*id))
             .map(|(id, identity)| (id.clone(), identity.clone()))
             .collect();
-        let mut restored = saved.clone();
-        // 【T18：身份对不上是"还在等"，不是"失败"】
-        //
-        // `reconcile` 的契约是严格的：任何一条旧轨在新图里找不到唯一身份，它就返回
-        // `Err`（这条契约由 `restored_edits_refuse_ambiguous_empty_and_missing_host_identity`
-        // 等用例钉住，本轮**不动**它 —— 猜测归属会把参数挂到别人的轨道上）。
-        //
-        // 但"对不上"有两种成因，处置相反：
-        //   * 存档坏了 / 身份本身为空 —— 真失败，报 `failed`；
-        //   * 宿主**这一次**的图还没长成（重开工程时 region 尚未交付、轨道还在重建）——
-        //     该继续等，报 `pending` 并说明在等什么。
-        // 此前两者都走 `?` ⇒ `note_restore_failed` ⇒ 界面显示"没能读回参数"，而实际
-        // 上再等一轮（或用户在宿主里做一次编辑）就好了。
-        if let Err(error) = restored.reconcile(&bindings) {
-            match Self::classify_restore_identity_error(&error) {
-                RestoreIdentityVerdict::AwaitingHostGraph => {
-                    self.note_restore_waiting(&format!("host-graph-not-rebuilt: {error}"));
-                    return Ok(());
-                }
-                RestoreIdentityVerdict::Fatal => return Err(error),
+        // 【合入的核心已经搬到文档上】`DocumentSession::merge_restore_locked` 是
+        // **文档级**存档与**逐实例**组件状态共用的那一份实现 —— 两份实现迟早会漂移，
+        // 而"漂移"在这里的代价正是"重开工程后参数没读回来"。
+        match document.merge_restore_locked(saved, &host, &bindings)? {
+            super::document::RestoreMerge::Merged => {
+                *pending = None;
+                Ok(())
+            }
+            super::document::RestoreMerge::Waiting(reason) => {
+                self.note_restore_waiting(&reason);
+                Ok(())
             }
         }
-        restored.atlas.migrate_legacy_gaps(&restored.params)?;
-        let mut changed_geometry = false;
-        if !restored.atlas.is_empty() {
-            let rebound = restored
-                .atlas
-                .rebind(&host, &document.parameter_identities_locked(&host)?)?;
-            changed_geometry = !restored.atlas.same_layout(&rebound);
-            restored.atlas = rebound;
-        }
-        let mut client = host.clone();
-        restored.apply(&mut client);
-        if changed_geometry {
-            crate::editor::parameter_atlas::merge_root_projection(
-                &mut client.params_by_root_track,
-                restored
-                    .atlas
-                    .project_root_records(&host, &document.parameter_identities_locked(&host)?)?,
-            );
-        } else if restored.atlas.is_empty() && !restored.params.is_empty() {
-            // 旧v2只有项目帧：在首次真实绑定的宿主布局建立source basis，随后移动/拉伸沿此迁移。
-            // 不猜旧会话key/名字，也不能回推旧状态未保存的、首次加载前已改变的布局。
-            restored.atlas = crate::editor::parameter_atlas::ParameterAtlas::default()
-                .capture(&client, &document.parameter_identities_locked(&host)?)?;
-        }
-        let mut edits = document.edits.lock_or_recover();
-        let mut merged = edits.merge(&host, &client, edits.revision)?;
-        merged.groups = restored.groups.clone();
-        let clip_ids = host
-            .clips
-            .iter()
-            .map(|clip| clip.id.clone())
-            .collect::<BTreeSet<_>>();
-        // 【G5：权威侧合并分两种，不能一律覆盖】
-        //
-        // 旧规则是"恢复的那一份更权威"，理由写得很直白 —— 它只在**重开工程**时成立
-        // （在线状态是空的）。而切屏重载 take 时交回来的载荷携带的是**更旧**的参数，
-        // 那时"恢复的更权威"就等于"回退"。
-        //
-        // 三种情况分开处置：
-        //   * 在线状态是**空的**（冷启动）⇒ 整份装上。没有别的数据源。
-        //   * 载荷到达时我们正处在**一次编辑会话**里 ⇒ 覆盖。撤销/重做在 ARA 里就是
-        //     一次还原会话（`ARAInterface.h:2938-2943`），undo 必须生效。
-        //   * 其余（宿主交回一份旧载荷）⇒ **按键补缺**：只补在线状态里没有的键。
-        let authoritative = !restored.from_archive
-            || edits.is_pristine()
-            || restored.arrived_in_edit_session
-            || document.authoritative_restore();
-        let mut kept_live = 0_usize;
-        for (key, params) in restored.atlas.authorities.clone() {
-            if authoritative || !merged.atlas.authorities.contains_key(&key) {
-                merged.atlas.set_authority(&key, params);
-            } else {
-                kept_live += 1;
-            }
-        }
-        if kept_live > 0 {
-            log::info!(
-                "[ara] restore kept {kept_live} live parameter set(s); the payload carries older \
-                 values for them and the live state is newer"
-            );
-        }
-        merged.atlas.regions.retain(|id, _| !clip_ids.contains(id));
-        merged.atlas.regions.extend(restored.atlas.regions);
-        merged
-            .atlas
-            .copy_seeds
-            .retain(|_, seed| !allowed.contains(&seed.root));
-        merged.atlas.copy_seeds.extend(restored.atlas.copy_seeds);
-        merged.atlas.gaps.retain(|root, _| !allowed.contains(root));
-        merged.atlas.gaps.extend(restored.atlas.gaps);
-        let items = document.fade_items_locked(&clip_ids);
-        if !merged.fades.is_empty() && items.is_empty() && !clip_ids.is_empty() {
-            // 【为什么是 pending 而不是失败】fade 归属元数据要等宿主几何刷新后
-            // 才能算出来；这是一次可重试的暂缓，不是身份冲突。保留载荷，下一次
-            // `prepare_renderers` / 分配变化会再试。
-            self.note_restore_waiting("fade-metadata-pending");
-            return Ok(());
-        }
-        merged.fades.retain(|item, _| !items.contains(item));
-        merged.fades.extend(restored.fades);
-        merged.reconcile(&document.track_bindings.lock_or_recover())?;
-        *edits = merged;
-        *pending = None;
-        Ok(())
     }
 
     /// 保存前重新核对完整宿主图；歧义或中间编辑态不能伪装成可恢复的state。
@@ -888,32 +780,13 @@ impl ExtensionOwner {
                         .iter()
                         .map(|clip| clip.id.clone())
                         .collect::<BTreeSet<_>>();
-                    local.atlas.regions.retain(|id, _| clips.contains(id));
-                    // 权威表必须按**同一口径**裁剪：键从已裁剪的 regions 派生 —— 那正是本组件
-                    // 真实持有的片段身份。不裁剪会让一个组件把另一个组件的参数写进自己的存档
-                    // （两个组件共享同一 source/modification 身份时尤其明显）。
-                    let allowed_authorities = local
-                        .atlas
-                        .regions
-                        .values()
-                        .filter_map(|record| {
-                            crate::editor::parameter_atlas::authority_key(
-                                record.identity.item.as_deref(),
-                                &record.identity.modification,
-                            )
-                        })
-                        .collect::<BTreeSet<_>>();
-                    local
-                        .atlas
-                        .authorities
-                        .retain(|key, _| allowed_authorities.contains(key));
-                    local
-                        .atlas
-                        .copy_seeds
-                        .retain(|_, seed| allowed.contains(&seed.root));
-                    local.atlas.gaps.retain(|root, _| allowed.contains(root));
-                    // 音节缓存按 Clip 身份裁剪；与 atlas.regions 同一口径，避免
-                    // 一个组件把别的组件 / 已删除片段的缓存写进自己的存档。
+                    // 【曲线按**根轨**裁剪】权威是 root 作用域的：一个组件只服务它被分配
+                    // 的那些轨，所以只保留这些根上的 run。不裁剪会让一个组件把另一个组件
+                    // 的参数写进自己的存档（两个组件共享同一 source/modification 身份时
+                    // 尤其明显）。
+                    local.authority.retain_roots(&allowed);
+                    // 音节缓存按 Clip 身份裁剪：它真实持有的片段就是本组件保存时
+                    // 可见的 clip 集，与 authority 的 root 作用域互相独立。
                     local.prune_take_syllable_clips(&clips);
                     if !local.fades.is_empty() {
                         let items = document.fade_items_locked(&clips);
@@ -934,6 +807,17 @@ impl ExtensionOwner {
                         "[ara] assigned timeline unavailable during save: {error}; saving the \
                          full state"
                     );
+                }
+            }
+            // 存档携带分析基线缓存：它不是编辑真相，但冷恢复渲染需要“原始值”
+            // 才能计算用户曲线相对源音高的偏移。authority 仍只存显式编辑。
+            for (root, base) in document.baseline_snapshot() {
+                if let Some(params) = local.params.get_mut(&root) {
+                    params.pitch_orig = base.pitch_orig;
+                    params.dyn_orig = base.dyn_orig;
+                    params.tension_orig = base.tension_orig;
+                    params.pitch_orig_key = base.pitch_key;
+                    params.dyn_orig_key = base.dyn_key;
                 }
             }
             match local.encode() {
@@ -1034,10 +918,17 @@ impl ExtensionOwner {
         edits: Vec<u8>,
         capture_edits: Option<Vec<u8>>,
     ) -> Result<Vec<u8>, String> {
-        let capture = self.capture.manifest();
+        let mut capture = self.capture.manifest();
+        // 事件起点是实例级事实，必须随组件 state 持久化：宿主下一次只报绝对域时，
+        // 插件仍能把它映射回事件本地时间轴。
+        if let Some(origin) = self.event_origin_samples() {
+            capture["eventOriginSamples"] = serde_json::json!(origin);
+        }
         let has_takes = capture["takes"]
             .as_array()
             .is_some_and(|takes| !takes.is_empty());
+        // 事件起点即使还没有 take 也要持久化：下一次播放宿主可能只报绝对域。
+        let has_capture_meta = has_takes || self.event_origin_samples().is_some();
         // 【为什么没有 Capture 数据时返回**裸** `EditState` 字节】两重理由：
         //
         // 1. 那些实例没有任何额外信息要存，套一层容器纯是开销；
@@ -1048,12 +939,12 @@ impl ExtensionOwner {
         // 于是格式变成"有 Capture 数据才是容器，否则是历史格式"，而 `decode`
         // 两种都认。这条不对称是有意的：新信息需要新格式，旧信息不需要。
         let capture_edits = capture_edits.filter(|bytes| !bytes.is_empty());
-        if !has_takes && capture_edits.is_none() {
+        if !has_capture_meta && capture_edits.is_none() {
             return Ok(edits);
         }
         Ok(crate::component_state::ComponentState {
             edits,
-            capture: has_takes.then(|| capture.to_string().into_bytes()),
+            capture: has_capture_meta.then(|| capture.to_string().into_bytes()),
             capture_edits,
         }
         .encode())

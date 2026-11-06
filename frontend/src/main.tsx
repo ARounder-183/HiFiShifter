@@ -28,7 +28,7 @@ if (import.meta.env.DEV && new URLSearchParams(window.location.search).has("mock
 // 写入是去抖的：关窗前的最后一次变更必须在 `pagehide` 补交。
 installUiStorageFlushHooks();
 
-// 偏好就位（后端不可用时静默降级为本机缓存），此后加载的应用模块才能读到正确的值。
+// 偏好就位（后端不可用时静默降级为本地缓存），此后加载的应用模块才能读到正确的值。
 await hydrateUiStorage();
 
 const { mountApp } = await import("./mount");

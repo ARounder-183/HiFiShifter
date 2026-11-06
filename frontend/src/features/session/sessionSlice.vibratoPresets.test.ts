@@ -138,7 +138,7 @@ test("features/session/sessionSlice.vibratoPresets.test.ts vibrato preset reduce
 /**
  * 停用名单：切换、循环切换跳过、删除时清理。
  *
- * 停用只影响"本机怎么挑预设"（工具栏列表 + 拖拽中循环切换），不影响活动预设本身。
+ * 停用只影响"本地怎么挑预设"（工具栏列表 + 拖拽中循环切换），不影响活动预设本身。
  */
 test("features/session/sessionSlice.vibratoPresets.test.ts disabled preset ids", () => {
     function assertEqual(actual: unknown, expected: unknown, label: string): void {
@@ -208,7 +208,7 @@ test("features/session/sessionSlice.vibratoPresets.test.ts builtin preset order"
  * 「摆放方式」是**设置**，不是预设字段。
  *
  * 【为什么单独钉】它决定"添加颤音时颤音围绕哪条线摆"，与具体预设无关：用户先定摆放
- * 方式、再挑预设，换预设不该把它换掉。因此它只存在设置里（本机记忆），下次打开
+ * 方式、再挑预设，换预设不该把它换掉。因此它只存在设置里（本地记忆），下次打开
  * 「添加颤音」还是上次选的那个。
  */
 test("features/session/sessionSlice.vibratoPresets.test.ts vibrato baseline setting", () => {

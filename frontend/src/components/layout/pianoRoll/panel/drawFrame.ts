@@ -14,7 +14,7 @@ import { drawPianoRoll } from "../render";
 import type { MainCanvasSignature } from "../mainCanvasSignature";
 import { isDynParam } from "../paramRanges";
 import { createTimelineAxis } from "../../renderKernel/timelineAxis.js";
-import { getCaptureBands } from "../../../../features/capture/captureRange";
+import { getCaptureBandsAt } from "../../../../features/capture/captureRange";
 import { resolvePanelRenderViewport } from "../kernel/viewportSource";
 import { resolvePlayheadRgba } from "./panelHelpers";
 import type { ModelDeps } from "./modelDeps";
@@ -168,7 +168,10 @@ export function drawPianoRollFrame(deps: DrawFrameDeps): void {
         // 而带子只需要内核在帧提交里读到最新值（见下方的 subscribeCapture）。
         // 【为什么取 .bands】捕获可能是多段（跳播再继续录），并集会把中间没录到的
         // 部分也画成"已录"。见 `features/capture/captureRange`。
-        captureBands: getCaptureBands()?.bands ?? null,
+        // 【为什么要读视觉播放头】快照是 5 Hz 的，而这里是逐帧绘制。只按快照画，
+        // 带子每 200 ms 往前跳一格 —— 用户说的"捕获带一顿一顿"就是它。时间轴那条
+        // 早就接了视觉值，参数编辑器这条一直没接，同一个量于是走成两种节奏。
+        captureBands: getCaptureBandsAt(visualPlayheadSecRef.current)?.bands ?? null,
     };
     // 选区块镜像（每帧刷新）：选区是**拍**为单位，宿主只认秒，因此这里先换算。
     // 空选区时喂 null，宿主据此清空本帧的实例（否则旧带子会留在画布上）。

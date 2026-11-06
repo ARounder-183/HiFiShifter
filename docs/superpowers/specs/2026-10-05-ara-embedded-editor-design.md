@@ -4,7 +4,7 @@
 以下stretch/fades未支持与30秒边界是先导历史，不再作为整goal完成范围。
 
 中文设计，2026-10-05。用户授权按建议持续实施、不逐步询问，并要求测试集中到最后。
-工作树`E:/code/HiFiShifter/.worktrees/ara-plugin`，分支`codex/ara-plugin`。
+工作树`主仓库的 .worktrees/ara-plugin`，分支`codex/ara-plugin`。
 
 ## 目标与完成定义
 
@@ -75,7 +75,7 @@ UI只取有界波形/参数。命令侧类型校验、宿主来源校验、预�
 
 bundle自带frontend资产，以固定虚拟HTTPS域映射只读资源目录；禁止远端导航、弹窗
 与非授权资源，IPC只接受固定本地origin消息。WebView数据目录单独按插件实例隔离，
-不复用本机发生0x800700AA的独立app profile；不删除用户profile、不改系统安全设置。
+不复用本地出现过 0x800700AA 的独立 app profile；不删除用户profile、不改系统安全设置。
 
 ## 共享编辑命令与原GUI
 
@@ -105,7 +105,7 @@ bundle自带frontend资产，以固定虚拟HTTPS域映射只读资源目录；�
 
 规范Windows VST3 bundle含x86_64-win模块、frontend资产和必要依赖；不依赖REAPER
 CWD/系统PATH，launcher只能用于隔离采集，不能替代发行部署。动态加载邻接依赖，
-插件目录由当前模块路径解析，不用主仓库或开发机绝对路径。
+插件目录由当前模块路径解析，不用主仓库或某台机器的绝对路径。
 
 最终一次集中执行：共享editor/app/frontend/plugin测试、build、依赖树与native ABI；
 修发现后只定向重测。真实REAPER打开内嵌原GUI，拖尺寸、画pitch、自动应用、导出

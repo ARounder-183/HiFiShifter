@@ -146,13 +146,16 @@ struct X11Owner {
 /// 服务线程退出（X 连接断开）时把槽位清空，下一次 `x11_owner()` 重建上下文
 /// 与线程 —— 否则 OnceLock 里留着一条死线程的残骸，此后的每次剪贴板写入都
 /// 静默无人服务。
-static X11_OWNER: OnceLock<Mutex<Option<X11Owner>>> = OnceLock::new();
+// 【为什么槽位里是 Arc】服务线程自己也持有这个槽位的引用（见 `x11_serve`），
+// 调用方拿到的必须是与槽位共享同一份上下文的句柄 —— 存裸值就只能 clone 出一份
+// 各自独立的 owner，写入方与服务线程看到的不是同一个对象。
+static X11_OWNER: OnceLock<Mutex<Option<Arc<X11Owner>>>> = OnceLock::new();
 
 fn x11_owner() -> Result<Arc<X11Owner>, String> {
     let slot = X11_OWNER.get_or_init(|| Mutex::new(None));
     // 【为什么在整个初始化期间持锁】并发的第二个调用者会等待而不是各建一套
     // （旧实现两个线程同时初始化时，输家多出一条永不退出的服务线程与一个
-    /// 无人收割的 X 连接 —— 一次性泄漏）。
+    // 无人收割的 X 连接 —— 一次性泄漏）。
     let mut guard = slot
         .lock()
         .map_err(|_| "clipboard_x11_lock_failed".to_string())?;
@@ -227,7 +230,7 @@ fn x11_serve(
     context: Arc<X11Context>,
     entries: Arc<RwLock<Vec<ClipboardEntry>>>,
     refresh: Receiver<()>,
-    owner_slot: &'static Mutex<Option<X11Owner>>,
+    owner_slot: &'static Mutex<Option<Arc<X11Owner>>>,
 ) {
     // 【为什么按 (requestor, property) 键控】只按 property atom 键控时，两个
     // 粘贴方用同名 property（如都叫 XCLIP_OUT）会互相覆盖 —— 后到的把先到的

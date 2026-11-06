@@ -778,7 +778,7 @@ export function useVibratoDialogModel({
     /**
      * 启用 / 停用一条预设。
      *
-     * 只影响本机的工具栏列表与拖拽中的循环切换 —— 预设本身、以及"当前使用"的
+     * 只影响本地的工具栏列表与拖拽中的循环切换 —— 预设本身、以及"当前使用"的
      * 选择都不受影响，因此不需要动活动预设。
      */
     function togglePresetEnabled(preset: VibratoPreset) {

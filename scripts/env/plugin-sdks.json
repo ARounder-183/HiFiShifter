@@ -48,5 +48,12 @@
         "tag": "2.3.3",
         "commit": "e83424d5928ab8513d2d082779c275765dee31b9",
         "_comment": "Pin for the LGPL-2.1 time-stretch library cloned by hifishifter-kernel/build.rs (tag 2.3.3 is a mutable reference; the build verifies HEAD against this commit after cloning). commit = refs/tags/2.3.3 peeled. Keep ASCII only: PowerShell 5.1 reads this file as ANSI when it has no BOM."
+    },
+    "clap": {
+        "repository": "https://github.com/free-audio/clap.git",
+        "ref": "1.1.9",
+        "commit": "094bb76c85366a13cc6c49292226d8608d6ae50c",
+        "tree": "4b56d7267e846fbe2a420370ea4f88f3ca7869b3",
+        "_comment": "CLAP 1.1.9 headers are consumed by the CLAP cdylib; no C/C++ compilation is needed."
     }
 }

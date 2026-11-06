@@ -36,11 +36,15 @@ pub(crate) fn handle(
             if owner.is_ara_bound() {
                 return Err("capture_not_applicable_ara".into());
             }
+            owner.end_processing_pass();
             capture.start()?;
+            owner.reset_transport_session("capture_start");
             Ok(status_json(owner))
         }
         "capture_stop" => {
             let take = capture.stop()?;
+            owner.end_processing_pass();
+            owner.reset_transport_session("capture_stop");
             // 录完立刻重投影并排一次合成：用户按下停止之后期待听到处理结果，而不是等
             // 下一次某个不相关的动作把它带起来。
             owner.request_capture_reload();
@@ -48,10 +52,14 @@ pub(crate) fn handle(
         }
         "capture_cancel" => {
             capture.cancel();
+            owner.end_processing_pass();
+            owner.reset_transport_session("capture_cancel");
             Ok(status_json(owner))
         }
         "capture_clear" => {
             capture.clear();
+            owner.end_processing_pass();
+            owner.reset_transport_session("capture_clear");
             // 时间线要跟着变空（否则界面还留着已经删掉的片段）。
             owner.request_capture_reload();
             Ok(status_json(owner))
@@ -118,6 +126,7 @@ fn status_json(owner: &Arc<ExtensionOwner>) -> Value {
             "startFrame": capture.start_frame,
             "endFrame": capture.end_frame,
             "positionFrame": capture.position_frame,
+            "blockFrames": capture.block_frames,
             "sampleRate": capture.sample_rate,
             "runs": runs,
         })
@@ -148,7 +157,7 @@ fn status_json(owner: &Arc<ExtensionOwner>) -> Value {
             })
         })
         .collect::<Vec<_>>();
-    // 【为什么把"清单里有、本机没有"的音频发出来】工程被拷到另一台机器时 sidecar
+    // 【为什么把"清单里有、本地没有"的音频发出来】工程被拷到另一台机器时 sidecar
     // 不会跟过去；界面必须能说清"丢了哪几段、共多久"，而不是只留一条日志。
     let missing = owner
         .capture()
@@ -171,6 +180,7 @@ fn status_json(owner: &Arc<ExtensionOwner>) -> Value {
         .collect::<Vec<_>>();
     json!({
         "state": status.state,
+        "phase": status.phase,
         "missingTakes": missing,
         // 【为什么"待命"是一个独立读数】武装之后、宿主播放之前，素材一定还是零 —— 而那
         // 与"正在录"是两种不同的等待：前者等用户去按播放，后者在积累素材。前端据此

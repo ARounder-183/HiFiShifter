@@ -1,10 +1,14 @@
 //! 独立app与插件共享的原编辑命令；平台只适配undo、dirty与音频发布副作用。
+pub mod assembly;
 pub mod capabilities;
 pub mod history;
 pub mod host;
 pub mod host_pcm;
 pub mod host_timeline;
 pub mod midi_import;
+pub mod param_authority;
+pub mod param_edit;
+pub mod param_geometry;
 pub mod params;
 pub mod selection;
 pub mod settings;
@@ -21,6 +25,25 @@ pub struct ConvertRange {
     pub frame_count: u32,
 }
 
+/// 一次参数写入的**显式意图**：范围来自命令本身，不依赖旧几何的整份数组差分。
+///
+/// ARA 插件用它把"用户确实写了哪几帧"记进会话；独立 App 可以忽略（默认 no-op）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ParamEditIntent {
+    SetFrames {
+        track_id: String,
+        param: String,
+        start_frame: usize,
+        frame_count: usize,
+    },
+    RestoreFrames {
+        track_id: String,
+        param: String,
+        start_frame: usize,
+        frame_count: usize,
+    },
+}
+
 /// 原参数命令所需的最小运行时边界；不包含Tauri、窗口或设备句柄。
 pub trait ParamHost {
     fn timeline(&self) -> &Mutex<TimelineState>;
@@ -29,6 +52,61 @@ pub trait ParamHost {
     fn mark_dirty(&self);
     /// 独立app更新设备快照；插件只排后台自动渲染，不能在这里跑设备/推理。
     fn publish_timeline(&self, timeline: TimelineState);
+    /// 记录一笔显式参数写入意图；默认实现供独立 App 忽略。
+    fn note_param_edit(&self, _intent: ParamEditIntent) {}
+
+    /// 参数权威是否在时间线**之外**（ARA 插件），而不是时间线本身（独立 App / Capture）。
+    ///
+    /// 【为什么需要一条显式能力位】导入类命令要在"写权威"与"写时间线数组"之间二选一，
+    /// 而两条路的**撤销点**压在不同地方（权威的撤销点要再取一次时间线锁，因此不能在
+    /// 持锁时压）。没有这条判据就只能先试写一次 —— 那会在失败时留下一个不该有的撤销步。
+    fn uses_param_authority(&self) -> bool {
+        false
+    }
+
+    /// 插件权威读入口。返回 Some 时内核不再读/写整条显示数组。
+    ///
+    /// 独立 App 保持 None，走原有 project-frame 数组语义；ARA 插件实现这一组方法。
+    fn read_authority_frames(
+        &self,
+        _track_id: &str,
+        _param: &str,
+        _start_frame: u32,
+        _frame_count: u32,
+        _stride: Option<u32>,
+        _with_sentinel: Option<bool>,
+        _binary: Option<bool>,
+    ) -> Option<Result<crate::models::ParamFramesPayload, String>> {
+        None
+    }
+
+    fn write_authority_frames(
+        &self,
+        _track_id: &str,
+        _param: &str,
+        _start_frame: u32,
+        _values: &[f32],
+        _present: Option<&[bool]>,
+        _checkpoint: bool,
+    ) -> Option<Result<serde_json::Value, String>> {
+        None
+    }
+
+    fn restore_authority_frames(
+        &self,
+        _track_id: &str,
+        _param: &str,
+        _start_frame: u32,
+        _frame_count: u32,
+        _checkpoint: bool,
+    ) -> Option<Result<serde_json::Value, String>> {
+        None
+    }
+
+    /// 当前权威 revision（插件用于在 UI 载荷里给前端水位）。
+    fn authority_revision(&self) -> u64 {
+        0
+    }
 }
 
 #[cfg(test)]

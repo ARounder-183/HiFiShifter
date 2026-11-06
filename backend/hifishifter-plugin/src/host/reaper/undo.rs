@@ -54,6 +54,10 @@ impl HostUndo {
         host: &Arc<NativeHost>,
         authorized: &impl Fn() -> bool,
     ) -> Result<(), String> {
+        // 【先把上一个块在别的线程上排下的"结束请求"兑现】那些块是 `Drop` 在非宿主
+        // 线程上排队的（见 `HostUndoBlock::drop`）。这里正是"马上要开新块"的时刻：
+        // 不先关掉它们，宿主会把新编辑并进那个还开着的块里。
+        host.drain_undo_ends();
         if checkpoint {
             self.finish_if_idle(false);
         }
@@ -80,6 +84,17 @@ impl HostUndo {
             let block = host.begin_project_undo(authorized);
             let mut state = self.state.lock_or_recover();
             state.starting = false;
+            // 【与 `close()` 的竞争必须在这里收口】`begin_project_undo` 会投递到宿主
+            // 线程并原地等它 —— 这段时间里 `close()` 完全可能跑完（它会把
+            // `closing` 置真并收尾所有在途请求）。旧实现拿到锁之后直接
+            // `state.block = Some(block)`，于是块被装回一个**已经收尾过**的状态里，
+            // 再也没有任何路径会去关它 ⇒ 宿主 Undo 块永久开着。
+            if state.closing {
+                drop(state);
+                // 丢掉这个块会跑 `HostUndoBlock::drop`，它负责真的把块结束掉。
+                drop(block);
+                return Err("host undo closed while a block was starting".into());
+            }
             match block {
                 Ok(block) => state.block = Some(block),
                 Err(error) => {

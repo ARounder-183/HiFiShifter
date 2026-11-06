@@ -24,12 +24,24 @@ fn main() {
     #[cfg(target_os = "linux")]
     sanitize_gtk_modules_for_appimage();
 
+    // ── 用户级目录的一次性布局迁移 ──────────────────────────────────────
+    //
+    // 【为什么必须在日志初始化之前】`init_logging` 会创建
+    // `%LOCALAPPDATA%\HiFiShifter\logs` 并立刻写文件。迁移的判据是"新旧根同时存在
+    // 就绝不合并"，所以日志目录一旦先被建出来，旧日志目录就会被判成冲突、永久
+    // 搬不过来。这是整个启动链上唯一能保证顺序的位置。
+    let layout = backend_lib::app_paths_migrate::ensure_layout_v2();
+
     let args: Vec<String> = std::env::args().collect();
 
     // 日志初始化（stderr logger + panic hook + stderr→文件 tee）：
     // `--log-file=<path>` 指定文件，`--log-file=-` 显式关闭，
     // 缺省写入平台标准日志目录（详见 logging 模块文档）。
     backend_lib::logging::init_logging(backend_lib::logging::choice_from_args(&args));
+
+    // 迁移发生在日志初始化之前，结局必须在这里补记（否则那段时间里发生的事
+    // 在日志里完全不可见 —— 迁移恰恰是"用户数据动了位置"的大事）。
+    layout.log_summary("app");
 
     // CLI diagnostics: `HiFiShifter --benchmark` runs the inference-device
     // benchmark and prints the JSON result, then exits.  Useful for

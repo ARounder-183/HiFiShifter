@@ -131,6 +131,7 @@ fn import_finished_recording(
         Some(target_track_id.clone()),
         Some(start_sec),
         channel_decision,
+        None,
     );
 
     let settings = recording::load_settings(state);

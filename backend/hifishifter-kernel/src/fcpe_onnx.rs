@@ -234,6 +234,10 @@ pub fn update_ort_ep(_choice: &str, _device_id: Option<i32>) {
         }
     }
     // 异步预热：立即在后台用新 EP 重建会话，把秒级构建移出 pitch 分析热路径。
+    // 【测试进程不能留游离构建线程】见 `async_session_prewarm_enabled`。
+    if !crate::vocoder_ort_session::async_session_prewarm_enabled() {
+        return;
+    }
     std::thread::Builder::new()
         .name("ort-session-prewarm-fcpe".into())
         .spawn(|| {

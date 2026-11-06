@@ -537,6 +537,15 @@ pub struct ParamFramesPayload {
     pub start_frame: u32,
     pub orig: Vec<f32>,
     pub edit: Vec<f32>,
+    /// 与 `orig`/`edit` 逐帧对齐的显式编辑位图（PFB2/JSON 都携带）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edited: Vec<bool>,
+    #[serde(default)]
+    pub authority_revision: u64,
+    #[serde(default)]
+    pub baseline_revision: u64,
+    #[serde(default)]
+    pub geometry_revision: u64,
     /// 二进制编码的曲线数据（请求带 `binary=true` 时返回）。
     ///
     /// 协议见 `commands/params.rs::encode_param_frames_binary`，与前端

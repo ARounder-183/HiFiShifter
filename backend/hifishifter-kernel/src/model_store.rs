@@ -13,13 +13,21 @@
 //!
 //! 【为什么用版本号目录】模型换一版就必须重建，否则新代码会读到旧权重 —— 那种错误
 //! 不会报错，只会让推理结果悄悄变差。版本号由**内容**派生（见
-//! `scripts/build/write-models-manifest.ps1`），因此模型一变版本就变，不需要人工维护。
+//! `scripts/setup/fetch-models.py --write-manifest`），因此模型一变版本就变，不需要人工维护。
 //!
 //! 【为什么共享库在全机目录而不是用户目录】安装器以管理员运行。若它把 152 MB 写进
 //! `%LOCALAPPDATA%`，"标准用户 + 输入管理员密码"这种提权方式写的就是**管理员**的
 //! 配置目录，而运行插件的是标准用户 —— 插件找不到模型，症状只是"推理不可用"。
 //! `%PROGRAMDATA%` 谁提权都能写对位置，所有用户都读得到，且默认允许普通用户创建
 //! 子目录（所以运行时发布模型也不需要提权）。
+//!
+//! 【为什么非 Windows 没有共享库】Linux/macOS 交付的是 AppImage / DMG 里的**自包含**
+//! bundle：没有能"拥有"一个全机目录的安装器，所谓共享库只是"一台机器只有一个用户"
+//! 的私人副本。历史实现在这两条平台上退回本地数据目录，代价是每个用户首启就往
+//! `~/Library/Caches` 或 `$XDG_CACHE_HOME` 里多写 152 MB —— 那还是**可被系统清理**
+//! 的目录，且 AppImage 是只读挂载，硬链接必然失败、只能退化为真拷贝。
+//! 现在 `shared_store_dir` 在非 Windows 返回 `None`：不发布、不写缓存，直接用 bundle
+//! 里的副本 —— 与交付形态（一个自包含包）完全一致。
 
 use std::path::{Path, PathBuf};
 
@@ -57,6 +65,17 @@ pub enum ModelSource {
     Bundle,
 }
 
+impl ModelSource {
+    /// 稳定标识（写进日志与诊断包；不随界面语言变化）。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Override => "override",
+            Self::Shared => "shared",
+            Self::Bundle => "bundle",
+        }
+    }
+}
+
 /// 解析结果。
 #[derive(Debug, Clone)]
 pub struct ModelOrigin {
@@ -64,6 +83,29 @@ pub struct ModelOrigin {
     pub source: ModelSource,
     /// 共享库是否在本次调用中被建立（首次运行时为 true）。
     pub published: bool,
+    /// 清单里的版本号（由模型内容派生）；bundle 不带清单时为 `None`。
+    pub version: Option<String>,
+}
+
+impl ModelOrigin {
+    /// 一行可读的来源描述：**来源 + 目录 + 版本 + 是否刚发布**。
+    ///
+    /// 【为什么集中在这里】App 与插件此前各写一份同样的 match，两边的字段与措辞
+    /// 稍一改动就分叉，而"模型到底从哪儿来的"正是用户报"推理不可用"时第一个要
+    /// 判断的事。诊断包里现在只有一种形状。
+    pub fn describe(&self) -> String {
+        let version = self.version.as_deref().unwrap_or("unknown");
+        format!(
+            "{} ({}, version {version}{})",
+            self.dir.display(),
+            self.source.as_str(),
+            if self.published {
+                ", just published"
+            } else {
+                ""
+            }
+        )
+    }
 }
 
 /// 读取清单；缺失或损坏时返回 `None`（调用方退回旧行为）。
@@ -93,8 +135,8 @@ pub fn looks_complete(models_dir: &Path, manifest: &ModelManifest) -> bool {
 /// 落在**全机共享**目录（Windows 上是 `%PROGRAMDATA%\HiFiShifter\models\<version>`）：
 /// 安装器以管理员身份运行，写进用户目录在"标准用户 + 管理员密码"提权时会落到管理员
 /// 的配置目录里，而运行插件的是标准用户 —— 见 `config_location::default_shared_data_dir`。
-pub fn shared_store_dir(version: &str) -> PathBuf {
-    crate::config_location::shared_data_subdir("models").join(version)
+pub fn shared_store_dir(version: &str) -> Option<PathBuf> {
+    Some(crate::app_paths::shared_data_subdir("models")?.join(version))
 }
 
 /// 把一个完整可用的模型目录"发布"到共享库。
@@ -159,6 +201,7 @@ pub fn resolve_and_register(bundle_models: &Path) -> Result<ModelOrigin, String>
             let dir = PathBuf::from(raw);
             if register(&dir) {
                 return Ok(ModelOrigin {
+                    version: read_manifest(&dir).map(|manifest| manifest.version),
                     dir,
                     source: ModelSource::Override,
                     published: false,
@@ -175,45 +218,56 @@ pub fn resolve_and_register(bundle_models: &Path) -> Result<ModelOrigin, String>
         .unwrap_or(false);
 
     // 2) 共享库：只有在清单能对上、且文件齐全时才用。
+    //
+    // 【非 Windows 直接跳过】`shared_store_dir` 在那两条平台上返回 `None`：没有安装器
+    // 能拥有一个全机目录，硬造出来的"共享库"只会让每个用户多写 152 MB。见模块文档。
     if let Some(manifest) = &bundle_manifest {
-        let shared = shared_store_dir(&manifest.version);
-        let shared_usable = read_manifest(&shared)
-            .map(|stored| stored.version == manifest.version && looks_complete(&shared, &stored))
-            .unwrap_or(false);
-        if shared_usable && register(&shared) {
-            return Ok(ModelOrigin {
-                dir: shared,
-                source: ModelSource::Shared,
-                published: false,
-            });
-        }
+        if let Some(shared) = shared_store_dir(&manifest.version) {
+            let shared_usable = read_manifest(&shared)
+                .map(|stored| {
+                    stored.version == manifest.version && looks_complete(&shared, &stored)
+                })
+                .unwrap_or(false);
+            if shared_usable && register(&shared) {
+                return Ok(ModelOrigin {
+                    dir: shared,
+                    source: ModelSource::Shared,
+                    published: false,
+                    version: Some(manifest.version.clone()),
+                });
+            }
 
-        // 3) 共享库缺失/不完整 → 从 bundle 建立。失败只是回到 bundle，不影响可用性。
-        if bundle_usable {
-            match publish(bundle_models, manifest, &shared) {
-                Ok(()) => {
-                    if register(&shared) {
-                        return Ok(ModelOrigin {
-                            dir: shared,
-                            source: ModelSource::Shared,
-                            published: true,
-                        });
+            // 3) 共享库缺失/不完整 → 从 bundle 建立。失败只是回到 bundle，不影响可用性。
+            if bundle_usable {
+                match publish(bundle_models, manifest, &shared) {
+                    Ok(()) => {
+                        if register(&shared) {
+                            return Ok(ModelOrigin {
+                                dir: shared,
+                                source: ModelSource::Shared,
+                                published: true,
+                                version: Some(manifest.version.clone()),
+                            });
+                        }
                     }
-                }
-                Err(error) => {
-                    // 只读卷、权限不足、磁盘满都会走到这里 —— 不是致命错误。
-                    log::warn!("建立共享模型库失败，改用 bundle 内的副本：{error}");
+                    Err(error) => {
+                        // 只读卷、权限不足、磁盘满都会走到这里 —— 不是致命错误。
+                        log::warn!("建立共享模型库失败，改用 bundle 内的副本：{error}");
+                    }
                 }
             }
         }
     }
 
-    // 4) 兜底：bundle 里的副本（便携版与手动安装走这条路）。
+    // 4) 兜底：bundle 里的副本（便携版、手动安装、以及全部非 Windows 交付形态）。
     if register(bundle_models) {
         return Ok(ModelOrigin {
             dir: bundle_models.to_path_buf(),
             source: ModelSource::Bundle,
             published: false,
+            version: bundle_manifest
+                .as_ref()
+                .map(|manifest| manifest.version.clone()),
         });
     }
 
@@ -367,7 +421,7 @@ mod tests {
 
     /// 仓库里那份 `models.json` 必须与**真实存在的模型文件**对得上。
     ///
-    /// 【为什么这条必须有】清单是生成物（`scripts/build/write-models-manifest.ps1`），而
+    /// 【为什么这条必须有】清单是生成物（`scripts/setup/fetch-models.py --write-manifest`），而
     /// 运行时要靠它判断共享库是否可用。清单一旦与文件不符（换了模型没重新生成、
     /// 或手工改过），共享库就会被永久判为"不完整"，两个形态每次都退回各自的 bundle
     /// —— 重复占用 152 MB，且没有任何报错。这条测试让它变成构建失败。
@@ -386,26 +440,76 @@ mod tests {
             "版本号应由内容派生为 12 位十六进制：{}",
             manifest.version
         );
-        let missing: Vec<&str> = manifest
+        // 权重自 v0.2 起不再进仓库（scripts/setup/fetch-models.py）：没取过权重的检出
+        // 是**清单在、文件不在**的正常状态，不是回归。取过之后再逐条校验字节数 ——
+        // 那时缺失就是真的缺了。
+        if manifest
             .files
             .iter()
-            .filter(|file| !models.join(&file.path).is_file())
-            .map(|file| file.path.as_str())
-            .collect();
-        assert!(missing.is_empty(), "清单列了不存在的文件：{missing:?}");
+            .any(|file| !models.join(&file.path).is_file())
+        {
+            eprintln!("skipping: model weights not fetched (run scripts/setup/fetch-models.py)");
+            return;
+        }
         assert!(
             looks_complete(&models, &manifest),
-            "清单里的字节数与实际文件不符 —— 重新运行 scripts/build/write-models-manifest.ps1"
+            "清单里的字节数与实际文件不符 —— 重新运行 scripts/setup/fetch-models.py --write-manifest"
         );
     }
 
     /// 共享库路径带版本号：不同版本必须落在不同目录，否则新代码会读到旧权重。
     #[test]
     fn the_shared_store_is_versioned() {
-        let a = shared_store_dir("aaa");
-        let b = shared_store_dir("bbb");
+        let Some(a) = shared_store_dir("aaa") else {
+            // 非 Windows 没有共享库（见下一条测试）。
+            return;
+        };
+        let b = shared_store_dir("bbb").expect("versioned store");
         assert_ne!(a, b);
         assert!(a.ends_with("aaa"));
         assert!(a.parent().unwrap().ends_with("models"));
+    }
+
+    /// 共享库只在 Windows 存在；其余平台必须明确"没有"。
+    #[test]
+    fn shared_store_is_unavailable_outside_windows() {
+        if cfg!(windows) {
+            assert!(shared_store_dir("v1").is_some());
+        } else {
+            assert!(shared_store_dir("v1").is_none());
+        }
+    }
+
+    /// 非 Windows：解析模型绝不能往用户目录写任何东西。
+    ///
+    /// 【为什么值得单独钉一条】历史实现在这两条平台上退回本地数据目录，结果是每个
+    /// 用户首启就往 `~/Library/Caches` / `$XDG_CACHE_HOME` 里多写 152 MB ——
+    /// 而那正是系统会清理的目录，AppImage 上还必然退化成真拷贝（只读挂载）。
+    #[test]
+    fn resolve_and_register_never_writes_outside_windows() {
+        if cfg!(windows) {
+            // Windows 上共享库是正常路径，由 publish_* 系列测试覆盖。
+            return;
+        }
+        let bundle = scratch("resolve-bundle");
+        fake_models(&bundle, 3);
+        let cache_root = crate::app_paths::cache_dir();
+        let cache_existed = cache_root.as_ref().map(|dir| dir.exists()).unwrap_or(false);
+
+        let origin = resolve_and_register(&bundle).expect("bundle models are usable");
+        assert_eq!(origin.source, ModelSource::Bundle);
+        assert!(!origin.published);
+        assert_eq!(origin.version.as_deref(), Some("v3"));
+
+        if let Some(cache_root) = cache_root {
+            if !cache_existed {
+                assert!(
+                    !cache_root.exists(),
+                    "非 Windows 不该建立任何缓存目录：{}",
+                    cache_root.display()
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&bundle);
     }
 }

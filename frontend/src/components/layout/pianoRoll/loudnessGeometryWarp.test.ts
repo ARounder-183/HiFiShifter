@@ -187,6 +187,11 @@ describe("移动（纯平移）", () => {
         }
     });
 
+    it("锁定参数线关闭时预览只搬基线（movesUserCurves=false）", () => {
+        expect(warp.movesUserCurves).toBe(false);
+        expect(warpOf([originGeo], [moved], true)!.movesUserCurves).toBe(true);
+    });
+
     it("锁定参数线开启时曲线与基线同一条平移（后端 move_clips 携带参数线）", () => {
         const locked = warpOf([originGeo], [moved], true)!;
         for (let k = 0; k < 400; k += 1) {

@@ -741,7 +741,7 @@ The plugin is currently a Windows x64 build and has only been verified against R
 
 There are two ways to install the plugin; pick either one:
 
-- **Installer (recommended)**: run `HiFiShifter_v<version>_windows-x86_64-vst3-setup.exe`. The wizard follows the system UI language, lets you choose the VST3 directory, installs the models into the machine-wide shared library (see [Model Files and Sharing](#model-files-and-sharing)), and registers an uninstall entry under Windows "Programs and Features / Installed apps". The installer first confirms that REAPER and its plugin host process have exited.
+- **Installer (recommended)**: run `HiFiShifter_v<version>_windows-x86_64-setup.exe`. **One package installs both the standalone app and the VST3/ARA plug-in**: the wizard follows the system UI language, lets you pick the app and VST3 directories separately, writes the models once (machine-wide shared library, see [Model Files and Sharing](#model-files-and-sharing)), and registers a **single** uninstall entry under Windows "Programs and Features / Installed apps". The installer first confirms that REAPER and HiFiShifter have exited.
 - **Manual copy**: close REAPER and put the **entire** `HiFiShifter.vst3` folder into a VST3 directory (for example `C:\Program Files\Common Files\VST3`), or add its parent directory to REAPER's VST scan path. Do not copy only the individual files inside the folder — the interface, models and runtime dependencies all live in that folder. This approach writes nothing to the registry; to uninstall, just delete the folder.
 
 Both ways require the WebView2 runtime and the VC++ x64 runtime to be installed.
@@ -780,7 +780,7 @@ In plugin mode, **the host handles** audio import, item position / trimming / li
 - When the host exposes transport control, the `Stop` and `Play / Pause` buttons control REAPER's playback; the playhead follows the REAPER project's position, and the BPM is decided by REAPER as well. When the host offers no transport control the whole group disappears.
 - The toolbar's `BPM` / time-signature fields, the metronome button and the record button do not appear in the plugin: they are host-authoritative readings or host commands, and REAPER's own interface already shows and operates them.
 - Fade audio on items is handled by REAPER; the envelope drawn in the interface is HiFiShifter's own schematic. The hover text gives the same three values as the standalone app (shape / length / curvature) and no longer prints the host's `c=` / `S=` readings, which told the user nothing actionable. The curve is not required to match REAPER's point by point.
-- The tempo map **is available in the plug-in, but only its scale axis is editable**: the tempo map *is* the storage for time-varying scale, and scale is HiFiShifter's own (REAPER has no project key signature). A change point's `BPM` and time signature are host-authoritative readings and are shown read-only in the dialog; the plug-in also does not auto-match the host tempo map (REAPER hands no tempo / time-signature content to ARA plug-ins — measured on this machine, see F-2 in `probe/ara/README.md`). Scale change points live in the plug-in's own settings.
+- The tempo map **is available in the plug-in, but only its scale axis is editable**: the tempo map *is* the storage for time-varying scale, and scale is HiFiShifter's own (REAPER has no project key signature). A change point's `BPM` and time signature are host-authoritative readings and are shown read-only in the dialog; the plug-in also does not auto-match the host tempo map (REAPER hands no tempo / time-signature content to ARA plug-ins — measured, see F-2 in `probe/ara/README.md`). Scale change points live in the plug-in's own settings.
 - Loop source (REAPER's "loop source" flag) is read and written faithfully: the plug-in renders with REAPER's loop semantics, and `Loop` / `Unloop` in the clip context menu are usable.
 - Reverse takes are **not processed** by the plug-in: ARA delivers no reversed audio, so the plug-in cannot render correct content. Such clips are still shown (with a reverse marker) and the reverse entry is disabled with a reason — do it in REAPER.
 - When a clip has no audio the hint now says **why**: `Waiting for REAPER to finish assigning audio` (the normal in-flight state right after split / trim / paste), `Waiting for REAPER to hand over audio` (this clip will not get audio, e.g. the FX sits on a folder parent track), `Reversed by REAPER; HiFiShifter does not process it`. A split clip inherits its parent's audio immediately, so it no longer sits on a placeholder.
@@ -816,7 +816,7 @@ Parameter editing works exactly as in the standalone app (see the [Parameter Edi
 - Parameters did not take effect, or differ after reopening the project: keep a copy of the project and the error text shown in the status bar; do not overwrite the project or force a reload repeatedly.
 - An out-of-memory notice appears: it means the harmonic separation did not run this time, and the `Harmonic Separation`-related results are not silently dropped; use shorter material or turn `Harmonic Separation` off first.
 - To submit logs or troubleshoot: the plugin log and the standalone app's log live in the **same folder** (the plugin writes `plugin.log`, the app writes `hifishifter.log`; different names, so neither overwrites the other and each rotates on its own). The menu `Help → Open Log Folder` opens that folder for you; if the host environment does not allow it, the path is shown so you can copy it. `Help → Export Diagnostics...` and `Options → Inference Device Benchmark` belong to the standalone app and are not available in the plugin.
-- Uninstalling: if you installed via the installer, uninstall HiFiShifter VST3 from Windows "Programs and Features / Installed apps"; if you copied the folder by hand, just delete the `HiFiShifter.vst3` folder. In both cases the settings and the shared model library are kept (see [Model Files and Sharing](#model-files-and-sharing)).
+- Uninstalling: if you installed via the installer, uninstall HiFiShifter from Windows "Programs and Features / Installed apps"; if you copied the folder by hand, just delete the `HiFiShifter.vst3` folder. In both cases the settings and the shared model library are kept (see [Model Files and Sharing](#model-files-and-sharing)).
 
 ### Connecting to the Host from the Standalone App
 
@@ -826,11 +826,11 @@ If you are used to editing in the standalone app, you can also let it connect to
 
 HiFiShifter automatically writes its run log to the platform-standard log directory — no command-line flags required. When you run into a problem, attaching the log file(s) to an issue helps a lot with diagnosis:
 
-| OS      | Log directory                                  |
-| ------- | ---------------------------------------------- |
-| Windows | `%LOCALAPPDATA%\com.arounder.hifishifter\logs` |
-| macOS   | `~/Library/Logs/com.arounder.hifishifter`      |
-| Linux   | `~/.local/share/com.arounder.hifishifter/logs` |
+| OS      | Log directory                      |
+| ------- | ---------------------------------- |
+| Windows | `%LOCALAPPDATA%\HiFiShifter\logs`  |
+| macOS   | `~/Library/Logs/HiFiShifter`       |
+| Linux   | `$XDG_STATE_HOME/HiFiShifter/logs` |
 
 - Use `Help → Open Log Folder` to jump straight to the log files.
 - The plugin (ARA) log shares the app's **folder, format and rotation**, and is named `plugin.log`. Both logs carry the version, date and time, so they can be submitted together.
@@ -838,6 +838,20 @@ HiFiShifter automatically writes its run log to the platform-standard log direct
 - Logs rotate automatically by size: 8 MiB per file, with up to 3 historical copies kept (`hifishifter.1.log` ~ `hifishifter.3.log`).
     - Frequently repeating errors / warnings are throttled automatically: a given log site emits at most one message per 10-second window, and suppressed messages are summarized in a `[throttled]` line before the next one.
 - Frontend and backend errors are written to the same log file, so a single file tells the whole story in chronological order.
+
+### Data directories
+
+Besides the logs, the user data lives here (the standalone app and the plug-in share the same directories):
+
+| Purpose | Windows | macOS | Linux |
+| --- | --- | --- | --- |
+| Settings | `%APPDATA%\HiFiShifter` | `~/Library/Application Support/HiFiShifter` | `$XDG_CONFIG_HOME/HiFiShifter` (default `~/.config/HiFiShifter`) |
+| Caches (waveform / render) | `%LOCALAPPDATA%\HiFiShifter\cache` | `~/Library/Caches/HiFiShifter` | `$XDG_CACHE_HOME/HiFiShifter` (default `~/.cache/HiFiShifter`) |
+| Imported media of unsaved sessions | `%LOCALAPPDATA%\HiFiShifter\unsaved\<session>` | `~/Library/Application Support/HiFiShifter/unsaved/<session>` | `$XDG_DATA_HOME/HiFiShifter/unsaved/<session>` |
+| Shared model library (Windows only, written by the installer) | `%PROGRAMDATA%\HiFiShifter\models\<version>` | — | — |
+
+- Imported media of a saved project lives in a `<project name>_media` folder next to the project file; copy the project together with that folder.
+- When upgrading from an older version, the first launch moves the old `com.arounder.hifishifter` directories to the new locations. If both the old and the new directory exist, they are **not merged** (both are left untouched) and a note is written to the log.
 
 ### The window does not come up on Linux / double-click does nothing
 

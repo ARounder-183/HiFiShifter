@@ -182,6 +182,21 @@ git clone --depth 1 --branch 2.3.3 https://codeberg.org/soundtouch/soundtouch.gi
 git -C soundtouch rev-parse HEAD
 ```
 
+#### 모델 가중치(필요할 때 받기)
+
+저장소에는 매니페스트 `backend/src-tauri/resources/models/models.json`(1.5 KB)만 커밋됩니다.
+151.6 MB의 가중치는 릴리스 자산 `models-<매니페스트 버전>.zip`으로 배포됩니다(버전은 내용
+해시이므로 오래된 파일을 받으면 파일별 검증에서 즉시 실패합니다). 빌드 스크립트가 가져오기
+스크립트를 자동으로 호출하며, 멱등이고 이미 완전하면 디렉터리 스캔만 합니다:
+
+```bash
+python scripts/setup/fetch-models.py                # 없으면 받기
+python scripts/setup/fetch-models.py --check        # 확인만
+python scripts/setup/fetch-models.py --source DIR   # 오프라인: 기존 모델 폴더에서 복사
+```
+
+`HIFISHIFTER_MODELS_BASE_URL`로 미러를 지정할 수 있습니다.
+
 ### 4. 개발 및 빌드
 
 ```bash
@@ -197,16 +212,16 @@ cargo tauri build
 cargo tauri build --bundles appimage -- --no-default-features --features onnx
 # 또는 보조 스크립트 사용: bash scripts/build/build-linux-appimage.sh
 
-# Windows 포터블 ZIP
-.\scripts\build\pack-portable.ps1 -SkipBuild
+# Windows: 통합 설치 프로그램(App + VST3 + 모델 라이브러리) + 포터블 ZIP
+.\build.bat
 
-# Windows VST3 ZIP + 설치 프로그램(전체 Release 전달 제공)
-.\scripts\build\pack-portable.ps1 -PackageTarget Plugin -SkipBuild -Installer
+# VST3 only
+.\build.bat -Target Plugin
 ```
 
 AppImage 에 포함할 내용은 `scripts/build/linux-appimage.sh` 한 곳에서 결정됩니다(CI 와 로컬 공통). 호스트가 제공해야 하는 라이브러리(WebKitGTK / GStreamer / GL / Wayland)를 번들에서 제거하고, `ldd` 로 실행 파일이 실제로 호스트의 사본을 참조하는지 검증한 뒤, 다시 패키징하고 헤드리스 기동 스모크 테스트를 수행합니다. 개별 단계는 `bash scripts/build/linux-appimage.sh package <tauri-release-dir>`(또는 `verify <AppDir>`)로 실행할 수 있습니다.
 
-`pack-portable.bat`을 두 번 클릭하면 App, VST3 또는 둘 다를 선택할 수 있습니다. 사용 가능한 옵션은 `scripts/build/pack-portable.ps1`과 `scripts/` 아래의 빌드 스크립트를 참고하세요.
+`build.bat`을 두 번 클릭하면 App과 VST3를 한 번에 빌드합니다. 사용 가능한 옵션은 `scripts/build/build.ps1`을 참고하세요.
 
 `TAURI_UI_MODE` 환경 변수로 프론트엔드 시작 모드를 전환할 수 있습니다:
 
@@ -254,11 +269,11 @@ ONNX Runtime 바이너리는 ort crate의 `download-binaries` 기능으로 빌�
 
 앱은 실행 로그를 OS 표준 로그 디렉터리에 자동으로 기록합니다. 명령줄 인수가 필요하지 않습니다:
 
-| OS | 로그 디렉터리 |
-| --- | --- |
-| Windows | `%LOCALAPPDATA%\com.arounder.hifishifter\logs` |
-| macOS | `~/Library/Logs/com.arounder.hifishifter` |
-| Linux | `~/.local/share/com.arounder.hifishifter/logs` |
+| OS      | 로그 디렉터리                      |
+| ------- | ---------------------------------- |
+| Windows | `%LOCALAPPDATA%\HiFiShifter\logs`  |
+| macOS   | `~/Library/Logs/HiFiShifter`       |
+| Linux   | `$XDG_STATE_HOME/HiFiShifter/logs` |
 
 - 앱 내부의 **도움말 → 로그 폴더 열기** 메뉴로 로그 위치를 바로 열 수 있고, **도움말 → 진단 정보 내보내기...** 메뉴로 시스템 정보 + 전체 로그 + 추론 장치 벤치마크 결과가 담긴 진단 패키지를 한 번에 생성할 수 있습니다. 이슈 등록 시 첨부해 주세요.
 - 로그는 크기 기준으로 자동 순환됩니다: 파일당 최대 8 MiB, 최대 3개의 이전 파일 보관 (`hifishifter.1.log` ~ `hifishifter.3.log`).
@@ -275,6 +290,20 @@ ONNX Runtime 바이너리는 ort crate의 `download-binaries` 기능으로 빌�
 - 시작 로그에는 항상 두 줄의 진단이 남습니다: `[linux] session:`(GTK 백엔드 / `DISPLAY` / `WAYLAND_DISPLAY` / AppImage) 와 `[linux] egl:`(EGL vendor 와 버전). 그래픽 관련 이슈에 첨부해 주세요.
 - 터미널에서 `HiFiShifter --benchmark` 실행: 추론 장치 벤치마크를 실행하고 JSON 결과를 출력합니다.
 
+### 데이터 디렉터리
+
+로그 외의 사용자 데이터는 다음 위치에 있습니다(독립 실행형 앱과 플러그인이 같은 디렉터리를 공유합니다):
+
+| 용도 | Windows | macOS | Linux |
+| --- | --- | --- | --- |
+| 설정 | `%APPDATA%\HiFiShifter` | `~/Library/Application Support/HiFiShifter` | `$XDG_CONFIG_HOME/HiFiShifter`(기본 `~/.config/HiFiShifter`) |
+| 캐시(파형 / 렌더) | `%LOCALAPPDATA%\HiFiShifter\cache` | `~/Library/Caches/HiFiShifter` | `$XDG_CACHE_HOME/HiFiShifter`(기본 `~/.cache/HiFiShifter`) |
+| 저장되지 않은 세션의 가져온 미디어 | `%LOCALAPPDATA%\HiFiShifter\unsaved\<세션>` | `~/Library/Application Support/HiFiShifter/unsaved/<세션>` | `$XDG_DATA_HOME/HiFiShifter/unsaved/<세션>` |
+| 공유 모델 라이브러리(Windows 전용, 설치 프로그램이 기록) | `%PROGRAMDATA%\HiFiShifter\models\<버전>` | — | — |
+
+- 저장된 프로젝트의 가져온 미디어는 프로젝트 파일 옆의 `<프로젝트 이름>_media` 디렉터리에 들어갑니다. 프로젝트와 함께 복사하면 됩니다.
+- 이전 버전에서 업그레이드하면 첫 실행 시 기존 `com.arounder.hifishifter` 디렉터리가 새 위치로 이동합니다. 옛 디렉터리와 새 디렉터리가 동시에 존재하면 **병합하지 않고**(양쪽 모두 그대로 둡니다) 로그에 한 줄 남깁니다.
+
 ## 문서
 
 - 사용자 매뉴얼: [简体中文](../../docs/i18n/USERMANUAL.md) · [繁體中文](USERMANUAL_zh-TW.md) · [English](USERMANUAL_en.md) · [日本語](USERMANUAL_ja.md) · [한국어](USERMANUAL_ko.md)
@@ -283,6 +312,7 @@ ONNX Runtime 바이너리는 ort crate의 `download-binaries` 기능으로 빌�
 
 - 확장(Extension) API: [docs/extension-api.md](../../docs/extension-api.md)
 - UI 문구 스타일 가이드(i18n Style Guide): [docs/i18n/style-guide.md](../../docs/i18n/style-guide.md)
+- 모델 가중치(가져오기 및 배포): [docs/models.md](../../docs/models.md)
 
 ## 감사의 말
 
@@ -298,4 +328,8 @@ ONNX Runtime 바이너리는 ort crate의 `download-binaries` 기능으로 빌�
 
 ## 라이선스
 
-이 프로젝트는 [MIT 라이선스](../../LICENSE)에 따라 배포됩니다.
+프로젝트 자체 코드는 [MIT 라이선스](../../LICENSE)에 따라 배포됩니다. 함께 배포되는
+서드파티 구성 요소의 라이선스 전문과 고지는 [`licenses/`](../../licenses/README.md) 에
+있습니다: SoundTouch(LGPL-2.1, 동적 링크, 수정되지 않은 업스트림), ARA SDK 등(Apache-2.0),
+DiffSinger 보코더 가중치(CC BY-NC-SA 4.0, 비상업적 용도만). 전체 구성 요소 목록은
+[LICENSE](../../LICENSE) 의 Third-Party Notices 를 참고하십시오.

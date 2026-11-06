@@ -13,6 +13,16 @@ export function isPluginMode(): boolean {
     return hostMode() === "plugin";
 }
 /**
+ * 参数线是否由前端/内核在本地做时域重映射。
+ *
+ * ARA 插件里几何变化由 ParameterAtlas 统一投影；前端再调用
+ * stretch_track_linked_params 会把已经投影过的数组二次映射，产生偏移/截断。
+ * 独立 App 没有 ARA 投影，仍走本地重映射。
+ */
+export function canRewriteParamLinesLocally(): boolean {
+    return !isPluginMode();
+}
+/**
  * 宿主写能力的**唯一**读取入口：后端 `hostCapabilities` 快照。
  *
  * 【为什么只有一个来源】此前 `clipEditing` / `audioImport` 等顶层布尔与

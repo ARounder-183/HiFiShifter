@@ -230,7 +230,7 @@ Task24增加非实时退役快照回收，实时读区SeqCst计数保护指针�
 - [x] actor稳定模型版本变化自动ensure_loaded；tempo有效字段同步，并向原GUI发plugin_host_changed/host_version，失败版本保留供轮询重试；pending冲突仍保留曲线。
 - [x] plugin lib65、宿主租约1、前端18、tsc/生产build验证；新版bundle位于embedded-vst3。最后新增回归首轮失败揭示take投影未重建，修复后65/65正常exit0。
 - [x] 真实Computer Use在测试副本原生Project Settings把120改150，插件打开后BPM=150；Time基准下媒体倍率维持1，截图captures/bpm-sync-150.jpg，保存RPP确认TEMPO150和PLAYRATE1。
-- [ ] 插件网页中真实点击播放/暂停、手绘与完整导出/重开：已先点标题栏并确认FX焦点，内容点击仍被本机工具跨进程检查拒绝，不能写成通过。
+- [ ] 插件网页中真实点击播放/暂停、手绘与完整导出/重开：已先点标题栏并确认FX焦点，内容点击仍被本地工具跨进程检查拒绝，不能写成通过。
 - [x] GUI不关闭时BPM150→180自动同步；原生Media Item Properties将第一段起点0→1秒，原时间线/参数区自动刷新且日志clipStartsSec=[1,3]，未点重载。截图bpm-sync-live-180.jpg、host-geometry-auto-refresh.jpg。
 - [ ] 本地pending曲线与宿主几何同时变化时的真实冲突确认，不能用无本地编辑的移动实测代替。
 - [x] 最终前端全量311 files/2715 tests通过，exit0，保留既有Canvas/act警告。
@@ -246,7 +246,7 @@ Task24增加非实时退役快照回收，实时读区SeqCst计数保护指针�
 - [x] 第二轨独奏真实导出四个窗口220.5→329.104Hz，gap=0；关闭两个FX窗口后再导出PCM maxdiff=0。verify_forward_gui_output新增FirstClipStartSec=1保持原PCM/布局严格验证；6旧+3移动布局回归通过。
 - [x] 一次集中review发现单素材selectClipParamRange也需DOM焦点，已同样补齐；多参数编辑面板广播时最后一个抢焦点为Minor残余，未声称支持此组合验收。
 - [x] 最终源版本前端312文件/2718测试exit0，tsc/生产bundle build exit0；正常退出REAPER冷重开40653-byte测试RPP，第二轨GUI尚未打开时导出PCM maxdiff0，再打开原FX显示恢复曲线，截图gui-keyboard-restored-curves.jpg。
-- [ ] 真实鼠标手绘/双轨均编辑/资源矩阵和独立app实测仍open。新焦点版本先点击FX标题再drag、激活新截图后仅重试一次，仍被本机Computer Use跨进程检查拒绝；不使用代理或脚本替代笔画。
+- [ ] 真实鼠标手绘/双轨均编辑/资源矩阵和独立app实测仍open。新焦点版本先点击FX标题再drag、激活新截图后仅重试一次，仍被本地 Computer Use 跨进程检查拒绝；不使用代理或脚本替代笔画。
 
 ## Task 30: 双轨分别编辑、撤销/重做与冷恢复（部分实测，后续转工程级 GUI）
 

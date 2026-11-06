@@ -6,8 +6,9 @@
 //! 没有版本号、没有时间戳、不轮转，而 App 那份全都有。两个形态的日志还要放进同一个
 //! 目录（见 `log_dir`），并排出现时差异只会更刺眼。
 //!
-//! 因此目录、格式、会话头、轮转只有这一处实现，两个宿主都调它。与
-//! [`crate::config_location`] 是同一个原则：**同一件事只有一处实现**。
+//! 因此目录、格式、会话头、轮转只有这一处实现，两个宿主都调它。目录本身由
+//! [`crate::app_paths`] 计算（与 [`crate::config_location`] 是同一个原则：
+//! **同一件事只有一处实现**）。
 //!
 //! 两个宿主各自保留的差异只有一处，且是真实的：
 //! - App 用 stderr 管道 + tee 线程，为了**顺带捕获第三方库直接写 stderr 的输出**
@@ -21,11 +22,8 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-/// Tauri 的 `identifier`，也是日志目录的一级名字。
-const APP_IDENTIFIER: &str = "com.arounder.hifishifter";
-
 /// 覆盖日志目录的环境变量（两个宿主同名同义）。
-pub const LOG_DIR_ENV: &str = "HIFISHIFTER_LOG_DIR";
+pub use crate::app_paths::LOG_DIR_ENV;
 
 /// 单个日志文件大小上限，超过后轮转。
 pub const MAX_LOG_FILE_BYTES: u64 = 8 * 1024 * 1024;
@@ -42,51 +40,19 @@ pub const TIMESTAMP_FORMAT: &str = "%Y-%m-%d %H:%M:%S%.3f";
 
 /// 平台默认日志目录；无法确定时为 `None`（不 panic —— 日志写不出不该让宿主起不来）。
 ///
-/// 结果与独立 App 历史上的布局逐一对应（**不是** [`crate::config_location`] 的
-/// `HiFiShifter` 子目录 —— 那是配置与运行时数据的家，日志一直是它的兄弟目录）：
+/// 【为什么只是一条转发】目录解析是"日志"这件事的一部分，不是宿主的能力差异。插件与
+/// 独立 App 必须写进**同一个目录**，两份实现就一定会分家（此前正是如此：插件多了
+/// `HiFiShifter` 一层子目录）。唯一的事实来源是 [`crate::app_paths::log_dir`]：
 ///
 /// | 平台 | 路径 |
 /// | --- | --- |
-/// | Windows | `%LOCALAPPDATA%\com.arounder.hifishifter\logs` |
-/// | macOS | `~/Library/Logs/com.arounder.hifishifter` |
-/// | Linux | `$XDG_DATA_HOME/com.arounder.hifishifter/logs`（缺省 `~/.local/share`） |
+/// | Windows | `%LOCALAPPDATA%\HiFiShifter\logs` |
+/// | macOS | `~/Library/Logs/HiFiShifter` |
+/// | Linux | `$XDG_STATE_HOME/HiFiShifter/logs`（缺省 `~/.local/state`） |
+///
+/// 可用环境变量 `HIFISHIFTER_LOG_DIR` 覆盖（两个宿主同名同义）。
 pub fn log_dir() -> Option<PathBuf> {
-    if let Ok(dir) = std::env::var(LOG_DIR_ENV) {
-        let dir = dir.trim();
-        if !dir.is_empty() {
-            return Some(PathBuf::from(dir));
-        }
-    }
-    #[cfg(windows)]
-    {
-        let base = match std::env::var_os("LOCALAPPDATA") {
-            Some(base) => PathBuf::from(base),
-            None => {
-                // LOCALAPPDATA 是 Windows 的标准变量；极简环境（CI 容器、测试沙箱）
-                // 可能没有它，此时按同一语义回退到 USERPROFILE 下的 AppData\Local。
-                let home = std::env::var_os("USERPROFILE")?;
-                PathBuf::from(home).join("AppData").join("Local")
-            }
-        };
-        Some(base.join(APP_IDENTIFIER).join("logs"))
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let home = std::env::var_os("HOME")?;
-        Some(
-            PathBuf::from(home)
-                .join("Library")
-                .join("Logs")
-                .join(APP_IDENTIFIER),
-        )
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        let base = std::env::var_os("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))?;
-        Some(base.join(APP_IDENTIFIER).join("logs"))
-    }
+    crate::app_paths::log_dir()
 }
 
 /// 会话头：版本、平台、以及本次会话的起始时刻。
@@ -324,8 +290,9 @@ mod tests {
         let dir = log_dir().expect("platform log dir");
         assert!(!dir.starts_with(std::env::temp_dir()), "{}", dir.display());
         assert!(
-            dir.to_string_lossy().contains(APP_IDENTIFIER),
-            "日志目录应以 identifier 命名：{}",
+            dir.to_string_lossy()
+                .contains(crate::app_paths::PRODUCT_DIR),
+            "日志目录应以产品目录名命名：{}",
             dir.display()
         );
     }

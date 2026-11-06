@@ -398,11 +398,17 @@ pub fn maybe_schedule_pitch_orig(
         tl.ensure_params_for_root(&job.root_track_id);
         let current_key = build_root_pitch_key(&tl, &job.root_track_id);
         if current_key == job.key {
+            let layout_key =
+                crate::pitch_analysis::build_root_pitch_layout_key(&tl, &job.root_track_id);
             if let Some(entry) = tl.params_by_root_track.get_mut(&job.root_track_id) {
                 if all_cache_hit {
                     // 全部命中：写入曲线、标记完成、通知前端
                     entry.pitch_orig = curve;
                     entry.pitch_orig_key = Some(job.key.clone());
+                    // 【全量命中 = 组装收敛】"在等"的读数必须跟着复位，否则绘制侧
+                    // 会一直按"还在分析"画半透明。
+                    entry.pitch_assembly_partial = false;
+                    entry.pitch_layout_key = Some(layout_key);
                     entry.has_pitch_adjustment_active = has_pitch_adjustment;
 
                     // 应用 Reaper 导入的待定音高偏移
@@ -445,20 +451,23 @@ pub fn maybe_schedule_pitch_orig(
                     should_request_bg_render = crate::host::host().auto_background_render_enabled()
                         && crate::host::host().take_pitch_pending_flag();
                 } else {
-                    // 部分命中：仅当曲线内容确实发生变化时才更新并通知前端。
-                    // 否则跳过 emit，防止"fetch -> emit -> fetch"无限循环。
-                    if entry.pitch_orig != curve {
-                        entry.pitch_orig = curve;
-                        entry.pitch_orig_key = None;
-                        entry.has_pitch_adjustment_active = has_pitch_adjustment;
-                        if !entry.pitch_edit_user_modified {
-                            // 复用已有内存，避免昂贵的重新分配
-                            entry.pitch_edit.clone_from(&entry.pitch_orig);
-                        }
+                    // 【部分命中不得覆盖曲线】`assemble_pitch_orig_from_cache` 从
+                    // `vec![0.0; target]` 起步，缺缓存的 clip 那一段**留 0**
+                    // （见 `assemble_pitch_orig_from_cache`）。此前这一支照样把整条曲线
+                    // 赋回去，于是那条线在画面上变成"这一段是 0"的平线，分析完再被覆盖
+                    // 回真值 —— **一次可见的闪烁**。而调用点是 `get_param_frames`，
+                    // 也就是**每次 GUI 轮询**都会发生一次。
+                    //
+                    // 现在的纪律：曲线只在**全量命中**时被写；部分命中只更新读数与
+                    // 键，曲线保持不动。绘制侧按 `pitch_assembly_partial` 决定是否
+                    // 降透明度 —— 它表达"还在等"，而不是"这里是 0"。
+                    entry.has_pitch_adjustment_active = has_pitch_adjustment;
+                    entry.pitch_orig_key = None;
+                    if !entry.pitch_assembly_partial {
+                        entry.pitch_assembly_partial = true;
                         should_emit = true;
                         emit_root_track_id = job.root_track_id.clone();
                     }
-                    // else: 曲线未变化，跳过通知，避免死循环
                 }
             }
         }

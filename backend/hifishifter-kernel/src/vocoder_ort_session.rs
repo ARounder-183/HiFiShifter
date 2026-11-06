@@ -53,7 +53,7 @@ pub(crate) const VOCODER_SMOKE_FRAMES: usize = 512;
 /// 音高检测（FCPE）烟测探针的 mel 帧数。
 ///
 /// 与声码器不同，FCPE 没有可对齐的"生产分块长度"（它按整段分析），而 4096
-/// 帧在这台机器的集显上 3.4 s 返回、从未被误判 —— 没有实测证据支持收紧，
+/// 帧在一台集显机器上 3.4 s 返回、从未被误判 —— 没有实测证据支持收紧，
 /// 改了只会引入未经验证的风险，故保持原值。
 const PITCH_SMOKE_FRAMES: usize = 4096;
 
@@ -224,6 +224,16 @@ pub(crate) fn disable_directml(device: Option<i32>, reason: &str) {
     }
 }
 
+/// 非 Windows 上的空实现。
+///
+/// 【为什么要有】`nsf_hifigan_onnx` 的"超时后按 active_ep 分派"是一段**跨平台**的
+/// match，里面必须写得出 `disable_directml` 这个名字。只给 Windows 实现的话，
+/// Linux / macOS 上整个 kernel 编不过（clap 的 Unix 构建就是这样红的）。
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn disable_directml(device: Option<i32>, reason: &str) {
+    let _ = (device, reason);
+}
+
 /// 撤销某台设备的禁用（基准测试实测跑通时调用）。
 ///
 /// 【为什么必须能撤销】旧实现只能"重启应用重试" —— 用户明明刚在基准测试里看到
@@ -245,11 +255,6 @@ pub(crate) fn enable_directml(device: Option<i32>) {
     #[cfg(not(target_os = "windows"))]
     let _ = device;
 }
-
-/// 非 Windows 构建下 DirectML 不存在；保留同名入口，避免调用方按运行期
-/// `active_ep()` 分派时产生平台相关的编译缺口。语义是 no-op。
-#[cfg(not(target_os = "windows"))]
-pub(crate) fn disable_directml(_device: Option<i32>, _reason: &str) {}
 
 #[cfg(target_os = "windows")]
 fn describe_dml_device(device: Option<i32>) -> String {
@@ -351,6 +356,28 @@ pub fn ep_settings_generation() -> u64 {
 }
 
 /// Set the runtime EP override. Pass `None` to clear the override.
+/// 异步会话预热的**进程级开关**（默认开）。
+///
+/// 【为什么需要它】`update_ort_ep` 的三份实现各自在**游离**线程里重建 ONNX 会话
+/// （秒级；GPU EP 首跑更久）。产品里这值得：它把秒级构建搬出了渲染/分析热路径。
+/// 但**测试进程不能有它**：Windows 上 libtest 跑完直接 `ExitProcess`，没有任何可用的
+/// 收尾钩子，于是进程会在预热线程正跑"建会话"的中途被拆掉 —— 实测插件测试二进制
+/// 即使每条用例都通过也以 `0xC0000005` 退出，VEH 抓到的崩溃线程名是
+/// `ort-session-prewarm-vocoder`、故障地址固定落在本 exe 内；关掉之后同一套用例
+/// 连续 5 次干净退出。会话本身仍会在首次真正使用时**惰性构建**，行为覆盖一点没少。
+static ASYNC_SESSION_PREWARM: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+
+/// 关掉/打开后台会话预热（见 [`ASYNC_SESSION_PREWARM`] 的说明）。
+pub fn set_async_session_prewarm(enabled: bool) {
+    ASYNC_SESSION_PREWARM.store(enabled, std::sync::atomic::Ordering::Release);
+}
+
+/// 后台会话预热是否允许启动。
+pub fn async_session_prewarm_enabled() -> bool {
+    ASYNC_SESSION_PREWARM.load(std::sync::atomic::Ordering::Acquire)
+}
+
 pub fn set_runtime_ep_override(ep: Option<String>) {
     let mut guard = RUNTIME_EP_OVERRIDE
         .get_or_init(|| Mutex::new(None))

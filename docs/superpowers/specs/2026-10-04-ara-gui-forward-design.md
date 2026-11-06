@@ -22,7 +22,7 @@ Windows x64 / REAPER 7.81。正向 mono/stereo、44100/48000Hz、每源最多30�
 2. 插件文档保存当前映射TimelineState；renderer仅渲染实际分配的clip，编辑状态不改
    DAW几何。显式提交在非实时线程运行现有WORLD/HiFiGAN内核，再发布不可变快照。
    未编辑仍用已实测原声快照，提交失败保留旧状态或明确撤销，不伪报成功。
-3. `hifishifter-ara-ipc`共享长度前缀JSON协议，Windows本机命名管道，拒绝远端。
+3. `hifishifter-ara-ipc`共享长度前缀JSON协议，Windows本地命名管道，拒绝远端。
    发现目录默认为LOCALAPPDATA/HiFiShifter/ara-instances，可用HIFISHIFTER_ARA_INSTANCE_DIR
    指到隔离目录。每条记录包含实例ID/进程ID/管道/名称/心跳；连接检查协议版本和会话token。
    有界帧64MiB，读写有超时，后台服务器析构可退出，不泄漏DLL执行线程。

@@ -196,16 +196,30 @@ npm --prefix frontend ci
 .\scripts\setup\export-sdk-mirror.ps1
 #    也可直接写到 U 盘 / 局域网共享：-MirrorDirectory E:\hfs-sdk-mirror
 
-# 2) 在离网机器上指向该镜像并构建（-Offline 禁止一切取源联网）
+# 2) 在离网机器上指向该镜像并构建（HIFISHIFTER_OFFLINE=1 禁止一切取源联网）
 $env:HIFISHIFTER_SDK_MIRROR = 'E:\hfs-sdk-mirror'
-.\scripts\setup\prepare-plugin-sdks.ps1 -Offline
-.\pack-portable.bat -Offline
+$env:HIFISHIFTER_OFFLINE = '1'
+.\build.bat
 ```
 
-`-Offline`（或环境变量 `HIFISHIFTER_OFFLINE=1`）同时作用于 SDK 取源、SoundTouch 自动克隆
+`HIFISHIFTER_OFFLINE=1` 同时作用于 SDK 取源、SoundTouch 自动克隆
 与 `cargo`（走本地 registry 缓存）。因此离网构建还需具备：一次联网构建留下的 Cargo 依赖
 缓存，以及已安装的 `frontend/node_modules`。缓存或镜像与 pin 不一致时，取源会快速失败并
 指出该跑哪条命令，而不是让 git 去联网。
+
+#### 模型权重（按需获取）
+
+仓库里只提交清单 `backend/src-tauri/resources/models/models.json`（1.5 KB）；151.6 MB 的权重
+作为 release 资产 `models-<清单版本>.zip` 分发（版本号是内容哈希，取错版本会在逐文件校验里
+立刻失败）。构建脚本会自动调用取权重脚本 —— 它是幂等的，已完整时只做一次目录扫描：
+
+```bash
+python scripts/setup/fetch-models.py                # 缺就取
+python scripts/setup/fetch-models.py --check        # 只检查
+python scripts/setup/fetch-models.py --source DIR   # 离网：从已有模型目录拷贝
+```
+
+`HIFISHIFTER_MODELS_BASE_URL` 可以指向一个镜像站点。
 
 ### 4. 开发与构建
 
@@ -222,17 +236,18 @@ cargo tauri build
 cargo tauri build --bundles appimage -- --no-default-features --features onnx
 # 或使用辅助脚本：bash scripts/build/build-linux-appimage.sh
 
-# Windows 便携版 ZIP
-.\scripts\build\pack-portable.ps1 -SkipBuild
+# Windows：合并安装器（App + VST3 + 模型库）+ 便携 ZIP，产物全在 dist\
+.\build.bat
 
-# Windows VST3 ZIP + 安装器（已有完整 Release 交付）
-.\scripts\build\pack-portable.ps1 -PackageTarget Plugin -SkipBuild -Installer
+# 只出 VST3 / 只出 App / 只重打安装器
+.\build.bat -Target Plugin
+.\build.bat -Target App
+.\build.bat -Target Installer
 ```
 
 AppImage 的打包内容由 `scripts/build/linux-appimage.sh` 统一决定，CI 与本地共用同一份逻辑：先把 WebKitGTK / GStreamer / GL / Wayland 这些**必须由宿主提供**的库从包里剪掉，再用 `ldd` 断言可执行文件确实解析到宿主的副本，然后重新打包并做一次无头启动冒烟。需要单独复用某一步时：`bash scripts/build/linux-appimage.sh package <Tauri 产物目录>`（或 `verify <AppDir>` 只做断言）。
 
-双击 `pack-portable.bat` 可选择 App、VST3 或两者；可用参数见 `scripts/build/pack-portable.ps1`
-与 `scripts/` 下的构建脚本。
+双击 `build.bat` 就是一次完整构建（合并安装器 + 便携包）；参数见 `scripts/build/build.ps1`。
 
 前端启动模式可通过环境变量 `TAURI_UI_MODE` 切换：
 
@@ -287,11 +302,11 @@ ONNX Runtime 二进制文件由 ort crate 在编译时通过 `download-binaries`
 
 应用会自动把运行日志写入系统标准日志目录，无需任何命令行参数：
 
-| 系统 | 日志目录 |
-| --- | --- |
-| Windows | `%LOCALAPPDATA%\com.arounder.hifishifter\logs` |
-| macOS | `~/Library/Logs/com.arounder.hifishifter` |
-| Linux | `~/.local/share/com.arounder.hifishifter/logs` |
+| 系统    | 日志目录                           |
+| ------- | ---------------------------------- |
+| Windows | `%LOCALAPPDATA%\HiFiShifter\logs`  |
+| macOS   | `~/Library/Logs/HiFiShifter`       |
+| Linux   | `$XDG_STATE_HOME/HiFiShifter/logs` |
 
 - 在应用内通过 **帮助 → 打开日志文件夹** 可以直接定位日志；**帮助 → 导出诊断信息** 可以一键生成诊断包（系统信息 + 全部日志 + 推理设备基准测试结果），提交 issue 时附上即可。
 - 日志按大小自动轮转：单个文件上限 8 MiB，默认保留 3 份历史（`hifishifter.1.log` ~ `hifishifter.3.log`）。
@@ -308,6 +323,20 @@ ONNX Runtime 二进制文件由 ort crate 在编译时通过 `download-binaries`
 - 启动日志里固定有两行图形诊断：`[linux] session:`（GTK 后端 / `DISPLAY` / `WAYLAND_DISPLAY` / 是否 AppImage）与 `[linux] egl:`（EGL vendor 与版本）。提交图形相关的 issue 时请附上这两行。
 - 终端运行 `HiFiShifter --benchmark`：直接执行推理设备基准测试并输出 JSON 结果。
 
+### 数据目录
+
+除日志之外，其余用户数据的位置如下（独立 App 与插件共用同一套目录）：
+
+| 用途 | Windows | macOS | Linux |
+| --- | --- | --- | --- |
+| 设置 | `%APPDATA%\HiFiShifter` | `~/Library/Application Support/HiFiShifter` | `$XDG_CONFIG_HOME/HiFiShifter`（缺省 `~/.config/HiFiShifter`） |
+| 缓存（波形 / 整段渲染） | `%LOCALAPPDATA%\HiFiShifter\cache` | `~/Library/Caches/HiFiShifter` | `$XDG_CACHE_HOME/HiFiShifter`（缺省 `~/.cache/HiFiShifter`） |
+| 未保存会话的导入素材 | `%LOCALAPPDATA%\HiFiShifter\unsaved\<会话>` | `~/Library/Application Support/HiFiShifter/unsaved/<会话>` | `$XDG_DATA_HOME/HiFiShifter/unsaved/<会话>` |
+| 共享模型库（仅 Windows，由安装器写入） | `%PROGRAMDATA%\HiFiShifter\models\<版本>` | — | — |
+
+- 已保存工程的导入素材放在工程文件旁边的 `<工程名>_media` 目录里，随工程一起拷走即可。
+- 从旧版本升级时，首次启动会自动把原来的 `com.arounder.hifishifter` 目录搬到新位置；若新旧目录同时存在则**不合并**（两边原样保留），并在日志里记一条说明。
+
 ## 文档
 
 - 使用手册：[简体中文](docs/i18n/USERMANUAL.md) · [繁體中文](docs/i18n/USERMANUAL_zh-TW.md) · [English](docs/i18n/USERMANUAL_en.md) · [日本語](docs/i18n/USERMANUAL_ja.md) · [한국어](docs/i18n/USERMANUAL_ko.md)
@@ -316,6 +345,7 @@ ONNX Runtime 二进制文件由 ort crate 在编译时通过 `download-binaries`
 
 - 扩展（Extension）API：[docs/extension-api.md](docs/extension-api.md)
 - 界面文案风格指南（i18n Style Guide）：[docs/i18n/style-guide.md](docs/i18n/style-guide.md)
+- 模型权重（获取与发布）：[docs/models.md](docs/models.md)
 
 ## 致谢
 
@@ -331,4 +361,7 @@ ONNX Runtime 二进制文件由 ort crate 在编译时通过 `download-binaries`
 
 ## License
 
-本项目基于 [MIT License](LICENSE) 发布。
+本项目的原创代码基于 [MIT License](LICENSE) 发布。发行物随附第三方组件的许可全文与声明，
+见 [`licenses/`](licenses/README.md)：SoundTouch（LGPL-2.1，动态链接、未修改的上游版本）、
+ARA SDK 等（Apache-2.0）、DiffSinger 声码器权重（CC BY-NC-SA 4.0，仅限非商业使用）。
+[LICENSE](LICENSE) 里的 Third-Party Notices 是完整的组件清单。

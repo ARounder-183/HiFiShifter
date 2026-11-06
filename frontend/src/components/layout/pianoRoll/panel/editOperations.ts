@@ -803,6 +803,8 @@ export async function runEditOp(
                     range.startFrame,
                     result,
                     isFirstWrite,
+                    // 整段选区都被这一步改过（均值 / 平滑 / 归一），逐帧都是显式编辑。
+                    new Array<boolean>(result.length).fill(true),
                 );
                 return Boolean(written?.ok);
             });
@@ -970,6 +972,8 @@ export async function runEditOp(
                     range.startFrame,
                     result,
                     isFirstWrite,
+                    // 整段选区都被这一步改过（均值 / 平滑 / 归一），逐帧都是显式编辑。
+                    new Array<boolean>(result.length).fill(true),
                 );
                 return Boolean(written?.ok);
             });
@@ -1051,6 +1055,8 @@ export async function runEditOp(
                     range.startFrame,
                     result,
                     isFirstWrite,
+                    // 整段选区都被这一步改过（均值 / 平滑 / 归一），逐帧都是显式编辑。
+                    new Array<boolean>(result.length).fill(true),
                 );
                 return Boolean(written?.ok);
             });

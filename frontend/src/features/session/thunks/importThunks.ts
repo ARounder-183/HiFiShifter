@@ -1131,168 +1131,32 @@ export const importMultipleAudioFilesAtPosition = createAsyncThunk(
             ).unwrap();
         }
 
-        dispatch(checkpointHistory());
-
-        // 多文件媒体导入的 undo 组：与单文件路径（importAudioFileAtPosition）
-        // 及宿主批量路径（importHostBatch）使用同一个标签，撤销菜单里不区分来源。
-        await webApi.beginUndoGroup("import_media");
-        // 取消闸门：本批可能是目录导入委托过来的长循环（见 importCancellation）。
-        const importGen = currentImportGeneration();
-        // 登记这次导入：历史跳转前会等它收尾（见 registerImportRun）。
-        const importRun = registerImportRun();
-        try {
-            const beforeClipIds = new Set(
-                (getState() as { session: SessionState }).session.clips.map((c) => c.id),
-            );
-
-            const accumulatedNewClipIds: string[] = [];
-
-            let lastImported: unknown = null;
-
-            if (mode === "across-time") {
-                let cursor = startSec;
-                let targetTrackId: string | undefined;
-
-                if (payload.trackId === null) {
-                    // 整批落在同一条新轨道上 → 以**这批的第一个**文件命名。
-                    const createdId = await createTrackForImport({
-                        dispatch: dispatch as unknown as TrackDispatch,
-                        getState,
-                        nameFromFile: files[0]?.name,
-                    });
-                    if (!createdId) {
-                        return rejectWithValue("add_track_failed");
-                    }
-                    targetTrackId = createdId;
-                } else {
-                    targetTrackId = payload.trackId ?? undefined;
-                }
-
-                for (const file of files) {
-                    if (isImportCancelled(importGen)) break;
-                    const fileName = String(file.name ?? "dropped-audio");
-                    const dataUrl = await new Promise<string>((resolve, reject) => {
-                        const reader = new FileReader();
-                        reader.onerror = () => reject(new Error("read_failed"));
-                        reader.onload = () => resolve(String(reader.result ?? ""));
-                        reader.readAsDataURL(file);
-                    });
-                    const base64 = dataUrl.includes(",")
-                        ? dataUrl.split(",").slice(1).join(",")
-                        : dataUrl;
-
-                    const imported = await webApi.importAudioBytes(
-                        fileName,
-                        base64,
-                        targetTrackId,
-                        cursor,
-                    );
-                    if (!(imported as { ok?: boolean }).ok) continue;
-                    lastImported = imported;
-                    const result = imported as {
-                        clips?: Array<{ id?: string; start_sec?: number; length_sec?: number }>;
-                    };
-                    for (const c of result.clips ?? []) {
-                        if (c.id) accumulatedNewClipIds.push(c.id);
-                    }
-                    const newClip = result.clips?.find(
-                        (c) => Math.abs((c.start_sec ?? 0) - cursor) < 0.01,
-                    );
-                    cursor += newClip?.length_sec ?? 0;
-                }
-            } else {
-                // across-tracks: similar to importMultipleAudioAtPosition
-                const state = getState() as { session: SessionState };
-                const rootTracks = state.session.tracks
-                    .filter((t) => !t.parentId)
-                    .sort(
-                        (a, b) => state.session.tracks.indexOf(a) - state.session.tracks.indexOf(b),
-                    );
-                let startIdx = 0;
-                if (payload.trackId) {
-                    const idx = rootTracks.findIndex((t) => t.id === payload.trackId);
-                    if (idx >= 0) startIdx = idx;
-                }
-
-                for (let i = 0; i < files.length; i++) {
-                    if (isImportCancelled(importGen)) break;
-                    const file = files[i];
-                    const trackIdx = startIdx + i;
-                    let targetTrackId: string | undefined;
-                    if (trackIdx < rootTracks.length) {
-                        targetTrackId = rootTracks[trackIdx].id;
-                    } else {
-                        // 每条新轨道各自以**它承载的那个文件**命名（循环变量 `file`）。
-                        const createdId = await createTrackForImport({
-                            dispatch: dispatch as unknown as TrackDispatch,
-                            getState,
-                            nameFromFile: file.name,
-                        });
-                        if (!createdId) continue;
-                        targetTrackId = createdId;
-                    }
-
-                    const fileName = String(file.name ?? "dropped-audio");
-                    const dataUrl = await new Promise<string>((resolve, reject) => {
-                        const reader = new FileReader();
-                        reader.onerror = () => reject(new Error("read_failed"));
-                        reader.onload = () => resolve(String(reader.result ?? ""));
-                        reader.readAsDataURL(file);
-                    });
-                    const base64 = dataUrl.includes(",")
-                        ? dataUrl.split(",").slice(1).join(",")
-                        : dataUrl;
-
-                    try {
-                        const imported = await webApi.importAudioBytes(
-                            fileName,
-                            base64,
-                            targetTrackId,
-                            startSec,
-                        );
-                        if ((imported as { ok?: boolean }).ok) {
-                            lastImported = imported;
-                            const result = imported as {
-                                clips?: Array<{
-                                    id?: string;
-                                    start_sec?: number;
-                                    length_sec?: number;
-                                }>;
-                            };
-                            for (const c of result.clips ?? []) {
-                                if (c.id) accumulatedNewClipIds.push(c.id);
-                            }
-                        }
-                    } catch {
-                        // continue
-                    }
-                }
-            }
-
-            // 用户撤销 / 跳转历史 → 循环提前退出，且**不带**时间线快照。
-            if (isImportCancelled(importGen)) {
-                return { ok: true, canceled: true, imported: null, newClipIds: [] as string[] };
-            }
-
-            const newClipIds = accumulatedNewClipIds.filter((id) => !!id && !beforeClipIds.has(id));
-
-            const latestTimeline = await syncAutoCrossfadeFromLatestTimeline({
-                dispatch: dispatch as unknown as (
-                    action: unknown,
-                ) => Promise<unknown> & { unwrap: () => Promise<unknown> },
-                getState,
-                newClipIds,
-            });
-
-            // 导入后将光标定位到起始位置（经独立字段交 reducer 采纳，
-            // 塞进 imported.playhead_sec 会被快照应用静默丢弃）。
-            const importedResult = latestTimeline ?? lastImported;
-
-            return { ok: true, imported: importedResult, newClipIds, playheadSec: startSec };
-        } finally {
-            importRun.finish();
-            endUndoGroupQuietly();
+        // ── 多文件、无本地路径 ──────────────────────────────────────────────
+        //
+        // 【为什么这里只剩一条委派】时间轴的拖放只有两条通道：带本地路径的（Tauri
+        // 原生拖放 / dataTransfer 里的 path）走 importMultipleAudioAtPosition，不带
+        // 路径的 File 兜底分支每次只取 dt.files[0]（见 useTimelineFileDrop）。插件
+        // 形态则由上面那条 importHostBatch 接手。于是这里原本那两段
+        // "读文件 → base64 → importAudioBytes" 的循环是**不可达的重复实现**：它们
+        // 与单文件路径做同一件事，却各自维护一份落点、错误文案与取消闸门。
+        //
+        // 现在退化成逐个委派：真有一天多文件从别的入口进来，行为也仍然是"每个文件
+        // 各导入一个 clip"，只是落点与错误处理只有单文件那一处实现。
+        let lastResult: unknown = null;
+        let accumulatedClipIds: string[] = [];
+        for (const file of files) {
+            const result = (await dispatch(
+                importAudioFileAtPosition({ file, trackId: payload.trackId, startSec }),
+            ).unwrap()) as { imported?: unknown; newClipIds?: string[] };
+            lastResult = result.imported ?? null;
+            accumulatedClipIds = accumulatedClipIds.concat(result.newClipIds ?? []);
         }
+        return {
+            ok: true,
+            imported: lastResult,
+            newClipIds: accumulatedClipIds,
+            playheadSec: startSec,
+        };
     },
 );
 

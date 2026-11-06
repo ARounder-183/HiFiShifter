@@ -1,5 +1,5 @@
 //! 参数命令：checkpoint控制undo，成功写入仍须独立记录工程dirty。
-use super::{ConvertRange, ParamHost};
+use super::{ConvertRange, ParamEditIntent, ParamHost};
 
 // ===================== param curves =====================
 
@@ -177,6 +177,40 @@ pub fn get_param_frames(
     binary: Option<bool>,
     with_sentinel: Option<bool>,
 ) -> crate::models::ParamFramesPayload {
+    if let Some(result) = state.read_authority_frames(
+        &track_id,
+        &param,
+        start_frame,
+        frame_count,
+        stride,
+        with_sentinel,
+        binary,
+    ) {
+        return match result {
+            Ok(payload) => payload,
+            Err(_error) => crate::models::ParamFramesPayload {
+                ok: false,
+                root_track_id: String::new(),
+                param: param.clone(),
+                frame_period_ms: 5.0,
+                start_frame,
+                orig: Vec::new(),
+                edit: Vec::new(),
+                edited: Vec::new(),
+                authority_revision: 0,
+                baseline_revision: 0,
+                geometry_revision: 0,
+                binary: None,
+                reference_kind: resolve_param_reference_kind(&param),
+                analysis_pending: None,
+                analysis_progress: None,
+                pitch_edit_user_modified: None,
+                pitch_edit_backend_available: None,
+                edit_sentinel: None,
+                dyn_orig_key: None,
+            },
+        };
+    }
     if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1") {
         log::warn!(
             "get_param_frames(track_id={}, param={}, start_frame={}, frame_count={}, stride={:?} binary={:?})",
@@ -208,6 +242,10 @@ pub fn get_param_frames(
                     start_frame,
                     orig: vec![],
                     edit: vec![],
+                    edited: vec![],
+                    authority_revision: 0,
+                    baseline_revision: 0,
+                    geometry_revision: 0,
                     binary: None,
                     reference_kind: resolve_param_reference_kind("pitch"),
                     analysis_pending: None,
@@ -281,6 +319,10 @@ pub fn get_param_frames(
             start_frame,
             orig: vec![],
             edit: vec![],
+            edited: vec![],
+            authority_revision: 0,
+            baseline_revision: 0,
+            geometry_revision: 0,
             binary: None,
             reference_kind: resolve_param_reference_kind("pitch"),
             analysis_pending: None,
@@ -348,6 +390,7 @@ pub fn get_param_frames(
     let mut edit = Vec::with_capacity(count);
     // dyn 的"未画"位图（仅 with_sentinel 时填充；其他参数恒 None）。
     let mut edit_sentinel: Option<Vec<bool>> = None;
+    let mut edited: Vec<bool> = Vec::with_capacity(count);
 
     match param.as_str() {
         "pitch" => {
@@ -428,6 +471,38 @@ pub fn get_param_frames(
         }
     }
 
+    // 显式编辑位图：与 value 同源判定。pitch 用 0 哨兵，dyn 用 -1 哨兵，
+    // extra 用参数默认值；绝不从 orig/edit 的数值差异反推（那会把原值物化）。
+    edited.clear();
+    for i in 0..count {
+        let idx = start.saturating_add(i.saturating_mul(step));
+        let is_edited = match param.as_str() {
+            "pitch" => entry.pitch_edit.get(idx).copied().is_some_and(|v| v != 0.0),
+            "tension" => entry
+                .tension_edit
+                .get(idx)
+                .copied()
+                .is_some_and(|v| v != 0.0),
+            "dyn" => entry
+                .extra_curves
+                .get("dyn")
+                .and_then(|curve| curve.get(idx))
+                .is_some_and(|v| *v >= 0.0 && v.is_finite()),
+            _ => entry
+                .extra_curves
+                .get(&param)
+                .and_then(|curve| curve.get(idx))
+                .is_some_and(|v| {
+                    crate::editor::param_authority::is_edited_value(
+                        &crate::editor::param_authority::canonical_param_key(&param),
+                        *v,
+                        resolve_extra_curve_default_value(param_kind, &param),
+                    )
+                }),
+        };
+        edited.push(is_edited);
+    }
+
     // dyn 的分析待定标志：与 pitch 共用 `analysis_pending` 字段（前端只关心
     // "这个参数是否还在后台分析"，语义一致）。
     let analysis_pending = analysis_pending.or(dyn_analysis_pending);
@@ -438,9 +513,13 @@ pub fn get_param_frames(
         param: param.clone(),
         frame_period_ms: fp,
         start_frame,
-        binary: binary.then(|| encode_param_frames_binary(&orig, &edit)),
-        orig: if binary { Vec::new() } else { orig },
-        edit: if binary { Vec::new() } else { edit },
+        binary: binary.then(|| encode_param_frames_binary(&orig, &edit, &edited)),
+        orig: if binary { Vec::new() } else { orig.clone() },
+        edit: if binary { Vec::new() } else { edit.clone() },
+        edited: if binary { Vec::new() } else { edited },
+        authority_revision: 0,
+        baseline_revision: 0,
+        geometry_revision: 0,
         reference_kind: resolve_param_reference_kind(&param),
         analysis_pending,
         analysis_progress: None,
@@ -459,37 +538,96 @@ pub fn get_param_frames(
         },
     }
 }
+/// 供插件权威路径复用的 PFB2 编码入口。
+pub fn encode_pfb2(orig: &[f32], edit: &[f32], edited: &[bool]) -> String {
+    encode_param_frames_binary(orig, edit, edited)
+}
+
 /// 将 orig/edit 两组 f32 曲线编码为 Base64 二进制。
 ///
-/// 协议：`[Header 8B][orig f32[count]][edit f32[count]]`，小端序。
+/// 协议：`[Header 16B: "PFB2"+count+flags+reserved][orig][edit][edited u8]`，小端序。
 ///   - Header: magic `"PFB1"`（4B）+ count（u32 LE，两组长度相同）
 ///
 /// 注意布局是**平面**（先整个 orig、再整个 edit），而不是 orig/edit 交错。
 /// 平面布局下前端可以用 `new Float32Array(buffer, offset, count)` 直接建零拷贝
 /// 视图，无需逐元素反交错。与前端 `paramFramesBinaryCodec.ts` 配套，
 /// 改动任一侧必须同步另一侧。
-fn encode_param_frames_binary(orig: &[f32], edit: &[f32]) -> String {
+pub fn encode_param_frames_binary(orig: &[f32], edit: &[f32], edited: &[bool]) -> String {
     use base64::Engine as _;
 
     debug_assert_eq!(orig.len(), edit.len(), "orig/edit length mismatch");
-    let count = orig.len().min(edit.len());
+    debug_assert_eq!(orig.len(), edited.len(), "orig/edited length mismatch");
+    let count = orig.len().min(edit.len()).min(edited.len());
     let orig = &orig[..count];
     let edit = &edit[..count];
+    let edited = &edited[..count];
 
-    let mut bytes = Vec::with_capacity(8 + count * 8);
-    bytes.extend_from_slice(b"PFB1");
+    let mut bytes = Vec::with_capacity(16 + count * 9);
+    bytes.extend_from_slice(b"PFB2");
     bytes.extend_from_slice(&(count as u32).to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
     for v in orig {
         bytes.extend_from_slice(&v.to_le_bytes());
     }
     for v in edit {
         bytes.extend_from_slice(&v.to_le_bytes());
     }
+    for flag in edited {
+        bytes.push(u8::from(*flag));
+    }
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
-/// 写入参数帧：checkpoint只控制undo，成功尾块/平滑仍在timeline锁内标脏。
+/// 写入参数帧（旧 App 入口；等价的显式位图入口见下）。
 pub fn set_param_frames(
+    state: &impl ParamHost,
+    track_id: String,
+    param: String,
+    start_frame: u32,
+    values: Vec<f32>,
+    checkpoint: Option<bool>,
+) -> serde_json::Value {
+    set_param_frames_with_present(
+        state,
+        track_id,
+        param,
+        start_frame,
+        values,
+        None,
+        checkpoint,
+    )
+}
+
+/// 写入参数帧：`present` 是显式编辑位图；插件权威路径只认它，不做整条数组差分。
+pub fn set_param_frames_with_present(
+    state: &impl ParamHost,
+    track_id: String,
+    param: String,
+    start_frame: u32,
+    values: Vec<f32>,
+    present: Option<Vec<bool>>,
+    checkpoint: Option<bool>,
+) -> serde_json::Value {
+    let do_checkpoint = checkpoint.unwrap_or(true);
+    if let Some(result) = state.write_authority_frames(
+        &track_id,
+        &param,
+        start_frame,
+        &values,
+        present.as_deref(),
+        do_checkpoint,
+    ) {
+        return match result {
+            Ok(value) => value,
+            Err(error) => serde_json::json!({"ok": false, "error": error}),
+        };
+    }
+    set_param_frames_legacy_body(state, track_id, param, start_frame, values, checkpoint)
+}
+
+/// 旧 App 的数组写入主体；插件权威路径在进入这里之前已返回。
+fn set_param_frames_legacy_body(
     state: &impl ParamHost,
     track_id: String,
     param: String,
@@ -677,6 +815,12 @@ pub fn set_param_frames(
         invalidate_rendered_clip_caches_for_child_track(&tl, spec.track_id);
     }
 
+    state.note_param_edit(ParamEditIntent::SetFrames {
+        track_id: root.clone(),
+        param: param.clone(),
+        start_frame: start_frame as usize,
+        frame_count: written,
+    });
     // Ensure realtime playback reflects edits immediately.
     state.publish_timeline(tl.clone());
 
@@ -704,6 +848,15 @@ pub fn restore_param_frames(
     frame_count: u32,
     checkpoint: Option<bool>,
 ) -> serde_json::Value {
+    let do_checkpoint = checkpoint.unwrap_or(true);
+    if let Some(result) =
+        state.restore_authority_frames(&track_id, &param, start_frame, frame_count, do_checkpoint)
+    {
+        return match result {
+            Ok(value) => value,
+            Err(error) => serde_json::json!({"ok": false, "error": error}),
+        };
+    }
     let mut tl = state.timeline().lock().unwrap_or_else(|e| e.into_inner());
     let do_checkpoint = checkpoint.unwrap_or(true);
     if do_checkpoint {
@@ -730,6 +883,11 @@ pub fn restore_param_frames(
 
     match param.as_str() {
         "pitch" => {
+            // 【没有原始值就没有"初始化"】`pitch_orig` 缺席时写 0 会把整条线清零
+            // （用户看到的正是"点一下初始化，参数线掉到底"）。保留当前值，等基线到达。
+            if entry.pitch_orig.is_empty() {
+                return serde_json::json!({"ok": true, "pending": true});
+            }
             for i in 0..count {
                 let idx = start.saturating_add(i);
                 if idx >= entry.pitch_edit.len() {
@@ -795,6 +953,12 @@ pub fn restore_param_frames(
         invalidate_rendered_clip_caches_for_child_track(&tl, spec.track_id);
     }
 
+    state.note_param_edit(ParamEditIntent::RestoreFrames {
+        track_id: root.clone(),
+        param: param.clone(),
+        start_frame: start_frame as usize,
+        frame_count: frame_count as usize,
+    });
     // Ensure realtime playback reflects edits immediately.
     state.publish_timeline(tl.clone());
 

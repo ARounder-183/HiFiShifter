@@ -91,6 +91,16 @@
 取消裁剪能完整恢复曲线（裁剪不缩短权威里的源曲线）。
 「锁定参数线」决定参数跟着**素材**走（源域锚定，默认）还是留在**工程位置**（工程域锚定）。
 
+> **它什么时候生效**：放置策略（`Placement`）决定"用哪条映射"，而**几何代次**
+> （`ui_geometry_revision`）决定"映射到哪"。两者都必须在**投影**时读同一份几何，
+> 开关才是一个真正的开关。此前的实现只在模型收口（`remap_and_log`）那一刻重投影，
+> 而"在宿主里拖动一个 item"既不改 edit 也不改 model —— 于是曲线停住，只有分割
+> （它推进了 edit/scope、走整份重载）才让曲线跟上。现在清单刷新
+> （`refresh_ui_geometry`）也会把重投影结果落到 GUI 读的那份数组上
+> （`adopt_view_into_timeline`），并且**只换曲线**：`pitch_orig_key` /
+> `dyn_orig_key` / `pending_pitch_offset` 是会话自己的记账，换掉它们会让每次拖动
+> 都触发一轮重分析。
+
 **persistentID 的生命周期必须跟着搬权威**：宿主改名（`updateAudioModificationProperties`）、
 整份 / 部分存档恢复时的 ID 重映射，都要同步把权威表搬过去，否则曲线被孤儿化。
 宿主动销毁 modification 时权威**不立即删**（撤销会把同一个 ID 带回来），
@@ -115,6 +125,25 @@
 `timestretch` / `content_fade_head` / `content_fade_tail` 来自 ARA region —— 因此
 **ARA-only 后端也必须采到后三项并推进 epoch**（`refresh_ara_render_facts`），否则宿主在
 ARA 侧改了时间拉伸 / 内容淡化，插件会继续用旧配置渲染。
+
+---
+
+## 3.1 CLAP（Capture-only 外壳，阶段 1）
+
+当前 `hifishifter-clap` 是可被 CLAP 1.1.9 宿主扫描与加载的普通插入效果器：
+
+| 能力 | 状态 | 契约原因 |
+| --- | --- | --- |
+| 实例化 / 激活 / process / 保存 state / 销毁 | 有 | `clap.plugin-factory` + `clap.state` + `clap.audio-ports` |
+| transport 读数 | 按事件如实给 | 只从 `clap_event_transport_t` 读播放/录音/循环/拍号；`steady_time` 不推断播放 |
+| 离线 bounce | 按扩展如实给 | 只从 `clap.render` 的 `CLAP_RENDER_OFFLINE` 置位 |
+| ARA 工厂 / 实例扩展 | **不暴露** | 共享 ARA 文档模型仍在 VST3 外壳里；暴露不能创建控制器的工厂会让宿主写穿空指针 |
+| `ara:supported` / `ara:required` | 都不声明 | descriptor 只描述已履行的能力 |
+| 内嵌 WebView / 宿主心跳 | 未提供 | core 的 GUI 原语还依赖 VST3 的 `IPlugFrame` / `IRunLoop`；CLAP 需要一套 `GuiAttach` 实现 |
+| 写回 / 分割 / 建轨 / 宿主撤销 / take / folder | 不可用 | 与 ARA-only 相同：REAPER 原生扩展是 VST3 COM 专属，CLAP 没有对应接口 |
+
+**这张表是阶段 1 的契约，不是缺陷清单**：阶段 2 只有把共享 ARA 运行时抽进 core、接好
+`ClapAraPluginAdapter` 的六个生命周期观察点并跑完真机验收，才允许把 ARA 能力写回 descriptor。
 
 ---
 
@@ -148,3 +177,4 @@ ARA 侧改了时间拉伸 / 内容淡化，插件会继续用旧配置渲染。
 | 身份 / 能力词汇表 | `backend/hifishifter-kernel/src/editor/host.rs` |
 | 丢失字段登记 | `backend/hifishifter-plugin/src/ara/mapping.rs`（`LOST_FIELDS`） |
 | 渲染事实 | `backend/hifishifter-plugin/src/host/geometry.rs` |
+| CLAP 外壳 | `backend/hifishifter-clap/` |

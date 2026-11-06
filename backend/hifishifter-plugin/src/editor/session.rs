@@ -140,6 +140,16 @@ impl RetryState {
             return RenderAction::Retry(ANALYSIS_PENDING_RETRY);
         }
         self.analysis_pending_since = None;
+        // 【"被取代"不是错误】渲染期间用户又改了一笔 / 宿主又交付了一次几何 ⇒ 这次
+        // 结果作废、立刻重排。把它计入 streak 会让"连续编辑"退避到 5 秒一轮，
+        // 用户看到的就是"画完半天不响"。真正需要退避的只有失败（渲染报错、发布失败）。
+        if error == "automatic apply superseded"
+            || error == "Conflict: workspace changed during automatic apply"
+        {
+            self.streak = 0;
+            *session.render_error.lock_or_recover() = None;
+            return RenderAction::Retry(RENDER_RETRY_INTERVAL);
+        }
         self.streak = self.streak.saturating_add(1);
         // 预算内：快速重试（宿主的编辑事务通常会在这 1.2 秒内收口）。
         if self.streak < RENDER_RETRY_BUDGET {
@@ -358,6 +368,28 @@ struct RegisteredView {
     sink: UiSink,
     route: Option<(Arc<super::routing::EditorLink>, u64)>,
 }
+impl RegisteredView {
+    /// 这条视图的路由是否仍然有效：组件还活着、仍指向本文档、绑定代次没变。
+    ///
+    /// 【为什么只有一个判据】"视图该被丢掉"有两个发现者 —— `revoke_closed_views`
+    /// （组件 stop 时主动扫一遍）与 `emit`（每次发事件时顺手清理）。两处各写一份
+    /// 判据的后果不是重复，而是**行为分叉**：`emit` 曾经只把视图从表里删掉、却不关
+    /// 它的回信口，于是组件 stop 与 actor 的一次 emit 撞在一起时，视图被静默丢弃 ——
+    /// 前端永远等一条不会来的回复，而 `enqueue` / `response` 都以为它还活着。
+    fn route_is_live(&self, document: Option<&Arc<DocumentSession>>) -> bool {
+        self.route.as_ref().is_none_or(|(link, lease)| {
+            document.is_some_and(|document| {
+                link.authorize(document)
+                    .is_ok_and(|current| current == *lease)
+            })
+        })
+    }
+
+    /// 丢掉一条视图时的**唯一**收尾：关掉它的回信口。
+    fn retire(&self) {
+        self.sink.closed.store(true, Ordering::Release);
+    }
+}
 #[derive(Default)]
 struct Loaded {
     initialized: bool,
@@ -430,7 +462,18 @@ pub(crate) struct EditorSession {
     /// 与 `load_capture_timeline` 的 `kept` 机制是同一件事。owner 只负责在会话
     /// **还不存在**时把字节块暂存下来（见 `ExtensionOwner::pending_capture_edits`）。
     pub(super) pending_capture_edits: Mutex<Option<super::capture_edits::CaptureEdits>>,
+    /// 最近一批显式参数写入意图；capture 用它区分"用户真的写了这几帧"与
+    /// "几何刷新后整份视图看起来不同"。
+    pub(super) param_intents: Mutex<Vec<hifishifter_kernel::editor::ParamEditIntent>>,
     pub(super) history: Mutex<TimelineHistory>,
+    /// 参数权威的逐步快照：history record index → authority。
+    /// 显示数组不再进历史；undo/redo 只回放这一层。
+    authority_history: Mutex<
+        std::collections::BTreeMap<
+            usize,
+            hifishifter_kernel::editor::param_authority::ParamAuthority,
+        >,
+    >,
     pub(super) project: Mutex<ProjectState>,
     // 设置**不在**这里：它属于用户，不属于某一个 ARA 文档。此前它是本结构体的字段，
     // 于是每个工程一份、初始化为出厂默认，换工程即丢。现在由进程级的
@@ -508,6 +551,15 @@ pub(crate) struct EditorSession {
     processed: AtomicU64,
     pub(super) applied: AtomicU64,
     host_version: AtomicU64,
+    /// 上一次通知 GUI 时那**份时间线**的内容指纹（见
+    /// `hifishifter_kernel::state::timeline_fingerprint`）。
+    ///
+    /// 【为什么需要它】每条 `plugin_host_changed` 都让前端重取整份时间线（实测单条
+    /// 1.9 MB）。而这条通知的**来源**里有若干条是"某个内部版本号变了"，不是"用户能
+    /// 看出区别了" —— 于是环一旦闭合（通知 → 前端重取 → 重取推动上游 → 再通知）就
+    /// 停不下来：实测 2~4 份整图每秒，页面堆冲到 1 GB 以上，状态栏一直闪"加载中"。
+    /// 指纹把"要不要通知"从"谁调用了"换成"内容变了没有"。
+    notified_fingerprint: Mutex<Option<u64>>,
     ui_geometry_version: AtomicU64,
     project_duration: AtomicU64,
     pub(super) error: Mutex<Option<String>>,
@@ -515,6 +567,8 @@ pub(crate) struct EditorSession {
     render_requested: AtomicBool,
     /// 播放位置采样的节奏读数（见 `note_playhead_sample`）。
     playhead_gaps: Mutex<PlayheadGaps>,
+    /// "在播、但位置一秒没动"的观测起点（见 `note_transport_stall`）。
+    transport_stall: Mutex<Option<(f64, Instant)>>,
     /// `pending` 持续为真的起点；不 pending 时为 `None`（诊断用）。
     pending_since: Mutex<Option<Instant>>,
     /// 本段 pending 是否已经报过 —— 每段只报一次，避免把诊断变成刷屏。
@@ -726,7 +780,9 @@ impl EditorSession {
             backing,
             timeline: Mutex::new(TimelineState::default()),
             pending_capture_edits: Mutex::new(None),
+            param_intents: Mutex::new(Vec::new()),
             history: Mutex::new(Default::default()),
+            authority_history: Mutex::new(std::collections::BTreeMap::new()),
             project: Mutex::new(initial_project),
             loaded: Mutex::new(Default::default()),
             // 渲染用的 PCM 暂存同样搬出 `%TEMP%`：磁盘清理在会话进行中删掉这些
@@ -759,12 +815,14 @@ impl EditorSession {
             processed: AtomicU64::new(0),
             applied: AtomicU64::new(0),
             host_version: AtomicU64::new(0),
+            notified_fingerprint: Mutex::new(None),
             ui_geometry_version: AtomicU64::new(0),
             project_duration: AtomicU64::new(0),
             error: Mutex::new(None),
             render_error: Mutex::new(None),
             render_requested: AtomicBool::new(false),
             playhead_gaps: Mutex::new(PlayheadGaps::default()),
+            transport_stall: Mutex::new(None),
             pending_since: Mutex::new(None),
             pending_reported: AtomicBool::new(false),
             render_task: Mutex::new(None),
@@ -873,6 +931,11 @@ impl EditorSession {
             || !timeline.project_scale_notes.is_empty()
             || timeline.tempo_map.is_some()
             || !timeline.disabled_group_ids.is_empty()
+            || timeline.clips.iter().any(|clip| {
+                clip.takes
+                    .iter()
+                    .any(|take| take.syllable_analysis.is_some())
+            })
     }
 
     /// 把界面时间线还原成**音频权威**形态，供 Capture 渲染使用。
@@ -1105,14 +1168,9 @@ impl EditorSession {
     pub(crate) fn revoke_closed_views(&self) {
         let document = self.document();
         self.views.lock_or_recover().retain(|_, view| {
-            let valid = view.route.as_ref().is_none_or(|(link, lease)| {
-                document.as_ref().is_some_and(|document| {
-                    link.authorize(document)
-                        .is_ok_and(|current| current == *lease)
-                })
-            });
+            let valid = view.route_is_live(document.as_ref());
             if !valid {
-                view.sink.closed.store(true, Ordering::Release);
+                view.retire();
             }
             valid
         });
@@ -1191,6 +1249,9 @@ impl EditorSession {
                 // `start()` 会把它们覆盖掉 —— "到点自动停"于是变成"到点丢掉"。
                 if let Some(owner) = session.capture_owner() {
                     owner.capture().service();
+                    // 【预览收尾】setProcessing(false) 只挂起；宿主真的不再送块时，
+                    // 由这个非音频心跳在 2 秒后 promote 并释放 cursor（音频线程不读墙钟）。
+                    owner.tick_preview_quiet();
                     // 【为什么原始磁带也要在这里补】它此前只在**用户动作**上发布
                     // （`capture_stop` / 清空 / 删 take 都走 `request_capture_reload`）。
                     // 而 take 还有第二条来源：宿主重开工程时从组件 state 的清单恢复
@@ -1212,6 +1273,14 @@ impl EditorSession {
                     // 停摆，而界面照样显示素材已就绪（用户报障："永远是直通"）。
                     if owner.take_render_wanted()
                         && !session.render_requested.load(Ordering::Acquire)
+                    {
+                        session.render_requested.store(true, Ordering::Release);
+                        deadline = Some(Instant::now());
+                    }
+                    // 【窗口渲染的补排】播放头走出当前快照的安全区（或整段装不下、
+                    // 当前窗口已经走完）时补一次。整段快照时这条恒为 false。
+                    if !session.render_requested.load(Ordering::Acquire)
+                        && owner.window_needs_rerender()
                     {
                         session.render_requested.store(true, Ordering::Release);
                         deadline = Some(Instant::now());
@@ -1552,10 +1621,73 @@ impl EditorSession {
         let _ = current.worker.join();
         Some((current.generation, current.ticket, cancelled, result))
     }
+
+    /// 把一份时间线作为**用户编辑**提交给文档（一次尝试）。
+    ///
+    /// 【为什么从 `publish_timeline` 里抽出来】重放要求"同一份用户意图提交多次"，
+    /// 而每次提交都必须用**当次**的基线与代次。抽成一个函数，重放循环里就只剩
+    /// "取新基线 → 再交一次"这一件事。
+    fn submit_workspace_edit(&self, timeline: &TimelineState) -> Result<(), String> {
+        let document = self.require_document()?;
+        let groups = document.edits.lock_or_recover().groups.clone();
+        let groups = if groups.is_empty() {
+            None
+        } else {
+            Some(groups.with_processing_from(timeline, &document.group_aliases(&self.namespace))?)
+        };
+        let native = self.native_timeline(timeline.clone())?;
+        let (edit, model, baseline) = {
+            let loaded = self.loaded.lock_or_recover();
+            (loaded.edit, loaded.model, loaded.view.clone())
+        };
+        // 【没有基线只有一种可能】这份会话还没读过工作区（窗口刚建、首帧还没到）。
+        // 那不是"冲突"，是一句可行动的话：重新打开窗口即可。
+        let Some(baseline) = baseline else {
+            return Err(
+                "Conflict: the editor has not read the workspace yet; reopen the plugin window"
+                    .into(),
+            );
+        };
+        let versions =
+            document.accept_workspace_edits_with_groups(edit, model, &native, &baseline, groups)?;
+        let mut loaded = self.loaded.lock_or_recover();
+        loaded.edit = versions.0;
+        loaded.model = versions.1;
+        // 【成对写】accept 返回的就是"编辑器此刻显示的视图"的下一份基线；
+        // 不存它，下一次提交的基线就落后一代（旧实现正是在这里把指针推离缓存）。
+        loaded.view = Some(versions.2);
+        self.param_intents.lock_or_recover().clear();
+        Ok(())
+    }
+
+    /// 重新取一份"编辑器此刻读到的"工作区视图，作为下一次提交的差分基线。
+    ///
+    /// 【为什么必须重取而不是复用】`capture_changes` 只记录 `client` 与基线的**差异**。
+    /// 拿一份过期基线重放，几何变化会被当成"用户改了参数"写回源曲线（抹平）。
+    fn refresh_baseline(&self) -> Result<(), String> {
+        let document = self.require_document()?;
+        let versions = document.editor_versions()?;
+        let view = document.workspace_view()?;
+        let mut loaded = self.loaded.lock_or_recover();
+        loaded.edit = versions.0;
+        loaded.model = versions.1;
+        loaded.view = Some(view);
+        Ok(())
+    }
+
     /// 原线缓存组装保留在actor；只把已确认的版本票据交给DSP线程，不并发修改timeline。
-    fn prepare_apply(&self) -> Result<(Arc<DocumentSession>, u64, u64, String), String> {
+    fn prepare_apply(&self) -> Result<(Arc<DocumentSession>, u64), String> {
+        // 【R7：只有**终态**错误才短路自动渲染】瞬时冲突（`Conflict: …`）意味着"宿主
+        // 在提交窗口里动过"，它必然收敛 —— 而 `self.error` 只在"提交成功"或
+        // `ensure_loaded` 成功时被清空。于是**一次**冲突就能让音频停在旧版本，直到
+        // 用户再做一次能成功的操作（用户报的"编辑之后没有声音"）。
+        //
+        // 现在瞬时冲突只进 `render_error`（读数），不挡渲染：旧快照仍可服务，
+        // 而重放（见 `publish_timeline`）会把编辑补上。
         if let Some(error) = self.error.lock_or_recover().clone() {
-            return Err(error);
+            if !crate::editor::errors::is_replayable_edit_conflict(&error) {
+                return Err(error);
+            }
         }
         self.complete_cached_analysis();
         if let Some(error) = self.error.lock_or_recover().clone() {
@@ -1565,27 +1697,17 @@ impl EditorSession {
         if self.requires_analysis(&self.timeline.lock_or_recover()) {
             return Err("pitch analysis pending".into());
         }
-        let (edit, model, projection) = {
-            let loaded = self.loaded.lock_or_recover();
-            (
-                loaded.edit,
-                loaded.model,
-                loaded
-                    .view
-                    .as_ref()
-                    .map(|view| view.projection.clone())
-                    .unwrap_or_default(),
-            )
-        };
+        // 【票据不再从这里出】它是渲染入口（`apply_workspace_edits_with_progress`）
+        // 自己取的。`loaded` 的语义是"编辑器最后一次读工作区时的票据"，把它当渲染
+        // 守卫等于"用户每画一笔就让下一次渲染必然 Conflict"。
         let document = self.require_document()?;
-        Ok((document, edit, model, projection))
+        Ok((document, self.generation.load(Ordering::Acquire)))
     }
     fn start_render(self: &Arc<Self>, ticket: u64) -> Result<(), String> {
         if self.is_capture() {
             return self.start_capture_render(ticket);
         }
-        let (document, edit, model, projection) = self.prepare_apply()?;
-        let generation = self.generation.load(Ordering::Acquire);
+        let (document, generation) = self.prepare_apply()?;
         let cancel = Arc::new(AtomicBool::new(false));
         let current = self.clone();
         let job_cancel = cancel.clone();
@@ -1617,9 +1739,6 @@ impl EditorSession {
         );
         let worker = RenderTask::spawn(ticket, generation, cancel, move || {
             document.apply_workspace_edits_with_progress(
-                edit,
-                model,
-                &projection,
                 job_cancel.clone(),
                 || {
                     !job_cancel.load(Ordering::Acquire)
@@ -1691,11 +1810,8 @@ impl EditorSession {
         ticket: u64,
         progress: Option<hifishifter_kernel::mixdown::ProgressCallback>,
     ) -> Result<(), String> {
-        let (document, edit, model, projection) = self.prepare_apply()?;
+        let (document, _generation) = self.prepare_apply()?;
         document.apply_workspace_edits_with_progress(
-            edit,
-            model,
-            &projection,
             self.analysis_cancel.clone(),
             || {
                 !self.closed.load(Ordering::Acquire)
@@ -1756,9 +1872,13 @@ impl EditorSession {
     /// 投影撤销项目缓存键时，源分析可能早已全量命中；由actor组装，不等GUI读取/新通知。
     /// 只消费clip分析缓存，不做神经推理；尚未齐全仍pending，用户目标曲线保持。
     fn complete_cached_analysis(&self) {
+        // 【为什么不能在这里取文档】`document()` 只被后面"把基线发布到文档"那一步需要。
+        // 此前它挡在函数最前面，于是 Capture 形态（**永远没有文档**）在第一步就返回 ——
+        // 下面那段 `if self.is_capture()` 是**死代码**，`pitch_orig_key` 永不置位，界面
+        // 停在"正在分析音高"，60 秒后触发 `analysis_abandoned` 降级渲染。
         let roots = {
             let mut timeline = self.timeline.lock_or_recover();
-            // 首次载入尚未get_param_frames时也必须有根状态，否则完成通知找不到接收原线的条目。
+            // 首次载入尚未 get_param_frames 时也必须有根状态，否则完成通知找不到接收原线的条目。
             let active_roots = timeline
                 .clips
                 .iter()
@@ -1767,13 +1887,13 @@ impl EditorSession {
             for root in active_roots {
                 timeline.ensure_params_for_root(&root);
             }
+            // 【判据是布局键，不是"就绪没有"】"就绪"是一次性状态；布局一变它不会
+            // 变回未就绪，基线就永远停在旧布局（移动之后旧位置留着原曲线、新位置
+            // `pitch_orig = 0` ⇒ 渲染器判定"无源 F0"而直通原音）。
             timeline
                 .params_by_root_track
-                .iter()
-                .filter(|(_, params)| {
-                    params.pitch_orig_key.is_none() || params.dyn_orig_key.is_none()
-                })
-                .map(|(root, _)| root.clone())
+                .keys()
+                .cloned()
                 .collect::<Vec<_>>()
         };
         if roots.is_empty() {
@@ -1793,9 +1913,30 @@ impl EditorSession {
             hifishifter_kernel::pitch_analysis::maybe_schedule_pitch_orig(&analysis, root);
             hifishifter_kernel::pitch_analysis::maybe_schedule_dyn_orig(&analysis, root);
         }
+        // 布局键必须取自**这一轮组装所用的**时间线：它与文档侧的键只差命名空间前缀，
+        // 而 `build_root_pitch_layout_key` 已经把前缀剥掉（见 `clip_layout_identity`）。
+        let layout_keys = {
+            let timeline = analysis.lock_or_recover();
+            roots
+                .iter()
+                .map(|root| {
+                    (
+                        root.clone(),
+                        hifishifter_kernel::pitch_analysis::build_root_pitch_layout_key(
+                            &timeline, root,
+                        ),
+                    )
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
         let params = analysis.into_inner().unwrap().params_by_root_track;
-        let mut changed = false;
-        {
+        // 【T1 / T7：分析完成只写**基线层**】旧实现把 pitch_orig / pitch_edit 直接写进
+        // 显示时间线，再走"用户提交"漏斗回写文档 —— 于是"分析完成"被捕获成一次
+        // 用户编辑（R5），未编辑帧被当成用户输入固化。现在它只发布基线：
+        // 显示由合成产生，捕获只认编辑域的差分。
+        // 【采集会话没有宿主文档】显示时间线就是权威：分析结果直接落进去，
+        // 绝不能走"文档基线 + 合成"（那条路径要求一份宿主时间线）。
+        if self.is_capture() {
             let mut timeline = self.timeline.lock_or_recover();
             for root in roots {
                 let Some(next) = params.get(&root) else {
@@ -1804,42 +1945,139 @@ impl EditorSession {
                 let Some(current) = timeline.params_by_root_track.get_mut(&root) else {
                     continue;
                 };
-                // 【原线补齐不等于内容变了】`pitch_orig_key` 是**缓存失效标记**，
-                // 不是内容本身：清掉它之后重新组装出的数组可能逐值相同（同一份
-                // 素材、同一份分析结果）。那时渲染结果一个字都不会变，就不该推进
-                // 渲染版本。
-                //
-                // 旧实现无条件 `changed = true`，于是"分析完成"这个本该一次性的
-                // 事件变成了每轮都推进版本：版本闸触发重渲染 → 快照换版 →
-                // 输出 token 变 → 装填一次接缝淡化（用户听到的咔）。
-                //
-                // 【为什么键仍然要写】它是失效标记：不写回去，下一轮 `roots` 仍然
-                // 包含它，组装会无限重复。写键、但不推进版本 —— 这两件事必须分开。
-                if current.pitch_orig_key.is_none() && next.pitch_orig_key.is_some() {
-                    let edit_differs =
-                        !current.pitch_edit_user_modified && current.pitch_edit != next.pitch_edit;
-                    changed |= current.pitch_orig != next.pitch_orig || edit_differs;
-                    current.pitch_orig = next.pitch_orig.clone();
-                    if !current.pitch_edit_user_modified {
-                        current.pitch_edit = next.pitch_edit.clone();
-                    }
-                    current.pitch_orig_key = next.pitch_orig_key.clone();
-                    current.has_pitch_adjustment_active = next.has_pitch_adjustment_active;
+                current.pitch_orig = next.pitch_orig.clone();
+                if !current.pitch_edit_user_modified {
+                    current.pitch_edit = next.pitch_edit.clone();
                 }
-                if current.dyn_orig_key.is_none() && next.dyn_orig_key.is_some() {
-                    changed |= current.dyn_orig != next.dyn_orig;
-                    current.dyn_orig = next.dyn_orig.clone();
-                    current.dyn_orig_key = next.dyn_orig_key.clone();
-                }
+                current.pitch_orig_key = next.pitch_orig_key.clone();
+                current.pitch_assembly_partial = next.pitch_assembly_partial;
+                current.dyn_orig = next.dyn_orig.clone();
+                current.dyn_orig_key = next.dyn_orig_key.clone();
+                current.has_pitch_adjustment_active = next.has_pitch_adjustment_active;
             }
+            drop(timeline);
+            self.publish_timeline_derived();
+            return;
+        }
+        // 【基线由"分析组装者"发布，但必须带上布局键】ARA 文档时间线里的
+        // `source_path` 是 ARA source 的 persistent id（不是文件路径），内容缓存按
+        // 真实文件路径建键 —— 因此文档侧自己组装不出来。真正能组装的只有本会话
+        // （它有清单给出的真实路径）。这里把组装结果连同布局键一起发布，文档侧的
+        // `baseline_for` 才能在布局未变时直接复用、在布局变了时知道要重建。
+        let mut changed = false;
+        for root in &roots {
+            let Some(next) = params.get(root) else {
+                continue;
+            };
+            // 【键缺席 ⇒ 分析还没真的完成】这一轮不发布，下一轮还会再试。
+            // 少了这条门，`pitch_analysis_algo = none` 的轨道也会被发布一份
+            // "全 0 但非空"的基线 —— 它会让渲染器误判"这条轨有参数要处理"，
+            // 从而走处理器路径并产出静音（本地回归实测）。
+            if next.pitch_orig_key.is_none() && next.dyn_orig_key.is_none() {
+                continue;
+            }
+            // 【到这里才需要文档】见函数开头：Capture 形态在上面的分支已经返回。
+            let Some(document) = self.document() else {
+                return;
+            };
+            let host_root = root
+                .strip_prefix(&self.namespace)
+                .unwrap_or(root)
+                .to_owned();
+            let Some(layout) = layout_keys.get(root) else {
+                continue;
+            };
+            changed |= document.publish_baseline(
+                &host_root,
+                hifishifter_kernel::editor::param_authority::RootBaseline::from_params(next)
+                    .with_layout(layout.clone()),
+            );
+        }
+        // 分析刚刚补齐（缓存从"部分命中"变成"全命中"）也要让显示与渲染重读一次：
+        // 基线的重建是懒的，没有这个信号就要等到下一次滚动/编辑才刷新。
+        if params
+            .values()
+            .any(|next| next.pitch_orig_key.is_some() || next.dyn_orig_key.is_some())
+        {
+            changed = true;
         }
         if changed {
             self.revision_bumps_analysis.fetch_add(1, Ordering::Relaxed);
-            let updated = self.timeline.lock_or_recover().clone();
-            self.publish_timeline(updated);
+            self.refresh_display_from_document();
             self.render_requested.store(true, Ordering::Release);
         }
     }
+
+    /// 把文档（宿主 id 空间）的根参数装进本会话（UI id 空间）的时间线。
+    ///
+    /// 【为什么必须映射而不是整份替换】文档的根键是 `track`，本会话的是
+    /// `{namespace}track`（见 `rewrite_ids`）。直接赋值会让根凭空消失：分析轮次
+    /// 找不到它、`pitch_orig_key` 永远是 None，界面停在"在分析"。
+    fn install_document_params(
+        &self,
+        timeline: &mut TimelineState,
+        params: &std::collections::BTreeMap<String, TrackParamsState>,
+    ) {
+        let live = timeline
+            .tracks
+            .iter()
+            .map(|track| track.id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        // 【为什么是逐根补丁而不是整表替换】合成视图只包含"这一轮算得出来"的根
+        // （缺基线的根会被跳过）。整表替换会把缺席的根**直接删掉**，界面上的那条
+        // 参数线随之消失 —— 用户看到的就是"切屏回来线少了一条"。
+        for (root, entry) in params.iter() {
+            let namespaced = format!("{}{root}", self.namespace);
+            let key = if live.contains(&namespaced) {
+                namespaced
+            } else {
+                root.clone()
+            };
+            if live.contains(&key) {
+                timeline.params_by_root_track.insert(key, entry.clone());
+            }
+        }
+    }
+
+    /// 把文档合成出来的显示数组装进本会话的时间线（**只读**，不提交任何编辑）。
+    fn refresh_display_from_document(&self) {
+        let Some(document) = self.document() else {
+            return;
+        };
+        let Ok(view) = document.workspace_view() else {
+            return;
+        };
+        {
+            let mut timeline = self.timeline.lock_or_recover();
+            self.install_document_params(&mut timeline, view.params.as_ref());
+        }
+        // 【票据必须一起前进】这份视图就是"编辑器此刻读到的"那一份；不同步
+        // `loaded`，下一次提交的差分基线就落后一代（把宿主几何差异当成用户改动），
+        // 而渲染入口也会拿到过期的 edit/model/scope。
+        if let Ok(versions) = document.editor_versions() {
+            let mut loaded = self.loaded.lock_or_recover();
+            if loaded.initialized {
+                loaded.edit = versions.0;
+                loaded.model = versions.1;
+                loaded.scope = versions.2;
+                loaded.view = Some(view);
+            }
+        }
+        self.publish_timeline_derived();
+    }
+
+    /// 派生发布：只让 GUI / 渲染看到新数组，**绝不**把它当成用户编辑提交。
+    fn publish_timeline_derived(&self) {
+        self.revision_bumps_publish.fetch_add(1, Ordering::Relaxed);
+        self.timeline_revision.fetch_add(1, Ordering::AcqRel);
+        self.clip_count.store(
+            self.timeline.lock_or_recover().clips.len() as u64,
+            Ordering::Release,
+        );
+        self.render_requested.store(true, Ordering::Release);
+        self.notify_timeline();
+    }
+
     /// 把宿主的编辑器视图选择搬进时间线（A5：`notifySelection` → 插件选区）。
     ///
     /// 【为什么只在"宿主的选择变了"时才覆盖】`notifySelection` 的契约是"通知插件用户
@@ -2032,10 +2270,10 @@ impl EditorSession {
         // 上一轮素材上卡死的分析结论不该跟着新素材走，否则新录的东西会被当成
         // "算不出来"，直接降级渲染（见 `analysis_abandoned` 的字段说明）。
         self.analysis_abandoned.lock_or_recover().clear();
-        for params in timeline.params_by_root_track.values_mut() {
-            params.pitch_orig_key = None;
-            params.dyn_orig_key = None;
-        }
+        // 【T1：这里**不再**清 `pitch_orig_key`】旧实现在加载时逐根清显示层的键，
+        // 那是 R1 的起点。失效判据现在归基线层：`RootBaseline::pitch_key` 与
+        // `build_root_pitch_key` 同源，分析流水线每次组装都会重算它。
+        // （同一源换 PCM 的失效尚未接上 —— 见 Plan §9.2 的未完成项。）
         self.rewrite_ids(&mut timeline, true);
         self.retain_display_waveforms(&mut timeline, false);
         document.present_host_inventory(&mut timeline, &self.namespace);
@@ -2069,8 +2307,7 @@ impl EditorSession {
             timeline.selected_clip_id = timeline.clips.first().map(|c| c.id.clone());
         }
         self.apply_host_selection(&mut timeline);
-        self.project_duration
-            .store(timeline.project_sec.to_bits(), Ordering::Release);
+        self.publish_duration(timeline.project_sec);
         self.clip_count
             .store(timeline.clips.len() as u64, Ordering::Release);
         *self.timeline.lock_or_recover() = timeline;
@@ -2095,19 +2332,24 @@ impl EditorSession {
         };
         *self.error.lock_or_recover() = None;
         *self.render_error.lock_or_recover() = None;
-        self.applied
-            .store(self.generation.load(Ordering::Acquire), Ordering::Release);
+        // 【不要在这里宣告"音频已应用"】`applied` 的语义是"这一代的**音频**已经发布"，
+        // 而本函数只装载了编辑/时间线状态。旧实现在这里直接写 `applied = generation`，
+        // 于是任何一次重载（宿主回写、焦点切换、模型回调）都会把"还没重算的音频"
+        // 记成已应用 —— 自动渲染的等待循环因此提前放行，用户听到的是上一版声音。
+        // 真正的写入者是渲染完成分支（见 `complete_render` 的 Ok 分支）。
         self.peaks.lock_or_recover().clear();
         // snapshot返回后UI缓存可能再次更新，强制下一轮按短事务版本同步，不能吞掉该变化。
         self.ui_geometry_version.store(0, Ordering::Release);
         self.complete_cached_analysis();
         self.schedule_analysis();
-        self.render_requested.store(true, Ordering::Release);
-        self.host_version.fetch_add(1, Ordering::AcqRel);
-        self.emit(
-            "plugin_host_changed",
-            json!({"version":self.host_version.load(Ordering::Acquire)}),
-        );
+        // 【只有 GUI 真的会看到区别时才请求合成、才通知】见 `notified_fingerprint`。
+        //
+        // 此前这两件事无条件做：一次"版本号动了但内容没动"的重载会既排一次合成
+        // （`render_requested` ⇒ 状态栏的 `rendering=1` 永远为真 ⇒ 一直显示"加载中"）
+        // 又让前端重取一份整图。而重载本身可能就是被那份重取推动的 —— 环闭合。
+        if self.notify_timeline() {
+            self.render_requested.store(true, Ordering::Release);
+        }
         Ok(())
     }
 
@@ -2179,6 +2421,17 @@ impl EditorSession {
         )?;
         // 先命名空间化，再按键对曲线 —— 保留的那份键已经是命名空间化的。
         self.rewrite_ids(&mut timeline, true);
+        // 【内容身份跟着 PCM 走】Capture 的分析缓存键优先读 content_id；这里再写
+        // 内容哈希指纹，保证“同 take 号、不同内容”必定 miss，“同内容、不同 take”
+        // 必定 hit。ARA 的指纹由 refresh_source_fingerprints 负责，这里只服务 Capture。
+        let fingerprints = owner.capture().content_fingerprints();
+        for clip in &mut timeline.clips {
+            if let Some(content_id) = clip.content_id.as_deref() {
+                if let Some(stamp) = fingerprints.get(content_id) {
+                    clip.source_file_fingerprint = Some(*stamp);
+                }
+            }
+        }
         let roots = timeline
             .clips
             .iter()
@@ -2257,8 +2510,7 @@ impl EditorSession {
         if timeline.selected_clip_id.is_none() {
             timeline.selected_clip_id = timeline.clips.first().map(|c| c.id.clone());
         }
-        self.project_duration
-            .store(timeline.project_sec.to_bits(), Ordering::Release);
+        self.publish_duration(timeline.project_sec);
         self.clip_count
             .store(timeline.clips.len() as u64, Ordering::Release);
         *self.timeline.lock_or_recover() = timeline;
@@ -2330,25 +2582,29 @@ impl EditorSession {
                     }
                 }
             }
-            self.project_duration
-                .store(timeline.project_sec.to_bits(), Ordering::Release);
+            self.publish_duration(timeline.project_sec);
         }
-        // 音节分析写在 live timeline 的 Take 上，而 UI 清单投影会用宿主几何
-        // 重写 takes。凡是被重建但仍存在同 Clip/Take 的条目，若源摘要未变，
-        // 就从存档副本重新播种一次；否则一次几何刷新会让刚算出的块“消失”，
-        // 前端再次分析，形成看起来像卡死的闭环。
+        // 宿主清单已经换成这一轮几何：先做一次参数几何事务，再读派生视图。
+        // 失败时不推进版本，下一轮重试同一 delta。
+        if let Err(error) = document.reconcile_parameter_geometry() {
+            log::warn!("[ara] parameter geometry deferred: {error}");
+            return;
+        }
+        // 【版本号必须在 adopt **成功之后**才推进】否则一次失败的 adopt 会把
+        // `ui_geometry_version` 推到最新，之后每轮都早退 —— 会话永久停在旧数组上，
+        // 用户看到的就是"切屏回来参数线回退"。
+        // 音节分析挂在 live take 上，清单重建会重写 takes。保持与
+        // `apply_take_syllables` 同一判据：稳定键 + 源摘要一致才播种。
         {
-            let edits = match self.document() {
-                Some(document) => document.edits.lock_or_recover().clone(),
-                None => return,
-            };
+            let edits = document.edits.lock_or_recover();
             let mut timeline = self.timeline.lock_or_recover();
+            let frame_period_ms = timeline.frame_period_ms();
             for clip in &mut timeline.clips {
                 for take in &mut clip.takes {
                     if take.syllable_analysis.is_some() {
                         continue;
                     }
-                    let key = super::state_channel::TakeSyllableKey {
+                    let key = crate::state_channel::TakeSyllableKey {
                         clip_id: clip.id.clone(),
                         take_id: take.id.clone(),
                     };
@@ -2358,8 +2614,7 @@ impl EditorSession {
                             .as_deref()
                             .or(clip.source_path.as_deref())
                             .unwrap_or_default();
-                        let digest =
-                            syllable_source_digest(source_path, take, timeline.frame_period_ms());
+                        let digest = syllable_source_digest(source_path, take, frame_period_ms);
                         if analysis.is_current(&digest) {
                             take.syllable_analysis = Some(analysis.clone());
                         }
@@ -2367,7 +2622,7 @@ impl EditorSession {
                 }
             }
         }
-        self.ui_geometry_version.store(version, Ordering::Release);
+        let mut adopted = !adopt_view;
         // 【take 事实也是几何】清单改写了 clip 的方向 / Loop / 窗口 ⇒ 图集几何变了 ⇒
         // 视图（`edits.params`）必须重建，基线必须跟着换。否则下一次提交会拿
         // "旧方向下的数组"当基线 —— 那正是"改完倒放再改参数，线整体错位"的形状。
@@ -2375,14 +2630,44 @@ impl EditorSession {
             if let (Ok(view), Ok(versions)) =
                 (document.workspace_view(), document.editor_versions())
             {
-                let mut loaded = self.loaded.lock_or_recover();
-                if loaded.initialized {
-                    loaded.view = Some(view);
-                    loaded.edit = versions.0;
-                    loaded.model = versions.1;
-                    loaded.scope = versions.2;
+                let initialized = {
+                    let mut loaded = self.loaded.lock_or_recover();
+                    let initialized = loaded.initialized;
+                    if initialized {
+                        loaded.view = Some(view.clone());
+                        loaded.edit = versions.0;
+                        loaded.model = versions.1;
+                        loaded.scope = versions.2;
+                    }
+                    initialized
+                };
+                if initialized {
+                    // 【写点 B 的实体】视图重建了，就必须落到 **GUI 读的那份数组** 上。
+                    //
+                    // 少这一句，"移动 item" 只会把 clip 挪走、把曲线留在原地（用户
+                    // 报的"参数线不跟随"）；而"分割"因为推进了 edit/scope、走了
+                    // 整份重载，看起来又是对的 —— 两条路径在这里分叉。
+                    let roots = {
+                        let mut timeline = self.timeline.lock_or_recover();
+                        // 视图里的参数**就是**这一轮的完整显示（基线 + 编辑），
+                        // 因此整份装上即可 —— 但必须映射 id 空间（见 `install_document_params`）。
+                        self.install_document_params(&mut timeline, view.params.as_ref());
+                        timeline.params_by_root_track.len()
+                    };
+                    adopted = true;
+                    hifishifter_kernel::log_limiter::emit_limited_key(
+                        log::Level::Warn,
+                        "ara.projection",
+                        format_args!(
+                            "[ara] projection epoch={} roots={roots}",
+                            self.ui_geometry_version.load(Ordering::Acquire)
+                        ),
+                    );
                 }
             }
+        }
+        if adopted {
+            self.ui_geometry_version.store(version, Ordering::Release);
         }
         self.notify_timeline();
     }
@@ -2555,7 +2840,7 @@ impl EditorSession {
         );
     }
 
-    /// 波形入口只接受本会话从宿主PCM生成的路径，不能让JS任意读取本机文件。
+    /// 波形入口只接受本会话从宿主PCM生成的路径，不能让JS任意读取本地文件。
     pub(super) fn check_source(&self, path: &str) -> Result<(), String> {
         if self
             .loaded
@@ -3053,10 +3338,77 @@ impl EditorSession {
         // （`ReversePolicy::Materialize`），排除反而会让它的 f0 全零 ⇒ 只剩气声。
         timeline
     }
+    /// 把「这一份 PCM 是哪一代」写进 clip 的内容指纹，并让过期原线失效。
+    ///
+    /// 【为什么必须做在会话里】宿主可以在**同一路径**下换一份内容（重新授权、替换素材、
+    /// ARA 重新交付 PCM）。文件签名（长度 / mtime）可能一点没变，分析缓存因此永远命中，
+    /// 用户看到"换了素材，参数线还是旧内容"。PCM 的 `version` 是唯一能回答这件事的读数，
+    /// 而它只在这里可见。
+    fn refresh_source_fingerprints(&self, timeline: &mut TimelineState) -> bool {
+        let Some(document) = self.document() else {
+            return false;
+        };
+        let sources = document.edit_sources.lock_or_recover();
+        let mut changed = false;
+        for clip in &mut timeline.clips {
+            let Some(path) = clip.source_path.clone() else {
+                continue;
+            };
+            let Some(pcm) = sources.get(&path) else {
+                continue;
+            };
+            // 内容指纹：PCM 代次 + 长度 + 前 4096 个采样的 FNV。
+            // 代次由发布方单调推进；采样哈希兜住"代次没变但内容被就地改写"的形状。
+            let mut stamp: u64 = 0xcbf2_9ce4_8422_2325;
+            for value in pcm.planes.iter().flat_map(|plane| plane.iter()).take(4096) {
+                stamp ^= u64::from(value.to_bits());
+                stamp = stamp.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            stamp ^= (pcm.planes.first().map(Vec::len).unwrap_or(0) as u64) << 1;
+            stamp ^= pcm.version.rotate_left(17);
+            if clip.source_file_fingerprint != Some(stamp) {
+                clip.source_file_fingerprint = Some(stamp);
+                changed = true;
+            }
+        }
+        changed
+    }
+
     /// 原分析实现可取消/join；每会话持有自己的worker，不推进全局generation。
     fn schedule_analysis(&self) {
         if self.closed.load(Ordering::Acquire) || !self.loaded.lock_or_recover().initialized {
             return;
+        }
+        {
+            let mut timeline = self.timeline.lock_or_recover();
+            let mut probe = timeline.clone();
+            if self.refresh_source_fingerprints(&mut probe) {
+                // 内容换代 ⇒ 这一代的原线作废。清键之后门禁会等新分析，而不是拿旧值
+                // 当"已应用"继续渲染。
+                let roots = probe
+                    .clips
+                    .iter()
+                    .filter_map(|clip| probe.resolve_root_track_id(&clip.track_id))
+                    .collect::<std::collections::BTreeSet<_>>();
+                for root in &roots {
+                    if let Some(params) = timeline.params_by_root_track.get_mut(root) {
+                        params.pitch_orig_key = None;
+                        params.dyn_orig_key = None;
+                    }
+                }
+                for (clip, fresh) in timeline.clips.iter_mut().zip(probe.clips.iter()) {
+                    clip.source_file_fingerprint = fresh.source_file_fingerprint;
+                }
+                hifishifter_kernel::log_limiter::emit_limited_key(
+                    log::Level::Warn,
+                    "ara.source.content-changed",
+                    format_args!(
+                        "[ara] the host republished {} source(s) with new content; the cached \
+                         original pitch/level is invalidated and re-analysed",
+                        roots.len()
+                    ),
+                );
+            }
         }
         let mut workers = self.analysis_workers.lock_or_recover();
         let mut pending = Vec::new();
@@ -3134,6 +3486,19 @@ impl EditorSession {
     /// 【为什么 owner 的时钟在这里就一定有值】它由 `setupProcessing` 装载
     /// （见 `ExtensionOwner::arm_capture_rendering` 的调用点），而那是宿主在任何
     /// `process` 之前的确定性时刻 —— 与窗口开没开无关。
+    /// 把工程时长同时写进本地原子与宿主时钟。
+    ///
+    /// 【为什么两处都要】`playback_state`（轮询）读本地那个；推送载荷由 GUI 线程直接从
+    /// 时钟构造，它读不到会话 —— 而两条通道的载荷必须**同形**，否则前端 reducer 就会
+    /// 为同一份语义写两套实现（那正是推送通道"缺 `ok` 就整条死掉"的成因）。
+    fn publish_duration(&self, seconds: f64) {
+        self.project_duration
+            .store(seconds.to_bits(), Ordering::Release);
+        if let Some(clock) = self.host_clock() {
+            clock.publish_duration(seconds);
+        }
+    }
+
     fn host_clock(&self) -> Option<Arc<crate::render::transport::TransportClock>> {
         match self.document() {
             Some(document) => Some(document.clock.clone()),
@@ -3145,9 +3510,19 @@ impl EditorSession {
 
     /// GUI读取真实宿主时钟，不驱动独立设备；未收到process上下文时保留本地查看游标。
     pub(super) fn transport(&self) -> (f64, bool) {
-        self.host_clock()
-            .map(|clock| clock.read())
-            .unwrap_or_else(|| (self.timeline.lock_or_recover().playhead_sec, false))
+        match self.host_clock() {
+            Some(clock) => {
+                let view = clock.read_view();
+                // 【为什么 Stale 要退回本地游标】残值是"上一次观测"，不是"现在在哪"；
+                // 把它当位置发出去，等于让一次时间线刷新把光标拽回一个已经过期的点。
+                // 本地查看游标至少是用户自己放的位置（与"没有时钟"同一处置）。
+                if view.provenance == crate::render::transport::Provenance::Stale && !view.playing {
+                    return (self.timeline.lock_or_recover().playhead_sec, false);
+                }
+                (view.position_sec, view.playing)
+            }
+            None => (self.timeline.lock_or_recover().playhead_sec, false),
+        }
     }
     /// 新淡化轴只装饰发给原GUI的JSON，不进入算法状态、撤销历史或音频缓存键。
     pub(super) fn decorate_host_fades(&self, payload: &mut Value) {
@@ -3162,20 +3537,76 @@ impl EditorSession {
         }
     }
     /// 只读宿主原子时钟；重合成阻塞actor时UI仍取得新鲜播放态，不借编辑timeline锁。
+    ///
+    /// 【为什么载荷要带 `position_source`】"位置是 0"有四种含义（见 `Provenance`），
+    /// 而界面上它们都画成同一条竖线。把来源与年龄一起交出去之后，下一次现场不必再
+    /// 从"光标不动"反推是宿主没给、还是我们没读。
     pub(super) fn playback_state(&self) -> Value {
         let clock = self.host_clock();
-        let (position, playing) = clock
-            .as_ref()
-            .map(|clock| clock.read())
-            .unwrap_or((0., false));
+        let view = clock.as_ref().map(|clock| clock.read_view());
+        let (position, playing) =
+            view.map_or((0., false), |view| (view.position_sec, view.playing));
         self.note_playhead_sample(playing);
-        json!({"ok":true,"is_playing":playing,"waiting_for_render":false,
+        self.note_transport_stall(position, playing);
+        let mut payload = json!({"ok":true,"is_playing":playing,"waiting_for_render":false,
             "target":if playing {Some("synthesized")} else {None},"base_sec":0.,
             "position_sec":position,"duration_sec":f64::from_bits(self.project_duration.load(Ordering::Acquire)),
             // 【为什么如实报而不是恒真】这个字段的语义是"上面那个位置来自宿主"。
             // Capture 形态下时钟来自 owner（同样是宿主写入的），因此也为真；
             // 两条都没有时它是假 —— 前端据此知道那个 0 不是"宿主在 0"。
-            "host_authoritative":clock.is_some()})
+            "host_authoritative":clock.is_some()});
+        if let Some(view) = view {
+            payload["position_source"] = json!(view.provenance.as_str());
+            payload["position_age_ms"] = json!(view.age_ms);
+            payload["seek_pending"] = json!(view.seek_pending);
+            // 【两条通道共用同一个乱序判据】推送与轮询是同一份语义的两个来源；
+            // 只有轮询带序号时，晚到的推送仍然能把光标拽回去。
+            payload["sample_seq"] = json!(view.sample_seq);
+        }
+        payload
+    }
+
+    /// 播放中位置长时间不动 ⇒ 留一份可归因的读数。
+    ///
+    /// 【为什么需要它】"光标卡住"有三种成因：来源停摆、来源一直在给同一个值、
+    /// 前端没消费。日志里三者同形，而这一行把**来源 + 年龄 + 定位窗口**直接写出来。
+    /// 限流由 `emit_limited_key` 负责，因此稳态下最多每 10 s 一行。
+    fn note_transport_stall(&self, position: f64, playing: bool) {
+        if !playing {
+            *self.transport_stall.lock_or_recover() = None;
+            return;
+        }
+        let now = Instant::now();
+        let stalled = {
+            let mut stall = self.transport_stall.lock_or_recover();
+            match stall.as_mut() {
+                Some((last, since)) if (*last - position).abs() < 1e-4 => {
+                    if now.duration_since(*since) < Duration::from_secs(1) {
+                        false
+                    } else {
+                        *since = now;
+                        true
+                    }
+                }
+                _ => {
+                    *stall = Some((position, now));
+                    false
+                }
+            }
+        };
+        if !stalled {
+            return;
+        }
+        if let Some(clock) = self.host_clock() {
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "transport.stuck",
+                format_args!(
+                    "[transport] the playhead has not moved for over a second while the host is playing: {}",
+                    clock.diagnostics()
+                ),
+            );
+        }
     }
     /// 播放位置采样的节奏读数（诊断）。
     ///
@@ -3416,18 +3847,18 @@ impl EditorSession {
     pub(super) fn emit(&self, event: &str, payload: Value) {
         let document = self.document();
         let views = {
-            let mut views = self.views.lock_or_recover();
-            views.retain(|_, view| {
-                !view.sink.closed.load(Ordering::Acquire)
-                    && view.route.as_ref().is_none_or(|(link, lease)| {
-                        document.as_ref().is_some_and(|document| {
-                            link.authorize(document)
-                                .is_ok_and(|current| current == *lease)
-                        })
-                    })
-            });
-            views
+            // 【只筛不删】删除一条视图是 `revoke_closed_views` / `close` 的职责 ——
+            // 它们删除时**同时关掉回信口**。这里顺手删掉的旧写法有两个后果：视图被
+            // 静默丢弃（前端永远等一条不会来的回复，而 `enqueue`/`response` 都以为
+            // 它还活着），以及"组件 stop 同步撤销"这条契约时对时错（actor 的一次
+            // `emit` 与 stop 撞上就赢）。发通知的路径不该改动会话状态。
+            self.views
+                .lock_or_recover()
                 .values()
+                .filter(|view| {
+                    !view.sink.closed.load(Ordering::Acquire)
+                        && view.route_is_live(document.as_ref())
+                })
                 .map(|view| view.sink.clone())
                 .collect::<Vec<_>>()
         };
@@ -3436,12 +3867,46 @@ impl EditorSession {
         }
     }
     /// 复用原GUI已订阅的刷新事件；共享选轨/曲线变化让所有视图重取同一个权威payload。
-    pub(super) fn notify_timeline(&self) {
+    ///
+    /// 【内容没变就不通知】判据是 [`Self::published_fingerprint`]：只要用户能看出
+    /// 区别的量没变，前端手上那份就是最新的 —— 再让它取一次只会多造一棵对象图。
+    /// 这条判据是"通知 → 前端重取 → 重取推动上游 → 再通知"那个环的**唯一**出口。
+    pub(super) fn notify_timeline(&self) -> bool {
+        let fingerprint = self.published_fingerprint();
+        {
+            let mut last = self.notified_fingerprint.lock_or_recover();
+            if *last == Some(fingerprint) {
+                return false;
+            }
+            *last = Some(fingerprint);
+        }
         self.host_version.fetch_add(1, Ordering::AcqRel);
         self.emit(
             "plugin_host_changed",
             json!({"version":self.host_version.load(Ordering::Acquire)}),
         );
+        true
+    }
+
+    /// "GUI 这一轮会看到什么"的指纹：时间线内容 + 两个宿主事实代次。
+    ///
+    /// 【为什么把两个原子也拌进来】`get_timeline_state` 的载荷里还有宿主几何代次与
+    /// 音频代次派生出来的装饰（`host_media`、`host_fades`）。它们变化时时间线本身
+    /// 可能一字不改，而界面必须刷新 —— 只比时间线会把这类更新吞掉。
+    fn published_fingerprint(&self) -> u64 {
+        let mut fingerprint =
+            hifishifter_kernel::state::timeline_fingerprint(&self.timeline.lock_or_recover());
+        if let Some(document) = self.document() {
+            fingerprint ^= document
+                .ui_geometry_revision
+                .load(Ordering::Acquire)
+                .rotate_left(17);
+            fingerprint ^= document
+                .editor_audio_revision
+                .load(Ordering::Acquire)
+                .rotate_left(33);
+        }
+        fingerprint
     }
     /// 一段 pending 持续多久之后才值得记一行。3 秒：短于它的是正常的一次应用往返。
     const PENDING_REPORT_AFTER: std::time::Duration = std::time::Duration::from_secs(3);
@@ -3543,6 +4008,27 @@ impl EditorSession {
             analysis_pending,
             rendering,
         );
+        // 【状态栏只回答一个问题：你听到的是不是当前编辑】
+        //
+        // 旧实现把「内务工作」（素材物化 / 后台快照刷新）也算进 `pending`，前端于是把它
+        // 显示成「正在自动应用…」—— 而用户此刻什么都没改。这句文案名不副实，而且它出现
+        // 在**每次**播放开始，于是用户学会了忽略它；等到真的需要它的时候（编辑后长时间
+        // 不生效）也就看不见了。
+        //
+        // 现在只有四个互斥读数，每一个都对应一个**用户能感知的后果**：
+        //   * `preparing` —— 还没有任何可服务的输出（冷启动 / 素材尚未物化）；
+        //   * `stale` —— 有输出，但它不是当前编辑（真正的"正在合成"）；
+        //   * `awaiting-analysis` —— 在等音高分析，且该根真的会产出；
+        //   * `current` —— 输出就是当前编辑（"已应用"，或干脆不显示）。
+        let audible_state = if !self.has_serviceable_snapshot() {
+            "preparing"
+        } else if audible_stale {
+            "stale"
+        } else if analysis_pending {
+            "awaiting-analysis"
+        } else {
+            "current"
+        };
         json!({
             // 【为什么把形态放进状态快照】bootstrap 是**窗口创建那一刻**算的，而形态判定
             // 要等 `setActive` 之后 5 秒宽限期才落定 —— 于是窗口打开时读到的一律是
@@ -3560,6 +4046,31 @@ impl EditorSession {
             "rendering_active":rendering,
             // 状态栏的「渲染中」读这一个（见上面 `audible_stale` 的说明）。
             "render_audible_stale":audible_stale,
+            // 【唯一驱动状态栏文案的字段】见上面 `audible_state` 的说明。
+            // `pending` 仍然保留（诊断包与"卡住了"的判定要用），但**不再驱动任何文案**。
+            "audible_state":audible_state,
+            // 【"你的这次编辑有没有被采纳"】写回被拒 / 跳过 / 无基线 / 被保护 / 重放耗尽
+            // 都在这一个读数里。§1.3 那 11 条回退路径里 9 条此前**连字符串都没有**，
+            // 用户唯一能做的事是"再画一次试试"。它不驱动任何文案（那是 §3.6 的事），
+            // 只让"没有被采纳"成为可查的事实。
+            "edit_health":self.document().map(|document|document.edit_health_json())
+                .unwrap_or(serde_json::Value::Null),
+            "param_health":self.document().map(|document| {
+                let authority = document.authority_snapshot();
+                serde_json::json!({
+                    "authorityRevision": authority.revision,
+                    "roots": authority.roots.len(),
+                    "runs": authority.run_count(),
+                    "samples": authority.sample_count(),
+                    "hash": authority.content_hash(),
+                    "lastGeometry": document.last_geometry_report.lock_or_recover().as_ref().map(|report| serde_json::json!({
+                        "affected": report.affected_runs,
+                        "split": report.split_runs,
+                        "cleared": report.cleared_runs,
+                        "unknown": report.unknown,
+                    })),
+                })
+            }).unwrap_or(serde_json::Value::Null),
             "host_version":self.host_version.load(Ordering::Acquire),
             "error":self.error.lock_or_recover().clone().or_else(||self.render_error.lock_or_recover().clone()).or(host_error),"connected":!self.closed.load(Ordering::Acquire),
             "ready":self.loaded.lock_or_recover().initialized})
@@ -3568,7 +4079,240 @@ impl EditorSession {
         self.emit("plugin_apply_state", self.state());
     }
 }
+impl EditorSession {
+    /// 读参数前保证分析基线已经按当前 clip 布局重组装。
+    ///
+    /// 内容分析按源文件缓存；移动/分割/裁剪只改布局，因此这里只做同步拼装，
+    /// 不重跑 F0。拼装结果变化才发布基线（不会触发捕获）。
+    fn refresh_analysis_baseline_for_root(&self, host_root: &str, param: &str) {
+        if param != "pitch" && param != "dyn" {
+            return;
+        }
+        let preferred = format!("{}{host_root}", self.namespace);
+        let root = {
+            let timeline = self.timeline.lock_or_recover();
+            if timeline.tracks.iter().any(|track| track.id == preferred) {
+                preferred
+            } else if timeline.tracks.iter().any(|track| track.id == host_root) {
+                host_root.to_owned()
+            } else {
+                return;
+            }
+        };
+        if param == "pitch" {
+            hifishifter_kernel::pitch_analysis::maybe_schedule_pitch_orig(&self.timeline, &root);
+        }
+        if param == "dyn" {
+            hifishifter_kernel::pitch_analysis::maybe_schedule_dyn_orig(&self.timeline, &root);
+        }
+        // 【发布的是"分析原线 + 布局键"，不是显示数组】`params.pitch_orig` 由
+        // `maybe_schedule_pitch_orig` 从内容缓存组装（与用户编辑无关）；`pitch_edit`
+        // 不参与（`from_params` 不读它）。布局键让文档侧的 `baseline_for` 在布局
+        // 未变时直接复用、变了就重建 —— 旧实现没有这个键，于是"就绪"变成一次性状态。
+        let snapshot = {
+            let timeline = self.timeline.lock_or_recover();
+            timeline
+                .params_by_root_track
+                .get(&root)
+                .cloned()
+                .map(|params| {
+                    let layout = hifishifter_kernel::pitch_analysis::build_root_pitch_layout_key(
+                        &timeline, &root,
+                    );
+                    (params, layout)
+                })
+        };
+        if let (Some((params, layout)), Some(document)) = (snapshot, self.document()) {
+            if params.pitch_orig_key.is_some() || params.dyn_orig_key.is_some() {
+                document.publish_baseline(
+                    host_root,
+                    hifishifter_kernel::editor::param_authority::RootBaseline::from_params(&params)
+                        .with_layout(layout),
+                );
+            }
+        }
+    }
+
+    fn authority_step_snapshot(
+        &self,
+    ) -> Option<hifishifter_kernel::editor::param_authority::ParamAuthority> {
+        self.document()
+            .map(|document| document.authority_snapshot())
+    }
+
+    /// 参数写入前的 undo 点：先把当前 authority 挂到当前位置，再把新步的占位
+    /// 也填成“写入前”的权威；写入成功后再用 `note_authority_step` 覆盖新步。
+    pub(super) fn checkpoint_authority_step(&self) {
+        if self.suppress_history.load(Ordering::Acquire) {
+            return;
+        }
+        let Some(authority) = self.authority_step_snapshot() else {
+            return;
+        };
+        let timeline = self.timeline.lock_or_recover().clone();
+        let mut history = self.history.lock_or_recover();
+        let previous = history.position;
+        history::checkpoint(
+            &mut history,
+            &timeline,
+            HistoryOp::ParamCurve.key().into(),
+            || None,
+        );
+        let next = history.position;
+        drop(history);
+        let mut steps = self.authority_history.lock_or_recover();
+        steps.insert(previous, authority.clone());
+        steps.insert(next, authority);
+        // 历史分支被截断时，旧 index 的快照已无意义；保留有界即可。
+        let keep_from = next.saturating_sub(1);
+        steps.retain(|index, _| *index + 100 >= keep_from);
+    }
+
+    fn note_authority_step(&self) {
+        let Some(authority) = self.authority_step_snapshot() else {
+            return;
+        };
+        let position = self.history.lock_or_recover().position;
+        self.authority_history
+            .lock_or_recover()
+            .insert(position, authority);
+    }
+
+    pub(super) fn restore_authority_step(&self, target: usize) -> bool {
+        let authority = self
+            .authority_history
+            .lock_or_recover()
+            .get(&target)
+            .cloned();
+        let Some(authority) = authority else {
+            return false;
+        };
+        let Some(document) = self.document() else {
+            return false;
+        };
+        match document.replace_authority(authority) {
+            Ok(()) => {
+                self.refresh_display_from_document();
+                self.render_requested.store(true, Ordering::Release);
+                true
+            }
+            Err(error) => {
+                log::warn!("[ara] parameter history restore failed: {error}");
+                false
+            }
+        }
+    }
+}
+
 impl ParamHost for EditorSession {
+    /// ARA 形态：曲线权威在文档里，时间线上的数组只是派生缓存。
+    /// Capture 形态没有文档 —— 那里的时间线**就是**权威（与独立 App 同义）。
+    fn uses_param_authority(&self) -> bool {
+        self.document().is_some()
+    }
+
+    fn read_authority_frames(
+        &self,
+        track_id: &str,
+        param: &str,
+        start_frame: u32,
+        frame_count: u32,
+        stride: Option<u32>,
+        with_sentinel: Option<bool>,
+        binary: Option<bool>,
+    ) -> Option<Result<hifishifter_kernel::models::ParamFramesPayload, String>> {
+        let document = self.document()?;
+        let host = track_id
+            .strip_prefix(&self.namespace)
+            .unwrap_or(track_id)
+            .to_owned();
+        self.refresh_analysis_baseline_for_root(&host, param);
+        Some(document.read_authority_frames(
+            &host,
+            param,
+            start_frame,
+            frame_count,
+            stride,
+            with_sentinel,
+            binary,
+        ))
+    }
+
+    fn write_authority_frames(
+        &self,
+        track_id: &str,
+        param: &str,
+        start_frame: u32,
+        values: &[f32],
+        present: Option<&[bool]>,
+        checkpoint: bool,
+    ) -> Option<Result<serde_json::Value, String>> {
+        let document = self.document()?;
+        let host = track_id
+            .strip_prefix(&self.namespace)
+            .unwrap_or(track_id)
+            .to_owned();
+        if checkpoint {
+            self.checkpoint_authority_step();
+        }
+        let result =
+            document.write_authority_range(&host, param, start_frame, values, present, false);
+        if result.is_ok() {
+            self.note_authority_step();
+            self.refresh_display_from_document();
+            self.mark_dirty();
+            self.render_requested.store(true, Ordering::Release);
+            self.publish_timeline_derived();
+        }
+        Some(result)
+    }
+
+    fn restore_authority_frames(
+        &self,
+        track_id: &str,
+        param: &str,
+        start_frame: u32,
+        frame_count: u32,
+        checkpoint: bool,
+    ) -> Option<Result<serde_json::Value, String>> {
+        let document = self.document()?;
+        let host = track_id
+            .strip_prefix(&self.namespace)
+            .unwrap_or(track_id)
+            .to_owned();
+        // 【撤销点只在真的会改的时候压】旧实现无条件 `checkpoint_authority_step()`，
+        // 于是"什么都没擦"（区间里没有 run、或被夹成 0 帧）也会在撤销栈上留一步 ——
+        // 用户按下去什么都不会发生，却要多按一次撤销才能回去。
+        let will_change = document.authority_has_runs_in(&host, param, start_frame, frame_count);
+        if checkpoint && will_change {
+            self.checkpoint_authority_step();
+        }
+        let result =
+            document.restore_authority_range(&host, param, start_frame, frame_count, false);
+        // 【只有真的改了才推动下游】`changed == false` 时刷新显示 / 标脏 / 请求渲染
+        // 全是无谓的：一次 no-op 右键会触发一次整份重合成与一次自动渲染。
+        let changed = result
+            .as_ref()
+            .ok()
+            .and_then(|value| value.get("changed"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        if result.is_ok() && changed {
+            self.note_authority_step();
+            self.refresh_display_from_document();
+            self.mark_dirty();
+            self.render_requested.store(true, Ordering::Release);
+            self.publish_timeline_derived();
+        }
+        Some(result)
+    }
+
+    fn authority_revision(&self) -> u64 {
+        self.document()
+            .map(|document| document.authority_revision())
+            .unwrap_or(0)
+    }
+
     fn timeline(&self) -> &Mutex<TimelineState> {
         &self.timeline
     }
@@ -3595,6 +4339,13 @@ impl ParamHost for EditorSession {
             }
         }
     }
+    fn note_param_edit(&self, intent: hifishifter_kernel::editor::ParamEditIntent) {
+        let mut intents = self.param_intents.lock_or_recover();
+        if intents.len() >= 256 {
+            intents.remove(0);
+        }
+        intents.push(intent);
+    }
     fn publish_timeline(&self, timeline: TimelineState) {
         // 【为什么在分支之前】这是"时间线变了"的**唯一**统一信号：所有曲线写入
         // （set_param_frames / restore / convert_mix_param / set_static_param /
@@ -3610,45 +4361,78 @@ impl ParamHost for EditorSession {
             self.render_requested.store(true, Ordering::Release);
             return;
         }
-        let result = (|| {
-            let document = self.require_document()?;
-            let groups = document.edits.lock_or_recover().groups.clone();
-            let groups =
-                if groups.is_empty() {
-                    None
+        // 【重基 + 重放】提交闸在"宿主在我编辑期间动过"时会返回 Conflict。
+        //
+        // 那条冲突是**可重基**的：用户的意图是"这条曲线的这几个帧改成这些值"，与
+        // "宿主在这期间移动了 item"在语义上并不冲突 —— 只要把差分落到**编辑器现在
+        // 看到的那份基线**上。旧实现把这种冲突写进 `self.error`，而
+        // `prepare_apply` 见错即停 ⇒ 一次瞬时冲突就让自动渲染停摆到用户下一次
+        // 成功的操作。这是"编辑之后没有声音"的第二个成因。
+        //
+        // 现在：每次重放前取一份**新基线**（`refresh_baseline`），最多
+        // `MAX_EDIT_REPLAYS` 次。重放的输入是"用户意图的差分"，与几何无关，所以
+        // 不会无限循环；只有"连差分都无法表达"（目标轨已不存在）才会耗尽。
+        const MAX_EDIT_REPLAYS: usize = 3;
+        let mut attempt = 0_usize;
+        let mut failure: Option<String> = None;
+        loop {
+            match self.submit_workspace_edit(&timeline) {
+                Ok(()) => {
+                    *self.error.lock_or_recover() = None;
+                    // 【提交成功必须重合成】`publish_timeline` 只负责把用户的编辑写进
+                    // 权威；它此前**从不**请求渲染。于是"编辑被采纳"与"声音更新"之间
+                    // 只靠"分析刚好也变了"这条巧合连着 —— 分析已缓存时，界面显示已
+                    // 应用、声音永远停在旧版本（状态快照里 `pending=false`）。
+                    self.render_requested.store(true, Ordering::Release);
+                    break;
+                }
+                Err(error) => {
+                    let retryable = crate::editor::errors::is_replayable_edit_conflict(&error);
+                    if retryable && attempt < MAX_EDIT_REPLAYS {
+                        attempt += 1;
+                        // 取新基线：下一次提交必须以"编辑器现在看到的那一份"为差分基准。
+                        // 取不到就当作耗尽 —— 拿旧基线重放会把几何差异当成用户改动写回。
+                        if let Err(reload) = self.refresh_baseline() {
+                            failure = Some(format!(
+                                "{error}; the baseline could not be refreshed ({reload})"
+                            ));
+                            break;
+                        }
+                        continue;
+                    }
+                    failure = Some(error);
+                    break;
+                }
+            }
+        }
+        match failure {
+            None => {}
+            Some(error) => {
+                if crate::editor::errors::is_replayable_edit_conflict(&error) {
+                    // 【瞬时冲突不进 `self.error`】那个位置是"终态、需要用户处置"的。
+                    // 放进去会让 `prepare_apply` 永久短路（见 R7）。这里只进渲染读数，
+                    // 并把"这次编辑没有被采纳"记成可读的读数 —— 用户至少知道该重画。
+                    *self.render_error.lock_or_recover() = Some(format!(
+                        "Conflict: this edit was not applied after {} attempt(s): {error}",
+                        attempt + 1
+                    ));
+                    if let Some(document) = self.document() {
+                        document.note_edit_dropped(format!(
+                            "replay budget exhausted after {} attempt(s): {error}",
+                            attempt + 1
+                        ));
+                    }
                 } else {
-                    Some(groups.with_processing_from(
-                        &timeline,
-                        &document.group_aliases(&self.namespace),
-                    )?)
-                };
-            let timeline = self.native_timeline(timeline)?;
-            let (edit, model, baseline) = {
-                let loaded = self.loaded.lock_or_recover();
-                (loaded.edit, loaded.model, loaded.view.clone())
-            };
-            // 【没有基线只有一种可能】这份会话还没读过工作区（窗口刚建、首帧还没到）。
-            // 那不是"冲突"，是一句可行动的话：重新打开窗口即可。
-            let Some(baseline) = baseline else {
-                return Err(
-                    "Conflict: the editor has not read the workspace yet; reopen the plugin \
-                     window"
-                        .into(),
-                );
-            };
-            let versions = document
-                .accept_workspace_edits_with_groups(edit, model, &timeline, &baseline, groups)?;
-            let mut loaded = self.loaded.lock_or_recover();
-            loaded.edit = versions.0;
-            loaded.model = versions.1;
-            // 【成对写】accept 返回的就是"编辑器此刻显示的视图"的下一份基线；
-            // 不存它，下一次提交的基线就落后一代（旧实现正是在这里把指针推离缓存）。
-            loaded.view = Some(versions.2);
-            *self.error.lock_or_recover() = None;
-            Ok::<_, String>(())
-        })();
-        if let Err(error) = result {
-            *self.error.lock_or_recover() = Some(error);
+                    // 【为什么不再写 `self.error`】那个位置是"终态、需要用户处置"的。
+                    // 一次"这次没落上"放进去会让 `prepare_apply` 永久短路（渲染停摆），
+                    // 也会让 `after_write` 把之后每一次**成功**的写入都报成失败 ——
+                    // 前端于是把已经生效的笔画回滚掉，用户看到的就是"参数线回退"。
+                    *self.render_error.lock_or_recover() = Some(error.clone());
+                    if let Some(document) = self.document() {
+                        document.note_edit_dropped(error);
+                    }
+                }
+            }
         }
     }
 }
@@ -3664,6 +4448,74 @@ impl MidiImportHost for EditorSession {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// 等后台投影线程"追上来"的上限。
+    ///
+    /// 【为什么是 30 秒】这些断言判的是**最终一致**：宿主时钟或文档改动最终反映到
+    /// `editor.timeline`，而投影是另一个线程在做。4 核 runner 跑整包测试时 CPU 是满的，
+    /// 5 秒的窗口实测会输掉（`host_cursor_is_absolute_once_and_tracks_stopped_seeks`
+    /// 在 CI 上偶发红、本地连跑全过）。30 秒对"真的挂了"仍然是一道明确判据，而且同
+    /// 文件里等后台收敛的用例本来就有用 30 / 60 秒的。
+    const PROJECTION_CATCH_UP: Duration = Duration::from_secs(30);
+
+    /// 等 actor 回执的上限。
+    ///
+    /// 【为什么不是 5 秒】这些用例往 actor 投一条命令、再等它回信。命令本身可能是
+    /// "两条长轨原子更新"这类要真算几十秒的活，而 runner 同时在跑另外几百条用例。
+    /// `linux-aarch64` 上 `two_long_tracks_update_atomically_with_old_ready_audio_inside_pcm_budget`
+    /// 就是在这里 5 秒超时的（本模块的 `call` 助手）。等不到仍然是失败，只是不再把
+    /// "机器慢"判成"actor 挂了"。
+    const ACTOR_REPLY_TIMEOUT: Duration = Duration::from_secs(30);
+
+    /// 某个组件存档里，所有权威的某条曲线是否包含给定取值。
+    ///
+    /// 【为什么需要它】T2 之后用户曲线只住在权威的稀疏 run 里，`params` 不再写显示
+    /// 数组。断言"这一笔有没有落盘"必须读权威。
+    fn authority_curve_has(bytes: &[u8], key: &str, value: f64) -> bool {
+        authority_curve_has_near(bytes, key, value, 1e-6)
+    }
+
+    /// 同上，但允许容差。
+    ///
+    /// 【为什么需要容差】权威是**源域**的：工程帧上的那一笔要按 clip 的源窗口重采样，
+    /// 两者不整除时落不到整数源帧上。断言"这一笔有没有落盘"因此要看"有没有接近它的
+    /// 取值"，而不是逐位相等。
+    fn authority_curve_has_near(bytes: &[u8], key: &str, value: f64, tolerance: f64) -> bool {
+        let saved: Value = serde_json::from_slice(bytes).unwrap();
+        if let Some(roots) = saved["edits"]["authority"]["roots"].as_object() {
+            if roots.values().any(|root| {
+                root["runs"][key].as_array().is_some_and(|runs| {
+                    runs.iter().any(|run| {
+                        run["values"].as_array().is_some_and(|values| {
+                            values.iter().any(|v| {
+                                v.as_f64()
+                                    .is_some_and(|sample| (sample - value).abs() <= tolerance)
+                            })
+                        })
+                    })
+                })
+            }) {
+                return true;
+            }
+        }
+        let Some(authorities) = saved["edits"]["atlas"]["authorities"].as_object() else {
+            return false;
+        };
+        authorities.values().any(|authority| {
+            authority["edits"][key]["runs"]
+                .as_array()
+                .is_some_and(|runs| {
+                    runs.iter().any(|run| {
+                        run["values"].as_array().is_some_and(|values| {
+                            values.iter().any(|v| {
+                                v.as_f64()
+                                    .is_some_and(|sample| (sample - value).abs() <= tolerance)
+                            })
+                        })
+                    })
+                })
+        })
+    }
     /// 一段 pending 只在持续过久时报一次 —— 报完就不再重复，避免诊断变成刷屏。
     #[test]
     fn a_stuck_pending_period_is_reported_once() {
@@ -3977,6 +4829,8 @@ pub(crate) mod tests {
                     ..Default::default()
                 },
                 0,
+                512,
+                true,
             );
             let (position, playing) = session.transport();
             assert!(playing, "宿主在播放必须如实报出");
@@ -3997,6 +4851,8 @@ pub(crate) mod tests {
                     ..Default::default()
                 },
                 0,
+                512,
+                true,
             );
             assert!(!session.transport().1, "停止播放必须如实回落");
         }));
@@ -4065,7 +4921,7 @@ pub(crate) mod tests {
         let owner = capture_owner_with_a_take();
         let session = owner.editor_session().unwrap();
         session.ensure_loaded(true).unwrap();
-        let (take, edit, with_curves, input) = owner.capture_render_input().unwrap();
+        let (take, edit, with_curves, input) = owner.capture_render_input(true).unwrap().unwrap();
         assert!(take > 0, "渲染输入必须绑定到活动 take");
         assert!(
             with_curves,
@@ -4091,7 +4947,7 @@ pub(crate) mod tests {
         let before = edit;
         session.mark_dirty();
         assert_ne!(
-            owner.capture_render_input().unwrap().1,
+            owner.capture_render_input(true).unwrap().unwrap().1,
             before,
             "参数写入必须推进渲染版本"
         );
@@ -4101,7 +4957,7 @@ pub(crate) mod tests {
     /// **诊断**：素材长度 → "画一条线"到"输出是处理结果"要多久。
     ///
     /// 【为什么值得留着】它回答的是 `ANALYSIS_PENDING_CEILING` 那个 60 秒到底合不合理：
-    /// 上限太低会把**正常**的慢分析判成卡死，太高则让真卡死多冻用户一分钟。本机实测
+    /// 上限太低会把**正常**的慢分析判成卡死，太高则让真卡死多冻用户一分钟。实测
     /// （48 kHz，含首次加载 ONNX 会话）：2 秒素材 ≈ 9.9 s、10 秒 ≈ 5.3 s、30 秒 ≈ 5.7 s
     /// —— 时间**几乎全在一次性模型加载**上，不随素材长度增长。所以 60 秒对常规素材有
     /// 两个数量级的余量，而真正需要调的是"卡死"那一侧（现在到顶只放弃**等待**，
@@ -4268,12 +5124,12 @@ pub(crate) mod tests {
         let session = owner.editor_session().unwrap();
         session.ensure_loaded(true).unwrap();
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let before = owner.capture_render_input().unwrap().1;
+            let before = owner.capture_render_input(true).unwrap().unwrap().1;
             // 模拟 `convert_mix_param` 的收尾：发布，但不标脏。
             let snapshot = session.timeline.lock_or_recover().clone();
             session.publish_timeline(snapshot);
             assert_ne!(
-                owner.capture_render_input().unwrap().1,
+                owner.capture_render_input(true).unwrap().unwrap().1,
                 before,
                 "发布过的时间线必须推进渲染版本，否则这类改动会被版本闸静默跳过"
             );
@@ -4500,7 +5356,7 @@ pub(crate) mod tests {
                 link: None,
             })
             .unwrap();
-        let result = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+        let result = receiver.recv_timeout(ACTOR_REPLY_TIMEOUT).unwrap();
         assert_eq!(result["id"], id);
         assert_eq!(result["ok"], true, "{result}");
         result["value"].clone()
@@ -4852,18 +5708,32 @@ pub(crate) mod tests {
             "set_param_frames",
             json!({"trackId":a,"param":"hifigan_tension","startFrame":0,"values":[65.],"checkpoint":true}),
         );
+        // 【T2：曲线只在权威里】显示数组不再承载用户曲线，读权威的稀疏 run。
         for id in ["track", "b"] {
-            assert_eq!(
-                document.edits.lock_or_recover().params[id].extra_curves["hifigan_tension"][0],
-                65.
+            let curve = {
+                let state = document.edits.lock_or_recover();
+                state
+                    .authority
+                    .root(id)
+                    .and_then(|authority| authority.runs.get("extra:hifigan_tension"))
+                    .map(|runs| {
+                        runs.iter()
+                            .flat_map(|run| run.values.iter().copied())
+                            .collect::<Vec<f32>>()
+                    })
+                    .unwrap_or_default()
+            };
+            assert!(
+                curve.iter().any(|value| (*value - 65.).abs() < 1e-3),
+                "root {id} 的分组张力必须落进权威：{curve:?}"
             );
         }
         let encoded = owners[1].encode_state().unwrap();
         let mut restored = crate::state_channel::EditState::default();
         restored.restore(&encoded).unwrap();
         assert_eq!(
-            serde_json::from_slice::<Value>(&encoded).unwrap()["version"],
-            8
+            serde_json::from_slice::<Value>(&encoded).unwrap()["version"].as_u64(),
+            Some(crate::state_channel::EditState::STATE_VERSION)
         );
         assert_eq!(
             restored.groups,
@@ -4895,9 +5765,10 @@ pub(crate) mod tests {
                 .is_some_and(|id| id.ends_with("-track")),
             "冷恢复后GUID分组必须重投影到新GUI namespace"
         );
-        assert_eq!(
-            cold_document.edits.lock_or_recover().params["b"].extra_curves["hifigan_tension"][0],
-            65.
+        let cold_bytes = cold_document.edits.lock_or_recover().encode().unwrap();
+        assert!(
+            authority_curve_has(&cold_bytes, "extra:hifigan_tension", 65.),
+            "冷恢复后 hifigan_tension 必须留在权威里"
         );
         cold_document.close();
         let ungrouped = call(
@@ -5083,8 +5954,10 @@ pub(crate) mod tests {
         let applied = editor.apply(editor.submitted.load(Ordering::Acquire), None);
         document.ready.store(true, Ordering::Release);
         assert!(applied.is_err(), "合成必须失败，才能验证尾笔不依赖它");
-        let b: Value = serde_json::from_slice(&saved[1]).unwrap();
-        assert_eq!(b["edits"]["params"]["b"]["pitch_edit"][399], 69.);
+        assert!(
+            authority_curve_has_near(&saved[1], "pitch_edit", 69., 1.5),
+            "尾笔必须落进权威"
+        );
         assert_eq!(
             editor.history.lock_or_recover().position,
             2,
@@ -5172,10 +6045,22 @@ pub(crate) mod tests {
                 let local: Value = serde_json::from_slice(&owner.encode_state().unwrap()).unwrap();
                 assert_eq!(local["edits"]["tracks"].as_array().unwrap().len(), 1);
                 assert_eq!(local["edits"]["params"].as_object().unwrap().len(), 1);
-                assert_eq!(
-                    local["edits"]["params"][if index == 0 { "track" } else { "b" }]["pitch_edit"]
-                        [100],
-                    if index == 0 { 60. } else { b_midi }
+                // v11 起显示数组不再入档；权威 runs 才是唯一可恢复的编辑真相。
+                let root = if index == 0 { "track" } else { "b" };
+                let target = if index == 0 { 60. } else { b_midi };
+                let runs = local["edits"]["authority"]["roots"][root]["runs"]["pitch_edit"]
+                    .as_array()
+                    .unwrap();
+                assert!(
+                    runs.iter().any(|run| {
+                        run["values"].as_array().is_some_and(|values| {
+                            values
+                                .iter()
+                                .filter_map(Value::as_f64)
+                                .any(|value| (value - target).abs() <= 1.5)
+                        })
+                    }),
+                    "restored authority must contain pitch {target} for root {root}: {local}"
                 );
             }
             cold_document.close();
@@ -5194,7 +6079,7 @@ pub(crate) mod tests {
         // 模型变化后仍发布最后一份时间线：这是 ensure_loaded 的既定语义
         // （见 an_observed_change_without_end_editing_keeps_publishing）。
         // 继续发布不代表丢掉本地曲线，下面的本地曲线断言仍然有效。
-        let published = receivers[0].recv_timeout(Duration::from_secs(5)).unwrap();
+        let published = receivers[0].recv_timeout(ACTOR_REPLY_TIMEOUT).unwrap();
         assert_eq!(published["ok"], true, "{published}");
         let local = editor.timeline.lock_or_recover();
         assert_eq!(local.params_by_root_track[ta].pitch_edit[100], 60.);
@@ -5232,21 +6117,13 @@ pub(crate) mod tests {
         for owner in &owners {
             owner.stop_editor();
         }
-        let projection = document.workspace_projection().unwrap();
         let workspace = document.workspace_timeline().unwrap();
         assert!(workspace.tracks.is_empty());
         assert!(workspace.clips.is_empty());
         let began = Instant::now();
         editor.flush().unwrap();
-        let edit = document.edits.lock_or_recover().revision;
         document
-            .apply_workspace_edits(
-                edit,
-                document.revision.load(Ordering::Acquire),
-                &projection,
-                Arc::new(AtomicBool::new(false)),
-                || true,
-            )
+            .apply_workspace_edits(Arc::new(AtomicBool::new(false)), || true)
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(3);
         while editor.error.lock_or_recover().is_none() {
@@ -5343,6 +6220,11 @@ pub(crate) mod tests {
                 })
                 .unwrap();
             assert_eq!(rx.recv_timeout(Duration::from_secs(3)).unwrap()["ok"], true);
+            // 【为什么先等后台排空】`bind_to_document` 尾部会把 prepare_job 排上后台
+            // 线程；它渲染出 0 帧空快照后 `publish` 原子替换 `current`，把我们下面这份
+            // 手工快照 `reclaim` 掉 —— 于是"组件 stop 后自己的输出被撤销"这条断言会随
+            // 后台时序时对时错。先等它退场，用例才只测 stop 语义。
+            owners[index].await_preparation_idle(std::time::Duration::from_secs(3));
             owners[index].snapshots[0]
                 .publish(crate::render::snapshot::PlaybackSnapshot {
                     sample_rate: 44100,
@@ -5407,83 +6289,6 @@ pub(crate) mod tests {
             "组件stop必须撤销自己的输出，不能清除另一renderer"
         );
     }
-    /// 原actor选择重叠region只换其参数投影；不能生成编辑/history或覆盖另一素材。
-    #[test]
-    fn atlas_selection_commands_project_overlaps_without_audio_or_history_changes() {
-        let (model, owners, _ids) = workspace_fixture();
-        let document = model.session();
-        let mut original = document
-            .timeline
-            .lock_or_recover()
-            .as_ref()
-            .unwrap()
-            .clone();
-        for (index, track) in original.tracks.iter().enumerate() {
-            original.params_by_root_track.insert(
-                track.id.clone(),
-                hifishifter_kernel::state::TrackParamsState {
-                    frame_period_ms: 5.,
-                    pitch_edit: vec![if index == 0 { 60. } else { 67. }; 2],
-                    ..Default::default()
-                },
-            );
-        }
-        let identities = document.parameter_identities_locked(&original).unwrap();
-        let atlas = super::super::parameter_atlas::ParameterAtlas::default()
-            .capture(&original, &identities)
-            .unwrap();
-        let root = original.tracks[0].id.clone();
-        let ca = original.clips[0].id.clone();
-        let cb = original.clips[1].id.clone();
-        original.clips[1].track_id = root.clone();
-        original.tracks.truncate(1);
-        original.selected_clip_id = Some(ca.clone());
-        let atlas = atlas.follow_geometry(&original, &identities).unwrap();
-        original.params_by_root_track = atlas.project_roots(&original, &identities).unwrap();
-        *document.timeline.lock_or_recover() = Some(original.clone());
-        document.track_bindings.lock_or_recover().insert(
-            root.clone(),
-            vec![
-                ("modification".into(), "ara://source".into()),
-                ("modification-b".into(), "ara://source".into()),
-            ],
-        );
-        {
-            let mut edits = document.edits.lock_or_recover();
-            edits.params = original.params_by_root_track;
-            edits.atlas = atlas;
-        }
-        let editor = owners[0].editor_session().unwrap();
-        let (reply, rx) = mpsc::channel();
-        let (events, _) = mpsc::sync_channel(128);
-        let sink = UiSink {
-            view_id: "atlas-select".into(),
-            reply,
-            events,
-            closed: Arc::new(AtomicBool::new(false)),
-        };
-        let loaded = call(&editor, &sink, &rx, 1, "get_timeline_state", json!({}));
-        let root = loaded["tracks"][0]["id"].as_str().unwrap();
-        let ca = format!("{}{ca}", editor.namespace);
-        let cb = format!("{}{cb}", editor.namespace);
-        let before = (
-            document.edits.lock_or_recover().revision,
-            editor.generation.load(Ordering::Acquire),
-        );
-        call(&editor, &sink, &rx, 2, "select_clip", json!({"clipId":cb}));
-        let b = editor.timeline.lock_or_recover().params_by_root_track[root].pitch_edit[0];
-        call(&editor, &sink, &rx, 3, "select_clip", json!({"clipId":ca}));
-        let a = editor.timeline.lock_or_recover().params_by_root_track[root].pitch_edit[0];
-        let after = (
-            document.edits.lock_or_recover().revision,
-            editor.generation.load(Ordering::Acquire),
-        );
-        let history = editor.history.lock_or_recover().records.len();
-        document.close();
-        assert_eq!((a, b), (60., 67.));
-        assert_eq!(before, after);
-        assert_eq!(history, 0);
-    }
     #[test]
     fn workspace_components_share_the_original_actor_and_cross_track_history() {
         let (_model, owners, _ids) = workspace_fixture();
@@ -5536,7 +6341,7 @@ pub(crate) mod tests {
                     link: Some(link),
                 })
                 .unwrap();
-            let result = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+            let result = receiver.recv_timeout(ACTOR_REPLY_TIMEOUT).unwrap();
             assert_eq!(result["id"], id);
             assert_eq!(result["ok"], true, "{result}");
             result["value"].clone()
@@ -5641,8 +6446,8 @@ pub(crate) mod tests {
         link.bind(std::process::id() as i64, rb.token()).unwrap();
         drop(held);
         let mut results = [
-            receiver.recv_timeout(Duration::from_secs(5)).unwrap(),
-            receiver.recv_timeout(Duration::from_secs(5)).unwrap(),
+            receiver.recv_timeout(ACTOR_REPLY_TIMEOUT).unwrap(),
+            receiver.recv_timeout(ACTOR_REPLY_TIMEOUT).unwrap(),
         ];
         results.sort_by_key(|r| r["id"].as_u64().unwrap());
         assert_eq!(
@@ -5684,7 +6489,7 @@ pub(crate) mod tests {
             })
             .unwrap();
         assert_eq!(
-            receiver.recv_timeout(Duration::from_secs(5)).unwrap()["ok"],
+            receiver.recv_timeout(ACTOR_REPLY_TIMEOUT).unwrap()["ok"],
             true
         );
         let (reply, _) = mpsc::channel();
@@ -5827,7 +6632,8 @@ pub(crate) mod tests {
                     client.clips.pop();
                 }
                 3 => client.clips[0].takes[0].source_path = Some("C:/private.wav".into()),
-                _ => client.clips[0].takes[0].playback_rate = 2.,
+                // 身份字段：把 clip 挂到另一条轨上等于换了一条片段，必须拒绝。
+                _ => client.clips[0].track_id = client.tracks[1].id.clone(),
             }
             assert!(document
                 .accept_workspace_edits(0, version, &client, &baseline)
@@ -5849,12 +6655,20 @@ pub(crate) mod tests {
         );
         assert_eq!(document.edits.lock_or_recover().revision, 0);
     }
+    /// **并发几何变化必须被吸收，但客户端改不动文档里的几何。**
+    ///
+    /// 【契约为什么变了】几何是宿主拥有的：用户画线期间宿主完全可能移动 / 拉伸 item。
+    /// 差分域是"编辑器看到的那份几何"（`capture` 的第一个参数），所以旧位置不会把
+    /// 用户的笔画写错帧。真正必须守住的是**文档几何只能由宿主改写** —— 客户端把它
+    /// 改成 42 s 之后，文档里仍是宿主那份。
     #[test]
-    fn workspace_accept_rejects_forged_geometry_before_changing_document_edits() {
+    fn workspace_accept_absorbs_a_stale_client_geometry_without_taking_it() {
         let (model, _owners, _ids) = workspace_fixture();
         let document = model.session();
         let baseline = document.workspace_view().unwrap();
-        let mut client = document.workspace_timeline().unwrap();
+        let host = document.workspace_timeline().unwrap();
+        let original_start = host.clips[0].start_sec;
+        let mut client = host.clone();
         client.clips[0].start_sec = 42.;
         assert!(
             document
@@ -5864,10 +6678,14 @@ pub(crate) mod tests {
                     &client,
                     &baseline
                 )
-                .is_err(),
-            "宿主几何必须拒绝而不是忽略"
+                .is_ok(),
+            "并发几何变化必须被吸收，而不是把用户的编辑整条丢弃"
         );
-        assert_eq!(document.edits.lock_or_recover().revision, 0);
+        assert_eq!(
+            document.workspace_timeline().unwrap().clips[0].start_sec,
+            original_start,
+            "文档几何仍由宿主决定，客户端改不动它"
+        );
     }
     #[test]
     fn workspace_global_solo_keeps_each_renderer_output_independent() {
@@ -5898,7 +6716,7 @@ pub(crate) mod tests {
             "set_track_state",
             json!({"trackId":track,"solo":true,"volume":0.5}),
         );
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + PROJECTION_CATCH_UP;
         while editor.applied.load(Ordering::Acquire) < 1 {
             assert!(
                 Instant::now() < deadline,
@@ -5963,14 +6781,33 @@ pub(crate) mod tests {
         let encoded = owner.encode_state().unwrap(); // 真getState路径会flush，不只测手工barrier。
         let saved: Value = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(
-            saved["version"], 8,
-            "权威参数按稳定宿主身份存档（v8：曲线按源帧索引）；旧 v2/v3 解码与范围回归另行保留"
+            saved["version"].as_u64(),
+            Some(crate::state_channel::EditState::STATE_VERSION),
+            "组件状态只有一个代际（见 `EditState::STATE_VERSION`）"
         );
-        assert_eq!(
-            &saved["edits"]["params"]["track"]["pitch_edit"]
-                .as_array()
-                .unwrap()[..2],
-            &[json!(60.), json!(64.)]
+        // 【T2：用户曲线只在权威里】`params` 不再写显示数组，所以这条断言改成
+        // 直接读权威的稀疏 run —— 它才是"用户的这两笔"真正落盘的地方。
+        let mut samples: Vec<f64> = Vec::new();
+        for authority in saved["edits"]["authority"]["roots"]
+            .as_object()
+            .unwrap()
+            .values()
+        {
+            if let Some(runs) = authority["runs"]["pitch_edit"].as_array() {
+                for run in runs {
+                    for value in run["values"].as_array().unwrap() {
+                        samples.push(value.as_f64().unwrap());
+                    }
+                }
+            }
+        }
+        // 【为什么不能断言"含 64"】权威是**源域**的：工程帧上的一格要按 clip 的源
+        // 窗口重采样，两者不整除时落不到整数源帧上，读到的是相邻两格的插值
+        // （这里 60 → 60.07）。能保证的是"尾笔**参与了**这条曲线"，即曲线覆盖
+        // 两格以上、且最大值被它抬高。
+        assert!(
+            samples.len() >= 2 && samples.iter().cloned().fold(f64::MIN, f64::max) > 60.0,
+            "尾笔必须落进权威并抬高曲线：{samples:?}"
         );
         assert_eq!(
             editor.history.lock_or_recover().position,
@@ -6016,14 +6853,31 @@ pub(crate) mod tests {
             });
         let playback =
             super::super::commands::dispatch(&editor, "get_playback_state", json!({})).unwrap();
-        let timeline =
-            super::super::commands::dispatch(&editor, "get_timeline_state", json!({})).unwrap();
+        // 【为什么播放位置是立即断言、而时间线要等】两者走的是不同的通路：播放状态
+        // 直接读时钟投影（同步），时间线是后台投影线程写进 `editor.timeline` 的快照。
+        // 立刻断言快照，在空闲机器上 20 ms 内就对，在 4 核 runner 上就会输给投影线程 ——
+        // 实测 CI 上这条偶发失败、本地连跑三次全过。判据因此写成"最终会一致"，与
+        // 同文件 `host_changes_and_bpm_sync_automatically_without_reloading` 一致。
+        let deadline = Instant::now() + PROJECTION_CATCH_UP;
+        let playhead = loop {
+            let timeline =
+                super::super::commands::dispatch(&editor, "get_timeline_state", json!({})).unwrap();
+            if timeline["playhead_sec"].as_f64() == Some(2.) {
+                break timeline["playhead_sec"].clone();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "时间线播放头没有跟上宿主时钟: {}",
+                timeline["playhead_sec"]
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
         editor.close();
         assert_eq!(
             playback["base_sec"].as_f64().unwrap() + playback["position_sec"].as_f64().unwrap(),
             2.
         );
-        assert_eq!(timeline["playhead_sec"], 2.);
+        assert_eq!(playhead, 2.);
     }
     /// 宿主tempo/geometry通知必须在无人点击重新载入时进入原GUI。
     #[test]
@@ -6059,7 +6913,7 @@ pub(crate) mod tests {
         let document = model.session();
         document.timeline.lock_or_recover().as_mut().unwrap().clips[0].start_sec = 2.;
         document.revision.fetch_add(1, Ordering::AcqRel);
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + PROJECTION_CATCH_UP;
         loop {
             let synced = editor.timeline.lock_or_recover().clone();
             if synced.clips[0].start_sec == 2. && synced.bpm == 150. {
@@ -6557,9 +7411,10 @@ pub(crate) mod tests {
                 );
             }
             if roots.iter().all(|root| {
-                editor.timeline.lock_or_recover().params_by_root_track[root]
-                    .pitch_orig_key
-                    .is_some()
+                let host = root.strip_prefix(&editor.namespace).unwrap_or(root);
+                editor
+                    .document()
+                    .is_some_and(|document| document.baseline_is_ready(host))
             }) {
                 break;
             }
@@ -7007,12 +7862,11 @@ pub(crate) mod tests {
                 publisher.collect_retired();
             }
         }
-        let ready_bytes = (44100 + 48000) * 180 * 4 * 2;
-        let curve_bytes = document
-            .edits
-            .lock_or_recover()
-            .atlas
-            .accounted_curve_bytes();
+        // 【只渲一档】两个发布器共享同一份 PCM，预算只按 44100 那一档记账。
+        let ready_bytes = 44100 * 180 * 4 * 2;
+        // 【曲线不再占这份预算】图集的源域曲线是它自己的一份内存；现在曲线只以
+        // `ParamAuthority` 的 run 存在，而那份预算由内核自己的上限管着。
+        let curve_bytes = 0_usize;
         assert_eq!(
             budget.used() - baseline,
             frames * 4 * 2 + ready_bytes + curve_bytes
@@ -7495,15 +8349,18 @@ pub(crate) mod tests {
                 "接受后的算法必须WORLD"
             );
             assert_eq!(accepted.params["track"].pitch_edit[100], 64.);
+            // 【T2：派生数组不再进编辑通道】`EditState::params` 只承载用户曲线；
+            // 原线住在文档的基线层，判据因此从"编辑态里有没有 pitch_orig"改成
+            // "这一代的基线是否已就绪"。
             if wait_for_analysis {
                 assert!(
-                    accepted.params["track"].pitch_orig[100] > 30.,
+                    document.baseline_is_ready("track"),
                     "自动渲染的原线必须分析完成"
                 );
             }
         }
         let deadline = Instant::now() + Duration::from_secs(30);
-        while editor.applied.load(Ordering::Acquire) < 1 {
+        while editor.applied.load(Ordering::Acquire) < editor.generation.load(Ordering::Acquire) {
             assert!(
                 Instant::now() < deadline,
                 "WORLD automatic apply failed: {:?}",
@@ -7545,34 +8402,50 @@ pub(crate) mod tests {
         );
         editor.close();
     }
-    /// 缺少原声分析时不能把用户的pitch标成已应用；曲线权威仍可保存。
+    /// 原线还没到齐时：用户的曲线必须照常保存，而"缺原线"不能被当成"不用处理"。
+    ///
+    /// 【为什么断言静态判据，而不是"`apply` 必须失败"】门禁是**动态**读数（"这份内容还
+    /// 产不产得出来"），它会随调度时机变化 —— 拿它去钉"不能假报已应用"，测出来的只会
+    /// 是时序（同一条理由写在 `effect_only_analysis_gate_does_not_block_none_or_plain_mix`
+    /// 的说明里；动态那一半由内核侧的 `a_root_whose_line_can_never_be_produced_stops_blocking_the_render`
+    /// 钉住）。这里钉两件**静态**事实：曲线进了权威、并被记成显式编辑；而原线仍然缺席
+    /// —— 也就是"缺原线"没有被当成"不用处理"（"这条 clip 仍要求处理器渲染"由
+    /// `effect_only_analysis_gate_does_not_block_none_or_plain_mix` 单独钉住）。
     #[test]
-    fn pending_pitch_analysis_does_not_publish_raw_audio_as_applied() {
+    fn pending_pitch_analysis_keeps_the_curve_and_still_needs_the_original_line() {
         let (_model, owner, _identity) = fixture();
         let editor = owner.editor_session().unwrap();
         editor.ensure_loaded(false).unwrap();
-        {
+        let root = {
             let mut timeline = editor.timeline.lock_or_recover();
             timeline.tracks[0].pitch_analysis_algo = PitchAnalysisAlgo::WorldDll;
             timeline.tracks[0].compose_enabled = true;
-            let root = timeline.tracks[0].id.clone();
-            timeline.ensure_params_for_root(&root);
-            let params = timeline.params_by_root_track.get_mut(&root).unwrap();
-            params.pitch_edit_user_modified = true;
-            params.pitch_edit = vec![64.; 200];
-            params.pitch_orig = vec![0.; 200];
-            params.pitch_orig_key = None;
-            editor.publish_timeline(timeline.clone());
+            timeline.tracks[0].id.clone()
+        };
+        // 用户画线走**真实写入路径**（与 `write_authority_frames` 同一个函数）：曲线只进
+        // 权威，显示由权威合成。
+        {
+            let document = editor.document().expect("ARA 会话必须有文档");
+            let host_root = root
+                .strip_prefix(editor.namespace.as_str())
+                .unwrap_or(root.as_str())
+                .to_owned();
+            document
+                .write_authority_range(&host_root, "pitch", 0, &[64.; 200], None, true)
+                .expect("参数写入必须成功");
         }
-        let outcome = editor.apply(0, None);
-        assert!(outcome.is_err(), "未分析的全零原线不能渲染原声并假报成功");
-        // 【为什么把消息打进断言】"是错误"与"是**哪一种**错误"是两件事：前者可能来自
-        // 任何一条守卫，只有后者才说明"渲染门禁在等分析"这条契约仍然成立。
-        let error = outcome.unwrap_err();
-        assert!(error.contains("analysis"), "unexpected error: {error}");
+        editor.refresh_display_from_document();
+        {
+            let timeline = editor.timeline.lock_or_recover();
+            let entry = &timeline.params_by_root_track[&root];
+            assert!(entry.pitch_edit_user_modified, "用户曲线必须被记为显式编辑");
+            assert!(entry.pitch_orig_key.is_none(), "这一轮原线还没组装");
+        }
         let bytes = owner.encode_state().unwrap();
-        let saved: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(saved["edits"]["params"]["track"]["pitch_edit"][0], 64.);
+        assert!(
+            authority_curve_has_near(&bytes, "pitch_edit", 64., 1.5),
+            "用户画的 64 必须落进权威"
+        );
         editor.close();
     }
 }

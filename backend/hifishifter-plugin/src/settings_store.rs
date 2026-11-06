@@ -25,7 +25,7 @@ use std::sync::Mutex;
 pub const LOCALE_KEY: &str = "hifishifter.locale";
 
 struct StoreState {
-    /// 配置目录；`None` 表示这台机器上解析不出来 —— 此时设置只在内存里生效，
+    /// 配置目录；`None` 表示系统没有给出这些目录 —— 此时设置只在内存里生效，
     /// 不影响本次会话使用，只是重启后丢失。
     dir: Option<PathBuf>,
     settings: UiSettings,
@@ -46,7 +46,7 @@ impl StoreState {
         // 启动即下发一次：进程级消费方（ONNX 会话 / 拉伸默认值 / 导入策略）必须与
         // 磁盘上的取值一致。此前插件从不调用这些下发函数，于是"默认拉伸算法"
         // 这类设置在插件里是死的 —— 值存下来了，没有任何人读它。
-        hifishifter_kernel::ui_settings_apply::apply(&settings);
+        apply_to_process(&settings);
         Self {
             dir,
             settings,
@@ -64,6 +64,19 @@ impl StoreState {
         let Some(dir) = &self.dir else { return };
         hifishifter_kernel::config::save_frontend_prefs(dir, &self.prefs);
     }
+}
+
+/// 把一份设置下发给进程级消费方（ONNX 会话 / 拉伸默认值 / 导入策略 / 渲染缓存）。
+///
+/// 【为什么测试里先关掉异步预热】见 `hifishifter_kernel::vocoder_ort_session::
+/// set_async_session_prewarm`：测试进程结束时没有收尾钩子（Windows 上 libtest 直接
+/// `ExitProcess`），预热线程会在"建会话"中途被拆掉，让整个测试二进制以
+/// `0xC0000005` 退出 —— 即使每条用例都通过。会话仍会在首次真正使用时惰性构建，
+/// 用例覆盖的行为一点没少。
+fn apply_to_process(settings: &UiSettings) {
+    #[cfg(test)]
+    hifishifter_kernel::vocoder_ort_session::set_async_session_prewarm(false);
+    hifishifter_kernel::ui_settings_apply::apply(settings);
 }
 
 static STORE: Mutex<Option<StoreState>> = Mutex::new(None);
@@ -128,7 +141,7 @@ pub fn save_settings_patch(patch: &serde_json::Value) -> Result<UiSettings, Stri
         state.settings = next;
         state.persist_settings();
         // 下发到进程级消费方（ONNX 会话 / 拉伸默认值 / 导入策略）。
-        hifishifter_kernel::ui_settings_apply::apply(&state.settings);
+        apply_to_process(&state.settings);
         Ok(state.settings.clone())
     });
     if result.is_ok() {
@@ -155,6 +168,19 @@ pub fn lock_param_lines() -> bool {
         }
     }
     let value = settings().lock_param_lines;
+    // 【为什么在变化时打一行 WARN】"我以为锁定是开着的"这类报障此前只能靠猜：
+    // 几何事务日志里有一个 `locked=` 读数，但没有"它是什么时候变的"。这一行只在
+    // 值**真的变化**时出现（含进程内第一次读），所以不会刷屏。
+    if guard.is_none_or(|(_, previous)| previous != value) {
+        log::warn!(
+            "[settings] lock_param_lines={value} revision={revision} (parameter lines now {})",
+            if value {
+                "follow the material"
+            } else {
+                "stay at their project position"
+            }
+        );
+    }
     *guard = Some((revision, value));
     value
 }

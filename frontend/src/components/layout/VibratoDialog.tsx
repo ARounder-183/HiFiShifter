@@ -269,7 +269,7 @@ export function VibratoDialog(props: VibratoDialogProps) {
                                  *
                                  * 【为什么读写的不是草稿】它是**添加颤音的参数**，不属于
                                  * 任何预设：用户先定摆放方式、再挑预设，换预设不该把它
-                                 * 换掉（见 `BaselineMode` 的说明）。因此它进设置、本机
+                                 * 换掉（见 `BaselineMode` 的说明）。因此它进设置、本地
                                  * 记忆，下次打开还是这个。
                                  */
                                 baseline={session.vibratoBaseline}

@@ -156,11 +156,23 @@ impl BlockTraceRing {
         record.seq.fetch_add(1, Ordering::Release);
     }
 
-    /// 最近一块的宿主上下文，格式化成 `[capture] ctx: …` 一行。
+    /// 最近一块的宿主上下文，格式化成 `[capture] ctx: …` 一行（测试用）。
     ///
-    /// 【为什么只有一块】它回答的是"宿主此刻给的是什么形状"，不是历史。需要历史时
-    /// 用 `snapshot`（诊断包里的块级 trace）。
+    /// 【为什么只剩测试在用】生产路径要的是"这一行的**形状**变了没有"，那需要
+    /// `last_context` 的第二个返回值；只取整行会让每块都算"变了"（行里有位置）。
+    #[cfg(test)]
     pub(super) fn last_context_line(&self) -> Option<String> {
+        self.last_context().map(|(line, _)| line)
+    }
+
+    /// 最近一块的上下文，同时给出**不含位置的形状键**。
+    ///
+    /// 【为什么要形状键】`[capture] ctx` 此前按整行去重，而行里带 `pos` —— 只要位置
+    /// 在走，每一块的整行都不同，于是它每块打一行：现场日志里 10162/26617 行是它。
+    /// 而这一行想回答的是"宿主此刻给的是什么**形状**"（钉住？有 continuous？music
+    /// 冻结？），位置本身由 `[capture] clock` 的汇总负责。按形状去重之后，一次播放
+    /// 只会在形状真的变化时打几行。
+    pub(super) fn last_context(&self) -> Option<(String, String)> {
         let head = self.head.load(Ordering::Acquire);
         if head == 0 {
             return None;
@@ -229,12 +241,37 @@ impl BlockTraceRing {
         let rate = f64::from_bits(rate_bits);
         let music = f64::from_bits(music_bits);
         let tempo = f64::from_bits(tempo_bits);
-        Some(format!(
+        // 【形状键：除了位置以外的一切】见 `last_context` 的说明。
+        let key = format!(
+            "stream={} mode={mode} state=0x{state:x} frames={frames} phase={phase} \
+             playing={} rising={} cycle={} had_prev={} cycle_meta={} cont={}{} \
+             music={}{} tempo={}{} rate={rate:.0} counted={} allow_output={} outcome={}",
+            ProcessStream::from_code(stream).map_or("?", |value| value.as_str()),
+            u8::from(playing),
+            u8::from(playing_rising),
+            cycle_wrap,
+            u8::from(had_previous),
+            cycle,
+            if continuous_valid { continuous } else { 0 },
+            if continuous_valid {
+                "(valid)"
+            } else {
+                "(absent)"
+            },
+            if music_valid { music } else { 0.0 },
+            if music_valid { "(valid)" } else { "(absent)" },
+            if tempo_valid { tempo } else { 0.0 },
+            if tempo_valid { "(valid)" } else { "(absent)" },
+            u8::from(counted),
+            u8::from(emitted),
+            capture,
+        );
+        let line = format!(
             "[capture] ctx: stream={} mode={mode} state=0x{state:x} \
              raw={raw_start} pos={position} delta={} frames={frames} phase={phase} \
              playing={} rising={} cycle={} had_prev={} \
-             cycle_meta={} cont={}{} music={}{} tempo={}{} rate={rate:.0} counted={} capture={} \
-             emitted={}",
+             cycle_meta={} cont={}{} music={}{} tempo={}{} rate={rate:.0} counted={} allow_output={} \
+             outcome={}",
             ProcessStream::from_code(stream).map_or("?", |value| value.as_str()),
             position.saturating_sub(raw_start),
             u8::from(playing),
@@ -253,9 +290,10 @@ impl BlockTraceRing {
             if tempo_valid { tempo } else { 0.0 },
             if tempo_valid { "(valid)" } else { "(absent)" },
             u8::from(counted),
-            emitted,
+            u8::from(emitted),
             capture,
-        ))
+        );
+        Some((line, key))
     }
 
     /// 最近的 `limit` 条记录（按写入顺序）。撕裂的记录直接跳过。

@@ -166,33 +166,24 @@ pub(crate) struct HostUndoBlock {
 }
 impl Drop for HostUndoBlock {
     fn drop(&mut self) {
+        // 【不在宿主线程也必须把块关掉】`Undo_EndBlock2` 只能在宿主线程调用，而
+        // `Drop` 可能在任意线程上跑（actor 线程、命令线程、错误路径）。旧实现遇到
+        // 这种情形直接 `return` —— 一声不响。
+        //
+        // 后果不是"少一条撤销记录"，而是**块一直开着**：宿主的下一次 `Undo_DoUndo`
+        // 会把之后所有编辑并成一步，用户按一次撤销就毁掉一大片；而自动渲染的
+        // `host_undo.pending` 也永远为真，于是合成永久饥饿。
+        //
+        // 正确处置是**排进宿主线程的队列**，由那一边的下一次 tick 关掉。
+        //
+        // 【为什么不是就地 `on_host`】那会**阻塞**等宿主线程来取任务，而 `Drop` 可能
+        // 正跑在宿主线程等待的那把锁上 —— 实测一个 workspace 用例因此永久挂起。
+        // 排队是异步的：调用方立刻返回，块由宿主线程在下一次 tick 关掉。
         if std::thread::current().id() != self.host.thread {
+            self.host.queue_undo_end(self.project);
             return;
         }
-        let Some(api) = &self.host.geometry else {
-            return;
-        };
-        let Some(write) = &self.host.write else {
-            return;
-        };
-        let project = self.project as *mut c_void;
-        if unsafe { (api.validate)(project, project, c"ReaProject*".as_ptr()) } {
-            unsafe {
-                // 【为什么是品牌名而不是文案】后端不持有 UI 文案（见 `model.rs` 的同名
-                // 约定）。这里写进的是**宿主自己的**撤销栈，宿主会把它显示在它自己的
-                // 界面里；一个稳定的产品名比一句可能过期的英文描述更合适。前端只对
-                // `backend === "local"` 的记录做 `history_op_` 本地化，宿主记录原样显示。
-                (write.end)(project, c"HiFiShifter".as_ptr(), -1);
-            }
-            // `Undo_EndBlock2` 之后，刚创建的条目就是当前条目 —— 在这里记下它的墙钟时间。
-            // 时间戳只是显示用的缓存，读不到就算了（不阻断任何写路径）。
-            if let Some(history) = &self.host.history {
-                let index = unsafe { (history.current)(project) };
-                if index >= 0 {
-                    self.host.note_undo_entry_time(index);
-                }
-            }
-        }
+        self.host.end_project_undo(self.project);
     }
 }
 
@@ -234,6 +225,61 @@ impl NativeHost {
             (self.write.as_ref().unwrap().begin)(project)
         })?;
         Ok(block)
+    }
+    /// 把一个"需要在宿主线程结束的 Undo 块"排队。
+    ///
+    /// 【为什么是队列而不是阻塞投递】见 [`HostUndoBlock::drop`]：阻塞投递会在
+    /// "`Drop` 跑在宿主线程正等的那把锁上"时自锁。队列由宿主线程的下一次
+    /// [`Self::drain_undo_ends`] 排空。
+    pub(crate) fn queue_undo_end(&self, project: usize) {
+        let mut queued = self.undo_ends.lock_or_recover();
+        // 同一个项目只留一次：一个块只会结束一次，重复排队没有意义。
+        if !queued.contains(&project) {
+            queued.push(project);
+        }
+    }
+
+    /// 在宿主线程上排空待结束的 Undo 块。**不在宿主线程时什么都不做**（留给下一次）。
+    pub(crate) fn drain_undo_ends(&self) {
+        if !self.on_host_thread() {
+            return;
+        }
+        let queued = std::mem::take(&mut *self.undo_ends.lock_or_recover());
+        for project in queued {
+            self.end_project_undo(project);
+        }
+    }
+
+    /// 结束一个已开启的宿主 Undo 块（**只允许在宿主线程调用**）。
+    ///
+    /// 抽成方法是为了让 [`HostUndoBlock::drop`] 在**别的线程**上也能把块关掉：
+    /// 那时它把这次调用投递到宿主线程，而不是就地放弃（见那里的说明）。
+    pub(crate) fn end_project_undo(&self, project: usize) {
+        let Some(api) = &self.geometry else {
+            return;
+        };
+        let Some(write) = &self.write else {
+            return;
+        };
+        let project = project as *mut c_void;
+        if !unsafe { (api.validate)(project, project, c"ReaProject*".as_ptr()) } {
+            return;
+        }
+        unsafe {
+            // 【为什么是品牌名而不是文案】后端不持有 UI 文案（见 `model.rs` 的同名
+            // 约定）。这里写进的是**宿主自己的**撤销栈，宿主会把它显示在它自己的
+            // 界面里；一个稳定的产品名比一句可能过期的英文描述更合适。前端只对
+            // `backend === "local"` 的记录做 `history_op_` 本地化，宿主记录原样显示。
+            (write.end)(project, c"HiFiShifter".as_ptr(), -1);
+        }
+        // `Undo_EndBlock2` 之后，刚创建的条目就是当前条目 —— 在这里记下它的墙钟时间。
+        // 时间戳只是显示用的缓存，读不到就算了（不阻断任何写路径）。
+        if let Some(history) = &self.history {
+            let index = unsafe { (history.current)(project) };
+            if index >= 0 {
+                self.note_undo_entry_time(index);
+            }
+        }
     }
     /// 记下一个由本插件创建的 Undo 条目的墙钟时间（Unix 毫秒）。
     ///

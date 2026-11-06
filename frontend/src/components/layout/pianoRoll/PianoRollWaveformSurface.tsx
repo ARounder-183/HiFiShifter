@@ -331,7 +331,12 @@ export function makeLoudnessAmplitudeMap(
     ): FrameSamples => {
         // 映射后的取样帧。`curveFrame` 同时承担"该帧是否已被恢复为 pad"的语义
         //（搬走的旧范围 → volume 1.0、dyn 目标沿用原声）。
-        const curveFrame = w === null ? frameF : w.curveFrame(frameF);
+        //
+        // 【「锁定参数线」关闭时不要搬用户曲线】此时用户画的那一笔被**钉在工程
+        // 位置**上，宿主移动片段不会带走它。预览若还按几何搬走编辑点，用户会看到
+        // "拖一下线跟着动，松手又跳回去"。只搬基线（它本来就是派生层）。
+        const curveFrame =
+            w === null || w.movesUserCurves === false ? frameF : w.curveFrame(frameF);
         const baseFrame = w === null ? frameF : w.baselineFrame(frameF);
         const baseScale = w === null ? 1 : w.baselineScale(frameF);
         // 该帧播放的素材在旧几何下不可见（延伸/截短新露出的部分、Slip 带入的部分）

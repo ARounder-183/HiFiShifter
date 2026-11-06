@@ -29,7 +29,7 @@ pub(crate) struct ProcessData {
 }
 
 #[repr(C)]
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 pub(crate) struct Chord {
     pub key_note: u8,
     pub root_note: u8,
@@ -37,7 +37,7 @@ pub(crate) struct Chord {
 }
 
 #[repr(C)]
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 pub(crate) struct FrameRate {
     pub frames_per_second: u32,
     pub flags: u32,
@@ -75,7 +75,7 @@ pub(crate) const PROCESS_CONTEXT_CONTINUOUS_VALID: u32 = 1 << 17;
 
 /// 完整 SDK 时间上下文；project_time_samples 始终有效，不依赖音乐时间有效位。
 #[repr(C)]
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 pub(crate) struct ProcessContext {
     pub state: u32,
     pub sample_rate: f64,
@@ -213,9 +213,23 @@ pub(crate) unsafe fn clear_outputs(data: *mut ProcessData) -> Result<(), BufferE
     // 【为什么 in-place 时不写这个掩码】见 [`input_output_share_bus`]：写进去的
     // "全静音"会在下一块被我们自己的 `capture_view` 读成"宿主没给输入"。
     if !input_output_share_bus(data) {
-        output.silence_flags = (1_u64 << channels.min(64)) - 1;
+        output.silence_flags = silence_mask(channels);
     }
     Ok(())
+}
+
+/// `AudioBusBuffers::silence_flags` 的"全部声道静音"掩码。
+///
+/// 【为什么必须是一个函数】`(1u64 << n) - 1` 在 `n == 64` 时**移位溢出**：debug 构建
+/// 直接 panic，release 构建把 `1u64 << 64` 掩成 0，于是掩码变成全零（= "一个声道都
+/// 不静音"）。总线现在接受任意声道数（见 `validate_bus`），64 声道不是理论值。
+pub(crate) fn silence_mask(declared: usize) -> u64 {
+    let bits = declared.min(64);
+    if bits >= 64 {
+        u64::MAX
+    } else {
+        (1_u64 << bits) - 1
+    }
 }
 
 /// 非 32-bit 浮点（`kSample64`）时的**降级静音**：按宿主声明的样本宽度清零输出。
@@ -265,7 +279,7 @@ pub(crate) unsafe fn silence_unsupported_sample_size(data: *mut ProcessData) -> 
                 };
             }
         }
-        output.silence_flags = (1_u64 << output.num_channels.min(64)) - 1;
+        output.silence_flags = silence_mask(output.num_channels as usize);
     }
     true
 }

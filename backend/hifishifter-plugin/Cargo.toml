@@ -1,6 +1,6 @@
 [package]
 name = "hifishifter-plugin"
-version = "0.1.0-beta.15"
+version = "0.2.0-beta"
 edition = "2021"
 publish = false
 description = "HiFiShifter 的 VST3 / ARA 插件适配层（复用本体离线内核）"
@@ -8,6 +8,7 @@ description = "HiFiShifter 的 VST3 / ARA 插件适配层（复用本体离线�
 # lock 由 `backend/` workspace 统一持有（见 backend/Cargo.toml 的说明）。
 
 [dependencies]
+hifishifter-plugin-core = { path = "../hifishifter-plugin-core" }
 # 插件包不分发闭源vslib；独立app的默认features不受影响。
 hifishifter-kernel = { path = "../hifishifter-kernel", default-features = false, features = ["onnx"] }
 hifishifter-host-link = { path = "../hifishifter-host-link" }
@@ -68,7 +69,7 @@ gdk = { version = "0.18", features = ["unsafe-assume-initialized"] }
 # `v2_8`（脚本消息通道）、`v2_16`（ephemeral WebContext）、`v2_22`
 # （`JSCValue`）一并打开 —— 这些正是本模块用到的最低 API 面。
 webkit2gtk = { version = "2.0", features = ["v2_40"] }
-# §JSCValue → &str§（脚本消息通道只传字符串，见 §gui/bridge.js§）。同样是 Cargo.lock 里
+# `JSCValue → &str`（脚本消息通道只传字符串，见 `gui/bridge.js`）。同样是 Cargo.lock 里
 # 已有的版本（webkit2gtk 自己依赖它）。
 javascriptcore-rs = "1.1"
 
@@ -101,6 +102,8 @@ objc2-web-kit = { version = "0.3", features = [
 webview2-com = "0.39"
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com",
     "Win32_System_Diagnostics_ToolHelp",
+    # `GlobalMemoryStatusEx`：PCM 预算按物理内存自适应（见 `render/budget.rs`）。
+    "Win32_System_SystemInformation",
     "Win32_System_Threading", "Win32_System_LibraryLoader", "Win32_Graphics_Gdi",
     "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_Shell_Common"] }
 

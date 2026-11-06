@@ -36,7 +36,7 @@ mod unavailable;
 
 pub(crate) use strokes::{KeyCode, OwnedStrokes, Stroke};
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 /// 探针窗口：等"宿主自己会不会动"。
@@ -60,6 +60,22 @@ const MIN_ESCAPE_GAP: Duration = Duration::from_millis(60);
 const RATE_WINDOW: Duration = Duration::from_secs(10);
 const ESCAPES_PER_WINDOW: usize = 20;
 
+/// "宿主自己处理这个键"这条记账的有效期。
+///
+/// 【为什么必须有有效期】它是从**一次**探针观察里学到的结论，而那次观察只看
+/// `playing` 有没有翻转 —— 工程播完、循环回卷、宿主自己在别处按了空格，都会让
+/// 一个**本来该由插件处理**的键被记成"宿主自己处理"。旧实现是永久的：一次误判，
+/// 这个键在本次会话里就再也不会被投递，用户唯一的出路是重开插件窗口。
+///
+/// 五分钟覆盖"用户离开一会儿再回来"的常见节奏，又不至于让一次真的误判活太久。
+const HOST_NATIVE_TTL: Duration = Duration::from_secs(300);
+
+/// "合成路径对这个键无效"这条记账的有效期。
+///
+/// 比 `HOST_NATIVE_TTL` 短一半：它的代价是**多一次焦点租借**（用户可能看到一瞬
+/// 焦点变化），所以宁可让一次误判只活两分钟，也不要让它陪跑整场会话。
+const ESCALATION_TTL: Duration = Duration::from_secs(120);
+
 /// 让路的保真度：原语**自报**，Policy 只据此分支。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Fidelity {
@@ -72,6 +88,13 @@ pub(crate) enum Fidelity {
     PassThrough,
     /// 页面先吃掉了键，我们再补一次。**必须**先证明宿主没自己处理过。
     Synthetic,
+    /// 用真实输入（`SendInput`）补一次，按键状态与焦点都是真的。
+    ///
+    /// 【为什么单列一档】`SendInput` 会更新线程的键状态、也经过宿主自己的消息循环，
+    /// 因此修饰键是忠实的、宿主按焦点/按键状态判快捷键也能命中。代价是要把焦点
+    /// **临时**租给宿主窗口（见 `FocusLoan`）—— 所以它只在该键的合成路径
+    /// 已经被证明无效之后才启用（见 `Arbiter::escalate`）。
+    Injected,
     /// 本平台没有这条路。接手但不投递，也不说话。
     #[allow(dead_code)]
     Unavailable,
@@ -83,6 +106,7 @@ impl Fidelity {
         match self {
             Fidelity::PassThrough => "pass-through",
             Fidelity::Synthetic => "synthetic",
+            Fidelity::Injected => "injected",
             Fidelity::Unavailable => "unavailable",
         }
     }
@@ -139,8 +163,12 @@ impl EscapeError {
 pub(crate) enum TargetKind {
     /// 宿主线程的**焦点窗口**（最可能真正处理这个键的那一个）。
     Focus,
-    /// 焦点在我们子树里时，宿主给插件开的容器窗口。
-    Parent,
+    /// 插件抢走键盘焦点**之前**，最后一个拿到焦点的宿主窗口。
+    ///
+    /// 【为什么它排在 RootOwner 前面】宿主的快捷键表通常挂在**用户当时正在用的那个
+    /// 窗口**的消息过程里，而不是主窗口。这个句柄本来就记着（`WM_KILLFOCUS` 的
+    /// wParam），只是此前没有投递路径用过它。
+    PreviousFocus,
     /// 退回 owner 链顶端（旧行为）。
     RootOwner,
 }
@@ -150,7 +178,7 @@ impl TargetKind {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             TargetKind::Focus => "focus",
-            TargetKind::Parent => "parent",
+            TargetKind::PreviousFocus => "previous-focus",
             TargetKind::RootOwner => "root-owner",
         }
     }
@@ -160,9 +188,17 @@ pub(crate) trait HostKeyEscape {
     fn fidelity(&self) -> Fidelity;
 
     /// `window` = 本编辑器窗口的平台句柄（HWND / NSView / XID），由调用方给出。
+    /// `previous` = 焦点进入本编辑器之前最后一个拿到焦点的宿主窗口（0 = 不知道）。
+    /// `prefer_injected` = 这个键的合成路径已经被证明无效（见 `Arbiter::escalate`）。
     ///
-    /// 成功时交回**投给了哪一级**（诊断读数用）。
-    fn escape(&mut self, window: usize, stroke: &Stroke) -> Result<TargetKind, EscapeError>;
+    /// 成功时交回**投给了哪一级**与**实际用的保真度**（诊断读数用）。
+    fn escape(
+        &mut self,
+        window: usize,
+        previous: Option<usize>,
+        stroke: &Stroke,
+        prefer_injected: bool,
+    ) -> Result<(TargetKind, Fidelity), EscapeError>;
 
     /// 把键盘焦点**交还宿主**。
     ///
@@ -217,7 +253,13 @@ pub(crate) enum RejectReason {
     RateLimited,
     /// 这个键不在键表里 —— 让不成立，调用方应回落旧文案。
     UnsupportedKey,
-    /// 带修饰键 —— 让不成立，调用方应回落旧文案。
+    /// 带修饰键，且**本平台**只有合成路径（它不能忠实转交组合键）。
+    ///
+    /// 【为什么它现在没有构造点】原语自己按保真度裁决（见 `windows::escape` 的两条路），
+    /// 状态机不再替它拒绝。这个变体保留在词汇里，是因为**别的平台**（`Unavailable` /
+    /// 未来的合成-only 平台）仍可能据此回一句"这个组合键送不出去" —— 删掉它会让那句
+    /// 话失去唯一的类型化出口。
+    #[allow(dead_code)]
     ModifiedKey,
 }
 
@@ -310,8 +352,27 @@ struct Pending {
 pub(crate) struct Arbiter {
     fidelity: Fidelity,
     gate: Gate,
-    /// 宿主自己处理过的键。**按码记账** —— 宿主认识空格，不代表它认识 F2。
-    host_native: HashSet<KeyCode>,
+    /// 宿主自己处理过的键 → 记账时刻。**按码记账** —— 宿主认识空格，不代表它认识 F2。
+    ///
+    /// 【为什么是时刻而不是布尔】旧实现是**永久**闩：键一旦被记成 host-native，本次
+    /// 会话里再也不会被投递。而判据（探针窗口内 `playing` 有没有翻转）会被
+    /// **任何**播放状态变化污染 —— 工程播完、循环回卷、宿主自己在别处按了空格。
+    /// 一次误判就把 Space 永久判死，用户唯一的出路是重开插件窗口（甚至重开宿主）。
+    ///
+    /// 现在每条闩都带时刻，并由三条出口失效：
+    ///   1. 超过 [`HOST_NATIVE_TTL`] ⇒ 忘掉（宿主行为可能已经不同）；
+    ///   2. 视图重新获得焦点 ⇒ 清空（"这次会话"从用户回到插件那一刻重新算）；
+    ///   3. 该键的传输读数发生了与本次让路无关的大跳 ⇒ 清空（见 `tick`）。
+    host_native: HashMap<KeyCode, Instant>,
+    /// 合成路径被证明无效的键 → 记账时刻。**按码记账**，与 `host_native` 同形。
+    ///
+    /// 【为什么与 host_native 分开】那张表记的是"宿主自己会处理这个键"（所以**不要**
+    /// 投递）；这张记的是"宿主收到了我们的合成消息但没反应"（所以**换一种方式**投递）。
+    /// 合成一条，语义相反。
+    ///
+    /// 【为什么要过期】一次误判（宿主当时正忙 / 弹了模态框）不该让这个键永远走更贵的
+    /// 那条路。五分钟覆盖"用户离开一会儿再回来"，又短到一次误判不会活太久。
+    injected: HashMap<KeyCode, Instant>,
     pending: Option<Pending>,
     last_escape: Option<Instant>,
     escapes: VecDeque<Instant>,
@@ -324,10 +385,12 @@ impl Arbiter {
             gate: match fidelity {
                 // 键根本没进页面 ⇒ 不存在双触发 ⇒ 探针纯属浪费一次手感。
                 Fidelity::PassThrough => Gate::Relay,
-                Fidelity::Synthetic => Gate::Probe,
+                // 注入与合成都发生在"页面已经看到这个键"之后，因此都需要探针防双触发。
+                Fidelity::Synthetic | Fidelity::Injected => Gate::Probe,
                 Fidelity::Unavailable => Gate::Unavailable,
             },
-            host_native: HashSet::new(),
+            host_native: HashMap::new(),
+            injected: HashMap::new(),
             pending: None,
             last_escape: None,
             escapes: VecDeque::new(),
@@ -338,9 +401,29 @@ impl Arbiter {
         self.fidelity
     }
 
-    /// 宿主自己处理过的键有几个（诊断读数）。
-    pub(crate) fn host_native_count(&self) -> usize {
+    /// 宿主自己处理过的键有几个（诊断读数；已过期的先清掉再数）。
+    pub(crate) fn host_native_count(&mut self) -> usize {
+        self.expire_host_native(Instant::now());
         self.host_native.len()
+    }
+
+    /// 忘掉超过 [`HOST_NATIVE_TTL`] 的"宿主自己处理"记账。
+    fn expire_host_native(&mut self, now: Instant) {
+        self.host_native
+            .retain(|_, at| now.duration_since(*at) < HOST_NATIVE_TTL);
+    }
+
+    /// 视图重新获得焦点 ⇒ "这次会话"重新算。
+    ///
+    /// 【为什么这条是必需的】`host_native` 的判据是"探针窗口内 `playing` 有没有
+    /// 翻转"，而那个量会被**与本次让路无关**的事情改变（工程播完、循环回卷、宿主
+    /// 自己在别处按了空格）。用户从别的窗口回到插件时，正是"我刚才是想让插件处理
+    /// 这个键"最明确的一刻 —— 从这一刻重新开始记账，一次误判就不会变成永久。
+    pub(crate) fn note_focus_regained(&mut self) {
+        self.host_native.clear();
+        // 探针/观察窗同样作废：它们的基线是**上一次**焦点下的阅读，回来的这一刻
+        // 已经没有意义了。留着它只会让下一次按键被 `InFlight` 拒掉。
+        self.pending = None;
     }
 
     /// 入口 A：插件**认识**这个键（命中了一条绑定），但能力矩阵说它不归插件做。
@@ -389,12 +472,17 @@ impl Arbiter {
             }
             Gate::Probe | Gate::Relay => {}
         }
-        if self.host_native.contains(&stroke.code) {
+        // 【为什么要在这里先结算过期的 pending】它的推进只由 `ui_tick` 负责，而
+        // `ui_tick` 被"本实例是否 owner"门住 —— owner 短暂失败时探针永远不结算，
+        // 之后**每一次**按键都拿到 `Rejected(InFlight)`，直到窗口重开。
+        // 入口处先按 now 结算是唯一不依赖定时器的兜底：超时的窗口直接作废。
+        self.settle_expired(now);
+        self.expire_host_native(now);
+        if self.host_native.contains_key(&stroke.code) {
             return KeyOutcome::rejected(RejectReason::HostNative);
         }
-        if !stroke.is_bare() {
-            return KeyOutcome::rejected(RejectReason::ModifiedKey);
-        }
+        // 【为什么不在这里拒修饰键】合成路径确实不能忠实转交组合键（`PostMessage` 不更新
+        // 键状态），但**注入**路径可以。让原语按保真度拒绝，这一层只判断"该不该让"。
         // 单飞**只针对探针**：探针靠"基线有没有翻转"下结论，中途插进来的按键会污染基线。
         //
         // 【为什么观察窗不单飞】观察窗只回答"上一次让路成没成"，它是记账、不是闸门。
@@ -486,9 +574,10 @@ impl Arbiter {
         if self.gate == Gate::Unavailable {
             return KeyOutcome::accepted_with(vec![Effect::Trace("unavailable")]);
         }
-        if !stroke.is_bare() {
-            return KeyOutcome::rejected(RejectReason::ModifiedKey);
-        }
+        // 同 `on_key`：入口处先结算，不依赖 `ui_tick`（见那里的说明）。
+        self.settle_expired(now);
+        self.expire_host_native(now);
+        // 同 `on_key`：修饰键交给原语按保真度裁决。
         // 【为什么探针在飞时不投】入口 B 不探针，但与入口 A 共享同一个宿主反应：
         // 探针窗口内插进来的投递会翻转 `playing`，`tick` 把**探针那个键**误记成
         // host-native（闩的是 `pending.stroke.code`，不是实际投出去的这个键）——
@@ -537,8 +626,9 @@ impl Arbiter {
 
         if reading.is_some_and(|reading| Some(reading) != pending.baseline) {
             if pending.probe {
-                // 宿主自己动了 ⇒ 这个宿主本来就会处理**这个键**。按码记账，永不投递。
-                self.host_native.insert(pending.stroke.code);
+                // 宿主自己动了 ⇒ 这个宿主本来就会处理**这个键**。按码记账（带时刻，
+                // 见 `host_native` 的说明：永久闩会让一次误判判死一个键）。
+                self.host_native.insert(pending.stroke.code, now);
                 return vec![Effect::Trace("host-native")];
             }
             return vec![Effect::Trace("accepted")];
@@ -566,11 +656,34 @@ impl Arbiter {
             return vec![Effect::Trace("relayed"), Effect::Escape { action, stroke }];
         }
 
-        // 观察窗到期、宿主仍没动。静默：用户的下一个动作本来就是去点宿主窗口。
+        // 观察窗到期、宿主仍没动。
+        //
+        // 【为什么这里要升级】合成消息投出去了、宿主毫无反应 —— 这是唯一能区分
+        // "宿主不处理这个键"与"宿主收不到这种投递"的时刻。后者才是现场（VEGAS 的
+        // `no-response` 四次全中），而它的解只有一种：下一次换成真实输入。
+        // 静默仍然是**对用户**的：升级只改变下一次怎么投，不出现在界面上。
         if pending.verifiable {
+            if self.escalate(pending.stroke.code, now) {
+                return vec![Effect::Trace("no-response"), Effect::Trace("escalate")];
+            }
             return vec![Effect::Trace("no-response")];
         }
         Vec::new()
+    }
+
+    /// 入口处结算**已过期**的探针 / 观察窗（不依赖 `ui_tick`）。
+    ///
+    /// 【为什么"只作废、不下结论"】过期意味着"我们没看见结果"，那是**无信息**，
+    /// 不是"宿主没动"。下结论会把一次没看见记成"宿主不处理这个键"（或反之），
+    /// 而那正是本模块最贵的一类错误。作废之后下一次按键重新探针一次即可。
+    fn settle_expired(&mut self, now: Instant) {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| now >= pending.deadline)
+        {
+            self.pending = None;
+        }
     }
 
     fn throttled(&self, now: Instant) -> bool {
@@ -585,6 +698,33 @@ impl Arbiter {
             .filter(|at| now.duration_since(**at) < RATE_WINDOW)
             .count()
             >= ESCAPES_PER_WINDOW
+    }
+
+    /// 这个键的合成路径被证明无效吗（且仍在有效期内）。
+    pub(crate) fn prefers_injected(&mut self, code: KeyCode) -> bool {
+        self.expire_injected(Instant::now());
+        self.injected.contains_key(&code)
+    }
+
+    /// 记下"合成对这个键不管用"。返回是否**新增**（用于只打一次日志）。
+    fn escalate(&mut self, code: KeyCode, now: Instant) -> bool {
+        self.expire_injected(now);
+        match self.injected.entry(code) {
+            // 已经升级过：只刷新时刻（延长它自己的有效期），不重复记日志。
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                entry.insert(now);
+                false
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(now);
+                true
+            }
+        }
+    }
+
+    fn expire_injected(&mut self, now: Instant) {
+        self.injected
+            .retain(|_, at| now.duration_since(*at) < ESCALATION_TTL);
     }
 
     fn record_escape(&mut self, now: Instant) {
@@ -749,10 +889,12 @@ mod tests {
         let second = start + Duration::from_secs(1);
         arbiter.on_key(second, "playback.toggle", bare("Space"), playing(true));
         let timeout = tick_for(&mut arbiter, second, 460, playing(true));
-        assert_eq!(traces(&timeout), vec!["no-response"]);
+        // 第一次超时：记账 + **升级**（下一次这个键改走注入）。两者都只进日志。
+        assert_eq!(traces(&timeout), vec!["no-response", "escalate"]);
         assert_eq!(escaped(&timeout), 0, "观察窗只记账，不再投递");
+        assert!(arbiter.prefers_injected(code("Space")));
 
-        // 同一个动作再失败一次：照常记账，仍然不说话。
+        // 同一个动作再失败一次：照常记账，但不再重复升级。
         let third = start + Duration::from_secs(3);
         arbiter.on_key(third, "playback.toggle", bare("Space"), playing(true));
         let again = tick_for(&mut arbiter, third, 460, playing(true));
@@ -871,30 +1013,80 @@ mod tests {
         assert_eq!(escaped(&unbound.effects), 0);
     }
 
-    /// **不变量：带修饰的键一律不让。**
+    /// **不变量：带修饰的键照让，但只能走注入。**
     ///
-    /// 【为什么这条是硬限制而不是偏好】`PostMessage` 不更新线程的异步键状态，宿主读
-    /// `GetKeyState` 会看到"没按 Ctrl"，于是 `Ctrl+Home` 变成 `Home`。送一个错的键
-    /// 比不送更坏。
+    /// 【为什么不再一律拒绝】合成消息确实不能忠实转交组合键（不更新异步键状态，
+    /// `Ctrl+Home` 会被读成 `Home`）。但**注入**可以 —— 于是"带修饰"从"拒绝的理由"
+    /// 变成"必须走注入的理由"，由原语按保真度裁决（见 `windows::escape`）。状态机
+    /// 只负责"该不该让"。
     #[test]
-    fn modified_strokes_are_never_relayed() {
+    fn a_modified_stroke_is_relayed_and_left_to_the_primitive() {
         let start = Instant::now();
         let mut arbiter = Arbiter::new(Fidelity::Synthetic);
         let mut stroke = bare("Space");
         stroke.ctrl = true;
+        // 入口 A：先探针（组合键同样可能被宿主自己处理），探针过后才投。
         let outcome = arbiter.on_key(start, "playback.toggle", stroke.clone(), playing(false));
-        assert_eq!(
-            outcome.verdict,
-            KeyVerdict::Rejected(RejectReason::ModifiedKey)
-        );
-        assert!(outcome.effects.is_empty());
+        assert_eq!(outcome.verdict, KeyVerdict::Accepted);
+        let relayed = tick_for(&mut arbiter, start, 120, playing(false));
+        assert_eq!(escaped(&relayed), 1, "探针到期后必须真的投一次");
 
-        let unbound = arbiter.on_unbound(start, stroke);
+        // 入口 B：未绑定的组合键直接投（换一个更晚的时刻：让路的硬间隔是 60 ms）。
+        let later = start + Duration::from_secs(1);
+        let unbound = arbiter.on_unbound(later, stroke);
+        assert_eq!(unbound.verdict, KeyVerdict::Accepted);
+        assert_eq!(escaped(&unbound.effects), 1);
+    }
+
+    /// **不变量：升级只作用于**那一个**失败过的键。**
+    ///
+    /// 【为什么按码而不是全局】一次误判（宿主当时正忙 / 弹了模态框）不该让**所有**
+    /// 键都改走更贵的注入路径 —— 焦点租借是有代价的。按码记账，代价就只落在真正
+    /// 出问题的那个键上。
+    #[test]
+    fn escalation_is_scoped_to_the_key_that_failed() {
+        let start = Instant::now();
+        let mut arbiter = Arbiter::new(Fidelity::Synthetic);
+        arbiter.on_key(start, "playback.toggle", bare("Space"), playing(true));
+        // 90 ms 探针：宿主没动 ⇒ 让一次（进入观察窗）。
         assert_eq!(
-            unbound.verdict,
-            KeyVerdict::Rejected(RejectReason::ModifiedKey)
+            traces(&tick_for(&mut arbiter, start, 120, playing(true))),
+            vec!["relayed"]
         );
-        assert!(unbound.effects.is_empty());
+        // 400 ms 观察窗到期：宿主仍没动 ⇒ 记账 + 升级。
+        let timeout = tick_for(
+            &mut arbiter,
+            start + Duration::from_millis(120),
+            460,
+            playing(true),
+        );
+        assert_eq!(traces(&timeout), vec!["no-response", "escalate"]);
+        assert!(arbiter.prefers_injected(code("Space")));
+        assert!(
+            !arbiter.prefers_injected(code("F2")),
+            "别的键不该为这一次失败买单"
+        );
+    }
+
+    /// **不变量：升级不会在记完之后立刻消失。**
+    ///
+    /// 【为什么只钉这一条】记账用的是真实时钟（`prefers_injected` 内部取
+    /// `Instant::now`），过期时间 120 s —— 测试里既不能等，也不该改系统时间。
+    /// 这里钉的是"刚记下就一定生效"，过期由 `ESCALATION_TTL` 的常量本身表达。
+    #[test]
+    fn an_escalation_survives_the_next_lookup() {
+        let start = Instant::now();
+        let mut arbiter = Arbiter::new(Fidelity::Synthetic);
+        arbiter.on_key(start, "playback.toggle", bare("Space"), playing(true));
+        tick_for(&mut arbiter, start, 120, playing(true));
+        tick_for(
+            &mut arbiter,
+            start + Duration::from_millis(120),
+            460,
+            playing(true),
+        );
+        assert!(arbiter.prefers_injected(code("Space")));
+        assert!(arbiter.prefers_injected(code("Space")));
     }
 
     /// **不变量：未绑定的键直接投，不付探针的 90 ms，也不进观察窗。**

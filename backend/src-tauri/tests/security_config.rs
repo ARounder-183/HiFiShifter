@@ -107,8 +107,9 @@ fn the_plugin_page_csp_still_blocks_frames_and_objects() {
 /// **不变量：开发配置带 CSP，且没有任何构建入口引用它。**
 ///
 /// 它把 `devUrl` 写死成 `http://localhost:5173`：拿它出包会得到一个指向空页面的
-/// 产物。引用面只允许 `scripts/release/set-version.ps1`（改版本号）与插件侧的
-/// `version_parity` 测试（比对版本）—— 新增任何引用都必须是有意识的决定。
+/// 产物。引用面只允许 `scripts/release/version-sources.json`（版本号落盘清单：
+/// 写入与校验都读它）与插件侧的 `version_parity` 测试（比对版本）—— 新增任何引用
+/// 都必须是有意识的决定。
 #[test]
 fn the_dev_config_never_reaches_a_build() {
     let root = repo_root();
@@ -120,7 +121,7 @@ fn the_dev_config_never_reaches_a_build() {
     );
 
     let allowed = [
-        "scripts/release/set-version.ps1",
+        "scripts/release/version-sources.json",
         "backend/hifishifter-plugin/tests/version_parity.rs",
         "backend/src-tauri/tests/security_config.rs",
     ];
@@ -148,9 +149,11 @@ fn collect_references(dir: &Path, root: &Path, out: &mut Vec<String>) {
             collect_references(&path, root, out);
             continue;
         }
+        // 版本号清单是 .json：它承担了原来硬写在一个 PowerShell 脚本里的那份路径表，
+        // 所以扫描面必须包含 json，否则"谁引用了开发配置"就漏掉了这一处。
         let relevant = matches!(
             path.extension().and_then(|ext| ext.to_str()),
-            Some("ps1" | "sh" | "mjs" | "js" | "yml" | "yaml" | "rs")
+            Some("ps1" | "sh" | "mjs" | "js" | "yml" | "yaml" | "rs" | "json")
         );
         if !relevant {
             continue;

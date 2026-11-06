@@ -426,7 +426,7 @@ impl AudioEngine {
             // 200ms 一次，见 `SNAPSHOT_REFRESH_MIN_MS`），但一次编辑风暴仍可能在
             // 两个音频回调之间产生多次换代。`keep` 小于"两次回调之间的换代数"时，
             // 最旧的已退休值会在发布线程上被丢弃 —— 而实时线程可能仍持有它，
-            // 于是析构重新落回实时线程，正是本机制要避免的爆音。
+            // 于是析构重新落回实时线程，正是这套机制要避免的爆音。
             // 8 给实时线程留出一个宽裕的释放窗口；代价很小：退休快照与
             // `RenderedClipCache` **共享**同一批 PCM 的 `Arc`，多留几代并不复制音频。
             let mut retired_snapshots = RetirementKeeper::<Arc<EngineSnapshot>>::new(8);
@@ -2237,6 +2237,8 @@ mod tests {
         let mut timeline = TimelineState::default();
         let track_id = timeline.tracks[0].id.clone();
         timeline.clips.push(Clip {
+            content_id: None,
+            loop_period_sec: None,
             takes: vec![],
             active_take_id: None,
             clip_playback_rate: 1.0,

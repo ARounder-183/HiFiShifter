@@ -106,7 +106,7 @@ export const persistUiSettings = createAsyncThunk(
 
             lineVibratoDragDirection: s.lineVibratoDragDirection,
             // 参数编辑器上次使用的工具（`select` / `draw` / `line` / `vibrato`）。
-            // 与拖动方向同属"本机记忆"，因此和它们写在一起。
+            // 与拖动方向同属"本地记忆"，因此和它们写在一起。
             paramEditorTool: s.toolMode,
             smoothnessPercent: s.edgeSmoothnessPercent,
             customScalePresets: s.customScalePresets,

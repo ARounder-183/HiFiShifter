@@ -24,6 +24,11 @@ import pathlib
 import re
 import sys
 
+# Windows 的 stdout 跟随 ANSI 代码页（英文系统是 cp1252、中文系统是 GBK），打印中文会
+# UnicodeEncodeError 打死进程 —— 真正的结论一条都进不了日志，红的是编码而不是规则。
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+
 ROOT = pathlib.Path(__file__).resolve().parents[2] / 'backend'
 SKIP_DIRS = {'target', 'third_party', 'node_modules'}
 

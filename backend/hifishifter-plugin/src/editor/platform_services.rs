@@ -14,6 +14,9 @@
 //! 【过滤器只有一条扩展名】现有签名只支持一个；多选留给后续
 //! （`import_native_audio_file` 一次一个文件）。
 
+// 只有 Linux 那一半用得上；macOS 的实现各自 import（见下面的 `mod macos`），
+// 否则这个导入在 macOS 上是 dead import —— 而那条告警只在 macOS 上出现。
+#[cfg(all(unix, not(target_os = "macos")))]
 use std::path::PathBuf;
 
 /// 等待外部程序（`xdg-open`）返回的上限。

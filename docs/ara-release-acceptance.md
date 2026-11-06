@@ -52,8 +52,8 @@ plugin156项；后续Verify流水线被中止，不能称整条Verify成功。
 ## 后续使用与开发
 
 用户操作见用户手册的插件章节（[简体中文](i18n/USERMANUAL.md#八vst3--ara-插件reaper)，
-另有英/日/韩/繁中四语）；构建入口见 `scripts/build/build-hifishifter.ps1`，打包见
-`scripts/release/package-vst3.ps1` 与 `scripts/build/pack-portable.ps1`。只维护同一份frontend/kernel，
+另有英/日/韩/繁中四语）；构建与打包只有一条命令 `scripts/build/build.ps1`（App 与 VST3 一次做完，
+产物全在 `dist/`）。只维护同一份frontend/kernel，
 宿主权限与生命周期留在适配层。
 用户已明确授权把当前分支改名为 `feature/ara-plugin` 并推送origin；不改名或删除其它
 远程分支，不强推，不自动创建PR。
@@ -73,6 +73,7 @@ plugin156项；后续Verify流水线被中止，不能称整条Verify成功。
   对带 GUI namespace 前缀的编辑器 id 同样成立。
 - **倒放参与参数/音高曲线投影**：源时间映射允许**严格降序**源轴（项目时间增 ⇒ 源位置减），
   正放/倒放共用同一份区间插值。
+
 
 ### 明确不渲染（现在会**说出来**，而不是静默）
 
@@ -107,3 +108,102 @@ plugin156项；后续Verify流水线被中止，不能称整条Verify成功。
   每实例份额。
 - **Cubase 重绑的实际触发时机、5.1 总线在真实宿主上的行为**：需要实机取证，
   相关修复只保证"不再致命/不再弹出"，不改变绑定语义。
+
+## 后续更新（2026-10-27，编辑完整性改造）
+
+### 倒放：方向三态 / 轴单一来源 / 往返自校验
+
+上一版的三条结论仍然成立（负速率或 SECTION MODE 都判倒放；镜像复原收口在共享解算；
+倒放参与参数投影）。以下三条**补充**它们：
+
+- **方向是三态**（`TakeGeometry::reversed: Option<bool>`）。「读不到」与「确实是正放」
+  是两件不同的事：前者会把倒放片段按正放渲染（方向与 REAPER 完全相反、偏移差
+  `2·soffs + consumed − D`）。读不到时不给窗口，调用方保留宿主镜像坐标并留读数
+  （`ara.reversed-axis-missing`）。REAPER 的 "Toggle take reverse" 是正 PLAYRATE +
+  SECTION MODE 1 —— **方向位是唯一来源**，丢了它就没有别的证据。
+- **镜像轴只有一个来源**（`take_axis_sec`）：`min(SECTION 末端, ARA 源时长, 解码时长)`，
+  第一个可用的胜出；读写两侧调**同一个函数**。旧实现读用 ARA 时长、写用 frames/sample_rate，
+  两者差一个容器头时每编辑一次就漂 `ΔD`。
+- **读→写→读自校验**（`roundtrip_residual`）：`轴 − 正向终点` 必须能复原宿主原本的
+  `D_STARTOFFS`，残差非零时打一行 `ara.reversed-roundtrip`（带 soffs / 轴 / 正向终点）。
+  仓库里没有任何一处能证明 REAPER 的镜像约定；这条读数让一次真机会话就能定案。
+
+**循环源 + 倒放不再单独分叉**：读取侧给的是 `(min_bound .. anchor)`，镜像关系
+`soffs = 轴 − 正向终点` 对 loop / 非 loop 是同一条式子。旧实现给 loop 单开一支、
+直接写 `source_start_sec`，于是循环 + 倒放的 take 每写一次就漂一个 `soffs`。
+
+**验收夹具**（插件侧之前完全空白）：
+
+- 倒放 + 部分 SECTION 的窗口（旧实现偏 `section_end − D`）；
+- 倒放 + 无轴 ⇒ `None`（旧实现退回原始 soffs，得 `[0, 0.75]` 而正确是 `[0.25, 1.25]`）；
+- 倒放的读→写→读往返（残差 < 1e-6）；
+- 倒放 + 循环源的往返；
+- 两个候选轴取残差最小的那个。
+
+## 后续更新（2026-10-27，传输权威与让路保真度）
+
+这一轮修的是**四条互相独立的断链**，每一条都能在旧日志里指认。
+
+### 播放光标：谁给的读数
+
+- **ARA 形态下的宿主采样曾完全停摆**：`refresh_host_transport_inner` 把授权闭包
+  写成了 `|| stamp.is_none()`，而 `NativeHost::sample` 在每次宿主调用前后都要问它。
+  只要文档存在（ARA 一定存在），闭包恒假 ⇒ `publish_host` 一次都没执行，且**静默**。
+  现场日志的指纹是 `[playhead]` 采样为 **0 条**（同一天的 VEGAS 会话有 3106 个
+  `playing=1` 的实时块）。
+- 现在每个读数都带来源（`position_source`: `host` / `block` / `seek` / `stale`）、
+  年龄（`position_age_ms`）与定位窗口（`seek_pending`）。**"位置是 0" 的四种含义
+  从此可以分开。**
+- **定位有"未落地窗口"**：`request_seek` 在投递之前记下意图，宿主报回的位置落进
+  `±0.25 s` 才关闭，最长 1 s。于是"跳过去又被拽回来"在源头不可能发生 ——
+  前端不再需要猜"该压住采样多久"。
+- **prefetch 块只能投"播不播"**：它的 `kPlaying` 与 realtime 块同源，而位置是渲染
+  进度。把两者拆开之后，编辑器实例（不处理音频）终于有了一个可信的播放位。
+- **推送优先**：视图定时器每拍读一次原子时钟，变了就发一条 `transport` 事件
+  （≤50 Hz + 200 ms 心跳）。轮询在插件形态退化为 400 ms 看门狗。
+
+### 锁定参数线：几何代次是投影的输入
+
+- 设计上"几何变了"有两个写点：`remap_and_log`（模型收口）与 `refresh_ui_geometry`
+  （清单刷新）。第二个写点**算对了然后丢掉了** —— 它调 `workspace_view()` 拿到重投影
+  结果，却只存进 `loaded.view`，而 GUI 读的是 `timeline.params_by_root_track`。
+- 于是：**移动 item 不跟随**（不推进 edit/model/scope），**分割后才跟随**（推进了
+  edit/scope，走整份重载）。
+- 现在 `adopt_view_into_timeline` 把重投影落到 GUI 那份数组上，并且**只换曲线**。
+
+### 非 ARA 宿主：让路的两级证据
+
+- VEGAS 一次会话里四次 `[relay] ... target=root-owner class=Vegas.Class.Frame ... no-response`
+  —— 目标**已经是**主窗口，仍然没反应。说明缺的不是目标，是**通道**：
+  `PostMessage` 只把消息塞进窗口队列，绕过宿主的输入分发、线程键状态与焦点判定。
+- 新增两级：目标多一档 `previous-focus`（`WM_KILLFOCUS` 的 wParam，本来就记着），
+  通道多一档 `Injected`（`SendInput` + RAII 焦点租借）。合成失败一次之后，**同一个键**
+  的下一次直接走注入（120 s 内有效）。
+- 带修饰的组合键**不再一律拒绝**：合成会送出一个错键，注入不会。
+
+### 真机验收（本轮新增）
+
+| 宿主 | 步 | 期望 | 证据 |
+|---|---|---|---|
+| REAPER | 播放 | 光标跟着走 | `[playhead] samples: gap_p95 < 40ms` |
+| REAPER | 拖动播放头 | 光标立即跟上 | `[transport] trace … src=host` |
+| REAPER | 插件内 seek（播放中） | 跳过去就停在那 | `src=seek` → `src=host`，无回跳 |
+| REAPER | 移动 item（锁开） | 曲线跟着走 | `[ara] projection epoch=… roots=…` |
+| REAPER | 关锁再移动 | 曲线留在原位 | 同上，位置不变 |
+| VEGAS | Space | 宿主播放/暂停 | `[relay] target=previous-focus class=…` + `fidelity=injected` |
+| VEGAS | Ctrl+Z | 宿主撤销 | 同上，`code=KeyZ` |
+
+三条必须留下的读数（缺一条就说明那一环没走到）：
+
+    [transport] trace … src=host …          （或 sample-failed，二选一）
+    [relay] target=previous-focus class=… fidelity=injected relayed
+    [ara] projection epoch=<ui_geometry_revision> roots=<n>
+
+### 仍未做（本轮诚实清单）
+
+- `HostFacts` 的**完整**结构（单一写者 + 清单/ARA 冲突裁决）仍不存在；本轮只补了
+  "几何代次 → 视图"这条边。
+- 升级表的键是 (宿主, 键) 里的**键**，不是 (窗口类名, 键)：一个进程只有一个宿主，
+  两者在实际中等价，但类型上少一维。
+- `SendInput` 的焦点租借在"宿主失焦即关闭 FX 窗"的宿主上可能让窗口闪一下；
+  目前只在**合成已被证明无效**之后才走这条路。

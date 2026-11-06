@@ -719,17 +719,17 @@ impl ExtensionOwner {
                 None => unmatched.push(*key),
             }
         }
-        // 一个宿主 item 只能被**一个** region 认领。两条 region 绑到同一个 item 会让
-        // 后续所有写回指向同一对象：移动、切分、fade、音量互相覆盖，且没有任何一侧
-        // 会报错。
+        // 【"一个 item 只能被一个 region 认领"这条去重删掉了】
         //
-        // 【为什么不再"全部丢弃"】旧实现把重复认领的候选**全丢**，于是"同一位置两个
-        // 几何全等的 item"会两个都不绑定、两个 clip 一起消失（用户报障："片段凭空
-        // 没了"）。现在按 region key 的**稳定顺序**保留第一个认领者，其余照常记账 ——
-        // 至少不会一次丢掉全部；剩下的那个 region 仍走 unmatched，如实报出。
-        let mut seen = std::collections::HashSet::<String>::new();
+        // 它假设 region 与 item 是**一一对应**的。而 REAPER 对一个循环延伸的 item
+        // 按循环节给出**多条** region —— 每节一条。去重于是只留下第一条，其余
+        // region 既不在 `region_items` 里、也没有授权：用户看到"多出来的 Clip 拖不动"，
+        // 重开工程后那条正确的 Clip 还是静音的。
+        //
+        // 现在一条 item 合法地拥有 N 条 region，它们全部登记进 `region_items`。
+        // 唯一性由**绑定判据本身**保证（`unique_geometry_for_region` 的"最小跨 +
+        // 歧义即弃"），不再靠事后去重。
         let claimed = bound.len();
-        bound.retain(|entry| seen.insert(entry.geometry.item_id.clone()));
         // 一次说清、且只在读数变化时输出（见 `report_binding`）。此前这里是两条无条件
         // 日志（INFO + WARN），在 folder 父轨场景下以 10Hz 重放 35 分钟共 16,769 条。
         self.report_binding(&BindingReport {
@@ -1025,6 +1025,23 @@ impl ExtensionOwner {
         // "我们多久没成功采过样"不需要任何授权：它是本侧的时钟事实。把"记录需求"
         // 与"执行动作"分开之后，随后的枚举仍会被原来的 gating 拦下（正确），
         // 但恢复需求已经被记下来了，下一次 stamp 可用时会真正执行。
+        // 【T-R4】宿主节拍没挂上时，任何**非宿主线程**的宿主调用都要白等 250 ms
+        // 再熔断 —— 光标不跟手、清单不刷新，全都长这个样子。视图定时器是唯一还会
+        // 跑的节拍，让它补一次（`ensure_host_timer` 自带 5 s 退避，幂等）。
+        if let Some(host) = self.native_host() {
+            host.ensure_host_timer();
+            // 【为什么这条是 WARN】节拍没挂上时，每次宿主调用都要白等 250 ms 再熔断 ——
+            // 光标不跟手、清单不刷新，全都长这个样子。限流器保证稳态下最多一行。
+            if !host.host_timer_attached() {
+                hifishifter_kernel::log_limiter::emit_limited_key(
+                    log::Level::Warn,
+                    "reaper.timer-missing",
+                    format_args!(
+                        "[reaper-host] the host timer is not attached; host calls run on the view thread and may wait up to 250 ms each"
+                    ),
+                );
+            }
+        }
         self.heal_stale_inventory_stamp();
         // 【T23】视图定时器是"宿主不再回调"时唯一还会跑的节拍：在这里提出收口请求。
         self.request_settle_if_overdue();
@@ -1047,7 +1064,20 @@ impl ExtensionOwner {
         let Ok(slot) = self.document.try_lock() else {
             return;
         };
-        let document = slot.as_ref().and_then(std::sync::Weak::upgrade);
+        // 【为什么先看强引用计数】`Weak::upgrade` 会临时把强计数加一。如果那个 `Weak`
+        // 恰好是**最后一个**引用（文档已经被别处 drop、只剩这里的弱引用），升级就会
+        // 让我们成为最后一个持有者，而随后的 `drop(document)` 会在**这条线程**上跑
+        // `DocumentSession` 的析构 —— 它要释放整份时间线、参数曲线与缓存。
+        // 而这条线程就是音频线程：一次析构 = 一次不可预测的阻塞。
+        //
+        // 计数 > 1 说明还有别人活着，升级与释放都不会触发析构；否则这一次直接放弃
+        // （下一次块 10 ms 后还会来，而宽限期本来就是秒级）。
+        let alive = slot.as_ref().is_some_and(|weak| weak.strong_count() > 1);
+        let document = if alive {
+            slot.as_ref().and_then(std::sync::Weak::upgrade)
+        } else {
+            None
+        };
         drop(slot);
         let Some(document) = document else {
             return;
@@ -1074,32 +1104,68 @@ impl ExtensionOwner {
     }
 
     pub(super) fn refresh_host_transport_inner(&self, throttled: bool) {
-        let Ok(stamp) = self.host_query_stamp() else {
-            return;
-        };
+        // 【时钟发布**不再**由几何授权门住】`host_query_stamp()` 回答的是"这份清单 /
+        // 几何此刻能不能查"，而时钟只需要"宿主在哪儿、在不在播"。两者绑在一起的后​果：
+        // 没有 document / 没有分配 / 实例刚关闭时拿不到 stamp ⇒ 一次也不发布 ⇒
+        // `host_is_fresh()` 150 ms 后为假 ⇒ 光标退回音频块读数，而**编辑器实例不处理
+        // 音频**，那两个量恒为 `(0,false)` ⇒ 用户看到"跳到位之后冻住一会儿"。
+        //
+        // 现在：先采一次并发布（授权判据仍要过 —— 采样本身是宿主调用），再用 stamp
+        // 决定要不要继续做下面那一段清单刷新。
+        let stamp = self.host_query_stamp().ok();
         let host = self.native_host();
         if let Some(host) = host {
-            if let Ok((position, playing)) = host.sample(|| self.host_query_authorized(&stamp)) {
-                // getter可能重入关闭/改scope，发布与撤销共用最终短事务。
-                let _transaction = stamp.0.transaction.lock_or_recover();
-                if !self.is_closed()
-                    && stamp.0.is_alive()
-                    && stamp.0.revision.load(Ordering::Acquire) == stamp.1
-                    && stamp.0.scope_revision.load(Ordering::Acquire) == stamp.2
-                {
-                    if let Some(clock) = self.clock.get() {
-                        clock.publish_host(position, playing);
+            // 【为什么授权判据在有 stamp 时才用】**没有 stamp**（无文档 / 无分配）时
+            // 恰恰是最需要时钟的时刻：宿主在播、而插件这边还没长出手臂。此时按
+            // "宿主原生可用"直接采样；采样是只读查询，失败也只是拿不到读数。
+            let authorized = stamp
+                .as_ref()
+                .is_some_and(|stamp| self.host_query_authorized(stamp));
+            if stamp.is_none() || authorized {
+                // 【授权闭包必须**真的**问授权】`sample` 在一次调用里要过 3~6 次闭包
+                // （`checked` 在每次宿主调用前后各问一次）。此前这里写的是
+                // `|| stamp.is_none()` —— 只要文档存在就恒为假 ⇒ ARA 形态下
+                // `publish_host` 一次都不执行，光标永远冻住，而且**完全静默**。
+                //
+                // 现在闭包里只做原子读与弱引用判活，不枚举宿主绑定：50 Hz 下那会把
+                // 一次 20 ms 的心跳拖成 200 ms（而正确性只需要"这份盖戳还有效"）。
+                let allowed = || match &stamp {
+                    None => true,
+                    Some((document, revision, scope, _)) => sample_allowed(
+                        Some((*revision, *scope)),
+                        Some((
+                            document.is_alive(),
+                            document.revision.load(Ordering::Acquire),
+                            document.scope_revision.load(Ordering::Acquire),
+                        )),
+                    ),
+                };
+                match host.sample(allowed) {
+                    Ok((position, playing)) => {
+                        // 【为什么是 `host_clock` 而不是 `self.clock`】ARA 下两者碰巧是
+                        // 同一个 `Arc`（见 `bind_to_document`），但读路径走的是文档时钟
+                        // （`EditorSession::host_clock`）。取值只留一处，两个答案就不会漂移。
+                        if let Some(clock) = self.host_clock() {
+                            clock.publish_host(position, playing);
+                        }
+                    }
+                    Err(error) => {
+                        if let Some(clock) = self.host_clock() {
+                            clock.note_sample_failure(&error);
+                        }
                     }
                 }
             }
         }
+        let Some(stamp) = stamp else {
+            return;
+        };
         if !self.host_query_authorized(&stamp) {
             return;
         }
         // 【前台恢复不依赖 setActive】后台期间定时器可能停摆；超过一个刷新周期
         // 没有成功采样过，就强制一次完整枚举（清掉采样时刻，让 `refresh_ui_inventory`
-        // 跳过"令牌未变"的早退），并跳过实例级节流。强制重采在事实未变时无副作用
-        // （见 `refresh_ui_inventory` 的 `token_changed` 分支）。
+        // 跳过"令牌未变"的早退），并跳过实例级节流。
         let stale_sample = stamp
             .0
             .ui_inventory_sampled_at
@@ -1136,6 +1202,18 @@ impl ExtensionOwner {
         let Ok(stamp) = self.host_query_stamp() else {
             return;
         };
+        // 【完整性：只有**真的开始枚举**才判假，成功走到末尾才置真】
+        //
+        // 呈现层据此决定"清单里缺席"能不能当成"宿主删掉了它"。这里的时序是
+        // **整个机制的死穴**：本函数有十余处提前 return（未授权、令牌未变、没有
+        // 原生扩展……），而它们都是"这一轮什么都没发生"，不是"枚举没做完"。
+        // 此前那一句写在最前面，于是**任何一次早退都会把标志留在 false**，
+        // 而稳态下早退是绝大多数轮次 ⇒ `inventory_is_complete()` 几乎永远为假 ⇒
+        // "清单里没有它"这条删除证据永远不成立 ⇒ 孤儿 clip 永久留在画布上
+        // （用户报的"宿主里没有、插件里还在"）。
+        //
+        // 现在：早退**不动**这个标志（保持上一轮的结论），只在真正进入枚举循环
+        // 之前判假。
         let Some(host) = self.native_host() else {
             // 没有原生扩展接口 —— 这是 **ARA-only 宿主**（Studio One / Cubase / Nuendo /
             // Logic …）的正常形态，不是"不受支持"：时间线有内容、音频能出、参数能调，
@@ -1184,6 +1262,10 @@ impl ExtensionOwner {
         // 就不发布、不 bump `ui_geometry_revision`、不失效渲染 —— 兜底采样必须**无副作用**，
         // 否则空闲工程会被 1Hz 的假变更搅得前端反复重绘。
         let token_changed = stored != Some(token);
+        // 【枚举从这里开始】只有走到这一行，"清单不完整"才成立 —— 上面每一条
+        // 提前 return 都是"这一轮什么都没发生"，不该把结论改写成"枚举失败"
+        // （见本函数开头关于 `inventory_is_complete` 的说明）。
+        stamp.0.inventory_incomplete.store(true, Ordering::Release);
         let mut tracks = std::collections::BTreeMap::new();
         let mut seen = std::collections::BTreeSet::new();
         // 诊断计数：多少 item 认领到了 region（没认领的只能是无源占位）。
@@ -1380,6 +1462,20 @@ impl ExtensionOwner {
         // 在下一次 `FACTS_REFRESH_INTERVAL` 到期时强制重采（见 `ui_inventory_sampled_at`）。
         *stamp.0.ui_inventory_sampled_at.lock_or_recover() = Some(std::time::Instant::now());
         stamp.0.ui_geometry_revision.fetch_add(1, Ordering::AcqRel);
+        // 【为什么这里**不**重新装配】
+        //
+        // clip 集合由装配器在 `remap_and_log` 收口时产出，而那一轮之前会先调一次
+        // `refresh_ui_inventory`（见 `remap_and_log`）—— 清单的最新结果因此已经在
+        // 装配输入里。在这里再装配一次有两个代价：本函数会被
+        // `host_geometries_locked` → `fade_items_locked` / `clip_for_host_item`
+        // 调到（那两处正持有 `clip_ids`，而装配要写它，`std::sync::Mutex` 不可重入），
+        // 也会被 `refresh_host_transport` 调到（那条路可能正持有 `transaction`）。
+        // 实测两个 `bound_tests` 用例因此永久挂起。
+        //
+        // 清单变化本身仍然立即生效：`present_host_inventory` 会把宿主的
+        // `D_POSITION` / `D_LENGTH` 投影到既有 clip 上，`project_host_item_geometry_locked`
+        // 会让渲染读到同一份几何。只有"item 的**增删**"需要重新装配，而那在 REAPER 里
+        // 必然伴随 region 的增删 ⇒ 必然收口。
         *self.host_audio.lock_or_recover() = status;
         // 用户报障时最需要的一行：宿主清单里有多少 item，其中多少被 ARA region 认领。
         // 认领不到的那些只能以无源占位出现（见方案 Task 5.1 / R4）。
@@ -1409,11 +1505,36 @@ impl ExtensionOwner {
                 status.state.as_str()
             );
         }
+        // 【触发点③：清单 / 几何推进】合入的候选集是 `track_bindings`，而它由真实
+        // sequence 边写入 —— "宿主图又长出了一块"的第一个可见信号正是这次清单刷新。
+        // 在这里补一次尝试，让"存档先到、图后长成"的窗口按毫秒收敛，而不是等宿主收口。
+        if let Err(error) = stamp.0.merge_archive_restore_locked() {
+            log::warn!("[ara] archive merge on inventory refresh failed: {error}");
+        }
+        stamp.0.inventory_incomplete.store(false, Ordering::Release);
         drop(_transaction);
+        // 【纯几何变化也必须让渲染失效】`facts_changed` 只覆盖"方向 / 循环源 / 声道
+        // 模式"这一批 ARA 表达不到的事实；而**位置与长度**同样会改变听感（片段搬到
+        // 别的时间点、裁短一段），却只在 `token_changed` 里体现。旧实现只让后者推进
+        // `ui_geometry_revision`（界面），不推进 `render_epoch`（音频）——
+        // 于是"移动 item：波形动了、参数线动了、声音没动"。
+        //
+        // `project_host_item_geometry_locked` 让渲染读到的位置与 GUI 同源，这里让它
+        // 有机会被重算。
         if facts_changed {
             // 渲染输入变了 ⇒ 文档级失效：推进 epoch 并通知**全部 owner**。
             // 不持 `transaction` 调用，避免与 `prepare_job` 的事务重入。
             stamp.0.invalidate_render_input();
+        } else if token_changed {
+            // 【为什么这一支**只**推进代次，不通知 owner】`invalidate_render_input`
+            // 会调每个 owner 的 `prepare()`，而 `prepare()` 要投递到会话 actor。
+            // 本函数可能正跑在**那条 actor 线程**上（`ensure_loaded` 的清单刷新），
+            // 于是"投递并等自己"就是一次必然的自锁 —— 实测整份测试套件挂死在这里。
+            //
+            // 只推进 `render_epoch` 已经足够：`PreparedVersion` 含它，下一次
+            // 20 ms 定时器驱动的 prepare 会看到版本不匹配并重算。位置/长度这类纯几何
+            // 变化只需要"让已发布的快照失效"，不需要当场重排。
+            stamp.0.note_render_geometry_changed();
         }
     }
     /// ARA-only 后端的渲染事实来源：只登记 ARA region 自己能给出的字段。
@@ -1649,5 +1770,51 @@ impl ExtensionOwner {
         if prepare_fades {
             stamp.0.invalidate_render_input();
         }
+    }
+}
+
+/// 一次宿主采样是否被允许（**纯判据**，不碰宿主、不取锁）。
+///
+/// `document` = 采样开始时那枚盖戳 (revision, scope)；`now` = 此刻的 (alive, revision, scope)。
+///
+/// 【为什么要抽成纯函数】上一轮的回归正是这一句写错了（只要有文档就恒拒），而它藏在
+/// `host.sample(|| …)` 的闭包里 —— 任何需要真宿主的用例都很难覆盖到。纯函数让
+/// "有文档时必须允许"变成一条当场可钉的断言。
+fn sample_allowed(document: Option<(u64, u64)>, now: Option<(bool, u64, u64)>) -> bool {
+    match (document, now) {
+        (None, _) => true,
+        (Some((revision, scope)), Some((alive, now_revision, now_scope))) => {
+            alive && revision == now_revision && scope == now_scope
+        }
+        (Some(_), None) => false,
+    }
+}
+
+#[cfg(test)]
+mod transport_gate_tests {
+    use super::sample_allowed;
+
+    /// **不变量：有文档时采样必须被允许。**
+    ///
+    /// 【为什么钉死】`cafdc1d3` 把授权闭包写成了"没有文档才允许"，于是 ARA 形态下
+    /// （一定**有**文档）一次宿主采样都不会发生 —— 播放光标因此彻底停摆，而日志里
+    /// 一个字都没有。这条断言在旧实现上会直接失败。
+    #[test]
+    fn a_document_makes_the_host_sample_authorized() {
+        assert!(sample_allowed(Some((7, 3)), Some((true, 7, 3))));
+    }
+
+    /// 采样期间宿主改了模型或范围 ⇒ 这一次读数不再可信。
+    #[test]
+    fn a_gate_that_moved_during_the_sample_is_refused() {
+        assert!(!sample_allowed(Some((7, 3)), Some((true, 8, 3))));
+        assert!(!sample_allowed(Some((7, 3)), Some((true, 7, 4))));
+        assert!(!sample_allowed(Some((7, 3)), Some((false, 7, 3))));
+    }
+
+    /// 没有文档（Capture / 未绑定）时仍然允许：那是唯一还能读到宿主位置的形态。
+    #[test]
+    fn a_sample_without_a_document_is_allowed() {
+        assert!(sample_allowed(None, None));
     }
 }

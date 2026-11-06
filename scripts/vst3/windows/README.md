@@ -15,8 +15,8 @@ hard timeout.
 - load_probe.cpp — minimal VST3 host-side probe. It does not include the VST3 SDK;
   it defines only the few vtable slots it needs.
 - verify.ps1 — static export/dependency checks, compiles the probe, runs it with a
-  timeout, writes .build-tmp/vst3-load-gate.log, .build-tmp/vst3-load-gate.err.log
-  and native-load-gate.json.
+  hard timeout. Probe output is captured in a temporary directory and printed only
+  when the gate fails.
 
 ## Usage
 
@@ -24,7 +24,7 @@ From the repository root, with the MSVC environment loaded:
 
 ```powershell
 . .\scripts\env\msvc-env.ps1
-.\scripts\vst3\windows\verify.ps1 -BundleDirectory .\.build-tmp\loadgate-test\HiFiShifter.vst3 -TimeoutSeconds 20
+.\scripts\vst3\windows\verify.ps1 -BundleDirectory .\dist\HiFiShifter.vst3 -TimeoutSeconds 20
 ```
 
 A passing run prints:

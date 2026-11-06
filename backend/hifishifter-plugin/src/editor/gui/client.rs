@@ -183,7 +183,7 @@ pub(crate) struct EditorClient {
     /// 已按下未松开的共享编辑键（去重用）。
     ///
     /// 【为什么 Linux 上是死字段】那里键盘事件直达 WebView，宿主根本不会把 Ctrl+C
-    /// 交给 §IPlugView::keyDown§，于是 §forward_edit_key§ 永远不会被调用。
+    /// 交给 `IPlugView::keyDown`，于是 `forward_edit_key` 永远不会被调用。
     #[cfg_attr(all(unix, not(target_os = "macos")), allow(dead_code))]
     forwarded_keys: HashSet<char>,
     host_replies: std::collections::HashMap<u64, HostReply>,
@@ -209,7 +209,7 @@ pub(crate) struct EditorClient {
     /// 让路的累计读数（诊断包用）。
     ///
     /// 【为什么计数在客户端而不是状态机里】状态机是纯逻辑、按会话重置；而"投递过几次、
-    /// 被拒过几次"是**这台机器上这个视图**的事实。删掉用户提示之后，这组数字是唯一还能
+    /// 被拒过几次"是**这个视图**的事实。删掉用户提示之后，这组数字是唯一还能
     /// 回答"让路到底有没有在工作"的东西。
     relay_stats: RelayStats,
     /// 待发给前端的**非回执**事件（让路没成的回报）。
@@ -217,6 +217,25 @@ pub(crate) struct EditorClient {
     /// 【为什么与 `replies` 分开】回执按 id 对应一次 `invoke`；这里的事件没有 id，
     /// 是"后台发生了一件事"。共用一条通道会逼前端去猜"这条到底对应哪个 promise"。
     view_events: std::collections::VecDeque<serde_json::Value>,
+    /// 上一次推给页面的传输读数（去重与心跳，见 `push_transport`）。
+    last_transport: Option<crate::render::transport::TransportView>,
+    /// 上一次推送的时刻：读数没变也按 `TRANSPORT_HEARTBEAT` 补一拍，
+    /// 让"通道还活着"本身成为可观测的事实。
+    last_transport_at: std::time::Instant,
+    /// 上一次推送时"在播且位置在动"的时刻；位置停住超过 `TRANSPORT_FROZEN` 就留证据。
+    last_transport_move_at: std::time::Instant,
+    /// 上一次推送的位置（判断"动没动"用）。
+    last_transport_position: f64,
+    /// 就绪之后累计投递给页面的字节数。
+    ///
+    /// 【为什么这条读数必须存在】一条消息的体积是渲染进程内存的直接输入，而它此前
+    /// **完全不可见**：出站只有一个 `bool`（投没投出去），投了多大没人知道。用户报的
+    /// Out of Memory 之所以只能靠猜，一半原因就在这里。
+    outbound_bytes: u64,
+    /// 上一次汇报时的累计值（用来"只在变化时打一行"）。
+    outbound_reported: u64,
+    /// 上一次汇报的时刻（汇报窗口见 [`OUTBOUND_REPORT_EVERY`]）。
+    outbound_at: std::time::Instant,
 }
 
 /// 让路的累计读数（见 `EditorClient::relay_stats`）。
@@ -226,7 +245,7 @@ struct RelayStats {
     posted: u64,
     /// 被原语拒绝的次数，按原因分。
     refused: [u64; 6],
-    /// 成功投递时，**投给了哪一级窗口**（focus / parent / root-owner）。
+    /// 成功投递时，**投给了哪一级窗口**（focus / previous-focus / root-owner）。
     ///
     /// 【为什么必须记这个】「按了没反应」有两种成因：投给了一个不处理按键的窗口，
     /// 或者宿主根本没收到。两者在日志里同形，而修的地方相隔很远 —— 有了这一维，
@@ -292,6 +311,19 @@ const QUEUE_BUDGET: usize = 256;
 /// 失败，而界面此时已经是一张死图；继续投递只会让 `pending` 涨到预算上限、把后续
 /// 命令全部拒掉 —— 那是"看起来能用、其实全废"的形态。
 const POST_FAILURE_LIMIT: u32 = 8;
+
+/// 单条消息超过这个体积就单独落一行。
+///
+/// 【为什么是 1 MiB】正常的时间线刷新在几十到几百 KiB；跨过 1 MiB 说明这一条已经
+/// 是"大对象"级别 —— 它单独就能让渲染进程多占一份同量级的堆（JSON 解析的中间态
+/// 通常是载荷的两三倍）。这条日志是"载荷是不是元凶"的第一个判据。
+const BIG_MESSAGE_BYTES: usize = 1024 * 1024;
+
+/// 出站体积汇报的窗口。
+///
+/// 【为什么不是每条都打】时间线刷新是高频的，逐条打会把诊断文件刷满。累计体积是
+/// 单调量，每 60 s 落一个增量就足够画出"每秒多少 KiB"的斜率。
+const OUTBOUND_REPORT_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// 等宿主完成「编辑器 ↔ 处理器」握手的最长时间。
 ///
@@ -487,6 +519,13 @@ impl EditorClient {
             owned: host_key_relay::OwnedStrokes::default(),
             relay_stats: RelayStats::default(),
             view_events: std::collections::VecDeque::new(),
+            last_transport: None,
+            last_transport_at: std::time::Instant::now(),
+            last_transport_move_at: std::time::Instant::now(),
+            last_transport_position: f64::NAN,
+            outbound_bytes: 0,
+            outbound_reported: 0,
+            outbound_at: std::time::Instant::now(),
         }))
     }
 
@@ -505,8 +544,73 @@ impl EditorClient {
         self.previous_focus = window;
     }
 
+    /// 视图**重新获得焦点**（窗口过程在 `WM_SETFOCUS` 里调用）。
+    ///
+    /// 【为什么这条必须存在】让路状态机里"宿主自己处理这个键"是按 key 记账的，而它的
+    /// 判据（探针窗口内 `playing` 有没有翻转）会被与本次让路无关的事情污染。用户从
+    /// 别的窗口回到插件的这一刻，是"我接下来想让插件处理这些键"最明确的一刻 ——
+    /// 从这里重新记账，一次误判就不会变成整场会话。
+    ///
+    /// 【为什么只清这一层】让路开关（`Gate`）是**会话级**结论（"这个宿主有没有让路
+    /// 原语"），它不因用户点了一下别处而失效。
+    #[cfg(windows)]
+    pub(crate) fn note_focus_regained(&mut self) {
+        self.relay.note_focus_regained();
+    }
+
     pub(crate) fn is_dead(&self) -> bool {
         self.dead
+    }
+
+    /// 平台报告"渲染进程 / GPU 进程 / 浏览器进程没了"。
+    ///
+    /// 【为什么这比"投递连续失败"更早、更准】投递失败要等若干个 tick 才攒够结论，
+    /// 而且分不清"页面忙"与"页面死"。这条信号是 WebView2 自己给的结论，还带 kind /
+    /// reason / exit code —— 三者合起来才能回答"是不是 OOM"。
+    pub(crate) fn on_process_failed(&mut self, kind: &str, reason: &str, exit_code: i32) {
+        if self.closed {
+            return;
+        }
+        crate::gui_log_line(&format!(
+            "renderer failed kind={kind} reason={reason} exit=0x{exit_code:08X} \
+             (outbound since ready: {} bytes)",
+            self.outbound_bytes
+        ));
+        self.dead = true;
+    }
+
+    /// 页面自报的堆读数（每 15 s 一次，见前端 `reportPageHeap`）。
+    ///
+    /// 【为什么由页面报而不是原生取】Chromium 的 JS 堆只有页面自己看得见；
+    /// `performance.memory` 是唯一不需要 DevTools 协议的来源。有了这条曲线，
+    /// "内存单调上升"与"稳态抖动"才能被区分开 —— 而这是判断"是不是泄漏"的唯一依据。
+    pub(crate) fn on_page_heap(&mut self, used: u64, total: u64, nodes: u64, resources: u64) {
+        if self.closed {
+            return;
+        }
+        crate::gui_log_line(&format!(
+            "heap used={used} total={total} nodes={nodes} resources={resources}"
+        ));
+    }
+
+    /// 页面（重新）开始加载：把就绪门与投递计数复位，等下一次 `on_page_ready`。
+    ///
+    /// 【为什么必须清队列与 pending】旧页面的那些请求永远不会再有回执。留着它们，
+    /// 新页面要等它们超时（30 s）才能用上命令预算；而队列里的旧消息会在新页面就绪时
+    /// 一次性投出去，把"上一代界面"的状态灌进"这一代界面"。
+    pub(crate) fn reset_page(&mut self) {
+        self.ready = false;
+        self.queue.clear();
+        self.post_failures = 0;
+        self.dead = false;
+        self.reported_not_ready = false;
+        self.pending.clear();
+        self.outbound_bytes = 0;
+        self.outbound_reported = 0;
+        self.outbound_at = std::time::Instant::now();
+        self.opened_at = std::time::Instant::now();
+        // 端口由平台在重建时重新挂上；先摘掉，免得关闭过程中的迟到回调往旧端口写。
+        self.port = None;
     }
 
     /// 平台报告"页面已经没了"（WebKit 的 `web_process_terminated` / `load_failed`）。
@@ -589,6 +693,16 @@ impl EditorClient {
         };
         if port.post_message(text) {
             self.post_failures = 0;
+            self.outbound_bytes = self.outbound_bytes.saturating_add(text.len() as u64);
+            // 【为什么大消息要单独一行】它是唯一能在"渲染进程被一条消息打死"这类
+            // 事故里指出**是哪一条**的读数。
+            if text.len() >= BIG_MESSAGE_BYTES {
+                hifishifter_kernel::log_limiter::emit_limited_key(
+                    log::Level::Warn,
+                    "gui_big_outbound",
+                    format_args!("[gui] outbound big message bytes={}", text.len()),
+                );
+            }
             return true;
         }
         self.post_failures = self.post_failures.saturating_add(1);
@@ -712,6 +826,80 @@ fn push_view_event(state: &Rc<RefCell<EditorClient>>, event: &str, payload: serd
     }));
 }
 
+/// 读数没变也要补一拍的间隔。
+///
+/// 【为什么需要心跳】一条**从不出现**的事件与"通道断了"在日志里同形。200 ms 足够让
+/// 诊断看到"通道在跑"，又不会把 UI 线程变成 50 Hz 的 JSON 工厂。
+const TRANSPORT_HEARTBEAT: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// 宿主说在播、位置却这么久没动 —— 值得留一行证据。
+///
+/// 【为什么是 500 ms】宿主采样 30 Hz、推送 50 Hz；半秒不动已经远超调度抖动，
+/// 而短于它会把一次正常的重排/落盘误报成故障。
+const TRANSPORT_FROZEN: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// 把宿主传输**推**给页面（事件，不是回执）。
+///
+/// 【为什么是推送而不是让前端轮询】轮询是"请求-响应"：一次慢回执、一次在途去重、
+/// 一次乱序丢弃，任何一环都会变成用户看得见的一次停顿。而这份读数是**原子读**，
+/// 生产它的成本几乎为零 —— 让它跟着视图定时器走，往返时延就从链路上消失了。
+fn push_transport(state: &Rc<RefCell<EditorClient>>) {
+    let link = state.borrow().link.clone();
+    let Ok(owner) = link.owner() else { return };
+    let Some(clock) = owner.host_clock() else {
+        return;
+    };
+    let view = clock.read_view();
+    let due = {
+        let state = state.borrow();
+        let changed = state.last_transport.is_none_or(|last| {
+            (last.position_sec - view.position_sec).abs() > 1e-3
+                || last.playing != view.playing
+                || last.provenance != view.provenance
+                || last.seek_pending != view.seek_pending
+        });
+        changed || state.last_transport_at.elapsed() >= TRANSPORT_HEARTBEAT
+    };
+    if !due {
+        return;
+    }
+    let frozen_for = {
+        let mut state = state.borrow_mut();
+        let now = std::time::Instant::now();
+        if !state.last_transport_position.is_finite()
+            || (state.last_transport_position - view.position_sec).abs() > 1e-4
+        {
+            state.last_transport_move_at = now;
+        }
+        state.last_transport_position = view.position_sec;
+        let frozen = if view.playing && !view.seek_pending {
+            now.duration_since(state.last_transport_move_at)
+        } else {
+            std::time::Duration::ZERO
+        };
+        state.last_transport = Some(view);
+        state.last_transport_at = now;
+        frozen
+    };
+    if frozen_for >= TRANSPORT_FROZEN {
+        // 【为什么这一行值得存在】"光标卡住"的三种成因（来源停摆 / 来源一直在给
+        // 同一个值 / 前端没消费）在日志里同形。这一行把**来源、年龄、定位窗口**
+        // 一起写出来，一次现场就能定死是哪一种。限流由 `emit_limited_key` 负责。
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Warn,
+            "transport.frozen",
+            format_args!(
+                "[transport] trace: the host reports playing but the position has not moved for {} ms ({}); the editor keeps extrapolating at 1x",
+                frozen_for.as_millis(),
+                view.to_json(clock.duration(), true)
+            ),
+        );
+    }
+    // 【载荷与 `get_playback_state` 同形】见 `TransportView::to_json`：缺 `ok` 的那一版
+    // 让前端 reducer 把**每一条**推送都丢掉了。
+    push_view_event(state, "transport", view.to_json(clock.duration(), true));
+}
+
 /// 宽限期到了还没绑定 ⇒ 试一次「进程内唯一活实例」兜底。
 ///
 /// 【为什么必须有它】编辑器与处理器之间的身份只由宿主的 `IConnectionPoint` 握手建立
@@ -795,9 +983,41 @@ pub(crate) fn ui_tick(state: &Rc<RefCell<EditorClient>>) {
 pub(crate) fn tick(state: &Rc<RefCell<EditorClient>>) {
     ui_tick(state);
     host_heartbeat();
+    push_transport(state);
+    report_outbound(state);
     if !state.borrow().closed {
         pump(state);
     }
+}
+
+/// 每 [`OUTBOUND_REPORT_EVERY`] 落一行"这一段时间往页面发了多少字节"。
+///
+/// 【为什么是**增量**而不是总量】总量只增不减，画不出斜率；而"每次宿主变更都重新
+/// 发一整份时间线"这种问题只有斜率能暴露。
+fn report_outbound(state: &Rc<RefCell<EditorClient>>) {
+    let mut state = state.borrow_mut();
+    if state.closed || state.outbound_bytes == state.outbound_reported {
+        return;
+    }
+    let elapsed = state.outbound_at.elapsed();
+    if elapsed < OUTBOUND_REPORT_EVERY {
+        return;
+    }
+    let delta = state.outbound_bytes - state.outbound_reported;
+    state.outbound_reported = state.outbound_bytes;
+    state.outbound_at = std::time::Instant::now();
+    let per_sec = delta as f64 / elapsed.as_secs_f64().max(0.001);
+    drop(state);
+    hifishifter_kernel::log_limiter::emit_limited_key(
+        log::Level::Warn,
+        "gui_outbound",
+        format_args!(
+            "[gui] outbound bytes={} over {:.1}s ({:.0} B/s)",
+            delta,
+            elapsed.as_secs_f64(),
+            per_sec
+        ),
+    );
 }
 
 pub(crate) fn pump(state: &Rc<RefCell<EditorClient>>) {
@@ -1053,17 +1273,21 @@ fn apply_relay_effects(state: &Rc<RefCell<EditorClient>>, effects: Vec<host_key_
                     refuse_relay(state, &action, "owned-key");
                     continue;
                 }
-                let (fidelity, result) = {
+                let result = {
                     let mut state = state.borrow_mut();
-                    let fidelity = state.escape.fidelity();
                     // 句柄在 `WM_NCCREATE` 之后才有效；在此之前按下按键是不可能的
                     // （窗口还没显示），因此这里不做额外判空。
                     let window = state.window;
-                    let result = state.escape.escape(window, &stroke);
-                    (fidelity, result)
+                    let previous = state.previous_focus;
+                    // 【为什么偏好要在这里问】它是**按键**记账的（"合成对这个键不管用"），
+                    // 而状态机是唯一知道观察窗结论的地方。
+                    let prefer_injected = state.relay.prefers_injected(stroke.code);
+                    state
+                        .escape
+                        .escape(window, Some(previous), &stroke, prefer_injected)
                 };
                 match result {
-                    Ok(target) => {
+                    Ok((target, fidelity)) => {
                         {
                             let mut state = state.borrow_mut();
                             state.relay_stats.posted += 1;
@@ -1101,7 +1325,7 @@ fn refuse_relay(state: &Rc<RefCell<EditorClient>>, action: &str, reason: &str) {
 fn target_slot(target: host_key_relay::TargetKind) -> usize {
     match target {
         host_key_relay::TargetKind::Focus => 0,
-        host_key_relay::TargetKind::Parent => 1,
+        host_key_relay::TargetKind::PreviousFocus => 1,
         host_key_relay::TargetKind::RootOwner => 2,
     }
 }
@@ -1334,9 +1558,36 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
         );
         return;
     };
+    // 页面的周期性内存自报：同样不进命令表（见 `protocol::PAGE_HEAP`）。
+    //
+    // 【为什么静默吞掉畸形读数】它是诊断通道，不是功能通道。一条缺字段的读数不该
+    // 让页面收到一个错误回执 —— 那只会让前端把"上报失败"当成需要处理的状态。
+    if request["command"] == protocol::PAGE_HEAP {
+        let args = &request["args"];
+        let field = |name: &str| args[name].as_f64().filter(|v| *v >= 0.0).unwrap_or(0.0) as u64;
+        let used = field("usedBytes");
+        let total = field("totalBytes");
+        let nodes = field("nodes");
+        let resources = field("resources");
+        {
+            let mut state = state.borrow_mut();
+            state.on_page_heap(used, total, nodes, resources);
+            // 【必须回一条回执】前端用 `invoke` 发它，而 `invoke` 是一个
+            // 请求-响应通道：不回就等于让那个 promise 挂到 30 s 超时，并且占着
+            // `pending` 预算（32 条用满之后本视图会拒绝**一切**后续命令）。
+            // 15 s 一条的上报若不回执，半个会话就能把预算耗光 —— 那是"界面突然点不动"
+            // 的又一个成因。
+            state.post(
+                serde_json::json!({"version":1,"viewId":view_id,"id":id,"ok":true,
+                "value":serde_json::Value::Null}),
+            );
+        }
+        return;
+    }
+
     // 页面的第一句话：不进命令表，就地消费（见 `protocol::PAGE_READY`）。
     if request["command"] == protocol::PAGE_READY {
-        // 【为什么要回一条回执】前端用 §invoke§ 发它（那是唯一现成的请求-响应通道），
+        // 【为什么要回一条回执】前端用 `invoke` 发它（那是唯一现成的请求-响应通道），
         // 不回就等于让那个 promise 挂到 30 秒超时 —— 一条"证明通道能用"的消息
         // 自己先超时，是最糟的第一印象。
         let mut state = state.borrow_mut();
@@ -1703,7 +1954,7 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
                 // 的东西 —— 投递成功过几次、被拒在哪一层、插件占用了多少键。
                 let relay=serde_json::json!({
                     "fidelity":state.borrow().relay.fidelity().as_str(),
-                    "hostNativeKeys":state.borrow().relay.host_native_count(),
+                    "hostNativeKeys":state.borrow_mut().relay.host_native_count(),
                     "owned":state.borrow().owned.len(),
                     "stats":state.borrow().relay_stats.json(),
                 });
@@ -1733,6 +1984,11 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
                     "audioSlowBlockPeakMs":crate::vst3::audio_slow_block_stats().1,
                     "renderers":document.as_ref().map(|document|document.renderer_diagnostics())
                         .unwrap_or_else(||serde_json::json!([])),
+                    // ARA 文档存档通道的读数：宿主有没有调用它、交回/交出了多少字节、
+                    // 有没有"交回旧载荷"、"合入"发生在什么时候。没有这一块，
+                    // "编辑重开后消失"在诊断包里就只剩一段沉默。
+                    "araRestore":document.as_ref().map(|document|document.archive_reading())
+                        .unwrap_or(serde_json::Value::Null),
                     // 慢车道状态：报障时"有一条长任务卡在这里"是最难从日志猜出来的
                     // 事实，让它随诊断包一起走。
                     "slowLane":crate::editor::slow_lane::snapshot(),
@@ -1752,7 +2008,6 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
                         serde_json::json!({
                             "projection":view.as_ref().map(|view|view.projection.chars().take(8).collect::<String>()).unwrap_or_default(),
                             "roots":view.as_ref().map(|view|view.params.len()).unwrap_or(0),
-                            "splitWindows":document.split_window_count(),
                         })
                     }).unwrap_or(serde_json::Value::Null),
                 });
@@ -2058,6 +2313,12 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
                 let result=(||->Result<(),String> {
                     let position=request["args"]["playheadSec"].as_f64().ok_or("invalid seek position")?;
                     let owner=link.owner()?;
+                    // 【为什么先记意图再投递】投递是异步的（宿主可能几百毫秒后才执行），
+                    // 而轮询/推送从下一拍就开始读。没有这个窗口，前端会先看到"新位置"、
+                    // 再被一条旧读数拽回去 —— 用户看到的就是"跳过去又跳回来"。
+                    if let Some(clock) = owner.host_clock() {
+                        clock.request_seek(position);
+                    }
                     // 【为什么 seek 也要投递】同一个 model 线程守卫；这条回写此前 30 次
                     // 调用全部失败，于是"点时间轴跳转"从来没有真正落到宿主上。
                     let playback=owner.host_playback().ok_or("host does not provide ARA playback control")?;

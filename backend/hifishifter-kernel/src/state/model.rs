@@ -86,9 +86,27 @@ pub fn clip_source_media_duration_sec(clip: &Clip) -> Option<f64> {
 /// 另一边 `clip_source_media_duration_sec(...).unwrap_or(source_end)`），
 /// 在元数据缺失/异常时会生成互不匹配的缓存键，导致拉伸结果永远无法命中。
 pub fn clip_loop_wrap_total_sec(clip: &Clip) -> f64 {
-    clip_source_media_duration_sec(clip)
+    clip_loop_period_sec(clip)
         .unwrap_or_else(|| clip.source_end_sec.max(clip.source_start_sec))
         .max(0.0)
+}
+
+/// 循环回绕周期的**唯一**取值：优先宿主读数（[`Clip::loop_period_sec`]），
+/// 其次媒体总时长。
+///
+/// 【为什么需要宿主读数这一层】REAPER 的循环源回绕的是 take 的**可播放区间**：
+/// 有 SOURCE SECTION 时是 section 长度，没有时才是整份媒体。内核只按媒体时长
+/// 回绕，于是"带 SECTION 的循环 take"周期偏大 —— 用户听到的是逐圈漂移的相位，
+/// 而波形看不出来。装配器把 section 长度写进 `loop_period_sec`，音频
+/// （[`clip_loop_wrap_total_sec`]）与音高曲线（[`clip_loop_cycle_span_sec`]）
+/// 就都从这一个入口取周期，不会再出现"音频与曲线各算一份、逐圈漂移"。
+///
+/// 返回 `None` = 周期未知（宿主没给 section、媒体时长也读不到）—— 调用方
+/// 保留自己的历史回退，**不要**把它当成零。
+pub fn clip_loop_period_sec(clip: &Clip) -> Option<f64> {
+    clip.loop_period_sec
+        .filter(|value| value.is_finite() && *value > 1e-9)
+        .or_else(|| clip_source_media_duration_sec(clip))
 }
 
 /// 非 Loop 正放 Clip 的**派生源终点**（REAPER 派生窗口模型）：
@@ -303,7 +321,9 @@ pub fn clip_loop_cycle_span_sec(clip: &Clip) -> Option<f64> {
     if !clip.loop_enabled {
         return None;
     }
-    let span = clip_source_media_duration_sec(clip)
+    // 【与音频同源】周期只从 [`clip_loop_period_sec`] 取，两处各算一份会让
+    // 音高曲线与音频逐圈漂开（听得出、看不出）。
+    let span = clip_loop_period_sec(clip)
         .unwrap_or_else(|| (clip.source_end_sec - clip.source_start_sec).abs());
     if span.is_finite() && span > 1e-9 {
         Some(span)
@@ -901,6 +921,10 @@ pub struct TrackParamsState {
 
     #[serde(skip)]
     pub pitch_orig_key: Option<String>,
+    /// 根布局键：只回答“这些内容切片摆在哪些工程窗口”。布局变化触发**重新组装**，
+    /// 不触发重新分析（分析缓存按内容键复用）。
+    #[serde(skip)]
+    pub pitch_layout_key: Option<String>,
 
     /// 由 Reaper 导入产生的待应用音高偏移（半音）。
     /// 当 pitch_orig 分析完成后，pitch_edit = pitch_orig + 此偏移。
@@ -942,19 +966,27 @@ pub struct TrackParamsState {
     #[serde(skip)]
     pub dyn_orig_source_key: Option<String>,
 
+    /// 上一次组装只命中了**部分** clip 的缓存（曲线因此没有更新）。
+    ///
+    /// 【为什么要与"内容未分析"分开】两者在界面上都表现为"这条线还没好"，但处置
+    /// 完全不同：前者只差一次缓存落地（曲线保持上一版是**正确**的），后者根本没有
+    /// 可画的数据。合成一个布尔就会导致"部分命中时把曲线写成 0"那种闪烁。
+    #[serde(skip)]
+    pub pitch_assembly_partial: bool,
+
     /// 声码器专属静态参数（key = ParamDescriptor::id，值为枚举整数转 f64）。
     /// 例："synth_mode" = 1.0（SYNTHMODE_MF）。
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub extra_params: HashMap<String, f64>,
 
-    /// 用户手动合并的参数块（工程 v7 起持久化；旧工程缺省为空）。
+    /// 用户手动合并的参数块（可选附加字段；旧工程缺省为空）。
     ///
     /// 自动分析结果与自动重叠归并**不写入这里**：前者是 Take 缓存，后者是
     /// 每次派生都可重算的视图。这里只记录用户明确执行过的合并意图。成员使用
     /// `(clip_id, take_id, syllable_id)`，不存数组序号，重分析后仍能校核。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub param_block_merges: Vec<ParamBlockMergeRecord>,
-    /// 用户手动切分 / 伸缩后的块区间（工程 v7，向后兼容：旧工程为空）。
+    /// 用户手动切分 / 伸缩后的块区间（可选附加字段；旧工程为空）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub param_block_interval_edits: Vec<ParamBlockIntervalEdit>,
 }
@@ -964,7 +996,7 @@ pub struct TrackParamsState {
 #[serde(rename_all = "camelCase")]
 pub struct ParamBlockMergeRecord {
     pub merged_group_id: String,
-    /// 合并组成员。字段名从 v7 初稿沿用 `member_refs`；成员本身携带源域秒，
+    /// 合并组成员。字段名沿用 `member_refs`；成员本身携带源域秒，
     /// 不再依赖自动数组序号。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub member_refs: Vec<ParamBlockMemberRef>,
@@ -1267,6 +1299,20 @@ pub struct ClipTake {
     pub source_file_mtime: Option<u64>,
     #[serde(skip)]
     pub source_file_size: Option<u64>,
+    /// 内容身份：由**发布方**给出的、跨会话稳定的内容标识。
+    ///
+    /// 【为什么必须有它】分析缓存的键此前哈希的是 `source_path` + 文件元数据，而
+    /// Capture 的素材是**会话私有的临时文件**：路径形如
+    /// `<localdata>/pcm/hfs-ui-{pid}-{N}-/sources/source-{blake3}.wav`，其中 `N` 是
+    /// 每个 `EditorSession` 自增的序号，会话 Drop 时整个目录被删。于是**同一份音频
+    /// 换一个会话就换一个键** ⇒ 缓存全 miss ⇒ 整份重分析。现场表现就是"每次播放都
+    /// 重新分析音高、参数线闪一下"。
+    ///
+    /// 取值约定：Capture 写 `capture://{take}`，ARA 写源的 `persistentID`，
+    /// 普通文件写 `file://{规范化路径}`。缺失时（老工程、外部拖入）退回
+    /// `source_path` + 文件元数据 —— 行为与改动前一致。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_id: Option<String>,
 
     /// 波形预览与音高范围缓存（保存前由 `prepare_timeline_for_project_save` 清空）。
     #[serde(default)]
@@ -1321,7 +1367,7 @@ pub struct ClipTake {
     #[serde(default, skip_serializing_if = "is_false")]
     pub midi_fill_gaps: bool,
 
-    /// 源域音节边界估计（工程 v7 起持久化；旧工程缺省为空）。
+    /// 源域音节边界估计（可选附加字段；旧工程缺省为空）。
     ///
     /// 这是**可重算缓存**：源文件或算法版本变化时可整体重算。但它与纯显示缓存
     /// 不同 —— 用户手动合并引用了其中的稳定音节 ID，保存后应立刻可恢复，
@@ -1368,6 +1414,7 @@ impl ClipTake {
             duration_sec: clip.duration_sec,
             duration_frames: clip.duration_frames,
             source_sample_rate: clip.source_sample_rate,
+            content_id: clip.content_id.clone(),
             source_file_fingerprint: clip.source_file_fingerprint,
             source_file_mtime: clip.source_file_mtime,
             source_file_size: clip.source_file_size,
@@ -1408,6 +1455,9 @@ impl ClipTake {
         clip.source_file_fingerprint = self.source_file_fingerprint;
         clip.source_file_mtime = self.source_file_mtime;
         clip.source_file_size = self.source_file_size;
+        // 【内容身份跟着 take 走】分析缓存的键读的是 clip 上的这一项（见
+        // `Clip::content_id`）；不投影的话它永远停在 None，键又退回私有路径。
+        clip.content_id = self.content_id.clone();
         clip.waveform_preview = self.waveform_preview.clone();
         clip.pitch_range = self.pitch_range.clone();
         clip.source_start_sec = self.source_start_sec;
@@ -1703,6 +1753,17 @@ pub struct Clip {
     /// 源文件内容指纹（active take 投影；权威值保存在对应 `ClipTake`）。
     #[serde(default, skip_serializing)]
     pub source_file_fingerprint: Option<u64>,
+    /// 内容身份（active take 投影；权威值保存在对应 `ClipTake`）。
+    ///
+    /// 【为什么分析缓存的键要读它】见 `ClipTake::content_id`：Capture 的素材是会话
+    /// 私有临时文件，路径里的命名空间每个会话都不同。把路径拌进内容键，等于"每开
+    /// 一次窗口就把整份音频重分析一遍"。
+    ///
+    /// 【为什么它必须能被序列化】会话侧的时间线是**经 JSON 重建**的（GUI 命名空间、
+    /// 素材路径重写都在那条路上）。`skip_serializing` 的字段会在重建时丢掉，于是键又
+    /// 退回私有路径 —— 那正是本轮要消灭的行为。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_id: Option<String>,
     /// 波形预览（active take 投影，保存前清空）。
     #[serde(default, skip_serializing)]
     pub waveform_preview: Option<Vec<f32>>,
@@ -1831,6 +1892,18 @@ pub struct Clip {
     /// 是否在 pitch_orig 组装时填补 MIDI 音符之间的空隙。
     #[serde(default, skip_serializing)]
     pub midi_fill_gaps: bool,
+
+    /// 循环**回绕周期**（源域秒）；`None` = 按媒体总时长（历史行为）。
+    ///
+    /// 【它解决什么】内核的 Loop 数学按**整份媒体**取模，而 REAPER 的循环源回绕的是
+    /// take 的**可播放区间**：有 SOURCE SECTION 时是 section 长度。少了这个字段，
+    /// "带 SECTION 的循环 take"每一圈的相位都比宿主偏一点 —— 听得出、看不出。
+    ///
+    /// 【为什么是一个新字段而不是改语义】`None` 时两个既有取值函数的行为**逐位不变**
+    /// （见 [`clip_loop_period_sec`]），因此旧工程、独立 App 导入、纯 MIDI clip 全部
+    /// 不受影响；只有装配器明确知道 section 长度时才填它。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_period_sec: Option<f64>,
 }
 
 /// 旧命名曲线枚举 → （REAPER 浮点形状 id, 曲率）。
@@ -1997,6 +2070,9 @@ impl Clip {
         }
         if projection.source_file_fingerprint.is_none() {
             projection.source_file_fingerprint = existing.source_file_fingerprint;
+        }
+        if projection.content_id.is_none() {
+            projection.content_id = existing.content_id;
         }
         self.active_take_id = Some(existing.id);
         self.takes[idx] = projection;
@@ -2291,6 +2367,156 @@ pub struct TimelineState {
 
     #[serde(default, skip_serializing_if = "hash_set_string_is_empty")]
     pub disabled_group_ids: HashSet<String>,
+}
+
+/// 时间线的**内容指纹**：只要 GUI 会看到的量变了，它就变。
+///
+/// 【它解决什么】\`plugin_host_changed\` 会让前端重取整份时间线（实测单条 1.9 MB）。
+/// 此前每条通知都无条件推进 \`host_version\`，于是"宿主里什么都没变"也会触发一次全量
+/// 往返；而重取本身又会推动上游再走一遍 —— 环一旦闭合就停不下来（实测 2~4 份整图
+/// 每秒，页面堆冲到 1 GB 以上，状态栏一直闪"加载中"）。
+///
+/// 指纹只回答一个问题：**这份时间线与上一份相比，用户能看出区别吗**。
+/// 看不出 ⇒ 不通知：前端手上那份就是最新的。
+///
+/// 【覆盖范围】id、几何、轨道结构、take 列表、参数数组、音阶与速度。刻意**不**包含
+/// \`selected_*\` 与 \`playhead_sec\` —— 那是纯交互状态，选择事件与
+/// \`get_playback_state\` 已经各有一条通道；把它们并进来会让"点一下片段"也触发一次
+/// 整图重取。
+///
+/// 【为什么是 FNV-1a】这里要回答的是"这两份**几乎一样**的图有没有区别"，所以需要
+/// 对"相邻两次只有一两个字节不同"敏感、又足够快（每次通知都要算一遍）。密码学哈希
+/// 在这里只多花时间。
+pub fn timeline_fingerprint(timeline: &TimelineState) -> u64 {
+    struct Hasher(u64);
+    impl Hasher {
+        fn bytes(&mut self, bytes: &[u8]) {
+            for byte in bytes {
+                self.0 ^= u64::from(*byte);
+                self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+        fn u64(&mut self, value: u64) {
+            self.bytes(&value.to_le_bytes());
+        }
+        fn f64(&mut self, value: f64) {
+            // 非有限值全部折成同一个哨兵：它们对用户是同一件事（"没有值"），
+            // 而 NaN 的位模式有几十种，逐位比会让指纹在无变化时抖动。
+            self.u64(if value.is_finite() {
+                value.to_bits()
+            } else {
+                u64::MAX
+            });
+        }
+        fn flag(&mut self, value: bool) {
+            self.u64(u64::from(value));
+        }
+        fn text(&mut self, value: &str) {
+            self.u64(value.len() as u64);
+            self.bytes(value.as_bytes());
+        }
+        fn maybe(&mut self, value: Option<&str>) {
+            self.text(value.unwrap_or(""));
+        }
+        fn curve(&mut self, values: &[f32]) {
+            self.u64(values.len() as u64);
+            for value in values {
+                self.u64(u64::from(value.to_bits()));
+            }
+        }
+    }
+    let mut h = Hasher(0xcbf2_9ce4_8422_2325);
+    h.u64(timeline.tracks.len() as u64);
+    for track in &timeline.tracks {
+        h.text(&track.id);
+        h.text(&track.name);
+        h.u64(track.order as u64);
+        h.maybe(track.parent_id.as_deref());
+        h.flag(track.muted);
+        h.flag(track.solo);
+        h.f64(f64::from(track.volume));
+        h.flag(track.compose_enabled);
+        h.text(track.pitch_analysis_algo.id());
+        h.text(&track.color);
+    }
+    h.u64(timeline.clips.len() as u64);
+    for clip in &timeline.clips {
+        h.text(&clip.id);
+        h.text(&clip.track_id);
+        h.text(&clip.name);
+        h.f64(clip.start_sec);
+        h.f64(clip.length_sec);
+        h.f64(clip.source_start_sec);
+        h.f64(clip.source_end_sec);
+        h.f64(f64::from(clip.playback_rate));
+        h.f64(f64::from(clip.clip_playback_rate));
+        h.flag(clip.reversed);
+        h.flag(clip.loop_enabled);
+        h.flag(clip.muted);
+        h.f64(clip.loop_period_sec.unwrap_or(f64::NAN));
+        h.u64(clip.channel_mode as u64);
+        h.f64(f64::from(clip.gain));
+        h.f64(f64::from(clip.clip_gain));
+        h.f64(clip.fade_in_sec);
+        h.f64(clip.fade_out_sec);
+        h.f64(clip.fade_in_shape);
+        h.f64(clip.fade_out_shape);
+        h.f64(clip.fade_in_dir);
+        h.f64(clip.fade_out_dir);
+        h.f64(clip.fade_in_s);
+        h.f64(clip.fade_out_s);
+        h.f64(clip.snap_offset_sec);
+        h.maybe(clip.group_id.as_deref());
+        h.maybe(clip.source_path.as_deref());
+        h.maybe(clip.active_take_id.as_deref());
+        h.u64(clip.takes.len() as u64);
+        for take in &clip.takes {
+            h.text(&take.id);
+            h.text(&take.name);
+            h.maybe(take.source_path.as_deref());
+            h.f64(take.source_start_sec);
+            h.f64(take.source_end_sec);
+            h.f64(f64::from(take.playback_rate));
+            h.flag(take.reversed);
+            h.flag(take.loop_enabled);
+            h.u64(take.channel_mode as u64);
+        }
+    }
+    // 【选择必须进指纹】插件里没有单独的选择事件通道 —— 宿主改选区时 GUI 能拿到的
+    // 唯一信号就是 `plugin_host_changed`。把它排除在外，用户点一下片段界面就会停在
+    // 旧选区上。`playhead_sec` 则**不进**：它由 `get_playback_state` 单独送，且每帧
+    // 都在变。
+    h.maybe(timeline.selected_track_id.as_deref());
+    h.maybe(timeline.selected_clip_id.as_deref());
+    h.f64(timeline.bpm);
+    h.f64(timeline.project_sec);
+    h.u64(timeline.project_scale_notes.len() as u64);
+    h.bytes(&timeline.project_scale_notes);
+    h.u64(timeline.tempo_map.as_ref().map_or(0, Vec::len) as u64);
+    for point in timeline.tempo_map.iter().flatten() {
+        h.text(&point.id);
+        h.f64(point.position_sec);
+        h.f64(point.bpm);
+        h.u64(u64::from(point.numerator.unwrap_or(0)));
+        h.u64(u64::from(point.denominator.unwrap_or(0)));
+        h.u64(u64::from(point.scale.is_some()));
+    }
+    h.u64(timeline.params_by_root_track.len() as u64);
+    for (root, params) in &timeline.params_by_root_track {
+        h.text(root);
+        h.f64(params.frame_period_ms);
+        h.flag(params.pitch_edit_user_modified);
+        h.curve(&params.pitch_edit);
+        h.curve(&params.tension_edit);
+        let mut keys: Vec<&String> = params.extra_curves.keys().collect();
+        keys.sort();
+        h.u64(keys.len() as u64);
+        for key in keys {
+            h.text(key);
+            h.curve(&params.extra_curves[key]);
+        }
+    }
+    h.0
 }
 
 /// Deserialization default (older project files lack the field): the next
@@ -2763,6 +2989,36 @@ impl TimelineState {
         }
     }
 
+    /// 把一段区间填成**目标位置自己的原始值**（未编辑帧的归属）。
+    ///
+    /// 【为什么需要它】移动/拉伸一段带编辑的区间时，未编辑的帧不是"0"，而是
+    /// 目标位置这一代分析出的 `pitch_orig`。旧实现把整段显示数组搬过去，
+    /// 于是未编辑帧带的是**旧位置**的原始值（用户看到的"原始线还是旧的"）。
+    fn fill_curve_range(
+        curve: &mut Vec<f32>,
+        required_len: usize,
+        start_frame: usize,
+        end_frame: usize,
+        original: &[f32],
+        default_value: f32,
+    ) {
+        if curve.len() < required_len {
+            curve.resize(required_len, default_value);
+        }
+        let start = start_frame.min(curve.len());
+        let end = end_frame.min(curve.len());
+        if start >= end {
+            return;
+        }
+        for (offset, value) in curve[start..end].iter_mut().enumerate() {
+            *value = original
+                .get(start + offset)
+                .copied()
+                .filter(|sample| sample.is_finite())
+                .unwrap_or(default_value);
+        }
+    }
+
     fn write_curve_range(
         curve: &mut Vec<f32>,
         required_len: usize,
@@ -2804,22 +3060,36 @@ impl TimelineState {
         // pitch/tension 始终保持工程长度所以未受影响；这里统一改为
         // 不足处补参考值（pitch/tension 补 0，extra 补参数默认值）。
         let frame_count = end_frame.saturating_sub(start_frame);
+        // 【T11：搬的是**编辑**，不是显示数组】显示数组里未编辑的帧等于 pitch_orig，
+        // 直接整段搬走会把**旧的**原始值带到新位置（用户看到"移动之后原始线还是旧的"）。
+        // 先提取编辑曲线，再按"未编辑 = 默认值"渲染成 payload，接收侧才有机会用
+        // **目标位置自己的**原始值填满那些帧。
+        let edits = crate::editor::param_edit::extract_edit_curves(entry);
+        let dense = |key: &str, pad_value: f32| -> Vec<f32> {
+            let mut values = vec![pad_value; frame_count];
+            if let Some(curve) = edits.get(key) {
+                for (offset, value) in values.iter_mut().enumerate() {
+                    if let Some(sample) = curve.value_at((start_frame + offset) as f64, key) {
+                        *value = sample;
+                    }
+                }
+            }
+            values
+        };
         let pitch_edit = if entry.pitch_edit_user_modified {
-            Self::curve_slice(&entry.pitch_edit, start_frame, frame_count, 0.0)
+            dense("pitch_edit", 0.0)
         } else {
             Vec::new()
         };
-        let tension_edit = Self::curve_slice(&entry.tension_edit, start_frame, frame_count, 0.0);
+        let tension_edit = dense("tension_edit", 0.0);
         let extra_curves = entry
             .extra_curves
-            .iter()
-            .map(|(param, curve)| {
+            .keys()
+            .map(|param| {
+                let key = format!("extra:{param}");
                 let default_value =
                     crate::renderer::common_params::automation_curve_pad_value(kind, param);
-                (
-                    param.clone(),
-                    Self::curve_slice(curve, start_frame, frame_count, default_value),
-                )
+                (param.clone(), dense(&key, default_value))
             })
             .collect();
 
@@ -2922,11 +3192,14 @@ impl TimelineState {
 
         let required_len = entry.pitch_edit.len().max(end_frame);
         if has_pitch {
-            Self::clear_curve_range(
+            // 未编辑帧取**目标位置**的原始值；payload 里那些帧是 0（=没有编辑）。
+            let original = entry.pitch_orig.clone();
+            Self::fill_curve_range(
                 &mut entry.pitch_edit,
                 required_len,
                 start_frame,
                 end_frame,
+                &original,
                 0.0,
             );
         }
@@ -2945,6 +3218,22 @@ impl TimelineState {
                 &linked_params.pitch_edit,
                 0.0,
             );
+            // payload 里 0 = "这一帧没有编辑"（`pitch_edit` 的哨兵），不是数值。
+            // 把它写进目标会把刚填好的原始值盖成 0 —— 用户看到的就是"移动之后
+            // 未编辑的原始线整段消失"。这里按帧把哨兵还原成目标位置的原始值。
+            let original = entry.pitch_orig.clone();
+            for (offset, value) in linked_params.pitch_edit.iter().copied().enumerate() {
+                if value != 0.0 {
+                    continue;
+                }
+                let idx = start_frame.saturating_add(offset);
+                if idx >= entry.pitch_edit.len() {
+                    break;
+                }
+                if let Some(sample) = original.get(idx).copied() {
+                    entry.pitch_edit[idx] = sample;
+                }
+            }
         }
         Self::write_curve_range(
             &mut entry.tension_edit,
@@ -3174,11 +3463,24 @@ impl TimelineState {
         };
 
         // 写入前先取出旧范围快照，避免写/读互相覆盖。
+        // 【T11：重采样的是**编辑层**】显示数组里未编辑的帧等于旧 `pitch_orig`；
+        // 把它一起重采样会把旧原始值拉到新位置。这里只取编辑，未编辑帧留 0。
         let pitch_sources: Vec<Vec<f32>> = if pitch_user_modified {
+            let edits = crate::editor::param_edit::extract_edit_curves(entry);
             frame_mappings
                 .iter()
                 .map(|&(old_start, old_count, _, _)| {
-                    Self::curve_slice(&entry.pitch_edit, old_start, old_count, 0.0)
+                    let mut values = vec![0.0; old_count];
+                    if let Some(curve) = edits.get("pitch_edit") {
+                        for (offset, value) in values.iter_mut().enumerate() {
+                            if let Some(sample) =
+                                curve.value_at((old_start + offset) as f64, "pitch_edit")
+                            {
+                                *value = sample;
+                            }
+                        }
+                    }
+                    values
                 })
                 .collect()
         } else {
@@ -3264,6 +3566,24 @@ impl TimelineState {
                 };
                 for (offset, value) in values.into_iter().enumerate() {
                     curve[new_start.saturating_add(offset)] = value;
+                }
+            }
+        }
+
+        // 新范围里"没有编辑"的帧取**目标位置**这一代分析出的原始值。
+        if pitch_user_modified {
+            let original = entry.pitch_orig.clone();
+            for &(_, _, new_start, new_count) in &frame_mappings {
+                for offset in 0..new_count {
+                    let idx = new_start.saturating_add(offset);
+                    if idx >= entry.pitch_edit.len() {
+                        break;
+                    }
+                    if entry.pitch_edit[idx] == 0.0 {
+                        if let Some(value) = original.get(idx).copied() {
+                            entry.pitch_edit[idx] = value;
+                        }
+                    }
                 }
             }
         }
@@ -3460,18 +3780,19 @@ impl TimelineState {
 
         entry.frame_period_ms = fp;
 
-        // CRITICAL FIX: Detect stale pitch curves and clear them when clip/timeline changes.
-        // This prevents old pitch data from being displayed after clip replacement or timeline edits.
+        // 【缓存失效 ≠ 用户数据消失】这里此前把 `pitch_orig` 与 `pitch_edit` 一起清空。
+        // 而"键变了"只说明**我们手上的原线可能是旧的**，不说明用户画的那条线无效：
+        // 键会因为一次素材重发布、一次采样率变化、甚至一次会话重建而变。清空之后，
+        // 用户看到的是自己的曲线凭空消失，随后被重新分析的结果覆盖回一条**不一样**的
+        // 曲线 —— 一次可见的闪烁 + 一次数据丢失。
+        //
+        // 现在只把键置 None（下次组装会重算），曲线原样保留：绘制侧按 `pitch_orig_key`
+        // 是否为空决定透明度，重分析完成后被**更完整**的值替换。纪律：同一条根的
+        // `pitch_edit` 只允许被"更完整"的值替换，不允许被空值替换。
         let key_changed = entry.pitch_orig_key.as_deref() != Some(&expected_key);
 
         if key_changed && entry.pitch_orig_key.is_some() {
-            // Timeline/clip configuration changed - clear orig curves to force re-analysis
-            entry.pitch_orig.clear();
             entry.pitch_orig_key = None;
-            // 仅当用户未手动编辑时才清空 pitch_edit，保护用户的编辑成果
-            if !entry.pitch_edit_user_modified {
-                entry.pitch_edit.clear();
-            }
 
             if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1") {
                 log::warn!(
@@ -3705,6 +4026,43 @@ impl TimelineState {
 mod tests {
     use super::*;
 
+    /// 拖放导入的显示名必须是**原始文件名**，而不是磁盘上的 \`import_<uuid>\`。
+    ///
+    /// 【为什么这条是用户可见的正确性】拖进来的音频块此前一律叫 \`import_a1b2c3d4\`
+    /// —— 用户在时间线上完全认不出哪个是哪个，而磁盘名恰恰是为了避免同名覆盖才
+    /// 变成 UUID 的。两者必须分开表达。
+    #[test]
+    fn import_audio_item_uses_the_display_name_for_the_clip() {
+        let dir = std::env::temp_dir().join(format!("hfs-display-name-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("import_deadbeef.wav");
+        std::fs::write(&path, b"RIFF").unwrap();
+
+        let mut timeline = TimelineState::default();
+        let track = timeline.add_track(Some("Track".to_string()), None, None);
+        timeline.import_audio_item(
+            &path.to_string_lossy(),
+            Some(track.clone()),
+            Some(0.0),
+            crate::channel_policy::ChannelResolution::NOOP,
+            Some("01 Take.wav"),
+        );
+        assert_eq!(timeline.clips[0].name, "01 Take.wav");
+
+        // 不传显示名时退回磁盘文件名（按路径导入走这条路）。
+        timeline.import_audio_item(
+            &path.to_string_lossy(),
+            Some(track),
+            Some(0.0),
+            crate::channel_policy::ChannelResolution::NOOP,
+            None,
+        );
+        assert_eq!(timeline.clips[1].name, "import_deadbeef.wav");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 串行化触及进程级“同步编辑所有 Take”开关的测试：该设置是全局原子，
     /// 无 per-test 作用域，并行测试会互相踩踏（一个测试把开关改回 true 时，
     /// 另一个正在断言“关闭同步”行为的测试就会读到错误的值）。
@@ -3739,11 +4097,16 @@ mod tests {
             "用户音高曲线必须保留（数组会被补齐到工程长度，但值不得被清掉）：{:?}",
             &entry.pitch_edit[..entry.pitch_edit.len().min(8)]
         );
-        // `resize_curve` 随后会把数组补齐到工程长度（填 0），所以"已清空"的形状是
-        // **全 0** 而不是空数组。
+        // 【契约变了：缓存失效 ≠ 用户数据消失】此前这里断言 `pitch_orig` 被清成全 0。
+        // 而"键变了"只说明**我们手上的原线可能是旧的**，不说明用户画的那条线无效：
+        // 键会因为一次素材重发布、一次采样率变化、甚至一次会话重建而变。清空之后
+        // 用户看到的是曲线凭空消失，随后被重新分析的结果覆盖回一条**不一样**的曲线
+        // —— 一次可见的闪烁 + 一次数据丢失。
+        //
+        // 现在只把键置 None（下次组装会重算），曲线原样保留。
         assert!(
-            entry.pitch_orig.iter().all(|v| *v == 0.),
-            "分析缓存仍应被清空以触发重分析：{:?}",
+            entry.pitch_orig[..4].iter().all(|v| *v == 57.),
+            "原线不得被清空（它仍是我们手上最可信的一份）：{:?}",
             &entry.pitch_orig[..entry.pitch_orig.len().min(8)]
         );
         assert_ne!(
@@ -9054,6 +9417,7 @@ impl TimelineState {
         }
 
         let clip = Clip {
+            loop_period_sec: None,
             takes: vec![],
             active_take_id: None,
             id: id.clone(),
@@ -9071,6 +9435,7 @@ impl TimelineState {
             source_file_mtime: computed_mtime,
             source_file_size: computed_size,
             source_file_fingerprint: computed_fp,
+            content_id: None,
             waveform_preview: computed_waveform,
             pitch_range: inherited
                 .as_ref()
@@ -10259,6 +10624,7 @@ impl TimelineState {
         let name = sources[0].name.clone();
         let color = sources[0].color.clone();
         let mut packed = Clip {
+            loop_period_sec: None,
             id: packed_id.clone(),
             group_id: None,
             track_id,
@@ -10277,6 +10643,7 @@ impl TimelineState {
             source_file_mtime: None,
             source_file_size: None,
             source_file_fingerprint: None,
+            content_id: None,
             waveform_preview: None,
             pitch_range: None,
             gain: 1.0,
@@ -11612,9 +11979,11 @@ impl TimelineState {
             self.ensure_params_for_root(root);
             let key = crate::pitch_analysis::build_root_pitch_key(self, root);
 
+            let layout_key = crate::pitch_analysis::build_root_pitch_layout_key(self, root);
             if let Some(entry) = self.params_by_root_track.get_mut(*root) {
                 entry.pitch_orig = curve;
                 entry.pitch_orig_key = Some(key);
+                entry.pitch_layout_key = Some(layout_key);
                 entry.has_pitch_adjustment_active = has_pitch_adjustment;
                 if !entry.pitch_edit_user_modified {
                     entry.pitch_edit.clone_from(&entry.pitch_orig);
@@ -11971,18 +12340,29 @@ impl TimelineState {
     /// `channel_decision` 由调用方在**锁外**按导入声道策略预先算好
     /// （见 `crate::channel_policy::precompute_decision`）：本函数在持锁状态
     /// 下运行，绝不能在此解码音频。`ChannelResolution::NOOP` 表示什么都不写。
+    ///
+    /// `display_name` 是 clip 的**显示名**；为 `None` 时退回磁盘文件名。拖放导入
+    /// 的磁盘名是 `import_<uuid>.wav`（避免同名覆盖），用户看到的却应该是
+    /// `01.wav` —— 两者必须分开表达，否则每个拖进来的音频块都叫 import_xxxx。
     pub fn import_audio_item(
         &mut self,
         audio_path: &str,
         track_id: Option<String>,
         start_sec: Option<f64>,
         channel_decision: crate::channel_policy::ChannelResolution,
+        display_name: Option<&str>,
     ) {
-        let name = Path::new(audio_path)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("Audio")
-            .to_string();
+        let name = display_name
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                Path::new(audio_path)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("Audio")
+                    .to_string()
+            });
 
         let mut duration_sec: Option<f64> = None;
         let mut duration_frames: Option<u64> = None;
@@ -12459,5 +12839,138 @@ mod gain_split_tests {
             clip.normalize_takes();
             assert!((clip.audible_gain() - audible_before).abs() < 1e-6);
         }
+    }
+    /// **T11：移动带编辑的片段时，未编辑帧取新位置的原始值。**
+    ///
+    /// 【为什么这条必须存在】独立 App 此前把整段 `pitch_edit` 切片搬走 —— 未编辑帧
+    /// 带的是**旧位置**的 `pitch_orig`。用户看到的是"移动之后，原始线还是旧的"。
+    /// 编辑帧的优先级高于未编辑帧（I8），所以它们必须原样落到新位置。
+    #[test]
+    fn app_move_recomposes_unedited_frames_from_the_new_pitch_orig() {
+        let mut tl = TimelineState::default();
+        let track_id = tl.tracks[0].id.clone();
+        let clip_id = tl.add_clip(
+            Some(track_id.clone()),
+            Some("MoveEdited".into()),
+            Some(0.0),
+            Some(2.0),
+            Some("C:/audio/a.mp3".into()),
+        );
+        let root = tl.resolve_root_track_id(&track_id).unwrap();
+        tl.ensure_params_for_root(&root);
+        let frames = 800usize; // 4 s @ 5 ms
+        {
+            let entry = tl.params_by_root_track.get_mut(&root).unwrap();
+            entry.pitch_orig = (0..frames).map(|i| 50.0 + i as f32 * 0.01).collect();
+            // 未编辑帧 = 原始值；只有旧范围 100..=120 是用户画的 70。
+            entry.pitch_edit = entry.pitch_orig.clone();
+            for frame in 100..=120 {
+                entry.pitch_edit[frame] = 70.0;
+            }
+            entry.pitch_edit_user_modified = true;
+        }
+        tl.move_clips(
+            &[MoveClipPayload {
+                clip_id,
+                start_sec: 1.0,
+                track_id: None,
+            }],
+            true,
+        );
+        let entry = tl.params_by_root_track.get(&root).unwrap();
+        assert!(
+            (entry.pitch_edit[300] - 70.0).abs() < 1e-4,
+            "编辑帧必须落到新位置（300），got {}",
+            entry.pitch_edit[300]
+        );
+        assert!(
+            (entry.pitch_edit[250] - entry.pitch_orig[250]).abs() < 1e-4,
+            "未编辑帧必须取新位置的原始值：{} vs {}",
+            entry.pitch_edit[250],
+            entry.pitch_orig[250]
+        );
+        assert!(
+            (entry.pitch_edit[200] - entry.pitch_orig[200]).abs() < 1e-4,
+            "新范围起点也必须是新原始值"
+        );
+    }
+}
+
+#[cfg(test)]
+mod timeline_fingerprint_tests {
+    use super::*;
+
+    fn timeline() -> TimelineState {
+        serde_json::from_value(serde_json::json!({
+            "tracks": [{"id": "track", "name": "t", "order": 0}],
+            "clips": [{
+                "id": "ara-item-a", "track_id": "track", "name": "A",
+                "start_sec": 0.0, "length_sec": 2.0,
+                "takes": [{"id": "take", "source_start_sec": 0.0, "source_end_sec": 2.0}]
+            }],
+            "bpm": 120.0, "project_sec": 2.0
+        }))
+        .unwrap()
+    }
+
+    /// 同一份时间线算两次必须相同 —— 否则"没变"永远判不出来，通知就退化成原来的
+    /// 无条件广播。
+    #[test]
+    fn the_fingerprint_is_stable_for_identical_timelines() {
+        assert_eq!(
+            timeline_fingerprint(&timeline()),
+            timeline_fingerprint(&timeline())
+        );
+    }
+
+    /// GUI 会看到的每一个量变化都必须改变指纹。这一条是"漏一个字段 = 界面停在旧值"
+    /// 的护栏：它比逐字段断言更宽，但足以抓住"新加了字段却忘了并进指纹"。
+    #[test]
+    fn every_user_visible_change_moves_the_fingerprint() {
+        let base = timeline_fingerprint(&timeline());
+        let mutations: Vec<(&str, fn(&mut TimelineState))> = vec![
+            ("clip geometry", |t| t.clips[0].start_sec = 1.0),
+            ("clip length", |t| t.clips[0].length_sec = 3.0),
+            ("clip name", |t| t.clips[0].name = "B".into()),
+            ("clip mute", |t| t.clips[0].muted = true),
+            ("clip loop", |t| t.clips[0].loop_enabled = true),
+            ("clip window", |t| t.clips[0].source_end_sec = 1.5),
+            ("take rate", |t| t.clips[0].takes[0].playback_rate = 2.0),
+            ("track name", |t| t.tracks[0].name = "u".into()),
+            ("track mute", |t| t.tracks[0].muted = true),
+            ("track volume", |t| t.tracks[0].volume = 0.5),
+            ("track order", |t| t.tracks[0].order = 3),
+            ("bpm", |t| t.bpm = 90.0),
+            ("project length", |t| t.project_sec = 9.0),
+            ("scale", |t| t.project_scale_notes = vec![0, 1]),
+            ("param curve", |t| {
+                t.params_by_root_track.insert(
+                    "track".into(),
+                    serde_json::from_value(serde_json::json!({"pitch_edit": [1.0, 2.0]})).unwrap(),
+                );
+            }),
+        ];
+        for (label, mutate) in mutations {
+            let mut changed = timeline();
+            mutate(&mut changed);
+            assert_ne!(
+                timeline_fingerprint(&changed),
+                base,
+                "{label} 变化必须改变指纹，否则界面会停在旧值"
+            );
+        }
+    }
+
+    /// 选区必须进指纹（插件里没有别的通道把它送到 GUI），播放头**不**进
+    /// （它每帧都在变，且由 `get_playback_state` 单独送）。
+    #[test]
+    fn selection_moves_the_fingerprint_but_the_playhead_does_not() {
+        let base = timeline_fingerprint(&timeline());
+        let mut playhead = timeline();
+        playhead.playhead_sec = 42.0;
+        assert_eq!(timeline_fingerprint(&playhead), base);
+        let mut selected = timeline();
+        selected.selected_clip_id = Some("ara-item-a".into());
+        assert_ne!(timeline_fingerprint(&selected), base);
     }
 }

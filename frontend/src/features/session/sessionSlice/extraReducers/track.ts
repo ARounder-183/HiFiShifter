@@ -128,25 +128,22 @@ export function registerTrack(builder: ActionReducerMapBuilder<SessionState>) {
             }
         })
 
-        .addCase(seekPlayhead.pending, (state, action) => {
+        .addCase(seekPlayhead.pending, (state) => {
             // seek 交接播放头所有权：seek 之前派发的在途播放轮询采样的是
             // seek 前的引擎位置，其迟到响应会把光标拽回旧位置（先跳回再
             // 被 seek 后的轮询拉回 —— 播放中点击标尺/拖拽时的可见跳变）。
+            //
+            // 【为什么不再有 `_pluginSeekRequestId`】"这次定位落地了没有"现在是
+            // **后端**的事实（`SeekIntent` 窗口，见 `render/transport.rs`）。前端
+            // 替权威猜"再压多久"只会在命令回执早于宿主落地时把旧读数放进来 ——
+            // 那正是"跳过去又跳回来"。多一个在途 id 只会多一处会漂移的状态。
             state._transportEpoch = (Number(state._transportEpoch) || 0) + 1;
-            if (isPluginMode()) state._pluginSeekRequestId = action.meta.requestId;
         })
-        .addCase(seekPlayhead.rejected, (state, action) => {
-            if (isPluginMode() && state._pluginSeekRequestId === action.meta.requestId) {
-                state._pluginSeekRequestId = null;
-                state._transportEpoch += 1;
-            }
+        .addCase(seekPlayhead.rejected, (state) => {
+            state._transportEpoch += 1;
         })
         .addCase(seekPlayhead.fulfilled, (state, action) => {
-            if (isPluginMode()) {
-                if (state._pluginSeekRequestId !== action.meta.requestId) return;
-                state._pluginSeekRequestId = null;
-                state._transportEpoch += 1;
-            }
+            state._transportEpoch += 1;
             const payload = action.payload as {
                 ok?: boolean;
                 playhead_sec?: number;

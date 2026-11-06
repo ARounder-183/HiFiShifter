@@ -630,7 +630,7 @@ export const zhCN = {
     about_copied: "已复制到剪贴板",
     about_third_party_title: "第三方许可",
     about_third_party_note:
-        "随附的库与模型权重各自保留其原有许可（完整清单见 LICENSE 文件）。NSF-HiFiGAN 声码器权重为 CC BY-NC-SA 4.0，仅限非商业使用。",
+        "随附的库与模型权重各自保留其原有许可（组件清单见 LICENSE 文件，许可全文见 licenses 文件夹）。NSF-HiFiGAN 声码器权重为 CC BY-NC-SA 4.0，仅限非商业使用。",
     clip_badge_rate_tip: "速率",
     clip_badge_gain_tip: "增益",
     clip_rate_editor_title: "编辑播放速率",
@@ -2143,7 +2143,6 @@ export const zhCN = {
 
     // ── 插件宿主的自动应用状态（状态栏片）───────────────────────────
     plugin_apply_waiting_host: "等待宿主音频",
-    plugin_apply_pending: "正在自动应用...",
     plugin_apply_applied: "已应用",
     plugin_apply_error: "尚未应用：{error}",
     plugin_apply_session_ended: "本次编辑会话已结束。请关闭并重新打开插件窗口后继续。",
@@ -2217,16 +2216,32 @@ export const zhCN = {
     // ── 宿主淡入淡出 tooltip 的补充说明 ─────────────────────────────
     fade_shape_axes_owned_by_host: "读不出宿主的淡化轴版本，无法确定用哪套轴；请用下方曲率滑杆调整",
     // ── 安装器（NSIS）─────────────────────────────────────────────────────
-    installer_name: "HiFiShifter VST3",
+    installer_name: "HiFiShifter",
     installer_publisher: "ARounder",
-    installer_welcome_title: "欢迎安装 HiFiShifter VST3",
+    installer_welcome_title: "欢迎安装 HiFiShifter",
     installer_welcome_text:
-        "安装程序会把 HiFiShifter VST3/ARA 插件放进你选择的 VST3 文件夹。\n请先关闭 REAPER：安装程序不会覆盖正在被加载的插件。\n设置与独立 App 共用。\n随包分发的 NSF-HiFiGAN 声码器权重为 CC BY-NC-SA 4.0 授权，仅限非商业使用。",
+        "安装程序会装上 HiFiShifter 独立 App 与 VST3/ARA 插件。两者共用同一份模型库，150 MB 权重只写一遍。\n继续之前请先关闭 REAPER 与 HiFiShifter：安装程序不会覆盖正在被加载的文件。\n设置、缓存与日志位于你的用户目录，卸载时会保留。\n随包分发的 NSF-HiFiGAN 声码器权重为 CC BY-NC-SA 4.0 授权，仅限非商业使用；许可全文安装在 LICENSE 与 licenses 文件夹中。",
+    installer_app_dir_text: "请选择独立 App 的安装位置。",
     installer_dir_text:
         "请选择 REAPER 会扫描的 VST3 文件夹。插件会以 HiFiShifter.vst3 文件夹的形式装在其中。",
-    installer_installing: "正在安装 HiFiShifter VST3...",
-    installer_err_not_x64: "此插件需要 64 位 Windows。",
-    installer_err_reaper_open: "请先完全退出 REAPER 及其插件宿主进程，再安装 HiFiShifter VST3。",
+    installer_installing: "正在安装 HiFiShifter...",
+    installer_err_not_x64: "HiFiShifter 需要 64 位 Windows。",
+    installer_err_reaper_open: "请先完全退出 REAPER 及其插件宿主进程，再安装 HiFiShifter。",
     installer_err_tasklist: "无法确认 REAPER 已退出。请关闭 REAPER 后重新运行安装程序。",
-    installer_uninstall_reaper_open: "请先退出 REAPER，再卸载 HiFiShifter VST3。",
+    installer_clap_dir_text:
+        "请选择 DAW 会扫描的 CLAP 文件夹。插件会以 HiFiShifter.clap 单文件的形式装在其中。",
+    installer_err_app_running: "HiFiShifter 正在运行。请关闭它后重新运行安装程序。",
+    installer_uninstall_reaper_open: "请先退出 REAPER，再卸载 HiFiShifter。",
+    installer_component_app: "HiFiShifter（独立 App）",
+    installer_component_vst3: "VST3 / ARA 插件",
+    installer_component_clap: "CLAP 插件（仅 Capture）",
+    installer_component_models: "共享模型库",
+    installer_component_shortcuts: "开始菜单与桌面快捷方式",
+    installer_component_models_install: "正在安装共享模型库...",
+    installer_component_models_skip: "共享模型库已是最新，跳过。",
+    installer_webview2_install_failed:
+        "WebView2 运行时安装失败。请从微软官网安装后再运行安装程序。",
+    installer_models_verify_failed:
+        "共享模型库复制后校验失败。请重新运行安装程序；若反复失败，请检查系统盘剩余空间。",
+    installer_repair_done: "修复完成。共享模型库已齐全。",
 } as const;

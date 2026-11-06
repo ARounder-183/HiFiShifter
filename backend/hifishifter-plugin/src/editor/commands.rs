@@ -507,7 +507,11 @@ fn export_audio_to_file(
         session
             .capture_owner()
             .ok_or("the Capture host is gone")?
-            .capture_render_input()?
+            // 【导出为什么要求带曲线】导出的产物用户会直接拿去用，而"会话还在加载"
+            // 意味着用户画好的曲线读不出来 —— 与其导出一份没有编辑的音频，不如让
+            // 用户稍等再按一次（`capture_session_pending` 的说明）。
+            .capture_render_input(true)?
+            .ok_or("the editor session is still loading; try exporting again in a moment")?
             .3
     } else {
         let document = session.document().ok_or("the ARA document is closed")?;
@@ -625,6 +629,8 @@ struct Frames {
     with_sentinel: Option<bool>,
     #[serde(default)]
     values: Vec<f32>,
+    /// 与 values 等长的显式编辑位图；缺省 = 全 true（旧前端兼容）。
+    present: Option<Vec<bool>>,
     checkpoint: Option<bool>,
 }
 #[derive(Deserialize)]
@@ -707,11 +713,74 @@ struct PrivateTrackMove {
     parent_track_id: Option<String>,
 }
 
+/// 一份时间线载荷的**软**上限：超过它就自动降级为 lite。
+///
+/// 【为什么要软上限】硬上限（`client::RESPONSE_BUDGET`，8 MiB）在超限时只能如实
+/// 回一个错误 —— 界面于是永久停在上一份快照上：看起来能用，其实再也不更新。
+/// 软上限让同一次请求**降级**而不是失败：界面继续刷新，代价只是这一帧没有波形
+/// 预览与 MIDI 音符。
+const PAYLOAD_SOFT_LIMIT_BYTES: usize = 6 * 1024 * 1024;
+
+/// 估算一份**全量**载荷的序列化体积。
+///
+/// 【为什么估算而不是实测】实测要先把整个 `TimelineStatePayload` 序列化一遍 ——
+/// 而那正是最贵的一步，等于最坏情况下付两次代价。这里要回答的只是"是不是已经大到
+/// 离谱"，取主导项即可：`waveform_preview`（4096 个 f32 的数组）与
+/// `midi_note_data` 是唯一会随 clip **时长**线性增长的字段，其余全是定长标量。
+///
+/// 【为什么系数大于 1】JSON 里一个 f32 序列化成 8-12 个字符，解析成 JS 数字还要
+/// 再占 8 字节；一个 MIDI 音符是一个五字段对象，落在堆上约 100 字节。系数取"解析
+/// 后的堆占用"，因为那才是能把渲染进程打死的东西。
+fn estimated_full_payload_bytes(
+    timeline: &hifishifter_kernel::state::model::TimelineState,
+) -> usize {
+    // 轨道、工程元数据、tempo map、历史深度的粗略基数。
+    let mut bytes = 16 * 1024;
+    for clip in &timeline.clips {
+        // 每条 clip 的定长字段（id / 路径 / 淡变 / 速率 / 颜色 …）。
+        bytes += 1024;
+        bytes += clip.waveform_preview.as_ref().map_or(0, |w| w.len() * 12);
+        bytes += clip
+            .midi_note_data
+            .as_ref()
+            .map_or(0, |notes| notes.len() * 96);
+        for take in &clip.takes {
+            bytes += 256;
+            bytes += take
+                .midi_note_data
+                .as_ref()
+                .map_or(0, |notes| notes.len() * 96);
+        }
+    }
+    bytes
+}
+
 /// 构造原payload，包括真实本地dirty和历史深度，不伪造工程文件路径。
 pub(crate) fn payload(session: &EditorSession, lite: bool) -> Result<Value, String> {
     let (position, _) = session.transport();
     let timeline = session.timeline.lock_or_recover();
-    let mut payload = if lite {
+    // 【为什么在这里判，而不是在投递处判】只有这里还拿得到 `TimelineState` ——
+    // 一旦它变成 `Value`，"降级"就无从做起了。判据是**估算**体积（见上）。
+    let estimated = if lite {
+        0
+    } else {
+        estimated_full_payload_bytes(&timeline)
+    };
+    let degraded = !lite && estimated > PAYLOAD_SOFT_LIMIT_BYTES;
+    if degraded {
+        hifishifter_kernel::log_limiter::emit_limited_key(
+            log::Level::Warn,
+            "gui_payload_lite",
+            format_args!(
+                "[gui] timeline payload degraded to lite: estimated {} KiB > {} KiB \
+                 (clips={}); waveform previews and MIDI notes are omitted from this frame",
+                estimated / 1024,
+                PAYLOAD_SOFT_LIMIT_BYTES / 1024,
+                timeline.clips.len()
+            ),
+        );
+    }
+    let mut payload = if lite || degraded {
         timeline.to_payload_lite()
     } else {
         timeline.to_payload()
@@ -807,14 +876,10 @@ fn after_write(session: &EditorSession, result: Value) -> Result<Value, String> 
         );
         return Err(message);
     }
-    if let Some(error) = session.error.lock_or_recover().clone() {
-        hifishifter_kernel::log_limiter::emit_limited_key(
-            log::Level::Warn,
-            "cmd_failed:write_session",
-            format_args!("[cmd] write rejected by session error: {error}"),
-        );
-        return Err(error);
-    }
+    // 【为什么不再读 `session.error`】写入命令的成败由 `result["ok"]` 回答。把会话级
+    // 错误当成"这次也失败了"会让一次历史失败永久污染之后每一次成功写入：前端收到
+    // Err 就把本地已经生效的笔画回滚，用户看到"画完就没了"。会话级错误现在只由
+    // `ensure_loaded` 这类**终态**失败设置，并通过 `get_state` 呈现给界面。
     session.emit("history_state", history_state(session));
     session.notify_timeline();
     Ok(result)
@@ -994,7 +1059,7 @@ pub(super) fn dispatch(
                 }
                 timeline.select_clip(id);
             }
-            // 只有已授权clip才切换源曲线，未就绪的显示占位绝不读本机原文件。
+            // 只有已授权clip才切换源曲线，未就绪的显示占位绝不读本地原文件。
             let authorized = {
                 let timeline = session.timeline.lock_or_recover();
                 timeline.selected_clip_id.as_ref().is_none_or(|id| {
@@ -1015,7 +1080,7 @@ pub(super) fn dispatch(
             return Ok(session.playback_state());
         }
         // 共振峰工具窗口：命令名与载荷和独立 App **逐字段同形**，前端不必按模式分支。
-        // 音频来自宿主授权的 PCM（插件禁止读本机文件），切片/倒放/下混与 App 共用
+        // 音频来自宿主授权的 PCM（插件禁止读本地文件），切片/倒放/下混与 App 共用
         // kernel 的 `formant_cache::analyze_clip_formants_from_interleaved`。
         "analyze_clip_formants" => return value(session.analyze_clip_formants(&input)?),
         // ── 参数块：与独立 App 同形的只读 / 缓存命令 ──
@@ -1686,6 +1751,9 @@ pub(super) fn dispatch(
         }
         "get_history_state" => Ok(history_state(session)),
         "begin_undo_group" => {
+            // 组内写入用 `checkpoint:false`，因此"组开始前"的权威必须在这里先挂上；
+            // 否则 undo 找不到可恢复的快照，整组曲线会留在原位（右键重置后"没反应"）。
+            session.checkpoint_authority_step();
             let timeline = session.timeline.lock_or_recover();
             history::checkpoint(
                 &mut session.history.lock_or_recover(),
@@ -1842,12 +1910,13 @@ pub(super) fn dispatch(
             budget(a.start_frame, a.values.len())?;
             after_write(
                 session,
-                params::set_param_frames(
+                params::set_param_frames_with_present(
                     session,
                     a.track_id,
                     a.param,
                     a.start_frame,
                     a.values,
+                    a.present,
                     a.checkpoint,
                 ),
             )
@@ -1905,13 +1974,18 @@ pub(super) fn dispatch(
         "stretch_track_linked_params" => {
             let a: StretchLinked = args(input)?;
             track_exists(session, &a.track_id)?;
+            let _ = a.checkpoint;
             if a.mappings.len() > 4096 {
                 return Err("stretch mapping budget exceeded".into());
             }
-            after_write(
-                session,
-                params::stretch_track_linked_params(session, a.track_id, a.mappings, a.checkpoint),
-            )
+            // ARA 模式下几何变化由内核的几何事务（`GeometryOp::Move/Stretch`）完成；这里再改
+            // 一次本地数组会把已经投影过的曲线二次映射（偏移/截断/默认值）。
+            // 保留命令是为了独立 App 与旧前端兼容，但在插件内必须是显式 no-op。
+            log::info!(
+                "[ara] stretch_track_linked_params skipped in ARA mode; the atlas projects \
+                 source edits from the host geometry"
+            );
+            Ok(serde_json::json!({"ok": true, "skipped": "ara-atlas"}))
         }
         "set_track_state" => {
             let object = input.as_object().ok_or("track arguments required")?;
@@ -2011,10 +2085,13 @@ pub(super) fn dispatch(
                 } else {
                     *timeline = next;
                 }
+                // 参数权威是独立历史层：显示数组不再作为快照回放。
                 drop(recorded);
-                session.mark_dirty();
-                session.publish_timeline(timeline.clone());
+                let timeline_for_publish = timeline.clone();
                 drop(timeline);
+                session.restore_authority_step(target);
+                session.mark_dirty();
+                session.publish_timeline(timeline_for_publish);
                 session.emit("history_state", history_state(session));
                 session.notify_timeline();
                 let mut payload = payload(session, false)?;

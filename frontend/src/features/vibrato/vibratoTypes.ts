@@ -42,7 +42,7 @@ export type EnvelopeCurve = "linear" | "exp" | "s";
  *    预设字段，切一次预设就得重选一次）；
  * 2. 它只在「添加颤音」里起作用：预设库、拖拽工具、预设文件都与它无关。
  *
- * 因此它存在**设置**里（本机记忆，见 `session.vibratoBaseline`），随窗口一起打开。
+ * 因此它存在**设置**里（本地记忆，见 `session.vibratoBaseline`），随窗口一起打开。
  */
 export type BaselineMode =
     /** 起点 → 终点线性插值（拖拽的既有行为）。 */

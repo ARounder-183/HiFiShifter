@@ -747,6 +747,7 @@ mod tests {
 
     fn make_clip() -> Clip {
         Clip {
+            loop_period_sec: None,
             id: "clip-a".to_string(),
             takes: vec![],
             active_take_id: None,
@@ -764,6 +765,7 @@ mod tests {
             source_file_mtime: None,
             source_file_size: None,
             source_file_fingerprint: None,
+            content_id: None,
             waveform_preview: None,
             pitch_range: None,
             gain: 1.0,

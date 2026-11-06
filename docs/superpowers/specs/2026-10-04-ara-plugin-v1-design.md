@@ -317,7 +317,7 @@ trait 需要再加方法 —— 那是加方法，不是改架构。
 
 | 方面 | v1 决定 | 理由 |
 | --- | --- | --- |
-| 传输 | 本机命名管道（Windows），长度前缀 + JSON 行协议 | 编辑是人手操作、低频，延迟要求宽松；管道自带就绪与背压语义，不需要自己发明 |
+| 传输 | 本地命名管道（Windows），长度前缀 + JSON 行协议 | 编辑是人手操作、低频，延迟要求宽松；管道自带就绪与背压语义，不需要自己发明 |
 | 依赖 | `interprocess` crate（同时给 Windows 命名管道与 Unix domain socket） | 为将来的 macOS 铺路，且不引入 async 运行时 |
 | 发现 | 插件把 `{pid, pipe_name, document_name, track_name, heartbeat_ms}` 写进 `%LOCALAPPDATA%\HiFiShifter\ara-instances\<instance>.json` | 目录扫描比端口探测简单，且天然支持多实例 |
 | 并发 | **单写者 + 乐观并发**：`commit(curves, base_revision)`；版本不匹配返回 `Conflict{current_revision}` | "最后写者胜"会**静默丢编辑**，那是这类工具的致命缺陷。宁可让用户重做一次 |
@@ -338,7 +338,7 @@ trait 需要再加方法 —— 那是加方法，不是改架构。
 （`probe/ara/rust-path/src/model.rs`，236 行手工收集）。
 
 **实测发现**（本次读锁定的 crate 源码得出）：同仓库的 `ara2-bridge` **默认 feature `plugin`**
-已经提供了一层**高层插件框架**，且就在本机 registry 里：
+已经提供了一层**高层插件框架**，且就在本地 registry 里：
 
 ```
 ara2-bridge-plugin-0.3.0/src/

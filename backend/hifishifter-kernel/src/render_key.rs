@@ -187,6 +187,7 @@ mod tests {
     /// 基准 clip：字段取"常见值"，与 `pitch_editing` 的测试夹具同形。
     fn base_clip() -> Clip {
         Clip {
+            loop_period_sec: None,
             id: "clip-a".to_string(),
             takes: vec![],
             active_take_id: Some("take-1".to_string()),
@@ -204,6 +205,7 @@ mod tests {
             source_file_mtime: Some(1_700_000_000),
             source_file_size: Some(123_456),
             source_file_fingerprint: Some(0xDEAD_BEEF),
+            content_id: None,
             waveform_preview: None,
             pitch_range: None,
             gain: 1.0,

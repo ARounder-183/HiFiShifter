@@ -4,7 +4,7 @@
 【为什么要单独一个脚本】`npm audit` 只覆盖 npm，`cargo audit` 需要装工具链；
 而本仓的依赖面是"两份锁文件"——`backend/Cargo.lock` 与
 `frontend/package-lock.json`。OSV 同时收录 crates.io 与 npm，一次批量查询就能
-把两边都扫完，且不需要在本机装任何东西。
+把两边都扫完，且不需要在本地安装任何东西。
 
 【为什么要有白名单】本仓有 5 条"修不动"的通告（上游把版本钉死 / 不再维护）。
 没有白名单，门禁永远是红的；有了白名单，**新增**的通告才是一次真正的告警。
@@ -30,6 +30,11 @@ import sys
 import time
 import urllib.error
 import urllib.request
+
+# Windows 的 stdout 跟随 ANSI 代码页（英文系统是 cp1252、中文系统是 GBK），打印中文会
+# UnicodeEncodeError 打死进程 —— 真正的结论一条都进不了日志，红的是编码而不是规则。
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
 OSV_BATCH = "https://api.osv.dev/v1/querybatch"
 ROOT = pathlib.Path(__file__).resolve().parents[2]

@@ -22,6 +22,7 @@ import type { MessageKey } from "../../../i18n/messages";
 import { formatTemplate } from "../../../i18n/format";
 import { useAppSelector } from "../../../app/hooks";
 import { useVisualPlayhead } from "../../../hooks/useVisualPlayhead";
+import { isTransportAdvancing } from "../../../features/session/selectors/transport";
 import { useDevicePixelRatio } from "../../../hooks/useDevicePixelRatio";
 import { wholeDevicePxLength } from "../../../utils/devicePixelLine";
 import {
@@ -166,6 +167,8 @@ const TrackHeaderPlayheadTime = React.memo(function TrackHeaderPlayheadTime() {
             isPlaying: state.session.runtime.isPlaying,
             playbackWaitingForRender: state.session.runtime.playbackWaitingForRender,
             playbackPositionSec: state.session.runtime.playbackPositionSec,
+            positionAdvancing: state.session.runtime.positionAdvancing,
+            positionAgeMs: state.session.runtime.positionAgeMs,
             primaryTimeUnit: state.session.primaryTimeUnit,
             secondaryTimeUnit: state.session.secondaryTimeUnit,
             bpm: state.session.bpm,
@@ -178,15 +181,13 @@ const TrackHeaderPlayheadTime = React.memo(function TrackHeaderPlayheadTime() {
         shallowEqual,
     );
     const [visualSec, setVisualSec] = useState(selector.playheadSec);
-    // 原地等待渲染（位置冻结）期间不得推进视觉插值（见 TimelinePanel 同名注释）。
-    const isTransportAdvancing =
-        selector.isPlaying &&
-        !selector.playbackWaitingForRender &&
-        selector.playbackPositionSec > 1e-4;
+    // 【唯一判据在 selector 里】见 `isTransportAdvancing`：三处三个公式，恰好在
+    // "位置冻结"这个场景互相分歧 —— 那正是"停止后光标还在走"。
+    const transportAdvancing = isTransportAdvancing(selector);
     useVisualPlayhead({
         syncedPlayheadSec: selector.playheadSec,
         syncedAtMs: selector.playheadSampledAtMs,
-        isTransportAdvancing,
+        isTransportAdvancing: transportAdvancing,
         onFrame: React.useCallback((sec: number) => setVisualSec(sec), []),
     });
     const timeContext = React.useMemo<TimeFormatContext>(

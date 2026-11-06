@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "HiFiShifter"
-version = "0.1.0-beta.15"
+version = "0.2.0-beta"
 dependencies = [
  "arc-swap",
  "base64 0.23.1",
@@ -2003,6 +2003,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
+name = "hifishifter-clap"
+version = "0.2.0-beta"
+dependencies = [
+ "hifishifter-plugin-core",
+ "libc",
+ "log",
+ "windows",
+]
+
+[[package]]
 name = "hifishifter-clipboard"
 version = "0.1.0"
 dependencies = [
@@ -2069,7 +2079,7 @@ dependencies = [
 
 [[package]]
 name = "hifishifter-plugin"
-version = "0.1.0-beta.15"
+version = "0.2.0-beta"
 dependencies = [
  "ara2-bridge",
  "base64 0.23.1",
@@ -2082,6 +2092,7 @@ dependencies = [
  "hifishifter-clipboard",
  "hifishifter-host-link",
  "hifishifter-kernel",
+ "hifishifter-plugin-core",
  "javascriptcore-rs",
  "libc",
  "log",
@@ -2096,6 +2107,19 @@ dependencies = [
  "webview2-com",
  "windows",
  "zip",
+]
+
+[[package]]
+name = "hifishifter-plugin-core"
+version = "0.2.0-beta"
+dependencies = [
+ "hifishifter-kernel",
+ "libc",
+ "log",
+ "serde",
+ "serde_json",
+ "webview2-com",
+ "windows",
 ]
 
 [[package]]

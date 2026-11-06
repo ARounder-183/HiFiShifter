@@ -50,8 +50,10 @@ pub fn remove_old_synth_temp(old_path: Option<&str>) {
 ///   会弄坏最近的工程；按文件龄清理只限制无主的陈旧残留）
 /// - `%TEMP%/hs_vslib_*.wav`（vslib 崩溃残留）
 ///
-/// 注意：新版本的拖放导入（`import_audio_bytes`）已改为落**持久目录**
-/// `<config_dir>/imported_media/`，不在此清理范围内。
+/// 注意：拖放导入（`import_audio_bytes`）早已改为落**持久目录**，不在此清理范围内。
+/// 落点见 `crate::media_paths`（有工程 → `<工程目录>/<工程名>_media/`，没有 →
+/// `<本地根>/unsaved/<会话>/`）。这里只兜底清理历史遗留：早期版本把 `import_*`
+/// 写在 `%TEMP%/hifishifter/` 下，那些文件可能仍被**已保存的老工程**引用。
 ///
 /// 此函数不会阻塞，内部 spawn 后台线程执行。
 pub fn cleanup_stale_temp_files() {
@@ -69,7 +71,7 @@ pub fn cleanup_stale_temp_files() {
             // glue_* 与 import_* 都可能被**已保存的工程**直接引用为 clip 源
             // （glue 是烘焙文件；旧版本的拖放导入落在临时目录），无条件清理
             // 会弄坏工程 —— 按文件龄清理，只限制无主的陈旧残留。
-            // 新版本的拖放导入已改落持久目录（见 `persistent_import_dir`），
+            // 新版本的拖放导入已改落持久目录（见 `media_paths`），
             // 这里只兜底清理历史遗留。
             let (removed, bytes) =
                 cleanup_dir_by_prefix_older_than(&hs_dir, &["glue_", "import_"], 7 * 24 * 3600);

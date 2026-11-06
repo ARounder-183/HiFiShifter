@@ -314,29 +314,35 @@ impl ExtensionOwner {
                 edits
                     .reconcile(&document.track_bindings.lock_or_recover())
                     .map_err(Self::invalid_edit)?;
+                let assigned = self
+                    .assigned_timeline(&document)
+                    .map_err(Self::invalid_edit)?;
                 let mut candidate = edits
-                    .merge_params(
-                        &self
-                            .assigned_timeline(&document)
-                            .map_err(Self::invalid_edit)?,
-                        &params,
-                        &tracks,
-                        edit.base_revisions.edits,
-                    )
+                    .merge_params(&assigned, &params, &tracks, edit.base_revisions.edits)
                     .map_err(Self::invalid_edit)?;
                 let mut curve_timeline = self
                     .assigned_timeline(&document)
                     .map_err(Self::invalid_edit)?;
                 candidate.apply(&mut curve_timeline);
-                candidate.atlas = edits
-                    .atlas
-                    .capture(
-                        &curve_timeline,
-                        &document
-                            .parameter_identities_locked(&curve_timeline)
-                            .map_err(Self::invalid_edit)?,
-                    )
-                    .map_err(Self::invalid_edit)?;
+                // 【曲线折回权威：**工程时间**差分】
+                //
+                // 旧实现把 `edit.params` 当成**源域**曲线的来源，于是它必须再解一次
+                // "这段显示对应哪段源" —— 而那正是分割 / 倒放 / 循环下解不对的那一步，
+                // 也是"编辑一下 clip，参数线被重置"的温床。权威活在工程时间上：显示
+                // 数组与 `compose_root_view` 的差，就是用户改的那几帧，位置一一对应。
+                {
+                    let baseline = document.baseline_snapshot();
+                    let geometry_revision = document.ui_geometry_revision.load(Ordering::Acquire);
+                    for (root, incoming) in &params {
+                        let Some(baseline) = baseline.get(root) else {
+                            continue;
+                        };
+                        candidate
+                            .authority
+                            .absorb_display(root, incoming, baseline, geometry_revision)
+                            .map_err(Self::invalid_edit)?;
+                    }
+                }
                 candidate
                     .reconcile(&document.track_bindings.lock_or_recover())
                     .map_err(Self::invalid_edit)?;
@@ -365,10 +371,9 @@ impl ExtensionOwner {
                 for publisher in &owner.snapshots {
                     publisher.collect_retired();
                 }
-                let mut snapshots = input
+                let snapshots = input
                     .render(Arc::new(std::sync::atomic::AtomicBool::new(false)))
                     .map_err(Self::invalid_edit)?;
-                super::snapshot::compact_prepared(&mut snapshots).map_err(Self::invalid_edit)?;
                 prepared.push((owner, keys, snapshots));
             }
             // ── 提交：短事务内复核（渲染期间一切可能都变了）并发布 ──────────
@@ -419,7 +424,7 @@ impl ExtensionOwner {
             for (owner, keys, snapshots) in prepared {
                 for (publisher, snapshot) in owner.snapshots.iter().zip(snapshots) {
                     publisher
-                        .publish(snapshot)
+                        .publish_shared(snapshot)
                         .map_err(|error| format!("snapshot publish failed: {error:?}"))
                         .map_err(Self::invalid_edit)?;
                 }
@@ -495,9 +500,53 @@ impl ExtensionOwner {
         // "在 HiFiShifter 中，倒放被识别为正放"）。与音阶播种（`document.timeline` 的
         // `project_scale_notes`）是同一条纪律、同一个理由。
         document.project_host_take_facts_locked(&mut timeline);
+        // 【几何也必须来自同一份清单】见 `project_host_item_geometry_locked`：移动
+        // item 不产生 ARA 收口，所以 `document.timeline` 里的位置会落后一步；而编辑器
+        // 读的是 REAPER 清单。不在这里覆盖，就是"GUI 动了、声音没动"。
+        document.project_host_item_geometry_locked(&mut timeline);
         let mut resolved = edits.clone();
         resolved.reconcile(&document.track_bindings.lock_or_recover())?;
         resolved.apply(&mut timeline);
+        // 【渲染与 GUI 必须同源】派生原始值只住在基线层（`DocumentSession::baseline`）。
+        // 少了这一步，`project_local` 会拿到空的 `pitch_orig`：未编辑帧的默认值退化成
+        // 0、渲染器也失去"源基频"这条参考 —— 用户看到参数线画好了，却一个采样都没变。
+        // 【为什么在 apply 之后】apply 才建立根的参数条目；在它之前安装会被"目标为空"
+        // 的条目挡掉。
+        document.install_baseline_locked(&mut timeline);
+        // 【有编辑但没基线 ⇒ 不许渲染】没有 `pitch_orig` 就没有源基频：渲染器会把
+        // 用户曲线原样"应用"到一条没有参考的链路上，输出与原始音频逐采样相同 ——
+        // 界面显示已应用、音频一个采样都没变。等分析（actor 会重试），不要静默降级。
+        {
+            let baseline = document.baseline_snapshot();
+            for (root, params) in timeline.params_by_root_track.iter() {
+                // 【两条来源都要看】编辑可能在权威里（正常路径），也可能只在显示数组里
+                // （旧存档恢复、App 导入）。任一存在而基线缺席 ⇒ 等分析。
+                // 【为什么只看这两条】`pitch_edit` 在未编辑时是**分析目标曲线**，
+                // 它非空不代表用户改过（测试夹具与"先画后分析"都长这样）。用
+                // "曲线非空 + 原始值空"当编辑证据会把正常加载判成"等分析"，实测
+                // 会让三条 automatic-apply 用例整条停摆。用户编辑的权威判据只有
+                // 权威表里的锚层与 `pitch_edit_user_modified`。
+                // 【为什么读冻结的 `edits` 而不是再锁一次 `document.edits`】本函数在
+                // 调用方的短事务里工作，`edits` 就是那一刻冻结的快照（各调用点都写作
+                // `document.edits.lock_or_recover().clone()`）。回头去锁活表既与本函数
+                // 其余输入不是同一代数据，也会在"调用方仍持有那把锁"的写法下**自锁**：
+                // `Mutex` 不可重入，整条渲染路径就此停死。
+                let edited = edits
+                    .authority
+                    .root(root)
+                    .is_some_and(|authority| !authority.is_empty())
+                    || params.pitch_edit_user_modified;
+                let baseline_usable = baseline.get(root).is_some_and(|entry| entry.is_ready())
+                    || params.pitch_orig.iter().any(|value| *value > 0.0)
+                    || params.pitch_edit.iter().any(|value| *value > 0.0);
+                if edited && !baseline_usable {
+                    return Err(format!(
+                        "{}; pitch analysis pending for root {root}",
+                        crate::editor::errors::CONFLICT_PREFIX
+                    ));
+                }
+            }
+        }
         if !resolved.groups.is_empty() {
             // 空父轨也能承载参数组算法；不加入其音频clip，更不混入其它renderer的区域。
             let mut grouped_view = timeline.clone();
@@ -570,18 +619,13 @@ impl ExtensionOwner {
         let facts_pending =
             self.native_host().is_some() && document.ui_tracks.lock_or_recover().is_empty();
         let kernel_render = edited
+            || !resolved.authority.is_pristine()
             || stretch
             || owned_fade
             || reversed_clip
             || !resolved.groups.is_empty()
             || facts_pending;
-        let clip_parameters = if resolved.atlas.is_empty() {
-            Default::default()
-        } else {
-            resolved
-                .atlas
-                .project_local(&timeline, &document.parameter_identities_locked(&timeline)?)?
-        };
+        let clip_parameters = document.compose_clip_params_locked(&timeline, &resolved)?;
         let available = if kernel_render {
             document.edit_sources.lock_or_recover()
         } else {
@@ -604,6 +648,7 @@ impl ExtensionOwner {
                 // "工程速率秒"折回源自己的秒（见 `RenderInput::project_sample_rate`）。
                 project_sample_rate: Some(self.setup_sample_rate()).filter(|rate| *rate > 0.0),
                 clip_parameters,
+                window: None,
             },
         ))
     }

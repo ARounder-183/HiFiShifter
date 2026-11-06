@@ -18,6 +18,10 @@ import { PluginApplyStatus } from "./features/ara/PluginApplyStatus";
 import { HostLinkExportControl } from "./features/hostLink/HostLinkExportControl";
 import { getPluginApplySnapshot, subscribePluginApply } from "./features/ara/pluginApplyStore";
 import { listen as listenHostEvent } from "./services/hostEvents";
+import {
+    transportPushed,
+    type TransportSample,
+} from "./features/session/sessionSlice/extraReducers/transport";
 import { getPluginHost } from "./services/pluginHost";
 import {
     importAudioAtPosition,
@@ -562,6 +566,7 @@ function AppInner() {
     const error = useAppSelector((state) => state.session.error);
 
     const runtimeIsPlaying = useAppSelector((state) => state.session.runtime.isPlaying);
+    const hostAuthoritative = useAppSelector((state) => state.session.runtime.hostAuthoritative);
     const runtimeHasSynthesized = useAppSelector((state) => state.session.runtime.hasSynthesized);
     const toolMode = useAppSelector((state) => state.session.toolMode);
     const drawToolMode = useAppSelector((state) => state.session.drawToolMode);
@@ -3303,6 +3308,8 @@ function AppInner() {
                                     extStart,
                                     editedDense,
                                     true,
+                                    // 这一笔整段都改过（选区平滑），每一帧都是显式编辑。
+                                    new Array<boolean>(editedDense.length).fill(true),
                                 );
                                 // 通知 PianoRoll 刷新曲线
                                 dispatch(checkpointHistory());
@@ -3481,6 +3488,51 @@ function AppInner() {
     }, []);
 
     /*
+     * 页面内存自报：让原生侧看得见"渲染进程的堆在往哪走"。
+     *
+     * 【为什么必须由页面报】Chromium 的 JS 堆只有页面自己看得见；`performance.memory`
+     * 是唯一不需要 DevTools 协议的来源。此前原生侧对这块内存**完全盲** —— 用户报的
+     * Out of Memory 在插件日志里连一行都没有。
+     *
+     * 【为什么是 15 s】它是趋势读数而不是实时读数：更密只会把诊断文件刷满，更疏则会在
+     * 一次持续数分钟的爬升里只剩两三个点。
+     *
+     * 【为什么用 setInterval 而不是 requestAnimationFrame】窗口被遮挡或最小化时 rAF 会
+     * 停，而内存爬升不会 —— 恰恰是"开着但没人看"的那段时间最容易涨。
+     *
+     * 【为什么读不到就什么都不发】没有 `performance.memory` 时发全零会让曲线看起来像
+     * "内存掉到 0"，比没有读数更误导。
+     */
+    useEffect(() => {
+        if (!isPluginMode()) return;
+        const host = getPluginHost();
+        if (!host) return;
+        const report = () => {
+            const memory = (
+                performance as Performance & {
+                    memory?: { usedJSHeapSize: number; totalJSHeapSize: number };
+                }
+            ).memory;
+            if (!memory || !Number.isFinite(memory.usedJSHeapSize)) return;
+            void host
+                .invoke("plugin_heap", {
+                    usedBytes: memory.usedJSHeapSize,
+                    totalBytes: memory.totalJSHeapSize,
+                    // DOM 节点数是"界面自己长胖"的独立证据：堆在涨而节点数不变，
+                    // 说明是数据对象在累积；两者一起涨才是渲染层的形状。
+                    nodes: document.getElementsByTagName("*").length,
+                    // 资源条目数（脚本 / 字体 / 图片）。缓冲区上限 250，所以它只回答
+                    // "加载过多少"这一件事。
+                    resources: performance.getEntriesByType("resource").length,
+                })
+                .catch(() => undefined);
+        };
+        report();
+        const timer = setInterval(report, 15_000);
+        return () => clearInterval(timer);
+    }, []);
+
+    /*
      * 原生拖放：把"拖进窗口的文件"变成一次普通导入。
      *
      * 【为什么路径只能由原生给】WebKit 的 `File` 没有磁盘路径（沙箱），所以拖进来的
@@ -3493,6 +3545,34 @@ function AppInner() {
      * —— 拖动根本没进 DOM，没有坐标可算。播放头 + 当前选中轨道是唯一能预期的答案，
      * 也与"文件菜单导入"完全一致。
      */
+    /*
+     * 宿主传输推送：宿主侧的视图定时器每 20 ms 读一次原子时钟，**变了就发一条事件**。
+     *
+     * 【为什么不再靠轮询】轮询是"请求-响应"：一次慢回执、一次在途去重、一次乱序丢弃，
+     * 任何一环都会变成用户看得见的一次停顿。推送把那一段往返整个删掉，于是"跳到位
+     * 之后卡一会儿"这类症状从链路上消失，而不是被调参掩盖。
+     *
+     * 【为什么是 plugin-only】独立 App 的传输在本进程里，没有宿主定时器可挂 ——
+     * 那边继续用轮询（见下面的常驻采样）。
+     */
+    useEffect(() => {
+        if (!isPluginMode()) return;
+        let disposed = false;
+        let unsubscribe: (() => void) | null = null;
+        void listenHostEvent<TransportSample>("transport", (event) => {
+            if (event.payload) dispatch(transportPushed(event.payload));
+        })
+            .then((off) => {
+                if (disposed) off();
+                else unsubscribe = off;
+            })
+            .catch(() => undefined);
+        return () => {
+            disposed = true;
+            unsubscribe?.();
+        };
+    }, [dispatch]);
+
     useEffect(() => {
         if (!isPluginMode()) return;
         let disposed = false;
@@ -3572,7 +3652,15 @@ function AppInner() {
         // 每 400ms 造一次本地失败（闸门挡掉了 IPC，但定时器本身仍在空转），并让状态栏
         // 持续闪一条没有意义的错误。
         if (sessionEnded) return;
-        const intervalMs = runtimeIsPlaying ? 33 : 400;
+        // 【为什么"宿主受控"就够了】`runtimeIsPlaying` 是**前端镜像**，起播那一瞬它
+        // 还是 false（第一次采样甚至还没回来）—— 于是轮询停在 400 ms，光标只能一格
+        // 一格地挪，这就是"跳到位之后卡一会儿"里那个"一会儿"的直接来源。
+        // `host_authoritative` 说的是"位置来自宿主"，它一旦为真，采样节奏就必须跟上
+        // 宿主（33 ms）；播放与否交给后端去答。
+        // 【为什么插件形态不再需要 33 ms 档】宿主侧的视图定时器已经在**推**传输读数
+        // （见下方的 `transport` 事件），轮询只剩看门狗职责。独立 App 没有推送通道，
+        // 保留原节奏。
+        const intervalMs = !isPluginMode() && (runtimeIsPlaying || hostAuthoritative) ? 33 : 400;
         const id = window.setInterval(() => {
             // 阻塞式前台预渲染（target="original"）阶段后端还未真正进入 playing，
             // 若此时同步会把前端"准备播放"状态误判为停止，导致 stop 锚点丢失。
@@ -3621,7 +3709,7 @@ function AppInner() {
                 });
         }, intervalMs);
         return () => window.clearInterval(id);
-    }, [dispatch, runtimeIsPlaying, rendering.blocking, sessionEnded]);
+    }, [dispatch, runtimeIsPlaying, hostAuthoritative, rendering.blocking, sessionEnded]);
 
     useEffect(() => {
         if (!recordingActive || !recordingSettings.autoStopAtSelectionEnd) return;

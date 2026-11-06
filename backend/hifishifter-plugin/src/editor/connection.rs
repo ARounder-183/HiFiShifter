@@ -140,6 +140,7 @@ pub(crate) fn resolve_and_record_host_identity() -> crate::host_identity::HostId
         });
     }
     let identity = crate::host_identity::resolve_identity(&evidence);
+    crate::host_identity::note_identity(&identity);
     crate::log_line(&identity.describe());
     if identity.display != "unknown" {
         // 日志按宿主分文件：拿到名字的这一刻把日志切过去

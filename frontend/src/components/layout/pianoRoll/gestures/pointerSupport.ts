@@ -12,6 +12,7 @@
 import type { ParamViewSegment } from "../types";
 import type { ParamSelection } from "../paramSelection";
 import { paramsApi } from "../../../../services/api/params";
+import { isPluginMode } from "../../../../services/hostCapabilities";
 
 export type CanvasCursor = "default" | "crosshair" | "grab" | "grabbing" | "ew-resize";
 
@@ -60,6 +61,14 @@ export async function recordGestureParamSelectionStep(args: {
                 (range) => Number.isFinite(range.startFrame) && Number.isFinite(range.frameCount),
             )
             .map((range) => [range.startFrame, range.frameCount]);
+    // 【为什么插件模式直接跳过】这条命令登记的是**本地**历史栈上的一步；而插件模式
+    // 里撤销栈由宿主持有（那条路是 `plugin_history_*`），后端对这条命令的回答必然是
+    // "Command unavailable in plug-in mode"。此前前端无条件调用，于是每一次选区拖动
+    // 都多一次注定失败的往返，日志里看起来像故障。
+    //
+    // 判据用模式而不是"上一次调用失败了没有"：后者的结论会依赖一次失败，而一次失败
+    // 可能只是宿主暂时忙 —— 那种"学会了不去调"的记忆比错误本身更难排查。
+    if (isPluginMode()) return;
     try {
         await paramsApi.recordParamSelectionStep(toPairs(args.before), toPairs(args.after));
     } catch (err) {
