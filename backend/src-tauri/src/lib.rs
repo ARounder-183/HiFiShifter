@@ -847,6 +847,7 @@ pub fn run() {
             commands::start_background_render,
             commands::cancel_background_render,
             commands::get_pitch_analysis_progress,
+            commands::get_syllable_analysis_progress,
             commands::open_log_folder,
             commands::pick_diagnostics_output_path,
             commands::export_diagnostics,

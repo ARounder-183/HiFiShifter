@@ -1033,6 +1033,9 @@ pub struct ParamBlockIntervalEdit {
     /// 编辑所作用的自动块 id；切分后左右段共享它。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub block_ids: Vec<String>,
+    /// 该编辑段是否被用户从块编辑视图删除（保留曲线与源音符）。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub deleted: bool,
 }
 
 impl TrackParamsState {
@@ -1044,15 +1047,31 @@ impl TrackParamsState {
     /// 保留仍有效的成员，少于两个成员的组整组丢弃。
     pub fn prune_param_block_merges(&mut self, clips: &[Clip]) {
         use std::collections::HashMap;
-        let mut valid: HashMap<(&str, &str), Vec<&crate::pitch_analysis::SyllableSpan>> =
-            HashMap::new();
+        let mut valid: HashMap<(&str, &str), Vec<(f64, f64)>> = HashMap::new();
         for clip in clips {
             for take in &clip.takes {
-                let spans = take
-                    .syllable_analysis
-                    .as_ref()
-                    .map(|a| a.source_spans_sec.iter().collect::<Vec<_>>())
-                    .unwrap_or_default();
+                /*
+                 * MIDI Clip 的块边界就是音符本身，不写入 `syllable_analysis`
+                 * （音频估计不应覆盖精确 MIDI）。若只认音节缓存，MIDI 上的
+                 * 合并 / 切分 / 伸缩记录会在保存时被全部剪掉。
+                 */
+                let spans: Vec<(f64, f64)> = match take.syllable_analysis.as_ref() {
+                    Some(analysis) => analysis
+                        .source_spans_sec
+                        .iter()
+                        .map(|span| (span.start_sec, span.end_sec))
+                        .collect(),
+                    None => take
+                        .midi_note_data
+                        .as_deref()
+                        .unwrap_or_default()
+                        .iter()
+                        .filter_map(|note| {
+                            (note.end_sec > note.start_sec)
+                                .then_some((note.start_sec, note.end_sec))
+                        })
+                        .collect(),
+                };
                 valid.insert((clip.id.as_str(), take.id.as_str()), spans);
             }
         }
@@ -1062,10 +1081,10 @@ impl TrackParamsState {
                 else {
                     return false;
                 };
-                spans.iter().any(|span| {
+                spans.iter().any(|(start_sec, end_sec)| {
                     // 音节 id 已含源域区间；这里再校核秒值，防止旧 id 复用。
-                    (span.start_sec - member.source_start_sec).abs() < 1e-3
-                        && (span.end_sec - member.source_end_sec).abs() < 1e-3
+                    (*start_sec - member.source_start_sec).abs() < 1e-3
+                        && (*end_sec - member.source_end_sec).abs() < 1e-3
                 })
             });
         }
@@ -1076,9 +1095,9 @@ impl TrackParamsState {
                 else {
                     return false;
                 };
-                spans.iter().any(|span| {
-                    (span.start_sec - member.source_start_sec).abs() < 1e-3
-                        && (span.end_sec - member.source_end_sec).abs() < 1e-3
+                spans.iter().any(|(start_sec, end_sec)| {
+                    (*start_sec - member.source_start_sec).abs() < 1e-3
+                        && (*end_sec - member.source_end_sec).abs() < 1e-3
                 })
             });
             let width = record.end_sec - record.start_sec;
@@ -1087,7 +1106,7 @@ impl TrackParamsState {
                 && width >= 0.02
                 && record.start_sec.is_finite()
                 && record.end_sec.is_finite();
-            if !valid_interval {
+            if !valid_interval && !record.deleted {
                 record.member_refs.clear();
             }
         }

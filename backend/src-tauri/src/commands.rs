@@ -3067,6 +3067,13 @@ pub fn get_pitch_analysis_progress(
     }
 }
 
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_syllable_analysis_progress() -> Option<crate::pitch_analysis::SyllableAnalysisProgress> {
+    common::guard_command("get_syllable_analysis_progress", None, || {
+        pitch_progress::get_syllable_analysis_progress()
+    })
+}
+
 // ===================== onnx_status =====================
 
 #[tauri::command(rename_all = "camelCase")]

@@ -6,12 +6,12 @@ import {
     averageParamValueInSpan,
     buildParamBlockDragSegments,
     buildParamBlockPreviewSegments,
+    deleteParamBlocks,
     hitTestParamBlocks,
     layoutParamBlockRects,
     materializeParamBlocks,
     mergeParamBlocks,
     mergeOverlappingParamBlocks,
-    MAX_ANALYSIS_BLOCK_SEC,
     MOCK_SYLLABLE_SEC,
     modeCenterOfValues,
     nearestParamBlockByTime,
@@ -45,10 +45,8 @@ function clip(
 }
 
 describe("autoBlocksForClips", () => {
-    it("无显式音节时一个 Clip 一个块", () => {
-        const blocks = autoBlocksForClips("root-a", [clip("a", 1, 2)]);
-        expect(blocks).toHaveLength(1);
-        expect(blocks[0]).toMatchObject({ startSec: 1, endSec: 3, kind: "auto" });
+    it("音频 Clip 分析完成前不显示块", () => {
+        expect(autoBlocksForClips("root-a", [clip("a", 1, 2)])).toEqual([]);
     });
 
     it("显式音节被裁剪到 Clip 内、零宽段被过滤", () => {
@@ -138,11 +136,11 @@ describe("autoBlocksForClips", () => {
         ]);
     });
 
-    it("没有显式 mock 标志时不擅自切分音频 Clip", () => {
-        expect(autoBlocksForClips("root-a", [clip("audio", 0, 2)])).toHaveLength(1);
+    it("没有显式 mock 标志时不擅自生成音频 Clip 块", () => {
+        expect(autoBlocksForClips("root-a", [clip("audio", 0, 2)])).toHaveLength(0);
     });
 
-    it("真实分析区间超过上限时继续拆段，子段保持源域身份", () => {
+    it("真实分析区间超过上限时保持模型边界，不再机械等分", () => {
         const blocks = autoBlocksForClips("root-a", [
             {
                 id: "audio-long",
@@ -155,16 +153,14 @@ describe("autoBlocksForClips", () => {
                 sourceSyllableSpansSec: [[0, 6]],
             },
         ]);
-        expect(blocks.length).toBeGreaterThanOrEqual(5);
-        expect(
-            blocks.every((block) => block.endSec - block.startSec <= MAX_ANALYSIS_BLOCK_SEC + 1e-9),
-        ).toBe(true);
+        expect(blocks.length).toBe(1);
+        expect(blocks[0]?.endSec - blocks[0]?.startSec).toBeCloseTo(6, 6);
         // 源域先切段：每个子块都有自己的源域区间，首尾相接且覆盖原段。
         expect(blocks[0].members[0]?.sourceStartSec).toBeCloseTo(0, 6);
         expect(blocks.at(-1)?.members[0]?.sourceEndSec).toBeCloseTo(6, 6);
     });
 
-    it("只有工程秒区间时同样受最长块限制", () => {
+    it("只有工程秒区间时同样保留分析边界", () => {
         const blocks = autoBlocksForClips("root-a", [
             {
                 id: "timeline-only",
@@ -174,10 +170,7 @@ describe("autoBlocksForClips", () => {
                 syllableSpansSec: [{ startSec: 2, endSec: 8 }],
             },
         ]);
-        expect(blocks.length).toBeGreaterThanOrEqual(5);
-        expect(
-            blocks.every((block) => block.endSec - block.startSec <= MAX_ANALYSIS_BLOCK_SEC + 1e-9),
-        ).toBe(true);
+        expect(blocks.length).toBe(1);
         expect(blocks[0].startSec).toBeCloseTo(2, 9);
         expect(blocks.at(-1)?.endSec).toBeCloseTo(8, 9);
     });
@@ -236,7 +229,10 @@ describe("projectMidiNoteSpansToTimeline", () => {
 
 describe("mergeParamBlocks", () => {
     it("同组相邻块可合并", () => {
-        const blocks = autoBlocksForClips("root-a", [clip("a", 0, 2), clip("b", 2, 2)]);
+        const blocks = autoBlocksForClips("root-a", [
+            clip("a", 0, 2, [0]),
+            clip("b", 2, 2, [2]),
+        ]);
         const result = mergeParamBlocks({
             state: EMPTY_PARAM_BLOCK_STATE,
             blocks,
@@ -249,7 +245,10 @@ describe("mergeParamBlocks", () => {
     });
 
     it("中间有真实空隙时拒绝合并", () => {
-        const blocks = autoBlocksForClips("root-a", [clip("a", 0, 2), clip("b", 3, 2)]);
+        const blocks = autoBlocksForClips("root-a", [
+            clip("a", 0, 2, [0]),
+            clip("b", 3, 2, [3]),
+        ]);
         const result = mergeParamBlocks({
             state: EMPTY_PARAM_BLOCK_STATE,
             blocks,
@@ -260,8 +259,10 @@ describe("mergeParamBlocks", () => {
 
     it("跨根轨道组拒绝合并", () => {
         const blocks = [
-            ...autoBlocksForClips("root-a", [clip("a", 0, 2)]),
-            ...autoBlocksForClips("root-b", [{ ...clip("b", 2, 2), trackId: "root-b" }]),
+            ...autoBlocksForClips("root-a", [clip("a", 0, 2, [0])]),
+            ...autoBlocksForClips("root-b", [
+                { ...clip("b", 2, 2, [2]), trackId: "root-b" },
+            ]),
         ];
         expect(
             mergeParamBlocks({
@@ -273,7 +274,7 @@ describe("mergeParamBlocks", () => {
     });
 
     it("合并后自动块让位，只保留一个合并块", () => {
-        const clips = [clip("a", 0, 2), clip("b", 2, 2)];
+        const clips = [clip("a", 0, 2, [0]), clip("b", 2, 2, [2])];
         const blocks = autoBlocksForClips("root-a", clips);
         const merged = mergeParamBlocks({
             state: EMPTY_PARAM_BLOCK_STATE,
@@ -367,7 +368,7 @@ describe("mergeParamBlocks", () => {
     });
 
     it("解合并后恢复原始自动块", () => {
-        const clips = [clip("a", 0, 2), clip("b", 2, 2)];
+        const clips = [clip("a", 0, 2, [0]), clip("b", 2, 2, [2])];
         const blocks = autoBlocksForClips("root-a", clips);
         const merged = mergeParamBlocks({
             state: EMPTY_PARAM_BLOCK_STATE,
@@ -705,6 +706,134 @@ describe("nearestParamBlockByTime", () => {
 });
 
 describe("param block drag", () => {
+    const editableClips = (): ParamBlockSourceClip[] => [
+        {
+            id: "a",
+            trackId: "root-a",
+            takeId: "take-a",
+            startSec: 1,
+            lengthSec: 2,
+            sourceStartSec: 0,
+            sourceEndSec: 2,
+            sourceSyllableSpansSec: [
+                [0, 0.5],
+                [0.5, 1],
+                [1, 1.5],
+                [1.5, 2],
+            ],
+            syllableSpansSec: projectSourceSpansToTimeline({
+                id: "a",
+                trackId: "root-a",
+                startSec: 1,
+                lengthSec: 2,
+                sourceStartSec: 0,
+                sourceEndSec: 2,
+                sourceSyllableSpansSec: [
+                    [0, 0.5],
+                    [0.5, 1],
+                    [1, 1.5],
+                    [1.5, 2],
+                ],
+            }),
+        },
+    ];
+
+    it("分析未完成时音频 Clip 没有任何块；分析边界到位后才派生音节块", () => {
+        expect(
+            autoBlocksForClips("root-a", [
+                {
+                    id: "a",
+                    trackId: "root-a",
+                    takeId: "take-a",
+                    startSec: 0,
+                    lengthSec: 2,
+                    sourceStartSec: 0,
+                    sourceEndSec: 2,
+                },
+            ]),
+        ).toEqual([]);
+        expect(autoBlocksForClips("root-a", editableClips())).toHaveLength(4);
+    });
+
+    it("切分保存后重新派生，左右两段都按源域成员恢复", () => {
+        const clips = editableClips();
+        const block = autoBlocksForClips("root-a", clips)[0];
+        const split = splitParamBlock({
+            state: EMPTY_PARAM_BLOCK_STATE,
+            block,
+            sec: 1.25,
+        });
+        if (!split.ok) throw new Error(`split failed: ${split.reason}`);
+        // 模拟工程保存 / 重新读取：只保留持久化字段，不保留任何自动块引用。
+        const reloaded = materializeParamBlocks({
+            rootTrackId: "root-a",
+            clips,
+            state: {
+                mergedBlocks: [],
+                persistedMerges: [],
+                persistedEdits: split.state.persistedEdits?.map((edit) => ({
+                    ...edit,
+                    id: edit.id.replace(/^edit:/, "reloaded-edit:"),
+                    blockIds: edit.blockIds?.map((id) =>
+                        id.startsWith("edit:") ? "missing-after-reload" : id,
+                    ),
+                })),
+            },
+        });
+        expect(reloaded.slice(0, 2).map((item) => [item.startSec, item.endSec])).toEqual([
+            [1, 1.25],
+            [1.25, 1.5],
+        ]);
+    });
+
+    it("伸缩保存后重新派生，新边界仍生效", () => {
+        const clips = editableClips();
+        const block = autoBlocksForClips("root-a", clips)[0];
+        const resized = resizeParamBlock({
+            state: EMPTY_PARAM_BLOCK_STATE,
+            block,
+            edge: "right",
+            targetSec: 1.3,
+        });
+        if (!resized.ok) throw new Error(`resize failed: ${resized.reason}`);
+        const reloaded = materializeParamBlocks({
+            rootTrackId: "root-a",
+            clips,
+            state: {
+                mergedBlocks: [],
+                persistedMerges: [],
+                persistedEdits: resized.state.persistedEdits,
+            },
+        });
+        expect(reloaded[0]).toMatchObject({ startSec: 1 });
+        expect(reloaded[0]?.endSec).toBeCloseTo(1.3, 6);
+    });
+
+    it("删除块保存后重新派生仍隐藏，且不会因其零宽伪记录被清理", () => {
+        const clips = editableClips();
+        const block = autoBlocksForClips("root-a", clips)[1];
+        const deleted = deleteParamBlocks({
+            state: EMPTY_PARAM_BLOCK_STATE,
+            blocks: autoBlocksForClips("root-a", clips),
+            selectedBlockIds: [block.id],
+        });
+        if (!deleted.ok) throw new Error(`delete failed: ${deleted.reason}`);
+        const reloaded = materializeParamBlocks({
+            rootTrackId: "root-a",
+            clips,
+            state: {
+                mergedBlocks: [],
+                persistedMerges: [],
+                persistedEdits: deleted.state.persistedEdits,
+            },
+        });
+        expect(reloaded.map((item) => [item.startSec, item.endSec])).toEqual([
+            [1, 1.5],
+            [2, 2.5],
+            [2.5, 3],
+        ]);
+    });
+
     it("切块后左右两段各自持久化，并保持稳定成员引用", () => {
         const sourceClips: ParamBlockSourceClip[] = [
             {
@@ -715,8 +844,14 @@ describe("param block drag", () => {
                 lengthSec: 2,
                 sourceStartSec: 0,
                 sourceEndSec: 2,
-                sourceSyllableSpansSec: [[0, 2]],
-                syllableSpansSec: [{ startSec: 0, endSec: 2 }],
+                sourceSyllableSpansSec: [
+                    [0, 1],
+                    [1, 2],
+                ],
+                syllableSpansSec: [
+                    { startSec: 0, endSec: 1 },
+                    { startSec: 1, endSec: 2 },
+                ],
             },
         ];
         const block = autoBlocksForClips("root-a", sourceClips)[0];
@@ -746,7 +881,7 @@ describe("param block drag", () => {
         ]);
     });
 
-    it("边缘伸缩不能越过相邻块，也不能缩到不可点击", () => {
+    it("边缘伸缩保持最小宽度，并可联动相邻块压缩", () => {
         const block = autoBlocksForClips("root-a", [
             {
                 id: "a",
@@ -756,7 +891,10 @@ describe("param block drag", () => {
                 lengthSec: 2,
                 sourceStartSec: 0,
                 sourceEndSec: 2,
-                sourceSyllableSpansSec: [[0, 2]],
+                sourceSyllableSpansSec: [
+                    [0, 1],
+                    [1, 2],
+                ],
             },
         ])[0];
         expect(block).toBeDefined();
@@ -770,14 +908,6 @@ describe("param block drag", () => {
             targetSec: 0.01,
         });
         expect(tooShort.ok).toBe(false);
-        const acrossNeighbor = resizeParamBlock({
-            state: EMPTY_PARAM_BLOCK_STATE,
-            block,
-            edge: "right",
-            targetSec: 1.2,
-            neighborStartSec: 1.1,
-        });
-        expect(acrossNeighbor.ok).toBe(false);
         const resized = resizeParamBlock({
             state: EMPTY_PARAM_BLOCK_STATE,
             block,
@@ -789,7 +919,7 @@ describe("param block drag", () => {
         expect(resized.state.persistedEdits?.[0]?.endSec).toBeCloseTo(0.5, 9);
     });
 
-    it("伸缩只拒绝正交集，紧邻块向外仍可接合", () => {
+    it("相邻块边缘延展时压缩邻居，不产生重叠", () => {
         const blocks = autoBlocksForClips("root-a", [
             {
                 id: "a",
@@ -814,19 +944,39 @@ describe("param block drag", () => {
             block: left,
             edge: "right",
             targetSec: 1.5,
-            neighborStartSec: 1,
-            neighborEndSec: 2,
-            neighbor: { startSec: 1, endSec: 2 },
+            neighbor: right,
         });
-        expect(joined.ok).toBe(false);
+        expect(joined.ok).toBe(true);
+        if (!joined.ok) return;
+        const materialized = materializeParamBlocks({
+            rootTrackId: "root-a",
+            clips: [
+                {
+                    id: "a",
+                    trackId: "root-a",
+                    takeId: "take-a",
+                    startSec: 0,
+                    lengthSec: 2,
+                    sourceStartSec: 0,
+                    sourceEndSec: 2,
+                    sourceSyllableSpansSec: [
+                        [0, 1],
+                        [1, 2],
+                    ],
+                },
+            ],
+            state: joined.state,
+        });
+        expect(materialized.map((item) => [item.startSec, item.endSec])).toEqual([
+            [0, 1.5],
+            [1.5, 2],
+        ]);
         const touching = resizeParamBlock({
             state: EMPTY_PARAM_BLOCK_STATE,
             block: left,
             edge: "right",
             targetSec: 1,
-            neighborStartSec: 1,
-            neighborEndSec: 2,
-            neighbor: { startSec: 1, endSec: 2 },
+            neighbor: right,
         });
         expect(touching.ok).toBe(true);
     });
@@ -845,7 +995,7 @@ describe("param block drag", () => {
                 lengthSec,
                 sourceStartSec: 0,
                 sourceEndSec: sourceLengthSec,
-                sourceSyllableSpansSec: [[0, sourceLengthSec]],
+                sourceSyllableSpansSec: [[0, 2]],
             },
         ];
         const original = clipAt(0, 2);
@@ -865,7 +1015,7 @@ describe("param block drag", () => {
         expect(moved[0]?.startSec).toBeCloseTo(3, 9);
         expect(moved[0]?.endSec).toBeCloseTo(3.5, 9);
         expect(moved[1]?.startSec).toBeCloseTo(3.5, 9);
-        expect(moved[1]?.endSec).toBeCloseTo(4, 9);
+        expect(moved[1]?.endSec).toBeCloseTo(5, 9);
 
         const stretched = materializeParamBlocks({
             rootTrackId: "root-a",
@@ -873,9 +1023,9 @@ describe("param block drag", () => {
             state: split.state,
         });
         expect(stretched[0]?.startSec).toBeCloseTo(0, 9);
-        expect(stretched[0]?.endSec).toBeCloseTo(4 / 3, 9);
-        expect(stretched[1]?.startSec).toBeCloseTo(4 / 3, 9);
-        expect(stretched[1]?.endSec).toBeCloseTo(8 / 3, 9);
+        expect(stretched[0]?.endSec).toBeCloseTo(0.5, 9);
+        expect(stretched[1]?.startSec).toBeCloseTo(0.5, 9);
+        expect(stretched[1]?.endSec).toBeCloseTo(2, 9);
     });
 
     it("吸附位移：音高半音、音阶与普通参数网格", () => {
@@ -1049,10 +1199,10 @@ describe("param block drag", () => {
 describe("mergeOverlappingParamBlocks", () => {
     it("只合并真正重叠的块，首尾相接保持独立", () => {
         const blocks = autoBlocksForClips("root-a", [
-            clip("a", 0, 1),
-            clip("b", 0.5, 1),
-            clip("c", 1.5, 1),
-            clip("d", 2.5, 1),
+            clip("a", 0, 1, [0]),
+            clip("b", 0.5, 1, [0.5]),
+            clip("c", 1.5, 1, [1.5]),
+            clip("d", 2.5, 1, [2.5]),
         ]);
         const result = mergeOverlappingParamBlocks({
             state: EMPTY_PARAM_BLOCK_STATE,
@@ -1068,13 +1218,21 @@ describe("mergeOverlappingParamBlocks", () => {
         expect(
             mergeOverlappingParamBlocks({
                 state: EMPTY_PARAM_BLOCK_STATE,
-                blocks: autoBlocksForClips("root-a", [clip("a", 0, 1), clip("b", 1, 1)]),
+                blocks: autoBlocksForClips("root-a", [
+                    clip("a", 0, 1, [0]),
+                    clip("b", 1, 1, [1]),
+                ]),
             }),
         ).toEqual({ ok: false, reason: "nothing_to_merge" });
     });
 
     it("手动选中合并的块仍然保留；一键重叠合并只处理尚未合并的自动块", () => {
-        const clips = [clip("a", 0, 1), clip("b", 0.5, 1), clip("c", 2, 1), clip("d", 2.5, 1)];
+        const clips = [
+            clip("a", 0, 1, [0]),
+            clip("b", 0.5, 1, [0.5]),
+            clip("c", 2, 1, [2]),
+            clip("d", 2.5, 1, [2.5]),
+        ];
         const blocks = autoBlocksForClips("root-a", clips);
         const manual = mergeParamBlocks({
             state: EMPTY_PARAM_BLOCK_STATE,
@@ -1104,7 +1262,7 @@ describe("mergeOverlappingParamBlocks", () => {
 
 describe("overlap-free materialization", () => {
     it("合并块拖动后重复派生保持同一身份，不在两个块之间跳", () => {
-        const clips = [clip("a", 0, 2), clip("b", 2, 2)];
+        const clips = [clip("a", 0, 2, [0]), clip("b", 2, 2, [2])];
         const blocks = autoBlocksForClips("root-a", clips);
         const merged = mergeParamBlocks({
             state: EMPTY_PARAM_BLOCK_STATE,
@@ -1131,7 +1289,12 @@ describe("overlap-free materialization", () => {
     });
 
     it("自动重叠归并身份不借用用户合并记录 id", () => {
-        const clips = [clip("a", 0, 1), clip("b", 0.5, 1), clip("c", 3, 1), clip("d", 3, 1)];
+        const clips = [
+            clip("a", 0, 1, [0]),
+            clip("b", 0.5, 1, [0.5]),
+            clip("c", 3, 1, [3]),
+            clip("d", 3, 1, [3]),
+        ];
         const auto = autoBlocksForClips("root-a", clips);
         const manual = mergeParamBlocks({
             state: EMPTY_PARAM_BLOCK_STATE,
@@ -1323,7 +1486,7 @@ describe("overlap-free materialization", () => {
     });
 
     it("不管开关字段如何，重叠块都派生成一个合并块", () => {
-        const clips = [clip("a", 0, 1), clip("b", 0.5, 1)];
+        const clips = [clip("a", 0, 1, [0]), clip("b", 0.5, 1, [0.5])];
         const base = materializeParamBlocks({
             rootTrackId: "root-a",
             clips,
@@ -1341,7 +1504,7 @@ describe("overlap-free materialization", () => {
         expect(merged[0].members.map((member) => member.clipId)).toEqual(["a", "b"]);
     });
 
-    it("超长单段继续拆分，旧开关关闭时也不产生重叠块", () => {
+    it("重叠分析段自动合并，旧开关关闭时也不产生重叠块", () => {
         const clips = [
             {
                 id: "a",
@@ -1359,7 +1522,7 @@ describe("overlap-free materialization", () => {
             clips,
             state: { mergedBlocks: [], mergeOverlapsActive: false },
         });
-        expect(blocks.length).toBeGreaterThan(1);
+        expect(blocks).toHaveLength(1);
         expect(blocks[0].startSec).toBeCloseTo(0, 6);
         expect(blocks.at(-1)?.endSec).toBeCloseTo(1.5, 6);
         for (let index = 1; index < blocks.length; index += 1) {
@@ -1368,7 +1531,11 @@ describe("overlap-free materialization", () => {
     });
 
     it("手动合并组与自动重叠组相交时，最终仍不产生重叠块", () => {
-        const clips = [clip("a", 0, 1), clip("b", 0.5, 1), clip("c", 1.2, 1)];
+        const clips = [
+            clip("a", 0, 1, [0]),
+            clip("b", 0.5, 1, [0.5]),
+            clip("c", 1.2, 1, [1.2]),
+        ];
         const auto = autoBlocksForClips("root-a", clips);
         const manual = mergeParamBlocks({
             state: EMPTY_PARAM_BLOCK_STATE,

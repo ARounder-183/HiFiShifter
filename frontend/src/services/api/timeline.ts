@@ -163,6 +163,7 @@ export interface ParamBlockIntervalEditPayload {
     memberStartSec?: number;
     memberEndSec?: number;
     blockIds?: string[];
+    deleted?: boolean;
 }
 
 export const timelineApi = {

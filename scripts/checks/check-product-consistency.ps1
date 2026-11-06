@@ -74,7 +74,8 @@ Test-Invariant '随包许可清单齐全（LICENSE + licenses\ 目录）' {
         'licenses\README.md',
         'licenses\COPYING.LGPL-2.1',
         'licenses\Apache-2.0.txt',
-        'licenses\NSF-HiGAN-vocoder-NOTICE.txt'
+        'licenses\NSF-HiGAN-vocoder-NOTICE.txt',
+        'licenses\GAME-NOTICE.txt'
     )
     foreach ($file in $required) {
         if (!(Test-Path -LiteralPath (Join-Path $root $file))) { throw "缺少随包许可文件：$file" }
@@ -83,6 +84,9 @@ Test-Invariant '随包许可清单齐全（LICENSE + licenses\ 目录）' {
     if ($nsi -notmatch 'HFS_LICENSES') { throw 'merged-installer.nsi 不再安装 licenses\ 目录' }
     $license = Get-RepoText 'LICENSE'
     if ($license -notmatch 'CLAP \(CLever Audio Plugin\) headers') { throw 'LICENSE 未登记 CLAP SDK 的第三方许可' }
+    if ($license -notmatch 'GAME - Generative Adaptive MIDI Extractor' -or $nsi -notmatch 'GAME-NOTICE') {
+        throw 'GAME 模型许可未登记到 LICENSE 或安装器许可目录'
+    }
     'LICENSE + licenses\（LGPL-2.1 / Apache-2.0 / CC BY-NC-SA 声明）'
 }
 

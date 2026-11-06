@@ -1049,6 +1049,7 @@ const NO_ARG_COMMANDS: ReadonlySet<string> = new Set([
     "get_onnx_diagnostic",
     "get_onnx_status",
     "get_pitch_analysis_progress",
+    "get_syllable_analysis_progress",
     "get_playback_state",
     "get_recording_apps",
     "get_recording_devices",

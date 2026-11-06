@@ -19,6 +19,7 @@ job 都要 checkout 一次（一次 PR 约 11 次）。仓库里只保留清单
     python scripts/setup/fetch-models.py --check        # 只检查，缺就退出码 1
     python scripts/setup/fetch-models.py --source DIR   # 从本地目录拷贝（已有权重）
     python scripts/setup/fetch-models.py --archive ZIP  # 从本地 zip 解压
+    python scripts/setup/fetch-models.py --fetch-game    # 取 GAME small ONNX
     python scripts/setup/fetch-models.py --base-url URL # 换一个下载源（镜像）
 
 用法（发布新权重，一年几次；流程见 docs/models.md）：
@@ -56,6 +57,22 @@ ASSET_DIR = REPO_ROOT / "dist" / "models"
 # 不需要额外的 zstd 二进制。150 MB 的一次性下载里，压缩率差别可以忽略。
 DEFAULT_BASE_URL = "https://github.com/ARounder-183/HiFiShifter/releases/download"
 
+# GAME 自动音符分块权重。上游按模型包发布；单独取、单独校验，再与其它模型一起
+# 写入同一份 models.json。这样不需要把权重提交进仓库。
+GAME_RELEASE_URL = (
+    "https://github.com/openvpi/GAME/releases/download/v1.0.3/"
+    "GAME-1.0.3-small-onnx.zip"
+)
+GAME_RELEASE_DIR = "GAME-1.0.3-small-onnx"
+GAME_FILES = (
+    "bd2dur.onnx",
+    "config.json",
+    "dur2bd.onnx",
+    "encoder.onnx",
+    "estimator.onnx",
+    "segmenter.onnx",
+)
+
 # 目录里允许存在、但既不进清单也不进资产的构建产物：macOS 的 build.rs 会把
 # pc_nsf_hifigan.onnx 改写成 CoreML 变体（backend/src-tauri/build.rs::
 # generate_coreml_model_variant），产物落在同一棵资源树里。它由构建自动生成 ——
@@ -63,6 +80,10 @@ DEFAULT_BASE_URL = "https://github.com/ARounder-183/HiFiShifter/releases/downloa
 # "构建环境里有没有编过 macOS 目标"。打包时按清单取文件，它天然被排除；这里只是
 # 别把它报成"多余文件"。
 GENERATED_ARTIFACTS = frozenset({"nsf_hifigan/pc_nsf_hifigan_coreml.onnx"})
+
+# GAME 是可独立启用的可选模型：本机只验证 GAME 时旧模型缺失是正常的。
+# 但发布资产仍必须包含清单里的全部条目；只有“检查本地是否可用”时跳过它。
+OPTIONAL_MODEL_PREFIXES = ("GAME/",)
 
 # 资产内部每个条目的时间戳。固定成 zip 能表示的最小值：让"同一份权重打两次包"
 # 逐字节相同，sha256 才有资格当发布物的身份。
@@ -119,6 +140,7 @@ def collect_manifest_entries() -> list[dict]:
     大小写在比较时都按小写归一（见 verify_hashes），但**存储**保持原样，免得同一份
     权重在两次生成之间整份 diff。
     """
+    existing = load_manifest()["files"] if MANIFEST.is_file() else []
     entries = [
         {
             "path": path.relative_to(MODELS_DIR).as_posix(),
@@ -128,6 +150,10 @@ def collect_manifest_entries() -> list[dict]:
         for path in MODELS_DIR.rglob("*")
         if path.is_file() and path.name not in MANIFEST_EXCLUDED_NAMES
     ]
+    # 本机往往只缓存其中一部分权重（例如只验证 GAME）。清单是“可下载的完整集合”，
+    # 不是当前工作树快照：缺失的旧条目原样保留，等下一次取权重时再校验。
+    present = {entry["path"] for entry in entries}
+    entries.extend(entry for entry in existing if entry["path"] not in present)
     entries.sort(key=manifest_sort_key)
     return entries
 
@@ -195,6 +221,8 @@ def missing_files(models_dir: Path, manifest: dict) -> list[str]:
 def verify_hashes(models_dir: Path, manifest: dict) -> list[str]:
     problems: list[str] = []
     for entry in manifest["files"]:
+        if entry["path"].startswith(OPTIONAL_MODEL_PREFIXES):
+            continue
         path = models_dir / entry["path"]
         if not path.is_file():
             problems.append(f"missing {entry['path']}")
@@ -205,6 +233,23 @@ def verify_hashes(models_dir: Path, manifest: dict) -> list[str]:
         # 每一份**正确**的权重都判成"校验失败"。
         if actual != entry["sha256"].lower():
             problems.append(f"sha256 {entry['path']}: {actual} != {entry['sha256']}")
+    return problems
+
+
+def verify_optional_game_hashes(manifest: dict) -> list[str]:
+    """可选 GAME 文件若存在，也逐文件校验；不存在时不报错。"""
+    problems: list[str] = []
+    for entry in manifest["files"]:
+        if not entry["path"].startswith(OPTIONAL_MODEL_PREFIXES):
+            continue
+        path = MODELS_DIR / entry["path"]
+        if not path.is_file():
+            continue
+        if path.stat().st_size != entry["bytes"]:
+            problems.append(f"size {entry['path']}")
+            continue
+        if sha256_of(path) != entry["sha256"].lower():
+            problems.append(f"sha256 {entry['path']}")
     return problems
 
 
@@ -248,6 +293,33 @@ def install_from_zip(archive: Path, manifest: dict) -> None:
                 install_from_directory(candidate, manifest)
                 return
         raise SystemExit(f"{archive} 里没有 models.json 列出的文件")
+
+
+def install_game_from_official_zip(archive: Path) -> None:
+    """把 OpenVPI 的 GAME 发布 zip 安装到 models/GAME/。"""
+    target = MODELS_DIR / "GAME"
+    with tempfile.TemporaryDirectory(prefix="hfs-game-install-") as tmp:
+        with zipfile.ZipFile(archive) as bundle:
+            bundle.extractall(tmp)
+        root = Path(tmp) / GAME_RELEASE_DIR
+        if not root.is_dir():
+            root = Path(tmp)
+        target.mkdir(parents=True, exist_ok=True)
+        for name in GAME_FILES:
+            source = root / name
+            if not source.is_file():
+                raise SystemExit(f"GAME 发布包缺少 {name}: {archive}")
+            shutil.copy2(source, target / name)
+
+
+def fetch_official_game() -> None:
+    if all((MODELS_DIR / "GAME" / name).is_file() for name in GAME_FILES):
+        print("GAME 模型已存在，跳过下载")
+        return
+    with tempfile.TemporaryDirectory(prefix="hfs-game-dl-") as tmp:
+        archive = Path(tmp) / "GAME-1.0.3-small-onnx.zip"
+        download(GAME_RELEASE_URL, archive)
+        install_game_from_official_zip(archive)
 
 
 def download(url: str, destination: Path) -> None:
@@ -378,6 +450,11 @@ def main() -> int:
     parser.add_argument("--source", type=Path, help="从本地模型目录拷贝")
     parser.add_argument("--archive", type=Path, help="从本地 zip 解压")
     parser.add_argument(
+        "--fetch-game",
+        action="store_true",
+        help="从 OpenVPI 官方 release 取 GAME small ONNX 模型，写入 models/GAME/",
+    )
+    parser.add_argument(
         "--package",
         nargs="?",
         const="",
@@ -396,6 +473,11 @@ def main() -> int:
         help="release 资产的基地址（镜像用；也可设 HIFISHIFTER_MODELS_BASE_URL）",
     )
     args = parser.parse_args()
+
+    if args.fetch_game:
+        fetch_official_game()
+        print("GAME 模型已安装到 backend/src-tauri/resources/models/GAME")
+        return 0
 
     # 这两个模式自己读 / 写清单，不需要先加载它（干净 clone 里权重还没有）。
     if args.write_manifest:
@@ -462,6 +544,7 @@ def main() -> int:
     # 【为什么下载完还要哈希校验】字节数对得上但内容不对（换了个同名文件、被截断后
     # 又补齐）是真实发生过的：症状是推理输出悄悄变差，而不是报错。
     hash_problems = verify_hashes(MODELS_DIR, manifest)
+    hash_problems += verify_optional_game_hashes(manifest)
     if hash_problems:
         print("模型权重校验失败：", file=sys.stderr)
         for problem in hash_problems:

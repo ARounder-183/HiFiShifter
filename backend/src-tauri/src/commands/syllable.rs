@@ -5,6 +5,9 @@ use hifishifter_kernel::pitch_analysis::syllable::{
     estimate_syllable_spans, SyllableConfig, TakeSyllableAnalysis, SYLLABLE_ALGORITHM,
     SYLLABLE_ALGORITHM_VERSION,
 };
+use hifishifter_kernel::pitch_analysis::{
+    set_syllable_analysis_progress, SyllableAnalysisProgress,
+};
 use serde::Deserialize;
 use serde::Serialize;
 use tauri::State;
@@ -63,6 +66,8 @@ pub struct ParamBlockIntervalEditPayload {
     pub member_end_sec: f64,
     #[serde(default)]
     pub block_ids: Vec<String>,
+    #[serde(default)]
+    pub deleted: bool,
 }
 
 fn source_digest(clip: &crate::state::Clip, frame_period_ms: f64) -> String {
@@ -139,7 +144,14 @@ pub(super) fn analyze_clip_syllables(
     state: State<'_, AppState>,
     clip_id: String,
 ) -> Result<ClipSyllableAnalysisPayload, String> {
-    let (mut tl, clip) = {
+    analyze_clip_syllables_inner(state, clip_id)
+}
+
+fn analyze_clip_syllables_inner(
+    state: State<'_, AppState>,
+    clip_id: String,
+) -> Result<ClipSyllableAnalysisPayload, String> {
+    let (tl_snapshot, clip) = {
         let guard = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
         let clip = guard
             .clips
@@ -149,6 +161,7 @@ pub(super) fn analyze_clip_syllables(
             .ok_or_else(|| "clip_not_found".to_string())?;
         (guard.clone(), clip)
     };
+    let mut tl = tl_snapshot;
     let take = clip.active_take().clone();
     let fp = tl.frame_period_ms().max(0.1);
     let digest = source_digest(&clip, fp);
@@ -156,25 +169,70 @@ pub(super) fn analyze_clip_syllables(
 
     // MIDI 内容已有精确音符边界；不要用音频估计覆盖它。
     if take.midi_note_data.as_ref().is_some_and(|n| !n.is_empty()) || clip.source_path.is_none() {
+        set_syllable_analysis_progress(None);
         return Ok(payload(&clip, &take.id, take.syllable_analysis.as_ref()));
     }
 
-    // 采样率由现有缓存决定（44.1 kHz）；本函数不会重复解码。
-    let (level, pitch) =
-        crate::pitch_clip::analyze_clip_for_syllables(&tl, &clip, &root, fp).unwrap_or_default();
-    let spans = if level.is_empty() {
-        Vec::new()
-    } else {
-        estimate_syllable_spans(&level, &pitch, fp, SyllableConfig::default())
+    let window = hifishifter_kernel::state::clip_playback_window_sec(&clip);
+    set_syllable_analysis_progress(Some(SyllableAnalysisProgress {
+        active: true,
+        clip_id: clip.id.clone(),
+        clip_name: clip.name.clone(),
+        progress: 0.02,
+        stage: "decoding".into(),
+        algorithm: hifishifter_kernel::game_onnx::GAME_ALGORITHM.into(),
+        message: None,
+    }));
+    let game = hifishifter_kernel::game_onnx::resolve_model_dir().map(|dir| {
+        hifishifter_kernel::game_onnx::analyze_source_file(
+            std::path::Path::new(clip.source_path.as_deref().unwrap_or("")),
+            &dir,
+            hifishifter_kernel::game_onnx::GameInferenceConfig::default(),
+        )
+    });
+    let (spans, algorithm, version) = match game {
+        Some(Ok(events)) => {
+            set_syllable_analysis_progress(Some(SyllableAnalysisProgress {
+                active: true,
+                clip_id: clip.id.clone(),
+                clip_name: clip.name.clone(),
+                progress: 0.94,
+                stage: "projecting".into(),
+                algorithm: hifishifter_kernel::game_onnx::GAME_ALGORITHM.into(),
+                message: None,
+            }));
+            (
+                hifishifter_kernel::game_onnx::syllable_spans_for_window(
+                    &events,
+                    window.0.min(window.1),
+                    window.0.max(window.1),
+                ),
+                hifishifter_kernel::game_onnx::GAME_ALGORITHM.to_string(),
+                hifishifter_kernel::game_onnx::GAME_ALGORITHM_VERSION,
+            )
+        }
+        Some(Err(error)) => {
+            log::warn!("GAME syllable analysis failed, falling back to VAD: {error}");
+            fallback_vad_spans(&tl, &clip, &root, fp)
+        }
+        None => fallback_vad_spans(&tl, &clip, &root, fp),
     };
     let analysis = if spans.is_empty() {
         None
     } else {
         Some(TakeSyllableAnalysis {
-            algorithm: SYLLABLE_ALGORITHM.to_string(),
-            algorithm_version: SYLLABLE_ALGORITHM_VERSION,
+            algorithm,
+            algorithm_version: version,
             source_digest: digest,
-            source_spans_sec: spans,
+            source_spans_sec: spans
+                .into_iter()
+                .map(
+                    |(start_sec, end_sec)| hifishifter_kernel::pitch_analysis::SyllableSpan {
+                        start_sec,
+                        end_sec,
+                    },
+                )
+                .collect(),
         })
     };
     let Some(clip_mut) = tl.clips.iter_mut().find(|c| c.id == clip_id) else {
@@ -196,7 +254,40 @@ pub(super) fn analyze_clip_syllables(
     // 音节分析会进入工程文件，必须提示保存；但不属于用户编辑，不进撤销栈。
     state.bump_timeline_version();
     state.mark_project_dirty_and_retitle();
+    set_syllable_analysis_progress(None);
     Ok(payload(&clip, &take.id, analysis.as_ref()))
+}
+
+fn fallback_vad_spans(
+    tl: &crate::state::TimelineState,
+    clip: &crate::state::Clip,
+    root: &str,
+    fp: f64,
+) -> (Vec<(f64, f64)>, String, u32) {
+    set_syllable_analysis_progress(Some(SyllableAnalysisProgress {
+        active: true,
+        clip_id: clip.id.clone(),
+        clip_name: clip.name.clone(),
+        progress: 0.55,
+        stage: "vad_fallback".into(),
+        algorithm: SYLLABLE_ALGORITHM.into(),
+        message: Some("GAME model unavailable; using VAD fallback".into()),
+    }));
+    let (level, pitch) =
+        crate::pitch_clip::analyze_clip_for_syllables(tl, clip, root, fp).unwrap_or_default();
+    let spans = if level.is_empty() {
+        Vec::new()
+    } else {
+        estimate_syllable_spans(&level, &pitch, fp, SyllableConfig::default())
+    };
+    (
+        spans
+            .into_iter()
+            .map(|span| (span.start_sec, span.end_sec))
+            .collect(),
+        SYLLABLE_ALGORITHM.to_string(),
+        SYLLABLE_ALGORITHM_VERSION,
+    )
 }
 
 pub(super) fn get_param_block_merges(
@@ -263,6 +354,7 @@ pub(super) fn get_param_block_merges(
                     member_start_sec: edit.member_start_sec,
                     member_end_sec: edit.member_end_sec,
                     block_ids: edit.block_ids.clone(),
+                    deleted: edit.deleted,
                 })
                 .collect()
         })
@@ -327,6 +419,7 @@ pub(super) fn set_param_block_merges(
                     member_start_sec: edit.member_start_sec,
                     member_end_sec: edit.member_end_sec,
                     block_ids: edit.block_ids,
+                    deleted: edit.deleted,
                 })
                 .filter(|edit| {
                     let width = edit.end_sec - edit.start_sec;

@@ -64,6 +64,8 @@ type Props = {
         | "handleTempoMapCommit"
         | "interactions"
         | "onScrollerScroll"
+        | "onCanvasDoubleClick"
+        | "onCanvasPointerMoveForBlocks"
         | "paddedContentWidth"
         | "paramValuePreview"
         | "pianoRollAmplitudeMap"
@@ -122,6 +124,8 @@ export function EditorArea({ m }: Props) {
         handleTempoMapCommit,
         interactions,
         onScrollerScroll,
+        onCanvasDoubleClick,
+        onCanvasPointerMoveForBlocks,
         paddedContentWidth,
         paramValuePreview,
         pianoRollAmplitudeMap,
@@ -401,9 +405,13 @@ export function EditorArea({ m }: Props) {
                                         // scroller 自身不加：触摸屏单指滚动依赖原生。
                                         touchAction: "none",
                                     }}
-                                    onPointerMove={interactions.onCanvasPointerMove}
+                                    onPointerMove={(event) => {
+                                        interactions.onCanvasPointerMove(event);
+                                        onCanvasPointerMoveForBlocks(event);
+                                    }}
                                     onPointerLeave={interactions.onCanvasPointerLeave}
                                     onPointerDown={interactions.onCanvasPointerDown}
+                                    onDoubleClick={onCanvasDoubleClick}
                                 />
 
                                 {/* 动态叠加层（阶段 2/3）：播放头与选区。

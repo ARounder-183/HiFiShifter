@@ -1,0 +1,25 @@
+GAME note segmentation model
+============================
+
+Upstream: https://github.com/openvpi/GAME
+Model package: GAME-1.0.3-small-onnx
+
+The GAME source code is licensed under the MIT License.
+The OpenVPI-provided model weights used by this application are licensed
+under Creative Commons Attribution-NonCommercial-ShareAlike 4.0
+International (CC BY-NC-SA 4.0):
+
+    https://creativecommons.org/licenses/by-nc-sa/4.0/
+
+The model files are not covered by HiFiShifter's MIT source license and may
+not be used for commercial purposes without a separate license from the
+upstream model authors. Attribution: GAME / OpenVPI Team.
+
+Files bundled under backend resources:
+
+    GAME/config.json
+    GAME/dur2bd.onnx
+    GAME/bd2dur.onnx
+    GAME/encoder.onnx
+    GAME/segmenter.onnx
+    GAME/estimator.onnx

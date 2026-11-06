@@ -31,6 +31,12 @@
 
 use std::path::{Path, PathBuf};
 
+/// 可选模型子目录：它们**不参与**“共享模型库是否完整”的判定。
+///
+/// GAME 是自动音符分块的增量模型；本机只验证 GAME 时，旧版模型尚未下载是正常
+/// 状态。把它算进“完整”会让程序拒绝登记共享库，或让构建误以为整个模型树就绪。
+pub const OPTIONAL_MODEL_DIRS: &[&str] = &["GAME/"];
+
 /// 覆盖模型目录的环境变量（CI、排障、自定义模型布局）。
 pub const MODELS_DIR_ENV: &str = "HIFISHIFTER_MODELS_DIR";
 
@@ -124,6 +130,12 @@ pub fn looks_complete(models_dir: &Path, manifest: &ModelManifest) -> bool {
         return false;
     }
     manifest.files.iter().all(|file| {
+        if OPTIONAL_MODEL_DIRS
+            .iter()
+            .any(|prefix| file.path.starts_with(prefix))
+        {
+            return true;
+        }
         std::fs::metadata(models_dir.join(&file.path))
             .map(|meta| meta.is_file() && meta.len() == file.bytes)
             .unwrap_or(false)
@@ -282,6 +294,7 @@ fn register(dir: &Path) -> bool {
     let fcpe = dir.join("fcpe/fcpe.onnx");
     let nsf = dir.join("nsf_hifigan");
     let hnsep = dir.join("hnsep");
+    let game = dir.join("GAME");
     let mut any = false;
     if fcpe.is_file() {
         crate::model_paths::set_fcpe_onnx_path(fcpe);
@@ -293,6 +306,10 @@ fn register(dir: &Path) -> bool {
     }
     if hnsep.join("hnsep.onnx").is_file() {
         crate::model_paths::set_hnsep_model_dir(hnsep);
+        any = true;
+    }
+    if crate::game_onnx::models_present(&game) {
+        crate::model_paths::set_game_model_dir(game);
         any = true;
     }
     any

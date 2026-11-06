@@ -14,6 +14,7 @@ use std::sync::OnceLock;
 static NSF_HIFIGAN_MODEL_DIR: OnceLock<PathBuf> = OnceLock::new();
 static HNSEP_MODEL_DIR: OnceLock<PathBuf> = OnceLock::new();
 static FCPE_ONNX_PATH: OnceLock<PathBuf> = OnceLock::new();
+static GAME_MODEL_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// NSF-HiFiGAN 模型目录（含 `pc_nsf_hifigan.onnx` 与 `config.json`）。
 pub fn nsf_hifigan_model_dir() -> Option<&'static Path> {
@@ -30,6 +31,11 @@ pub fn fcpe_onnx_path() -> Option<&'static Path> {
     FCPE_ONNX_PATH.get().map(|p| p.as_path())
 }
 
+/// GAME 音符分块模型目录。
+pub fn game_model_dir() -> Option<&'static Path> {
+    GAME_MODEL_DIR.get().map(|p| p.as_path())
+}
+
 /// 登记 NSF-HiFiGAN 模型目录。返回 `false` 表示已经登记过（**不覆盖**）。
 pub fn set_nsf_hifigan_model_dir(path: PathBuf) -> bool {
     NSF_HIFIGAN_MODEL_DIR.set(path).is_ok()
@@ -43,6 +49,11 @@ pub fn set_hnsep_model_dir(path: PathBuf) -> bool {
 /// 登记 FCPE 模型路径。返回 `false` 表示已经登记过（**不覆盖**）。
 pub fn set_fcpe_onnx_path(path: PathBuf) -> bool {
     FCPE_ONNX_PATH.set(path).is_ok()
+}
+
+/// 登记 GAME 模型目录。返回 `false` 表示已经登记过（**不覆盖**）。
+pub fn set_game_model_dir(path: PathBuf) -> bool {
+    GAME_MODEL_DIR.set(path).is_ok()
 }
 
 #[cfg(test)]

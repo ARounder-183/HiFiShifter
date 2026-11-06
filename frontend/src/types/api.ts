@@ -589,6 +589,17 @@ export interface PitchProgressPayload {
     totalClips?: number;
 }
 
+/** 参数块（音符）分析进度；与音高原线批次分开，便于显示 GAME / VAD 来源。 */
+export interface SyllableAnalysisProgressPayload {
+    active: boolean;
+    clipId: string;
+    clipName: string;
+    progress: number;
+    stage: string;
+    algorithm: string;
+    message?: string | null;
+}
+
 export interface OnnxStatusResult {
     compiled: boolean;
     available: boolean;

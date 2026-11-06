@@ -5,7 +5,13 @@
  * 合并 / 解合并动作。菜单仍沿用 `AppAnchoredMenu` 的锚点结构。
  */
 import { Box } from "@radix-ui/themes";
-import { CheckIcon, ChevronDownIcon, LayersIcon } from "@radix-ui/react-icons";
+import {
+    CheckIcon,
+    ChevronDownIcon,
+    LayersIcon,
+    ResetIcon,
+    TrashIcon,
+} from "@radix-ui/react-icons";
 import { setToolModePersistent } from "../../../../features/session/sessionSlice";
 import { AppAnchoredMenu } from "../../../../ui";
 import type { PianoRollPanelModel } from "./usePianoRollPanelModel";
@@ -20,10 +26,14 @@ type Props = {
         | "blockToolMenuRef"
         | "canMergeSelectedParamBlocks"
         | "canUnmergeSelectedParamBlocks"
+        | "canDeleteSelectedParamBlocks"
+        | "canRestoreDeletedParamBlocks"
         | "dispatch"
         | "mergeAllOverlappingParamBlocks"
         | "mergeOverlapsActive"
         | "mergeSelectedParamBlocks"
+        | "deleteSelectedParamBlocks"
+        | "restoreParamBlocks"
         | "paramBlockMessage"
         | "paramBlockToolActive"
         | "paramBlocksVisible"
@@ -44,10 +54,14 @@ export function BlockToolMenu({ m }: Props) {
         blockToolMenuRef,
         canMergeSelectedParamBlocks,
         canUnmergeSelectedParamBlocks,
+        canDeleteSelectedParamBlocks,
+        canRestoreDeletedParamBlocks,
         dispatch,
         mergeAllOverlappingParamBlocks,
         mergeOverlapsActive,
         mergeSelectedParamBlocks,
+        deleteSelectedParamBlocks,
+        restoreParamBlocks,
         paramBlockMessage,
         paramBlockToolActive,
         paramBlocksVisible,
@@ -127,6 +141,40 @@ export function BlockToolMenu({ m }: Props) {
                             <LayersIcon />
                         </Box>
                         <span className="hs-menu__label-text">{tf("param_blocks_merge")}</span>
+                    </span>
+                </button>
+                <button
+                    type="button"
+                    className="hs-menu__item"
+                    disabled={!canDeleteSelectedParamBlocks}
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={() => {
+                        deleteSelectedParamBlocks();
+                        close();
+                    }}
+                >
+                    <span className="flex min-w-0 items-center gap-2">
+                        <Box className="hs-menu__icon">
+                            <TrashIcon />
+                        </Box>
+                        <span className="hs-menu__label-text">{tf("param_blocks_delete")}</span>
+                    </span>
+                </button>
+                <button
+                    type="button"
+                    className="hs-menu__item"
+                    disabled={!canRestoreDeletedParamBlocks}
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={() => {
+                        restoreParamBlocks();
+                        close();
+                    }}
+                >
+                    <span className="flex min-w-0 items-center gap-2">
+                        <Box className="hs-menu__icon">
+                            <ResetIcon />
+                        </Box>
+                        <span className="hs-menu__label-text">{tf("param_blocks_restore")}</span>
                     </span>
                 </button>
                 <button

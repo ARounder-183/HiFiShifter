@@ -136,6 +136,7 @@ pub(crate) fn analyze_syllables(
         .as_ref()
         .is_some_and(|notes| !notes.is_empty())
     {
+        hifishifter_kernel::pitch_analysis::set_syllable_analysis_progress(None);
         return Ok(json!({
             "clipId": request.clip_id,
             "takeId": request.take_id,
@@ -148,6 +149,7 @@ pub(crate) fn analyze_syllables(
     // 插件这里读到的 `source_path` 一定是本会话物化的授权 PCM（在 actor 冻结快照
     // 前已由 `check_source` 校验）。worker 只做计算，不重新解释路径。
     if take.source_path.is_none() && clip.source_path.is_none() {
+        hifishifter_kernel::pitch_analysis::set_syllable_analysis_progress(None);
         return Ok(json!({
             "clipId": request.clip_id,
             "takeId": request.take_id,
@@ -157,6 +159,97 @@ pub(crate) fn analyze_syllables(
             "analyzed": false,
         }));
     }
+    let source_path = take
+        .source_path
+        .as_deref()
+        .or(clip.source_path.as_deref())
+        .ok_or_else(|| {
+            hifishifter_kernel::pitch_analysis::set_syllable_analysis_progress(None);
+            "source_missing".to_string()
+        })?;
+    let window_start = request.source_window.0.min(request.source_window.1);
+    let window_end = request.source_window.0.max(request.source_window.1);
+    hifishifter_kernel::pitch_analysis::set_syllable_analysis_progress(Some(
+        hifishifter_kernel::pitch_analysis::SyllableAnalysisProgress {
+            active: true,
+            clip_id: request.clip_id.clone(),
+            clip_name: clip.name.clone(),
+            progress: 0.02,
+            stage: "decoding".into(),
+            algorithm: hifishifter_kernel::game_onnx::GAME_ALGORITHM.into(),
+            message: None,
+        },
+    ));
+    let game = hifishifter_kernel::game_onnx::resolve_model_dir().map(|dir| {
+        hifishifter_kernel::game_onnx::analyze_source_file(
+            std::path::Path::new(source_path),
+            &dir,
+            hifishifter_kernel::game_onnx::GameInferenceConfig::default(),
+        )
+    });
+    let (spans, algorithm, version) = match game {
+        Some(Ok(events)) => (
+            hifishifter_kernel::game_onnx::syllable_spans_for_window(
+                &events,
+                window_start,
+                window_end,
+            )
+            .into_iter()
+            .map(
+                |(start, end)| hifishifter_kernel::pitch_analysis::SyllableSpan {
+                    start_sec: start,
+                    end_sec: end,
+                },
+            )
+            .collect::<Vec<_>>(),
+            hifishifter_kernel::game_onnx::GAME_ALGORITHM,
+            hifishifter_kernel::game_onnx::GAME_ALGORITHM_VERSION,
+        ),
+        Some(Err(error)) => {
+            log::warn!("GAME plugin syllable analysis failed: {error}");
+            (
+                match vad_fallback_spans(&request, clip) {
+                    Ok(spans) => spans,
+                    Err(error) => {
+                        hifishifter_kernel::pitch_analysis::set_syllable_analysis_progress(None);
+                        return Err(error);
+                    }
+                },
+                hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM,
+                hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM_VERSION,
+            )
+        }
+        None => (
+            match vad_fallback_spans(&request, clip) {
+                Ok(spans) => spans,
+                Err(error) => {
+                    hifishifter_kernel::pitch_analysis::set_syllable_analysis_progress(None);
+                    return Err(error);
+                }
+            },
+            hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM,
+            hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM_VERSION,
+        ),
+    };
+    hifishifter_kernel::pitch_analysis::set_syllable_analysis_progress(None);
+    Ok(json!({
+        "clipId": request.clip_id,
+        "takeId": request.take_id,
+        "sourceSpansSec": spans.iter().map(|span| json!({
+            "startSec": span.start_sec,
+            "endSec": span.end_sec,
+        })).collect::<Vec<_>>(),
+        "algorithm": algorithm,
+        "algorithmVersion": version,
+        // 空 spans 代表“没检测到发声”，不是分析失败；actor 会保留旧缓存并回退。
+        "analyzed": !spans.is_empty(),
+    }))
+}
+
+fn vad_fallback_spans(
+    request: &super::session::SyllableAnalysisRequest,
+    clip: &hifishifter_kernel::state::Clip,
+) -> Result<Vec<hifishifter_kernel::pitch_analysis::SyllableSpan>, String> {
     let (level, pitch) = hifishifter_kernel::pitch_clip::analyze_clip_for_syllables_isolated(
         &request.snapshot,
         clip,
@@ -165,24 +258,12 @@ pub(crate) fn analyze_syllables(
         &|| false,
     )
     .ok_or("source_missing")?;
-    let spans = hifishifter_kernel::pitch_analysis::estimate_syllable_spans(
+    Ok(hifishifter_kernel::pitch_analysis::estimate_syllable_spans(
         &level,
         &pitch,
         request.frame_period_ms,
         hifishifter_kernel::pitch_analysis::SyllableConfig::default(),
-    );
-    Ok(json!({
-        "clipId": request.clip_id,
-        "takeId": request.take_id,
-        "sourceSpansSec": spans.iter().map(|span| json!({
-            "startSec": span.start_sec,
-            "endSec": span.end_sec,
-        })).collect::<Vec<_>>(),
-        "algorithm": hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM,
-        "algorithmVersion": hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM_VERSION,
-        // 空 spans 代表“没检测到发声”，不是分析失败；actor 会保留旧缓存并回退。
-        "analyzed": !spans.is_empty(),
-    }))
+    ))
 }
 #[cfg(test)]
 mod lane_tests {
@@ -686,6 +767,8 @@ struct IntervalEditInput {
     member_end_sec: f64,
     #[serde(default)]
     block_ids: Vec<String>,
+    #[serde(default)]
+    deleted: bool,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1167,6 +1250,7 @@ pub(super) fn dispatch(
                                 "memberStartSec": edit.member_start_sec,
                                 "memberEndSec": edit.member_end_sec,
                                 "blockIds": edit.block_ids,
+                                "deleted": edit.deleted,
                             })
                         })
                         .collect::<Vec<_>>()
@@ -1233,6 +1317,7 @@ pub(super) fn dispatch(
                         member_start_sec: edit.member_start_sec,
                         member_end_sec: edit.member_end_sec,
                         block_ids: edit.block_ids,
+                        deleted: edit.deleted,
                     })
                     .filter(|edit| {
                         let width = edit.end_sec - edit.start_sec;
@@ -1817,6 +1902,11 @@ pub(super) fn dispatch(
                 }),
                 None => Value::Null,
             },
+        ),
+        "get_syllable_analysis_progress" => Ok(
+            hifishifter_kernel::pitch_analysis::syllable_analysis_progress()
+                .map(|progress| serde_json::to_value(progress).unwrap_or(Value::Null))
+                .unwrap_or(Value::Null),
         ),
         // 把编辑后的音高曲线导出成 MIDI。
         //

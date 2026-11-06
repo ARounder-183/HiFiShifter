@@ -847,7 +847,13 @@ export const koKR = {
     param_blocks_split_here: "여기서 분할",
     param_blocks_split_none: "먼저 블록을 선택하세요",
     param_blocks_split_too_short: "분할 지점이 가장자리에 너무 가깝습니다",
-    param_blocks_resize_blocked: "인접 블록을 넘거나 너무 짧아질 수 없습니다",
+    param_blocks_delete: "선택한 블록 삭제",
+    param_blocks_delete_none: "먼저 블록을 선택하세요",
+    param_blocks_delete_blocked: "이 블록은 삭제할 수 없습니다",
+    param_blocks_restore: "최근 삭제한 블록 복원",
+    param_blocks_restore_selected: "선택한 블록 복원",
+    param_blocks_restore_none: "복원할 블록이 없습니다",
+    param_blocks_vad_fallback: "VAD 폴백",
     hide_secondary_param: "보조 파라미터 오버레이 숨기기",
     secondary_overlay_tooltip_visible: "보조 파라미터 오버레이: 표시\n클릭하여 숨기기",
     secondary_overlay_tooltip_hidden: "보조 파라미터 오버레이: 숨김\n클릭하여 표시",
@@ -856,6 +862,7 @@ export const koKR = {
 
     common_solo: "솔로",
     status_analyzing_pitch: "피치 분석 중",
+    status_analyzing_blocks: "노트 블록 분석 중",
     status_analyzing_waveform: "파형 분석 중",
     status_stretching: "타임 스트레치 중",
 

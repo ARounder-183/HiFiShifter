@@ -1,7 +1,7 @@
 # 模型权重：放在哪、怎么发
 
 一句话：**清单进仓库，权重进 release**。仓库里只有
-`backend/src-tauri/resources/models/models.json`（1.5 KB），151.6 MB 的权重以
+`backend/src-tauri/resources/models/models.json`，约 200 MB 的权重以
 `models-<version>.zip` 的形式挂在 tag `models-<version>` 下，按内容哈希取用。
 
 这条线上只有三件事必须绝对正确，其余都是细节：
@@ -35,12 +35,24 @@
 ```
 backend/src-tauri/resources/models/
 ├── fcpe/fcpe.onnx
+├── GAME/
+│   ├── bd2dur.onnx
+│   ├── config.json
+│   ├── dur2bd.onnx
+│   ├── encoder.onnx
+│   ├── estimator.onnx
+│   └── segmenter.onnx
 ├── hnsep/hnsep.onnx
 ├── hnsep/config.yaml
 ├── nsf_hifigan/pc_nsf_hifigan.onnx
 ├── nsf_hifigan/config.json
 └── nsf_hifigan/coreml_pads_patch.txt   ← scripts/build/generate-coreml-pads-patch.py 生成
 ```
+
+GAME 自动音符分块权重可用
+`python scripts/setup/fetch-models.py --fetch-game` 从 OpenVPI 官方 release 取；
+权重许可与声码器一致为 **CC BY-NC-SA 4.0**，声明见
+[`licenses/GAME-NOTICE.txt`](../licenses/GAME-NOTICE.txt)。
 
 放进去之后**就别再动**：任何一次字节改动都会得到一个新版本号。新增或替换权重时，
 [`../licenses/README.md`](../licenses/README.md) 里对应的模型出处与许可也要跟着改 ——

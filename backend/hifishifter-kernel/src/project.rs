@@ -844,6 +844,7 @@ mod tests {
                     member_start_sec: 0.0,
                     member_end_sec: 0.3,
                     block_ids: vec!["auto:clip:0".into()],
+                    deleted: false,
                 }],
                 ..Default::default()
             },
@@ -869,6 +870,19 @@ mod tests {
         assert_eq!(edit.edit_id, "edit-left");
         assert_eq!(edit.start_sec, 0.0);
         assert_eq!(edit.end_sec, 0.2);
+    }
+
+    #[test]
+    fn missing_deleted_field_keeps_old_interval_visible() {
+        let edit: crate::state::ParamBlockIntervalEdit =
+            serde_json::from_value(serde_json::json!({
+                "editId": "legacy",
+                "memberRefs": [],
+                "startSec": 0.0,
+                "endSec": 0.5
+            }))
+            .expect("legacy interval edit should deserialize");
+        assert!(!edit.deleted);
     }
 
     #[test]
@@ -928,9 +942,61 @@ mod tests {
         clip.id = "clip".into();
         clip.takes = vec![take];
         clip.active_take_id = Some("take".into());
+        let actual_clip_id = clip.id.clone();
         params.prune_param_block_merges(&[clip]);
         assert_eq!(params.param_block_merges.len(), 1);
         assert_eq!(params.param_block_merges[0].member_refs.len(), 2);
+    }
+
+    #[test]
+    fn prune_interval_edits_accepts_midi_note_boundaries() {
+        fn midi_note(start_sec: f64, end_sec: f64) -> crate::midi_import::MidiNoteEvent {
+            crate::midi_import::MidiNoteEvent {
+                start_sec,
+                end_sec,
+                note: 60.0,
+                velocity: 100,
+                channel: 0,
+            }
+        }
+        let mut tl = timeline();
+        tl.add_track(Some("track".into()), None, None);
+        let id = tl.add_clip(
+            Some("track".into()),
+            Some("clip".into()),
+            Some(0.0),
+            Some(1.0),
+            None,
+        );
+        let mut clip = tl.clips.into_iter().find(|c| c.id == id).unwrap();
+        let mut take = crate::state::ClipTake::from_clip(&clip);
+        take.id = "take".into();
+        take.midi_note_data = Some(vec![midi_note(0.0, 0.25), midi_note(0.25, 0.5)]);
+        clip.takes = vec![take];
+        clip.active_take_id = Some("take".into());
+        let actual_clip_id = clip.id.clone();
+        let mut params = crate::state::TrackParamsState::default();
+        params
+            .param_block_interval_edits
+            .push(crate::state::ParamBlockIntervalEdit {
+                edit_id: "split-midi".into(),
+                member_refs: vec![crate::state::ParamBlockMemberRef {
+                    clip_id: actual_clip_id.clone(),
+                    take_id: "take".into(),
+                    syllable_id: "midi".into(),
+                    source_start_sec: 0.0,
+                    source_end_sec: 0.25,
+                }],
+                start_sec: 0.0,
+                end_sec: 0.125,
+                member_start_sec: 0.0,
+                member_end_sec: 0.25,
+                block_ids: vec!["auto:clip:midi".into()],
+                deleted: false,
+            });
+        params.prune_param_block_merges(&[clip]);
+        assert_eq!(params.param_block_interval_edits.len(), 1);
+        assert_eq!(params.param_block_interval_edits[0].member_refs.len(), 1);
     }
 
     #[test]

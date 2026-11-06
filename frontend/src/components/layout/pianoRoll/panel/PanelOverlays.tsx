@@ -64,8 +64,15 @@ type Props = {
         | "paramBlockContextMenu"
         | "setParamBlockContextMenu"
         | "selectedParamBlockCount"
+        | "selectedParamBlockIds"
         | "canMergeSelectedParamBlocks"
         | "canUnmergeSelectedParamBlocks"
+        | "canDeleteSelectedParamBlocks"
+        | "canRestoreDeletedParamBlocks"
+        | "deleteSelectedParamBlocks"
+        | "restoreParamBlocks"
+        | "selectedParamBlockDeleted"
+        | "selectedParamBlockIds"
         | "paramBlockSplitAtSec"
         | "splitSelectedParamBlockAt"
         | "mergeSelectedParamBlocks"
@@ -135,6 +142,12 @@ export function PanelOverlays({ m }: Props) {
         selectedParamBlockCount,
         canMergeSelectedParamBlocks,
         canUnmergeSelectedParamBlocks,
+        canDeleteSelectedParamBlocks,
+        canRestoreDeletedParamBlocks,
+        deleteSelectedParamBlocks,
+        restoreParamBlocks,
+        selectedParamBlockDeleted,
+        selectedParamBlockIds,
         paramBlockSplitAtSec,
         splitSelectedParamBlockAt,
         mergeSelectedParamBlocks,
@@ -243,6 +256,12 @@ export function PanelOverlays({ m }: Props) {
                     selectedCount={selectedParamBlockCount}
                     canMerge={canMergeSelectedParamBlocks}
                     canUnmerge={canUnmergeSelectedParamBlocks}
+                    canDelete={canDeleteSelectedParamBlocks}
+                    canRestoreDeleted={canRestoreDeletedParamBlocks}
+                    selectedDeleted={selectedParamBlockDeleted}
+                    onDelete={deleteSelectedParamBlocks}
+                    onRestoreDeleted={() => restoreParamBlocks()}
+                    onRestoreSelected={() => restoreParamBlocks(selectedParamBlockIds)}
                     mergeMessage={
                         paramBlockMessage === null
                             ? null

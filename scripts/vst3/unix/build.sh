@@ -300,6 +300,7 @@ build_gui() {
 stage_models_fetch() {
     step "模型权重"
     python3 "$REPO_ROOT/scripts/setup/fetch-models.py" || die "模型权重获取失败"
+    python3 "$REPO_ROOT/scripts/setup/fetch-models.py" --fetch-game || die "GAME 模型获取失败"
 }
 
 stage_bundle() {

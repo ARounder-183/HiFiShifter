@@ -1055,9 +1055,8 @@ function recordWriteArgs(method: string, args: unknown[]): void {
 
 export function installMockBackend(): void {
     const handlers = buildHandlers();
-    /** 调用轨迹（调试用：`window.__mockCalls` 可读出被调用的方法顺序）。 */
+    /** 调用轨迹（本文件内诊断用；不暴露到 window）。 */
     const calls: string[] = [];
-    (window as unknown as { __mockCalls?: string[] }).__mockCalls = calls;
     const api = new Proxy(handlers, {
         get(target, property) {
             if (typeof property !== "string") return undefined;
@@ -1086,21 +1085,4 @@ export function installMockBackend(): void {
     });
 
     (window as unknown as { pywebview?: { api: unknown } }).pywebview = { api };
-    // 自动化调试出口：当前预览页确已安装 mock 后端（同页可读调用轨迹与写入参数）。
-    (window as unknown as { __hifiMockInstalled?: boolean }).__hifiMockInstalled = true;
-    // 浏览器实验页的诊断出口：无 DevTools 时也能从页面状态回答
-    // “mock 是否装好、时间线请求是否真的回来”。
-    (
-        window as unknown as {
-            __hifiMockDebugState?: { syllableSpans: Map<string, unknown> };
-        }
-    ).__hifiMockDebugState = { syllableSpans: mockSyllableSpans };
-    (
-        window as unknown as {
-            __hifiMockDebug?: {
-                writes: Map<string, Map<number, number>>;
-                calls: string[];
-            };
-        }
-    ).__hifiMockDebug = { writes: mockParamWrites, calls };
 }

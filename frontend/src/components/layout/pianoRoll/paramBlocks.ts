@@ -273,6 +273,8 @@ export interface MergedParamBlock {
 
 export interface ParamBlockState {
     readonly mergedBlocks: readonly MergedParamBlock[];
+    /** 上一批被删除的块，供用户一键恢复；仅在会话内有效。 */
+    readonly lastDeletedBlocks?: readonly PersistedParamBlockDeletion[];
     /**
      * 工程持久化的合并记录（v7）：成员用 Clip / Take / 音节稳定引用，
      * 不随自动数组序号变化。与旧会话 `mergedBlocks` 并存，派生时二者共同生效。
@@ -335,6 +337,27 @@ export interface PersistedParamBlockEdit {
      * 旧工程无此字段时走旧的区间兜底。
      */
     readonly blockIds?: readonly string[];
+    /** 用户从块编辑视图删除该段；保留曲线与源音符。 */
+    readonly deleted?: boolean;
+}
+
+/**
+ * 被用户删除的块。
+ *
+ * 删除不是从音频里移除音符，而是**从参数块编辑视图隐藏**它；因此不能改写
+ * 源域音节分析，也不能删除参数曲线。记录成员稳定引用后，自动分析重跑仍能
+ * 把同一批块继续隐藏，直到用户显式恢复。
+ */
+export interface PersistedParamBlockDeletion {
+    readonly id: string;
+    readonly members: readonly {
+        readonly clipId: string;
+        readonly takeId: string;
+        readonly syllableId: string;
+        readonly sourceStartSec: number;
+        readonly sourceEndSec: number;
+    }[];
+    readonly blockIds?: readonly string[];
 }
 
 export type BlockMergeResult =
@@ -352,8 +375,7 @@ export type ParamBlockMergeMessageKey =
     | "param_blocks_merge_already"
     | "param_blocks_merge_none";
 
-export type ParamBlockEditFailureReason =
-    "not_found" | "too_short" | "adjacent_block" | "no_members";
+export type ParamBlockEditFailureReason = "not_found" | "too_short" | "no_members";
 
 export type ParamBlockEditResult =
     | { readonly ok: true; readonly state: ParamBlockState; readonly blockId: string }
@@ -375,8 +397,8 @@ export interface ParamBlockResizeInput {
     readonly targetSec: number;
     readonly neighborStartSec?: number | null;
     readonly neighborEndSec?: number | null;
-    /** 相邻块的完整区间；用于判断伸缩后是否真的产生了正交集。 */
-    readonly neighbor?: { readonly startSec: number; readonly endSec: number } | null;
+    /** 相邻块；延展跨越它时同步压缩它，保持首尾相接且不重叠。 */
+    readonly neighbor?: ParamBlock | null;
     readonly minBlockSec?: number;
 }
 
@@ -401,14 +423,6 @@ export function paramBlockMergeMessageKey(
 export const MIN_AUTO_BLOCK_SEC = 0.02;
 /** mock 音节块的默认时长（秒）：足够宽到能点中、又能看到“多个相邻块”。 */
 export const MOCK_SYLLABLE_SEC = 0.55;
-/**
- * 分析结果的最大块时长（秒）。
- *
- * 这是**显示层保底**，不是新的音节识别算法：上游已经判出的边界全部保留，
- * 只有单个区间仍超过上限时才继续等分。旧工程没有分析区间时不会触发它，
- * 仍保持“一个 Clip 一个块”的兼容语义。
- */
-export const MAX_ANALYSIS_BLOCK_SEC = 1.4;
 /** 块高 = 半音行高（键盘键高）的倍数。纵向缩放时跟着键高一起缩放。 */
 export const PARAM_BLOCK_ROW_HEIGHT_MULTIPLIER = 1.5;
 
@@ -423,65 +437,15 @@ function clipSpan(clip: ParamBlockSourceClip): ParamBlockMember {
 }
 
 /**
- * 超过上限的分析区间再细分。
- *
- * 用等分而不是固定 1.4 秒硬切，保证最后一段不会只剩一两帧；所有子段仍首尾
- * 相接，不制造人为间隙，也不改变块的代表值算法。
- */
-function boundAnalysisSpans(
-    spans: ReadonlyArray<{ startSec: number; endSec: number }>,
-): Array<{ startSec: number; endSec: number }> {
-    const out: Array<{ startSec: number; endSec: number }> = [];
-    for (const span of spans) {
-        const startSec = span.startSec;
-        const endSec = span.endSec;
-        const durationSec = endSec - startSec;
-        if (!(durationSec > MAX_ANALYSIS_BLOCK_SEC + 1e-9)) {
-            out.push({ startSec, endSec });
-            continue;
-        }
-        const pieces = Math.ceil(durationSec / MAX_ANALYSIS_BLOCK_SEC);
-        const step = durationSec / pieces;
-        for (let index = 0; index < pieces; index += 1) {
-            out.push({
-                startSec: startSec + step * index,
-                endSec: index === pieces - 1 ? endSec : startSec + step * (index + 1),
-            });
-        }
-    }
-    return out;
-}
-
-/**
- * 把源域音节按最大时长预切，再整体投影到时间线。
- *
- * 必须先在**源域**切：若先投影再切，子段仍共享原音节下标，合并记录无法区分；
- * 源域下标是持久化合并与块身份的唯一稳定基准。切完之后的每个子段都是一条
- * 独立音节，因此 `sourceIndex` 指向的是切分后的数组。
- */
-function projectBoundedSourceSpansToTimeline(
-    clip: ParamBlockSourceClip,
-): Array<{ startSec: number; endSec: number; sourceIndex: number }> {
-    const rawSpans = clip.sourceSyllableSpansSec ?? [];
-    if (rawSpans.length === 0) return [];
-    const bounded = boundAnalysisSpans(
-        rawSpans.map(([startSec, endSec]) => ({ startSec, endSec })),
-    );
-    return projectSourceSpansToTimeline({
-        ...clip,
-        sourceSyllableSpansSec: bounded.map(({ startSec, endSec }) => [startSec, endSec] as const),
-    }).map((span, sourceIndex) => ({ ...span, sourceIndex }));
-}
-
-/**
  * 由 Clip 派生自动音节块。
  *
  * 优先级：
- * 1. 显式 `syllableSpansSec`（mock / 未来分析结果）；
- * 2. 无显式音节时，每个 Clip 作为一个块（保守，不凭曲线零散跳变乱切）。
+ * 1. 显式 `syllableSpansSec`（mock / 分析结果）；
+ * 2. 显式 mock 音节；
+ * 3. 其余音频 Clip 尚无分析结果时返回空集，不伪造“整段一块”。
  *
- * 显式音节会先裁剪到 Clip 范围、去掉零宽段；全无效时退回整块。
- * 合法音节保留原边界；单个超过上限的区间按显示保底继续等分。
+ * 显式音节会先裁剪到 Clip 范围、去掉零宽段。
+ * 分析得到的边界是权威，不再按固定时长机械等分。
  */
 export function autoBlocksForClips(
     rootTrackId: string,
@@ -531,16 +495,27 @@ export function autoBlocksForClips(
                 previous.endSec = current.startSec;
             }
         }
+        /*
+         * 【分析前必须为空】音频 Clip 没有音节分析时，前端不知道发音边界。
+         * 以前这里回退成 `[member]`，用户会在分析完成前先看到一个覆盖整段
+         * Clip 的假块；它既不是真实音节，也会让切分 / 伸缩记录与随后的分析
+         * 结果错位。MIDI Clip 已在上面提供精确音节，不经过这里。
+         */
+        /*
+         * 源域分析结果可能只出现在 `sourceSyllableSpansSec`，而工程秒
+         * `syllableSpansSec` 由调用方投影后才传；不能因为前者在这一步还没
+         * 展开，就把整条 Clip 判成“尚未分析”。
+         */
+        const hasSourceAnalysis = (clip.sourceSyllableSpansSec?.length ?? 0) > 0;
+        if (spans.length === 0 && !hasSourceAnalysis && clip.mockSyllables !== true) continue;
         const effective =
             spans.length > 0
-                ? spans.length === 1
-                    ? // 单个音频 Clip 没有音节切分时，上游可能把整段交给这里；
-                      // 多段明确音节保留原始边界，只对“唯一一段且超长”做保底。
-                      boundAnalysisSpans(spans)
-                    : spans
-                : clip.mockSyllables === true
-                  ? mockSyllableSpans(member)
-                  : [member];
+                ? // 模型/分析给出的音节边界就是权威；不再按 1.4 秒机械等分，
+                  // 否则长元音会被切成一堆与发音无关的块。
+                  spans
+                : hasSourceAnalysis
+                  ? []
+                  : mockSyllableSpans(member);
 
         /*
          * 【源域数组存在时，工程秒只用于显示】`syllableSpansSec` 是已投影结果，
@@ -553,7 +528,12 @@ export function autoBlocksForClips(
                 ? projectSourceSpansToTimeline(clip)
                 : [];
         const projectedFromSource =
-            rawProjectedFromSource.length > 0 ? projectBoundedSourceSpansToTimeline(clip) : [];
+            rawProjectedFromSource.length > 0
+                ? projectSourceSpansToTimeline(clip).map((span, sourceIndex) => ({
+                      ...span,
+                      sourceIndex,
+                  }))
+                : [];
         const effectiveSpans =
             projectedFromSource.length > 0
                 ? projectedFromSource
@@ -777,7 +757,10 @@ function replaceBlockEdits(
     return {
         ...state,
         persistedEdits: [
-            ...(state.persistedEdits ?? []).filter((edit) => edit.id !== replacedBlockId),
+            ...(state.persistedEdits ?? []).filter(
+                (edit) =>
+                    edit.id !== replacedBlockId && !(edit.blockIds ?? []).includes(replacedBlockId),
+            ),
             ...nextEdits,
         ],
         persistedMerges: (state.persistedMerges ?? []).filter(
@@ -849,48 +832,198 @@ export function resizeParamBlock(args: ParamBlockResizeInput): ParamBlockEditRes
     if (!Number.isFinite(nextStart) || !Number.isFinite(nextEnd) || nextEnd - nextStart < minSec) {
         return { ok: false, reason: "too_short" };
     }
-    const neighbor = args.neighbor;
-    if (
-        neighbor !== undefined &&
-        neighbor !== null &&
-        nextStart < neighbor.endSec - 1e-6 &&
-        neighbor.startSec < nextEnd - 1e-6
-    ) {
-        return { ok: false, reason: "adjacent_block" };
-    }
-    if (
-        args.neighborStartSec !== undefined &&
-        args.neighborStartSec !== null &&
-        args.edge === "right" &&
-        nextEnd > args.neighborStartSec + 1e-6
-    ) {
-        return { ok: false, reason: "adjacent_block" };
-    }
-    if (
-        args.neighborEndSec !== undefined &&
-        args.neighborEndSec !== null &&
-        args.edge === "left" &&
-        nextStart < args.neighborEndSec - 1e-6
-    ) {
-        return { ok: false, reason: "adjacent_block" };
-    }
     const members = blockMemberRefs(block);
     if (members === null) return { ok: false, reason: "no_members" };
+    let nextEdits: PersistedParamBlockEdit[] = [
+        {
+            id: block.id,
+            members,
+            startSec: nextStart,
+            endSec: nextEnd,
+            memberStartSec: block.startSec,
+            memberEndSec: block.endSec,
+            blockIds: [block.id],
+        },
+    ];
+    const replacedIds = [block.id];
+    /*
+     * 相邻连续块联动压缩：右边缘向右延展时，后一个块起点随之右移；
+     * 左边缘向左延展时，前一个块终点随之左移。只对首尾相接的块生效，
+     * 中间隔着休止的块保持不动。若压缩后不足最小宽度则拒绝整次改边。
+     */
+    const neighbor = args.neighbor;
+    if (neighbor !== undefined && neighbor !== null) {
+        if (args.edge === "right" && nextEnd > neighbor.startSec + 1e-6) {
+            if (neighbor.endSec - nextEnd < minSec) return { ok: false, reason: "too_short" };
+            const neighborMembers = blockMemberRefs(neighbor);
+            if (neighborMembers === null) return { ok: false, reason: "no_members" };
+            nextEdits = [
+                ...nextEdits,
+                {
+                    id: neighbor.id,
+                    members: neighborMembers,
+                    startSec: nextEnd,
+                    endSec: neighbor.endSec,
+                    memberStartSec: neighbor.startSec,
+                    memberEndSec: neighbor.endSec,
+                    blockIds: [neighbor.id],
+                },
+            ];
+            replacedIds.push(neighbor.id);
+        } else if (args.edge === "left" && nextStart < neighbor.endSec - 1e-6) {
+            if (nextStart - neighbor.startSec < minSec) return { ok: false, reason: "too_short" };
+            const neighborMembers = blockMemberRefs(neighbor);
+            if (neighborMembers === null) return { ok: false, reason: "no_members" };
+            nextEdits = [
+                ...nextEdits,
+                {
+                    id: neighbor.id,
+                    members: neighborMembers,
+                    startSec: neighbor.startSec,
+                    endSec: nextStart,
+                    memberStartSec: neighbor.startSec,
+                    memberEndSec: neighbor.endSec,
+                    blockIds: [neighbor.id],
+                },
+            ];
+            replacedIds.push(neighbor.id);
+        }
+    }
+    let state = args.state;
+    for (const edit of nextEdits) {
+        state = replaceBlockEdits(state, edit.id, []);
+    }
+    state = {
+        ...state,
+        persistedEdits: [
+            ...(state.persistedEdits ?? []).filter(
+                (edit) =>
+                    !replacedIds.includes(edit.id) &&
+                    !nextEdits.some((next) => next.id === edit.id),
+            ),
+            ...nextEdits,
+        ],
+    };
     return {
         ok: true,
         blockId: block.id,
-        state: replaceBlockEdits(args.state, block.id, [
-            {
-                id: block.id,
-                members,
-                startSec: nextStart,
-                endSec: nextEnd,
-                memberStartSec: block.startSec,
-                memberEndSec: block.endSec,
-                blockIds: [block.id],
-            },
-        ]),
+        state,
     };
+}
+
+/**
+ * 删除块（参数块视图语义）：只隐藏该块，不改写音频、参数曲线或音节分析。
+ *
+ * 删除记录按成员稳定引用保存；下次自动分析重跑后仍能命中同一批块。若删除的
+ * 是合并块，则把整个合并组一并隐藏，避免它的成员自动块重新出现。
+ */
+export function deleteParamBlocks(args: {
+    readonly state: ParamBlockState;
+    readonly blocks: readonly ParamBlock[];
+    readonly selectedBlockIds: readonly string[];
+}): ParamBlockEditResult {
+    const selected = args.blocks.filter((block) => args.selectedBlockIds.includes(block.id));
+    if (selected.length === 0) return { ok: false, reason: "not_found" };
+    const members = selected.flatMap((block) => blockMemberRefs(block) ?? []);
+    if (members.length === 0) return { ok: false, reason: "no_members" };
+    const edit: PersistedParamBlockEdit = {
+        id: `deleted:${selected
+            .map((block) => block.id)
+            .sort()
+            .join("+")}`,
+        members,
+        /*
+         * 删除记录只表达“视图里隐藏”，但仍要通过后端与持久化模型的区间
+         * 有效性校核（宽度 >= MIN_AUTO_BLOCK_SEC）。用块当前区间作为记录
+         * 区间即可：它不会移动块，只用于保存 / 重读时保持这条删除意图。
+         */
+        startSec: Math.min(...selected.map((block) => block.startSec)),
+        endSec: Math.max(
+            ...selected.map((block) => block.endSec),
+            Math.min(...selected.map((block) => block.startSec)) + MIN_AUTO_BLOCK_SEC,
+        ),
+        memberStartSec: Math.min(...selected.map((block) => block.startSec)),
+        memberEndSec: Math.max(...selected.map((block) => block.endSec)),
+        blockIds: selected.map((block) => block.id),
+    };
+    const ids = new Set(selected.map((block) => block.id));
+    return {
+        ok: true,
+        blockId: edit.id,
+        state: {
+            ...args.state,
+            lastDeletedBlocks: [
+                ...(args.state.lastDeletedBlocks ?? []),
+                ...(args.state.persistedEdits ?? []).filter((existing) =>
+                    (existing.blockIds ?? []).some((id) => ids.has(id)),
+                ),
+            ],
+            persistedEdits: [
+                ...(args.state.persistedEdits ?? []).filter(
+                    (existing) => !(existing.blockIds ?? []).some((id) => ids.has(id)),
+                ),
+                { ...edit, deleted: true },
+            ],
+            persistedMerges: (args.state.persistedMerges ?? []).filter(
+                (record) => !ids.has(record.id),
+            ),
+            mergedBlocks: args.state.mergedBlocks.filter((record) => !ids.has(record.id)),
+        },
+    };
+}
+
+/** 恢复之前被隐藏的块；不会改动曲线或源音符。 */
+export function restoreDeletedParamBlocks(args: {
+    readonly state: ParamBlockState;
+    /** 只恢复这些自动块的删除记录；空 = 恢复最近一批。 */
+    readonly blockIds?: readonly string[];
+}): ParamBlockEditResult {
+    const ids = new Set(
+        args.blockIds !== undefined && args.blockIds.length > 0
+            ? args.blockIds
+            : (args.state.lastDeletedBlocks ?? []).flatMap((record) => record.blockIds ?? []),
+    );
+    if (ids.size === 0) return { ok: false, reason: "not_found" };
+    return {
+        ok: true,
+        blockId: args.blockIds?.[0] ?? "restore",
+        state: {
+            ...args.state,
+            lastDeletedBlocks: [],
+            persistedEdits: (args.state.persistedEdits ?? []).filter(
+                (record) =>
+                    !(record.deleted === true && (record.blockIds ?? []).some((id) => ids.has(id))),
+            ),
+        },
+    };
+}
+
+/** 是否已有会遮住这些自动块的融合（手动 / 持久化 / 重叠）记录。 */
+export function canMergeParamBlocks(
+    _state: ParamBlockState,
+    blocks: readonly ParamBlock[],
+    selectedBlockIds: readonly string[],
+): boolean {
+    const selected = blocks.filter((block) => selectedBlockIds.includes(block.id));
+    if (selected.length < 2) return false;
+    // 复杂块（手动 / 自动归并）不能被再次合并，否则成员引用会重复。
+    return (
+        !selected.some((block) => block.kind === "merged") &&
+        !selected.some(
+            (block, index) => index > 0 && !blocksAreAdjacent(selected[index - 1], block),
+        )
+    );
+}
+
+/** 当前块是否已被用户删除（按稳定成员引用 / 自动块 id 命中）。 */
+export function isParamBlockDeleted(state: ParamBlockState, block: ParamBlock): boolean {
+    const ids = new Set((block.members.map((member) => member.syllableId) ?? []).filter(Boolean));
+    return (state.persistedEdits ?? []).some(
+        (record) =>
+            record.deleted === true &&
+            ((record.blockIds ?? []).includes(block.id) ||
+                record.members.some((member) => ids.has(member.syllableId))),
+    );
 }
 
 /**
@@ -1111,8 +1244,15 @@ function materializeEditedRecords(
         ),
     );
     const editedAutos = new Set<string>();
+    const covered = new Set<string>();
+    for (const edit of args.state.persistedEdits ?? []) {
+        if (edit.deleted === true) continue;
+        for (const id of edit.blockIds ?? []) covered.add(id);
+    }
     const edited: ParamBlock[] = [];
+    const autoById = new Map(auto.map((block) => [block.id, block]));
     for (const record of args.state.persistedEdits ?? []) {
+        if (record.deleted === true) continue;
         const members: ParamBlockMember[] = [];
         const matchedBlocks: ParamBlock[] = [];
         let memberSpanStart = Number.POSITIVE_INFINITY;
@@ -1122,6 +1262,20 @@ function materializeEditedRecords(
                 `${member.clipId}|${member.takeId}|${member.sourceStartSec.toFixed(3)}|${member.sourceEndSec.toFixed(3)}`,
             );
             if (block === undefined || matchedBlocks.includes(block)) continue;
+            /*
+             * 改边会同时写“当前块 + 相邻块”两条记录，而两条记录可能共享
+             * 相同的 Clip/Take 成员引用。只按成员查找会把邻居也卷进来，导致
+             * 几何用错原块。若记录声明了 blockIds，就只接受其中仍存在的块。
+             */
+            if (
+                record.blockIds !== undefined &&
+                record.blockIds.length > 0 &&
+                !record.blockIds.some(
+                    (id) => autoById.get(id) === block || autoById.get(id) === undefined,
+                )
+            ) {
+                continue;
+            }
             matchedBlocks.push(block);
             members.push(...block.members);
             memberSpanStart = Math.min(memberSpanStart, block.startSec);
@@ -1137,8 +1291,8 @@ function materializeEditedRecords(
          * 段落在音符内的相对位置。对于未离开成员范围的普通伸缩，映射退化为
          * 原来的工程秒 ± 位移。
          */
-        const currentStart = Math.min(...matchedBlocks.map((block) => block.startSec));
-        const currentEnd = Math.max(...matchedBlocks.map((block) => block.endSec));
+        const originalStart = Math.min(...matchedBlocks.map((block) => block.startSec));
+        const originalEnd = Math.max(...matchedBlocks.map((block) => block.endSec));
         const recordedStart = Math.min(
             record.memberStartSec ?? memberSpanStart,
             record.memberEndSec ?? memberSpanEnd,
@@ -1148,21 +1302,46 @@ function materializeEditedRecords(
             record.memberEndSec ?? memberSpanEnd,
         );
         const recordedSpan = recordedEnd - recordedStart;
+        const currentSpan = originalEnd - originalStart;
         const remap = (sec: number): number => {
-            if (!(recordedSpan > 1e-9)) return currentStart + (sec - recordedStart);
+            if (Math.abs(currentSpan - recordedSpan) <= 1e-6) {
+                return sec + (originalStart - recordedStart);
+            }
+            if (!(recordedSpan > 1e-9)) return originalStart + (sec - recordedStart);
             const ratio = Math.max(0, Math.min(1, (sec - recordedStart) / recordedSpan));
-            return currentStart + ratio * (currentEnd - currentStart);
+            return originalStart + ratio * currentSpan;
         };
-        const startSec = Math.max(currentStart, Math.min(currentEnd, remap(record.startSec)));
-        const endSec = Math.max(startSec, Math.min(currentEnd, remap(record.endSec)));
-        if (!(endSec > startSec + 1e-9) || !(endSec - startSec >= MIN_AUTO_BLOCK_SEC)) continue;
+        /*
+         * 普通改边记录的是“这一块自己的新边界”，不是对整个成员范围的比例变换。
+         * 只有当成员范围真的变化（Clip 被移动/拉伸）时才做映射；否则原样使用
+         * 记录秒，并对相邻块各自保留自己的端点。
+         */
+        const stretched = Math.abs(currentSpan - recordedSpan) > 1e-6;
+        const mapEdge = (sec: number): number => {
+            if (!stretched) return sec + (originalStart - recordedStart);
+            return remap(sec);
+        };
+        const startSec = mapEdge(record.startSec);
+        const endSec = mapEdge(record.endSec);
+        const currentStart = Math.min(...matchedBlocks.map((block) => block.startSec));
+        /*
+         * Clip 移动时，切分段的**内部端点**应整体平移；只有与成员边界重合的
+         * 外端点才落在成员当前边界上。否则右半段会从 mate 的旧 endSec
+         * （2.0）算出 5.0，而不是 Clip 新的末尾 4.0。
+         */
+        const isMemberStart = Math.abs(record.startSec - recordedStart) <= 1e-6;
+        const movedStart = isMemberStart ? currentStart : startSec;
+        const movedEnd = endSec;
+        if (!(movedEnd > movedStart + 1e-9) || !(movedEnd - movedStart >= MIN_AUTO_BLOCK_SEC)) {
+            continue;
+        }
         edited.push({
             id: record.id,
             rootTrackId: args.rootTrackId,
             kind: matchedBlocks.length > 1 ? "merged" : "auto",
             members,
-            startSec,
-            endSec,
+            startSec: movedStart,
+            endSec: movedEnd,
             averageValue: null,
         });
     }
@@ -1174,6 +1353,7 @@ function materializeEditedRecords(
      */
     const autoByStableId = new Map(auto.map((block) => [block.id, block]));
     for (const record of args.state.persistedEdits ?? []) {
+        if (record.deleted === true) continue;
         if (record.blockIds === undefined || record.blockIds.length === 0) continue;
         for (const id of record.blockIds) {
             const block = autoByStableId.get(id);
@@ -1196,6 +1376,7 @@ function materializeAutoBlocks(
     const editedSpans: Array<{ startSec: number; endSec: number }> = [];
     for (const edit of args.state.persistedEdits ?? []) {
         for (const id of edit.blockIds ?? []) editedAutos.add(id);
+        if (edit.deleted === true) continue;
         // 仅有旧快照（无稳定 id）才按成员原始范围兜底；新记录按 blockIds
         // 精确吞块，不能因为同一 Clip 的后续自动块相接而误吞。
         if (edit.blockIds === undefined || edit.blockIds.length === 0) {
@@ -1243,7 +1424,23 @@ function materializeNonOverlappingParamBlocks(args: {
     const auto = autoBlocksForClips(args.rootTrackId, args.clips);
     const merged = materializeMergedRecords(args, auto);
     const edited = materializeEditedRecords(args, auto);
-    const remaining = materializeAutoBlocks(args, auto);
+    /*
+     * 编辑记录按成员稳定引用接管自动块；但改边会写“当前块 + 相邻块”两条
+     * 记录，若仍按 `editedAutos` 把所有记录指向的自动块都吞掉，会把相邻块
+     * 自己的新边界也一起丢掉。因此先从自动块池里移除真正产生编辑段的原块，
+     * 再按记录自身的 `blockIds` 去掉改边记录对应的原块。
+     */
+    const editedSourceIds = new Set(
+        edited.flatMap((block) => block.members.map((m) => m.syllableId)),
+    );
+    const remaining = materializeAutoBlocks(args, auto).filter((block) => {
+        const editCovers = (args.state.persistedEdits ?? []).some(
+            (edit) =>
+                edit.blockIds?.includes(block.id) &&
+                !block.members.some((member) => editedSourceIds.has(member.syllableId)),
+        );
+        return !editCovers;
+    });
     const result = mergeOverlappingParamBlocks({
         state: { mergedBlocks: [] },
         blocks: remaining,
@@ -1487,6 +1684,24 @@ export function snapParamBlockValueDelta(args: {
 }): number {
     const step = Math.max(1e-9, Number(args.step) || 0);
     return Math.round(args.delta / step) * step;
+}
+
+/** 把工程秒吸附到 BPM / 拍号网格；`subdivision` 是每拍的细分数。 */
+export function snapParamBlockTimeToGrid(args: {
+    readonly sec: number;
+    readonly bpm: number;
+    readonly timeSignatureDenominator: number;
+    /** 网格步长（拍）。调用方直接复用时间轴 `gridStepBeats`。 */
+    readonly stepBeats: number;
+    readonly enabled: boolean;
+}): number {
+    if (!args.enabled || !Number.isFinite(args.sec)) return args.sec;
+    const bpm = Number.isFinite(args.bpm) && args.bpm > 0 ? args.bpm : 120;
+    const denominator = Math.max(1, Math.round(args.timeSignatureDenominator) || 4);
+    const stepBeats = Math.max(1e-9, Number(args.stepBeats) || 1);
+    // 工程拍号的分母不是四分音符时，秒/拍要按分母换算；bar 仅用于文档语义。
+    const gridSec = (60 / bpm) * stepBeats * (4 / denominator);
+    return Math.round(args.sec / gridSec) * gridSec;
 }
 
 /**
