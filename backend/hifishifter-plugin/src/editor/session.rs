@@ -4017,7 +4017,7 @@ pub(crate) mod tests {
             },
         )
         .unwrap();
-        ready.recv_timeout(Duration::from_secs(1)).unwrap();
+        ready.recv_timeout(ACTOR_REPLY_TIMEOUT).unwrap();
         {
             let mut active = editor.render_task.lock_or_recover();
             *active = Some(job);
@@ -6597,8 +6597,7 @@ pub(crate) mod tests {
             }
         });
         let began = Instant::now();
-        while editor.applied.load(Ordering::Acquire) < 1 && began.elapsed() < Duration::from_secs(5)
-        {
+        while editor.applied.load(Ordering::Acquire) < 1 && began.elapsed() < ACTOR_REPLY_TIMEOUT {
             rx.try_iter().for_each(drop);
             std::thread::sleep(Duration::from_millis(5));
         }
@@ -6681,7 +6680,7 @@ pub(crate) mod tests {
         );
         let began = Instant::now();
         while editor.render_error.lock_or_recover().is_none() {
-            assert!(began.elapsed() < Duration::from_secs(5));
+            assert!(began.elapsed() < ACTOR_REPLY_TIMEOUT);
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(editor.error.lock_or_recover().is_none());
@@ -6691,7 +6690,7 @@ pub(crate) mod tests {
         let began = Instant::now();
         while editor.applied.load(Ordering::Acquire) < 1 {
             assert!(
-                began.elapsed() < Duration::from_secs(5),
+                began.elapsed() < ACTOR_REPLY_TIMEOUT,
                 "{:?}",
                 editor.state()
             );
@@ -7049,8 +7048,12 @@ pub(crate) mod tests {
             if left == [0.1, 0.2, 0.3, 0.4] {
                 break;
             }
+            // A loaded CI runner can take well over five seconds for the
+            // re-analysis to publish new PCM.  Use the shared actor deadline:
+            // the invariant is that the moved clip eventually re-applies using
+            // the same analysis file, not how fast the scheduler gets there.
             assert!(
-                began.elapsed() < Duration::from_secs(5),
+                began.elapsed() < ACTOR_REPLY_TIMEOUT,
                 "{:?}",
                 editor.state()
             );
