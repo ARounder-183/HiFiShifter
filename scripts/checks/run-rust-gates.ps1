@@ -125,17 +125,14 @@ function Get-CargoCommand([string]$kind, [int]$Threads = 0) {
                 if (!$Package) {
                     Write-Output "$prefix cargo test --locked --manifest-path $manifest --workspace --exclude hifishifter-plugin -- --test-threads=1$skips"
                 }
-                # 【为什么每个 chunk 都带 --lib】不带 --lib 时，每次 cargo test 都会把
-                # 集成测试目标（version_parity / vst3_exports）与 doc-tests 也跑一遍，
-                # 并重新评估 build script。六个 chunk 就是六次重复的 cmake / dlopen，
-                # 在 macOS arm64 上实测会让下一次 cargo test 卡在 build script 上十分钟
-                # （editor:: 全绿之后 host:: 再无输出）。--lib 把每条命令限制到唯一那颗
-                # libtest 二进制，构建只做一次；集成测试由下面的兜底命令单独跑一次。
+                # 【为什么先 --no-run 一次】按模块拆进程时，每条 cargo test 都会重新
+                # 评估 build script；macOS arm64 上实测第二个 chunk 会卡在 cmake 上十分钟。
+                # 先把所有测试目标一次性编出来，后续每条命令就只是启动现成的二进制。
+                Write-Output "$prefix cargo test --locked --manifest-path $manifest -p hifishifter-plugin --no-run"
                 foreach ($chunk in $pluginChunks) {
-                    Write-Output "$prefix cargo test --locked --manifest-path $manifest -p hifishifter-plugin --lib -- $chunk --test-threads=1$skips"
+                    Write-Output "$prefix cargo test --locked --manifest-path $manifest -p hifishifter-plugin -- $chunk --test-threads=1$skips"
                 }
                 # 兜底：不属于任何模块前缀的用例（crate 根上的 tests::）与集成测试目标。
-                # 这里故意不加 --lib —— 它是唯一需要跑到集成测试二进制的那一次。
                 $chunkSkips = ($pluginChunks | ForEach-Object { "--skip $_" }) -join ' '
                 Write-Output "$prefix cargo test --locked --manifest-path $manifest -p hifishifter-plugin -- --test-threads=1 $chunkSkips$skips"
             }
