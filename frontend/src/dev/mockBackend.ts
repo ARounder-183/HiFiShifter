@@ -199,10 +199,10 @@ const mockTakeChannelModes = new Map<string, number>();
  */
 const mockParamWrites = new Map<string, Map<number, number>>();
 
-/** mock 的音节块分析：按固定 0.55s 切片，只供 dev mock 使用。 */
+/** mock 的 v7 音节块分析：按固定 0.55s 切片，仅浏览器实验用。 */
 const mockSyllableSpans = new Map<string, Array<{ startSec: number; endSec: number }>>();
 
-/** mock 的手动合并记录（root track → 记录）。 */
+/** mock 的 v7 手动合并记录（root track → 记录）。 */
 const mockParamBlockMerges = new Map<
     string,
     Array<{
@@ -217,7 +217,7 @@ const mockParamBlockMerges = new Map<
     }>
 >();
 
-/** mock 的手动切分 / 伸缩记录（root track → 记录）。 */
+/** mock 的 v7 手动切分 / 伸缩记录（root track → 记录）。 */
 const mockParamBlockEdits = new Map<
     string,
     Array<{
@@ -556,8 +556,8 @@ function buildHandlers(): Record<string, (...args: unknown[]) => unknown> {
             // 音节区间按 clip 可见长度生成，避免把不可见尾部也画成块。
             const duration = Number(clip?.length_sec ?? 0) || 4;
             const spans: Array<{ startSec: number; endSec: number }> = [];
-            // 与真实算法的最大段约束一致：长段拆开，避免 mock 退化成一个整块。
-            const count = Math.max(1, Math.ceil(duration / 1.4));
+            // 浏览器实验用：把每个 clip 切成 4 个等长音节，保证块数可数、可拖动。
+            const count = Math.max(1, Math.min(4, Math.ceil(duration / 1.2)));
             const step = duration / count;
             for (let index = 0; index < count; index += 1) {
                 const startSec = index * step;
@@ -1086,4 +1086,21 @@ export function installMockBackend(): void {
     });
 
     (window as unknown as { pywebview?: { api: unknown } }).pywebview = { api };
+    // 自动化调试出口：当前预览页确已安装 mock 后端（同页可读调用轨迹与写入参数）。
+    (window as unknown as { __hifiMockInstalled?: boolean }).__hifiMockInstalled = true;
+    // 浏览器实验页的诊断出口：无 DevTools 时也能从页面状态回答
+    // “mock 是否装好、时间线请求是否真的回来”。
+    (
+        window as unknown as {
+            __hifiMockDebugState?: { syllableSpans: Map<string, unknown> };
+        }
+    ).__hifiMockDebugState = { syllableSpans: mockSyllableSpans };
+    (
+        window as unknown as {
+            __hifiMockDebug?: {
+                writes: Map<string, Map<number, number>>;
+                calls: string[];
+            };
+        }
+    ).__hifiMockDebug = { writes: mockParamWrites, calls };
 }
