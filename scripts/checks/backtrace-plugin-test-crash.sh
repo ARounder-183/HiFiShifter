@@ -39,7 +39,11 @@ fi
 for filter in "$@"; do
     echo "::group::gdb $filter"
     # 崩了就停在信号上、bt 打的是崩溃现场；没崩就是一次正常的栈，同样有用。
-    gdb -batch -ex run -ex 'thread apply all bt 12' --args "$BIN" "$filter" --test-threads=1 || true
+    # 回放必须和正式测试用同一套 EP 判据：脚本可能从本地 shell 或单独的步骤里
+    # 被调起，那时 job 级 env 不在场，Dawn 会在这台只有 Lavapipe 的机器上把堆写坏，
+    # 于是「抓栈」这一步自己制造一次 SIGSEGV，看起来像原测试又崩了。
+    HIFISHIFTER_ORT_EP=cpu \
+      gdb -batch -ex run -ex 'thread apply all bt 12' --args "$BIN" "$filter" --test-threads=1 || true
     echo "::endgroup::"
 done
 exit 0

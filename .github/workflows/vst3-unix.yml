@@ -46,6 +46,12 @@ jobs:
     needs: gates
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
+    env:
+      # 整个 job 每个步骤都要看到这个硬钉：gdb 回放脚本会重新拉起同一颗测试二进制，
+      # 若只写在下面的测试步骤 env 里，回放就没有 cpu pin，Dawn/Tint 会在只有
+      # Lavapipe 的 Linux runner 上重新把堆写坏，诊断步骤自己制造一次 SIGSEGV。
+      # 放在 job 级别才能保证构建、测试、崩溃回放走的是同一套 EP 判据。
+      HIFISHIFTER_ORT_EP: cpu
     strategy:
       fail-fast: false
       matrix:
@@ -222,14 +228,6 @@ jobs:
       # 跳过清单只有一份（scripts/checks/test-skips.txt，[unix] 前缀的条目在这里生效）。
       # 此前这里有四条 --skip 写死在 YAML 里，与 build.yml / vst3.yml 的各一条互不知情。
       - name: Run plugin unit tests
-        env:
-          # 托管 runner 没有 GPU。`cpu` 是**硬钉**：不仅会话不建 GPU EP，连
-          # `diagnose_available_providers()` 的 WebGPU 探测都不做 —— 注册那个 EP 本身
-          # 就会启动 Dawn/Tint 的着色器编译线程，在只有 Lavapipe 的 Linux runner 上把堆
-          # 写坏（free(): unaligned chunk detected in tcache 2 → SIGABRT）。此前 UI 设置
-          # 的默认 "auto" 会通过运行时覆盖把这个环境变量顶掉，所以内核让 cpu-only
-          # 优先于一切偏好。判的是逻辑，不是 GPU 性能（与 gates.yml 的 Windows 测试同因）。
-          HIFISHIFTER_ORT_EP: cpu
         run: |
           # 【为什么两条分支都要限时】macOS 没有 GNU timeout（coreutils 不预装），
           # 直接写 timeout 会以 127 结束、看起来像测试挂了其实一条都没跑；但不加
