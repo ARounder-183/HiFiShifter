@@ -886,6 +886,15 @@ fn default_ep_for_role(role: OrtSessionRole) -> &'static str {
 /// 3. The global `HIFISHIFTER_ORT_EP` env var.
 /// 4. The role's default (see [`default_ep_for_role`]).
 fn ep_choice_for_role(role: OrtSessionRole) -> String {
+    // A CPU-only pin outranks every other preference.  The persisted UI
+    // setting defaults to `"auto"` and is pushed into `RUNTIME_EP_OVERRIDE`
+    // on the first `ui_settings_apply::apply()`, so without this guard the
+    // pin would be replaced before any session was built — which is exactly
+    // how a CI test process ended up running the real WebGPU stack.
+    if cpu_only_mode() {
+        return "cpu".to_string();
+    }
+
     // 1. Per-model env var — highest priority so a user can opt any single
     //    model (including HNSEP) onto the GPU even though its default is CPU.
     let role_env = match role {
@@ -929,6 +938,54 @@ fn global_env_ep_choice() -> Option<String> {
         .map(|v| v.trim().to_ascii_lowercase())
         .filter(|v| !v.is_empty())
 }
+
+/// True when the process is explicitly pinned to CPU-only inference.
+///
+/// `HIFISHIFTER_ORT_EP=cpu` is stronger than an EP *preference*: headless CI
+/// runners and audio hosts use it to keep the GPU runtimes out of the
+/// process.  Two things used to defeat that intent.  The persisted UI
+/// setting defaults to `"auto"`, and the runtime override is consulted
+/// before the env var, so a first `ui_settings_apply::apply()` silently
+/// replaced `cpu` with `auto` and built a real WebGPU session.
+/// Separately, `diagnose_available_providers()` registered the WebGPU EP
+/// merely to *list* it, which brought up Dawn/Tint and its shader-compiler
+/// threads; on a runner whose only Vulkan device is Lavapipe those threads
+/// corrupted the heap (`free(): unaligned chunk detected in tcache 2`) and
+/// aborted the whole test binary.  A CPU-only pin now means exactly that:
+/// no GPU provider is probed and no GPU session is built.
+pub fn cpu_only_mode() -> bool {
+    global_env_ep_choice().as_deref() == Some("cpu")
+}
+
+/// Register the alternative ORT backend used on Intel macOS.
+///
+/// `ort-sys` ships no x86_64-apple-darwin binary, so that target links
+/// `ort` with `alternative-backend` and `ort-tract` supplies the API
+/// implementation.  `ort::api()` panics until `ort::set_api` installs one;
+/// nothing in this repository ever called it, so the first ONNX operation
+/// on Intel macOS aborted with "attempted to use `ort` APIs before
+/// initializing a backend" while holding the global environment lock —
+/// poisoning it and making every later inference fail with "Mutex poisoned".
+/// `set_api` is a process-global one-shot, so calling it defensively at
+/// every ORT entry point is harmless; the `Once` avoids rebuilding the
+/// (large) function-table value on each call.
+pub(crate) fn ensure_ort_backend() {
+    register_alternative_backend();
+}
+
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+fn register_alternative_backend() {
+    static BACKEND: std::sync::Once = std::sync::Once::new();
+    BACKEND.call_once(|| {
+        ort::set_api(ort_tract::api());
+        log::info!("[ort] registered the ort-tract CPU backend (macOS x86_64)");
+    });
+}
+
+/// On every other target `ort` links the native ONNX Runtime directly, so
+/// there is no alternative API to install.
+#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+fn register_alternative_backend() {}
 
 /// The global env var, defaulting to `"auto"`.  Only used for diagnostics.
 fn env_ep_choice() -> String {
@@ -1267,9 +1324,16 @@ fn build_session_inner(
     ep_override: Option<&str>,
     bypass_disable_latch: bool,
 ) -> Result<(Session, String, Option<i32>), String> {
-    let choice = match ep_override {
-        Some(ep) => ep.trim().to_ascii_lowercase(),
-        None => ep_choice_for_role(role),
+    ensure_ort_backend();
+    let choice = if cpu_only_mode() {
+        // Explicit overrides (the benchmark passes its EP as an argument)
+        // must not bypass the process-wide CPU-only pin either.
+        "cpu".to_string()
+    } else {
+        match ep_override {
+            Some(ep) => ep.trim().to_ascii_lowercase(),
+            None => ep_choice_for_role(role),
+        }
     };
 
     // Only an explicit "cpu" choice short-circuits here.  HNSEP resolves to
@@ -2050,6 +2114,7 @@ pub struct GpuDiagnostic {
 /// some GPU/driver combos; WebGPU on Windows is only used when the user
 /// explicitly selects it.
 pub fn diagnose_available_providers() -> Vec<String> {
+    ensure_ort_backend();
     let mut providers = vec!["CPUExecutionProvider".to_string()];
 
     // WebGPU — compiled on Linux x86_64 / macOS ARM64 only.
@@ -2066,7 +2131,12 @@ pub fn diagnose_available_providers() -> Vec<String> {
         all(target_os = "macos", target_arch = "aarch64")
     ))]
     {
-        if cfg!(target_os = "linux") && is_wsl2() {
+        if cpu_only_mode() {
+            // Merely registering the WebGPU EP starts Dawn/Tint and its
+            // shader-compiler threads.  On a headless runner that corrupts
+            // the heap, so a CPU-only pin must not even *enumerate* GPUs.
+            log::warn!("[ort] webgpu: skipped(HIFISHIFTER_ORT_EP=cpu)");
+        } else if cfg!(target_os = "linux") && is_wsl2() {
             log::warn!(
                 "[ort] webgpu: skipped(wsl2) — dawn needs a real vulkan device, \
                  WSL2 only exposes the d3d12 passthrough"
@@ -2081,12 +2151,12 @@ pub fn diagnose_available_providers() -> Vec<String> {
 
     // CoreML -- macOS ARM64 only (Apple Neural Engine / GPU).
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    if probe_coreml_ep_available() {
+    if !cpu_only_mode() && probe_coreml_ep_available() {
         providers.push("CoreMLExecutionProvider".to_string());
     }
 
     // DirectML — Windows only
-    if probe_directml_ep_available() {
+    if !cpu_only_mode() && probe_directml_ep_available() {
         providers.push("DmlExecutionProvider".to_string());
     }
 
@@ -2206,6 +2276,7 @@ const fn probe_directml_ep_available() -> bool {
 /// 而会话实际建在 `device 1`（集显）上 —— 排查"GPU 为什么没跑起来"时，
 /// 这两个数字互相矛盾，只会把人带偏。
 pub fn diagnose_gpu() -> GpuDiagnostic {
+    ensure_ort_backend();
     let available_providers = diagnose_available_providers();
     let selected_ep = ep_choice_for_role(OrtSessionRole::Vocoder);
     let gpu_device_id = effective_dml_device_id().unwrap_or(0);
@@ -2223,6 +2294,32 @@ pub fn diagnose_gpu() -> GpuDiagnostic {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `HIFISHIFTER_ORT_EP=cpu` 必须压过运行时覆盖：UI 设置的默认值是 `auto`，
+    /// 而它会在进程启动时通过 `set_runtime_ep_override` 写入。少了这条优先级，
+    /// 无 GPU 的 CI runner 会去建 WebGPU 会话，并在 Dawn/Tint 线程里把堆写坏。
+    /// 环境变量是进程级状态，用 serial() 与别的用例隔开，退出前恢复原值。
+    #[test]
+    fn a_cpu_only_pin_outranks_the_runtime_override() {
+        let _serial = serial();
+        let saved = std::env::var_os("HIFISHIFTER_ORT_EP");
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => unsafe { std::env::set_var("HIFISHIFTER_ORT_EP", value) },
+                    None => unsafe { std::env::remove_var("HIFISHIFTER_ORT_EP") },
+                }
+            }
+        }
+        let _restore = Restore(saved);
+        unsafe { std::env::set_var("HIFISHIFTER_ORT_EP", "cpu") };
+        set_runtime_ep_override(Some("auto".to_string()));
+        assert!(cpu_only_mode());
+        assert_eq!(ep_choice_for_role(OrtSessionRole::Vocoder), "cpu");
+        assert_eq!(ep_choice_for_role(OrtSessionRole::PitchDetector), "cpu");
+        assert_eq!(ep_choice_for_role(OrtSessionRole::Separator), "cpu");
+    }
 
     /// 预算作用域重叠（启动时三个预热线程并发进入）时，先结束的不得解除上限，
     /// 最后一个离开者必须清零 —— 旧实现会把上限永久泄漏成 2（第 5 轮审查 P2-1）。

@@ -83,7 +83,24 @@ DMG 里的 dylib 校验都必须**先有产物**。它们属于 `build.yml` / `v
 - **门禁类失败**（gates / plugin-gates）：本地跑同一个脚本即可复现，例如
   `pwsh scripts/checks/run-rust-gates.ps1 -Only clippy`。
 - **产物类失败**（build / vst3-unix）：先看对应 job 的 diagnostics artifact
-  （`*-diagnostics`），里面有构建日志与 bundle 目录清单。
+  （`*-diagnostics`），里面有构建日志与 bundle 目录清单。`ara2-bridge-companion`
+  的 build.rs panic 写在日志中段、后面跟着几百行 World C++ 告警，按 `^error` 定位
+  才看得见；`vst3/unix/build.sh` 的 `sync_submodule` 负责初始化 `pluginterfaces`
+  与 ARA_API 两个 gitlink（Windows 那条路一直有，Unix 这条从未跑过所以一直缺）。
+- **测试被信号打死**：`scripts/checks/backtrace-plugin-test-crash.sh` 在失败时按整组
+  重放并打印所有线程栈；它只在 Linux 上跑（macOS 没有 apt-get/gdb），所以 CI 上
+  别指望 macOS 那条腿能给出栈。
+- **CPU-only 测试环境**：Windows 与 Unix 的测试 job 都设 `HIFISHIFTER_ORT_EP=cpu`。
+  这不是偏好而是硬钉：内核让 `cpu_only_mode()` 优先于持久化设置（其默认 `auto`
+  会通过运行时覆盖顶掉环境变量），并跳过 `diagnose_available_providers()` 的 WebGPU
+  注册探测。仅注册那个 EP 就会启动 Dawn/Tint 的着色器编译线程，在只有 Lavapipe 的
+  runner 上写坏堆（`free(): unaligned chunk detected in tcache 2` → SIGABRT）。
+- **Intel macOS 的 ONNX 后端**：`ort-sys` 没有 x86_64-apple-darwin 预编译库，该目标
+  用 `ort` 的 `alternative-backend` + `ort-tract`。`ort::set_api(ort_tract::api())`
+  必须在任何 `ort` API 之前调用；缺失时首个 ONNX 操作 panic 并毒化全局环境锁，
+  后续全部报 `Mutex poisoned`。`vocoder_ort_session::ensure_ort_backend()` 统一兜底，
+  并由三个模型的 `ensure_ort_init()` 调用。`ort-tract` 能跑 FCPE 与 NSF-HiFiGAN，
+  **不支持 HNSEP**（`InferenceConcat` 分析失败），该模型在此目标上不可用。
 - 偶发失败**不要**直接重跑掩盖：先确认它是不是 `test-skips.txt` 里已登记的那一条。
 
 ## 已知的测试跳过

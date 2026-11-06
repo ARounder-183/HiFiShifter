@@ -170,6 +170,7 @@ pub fn active_backend_name() -> &'static str {
 }
 
 fn ensure_ort_init() -> Result<(), String> {
+    crate::vocoder_ort_session::ensure_ort_backend();
     match ORT_INIT.get_or_init(|| {
         // Try to commit our desired environment config (name, etc.).
         // If commit() returns false, the environment was already committed

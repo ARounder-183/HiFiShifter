@@ -42,6 +42,7 @@ static SHARED_SESSION: OnceLock<Mutex<Option<Arc<Mutex<Session>>>>> = OnceLock::
 static LOGGED_UNAVAILABLE: AtomicBool = AtomicBool::new(false);
 
 fn ensure_ort_init() -> Result<(), String> {
+    crate::vocoder_ort_session::ensure_ort_backend();
     match ORT_INIT.get_or_init(|| {
         // commit() returns false if the global ORT environment was already
         // committed by another module — that's fine, the active environment

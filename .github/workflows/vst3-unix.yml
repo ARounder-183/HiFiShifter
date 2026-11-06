@@ -223,11 +223,12 @@ jobs:
       # 此前这里有四条 --skip 写死在 YAML 里，与 build.yml / vst3.yml 的各一条互不知情。
       - name: Run plugin unit tests
         env:
-          # 托管 runner 没有 GPU。ort 默认的 "auto" 会先试 WebGPU，dawn 初始化在无显卡的
-          # 机器上必然失败（vkCreateInstance: Found no drivers），然后**进程在退出时
-          # SIGSEGV** —— 56 条用例全绿、退出码却是 11，看上去像测试挂了。
-          # 判的是逻辑，不是 GPU 性能，所以直接钉成 cpu（与 gates.yml 的 Windows 测试
-          # job 同一条理由）。
+          # 托管 runner 没有 GPU。`cpu` 是**硬钉**：不仅会话不建 GPU EP，连
+          # `diagnose_available_providers()` 的 WebGPU 探测都不做 —— 注册那个 EP 本身
+          # 就会启动 Dawn/Tint 的着色器编译线程，在只有 Lavapipe 的 runner 上把堆写坏
+          # （free(): unaligned chunk detected in tcache 2 → SIGABRT）。此前 UI 设置的
+          # 默认 "auto" 会通过运行时覆盖把这个环境变量顶掉，所以内核现在让 cpu-only
+          # 优先于一切偏好。判的是逻辑，不是 GPU 性能。
           HIFISHIFTER_ORT_EP: cpu
         run: |
           # 【为什么不是直接写 timeout】macOS 上没有 GNU 的 timeout（coreutils 不预装），
@@ -244,9 +245,11 @@ jobs:
       # （渲染路径的堆损坏与退出时的析构是两回事）。这一步只在失败时跑，用 gdb 把最
       # 容易崩的两组各重放一遍，打印所有线程的栈；没有 gdb 就直接跳过。
       - name: Backtrace the test crash
-        if: failure()
+        if: failure() && runner.os == 'Linux'
         run: |
           # ubuntu-24.04 镜像里没有 gdb（脚本自己会判一次），失败时临时装上。
+          # macOS runner 既没有 apt-get，也用不了 gdb（lldb 需要不同的脚本），
+          # 让这一步在 macOS 上跑只会以 127 结束、把一个已经在红的 job 再加一条红灯。
           command -v gdb >/dev/null 2>&1 || sudo apt-get install -y --no-install-recommends gdb
           bash scripts/checks/backtrace-plugin-test-crash.sh
 

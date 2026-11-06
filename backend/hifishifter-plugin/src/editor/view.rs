@@ -699,7 +699,24 @@ mod tests {
             let mut echoed = ViewRect::default();
             assert_eq!((table.get_size)(ptr, &mut echoed), K_RESULT_OK);
             assert_eq!(echoed.dimensions(), None);
+            // `NSView` is accepted on macOS (it is the native parent type) and
+            // rejected elsewhere; `HWND` is the exact inverse.  The old test
+            // pinned `NSView` to `K_RESULT_FALSE` unconditionally, which only
+            // passed on Windows/Linux — on both macOS legs it failed with
+            // `left: 0, right: 1` after ~180 otherwise-green tests.  Assert the
+            // platform contract instead of one platform's answer.
+            #[cfg(target_os = "macos")]
+            assert_eq!((table.platform)(ptr, c"NSView".as_ptr()), K_RESULT_OK);
+            #[cfg(not(target_os = "macos"))]
             assert_eq!((table.platform)(ptr, c"NSView".as_ptr()), K_RESULT_FALSE);
+            assert_eq!(
+                (table.platform)(ptr, c"HWND".as_ptr()),
+                if cfg!(windows) {
+                    K_RESULT_OK
+                } else {
+                    K_RESULT_FALSE
+                }
+            );
             assert_eq!(
                 (table.attached)(ptr, std::ptr::null_mut(), c"HWND".as_ptr()),
                 K_INVALID_ARGUMENT
