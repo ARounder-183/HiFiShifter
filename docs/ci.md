@@ -111,7 +111,7 @@ DMG 里的 dylib 校验都必须**先有产物**。它们属于 `build.yml` / `v
 
 ## 已知的测试跳过
 
-`scripts/checks/test-skips.txt` 是权威清单。当前三类（全部是 `[unix]`，都只在
+`scripts/checks/test-skips.txt` 是权威清单。当前四类（全部是 `[unix]`，都只在
 Linux/macOS 暴露、且不是这轮适配引入的）：
 
 - `task34_tail_and_shared_undo_save_restore_both_world_tracks_without_gui`：
@@ -121,6 +121,10 @@ Linux/macOS 暴露、且不是这轮适配引入的）：
 - `automatic_apply_releases_the_transaction_and_rechecks_model_and_edit_versions`：
   偶发（单独连跑 3 次：1 过 2 挂）—— 快照已发布、块却还没被后台渲染填上。Windows 侧
   根因已修，Unix 夹具尚未按修复后的形态复验。
+- `host_move_without_local_generation_reapplies_and_reuses_analysis_file`：
+  宿主移动后等不到新 PCM，`state()` 显示 `analysis_pending=false` / `generation=0` /
+  `audible_state=current` —— 重分析根本没发布，5 秒与 30 秒两种上限都超时，不是等得不够
+  久。与上一条同属 Unix 渲染夹具的后台填充链：单跑能过、整组跑偶发不发布。
 
 外加一条全平台的 `pending_pitch_analysis_does_not_publish_raw_audio_as_applied`
 （间歇挂死，根因按 `docs/plans/2026-10-27-audit-repair-round2.md` §1.3 / §7 批次 8 跟踪）。
