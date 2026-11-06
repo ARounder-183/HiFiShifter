@@ -49,6 +49,22 @@ pub struct ParamBlockMergeRecordPayload {
     pub member_refs: Vec<ParamBlockMemberRefPayload>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParamBlockIntervalEditPayload {
+    pub edit_id: String,
+    #[serde(default)]
+    pub member_refs: Vec<ParamBlockMemberRefPayload>,
+    pub start_sec: f64,
+    pub end_sec: f64,
+    #[serde(default)]
+    pub member_start_sec: f64,
+    #[serde(default)]
+    pub member_end_sec: f64,
+    #[serde(default)]
+    pub block_ids: Vec<String>,
+}
+
 fn source_digest(clip: &crate::state::Clip, frame_period_ms: f64) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"take_syllable_v1");
@@ -187,13 +203,14 @@ pub(super) fn analyze_clip_syllables(
 pub(super) fn get_param_block_merges(
     state: State<'_, AppState>,
     root_track_id: String,
-) -> Result<Vec<ParamBlockMergeRecordPayload>, String> {
+) -> Result<(Vec<ParamBlockMergeRecordPayload>, Vec<ParamBlockIntervalEditPayload>), String> {
     let tl = state
         .timeline
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
-    Ok(tl.params_by_root_track
+    let records = tl
+        .params_by_root_track
         .get(&root_track_id)
         .map(|entry| {
             entry
@@ -215,13 +232,44 @@ pub(super) fn get_param_block_merges(
                 })
                 .collect()
         })
-        .unwrap_or_default())
+        .unwrap_or_default();
+    let interval_edits = tl
+        .params_by_root_track
+        .get(&root_track_id)
+        .map(|entry| {
+            entry
+                .param_block_interval_edits
+                .iter()
+                .map(|edit| ParamBlockIntervalEditPayload {
+                    edit_id: edit.edit_id.clone(),
+                    member_refs: edit
+                        .member_refs
+                        .iter()
+                        .map(|r| ParamBlockMemberRefPayload {
+                            clip_id: r.clip_id.clone(),
+                            take_id: r.take_id.clone(),
+                            syllable_id: r.syllable_id.clone(),
+                            source_start_sec: r.source_start_sec,
+                            source_end_sec: r.source_end_sec,
+                        })
+                        .collect(),
+                    start_sec: edit.start_sec,
+                    end_sec: edit.end_sec,
+                    member_start_sec: edit.member_start_sec,
+                    member_end_sec: edit.member_end_sec,
+                    block_ids: edit.block_ids.clone(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok((records, interval_edits))
 }
 
 pub(super) fn set_param_block_merges(
     state: State<'_, AppState>,
     root_track_id: String,
     records: Vec<ParamBlockMergeRecordPayload>,
+    interval_edits: Vec<ParamBlockIntervalEditPayload>,
     checkpoint: Option<bool>,
 ) -> serde_json::Value {
     let before = state
@@ -253,6 +301,37 @@ pub(super) fn set_param_block_merges(
                         .collect(),
                 })
                 .filter(|r| r.member_refs.len() >= 2)
+                .collect();
+            entry.param_block_interval_edits = interval_edits
+                .into_iter()
+                .map(|edit| crate::state::ParamBlockIntervalEdit {
+                    edit_id: edit.edit_id,
+                    member_refs: edit
+                        .member_refs
+                        .into_iter()
+                        .map(|m| crate::state::ParamBlockMemberRef {
+                            clip_id: m.clip_id,
+                            take_id: m.take_id,
+                            syllable_id: m.syllable_id,
+                            source_start_sec: m.source_start_sec,
+                            source_end_sec: m.source_end_sec,
+                        })
+                        .collect(),
+                    start_sec: edit.start_sec,
+                    end_sec: edit.end_sec,
+                    member_start_sec: edit.member_start_sec,
+                    member_end_sec: edit.member_end_sec,
+                    block_ids: edit.block_ids,
+                })
+                .filter(|edit| {
+                    let width = edit.end_sec - edit.start_sec;
+                    !edit.member_refs.is_empty()
+                        && edit.edit_id.len() <= 512
+                        && width.is_finite()
+                        && width >= 0.02
+                        && edit.start_sec.is_finite()
+                        && edit.end_sec.is_finite()
+                })
                 .collect();
         }
         let clips = tl.clips.clone();

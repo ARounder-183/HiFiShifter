@@ -818,6 +818,21 @@ mod tests {
                         source_end_sec: 0.3,
                     }],
                 }],
+                param_block_interval_edits: vec![crate::state::ParamBlockIntervalEdit {
+                    edit_id: "edit-left".into(),
+                    member_refs: vec![crate::state::ParamBlockMemberRef {
+                        clip_id: "clip".into(),
+                        take_id: "take".into(),
+                        syllable_id: "syl".into(),
+                        source_start_sec: 0.1,
+                        source_end_sec: 0.3,
+                    }],
+                    start_sec: 0.0,
+                    end_sec: 0.2,
+                    member_start_sec: 0.0,
+                    member_end_sec: 0.3,
+                    block_ids: vec!["auto:clip:0".into()],
+                }],
                 ..Default::default()
             },
         );
@@ -838,6 +853,10 @@ mod tests {
                 .syllable_id,
             "syl"
         );
+        let edit = &loaded.timeline.params_by_root_track["track"].param_block_interval_edits[0];
+        assert_eq!(edit.edit_id, "edit-left");
+        assert_eq!(edit.start_sec, 0.0);
+        assert_eq!(edit.end_sec, 0.2);
     }
 
     #[test]

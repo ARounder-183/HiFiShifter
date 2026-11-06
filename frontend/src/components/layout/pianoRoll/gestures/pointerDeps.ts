@@ -83,6 +83,8 @@ export type PointerDeps = {
         gridStep: number;
         /** 是否为右键：命中块时打开块菜单，不启动拖动。 */
         contextMenu: boolean;
+        /** 双击命中的块内切分点；由面板负责执行切分。 */
+        doubleClick?: boolean;
     }) => boolean;
     activePointerGestureEndRef: RefObject<(() => void) | null>;
     applyDenseToLiveEdit: (

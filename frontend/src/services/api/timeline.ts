@@ -155,6 +155,16 @@ export interface ParamBlockMergeRecordPayload {
     memberRefs: ParamBlockMemberRefPayload[];
 }
 
+export interface ParamBlockIntervalEditPayload {
+    editId: string;
+    memberRefs: ParamBlockMemberRefPayload[];
+    startSec: number;
+    endSec: number;
+    memberStartSec?: number;
+    memberEndSec?: number;
+    blockIds?: string[];
+}
+
 export const timelineApi = {
     // Undo/Redo (backend-authoritative)
     undoTimeline: () => invoke<TimelineResult>("undo_timeline"),
@@ -426,19 +436,32 @@ export const timelineApi = {
         invoke<ClipSyllableAnalysisResult>("analyze_clip_syllables", clipId),
 
     getParamBlockMerges: (rootTrackId: string) =>
-        invoke<{ ok: boolean; records: ParamBlockMergeRecordPayload[]; error?: string }>(
-            "get_param_block_merges",
-            rootTrackId,
-        ).then((result) => {
+        invoke<{
+            ok: boolean;
+            records: ParamBlockMergeRecordPayload[];
+            intervalEdits?: ParamBlockIntervalEditPayload[];
+            error?: string;
+        }>("get_param_block_merges", rootTrackId).then((result) => {
             if (!result?.ok) throw new Error(result?.error ?? "get_param_block_merges failed");
-            return result.records ?? [];
+            return {
+                records: result.records ?? [],
+                intervalEdits: result.intervalEdits ?? [],
+            };
         }),
 
     setParamBlockMerges: (
         rootTrackId: string,
         records: ParamBlockMergeRecordPayload[],
+        intervalEdits: ParamBlockIntervalEditPayload[] = [],
         checkpoint = true,
-    ) => invoke<{ ok: boolean }>("set_param_block_merges", rootTrackId, records, checkpoint),
+    ) =>
+        invoke<{ ok: boolean }>(
+            "set_param_block_merges",
+            rootTrackId,
+            records,
+            intervalEdits,
+            checkpoint,
+        ),
 
     setClipsStateBulk: (payload: {
         updates: Array<{

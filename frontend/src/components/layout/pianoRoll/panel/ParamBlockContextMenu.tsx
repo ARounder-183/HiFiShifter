@@ -14,6 +14,8 @@ export interface ParamBlockContextMenuProps {
     readonly canMerge: boolean;
     readonly canUnmerge: boolean;
     readonly mergeMessage: string | null;
+    readonly splitAtSec: number | null;
+    readonly onSplit: (sec: number) => void;
     readonly onMerge: () => void;
     readonly onUnmerge: () => void;
     readonly onClose: () => void;
@@ -27,6 +29,8 @@ export function ParamBlockContextMenu({
     canMerge,
     canUnmerge,
     mergeMessage,
+    splitAtSec,
+    onSplit,
     onMerge,
     onUnmerge,
     onClose,
@@ -37,6 +41,15 @@ export function ParamBlockContextMenu({
             key: "blocks-heading",
             label: tf("param_blocks_tool"),
             heading: true,
+        },
+        {
+            key: "blocks-split",
+            label: tf("param_blocks_split_here"),
+            disabled: splitAtSec === null || selectedCount !== 1,
+            description: splitAtSec === null ? tf("param_blocks_split_none") : undefined,
+            onSelect: () => {
+                if (splitAtSec !== null) onSplit(splitAtSec);
+            },
         },
         {
             key: "blocks-merge",

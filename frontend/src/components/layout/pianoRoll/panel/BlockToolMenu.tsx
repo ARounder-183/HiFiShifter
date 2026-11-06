@@ -62,6 +62,15 @@ export function BlockToolMenu({ m }: Props) {
 
     const close = () => setBlockToolMenuOpen(false);
 
+    /*
+     * 药丸主体进入块工具；再点一次回到进入前的绘制工具。此前只切 `toolMode`，
+     * 但 `s.drawToolMode` 在块工具期间仍保存着旧值，用户第二次点击会“没有反应”。
+     */
+    const toggleBlockTool = () => {
+        const next = paramBlockToolActive ? s.drawToolMode || "draw" : "block";
+        void dispatch(setToolModePersistent(next));
+    };
+
     return (
         <Box
             ref={blockToolMenuAnchorRef}
@@ -77,11 +86,7 @@ export function BlockToolMenu({ m }: Props) {
                 labelAriaLabel={tf("param_blocks_tool")}
                 labelTooltip={tf("param_blocks_tool")}
                 active={paramBlockToolActive}
-                onSelect={() =>
-                    void dispatch(
-                        setToolModePersistent(paramBlockToolActive ? s.drawToolMode : "block"),
-                    )
-                }
+                onSelect={toggleBlockTool}
                 eyeMode={paramBlocksVisible ? "on" : "off"}
                 onToggleEye={toggleParamBlocksVisible}
                 eyeTooltip={tf("param_blocks_show_overlay")}

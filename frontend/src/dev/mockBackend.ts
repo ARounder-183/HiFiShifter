@@ -217,6 +217,26 @@ const mockParamBlockMerges = new Map<
     }>
 >();
 
+/** mock 的 v7 手动切分 / 伸缩记录（root track → 记录）。 */
+const mockParamBlockEdits = new Map<
+    string,
+    Array<{
+        editId: string;
+        memberRefs: Array<{
+            clipId: string;
+            takeId: string;
+            syllableId: string;
+            sourceStartSec: number;
+            sourceEndSec: number;
+        }>;
+        startSec: number;
+        endSec: number;
+        memberStartSec?: number;
+        memberEndSec?: number;
+        blockIds?: string[];
+    }>
+>();
+
 function mockParamWriteKey(trackId: string, param: string): string {
     return `${trackId}\u0000${param}`;
 }
@@ -557,11 +577,16 @@ function buildHandlers(): Record<string, (...args: unknown[]) => unknown> {
         get_param_block_merges: (...args: unknown[]) => ({
             ok: true,
             records: mockParamBlockMerges.get(String(args[0] ?? "")) ?? [],
+            intervalEdits: mockParamBlockEdits.get(String(args[0] ?? "")) ?? [],
         }),
         set_param_block_merges: (...args: unknown[]) => {
             mockParamBlockMerges.set(
                 String(args[0] ?? ""),
                 Array.isArray(args[1]) ? (args[1] as never[]) : [],
+            );
+            mockParamBlockEdits.set(
+                String(args[0] ?? ""),
+                Array.isArray(args[2]) ? (args[2] as never[]) : [],
             );
             return { ok: true };
         },

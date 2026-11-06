@@ -330,7 +330,8 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
             return {
                 rootTrackId: args[0],
                 records: args[1],
-                checkpoint: args[2] ?? true,
+                intervalEdits: args[2] ?? [],
+                checkpoint: args[3] ?? true,
             };
 
         case "apply_clip_linked_params":

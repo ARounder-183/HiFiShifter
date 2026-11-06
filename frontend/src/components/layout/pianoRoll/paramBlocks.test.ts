@@ -20,6 +20,8 @@ import {
     projectSourceSpansToTimeline,
     resolveParamBlockDragWrite,
     resolveParamBlockSnapDelta,
+    resizeParamBlock,
+    splitParamBlock,
     unmergeParamBlocks,
     type ParamBlock,
     type ParamBlockSourceClip,
@@ -66,6 +68,27 @@ describe("autoBlocksForClips", () => {
         expect(blocks.map((block) => [block.startSec, block.endSec])).toEqual([
             [10, 11],
             [12.5, 14.5],
+        ]);
+    });
+
+    it("相邻音节之间的小浮点缝不会形成人为间隙", () => {
+        const blocks = autoBlocksForClips("root-a", [
+            {
+                id: "a",
+                trackId: "root-a",
+                startSec: 0,
+                lengthSec: 1,
+                syllableSpansSec: [
+                    { startSec: 0, endSec: 0.3 },
+                    { startSec: 0.305, endSec: 0.6 },
+                    { startSec: 0.6, endSec: 1 },
+                ],
+            },
+        ]);
+        expect(blocks.map((block) => [block.startSec, block.endSec])).toEqual([
+            [0, 0.305],
+            [0.305, 0.6],
+            [0.6, 1],
         ]);
     });
 
@@ -139,6 +162,24 @@ describe("autoBlocksForClips", () => {
         // 源域先切段：每个子块都有自己的源域区间，首尾相接且覆盖原段。
         expect(blocks[0].members[0]?.sourceStartSec).toBeCloseTo(0, 6);
         expect(blocks.at(-1)?.members[0]?.sourceEndSec).toBeCloseTo(6, 6);
+    });
+
+    it("只有工程秒区间时同样受最长块限制", () => {
+        const blocks = autoBlocksForClips("root-a", [
+            {
+                id: "timeline-only",
+                trackId: "root-a",
+                startSec: 2,
+                lengthSec: 6,
+                syllableSpansSec: [{ startSec: 2, endSec: 8 }],
+            },
+        ]);
+        expect(blocks.length).toBeGreaterThanOrEqual(5);
+        expect(
+            blocks.every((block) => block.endSec - block.startSec <= MAX_ANALYSIS_BLOCK_SEC + 1e-9),
+        ).toBe(true);
+        expect(blocks[0].startSec).toBeCloseTo(2, 9);
+        expect(blocks.at(-1)?.endSec).toBeCloseTo(8, 9);
     });
 });
 
@@ -664,6 +705,179 @@ describe("nearestParamBlockByTime", () => {
 });
 
 describe("param block drag", () => {
+    it("切块后左右两段各自持久化，并保持稳定成员引用", () => {
+        const sourceClips: ParamBlockSourceClip[] = [
+            {
+                id: "a",
+                trackId: "root-a",
+                takeId: "take-a",
+                startSec: 0,
+                lengthSec: 2,
+                sourceStartSec: 0,
+                sourceEndSec: 2,
+                sourceSyllableSpansSec: [[0, 2]],
+                syllableSpansSec: [{ startSec: 0, endSec: 2 }],
+            },
+        ];
+        const block = autoBlocksForClips("root-a", sourceClips)[0];
+        expect(block.startSec).toBeCloseTo(0, 6);
+        expect(block.endSec).toBeCloseTo(1, 6);
+        const split = splitParamBlock({
+            state: EMPTY_PARAM_BLOCK_STATE,
+            block,
+            sec: 0.5,
+        });
+        expect(split.ok ? split.state.persistedEdits?.length : split.reason).toBeDefined();
+        if (!split.ok) throw new Error(`split failed: ${split.reason}`);
+        expect(split.state.persistedEdits).toHaveLength(2);
+        expect(split.state.persistedEdits?.map((edit) => [edit.startSec, edit.endSec])).toEqual([
+            [0, 0.5],
+            [0.5, 1],
+        ]);
+        const materialized = materializeParamBlocks({
+            rootTrackId: "root-a",
+            clips: sourceClips,
+            state: split.state,
+        });
+        expect(materialized.map((item) => [item.startSec, item.endSec])).toEqual([
+            [0, 0.5],
+            [0.5, 1],
+            [1, 2],
+        ]);
+    });
+
+    it("边缘伸缩不能越过相邻块，也不能缩到不可点击", () => {
+        const block = autoBlocksForClips("root-a", [
+            {
+                id: "a",
+                trackId: "root-a",
+                takeId: "take-a",
+                startSec: 0,
+                lengthSec: 2,
+                sourceStartSec: 0,
+                sourceEndSec: 2,
+                sourceSyllableSpansSec: [[0, 2]],
+            },
+        ])[0];
+        expect(block).toBeDefined();
+        if (block === undefined) return;
+        expect(block.startSec).toBeCloseTo(0, 6);
+        expect(block.endSec).toBeCloseTo(1, 6);
+        const tooShort = resizeParamBlock({
+            state: EMPTY_PARAM_BLOCK_STATE,
+            block,
+            edge: "right",
+            targetSec: 0.01,
+        });
+        expect(tooShort.ok).toBe(false);
+        const acrossNeighbor = resizeParamBlock({
+            state: EMPTY_PARAM_BLOCK_STATE,
+            block,
+            edge: "right",
+            targetSec: 1.2,
+            neighborStartSec: 1.1,
+        });
+        expect(acrossNeighbor.ok).toBe(false);
+        const resized = resizeParamBlock({
+            state: EMPTY_PARAM_BLOCK_STATE,
+            block,
+            edge: "right",
+            targetSec: 0.5,
+        });
+        expect(resized.ok).toBe(true);
+        if (!resized.ok) return;
+        expect(resized.state.persistedEdits?.[0]?.endSec).toBeCloseTo(0.5, 9);
+    });
+
+    it("伸缩只拒绝正交集，紧邻块向外仍可接合", () => {
+        const blocks = autoBlocksForClips("root-a", [
+            {
+                id: "a",
+                trackId: "root-a",
+                takeId: "take-a",
+                startSec: 0,
+                lengthSec: 2,
+                sourceStartSec: 0,
+                sourceEndSec: 2,
+                sourceSyllableSpansSec: [
+                    [0, 1],
+                    [1, 2],
+                ],
+            },
+        ]);
+        const [left, right] = blocks;
+        expect(left).toBeDefined();
+        expect(right).toBeDefined();
+        if (left === undefined || right === undefined) return;
+        const joined = resizeParamBlock({
+            state: EMPTY_PARAM_BLOCK_STATE,
+            block: left,
+            edge: "right",
+            targetSec: 1.5,
+            neighborStartSec: 1,
+            neighborEndSec: 2,
+            neighbor: { startSec: 1, endSec: 2 },
+        });
+        expect(joined.ok).toBe(false);
+        const touching = resizeParamBlock({
+            state: EMPTY_PARAM_BLOCK_STATE,
+            block: left,
+            edge: "right",
+            targetSec: 1,
+            neighborStartSec: 1,
+            neighborEndSec: 2,
+            neighbor: { startSec: 1, endSec: 2 },
+        });
+        expect(touching.ok).toBe(true);
+    });
+
+    it("手动切分后的左右段在 Clip 移动与拉伸后仍保持相对位置", () => {
+        const clipAt = (
+            startSec: number,
+            lengthSec: number,
+            sourceLengthSec = 2,
+        ): ParamBlockSourceClip[] => [
+            {
+                id: "a",
+                trackId: "root-a",
+                takeId: "take-a",
+                startSec,
+                lengthSec,
+                sourceStartSec: 0,
+                sourceEndSec: sourceLengthSec,
+                sourceSyllableSpansSec: [[0, sourceLengthSec]],
+            },
+        ];
+        const original = clipAt(0, 2);
+        const block = autoBlocksForClips("root-a", original)[0];
+        const split = splitParamBlock({
+            state: EMPTY_PARAM_BLOCK_STATE,
+            block,
+            sec: 0.5,
+        });
+        if (!split.ok) throw new Error(`split failed: ${split.reason}`);
+
+        const moved = materializeParamBlocks({
+            rootTrackId: "root-a",
+            clips: clipAt(3, 2),
+            state: split.state,
+        });
+        expect(moved[0]?.startSec).toBeCloseTo(3, 9);
+        expect(moved[0]?.endSec).toBeCloseTo(3.5, 9);
+        expect(moved[1]?.startSec).toBeCloseTo(3.5, 9);
+        expect(moved[1]?.endSec).toBeCloseTo(4, 9);
+
+        const stretched = materializeParamBlocks({
+            rootTrackId: "root-a",
+            clips: clipAt(0, 4, 4),
+            state: split.state,
+        });
+        expect(stretched[0]?.startSec).toBeCloseTo(0, 9);
+        expect(stretched[0]?.endSec).toBeCloseTo(4 / 3, 9);
+        expect(stretched[1]?.startSec).toBeCloseTo(4 / 3, 9);
+        expect(stretched[1]?.endSec).toBeCloseTo(8 / 3, 9);
+    });
+
     it("吸附位移：音高半音、音阶与普通参数网格", () => {
         expect(
             resolveParamBlockSnapDelta({
@@ -1127,7 +1341,7 @@ describe("overlap-free materialization", () => {
         expect(merged[0].members.map((member) => member.clipId)).toEqual(["a", "b"]);
     });
 
-    it("重叠块无条件归并，旧开关关闭时也不存在重叠", () => {
+    it("超长单段继续拆分，旧开关关闭时也不产生重叠块", () => {
         const clips = [
             {
                 id: "a",
@@ -1145,8 +1359,9 @@ describe("overlap-free materialization", () => {
             clips,
             state: { mergedBlocks: [], mergeOverlapsActive: false },
         });
-        expect(blocks).toHaveLength(1);
-        expect(blocks[0]).toMatchObject({ startSec: 0, endSec: 1.5 });
+        expect(blocks.length).toBeGreaterThan(1);
+        expect(blocks[0].startSec).toBeCloseTo(0, 6);
+        expect(blocks.at(-1)?.endSec).toBeCloseTo(1.5, 6);
         for (let index = 1; index < blocks.length; index += 1) {
             expect(blocks[index].startSec).toBeGreaterThanOrEqual(blocks[index - 1].endSec - 1e-9);
         }

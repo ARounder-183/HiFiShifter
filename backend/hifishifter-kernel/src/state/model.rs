@@ -954,6 +954,9 @@ pub struct TrackParamsState {
     /// `(clip_id, take_id, syllable_id)`，不存数组序号，重分析后仍能校核。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub param_block_merges: Vec<ParamBlockMergeRecord>,
+    /// 用户手动切分 / 伸缩后的块区间（工程 v7，向后兼容：旧工程为空）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub param_block_interval_edits: Vec<ParamBlockIntervalEdit>,
 }
 
 /// 一个被手动合并的块组。
@@ -979,6 +982,25 @@ pub struct ParamBlockMemberRef {
     pub source_start_sec: f64,
     #[serde(default)]
     pub source_end_sec: f64,
+}
+
+/// 一个手动切分 / 伸缩后的块区间。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParamBlockIntervalEdit {
+    pub edit_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub member_refs: Vec<ParamBlockMemberRef>,
+    pub start_sec: f64,
+    pub end_sec: f64,
+    /// 编辑当时的成员工程秒区间；旧工程缺省时前端按成员当前范围兼容。
+    #[serde(default)]
+    pub member_start_sec: f64,
+    #[serde(default)]
+    pub member_end_sec: f64,
+    /// 编辑所作用的自动块 id；切分后左右段共享它。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub block_ids: Vec<String>,
 }
 
 impl TrackParamsState {
@@ -1016,6 +1038,29 @@ impl TrackParamsState {
             });
         }
         self.param_block_merges.retain(|r| r.member_refs.len() >= 2);
+        for record in &mut self.param_block_interval_edits {
+            record.member_refs.retain(|member| {
+                let Some(spans) = valid.get(&(member.clip_id.as_str(), member.take_id.as_str()))
+                else {
+                    return false;
+                };
+                spans.iter().any(|span| {
+                    (span.start_sec - member.source_start_sec).abs() < 1e-3
+                        && (span.end_sec - member.source_end_sec).abs() < 1e-3
+                })
+            });
+            let width = record.end_sec - record.start_sec;
+            let valid_interval = record.member_refs.first().is_some()
+                && width.is_finite()
+                && width >= 0.02
+                && record.start_sec.is_finite()
+                && record.end_sec.is_finite();
+            if !valid_interval {
+                record.member_refs.clear();
+            }
+        }
+        self.param_block_interval_edits
+            .retain(|record| !record.member_refs.is_empty());
     }
 
     /// 保存工程文件时，没有任何用户数据需要持久化的状态。
@@ -1031,6 +1076,7 @@ impl TrackParamsState {
             && self.extra_curves.is_empty()
             && self.extra_params.is_empty()
             && self.param_block_merges.is_empty()
+            && self.param_block_interval_edits.is_empty()
     }
 }
 

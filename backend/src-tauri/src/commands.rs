@@ -1247,7 +1247,9 @@ pub fn get_param_block_merges(
     common::guard_json_command(
         "get_param_block_merges",
         || match syllable::get_param_block_merges(state, root_track_id) {
-            Ok(records) => serde_json::json!({ "ok": true, "records": records }),
+            Ok((records, interval_edits)) => {
+                serde_json::json!({ "ok": true, "records": records, "intervalEdits": interval_edits })
+            }
             Err(error) => serde_json::json!({ "ok": false, "error": error }),
         },
     )
@@ -1258,10 +1260,17 @@ pub fn set_param_block_merges(
     state: State<'_, AppState>,
     root_track_id: String,
     records: Vec<syllable::ParamBlockMergeRecordPayload>,
+    interval_edits: Option<Vec<syllable::ParamBlockIntervalEditPayload>>,
     checkpoint: Option<bool>,
 ) -> serde_json::Value {
     common::guard_json_command("set_param_block_merges", || {
-        syllable::set_param_block_merges(state, root_track_id, records, checkpoint)
+        syllable::set_param_block_merges(
+            state,
+            root_track_id,
+            records,
+            interval_edits.unwrap_or_default(),
+            checkpoint,
+        )
     })
 }
 

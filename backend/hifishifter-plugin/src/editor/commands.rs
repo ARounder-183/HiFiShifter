@@ -277,6 +277,14 @@ mod lane_tests {
                         {"clipId":"clip","takeId":"take","syllableId":"b","sourceStartSec":0.3,"sourceEndSec":0.6}
                     ]
                 }],
+                "intervalEdits": [{
+                    "editId": "edit:v7",
+                    "memberRefs": [
+                        {"clipId":"clip","takeId":"take","syllableId":"a","sourceStartSec":0.1,"sourceEndSec":0.3}
+                    ],
+                    "startSec": 0.1,
+                    "endSec": 0.25
+                }],
                 "checkpoint": true
             }),
         );
@@ -287,6 +295,8 @@ mod lane_tests {
             read["records"].as_array().is_some(),
             "查询必须返回与 App 同形的 records 数组"
         );
+        assert_eq!(read["intervalEdits"][0]["editId"], "edit:v7");
+        assert_eq!(read["intervalEdits"][0]["endSec"], 0.25);
         // 通道容量足够容纳本测试产生的 history/state 事件；不读取内容。
     }
 }
@@ -655,6 +665,21 @@ struct MergeMemberInput {
     syllable_id: String,
     source_start_sec: f64,
     source_end_sec: f64,
+}
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IntervalEditInput {
+    edit_id: String,
+    #[serde(default)]
+    member_refs: Vec<MergeMemberInput>,
+    start_sec: f64,
+    end_sec: f64,
+    #[serde(default)]
+    member_start_sec: f64,
+    #[serde(default)]
+    member_end_sec: f64,
+    #[serde(default)]
+    block_ids: Vec<String>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1055,7 +1080,34 @@ pub(super) fn dispatch(
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            return Ok(json!({"ok": true, "records": records}));
+            let interval_edits = timeline
+                .params_by_root_track
+                .get(root_track_id)
+                .map(|entry| {
+                    entry
+                        .param_block_interval_edits
+                        .iter()
+                        .map(|edit| {
+                            json!({
+                                "editId": edit.edit_id,
+                                "memberRefs": edit.member_refs.iter().map(|member| json!({
+                                    "clipId": member.clip_id,
+                                    "takeId": member.take_id,
+                                    "syllableId": member.syllable_id,
+                                    "sourceStartSec": member.source_start_sec,
+                                    "sourceEndSec": member.source_end_sec,
+                                })).collect::<Vec<_>>(),
+                                "startSec": edit.start_sec,
+                                "endSec": edit.end_sec,
+                                "memberStartSec": edit.member_start_sec,
+                                "memberEndSec": edit.member_end_sec,
+                                "blockIds": edit.block_ids,
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            return Ok(json!({"ok": true, "records": records, "intervalEdits": interval_edits}));
         }
         "set_param_block_merges" => {
             let root_track_id = input["rootTrackId"]
@@ -1064,6 +1116,12 @@ pub(super) fn dispatch(
                 .to_owned();
             track_exists(session, &root_track_id)?;
             let records: Vec<MergeRecordInput> = args(input["records"].clone())?;
+            let interval_edits: Vec<IntervalEditInput> = args(
+                input
+                    .get("intervalEdits")
+                    .cloned()
+                    .unwrap_or_else(|| json!([])),
+            )?;
             let checkpoint = input["checkpoint"].as_bool().unwrap_or(true);
             let mut timeline = session.timeline.lock_or_recover();
             if checkpoint {
@@ -1089,6 +1147,37 @@ pub(super) fn dispatch(
                             .collect(),
                     })
                     .filter(|record| record.member_refs.len() >= 2)
+                    .collect();
+                entry.param_block_interval_edits = interval_edits
+                    .into_iter()
+                    .map(|edit| hifishifter_kernel::state::ParamBlockIntervalEdit {
+                        edit_id: edit.edit_id,
+                        member_refs: edit
+                            .member_refs
+                            .into_iter()
+                            .map(|member| hifishifter_kernel::state::ParamBlockMemberRef {
+                                clip_id: member.clip_id,
+                                take_id: member.take_id,
+                                syllable_id: member.syllable_id,
+                                source_start_sec: member.source_start_sec,
+                                source_end_sec: member.source_end_sec,
+                            })
+                            .collect(),
+                        start_sec: edit.start_sec,
+                        end_sec: edit.end_sec,
+                        member_start_sec: edit.member_start_sec,
+                        member_end_sec: edit.member_end_sec,
+                        block_ids: edit.block_ids,
+                    })
+                    .filter(|edit| {
+                        let width = edit.end_sec - edit.start_sec;
+                        !edit.member_refs.is_empty()
+                            && edit.edit_id.len() <= 512
+                            && width.is_finite()
+                            && width >= 0.02
+                            && edit.start_sec.is_finite()
+                            && edit.end_sec.is_finite()
+                    })
                     .collect();
             }
             timeline.sync_clip_takes_from_flat();

@@ -66,6 +66,8 @@ type Props = {
         | "selectedParamBlockCount"
         | "canMergeSelectedParamBlocks"
         | "canUnmergeSelectedParamBlocks"
+        | "paramBlockSplitAtSec"
+        | "splitSelectedParamBlockAt"
         | "mergeSelectedParamBlocks"
         | "unmergeSelectedParamBlocks"
         | "paramBlockMessage"
@@ -133,6 +135,8 @@ export function PanelOverlays({ m }: Props) {
         selectedParamBlockCount,
         canMergeSelectedParamBlocks,
         canUnmergeSelectedParamBlocks,
+        paramBlockSplitAtSec,
+        splitSelectedParamBlockAt,
         mergeSelectedParamBlocks,
         unmergeSelectedParamBlocks,
         paramBlockMessage,
@@ -244,6 +248,8 @@ export function PanelOverlays({ m }: Props) {
                             ? null
                             : tf(paramBlockMessage as Parameters<typeof tf>[0])
                     }
+                    splitAtSec={paramBlockSplitAtSec}
+                    onSplit={splitSelectedParamBlockAt}
                     onMerge={mergeSelectedParamBlocks}
                     onUnmerge={unmergeSelectedParamBlocks}
                     onClose={() => setParamBlockContextMenu(null)}

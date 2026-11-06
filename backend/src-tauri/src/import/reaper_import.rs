@@ -1072,6 +1072,7 @@ fn convert_reaper_data(
                         extra_curves: Default::default(),
                         extra_params: Default::default(),
                         param_block_merges: Vec::new(),
+                        param_block_interval_edits: Vec::new(),
                     },
                 );
             }
