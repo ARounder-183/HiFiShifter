@@ -1741,6 +1741,9 @@ impl DocumentSession {
             timeline.tracks,
             &edits.fades,
             &edits.groups,
+            // 音节缓存会让 `edits.apply` 改写 Take；不进指纹时，首次分析后
+            // `ensure_loaded` 的“版本未变”早退会让 UI 永远看不到新区间。
+            &edits.take_syllables,
             &timeline.project_scale_notes,
             &timeline.tempo_map,
             // 【为什么渲染事实也进指纹】`ensure_loaded` 靠"版本没变 + 本指纹相同"早退。
@@ -3991,6 +3994,19 @@ impl DocumentSession {
                 kept_live_roots += 1;
             }
         }
+        // 音节缓存不是编辑权威，而是一份**可重建的派生缓存**：冷恢复/undo 才整份
+        // 继承；普通旧载荷只补在线缺失的 Clip/Take，绝不抹掉刚算出的结果。
+        if authoritative {
+            merged.take_syllables = restored.take_syllables.clone();
+        } else {
+            for (key, analysis) in &restored.take_syllables {
+                merged
+                    .take_syllables
+                    .entry(key.clone())
+                    .or_insert_with(|| analysis.clone());
+            }
+        }
+        merged.validate_take_syllables()?;
         if kept_live_roots > 0 {
             log::info!(
                 "[param] restore kept {kept_live_roots} live root(s); stale payload only filled missing roots"

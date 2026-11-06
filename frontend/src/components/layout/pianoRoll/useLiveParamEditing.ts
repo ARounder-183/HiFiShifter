@@ -378,11 +378,14 @@ export function useLiveParamEditing(args: {
                 // （`commitStroke` 结尾的 `bumpRefreshToken` → `notifyLiveEditEnded`）。
                 const liveWindow = paramViewRef.current;
                 if (liveWindow === null || liveWindow.key !== pv.key) return;
-                const start = pv.startFrame;
-                const step = pv.stride;
-                const nextEdit = pv.edit.slice();
+                const step = liveWindow.stride;
+                /*
+                 * 以**当前**窗口为基底，避免拖动期间 paramView 被替换时
+                 * 用按下时那份旧数组构造出陈旧快照。
+                 */
+                const nextEdit = liveWindow.edit.slice();
                 for (let i = 0; i < nextEdit.length; i += 1) {
-                    const f = start + i * step;
+                    const f = liveWindow.startFrame + i * step;
                     if (f < minF || f > maxF) continue;
                     if (mode === "restore") {
                         nextEdit[i] = pv.orig[i] ?? nextEdit[i];
@@ -391,7 +394,7 @@ export function useLiveParamEditing(args: {
                         if (j >= 0 && j < dense.length) nextEdit[i] = dense[j] ?? nextEdit[i];
                     }
                 }
-                setParamView({ ...pv, edit: nextEdit });
+                setParamView({ ...liveWindow, edit: nextEdit });
             }
 
             // 提交是 fire-and-forget 调用（调用方不 await），任何 IPC 失败都必须

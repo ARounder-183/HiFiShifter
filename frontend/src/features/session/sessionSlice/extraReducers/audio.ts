@@ -27,6 +27,7 @@ import {
     applyTimelineStatePreservingPitchVisuals,
     applyAutoCrossfadeInReducer,
 } from "../helpersCore";
+import { applyImportSelection } from "../importSelection";
 import { setPending, setRejected } from "./shared";
 import type { ActionReducerMapBuilder } from "@reduxjs/toolkit";
 import type { SessionState } from "../types";
@@ -105,11 +106,16 @@ export function registerAudio(builder: ActionReducerMapBuilder<SessionState>) {
             if (payload.path) {
                 state.audioPath = payload.path;
                 if (payload.imported?.ok) {
-                    applyTimelineState(state, payload.imported, { force: true });
+                    applyTimelineStatePreservingPitchVisuals(state, payload.imported);
                     if (payload.newClipIds && payload.newClipIds.length > 0) {
                         state.multiSelectedClipIds = payload.newClipIds;
                         state.multiSelectionIntentional = false;
-                        state.selectedClipId = payload.newClipIds[0] ?? null;
+                        // 导入不夺取参数编辑器的“根轨道组”所有权。新 Clip 可以进
+                        // 多选，但只有用户明确点选它时才切换 selectedTrackId。
+                        state.selectedClipId =
+                            state.selectedTrackId !== null
+                                ? state.selectedClipId
+                                : (payload.newClipIds[0] ?? null);
                     }
                 }
             }
@@ -142,11 +148,9 @@ export function registerAudio(builder: ActionReducerMapBuilder<SessionState>) {
             if (payload.path) {
                 state.audioPath = payload.path;
                 if (payload.imported?.ok) {
-                    applyTimelineState(state, payload.imported, { force: true });
+                    applyTimelineStatePreservingPitchVisuals(state, payload.imported);
                     if (payload.newClipIds && payload.newClipIds.length > 0) {
-                        state.multiSelectedClipIds = payload.newClipIds;
-                        state.multiSelectionIntentional = false;
-                        state.selectedClipId = payload.newClipIds[0] ?? null;
+                        applyImportSelection(state, payload.newClipIds);
                     }
                 }
             }
@@ -194,9 +198,7 @@ export function registerAudio(builder: ActionReducerMapBuilder<SessionState>) {
                 }
                 if (payload.newClipIds && payload.newClipIds.length > 0) {
                     applyAutoCrossfadeInReducer(state, payload.newClipIds);
-                    state.multiSelectedClipIds = payload.newClipIds;
-                    state.multiSelectionIntentional = false;
-                    state.selectedClipId = payload.newClipIds[0] ?? null;
+                    applyImportSelection(state, payload.newClipIds);
                 }
             }
         })
@@ -238,9 +240,7 @@ export function registerAudio(builder: ActionReducerMapBuilder<SessionState>) {
                 }
                 if (payload.newClipIds && payload.newClipIds.length > 0) {
                     applyAutoCrossfadeInReducer(state, payload.newClipIds);
-                    state.multiSelectedClipIds = payload.newClipIds;
-                    state.multiSelectionIntentional = false;
-                    state.selectedClipId = payload.newClipIds[0] ?? null;
+                    applyImportSelection(state, payload.newClipIds);
                 }
             }
         })
@@ -284,9 +284,7 @@ export function registerAudio(builder: ActionReducerMapBuilder<SessionState>) {
                 }
                 if (payload.newClipIds && payload.newClipIds.length > 0) {
                     applyAutoCrossfadeInReducer(state, payload.newClipIds);
-                    state.multiSelectedClipIds = payload.newClipIds;
-                    state.multiSelectionIntentional = false;
-                    state.selectedClipId = payload.newClipIds[0] ?? null;
+                    applyImportSelection(state, payload.newClipIds);
                 }
             }
         })
@@ -348,9 +346,7 @@ export function registerAudio(builder: ActionReducerMapBuilder<SessionState>) {
                 }
                 if (payload.newClipIds && payload.newClipIds.length > 0) {
                     applyAutoCrossfadeInReducer(state, payload.newClipIds);
-                    state.multiSelectedClipIds = payload.newClipIds;
-                    state.multiSelectionIntentional = false;
-                    state.selectedClipId = payload.newClipIds[0] ?? null;
+                    applyImportSelection(state, payload.newClipIds);
                 }
             }
         })
@@ -394,9 +390,7 @@ export function registerAudio(builder: ActionReducerMapBuilder<SessionState>) {
                 }
                 // select all imported clips
                 if (payload.newClipIds && payload.newClipIds.length > 0) {
-                    state.multiSelectedClipIds = payload.newClipIds;
-                    state.multiSelectionIntentional = false;
-                    state.selectedClipId = payload.newClipIds[0] ?? null;
+                    applyImportSelection(state, payload.newClipIds);
                 }
             }
         })

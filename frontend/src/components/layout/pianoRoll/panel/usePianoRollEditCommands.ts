@@ -58,6 +58,8 @@ type PianoRollEditCommandInputs = Pick<
     | "store"
     | "vibratoBaseline"
 > & {
+    /** 块编辑工具下不执行曲线编辑命令（避免点块时误改参数）。 */
+    curveEditsSuppressed: boolean;
     /** 可滚域时长（全选的右边界）。 */
     dynamicProjectSec: number;
     /** 交互层持有的稳定命令入口（渲染期刷新，见文件头）。 */
@@ -107,6 +109,7 @@ export function usePianoRollEditCommands({
     setSelectionUi,
     store,
     vibratoBaseline,
+    curveEditsSuppressed,
 }: PianoRollEditCommandInputs) {
     /**
      * 参数编辑器「全选」：把整条参数曲线（0 → 工程时长）设为选区。
@@ -135,45 +138,47 @@ export function usePianoRollEditCommands({
     // ── Edit operation handler (shared by context menu + MenuBar events) ──
     const handleEditOp = useCallback(
         async (op: string, data?: Record<string, unknown>) =>
-            runEditOp(
-                {
-                    activeVibratoPresetId,
-                    bumpRefreshToken,
-                    clipboardRef,
-                    currentParamDefaultValue,
-                    currentParamQuantizeUnit,
-                    currentParamRange,
-                    dispatch,
-                    editParam,
-                    effectiveProjectScale,
-                    invalidate,
-                    midiDialogOpenParamsRef,
-                    midiDialogSourceRef,
-                    paramView,
-                    paramViewRef,
-                    pitchDeltaToDegreeSteps,
-                    pitchEnabled,
-                    processorParamsRef,
-                    projectScaleAtSec,
-                    resolveScaleFromToken,
-                    resolvedVibratoPresets,
-                    rootTrackId,
-                    s,
-                    scrollerRef,
-                    selectAllParamRange,
-                    selectionRef,
-                    setClipboardGuid,
-                    setMidiDialogOpen,
-                    setMidiDialogSelection,
-                    setMidiPath,
-                    setParamView,
-                    setSelectionUi,
-                    store,
-                    vibratoBaseline,
-                },
-                op,
-                data,
-            ),
+            curveEditsSuppressed
+                ? undefined
+                : runEditOp(
+                      {
+                          activeVibratoPresetId,
+                          bumpRefreshToken,
+                          clipboardRef,
+                          currentParamDefaultValue,
+                          currentParamQuantizeUnit,
+                          currentParamRange,
+                          dispatch,
+                          editParam,
+                          effectiveProjectScale,
+                          invalidate,
+                          midiDialogOpenParamsRef,
+                          midiDialogSourceRef,
+                          paramView,
+                          paramViewRef,
+                          pitchDeltaToDegreeSteps,
+                          pitchEnabled,
+                          processorParamsRef,
+                          projectScaleAtSec,
+                          resolveScaleFromToken,
+                          resolvedVibratoPresets,
+                          rootTrackId,
+                          s,
+                          scrollerRef,
+                          selectAllParamRange,
+                          selectionRef,
+                          setClipboardGuid,
+                          setMidiDialogOpen,
+                          setMidiDialogSelection,
+                          setMidiPath,
+                          setParamView,
+                          setSelectionUi,
+                          store,
+                          vibratoBaseline,
+                      },
+                      op,
+                      data,
+                  ),
         [
             rootTrackId,
             editParam,
@@ -201,6 +206,7 @@ export function usePianoRollEditCommands({
             resolvedVibratoPresets,
             activeVibratoPresetId,
             vibratoBaseline,
+            curveEditsSuppressed,
         ],
     );
 

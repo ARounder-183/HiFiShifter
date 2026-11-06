@@ -2019,12 +2019,13 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
                 crate::editor::slow_lane::submit(crate::editor::slow_lane::SlowTask {
                     id,
                     command:"export_diagnostics".into(),
-                    sink,
+                    sink:Some(sink),
                     work:Box::new(move||{
                         crate::editor::plugin_diagnostics::write_package(&out,&system,&settings)?;
                         crate::log_line(&format!("[diagnostics] plugin package exported: {}",out.display()));
                         Ok(serde_json::json!({"ok":true,"path":out.to_string_lossy()}))
                     }),
+                    commit:None,
                 })?;
                 Ok(())
             })();

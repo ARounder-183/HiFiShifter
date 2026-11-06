@@ -8,6 +8,7 @@ import { planParamConversion } from "../paramConversion";
 import { VibratoDialog } from "../../VibratoDialog";
 import { MidiTrackSelectDialog } from "../../MidiTrackSelectDialog";
 import { EditContextMenu } from "../../../editDialogs/EditContextMenu";
+import { ParamBlockContextMenu } from "./ParamBlockContextMenu";
 
 import type { PianoRollPanelModel } from "./usePianoRollPanelModel";
 
@@ -60,6 +61,16 @@ type Props = {
         | "rootTrack"
         | "s"
         | "setCtxMenu"
+        | "paramBlockContextMenu"
+        | "setParamBlockContextMenu"
+        | "selectedParamBlockCount"
+        | "canMergeSelectedParamBlocks"
+        | "canUnmergeSelectedParamBlocks"
+        | "paramBlockSplitAtSec"
+        | "splitSelectedParamBlockAt"
+        | "mergeSelectedParamBlocks"
+        | "unmergeSelectedParamBlocks"
+        | "paramBlockMessage"
         | "setMidiDialogOpen"
         | "setVibratoDialogOpen"
         | "specifiedBpm"
@@ -119,6 +130,16 @@ export function PanelOverlays({ m }: Props) {
         rootTrack,
         s,
         setCtxMenu,
+        paramBlockContextMenu,
+        setParamBlockContextMenu,
+        selectedParamBlockCount,
+        canMergeSelectedParamBlocks,
+        canUnmergeSelectedParamBlocks,
+        paramBlockSplitAtSec,
+        splitSelectedParamBlockAt,
+        mergeSelectedParamBlocks,
+        unmergeSelectedParamBlocks,
+        paramBlockMessage,
         setMidiDialogOpen,
         setVibratoDialogOpen,
         specifiedBpm,
@@ -215,6 +236,26 @@ export function PanelOverlays({ m }: Props) {
                     onConvertDynToVolume={() => void handleEditOp("convertDynToVolume")}
                 />
             )}
+            {paramBlockContextMenu !== null ? (
+                <ParamBlockContextMenu
+                    x={paramBlockContextMenu.x}
+                    y={paramBlockContextMenu.y}
+                    selectedCount={selectedParamBlockCount}
+                    canMerge={canMergeSelectedParamBlocks}
+                    canUnmerge={canUnmergeSelectedParamBlocks}
+                    mergeMessage={
+                        paramBlockMessage === null
+                            ? null
+                            : tf(paramBlockMessage as Parameters<typeof tf>[0])
+                    }
+                    splitAtSec={paramBlockSplitAtSec}
+                    onSplit={splitSelectedParamBlockAt}
+                    onMerge={mergeSelectedParamBlocks}
+                    onUnmerge={unmergeSelectedParamBlocks}
+                    onClose={() => setParamBlockContextMenu(null)}
+                    tf={tf}
+                />
+            ) : null}
 
             {/*
              * 颤音窗口：预设库 + 套用到选区，同一个窗口（右键菜单 / 快捷键 / 工具栏 /

@@ -145,6 +145,69 @@ test("components/layout/timeline/runtime/timelineCanvasModel.test.ts scripted ch
         },
         "sparse overlay ids",
     );
+
+    {
+        const overlapModel = buildSparseClipRenderModel({
+            visibleTracks: [{ id: "track-a", color: "#ff7a00" }],
+            startTrackIndex: 0,
+            visibleTrackClipsById: {
+                "track-a": [
+                    {
+                        id: "earlier",
+                        trackId: "track-a",
+                        name: "Earlier",
+                        startSec: 1,
+                        lengthSec: 4,
+                        gain: 1,
+                        playbackRate: 1,
+                        muted: false,
+                        fadeInSec: 0,
+                        fadeOutSec: 0,
+                        fadeInShape: 0,
+                        fadeInDir: 0,
+                        fadeOutShape: 0,
+                        fadeOutDir: 0,
+                    },
+                    {
+                        id: "later",
+                        trackId: "track-a",
+                        name: "Later",
+                        startSec: 3,
+                        lengthSec: 4,
+                        gain: 1,
+                        playbackRate: 1,
+                        muted: false,
+                        fadeInSec: 0,
+                        fadeOutSec: 0,
+                        fadeInShape: 0,
+                        fadeInDir: 0,
+                        fadeOutShape: 0,
+                        fadeOutDir: 0,
+                    },
+                ],
+            },
+            axis: createTimelineAxis({ pxPerSec: 100, viewportWidthPx: 1000 }),
+            rowHeight: 48,
+            selectedClipId: null,
+            multiSelectedClipIds: [],
+            renamingClipId: null,
+        });
+        const byId = new Map(overlapModel.drawClips.map((clip) => [clip.id, clip]));
+        assertEqual(byId.get("earlier")?.coveredUntilPx ?? 0, 0, "earlier clip is not covered");
+        assertEqual(
+            byId.get("earlier")?.trailingHeaderOverlapPx,
+            200,
+            "earlier clip tail header is covered by the later clip",
+        );
+        // earlier = [100,500)，later = [300,700)：later 的前 200px 被压住，
+        // header 必须从这里开始裁剪，不能按紧邻前序的等权混合段另算一份。
+        assertEqual(byId.get("later")?.coveredUntilPx, 200, "later clip header covered width");
+        assertEqual(
+            byId.get("later")?.trailingHeaderOverlapPx ?? 0,
+            0,
+            "later clip header retains its leading overlap",
+        );
+    }
 });
 
 test("components/layout/timeline/runtime/timelineCanvasModel.test.ts 重叠检测：排序扫描 ≡ 全对比较", async () => {

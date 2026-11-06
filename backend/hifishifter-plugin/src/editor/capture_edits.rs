@@ -70,6 +70,25 @@ pub(crate) struct CaptureEdits {
     /// 轨道 id → 用户设置。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub track_settings: BTreeMap<String, CaptureTrackSettings>,
+    /// Clip/Take → 音节分析缓存。
+    ///
+    /// 键是**稳定身份**（不含会话命名空间）；值里是源域区间。手动合并记录要
+    /// 靠它校核成员是否仍存在，因此不能只存曲线。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub take_syllables:
+        BTreeMap<CaptureTakeKey, hifishifter_kernel::pitch_analysis::TakeSyllableAnalysis>,
+    /// 根轨 → 手动合并/切开意图。曲线里没有这两类“块意图”的表示。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub param_block_merges: BTreeMap<String, Vec<hifishifter_kernel::state::ParamBlockMergeRecord>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub param_block_interval_edits:
+        BTreeMap<String, Vec<hifishifter_kernel::state::ParamBlockIntervalEdit>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub(crate) struct CaptureTakeKey {
+    pub clip_id: String,
+    pub take_id: String,
 }
 
 impl CaptureEdits {
@@ -126,6 +145,18 @@ impl CaptureEdits {
     pub(crate) fn stabilize(&mut self) {
         stabilize_map(&mut self.params_by_root_track);
         stabilize_map(&mut self.track_settings);
+        stabilize_map(&mut self.param_block_merges);
+        stabilize_map(&mut self.param_block_interval_edits);
+        let old = std::mem::take(&mut self.take_syllables);
+        for (key, analysis) in old {
+            self.take_syllables.insert(
+                CaptureTakeKey {
+                    clip_id: strip_session_namespace(&key.clip_id).to_owned(),
+                    take_id: strip_session_namespace(&key.take_id).to_owned(),
+                },
+                analysis,
+            );
+        }
     }
 
     /// 把稳定键绑定到**当前会话**的命名空间。
@@ -135,6 +166,20 @@ impl CaptureEdits {
     pub(crate) fn bind_to_namespace(&mut self, namespace: &str) {
         bind_map(&mut self.params_by_root_track, namespace);
         bind_map(&mut self.track_settings, namespace);
+        bind_map(&mut self.param_block_merges, namespace);
+        bind_map(&mut self.param_block_interval_edits, namespace);
+        let old = std::mem::take(&mut self.take_syllables);
+        for (key, analysis) in old {
+            self.take_syllables.insert(
+                CaptureTakeKey {
+                    clip_id: bind_key(&key.clip_id, namespace),
+                    // `rewrite_ids` 只改写 clip / track / params 键；Capture 的 take id
+                    // 由投影生成且跨会话稳定，不能跟 clip 一起加前缀。
+                    take_id: key.take_id,
+                },
+                analysis,
+            );
+        }
         // `disabled_group_ids` 不是轨道 id，`rewrite_ids` 从不改写它们 —— 保持原样。
     }
 }
@@ -173,10 +218,51 @@ pub(crate) fn capture(
                 )
             })
             .collect(),
+        take_syllables: timeline
+            .clips
+            .iter()
+            .flat_map(|clip| {
+                clip.takes.iter().filter_map(move |take| {
+                    take.syllable_analysis.clone().map(|analysis| {
+                        (
+                            CaptureTakeKey {
+                                clip_id: clip.id.clone(),
+                                take_id: take.id.clone(),
+                            },
+                            analysis,
+                        )
+                    })
+                })
+            })
+            .collect(),
+        param_block_merges: timeline
+            .params_by_root_track
+            .iter()
+            .filter(|(_, params)| !params.param_block_merges.is_empty())
+            .map(|(root, params)| (root.clone(), params.param_block_merges.clone()))
+            .collect(),
+        param_block_interval_edits: timeline
+            .params_by_root_track
+            .iter()
+            .filter(|(_, params)| !params.param_block_interval_edits.is_empty())
+            .map(|(root, params)| (root.clone(), params.param_block_interval_edits.clone()))
+            .collect(),
     };
     // 先按当前命名空间精确剥离，再用通用模式兜住历史载荷。
     strip_namespace_map(&mut edits.params_by_root_track, namespace);
     strip_namespace_map(&mut edits.track_settings, namespace);
+    strip_namespace_map(&mut edits.param_block_merges, namespace);
+    strip_namespace_map(&mut edits.param_block_interval_edits, namespace);
+    let old = std::mem::take(&mut edits.take_syllables);
+    for (key, analysis) in old {
+        edits.take_syllables.insert(
+            CaptureTakeKey {
+                clip_id: strip_exact_namespace(&key.clip_id, namespace),
+                take_id: strip_exact_namespace(&key.take_id, namespace),
+            },
+            analysis,
+        );
+    }
     edits.stabilize();
     edits
 }
@@ -267,6 +353,13 @@ fn strip_namespace_map<V>(map: &mut BTreeMap<String, V>, namespace: &str) {
     }
 }
 
+fn strip_exact_namespace(key: &str, namespace: &str) -> String {
+    if namespace.is_empty() {
+        return key.to_owned();
+    }
+    key.strip_prefix(namespace).unwrap_or(key).to_owned()
+}
+
 fn stabilize_map<V>(map: &mut BTreeMap<String, V>) {
     if map.is_empty() {
         return;
@@ -288,6 +381,13 @@ fn bind_map<V>(map: &mut BTreeMap<String, V>, namespace: &str) {
             value,
         );
     }
+}
+
+fn bind_key(key: &str, namespace: &str) -> String {
+    if namespace.is_empty() {
+        return key.to_owned();
+    }
+    format!("{namespace}{}", strip_session_namespace(key))
 }
 
 /// `hfs-ui-{pid}-{n}-{rest}` → `{rest}`；不是这个形状时原样返回。
@@ -352,6 +452,39 @@ pub(crate) fn apply_project_state(
     timeline
         .disabled_group_ids
         .extend(edits.disabled_group_ids.iter().cloned());
+    for (key, analysis) in &edits.take_syllables {
+        let Some(clip) = timeline
+            .clips
+            .iter_mut()
+            .find(|clip| clip.id == key.clip_id)
+        else {
+            continue;
+        };
+        let Some(take) = clip.takes.iter_mut().find(|take| take.id == key.take_id) else {
+            continue;
+        };
+        take.syllable_analysis = Some(analysis.clone());
+    }
+    // 合并/切开意图按根恢复。即使当前根还没有曲线条目也先落在这里，
+    // 随后的 `ensure_params_for_root` 会保留这些用户意图。
+    for (root, merges) in &edits.param_block_merges {
+        let entry = timeline
+            .params_by_root_track
+            .entry(root.clone())
+            .or_default();
+        entry.param_block_merges = merges.clone();
+    }
+    for (root, interval_edits) in &edits.param_block_interval_edits {
+        let entry = timeline
+            .params_by_root_track
+            .entry(root.clone())
+            .or_default();
+        entry.param_block_interval_edits = interval_edits.clone();
+    }
+    let clips = timeline.clips.clone();
+    for params in timeline.params_by_root_track.values_mut() {
+        params.prune_param_block_merges(&clips);
+    }
     for track in &mut timeline.tracks {
         let Some(settings) = edits.track_settings.get(&track.id) else {
             continue;
@@ -577,5 +710,133 @@ mod tests {
         let restored = CaptureEdits::decode(&edits.encode().unwrap()).unwrap();
         assert!(restored.params_by_root_track.is_empty());
         assert!(restored.track_settings.is_empty());
+    }
+
+    /// **Capture 的音节缓存与手动合并记录必须一起保存。**
+    #[test]
+    fn syllable_cache_and_manual_block_intents_round_trip() {
+        let mut timeline = timeline_with_curve();
+        let analysis = hifishifter_kernel::pitch_analysis::TakeSyllableAnalysis {
+            algorithm: hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM.into(),
+            algorithm_version: hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM_VERSION,
+            source_digest: "digest".into(),
+            source_spans_sec: vec![
+                hifishifter_kernel::pitch_analysis::SyllableSpan {
+                    start_sec: 0.1,
+                    end_sec: 0.3,
+                },
+                hifishifter_kernel::pitch_analysis::SyllableSpan {
+                    start_sec: 0.3,
+                    end_sec: 0.6,
+                },
+            ],
+        };
+        timeline.clips.push(hifishifter_kernel::state::Clip {
+            id: "clip".into(),
+            track_id: "capture-track".into(),
+            name: "clip".into(),
+            length_sec: 1.0,
+            takes: vec![hifishifter_kernel::state::ClipTake {
+                id: "take".into(),
+                name: "take".into(),
+                syllable_analysis: Some(analysis.clone()),
+                ..Default::default()
+            }],
+            active_take_id: Some("take".into()),
+            ..Default::default()
+        });
+        let members = [(0.1, 0.3), (0.3, 0.6)]
+            .into_iter()
+            .enumerate()
+            .map(
+                |(index, (start_sec, end_sec))| hifishifter_kernel::state::ParamBlockMemberRef {
+                    clip_id: "clip".into(),
+                    take_id: "take".into(),
+                    syllable_id: format!("syl-{index}"),
+                    source_start_sec: start_sec,
+                    source_end_sec: end_sec,
+                },
+            )
+            .collect::<Vec<_>>();
+        timeline
+            .params_by_root_track
+            .get_mut("capture-track")
+            .unwrap()
+            .param_block_merges
+            .push(hifishifter_kernel::state::ParamBlockMergeRecord {
+                merged_group_id: "group".into(),
+                member_refs: members,
+            });
+
+        let bytes = capture(&timeline, "").encode().unwrap();
+        let restored = CaptureEdits::decode(&bytes).unwrap();
+        assert_eq!(
+            restored.take_syllables[&CaptureTakeKey {
+                clip_id: "clip".into(),
+                take_id: "take".into(),
+            }],
+            analysis
+        );
+        assert_eq!(
+            restored.param_block_merges["capture-track"].len(),
+            1,
+            "手动合并意图必须随载荷保存"
+        );
+
+        let mut target = TimelineState::default();
+        target.tracks = timeline.tracks.clone();
+        apply(&mut target, &restored);
+        assert_eq!(target.clips[0].takes[0].syllable_analysis, Some(analysis));
+        assert_eq!(
+            target.params_by_root_track["capture-track"]
+                .param_block_merges
+                .len(),
+            1
+        );
+    }
+
+    /// 旧载荷缺省：音节缓存与合并意图不存在时解码为空白，不破坏曲线。
+    #[test]
+    fn old_capture_payload_without_block_fields_still_decodes() {
+        let legacy = serde_json::json!({
+            "params_by_root_track": {
+                "capture-track": {
+                    "pitch_edit": [60.0, 62.0],
+                    "pitch_edit_user_modified": true
+                }
+            }
+        });
+        let restored = CaptureEdits::decode(&serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert_eq!(restored.take_syllables.len(), 0);
+        assert_eq!(restored.param_block_merges.len(), 0);
+        assert_eq!(restored.param_block_interval_edits.len(), 0);
+    }
+
+    /// **真实命名空间下，Capture 的 Take 身份必须保持稳定。**
+    ///
+    /// `rewrite_ids` 只给 clip / track / params 键加前缀，Take id 不动；
+    /// 这里钉住同一口径，避免重开后音节缓存全部 miss。
+    #[test]
+    fn take_syllable_keys_bind_only_the_clip_side_to_the_session_namespace() {
+        let mut payload = CaptureEdits::default();
+        payload.take_syllables.insert(
+            CaptureTakeKey {
+                clip_id: "capture-clip-1-0".into(),
+                take_id: "capture-clip-1-0_take_1".into(),
+            },
+            hifishifter_kernel::pitch_analysis::TakeSyllableAnalysis {
+                algorithm: hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM.into(),
+                algorithm_version: hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM_VERSION,
+                source_digest: "digest".into(),
+                source_spans_sec: vec![hifishifter_kernel::pitch_analysis::SyllableSpan {
+                    start_sec: 0.0,
+                    end_sec: 0.5,
+                }],
+            },
+        );
+        payload.bind_to_namespace("hfs-ui-1234-2-");
+        let key = payload.take_syllables.keys().next().unwrap();
+        assert_eq!(key.clip_id, "hfs-ui-1234-2-capture-clip-1-0");
+        assert_eq!(key.take_id, "capture-clip-1-0_take_1");
     }
 }

@@ -1886,6 +1886,13 @@ function AppInner() {
         void dispatch(loadDockSettings())
             .unwrap()
             .then((payload) => {
+                if (import.meta.env.DEV && new URLSearchParams(window.location.search).has("mock")) {
+                    // mock 的设置对象没有 Disk 上的 dock 布局；但必须走真实的
+                    // hydrate 路径，让 Dock 的默认工作区立刻可交互。
+                    dispatch(hydrateDock({ settings: null, layout: null, mode: "standalone" }));
+                    finalizeDockHydration(dispatch, store.getState);
+                    return;
+                }
                 dispatch(hydrateDock(payload));
                 // 归一化与面板注册都已完成，此时才能安全处理"套用启动预设"与
                 // "把浮窗收回停靠位"这两件事（见 `finalizeDockHydration`）。
@@ -1893,7 +1900,13 @@ function AppInner() {
             })
             .catch(() => {
                 // 读不到设置时保持出厂布局；`hydrated` 仍为 false，因此不会把
-                // 默认布局写回去覆盖磁盘内容。
+                // 默认布局写回去覆盖磁盘内容。纯浏览器 mock 没有可恢复的磁盘布局，
+                // 必须显式 hydrate 一次出厂布局，否则 Dock 的工作区与参数编辑器
+                // 根本不会挂载 —— 表现为“界面看得见、下方全空、点击无反应”。
+                if (import.meta.env.DEV && new URLSearchParams(window.location.search).has("mock")) {
+                    dispatch(hydrateDock({ settings: null, layout: null, mode: "standalone" }));
+                    finalizeDockHydration(dispatch, store.getState);
+                }
             });
     }, [dispatch]);
 
@@ -2941,7 +2954,7 @@ function AppInner() {
                     break;
                 case "mode.toggle": {
                     const cur = runtimeRef.current.toolMode;
-                    if (cur === "select") {
+                    if (cur === "select" || cur === "block") {
                         void dispatch(setToolModePersistent(runtimeRef.current.drawToolMode));
                     } else {
                         void dispatch(setToolModePersistent("select"));
@@ -3056,7 +3069,7 @@ function AppInner() {
                     // 直线与颤音共用同一份拖动方向（同一个"起点 → 终点"手势），
                     // 因此两者都归到 `"vibrato"` 这一路。
                     const tool =
-                        ss.toolMode === "select"
+                        ss.toolMode === "select" || ss.toolMode === "block"
                             ? ("select" as const)
                             : ss.drawToolMode === "draw"
                               ? ("draw" as const)

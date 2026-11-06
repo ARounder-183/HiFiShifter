@@ -46,7 +46,9 @@ export function scopePriority(
     switch (scopedContext) {
         case "paramEditorSelect":
             // 参数编辑器操作只在钢琴卷帘 + 选择工具下生效；其它焦点域硬排除。
-            return domain === "pianoRoll" && toolMode === "select" ? 0 : Infinity;
+            return domain === "pianoRoll" && (toolMode === "select" || toolMode === "block")
+                ? 0
+                : Infinity;
         case "timelineFocus":
             return domain === "timeline" ? 0 : 2;
         case "trackHeaderFocus":
@@ -240,7 +242,9 @@ export function resolveEditOpRoute(
             return null;
         case "selectAll":
         case "deselect":
-            if (surface === "pianoRoll" && toolMode === "select") return "hifi:editOp";
+            if (surface === "pianoRoll" && (toolMode === "select" || toolMode === "block")) {
+                return "hifi:editOp";
+            }
             return "hifi:timelineEditOp";
         case "pasteTracks":
         case "delete":

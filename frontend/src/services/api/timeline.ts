@@ -131,6 +131,40 @@ export interface ClipFormantAnalysisResult {
     message: string | null;
 }
 
+export interface ClipSyllableAnalysisResult {
+    ok: boolean;
+    clipId: string;
+    takeId: string;
+    /** 源域 [start, end]；空数组 = 尚无结果 / 回退整段。 */
+    sourceSpansSec: Array<{ startSec: number; endSec: number }>;
+    algorithm: string;
+    algorithmVersion: number;
+    analyzed: boolean;
+}
+
+export interface ParamBlockMemberRefPayload {
+    clipId: string;
+    takeId: string;
+    syllableId: string;
+    sourceStartSec: number;
+    sourceEndSec: number;
+}
+
+export interface ParamBlockMergeRecordPayload {
+    mergedGroupId: string;
+    memberRefs: ParamBlockMemberRefPayload[];
+}
+
+export interface ParamBlockIntervalEditPayload {
+    editId: string;
+    memberRefs: ParamBlockMemberRefPayload[];
+    startSec: number;
+    endSec: number;
+    memberStartSec?: number;
+    memberEndSec?: number;
+    blockIds?: string[];
+}
+
 export const timelineApi = {
     // Undo/Redo (backend-authoritative)
     undoTimeline: () => invoke<TimelineResult>("undo_timeline"),
@@ -394,6 +428,40 @@ export const timelineApi = {
      */
     analyzeClipFormants: (clipId: string) =>
         invoke<ClipFormantAnalysisResult>("analyze_clip_formants", clipId),
+
+    getClipSyllableSpans: (clipId: string) =>
+        invoke<ClipSyllableAnalysisResult>("get_clip_syllable_spans", clipId),
+
+    analyzeClipSyllables: (clipId: string) =>
+        invoke<ClipSyllableAnalysisResult>("analyze_clip_syllables", clipId),
+
+    getParamBlockMerges: (rootTrackId: string) =>
+        invoke<{
+            ok: boolean;
+            records: ParamBlockMergeRecordPayload[];
+            intervalEdits?: ParamBlockIntervalEditPayload[];
+            error?: string;
+        }>("get_param_block_merges", rootTrackId).then((result) => {
+            if (!result?.ok) throw new Error(result?.error ?? "get_param_block_merges failed");
+            return {
+                records: result.records ?? [],
+                intervalEdits: result.intervalEdits ?? [],
+            };
+        }),
+
+    setParamBlockMerges: (
+        rootTrackId: string,
+        records: ParamBlockMergeRecordPayload[],
+        intervalEdits: ParamBlockIntervalEditPayload[] = [],
+        checkpoint = true,
+    ) =>
+        invoke<{ ok: boolean }>(
+            "set_param_block_merges",
+            rootTrackId,
+            records,
+            intervalEdits,
+            checkpoint,
+        ),
 
     setClipsStateBulk: (payload: {
         updates: Array<{
