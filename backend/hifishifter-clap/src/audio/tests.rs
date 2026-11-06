@@ -126,3 +126,27 @@ fn two_instances_keep_independent_sample_rates_and_render_modes() {
     assert_eq!(realtime.capture_observations(), (false, false));
     assert_eq!(offline.capture_observations(), (false, true));
 }
+
+#[test]
+fn in_place_buffers_are_passed_through_without_cross_channel_corruption() {
+    // 输入与输出共用同一块内存：若实现"读一路就写一路"，右声道会读到被
+    // 左声道覆盖的数据。这里让两个声道各用不同的波形，逐样本比对。
+    let mut left = vec![1.0_f32, 2.0, 3.0, 4.0];
+    let mut right = vec![10.0_f32, 20.0, 30.0, 40.0];
+    let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
+    let buffer = clap_audio_buffer_t {
+        data32: planes.as_mut_ptr(), data64: std::ptr::null_mut(),
+        channel_count: 2, latency: 0, constant_mask: 0,
+    };
+    let process = clap_process_t {
+        steady_time: 0, frames_count: 4,
+        transport: std::ptr::null(),
+        audio_inputs: &buffer,
+        audio_outputs: &buffer as *const _ as *mut _,
+        audio_inputs_count: 1, audio_outputs_count: 1,
+        in_events: std::ptr::null(), out_events: std::ptr::null(),
+    };
+    assert!(unsafe { process_block(&process) });
+    assert_eq!(left, vec![1.0, 2.0, 3.0, 4.0]);
+    assert_eq!(right, vec![10.0, 20.0, 30.0, 40.0]);
+}

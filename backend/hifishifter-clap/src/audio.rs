@@ -183,7 +183,11 @@ pub unsafe fn process_block(process: &clap_process_t) -> bool {
             .iter()
             .any(|input| input.ptr == out.ptr)
     });
-    let _block = AudioBlock {
+    // 【为什么用 AudioBlock 而不是直接操作裸指针】这一层是格式外壳与共享语义的
+    // 唯一交界：core 只认识 ChannelPlane，不认识 clap_audio_buffer_t。构造之后
+    // 所有搬运都从 block 的平面描述出发，in-place 语义也由 block 自己携带；
+    // 把 block 丢在一边另写一套指针循环，等于让中性契约永远没有消费者。
+    let mut block = AudioBlock {
         frames,
         sample_width: SampleWidth::F32,
         input: &in_planes[..in_count],
@@ -191,29 +195,45 @@ pub unsafe fn process_block(process: &clap_process_t) -> bool {
         in_place,
     };
     // 保守直通：逐帧先读两个源样本再写输出；in-place 与声道交换都安全。
-    for frame in 0..frames {
-        let left = if in_count > 0 {
-            unsafe { *in_planes[0].ptr.cast::<f32>().add(frame) }
-        } else {
-            0.0
-        };
-        let right = if in_count > 1 {
-            unsafe { *in_planes[1].ptr.cast::<f32>().add(frame) }
-        } else {
-            left
-        };
-        let values = [left, right, (left + right) * 0.5];
-        for channel in 0..channel_count {
-            let target = unsafe { out_planes[channel].ptr.cast::<f32>().add(frame) };
-            let value = if channel_count == 1 {
-                values[2]
-            } else {
-                values[channel]
-            };
-            unsafe { target.write(value) };
-        }
+    // F64 已在上面单独处理，这里只可能是 F32。
+    if block.sample_width != SampleWidth::F32 {
+        return false;
+    }
+    // 【为什么 in_place 不需要单独分支】"读一个源就写一个输出"会在共用地址时
+    // 让第二个源读到刚被覆盖的数据。这里每帧都先 read_frame 把两个源读进栈上定长
+    // 数组，再 write_frame 统一写全部输出平面，顺序天然满足 in-place 契约。
+    // block.in_place 由构造方检测后随 block 传递，供后续共享渲染层判断是否需要
+    // 额外的缓冲；本直通实现只依赖"先读齐再写"这一条，不分配堆内存。
+    for frame in 0..block.frames {
+        let sources = read_frame(&block, frame);
+        write_frame(&mut block, frame, &sources);
     }
     true
+}
+
+/// 读出一帧两个源声道（缺声道时按既定规则补齐），不触碰任何输出平面。
+fn read_frame(block: &AudioBlock<'_>, frame: usize) -> [f32; 3] {
+    let left = if !block.input.is_empty() {
+        unsafe { *block.input[0].ptr.cast::<f32>().add(frame) }
+    } else {
+        0.0
+    };
+    let right = if block.input.len() > 1 {
+        unsafe { *block.input[1].ptr.cast::<f32>().add(frame) }
+    } else {
+        left
+    };
+    [left, right, (left + right) * 0.5]
+}
+
+/// 把一帧写进所有输出平面；单声道输出取两路平均。
+fn write_frame(block: &mut AudioBlock<'_>, frame: usize, values: &[f32; 3]) {
+    let mono = block.output.len() == 1;
+    for (channel, plane) in block.output.iter_mut().enumerate() {
+        let target = unsafe { plane.ptr.cast::<f32>().add(frame) };
+        let value = if mono { values[2] } else { values[channel] };
+        unsafe { target.write(value) };
+    }
 }
 
 unsafe fn buffers(
