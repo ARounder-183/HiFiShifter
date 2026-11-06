@@ -68,13 +68,27 @@ pub(crate) fn is_slow(command: &str) -> bool {
 /// 时间线、参数、历史全都只能经由会话访问，签名里没有它，就写不出越界的代码。
 /// （`SlowTask.work` 的闭包入口靠纪律，见 `slow_lane` 的模块头；这条按名字分发的路
 /// 则把最常用的那条锁死在类型层面。）
-pub(crate) fn dispatch_slow(command: &str, _args: &Value) -> Option<Result<Value, String>> {
+/// The slow-lane arm for `command`, if the table has one.
+///
+/// Kept separate from [`dispatch_slow`] so a test can prove that every table
+/// entry has a matching arm **without actually running the arm**.  The
+/// benchmark arm builds an ONNX session and runs five real inferences; on a
+/// headless CI runner that takes minutes and can hang in the ORT CPU backend.
+/// Before the Intel-macOS backend was registered it failed instantly and this
+/// test looked cheap, which hid the cost for as long as ORT was broken there.
+pub(crate) fn slow_dispatch_target(
+    command: &str,
+) -> Option<(&'static str, fn() -> Result<Value, String>)> {
     match command {
-        "run_vocoder_benchmark" => {
-            Some(hifishifter_kernel::nsf_hifigan_onnx::run_benchmark().and_then(value))
-        }
+        "run_vocoder_benchmark" => Some(("run_vocoder_benchmark", || {
+            hifishifter_kernel::nsf_hifigan_onnx::run_benchmark().and_then(value)
+        })),
         _ => None,
     }
+}
+
+pub(crate) fn dispatch_slow(command: &str, _args: &Value) -> Option<Result<Value, String>> {
+    slow_dispatch_target(command).map(|(_, run)| run())
 }
 
 // 回归诊断测试仅在cfg(test)编译；产品分组历史路径由已加载分支实际执行。
@@ -101,7 +115,7 @@ mod lane_tests {
         for command in SLOW_COMMANDS {
             assert_eq!(lane(command), Lane::Slow, "{command} 必须在慢车道表里");
             assert!(
-                dispatch_slow(command, &serde_json::json!({})).is_some(),
+                slow_dispatch_target(command).is_some_and(|(name, _)| name == *command),
                 "{command} 在表里但 dispatch_slow 没有对应 arm"
             );
         }

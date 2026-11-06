@@ -90,15 +90,17 @@ DMG 里的 dylib 校验都必须**先有产物**。它们属于 `build.yml` / `v
 - **测试被信号打死**：`scripts/checks/backtrace-plugin-test-crash.sh` 在失败时按整组
   重放并打印所有线程栈；它只在 Linux 上跑（macOS 没有 apt-get/gdb），所以 CI 上
   别指望 macOS 那条腿能给出栈。
-- **CPU-only 测试环境**：Windows 与 **Linux** 的测试 job 设 `HIFISHIFTER_ORT_EP=cpu`。
+- **CPU-only 测试环境**：Windows 与 Unix 的测试 job 都设 `HIFISHIFTER_ORT_EP=cpu`。
   这不是偏好而是硬钉：内核让 `cpu_only_mode()` 优先于持久化设置（其默认 `auto`
   会通过运行时覆盖顶掉环境变量），并跳过 `diagnose_available_providers()` 的 WebGPU
   注册探测。仅注册那个 EP 就会启动 Dawn/Tint 的着色器编译线程，在只有 Lavapipe 的
   Linux runner 上写坏堆（`free(): unaligned chunk detected in tcache 2` → SIGABRT）。
-  **macOS 必须留在 `auto`**：Dawn 在 macOS 走 Metal，没有这个故障；钉成 cpu 会跳过
-  GPU 探测、改变 ORT 初始化时序，实测让 `editor::` 组在
-  `a_slow_command_replies_without_touching_the_actor_queue` 永久挂住。`vst3-unix.yml`
-  用 `runner.os == 'Linux` 条件分别取值。
+- **测试不要真跑推理**：`editor::commands::lane_tests::every_slow_command_is_dispatchable`
+  过去直接调 `dispatch_slow("run_vocoder_benchmark")`，于是**真的建 ONNX 会话并跑 5 轮
+  推理**。此前 macOS Intel 的 ORT 后端没注册，benchmark 立即报错，这条测试看着只要几毫秒；
+  `ensure_ort_backend()` 修好后端之后它第一次真正跑起来，在 headless runner 上耗时数十秒
+  甚至挂住整个 `editor::` 组。现在 `slow_dispatch_target()` 只回答「表里这条命令有没有
+  对应 arm」，测试不再执行 arm 本身。
 - **Intel macOS 的 ONNX 后端**：`ort-sys` 没有 x86_64-apple-darwin 预编译库，该目标
   用 `ort` 的 `alternative-backend` + `ort-tract`。`ort::set_api(ort_tract::api())`
   必须在任何 `ort` API 之前调用；缺失时首个 ONNX 操作 panic 并毒化全局环境锁，
