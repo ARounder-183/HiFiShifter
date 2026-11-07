@@ -12,7 +12,7 @@
 //! "建一个视图"和"卸载前收尾"；平台的差异（异步 COM、GTK 线程、scheme handler）
 //! 全部留在原语里。
 
-mod client;
+pub(crate) mod client;
 mod port;
 mod protocol;
 mod unavailable;

@@ -1450,18 +1450,22 @@ impl BootstrapFlags {
     }
 }
 
-/// 当前 bootstrap 快照。导航前注入与绑定后的补发共用同一份事实。
-pub(crate) fn bootstrap_json(
-    link: &crate::editor::routing::EditorLink,
+/// 视图 bootstrap 的**能力快照**（`hostKind` / `hostCapabilities` / `captureCaps` 等）。
+///
+/// 【为什么单独暴露】格式外壳（CLAP）没有 `EditorLink`，但它要的正是这同一份能力事实：
+/// `hostKind` 决定前端按哪种形态分流，`captureCaps` 决定录制引导语。外壳自己拼一份
+/// 就必然与这里漂移 —— 而漂移的表现是“同一种宿主在两种格式下显示不同的能力”。
+pub fn bootstrap_capabilities(
+    owner: Option<&std::sync::Arc<crate::render::extension::ExtensionOwner>>,
     view_id: &str,
 ) -> serde_json::Value {
-    let owner = link.owner().ok();
     // 【为什么先落定形态】窗口打开时可能还在 ARA 绑定宽限期内；不按需求值，
     // `hostKind` 会停在 `ara_only`，非 ARA 宿主会被当成 ARA-only 对待。
-    if let Some(owner) = &owner {
+    if let Some(owner) = owner {
         owner.resolve_binding_mode();
     }
-    let mut payload = BootstrapFlags {
+
+    let payload = BootstrapFlags {
         transport_control: owner
             .as_ref()
             .is_some_and(|owner| owner.host_playback().is_some()),
@@ -1496,6 +1500,19 @@ pub(crate) fn bootstrap_json(
             .unwrap_or_else(hifishifter_kernel::editor::host::HostCapabilities::none),
     }
     .to_json(view_id);
+    // 路由状态：前端据此区分「还在等宿主」与「宿主根本没连」，并决定要不要提示。
+    // 放在这里而不是 `BootstrapFlags` 里，是因为后者是 `Copy` 的纯能力快照，
+    // 而这两个字段带一段可能很长的原因字符串。
+    payload
+}
+
+/// 当前 bootstrap 快照。导航前注入与绑定后的补发共用同一份事实。
+pub(crate) fn bootstrap_json(
+    link: &crate::editor::routing::EditorLink,
+    view_id: &str,
+) -> serde_json::Value {
+    let owner = link.owner().ok();
+    let mut payload = bootstrap_capabilities(owner.as_ref(), view_id);
     // 路由状态：前端据此区分「还在等宿主」与「宿主根本没连」，并决定要不要提示。
     // 放在这里而不是 `BootstrapFlags` 里，是因为后者是 `Copy` 的纯能力快照，
     // 而这两个字段带一段可能很长的原因字符串。

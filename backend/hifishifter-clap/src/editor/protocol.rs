@@ -41,44 +41,22 @@ const MAX_PREF_KEYS: usize = 512;
 const MAX_PREF_KEY_BYTES: usize = 256;
 const MAX_PREF_VALUE_BYTES: usize = 64 * 1024;
 
-/// 本窗口的 bootstrap：形态是 `capture`，能力全部如实为 false。
+/// 本窗口的 bootstrap：**共享能力快照** + 本格式的路由读数。
 ///
-/// `viewId` 由实例生成，回执与事件都带它（前端据此丢弃别的实例的消息）。
-pub fn bootstrap(view_id: &str, capture_caps: Value) -> Value {
-    json!({
-        "version": 1,
-        "viewId": view_id,
-        "hostKind": "capture",
-        "historyBackend": "local",
-        "trackGrouping": true,
-        "transportControl": false,
-        "fadeAxes": null,
-        "captureCaps": capture_caps,
-        "hostCapabilities": {
-            "transport": false,
-            "clipGeometry": false,
-            "clipWrite": false,
-            "split": false,
-            "undoStack": false,
-            "mediaImport": false,
-            "trackCreate": false,
-            "itemClipboard": false,
-            "fadeAxes": false,
-            "exportAudio": false,
-            "exportData": false,
-        },
-        // 【为什么不是 `unbound`】那个取值的前端含义是"视图根本连不上处理器"，而
-        // `captureStore` 看到它会**直接跳过 capture_status 轮询** —— 表现就是录制键
-        // 永远是灰的（实测：用户报的"当前不可用"）。CLAP 视图确实连着一个处理器：
-        // 本模块自己在进程内回答命令。真正缺的是 ARA 文档与编辑能力，那些由
-        // `hostCapabilities` 全 false 如实表达。
-        "editorRoute": {
-            "state": "bound",
-            "reason": "CLAP Capture-only shell: commands are served in-process by the plug-in",
-        },
-    })
+/// 【为什么能力快照由共享层给】`hostKind` 决定前端按哪种形态分流，`captureCaps` 决定
+/// 录制引导语，`hostCapabilities` 决定哪些入口可用 —— 这三样描述的是**插件此刻面对
+/// 的宿主**，与外壳是 VST3 还是 CLAP 无关。外壳自己拼一份就必然漂移。
+///
+/// 【为什么 `editorRoute` 必须在这里补】它是**格式侧**的事实：CLAP 视图连着的是本进程
+/// 内的编辑会话。取值为 `unbound` 会让前端**完全跳过** capture_status 轮询
+/// （captureStore.ts 的降频判据），于是录制键永远灰着。
+pub fn bootstrap(mut capabilities: Value) -> Value {
+    capabilities["editorRoute"] = json!({
+        "state": "bound",
+        "reason": "CLAP shell: commands are served by the shared editor session",
+    });
+    capabilities
 }
-
 /// bootstrap 的 `captureCaps`：四个读数**都是观察到的**。
 ///
 /// 【为什么 sawContext 取自捕获存储而不是 AudioState】“宿主给过可用的工程位置”是捕获
@@ -208,10 +186,17 @@ mod tests {
 
     #[test]
     fn bootstrap_reports_capture_and_no_host_write_capabilities() {
-        let boot = bootstrap(
-            "view-1",
-            json!({"sawContext": false, "sawInput": false, "sawOffline": false, "canCapture": false}),
-        );
+        let boot = bootstrap(json!({
+            "version": 1,
+            "viewId": "view-1",
+            "hostKind": "capture",
+            "hostCapabilities": {
+                "transport": false, "clipGeometry": false, "clipWrite": false, "split": false,
+                "undoStack": false, "mediaImport": false, "trackCreate": false,
+                "itemClipboard": false, "fadeAxes": false, "exportAudio": false, "exportData": false
+            },
+            "captureCaps": {"sawContext": false, "sawInput": false, "sawOffline": false, "canCapture": false}
+        }));
         // 【为什么钉死这一条】`editorRoute.state == "unbound"` 会让前端**完全跳过**
         // capture_status 轮询（captureStore.ts 的降频判据），于是录制键永远灰着。
         // 这个取值必须只在“视图真的连不上处理器”时出现，CLAP 不是那种情况。

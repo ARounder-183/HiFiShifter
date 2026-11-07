@@ -49,6 +49,8 @@ pub(crate) const TEMP_SWEEP_TARGETS: &[(&str, &str)] = &[
 ];
 
 pub(crate) use errors::classify_error;
+/// 视图 bootstrap 的能力快照（两种格式共用同一份事实）。
+pub use gui::client::bootstrap_capabilities;
 pub(crate) use view::create_view_with_link;
 
 #[cfg(test)]

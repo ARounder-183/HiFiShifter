@@ -683,23 +683,18 @@ fn configure_browser(
     // bootstrap 必须在任何页面脚本之前注入，且导航要等注入完成。
     // 捕获能力是**观察到的**：宿主给过可用位置、给过输入、见过离线 render —— 三者的
     // 现场读数在实例上，bootstrap 只是把它们抄进页面（前端据此说"能不能录"）。
-    let caps = unsafe { crate::instance(plugin) }
-        .map(|instance| {
-            let (_, saw_offline) = instance.audio.capture_observations();
-            let status = instance.owner.capture().status();
-            let active = instance.active.load(std::sync::atomic::Ordering::Acquire)
-                && instance.processing.load(std::sync::atomic::Ordering::Acquire);
-            protocol::capture_caps(status.saw_context, status.saw_input, saw_offline, active)
-        })
-        .unwrap_or_else(|| {
-            serde_json::json!({
-                "sawContext": false, "sawInput": false, "sawOffline": false, "canCapture": false
-            })
-        });
+    // 【为什么能力快照来自共享层】`hostKind` / `hostCapabilities` / `captureCaps` 描述的是
+    // “插件此刻面对什么宿主”，与外壳是哪种格式无关 —— VST3 的视图读的是同一份函数。
     let boot = with_view(plugin, |view| {
-        protocol::bootstrap(&view.view_id, caps.clone())
+        let owner = unsafe { crate::instance(plugin) }.map(|instance| &instance.owner);
+        protocol::bootstrap(hifishifter_plugin::editor::bootstrap_capabilities(
+            owner,
+            &view.view_id,
+        ))
     })
-    .unwrap_or_else(|| protocol::bootstrap("clap-view", caps));
+    .unwrap_or_else(|| {
+        protocol::bootstrap(serde_json::json!({ "version": 1, "viewId": "clap-view" }))
+    });
     let script = wide(&format!("window.__HFS_PLUGIN_BOOTSTRAP__={boot};"));
     let nav_browser = browser.clone();
     let ready =
