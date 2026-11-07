@@ -133,7 +133,10 @@ pub struct Instance {
     /// `process` 是否正在执行（防同一实例并发进入音频回调）。
     pub in_process: AtomicBool,
     /// 捕获宿主：与 VST3 共用同一份运行时（判定、投影、sidecar）。
-    pub capture: crate::capture::CaptureHost,
+    ///
+    /// 【为什么是 Arc】音高基线要在后台线程上算（一段几分钟的素材要几秒到几十秒），
+    /// 而线程不能借用实例。Arc 让那条线程只持有捕获宿主，生命周期与实例解耦。
+    pub capture: std::sync::Arc<crate::capture::CaptureHost>,
 }
 
 unsafe extern "C" fn create_plugin(
@@ -161,7 +164,7 @@ unsafe extern "C" fn create_plugin(
             active: AtomicBool::new(false),
             processing: AtomicBool::new(false),
             in_process: AtomicBool::new(false),
-            capture: crate::capture::CaptureHost::default(),
+            capture: std::sync::Arc::new(crate::capture::CaptureHost::default()),
         });
         let plugin = Box::new(clap_plugin_t {
             desc: &raw const DESCRIPTOR,
@@ -418,7 +421,7 @@ mod tests {
             active: AtomicBool::new(false),
             processing: AtomicBool::new(false),
             in_process: AtomicBool::new(false),
-            capture: crate::capture::CaptureHost::default(),
+            capture: std::sync::Arc::new(crate::capture::CaptureHost::default()),
         }));
         let plugin = clap_plugin_t {
             desc: std::ptr::null(),

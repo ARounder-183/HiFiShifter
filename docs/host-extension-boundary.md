@@ -142,7 +142,7 @@ ARA 侧改了时间拉伸 / 内容淡化，插件会继续用旧配置渲染。
 | ARA 工厂 / 实例扩展 | **不暴露** | 共享 ARA 文档模型仍在 VST3 外壳里；暴露不能创建控制器的工厂会让宿主写穿空指针 |
 | `ara:supported` / `ara:required` | 都不声明 | descriptor 只描述已履行的能力 |
 | 内嵌 WebView | Windows 有 | `clap.gui` + 独立 WebView2 宿主，加载同一份 `frontend/dist`；非 Windows 如实降级 |
-| 编辑器命令 | 最小回执后端 | `plugin_health` 成功、时间线可读、未接线命令立刻回结构化错误；不复用 VST3 的 ARA 会话 |
+| 编辑器命令 | Capture 回执后端 | `plugin_health`、时间线、参数曲线（`get/set_param_frames`、静态参数）、波形峰值、传输读数都由本模块在进程内回答；未接线的命令立刻回结构化错误，不复用 VST3 的 ARA 会话 |
 | 捕获（录音） | **有** | `capture_status` / `start` / `stop` / `cancel` / `clear` / `delete_take` / `set_options` 与 VST3 同名同载荷；音频从 `process` 的输入总线按工程位置写进插件自己的时间线，实现与 VST3 是**同一个 crate**（`hifishifter-capture`） |
 | 写回 / 分割 / 建轨 / 宿主撤销 / take / folder | 不可用 | 与 ARA-only 相同：REAPER 原生扩展是 VST3 COM 专属，CLAP 没有对应接口 |
 
@@ -176,6 +176,13 @@ ARA 侧改了时间拉伸 / 内容淡化，插件会继续用旧配置渲染。
   `capture_status` 轮询（那本是"视图连不上处理器"的降频判据）。CLAP 视图由本模块在
   进程内回答命令，路由因此报 `bound`；真正缺的 ARA/编辑能力由 `hostCapabilities`
   全 false 表达。这正是用户报的"当前不可用"的第二层原因。
+- **参数编辑器有一条真实的音高线**：`get_processor_params` 按算法给出参数描述符；
+  `get_param_frames` / `set_param_frames` 读写时间线上的曲线（与 VST3 同一份
+  `hifishifter_kernel::editor::params`）；音高**原线**由静态链接的 WORLD
+  （`world_vocoder::estimate_f0_hz`）在后台线程上从捕获 PCM 估计后铺到工程帧网格 ——
+  CLAP 外壳不链接 ONNX 推理栈，这是不引入 40 MB 依赖又让原线真实存在的那条路。
+- **宿主调整窗口大小**：`clap.gui` 的 `adjust_size` 只把请求夹到合法区间后**原样放行**。
+  此前它无条件写回 960×640，于是窗口永远拖不动、WebView 也收不到尺寸变化。
 - **捕获的界面读数必须由外壳回答**：编辑器不推送传输事件，光标与捕获带右缘都读
   `get_playback_state`；时间线的重取由 `plugin_get_apply_state.host_version` 的**前进**
   触发（CLAP 里它等于捕获存储的修订号）。缺了前一条，页面上的光标永远停在 0、带子

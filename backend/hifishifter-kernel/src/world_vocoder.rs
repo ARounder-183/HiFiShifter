@@ -305,6 +305,42 @@ fn cleanup_f0_inplace(f0: &mut [f64], frame_period_ms: f64, f0_floor: f64, f0_ce
     }
 }
 
+/// 从一段**单声道** PCM 估计 F0（Hz；`0.0` 是该帧没有可靠音高）。
+///
+/// 【为什么需要这个入口】FCPE 是插件/App 的首选音高检测器，但它要 ONNX 运行时。
+/// CLAP 外壳刻意不链接推理内核（见 `docs/host-extension-boundary.md`），于是
+/// `fcpe_onnx::is_available()` 在那里恒为假 —— 参数编辑器就**没有原线可画**。
+/// WORLD 是静态链接的（`is_available()` 恒真），质量足够画出可编辑的基线，
+/// 因此把它包成一个与检测器无关的入口：谁有 PCM，谁就能拿到一条真实音高线。
+///
+/// 【帧网格】`frame_period_ms` 与参数编辑器一致（默认 5 ms）。返回长度由 WORLD
+/// 决定（`GetSamplesForHarvest`），调用方按时间轴裁剪/重采样。
+pub fn estimate_f0_hz(samples: &[f32], sample_rate: u32, frame_period_ms: f64) -> Vec<f32> {
+    if samples.is_empty() || sample_rate == 0 || !frame_period_ms.is_finite() {
+        return Vec::new();
+    }
+    // WORLD 的 C 接口只吃 f64 单声道。
+    let mono: Vec<f64> = samples.iter().map(|sample| f64::from(*sample)).collect();
+    let fs = i32::try_from(sample_rate).unwrap_or(0);
+    if fs <= 0 {
+        return Vec::new();
+    }
+    // 人声范围；超出这个范围的"音高"在本产品的用途里只会是噪声。
+    let floor = 65.0;
+    let ceil = 1200.0;
+    // 【为什么固定用 DIO + StoneMask，而不是跟随 `HIFISHIFTER_WORLD_F0`】本仓库静态
+    // 链接的 WORLD 里 `Harvest` 会返回**全零**（同一份 PCM 用 DIO 能正确给出 220 Hz，
+    // 见同文件用例）。音高线"全零"在界面上等于"没有原线"，所以这里只走实测可用的那条。
+    let Ok((_positions, mut f0)) =
+        compute_f0_with_positions_dio_stonemask(&mono, fs, frame_period_ms, floor, ceil)
+    else {
+        return Vec::new();
+    };
+    // 与声码器同一条清理：填掉短洞、把越界值归零（否则一条纯正弦会留下零星空洞）。
+    cleanup_f0_inplace(&mut f0, frame_period_ms, floor, ceil);
+    f0.into_iter().map(|hz| hz as f32).collect()
+}
+
 fn compute_f0_with_positions_dio_stonemask(
     x: &[f64],
     fs: i32,
@@ -789,6 +825,39 @@ where
 
 #[cfg(test)]
 mod tests {
+    /// WORLD 的 F0 入口必须真的能从 PCM 里读出音高。
+    ///
+    /// 【为什么这条在插件之外】CLAP 外壳的音高原线完全依赖它（那边没有 FCPE）；
+    /// 它坏掉时表现为"参数编辑器里一条线都没有"，而错误信息只会在别处出现。
+    #[test]
+    fn estimate_f0_hz_finds_a_sine() {
+        let rate = 48_000_u32;
+        let samples: Vec<f32> = (0..rate)
+            .map(|index| {
+                (2.0 * std::f64::consts::PI * 220.0 * f64::from(index) / f64::from(rate)).sin()
+                    as f32
+                    * 0.5
+            })
+            .collect();
+        let f0 = estimate_f0_hz(&samples, rate, 5.0);
+        assert!(!f0.is_empty(), "no frames were produced");
+        let voiced: Vec<f32> = f0.iter().copied().filter(|hz| *hz > 0.0).collect();
+        assert!(
+            voiced.len() > f0.len() / 2,
+            "too few voiced frames: {} / {}",
+            voiced.len(),
+            f0.len()
+        );
+        let mut sorted = voiced.clone();
+        sorted.sort_by(|a, b| a.total_cmp(b));
+        let median = sorted[sorted.len() / 2];
+        assert!(
+            (median - 220.0).abs() < 5.0,
+            "expected 220 Hz, got {median} Hz (first: {:?})",
+            &f0[..f0.len().min(12)]
+        );
+    }
+
     use super::*;
 
     /// 归一化系数必须是**整段**统计量（旧实现逐块计算，块间因此有台阶）。

@@ -5,6 +5,7 @@
 //! 同一份前端产物、把页面消息交给 `protocol` 回执。
 
 pub mod protocol;
+pub mod timeline_host;
 
 #[cfg(windows)]
 pub mod windows;

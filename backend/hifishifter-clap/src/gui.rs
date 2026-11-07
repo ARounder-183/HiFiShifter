@@ -178,28 +178,49 @@ unsafe extern "C" fn get_size(p: *const clap_plugin_t, width: *mut u32, height: 
 unsafe extern "C" fn can_resize(_p: *const clap_plugin_t) -> bool {
     hifishifter_plugin_core::guard_ffi(false, || true)
 }
+/// 编辑器允许的最小 / 最大像素尺寸。
+///
+/// 【为什么最小不是 0】参数编辑器与时间轴在这个宽度以下会互相压扁（工具栏换行、
+/// 轨道头吃掉全部横向空间）。给宿主一个下限，比让它把窗口拖成一条缝再画不出来好。
+pub const MIN_EDITOR_SIZE: (u32, u32) = (720, 480);
+/// 上限只是"别让一次误拖把窗口设成 8K"的理智线。
+pub const MAX_EDITOR_SIZE: (u32, u32) = (4096, 2400);
+
+/// 把宿主请求的尺寸夹到合法区间。
+pub fn clamp_editor_size(width: u32, height: u32) -> (u32, u32) {
+    (
+        width.clamp(MIN_EDITOR_SIZE.0, MAX_EDITOR_SIZE.0),
+        height.clamp(MIN_EDITOR_SIZE.1, MAX_EDITOR_SIZE.1),
+    )
+}
+
 unsafe extern "C" fn adjust_size(_p: *const clap_plugin_t, w: *mut u32, h: *mut u32) -> bool {
     hifishifter_plugin_core::guard_ffi(false, || {
         if w.is_null() || h.is_null() {
-            false
-        } else {
-            unsafe {
-                *w = 960;
-                *h = 640;
-            };
-            true
+            return false;
         }
+        // 【为什么这里绝不能返回固定尺寸】宿主在用户拖拽边框时调用本函数，把请求的
+        // 宽高交给插件"调整后"使用。此前这里无条件写回 960×640 —— 于是窗口**永远
+        // 变不大也变不小**，WebView 也就永远收不到尺寸变化（用户报的"调整窗口大小
+        // 前端不更新"）。这里只做夹取，原样放行用户要的尺寸。
+        let (width, height) = clamp_editor_size(unsafe { *w }, unsafe { *h });
+        unsafe {
+            *w = width;
+            *h = height;
+        }
+        true
     })
 }
 unsafe extern "C" fn set_size(p: *const clap_plugin_t, w: u32, h: u32) -> bool {
     hifishifter_plugin_core::guard_ffi(false, || {
+        let (width, height) = clamp_editor_size(w, h);
         #[cfg(windows)]
         {
-            crate::editor::windows::set_size(p, w, h)
+            crate::editor::windows::set_size(p, width, height)
         }
         #[cfg(not(windows))]
         {
-            let _ = (p, w, h);
+            let _ = (p, width, height);
             false
         }
     })
@@ -269,6 +290,24 @@ mod tests {
     /// 【为什么只测这一层】真正的创建路径在 `editor/windows.rs`（子 HWND + WebView2），
     /// 真机验收由 `scripts/clap/probe.c` 的黑盒 GUI 流程负责。这里钉的是"表是完整的、
     /// 并且只提供 win32 嵌入而不是浮窗"这两条契约。
+    /// 宿主拖拽边框时**必须原样放行**用户要的尺寸（只夹到合法区间）。
+    ///
+    /// 【为什么这条是回归测试】此前 `adjust_size` 无条件写回 960×640 —— 窗口拖不动，
+    /// WebView 也永远收不到尺寸变化（用户报的"调整窗口大小前端不更新"）。
+    #[test]
+    fn resize_requests_survive_adjustment() {
+        assert_eq!(clamp_editor_size(1200, 800), (1200, 800));
+        assert_eq!(
+            clamp_editor_size(10, 10),
+            MIN_EDITOR_SIZE,
+            "below the floor the window must not collapse"
+        );
+        assert_eq!(clamp_editor_size(9000, 9000), MAX_EDITOR_SIZE);
+        let (mut w, mut h) = (1280_u32, 720_u32);
+        assert!(unsafe { adjust_size(std::ptr::null(), &mut w, &mut h) });
+        assert_eq!((w, h), (1280, 720), "the requested size must pass through");
+    }
+
     #[test]
     fn the_gui_extension_is_complete_and_offers_only_embedded_win32() {
         assert!(GUI_EXT.is_api_supported.is_some());

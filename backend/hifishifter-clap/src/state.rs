@@ -363,7 +363,7 @@ mod tests {
             active: std::sync::atomic::AtomicBool::new(false),
             processing: std::sync::atomic::AtomicBool::new(false),
             in_process: std::sync::atomic::AtomicBool::new(false),
-            capture: crate::capture::CaptureHost::default(),
+            capture: std::sync::Arc::new(crate::capture::CaptureHost::default()),
         }));
         let plugin = clap_plugin_t {
             desc: std::ptr::null(),

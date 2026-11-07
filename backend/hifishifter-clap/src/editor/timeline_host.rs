@@ -1,0 +1,365 @@
+//! CLAP 外壳的**编辑器时间线**：捕获投影 + 用户对参数曲线的编辑。
+//!
+//! 【为什么需要一个常驻的时间线对象】此前 `get_timeline_state` 每次调用都现场投影一份
+//! 新的 `TimelineState`。只读时没问题，但参数编辑器是**有状态**的：用户画的音高线存在
+//! `TrackParamsState` 里，下一次投影会把它连同对象一起丢掉 —— 表现是"画一笔就没了"、
+//! "关掉再开线全不见"。所以时间线必须在两次命令之间活下来。
+//!
+//! 【与捕获存储的关系】捕获存储是**素材**（段、take、PCM）；这里是它的**视图**（轨道、
+//! 片段、参数曲线）。素材每变一次（新一轮录制、清空、删 take），`CaptureStore::revision`
+//! 就前进一次，本对象据此重建视图 —— 但只在真的变了的时候重建，否则用户的编辑会被
+//! 一次无害的轮询冲掉。
+//!
+//! 【音高原线从哪来】VST3/App 用 FCPE（ONNX）分析；CLAP 外壳刻意不链接推理内核，
+//! 因此这里用**静态链接的 WORLD**（`world_vocoder::estimate_f0_hz`）在后台线程上算一条
+//! 基线。它比 FCPE 粗，但它是真实的、可编辑的，且不把 40 MB 的推理栈拖进插件。
+//! 分析在**后台线程**上跑：一段几分钟的素材要几秒到几十秒，卡在 WebView2 的消息
+//! 处理线程上就是"界面假死"。
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+
+use hifishifter_capture::store::CaptureStore;
+use hifishifter_capture::types::CapturePcm;
+use hifishifter_kernel::editor::ParamHost;
+use hifishifter_kernel::state::{HistoryOp, TimelineState};
+use serde_json::Value;
+
+/// 捕获时间线上唯一的轨道 id（与 `hifishifter_capture::timeline` 同一个常量）。
+pub const CAPTURE_TRACK_ID: &str = hifishifter_capture::timeline::CAPTURE_TRACK_ID;
+
+/// 一次音高基线分析的状态。
+#[derive(Default)]
+struct PitchState {
+    /// 已经产出基线的捕获修订号（`u64::MAX` = 还没有）。
+    ready_revision: u64,
+    /// 有线程正在算。
+    running: bool,
+}
+
+/// 编辑器时间线 + 它的派生数据。
+pub struct TimelineHost {
+    timeline: Mutex<TimelineState>,
+    /// `timeline` 对应的捕获修订号。
+    revision: AtomicU64,
+    pitch: Mutex<PitchState>,
+}
+
+impl Default for TimelineHost {
+    fn default() -> Self {
+        Self {
+            timeline: Mutex::new(TimelineState::default()),
+            // 【为什么初值不是 0】空捕获存储的修订号也是 0；用 MAX 保证第一次访问一定
+            // 会建一次视图（默认的 `TimelineState` 带着一条 "Main" 轨，不该被看到）。
+            revision: AtomicU64::new(u64::MAX),
+            pitch: Mutex::new(PitchState {
+                ready_revision: u64::MAX,
+                running: false,
+            }),
+        }
+    }
+}
+
+impl TimelineHost {
+    fn lock(&self) -> std::sync::MutexGuard<'_, TimelineState> {
+        self.timeline.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// 素材变了就重建视图；没变就什么都不做（保住用户的编辑）。
+    pub fn refresh(&self, store: &CaptureStore) {
+        let revision = store.revision();
+        if self.revision.load(Ordering::Acquire) == revision {
+            return;
+        }
+        let (fresh, _sources) = store.session_timeline();
+        let mut timeline = self.lock();
+        // 【为什么再判一次】两个线程可能同时发现"版本变了"；先到的那个已经建好了，
+        // 后到的不能再覆盖一次 —— 那会把刚发生的编辑冲掉。
+        if self.revision.load(Ordering::Acquire) == revision {
+            return;
+        }
+        *timeline = fresh;
+        self.revision.store(revision, Ordering::Release);
+        let mut pitch = self.pitch.lock().unwrap_or_else(|e| e.into_inner());
+        pitch.ready_revision = u64::MAX;
+        pitch.running = false;
+    }
+
+    /// 时间线载荷（编辑器渲染的那一份）。
+    pub fn payload(&self, playhead_sec: f64) -> Value {
+        let timeline = self.lock();
+        let mut payload =
+            serde_json::to_value(timeline.to_payload()).unwrap_or_else(|_| serde_json::json!({}));
+        payload["playhead_sec"] = serde_json::json!(playhead_sec.max(0.0));
+        payload["undo_depth"] = serde_json::json!(0);
+        payload["redo_depth"] = serde_json::json!(0);
+        payload
+    }
+
+    /// 轨道是否存在（参数命令的前置校验）。
+    pub fn track_exists(&self, track_id: &str) -> bool {
+        self.lock().tracks.iter().any(|track| track.id == track_id)
+    }
+
+    /// 当前音高基线是否已经就绪（`false` = 还在后台算）。
+    pub fn pitch_pending(&self) -> bool {
+        self.pitch.lock().unwrap_or_else(|e| e.into_inner()).running
+    }
+
+    /// 确保音高基线存在；需要时**在后台线程**上算。
+    ///
+    /// 返回 `true` 表示"现在就有一条可用的基线"。
+    pub fn ensure_pitch_baseline(self: &Arc<Self>, store: &CaptureStore) -> bool {
+        self.refresh(store);
+        let revision = self.revision.load(Ordering::Acquire);
+        {
+            let mut state = self.pitch.lock().unwrap_or_else(|e| e.into_inner());
+            if state.ready_revision == revision {
+                return true;
+            }
+            if state.running {
+                return false;
+            }
+            state.running = true;
+        }
+        // 【为什么要在这里物化源表】线程里不能再碰捕获存储（它归属于插件实例，
+        // 生命周期不保证跨线程）；`material_sources` 返回的是 Arc，在线程里读是安全的。
+        let sources = store.material_sources();
+        let (root, frame_period_ms, target, clips) = {
+            let timeline = self.lock();
+            let Some(root) = timeline
+                .tracks
+                .first()
+                .map(|track| track.id.clone())
+                .or_else(|| Some(CAPTURE_TRACK_ID.to_owned()))
+            else {
+                return false;
+            };
+            let frame_period_ms = timeline.frame_period_ms();
+            let target = timeline.target_param_frames(frame_period_ms);
+            let mut clips = Vec::new();
+            for clip in &timeline.clips {
+                if clip.muted {
+                    continue;
+                }
+                let Some(source) = clip.source_path.clone() else {
+                    continue;
+                };
+                clips.push(ClipWindow {
+                    source,
+                    start_sec: clip.start_sec.max(0.0),
+                    length_sec: clip.length_sec.max(0.0),
+                    source_start_sec: clip.source_start_sec.max(0.0),
+                    source_end_sec: clip.source_end_sec.max(0.0),
+                    playback_rate: if clip.playback_rate.is_finite() && clip.playback_rate > 0.0 {
+                        f64::from(clip.playback_rate)
+                    } else {
+                        1.0
+                    },
+                });
+            }
+            (root, frame_period_ms, target, clips)
+        };
+        if clips.is_empty() {
+            let mut state = self.pitch.lock().unwrap_or_else(|e| e.into_inner());
+            state.running = false;
+            state.ready_revision = revision;
+            return true;
+        }
+        let host = Arc::clone(self);
+        let spawned = std::thread::Builder::new()
+            .name("hfs-clap-pitch".into())
+            .spawn(move || {
+                let curve = compute_pitch_curve(&clips, &sources, frame_period_ms, target);
+                host.finish_pitch(&root, curve, revision);
+            });
+        if spawned.is_err() {
+            let mut state = self.pitch.lock().unwrap_or_else(|e| e.into_inner());
+            state.running = false;
+            return false;
+        }
+        false
+    }
+
+    /// 后台线程：把算好的基线写进时间线。
+    fn finish_pitch(&self, root: &str, curve: Vec<f32>, revision: u64) {
+        {
+            let mut timeline = self.lock();
+            timeline.ensure_params_for_root(root);
+            let key = hifishifter_kernel::pitch_analysis::build_root_pitch_key(&timeline, root);
+            let layout =
+                hifishifter_kernel::pitch_analysis::build_root_pitch_layout_key(&timeline, root);
+            if let Some(entry) = timeline.params_by_root_track.get_mut(root) {
+                entry.pitch_orig = curve;
+                // 【为什么只在没有用户编辑时覆盖 edit】用户可能已经画过线；分析回来
+                // 时把它整条冲掉，等于"画完等一会儿就没了"。
+                if !entry.pitch_edit_user_modified
+                    || entry.pitch_edit.len() != entry.pitch_orig.len()
+                {
+                    entry.pitch_edit = entry.pitch_orig.clone();
+                    entry.pitch_edit_user_modified = false;
+                }
+                // 【为什么要写这两个 key】内核的 `maybe_schedule_pitch_orig` 靠它们判断
+                // "原线已是最新"。不写的话，它会认为该组装，于是用**空缓存**重新组装，
+                // 把我们刚算好的曲线覆盖成零。
+                entry.pitch_orig_key = Some(key);
+                entry.pitch_layout_key = Some(layout);
+            }
+        }
+        let mut state = self.pitch.lock().unwrap_or_else(|e| e.into_inner());
+        state.running = false;
+        state.ready_revision = revision;
+        log::info!(
+            "[clap][pitch] baseline ready for '{root}' at revision {revision} ({} frame(s))",
+            self.lock()
+                .params_by_root_track
+                .get(root)
+                .map(|e| e.pitch_orig.len())
+                .unwrap_or(0)
+        );
+    }
+}
+
+/// 一个片段在时间线上的窗口（后台线程只读这份拷贝）。
+struct ClipWindow {
+    source: String,
+    start_sec: f64,
+    length_sec: f64,
+    source_start_sec: f64,
+    source_end_sec: f64,
+    playback_rate: f64,
+}
+
+/// 把 Hz 换成 MIDI 音高（0 = 没有音高）。
+fn hz_to_midi(hz: f32) -> f32 {
+    if !(hz.is_finite() && hz > 0.0) {
+        return 0.0;
+    }
+    69.0 + 12.0 * (f64::from(hz) / 440.0).log2() as f32
+}
+
+/// 逐片段算音高并铺到工程帧网格上。
+fn compute_pitch_curve(
+    clips: &[ClipWindow],
+    sources: &HashMap<String, Arc<CapturePcm>>,
+    frame_period_ms: f64,
+    target: usize,
+) -> Vec<f32> {
+    let mut out = vec![0.0_f32; target];
+    if !frame_period_ms.is_finite() || frame_period_ms <= 0.0 {
+        return out;
+    }
+    for clip in clips {
+        let Some(pcm) = sources.get(&clip.source) else {
+            continue;
+        };
+        let channels = pcm.planes.len();
+        let frames = pcm.planes.first().map(Vec::len).unwrap_or(0);
+        if frames == 0 || channels == 0 {
+            continue;
+        }
+        let rate = f64::from(pcm.sample_rate.max(1));
+        let start = (clip.source_start_sec * rate).round().max(0.0) as usize;
+        let declared_end = if clip.source_end_sec > 0.0 {
+            (clip.source_end_sec * rate).round().max(0.0) as usize
+        } else {
+            frames
+        };
+        let end = declared_end.min(frames).max(start);
+        if end <= start {
+            continue;
+        }
+        // 单声道混合：WORLD 只吃单声道，取各声道平均（与渲染侧的下混同口径）。
+        let mono: Vec<f32> = (start..end)
+            .map(|index| {
+                let mut sum = 0.0_f32;
+                for plane in &pcm.planes {
+                    sum += plane[index];
+                }
+                sum / channels as f32
+            })
+            .collect();
+        let f0 = hifishifter_kernel::world_vocoder::estimate_f0_hz(
+            &mono,
+            pcm.sample_rate,
+            frame_period_ms,
+        );
+        if f0.is_empty() {
+            continue;
+        }
+        let clip_start_frame = (clip.start_sec * 1000.0 / frame_period_ms).round() as usize;
+        let clip_frames = (clip.length_sec * 1000.0 / frame_period_ms).round() as usize;
+        for index in 0..clip_frames {
+            let frame = clip_start_frame + index;
+            if frame >= target {
+                break;
+            }
+            // 工程帧 → 片段内秒 → 源内秒（播放速率 > 1 时更快消耗源）。
+            let elapsed = index as f64 * frame_period_ms / 1000.0 * clip.playback_rate;
+            let source_frame = (elapsed * 1000.0 / frame_period_ms).round() as usize;
+            let Some(hz) = f0.get(source_frame) else {
+                continue;
+            };
+            let midi = hz_to_midi(*hz);
+            if midi > 0.0 {
+                out[frame] = midi;
+            }
+        }
+    }
+    out
+}
+
+impl ParamHost for TimelineHost {
+    fn timeline(&self) -> &Mutex<TimelineState> {
+        &self.timeline
+    }
+
+    fn checkpoint_timeline(&self, _timeline: &TimelineState, _operation: HistoryOp) {
+        // 【为什么是空实现】CLAP 外壳没有撤销栈（宿主也没有给它一个）。写曲线本身
+        // 仍然生效；只是"撤销这一步"不成立，界面上也不会出现一条假的历史记录。
+    }
+
+    fn mark_dirty(&self) {
+        // 没有工程文件可标脏；保留这个方法是为了让共享命令能跑通。
+    }
+
+    fn publish_timeline(&self, _timeline: TimelineState) {
+        // 【为什么什么都不做】发布是"把时间线交给渲染/设备"。CLAP 外壳本阶段是直通，
+        // 没有渲染可发布；曲线留在时间线里，下一次读取就是它自己。
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 波形：`hz_to_midi` 的锚点（A4 = 69，C4 ≈ 60）。
+    #[test]
+    fn hz_maps_to_midi_notes() {
+        assert!((hz_to_midi(440.0) - 69.0).abs() < 1e-4);
+        assert!((hz_to_midi(261.63) - 60.0).abs() < 0.02);
+        assert_eq!(hz_to_midi(0.0), 0.0, "没有音高必须是 0（前端据此判定未画）");
+    }
+
+    /// 空捕获存储：第一次访问必须建出**捕获轨道**（而不是默认的 Main 轨）。
+    #[test]
+    fn a_fresh_store_builds_the_capture_track() {
+        let store = CaptureStore::default();
+        let host = TimelineHost::default();
+        host.refresh(&store);
+        let timeline = host.lock();
+        assert_eq!(timeline.tracks.len(), 1);
+        assert_eq!(timeline.tracks[0].id, CAPTURE_TRACK_ID);
+        assert!(timeline.clips.is_empty());
+    }
+
+    /// 没有素材时音高基线立刻"就绪"（不该留一个永远转的等待）。
+    #[test]
+    fn an_empty_timeline_has_no_pending_pitch_job() {
+        let store = CaptureStore::default();
+        let host = Arc::new(TimelineHost::default());
+        assert!(host.ensure_pitch_baseline(&store));
+        assert!(!host.pitch_pending());
+    }
+}

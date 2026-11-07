@@ -60,6 +60,11 @@ pub struct CaptureHost {
     host_playing: AtomicBool,
     /// 读数序号：前端按它丢弃重复与乱序的采样（与 VST3 的 `sample_seq` 同一语义）。
     sample_seq: AtomicU64,
+    /// 编辑器时间线（捕获投影 + 用户画的参数曲线）。
+    ///
+    /// 【为什么不是每次请求现场投影】参数曲线是**编辑状态**：现场投影会把用户刚画的
+    /// 线连同对象一起丢掉。详见 `editor::timeline_host` 的模块说明。
+    editor: std::sync::Arc<crate::editor::timeline_host::TimelineHost>,
     /// 已编码好的波形 mipmap（`(源 id, 级别)` → Base64）。
     ///
     /// 【为什么缓存】编码一次 L0 要遍历整条素材（60 秒立体声 ≈ 580 万样本）。前端每次
@@ -91,6 +96,7 @@ impl Default for CaptureHost {
             position_at_ms: AtomicU64::new(0),
             host_playing: AtomicBool::new(false),
             sample_seq: AtomicU64::new(0),
+            editor: std::sync::Arc::new(crate::editor::timeline_host::TimelineHost::default()),
             mipmaps: Mutex::new(std::collections::HashMap::new()),
             saw_position: AtomicBool::new(false),
         }
@@ -279,6 +285,156 @@ impl CaptureHost {
         })
     }
 
+    /// `get_param_frames`：参数编辑器读一条曲线（与 VST3 同一份载荷）。
+    ///
+    /// 【为什么外壳必须回答】这是参数编辑器的**唯一**取数入口：没有它，piano roll
+    /// 既画不出原线也画不出用户画的线，整块区域是空的（"参数编辑器里什么都没有"）。
+    pub fn param_frames(&self, args: &Value) -> Result<Value, String> {
+        let track_id = args["trackId"]
+            .as_str()
+            .ok_or("get_param_frames needs trackId")?
+            .to_owned();
+        let param = args["param"]
+            .as_str()
+            .ok_or("get_param_frames needs param")?
+            .to_owned();
+        let start_frame = args["startFrame"].as_u64().unwrap_or(0) as u32;
+        let frame_count = args["frameCount"].as_u64().unwrap_or(0) as u32;
+        let stride = args["stride"].as_u64().map(|value| value as u32);
+        let binary = args["binary"].as_bool();
+        let with_sentinel = args["withSentinel"].as_bool();
+        self.editor.refresh(&self.store);
+        if !self.editor.track_exists(&track_id) {
+            return Err(format!("unknown track: {track_id}"));
+        }
+        // 音高先确保基线：第一次问会**在后台起一轮分析**并如实回 analysis_pending，
+        // 前端据此继续轮询（与 VST3 的"分析中"同一个字段）。
+        if param == "pitch" {
+            let _ = self.editor.ensure_pitch_baseline(&self.store);
+        }
+        let mut payload = hifishifter_kernel::editor::params::get_param_frames(
+            self.editor.as_ref(),
+            track_id,
+            param,
+            start_frame,
+            frame_count,
+            stride,
+            binary,
+            with_sentinel,
+        );
+        // 【为什么是"或"而不是"没有才写"】内核自己会回 `Some(false)`（它调度的是
+        // FCPE 批处理）。我们这条 WORLD 基线不在它的调度里，必须并进来 —— 否则前端
+        // 拿到"分析完成"而曲线还是空的。
+        payload.analysis_pending =
+            Some(payload.analysis_pending.unwrap_or(false) || self.editor.pitch_pending());
+        serde_json::to_value(payload).map_err(|error| error.to_string())
+    }
+
+    /// `set_param_frames`：把用户画的曲线写回时间线。
+    ///
+    /// 【为什么 present 必须逐帧传下去】它是"这一帧用户真的画过"的显式位图；丢了它，
+    /// 整段窗口里没碰过的帧会被烘成硬编辑，之后基线与几何变化都不再跟随。
+    pub fn set_param_frames(&self, args: &Value) -> Result<Value, String> {
+        let track_id = args["trackId"]
+            .as_str()
+            .ok_or("set_param_frames needs trackId")?
+            .to_owned();
+        let param = args["param"]
+            .as_str()
+            .ok_or("set_param_frames needs param")?
+            .to_owned();
+        let start_frame = args["startFrame"].as_u64().unwrap_or(0) as u32;
+        let values: Vec<f32> = args["values"]
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_f64)
+                    .map(|value| value as f32)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if values.is_empty() {
+            return Err("set_param_frames needs values".into());
+        }
+        let present = args["present"].as_array().map(|items| {
+            items
+                .iter()
+                .map(|value| value.as_bool().unwrap_or(true))
+                .collect::<Vec<bool>>()
+        });
+        let checkpoint = args["checkpoint"].as_bool();
+        self.editor.refresh(&self.store);
+        if !self.editor.track_exists(&track_id) {
+            return Err(format!("unknown track: {track_id}"));
+        }
+        if param == "pitch" {
+            // 先让基线就位：没有 orig 的 edit 就是"一条凭空画的线"，回读时会被
+            // 0 哨兵规则解释错。
+            let _ = self.editor.ensure_pitch_baseline(&self.store);
+        }
+        Ok(
+            hifishifter_kernel::editor::params::set_param_frames_with_present(
+                self.editor.as_ref(),
+                track_id,
+                param,
+                start_frame,
+                values,
+                present,
+                checkpoint,
+            ),
+        )
+    }
+
+    /// `get_static_param` / `set_static_param`：静态枚举参数（算法下拉）。
+    pub fn get_static_param(&self, args: &Value) -> Result<Value, String> {
+        let track_id = args["trackId"]
+            .as_str()
+            .ok_or("get_static_param needs trackId")?
+            .to_owned();
+        let param = args["param"]
+            .as_str()
+            .ok_or("get_static_param needs param")?
+            .to_owned();
+        self.editor.refresh(&self.store);
+        if !self.editor.track_exists(&track_id) {
+            return Err(format!("unknown track: {track_id}"));
+        }
+        serde_json::to_value(hifishifter_kernel::editor::params::get_static_param(
+            self.editor.as_ref(),
+            track_id,
+            param,
+        ))
+        .map_err(|error| error.to_string())
+    }
+
+    /// 写一个静态参数（值来自算法自己的枚举描述符）。
+    pub fn set_static_param(&self, args: &Value) -> Result<Value, String> {
+        let track_id = args["trackId"]
+            .as_str()
+            .ok_or("set_static_param needs trackId")?
+            .to_owned();
+        let param = args["param"]
+            .as_str()
+            .ok_or("set_static_param needs param")?
+            .to_owned();
+        let value = args["value"]
+            .as_f64()
+            .ok_or("set_static_param needs value")?;
+        let checkpoint = args["checkpoint"].as_bool();
+        self.editor.refresh(&self.store);
+        if !self.editor.track_exists(&track_id) {
+            return Err(format!("unknown track: {track_id}"));
+        }
+        Ok(hifishifter_kernel::editor::params::set_static_param(
+            self.editor.as_ref(),
+            track_id,
+            param,
+            value,
+            checkpoint,
+        ))
+    }
+
     /// 一条源在某一级的波形 mipmap（Base64，WFPK v2 布局）。
     ///
     /// 【为什么由外壳回答】前端的波形层按 `source_path` 取峰值
@@ -454,12 +610,13 @@ impl CaptureHost {
 
     /// 编辑器要的时间线（含捕获出来的轨道与片段）。
     pub fn timeline_payload(&self, playhead_sec: f64) -> Value {
-        let (timeline, _sources) = self.store.session_timeline();
-        let mut payload = serde_json::to_value(timeline.to_payload()).unwrap_or_else(|_| json!({}));
-        payload["playhead_sec"] = json!(playhead_sec.max(0.0));
-        payload["undo_depth"] = json!(0);
-        payload["redo_depth"] = json!(0);
-        payload
+        self.editor.refresh(&self.store);
+        self.editor.payload(playhead_sec)
+    }
+
+    /// 编辑器时间线（参数命令的前置校验与音高基线都在这里）。
+    pub fn editor(&self) -> &std::sync::Arc<crate::editor::timeline_host::TimelineHost> {
+        &self.editor
     }
 
     /// bootstrap 的 `captureCaps`：四个读数**都是观察到的**。
@@ -909,6 +1066,110 @@ mod tests {
         );
         // 未知源必须是"没有"，而不是一份静音波形 —— 后者会让前端画出一条假直线。
         assert!(host.waveform_mipmap("capture://999", 0).is_none());
+    }
+
+    /// 参数曲线必须能**写进去再读回来**：这是参数编辑器"能编辑"的全部含义。
+    #[test]
+    fn parameter_edits_round_trip_on_the_capture_timeline() {
+        let host = activated_host();
+        let audio = audio();
+        host.handle("capture_start", &json!({})).unwrap();
+        for index in 0..40 {
+            let transport = playing_at(index as f64 * 480.0 / 48_000.0);
+            let mut block = Block::new(&transport, 480, index as f32);
+            block.attach();
+            unsafe { host.on_process(&block.process, &audio) };
+            block.left.clear();
+            block.right.clear();
+        }
+        host.handle("capture_stop", &json!({})).unwrap();
+        let track = crate::editor::timeline_host::CAPTURE_TRACK_ID;
+        let written = host
+            .set_param_frames(&json!({
+                "trackId": track,
+                "param": "tension",
+                "startFrame": 3,
+                "values": [0.5, 0.75],
+                "present": [true, true],
+                "checkpoint": false,
+            }))
+            .expect("set_param_frames");
+        assert_eq!(written["ok"], json!(true), "{written}");
+        let read = host
+            .param_frames(&json!({
+                "trackId": track,
+                "param": "tension",
+                "startFrame": 3,
+                "frameCount": 2,
+                "binary": false,
+            }))
+            .expect("get_param_frames");
+        assert_eq!(read["ok"], json!(true), "{read}");
+        assert_eq!(read["edit"], json!([0.5, 0.75]), "{read}");
+        assert_eq!(read["edited"], json!([true, true]), "{read}");
+    }
+
+    /// 捕获后的音高**原线**必须真的出现（WORLD 基线），否则参数编辑器是一片空白。
+    ///
+    /// 【为什么用 220 Hz 正弦】它对应 A3 = MIDI 57，落在人声范围内；检测器若把整段
+    /// 判成无声（全 0）或判错八度（45 / 69），这条就会失败。
+    #[test]
+    fn a_captured_tone_gets_a_pitch_baseline() {
+        let host = activated_host();
+        let audio = audio();
+        host.handle("capture_start", &json!({})).unwrap();
+        let mut phase = 0.0_f64;
+        for index in 0..100 {
+            let transport = playing_at(index as f64 * 480.0 / 48_000.0);
+            let mut block = Block::new(&transport, 480, 0.0);
+            block.attach();
+            let samples: Vec<f32> = (0..480)
+                .map(|_| {
+                    phase += 2.0 * std::f64::consts::PI * 220.0 / 48_000.0;
+                    (phase.sin() * 0.5) as f32
+                })
+                .collect();
+            block.left.copy_from_slice(&samples);
+            block.right.copy_from_slice(&samples);
+            unsafe { host.on_process(&block.process, &audio) };
+        }
+        host.handle("capture_stop", &json!({})).unwrap();
+        let track = crate::editor::timeline_host::CAPTURE_TRACK_ID;
+        let mut last = json!(null);
+        for _ in 0..200 {
+            let read = host
+                .param_frames(&json!({
+                    "trackId": track,
+                    "param": "pitch",
+                    "startFrame": 0,
+                    "frameCount": 80,
+                    "binary": false,
+                }))
+                .expect("get_param_frames");
+            last = read.clone();
+            let pending = read["analysis_pending"].as_bool().unwrap_or(false);
+            if !pending {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert_eq!(last["ok"], json!(true), "{last}");
+        let orig: Vec<f64> = last["orig"]
+            .as_array()
+            .map(|items| items.iter().filter_map(Value::as_f64).collect())
+            .unwrap_or_default();
+        assert!(!orig.is_empty(), "no frames in {last}");
+        let voiced = orig.iter().filter(|value| **value > 0.0).count();
+        assert!(voiced > orig.len() / 2, "too few voiced frames: {orig:?}");
+        let median = {
+            let mut values: Vec<f64> = orig.iter().copied().filter(|value| *value > 0.0).collect();
+            values.sort_by(|a, b| a.total_cmp(b));
+            values[values.len() / 2]
+        };
+        assert!(
+            (median - 57.0).abs() < 2.0,
+            "expected A3 (57) but the baseline says {median}: {orig:?}"
+        );
     }
 
     /// 取消之后不能留下任何 take（录制中的素材也一并丢弃）。

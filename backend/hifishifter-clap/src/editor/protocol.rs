@@ -153,6 +153,39 @@ pub fn reply(view_id: &str, request: &Value, capture: &crate::capture::CaptureHo
                 "mode": "capture",
             }))
         }
+        // 处理器参数清单：参数编辑器按**当前算法**列出可编辑的参数。
+        // 【为什么必须有】缺了它，前端只剩一个硬编码的 pitch —— 用户切到任何算法
+        // 都看不到共振峰/张力/气声等专属参数（"参数编辑器里只有音高"）。
+        "get_processor_params" => {
+            let algo = request["args"]["algo"]
+                .as_str()
+                .or_else(|| request["algo"].as_str())
+                .unwrap_or("")
+                .to_owned();
+            ok(json!(
+                hifishifter_kernel::editor::capabilities::get_processor_params(algo)
+            ))
+        }
+        // 参数曲线：读（编辑器画线）与写（用户落笔）。
+        "get_param_frames" => match capture.param_frames(&request["args"]) {
+            Ok(value) => ok(value),
+            Err(message) => err(&message),
+        },
+        "set_param_frames" => match capture.set_param_frames(&request["args"]) {
+            Ok(value) => ok(value),
+            Err(message) => err(&message),
+        },
+        // 静态枚举参数（算法下拉/开关）。值来自算法自己的描述符表。
+        "get_static_param" => match capture.get_static_param(&request["args"]) {
+            Ok(value) => ok(value),
+            Err(message) => err(&message),
+        },
+        "set_static_param" => match capture.set_static_param(&request["args"]) {
+            Ok(value) => ok(value),
+            Err(message) => err(&message),
+        },
+        // 长分析进度：CLAP 的音高基线不是"逐片段批处理"，如实回 null（前端按无进度处理）。
+        "get_pitch_analysis_progress" => ok(Value::Null),
         // 波形 mipmap：时间线与参数编辑器的波形层按 `source_path` 取峰值。
         // 【为什么必须有】CLAP 的源是内存里的 `capture://blake3:<hash>`，磁盘上没有文件；
         // 不回答这一条，片段就是一块没有内容的色块 —— 用户说的"没有预览"。
@@ -326,6 +359,28 @@ mod tests {
         assert_eq!(reply["id"], 7);
         assert_eq!(reply["ok"], true);
         assert_eq!(reply["viewId"], "v");
+    }
+
+    /// 参数清单必须跟着**算法**走：只回 pitch 等于把其它算法阉了。
+    #[test]
+    fn the_processor_parameters_follow_the_algorithm() {
+        let host = capture();
+        let advanced = reply(
+            "v",
+            &json!({ "id": 1, "command": "get_processor_params", "args": { "algo": "nsf_hifigan_onnx" } }),
+            &host,
+        );
+        let list = advanced["value"].as_array().expect("a parameter list");
+        assert!(
+            list.len() > 1,
+            "an algorithm must expose more than a single parameter: {advanced}"
+        );
+        let ids: Vec<&str> = list.iter().filter_map(|item| item["id"].as_str()).collect();
+        assert!(!ids.is_empty(), "ids: {ids:?}");
+        assert!(
+            ids.iter().any(|id| *id != "pitch"),
+            "no algorithm-specific parameter in {ids:?}"
+        );
     }
 
     /// 传输读数必须由外壳回答，否则前端的光标没有任何来源。
