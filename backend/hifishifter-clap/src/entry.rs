@@ -670,6 +670,49 @@ mod tests {
         release(&mut plugin, instance);
     }
 
+    /// **实例级 ARA 扩展必须真的发得出来**。
+    ///
+    /// 【为什么这条必须存在】entry 级工厂表与实例级扩展是两条独立通路：宿主先按工厂
+    /// 建文档，再对实例要 `ARACLAP.h` 的插件扩展去 bind。少了后者，宿主拿到的永远是
+    /// null —— 表现是"工程里有这个插件，但 ARA 一条 region 都不给"，而日志里只有
+    /// 工厂发现成功的痕迹。这里走与真实宿主同一条 C ABI 路径，钉住"实例确实交出了
+    /// 扩展表"这一事实。
+    #[test]
+    fn an_initialised_instance_exposes_the_ara_plugin_extension() {
+        let (mut plugin, instance) = fixture();
+        let ptr: *const clap_plugin_t = &raw const plugin;
+        let host = crate::abi::clap_host_t {
+            clap_version: CLAP_VERSION,
+            host_data: std::ptr::null_mut(),
+            name: c"probe".as_ptr(),
+            vendor: c"probe".as_ptr(),
+            url: c"probe".as_ptr(),
+            version: c"1".as_ptr(),
+            get_extension: None,
+            request_restart: None,
+            request_process: None,
+            request_callback: None,
+        };
+        unsafe { (*instance).host = &raw const host };
+        assert!(unsafe { plugin_init(ptr) });
+        let id = c"org.ara-audio.ara.pluginextension/2".as_ptr();
+        let extension = unsafe { plugin_get_extension(ptr, id) };
+        assert!(
+            !extension.is_null(),
+            "an initialised instance must expose the ARA plug-in extension"
+        );
+        // 同一个指针必须稳定：宿主可能反复查询，每次返回新表会让它拿到的回调对不上。
+        assert_eq!(
+            extension,
+            unsafe { plugin_get_extension(ptr, id) },
+            "the extension table address must be stable"
+        );
+        unsafe {
+            plugin_deactivate(ptr);
+        }
+        release(&mut plugin, instance);
+    }
+
     #[test]
     fn a_capture_only_descriptor_does_not_advertise_ara() {
         let features = unsafe { std::slice::from_raw_parts(DESCRIPTOR.features, 3) };
