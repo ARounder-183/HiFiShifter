@@ -295,7 +295,7 @@ unsafe extern "C" fn plugin_activate(
         // `setupProcessing` 驱动，因为那是 SDK 保证在任何 `process` 之前、且在宿主
         // UI 线程上被调用的唯一时刻 —— VST3 侧调用的是同一个方法。
         instance.owner.arm_capture_rendering();
-        crate::ara::observe_activation(plugin);
+        unsafe { crate::ara::observe_activation(plugin) };
         log::info!("[clap] activated at {sample_rate} Hz, block {min}..={max}");
         true
     })

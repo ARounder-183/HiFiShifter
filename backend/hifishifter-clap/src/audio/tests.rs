@@ -123,8 +123,10 @@ fn two_instances_keep_independent_sample_rates_and_render_modes() {
     assert!(!realtime.to_transport_frame(&process).offline);
     assert_eq!(offline.sample_rate(), 96_000.0);
     assert!(offline.to_transport_frame(&process).offline);
-    assert_eq!(realtime.capture_observations(), (false, false));
-    assert_eq!(offline.capture_observations(), (false, true));
+    // 【为什么看 is_offline】观察位现在只有一份（捕获存储）；本结构只回答"此刻是不是
+    // 离线渲染模式" —— 那正是共享捕获路径按流分账时读的那个事实。
+    assert!(!realtime.is_offline());
+    assert!(offline.is_offline());
 }
 
 #[test]

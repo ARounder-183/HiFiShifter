@@ -175,8 +175,10 @@ pub unsafe fn attach(plugin: *const clap_plugin_t) {
 /// 【为什么这件事必须记】ARA 契约规定 bind 只能在 activate **之前**发生；激活之后仍
 /// 无绑定，就是“宿主把本插件当普通插入”的确定证据（见 `InstanceMode`）。VST3 在
 /// `setActive` 里记同一份事实，两种格式因此对“形态什么时候落定”只有一个答案。
-pub fn observe_activation(plugin: *const clap_plugin_t) {
-    // SAFETY: 调用方是宿主的 activate 回调，实例仍归宿主所有。
+/// # Safety
+/// `plugin` 必须是宿主按 CLAP 契约传入的、尚未 destroy 的插件记录。
+pub unsafe fn observe_activation(plugin: *const clap_plugin_t) {
+    // SAFETY: 由调用方保证。
     if let Some(instance) = unsafe { crate::instance(plugin) } {
         instance.owner.note_component_activated();
     }

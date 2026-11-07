@@ -23,16 +23,11 @@ pub struct AudioState {
     sample_rate: AtomicU64,
     /// `clap_plugin_render::set` 给出的当前模式是否为离线。
     offline_render: AtomicBool,
-    /// 本实例是否收到过 transport 事件（Capture bootstrap 如实上报）。
-    saw_transport: AtomicBool,
-    /// 本实例是否收到过离线 render 模式。
-    saw_offline: AtomicBool,
-    /// 处理过多少块（诊断：宿主到底有没有在跑我们）。
-    blocks: AtomicU64,
-    /// 见过的 transport 标志位并集（诊断：宿主给的是拍还是秒）。
-    transport_flags: AtomicU64,
-    /// 是否从 transport 里成功推出过工程位置（录制的硬前提）。
-    saw_position: AtomicBool,
+    // 【为什么这里不再有 saw_transport / saw_offline / blocks 这几份读数】它们描述的是
+    // “宿主实际给了什么”，而那是**捕获存储**的观察位（~CaptureStore::status~ 里的
+    // ~saw_context~ / ~saw_input~ / ~saw_offline~）。同一个事实存两份，界面就会在
+    // 某一次改动后读到互相矛盾的答案。本结构只保留**它独有**的两项：声明过的采样率
+    // 与 render 模式。
 }
 
 impl AudioState {
@@ -52,11 +47,8 @@ impl AudioState {
         if mode != crate::abi::CLAP_RENDER_REALTIME && mode != CLAP_RENDER_OFFLINE {
             return false;
         }
-        let offline = mode == CLAP_RENDER_OFFLINE;
-        self.offline_render.store(offline, Ordering::Release);
-        if offline {
-            self.saw_offline.store(true, Ordering::Release);
-        }
+        self.offline_render
+            .store(mode == CLAP_RENDER_OFFLINE, Ordering::Release);
         true
     }
 
@@ -68,27 +60,6 @@ impl AudioState {
         self.offline_render.load(Ordering::Acquire)
     }
 
-    /// Capture bootstrap 的能力读数（是否见过 transport / 是否见过离线 render）。
-    /// 诊断读数：@@(处理过的块数, 见过的 transport 标志, 是否推出过位置)@@。
-    ///
-    /// 【为什么值得单独暴露】"按钮一直是灰的"有两种完全不同的原因：宿主根本没在跑我们
-    /// （块数 0），或者宿主跑了但没给可用的时间轴（标志位里只有拍号/速度，没有
-    /// seconds/beats）。三个数一起打出来，就不必再猜。
-    pub fn capture_evidence(&self) -> (u64, u32, bool) {
-        (
-            self.blocks.load(Ordering::Acquire),
-            self.transport_flags.load(Ordering::Acquire) as u32,
-            self.saw_position.load(Ordering::Acquire),
-        )
-    }
-
-    pub fn capture_observations(&self) -> (bool, bool) {
-        (
-            self.saw_transport.load(Ordering::Acquire),
-            self.saw_offline.load(Ordering::Acquire),
-        )
-    }
-
     /// 把 CLAP 的时间读数转换为中性 `TransportFrame`。
     ///
     /// `steady_time` 在停播与重放时仍会前进，因此**绝不**拿它的变化推断播放状态。
@@ -98,7 +69,6 @@ impl AudioState {
         let sample_rate = self.sample_rate();
         let offline = self.offline_render.load(Ordering::Acquire);
         let steady = (process.steady_time >= 0).then_some(process.steady_time);
-        self.blocks.fetch_add(1, Ordering::AcqRel);
         let Some(transport) = (unsafe { process.transport.as_ref() }) else {
             return TransportFrame {
                 project_time_samples: 0,
@@ -114,18 +84,14 @@ impl AudioState {
                 position_trusted: false,
             };
         };
-        self.saw_transport.store(true, Ordering::Release);
-        self.transport_flags
-            .fetch_or(u64::from(transport.flags), Ordering::AcqRel);
+        // 【为什么这里不再记读数】“宿主给过什么”由共享捕获路径记在 `CaptureStore` 上
+        // （见本文件的字段说明）；这里只负责把这一块的时间换算成中性描述。
         // 【为什么秒不是唯一来源】CLAP 的 transport 可以只声明拍时间轴。实测宿主
         // （REAPER 的 CLAP 实现是其中之一）只给 `HAS_BEATS_TIMELINE + HAS_TEMPO` 时，
         // 只认 seconds 的实现会让 position_trusted 永远是 false —— 表现为"捕获按钮
         // 永远灰着"，而插件其实已经被正常处理了。拍是精确的定点值，配上速度就能
         // 换算成秒，因此两种时间轴都接受。
         let position = transport_position(transport, sample_rate);
-        if position.is_some() {
-            self.saw_position.store(true, Ordering::Release);
-        }
         TransportFrame {
             project_time_samples: position.unwrap_or(0),
             sample_rate,
