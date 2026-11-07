@@ -167,8 +167,15 @@ ARA 侧改了时间拉伸 / 内容淡化，插件会继续用旧配置渲染。
   Windows 产物把 `frontend/` 与 `models.json` 装到模块同级的
   `HiFiShifter-resources`（`ResourceLayout::Sibling`），安装器与自检都断言
   `plugin.html` 落地。此前只装 `.clap` 单文件，宿主扫描得到插件却只会给空白窗口。
+- **WebView2 用户数据目录**：profile 固定在
+  `%LOCALAPPDATA%\HiFiShifter\webview\clap-<pid>`（`hifishifter_plugin_core::local_data`，
+  与内核 `app_paths` 由跨 crate 测试逐字比对）。它**绝不能**落在模块旁边：模块装在
+  `Program Files`，浏览器进程在那里无权建 `EBWebView`，宿主会弹出
+  「Microsoft Edge 无法读取和写入其数据目录」而窗口一片空白（用户实测）。建目录后
+  还会写一次探针文件，写不进去就在窗口里给出原因、且完全不拉起 WebView2；
+  资源目录一旦混进 `webview/`，构建与自检脚本都会硬失败（运行期状态不进安装包）。
 - **能力诚实性**：黑盒探针把 `clap.state` / `clap.render` / `clap.audio-ports` /
-  `clap.timer-support` 必须存在、`clap.gui` 必须缺席、descriptor 不得含任何
+  `clap.timer-support` / `clap.gui` 必须存在、descriptor 不得含任何
   `ara:` feature、ARA 工厂必须缺席都写成硬失败；`verify.sh` 逐项断言探针输出。
   探针自身实现 `clap.log` 假宿主并断言收到日志、`clap.latency` / `clap.tail`
   必须返回 0。打印 "absent" 后照常返回成功的老判据不再成立。

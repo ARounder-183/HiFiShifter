@@ -23,6 +23,7 @@
 #[allow(missing_docs)]
 pub mod component_state;
 pub mod format;
+pub mod local_data;
 #[allow(missing_docs)]
 pub mod plugin_log_name;
 pub mod resource_root;

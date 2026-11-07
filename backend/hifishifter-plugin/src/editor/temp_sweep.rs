@@ -191,7 +191,7 @@ pub(crate) fn sweep_step() -> bool {
 fn collect_stale_dirs() -> (VecDeque<PathBuf>, ScanStats) {
     let mut pending = VecDeque::new();
     let mut stats = ScanStats::default();
-    for (subdir, prefix) in [("webview", "view-"), ("pcm", "hfs-ui-")] {
+    for (subdir, prefix) in super::TEMP_SWEEP_TARGETS {
         collect_stale_in(
             &hifishifter_kernel::config_location::local_data_subdir(subdir),
             prefix,

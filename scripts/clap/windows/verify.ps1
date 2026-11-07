@@ -11,6 +11,14 @@ $manifest = Join-Path $resources "models\models.json"
 if (!(Test-Path -LiteralPath $frontend)) { throw "CLAP frontend assets missing: $frontend" }
 if (!(Test-Path -LiteralPath $manifest)) { throw "CLAP model manifest missing: $manifest" }
 Write-Host "OK   resources: frontend + models.json next to the module"
+# WebView2 的用户数据目录必须落在 %LOCALAPPDATA%\HiFiShifter\webview 下：模块自己
+# 在 Program Files，profile 一旦出现在这里，浏览器进程就无权写自己的数据目录
+# （宿主里弹"Microsoft Edge 无法读取和写入其数据目录"，窗口空白）。
+$strayProfile = Join-Path $resources "webview"
+if (Test-Path -LiteralPath $strayProfile) {
+    throw "WebView2 profile leaked into the resource tree: $strayProfile"
+}
+Write-Host "OK   resources: no WebView2 profile beside the module"
 $dumpbin = Get-Command dumpbin -ErrorAction SilentlyContinue
 if ($dumpbin) {
     $exports = & $dumpbin.Source /exports $ModulePath 2>&1

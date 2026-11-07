@@ -26,14 +26,49 @@ pub(crate) mod session;
 pub(crate) mod slow_lane;
 #[cfg(not(test))]
 mod temp_sweep;
+
 mod view;
 pub(crate) mod workspace;
+
+/// 临时目录回收表：「本地数据子目录 → 目录名前缀」。
+///
+/// 【为什么放在这里而不是 `temp_sweep` 里】那个模块只在非测试构建里编译（测试进程
+/// 不该去删真实的用户目录），放在它里面的常量与测试都跟着不参与 `cargo test` ——
+/// 于是"少回收一类目录"这种缺陷不会有任何测试变红。表放在 `editor` 这一层，
+/// 判据（[`TEMP_SWEEP_TARGETS`] 的条目）就能被普通单元测试守住。
+///
+/// 【为什么 webview 有两个前缀】`view-<pid>` 是 VST3 编辑器的 WebView2 profile，
+/// `clap-<pid>` 是 CLAP 外壳的：同一个产品、同一个根，判据（属主进程已退出）完全
+/// 相同，所以由同一趟扫描回收。CLAP 的目录名见
+/// `hifishifter-clap/src/editor/windows.rs` 的 `profile_dir_for`。
+pub(crate) const TEMP_SWEEP_TARGETS: &[(&str, &str)] = &[
+    ("webview", "view-"),
+    ("webview", "clap-"),
+    ("pcm", "hfs-ui-"),
+];
+
 pub(crate) use errors::classify_error;
 pub(crate) use view::create_view_with_link;
 
 #[cfg(test)]
 mod tests {
     use super::classify_error;
+
+    /// 回收表必须覆盖 CLAP 外壳的 WebView2 profile。
+    ///
+    /// 【为什么这条要单独守】漏掉一个前缀不会报错：宿主每次启动都会多留一份几百 MB 的
+    /// 用户数据目录，直到用户自己发现（VST3 曾经就是这样攒出 147 个目录、7.1 GiB）。
+    #[test]
+    fn the_temp_sweep_table_covers_the_clap_profile() {
+        assert!(
+            super::TEMP_SWEEP_TARGETS.contains(&("webview", "clap-")),
+            "CLAP profiles are never reclaimed: {:?}",
+            super::TEMP_SWEEP_TARGETS
+        );
+        // VST3 那一列不能在加 CLAP 的时候被顺手弄丢。
+        assert!(super::TEMP_SWEEP_TARGETS.contains(&("webview", "view-")));
+        assert!(super::TEMP_SWEEP_TARGETS.contains(&("pcm", "hfs-ui-")));
+    }
 
     /// 【为什么钉死】前端据 `terminal` **永久停止轮询**。一旦这里把终态错误判成
     /// `transient`，那个"把终态错误答 19,056 次"的缺陷就会以另一种形式回来。

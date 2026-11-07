@@ -6,11 +6,15 @@
 //! 注册窗口类、建子 HWND、把 `hifishifter.invalid` 映射到资源目录、把页面消息
 //! 交给 `protocol` 回执。
 //!
-//! 【为什么用进程级单视图】`clap.gui` 的回调只拿到 `clap_plugin_t*`，而
-//! `clap_host_gui` 不携带每窗口上下文；一个 CLAP 实例同时只有一个 GUI，
-//! 所以把视图状态放在 `Instance` 里、由 `plugin` 指针索引最贴近契约。
-//! 本模块用 `OnceLock<Mutex<HashMap<usize, ViewState>>>` 保存它们，
-//! `destroy` 时按 plugin 指针移除，不留悬垂 HWND。
+//! 【为什么视图表是 thread_local】`clap.gui` 的回调只拿到 `clap_plugin_t*`，而
+//! `clap_host_gui` 不携带每窗口上下文；一个 CLAP 实例同时只有一个 GUI，用
+//! `plugin` 指针索引最贴近契约。HWND 与 COM 接口都不是 `Send`，而 CLAP 的 GUI
+//! 回调本来就全在宿主主线程上，所以环境与视图表都放 `thread_local`；`destroy`
+//! 按 plugin 指针移除，不留悬垂 HWND。
+//!
+//! 【profile 在哪】WebView2 的用户数据目录固定在
+//! `%LOCALAPPDATA%\HiFiShifter\webview\clap-<pid>` —— 模块自己躺在 `Program Files`
+//! 下（管理员写权限），把 profile 写在模块旁边等于让浏览器进程无权写自己的数据目录。
 
 #![cfg(windows)]
 
@@ -59,6 +63,8 @@ struct ViewState {
     hwnd: HWND,
     parent: HWND,
     controller: Option<ICoreWebView2Controller>,
+    /// 失败时写进窗口的那一行字（`STATIC` 子窗口）；成功路径上永远是 `None`。
+    error: Option<HWND>,
 }
 
 fn with_view<R>(plugin: *const clap_plugin_t, f: impl FnOnce(&mut ViewState) -> R) -> Option<R> {
@@ -188,6 +194,7 @@ pub fn create(plugin: *const clap_plugin_t, floating: bool) -> Result<(), String
                     hwnd: HWND::default(),
                     parent: HWND::default(),
                     controller: None,
+                    error: None,
                 },
             );
             Ok::<(), String>(())
@@ -232,8 +239,17 @@ fn create_inner(plugin: *const clap_plugin_t) -> Result<(), String> {
         view.hwnd = hwnd;
     })
     .ok_or("GUI view disappeared during creation")?;
-    let folder = frontend_dir()?;
-    begin_browser(plugin, hwnd, folder)
+    // 【为什么建窗之后才解析资源与 profile】失败时窗口还在，原因可以直接写进窗口；
+    // 反过来的话宿主只知道"create 失败"，用户看到的是一片什么都没有的插件窗口。
+    let setup = frontend_dir().and_then(|folder| Ok((folder, webview_profile_dir()?)));
+    match setup {
+        Ok((folder, profile)) => begin_browser(plugin, hwnd, folder, profile),
+        Err(error) => {
+            log::error!("[clap][gui] editor unavailable: {error}");
+            show_error(plugin, &error);
+            Ok(())
+        }
+    }
 }
 
 fn frontend_dir() -> Result<PathBuf, String> {
@@ -242,21 +258,108 @@ fn frontend_dir() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-fn begin_browser(plugin: *const clap_plugin_t, hwnd: HWND, folder: PathBuf) -> Result<(), String> {
-    if let Some(environment) = ENVIRONMENT.with(|slot| slot.borrow_mut().take()) {
-        ENVIRONMENT.with(|slot| *slot.borrow_mut() = Some(environment.clone()));
+/// 本进程的 WebView2 用户数据目录。
+///
+/// 【为什么不能放在模块旁边】CLAP 模块装在 `C:\Program Files\Common Files\CLAP`，
+/// 那是管理员写权限的目录。此前 profile 落在 `<模块目录>\HiFiShifter-resources\webview\view-<pid>`，
+/// WebView2 的浏览器进程在那里建 `EBWebView` 直接被系统拒绝，宿主里弹出一个
+/// "Microsoft Edge 无法读取和写入其数据目录"的模态框，插件窗口只剩空白（用户实测）。
+///
+/// 【为什么每进程一份】WebView2 不允许两个进程同时打开同一个用户数据目录，所以目录名
+/// 带 PID；同一进程内的多个视图共享一份（见 [`ENVIRONMENT`] 的池化）。
+/// 【为什么与 VST3 的 `view-<pid>` 分开】REAPER 会同时加载 VST3 与 CLAP，两边的环境
+/// 各持一份 profile 才不会互相接管对方的浏览器进程；回收由 VST3 的 `temp_sweep` 统一做
+/// （它按 `clap-` 前缀识别本外壳的目录）。
+fn webview_profile_dir() -> Result<PathBuf, String> {
+    let profile = profile_dir_for(
+        &hifishifter_plugin_core::local_data::local_data_subdir("webview"),
+        std::process::id(),
+    );
+    std::fs::create_dir_all(&profile).map_err(|e| {
+        format!(
+            "WebView2 profile directory is unavailable: {} ({e})",
+            profile.display()
+        )
+    })?;
+    // 【为什么要写一个探针文件】`create_dir_all` 成功不等于浏览器进程写得进：目录可能
+    // 由管理员创建、当前用户只读。真等到浏览器那边失败，宿主只会看到一个模态框；
+    // 在这里先写一次，就能给出可读的原因，而且完全不拉起 WebView2。
+    let probe = profile.join("write-probe.tmp");
+    std::fs::write(&probe, b"hifishifter").map_err(|e| {
+        format!(
+            "WebView2 profile directory is not writable: {} ({e})",
+            profile.display()
+        )
+    })?;
+    let _ = std::fs::remove_file(&probe);
+    Ok(profile)
+}
+
+/// 纯路径规则：[profile 根] + [进程号]，便于单测。
+fn profile_dir_for(root: &std::path::Path, pid: u32) -> PathBuf {
+    root.join(format!("clap-{pid}"))
+}
+
+/// 在自有窗口里写一行错误。
+///
+/// 【为什么用 `STATIC` 而不是 `SetWindowTextW`】自有 child 窗口没有标题栏，窗口文本
+/// 用户根本看不见；VST3 那边同样是用一个真实的 `STATIC` 控件把失败原因显示出来。
+fn show_error(plugin: *const clap_plugin_t, text: &str) {
+    let message = wide(&format!("HiFiShifter CLAP editor: {text}"));
+    let state = with_view(plugin, |view| (view.hwnd, view.error));
+    let Some((hwnd, existing)) = state else {
+        return;
+    };
+    if let Some(existing) = existing {
+        unsafe {
+            let _ = SetWindowTextW(existing, PCWSTR(message.as_ptr()));
+        }
+        return;
+    }
+    let created = unsafe {
+        CreateWindowExW(
+            WINDOW_EX_STYLE::default(),
+            w!("STATIC"),
+            PCWSTR(message.as_ptr()),
+            WS_CHILD | WS_VISIBLE,
+            12,
+            12,
+            900,
+            96,
+            Some(hwnd),
+            None,
+            None,
+            None,
+        )
+    };
+    if let Ok(created) = created {
+        with_view(plugin, |view| view.error = Some(created));
+    }
+}
+
+fn begin_browser(
+    plugin: *const clap_plugin_t,
+    hwnd: HWND,
+    folder: PathBuf,
+    profile: PathBuf,
+) -> Result<(), String> {
+    if let Some(environment) = ENVIRONMENT.with(|slot| slot.borrow().clone()) {
         return create_controller(plugin, hwnd, folder, &environment);
     }
+    let profile_text = profile.to_string_lossy().into_owned();
+    log::info!("[clap][gui] WebView2 profile: {profile_text}");
     let completed = CreateCoreWebView2EnvironmentCompletedHandler::create(Box::new(
         move |result, environment| {
             let environment = match (result, environment) {
                 (Ok(()), Some(environment)) => environment,
                 (Err(error), _) => {
                     log::error!("[clap][gui] WebView2 environment failed: {error}");
+                    show_error(plugin, &format!("WebView2 environment failed: {error}"));
                     return Ok(());
                 }
                 _ => {
                     log::error!("[clap][gui] WebView2 returned no environment");
+                    show_error(plugin, "WebView2 returned no environment");
                     return Ok(());
                 }
             };
@@ -268,15 +371,7 @@ fn begin_browser(plugin: *const clap_plugin_t, hwnd: HWND, folder: PathBuf) -> R
         },
     ));
     let options: ICoreWebView2EnvironmentOptions = CoreWebView2EnvironmentOptions::default().into();
-    // 用户数据目录用进程 ID 隔离，避免两个宿主进程抢同一份 profile。
-    let profile = hifishifter_plugin_core::resource_root::resources_dir()
-        .map(|dir| {
-            dir.join("webview")
-                .join(format!("view-{}", std::process::id()))
-        })
-        .unwrap_or_else(|_| std::env::temp_dir().join(format!("hfs-clap-{}", std::process::id())));
-    let _ = std::fs::create_dir_all(&profile);
-    let profile = wide(&profile.to_string_lossy());
+    let profile = wide(&profile_text);
     unsafe {
         CreateCoreWebView2EnvironmentWithOptions(
             PCWSTR::null(),
@@ -592,4 +687,43 @@ pub fn shutdown() -> bool {
     }
     unsafe { CoUninitialize() };
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// profile 目录名必须带 PID：WebView2 不允许两个进程共用一个用户数据目录。
+    #[test]
+    fn the_profile_directory_is_per_process() {
+        let root = std::path::Path::new(r"C:\Users\u\AppData\Local\HiFiShifter\webview");
+        assert_eq!(
+            profile_dir_for(root, 58072),
+            root.join("clap-58072"),
+            "profile must carry the process id"
+        );
+        assert_ne!(profile_dir_for(root, 1), profile_dir_for(root, 2));
+    }
+
+    /// 回归守卫：profile 绝不能落在资源目录（模块旁边）之下。
+    ///
+    /// 用户实测的失败形态就是这条：模块装在 `Program Files`，profile 跟着落在
+    /// `<模块目录>\HiFiShifter-resources\webview\...`，浏览器进程无权写入。
+    #[test]
+    fn the_profile_is_never_next_to_the_module() {
+        let profile = webview_profile_dir().expect("profile directory is creatable");
+        let local = hifishifter_plugin_core::local_data::local_data_dir()
+            .expect("local data root is resolvable here");
+        assert!(
+            profile.starts_with(&local),
+            "{} is outside {}",
+            profile.display(),
+            local.display()
+        );
+        assert!(
+            !profile.to_string_lossy().contains("HiFiShifter-resources"),
+            "{} points into the resource directory",
+            profile.display()
+        );
+    }
 }

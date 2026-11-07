@@ -164,6 +164,10 @@ if ($Target -eq 'All' -or $Target -eq 'Plugin' -or $Target -eq 'Clap') {
     Copy-Item 'frontend\dist\plugin.html' (Join-Path $clapRes 'frontend')
     Copy-Item 'frontend\dist\assets\*' (Join-Path $clapRes 'frontend\assets') -Recurse
     Copy-Item (Join-Path $modelsSource 'models.json') (Join-Path $clapRes 'models')
+    # 【为什么要显式删掉 webview】WebView2 的用户数据目录是**运行期状态**（缓存、
+    # 锁文件、本机 profile），它曾经因为落在资源目录里而被打进安装包，也会让下一个
+    # 用户拿到一份被占用的 profile。资源目录里只允许有 frontend 与 models。
+    Remove-Item -LiteralPath (Join-Path $clapRes 'webview') -Recurse -Force -ErrorAction SilentlyContinue
     Write-Host "CLAP 资源已组装：$clapRes" -ForegroundColor Green
     & .\scripts\clap\windows\verify.ps1 -ModulePath (Join-Path $dist 'HiFiShifter.clap')
 }
@@ -235,6 +239,10 @@ function Write-ClapStage {
     # 只装 .clap 时 frontend_dir() 必然失败，宿主看到的是一块空白窗口。
     $resources = Join-Path $dist 'HiFiShifter-resources'
     if (!(Test-Path $resources)) { throw "缺少 CLAP 资源目录：$resources" }
+    # 暂存前再挡一次：运行期状态绝不能进安装包（判据同 build.ps1 的组装段）。
+    if (Test-Path (Join-Path $resources 'webview')) {
+        throw "CLAP 资源目录里混进了 WebView2 运行期目录：$(Join-Path $resources 'webview')"
+    }
     $staged = Join-Path $stage 'HiFiShifter-resources'
     Reset-Directory $staged
     Copy-Item "$resources\*" $staged -Recurse -Force

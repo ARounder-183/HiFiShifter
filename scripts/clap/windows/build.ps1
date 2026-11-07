@@ -21,6 +21,8 @@ New-Item -ItemType Directory -Force -Path $frontend, (Join-Path $frontend "asset
 Copy-Item (Join-Path $root "frontend\dist\plugin.html") $frontend -Force
 Copy-Item (Join-Path $root "frontend\dist\assets\*") (Join-Path $frontend "assets") -Recurse -Force
 Copy-Item (Join-Path $root "backend\src-tauri\resources\models\models.json") $models -Force
+# WebView2 的 profile 属于运行期状态，绝不跟着资源走（判据同 scripts/build/build.ps1）。
+Remove-Item -LiteralPath (Join-Path $resources "webview") -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host "CLAP resources: $resources" -ForegroundColor Green
 
 if (!$SkipVerify) { & (Join-Path $PSScriptRoot "verify.ps1") -ModulePath (Join-Path $outDir "HiFiShifter.clap") }
