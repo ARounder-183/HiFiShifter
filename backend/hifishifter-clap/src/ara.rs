@@ -114,30 +114,32 @@ unsafe extern "C" fn ara_bind(
     })
 }
 
-/// 把一块宿主音频交给**共享**捕获路径；返回本块位置是否可信。
+/// 把一块宿主音频交给**共享**渲染通路：捕获观察与输出仲裁都在那一份实现里。
 ///
-/// 【为什么在这里】CLAP 的 \`process\` 只知道自己的缓冲与 transport；把"这一块是什么"
+/// 【为什么返回 `Option`】`None` 表示本实例没有 ARA 绑定器（运行时不可用）。调用方据此
+/// 退回自己的直通通路 —— 而不是让一个没有文档的实例静默地不出声。
+///
+/// 【为什么在这里翻译】CLAP 的 `process` 只知道自己的缓冲与 transport；把“这一块是什么”
 /// 翻译成中立描述是格式外壳的职责。翻译之后走的是 VST3 用的同一个
-/// \`ExtensionOwner::capture_block\` —— 观察、相位判定与录制都在那一份实现里。
+/// `ExtensionOwner::process_audio` —— 观察、相位判定、门控与快照输出都在那一份实现里。
 ///
-/// 【为什么位置要单独算】\`AudioState::to_transport_frame\` 会推进块计数，而它只能被
-/// 调用一次（否则每个块被记成两块）。这里用同一个换算函数 \`transport_position\`，
-/// 不重复计数，也不复制"只给拍不给秒"的兜底逻辑。
+/// 【为什么位置要单独算】`AudioState::to_transport_frame` 会推进块计数，而它只能被
+/// 调用一次（否则每个块被记成两块）。这里用同一个换算函数 `transport_position`，
+/// 不重复计数，也不复制“只给拍不给秒”的兜底逻辑。
 ///
 /// # Safety
-/// \`plugin\` 与 \`process\` 必须是宿主按 CLAP 契约传入的活记录，且 \`process\` 的输入
-/// 平面至少有 \`frames_count\` 帧可读。
-pub unsafe fn observe_block(plugin: *const clap_plugin_t, process: *const clap_process_t) -> bool {
+/// `plugin` 与 `process` 必须是宿主按 CLAP 契约传入的活记录，且 `process` 的输入
+/// 平面至少有 `frames_count` 帧可读。
+pub unsafe fn process_audio(
+    plugin: *const clap_plugin_t,
+    process: *const clap_process_t,
+) -> Option<hifishifter_plugin::render::extension::RenderOutcome> {
     if plugin.is_null() || process.is_null() {
-        return false;
+        return None;
     }
     // SAFETY: 由调用方保证。
-    let Some(instance) = (unsafe { crate::instance(plugin) }) else {
-        return false;
-    };
-    let Some(binder) = instance.ara.as_ref() else {
-        return false;
-    };
+    let instance = unsafe { crate::instance(plugin) }?;
+    let binder = instance.ara.as_ref()?;
     let process = unsafe { &*process };
     let frames = process.frames_count as usize;
     let rate = instance.audio.sample_rate();
@@ -166,34 +168,20 @@ pub unsafe fn observe_block(plugin: *const clap_plugin_t, process: *const clap_p
             context.tempo = Some(transport.tempo);
         }
     }
-    let mut planes: [Option<&[f32]>; 2] = [None, None];
-    if frames > 0 && process.audio_inputs_count > 0 && !process.audio_inputs.is_null() {
-        let bus = unsafe { &*process.audio_inputs };
-        if !bus.data32.is_null() {
-            for channel in 0..(bus.channel_count as usize).min(2) {
-                let plane = unsafe { *bus.data32.add(channel) };
-                if plane.is_null() {
-                    continue;
-                }
-                planes[channel] = Some(unsafe { std::slice::from_raw_parts(plane, frames) });
-            }
-        }
-    }
+    let _ = frames;
+    // 进程形态：CLAP 只有“离线 render 模式”这一个权威来源（见 AudioState::is_offline）。
+    let mode = if instance.audio.is_offline() { 2 } else { 0 };
     let stream = if instance.audio.is_offline() {
         hifishifter_capture::recorder::ProcessStream::Offline
     } else {
         hifishifter_capture::recorder::ProcessStream::Realtime
     };
-    let block = hifishifter_capture::recorder::InputBlock {
-        start: context.project_time_samples,
-        frames,
-        sample_rate: rate,
-        planes,
-        playing: context.playing,
-    };
-    binder.owner().capture_block(block, stream, context, None)
+    let mut silence = 0_u64;
+    // SAFETY: 宿主在本次回调里给出的有效记录；平面至少含 frames_count 帧。
+    let mut block = unsafe { crate::audio::block_from_clap(process, mode, &mut silence) }?;
+    // SAFETY: 与 block_from_clap 同一份宿主缓冲，且只在本次回调内使用。
+    Some(unsafe { binder.owner().process_audio(&mut block, context, stream, None) })
 }
-
 /// 实例级 ARA 扩展查询。
 pub fn get_extension(plugin: *const clap_plugin_t, id: &str) -> *const c_void {
     if !matches!(

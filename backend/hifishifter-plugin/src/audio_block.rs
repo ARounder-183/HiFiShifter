@@ -21,7 +21,7 @@ use crate::audio_abi::BufferError;
 /// 【为什么静音掩码是 `&mut u64` 而不是字段】它必须写回**宿主的结构**（VST3 是
 /// `AudioBusBuffers::silence_flags`，CLAP 是一个本地 `u64`），而两者的存放位置不同。
 /// 把它做成一个写出口之后，写掩码这件事就只有一处实现。
-pub(crate) struct OutputBus<'a> {
+pub struct OutputBus<'a> {
     /// 宿主声明的声道数。可能大于 2：多声道总线只处理前两个，其余保持静音。
     pub num_channels: usize,
     pointers: &'a mut [*mut f32],
@@ -34,7 +34,7 @@ impl<'a> OutputBus<'a> {
     /// 【为什么构造时就把掩码置成“全部静音”】`silence_flags` 的语义是“这一块**已经
     /// 写出**的内容里哪些声道全是零”。还没写任何样本时，“全部静音”是唯一诚实的初值；
     /// 每个写入点按实际写下的非零样本逐位清除它。
-    pub(crate) fn new(pointers: &'a mut [*mut f32], silence: &'a mut u64) -> Self {
+    pub fn new(pointers: &'a mut [*mut f32], silence: &'a mut u64) -> Self {
         *silence = crate::audio_abi::silence_mask(pointers.len());
         Self {
             num_channels: pointers.len(),
@@ -44,7 +44,7 @@ impl<'a> OutputBus<'a> {
     }
 
     /// 第 `channel` 个平面的写指针；越界或 inactive 声道返回空指针。
-    pub(crate) fn pointer(&self, channel: usize) -> *mut f32 {
+    pub fn pointer(&self, channel: usize) -> *mut f32 {
         self.pointers
             .get(channel)
             .copied()
@@ -52,12 +52,12 @@ impl<'a> OutputBus<'a> {
     }
 
     /// 本块要写的声道数：只处理前两个（内部快照恒为立体声）。
-    pub(crate) fn channels(&self) -> usize {
+    pub fn channels(&self) -> usize {
         self.num_channels.min(2)
     }
 
     /// 覆盖静音掩码。
-    pub(crate) fn set_silence_flags(&mut self, value: u64) {
+    pub fn set_silence_flags(&mut self, value: u64) {
         *self.silence = value;
     }
 
@@ -70,7 +70,7 @@ impl<'a> OutputBus<'a> {
 /// 有几个”，读的时候再取一次指针 —— 与直通函数复制总线头的
 /// 历史做法同义。
 #[derive(Clone, Copy)]
-pub(crate) struct InputBus {
+pub struct InputBus {
     pointers: *const *mut f32,
     /// 宿主声明的输入声道数。
     pub num_channels: usize,
@@ -82,7 +82,7 @@ impl InputBus {
     /// # Safety
     /// `pointers` 要么为空，要么指向至少 `num_channels` 个有效指针，并在本回调期间
     /// 保持有效。
-    pub(crate) unsafe fn new(pointers: *const *mut f32, num_channels: usize) -> Self {
+    pub unsafe fn new(pointers: *const *mut f32, num_channels: usize) -> Self {
         Self {
             pointers,
             num_channels,
@@ -90,7 +90,7 @@ impl InputBus {
     }
 
     /// 没有输入的块（纯生成/静音场景）。
-    pub(crate) fn empty() -> Self {
+    pub fn empty() -> Self {
         Self {
             pointers: std::ptr::null(),
             num_channels: 0,
@@ -102,7 +102,7 @@ impl InputBus {
     /// 【为什么不看 `silence_flags`】该位只是“这些样本全是零”的可选提示，置位时
     /// 缓冲**仍必须可读**。把它当成“没有输入”会让一条本来有声的轨道被插件静音掉
     /// （见 `audio_abi::capture_view` 的同名说明）。
-    pub(crate) fn pointer(&self, channel: usize) -> *mut f32 {
+    pub fn pointer(&self, channel: usize) -> *mut f32 {
         if channel >= self.num_channels || self.pointers.is_null() {
             return std::ptr::null_mut();
         }
@@ -111,7 +111,7 @@ impl InputBus {
     }
 
     /// 本块可读的声道数：只处理前两个。
-    pub(crate) fn channels(&self) -> usize {
+    pub fn channels(&self) -> usize {
         self.num_channels.min(2)
     }
 
@@ -123,7 +123,7 @@ impl InputBus {
     ///
     /// # Safety
     /// 非空平面至少有 `frames` 帧可读；返回的切片不得带出本次回调。
-    pub(crate) unsafe fn planes<'a>(&self, frames: usize) -> [Option<&'a [f32]>; 2] {
+    pub unsafe fn planes<'a>(&self, frames: usize) -> [Option<&'a [f32]>; 2] {
         let mut planes: [Option<&'a [f32]>; 2] = [None, None];
         if frames == 0 {
             return planes;
@@ -145,7 +145,7 @@ impl InputBus {
 /// 【为什么把 frames / mode 也放进来】“这一块多长、属于哪种进程流”是渲染通路每个分支
 /// 都要读的同一个事实，而它此前分别从 `ProcessData::num_samples` 与
 /// `ProcessData::process_mode` 现场读 —— 两个格式各自读一遍，就多了一处可以漂移的地方。
-pub(crate) struct AudioBlock<'a> {
+pub struct AudioBlock<'a> {
     /// 本块的帧数。
     pub frames: usize,
     /// 进程形态（VST3/CLAP 同值：0 = 实时，1 = 预取，2 = 离线）。
@@ -164,7 +164,7 @@ pub(crate) struct AudioBlock<'a> {
 
 impl<'a> AudioBlock<'a> {
     /// 本块是否属于离线（冻结 / 胶合 / 导出）进程流。
-    pub(crate) fn is_offline(&self) -> bool {
+    pub fn is_offline(&self) -> bool {
         self.mode == 2
     }
 
@@ -176,7 +176,7 @@ impl<'a> AudioBlock<'a> {
     ///
     /// 【为什么 in-place 时不写掩码】见 [`AudioBlock::in_place`]：写进去的“全静音”
     /// 会在下一块被我们自己的捕获读成“宿主没给输入”。
-    pub(crate) fn clear_output(&mut self) {
+    pub fn clear_output(&mut self) {
         let frames = self.frames;
         if self.output.num_channels == 0 {
             self.output.set_silence_flags(0);
@@ -206,7 +206,7 @@ impl<'a> AudioBlock<'a> {
     /// # Safety
     /// 调用契约保证输入非空平面可读、输出非空平面可写 `frames` 帧，且部分重叠
     /// （既非同一地址也非完整 plane 互换）的情形会被下面的检查拒绝。
-    pub(crate) unsafe fn pass_through(&mut self) -> Result<(), BufferError> {
+    pub unsafe fn pass_through(&mut self) -> Result<(), BufferError> {
         let frames = self.frames;
         if self.output.num_channels == 0 {
             self.output.set_silence_flags(0);

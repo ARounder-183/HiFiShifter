@@ -64,43 +64,6 @@ pub fn frame_is_trustworthy(frame: &TransportFrame) -> bool {
         && frame.sample_rate > 0.0
 }
 
-/// 一个音频块的输入/输出平面。格式外壳负责把宿主布局转换成这一份。
-///
-/// 【为什么是借用的平面】音频回调不能分配、不能拷贝整块 PCM；这里只描述宿主给的指针范围。
-pub struct AudioBlock<'a> {
-    /// 本块的帧数。
-    pub frames: usize,
-    /// 样本宽度；F64 明确降级为静音。
-    pub sample_width: SampleWidth,
-    /// 输入声道平面（只读）。
-    pub input: &'a [ChannelPlane],
-    /// 输出声道平面（可写）。
-    pub output: &'a mut [ChannelPlane],
-    /// 输入与输出是否共享同一批缓冲；共享时必须先读后写。
-    pub in_place: bool,
-}
-
-/// 插件实际处理的样本宽度。VST3 的 kSample64 明确降级为静音，CLAP 只声明 F64 时才给。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SampleWidth {
-    /// 32 位浮点，唯一支持的宽度。
-    F32,
-    /// 64 位浮点；所有格式的保守行为都是静音且仍返回成功。
-    F64,
-}
-
-/// 一条声道平面；`ptr` 由宿主保证在回调期间有效。
-///
-/// # Safety
-/// 调用方必须保证 `ptr` 至少覆盖 `frames` 个 `SampleWidth` 样本且可读写（输出）/可读（输入）。
-#[derive(Clone, Copy, Debug)]
-pub struct ChannelPlane {
-    /// 平面起始地址。
-    pub ptr: *mut c_void,
-    /// 该平面可用帧数。
-    pub frames: usize,
-}
-
 /// 宿主存取的组件 state：格式层不解释字节块内容。
 pub trait FormatState {
     /// 读取宿主保存的字节块。

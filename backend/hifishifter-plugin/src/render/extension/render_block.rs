@@ -21,7 +21,7 @@ use super::*;
 /// 未就绪 —— 宿主应把这一帧当静音）与**宿主给的数据不可用**（参数非法 / 形状不支持）。
 /// 前者是正常状态，后者需要宿主知道；合成一个布尔值会让调用方无法区分。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RenderOutcome {
+pub enum RenderOutcome {
     /// 本块已按语义处理完（写满、清零或直通）。
     Done,
     /// 本块没有产出可用音频（离线流上快照未就绪，或缺工程位置）。
@@ -220,5 +220,42 @@ impl ExtensionOwner {
             block.output.set_silence_flags(0);
         }
         RenderOutcome::Done
+    }
+}
+
+impl ExtensionOwner {
+    /// 一次 `process` 的完整语义：**捕获观察 → 输出仲裁**。
+    ///
+    /// 【为什么这是一个入口而不是两个】两个格式的外壳都只该回答一个问题：“这一块
+    /// 该出什么声”。捕获观察必须先于输出仲裁（它决定本块位置是否可信、要不要发布），
+    /// 把顺序留给调用方就等于让两种格式各自复述一次这条规则 —— 而它们迟早会分叉。
+    ///
+    /// 【为什么证据不交给调用方】[`BlockEvidence`] 是本 crate 内部的相位/切分/门控
+    /// 结论；别的格式拿它没有任何用处，只会在传递中丢失字段。这里让它一步到位地
+    /// 流进 [`ExtensionOwner::render_block`]。
+    ///
+    /// # Safety
+    /// `block` 的平面由宿主提供，非空平面至少含 `frames` 帧；本函数只在本回调内使用
+    /// 它们，不保留任何指针。
+    pub unsafe fn process_audio(
+        &self,
+        block: &mut crate::audio_block::AudioBlock<'_>,
+        context: crate::block_context::BlockContext,
+        stream: ProcessStream,
+        effective_position: Option<i64>,
+    ) -> RenderOutcome {
+        let start = effective_position.unwrap_or(context.project_time_samples);
+        // SAFETY: 调用方保证非空输入平面至少含 `frames` 帧可读，且切片不越出本回调。
+        let planes = unsafe { block.input.planes(block.frames) };
+        let input = crate::capture::recorder::InputBlock {
+            start,
+            frames: block.frames,
+            sample_rate: context.sample_rate,
+            planes,
+            playing: context.playing,
+        };
+        let evidence = self.capture_observe_block(input, stream, context, effective_position);
+        // SAFETY: 同一份宿主缓冲，且只在本次回调内使用。
+        unsafe { self.render_block(block, Some(context), evidence) }
     }
 }

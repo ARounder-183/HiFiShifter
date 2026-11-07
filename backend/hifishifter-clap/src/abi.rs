@@ -229,7 +229,11 @@ pub const CLAP_EXT_RENDER: &[u8] = b"clap.render\0";
 pub const CLAP_EXT_AUDIO_PORTS: &[u8] = b"clap.audio-ports\0";
 /// `clap.gui` 扩展 ID。
 pub const CLAP_EXT_GUI: &[u8] = b"clap.gui\0";
-/// 阶段 2 启用 ARA 时才声明 `ara:supported`；Capture-only 外壳绝不谎报能力。
+/// ARACLAP.h 规定的 ARA 能力位：宿主只在 descriptor 里看到它时，才会在 entry 上查询
+/// `clap.ara.factory`、并在实例上查询 `clap.ara.plugin-extension`。
+///
+/// 【为什么没有 `ara:required`】本插件在没有 ARA 的宿主里仍是可用的普通效果器；
+/// `required` 会让那些宿主直接拒绝加载它。
 pub const FEATURE_ARA_SUPPORTED: &[u8] = b"ara:supported\0";
 /// 插件分类：音频效果器。
 pub const FEATURE_AUDIO_EFFECT: &[u8] = b"audio-effect\0";
@@ -253,7 +257,7 @@ pub const PLUGIN_ID_STR: &str = "com.hifishifter.clap";
 
 /// 静态函数/指针数组的 Sync 包装。
 #[repr(transparent)]
-pub struct StaticPtrArray(pub [*const c_char; 4]);
+pub struct StaticPtrArray(pub [*const c_char; 5]);
 // SAFETY: 只读静态表，见模块头。
 unsafe impl Sync for StaticPtrArray {}
 unsafe impl Send for StaticPtrArray {}

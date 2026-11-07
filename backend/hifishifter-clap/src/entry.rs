@@ -1,9 +1,12 @@
 //! CLAP 模块入口：descriptor、工厂、实例生命周期与扩展分发。
 //!
 //! 【ARA 的两级入口】entry 级工厂表在 `crate::ara::entry_extension`，实例级扩展在
-//! `crate::ara::get_extension`；两者背后是 VST3 那份共享 binder。descriptor 的
-//! `ara:supported` 在整条链验收前保持关闭 —— 交一个没有文档控制器的工厂会让宿主
-//! 写穿空指针。
+//! `crate::ara::get_extension`；两者背后是 VST3 那份共享 binder。descriptor 因此声明
+//! `ara:supported`：宿主据此才会在 entry 上要工厂、在实例上要扩展并 bind。
+//!
+//! 【为什么不声明 `ara:required`】本插件在没有 ARA 的宿主里仍是可用的普通效果器
+//! （捕获形态）。`required` 会让那些宿主直接拒绝加载它 —— 那是把“支持 ARA”说成
+//! “只会 ARA”。
 
 use crate::abi::cstr;
 use crate::abi::*;
@@ -28,6 +31,11 @@ static FEATURES: StaticPtrArray = StaticPtrArray([
     cstr(FEATURE_AUDIO_EFFECT),
     cstr(FEATURE_PITCH_CORRECTION),
     cstr(FEATURE_STEREO),
+    // 【为什么这一条是 ARA 的开关】ARACLAP.h 规定：宿主只有在 descriptor 的 features
+    // 里看到 `ara:supported` 才会在 entry 上查询 `clap.ara.factory`、并在实例上查询
+    // `clap.ara.plugin-extension`。少了它，两级入口都是死代码 —— 插件在宿主眼里只是
+    // 一个普通效果器。
+    cstr(FEATURE_ARA_SUPPORTED),
     std::ptr::null(),
 ]);
 static DESCRIPTOR: clap_plugin_descriptor_t = clap_plugin_descriptor_t {
@@ -362,11 +370,28 @@ unsafe extern "C" fn plugin_process(
             // 块计数与读数序号；此前它在这里和 `capture.on_process` 里各读一次，
             // 于是每个音频块被记成两块（诊断读数翻倍，前端的乱序判据也被加快）。
             // 现在唯一的读点在 `capture.on_process`，它自己负责写日志。
-            // 【ARA 形态：同一块也喂给共享捕获路径】观察、相位判定与录制在 VST3 用的是
-            // `ExtensionOwner::capture_block`；CLAP 的 ARA 实例调的是同一个方法。
-            // 捕获形态（未接 ARA）仍走自己的 `capture`：那条路还没有被共享实现取代。
+            // 【ARA 形态：整条通路都交给共享实现】捕获观察、相位判定、门控与快照输出
+            // 在 VST3 用的是 `ExtensionOwner::process_audio`；CLAP 的 ARA 实例调的是
+            // 同一个方法 —— 于是两种格式不可能在“这一块该出什么声”上分叉。
             if instance.ara.is_some() {
-                unsafe { crate::ara::observe_block(plugin, process) };
+                use hifishifter_plugin::render::extension::RenderOutcome;
+                match unsafe { crate::ara::process_audio(plugin, process) } {
+                    // 宿主给的数据不可用 / 形状不受支持：如实上报。
+                    Some(RenderOutcome::Invalid | RenderOutcome::Unsupported) => {
+                        return CLAP_PROCESS_ERROR;
+                    }
+                    // 写满整块 / 清零 / 直通：本块已按语义处理完。离线流上快照还没就绪
+                    // （`NotReady`）时输出是静音，但那不是宿主错误。
+                    Some(_) => {
+                        // 【为什么这里仍然喂 CLAP 自己的捕获存储】编辑器命令（录制状态、
+                        // 时间线、波形）读的是它；共享存储接管那一半是独立一期。两条通路
+                        // 读的是同一块输入，与改动前一致。
+                        unsafe { instance.capture.on_process(process, &instance.audio) };
+                        return CLAP_PROCESS_CONTINUE;
+                    }
+                    // 没有绑定器（运行时不可用）：退回下面的直通通路。
+                    None => {}
+                }
             }
             if unsafe { audio::process_block(process) } {
                 // 【顺序】先让宿主缓冲就位（in-place 时输入与输出是同一块），再喂捕获：
@@ -538,6 +563,106 @@ mod tests {
         release(&mut plugin, instance);
     }
 
+    /// **未绑定文档的 ARA 实例必须把宿主原声原样送出去**。
+    ///
+    /// 【为什么这条必须存在】CLAP 的 ARA 实例现在整块走**共享渲染通路**
+    /// （`ExtensionOwner::process_audio`）。那条路在“没有文档”时的正确结论是**直通**，
+    /// 而不是静音 —— 宿主只是把一个普通插入插在轨上，用户必须听见原声。这条用例把
+    /// “共享通路确实接上了”与“退化结论正确”两件事一起钉住：它同时断言实例有绑定器
+    /// （否则测的只是回退通路）与输出逐样本等于输入。
+    #[test]
+    fn an_ara_instance_without_a_document_passes_host_audio_through() {
+        let (mut plugin, instance) = fixture();
+        let ptr: *const clap_plugin_t = &raw const plugin;
+        let host = crate::abi::clap_host_t {
+            clap_version: CLAP_VERSION,
+            host_data: std::ptr::null_mut(),
+            name: c"probe".as_ptr(),
+            vendor: c"probe".as_ptr(),
+            url: c"probe".as_ptr(),
+            version: c"1".as_ptr(),
+            get_extension: None,
+            request_restart: None,
+            request_process: None,
+            request_callback: None,
+        };
+        unsafe { (*instance).host = &raw const host };
+        assert!(unsafe { plugin_init(ptr) });
+        assert!(
+            unsafe { (*instance).ara.is_some() },
+            "this case only means something when the instance has an ARA binder"
+        );
+        assert!(unsafe { plugin_activate(ptr, 48_000.0, 1, 512) });
+        assert!(unsafe { start_processing(ptr) });
+
+        const FRAMES: usize = 256;
+        let left: Vec<f32> = (0..FRAMES).map(|i| (i as f32 * 0.05).sin() * 0.5).collect();
+        let right: Vec<f32> = (0..FRAMES).map(|i| (i as f32 * 0.03).cos() * 0.5).collect();
+        let mut out_left = vec![0.0_f32; FRAMES];
+        let mut out_right = vec![0.0_f32; FRAMES];
+        let mut transport = crate::abi::clap_event_transport_t {
+            header: crate::abi::clap_event_header_t {
+                size: std::mem::size_of::<crate::abi::clap_event_transport_t>() as u32,
+                time: 0,
+                space_id: 0,
+                type_: crate::abi::CLAP_EVENT_TRANSPORT,
+                flags: 0,
+            },
+            flags: crate::abi::transport_flags::HAS_SECONDS_TIMELINE
+                | crate::abi::transport_flags::IS_PLAYING,
+            song_pos_beats: 0,
+            song_pos_seconds: 0,
+            tempo: 120.0,
+            tempo_inc: 0.0,
+            loop_start_beats: 0,
+            loop_end_beats: 0,
+            loop_start_seconds: 0,
+            loop_end_seconds: 0,
+            bar_start: 0,
+            bar_number: 0,
+            tsig_num: 4,
+            tsig_denom: 4,
+        };
+        let mut in_planes: [*mut f32; 2] =
+            [left.as_ptr() as *mut f32, right.as_ptr() as *mut f32];
+        let mut out_planes: [*mut f32; 2] = [out_left.as_mut_ptr(), out_right.as_mut_ptr()];
+        let input = crate::abi::clap_audio_buffer_t {
+            data32: in_planes.as_mut_ptr(),
+            data64: std::ptr::null_mut(),
+            channel_count: 2,
+            latency: 0,
+            constant_mask: 0,
+        };
+        let mut output = crate::abi::clap_audio_buffer_t {
+            data32: out_planes.as_mut_ptr(),
+            data64: std::ptr::null_mut(),
+            channel_count: 2,
+            latency: 0,
+            constant_mask: 0,
+        };
+        let process = clap_process_t {
+            steady_time: 0,
+            frames_count: FRAMES as u32,
+            transport: &mut transport,
+            audio_inputs: &input,
+            audio_outputs: &mut output,
+            audio_inputs_count: 1,
+            audio_outputs_count: 1,
+            in_events: std::ptr::null(),
+            out_events: std::ptr::null(),
+        };
+        assert_eq!(
+            unsafe { plugin_process(ptr, &raw const process) },
+            CLAP_PROCESS_CONTINUE
+        );
+        assert_eq!(out_left, left, "the host signal must reach the output unchanged");
+        assert_eq!(out_right, right, "the host signal must reach the output unchanged");
+        unsafe {
+            stop_processing(ptr);
+            plugin_deactivate(ptr);
+        }
+        release(&mut plugin, instance);
+    }
     /// **端到端验收**：宿主播放 → 页面按捕获 → 录制 → 停止 → 时间线上出现片段。
     ///
     /// 【为什么这条必须存在】前面的用例各自只验证一段（存储、协议、音频适配）。
@@ -718,15 +843,29 @@ mod tests {
         release(&mut plugin, instance);
     }
 
+    /// **descriptor 必须声明 `ara:supported`**。
+    ///
+    /// 【为什么这条是 ARA 的总开关】ARACLAP.h 规定宿主只在看到该 feature 时才去查
+    /// 两级 ARA 扩展。少了它，绑定器、渲染器与编辑器通路全部是死代码 —— 而这正是
+    /// 之前“日志里工厂建好了、宿主一条 region 都不给”的形态。
+    ///
+    /// 【为什么不声明 `ara:required`】见模块文档：没有 ARA 的宿主里本插件仍是可用的
+    /// 普通效果器。`required` 会让那些宿主直接拒绝加载。
     #[test]
-    fn a_capture_only_descriptor_does_not_advertise_ara() {
-        let features = unsafe { std::slice::from_raw_parts(DESCRIPTOR.features, 3) };
+    fn the_descriptor_advertises_ara_support_without_requiring_it() {
+        let features = unsafe { std::slice::from_raw_parts(DESCRIPTOR.features, 4) };
         let strings: Vec<&str> = features
             .iter()
             .map(|p| unsafe { CStr::from_ptr(*p) }.to_str().unwrap())
             .collect();
-        assert!(!strings.contains(&"ara:supported"));
-        assert!(!strings.contains(&"ara:required"));
+        assert!(
+            strings.contains(&"ara:supported"),
+            "a host only asks for the ARA extensions when this feature is present: {strings:?}"
+        );
+        assert!(
+            !strings.contains(&"ara:required"),
+            "the plug-in stays usable as a plain effect outside ARA hosts"
+        );
     }
     #[test]
     fn the_entry_declares_clap_1_1_9() {

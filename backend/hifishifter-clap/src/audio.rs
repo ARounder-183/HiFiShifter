@@ -5,8 +5,8 @@
 //! **总是读、总是写满**：只处理 F32，F64 保守静音并返回成功；in-place 时先读后写。
 
 use crate::abi::{clap_audio_buffer_t, clap_process_t, CLAP_RENDER_OFFLINE, CLAP_SECTIME_FACTOR};
-use hifishifter_plugin_core::format::{AudioBlock, ChannelPlane, SampleWidth, TransportFrame};
-use std::ffi::c_void;
+use hifishifter_plugin::audio_block::{AudioBlock, InputBus, OutputBus};
+use hifishifter_plugin_core::format::TransportFrame;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// 一个 CLAP 实例的音频时间状态。
@@ -188,7 +188,70 @@ pub unsafe fn overwrite_output(
     }
 }
 
-/// 校验并拷贝一个音频块。返回 `false` 表示宿主布局非法（输出必须丢弃）。
+/// 把 CLAP 的 `process` 数据翻译成共享的中立块。
+///
+/// 【为什么翻译放在格式外壳】`clap_audio_buffer_t` 的字段布局、`data32`/`data64` 的
+/// 联合体语义、`channel_count` 与指针数组的对应关系，都是 **CLAP ABI** 的知识。
+/// 共享渲染层刻意不认识它们 —— 它只面对“平面在哪、有几帧、是不是 in-place”。
+///
+/// 【为什么 in-place 要看“同一批平面指针”】CLAP 没有 VST3 那种“同一份总线结构”的
+/// 概念，宿主只保证输入与输出的平面指针**可能相同**。逐声道比对指针是这里唯一可靠的
+/// 判据（而它只影响静音掩码这条可选提示）。
+///
+/// 【返回 `None` 的情形】空块或没有可写输出平面 —— 调用方对这两种情形的既有语义都是
+/// “本块没有可处理的内容”。
+///
+/// # Safety
+/// `process` 必须是宿主在本次回调里给出的有效记录；非空平面至少含 `frames_count` 帧。
+pub unsafe fn block_from_clap<'a>(
+    process: &'a clap_process_t,
+    mode: i32,
+    silence: &'a mut u64,
+) -> Option<AudioBlock<'a>> {
+    let frames = process.frames_count as usize;
+    if frames == 0 || process.audio_outputs_count == 0 || process.audio_outputs.is_null() {
+        return None;
+    }
+    let output = unsafe { &mut *process.audio_outputs };
+    if output.channel_count == 0 || output.data32.is_null() {
+        return None;
+    }
+    let input = if process.audio_inputs_count > 0 && !process.audio_inputs.is_null() {
+        let bus = unsafe { &*process.audio_inputs };
+        // SAFETY: 宿主声明 `channel_count` 个平面指针，本回调期间有效。
+        unsafe { InputBus::new(bus.data32, bus.channel_count as usize) }
+    } else {
+        InputBus::empty()
+    };
+    let in_place = if process.audio_inputs_count > 0 && !process.audio_inputs.is_null() {
+        let bus = unsafe { &*process.audio_inputs };
+        let shared = bus.channel_count.min(output.channel_count) as usize;
+        (0..shared).any(|channel| {
+            // SAFETY: `channel < min(两个声道路数)`，两侧都声明了对应指针。
+            let source = unsafe { *bus.data32.add(channel) };
+            let target = unsafe { *output.data32.add(channel) };
+            !source.is_null() && source == target
+        })
+    } else {
+        false
+    };
+    // SAFETY: 上面已确认指针数组非空且声明了 `channel_count` 个平面。
+    let pointers: &'a mut [*mut f32] =
+        unsafe { std::slice::from_raw_parts_mut(output.data32, output.channel_count as usize) };
+    Some(AudioBlock {
+        frames,
+        mode,
+        input,
+        output: OutputBus::new(pointers, silence),
+        in_place,
+    })
+}
+
+/// 校验并直通一个音频块。返回 `false` 表示宿主布局非法（输出必须丢弃）。
+///
+/// 【为什么这里只剩“翻译 + 直通”】in-place 的“先读齐再写”、单声道下混、inactive 声道
+/// 跳过 —— 这些结论现在只有一处实现（`AudioBlock::pass_through`）。此前它们是本文件
+/// 里的一段独立循环，与 VST3 侧的同名逻辑各写一遍。
 ///
 /// # Safety
 /// `process` 必须来自宿主的有效 `clap_process_t`，其缓冲在调用期间有效。
@@ -197,123 +260,22 @@ pub unsafe fn process_block(process: &clap_process_t) -> bool {
     if frames == 0 {
         return true;
     }
-    let Some(inputs) = (unsafe { buffers(process.audio_inputs, process.audio_inputs_count) })
-    else {
-        return false;
-    };
-    let Some(outputs) =
-        (unsafe { buffers_mut(process.audio_outputs, process.audio_outputs_count) })
-    else {
-        return false;
-    };
-    let outputs: &[clap_audio_buffer_t] = outputs;
     // F64 不处理：保守地把输出写零，但仍返回成功（与 VST3 kSample64 同口径）。
-    if inputs
-        .iter()
-        .chain(outputs.iter())
-        .any(|b| !b.data64.is_null())
-    {
-        for output in outputs {
-            unsafe { clear_f64(output, frames) };
-        }
-        return true;
-    }
-    // 固定 2 声道平面数组：音频回调不分配、不拷贝整块 PCM。
-    let mut in_planes = [ChannelPlane {
-        ptr: std::ptr::null_mut(),
-        frames: 0,
-    }; 2];
-    let mut in_count = 0usize;
-    if let Some(buffer) = inputs.first() {
-        for channel in 0..(buffer.channel_count as usize).min(2) {
-            let Some(ptr) = (unsafe { plane_ptr32(buffer, channel) }) else {
-                return false;
-            };
-            in_planes[in_count] = ChannelPlane {
-                ptr: ptr.cast::<c_void>(),
-                frames,
-            };
-            in_count += 1;
+    if let Some(outputs) = unsafe { buffers(process.audio_outputs, process.audio_outputs_count) } {
+        if outputs.iter().any(|buffer| !buffer.data64.is_null()) {
+            for output in outputs {
+                unsafe { clear_f64(output, frames) };
+            }
+            return true;
         }
     }
-    let Some(output) = outputs.first() else {
+    let mut silence = 0_u64;
+    let Some(mut block) = (unsafe { block_from_clap(process, 0, &mut silence) }) else {
         return false;
     };
-    let channel_count = (output.channel_count as usize).min(2);
-    if channel_count == 0 {
-        return false;
-    }
-    let mut out_planes = [ChannelPlane {
-        ptr: std::ptr::null_mut(),
-        frames: 0,
-    }; 2];
-    for channel in 0..channel_count {
-        let Some(ptr) = (unsafe { plane_ptr32_mut(output, channel) }) else {
-            return false;
-        };
-        out_planes[channel] = ChannelPlane {
-            ptr: ptr.cast::<c_void>(),
-            frames,
-        };
-    }
-    let in_place = out_planes[..channel_count].iter().any(|out| {
-        in_planes[..in_count]
-            .iter()
-            .any(|input| input.ptr == out.ptr)
-    });
-    // 【为什么用 AudioBlock 而不是直接操作裸指针】这一层是格式外壳与共享语义的
-    // 唯一交界：core 只认识 ChannelPlane，不认识 clap_audio_buffer_t。构造之后
-    // 所有搬运都从 block 的平面描述出发，in-place 语义也由 block 自己携带；
-    // 把 block 丢在一边另写一套指针循环，等于让中性契约永远没有消费者。
-    let mut block = AudioBlock {
-        frames,
-        sample_width: SampleWidth::F32,
-        input: &in_planes[..in_count],
-        output: &mut out_planes[..channel_count],
-        in_place,
-    };
-    // 保守直通：逐帧先读两个源样本再写输出；in-place 与声道交换都安全。
-    // F64 已在上面单独处理，这里只可能是 F32。
-    if block.sample_width != SampleWidth::F32 {
-        return false;
-    }
-    // 【为什么 in_place 不需要单独分支】"读一个源就写一个输出"会在共用地址时
-    // 让第二个源读到刚被覆盖的数据。这里每帧都先 read_frame 把两个源读进栈上定长
-    // 数组，再 write_frame 统一写全部输出平面，顺序天然满足 in-place 契约。
-    // block.in_place 由构造方检测后随 block 传递，供后续共享渲染层判断是否需要
-    // 额外的缓冲；本直通实现只依赖"先读齐再写"这一条，不分配堆内存。
-    for frame in 0..block.frames {
-        let sources = read_frame(&block, frame);
-        write_frame(&mut block, frame, &sources);
-    }
-    true
+    // SAFETY: 由本函数的调用契约保证。
+    unsafe { block.pass_through() }.is_ok()
 }
-
-/// 读出一帧两个源声道（缺声道时按既定规则补齐），不触碰任何输出平面。
-fn read_frame(block: &AudioBlock<'_>, frame: usize) -> [f32; 3] {
-    let left = if !block.input.is_empty() {
-        unsafe { *block.input[0].ptr.cast::<f32>().add(frame) }
-    } else {
-        0.0
-    };
-    let right = if block.input.len() > 1 {
-        unsafe { *block.input[1].ptr.cast::<f32>().add(frame) }
-    } else {
-        left
-    };
-    [left, right, (left + right) * 0.5]
-}
-
-/// 把一帧写进所有输出平面；单声道输出取两路平均。
-fn write_frame(block: &mut AudioBlock<'_>, frame: usize, values: &[f32; 3]) {
-    let mono = block.output.len() == 1;
-    for (channel, plane) in block.output.iter_mut().enumerate() {
-        let target = unsafe { plane.ptr.cast::<f32>().add(frame) };
-        let value = if mono { values[2] } else { values[channel] };
-        unsafe { target.write(value) };
-    }
-}
-
 unsafe fn buffers(
     ptr: *const clap_audio_buffer_t,
     count: u32,
@@ -325,32 +287,6 @@ unsafe fn buffers(
         return None;
     }
     Some(unsafe { std::slice::from_raw_parts(ptr, count as usize) })
-}
-unsafe fn buffers_mut(
-    ptr: *mut clap_audio_buffer_t,
-    count: u32,
-) -> Option<&'static mut [clap_audio_buffer_t]> {
-    if count == 0 {
-        return Some(&mut []);
-    }
-    if ptr.is_null() {
-        return None;
-    }
-    Some(unsafe { std::slice::from_raw_parts_mut(ptr, count as usize) })
-}
-unsafe fn plane_ptr32(buffer: &clap_audio_buffer_t, channel: usize) -> Option<*mut f32> {
-    if buffer.data32.is_null() || channel >= buffer.channel_count as usize {
-        return None;
-    }
-    let ptr = unsafe { *buffer.data32.add(channel) };
-    (!ptr.is_null()).then_some(ptr)
-}
-unsafe fn plane_ptr32_mut(buffer: &clap_audio_buffer_t, channel: usize) -> Option<*mut f32> {
-    if buffer.data32.is_null() || channel >= buffer.channel_count as usize {
-        return None;
-    }
-    let ptr = unsafe { *buffer.data32.add(channel) };
-    (!ptr.is_null()).then_some(ptr)
 }
 unsafe fn clear_f64(buffer: &clap_audio_buffer_t, frames: usize) {
     if buffer.data64.is_null() {

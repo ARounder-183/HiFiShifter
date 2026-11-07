@@ -96,7 +96,7 @@ pub(crate) struct ProcessContext {
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub(crate) enum BufferError {
+pub enum BufferError {
     InvalidArgument,
     UnsupportedFormat,
 }
