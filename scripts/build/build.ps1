@@ -32,6 +32,15 @@ Set-Location $root
 . .\scripts\env\sdk-env.ps1
 Set-SdkEnvironment
 
+# 【为什么再算一次 $root】上面两份 env 脚本是**点源**的：它们的顶层变量会落在这个作用域里。
+# 真实事故：msvc-env.ps1 里有一个 `foreach ($root in ...)`，把这里的 `$root`（仓库根）
+# 覆盖成 Visual Studio 安装目录，于是 `Join-Path $root 'backend\...'` 指向
+# `C:\Program Files\Microsoft Visual Studio\2022\Community\backend\...`，
+# 构建在"找不到 models.json"处失败。env 脚本已改成函数（不再泄漏变量），这里再算一次是
+# 第二道闸 —— 代价一行，收益是同类回归再也不会把产物写到仓库外。
+$root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
+Set-Location $root
+
 function Assert-Ok($what) {
     if ($LASTEXITCODE) { throw "$what 失败（退出码 $LASTEXITCODE）" }
 }

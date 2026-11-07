@@ -33,4 +33,9 @@ Invoke-Gate 'Command gating gate' { python scripts/checks/check-command-gating.p
 # 版本号、安装器文案、模型清单、许可清单、安装器形态：都是"少一处也不报错"的约定。
 Invoke-Gate 'Product consistency gate' { & (Join-Path $PSScriptRoot 'check-product-consistency.ps1') }
 
+# 点源的 env 脚本只允许改 $env:*。真实事故：msvc-env.ps1 的一个 `foreach ($root in ...)`
+# 把构建脚本的 `$root`（仓库根）改写成了 Visual Studio 安装目录，构建在
+# "找不到 backend\src-tauri\resources\models\models.json" 处失败。
+Invoke-Gate 'Env script scope gate' { & (Join-Path $PSScriptRoot 'check-env-scripts.ps1') }
+
 Write-Host 'All static gates passed.' -ForegroundColor Green

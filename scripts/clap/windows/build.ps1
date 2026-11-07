@@ -4,6 +4,9 @@ $ErrorActionPreference = "Stop"
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\..\.."))
 . (Join-Path $root "scripts\env\msvc-env.ps1")
 . (Join-Path $root "scripts\env\sdk-env.ps1"); Set-SdkEnvironment
+# env 脚本是点源的（事故记录见 scripts/build/build.ps1）：再算一次，绝不让它们留下的
+# 同名变量把仓库根换掉。
+$root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\..\.."))
 Push-Location (Join-Path $root "backend")
 try { cargo build -p hifishifter-clap --release --locked } finally { Pop-Location }
 $module = Join-Path $root "backend\target\release\hifishifter_clap.dll"
