@@ -171,6 +171,16 @@ fn ensure_layout_v2_once() {
         hifishifter_kernel::app_paths_migrate::ensure_layout_v2().log_summary("plugin");
     });
     hifishifter_plugin_core::set_product_version(crate::VERSION);
+    // 【为什么资源布局在这里登记】VST3 的模块是 bundle（`Contents/Resources`），
+    // 而资源根的唯一实现 `resource_root` 需要知道"本模块在哪、是哪种形态"。
+    // 这里与 `set_product_version` 同属"进程级、只登记一次"的事实，放在同一处。
+    // CLAP 在它自己的 `entry_init` 里登记 Sibling 形态（见 `hifishifter-clap`）。
+    if let Ok(module) = crate::editor::resources::module_path() {
+        let _ = hifishifter_plugin_core::resource_root::set_layout(
+            hifishifter_plugin_core::resource_root::ResourceLayout::BundleContents,
+        );
+        let _ = hifishifter_plugin_core::resource_root::set_module_path(module);
+    }
     hifishifter_plugin_core::ensure_layout_v2_once();
 }
 

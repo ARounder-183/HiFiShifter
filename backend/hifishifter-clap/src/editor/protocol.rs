@@ -156,6 +156,17 @@ fn reply_in_process(view_id: &str, id: u64, command: &str, request: &Value) -> O
         "save_ui_settings" | "get_ui_settings" => ok(json!({ "ok": true })),
         // 页面就绪/心跳这类诊断消息不进命令表，也别让它们变成错误。
         "plugin_ready" | "plugin_heap" | "plugin_refresh" => ok(json!(null)),
+        // 【为什么这两条在进程内回答】它们服务的是**这个视图**，与编辑会话无关：
+        // `log_frontend_error` 只是把前端错误按共享限流键写进日志（与 VST3 同一个
+        // 实现）；`host_key_owned_set` 是 VST3 让路状态机的输入，而 CLAP 没有
+        // `IPlugView::keyDown` 那条路（键直达 WebView），让路无从发生。此前它们落到
+        // actor 上变成 "Command unavailable in plug-in mode"，每次开窗都往日志里
+        // 留下两条假错误。
+        "log_frontend_error" => {
+            hifishifter_plugin::editor::log_frontend_error(&request["args"]);
+            ok(json!(null))
+        }
+        "host_key_owned_set" => ok(json!({ "ok": true, "hostRelay": false })),
         "" => Some(json!({
             "version": 1, "viewId": view_id, "id": id, "ok": false,
             "error": "missing command", "errorKind": "transient", "errorCode": null,
@@ -179,7 +190,6 @@ pub fn parse_request(text: &str, view_id: &str) -> Option<Value> {
     Some(request)
 }
 
-#[cfg(test)]
 #[cfg(test)]
 mod tests {
     use super::*;

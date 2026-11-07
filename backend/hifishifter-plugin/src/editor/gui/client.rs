@@ -68,6 +68,34 @@ fn host_reply_retry_backoff(attempt: u32) -> std::time::Duration {
 /// 整条栈当成键 —— 而栈里往往含地址/行号这类每次都变的内容，会让"同一类错误"
 /// 每次都落进新桶，限流器形同虚设。64 字符足以区分 invoke 方法名与错误分类，
 /// 又不会让键本身变成新的日志体量。
+/// 前端自报错误的统一落盘口。
+///
+/// 【为什么抽成自由函数】VST3 的 `EditorClient` 与 CLAP 的视图协议是两条入站路径，
+/// 但"页面报了一个错"是同一件事：同一条限流键、同一个级别、同一行格式。分成两份
+/// 实现的下场是两边限流窗口不同，一边刷屏一边安静。
+///
+/// 【为什么按 (message, detail) 分桶限流，而不是原样落盘】这个入口是**运行期数据
+/// 驱动**的：每个失败的方法名是一类新错误。此前每条都原样写进日志，实测把一个终态
+/// 错误（组件已关闭而页面仍在轮询）放大成 50 分钟 19,056 行、轮转文件合计约 32 MB
+/// 纯噪声 —— 用户报障时真正有用的线索全被冲掉。现在每类错误各自 10 秒最多一条，
+/// 且窗口内被抑制的条数会在下一条输出前以 `[throttled]` 汇总行补记。
+///
+/// 【为什么是 Warn 而不是 Info】页面自己报的错是**故障信号**，而默认日志级别是
+/// Warn —— Info 级的限流诊断在本构建里一条都不会输出。
+pub fn log_frontend_error(args: &serde_json::Value) {
+    let message = args["message"].as_str().unwrap_or("");
+    let detail = args["detail"].as_str().unwrap_or("");
+    let key = format!(
+        "frontend:{}:{}",
+        truncate_key(message),
+        truncate_key(detail)
+    );
+    hifishifter_kernel::log_limiter::emit_limited_key(
+        log::Level::Warn,
+        &key,
+        format_args!("Embedded frontend: {args}"),
+    );
+}
 fn truncate_key(text: &str) -> String {
     const MAX: usize = 64;
     if text.len() <= MAX {
@@ -1783,29 +1811,7 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
         Some("ping") => Ok(serde_json::json!({"ok":true,"mode":"plugin","view_id":view_id,
             "connected":state.borrow().link.owner().is_ok()})),
         Some("log_frontend_error") => {
-            // 【为什么按 (message, detail) 分桶限流，而不是原样落盘】
-            // 这个入口是**运行期数据驱动**的：每个失败的方法名是一类新错误。
-            // 此前每条都原样写进日志，实测把一个终态错误（组件已关闭而页面仍在
-            // 轮询）放大成 50 分钟 19,056 行、轮转文件合计约 32 MB 纯噪声 ——
-            // 用户报障时真正有用的线索全被冲掉。
-            // 现在每类错误各自 10 秒最多一条，且窗口内被抑制的条数会在下一条
-            // 输出前以 `[throttled]` 汇总行补记（不丢信息，只丢重复）。
-            let args = &request["args"];
-            let message = args["message"].as_str().unwrap_or("");
-            let detail = args["detail"].as_str().unwrap_or("");
-            let key = format!(
-                "frontend:{}:{}",
-                truncate_key(message),
-                truncate_key(detail)
-            );
-            // 【为什么是 Warn 而不是 Info】页面自己报的错是**故障信号**，而默认
-            // 日志级别是 Warn —— Info 级的限流诊断在本构建里一条都不会输出。
-            // 这条曾经因此哑了整场：前端在报错，插件侧一片空白。
-            hifishifter_kernel::log_limiter::emit_limited_key(
-                log::Level::Warn,
-                &key,
-                format_args!("Embedded frontend: {}", args),
-            );
+            log_frontend_error(&request["args"]);
             Ok(serde_json::Value::Null)
         }
         Some(command @ ("open_audio_dialog"|"open_audio_dialog_multi"))=>{
