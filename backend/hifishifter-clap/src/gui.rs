@@ -149,7 +149,11 @@ unsafe extern "C" fn create(p: *const clap_plugin_t, _api: *const c_char, floati
 unsafe extern "C" fn destroy(p: *const clap_plugin_t) {
     hifishifter_plugin_core::guard_ffi((), || {
         #[cfg(windows)]
-        crate::editor::windows::destroy(p);
+        // SAFETY: `p` 是本模块创建、尚未销毁的插件实例（CLAP 保证 gui.destroy 早于
+        // plugin.destroy）。
+        unsafe {
+            crate::editor::windows::destroy(p)
+        };
         #[cfg(not(windows))]
         let _ = p;
     })

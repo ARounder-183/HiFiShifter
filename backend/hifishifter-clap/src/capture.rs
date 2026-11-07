@@ -88,6 +88,12 @@ pub struct CaptureHost {
 
 impl Default for CaptureHost {
     fn default() -> Self {
+        // 【为什么先建这两个再交给结构体】音高基线在后台线程上落地，落地之后要
+        // **重渲染**（渲染读的正是那条 `pitch_orig`）。编辑器因此持有一份渲染引擎的
+        // 引用；两者必须指向同一份实例，不能各建一个。
+        let editor = std::sync::Arc::new(crate::editor::timeline_host::TimelineHost::default());
+        let render = std::sync::Arc::new(crate::render::RenderEngine::default());
+        editor.attach_render(std::sync::Arc::clone(&render));
         Self {
             store: CaptureStore::default(),
             session: Mutex::new(TransportSession::default()),
@@ -102,8 +108,8 @@ impl Default for CaptureHost {
             position_at_ms: AtomicU64::new(0),
             host_playing: AtomicBool::new(false),
             sample_seq: AtomicU64::new(0),
-            editor: std::sync::Arc::new(crate::editor::timeline_host::TimelineHost::default()),
-            render: std::sync::Arc::new(crate::render::RenderEngine::default()),
+            editor,
+            render,
             mipmaps: Mutex::new(std::collections::HashMap::new()),
             saw_position: AtomicBool::new(false),
         }
@@ -1290,6 +1296,109 @@ mod tests {
         assert!(
             (median - 57.0).abs() < 2.0,
             "expected A3 (57) but the baseline says {median}: {orig:?}"
+        );
+    }
+
+    /// 捕获结束后，音高**原线**必须自己出现在参数编辑器里（用户不必先画一笔）。
+    ///
+    /// 【为什么这条是回归测试】CLAP 外壳此前只在**取数**时启动 WORLD 基线，却从不
+    /// 告诉页面"算完了"。页面拿到的那一次是"分析中、曲线为空"，之后没有任何东西
+    /// 再取一次 —— 用户看到的就是一片空白，直到他自己画一笔（那次写入顺带触发了
+    /// 重取），才"等一会儿突然出现"。这条钉住两件事：`pitch_orig_updated` 真的被
+    /// 投递给页面，且随后一次取数拿得到曲线。
+    #[test]
+    fn a_finished_pitch_baseline_notifies_the_editor() {
+        let host = activated_host();
+        let audio = audio();
+        let events: std::sync::Arc<std::sync::Mutex<Vec<(String, Value)>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = std::sync::Arc::clone(&events);
+        host.editor().set_notifier(Some(std::sync::Arc::new(
+            move |event: &str, payload: Value| {
+                sink.lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push((event.to_owned(), payload));
+            },
+        )));
+        host.handle("capture_start", &json!({})).unwrap();
+        let mut phase = 0.0_f64;
+        for index in 0..100 {
+            let transport = playing_at(index as f64 * 480.0 / 48_000.0);
+            let mut block = Block::new(&transport, 480, 0.0);
+            block.attach();
+            let samples: Vec<f32> = (0..480)
+                .map(|_| {
+                    phase += 2.0 * std::f64::consts::PI * 220.0 / 48_000.0;
+                    (phase.sin() * 0.5) as f32
+                })
+                .collect();
+            block.left.copy_from_slice(&samples);
+            block.right.copy_from_slice(&samples);
+            unsafe { host.on_process(&block.process, &audio) };
+        }
+        host.handle("capture_stop", &json!({})).unwrap();
+        let track = crate::editor::timeline_host::CAPTURE_TRACK_ID;
+        // 第一次取数会**启动**后台分析（并如实回 `analysis_pending`）。
+        host.param_frames(&json!({
+            "trackId": track,
+            "param": "pitch",
+            "startFrame": 0,
+            "frameCount": 80,
+            "binary": false,
+        }))
+        .expect("get_param_frames");
+        // 页面这一侧只知道事件：它没有任何"再问一次"的定时器。
+        let mut updated = false;
+        for _ in 0..400 {
+            if events
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .any(|(name, _)| name == "pitch_orig_updated")
+            {
+                updated = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        let seen = events.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert!(
+            updated,
+            "the editor was never told the baseline is ready: {seen:?}"
+        );
+        assert!(
+            seen.iter()
+                .any(|(name, _)| name == "pitch_orig_analysis_started"),
+            "the editor was never told an analysis started: {seen:?}"
+        );
+        let payload = seen
+            .iter()
+            .find(|(name, _)| name == "pitch_orig_updated")
+            .map(|(_, payload)| payload.clone())
+            .unwrap_or(Value::Null);
+        assert_eq!(
+            payload["rootTrackId"],
+            json!(track),
+            "the event must name the track whose baseline landed: {payload}"
+        );
+        // 事件之后**再取一次**（页面收到事件做的就是这件事）必须拿到曲线。
+        let read = host
+            .param_frames(&json!({
+                "trackId": track,
+                "param": "pitch",
+                "startFrame": 0,
+                "frameCount": 80,
+                "binary": false,
+            }))
+            .expect("get_param_frames");
+        assert_eq!(read["analysis_pending"], json!(false), "{read}");
+        let orig: Vec<f64> = read["orig"]
+            .as_array()
+            .map(|items| items.iter().filter_map(Value::as_f64).collect())
+            .unwrap_or_default();
+        assert!(
+            orig.iter().filter(|value| **value > 0.0).count() > orig.len() / 2,
+            "the refreshed curve must carry the baseline: {read}"
         );
     }
 

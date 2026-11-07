@@ -48,6 +48,23 @@ const PAGE_URL: &str = "https://hifishifter.invalid/plugin.html";
 const CLASS_NAME: &str = "HiFiShifter.CLAP.Editor";
 const WINDOW_TITLE: &str = "HiFiShifter CLAP editor";
 
+/// 后台线程 → UI 线程的私有窗口消息：把一条页面事件投递给本视图。
+///
+/// 【为什么要绕一道 `PostMessage`】WebView2 的 `PostWebMessageAsJson` 只能在创建
+/// 控制器的 UI 线程上调用，而"音高基线算完了"发生在后台线程。`PostMessage` 是少数
+/// 几个可以跨线程投递到窗口的 API，且它只是**入队**，不会在投递方线程上执行窗口过程。
+const WM_APP_PAGE_EVENT: u32 = WM_APP + 1;
+
+/// 一条待投递的页面事件（随 `PostMessage` 的 `lparam` 过线程边界）。
+///
+/// 【为什么用裸指针而不是队列】`PostMessage` 不提供用户数据通道，`wparam`/`lparam`
+/// 是两个整数。把 `Box::into_raw` 的地址当 `lparam` 传过去、由窗口过程 `Box::from_raw`
+/// 取回所有权，是这条通道最直接的所有权转移方式（每条消息恰好取一次）。
+struct PageEvent {
+    event: String,
+    payload: serde_json::Value,
+}
+
 // 本进程的 WebView2 环境与视图表（STA 线程独占；所有 CLAP 视图都在宿主 UI 线程创建）。
 thread_local! {
     // 【为什么不是全局 Mutex】HWND 与 COM 接口都不是 Send；而 CLAP 的 GUI 回调
@@ -144,11 +161,83 @@ unsafe extern "system" fn window_proc(
                 }
                 LRESULT(0)
             }
+            WM_APP_PAGE_EVENT => {
+                // SAFETY: 这个指针只由 `post_page_event` 用 `Box::into_raw` 造出来，
+                // 且每条消息恰好被取走一次。
+                let event = unsafe { Box::from_raw(lparam.0 as *mut PageEvent) };
+                deliver_page_event(hwnd, *event);
+                LRESULT(0)
+            }
             WM_DESTROY => LRESULT(0),
             _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
         }
     })
 }
+/// UI 线程：把一条事件写进页面。
+///
+/// 【为什么只在这里调 `PostWebMessageAsJson`】它是 WebView2 的 UI 线程 API。窗口过程
+/// 由宿主消息泵在本线程上调用，因此这里是全模块唯一合法的投递点。
+///
+/// 【找不到视图就丢弃】视图可能正在销毁（控制器已关），事件没有意义；宁可丢一条
+/// "原线到了"，也不要往已关闭的页面投递 —— 页面重开后会自己重取一次曲线。
+fn deliver_page_event(hwnd: HWND, event: PageEvent) {
+    let target = VIEWS.with(|views| {
+        views
+            .borrow()
+            .values()
+            .find(|view| view.hwnd == hwnd)
+            .map(|view| (view.view_id.clone(), view.controller.clone()))
+    });
+    let Some((view_id, Some(controller))) = target else {
+        return;
+    };
+    let Ok(browser) = (unsafe { controller.CoreWebView2() }) else {
+        return;
+    };
+    let text = wide(&page_event_message(&view_id, &event.event, &event.payload));
+    let _ = unsafe { browser.PostWebMessageAsJson(PCWSTR(text.as_ptr())) };
+}
+
+/// 页面事件的线上形状。
+///
+/// 【为什么单独一个函数】`version` + `viewId` 是页面桥的准入条件（见
+/// `frontend/src/services/pluginHost.ts` 的 `receive`），`event` 才是"这是通知、
+/// 不是某条请求的回执"。写错一个字段，页面会**静默**把它当成无关消息丢掉 ——
+/// 所以这条契约要能被单测钉住，而不是只在窗口里跑一遍。
+fn page_event_message(view_id: &str, event: &str, payload: &serde_json::Value) -> String {
+    serde_json::json!({
+        "version": 1,
+        "viewId": view_id,
+        "event": event,
+        "payload": payload,
+    })
+    .to_string()
+}
+
+/// 任意线程：把一条事件投递给 `hwnd` 所属的视图（入队后立即返回）。
+fn post_page_event(hwnd: isize, event: &str, payload: serde_json::Value) {
+    if hwnd == 0 {
+        return;
+    }
+    let raw = Box::into_raw(Box::new(PageEvent {
+        event: event.to_owned(),
+        payload,
+    }));
+    let posted = unsafe {
+        PostMessageW(
+            Some(HWND(hwnd as *mut core::ffi::c_void)),
+            WM_APP_PAGE_EVENT,
+            WPARAM(0),
+            LPARAM(raw as isize),
+        )
+    };
+    if posted.is_err() {
+        // 【为什么必须回收】窗口已经没了（宿主关了编辑器）：消息永远不会到达，
+        // 所有权还在我们手上。不回收就是每关一次窗漏一条事件。
+        drop(unsafe { Box::from_raw(raw) });
+    }
+}
+
 fn register_class() -> Result<(), String> {
     static REGISTERED: OnceLock<Result<(), String>> = OnceLock::new();
     REGISTERED
@@ -245,6 +334,19 @@ fn create_inner(plugin: *const clap_plugin_t) -> Result<(), String> {
         view.hwnd = hwnd;
     })
     .ok_or("GUI view disappeared during creation")?;
+    // 页面事件通道：音高基线在后台线程上算完，要把 `pitch_orig_updated` 推给页面。
+    // 闭包只捕获一个 `isize` —— HWND 不是 `Send`，而这条闭包要跨线程调用。
+    if let Some(instance) = unsafe { crate::instance(plugin) } {
+        let handle = hwnd.0 as isize;
+        instance
+            .capture
+            .editor()
+            .set_notifier(Some(std::sync::Arc::new(
+                move |event: &str, payload: serde_json::Value| {
+                    post_page_event(handle, event, payload)
+                },
+            )));
+    }
     // 【为什么建窗之后才解析资源与 profile】失败时窗口还在，原因可以直接写进窗口；
     // 反过来的话宿主只知道"create 失败"，用户看到的是一片什么都没有的插件窗口。
     let setup = frontend_dir().and_then(|folder| Ok((folder, webview_profile_dir()?)));
@@ -691,8 +793,18 @@ pub fn is_created(plugin: *const clap_plugin_t) -> bool {
 }
 
 /// `destroy`：关控制器、销毁窗口、从表里移除。可重入。
-pub fn destroy(plugin: *const clap_plugin_t) {
+///
+/// # Safety
+/// `plugin` 必须是本模块创建的、尚未 `destroy` 的 `clap_plugin_t`：本函数要回读
+/// 实例上的事件出口（窗口一关就得摘掉，否则后台线程会往一个可能被复用的 HWND 投递）。
+pub unsafe fn destroy(plugin: *const clap_plugin_t) {
     let key = plugin as usize;
+    // 【为什么先摘掉事件出口】窗口一关，`hwnd` 就可能被系统复用；后台线程此时再
+    // 投递就是往一个不相干的窗口发消息。摘掉之后事件静默丢弃，重开窗口时页面会
+    // 自己重取一次曲线。
+    if let Some(instance) = unsafe { crate::instance(plugin) } {
+        instance.capture.editor().set_notifier(None);
+    }
     let view = VIEWS.with(|views| views.borrow_mut().remove(&key));
     if let Some(mut view) = view {
         if let Some(controller) = view.controller.take() {
@@ -724,6 +836,28 @@ pub fn shutdown() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 页面事件必须是页面桥认得的那一种消息（`event` 而非回执）。
+    #[test]
+    fn page_events_match_the_page_bridge_contract() {
+        let text = page_event_message(
+            "clap-view-1-2",
+            "pitch_orig_updated",
+            &serde_json::json!({ "rootTrackId": "capture-track" }),
+        );
+        let value: serde_json::Value = serde_json::from_str(&text).expect("valid json");
+        assert_eq!(value["version"], serde_json::json!(1));
+        assert_eq!(value["viewId"], serde_json::json!("clap-view-1-2"));
+        assert_eq!(value["event"], serde_json::json!("pitch_orig_updated"));
+        assert_eq!(
+            value["payload"]["rootTrackId"],
+            serde_json::json!("capture-track")
+        );
+        assert!(
+            value.get("id").is_none(),
+            "an event must not look like a reply to a request id"
+        );
+    }
 
     /// profile 目录名必须带 PID：WebView2 不允许两个进程共用一个用户数据目录。
     #[test]
