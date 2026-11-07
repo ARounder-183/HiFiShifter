@@ -1256,7 +1256,7 @@ unsafe extern "system" fn component_terminate(this: *mut c_void) -> TResult {
             unsafe {
                 let processor = &*(this as *mut Processor);
                 processor.connection.close();
-                processor.extension_owner.stop_editor();
+                processor.extension_owner.component_terminated();
             }
             crate::log_line("IComponent::terminate");
             K_RESULT_OK
@@ -1404,22 +1404,15 @@ unsafe extern "system" fn component_set_active(this: *mut c_void, state: i8) -> 
                 // `IPlugInEntryPoint2`）。`ara_bound` 为假就是"宿主把本插件当普通插入
                 // 效果器"的直接证据 —— Cubase 实测正是如此，而此前日志里没有任何一行
                 // 直接说出这件事，得靠对比两个会话才能推断。
-                owner.note_component_activated();
-                // 【预览跨失活保留 cursor】重新激活时若有一个挂起的预览，恢复它；
-                // 否则清掉上一轮的几何（同一 raw 的第一块会被判成 Resting，输出
-                // 继续读上一张 take —— 问题 3）。
-                if !owner.resume_processing_preview() {
-                    owner.reset_transport_session("component_activated");
-                }
-                // 后台/前台切换后宿主可能已重建几何或恢复源访问；主动枚举一次，
-                // 不等下一次 UI tick 的节流窗口。
-                owner.resume_resync();
+                // 激活序列（恢复挂起预览 / 清上一遍几何 / 主动重同步）由共享生命周期入口给出：
+                // CLAP 的 activate 调的是同一个方法。
+                owner.component_activated();
                 crate::log_line(&format!(
                     "IComponent::setActive({state}): ara_bound={}",
                     owner.is_ara_bound()
                 ));
             } else {
-                owner.note_component_deactivated();
+                owner.component_deactivated();
                 crate::log_line(&format!("IComponent::setActive({state})"));
             }
             K_RESULT_OK
@@ -1691,38 +1684,24 @@ unsafe extern "system" fn audio_setup_processing(
             // 保证"setup 接受过的率"在音频线程上不会再被拒（见 `ExtensionOwner::setup_sample_rate`）。
             // SAFETY: this 为存活音频接口。
             let owner = unsafe { &(*base_from_audio(this)).extension_owner };
-            owner.set_setup_sample_rate(setup.sample_rate);
-            // 【为什么在这里装载 Capture 的渲染基础设施】`setupProcessing` 是 SDK 保证
-            // 在任何 `process` 之前、且在宿主 UI 线程上被调用的唯一时刻，而宿主时钟、
-            // 合成队列与 `prepare_owner` 都是"第一次 process 之前必须就位"的东西。
-            // 此前它们由 WebView 的 20ms 定时器装载 —— 于是**没开窗口**的会话里宿主位置
-            // 根本没有地方落：插件 UI 的播放光标永远是 0，而用户以为宿主没在播放。
-            owner.arm_capture_rendering();
             crate::log_line(&format!(
                 "IAudioProcessor::setupProcessing mode={} rate={}",
                 setup.process_mode, setup.sample_rate
             ));
-            if setup.process_mode == 2 {
-                // SAFETY: this为存活音频接口；SDK明确setup在UI线程/禁用状态调用。
-                let owner = unsafe { &(*base_from_audio(this)).extension_owner };
-                // 【为什么在这里同步等待】离线渲染会把当时听不到的声音烘焙进产物：等得不够久
-                // ⇒ 产物里是静音，这是数据正确性失败。等待时长与理由见 `OFFLINE_PREPARE_TIMEOUT`。
-                //
-                // 【为什么失败返回 `kResultOk` 而不是 `kResultFalse`】`kResultFalse` 会让多数
-                // 宿主把插件**整个踢出链路**（用户看到"插件不见了"，没有任何提示）。返回 OK 则
-                // 保留插件：离线渲染输出静音，且日志里有一条明确的原因 —— 可诊断的降级优于
-                // 静默的消失。
-                let started = std::time::Instant::now();
-                if let Err(error) = owner.prepare_offline_until(
-                    started + crate::render::extension::OFFLINE_PREPARE_TIMEOUT,
-                ) {
-                    crate::log_line(&format!(
-                    "Offline preparation failed after {:?}: {error}. Keeping the plugin in the chain; \
-                     offline output will be silent until preparation succeeds.",
-                    started.elapsed()
+            // 【为什么采样率与离线准备在这里一起落定】`setupProcessing` 是 SDK 保证在任何
+            // `process` 之前、且在宿主 UI 线程上被调用的唯一时刻：宿主时钟、合成队列与
+            // `prepare_owner` 都必须在第一块之前就位，离线渲染更必须在出第一块之前把结果
+            // 准备好（否则产物里是静音，属于数据正确性失败）。CLAP 没有独立的 setup 回调，
+            // 它由 `activate` 调同一个方法（见 `ExtensionOwner::setup_processing`）。
+            //
+            // 【为什么失败仍返回 `kResultOk`】`kResultFalse` 会让多数宿主把插件**整个踢出
+            // 链路**（用户看到"插件不见了"，没有任何提示）。保留插件则离线产物静音，且日志里
+            // 有一条明确的原因 —— 可诊断的降级优于静默的消失。
+            if let Err(error) = owner.setup_processing(setup.sample_rate, setup.process_mode == 2) {
+                crate::log_line(&format!(
+                    "Offline preparation failed after setupProcessing: {error}. Keeping the plugin in the chain; offline output will be silent until preparation succeeds."
                 ));
-                    return K_RESULT_OK;
-                }
+                return K_RESULT_OK;
             }
             K_RESULT_OK
         })
@@ -1739,31 +1718,12 @@ unsafe extern "system" fn audio_set_processing(this: *mut c_void, state: i8) -> 
                 return K_INVALID_ARGUMENT;
             }
             let owner = unsafe { &(*base_from_audio(this)).extension_owner };
+            // 处理开始/停止的整条序列由共享生命周期入口给出（CLAP 的
+            // start_processing / stop_processing 调的是同一对方法）。
             if state == 0 {
-                owner.record_processing_stop();
-                if owner.processing_pass_is_preview() {
-                    // 【预览只挂起】VEGAS 的非实时预览完全可能在每个 chunk 之间调用
-                    // setProcessing(false)。结束 pass 会把 cursor/几何清空，下一块只能
-                    // 重新从候选开始 —— 看起来就是“只录了 1 秒”。
-                    owner.suspend_processing_preview("setProcessing(false)");
-                } else {
-                    owner.note_processing_stopped();
-                }
-            } else if owner.resume_processing_preview() {
-                // 恢复挂起的预览：cursor 与 pass 原样接上。
-            } else if owner.setup_process_mode() == 2 {
-                // 【离线预览的第二个入口】有些宿主（含 VEGAS 的“应用非实时事件 FX”）
-                // 在 setup 时声明 mode=2，但直到 setProcessing(true) 才真正开始预览。
-                // 这里同步准备一次；失败仍返回 OK，让宿主保留插件（产物会静音但可诊断）。
-                let started = std::time::Instant::now();
-                if let Err(error) = owner.prepare_offline_until(
-                    started + crate::render::extension::OFFLINE_PREPARE_TIMEOUT,
-                ) {
-                    crate::log_line(&format!(
-                        "Offline preparation at setProcessing(true) failed after {:?}: {error}",
-                        started.elapsed()
-                    ));
-                }
+                owner.processing_stopped();
+            } else {
+                owner.processing_started(owner.setup_process_mode() == 2);
             }
             K_RESULT_OK
         })

@@ -44,6 +44,7 @@ mod declick;
 mod diagnostics;
 mod host_clock;
 mod host_link;
+mod lifecycle;
 mod playback;
 mod processing_pass;
 mod render_block;

@@ -260,6 +260,9 @@ unsafe extern "C" fn plugin_destroy(plugin: *const clap_plugin_t) {
                     log::error!("[clap] destroy called while active; leaking instead of crashing");
                     return;
                 }
+                // 组件终止：停掉会话 actor 与准备 worker（它们持有指向 owner 的强引用，
+                // 不先关闭邮箱线程就不会退出）。与 VST3 的 terminate 同一个方法。
+                instance.owner.component_terminated();
             }
             unsafe { drop(Box::from_raw(data.cast::<Instance>())) };
         }
@@ -289,13 +292,18 @@ unsafe extern "C" fn plugin_activate(
             return false;
         }
         instance.audio.set_sample_rate(sample_rate);
-        // 捕获拒绝在没有工程采样率的实例上武装：它是“工程帧 ↔ 秒”换算的唯一依据。
-        instance.owner.capture().note_project_rate(sample_rate);
-        // 让共享渲染基础设施就位（准备队列、时钟、Capture 会话）。它由
-        // `setupProcessing` 驱动，因为那是 SDK 保证在任何 `process` 之前、且在宿主
-        // UI 线程上被调用的唯一时刻 —— VST3 侧调用的是同一个方法。
-        instance.owner.arm_capture_rendering();
-        unsafe { crate::ara::observe_activation(plugin) };
+        // 采样率、捕获渲染基础设施与离线意图：与 VST3 的 setupProcessing 同一条共享
+        // 序列（见 `ExtensionOwner::setup_processing`）。CLAP 没有单独的 setup 回调，
+        // 所以这三件事都由 activate 承担。
+        if let Err(error) = instance
+            .owner
+            .setup_processing(sample_rate, instance.audio.is_offline())
+        {
+            log::warn!("[clap] offline preparation at activate failed: {error}");
+        }
+        // 激活序列（恢复挂起预览 / 清上一遍几何 / 主动重同步）：与 VST3 的
+        // setActive(true) 是同一个方法。ARA 的绑定窗口也在这里关闭。
+        instance.owner.component_activated();
         log::info!("[clap] activated at {sample_rate} Hz, block {min}..={max}");
         true
     })
@@ -314,7 +322,7 @@ unsafe extern "C" fn plugin_deactivate(plugin: *const clap_plugin_t) {
             return;
         }
         instance.audio.set_render_mode(CLAP_RENDER_REALTIME);
-        crate::ara::observe_deactivation(plugin);
+        instance.owner.component_deactivated();
     })
 }
 unsafe extern "C" fn start_processing(plugin: *const clap_plugin_t) -> bool {
@@ -328,7 +336,9 @@ unsafe extern "C" fn start_processing(plugin: *const clap_plugin_t) -> bool {
             log::error!("[clap] start_processing in an invalid state rejected");
             return false;
         }
-        crate::ara::observe_processing(plugin);
+        instance
+            .owner
+            .processing_started(instance.audio.is_offline());
         true
     })
 }
@@ -336,6 +346,9 @@ unsafe extern "C" fn stop_processing(plugin: *const clap_plugin_t) {
     hifishifter_plugin_core::guard_ffi((), || {
         if let Some(instance) = unsafe { crate::instance(plugin) } {
             instance.processing.store(false, Ordering::Release);
+            // 处理停止序列（收尾 pass、冻结宿主时钟、清流几何）：与 VST3 的
+            // setProcessing(false) 是同一个方法。
+            instance.owner.processing_stopped();
         }
     })
 }
