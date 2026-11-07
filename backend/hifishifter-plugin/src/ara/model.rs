@@ -3605,7 +3605,7 @@ mod tests {
             channel_buffers: planes.as_mut_ptr(),
         };
         assert!(
-            !unsafe { owner.snapshots[0].copy_block(0, 44100, &mut bus, 4) },
+            !unsafe { owner.snapshots[0].copy_block(0, 44100, &mut crate::audio_abi::output_bus(&mut bus), 4) },
             "撤权首先撤销实时旧快照"
         );
         assert_eq!(left, [0.0; 4]);

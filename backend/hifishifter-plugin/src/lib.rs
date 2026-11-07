@@ -64,6 +64,7 @@
 pub mod ara;
 mod ara_entry;
 mod audio_abi;
+mod audio_block;
 mod capture;
 pub use hifishifter_plugin_core::component_state;
 mod diagnostics;

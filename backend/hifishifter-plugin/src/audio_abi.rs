@@ -168,20 +168,82 @@ pub(crate) unsafe fn validate(data: *mut ProcessData) -> Result<(), BufferError>
     Ok(())
 }
 
-/// 输入与输出是否**共用同一份总线结构**（in-place 宿主）。
+/// 把 VST3 的回调数据翻译成与格式无关的块描述（[`crate::audio_block::AudioBlock`]）。
 ///
-/// 【为什么必须知道这件事】`silence_flags` 是**写在总线结构里**的。宿主可以合法地把
-/// 同一个 `AudioBusBuffers` 同时当输入和输出（见 `pass_through` 的说明），于是一个插件
-/// 给自己输出写的"全是静音"掩码，会在**下一块**被它自己当作"宿主说这个输入是静音的"
-/// 读回来 —— 自己把自己录成静音、也把自己直通成静音。掩码只是给宿主省算力的**可选**
-/// 提示，in-place 时省掉它没有任何代价。
-pub(crate) fn input_output_share_bus(data: &ProcessData) -> bool {
-    data.num_inputs > 0
-        && data.num_outputs > 0
-        && !data.inputs.is_null()
-        && data.inputs == data.outputs
+/// 【为什么翻译放在本文件】读平面指针数组、判断 in-place、复制输入总线头 —— 这三件事
+/// 全是 **VST3 ABI** 的知识（`AudioBusBuffers` 的字段布局、`inputs`/`outputs` 可能指向
+/// 同一份结构）。`render::extension` 刻意不认识它们，这样渲染决策可以在完全不碰宿主
+/// ABI 的情况下被复用与单测。
+///
+/// 【为什么全程只用裸指针读字段】本函数产出的 `AudioBlock` 借用宿主缓冲，而调用方在
+/// 它存活期间还要读同一份 `ProcessData` 的其它字段（进程形态、工程位置）。一旦这里
+/// 建立一个 `&mut ProcessData`，那次读取就变成别名借用 —— 而这些字段本来就是只读的
+/// 宿主数据，用裸指针逐字段读才如实反映“只借了缓冲”。
+///
+/// 【返回 `None` 的两种情形】没有输出总线（`num_outputs == 0`）或空块
+/// （`num_samples == 0`）—— 调用方对这两种情形的既有语义都是“什么都不做、返回成功”。
+///
+/// # Safety
+/// 与 [`validate`] 相同：`data` 指向本回调独占的合法 SDK 结构，非空 plane 至少含
+/// `num_samples` 帧。
+pub(crate) unsafe fn block_from_vst3<'a>(
+    data: *mut ProcessData,
+) -> Option<crate::audio_block::AudioBlock<'a>> {
+    if data.is_null() {
+        return None;
+    }
+    let num_samples = unsafe { (*data).num_samples };
+    let num_inputs = unsafe { (*data).num_inputs };
+    let num_outputs = unsafe { (*data).num_outputs };
+    let inputs = unsafe { (*data).inputs };
+    let outputs = unsafe { (*data).outputs };
+    if num_samples <= 0 || num_outputs == 0 || outputs.is_null() {
+        return None;
+    }
+    // 【为什么 in-place 要看“同一份总线结构”而不是“同一块内存”】`silence_flags` 写在
+    // 总线结构里：宿主把同一个 `AudioBusBuffers` 同时当输入和输出时，我们给自己输出写的
+    // “全静音”会在下一块被我们自己的捕获读成“宿主没给输入”。掩码只是可选提示，
+    // 这种情况下省掉它没有任何代价。
+    let in_place = num_inputs > 0 && !inputs.is_null() && inputs == outputs;
+    let input = if num_inputs > 0 && !inputs.is_null() {
+        // SAFETY: 上面已确认唯一输入总线非空；按值复制头部，不建立任何引用。
+        let header = unsafe { std::ptr::read(inputs) };
+        // SAFETY: 头部里的指针数组由宿主提供，本回调期间有效。
+        unsafe {
+            crate::audio_block::InputBus::new(
+                header.channel_buffers,
+                header.num_channels.max(0) as usize,
+            )
+        }
+    } else {
+        crate::audio_block::InputBus::empty()
+    };
+    // SAFETY: 上面已确认唯一输出总线非空，且它在本回调期间独占。
+    let output = output_bus(unsafe { &mut *outputs });
+    Some(crate::audio_block::AudioBlock {
+        frames: num_samples as usize,
+        mode: unsafe { (*data).process_mode },
+        input,
+        output,
+        in_place,
+    })
 }
-
+/// 从 VST3 输出总线构造中立平面视图。
+///
+/// 【为什么单独暴露】[`block_from_vst3`] 用它拼整块描述；只关心输出平面的调用点
+/// （分层拷贝、接缝去咔的用例）也用它，从而不必各自复述“指针数组在哪、静音掩码写回
+/// 哪里”。
+pub(crate) fn output_bus<'a>(
+    bus: &'a mut AudioBusBuffers,
+) -> crate::audio_block::OutputBus<'a> {
+    let pointers: &'a mut [*mut f32] = if bus.num_channels > 0 && !bus.channel_buffers.is_null() {
+        // SAFETY: 调用方保证 `num_channels` 个平面指针在本回调期间有效且独占。
+        unsafe { std::slice::from_raw_parts_mut(bus.channel_buffers, bus.num_channels as usize) }
+    } else {
+        &mut []
+    };
+    crate::audio_block::OutputBus::new(pointers, &mut bus.silence_flags)
+}
 /// 仅在完整校验后清输出；playback renderer失败/停播仍清零，纯editor不走此入口。
 /// # Safety
 /// 与validate相同，非空output plane必须有至少num_samples可写帧。
@@ -189,32 +251,15 @@ pub(crate) unsafe fn clear_outputs(data: *mut ProcessData) -> Result<(), BufferE
     unsafe {
         validate(data)?;
     }
-    let data = unsafe { &*data };
-    if data.num_samples == 0 || data.num_outputs == 0 {
+    // SAFETY: validate 已确认 data 指向本回调独占的合法结构。
+    let data = unsafe { &mut *data };
+    // 【为什么直接交给中立块】"清零 + 写静音掩码 + in-place 时不写掩码"这套纪律此前
+    // 只长在 VST3 的字段上，别的格式要复用只能再抄一遍。现在它是
+    // `AudioBlock::clear_output` 一处实现（见 crate::audio_block）。
+    let Some(mut block) = (unsafe { block_from_vst3(data) }) else {
         return Ok(());
-    }
-    let output = unsafe { &mut *data.outputs };
-    if output.num_channels == 0 {
-        output.silence_flags = 0;
-        return Ok(());
-    }
-    // 【为什么按 `num_channels` 而不是写死 2，也不再钳到 2】总线现在接受任意声道数
-    // （见 `validate_bus`）：钳到 2 会让第 3..N 个声道**留着上一次回调的残留**——
-    // 而 `copy_block` 只写前两个，于是环绕声道输出垃圾。这里必须把所有声明的声道都
-    // 清零，后两个之后的部分才真正静音。
-    let channels = output.num_channels as usize;
-    for channel in 0..channels {
-        // SAFETY: 宿主提供 `num_channels` 个 plane 指针，非空 plane 至少含指定帧数。
-        let plane = unsafe { *output.channel_buffers.add(channel) };
-        if !plane.is_null() {
-            unsafe { std::ptr::write_bytes(plane, 0, data.num_samples as usize) };
-        }
-    }
-    // 【为什么 in-place 时不写这个掩码】见 [`input_output_share_bus`]：写进去的
-    // "全静音"会在下一块被我们自己的 `capture_view` 读成"宿主没给输入"。
-    if !input_output_share_bus(data) {
-        output.silence_flags = silence_mask(channels);
-    }
+    };
+    block.clear_output();
     Ok(())
 }
 
@@ -282,111 +327,6 @@ pub(crate) unsafe fn silence_unsupported_sample_size(data: *mut ProcessData) -> 
         output.silence_flags = silence_mask(output.num_channels as usize);
     }
     true
-}
-
-/// 纯editor renderer按SDK透传宿主信号；输入/输出bus或对应plane相同也不能先清零。
-/// # Safety
-/// 与validate相同，输入非空plane可读、输出可写num_samples帧；不保留任何宿主指针。
-pub(crate) unsafe fn pass_through(data: *mut ProcessData) -> Result<(), BufferError> {
-    unsafe {
-        validate(data)?;
-    }
-    let data = unsafe { &*data };
-    if data.num_samples == 0 || data.num_outputs == 0 {
-        return Ok(());
-    }
-    // 先按值复制header，允许inputs/outputs指向同一个AudioBusBuffers，不制造共享/可变引用别名。
-    let input = if data.num_inputs > 0 {
-        Some(unsafe { std::ptr::read(data.inputs) })
-    } else {
-        None
-    };
-    let output = unsafe { &mut *data.outputs };
-    if output.num_channels == 0 {
-        output.silence_flags = 0;
-        return Ok(());
-    }
-    // 【为什么按实际声道数展开】总线允许单声道（见 `validate_bus`）。单声道输入喂给
-    // 立体声输出时两个输出通道复用同一个源 plane（下面的"每帧先读后写"已经处理别名）；
-    // 立体声输入给单声道输出时取平均，而不是丢掉右声道。
-    let channels = output.num_channels.clamp(0, 2) as usize;
-    let input_channels = input
-        .as_ref()
-        .map(|bus| bus.num_channels.clamp(0, 2) as usize)
-        .unwrap_or(0);
-    let sources: [*mut f32; 2] = std::array::from_fn(|channel| match &input {
-        Some(bus) if input_channels > 0 => {
-            let index = if input_channels == 1 { 0 } else { channel };
-            // 【为什么不看 `silence_flags`】与 `capture_view` 同一理由：该位只是可选提示，
-            // 而置位时缓冲**仍必须可读**。把它当成"没有输入"会让一条本来有声的轨道
-            // 被插件静音掉 —— 用户看到的是"插上插件就没声音了"。
-            if index >= input_channels {
-                std::ptr::null_mut()
-            } else {
-                // SAFETY: `index < input_channels <= 2`，宿主提供对应数量的 plane 指针。
-                unsafe { *bus.channel_buffers.add(index) }
-            }
-        }
-        _ => std::ptr::null_mut(),
-    });
-    let targets: [*mut f32; 2] = std::array::from_fn(|channel| {
-        if channel < channels {
-            // SAFETY: `channel < channels = output.num_channels`，宿主提供对应数量的指针。
-            unsafe { *output.channel_buffers.add(channel) }
-        } else {
-            std::ptr::null_mut()
-        }
-    });
-    let bytes = data.num_samples as usize * std::mem::size_of::<f32>();
-    for source in sources {
-        for target in targets {
-            if source.is_null() || target.is_null() || source == target {
-                continue;
-            }
-            let a = source as usize;
-            let b = target as usize;
-            if a < b.saturating_add(bytes) && b < a.saturating_add(bytes) {
-                return Err(BufferError::UnsupportedFormat);
-            }
-        }
-    }
-    // 支持独立plane或整个plane的in-place/交换；部分偏移重叠明确拒绝且不写数据。
-    // 每帧先读两个源再写输出，兼容对应in-place与两个完整plane的交换别名。
-    for frame in 0..data.num_samples as usize {
-        let values = sources.map(|source| {
-            if source.is_null() {
-                0.0
-            } else {
-                unsafe { *source.add(frame) }
-            }
-        });
-        if channels == 1 {
-            let mono = if input_channels >= 2 {
-                (values[0] + values[1]) * 0.5
-            } else {
-                values[0]
-            };
-            if !targets[0].is_null() {
-                unsafe { targets[0].add(frame).write(mono) };
-            }
-        } else {
-            for channel in 0..channels {
-                if !targets[channel].is_null() {
-                    unsafe {
-                        targets[channel].add(frame).write(values[channel]);
-                    }
-                }
-            }
-        }
-    }
-    output.silence_flags = (0..channels).fold(0, |flags, channel| {
-        if sources[channel].is_null() || targets[channel].is_null() {
-            flags | (1 << channel)
-        } else {
-            flags
-        }
-    });
-    Ok(())
 }
 
 /// 从输入总线构造捕获视图（Capture 通路）。

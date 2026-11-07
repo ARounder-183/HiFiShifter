@@ -1693,19 +1693,21 @@ impl ExtensionOwner {
     /// 基准测试 / 预热进行中时，实时输出由 [`Self::diagnostic_silence_applies`] 压成
     /// 静音（见该判据的说明）—— 这是模块文档承诺的"诊断期间音频通路静音"在插件侧
     /// 的落点，与独立 App 音频回调同判据。
-    pub(crate) fn capture_stage(
+    /// # Safety
+    /// `block` 的平面由宿主提供，非空平面至少含 `frames` 帧；本函数只在本回调内使用
+    /// 它们，不保留任何指针。
+    pub(crate) unsafe fn capture_stage(
         &self,
-        data: *mut crate::audio_abi::ProcessData,
+        block: &mut crate::audio_block::AudioBlock<'_>,
         evidence: Option<BlockEvidence>,
     ) -> CaptureStage {
         let capture = self.capture();
-        // SAFETY: 调用方保证 data 在本回调期间可读。
-        let offline = unsafe { (*data).process_mode } == 2 || self.processing_pass.is_offline();
+        let offline = block.is_offline() || self.processing_pass.is_offline();
         // 选项是无锁快照（见 `CaptureStore::options`）。
         let options = capture.options();
         // 去咔状态按进程流隔离；块长取宿主本回调声明的帧数。
         let stream = evidence.map_or(ProcessStream::Realtime, |evidence| evidence.stream);
-        let frames = unsafe { (*data).num_samples as usize };
+        let frames = block.frames;
         // 【为什么先仲裁、再做防御性清空】录制中的输出是**宿主正在送进来的原声**
         // （用户监听自己），它不该被"停播重复抑制"影响 —— 那个判据描述的是"同一段
         // 内容又来了"，而录制中来的每一块都是要录的新内容。此前防御清空排在仲裁之前，
@@ -1743,7 +1745,7 @@ impl ExtensionOwner {
                 {
                     // 从上一块尾巴淡到零。本函数写满整块，**不能**再调 `clear_outputs`
                     // —— 那会把刚写好的淡出一起抹掉（见其文档）。
-                    unsafe { self.apply_gate_fade_out(stream, &mut *(*data).outputs, frames) };
+                    self.apply_gate_fade_out(stream, &mut block.output, frames);
                     return CaptureStage::Handled;
                 }
             }
@@ -1751,7 +1753,7 @@ impl ExtensionOwner {
         // 【诊断期间必须静音】见 [`Self::diagnostic_silence_applies`]。同一套淡出
         // 写法：淡到零并写满整块，不用再清（也**不能**再清）。
         if Self::diagnostic_silence_applies(evidence) {
-            unsafe { self.apply_gate_fade_out(stream, &mut *(*data).outputs, frames) };
+            self.apply_gate_fade_out(stream, &mut block.output, frames);
             return CaptureStage::Handled;
         }
         match output {
@@ -1779,7 +1781,7 @@ impl ExtensionOwner {
                 // 导出）才是结果。实时播放则照旧监听，因为用户要听到自己正在录的东西。
                 if options.monitor && !offline {
                     // SAFETY: 与上面同一份数据；`pass_through` 自己会校验形状。
-                    let _ = unsafe { crate::audio_abi::pass_through(data) };
+                    let _ = unsafe { block.pass_through() };
                     self.note_emitted(evidence);
                 } else {
                     // 【为什么"不监听"必须显式清空】本分支**整块都不写**，而调用方拿到
@@ -1787,10 +1789,9 @@ impl ExtensionOwner {
                     // 留着上一次的内容：in-place 宿主下那是**输入原声**（关掉监听反而
                     // 听得见），非 in-place 宿主下是未定义字节。本文件头那条纪律正是
                     // "只有本通路确实不写整块时才清"，这里就是那种情形。
-                    // SAFETY: 与上面同一份数据；`clear_outputs` 自己会校验形状。
-                    let _ = unsafe { crate::audio_abi::clear_outputs(data) };
+                    block.clear_output();
                 }
-                unsafe { self.apply_output_declick(stream, &mut *(*data).outputs, frames) };
+                self.apply_output_declick(stream, &mut block.output, frames);
                 CaptureStage::Handled
             }
             // 【为什么区间外要直通】只录了 10 秒的素材不该把整条轨变成静音：快照覆盖的
@@ -1815,9 +1816,9 @@ impl ExtensionOwner {
             // `capture_output` 已置好 `render_wanted`，actor 会补排一次合成。
             CaptureOutput::PendingSynthesis | CaptureOutput::PassThrough => {
                 // SAFETY: 与上面同一份数据；`pass_through` 自己会校验形状。
-                let _ = unsafe { crate::audio_abi::pass_through(data) };
+                let _ = unsafe { block.pass_through() };
                 self.note_emitted(evidence);
-                unsafe { self.apply_output_declick(stream, &mut *(*data).outputs, frames) };
+                self.apply_output_declick(stream, &mut block.output, frames);
                 CaptureStage::Handled
             }
         }

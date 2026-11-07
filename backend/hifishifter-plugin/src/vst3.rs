@@ -1978,8 +1978,8 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
     }
     let shape = unsafe { crate::audio_abi::validate(data.cast()) };
     // 【为什么 Capture 的观察与捕获在形状判定**之前】** 见 `ExtensionOwner::capture_observe`：
-    // 录制只依赖"宿主给的位置"与"宿主给的输入"，与输出总线的形状无关。此前它在下面的
-    // `num_outputs == 0` 早退之后 —— 于是"宿主没接我们的输出"这一个无关事实会让插件
+    // 录制只依赖“宿主给的位置”与“宿主给的输入”，与输出总线的形状无关。此前它在下面的
+    // `num_outputs == 0` 早退之后 —— 于是“宿主没接我们的输出”这一个无关事实会让插件
     // 既录不到东西，又让 `sawContext` 永不置位（界面上的录制键一直是灰的）。
     //
     // 只跳过 `InvalidArgument`（data 本身非法）：那种情况下连字段读取都不该做。
@@ -1989,14 +1989,14 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
         let probe = unsafe { &mut *data.cast::<crate::audio_abi::ProcessData>() };
         // SAFETY: this 是存活的音频接口子对象。
         let owner = unsafe { &(*base_from_audio(this)).extension_owner };
-        // 【T23】`process` 是宿主**一定会周期性到达**的少数入口之一，因此它是"宿主不再
-        // 回调"这条死路在插件侧最可靠的出口。本函数只读两个原子量并按需置位，
+        // 【T23】`process` 是宿主**一定会周期性到达**的少数入口之一，因此它是“宿主不再
+        // 回调”这条死路在插件侧最可靠的出口。本函数只读两个原子量并按需置位，
         // 真正的收口仍由 ARA 控制器在下一次回调里执行（`runtime_mut` 的头部）。
         //
         // 【为什么在音频线程上也敢调】它不取任何 `Mutex` 的阻塞路径（文档槽用
         // `try_lock`，拿不到就跳过）—— 下一次块（10 ms 后）会再来。
         owner.request_settle_if_overdue();
-        // 【为什么精度要记下来】非 32-bit 时插件按设计静音，而"静音"在界面上必须能
+        // 【为什么精度要记下来】非 32-bit 时插件按设计静音，而“静音”在界面上必须能
         // 说清原因（见 `CaptureStore::unsupported_precision`）。这一行与形状判定无关，
         // 所以在 `InvalidArgument` 之外一律记录。
         owner.capture().note_precision(probe.symbolic_sample_size);
@@ -2033,250 +2033,41 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
             }
             // SAFETY: this 是存活的音频接口子对象。
             let owner = unsafe { &(*base_from_audio(this)).extension_owner };
-            if owner.is_editor_only() {
-                // 纯编辑角色不是歌曲播放renderer；保留宿主已经处理的fade/gain/前级FX，包括停播监听。
-                return match unsafe { crate::audio_abi::pass_through(data) } {
-                    Ok(()) => K_RESULT_OK,
-                    Err(crate::audio_abi::BufferError::InvalidArgument) => K_INVALID_ARGUMENT,
-                    Err(crate::audio_abi::BufferError::UnsupportedFormat) => {
-                        if unsafe { crate::audio_abi::silence_unsupported_sample_size(data) } {
-                            K_RESULT_OK
-                        } else {
-                            K_RESULT_FALSE
-                        }
-                    }
-                };
-            }
-            // 【为什么不再无条件先清输出 —— 这是"插件在链路里却没有一点输出"的直接原因】
-            // 宿主**可以合法地把同一个缓冲同时当输入和输出**（in-place：`inputs` 与
-            // `outputs` 指向同一份内存，甚至同一个 `AudioBusBuffers`）。先清输出就把
-            // **输入**一起抹掉了，而下面两条通路都要读它：直通会把零送出去、分层拷贝在
-            // 快照范围外也会把零送出去。于是插件在链路里、却一点声音都没有。
-            //
-            // 现在的纪律是：**只有"本通路确实不写整块"时才清**（见 `layered` 与停止/静音
-            // 分支）。写满整块的路径（直通、分层拷贝）自己覆盖每一帧，不需要也不允许先清。
-            if owner.host_item_muted() {
-                // 【为什么不再直接 clear】宿主静音是一次"有声 → 静音"的源切换；
-                // 直接清零会在块首留下一次阶跃（正是用户听到的"咔"）。与门控清零
-                // 走同一条去咔路径：从上一块尾巴淡到零，其余帧写零。
-                // 该函数自己写满整块，因此**不能**再调 `clear_outputs`。
-                let Some(stream) =
-                    crate::capture::recorder::ProcessStream::from_mode(data.process_mode)
-                else {
-                    // 未知 process_mode：不能冒充实时流去写 capture/去咔状态。
-                    let _ = unsafe { crate::audio_abi::clear_outputs(data) };
-                    return K_RESULT_OK;
-                };
-                let frames = data.num_samples as usize;
-                let outputs = data.outputs;
-                if outputs.is_null() {
-                    let _ = unsafe { crate::audio_abi::clear_outputs(data) };
-                } else {
-                    unsafe { owner.apply_gate_fade_out(stream, &mut *outputs, frames) };
-                }
-                return K_RESULT_OK;
-            }
-            if data.process_context.is_null() {
-                owner.snapshots[0].misses.fetch_add(1, Ordering::Relaxed);
-                // 没有工程位置就无从选择输出内容：与改动前一致地静音。
-                let _ = unsafe { crate::audio_abi::clear_outputs(data) };
-                return if data.process_mode == 2 {
-                    K_RESULT_FALSE
-                } else {
-                    K_RESULT_OK
-                };
-            }
-            // SAFETY: VST3 processContext 的完整 SDK 结构在当前回调期间存活。
-            let context = unsafe { &*data.process_context };
-            // REAPER停播也会process固定光标位置；只离线导出允许没有kPlaying的供音。
-            // 停播时不输出任何东西 ⇒ 必须清（否则输出里留着上一块的残留）。
-            //
-            // 【为什么还要看"位置在不在前进"】`kPlaying` 与位置不是原子更新的：宿主从
-            // "停止"切到"播放"的那几块里，位置已经在走、播放位可能还没置上。此前只按
-            // 播放位判断，于是**每次播放都吞掉开头**（用户报障：播放后约 1 秒没有输出）。
-            // 位置在前进是宿主无关的硬事实 —— 真在播就必然前进（见
-            // `ExtensionOwner::capture_transport_running`）。
-            //
-            // 【为什么这一支必须排在 `capture_stage` **之前**】门控判"要静音"时若已经
-            // 写过快照，清输出就清不掉那一块的内容 —— 于是每次停播/移动光标都会漏出一
-            // 小块**新位置**的音频（用户报障："很短、内容不对的一声"）。先判、后写，
-            // "清输出"才是真的清。
-            // 【为什么不能再以 `kPlaying == 0` 为前提】FL Studio 停播时仍可能保持
-            // `kPlaying == 1`；此时门控必须由“本块是否真的在推进”（`allow_output`）
-            // 独立决定。`capture_should_emit` 对 ARA 实例仍返回 `kPlaying`，所以
-            // “停播即静音”的既有语义不变。
-            let playing = context.state & crate::audio_abi::PROCESS_CONTEXT_PLAYING != 0;
-            if data.process_mode != 2 && !owner.capture_should_emit(evidence, playing) {
-                owner.note_gate_cleared(
-                    evidence.map_or(crate::capture::recorder::ProcessStream::Realtime, |ev| {
-                        ev.stream
-                    }),
-                );
-                // 【为什么要先去咔再清零】起播窗口里 `allow_output` 可能逐块翻转
-                // （`Resting` 重复抑制），于是出现"有声 → 清零 → 有声"。直接从有声
-                // 阶跃到零就是用户听到的"咔"。
-                //
-                // 【为什么用 `apply_gate_fade_out` 而不是"先去咔再 `clear_outputs`"】
-                // 后者先把整块写零，去咔产物随即被销毁 —— 那不是去咔，是把去咔白做
-                // 一遍。本函数自己按"尾巴 → 0"写满整块，因此**不能再调用**清零。
-                unsafe {
-                    owner.apply_gate_fade_out(
-                        evidence.map_or(crate::capture::recorder::ProcessStream::Realtime, |ev| {
-                            ev.stream
-                        }),
-                        &mut *data.outputs,
-                        data.num_samples as usize,
-                    );
-                }
-                return K_RESULT_OK;
-            }
-            // 【未知 process_mode 必须拒绝】SDK 只定义 0/1/2；把它当成 Realtime 会
-            // 把离线/未知流写进实时捕获与门控状态。透传是最诚实的降级。
-            if crate::capture::recorder::ProcessStream::from_mode(data.process_mode).is_none() {
-                let _ = unsafe { crate::audio_abi::pass_through(data) };
-                return K_RESULT_OK;
-            }
-            // 【Capture 通路】在快照输出之前插入。它要么自己写完输出（`Handled`），要么
-            // 告诉下面"读哪个发布器"以及"区间外要不要直通宿主原声"（`Snapshot`）。
-            // 未录制且没有素材时它是 `PassThrough` —— 插件在录制之前是完全透明的，
-            // 而不是把整条轨静音（见 `ExtensionOwner::capture_output`）。
-            let (snapshot_source, layered) = match owner.capture_stage(data, evidence) {
-                crate::render::extension::CaptureStage::Handled => return K_RESULT_OK,
-                crate::render::extension::CaptureStage::Snapshot { source, layered } => {
-                    (source, layered)
-                }
-            };
-            // 【为什么分层拷贝前不能清】它写满整块（快照范围内取快照、范围外取**输入**），
-            // 而 in-place 宿主下"输入"就是这块缓冲本身 —— 先清等于把要拷的东西删掉。
-            if !layered && unsafe { crate::audio_abi::clear_outputs(data) }.is_err() {
-                // 【为什么不用 expect】这里在**音频线程**上，panic 会跨越 VST3 的 FFI 边界
-                // 展开进宿主的音频回调。宁可返回错误码让宿主把这一帧当静音。
-                return K_RESULT_FALSE;
-            }
-            // 按 `setupProcessing` 的**权威率**选快照：非原生率（96k/192k…）取最近的已声明
-            // 原生快照，`copy_block` 会把它线性重采样到宿主输出率。此前这里用
-            // `context.sample_rate` 且只认 44.1/48k，其余 `kResultFalse` —— 与 setup 的接受域
-            // 不一致，96k 工程里会持续静音甚至被踢出链路（见 `setup_sample_rate`）。
-            //
-            // 原始磁带只有一份（它按捕获时的工程率录制），因此不参与按率选择。
-            let publisher = match snapshot_source {
-                crate::render::extension::SnapshotSource::Processed => {
-                    &owner.snapshots[owner.snapshot_index_for_rate(context.sample_rate)]
-                }
-                crate::render::extension::SnapshotSource::Raw => &owner.raw_tape,
-            };
-            // 输出率取宿主在 processContext 里报的率（那才是宿主缓冲的真实率）；它缺失/
-            // 非法时退回 `setupProcessing` 的声明，避免 0 触发无意义的巨量重采样。
-            let output_rate = if context.sample_rate.is_finite() && context.sample_rate > 0.0 {
-                context.sample_rate
+            // 【为什么先翻译成中立块再仲裁】输出通路的每一道判据（门控、in-place 不清、
+            // 分层拷贝前不预清、离线失败、未知形态直通）都只与“这一块多长、宿主给了
+            // 什么平面、要不要直通”有关，与宿主是 VST3 还是 CLAP 无关。翻译一次之后
+            // 两种格式走的是同一段代码（见 `render::extension::render_block`）。
+            let context = if data.process_context.is_null() {
+                None
             } else {
-                owner.setup_sample_rate()
+                // SAFETY: VST3 processContext 的完整 SDK 结构在当前回调期间存活。
+                Some(crate::block_context::BlockContext::from_vst3(unsafe {
+                    &*data.process_context
+                }))
             };
-            // SAFETY: 缓冲经 validate 校验；`layered` 时未清但由 `copy_block_layered_at`
-            // 逐帧覆盖，其余路径已由上面的 clear_outputs 清过。publisher 由 owner 保留。
-            // 【B0】本块分层拷贝的覆盖读数。两段（循环切分）各自写一份，这里合并。
-            let mut layered_probe = crate::render::snapshot::LayeredProbe::default();
-            let ready = unsafe {
-                if layered {
-                    // 【为什么要重新取一次输入视图】Capture 要"录过的那一段被替换、其余
-                    // 保持宿主原声"，而"范围外"这个区别只在写之前知道（见
-                    // `copy_block_layered_at`）。这里不分配：`capture_view` 只借用宿主缓冲。
-                    let input = crate::audio_abi::capture_view(
-                        data,
-                        context.project_time_samples,
-                        context.sample_rate,
-                        context.state & crate::audio_abi::PROCESS_CONTEXT_PLAYING != 0,
-                    );
-                    match evidence {
-                        Some(evidence) => {
-                            let mut ready = true;
-                            for part in evidence.split.iter() {
-                                let mut part_probe =
-                                    crate::render::snapshot::LayeredProbe::default();
-                                ready &= publisher.copy_block_layered_at_probed(
-                                    part.position,
-                                    output_rate.max(1.0) as u32,
-                                    &mut *data.outputs,
-                                    part.input_offset,
-                                    part.frames,
-                                    &input.planes,
-                                    part.input_offset,
-                                    &mut part_probe,
-                                );
-                                layered_probe.merge(part_probe);
-                            }
-                            ready
-                        }
-                        None => publisher.copy_block_layered_at_probed(
-                            context.project_time_samples,
-                            output_rate.max(1.0) as u32,
-                            &mut *data.outputs,
-                            0,
-                            data.num_samples as usize,
-                            &input.planes,
-                            0,
-                            &mut layered_probe,
-                        ),
-                    }
-                } else {
-                    match evidence {
-                        Some(evidence) => {
-                            let mut ready = true;
-                            for part in evidence.split.iter() {
-                                ready &= publisher.copy_block_at(
-                                    part.position,
-                                    output_rate.max(1.0) as u32,
-                                    &mut *data.outputs,
-                                    part.input_offset,
-                                    part.frames,
-                                );
-                            }
-                            ready
-                        }
-                        None => publisher.copy_block(
-                            context.project_time_samples,
-                            output_rate.max(1.0) as u32,
-                            &mut *data.outputs,
-                            data.num_samples as usize,
-                        ),
+            // SAFETY: validate 已确认输出总线非空、非空平面至少含 num_samples 帧。
+            let Some(mut block) = (unsafe { crate::audio_abi::block_from_vst3(data) }) else {
+                return K_RESULT_OK;
+            };
+            // SAFETY: 与 `block_from_vst3` 同一份宿主缓冲，且只在本次回调内使用。
+            match unsafe { owner.render_block(&mut block, context, evidence) } {
+                crate::render::extension::RenderOutcome::Done => K_RESULT_OK,
+                crate::render::extension::RenderOutcome::NotReady => K_RESULT_FALSE,
+                crate::render::extension::RenderOutcome::Invalid => K_INVALID_ARGUMENT,
+                crate::render::extension::RenderOutcome::Unsupported => {
+                    // 样本宽度不支持（kSample64）时按实际宽度静音并留在链路里；其余形状
+                    // 问题仍按失败上报 —— 见 `silence_unsupported_sample_size`。
+                    if unsafe {
+                        crate::audio_abi::silence_unsupported_sample_size(
+                            data as *mut crate::audio_abi::ProcessData,
+                        )
+                    } {
+                        K_RESULT_OK
+                    } else {
+                        K_RESULT_FALSE
                     }
                 }
-            };
-            // 【为什么在快照写完以后】接缝去咔需要"上一块输出的尾巴"与"这一块的新信号"
-            // 做交叉淡化；写完再混，才不会把新源的第一帧直接硬切到旧源的最后帧。
-            let declick_stream = evidence.map_or(
-                crate::capture::recorder::ProcessStream::Realtime,
-                |evidence| evidence.stream,
-            );
-            if layered {
-                owner.note_layered_probe(declick_stream, layered_probe);
             }
-            // 【这里曾经有一条"整块直通宿主原声"的保护，现已删除】
-            //
-            // 它的判据是"读游标跳过了超过 50 ms"，动作是**把整块**（宿主块最大可达 6 s）
-            // 换成宿主输入。而直通本身就是换了一个信号源 —— 前后各一次硬切换，用户听到
-            // 的那一下"咔"其实是这个保护动作自己。
-            //
-            // 现在位置只有一个权威（`StreamGeometry` 的 R1–R4），跳变只可能发生在 pass
-            // 边界，而 pass 边界本来就要重新开始；接缝去咔的一次交叉淡化就够。
-            unsafe {
-                owner.apply_output_declick(
-                    declick_stream,
-                    &mut *data.outputs,
-                    data.num_samples as usize,
-                )
-            };
-            if data.process_mode == 2 && !ready {
-                return K_RESULT_FALSE;
-            }
-            // 【为什么 in-place 时要把掩码压平】见 `input_output_share_bus`：快照写下的
-            // "这一段是静音"会在下一块被我们自己的捕获读成"宿主没给输入"。掩码只是提示，
-            // 压平成"非静音"永远是安全的（最坏情况是宿主少省一次算力）。
-            if crate::audio_abi::input_output_share_bus(data) {
-                // SAFETY: 输出总线已在上面校验过；同一份结构在回调期间存活。
-                unsafe { (*data.outputs).silence_flags = 0 };
-            }
-            K_RESULT_OK
         }
         Err(crate::audio_abi::BufferError::InvalidArgument) => K_INVALID_ARGUMENT,
         Err(crate::audio_abi::BufferError::UnsupportedFormat) => {
@@ -2294,7 +2085,6 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
         }
     }
 }
-
 unsafe extern "system" fn audio_get_tail_samples(_this: *mut c_void) -> u32 {
     {
         // 【FFI 守卫】本入口被宿主调用：panic 越界 = abort（宿主崩溃）。

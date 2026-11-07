@@ -97,10 +97,10 @@ impl ExtensionOwner {
     pub(crate) unsafe fn apply_output_declick(
         &self,
         stream: ProcessStream,
-        output: &mut crate::audio_abi::AudioBusBuffers,
+        output: &mut crate::audio_block::OutputBus<'_>,
         frames: usize,
     ) {
-        if frames == 0 || output.num_channels <= 0 || output.channel_buffers.is_null() {
+        if frames == 0 || output.num_channels == 0 {
             return;
         }
         let token = self.output_token[stream.index()].load(Ordering::Acquire);
@@ -175,7 +175,7 @@ impl ExtensionOwner {
                 armed = seam.code();
             }
         }
-        let channels = (output.num_channels as usize).min(2);
+        let channels = output.channels();
         if state.fade_active.load(Ordering::Acquire) {
             // 宽度由 `arm_seam` 定：透传接缝与同族切换 64 帧，Raw ↔ Processed 960 帧。
             let len = match state.fade_len.load(Ordering::Acquire) as usize {
@@ -186,8 +186,7 @@ impl ExtensionOwner {
             let remaining = len.saturating_sub(position);
             let count = remaining.min(frames);
             for channel in 0..channels {
-                // SAFETY: 调用方保证输出总线有 `channels` 个可写平面。
-                let plane = unsafe { *output.channel_buffers.add(channel) };
+                let plane = output.pointer(channel);
                 if plane.is_null() {
                     continue;
                 }
@@ -229,8 +228,7 @@ impl ExtensionOwner {
         if frames >= DECLICK_HISTORY_FRAMES {
             let start = frames - DECLICK_HISTORY_FRAMES;
             for channel in 0..channels {
-                // SAFETY: 同上。
-                let plane = unsafe { *output.channel_buffers.add(channel) };
+                let plane = output.pointer(channel);
                 if plane.is_null() {
                     continue;
                 }
@@ -244,8 +242,7 @@ impl ExtensionOwner {
         } else {
             let written = frames;
             for channel in 0..channels {
-                // SAFETY: 同上。
-                let plane = unsafe { *output.channel_buffers.add(channel) };
+                let plane = output.pointer(channel);
                 if plane.is_null() {
                     continue;
                 }
@@ -303,24 +300,23 @@ impl ExtensionOwner {
     pub(crate) unsafe fn apply_gate_fade_out(
         &self,
         stream: ProcessStream,
-        output: &mut crate::audio_abi::AudioBusBuffers,
+        output: &mut crate::audio_block::OutputBus<'_>,
         frames: usize,
     ) {
-        if frames == 0 || output.num_channels <= 0 || output.channel_buffers.is_null() {
+        if frames == 0 || output.num_channels == 0 {
             return;
         }
         let Some(state) = self.declick.get(stream.index()) else {
             return;
         };
-        let declared = output.num_channels as usize;
+        let declared = output.num_channels;
         let fade = frames.min(OUTPUT_DECLICK_FRAMES);
         // `tail` 里 0 是最旧的、63 是最新的；短块淡出必须从**最新的 fade 帧**开始，
         // 否则边界处仍会从一段旧样本跳到零。
         let base = DECLICK_HISTORY_FRAMES - fade;
         let mut any_signal = false;
         for channel in 0..declared {
-            // SAFETY: 宿主声明 `num_channels` 个平面指针，非空平面至少含 `frames` 帧。
-            let plane = unsafe { *output.channel_buffers.add(channel) };
+            let plane = output.pointer(channel);
             if plane.is_null() {
                 continue;
             }
@@ -349,11 +345,11 @@ impl ExtensionOwner {
         // 【为什么按实际输出报静音位】本块通常含一段淡出（非静音）；但尾巴本来就
         // 全零时（首次静音、或连续静音的第二块），整块确实全是零 —— 这时如实报
         // 静音，宿主才能跳过下游处理。恒报"非静音"会在每次静音开始时白跑一整条链路。
-        output.silence_flags = if any_signal {
+        output.set_silence_flags(if any_signal {
             0
         } else {
             crate::audio_abi::silence_mask(declared)
-        };
+        });
         // 【必须清整段历史，而不是只清最旧的 64 帧】淡出读的是 `base = 历史长度 - fade`
         // —— 也就是**最新**的那一段；此前这里清的是 `0..64`（最旧的一段），于是第二块
         // 起会把同一段冻结的尾巴反复读出、反复淡出：周期 = 块长（848 帧 ≈ 18 ms），

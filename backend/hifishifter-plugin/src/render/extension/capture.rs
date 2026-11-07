@@ -564,13 +564,13 @@ impl ExtensionOwner {
         kind: u8,
         seam: crate::render::click::SeamCode,
         first_of_stream: bool,
-        output: &crate::audio_abi::AudioBusBuffers,
+        output: &crate::audio_block::OutputBus<'_>,
         frames: usize,
     ) {
         if !Self::click_audit_enabled() {
             return;
         }
-        let channels = (output.num_channels as usize).min(2);
+        let channels = output.channels();
         let mut max_step = 0.0_f32;
         let mut peak = 0.0_f32;
         let mut first = 0.0_f32;
@@ -578,8 +578,7 @@ impl ExtensionOwner {
         let mut energy = 0.0_f64;
         let mut energy_frames = 0_u32;
         for channel in 0..channels {
-            // SAFETY: 调用方保证总线有 `channels` 个可读平面，且至少 `frames` 帧。
-            let plane = unsafe { *output.channel_buffers.add(channel) };
+            let plane = output.pointer(channel);
             if plane.is_null() {
                 continue;
             }
