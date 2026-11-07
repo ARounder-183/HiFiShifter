@@ -128,16 +128,84 @@ pub fn reply(view_id: &str, request: &Value, capture: &crate::capture::CaptureHo
             "redoDepth": 0,
             "records": [],
         })),
-        "plugin_get_apply_state" => ok(json!({
-            "generation": 0,
-            "applied_generation": 0,
-            "pending": false,
-            "connected": false,
-            "ready": false,
-            "error": null,
-            "rendering_active": false,
-            "render_audible_stale": false,
-        })),
+        // 【为什么 generation 是捕获存储的修订号】前端只在"版本前进"或"从未就绪 →
+        // 就绪"时重取整份时间线（见 `pluginApplyStore`）。此前这里恒为 0，于是
+        // 录制结束、take 已经落盘，界面上却永远不会出现那个片段 —— 用户报的
+        // "捕获结束以后没有产生 Clip"就是这条。CLAP 没有"应用/渲染"这个阶段，
+        // 它的宿主侧文档就是捕获存储，修订号正是"文档变了"的等价物。
+        "plugin_get_apply_state" => {
+            let generation = capture.revision();
+            ok(json!({
+                "generation": generation,
+                "applied_generation": generation,
+                // 【为什么 `host_version` 必须一起给】前端判"要不要重取时间线"读的是
+                // 这个字段（`pluginApplyStore.poll`：`current.host_version !== lastHostVersion`），
+                // 不是 `generation`。只改 `generation` 等于什么都没说 —— 界面照旧不刷新。
+                "host_version": generation,
+                "pending": false,
+                "connected": true,
+                "ready": true,
+                "error": null,
+                "rendering_active": false,
+                "render_audible_stale": false,
+                "analysis_pending": false,
+                "audible_state": "current",
+                "mode": "capture",
+            }))
+        }
+        // 波形 mipmap：时间线与参数编辑器的波形层按 `source_path` 取峰值。
+        // 【为什么必须有】CLAP 的源是内存里的 `capture://blake3:<hash>`，磁盘上没有文件；
+        // 不回答这一条，片段就是一块没有内容的色块 —— 用户说的"没有预览"。
+        "get_waveform_mipmap_binary" => {
+            let args = request.get("args");
+            let source = args
+                .and_then(|args| args.get("sourcePath"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let level = args
+                .and_then(|args| args.get("level"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                .min(2) as u8;
+            // 空串 = 这份源暂时还没有峰值（前端按"尚未就绪"冷却重试）。
+            ok(json!(capture
+                .waveform_mipmap(source, level)
+                .unwrap_or_default()))
+        }
+        "preload_waveform_mipmap" => ok(json!({ "ok": true })),
+        "batch_get_waveform_mipmap" => {
+            let args = request.get("args");
+            let paths = args
+                .and_then(|args| args.get("sourcePaths"))
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let wanted: Option<Vec<u64>> = args
+                .and_then(|args| args.get("levels"))
+                .and_then(Value::as_array)
+                .map(|levels| levels.iter().filter_map(Value::as_u64).collect());
+            let mut table = serde_json::Map::new();
+            for path in paths.iter().filter_map(Value::as_str) {
+                let mut levels = Vec::with_capacity(3);
+                for level in 0..3_u8 {
+                    let requested = wanted
+                        .as_ref()
+                        .is_none_or(|wanted| wanted.iter().any(|w| *w == u64::from(level)));
+                    let data = if requested {
+                        capture.waveform_mipmap(path, level).unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
+                    levels.push(Value::String(data));
+                }
+                table.insert(path.to_owned(), Value::Array(levels));
+            }
+            ok(Value::Object(table))
+        }
+        // 宿主传输读数：光标、捕获带右缘、以及"宿主在不在播"都读这一条。
+        // 【为什么必须由外壳回答】前端只有一个 reducer，缺了这一条就没有任何东西
+        // 能让播放光标前进 —— 用户看到的正是"捕获在计时，光标却钉在 0"。
+        "get_playback_state" => ok(capture.playback_state()),
         // 捕获命令（与 VST3 同一套名字与载荷）。形状由运行时给出，前端只认一种。
         // 【为什么取 args 而不是整个 request】载荷在 `args` 里；把外层信封传给
         // `capture_delete_take` 会让它读不到 takeId（静默按默认值处理）。
@@ -258,6 +326,46 @@ mod tests {
         assert_eq!(reply["id"], 7);
         assert_eq!(reply["ok"], true);
         assert_eq!(reply["viewId"], "v");
+    }
+
+    /// 传输读数必须由外壳回答，否则前端的光标没有任何来源。
+    #[test]
+    fn the_transport_readout_is_answered_by_the_shell() {
+        let reply = reply(
+            "v",
+            &json!({ "id": 11, "command": "get_playback_state" }),
+            &capture(),
+        );
+        assert_eq!(reply["ok"], true);
+        assert_eq!(reply["value"]["ok"], true);
+        assert_eq!(reply["value"]["is_playing"], false);
+        assert_eq!(reply["value"]["host_authoritative"], true);
+    }
+
+    /// `plugin_get_apply_state` 的版本号必须跟着捕获存储走。
+    ///
+    /// 【为什么这是"录完没有片段"的回归测试】前端只在版本前进时重取整份时间线。
+    /// 版本恒为 0 时 take 已经落盘、界面却永远是空的。
+    #[test]
+    fn the_apply_state_version_tracks_the_capture_store() {
+        let host = crate::capture::CaptureHost::default();
+        let value = reply(
+            "v",
+            &json!({ "id": 1, "command": "plugin_get_apply_state" }),
+            &host,
+        )["value"]
+            .clone();
+        assert_eq!(value["generation"], json!(host.revision()));
+        assert_eq!(
+            value["generation"], value["applied_generation"],
+            "the capture timeline is always applied: there is no render stage"
+        );
+        assert_eq!(
+            value["host_version"], value["generation"],
+            "the frontend refetches the timeline on host_version, not on generation"
+        );
+        assert_eq!(value["ready"], true);
+        assert_eq!(value["mode"], "capture");
     }
 
     #[test]

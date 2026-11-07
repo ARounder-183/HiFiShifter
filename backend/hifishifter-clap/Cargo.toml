@@ -22,6 +22,8 @@ hifishifter-capture = { path = "../hifishifter-capture" }
 hifishifter-kernel = { path = "../hifishifter-kernel", default-features = false }
 log = { version = "0.4", features = ["std"] }
 serde_json = "1"
+# 波形 mipmap 走 Base64 回执（前端 `atob` 解码）；与 VST3 同一个协议常量。
+base64 = "0.23"
 
 [target.'cfg(windows)'.dependencies]
 # 内嵌编辑器：子 HWND + WebView2。与 VST3 同版，避免把第二套 COM ABI 拉进工作区。

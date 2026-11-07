@@ -46,6 +46,26 @@ pub struct CaptureHost {
     blocks: AtomicU64,
     /// 见过的 transport 标志位并集（诊断：宿主给的是拍还是秒）。
     transport_flags: AtomicU64,
+    /// 最近一次**可信**的宿主位置（秒）与它被观测到的时刻（Unix 毫秒）。
+    ///
+    /// 【为什么不在读的时候现算】CLAP 的 transport 只在 `process` 回调里有效，而编辑器
+    /// 的轮询在宿主主线程上。位置必须由音频线程抄进原子量，读侧只能读那份快照 ——
+    /// 反过来"读的时候去问宿主"根本没有可问的入口。
+    position_bits: AtomicU64,
+    position_at_ms: AtomicU64,
+    /// 宿主此刻是否在播放（与 `position_bits` 同一时刻的读数）。
+    ///
+    /// 【为什么与位置分开】停播时宿主**仍然**给一个有效位置（编辑光标）。把它当成
+    /// "在播"会让插件的光标自己往前跑；把它丢掉又会让停止后的光标跳回 0。
+    host_playing: AtomicBool,
+    /// 读数序号：前端按它丢弃重复与乱序的采样（与 VST3 的 `sample_seq` 同一语义）。
+    sample_seq: AtomicU64,
+    /// 已编码好的波形 mipmap（`(源 id, 级别)` → Base64）。
+    ///
+    /// 【为什么缓存】编码一次 L0 要遍历整条素材（60 秒立体声 ≈ 580 万样本）。前端每次
+    /// 缩放都会问同一级，重算等于把音频线程旁边的 UI 线程按在 CPU 上。源 id 唯一对应
+    /// 一份不变的 PCM，因此缓存不会被"改了内容"作废。
+    mipmaps: Mutex<std::collections::HashMap<(String, u8), String>>,
     /// 宿主给过**可信的工程位置**（不是"给过 transport 事件"）。
     ///
     /// 【为什么不能复用运行时的 `saw_context`】那个读数只要求"块里有有效采样率"，
@@ -67,6 +87,11 @@ impl Default for CaptureHost {
             activated: AtomicBool::new(false),
             blocks: AtomicU64::new(0),
             transport_flags: AtomicU64::new(0),
+            position_bits: AtomicU64::new(0),
+            position_at_ms: AtomicU64::new(0),
+            host_playing: AtomicBool::new(false),
+            sample_seq: AtomicU64::new(0),
+            mipmaps: Mutex::new(std::collections::HashMap::new()),
             saw_position: AtomicBool::new(false),
         }
     }
@@ -92,16 +117,34 @@ impl CaptureHost {
                 .fetch_or(u64::from(transport.flags), Ordering::AcqRel);
         }
         let frame = audio.to_transport_frame(process);
+        log::trace!(
+            "[clap] block frames={} trusted={} playing={:?} offline={}",
+            process.frames_count,
+            frame.position_trusted,
+            frame.playing,
+            frame.offline
+        );
         if frame.sample_rate > 0.0 {
             self.store.note_project_rate(frame.sample_rate);
         }
         if frame.offline {
             self.store.note_offline();
         }
-        if frame.position_trusted {
+        if frame.position_trusted && frame.sample_rate > 0.0 {
+            // 【为什么位置用"秒"存】编辑器要的就是秒；存帧还要连带存采样率，而
+            // 采样率已经由 `note_activate` 记过一份 —— 两份会让"改了采样率"变成
+            // 两个各自更新的值。
+            let seconds = frame.project_time_samples as f64 / frame.sample_rate;
+            self.position_bits
+                .store(seconds.to_bits(), Ordering::Release);
+            self.position_at_ms.store(now_ms(), Ordering::Release);
+            self.sample_seq.fetch_add(1, Ordering::AcqRel);
             self.saw_position.store(true, Ordering::Release);
         }
         let playing = frame.playing.unwrap_or(false) && frame.position_trusted;
+        // 【为什么连"没在播"也要记】停播时宿主给的位置是编辑光标：界面要把它画出来，
+        // 而"要不要让光标继续走"由这一个布尔回答。
+        self.host_playing.store(playing, Ordering::Release);
         let recording = frame.recording.unwrap_or(false);
         let was_playing = self.last_playing.swap(playing, Ordering::AcqRel);
         let was_recording = self.last_recording.swap(recording, Ordering::AcqRel);
@@ -188,6 +231,98 @@ impl CaptureHost {
         let _ = self.store.on_block_with_context(block, ctx);
     }
 
+    /// 宿主此刻的传输读数（`get_playback_state` 的载荷）。
+    ///
+    /// 【为什么外壳必须回答这一条】前端的光标与捕获带右缘都读它：编辑器每 400 ms
+    /// 问一次（插件形态不用 33 ms 档，见 `App.tsx` 的常驻轮询），视觉层再按 1x
+    /// 插值。这一条没人回答时，页面上的光标永远停在 0 —— 而捕获带的右缘又只能
+    /// 跟着"视觉播放头"延伸，于是带子与光标一起冻住。用户看到的就是"捕获在计时，
+    /// 但界面什么都不动"。
+    ///
+    /// 【为什么形状与 VST3 逐字段相同】前端只有**一个** reducer（`applyTransportSample`），
+    /// 两条通道共用。少一个 `ok` 就会让整条采样被丢弃（VST3 曾经就是这样静默失效的）。
+    pub fn playback_state(&self) -> Value {
+        let seen = self.saw_position.load(Ordering::Acquire);
+        let seconds = f64::from_bits(self.position_bits.load(Ordering::Acquire));
+        let at = self.position_at_ms.load(Ordering::Acquire);
+        let now = now_ms();
+        let age_ms = if at == 0 {
+            u32::MAX
+        } else {
+            now.saturating_sub(at).min(u64::from(u32::MAX)) as u32
+        };
+        // 【为什么播放位要有寿命】宿主停播后可能直接不再调用 `process`（REAPER 的
+        // 空闲通路就是这样）。没有这道闸门，最后一次 `kPlaying=1` 会永远生效 ——
+        // 光标在静止的画面上继续外推，正是"停止后光标还在走"。
+        let playing = seen && self.host_playing.load(Ordering::Acquire) && age_ms <= PLAYING_TTL_MS;
+        let duration_sec = self
+            .store
+            .material_span()
+            .map(|span| span.end_frame as f64 / f64::from(span.sample_rate.max(1)))
+            .unwrap_or(0.0);
+        json!({
+            "ok": true,
+            "is_playing": playing,
+            "waiting_for_render": false,
+            "target": Value::Null,
+            "base_sec": 0.0,
+            "position_sec": if seen { seconds } else { 0.0 },
+            "duration_sec": duration_sec,
+            // 【为什么恒真】这里的每一个位置都来自宿主的 transport 事件，没有一格是
+            // 插件自己推的。前端据此关掉"按往返时延外推"（那会把宿主的读数推过头）。
+            "host_authoritative": true,
+            "position_source": "host",
+            "transport_source": "host",
+            "position_age_ms": age_ms,
+            "seek_pending": false,
+            "sample_seq": self.sample_seq.load(Ordering::Acquire),
+        })
+    }
+
+    /// 一条源在某一级的波形 mipmap（Base64，WFPK v2 布局）。
+    ///
+    /// 【为什么由外壳回答】前端的波形层按 `source_path` 取峰值
+    /// （`get_waveform_mipmap_binary`）。CLAP 的源是内存里的 `capture://blake3:<hash>`，
+    /// 磁盘上根本没有文件 —— 不回答这一条，时间轴与参数编辑器里的片段就是一块
+    /// **没有内容的色块**（用户说的"没有预览"）。
+    ///
+    /// 未知源返回 `None`（协议层回空串，前端按"尚未就绪"冷却重试）。
+    pub fn waveform_mipmap(&self, source_path: &str, level: u8) -> Option<String> {
+        let key = (source_path.to_owned(), level);
+        if let Some(cached) = self
+            .mipmaps
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+        {
+            return Some(cached.clone());
+        }
+        let sources = self.store.material_sources();
+        let pcm = sources.get(source_path)?;
+        let bytes = mipmap_bytes(pcm, level)?;
+        let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
+        let mut cache = self.mipmaps.lock().unwrap_or_else(|e| e.into_inner());
+        // 【为什么有上限】每个级别是一份新分配的编码串；素材很多时不设界就是内存泄漏。
+        // 淘汰最老的一条（HashMap 的插入顺序在 Rust 里不保证，因此按"随便删一个"处理：
+        // 缓存只是加速，删错不会错结果）。
+        if cache.len() >= MAX_MIPMAP_CACHE {
+            if let Some(stale) = cache.keys().next().cloned() {
+                cache.remove(&stale);
+            }
+        }
+        cache.insert(key, encoded.clone());
+        Some(encoded)
+    }
+
+    /// 捕获存储的修订号：时间线上的素材每变一次就 +1。
+    ///
+    /// 【为什么要暴露它】编辑器靠对比它来决定"要不要重取整份时间线"
+    /// （`plugin_get_apply_state.host_version`）。没有它，录完之后时间线永远不会
+    /// 重新取 —— take 已经落盘、界面却还是空的（用户报的"录完没有片段"）。
+    pub fn revision(&self) -> u64 {
+        self.store.revision()
+    }
+
     /// 非音频线程：收走封口段、把"自己停下"的捕获提升成 take。
     pub fn service(&self) {
         self.store.service();
@@ -201,11 +336,30 @@ impl CaptureHost {
             "capture_block_trace" => Ok(json!([])),
             "capture_start" => {
                 self.store.start()?;
+                log::info!(
+                    "[clap][capture] armed: blocks={} saw_position={} activated={}",
+                    self.blocks.load(Ordering::Acquire),
+                    self.saw_position.load(Ordering::Acquire),
+                    self.activated.load(Ordering::Acquire)
+                );
                 Ok(self.status())
             }
             "capture_stop" => {
                 let take = self.store.stop()?;
-                Ok(json!({ "take": take, "status": self.status() }))
+                let status = self.status();
+                // 【为什么把这条写成 info 而不是 trace】"录完没有片段"在宿主里只有三种
+                // 形状：没录到帧、录到了但整段静音、录到了但时间线没被重取。三个读数
+                // 一行写完，下一次现场就不必再猜。
+                log::info!(
+                    "[clap][capture] stopped: take={} frames={} clips={} silent={} span={} takes={}",
+                    take,
+                    status["material"]["capturedFrames"].as_u64().unwrap_or(0),
+                    status["material"]["clips"].as_u64().unwrap_or(0),
+                    status["material"]["silent"].as_bool().unwrap_or(true),
+                    status["span"],
+                    status["takeCount"].as_u64().unwrap_or(0)
+                );
+                Ok(json!({ "take": take, "status": status }))
             }
             "capture_cancel" => {
                 self.store.cancel();
@@ -324,6 +478,83 @@ impl CaptureHost {
     }
 }
 
+/// 波形 mipmap 缓存的最多条数（见 `waveform_mipmap`）。
+const MAX_MIPMAP_CACHE: usize = 16;
+
+/// 把一份源 PCM 编码成 `WFPK` v2 二进制（前端 `waveformBinaryCodec` 的协议）。
+///
+/// 布局：`[WFPK][version=2][sample_rate][division][peak_count][level][channels]`
+/// 之后按声道分块 `ch0_min / ch0_max / ch1_min / ch1_max`，每块 `peak_count` 个 f32。
+fn mipmap_bytes(pcm: &hifishifter_capture::types::CapturePcm, level: u8) -> Option<Vec<u8>> {
+    let divisor: u32 = match level {
+        0 => 16,
+        1 => 512,
+        2 => 4096,
+        _ => return None,
+    };
+    let frames = pcm.planes.iter().map(Vec::len).max().unwrap_or(0);
+    if frames == 0 || pcm.sample_rate == 0 {
+        return None;
+    }
+    let channels = pcm.planes.len().clamp(1, 2);
+    let divisor = divisor as usize;
+    let peak_count = frames.div_ceil(divisor).max(1);
+    let mut out = Vec::with_capacity(28 + peak_count * channels * 8);
+    out.extend_from_slice(b"WFPK");
+    out.extend_from_slice(&2u32.to_le_bytes());
+    out.extend_from_slice(&pcm.sample_rate.to_le_bytes());
+    out.extend_from_slice(&(divisor as u32).to_le_bytes());
+    out.extend_from_slice(&(peak_count as u32).to_le_bytes());
+    out.extend_from_slice(&(u32::from(level)).to_le_bytes());
+    out.extend_from_slice(&(channels as u32).to_le_bytes());
+    for channel in 0..channels {
+        let plane = &pcm.planes[channel.min(pcm.planes.len() - 1)];
+        for peak in 0..peak_count {
+            let lo = peak * divisor;
+            let hi = (lo + divisor).min(plane.len());
+            let mut min = 0.0_f32;
+            if lo < hi {
+                min = plane[lo];
+                for sample in &plane[lo + 1..hi] {
+                    if *sample < min {
+                        min = *sample;
+                    }
+                }
+            }
+            out.extend_from_slice(&min.to_le_bytes());
+        }
+        for peak in 0..peak_count {
+            let lo = peak * divisor;
+            let hi = (lo + divisor).min(plane.len());
+            let mut max = 0.0_f32;
+            if lo < hi {
+                max = plane[lo];
+                for sample in &plane[lo + 1..hi] {
+                    if *sample > max {
+                        max = *sample;
+                    }
+                }
+            }
+            out.extend_from_slice(&max.to_le_bytes());
+        }
+    }
+    Some(out)
+}
+
+/// 播放位允许的最大读数年龄（毫秒）：超过它，最后一次 `kPlaying=1` 不再算数。
+///
+/// 【为什么是 250】与前端 `TRANSPORT_ADVANCE_MAX_AGE_MS` 同一个量级：44.1/48 kHz 下
+/// 一块是 21~46 ms，250 ms 足以吸收调度抖动，又短到用户看不见"停止后还在走"。
+const PLAYING_TTL_MS: u32 = 250;
+
+/// 当前 Unix 毫秒（读侧与音频侧共用；只做差值，不做绝对时间语义）。
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
+}
+
 /// 取至多两个输入平面（CLAP 的 `audio_inputs[0]`）。
 unsafe fn input_planes(process: &clap_process_t, frames: usize) -> [Option<&[f32]>; 2] {
     let mut planes: [Option<&[f32]>; 2] = [None, None];
@@ -392,7 +623,7 @@ mod tests {
                 .map(|index| ((index as f32 + offset) * 0.01).sin())
                 .collect();
             let right = left.clone();
-            let mut block = Self {
+            let block = Self {
                 planes: [std::ptr::null_mut(); 2],
                 left,
                 right,
@@ -415,10 +646,19 @@ mod tests {
                     out_events: std::ptr::null(),
                 },
             };
-            block.planes = [block.left.as_mut_ptr(), block.right.as_mut_ptr()];
-            block.buffer.data32 = block.planes.as_mut_ptr();
-            block.process.audio_inputs = &block.buffer;
+            // 【为什么指针要由调用方在**最终位置**上绑】`Block` 在 `new` 里只是
+            // 一个临时值：返回时整个结构体会被移动，而 `audio_inputs` / `data32`
+            // 里存的是指向**结构体内部**的裸指针。移动之后它们指向已被释放的栈槽，
+            // 测试于是读到垃圾（表现为"录到了帧数但全是静音"）。`attach` 在
+            // 调用方拿到最终位置之后再绑一次。
             block
+        }
+
+        /// 把内部指针绑到**当前位置**。必须在 `Block` 落到最终位置之后调用。
+        fn attach(&mut self) {
+            self.planes = [self.left.as_mut_ptr(), self.right.as_mut_ptr()];
+            self.buffer.data32 = self.planes.as_mut_ptr();
+            self.process.audio_inputs = &self.buffer;
         }
     }
 
@@ -462,6 +702,8 @@ mod tests {
         assert_eq!(host.status()["sawContext"], json!(false), "no position yet");
         let transport = playing_at(0.0);
         let mut block = Block::new(&transport, 64, 0.0);
+
+        block.attach();
         unsafe { host.on_process(&block.process, &audio) };
         assert_eq!(
             host.status()["sawContext"],
@@ -488,6 +730,8 @@ mod tests {
         transport.tempo = 120.0;
         transport.song_pos_beats = 2 * (1_i64 << 31);
         let mut block = Block::new(&transport, 64, 0.0);
+
+        block.attach();
         unsafe { host.on_process(&block.process, &audio) };
         block.left.clear();
         block.right.clear();
@@ -507,6 +751,8 @@ mod tests {
         for index in 0..20 {
             let transport = playing_at(index as f64 * 480.0 / 48_000.0);
             let mut block = Block::new(&transport, 480, index as f32);
+
+            block.attach();
             unsafe { host.on_process(&block.process, &audio) };
             block.left.clear();
             block.right.clear();
@@ -518,6 +764,153 @@ mod tests {
         assert!(captured > 0, "no frames recorded: {status}");
     }
 
+    /// 录制中必须给出**正在长出来的捕获带**（前端画预览与光标全靠它）。
+    ///
+    /// 【为什么是这条的回归测试】用户报"捕获时没有预览"时，界面读的是
+    /// `status.capture`；它为 null 就等于"没有任何东西在长"。这里直接钉住
+    /// 线上形状：区间列表非空、位置在推进、采样率有效。
+    #[test]
+    fn a_recording_publishes_the_growing_capture_band() {
+        let host = activated_host();
+        let audio = audio();
+        host.handle("capture_start", &json!({})).unwrap();
+        for index in 0..40 {
+            let transport = playing_at(index as f64 * 480.0 / 48_000.0);
+            let mut block = Block::new(&transport, 480, index as f32);
+
+            block.attach();
+            unsafe { host.on_process(&block.process, &audio) };
+            block.left.clear();
+            block.right.clear();
+        }
+        let status = host.status();
+        let capture = &status["capture"];
+        assert!(capture.is_object(), "no capture band in {status}");
+        assert_eq!(
+            capture["sampleRate"].as_f64(),
+            Some(48_000.0),
+            "the band must carry the project rate: {status}"
+        );
+        let runs = capture["runs"].as_array().expect("runs must be a list");
+        assert!(!runs.is_empty(), "no covered run in {status}");
+        assert!(
+            capture["positionFrame"].as_u64().unwrap_or(0) > 0,
+            "the capture position must advance: {status}"
+        );
+    }
+
+    /// 停止之后必须真的留下一个 take 和一个时间轴片段。
+    ///
+    /// 【为什么用 `timeline_payload` 断言】它是编辑器窗口真正渲染的那份数据。
+    /// take 存在但投影里没有片段时，用户看到的就是"录完了什么都没有"。
+    #[test]
+    fn stopping_produces_a_take_and_a_clip_on_the_timeline() {
+        let host = activated_host();
+        let audio = audio();
+        host.handle("capture_start", &json!({})).unwrap();
+        for index in 0..40 {
+            let transport = playing_at(index as f64 * 480.0 / 48_000.0);
+            let mut block = Block::new(&transport, 480, index as f32);
+
+            block.attach();
+            unsafe { host.on_process(&block.process, &audio) };
+            block.left.clear();
+            block.right.clear();
+        }
+        let reply = host.handle("capture_stop", &json!({})).unwrap();
+        assert_eq!(reply["status"]["takeCount"], json!(1), "no take: {reply}");
+        let timeline = host.timeline_payload(0.5);
+        let clips = timeline["clips"].as_array().expect("clips must be a list");
+        assert!(!clips.is_empty(), "no clip on the timeline: {timeline}");
+    }
+
+    /// 宿主的**播放位置与播放位**必须能被编辑器读到（`get_playback_state`）。
+    ///
+    /// 【为什么这条是用户报障的回归测试】CLAP 外壳此前根本不回答这条命令，于是
+    /// 前端的光标永远停在 0：捕获带右缘只跟着"视觉播放头"延伸，两者一起冻住。
+    /// 这里钉住三件事：位置来自宿主、播放位如实、停播时位置是编辑光标而不是"在播"。
+    #[test]
+    fn the_editor_can_read_the_host_playhead() {
+        let host = activated_host();
+        let audio = audio();
+        let transport = playing_at(0.5);
+        let mut block = Block::new(&transport, 480, 0.0);
+        block.attach();
+        unsafe { host.on_process(&block.process, &audio) };
+        let state = host.playback_state();
+        assert_eq!(state["ok"], json!(true));
+        assert_eq!(state["is_playing"], json!(true));
+        assert_eq!(state["host_authoritative"], json!(true));
+        let position = state["position_sec"].as_f64().unwrap_or(-1.0);
+        assert!((position - 0.5).abs() < 1e-6, "position was {position}");
+
+        // 宿主停播：位置仍然有效（那是编辑光标），但绝不能再报"在播"。
+        let mut stopped = playing_at(3.0);
+        stopped.flags = crate::abi::transport_flags::HAS_SECONDS_TIMELINE;
+        let mut block = Block::new(&stopped, 480, 0.0);
+        block.attach();
+        unsafe { host.on_process(&block.process, &audio) };
+        let state = host.playback_state();
+        assert_eq!(state["is_playing"], json!(false));
+        let position = state["position_sec"].as_f64().unwrap_or(-1.0);
+        assert!((position - 3.0).abs() < 1e-6, "position was {position}");
+    }
+
+    /// 时间线与参数编辑器的波形层按源取峰值：外壳必须给出 `WFPK` v2 二进制。
+    ///
+    /// 【为什么这条属于"预览"的验收】片段没有峰值就只是一块色块。这里解出真二进制，
+    /// 逐字段核对头部与"确实有非零振幅"。
+    #[test]
+    fn a_captured_take_serves_a_waveform_mipmap() {
+        let host = activated_host();
+        let audio = audio();
+        host.handle("capture_start", &json!({})).unwrap();
+        for index in 0..40 {
+            let transport = playing_at(index as f64 * 480.0 / 48_000.0);
+            let mut block = Block::new(&transport, 480, index as f32);
+            block.attach();
+            unsafe { host.on_process(&block.process, &audio) };
+            block.left.clear();
+            block.right.clear();
+        }
+        let reply = host.handle("capture_stop", &json!({})).unwrap();
+        assert_eq!(reply["status"]["takeCount"], json!(1));
+        // 源 id 是内容寻址的（`capture://blake3:<hex>`），必须从时间线上读回来 ——
+        // 波形层正是拿片段的 `source_path` 去问峰值的。
+        let timeline = host.timeline_payload(0.0);
+        let source = timeline["clips"][0]["source_path"]
+            .as_str()
+            .expect("the clip must name its source")
+            .to_owned();
+        let encoded = host
+            .waveform_mipmap(&source, 0)
+            .expect("a captured take must serve a waveform mipmap");
+        let bytes = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            encoded.as_bytes(),
+        )
+        .expect("the mipmap must be valid base64");
+        assert_eq!(&bytes[..4], b"WFPK", "wrong magic");
+        let read =
+            |offset: usize| u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+        assert_eq!(read(4), 2, "format version");
+        assert_eq!(read(8), 48_000, "sample rate");
+        assert_eq!(read(12), 16, "L0 divisor");
+        assert_eq!(read(24), 2, "stereo");
+        let peaks = read(16) as usize;
+        assert_eq!(bytes.len(), 28 + peaks * 2 * 8, "payload size");
+        let floats: Vec<f32> = bytes[28..]
+            .chunks_exact(4)
+            .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+            .collect();
+        assert!(
+            floats.iter().any(|value| value.abs() > 0.0),
+            "the recorded sine must appear in the peaks"
+        );
+        // 未知源必须是"没有"，而不是一份静音波形 —— 后者会让前端画出一条假直线。
+        assert!(host.waveform_mipmap("capture://999", 0).is_none());
+    }
+
     /// 取消之后不能留下任何 take（录制中的素材也一并丢弃）。
     #[test]
     fn cancelling_a_recording_leaves_no_take() {
@@ -527,6 +920,8 @@ mod tests {
         for index in 0..4 {
             let transport = playing_at(index as f64 * 0.01);
             let mut block = Block::new(&transport, 480, index as f32);
+
+            block.attach();
             unsafe { host.on_process(&block.process, &audio) };
             block.left.clear();
             block.right.clear();
@@ -544,6 +939,8 @@ mod tests {
         let mut transport = playing_at(1.0);
         transport.flags = transport_flags::IS_PLAYING;
         let mut block = Block::new(&transport, 64, 0.0);
+
+        block.attach();
         unsafe { host.on_process(&block.process, &audio) };
         block.left.clear();
         block.right.clear();

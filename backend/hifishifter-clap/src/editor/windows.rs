@@ -56,6 +56,12 @@ thread_local! {
     static VIEWS: RefCell<HashMap<usize, ViewState>> = RefCell::new(HashMap::new());
     /// 本线程处理过的页面消息总数（销毁时汇总，一条日志回答"页面跑通没有"）。
     static PAGE_MESSAGES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// 本视图的页面**问过哪些命令**（去重，销毁时一行汇总）。
+    ///
+    /// 【为什么值得单独记】"页面打开了但某条命令没人回答"在宿主侧完全同形：
+    /// 窗口有内容、也不报错，只是那一块永远不动。把问过的命令列出来，就能直接看出
+    /// 是"没问"（前端没走到）还是"问了但回执不对"（见 `protocol::reply`）。
+    static PAGE_COMMANDS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
 struct ViewState {
@@ -485,14 +491,19 @@ fn configure_browser(
                     count.set(seen + 1);
                     seen
                 });
+                // 命令名来自页面（外部输入）：只截取到下一个引号，长度由请求体上限约束。
+                let command = text
+                    .split("\"command\":\"")
+                    .nth(1)
+                    .and_then(|rest| rest.split('"').next())
+                    .unwrap_or("?");
+                PAGE_COMMANDS.with(|names| {
+                    let mut names = names.borrow_mut();
+                    if names.len() < 64 && !names.iter().any(|name| name == command) {
+                        names.push(command.to_owned());
+                    }
+                });
                 if seen < 8 {
-                    // 命令名来自页面（外部输入），只截取前 64 字节且按 debug 打印；
-                    // 它回答的是"页面到底跑到哪一步了"。
-                    let command = text
-                        .split("\"command\":\"")
-                        .nth(1)
-                        .and_then(|rest| rest.split('"').next())
-                        .unwrap_or("?");
                     log::info!(
                         "[clap][gui] page message #{} ({} bytes, command={command})",
                         seen + 1,
@@ -693,7 +704,9 @@ pub fn destroy(plugin: *const clap_plugin_t) {
             }
         }
         let handled = PAGE_MESSAGES.with(|count| count.get());
-        log::info!("[clap][gui] view destroyed after {handled} page message(s)");
+        let commands = PAGE_COMMANDS.with(|names| names.borrow().join(", "));
+        log::info!("[clap][gui] view destroyed after {handled} page message(s): {commands}");
+        PAGE_COMMANDS.with(|names| names.borrow_mut().clear());
     }
 }
 

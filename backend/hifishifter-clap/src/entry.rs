@@ -352,14 +352,10 @@ unsafe extern "C" fn plugin_process(
             let Some(process) = (unsafe { process.as_ref() }) else {
                 return CLAP_PROCESS_ERROR;
             };
-            let frame = instance.audio.to_transport_frame(process);
-            log::trace!(
-                "[clap] block frames={} trusted={} playing={:?} offline={}",
-                process.frames_count,
-                frame.position_trusted,
-                frame.playing,
-                frame.offline
-            );
+            // 【为什么只在这里读一次 host transport】`to_transport_frame` 会推进
+            // 块计数与读数序号；此前它在这里和 `capture.on_process` 里各读一次，
+            // 于是每个音频块被记成两块（诊断读数翻倍，前端的乱序判据也被加快）。
+            // 现在唯一的读点在 `capture.on_process`，它自己负责写日志。
             crate::ara::observe_processing(plugin);
             if unsafe { audio::process_block(process) } {
                 // 【顺序】先让宿主缓冲就位（in-place 时输入与输出是同一块），再喂捕获：
@@ -524,6 +520,143 @@ mod tests {
             unsafe { plugin_process(ptr, &raw const process) },
             CLAP_PROCESS_CONTINUE
         );
+        unsafe {
+            stop_processing(ptr);
+            plugin_deactivate(ptr);
+        }
+        release(&mut plugin, instance);
+    }
+
+    /// **端到端验收**：宿主播放 → 页面按捕获 → 录制 → 停止 → 时间线上出现片段。
+    ///
+    /// 【为什么这条必须存在】前面的用例各自只验证一段（存储、协议、音频适配）。
+    /// 用户报障的形态恰恰是"每一段都绿、合起来什么都不动"——接线处的错误（`process`
+    /// 没喂捕获、页面命令走错实例、回执形状不对）只有把整条链跑一遍才看得见。
+    /// 这里走的是与真实编辑器同一条路：C ABI 的 process 回调 + `protocol::reply`。
+    #[test]
+    fn a_host_playback_produces_a_clip_through_the_plugin_entry() {
+        let (mut plugin, instance) = fixture();
+        let ptr: *const clap_plugin_t = &raw const plugin;
+        let host = crate::abi::clap_host_t {
+            clap_version: CLAP_VERSION,
+            host_data: std::ptr::null_mut(),
+            name: c"probe".as_ptr(),
+            vendor: c"probe".as_ptr(),
+            url: c"probe".as_ptr(),
+            version: c"1".as_ptr(),
+            get_extension: None,
+            request_restart: None,
+            request_process: None,
+            request_callback: None,
+        };
+        unsafe { (*instance).host = &raw const host };
+        assert!(unsafe { plugin_init(ptr) });
+        assert!(unsafe { plugin_activate(ptr, 48_000.0, 1, 512) });
+        assert!(unsafe { start_processing(ptr) });
+
+        let reply = |command: &str, args: serde_json::Value| {
+            let request = serde_json::json!({ "id": 1, "viewId": "v", "version": 1, "command": command, "args": args });
+            let capture = &unsafe { crate::instance(ptr) }.expect("instance").capture;
+            crate::editor::protocol::reply("v", &request, capture)
+        };
+
+        // 页面在用户按键之前就能读到"能录"。
+        assert_eq!(
+            reply("capture_status", serde_json::Value::Null)["value"]["canCapture"],
+            true
+        );
+        assert_eq!(reply("capture_start", serde_json::Value::Null)["ok"], true);
+
+        // 宿主播放：每块 480 帧、位置按块长推进。
+        let left: Vec<f32> = (0..480).map(|i| (i as f32 * 0.05).sin()).collect();
+        let right = left.clone();
+        let mut out_left = vec![0.0_f32; 480];
+        let mut out_right = vec![0.0_f32; 480];
+        for block in 0..40_i64 {
+            let mut transport = crate::abi::clap_event_transport_t {
+                header: crate::abi::clap_event_header_t {
+                    size: std::mem::size_of::<crate::abi::clap_event_transport_t>() as u32,
+                    time: 0,
+                    space_id: 0,
+                    type_: crate::abi::CLAP_EVENT_TRANSPORT,
+                    flags: 0,
+                },
+                flags: crate::abi::transport_flags::HAS_SECONDS_TIMELINE
+                    | crate::abi::transport_flags::IS_PLAYING,
+                song_pos_beats: 0,
+                song_pos_seconds: (block as f64 * 480.0 / 48_000.0
+                    * crate::abi::CLAP_SECTIME_FACTOR)
+                    .round() as i64,
+                tempo: 120.0,
+                tempo_inc: 0.0,
+                loop_start_beats: 0,
+                loop_end_beats: 0,
+                loop_start_seconds: 0,
+                loop_end_seconds: 0,
+                bar_start: 0,
+                bar_number: 0,
+                tsig_num: 4,
+                tsig_denom: 4,
+            };
+            let mut in_planes: [*mut f32; 2] =
+                [left.as_ptr() as *mut f32, right.as_ptr() as *mut f32];
+            let mut out_planes: [*mut f32; 2] = [out_left.as_mut_ptr(), out_right.as_mut_ptr()];
+            let input = crate::abi::clap_audio_buffer_t {
+                data32: in_planes.as_mut_ptr(),
+                data64: std::ptr::null_mut(),
+                channel_count: 2,
+                latency: 0,
+                constant_mask: 0,
+            };
+            let mut output = crate::abi::clap_audio_buffer_t {
+                data32: out_planes.as_mut_ptr(),
+                data64: std::ptr::null_mut(),
+                channel_count: 2,
+                latency: 0,
+                constant_mask: 0,
+            };
+            let process = clap_process_t {
+                steady_time: block * 480,
+                frames_count: 480,
+                transport: &mut transport,
+                audio_inputs: &input,
+                audio_outputs: &mut output,
+                audio_inputs_count: 1,
+                audio_outputs_count: 1,
+                in_events: std::ptr::null(),
+                out_events: std::ptr::null(),
+            };
+            assert_eq!(
+                unsafe { plugin_process(ptr, &raw const process) },
+                CLAP_PROCESS_CONTINUE
+            );
+        }
+
+        let status = reply("capture_status", serde_json::Value::Null);
+        assert_eq!(status["value"]["state"], "recording", "{status}");
+        // 光标跟着宿主走：40 块 × 480 帧 = 0.4 s。
+        let transport = reply("get_playback_state", serde_json::Value::Null);
+        let position = transport["value"]["position_sec"].as_f64().unwrap_or(-1.0);
+        assert!((position - 0.392).abs() < 0.02, "position was {position}");
+
+        let stopped = reply("capture_stop", serde_json::Value::Null);
+        assert_eq!(stopped["value"]["status"]["takeCount"], 1, "{stopped}");
+        let timeline = reply("get_timeline_state", serde_json::Value::Null);
+        let clips = timeline["value"]["clips"].as_array().expect("clips");
+        assert_eq!(clips.len(), 1, "expected exactly one clip: {timeline}");
+        let source = clips[0]["source_path"].as_str().expect("source path");
+        let args = serde_json::json!({ "sourcePath": source, "level": 0 });
+        let mipmap = reply("get_waveform_mipmap_binary", args);
+        assert!(
+            mipmap["value"]
+                .as_str()
+                .is_some_and(|data| !data.is_empty()),
+            "the clip must serve waveform peaks: {mipmap}"
+        );
+        // 时间线版本必须前进，否则编辑器永远不会重取 —— 用户看到的就是"没有片段"。
+        let apply = reply("plugin_get_apply_state", serde_json::Value::Null);
+        assert_eq!(apply["value"]["generation"], serde_json::json!(1));
+
         unsafe {
             stop_processing(ptr);
             plugin_deactivate(ptr);

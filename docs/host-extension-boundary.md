@@ -137,7 +137,7 @@ ARA 侧改了时间拉伸 / 内容淡化，插件会继续用旧配置渲染。
 | 实例化 / 激活 / process / 保存 state / 销毁 | 有 | `clap.plugin-factory` + `clap.state` + `clap.audio-ports`；生命周期按 CLAP 状态机严格校验 |
 | 延迟 / 尾音 | 如实为 0 | `clap.latency` + `clap.tail`；逐帧直通、不缓存样本，0 是唯一正确答案 |
 | 宿主日志 | 有 | `clap.log`：`plugin.init` 后查询 `clap_host_log` 并装上 logger，诊断不再静默丢弃 |
-| transport 读数 | 按事件如实给 | 只从 `clap_event_transport_t` 读播放/录音/循环/拍号；`steady_time` 不推断播放 |
+| transport 读数 | 按事件如实给 | 只从 `clap_event_transport_t` 读播放/录音/循环/拍号；`steady_time` 不推断播放。编辑器轮询的 `get_playback_state`（光标与捕获带右缘的唯一来源）由实例把位置抄进原子量后回答 |
 | 离线 bounce | 按扩展如实给 | 只从 `clap.render` 的 `CLAP_RENDER_OFFLINE` 置位 |
 | ARA 工厂 / 实例扩展 | **不暴露** | 共享 ARA 文档模型仍在 VST3 外壳里；暴露不能创建控制器的工厂会让宿主写穿空指针 |
 | `ara:supported` / `ara:required` | 都不声明 | descriptor 只描述已履行的能力 |
@@ -176,6 +176,15 @@ ARA 侧改了时间拉伸 / 内容淡化，插件会继续用旧配置渲染。
   `capture_status` 轮询（那本是"视图连不上处理器"的降频判据）。CLAP 视图由本模块在
   进程内回答命令，路由因此报 `bound`；真正缺的 ARA/编辑能力由 `hostCapabilities`
   全 false 表达。这正是用户报的"当前不可用"的第二层原因。
+- **捕获的界面读数必须由外壳回答**：编辑器不推送传输事件，光标与捕获带右缘都读
+  `get_playback_state`；时间线的重取由 `plugin_get_apply_state.host_version` 的**前进**
+  触发（CLAP 里它等于捕获存储的修订号）。缺了前一条，页面上的光标永远停在 0、带子
+  右缘跟着冻住（"捕获在计时，界面什么都不动"）；缺了后一条，take 已经落盘、时间线却
+  永远不重取（"捕获结束没有片段"）。
+- **波形峰值来自内存**：CLAP 的源是 `capture://blake3:<hash>`，磁盘上没有文件。
+  `get_waveform_mipmap_binary` / `batch_get_waveform_mipmap` 由外壳按 `WFPK` v2
+  协议直接从捕获 PCM 编码（分块 min/max，三级除数 16/512/4096），结果按源缓存 ——
+  否则片段只是一块没有内容的色块。
 - **捕获运行时是共享的**：`recorder` / `sidecar` / `store` / `timeline` / `transport`
   从 VST3 crate 搬进 `backend/hifishifter-capture/`（纯机械搬迁 + 中性类型转换），VST3 与
   CLAP 两个外壳都只是它的适配层：VST3 把 `ProcessContext` 变成 `InputBlock`，CLAP 把
