@@ -362,7 +362,12 @@ unsafe extern "C" fn plugin_process(
             // 块计数与读数序号；此前它在这里和 `capture.on_process` 里各读一次，
             // 于是每个音频块被记成两块（诊断读数翻倍，前端的乱序判据也被加快）。
             // 现在唯一的读点在 `capture.on_process`，它自己负责写日志。
-            crate::ara::observe_processing(plugin);
+            // 【ARA 形态：同一块也喂给共享捕获路径】观察、相位判定与录制在 VST3 用的是
+            // `ExtensionOwner::capture_block`；CLAP 的 ARA 实例调的是同一个方法。
+            // 捕获形态（未接 ARA）仍走自己的 `capture`：那条路还没有被共享实现取代。
+            if instance.ara.is_some() {
+                unsafe { crate::ara::observe_block(plugin, process) };
+            }
             if unsafe { audio::process_block(process) } {
                 // 【顺序】先让宿主缓冲就位（in-place 时输入与输出是同一块），再喂捕获：
                 // 捕获只读输入平面，写完自己的段；它不改输出，因此直通不受影响。

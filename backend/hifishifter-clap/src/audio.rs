@@ -60,6 +60,14 @@ impl AudioState {
         true
     }
 
+    /// 当前 render 模式是否为离线。
+    ///
+    /// 【为什么需要读它】共享捕获路径按流分开记账（实时 / 预取 / 离线），而
+    /// `clap.render` 的模式是唯一来源；把它留在本结构里，调用方不必自己再存一份。
+    pub fn is_offline(&self) -> bool {
+        self.offline_render.load(Ordering::Acquire)
+    }
+
     /// Capture bootstrap 的能力读数（是否见过 transport / 是否见过离线 render）。
     /// 诊断读数：@@(处理过的块数, 见过的 transport 标志, 是否推出过位置)@@。
     ///
@@ -114,23 +122,7 @@ impl AudioState {
         // 只认 seconds 的实现会让 position_trusted 永远是 false —— 表现为"捕获按钮
         // 永远灰着"，而插件其实已经被正常处理了。拍是精确的定点值，配上速度就能
         // 换算成秒，因此两种时间轴都接受。
-        let has_seconds = transport.flags & crate::abi::transport_flags::HAS_SECONDS_TIMELINE != 0;
-        let has_beats = transport.flags & crate::abi::transport_flags::HAS_BEATS_TIMELINE != 0;
-        let has_tempo = transport.flags & crate::abi::transport_flags::HAS_TEMPO != 0;
-        let seconds = transport.song_pos_seconds as f64 / CLAP_SECTIME_FACTOR;
-        let beats = transport.song_pos_beats as f64 / crate::abi::CLAP_BEATTIME_FACTOR;
-        let position = if has_seconds && seconds.is_finite() && seconds >= 0.0 {
-            Some((seconds * sample_rate).round() as i64)
-        } else if has_beats
-            && has_tempo
-            && beats.is_finite()
-            && beats >= 0.0
-            && transport.tempo > 0.0
-        {
-            Some((beats * 60.0 / transport.tempo * sample_rate).round() as i64)
-        } else {
-            None
-        };
+        let position = transport_position(transport, sample_rate);
         if position.is_some() {
             self.saw_position.store(true, Ordering::Release);
         }
@@ -375,4 +367,29 @@ unsafe fn clear_f64(buffer: &clap_audio_buffer_t, frames: usize) {
 #[cfg(test)]
 mod tests {
     include!("audio/tests.rs");
+}
+
+/// 从 CLAP transport 推出工程位置（采样帧）；两条时间轴都接受，都没有则 `None`。
+///
+/// 【为什么抽成函数】它是"宿主时间 → 工程帧"的**唯一**换算：捕获形态的观察用它，
+/// ARA 形态喂给共享捕获路径的 `BlockContext` 也用它。两份实现迟早会在
+/// "只给拍不给秒"的宿主上分叉（REAPER 的 CLAP 就是其中之一）。
+pub fn transport_position(transport: &crate::abi::clap_event_transport_t, sample_rate: f64) -> Option<i64> {
+    let has_seconds = transport.flags & crate::abi::transport_flags::HAS_SECONDS_TIMELINE != 0;
+    let has_beats = transport.flags & crate::abi::transport_flags::HAS_BEATS_TIMELINE != 0;
+    let has_tempo = transport.flags & crate::abi::transport_flags::HAS_TEMPO != 0;
+    let seconds = transport.song_pos_seconds as f64 / CLAP_SECTIME_FACTOR;
+    let beats = transport.song_pos_beats as f64 / crate::abi::CLAP_BEATTIME_FACTOR;
+    if has_seconds && seconds.is_finite() && seconds >= 0.0 {
+        Some((seconds * sample_rate).round() as i64)
+    } else if has_beats
+        && has_tempo
+        && beats.is_finite()
+        && beats >= 0.0
+        && transport.tempo > 0.0
+    {
+        Some((beats * 60.0 / transport.tempo * sample_rate).round() as i64)
+    } else {
+        None
+    }
 }

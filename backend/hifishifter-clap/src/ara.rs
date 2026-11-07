@@ -11,7 +11,7 @@
 //! 正确性交给时序。这里改用 companion 的**同一套** ClapAraPluginExtension 结构体与
 //! ClapAraEntry 工厂表，只把回调接到共享 binder 上。
 
-use crate::abi::clap_plugin_t;
+use crate::abi::{clap_plugin_t, clap_process_t};
 use ara2_bridge::companion::clap::sys::{ClapAraPluginExtension, ClapPlugin};
 /// ARACLAP.h 钉死的四个扩展 ID（stable + draft 兼容）。对外只此一份，测试直接比对。
 pub use ara2_bridge::companion::clap::sys::{
@@ -112,6 +112,86 @@ unsafe extern "C" fn ara_bind(
             .bind(controller.cast(), known, assigned)
             .cast()
     })
+}
+
+/// 把一块宿主音频交给**共享**捕获路径；返回本块位置是否可信。
+///
+/// 【为什么在这里】CLAP 的 \`process\` 只知道自己的缓冲与 transport；把"这一块是什么"
+/// 翻译成中立描述是格式外壳的职责。翻译之后走的是 VST3 用的同一个
+/// \`ExtensionOwner::capture_block\` —— 观察、相位判定与录制都在那一份实现里。
+///
+/// 【为什么位置要单独算】\`AudioState::to_transport_frame\` 会推进块计数，而它只能被
+/// 调用一次（否则每个块被记成两块）。这里用同一个换算函数 \`transport_position\`，
+/// 不重复计数，也不复制"只给拍不给秒"的兜底逻辑。
+///
+/// # Safety
+/// \`plugin\` 与 \`process\` 必须是宿主按 CLAP 契约传入的活记录，且 \`process\` 的输入
+/// 平面至少有 \`frames_count\` 帧可读。
+pub unsafe fn observe_block(plugin: *const clap_plugin_t, process: *const clap_process_t) -> bool {
+    if plugin.is_null() || process.is_null() {
+        return false;
+    }
+    // SAFETY: 由调用方保证。
+    let Some(instance) = (unsafe { crate::instance(plugin) }) else {
+        return false;
+    };
+    let Some(binder) = instance.ara.as_ref() else {
+        return false;
+    };
+    let process = unsafe { &*process };
+    let frames = process.frames_count as usize;
+    let rate = instance.audio.sample_rate();
+    let mut context = hifishifter_plugin::block_context::BlockContext {
+        sample_rate: rate,
+        ..Default::default()
+    };
+    if let Some(transport) = unsafe { process.transport.as_ref() } {
+        let flags = transport.flags;
+        context.playing = flags & crate::abi::transport_flags::IS_PLAYING != 0;
+        context.recording = flags & crate::abi::transport_flags::IS_RECORDING != 0;
+        context.cycle_active = flags & crate::abi::transport_flags::IS_LOOP_ACTIVE != 0;
+        context.project_time_samples =
+            crate::audio::transport_position(transport, rate).unwrap_or_default();
+        if flags & crate::abi::transport_flags::HAS_BEATS_TIMELINE != 0 {
+            let factor = crate::abi::CLAP_BEATTIME_FACTOR;
+            context.music = Some(transport.song_pos_beats as f64 / factor);
+            context.cycle_valid = true;
+            context.cycle_start_music = transport.loop_start_beats as f64 / factor;
+            context.cycle_end_music = transport.loop_end_beats as f64 / factor;
+        }
+        if flags & crate::abi::transport_flags::HAS_TEMPO != 0
+            && transport.tempo.is_finite()
+            && transport.tempo > 0.0
+        {
+            context.tempo = Some(transport.tempo);
+        }
+    }
+    let mut planes: [Option<&[f32]>; 2] = [None, None];
+    if frames > 0 && process.audio_inputs_count > 0 && !process.audio_inputs.is_null() {
+        let bus = unsafe { &*process.audio_inputs };
+        if !bus.data32.is_null() {
+            for channel in 0..(bus.channel_count as usize).min(2) {
+                let plane = unsafe { *bus.data32.add(channel) };
+                if plane.is_null() {
+                    continue;
+                }
+                planes[channel] = Some(unsafe { std::slice::from_raw_parts(plane, frames) });
+            }
+        }
+    }
+    let stream = if instance.audio.is_offline() {
+        hifishifter_capture::recorder::ProcessStream::Offline
+    } else {
+        hifishifter_capture::recorder::ProcessStream::Realtime
+    };
+    let block = hifishifter_capture::recorder::InputBlock {
+        start: context.project_time_samples,
+        frames,
+        sample_rate: rate,
+        planes,
+        playing: context.playing,
+    };
+    binder.owner().capture_block(block, stream, context, None)
 }
 
 /// 实例级 ARA 扩展查询。
