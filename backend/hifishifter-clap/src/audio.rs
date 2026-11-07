@@ -145,49 +145,6 @@ impl AudioState {
     }
 }
 
-/// 用渲染结果覆盖输出缓冲；渲染没有覆盖到的帧保持宿主原声（直通）。
-///
-/// 【为什么在直通之后写】`process_block` 已经把输入抄进输出（in-place 时是同一块
-/// 内存）。这里只覆盖"属于素材"的那一段，其余帧原样保留 —— 于是"插件没处理的地方"
-/// 听起来与没插插件完全一致，不会出现前 30 秒静音那种断层。
-///
-/// # Safety
-/// `process` 必须是宿主在本次 `process` 回调里给出的有效指针；输出平面在调用期间
-/// 有效且至少有 `frames_count` 个样本。
-pub unsafe fn overwrite_output(
-    process: &clap_process_t,
-    tape: &crate::render::RenderTape,
-    start_frame: i64,
-    passthrough_outside: bool,
-) {
-    let frames = process.frames_count as usize;
-    if frames == 0 || process.audio_outputs.is_null() || process.audio_outputs_count == 0 {
-        return;
-    }
-    let buffer = unsafe { &mut *process.audio_outputs };
-    if buffer.data32.is_null() || buffer.channel_count == 0 {
-        return;
-    }
-    for channel in 0..(buffer.channel_count.min(2) as usize) {
-        let data = unsafe { *buffer.data32.add(channel) };
-        if data.is_null() {
-            continue;
-        }
-        for index in 0..frames {
-            let Some(sample) = tape.sample(start_frame + index as i64) else {
-                // 【为什么这里可能写 0】`outside_passthrough = false` 是用户的显式
-                // 选择："素材之外静音"。默认（true）保持宿主原声 —— 那正是
-                // `process_block` 已经写进去的内容。
-                if !passthrough_outside {
-                    unsafe { *data.add(index) = 0.0 };
-                }
-                continue;
-            };
-            unsafe { *data.add(index) = sample[channel.min(1)] };
-        }
-    }
-}
-
 /// 把 CLAP 的 `process` 数据翻译成共享的中立块。
 ///
 /// 【为什么翻译放在格式外壳】`clap_audio_buffer_t` 的字段布局、`data32`/`data64` 的

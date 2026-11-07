@@ -138,7 +138,7 @@ unsafe extern "C" fn state_save(
         // 【为什么在这里并清单】捕获的音频落在本地缓存（sidecar），而"有哪些 take"
         // 必须跟着宿主工程走：不并进去，重开工程就是一片空时间线，用户会以为录丢。
         let mut container = ComponentState::decode(&stored).unwrap_or_default();
-        container.capture = serde_json::to_vec(&instance.capture.manifest()).ok();
+        container.capture = serde_json::to_vec(&instance.owner.capture().manifest()).ok();
         let bytes = container.encode();
         unsafe { write_all(stream, &bytes) }
     })
@@ -169,7 +169,7 @@ unsafe extern "C" fn state_load(
                 if let Some(capture) = container.capture {
                     match serde_json::from_slice::<serde_json::Value>(&capture) {
                         Ok(manifest) => {
-                            if let Err(error) = instance.capture.restore_manifest(&manifest) {
+                            if let Err(error) = instance.owner.capture().restore_manifest(&manifest) {
                                 log::warn!("[clap] capture manifest rejected: {error}");
                             }
                         }
@@ -358,12 +358,14 @@ mod tests {
             audio: crate::audio::AudioState::default(),
             host: std::ptr::null(),
             plugin: std::ptr::null(),
+            owner: std::sync::Arc::new(
+                hifishifter_plugin::render::extension::ExtensionOwner::default(),
+            ),
             ara: None,
             initialized: std::sync::atomic::AtomicBool::new(false),
             active: std::sync::atomic::AtomicBool::new(false),
             processing: std::sync::atomic::AtomicBool::new(false),
             in_process: std::sync::atomic::AtomicBool::new(false),
-            capture: std::sync::Arc::new(crate::capture::CaptureHost::default()),
         }));
         let plugin = clap_plugin_t {
             desc: std::ptr::null(),

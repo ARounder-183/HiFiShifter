@@ -11,7 +11,7 @@
 //! 正确性交给时序。这里改用 companion 的**同一套** ClapAraPluginExtension 结构体与
 //! ClapAraEntry 工厂表，只把回调接到共享 binder 上。
 
-use crate::abi::{clap_plugin_t, clap_process_t};
+use crate::abi::clap_plugin_t;
 use ara2_bridge::companion::clap::sys::{ClapAraPluginExtension, ClapPlugin};
 /// ARACLAP.h 钉死的四个扩展 ID（stable + draft 兼容）。对外只此一份，测试直接比对。
 pub use ara2_bridge::companion::clap::sys::{
@@ -24,7 +24,6 @@ use ara2_bridge::sys::{
     ARADocumentControllerRef, ARAFactory, ARAPlugInExtensionInstance, ARAPlugInInstanceRoleFlags,
 };
 use hifishifter_plugin::ara::binder::AraBinder;
-use hifishifter_plugin::render::extension::ExtensionOwner;
 use std::ffi::c_void;
 use std::sync::{Arc, OnceLock};
 
@@ -114,74 +113,6 @@ unsafe extern "C" fn ara_bind(
     })
 }
 
-/// 把一块宿主音频交给**共享**渲染通路：捕获观察与输出仲裁都在那一份实现里。
-///
-/// 【为什么返回 `Option`】`None` 表示本实例没有 ARA 绑定器（运行时不可用）。调用方据此
-/// 退回自己的直通通路 —— 而不是让一个没有文档的实例静默地不出声。
-///
-/// 【为什么在这里翻译】CLAP 的 `process` 只知道自己的缓冲与 transport；把“这一块是什么”
-/// 翻译成中立描述是格式外壳的职责。翻译之后走的是 VST3 用的同一个
-/// `ExtensionOwner::process_audio` —— 观察、相位判定、门控与快照输出都在那一份实现里。
-///
-/// 【为什么位置要单独算】`AudioState::to_transport_frame` 会推进块计数，而它只能被
-/// 调用一次（否则每个块被记成两块）。这里用同一个换算函数 `transport_position`，
-/// 不重复计数，也不复制“只给拍不给秒”的兜底逻辑。
-///
-/// # Safety
-/// `plugin` 与 `process` 必须是宿主按 CLAP 契约传入的活记录，且 `process` 的输入
-/// 平面至少有 `frames_count` 帧可读。
-pub unsafe fn process_audio(
-    plugin: *const clap_plugin_t,
-    process: *const clap_process_t,
-) -> Option<hifishifter_plugin::render::extension::RenderOutcome> {
-    if plugin.is_null() || process.is_null() {
-        return None;
-    }
-    // SAFETY: 由调用方保证。
-    let instance = unsafe { crate::instance(plugin) }?;
-    let binder = instance.ara.as_ref()?;
-    let process = unsafe { &*process };
-    let frames = process.frames_count as usize;
-    let rate = instance.audio.sample_rate();
-    let mut context = hifishifter_plugin::block_context::BlockContext {
-        sample_rate: rate,
-        ..Default::default()
-    };
-    if let Some(transport) = unsafe { process.transport.as_ref() } {
-        let flags = transport.flags;
-        context.playing = flags & crate::abi::transport_flags::IS_PLAYING != 0;
-        context.recording = flags & crate::abi::transport_flags::IS_RECORDING != 0;
-        context.cycle_active = flags & crate::abi::transport_flags::IS_LOOP_ACTIVE != 0;
-        context.project_time_samples =
-            crate::audio::transport_position(transport, rate).unwrap_or_default();
-        if flags & crate::abi::transport_flags::HAS_BEATS_TIMELINE != 0 {
-            let factor = crate::abi::CLAP_BEATTIME_FACTOR;
-            context.music = Some(transport.song_pos_beats as f64 / factor);
-            context.cycle_valid = true;
-            context.cycle_start_music = transport.loop_start_beats as f64 / factor;
-            context.cycle_end_music = transport.loop_end_beats as f64 / factor;
-        }
-        if flags & crate::abi::transport_flags::HAS_TEMPO != 0
-            && transport.tempo.is_finite()
-            && transport.tempo > 0.0
-        {
-            context.tempo = Some(transport.tempo);
-        }
-    }
-    let _ = frames;
-    // 进程形态：CLAP 只有“离线 render 模式”这一个权威来源（见 AudioState::is_offline）。
-    let mode = if instance.audio.is_offline() { 2 } else { 0 };
-    let stream = if instance.audio.is_offline() {
-        hifishifter_capture::recorder::ProcessStream::Offline
-    } else {
-        hifishifter_capture::recorder::ProcessStream::Realtime
-    };
-    let mut silence = 0_u64;
-    // SAFETY: 宿主在本次回调里给出的有效记录；平面至少含 frames_count 帧。
-    let mut block = unsafe { crate::audio::block_from_clap(process, mode, &mut silence) }?;
-    // SAFETY: 与 block_from_clap 同一份宿主缓冲，且只在本次回调内使用。
-    Some(unsafe { binder.owner().process_audio(&mut block, context, stream, None) })
-}
 /// 实例级 ARA 扩展查询。
 pub fn get_extension(plugin: *const clap_plugin_t, id: &str) -> *const c_void {
     if !matches!(
@@ -223,8 +154,8 @@ pub unsafe fn attach(plugin: *const clap_plugin_t) {
             return;
         }
     };
-    // 每个实例一份扩展所有权：文档绑定、renderer 分配与编辑器会话都挂在这里。
-    let owner = Arc::new(ExtensionOwner::default());
+    // 复用实例的扩展所有权：文档绑定、renderer 分配与编辑器会话都挂在同一份上。
+    let owner = Arc::clone(&instance.owner);
     match AraBinder::new(
         association,
         CompanionRoles::all(),

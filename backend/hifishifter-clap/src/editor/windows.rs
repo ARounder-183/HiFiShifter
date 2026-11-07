@@ -324,15 +324,16 @@ pub unsafe fn create(plugin: *const clap_plugin_t, floating: bool) -> Result<(),
             let view_id = format!("clap-view-{}-{}", std::process::id(), key);
             // 【为什么在这里建端口】端口的生命周期就是视图的生命周期：页面走了，它上面
             // 在途的命令与事件就没有接收方，继续排队只会把旧视图的读数写进新视图。
+            // 【为什么取 instance.owner 而不是 ARA 绑定器】两种形态都有编辑会话：绑定过
+            // ARA 走文档那份，从未绑定走本实例的 Capture 会话。按绑定器取会让 Capture
+            // 形态永远没有编辑后端 —— 而那正是必须能编辑的形态。
             // SAFETY: create 的入参已判空，实例由宿主持有到 destroy。
-            let editor = unsafe { crate::instance(plugin) }
-                .and_then(|instance| instance.ara.as_ref())
-                .map(|binder| {
-                    std::sync::Arc::new(hifishifter_plugin::editor::port::EditorPort::new(
-                        binder.owner().clone(),
-                        &view_id,
-                    ))
-                });
+            let editor = unsafe { crate::instance(plugin) }.map(|instance| {
+                std::sync::Arc::new(hifishifter_plugin::editor::port::EditorPort::new(
+                    std::sync::Arc::clone(&instance.owner),
+                    &view_id,
+                ))
+            });
             views.insert(
                 key,
                 ViewState {
@@ -392,19 +393,9 @@ fn create_inner(plugin: *const clap_plugin_t) -> Result<(), String> {
     // 窗口这一层，端口本身不假设任何 UI 运行时。
     // 定时器随窗口销毁自动消失（DestroyWindow 会回收本线程为它建的定时器）。
     let _ = unsafe { SetTimer(Some(hwnd), PAGE_EVENT_TIMER_ID, 20, None) };
-    // 页面事件通道：音高基线在后台线程上算完，要把 `pitch_orig_updated` 推给页面。
-    // 闭包只捕获一个 `isize` —— HWND 不是 `Send`，而这条闭包要跨线程调用。
-    if let Some(instance) = unsafe { crate::instance(plugin) } {
-        let handle = hwnd.0 as isize;
-        instance
-            .capture
-            .editor()
-            .set_notifier(Some(std::sync::Arc::new(
-                move |event: &str, payload: serde_json::Value| {
-                    post_page_event(handle, event, payload)
-                },
-            )));
-    }
+    // 页面事件通道：编辑会话在 actor 线程上产生事件（分析进度、渲染状态、bootstrap
+    // 变化），而 WebView2 只能在 UI 线程投递。视图端口把这些事件排进自己的通道，
+    // 上面的 20 ms 定时器在**本线程**上取走并投递 —— 线程边界留在窗口这一层。
     // 【为什么建窗之后才解析资源与 profile】失败时窗口还在，原因可以直接写进窗口；
     // 反过来的话宿主只知道"create 失败"，用户看到的是一片什么都没有的插件窗口。
     let setup = frontend_dir().and_then(|folder| Ok((folder, webview_profile_dir()?)));
@@ -670,21 +661,10 @@ fn configure_browser(
                         text.len()
                     );
                 }
-                // 【为什么在这里取实例】捕获命令（capture_*）与时间线都挂在实例上；
-                // 视图表里没有它，而回执必须由本实例的存储回答。
-                let Some(capture) = crate::instance(plugin).map(|i| &i.capture) else {
-                    return Ok(());
-                };
                 let Some(reply) = with_view(plugin, |view| {
-                    protocol::parse_request(&text, &view.view_id)
-                        .map(|request| {
-                            protocol::reply_with_editor(
-                                &view.view_id,
-                                &request,
-                                capture,
-                                view.editor.as_deref(),
-                            )
-                        })
+                    protocol::parse_request(&text, &view.view_id).map(|request| {
+                        protocol::reply_with_editor(&view.view_id, &request, view.editor.as_deref())
+                    })
                 })
                 .flatten() else {
                     return Ok(());
@@ -706,7 +686,10 @@ fn configure_browser(
     let caps = unsafe { crate::instance(plugin) }
         .map(|instance| {
             let (_, saw_offline) = instance.audio.capture_observations();
-            instance.capture.capture_caps(saw_offline)
+            let status = instance.owner.capture().status();
+            let active = instance.active.load(std::sync::atomic::Ordering::Acquire)
+                && instance.processing.load(std::sync::atomic::Ordering::Acquire);
+            protocol::capture_caps(status.saw_context, status.saw_input, saw_offline, active)
         })
         .unwrap_or_else(|| {
             serde_json::json!({
@@ -864,12 +847,9 @@ pub fn is_created(plugin: *const clap_plugin_t) -> bool {
 /// 实例上的事件出口（窗口一关就得摘掉，否则后台线程会往一个可能被复用的 HWND 投递）。
 pub unsafe fn destroy(plugin: *const clap_plugin_t) {
     let key = plugin as usize;
-    // 【为什么先摘掉事件出口】窗口一关，`hwnd` 就可能被系统复用；后台线程此时再
-    // 投递就是往一个不相干的窗口发消息。摘掉之后事件静默丢弃，重开窗口时页面会
+    // 【为什么先关端口】窗口一关，`hwnd` 就可能被系统复用；编辑会话此时再投递
+    // 就是往一个不相干的窗口发消息。端口关闭之后事件静默丢弃，重开窗口时页面会
     // 自己重取一次曲线。
-    if let Some(instance) = unsafe { crate::instance(plugin) } {
-        instance.capture.editor().set_notifier(None);
-    }
     let view = VIEWS.with(|views| views.borrow_mut().remove(&key));
     if let Some(mut view) = view {
         if let Some(controller) = view.controller.take() {

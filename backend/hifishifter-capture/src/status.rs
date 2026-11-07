@@ -128,7 +128,10 @@ pub fn status_json(store: &CaptureStore, extras: StatusExtras<'_>) -> Value {
         "sawInput": status.saw_input,
         "sawOffline": status.saw_offline,
         // 录制的**唯一**硬前提是工程位置：音频按工程帧对齐，没有它整条通路不成立。
-        "canCapture": status.saw_context,
+        // 【为什么还要看 `host_ready`】宿主声明过工程率就说明它确实在跑本实例；
+        // 停播时有些宿主一个音频块都不送（REAPER 的 CLAP 通路就是），只按“见过位置”
+        // 判会让录制键在用户做任何事之前永远是灰的。
+        "canCapture": status.saw_context || status.host_ready,
         // 宿主**此刻**是否在播放：按了录制却没声音进来时，面板据此说清原因。
         "hostPlaying": status.host_playing,
         // 宿主在用 64 位浮点跑本实例 ⇒ 插件按设计静音（平面是 64 位的）。

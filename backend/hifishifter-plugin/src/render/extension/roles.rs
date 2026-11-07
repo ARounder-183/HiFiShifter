@@ -443,7 +443,7 @@ impl ExtensionOwner {
     /// 能调参；它的退化只体现在"片段几何只读"。把这条结论收敛成一个后端值，前端与
     /// 诊断包就能直接读到"我是哪个后端、我能做什么"，而不是从一堆 `Option` 反推。
     /// Capture 通路的捕获存储。
-    pub(crate) fn capture(&self) -> &crate::capture::CaptureStore {
+    pub fn capture(&self) -> &crate::capture::CaptureStore {
         &self.capture
     }
 

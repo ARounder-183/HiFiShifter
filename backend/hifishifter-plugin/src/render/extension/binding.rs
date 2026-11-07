@@ -248,6 +248,18 @@ impl ExtensionOwner {
             .is_some_and(|document| document.is_alive())
     }
 
+    /// 本实例此刻能不能提供**编辑会话**。
+    ///
+    /// 【为什么不是 `is_ara_bound`】编辑命令的语义只有一套，而能服务它的会话有两种：
+    /// 绑定过 ARA ⇒ 文档上那份（同文档多实例共享）；从未绑定 ⇒ 本实例自己的 Capture
+    /// 会话（见 `editor_session`）。此前外壳拿 `is_ara_bound` 当判据，于是“宿主没给
+    /// ARA”被读成“没有编辑后端”—— 而那正是 Capture 形态**必须**能编辑的场合。
+    ///
+    /// 【为什么绑定过又关闭就是 false】那时会话是真的结束了，如实报错比悄悄降级成
+    /// Capture 更诚实（与 `editor_session` 的措辞同一条纪律）。
+    pub fn editor_available(&self) -> bool {
+        self.is_ara_bound() || !self.bound_once.load(Ordering::Acquire)
+    }
     /// 本实例的运行形态。**无锁**，可从音频线程调用。
     ///
     /// 【为什么先看 `bound_once` 再看原子】两者本该一致，但 `bound_once` 是既有的、

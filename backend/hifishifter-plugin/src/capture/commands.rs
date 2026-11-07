@@ -135,13 +135,15 @@ mod tests {
     /// 【为什么这条必须有】此前 `saw_context` 只在武装之后更新，而按钮由它门控 ——
     /// 于是"必须先录一次才能录"：按钮永远是灰的，Capture 在所有宿主上都用不了。
     /// 这条走的是面板真正读的那条路（`capture_status`）。
+    /// 【为什么第一条断言是 true】宿主**声明过工程率**就说明它确实在跑本实例，
+    /// 而那是比第一个音频块更早的证据（停播时有些宿主一个块都不送）。
     #[test]
     fn the_record_button_unlocks_before_anything_is_recorded() {
         let owner = owner();
         assert_eq!(
             handle(&owner, "capture_status", &json!({})).unwrap()["canCapture"],
-            false,
-            "还没见过宿主上下文时不能声称可以录制"
+            true,
+            "宿主声明过工程率 ⇒ 确实在跑本实例 ⇒ 按钮必须可用"
         );
         let samples: &'static [f32] = Box::leak(vec![0.1_f32; 64].into_boxed_slice());
         // 注意：**没有** `capture_start` —— 观察必须与武装无关。
@@ -178,17 +180,21 @@ mod tests {
         assert_eq!(status["araBound"], true);
     }
 
-    /// 未录制时的状态如实报告"还不能录"，而不是假装可用。
+    /// **宿主从未声明过工程率**的实例必须如实报“还不能录”，而不是假装可用。
+    ///
+    /// 【为什么这个夹具不声明率】`canCapture` 的两份证据是“声明过工程率”（宿主在跑
+    /// 本实例）与“见过可用位置”（能对齐时间轴）。两者都没有时，按下录制只会写进一条
+    /// 没有坐标的素材 —— 那种情况下按钮必须是灰的。
     #[test]
     fn an_untouched_instance_reports_that_it_cannot_capture_yet() {
-        let owner = owner();
+        let owner = Arc::new(ExtensionOwner::default());
         let status = handle(&owner, "capture_status", &json!({})).unwrap();
         assert_eq!(status["state"], "empty");
         assert_eq!(status["takeCount"], 0);
         assert_eq!(status["activeTake"], Value::Null);
         assert_eq!(
             status["canCapture"], false,
-            "没见过 ProcessContext 之前不能声称可以录制"
+            "既没声明过工程率、也没见过可用位置 ⇒ 不能声称可以录制"
         );
         assert_eq!(status["recording"], Value::Null);
         assert_eq!(
@@ -262,7 +268,8 @@ mod tests {
         assert_eq!(status["state"], "standby", "宿主还没播放 ⇒ 待命");
         assert_eq!(status["standby"], true);
         assert_eq!(status["recording"], Value::Null, "待命期没有任何读数");
-        assert_eq!(status["canCapture"], false, "没见过上下文 ⇒ 还不能录");
+        // 宿主声明过工程率 ⇒ 能录（虽然还没见过位置，按钮先可用）。
+        assert_eq!(status["canCapture"], true, "宿主在跑本实例 ⇒ 能录");
 
         // 宿主开始播放 ⇒ 进入录制中。
         owner.capture().on_block(playing_block(64));

@@ -132,6 +132,13 @@ pub struct Instance {
     pub audio: audio::AudioState,
     pub host: *const clap_host_t,
     pub plugin: *const clap_plugin_t,
+    /// 本实例的扩展所有权：文档绑定、renderer 分配、捕获存储与编辑器会话都挂在这里。
+    ///
+    /// 【为什么每个实例都有，而不只是 ARA 实例】它是**共享语义**的唯一载体：捕获
+    /// 观察、输出仲裁、编辑会话、参数与时间线都在 `ExtensionOwner` 上。此前 CLAP 只有
+    /// ARA 实例才建它，于是 Capture 形态只能另起一套（`CaptureHost` + `RenderEngine`）
+    /// —— 同一个命令在两种形态下有两种行为。
+    pub owner: std::sync::Arc<hifishifter_plugin::render::extension::ExtensionOwner>,
     /// 实例级 ARA 绑定器；运行时不可用时为 None（实例退回 Capture 形态）。
     pub ara: Option<std::sync::Arc<hifishifter_plugin::ara::binder::AraBinder>>,
     /// `plugin->init` 是否已成功。CLAP 规定每个实例只调一次。
@@ -142,11 +149,7 @@ pub struct Instance {
     pub processing: AtomicBool,
     /// `process` 是否正在执行（防同一实例并发进入音频回调）。
     pub in_process: AtomicBool,
-    /// 捕获宿主：与 VST3 共用同一份运行时（判定、投影、sidecar）。
-    ///
-    /// 【为什么是 Arc】音高基线要在后台线程上算（一段几分钟的素材要几秒到几十秒），
-    /// 而线程不能借用实例。Arc 让那条线程只持有捕获宿主，生命周期与实例解耦。
-    pub capture: std::sync::Arc<crate::capture::CaptureHost>,
+
 }
 
 unsafe extern "C" fn create_plugin(
@@ -169,12 +172,14 @@ unsafe extern "C" fn create_plugin(
             audio: audio::AudioState::default(),
             host,
             plugin: std::ptr::null(),
+            owner: std::sync::Arc::new(
+                hifishifter_plugin::render::extension::ExtensionOwner::default(),
+            ),
             ara: None,
             initialized: AtomicBool::new(false),
             active: AtomicBool::new(false),
             processing: AtomicBool::new(false),
             in_process: AtomicBool::new(false),
-            capture: std::sync::Arc::new(crate::capture::CaptureHost::default()),
         });
         let plugin = Box::new(clap_plugin_t {
             desc: &raw const DESCRIPTOR,
@@ -284,8 +289,12 @@ unsafe extern "C" fn plugin_activate(
             return false;
         }
         instance.audio.set_sample_rate(sample_rate);
-        // 捕获拒绝在没有工程采样率的实例上武装：它是"工程帧 ↔ 秒"换算的唯一依据。
-        instance.capture.note_activate(sample_rate);
+        // 捕获拒绝在没有工程采样率的实例上武装：它是“工程帧 ↔ 秒”换算的唯一依据。
+        instance.owner.capture().note_project_rate(sample_rate);
+        // 让共享渲染基础设施就位（准备队列、时钟、Capture 会话）。它由
+        // `setupProcessing` 驱动，因为那是 SDK 保证在任何 `process` 之前、且在宿主
+        // UI 线程上被调用的唯一时刻 —— VST3 侧调用的是同一个方法。
+        instance.owner.arm_capture_rendering();
         crate::ara::observe_activation(plugin);
         log::info!("[clap] activated at {sample_rate} Hz, block {min}..={max}");
         true
@@ -366,40 +375,18 @@ unsafe extern "C" fn plugin_process(
             let Some(process) = (unsafe { process.as_ref() }) else {
                 return CLAP_PROCESS_ERROR;
             };
-            // 【为什么只在这里读一次 host transport】`to_transport_frame` 会推进
-            // 块计数与读数序号；此前它在这里和 `capture.on_process` 里各读一次，
-            // 于是每个音频块被记成两块（诊断读数翻倍，前端的乱序判据也被加快）。
-            // 现在唯一的读点在 `capture.on_process`，它自己负责写日志。
-            // 【ARA 形态：整条通路都交给共享实现】捕获观察、相位判定、门控与快照输出
-            // 在 VST3 用的是 `ExtensionOwner::process_audio`；CLAP 的 ARA 实例调的是
-            // 同一个方法 —— 于是两种格式不可能在“这一块该出什么声”上分叉。
-            if instance.ara.is_some() {
-                use hifishifter_plugin::render::extension::RenderOutcome;
-                match unsafe { crate::ara::process_audio(plugin, process) } {
-                    // 宿主给的数据不可用 / 形状不受支持：如实上报。
-                    Some(RenderOutcome::Invalid | RenderOutcome::Unsupported) => {
-                        return CLAP_PROCESS_ERROR;
-                    }
-                    // 写满整块 / 清零 / 直通：本块已按语义处理完。离线流上快照还没就绪
-                    // （`NotReady`）时输出是静音，但那不是宿主错误。
-                    Some(_) => {
-                        // 【为什么这里仍然喂 CLAP 自己的捕获存储】编辑器命令（录制状态、
-                        // 时间线、波形）读的是它；共享存储接管那一半是独立一期。两条通路
-                        // 读的是同一块输入，与改动前一致。
-                        unsafe { instance.capture.on_process(process, &instance.audio) };
-                        return CLAP_PROCESS_CONTINUE;
-                    }
-                    // 没有绑定器（运行时不可用）：退回下面的直通通路。
-                    None => {}
-                }
-            }
-            if unsafe { audio::process_block(process) } {
-                // 【顺序】先让宿主缓冲就位（in-place 时输入与输出是同一块），再喂捕获：
-                // 捕获只读输入平面，写完自己的段；它不改输出，因此直通不受影响。
-                unsafe { instance.capture.on_process(process, &instance.audio) };
-                CLAP_PROCESS_CONTINUE
-            } else {
-                CLAP_PROCESS_ERROR
+            // 【为什么整条通路只有一处】捕获观察、相位判定、门控与快照输出都在
+            // `ExtensionOwner::process_audio` 里（VST3 调的是同一个方法）。外壳只翻译
+            // 缓冲与 transport，再把结局映射成 CLAP 的返回码 —— 于是两种格式不可能在
+            // “这一块该出什么声”上分叉，两种**形态**（ARA / Capture）也不会。
+            use hifishifter_plugin::render::extension::RenderOutcome;
+            let _ = instance;
+            match unsafe { crate::process::process_audio(plugin, process) } {
+                // 宿主给的数据不可用 / 形状不受支持：如实上报。
+                RenderOutcome::Invalid | RenderOutcome::Unsupported => CLAP_PROCESS_ERROR,
+                // 写满整块 / 清零 / 直通：本块已按语义处理完。离线流上快照还没就绪
+                // （`NotReady`）时输出是静音，但那不是宿主错误。
+                RenderOutcome::Done | RenderOutcome::NotReady => CLAP_PROCESS_CONTINUE,
             }
         })();
         instance.in_process.store(false, Ordering::Release);
@@ -449,12 +436,14 @@ mod tests {
             audio: audio::AudioState::default(),
             host: std::ptr::null(),
             plugin: std::ptr::null(),
+            owner: std::sync::Arc::new(
+                hifishifter_plugin::render::extension::ExtensionOwner::default(),
+            ),
             ara: None,
             initialized: AtomicBool::new(false),
             active: AtomicBool::new(false),
             processing: AtomicBool::new(false),
             in_process: AtomicBool::new(false),
-            capture: std::sync::Arc::new(crate::capture::CaptureHost::default()),
         }));
         let plugin = clap_plugin_t {
             desc: std::ptr::null(),
@@ -690,10 +679,15 @@ mod tests {
         assert!(unsafe { plugin_activate(ptr, 48_000.0, 1, 512) });
         assert!(unsafe { start_processing(ptr) });
 
+        // 【为什么走视图端口】编辑命令只有一套实现（`EditorPort` → 会话 / 捕获命令）；
+        // 直接调协议层的命令表测的会是另一条早已删除的路。
+        let port = hifishifter_plugin::editor::port::EditorPort::new(
+            std::sync::Arc::clone(&unsafe { crate::instance(ptr) }.expect("instance").owner),
+            "v",
+        );
         let reply = |command: &str, args: serde_json::Value| {
             let request = serde_json::json!({ "id": 1, "viewId": "v", "version": 1, "command": command, "args": args });
-            let capture = &unsafe { crate::instance(ptr) }.expect("instance").capture;
-            crate::editor::protocol::reply("v", &request, capture)
+            crate::editor::protocol::reply_with_editor("v", &request, Some(&port))
         };
 
         // 页面在用户按键之前就能读到"能录"。
@@ -791,7 +785,14 @@ mod tests {
         );
         // 时间线版本必须前进，否则编辑器永远不会重取 —— 用户看到的就是"没有片段"。
         let apply = reply("plugin_get_apply_state", serde_json::Value::Null);
-        assert_eq!(apply["value"]["generation"], serde_json::json!(1));
+        assert_eq!(apply["value"]["mode"], "capture", "{apply}");
+        // 【为什么看 host_version 而不是 generation】前端判“要不要重取时间线”读的是
+        // host_version（`pluginApplyStore.poll`），generation 只是渲染阶段的计数。
+        // 两个字段各有各的含义，这里钉的是**界面真的会刷新**那一条。
+        assert!(
+            apply["value"]["host_version"].as_u64().unwrap_or(0) >= 1,
+            "the host version must advance after a capture, or the timeline never refreshes: {apply}"
+        );
 
         unsafe {
             stop_processing(ptr);

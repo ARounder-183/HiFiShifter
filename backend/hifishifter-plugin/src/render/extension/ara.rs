@@ -311,7 +311,7 @@ impl ExtensionOwner {
     ///
     /// 【为什么可以重复调用】三处都是 `OnceLock` / 覆盖式赋值，重复调用无副作用；
     /// 它由 20ms 的 UI 定时器驱动，因此必须幂等。
-    pub(crate) fn arm_capture_rendering(self: &Arc<Self>) {
+    pub fn arm_capture_rendering(self: &Arc<Self>) {
         self.init_block_trace();
         self.ensure_preparation();
         *self.prepare_owner.lock_or_recover() = Some(Arc::downgrade(self));

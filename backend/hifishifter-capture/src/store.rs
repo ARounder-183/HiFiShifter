@@ -261,6 +261,11 @@ pub struct CaptureStatus {
     pub options: CaptureOptions,
     pub take_count: usize,
     pub active_take: Option<u64>,
+    /// 宿主已经声明过工程率（= 确实在跑本实例，见 [`CaptureStore::note_project_rate`]）。
+    ///
+    /// 【为什么它独立于 `saw_context`】它是**更早**的一份证据：宿主在 setup/activate 时
+    /// 就声明了率，而第一个音频块可能永远不来（停播时有些宿主一个块都不送）。
+    pub host_ready: bool,
     /// 宿主给过可用的 `ProcessContext`（没有它就无法对齐时间轴）。
     pub saw_context: bool,
     /// 宿主在输入总线上给过音频。
@@ -287,6 +292,8 @@ pub struct CaptureStatus {
 pub struct CaptureStore {
     /// 音频线程只读这一个原子就能早退。
     armed: AtomicBool,
+    /// 宿主已经声明过工程率（见 [`CaptureStore::note_project_rate`]）。
+    host_ready: AtomicBool,
     /// 本次捕获**是否已经收到过宿主播放的音频**（`false` = 待命）。
     ///
     /// 【为什么要有这个原子副本】输出仲裁在**音频线程**上问"现在到底在不在录"
@@ -387,6 +394,7 @@ impl Default for CaptureStore {
     fn default() -> Self {
         Self {
             armed: AtomicBool::new(false),
+            host_ready: AtomicBool::new(false),
             capture_started: AtomicBool::new(false),
             recording_active: AtomicBool::new(false),
             capture: Mutex::new(Capture::default()),
@@ -753,12 +761,23 @@ impl CaptureStore {
         f64::from(self.project_rate.load(Ordering::Acquire).max(0))
     }
 
-    /// 记录宿主声明的工程率（`setupProcessing`）。
+    /// 记录宿主声明的工程率（`setupProcessing` / CLAP `activate`）。
+    ///
+    /// 【为什么同时置 `host_ready`】它是“宿主确实在跑本实例”的**第一份**证据，
+    /// 而它比第一个音频块更早到。停播时有些宿主（REAPER 的 CLAP 通路就是）一个块
+    /// 都不送 —— 只按“看见过位置”判 `canCapture` 会让录制键在用户做任何事之前
+    /// 永远是灰的，而那正是“当前不可用”这条报障的形状。
     pub fn note_project_rate(&self, rate: f64) {
         if rate.is_finite() && rate > 0.0 {
             self.project_rate
                 .store(rate.round() as i32, Ordering::Release);
+            self.host_ready.store(true, Ordering::Release);
         }
+    }
+
+    /// 宿主是否已经声明过工程率（= 确实在跑本实例）。
+    pub fn host_ready(&self) -> bool {
+        self.host_ready.load(Ordering::Acquire)
     }
 
     /// 记录"宿主走的是离线处理"（bounce / 导出）。
@@ -1738,6 +1757,7 @@ impl CaptureStore {
             options: self.options(),
             take_count,
             active_take: self.latest_take(),
+            host_ready: self.host_ready(),
             saw_context: self.saw_context.load(Ordering::Acquire),
             saw_input: self.saw_input.load(Ordering::Acquire),
             saw_offline: self.saw_offline.load(Ordering::Acquire),

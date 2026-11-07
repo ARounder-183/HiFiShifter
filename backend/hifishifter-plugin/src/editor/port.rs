@@ -68,6 +68,13 @@ impl EditorPort {
     /// 返回的是**命令的返回值**（回执信封由外壳按自己的页面协议包），错误是可直接展示
     /// 的字符串 —— 与 VST3 页面收到的同一条文案，因为它们出自同一个 `dispatch`。
     pub fn request(&self, command: &str, args: Value) -> Result<Value, String> {
+        // 【为什么 Capture 命令在这里拦下】它的全部状态都在 `ExtensionOwner` 上（捕获
+        // 存储、take、观察位），而会话分发只拿得到 `EditorSession`（它到不了 owner）。
+        // VST3 的视图层走的是同一个 `capture::commands::handle` —— 两种格式因此不会在
+        // “按录制到底做了什么”上分叉。
+        if crate::capture::commands::is_capture_command(command) {
+            return crate::capture::commands::handle(&self.owner, command, &args);
+        }
         let session: Arc<EditorSession> = self.owner.editor_session()?;
         let id = self.next_id.fetch_add(1, Ordering::AcqRel);
         session.enqueue(UiRequest {
