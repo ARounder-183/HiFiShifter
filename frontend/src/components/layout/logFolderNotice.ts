@@ -35,7 +35,7 @@ export function logFolderNotice(res: LogFolderResult, pluginMode: boolean): LogF
     if (!pluginMode && res.opened !== false) {
         return { kind: "none" };
     }
-    // 优先给**文件**路径：用户真正想复制给开发者的往往是 `plugin.log` 本身。
+    // 优先给**文件**路径：用户真正想复制给开发者的往往是 `plugin-<format>-<host>.log` 本身。
     const path = res.file || res.path;
     return path ? { kind: "path", path } : { kind: "none" };
 }

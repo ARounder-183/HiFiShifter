@@ -1,41 +1,47 @@
-//! 插件 DLL 的轻量诊断日志。
+//! 插件的**唯一**文件日志实现：VST3、CLAP 以及后续所有格式共用。
 //!
-//! 【为什么默认就该写日志】原先只有在 `HIFISHIFTER_PLUGIN_LOG` 有值时才写文件 ——
-//! 而那是探针脚本专用的环境变量，普通用户根本不会设。于是"插件出问题时去 Help →
-//! 打开日志目录拿日志"这条路是断的：那里既没有日志，菜单项本身也会因为命令未实现
-//! 而报错。REAPER 不提供插件日志后端，所以文件日志是唯一的排查手段。
+//! 【为什么只能有一份】此前 CLAP 外壳在 `log_host.rs` 里另写了一套：固定文件名、
+//! 无时间戳、无会话头、无轮转、写死 Info；而共享层的宿主身份解析又会去调本模块的
+//! `note_host_application`，于是一个 CLAP 进程**同时**在 VST3 的文件里开一个空会话、
+//! 在自己的文件里写无格式的行。用户拿到的是"所有时期的日志混在一起、分不出哪次运行、
+//! 也分不出哪份二进制"。日志一旦出现两套实现，就必然出现这种交叉污染。
 //!
-//! 【为什么与 App 同一个目录、同一个格式】两个形态的日志会被用户放在一起看、
-//! 一起打进诊断包。目录、行格式、会话头、轮转全部来自
-//! [`hifishifter_kernel::logfile`] —— 此前这里另写了一套，结果是插件日志**没有日期、
-//! 没有版本号、没有时间戳、也不轮转**，与 App 的日志完全不像同一个产品。
-//! 唯一的差异是**文件名**（`plugin.log` vs `hifishifter.log`），这是有意的：
-//! 同目录不冲突，轮转也各按自己的文件名进行。
+//! 因此目录、行格式、会话头、轮转、级别、panic hook 全部来自这里与
+//! [`hifishifter_kernel::logfile`]；格式外壳唯一的差异是**自己那条宿主的日志后端**
+//! （CLAP 的 `clap.log`），那通过一个格式无关的转发 sink 登记进来，而不是另装一个
+//! `log::Log`。
+//!
+//! 文件名 = `plugin-<format>-<host>.log`（见 `plugin_log_name`）。format 来自唯一的
+//! 格式登记点 [`crate::log_tag`]，新增格式不需要改本模块。
 //!
 //! 覆盖顺序：`HIFISHIFTER_PLUGIN_LOG`（精确落点，一个**文件**路径）>
 //! `HIFISHIFTER_LOG_DIR`（与 App 同名同义的**目录**）> 平台默认。
-//!
-//! 【为什么这两个变量不再叫 `HIFISHIFTER_ARA_*`】宿主不提供 ARA 时本插件仍然可作为
-//! 常规 VST3 使用（主要靠捕获通路），"ARA" 只描述其中一条通路。同一个前缀下还有几个
-//! 探针/开发用的变量（`_PCM_PROBE` / `_TRANSPORT_PROBE` / `_EDITOR_ASSETS` …），
-//! 它们一并改成了 `HIFISHIFTER_PLUGIN_*` —— 这组变量此前只存在于开发者脚本里，
-//! 没有对外承诺，因此不保留旧名。
 
 use hifishifter_kernel::logfile::RotatingLog;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, Once, OnceLock};
 
-/// 未知宿主时的日志文件名。真正的文件名由 `plugin_log_name::log_file_name` 决定
-/// （`plugin-<slug>.log`）；App 的 `hifishifter.log` 是另一回事，见模块文档。
-const PLUGIN_LOG_FILE: &str = "plugin-unknown.log";
-
-/// 会话头里的产品标识：两个形态的日志放在一起时要能一眼分清。
+/// 宿主日志后端的签名：把一条**已格式化**的行交给宿主自己的日志面板。
 ///
-/// 【为什么不再写 `ARA plugin`】宿主不提供 ARA 时，这个插件仍然可作为常规 VST3
-/// 使用（主要靠捕获通路）。写死 ARA 会让日志与「关于」对不上实际运行形态 ——
-/// 用户拿着截图报障时，开发者会先怀疑"你装的到底是哪个"。这里写的是**构建形态**，
-/// 运行时具体走 ARA 还是捕获由 `get_about_info` 的 `host` 字段如实给出。
-const PRODUCT: &str = "HiFiShifter VST3 / ARA plugin";
+/// 级别用 `log::Level` 而不是 CLAP 的 severity 常量 —— 后者是 CLAP 私有细节，不该
+/// 渗进共享层；外壳在自己的 sink 里做一次映射即可。
+pub type HostLogSink = fn(log::Level, &str);
+
+/// 由格式外壳登记的宿主日志后端（可缺省）。
+///
+/// 【为什么是 `OnceLock` 而不是可覆盖的指针】`log::set_logger` 全进程只能成功一次，
+/// 日志也只能交给一个宿主实例；允许第二个实例覆盖会让第一个实例的诊断凭空改道。
+static HOST_SINK: OnceLock<HostLogSink> = OnceLock::new();
+
+/// 登记宿主日志后端；重复登记忽略（第一个赢）。装不装都不影响文件日志。
+pub fn set_host_sink(sink: HostLogSink) {
+    let _ = HOST_SINK.set(sink);
+}
+
+/// 会话头里的产品标识由格式标签派生（见 `crate::log_product`）。
+fn product() -> String {
+    crate::log_product()
+}
 
 static INIT: Once = Once::new();
 static LOGGER: FileLogger = FileLogger;
@@ -46,7 +52,7 @@ static LOG_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
 static HOST_NAME: Mutex<Option<String>> = Mutex::new(None);
 /// 写入器确定之前攒下的日志行。上限见 `MAX_PENDING_LINES`。
 static PENDING: Mutex<Vec<String>> = Mutex::new(Vec::new());
-/// 攒多少行就放弃等待宿主名、直接落到 `plugin-unknown.log`。
+/// 攒多少行就放弃等待宿主名、直接落到 `plugin-<format>-unknown.log`。
 const MAX_PENDING_LINES: usize = 512;
 /// 日志器装好之后的宽限期：超过它还没等到宿主名就直接落 unknown。
 ///
@@ -77,6 +83,11 @@ impl log::Log for FileLogger {
             record.target(),
             &record.args().to_string(),
         );
+        // 【先交宿主，再写文件】宿主面板是实时的，文件是事后取证的；两路都无条件走，
+        // 互不阻塞对方的判断。
+        if let Some(sink) = HOST_SINK.get() {
+            sink(record.level(), &line);
+        }
         let mut guard = WRITER.lock().unwrap_or_else(|e| e.into_inner());
         if guard.is_none() {
             // 缓冲满、或已经等过了宽限期：直接落到 unknown，宁可文件名不完美也不能丢日志。
@@ -87,19 +98,21 @@ impl log::Log for FileLogger {
             // 的人要的就是**那个文件**：这时还按"等宿主名"攒着，等于让排查者对着一个
             // 空目录猜。实测过一个合成宿主：宿主名没到、宽限期又没新记录触发，
             // 整段缓冲就随进程退出一起消失了。
-            let explicit = env_override_path().is_some();
+            let explicit = has_explicit_override();
             // 【顺序很重要】只有"确实要攒着"时才入队：先入队再决定要不要落盘，
             // 会让同一条日志既进缓冲又被 `drain_pending_into` 写一遍 —— 输出里出现
             // 两条一模一样、时间戳也一样的行。这个缺陷真的发生过。
-            // 【为什么 `[gui]` 不走缓冲】GUI 侧的诊断是用来定位"宿主冻住"的，而冻结
-            // 恰好发生在启动后一两秒内 —— 那时写入器还没落定，整段缓冲会随进程一起消失，
-            // 日志里只剩一行 `module loaded`。这类行必须**立刻落盘**，否则等于没写。
-            let urgent = record.args().to_string().contains("[gui]");
+            // 【为什么 GUI 冻结诊断不走缓冲】`gui_log_line` 产出的行以 `[gui] ` 开头，
+            // 用来定位"宿主冻住"；冻结恰好发生在启动后一两秒内，那时写入器还没落定，
+            // 整段缓冲会随进程一起消失。用 `starts_with` 而不是 `contains`：CLAP 的
+            // `[clap][gui] ...` 只是普通视图日志，不该绕过缓冲、在 unknown 文件里
+            // 留下半段会话。
+            let urgent = record.args().to_string().starts_with("[gui] ");
             if !timed_out && !explicit && !urgent {
                 let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
                 if pending.len() < MAX_PENDING_LINES {
                     // 落点未定（宿主名还没到、也没过宽限期）：先攒着，别急着创建
-                    // `plugin-unknown.log` —— 那会让"按宿主分文件"在真拿到宿主名之前就定死。
+                    // `plugin-<format>-unknown.log` —— 那会让"按宿主分文件"在真拿到宿主名之前就定死。
                     pending.push(line.clone());
                     return;
                 }
@@ -123,38 +136,51 @@ impl log::Log for FileLogger {
     fn flush(&self) {}
 }
 
-/// 环境变量给出的精确落点（探针用）。设了它就不再按宿主分文件。
-fn env_override_path() -> Option<PathBuf> {
-    for variable in ["HIFISHIFTER_PLUGIN_LOG", "HIFISHIFTER_LOG_DIR"] {
-        if let Some(raw) = std::env::var_os(variable) {
-            let raw = raw.to_string_lossy().trim().to_owned();
-            if raw.is_empty() {
-                continue;
-            }
-            let path = PathBuf::from(&raw);
-            // `HIFISHIFTER_LOG_DIR` 是**目录**（与 App 同名同义）；
-            // `HIFISHIFTER_PLUGIN_LOG` 是探针用的**文件**路径。
-            return Some(if variable == "HIFISHIFTER_LOG_DIR" {
-                path.join(PLUGIN_LOG_FILE)
-            } else {
-                path
-            });
-        }
-    }
-    None
+/// 精确文件落点（`HIFISHIFTER_PLUGIN_LOG`，探针用）。设了它就完全固定，
+/// 不再按格式/宿主分文件。
+///
+/// 【为什么只有它关缓冲】设了精确路径的人要的就是**那个文件**，让排查者对着一个
+/// 空目录猜是不可接受的。而 `HIFISHIFTER_LOG_DIR` 只是改目录：宿主名尚未到达时
+/// 仍应把早期行攒在内存里，等 `note_host_application` 一次性补进正确文件 ——
+/// 否则每次宿主改名都会在 unknown 文件里留半段、再在真名文件里留半段。
+fn explicit_file() -> Option<PathBuf> {
+    std::env::var_os("HIFISHIFTER_PLUGIN_LOG")
+        .map(|raw| raw.to_string_lossy().trim().to_owned())
+        .filter(|raw| !raw.is_empty())
+        .map(PathBuf::from)
+}
+
+/// 日志目录覆盖（`HIFISHIFTER_LOG_DIR`，与 App 同名同义）。**只改目录**，
+/// 文件名仍按格式 + 当前宿主名生成 —— 否则宿主名到达时 `note_host_application`
+/// 的改名会被这个固定名吞掉。
+fn log_dir_override() -> Option<PathBuf> {
+    std::env::var_os("HIFISHIFTER_LOG_DIR")
+        .map(|raw| raw.to_string_lossy().trim().to_owned())
+        .filter(|raw| !raw.is_empty())
+        .map(PathBuf::from)
+}
+
+/// 精确文件落点是否关掉了"等宿主名"的内存缓冲。
+fn has_explicit_override() -> bool {
+    explicit_file().is_some()
 }
 
 /// 当前应当使用的日志文件路径。
 ///
-/// 【为什么不缓存成 OnceLock】宿主名要到 `setActive` 才拿得到，而在此之前日志已经
-/// 开始写了。路径必须能随宿主名"改名"一次，见 `note_host_application`。
+/// 【为什么不缓存成 OnceLock】宿主名只有 `setActive` / `clap_host_t.name` 之后
+/// 拿得到，而在此之前日志已经开始写了。路径必须能随宿主名"改名"一次，见
+/// `note_host_application`。
 fn log_path() -> PathBuf {
-    if let Some(path) = env_override_path() {
+    if let Some(path) = explicit_file() {
         return path;
     }
     let host = HOST_NAME.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    let file = crate::plugin_log_name::log_file_name(host.as_deref());
-    default_log_dir().join(file)
+    let file = hifishifter_plugin_core::plugin_log_name::log_file_name(
+        Some(crate::log_tag()),
+        host.as_deref(),
+    );
+    let dir = log_dir_override().unwrap_or_else(default_log_dir);
+    dir.join(file)
 }
 
 /// 按当前路径开一个写入器（会话头由 `RotatingLog::open` 写）。
@@ -163,7 +189,8 @@ fn open_writer() -> Result<RotatingLog, String> {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let writer = RotatingLog::open(path, PRODUCT, crate::VERSION).map_err(|e| e.to_string())?;
+    let writer =
+        RotatingLog::open(path, &product(), crate::VERSION).map_err(|e| e.to_string())?;
     *LOG_PATH.lock().unwrap_or_else(|e| e.into_inner()) = Some(writer.path().to_path_buf());
     Ok(writer)
 }
@@ -200,14 +227,26 @@ pub fn flush_pending() {
     }
 }
 
-/// 记下宿主应用名，并把日志切到 `plugin-<slug>.log`。
+/// 记下宿主应用名，并把日志切到 `plugin-<format>-<host>.log`。
 ///
-/// 【为什么必须在起日志之后才调】`IHostApplication::getName` 只有 `setActive` 之后
-/// 可用，而日志在 DLL 加载时就要能写。于是先攒着、拿到名字时再一次性落地：
+/// 【为什么必须在起日志之后才调】宿主名只有 `setActive` / `clap_host_t.name` 之后
+/// 可用，而日志在模块加载时就要能写。于是先攒着、拿到名字时再一次性落地：
 /// 会话头会开在**正确的文件**里，早期几行也不会丢。
+///
+/// 【为什么必须幂等】CLAP 的每个实例 `init` 都会解析一次宿主身份，VST3 也可能在
+/// 加载期先给 `unknown`、之后补一个真名。每次都重建写入器会在文件里留下一串
+/// **只有会话头、没有内容**的空会话 —— 用户看到的就是"日志被反复截断"。同一个
+/// 名字重复到达时直接返回；`unknown` 不落名，等真名来。
 pub fn note_host_application(name: &str) {
+    if name.is_empty() || name.eq_ignore_ascii_case("unknown") {
+        return;
+    }
     {
-        *HOST_NAME.lock().unwrap_or_else(|e| e.into_inner()) = Some(name.to_owned());
+        let mut guard = HOST_NAME.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.as_deref() == Some(name) {
+            return;
+        }
+        *guard = Some(name.to_owned());
     }
     let mut guard = WRITER.lock().unwrap_or_else(|e| e.into_inner());
     match open_writer() {
@@ -288,7 +327,7 @@ pub fn init() {
         // 【为什么这里不直接开文件】宿主名（`IHostApplication::getName`）要到
         // `setActive` 之后才有，而按宿主分文件要求文件名里带它。此处只把 logger 装上：
         // 早期日志行先进内存缓冲，`note_host_application` 到达时再一次性落到
-        // `plugin-<slug>.log`（见该函数与 `FileLogger::log` 的说明）。
+        // `plugin-<format>-<host>.log`（见该函数与 `FileLogger::log` 的说明）。
         install_panic_hook();
     });
 }
@@ -318,6 +357,9 @@ fn install_panic_hook() {
             "hifishifter_plugin::panic",
             &format!("PANIC: thread '{name}' panicked at {location}: {payload}"),
         );
+        if let Some(sink) = HOST_SINK.get() {
+            sink(log::Level::Error, &line);
+        }
         {
             // 【为什么用 `try_lock` 而不是 `lock`】本 hook 会在**任意线程**的 panic 上跑，
             // 包括"panic 正发生在 `FileLogger::log` 里、`WRITER` 已被持有"这种情况 ——
@@ -336,6 +378,27 @@ fn install_panic_hook() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 文件名必须同时带格式与宿主 —— 这是"日志不再混在一起"的契约。
+    #[test]
+    fn the_log_file_name_carries_both_dimensions() {
+        let clap = hifishifter_plugin_core::plugin_log_name::log_file_name(
+            Some("clap"),
+            Some("REAPER"),
+        );
+        let vst3 = hifishifter_plugin_core::plugin_log_name::log_file_name(
+            Some("vst3"),
+            Some("REAPER"),
+        );
+        assert_eq!(clap, "plugin-clap-reaper.log");
+        assert_ne!(clap, vst3, "同一宿主里两种格式不能共用一个文件");
+    }
+
+    /// 会话头由格式标签派生，新增格式不需要改这里。
+    #[test]
+    fn the_product_banner_names_the_format() {
+        assert!(product().contains(&crate::log_tag().to_ascii_uppercase()));
+    }
 
     /// 插件日志必须落在**与 App 同一个目录**里。
     ///
@@ -367,7 +430,7 @@ mod tests {
 
     /// 文件名与 App 不同 —— 同目录下才不会被覆盖，轮转也互不影响。
     ///
-    /// 具体形状是 `plugin-<宿主>.log` / `plugin-unknown.log`（见 `plugin_log_name`）；
+    /// 具体形状是 `plugin-<format>-<host>.log`（见 `plugin_log_name`）；
     /// 这里只钉住"插件前缀 + 与 App 的 `hifishifter.log` 不同名"。
     #[test]
     fn the_plugin_log_file_name_differs_from_the_app() {

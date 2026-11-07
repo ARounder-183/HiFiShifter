@@ -157,7 +157,7 @@ pub fn note_identity(identity: &HostIdentity) {
         HOST_IS_VEGAS.store(true, std::sync::atomic::Ordering::Release);
     }
     // 【为什么用 WARN】默认日志级别看不到 INFO；而“宿主到底被认成谁”正是预览
-    // 判定唯一的先验。现场日志文件名是 plugin-unknown.log，这一行能直接回答它。
+    // 判定唯一的先验。现场日志文件名是 plugin-<format>-unknown.log，这一行能直接回答它。
     if !HOST_IDENTITY_REPORTED.swap(true, std::sync::atomic::Ordering::AcqRel) {
         log::warn!(
             "[host] identity resolved at create/setup: display=\"{}\" vegas_family={} evidence={}",

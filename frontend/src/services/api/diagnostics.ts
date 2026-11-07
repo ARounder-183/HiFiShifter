@@ -41,7 +41,7 @@ export interface LogFolderResult {
     /**
      * 插件回报的日志文件完整路径。
      *
-     * 【为什么与 `path` 并存】用户真正想复制给开发者的往往是 `plugin.log` 本身，
+     * 【为什么与 `path` 并存】用户真正想复制给开发者的往往是 `plugin-<format>-<host>.log` 本身，
      * 而不是它所在的目录。
      */
     file?: string;

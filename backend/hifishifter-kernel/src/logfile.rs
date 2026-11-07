@@ -92,10 +92,10 @@ pub fn now_timestamp() -> String {
 
 /// `hifishifter.log → hifishifter.1.log → … → hifishifter.{MAX}.log` 的命名。
 ///
-/// 以**文件名**（而非目录）为准，因此同一目录下的 `hifishifter.log` 与 `plugin.log`
+/// 以**文件名**（而非目录）为准，因此同一目录下的 `hifishifter.log` 与 `plugin-<format>-<host>.log`
 /// 各自轮转、互不影响 —— 两个形态的日志放在一起时这一点是必须的。
 ///
-/// 两个宿主各自决定自己的文件名（App 用 `hifishifter.log`，插件用 `plugin.log`），
+/// 两个宿主各自决定自己的文件名（App 用 `hifishifter.log`，插件按格式与宿主分文件），
 /// 所以这里没有"日志文件名"常量；`fallback` 只在传入路径没有文件名时用得上。
 pub fn rotated_path(path: &Path, index: usize) -> PathBuf {
     let file_name = path
@@ -264,13 +264,13 @@ mod tests {
         assert!(banner.ends_with("===="), "{banner}");
     }
 
-    /// 轮转按**文件名**进行，因此同目录下的 `plugin.log` 不会被 App 的轮转碰到。
+    /// 轮转按**文件名**进行，因此同目录下的插件日志不会被 App 的轮转碰到。
     #[test]
     fn rotation_is_per_file_name() {
         let app = rotated_path(Path::new("/logs/hifishifter.log"), 1);
         assert!(app.ends_with("hifishifter.1.log"), "{app:?}");
-        let plugin = rotated_path(Path::new("/logs/plugin.log"), 2);
-        assert!(plugin.ends_with("plugin.2.log"), "{plugin:?}");
+        let plugin = rotated_path(Path::new("/logs/plugin-clap-reaper.log"), 2);
+        assert!(plugin.ends_with("plugin-clap-reaper.2.log"), "{plugin:?}");
     }
 
     /// `HIFISHIFTER_LOG_DIR` 覆盖默认目录（两个宿主同名同义）。
@@ -307,7 +307,7 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("plugin.log");
+        let path = dir.join("plugin-clap-reaper.log");
 
         let mut log = RotatingLog::open(path.clone(), "HiFiShifter", "1.2.3").expect("open log");
         log.write_line("first").unwrap();

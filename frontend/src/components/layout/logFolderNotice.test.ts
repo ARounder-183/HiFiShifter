@@ -9,7 +9,7 @@ import { expect, test } from "vitest";
 import { logFolderNotice } from "./logFolderNotice";
 
 const PATH = String.raw`C:\Users\me\AppData\Local\com.arounder.hifishitter\logs`;
-const FILE = `${PATH}\\plugin.log`;
+const FILE = `${PATH}\\plugin-vst3-reaper.log`;
 
 test("a failure reports the backend detail", () => {
     expect(logFolderNotice({ ok: false, error: "boom" }, true)).toEqual({
@@ -32,7 +32,7 @@ test("the plugin stays silent when the file manager really opened", () => {
 test("the plugin hands over the path when it could not open the file manager", () => {
     expect(logFolderNotice({ ok: true, path: PATH, file: FILE, opened: false }, true)).toEqual({
         kind: "path",
-        // 优先给文件路径：用户想复制给开发者的往往是 plugin.log 本身。
+        // 优先给文件路径：用户想复制给开发者的往往是 plugin-<format>-<host>.log 本身。
         path: FILE,
     });
 });

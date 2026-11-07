@@ -228,10 +228,13 @@ int main(int argc, char **argv) {
         }
     }
 
-    /* 【为什么用 LOG_DIR 而不是 PLUGIN_LOG】日志文件名会随宿主名改写；给一个**目录**
-     * 让"按宿主分文件"照常发生，探针只认目录里那一个文件。显式路径还会关掉缓冲，
-     * 于是握手行不会因为进程提前退出而丢在内存里。 */
-    setenv("HIFISHIFTER_LOG_DIR", workdir, 1);
+    /* 【为什么用 PLUGIN_LOG 精确文件】日志文件名的形状是
+     * plugin-<format>-<host>.log，会随格式与宿主改写；探针只关心"这一个文件里有没有
+     * 握手行"，不该跟着命名规则走。显式文件路径还会关掉内存缓冲，于是握手行不会
+     * 因为进程提前退出而丢在内存里。 */
+    char probe_log_path[1100];
+    snprintf(probe_log_path, sizeof probe_log_path, "%s/plugin-iid-probe.log", workdir);
+    setenv("HIFISHIFTER_PLUGIN_LOG", probe_log_path, 1);
     setenv("HIFISHIFTER_LOG", "info", 1);
 
     void *module = dlopen(module_path, RTLD_NOW | RTLD_LOCAL);
@@ -263,7 +266,7 @@ int main(int argc, char **argv) {
     unsigned char component_iid[16];
     platform_iid(IID_COMPONENT, component_iid);
     char log_path[1100];
-    snprintf(log_path, sizeof log_path, "%s/plugin-unknown.log", workdir);
+    snprintf(log_path, sizeof log_path, "%s", probe_log_path);
     void *component = NULL;
     tresult result = ((CreateInstanceFn)VT(factory)[6])(
         factory, (const char *)component_cid, (const char *)component_iid, &component);

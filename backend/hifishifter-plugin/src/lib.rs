@@ -69,7 +69,8 @@ pub use audio_abi::BufferError;
 pub mod audio_block;
 mod capture;
 pub use hifishifter_plugin_core::component_state;
-mod diagnostics;
+/// 两种格式共用的**唯一**文件日志实现；格式外壳在自己的模块入口调 `init()`。
+pub mod diagnostics;
 pub mod block_context;
 pub mod editor;
 #[allow(missing_docs)]
@@ -129,28 +130,45 @@ pub(crate) fn plugin_form_label(
     }
 }
 
-/// 本 cdylib 的格式标签（`[vst3]` / `[clap]`）。
+/// 本 cdylib 的**插件类型标签**（`vst3` / `clap` / 未来的 `au` …）。
 ///
-/// 【为什么需要它】`hifishifter-plugin` 现在是**两种外壳共用的**共享层，而日志行
-/// 仍写着 `[vst3]` —— 在 CLAP 宿主里读日志的人会把一条 ARA 工厂日志归到错误的模块，
-/// 排查方向从一开始就偏了。标签由各 cdylib 在入口登记一次，共享层的每一行都带它。
+/// 【为什么是格式身份的唯一登记点】`hifishifter-plugin` 是所有外壳共用的共享层。
+/// 同一份事实要出现在三处：日志行前缀（`log_line`）、「关于」/诊断包的形态标签、
+/// 以及**日志文件名与会话头**（`diagnostics`）。三处各自猜一次格式，就必然分叉 ——
+/// 此前 CLAP 会话里出现过 `[vst3] ARA factory built`，正是因为它只改了日志前缀，
+/// 没改日志系统对「我是谁」的判断。现在统一由这一处 `set_log_tag` 登记，其余全部派生。
+///
+/// 新增插件格式时只需在自己的 cdylib 入口调一次 `set_log_tag("<tag>")`；文件名、
+/// 会话头、轮转、诊断包都会自动跟着走，无需改动共享层或命名模块。
 static LOG_TAG: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
 
-/// 登记格式标签；重复登记忽略（第一个赢，与模块初始化的一次性语义一致）。
+/// 登记插件类型标签；重复登记忽略（第一个赢，与模块初始化的一次性语义一致）。
+///
+/// 【为什么必须由各 cdylib 在自己最早的入口登记】共享层的日志可能在任何组件创建之前
+/// 就要写；晚一步登记，最早那几行就会归到默认文件名下。
 pub fn set_log_tag(tag: &'static str) {
     let _ = LOG_TAG.set(tag);
 }
 
-/// 当前格式标签；未登记时按 VST3（历史默认，也是本 crate 最初的唯一外壳）。
-fn log_tag() -> &'static str {
+/// 当前插件类型标签；未登记时按 VST3（历史默认，也是本 crate 最初的唯一外壳）。
+///
+/// 【为什么公开】`diagnostics` 用它拼日志文件名与会话头；外壳自己也可以读回它做自检。
+pub fn log_tag() -> &'static str {
     LOG_TAG.get().copied().unwrap_or("vst3")
+}
+
+/// 会话头里的产品标识：日志放在一起时要能一眼分清是哪一种插件格式。
+///
+/// 由格式标签派生，因此新增格式不需要改这里。
+pub fn log_product() -> String {
+    format!("HiFiShifter {} plug-in", log_tag().to_ascii_uppercase())
 }
 
 /// 解析并记录宿主身份（进程证据链；两种格式共用同一条判据）。
 ///
 /// 【为什么 CLAP 也要调】身份解析的证据（进程映像、祖先链、环境变量）与格式无关，
-/// 而日志文件名 `plugin-<slug>.log` 正是由它决定的 —— 不调就等于每次 CLAP 报障都
-/// 只能拿到 `plugin-unknown.log`。
+/// 而日志文件名 `plugin-<format>-<host>.log` 里的宿主段正是由它决定的 —— 不调就等于每次
+/// CLAP 报障都只能拿到 `plugin-clap-unknown.log`。
 pub fn resolve_host_identity() {
     crate::editor::connection::resolve_and_record_host_identity();
 }
@@ -221,6 +239,10 @@ pub(crate) fn guard_ffi<R>(fallback: R, f: impl FnOnce() -> R) -> R {
 #[no_mangle]
 pub extern "system" fn GetPluginFactory() -> *mut c_void {
     crate::guard_ffi(std::ptr::null_mut(), || {
+        // 【为什么显式登记】格式标签是日志文件名与会话头的唯一来源；VST3 虽是默认
+        // 值，显式登记能让"两个格式走同一套逻辑"这件事在入口处可见、且不会被将来
+        // 的默认值改动悄悄破坏。
+        crate::set_log_tag("vst3");
         crate::ensure_layout_v2_once();
         diagnostics::init();
         // 【为什么在工厂入口打一行】宿主扫描插件也会走到这里。有了这一行，日志就能
@@ -253,6 +275,7 @@ pub extern "system" fn GetPluginFactory() -> *mut c_void {
 /// 跳过也不要带着坏 runtime 插进 N 个轨道。
 fn module_initialize() -> bool {
     crate::guard_ffi(false, || {
+        crate::set_log_tag("vst3");
         crate::ensure_layout_v2_once();
         diagnostics::init();
         editor::resources::initialize_models();

@@ -126,7 +126,7 @@ unsafe fn record_host_name(host: *mut c_void) {
     resolve_and_record_host_identity();
 }
 
-/// 收集全部证据、定出宿主、把日志切到 `plugin-<slug>.log`。
+/// 收集全部证据、定出宿主、把日志切到 `plugin-<format>-<host>.log`。
 ///
 /// 【为什么可以重复调用】Cubase 在加载期只给 unknown，真正使用时的名字更晚才到。
 /// 第一次拿不到就留 unknown，后续调用（首次 process）再解析一次；一旦得到非 unknown
@@ -163,7 +163,7 @@ pub(crate) fn resolve_and_record_host_identity() -> crate::host_identity::HostId
 /// `
 ///
 /// 按 UTF-16 解 Linux 的缓冲会得到一串乱码 ⇒ `from_utf16` 失败 ⇒ 宿主名永远是
-/// `unknown` ⇒ 日志文件名永远停在 `plugin-unknown.log`。用户报的"日志没有按宿主名分类"
+/// `unknown` ⇒ 日志文件名永远停在 `plugin-<format>-unknown.log`。用户报的"日志没有按宿主名分类"
 /// 就是这一条：这段代码只在 Windows 上被跑过。
 #[cfg(windows)]
 type HostNameBuffer = [u16; 128];
@@ -210,7 +210,7 @@ fn decode_string128(buffer: &HostNameBuffer) -> Option<String> {
     // 【为什么这里有两种编码】VST3 的 `String128` 在 Unix 上是 `char[128]`（UTF-8），
     // 但宿主不一定照办：实测 REAPER/Linux 按 **UTF-16LE** 写（"REAPER" 写成
     // `R\0E\0A\0P\0E\0R\0`）。只按 UTF-8 解会停在第一个 NUL 上得到 "R"，
-    // 于是宿主名永远是 `unknown`、日志文件名永远停在 `plugin-unknown.log` ——
+    // 于是宿主名永远是 `unknown`、日志文件名永远停在 `plugin-<format>-unknown.log` ——
     // 症状与"根本没拿到宿主名"完全同形，这正是它藏了这么久的原因。
     if looks_like_utf16le(buffer) {
         if let Some(name) = decode_utf16le(buffer) {

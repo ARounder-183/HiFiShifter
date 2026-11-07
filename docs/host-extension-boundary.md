@@ -169,10 +169,12 @@ ARA 侧改了时间拉伸 / 内容淡化，插件会继续用旧配置渲染。
   Windows 产物把 `frontend/` 与 `models.json` 装到模块同级的
   `HiFiShifter-resources`（`ResourceLayout::Sibling`），安装器与自检都断言
   `plugin.html` 落地。此前只装 `.clap` 单文件，宿主扫描得到插件却只会给空白窗口。
-- **CLAP 的日志落盘**：外壳除了把日志交给宿主的 `clap.log`，还写
-  `%LOCALAPPDATA%\HiFiShifter\logs\plugin-clap.log`（8 MiB 软上限）。"录制键一直是灰的"
-  这类问题只能靠"处理过几块 / 见过哪些 transport 标志 / 是否推出过工程位置"三个读数
-  定位 —— 它们现在每次会话第一条 `capture_status` 就会写进日志。
+- **日志落盘只有一套**：VST3 与 CLAP 共用 `hifishifter-plugin::diagnostics`
+  （目录、行格式、会话头、8 MiB 轮转、级别、panic hook 全部来自
+  `kernel::logfile`）。文件名是 `plugin-<format>-<host>.log`，例如
+  `plugin-vst3-reaper.log` / `plugin-clap-reaper.log`：格式来自唯一的
+  `set_log_tag` 登记点，新增格式自动适配。外壳只把日志额外转发给宿主的
+  `clap.log`，不再自己装 logger、开文件或定级别。
 - **editorRoute 不能说 `unbound``：前端的 `captureStore` 在路由为 `unbound` 时**完全跳过**
   `capture_status` 轮询（那本是"视图连不上处理器"的降频判据）。CLAP 视图由本模块在
   进程内回答命令，路由因此报 `bound`；真正缺的 ARA/编辑能力由 `hostCapabilities`

@@ -70,10 +70,15 @@ pub static clap_entry: clap_plugin_entry_t = clap_plugin_entry_t {
 };
 
 unsafe extern "C" fn entry_init(plugin_path: *const c_char) -> bool {
-    // 【为什么第一件事就是登记标签】共享层（`hifishifter-plugin`）的每一行日志都带
-    // 格式标签，而它的默认值是 `[vst3]`。晚一步登记，最早那几行就会挂错模块名。
+    // 【为什么第一件事就是登记标签】格式标签是共享层判断「我是谁」的唯一依据：日志
+    // 行前缀、日志文件名（plugin-clap-<host>.log）与会话头全部由它派生。晚一步登记，
+    // 最早那几行就会挂到默认的 VST3 文件名下 —— 那正是此前两种格式日志混在一起的成因。
     hifishifter_plugin::set_log_tag("clap");
     hifishifter_plugin_core::guard_ffi(false, || {
+        // 【为什么在共享层装日志器】文件日志只有一份实现（格式、会话头、轮转、级别、
+        // panic hook）。CLAP 外壳只补一条可选的宿主转发 sink（见 log_host::install）。
+        // 必须早于模块路径解析：解析本身可能写日志。
+        hifishifter_plugin::diagnostics::init();
         if !plugin_path.is_null() {
             if let Ok(path) = unsafe { CStr::from_ptr(plugin_path) }.to_str() {
                 let _ = MODULE_PATH.set(path.to_owned());
@@ -92,6 +97,9 @@ unsafe extern "C" fn entry_deinit() {
     hifishifter_plugin_core::guard_ffi((), || {
         crate::log_host::clear();
         log::info!("[clap] module shutdown");
+        // 把宽限期内仍攒在缓冲里的早期日志行落盘：缓冲只在「下一条记录到达」时落地，
+        // 宿主不再打日志就退出的会话会把它整段丢掉。
+        hifishifter_plugin::diagnostics::flush_pending();
     })
 }
 
@@ -264,9 +272,12 @@ unsafe extern "C" fn plugin_init(plugin: *const clap_plugin_t) -> bool {
             return false;
         }
         crate::log_host::install(instance.host);
-        // 【为什么在这里解析身份】与 VST3 的 `initialize` 同一时刻：日志文件名
-        // `plugin-<slug>.log` 由它决定，而进程证据（映像名 / 祖先链）与格式无关 ——
-        // 不调就等于每次 CLAP 报障只能拿到 `plugin-unknown.log`。
+        // 【为什么只走这一条】宿主身份（以及日志文件名里的宿主段）由共享层
+        // `resolve_host_identity` 的进程证据链唯一决定，与 VST3 完全同一判据。
+        // CLAP 的 `clap_host_t.name` 已经在 `create_plugin` 里交给
+        // `ExtensionOwner::note_host_self_report` 作为诊断事实；如果在这里再直调
+        // `note_host_application`，就会与证据链形成两个改名源 —— 一个报 "probe"、
+        // 一个报 "unknown"，日志文件被反复重建、会话头叠成一串。
         hifishifter_plugin::resolve_host_identity();
         // SAFETY: 本函数就是宿主调用的 plugin.init，plugin 是本实例的记录。
         unsafe { crate::ara::attach(plugin) };

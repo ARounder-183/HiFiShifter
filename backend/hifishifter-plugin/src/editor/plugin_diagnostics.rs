@@ -54,7 +54,7 @@ pub(super) fn write_package(
     zip.write_all(settings_json.as_bytes())
         .map_err(|e| format!("write settings failed: {e}"))?;
 
-    // 日志：插件自己的 plugin.log，以及同目录下 App 的 hifishifter.log（如果存在）。
+    // 日志：插件自己的 plugin-<format>-<host>.log 及轮转分代，以及同目录下 App 的 hifishifter.log 及其轮转分代（如果存在）。
     // 两份日志共用一个目录（见 `diagnostics.rs`），出问题时往往要一起看。
     for path in log_files() {
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
@@ -86,19 +86,20 @@ pub(super) fn write_package(
     Ok(())
 }
 
-/// 纳入诊断包的日志文件：本插件的 `plugin.log`，外加同目录的 `hifishifter.log`
-/// 与它的轮转分代。缺失的文件直接跳过（不是错误）。
+/// 纳入诊断包的日志文件：本插件当前文件及其轮转分代，外加同目录 App 的
+/// `hifishifter.log` 及其轮转分代。轮转命名由 `kernel::logfile` 统一给出，
+/// 不再手写 `hifishifter.log.1` 这种与实际 `hifishifter.1.log` 不符的名字。
+/// 缺失的文件直接跳过（不是错误）。
 fn log_files() -> Vec<PathBuf> {
-    let mut files = vec![crate::diagnostics::log_file()];
+    let plugin = crate::diagnostics::log_file();
+    let mut files = hifishifter_kernel::logfile::rotated_files(&plugin);
     if let Some(dir) = crate::diagnostics::log_directory().parent() {
-        for name in ["hifishifter.log", "hifishifter.log.1", "hifishifter.log.2"] {
-            let candidate = dir.join(name);
-            if candidate.is_file() {
-                files.push(candidate);
-            }
-        }
+        let app = dir.join("hifishifter.log");
+        files.extend(hifishifter_kernel::logfile::rotated_files(&app));
     }
     files.retain(|path| path.is_file());
+    files.sort();
+    files.dedup();
     files
 }
 
