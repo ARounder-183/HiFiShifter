@@ -216,9 +216,10 @@ int main(int argc, char **argv) {
     if (!tail || !tail->get || tail->get(plugin) != 0) { fprintf(stderr, "clap.tail must report 0\n"); return 1; }
     printf("host_log_bytes=%zu\n", host_log_len);
     if (host_log_len == 0) { fprintf(stderr, "clap.log was never delivered to the host\n"); return 1; }
-    /* 阶段 1 明确不返回 clap.gui：交一个假的嵌入视图比不提供 GUI 更危险。 */
-    if (plugin->get_extension(plugin, "clap.gui")) {
-        fprintf(stderr, "clap.gui must not be advertised by a Capture-only shell\n"); return 1;
+    /* clap.gui 必须存在：宿主靠它建窗口、嵌前端。阶段 1 曾把它整个拿掉，
+       结果是 REAPER 扫描到插件却只给出一块空白窗口。 */
+    if (!plugin->get_extension(plugin, "clap.gui")) {
+        fprintf(stderr, "clap.gui extension is missing; the host cannot show the editor\n"); return 1;
     }
     if (plugin->stop_processing) plugin->stop_processing(plugin);
     plugin->deactivate(plugin);

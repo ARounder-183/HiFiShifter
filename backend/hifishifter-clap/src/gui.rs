@@ -1,20 +1,15 @@
-//! CLAP GUI 扩展的诚实声明。
+//! CLAP `clap.gui` 扩展：把同一份前端产物嵌进宿主给的父窗口。
 //!
-//! 【为什么阶段 1 不嵌 WebView】core 的 WebView 原语依赖 VST3 的 `IRunLoop` /
-//! `IPlugFrame` 连接点；CLAP 用 `clap_host_gui` + `timer-support`，是另一套协议。
-//! 在共享 GUI 抽象落地前，明确报告「本版本只提供浮窗 API」比返回一个空白嵌入视图诚实。
+//! 【为什么不复用 VST3 的原语】VST3 的 `editor/gui` 与 ARA 会话、219 条命令、
+//! REAPER 原生扩展绑在一起；CLAP 阶段 1 没有那些后端。这里走 `editor/windows.rs`
+//! 的精简 WebView2 宿主 + `editor/protocol.rs` 的结构化回执：页面是真的、能力
+//! 边界也是真的（`hostKind: "capture"`、写能力全部 false）。
+//!
+//! 【非 Windows】当前只有 Windows 提供内嵌 WebView2；其它平台 `is_api_supported`
+//! 如实返回 false，绝不交一个空白视图让宿主以为成功。
 
 use crate::abi::{clap_plugin_t, CLAP_EXT_GUI};
-use hifishifter_plugin_core::format::GuiAttach;
 use std::ffi::{c_char, c_void, CStr};
-use std::sync::atomic::{AtomicBool, Ordering};
-
-static FLOATING_WINDOW_OPEN: AtomicBool = AtomicBool::new(false);
-
-/// GUI 是否已创建。用于 `on_main_thread` 心跳与状态诊断。
-pub fn is_created() -> bool {
-    FLOATING_WINDOW_OPEN.load(Ordering::Acquire)
-}
 
 /// CLAP 的父窗口句柄（clap.window）。
 #[repr(C)]
@@ -56,41 +51,6 @@ pub struct clap_host_gui_t {
     pub closed: Option<unsafe extern "C" fn(*const c_void, bool)>,
 }
 
-/// 平台父窗口类型：core 不硬编码 "HWND"。
-pub struct ClapGuiAttach {
-    pub api: &'static str,
-    pub parent: *mut c_void,
-    pub host_gui: *const clap_host_gui_t,
-}
-unsafe impl Send for ClapGuiAttach {}
-impl GuiAttach for ClapGuiAttach {
-    fn parent(&self) -> *mut c_void {
-        self.parent
-    }
-    fn platform_kind(&self) -> &str {
-        self.api
-    }
-    fn embedded(&self) -> bool {
-        false
-    }
-    fn frame(&self) -> usize {
-        0
-    }
-    fn request_resize(&self, w: i32, h: i32) -> bool {
-        let Some(host) = (unsafe { self.host_gui.as_ref() }) else {
-            return false;
-        };
-        let Some(request) = host.request_resize else {
-            return false;
-        };
-        if w <= 0 || h <= 0 {
-            return false;
-        }
-        unsafe { request(self.host_gui.cast(), w as u32, h as u32) }
-    }
-    fn on_host_tick(&self) {}
-}
-
 pub static GUI_EXT: clap_plugin_gui_t = clap_plugin_gui_t {
     is_api_supported: Some(is_api_supported),
     get_preferred_api: Some(get_preferred_api),
@@ -115,48 +75,108 @@ unsafe extern "C" fn is_api_supported(
     floating: bool,
 ) -> bool {
     hifishifter_plugin_core::guard_ffi(false, || {
-        floating
-            && !api.is_null()
-            && unsafe { CStr::from_ptr(api) }.to_bytes() == b"clap:unavailable"
+        if api.is_null() || !crate::editor::is_supported() {
+            return false;
+        }
+        let Ok(api) = unsafe { CStr::from_ptr(api) }.to_str() else {
+            return false;
+        };
+        #[cfg(windows)]
+        {
+            crate::editor::windows::is_api_supported(api, floating)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (api, floating);
+            false
+        }
     })
 }
 unsafe extern "C" fn get_preferred_api(
     _p: *const clap_plugin_t,
-    _api: *mut *const c_char,
-    _floating: *mut bool,
+    api: *mut *const c_char,
+    floating: *mut bool,
 ) -> bool {
-    hifishifter_plugin_core::guard_ffi(false, || false)
-}
-unsafe extern "C" fn create(_p: *const clap_plugin_t, _api: *const c_char, floating: bool) -> bool {
     hifishifter_plugin_core::guard_ffi(false, || {
-        // 只承认浮窗；没有嵌入父窗口协议时不谎报成功。
-        if !floating {
+        if api.is_null() || floating.is_null() {
             return false;
         }
-        FLOATING_WINDOW_OPEN.store(true, Ordering::Release);
-        true
+        #[cfg(windows)]
+        {
+            let Some((name, is_floating)) = crate::editor::windows::preferred_api() else {
+                return false;
+            };
+            unsafe {
+                *api = match name {
+                    "win32" => c"win32".as_ptr(),
+                    "cocoa" => c"cocoa".as_ptr(),
+                    "x11" => c"x11".as_ptr(),
+                    _ => c"wayland".as_ptr(),
+                };
+                *floating = is_floating;
+            }
+            true
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
     })
 }
-unsafe extern "C" fn destroy(_p: *const clap_plugin_t) {
-    hifishifter_plugin_core::guard_ffi((), || FLOATING_WINDOW_OPEN.store(false, Ordering::Release))
+unsafe extern "C" fn create(p: *const clap_plugin_t, _api: *const c_char, floating: bool) -> bool {
+    hifishifter_plugin_core::guard_ffi(false, || {
+        #[cfg(windows)]
+        {
+            match crate::editor::windows::create(p, floating) {
+                Ok(()) => {
+                    log::info!("[clap][gui] embedded view created");
+                    true
+                }
+                Err(error) => {
+                    log::error!("[clap][gui] create failed: {error}");
+                    false
+                }
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (p, floating);
+            log::warn!("[clap][gui] {}", crate::editor::unavailable_reason());
+            false
+        }
+    })
+}
+unsafe extern "C" fn destroy(p: *const clap_plugin_t) {
+    hifishifter_plugin_core::guard_ffi((), || {
+        #[cfg(windows)]
+        crate::editor::windows::destroy(p);
+        #[cfg(not(windows))]
+        let _ = p;
+    })
 }
 unsafe extern "C" fn set_scale(_p: *const clap_plugin_t, _scale: f64) -> bool {
     hifishifter_plugin_core::guard_ffi(false, || false)
 }
-unsafe extern "C" fn get_size(_p: *const clap_plugin_t, width: *mut u32, height: *mut u32) -> bool {
+unsafe extern "C" fn get_size(p: *const clap_plugin_t, width: *mut u32, height: *mut u32) -> bool {
     hifishifter_plugin_core::guard_ffi(false, || {
         if width.is_null() || height.is_null() {
             return false;
         }
-        unsafe {
-            *width = 960;
-            *height = 640
-        };
-        true
+        #[cfg(windows)]
+        if let Some((w, h)) = crate::editor::windows::get_size(p) {
+            unsafe {
+                *width = w;
+                *height = h;
+            }
+            return true;
+        }
+        #[cfg(not(windows))]
+        let _ = p;
+        false
     })
 }
 unsafe extern "C" fn can_resize(_p: *const clap_plugin_t) -> bool {
-    hifishifter_plugin_core::guard_ffi(false, || false)
+    hifishifter_plugin_core::guard_ffi(false, || true)
 }
 unsafe extern "C" fn adjust_size(_p: *const clap_plugin_t, w: *mut u32, h: *mut u32) -> bool {
     hifishifter_plugin_core::guard_ffi(false, || {
@@ -165,29 +185,69 @@ unsafe extern "C" fn adjust_size(_p: *const clap_plugin_t, w: *mut u32, h: *mut 
         } else {
             unsafe {
                 *w = 960;
-                *h = 640
+                *h = 640;
             };
             true
         }
     })
 }
-unsafe extern "C" fn set_size(_p: *const clap_plugin_t, _w: u32, _h: u32) -> bool {
-    hifishifter_plugin_core::guard_ffi(false, || false)
+unsafe extern "C" fn set_size(p: *const clap_plugin_t, w: u32, h: u32) -> bool {
+    hifishifter_plugin_core::guard_ffi(false, || {
+        #[cfg(windows)]
+        {
+            crate::editor::windows::set_size(p, w, h)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (p, w, h);
+            false
+        }
+    })
 }
-unsafe extern "C" fn set_parent(_p: *const clap_plugin_t, _w: *const clap_window_t) -> bool {
-    hifishifter_plugin_core::guard_ffi(false, || false)
+unsafe extern "C" fn set_parent(p: *const clap_plugin_t, window: *const clap_window_t) -> bool {
+    hifishifter_plugin_core::guard_ffi(false, || {
+        #[cfg(windows)]
+        {
+            unsafe { crate::editor::windows::set_parent(p, window) }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (p, window);
+            false
+        }
+    })
 }
 unsafe extern "C" fn set_transient(_p: *const clap_plugin_t, _w: *const clap_window_t) -> bool {
-    hifishifter_plugin_core::guard_ffi(false, || true)
+    hifishifter_plugin_core::guard_ffi(false, || false)
 }
 unsafe extern "C" fn suggest_title(_p: *const clap_plugin_t, _title: *const c_char) {
     hifishifter_plugin_core::guard_ffi((), || ())
 }
-unsafe extern "C" fn show(_p: *const clap_plugin_t) -> bool {
-    hifishifter_plugin_core::guard_ffi(false, is_created)
+unsafe extern "C" fn show(p: *const clap_plugin_t) -> bool {
+    hifishifter_plugin_core::guard_ffi(false, || {
+        #[cfg(windows)]
+        {
+            crate::editor::windows::show(p)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = p;
+            false
+        }
+    })
 }
-unsafe extern "C" fn hide(_p: *const clap_plugin_t) -> bool {
-    hifishifter_plugin_core::guard_ffi(false, || true)
+unsafe extern "C" fn hide(p: *const clap_plugin_t) -> bool {
+    hifishifter_plugin_core::guard_ffi(false, || {
+        #[cfg(windows)]
+        {
+            crate::editor::windows::hide(p)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = p;
+            false
+        }
+    })
 }
 
 /// `CLAP_EXT_GUI` 的字节串（给 `get_extension` 比较用）。
@@ -203,15 +263,26 @@ unsafe impl Send for clap_host_gui_t {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 扩展表的槽位必须齐全：宿主靠它们建窗口、挂父窗口、取尺寸与销毁。
+    ///
+    /// 【为什么只测这一层】真正的创建路径在 `editor/windows.rs`（子 HWND + WebView2），
+    /// 真机验收由 `scripts/clap/probe.c` 的黑盒 GUI 流程负责。这里钉的是"表是完整的、
+    /// 并且只提供 win32 嵌入而不是浮窗"这两条契约。
     #[test]
-    fn gui_platform_kind_is_supplied_by_the_format_layer() {
-        let attach = ClapGuiAttach {
-            api: "clap:win32",
-            parent: std::ptr::null_mut(),
-            host_gui: std::ptr::null(),
-        };
-        assert_eq!(attach.platform_kind(), "clap:win32");
-        assert!(!attach.embedded());
-        assert_eq!(attach.frame(), 0);
+    fn the_gui_extension_is_complete_and_offers_only_embedded_win32() {
+        assert!(GUI_EXT.is_api_supported.is_some());
+        assert!(GUI_EXT.get_preferred_api.is_some());
+        assert!(GUI_EXT.create.is_some());
+        assert!(GUI_EXT.destroy.is_some());
+        assert!(GUI_EXT.get_size.is_some());
+        assert!(GUI_EXT.set_size.is_some());
+        assert!(GUI_EXT.set_parent.is_some());
+        assert!(GUI_EXT.show.is_some());
+        assert!(GUI_EXT.hide.is_some());
+        assert!(
+            !unsafe { is_api_supported(std::ptr::null(), c"win32".as_ptr(), true) },
+            "floating windows are not offered"
+        );
     }
 }

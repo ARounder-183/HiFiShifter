@@ -17,14 +17,18 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 hifishifter-plugin-core = { path = "../hifishifter-plugin-core" }
 log = { version = "0.4", features = ["std"] }
+serde_json = "1"
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_LibraryLoader"] }
+# 内嵌编辑器：子 HWND + WebView2。与 VST3 同版，避免把第二套 COM ABI 拉进工作区。
+webview2-com = "0.39"
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com",
+    "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]
-serde_json = "1"
 ara2-bridge-companion = { version = "0.3.0", features = ["clap"] }
 ara2-bridge-sys = "0.3.0"

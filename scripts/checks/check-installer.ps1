@@ -61,7 +61,7 @@ Assert-That "安装器体积小于 $MaxSizeMb MB（模型只装一份）" {
 }
 
 # ── 编译测试模式安装器（与发布安装器同一份脚本、同一份载荷）─────────────────
-foreach ($required in 'app', 'vst3', 'HiFiShifter.clap', 'models', 'licenses', 'LICENSE', 'license-page.txt', 'models-verify.nsh') {
+foreach ($required in 'app', 'vst3', 'HiFiShifter.clap', 'HiFiShifter-resources', 'models', 'licenses', 'LICENSE', 'license-page.txt', 'models-verify.nsh') {
     if (!(Test-Path (Join-Path $stage $required))) { throw "dist\_stage\installer 缺少 $required" }
 }
 
@@ -162,6 +162,7 @@ $nsisArgs = @(
     "/DAPP_DIR=$(Join-Path $stage 'app')",
     "/DVST3_DIR=$(Join-Path $stage 'vst3')",
     "/DCLAP_FILE=$(Join-Path $stage 'HiFiShifter.clap')",
+    "/DCLAP_RES_DIR=$(Join-Path $stage 'HiFiShifter-resources')",
     "/DMODELS_DIR=$(Join-Path $stage 'models')",
     "/DMODELS_VERSION=$($manifest.version)",
     "/DMODELS_VERIFY=$(Join-Path $stage 'models-verify.nsh')",
@@ -237,7 +238,11 @@ try {
 
     Assert-That 'CLAP 组件装到自己的目录' {
         if (!(Test-Path (Join-Path $clapDir 'HiFiShifter.clap'))) { throw 'CLAP 模块没有安装到选定目录' }
-        'installed'
+        $clapFrontend = Join-Path $clapDir 'HiFiShifter-resources\frontend\plugin.html'
+        if (!(Test-Path $clapFrontend)) { throw "CLAP 前端资源没有随模块落地：$clapFrontend" }
+        $clapManifest = Join-Path $clapDir 'HiFiShifter-resources\models\models.json'
+        if (!(Test-Path $clapManifest)) { throw "CLAP 模型清单没有随模块落地：$clapManifest" }
+        'module + frontend + manifest'
     }
     # 安装器真的把别平台二进制装进来了也会在这里被抓到（编译前查暂存区、装完查落地）。
     Assert-That 'VST3 落地点只含 Windows 架构' {
@@ -294,7 +299,8 @@ try {
     }
     Assert-That '卸载后 CLAP 文件消失' {
         if (Test-Path (Join-Path $clapDir 'HiFiShifter.clap')) { throw 'HiFiShifter.clap 仍存在' }
-        'gone'
+        if (Test-Path (Join-Path $clapDir 'HiFiShifter-resources')) { throw 'HiFiShifter-resources 仍存在' }
+        'module + resources gone'
     }
     Assert-That '卸载后 VST3 目录消失' {
         if (Test-Path (Join-Path $vst3Dir 'HiFiShifter.vst3')) { throw '插件目录仍存在' }

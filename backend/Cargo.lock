@@ -2012,6 +2012,7 @@ dependencies = [
  "libc",
  "log",
  "serde_json",
+ "webview2-com",
  "windows",
 ]
 

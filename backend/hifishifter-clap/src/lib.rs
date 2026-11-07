@@ -5,6 +5,7 @@
 //!
 //! 【能力边界】阶段 1 是 Capture-only：descriptor 不声明 `ara:supported`，
 //! entry 不暴露 ARA 工厂，实例不返回 ARA 扩展。共享 ARA 文档模型仍在 VST3 外壳里。
+//! 编辑器窗口在 Windows 上经 `clap.gui` 内嵌同一份前端产物；其它平台如实降级。
 //! 不链接 VST3 SDK、不带 Tauri/wry/app runtime。
 
 #![deny(missing_docs)]
@@ -19,6 +20,7 @@
 pub mod abi;
 pub mod ara;
 pub mod audio;
+pub mod editor;
 pub mod entry;
 pub mod gui;
 pub mod latency_tail;

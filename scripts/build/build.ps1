@@ -155,6 +155,16 @@ if ($Target -eq 'All' -or $Target -eq 'Plugin' -or $Target -eq 'Clap') {
     $clapModule = Join-Path $built 'hifishifter_clap.dll'
     if (!(Test-Path $clapModule)) { throw "缺少 $clapModule" }
     Copy-Item $clapModule (Join-Path $dist 'HiFiShifter.clap') -Force
+    # 单文件 CLAP 的资源必须与模块同级（ResourceLayout::Sibling）：前端产物 +
+    # 模型清单。少了任何一个，宿主能扫描到插件却只会得到一块空白窗口。
+    $clapRes = Join-Path $dist 'HiFiShifter-resources'
+    Reset-Directory (Join-Path $clapRes 'frontend')
+    Reset-Directory (Join-Path $clapRes 'models')
+    New-Item -ItemType Directory -Force (Join-Path $clapRes 'frontend\assets') | Out-Null
+    Copy-Item 'frontend\dist\plugin.html' (Join-Path $clapRes 'frontend')
+    Copy-Item 'frontend\dist\assets\*' (Join-Path $clapRes 'frontend\assets') -Recurse
+    Copy-Item (Join-Path $modelsSource 'models.json') (Join-Path $clapRes 'models')
+    Write-Host "CLAP 资源已组装：$clapRes" -ForegroundColor Green
     & .\scripts\clap\windows\verify.ps1 -ModulePath (Join-Path $dist 'HiFiShifter.clap')
 }
 
@@ -220,6 +230,18 @@ function Write-ClapStage {
     $clap = Join-Path $stage 'HiFiShifter.clap'
     Copy-Item (Join-Path $dist 'HiFiShifter.clap') $clap -Force
     Write-Host "CLAP 载荷：$clap" -ForegroundColor Green
+    # 【为什么必须连资源目录一起暂存】CLAP 在 Windows 上是单文件模块，前端与
+    # 模型清单按 ResourceLayout::Sibling 放在同级的 HiFiShifter-resources。
+    # 只装 .clap 时 frontend_dir() 必然失败，宿主看到的是一块空白窗口。
+    $resources = Join-Path $dist 'HiFiShifter-resources'
+    if (!(Test-Path $resources)) { throw "缺少 CLAP 资源目录：$resources" }
+    $staged = Join-Path $stage 'HiFiShifter-resources'
+    Reset-Directory $staged
+    Copy-Item "$resources\*" $staged -Recurse -Force
+    if (!(Test-Path (Join-Path $staged 'frontend\plugin.html'))) {
+        throw "CLAP 资源目录里缺少 frontend\plugin.html"
+    }
+    Write-Host "CLAP 资源：$staged" -ForegroundColor Green
 }
 
 function Write-ModelsStage {
@@ -307,7 +329,7 @@ if ($Target -ne 'Installer') {
 }
 
 if ($Target -eq 'Installer') {
-    foreach ($required in 'app', 'vst3', 'HiFiShifter.clap', 'models', 'licenses', 'LICENSE', 'license-page.txt', 'models-verify.nsh') {
+    foreach ($required in 'app', 'vst3', 'HiFiShifter.clap', 'HiFiShifter-resources', 'models', 'licenses', 'LICENSE', 'license-page.txt', 'models-verify.nsh') {
         if (!(Test-Path (Join-Path $stage $required))) {
             throw "dist\_stage\installer 缺少 $required：先跑 .\scripts\build\build.ps1 -Target All"
         }
@@ -337,6 +359,7 @@ Remove-Item $setup -Force -ErrorAction SilentlyContinue
     "/DAPP_DIR=$(Join-Path $stage 'app')" `
     "/DVST3_DIR=$(Join-Path $stage 'vst3')" `
     "/DCLAP_FILE=$(Join-Path $stage 'HiFiShifter.clap')" `
+    "/DCLAP_RES_DIR=$(Join-Path $stage 'HiFiShifter-resources')" `
     "/DMODELS_DIR=$(Join-Path $stage 'models')" `
     "/DMODELS_VERSION=$modelsVersion" `
     "/DMODELS_VERIFY=$(Join-Path $stage 'models-verify.nsh')" `

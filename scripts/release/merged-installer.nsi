@@ -48,6 +48,9 @@ ${StrTrimNewLines}
 !ifndef CLAP_FILE
   !error "CLAP_FILE is required (assembled HiFiShifter.clap module)"
 !endif
+!ifndef CLAP_RES_DIR
+  !error "CLAP_RES_DIR is required (staged HiFiShifter-resources: frontend + models.json)"
+!endif
 !ifndef MODELS_DIR
   !error "MODELS_DIR is required (full model weights)"
 !endif
@@ -97,6 +100,7 @@ ${StrTrimNewLines}
 
 !define VST3_SUBDIR "HiFiShifter.vst3"
 !define CLAP_FILENAME "HiFiShifter.clap"
+!define CLAP_RESOURCES "HiFiShifter-resources"
 !define ARP_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\HiFiShifter"
 ; 旧版插件安装器留下的卸载项：本安装器接管模型库与插件目录，成功后把它清掉。
 !define LEGACY_VST3_ARP_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\HiFiShifterVST3"
@@ -772,6 +776,10 @@ Section "$(HFS_COMPONENT_CLAP)"
   SetOutPath "$HfsClapDir"
   Delete "$HfsClapDir\${CLAP_FILENAME}"
   File "/oname=${CLAP_FILENAME}" "${CLAP_FILE}"
+  ; 单文件 CLAP 的前端与模型清单必须与模块同级。只装 .clap 时插件能扫描到，
+  ; frontend_dir() 却找不到 plugin.html —— 窗口就是一块空白。
+  SetOutPath "$HfsClapDir\${CLAP_RESOURCES}"
+  File /r "${CLAP_RES_DIR}\*.*"
   WriteRegStr ${HFS_ARP_ROOT} "${ARP_KEY}" "ClapDir" "$HfsClapDir"
 SectionEnd
 SectionGroupEnd
@@ -833,6 +841,8 @@ Section "Uninstall"
   ; 只删自己：$HfsVst3Dir 是 Common Files\VST3，里面还有别人的插件。
   RMDir /r "$HfsVst3Dir\${VST3_SUBDIR}"
   Delete "$HfsClapDir\${CLAP_FILENAME}"
+  ; 只删本产品的资源目录：$HfsClapDir 是公共 CLAP 目录，里面有别人的插件。
+  RMDir /r "$HfsClapDir\${CLAP_RESOURCES}"
   ; App 目录整个属于本产品（与 Tauri 安装器的行为一致）。
   RMDir /r "$INSTDIR"
 

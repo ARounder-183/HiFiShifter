@@ -385,6 +385,7 @@ unsafe extern "C" fn plugin_get_extension(
             "clap.timer-support" => return (&raw const TIMER_EXT).cast(),
             "clap.latency" => return (&raw const crate::latency_tail::LATENCY_EXT).cast(),
             "clap.tail" => return (&raw const crate::latency_tail::TAIL_EXT).cast(),
+            "clap.gui" => return (&raw const crate::gui::GUI_EXT).cast(),
             _ => {}
         }
         crate::ara::get_extension(plugin, id)

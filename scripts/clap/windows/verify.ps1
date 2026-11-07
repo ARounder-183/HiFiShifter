@@ -2,6 +2,15 @@
 param([Parameter(Mandatory=$true)][string]$ModulePath)
 $ErrorActionPreference = "Stop"
 if (!(Test-Path -LiteralPath $ModulePath)) { throw "CLAP module missing: $ModulePath" }
+# 单文件 CLAP 的资源目录必须与模块同级；缺 plugin.html 的表现是宿主扫描到插件
+# 却只给出一块空白窗口（前端根本没被加载）。
+$moduleDir = Split-Path -Parent $ModulePath
+$resources = Join-Path $moduleDir "HiFiShifter-resources"
+$frontend = Join-Path $resources "frontend\plugin.html"
+$manifest = Join-Path $resources "models\models.json"
+if (!(Test-Path -LiteralPath $frontend)) { throw "CLAP frontend assets missing: $frontend" }
+if (!(Test-Path -LiteralPath $manifest)) { throw "CLAP model manifest missing: $manifest" }
+Write-Host "OK   resources: frontend + models.json next to the module"
 $dumpbin = Get-Command dumpbin -ErrorAction SilentlyContinue
 if ($dumpbin) {
     $exports = & $dumpbin.Source /exports $ModulePath 2>&1

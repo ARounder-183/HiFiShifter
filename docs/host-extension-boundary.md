@@ -141,7 +141,8 @@ ARA 侧改了时间拉伸 / 内容淡化，插件会继续用旧配置渲染。
 | 离线 bounce | 按扩展如实给 | 只从 `clap.render` 的 `CLAP_RENDER_OFFLINE` 置位 |
 | ARA 工厂 / 实例扩展 | **不暴露** | 共享 ARA 文档模型仍在 VST3 外壳里；暴露不能创建控制器的工厂会让宿主写穿空指针 |
 | `ara:supported` / `ara:required` | 都不声明 | descriptor 只描述已履行的能力 |
-| 内嵌 WebView / 宿主心跳 | 未提供 | core 的 GUI 原语还依赖 VST3 的 `IPlugFrame` / `IRunLoop`；CLAP 需要一套 `GuiAttach` 实现 |
+| 内嵌 WebView | Windows 有 | `clap.gui` + 独立 WebView2 宿主，加载同一份 `frontend/dist`；非 Windows 如实降级 |
+| 编辑器命令 | 最小回执后端 | `plugin_health` 成功、时间线空态可读、未接线命令立刻回结构化错误；不复用 VST3 的 ARA 会话 |
 | 写回 / 分割 / 建轨 / 宿主撤销 / take / folder | 不可用 | 与 ARA-only 相同：REAPER 原生扩展是 VST3 COM 专属，CLAP 没有对应接口 |
 
 **这张表是阶段 1 的契约，不是缺陷清单**：阶段 2 只有把共享 ARA 运行时抽进 core、接好
@@ -162,6 +163,10 @@ ARA 侧改了时间拉伸 / 内容淡化，插件会继续用旧配置渲染。
 - **每实例状态**：采样率、`clap.render` 模式与 transport 观察值从进程级 static 移到
   `Instance::audio`。同一宿主进程里两个实例（不同采样率 / 一个实时一个离线）不再
   互相覆盖；`process` 在未 `activate` / 未 `start_processing` / 并发进入时明确拒绝。
+- **窗口与资源**：`clap.gui` 真实创建子 HWND 并挂到宿主的 win32 父窗口；
+  Windows 产物把 `frontend/` 与 `models.json` 装到模块同级的
+  `HiFiShifter-resources`（`ResourceLayout::Sibling`），安装器与自检都断言
+  `plugin.html` 落地。此前只装 `.clap` 单文件，宿主扫描得到插件却只会给空白窗口。
 - **能力诚实性**：黑盒探针把 `clap.state` / `clap.render` / `clap.audio-ports` /
   `clap.timer-support` 必须存在、`clap.gui` 必须缺席、descriptor 不得含任何
   `ara:` feature、ARA 工厂必须缺席都写成硬失败；`verify.sh` 逐项断言探针输出。
