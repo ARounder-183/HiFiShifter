@@ -13,11 +13,15 @@ hifishifter-plugin-core = { path = "../hifishifter-plugin-core" }
 hifishifter-ara = { path = "../hifishifter-ara" }
 # 捕获运行时（格式无关）：VST3 与 CLAP 共用同一份判定与投影。
 hifishifter-capture = { path = "../hifishifter-capture" }
-# 插件包不分发闭源vslib；独立app的默认features不受影响。
+# 【为什么 `features = []`（一个都不留）】插件包不分发闭源 vslib，而 `vslib` 这个
+# kernel feature 会 `#[link]` 一个**链接期**依赖：打开它，引擎就导入 `vslib_x64.dll`，
+# 而打包白名单刻意不带那个 DLL —— 宿主的 `LoadLibrary` 直接失败，表现是
+# 「InitDll returned false」，日志里一行都没有（`guard_ffi` 的 logger 还没装）。
+# 独立 app 的默认 features 不受影响：它自己直接依赖 kernel，默认值仍是全开。
 # 【为什么 ONNX / SoundTouch 是 feature 而不是写死】实现层要被 CLAP 外壳复用，而 CLAP 模块
 # 带不动 SoundTouchDLL（链接期依赖，Windows 只按宿主目录解析）也不该被 38 MB 的推理栈撑大。
 # 默认仍全开 —— VST3 产物的行为与依赖一行不变。
-hifishifter-kernel = { path = "../hifishifter-kernel", default-features = false, features = ["vslib"] }
+hifishifter-kernel = { path = "../hifishifter-kernel", default-features = false, features = [] }
 hifishifter-host-link = { path = "../hifishifter-host-link" }
 hifishifter-clipboard = { path = "../hifishifter-clipboard" }
 blake3 = "1"
