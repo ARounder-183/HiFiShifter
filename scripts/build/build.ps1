@@ -391,8 +391,16 @@ if ($Target -eq 'Installer') {
 # ── 安装器 ──────────────────────────────────────────────────────────────────
 $makensis = (Get-Command makensis -ErrorAction SilentlyContinue).Source
 if (!$makensis) {
-    $candidate = Join-Path ([Environment]::GetEnvironmentVariable('ProgramFiles(x86)')) 'NSIS\makensis.exe'
-    if (Test-Path $candidate) { $makensis = $candidate }
+    # 【为什么不读 `ProgramFiles(x86)` 环境变量】它在部分宿主里根本不存在，而
+    # `msvc-env.ps1` 导入 vcvars 环境时会把空值写回（.NET 把空值当"删除"），于是
+    # 构建尾部会以一个和 NSIS 毫无关系的报错失败："无法将自变量绑定到参数 'Path'"。
+    # 目录只能问系统 API（与 `scripts/env/msvc-env.ps1` 的 `Get-ProgramFilesRoots` 同源）。
+    foreach ($kind in 'ProgramFilesX86', 'ProgramFiles') {
+        $base = [Environment]::GetFolderPath($kind)
+        if (!$base) { continue }
+        $candidate = Join-Path $base 'NSIS\makensis.exe'
+        if (Test-Path -LiteralPath $candidate) { $makensis = $candidate; break }
+    }
 }
 if (!$makensis) {
     throw '找不到 makensis：先跑 scripts\setup\install_deps_windows.ps1（Windows 只交付这一个安装器，缺它等于没有产物）'

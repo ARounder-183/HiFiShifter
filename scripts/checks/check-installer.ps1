@@ -41,8 +41,14 @@ function Assert-That($name, [scriptblock]$body) {
 function Get-Makensis {
     $cmd = (Get-Command makensis -ErrorAction SilentlyContinue).Source
     if ($cmd) { return $cmd }
-    $candidate = Join-Path ([Environment]::GetEnvironmentVariable('ProgramFiles(x86)')) 'NSIS\makensis.exe'
-    if (Test-Path $candidate) { return $candidate }
+    # 【为什么不读 `ProgramFiles(x86)` 环境变量】见 build.ps1 同名处：它可能不存在，
+    # 也可能被 vcvars 的导入删掉（空值 = 删除），报错却指向 `-Path` 参数。
+    foreach ($kind in 'ProgramFilesX86', 'ProgramFiles') {
+        $base = [Environment]::GetFolderPath($kind)
+        if (!$base) { continue }
+        $candidate = Join-Path $base 'NSIS\makensis.exe'
+        if (Test-Path -LiteralPath $candidate) { return $candidate }
+    }
     throw '找不到 makensis：先跑 scripts\setup\install_deps_windows.ps1'
 }
 
