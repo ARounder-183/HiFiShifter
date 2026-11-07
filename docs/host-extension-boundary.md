@@ -142,7 +142,8 @@ ARA 侧改了时间拉伸 / 内容淡化，插件会继续用旧配置渲染。
 | ARA 工厂 / 实例扩展 | **不暴露** | 共享 ARA 文档模型仍在 VST3 外壳里；暴露不能创建控制器的工厂会让宿主写穿空指针 |
 | `ara:supported` / `ara:required` | 都不声明 | descriptor 只描述已履行的能力 |
 | 内嵌 WebView | Windows 有 | `clap.gui` + 独立 WebView2 宿主，加载同一份 `frontend/dist`；非 Windows 如实降级 |
-| 编辑器命令 | 最小回执后端 | `plugin_health` 成功、时间线空态可读、未接线命令立刻回结构化错误；不复用 VST3 的 ARA 会话 |
+| 编辑器命令 | 最小回执后端 | `plugin_health` 成功、时间线可读、未接线命令立刻回结构化错误；不复用 VST3 的 ARA 会话 |
+| 捕获（录音） | **有** | `capture_status` / `start` / `stop` / `cancel` / `clear` / `delete_take` / `set_options` 与 VST3 同名同载荷；音频从 `process` 的输入总线按工程位置写进插件自己的时间线，实现与 VST3 是**同一个 crate**（`hifishifter-capture`） |
 | 写回 / 分割 / 建轨 / 宿主撤销 / take / folder | 不可用 | 与 ARA-only 相同：REAPER 原生扩展是 VST3 COM 专属，CLAP 没有对应接口 |
 
 **这张表是阶段 1 的契约，不是缺陷清单**：阶段 2 只有把共享 ARA 运行时抽进 core、接好
@@ -167,6 +168,12 @@ ARA 侧改了时间拉伸 / 内容淡化，插件会继续用旧配置渲染。
   Windows 产物把 `frontend/` 与 `models.json` 装到模块同级的
   `HiFiShifter-resources`（`ResourceLayout::Sibling`），安装器与自检都断言
   `plugin.html` 落地。此前只装 `.clap` 单文件，宿主扫描得到插件却只会给空白窗口。
+- **捕获运行时是共享的**：`recorder` / `sidecar` / `store` / `timeline` / `transport`
+  从 VST3 crate 搬进 `backend/hifishifter-capture/`（纯机械搬迁 + 中性类型转换），VST3 与
+  CLAP 两个外壳都只是它的适配层：VST3 把 `ProcessContext` 变成 `InputBlock`，CLAP 把
+  `clap_event_transport_t` 变成同一个形状。因此 "CLAP 能录" 与 "VST3 能录" 是同一条
+  代码路径 —— 不是一份为 CLAP 重写的简化版。VST3 侧的 779 条库用例与捕获 crate 的 125 条
+  用例逐条通过，判定零改动。
 - **WebView2 用户数据目录**：profile 固定在
   `%LOCALAPPDATA%\HiFiShifter\webview\clap-<pid>`（`hifishifter_plugin_core::local_data`，
   与内核 `app_paths` 由跨 crate 测试逐字比对）。它**绝不能**落在模块旁边：模块装在

@@ -20,6 +20,7 @@
 pub mod abi;
 pub mod ara;
 pub mod audio;
+pub mod capture;
 pub mod editor;
 pub mod entry;
 pub mod gui;

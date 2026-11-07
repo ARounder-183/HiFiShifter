@@ -95,7 +95,7 @@ impl ExtensionOwner {
             );
         }
         let input = super::input::RenderInput {
-            regions: self.capture.regions_for_timeline(&timeline),
+            regions: crate::capture::ara_regions(self.capture.regions_for_timeline(&timeline)),
             sources: self.capture.material_sources(),
             timeline: Some(timeline),
             project_sample_rate: Some(self.setup_sample_rate()).filter(|rate| *rate > 0.0),

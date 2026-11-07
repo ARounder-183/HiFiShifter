@@ -2003,11 +2003,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
+name = "hifishifter-capture"
+version = "0.2.0-beta"
+dependencies = [
+ "blake3",
+ "hifishifter-kernel",
+ "hifishifter-plugin-core",
+ "libc",
+ "log",
+ "serde_json",
+ "trash",
+ "windows",
+]
+
+[[package]]
 name = "hifishifter-clap"
 version = "0.2.0-beta"
 dependencies = [
  "ara2-bridge-companion",
  "ara2-bridge-sys",
+ "hifishifter-capture",
+ "hifishifter-kernel",
  "hifishifter-plugin-core",
  "libc",
  "log",
@@ -2093,6 +2109,7 @@ dependencies = [
  "flate2",
  "gdk",
  "gtk",
+ "hifishifter-capture",
  "hifishifter-clipboard",
  "hifishifter-host-link",
  "hifishifter-kernel",

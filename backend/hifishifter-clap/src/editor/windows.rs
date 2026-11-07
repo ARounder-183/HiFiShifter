@@ -499,9 +499,14 @@ fn configure_browser(
                         text.len()
                     );
                 }
+                // 【为什么在这里取实例】捕获命令（capture_*）与时间线都挂在实例上；
+                // 视图表里没有它，而回执必须由本实例的存储回答。
+                let Some(capture) = crate::instance(plugin).map(|i| &i.capture) else {
+                    return Ok(());
+                };
                 let Some(reply) = with_view(plugin, |view| {
                     protocol::parse_request(&text, &view.view_id)
-                        .map(|request| protocol::reply(&view.view_id, &request))
+                        .map(|request| protocol::reply(&view.view_id, &request, capture))
                 })
                 .flatten() else {
                     return Ok(());
@@ -518,8 +523,22 @@ fn configure_browser(
         )?;
     }
     // bootstrap 必须在任何页面脚本之前注入，且导航要等注入完成。
-    let boot = with_view(plugin, |view| protocol::bootstrap(&view.view_id))
-        .unwrap_or_else(|| protocol::bootstrap("clap-view"));
+    // 捕获能力是**观察到的**：宿主给过可用位置、给过输入、见过离线 render —— 三者的
+    // 现场读数在实例上，bootstrap 只是把它们抄进页面（前端据此说"能不能录"）。
+    let caps = unsafe { crate::instance(plugin) }
+        .map(|instance| {
+            let (_, saw_offline) = instance.audio.capture_observations();
+            instance.capture.capture_caps(saw_offline)
+        })
+        .unwrap_or_else(|| {
+            serde_json::json!({
+                "sawContext": false, "sawInput": false, "sawOffline": false, "canCapture": false
+            })
+        });
+    let boot = with_view(plugin, |view| {
+        protocol::bootstrap(&view.view_id, caps.clone())
+    })
+    .unwrap_or_else(|| protocol::bootstrap("clap-view", caps));
     let script = wide(&format!("window.__HFS_PLUGIN_BOOTSTRAP__={boot};"));
     let nav_browser = browser.clone();
     let ready =

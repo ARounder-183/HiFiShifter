@@ -16,6 +16,10 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 hifishifter-plugin-core = { path = "../hifishifter-plugin-core" }
+# 捕获运行时与 VST3 共用同一份（判定、投影、sidecar 全在那边）。
+hifishifter-capture = { path = "../hifishifter-capture" }
+# 时间线载荷与 VST3 同形（同一个 TimelineState），只用到 serde 类型。
+hifishifter-kernel = { path = "../hifishifter-kernel", default-features = false }
 log = { version = "0.4", features = ["std"] }
 serde_json = "1"
 

@@ -1,0 +1,34 @@
+# HiFiShifter 的捕获运行时（格式无关）。
+#
+# 【为什么单独一个 crate】捕获的全部语义 —— 起播滞后、停播钉住、循环回绕、段封口、
+# spare 耗尽、take 提升、sidecar 落盘、时间线投影 —— 都是**关于宿主与工程时间**的
+# 判定，与"宿主是 VST3 还是 CLAP"无关。把它留在 VST3 crate 里的后果是：CLAP 外壳
+# 要么没有捕获（用户看到的"当前不可用"），要么再写一份必然漂移的实现。
+#
+# 【为什么依赖内核】时间线投影产出的就是 `hifishifter_kernel::state::TimelineState`，
+# 与 ARA 通路同形。核心只用到 `state` 里的 serde 类型，因此默认特性关掉（不拉 ONNX）。
+[package]
+name = "hifishifter-capture"
+version = "0.2.0-beta"
+edition = "2021"
+publish = false
+description = "Format-neutral capture runtime shared by the HiFiShifter plug-in shells"
+
+[lib]
+name = "hifishifter_capture"
+crate-type = ["rlib"]
+
+[dependencies]
+hifishifter-plugin-core = { path = "../hifishifter-plugin-core" }
+hifishifter-kernel = { path = "../hifishifter-kernel", default-features = false }
+log = { version = "0.4", features = ["std"] }
+serde_json = "1"
+# take 内容指纹与"删到回收站"：两者都是捕获存储的对外行为（重启后按内容认回音频）。
+blake3 = "1"
+trash = "5.2.9"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_System_SystemInformation"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

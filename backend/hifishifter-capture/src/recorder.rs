@@ -49,7 +49,7 @@
 use std::ops::Range;
 
 /// 一次捕获最多上报多少个"已覆盖区间"（见 `Recorder::covered_runs`）。
-pub(crate) const MAX_CAPTURE_RUNS: usize = 256;
+pub const MAX_CAPTURE_RUNS: usize = 256;
 
 /**
  * 把任意顺序的区间合并成**升序、互不相交、相邻合并**的列表，最多 `cap` 条。
@@ -65,10 +65,7 @@ pub(crate) const MAX_CAPTURE_RUNS: usize = 256;
  * 超过 `cap` 时反复合并**最小的间隙**：丢掉的是"这里有一点小空隙"，保留的是
  * "大段没录到"—— 后者才是用户需要看见的信息。
  */
-pub(crate) fn merge_runs(
-    runs: impl IntoIterator<Item = Range<i64>>,
-    cap: usize,
-) -> Vec<Range<i64>> {
+pub fn merge_runs(runs: impl IntoIterator<Item = Range<i64>>, cap: usize) -> Vec<Range<i64>> {
     let mut sorted: Vec<Range<i64>> = runs.into_iter().filter(|run| run.end > run.start).collect();
     sorted.sort_by_key(|run| run.start);
     let mut merged: Vec<Range<i64>> = Vec::with_capacity(sorted.len());
@@ -117,7 +114,7 @@ const SEALED_HEADROOM: usize = 4;
 
 /// 一个段的**结束原因**。它是用户可见诊断的一部分：为什么录到这里就断了。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ClosedReason {
+pub enum ClosedReason {
     /// 段满（正常切段，不是异常）。
     Full,
     /// 宿主位置跳跃（seek / 循环回卷 / 录音中移动光标）。
@@ -142,7 +139,7 @@ pub(crate) enum ClosedReason {
 
 impl ClosedReason {
     /// 语言无关的分类名；前端按此查 catalog。
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             ClosedReason::Full => "full",
             ClosedReason::Jump => "jump",
@@ -160,7 +157,7 @@ impl ClosedReason {
     /// 【为什么 `LimitReached` 算"需要知道"】录制自己停了，而原因是用户自己设的一个
     /// 数值 —— 不说清就只能是"录着录着就断了"。它与 `NoSpare`（内存没跟上）同一类：
     /// 都是"不是用户按的停"，都必须能被归因。
-    pub(crate) fn is_notable(self) -> bool {
+    pub fn is_notable(self) -> bool {
         !matches!(
             self,
             ClosedReason::Full | ClosedReason::Stopped | ClosedReason::NewPass
@@ -171,7 +168,7 @@ impl ClosedReason {
     ///
     /// 【为什么不用 `as u8`】显式编码让"哪个数字是哪一条"成为契约的一部分：
     /// 将来插入或重排枚举成员不会静默改变已写出去的数字。
-    pub(crate) fn code(self) -> u8 {
+    pub fn code(self) -> u8 {
         match self {
             ClosedReason::Full => 1,
             ClosedReason::Jump => 2,
@@ -185,7 +182,7 @@ impl ClosedReason {
     }
 
     /// [`Self::code`] 的逆。未知编码返回 `None`（而不是猜一个）。
-    pub(crate) fn from_code(code: u8) -> Option<Self> {
+    pub fn from_code(code: u8) -> Option<Self> {
         match code {
             1 => Some(ClosedReason::Full),
             2 => Some(ClosedReason::Jump),
@@ -202,7 +199,7 @@ impl ClosedReason {
 
 /// 一个段与它前一段之间的关系。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SegmentLoss {
+pub enum SegmentLoss {
     /// 与上一段首尾相接（正常）。
     None,
     /// 与上一段之间有跳跃：中间那段工程时间**没有被录到**。
@@ -221,7 +218,7 @@ pub(crate) enum SegmentLoss {
 /// 【不变式】封口后 `span().len() == planes[ch].len()`，且所有平面等长。
 /// 活跃期间平面长度是**容量**，`filled` 才是有效长度 —— 封口时截断。
 #[derive(Debug)]
-pub(crate) struct Segment {
+pub struct Segment {
     /// 工程采样域起点（`projectTimeSamples` 的域）。
     pub origin: i64,
     pub sample_rate: u32,
@@ -268,14 +265,14 @@ pub(crate) struct Segment {
     /// 【为什么额度跟着段走而不是由 store 统一持有】段一旦封口就不再增长，
     /// 它的额度也就固定了。跟着段走意味着"丢弃一个段"立刻归还额度，
     /// 不需要 store 再维护一张并行的账。
-    pub _reservation: Option<crate::render::budget::Reservation>,
+    pub _reservation: Option<crate::budget::Reservation>,
 }
 
 /// 一段里能登记的覆盖区间个数上限。
 ///
 /// 【为什么是 8】一段是 8 秒；空洞只来自丢块与桥接，两者在正常宿主上都是个位数。
 /// 8 给足余量，又不让 `Segment` 变得更大。
-pub(crate) const COVERAGE_SLOTS: usize = 8;
+pub const COVERAGE_SLOTS: usize = 8;
 
 /// 只保留 `limit` 之前（段内相对帧）的覆盖区间。
 ///
@@ -405,7 +402,7 @@ fn claim_whole_before(coverage: &mut [std::ops::Range<usize>], len: &mut usize, 
 
 impl Segment {
     /// 本段覆盖的工程采样区间（左闭右开）。
-    pub(crate) fn span(&self) -> Range<i64> {
+    pub fn span(&self) -> Range<i64> {
         self.origin..self.origin + self.filled as i64
     }
 
@@ -415,7 +412,7 @@ impl Segment {
     /// 这既省内存，也让"用户录了一段静音"与"用户没录"在界面上可区分。
     ///
     /// 段内是否含非有限采样。含 NaN/Inf 的段不能进渲染。
-    pub(crate) fn has_nonfinite(&self) -> bool {
+    pub fn has_nonfinite(&self) -> bool {
         self.planes
             .iter()
             .any(|plane| plane.iter().any(|sample| !sample.is_finite()))
@@ -424,7 +421,7 @@ impl Segment {
 
 /// 一个音频块的输入视图（音频线程构造，**不拥有**数据，因此不分配）。
 #[derive(Clone, Copy)]
-pub(crate) struct InputBlock<'a> {
+pub struct InputBlock<'a> {
     /// 块首的工程位置（`projectTimeSamples`）。
     pub start: i64,
     /// 帧数（`num_samples`）。
@@ -443,7 +440,7 @@ pub(crate) struct InputBlock<'a> {
 
 impl InputBlock<'_> {
     /// 本块有没有**任何**可用输入。
-    pub(crate) fn has_audio(&self) -> bool {
+    pub fn has_audio(&self) -> bool {
         self.planes.iter().any(|plane| plane.is_some())
     }
 }
@@ -456,7 +453,7 @@ impl InputBlock<'_> {
 /// `last_block_*` / `expected_next` 会让一条流替另一条流作证。捕获与输出都必须
 /// 按流隔离状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ProcessStream {
+pub enum ProcessStream {
     /// `kRealtime`（0）。
     Realtime,
     /// `kPrefetch`（1）。
@@ -467,7 +464,7 @@ pub(crate) enum ProcessStream {
 
 impl ProcessStream {
     /// 未知 mode 必须显式失败，不能静默归为 realtime。
-    pub(crate) fn from_mode(mode: i32) -> Option<Self> {
+    pub fn from_mode(mode: i32) -> Option<Self> {
         match mode {
             0 => Some(Self::Realtime),
             1 => Some(Self::Prefetch),
@@ -476,7 +473,7 @@ impl ProcessStream {
         }
     }
 
-    pub(crate) fn index(self) -> usize {
+    pub fn index(self) -> usize {
         match self {
             Self::Realtime => 0,
             Self::Prefetch => 1,
@@ -493,7 +490,7 @@ impl ProcessStream {
     }
 
     /// 稳定编码（只增不改，诊断用）。
-    pub(crate) fn code(self) -> u8 {
+    pub fn code(self) -> u8 {
         match self {
             Self::Realtime => 1,
             Self::Prefetch => 2,
@@ -501,7 +498,7 @@ impl ProcessStream {
         }
     }
 
-    pub(crate) fn from_code(code: u8) -> Option<Self> {
+    pub fn from_code(code: u8) -> Option<Self> {
         match code {
             1 => Some(Self::Realtime),
             2 => Some(Self::Prefetch),
@@ -510,7 +507,7 @@ impl ProcessStream {
         }
     }
 
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Realtime => "realtime",
             Self::Prefetch => "prefetch",
@@ -521,7 +518,7 @@ impl ProcessStream {
 
 /// 捕获自身的相位（与 Record 键、kPlaying 分开）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum CapturePhase {
+pub enum CapturePhase {
     /// 已武装，宿主还没播过。
     #[default]
     Standby,
@@ -536,7 +533,7 @@ pub(crate) enum CapturePhase {
 }
 
 impl CapturePhase {
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Standby => "standby",
             Self::Starting => "starting",
@@ -546,7 +543,7 @@ impl CapturePhase {
         }
     }
 
-    pub(crate) fn is_recording(self) -> bool {
+    pub fn is_recording(self) -> bool {
         matches!(self, Self::Starting | Self::Recording)
     }
 }
@@ -557,7 +554,7 @@ impl CapturePhase {
 /// 在起播第一块滞后置位（VEGAS/REAPER）。真正能跨宿主成立的判据只有“位置是否在
 /// 推进”。`Resting` 表示同一块首已经出现过：这不是新素材，也不是新的输出位置。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum TransportPhase {
+pub enum TransportPhase {
     /// 本流首块，或 `kPlaying`/`kRecording` 上升沿后的第一块。
     #[default]
     Start,
@@ -569,7 +566,7 @@ pub(crate) enum TransportPhase {
 
 impl TransportPhase {
     /// 稳定编码（只增不改，诊断用）。
-    pub(crate) fn code(self) -> u8 {
+    pub fn code(self) -> u8 {
         match self {
             Self::Start => 1,
             Self::Rolling => 2,
@@ -604,7 +601,7 @@ impl TransportPhase {
 /// 录音声明成洞：播放侧回退宿主原声（前 0.658 s 不受参数线影响），并在边界处做一次
 /// 源切换 —— 那一下就是用户听到的"咔"。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum PositionSource {
+pub enum PositionSource {
     /// `projectTimeSamples`（正常路径）。
     #[default]
     Project,
@@ -621,7 +618,7 @@ pub(crate) enum PositionSource {
 }
 
 impl PositionSource {
-    pub(crate) fn code(self) -> u8 {
+    pub fn code(self) -> u8 {
         match self {
             Self::Project => 1,
             Self::Continuous => 2,
@@ -633,7 +630,7 @@ impl PositionSource {
         }
     }
 
-    pub(crate) fn from_code(code: u8) -> Option<Self> {
+    pub fn from_code(code: u8) -> Option<Self> {
         match code {
             1 => Some(Self::Project),
             2 => Some(Self::Continuous),
@@ -651,7 +648,7 @@ impl PositionSource {
 /// 【为什么需要它】SDK 明确允许宿主不按 cycle 边界切块；一个块的后半段可能已经是
 /// 下一圈的开头。按原位置整块写入会把那一段放到 loop 终点之后，形成悬挂尾巴。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct SubBlock {
+pub struct SubBlock {
     /// 这一段在工程时间轴上的起点（回卷后是 cycle start）。
     pub position: i64,
     /// 这一段在宿主块内的帧偏移。
@@ -660,7 +657,7 @@ pub(crate) struct SubBlock {
 }
 
 impl SubBlock {
-    pub(crate) const EMPTY: Self = Self {
+    pub const EMPTY: Self = Self {
         position: 0,
         input_offset: 0,
         frames: 0,
@@ -669,7 +666,7 @@ impl SubBlock {
 
 /// 一个宿主块的切分结果（1 或 2 段）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct BlockSplit {
+pub struct BlockSplit {
     pub parts: [SubBlock; 2],
     pub count: u8,
 }
@@ -684,7 +681,7 @@ impl Default for BlockSplit {
 }
 
 impl BlockSplit {
-    pub(crate) fn whole(position: i64, frames: usize) -> Self {
+    pub fn whole(position: i64, frames: usize) -> Self {
         Self {
             parts: [
                 SubBlock {
@@ -698,14 +695,14 @@ impl BlockSplit {
         }
     }
 
-    pub(crate) fn split(first: SubBlock, second: SubBlock) -> Self {
+    pub fn split(first: SubBlock, second: SubBlock) -> Self {
         Self {
             parts: [first, second],
             count: 2,
         }
     }
 
-    pub(crate) fn iter(&self) -> impl Iterator<Item = &SubBlock> {
+    pub fn iter(&self) -> impl Iterator<Item = &SubBlock> {
         self.parts[..self.count.clamp(1, 2) as usize].iter()
     }
 }
@@ -713,7 +710,7 @@ impl BlockSplit {
 /// 一块音频的进程流上下文（与样本视图分开：`InputBlock` 仍然只描述音频）。
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
-pub(crate) struct BlockContext {
+pub struct BlockContext {
     pub stream: ProcessStream,
     /// 本块所属的捕获世代。
     pub capture_epoch: u64,
@@ -812,8 +809,7 @@ impl BlockContext {
     ///
     /// 【为什么带 `#[cfg(test)]`】生产路径从 `ProcessContext` 逐字段构造
     /// （`BlockContext::from_process` 一类），这个便捷构造器没有生产调用点。
-    #[cfg(test)]
-    pub(crate) fn realtime(flow: bool) -> Self {
+    pub fn realtime(flow: bool) -> Self {
         Self {
             stream: ProcessStream::Realtime,
             capture_epoch: 0,
@@ -925,7 +921,7 @@ struct Pending {
 
 /// 一次 `on_block` 的结果（给调用方决定输出）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CaptureOutcome {
+pub enum CaptureOutcome {
     /// 已写入（可能同时封了口）。
     Captured,
     /// 本块没有可用输入：写了等长的零，保持时间轴连续。
@@ -954,7 +950,7 @@ pub(crate) enum CaptureOutcome {
 
 /// 捕获侧诊断快照（`capture_status` 与诊断包读取）。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct CaptureDiagnostics {
+pub struct CaptureDiagnostics {
     pub preroll_frames_dropped: u64,
     pub pending_stashed: u64,
     pub pending_committed: u64,
@@ -1013,7 +1009,7 @@ pub(crate) struct CaptureDiagnostics {
 }
 
 /// 捕获状态机。**只有音频线程写**；非音频线程在锁下补充备用缓冲与收走封口的段。
-pub(crate) struct Capture {
+pub struct Capture {
     /// 正在写的段；`None` = 尚未开始或已停止。
     active: Option<Segment>,
     /// 预分配的备用缓冲（非音频线程补充）。
@@ -1261,7 +1257,7 @@ impl Capture {
     /// （每个都是空的、长度为容量的平面）；`pendings` 是两条流各自的 lookbehind
     /// 专用缓冲（`None` = 预算不足，关闭该流的 lookbehind）；`max_frames` 是
     /// 本次录制的帧数上限（`0` = 不限）。非音频线程调用。
-    pub(crate) fn start(
+    pub fn start(
         &mut self,
         channels: u8,
         capacity_frames: usize,
@@ -1288,22 +1284,22 @@ impl Capture {
     ///
     /// 【为什么界面需要它】待命与录制中是两种不同的等待：前者等的是**用户去按播放**，
     /// 后者等的是**时间积累**。合成一个"已录 0.0 秒"会让待命看起来像失败。
-    pub(crate) fn is_started(&self) -> bool {
+    pub fn is_started(&self) -> bool {
         self.started
     }
 
     /// 本次捕获的世代。
-    pub(crate) fn epoch(&self) -> u64 {
+    pub fn epoch(&self) -> u64 {
         self.epoch
     }
 
     /// 当前捕获相位（音频线程写，非音频线程读）。
-    pub(crate) fn phase(&self) -> CapturePhase {
+    pub fn phase(&self) -> CapturePhase {
         self.phase
     }
 
     /// 最近一块的帧数（0 = 还没有块）。
-    pub(crate) fn last_block_frames(&self) -> u32 {
+    pub fn last_block_frames(&self) -> u32 {
         self.last_block_frames
     }
 
@@ -1313,7 +1309,7 @@ impl Capture {
     /// 下一次起播的第一块会被当作“上一块的延续”覆盖写，听起来像上一遍的尾巴。
     /// 这里封口 active，并清空所有跨 pass 的记账；同一 take 内后续段由时间线
     /// 的“后来者胜出”规则覆盖。
-    pub(crate) fn begin_transport_pass(&mut self, epoch: u64) {
+    pub fn begin_transport_pass(&mut self, epoch: u64) {
         if self.transport_epoch == epoch {
             return;
         }
@@ -1343,7 +1339,7 @@ impl Capture {
     /// 【为什么要有预警】上限到点会**自己停**，而那是用户设的一个数值 —— 不预警的话
     /// 用户只能看到"录着录着就断了"。预警必须早于上限，且必须由后端给（只有它知道
     /// 已捕获多少帧）。
-    pub(crate) fn limit_warning(&self) -> bool {
+    pub fn limit_warning(&self) -> bool {
         if self.max_frames == 0 || self.sample_rate == 0 {
             return false;
         }
@@ -1352,22 +1348,22 @@ impl Capture {
     }
 
     /// 是否已经结束（等 promote）。
-    pub(crate) fn is_stopped(&self) -> bool {
+    pub fn is_stopped(&self) -> bool {
         self.stopped.is_some()
     }
 
     /// 停止原因。
-    pub(crate) fn stopped_reason(&self) -> Option<ClosedReason> {
+    pub fn stopped_reason(&self) -> Option<ClosedReason> {
         self.stopped
     }
 
     /// 备用缓冲还剩几个（非音频线程据此补充）。
-    pub(crate) fn spare_count(&self) -> usize {
+    pub fn spare_count(&self) -> usize {
         self.spares.len()
     }
 
     /// 已封口、尚未被收走的段数。
-    pub(crate) fn sealed_len(&self) -> usize {
+    pub fn sealed_len(&self) -> usize {
         self.sealed.len()
     }
 
@@ -1376,7 +1372,7 @@ impl Capture {
     /// 【为什么取并集而不是"首段起点 .. 最后写入位置"】宿主 seek 回退或循环回卷会让
     /// 后面的段落在前面：那时"最后写入位置"反而在起点左侧，用区间端点算出来的带子会
     /// 缩回去甚至翻号。界面要的是"我录过哪些地方"，并集才是那个问题的答案。
-    pub(crate) fn span(&self) -> Option<Range<i64>> {
+    pub fn span(&self) -> Option<Range<i64>> {
         let mut start = i64::MAX;
         let mut end = i64::MIN;
         for segment in self.sealed.iter().chain(self.active.iter()) {
@@ -1410,7 +1406,7 @@ impl Capture {
     /// 而画面上根本分辨不出 1 毫秒的缝隙。超过上限就反复合并**最小的间隙**，
     /// 丢掉的是"这里有一点点空隙"的信息，保留的是"大段没录到"的信息 —— 那才是用户
     /// 需要看见的东西。
-    pub(crate) fn covered_runs(&self) -> Vec<Range<i64>> {
+    pub fn covered_runs(&self) -> Vec<Range<i64>> {
         merge_runs(
             self.sealed.iter().chain(self.active.iter()).map(|segment| {
                 let start = segment.origin.max(0);
@@ -1422,12 +1418,12 @@ impl Capture {
     }
 
     /// 已写入的工程帧总数。
-    pub(crate) fn captured_frames(&self) -> u64 {
+    pub fn captured_frames(&self) -> u64 {
         self.captured_frames
     }
 
     /// 最后写入的工程位置终点。
-    pub(crate) fn last_position(&self) -> Option<i64> {
+    pub fn last_position(&self) -> Option<i64> {
         self.last_position
     }
 
@@ -1436,7 +1432,7 @@ impl Capture {
     /// 【为什么保留】录音结束后正是用户最需要看"开头丢了多少 pre-roll / lookbehind
     /// 补了几块"的时刻；`*capture = default()` 会把这些读数一起清掉，诊断就永远只能
     /// 在录制**过程中**读到。
-    pub(crate) fn reset_after_promote(&mut self) {
+    pub fn reset_after_promote(&mut self) {
         let diagnostics = self.diagnostics();
         *self = Self {
             // 保留“这次录制最后用哪条流供料”的读数：用户按下停止后仍要能诊断
@@ -1468,7 +1464,7 @@ impl Capture {
     }
 
     /// 捕获侧诊断快照（非音频线程调用）。
-    pub(crate) fn diagnostics(&self) -> CaptureDiagnostics {
+    pub fn diagnostics(&self) -> CaptureDiagnostics {
         CaptureDiagnostics {
             preroll_frames_dropped: self.preroll_frames_dropped,
             pending_stashed: self.pending_stashed,
@@ -1503,17 +1499,17 @@ impl Capture {
     }
 
     /// 当前为捕获供料的进程流（`None` = 尚未选举）。
-    pub(crate) fn elected_stream(&self) -> Option<ProcessStream> {
+    pub fn elected_stream(&self) -> Option<ProcessStream> {
         self.elected
     }
 
     /// 本次捕获的峰值。
-    pub(crate) fn peak(&self) -> [f32; 2] {
+    pub fn peak(&self) -> [f32; 2] {
         self.peak
     }
 
     /// 本次捕获的工程采样率（`0` = 尚未确定）。
-    pub(crate) fn sample_rate(&self) -> u32 {
+    pub fn sample_rate(&self) -> u32 {
         self.sample_rate
     }
 
@@ -1522,7 +1518,7 @@ impl Capture {
     /// 【为什么要"补充"而不是"预留一大把"】预留 N 个等于预留 N×8 秒的内存，而绝大多数
     /// 录制只用得起一两个。按需补充让内存占用跟随实际录制长度，同时保证音频线程手上
     /// **总有**一个可用的。
-    pub(crate) fn push_spare(&mut self, spare: Segment) {
+    pub fn push_spare(&mut self, spare: Segment) {
         self.spares.push(spare);
     }
 
@@ -1532,7 +1528,7 @@ impl Capture {
     /// `Vec`，于是音频线程上下一次 `sealed.push` 就是一次分配 —— 而它发生在音频
     /// 线程上，且每次换段都会发生（8 秒一段）。这里（非音频线程）先备好容量，
     /// 音频线程的 push 就落在既有容量里。
-    pub(crate) fn drain_sealed(&mut self) -> Vec<Segment> {
+    pub fn drain_sealed(&mut self) -> Vec<Segment> {
         let taken = std::mem::take(&mut self.sealed);
         self.sealed.reserve(SEALED_HEADROOM);
         taken
@@ -1542,7 +1538,7 @@ impl Capture {
     ///
     /// 【为什么 pending 直接丢弃】它只是“尚未被下一块证明”的候选首块；用户按下
     /// stop 时，没有证据的那一块不能算素材（否则一次误按会产生一个幽灵 take）。
-    pub(crate) fn finish(&mut self, reason: ClosedReason) -> Vec<Segment> {
+    pub fn finish(&mut self, reason: ClosedReason) -> Vec<Segment> {
         for pending in &mut self.pendings {
             pending.buffer = None;
             pending.ready = false;
@@ -1562,7 +1558,7 @@ impl Capture {
     /// 【为什么带 `#[cfg(test)]`】生产路径走 `on_block_with_context`（带进程流与块流
     /// 证据）；这两个"只带 flow"的包装只被测试用来喂块。
     #[cfg(test)]
-    pub(crate) fn on_block(&mut self, block: InputBlock<'_>) -> CaptureOutcome {
+    pub fn on_block(&mut self, block: InputBlock<'_>) -> CaptureOutcome {
         self.on_block_with_flow(block, false)
     }
 
@@ -1571,11 +1567,7 @@ impl Capture {
     /// 【为什么 `flow` 不能直接等于“写”】位置推进既可能是起播，也可能是停播时
     /// 拖了一次播放头。弱证据先暂存一块，下一块**首尾相接**才提交（lookbehind）。
     #[cfg(test)]
-    pub(crate) fn on_block_with_flow(
-        &mut self,
-        block: InputBlock<'_>,
-        flow: bool,
-    ) -> CaptureOutcome {
+    pub fn on_block_with_flow(&mut self, block: InputBlock<'_>, flow: bool) -> CaptureOutcome {
         self.on_block_with_context(block, BlockContext::realtime(flow))
     }
 
@@ -1584,7 +1576,7 @@ impl Capture {
     /// 【职责划分】本函数只做三件事：夹掉 pre-roll、更新**本流**候选、决定是否
     /// 选举/交接；真正的 lookbehind 与写入是 [`Self::capture_elected`]。这样
     /// “哪条流供料”与“这一块怎么写”不会在同一个 if 树里互相污染。
-    pub(crate) fn on_block_with_context(
+    pub fn on_block_with_context(
         &mut self,
         block: InputBlock<'_>,
         ctx: BlockContext,
@@ -3234,7 +3226,7 @@ impl Capture {
     }
 
     /// 宿主停止处理：冻结位置、保留 active 段与 take，等待下一次起播。
-    pub(crate) fn pause(&mut self) {
+    pub fn pause(&mut self) {
         if self.started {
             self.phase = CapturePhase::Paused;
         }
@@ -3265,7 +3257,7 @@ impl Capture {
 /// 一起出现 —— 它们共同描述"本块写哪一段"，拆成四个位置参数只会让调用点反复核对
 /// 顺序（`start, frames, skip, rate` 的顺序错了不会报错，只会录出错位的内容）。
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct BlockGeometry {
+pub struct BlockGeometry {
     /// 本块在工程域的有效起点（已夹掉负位置）。
     pub start: i64,
     /// 有效帧数（已扣掉 `skip`）。
@@ -3285,7 +3277,7 @@ pub(crate) struct BlockGeometry {
 /// 因此这里是它的一个**显式子集**：由调用方从 `BlockContext` / `BlockEvidence`
 /// 里挑出来（见 `on_block_with_context` 的两个构造点），字段一一对应。
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct BlockEvidence {
+pub struct BlockEvidence {
     /// 位置流在推进的弱证据（宿主没报 `kPlaying` 时唯一的起播依据）。
     pub flow: bool,
     /// `kPlaying` / `kRecording` 的上升沿。

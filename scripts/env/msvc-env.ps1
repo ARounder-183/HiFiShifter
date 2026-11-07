@@ -3,22 +3,123 @@
 # cc / cmake 两个 crate 直接调 cl.exe，它们不会自己初始化 MSVC 环境。没有 INCLUDE / LIB /
 # PATH 时 cl.exe 会在启动编译器后端时报 D8050（"cl.exe 存在但编译全部失败"），所以这一步
 # 不能静默跳过。
+#
+# 【为什么不再只认 vswhere】vswhere 只是**一条**发现路径，不是唯一事实：实测某些机器的
+# vswhere 对 `-requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64` 返回空
+# （工作负载装在别的产品里、或 vswhere 版本过旧），而 VS 本身完全可用。于是构建脚本在
+# "VS 明明装着"的机器上直接报"找不到 Visual Studio"。现在按**可执行证据**发现：
+# 谁下面真的有 `VC\Auxiliary\Build\vcvars64.bat` 就用谁，顺序是
+# 已导入的环境变量 → vswhere → 注册表 → 安装目录扫描。
+#
+# 【为什么不写死盘符或目录】仓库可能在任何盘、任何目录；VS 可能在 Program Files 也可能
+# 在 Program Files (x86)。所有位置都由系统 API / 环境变量推出，不出现字面路径。
 
 $ErrorActionPreference = 'Stop'
 
-$vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-if (!(Test-Path $vswhere)) { throw "找不到 vswhere.exe：$vswhere（需要带「使用 C++ 的桌面开发」工作负载的 Visual Studio）" }
+# 幂等：在 VS 开发者命令提示符里点源，或同一次构建里被点源两次时，不要重复导入。
+# 重复导入会把 vcvars 的 PATH 再叠一遍，最终超过 8191 字符的环境块上限。
+if ($env:VSCMD_VER -and $env:INCLUDE -and $env:LIB -and (Get-Command cl.exe -ErrorAction SilentlyContinue)) {
+    return
+}
 
-$vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-if (!$vsPath) { throw '找不到带「使用 C++ 的桌面开发」工作负载的 Visual Studio 实例' }
-$vcvars = Join-Path $vsPath.Trim() 'VC\Auxiliary\Build\vcvars64.bat'
-if (!(Test-Path $vcvars)) { throw "找不到 $vcvars" }
+function Get-ProgramFilesRoots {
+    # 用系统 API 取，而不是读环境变量：$env:ProgramFiles(x86) 在某些宿主里不存在。
+    $roots = @()
+    foreach ($kind in 'ProgramFilesX86', 'ProgramFiles') {
+        $path = [Environment]::GetFolderPath($kind)
+        if ($path) { $roots += $path }
+    }
+    return $roots | Select-Object -Unique
+}
 
-# 让 cmd 先跑 vcvars64.bat 再 `set` 转储整个环境；逐行按第一个 '=' 切分（值本身可以含 '='）。
-foreach ($line in (& cmd.exe /c "`"$vcvars`" >nul 2>&1 && set")) {
+function Find-VsWhere {
+    foreach ($root in Get-ProgramFilesRoots) {
+        $candidate = Join-Path $root 'Microsoft Visual Studio\Installer\vswhere.exe'
+        if (Test-Path -LiteralPath $candidate) { return $candidate }
+    }
+    $onPath = Get-Command vswhere.exe -ErrorAction SilentlyContinue
+    if ($onPath) { return $onPath.Source }
+    return $null
+}
+
+function Get-VsInstallRoots {
+    $roots = @()
+    if ($env:VCINSTALLDIR) { $roots += (Split-Path -Parent (Split-Path -Parent $env:VCINSTALLDIR)) }
+    if ($env:VSINSTALLDIR) { $roots += $env:VSINSTALLDIR }
+
+    $vswhere = Find-VsWhere
+    if ($vswhere) {
+        # 先按组件要求找；找不到再放宽（组件 ID 随工作负载而异，而"有 vcvars64.bat"才是硬判据）。
+        foreach ($requires in @('Microsoft.VisualStudio.Component.VC.Tools.x86.x64', $null)) {
+            if ($requires) {
+                $found = & $vswhere -latest -products * -requires $requires -property installationPath 2>$null
+            } else {
+                $found = & $vswhere -latest -products * -property installationPath 2>$null
+            }
+            foreach ($line in @($found)) {
+                if ($line -and $line.Trim()) { $roots += $line.Trim() }
+            }
+            if ($roots.Count -gt 0) { break }
+        }
+    }
+
+    foreach ($key in 'HKLM:\SOFTWARE\Microsoft\VisualStudio\SxS\VS7', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\VisualStudio\SxS\VS7') {
+        if (!(Test-Path $key)) { continue }
+        foreach ($value in (Get-ItemProperty $key).PSObject.Properties) {
+            if ($value.Name -match '^\d+\.\d+$' -and $value.Value) { $roots += [string]$value.Value }
+        }
+    }
+
+    foreach ($root in Get-ProgramFilesRoots) {
+        $base = Join-Path $root 'Microsoft Visual Studio'
+        if (!(Test-Path -LiteralPath $base)) { continue }
+        $roots += Get-ChildItem -LiteralPath $base -Directory -ErrorAction SilentlyContinue |
+            ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Directory -ErrorAction SilentlyContinue } |
+            ForEach-Object { $_.FullName }
+    }
+    return $roots | Where-Object { $_ } | Select-Object -Unique
+}
+
+$vcvars = $null
+foreach ($root in Get-VsInstallRoots) {
+    $candidate = Join-Path $root.Trim() 'VC\Auxiliary\Build\vcvars64.bat'
+    if (Test-Path -LiteralPath $candidate) { $vcvars = $candidate; break }
+}
+if (!$vcvars) {
+    throw ('找不到 VC\Auxiliary\Build\vcvars64.bat。需要带「使用 C++ 的桌面开发」工作负载的 Visual Studio；' +
+        '也可以先在「x64 Native Tools Command Prompt for VS」里启动 PowerShell 再跑构建。')
+}
+
+# 【为什么写一个临时 .cmd 而不是 `cmd /c "call ..."`】Windows 的命令行没有
+# "带引号路径"的统一转义规则：从 PowerShell / Node 把 `call "C:\Program Files\..."`
+# 拼成一条命令行时，引号会被宿主吃掉或转义成 \\"，cmd 于是把整串当成一个不存在的
+# 命令名（实测报 `'"C:\Program Files\..."' 不是内部或外部命令`）。写进 .cmd 文件
+# 之后由 cmd 自己解析，路径里有空格、中文、任何字符都不需要再转义。
+$transcript = Join-Path ([IO.Path]::GetTempPath()) ("hfs-vcvars-" + [Guid]::NewGuid().ToString('N') + '.cmd')
+$lines = @(
+    '@echo off',
+    ('call "{0}" >nul 2>&1' -f $vcvars),
+    'if errorlevel 1 exit /b 1',
+    'set'
+)
+[IO.File]::WriteAllLines($transcript, $lines, [Text.Encoding]::Default)
+try {
+    # 【为什么不用 $env:ComSpec】极简宿主（CI 容器、按需构造的环境）里它可能是空的。
+    $comspec = if ($env:ComSpec) { $env:ComSpec } else { Join-Path $env:SystemRoot 'System32\cmd.exe' }
+    $dump = & $comspec /c $transcript
+    if ($LASTEXITCODE) { throw "vcvars64.bat 执行失败（退出码 $LASTEXITCODE）：$vcvars" }
+} finally {
+    Remove-Item -LiteralPath $transcript -Force -ErrorAction SilentlyContinue
+}
+
+# 逐行按第一个 '=' 切分（值本身可以含 '='）。
+foreach ($line in $dump) {
     $split = $line.IndexOf('=')
     if ($split -lt 1) { continue }
     Set-Item -Path "Env:$($line.Substring(0, $split))" -Value $line.Substring($split + 1)
+}
+if (!(Get-Command cl.exe -ErrorAction SilentlyContinue)) {
+    throw "vcvars64.bat 已执行但 PATH 上仍然没有 cl.exe：$vcvars"
 }
 
 # cmake 的 "Visual Studio 17 2022" 生成器靠注册表找实例，而 opusic-sys 显式请求它；

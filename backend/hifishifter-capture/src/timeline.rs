@@ -35,7 +35,7 @@
 //! 一段**空**，而空是诚实的：那里确实什么都没录。
 //!
 //! 整段录音全静音时仍然**不产生片段**（素材为空的判据是"有没有可听内容"，
-//! 见 [`MaterialSummary::is_silent`](super::MaterialSummary::is_silent)）：一个全静音的
+//! 见 [`MaterialSummary::is_silent`](crate::store::MaterialSummary::is_silent)）：一个全静音的
 //! take 若算作"有素材"，插件就会把这条轨替换成静音 —— 那是"插件把我的轨道弄哑了"。
 //!
 //! # 单位
@@ -44,8 +44,8 @@
 //! 各自独立换算（段起点、段长、段内偏移），不合到一起算 —— 合起来写会掩盖
 //! "用了哪个率"这个唯一重要的问题。
 
-use super::recorder::Segment;
-use crate::render::snapshot::PlaybackSnapshot;
+use crate::recorder::Segment;
+use crate::types::CaptureTape;
 use hifishifter_kernel::state::TimelineState;
 use serde_json::json;
 use std::ops::Range;
@@ -59,9 +59,9 @@ use std::ops::Range;
 /// 【为什么是常量而不是按宿主派生】宿主连名字都没给我们（没有原生扩展），
 /// 而且 Capture 形态下素材只有一条流。派生一个假名字进日志与工程文件，比一个
 /// 诚实的固定名字更糟。
-pub(crate) const CAPTURE_TRACK_ID: &str = "capture-track";
+pub const CAPTURE_TRACK_ID: &str = "capture-track";
 /// 轨道显示名。
-pub(crate) const CAPTURE_TRACK_NAME: &str = "Capture";
+pub const CAPTURE_TRACK_NAME: &str = "Capture";
 /// 每个投影 clip 的外部边界淡化（秒）。
 ///
 /// 【为什么需要】Capture 的 clip 起点/终点可能落在波形中间；硬切会产生"咔"。
@@ -71,17 +71,17 @@ const CAPTURE_EDGE_FADE_SEC: f64 = 0.002;
 
 /// 投影的输入：一个 take 的 id 与它的段（按录制顺序）。
 #[derive(Clone, Copy)]
-pub(crate) struct ProjectionTake<'a> {
+pub struct ProjectionTake<'a> {
     pub id: u64,
     pub segments: &'a [Segment],
 }
 
 /// 一个 take 的**素材带**：它的段按录制顺序首尾相接（见模块头）。
-pub(crate) struct Tape<'a> {
+pub struct Tape<'a> {
     /// 录制序号（take 号）。
-    pub(crate) take: u64,
+    pub take: u64,
     /// 本带的采样率。同一 take 内必然一致 —— 捕获在采样率变化时停止。
-    pub(crate) sample_rate: u32,
+    pub sample_rate: u32,
     /// 参与本带的段（**已剔除**含 NaN/Inf 的那些）。
     segments: Vec<&'a Segment>,
     /// 每段在带上的起点（帧），与 `segments` 同序。
@@ -92,12 +92,12 @@ pub(crate) struct Tape<'a> {
 
 impl<'a> Tape<'a> {
     /// 带的总帧数。
-    pub(crate) fn frames(&self) -> usize {
+    pub fn frames(&self) -> usize {
         self.frames
     }
 
     /// 内容身份：优先取 promote 写入的内容哈希；旧档/测试夹具退回 take 号。
-    pub(crate) fn source_key(&self) -> String {
+    pub fn source_key(&self) -> String {
         self.segments
             .first()
             .and_then(|segment| segment.source_key.clone())
@@ -180,7 +180,7 @@ impl<'a> Tape<'a> {
     /// 这份读数就是那条断链的接线端：它跟着源走到渲染输入，再走到发布快照。
     ///
     /// 空 = "整份都算录到了"（旧语义，也是没有覆盖记录的段的语义）。
-    pub(crate) fn covered_ranges(&self) -> Vec<Range<usize>> {
+    pub fn covered_ranges(&self) -> Vec<Range<usize>> {
         let mut covered: Vec<Range<usize>> = Vec::new();
         for (segment, base) in self.segments.iter().zip(&self.offsets) {
             let limit = *base + segment.filled;
@@ -232,7 +232,7 @@ impl<'a> Tape<'a> {
     /// 【为什么在这里拼而不是让消费方各拼一遍】源 PCM 是渲染与波形共用的输入，
     /// 而"带 = 段的顺序拼接"这条规则只能有一处实现 —— 两处实现必然漂移，
     /// 表现为"听到的和看到的不是同一段音频"。
-    pub(crate) fn concat_planes(&self) -> Vec<Vec<f32>> {
+    pub fn concat_planes(&self) -> Vec<Vec<f32>> {
         let channels = self
             .segments
             .iter()
@@ -291,7 +291,7 @@ fn push_merged(covered: &mut Vec<Range<usize>>, range: Range<usize>) {
 ///
 /// 【为什么剔除段而不是整条 take】含 NaN/Inf 的段不能进渲染，但同一次录制里的其余段
 /// 是好的 —— 让一段坏音频抹掉整次录制，与 `render/input.rs` 的既有纪律（逐条降级）不符。
-pub(crate) fn build_tapes<'a>(takes: &[ProjectionTake<'a>]) -> (Vec<Tape<'a>>, usize) {
+pub fn build_tapes<'a>(takes: &[ProjectionTake<'a>]) -> (Vec<Tape<'a>>, usize) {
     let mut dropped = 0usize;
     let mut tapes = Vec::with_capacity(takes.len());
     for take in takes {
@@ -371,7 +371,7 @@ fn resolved_pieces(tapes: &[Tape<'_>]) -> Vec<Piece> {
 
 /// 一次投影的结果摘要（给状态栏与诊断用）。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct TimelineSummary {
+pub struct TimelineSummary {
     /// 生成的片段数。
     pub clips: usize,
     /// 片段覆盖的工程帧数（不含静音空洞）。
@@ -396,7 +396,7 @@ pub(crate) struct TimelineSummary {
 ///
 /// 【为什么非法段是"丢弃"而不是"报错"】一段含 NaN 的音频不该让整条时间线消失 ——
 /// 其余段是好的，用户要能听见它们。丢弃并计数，与 `render/input.rs` 的既有纪律一致。
-pub(crate) fn project(takes: &[ProjectionTake<'_>], bpm: f64) -> (TimelineState, TimelineSummary) {
+pub fn project(takes: &[ProjectionTake<'_>], bpm: f64) -> (TimelineState, TimelineSummary) {
     let (tapes, dropped_segments) = build_tapes(takes);
     let mut summary = TimelineSummary {
         dropped_segments,
@@ -558,7 +558,7 @@ pub(crate) fn project(takes: &[ProjectionTake<'_>], bpm: f64) -> (TimelineState,
 ///
 /// 原始磁带要表达的东西极其简单："把捕获到的样本原样播一遍"。那就**直接拷样本**：
 /// 没有单位换算、没有重采样、没有插值，因而不可能因为约定不一致而出错。
-pub(crate) fn raw_tape(takes: &[ProjectionTake<'_>]) -> Option<PlaybackSnapshot> {
+pub fn raw_tape(takes: &[ProjectionTake<'_>]) -> Option<CaptureTape> {
     let (tapes, _) = build_tapes(takes);
     let pieces = resolved_pieces(&tapes);
     if pieces.is_empty() {
@@ -578,7 +578,7 @@ pub(crate) fn raw_tape(takes: &[ProjectionTake<'_>]) -> Option<PlaybackSnapshot>
         return None;
     }
     let bytes = frames.checked_mul(8)?;
-    let reservation = crate::render::budget::global_budget().reserve(bytes)?;
+    let reservation = crate::budget::global_budget().reserve(bytes)?;
     let mut left = vec![0.0_f32; frames];
     let mut right = vec![0.0_f32; frames];
     // 【T1：宿主帧域的真实覆盖区间】只有"从宿主样本里拷过来"的帧才进这里。
@@ -620,13 +620,13 @@ pub(crate) fn raw_tape(takes: &[ProjectionTake<'_>]) -> Option<PlaybackSnapshot>
             }
         }
     }
-    let mut snapshot = PlaybackSnapshot {
+    let mut snapshot = CaptureTape {
         sample_rate: rate,
         origin_sample: start,
         left,
         right,
         covered,
-        _reservation: Some(reservation),
+        reservation: Some(reservation),
     };
     // 与合成路径同一纪律：逐 bit 相同才归并，且归并会把额度退回去。
     let _ = snapshot.compact_mono();
@@ -644,7 +644,7 @@ pub(crate) fn raw_tape(takes: &[ProjectionTake<'_>]) -> Option<PlaybackSnapshot>
 ///
 /// 两个读数都只读事实，不改任何行为。
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(crate) struct LeadIn {
+pub struct LeadIn {
     /// 第一个"属于我们"的帧在带内的偏移（帧）。空 = 整条带都不属于我们。
     pub synthetic_frames: u64,
     /// 第一个**非零**样本在带内的偏移（秒）。`None` = 整条带都是零。
@@ -661,7 +661,7 @@ pub(crate) struct LeadIn {
 }
 
 /// 量一次录制的前导（见 [`LeadIn`]）。**纯读**。
-pub(crate) fn lead_in(segments: &[Segment]) -> LeadIn {
+pub fn lead_in(segments: &[Segment]) -> LeadIn {
     let takes = [ProjectionTake { id: 0, segments }];
     let (tapes, _) = build_tapes(&takes);
     let Some(tape) = tapes.first() else {
@@ -697,11 +697,7 @@ pub(crate) fn lead_in(segments: &[Segment]) -> LeadIn {
 }
 
 /// 单个 take 的投影（便利入口；语义与 [`project`] 逐字段一致）。
-pub(crate) fn build(
-    segments: &[Segment],
-    take_id: u64,
-    bpm: f64,
-) -> (TimelineState, TimelineSummary) {
+pub fn build(segments: &[Segment], take_id: u64, bpm: f64) -> (TimelineState, TimelineSummary) {
     project(
         &[ProjectionTake {
             id: take_id,
@@ -716,7 +712,7 @@ pub(crate) fn build(
 /// 【为什么不是一段一份】片段可以跨段（见模块头），而一个片段只能引用一份源 ——
 /// 段一份源会让跨段片段无法表达。带上 take 号是必须的：两次录制的内容不同，
 /// 共用一个 id 会让"上一次 take 的源"被这一次引用。
-pub(crate) fn source_id(take_id: u64) -> String {
+pub fn source_id(take_id: u64) -> String {
     format!("capture://{take_id}")
 }
 
@@ -727,7 +723,7 @@ pub(crate) fn source_id(take_id: u64) -> String {
 /// 段号则会随**内存容器**的划分变化（8 秒一段），而容器与内容无关。
 /// `(take, 带内偏移)` 只描述"这是哪一次录制的哪一段音频"：没被覆盖的片保持 id 不变，
 /// 被覆盖的片本来就该换一个身份。
-pub(crate) fn clip_id(take_id: u64, offset: usize) -> String {
+pub fn clip_id(take_id: u64, offset: usize) -> String {
     format!("capture-clip-{take_id}-{offset}")
 }
 
@@ -739,7 +735,7 @@ pub(crate) fn clip_id(take_id: u64, offset: usize) -> String {
 /// 于是即使投影这一层被绕过，raw 与 processed 也不会相差一个 pre-roll。
 ///
 /// 返回被裁剪的 clip 数（调用方据此记一次限流日志）。
-pub(crate) fn clamp_timeline_to_project(timeline: &mut TimelineState) -> usize {
+pub fn clamp_timeline_to_project(timeline: &mut TimelineState) -> usize {
     let mut trimmed = 0_usize;
     timeline.clips.retain_mut(|clip| {
         if !clip.start_sec.is_finite() || clip.start_sec >= 0.0 {
@@ -880,7 +876,7 @@ fn coalesce(pieces: Vec<Piece>) -> Vec<Piece> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::capture::recorder::{ClosedReason, SegmentLoss};
+    use crate::recorder::{ClosedReason, SegmentLoss};
 
     fn segment(origin: i64, values: &[f32]) -> Segment {
         Segment {

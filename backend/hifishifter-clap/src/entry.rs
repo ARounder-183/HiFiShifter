@@ -132,6 +132,8 @@ pub struct Instance {
     pub processing: AtomicBool,
     /// `process` 是否正在执行（防同一实例并发进入音频回调）。
     pub in_process: AtomicBool,
+    /// 捕获宿主：与 VST3 共用同一份运行时（判定、投影、sidecar）。
+    pub capture: crate::capture::CaptureHost,
 }
 
 unsafe extern "C" fn create_plugin(
@@ -159,6 +161,7 @@ unsafe extern "C" fn create_plugin(
             active: AtomicBool::new(false),
             processing: AtomicBool::new(false),
             in_process: AtomicBool::new(false),
+            capture: crate::capture::CaptureHost::default(),
         });
         let plugin = Box::new(clap_plugin_t {
             desc: &raw const DESCRIPTOR,
@@ -267,6 +270,8 @@ unsafe extern "C" fn plugin_activate(
             return false;
         }
         instance.audio.set_sample_rate(sample_rate);
+        // 捕获拒绝在没有工程采样率的实例上武装：它是"工程帧 ↔ 秒"换算的唯一依据。
+        instance.capture.note_activate(sample_rate);
         crate::ara::observe_activation(plugin);
         log::info!("[clap] activated at {sample_rate} Hz, block {min}..={max}");
         true
@@ -357,6 +362,9 @@ unsafe extern "C" fn plugin_process(
             );
             crate::ara::observe_processing(plugin);
             if unsafe { audio::process_block(process) } {
+                // 【顺序】先让宿主缓冲就位（in-place 时输入与输出是同一块），再喂捕获：
+                // 捕获只读输入平面，写完自己的段；它不改输出，因此直通不受影响。
+                unsafe { instance.capture.on_process(process, &instance.audio) };
                 CLAP_PROCESS_CONTINUE
             } else {
                 CLAP_PROCESS_ERROR
@@ -414,6 +422,7 @@ mod tests {
             active: AtomicBool::new(false),
             processing: AtomicBool::new(false),
             in_process: AtomicBool::new(false),
+            capture: crate::capture::CaptureHost::default(),
         }));
         let plugin = clap_plugin_t {
             desc: std::ptr::null(),

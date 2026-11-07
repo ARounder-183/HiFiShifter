@@ -44,7 +44,7 @@ const MAX_PREF_VALUE_BYTES: usize = 64 * 1024;
 /// 本窗口的 bootstrap：形态是 `capture`，能力全部如实为 false。
 ///
 /// `viewId` 由实例生成，回执与事件都带它（前端据此丢弃别的实例的消息）。
-pub fn bootstrap(view_id: &str) -> Value {
+pub fn bootstrap(view_id: &str, capture_caps: Value) -> Value {
     json!({
         "version": 1,
         "viewId": view_id,
@@ -53,12 +53,7 @@ pub fn bootstrap(view_id: &str) -> Value {
         "trackGrouping": true,
         "transportControl": false,
         "fadeAxes": null,
-        "captureCaps": {
-            "sawContext": false,
-            "sawInput": false,
-            "sawOffline": false,
-            "canCapture": false,
-        },
+        "captureCaps": capture_caps,
         "hostCapabilities": {
             "transport": false,
             "clipGeometry": false,
@@ -81,7 +76,7 @@ pub fn bootstrap(view_id: &str) -> Value {
 
 /// 一条页面请求 → 回执。**永不返回 None**：每个合法请求都必须有回执，否则前端
 /// 的 Promise 会挂到 `commandTimeoutMs` 才拒绝，用户看到的是"界面卡住"。
-pub fn reply(view_id: &str, request: &Value) -> Value {
+pub fn reply(view_id: &str, request: &Value, capture: &crate::capture::CaptureHost) -> Value {
     let id = request.get("id").and_then(Value::as_u64).unwrap_or(0);
     let command = request.get("command").and_then(Value::as_str).unwrap_or("");
     let ok = |value: Value| json!({ "version": 1, "viewId": view_id, "id": id, "ok": true, "value": value });
@@ -96,14 +91,12 @@ pub fn reply(view_id: &str, request: &Value) -> Value {
         "plugin_health" | "ping" => ok(json!({ "ok": true, "kind": "clap-capture" })),
         // 时间线空态：Capture 外壳还没有捕获存储，返回一份**完整**的可渲染空工程。
         // 缺字段会让前端在 reducer 里读到 undefined（例如 bpm / playhead_sec）。
-        "get_timeline_state" => ok(json!({
-            "tracks": [],
-            "clips": [],
-            "selected_track_id": null,
-            "selected_clip_id": null,
-            "bpm": 120.0,
-            "playhead_sec": 0.0,
-        })),
+        // 捕获出来的轨道与片段就在这里出现。空时间线（还没录）由运行时给出，
+        // 是**一份完整的空工程**而不是省略字段 —— 前端 reducer 读不到 bpm/playhead_sec
+        // 会渲染成 undefined。
+        "get_timeline_state" | "get_timeline_state_lite" => {
+            ok(capture.timeline_payload(request["playheadSec"].as_f64().unwrap_or(0.0)))
+        }
         // 只读状态查询：给合法空态，让界面渲染出"还没有内容"，而不是显示一串失败。
         "get_runtime_info" => ok(json!({
             "ok": true,
@@ -140,6 +133,11 @@ pub fn reply(view_id: &str, request: &Value) -> Value {
             "rendering_active": false,
             "render_audible_stale": false,
         })),
+        // 捕获命令（与 VST3 同一套名字与载荷）。形状由运行时给出，前端只认一种。
+        command if command.starts_with("capture_") => match capture.handle(command, request) {
+            Ok(value) => ok(value),
+            Err(message) => err(&message),
+        },
         // 页面就绪/心跳这类诊断消息不进命令表，也别让它们变成错误。
         "plugin_ready" | "plugin_heap" | "plugin_refresh" => ok(json!(null)),
         // 界面偏好：读、写、删都回整表（与后端 `Record<string, string>` 契约一致）。
@@ -201,7 +199,10 @@ mod tests {
 
     #[test]
     fn bootstrap_reports_capture_and_no_host_write_capabilities() {
-        let boot = bootstrap("view-1");
+        let boot = bootstrap(
+            "view-1",
+            json!({"sawContext": false, "sawInput": false, "sawOffline": false, "canCapture": false}),
+        );
         assert_eq!(boot["version"], 1);
         assert_eq!(boot["viewId"], "view-1");
         assert_eq!(boot["hostKind"], "capture");
@@ -224,9 +225,18 @@ mod tests {
         assert_eq!(boot["captureCaps"]["canCapture"], false);
     }
 
+    /// 测试用的捕获宿主（未武装，所有命令都回合法空态）。
+    fn capture() -> crate::capture::CaptureHost {
+        crate::capture::CaptureHost::default()
+    }
+
     #[test]
     fn the_health_probe_succeeds_so_the_app_mounts() {
-        let reply = reply("v", &json!({ "id": 7, "command": "plugin_health" }));
+        let reply = reply(
+            "v",
+            &json!({ "id": 7, "command": "plugin_health" }),
+            &capture(),
+        );
         assert_eq!(reply["id"], 7);
         assert_eq!(reply["ok"], true);
         assert_eq!(reply["viewId"], "v");
@@ -234,7 +244,11 @@ mod tests {
 
     #[test]
     fn unwired_commands_fail_fast_instead_of_hanging_until_timeout() {
-        let reply = reply("v", &json!({ "id": 8, "command": "set_track_state" }));
+        let reply = reply(
+            "v",
+            &json!({ "id": 8, "command": "set_track_state" }),
+            &capture(),
+        );
         assert_eq!(reply["ok"], false);
         assert_eq!(reply["errorKind"], "transient");
         assert!(reply["error"].as_str().unwrap().contains("not wired"));
@@ -242,7 +256,7 @@ mod tests {
 
     #[test]
     fn every_request_gets_a_reply_even_without_a_command() {
-        let reply = reply("v", &json!({ "id": 9 }));
+        let reply = reply("v", &json!({ "id": 9 }), &capture());
         assert_eq!(reply["ok"], false);
     }
 
@@ -251,14 +265,20 @@ mod tests {
         let put = reply(
             "v",
             &json!({ "id": 1, "command": "ui_kv_put", "args": { "patch": { "hfs.lang": "zh-CN" } } }),
+            &capture(),
         );
         assert_eq!(put["ok"], true);
         assert_eq!(put["value"]["hfs.lang"], "zh-CN");
-        let dump = reply("v", &json!({ "id": 2, "command": "ui_kv_dump" }));
+        let dump = reply(
+            "v",
+            &json!({ "id": 2, "command": "ui_kv_dump" }),
+            &capture(),
+        );
         assert_eq!(dump["value"]["hfs.lang"], "zh-CN");
         let deleted = reply(
             "v",
             &json!({ "id": 3, "command": "ui_kv_delete", "args": { "keys": ["hfs.lang"] } }),
+            &capture(),
         );
         assert!(deleted["value"].get("hfs.lang").is_none());
     }
@@ -269,6 +289,7 @@ mod tests {
         let reply = reply(
             "v",
             &json!({ "id": 4, "command": "ui_kv_put", "args": { "patch": { "big": huge, "num": 5 } } }),
+            &capture(),
         );
         // 非法条目被丢弃，但命令本身成功（与后端"整表回执"的契约一致）。
         assert_eq!(reply["ok"], true);

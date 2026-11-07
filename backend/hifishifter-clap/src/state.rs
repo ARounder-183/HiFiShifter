@@ -132,9 +132,14 @@ unsafe extern "C" fn state_save(
         let Some(instance) = (unsafe { crate::instance(plugin) }) else {
             return false;
         };
-        let Ok(bytes) = instance.state.save() else {
+        let Ok(stored) = instance.state.save() else {
             return false;
         };
+        // 【为什么在这里并清单】捕获的音频落在本地缓存（sidecar），而"有哪些 take"
+        // 必须跟着宿主工程走：不并进去，重开工程就是一片空时间线，用户会以为录丢。
+        let mut container = ComponentState::decode(&stored).unwrap_or_default();
+        container.capture = serde_json::to_vec(&instance.capture.manifest()).ok();
+        let bytes = container.encode();
         unsafe { write_all(stream, &bytes) }
     })
 }
@@ -154,7 +159,27 @@ unsafe extern "C" fn state_load(
                 return false;
             }
         };
-        instance.state.load(&bytes).is_ok()
+        if instance.state.load(&bytes).is_err() {
+            return false;
+        }
+        // 【失败不阻断加载】清单解析不了只说明这一次恢复拿不到 take；把整块状态拒掉
+        // 会让用户的编辑也一起丢。日志留下面因，界面按"没有捕获"继续。
+        match ComponentState::decode(&bytes) {
+            Ok(container) => {
+                if let Some(capture) = container.capture {
+                    match serde_json::from_slice::<serde_json::Value>(&capture) {
+                        Ok(manifest) => {
+                            if let Err(error) = instance.capture.restore_manifest(&manifest) {
+                                log::warn!("[clap] capture manifest rejected: {error}");
+                            }
+                        }
+                        Err(error) => log::warn!("[clap] capture manifest is not JSON: {error}"),
+                    }
+                }
+            }
+            Err(error) => log::warn!("[clap] state container is unreadable: {error}"),
+        }
+        true
     })
 }
 
@@ -338,6 +363,7 @@ mod tests {
             active: std::sync::atomic::AtomicBool::new(false),
             processing: std::sync::atomic::AtomicBool::new(false),
             in_process: std::sync::atomic::AtomicBool::new(false),
+            capture: crate::capture::CaptureHost::default(),
         }));
         let plugin = clap_plugin_t {
             desc: std::ptr::null(),
@@ -375,7 +401,17 @@ mod tests {
         };
         let output = ostream(&mut sink);
         assert!(unsafe { state_save(plugin_ptr, &output) });
-        assert_eq!(sink.data, original, "C 边界往返必须逐字保真");
+        // 【为什么不再逐字比较整块】捕获清单那一栏的**所有者是捕获存储**：保存时写入
+        // 当前 manifest，而不是把宿主编来的那份原样退回（否则清空 take 之后重开工程，
+        // 旧清单又回来了）。保真的对象因此是容器里其余两栏。
+        let saved = ComponentState::decode(&sink.data).expect("saved container must decode");
+        let loaded = ComponentState::decode(&original).expect("fixture must decode");
+        assert_eq!(saved.edits, loaded.edits, "编辑载荷必须逐字保真");
+        assert_eq!(
+            saved.capture_edits, loaded.capture_edits,
+            "捕获编辑必须逐字保真"
+        );
+        assert!(saved.capture.is_some(), "capture manifest must be written");
 
         unsafe { drop(Box::from_raw(instance)) };
     }

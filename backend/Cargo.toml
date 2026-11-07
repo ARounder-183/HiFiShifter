@@ -14,6 +14,7 @@ members = [
     "hifishifter-plugin",
     "hifishifter-plugin-core",
     "hifishifter-clap",
+    "hifishifter-capture",
     "hifishifter-host-link",
     "hifishifter-clipboard",
 ]

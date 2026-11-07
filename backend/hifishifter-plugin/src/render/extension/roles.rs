@@ -395,10 +395,11 @@ impl ExtensionOwner {
         if self.raw_tape_revision.load(Ordering::Acquire) == revision {
             return;
         }
-        let Some(snapshot) = self.capture.raw_tape() else {
+        let Some(tape) = self.capture.raw_tape() else {
             return;
         };
         self.raw_tape.collect_retired();
+        let snapshot = crate::capture::snapshot_from_tape(tape);
         if !self.raw_tape.has_capacity(&snapshot) {
             log::warn!(
                 "[capture] raw tape does not fit the snapshot budget; keeping the previous one"

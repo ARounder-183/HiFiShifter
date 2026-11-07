@@ -17,7 +17,7 @@
 # 需要：MSVC（cl.exe）、cargo、npm、NSIS。见 scripts/setup/install_deps_windows.ps1。
 [CmdletBinding()]
 param(
-    [ValidateSet('All', 'App', 'Plugin', 'Installer')][string]$Target = 'All',
+    [ValidateSet('All', 'App', 'Plugin', 'Clap', 'Installer')][string]$Target = 'All',
     [switch]$SkipFrontend,
     [ValidateSet('Debug', 'Release')][string]$Configuration = 'Release',
     # 离线 / 受控环境可以显式指定已下载好的 WebView2 bootstrapper（见 Get-WebView2Bootstrapper）。
@@ -36,6 +36,40 @@ function Assert-Ok($what) {
     if ($LASTEXITCODE) { throw "$what 失败（退出码 $LASTEXITCODE）" }
 }
 
+# 构建需要的外部工具：缺失时给一句能照做的错误，而不是让 PowerShell 抛
+# "无法将 xxx 项识别为 cmdlet"（那对新克隆仓库的人没有任何指向性）。
+foreach ($tool in 'cargo', 'npm') {
+    if (!(Get-Command $tool -ErrorAction SilentlyContinue)) {
+        throw "找不到 $tool。先跑 scripts\setup\install_deps_windows.ps1 装齐工具链，或把它的目录加进 PATH。"
+    }
+}
+
+# 【为什么不能直接调 `python`】Windows 上有三种常见形态：`python.exe` 在 PATH、只有
+# `py` 启动器、以及 Microsoft Store 的 `python.exe` 别名（存在但一运行就弹应用商店）。
+# 判据是"能真的跑起来并且是 3.x"，而不是"PATH 上有个叫 python 的文件"。
+function Resolve-Python {
+    $candidates = @(
+        @{ Exe = 'python'; Prefix = @() },
+        @{ Exe = 'py'; Prefix = @('-3') },
+        @{ Exe = 'python3'; Prefix = @() }
+    )
+    foreach ($candidate in $candidates) {
+        $found = Get-Command $candidate.Exe -ErrorAction SilentlyContinue
+        if (!$found) { continue }
+        $previous = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            $major = & $found.Source @($candidate.Prefix) -c 'import sys; print(sys.version_info[0])' 2>$null
+        }
+        catch { $major = $null }
+        finally { $ErrorActionPreference = $previous }
+        if ("$major".Trim() -eq '3') {
+            return @{ Exe = $found.Source; Prefix = @($candidate.Prefix) }
+        }
+    }
+    throw '找不到可用的 Python 3：装好后确保 python.exe（或 py 启动器）在 PATH 上，见 scripts\setup\install_deps_windows.ps1'
+}
+
 function Reset-Directory([string]$path) {
     Remove-Item $path -Recurse -Force -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Force $path | Out-Null
@@ -43,7 +77,8 @@ function Reset-Directory([string]$path) {
 
 # 模型权重不在仓库里（见 scripts/setup/fetch-models.py）：缺了就取，已有则是一次
 # 目录扫描。CI 用 actions/cache 以清单哈希为键缓存解压结果，因此这里通常什么都不做。
-python (Join-Path $PSScriptRoot '..\setup\fetch-models.py')
+$python = Resolve-Python
+& $python.Exe @($python.Prefix) (Join-Path $PSScriptRoot '..\setup\fetch-models.py')
 Assert-Ok '模型权重'
 
 $profile = $Configuration.ToLowerInvariant()

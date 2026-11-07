@@ -52,7 +52,7 @@
 //! 旧文件不会被静默误读：魔数与版本不匹配时返回一句可执行的错误（见 `read`），
 //! 而 `CaptureStore::restore_manifest` 本来就会跳过读不出来的 take。
 
-use super::recorder::{ClosedReason, Segment, SegmentLoss};
+use crate::recorder::{ClosedReason, Segment, SegmentLoss};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -85,7 +85,7 @@ const FILE_EXT: &str = "hfscap";
 ///
 /// 【为什么不是配置目录】配置目录会随用户配置漫游/同步，而这是可能上百 MB 的缓存；
 /// 把它放进同步目录是给用户的网络与配额添麻烦。
-pub(crate) fn default_dir() -> Option<PathBuf> {
+pub fn default_dir() -> Option<PathBuf> {
     hifishifter_kernel::config_location::default_local_data_dir().map(|dir| dir.join("capture"))
 }
 
@@ -133,7 +133,7 @@ fn take_nonce(take_id: u64) -> String {
 /// 【为什么不含 take_id】take_id 是实例级计数器，跨工程/跨会话会复用；把它编进
 /// 内容身份会让“同一份 PCM 换个 take 号”变成新的分析缓存，而“take 号相同、内容
 /// 不同”仍会命中旧缓存。内容身份必须只由采样内容 + 采样率 + 声道数 + 帧数决定。
-pub(crate) fn content_hash(segments: &[Segment]) -> [u8; 32] {
+pub fn content_hash(segments: &[Segment]) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"hfs-capture-content-v2");
     for segment in segments {
@@ -152,13 +152,13 @@ pub(crate) fn content_hash(segments: &[Segment]) -> [u8; 32] {
 
 /// 把段写成 sidecar。返回实际写入的路径。
 #[cfg(test)]
-pub(crate) fn write(dir: &Path, take_id: u64, segments: &[Segment]) -> Result<PathBuf, String> {
+pub fn write(dir: &Path, take_id: u64, segments: &[Segment]) -> Result<PathBuf, String> {
     let hash = content_hash(segments);
     write_with_hash(dir, take_id, &hash, segments)
 }
 
 /// 用调用方已经算好的内容哈希写 sidecar（promote 路径用，避免重复扫 PCM）。
-pub(crate) fn write_with_hash(
+pub fn write_with_hash(
     dir: &Path,
     take_id: u64,
     hash: &[u8; 32],
@@ -223,12 +223,12 @@ pub(crate) fn write_with_hash(
 /// 一句"`unsupported version 5`"只会让人去翻代码；这里直接说明"这是重置前构建留下的"
 /// 并给出下一步（删掉或重录）。
 #[cfg(test)]
-pub(crate) fn read(path: &Path) -> Result<Vec<Segment>, String> {
+pub fn read(path: &Path) -> Result<Vec<Segment>, String> {
     read_with_hash(path).map(|(segments, _)| segments)
 }
 
 /// 读 sidecar 并同时返回内容哈希。
-pub(crate) fn read_with_hash(path: &Path) -> Result<(Vec<Segment>, [u8; 32]), String> {
+pub fn read_with_hash(path: &Path) -> Result<(Vec<Segment>, [u8; 32]), String> {
     let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     if bytes.len() < MAGIC.len() + 4 + 4 + DIGEST_LEN {
         return Err(format!("{}: truncated capture sidecar", path.display()));
@@ -298,7 +298,7 @@ pub(crate) fn read_with_hash(path: &Path) -> Result<(Vec<Segment>, [u8; 32]), St
                     path.display()
                 ));
             }
-            if coverage_len >= super::recorder::COVERAGE_SLOTS {
+            if coverage_len >= crate::recorder::COVERAGE_SLOTS {
                 // 超出版本允许的槽位：整段都算录到。
                 coverage_len = 0;
                 break;
@@ -351,7 +351,7 @@ pub(crate) fn read_with_hash(path: &Path) -> Result<(Vec<Segment>, [u8; 32]), St
 ///
 /// 【为什么移入回收站而不是直接删】录了几分钟的东西被误删是不可接受的；
 /// 与文件浏览器的删除语义保持一致（同一个 `trash` 依赖）。
-pub(crate) fn remove(path: &Path) {
+pub fn remove(path: &Path) {
     if path.exists() {
         if let Err(error) = trash::delete(path) {
             log::warn!("[capture] could not trash {}: {error}", path.display());
