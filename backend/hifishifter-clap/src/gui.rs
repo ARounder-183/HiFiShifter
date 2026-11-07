@@ -127,7 +127,8 @@ unsafe extern "C" fn create(p: *const clap_plugin_t, _api: *const c_char, floati
     hifishifter_plugin_core::guard_ffi(false, || {
         #[cfg(windows)]
         {
-            match crate::editor::windows::create(p, floating) {
+            // SAFETY: create 是 clap.gui 的回调，p 是本实例的活记录。
+            match unsafe { crate::editor::windows::create(p, floating) } {
                 Ok(()) => {
                     log::info!("[clap][gui] embedded view created");
                     true

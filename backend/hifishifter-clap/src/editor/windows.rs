@@ -55,6 +55,9 @@ const WINDOW_TITLE: &str = "HiFiShifter CLAP editor";
 /// 几个可以跨线程投递到窗口的 API，且它只是**入队**，不会在投递方线程上执行窗口过程。
 const WM_APP_PAGE_EVENT: u32 = WM_APP + 1;
 
+/// 视图的事件泵定时器 id（每视图一个窗口，id 只需在窗口内唯一）。
+const PAGE_EVENT_TIMER_ID: usize = 1;
+
 /// 一条待投递的页面事件（随 `PostMessage` 的 `lparam` 过线程边界）。
 ///
 /// 【为什么用裸指针而不是队列】`PostMessage` 不提供用户数据通道，`wparam`/`lparam`
@@ -83,6 +86,12 @@ thread_local! {
 
 struct ViewState {
     view_id: String,
+    /// 本视图的命令端口（共享编辑会话的唯一入口）。
+    ///
+    /// 【为什么挂在视图上而不是实例上】回执与事件都带 `viewId`，页面据此丢弃别的视图的
+    /// 消息；端口持有那条投递通道，天然是"一视图一份"。实例未接 ARA 时为 `None`，
+    /// 页面走 Capture 形态的只读后端（见 `protocol::reply_with_editor`）。
+    editor: Option<std::sync::Arc<hifishifter_plugin::editor::port::EditorPort>>,
     hwnd: HWND,
     parent: HWND,
     controller: Option<ICoreWebView2Controller>,
@@ -168,6 +177,10 @@ unsafe extern "system" fn window_proc(
                 deliver_page_event(hwnd, *event);
                 LRESULT(0)
             }
+            WM_TIMER if wparam.0 == PAGE_EVENT_TIMER_ID => {
+                drain_editor_events(hwnd);
+                LRESULT(0)
+            }
             WM_DESTROY => LRESULT(0),
             _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
         }
@@ -196,6 +209,30 @@ fn deliver_page_event(hwnd: HWND, event: PageEvent) {
     };
     let text = wide(&page_event_message(&view_id, &event.event, &event.payload));
     let _ = unsafe { browser.PostWebMessageAsJson(PCWSTR(text.as_ptr())) };
+}
+
+/// UI 线程：把共享编辑会话排队的页面事件投递给本窗口的页面。
+///
+/// 【为什么按窗口筛端口】事件带 `viewId`，投错窗口会被页面按 id 丢弃 —— 但那时
+/// 事件已经从端口里取走，等于永久丢失。这里只取属于本窗口的端口。
+fn drain_editor_events(hwnd: HWND) {
+    let ports: Vec<std::sync::Arc<hifishifter_plugin::editor::port::EditorPort>> =
+        VIEWS.with(|views| {
+            views
+                .borrow()
+                .values()
+                .filter(|view| view.hwnd == hwnd)
+                .filter_map(|view| view.editor.clone())
+                .collect()
+        });
+    for port in ports {
+        for event in port.poll_events() {
+            let name = event.get("event").and_then(|value| value.as_str());
+            let Some(name) = name else { continue };
+            let payload = event.get("payload").cloned().unwrap_or(serde_json::Value::Null);
+            post_page_event(hwnd.0 as isize, name, payload);
+        }
+    }
 }
 
 /// 页面事件的线上形状。
@@ -267,7 +304,9 @@ pub fn preferred_api() -> Option<(&'static str, bool)> {
 }
 
 /// `create`：建子 HWND（同步），随后异步初始化 WebView2 并导航。
-pub fn create(plugin: *const clap_plugin_t, floating: bool) -> Result<(), String> {
+/// # Safety
+/// `plugin` 必须是宿主按 `clap.gui` 契约传入的、尚未 destroy 的插件记录。
+pub unsafe fn create(plugin: *const clap_plugin_t, floating: bool) -> Result<(), String> {
     if floating {
         return Err("a floating CLAP window is not supported; embed with win32".into());
     }
@@ -282,10 +321,23 @@ pub fn create(plugin: *const clap_plugin_t, floating: bool) -> Result<(), String
             if views.contains_key(&key) {
                 return Err("GUI already created for this CLAP instance".into());
             }
+            let view_id = format!("clap-view-{}-{}", std::process::id(), key);
+            // 【为什么在这里建端口】端口的生命周期就是视图的生命周期：页面走了，它上面
+            // 在途的命令与事件就没有接收方，继续排队只会把旧视图的读数写进新视图。
+            // SAFETY: create 的入参已判空，实例由宿主持有到 destroy。
+            let editor = unsafe { crate::instance(plugin) }
+                .and_then(|instance| instance.ara.as_ref())
+                .map(|binder| {
+                    std::sync::Arc::new(hifishifter_plugin::editor::port::EditorPort::new(
+                        binder.owner().clone(),
+                        &view_id,
+                    ))
+                });
             views.insert(
                 key,
                 ViewState {
-                    view_id: format!("clap-view-{}-{}", std::process::id(), key),
+                    view_id,
+                    editor,
                     hwnd: HWND::default(),
                     parent: HWND::default(),
                     controller: None,
@@ -334,6 +386,12 @@ fn create_inner(plugin: *const clap_plugin_t) -> Result<(), String> {
         view.hwnd = hwnd;
     })
     .ok_or("GUI view disappeared during creation")?;
+    // 【为什么要有这个定时器】共享编辑会话在 actor 线程上产生页面事件（分析进度、
+    // 渲染状态、bootstrap 变化），而 WebView2 只能在 UI 线程投递。端口把事件排进
+    // 自己的通道，这个 20 ms 定时器在**本线程**上把它们取走并投递 —— 线程边界留在
+    // 窗口这一层，端口本身不假设任何 UI 运行时。
+    // 定时器随窗口销毁自动消失（DestroyWindow 会回收本线程为它建的定时器）。
+    let _ = unsafe { SetTimer(Some(hwnd), PAGE_EVENT_TIMER_ID, 20, None) };
     // 页面事件通道：音高基线在后台线程上算完，要把 `pitch_orig_updated` 推给页面。
     // 闭包只捕获一个 `isize` —— HWND 不是 `Send`，而这条闭包要跨线程调用。
     if let Some(instance) = unsafe { crate::instance(plugin) } {
@@ -619,7 +677,14 @@ fn configure_browser(
                 };
                 let Some(reply) = with_view(plugin, |view| {
                     protocol::parse_request(&text, &view.view_id)
-                        .map(|request| protocol::reply(&view.view_id, &request, capture))
+                        .map(|request| {
+                            protocol::reply_with_editor(
+                                &view.view_id,
+                                &request,
+                                capture,
+                                view.editor.as_deref(),
+                            )
+                        })
                 })
                 .flatten() else {
                     return Ok(());
