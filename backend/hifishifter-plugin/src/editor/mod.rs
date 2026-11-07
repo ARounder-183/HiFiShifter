@@ -22,6 +22,7 @@ mod plugin_diagnostics;
 pub(crate) mod private_groups;
 pub(crate) mod resources;
 pub(crate) mod routing;
+pub mod port;
 pub mod session;
 pub(crate) mod slow_lane;
 #[cfg(not(test))]

@@ -79,6 +79,38 @@ pub fn bootstrap(view_id: &str, capture_caps: Value) -> Value {
     })
 }
 
+/// 一条页面请求 → 回执；**优先走共享编辑会话**，没挂文档时才用捕获形态。
+///
+/// 【为什么分成两层】"页面消息长什么样"是格式自己的事（CLAP 用
+/// `{version, viewId, command, args}`），而"命令做什么"只有一套实现（VST3 与 CLAP
+/// 共用的 `EditorPort` → `EditorSession` → `commands::dispatch`）。这一层只做取舍：
+/// 实例已经绑在 ARA 文档上 ⇒ 把命令送进共享会话，回执里放它的返回值；否则维持
+/// Capture 形态的只读后端。
+///
+/// 【为什么不能"总是走共享会话"】Capture 形态**没有** ARA 文档，编辑会话无从建立
+/// （`EditorPort::is_bound` 为 false）。那时仍要回答探活、空时间线与能力位，否则页面
+/// 在挂载阶段就变成"会话不可用"。
+pub fn reply_with_editor(
+    view_id: &str,
+    request: &Value,
+    capture: &crate::capture::CaptureHost,
+    editor: Option<&hifishifter_plugin::editor::port::EditorPort>,
+) -> Value {
+    let Some(editor) = editor.filter(|editor| editor.is_bound()) else {
+        return reply(view_id, request, capture);
+    };
+    let id = request.get("id").and_then(Value::as_u64).unwrap_or(0);
+    let command = request.get("command").and_then(Value::as_str).unwrap_or("");
+    let args = request.get("args").cloned().unwrap_or(Value::Null);
+    match editor.request(command, args) {
+        Ok(value) => json!({ "version": 1, "viewId": view_id, "id": id, "ok": true, "value": value }),
+        Err(message) => json!({
+            "version": 1, "viewId": view_id, "id": id, "ok": false,
+            "error": message, "errorKind": "transient", "errorCode": null,
+        }),
+    }
+}
+
 /// 一条页面请求 → 回执。**永不返回 None**：每个合法请求都必须有回执，否则前端
 /// 的 Promise 会挂到 `commandTimeoutMs` 才拒绝，用户看到的是"界面卡住"。
 pub fn reply(view_id: &str, request: &Value, capture: &crate::capture::CaptureHost) -> Value {
@@ -345,6 +377,28 @@ mod tests {
     }
 
     /// 测试用的捕获宿主（未武装，所有命令都回合法空态）。
+    /// **不变量：没有 ARA 文档时，回执与捕获形态逐字相同。**
+    ///
+    /// 【为什么钉住】`reply_with_editor` 是新增的一层取舍，它的兜底必须与旧路径**同形**；
+    /// 差一个字段，前端就会在某一种形态下读不到 `value` 而静默停在旧状态。
+    #[test]
+    fn an_unbound_instance_falls_back_to_the_capture_reply_verbatim() {
+        let host = crate::capture::CaptureHost::default();
+        for command in [
+            "plugin_health",
+            "get_timeline_state",
+            "get_playback_state",
+            "ui_kv_dump",
+        ] {
+            let request = serde_json::json!({ "id": 7, "viewId": "v", "command": command, "args": {} });
+            assert_eq!(
+                reply_with_editor("v", &request, &host, None),
+                reply("v", &request, &host),
+                "fallback drifted for {command}"
+            );
+        }
+    }
+
     fn capture() -> crate::capture::CaptureHost {
         crate::capture::CaptureHost::default()
     }
