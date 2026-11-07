@@ -50,6 +50,8 @@ thread_local! {
     // 契约本来就全在宿主主线程上，thread_local 既满足 Rust，也符合真实线程模型。
     static ENVIRONMENT: RefCell<Option<ICoreWebView2Environment>> = const { RefCell::new(None) };
     static VIEWS: RefCell<HashMap<usize, ViewState>> = RefCell::new(HashMap::new());
+    /// 本线程处理过的页面消息总数（销毁时汇总，一条日志回答"页面跑通没有"）。
+    static PAGE_MESSAGES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 struct ViewState {
@@ -377,19 +379,44 @@ fn configure_browser(
                 let mut json = PWSTR::null();
                 args.WebMessageAsJson(&mut json)?;
                 let text = CoTaskMemPWSTR::from(json).to_string();
-                let script_browser = message_browser.clone();
-                if let Some(reply) = with_view(plugin, |view| {
+                // 【为什么记这一行】"窗口开了但页面没跑起来"与"页面在跑、只是没内容"
+                // 在宿主侧完全同形。第一条页面消息是**JS 真的执行了**的唯一证据，
+                // 而用户报障时我们只有日志——所以这条只打一次，带命令名。
+                // 【为什么是前 8 条 + 总数】页面启动会依次问偏好、探活、拉时间线；
+                // 只看第一条分不清"页面起来了"与"页面卡在第二步"，而逐条打印
+                // 又会把日志刷满。前 8 条给序列，销毁时给总数。
+                let seen = PAGE_MESSAGES.with(|count| {
+                    let seen = count.get();
+                    count.set(seen + 1);
+                    seen
+                });
+                if seen < 8 {
+                    // 命令名来自页面（外部输入），只截取前 64 字节且按 debug 打印；
+                    // 它回答的是"页面到底跑到哪一步了"。
+                    let command = text
+                        .split("\"command\":\"")
+                        .nth(1)
+                        .and_then(|rest| rest.split('"').next())
+                        .unwrap_or("?");
+                    log::info!(
+                        "[clap][gui] page message #{} ({} bytes, command={command})",
+                        seen + 1,
+                        text.len()
+                    );
+                }
+                let Some(reply) = with_view(plugin, |view| {
                     protocol::parse_request(&text, &view.view_id)
                         .map(|request| protocol::reply(&view.view_id, &request))
                 })
-                .flatten()
-                {
-                    let script = wide(&format!(
-                        "window.__hfsDeliver && window.__hfsDeliver({});",
-                        reply
-                    ));
-                    let _ = script_browser.ExecuteScript(PCWSTR(script.as_ptr()), None);
-                }
+                .flatten() else {
+                    return Ok(());
+                };
+                // 【为什么是 PostWebMessageAsJson】这是 WebView2 的原生投递通道，
+                // 页面从 `chrome.webview` 的 message 事件收到它。`__hfsDeliver` 是
+                // WebKit 垫片里的函数，Windows 上没有 —— 用它会让每条回执
+                // 静默丢失，表现是页面发了一条消息就再没动静（实测）。
+                let payload = wide(&reply.to_string());
+                let _ = message_browser.PostWebMessageAsJson(PCWSTR(payload.as_ptr()));
                 Ok(())
             })),
             &mut token,
@@ -551,7 +578,8 @@ pub fn destroy(plugin: *const clap_plugin_t) {
                 let _ = DestroyWindow(view.hwnd);
             }
         }
-        log::info!("[clap][gui] view destroyed");
+        let handled = PAGE_MESSAGES.with(|count| count.get());
+        log::info!("[clap][gui] view destroyed after {handled} page message(s)");
     }
 }
 

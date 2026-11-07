@@ -11,6 +11,35 @@
 //! 用户看到的是"这个形态还没有编辑后端"，而不是一块空白或永远转的加载圈。
 
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
+use std::sync::{Mutex, OnceLock};
+
+/// 进程内的界面偏好表。
+///
+/// 【为什么要有它】前端启动时先调 `ui_kv_dump` 把偏好灌回 `localStorage`；
+/// 直接回错误会让这一步走失败分支（虽然能降级，但日志里每次开窗都多一条）。
+/// CLAP 外壳没有独立的配置文件后端，一份进程内的表至少保证：
+/// 同一个会话里开两个窗口看到的是同一份偏好，改语言/外观不会立刻回弹。
+///
+/// 【边界】它不落盘：宿主退出即丢。真正常驻的偏好由 VST3/App 侧的配置文件负责，
+/// 这里只补齐 CLAP 形态缺失的那一段，不假装自己是持久存储。
+fn preferences() -> &'static Mutex<BTreeMap<String, String>> {
+    static PREFS: OnceLock<Mutex<BTreeMap<String, String>>> = OnceLock::new();
+    PREFS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn snapshot() -> Value {
+    let map = preferences().lock().unwrap_or_else(|e| e.into_inner());
+    json!(map
+        .iter()
+        .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+        .collect::<serde_json::Map<_, _>>())
+}
+
+/// 单个键与整表的硬上限：页面是外部输入，不能让一次 put 把内存吃光。
+const MAX_PREF_KEYS: usize = 512;
+const MAX_PREF_KEY_BYTES: usize = 256;
+const MAX_PREF_VALUE_BYTES: usize = 64 * 1024;
 
 /// 本窗口的 bootstrap：形态是 `capture`，能力全部如实为 false。
 ///
@@ -65,12 +94,87 @@ pub fn reply(view_id: &str, request: &Value) -> Value {
     match command {
         // 挂载前的探活（sessionProbe.ts）：必须成功，否则整页变成"会话不可用"。
         "plugin_health" | "ping" => ok(json!({ "ok": true, "kind": "clap-capture" })),
-        // 时间线空态：Capture 外壳还没有捕获存储，返回一份可渲染的空工程。
-        "get_timeline_state" => ok(json!({ "tracks": [], "clips": [] })),
+        // 时间线空态：Capture 外壳还没有捕获存储，返回一份**完整**的可渲染空工程。
+        // 缺字段会让前端在 reducer 里读到 undefined（例如 bpm / playhead_sec）。
+        "get_timeline_state" => ok(json!({
+            "tracks": [],
+            "clips": [],
+            "selected_track_id": null,
+            "selected_clip_id": null,
+            "bpm": 120.0,
+            "playhead_sec": 0.0,
+        })),
+        // 只读状态查询：给合法空态，让界面渲染出"还没有内容"，而不是显示一串失败。
+        "get_runtime_info" => ok(json!({
+            "ok": true,
+            "device": "clap",
+            "model_loaded": false,
+            "audio_loaded": false,
+            "has_synthesized": false,
+            "is_playing": false,
+            "playback_target": null,
+            "gpuBackend": "CPU",
+        })),
+        "get_ui_settings" => ok(json!({})),
+        "get_vslib_status" => ok(json!({
+            "compiled": false,
+            "available": false,
+            "version": null,
+            "error": "the CLAP Capture-only shell does not load the native vslib",
+        })),
+        "get_history_state" => ok(json!({
+            "ok": true,
+            "backend": "local",
+            "position": 0,
+            "undoDepth": 0,
+            "redoDepth": 0,
+            "records": [],
+        })),
+        "plugin_get_apply_state" => ok(json!({
+            "generation": 0,
+            "applied_generation": 0,
+            "pending": false,
+            "connected": false,
+            "ready": false,
+            "error": null,
+            "rendering_active": false,
+            "render_audible_stale": false,
+        })),
         // 页面就绪/心跳这类诊断消息不进命令表，也别让它们变成错误。
         "plugin_ready" | "plugin_heap" | "plugin_refresh" => ok(json!(null)),
-        // UI 偏好落盘：阶段 1 用 WebView2 自己的 localStorage 兜底，明确告知而非超时。
-        "save_ui_settings" => ok(json!(null)),
+        // 界面偏好：读、写、删都回整表（与后端 `Record<string, string>` 契约一致）。
+        "ui_kv_dump" => ok(snapshot()),
+        "ui_kv_put" => {
+            if let Some(patch) = request["args"]["patch"].as_object() {
+                let mut map = preferences().lock().unwrap_or_else(|e| e.into_inner());
+                for (key, value) in patch {
+                    if map.len() >= MAX_PREF_KEYS && !map.contains_key(key) {
+                        continue;
+                    }
+                    if key.len() > MAX_PREF_KEY_BYTES {
+                        continue;
+                    }
+                    let Some(text) = value.as_str() else { continue };
+                    if text.len() > MAX_PREF_VALUE_BYTES {
+                        continue;
+                    }
+                    map.insert(key.clone(), text.to_owned());
+                }
+            }
+            ok(snapshot())
+        }
+        "ui_kv_delete" => {
+            if let Some(keys) = request["args"]["keys"].as_array() {
+                let mut map = preferences().lock().unwrap_or_else(|e| e.into_inner());
+                for key in keys {
+                    if let Some(key) = key.as_str() {
+                        map.remove(key);
+                    }
+                }
+            }
+            ok(snapshot())
+        }
+        "save_ui_settings" => ok(json!({ "ok": true })),
         "" => err("missing command"),
         _ => err("command is not wired in the CLAP Capture-only shell"),
     }
@@ -140,6 +244,36 @@ mod tests {
     fn every_request_gets_a_reply_even_without_a_command() {
         let reply = reply("v", &json!({ "id": 9 }));
         assert_eq!(reply["ok"], false);
+    }
+
+    #[test]
+    fn ui_preferences_round_trip_within_the_session() {
+        let put = reply(
+            "v",
+            &json!({ "id": 1, "command": "ui_kv_put", "args": { "patch": { "hfs.lang": "zh-CN" } } }),
+        );
+        assert_eq!(put["ok"], true);
+        assert_eq!(put["value"]["hfs.lang"], "zh-CN");
+        let dump = reply("v", &json!({ "id": 2, "command": "ui_kv_dump" }));
+        assert_eq!(dump["value"]["hfs.lang"], "zh-CN");
+        let deleted = reply(
+            "v",
+            &json!({ "id": 3, "command": "ui_kv_delete", "args": { "keys": ["hfs.lang"] } }),
+        );
+        assert!(deleted["value"].get("hfs.lang").is_none());
+    }
+
+    #[test]
+    fn oversized_or_non_string_preferences_are_rejected_without_erroring() {
+        let huge = "x".repeat(MAX_PREF_VALUE_BYTES + 1);
+        let reply = reply(
+            "v",
+            &json!({ "id": 4, "command": "ui_kv_put", "args": { "patch": { "big": huge, "num": 5 } } }),
+        );
+        // 非法条目被丢弃，但命令本身成功（与后端"整表回执"的契约一致）。
+        assert_eq!(reply["ok"], true);
+        assert!(reply["value"].get("big").is_none());
+        assert!(reply["value"].get("num").is_none());
     }
 
     #[test]
