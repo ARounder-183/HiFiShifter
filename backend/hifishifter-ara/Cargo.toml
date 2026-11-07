@@ -1,0 +1,26 @@
+# HiFiShifter 的 ARA 文档模型（格式无关）。
+#
+# 【为什么单独一个 crate】ARA 的文档模型（source / modification / region sequence /
+# playback region）到 `TimelineState` 的映射只依赖 ARA 的语义类型与内核的时间线，
+# 与 VST3 / CLAP / AU 的 ABI 都没有关系。把它放在任何一个格式外壳里，另一个格式就
+# 只能复制一份 —— 而这份映射决定了「宿主里的 item 落在时间轴哪里」，两份实现必然漂移。
+#
+# 【为什么不放进 hifishifter-plugin-core】core 是**契约层**（字节容器、资源规则、FFI
+# 守卫），刻意只依赖标准库与 log；本 crate 要读内核的 `TimelineState` 与装配类型，
+# 属于领域模型而不是契约，混进去会把推理内核拖进每一个格式的依赖图。
+[package]
+name = "hifishifter-ara"
+version = "0.2.0-beta"
+edition = "2021"
+publish = false
+description = "Format-neutral ARA document model for HiFiShifter plug-ins"
+
+[lib]
+name = "hifishifter_ara"
+crate-type = ["rlib"]
+
+[dependencies]
+hifishifter-kernel = { path = "../hifishifter-kernel", default-features = false }
+log = { version = "0.4", features = ["std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

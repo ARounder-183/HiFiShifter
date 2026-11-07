@@ -13,6 +13,7 @@ members = [
     "hifishifter-kernel",
     "hifishifter-plugin",
     "hifishifter-plugin-core",
+    "hifishifter-ara",
     "hifishifter-clap",
     "hifishifter-capture",
     "hifishifter-host-link",

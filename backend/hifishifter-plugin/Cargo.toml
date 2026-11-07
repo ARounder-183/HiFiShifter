@@ -9,6 +9,8 @@ description = "HiFiShifter 的 VST3 / ARA 插件适配层（复用本体离线�
 
 [dependencies]
 hifishifter-plugin-core = { path = "../hifishifter-plugin-core" }
+# ARA 文档模型（源/区间/序列 → 时间线）。与格式无关，CLAP 侧复用同一份。
+hifishifter-ara = { path = "../hifishifter-ara" }
 # 捕获运行时（格式无关）：VST3 与 CLAP 共用同一份判定与投影。
 hifishifter-capture = { path = "../hifishifter-capture" }
 # 插件包不分发闭源vslib；独立app的默认features不受影响。

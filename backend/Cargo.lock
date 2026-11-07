@@ -2003,6 +2003,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
+name = "hifishifter-ara"
+version = "0.2.0-beta"
+dependencies = [
+ "hifishifter-kernel",
+ "log",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "hifishifter-capture"
 version = "0.2.0-beta"
 dependencies = [
@@ -2111,6 +2121,7 @@ dependencies = [
  "flate2",
  "gdk",
  "gtk",
+ "hifishifter-ara",
  "hifishifter-capture",
  "hifishifter-clipboard",
  "hifishifter-host-link",
