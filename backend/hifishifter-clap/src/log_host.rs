@@ -14,9 +14,10 @@
 //! 有效；`deinit` 时 `clear()` 把它摘掉，避免把日志写进已卸载的模块。
 
 use crate::abi::clap_host_t;
-use std::ffi::{c_char, c_void, CString};
+use std::ffi::{c_char, c_void, CStr, CString};
+use std::io::Write;
 use std::sync::atomic::{AtomicPtr, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 /// `clap.log` 扩展 ID（`clap/ext/log.h`）。
 pub const CLAP_EXT_LOG: &[u8] = b"clap.log\0";
@@ -44,6 +45,36 @@ static HOST_PTR: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static HOST: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 /// `set_logger` 只跑一次；失败也不重试（宿主没提供 clap.log 是正常的）。
 static LOGGER: OnceLock<()> = OnceLock::new();
+/// 文件落点（每进程只解析一次；解析不出来就只走宿主日志）。
+static FILE: OnceLock<Mutex<Option<std::fs::File>>> = OnceLock::new();
+/// 单个日志文件的软上限：超过就在进程启动时截断（插件诊断不需要历史）。
+const MAX_LOG_BYTES: u64 = 8 * 1024 * 1024;
+
+/// 本模块的日志文件：`%LOCALAPPDATA%\HiFiShifter\logs\plugin-clap-<host>.log`。
+///
+/// 【为什么 CLAP 也要落盘】VST3 外壳一直写自己的日志文件，而 CLAP 只把日志交给
+/// 宿主的 `clap.log` —— 宿主的面板默认关着，用户报障时我们手上一个字节都没有。
+/// "按钮一直是灰的"这类问题只能靠"块数 / transport 标志 / 是否推出过位置"三个读数
+/// 定位，它们必须能事后读到。文件名带 `clap-` 前缀，与 VST3 的
+/// `plugin-<host>.log` 并列而不混写（两种格式的判定逻辑不同，混在一起没法读）。
+fn open_log_file() -> Option<std::fs::File> {
+    let dir = hifishifter_kernel::app_paths::log_dir()?;
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join("plugin-clap.log");
+    let oversized = std::fs::metadata(&path)
+        .map(|meta| meta.len() > MAX_LOG_BYTES)
+        .unwrap_or(false);
+    let file = if oversized {
+        std::fs::File::create(&path).ok()?
+    } else {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .ok()?
+    };
+    Some(file)
+}
 
 struct ClapLogger;
 
@@ -53,6 +84,21 @@ impl log::Log for ClapLogger {
     }
 
     fn log(&self, record: &log::Record<'_>) {
+        // 【先写文件，再交宿主】宿主回调是外部代码：它可以阻塞、可以丢弃、也可以在
+        // 卸载过程中失效。文件这一路不依赖宿主，必须无条件先落盘。
+        if let Some(slot) = FILE.get() {
+            if let Ok(mut guard) = slot.lock() {
+                if let Some(file) = guard.as_mut() {
+                    let _ = writeln!(
+                        file,
+                        "[{}] {} {}",
+                        record.level(),
+                        record.target(),
+                        record.args()
+                    );
+                }
+            }
+        }
         let host = HOST.load(Ordering::Acquire);
         if host.is_null() {
             return;
@@ -91,13 +137,31 @@ pub unsafe fn install(host: *const clap_host_t) {
     if host.is_null() {
         return;
     }
+    // 【为什么先把文件日志装起来】即使宿主没有 clap.log，插件自己的诊断也必须落地。
+    // log::set_logger 全进程只能成功一次，所以无论宿主给不给扩展，这里都要装。
+    LOGGER.get_or_init(|| {
+        let _ = log::set_logger(&ClapLogger);
+        log::set_max_level(log::LevelFilter::Info);
+        FILE.get_or_init(|| Mutex::new(open_log_file()));
+    });
     let get_extension = unsafe { (*host).get_extension };
     let Some(get_extension) = get_extension else {
         return;
     };
+    let name = unsafe { (*host).name };
+    log::info!(
+        "[clap] logger installed (host={})",
+        if name.is_null() {
+            "unknown".to_string()
+        } else {
+            unsafe { CStr::from_ptr(name) }
+                .to_string_lossy()
+                .into_owned()
+        }
+    );
     let ext = unsafe { get_extension(host, CLAP_EXT_LOG.as_ptr().cast()) };
     if ext.is_null() {
-        // 宿主没有 clap.log 不是错误：日志只是丢弃，不影响音频。
+        // 宿主没有 clap.log 不是错误：日志已经写了文件，音频不受影响。
         return;
     }
     // 【为什么只登记第一个】log::set_logger 全进程只能成功一次，因此日志也只能
@@ -115,10 +179,6 @@ pub unsafe fn install(host: *const clap_host_t) {
         return;
     }
     HOST_PTR.store(host as *mut c_void, Ordering::Release);
-    LOGGER.get_or_init(|| {
-        let _ = log::set_logger(&ClapLogger);
-        log::set_max_level(log::LevelFilter::Trace);
-    });
 }
 
 /// `clap_entry.deinit` 时摘掉宿主指针；之后 `log` 变成 no-op。

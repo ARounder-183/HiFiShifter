@@ -27,6 +27,12 @@ pub struct AudioState {
     saw_transport: AtomicBool,
     /// 本实例是否收到过离线 render 模式。
     saw_offline: AtomicBool,
+    /// 处理过多少块（诊断：宿主到底有没有在跑我们）。
+    blocks: AtomicU64,
+    /// 见过的 transport 标志位并集（诊断：宿主给的是拍还是秒）。
+    transport_flags: AtomicU64,
+    /// 是否从 transport 里成功推出过工程位置（录制的硬前提）。
+    saw_position: AtomicBool,
 }
 
 impl AudioState {
@@ -55,6 +61,19 @@ impl AudioState {
     }
 
     /// Capture bootstrap 的能力读数（是否见过 transport / 是否见过离线 render）。
+    /// 诊断读数：@@(处理过的块数, 见过的 transport 标志, 是否推出过位置)@@。
+    ///
+    /// 【为什么值得单独暴露】"按钮一直是灰的"有两种完全不同的原因：宿主根本没在跑我们
+    /// （块数 0），或者宿主跑了但没给可用的时间轴（标志位里只有拍号/速度，没有
+    /// seconds/beats）。三个数一起打出来，就不必再猜。
+    pub fn capture_evidence(&self) -> (u64, u32, bool) {
+        (
+            self.blocks.load(Ordering::Acquire),
+            self.transport_flags.load(Ordering::Acquire) as u32,
+            self.saw_position.load(Ordering::Acquire),
+        )
+    }
+
     pub fn capture_observations(&self) -> (bool, bool) {
         (
             self.saw_transport.load(Ordering::Acquire),
@@ -71,6 +90,7 @@ impl AudioState {
         let sample_rate = self.sample_rate();
         let offline = self.offline_render.load(Ordering::Acquire);
         let steady = (process.steady_time >= 0).then_some(process.steady_time);
+        self.blocks.fetch_add(1, Ordering::AcqRel);
         let Some(transport) = (unsafe { process.transport.as_ref() }) else {
             return TransportFrame {
                 project_time_samples: 0,
@@ -87,10 +107,33 @@ impl AudioState {
             };
         };
         self.saw_transport.store(true, Ordering::Release);
+        self.transport_flags
+            .fetch_or(u64::from(transport.flags), Ordering::AcqRel);
+        // 【为什么秒不是唯一来源】CLAP 的 transport 可以只声明拍时间轴。实测宿主
+        // （REAPER 的 CLAP 实现是其中之一）只给 `HAS_BEATS_TIMELINE + HAS_TEMPO` 时，
+        // 只认 seconds 的实现会让 position_trusted 永远是 false —— 表现为"捕获按钮
+        // 永远灰着"，而插件其实已经被正常处理了。拍是精确的定点值，配上速度就能
+        // 换算成秒，因此两种时间轴都接受。
         let has_seconds = transport.flags & crate::abi::transport_flags::HAS_SECONDS_TIMELINE != 0;
+        let has_beats = transport.flags & crate::abi::transport_flags::HAS_BEATS_TIMELINE != 0;
+        let has_tempo = transport.flags & crate::abi::transport_flags::HAS_TEMPO != 0;
         let seconds = transport.song_pos_seconds as f64 / CLAP_SECTIME_FACTOR;
-        let position = (has_seconds && seconds.is_finite() && seconds >= 0.0)
-            .then(|| (seconds * sample_rate).round() as i64);
+        let beats = transport.song_pos_beats as f64 / crate::abi::CLAP_BEATTIME_FACTOR;
+        let position = if has_seconds && seconds.is_finite() && seconds >= 0.0 {
+            Some((seconds * sample_rate).round() as i64)
+        } else if has_beats
+            && has_tempo
+            && beats.is_finite()
+            && beats >= 0.0
+            && transport.tempo > 0.0
+        {
+            Some((beats * 60.0 / transport.tempo * sample_rate).round() as i64)
+        } else {
+            None
+        };
+        if position.is_some() {
+            self.saw_position.store(true, Ordering::Release);
+        }
         TransportFrame {
             project_time_samples: position.unwrap_or(0),
             sample_rate,

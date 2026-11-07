@@ -67,9 +67,14 @@ pub fn bootstrap(view_id: &str, capture_caps: Value) -> Value {
             "exportAudio": false,
             "exportData": false,
         },
+        // 【为什么不是 `unbound`】那个取值的前端含义是"视图根本连不上处理器"，而
+        // `captureStore` 看到它会**直接跳过 capture_status 轮询** —— 表现就是录制键
+        // 永远是灰的（实测：用户报的"当前不可用"）。CLAP 视图确实连着一个处理器：
+        // 本模块自己在进程内回答命令。真正缺的是 ARA 文档与编辑能力，那些由
+        // `hostCapabilities` 全 false 如实表达。
         "editorRoute": {
-            "state": "unbound",
-            "reason": "CLAP Capture-only shell: the shared ARA editor is not attached",
+            "state": "bound",
+            "reason": "CLAP Capture-only shell: commands are served in-process by the plug-in",
         },
     })
 }
@@ -134,10 +139,15 @@ pub fn reply(view_id: &str, request: &Value, capture: &crate::capture::CaptureHo
             "render_audible_stale": false,
         })),
         // 捕获命令（与 VST3 同一套名字与载荷）。形状由运行时给出，前端只认一种。
-        command if command.starts_with("capture_") => match capture.handle(command, request) {
-            Ok(value) => ok(value),
-            Err(message) => err(&message),
-        },
+        // 【为什么取 args 而不是整个 request】载荷在 `args` 里；把外层信封传给
+        // `capture_delete_take` 会让它读不到 takeId（静默按默认值处理）。
+        command if command.starts_with("capture_") => {
+            let args = request.get("args").cloned().unwrap_or(Value::Null);
+            match capture.handle(command, &args) {
+                Ok(value) => ok(value),
+                Err(message) => err(&message),
+            }
+        }
         // 页面就绪/心跳这类诊断消息不进命令表，也别让它们变成错误。
         "plugin_ready" | "plugin_heap" | "plugin_refresh" => ok(json!(null)),
         // 界面偏好：读、写、删都回整表（与后端 `Record<string, string>` 契约一致）。
@@ -202,6 +212,14 @@ mod tests {
         let boot = bootstrap(
             "view-1",
             json!({"sawContext": false, "sawInput": false, "sawOffline": false, "canCapture": false}),
+        );
+        // 【为什么钉死这一条】`editorRoute.state == "unbound"` 会让前端**完全跳过**
+        // capture_status 轮询（captureStore.ts 的降频判据），于是录制键永远灰着。
+        // 这个取值必须只在"视图真的连不上处理器"时出现，CLAP 不是那种情况。
+        assert_ne!(
+            boot["editorRoute"]["state"],
+            json!("unbound"),
+            "an unbound route silences capture polling"
         );
         assert_eq!(boot["version"], 1);
         assert_eq!(boot["viewId"], "view-1");

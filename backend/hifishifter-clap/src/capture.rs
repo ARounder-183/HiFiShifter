@@ -34,6 +34,18 @@ pub struct CaptureHost {
     last_playing: AtomicBool,
     last_recording: AtomicBool,
     pass: AtomicU64,
+    /// 宿主已经激活并开始处理本实例（`activate` + `start_processing`）。
+    ///
+    /// 【为什么它也算"能录"】录制的操作顺序是"先按捕获、再按播放"。宿主在停播时
+    /// 可能一个块都不送（REAPER 的 CLAP 通路就是这样），于是"等到看见块才允许按"
+    /// 会让按钮在用户做任何事之前**永远是灰的**——用户看到的正是"当前不可用"。
+    /// 激活过 != 一定能拿到位置，但"能不能拿到位置"由 `sawContext` 如实回答，
+    /// 而"能不能先武装"只需要"这个宿主确实在跑我们"。
+    activated: AtomicBool,
+    /// 处理过的块数（诊断；与 `AudioState` 的计数互相印证）。
+    blocks: AtomicU64,
+    /// 见过的 transport 标志位并集（诊断：宿主给的是拍还是秒）。
+    transport_flags: AtomicU64,
     /// 宿主给过**可信的工程位置**（不是"给过 transport 事件"）。
     ///
     /// 【为什么不能复用运行时的 `saw_context`】那个读数只要求"块里有有效采样率"，
@@ -52,6 +64,9 @@ impl Default for CaptureHost {
             last_playing: AtomicBool::new(false),
             last_recording: AtomicBool::new(false),
             pass: AtomicU64::new(0),
+            activated: AtomicBool::new(false),
+            blocks: AtomicU64::new(0),
+            transport_flags: AtomicU64::new(0),
             saw_position: AtomicBool::new(false),
         }
     }
@@ -61,6 +76,7 @@ impl CaptureHost {
     /// 激活时登记工程采样率（捕获拒绝在没有采样率的实例上武装）。
     pub fn note_activate(&self, rate: f64) {
         self.store.note_project_rate(rate);
+        self.activated.store(true, Ordering::Release);
     }
 
     /// 音频线程：喂一块。
@@ -70,6 +86,11 @@ impl CaptureHost {
     /// 调用期间有效。本函数在音频线程上执行，只做常量时间的读写，不加阻塞锁以外的
     /// 事（`CaptureStore` 内部已按"拿不到锁就旁路暂存"实现）。
     pub unsafe fn on_process(&self, process: &clap_process_t, audio: &AudioState) {
+        self.blocks.fetch_add(1, Ordering::AcqRel);
+        if let Some(transport) = unsafe { process.transport.as_ref() } {
+            self.transport_flags
+                .fetch_or(u64::from(transport.flags), Ordering::AcqRel);
+        }
         let frame = audio.to_transport_frame(process);
         if frame.sample_rate > 0.0 {
             self.store.note_project_rate(frame.sample_rate);
@@ -239,8 +260,32 @@ impl CaptureHost {
         let position = self.saw_position.load(Ordering::Acquire);
         let saw_context = status["sawContext"].as_bool().unwrap_or(false) && position;
         status["sawContext"] = json!(saw_context);
-        status["canCapture"] = json!(saw_context);
+        // 能先武装 != 已经有位置：后者由 sawContext 如实回答（设置窗口据此解释）。
+        status["canCapture"] = json!(self.activated.load(Ordering::Acquire) || saw_context);
+        self.log_evidence_once();
         status
+    }
+
+    /// 第一次被问状态时把"宿主到底做了什么"写进日志（只写一次）。
+    ///
+    /// 【为什么必须有】"按钮一直是灰的"在宿主里完全同形：可能是宿主没在跑我们、
+    /// 可能是跑了但没给时间轴、也可能是给了时间轴但我们没认出标志位。三个读数
+    /// （块数 / transport 标志并集 / 是否推出过位置）一写，就不必再猜。
+    fn log_evidence_once(&self) {
+        static LOGGED: AtomicBool = AtomicBool::new(false);
+        if LOGGED.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let status = self.store.status();
+        log::info!(
+            "[clap][capture] status requested: blocks={} transport_flags=0x{:x} saw_position={}              saw_context={} saw_input={} can_capture={}",
+            self.blocks.load(Ordering::Acquire),
+            self.transport_flags.load(Ordering::Acquire),
+            self.saw_position.load(Ordering::Acquire),
+            status.saw_context,
+            status.saw_input,
+            self.activated.load(Ordering::Acquire)
+        );
     }
 
     /// 捕获清单（随宿主工程存取的字节块里那一段）。
@@ -274,7 +319,7 @@ impl CaptureHost {
             "sawContext": status.saw_context,
             "sawInput": status.saw_input,
             "sawOffline": saw_offline,
-            "canCapture": status.saw_context && self.saw_position.load(Ordering::Acquire),
+            "canCapture": self.activated.load(Ordering::Acquire) || status.saw_context,
         })
     }
 }
@@ -377,9 +422,14 @@ mod tests {
         }
     }
 
+    /// 未激活的实例（宿主还没调用 activate）。
     fn host() -> CaptureHost {
-        let host = CaptureHost::default();
-        // 宿主在 activate 时声明工程率：没有它 `capture_start` 会拒绝武装。
+        CaptureHost::default()
+    }
+
+    /// 已激活的实例：宿主声明了工程率，可以武装。
+    fn activated_host() -> CaptureHost {
+        let host = host();
         host.note_activate(48_000.0);
         host
     }
@@ -390,28 +440,68 @@ mod tests {
         audio
     }
 
-    /// 录制按钮必须**在武装之前**就能变真：宿主给过可用的工程位置。
+    /// 录制按钮必须**在用户按播放之前**就能按：激活即"能武装"，位置另算。
+    ///
+    /// 【为什么这两件事要分开】REAPER 的 CLAP 通路在停播时可能一个块都不送；若
+    /// "能录"要等到看见位置，按钮就永远是灰的（用户报的"当前不可用"）。
     #[test]
-    fn a_host_that_supplies_a_playhead_reports_capture_as_possible() {
+    fn activation_is_enough_to_arm_and_a_playhead_is_reported_separately() {
         let host = host();
         let audio = audio();
-        assert_eq!(host.status()["canCapture"], json!(false));
+        assert_eq!(
+            host.status()["canCapture"],
+            json!(false),
+            "not activated yet"
+        );
+        host.note_activate(48_000.0);
+        assert_eq!(
+            host.status()["canCapture"],
+            json!(true),
+            "activation is enough"
+        );
+        assert_eq!(host.status()["sawContext"], json!(false), "no position yet");
         let transport = playing_at(0.0);
         let mut block = Block::new(&transport, 64, 0.0);
         unsafe { host.on_process(&block.process, &audio) };
         assert_eq!(
-            host.status()["canCapture"],
+            host.status()["sawContext"],
             json!(true),
-            "one block with a trusted position is enough evidence"
+            "one block with a trusted position proves the host supplies one"
         );
         block.left.clear();
         block.right.clear();
     }
 
-    /// 武装后喂一段"宿主在播放"的块：状态进入录制中，且捕获帧数在长。
+    /// 只有拍时间轴的宿主也必须能算出工程位置。
+    ///
+    /// 【为什么这条必须有】CLAP 允许宿主只声明 `HAS_BEATS_TIMELINE + HAS_TEMPO`。
+    /// 只认 seconds 的实现会让 `position_trusted` 永远是 false —— 表现为"捕获按钮
+    /// 永远灰着"，而插件其实被正常处理了。2 拍 @120 BPM = 1 秒 = 48000 帧。
+    #[test]
+    fn a_beats_only_transport_still_yields_a_position() {
+        let host = activated_host();
+        let audio = audio();
+        let mut transport = playing_at(0.0);
+        transport.flags = crate::abi::transport_flags::HAS_BEATS_TIMELINE
+            | crate::abi::transport_flags::HAS_TEMPO
+            | crate::abi::transport_flags::IS_PLAYING;
+        transport.tempo = 120.0;
+        transport.song_pos_beats = 2 * (1_i64 << 31);
+        let mut block = Block::new(&transport, 64, 0.0);
+        unsafe { host.on_process(&block.process, &audio) };
+        block.left.clear();
+        block.right.clear();
+        assert_eq!(
+            host.status()["sawContext"],
+            json!(true),
+            "beats + tempo is a usable playhead"
+        );
+    }
+
+    /// 武装后喂一段"宿主在播放"的块：状态进入录制中，且捕获帧数在涨。
     #[test]
     fn arming_then_feeding_playing_blocks_records_audio() {
-        let host = host();
+        let host = activated_host();
         let audio = audio();
         host.handle("capture_start", &json!({})).unwrap();
         for index in 0..20 {
@@ -431,7 +521,7 @@ mod tests {
     /// 取消之后不能留下任何 take（录制中的素材也一并丢弃）。
     #[test]
     fn cancelling_a_recording_leaves_no_take() {
-        let host = host();
+        let host = activated_host();
         let audio = audio();
         host.handle("capture_start", &json!({})).unwrap();
         for index in 0..4 {
@@ -448,8 +538,8 @@ mod tests {
 
     /// 没有位置信息的宿主必须**如实**报"不能录"，而不是让按钮看起来能用。
     #[test]
-    fn a_host_without_a_playhead_is_reported_as_unusable() {
-        let host = host();
+    fn a_host_without_a_playhead_reports_no_context_but_still_arms() {
+        let host = activated_host();
         let audio = audio();
         let mut transport = playing_at(1.0);
         transport.flags = transport_flags::IS_PLAYING;
@@ -457,7 +547,15 @@ mod tests {
         unsafe { host.on_process(&block.process, &audio) };
         block.left.clear();
         block.right.clear();
-        assert_eq!(host.status()["canCapture"], json!(false));
-        assert_eq!(host.status()["sawContext"], json!(false));
+        assert_eq!(
+            host.status()["sawContext"],
+            json!(false),
+            "a host that only sends tempo/time-signature never proves a playhead"
+        );
+        assert_eq!(
+            host.status()["canCapture"],
+            json!(true),
+            "armed is still allowed; the panel explains the missing playhead"
+        );
     }
 }

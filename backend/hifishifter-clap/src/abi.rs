@@ -98,6 +98,8 @@ pub type clap_beattime = i64;
 pub type clap_sectime = i64;
 /// 固定点换标（fixedpoint.h: 1<<31）。
 pub const CLAP_SECTIME_FACTOR: f64 = 2_147_483_648.0;
+/// 拍时间换标：1 拍（四分音符）= `1<<31`。
+pub const CLAP_BEATTIME_FACTOR: f64 = 2_147_483_648.0;
 
 /// `clap_event_transport_t`。
 #[repr(C)]
