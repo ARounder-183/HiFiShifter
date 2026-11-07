@@ -94,35 +94,29 @@ impl ExtensionOwner {
     pub(super) fn note_stream_block(
         &self,
         stream: ProcessStream,
-        context: &crate::audio_abi::ProcessContext,
+        context: impl Into<crate::block_context::BlockContext>,
         frames: usize,
         playing_rising: bool,
         recording_rising: bool,
     ) -> StreamBlock {
-        // 旧测试入口模拟的是“宿主在走”，没有 kPlaying 位；生产路径走 `_at`，
-        // 不受这里影响。给测试上下文补上播放位，保持原有 3 秒计数器语义。
-        let mut forced = *context;
-        forced.state |= crate::audio_abi::PROCESS_CONTEXT_PLAYING;
-        self.note_stream_block_at(
-            stream,
-            &forced,
-            frames,
-            playing_rising,
-            recording_rising,
-            None,
-        )
+        // 旧测试入口模拟的是"宿主在走"，没有播放位；生产路径走 `_at`，不受这里影响。
+        // 给测试上下文补上播放位，保持原有 3 秒计数器语义。
+        let mut forced: crate::block_context::BlockContext = context.into();
+        forced.playing = true;
+        self.note_stream_block_at(stream, forced, frames, playing_rising, recording_rising, None)
     }
 
     /// 与 note_stream_block 相同，但允许调用方给出**本地有效位置**（离线 cursor）。
     pub(super) fn note_stream_block_at(
         &self,
         stream: ProcessStream,
-        context: &crate::audio_abi::ProcessContext,
+        context: impl Into<crate::block_context::BlockContext>,
         frames: usize,
         playing_rising: bool,
         recording_rising: bool,
         effective_position: Option<i64>,
     ) -> StreamBlock {
+        let context = context.into();
         let rate = if context.sample_rate.is_finite() && context.sample_rate > 0.0 {
             context.sample_rate
         } else {
@@ -133,12 +127,12 @@ impl ExtensionOwner {
             effective_position.unwrap_or(context.project_time_samples),
             frames,
             rate,
-            StreamTime::from_context(context),
+            StreamTime::from_context(&context),
             playing_rising,
             recording_rising,
             // kPlaying 是 SDK 对"transport 是否在走"的权威回答，与位置、采样率、
             // 样本同属**同一个块**。计数器的推进权必须以它为准（见 may_advance）。
-            context.state & crate::audio_abi::PROCESS_CONTEXT_PLAYING != 0,
+            context.playing,
         )
     }
 
@@ -150,10 +144,11 @@ impl ExtensionOwner {
     pub(super) fn note_processing_block(
         &self,
         stream: ProcessStream,
-        context: &crate::audio_abi::ProcessContext,
+        context: impl Into<crate::block_context::BlockContext>,
         frames: usize,
         processing: ProcessingBlock,
     ) -> StreamBlock {
+        let context = context.into();
         let offline = processing.kind == ProcessingKind::Offline;
         let timebase = if offline {
             TimebaseKind::OfflineLocal
@@ -1058,9 +1053,10 @@ impl ExtensionOwner {
     pub(crate) fn capture_observe(
         &self,
         data: *mut crate::audio_abi::ProcessData,
-        context: &crate::audio_abi::ProcessContext,
+        context: impl Into<crate::block_context::BlockContext>,
         effective_position: Option<i64>,
     ) -> Option<BlockEvidence> {
+        let context = context.into();
         let capture = self.capture();
         // SAFETY: 调用方保证 data 在本回调期间可读。
         let mode = unsafe { (*data).process_mode };
@@ -1080,8 +1076,8 @@ impl ExtensionOwner {
         } else {
             declared
         };
-        let playing = context.state & crate::audio_abi::PROCESS_CONTEXT_PLAYING != 0;
-        let recording = context.state & crate::audio_abi::PROCESS_CONTEXT_RECORDING != 0;
+        let playing = context.playing;
+        let recording = context.recording;
         // SAFETY: 与 `audio_process_inner` 同一份宿主提供的 ProcessData；`capture_view`
         // 的切片只在本次回调内有效，而消费方同步读完就返回。
         let requested_position = effective_position;
@@ -1127,7 +1123,7 @@ impl ExtensionOwner {
         // 实时流“在前进”的证据（用户听到的开头小段循环）。
         // 【处理 pass 必须先于 HostClock】mode=0 的冻结预览 raw 固定、kPlaying=0；
         // 若先走实时会话，它会在 1 秒起播窗口后被判成 Paused，预览永远只录 1 秒。
-        let stream_time = StreamTime::from_context(context);
+        let stream_time = StreamTime::from_context(&context);
         let phase_before = SessionPhase::from_code(
             self.streams[stream.index()]
                 .session_phase
@@ -1322,7 +1318,7 @@ impl ExtensionOwner {
             }
         }
         self.note_block_trace(
-            context.state,
+            context.state_bits(),
             mode,
             stream,
             stream_block.raw_start,
@@ -1380,11 +1376,12 @@ impl ExtensionOwner {
     /// `block_split` 的逐段位置负责）。
     pub(super) fn cycle_start_position(
         &self,
-        context: &crate::audio_abi::ProcessContext,
+        context: impl Into<crate::block_context::BlockContext>,
         rate: f64,
         position: i64,
     ) -> Option<i64> {
-        let time = StreamTime::from_context(context);
+        let context = context.into();
+        let time = StreamTime::from_context(&context);
         if !time.cycle_active || !time.cycle_valid {
             return None;
         }
@@ -1403,12 +1400,13 @@ impl ExtensionOwner {
     /// `(cycle_end − project_time_music) × 60/tempo × rate` 就是本块到终点的帧数。
     pub(super) fn block_split(
         &self,
-        context: &crate::audio_abi::ProcessContext,
+        context: impl Into<crate::block_context::BlockContext>,
         frames: usize,
         rate: f64,
         position: i64,
     ) -> BlockSplit {
-        let time = StreamTime::from_context(context);
+        let context = context.into();
+        let time = StreamTime::from_context(&context);
         let (Some(tempo), Some(music)) = (time.tempo, time.music) else {
             return BlockSplit::whole(position, frames);
         };

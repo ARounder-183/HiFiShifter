@@ -2009,7 +2009,10 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
                 owner.note_offline_block(context, probe.process_mode, probe.num_samples as usize);
             // 【观察顺序：捕获先、宿主采样后】捕获决定本块位置是否可信；宿主采样通道
             // 必须看到同一个结论，否则 PendingAbsolute 期间它仍会把绝对位置画出去。
-            evidence = owner.capture_observe(probe, context, effective_position);
+            // 【为什么在这里转成中立描述】VST3 的 state 位只在这一处解码；捕获观察
+            // 之后只看事实，与 CLAP 侧走同一段代码（见 crate::block_context）。
+            let block = crate::block_context::BlockContext::from_vst3(context);
+            evidence = owner.capture_observe(probe, block, effective_position);
             if !owner.processing_pass_active() {
                 let position_trusted = evidence.is_some_and(|evidence| evidence.position_trusted);
                 owner.observe_transport(

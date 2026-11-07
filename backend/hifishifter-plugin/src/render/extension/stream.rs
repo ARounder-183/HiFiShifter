@@ -603,19 +603,15 @@ pub(crate) struct StreamTime {
 }
 
 impl StreamTime {
-    pub(super) fn from_context(context: &crate::audio_abi::ProcessContext) -> Self {
-        let state = context.state;
-        let continuous_ok = state & crate::audio_abi::PROCESS_CONTEXT_CONTINUOUS_VALID != 0;
-        let music_ok = state & crate::audio_abi::PROCESS_CONTEXT_PROJECT_TIME_MUSIC_VALID != 0;
-        let tempo_ok = state & crate::audio_abi::PROCESS_CONTEXT_TEMPO_VALID != 0;
-        let cycle_ok = state & crate::audio_abi::PROCESS_CONTEXT_CYCLE_VALID != 0;
+    /// 从**格式无关**的块描述取值：VST3 的 ~state~ 位已在
+    /// [~crate::block_context::BlockContext::from_vst3~] 里解码完毕，这里不再按位与。
+    pub(super) fn from_context(context: &crate::block_context::BlockContext) -> Self {
         Self {
-            continuous: continuous_ok.then_some(context.continuous_time_samples),
-            music: music_ok.then_some(context.project_time_music),
-            tempo: (tempo_ok && context.tempo.is_finite() && context.tempo > 0.0)
-                .then_some(context.tempo),
-            cycle_active: state & crate::audio_abi::PROCESS_CONTEXT_CYCLE_ACTIVE != 0,
-            cycle_valid: cycle_ok,
+            continuous: context.continuous,
+            music: context.music,
+            tempo: context.tempo,
+            cycle_active: context.cycle_active,
+            cycle_valid: context.cycle_valid,
             cycle_start_music: context.cycle_start_music,
             cycle_end_music: context.cycle_end_music,
         }

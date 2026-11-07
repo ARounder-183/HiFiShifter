@@ -67,6 +67,7 @@ mod audio_abi;
 mod capture;
 pub use hifishifter_plugin_core::component_state;
 mod diagnostics;
+pub mod block_context;
 pub mod editor;
 #[allow(missing_docs)]
 pub mod fade;
