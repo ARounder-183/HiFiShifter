@@ -2030,6 +2030,7 @@ dependencies = [
 name = "hifishifter-clap"
 version = "0.2.0-beta"
 dependencies = [
+ "ara2-bridge",
  "ara2-bridge-companion",
  "ara2-bridge-sys",
  "arc-swap",

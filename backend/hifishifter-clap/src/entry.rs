@@ -1,8 +1,9 @@
 //! CLAP 模块入口：descriptor、工厂、实例生命周期与扩展分发。
 //!
-//! 【为什么阶段 1 不暴露 ARA】`ara:supported` 意味着宿主可以按 ARACLAP.h 去要
-//! ARAFactory 与实例扩展。当前共享文档模型仍在 VST3 外壳里，交一个不能创建控制器的
-//! 工厂会让宿主写穿空指针；所以 descriptor 不声明 ARA，entry 也不给 ARA factory。
+//! 【ARA 的两级入口】entry 级工厂表在 `crate::ara::entry_extension`，实例级扩展在
+//! `crate::ara::get_extension`；两者背后是 VST3 那份共享 binder。descriptor 的
+//! `ara:supported` 在整条链验收前保持关闭 —— 交一个没有文档控制器的工厂会让宿主
+//! 写穿空指针。
 
 use crate::abi::cstr;
 use crate::abi::*;
@@ -94,7 +95,8 @@ unsafe extern "C" fn entry_get_factory(factory_id: *const c_char) -> *const c_vo
         if id == CLAP_PLUGIN_FACTORY_ID {
             return (&raw const FACTORY).cast::<c_void>();
         }
-        std::ptr::null()
+        // ARA 工厂表（entry 级）：与 VST3 共用同一个 ARAFactory，只是关联名不同。
+        crate::ara::entry_extension(id)
     })
 }
 
@@ -122,8 +124,8 @@ pub struct Instance {
     pub audio: audio::AudioState,
     pub host: *const clap_host_t,
     pub plugin: *const clap_plugin_t,
-    /// 阶段 2 的实例级 ARA 适配器；未接线前恒为 None。
-    pub ara: Option<()>,
+    /// 实例级 ARA 绑定器；运行时不可用时为 None（实例退回 Capture 形态）。
+    pub ara: Option<std::sync::Arc<hifishifter_plugin::ara::binder::AraBinder>>,
     /// `plugin->init` 是否已成功。CLAP 规定每个实例只调一次。
     pub initialized: AtomicBool,
     /// `plugin->activate` 是否已成功；`process` 必须在此之后。
@@ -226,7 +228,8 @@ unsafe extern "C" fn plugin_init(plugin: *const clap_plugin_t) -> bool {
             return false;
         }
         crate::log_host::install(instance.host);
-        crate::ara::attach(plugin);
+        // SAFETY: 本函数就是宿主调用的 plugin.init，plugin 是本实例的记录。
+        unsafe { crate::ara::attach(plugin) };
         log::info!("[clap] instance initialized");
         true
     })

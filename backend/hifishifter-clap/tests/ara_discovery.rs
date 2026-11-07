@@ -1,10 +1,12 @@
-//! 阶段 2 前置判据：ARA-over-CLAP 的 ID 与发现表 ABI 必须与上游一致。
+//! ARA-over-CLAP 的发现表判据：ID、布局、配对键与真实入口行为。
 //!
-//! 【为什么用 dev-dependency】`ara2-bridge-companion` 的 `clap` feature 是纯
-//! checked-in 声明，build.rs 对它不要求任何 SDK；只挂在 dev-dependencies 上，
-//! 既不进产品依赖图，也不会把 VST3 SDK / `audio-unit-v2` 拖进六平台构建。
-//! 这条测试回答的是"等共享 ARA runtime 就绪时，我们能不能直接接上"，
-//! 而不是"现在就暴露 ARA 能力"——后者仍按阶段 1 契约返回 null。
+//! 【为什么用真实 companion 类型】这些 ID 与结构体是 ARA 官方头文件的逐字镜像；
+//! 用自己的常量去断言自己的常量是空转。这里从 `ara2-bridge-companion` 读回同一组
+//! 值，再与 `hifishifter_clap::ara` 暴露的那一份逐字比对。
+//!
+//! 【现在断言什么】entry 级工厂表已接上共享 ARA runtime（与 VST3 同一个
+//! `ARAFactory`，只是关联名换成 CLAP 的 descriptor ID），所以"工厂 ID 必须给出表、
+//! 别的 ID 必须给 null"是产品行为；实例级扩展在没有绑定器的实例上仍必须返回 null。
 
 use ara2_bridge_companion::clap::sys::{
     CLAP_EXT_ARA_FACTORY, CLAP_EXT_ARA_FACTORY_COMPAT, CLAP_EXT_ARA_PLUGIN_EXTENSION,
@@ -72,7 +74,7 @@ fn a_real_clap_ara_entry_exposes_one_stable_factory_association() {
 }
 
 #[test]
-fn the_unwired_stage_one_still_returns_null_for_every_ara_query() {
+fn an_instance_without_a_binder_returns_null_for_every_ara_query() {
     for id in [
         CLAP_EXT_ARA_FACTORY,
         CLAP_EXT_ARA_FACTORY_COMPAT,
@@ -81,9 +83,30 @@ fn the_unwired_stage_one_still_returns_null_for_every_ara_query() {
     ] {
         assert!(
             ours::get_extension(std::ptr::null(), id).is_null(),
-            "stage 1 must not expose {id}"
+            "an instance without an ARA binder must not expose {id}"
         );
     }
     // 角色集合只是确认 companion 的 CLAP 通道可用，不作为能力声明。
     assert!(CompanionRoles::all().contains(CompanionRoles::PLAYBACK_RENDERER));
+}
+
+/// **entry 级配对键**：工厂扩展 ID 必须给出表，其余 ID 必须给 null。
+///
+/// 【为什么这条是产品行为而不是前置判据】entry 现在接的是**共享** ARA runtime 的
+/// 同一个 `ARAFactory`；宿主拿到的表里，`get_plugin_id` 必须与 descriptor 逐字相同，
+/// 否则宿主无法把工厂与实例配成一对，表现为"插件能加载但从不进入 ARA"。
+#[test]
+fn the_entry_publishes_the_ara_factory_under_the_clap_descriptor_id() {
+    let table = ours::entry_extension(CLAP_EXT_ARA_FACTORY);
+    assert!(!table.is_null(), "the ARA factory table must be published");
+    let host = unsafe { ClapAraHostFactory::discover(table.cast()) }.expect("discover");
+    assert_eq!(host.factory_count(), 1);
+    let association = host.factory(0).expect("factory 0");
+    assert_eq!(
+        association.plugin_id(),
+        hifishifter_clap::abi::PLUGIN_ID_STR
+    );
+    assert!(!association.ara_factory().is_null());
+    assert!(ours::entry_extension("clap.plugin-factory").is_null());
+    assert!(ours::entry_extension(CLAP_EXT_ARA_PLUGIN_EXTENSION).is_null());
 }

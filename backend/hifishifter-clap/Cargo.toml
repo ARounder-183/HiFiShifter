@@ -1,8 +1,8 @@
 # HiFiShifter 的 CLAP 1.1.9 插件外壳。
 #
-# 【为什么阶段 1 不开 ARA】当前产物是可加载的 Capture-only 外壳：descriptor 不声明
-# ara:supported，entry 也不暴露 ARA 工厂。等共享 ARA 文档模型在 core 落地后，阶段 2
-# 才加 ara2-bridge 的 clap feature，并同时接实例级 CLAP_EXT_ARA_PLUGINEXTENSION。
+# 【ARA 怎么接】entry 级 ARA 工厂表与实例级 CLAP_EXT_ARA_PLUGINEXTENSION 都由 src/ara.rs
+# 暴露，绑定逻辑走 hifishifter-plugin 的共享 binder（与 VST3 同一份）。descriptor 的
+# ara:supported 只在整条链（文档 → renderer → 编辑器）接通并验收后打开。
 [package]
 name = "hifishifter-clap"
 version = "0.2.0-beta"
@@ -22,6 +22,9 @@ hifishifter-capture = { path = "../hifishifter-capture" }
 # 只做格式适配。关掉默认 feature ⇒ 不带 ONNX 推理栈与 SoundTouchDLL（链接期依赖，
 # Windows 只按宿主目录解析，CLAP 没有 loader 层）。
 hifishifter-plugin = { path = "../hifishifter-plugin", default-features = false }
+# ARA 2 的 CLAP 伴生适配器：entry 级工厂表与实例级扩展的**结构体与回调形状**由它给出，
+# 绑定逻辑则走 hifishifter-plugin 的共享 binder（见 src/ara.rs 的说明）。
+ara2-bridge = { version = "0.3.0", features = ["clap"] }
 # 时间线载荷与 VST3 同形（同一个 TimelineState），只用到 serde 类型。
 hifishifter-kernel = { path = "../hifishifter-kernel", default-features = false }
 log = { version = "0.4", features = ["std"] }

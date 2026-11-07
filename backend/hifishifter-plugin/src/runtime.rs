@@ -104,6 +104,17 @@ fn factory_capabilities() -> FactoryCapabilities {
 }
 
 impl Runtime {
+    /// 以**另一种格式**的关联 ID 复用同一个 ARA 工厂。
+    ///
+    /// 【为什么需要它】companion 的关联 ID 是"宿主用来把主工厂与音频处理器配成一对"的
+    /// 那个名字：VST3 用处理器类名，CLAP 用 descriptor 的插件 ID。两者指向**同一个**
+    /// `ARAFactory`（进程内唯一、泄漏到进程结束），区别只在配对时用的名字。
+    /// 复制一份工厂会让宿主看到两个 ARA 主工厂，同一份工程里可能被配成两对。
+    pub fn companion_for(&self, id: &str) -> Result<CompanionFactory<'static>, AraError> {
+        // SAFETY: 工厂被泄漏到进程结束，指针在整个进程期内可读。
+        unsafe { CompanionFactory::from_raw(id, &*self.factory.0.as_raw()) }
+    }
+
     /// 建立工厂与 companion 关联。
     fn init() -> Result<Runtime, AraError> {
         let factory = FactoryBuilder::new(crate::FACTORY_ID, crate::ARCHIVE_ID)

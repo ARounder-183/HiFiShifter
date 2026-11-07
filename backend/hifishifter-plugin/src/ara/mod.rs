@@ -10,6 +10,8 @@
 //! 真实 ARA 之间的唯一接触面。
 
 pub use hifishifter_ara::mapping;
+/// 格式无关的 ARA 实例绑定（VST3 与 CLAP 共用同一份决策逻辑）。
+pub mod binder;
 pub mod model;
 pub mod persistence;
 
