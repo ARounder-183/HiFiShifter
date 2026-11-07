@@ -1048,42 +1048,41 @@ impl ExtensionOwner {
     ///
     /// 录制只关心两件事：宿主给的**工程位置**、宿主给的**输入**。
     ///
-    /// 前置条件（由调用方保证）：`data` 的样本是 32-bit 浮点、`process_context` 非空。
-    /// 非 32-bit 时平面是 64 位（联合体同地址），按 `f32` 读会读到垃圾。
-    pub(crate) fn capture_observe(
+    /// 捕获观察的**唯一**实现：吃一个中立块与中立时间事实。
+    ///
+    /// 【为什么块与时间分开】缓冲（`InputBlock`）描述"这一段样本是什么"，时间事实
+    /// （`BlockContext`）描述"它在宿主时间轴上处于哪一刻"。两者来源不同：VST3 把它们
+    /// 分别放在 `ProcessData` 与 `ProcessContext`，CLAP 放在 `clap_process_t` 与
+    /// `clap_event_transport_t`。合成一个结构只会逼每种格式再造一次。
+    pub(crate) fn capture_observe_block(
         &self,
-        data: *mut crate::audio_abi::ProcessData,
+        block: crate::capture::recorder::InputBlock<'_>,
+        stream: ProcessStream,
         context: impl Into<crate::block_context::BlockContext>,
         effective_position: Option<i64>,
     ) -> Option<BlockEvidence> {
         let context = context.into();
         let capture = self.capture();
-        // SAFETY: 调用方保证 data 在本回调期间可读。
-        let mode = unsafe { (*data).process_mode };
-        let stream = ProcessStream::from_mode(mode)?;
         // 【为什么离线也要记】它决定前端显示哪一条引导：走过 bounce 的宿主可以
         // "点一次 Capture 然后导出"，而实时宿主必须真的播一遍。
         if stream == ProcessStream::Offline {
             capture.note_offline();
         }
-        // 【为什么采样率有兜底】`ProcessContext::sample_rate` 是 SDK 标注 always valid 的
-        // 字段，但真出现过宿主不填它的情形；而**没有率就无法把工程帧换算成秒**，
-        // 捕获会把每一块都当成"没有位置"丢掉（用户看到的是"录了 0.0 秒"）。
-        // `setupProcessing` 声明过的率是同一件事的权威来源，用它兜底不引入新语义。
-        let declared = self.setup_sample_rate();
-        let rate = if context.sample_rate.is_finite() && context.sample_rate > 0.0 {
-            context.sample_rate
+        // 【为什么采样率有兜底】宿主不填采样率的情形真实出现过，而没有率就无法把
+        // 工程帧换算成秒，捕获会把每一块都当成"没有位置"丢掉（用户看到"录了 0.0 秒"）。
+        // 声明过的率是同一件事的权威来源，用它兜底不引入新语义。
+        let rate = if block.sample_rate.is_finite() && block.sample_rate > 0.0 {
+            block.sample_rate
         } else {
-            declared
+            self.setup_sample_rate()
         };
         let playing = context.playing;
         let recording = context.recording;
-        // SAFETY: 与 `audio_process_inner` 同一份宿主提供的 ProcessData；`capture_view`
-        // 的切片只在本次回调内有效，而消费方同步读完就返回。
         let requested_position = effective_position;
-        let effective_position = effective_position.unwrap_or(context.project_time_samples);
-        let block =
-            unsafe { crate::audio_abi::capture_view(data, effective_position, rate, playing) };
+        // 块的起点就是调用方已经算好的有效位置（适配层用同一个值构造 `InputBlock`）。
+        let effective_position = effective_position.unwrap_or(block.start);
+        // 诊断环里的 `mode` 与宿主声明的处理模式同值（`ProcessStream` 的 index 就是它）。
+        let mode = stream.index() as i32;
         // 【为什么未武装也要观察】观察位描述"宿主实际做了什么"，而录制按钮的门
         // （`canCapture`）读的正是 `saw_context`。此前观察发生在武装**之后**，于是
         // "必须先录一次才能录"——按钮永远是灰的，Capture 在所有宿主上都用不了。
@@ -1368,6 +1367,48 @@ impl ExtensionOwner {
             transport_generation: stream_block.transport_generation,
             preview: stream_block.preview,
         })
+    }
+
+    /// VST3 适配层：把宿主 `ProcessData` 变成中立块，再走同一条捕获逻辑。
+    ///
+    /// 【为什么留着它】它是 VST3 音频回调唯一认识的形状；真正的观察在
+    /// [`Self::capture_observe_block`] 里。CLAP 侧从 `clap_audio_buffer_t` 直接造
+    /// `InputBlock`，两边之后走的是同一段代码。
+    pub(crate) fn capture_observe(
+        &self,
+        data: *mut crate::audio_abi::ProcessData,
+        context: impl Into<crate::block_context::BlockContext>,
+        effective_position: Option<i64>,
+    ) -> Option<BlockEvidence> {
+        let context = context.into();
+        // SAFETY: 调用方保证 data 在本回调期间可读。
+        let mode = unsafe { (*data).process_mode };
+        let stream = ProcessStream::from_mode(mode)?;
+        let rate = if context.sample_rate.is_finite() && context.sample_rate > 0.0 {
+            context.sample_rate
+        } else {
+            self.setup_sample_rate()
+        };
+        let start = effective_position.unwrap_or(context.project_time_samples);
+        // SAFETY: 与 `audio_process_inner` 同一份宿主提供的 ProcessData；切片只在本次
+        // 回调内有效，而消费方同步读完就返回。
+        let block = unsafe { crate::audio_abi::capture_view(data, start, rate, context.playing) };
+        self.capture_observe_block(block, stream, context, effective_position)
+    }
+
+    /// 把宿主音频喂进共享捕获路径；返回"本块位置是否可信"。
+    ///
+    /// 【为什么返回 bool 而不是证据结构】证据里的相位、切分与门控是 VST3 音频通路的
+    /// 输入；别的格式要的只是"这一块的位置能不能当绝对位置用"。
+    pub fn capture_block(
+        &self,
+        block: crate::capture::recorder::InputBlock<'_>,
+        stream: ProcessStream,
+        context: impl Into<crate::block_context::BlockContext>,
+        effective_position: Option<i64>,
+    ) -> bool {
+        self.capture_observe_block(block, stream, context, effective_position)
+            .is_some_and(|evidence| evidence.position_trusted)
     }
 
     /// 循环起点在工程采样域中的位置（`None` = 元数据不足）。
