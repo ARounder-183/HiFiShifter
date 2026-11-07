@@ -14,7 +14,10 @@ hifishifter-ara = { path = "../hifishifter-ara" }
 # 捕获运行时（格式无关）：VST3 与 CLAP 共用同一份判定与投影。
 hifishifter-capture = { path = "../hifishifter-capture" }
 # 插件包不分发闭源vslib；独立app的默认features不受影响。
-hifishifter-kernel = { path = "../hifishifter-kernel", default-features = false, features = ["onnx", "soundtouch"] }
+# 【为什么 ONNX / SoundTouch 是 feature 而不是写死】实现层要被 CLAP 外壳复用，而 CLAP 模块
+# 带不动 SoundTouchDLL（链接期依赖，Windows 只按宿主目录解析）也不该被 38 MB 的推理栈撑大。
+# 默认仍全开 —— VST3 产物的行为与依赖一行不变。
+hifishifter-kernel = { path = "../hifishifter-kernel", default-features = false, features = ["vslib"] }
 hifishifter-host-link = { path = "../hifishifter-host-link" }
 hifishifter-clipboard = { path = "../hifishifter-clipboard" }
 blake3 = "1"
@@ -114,6 +117,13 @@ windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com"
 [target.'cfg(windows)'.dev-dependencies]
 # 一次性模型资源诊断使用系统进程峰值；产品构建不引入此测试专用API。
 windows = { version = "0.62", features = ["Win32_System_ProcessStatus"] }
+
+[features]
+# 默认 = VST3/App 的完整形态（ONNX 声码器 + SoundTouch）。
+# `--no-default-features` = 只有静态链接的 WORLD/Signalsmith，CLAP 外壳用这一形态。
+default = ["onnx", "soundtouch"]
+onnx = ["hifishifter-kernel/onnx"]
+soundtouch = ["hifishifter-kernel/soundtouch"]
 
 [lib]
 name = "hifishifter_plugin"
