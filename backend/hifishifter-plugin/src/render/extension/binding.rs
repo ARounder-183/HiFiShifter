@@ -482,7 +482,14 @@ impl ExtensionOwner {
                 // 【为什么 Capture 实例不报】它**永远**没有 ARA 文档 —— 那不是故障，
                 // 是形态。此前这一行每 10 秒报一次，40 分钟的现场日志里刷了 480 行，
                 // 把真正的错误整片淹掉；而"看不到读数"正是本轮要修的第一件事。
-                if self.mode() != InstanceMode::Capture {
+                //
+                // 【为什么还要看 `was_bound_before`】`mode()` 要等激活后过了宽限期才
+                // 落定成 Capture，而这条路径在**激活那一刻**就会跑一次（共享生命周期
+                // 入口的 `component_activated` → `resume_resync`）：只看 `mode()` 的话，
+                // 每一个普通插入都会在激活时留下一条"没有文档"的警告。真正需要这条
+                // 诊断的只有"曾经绑上、后来丢了文档"的实例 —— 那正是 `was_bound_before`
+                // 回答的问题。
+                if self.mode() != InstanceMode::Capture && self.was_bound_before() {
                     hifishifter_kernel::log_limiter::emit_limited_key(
                         log::Level::Warn,
                         "ara.stamp.no-document",

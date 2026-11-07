@@ -148,8 +148,8 @@ fi
 # ── 4. 黑盒加载 ──────────────────────────────────────────────────────────────
 #
 # 探针真的走一遍 dlopen → init → 工厂 → 实例 → activate → process（逐样本比对直通）
-# → state 存取往返，最后断言 ARA 工厂缺席。任何一条不过都说明"能编译"与"能用"之间
-# 还有距离。
+# → state 存取往返，并核对 ARA 工厂表与 descriptor 的配对。任何一条不过都说明
+# "能编译"与"能用"之间还有距离。
 printf "\n4) 黑盒加载（dlopen → entry → 工厂 → 实例 → process → state）\n"
 PROBE_DIR="$(mktemp -d)"
 trap 'rm -rf "$PROBE_DIR"' EXIT
@@ -161,9 +161,18 @@ if cc -O1 -Wall -o "$PROBE_DIR/probe" "$SCRIPT_DIR/probe.c" $EXTRA_LIBS 2>"$PROB
         sed "s/^/    /" "$PROBE_DIR/out.log"
         grep -q "plugin_id=com.hifishifter.clap" "$PROBE_DIR/out.log" || bad "描述符 id 不是 com.hifishifter.clap"
         grep -q "process=ok" "$PROBE_DIR/out.log" || bad "process 没有跑通（直通比对失败）"
-        grep -q "ara_factory=absent" "$PROBE_DIR/out.log" || bad "本阶段不应暴露 ARA 工厂"
-        if grep -q "feature=ara" "$PROBE_DIR/out.log"; then
-            bad "描述符声明了 ARA feature（本阶段是 Capture-only）"
+        # ── ARA（阶段 2）────────────────────────────────────────────────────
+        # 判据从"必须缺席"反过来：宿主扫描时就要看到工厂表，并用 get_plugin_id
+        # 把它与 descriptor 配对；两者差一个字符，插件永远不会被 ARA 认领，而
+        # 宿主日志里一个字都不会说。
+        grep -q "ara_factory=present plugin_id=com.hifishifter.clap" "$PROBE_DIR/out.log" \
+            || bad "entry 没有发布与 descriptor 配对的 ARA 工厂表"
+        grep -q "ara_plugin_extension=present" "$PROBE_DIR/out.log" \
+            || bad "实例没有 ARA 插件扩展：宿主无法绑定文档控制器"
+        grep -q "feature=ara:supported" "$PROBE_DIR/out.log" \
+            || bad "描述符没有声明 ara:supported（宿主不会把本插件当作 ARA 候选）"
+        if grep -q "feature=ara:required" "$PROBE_DIR/out.log"; then
+            bad "描述符声明了 ara:required（不支持 ARA 的宿主会直接拒绝建立实例）"
         fi
         # 【为什么逐项断言扩展】探针打印 "absent" 后返回 0 是老版判据的漏洞：
         # 少了 clap.state 的产物照样绿，宿主保存工程时编辑全丢。现在把"必须存在"

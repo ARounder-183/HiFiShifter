@@ -72,6 +72,19 @@ typedef struct {
     bool (*load)(const void *, const void *);
 } clap_plugin_state_t;
 
+/* ARA：entry 级工厂表与实例级扩展（ARACLAP.h 的 stable ID）。
+   【为什么判据要在这里】宿主在扫描阶段就用 `get_plugin_id` 把这张表与 descriptor
+   配对；两者只要差一个字符，插件永远不会被 ARA 认领，而宿主日志里不会有任何提示。 */
+typedef struct {
+    uint32_t (*get_factory_count)(const void *);
+    const void *(*get_ara_factory)(const void *, uint32_t);
+    const char *(*get_plugin_id)(const void *, uint32_t);
+} clap_ara_factory_t;
+typedef struct {
+    const void *(*get_factory)(const void *);
+    const void *(*bind_to_document_controller)(const void *, const void *, uint32_t, uint32_t);
+} clap_ara_plugin_extension_t;
+
 static unsigned char saved_state[4096];
 static unsigned char first_state[4096];
 static size_t saved_len = 0, loaded_len = 0;
@@ -140,16 +153,25 @@ int main(int argc, char **argv) {
         fprintf(stderr, "invalid descriptor\n"); entry->deinit(); return 1;
     }
     printf("plugin_id=%s plugin_name=%s version=%s\n", desc->id, desc->name, desc->version);
+    bool saw_ara_supported = false;
     if (desc->features) {
-        for (const char *const *feature = desc->features; *feature; ++feature) printf("feature=%s\n", *feature);
-        /* 阶段 1 是 Capture-only：descriptor 绝不声明任一 ARA 能力，也绝不要求 ARA。
-           宿主若看到 ara:required，会直接拒绝为这个插件建立实例。 */
         for (const char *const *feature = desc->features; *feature; ++feature) {
-            if (strncmp(*feature, "ara:", 4) == 0) {
-                fprintf(stderr, "unexpected ARA feature: %s\n", *feature);
+            printf("feature=%s\n", *feature);
+            if (strcmp(*feature, "ara:supported") == 0) saw_ara_supported = true;
+        }
+        /* 阶段 2：descriptor 必须声明 ara:supported（宿主据此知道可以从 ARA 入口插入），
+           但**绝不**声明 ara:required —— 那会让不支持 ARA 的宿主直接拒绝建立实例。
+           两种宿主都要能插上，这是本插件的基本前提。 */
+        for (const char *const *feature = desc->features; *feature; ++feature) {
+            if (strcmp(*feature, "ara:required") == 0) {
+                fprintf(stderr, "the descriptor must not require ARA: %s\n", *feature);
                 entry->deinit(); return 1;
             }
         }
+    }
+    if (!saw_ara_supported) {
+        fprintf(stderr, "the descriptor does not advertise ara:supported\n");
+        entry->deinit(); return 1;
     }
     /* 工厂只能报一个插件；get_plugin_descriptor(1) 必须返回 null，否则
        宿主扫描索引会越界。 */
@@ -157,12 +179,48 @@ int main(int argc, char **argv) {
         fprintf(stderr, "get_plugin_descriptor(1) should return null\n");
         entry->deinit(); return 1;
     }
+    /* ARA 工厂表：与 descriptor 同索引、同 id、同一份二进制。 */
+    const clap_ara_factory_t *ara_factory =
+        (const clap_ara_factory_t *)entry->get_factory("org.ara-audio.ara.factory/2");
+    if (!ara_factory || !ara_factory->get_factory_count || !ara_factory->get_ara_factory ||
+        !ara_factory->get_plugin_id) {
+        fprintf(stderr, "the entry publishes no ARA factory table\n"); entry->deinit(); return 1;
+    }
+    if (ara_factory->get_factory_count(ara_factory) != 1) {
+        fprintf(stderr, "the ARA factory table must describe exactly one association\n");
+        entry->deinit(); return 1;
+    }
+    const char *ara_plugin_id = ara_factory->get_plugin_id(ara_factory, 0);
+    if (!ara_plugin_id || strcmp(ara_plugin_id, desc->id) != 0) {
+        fprintf(stderr, "ARA plugin id mismatch: %s != %s\n",
+            ara_plugin_id ? ara_plugin_id : "(null)", desc->id);
+        entry->deinit(); return 1;
+    }
+    const void *ara_table = ara_factory->get_ara_factory(ara_factory, 0);
+    if (!ara_table || ara_factory->get_ara_factory(ara_factory, 0) != ara_table) {
+        fprintf(stderr, "the ARA factory pointer must be stable across queries\n");
+        entry->deinit(); return 1;
+    }
+    printf("ara_factory=present plugin_id=%s\n", ara_plugin_id);
+
     const clap_plugin_t *plugin = (const clap_plugin_t *)factory->create_plugin(
         factory, (const void *)&host, "com.hifishifter.clap");
     if (!plugin || !plugin->init || !plugin->destroy || !plugin->activate || !plugin->process) {
         fprintf(stderr, "create_plugin returned an incomplete plug-in\n"); return 1;
     }
     if (!plugin->init(plugin)) { fprintf(stderr, "plugin.init failed\n"); return 1; }
+    /* 实例级 ARA 扩展必须给出**同一张**工厂表的指针：宿主用它把实例绑到文档控制器。 */
+    const clap_ara_plugin_extension_t *ara_ext = (const clap_ara_plugin_extension_t *)
+        plugin->get_extension(plugin, "org.ara-audio.ara.pluginextension/2");
+    if (!ara_ext || !ara_ext->get_factory || !ara_ext->bind_to_document_controller) {
+        fprintf(stderr, "the instance exposes no ARA plugin extension\n");
+        plugin->destroy(plugin); entry->deinit(); return 1;
+    }
+    if (ara_ext->get_factory(plugin) != ara_table) {
+        fprintf(stderr, "the instance ARA factory differs from the entry table\n");
+        plugin->destroy(plugin); entry->deinit(); return 1;
+    }
+    printf("ara_plugin_extension=present\n");
     if (!plugin->activate(plugin, 48000.0, 1, 512)) { fprintf(stderr, "activate failed\n"); return 1; }
     if (plugin->start_processing && !plugin->start_processing(plugin)) { fprintf(stderr, "start_processing failed\n"); return 1; }
     float left[8] = {1,2,3,4,5,6,7,8}, right[8] = {8,7,6,5,4,3,2,1};
@@ -224,8 +282,7 @@ int main(int argc, char **argv) {
     if (plugin->stop_processing) plugin->stop_processing(plugin);
     plugin->deactivate(plugin);
     plugin->destroy(plugin);
-    const void *ara = entry->get_factory("org.ara-audio.ara.factory/2");
-    printf("ara_factory=%s\n", ara ? "present" : "absent");
+
     entry->deinit();
     return 0;
 }
