@@ -314,7 +314,7 @@ pub struct PlaybackEndpoint {
 }
 
 #[derive(Default)]
-pub(crate) struct DocumentSession {
+pub struct DocumentSession {
     controller: AtomicUsize,
     alive: AtomicBool,
     /// 本文档是否曾经成功 attach 过 renderer（重绑/关闭后用于区分"还没绑"与"绑过又没了"）。

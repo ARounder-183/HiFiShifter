@@ -61,6 +61,16 @@ pub fn observe_processing(_plugin: *const clap_plugin_t) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 共享实现必须能被 CLAP 外壳**命名**：ARA 绑定走的是 VST3 那一份
+    /// `ExtensionOwner`，不是复制品。这条用例钉住公开面（类型可达、可 `Arc` 持有），
+    /// 接线时不需要再改可见性。
+    #[test]
+    fn the_shared_ara_owner_is_reachable_from_the_clap_shell() {
+        let owner: Option<std::sync::Arc<hifishifter_plugin::render::extension::ExtensionOwner>> =
+            None;
+        assert!(owner.is_none());
+    }
     #[test]
     fn the_factory_id_is_format_suffixed() {
         assert_eq!(crate::entry::ARA_FACTORY_ID, "com.hifishifter.ara.clap");

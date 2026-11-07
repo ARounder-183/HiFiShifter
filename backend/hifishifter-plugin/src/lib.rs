@@ -49,6 +49,13 @@
     // 测试等待循环用 `while <不变量>` 表达"轮询到满足为止"，超时由循环体内的
     // deadline 断言负责；改写成 `loop` 会把停止条件藏得更深。
     clippy::while_immutable_condition,
+    // 【为什么允许 private_interfaces】本 crate 同时是 VST3 的 cdylib 与 CLAP 外壳的
+    // rlib：`ExtensionOwner` / `DocumentSession` 必须 `pub`，兄弟外壳才能把 ARA 绑定
+    // 转给**同一份**实现；而它们的公开方法签名里会带出本 crate 内部的协作类型
+    // （快照发布器、区域键……）。那些类型不属于对外契约，也不该为了消一条 lint 被
+    // 提升成 `pub` —— 那会把实现细节变成别人可以依赖的 API。真正的边界由
+    // `hifishifter-clap` 只调用少数几个方法这一事实约束。
+    private_interfaces,
     // `let mut x = X::default(); x.a = 1;` 与结构体更新语法等价；后者在字段多、
     // 默认值集中定义时更难读（要来回对照 Default 实现）。
     clippy::field_reassign_with_default,
@@ -60,14 +67,14 @@ mod audio_abi;
 mod capture;
 pub use hifishifter_plugin_core::component_state;
 mod diagnostics;
-mod editor;
+pub mod editor;
 #[allow(missing_docs)]
 pub mod fade;
 #[allow(missing_docs)]
 pub mod host_identity;
 pub use hifishifter_plugin_core::plugin_log_name;
 pub mod render;
-mod runtime;
+pub mod runtime;
 mod settings_store;
 mod state_channel;
 mod state_stream;
