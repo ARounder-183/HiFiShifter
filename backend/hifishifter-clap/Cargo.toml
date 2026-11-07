@@ -18,6 +18,10 @@ crate-type = ["cdylib", "rlib"]
 hifishifter-plugin-core = { path = "../hifishifter-plugin-core" }
 # 捕获运行时与 VST3 共用同一份（判定、投影、sidecar 全在那边）。
 hifishifter-capture = { path = "../hifishifter-capture" }
+# 实现层（ARA 模型 / 渲染 / 编辑器 / 宿主适配）**唯一的一份**：CLAP 外壳不复制任何逻辑，
+# 只做格式适配。关掉默认 feature ⇒ 不带 ONNX 推理栈与 SoundTouchDLL（链接期依赖，
+# Windows 只按宿主目录解析，CLAP 没有 loader 层）。
+hifishifter-plugin = { path = "../hifishifter-plugin", default-features = false }
 # 时间线载荷与 VST3 同形（同一个 TimelineState），只用到 serde 类型。
 hifishifter-kernel = { path = "../hifishifter-kernel", default-features = false }
 log = { version = "0.4", features = ["std"] }
