@@ -170,12 +170,17 @@ pub unsafe fn attach(plugin: *const clap_plugin_t) {
     }
 }
 
-/// 激活观察点。
+/// 激活观察点：记录“宿主把本实例激活了”的时刻。
 ///
-/// 【为什么这里什么都不做】VST3 的绑定窗口时刻由组件层（setActive）记在
-/// ExtensionOwner 上，那是格式外壳的事；CLAP 的等价时刻要等编辑器/形态判定接到
-/// 同一份 owner 之后才有消费者。此刻提前记一个没人读的时刻只会制造两份真相。
-pub fn observe_activation(_plugin: *const clap_plugin_t) {}
+/// 【为什么这件事必须记】ARA 契约规定 bind 只能在 activate **之前**发生；激活之后仍
+/// 无绑定，就是“宿主把本插件当普通插入”的确定证据（见 `InstanceMode`）。VST3 在
+/// `setActive` 里记同一份事实，两种格式因此对“形态什么时候落定”只有一个答案。
+pub fn observe_activation(plugin: *const clap_plugin_t) {
+    // SAFETY: 调用方是宿主的 activate 回调，实例仍归宿主所有。
+    if let Some(instance) = unsafe { crate::instance(plugin) } {
+        instance.owner.note_component_activated();
+    }
+}
 /// 停活观察点。
 pub fn observe_deactivation(_plugin: *const clap_plugin_t) {}
 /// 处理观察点。

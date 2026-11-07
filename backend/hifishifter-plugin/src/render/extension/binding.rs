@@ -310,7 +310,7 @@ impl ExtensionOwner {
     /// 【为什么在这里记而不是轮询宿主】`setActive` 是 ARA 绑定窗口的**关闭点**：
     /// 契约规定绑定只能发生在它之前。把时刻记下来，UI 定时器就能在宽限期后给出
     /// 一条确定性的诊断，而不是让读者去对比两个会话的日志。
-    pub(crate) fn note_component_activated(&self) {
+    pub fn note_component_activated(&self) {
         let mut at = self.set_active_at.lock_or_recover();
         if at.is_none() {
             *at = Some(std::time::Instant::now());
