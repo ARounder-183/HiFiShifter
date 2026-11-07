@@ -407,7 +407,7 @@ impl ExtensionOwner {
     }
 
     /// setState只暂存本组件恢复；宿主明确分配区域且模型ready后再合入共享权威。
-    pub(crate) fn restore_state(&self, bytes: &[u8]) -> Result<(), String> {
+    pub fn restore_state(&self, bytes: &[u8]) -> Result<(), String> {
         if bytes.is_empty() {
             return Ok(());
         }
@@ -723,7 +723,7 @@ impl ExtensionOwner {
     /// flush 超时、reconcile 失败、fade 元数据在途、payload 超限都降级为"返回当前
     /// 可用的最佳载荷"。宿主把 `getState` 的失败当成"插件存档失败"，而那比保存一份
     /// 稍旧的快照糟得多。
-    pub(crate) fn encode_state(&self) -> Result<Vec<u8>, String> {
+    pub fn encode_state(&self) -> Result<Vec<u8>, String> {
         let document = self
             .document
             .lock_or_recover()

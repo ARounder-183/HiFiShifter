@@ -1,7 +1,12 @@
-//! CLAP state：把宿主的不透明字节块交给 core 的 `ComponentState` 容器。
+//! CLAP state：宿主的不透明字节块 ⇄ 共享组件存档（`ComponentState`）。
 //!
-//! 【为什么 core 认识字节格式】`ComponentState` 是产品存档格式，与插件格式无关；
-//! CLAP 与 VST3 共用同一份魔数/版本/三段载荷，跨格式复制粘贴实例仍然可读。
+//! 【为什么外壳不再自己存字节】VST3 的 `getState` / `setState` 与 CLAP 的 `clap.state`
+//! 是同一件事：把本实例的编辑编码成宿主能保管的字节块，再读回来。此前 CLAP 侧把宿主
+//! 编来的字节**原样缓存**再原样写回 —— 保存时不编码当前编辑，加载时也不把编辑合入
+//! 会话，于是 CLAP 实例的存档是一条只有透传、没有内容的通路（重开工程后编辑全丢，
+//! 而日志里一切正常）。现在两条格式都走 `ExtensionOwner::encode_state` /
+//! `restore_state`：存档格式（编辑 + 捕获清单 + 捕获曲线）与"什么时候合入"的规则
+//! 只有一份，跨格式复制粘贴实例也仍然可读。
 //!
 //! 【为什么流读写必须循环】`clap/stream.h` 明确写了宿主可以限制单次读/写的字节数，
 //! 并提示「You need to use a loop to ensure that you read or write the entirety of your
@@ -10,41 +15,13 @@
 //! 没有别的线索，因此这里把短读/短写都当成正常进度继续推进。
 
 use crate::abi::clap_plugin_t;
-use hifishifter_plugin_core::component_state::ComponentState;
-use hifishifter_plugin_core::format::FormatState;
 use std::ffi::c_void;
-use std::sync::Mutex;
 
 /// 组件 state 的硬上限；与 `ComponentState` 的 64 MiB 约定一致。
 ///
 /// 【为什么需要上限】宿主若一直返回同一个正数而从不给 EOF，循环就永不结束；
 /// 音频插件不能把宿主线程挂死。超过上限按明确错误返回，而不是静默截断。
 const MAX_STATE_BYTES: usize = 64 * 1024 * 1024;
-
-/// 一个 CLAP 实例的持久状态。
-#[derive(Default)]
-pub struct InstanceState(Mutex<Vec<u8>>);
-
-impl FormatState for InstanceState {
-    fn load(&self, bytes: &[u8]) -> Result<(), String> {
-        // 验证容器可读，再保存原始字节：宿主拿到的与存进来的逐字相同。
-        ComponentState::decode(bytes)?;
-        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = bytes.to_vec();
-        Ok(())
-    }
-    fn save(&self) -> Result<Vec<u8>, String> {
-        let stored = self.0.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        if stored.is_empty() {
-            // 【为什么新实例也要写出字节】宿主把"0 字节"理解成"这个插件没有 state"，
-            // 而解码端又会把零字节当成裸 `EditState`（历史分支）。同一个工程在 CLAP
-            // 与 VST3 之间来回打开时，两边就会给出不同的字节块。写一个合法的空容器，
-            // 两个格式对"空状态"的表示就一致了。
-            return Ok(ComponentState::default().encode());
-        }
-        Ok(stored)
-    }
-}
-
 /// `clap_ostream_t`（`.ctx` 必须在函数指针之前，见 clap/stream.h）。
 #[repr(C)]
 pub struct clap_ostream_t {
@@ -132,14 +109,13 @@ unsafe extern "C" fn state_save(
         let Some(instance) = (unsafe { crate::instance(plugin) }) else {
             return false;
         };
-        let Ok(stored) = instance.state.save() else {
+        // 【为什么保存必须现场编码】宿主保存的是"此刻的实例"。回放上一次加载到的字节
+        // 只会存下一份陈旧载荷 —— 用户在这次会话里画的每一条曲线都不会进工程。
+        // 编码本身包含捕获清单与捕获曲线（与 VST3 的 getState 同一份实现）。
+        let Ok(bytes) = instance.owner.encode_state() else {
+            log::error!("[clap] state.save failed to encode the component state");
             return false;
         };
-        // 【为什么在这里并清单】捕获的音频落在本地缓存（sidecar），而"有哪些 take"
-        // 必须跟着宿主工程走：不并进去，重开工程就是一片空时间线，用户会以为录丢。
-        let mut container = ComponentState::decode(&stored).unwrap_or_default();
-        container.capture = serde_json::to_vec(&instance.owner.capture().manifest()).ok();
-        let bytes = container.encode();
         unsafe { write_all(stream, &bytes) }
     })
 }
@@ -159,25 +135,10 @@ unsafe extern "C" fn state_load(
                 return false;
             }
         };
-        if instance.state.load(&bytes).is_err() {
-            return false;
-        }
-        // 【失败不阻断加载】清单解析不了只说明这一次恢复拿不到 take；把整块状态拒掉
-        // 会让用户的编辑也一起丢。日志留下面因，界面按"没有捕获"继续。
-        match ComponentState::decode(&bytes) {
-            Ok(container) => {
-                if let Some(capture) = container.capture {
-                    match serde_json::from_slice::<serde_json::Value>(&capture) {
-                        Ok(manifest) => {
-                            if let Err(error) = instance.owner.capture().restore_manifest(&manifest) {
-                                log::warn!("[clap] capture manifest rejected: {error}");
-                            }
-                        }
-                        Err(error) => log::warn!("[clap] capture manifest is not JSON: {error}"),
-                    }
-                }
-            }
-            Err(error) => log::warn!("[clap] state container is unreadable: {error}"),
+        // 【失败不阻断加载】与 VST3 的 setState 同一条纪律：一份读不出来的旧存档只该
+        // 丢掉那份编辑，不该让整份工程加载失败。真因记进日志与恢复读数。
+        if let Err(error) = instance.owner.restore_state(&bytes) {
+            log::error!("[clap] state.load ignored: {error}; the host document load continues");
         }
         true
     })
@@ -186,11 +147,11 @@ unsafe extern "C" fn state_load(
 // SAFETY: 宿主只读的静态扩展表。
 unsafe impl Sync for clap_plugin_state_t {}
 unsafe impl Send for clap_plugin_state_t {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::Instance;
+    use hifishifter_plugin_core::component_state::ComponentState;
 
     /// 测试宿主：把每次读/写限制在 `max_chunk` 字节内，并可在指定调用次数上报错。
     struct TestStream {
@@ -241,15 +202,6 @@ mod tests {
         n as i64
     }
 
-    fn container() -> Vec<u8> {
-        ComponentState {
-            edits: vec![7; 517],
-            capture: Some(br#"{"takes":[{"id":"a"}]}"#.to_vec()),
-            capture_edits: Some(br#"{"notes":[]}"#.to_vec()),
-        }
-        .encode()
-    }
-
     fn ostream(state: &mut TestStream) -> clap_ostream_t {
         clap_ostream_t {
             ctx: (state as *mut TestStream).cast(),
@@ -263,9 +215,48 @@ mod tests {
         }
     }
 
+    /// 一个与宿主给的形状一致的实例记录；调用方负责 `release_instance`。
+    fn instance() -> *const clap_plugin_t {
+        let instance = Box::into_raw(Box::new(Instance {
+            audio: crate::audio::AudioState::default(),
+            host: std::ptr::null(),
+            plugin: std::ptr::null(),
+            owner: std::sync::Arc::new(
+                hifishifter_plugin::render::extension::ExtensionOwner::default(),
+            ),
+            ara: None,
+            initialized: std::sync::atomic::AtomicBool::new(false),
+            active: std::sync::atomic::AtomicBool::new(false),
+            processing: std::sync::atomic::AtomicBool::new(false),
+            in_process: std::sync::atomic::AtomicBool::new(false),
+        }));
+        let plugin = Box::into_raw(Box::new(clap_plugin_t {
+            desc: std::ptr::null(),
+            plugin_data: instance.cast(),
+            init: None,
+            destroy: None,
+            activate: None,
+            deactivate: None,
+            start_processing: None,
+            stop_processing: None,
+            reset: None,
+            process: None,
+            get_extension: None,
+            on_main_thread: None,
+        }));
+        plugin as *const clap_plugin_t
+    }
+
+    unsafe fn release_instance(plugin: *const clap_plugin_t) {
+        let plugin = plugin.cast_mut();
+        let data = unsafe { (*plugin).plugin_data };
+        unsafe { drop(Box::from_raw(data.cast::<Instance>())) };
+        unsafe { drop(Box::from_raw(plugin)) };
+    }
+
     #[test]
     fn partial_writes_are_retried_until_the_whole_container_is_written() {
-        let bytes = container();
+        let bytes = b"a container longer than one chunk".to_vec();
         let mut state = TestStream {
             data: Vec::new(),
             max_chunk: 7,
@@ -281,7 +272,7 @@ mod tests {
 
     #[test]
     fn partial_reads_do_not_truncate_the_container() {
-        let bytes = container();
+        let bytes = b"a container longer than one chunk".to_vec();
         let mut state = TestStream {
             data: bytes.clone(),
             max_chunk: 5,
@@ -297,22 +288,22 @@ mod tests {
 
     #[test]
     fn a_write_error_fails_the_save_instead_of_accepting_a_prefix() {
-        let bytes = container();
         let mut state = TestStream {
             data: Vec::new(),
-            max_chunk: 64,
+            // 块长必须小于载荷，否则第一次调用就把整块写完，注入的错误永远轮不到。
+            max_chunk: 8,
             read_offset: 0,
             fail_on_call: Some(2),
             calls: 0,
         };
         let stream = ostream(&mut state);
-        assert!(!unsafe { write_all(&stream, &bytes) });
+        assert!(!unsafe { write_all(&stream, b"payload payload payload") });
     }
 
     #[test]
     fn a_read_error_fails_the_load_instead_of_accepting_a_prefix() {
         let mut state = TestStream {
-            data: container(),
+            data: b"payload payload payload".to_vec(),
             max_chunk: 64,
             read_offset: 0,
             fail_on_call: Some(2),
@@ -349,51 +340,15 @@ mod tests {
         assert_eq!(unsafe { read_all(&stream) }.unwrap(), Vec::<u8>::new());
     }
 
-    /// 端到端：真实的 `clap_plugin_t` → `state_save` → 短写流 → 短读流 →
-    /// `state_load`，验证 C 边界上的部分读写不会破坏跨格式存档容器。
+    /// 端到端：真实的 `clap_plugin_t` → `state_save` → 短写流 → `state_load`。
+    ///
+    /// 【为什么这条用例存在】它钉的是"存档走共享编解码器"这件事本身：旧实现把宿主
+    /// 编来的字节原样缓存，于是**从没加载过**的实例保存出来的是一份空容器；现在保存
+    /// 必须现场编码，输出必须能被 `ComponentState::decode` 读回，并且再过一遍加载 →
+    /// 保存后逐字稳定（宿主会反复保存同一份工程）。
     #[test]
     fn state_round_trips_through_the_c_abi_with_short_streams() {
-        let instance = Box::into_raw(Box::new(Instance {
-            state: InstanceState::default(),
-            audio: crate::audio::AudioState::default(),
-            host: std::ptr::null(),
-            plugin: std::ptr::null(),
-            owner: std::sync::Arc::new(
-                hifishifter_plugin::render::extension::ExtensionOwner::default(),
-            ),
-            ara: None,
-            initialized: std::sync::atomic::AtomicBool::new(false),
-            active: std::sync::atomic::AtomicBool::new(false),
-            processing: std::sync::atomic::AtomicBool::new(false),
-            in_process: std::sync::atomic::AtomicBool::new(false),
-        }));
-        let plugin = clap_plugin_t {
-            desc: std::ptr::null(),
-            plugin_data: instance.cast(),
-            init: None,
-            destroy: None,
-            activate: None,
-            deactivate: None,
-            start_processing: None,
-            stop_processing: None,
-            reset: None,
-            process: None,
-            get_extension: None,
-            on_main_thread: None,
-        };
-        let plugin_ptr: *const clap_plugin_t = &raw const plugin;
-        let original = container();
-
-        let mut source = TestStream {
-            data: original.clone(),
-            max_chunk: 5,
-            read_offset: 0,
-            fail_on_call: None,
-            calls: 0,
-        };
-        let input = istream(&mut source);
-        assert!(unsafe { state_load(plugin_ptr, &input) });
-
+        let plugin = instance();
         let mut sink = TestStream {
             data: Vec::new(),
             max_chunk: 7,
@@ -402,51 +357,98 @@ mod tests {
             calls: 0,
         };
         let output = ostream(&mut sink);
-        assert!(unsafe { state_save(plugin_ptr, &output) });
-        // 【为什么不再逐字比较整块】捕获清单那一栏的**所有者是捕获存储**：保存时写入
-        // 当前 manifest，而不是把宿主编来的那份原样退回（否则清空 take 之后重开工程，
-        // 旧清单又回来了）。保真的对象因此是容器里其余两栏。
-        let saved = ComponentState::decode(&sink.data).expect("saved container must decode");
-        let loaded = ComponentState::decode(&original).expect("fixture must decode");
-        assert_eq!(saved.edits, loaded.edits, "编辑载荷必须逐字保真");
-        assert_eq!(
-            saved.capture_edits, loaded.capture_edits,
-            "捕获编辑必须逐字保真"
-        );
-        assert!(saved.capture.is_some(), "capture manifest must be written");
+        assert!(unsafe { state_save(plugin, &output) });
+        let saved = ComponentState::decode(&sink.data).expect("保存的载荷必须是可读的组件存档");
+        assert!(!saved.edits.is_empty(), "存档必须带一份编辑载荷");
 
-        unsafe { drop(Box::from_raw(instance)) };
-    }
-
-    #[test]
-    fn component_state_round_trips_through_the_clap_state_contract() {
-        let container = ComponentState {
-            edits: vec![1, 2, 3],
-            capture: Some(b"{\"takes\":[]}".to_vec()),
-            capture_edits: None,
+        // ① 连续两次保存必须逐字相同：宿主会反复保存同一份工程，而"两次不同"
+        // 意味着存档里混进了与内容无关的噪声（旧实现正是每次写一份空容器）。
+        let mut second = TestStream {
+            data: Vec::new(),
+            max_chunk: 7,
+            read_offset: 0,
+            fail_on_call: None,
+            calls: 0,
         };
-        let bytes = container.encode();
-        let state = InstanceState::default();
-        assert!(state.load(&bytes).is_ok());
-        assert_eq!(state.save().unwrap(), bytes);
-    }
-    #[test]
-    fn a_fresh_instance_saves_a_valid_empty_container() {
-        let state = InstanceState::default();
-        let bytes = state.save().unwrap();
+        let output = ostream(&mut second);
+        assert!(unsafe { state_save(plugin, &output) });
+        assert_eq!(second.data, sink.data, "同一次会话的重复保存必须逐字稳定");
+
+        // ② 读回来之后仍能保存出一份可读载荷（恢复 → 再保存不产生坏容器）。
+        let mut source = TestStream {
+            data: sink.data.clone(),
+            max_chunk: 5,
+            read_offset: 0,
+            fail_on_call: None,
+            calls: 0,
+        };
+        let input = istream(&mut source);
+        assert!(unsafe { state_load(plugin, &input) });
+        let mut third = TestStream {
+            data: Vec::new(),
+            max_chunk: 7,
+            read_offset: 0,
+            fail_on_call: None,
+            calls: 0,
+        };
+        let output = ostream(&mut third);
+        assert!(unsafe { state_save(plugin, &output) });
         assert!(
-            !bytes.is_empty(),
-            "a fresh instance must still write a container"
+            ComponentState::decode(&third.data).is_ok(),
+            "恢复之后保存出来的载荷仍必须是可读容器"
         );
-        assert!(ComponentState::decode(&bytes).is_ok());
-        state.load(&bytes).unwrap();
-        assert_eq!(state.save().unwrap(), bytes);
+
+        unsafe { release_instance(plugin) };
     }
 
+    /// 加载必须把捕获清单交回捕获存储 —— 这是"重开工程 take 还在"的唯一通路。
     #[test]
-    fn a_bare_legacy_blob_is_still_accepted() {
-        let state = InstanceState::default();
-        assert!(state.load(b"legacy edit state").is_ok());
-        assert_eq!(state.save().unwrap(), b"legacy edit state");
+    fn a_load_restores_the_capture_manifest_through_the_shared_path() {
+        let source = instance();
+        let manifest = unsafe { crate::instance(source) }.unwrap().owner.capture().manifest();
+        let container = ComponentState {
+            edits: b"{}".to_vec(),
+            capture: Some(serde_json::to_vec(&manifest).unwrap()),
+            capture_edits: None,
+        }
+        .encode();
+
+        let target = instance();
+        let mut stream = TestStream {
+            data: container,
+            max_chunk: 3,
+            read_offset: 0,
+            fail_on_call: None,
+            calls: 0,
+        };
+        let input = istream(&mut stream);
+        assert!(unsafe { state_load(target, &input) });
+        assert_eq!(
+            unsafe { crate::instance(target) }.unwrap().owner.capture().manifest(),
+            manifest,
+            "清单必须经共享恢复路径回到捕获存储"
+        );
+
+        unsafe { release_instance(source) };
+        unsafe { release_instance(target) };
+    }
+
+    /// 一份读不出来的旧载荷只该丢掉那份编辑，不该让宿主的工程加载失败。
+    #[test]
+    fn an_unreadable_payload_does_not_fail_the_host_load() {
+        let plugin = instance();
+        let mut stream = TestStream {
+            data: b"this is not a component state".to_vec(),
+            max_chunk: 64,
+            read_offset: 0,
+            fail_on_call: None,
+            calls: 0,
+        };
+        let input = istream(&mut stream);
+        assert!(
+            unsafe { state_load(plugin, &input) },
+            "读不出来的存档不能让宿主认为整份工程加载失败"
+        );
+        unsafe { release_instance(plugin) };
     }
 }

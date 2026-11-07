@@ -126,7 +126,6 @@ unsafe extern "C" fn factory_descriptor(
 
 /// 一个 CLAP 实例的全部可变状态。
 pub struct Instance {
-    pub state: state::InstanceState,
     /// 本实例的音频时间状态（采样率 / render 模式 / transport 观察值）。
     /// 绝不放到进程级 static：同一宿主进程里多实例会互相覆盖。
     pub audio: audio::AudioState,
@@ -168,7 +167,6 @@ unsafe extern "C" fn create_plugin(
             return std::ptr::null();
         }
         let instance = Box::new(Instance {
-            state: state::InstanceState::default(),
             audio: audio::AudioState::default(),
             host,
             plugin: std::ptr::null(),
@@ -445,7 +443,6 @@ mod tests {
     /// 返回的 `clap_plugin_t` 保持在栈上；测试结束前手动释放 `Instance`。
     fn fixture() -> (clap_plugin_t, *mut Instance) {
         let instance = Box::into_raw(Box::new(Instance {
-            state: state::InstanceState::default(),
             audio: audio::AudioState::default(),
             host: std::ptr::null(),
             plugin: std::ptr::null(),
