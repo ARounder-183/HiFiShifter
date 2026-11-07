@@ -174,6 +174,48 @@ impl ExtensionOwner {
                 }
             })
     }
+    /// 记录宿主在入口自报的身份（`clap_host_t.name/version`）。只记第一次。
+    ///
+    /// 【为什么空名不算一次自报】宿主给空串与"没给"是同一种事实：我们仍然不知道
+    /// 它叫什么。把它记下来会让后面真正带着名字的那一次被忽略。
+    pub fn note_host_self_report(&self, name: Option<&str>, version: Option<&str>) {
+        let name = name.unwrap_or_default().trim();
+        if name.is_empty() {
+            return;
+        }
+        let version = version.unwrap_or_default().trim().to_owned();
+        let mut slot = self.host_self_report.lock_or_recover();
+        if slot.is_none() {
+            *slot = Some((name.to_owned(), version));
+        }
+    }
+
+    /// 宿主自报身份的原样读数（未自报为 `None`）。
+    pub(crate) fn host_self_report(&self) -> Option<(String, String)> {
+        self.host_self_report.lock_or_recover().clone()
+    }
+
+    /// 宿主应用名：原生适配器 → 进程级探针 → 入口自报。
+    ///
+    /// 【为什么是这个顺序】前两者是"宿主自己回答了我们的查询"，最后一个是"宿主在入口
+    /// 声明过自己是谁"。三者都是诊断事实，取第一个可用的；**绝不用于分支**。
+    pub fn host_app_name(&self) -> Option<String> {
+        self.host_backend()
+            .app_name()
+            .map(str::to_owned)
+            .or_else(crate::editor::connection::host_application_name)
+            .or_else(|| self.host_self_report().map(|(name, _)| name))
+    }
+
+    /// 宿主应用版本（同一条来源顺序；入口自报里没有版本时返回 `None`）。
+    pub fn host_app_version(&self) -> Option<String> {
+        self.host_backend().app_version().map(str::to_owned).or_else(|| {
+            self.host_self_report()
+                .map(|(_, version)| version)
+                .filter(|version| !version.is_empty())
+        })
+    }
+
     /// 宿主最近一次编辑器视图选择（`notifySelection`），指针键的副本。
     ///
     /// 【为什么可以从任意线程读】`ExtensionState` 只在写入时持锁，这里读的是一份
@@ -380,8 +422,7 @@ impl ExtensionOwner {
         {
             return;
         }
-        let backend = self.host_backend();
-        let host = backend.app_name().unwrap_or("this host");
+        let host = self.host_app_name().unwrap_or_else(|| "this host".to_owned());
         // 诊断里要报"激活之后过了多久"，判据本身只问"窗口关没关"（见 `binding_window_closed`）。
         let elapsed = (*self.set_active_at.lock_or_recover())
             .map(|at| at.elapsed())
@@ -1835,5 +1876,43 @@ mod transport_gate_tests {
     #[test]
     fn a_sample_without_a_document_is_allowed() {
         assert!(sample_allowed(None, None));
+    }
+}
+
+#[cfg(test)]
+mod host_identity_tests {
+    use super::*;
+
+    /// 宿主自报身份只记第一次，空名字不算一次自报。
+    ///
+    /// 【为什么钉这一条】CLAP 的 `clap_host_t.name` 由宿主进程写入：包装器会先给一个
+    /// 空串或 `unknown`，真正的名字更晚才到。若把空串也记成"已经自报过"，后面那次
+    /// 带着真名的调用就被丢掉，诊断包里永远只有一个空名字。
+    #[test]
+    fn the_host_self_report_is_recorded_once_and_ignores_empty_names() {
+        let owner = ExtensionOwner::default();
+        assert_eq!(owner.host_self_report(), None);
+        owner.note_host_self_report(Some("   "), Some("7.0"));
+        assert_eq!(owner.host_self_report(), None, "空名字不算一次自报");
+        owner.note_host_self_report(Some(" REAPER "), Some(" 7.0 "));
+        owner.note_host_self_report(Some("Other"), Some("9"));
+        assert_eq!(
+            owner.host_self_report(),
+            Some(("REAPER".to_owned(), "7.0".to_owned())),
+            "第一次自报生效，后续不覆盖"
+        );
+    }
+
+    /// 自报的名字必须能走到 `host_app_name`：CLAP 没有原生适配器，这是它唯一的来源。
+    #[test]
+    fn a_self_reported_name_reaches_the_host_app_name() {
+        let owner = ExtensionOwner::default();
+        owner.note_host_self_report(Some("Cubase"), Some("13.0"));
+        // 进程级探针是进程全局状态（同进程里别的用例可能已经写过），所以只在它确实
+        // 没有读数时断言最终结果 —— 这里要钉的是"自报不会被丢掉"，不是探针的优先级。
+        if crate::editor::connection::host_application_name().is_none() {
+            assert_eq!(owner.host_app_name().as_deref(), Some("Cubase"));
+            assert_eq!(owner.host_app_version().as_deref(), Some("13.0"));
+        }
     }
 }

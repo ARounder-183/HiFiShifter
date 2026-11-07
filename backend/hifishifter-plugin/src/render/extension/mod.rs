@@ -84,6 +84,13 @@ pub struct ExtensionOwner {
     /// （`ExtensionOwner` 析构）再统一释放，代价是"一个处理器一生绑定过的文档数"
     /// 条额外存储，上界极小。
     retired: Mutex<Vec<ExtensionBinding>>,
+    /// 宿主在入口自报的身份：`(名字, 版本)`。
+    ///
+    /// 【为什么需要插件侧一份副本】VST3 的宿主身份来自 `IHostApplication`（原生适配器
+    /// 与进程级探针各一份）；CLAP 没有那个接口，但它的 `clap_host_t` 里就带着宿主自称
+    /// 的名字与版本。两者都只是**诊断事实**，所以收进同一个只读槽位，读者只有一条路径
+    /// （见 `ExtensionOwner::host_app_name`）—— 谁先有就用谁，绝不按宿主名分支。
+    host_self_report: Mutex<Option<(String, String)>>,
     /// 最近一次 bind 的目标文档 id（仅诊断；`0` = 从未绑定）。
     ///
     /// 【为什么不用 `document` 反查】文档关闭后 `document` 被清空，而诊断需要

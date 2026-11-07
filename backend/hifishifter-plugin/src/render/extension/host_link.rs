@@ -50,7 +50,7 @@ impl ExtensionOwner {
             edits.revision
         };
 
-        let host_label = self.host_backend().app_name().unwrap_or("Host").to_string();
+        let host_label = self.host_app_name().unwrap_or_else(|| "Host".to_owned());
         let doc_key = self.document_key(&document);
         let identity = link::link_id(link::SourceKind::Ara, &host_label, &doc_key);
         // 【为什么目录名就是身份】重新导出必须落在**同一个**工作区上，否则每次导出

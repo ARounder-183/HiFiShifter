@@ -118,10 +118,41 @@ pub use hifishifter_plugin_core::FACTORY_ID;
 pub(crate) fn plugin_form_label(
     owner: Option<&crate::render::extension::ExtensionOwner>,
 ) -> &'static str {
-    match owner {
-        Some(owner) if !owner.is_ara_bound() => "VST3 plug-in (capture)",
-        _ => "VST3 / ARA plug-in",
+    // 【为什么按标签选】同一份共享代码同时跑在两种外壳里，把 "VST3" 写死会让 CLAP
+    // 会话的「关于」与诊断包自称 VST3 —— 用户照着截图报障时，第一句话就是错的。
+    let capture = owner.is_some_and(|owner| !owner.is_ara_bound());
+    match (log_tag(), capture) {
+        ("clap", true) => "CLAP plug-in (capture)",
+        ("clap", false) => "CLAP / ARA plug-in",
+        (_, true) => "VST3 plug-in (capture)",
+        (_, false) => "VST3 / ARA plug-in",
     }
+}
+
+/// 本 cdylib 的格式标签（`[vst3]` / `[clap]`）。
+///
+/// 【为什么需要它】`hifishifter-plugin` 现在是**两种外壳共用的**共享层，而日志行
+/// 仍写着 `[vst3]` —— 在 CLAP 宿主里读日志的人会把一条 ARA 工厂日志归到错误的模块，
+/// 排查方向从一开始就偏了。标签由各 cdylib 在入口登记一次，共享层的每一行都带它。
+static LOG_TAG: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+
+/// 登记格式标签；重复登记忽略（第一个赢，与模块初始化的一次性语义一致）。
+pub fn set_log_tag(tag: &'static str) {
+    let _ = LOG_TAG.set(tag);
+}
+
+/// 当前格式标签；未登记时按 VST3（历史默认，也是本 crate 最初的唯一外壳）。
+fn log_tag() -> &'static str {
+    LOG_TAG.get().copied().unwrap_or("vst3")
+}
+
+/// 解析并记录宿主身份（进程证据链；两种格式共用同一条判据）。
+///
+/// 【为什么 CLAP 也要调】身份解析的证据（进程映像、祖先链、环境变量）与格式无关，
+/// 而日志文件名 `plugin-<slug>.log` 正是由它决定的 —— 不调就等于每次 CLAP 报障都
+/// 只能拿到 `plugin-unknown.log`。
+pub fn resolve_host_identity() {
+    crate::editor::connection::resolve_and_record_host_identity();
 }
 
 /// 用户级目录的一次性布局迁移（**每个宿主进程只跑一次**）。
@@ -148,7 +179,7 @@ fn ensure_layout_v2_once() {
 /// 【为什么不用 `println!`】插件跑在宿主进程里，stdout 通常无处可去。`log` 会走宿主
 /// 已装配的日志后端；宿主没装时它是静默丢弃，不会因为"日志写不出去"影响编曲。
 pub(crate) fn log_line(message: &str) {
-    log::info!("[vst3] {message}");
+    log::info!("[{}] {message}", log_tag());
 }
 
 /// GUI 生命周期的诊断行：**必须是 WARN 级**。

@@ -70,6 +70,9 @@ pub static clap_entry: clap_plugin_entry_t = clap_plugin_entry_t {
 };
 
 unsafe extern "C" fn entry_init(plugin_path: *const c_char) -> bool {
+    // 【为什么第一件事就是登记标签】共享层（`hifishifter-plugin`）的每一行日志都带
+    // 格式标签，而它的默认值是 `[vst3]`。晚一步登记，最早那几行就会挂错模块名。
+    hifishifter_plugin::set_log_tag("clap");
     hifishifter_plugin_core::guard_ffi(false, || {
         if !plugin_path.is_null() {
             if let Ok(path) = unsafe { CStr::from_ptr(plugin_path) }.to_str() {
@@ -166,13 +169,21 @@ unsafe extern "C" fn create_plugin(
         if !unsafe { clap_version_is_compatible((*host).clap_version) } {
             return std::ptr::null();
         }
+        // 宿主在 `clap_host_t` 里自报名字与版本（CLAP 契约要求这两个字段非空）。
+        // 这是 CLAP 侧唯一诚实的宿主身份来源：VST3 用 IHostApplication，两者最终都进
+        // `ExtensionOwner::host_app_name`，读者与分支判据完全一致（且绝不按名字分支）。
+        let host_name = unsafe { clap_host_string((*host).name) };
+        let host_version = unsafe { clap_host_string((*host).version) };
+
         let instance = Box::new(Instance {
             audio: audio::AudioState::default(),
             host,
             plugin: std::ptr::null(),
-            owner: std::sync::Arc::new(
-                hifishifter_plugin::render::extension::ExtensionOwner::default(),
-            ),
+            owner: {
+                let owner = hifishifter_plugin::render::extension::ExtensionOwner::default();
+                owner.note_host_self_report(host_name.as_deref(), host_version.as_deref());
+                std::sync::Arc::new(owner)
+            },
             ara: None,
             initialized: AtomicBool::new(false),
             active: AtomicBool::new(false),
@@ -197,6 +208,20 @@ unsafe extern "C" fn create_plugin(
         unsafe { crate::instance_mut(ptr) }.plugin = ptr;
         ptr
     })
+}
+
+/// 读一个宿主提供的 CLAP 字符串；空指针或非 UTF-8 一律 `None`。
+///
+/// 【为什么不 `unwrap`】这些字段由宿主进程写入。一个坏指针不该让插件在扫描阶段崩掉
+/// —— 身份只是诊断事实，缺了它插件照常工作。
+/// # Safety
+/// `text` 必须是宿主在本次调用期间仍然有效的 NUL 结尾字符串，或空指针。
+unsafe fn clap_host_string(text: *const c_char) -> Option<String> {
+    if text.is_null() {
+        return None;
+    }
+    let bytes = unsafe { CStr::from_ptr(text) }.to_str().ok()?.trim();
+    (!bytes.is_empty()).then(|| bytes.to_owned())
 }
 
 fn clap_version_is_compatible(v: clap_version_t) -> bool {
@@ -239,6 +264,10 @@ unsafe extern "C" fn plugin_init(plugin: *const clap_plugin_t) -> bool {
             return false;
         }
         crate::log_host::install(instance.host);
+        // 【为什么在这里解析身份】与 VST3 的 `initialize` 同一时刻：日志文件名
+        // `plugin-<slug>.log` 由它决定，而进程证据（映像名 / 祖先链）与格式无关 ——
+        // 不调就等于每次 CLAP 报障只能拿到 `plugin-unknown.log`。
+        hifishifter_plugin::resolve_host_identity();
         // SAFETY: 本函数就是宿主调用的 plugin.init，plugin 是本实例的记录。
         unsafe { crate::ara::attach(plugin) };
         log::info!("[clap] instance initialized");

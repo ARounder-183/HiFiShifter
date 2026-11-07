@@ -1982,9 +1982,11 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
                     "generatedAt":chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
                     // 用户报障时"你是哪个宿主"是第一个要问的问题。宿主名来自
                     // `IHostApplication::getName`（只诊断用，绝不参与分支）。
-                    "host":{"appName":backend.app_name().map(str::to_owned)
-                            .or_else(crate::editor::connection::host_application_name),
-                        "appVersion":backend.app_version()},
+                    // 宿主身份的三个来源（原生适配器 / 进程级探针 / 入口自报）收在
+                    // `ExtensionOwner::host_app_name` 一处：CLAP 没有 IHostApplication，
+                    // 它靠 `clap_host_t.name` 自报，读者不必知道这件事。
+                    "host":{"appName":owner.host_app_name(),
+                        "appVersion":owner.host_app_version()},
                     // 当前编辑后端与能力位：报障时能直接读出"是不是 ARA-only 只读后端"。
                     "backend":{"kind":backend.kind().as_str(),
                         "nativeAdapter":backend.native().is_some(),
