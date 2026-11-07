@@ -80,10 +80,22 @@ impl TimelineHost {
             return;
         }
         *timeline = fresh;
+        // 【为什么把算法钉成 WORLD】渲染要用声码器，而本外壳不链接 ONNX 推理栈
+        // （模块 1.5 MB，VST3 那套引擎 38 MB）。WORLD 是静态链接的，因此它是这里
+        // **唯一**能真正产出处理结果的算法。不钉的话，轨道默认的 nsf_hifigan_onnx
+        // 在渲染侧会被判成"后端不可用"，结果是"渲染成功但一个样本都没变"。
+        for track in &mut timeline.tracks {
+            track.pitch_analysis_algo = hifishifter_kernel::state::PitchAnalysisAlgo::WorldDll;
+        }
         self.revision.store(revision, Ordering::Release);
         let mut pitch = self.pitch.lock().unwrap_or_else(|e| e.into_inner());
         pitch.ready_revision = u64::MAX;
         pitch.running = false;
+    }
+
+    /// 时间线的一份只读快照（渲染作业用）。
+    pub fn snapshot(&self) -> TimelineState {
+        self.lock().clone()
     }
 
     /// 时间线载荷（编辑器渲染的那一份）。
@@ -184,6 +196,10 @@ impl TimelineHost {
 
     /// 后台线程：把算好的基线写进时间线。
     fn finish_pitch(&self, root: &str, curve: Vec<f32>, revision: u64) {
+        // 【为什么先取帧数再拿第二把锁】`refresh` 的加锁顺序是"时间线 → pitch"。
+        // 这里若持着 pitch 再去拿时间线，两个线程就会各持一把互相等（死锁）。
+        // 锁序必须全局一致：**时间线在前，pitch 在后**。
+        let mut frames = 0_usize;
         {
             let mut timeline = self.lock();
             timeline.ensure_params_for_root(root);
@@ -205,18 +221,15 @@ impl TimelineHost {
                 // 把我们刚算好的曲线覆盖成零。
                 entry.pitch_orig_key = Some(key);
                 entry.pitch_layout_key = Some(layout);
+                frames = entry.pitch_orig.len();
             }
         }
         let mut state = self.pitch.lock().unwrap_or_else(|e| e.into_inner());
         state.running = false;
         state.ready_revision = revision;
+        drop(state);
         log::info!(
-            "[clap][pitch] baseline ready for '{root}' at revision {revision} ({} frame(s))",
-            self.lock()
-                .params_by_root_track
-                .get(root)
-                .map(|e| e.pitch_orig.len())
-                .unwrap_or(0)
+            "[clap][pitch] baseline ready for '{root}' at revision {revision} ({frames} frame(s))"
         );
     }
 }

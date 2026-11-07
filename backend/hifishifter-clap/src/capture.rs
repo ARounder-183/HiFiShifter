@@ -65,6 +65,12 @@ pub struct CaptureHost {
     /// 【为什么不是每次请求现场投影】参数曲线是**编辑状态**：现场投影会把用户刚画的
     /// 线连同对象一起丢掉。详见 `editor::timeline_host` 的模块说明。
     editor: std::sync::Arc<crate::editor::timeline_host::TimelineHost>,
+    /// 音频输出：时间线的离线渲染结果（直通之外的唯一输出来源）。
+    ///
+    /// 【为什么与编辑器分开】编辑器时间线是"用户看到/编辑的东西"，渲染引擎是
+    /// "用户听到的东西"。两者同源（渲染输入就是编辑器时间线的快照），但一个是
+    /// 可变文档、一个是不可变的已发布快照 —— 音频线程只读后者。
+    render: std::sync::Arc<crate::render::RenderEngine>,
     /// 已编码好的波形 mipmap（`(源 id, 级别)` → Base64）。
     ///
     /// 【为什么缓存】编码一次 L0 要遍历整条素材（60 秒立体声 ≈ 580 万样本）。前端每次
@@ -97,6 +103,7 @@ impl Default for CaptureHost {
             host_playing: AtomicBool::new(false),
             sample_seq: AtomicU64::new(0),
             editor: std::sync::Arc::new(crate::editor::timeline_host::TimelineHost::default()),
+            render: std::sync::Arc::new(crate::render::RenderEngine::default()),
             mipmaps: Mutex::new(std::collections::HashMap::new()),
             saw_position: AtomicBool::new(false),
         }
@@ -130,6 +137,20 @@ impl CaptureHost {
             frame.playing,
             frame.offline
         );
+        // 【先把渲染结果盖上去】直通已经由 `audio::process_block` 写进输出；
+        // 这里只覆盖属于素材的帧，其余保持宿主原声。
+        if let Some(tape) = self.render.current() {
+            if (tape.sample_rate as f64 - frame.sample_rate).abs() < 0.5 {
+                unsafe {
+                    crate::audio::overwrite_output(
+                        process,
+                        &tape,
+                        frame.project_time_samples,
+                        self.store.options().outside_passthrough,
+                    )
+                };
+            }
+        }
         if frame.sample_rate > 0.0 {
             self.store.note_project_rate(frame.sample_rate);
         }
@@ -373,17 +394,20 @@ impl CaptureHost {
             // 0 哨兵规则解释错。
             let _ = self.editor.ensure_pitch_baseline(&self.store);
         }
-        Ok(
-            hifishifter_kernel::editor::params::set_param_frames_with_present(
-                self.editor.as_ref(),
-                track_id,
-                param,
-                start_frame,
-                values,
-                present,
-                checkpoint,
-            ),
-        )
+        let result = hifishifter_kernel::editor::params::set_param_frames_with_present(
+            self.editor.as_ref(),
+            track_id,
+            param,
+            start_frame,
+            values,
+            present,
+            checkpoint,
+        );
+        // 【为什么每次写入都请求重渲染】曲线是 Capture 形态下"处理"的全部内容：
+        // 写完不重渲染，用户画完听到的还是上一版（"改了没反应"）。防抖在引擎里，
+        // 拖拽期间几十条写入只会触发一次真正的渲染。
+        self.schedule_render();
+        Ok(result)
     }
 
     /// `get_static_param` / `set_static_param`：静态枚举参数（算法下拉）。
@@ -426,13 +450,17 @@ impl CaptureHost {
         if !self.editor.track_exists(&track_id) {
             return Err(format!("unknown track: {track_id}"));
         }
-        Ok(hifishifter_kernel::editor::params::set_static_param(
+        let result = hifishifter_kernel::editor::params::set_static_param(
             self.editor.as_ref(),
             track_id,
             param,
             value,
             checkpoint,
-        ))
+        );
+        // 静态参数（算法下拉等）会改变渲染链：写完必须重渲染。
+        self.schedule_render();
+        self.schedule_render();
+        Ok(result)
     }
 
     /// 一条源在某一级的波形 mipmap（Base64，WFPK v2 布局）。
@@ -479,6 +507,23 @@ impl CaptureHost {
         self.store.revision()
     }
 
+    /// 请求重渲染（素材或曲线变了之后调用）。
+    ///
+    /// 【为什么所有入口都调同一个函数】渲染输入只有一来源：编辑器时间线 + 捕获 PCM。
+    /// 三处（录制结束、清空/删 take、参数写入）各拼一份输入，迟早会有一处漏掉某个字段
+    /// —— 表现就是"这次改动没生效"。
+    fn schedule_render(&self) {
+        self.editor.refresh(&self.store);
+        if !self.store.has_material() {
+            self.render.clear();
+            return;
+        }
+        let timeline = self.editor.snapshot();
+        let sources = self.store.material_sources();
+        let rate = self.store.project_rate().round().max(0.0) as u32;
+        self.render.request(timeline, sources, rate);
+    }
+
     /// 非音频线程：收走封口段、把"自己停下"的捕获提升成 take。
     pub fn service(&self) {
         self.store.service();
@@ -502,6 +547,7 @@ impl CaptureHost {
             }
             "capture_stop" => {
                 let take = self.store.stop()?;
+                self.schedule_render();
                 let status = self.status();
                 // 【为什么把这条写成 info 而不是 trace】"录完没有片段"在宿主里只有三种
                 // 形状：没录到帧、录到了但整段静音、录到了但时间线没被重取。三个读数
@@ -523,6 +569,7 @@ impl CaptureHost {
             }
             "capture_clear" => {
                 self.store.clear();
+                self.schedule_render();
                 Ok(self.status())
             }
             "capture_delete_take" => {
@@ -530,6 +577,7 @@ impl CaptureHost {
                     .as_u64()
                     .ok_or("capture_delete_take needs a numeric takeId")?;
                 self.store.delete_take(id)?;
+                self.schedule_render();
                 Ok(self.status())
             }
             "capture_set_options" => {
@@ -558,8 +606,13 @@ impl CaptureHost {
             StatusExtras {
                 // CLAP 阶段 1 不暴露 ARA：Capture 永远适用。
                 ara_bound: false,
-                // 本阶段没有渲染：听到的永远是宿主原声。
-                output: "passthrough",
+                // 【如实报】有渲染结果就是 processed（素材之外的帧仍是宿主原声，
+                // 那是 `outside_passthrough` 的语义，不改变这个读数）。
+                output: if self.render.current().is_some() {
+                    "processed"
+                } else {
+                    "passthrough"
+                },
                 block_diagnostics: json!({}),
             },
         );
@@ -605,7 +658,9 @@ impl CaptureHost {
 
     /// 从工程存档里恢复捕获清单（sidecar 缺失的 take 会被如实报为 missingTakes）。
     pub fn restore_manifest(&self, manifest: &Value) -> Result<(), String> {
-        self.store.restore_manifest(manifest)
+        let result = self.store.restore_manifest(manifest);
+        self.schedule_render();
+        result
     }
 
     /// 编辑器要的时间线（含捕获出来的轨道与片段）。
@@ -738,6 +793,72 @@ mod tests {
     use crate::abi::{
         clap_audio_buffer_t, clap_event_transport_t, transport_flags, CLAP_SECTIME_FACTOR,
     };
+
+    /// 等到渲染引擎发布**第 `at_least` 代**输出（后台线程 + 防抖，需要轮询）。
+    fn wait_for_tape(
+        host: &CaptureHost,
+        at_least: u64,
+    ) -> std::sync::Arc<crate::render::RenderTape> {
+        let mut last = None;
+        for _ in 0..600 {
+            if let Some(tape) = host.render.current() {
+                // 【为什么看代数而不是"有没有"】第一次渲染的结果在改完曲线后仍然在，
+                // 直接读会拿到上一版 —— 那条断言就永远成立、也永远测不到东西。
+                if host.render.generation() >= at_least {
+                    return tape;
+                }
+                last = Some(tape);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        panic!(
+            "no render generation >= {at_least} (last tape: {:?}, generation: {}, error: {:?})",
+            last.map(|t| t.frames),
+            host.render.generation(),
+            host.render.last_error()
+        );
+    }
+
+    /// 某个频率上的能量（Goertzel）。用于判断"这一版里 440 Hz 是不是变强了"。
+    fn tone_energy(tape: &crate::render::RenderTape, hz: f64) -> f64 {
+        let channels = tape.channels.max(1);
+        let lo = tape.frames / 4;
+        let hi = tape.frames * 3 / 4;
+        let rate = f64::from(tape.sample_rate.max(1));
+        let omega = 2.0 * std::f64::consts::PI * hz / rate;
+        let coeff = 2.0 * omega.cos();
+        let (mut s1, mut s2) = (0.0_f64, 0.0_f64);
+        for index in lo..hi {
+            let s0 = f64::from(tape.interleaved[index * channels]) + coeff * s1 - s2;
+            s2 = s1;
+            s1 = s0;
+        }
+        (s1 * s1 + s2 * s2 - coeff * s1 * s2).max(0.0)
+    }
+
+    /// 用**过零率**估计主频（Hz）。
+    ///
+    /// 【为什么不用 FFT】这里只比较"同一个信号被移调前后"的频率比，过零率对纯音
+    /// 足够准确，而且不引入新依赖。取中段 50% 以避开首尾的淡化与静音。
+    fn dominant_hz(tape: &crate::render::RenderTape) -> f64 {
+        let channels = tape.channels.max(1);
+        let lo = tape.frames / 4;
+        let hi = tape.frames * 3 / 4;
+        if hi <= lo + 1 {
+            return 0.0;
+        }
+        let mut crossings = 0_usize;
+        let mut previous = tape.interleaved[lo * channels];
+        for index in lo + 1..hi {
+            let value = tape.interleaved[index * channels];
+            if (previous < 0.0 && value >= 0.0) || (previous >= 0.0 && value < 0.0) {
+                crossings += 1;
+            }
+            previous = value;
+        }
+        let seconds = (hi - lo) as f64 / f64::from(tape.sample_rate.max(1));
+        crossings as f64 / (2.0 * seconds)
+    }
 
     /// 一个"宿主在播放"的 transport 事件（秒 → CLAP 定点）。
     fn playing_at(seconds: f64) -> clap_event_transport_t {
@@ -1169,6 +1290,157 @@ mod tests {
         assert!(
             (median - 57.0).abs() < 2.0,
             "expected A3 (57) but the baseline says {median}: {orig:?}"
+        );
+    }
+
+    /// 捕获结束后必须真的**发布一份渲染输出**：这是"音频输出接上"的验收。
+    ///
+    /// 【为什么这条要等待】渲染在后台线程上跑（防抖 600 ms + WORLD 声码器），
+    /// 因此这里轮询到超时为止；发布出来的磁带必须覆盖素材区间且有非零样本。
+    #[test]
+    fn a_captured_take_is_rendered_into_a_playable_tape() {
+        let host = activated_host();
+        let audio = audio();
+        host.handle("capture_start", &json!({})).unwrap();
+        let mut phase = 0.0_f64;
+        for index in 0..100 {
+            let transport = playing_at(index as f64 * 480.0 / 48_000.0);
+            let mut block = Block::new(&transport, 480, 0.0);
+            block.attach();
+            let samples: Vec<f32> = (0..480)
+                .map(|_| {
+                    phase += 2.0 * std::f64::consts::PI * 220.0 / 48_000.0;
+                    (phase.sin() * 0.4) as f32
+                })
+                .collect();
+            block.left.copy_from_slice(&samples);
+            block.right.copy_from_slice(&samples);
+            unsafe { host.on_process(&block.process, &audio) };
+        }
+        host.handle("capture_stop", &json!({})).unwrap();
+        let mut tape = None;
+        for _ in 0..400 {
+            if let Some(current) = host.render.current() {
+                tape = Some(current);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let tape = tape.expect("the capture must be rendered into a playable tape");
+        assert_eq!(tape.sample_rate, 48_000);
+        assert!(
+            tape.end_frame > tape.start_frame,
+            "the tape must cover the captured material ({}..{})",
+            tape.start_frame,
+            tape.end_frame
+        );
+        assert!(tape.frames > 0, "no frames in the rendered tape");
+        assert!(
+            tape.interleaved.iter().any(|sample| sample.abs() > 1e-6),
+            "the rendered tape is silent"
+        );
+        // 状态里的输出仲裁要如实说"现在听到的是处理结果"。
+        assert_eq!(host.status()["output"], json!("processed"));
+    }
+
+    /// **输出真的接上了**：把音高改高一个八度，渲染结果的主频必须翻倍。
+    ///
+    /// 【为什么这是唯一有说服力的验收】"输出接上了"可以有很多弱证据（有样本、
+    /// 非静音、状态说 processed），但它们全都无法区分"播放的是我们的渲染"与
+    /// "播放的是宿主原声"。一个八度的音高变化只有真正走了声码器才可能出现。
+    #[test]
+    fn a_pitch_edit_changes_the_rendered_audio() {
+        let host = activated_host();
+        let audio = audio();
+        host.handle("capture_start", &json!({})).unwrap();
+        let mut phase = 0.0_f64;
+        for index in 0..100 {
+            let transport = playing_at(index as f64 * 480.0 / 48_000.0);
+            let mut block = Block::new(&transport, 480, 0.0);
+            block.attach();
+            let samples: Vec<f32> = (0..480)
+                .map(|_| {
+                    phase += 2.0 * std::f64::consts::PI * 220.0 / 48_000.0;
+                    (phase.sin() * 0.4) as f32
+                })
+                .collect();
+            block.left.copy_from_slice(&samples);
+            block.right.copy_from_slice(&samples);
+            unsafe { host.on_process(&block.process, &audio) };
+        }
+        host.handle("capture_stop", &json!({})).unwrap();
+        let original = wait_for_tape(&host, 1);
+        let base_hz = dominant_hz(&original);
+
+        // 等音高基线（WORLD）就绪，然后把它整体抬高 12 个半音。
+        let track = crate::editor::timeline_host::CAPTURE_TRACK_ID;
+        let mut orig: Vec<f32> = Vec::new();
+        for _ in 0..200 {
+            let read = host
+                .param_frames(&json!({
+                    "trackId": track, "param": "pitch",
+                    "startFrame": 0, "frameCount": 200, "binary": false,
+                }))
+                .expect("get_param_frames");
+            let pending = read["analysis_pending"].as_bool().unwrap_or(false);
+            orig = read["orig"]
+                .as_array()
+                .map(|items| {
+                    items
+                        .iter()
+                        .map(|v| v.as_f64().unwrap_or(0.0) as f32)
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !pending && orig.iter().any(|value| *value > 0.0) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert!(
+            orig.iter().any(|value| *value > 0.0),
+            "no pitch baseline to edit"
+        );
+        let shifted: Vec<f32> = orig
+            .iter()
+            .map(|value| if *value > 0.0 { value + 12.0 } else { 0.0 })
+            .collect();
+        let present = vec![true; shifted.len()];
+        host.set_param_frames(&json!({
+            "trackId": track, "param": "pitch",
+            "startFrame": 0, "values": shifted,
+            "present": present, "checkpoint": false,
+        }))
+        .expect("set_param_frames");
+
+        let edited = wait_for_tape(&host, 2);
+        let edited_hz = dominant_hz(&edited);
+        let energy = |tape: &crate::render::RenderTape| -> f64 {
+            tape.interleaved
+                .iter()
+                .map(|v| f64::from(*v).abs())
+                .sum::<f64>()
+        };
+        eprintln!(
+            "[test] 220Hz base={:.1} edited={:.1} | 440Hz base={:.1} edited={:.1}",
+            tone_energy(&original, 220.0),
+            tone_energy(&edited, 220.0),
+            tone_energy(&original, 440.0),
+            tone_energy(&edited, 440.0)
+        );
+        eprintln!(
+            "[test] base frames={} energy={:.3} hz={:.1} | edited frames={} energy={:.3} hz={:.1}",
+            original.frames,
+            energy(&original),
+            base_hz,
+            edited.frames,
+            energy(&edited),
+            edited_hz
+        );
+        let ratio = edited_hz / base_hz.max(1.0);
+        assert!(
+            (1.7..2.3).contains(&ratio),
+            "an octave up must roughly double the pitch: {base_hz:.1} Hz -> {edited_hz:.1} Hz"
         );
     }
 

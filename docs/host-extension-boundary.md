@@ -135,7 +135,7 @@ ARA 侧改了时间拉伸 / 内容淡化，插件会继续用旧配置渲染。
 | 能力 | 状态 | 契约原因 |
 | --- | --- | --- |
 | 实例化 / 激活 / process / 保存 state / 销毁 | 有 | `clap.plugin-factory` + `clap.state` + `clap.audio-ports`；生命周期按 CLAP 状态机严格校验 |
-| 延迟 / 尾音 | 如实为 0 | `clap.latency` + `clap.tail`；逐帧直通、不缓存样本，0 是唯一正确答案 |
+| 延迟 / 尾音 | 如实为 0 | `clap.latency` + `clap.tail`；输出是整段渲染结果的**逐帧拷贝**，没有额外缓冲，0 是唯一正确答案 |
 | 宿主日志 | 有 | `clap.log`：`plugin.init` 后查询 `clap_host_log` 并装上 logger，诊断不再静默丢弃 |
 | transport 读数 | 按事件如实给 | 只从 `clap_event_transport_t` 读播放/录音/循环/拍号；`steady_time` 不推断播放。编辑器轮询的 `get_playback_state`（光标与捕获带右缘的唯一来源）由实例把位置抄进原子量后回答 |
 | 离线 bounce | 按扩展如实给 | 只从 `clap.render` 的 `CLAP_RENDER_OFFLINE` 置位 |
@@ -143,6 +143,7 @@ ARA 侧改了时间拉伸 / 内容淡化，插件会继续用旧配置渲染。
 | `ara:supported` / `ara:required` | 都不声明 | descriptor 只描述已履行的能力 |
 | 内嵌 WebView | Windows 有 | `clap.gui` + 独立 WebView2 宿主，加载同一份 `frontend/dist`；非 Windows 如实降级 |
 | 编辑器命令 | Capture 回执后端 | `plugin_health`、时间线、参数曲线（`get/set_param_frames`、静态参数）、波形峰值、传输读数都由本模块在进程内回答；未接线的命令立刻回结构化错误，不复用 VST3 的 ARA 会话 |
+| 音频输出 | **有（渲染结果）** | 捕获的素材 + 用户曲线由 `mixdown::render_mixdown_with_pcm`（与 App 导出同一份）在后台线程渲染成 PCM，`process` 只覆盖"属于素材"的帧；素材之外按 `outside_passthrough` 直通或静音。声码器用静态链接的 WORLD（本外壳不链接 ONNX 推理栈） |
 | 捕获（录音） | **有** | `capture_status` / `start` / `stop` / `cancel` / `clear` / `delete_take` / `set_options` 与 VST3 同名同载荷；音频从 `process` 的输入总线按工程位置写进插件自己的时间线，实现与 VST3 是**同一个 crate**（`hifishifter-capture`） |
 | 写回 / 分割 / 建轨 / 宿主撤销 / take / folder | 不可用 | 与 ARA-only 相同：REAPER 原生扩展是 VST3 COM 专属，CLAP 没有对应接口 |
 
@@ -176,6 +177,21 @@ ARA 侧改了时间拉伸 / 内容淡化，插件会继续用旧配置渲染。
   `capture_status` 轮询（那本是"视图连不上处理器"的降频判据）。CLAP 视图由本模块在
   进程内回答命令，路由因此报 `bound`；真正缺的 ARA/编辑能力由 `hostCapabilities`
   全 false 表达。这正是用户报的"当前不可用"的第二层原因。
+- **输出接在渲染结果上**：`capture_stop`、清空/删 take、写入曲线/静态参数都会请求一次重渲染
+  （防抖 600 ms），结果以 `ArcSwapOption<RenderTape>` 无锁发布；音频线程在直通之后
+  覆盖素材区间，因此"没处理的地方"听起来与没插插件完全一致。渲染失败会写
+  `[clap][render] render failed`，不会变成静默的"没声音"。
+  端到端判据是**频率**而不是"有样本"：把捕获的 220 Hz 正弦整体抬高 12 个半音，渲染
+  结果的主频必须变成 440 Hz（`a_pitch_edit_changes_the_rendered_audio`）。
+- **WORLD 的 F0 估计器**：本仓库静态链接的 WORLD 里 `Harvest` 对任何输入都返回全 0，
+  而"全 0 的 f0"会让声码器判定"没有有声音高"并**原样返回输入** —— 表现就是"曲线画满、
+  声音没变"，且没有任何报错。因此默认改用 DIO + StoneMask，并在首选估计器产不出任何
+  有声音高时自动换另一个再试一次（`vocode_one`）。`the_vocoder_actually_shifts_the_pitch`
+  用 220→440 Hz 钉住这条。
+- **SoundTouch 是可选 feature**：它是**链接期**依赖，一打开产物就多一个必须与宿主同目录
+  的 `SoundTouchDLL.dll`，而 CLAP 外壳没有 loader 层。内核因此把 `soundtouch` 拆成
+  feature（默认开，VST3/App 行为不变）；CLAP 关掉它，走静态链接的 Signalsmith。
+  判据：`link /dump /dependents dist\HiFiShifter.clap` 里不得出现 `SoundTouchDLL`。
 - **参数编辑器有一条真实的音高线**：`get_processor_params` 按算法给出参数描述符；
   `get_param_frames` / `set_param_frames` 读写时间线上的曲线（与 VST3 同一份
   `hifishifter_kernel::editor::params`）；音高**原线**由静态链接的 WORLD

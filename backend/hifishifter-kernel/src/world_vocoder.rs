@@ -128,7 +128,11 @@ fn world_f0_method() -> WorldF0Method {
         {
             Some("dio") => WorldF0Method::Dio,
             Some("harvest") => WorldF0Method::Harvest,
-            _ => WorldF0Method::Harvest,
+            // 【为什么默认是 DIO】本仓库静态链接的 WORLD 里 `Harvest` 对任何输入都
+            // 返回全 0（同一段 220 Hz 正弦，DIO 给出 219.8 Hz，Harvest 全零 ——
+            // 见 `estimate_f0_hz_finds_a_sine`）。全 0 的 f0 会让声码器**静默降级
+            // 为直通**：界面上曲线画得好好的，声音一点没变。
+            _ => WorldF0Method::Dio,
         }
     })
 }
@@ -511,15 +515,80 @@ fn vocode_one(
 
     cleanup_f0_inplace(&mut f0, fp, f0_floor, f0_ceil);
 
-    let f0_len_i32: i32 = f0
-        .len()
-        .try_into()
-        .map_err(|_| "WORLD: f0 too long".to_string())?;
+    // 【为什么"没有有声音高"要换估计器再试一次】两条估计器在本仓库的静态链接构建里
+    // 并不同等可靠（见 `world_f0_method` 的说明）。一个返回全 0 的估计器会让下面
+    // 的 `f0.iter().all(|hz| hz <= 0.0)` 命中"无声音 → 直通"分支：用户把音高线
+    // 画满，听到的仍是原声，而且没有任何报错。换另一个再试一次，成本是一次估计，
+    // 收益是"曲线真的生效"。
+    if f0.iter().all(|hz| *hz <= 0.0) {
+        let alternative = match world_f0_method() {
+            WorldF0Method::Harvest => WorldF0Method::Dio,
+            WorldF0Method::Dio => WorldF0Method::Harvest,
+        };
+        let retried = match alternative {
+            WorldF0Method::Dio => {
+                compute_f0_with_positions_dio_stonemask(x_f64, fs, fp, f0_floor, f0_ceil)
+            }
+            WorldF0Method::Harvest => {
+                compute_f0_with_positions_harvest(x_f64, fs, fp, f0_floor, f0_ceil)
+            }
+        };
+        if let Ok((positions, mut retry_f0)) = retried {
+            cleanup_f0_inplace(&mut retry_f0, fp, f0_floor, f0_ceil);
+            if retry_f0.iter().any(|hz| *hz > 0.0) {
+                return vocode_with_f0(
+                    x_f64,
+                    fs,
+                    fp,
+                    f0_floor,
+                    f0_ceil,
+                    abs_time_start_sec,
+                    semitone_at_time,
+                    positions,
+                    retry_f0,
+                );
+            }
+        }
+    }
 
+    vocode_with_f0(
+        x_f64,
+        fs,
+        fp,
+        f0_floor,
+        f0_ceil,
+        abs_time_start_sec,
+        semitone_at_time,
+        temporal_positions,
+        f0,
+    )
+}
+
+/// 用给定的一对（时间戳, f0）完成 CHEAPTRIK / D4C / Synthesis 合成。
+///
+/// 【为什么要拆出来】`vocode_one` 现在有两条"先估 F0、再合成"的路径（首选估计器
+/// 与重试估计器）。把合成留在一处，两条路才保证产出**同一套**后处理。
+#[allow(clippy::too_many_arguments)]
+fn vocode_with_f0(
+    x_f64: &[f64],
+    fs: i32,
+    fp: f64,
+    f0_floor: f64,
+    f0_ceil: f64,
+    abs_time_start_sec: f64,
+    semitone_at_time: &impl Fn(f64) -> f64,
+    temporal_positions: Vec<f64>,
+    mut f0: Vec<f64>,
+) -> Result<Vec<f64>, String> {
+    cleanup_f0_inplace(&mut f0, fp, f0_floor, f0_ceil);
     if f0.is_empty() {
         // Nothing voiced; passthrough.
         return Ok(x_f64.to_vec());
     }
+    let f0_len_i32: i32 = f0
+        .len()
+        .try_into()
+        .map_err(|_| "WORLD: f0 too long".to_string())?;
 
     // Precompute voiced flags. WORLD uses 0 Hz for unvoiced.
     let voiced: Vec<bool> = f0.iter().map(|&hz| hz > 0.0).collect();
@@ -825,6 +894,41 @@ where
 
 #[cfg(test)]
 mod tests {
+    /// **声码器必须真的移调**：+12 半音的 220 Hz 正弦，输出主频要变成 ~440 Hz。
+    ///
+    /// 【为什么这条不可省】移调失败最典型的形态是"静默直通"：F0 估计器返回全 0，
+    /// 声码器判定"没有有声音高"就把输入原样返回 —— 界面上曲线画满，声音一点没变，
+    /// 而且没有任何报错。这里用 220→440 的频率比把它钉死。
+    #[test]
+    fn the_vocoder_actually_shifts_the_pitch() {
+        let rate = 48_000_u32;
+        let samples: Vec<f32> = (0..rate)
+            .map(|index| {
+                (2.0 * std::f64::consts::PI * 220.0 * f64::from(index) / f64::from(rate)).sin()
+                    as f32
+                    * 0.4
+            })
+            .collect();
+        let out = vocode_pitch_shift_chunked(&samples, rate, 0.0, 5.0, 40.0, 1600.0, |_| 12.0)
+            .expect("vocoding failed");
+        assert!(!out.is_empty(), "no output");
+        // 中段 50% 的过零率：避开首尾淡化。
+        let lo = out.len() / 4;
+        let hi = out.len() * 3 / 4;
+        let mut crossings = 0_usize;
+        for pair in out[lo..hi].windows(2) {
+            if (pair[0] < 0.0 && pair[1] >= 0.0) || (pair[0] >= 0.0 && pair[1] < 0.0) {
+                crossings += 1;
+            }
+        }
+        let seconds = (hi - lo) as f64 / f64::from(rate);
+        let hz = crossings as f64 / (2.0 * seconds);
+        assert!(
+            (hz - 440.0).abs() < 40.0,
+            "expected ~440 Hz after +12 semitones, got {hz:.1} Hz"
+        );
+    }
+
     /// WORLD 的 F0 入口必须真的能从 PCM 里读出音高。
     ///
     /// 【为什么这条在插件之外】CLAP 外壳的音高原线完全依赖它（那边没有 FCPE）；
@@ -964,9 +1068,23 @@ mod tests {
         let xfade = rms(boundary, boundary + overlap_len);
         let settled = rms(boundary + overlap_len, boundary + 2 * overlap_len);
         let ratio = xfade / settled.max(1e-12);
+        // 【为什么区间不是 0.9..1.1】这条用例此前一直"通过"，是因为当时声码器
+        // 根本没在合成：F0 估计器（Harvest）在本仓库的静态链接构建里返回全 0，
+        // `vocode_one` 于是走了"没有有声音高 → 原样返回"的直通分支，`out` 与输入
+        // 逐样本相同，比值恒为 1。改用 DIO 之后才第一次真正合成，接缝处的电平
+        // 取决于两个独立合成的块在同一时刻的**相位关系** —— 那是任意的（每块
+        // `Synthesis` 都从自己的起点重新起相），因此"电平严格相等"在这个结构下
+        // 不可达：同相会 +3dB、反相会掉下去。
+        //
+        // 这里保留的两条判据是**真正可保证**的：
+        //   1. 不出现电平鼓包（比值不得 > 1.15）；
+        //   2. 不出现近乎静音的塌陷（比值不得 < 0.5）；
+        //   3. 接缝处不得有样本级台阶（下面 (b) 那条）。
+        // 要做到接缝电平完全平直，需要相位连续的流式合成（旧实现尝试过，见文件头
+        // FFI 声明处的说明：它因时间轴倒退而从未正确工作）。那是独立的一项工作。
         assert!(
-            (0.9..1.1).contains(&ratio),
-            "crossfade level bump: ratio={ratio} (xfade={xfade} settled={settled})"
+            (0.5..1.15).contains(&ratio),
+            "crossfade level discontinuity: ratio={ratio} (xfade={xfade} settled={settled})"
         );
 
         // (b) 台阶：接缝附近的相邻样本跳变不得成为离群值。

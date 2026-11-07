@@ -342,59 +342,72 @@ pub fn time_stretch_interleaved(
             }
         }
         StretchAlgorithm::SoundTouchDll => {
-            let in_frames = if channels == 0 {
-                0
-            } else {
-                input.len() / channels
-            };
-            if in_frames < 2 || out_frames < 2 {
-                return linear_time_stretch_interleaved(input, channels, out_frames);
+            // 【为什么这个分支有两条实现】SoundTouch 是**链接期**依赖（`#[link(name=…)]`），
+            // 一打开，产物就多一个必须与宿主同目录的 `SoundTouchDLL.dll`。CLAP 外壳没有
+            // loader 层，带不动它 —— 于是那边关掉 feature，走线性重采样。
+            // 【为什么退到线性而不是直通】线性重采样至少保持时长与内容；直通会让"改了速率"
+            // 听起来完全没生效，那是更糟的谎。
+            #[cfg(not(feature = "soundtouch"))]
+            {
+                linear_time_stretch_interleaved(input, channels, out_frames)
             }
-            let ratio = (out_frames as f64) / (in_frames as f64);
-            let result = crate::soundtouch::try_time_stretch_interleaved_realtime(
-                input,
-                channels,
-                sample_rate.max(1),
-                ratio,
-                out_frames,
-            )
-            .or_else(|_| {
-                crate::soundtouch::try_time_stretch_interleaved_offline(
+            #[cfg(feature = "soundtouch")]
+            {
+                let in_frames = if channels == 0 {
+                    0
+                } else {
+                    input.len() / channels
+                };
+                if in_frames < 2 || out_frames < 2 {
+                    return linear_time_stretch_interleaved(input, channels, out_frames);
+                }
+                let ratio = (out_frames as f64) / (in_frames as f64);
+                let result = crate::soundtouch::try_time_stretch_interleaved_realtime(
                     input,
                     channels,
                     sample_rate.max(1),
                     ratio,
                     out_frames,
                 )
-            });
-
-            match result {
-                Ok(mut out) => {
-                    // 先对齐长度并做收尾，再施加静音门控。
-                    //
-                    // 【为什么不能裸 resize】拉伸器少给几帧时，裸 `resize(0.0)`
-                    // 会在**非过零点**切断内容、再直接接上数字静音 —— 两处都是
-                    // 台阶。`smooth_tail_then_align` 在边界前做 ~5ms 线性收尾，
-                    // 让切点落在 ≈0 上。
-                    //
-                    // 顺序：先对齐、后门控。门控按 `output.len()` 推算输出帧数，
-                    // 放在对齐之后才能覆盖最终长度。
-                    let ramp = ((0.005 * sample_rate.max(1) as f64).round() as usize).max(2)
-                        * channels.max(1);
-                    crate::seam::smooth_tail_then_align(&mut out, out_frames * channels, ramp);
-                    preserve_hard_silence_after_stretch(
+                .or_else(|_| {
+                    crate::soundtouch::try_time_stretch_interleaved_offline(
                         input,
-                        &mut out,
                         channels,
                         sample_rate.max(1),
-                    );
-                    out
-                }
-                Err(e) => {
-                    if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1") {
-                        log::error!("time_stretch: SoundTouch failed, falling back: {e}");
+                        ratio,
+                        out_frames,
+                    )
+                });
+
+                match result {
+                    Ok(mut out) => {
+                        // 先对齐长度并做收尾，再施加静音门控。
+                        //
+                        // 【为什么不能裸 resize】拉伸器少给几帧时，裸 `resize(0.0)`
+                        // 会在**非过零点**切断内容、再直接接上数字静音 —— 两处都是
+                        // 台阶。`smooth_tail_then_align` 在边界前做 ~5ms 线性收尾，
+                        // 让切点落在 ≈0 上。
+                        //
+                        // 顺序：先对齐、后门控。门控按 `output.len()` 推算输出帧数，
+                        // 放在对齐之后才能覆盖最终长度。
+                        let ramp = ((0.005 * sample_rate.max(1) as f64).round() as usize).max(2)
+                            * channels.max(1);
+                        crate::seam::smooth_tail_then_align(&mut out, out_frames * channels, ramp);
+                        preserve_hard_silence_after_stretch(
+                            input,
+                            &mut out,
+                            channels,
+                            sample_rate.max(1),
+                        );
+                        out
                     }
-                    linear_time_stretch_interleaved(input, channels, out_frames)
+                    Err(e) => {
+                        if std::env::var("HIFISHIFTER_DEBUG_COMMANDS").ok().as_deref() == Some("1")
+                        {
+                            log::error!("time_stretch: SoundTouch failed, falling back: {e}");
+                        }
+                        linear_time_stretch_interleaved(input, channels, out_frames)
+                    }
                 }
             }
         }

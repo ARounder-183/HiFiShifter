@@ -27,6 +27,7 @@ pub mod gui;
 pub mod latency_tail;
 pub mod log_host;
 pub mod ports;
+pub mod render;
 pub mod render_ext;
 pub mod state;
 pub mod timer;

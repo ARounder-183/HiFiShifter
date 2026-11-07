@@ -140,6 +140,7 @@ pub mod pitch_config;
 pub mod vibrato;
 
 // ── 时间拉伸（原生构建见 build.rs）────────────────────────────────────────────
+#[cfg(feature = "soundtouch")]
 pub mod soundtouch;
 pub mod sstretch;
 pub mod time_stretch;

@@ -2022,6 +2022,7 @@ version = "0.2.0-beta"
 dependencies = [
  "ara2-bridge-companion",
  "ara2-bridge-sys",
+ "arc-swap",
  "base64 0.23.1",
  "hifishifter-capture",
  "hifishifter-kernel",

@@ -51,9 +51,14 @@ cc = "1.0"
 [features]
 # 与 app 同名同义，默认值也一致：默认带 ONNX 声码器与 vslib。
 # app 侧通过 `hifishifter-kernel/onnx` 转发，见 backend/src-tauri/Cargo.toml。
-default = ["onnx", "vslib"]
+default = ["onnx", "vslib", "soundtouch"]
 onnx = ["dep:ort", "dep:ndarray", "dep:ort-tract"]
 vslib = []
+# 【为什么 SoundTouch 是一个独立 feature】它是**链接期**依赖（`#[link(name=...)]`），
+# 一打开，产物就得多带一个 SoundTouchDLL.dll，而且 Windows 只按**宿主目录**解析
+# 依赖（不是插件模块目录）。CLAP 外壳没有 loader 层，带不动它 —— 关掉这个 feature
+# 之后 CLAP 走 Signalsmith（静态链接、MIT），VST3/App 保持原样。
+soundtouch = []
 
 # ── ONNX Runtime 的平台差异 ──────────────────────────────────────────────────
 # 与 app 的 Cargo.toml 逐字一致：两边各自声明同一份 spec，cargo 会做特性统一，

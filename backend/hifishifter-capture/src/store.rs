@@ -748,6 +748,11 @@ impl CaptureStore {
         self.unsupported_precision.load(Ordering::Acquire)
     }
 
+    /// 本实例的工程采样率（0 = 宿主还没声明）。渲染与"工程帧 ↔ 秒"换算都要它。
+    pub fn project_rate(&self) -> f64 {
+        f64::from(self.project_rate.load(Ordering::Acquire).max(0))
+    }
+
     /// 记录宿主声明的工程率（`setupProcessing`）。
     pub fn note_project_rate(&self, rate: f64) {
         if rate.is_finite() && rate > 0.0 {
