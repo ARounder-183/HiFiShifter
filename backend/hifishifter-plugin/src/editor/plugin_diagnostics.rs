@@ -42,9 +42,10 @@ pub(super) fn write_package(
 
     zip.start_file("system_info.json", options)
         .map_err(|e| format!("zip add system_info failed: {e}"))?;
-    // 【为什么在打包时补 ARA 能力读数】"这个宿主为什么没走 ARA"是报障里最常被问、
-    // 却最难自证的一件事：宿主不实现本格式的 ARA 发现协议时，日志里连一条 ARA 痕迹
-    // 都没有。诊断包必须能直接回答，而不是让读者去猜插件装没装对。
+    // 【为什么在打包时补 ARA 能力读数】"这个宿主有没有把本插件当 ARA 插件"是报障里
+    // 最常被问、却最难自证的一件事：REAPER 这类宿主走的是旧草案 ID，不查 entry 级
+    // 工厂，光看工厂查询记录会误判成"不支持 ARA"。诊断包直接给出共享层的握手读数，
+    // 而不是让读者去猜插件装没装对。
     let mut info_value = system_info.clone();
     if let Some(object) = info_value.as_object_mut() {
         object.insert(

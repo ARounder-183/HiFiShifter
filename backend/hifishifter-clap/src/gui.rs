@@ -1,9 +1,10 @@
 //! CLAP `clap.gui` 扩展：把同一份前端产物嵌进宿主给的父窗口。
 //!
 //! 【为什么不复用 VST3 的原语】VST3 的 `editor/gui` 与 ARA 会话、219 条命令、
-//! REAPER 原生扩展绑在一起；CLAP 阶段 1 没有那些后端。这里走 `editor/windows.rs`
-//! 的精简 WebView2 宿主 + `editor/protocol.rs` 的结构化回执：页面是真的、能力
-//! 边界也是真的（`hostKind: "capture"`、写能力全部 false）。
+//! REAPER 原生扩展绑在一起；CLAP 外壳复用共享编辑会话，不另起一套后端。这里走
+//! `editor/windows.rs` 的精简 WebView2 宿主 + `editor/protocol.rs` 的结构化回执：
+//! 页面是真的；宿主把实例绑到 ARA 文档后命令由共享会话服务，未绑定时
+//! `hostCapabilities` 如实表达能力边界。
 //!
 //! 【非 Windows】当前只有 Windows 提供内嵌 WebView2；其它平台 `is_api_supported`
 //! 如实返回 false，绝不交一个空白视图让宿主以为成功。

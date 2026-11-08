@@ -328,7 +328,7 @@ fn rust_clap_layout_matches_the_pinned_native_sdk() {
         offset_of!(TimerExt, on_timer)
     );
 
-    // GUI 表当前不返回给宿主（阶段 1 是 Capture-only），但一旦有人打开
+    // GUI 表当前不返回给宿主，但一旦有人打开
     // `get_extension("clap.gui")`，错位的函数指针会让宿主跳进无关代码。
     // 提前把布局钉住，避免"未接线"变成"未验证"。
     type Window = hifishifter_clap::gui::clap_window_t;

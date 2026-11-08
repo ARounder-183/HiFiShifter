@@ -15,7 +15,7 @@ HiFiShifter 是一個圖形化人聲編輯與合成工具。它支援多軌道�
 - **三種聲碼器演算法**：nsf-hifigan（PC-NSF-HiFiGAN）、World、VsLib，詳見[演算法](#演算法)。
 - **互操作性**：匯入 REAPER（`.rpp`）與 VocalShifter（`.vshp` / `.vsp`）專案，雙向讀寫 REAPER 與 VocalShifter 剪貼簿；MIDI 可匯入為音高參考塊 / 音高參數 / 速度映射，音訊塊與音高線可匯出為 MIDI。
 - **匯入匯出**：常見音訊 / 視訊格式匯入（視訊檔自動提取音訊軌），專案與分軌匯出為 `wav` / `mp3` / `flac`。
-- **VST3 / ARA 外掛**：除獨立 App 外，另提供 Windows x64 的 VST3（ARA）外掛，可在 REAPER 中直接開啟同一套編輯介面：宿主負責片段幾何、BPM 與漸變聲音，HiFiShifter 負責參數曲線，編輯自動套用回宿主。詳見使用手冊的 [VST3 / ARA 外掛](USERMANUAL_zh-TW.md#八vst3--ara-外掛reaper)章節。
+- **VST3 / CLAP ARA 外掛**：除獨立 App 外，另提供 Windows x64 的 VST3 與 CLAP（ARA）外掛，兩者皆可透過 ARA 在 REAPER 中直接開啟同一套編輯介面：宿主負責片段幾何、BPM 與漸變聲音，HiFiShifter 負責參數曲線，編輯自動套用回宿主。詳見使用手冊的 [VST3 / CLAP ARA 外掛](USERMANUAL_zh-TW.md#八vst3--clap-ara-外掛reaper)章節。
 - **其他**：內建檔案瀏覽器與快速搜尋、記事本、自動備份、多語言介面（简体中文 / 繁體中文 / English / 日本語 / 한국어）、深淺色主題、推理裝置選擇與基準測試。
 
 ## 安裝
@@ -26,7 +26,7 @@ HiFiShifter 是一個圖形化人聲編輯與合成工具。它支援多軌道�
 - **macOS**：未簽名 dmg（Apple Silicon 裝 `arm64`，Intel 裝 `x86_64`）。首次安裝需要手動放行；若提示「檔案已損毀」，請按照[使用手冊](USERMANUAL_zh-TW.md#一安裝)中的步驟處理。
 - **Linux**：AppImage（x86_64 / arm64）。執行需要系統提供 `webkit2gtk-4.1`（Arch/CachyOS、Ubuntu 24.04+、Fedora 39+、Debian 13+ 等均已提供；Ubuntu 22.04 僅有 `webkit2gtk-4.0`，不支援）。
 
-**VST3 / ARA 外掛**：Windows x64 另有 VST3（ARA）外掛形態，可在 REAPER 中以嵌入介面使用（目前僅針對 REAPER 驗證）。安裝方式、執行依賴與使用限制見使用手冊的 [VST3 / ARA 外掛](USERMANUAL_zh-TW.md#八vst3--ara-外掛reaper)章節。
+**VST3 / CLAP ARA 外掛**：Windows x64 另有 VST3 與 CLAP 的 ARA 外掛形態，可在 REAPER 中以嵌入介面使用（目前僅針對 REAPER 驗證）。安裝方式、執行依賴與使用限制見使用手冊的 [VST3 / CLAP ARA 外掛](USERMANUAL_zh-TW.md#八vst3--clap-ara-外掛reaper)章節。
 
 GPU 加速：Windows 使用 DirectML（DirectX 12），macOS（Apple Silicon）使用 CoreML + WebGPU，Linux x86_64 使用 WebGPU（Dawn/Vulkan），其餘平台回退 CPU。可在應用內 `選項 → 推理裝置` 中切換裝置並執行基準測試。
 
@@ -43,7 +43,7 @@ HiFiShifter 提供了一個統一的渲染介面，以便未來增添更多的�
 1. 透過其他 DAW 或切片軟體準備好人力所需的短片段音源。
 2. 在 HiFiShifter 中完成音訊的拼貼和調音。
 
-如果你已經在 REAPER 裡工作，也可以直接用 [VST3 / ARA 外掛](USERMANUAL_zh-TW.md#八vst3--ara-外掛reaper)在 REAPER 專案內完成拼貼與調音，不必再把音訊匯入獨立 App。
+如果你已經在 REAPER 裡工作，也可以直接用 [VST3 / CLAP ARA 外掛](USERMANUAL_zh-TW.md#八vst3--clap-ara-外掛reaper)在 REAPER 專案內完成拼貼與調音，不必再把音訊匯入獨立 App。
 
 當然，HiFiShifter 也支援以下操作方便從其他軟體的專案遷移：
 

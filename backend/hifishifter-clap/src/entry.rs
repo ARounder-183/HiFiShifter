@@ -7,6 +7,11 @@
 //! 【为什么不声明 `ara:required`】本插件在没有 ARA 的宿主里仍是可用的普通效果器
 //! （捕获形态）。`required` 会让那些宿主直接拒绝加载它 —— 那是把“支持 ARA”说成
 //! “只会 ARA”。
+//!
+//! 【REAPER 的发现路径】REAPER 6.71+ 不查 entry 级 ARA 工厂、也不检查 `ara:supported`，
+//! 而是在 `plugin->init` 后直接向实例查询 2022 私有草案 ID
+//! `com.celemony.ara.plugin_extension.draft/1`。`crate::ara::get_extension` 已兼容
+//! 该 ID，`ara:supported` 仍保留给按 ARACLAP.h 定稿协议发现的宿主。
 
 use crate::abi::cstr;
 use crate::abi::*;
@@ -31,10 +36,9 @@ static FEATURES: StaticPtrArray = StaticPtrArray([
     cstr(FEATURE_AUDIO_EFFECT),
     cstr(FEATURE_PITCH_CORRECTION),
     cstr(FEATURE_STEREO),
-    // 【为什么这一条是 ARA 的开关】ARACLAP.h 规定：宿主只有在 descriptor 的 features
-    // 里看到 `ara:supported` 才会在 entry 上查询 `clap.ara.factory`、并在实例上查询
-    // `clap.ara.plugin-extension`。少了它，两级入口都是死代码 —— 插件在宿主眼里只是
-    // 一个普通效果器。
+    // 【为什么这一条要保留】ARACLAP.h 规定按定稿协议发现的宿主先看 descriptor 的
+    // `ara:supported`，再查 entry 级工厂与实例级扩展。REAPER 6.71+ 走的是更早的
+    // 私有草案路径（无条件查实例级旧 ID），不依赖这个 feature；两者都不该被漏掉。
     cstr(FEATURE_ARA_SUPPORTED),
     std::ptr::null(),
 ]);
@@ -896,9 +900,9 @@ mod tests {
 
     /// **descriptor 必须声明 `ara:supported`**。
     ///
-    /// 【为什么这条是 ARA 的总开关】ARACLAP.h 规定宿主只在看到该 feature 时才去查
-    /// 两级 ARA 扩展。少了它，绑定器、渲染器与编辑器通路全部是死代码 —— 而这正是
-    /// 之前“日志里工厂建好了、宿主一条 region 都不给”的形态。
+    /// 【为什么这条必须存在】按 ARACLAP.h 定稿协议发现的宿主只在看到该 feature 时
+    /// 才去查两级 ARA 扩展。REAPER 的旧草案路径虽然不依赖它，但 descriptor 仍须如实
+    /// 声明能力，否则定稿宿主会完全跳过 ARA 发现。
     ///
     /// 【为什么不声明 `ara:required`】见模块文档：没有 ARA 的宿主里本插件仍是可用的
     /// 普通效果器。`required` 会让那些宿主直接拒绝加载。

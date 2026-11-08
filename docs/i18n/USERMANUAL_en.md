@@ -37,7 +37,7 @@ In the menu `Options → Inference Device`, you can select `Auto`, `CPU`, or `GP
 
 On Windows, HiFiShifter disables the browser shortcuts that WebView2 normally intercepts (such as `Ctrl + F`, `Ctrl + P`, `F5`, and `Ctrl` with `+` / `-` for page zoom), so those key combinations reach HiFiShifter normally and never interrupt your editing.
 
-**About the VST3 / ARA Plugin**: Besides the standalone app, HiFiShifter is also available as a VST3 (ARA) plugin, which opens the same editing interface directly inside a REAPER project. The plugin is currently a Windows x64 build and has only been verified against REAPER; see the [VST3 / ARA Plugin](#8-vst3--ara-plugin-reaper) chapter for installation and usage.
+**About the VST3 / CLAP ARA Plug-ins**: Besides the standalone app, HiFiShifter is also available as VST3 and CLAP ARA plug-ins, which opens the same editing interface directly inside a REAPER project. The plugin is currently a Windows x64 build and has only been verified against REAPER; see the [VST3 / CLAP ARA Plug-ins](#8-vst3--clap-ara-plug-ins-reaper) chapter for installation and usage.
 
 ## 2. Menu
 
@@ -106,7 +106,7 @@ The `View` menu contains options related to the interface display:
 - `Time Display`: Lets you choose the primary/secondary time units of the timeline ruler and open `Timeline Display Settings...`.
 - `Theme: Auto / Dark / Light`: Switch the current theme. With `Auto`, HiFiShifter follows your operating system's light/dark appearance and switches automatically (this is the default).
 - `Appearance Settings...`: Open the appearance settings panel.
-- `Connect to ARA Host...`: Connect to a running ARA host (REAPER) instance to edit the host's audio from the standalone app. Shown in the standalone app only; it opens a floating session panel where you can submit, refresh or disconnect. See the [VST3 / ARA Plugin](#8-vst3--ara-plugin-reaper) chapter for details.
+- `Connect to ARA Host...`: Connect to a running ARA host (REAPER) instance to edit the host's audio from the standalone app. Shown in the standalone app only; it opens a floating session panel where you can submit, refresh or disconnect. See the [VST3 / CLAP ARA Plug-ins](#8-vst3--clap-ara-plug-ins-reaper) chapter for details.
 - `Refresh`: Reload runtime information.
 - `Clear Waveform Cache`: Clear the cached waveform data; it is regenerated the next time it is displayed.
 
@@ -731,9 +731,9 @@ Open the recording settings via `File -> Recording...`:
 3. Click the record button again to stop recording; timeline playback stops with it.
 4. If the selected track has no clips within the recording range, the recording is imported directly onto that track. Otherwise a new `Recording` track is created immediately below the selected track, the recording is imported there, and the new track and the new clip are selected automatically.
 
-## 8. VST3 / ARA Plugin (REAPER)
+## 8. VST3 / CLAP ARA Plug-ins (REAPER)
 
-Besides the standalone app, HiFiShifter also ships in a VST3 (ARA) plugin form: load it into REAPER and the same HiFiShifter editing interface opens directly inside the REAPER project. The plugin shares the same editing and rendering logic as the standalone app, but **does not require the standalone app to be started first**, and edits are saved together with the REAPER project.
+Besides the standalone app, HiFiShifter also ships as VST3 and CLAP plug-ins, both of which can connect through ARA in REAPER: load either one into REAPER and the same HiFiShifter editing interface opens directly inside the REAPER project. VST3 uses the finalized ARA SDK protocol; CLAP additionally supports the 2022 private draft ID used by REAPER 6.71+, so both formats establish an ARA session in REAPER. The plugin shares the same editing and rendering logic as the standalone app, but **does not require the standalone app to be started first**, and edits are saved together with the REAPER project.
 
 The plugin is currently a Windows x64 build and has only been verified against REAPER; there is no plugin delivery for Linux / macOS yet.
 
@@ -741,14 +741,14 @@ The plugin is currently a Windows x64 build and has only been verified against R
 
 There are two ways to install the plugin; pick either one:
 
-- **Installer (recommended)**: run `HiFiShifter_v<version>_windows-x86_64-setup.exe`. **One package installs both the standalone app and the VST3/ARA plug-in**: the wizard follows the system UI language, lets you pick the app and VST3 directories separately, writes the models once (machine-wide shared library, see [Model Files and Sharing](#model-files-and-sharing)), and registers a **single** uninstall entry under Windows "Programs and Features / Installed apps". The installer first confirms that REAPER and HiFiShifter have exited.
+- **Installer (recommended)**: run `HiFiShifter_v<version>_windows-x86_64-setup.exe`. **One package installs the standalone app, the VST3/ARA plug-in and the CLAP/ARA plug-in**: the wizard follows the system UI language, lets you pick the app and VST3 directories separately, writes the models once (machine-wide shared library, see [Model Files and Sharing](#model-files-and-sharing)), and registers a **single** uninstall entry under Windows "Programs and Features / Installed apps". The installer first confirms that REAPER and HiFiShifter have exited.
 - **Manual copy**: close REAPER and put the **entire** `HiFiShifter.vst3` folder into a VST3 directory (for example `C:\Program Files\Common Files\VST3`), or add its parent directory to REAPER's VST scan path. Do not copy only the individual files inside the folder — the interface, models and runtime dependencies all live in that folder. This approach writes nothing to the registry; to uninstall, just delete the folder.
 
 Both ways require the WebView2 runtime and the VC++ x64 runtime to be installed.
 
 Access steps (same for both ways):
 
-1. Restart REAPER and let it scan plugins, then add the VST3 plugin HiFiShifter on a track that has a vocal audio item and connect it via the host's ARA mechanism (rather than importing the audio into the standalone app). Trying it on a copy of the project first is recommended.
+1. Restart REAPER and let it scan plugins, then add `VST3: HiFiShifter` or `CLAP: HiFiShifter` on a track that has a vocal audio item and connect it via the host's ARA mechanism (rather than importing the audio into the standalone app). Trying it on a copy of the project first is recommended.
 2. To work on several tracks, add a plugin instance on each track. Opening any one HiFiShifter window lets you edit every track already connected in the same project — these windows are different views of one workspace, not independent editing copies; edits are not shared between different projects.
 3. Before using shortcuts, click the plugin window once so keyboard focus enters the interface (the plugin forwards `Ctrl + C` / `Ctrl + X` / `Ctrl + V` / `Ctrl + Z` / `Ctrl + Y`, and the remaining shortcuts are handled by the interface itself).
 

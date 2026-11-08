@@ -1,7 +1,7 @@
 //! Windows 内嵌视图：子 HWND + WebView2 + 同一份前端产物。
 //!
 //! 【为什么不是复制 VST3 的 windows.rs】那份 1188 行里大半是 `EditorClient` /
-//! `EditorLink` / ARA 会话 / 219 条命令的策略。CLAP 阶段 1 没有那些后端，
+//! `EditorLink` / ARA 会话 / 219 条命令的策略。CLAP 外壳复用共享编辑会话，
 //! 只需要"把 `frontend/dist` 真正画进宿主给的矩形"。这里只保留四件事：
 //! 注册窗口类、建子 HWND、把 `hifishifter.invalid` 映射到资源目录、把页面消息
 //! 交给 `protocol` 回执。

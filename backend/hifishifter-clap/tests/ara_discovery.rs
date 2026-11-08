@@ -7,6 +7,8 @@
 //! 【现在断言什么】entry 级工厂表已接上共享 ARA runtime（与 VST3 同一个
 //! `ARAFactory`，只是关联名换成 CLAP 的 descriptor ID），所以"工厂 ID 必须给出表、
 //! 别的 ID 必须给 null"是产品行为；实例级扩展在没有绑定器的实例上仍必须返回 null。
+//! REAPER 6.71+ 使用 2022 私有草案 ID 做实例级发现（见 `hifishifter_clap::ara`），
+//! 它与官方 stable/compat ID 属于同一张表，因此也纳入判据。
 
 use ara2_bridge_companion::clap::sys::{
     CLAP_EXT_ARA_FACTORY, CLAP_EXT_ARA_FACTORY_COMPAT, CLAP_EXT_ARA_PLUGIN_EXTENSION,
@@ -45,6 +47,23 @@ fn the_four_ara_extension_ids_match_the_pinned_companion() {
     assert_eq!(CLAP_PLUGIN_FEATURE_ARA_SUPPORTED, "ara:supported");
 }
 
+/// REAPER 的旧草案 ID 不是 ARACLAP.h 的任何一个常量，必须在本仓单独钉死。
+#[test]
+fn the_reaper_legacy_id_is_a_distinct_well_known_constant() {
+    assert_eq!(
+        ours::CLAP_EXT_ARA_PLUGIN_EXTENSION_REAPER_LEGACY,
+        "com.celemony.ara.plugin_extension.draft/1"
+    );
+    assert_ne!(
+        ours::CLAP_EXT_ARA_PLUGIN_EXTENSION_REAPER_LEGACY,
+        CLAP_EXT_ARA_PLUGIN_EXTENSION
+    );
+    assert_ne!(
+        ours::CLAP_EXT_ARA_PLUGIN_EXTENSION_REAPER_LEGACY,
+        CLAP_EXT_ARA_PLUGIN_EXTENSION_COMPAT
+    );
+}
+
 #[test]
 fn a_real_clap_ara_entry_exposes_one_stable_factory_association() {
     let factory = factory_fixture();
@@ -80,6 +99,7 @@ fn an_instance_without_a_binder_returns_null_for_every_ara_query() {
         CLAP_EXT_ARA_FACTORY_COMPAT,
         CLAP_EXT_ARA_PLUGIN_EXTENSION,
         CLAP_EXT_ARA_PLUGIN_EXTENSION_COMPAT,
+        ours::CLAP_EXT_ARA_PLUGIN_EXTENSION_REAPER_LEGACY,
     ] {
         assert!(
             ours::get_extension(std::ptr::null(), id).is_null(),

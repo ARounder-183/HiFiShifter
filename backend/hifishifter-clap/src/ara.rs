@@ -10,6 +10,15 @@
 //! （同一进程里可以同时有多份文档）。少这一个实参，就只能靠"猜最近一份文档"，那是把
 //! 正确性交给时序。这里改用 companion 的**同一套** ClapAraPluginExtension 结构体与
 //! ClapAraEntry 工厂表，只把回调接到共享 binder 上。
+//!
+//! 【REAPER 的旧草案 ID】REAPER 6.71 起实现的 ARA-over-CLAP 早于 ARA SDK 的定稿：
+//! 它在 `plugin->init` 后无条件向实例查询 `com.celemony.ara.plugin_extension.draft/1`
+//! （2022 私有草案），**不查** entry 级 ARA 工厂，也不检查 `ara:supported`。实测
+//! （REAPER 7.85 / Windows x64）只要实例返回同一张 `clap_ara_plugin_extension_t`，
+//! 宿主就会调 `get_factory` / `bind_to_document_controller`，创建文档控制器、交付
+//! tempo map、region sequence 与授权 PCM —— 完整 ARA 链路与 VST3 一致。因此本模块
+//! 在 ARACLAP.h 的 stable/compat ID 之外，额外认这一个 ID；回调、绑定器、角色校验
+//! 全部复用同一份，不为它开第二条代码路径。
 
 use crate::abi::clap_plugin_t;
 use ara2_bridge::companion::clap::sys::{ClapAraPluginExtension, ClapPlugin};
@@ -18,6 +27,14 @@ pub use ara2_bridge::companion::clap::sys::{
     CLAP_EXT_ARA_FACTORY, CLAP_EXT_ARA_FACTORY_COMPAT, CLAP_EXT_ARA_PLUGIN_EXTENSION,
     CLAP_EXT_ARA_PLUGIN_EXTENSION_COMPAT,
 };
+
+/// REAPER 7.85（及 6.71 起）使用的 2022 年代私有草案实例级扩展 ID。
+///
+/// 【为什么保留它】这个 ID 不属于 ARA SDK 任何一版 `ARACLAP.h`，但 REAPER 的
+/// ARA-over-CLAP 宿主实现用的就是它，且到 7.85 仍在用。忽略它 = 在 REAPER 里
+/// 完全失去 ARA；应答它 = 走与官方 ID 完全相同的 `PLUGIN_EXT` 与共享 binder。
+pub const CLAP_EXT_ARA_PLUGIN_EXTENSION_REAPER_LEGACY: &str =
+    "com.celemony.ara.plugin_extension.draft/1";
 use ara2_bridge::companion::clap::ClapAraEntry;
 use ara2_bridge::companion::CompanionRoles;
 use ara2_bridge::sys::{
@@ -28,18 +45,31 @@ use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
-/// 宿主是否**查询过** entry 级 ARA 工厂扩展。
+/// 宿主是否已发起本格式的 ARA 握手。
 ///
-/// 【为什么需要这个读数】ARA-over-CLAP（ARACLAP.h）是宿主可选实现的能力：REAPER 7.85
-/// 只实现 ARA-over-VST3，从不查询 CLAP 的 ARA 工厂，于是 CLAP 插件在该宿主里永远是
-/// Capture 形态，且日志里一条 ARA 痕迹都没有 —— 用户会以为是自己装错了或插件坏了。
-/// 这个原子位是"宿主有没有问过"的唯一事实来源，bootstrap 与诊断包据此如实报告，
-/// 而不是让界面继续暗示 ARA 可用。
-static ARA_FACTORY_QUERIED: AtomicBool = AtomicBool::new(false);
+/// 【为什么是"握手"而不是"工厂查询"】宿主有两条互不相同的发现路径：
+/// - ARA SDK 2.3 定稿：先查 entry 级 `CLAP_EXT_ARA_FACTORY`，再查实例级扩展；
+/// - REAPER 6.71+ 的 2022 草案：**只查**实例级 `…plugin_extension.draft/1`，
+///   从 `clap.plugin-factory` 拿到插件后直接 `get_factory` / `bind`，从不查
+///   entry 级 ARA 工厂。
+///
+/// 只盯工厂查询会把 REAPER 这条真实生效的 ARA 会话误报成"宿主不支持 ARA"。
+/// 两条路径都在这里置位，bootstrap 与诊断包据此如实报告。
+static ARA_HANDSHAKE_STARTED: AtomicBool = AtomicBool::new(false);
 
-/// 宿主是否查询过本格式的 ARA 工厂扩展（供 bootstrap / 诊断读取）。
+/// 宿主是否已发起本格式的 ARA 握手（供 bootstrap / 诊断读取）。
+///
+/// 名字保留 `factory_queried` 是为了不动既有 JSON 字段 `factoryQueriedByHost`；
+/// 语义已扩展为"任一发现路径触发了 ARA 入口"。
 pub fn ara_factory_queried() -> bool {
-    ARA_FACTORY_QUERIED.load(Ordering::Acquire)
+    ARA_HANDSHAKE_STARTED.load(Ordering::Acquire)
+}
+
+/// 登记一次 ARA 握手，并把读数同步到共享诊断层。
+fn note_ara_handshake(id: &str) {
+    ARA_HANDSHAKE_STARTED.store(true, Ordering::Release);
+    hifishifter_plugin::diagnostics::note_ara_factory_queried();
+    log::warn!("[clap][ara] ARA handshake started via extension id={id}");
 }
 
 /// entry 级 ARA 工厂表；进程内只建一次（工厂本身泄漏到进程结束）。
@@ -87,13 +117,9 @@ pub fn entry_extension(id: &str) -> *const c_void {
     if !matches!(id, CLAP_EXT_ARA_FACTORY | CLAP_EXT_ARA_FACTORY_COMPAT) {
         return std::ptr::null();
     }
-    // 宿主走到这一步就说明它实现了 ARA-over-CLAP 的发现协议；无论工厂最终建没建成，
+    // 宿主走到这一步说明它按 ARA SDK 2.3 定稿协议发起发现；无论工厂最终建没建成，
     // "问过"这个事实都要记下来，供能力报告使用。
-    ARA_FACTORY_QUERIED.store(true, Ordering::Release);
-    hifishifter_plugin::diagnostics::note_ara_factory_queried();
-    log::warn!(
-        "[clap][ara] host queried the ARA factory extension (id={id}); ARA-over-CLAP is available in this host"
-    );
+    note_ara_handshake(id);
     ara_entry().map_or(std::ptr::null(), |entry| entry.extension(id))
 }
 
@@ -136,16 +162,24 @@ unsafe extern "C" fn ara_bind(
 }
 
 /// 实例级 ARA 扩展查询。
+///
+/// 【为什么三个 ID 返回同一张表】官方 stable、SDK 的 draft/2 兼容 ID、以及 REAPER
+/// 的 2022 私有草案 ID，指向的都是同一个 `clap_ara_plugin_extension_t` 契约
+/// （`get_factory` + `bind_to_document_controller`）。宿主用哪个名字问，就让它
+/// 拿到同一份实现；差异只发生在"要不要应答"这一步，绝不复制回调或另建 binder。
 pub fn get_extension(plugin: *const clap_plugin_t, id: &str) -> *const c_void {
     if !matches!(
         id,
-        CLAP_EXT_ARA_PLUGIN_EXTENSION | CLAP_EXT_ARA_PLUGIN_EXTENSION_COMPAT
+        CLAP_EXT_ARA_PLUGIN_EXTENSION
+            | CLAP_EXT_ARA_PLUGIN_EXTENSION_COMPAT
+            | CLAP_EXT_ARA_PLUGIN_EXTENSION_REAPER_LEGACY
     ) {
         return std::ptr::null();
     }
     if binder_for(plugin).is_none() {
         return std::ptr::null();
     }
+    note_ara_handshake(id);
     std::ptr::from_ref(&PLUGIN_EXT).cast()
 }
 
@@ -207,11 +241,30 @@ mod tests {
     fn the_factory_id_is_format_suffixed() {
         assert_eq!(crate::entry::ARA_FACTORY_ID, "com.hifishifter.ara.clap");
     }
-    /// 没接 ARA 的实例必须如实返回 null，而不是一张假接口表。
+    /// 没接 ARA 的实例必须如实返回 null，而不是一张假接口表（含 REAPER 旧 ID）。
     #[test]
     fn an_unwired_instance_extension_returns_null_instead_of_a_fake_interface() {
         assert!(get_extension(std::ptr::null(), CLAP_EXT_ARA_PLUGIN_EXTENSION).is_null());
+        assert!(get_extension(
+            std::ptr::null(),
+            CLAP_EXT_ARA_PLUGIN_EXTENSION_REAPER_LEGACY
+        )
+        .is_null());
         assert!(get_extension(std::ptr::null(), "clap.state").is_null());
+    }
+
+    /// REAPER 的私有草案 ID 必须逐字钉死；拼错一个字符就会在真机上静默退回 Capture。
+    #[test]
+    fn the_reaper_legacy_extension_id_is_pinned() {
+        assert_eq!(
+            CLAP_EXT_ARA_PLUGIN_EXTENSION_REAPER_LEGACY,
+            "com.celemony.ara.plugin_extension.draft/1"
+        );
+        assert_ne!(
+            CLAP_EXT_ARA_PLUGIN_EXTENSION_REAPER_LEGACY,
+            CLAP_EXT_ARA_PLUGIN_EXTENSION,
+            "旧草案 ID 与 ARA SDK 2.3 稳定 ID 是两个不同的字符串"
+        );
     }
     /// entry 级只认 ARA 工厂 ID：别的 ID 不能拿到工厂表。
     #[test]

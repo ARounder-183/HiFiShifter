@@ -220,7 +220,15 @@ int main(int argc, char **argv) {
         fprintf(stderr, "the instance ARA factory differs from the entry table\n");
         plugin->destroy(plugin); entry->deinit(); return 1;
     }
-    printf("ara_plugin_extension=present\n");
+    /* REAPER 6.71+ 用 2022 私有草案 ID 做实例级发现；它必须拿到**同一张**表。
+       少了这条，REAPER 里 ARA 会静默降级成 Capture，而产物自检全绿。 */
+    const clap_ara_plugin_extension_t *reaper_ext = (const clap_ara_plugin_extension_t *)
+        plugin->get_extension(plugin, "com.celemony.ara.plugin_extension.draft/1");
+    if (!reaper_ext || reaper_ext != ara_ext) {
+        fprintf(stderr, "the REAPER legacy ARA extension is missing or differs\n");
+        plugin->destroy(plugin); entry->deinit(); return 1;
+    }
+    printf("ara_plugin_extension=present ara_reaper_legacy=present\n");
     if (!plugin->activate(plugin, 48000.0, 1, 512)) { fprintf(stderr, "activate failed\n"); return 1; }
     if (plugin->start_processing && !plugin->start_processing(plugin)) { fprintf(stderr, "start_processing failed\n"); return 1; }
     float left[8] = {1,2,3,4,5,6,7,8}, right[8] = {8,7,6,5,4,3,2,1};

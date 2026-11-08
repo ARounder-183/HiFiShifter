@@ -15,7 +15,7 @@ HiFiShifter is a graphical vocal editing and synthesis tool. It supports multi-t
 - **Three vocoder algorithms**: nsf-hifigan (PC-NSF-HiFiGAN), World and VsLib — see [Algorithms](#algorithms).
 - **Interoperability**: import REAPER (`.rpp`) and VocalShifter (`.vshp` / `.vsp`) projects, with two-way read/write of the REAPER and VocalShifter clipboards; MIDI can be imported as pitch reference clips / pitch parameters / tempo maps, and audio clips and pitch lines can be exported to MIDI.
 - **Import & export**: import common audio / video formats (the audio track is extracted from videos automatically); export the project and stems as `wav` / `mp3` / `flac`.
-- **VST3 / ARA Plugin**: besides the standalone app, a Windows x64 VST3 (ARA) plugin is also provided, opening the same editing interface directly inside REAPER: the host handles clip geometry, BPM and fade audio, HiFiShifter handles parameter curves, and edits are applied back to the host automatically. See the [VST3 / ARA plugin chapter](USERMANUAL_en.md#8-vst3--ara-plugin-reaper) of the user manual for details.
+- **VST3 / CLAP ARA Plug-ins**: besides the standalone app, Windows x64 VST3 and CLAP plug-ins are provided, both opening the same editing interface directly inside REAPER through ARA: the host handles clip geometry, BPM and fade audio, HiFiShifter handles parameter curves, and edits are applied back to the host automatically. See the [VST3 / CLAP ARA plug-in chapter](USERMANUAL_en.md#8-vst3--clap-ara-plug-ins-reaper) of the user manual for details.
 - **Miscellaneous**: built-in file browser and quick search, notepad, auto backup, multi-language UI (简体中文 / 繁體中文 / English / 日本語 / 한국어), light and dark themes, inference device selection and benchmarking.
 
 ## Installation
@@ -26,7 +26,7 @@ Download the package for your operating system and architecture from the [Releas
 - **macOS**: unsigned dmg (Apple Silicon → `arm64`, Intel → `x86_64`). The first launch requires manual approval; if macOS reports the file as "damaged", follow the steps in the [user manual](USERMANUAL_en.md#1-installation).
 - **Linux**: AppImage (x86_64 / arm64). Requires `webkit2gtk-4.1` from the system (shipped by Arch/CachyOS, Ubuntu 24.04+, Fedora 39+, Debian 13+, …; Ubuntu 22.04 only has `webkit2gtk-4.0` and is not supported).
 
-**VST3 / ARA Plugin**: Windows x64 also has a VST3 (ARA) plugin form, usable as an embedded interface inside REAPER (currently verified against REAPER only). See the [VST3 / ARA plugin chapter](USERMANUAL_en.md#8-vst3--ara-plugin-reaper) of the user manual for installation, runtime dependencies and usage limitations.
+**VST3 / CLAP ARA Plug-ins**: Windows x64 has both VST3 and CLAP ARA plug-in forms, usable as an embedded interface inside REAPER (currently verified against REAPER only). See the [VST3 / CLAP ARA plug-in chapter](USERMANUAL_en.md#8-vst3--clap-ara-plug-ins-reaper) of the user manual for installation, runtime dependencies and usage limitations.
 
 GPU acceleration: Windows uses DirectML (DirectX 12), macOS (Apple Silicon) uses CoreML + WebGPU, and Linux x86_64 uses WebGPU (Dawn/Vulkan); other platforms fall back to CPU. You can switch the device and run the benchmark in-app via `Options → Inference Device`.
 
@@ -43,7 +43,7 @@ Our recommended workflow is:
 1. Prepare short clip sources needed for vocal using other DAWs or slicing software.
 2. Complete audio splicing and tuning in HiFiShifter.
 
-If you already work in REAPER, you can also use the [VST3 / ARA plugin](USERMANUAL_en.md#8-vst3--ara-plugin-reaper) to do the splicing and tuning inside the REAPER project directly, without importing the audio into the standalone app.
+If you already work in REAPER, you can also use the [VST3 / CLAP ARA plug-in](USERMANUAL_en.md#8-vst3--clap-ara-plug-ins-reaper) to do the splicing and tuning inside the REAPER project directly, without importing the audio into the standalone app.
 
 HiFiShifter also supports the following operations to facilitate migration from other software:
 

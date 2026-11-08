@@ -27,26 +27,36 @@ use std::sync::{Mutex, Once, OnceLock};
 /// 渗进共享层；外壳在自己的 sink 里做一次映射即可。
 pub type HostLogSink = fn(log::Level, &str);
 
-/// 宿主是否查询过本格式的 ARA 工厂扩展。
+/// 宿主是否已发起本格式的 ARA 握手。
 ///
-/// 【为什么这个读数在共享层】ARA-over-CLAP 是宿主可选能力（REAPER 7.85 只实现
-/// ARA-over-VST3）。宿主从不查询工厂时，插件在该格式下只能是 Capture 形态，而日志里
-/// 连一条 ARA 痕迹都没有 —— 用户会以为插件坏了。格式外壳在收到合法的 ARA 工厂查询
-/// 时登记这里，诊断包与会话日志据此**如实**说明"本宿主不支持本格式的 ARA"。
+/// 【为什么这个读数在共享层】"这个宿主有没有把本插件当 ARA 插件"是报障里最常被
+/// 问、却最难自证的一件事。格式外壳在任一 ARA 发现路径触发时登记这里：ARA SDK 2.3
+/// 的 entry 级工厂查询，或 REAPER 6.71+ 的 2022 草案实例级扩展查询。诊断包与会话
+/// 日志据此**如实**报告，而不是让读者去猜插件装没装对。
 static ARA_FACTORY_QUERIED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// 登记"宿主查询过本格式的 ARA 工厂扩展"（格式外壳调用，每进程一次即可）。
+/// 登记"宿主已发起本格式的 ARA 握手"（格式外壳调用，每进程一次即可）。
+///
+/// 名字保留 `factory_queried` 是为了不动既有 JSON 字段 `factoryQueriedByHost`；
+/// 语义已扩展为"任一发现路径触发了 ARA 入口"。
 pub fn note_ara_factory_queried() {
     ARA_FACTORY_QUERIED.store(true, std::sync::atomic::Ordering::Release);
 }
 
 /// ARA 能力读数（供诊断包 system_info 与会话日志使用）。
 pub fn ara_discovery_json() -> serde_json::Value {
+    let active = ARA_FACTORY_QUERIED.load(std::sync::atomic::Ordering::Acquire);
     serde_json::json!({
-        "factoryQueriedByHost": ARA_FACTORY_QUERIED.load(std::sync::atomic::Ordering::Acquire),
+        // 兼容键：字段名沿用历史约定，语义已扩展为"任一 ARA 发现路径被触发"。
+        "factoryQueriedByHost": active,
+        "araActive": active,
         "format": crate::log_tag(),
-        "note": "false means the host does not implement ARA for this plug-in format; use the format the host does support (e.g. VST3 in REAPER)",
+        "note": if active {
+            "the host started an ARA handshake for this plug-in format"
+        } else {
+            "no ARA handshake was started for this plug-in format; the plug-in runs in Capture mode unless the host uses a different discovery path"
+        },
     })
 }
 

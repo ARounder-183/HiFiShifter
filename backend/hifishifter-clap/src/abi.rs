@@ -229,8 +229,9 @@ pub const CLAP_EXT_RENDER: &[u8] = b"clap.render\0";
 pub const CLAP_EXT_AUDIO_PORTS: &[u8] = b"clap.audio-ports\0";
 /// `clap.gui` 扩展 ID。
 pub const CLAP_EXT_GUI: &[u8] = b"clap.gui\0";
-/// ARACLAP.h 规定的 ARA 能力位：宿主只在 descriptor 里看到它时，才会在 entry 上查询
-/// `clap.ara.factory`、并在实例上查询 `clap.ara.plugin-extension`。
+/// ARACLAP.h 规定的 ARA 能力位：按定稿协议发现的宿主在 descriptor 里看到它后，才会
+/// 在 entry 上查询 ARA 工厂、在实例上查询 ARA 插件扩展。REAPER 6.71+ 的 2022 草案
+/// 路径不依赖这个 feature（见 `crate::ara`），但 descriptor 仍须如实声明能力。
 ///
 /// 【为什么没有 `ara:required`】本插件在没有 ARA 的宿主里仍是可用的普通效果器；
 /// `required` 会让那些宿主直接拒绝加载它。

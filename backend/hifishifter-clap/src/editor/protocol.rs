@@ -1,13 +1,14 @@
 //! CLAP 编辑器窗口的页面协议：bootstrap 与命令回执（纯函数，可全量单测）。
 //!
 //! 【为什么不复用 VST3 的 `EditorClient`】它握着 `EditorLink` / `UiSink` /
-//! ARA 文档租约，219 条命令的每一次分发都要问会话状态。CLAP 阶段 1 是
-//! Capture-only 外壳，没有 ARA 文档，硬接那套只会把"窗口能开、每条命令超时"
-//! 变成新的白屏。这里给一份**如实**的最小后端：探活成功、只读空态给得出、
-//! 未接线的命令立刻回一个带分类的错误，前端不会挂到 30 s。
+//! ARA 文档租约，219 条命令的每一次分发都要问会话状态。CLAP 外壳在宿主没有把本
+//! 实例绑到 ARA 文档时走共享的 Capture 命令后端；硬接那套只会把"窗口能开、
+//! 每条命令超时"变成新的白屏。这里给一份**如实**的最小后端：探活成功、只读空态
+//! 给得出、未接线的命令立刻回一个带分类的错误，前端不会挂到 30 s。
 //!
 //! 【为什么这不是假页面】前端资源、bootstrap、消息口三样都是真的；页面会完整
-//! 挂载同一份 React 应用。能力边界由 `hostCapabilities` 如实表达（全是 false），
+//! 挂载同一份 React 应用。宿主把实例绑到 ARA 文档后，命令由共享 `EditorSession`
+//! 服务（与 VST3 同一条路）；未绑定时 `hostCapabilities` 如实表达能力边界，
 //! 用户看到的是"这个形态还没有编辑后端"，而不是一块空白或永远转的加载圈。
 
 use serde_json::{json, Value};
@@ -55,12 +56,13 @@ pub fn bootstrap(mut capabilities: Value) -> Value {
         "state": "bound",
         "reason": "CLAP shell: commands are served by the shared editor session",
     });
-    // 【为什么把 ARA 发现结果交给前端】ARA-over-CLAP 是宿主可选能力：不实现它的宿主
-    // （实测 REAPER 7.85）从不查询 ARA 工厂，CLAP 插件便只能是 Capture 形态。界面必须
-    // 能如实说清"这个宿主不支持本格式的 ARA，请用 VST3 版"，而不是让用户对着一个
-    // 永远不会来的 ARA 会话反复排查。取值只来自宿主是否真的查询过，绝不按名字猜宿主。
+    // 【为什么把 ARA 发现结果交给前端】宿主有两条 ARA 发现路径：ARA SDK 2.3 的
+    // entry 级工厂查询，以及 REAPER 6.71+ 的 2022 草案实例级扩展查询。两者都会置位
+    // 共享的握手读数。取值只来自宿主是否真的触发过 ARA 入口，绝不按名字猜宿主；
+    // 前端据此如实说明本实例有没有进入 ARA 形态。
     capabilities["araDiscovery"] = json!({
         "factoryQueriedByHost": crate::ara::ara_factory_queried(),
+        "araActive": crate::ara::ara_factory_queried(),
         "format": "clap",
     });
     capabilities
@@ -84,7 +86,7 @@ pub fn capture_caps(saw_context: bool, saw_input: bool, saw_offline: bool, activ
 /// 【为什么只有一条通路】“命令做什么”只有一套实现：`EditorPort` → `EditorSession` →
 /// `commands::dispatch`（Capture 命令在端口里被 `capture::commands::handle` 拦下，与
 /// VST3 视图层同一条路）。这一层只做两件事：把页面信封翻成 `(command, args)`，再把
-/// 结果包回页面信封。此前这里还有一张“Capture-only 外壳”的命令表，它是同一批命令的
+/// 结果包回页面信封。此前这里还有一张按外壳形态分流的命令表，它是同一批命令的
 /// 第二份实现 —— 已经删除。
 ///
 /// 【为什么界面偏好不走会话】`ui_kv_*` 是**进程内**的界面偏好表，与会话/文档无关；
@@ -226,10 +228,14 @@ mod tests {
         assert_eq!(boot["version"], 1);
         assert_eq!(boot["viewId"], "view-1");
         assert_eq!(boot["hostKind"], "capture");
-        // ARA 发现结果必须如实来自宿主是否查询过工厂，且标明格式。
+        // ARA 发现结果必须如实来自宿主是否发起过握手，且标明格式。
         assert_eq!(boot["araDiscovery"]["format"], json!("clap"));
         assert_eq!(
             boot["araDiscovery"]["factoryQueriedByHost"],
+            json!(crate::ara::ara_factory_queried())
+        );
+        assert_eq!(
+            boot["araDiscovery"]["araActive"],
             json!(crate::ara::ara_factory_queried())
         );
         let caps = &boot["hostCapabilities"];
