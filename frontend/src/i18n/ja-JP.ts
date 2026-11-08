@@ -2294,7 +2294,8 @@ export const jaJP = {
     installer_dir_text: "DAW がスキャンする VST3 フォルダーを選択。",
     installer_installing: "HiFiShifter をインストール中...",
     installer_err_not_x64: "HiFiShifter には 64 ビット版 Windows が必要です。",
-    installer_err_host_open: "プラグインを使用中の DAW があります。すべての DAW を閉じて再試行してください。",
+    installer_err_host_open:
+        "プラグインを使用中の DAW があります。すべての DAW を閉じて再試行してください。",
     installer_err_tasklist: "DAW の終了を確認できません。閉じてから再試行してください。",
     installer_clap_dir_text: "DAW がスキャンする CLAP フォルダーを選択。",
     installer_err_app_running: "HiFiShifter が実行中です。終了して再試行してください。",
@@ -2309,20 +2310,26 @@ export const jaJP = {
     installer_component_models_install: "モデルライブラリをインストール中...",
     installer_component_models_skip: "モデルライブラリは最新です。",
     installer_desc_group_app: "本体、モデルライブラリ、任意のショートカット。",
-    installer_desc_group_plugins: "DAW で読み込むプラグイン形式。お使いの DAW が対応するものを選択。",
+    installer_desc_group_plugins:
+        "DAW で読み込むプラグイン形式。お使いの DAW が対応するものを選択。",
     installer_desc_app: "スタンドアロン版エディター。常にインストールされます。",
     installer_desc_vst3: "VST3 / ARA プラグイン。次のページで選ぶ VST3 フォルダーにインストール。",
     installer_desc_clap: "CLAP プラグイン（Capture のみ）。選んだ CLAP フォルダーにインストール。",
     installer_desc_models: "本体と全プラグインで共有するモデル重み。1 か所にのみ保存。",
     installer_desc_shortcuts: "スタートメニュー項目とデスクトップアイコンを追加。",
-    installer_webview2_install_failed: "WebView2 のインストールに失敗しました。Microsoft のサイトからインストールして再試行してください。",
-    installer_models_verify_failed: "モデルライブラリの検証に失敗しました。再試行し、繰り返す場合は空き容量を確認してください。",
+    installer_webview2_install_failed:
+        "WebView2 のインストールに失敗しました。Microsoft のサイトからインストールして再試行してください。",
+    installer_models_verify_failed:
+        "モデルライブラリの検証に失敗しました。再試行し、繰り返す場合は空き容量を確認してください。",
     installer_uninstall_options_title: "アンインストール オプション",
     installer_uninstall_options_subtitle: "HiFiShifter と一緒に削除する項目を選択してください。",
-    installer_uninstall_options_top: "以下をあわせて削除できます。設定と未保存の作業は常に保持されます。",
+    installer_uninstall_options_top:
+        "以下をあわせて削除できます。設定と未保存の作業は常に保持されます。",
     installer_uninstall_opt_models: "共有モデル ライブラリを削除",
-    installer_uninstall_opt_models_desc: "約 150 MB を解放。すべての HiFiShifter インストールで共有されます。",
+    installer_uninstall_opt_models_desc:
+        "約 150 MB を解放。すべての HiFiShifter インストールで共有されます。",
     installer_uninstall_opt_cache: "キャッシュとログを削除",
-    installer_uninstall_opt_cache_desc: "波形/レンダリング キャッシュ、ログ、WebView データ、一時ファイル。",
+    installer_uninstall_opt_cache_desc:
+        "波形/レンダリング キャッシュ、ログ、WebView データ、一時ファイル。",
     installer_repair_done: "修復が完了しました。",
 } as const;

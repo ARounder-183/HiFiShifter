@@ -2264,7 +2264,8 @@ export const koKR = {
     installer_dir_text: "DAW가 검사하는 VST3 폴더를 선택하세요.",
     installer_installing: "HiFiShifter 설치 중...",
     installer_err_not_x64: "HiFiShifter는 64비트 Windows가 필요합니다.",
-    installer_err_host_open: "플러그인을 사용 중인 DAW가 있습니다. 모든 DAW를 닫고 다시 시도하세요.",
+    installer_err_host_open:
+        "플러그인을 사용 중인 DAW가 있습니다. 모든 DAW를 닫고 다시 시도하세요.",
     installer_err_tasklist: "DAW 종료를 확인할 수 없습니다. 닫고 다시 시도하세요.",
     installer_clap_dir_text: "DAW가 검사하는 CLAP 폴더를 선택하세요.",
     installer_err_app_running: "HiFiShifter가 실행 중입니다. 종료하고 다시 시도하세요.",
@@ -2279,17 +2280,22 @@ export const koKR = {
     installer_component_models_install: "모델 라이브러리 설치 중...",
     installer_component_models_skip: "모델 라이브러리가 최신입니다.",
     installer_desc_group_app: "본체, 모델 라이브러리, 선택적 바로 가기.",
-    installer_desc_group_plugins: "DAW에서 불러올 플러그인 형식입니다. 사용하는 DAW가 지원하는 형식을 선택하세요.",
+    installer_desc_group_plugins:
+        "DAW에서 불러올 플러그인 형식입니다. 사용하는 DAW가 지원하는 형식을 선택하세요.",
     installer_desc_app: "독립 실행형 편집기입니다. 항상 설치됩니다.",
-    installer_desc_vst3: "VST3 / ARA 플러그인입니다. 다음 페이지에서 선택한 VST3 폴더에 설치됩니다.",
+    installer_desc_vst3:
+        "VST3 / ARA 플러그인입니다. 다음 페이지에서 선택한 VST3 폴더에 설치됩니다.",
     installer_desc_clap: "CLAP 플러그인(Capture 전용)입니다. 선택한 CLAP 폴더에 설치됩니다.",
     installer_desc_models: "본체와 모든 플러그인이 공유하는 모델 가중치입니다. 한 번만 저장됩니다.",
     installer_desc_shortcuts: "시작 메뉴 항목과 바탕 화면 아이콘을 추가합니다.",
-    installer_webview2_install_failed: "WebView2 설치에 실패했습니다. Microsoft 사이트에서 설치한 뒤 다시 시도하세요.",
-    installer_models_verify_failed: "모델 라이브러리 검증에 실패했습니다. 다시 시도하고, 반복되면 디스크 여유 공간을 확인하세요.",
+    installer_webview2_install_failed:
+        "WebView2 설치에 실패했습니다. Microsoft 사이트에서 설치한 뒤 다시 시도하세요.",
+    installer_models_verify_failed:
+        "모델 라이브러리 검증에 실패했습니다. 다시 시도하고, 반복되면 디스크 여유 공간을 확인하세요.",
     installer_uninstall_options_title: "제거 옵션",
     installer_uninstall_options_subtitle: "HiFiShifter와 함께 정리할 항목을 선택하세요.",
-    installer_uninstall_options_top: "아래 데이터를 함께 정리할 수 있습니다. 설정과 저장하지 않은 작업은 항상 유지됩니다.",
+    installer_uninstall_options_top:
+        "아래 데이터를 함께 정리할 수 있습니다. 설정과 저장하지 않은 작업은 항상 유지됩니다.",
     installer_uninstall_opt_models: "공유 모델 라이브러리 삭제",
     installer_uninstall_opt_models_desc: "약 150 MB 확보. 모든 HiFiShifter 설치가 공유합니다.",
     installer_uninstall_opt_cache: "캐시 및 로그 삭제",

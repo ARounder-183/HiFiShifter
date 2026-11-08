@@ -2304,14 +2304,19 @@ export const enUS = {
     installer_desc_clap: "CLAP plug-in (Capture-only). Installed into the CLAP folder you choose.",
     installer_desc_models: "Model weights shared by the app and all plug-ins. Stored once.",
     installer_desc_shortcuts: "Adds a Start menu entry and a desktop icon.",
-    installer_webview2_install_failed: "WebView2 could not be installed. Install it from Microsoft's site and try again.",
-    installer_models_verify_failed: "Model library verification failed. Try again; if it persists, check disk space.",
+    installer_webview2_install_failed:
+        "WebView2 could not be installed. Install it from Microsoft's site and try again.",
+    installer_models_verify_failed:
+        "Model library verification failed. Try again; if it persists, check disk space.",
     installer_uninstall_options_title: "Uninstall options",
     installer_uninstall_options_subtitle: "Choose what to remove along with HiFiShifter.",
-    installer_uninstall_options_top: "Also remove the data below. Your settings and unsaved work are always kept.",
+    installer_uninstall_options_top:
+        "Also remove the data below. Your settings and unsaved work are always kept.",
     installer_uninstall_opt_models: "Remove the shared model library",
-    installer_uninstall_opt_models_desc: "Frees about 150 MB. Shared by every HiFiShifter installation.",
+    installer_uninstall_opt_models_desc:
+        "Frees about 150 MB. Shared by every HiFiShifter installation.",
     installer_uninstall_opt_cache: "Remove caches and logs",
-    installer_uninstall_opt_cache_desc: "Waveform/render caches, logs, WebView data and temporary files.",
+    installer_uninstall_opt_cache_desc:
+        "Waveform/render caches, logs, WebView data and temporary files.",
     installer_repair_done: "Repair complete.",
 } as const;
