@@ -249,8 +249,6 @@ mod ort_impl {
         segmenter: Session,
         estimator: Session,
         bd2dur: Session,
-        #[allow(dead_code)]
-        dur2bd: Session,
     }
 
     impl GameSessions {
@@ -268,7 +266,6 @@ mod ort_impl {
                 segmenter: load("segmenter.onnx")?,
                 estimator: load("estimator.onnx")?,
                 bd2dur: load("bd2dur.onnx")?,
-                dur2bd: load("dur2bd.onnx")?,
             })
         }
     }
