@@ -223,6 +223,9 @@ export function registerRuntime(builder: ActionReducerMapBuilder<SessionState>) 
                     1000,
                 );
             }
+            if (s.paramBlockFollowPitch != null) {
+                state.paramBlockFollowPitch = Boolean(s.paramBlockFollowPitch);
+            }
             state.playheadZoomEnabled = s.playheadZoom;
             if (s.autoScroll != null) state.autoScrollEnabled = s.autoScroll;
             if (s.paramEditorSeekPlayhead != null)

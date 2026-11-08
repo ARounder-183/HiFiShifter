@@ -99,6 +99,8 @@ pub struct ModelHandle {
     /// 【为什么不进存档】它是**本次会话**的重建窗口，跨会话没有任何意义（进程重启后
     /// 所有 key 都会重新分配）。
     pending_sequence_deaths: Vec<(i32, Option<String>, String)>,
+    source_reads: HashMap<usize, crate::render::source_reads::SourceRead>,
+    retired_source_reads: Vec<(usize, crate::render::source_reads::SourceRead)>,
     head_tail: Option<Arc<ara2_bridge::plugin::RealtimeHeadTailAdapter>>,
     /// 正在累积的 ARA 文档。
     document: AraDocument,
@@ -239,6 +241,8 @@ impl Default for ModelHandle {
             sequence_persistent_ids: Vec::new(),
             destroyed_sequences: HashSet::new(),
             pending_sequence_deaths: Vec::new(),
+            source_reads: HashMap::new(),
+            retired_source_reads: Vec::new(),
             head_tail: {
                 // 【为什么不用 expect】`Default for ModelHandle` 在**每次文档创建**时
                 // 都会跑，而它在宿主进程里 —— 一次 panic 会带走整个 DAW 会话。容量常量
@@ -626,6 +630,7 @@ impl ModelHandle {
     }
 
     fn remap_and_log(&mut self) {
+        let _startup_span = crate::startup::Span::new("ara.remap", self.session.id, 0);
         // 先更新 session 的派生表：它们必须**立刻**反映新图，否则渲染/工作区路径
         // 在收口前就读到旧的 region 集合（见 `sync_session_derived_tables`）。
         self.sync_session_derived_tables();
@@ -1142,6 +1147,8 @@ impl DocumentLifecycle for ModelHandle {
         _document: &mut Self::Document,
         _host: &HostContentScope<'_, '_>,
     ) -> Result<(), AraError> {
+        self.source_reads.retain(|_, job| !job.finished());
+        self.retired_source_reads.retain(|(_, job)| !job.finished());
         self.service_model_thread();
         self.editing = false;
         self.session.set_in_edit_session(false);
@@ -1756,6 +1763,7 @@ impl AudioSources for ModelHandle {
 
     /// 源销毁时撤销访问和快照，不能继续播已销毁源的缓存。
     fn destroy_audio_source(&mut self, state: Self::AudioSource, host: &HostContentScope<'_, '_>) {
+        self.cancel_source_read(state);
         self.mark_model_dirty();
         self.session.clear_renderers();
         if let Some(source) = self.document.audio_sources.get(state) {
@@ -1933,17 +1941,28 @@ impl ModelHandle {
     /// 【为什么不会让旧音频盖住新内容】内容变化时 `source_content_version` 会前进，
     /// 而 `SourcePcm` 带 `version`，渲染缓存键含它。保留旧 PCM 的那一窗口里渲染读到
     /// 的是**上一版内容**——与 Capture 的 `StaleProcessed` 是同一条既有纪律。
+    fn cancel_source_read(&mut self, index: usize) {
+        if let Some(job) = self.source_reads.remove(&index) {
+            job.cancel(&self.session);
+            self.retired_source_reads.push((index, job));
+        }
+    }
+
     fn refresh_source_pcm(&mut self, index: usize, host: &HostContentScope<'_, '_>) {
         // 【T-A1-4：这里**不能**无条件撤渲染权威】本函数被宿主每一次内容/访问变化调用，
         // 也被我们自己的 1 s 重试调用。旧实现在最开头 `revoke_renderers()`，于是
         // "一次重试"就硬清全部快照 ⇒ 每个重试周期一次静音。真正需要撤的只有一件事：
         // **我们已经有的那份 PCM 现在读不到**（那条分支里才撤）。
-        let Some(source) = self.document.audio_sources.get(index) else {
+        let Some(source) = self.document.audio_sources.get(index).cloned() else {
             return;
         };
+        self.retired_source_reads
+            .retain(|(source, job)| *source != index || !job.finished());
+        let version = self.source_content_version(index);
         let id = source.persistent_id.clone();
         let readable = source.sample_access_enabled && !source.deactivated;
         if !readable {
+            self.cancel_source_read(index);
             // 【T7】渲染权威表必须撤掉（宿主收回了访问，不能继续播旧采样），但
             // **编辑侧的物化副本保留** —— 那是界面波形的来源，丢了就等于"整条轨
             // 突然空了"。这一对区分正是"暂时不可读"与"从来没有过"的落点。
@@ -1982,6 +2001,80 @@ impl ModelHandle {
                 self.session.prepare_renderers();
             }
             return;
+        }
+        if self.source_reads.get(&index).is_some_and(|job| {
+            job.matches(
+                version,
+                usize::try_from(source.sample_count).unwrap_or(0),
+                source.channel_count.max(1) as usize,
+                source.sample_rate as u32,
+            ) && !job.finished()
+        }) {
+            return;
+        }
+        if self.source_reads.get(&index).is_some_and(|job| {
+            !job.matches(
+                version,
+                usize::try_from(source.sample_count).unwrap_or(0),
+                source.channel_count.max(1) as usize,
+                source.sample_rate as u32,
+            )
+        }) {
+            self.cancel_source_read(index);
+        } else {
+            self.source_reads.remove(&index);
+        }
+        let current = self
+            .session
+            .edit_sources
+            .lock_or_recover()
+            .get(&id)
+            .is_some_and(|pcm| {
+                pcm.version == version
+                    && pcm.planes.len() == source.channel_count.max(1) as usize
+                    && pcm.sample_rate == source.sample_rate as u32
+                    && pcm.planes.first().map(Vec::len) == usize::try_from(source.sample_count).ok()
+            });
+        if current
+            && self.session.source_states.lock_or_recover().get(&id)
+                == Some(&crate::render::document::SourceState::Published)
+        {
+            return;
+        }
+        if let Ok(frames) = usize::try_from(source.sample_count) {
+            if frames
+                .saturating_mul(source.channel_count.max(1) as usize)
+                .saturating_mul(4)
+                > 64 * 1024
+                && source.sample_rate == source.sample_rate.round()
+            {
+                match crate::render::source_reads::SourceRead::start(
+                    host,
+                    &self.session,
+                    id.clone(),
+                    frames,
+                    source.channel_count.max(1) as usize,
+                    source.sample_rate as u32,
+                    version,
+                ) {
+                    Ok(Some(job)) => {
+                        self.source_reads.insert(index, job);
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        self.session
+                            .source_states
+                            .lock_or_recover()
+                            .insert(id.clone(), crate::render::document::SourceState::Failed);
+                        self.session
+                            .source_failures
+                            .lock_or_recover()
+                            .insert(id, error);
+                    }
+                }
+                self.publish_readiness();
+                return;
+            }
         }
         let result = usize::try_from(source.sample_count)
             .ok()
@@ -2570,6 +2663,12 @@ impl PlaybackRegions for ModelHandle {
 impl Drop for ModelHandle {
     fn drop(&mut self) {
         self.session.close();
+        for job in self.source_reads.values() {
+            job.wait();
+        }
+        for (_, job) in &self.retired_source_reads {
+            job.wait();
+        }
         // 初始化失败也可能直接释放模型而没有 destroy_document 回调。
         region_owners()
             .lock()

@@ -46,7 +46,9 @@ export function scopePriority(
     switch (scopedContext) {
         case "paramEditorSelect":
             // 参数编辑器操作只在钢琴卷帘 + 选择工具下生效；其它焦点域硬排除。
-            return domain === "pianoRoll" && toolMode === "select" ? 0 : Infinity;
+            return domain === "pianoRoll" && (toolMode === "select" || toolMode === "block")
+                ? 0
+                : Infinity;
         case "timelineFocus":
             return domain === "timeline" ? 0 : 2;
         case "trackHeaderFocus":
@@ -223,6 +225,14 @@ export function resolveEditOpRoute(
     op: EditOp | string,
     toolMode?: string,
 ): EditOpChannel | null {
+    /*
+     * 参数块工具拥有 `S`：切的是块，不是上方时间轴 Clip。
+     * 这条必须在统一编辑路由里，而不是散落在某个 keydown 监听中；
+     * 菜单 / 快捷键 / 事件派发都经过这里，才能保证只有块被切分。
+     */
+    if (op === "split" && surface === "pianoRoll" && toolMode === "block") {
+        return "hifi:editOp";
+    }
     switch (op) {
         case "copy":
         case "cut":
@@ -240,7 +250,9 @@ export function resolveEditOpRoute(
             return null;
         case "selectAll":
         case "deselect":
-            if (surface === "pianoRoll" && toolMode === "select") return "hifi:editOp";
+            if (surface === "pianoRoll" && (toolMode === "select" || toolMode === "block")) {
+                return "hifi:editOp";
+            }
             return "hifi:timelineEditOp";
         case "pasteTracks":
         case "delete":

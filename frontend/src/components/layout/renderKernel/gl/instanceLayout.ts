@@ -97,3 +97,40 @@ export function writeFlatInstance(out: Float32Array, index: number, instance: Fl
     out[base + o.seamRgb + 2] = 0;
     out[base + o.mode] = INSTANCE_MODE_FLAT;
 }
+
+/**
+ * 把一个**圆角填充**实例写入 GL 实例缓冲（BOX 模式，无描边）。
+ *
+ * 用于参数块的音符底：`bodyRgba` 是填充、`borderWidth=0`，因此片元着色器只做
+ * 圆角 SDF 裁剪，不会叠出边缘。块边框仍由 `writeFlatInstance` 的 1px 矩形单独画，
+ * 两者在同一个缓冲里按先后顺序合成。
+ */
+export function writeBoxFillInstance(
+    out: Float32Array,
+    index: number,
+    instance: FlatInstance & { readonly radius?: number },
+): void {
+    const base = index * CLIP_INSTANCE_FLOATS;
+    const o = CLIP_INSTANCE_OFFSETS;
+    out[base + o.rect] = instance.x;
+    out[base + o.rect + 1] = instance.y;
+    out[base + o.rect + 2] = instance.w;
+    out[base + o.rect + 3] = instance.h;
+    out[base + o.radius] = Math.max(
+        0,
+        Math.min(instance.radius ?? 0, instance.w / 2, instance.h / 2),
+    );
+    out[base + o.headerH] = 0;
+    for (let i = 0; i < 4; i += 1) {
+        out[base + o.bodyRgba + i] = instance.rgba[i];
+        out[base + o.headerRgba + i] = instance.rgba[i];
+    }
+    for (let i = 0; i < 4; i += 1) out[base + o.borderRgba + i] = 0;
+    out[base + o.borderWidth] = 0;
+    out[base + o.overlapPx] = 0;
+    out[base + o.seam] = 0;
+    out[base + o.seamRgb] = 0;
+    out[base + o.seamRgb + 1] = 0;
+    out[base + o.seamRgb + 2] = 0;
+    out[base + o.mode] = INSTANCE_MODE_BOX;
+}

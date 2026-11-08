@@ -82,6 +82,7 @@ import { noteFadeLinePointerDown } from "../../hooks/fadeLineClickGesture";
 import { effectiveFadeSec, hitClipFadeTarget } from "../interaction/fadeTargets";
 import type { FadeContextSide } from "../../FadeContextMenu";
 import { hitOverlapControl } from "../interaction/overlapControls";
+import { resolveClipHeaderLayout } from "../interaction/clipHeaderLayout";
 import { hitInactiveTakeLane } from "../../takeLanes";
 import { isPluginMode } from "../../../../../services/hostCapabilities";
 import { resolveHorizontalWheelZoom } from "../../runtime/timelineScrollRange";
@@ -102,7 +103,12 @@ import {
     WHEEL_ZOOM_IN_FACTOR,
     WHEEL_ZOOM_OUT_FACTOR,
 } from "../../constants";
-import { hitTest, type ClipHitRegion, type HitTestClip } from "../interaction/hitTest";
+import {
+    downgradeOverlapHitForPlainLeftPress,
+    hitTest,
+    type ClipHitRegion,
+    type HitTestClip,
+} from "../interaction/hitTest";
 import type { SeekGesturePhase } from "../interaction/seekGesture";
 import {
     isContentYBelowTracks,
@@ -3674,6 +3680,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 localX: contentX - target.startSec * view.pxPerSec,
                 localY: hit.localY,
                 partnerClipId: overlap.partnerClipId,
+                laterClipId: overlap.laterClipId,
                 fadeIsLine: overlap.fadeIsLine,
                 fromOverlapRegion: true,
             };
@@ -4004,6 +4011,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      */
     type KernelHit = ReturnType<typeof hitTest> & {
         readonly partnerClipId?: string;
+        /** 重叠区里**后一个** clip 的 id（普通左键的选中目标）。 */
+        readonly laterClipId?: string;
         /**
          * 淡变命中是否为包络线本体（`false` = 区域边缘竖线）。
          *
@@ -4061,9 +4070,41 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         });
     }
 
+    /**
+     * header 尾部被后序同轨 Clip 覆盖的像素宽度。
+     *
+     * 与模型侧 `trailingHeaderOverlapPx` 同一口径：取所有后序块中
+     * `startSec` 的最小值，再钳到本 Clip 的宽度。命中端用它把前一个 Clip
+     * 的尾部标签与名称收在重叠起点之前。
+     */
+    function trailingHeaderOverlapPxOf(hit: {
+        readonly clip: HitTestClip;
+        readonly trackIndex: number;
+    }): number {
+        const view = scroll.get();
+        const track = hitTracks[hit.trackIndex];
+        if (track === undefined) return 0;
+        const list = hitClipsByTrack.get(track.id) ?? [];
+        const clipWidthPx = Math.max(1, hit.clip.lengthSec * view.pxPerSec);
+        const clipEndSec = hit.clip.startSec + hit.clip.lengthSec;
+        let coveredFromSec = Number.POSITIVE_INFINITY;
+        for (const other of list) {
+            if (other.id === hit.clip.id) continue;
+            const startsAfter =
+                other.startSec > hit.clip.startSec + 1e-9 ||
+                (Math.abs(other.startSec - hit.clip.startSec) <= 1e-9 &&
+                    String(other.id) > String(hit.clip.id));
+            if (!startsAfter || other.startSec >= clipEndSec - 1e-9) continue;
+            coveredFromSec = Math.min(coveredFromSec, other.startSec);
+        }
+        if (!Number.isFinite(coveredFromSec)) return 0;
+        return Math.max(0, Math.min(clipWidthPx, (clipEndSec - coveredFromSec) * view.pxPerSec));
+    }
+
     function resolveHeaderControl(hit: {
         readonly clip: HitTestClip;
         readonly region: ClipHitRegion;
+        readonly trackIndex: number;
         readonly localX: number;
         readonly localY: number;
     }): ClipHeaderControl {
@@ -4077,6 +4118,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             clipWidthPx,
             style,
             headerHeightPx: CLIP_HEADER_HEIGHT,
+            trailingHeaderOverlapPx: trailingHeaderOverlapPxOf(hit),
         });
     }
 
@@ -4091,7 +4133,61 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
     }
 
     function startPrimaryGesture(event: PointerEvent): void {
-        const hit = hitAt(event.clientX, event.clientY);
+        /*
+         * 左键的「无修饰键点击」优先归 clip 本体。
+         *
+         * 【为什么】重叠区里 `hitAt` 会按**位置**把命中改写为边缘 / 淡变包络，
+         * 这些控件在无修饰键单击时只改淡变长度或曲率 —— 用户实际感受到的是
+         * 「这段 clip 左键点不动，只能右键」。右键路径（`dispatchContextMenuAt`）
+         * 仍保留淡变专属菜单的优先级；左键只在**确实按住了编辑修饰键**时才让
+         * 控件接管，否则落到 clip 本体（选中 / 拖动）。
+         *
+         * 例外：header 控件（静音 / 链 / 共振峰 / 旋钮 / 徽标）仍是独立控件，
+         * 不能因为这条规则被吞进 clip 拖动。它们由 `resolveHeaderControl` 识别。
+         */
+        const rawHit = hitAt(event.clientX, event.clientY);
+        const modifiers = {
+            altKey: event.altKey,
+            ctrlKey: event.ctrlKey,
+            metaKey: event.metaKey,
+            shiftKey: event.shiftKey,
+        };
+        const plainLeftOverlap =
+            rawHit.kind === "clip" &&
+            rawHit.fromOverlapRegion === true &&
+            rawHit.region !== "header" &&
+            !modifiers.altKey &&
+            !modifiers.ctrlKey &&
+            !modifiers.metaKey &&
+            !modifiers.shiftKey;
+        /*
+         * 重叠区普通左键选中**后一个** clip（视觉上压在上面的那个），而不是
+         * 控件归属的 clip。控件归属仍用于右键淡变菜单与带修饰键的编辑。
+         */
+        const laterClip =
+            plainLeftOverlap && rawHit.laterClipId !== undefined
+                ? data().clips.find((clip) => clip.id === rawHit.laterClipId)
+                : undefined;
+        const hitWithTarget =
+            plainLeftOverlap && laterClip !== undefined
+                ? {
+                      ...rawHit,
+                      clip: {
+                          ...rawHit.clip,
+                          id: laterClip.id,
+                          trackId: laterClip.trackId,
+                          startSec: laterClip.startSec,
+                          lengthSec: laterClip.lengthSec,
+                          muted: laterClip.muted,
+                          gain: clipItemGain(laterClip),
+                          playbackRate: laterClip.playbackRate,
+                          name: laterClip.name,
+                          groupId: laterClip.groupId,
+                          isMidiClip: laterClip.midiNoteCount != null,
+                      },
+                  }
+                : rawHit;
+        const hit = downgradeOverlapHitForPlainLeftPress(hitWithTarget, modifiers);
         if (hit.kind === "clip" && interactions?.geometryReadOnly) {
             const intercepted = interactions.onClipPointerDownIntercept?.({
                 clipId: hit.clip.id,
@@ -6309,9 +6405,32 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             const clipLeftPx = clip.startSec * view.pxPerSec;
             const rowTopPx = rowIndex * view.rowHeight;
             if (field === "name") {
-                const left = clipLeftPx + style.leadingControlsWidth;
-                const available =
-                    clipWidthPx - style.leadingControlsWidth - style.trailingReservePx;
+                const hitClip: HitTestClip = {
+                    id: clip.id,
+                    trackId: clip.trackId,
+                    startSec: clip.startSec,
+                    lengthSec: clip.lengthSec,
+                    muted: clip.muted,
+                    gain: clipItemGain(clip),
+                    playbackRate: clip.playbackRate,
+                    name: clip.name,
+                    groupId: clip.groupId,
+                    isMidiClip: clip.midiNoteCount != null,
+                };
+                const headerLayout = resolveClipHeaderLayout({
+                    clipWidthPx,
+                    trailingOverlapPx: trailingHeaderOverlapPxOf({
+                        clip: hitClip,
+                        trackIndex: rowIndex,
+                    }),
+                    leadingControlsWidth: style.leadingControlsWidth,
+                    showGainLabel: style.showGainLabel,
+                    showPlaybackRate: style.showPlaybackRate,
+                    gainLabelWidth: style.gainLabelWidth,
+                    rateLabelWidth: style.rateLabelWidth,
+                });
+                const left = clipLeftPx + headerLayout.nameLeftPx;
+                const available = headerLayout.nameWidthPx;
                 return {
                     contentLeftPx: left,
                     contentTopPx: rowTopPx,
@@ -6319,15 +6438,48 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 };
             }
             if (field === "gain") {
+                const headerLayout = resolveClipHeaderLayout({
+                    clipWidthPx,
+                    trailingOverlapPx: trailingHeaderOverlapPxOf({
+                        clip: {
+                            id: clip.id,
+                            trackId: clip.trackId,
+                            startSec: clip.startSec,
+                            lengthSec: clip.lengthSec,
+                        },
+                        trackIndex: rowIndex,
+                    }),
+                    leadingControlsWidth: style.leadingControlsWidth,
+                    showGainLabel: style.showGainLabel,
+                    showPlaybackRate: style.showPlaybackRate,
+                    gainLabelWidth: style.gainLabelWidth,
+                    rateLabelWidth: style.rateLabelWidth,
+                });
                 return {
-                    contentLeftPx: clipLeftPx + clipWidthPx - style.gainLabelWidth - 6,
+                    contentLeftPx: clipLeftPx + headerLayout.gainLabelLeftPx,
                     contentTopPx: rowTopPx,
                     widthPx: 72,
                 };
             }
+            const headerLayout = resolveClipHeaderLayout({
+                clipWidthPx,
+                trailingOverlapPx: trailingHeaderOverlapPxOf({
+                    clip: {
+                        id: clip.id,
+                        trackId: clip.trackId,
+                        startSec: clip.startSec,
+                        lengthSec: clip.lengthSec,
+                    },
+                    trackIndex: rowIndex,
+                }),
+                leadingControlsWidth: style.leadingControlsWidth,
+                showGainLabel: style.showGainLabel,
+                showPlaybackRate: style.showPlaybackRate,
+                gainLabelWidth: style.gainLabelWidth,
+                rateLabelWidth: style.rateLabelWidth,
+            });
             return {
-                contentLeftPx:
-                    clipLeftPx + clipWidthPx - style.gainLabelWidth - style.rateLabelWidth - 14,
+                contentLeftPx: clipLeftPx + headerLayout.rateLabelLeftPx,
                 contentTopPx: rowTopPx,
                 widthPx: 72,
             };

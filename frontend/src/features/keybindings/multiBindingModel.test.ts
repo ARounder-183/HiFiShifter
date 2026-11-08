@@ -40,10 +40,10 @@ describe("默认值：重做绑两个键", () => {
         expect(redo[1]).toEqual({ key: "y", ctrl: true });
     });
 
-    it("除重做外，所有动作的默认绑定都是单个键", () => {
-        // 多绑定是能力，不是默认风格：默认表里只应有 edit.redo 用到它。
+    it("仅重做与块模式切换具有多种默认键法", () => {
+        // 块切换接受 Backquote 的上下档，重做接受两种常见键法。
         const multi = ALL_ACTION_IDS.filter((id) => DEFAULT_KEYBINDINGS[id].length > 1);
-        expect(multi).toEqual(["edit.redo"]);
+        expect(multi).toEqual(["mode.toggleBlockEdit", "edit.redo"]);
     });
 });
 

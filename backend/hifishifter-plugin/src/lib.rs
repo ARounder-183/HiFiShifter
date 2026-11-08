@@ -67,6 +67,7 @@ pub use hifishifter_plugin_core::plugin_log_name;
 pub mod render;
 mod runtime;
 mod settings_store;
+mod startup;
 mod state_channel;
 mod state_stream;
 pub use hifishifter_plugin_core::sync;

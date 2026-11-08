@@ -5,6 +5,7 @@ import { resolveLoopMediaDurationSec } from "../../../utils/loopRender";
 import { clampGain } from "../../../utils/gainDb";
 import { normalizeChannelMode } from "../../../utils/channelMode";
 import { markProjectDirty } from "../sessionDirtyState";
+import { resolveRootTrackId } from "../trackUtils";
 import type { ClipColor, SessionState } from "./types";
 import { MAX_TRACK_VOLUME } from "./settings";
 import { applyTimelineState } from "./helpersTimeline";
@@ -259,11 +260,32 @@ export function applyTimelineStatePreservingPitchVisuals(
     timeline: TimelineState,
 ) {
     const currentParamsEpoch = state.paramsEpoch;
+    // 参数编辑器的“作用域”是 root track + 当前参数。导入只新增媒体，不得把用户
+    // 正在编辑的轨道组参数当成新 Clip 的上下文重取：后端快照可能把
+    // selected_track_id 切到新 Clip 所在轨，前端若无条件采纳，参数编辑器会突然
+    // 换一只 root，用户看到的曲线既不是“被清空”，也不是“仍是原来那条”。
+    //
+    // 只在当前 root track 仍然存在时保留。若导入真的删除了该 root（替换工程等
+    // 语义不该走本 helper），仍按后端快照切换，避免留下指向不存在轨道的选择。
+    const currentRootTrackId = resolveRootTrackId(state.tracks, state.selectedTrackId);
+    const currentEditorTrackId = state.selectedTrackId;
+    const currentEditorClipId = state.selectedClipId;
     // 必须捕获浅拷贝快照：在 Immer producer 内直接持有 state.clipPitchCurves
     // 得到的是 draft 代理，applyTimelineState 随后的 prune（delete 缺失 clip）
     // 会透过代理可见，"恢复"赋值等于把已删空的 draft 原样写回。
     const currentClipPitchCurves = { ...state.clipPitchCurves };
     applyTimelineState(state, timeline, { force: true });
+    const nextTrackIds = new Set(timeline.tracks.map((track) => track.id));
+    if (currentEditorTrackId !== null && nextTrackIds.has(currentEditorTrackId)) {
+        state.selectedTrackId = currentEditorTrackId;
+        state.selectedClipId =
+            currentEditorClipId !== null &&
+            timeline.clips.some((clip) => clip.id === currentEditorClipId)
+                ? currentEditorClipId
+                : state.selectedClipId;
+    } else if (currentRootTrackId !== null && nextTrackIds.has(currentRootTrackId)) {
+        state.selectedTrackId = currentRootTrackId;
+    }
     state.paramsEpoch = currentParamsEpoch;
     restoreClipPitchCurves(state, currentClipPitchCurves);
 }

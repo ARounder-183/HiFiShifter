@@ -3,6 +3,205 @@ use super::*;
 use crate::sync::MutexExt;
 use std::sync::{atomic::AtomicBool, mpsc, Arc};
 
+#[test]
+fn param_line_layout_is_independent_of_clip_members_and_survives_component_save() {
+    let (model, owner, _identity) = crate::editor::session::tests::fixture();
+    let editor = owner.editor_session().unwrap();
+    editor.ensure_loaded(false).unwrap();
+    let root = editor.timeline.lock_or_recover().tracks[0].id.clone();
+    let generation = editor.generation.load(Ordering::Acquire);
+    let reply=dispatch(&editor,"set_param_line_blocks",json!({"rootTrackId":root,"expectedRevision":0,
+        "blocks":[{"id":"ordinary","startFrame":10,"endFrameExclusive":80}],
+        "gameBaseline":[{"id":"initial","startFrame":0,"endFrameExclusive":100}],"checkpoint":true})).unwrap();
+    assert_eq!(reply["layout"]["blocks"][0]["id"], "ordinary");
+    assert_eq!(
+        editor.generation.load(Ordering::Acquire),
+        generation,
+        "boundary-only edits must not invalidate audio"
+    );
+    editor.ensure_loaded(true).unwrap();
+    let after = dispatch(
+        &editor,
+        "get_param_line_blocks",
+        json!({"rootTrackId":root}),
+    )
+    .unwrap();
+    assert_eq!(after["layout"]["blocks"][0]["endFrameExclusive"], 80);
+    let encoded = owner.encode_state().unwrap();
+    let (cold_model, cold_owner, _cold_identity) = crate::editor::session::tests::fixture();
+    cold_owner.restore_state(&encoded).unwrap();
+    let cold_editor = cold_owner.editor_session().unwrap();
+    cold_editor.ensure_loaded(false).unwrap();
+    let cold_root = cold_editor.timeline.lock_or_recover().tracks[0].id.clone();
+    let restored = dispatch(
+        &cold_editor,
+        "get_param_line_blocks",
+        json!({"rootTrackId":cold_root}),
+    )
+    .unwrap();
+    assert_eq!(restored["layout"]["blocks"][0]["id"], "ordinary");
+    assert_eq!(
+        restored["layout"]["gameBaseline"]["segments"][0]["id"],
+        "initial"
+    );
+    cold_model.session().close();
+    model.session().close();
+}
+
+#[test]
+fn param_line_layout_and_curve_commit_or_reject_together() {
+    let (model, owner, _identity) = crate::editor::session::tests::fixture();
+    let editor = owner.editor_session().unwrap();
+    editor.ensure_loaded(false).unwrap();
+    let root = editor.timeline.lock_or_recover().tracks[0].id.clone();
+    let read = dispatch(
+        &editor,
+        "get_param_frames",
+        json!({"trackId":root,"param":"volume","startFrame":0,"frameCount":4,"binary":false}),
+    )
+    .unwrap();
+    let request = json!({"rootTrackId":root,"expectedRevision":0,"blocks":[{"id":"created","startFrame":0,"endFrameExclusive":4}],
+        "curvePatches":[{"param":"volume","startFrame":0,"values":[0.5,0.6,0.7,0.8]}],
+        "expectedCurveRevision":read["authority_revision"],"expectedGeometrySignature":read["geometry_signature"],"checkpoint":true});
+    let result = dispatch(&editor, "set_param_line_blocks", request.clone()).unwrap();
+    assert_eq!(result["layout"]["blocks"][0]["id"], "created");
+    let curve = dispatch(
+        &editor,
+        "get_param_frames",
+        json!({"trackId":root,"param":"volume","startFrame":0,"frameCount":4,"binary":false}),
+    )
+    .unwrap();
+    assert!((curve["edit"][0].as_f64().unwrap() - 0.5).abs() < 1e-5);
+    let history_before = dispatch(&editor, "get_history_state", json!({})).unwrap();
+    let mut stale = request;
+    stale["expectedRevision"] = result["layout"]["revision"].clone();
+    stale["blocks"][0]["id"] = json!("must-not-appear");
+    assert!(dispatch(&editor, "set_param_line_blocks", stale).is_err());
+    let after = dispatch(
+        &editor,
+        "get_param_line_blocks",
+        json!({"rootTrackId":root}),
+    )
+    .unwrap();
+    assert_eq!(after["layout"]["blocks"][0]["id"], "created");
+    assert_eq!(
+        dispatch(&editor, "get_history_state", json!({})).unwrap(),
+        history_before,
+        "rejected edits must not add history"
+    );
+    model.session().close();
+}
+
+#[test]
+fn param_line_boundary_undo_keeps_audio_generation_and_empty_layout() {
+    let (model, owner, _) = crate::editor::session::tests::fixture();
+    let editor = owner.editor_session().unwrap();
+    editor.ensure_loaded(false).unwrap();
+    let root = editor.timeline.lock_or_recover().tracks[0].id.clone();
+    let initial = dispatch(
+        &editor,
+        "set_param_line_blocks",
+        json!({"rootTrackId":root,"expectedRevision":0,"blocks":[],"checkpoint":false}),
+    )
+    .unwrap();
+    let generation = editor.generation.load(Ordering::Acquire);
+    let added=dispatch(&editor,"set_param_line_blocks",json!({"rootTrackId":root,"expectedRevision":initial["layout"]["revision"],"blocks":[{"id":"manual","startFrame":10,"endFrameExclusive":30}],"checkpoint":true})).unwrap();
+    dispatch(&editor, "undo_parameter_edit", json!({})).unwrap();
+    let undone = dispatch(
+        &editor,
+        "get_param_line_blocks",
+        json!({"rootTrackId":root}),
+    )
+    .unwrap();
+    assert_eq!(undone["initialized"], true);
+    assert_eq!(undone["layout"]["blocks"], json!([]));
+    assert!(
+        undone["layout"]["revision"].as_u64().unwrap()
+            > added["layout"]["revision"].as_u64().unwrap()
+    );
+    assert_eq!(
+        editor.generation.load(Ordering::Acquire),
+        generation,
+        "boundary undo must not regenerate audio"
+    );
+    dispatch(&editor, "redo_parameter_edit", json!({})).unwrap();
+    assert_eq!(
+        dispatch(
+            &editor,
+            "get_param_line_blocks",
+            json!({"rootTrackId":root})
+        )
+        .unwrap()["layout"]["blocks"][0]["id"],
+        "manual"
+    );
+    model.session().close();
+}
+
+#[test]
+fn timeline_payload_omits_redundant_waveforms_and_preserves_all_block_sources() {
+    let (model, owner, _id) = crate::editor::session::tests::fixture();
+    let editor = owner.editor_session().unwrap();
+    editor.ensure_loaded(false).unwrap();
+    // This test exercises serialization of an isolated snapshot, not the ARA inventory pump.
+    let snapshot = editor.timeline.lock_or_recover().clone();
+    editor.close();
+    *editor.timeline.lock_or_recover() = snapshot;
+    let original_bytes = {
+        let mut timeline = editor.timeline.lock_or_recover();
+        let mut clip = timeline.clips[0].clone();
+        clip.waveform_preview = Some(vec![0.1234567; 4096]);
+        let notes = vec![hifishifter_kernel::midi_import::MidiNoteEvent {
+            start_sec: 0.0,
+            end_sec: 0.1,
+            note: 60.0,
+            velocity: 100,
+            channel: 0,
+        }];
+        clip.midi_note_data = Some(notes.clone());
+        clip.takes[0].midi_note_data = Some(notes);
+        clip.takes[0].syllable_analysis =
+            Some(hifishifter_kernel::pitch_analysis::TakeSyllableAnalysis {
+                algorithm: hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM.into(),
+                algorithm_version: hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM_VERSION,
+                source_digest: "payload-test".into(),
+                source_spans_sec: vec![hifishifter_kernel::pitch_analysis::SyllableSpan {
+                    start_sec: 0.0,
+                    end_sec: 0.1,
+                }],
+            });
+        timeline.clips = (0..256)
+            .map(|index| {
+                let mut clip = clip.clone();
+                clip.id = format!("payload-{index}");
+                clip
+            })
+            .collect();
+        serde_json::to_vec(&timeline.to_payload()).unwrap().len()
+    };
+    let full = payload(&editor, false).unwrap();
+    assert_eq!(
+        full["clips"].as_array().unwrap().len(),
+        256,
+        "host refresh must not replace the fixture"
+    );
+    assert!(serde_json::to_vec(&full).unwrap().len() < original_bytes / 4);
+    for clip in full["clips"].as_array().unwrap() {
+        assert!(clip["waveform_preview"].is_null());
+        assert_eq!(clip["midi_note_data"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            clip["takes"][0]["midi_note_data"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(clip["takes"][0]["syllable_spans_sec"], json!([[0.0, 0.1]]));
+    }
+    let lite = payload(&editor, true).unwrap();
+    assert_eq!(
+        lite["clips"][0]["takes"][0]["syllable_spans_sec"],
+        json!([[0.0, 0.1]])
+    );
+    model.session().close();
+}
+
 /// 同一真实actor分派中，分组编辑与非分组编辑的本地历史深度对比。
 #[test]
 fn grouped_edits_preserve_local_undo_checkpoint() {
@@ -535,4 +734,73 @@ fn host_api_free_commands_are_dispatched_in_the_plugin() {
     );
     drop(document);
     editor.close();
+}
+
+#[test]
+fn startup_editor_lookup_does_not_wait_for_pcm_or_geometry_transaction() {
+    let (model, owner, _identity) = crate::editor::session::tests::fixture();
+    let document = model.session();
+    let expected = document.editor_session().unwrap();
+    let transaction = document.transaction.lock_or_recover();
+    let (tx, rx) = mpsc::channel();
+    let concurrent = document.clone();
+    let reader = std::thread::spawn(move || {
+        let _ = tx.send(concurrent.editor_session());
+    });
+    let result = rx.recv_timeout(std::time::Duration::from_secs(1));
+    drop(transaction);
+    reader.join().unwrap();
+    let actual = result
+        .expect("UI editor lookup waited for the PCM transaction")
+        .unwrap();
+    assert!(Arc::ptr_eq(&expected, &actual));
+    drop(owner);
+    document.close();
+}
+
+#[test]
+fn source_preparation_returns_inventory_before_files_and_preserves_history() {
+    let (model, owner, _) = crate::editor::session::tests::fixture();
+    let document = model.session();
+    document.publish_source_pcm(
+        "ara://source".into(),
+        Arc::new(crate::render::source::SourcePcm {
+            sample_rate: 44100,
+            planes: vec![vec![0.1; 100000]],
+            version: 0,
+            covered: vec![],
+            _reservation: None,
+        }),
+    );
+    let editor = owner.editor_session().unwrap();
+    let initial = dispatch(&editor, "get_timeline_state", json!({})).unwrap();
+    assert_eq!(initial["tracks"].as_array().unwrap().len(), 1);
+    let root = initial["tracks"][0]["id"].as_str().unwrap();
+    dispatch(&editor,"set_param_line_blocks",json!({"rootTrackId":root,"expectedRevision":0,"blocks":[{"id":"early","startFrame":0,"endFrameExclusive":4}],"checkpoint":true})).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if editor.ensure_loaded(false).is_ok() {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert_eq!(
+        dispatch(&editor, "get_history_state", json!({})).unwrap()["undoDepth"],
+        1
+    );
+    assert!(editor.timeline.lock_or_recover().clips[0]
+        .source_path
+        .as_ref()
+        .is_some_and(|p| std::path::Path::new(p).is_file()));
+    assert_eq!(
+        dispatch(
+            &editor,
+            "get_param_line_blocks",
+            json!({"rootTrackId":root})
+        )
+        .unwrap()["layout"]["blocks"][0]["id"],
+        "early"
+    );
+    document.close();
 }

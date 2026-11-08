@@ -332,7 +332,24 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
             return { clipId: args[0] };
 
         case "analyze_clip_formants":
+        case "get_clip_syllable_spans":
+        case "analyze_clip_syllables":
             return { clipId: args[0] };
+
+        case "get_param_block_merges":
+        case "get_param_line_blocks":
+            return { rootTrackId: args[0] };
+
+        case "set_param_line_blocks":
+            return args[0] as Record<string, unknown>;
+
+        case "set_param_block_merges":
+            return {
+                rootTrackId: args[0],
+                records: args[1],
+                intervalEdits: args[2] ?? [],
+                checkpoint: args[3] ?? true,
+            };
 
         case "apply_clip_linked_params":
             return {
@@ -1049,6 +1066,7 @@ const NO_ARG_COMMANDS: ReadonlySet<string> = new Set([
     "get_onnx_diagnostic",
     "get_onnx_status",
     "get_pitch_analysis_progress",
+    "get_syllable_analysis_progress",
     "get_playback_state",
     "get_recording_apps",
     "get_recording_devices",

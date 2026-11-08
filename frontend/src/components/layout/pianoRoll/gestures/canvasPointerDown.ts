@@ -13,6 +13,7 @@ import {
 import { createEdgeScrollDriver } from "../kernel/edgeScrollDriver";
 import { getDrawPreviewValue } from "../paramValuePreviewLogic";
 import { timeToFrame } from "../utils";
+import { isModifierActive } from "../../../../features/keybindings/keybindingsSlice";
 import type { StrokeMode } from "../types";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import type { PointerDeps } from "./pointerDeps";
@@ -69,6 +70,7 @@ type CanvasPointerDownDeps = Pick<
     | "morphModifierDownRef"
     | "morphOverlayRef"
     | "onContextMenu"
+    | "onParamBlockPointerDown"
     | "onCycleDragDirection"
     | "onParamCommitSucceeded"
     | "onParamValuePreviewChange"
@@ -117,6 +119,7 @@ type CanvasPointerDownDeps = Pick<
     | "vibratoPreset"
     | "vibratoPresetCycleList"
     | "vibratoStateRef"
+    | "yToValue"
     | "viewSizeRef"
 >;
 
@@ -142,7 +145,7 @@ export type PointerDownBranch = "select" | "vibrato" | "freehand";
  * "每个工具都有归属"变成一条能失败的测试，而不是要靠读 645 行 if/else 才知道。
  */
 export function pointerDownBranchFor(toolMode: string): PointerDownBranch {
-    if (toolMode === "select") return "select";
+    if (toolMode === "select" || toolMode === "block") return "select";
     if (toolMode === "line" || toolMode === "vibrato") return "vibrato";
     return "freehand";
 }
@@ -198,6 +201,7 @@ export function handleCanvasPointerDown(
         morphModifierDownRef,
         morphOverlayRef,
         onContextMenu,
+        onParamBlockPointerDown,
         onCycleDragDirection,
         onParamCommitSucceeded,
         onParamValuePreviewChange,
@@ -241,6 +245,7 @@ export function handleCanvasPointerDown(
         toolMode,
         updateSelectionUi,
         valueToY,
+        yToValue,
         vibratoFrequencyAdjustKb,
         vibratoHudAnchorRef,
         vibratoPreset,
@@ -248,6 +253,146 @@ export function handleCanvasPointerDown(
         vibratoStateRef,
         viewSizeRef,
     } = deps;
+
+    // 中键平移必须早于块命中：块工具下中键仍应移动视图，而不是被当成块点击。
+    if (e.button === 1) {
+        e.preventDefault();
+        const scroller = scrollerRef.current;
+        if (!scroller) return;
+        setCanvasCursor("grabbing");
+        const pid = e.pointerId;
+        panRef.current = {
+            pointerId: pid,
+            startClientX: e.clientX,
+            startClientY: e.clientY,
+            startScrollLeft: scroller.scrollLeft,
+            startView:
+                editParam === "pitch"
+                    ? pitchViewRef.current
+                    : (paramViewsRef.current[editParam] ?? {
+                          center: 0.5,
+                          span: 1,
+                      }),
+            startRectH:
+                (canvasRef.current?.getBoundingClientRect().height ?? viewSizeRef.current.h) || 1,
+        };
+        let gesture: PointerGesture | null = null;
+        const onMove = (ev: globalThis.PointerEvent) => {
+            if ((ev.buttons & 4) !== 4) {
+                gesture?.end("up", ev);
+                return;
+            }
+            const pan = panRef.current;
+            if (!pan) return;
+            const dx = ev.clientX - pan.startClientX;
+            const dy = ev.clientY - pan.startClientY;
+            scroller.scrollLeft = Math.max(0, pan.startScrollLeft - dx);
+            syncScrollLeft(scroller);
+            const hPx = Math.max(1, pan.startRectH);
+            const deltaCenter = (dy / hPx) * pan.startView.span;
+            if (editParam === "pitch") {
+                setPitchView(
+                    clampViewport("pitch", {
+                        span: pan.startView.span,
+                        center: pan.startView.center + deltaCenter,
+                    }),
+                );
+            } else {
+                setParamViewport(
+                    editParam,
+                    clampViewport(editParam, {
+                        span: pan.startView.span,
+                        center: pan.startView.center + deltaCenter,
+                    }),
+                );
+            }
+            invalidate();
+        };
+        const onEnd = () => {
+            panRef.current = null;
+            setCanvasCursor(getDefaultCanvasCursor());
+        };
+        gesture = startPointerGesture({
+            pointerId: pid,
+            captureTarget: e.currentTarget,
+            onMove,
+            onEnd,
+            registerEnd: setActivePointerGestureEnd,
+            clearEnd: clearActivePointerGestureEnd,
+        });
+        return;
+    }
+
+    /*
+     * 块编辑工具优先于曲线手势。
+     *
+     * 【为什么放在最前面】块是同一条曲线上的另一种“命中目标”；若先走曲线 / 选区
+     * 分支，用户永远选不中块。回调返回 true 表示已消费，必须直接 return。
+     * 只有块工具启用时面板才会传该回调，因此既有交互不受影响。
+     */
+    if (onParamBlockPointerDown) {
+        const rect = canvasRef.current?.getBoundingClientRect();
+        if (rect) {
+            try {
+                /*
+                 * 拖块时不要先 seek：我们要连续纵向拖动；按下即挪播放头会打断
+                 * 手势，而且块编辑不是“定位播放头”。命中块时再阻止后续 seek。
+                 */
+                const consumed = onParamBlockPointerDown({
+                    sec: pointerSec(e.clientX),
+                    localY: e.clientY - rect.top,
+                    clientY: e.clientY,
+                    clientX: e.clientX,
+                    contextMenu: e.button === 2,
+                    pointerId: e.pointerId,
+                    captureTarget: e.currentTarget,
+                    setActivePointerGestureEnd,
+                    clearActivePointerGestureEnd,
+                    // 新增块用同一个多选修饰键起步：修饰键 + 空白拖拽。
+                    add: isModifierActive(paramMultiSelectKb, e.nativeEvent),
+                    // 沿用参数编辑器的多选键（默认 Ctrl / Cmd），与选区语义一致。
+                    toggle: isModifierActive(paramMultiSelectKb, e.nativeEvent),
+                    pointerType: e.nativeEvent.pointerType,
+                    altKey: e.altKey,
+                    shiftKey: e.shiftKey,
+                    yToValue,
+                    canvasHeightPx: rect.height,
+                    blockSnapEnabled: isEffectivePitchSnapActive(e.nativeEvent),
+                    blockSnapStep: 1,
+                    blockSnapScale:
+                        pitchSnapUnit === "scale"
+                            ? (scaleAtSec?.(pointerSec(e.clientX)) ?? projectScale)
+                            : undefined,
+                    pointerValue,
+                    secAtClientX: pointerSec,
+                    isSnapToggleModifierHeld,
+                    editParam,
+                    gridStep: 1,
+                });
+                if (consumed) {
+                    /*
+                     * 左键不要 preventDefault：Pointer Events 规范下这会抑制
+                     * 兼容 mouse 事件，双击（dblclick）就永远不会派发。
+                     * 指针捕获也由具体手势安装；单击本身不捕获，否则 pointerup
+                     * 会被重定向，浏览器无法把两次点击合成为 dblclick。
+                     */
+                    if (e.button === 2) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                    }
+                    return;
+                }
+            } catch {
+                // 块层是实验能力：命中异常不得让参数编辑器整体失去绘制手势。
+            }
+        }
+    }
+    /*
+     * 块工具在未命中块时已清空块选择；这里必须终止手势，不能让同一次按下继续
+     * 落进自由绘制分支。否则“点击块外空白”会顺手在曲线上画一个点，块工具看起来
+     * 像误触了画笔。
+     */
+    if (toolMode === "block") return;
 
     // 掌压拒识：笔 / 鼠标手势进行中时，触摸（书写时的手掌）按下不中止、
     // 不接管当前手势。pen / mouse 的第二指针维持原语义（切笔尖 / 橡皮
@@ -396,7 +541,7 @@ export function handleCanvasPointerDown(
             applyEdgeScrollLeft(nextDrawing);
         },
         // 上界同为绘制坐标（`edgeScrollMaxLeftPx` 已含 nativeOffset 平移）。
-        getMaxScrollLeft: () => maxScrollLeftFor(toolMode !== "select"),
+        getMaxScrollLeft: () => maxScrollLeftFor(toolMode !== "select" && toolMode !== "block"),
         // ★ 下界必须也是绘制坐标且可为负：开启同步时绘制域是
         // `[−偏移, 内容宽 − 偏移]`，左侧那片预留的对齐留白是**合法的负区间**。
         // 传 0 会让"向左滚"每帧都被夹回 0，与内核自己的下界（−偏移）打架 ——
@@ -404,82 +549,6 @@ export function handleCanvasPointerDown(
         getMinScrollLeft: () => (syncTimelineEnabled ? -timelineOffsetRef.current : 0),
         onScrolled: (clientX) => onEdgeScrolledRef.current?.(clientX),
     });
-
-    // Middle mouse: pan (time axis)
-    if (e.button === 1) {
-        e.preventDefault();
-        const scroller = scrollerRef.current;
-        // 【为什么先判空再换光标】光标由 onEnd 恢复；中键分支在 ref 为空时不建手势、
-        // 也没有 onEnd —— 先设 "grabbing" 再 return 会把光标永远挂住。
-        if (!scroller) return;
-        setCanvasCursor("grabbing");
-        const pid = e.pointerId;
-        panRef.current = {
-            pointerId: pid,
-            startClientX: e.clientX,
-            startClientY: e.clientY,
-            startScrollLeft: scroller.scrollLeft,
-            startView:
-                editParam === "pitch"
-                    ? pitchViewRef.current
-                    : (paramViewsRef.current[editParam] ?? {
-                          center: 0.5,
-                          span: 1,
-                      }),
-            startRectH:
-                (canvasRef.current?.getBoundingClientRect().height ?? viewSizeRef.current.h) || 1,
-        };
-        /** 手势句柄（onMove 需要主动收尾，见 selection 分支的同名字段）。 */
-        let gesture: PointerGesture | null = null;
-        const onMove = (ev: globalThis.PointerEvent) => {
-            // 掌侧误触防御：协议已经按 pointerId 过滤，因此第二指针的 move
-            // 到不了这里 —— touch 的 buttons 恒不满足 &4，若让它过 buttons
-            // 检查会把进行中的平移整个终止掉。
-            if ((ev.buttons & 4) !== 4) {
-                gesture?.end("up", ev);
-                return;
-            }
-            const pan = panRef.current;
-            if (!pan) return;
-            const dx = ev.clientX - pan.startClientX;
-            const dy = ev.clientY - pan.startClientY;
-            scroller.scrollLeft = Math.max(0, pan.startScrollLeft - dx);
-            syncScrollLeft(scroller);
-
-            const hPx = Math.max(1, pan.startRectH);
-            const deltaCenter = (dy / hPx) * pan.startView.span;
-            if (editParam === "pitch") {
-                setPitchView(
-                    clampViewport("pitch", {
-                        span: pan.startView.span,
-                        center: pan.startView.center + deltaCenter,
-                    }),
-                );
-            } else {
-                setParamViewport(
-                    editParam,
-                    clampViewport(editParam, {
-                        span: pan.startView.span,
-                        center: pan.startView.center + deltaCenter,
-                    }),
-                );
-            }
-            invalidate();
-        };
-        const onEnd = () => {
-            panRef.current = null;
-            setCanvasCursor(getDefaultCanvasCursor());
-        };
-        gesture = startPointerGesture({
-            pointerId: pid,
-            captureTarget: e.currentTarget,
-            onMove,
-            onEnd,
-            registerEnd: setActivePointerGestureEnd,
-            clearEnd: clearActivePointerGestureEnd,
-        });
-        return;
-    }
 
     if (toolMode === "select") {
         if (

@@ -75,13 +75,14 @@ pub mod log_limiter;
 pub mod logfile;
 pub mod model_paths;
 pub mod model_store;
+pub mod param_line_blocks;
 pub mod rt_retirement;
 pub mod ui_settings_apply;
 pub mod util;
 
 // 模型路径的读取函数直接挂到 crate 根：声码器与 FCPE 模块里写的是
 // `crate::nsf_hifigan_model_dir()` 这类调用，挂到根上就不必改那些调用点。
-pub use model_paths::{fcpe_onnx_path, hnsep_model_dir, nsf_hifigan_model_dir};
+pub use model_paths::{fcpe_onnx_path, game_model_dir, hnsep_model_dir, nsf_hifigan_model_dir};
 
 /// 热路径调试日志：经 `log::debug!` 走统一日志管线，release 默认 Info 级别下
 /// 不产生格式化开销；需要诊断时用 `HIFISHIFTER_LOG=debug` 临时打开。
@@ -163,6 +164,7 @@ pub mod synth_clip_cache;
 pub mod formant_cache;
 pub mod formant_morph;
 pub mod glottal_rd;
+pub mod growl;
 pub mod hnsep_dsp;
 #[cfg(feature = "onnx")]
 mod hnsep_resources;
@@ -222,6 +224,10 @@ pub mod pitch_analysis;
 pub mod pitch_clip;
 pub mod pitch_editing;
 pub mod streaming_pitch;
+
+// GAME 自动音符分块。关闭 `onnx` feature 时也保留配置/切分/后处理，
+// 只有实际推理函数缺席；调用方按能力探测后回退到 VAD。
+pub mod game_onnx;
 
 // ── 通道与声道策略 ──────────────────────────────────────────────────────────
 pub mod channel_decision;

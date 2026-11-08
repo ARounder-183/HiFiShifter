@@ -9,6 +9,7 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     // 模式切换
     "mode.toggle": [{ key: "tab" }],
     "mode.selectTool": [{ key: "f7" }],
+    "mode.toggleBlockEdit": [{ key: "`" }, { key: "`", shift: true }],
     "mode.drawTool": [{ key: "f8" }],
     // 直线与颤音是两种工具（直线 ≡ 颤音 + 直线预设），因此各占一个键；
     // F7→F10 与工具栏右键菜单里的排列顺序一致。
@@ -255,6 +256,10 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
 export const ACTION_META: Record<ActionId, ActionMeta> = {
     "mode.toggle": { labelKey: "kb_mode_toggle", group: "mode" },
     "mode.selectTool": { labelKey: "kb_mode_select_tool", group: "mode" },
+    "mode.toggleBlockEdit": {
+        labelKey: "kb_mode_toggle_block_edit",
+        group: "mode",
+    },
     "mode.drawTool": { labelKey: "kb_mode_draw_tool", group: "mode" },
     "mode.lineTool": { labelKey: "kb_mode_line_tool", group: "mode" },
     "mode.vibratoTool": { labelKey: "kb_mode_vibrato_tool", group: "mode" },

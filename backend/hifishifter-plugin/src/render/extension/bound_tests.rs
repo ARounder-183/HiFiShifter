@@ -1,6 +1,184 @@
 //! `render/extension.rs` 的 `bound_tests` 测试（从内联模块纯搬到这里，`use super::*` 解析不变）。
 
 use super::*;
+
+#[test]
+fn an_unassigned_renderer_does_not_start_preparation_work() {
+    let (model, _owners, ids) = crate::editor::session::tests::workspace_fixture();
+    let document = model.session();
+    let owner = Arc::new(ExtensionOwner::default());
+    let raw = owner
+        .bind_to_document(
+            document.clone(),
+            ApiGeneration::V2Final,
+            ExtensionRoles::all(),
+            ExtensionRoles::PLAYBACK_RENDERER,
+            None,
+        )
+        .unwrap();
+    owner.prepare();
+    assert!(owner.preparation().is_none());
+    let key = (&*ids[0] as *const u8) as u64;
+    unsafe {
+        let extension = &*raw;
+        ((*extension.playbackRendererInterface)
+            .addPlaybackRegion
+            .unwrap())(extension.playbackRendererRef, key as *mut _);
+    }
+    owner.prepare();
+    assert!(owner.preparation().is_some());
+    owner.stop_editor();
+    owner.ensure_preparation();
+    assert!(owner.preparation().is_none());
+    document.close();
+}
+
+#[test]
+fn offline_empty_renderer_prepares_silence_without_a_periodic_worker() {
+    let model = crate::ara::model::ModelHandle::new();
+    let document = model.session();
+    *document.timeline.lock_or_recover() = Some(
+        serde_json::from_value(serde_json::json!({
+            "tracks": [], "clips": [], "bpm": 120, "project_sec": 0
+        }))
+        .unwrap(),
+    );
+    document.ready.store(true, Ordering::Release);
+    let owner = Arc::new(ExtensionOwner::default());
+    owner
+        .bind_to_document(
+            document.clone(),
+            ApiGeneration::V2Final,
+            ExtensionRoles::all(),
+            ExtensionRoles::PLAYBACK_RENDERER,
+            None,
+        )
+        .unwrap();
+    owner.prepare();
+    assert!(owner.preparation().is_none());
+    owner
+        .prepare_offline_until(std::time::Instant::now() + std::time::Duration::from_secs(3))
+        .unwrap();
+    let mut left = [9.0; 4];
+    let mut right = [9.0; 4];
+    let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
+    let mut bus = crate::audio_abi::AudioBusBuffers {
+        num_channels: 2,
+        silence_flags: 0,
+        channel_buffers: planes.as_mut_ptr(),
+    };
+    // SAFETY: 输出平面各有四帧。
+    assert!(unsafe { owner.snapshots[0].copy_block(0, 44100, &mut bus, 4) });
+    assert_eq!(left, [0.0; 4]);
+    assert_eq!(right, left);
+    document.close();
+}
+
+#[test]
+fn closing_preparation_releases_owner_slot_before_waiting_for_worker() {
+    let owner = Arc::new(ExtensionOwner::default());
+    owner.ensure_preparation();
+    let queue = owner.preparation().unwrap();
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    queue
+        .request(Box::new(move |_| {
+            entered_tx.send(()).unwrap();
+            release_rx
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .unwrap();
+            Ok(())
+        }))
+        .unwrap();
+    entered_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .unwrap();
+    let stopping = owner.clone();
+    let closer = std::thread::spawn(move || stopping.stop_editor());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    while !queue.is_closed() && std::time::Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    let closed = queue.is_closed();
+    let slot_released = owner.preparation.try_lock().is_ok();
+    release_tx.send(()).unwrap();
+    closer.join().unwrap();
+    assert!(closed, "preparation close did not start");
+    assert!(
+        slot_released,
+        "worker exit must not wait behind its owner slot"
+    );
+}
+
+/// REAPER asks getState while inserting an instance, before opening its editor.
+/// Encoding already owns the document transaction and must not reacquire it
+/// through the public workspace-timeline accessor.
+#[test]
+fn component_state_encoding_after_ready_graph_does_not_relock_transaction() {
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let (model, owners, _ids) = crate::editor::session::tests::workspace_fixture();
+        let document = model.session();
+        document
+            .write_authority_range("track", "pitch", 100, &[64.; 4], None, false)
+            .unwrap();
+        document.ready.store(true, Ordering::Release);
+        started_tx.send(()).unwrap();
+        let result = owners[0].encode_state();
+        let _ = result_tx.send(result);
+        document.close();
+    });
+    started_rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("component-state fixture must be ready before timing the save");
+    let bytes = result_rx
+        .recv_timeout(std::time::Duration::from_secs(3))
+        .expect("getState must return without relocking its own document transaction")
+        .expect("encoding the bound component state must succeed");
+    let mut state = crate::state_channel::EditState::default();
+    state.restore(&bytes).unwrap();
+    assert!(authority_curve(&state, "track", "pitch_edit").contains(&64.));
+}
+
+#[test]
+fn host_tick_defers_instead_of_waiting_for_a_busy_document_transaction() {
+    let (model, owner, _id) = crate::editor::session::tests::fixture();
+    let document = model.session();
+    let stamp = owner.host_query_stamp().unwrap();
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let locked_document = document.clone();
+    let holder = std::thread::spawn(move || {
+        let _transaction = locked_document.transaction.lock_or_recover();
+        held_tx.send(()).unwrap();
+        let _ = release_rx.recv();
+    });
+    held_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .unwrap();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let query_owner = owner.clone();
+    let query = std::thread::spawn(move || {
+        query_owner.refresh_host_transport_tick();
+        let _query_scope = super::document::HostQueryScope::nonblocking();
+        let deferred = query_owner.host_query_stamp().is_err();
+        let authorized = query_owner.host_query_authorized(&stamp);
+        done_tx.send((deferred, authorized)).unwrap();
+    });
+    let before_release = done_rx.recv_timeout(std::time::Duration::from_millis(200));
+    release_tx.send(()).unwrap();
+    holder.join().unwrap();
+    query.join().unwrap();
+    assert_eq!(
+        before_release.expect("host UI tick must not wait for a background document transaction"),
+        (true, false)
+    );
+    let resumed = owner.host_query_stamp().unwrap();
+    assert!(owner.host_query_authorized(&resumed));
+    document.close();
+}
+
 /// 读某根轨在权威里的整条曲线（跨 run 平铺）。
 ///
 /// 【为什么要这个助手】T2 之后用户曲线**只**住在 `ParamAuthority` 的稀疏 run 里，
@@ -73,7 +251,7 @@ fn owned_fade_shape_changes_kernel_pcm_and_state_roundtrip_and_undo_clears_it() 
     }
     owners[0].refresh_host_transport();
     let editor = owners[0].editor_session().unwrap();
-    editor.ensure_loaded(false).unwrap();
+    crate::editor::session::tests::wait_for_source_files(&editor);
     let before = owners[0].encode_state().unwrap();
     let render = || {
         let input = {
@@ -1195,24 +1373,11 @@ fn automatic_apply_releases_the_transaction_and_rechecks_model_and_edit_versions
 /// 即使其它线程暂持模型事务，真实prepare callback也必须返回，并在后台最终发布。
 #[test]
 fn prepare_callback_does_not_wait_for_a_model_transaction() {
-    let model = crate::ara::model::ModelHandle::new();
+    let (model, owner, _id) = crate::editor::session::tests::fixture();
     let document = model.session();
-    *document.timeline.lock_or_recover() = Some(
-        serde_json::from_value(serde_json::json!({
-            "tracks":[],"clips":[],"bpm":120,"project_sec":0}))
-        .unwrap(),
-    );
-    document.ready.store(true, Ordering::Release);
-    let owner = Arc::new(ExtensionOwner::default());
-    owner
-        .bind_to_document(
-            document.clone(),
-            ApiGeneration::V2Final,
-            ExtensionRoles::all(),
-            ExtensionRoles::PLAYBACK_RENDERER | ExtensionRoles::EDITOR_RENDERER,
-            None,
-        )
-        .unwrap();
+    let sources = document.edit_sources.lock_or_recover().clone();
+    *document.sources.lock_or_recover() = sources;
+    owner.snapshots.iter().for_each(|snapshot| snapshot.clear());
     let held = document.transaction.lock_or_recover();
     let (sent, received) = std::sync::mpsc::channel();
     let requesting = owner.clone();
@@ -1231,7 +1396,11 @@ fn prepare_callback_does_not_wait_for_a_model_transaction() {
         assert!(std::time::Instant::now() < deadline);
         std::thread::yield_now();
     }
-    assert!(owner.preparation_state().1.is_none());
+    assert!(
+        owner.preparation_state().1.is_none(),
+        "{:?}",
+        owner.preparation_state()
+    );
     let mut left = [9.0; 4];
     let mut right = [9.0; 4];
     let mut planes = [left.as_mut_ptr(), right.as_mut_ptr()];
@@ -1240,9 +1409,10 @@ fn prepare_callback_does_not_wait_for_a_model_transaction() {
         silence_flags: 0,
         channel_buffers: planes.as_mut_ptr(),
     };
-    // SAFETY: 四帧平面存活；验证worker真的发布空分配快照，不接受“只是忽略prepare”。
+    // SAFETY: 输出平面各有四帧。
     assert!(unsafe { owner.snapshots[0].copy_block(0, 44100, &mut bus, 4) });
-    assert_eq!(left, [0.0; 4]);
+    assert_eq!(left, [0.1, 0.2, 0.3, 0.4]);
+    assert_eq!(right, left);
     drop(model);
 }
 

@@ -66,7 +66,7 @@ describe("hitOverlapControl", () => {
                 pxPerSec: PX_PER_SEC,
                 rowHeight: ROW_HEIGHT,
             }),
-        ).toEqual({ kind: "clip-left-edge", clipId: "later" });
+        ).toEqual({ kind: "clip-left-edge", clipId: "later", laterClipId: "later" });
     });
 
     it("命中重叠区右缘 → 前一个 clip 的右边缘（内核原先完全不可达）", () => {
@@ -79,7 +79,12 @@ describe("hitOverlapControl", () => {
                 pxPerSec: PX_PER_SEC,
                 rowHeight: ROW_HEIGHT,
             }),
-        ).toEqual({ kind: "clip-right-edge", clipId: "earlier" });
+        ).toEqual({
+            kind: "clip-right-edge",
+            clipId: "earlier",
+            // 前一个 clip 的右缘仍是「控件归属」，而普通左键点击要选中后一个。
+            laterClipId: "later",
+        });
     });
 
     it("重叠区内部、远离两侧边缘 → 不命中控件（交回通用命中）", () => {
@@ -104,7 +109,7 @@ describe("hitOverlapControl", () => {
                     pxPerSec: PX_PER_SEC,
                     rowHeight: ROW_HEIGHT,
                 }),
-            ).toEqual({ kind: "clip-right-edge", clipId: "earlier" });
+            ).toEqual({ kind: "clip-right-edge", clipId: "earlier", laterClipId: "later" });
         }
     });
 
@@ -183,7 +188,12 @@ describe("hitOverlapControl", () => {
                 pxPerSec: PX_PER_SEC,
                 rowHeight: ROW_HEIGHT,
             }),
-        ).toEqual({ kind: "crossfade-grip", clipId: "later", partnerClipId: "earlier" });
+        ).toEqual({
+            kind: "crossfade-grip",
+            clipId: "later",
+            laterClipId: "later",
+            partnerClipId: "earlier",
+        });
     });
 
     it("抓手优先于淡变包络线（同一点上曲线命中块也在，必须判为抓手）", () => {
@@ -251,7 +261,7 @@ describe("hitOverlapControl", () => {
                 pxPerSec: PX_PER_SEC,
                 rowHeight: ROW_HEIGHT,
             }),
-        ).toEqual({ kind: "clip-left-edge", clipId: "c" });
+        ).toEqual({ kind: "clip-left-edge", clipId: "c", laterClipId: "c" });
         // 250 处不在任何边缘带上，也没有淡变 → 无控件
         expect(
             hitOverlapControl({

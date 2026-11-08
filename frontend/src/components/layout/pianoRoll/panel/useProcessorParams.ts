@@ -133,7 +133,11 @@ export function useProcessorParams({
             return 0.05;
         }
         if (editParam === "formant_shift_cents") return 50;
-        if (editParam === "breath_gain" || editParam === "hifigan_tension") {
+        if (
+            editParam === "breath_gain" ||
+            editParam === "hifigan_tension" ||
+            editParam === "hifigan_growl"
+        ) {
             return 0.05;
         }
         if (editParam === "pan") return 0.1;
@@ -265,6 +269,8 @@ export function useProcessorParams({
                     return t("breath_gain_label");
                 case "hifigan_tension":
                     return t("hifigan_tension_label");
+                case "hifigan_growl":
+                    return t("hifigan_growl_label");
                 case "formant_shift_cents":
                     return t("formant_shift_label");
                 case "hifigan_volume":
@@ -299,6 +305,8 @@ export function useProcessorParams({
                 case "hifigan_tension":
                 case "tension":
                     return t("param_btn_tension");
+                case "hifigan_growl":
+                    return t("param_btn_growl");
                 case "formant_shift_cents":
                     return t("param_btn_formant");
                 case "hifigan_volume":

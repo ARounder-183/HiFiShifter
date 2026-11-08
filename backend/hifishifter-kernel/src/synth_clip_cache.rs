@@ -447,7 +447,10 @@ pub fn clear_pad_suppressed_clips() {
 /// - 渲染键纳入**模型文件内容摘要**。
 /// 以上每一条都改变输出 PCM（块边界位置与波形都变），必须整体失效，
 /// 否则新旧基准会长期混用 —— 表现正是"某些 clip 在接缝处仍有杂音"。
-pub const RENDER_PIPELINE_VERSION: u32 = 9;
+///
+/// v10：新增 `hifigan_growl`（GRWC 怒音）——它在谐波支上改变波形，
+/// 旧缓存不得被当作本版本结果返回。
+pub const RENDER_PIPELINE_VERSION: u32 = 10;
 
 /// [`compute_rendered_clip_hash`] 的输入集合。
 ///
@@ -662,9 +665,9 @@ pub fn compute_rendered_clip_hash_excluding(
         // nsf-hifigan 的**气声**是渲染后处理：预览靠 `breath_noise_stereo` +
         // `audio_engine/mix.rs` 实时混音，把它混进底层哈希会让每次拖曲线都重合成。
         //
-        // `hifigan_tension` **不再**排除：张力已迁移为声码器内部的 mel 域操作
-        //（`audio/rd_tension.rs`），是渲染流程的一部分 —— 必须参与哈希，
-        // 否则改张力会命中旧渲染（这正是它能取代独立张力缓存变体的原因）。
+        // `hifigan_tension` / `hifigan_growl` **不再**排除：二者都已迁入
+        // 声码器内部的谐波支处理（`audio/rd_tension.rs`、`audio/growl.rs`），
+        // 是渲染流程的一部分 —— 必须参与哈希，否则改参数会命中旧渲染。
         !(_renderer_id == "nsf_hifigan_onnx" && matches!(param_id, "breath_gain"))
     }
 
@@ -871,6 +874,7 @@ pub fn compute_breath_noise_hash(input: &RenderedClipHashInput<'_>) -> u64 {
     // - 曲线级 `formant_shift_cents`（gender / 共振峰：只改谐波支的 mel）
     // - clip 级 `formant_morph`（同上）
     // - `hifigan_tension`（Rd 张力：只重塑谐波结构，噪声支原样保留）
+    // - `hifigan_growl`（GRWC 怒音：同样只作用于谐波支）
     //
     // 【张力为什么也要排除】张力迁入声码器后已参与**渲染键**（见
     // `include_rendered_extra_curve`），但噪声 stem 本身与张力无关 ——
@@ -878,7 +882,12 @@ pub fn compute_breath_noise_hash(input: &RenderedClipHashInput<'_>) -> u64 {
     let filtered_curves: std::collections::HashMap<String, Vec<f32>> = input
         .extra_curves
         .iter()
-        .filter(|(k, _)| !matches!(k.as_str(), "formant_shift_cents" | "hifigan_tension"))
+        .filter(|(k, _)| {
+            !matches!(
+                k.as_str(),
+                "formant_shift_cents" | "hifigan_tension" | "hifigan_growl"
+            )
+        })
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     compute_rendered_clip_hash(&RenderedClipHashInput {

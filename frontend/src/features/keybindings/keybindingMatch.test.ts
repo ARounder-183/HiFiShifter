@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
     canonicalKeyFromEvent,
@@ -6,7 +6,15 @@ import {
     normalizeEventKey,
     physicalKeyFromEvent,
 } from "./keybindingMatch";
+import { DEFAULT_KEYBINDINGS } from "./defaultKeybindings";
 import type { Keybinding } from "./types";
+
+/*
+ * 这个文件钉的是“非 macOS 的 Ctrl 绑定”语义；若跟随宿主平台，
+ * macOS 上会把 ctrl 映射错，测试结果因机器而异。显式固定为非 Mac，
+ * 平台分支本身由其它覆盖 mac 的用例负责。
+ */
+vi.mock("../../utils/platform", () => ({ IS_MAC: false }));
 
 /** 构造键盘事件（仅填充匹配所需的字段）。 */
 function keyEvent(
@@ -31,6 +39,19 @@ function keyEvent(
 }
 
 describe("keybindingMatch — 物理键位匹配（Shift 上档字符归位）", () => {
+    it("~ 默认切换块编辑与音高绘制，并命中 Shift+Backquote", () => {
+        expect(DEFAULT_KEYBINDINGS["mode.toggleBlockEdit"]).toEqual([
+            { key: "`" },
+            { key: "`", shift: true },
+        ]);
+        expect(
+            matchesKeybinding(keyEvent("~", { code: "Backquote", shift: true }), {
+                key: "~",
+                shift: true,
+            }),
+        ).toBe(true);
+    });
+
     it("normalizeEventKey 保持既有行为（小写字符）", () => {
         expect(normalizeEventKey(keyEvent("T"))).toBe("t");
         expect(normalizeEventKey(keyEvent("-", { code: "Minus" }))).toBe("-");
@@ -88,3 +109,22 @@ describe("keybindingMatch — 物理键位匹配（Shift 上档字符归位）",
         expect(canonicalKeyFromEvent(keyEvent(" ", { code: "Space" }))).toBe("space");
     });
 });
+
+for (const key of ["Process", "Unidentified", "`", "~"]) {
+    for (const shift of [false, true]) {
+        it(`physical Backquote works with ${key}, shift=${shift}`, () => {
+            const event = keyEvent(key, { code: "Backquote", shift });
+            expect(
+                DEFAULT_KEYBINDINGS["mode.toggleBlockEdit"].some((binding) =>
+                    matchesKeybinding(event, binding),
+                ),
+            ).toBe(true);
+            expect(
+                matchesKeybinding(keyEvent(key, { code: "Backquote", shift, ctrl: true }), {
+                    key: "`",
+                    shift,
+                }),
+            ).toBe(false);
+        });
+    }
+}

@@ -44,6 +44,7 @@ function Reset-Directory([string]$path) {
 # 模型权重不在仓库里（见 scripts/setup/fetch-models.py）：缺了就取，已有则是一次
 # 目录扫描。CI 用 actions/cache 以清单哈希为键缓存解压结果，因此这里通常什么都不做。
 python (Join-Path $PSScriptRoot '..\setup\fetch-models.py')
+python (Join-Path $PSScriptRoot '..\setup\fetch-models.py') --fetch-game
 Assert-Ok '模型权重'
 
 $profile = $Configuration.ToLowerInvariant()

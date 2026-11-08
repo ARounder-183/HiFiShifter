@@ -12,6 +12,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+& (Join-Path $PSScriptRoot 'verify-frontend.ps1') -FrontendDirectory (Join-Path ([IO.Path]::GetFullPath($BundleDirectory)) 'Contents\Resources\frontend')
 $module = Join-Path ([IO.Path]::GetFullPath($BundleDirectory)) 'Contents\x86_64-win'
 $shim = Join-Path $module 'HiFiShifter.vst3'
 foreach ($required in $shim, "$module\HiFiShifterEngine.dll", "$module\SoundTouchDLL.dll", "$module\DirectML.dll") {
@@ -56,7 +57,10 @@ try {
     }
 }
 finally {
-    Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
+    $resolvedWork = [IO.Path]::GetFullPath($work)
+    $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
+    if (!$resolvedWork.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase)) { throw 'Unexpected probe cleanup path' }
+    Remove-Item -LiteralPath $resolvedWork -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 Write-Host "VST3 加载门禁通过：$shim" -ForegroundColor Green

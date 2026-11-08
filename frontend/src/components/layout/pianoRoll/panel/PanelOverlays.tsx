@@ -8,6 +8,7 @@ import { planParamConversion } from "../paramConversion";
 import { VibratoDialog } from "../../VibratoDialog";
 import { MidiTrackSelectDialog } from "../../MidiTrackSelectDialog";
 import { EditContextMenu } from "../../../editDialogs/EditContextMenu";
+import { ParamBlockContextMenu } from "./ParamBlockContextMenu";
 
 import type { PianoRollPanelModel } from "./usePianoRollPanelModel";
 
@@ -60,6 +61,18 @@ type Props = {
         | "rootTrack"
         | "s"
         | "setCtxMenu"
+        | "paramBlockContextMenu"
+        | "canRestoreGameParamBlocks"
+        | "restoreGameParamBlocks"
+        | "setParamBlockContextMenu"
+        | "selectedParamBlockCount"
+        | "canMergeSelectedParamBlocks"
+        | "canDeleteSelectedParamBlocks"
+        | "deleteSelectedParamBlocks"
+        | "selectedParamBlockDeleted"
+        | "paramBlockSplitAtSec"
+        | "splitSelectedParamBlockAt"
+        | "mergeSelectedParamBlocks"
         | "setMidiDialogOpen"
         | "setVibratoDialogOpen"
         | "specifiedBpm"
@@ -119,6 +132,18 @@ export function PanelOverlays({ m }: Props) {
         rootTrack,
         s,
         setCtxMenu,
+        paramBlockContextMenu,
+        canRestoreGameParamBlocks,
+        restoreGameParamBlocks,
+        setParamBlockContextMenu,
+        selectedParamBlockCount,
+        canMergeSelectedParamBlocks,
+        canDeleteSelectedParamBlocks,
+        deleteSelectedParamBlocks,
+        selectedParamBlockDeleted,
+        paramBlockSplitAtSec,
+        splitSelectedParamBlockAt,
+        mergeSelectedParamBlocks,
         setMidiDialogOpen,
         setVibratoDialogOpen,
         specifiedBpm,
@@ -215,6 +240,24 @@ export function PanelOverlays({ m }: Props) {
                     onConvertDynToVolume={() => void handleEditOp("convertDynToVolume")}
                 />
             )}
+            {paramBlockContextMenu !== null ? (
+                <ParamBlockContextMenu
+                    x={paramBlockContextMenu.x}
+                    y={paramBlockContextMenu.y}
+                    selectedCount={selectedParamBlockCount}
+                    canMerge={canMergeSelectedParamBlocks}
+                    canDelete={canDeleteSelectedParamBlocks}
+                    canRestoreGame={canRestoreGameParamBlocks}
+                    onRestoreGame={restoreGameParamBlocks}
+                    selectedDeleted={selectedParamBlockDeleted}
+                    onDelete={deleteSelectedParamBlocks}
+                    splitAtSec={paramBlockSplitAtSec}
+                    onSplit={splitSelectedParamBlockAt}
+                    onMerge={mergeSelectedParamBlocks}
+                    onClose={() => setParamBlockContextMenu(null)}
+                    tf={tf}
+                />
+            ) : null}
 
             {/*
              * 颤音窗口：预设库 + 套用到选区，同一个窗口（右键菜单 / 快捷键 / 工具栏 /

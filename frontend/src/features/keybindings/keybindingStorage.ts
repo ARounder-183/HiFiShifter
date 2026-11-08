@@ -111,6 +111,17 @@ export function normalizeStoredBindingShape(
             out[actionId as keyof KeybindingOverrides] = [value];
         }
     }
+    const blockToggle = out["mode.toggleBlockEdit"];
+    if (
+        blockToggle?.length === 1 &&
+        blockToggle[0].key === "~" &&
+        blockToggle[0].shift &&
+        !blockToggle[0].ctrl &&
+        !blockToggle[0].alt &&
+        !blockToggle[0].modifierOnly
+    ) {
+        delete out["mode.toggleBlockEdit"];
+    }
     return out;
 }
 

@@ -14,6 +14,7 @@ import { MenuBar } from "./components/layout/MenuBar";
 import { ActionBar } from "./components/layout/ActionBar";
 import { HostLinkPanel } from "./features/hostLink/HostLinkPanel";
 import { HostAudioNotice } from "./features/ara/HostAudioNotice";
+import { useSyllableAnalysisEvents } from "./features/session/useSyllableAnalysisEvents";
 import { PluginApplyStatus } from "./features/ara/PluginApplyStatus";
 import { HostLinkExportControl } from "./features/hostLink/HostLinkExportControl";
 import { getPluginApplySnapshot, subscribePluginApply } from "./features/ara/pluginApplyStore";
@@ -79,6 +80,7 @@ import {
     saveProjectAsRemote,
     saveProjectToPathRemote,
     setTrackMeters,
+    setEditParam,
     setToolModePersistent,
     setVslibAvailable,
     setPlaybackRenderingState,
@@ -100,6 +102,8 @@ import { PitchAnalysisProvider } from "./contexts/PitchAnalysisContext";
 import { PitchAnalysisStatusChip } from "./components/layout/PitchAnalysisStatusChip";
 import { ParamDataLoadingChip } from "./components/layout/ParamDataLoadingChip";
 import { AppStatusProgressChips } from "./components/layout/AppStatusProgressChips";
+import { ParamBlockAnalysisStatus } from "./components/layout/pianoRoll/panel/ParamBlockAnalysisStatus";
+import { toggleParamBlockEditingTool } from "./components/layout/pianoRoll/paramBlockMarquee";
 import { appStatusProgressBus } from "./utils/appStatusProgressBus";
 const FileBrowserPanel = lazy(() =>
     import("./components/layout/FileBrowserPanel").then((module) => ({
@@ -559,6 +563,7 @@ function detectExternalActionKindFromPath(path: string): ExternalFileActionKind 
 }
 
 function AppInner() {
+    useSyllableAnalysisEvents();
     const dispatch = useAppDispatch();
     const { t, tf, tVars, plural } = useI18n();
 
@@ -1886,6 +1891,13 @@ function AppInner() {
         void dispatch(loadDockSettings())
             .unwrap()
             .then((payload) => {
+                if (import.meta.env.DEV && new URLSearchParams(window.location.search).has("mock")) {
+                    // mock 的设置对象没有 Disk 上的 dock 布局；但必须走真实的
+                    // hydrate 路径，让 Dock 的默认工作区立刻可交互。
+                    dispatch(hydrateDock({ settings: null, layout: null, mode: "standalone" }));
+                    finalizeDockHydration(dispatch, store.getState);
+                    return;
+                }
                 dispatch(hydrateDock(payload));
                 // 归一化与面板注册都已完成，此时才能安全处理"套用启动预设"与
                 // "把浮窗收回停靠位"这两件事（见 `finalizeDockHydration`）。
@@ -1893,7 +1905,13 @@ function AppInner() {
             })
             .catch(() => {
                 // 读不到设置时保持出厂布局；`hydrated` 仍为 false，因此不会把
-                // 默认布局写回去覆盖磁盘内容。
+                // 默认布局写回去覆盖磁盘内容。纯浏览器 mock 没有可恢复的磁盘布局，
+                // 必须显式 hydrate 一次出厂布局，否则 Dock 的工作区与参数编辑器
+                // 根本不会挂载 —— 表现为“界面看得见、下方全空、点击无反应”。
+                if (import.meta.env.DEV && new URLSearchParams(window.location.search).has("mock")) {
+                    dispatch(hydrateDock({ settings: null, layout: null, mode: "standalone" }));
+                    finalizeDockHydration(dispatch, store.getState);
+                }
             });
     }, [dispatch]);
 
@@ -2941,7 +2959,7 @@ function AppInner() {
                     break;
                 case "mode.toggle": {
                     const cur = runtimeRef.current.toolMode;
-                    if (cur === "select") {
+                    if (cur === "select" || cur === "block") {
                         void dispatch(setToolModePersistent(runtimeRef.current.drawToolMode));
                     } else {
                         void dispatch(setToolModePersistent("select"));
@@ -2951,6 +2969,15 @@ function AppInner() {
                 case "mode.selectTool":
                     void dispatch(setToolModePersistent("select"));
                     break;
+                case "mode.toggleBlockEdit": {
+                    const next = toggleParamBlockEditingTool(runtimeRef.current.toolMode);
+                    if (next === "draw") {
+                        dispatch(setEditParam("pitch"));
+                        void dispatch(persistUiSettings());
+                    }
+                    void dispatch(setToolModePersistent(next));
+                    break;
+                }
                 case "mode.drawTool":
                     void dispatch(setToolModePersistent("draw"));
                     break;
@@ -3056,7 +3083,7 @@ function AppInner() {
                     // 直线与颤音共用同一份拖动方向（同一个"起点 → 终点"手势），
                     // 因此两者都归到 `"vibrato"` 这一路。
                     const tool =
-                        ss.toolMode === "select"
+                        ss.toolMode === "select" || ss.toolMode === "block"
                             ? ("select" as const)
                             : ss.drawToolMode === "draw"
                               ? ("draw" as const)
@@ -4598,6 +4625,8 @@ function AppInner() {
                         逐 clip 的进度事件不参与本组件重渲染
                         （见 PitchAnalysisStatusChip 的说明）。 */}
                     <PitchAnalysisStatusChip />
+                    {/* 音符块（GAME / VAD）分析：与音高进度同一状态栏槽位。 */}
+                    <ParamBlockAnalysisStatus enabled />
                     {/* 参数曲线取数提示：**独立订阅**外部 store，不参与本组件重渲染
                         （见 ParamDataLoadingChip 的说明）。 */}
                     <ParamDataLoadingChip />

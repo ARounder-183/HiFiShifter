@@ -61,11 +61,76 @@ pub fn materialize(
 /// 同进程授权源已由调用者计入硬预算；文件流式写出不复制PCM，不按时长拒绝正常长源。
 /// 外部IPC入口仍走materialize的64MiB限制，不能借此扩大旧传输协议。
 pub fn materialize_with_byte_limit(
+    timeline: TimelineState,
+    sources: &[PcmView<'_>],
+    dir: &Path,
+    byte_limit: usize,
+    reverse_policy: ReversePolicy,
+) -> Result<(TimelineState, HashMap<String, String>), String> {
+    materialize_impl(
+        timeline,
+        sources,
+        dir,
+        byte_limit,
+        reverse_policy,
+        None,
+        &|| false,
+    )
+}
+
+pub fn materialize_cancellable(
+    timeline: TimelineState,
+    sources: &[PcmView<'_>],
+    dir: &Path,
+    byte_limit: usize,
+    reverse_policy: ReversePolicy,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<(TimelineState, HashMap<String, String>), String> {
+    materialize_impl(
+        timeline,
+        sources,
+        dir,
+        byte_limit,
+        reverse_policy,
+        None,
+        cancelled,
+    )
+}
+
+// Paths must have been prepared from these exact immutable PCM buffers.
+pub fn materialize_prepared(
+    timeline: TimelineState,
+    sources: &[PcmView<'_>],
+    dir: &Path,
+    byte_limit: usize,
+    reverse_policy: ReversePolicy,
+    paths: &HashMap<String, String>,
+) -> Result<(TimelineState, HashMap<String, String>), String> {
+    if sources
+        .iter()
+        .any(|pcm| !paths.contains_key(pcm.persistent_id))
+    {
+        return Err("source files are preparing".into());
+    }
+    materialize_impl(
+        timeline,
+        sources,
+        dir,
+        byte_limit,
+        reverse_policy,
+        Some(paths),
+        &|| false,
+    )
+}
+
+fn materialize_impl(
     mut timeline: TimelineState,
     sources: &[PcmView<'_>],
     dir: &Path,
     byte_limit: usize,
     reverse_policy: ReversePolicy,
+    prepared: Option<&HashMap<String, String>>,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<(TimelineState, HashMap<String, String>), String> {
     if byte_limit == 0 || byte_limit > MAX_HOST_PCM_BYTES {
         return Err("invalid host PCM byte limit".into());
@@ -102,7 +167,7 @@ pub fn materialize_with_byte_limit(
             || pcm
                 .planes
                 .iter()
-                .any(|p| p.len() != frames || p.iter().any(|n| !n.is_finite()))
+                .any(|p| p.len() != frames || (prepared.is_none() && p.chunks(65536).any(|chunk| cancelled() || chunk.iter().any(|n| !n.is_finite()))))
             || known.insert(pcm.persistent_id, pcm).is_some()
         {
             return Err("invalid or oversized host PCM".into());
@@ -169,16 +234,29 @@ pub fn materialize_with_byte_limit(
             missing.insert(clip.id.clone());
         }
     }
-    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    if prepared.is_none() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
     let mut paths = HashMap::new();
     let mut reverse = HashMap::new();
     for pcm in sources {
+        if cancelled() {
+            return Err("source preparation cancelled".into());
+        }
+        if let Some(path) = prepared.and_then(|paths| paths.get(pcm.persistent_id)) {
+            paths.insert(pcm.persistent_id, path.clone());
+            reverse.insert(path.clone(), pcm.persistent_id.to_owned());
+            continue;
+        }
         let mut fingerprint = blake3::Hasher::new();
         fingerprint.update(pcm.persistent_id.as_bytes());
         fingerprint.update(&pcm.sample_rate.to_le_bytes());
         fingerprint.update(&(pcm.planes.len() as u64).to_le_bytes());
         for plane in pcm.planes {
-            for sample in plane {
+            for (index, sample) in plane.iter().enumerate() {
+                if index % 65536 == 0 && cancelled() {
+                    return Err("source preparation cancelled".into());
+                }
                 fingerprint.update(&sample.to_le_bytes());
             }
         }
@@ -202,6 +280,9 @@ pub fn materialize_with_byte_limit(
                 )
                 .map_err(|e| e.to_string())?;
                 for frame in 0..pcm.planes[0].len() {
+                    if frame % 65536 == 0 && cancelled() {
+                        return Err("source preparation cancelled".into());
+                    }
                     for plane in pcm.planes {
                         wav.write_sample(plane[frame]).map_err(|e| e.to_string())?;
                     }

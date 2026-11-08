@@ -12,6 +12,7 @@ which is also the authoritative component list (names, versions, upstream links)
 | `COPYING.LGPL-2.1` | SoundTouch (`SoundTouchDLL`) - GNU Lesser General Public License 2.1 |
 | `Apache-2.0.txt` | ARA SDK headers, `rusty_mp3`, `rusty_flac` - Apache License 2.0 |
 | `NSF-HiGAN-vocoder-NOTICE.txt` | DiffSinger Community Vocoder weights - CC BY-NC-SA 4.0 |
+| `GAME-NOTICE.txt` | GAME note segmentation ONNX weights - CC BY-NC-SA 4.0 |
 
 CLAP is a header-only MIT SDK; its upstream license text travels in the pinned SDK checkout and the authoritative component list in `../LICENSE`.
 

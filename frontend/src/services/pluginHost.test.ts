@@ -4,6 +4,8 @@ import {
     commandTimeoutMs,
     createPluginHost,
     DEFAULT_COMMAND_TIMEOUT_MS,
+    PLUGIN_ACTIVE_REQUEST_LIMIT,
+    PLUGIN_BACKGROUND_REQUEST_LIMIT,
     type WebViewMessagePort,
 } from "./pluginHost";
 
@@ -127,9 +129,9 @@ describe("plugin host protocol", () => {
     it("bounds unfinished requests and propagates native send errors", async () => {
         const native = nativePort();
         const host = createPluginHost(native.port, { version: 1, viewId: "a" });
-        const pending = Array.from({ length: 128 }, () => host.invoke("slow").catch(String));
+        const pending = Array.from({ length: 512 }, () => host.invoke("slow").catch(String));
         await expect(host.invoke("overflow")).rejects.toThrow("Too many");
-        expect(native.sent).toHaveLength(128);
+        expect(native.sent).toHaveLength(PLUGIN_ACTIVE_REQUEST_LIMIT);
         host.dispose();
         await Promise.all(pending);
         native.port.postMessage = () => {
@@ -138,6 +140,46 @@ describe("plugin host protocol", () => {
         const broken = createPluginHost(native.port, { version: 1, viewId: "b" });
         await expect(broken.invoke("ping")).rejects.toThrow("native gone");
         broken.dispose();
+    });
+
+    it("keeps a waveform burst below native capacity and prioritizes the timeline", async () => {
+        const native = nativePort();
+        const host = createPluginHost(native.port, { version: 1, viewId: "burst" });
+        const waves = Array.from({ length: 100 }, (_, clip) =>
+            host.invoke("get_waveform_mipmap_binary", { clip }).catch(String),
+        );
+        expect(native.sent).toHaveLength(PLUGIN_BACKGROUND_REQUEST_LIMIT);
+        const timeline = host.invoke("get_timeline_state");
+        expect(native.sent.at(-1)?.command).toBe("get_timeline_state");
+        native.deliver({
+            version: 1,
+            viewId: "burst",
+            id: native.sent.at(-1)!.id,
+            ok: true,
+            value: { clips: [] },
+        });
+        await expect(timeline).resolves.toEqual({ clips: [] });
+        host.dispose();
+        await Promise.all(waves);
+    });
+
+    it("starts request timeouts only when queued work reaches the native port", async () => {
+        vi.useFakeTimers();
+        const native = nativePort();
+        const host = createPluginHost(native.port, { version: 1, viewId: "queued" });
+        const slow = Array.from({ length: PLUGIN_ACTIVE_REQUEST_LIMIT }, () =>
+            host.invoke("analyze_clip_syllables").catch(String),
+        );
+        const next = host.invoke("get_timeline_state");
+        await vi.advanceTimersByTimeAsync(DEFAULT_COMMAND_TIMEOUT_MS + 1);
+        expect(native.sent).toHaveLength(PLUGIN_ACTIVE_REQUEST_LIMIT);
+        native.deliver({ version: 1, viewId: "queued", id: native.sent[0].id, ok: true, value: 1 });
+        const posted = native.sent.at(-1)!;
+        expect(posted.command).toBe("get_timeline_state");
+        native.deliver({ version: 1, viewId: "queued", id: posted.id, ok: true, value: 2 });
+        await expect(next).resolves.toBe(2);
+        host.dispose();
+        await Promise.all(slow);
     });
 });
 
@@ -160,5 +202,10 @@ describe("command timeouts", () => {
     it("keeps the default budget for ordinary commands", () => {
         expect(commandTimeoutMs("set_clip_state")).toBe(DEFAULT_COMMAND_TIMEOUT_MS);
         expect(commandTimeoutMs("get_timeline_state")).toBe(DEFAULT_COMMAND_TIMEOUT_MS);
+    });
+
+    it("allows a single progress-reporting GAME job to finish without timing out the batch", () => {
+        expect(commandTimeoutMs("analyze_clip_syllables")).toBe(15 * 60_000);
+        expect(commandTimeoutMs("get_syllable_analysis_progress")).toBe(DEFAULT_COMMAND_TIMEOUT_MS);
     });
 });

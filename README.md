@@ -209,7 +209,7 @@ $env:HIFISHIFTER_OFFLINE = '1'
 
 #### 模型权重（按需获取）
 
-仓库里只提交清单 `backend/src-tauri/resources/models/models.json`（1.5 KB）；151.6 MB 的权重
+仓库里只提交清单 `backend/src-tauri/resources/models/models.json`；约 200 MB 的权重
 作为 release 资产 `models-<清单版本>.zip` 分发（版本号是内容哈希，取错版本会在逐文件校验里
 立刻失败）。构建脚本会自动调用取权重脚本 —— 它是幂等的，已完整时只做一次目录扫描：
 
@@ -217,6 +217,7 @@ $env:HIFISHIFTER_OFFLINE = '1'
 python scripts/setup/fetch-models.py                # 缺就取
 python scripts/setup/fetch-models.py --check        # 只检查
 python scripts/setup/fetch-models.py --source DIR   # 离网：从已有模型目录拷贝
+python scripts/setup/fetch-models.py --fetch-game    # GAME 音符分块权重（可选）
 ```
 
 `HIFISHIFTER_MODELS_BASE_URL` 可以指向一个镜像站点。

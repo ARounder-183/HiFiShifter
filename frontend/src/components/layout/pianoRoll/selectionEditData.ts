@@ -98,7 +98,14 @@ export async function fetchFullResCurve(args: {
     paramView?: ParamViewSegment | null;
     onProgress?: (doneFrames: number, totalFrames: number) => void;
     withSentinel?: boolean;
-}): Promise<FrameCurve & { sentinel?: boolean[] }> {
+}): Promise<
+    FrameCurve & {
+        sentinel?: boolean[];
+        authorityRevision?: number;
+        geometryRevision?: number;
+        geometrySignature?: string;
+    }
+> {
     const { trackId, param, paramView, onProgress, withSentinel } = args;
     const startFrame = Math.max(0, Math.floor(args.startFrame));
     const endFrame = Math.max(startFrame, Math.floor(args.endFrame));
@@ -131,6 +138,9 @@ export async function fetchFullResCurve(args: {
     const values = new Array<number>(totalFrames);
     const sentinel = withSentinel ? new Array<boolean>(totalFrames) : undefined;
     let done = 0;
+    let authorityRevision: number | undefined;
+    let geometryRevision: number | undefined;
+    let geometrySignature: string | undefined;
     for (let chunkStart = startFrame; chunkStart <= endFrame; chunkStart += CHUNK_FRAMES) {
         const chunkEnd = Math.min(endFrame, chunkStart + CHUNK_FRAMES - 1);
         const count = chunkEnd - chunkStart + 1;
@@ -143,6 +153,29 @@ export async function fetchFullResCurve(args: {
             true,
             withSentinel ?? false,
         );
+        if (!res?.ok) throw new Error("Failed to read full-resolution parameter curve");
+        if (
+            authorityRevision !== undefined &&
+            res.authority_revision !== undefined &&
+            authorityRevision !== res.authority_revision
+        )
+            throw new Error("Conflict: parameter curve changed during read");
+        if (
+            geometrySignature !== undefined &&
+            res.geometry_signature !== undefined &&
+            geometrySignature !== res.geometry_signature
+        )
+            throw new Error("Conflict: parameter geometry changed during read");
+        if (
+            geometrySignature === undefined &&
+            geometryRevision !== undefined &&
+            res.geometry_revision !== undefined &&
+            geometryRevision !== res.geometry_revision
+        )
+            throw new Error("Conflict: parameter geometry changed during read");
+        authorityRevision = res.authority_revision;
+        geometryRevision = res.geometry_revision;
+        geometrySignature = res.geometry_signature;
         const src = res?.ok ? res.edit : undefined;
         const sent = res?.ok ? res.edit_sentinel : undefined;
         for (let i = 0; i < count; i += 1) {
@@ -154,7 +187,14 @@ export async function fetchFullResCurve(args: {
         onProgress?.(done, totalFrames);
         await yieldToUi();
     }
-    return { startFrame, values, sentinel };
+    return {
+        startFrame,
+        values,
+        sentinel,
+        ...(authorityRevision === undefined ? {} : { authorityRevision }),
+        ...(geometryRevision === undefined ? {} : { geometryRevision }),
+        ...(geometrySignature === undefined ? {} : { geometrySignature }),
+    };
 }
 
 /**
@@ -392,7 +432,7 @@ export async function uploadFullResCurveSegments(args: {
         for (let offset = 0; offset < values.length; offset += CHUNK_FRAMES) {
             const count = Math.min(CHUNK_FRAMES, values.length - offset);
             const chunk = values.slice(offset, offset + count);
-            await paramsApi.setParamFrames(
+            const result = await paramsApi.setParamFrames(
                 trackId,
                 param,
                 startFrame + offset,
@@ -400,6 +440,7 @@ export async function uploadFullResCurveSegments(args: {
                 isFirstChunk, // 整批仅首个实际写入打撤销点
                 new Array<boolean>(chunk.length).fill(true),
             );
+            if (!result?.ok) throw new Error("Failed to write full-resolution parameter curve");
             isFirstChunk = false;
             done += count;
             onProgress?.(done, totalFrames);

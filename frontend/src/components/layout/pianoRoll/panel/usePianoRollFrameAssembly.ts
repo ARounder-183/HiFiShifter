@@ -85,6 +85,7 @@ type PianoRollFrameAssemblyInputs = {
     snapToggleHeld: boolean;
     // —— 取数 hook（`usePianoRollData`）的切片 ——
     paramView: ModelDeps["paramView"];
+    paramBlockInteractionCurveRef: RefObject<ParamViewSegment | null>;
     setParamView: ModelDeps["setParamView"];
     secondaryParamViews: ModelDeps["secondaryParamViews"];
     referencePitchViews: Record<string, ParamViewSegment>;
@@ -150,13 +151,13 @@ export function usePianoRollFrameAssembly({
     hoveredReferenceRootTrackId,
     snapToggleHeld,
     paramView,
+    paramBlockInteractionCurveRef,
     setParamView,
     secondaryParamViews,
     referencePitchViews,
     bumpRefreshToken,
     notifyLiveEditEnded,
     loudnessAnalysisPending,
-    loudnessSnapshotFetchSeq,
     getLatestLoudnessFetchSeq,
     flushLoudnessPending,
     selectionRef,
@@ -256,7 +257,8 @@ export function usePianoRollFrameAssembly({
         ensureLiveEditBase,
         applyDenseToLiveEdit,
         resetLiveEditPreview,
-        clearCommittedLiveEditOverride,
+        clearLiveEditOverride,
+        clearCommittedLiveEditOverrideIfCaughtUp,
         markLiveEditCommitted,
         commitStroke: commitStrokeBase,
     } = useLiveParamEditing({
@@ -309,10 +311,8 @@ export function usePianoRollFrameAssembly({
      * 到达"，不会长期遮挡后续状态。
      */
     useEffect(() => {
-        if (loudnessSnapshotFetchSeq > committedSettleSeqRef.current) {
-            clearCommittedLiveEditOverride();
-        }
-    }, [loudnessSnapshotFetchSeq, clearCommittedLiveEditOverride]);
+        if (paramView !== null) clearCommittedLiveEditOverrideIfCaughtUp(paramView);
+    }, [paramView, clearCommittedLiveEditOverrideIfCaughtUp]);
 
     // Clip 音高拖拽（修饰键 + 波形垂直拖拽）的实时预览桥：拖拽侧以节流
     // 后端预览写入修改 pitch 参数线；这里把同一音分偏移实时应用到本地
@@ -549,7 +549,10 @@ export function usePianoRollFrameAssembly({
      * @param axis 当前投影（每帧由 drawRef 构造）。
      * @returns 曲线图层列表（按绘制顺序）；GL 关闭时不会被调用。
      */
-    function buildCurveLayers(axis: TimelineAxis): PianoRollCurveLayer[] {
+    function buildCurveLayers(
+        axis: TimelineAxis,
+        frameView?: ParamViewSegment | null,
+    ): PianoRollCurveLayer[] {
         return buildCurveLayersImpl(
             {
                 clipboardRef,
@@ -557,6 +560,7 @@ export function usePianoRollFrameAssembly({
                 editParam,
                 liveEditOverrideRef,
                 paramView,
+                interactionParamViewRef: paramBlockInteractionCurveRef,
                 pitchEnabled,
                 referencePitchOverlays,
                 secSpanClipRect,
@@ -569,6 +573,7 @@ export function usePianoRollFrameAssembly({
                 visibleSecondaryParamIds,
             },
             axis,
+            frameView,
         );
     }
 
@@ -645,6 +650,7 @@ export function usePianoRollFrameAssembly({
             liveEditOverrideRef,
             loudnessAnalysisPending,
             paramMorphOverlays,
+            paramBlockInteractionCurveRef,
             paramView,
             paramViewsRef,
             pitchEnabled,
@@ -673,6 +679,7 @@ export function usePianoRollFrameAssembly({
         ensureLiveEditBase,
         applyDenseToLiveEdit,
         resetLiveEditPreview,
+        clearLiveEditOverride,
         commitStroke,
         onParamCommitSucceeded,
         detectedPitchCurves,

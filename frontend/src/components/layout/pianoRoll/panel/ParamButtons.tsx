@@ -81,7 +81,7 @@ export function ParamButtons({ m }: Props) {
                 // 层级由 `gatedPillHideAt` 换算，槽位常挂载、只改 `display` —— 见文件头
                 // 关于"绝不 return null"的说明。
                 //
-                // 【分离开启时不参与让位】此时这两个药丸是**活的功能入口**，而第 4–10 级
+                // 【分离开启时不参与让位】此时被门禁的药丸是**活的功能入口**，而第 4–10 级
                 // 之间没有别的入口（「⋯」要到第 10 级才出现）—— 让位等于让参数暂时消失。
                 // 这个判据只看"分离开关"，与层级无关，因此不会重新引入自反馈。
                 const gatedHideIndex = gatedPillHideOrder.indexOf(p.id);
@@ -203,12 +203,14 @@ export function ParamButtons({ m }: Props) {
                 // 提示文案要指出**真正**的原因，否则用户会去开错开关。
                 // 分离门禁按参数各给一句（与 `pitch_requires_compose`
                 // 同一体裁：祈使句点名"开启什么、就能编辑什么"）；
-                // 只有被分离门禁的两个参数会走到这里，故二选一即可。
+                // 只有被分离门禁的参数会走到这里，故按 id 逐一给文案。
                 const gateTooltip = !composeEnabled
                     ? t("pitch_requires_compose")
                     : p.id === "hifigan_tension"
                       ? t("hifigan_tension_requires_separation")
-                      : t("breath_gain_requires_separation");
+                      : p.id === "hifigan_growl"
+                        ? t("hifigan_growl_requires_separation")
+                        : t("breath_gain_requires_separation");
 
                 const paramPill = (
                     <ParamToolbarPill

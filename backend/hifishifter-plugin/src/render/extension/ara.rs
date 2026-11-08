@@ -10,6 +10,9 @@ impl ExtensionOwner {
         assigned: ExtensionRoles,
         companion: Option<ara2_bridge::companion::CompanionControllerBinding<'static>>,
     ) -> Result<*const ara2_bridge::sys::ARAPlugInExtensionInstance, AraError> {
+        self.startup
+            .mark(crate::startup::Stage::AraBind, document.id);
+        let _startup_span = crate::startup::Span::new("ara.bind", document.id, 0);
         let mut current = self.binding.lock().unwrap_or_else(|p| p.into_inner());
         if current.is_some() {
             // 已绑定再绑定：只有"同一份仍然活着的文档"才是重复绑定。
@@ -177,15 +180,6 @@ impl ExtensionOwner {
         document.attach(self, owned.1, companion)?;
         *self.document.lock_or_recover() = Some(Arc::downgrade(&document));
         let weak = Arc::downgrade(self);
-        // 【为什么不再只对 playback 角色初始化】文档上没有任何 playback 实例时，编辑实例会
-        // **接管渲染**（见 [`ExtensionOwner::is_editor_only`]），那时它也必须有这条准备队列 ——
-        // 只对 playback 初始化会让接管的实例永远排不出任务（`prepare()` 的 `None => {}`
-        // 分支会静默吞掉），于是"接管"看起来生效了、声音却一直不更新。
-        if !enabled.is_empty() {
-            // 【为什么是 ensure 而不是 get_or_init】见 `preparation` 字段说明：
-            // 上一份文档关闭时队列已被 close，重绑必须拿到一条**新**队列。
-            self.ensure_preparation();
-        }
         // 只登记weak供宿主回调排队；后台计算不形成owner自循环。
         *self.prepare_owner.lock_or_recover() = Some(weak);
         let _ = self.clock.set(document.clock.clone());
@@ -349,7 +343,7 @@ impl ExtensionOwner {
         // `renders()` 为假，而那正是"刚录完、播放中"这个最需要读数的时刻。
         self.log_click_report();
         self.log_capture_report();
-        if !self.renders() {
+        if self.is_closed() || !self.renders() {
             return;
         }
         // 源/assignment撤销在文档事务内清理；此函数只排队，不能在事务外clear旧任务刚发布的音频。
@@ -359,6 +353,23 @@ impl ExtensionOwner {
         let Some(weak) = weak else {
             return;
         };
+        if self.is_bound() {
+            let role = self.role.load(Ordering::Acquire);
+            let regions = self
+                .assignments
+                .lock_or_recover()
+                .get(&role)
+                .is_some_and(|keys| !keys.is_empty());
+            let sequences = self
+                .sequences
+                .lock_or_recover()
+                .get(&role)
+                .is_some_and(|keys| !keys.is_empty());
+            if !regions && !sequences {
+                return;
+            }
+        }
+        self.ensure_preparation();
         if let Some(worker) = self.preparation() {
             if let Err(error) = worker.request(Box::new(move |cancel| {
                 weak.upgrade()
@@ -463,6 +474,7 @@ impl ExtensionOwner {
             if std::time::Instant::now() >= deadline {
                 return Err("offline preparation timed out".into());
             }
+            self.ensure_preparation();
             let worker = self
                 .preparation()
                 .ok_or("offline preparation worker missing")?;
@@ -475,7 +487,13 @@ impl ExtensionOwner {
                             .into(),
                     );
                 }
-                self.prepare();
+                let owner = Arc::downgrade(self);
+                worker.request(Box::new(move |cancel| {
+                    owner
+                        .upgrade()
+                        .ok_or("renderer closed".to_owned())?
+                        .prepare_job(cancel)
+                }))?;
             }
             worker.wait_idle_until(deadline)?;
         }

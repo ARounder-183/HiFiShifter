@@ -64,7 +64,7 @@ export function usePianoRollEditSession({ dispatch, invalidate, s }: EditSession
     }, [invalidate, s.pendingParamSelectionRestore]);
     const [paramMorphOverlays, setParamMorphOverlays] = useState<ParamMorphOverlay[] | null>(null);
     const [canvasCursor, setCanvasCursor] = useState<CSSProperties["cursor"]>(
-        s.toolMode === "select" ? "default" : "crosshair",
+        s.toolMode === "select" || s.toolMode === "block" ? "default" : "crosshair",
     );
 
     const strokeRef = useRef<{

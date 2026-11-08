@@ -113,6 +113,8 @@ export interface SessionState {
     pitchSnapToleranceCents: number;
     /** 基准音阶键名，如 "C" "Db" 等 */
     pitchSnapScale: import("../../../utils/musicalScales").ScaleKey;
+    /** 新建块后把音高按原曲线形状归一化到音阶。 */
+    paramBlockFollowPitch: boolean;
     /** 音阶高亮模式：始终 / 关闭 */
     scaleHighlightMode: "always" | "off";
     /** 播放头缩放 */

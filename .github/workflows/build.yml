@@ -193,7 +193,7 @@ jobs:
 
       # ── 模型权重 ───────────────────────────────────────────────────────
       #
-      # 权重（151.6 MB）不在仓库里：checkout 因此从 150 MB 起步变成几 MB。以清单
+      # 权重（约 200 MB）不在仓库里：checkout 因此从 200 MB 起步变成几 MB。以清单
       # 哈希为键缓存解压结果 —— 模型一换键就变，不会取到旧权重。
       - name: Cache model weights
         uses: actions/cache@v5
@@ -203,6 +203,9 @@ jobs:
 
       - name: Fetch model weights
         run: python scripts/setup/fetch-models.py
+        shell: bash
+      - name: Fetch GAME note segmentation weights
+        run: python scripts/setup/fetch-models.py --fetch-game
         shell: bash
 
       # ── SoundTouch source ──────────────────────────────────────────────

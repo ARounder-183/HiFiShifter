@@ -258,7 +258,7 @@ describe("多绑定：一行的 chip 列表与追加按钮", () => {
     it("「重做」行渲染两颗 chip（默认绑了 Ctrl+Shift+Z 与 Ctrl+Y）", () => {
         const { cleanup } = renderDialog();
         try {
-            // 默认表里只有 edit.redo 有第二个槽位，因此 slot=1 全窗口唯一。
+            applyQuery("ctrl shift z");
             const secondSlots =
                 document.body.querySelectorAll<HTMLElement>('[data-hs-kb-slot="1"]');
             expect(secondSlots).toHaveLength(1);

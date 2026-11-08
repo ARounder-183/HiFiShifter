@@ -255,7 +255,8 @@ impl ExtensionOwner {
         // 【为什么 take 掉而不是留在槽位里】`close()` 是终结性的；留下一个
         // `closed == true` 的队列表只会让下一次重绑再次踩到同一个死队列。
         // 重绑时 `ensure_preparation()` 会建一条新的。
-        if let Some(worker) = self.preparation.lock_or_recover().take() {
+        let worker = self.preparation.lock_or_recover().take();
+        if let Some(worker) = worker {
             worker.close();
         }
     }
@@ -756,17 +757,30 @@ impl ExtensionOwner {
             if let Err(error) = self.merge_pending_restore(&document) {
                 log::warn!("[ara] merge pending restore before save failed: {error}");
             }
-            let mut edits = document.edits.lock_or_recover();
-            if let Err(error) = edits.reconcile(&document.track_bindings.lock_or_recover()) {
-                log::warn!(
-                    "[ara] reconcile before save failed: {error}; saving the unpruned state"
-                );
+            let mut local = {
+                let mut edits = document.edits.lock_or_recover();
+                if let Err(error) = edits.reconcile(&document.track_bindings.lock_or_recover()) {
+                    log::warn!(
+                        "[ara] reconcile before save failed: {error}; saving the unpruned state"
+                    );
+                }
+                edits.clone()
+            };
+            // 分析结果写在 live 时间线的 take 字段；`EditState` 是另一份存档权威。
+            // 保存前收一次，否则本次分析永远进不了下一次 getState / ARA 存档。
+            // The enclosing save already owns `document.transaction`. Re-entering
+            // workspace_timeline() would wait forever on that non-recursive mutex.
+            // Release the edits guard before projecting the timeline as well.
+            let live_timeline = document.workspace_timeline_locked().ok();
+            if let Some(timeline) = live_timeline.as_ref() {
+                local.capture_take_syllables(timeline);
+                local.prune_take_syllables(timeline);
             }
-            let mut local = edits.clone();
             match self.assigned_timeline(&document) {
                 Ok(host) => {
                     let allowed: BTreeSet<_> = host.tracks.iter().map(|t| t.id.clone()).collect();
                     local.params.retain(|id, _| allowed.contains(id));
+                    local.param_line_blocks.retain(|id, _| allowed.contains(id));
                     local.tracks.retain(|t| allowed.contains(&t.id));
                     let clips = host
                         .clips
@@ -778,6 +792,9 @@ impl ExtensionOwner {
                     // 的参数写进自己的存档（两个组件共享同一 source/modification 身份时
                     // 尤其明显）。
                     local.authority.retain_roots(&allowed);
+                    // 音节缓存按 Clip 身份裁剪：它真实持有的片段就是本组件保存时
+                    // 可见的 clip 集，与 authority 的 root 作用域互相独立。
+                    local.prune_take_syllable_clips(&clips);
                     if !local.fades.is_empty() {
                         let items = document.fade_items_locked(&clips);
                         // 【为什么这里不再失败】fade 元数据在途时保留整份 fade 表；

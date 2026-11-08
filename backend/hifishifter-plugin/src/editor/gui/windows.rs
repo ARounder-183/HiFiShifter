@@ -410,6 +410,9 @@ impl WindowsHost {
         height: i32,
         link: Arc<crate::editor::routing::EditorLink>,
     ) -> Result<Self, String> {
+        if let Ok(owner) = link.owner() {
+            owner.startup_stage(crate::startup::Stage::Attached);
+        }
         let parent = HWND(parent as *mut c_void);
         if !unsafe { IsWindow(Some(parent)) }.as_bool() {
             return Err("parent is not a live HWND".into());
@@ -1094,6 +1097,9 @@ fn configure_browser(
             }
             unsafe {
                 navigate.Navigate(w!("https://hifishifter.invalid/plugin.html"))?;
+            }
+            if let Ok(owner) = state.borrow().link.owner() {
+                owner.startup_stage(crate::startup::Stage::Navigation);
             }
             crate::gui_log_line("frontend navigation started (commands pending session binding)");
             Ok(())

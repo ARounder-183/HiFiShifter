@@ -9,12 +9,17 @@ use std::path::Path;
 pub mod analysis;
 pub mod dyn_analysis;
 pub mod schedule;
+pub mod syllable;
 
 // 公开 API — 供 crate 内其他模块使用
 pub use schedule::maybe_schedule_pitch_orig;
 
 // DYN（动态）原声电平基线的组装入口。
 pub use dyn_analysis::{assemble_dyn_orig_for_engine, maybe_schedule_dyn_orig};
+pub use syllable::{
+    estimate_syllable_spans, fill_spans_without_merging, SyllableConfig, SyllableSpan,
+    TakeSyllableAnalysis, SYLLABLE_ALGORITHM, SYLLABLE_ALGORITHM_VERSION,
+};
 
 pub fn hz_to_midi(hz: f64) -> f32 {
     if !(hz.is_finite() && hz > 1e-6) {
@@ -218,6 +223,41 @@ pub struct PitchOrigAnalysisProgressEvent {
     pub completed_clips: u32,
     /// 需要分析的 clip 总数
     pub total_clips: u32,
+}
+
+/// 音节 / 音符分块分析进度（独立于音高原线批次）。
+///
+/// 前端状态栏只显示这一个快照；`algorithm` 让用户与诊断能看出当前是
+/// GAME 模型还是 VAD 回退，不再把两种质量完全不同的结果混为一谈。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyllableAnalysisProgress {
+    pub active: bool,
+    pub clip_id: String,
+    pub clip_name: String,
+    pub progress: f32,
+    pub stage: String,
+    pub algorithm: String,
+    pub message: Option<String>,
+}
+
+fn syllable_progress_slot() -> &'static std::sync::Mutex<Option<SyllableAnalysisProgress>> {
+    static SLOT: std::sync::OnceLock<std::sync::Mutex<Option<SyllableAnalysisProgress>>> =
+        std::sync::OnceLock::new();
+    SLOT.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+pub fn set_syllable_analysis_progress(progress: Option<SyllableAnalysisProgress>) {
+    if let Ok(mut slot) = syllable_progress_slot().lock() {
+        *slot = progress;
+    }
+}
+
+pub fn syllable_analysis_progress() -> Option<SyllableAnalysisProgress> {
+    syllable_progress_slot()
+        .lock()
+        .ok()
+        .and_then(|slot| slot.clone())
 }
 
 pub fn resample_curve_linear(values: &[f32], out_len: usize) -> Vec<f32> {

@@ -33,6 +33,8 @@ import { I18nProvider } from "./i18n/I18nProvider";
 import { AppThemeProvider } from "./theme/AppThemeProvider";
 import { SessionUnavailable } from "./features/ara/SessionUnavailable";
 import { probeSession } from "./services/sessionProbe";
+import { isPluginMode } from "./services/hostDetect";
+import { invoke } from "./services/invoke";
 
 export async function mountApp(): Promise<void> {
     // dev-only 性能工程脚手架：动态 import 保证生产构建完全不打包该模块。
@@ -81,4 +83,11 @@ export async function mountApp(): Promise<void> {
             </Provider>
         </StrictMode>,
     );
+    if (isPluginMode()) {
+        requestAnimationFrame(() =>
+            requestAnimationFrame(() => {
+                void invoke("plugin_ui_ready").catch(() => undefined);
+            }),
+        );
+    }
 }

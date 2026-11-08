@@ -53,6 +53,7 @@ export const initialState: SessionState = {
     pitchSnapUnit: "semitone",
     pitchSnapScale: "C",
     pitchSnapToleranceCents: 0,
+    paramBlockFollowPitch: false,
     scaleHighlightMode: "off",
     playheadZoomEnabled: false,
     autoScrollEnabled: false,

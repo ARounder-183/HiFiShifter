@@ -44,6 +44,22 @@ pub(crate) struct EditState {
     /// 插件自有、宿主表达不到的逐片段属性（颜色 / 共振峰变形）。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub clip_local: BTreeMap<String, ClipLocalState>,
+    /// 插件自有、宿主表达不到的音节分析缓存。
+    ///
+    /// 键必须同时含 Clip 与 Take 身份：ARA 的 clip 会在每次 `ensure_loaded` 中
+    /// 按宿主几何重建，只有跨重建稳定的 id 才能校核。值仍是内核的
+    /// `TakeSyllableAnalysis`，因此算法版本 / 源文件摘要的失效判断只有一份。
+    #[serde(
+        default,
+        with = "take_syllable_map",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub take_syllables:
+        BTreeMap<TakeSyllableKey, hifishifter_kernel::pitch_analysis::TakeSyllableAnalysis>,
+    /// Authored root parameter-line layouts; independent of audio authority.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub param_line_blocks:
+        BTreeMap<String, hifishifter_kernel::param_line_blocks::ParamLineBlockSet>,
     /// 跨组件共享的插件私有参数分组；GUID关系不参与REAPER folder或音频路由。
     #[serde(
         default,
@@ -87,6 +103,52 @@ pub(crate) struct EditState {
     ///     覆盖就是用户看到的"参数回退"。
     #[serde(skip)]
     pub from_archive: bool,
+}
+
+/// Take 音节缓存的稳定键。
+///
+/// ARA 的 Clip id 已由宿主的 item / region 身份派生；Take id 由 take GUID 派生。
+/// 两者都不按数组序号，故冷重建与工程重开后仍能对上。
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub(crate) struct TakeSyllableKey {
+    pub clip_id: String,
+    pub take_id: String,
+}
+
+/// JSON 对象的键只能是字符串；音节缓存以稳定结构体为键，因此编码成有序的
+/// `(key, value)` 数组。这样既不把两个身份字段拼成不可逆字符串，也保持确定性排序。
+pub(crate) mod take_syllable_map {
+    use super::BTreeMap;
+    use super::TakeSyllableKey;
+    use serde::de::Error as _;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    type TakeSyllables =
+        BTreeMap<TakeSyllableKey, hifishifter_kernel::pitch_analysis::TakeSyllableAnalysis>;
+
+    pub(crate) fn serialize<S>(map: &TakeSyllables, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        map.iter().collect::<Vec<_>>().serialize(serializer)
+    }
+
+    pub(crate) fn deserialize<'de, D>(deserializer: D) -> Result<TakeSyllables, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let entries = Vec::<(
+            TakeSyllableKey,
+            hifishifter_kernel::pitch_analysis::TakeSyllableAnalysis,
+        )>::deserialize(deserializer)?;
+        let mut map = BTreeMap::new();
+        for (key, analysis) in entries {
+            if map.insert(key, analysis).is_some() {
+                return Err(D::Error::custom("duplicate take syllable key"));
+            }
+        }
+        Ok(map)
+    }
 }
 
 /// 一次冷恢复身份匹配的三种结论（见 [`pick_binding`]）。
@@ -186,6 +248,8 @@ impl EditState {
             && self.authority.is_pristine()
             && self.fades.is_empty()
             && self.clip_local.is_empty()
+            && self.take_syllables.is_empty()
+            && self.param_line_blocks.is_empty()
     }
 
     /// 形状记录有界且只允许固定GUID键，冷重开不能按会话clip序号关联。
@@ -213,6 +277,39 @@ impl EditState {
                 .is_some_and(|color| color.len() > 64 || color.contains('\0'))
             {
                 return Err("invalid clip color".into());
+            }
+        }
+        Ok(())
+    }
+    /// 音节缓存有界，且每个区间必须是有限、正宽、按时间排序的源域秒。
+    pub(crate) fn validate_take_syllables(&self) -> Result<(), String> {
+        if self.param_line_blocks.len() > 10000 {
+            return Err("root parameter block budget exceeded".into());
+        }
+        for blocks in self.param_line_blocks.values() {
+            blocks.validate()?;
+        }
+        if self.take_syllables.len() > 20000 {
+            return Err("take syllable cache budget exceeded".into());
+        }
+        for analysis in self.take_syllables.values() {
+            if analysis.algorithm.is_empty()
+                || analysis.algorithm_version == 0
+                || analysis.source_digest.is_empty()
+                || analysis.source_spans_sec.len() > 20000
+            {
+                return Err("invalid take syllable analysis".into());
+            }
+            let mut previous_end = f64::NEG_INFINITY;
+            for span in &analysis.source_spans_sec {
+                if !span.start_sec.is_finite()
+                    || !span.end_sec.is_finite()
+                    || span.end_sec <= span.start_sec
+                    || span.start_sec < previous_end - 1e-9
+                {
+                    return Err("invalid take syllable span".into());
+                }
+                previous_end = span.end_sec;
             }
         }
         Ok(())
@@ -251,6 +348,7 @@ impl EditState {
             .iter()
             .map(|t| t.id.clone())
             .chain(self.params.keys().cloned())
+            .chain(self.param_line_blocks.keys().cloned())
             .collect();
         for old in &ids {
             // 存档里这一条的身份（缺席与空向量同义：没有可匹配的东西）。
@@ -369,6 +467,15 @@ impl EditState {
                     Some(track)
                 }
                 None if unbound.contains(&track.id) => Some(track.clone()),
+                None => None,
+            })
+            .collect();
+        candidate.param_line_blocks = self
+            .param_line_blocks
+            .iter()
+            .filter_map(|(id, blocks)| match mapping.get(id) {
+                Some((new, _)) => Some((new.clone(), blocks.clone())),
+                None if unbound.contains(id) => Some((id.clone(), blocks.clone())),
                 None => None,
             })
             .collect();
@@ -543,6 +650,12 @@ impl EditState {
             // 【T2：派生数组不从这里来】它们属于基线层；恢复路径由
             // `publish_baseline` / `install_baseline_locked` 负责。
         }
+        for (root, blocks) in &self.param_line_blocks {
+            if !self.unbound.contains(root) && timeline.tracks.iter().any(|track| &track.id == root)
+            {
+                merged.entry(root.clone()).or_default().param_line_blocks = Some(blocks.clone());
+            }
+        }
         timeline.params_by_root_track = merged;
         for track in &mut timeline.tracks {
             if self.unbound.contains(&track.id) {
@@ -560,6 +673,8 @@ impl EditState {
         // 否则会被下一次 `ensure_loaded` 的整份重建冲掉（颜色消失、共振峰变形失效）。
         for clip in &mut timeline.clips {
             let Some(local) = self.clip_local.get(&clip.id) else {
+                // clip_local 不是音节缓存的准入条件；两类字段独立播种。
+                self.apply_take_syllables(clip);
                 continue;
             };
             if let Some(color) = &local.color {
@@ -568,7 +683,95 @@ impl EditState {
             if local.formant_morph.is_some() {
                 clip.formant_morph = local.formant_morph.clone();
             }
+            self.apply_take_syllables(clip);
         }
+    }
+
+    fn apply_take_syllables(&self, clip: &mut hifishifter_kernel::state::Clip) {
+        for take in &mut clip.takes {
+            let key = TakeSyllableKey {
+                clip_id: clip.id.clone(),
+                take_id: take.id.clone(),
+            };
+            if let Some(analysis) = self.take_syllables.get(&key) {
+                // 存档里的缓存是跨重建的权威副本；ARA 重建时从旧 take 继承的
+                // 可能是更旧的一轮。按稳定键存在时以存档为准，避免回退。
+                take.syllable_analysis = Some(analysis.clone());
+            }
+        }
+    }
+
+    /// 把当前时间线上已存在的音节分析收进存档表。
+    ///
+    /// 【为什么保存前要收】分析命令写的是 `session.timeline` 的 take 字段，
+    /// 而 `EditState` 是另一份权威副本。只靠恢复时播种不会让新结果进入下一份
+    /// `getState` / ARA 存档；保存前收一次，两个容器才不会分叉。
+    pub fn capture_take_syllables(&mut self, timeline: &hifishifter_kernel::state::TimelineState) {
+        for clip in &timeline.clips {
+            for take in &clip.takes {
+                let Some(analysis) = take.syllable_analysis.clone() else {
+                    continue;
+                };
+                // 【为什么在这里校验】此方法会被保存路径调用；坏区间若进入存档，
+                // 下一次 `getState` 会让整份状态被拒，等于保存失败。逐条过滤比整份
+                // 丢安全得多，而且分析侧写出的本来就是合法区间。
+                if analysis.algorithm.is_empty()
+                    || analysis.algorithm_version == 0
+                    || analysis.source_digest.is_empty()
+                    || analysis.source_spans_sec.len() > 20000
+                {
+                    continue;
+                }
+                let spans_valid = analysis.source_spans_sec.windows(2).all(|pair| {
+                    pair[0].start_sec.is_finite()
+                        && pair[0].end_sec.is_finite()
+                        && pair[0].end_sec > pair[0].start_sec
+                        && pair[1].start_sec >= pair[0].end_sec - 1e-9
+                        && pair[1].start_sec.is_finite()
+                        && pair[1].end_sec.is_finite()
+                        && pair[1].end_sec > pair[1].start_sec
+                });
+                let single_valid = analysis.source_spans_sec.len() == 1
+                    && analysis.source_spans_sec[0].start_sec.is_finite()
+                    && analysis.source_spans_sec[0].end_sec.is_finite()
+                    && analysis.source_spans_sec[0].end_sec
+                        > analysis.source_spans_sec[0].start_sec;
+                if !(spans_valid || single_valid) {
+                    continue;
+                }
+                self.take_syllables.insert(
+                    TakeSyllableKey {
+                        clip_id: clip.id.clone(),
+                        take_id: take.id.clone(),
+                    },
+                    analysis,
+                );
+            }
+        }
+    }
+
+    /// 丢弃已不存在 Clip / Take 的音节缓存。
+    ///
+    /// 保存时宿主已经给出本次允许的 clip 集；在这里二次清理 take，避免删除
+    /// take 后旧缓存随工程一直增长，也避免把旧 take 的分析套到新 take。
+    pub fn prune_take_syllables(&mut self, timeline: &hifishifter_kernel::state::TimelineState) {
+        let live: std::collections::BTreeSet<(String, String)> = timeline
+            .clips
+            .iter()
+            .flat_map(|clip| {
+                clip.takes
+                    .iter()
+                    .map(move |take| (clip.id.clone(), take.id.clone()))
+            })
+            .collect();
+        self.take_syllables
+            .retain(|key, _| live.contains(&(key.clip_id.clone(), key.take_id.clone())));
+    }
+
+    /// 按"本组件允许的 clip id 集合"裁剪音节缓存。
+    pub fn prune_take_syllable_clips(&mut self, clips: &std::collections::BTreeSet<String>) {
+        self.take_syllables
+            .retain(|key, _| clips.contains(&key.clip_id));
     }
 
     /// 本构建**唯一**认得的插件状态版本。
@@ -579,11 +782,9 @@ impl EditState {
     /// `migrate_legacy_gaps` 这些迁移，全部只为"读回已经流通过的旧存档"存在 ——
     /// 没有终端用户，就没有需要兼容的存档。留着它们只会让"当前格式到底有几代"
     /// 变成一个没人答得清的问题。
-    ///
     /// 【边界：独立 App 不受影响】App 的工程文件是 `ProjectFile`（v6），与这份载荷
     /// **不是同一个格式**；kernel 的 `TimelineState` / `TrackParamsState` 仍必须
     /// 保持向后兼容（App 也读它们）。见第三轮方案的 §2.3.3。
-    /// 存档代际。
     ///
     /// 【为什么从 1 升到 2】第 1 代有两个互相矛盾的约定同时存在：`encode` 写的是
     /// `STATE_VERSION`（= 1），而 `restore` 把 `version == 1` 当成**旧格式**直接
@@ -598,6 +799,9 @@ impl EditState {
     /// （早期构建确实写过），而它的记录**没有持久身份**（按会话轨序号索引）。升到 2 之后，
     /// 旧档会被明确拒绝并给出可行动的理由，而不是被按序号猜着恢复 —— 猜错的后果是
     /// 把 A 轨的曲线套到 B 轨上。插件从未发布给终端用户，所以"不迁移"是允许的。
+    ///
+    /// 【音节缓存不升代际】`take_syllables` 缺省为空，是**可选缓存**；升代会让已经
+    /// 写出的第 2 代载荷被整份拒绝，而缺少缓存最多回退成整段 / MIDI 音符。
     pub(crate) const STATE_VERSION: u64 = 2;
 
     /// 有版本且有界的组件state；旧空state保持默认编辑。
@@ -606,6 +810,7 @@ impl EditState {
         self.authority.validate()?;
         self.validate_fades()?;
         self.validate_clip_local()?;
+        self.validate_take_syllables()?;
         // 【为什么不再拒绝"没有身份"的条目】此前这里返回 `Err`，而它唯一的调用方
         // `encode_archive` 把错误降级成 `Ok(Vec::new())` —— 宿主于是收到一份**空存档**
         // 并把它写进工程文件。一条空轨（没有 region、因此没有身份）就足以触发它，
@@ -636,7 +841,7 @@ impl EditState {
                 // 或还没迁移到权威的编辑）。此前这一句无条件执行，于是"曲线只在显示
                 // 数组里"的工程存档一次就永久丢掉它 —— 用户画了线、保存、重开就没了。
                 // 只剥真正的派生缓存（分析基线），那是可以重算的。
-                let params = if authority_present {
+                let mut params = if authority_present {
                     let mut params = params;
                     params.pitch_edit.clear();
                     params.tension_edit.clear();
@@ -646,6 +851,10 @@ impl EditState {
                 } else {
                     crate::editor::capture_edits::strip_derived_curves(&params)
                 };
+                // The root map is authoritative; params is only a view cache.
+                if trimmed.param_line_blocks.contains_key(&root) {
+                    params.param_line_blocks = None;
+                }
                 (root, params)
             })
             .collect();
@@ -705,6 +914,7 @@ impl EditState {
             .collect();
         restored.needs_rebind = !restored.tracks.is_empty() || !restored.params.is_empty();
         restored.validate_clip_local()?;
+        restored.validate_take_syllables()?;
         restored.revision = self
             .revision
             .max(restored.revision)
@@ -768,6 +978,85 @@ mod tests {
             timeline.clips[0].formant_morph.is_some(),
             "共振峰变形是渲染输入，必须随投影播种"
         );
+    }
+
+    fn syllable_analysis() -> hifishifter_kernel::pitch_analysis::TakeSyllableAnalysis {
+        hifishifter_kernel::pitch_analysis::TakeSyllableAnalysis {
+            algorithm: hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM.into(),
+            algorithm_version: hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM_VERSION,
+            source_digest: "digest".into(),
+            source_spans_sec: vec![
+                hifishifter_kernel::pitch_analysis::SyllableSpan {
+                    start_sec: 0.1,
+                    end_sec: 0.3,
+                },
+                hifishifter_kernel::pitch_analysis::SyllableSpan {
+                    start_sec: 0.3,
+                    end_sec: 0.6,
+                },
+            ],
+        }
+    }
+
+    /// 音节缓存跨 `encode` / `restore` 往返，且在共同投影入口重新播种到 Take。
+    #[test]
+    fn take_syllable_analysis_survives_plugin_state_round_trip() {
+        let mut edits = EditState::default();
+        edits.take_syllables.insert(
+            TakeSyllableKey {
+                clip_id: "clip-a".into(),
+                take_id: "take-a".into(),
+            },
+            syllable_analysis(),
+        );
+        // 冷恢复路径只有在 `needs_rebind == false` 且无 unbound 时才应套用；
+        // 这里直接验证纯存档往返 + 播种，不伪造宿主身份。
+        let keys = TakeSyllableKey {
+            clip_id: "clip-a".into(),
+            take_id: "take-a".into(),
+        };
+        assert_eq!(edits.take_syllables.get(&keys), Some(&syllable_analysis()));
+        let bytes = edits.encode().expect("encode");
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["version"], 2);
+        let mut restored = EditState::default();
+        restored.restore(&bytes).expect("restore");
+        assert_eq!(restored.take_syllables.len(), 1);
+
+        let mut timeline = host();
+        timeline.clips = vec![serde_json::from_value(serde_json::json!({
+            "id":"clip-a","track_id":"track","name":"clip","start_sec":0,"length_sec":1,
+            "takes":[{"id":"take-a","source_start_sec":0,"source_end_sec":1}],
+            "active_take_id":"take-a"
+        }))
+        .unwrap()];
+        timeline.normalize_clip_takes();
+        restored.needs_rebind = false;
+        restored.unbound.clear();
+        restored.apply(&mut timeline);
+        assert_eq!(
+            timeline.clips[0].active_take().syllable_analysis,
+            Some(syllable_analysis())
+        );
+    }
+
+    /// 保存前收索引必须把 live 时间线上的分析带进 EditState 的权威表。
+    #[test]
+    fn capture_collects_live_take_syllables() {
+        let mut edits = EditState::default();
+        let mut timeline = host();
+        timeline.clips = vec![serde_json::from_value(serde_json::json!({
+            "id":"clip-a","track_id":"track","name":"clip","start_sec":0,"length_sec":1,
+            "takes":[{"id":"take-a","source_start_sec":0,"source_end_sec":1,
+                      "syllable_analysis": syllable_analysis()}],
+            "active_take_id":"take-a"
+        }))
+        .unwrap()];
+        edits.capture_take_syllables(&timeline);
+        assert!(edits.take_syllables.contains_key(&TakeSyllableKey {
+            clip_id: "clip-a".into(),
+            take_id: "take-a".into(),
+        }));
     }
     #[test]
     fn invalid_curve_and_unknown_track_are_rejected() {

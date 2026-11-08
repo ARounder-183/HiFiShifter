@@ -182,6 +182,53 @@ export interface HitTestArgs {
 }
 
 /**
+ * 左键按下时的「重叠区控件降级」判定。
+ *
+ * 【要解决的问题】重叠区的 `hitOverlapControl` 按位置把命中改写成淡变角 /
+ * 交叉点抓手；这些控件在无修饰键单击时不改变选中，用户看到的是「左键点不中
+ * clip，右键却能弹菜单」。右键需要保留淡变专属菜单，因此只在**左键按下**
+ * 路径把无修饰键的重叠区命中降级为 clip 本体。
+ *
+ * 规则：
+ * - 只在 `fromOverlapRegion` 命中上生效（普通淡变角 / 边缘的手感不变）；
+ * - 任编辑修饰键（Alt / Ctrl / Cmd / Shift）按住时保留控件；
+ * - header 命中不降级（header 控件有自己的消费语义）。
+ *
+ * @param hit 原始命中结果。
+ * @param modifiers 按下时的修饰键快照。
+ * @returns 应采用的命中结果；不降级时原样返回。
+ */
+export function downgradeOverlapHitForPlainLeftPress<
+    T extends {
+        readonly kind: string;
+        readonly region?: ClipHitRegion;
+        readonly fromOverlapRegion?: boolean;
+        readonly clip?: { readonly id: string };
+        readonly laterClipId?: string;
+    },
+>(
+    hit: T,
+    modifiers: {
+        readonly altKey: boolean;
+        readonly ctrlKey: boolean;
+        readonly metaKey: boolean;
+        readonly shiftKey: boolean;
+    },
+): T {
+    if (hit.kind !== "clip") return hit;
+    if (hit.fromOverlapRegion !== true) return hit;
+    if (hit.region === "header") return hit;
+    if (modifiers.altKey || modifiers.ctrlKey || modifiers.metaKey || modifiers.shiftKey) {
+        return hit;
+    }
+    return {
+        ...hit,
+        region: "body" as const,
+        fromOverlapRegion: false,
+    } as T;
+}
+
+/**
  * 在轨道内二分查找覆盖 `sec` 的 clip。
  *
  * 规则：取「最后一个 startSec <= sec」的 clip，再校验 sec 是否落在其长度内

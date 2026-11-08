@@ -21,7 +21,11 @@
  */
 import { describe, expect, test } from "vitest";
 
-import { restoreLiveEditRange, writeDenseIntoLiveWindow } from "./liveEditWindow";
+import {
+    liveEditWindowMatchesParamView,
+    restoreLiveEditRange,
+    writeDenseIntoLiveWindow,
+} from "./liveEditWindow";
 import { clampParamWriteValue, DYN_FOLLOW_ORIG } from "./paramRanges";
 import type { StrokeMode } from "./types";
 
@@ -69,6 +73,27 @@ function numericArray(length: number, seed: number): number[] {
 }
 
 describe("writeDenseIntoLiveWindow", () => {
+    test("只有窗口键和曲线值都追上 live 覆盖时才允许撤覆盖", () => {
+        expect(
+            liveEditWindowMatchesParamView({
+                live: { key: "window-a", edit: [60, 61, 62] },
+                paramView: { key: "window-a", edit: [60, 61, 62] },
+            }),
+        ).toBe(true);
+        expect(
+            liveEditWindowMatchesParamView({
+                live: { key: "window-a", edit: [60, 61, 62] },
+                paramView: { key: "window-a", edit: [60, 61, 60] },
+            }),
+        ).toBe(false);
+        expect(
+            liveEditWindowMatchesParamView({
+                live: { key: "window-a", edit: [60, 61, 62] },
+                paramView: { key: "window-b", edit: [60, 61, 62] },
+            }),
+        ).toBe(false);
+    });
+
     test("与旧的全窗口扫描逐值等价（覆盖各种步长与越界组合）", () => {
         const cases: Array<{
             startFrame: number;

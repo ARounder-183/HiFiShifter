@@ -210,9 +210,10 @@ pub fn hifigan_tension_curve_for_clip<'a>(
 /// - `clip_start_sec`：clip 在时间轴上的起点（秒）
 /// 气声分离开关闭时，需要从下发数据中剥离的曲线键。
 ///
-/// # 为什么是这两个
+/// # 为什么是这三个
 /// - `breath_gain`：噪声支的混入增益。噪声支只存在于 HNSEP 分离路径。
 /// - `hifigan_tension`：Rd 张力。它只重塑**谐波**支，同样依赖分离。
+/// - `hifigan_growl`：GRWC 怒音。它只调制**谐波**支，同样依赖分离。
 ///
 /// `formant_shift_cents` **不在**其中：共振峰走 mel 阶段的 `keyShift`，
 /// 与 HNSEP 无关，关闭分离时照常可用。
@@ -220,7 +221,8 @@ pub fn hifigan_tension_curve_for_clip<'a>(
 /// # 命名
 /// 键名与 `renderer::chain` 的参数描述符 id 一致；常量在此集中定义，
 /// 避免两处字符串字面量漂移。
-pub const HIFIGAN_SEPARATION_GATED_CURVES: [&str; 2] = ["breath_gain", "hifigan_tension"];
+pub const HIFIGAN_SEPARATION_GATED_CURVES: [&str; 3] =
+    ["breath_gain", "hifigan_tension", "hifigan_growl"];
 
 /// 按开关状态剥离被门禁的曲线，返回需要**下发**给处理器的曲线集合。
 ///
@@ -257,13 +259,19 @@ pub const HIFIGAN_SEPARATION_GATED_CURVES: [&str; 2] = ["breath_gain", "hifigan_
 pub const HIFIGAN_COMPOSE_GATED_CURVES: [&str; 3] =
     ["breath_gain", "hifigan_tension", "formant_shift_cents"];
 
+/// Compose 关闭时必须剥离的曲线，另加怒音。保持单独常量是为了让
+/// `HIFIGAN_COMPOSE_GATED_CURVES` 的既有契约（三条）不被无意改变，
+/// 同时让新增的怒音有唯一可检索的归属。
+const HIFIGAN_COMPOSE_GATED_GROWL: &str = "hifigan_growl";
+
 /// 按 **Compose 开关**与**气声分离开关**的状态剥离曲线，返回下发给处理器的集合。
 ///
 /// # 两道门禁
-/// 1. **Compose 关闭** ⇒ 剥离 [`HIFIGAN_COMPOSE_GATED_CURVES`]（共振峰/气声/张力）。
+/// 1. **Compose 关闭** ⇒ 剥离 [`HIFIGAN_COMPOSE_GATED_CURVES`]（共振峰/气声/张力）
+///    与 `hifigan_growl`。
 ///    这是"听到原音频"的**合成侧兜底**：即使处理器因其它原因（音高参考块、
 ///    子轨共振峰偏移）仍需运行，也读不到这些曲线。
-/// 2. **气声分离开关关闭** ⇒ 剥离 [`HIFIGAN_SEPARATION_GATED_CURVES`]（气声/张力）。
+/// 2. **气声分离开关关闭** ⇒ 剥离 [`HIFIGAN_SEPARATION_GATED_CURVES`]（气声/张力/怒音）。
 ///    注意共振峰**不**依赖分离开关，故不在其中。
 ///
 /// # 为什么两道门禁集中在一个函数里
@@ -279,6 +287,15 @@ pub fn gate_hifigan_effect_curves<'a>(
     compose_enabled: bool,
 ) -> std::borrow::Cow<'a, HashMap<String, Vec<f32>>> {
     let gated: &[&str] = if !compose_enabled {
+        // 拼成一次性切片会分配；这里用两个阶段剥离，常态仍走 Borrowed。
+        if curves.contains_key(HIFIGAN_COMPOSE_GATED_GROWL) {
+            let mut stripped = curves.clone();
+            for key in HIFIGAN_COMPOSE_GATED_CURVES {
+                stripped.remove(key);
+            }
+            stripped.remove(HIFIGAN_COMPOSE_GATED_GROWL);
+            return std::borrow::Cow::Owned(stripped);
+        }
         &HIFIGAN_COMPOSE_GATED_CURVES
     } else if extra_param_enabled(extra_params, crate::renderer::HIFIGAN_SEPARATION_PARAM_ID) {
         return std::borrow::Cow::Borrowed(curves);
@@ -310,6 +327,29 @@ pub fn hifigan_tension_active_for_clip(
     let curve = hifigan_tension_curve_for_clip(entry, clip);
     curve_differs_from_default_in_range(
         curve,
+        entry.frame_period_ms.max(0.1),
+        clip_start_sec,
+        clip_start_sec + clip.length_sec.max(0.0),
+        0.0,
+    )
+}
+
+/// 怒音曲线在该 clip 区间内是否活跃（决策侧判据）。
+///
+/// 与 [`hifigan_tension_active_for_clip`] 同构：开关关闭、或曲线在该区间内
+/// 全部为 0 时返回 false。它只决定是否预渲染/是否走内部拉伸；真正施加在
+/// `renderer::chain::HiFiGanStage::apply_growl`。
+pub fn hifigan_growl_active_for_clip(
+    entry: &crate::state::TrackParamsState,
+    clip: &crate::state::Clip,
+    clip_start_sec: f64,
+) -> bool {
+    let extra_params = clip.extra_params.as_ref().unwrap_or(&entry.extra_params);
+    if !extra_param_enabled(extra_params, crate::renderer::HIFIGAN_SEPARATION_PARAM_ID) {
+        return false;
+    }
+    curve_differs_from_default_in_range(
+        extra_curve_for_clip(entry, clip, "hifigan_growl"),
         entry.frame_period_ms.max(0.1),
         clip_start_sec,
         clip_start_sec + clip.length_sec.max(0.0),
@@ -501,18 +541,19 @@ pub fn hifigan_formant_shift_active_for_clip(
     )
 }
 
-/// 轨道级 HiFiGAN 效果（气声 / 张力 / 共振峰）的生效标志。
+/// 轨道级 HiFiGAN 效果（气声 / 张力 / 怒音 / 共振峰）的生效标志。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct HifiganEffectFlags {
     breath: bool,
     tension: bool,
     formant: bool,
+    growl: bool,
 }
 
 impl HifiganEffectFlags {
     /// 是否有任一轨道级效果生效。
     fn any(self) -> bool {
-        self.breath || self.tension || self.formant
+        self.breath || self.tension || self.formant || self.growl
     }
 }
 
@@ -550,6 +591,7 @@ fn hifigan_effect_flags(
         breath: track_requests_extra_processing(algo, entry, clip, clip_start_sec),
         tension: hifigan_tension_active_for_clip(entry, clip, clip_start_sec),
         formant: hifigan_formant_shift_active_for_clip(entry, clip, clip_start_sec),
+        growl: hifigan_growl_active_for_clip(entry, clip, clip_start_sec),
     }
 }
 
@@ -1152,12 +1194,18 @@ mod tests {
         let mut curves = HashMap::new();
         curves.insert("breath_gain".to_string(), vec![0.5f32, 0.8]);
         curves.insert("hifigan_tension".to_string(), vec![80.0f32, -40.0]);
+        curves.insert("hifigan_growl".to_string(), vec![70.0f32]);
         curves.insert("formant_shift_cents".to_string(), vec![120.0f32]);
 
         // 即使分离开关是**开**的，Compose 关闭也必须全部剥离。
         let gated = gate_hifigan_effect_curves(&curves, &params_with_separation(true), false);
 
-        for key in ["breath_gain", "hifigan_tension", "formant_shift_cents"] {
+        for key in [
+            "breath_gain",
+            "hifigan_tension",
+            "hifigan_growl",
+            "formant_shift_cents",
+        ] {
             assert!(
                 !gated.contains_key(key),
                 "Compose 关闭必须剥离 {key}，否则用户仍能听到该改动"
@@ -1190,15 +1238,16 @@ mod tests {
         }
     }
 
-    /// 关闭开关必须剥掉 `breath_gain` 与 `hifigan_tension`。
+    /// 关闭开关必须剥掉 `breath_gain`、`hifigan_tension` 与 `hifigan_growl`。
     ///
     /// 这是需求「不参与合成」的**合成侧**核心断言：处理器收不到这两条曲线，
     /// 无论其内部逻辑如何都不会生效，分离路径也不会被触发。
     #[test]
-    fn separation_off_strips_both_gated_curves() {
+    fn separation_off_strips_all_gated_curves() {
         let mut curves = HashMap::new();
         curves.insert("breath_gain".to_string(), vec![0.5f32, 0.8]);
         curves.insert("hifigan_tension".to_string(), vec![80.0f32, -40.0]);
+        curves.insert("hifigan_growl".to_string(), vec![70.0f32]);
         // 对照项：共振峰与分离无关，必须保留
         curves.insert("formant_shift_cents".to_string(), vec![120.0f32]);
 
@@ -1212,6 +1261,10 @@ mod tests {
             !gated.contains_key("hifigan_tension"),
             "switch off must strip hifigan_tension so Rd tension cannot apply"
         );
+        assert!(
+            !gated.contains_key("hifigan_growl"),
+            "switch off must strip hifigan_growl so GRWC growl cannot apply"
+        );
         assert_eq!(
             gated.get("formant_shift_cents").map(|v| v.as_slice()),
             Some([120.0f32].as_slice()),
@@ -1221,10 +1274,11 @@ mod tests {
 
     /// 开启开关必须**原样保留**两条曲线（不得误剥）。
     #[test]
-    fn separation_on_keeps_both_curves() {
+    fn separation_on_keeps_all_gated_curves() {
         let mut curves = HashMap::new();
         curves.insert("breath_gain".to_string(), vec![0.5f32]);
         curves.insert("hifigan_tension".to_string(), vec![80.0f32]);
+        curves.insert("hifigan_growl".to_string(), vec![70.0f32]);
 
         let gated = gate_hifigan_effect_curves(&curves, &params_with_separation(true), true);
 
@@ -1235,6 +1289,10 @@ mod tests {
         assert_eq!(
             gated.get("hifigan_tension").map(|v| v.as_slice()),
             Some([80.0f32].as_slice())
+        );
+        assert_eq!(
+            gated.get("hifigan_growl").map(|v| v.as_slice()),
+            Some([70.0f32].as_slice())
         );
     }
 
@@ -2178,6 +2236,7 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
     let extra_processing = fx.breath;
     let tension_processing = fx.tension;
     let formant_processing = fx.formant;
+    let growl_processing = fx.growl;
 
     // 若这类效果启用而 Mel Stretch 又被选中，外部预拉伸必须跳过，让
     // processor 使用真实 playback_rate 完成内部时间伸缩。
@@ -2185,6 +2244,7 @@ pub fn maybe_apply_pitch_edit_to_clip_segment(
         && (extra_processing
             || tension_processing
             || formant_processing
+            || growl_processing
             || has_child_formant_offset);
 
     // Compose 关闭、且没有音高参考块、也没有子轨共振峰偏移时，不进入处理器。
@@ -2750,15 +2810,16 @@ pub fn does_clip_need_processor_render(
     // 例外：needs_processor_stretch 时必须触发预渲染以执行其内部拉伸。
     // 例外：has_pitch_adjustment_active 时，音高参考块提供的 MIDI 音高数据已写入 pitch_edit，
     //       即使 pitch_edit_user_modified 为 false 也应触发渲染。
-    debug_eprintln!("[pitch_edit] does_clip_need_processor_render: clip={} user_modified={} has_adj={} extra={} tension={} formant={} child_off={} child_formant={} stretch={}",
+    debug_eprintln!("[pitch_edit] does_clip_need_processor_render: clip={} user_modified={} has_adj={} extra={} tension={} formant={} growl={} child_off={} child_formant={} stretch={}",
         clip.id, entry.pitch_edit_user_modified, entry.has_pitch_adjustment_active,
-        fx.breath, fx.tension, fx.formant, has_child_pitch_offset,
+        fx.breath, fx.tension, fx.formant, fx.growl, has_child_pitch_offset,
         has_child_formant_offset, needs_processor_stretch);
     if !entry.pitch_edit_user_modified
         && !entry.has_pitch_adjustment_active
         && !fx.breath
         && !fx.tension
         && !fx.formant
+        && !fx.growl
         && !has_child_pitch_offset
         && !has_child_formant_offset
         && !needs_processor_stretch
@@ -2769,6 +2830,7 @@ pub fn does_clip_need_processor_render(
     if fx.breath
         || fx.tension
         || fx.formant
+        || fx.growl
         || has_child_pitch_offset
         || has_child_formant_offset
         || needs_processor_stretch

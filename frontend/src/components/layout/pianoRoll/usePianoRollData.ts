@@ -96,6 +96,21 @@ export function usePianoRollData(args: {
     }
     const liveEditDeferral: LiveEditDeferral = liveEditDeferralRef.current;
     const [paramView, setParamView] = useState<ParamViewSegment | null>(null);
+    /**
+     * Backend-only monotonic revision for `paramView`.
+     *
+     * `paramView.key` intentionally identifies only the window geometry, so a
+     * forced refresh of the same window keeps the same key. Block commits must
+     * still know that an authoritative payload (not their own optimistic local
+     * echo) has arrived before retiring a preview snapshot.
+     */
+    const [authorityRevision, setAuthorityRevision] = useState(0);
+    /**
+     * A response is authoritative for a commit only when the request itself was
+     * issued after that commit. A response from an older request can arrive
+     * after the commit and must not release its preview.
+     */
+    const authorityAppliedRequestSeqRef = useRef(0);
     // 副参数曲线（与 edit 区分，用于叠加显示）
     const [secondaryParamViews, setSecondaryParamViews] = useState<
         Partial<Record<ParamName, ParamViewSegment>>
@@ -825,6 +840,8 @@ export function usePianoRollData(args: {
                             ? (payload.edit_sentinel ?? undefined)
                             : undefined,
                     });
+                    authorityAppliedRequestSeqRef.current = reqId;
+                    setAuthorityRevision((value) => value + 1);
                     lastAppliedForceParamFetchTokenRef.current = localForceParamFetchToken;
                     invalidate();
 
@@ -984,6 +1001,8 @@ export function usePianoRollData(args: {
                         ? (payload.edit_sentinel ?? undefined)
                         : undefined,
                 });
+                authorityAppliedRequestSeqRef.current = reqId;
+                setAuthorityRevision((value) => value + 1);
 
                 if (Math.abs(fpRes - fpMs) > 1e-3) {
                     const retryKey = `${fpKey}|${fpMs}`;
@@ -1246,8 +1265,18 @@ export function usePianoRollData(args: {
         setForceParamFetchToken((x) => x + 1);
     }, []);
 
+    const getAuthorityWatermark = useCallback(
+        () => ({
+            issuedRequestSeq: fetchReqIdRef.current,
+            appliedRequestSeq: authorityAppliedRequestSeqRef.current,
+        }),
+        [],
+    );
+
     return {
         paramView,
+        authorityRevision,
+        getAuthorityWatermark,
         setParamView,
         secondaryParamViews,
         referencePitchViews,

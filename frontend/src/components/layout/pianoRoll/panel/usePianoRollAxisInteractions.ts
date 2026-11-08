@@ -159,7 +159,7 @@ export function usePianoRollAxisInteractions({
             window.removeEventListener("blur", onPointerUp);
             stopNote();
         };
-    }, [editParam, pitchViewRef]);
+    }, [axisWrapRef, editParam, pitchViewRef, viewSizeRef]);
 
     // ── 纵轴标尺：左键点击切换展示单位（音量 / 动态）──────────────────────────
     //
@@ -183,7 +183,7 @@ export function usePianoRollAxisInteractions({
         };
         el.addEventListener("click", onClick);
         return () => el.removeEventListener("click", onClick);
-    }, [dispatch, editParam]);
+    }, [axisWrapRef, dispatch, editParam]);
 
     // ── 纵轴标尺的悬浮读数（`弹出展示参数`）──────────────────────────────────
     //
