@@ -185,6 +185,30 @@ CLAP 形态下这个包装对象的 `+0x08`（底层渲染器对象）**从来�
 3. 加载音频 item → `createPlaybackRegion` → 分配区域 → 循环走到那个空槽位；
 4. 登记例程对 NULL 不做检查 → `mov rcx,[0+8]` → `0xC0000005`。
 
+### 4.6 两种放置位置，各缺另一半（take FX 实验）
+
+REAPER 的 ARA 既支持"轨道 FX"也支持"媒体项 take FX"。把同一个模块分别插到这两处，
+观察到的角色分配正好互补 —— 而两处都照样崩：
+
+| 放置位置 | 宿主分配的 assigned | 我们交出的接口 | 崩溃点 |
+| --- | --- | --- | --- |
+| 轨道 FX | `[editor,view]` | `playback=false editor=true view=true` | `0x14005a677`（登记 playback 渲染器时读到 NULL） |
+| 媒体项 take FX | `[playback,view]` | `playback=true editor=false view=true` | `0x140056b89`（`movzx edi, byte [rdx+0x58]`，`rdx=0`：登记 editor 渲染器时读到 NULL） |
+
+take FX 这一档尤其说明问题：**我们确实当上了 playback 渲染器**（`playback=true`，
+宿主也给了授权 PCM），但 REAPER 在创建 region sequence 之后要把它挂到 editor 渲染器上，
+而那个槽位的实现指针同样是 NULL —— 因为没有任何实例以 `editor` 角色绑定过。
+
+**关键结论：REAPER 为每份 ARA 文档同时准备 editor 与 playback 两个槽位，每个槽位只能由
+一次独立的 bind 填充；而 CLAP 形态下宿主只创建一次实例，所以无论插在哪里，总有一个
+槽位是空的。** 这也解释了为什么"三个接口全给"（见 §3）在两种放置位置下都救不了：
+槽位不是从我们交出的 `ARAPlugInExtensionInstance` 里取的。
+
+补充取证：宿主在 CLAP 绑定点把 `knownRoles` 硬编码为 `7`（playback|editor|view），
+而 `assignedRoles` 是一个全局角色档位（`0x140EAB774`）的纯函数 —— 该档位由"这次要建
+的是 editor 实例还是 playback 实例"写入（`0x1404b93b3` 写 1、`0x1404b948c` 写 2，
+文档侧路径写 `5/6`）。也就是说角色分配完全由宿主决定，插件侧没有任何输入能改变它。
+
 ## 5. 处置
 
 **只应答 ARACLAP.h 定稿的 ID，明确拒绝 REAPER 的私有草案 ID。**
@@ -232,7 +256,10 @@ CLAP 形态下这个包装对象的 `+0x08`（底层渲染器对象）**从来�
 2. 验收 ARA 时，工程里**必须有音频 item**。空工程是这条缺陷最好的伪装。
 3. 判断"宿主崩在谁身上"，看三点：崩溃模块是不是宿主自身、偏移是否恒定、以及
    把插件侧对应能力关掉后是否消失。三者齐备就应当去反汇编宿主，而不是继续改插件。
-4. **判断宿主 ARA 实现是否完整的唯一外部读数，是"它为一篇文档建了几个插件实例"。**
+4. **验收 ARA 要两种放置位置都试。** 轨道 FX 与媒体项 take FX 在 REAPER 里分配的角色是
+   互补的（前者 editor、后者 playback）。只测一种会得出"只缺一个角色"的错误结论 ——
+   实际是两处各缺另一半。
+5. **判断宿主 ARA 实现是否完整的唯一外部读数，是"它为一篇文档建了几个插件实例"。**
    `ARACLAP.h` 规定一个实例只承担一组角色；只建一个实例却要求多角色的宿主，
    必然在渲染路径上缺东西。日志里 `create_plugin` 的行数就是这条读数。
 5. 需要真正的 ARA 时用 VST3 形态；ARA SDK 定稿协议的 CLAP 宿主（若将来出现）仍会
