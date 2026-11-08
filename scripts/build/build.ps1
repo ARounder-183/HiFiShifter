@@ -45,6 +45,21 @@ function Assert-Ok($what) {
     if ($LASTEXITCODE) { throw "$what 失败（退出码 $LASTEXITCODE）" }
 }
 
+# 【为什么组装完还要逐字节比一次】"拷进载荷的"必须就是"刚编出来的"那一份字节。
+# 这条判据拦的不是编译错误，而是**顺序缺陷**：只要在组装之后还有别的 cargo 调用碰过
+# 同一个 target 目录，载荷里就会悄悄换成另一版引擎，而构建一切正常、产物也能加载 ——
+# 只有事后比对哈希才发现对不上，那时已经无从追溯它到底来自哪次构建。
+function Assert-SameBytes([string]$Expected, [string]$Actual) {
+    if (!(Test-Path -LiteralPath $Expected)) { throw "缺少构建产物：$Expected" }
+    if (!(Test-Path -LiteralPath $Actual)) { throw "缺少已组装的载荷：$Actual" }
+    $wanted = (Get-FileHash -LiteralPath $Expected -Algorithm SHA256).Hash
+    $shipped = (Get-FileHash -LiteralPath $Actual -Algorithm SHA256).Hash
+    if ($wanted -ne $shipped) {
+        throw ("载荷与构建产物不一致：{0}（构建 {1}）vs {2}（载荷 {3}）；" +
+            "说明组装之后还有别的构建重写过 target 目录") -f $Expected, $wanted, $Actual, $shipped
+    }
+}
+
 # 构建需要的外部工具：缺失时给一句能照做的错误，而不是让 PowerShell 抛
 # "无法将 xxx 项识别为 cmdlet"（那对新克隆仓库的人没有任何指向性）。
 foreach ($tool in 'cargo', 'npm') {
@@ -161,13 +176,28 @@ if ($Target -eq 'All' -or $Target -eq 'App') {
     }
 }
 
+# ── 插件引擎与 CLAP 模块：一次编译，两处组装 ────────────────────────────────
+#
+# 【为什么两种格式必须在**同一次** cargo 调用里编完，再分别组装载荷】
+# `hifishifter-clap` 依赖 `hifishifter-plugin`，而 cargo 会把同一次调用里
+# `ara2-bridge` 的 feature 合并成 `vst3 + clap`。于是"先组装 VST3、再编译 CLAP"
+# 会让 CLAP 那一步在同一个 target 目录里把 `hifishifter_plugin.dll` 原样重写一遍：
+# 内容等价，但安装包里的引擎从此不再由"组装它的那次构建"产出 —— 事后比对哈希、
+# 追溯来源都对不上。并成一次调用之后，两个产物来自同一个构建计划，顺序不再影响结果；
+# 这也是 `hifishifter-clap` 的 Cargo.toml 里"必须与 VST3/App 使用同一份 feature"
+# 那句话唯一可靠的落法。
+if ($Target -eq 'All' -or $Target -eq 'Plugin' -or $Target -eq 'Clap') {
+    $pluginBuild = @(
+        'build', '--manifest-path', 'backend\Cargo.toml',
+        '-p', 'hifishifter-plugin', '-p', 'hifishifter-clap'
+    )
+    if ($Configuration -eq 'Release') { $pluginBuild += '--release' }
+    cargo @pluginBuild
+    Assert-Ok '插件引擎与 CLAP 模块构建'
+}
+
 # ── VST3 ────────────────────────────────────────────────────────────────────
 if ($Target -eq 'All' -or $Target -eq 'Plugin') {
-    $pluginArgs = @('build', '--manifest-path', 'backend\Cargo.toml', '-p', 'hifishifter-plugin')
-    if ($Configuration -eq 'Release') { $pluginArgs += '--release' }
-    cargo @pluginArgs
-    Assert-Ok '插件引擎构建'
-
     $bundle = Join-Path $dist 'HiFiShifter.vst3'
     $module = Join-Path $bundle 'Contents\x86_64-win'
     $resources = Join-Path $bundle 'Contents\Resources'
@@ -183,6 +213,7 @@ if ($Target -eq 'All' -or $Target -eq 'Plugin') {
     New-Item -ItemType Directory -Force "$resources\frontend\assets" | Out-Null
 
     Copy-Item "$built\hifishifter_plugin.dll" "$module\HiFiShifterEngine.dll"
+    Assert-SameBytes "$built\hifishifter_plugin.dll" "$module\HiFiShifterEngine.dll"
     # DLL 白名单刻意不含 vslib：它是独立 App 的闭源运行时，插件不分发。
     foreach ($dll in 'onnxruntime.dll', 'DirectML.dll', 'SoundTouchDLL.dll') {
         if (Test-Path "$built\$dll") { Copy-Item "$built\$dll" $module }
@@ -217,13 +248,10 @@ if ($Configuration -eq 'Debug') {
 }
 
 if ($Target -eq 'All' -or $Target -eq 'Plugin' -or $Target -eq 'Clap') {
-    $clapArgs = @('build', '--manifest-path', 'backend\Cargo.toml', '-p', 'hifishifter-clap')
-    if ($Configuration -eq 'Release') { $clapArgs += '--release' }
-    cargo @clapArgs
-    Assert-Ok 'CLAP 模块构建'
     $clapModule = Join-Path $built 'hifishifter_clap.dll'
     if (!(Test-Path $clapModule)) { throw "缺少 $clapModule" }
     Copy-Item $clapModule (Join-Path $dist 'HiFiShifter.clap') -Force
+    Assert-SameBytes $clapModule (Join-Path $dist 'HiFiShifter.clap')
     # 单文件 CLAP 的资源必须与模块同级（ResourceLayout::Sibling）：前端产物 +
     # 模型清单。少了任何一个，宿主能扫描到插件却只会得到一块空白窗口。
     $clapRes = Join-Path $dist 'HiFiShifter-resources'
@@ -295,6 +323,8 @@ function Write-Vst3Stage {
     New-Item -ItemType Directory -Force (Join-Path $vst3 'Contents') | Out-Null
     Copy-Item $winModule (Join-Path $vst3 'Contents\x86_64-win') -Recurse
     Copy-Item $resources (Join-Path $vst3 'Contents\Resources') -Recurse
+    # 安装器打进去的就是这两个目录里的一切：载荷边界上再比一次字节。
+    Assert-SameBytes "$built\hifishifter_plugin.dll" (Join-Path $vst3 'Contents\x86_64-win\HiFiShifterEngine.dll')
 
     # 兜底：暂存区里只允许出现 x86_64-win 这一个架构目录。若将来新增别的本平台架构，
     # 要在这里显式加入白名单，而不是把 Copy-Item * 放回来。
@@ -309,6 +339,7 @@ function Write-Vst3Stage {
 function Write-ClapStage {
     $clap = Join-Path $stage 'HiFiShifter.clap'
     Copy-Item (Join-Path $dist 'HiFiShifter.clap') $clap -Force
+    Assert-SameBytes (Join-Path $built 'hifishifter_clap.dll') $clap
     Write-Host "CLAP 载荷：$clap" -ForegroundColor Green
     # 【为什么必须连资源目录一起暂存】CLAP 在 Windows 上是单文件模块，前端与
     # 模型清单按 ResourceLayout::Sibling 放在同级的 HiFiShifter-resources。
@@ -417,6 +448,19 @@ if ($Target -eq 'Installer') {
         if (!(Test-Path (Join-Path $stage $required))) {
             throw "dist\_stage\installer 缺少 $required：先跑 .\scripts\build\build.ps1 -Target All"
         }
+    }
+}
+
+# 【打安装器之前的最后一道：暂存区的插件载荷必须就是 target 里那一份字节】
+# 这条判据专门覆盖"只重建了某一种格式"的用法：哪怕只跑 -Target Clap，只要 target 里
+# 存在引擎，就在这里比对一次 —— 顺序缺陷不会再以"安装包带着上一版引擎"的形式溜过去。
+# （-Target Installer 有意复用既有暂存区，那时 target 可能为空，比对自动跳过。）
+foreach ($payload in @(
+    @{ Built = (Join-Path $built 'hifishifter_plugin.dll'); Staged = (Join-Path $stage 'vst3\Contents\x86_64-win\HiFiShifterEngine.dll') },
+    @{ Built = (Join-Path $built 'hifishifter_clap.dll'); Staged = (Join-Path $stage 'HiFiShifter.clap') }
+)) {
+    if (Test-Path -LiteralPath $payload.Built) {
+        Assert-SameBytes $payload.Built $payload.Staged
     }
 }
 
