@@ -10,8 +10,13 @@
 /// 【为什么是相对容差而不是纯绝对】`Clip::playback_rate` 在 kernel 里是 f32，写回
 /// 前置检查拿它与 REAPER 的 f64 `D_PLAYRATE` 比 —— f32 往返本身就有 ~1e-7 相对误差。
 /// 纯绝对阈值会把这种正常舍入判成"宿主变了"。相对项吸收它，绝对项兜住接近 0 的量。
+///
+/// 【实现在内核】几何分类器（`hifishifter_kernel::editor::param_geometry`）用的是
+/// 同一条判据 —— 它判的是"这一次宿主编辑算不算一次移动/拉伸"，与写回前置检查判的是
+/// 同一件事。两份阈值会让"分类说没动、写回说动了"（或反过来）成为可能，所以这里
+/// 只做转调，阈值只有 `hifishifter_kernel::host_value::compatible` 一处。
 pub(crate) fn host_value_compatible(a: f64, b: f64) -> bool {
-    a.is_finite() && b.is_finite() && (a - b).abs() <= 1e-6 + 1e-9 * a.abs().max(b.abs())
+    hifishifter_kernel::host_value::compatible(a, b)
 }
 
 #[derive(Debug, Clone, PartialEq)]

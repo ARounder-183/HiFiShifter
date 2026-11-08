@@ -857,6 +857,161 @@ mod tests {
         document
     }
 
+    /// 一个只有一条**循环源** clip 的时间线（媒体 10 s、item 10 s、倍率 1.0）。
+    fn document_with_a_loop_clip() -> Arc<DocumentSession> {
+        let document = DocumentSession::new(9_002);
+        let mut timeline: hifishifter_kernel::state::TimelineState =
+            serde_json::from_value(serde_json::json!({
+                "tracks": [{"id": "track", "name": "t", "order": 0}],
+                "clips": [{
+                    "id": "ara-item-{A}", "track_id": "track", "name": "vocal",
+                    "start_sec": 0.0, "length_sec": 10.0,
+                    "takes": [{
+                        "id": "take", "name": "vocal", "source_path": "src",
+                        "source_start_sec": 0.0, "source_end_sec": 10.0,
+                        "playback_rate": 1.0, "duration_sec": 10.0, "loop_enabled": true
+                    }]
+                }],
+                "bpm": 120.0,
+                "project_sec": 20.0,
+            }))
+            .unwrap();
+        for clip in &mut timeline.clips {
+            clip.normalize_takes();
+        }
+        *document.timeline.lock_or_recover() = Some(timeline);
+        document
+    }
+
+    /// 跑一次**完整**的几何事务（与 `reconcile_parameter_geometry` 同一条链路）。
+    fn reconcile_geometry_once(
+        document: &DocumentSession,
+    ) -> hifishifter_kernel::editor::param_geometry::TransformReport {
+        let host = document
+            .timeline
+            .lock_or_recover()
+            .clone()
+            .expect("the fixture installs a timeline");
+        let frame = document.geometry_frame(&host, true);
+        let mut edits = document.edits.lock_or_recover();
+        document
+            .reconcile_parameter_geometry_locked(&frame, &mut edits)
+            .expect("a well-formed frame must reconcile")
+    }
+
+    /// **分割一个循环源 item，参数线一根都不许动（插件侧粘合层）。**
+    ///
+    /// 【为什么内核已有分类用例，这里还要一条】分类器只回答"这一帧算什么"；用户
+    /// 看到的是"事务跑完之后权威里还剩什么"。这条把 `geometry_frame` →
+    /// `reconcile_parameter_geometry_locked` → `apply_geometry_transaction` 串起来，
+    /// 钉住"分割前后参数权威逐字节相等"——用户报的正是这条链断在最后一步：
+    /// 分割被当成拉伸，整条曲线被压进半段。
+    ///
+    /// 【为什么 fixture 必须是循环源】REAPER 新建 item 默认 `B_LOOPSRC=1`，源窗口是
+    /// `[锚点, 媒体末)` 而不是 `[锚点, 锚点+长度×倍率)`。少了这个前提，用例就绕开
+    /// 了真正的缺陷（非循环源的分割本来就分类正确）。
+    #[test]
+    fn a_loop_source_split_leaves_the_authority_byte_identical() {
+        let _serial = crate::settings_store::test_support::exclusive();
+        let _ = crate::settings_store::save_settings_patch(&serde_json::json!({
+            "lockParamLines": true
+        }));
+        let document = document_with_a_loop_clip();
+        document
+            .write_authority_range("track", "pitch", 0, &[61.0; 200], Some(&[true; 200]), false)
+            .unwrap();
+        let before = document.edits.lock_or_recover().authority.content_hash();
+        assert!(
+            reconcile_geometry_once(&document).is_empty(),
+            "首次事务只记账（日志为空 ⇒ 没有 delta）"
+        );
+        // 宿主在 5 s 处分割：item 变短，循环源的源窗口不变（仍是 [0, 10)）。
+        document.timeline.lock_or_recover().as_mut().unwrap().clips[0].length_sec = 5.0;
+        let report = reconcile_geometry_once(&document);
+        assert!(report.is_empty(), "分割不是拉伸：{report:?}");
+        assert_eq!(
+            document.edits.lock_or_recover().authority.content_hash(),
+            before,
+            "锁定参数线开启时，分割前后参数权威必须逐字节相等"
+        );
+    }
+
+    /// **锁定关闭 ⇒ 宿主怎么改，参数线都一个字节不动。**
+    ///
+    /// 【为什么三种编辑一起打】用户的原话是"对 Clip 的编辑操作前后，参数线需要保持
+    /// 完全不变"。移动、拉伸、分割在分类器里走的是三条不同的分支，逐条测只能证明
+    /// "某一条没动"；只有同一帧里同时出现三种变化，才证明**整条判定被短路**了 ——
+    /// 而这正是关锁该有的形状：不是"每个 delta 都不生效"，是"根本不算 delta"。
+    #[test]
+    fn host_edits_leave_the_authority_alone_when_the_lock_is_off() {
+        let _serial = crate::settings_store::test_support::exclusive();
+        let _ = crate::settings_store::save_settings_patch(&serde_json::json!({
+            "lockParamLines": false
+        }));
+        let document = document_with_a_loop_clip();
+        document
+            .write_authority_range("track", "pitch", 0, &[61.0; 200], Some(&[true; 200]), false)
+            .unwrap();
+        let before = document.edits.lock_or_recover().authority.content_hash();
+        assert!(reconcile_geometry_once(&document).is_empty());
+        {
+            let mut slot = document.timeline.lock_or_recover();
+            let clip = &mut slot.as_mut().unwrap().clips[0];
+            clip.start_sec = 3.0; // 移动
+            clip.length_sec = 5.0; // 分割 / 裁剪
+            clip.playback_rate = 0.5; // 拉伸
+        }
+        let report = reconcile_geometry_once(&document);
+        assert!(
+            report.is_empty(),
+            "锁关闭时任何几何变化都不搬参数：{report:?}"
+        );
+        assert_eq!(
+            document.edits.lock_or_recover().authority.content_hash(),
+            before,
+            "锁关闭时，宿主编辑前后参数权威必须逐字节相等"
+        );
+        // 恢复默认值，避免同进程的其他用例读到关锁状态。
+        let _ = crate::settings_store::save_settings_patch(&serde_json::json!({
+            "lockParamLines": true
+        }));
+    }
+
+    /// **锁定开启 ⇒ 移动片段必须把该片段范围内的参数线整段搬走。**
+    ///
+    /// 【为什么这条与内核的 `move_only_changes_placement` 不重复】内核那条证明的是
+    /// "给定 delta，事务会搬"；这条证明的是"宿主真的动了一个 item 之后，插件算出了
+    /// 那条 delta 并落到权威上"。中间隔着 `geometry_frame` 与日志配对 —— 用户报的
+    /// "锁开了线却没动"就死在这一段。
+    #[test]
+    fn moving_a_clip_carries_its_parameter_line_when_the_lock_is_on() {
+        let _serial = crate::settings_store::test_support::exclusive();
+        let _ = crate::settings_store::save_settings_patch(&serde_json::json!({
+            "lockParamLines": true
+        }));
+        let document = document_with_a_loop_clip();
+        document
+            .write_authority_range("track", "pitch", 0, &[61.0; 200], Some(&[true; 200]), false)
+            .unwrap();
+        let period_ms = document.edits.lock_or_recover().authority.frame_period_ms;
+        let frames_per_second = (1000.0 / period_ms).round() as u32;
+        assert!(reconcile_geometry_once(&document).is_empty());
+        document.timeline.lock_or_recover().as_mut().unwrap().clips[0].start_sec = 1.0;
+        let report = reconcile_geometry_once(&document);
+        assert_eq!(
+            report.affected_runs, 1,
+            "移动必须搬走那一段曲线：{report:?}"
+        );
+        assert!(
+            !document.authority_has_runs_in("track", "pitch", 0, frames_per_second),
+            "原位置不得留下残影"
+        );
+        assert!(
+            document.authority_has_runs_in("track", "pitch", frames_per_second, 10),
+            "曲线必须落在新位置"
+        );
+    }
+
     /// **【第三轮 P1】clip 之外的参数线必须能被擦掉。**
     ///
     /// 【为什么这是用户报的"右键拖拽回弹"】旧实现把重置区间夹到
@@ -3310,6 +3465,12 @@ impl DocumentSession {
         // clip、日志里有几条、算出了哪些 delta"。没有它，用户报"锁没生效"时只能
         // 从代码反推哪一步断了（见 docs/superpowers/plans/…-round2.md §1.5）。
         if !deltas.is_empty() || frame.clips.is_empty() {
+            // 【为什么每个 delta 都要带两个窗口】"判成了拉伸"本身不是答案：
+            // 真正的答案在"哪一项让它这么判"。几何分类只看三个宿主事实（工程窗口、
+            // 源窗口、播放倍率），而它们全都曾经只存在于内存里 —— 于是"分割一个
+            // item 却把参数线压进半段"只能靠反推代码才找得到（循环源的源窗口不随
+            // 长度收缩 ⇒ 除出来的倍率翻倍 ⇒ 冒充拉伸）。把这两个窗口打进同一行，
+            // 下一次现场日志就能直接指认。
             let ops = deltas
                 .iter()
                 .map(|delta| {
@@ -3321,7 +3482,17 @@ impl DocumentSession {
                         GeometryOp::TrimOrNone => "trim",
                         GeometryOp::Replace => "replace",
                     };
-                    format!("{}:{op}", delta.key)
+                    let old = journal.entries().get(&delta.key);
+                    let new = frame.clips.iter().find(|clip| clip.key == delta.key);
+                    match (old, new) {
+                        (Some(old), Some(new)) => format!(
+                            "{}:{op}{{{} -> {}}}",
+                            delta.key,
+                            old.trace_facts(),
+                            new.trace_facts()
+                        ),
+                        _ => format!("{}:{op}", delta.key),
+                    }
                 })
                 .collect::<Vec<_>>()
                 .join(",");
@@ -3357,6 +3528,27 @@ impl DocumentSession {
             // `timeline` 可能是另一份宿主视图 —— 用它覆盖会把在线权威的根 id
             // 写成宿主新 id，下一次 reconcile 会把这条轨判成"认不出"）。
             edits.revision = edits.revision.saturating_add(1);
+        }
+        if !report.is_empty() {
+            // 【为什么几何事务也要走 `param.mutate`】此前它**一条读数都没有**：
+            // 曲线被搬走了，日志里却只有一行 `[geom] ... deltas=[...]`（那是分类器
+            // 的输入，不是"权威真的变了"）。于是"锁开着但线没动"与"锁关着线却动了"
+            // 这两种相反的报障，在日志里长得一模一样 —— 都只有 geom 那一行。
+            // 与用户画线共用同一个键，是为了让"这条曲线什么时候被谁改过"只有一条流。
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "param.mutate",
+                format_args!(
+                    "[param] mutate cause=geometry affected={} split={} cleared={} dropped={} \
+                     deltas={} rev={}",
+                    report.affected_runs,
+                    report.split_runs,
+                    report.cleared_runs,
+                    report.dropped_frames,
+                    report.applied_deltas,
+                    edits.revision
+                ),
+            );
         }
         let epoch = journal.epoch();
         journal.commit(frame, epoch);

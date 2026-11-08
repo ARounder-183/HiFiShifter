@@ -1,8 +1,31 @@
 //! 宿主几何变化 → 参数 run 放置变换。
 //!
 //! 锁定只影响**一次几何事务**：关闭时只更新几何日志；开启时只改
-//! `placement` 与边界切分，`values` 逐字节不动。裁剪/分割/倒放/Loop 不产生
-//! Move/Stretch，因此权威哈希必须保持不变。
+//! `placement` 与边界切分，`values` 逐字节不动。
+//!
+//! # 分类契约（这一节就是"锁定参数线"的全部语义）
+//!
+//! 一次几何变化只有三种可能，判据只看**宿主给的三个事实**：
+//!
+//! | 变化 | 判据 | 参数线 |
+//! |---|---|---|
+//! | 移动 | 源窗口不变、工程起点变 | 整段平移 |
+//! | 拉伸 | **播放倍率**变了、工程时长也变了 | 按新旧时长比缩放 |
+//! | 其余 | 以上都不成立 | **原地不动** |
+//!
+//! "其余"包含裁剪、**分割**、滑源、倒放、Loop 开关、换素材 —— 它们改变的是
+//! "这条 clip 露出素材的哪一段"，不是"素材被拉长压短"。用户把一条 item 一刀切两半，
+//! 两半各自仍然播放原来那段时间上的原速内容：**分割不是压缩**，参数线一根都不该动。
+//!
+//! 【为什么倍率必须是宿主读数而不是除出来的】`源窗口跨度 / 工程时长` 这个商只在
+//! "源窗口就是消费窗口"时等于倍率。**循环源**（REAPER 的 `B_LOOPSRC`，新建 item
+//! 的默认值）的源窗口是 `[锚点, 媒体末)` —— 它比消费窗口长得多，于是任何一次长度
+//! 变化都会让这个商变化。据此判成拉伸，就会把整条参数线压进新长度里：用户看到
+//! "分割一个 item，它的参数线被压缩到半段之内"。倍率是宿主自己报的量，分割与裁剪
+//! 都不改它，所以按它分类，分割就不可能冒充拉伸。
+//!
+//! 【为什么阈值不是 1e-9】见 [`crate::host_value`]：f32 往返与采样量化会带来
+//! ~1e-7 的相对误差，用绝对阈值判"倍率变没变"会把舍入当成编辑。
 
 use super::param_authority::{ParamAuthority, PlacedRun, RootParamAuthority, RunPlacement};
 use crate::state::Clip;
@@ -57,7 +80,20 @@ pub struct ClipGeometry {
     pub project_start: f64,
     pub project_duration: f64,
     pub source_start: f64,
+    /// 源窗口的跨度（秒）。**循环源的窗口是 `[锚点, 媒体末)`**，因此它不等于
+    /// `project_duration × rate` —— 只有非循环 clip 才有那个等式。
     pub source_duration: f64,
+    /// 这条 clip 的**有效播放倍率**（`Clip::playback_rate`，即 item 倍率 × take 倍率）。
+    ///
+    /// 【为什么不能由 `source_duration / project_duration` 除出来】那个商只在
+    /// "源窗口 == 消费窗口"时等于倍率，而循环源的源窗口是 `[锚点, 媒体末)`：它比
+    /// 消费窗口长得多，于是任何一次长度变化（分割、裁剪）都会让这个商变化。分类器
+    /// 据此判成一次 Stretch，把整条参数线压进新长度里 —— 用户看到的正是"分割一个
+    /// item，它的参数线被压缩到半段之内"。倍率是宿主自己给的读数，分割/裁剪不改它。
+    ///
+    /// 【取值口径】与渲染键同一个函数（[`crate::render_key::clip_playback_rate`]）：
+    /// 非法值按 1.0，与实时引擎一致。两处各写一份，就会出现"渲染按 0.5 倍速、
+    /// 几何按 1.0 分类"的错位。
     pub rate: f64,
     pub reversed: bool,
     pub loop_enabled: bool,
@@ -87,17 +123,31 @@ impl ClipGeometry {
             && !self.source_id.is_empty()
     }
 
+    /// 一行几何读数：`pos=…+… src=[…+…] rate=… loop=… rev=…`。
+    ///
+    /// 【为什么要它】"锁定参数线没生效"这一类报障，唯一的判据是**这一帧的两个窗口
+    /// 差在哪**。旧日志只写 `deltas=[item:{GUID}:stretch]` —— 它说"判成了拉伸"，
+    /// 却不说"哪一项让它这么判"。于是排查只能从代码反推，而真正的答案（循环源的
+    /// 窗口不随长度收缩 ⇒ 除出来的倍率翻倍）恰恰藏在被丢掉的那几个数里。
+    pub fn trace_facts(&self) -> String {
+        format!(
+            "pos={:.6}+{:.6} src=[{:.6}+{:.6}] rate={:.6} loop={} rev={}",
+            self.project_start,
+            self.project_duration,
+            self.source_start,
+            self.source_duration,
+            self.rate,
+            self.loop_enabled,
+            self.reversed
+        )
+    }
+
     pub fn from_clip(clip: &Clip, root: &str, key: GeometryKey) -> Self {
         let source_start = clip.source_start_sec.max(0.0);
         let source_end = clip
             .source_end_sec
             .max(source_start + clip.length_sec.max(0.0) * clip.playback_rate.abs() as f64);
         let source_duration = (source_end - source_start).max(0.0);
-        let rate = if clip.length_sec > 0.0 && source_duration > 0.0 {
-            source_duration / clip.length_sec
-        } else {
-            1.0
-        };
         Self {
             key,
             root: root.to_owned(),
@@ -105,7 +155,8 @@ impl ClipGeometry {
             project_duration: clip.length_sec,
             source_start,
             source_duration,
-            rate,
+            // 【宿主读数，不是除出来的】见 `rate` 字段的说明。
+            rate: crate::render_key::clip_playback_rate(clip),
             reversed: clip.reversed,
             loop_enabled: clip.loop_enabled,
             source_id: clip.source_path.clone().unwrap_or_default(),
@@ -160,21 +211,26 @@ impl GeometryOp {
     }
 }
 
-/// 与独立 App 对齐的分类：
-/// * rate 与工程时长同时变化 => Stretch；
+/// 与独立 App 对齐的分类（契约见模块文档）：
+/// * **倍率**与工程时长同时变化 => Stretch；
 /// * 源窗不变、工程起点变化 => Move；
-/// * 其余（裁剪/滑源/倒放/Loop/Section/换素材）=> 不搬参数。
+/// * 其余（裁剪/**分割**/滑源/倒放/Loop/Section/换素材）=> 不搬参数。
+///
+/// 【为什么全部比较都走 `host_value::compatible`】这些量来自宿主 f64 与模型 f32
+/// 的往返，1e-7 量级的相对误差是**常态**而不是编辑。判据偏严的代价不是"少刷新
+/// 一次"，而是把一次分割当成一次拉伸（见模块文档与 `ClipGeometry::rate`）。
 pub fn classify(old: &ClipGeometry, new: &ClipGeometry) -> GeometryOp {
+    use crate::host_value::compatible;
     if old.source_id != new.source_id {
         return GeometryOp::Replace;
     }
     if !old.is_well_formed() || !new.is_well_formed() {
         return GeometryOp::TrimOrNone;
     }
-    let rate_changed = (new.rate - old.rate).abs() > EPS;
-    let source_start_changed = (new.source_start - old.source_start).abs() > EPS;
-    let source_duration_changed = (new.source_duration - old.source_duration).abs() > EPS;
-    if rate_changed && (new.project_duration - old.project_duration).abs() > EPS {
+    let rate_changed = !compatible(old.rate, new.rate);
+    let source_start_changed = !compatible(old.source_start, new.source_start);
+    let source_duration_changed = !compatible(old.source_duration, new.source_duration);
+    if rate_changed && !compatible(old.project_duration, new.project_duration) {
         return GeometryOp::Stretch {
             old: GeometryWindow::new(old.project_start, old.project_duration),
             new: GeometryWindow::new(new.project_start, new.project_duration),
@@ -182,7 +238,7 @@ pub fn classify(old: &ClipGeometry, new: &ClipGeometry) -> GeometryOp {
     }
     if !source_start_changed
         && !source_duration_changed
-        && (old.root != new.root || (new.project_start - old.project_start).abs() > EPS)
+        && (old.root != new.root || !compatible(old.project_start, new.project_start))
     {
         return GeometryOp::Move {
             old: GeometryWindow::new(old.project_start, old.project_duration),
@@ -557,16 +613,23 @@ pub fn copy_geometry_window(
     Ok(report)
 }
 
-/// 两条几何是否描述**同一份素材窗口**（与"同一时刻"无关）。
+/// 两条几何是否描述**同一份素材、同样长的一段**（与"同一时刻"无关）。
 ///
 /// 【为什么这是配对判据】宿主在移动 / 跨轨拖动时可能销毁并重建 region，clip 身份因此
-/// 变化，但"源文件 + 源窗口 + 速率 + 方向"逐项不变。满足这条的"消失 + 出现"就是一次
-/// **移动**，而不是"复制"。
+/// 变化，但"源文件 + 源窗口 + 速率 + 方向 + 工程时长"逐项不变。满足这条的
+/// "消失 + 出现"就是一次 **移动**，而不是"复制"。
+///
+/// 【为什么工程时长也必须在判据里】移动与复制都**整条**搬同一段素材，长度不变。
+/// 长度变了就不是"同一条 clip 换了个身份"，而是一次同时改了长度与位置的编辑 ——
+/// 那种情形按移动处理会把曲线**整体平移却不缩放**（长度变了、曲线间距没变），
+/// 比不做更糟。宁可这一帧不配对，等下一帧几何稳定后再算。
 fn same_content(a: &ClipGeometry, b: &ClipGeometry) -> bool {
+    use crate::host_value::compatible;
     a.source_id == b.source_id
-        && (a.source_start - b.source_start).abs() <= 1e-6
-        && (a.source_duration - b.source_duration).abs() <= 1e-6
-        && (a.rate - b.rate).abs() <= 1e-9
+        && compatible(a.source_start, b.source_start)
+        && compatible(a.source_duration, b.source_duration)
+        && compatible(a.rate, b.rate)
+        && compatible(a.project_duration, b.project_duration)
         && a.reversed == b.reversed
 }
 
@@ -691,8 +754,8 @@ impl GeometryJournal {
             let old = vanished[*index];
             consumed.insert(*index);
             paired.insert(fresh.key.clone());
-            let moved =
-                old.root != fresh.root || (fresh.project_start - old.project_start).abs() > EPS;
+            let moved = old.root != fresh.root
+                || !crate::host_value::compatible(fresh.project_start, old.project_start);
             if moved {
                 let window_old = GeometryWindow::new(old.project_start, old.project_duration);
                 let window_new = GeometryWindow::new(fresh.project_start, fresh.project_duration);
@@ -732,7 +795,7 @@ impl GeometryJournal {
             let [source] = sources.as_slice() else {
                 continue;
             };
-            if (source.project_start - fresh.project_start).abs() <= EPS {
+            if crate::host_value::compatible(source.project_start, fresh.project_start) {
                 continue;
             }
             deltas.push(GeometryDelta {
@@ -933,6 +996,119 @@ mod tests {
 
     fn delta(old: &ClipGeometry, new: &ClipGeometry) -> GeometryDelta {
         GeometryDelta::from_geometry(old, new, 0).unwrap()
+    }
+
+    /// 一条真实 `Clip`：走产品同一条反序列化 + 物化路径（默认值只有一个来源）。
+    fn clip_from(value: serde_json::Value) -> Clip {
+        let mut clip: Clip = serde_json::from_value(value).unwrap();
+        clip.normalize_takes();
+        clip
+    }
+
+    /// 循环源 item：媒体 10 s，源窗口恒为 `[锚点, 媒体末)`（与 item 长度无关）。
+    fn loop_item(length: f64) -> Clip {
+        clip_from(serde_json::json!({
+            "id": "ara-item-{A}", "track_id": "root", "name": "vocal",
+            "start_sec": 0.0, "length_sec": length,
+            "takes": [{
+                "id": "take", "name": "vocal", "source_path": "src",
+                "source_start_sec": 0.0, "source_end_sec": 10.0,
+                "playback_rate": 1.0, "duration_sec": 10.0, "loop_enabled": true
+            }]
+        }))
+    }
+
+    fn geometry_of(clip: &Clip) -> ClipGeometry {
+        ClipGeometry::from_clip(clip, "root", GeometryKey::item("{A}"))
+    }
+
+    /// **分割不是压缩。**
+    ///
+    /// 【为什么这条必须存在】REAPER 新建 item 默认打开"循环源"（`B_LOOPSRC=1`），
+    /// 于是源窗口是 `[锚点, 媒体末)` —— 它**不随 item 长度收缩**。旧实现把倍率算成
+    /// `源窗口跨度 / 工程时长`，分割之后这个商从 1.0 变成 2.0，分类器据此判成一次
+    /// Stretch，把整条参数线压进左半段。用户报的就是这个："分割 item，参数线被压缩
+    /// 到该 item 范围内"。
+    ///
+    /// 判据取"没有 delta"，因为那正是 `锁定参数线` 开启时唯一正确的处置：分割只改变
+    /// "这条 clip 露出素材的哪一段"，素材本身一个采样都没有被拉长压短。
+    #[test]
+    fn a_loop_source_split_is_not_a_stretch() {
+        let parent = loop_item(10.0);
+        let mut left = parent.clone();
+        left.length_sec = 5.0;
+        let (old, new) = (geometry_of(&parent), geometry_of(&left));
+        assert_eq!(old.rate, 1.0, "倍率取宿主读数");
+        assert_eq!(new.rate, 1.0, "分割不改变播放倍率");
+        assert_eq!(
+            new.source_duration, old.source_duration,
+            "循环源的源窗口不随长度收缩 —— 正是它让'除出来的倍率'失真"
+        );
+        assert!(
+            GeometryDelta::from_geometry(&old, &new, 0).is_none(),
+            "分割不是拉伸：{old:?} -> {new:?}"
+        );
+    }
+
+    /// 同一个 item 的**右边缘裁剪**同理：素材没被拉伸，曲线留在原地。
+    #[test]
+    fn a_loop_source_trim_is_not_a_stretch() {
+        let parent = loop_item(10.0);
+        let mut trimmed = parent.clone();
+        trimmed.length_sec = 7.5;
+        assert!(
+            GeometryDelta::from_geometry(&geometry_of(&parent), &geometry_of(&trimmed), 0)
+                .is_none()
+        );
+    }
+
+    /// 真正的拉伸（宿主改 `D_PLAYRATE` 并同步改长度）仍然必须缩放曲线。
+    ///
+    /// 【为什么循环源也要测】倍率改口径之后，唯一的风险是"把真的拉伸也当成裁剪"。
+    /// 这条用例把那个方向钉死：1.0 倍 → 0.5 倍、10 s → 20 s，曲线间距必须翻倍。
+    #[test]
+    fn a_real_stretch_of_a_loop_source_still_scales_the_curve() {
+        let parent = loop_item(10.0);
+        let mut stretched = parent.clone();
+        stretched.length_sec = 20.0;
+        stretched.playback_rate = 0.5;
+        let (old, new) = (geometry_of(&parent), geometry_of(&stretched));
+        assert_eq!(old.rate, 1.0);
+        assert_eq!(new.rate, 0.5);
+        let mut authority = authority_with_run();
+        let before = authority.roots["root"].runs["pitch_edit"][0]
+            .placement
+            .seconds_per_frame;
+        let delta = GeometryDelta::from_geometry(&old, &new, 0).expect("拉伸必须被识别");
+        assert!(matches!(delta.op, GeometryOp::Stretch { .. }), "{delta:?}");
+        apply_geometry_transaction(&mut authority, &[delta]).unwrap();
+        let run = &authority.roots["root"].runs["pitch_edit"][0];
+        assert!(
+            (run.placement.seconds_per_frame - before * 2.0).abs() < 1e-9,
+            "帧间距必须按新旧时长比放大：{} -> {}",
+            before,
+            run.placement.seconds_per_frame
+        );
+    }
+
+    /// 非循环 item 的分割同样什么都不搬（回归护栏：修循环源不能反过来放松这一条）。
+    #[test]
+    fn a_plain_split_is_not_a_stretch_either() {
+        let parent = clip_from(serde_json::json!({
+            "id": "ara-item-{A}", "track_id": "root", "name": "vocal",
+            "start_sec": 0.0, "length_sec": 10.0,
+            "takes": [{
+                "id": "take", "source_path": "src", "source_start_sec": 0.0,
+                "source_end_sec": 10.0, "playback_rate": 1.0, "duration_sec": 10.0
+            }]
+        }));
+        let mut left = parent.clone();
+        left.length_sec = 5.0;
+        left.takes[0].source_end_sec = 5.0;
+        left.source_end_sec = 5.0;
+        assert!(
+            GeometryDelta::from_geometry(&geometry_of(&parent), &geometry_of(&left), 0).is_none()
+        );
     }
 
     /// **分割本身什么都不搬。**
@@ -1260,6 +1436,31 @@ mod tests {
             runs.iter()
                 .any(|run| (run.placement.start_sec - 0.20).abs() < 1e-9),
             "the moved segment must land on the new position"
+        );
+    }
+
+    /// 身份变了、源窗口一样、但**长度**变了 ⇒ 不是一次移动。
+    ///
+    /// 【为什么不配对】宿主在"销毁并重建 region"的同时顺手裁短了这条 clip。若配对判据
+    /// 只看源窗口，它会被判成一次 Move —— 于是曲线被**整体平移却不缩放**：长度变了、
+    /// 曲线间距没变，比不动更糟。宁可这一帧不配对，等几何稳定后再算。
+    #[test]
+    fn a_length_change_with_a_new_identity_is_not_a_move() {
+        let mut journal = GeometryJournal::default();
+        let old = ClipGeometry {
+            key: GeometryKey::item("{OLD}"),
+            ..clip(0.0, 0.10, 0.0, 0.10, 1.0)
+        };
+        journal.commit(&GeometryFrame::complete(vec![old]), 1);
+        let fresh = ClipGeometry {
+            key: GeometryKey::item("{NEW}"),
+            ..clip(0.05, 0.05, 0.0, 0.10, 1.0)
+        };
+        assert!(
+            journal
+                .diff(&GeometryFrame::complete(vec![fresh]))
+                .is_empty(),
+            "长度变了就不是同一条 clip 换了身份"
         );
     }
 

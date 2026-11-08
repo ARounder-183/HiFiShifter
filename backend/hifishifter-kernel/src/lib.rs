@@ -233,6 +233,9 @@ pub mod stereo_detect;
 // ── 宿主 take 几何（App 的 .rpp 导入与插件的实时读数共用同一份解算）────────
 pub mod take_geometry;
 
+// ── 宿主数值的"同一个量"判据（绑定 / 写回 / 几何分类共用）──────────────────
+pub mod host_value;
+
 // ── 工程与杂项 ──────────────────────────────────────────────────────────────
 pub mod clip_rendering_state;
 pub mod config;

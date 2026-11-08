@@ -188,8 +188,11 @@ plugin156项；后续Verify流水线被中止，不能称整条Verify成功。
 | REAPER | 播放 | 光标跟着走 | `[playhead] samples: gap_p95 < 40ms` |
 | REAPER | 拖动播放头 | 光标立即跟上 | `[transport] trace … src=host` |
 | REAPER | 插件内 seek（播放中） | 跳过去就停在那 | `src=seek` → `src=host`，无回跳 |
-| REAPER | 移动 item（锁开） | 曲线跟着走 | `[ara] projection epoch=… roots=…` |
-| REAPER | 关锁再移动 | 曲线留在原位 | 同上，位置不变 |
+| REAPER | 移动 item（锁开） | 曲线跟着走 | `[geom] … deltas=[item:{GUID}:move{…}]` + `[param] mutate cause=geometry affected=N` |
+| REAPER | 拉伸 item（锁开） | 曲线按比例缩放 | 同上，op 是 `stretch`，且 `rate` 两侧不同 |
+| REAPER | **分割 item（锁开）** | **曲线一根都不动** | 只有 `[geom]` 那一行，**没有** `[param] mutate cause=geometry` |
+| REAPER | 裁剪 item（锁开） | 曲线不动（素材没被拉长压短） | 同上 |
+| REAPER | 关锁再移动 / 拉伸 / 分割 | 曲线留在原位，逐字节不变 | `[geom] … locked=false`，无 `cause=geometry` |
 | VEGAS | Space | 宿主播放/暂停 | `[relay] target=previous-focus class=…` + `fidelity=injected` |
 | VEGAS | Ctrl+Z | 宿主撤销 | 同上，`code=KeyZ` |
 
@@ -198,6 +201,15 @@ plugin156项；后续Verify流水线被中止，不能称整条Verify成功。
     [transport] trace … src=host …          （或 sample-failed，二选一）
     [relay] target=previous-focus class=… fidelity=injected relayed
     [ara] projection epoch=<ui_geometry_revision> roots=<n>
+
+几何这一类问题（"锁开了线没动 / 锁关了线却动了 / 分割把线压扁了"）另有两条读数，
+它们回答的是**不同的问题**，缺任一条就只能靠反推代码：
+
+    [geom] clips=<n> complete=<bool> journal=<n> locked=<bool> deltas=[<key>:<op>{<旧窗口> -> <新窗口>}]
+    [param] mutate cause=geometry affected=<n> split=<n> cleared=<n> dropped=<n> deltas=<n> rev=<n>
+
+第一行是**分类器的输入**（两个窗口的 `pos/len/src/rate/loop/rev` 全在里面），第二行是
+**权威真的变了**。分割的正确形状是"第一行说没有 delta、第二行根本不出现"。
 
 ### 仍未做（本轮诚实清单）
 
