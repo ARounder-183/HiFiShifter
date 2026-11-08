@@ -169,8 +169,10 @@ if cc -O1 -Wall -o "$PROBE_DIR/probe" "$SCRIPT_DIR/probe.c" $EXTRA_LIBS 2>"$PROB
             || bad "entry 没有发布与 descriptor 配对的 ARA 工厂表"
         grep -q "ara_plugin_extension=present" "$PROBE_DIR/out.log" \
             || bad "实例没有 ARA 插件扩展：宿主无法绑定文档控制器"
-        grep -q "ara_reaper_legacy=present" "$PROBE_DIR/out.log" \
-            || bad "实例没有应答 REAPER 的旧草案 ARA 扩展 ID：REAPER 里会静默退回 Capture"
+        # REAPER 的 2022 私有草案 ID 必须被**拒绝**：它的宿主实现在需要真正渲染时
+        # 会崩在自身代码里（reaper.exe+0x5a677）。这条断言防止它被"顺手兼容"回来。
+        grep -q "ara_reaper_legacy=absent" "$PROBE_DIR/out.log" \
+            || bad "实例应答了 REAPER 的私有草案 ARA 扩展 ID（会让 REAPER 崩溃）"
         grep -q "feature=ara:supported" "$PROBE_DIR/out.log" \
             || bad "描述符没有声明 ara:supported（宿主不会把本插件当作 ARA 候选）"
         if grep -q "feature=ara:required" "$PROBE_DIR/out.log"; then

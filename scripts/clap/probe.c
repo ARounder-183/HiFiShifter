@@ -220,15 +220,16 @@ int main(int argc, char **argv) {
         fprintf(stderr, "the instance ARA factory differs from the entry table\n");
         plugin->destroy(plugin); entry->deinit(); return 1;
     }
-    /* REAPER 6.71+ 用 2022 私有草案 ID 做实例级发现；它必须拿到**同一张**表。
-       少了这条，REAPER 里 ARA 会静默降级成 Capture，而产物自检全绿。 */
+    /* REAPER 6.71+ 用 2022 私有草案 ID 做实例级发现，但那条草案的宿主实现在需要
+       真正渲染时会崩在自身代码里（见 hifishifter_clap::ara 模块文档）。因此这里断言
+       的是**必须缺席**：应答它等于把宿主的空指针缺陷引到用户面前。 */
     const clap_ara_plugin_extension_t *reaper_ext = (const clap_ara_plugin_extension_t *)
         plugin->get_extension(plugin, "com.celemony.ara.plugin_extension.draft/1");
-    if (!reaper_ext || reaper_ext != ara_ext) {
-        fprintf(stderr, "the REAPER legacy ARA extension is missing or differs\n");
+    if (reaper_ext != NULL) {
+        fprintf(stderr, "the REAPER private draft ARA extension must not be answered\n");
         plugin->destroy(plugin); entry->deinit(); return 1;
     }
-    printf("ara_plugin_extension=present ara_reaper_legacy=present\n");
+    printf("ara_plugin_extension=present ara_reaper_legacy=absent\n");
     if (!plugin->activate(plugin, 48000.0, 1, 512)) { fprintf(stderr, "activate failed\n"); return 1; }
     if (plugin->start_processing && !plugin->start_processing(plugin)) { fprintf(stderr, "start_processing failed\n"); return 1; }
     float left[8] = {1,2,3,4,5,6,7,8}, right[8] = {8,7,6,5,4,3,2,1};

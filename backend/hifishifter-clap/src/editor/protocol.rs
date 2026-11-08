@@ -57,7 +57,7 @@ pub fn bootstrap(mut capabilities: Value) -> Value {
         "reason": "CLAP shell: commands are served by the shared editor session",
     });
     // 【为什么把 ARA 发现结果交给前端】宿主有两条 ARA 发现路径：ARA SDK 2.3 的
-    // entry 级工厂查询，以及 REAPER 6.71+ 的 2022 草案实例级扩展查询。两者都会置位
+    // entry 级工厂查询与实例级扩展查询都会置位
     // 共享的握手读数。取值只来自宿主是否真的触发过 ARA 入口，绝不按名字猜宿主；
     // 前端据此如实说明本实例有没有进入 ARA 形态。
     capabilities["araDiscovery"] = json!({

@@ -15,7 +15,7 @@ HiFiShifter는 그래픽 보컬 편집 및 합성 도구입니다. 멀티트랙 
 - **세 가지 보코더 알고리즘**: nsf-hifigan(PC-NSF-HiFiGAN), World, VsLib. 자세한 내용은 [알고리즘](#알고리즘)을 참고하세요.
 - **상호 운용성**: REAPER(`.rpp`)와 VocalShifter(`.vshp` / `.vsp`) 프로젝트 가져오기, REAPER·VocalShifter 클립보드 양방향 읽기/쓰기를 지원합니다. MIDI는 음높이 참조 블록 / 음높이 파라미터 / 템포 맵으로 가져올 수 있고, 오디오 클립과 피치 라인을 MIDI로 내보낼 수 있습니다.
 - **가져오기 / 내보내기**: 일반적인 오디오 / 비디오 포맷 가져오기(비디오는 오디오 트랙 자동 추출), 프로젝트와 분리 트랙을 `wav` / `mp3` / `flac`으로 내보냅니다.
-- **VST3 / CLAP ARA 플러그인**: 독립 실행형 앱 외에도 Windows x64용 VST3·CLAP ARA 플러그인을 제공하여 REAPER에서 동일한 편집 인터페이스를 바로 열 수 있습니다. 호스트가 클립 지오메트리, BPM과 페이드 오디오를 담당하고 HiFiShifter가 파라미터 곡선을 담당하며, 편집은 자동으로 호스트에 다시 적용됩니다. 자세한 내용은 사용자 매뉴얼의 [VST3 / CLAP ARA 플러그인](USERMANUAL_ko.md#8-vst3--clap-ara-플러그인-reaper) 장을 참고하세요.
+- **VST3 ARA 플러그인과 CLAP 플러그인**: 독립 실행형 앱 외에도 Windows x64용 VST3·CLAP 플러그인을 제공합니다. VST3 플러그인은 REAPER에서 ARA를 통해 동일한 편집 인터페이스를 바로 열 수 있습니다. 호스트가 클립 지오메트리, BPM과 페이드 오디오를 담당하고 HiFiShifter가 파라미터 곡선을 담당하며, 편집은 자동으로 호스트에 다시 적용됩니다. CLAP 플러그인은 같은 편집기의 인서트 이펙트 형태입니다(REAPER와 ARA 바인딩을 맺지 않음). 자세한 내용은 사용자 매뉴얼의 [플러그인](USERMANUAL_ko.md#8-vst3-ara-플러그인과-clap-플러그인-reaper) 장을 참고하세요.
 - **기타**: 내장 파일 브라우저와 빠른 검색, 노트, 자동 백업, 다국어 인터페이스(简体中文 / 繁體中文 / English / 日本語 / 한국어), 다크/라이트 테마, 추론 장치 선택과 벤치마크.
 
 ## 설치
@@ -26,7 +26,7 @@ HiFiShifter는 그래픽 보컬 편집 및 합성 도구입니다. 멀티트랙 
 - **macOS**: 서명되지 않은 dmg(Apple Silicon은 `arm64`, Intel은 `x86_64`). 첫 실행 시 수동으로 허용해야 합니다. "파일이 손상되었습니다"라는 메시지가 표시되면 [사용자 매뉴얼](USERMANUAL_ko.md#1-설치)의 절차에 따라 처리하세요.
 - **Linux**: AppImage(x86_64 / arm64). 실행하려면 시스템의 `webkit2gtk-4.1` 이 필요합니다(Arch/CachyOS, Ubuntu 24.04+, Fedora 39+, Debian 13+ 등 제공. Ubuntu 22.04 는 `webkit2gtk-4.0` 만 있어 미지원).
 
-**VST3 / CLAP ARA 플러그인**: Windows x64에는 REAPER에서 임베디드 인터페이스로 사용할 수 있는 VST3·CLAP ARA 플러그인 형태가 있습니다(현재 REAPER에서만 검증). 설치 방법, 실행 종속성과 사용 제한은 사용자 매뉴얼의 [VST3 / CLAP ARA 플러그인](USERMANUAL_ko.md#8-vst3--clap-ara-플러그인-reaper) 장을 참고하세요.
+**VST3 ARA 플러그인과 CLAP 플러그인**: Windows x64에는 두 가지 형태가 있습니다. REAPER에서는 VST3 플러그인을 ARA 임베디드 인터페이스로 사용하고(현재 REAPER에서만 검증), CLAP 플러그인은 일반 인서트 이펙트로 사용할 수 있습니다. 설치 방법, 실행 종속성과 사용 제한은 사용자 매뉴얼의 [플러그인](USERMANUAL_ko.md#8-vst3-ara-플러그인과-clap-플러그인-reaper) 장을 참고하세요.
 
 GPU 가속: Windows는 DirectML(DirectX 12), macOS(Apple Silicon)는 CoreML + WebGPU, Linux x86_64는 WebGPU(Dawn/Vulkan)를 사용하며, 그 외 플랫폼은 CPU로 폴백합니다. 앱 내 `옵션 → 추론 장치`에서 장치를 전환하고 벤치마크를 실행할 수 있습니다.
 
@@ -43,7 +43,7 @@ HiFiShifter는 통합 렌더링 인터페이스를 제공하여 향후 알고리
 1. 다른 DAW 또는 슬라이싱 소프트웨어를 사용하여 인간 보컬에 필요한 짧은 클립 소스를 준비합니다.
 2. HiFiShifter에서 오디오 스플라이싱 및 튜닝을 완료합니다.
 
-이미 REAPER에서 작업 중이라면 [VST3 / CLAP ARA 플러그인](USERMANUAL_ko.md#8-vst3--clap-ara-플러그인-reaper)을 사용하여 REAPER 프로젝트 안에서 스플라이싱과 튜닝을 완료할 수 있으며, 오디오를 독립 실행형 앱으로 다시 가져올 필요가 없습니다.
+이미 REAPER에서 작업 중이라면 [VST3 ARA 플러그인](USERMANUAL_ko.md#8-vst3-ara-플러그인과-clap-플러그인-reaper)을 사용하여 REAPER 프로젝트 안에서 스플라이싱과 튜닝을 완료할 수 있으며, 오디오를 독립 실행형 앱으로 다시 가져올 필요가 없습니다.
 
 물론 HiFiShifter는 다른 소프트웨어에서 프로젝트를 쉽게 마이그레이션할 수 있도록 다음 작업도 지원합니다:
 

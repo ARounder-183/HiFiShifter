@@ -37,7 +37,7 @@ HiFiShifter 是一款图形化人声编辑与合成工具。它支持多轨道�
 
 在 Windows 上，HiFiShifter 已关闭 WebView2 自带的浏览器快捷键（如 `Ctrl + F`、`Ctrl + P`、`F5` 以及 `Ctrl` 配合 `+` / `-` 的页面缩放），因此这些按键会正常交给 HiFiShifter 处理，不会打断你的编辑操作。
 
-**关于 VST3 / CLAP ARA 插件**：除独立 App 外，HiFiShifter 还提供 VST3 与 CLAP 两种（ARA）插件形态，可以把同一套编辑界面直接开在 REAPER 的工程里。目前插件为 Windows x64 版本，且只针对 REAPER 验证过；安装与使用见 [VST3 / CLAP ARA 插件](#八vst3--clap-ara-插件reaper)章节。
+**关于插件**：除独立 App 外，HiFiShifter 还提供 VST3 与 CLAP 两种插件形态，可以把同一套编辑界面直接开在 REAPER 的工程里。在 REAPER 里请用 VST3 形态接入 ARA；CLAP 形态可用作普通插入效果器。目前插件为 Windows x64 版本，且只针对 REAPER 验证过；安装与使用见 [VST3 ARA 插件与 CLAP 插件](#八vst3-ara-插件与-clap-插件reaper)章节。
 
 ## 二、菜单
 
@@ -106,7 +106,7 @@ HiFiShifter 的结构化复制粘贴是保存在系统剪贴板中的，因此�
 - `时间显示`：允许选择时间轴的主/副时间单位，并打开 `时间轴显示设置...`。
 - `主题：自动 / 深色 / 浅色`：切换当前主题。选择 `自动` 时，HiFiShifter 会跟随系统的深色 / 浅色外观自动切换（也是默认设置）。
 - `外观设置...`：打开外观设置面板。
-- `ARA 宿主连接...`：连接正在运行的 ARA 宿主（REAPER）实例，用于在独立 App 中编辑宿主的音频。仅在独立 App 中显示；打开后是一个浮出的会话面板，可提交、刷新或断开连接，详见 [VST3 / CLAP ARA 插件](#八vst3--clap-ara-插件reaper)章节。
+- `ARA 宿主连接...`：连接正在运行的 ARA 宿主（REAPER）实例，用于在独立 App 中编辑宿主的音频。仅在独立 App 中显示；打开后是一个浮出的会话面板，可提交、刷新或断开连接，详见 [VST3 ARA 插件与 CLAP 插件](#八vst3-ara-插件与-clap-插件reaper)章节。
 - `刷新`：重新加载运行时信息。
 - `清除波形缓存`：清除已缓存的波形数据，下次显示时会重新生成。
 
@@ -730,9 +730,18 @@ HiFiShifter 支持直接在时间轴上录音。录音时可以从当前播放�
 3. 再次点击录音按钮停止录音；时间轴播放随之停止。
 4. 如果当前选中轨道在录音范围内没有任何音频块，录音会直接导入该轨道；否则会在当前选中轨道正下方新建一条 `录音` 轨道并导入，同时自动选中新轨道和新音频块。
 
-## 八、VST3 / CLAP ARA 插件（REAPER）
+## 八、VST3 ARA 插件与 CLAP 插件（REAPER）
 
-除独立 App 之外，HiFiShifter 还提供 VST3 与 CLAP 两种插件形态，二者在 REAPER 里都能以 ARA 方式接入：把插件加载进 REAPER，就能在 REAPER 的工程里直接打开同一套 HiFiShifter 编辑界面。VST3 走 ARA SDK 定稿协议；CLAP 除标准扩展外还兼容 REAPER 6.71+ 使用的 2022 私有草案 ID，因此两种格式在 REAPER 中都能建立 ARA 会话。插件与独立 App 共用同一套编辑与渲染逻辑，但**不需要先启动独立 App**，编辑结果随 REAPER 工程一起保存。
+除独立 App 之外，HiFiShifter 还提供 VST3 与 CLAP 两种插件形态。**在 REAPER 里请用
+`VST3: HiFiShifter` 以 ARA 方式接入**：加载后就能在 REAPER 的工程里直接打开同一套
+HiFiShifter 编辑界面。插件与独立 App 共用同一套编辑与渲染逻辑，但**不需要先启动独立
+App**，编辑结果随 REAPER 工程一起保存。
+
+`CLAP: HiFiShifter` 是同一套编辑器的插入效果器形态：它可以在 REAPER 里加载、录音、
+编辑与渲染输出，但**不与 REAPER 建立 ARA 文档绑定**。原因是 REAPER 的 ARA-over-CLAP
+实现（2022 私有草案）在时间线上存在音频时会崩在 REAPER 自己的代码里，与本插件无关；
+因此本插件只对按 ARA SDK 定稿协议实现的 CLAP 宿主提供 ARA。在 REAPER 里需要 ARA 时，
+请使用 VST3 形态。
 
 目前插件为 Windows x64 版本，且只针对 REAPER 验证过；Linux / macOS 暂无插件交付。
 
@@ -740,14 +749,14 @@ HiFiShifter 支持直接在时间轴上录音。录音时可以从当前播放�
 
 插件有两种装法，任选其一：
 
-- **安装器（推荐）**：运行 `HiFiShifter_v<版本>_windows-x86_64-setup.exe`。**一个安装包同时装上独立 App、VST3/ARA 与 CLAP/ARA 插件**：向导跟随系统界面语言，可以分别选择 App 与 VST3 两个目录；模型只装一遍（全机共享库，见[模型文件与共享](#模型文件与共享)），并在 Windows 的「程序和功能 / 已安装的应用」里注册**一个**卸载项。安装器会先确认 REAPER 与 HiFiShifter 均已退出。
+- **安装器（推荐）**：运行 `HiFiShifter_v<版本>_windows-x86_64-setup.exe`。**一个安装包同时装上独立 App、VST3/ARA 与 CLAP 插件**：向导跟随系统界面语言，可以分别选择 App 与 VST3 两个目录；模型只装一遍（全机共享库，见[模型文件与共享](#模型文件与共享)），并在 Windows 的「程序和功能 / 已安装的应用」里注册**一个**卸载项。安装器会先确认 REAPER 与 HiFiShifter 均已退出。
 - **手动拷贝**：关闭 REAPER，把**整个** `HiFiShifter.vst3` 文件夹放入一个 VST3 目录（例如 `C:\Program Files\Common Files\VST3`），或把它的父目录加入 REAPER 的 VST 扫描路径。不要只复制文件夹里的单个文件 —— 界面、模型与运行依赖都在这个文件夹里。这种装法不写注册表，卸载时手动删除该文件夹即可。
 
 两种装法都需要已安装 WebView2 运行时与 VC++ x64 运行库。
 
 接入步骤（两种装法相同）：
 
-1. 重启 REAPER 并让它扫描插件，然后在有人声音频片段的轨道上添加 `VST3: HiFiShifter` 或 `CLAP: HiFiShifter`，按宿主的 ARA 方式接入（而不是把音频导入独立 App）。建议先用工程副本试用。
+1. 重启 REAPER 并让它扫描插件，然后在有人声音频片段的轨道上添加 `VST3: HiFiShifter`，按宿主的 ARA 方式接入（而不是把音频导入独立 App）。建议先用工程副本试用。
 2. 需要处理多条轨道时，在每条轨道上分别添加插件实例。打开其中任意一个 HiFiShifter 窗口，都可以编辑同一工程里已接入的全部轨道；这些窗口是同一个工作区的不同视图，不是各自独立的编辑副本。不同工程之间不共享编辑。
 3. 使用快捷键前先点击一次插件窗口，让键盘焦点进入界面（插件会转发 `Ctrl + C` / `Ctrl + X` / `Ctrl + V` / `Ctrl + Z` / `Ctrl + Y`，其余快捷键由界面自身处理）。
 

@@ -130,13 +130,22 @@ ARA 侧改了时间拉伸 / 内容淡化，插件会继续用旧配置渲染。
 
 ## 3.1 CLAP（ARA + Capture 双形态）
 
-> **现状勘误（2026-11-08）**：本节原先写作「Capture-only 外壳，阶段 1」。真机验证
-> （[报告](2026-11-08-reaper-clap-ara-runtime-verification.md)）证明 REAPER 7.85 的
-> CLAP 宿主实现了完整 ARA，只是使用 2022 私有草案 ID
-> `com.celemony.ara.plugin_extension.draft/1`；本仓已在 `hifishifter-clap::ara`
-> 兼容该 ID。下表「ARA 工厂 / 实例扩展 / `ara:supported`」三行已随之更新，
-> 「声码器用静态链接的 WORLD、本外壳不链接 ONNX」亦已过时（三个格式现共用
-> `onnx + soundtouch` 内核）。表中其余关于 transport / state / GUI / 捕获的契约不变。
+> **现状勘误（2026-11-08，第二次修订）**：本节先写作「Capture-only 外壳」，随后一度
+> 改为「REAPER 7.85 已跑通 CLAP ARA」。**后一结论是错的**：那次验证只覆盖了空工程，
+> 一旦时间线上有音频 item，REAPER 7.85 就会崩在自己的代码里
+> （`reaper.exe+0x5a677`，`0xC0000005`，读地址 `0x8`）。取证见
+> [报告](2026-11-08-reaper-clap-ara-crash-analysis.md)。
+>
+> 根因是 **REAPER 的 2022 私有草案实现不完整**，不是插件侧可修补的：该崩溃函数在
+> `test rbx,rbx` 之后仍解引用 `rbx`；强制本实例同时承担 `playback|editor|view`、
+> 补齐 ARA 1 遗留字段、关闭 `samples_access` 的同步 PCM 读取，三种改法都照崩。
+> 同一台机器同一份音频下 **VST3 形态稳定**（REAPER 为 VST3 建两个实例并分配
+> `playback`；CLAP 只建一个，`assigned=editor|view`）。
+>
+> 因此本仓只应答 ARACLAP.h 定稿的两个 ID，**明确拒绝**
+> `com.celemony.ara.plugin_extension.draft/1`：REAPER 里的 CLAP 插件以 Capture
+> 形态稳定运行，需要 ARA 时用 **VST3 形态**。下表「ARA 工厂 / 实例扩展」两行已按此
+> 更新；「三个格式共用 `onnx + soundtouch` 内核」仍成立。
 
 当前 `hifishifter-clap` 是可被 CLAP 1.1.9 宿主扫描与加载的插入效果器；宿主把实例
 绑到 ARA 文档后进入 ARA 形态，未绑定时走 Capture 形态：
@@ -148,8 +157,8 @@ ARA 侧改了时间拉伸 / 内容淡化，插件会继续用旧配置渲染。
 | 宿主日志 | 有 | `clap.log`：`plugin.init` 后查询 `clap_host_log` 并装上 logger，诊断不再静默丢弃 |
 | transport 读数 | 按事件如实给 | 只从 `clap_event_transport_t` 读播放/录音/循环/拍号；`steady_time` 不推断播放。编辑器轮询的 `get_playback_state`（光标与捕获带右缘的唯一来源）由实例把位置抄进原子量后回答 |
 | 离线 bounce | 按扩展如实给 | 只从 `clap.render` 的 `CLAP_RENDER_OFFLINE` 置位 |
-| ARA 工厂 / 实例扩展 | **有（含 REAPER 旧草案 ID）** | entry 发布 `ClapAraEntry`（stable + `draft/2` compat）；实例返回 `clap_ara_plugin_extension_t`，除 ARACLAP.h 两个 ID 外还认 `com.celemony.ara.plugin_extension.draft/1`（REAPER 6.71+）。绑定走与 VST3 同一份 `AraBinder` |
-| `ara:supported` / `ara:required` | 声明 supported，不声明 required | 定稿宿主据此发现 ARA；REAPER 的旧草案路径不依赖它，但 descriptor 仍须如实声明。没有 ARA 的宿主里插件仍可作普通效果器 |
+| ARA 工厂 / 实例扩展 | **有，仅限 ARACLAP.h 定稿 ID** | entry 发布 `ClapAraEntry`（stable + `draft/2` compat）；实例返回 `clap_ara_plugin_extension_t`。REAPER 的 `com.celemony.ara.plugin_extension.draft/1` 被**显式拒绝**（应答会让 REAPER 崩在 `+0x5a677`）。绑定走与 VST3 同一份 `AraBinder` |
+| `ara:supported` / `ara:required` | 声明 supported，不声明 required | 定稿宿主据此发现 ARA。REAPER 的私有草案既不读它也不查 entry 级工厂，那条路径在本插件里不被支持。没有 ARA 的宿主里插件仍可作普通效果器 |
 | 内嵌 WebView | Windows 有 | `clap.gui` + 独立 WebView2 宿主，加载同一份 `frontend/dist`；非 Windows 如实降级 |
 | 编辑器命令 | Capture 回执后端 | `plugin_health`、时间线、参数曲线（`get/set_param_frames`、静态参数）、波形峰值、传输读数都由本模块在进程内回答；未接线的命令立刻回结构化错误，不复用 VST3 的 ARA 会话 |
 | 音频输出 | **有（渲染结果）** | 捕获的素材 + 用户曲线由 `mixdown::render_mixdown_with_pcm`（与 App 导出同一份）在后台线程渲染成 PCM，`process` 只覆盖"属于素材"的帧；素材之外按 `outside_passthrough` 直通或静音。VST3 / CLAP / App 现共用同一套 `onnx + soundtouch` 推理内核 |
@@ -157,9 +166,10 @@ ARA 侧改了时间拉伸 / 内容淡化，插件会继续用旧配置渲染。
 | 写回 / 分割 / 建轨 / 宿主撤销 / take / folder | 不可用 | 与 ARA-only 相同：REAPER 原生扩展是 VST3 COM 专属，CLAP 没有对应接口 |
 
 **这张表是当前实现的契约，不是缺陷清单**：共享 ARA 运行时、`ClapAraEntry` /
-`clap_ara_plugin_extension_t` 两级入口与 `AraBinder` 绑定均已接线；REAPER 7.85
-真机已跑通文档控制器创建、tempo map、region sequence、授权 PCM 与 playback region。
-其余宿主（Bitwig / Studio One / MultitrackStudio）的 CLAP ARA 仍需逐个真机验收。
+`clap_ara_plugin_extension_t` 两级入口与 `AraBinder` 绑定均已接线，按 ARACLAP.h
+定稿协议发现的宿主可完整使用。**REAPER 的 CLAP ARA 不可用**，原因在宿主侧（见上）；
+REAPER 用户应使用 VST3 形态获得完整 ARA。其余宿主（Bitwig / Studio One /
+MultitrackStudio）的 CLAP ARA 仍需逐个真机验收。
 
 ### 产物侧的工程证据（非真机宿主结论）
 
@@ -236,13 +246,15 @@ ARA 侧改了时间拉伸 / 内容淡化，插件会继续用旧配置渲染。
   资源目录一旦混进 `webview/`，构建与自检脚本都会硬失败（运行期状态不进安装包）。
 - **能力诚实性**：黑盒探针把 `clap.state` / `clap.render` / `clap.audio-ports` /
   `clap.timer-support` / `clap.gui` 必须存在、descriptor 声明 `ara:supported` 且
-  不含 `ara:required`、entry ARA 工厂表与实例 ARA 扩展（含 REAPER 旧草案 ID）
-  必须返回同一张可用接口都写成硬失败；`verify.sh` 逐项断言探针输出。
+  不含 `ara:required`、entry ARA 工厂表与实例 ARA 扩展必须返回同一张可用接口都写成
+  硬失败；REAPER 的私有草案 ID 则断成**必须缺席**（应答即崩宿主）；
+  `verify.sh` 逐项断言探针输出。
   探针自身实现 `clap.log` 假宿主并断言收到日志、`clap.latency` / `clap.tail`
   必须返回 0。打印 "absent" 后照常返回成功的老判据不再成立。
 
-REAPER 7.85 / Windows x64 的 CLAP 扫描、实例化、ARA 握手与授权 PCM 已由
-[真机验证报告](2026-11-08-reaper-clap-ara-runtime-verification.md)覆盖；其余宿主
+REAPER 7.85 / Windows x64 的 CLAP 扫描、实例化与 Capture 形态已由隔离真机复测覆盖
+（含音频 item 场景，退出码 0）；**CLAP ARA 在该宿主不可用**，取证与结论见
+[崩溃分析报告](2026-11-08-reaper-clap-ara-crash-analysis.md)。其余宿主
 （Bitwig / Studio One / MultitrackStudio）与保存重开、WebView 编辑仍按
 `docs/plugin-host-survey.md` 保持「未测」。
 
@@ -252,7 +264,8 @@ REAPER 7.85 / Windows x64 的 CLAP 扫描、实例化、ARA 握手与授权 PCM 
 **真实** CLAP 类型钉住四件改错就要等到宿主里才暴露的事：
 
 - `ARACLAP.h` 的四个扩展 ID（entry 工厂稳定/兼容、实例扩展稳定/兼容）与
-  `ara:supported` 常量逐字一致，另单独钉死 REAPER 的 2022 私有草案 ID；
+  `ara:supported` 常量逐字一致，另单独钉死 REAPER 的私有草案 ID —— 且断言它
+  **永远拿不到扩展表**（`the_reaper_legacy_id_is_never_answered`）；
 - `ClapAraEntry::new` 能由 descriptor ID 构造出恰好一条工厂关联，
   `get_factory_count` / `get_ara_factory` / `get_plugin_id` 三个回调可用；
 - 宿主侧 `ClapAraHostFactory::discover` 读回的 `plugin_id` 与 descriptor

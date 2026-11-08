@@ -31,8 +31,8 @@ pub type HostLogSink = fn(log::Level, &str);
 ///
 /// 【为什么这个读数在共享层】"这个宿主有没有把本插件当 ARA 插件"是报障里最常被
 /// 问、却最难自证的一件事。格式外壳在任一 ARA 发现路径触发时登记这里：ARA SDK 2.3
-/// 的 entry 级工厂查询，或 REAPER 6.71+ 的 2022 草案实例级扩展查询。诊断包与会话
-/// 日志据此**如实**报告，而不是让读者去猜插件装没装对。
+/// 的 entry 级工厂查询或实例级扩展查询。诊断包与会话日志据此**如实**报告，而不是
+/// 让读者去猜插件装没装对。
 static ARA_FACTORY_QUERIED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 

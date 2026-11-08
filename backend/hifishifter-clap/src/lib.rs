@@ -4,8 +4,10 @@
 //! 一律经 `hifishifter-plugin-core`。
 //!
 //! 【能力边界】descriptor 声明 `ara:supported`（不声明 `ara:required`）：entry 暴露共享
-//! ARA 工厂，实例暴露 ARA 插件扩展并在宿主 bind 时接到同一份文档模型；除 ARACLAP.h
-//! 定稿 ID 外，还兼容 REAPER 6.71+ 的 2022 私有草案 ID（实测 7.85 完整握手）。
+//! ARA 工厂，实例暴露 ARA 插件扩展并在宿主 bind 时接到同一份文档模型 —— 仅限按
+//! ARACLAP.h 定稿协议发现的宿主。REAPER 6.71+ 用的是 2022 私有草案，其宿主实现在
+//! 需要真正渲染时会崩在自身代码里（见 `ara` 模块文档），因此不应答该 ID；REAPER 里
+//! 的 CLAP 插件以 Capture 形态稳定运行，需要 ARA 时用 VST3 形态。
 //! 没有 ARA 的宿主里，它仍是可用的普通效果器（Capture 形态）。
 //! 两种形态的音频、捕获与编辑都走
 //! `hifishifter-plugin` 里那一份实现，本 crate 只做 ABI 翻译。

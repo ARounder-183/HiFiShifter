@@ -2,16 +2,20 @@
 //!
 //! 【ARA 的两级入口】entry 级工厂表在 `crate::ara::entry_extension`，实例级扩展在
 //! `crate::ara::get_extension`；两者背后是 VST3 那份共享 binder。descriptor 因此声明
-//! `ara:supported`：宿主据此才会在 entry 上要工厂、在实例上要扩展并 bind。
+//! `ara:supported`：按 ARACLAP.h 定稿协议发现的宿主据此才会在 entry 上要工厂、
+//! 在实例上要扩展并 bind。
 //!
 //! 【为什么不声明 `ara:required`】本插件在没有 ARA 的宿主里仍是可用的普通效果器
 //! （捕获形态）。`required` 会让那些宿主直接拒绝加载它 —— 那是把“支持 ARA”说成
 //! “只会 ARA”。
 //!
-//! 【REAPER 的发现路径】REAPER 6.71+ 不查 entry 级 ARA 工厂、也不检查 `ara:supported`，
-//! 而是在 `plugin->init` 后直接向实例查询 2022 私有草案 ID
-//! `com.celemony.ara.plugin_extension.draft/1`。`crate::ara::get_extension` 已兼容
-//! 该 ID，`ara:supported` 仍保留给按 ARACLAP.h 定稿协议发现的宿主。
+//! 【REAPER 的发现路径**不**被支持】REAPER 6.71+ 不查 entry 级 ARA 工厂、也不检查
+//! `ara:supported`，而是在 `plugin->init` 后直接向实例查询 2022 私有草案 ID
+//! `com.celemony.ara.plugin_extension.draft/1`。该草案的宿主实现在需要真正渲染时会
+//! 崩在自己的代码里（`reaper.exe+0x5a677`，详见 `crate::ara` 的模块文档），所以
+//! `crate::ara::get_extension` **不应答**它：REAPER 里的 CLAP 插件以 Capture 形态
+//! 稳定运行，需要 ARA 时用 VST3 形态。`ara:supported` 只服务于按 ARACLAP.h 定稿
+//! 协议发现的宿主。
 
 use crate::abi::cstr;
 use crate::abi::*;
@@ -38,7 +42,9 @@ static FEATURES: StaticPtrArray = StaticPtrArray([
     cstr(FEATURE_STEREO),
     // 【为什么这一条要保留】ARACLAP.h 规定按定稿协议发现的宿主先看 descriptor 的
     // `ara:supported`，再查 entry 级工厂与实例级扩展。REAPER 6.71+ 走的是更早的
-    // 私有草案路径（无条件查实例级旧 ID），不依赖这个 feature；两者都不该被漏掉。
+    // 私有草案路径，它既不读这个 feature、也不查 entry 级工厂 —— 那条路径上的宿主
+    // 缺陷让插件无法安全应答（见 `crate::ara`），因此这里声明的是"定稿协议下支持
+    // ARA"，不是"REAPER 的 CLAP ARA 可用"。
     cstr(FEATURE_ARA_SUPPORTED),
     std::ptr::null(),
 ]);
