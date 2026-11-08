@@ -230,6 +230,19 @@ try {
         'no .onnx under INSTDIR'
     }
 
+    # 【为什么连"插件模块不在 App 目录"也要断言】插件与独立 App 编译在同一个
+    # `backend\target\<profile>` 目录里，打包脚本靠一条排除判据把它们分开。判据写错时
+    # 安装包只是"大了 40~80 MB"，装完一切照常工作 —— 只有对着装出来的目录看才认得出来。
+    # 所以判据必须落在安装后的真实落地点上，而不是只信 build.ps1 里那句注释。
+    Assert-That 'App 目录里没有宿主插件模块' {
+        foreach ($module in 'hifishifter_plugin.dll', 'hifishifter_clap.dll') {
+            if (Test-Path (Join-Path $installDir $module)) {
+                throw "App 安装目录混入了插件模块：$module"
+            }
+        }
+        'no hifishifter_plugin.dll / hifishifter_clap.dll under INSTDIR'
+    }
+
     Assert-That '许可全文与声明落到 LICENSE 里写的路径' {
         foreach ($rel in 'LICENSE', 'licenses\README.md', 'licenses\COPYING.LGPL-2.1', 'licenses\Apache-2.0.txt') {
             if (!(Test-Path (Join-Path $installDir $rel))) { throw "App 缺少 $rel" }

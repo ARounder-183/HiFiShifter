@@ -84,6 +84,31 @@ function Reset-Directory([string]$path) {
     New-Item -ItemType Directory -Force $path | Out-Null
 }
 
+# 【哪些 DLL 属于"宿主插件载荷"，绝不随独立 App 分发】`backend\target\<profile>` 里同时躺着
+# 三种格式的产物：独立 App、VST3 引擎（`hifishifter_plugin.dll`）与 CLAP 模块
+# （`hifishifter_clap.dll`）。它们与 App 自己的通用运行时 DLL 混在同一个目录，于是
+# `Get-ChildItem *.dll` 一把抓就会把两个约 40 MB 的插件模块一并塞进安装包与便携包 ——
+# 用户装了 App 就多出两份永远用不到的宿主插件二进制，而便携包是自解压目录，更藏不住。
+# 插件只经由两条专门通路分发：VST3 bundle（见 Write-Vst3Stage）与 CLAP 目录
+# （见 Write-ClapStage）；App 载荷与它们没有任何交集。
+$pluginModuleDlls = @('hifishifter_plugin.dll', 'hifishifter_clap.dll')
+
+function Copy-AppRuntimeDlls([string]$Destination) {
+    # 0 字节的 DLL 是 arm64 上的占位符（vslib 是 x86_64 专用），不进产物。
+    Get-ChildItem $built -Filter *.dll |
+        Where-Object { $_.Length -gt 0 -and $pluginModuleDlls -notcontains $_.Name } |
+        Copy-Item -Destination $Destination
+    # 【为什么拷完还要再查一遍】上面的过滤条件是"排除式"的：将来新增一种插件格式
+    # （比如 AUv2）时，只改 `$pluginModuleDlls` 一处就够；但只要有人把它写错、或把
+    # `Get-ChildItem` 换成别的写法，产物就会静默变大 40 MB 而构建照样成功。
+    # 判据放在这里，错误在构建期就变成一句能读懂的失败。
+    foreach ($module in $pluginModuleDlls) {
+        if (Test-Path (Join-Path $Destination $module)) {
+            throw "App 载荷混入了宿主插件模块：$(Join-Path $Destination $module)"
+        }
+    }
+}
+
 # 模型权重不在仓库里（见 scripts/setup/fetch-models.py）：缺了就取，已有则是一次
 # 目录扫描。CI 用 actions/cache 以清单哈希为键缓存解压结果，因此这里通常什么都不做。
 $python = Resolve-Python
@@ -235,11 +260,9 @@ function Write-AppPayload {
     $app = Join-Path $stage 'app'
     Reset-Directory $app
     Copy-Item "$built\HiFiShifter.exe" $app
-    # 0 字节的 DLL 是 arm64 上的占位符（vslib 是 x86_64 专用），不进产物。
-    # hifishifter_plugin.dll 属于 VST3 载荷，装进 App 目录只会多一份 40 MB。
-    Get-ChildItem $built -Filter *.dll |
-        Where-Object { $_.Length -gt 0 -and $_.Name -ne 'hifishifter_plugin.dll' } |
-        Copy-Item -Destination $app
+    # 运行时 DLL 与"哪些模块属于插件载荷"由 Copy-AppRuntimeDlls 一处判定，
+    # 与便携包共用同一判据（此前两处各写一遍，加 CLAP 时只改了一处）。
+    Copy-AppRuntimeDlls $app
     New-Item -ItemType Directory -Force "$app\models" | Out-Null
     Copy-Item "$modelsSource\models.json" "$app\models"
     Write-Host "App 载荷：$app" -ForegroundColor Green
@@ -452,9 +475,8 @@ if ($Target -ne 'All') {
 $portable = Join-Path $dist 'HiFiShifter'
 Reset-Directory $portable
 Copy-Item "$built\HiFiShifter.exe" $portable
-Get-ChildItem $built -Filter *.dll |
-    Where-Object { $_.Length -gt 0 -and $_.Name -ne 'hifishifter_plugin.dll' } |
-    Copy-Item -Destination $portable
+# 与安装器的 App 载荷走同一个判据：插件模块不随独立 App 分发。
+Copy-AppRuntimeDlls $portable
 Copy-Item $modelsSource "$portable\models" -Recurse
 Copy-Item $licenses $portable -Recurse
 
