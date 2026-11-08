@@ -42,7 +42,17 @@ pub(super) fn write_package(
 
     zip.start_file("system_info.json", options)
         .map_err(|e| format!("zip add system_info failed: {e}"))?;
-    let info = serde_json::to_string_pretty(system_info)
+    // 【为什么在打包时补 ARA 能力读数】"这个宿主为什么没走 ARA"是报障里最常被问、
+    // 却最难自证的一件事：宿主不实现本格式的 ARA 发现协议时，日志里连一条 ARA 痕迹
+    // 都没有。诊断包必须能直接回答，而不是让读者去猜插件装没装对。
+    let mut info_value = system_info.clone();
+    if let Some(object) = info_value.as_object_mut() {
+        object.insert(
+            "araDiscovery".to_owned(),
+            crate::diagnostics::ara_discovery_json(),
+        );
+    }
+    let info = serde_json::to_string_pretty(&info_value)
         .map_err(|e| format!("serialize system_info failed: {e}"))?;
     zip.write_all(info.as_bytes())
         .map_err(|e| format!("write system_info failed: {e}"))?;
@@ -144,6 +154,9 @@ mod tests {
         std::io::Read::read_to_string(&mut archive.by_name("system_info.json").unwrap(), &mut info)
             .unwrap();
         assert!(info.contains("HiFiShifter VST3 / ARA plugin"), "{info}");
+        // ARA 能力读数是"这个宿主为什么没走 ARA"的自证，必须随包导出。
+        assert!(info.contains("araDiscovery"), "{info}");
+        assert!(info.contains("factoryQueriedByHost"), "{info}");
 
         std::fs::remove_dir_all(&dir).ok();
     }

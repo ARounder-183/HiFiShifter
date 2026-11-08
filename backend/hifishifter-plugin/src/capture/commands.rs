@@ -42,6 +42,10 @@ pub(crate) fn handle(
             Ok(status_json(owner))
         }
         "capture_stop" => {
+            // 【为什么用户动作要留一行】"捕获 1 s 后自动终止"必须先分清：是用户按了
+            // 停止、宿主停播后被自动收口、还是到上限。三者界面完全同形；用户动作这一
+            // 条只在这里发生，用 WARN 让 release 默认级别也能读到。
+            log::warn!("[capture] capture_stop command (user action)");
             let take = capture.stop()?;
             owner.end_processing_pass();
             owner.reset_transport_session("capture_stop");

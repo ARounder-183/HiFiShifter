@@ -741,7 +741,11 @@ impl ExtensionOwner {
     }
 
     /// 非音频线程心跳：挂起/静止超过 2 秒就结束预览并 promote。
-    pub(crate) fn tick_preview_quiet(&self) {
+    ///
+    /// 【为什么公开】它是共享生命周期序列的一环（`editor::session` 的 actor 心跳里
+    /// 与 `capture().service()` 并列调用）。格式外壳的集成测试要按真实心跳复现宿主
+    /// 停播行为，就必须能调到同一条入口，而不是复制一份"安静判据"。
+    pub fn tick_preview_quiet(&self) {
         if !self.processing_pass.end_if_quiet() {
             return;
         }

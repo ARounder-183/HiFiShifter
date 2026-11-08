@@ -25,7 +25,22 @@ use ara2_bridge::sys::{
 };
 use hifishifter_plugin::ara::binder::AraBinder;
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
+
+/// 宿主是否**查询过** entry 级 ARA 工厂扩展。
+///
+/// 【为什么需要这个读数】ARA-over-CLAP（ARACLAP.h）是宿主可选实现的能力：REAPER 7.85
+/// 只实现 ARA-over-VST3，从不查询 CLAP 的 ARA 工厂，于是 CLAP 插件在该宿主里永远是
+/// Capture 形态，且日志里一条 ARA 痕迹都没有 —— 用户会以为是自己装错了或插件坏了。
+/// 这个原子位是"宿主有没有问过"的唯一事实来源，bootstrap 与诊断包据此如实报告，
+/// 而不是让界面继续暗示 ARA 可用。
+static ARA_FACTORY_QUERIED: AtomicBool = AtomicBool::new(false);
+
+/// 宿主是否查询过本格式的 ARA 工厂扩展（供 bootstrap / 诊断读取）。
+pub fn ara_factory_queried() -> bool {
+    ARA_FACTORY_QUERIED.load(Ordering::Acquire)
+}
 
 /// entry 级 ARA 工厂表；进程内只建一次（工厂本身泄漏到进程结束）。
 ///
@@ -48,7 +63,7 @@ fn ara_entry() -> Option<&'static ClapAraEntry<'static>> {
             };
             match ClapAraEntry::new([association]) {
                 Ok(entry) => {
-                    log::info!(
+                    log::warn!(
                         "[clap][ara] entry publishes {} ARA association(s) for {}",
                         entry.factory_count(),
                         crate::abi::PLUGIN_ID_STR
@@ -72,6 +87,13 @@ pub fn entry_extension(id: &str) -> *const c_void {
     if !matches!(id, CLAP_EXT_ARA_FACTORY | CLAP_EXT_ARA_FACTORY_COMPAT) {
         return std::ptr::null();
     }
+    // 宿主走到这一步就说明它实现了 ARA-over-CLAP 的发现协议；无论工厂最终建没建成，
+    // "问过"这个事实都要记下来，供能力报告使用。
+    ARA_FACTORY_QUERIED.store(true, Ordering::Release);
+    hifishifter_plugin::diagnostics::note_ara_factory_queried();
+    log::warn!(
+        "[clap][ara] host queried the ARA factory extension (id={id}); ARA-over-CLAP is available in this host"
+    );
     ara_entry().map_or(std::ptr::null(), |entry| entry.extension(id))
 }
 
@@ -164,7 +186,7 @@ pub unsafe fn attach(plugin: *const clap_plugin_t) {
     ) {
         Ok(binder) => {
             instance.ara = Some(Arc::new(binder));
-            log::info!("[clap][ara] instance bound to the shared ARA binder");
+            log::warn!("[clap][ara] instance bound to the shared ARA binder");
         }
         Err(error) => log::error!("[clap][ara] ARA binder rejected: {error}"),
     }

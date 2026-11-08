@@ -27,6 +27,29 @@ use std::sync::{Mutex, Once, OnceLock};
 /// 渗进共享层；外壳在自己的 sink 里做一次映射即可。
 pub type HostLogSink = fn(log::Level, &str);
 
+/// 宿主是否查询过本格式的 ARA 工厂扩展。
+///
+/// 【为什么这个读数在共享层】ARA-over-CLAP 是宿主可选能力（REAPER 7.85 只实现
+/// ARA-over-VST3）。宿主从不查询工厂时，插件在该格式下只能是 Capture 形态，而日志里
+/// 连一条 ARA 痕迹都没有 —— 用户会以为插件坏了。格式外壳在收到合法的 ARA 工厂查询
+/// 时登记这里，诊断包与会话日志据此**如实**说明"本宿主不支持本格式的 ARA"。
+static ARA_FACTORY_QUERIED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// 登记"宿主查询过本格式的 ARA 工厂扩展"（格式外壳调用，每进程一次即可）。
+pub fn note_ara_factory_queried() {
+    ARA_FACTORY_QUERIED.store(true, std::sync::atomic::Ordering::Release);
+}
+
+/// ARA 能力读数（供诊断包 system_info 与会话日志使用）。
+pub fn ara_discovery_json() -> serde_json::Value {
+    serde_json::json!({
+        "factoryQueriedByHost": ARA_FACTORY_QUERIED.load(std::sync::atomic::Ordering::Acquire),
+        "format": crate::log_tag(),
+        "note": "false means the host does not implement ARA for this plug-in format; use the format the host does support (e.g. VST3 in REAPER)",
+    })
+}
+
 /// 由格式外壳登记的宿主日志后端（可缺省）。
 ///
 /// 【为什么是 `OnceLock` 而不是可覆盖的指针】`log::set_logger` 全进程只能成功一次，

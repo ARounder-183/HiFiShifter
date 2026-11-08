@@ -802,14 +802,17 @@ impl CaptureStore {
         // 两者都不该由前端的一个笔误变成 0 或 1e9。
         //
         // 【为什么上限要单独一支】`0` 是"不限"的哨兵值（见字段说明），而"笔误"
-        // （负数、非有限值）必须退回最小值 —— 两者不能共用一条 `clamp`。
+        // （负数、非有限值）必须退回一个**能正常录制**的值 —— 两者不能共用一条
+        // `clamp`。此前兜底写的是 1.0 秒：一次前端笔误会把上限砍成 1 秒，症状是
+        // "捕获时长走到 1 s 就自动终止"，与宿主只播 1 s 完全同形、极难区分。
+        // 现在退回产品默认值（600 s），既不放大内存占用，也不伪造一个极短上限。
         let limit = options.max_duration_sec;
         let limit = if limit == 0.0 {
             0.0
         } else if limit.is_finite() {
             limit.clamp(1.0, 3600.0)
         } else {
-            1.0
+            DEFAULT_MAX_DURATION_SEC
         };
         // 每个字段独立原子写；音频线程可能看到“上一个上限 + 这一个段长”的瞬时组合，
         // 但每一项都在合法域内，且没有任何一项会与另一项配对成分配爆炸。
@@ -864,6 +867,17 @@ impl CaptureStore {
         // 【为什么上限在这里换算成帧】`max_duration_sec` 是用户单位（秒），而音频线程
         // 上的判据只能是帧（一次整数比较）。换算点必须唯一，否则两处会漂移。
         let max_frames = (options.max_duration_sec * rate as f64).round().max(0.0) as u64;
+        // 【为什么把生效上限写进日志】"捕获录到 1 s 就自己停了"这类报障，第一件事
+        // 是分清宿主只播了 1 s、用户把上限设成了 1 s、还是内部判据提前收口。三者
+        // 在界面上完全同形，只有 start() 这里知道这次真正生效的帧数。每会话一次，
+        // 用 WARN 让 release 默认级别也能读到（诊断取舍见 diagnostics 模块头）。
+        log::warn!(
+            "[capture] armed: maxDurationSec={} maxFrames={} rate={} segmentSec={}",
+            options.max_duration_sec,
+            max_frames,
+            rate,
+            options.segment_sec
+        );
         let spares = (0..SPARE_BUFFERS)
             .map(|_| allocate_spare(capacity, 2))
             .collect::<Option<Vec<_>>>()
@@ -1541,7 +1555,7 @@ impl CaptureStore {
     /// 返回是否真的 promote 了。用户按的停（`stop()`）不走这里：那条路上
     /// `armed` 是用户自己清掉的，语义不同（用户要的是"这一次录完了"）。
     fn finish_auto_stopped(&self) -> bool {
-        let segments = {
+        let (reason, segments) = {
             let mut capture = self.capture.lock_or_recover();
             if !capture.is_stopped() {
                 return false;
@@ -1549,7 +1563,7 @@ impl CaptureStore {
             let reason = capture.stopped_reason().unwrap_or(ClosedReason::Stopped);
             let segments = capture.finish(reason);
             capture.reset_after_promote();
-            segments
+            (reason, segments)
         };
         self.capture_stream.store(0, Ordering::Release);
         if segments.is_empty() {
@@ -1558,7 +1572,11 @@ impl CaptureStore {
         if self.promote(segments).is_err() {
             return false;
         }
-        log::info!("[capture] a self-stopped capture was promoted into a take");
+        log::warn!(
+            "[capture] self-stopped capture promoted into a take: reason={} armed={}",
+            reason.as_str(),
+            self.is_armed()
+        );
         true
     }
 
@@ -2554,7 +2572,17 @@ mod tests {
         let options = store.options();
         assert!(
             options.max_duration_sec >= 1.0,
-            "负数（笔误）必须退回最小值，不能变成 0 = 不限"
+            "负数（笔误）必须退回一个可用上限，不能变成 0 = 不限"
+        );
+        // 非有限值必须退回产品默认值，绝不能变成 1 秒的假上限。
+        store.set_options(CaptureOptions {
+            max_duration_sec: f64::NAN,
+            ..options
+        });
+        assert_eq!(
+            store.options().max_duration_sec,
+            DEFAULT_MAX_DURATION_SEC,
+            "笔误兜底必须落在产品默认值，不能把录制砍成 1 秒"
         );
         assert!(options.segment_sec <= 60.0);
         assert!(!options.monitor);

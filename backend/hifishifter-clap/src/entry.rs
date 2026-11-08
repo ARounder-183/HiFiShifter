@@ -922,4 +922,136 @@ mod tests {
     fn the_entry_declares_clap_1_1_9() {
         assert_eq!(clap_entry.clap_version, CLAP_VERSION)
     }
+
+
+    /// **CLAP 状态机不变量**：宿主停播后仍持续送块时，捕获不得自行收成 take。
+    ///
+    /// 【为什么钉这条】现场日志里 REAPER 7.85 的 CLAP 通路每次只播约 1 s，随后
+    /// kPlaying 落 0、transport 位置回到这一遍的起点并持续送静音块；用户看到的就是
+    /// "捕获时长走到 1 s 又自动终止"。这条用例按现场形状（beats 轴 + 停播后位置回绕 +
+    /// 静音输入 + 非音频心跳）走一遍，把"停播不结束录制"这个设计意图钉住：
+    /// 无论现场那次自动收口最终来自上限、预览心跳还是别的路径，状态机本身都不允许
+    /// 宿主的一次停播把这一遍 promote 掉。
+    ///
+    /// 【为什么用 beats 轴】REAPER 的 CLAP transport 实测只给 HAS_BEATS_TIMELINE +
+    /// HAS_TEMPO；只认 seconds 的夹具测的是另一条路。
+    ///
+    /// 【判据】一次 capture_start 之后，宿主中间的停播/重播都属于同一遍录制：
+    /// 在用户按 capture_stop 之前，takeCount 必须是 0，且状态保持 armed。
+    #[test]
+    fn a_host_pause_does_not_promote_a_one_second_take() {
+        let (mut plugin, instance) = fixture();
+        let ptr: *const clap_plugin_t = &raw const plugin;
+        let host = crate::abi::clap_host_t {
+            clap_version: CLAP_VERSION,
+            host_data: std::ptr::null_mut(),
+            name: c"REAPER".as_ptr(),
+            vendor: c"probe".as_ptr(),
+            url: c"probe".as_ptr(),
+            version: c"1".as_ptr(),
+            get_extension: None,
+            request_restart: None,
+            request_process: None,
+            request_callback: None,
+        };
+        unsafe { (*instance).host = &raw const host };
+        assert!(unsafe { plugin_init(ptr) });
+        assert!(unsafe { plugin_activate(ptr, 48_000.0, 1, 512) });
+        assert!(unsafe { start_processing(ptr) });
+        let owner = std::sync::Arc::clone(&unsafe { crate::instance(ptr) }.expect("instance").owner);
+        let port = hifishifter_plugin::editor::port::EditorPort::new(
+            std::sync::Arc::clone(&owner),
+            "v",
+        );
+        let reply = |command: &str, args: serde_json::Value| {
+            let request = serde_json::json!({ "id": 1, "viewId": "v", "version": 1, "command": command, "args": args });
+            crate::editor::protocol::reply_with_editor("v", &request, Some(&port))
+        };
+        assert_eq!(reply("capture_start", serde_json::Value::Null)["ok"], true);
+
+        let frames = 512_u32;
+        let rate = 48_000.0_f64;
+        let left: Vec<f32> = vec![0.0_f32; frames as usize];
+        let right = left.clone();
+        let mut out_left = vec![0.0_f32; frames as usize];
+        let mut out_right = vec![0.0_f32; frames as usize];
+        let mut block_index = 0_i64;
+        let mut feed = |playing: bool, position_frames: i64| {
+            // REAPER 给拍轴：music 秒 -> beats = 秒 * tempo/60。
+            let seconds = position_frames as f64 / rate;
+            let beats = seconds * 120.0 / 60.0;
+            let mut transport = crate::abi::clap_event_transport_t {
+                header: crate::abi::clap_event_header_t {
+                    size: std::mem::size_of::<crate::abi::clap_event_transport_t>() as u32,
+                    time: 0,
+                    space_id: 0,
+                    type_: crate::abi::CLAP_EVENT_TRANSPORT,
+                    flags: 0,
+                },
+                flags: crate::abi::transport_flags::HAS_BEATS_TIMELINE
+                    | crate::abi::transport_flags::HAS_TEMPO
+                    | if playing { crate::abi::transport_flags::IS_PLAYING } else { 0 },
+                song_pos_beats: (beats * crate::abi::CLAP_BEATTIME_FACTOR).round() as i64,
+                song_pos_seconds: 0,
+                tempo: 120.0,
+                tempo_inc: 0.0,
+                loop_start_beats: 0,
+                loop_end_beats: 0,
+                loop_start_seconds: 0,
+                loop_end_seconds: 0,
+                bar_start: 0,
+                bar_number: 0,
+                tsig_num: 4,
+                tsig_denom: 4,
+            };
+            let mut in_planes: [*mut f32; 2] = [left.as_ptr() as *mut f32, right.as_ptr() as *mut f32];
+            let mut out_planes: [*mut f32; 2] = [out_left.as_mut_ptr(), out_right.as_mut_ptr()];
+            let input = crate::abi::clap_audio_buffer_t {
+                data32: in_planes.as_mut_ptr(), data64: std::ptr::null_mut(),
+                channel_count: 2, latency: 0, constant_mask: 0,
+            };
+            let mut output = crate::abi::clap_audio_buffer_t {
+                data32: out_planes.as_mut_ptr(), data64: std::ptr::null_mut(),
+                channel_count: 2, latency: 0, constant_mask: 0,
+            };
+            let process = clap_process_t {
+                steady_time: block_index * frames as i64,
+                frames_count: frames,
+                transport: &mut transport,
+                audio_inputs: &input,
+                audio_outputs: &mut output,
+                audio_inputs_count: 1,
+                audio_outputs_count: 1,
+                in_events: std::ptr::null(),
+                out_events: std::ptr::null(),
+            };
+            block_index += 1;
+            assert_eq!(unsafe { plugin_process(ptr, &raw const process) }, CLAP_PROCESS_CONTINUE);
+        };
+
+        // 播 1 s（约 94 块 @512/48k）。
+        for i in 0..94_i64 { feed(true, i * frames as i64); }
+        // 停播后 REAPER 把 transport 位置重置回这一遍的起点，并持续送静音块
+        // （现场日志：playing=0 时 raw 从 429264 回到 381648，music 同步回 15.902）。
+        let pass_start = 0_i64;
+        for _ in 0..470_i64 { feed(false, pass_start); }
+        // 非音频线程心跳：补给线 + 自动 promote 都挂在这里。
+        for _ in 0..10 { owner.capture().service(); owner.tick_preview_quiet(); }
+
+        let status = reply("capture_status", serde_json::Value::Null);
+        let take_count = status["value"]["takeCount"].as_u64().unwrap_or(u64::MAX);
+        let state = status["value"]["state"].as_str().unwrap_or("?").to_owned();
+        assert_eq!(take_count, 0, "宿主停播不得把这一遍收成 take：{status}");
+        assert!(
+            state == "recording" || state == "standby",
+            "停播后仍应保持武装，实际 state={state}：{status}"
+        );
+
+        // 用户真正按停止才产生唯一一个 take。
+        let stopped = reply("capture_stop", serde_json::Value::Null);
+        assert_eq!(stopped["value"]["status"]["takeCount"], 1, "{stopped}");
+        unsafe { stop_processing(ptr); plugin_deactivate(ptr); }
+        release(&mut plugin, instance);
+    }
+
 }

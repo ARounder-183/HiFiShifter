@@ -55,6 +55,14 @@ pub fn bootstrap(mut capabilities: Value) -> Value {
         "state": "bound",
         "reason": "CLAP shell: commands are served by the shared editor session",
     });
+    // 【为什么把 ARA 发现结果交给前端】ARA-over-CLAP 是宿主可选能力：不实现它的宿主
+    // （实测 REAPER 7.85）从不查询 ARA 工厂，CLAP 插件便只能是 Capture 形态。界面必须
+    // 能如实说清"这个宿主不支持本格式的 ARA，请用 VST3 版"，而不是让用户对着一个
+    // 永远不会来的 ARA 会话反复排查。取值只来自宿主是否真的查询过，绝不按名字猜宿主。
+    capabilities["araDiscovery"] = json!({
+        "factoryQueriedByHost": crate::ara::ara_factory_queried(),
+        "format": "clap",
+    });
     capabilities
 }
 /// bootstrap 的 `captureCaps`：四个读数**都是观察到的**。
@@ -218,6 +226,12 @@ mod tests {
         assert_eq!(boot["version"], 1);
         assert_eq!(boot["viewId"], "view-1");
         assert_eq!(boot["hostKind"], "capture");
+        // ARA 发现结果必须如实来自宿主是否查询过工厂，且标明格式。
+        assert_eq!(boot["araDiscovery"]["format"], json!("clap"));
+        assert_eq!(
+            boot["araDiscovery"]["factoryQueriedByHost"],
+            json!(crate::ara::ara_factory_queried())
+        );
         let caps = &boot["hostCapabilities"];
         for key in [
             "transport",

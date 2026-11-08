@@ -254,7 +254,7 @@ impl Runtime {
             let highest = raw.highestSupportedApiGeneration;
             let transformations = raw.supportedPlaybackTransformationFlags;
             let analyzeable = raw.analyzeableContentTypesCount;
-            log::info!(
+            log::warn!(
                 "[ara] factory advertised: generations={lowest}..={highest} \
                  transformations={transformations:#x} analyzeableContentTypes={analyzeable}"
             );
@@ -262,7 +262,7 @@ impl Runtime {
         // SAFETY: 工厂被泄漏到进程结束，`as_raw` 指向的 ARAFactory 与工厂同寿。
         let companion =
             unsafe { CompanionFactory::from_raw(crate::CLASS_NAME, &*factory.as_raw())? };
-        crate::log_line("ARA factory built; companion association ready");
+        log::warn!("[ara] factory built; companion association ready");
         Ok(Runtime {
             factory: StaticFactory(factory),
             companion,

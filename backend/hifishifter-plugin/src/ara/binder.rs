@@ -173,7 +173,7 @@ impl AraBinder {
             );
             return std::ptr::null();
         };
-        log::info!(
+        log::warn!(
             "[ara] bind request: document={} controller={:#x} owner_bound_document={:?} \
              closed={} has_binding={}",
             document.id,
@@ -275,7 +275,7 @@ impl AraBinder {
                 // SAFETY: 记录由 owner 持有到实例销毁，本调用期间有效；紧凑结构整份拷出
                 // 再读字段（对 packed 字段取引用是 UB）。
                 let instance = unsafe { raw.read_unaligned() };
-                log::info!(
+                log::warn!(
                     "[ara] extension instance: playback={} editor={} view={}",
                     !instance.playbackRendererInterface.is_null(),
                     !instance.editorRendererInterface.is_null(),
