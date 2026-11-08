@@ -16,7 +16,11 @@ vi.mock("../../../services/api", async (importOriginal) => {
 
 import { configureStore } from "@reduxjs/toolkit";
 
-import sessionReducer, { setToolModePersistent } from "../sessionSlice";
+import sessionReducer, {
+    setEditParam,
+    setToolModePersistent,
+    toggleParamBlockEditPersistent,
+} from "../sessionSlice";
 
 const makeStore = () => configureStore({ reducer: { session: sessionReducer } });
 
@@ -31,6 +35,24 @@ describe("setToolModePersistent", () => {
     beforeEach(() => {
         saveMock.mockClear();
     });
+
+    it.each(["pitch", "tension", "breathiness", "formant_shift", "volume"])(
+        "block toggle preserves the current %s parameter and persists the tool",
+        async (param) => {
+            const store = makeStore();
+            store.dispatch(setEditParam(param));
+            await store.dispatch(toggleParamBlockEditPersistent());
+            expect(store.getState().session.toolMode).toBe("block");
+            await store.dispatch(toggleParamBlockEditPersistent());
+            expect(store.getState().session.toolMode).toBe("draw");
+            expect(store.getState().session.editParam).toBe(param);
+            expect(store.getState().session.project.dirty).toBe(false);
+            expect(saveMock).toHaveBeenCalledTimes(2);
+            expect(saveMock).toHaveBeenLastCalledWith(
+                expect.objectContaining({ paramEditorTool: "draw" }),
+            );
+        },
+    );
 
     it("切换工具：写状态并落盘", async () => {
         const store = makeStore();

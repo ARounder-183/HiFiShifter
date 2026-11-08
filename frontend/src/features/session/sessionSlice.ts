@@ -61,6 +61,7 @@ import type { BaselineMode, VibratoPreset } from "../../features/vibrato/vibrato
 import type { TempoMap } from "../../utils/tempoMap";
 import { clampDenominator, normalizeTempoMap } from "../../utils/tempoMap";
 import { markProjectDirty } from "./sessionDirtyState";
+import { toggleParamBlockEditingTool } from "../../components/layout/pianoRoll/paramBlockMarquee";
 import type { ClipColor, SessionState, StretchAlgorithmOption } from "./sessionSlice/types";
 import { resolveTrackIdForClipSelection } from "./selectionFocus";
 import { applyHistoryDepths } from "./sessionSlice/history";
@@ -275,6 +276,9 @@ const sessionSlice = createSlice({
                     backend: record.backend ?? backend,
                 }));
             }
+        },
+        markProjectEdited(state) {
+            markProjectDirty(state.project);
         },
         checkpointHistory(state) {
             // 撤销/重做由后端权威管理（undo_timeline / redo_timeline 返回完整
@@ -1238,6 +1242,7 @@ export const {
     clearTrackMeters,
     setHistoryState,
     checkpointHistory,
+    markProjectEdited,
     applyTimelinePayload,
     setToolMode,
     setEditParam,
@@ -1376,6 +1381,16 @@ export const setToolModePersistent = createAsyncThunk<ToolMode, ToolMode>(
         dispatch(setToolMode(mode));
         (dispatch as unknown as (action: unknown) => void)(persistUiSettings());
         return mode;
+    },
+);
+
+export const toggleParamBlockEditPersistent = createAsyncThunk<ToolMode, void>(
+    "session/toggleParamBlockEditPersistent",
+    (_, { dispatch, getState }) => {
+        const { toolMode } = (getState() as { session: SessionState }).session;
+        const next = toggleParamBlockEditingTool(toolMode);
+        (dispatch as unknown as (action: unknown) => void)(setToolModePersistent(next));
+        return next;
     },
 );
 

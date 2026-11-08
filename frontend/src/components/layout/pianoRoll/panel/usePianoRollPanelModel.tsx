@@ -10,6 +10,7 @@ import {
     cycleDragDirection,
     persistUiSettings,
     applyClipSyllableAnalysis,
+    markProjectEdited,
 } from "../../../../features/session/sessionSlice";
 import { resolveRootTrackId } from "../../../../features/session/trackUtils";
 import {
@@ -2778,6 +2779,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         rootTrackId,
         clips: paramBlockClips,
         enabled: paramBlocksVisible || paramBlockToolActive,
+        onCommitted: () => dispatch(markProjectEdited()),
         historyKey: `${s.historyUndoDepth}:${s.historyRedoDepth}:${paramBlockClips.map((clip) => `${clip.id},${clip.trackId},${clip.startSec},${clip.lengthSec},${clip.sourceStartSec},${clip.sourceEndSec},${clip.playbackRate}`).join(";")}`,
         state: paramBlockState,
         setState: setParamBlockState,
@@ -3710,6 +3712,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                  * 且达到最小宽度后才提交；短点击仍然只是清空选择。
                  */
                 if (paramBlockToolActive && hit.add) {
+                    const flattenCreatedPitch = editParam === "pitch" && hit.altKey === true;
                     const createStartSec = hit.sec;
                     const createStartClientX = hit.clientX;
                     const createStartClientY = hit.clientY;
@@ -3913,6 +3916,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                 values: source,
                                 target: createValue,
                                 param: editParam,
+                                flatten: flattenCreatedPitch,
                                 curveOwned: Boolean(paramBlockStateRef.current.lineLayout),
                             });
                             applyDenseToLiveEdit(
@@ -4081,6 +4085,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                                                     values: source.values,
                                                                     target: createValue,
                                                                     param: editParam,
+                                                                    flatten: flattenCreatedPitch,
                                                                     curveOwned: Boolean(
                                                                         created.state.lineLayout,
                                                                     ),

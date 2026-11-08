@@ -90,7 +90,7 @@ export type ActionId =
     // 模式切换
     | "mode.toggle" // 模式切换（正向）
     | "mode.selectTool" // 切换到选择工具
-    | "mode.toggleBlockEdit" // 块编辑与音高绘制双向切换
+    | "mode.toggleBlockEdit" // 当前参数的块编辑与绘制双向切换
     | "mode.drawTool" // 切换到绘制工具
     | "mode.lineTool" // 切换到直线工具
     | "mode.vibratoTool" // 切换到颤音工具

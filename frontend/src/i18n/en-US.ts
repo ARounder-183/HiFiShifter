@@ -1264,7 +1264,7 @@ export const enUS = {
     kb_group_mode: "Mode & Tools",
     kb_mode_toggle: "Mode Toggle",
     kb_mode_select_tool: "Switch to Select Tool",
-    kb_mode_toggle_block_edit: "Toggle pitch drawing / block editing",
+    kb_mode_toggle_block_edit: "Toggle parameter drawing / block editing",
     kb_mode_draw_tool: "Switch to Draw Tool",
     kb_mode_line_tool: "Switch to Line Tool",
     kb_mode_vibrato_tool: "Switch to Vibrato Tool",

@@ -1198,7 +1198,7 @@ export const koKR = {
     kb_group_mode: "모드 및 도구",
     kb_mode_toggle: "모드 전환",
     kb_mode_select_tool: "선택 도구로 전환",
-    kb_mode_toggle_block_edit: "피치 그리기 / 블록 편집 전환",
+    kb_mode_toggle_block_edit: "파라미터 그리기 / 블록 편집 전환",
     kb_mode_draw_tool: "그리기 도구로 전환",
     kb_mode_line_tool: "직선 도구로 전환",
     kb_mode_vibrato_tool: "비브라토 도구로 전환",

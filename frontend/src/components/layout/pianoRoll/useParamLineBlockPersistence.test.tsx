@@ -28,6 +28,7 @@ let updateLocalState: (state: ParamBlockState) => void;
 let deferReadback = false;
 let root: Root | undefined;
 let host: HTMLDivElement;
+const onCommitted = vi.fn();
 async function mount(initialized = true) {
     vi.mocked(timelineApi.getParamLineBlocks).mockResolvedValue({
         ok: true,
@@ -57,6 +58,7 @@ async function mount(initialized = true) {
             state: value,
             setState: setValue,
             deferReadback: () => deferReadback,
+            onCommitted,
         });
         return null;
     }
@@ -79,12 +81,14 @@ test("a saved empty layout is authoritative and never reruns legacy migration", 
     expect(state.lineLayout?.blocks).toEqual([]);
     expect(timelineApi.getParamBlockMerges).not.toHaveBeenCalled();
     expect(timelineApi.setParamLineBlocks).not.toHaveBeenCalled();
+    expect(onCommitted).not.toHaveBeenCalled();
 });
 test("migration writes exactly once and does not create an Undo step", async () => {
     await mount(false);
     expect(api.ready).toBe(true);
     expect(timelineApi.setParamLineBlocks).toHaveBeenCalledOnce();
     expect(vi.mocked(timelineApi.setParamLineBlocks).mock.calls[0][0].checkpoint).toBe(false);
+    expect(onCommitted).not.toHaveBeenCalled();
 });
 test("queued local edits preserve preceding commits instead of replacing them", async () => {
     await mount();
@@ -106,6 +110,25 @@ test("queued local edits preserve preceding commits instead of replacing them", 
     });
     expect(state.lineLayout?.blocks.map((block) => block.id)).toEqual(["a", "b"]);
     expect(vi.mocked(timelineApi.setParamLineBlocks).mock.calls[1][0].expectedRevision).toBe(3);
+    expect(onCommitted).toHaveBeenCalledTimes(2);
+});
+
+test("a failed block write does not report a committed edit", async () => {
+    await mount();
+    vi.mocked(timelineApi.setParamLineBlocks).mockRejectedValueOnce(new Error("write failed"));
+    await act(async () => {
+        await expect(
+            api.commit({
+                ...state,
+                lineEditBase: empty,
+                lineLayout: {
+                    ...empty,
+                    blocks: [{ id: "a", startFrame: 0, endFrameExclusive: 10 }],
+                },
+            }),
+        ).rejects.toThrow("write failed");
+    });
+    expect(onCommitted).not.toHaveBeenCalled();
 });
 test("a newer analysis event wins over a late acknowledgement", async () => {
     await mount();

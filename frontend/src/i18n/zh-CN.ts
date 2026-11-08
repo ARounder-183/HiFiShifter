@@ -1075,7 +1075,7 @@ export const zhCN = {
     kb_group_mode: "模式与工具",
     kb_mode_toggle: "模式切换",
     kb_mode_select_tool: "切换到选择工具",
-    kb_mode_toggle_block_edit: "音高编辑与块编辑切换",
+    kb_mode_toggle_block_edit: "参数绘制与块编辑切换",
     kb_mode_draw_tool: "切换到绘制工具",
     kb_mode_line_tool: "切换到直线工具",
     kb_mode_vibrato_tool: "切换到颤音工具",

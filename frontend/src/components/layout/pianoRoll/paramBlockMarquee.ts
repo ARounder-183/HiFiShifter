@@ -31,7 +31,7 @@ export function shouldStartParamBlockRightDragMarquee(args: {
     return args.blockToolActive && args.contextMenu;
 }
 
-/** `~`：块工具与音高选区工具双向切换。 */
+/** `~`：切换当前参数的块工具与绘制工具。 */
 export function toggleParamBlockEditingTool(toolMode: string): "block" | "draw" {
     return toolMode === "block" ? "draw" : "block";
 }

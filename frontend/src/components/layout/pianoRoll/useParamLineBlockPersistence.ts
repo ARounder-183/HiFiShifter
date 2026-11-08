@@ -24,6 +24,7 @@ export function useParamLineBlockPersistence(args: {
     state: ParamBlockState;
     setState: Dispatch<SetStateAction<ParamBlockState>>;
     deferReadback?: () => boolean;
+    onCommitted?: () => void;
 }) {
     const [readyRoot, setReadyRoot] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
@@ -238,6 +239,7 @@ export function useParamLineBlockPersistence(args: {
                 .then(execute);
             const complete = job
                 .then((layout) => {
+                    if (layout) latest.current.onCommitted?.();
                     if (
                         layout &&
                         latest.current.rootTrackId === root &&

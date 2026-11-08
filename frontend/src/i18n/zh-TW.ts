@@ -1076,7 +1076,7 @@ export const zhTW = {
     kb_group_mode: "模式與工具",
     kb_mode_toggle: "模式切換",
     kb_mode_select_tool: "切換到選取工具",
-    kb_mode_toggle_block_edit: "音高編輯與音符塊編輯切換",
+    kb_mode_toggle_block_edit: "參數繪製與音符塊編輯切換",
     kb_mode_draw_tool: "切換到繪製工具",
     kb_mode_line_tool: "切換到直線工具",
     kb_mode_vibrato_tool: "切換到顫音工具",

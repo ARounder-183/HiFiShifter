@@ -1139,7 +1139,7 @@ export const jaJP = {
     kb_group_mode: "モードとツール",
     kb_mode_toggle: "モード切替",
     kb_mode_select_tool: "選択ツールに切替",
-    kb_mode_toggle_block_edit: "ピッチ描画 / ブロック編集を切り替え",
+    kb_mode_toggle_block_edit: "パラメータ描画 / ブロック編集を切り替え",
     kb_mode_draw_tool: "描画ツールに切替",
     kb_mode_line_tool: "直線ツールに切替",
     kb_mode_vibrato_tool: "ビブラートツールに切替",

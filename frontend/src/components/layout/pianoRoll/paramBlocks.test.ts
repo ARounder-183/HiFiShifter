@@ -1086,6 +1086,55 @@ describe("param block drag", () => {
         ).toEqual([63, 64, 64, 65]);
     });
 
+    it("Ctrl+Alt 创建音高块时，预览与完整曲线提交都写为同一个平直值", () => {
+        const preview = shiftParamBlockCurveValuesToTarget({
+            values: [60, 62, 0, 64],
+            target: 65,
+            param: "pitch",
+            curveOwned: true,
+            flatten: true,
+        });
+        const committed = shiftParamBlockCurveValuesToTarget({
+            values: [60, 61.25, 62, 63.5, 0, 63, 64, 60.5],
+            target: 65,
+            param: "pitch",
+            curveOwned: true,
+            flatten: true,
+        });
+        expect(preview).toEqual([65, 65, 65, 65]);
+        expect(committed).toEqual(Array(8).fill(65));
+        const projected = applyFullResSegmentsToParamView({
+            paramView: {
+                key: "pitch",
+                startFrame: 0,
+                framePeriodMs: 5,
+                stride: 1,
+                orig: Array(12).fill(60),
+                edit: Array(12).fill(60),
+            },
+            segments: [{ startFrame: 2, values: committed }],
+        });
+        expect(projected.edit).toEqual([60, 60, ...Array(8).fill(65), 60, 60]);
+    });
+
+    it("普通创建保留无声帧，平直创建也可填满原本没有音高的区间", () => {
+        expect(
+            shiftParamBlockCurveValuesToTarget({
+                values: [60, 0, 61],
+                target: 64,
+                param: "pitch",
+            })[1],
+        ).toBe(0);
+        expect(
+            shiftParamBlockCurveValuesToTarget({
+                values: [0, 0, 0],
+                target: 64,
+                param: "pitch",
+                flatten: true,
+            }),
+        ).toEqual([64, 64, 64]);
+    });
+
     const editableClips = (): ParamBlockSourceClip[] => [
         {
             id: "a",

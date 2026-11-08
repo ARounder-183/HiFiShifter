@@ -3660,8 +3660,10 @@ export function shiftParamBlockCurveValuesToTarget(args: {
     readonly target: number;
     readonly param: string;
     readonly curveOwned?: boolean;
+    readonly flatten?: boolean;
 }): number[] {
     if (!Number.isFinite(args.target)) return args.values.slice();
+    if (args.flatten && args.param === "pitch") return args.values.map(() => args.target);
     const editable = args.values.filter(
         (value) => Number.isFinite(value) && (args.param !== "pitch" || value > 0),
     );

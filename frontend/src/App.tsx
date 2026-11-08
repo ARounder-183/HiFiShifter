@@ -80,8 +80,8 @@ import {
     saveProjectAsRemote,
     saveProjectToPathRemote,
     setTrackMeters,
-    setEditParam,
     setToolModePersistent,
+    toggleParamBlockEditPersistent,
     setVslibAvailable,
     setPlaybackRenderingState,
     checkpointHistory,
@@ -103,7 +103,6 @@ import { PitchAnalysisStatusChip } from "./components/layout/PitchAnalysisStatus
 import { ParamDataLoadingChip } from "./components/layout/ParamDataLoadingChip";
 import { AppStatusProgressChips } from "./components/layout/AppStatusProgressChips";
 import { ParamBlockAnalysisStatus } from "./components/layout/pianoRoll/panel/ParamBlockAnalysisStatus";
-import { toggleParamBlockEditingTool } from "./components/layout/pianoRoll/paramBlockMarquee";
 import { appStatusProgressBus } from "./utils/appStatusProgressBus";
 const FileBrowserPanel = lazy(() =>
     import("./components/layout/FileBrowserPanel").then((module) => ({
@@ -196,6 +195,7 @@ import { resolveParamShiftIntent } from "./features/keybindings/paramShiftAction
 import { isSelectionParamEditInFlight } from "./features/session/selectionEditInFlight";
 import { trackNameForMedia } from "./features/session/mediaTrackName";
 import { runConfirmedExitClose } from "./confirmedExitClose";
+import { createWindowCloseGuard } from "./windowCloseGuard";
 import { paramsApi } from "./services/api";
 import { coreApi } from "./services/api/core";
 import type { SourceFileChange, SourceFileMatchCandidate } from "./services/api/timeline";
@@ -212,7 +212,6 @@ import {
 } from "./features/session/projectOpenEvents";
 import { detectExternalPathAction } from "./components/layout/timeline/dnd";
 import type { MessageKey } from "./i18n/messages";
-import type { CloseRequestedEvent } from "@tauri-apps/api/window";
 import { useAutoBackupScheduler } from "./hooks/useAutoBackupScheduler";
 import { useClipFormantStatusListener } from "./hooks/useClipFormantStatusListener";
 import { useRecordingListener } from "./hooks/useRecordingListener";
@@ -600,11 +599,6 @@ function AppInner() {
     // 注意：playbackPositionSec 以 ~30Hz 持续变化，这里不能订阅（否则每次
     // 播放 tick 都重渲 AppInner）；需要它的地方（录音自动停止）在回调内经
     // store.getState() 同步读取最新值。
-    // 使用 ref 桥接最新的工程修改状态
-    const projectDirtyRef = useRef(projectDirty);
-    useEffect(() => {
-        projectDirtyRef.current = projectDirty;
-    }, [projectDirty]);
     const projectPath = useAppSelector((state) => state.session.project.path);
     const hasExistingTempoMap = useAppSelector((state) => Boolean(state.session.tempoMap));
     // 当前会话中已忽略的缺失媒体路径集合（用户点击"忽略"后不再重复弹窗）
@@ -2066,21 +2060,24 @@ function AppInner() {
         async function setup() {
             try {
                 const mod = await loadStandaloneWindowApi();
+                if (disposed) return;
                 const currentWindow = mod.getCurrentWindow();
-                unlisten = await currentWindow.onCloseRequested((event: CloseRequestedEvent) => {
-                    if (allowWindowCloseRef.current) {
+                unlisten = await currentWindow.onCloseRequested(createWindowCloseGuard({
+                    isDisposed: () => disposed,
+                    consumeAllowClose: () => {
+                        const allowed = allowWindowCloseRef.current;
                         allowWindowCloseRef.current = false;
-                        return;
-                    }
-                    // 读取 ref 的值，无需重建整个监听器
-                    if (!projectDirtyRef.current) {
-                        return;
-                    }
-                    event.preventDefault();
-                    if (!disposed) {
-                        promptUnsavedAction("exit", closeWindowNow);
-                    }
-                });
+                        return allowed;
+                    },
+                    isProjectDirty: () => store.getState().session.project.dirty,
+                    getProjectMeta: projectApi.getProjectMeta,
+                    promptSave: () => promptUnsavedAction("exit", closeWindowNow),
+                    closeWindow: closeWindowNow,
+                }));
+                if (disposed) {
+                    unlisten();
+                    unlisten = null;
+                }
             } catch {
                 // 非 Tauri 环境：忽略窗口关闭事件监听失败
             }
@@ -2091,7 +2088,7 @@ function AppInner() {
             disposed = true;
             if (unlisten) unlisten();
         };
-    }, [closeWindowNow, promptUnsavedAction]); // 剔除 projectDirty 依赖，只绑定一次
+    }, [closeWindowNow, promptUnsavedAction]);
 
     // 检测已导入的媒体源文件是否被外部修改或删除。
     // 触发时机：窗口重新获得焦点，以及工程/导入内容刚替换完成时。
@@ -2970,12 +2967,7 @@ function AppInner() {
                     void dispatch(setToolModePersistent("select"));
                     break;
                 case "mode.toggleBlockEdit": {
-                    const next = toggleParamBlockEditingTool(runtimeRef.current.toolMode);
-                    if (next === "draw") {
-                        dispatch(setEditParam("pitch"));
-                        void dispatch(persistUiSettings());
-                    }
-                    void dispatch(setToolModePersistent(next));
+                    void dispatch(toggleParamBlockEditPersistent());
                     break;
                 }
                 case "mode.drawTool":
