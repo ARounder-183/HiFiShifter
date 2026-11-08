@@ -453,12 +453,27 @@ impl ExtensionOwner {
             last_playing: geometry.last_playing.load(Ordering::Acquire),
             max_start_window_frames: pre_roll_cap,
         };
+        // 【首块起播容差的唯一正证据】见下面 `playing_rising` 的说明：只有本块真的
+        // 有信号，才允许“kPlaying 滞后”的宿主在第一块上打开有界起点窗口。
+        let audio_evidence = !geometry.last_block_silent.load(Ordering::Acquire);
         let decision = session.observe(SessionInput {
             // 离线 pass 有自己的 cursor；它不需要 kPlaying 也必须在走。
             playing: playing || is_offline,
-            // 【首块也开一个有界起点窗口】VEGAS 可能先送 0.6 s 音频、kPlaying 才置位；
-            // 窗口只有 1 秒，超过仍冻结。它不是“无限计数器”，只是起播容差。
-            playing_rising: playing_rising || recording_rising || (!had && !playing && !is_offline),
+            // 【首块不再无条件伪造起播】此前 `!had && !playing` 会在**任何**宿主的第一
+            // 块上合成一个起播上升沿，打开 1 秒的有界起点窗口。REAPER 等宿主停播时仍
+            // 持续 process 固定光标处的**静音块**，而 `capture_start` 会重置流几何
+            //（`had` 归零）⇒ 按下录制、宿主根本没播，那 1 秒静音就被逐块记成 take：
+            // 界面上正是“捕获开始后立刻计时、到 1 s 自动停住”，take 里
+            // `first_signal_at=none` / `pre_roll_frames≈48000`。
+            //
+            // 【唯一的正证据】“kPlaying 还来不及置位但音频已经在流动”只在**这一块真的
+            // 有信号**时成立（VEGAS Event FX 预卷、VST3 起播窗口、prefetch 都是这种形
+            // 状）。全静音块没有任何证据能把它与“宿主停播”区分开，因此不放行。
+            // 真正起播时 kPlaying 会升起，`transport_active` 照常由 `playing` 打开 ——
+            // 这次容差只影响“没播放”的那段，不会吞掉任何一帧真实音频。
+            playing_rising: playing_rising
+                || recording_rising
+                || (!had && !playing && !is_offline && audio_evidence),
             recording_rising,
             // 域切换不是 seek：不能让它触发 host_reset 的新 epoch。
             host_reset: host_rewound && !clock.switched,

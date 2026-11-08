@@ -1533,6 +1533,68 @@ fn a_pinned_silent_repeat_stays_resting() {
     );
 }
 
+/// **停播时的静音首块不得伪造起播窗口（REAPER CLAP 现场）。**
+///
+/// 【为什么钉这条】`capture_start` 会重置流几何，`had` 归零；REAPER 停播时仍持续
+/// process 固定光标处的静音块。旧实现把「首块 + kPlaying=0」无条件当成 VEGAS 起播
+/// 容差，打开 1 秒有界窗口 ⇒ 静音被逐块记成 take，界面上「没播放却在计时、到 1s
+/// 自动停」。判据现在要求本块真的有信号：纯静音块没有任何证据能证明宿主在起播。
+#[test]
+fn a_silent_stopped_first_block_never_opens_the_start_window() {
+    let owner = insert_owner();
+    let stream = ProcessStream::Realtime;
+    let raw = 381_648_i64;
+    // 首块：宿主没播、输入全静音。
+    owner.streams[stream.index()].note_block_silence(true);
+    let first = owner.note_stream_geometry(
+        stream,
+        raw,
+        512,
+        48_000.0,
+        StreamTime::default(),
+        false,
+        false,
+        false,
+    );
+    assert!(!first.transport_active, "停播静音首块无权推进位置/写捕获");
+    assert!(!first.start_window, "停播静音首块不得打开起点窗口");
+    // 宿主持续送同样的停播静音块（远超旧实现那 1 秒窗口）：一个都不许被记账。
+    for _ in 0..100 {
+        owner.streams[stream.index()].note_block_silence(true);
+        let block = owner.note_stream_geometry(
+            stream,
+            raw,
+            512,
+            48_000.0,
+            StreamTime::default(),
+            false,
+            false,
+            false,
+        );
+        assert!(!block.transport_active);
+    }
+    assert_eq!(
+        owner.streams[stream.index()]
+            .counted_blocks
+            .load(Ordering::Acquire),
+        0,
+        "宿主没播放 ⇒ 一帧都不许计入捕获"
+    );
+    // 一旦宿主真的起播（kPlaying 升起 + 有信号），同一个 owner 必须立刻放行。
+    owner.streams[stream.index()].note_block_silence(false);
+    let live = owner.note_stream_geometry(
+        stream,
+        raw,
+        512,
+        48_000.0,
+        StreamTime::default(),
+        true,
+        false,
+        true,
+    );
+    assert!(live.transport_active, "真实起播必须立刻有权推进");
+}
+
 /// **起播窗口里的静音/持续音也必须按块长推进。**
 ///
 /// 【为什么这是问题一的回归】VEGAS 在钉住窗口里可能先送 0.4 s 静音，再送内容。

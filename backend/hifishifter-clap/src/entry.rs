@@ -1054,4 +1054,124 @@ mod tests {
         release(&mut plugin, instance);
     }
 
+    /// **宿主根本没播放时按下捕获，不得开始计时、不得自己收口。**
+    ///
+    /// 【为什么与上一节并存】上一节钉的是"播过一遍、停播后不 promote"；这一节钉的是
+    /// 现场报障的正身：capture_start 之后宿主一直是 kPlaying=0（REAPER 停播时仍持续
+    /// process 固定光标处的静音块）。此前 note_stream_geometry 在 capture_start 重置
+    /// 流几何后的**第一块**上无条件伪造一个起播上升沿，打开 1 秒有界起点窗口 ⇒ 静音
+    /// 块被逐块记账，界面上"计时走到 1 s 就自动停"，take 里 first_signal_at=none。
+    /// 修复后即时给出 kPlaying 的宿主（REAPER）一律以它为准：停播块 transport_active
+    /// 恒为假，capturedFrames 必须一直是 0，用户按停止之前 takeCount 必须是 0。
+    #[test]
+    fn a_stopped_host_never_starts_capture_counting() {
+        let (mut plugin, instance) = fixture();
+        let ptr: *const clap_plugin_t = &raw const plugin;
+        let host = crate::abi::clap_host_t {
+            clap_version: CLAP_VERSION,
+            host_data: std::ptr::null_mut(),
+            name: c"REAPER".as_ptr(),
+            vendor: c"probe".as_ptr(),
+            url: c"probe".as_ptr(),
+            version: c"1".as_ptr(),
+            get_extension: None,
+            request_restart: None,
+            request_process: None,
+            request_callback: None,
+        };
+        unsafe { (*instance).host = &raw const host };
+        assert!(unsafe { plugin_init(ptr) });
+        assert!(unsafe { plugin_activate(ptr, 48_000.0, 1, 512) });
+        assert!(unsafe { start_processing(ptr) });
+        let owner = std::sync::Arc::clone(&unsafe { crate::instance(ptr) }.expect("instance").owner);
+        let port = hifishifter_plugin::editor::port::EditorPort::new(
+            std::sync::Arc::clone(&owner),
+            "v",
+        );
+        let reply = |command: &str, args: serde_json::Value| {
+            let request = serde_json::json!({ "id": 1, "viewId": "v", "version": 1, "command": command, "args": args });
+            crate::editor::protocol::reply_with_editor("v", &request, Some(&port))
+        };
+        assert_eq!(reply("capture_start", serde_json::Value::Null)["ok"], true);
+
+        let frames = 512_u32;
+        let rate = 48_000.0_f64;
+        let silent: Vec<f32> = vec![0.0_f32; frames as usize];
+        let mut out_left = vec![0.0_f32; frames as usize];
+        let mut out_right = vec![0.0_f32; frames as usize];
+        let mut block_index = 0_i64;
+        let mut feed = |playing: bool, position_frames: i64, live: &[f32]| {
+            let seconds = position_frames as f64 / rate;
+            let beats = seconds * 120.0 / 60.0;
+            let mut transport = crate::abi::clap_event_transport_t {
+                header: crate::abi::clap_event_header_t {
+                    size: std::mem::size_of::<crate::abi::clap_event_transport_t>() as u32,
+                    time: 0,
+                    space_id: 0,
+                    type_: crate::abi::CLAP_EVENT_TRANSPORT,
+                    flags: 0,
+                },
+                flags: crate::abi::transport_flags::HAS_BEATS_TIMELINE
+                    | crate::abi::transport_flags::HAS_TEMPO
+                    | if playing { crate::abi::transport_flags::IS_PLAYING } else { 0 },
+                song_pos_beats: (beats * crate::abi::CLAP_BEATTIME_FACTOR).round() as i64,
+                song_pos_seconds: 0,
+                tempo: 120.0,
+                tempo_inc: 0.0,
+                loop_start_beats: 0,
+                loop_end_beats: 0,
+                loop_start_seconds: 0,
+                loop_end_seconds: 0,
+                bar_start: 0,
+                bar_number: 0,
+                tsig_num: 4,
+                tsig_denom: 4,
+            };
+            let mut in_planes: [*mut f32; 2] = [live.as_ptr() as *mut f32, live.as_ptr() as *mut f32];
+            let mut out_planes: [*mut f32; 2] = [out_left.as_mut_ptr(), out_right.as_mut_ptr()];
+            let input = crate::abi::clap_audio_buffer_t {
+                data32: in_planes.as_mut_ptr(), data64: std::ptr::null_mut(),
+                channel_count: 2, latency: 0, constant_mask: 0,
+            };
+            let mut output = crate::abi::clap_audio_buffer_t {
+                data32: out_planes.as_mut_ptr(), data64: std::ptr::null_mut(),
+                channel_count: 2, latency: 0, constant_mask: 0,
+            };
+            let process = clap_process_t {
+                steady_time: block_index * frames as i64,
+                frames_count: frames,
+                transport: &mut transport,
+                audio_inputs: &input,
+                audio_outputs: &mut output,
+                audio_inputs_count: 1,
+                audio_outputs_count: 1,
+                in_events: std::ptr::null(),
+                out_events: std::ptr::null(),
+            };
+            block_index += 1;
+            assert_eq!(unsafe { plugin_process(ptr, &raw const process) }, CLAP_PROCESS_CONTINUE);
+        };
+
+        // 宿主一直停播：持续送固定光标处的静音块（远超旧实现那 1 秒窗口）。
+        for _ in 0..400_i64 { feed(false, 381_648, &silent); }
+        for _ in 0..10 { owner.capture().service(); owner.tick_preview_quiet(); }
+
+        let status = reply("capture_status", serde_json::Value::Null);
+        assert_eq!(status["value"]["takeCount"].as_u64().unwrap_or(u64::MAX), 0,
+            "停播期间不得产生任何 take：{status}");
+        assert!(status["value"]["recording"].is_null(),
+            "宿主没播放 ⇒ 仍是待命，根本不该有录制读数（计时必须停在 0）：{status}");
+        assert_eq!(status["value"]["state"].as_str().unwrap_or("?"), "standby",
+            "停播时状态必须是待命而不是 recording：{status}");
+
+        // 用户真正按播放：这一遍才开始积累素材。
+        let live: Vec<f32> = (0..frames as usize).map(|i| (i as f32 / 64.0).sin() * 0.25).collect();
+        for i in 0..94_i64 { feed(true, 381_648 + i * frames as i64, &live); }
+        // 用户按停止 ⇒ 唯一一个 take，且带真实内容。
+        let stopped = reply("capture_stop", serde_json::Value::Null);
+        assert_eq!(stopped["value"]["status"]["takeCount"], 1, "{stopped}");
+        unsafe { stop_processing(ptr); plugin_deactivate(ptr); }
+        release(&mut plugin, instance);
+    }
+
 }
