@@ -251,9 +251,18 @@ function applyTransportSample(
     }
     // 【乱序防护的第二种形态：读数序号】纪元判的是"传输态有没有变"，它拦不住
     // "同一场播放里两条通道的先后"。推送与轮询现在都带 `sample_seq`（后端在产生
-    // 读数的那一刻分配），序号更小的一律丢弃 —— 于是晚到的旧读数不会再拽回光标。
+    // 读数的那一刻分配），序号**更小**的一律丢弃 —— 于是晚到的旧读数不会再拽回光标。
+    //
+    // 【为什么判据是"严格更小"而不是"小于等于"】`sample_seq` 标识的是**后端发布了
+    // 哪一次读数**，而一条读数里还带着会随时间变化的派生事实：`position_age_ms` 与
+    // 由它决定的 `is_playing`。同一个序号可以被读多次，每次读到的派生事实不同 ——
+    // 典型场景正是 REAPER 的 Item（take FX）：宿主停播后**不再送音频块**，序号就冻住
+    // 了，而"播放位已过期"恰恰是在后续这些同序号读数里才表达出来的。用 `<=` 把它们
+    // 当重复丢掉，界面就永远停在"宿主还在播"，光标按 1x 无限前漂（"播放时光标能动、
+    // 但不会停止"）。同序号的两条读数不可能乱序（它们是同一份发布的重复读取），
+    // 后到的那条只会更新，不会把光标拽回旧位置。
     const sampleSeq = typeof payload.sample_seq === "number" ? payload.sample_seq : null;
-    if (sampleSeq !== null && sampleSeq <= state.runtime.lastTransportSeq) {
+    if (sampleSeq !== null && sampleSeq < state.runtime.lastTransportSeq) {
         return;
     }
     if (sampleSeq !== null) {

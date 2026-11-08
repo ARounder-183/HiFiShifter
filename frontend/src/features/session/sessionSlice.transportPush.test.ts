@@ -113,6 +113,45 @@ test("★ 位置真的前进了才置 positionAdvancing（视觉推进的事实�
     expect(stopped.runtime.positionAdvancing).toBe(false);
 });
 
+test("★ 同一序号的后读采样必须仍然生效：宿主停发音频块时播放位要能过期", () => {
+    // REAPER 的 Item（take FX）停播后**不再送音频块**，后端因此不再产生新的
+    // `sample_seq`；而"播放位已过期"只在随后的同序号读数里表达。把同序号读数当
+    // 重复丢掉，界面就会永远停在"宿主还在播"——光标能动、但不会停止。
+    const base = reducer(undefined, { type: "@@INIT" });
+    const playing = reducer(
+        base,
+        transportPushed(sample({ position_sec: 30, sample_seq: 5, position_age_ms: 4 })),
+    );
+    expect(playing.runtime.isPlaying).toBe(true);
+    expect(playing.runtime.positionAdvancing).toBe(true);
+
+    // 同一条发布，再读一次：块已过期，位置冻结在 30 s。
+    const expired = reducer(
+        playing,
+        transportPushed(
+            sample({
+                is_playing: false,
+                position_sec: 30,
+                sample_seq: 5,
+                position_source: "stale",
+                position_age_ms: 4_294_967_295,
+            }),
+        ),
+    );
+    expect(expired.runtime.isPlaying).toBe(false);
+    expect(expired.runtime.positionAdvancing).toBe(false);
+    // 残值只负责熄灭播放位，绝不把光标拽回旧位置。
+    expect(expired.playheadSec).toBe(30);
+});
+
+test("★ 严格更旧的序号仍然被丢弃（乱序防护没有被放宽）", () => {
+    const base = reducer(undefined, { type: "@@INIT" });
+    const playing = reducer(base, transportPushed(sample({ position_sec: 30, sample_seq: 5 })));
+    const older = reducer(playing, transportPushed(sample({ position_sec: 12, sample_seq: 4 })));
+    expect(older.playheadSec).toBe(30);
+    expect(older.runtime.isPlaying).toBe(true);
+});
+
 test("轮询与推送共用同一份语义：同一条采样经两条通道得到同一个状态", () => {
     const base = reducer(undefined, { type: "@@INIT" });
     const pushed = reducer(base, transportPushed(sample({ position_sec: 9.5 })));
