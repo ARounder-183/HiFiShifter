@@ -61,27 +61,15 @@ use ara2_bridge::sys::{
 };
 use hifishifter_plugin::ara::binder::AraBinder;
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
-/// 宿主是否已发起本格式的 ARA 握手。
+/// 登记一次 ARA 握手。
 ///
-/// 【为什么叫"握手"而不是"工厂查询"】按 ARACLAP.h 定稿协议发现的宿主有两条入口：
-/// 先查 entry 级 `CLAP_EXT_ARA_FACTORY`，再查实例级扩展。两条都要置位，否则
-/// "宿主只查了实例级"这一档会被误报成"宿主不支持 ARA"，诊断读数就会说谎。
-static ARA_HANDSHAKE_STARTED: AtomicBool = AtomicBool::new(false);
-
-/// 宿主是否已发起本格式的 ARA 握手（供 bootstrap / 诊断读取）。
-///
-/// 名字保留 `factory_queried` 是为了不动既有 JSON 字段 `factoryQueriedByHost`；
-/// 语义已扩展为"任一发现路径触发了 ARA 入口"。
-pub fn ara_factory_queried() -> bool {
-    ARA_HANDSHAKE_STARTED.load(Ordering::Acquire)
-}
-
-/// 登记一次 ARA 握手，并把读数同步到共享诊断层。
+/// 【为什么只有共享层那一份读数】"宿主有没有把本插件当 ARA 插件"是**格式无关**的事实：
+/// 它由 entry 级工厂查询与实例级扩展查询共同置位，最终出现在诊断包与页面 bootstrap 的
+/// `araDiscovery` 里。这里曾经另存一个 `ARA_HANDSHAKE_STARTED` 原子量，于是同一个事实
+/// 有两份状态 —— 一份漏置位就会出现"诊断包说问过、页面说没问过"的矛盾。
 fn note_ara_handshake(id: &str) {
-    ARA_HANDSHAKE_STARTED.store(true, Ordering::Release);
     hifishifter_plugin::diagnostics::note_ara_factory_queried();
     log::warn!("[clap][ara] ARA handshake started via extension id={id}");
 }

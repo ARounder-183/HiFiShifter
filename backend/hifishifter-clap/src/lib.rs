@@ -11,7 +11,8 @@
 //! 没有 ARA 的宿主里，它仍是可用的普通效果器（Capture 形态）。
 //! 两种形态的音频、捕获与编辑都走
 //! `hifishifter-plugin` 里那一份实现，本 crate 只做 ABI 翻译。
-//! 编辑器窗口在 Windows 上经 `clap.gui` 内嵌同一份前端产物；其它平台如实降级。
+//! 编辑器窗口经 `clap.gui` 内嵌**与 VST3 同一个**共享视图栈（`hifishifter-plugin` 的
+//! `editor::gui`）：同一份 Policy、同一份平台原语、同一份前端产物。
 //! 不链接 VST3 SDK、不带 Tauri/wry/app runtime。
 
 #![deny(missing_docs)]
@@ -26,7 +27,6 @@
 pub mod abi;
 pub mod ara;
 pub mod audio;
-pub mod editor;
 pub mod entry;
 pub mod gui;
 pub mod latency_tail;

@@ -56,7 +56,7 @@ pub(crate) fn live_links() -> Vec<Arc<EditorLink>> {
     all.iter().filter_map(Weak::upgrade).collect()
 }
 
-pub(crate) struct RouteLease {
+pub struct RouteLease {
     token: String,
 }
 impl RouteLease {
@@ -99,6 +99,12 @@ pub(crate) enum RouteOrigin {
     HostHandshake,
     /// 宿主没有完成握手；按「进程内唯一活实例」兜底绑定（见 [`bind_sole_owner`]）。
     SoleOwnerFallback,
+    /// 格式外壳**直接**知道这条视图属于哪个实例（CLAP：`clap_plugin_t` 就是那个实例）。
+    ///
+    /// 【为什么它不是第三种"猜测"】前两种都在回答"宿主没告诉我们时该连哪一个"；这一种
+    /// 根本没有未知量 —— 外壳持有实例指针，视图与实例的映射在创建时就已确定。把它记成
+    /// fallback 会让诊断读到一个不存在的歧义，也会让多实例宿主里 CLAP 的视图被拒绝服务。
+    Direct,
 }
 
 /// 路由状态（诊断包、`plugin_health` 与前端共用的四态）。
@@ -142,10 +148,16 @@ struct Handler2Vtbl {
     set_dirty: unsafe extern "system" fn(*mut c_void, u8) -> TResult,
 }
 #[derive(Default)]
-pub(crate) struct EditorLink {
+pub struct EditorLink {
     binding: Mutex<Binding>,
     handler2: Mutex<usize>,
     dirty: std::sync::atomic::AtomicBool,
+    /// 直连链路自己持有的租约；VST3 由组件侧持有（`vst3.rs` 的 `route`）。
+    ///
+    /// 【为什么必须由链路持有】`RouteLease::new` 只把令牌登记进进程表，条目是 `Weak`；
+    /// 租约一析构，`owner()` 立刻查不到令牌。CLAP 没有组件对象来替它保管，所以放在这里，
+    /// 与链路同生共死。
+    lease: Mutex<Option<RouteLease>>,
 }
 fn release_handler(pointer: usize) {
     if pointer != 0 {
@@ -300,6 +312,26 @@ impl EditorLink {
     }
 }
 impl EditorLink {
+    /// 为一个**非 VST3** 外壳（CLAP）建立直连链路。
+    ///
+    /// 【为什么需要它】VST3 的链路靠宿主 `IConnectionPoint` 握手或「进程内唯一实例」兜底
+    /// 建立；CLAP 的实例在创建时就已知归属（`clap_plugin_t` 就是那个实例），没有可握手
+    /// 的消息通道，也不需要猜。直连把这条唯一映射写成显式事实 —— 让 CLAP 去走兜底会在
+    /// 多实例宿主里拒绝服务，并把 `origin` 记成 fallback（一个不存在的歧义）。
+    pub fn for_owner(owner: &Arc<ExtensionOwner>) -> Result<Arc<Self>, String> {
+        let lease = RouteLease::new(owner);
+        let link = Arc::new(Self::default());
+        {
+            let mut binding = link.binding.lock().unwrap_or_else(|e| e.into_inner());
+            binding.generation = 1;
+            binding.token = Some(lease.token().to_owned());
+            binding.origin = Some(RouteOrigin::Direct);
+            binding.failure = None;
+        }
+        *link.lease.lock().unwrap_or_else(|e| e.into_inner()) = Some(lease);
+        Ok(link)
+    }
+
     /// 已经绑定（任一来源）。
     pub(crate) fn is_bound(&self) -> bool {
         self.binding
@@ -458,6 +490,27 @@ mod tests {
         assert!(link.is_bound());
         assert_eq!(link.route_state(), RouteState::Fallback);
         assert!(Arc::ptr_eq(&link.owner().unwrap(), &a));
+    }
+
+    /// **不变量：CLAP 的直连链路只绑到它自己的实例，且不经过"唯一活实例"兜底。**
+    ///
+    /// 【为什么钉死】直连的全部价值是"实例与视图的映射在创建时就已知"。一旦它退化成
+    /// 按进程表猜，多实例宿主里两条轨的编辑会串在一起 —— 而症状只会在某个宿主的某个
+    /// 工程里出现。这里同时钉住"两个直连链路各自绑各自的 owner"。
+    #[test]
+    fn a_direct_link_binds_only_its_own_owner() {
+        let a = Arc::new(ExtensionOwner::default());
+        let b = Arc::new(ExtensionOwner::default());
+        let first = EditorLink::for_owner(&a).unwrap();
+        let second = EditorLink::for_owner(&b).unwrap();
+        assert!(first.is_bound());
+        assert_eq!(first.route_state(), RouteState::Bound);
+        assert!(Arc::ptr_eq(&first.owner().unwrap(), &a));
+        assert!(Arc::ptr_eq(&second.owner().unwrap(), &b));
+        // 组件关闭后链路必须如实失败，而不是继续用一具尸体。
+        b.component_terminated();
+        assert!(second.owner().is_err());
+        assert!(Arc::ptr_eq(&first.owner().unwrap(), &a));
     }
 
     /// 兜底失败只记第一条，且不会把已经绑好的链路打回未绑定。

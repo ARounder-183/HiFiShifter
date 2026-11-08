@@ -2033,17 +2033,12 @@ dependencies = [
  "ara2-bridge",
  "ara2-bridge-companion",
  "ara2-bridge-sys",
- "arc-swap",
- "base64 0.23.1",
  "hifishifter-capture",
  "hifishifter-kernel",
  "hifishifter-plugin",
  "hifishifter-plugin-core",
- "libc",
  "log",
  "serde_json",
- "webview2-com",
- "windows",
 ]
 
 [[package]]

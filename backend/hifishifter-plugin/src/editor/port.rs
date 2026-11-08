@@ -84,7 +84,10 @@ impl EditorPort {
             sink: self.sink.clone(),
             link: None,
         })?;
-        let replies = self.replies.lock().map_err(|_| "editor reply channel poisoned")?;
+        let replies = self
+            .replies
+            .lock()
+            .map_err(|_| "editor reply channel poisoned")?;
         loop {
             let reply = replies
                 .recv_timeout(REPLY_TIMEOUT)
@@ -103,6 +106,35 @@ impl EditorPort {
                     .unwrap_or("editor command failed")
                     .to_owned())
             };
+        }
+    }
+
+    /// 把一条页面请求包成该页面协议的回执（外壳自己的信封）。
+    ///
+    /// 【为什么信封也在这里】"命令怎么执行"与"回执长什么样"是同一条契约的两端；
+    /// 每个外壳各拼一次，就会出现"VST3 的 ok/value 与 CLAP 的 ok/value 字段名不同"
+    /// 这种只能靠读两个文件才能发现的漂移。内嵌视图走 `gui::client` 的同一条形状。
+    pub fn reply(&self, request: &Value) -> Value {
+        let id = request.get("id").and_then(Value::as_u64).unwrap_or(0);
+        let command = request.get("command").and_then(Value::as_str).unwrap_or("");
+        let args = request.get("args").cloned().unwrap_or(Value::Null);
+        match self.request(command, args) {
+            Ok(value) => serde_json::json!({
+                "version": 1,
+                "viewId": self.sink.view_id,
+                "id": id,
+                "ok": true,
+                "value": value,
+            }),
+            Err(error) => serde_json::json!({
+                "version": 1,
+                "viewId": self.sink.view_id,
+                "id": id,
+                "ok": false,
+                "error": error,
+                "errorKind": "transient",
+                "errorCode": null,
+            }),
         }
     }
 
@@ -132,5 +164,86 @@ impl EditorPort {
 impl Drop for EditorPort {
     fn drop(&mut self) {
         self.close();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings_store::test_support::{exclusive, reset};
+
+    fn port() -> EditorPort {
+        EditorPort::new(
+            std::sync::Arc::new(crate::render::extension::ExtensionOwner::default()),
+            "v",
+        )
+    }
+
+    fn call(port: &EditorPort, command: &str, args: Value) -> Value {
+        port.reply(&serde_json::json!({
+            "version": 1,
+            "viewId": "v",
+            "id": 1,
+            "command": command,
+            "args": args,
+        }))
+    }
+
+    /// **不变量：界面设置与前端偏好必须落进共享的 `settings_store`，不是外壳自己的一张表。**
+    ///
+    /// 【为什么钉死】CLAP 外壳曾经在 `protocol.rs` 里用一张进程内 `BTreeMap` 回答
+    /// `ui_kv_*`，并把 `save_ui_settings` 直接回 `{"ok":true}` —— 于是「锁定参数线」
+    /// 这个开关在 CLAP 编辑器里点了没有任何效果（`lock_param_lines()` 永远读默认值），
+    /// 语言/主题也在关窗后全部丢失。这条用例走的是页面那条路（`EditorPort::reply`），
+    /// 断言的是**共享存储**被改到，而不是回执长得像成功。
+    #[test]
+    fn ui_settings_and_prefs_are_served_by_the_shared_store() {
+        let _serial = exclusive();
+        reset();
+        let port = port();
+
+        let reply = call(
+            &port,
+            "save_ui_settings",
+            serde_json::json!({ "settings": { "lockParamLines": false } }),
+        );
+        assert_eq!(reply["ok"], true, "{reply}");
+        assert_eq!(reply["value"]["lockParamLines"], false, "{reply}");
+        assert!(
+            !crate::settings_store::lock_param_lines(),
+            "锁定参数线的开关必须真的改到共享设置"
+        );
+
+        let reply = call(&port, "get_ui_settings", Value::Null);
+        assert_eq!(reply["value"]["lockParamLines"], false, "{reply}");
+
+        let reply = call(
+            &port,
+            "ui_kv_put",
+            serde_json::json!({ "patch": { "hifishifter.locale": "zh-CN" } }),
+        );
+        assert_eq!(reply["value"]["hifishifter.locale"], "zh-CN", "{reply}");
+        let reply = call(&port, "ui_kv_dump", Value::Null);
+        assert_eq!(reply["value"]["hifishifter.locale"], "zh-CN", "{reply}");
+        let reply = call(
+            &port,
+            "ui_kv_delete",
+            serde_json::json!({ "keys": ["hifishifter.locale"] }),
+        );
+        assert!(
+            reply["value"].get("hifishifter.locale").is_none(),
+            "{reply}"
+        );
+    }
+
+    /// 一条走会话的命令必须带回执信封；没有后端的视图要立刻失败而不是挂到超时。
+    #[test]
+    fn a_session_command_answers_in_the_page_envelope() {
+        let port = port();
+        let reply = call(&port, "plugin_get_apply_state", Value::Null);
+        assert_eq!(reply["version"], 1);
+        assert_eq!(reply["viewId"], "v");
+        assert_eq!(reply["id"], 1);
+        assert_eq!(reply["ok"], true, "{reply}");
     }
 }

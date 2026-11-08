@@ -14,8 +14,9 @@ mod notebook;
 // `#[cfg(not(test))]`（测试进程不该扫描/删除真实的用户临时目录）。
 pub(crate) mod capture_edits;
 mod param_curves;
-// GUI 的另一半：文件对话框 / 在文件管理器中显示 / 用默认程序打开（按平台各一份）。
-pub(crate) mod gui;
+// 内嵌编辑器：**格式无关**的 Policy + 三个平台原语。VST3 的 `IPlugView` 与 CLAP 的
+// `clap_plugin_gui` 都只经 `gui::create_view` 建视图（见 `gui::EditorView`）。
+pub mod gui;
 #[cfg(not(windows))]
 pub(crate) mod platform_services;
 mod plugin_diagnostics;
@@ -38,10 +39,10 @@ pub(crate) mod workspace;
 /// 于是"少回收一类目录"这种缺陷不会有任何测试变红。表放在 `editor` 这一层，
 /// 判据（[`TEMP_SWEEP_TARGETS`] 的条目）就能被普通单元测试守住。
 ///
-/// 【为什么 webview 有两个前缀】`view-<pid>` 是 VST3 编辑器的 WebView2 profile，
-/// `clap-<pid>` 是 CLAP 外壳的：同一个产品、同一个根，判据（属主进程已退出）完全
-/// 相同，所以由同一趟扫描回收。CLAP 的目录名见
-/// `hifishifter-clap/src/editor/windows.rs` 的 `profile_dir_for`。
+/// 【为什么 webview 有两个前缀】`view-<pid>` 是两个格式**共用**的 WebView2 profile
+/// （同一个共享视图栈，见 `gui/windows.rs::profile_directory`）；`clap-<pid>` 是 CLAP
+/// 外壳独立实现时期留下的旧目录名 —— 仍然必须扫，否则那些机器上的旧目录永远不会被回收。
+/// 两者同根、判据（属主进程已退出）相同，所以由同一趟扫描处理。
 pub(crate) const TEMP_SWEEP_TARGETS: &[(&str, &str)] = &[
     ("webview", "view-"),
     ("webview", "clap-"),
@@ -54,16 +55,38 @@ pub use gui::client::bootstrap_capabilities;
 pub use gui::client::log_frontend_error;
 pub(crate) use view::create_view_with_link;
 
+/// 建视图的唯一入口（父句柄 + 尺寸 + 实例链路）。
+pub use gui::create_view as create_editor_view;
+/// 一个已建立的嵌入式视图；两个格式共用同一份实现。
+pub use gui::EditorView;
+/// 编辑器链路：把视图绑到一个 `ExtensionOwner` 上。
+pub use routing::EditorLink;
+/// 实例在进程内的租约；持有它 = 让 `live_owners()` 看得见这个实例。
+pub use routing::RouteLease;
+
+/// 宿主主线程的周期工作：投递泵 + 宿主时钟/Undo/setDirty 收口。
+///
+/// 【为什么只有这一份】VST3 挂在 REAPER 的 `plugin_register("timer")` 上，CLAP 挂在
+/// `clap.timer-support` 的 `on_timer` 与 `on_main_thread` 上 —— 驱动方式不同，但
+/// **每次节拍要做的事**完全相同。此前这段顺序写在 `host/reaper/host_timer.rs` 里，
+/// CLAP 没有对应物，于是它的宿主侧周期工作一个环节都不跑。
+pub fn host_main_thread_tick() {
+    // 1) 先排空投递队列：编辑器命令要回到这条线程上执行。
+    crate::host::marshal::pump();
+    // 2) 再跑宿主侧周期工作（时钟采样、Undo 收口、setDirty 冲刷）。
+    gui::client::host_heartbeat();
+}
+
 #[cfg(test)]
 mod tests {
     use super::classify_error;
 
-    /// 回收表必须覆盖 CLAP 外壳的 WebView2 profile。
+    /// 回收表必须覆盖两个格式的 WebView2 profile（含 CLAP 独立实现时期的旧前缀）。
     ///
     /// 【为什么这条要单独守】漏掉一个前缀不会报错：宿主每次启动都会多留一份几百 MB 的
     /// 用户数据目录，直到用户自己发现（VST3 曾经就是这样攒出 147 个目录、7.1 GiB）。
     #[test]
-    fn the_temp_sweep_table_covers_the_clap_profile() {
+    fn the_temp_sweep_table_covers_both_webview_profiles() {
         assert!(
             super::TEMP_SWEEP_TARGETS.contains(&("webview", "clap-")),
             "CLAP profiles are never reclaimed: {:?}",
@@ -117,7 +140,7 @@ mod tests {
 }
 
 /// 卸载前撤销本模块注册的窗口类 / 停掉私有 GUI 线程；尚有窗口时明确拒绝正常卸载。
-pub(crate) fn shutdown() -> bool {
+pub fn shutdown() -> bool {
     gui::shutdown()
 }
 

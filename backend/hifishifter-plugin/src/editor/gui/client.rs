@@ -1493,7 +1493,7 @@ pub fn bootstrap_capabilities(
         owner.resolve_binding_mode();
     }
 
-    let payload = BootstrapFlags {
+    let mut payload = BootstrapFlags {
         transport_control: owner
             .as_ref()
             .is_some_and(|owner| owner.host_playback().is_some()),
@@ -1528,6 +1528,10 @@ pub fn bootstrap_capabilities(
             .unwrap_or_else(hifishifter_kernel::editor::host::HostCapabilities::none),
     }
     .to_json(view_id);
+    // 【为什么 ARA 发现读数在共享 bootstrap 里】"这个宿主有没有把本插件当 ARA 插件"与外壳
+    // 格式无关：它来自共享诊断层的同一个原子量（entry 级工厂查询或实例级扩展查询触发）。
+    // 让每个外壳各拼一份，就会出现 CLAP 报"没问过"而诊断包报"问过"的矛盾。
+    payload["araDiscovery"] = crate::diagnostics::ara_discovery_json();
     // 路由状态：前端据此区分「还在等宿主」与「宿主根本没连」，并决定要不要提示。
     // 放在这里而不是 `BootstrapFlags` 里，是因为后者是 `Copy` 的纯能力快照，
     // 而这两个字段带一段可能很长的原因字符串。
@@ -2505,6 +2509,22 @@ mod backoff_tests {
 #[cfg(test)]
 mod bootstrap_tests {
     use super::BootstrapFlags;
+
+    /// **不变量：每个格式的 bootstrap 都带同一份 ARA 发现读数。**
+    ///
+    /// 【为什么钉死】"宿主有没有把本插件当 ARA 插件"决定页面怎么解释"没有片段"：
+    /// 是宿主不支持 ARA，还是 ARA 已握手但时间线为空。这个读数曾经只由 CLAP 外壳
+    /// 自己拼进 bootstrap，VST3 的页面根本读不到；现在它来自共享诊断层的同一个原子量。
+    #[test]
+    fn every_bootstrap_carries_the_shared_ara_discovery_readout() {
+        let boot = super::bootstrap_capabilities(None, "view-1");
+        assert!(boot["araDiscovery"]["factoryQueriedByHost"].is_boolean());
+        assert!(boot["araDiscovery"]["araActive"].is_boolean());
+        assert_eq!(
+            boot["araDiscovery"]["format"],
+            serde_json::json!(crate::log_tag())
+        );
+    }
 
     /// `trackGrouping` 不随任何宿主能力变化 —— 它守卫的是纯插件的参数分组。
     ///

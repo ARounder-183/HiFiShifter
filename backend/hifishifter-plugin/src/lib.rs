@@ -179,16 +179,38 @@ pub fn resolve_host_identity() {
 /// 那时迁移只能由插件触发，否则他们的设置与 PCM 暂存永远留在
 /// `com.arounder.hifishifter\` 那一层下面。
 ///
+/// 进程级初始化：产品版本 + 用户目录布局迁移（**两种格式共用同一份**）。
+///
+/// 【为什么单独成一个函数】CLAP 外壳没有 bundle 形态的资源目录，但它同样需要这一整段：
+/// 用户可能只装插件、从不打开独立 App。此前 CLAP 的 `entry_init` 注册的是一个**空钩子**，
+/// 于是 CLAP-only 用户的数据永远停在旧布局；更糟的是 `set_layout_migration_hook` 是
+/// 进程级 `OnceLock` —— 谁先登记谁赢，CLAP 先加载时会把 VST3 真正的那一份挡掉。
+/// 现在两个外壳登记的是同一个函数指针，谁先谁后都一样。
+///
 /// 【为什么必须早于 `diagnostics::init()`】日志初始化会创建
 /// `<本地根>\logs` 并立刻写文件；迁移的判据是"新旧根同时存在就绝不合并"，
 /// 日志目录先被建出来，旧日志就再也搬不过来了。
-fn ensure_layout_v2_once() {
+pub fn initialize_process_state() {
     // 【为什么在钩子之后才迁移】日志初始化会先建 logs 目录，而迁移判据是
     // 「新旧根同时存在就不合并」；钩子必须先登记，否则每个入口都要重复这段顺序。
     hifishifter_plugin_core::set_layout_migration_hook(|| {
         hifishifter_kernel::app_paths_migrate::ensure_layout_v2().log_summary("plugin");
     });
     hifishifter_plugin_core::set_product_version(crate::VERSION);
+    hifishifter_plugin_core::ensure_layout_v2_once();
+}
+
+/// 登记本模块的推理模型与声码器资源（**两种格式共用同一份**）。
+///
+/// 【为什么公开】VST3 在模块入口调它；CLAP 的模块入口此前没有这一步 —— 模型要等到
+/// 第一次打开编辑器、建会话时才登记，而"从没开过窗口就渲染/导出"的会话会先撞上
+/// `models unavailable`。登记是幂等的，早调没有副作用。
+pub fn initialize_resources() {
+    crate::editor::resources::initialize_models();
+}
+
+/// VST3 bundle 形态的模块初始化：先登记资源根，再跑进程级初始化。
+fn ensure_layout_v2_once() {
     // 【为什么资源布局在这里登记】VST3 的模块是 bundle（`Contents/Resources`），
     // 而资源根的唯一实现 `resource_root` 需要知道"本模块在哪、是哪种形态"。
     // 这里与 `set_product_version` 同属"进程级、只登记一次"的事实，放在同一处。
@@ -199,7 +221,7 @@ fn ensure_layout_v2_once() {
         );
         let _ = hifishifter_plugin_core::resource_root::set_module_path(module);
     }
-    hifishifter_plugin_core::ensure_layout_v2_once();
+    initialize_process_state();
 }
 
 /// 写一行诊断信息。

@@ -2,7 +2,8 @@
 #
 # 【ARA 怎么接】entry 级 ARA 工厂表与实例级 CLAP_EXT_ARA_PLUGINEXTENSION 都由 src/ara.rs
 # 暴露，绑定逻辑走 hifishifter-plugin 的共享 binder（与 VST3 同一份）。descriptor 的
-# ara:supported 只在整条链（文档 → renderer → 编辑器）接通并验收后打开。
+# ara:supported 已打开：文档 → renderer → 编辑器整条链都是共享实现（覆盖对照见
+# docs/host-extension-boundary.md 的「CLAP ↔ VST3 覆盖对照」）。
 [package]
 name = "hifishifter-clap"
 version = "0.2.0-beta"
@@ -45,20 +46,10 @@ ara2-bridge = { version = "0.3.0", features = ["clap"] }
 hifishifter-kernel = { path = "../hifishifter-kernel", default-features = false, features = ["onnx", "soundtouch"] }
 log = { version = "0.4", features = ["std"] }
 serde_json = "1"
-# 波形 mipmap 走 Base64 回执（前端 `atob` 解码）；与 VST3 同一个协议常量。
-base64 = "0.23"
-# 音频线程要无锁读"当前渲染结果"；Mutex 会在回调里制造优先级反转。
-arc-swap = "1.7"
-
-[target.'cfg(windows)'.dependencies]
-# 内嵌编辑器：子 HWND + WebView2。与 VST3 同版，避免把第二套 COM ABI 拉进工作区。
-webview2-com = "0.39"
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com",
-    "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_Graphics_Gdi",
-    "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse"] }
-
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
+# 【为什么这里没有 webview2-com / windows / libc / base64 / arc-swap】
+# 内嵌编辑器是 `hifishifter-plugin` 里的**共享视图栈**（WebView2 / WKWebView / WebKitGTK），
+# 波形、渲染与状态也都在共享层。外壳只做 CLAP 的 ABI 翻译 —— 一旦这里重新出现 GUI 或
+# 渲染依赖，就意味着又长出了一份第二实现（这正是本轮审查删掉的那一类分叉）。
 
 [dev-dependencies]
 ara2-bridge-companion = { version = "0.3.0", features = ["clap"] }

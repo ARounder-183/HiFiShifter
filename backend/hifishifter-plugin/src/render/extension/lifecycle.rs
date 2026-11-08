@@ -98,6 +98,17 @@ impl ExtensionOwner {
         }
     }
 
+    /// 宿主要求丢弃跨块状态（CLAP `plugin.reset`）。
+    ///
+    /// 【为什么不能是空实现】`clap/plugin.h` 的 reset 语义是"清掉会跨 process 调用残留
+    /// 的状态"：宿主在定位、循环回卷、离线分段之间调它。本插件唯一跨块残留的就是
+    /// **会话边界**（流几何、每流播放位、rung latch、捕获时钟）—— 不在这里清，下一块
+    /// 会被判成"上一遍的延续"，表现是定位后第一块读旧快照、或捕获接不上。
+    /// 它与 `processing_stopped` 走同一个原子量序列，因此可在音频线程调用。
+    pub fn processing_reset(&self) {
+        self.reset_transport_session("host reset");
+    }
+
     /// 组件终止（VST3 `terminate` / CLAP `destroy`）：停 worker、释放宿主适配器。
     ///
     /// 【为什么必须在销毁实例之前调】会话 actor 与准备 worker 都持有指向本 owner 的

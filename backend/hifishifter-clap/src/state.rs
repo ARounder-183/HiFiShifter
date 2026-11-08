@@ -217,18 +217,21 @@ mod tests {
 
     /// 一个与宿主给的形状一致的实例记录；调用方负责 `release_instance`。
     fn instance() -> *const clap_plugin_t {
+        let owner =
+            std::sync::Arc::new(hifishifter_plugin::render::extension::ExtensionOwner::default());
+        let route = hifishifter_plugin::editor::RouteLease::new(&owner);
         let instance = Box::into_raw(Box::new(Instance {
             audio: crate::audio::AudioState::default(),
             host: std::ptr::null(),
             plugin: std::ptr::null(),
-            owner: std::sync::Arc::new(
-                hifishifter_plugin::render::extension::ExtensionOwner::default(),
-            ),
+            owner,
             ara: None,
             initialized: std::sync::atomic::AtomicBool::new(false),
             active: std::sync::atomic::AtomicBool::new(false),
             processing: std::sync::atomic::AtomicBool::new(false),
             in_process: std::sync::atomic::AtomicBool::new(false),
+            route,
+            timer_id: std::sync::atomic::AtomicU32::new(u32::MAX),
         }));
         let plugin = Box::into_raw(Box::new(clap_plugin_t {
             desc: std::ptr::null(),
@@ -405,7 +408,11 @@ mod tests {
     #[test]
     fn a_load_restores_the_capture_manifest_through_the_shared_path() {
         let source = instance();
-        let manifest = unsafe { crate::instance(source) }.unwrap().owner.capture().manifest();
+        let manifest = unsafe { crate::instance(source) }
+            .unwrap()
+            .owner
+            .capture()
+            .manifest();
         let container = ComponentState {
             edits: b"{}".to_vec(),
             capture: Some(serde_json::to_vec(&manifest).unwrap()),
@@ -424,7 +431,11 @@ mod tests {
         let input = istream(&mut stream);
         assert!(unsafe { state_load(target, &input) });
         assert_eq!(
-            unsafe { crate::instance(target) }.unwrap().owner.capture().manifest(),
+            unsafe { crate::instance(target) }
+                .unwrap()
+                .owner
+                .capture()
+                .manifest(),
             manifest,
             "清单必须经共享恢复路径回到捕获存储"
         );

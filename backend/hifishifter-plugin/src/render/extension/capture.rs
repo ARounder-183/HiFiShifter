@@ -545,7 +545,11 @@ impl ExtensionOwner {
     /// 9801/26617 行 —— 一个诊断工具的成本高到会改变被观测的行为，它就不再是诊断。
     /// 与 `HIFISHIFTER_BUFFER_AUDIT` 同一套开关纪律：读一次就缓存，默认关闭。
     /// 预热音频线程会读取的一次性开关（组件创建时调用，避免首块分配）。
-    pub(crate) fn warm_audio_caches(&self) {
+    ///
+    /// 【为什么公开】两个格式的实例创建都要调它（VST3 在组件构造、CLAP 在
+    /// `create_plugin`）：不调的那一个会在**第一块音频**里做一次 `std::env::var`
+    /// （分配一个 String）—— 那是实时线程上唯一一次堆分配。
+    pub fn warm_audio_caches(&self) {
         let _ = Self::click_audit_enabled();
     }
 

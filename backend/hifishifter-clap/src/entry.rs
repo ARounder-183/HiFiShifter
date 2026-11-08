@@ -96,15 +96,25 @@ unsafe extern "C" fn entry_init(plugin_path: *const c_char) -> bool {
             }
         }
         resource_root::set_layout(ResourceLayout::for_clap()).ok();
-        hifishifter_plugin_core::set_product_version(VERSION);
-        hifishifter_plugin_core::set_layout_migration_hook(|| {});
-        hifishifter_plugin_core::ensure_layout_v2_once();
+        // 【为什么不再自己注册空钩子】`set_layout_migration_hook` 是进程级 OnceLock：
+        // 空钩子会挡住 VST3 真正的那一份，而 CLAP-only 用户则永远不迁移。
+        // 现在两个外壳登记同一个函数指针（见 `hifishifter_plugin::initialize_process_state`）。
+        hifishifter_plugin::initialize_process_state();
+        // 模型登记与 VST3 的模块入口同一步：早调幂等，晚调会让"没开过窗口就导出"的
+        // 会话先撞上 models unavailable。
+        hifishifter_plugin::initialize_resources();
         true
     })
 }
 
 unsafe extern "C" fn entry_deinit() {
     hifishifter_plugin_core::guard_ffi((), || {
+        // 【为什么必须收尾编辑器】窗口类与 WebView2 回调都指向本模块的代码页；宿主随后
+        // 的 `FreeLibrary` 若真的卸载它，下一条窗口消息就是野跳转。与 VST3 的 `ExitDll`
+        // 调的是同一个函数（它还负责注销窗口类）。
+        if !hifishifter_plugin::editor::shutdown() {
+            log::warn!("[clap] module deinit with live editor windows; the module stays resident");
+        }
         crate::log_host::clear();
         log::info!("[clap] module shutdown");
         // 把宽限期内仍攒在缓冲里的早期日志行落盘：缓冲只在「下一条记录到达」时落地，
@@ -169,7 +179,16 @@ pub struct Instance {
     pub processing: AtomicBool,
     /// `process` 是否正在执行（防同一实例并发进入音频回调）。
     pub in_process: AtomicBool,
-
+    /// 本实例在进程内的租约。
+    ///
+    /// 【为什么必须持有它】`live_owners()` 只看这张表：没有租约的实例对宿主侧心跳、
+    /// 编辑器链路与诊断读数都不存在。VST3 由组件的 `route` 字段持有同一份东西。
+    pub route: hifishifter_plugin::editor::RouteLease,
+    /// `clap.timer-support` 注册到的定时器 id；`u32::MAX` = 没挂上。
+    ///
+    /// 【为什么每个实例一个】宿主按实例回调 `on_timer`；共用 id 会让一个实例的节拍
+    /// 去驱动另一个实例的心跳，而它们可能在不同线程/不同文档上。
+    pub timer_id: std::sync::atomic::AtomicU32,
 }
 
 unsafe extern "C" fn create_plugin(
@@ -203,20 +222,26 @@ unsafe extern "C" fn create_plugin(
         let host_name = unsafe { clap_host_string((*host).name) };
         let host_version = unsafe { clap_host_string((*host).version) };
 
+        let owner = std::sync::Arc::new({
+            let owner = hifishifter_plugin::render::extension::ExtensionOwner::default();
+            owner.note_host_self_report(host_name.as_deref(), host_version.as_deref());
+            owner
+        });
+        // 与 VST3 的组件构造同一步：把音频线程首块会读的一次性开关预热掉。
+        owner.warm_audio_caches();
+        let route = hifishifter_plugin::editor::RouteLease::new(&owner);
         let instance = Box::new(Instance {
             audio: audio::AudioState::default(),
             host,
             plugin: std::ptr::null(),
-            owner: {
-                let owner = hifishifter_plugin::render::extension::ExtensionOwner::default();
-                owner.note_host_self_report(host_name.as_deref(), host_version.as_deref());
-                std::sync::Arc::new(owner)
-            },
+            owner,
             ara: None,
             initialized: AtomicBool::new(false),
             active: AtomicBool::new(false),
             processing: AtomicBool::new(false),
             in_process: AtomicBool::new(false),
+            route,
+            timer_id: std::sync::atomic::AtomicU32::new(u32::MAX),
         });
         let plugin = Box::new(clap_plugin_t {
             desc: &raw const DESCRIPTOR,
@@ -318,6 +343,10 @@ unsafe extern "C" fn plugin_destroy(plugin: *const clap_plugin_t) {
                     log::error!("[clap] destroy called while active; leaking instead of crashing");
                     return;
                 }
+                // 宿主没按契约先调 `gui.destroy` 时，窗口与链路必须随实例一起消失：
+                // 窗口类留在已卸载的模块里，下一条窗口消息就是野跳转。
+                unsafe { crate::gui::forget(plugin) };
+                unsafe { crate::timer::release(plugin) };
                 // 组件终止：停掉会话 actor 与准备 worker（它们持有指向 owner 的强引用，
                 // 不先关闭邮箱线程就不会退出）。与 VST3 的 terminate 同一个方法。
                 instance.owner.component_terminated();
@@ -362,6 +391,9 @@ unsafe extern "C" fn plugin_activate(
         // 激活序列（恢复挂起预览 / 清上一遍几何 / 主动重同步）：与 VST3 的
         // setActive(true) 是同一个方法。ARA 的绑定窗口也在这里关闭。
         instance.owner.component_activated();
+        // 宿主侧节拍：把投递泵与宿主时钟/Undo/setDirty 收口挂到 `clap.timer-support` 上。
+        // 与 VST3 挂在 REAPER `plugin_register("timer")` 上的是**同一个** tick 实现。
+        unsafe { crate::timer::acquire(plugin) };
         log::info!("[clap] activated at {sample_rate} Hz, block {min}..={max}");
         true
     })
@@ -380,6 +412,7 @@ unsafe extern "C" fn plugin_deactivate(plugin: *const clap_plugin_t) {
             return;
         }
         instance.audio.set_render_mode(CLAP_RENDER_REALTIME);
+        unsafe { crate::timer::release(plugin) };
         instance.owner.component_deactivated();
     })
 }
@@ -412,10 +445,11 @@ unsafe extern "C" fn stop_processing(plugin: *const clap_plugin_t) {
 }
 unsafe extern "C" fn reset_processing(plugin: *const clap_plugin_t) {
     hifishifter_plugin_core::guard_ffi((), || {
-        // reset() clears processing state but keeps the activation. Nothing is
-        // buffered across blocks in this shell, so there is no DSP state to drop.
+        // `clap/plugin.h` 的 reset 是"丢掉会跨 process 调用残留的状态"，宿主在定位、
+        // 循环回卷与离线分段之间调它。本插件跨块残留的只有会话边界（流几何 / 每流播放位 /
+        // rung latch / 捕获时钟）—— 与 `processing_stopped` 走同一个原子量序列。
         if let Some(instance) = unsafe { crate::instance(plugin) } {
-            let _ = instance;
+            instance.owner.processing_reset();
         }
     })
 }
@@ -491,7 +525,11 @@ unsafe extern "C" fn plugin_get_extension(
 }
 
 unsafe extern "C" fn on_main_thread(_plugin: *const clap_plugin_t) {
-    hifishifter_plugin_core::guard_ffi((), || ())
+    hifishifter_plugin_core::guard_ffi((), || {
+        // 宿主按 `clap_host.request_callback` 把控制权交回主线程：这正是"投递泵 +
+        // 宿主侧周期工作"要的那条线程。内容与 VST3 的宿主节拍**同一份实现**。
+        hifishifter_plugin::editor::host_main_thread_tick();
+    })
 }
 
 #[cfg(test)]
@@ -502,18 +540,21 @@ mod tests {
     /// 造一个与宿主给的形状完全一致的实例记录，用于直接跑生命周期回调。
     /// 返回的 `clap_plugin_t` 保持在栈上；测试结束前手动释放 `Instance`。
     fn fixture() -> (clap_plugin_t, *mut Instance) {
+        let owner =
+            std::sync::Arc::new(hifishifter_plugin::render::extension::ExtensionOwner::default());
+        let route = hifishifter_plugin::editor::RouteLease::new(&owner);
         let instance = Box::into_raw(Box::new(Instance {
             audio: audio::AudioState::default(),
             host: std::ptr::null(),
             plugin: std::ptr::null(),
-            owner: std::sync::Arc::new(
-                hifishifter_plugin::render::extension::ExtensionOwner::default(),
-            ),
+            owner,
             ara: None,
             initialized: AtomicBool::new(false),
             active: AtomicBool::new(false),
             processing: AtomicBool::new(false),
             in_process: AtomicBool::new(false),
+            route,
+            timer_id: std::sync::atomic::AtomicU32::new(u32::MAX),
         }));
         let plugin = clap_plugin_t {
             desc: std::ptr::null(),
@@ -682,8 +723,7 @@ mod tests {
             tsig_num: 4,
             tsig_denom: 4,
         };
-        let mut in_planes: [*mut f32; 2] =
-            [left.as_ptr() as *mut f32, right.as_ptr() as *mut f32];
+        let mut in_planes: [*mut f32; 2] = [left.as_ptr() as *mut f32, right.as_ptr() as *mut f32];
         let mut out_planes: [*mut f32; 2] = [out_left.as_mut_ptr(), out_right.as_mut_ptr()];
         let input = crate::abi::clap_audio_buffer_t {
             data32: in_planes.as_mut_ptr(),
@@ -714,8 +754,14 @@ mod tests {
             unsafe { plugin_process(ptr, &raw const process) },
             CLAP_PROCESS_CONTINUE
         );
-        assert_eq!(out_left, left, "the host signal must reach the output unchanged");
-        assert_eq!(out_right, right, "the host signal must reach the output unchanged");
+        assert_eq!(
+            out_left, left,
+            "the host signal must reach the output unchanged"
+        );
+        assert_eq!(
+            out_right, right,
+            "the host signal must reach the output unchanged"
+        );
         unsafe {
             stop_processing(ptr);
             plugin_deactivate(ptr);
@@ -757,7 +803,7 @@ mod tests {
         );
         let reply = |command: &str, args: serde_json::Value| {
             let request = serde_json::json!({ "id": 1, "viewId": "v", "version": 1, "command": command, "args": args });
-            crate::editor::protocol::reply_with_editor("v", &request, Some(&port))
+            port.reply(&request)
         };
 
         // 页面在用户按键之前就能读到"能录"。
@@ -900,14 +946,13 @@ mod tests {
         assert!(unsafe { plugin_init(ptr) });
         assert!(unsafe { plugin_activate(ptr, 48_000.0, 1, 512) });
         assert!(unsafe { start_processing(ptr) });
-        let owner = std::sync::Arc::clone(&unsafe { crate::instance(ptr) }.expect("instance").owner);
-        let port = hifishifter_plugin::editor::port::EditorPort::new(
-            std::sync::Arc::clone(&owner),
-            "v",
-        );
+        let owner =
+            std::sync::Arc::clone(&unsafe { crate::instance(ptr) }.expect("instance").owner);
+        let port =
+            hifishifter_plugin::editor::port::EditorPort::new(std::sync::Arc::clone(&owner), "v");
         let reply = |command: &str| {
             let request = serde_json::json!({ "id": 1, "viewId": "v", "version": 1, "command": command, "args": serde_json::Value::Null });
-            crate::editor::protocol::reply_with_editor("v", &request, Some(&port))
+            port.reply(&request)
         };
 
         // 一开始没有任何宿主块：位置是 0，且没在播放。
@@ -1087,7 +1132,6 @@ mod tests {
         assert_eq!(clap_entry.clap_version, CLAP_VERSION)
     }
 
-
     /// **CLAP 状态机不变量**：宿主停播后仍持续送块时，捕获不得自行收成 take。
     ///
     /// 【为什么钉这条】现场日志里 REAPER 7.85 的 CLAP 通路每次只播约 1 s，随后
@@ -1122,14 +1166,13 @@ mod tests {
         assert!(unsafe { plugin_init(ptr) });
         assert!(unsafe { plugin_activate(ptr, 48_000.0, 1, 512) });
         assert!(unsafe { start_processing(ptr) });
-        let owner = std::sync::Arc::clone(&unsafe { crate::instance(ptr) }.expect("instance").owner);
-        let port = hifishifter_plugin::editor::port::EditorPort::new(
-            std::sync::Arc::clone(&owner),
-            "v",
-        );
+        let owner =
+            std::sync::Arc::clone(&unsafe { crate::instance(ptr) }.expect("instance").owner);
+        let port =
+            hifishifter_plugin::editor::port::EditorPort::new(std::sync::Arc::clone(&owner), "v");
         let reply = |command: &str, args: serde_json::Value| {
             let request = serde_json::json!({ "id": 1, "viewId": "v", "version": 1, "command": command, "args": args });
-            crate::editor::protocol::reply_with_editor("v", &request, Some(&port))
+            port.reply(&request)
         };
         assert_eq!(reply("capture_start", serde_json::Value::Null)["ok"], true);
 
@@ -1154,7 +1197,11 @@ mod tests {
                 },
                 flags: crate::abi::transport_flags::HAS_BEATS_TIMELINE
                     | crate::abi::transport_flags::HAS_TEMPO
-                    | if playing { crate::abi::transport_flags::IS_PLAYING } else { 0 },
+                    | if playing {
+                        crate::abi::transport_flags::IS_PLAYING
+                    } else {
+                        0
+                    },
                 song_pos_beats: (beats * crate::abi::CLAP_BEATTIME_FACTOR).round() as i64,
                 song_pos_seconds: 0,
                 tempo: 120.0,
@@ -1168,15 +1215,22 @@ mod tests {
                 tsig_num: 4,
                 tsig_denom: 4,
             };
-            let mut in_planes: [*mut f32; 2] = [left.as_ptr() as *mut f32, right.as_ptr() as *mut f32];
+            let mut in_planes: [*mut f32; 2] =
+                [left.as_ptr() as *mut f32, right.as_ptr() as *mut f32];
             let mut out_planes: [*mut f32; 2] = [out_left.as_mut_ptr(), out_right.as_mut_ptr()];
             let input = crate::abi::clap_audio_buffer_t {
-                data32: in_planes.as_mut_ptr(), data64: std::ptr::null_mut(),
-                channel_count: 2, latency: 0, constant_mask: 0,
+                data32: in_planes.as_mut_ptr(),
+                data64: std::ptr::null_mut(),
+                channel_count: 2,
+                latency: 0,
+                constant_mask: 0,
             };
             let mut output = crate::abi::clap_audio_buffer_t {
-                data32: out_planes.as_mut_ptr(), data64: std::ptr::null_mut(),
-                channel_count: 2, latency: 0, constant_mask: 0,
+                data32: out_planes.as_mut_ptr(),
+                data64: std::ptr::null_mut(),
+                channel_count: 2,
+                latency: 0,
+                constant_mask: 0,
             };
             let process = clap_process_t {
                 steady_time: block_index * frames as i64,
@@ -1190,17 +1244,27 @@ mod tests {
                 out_events: std::ptr::null(),
             };
             block_index += 1;
-            assert_eq!(unsafe { plugin_process(ptr, &raw const process) }, CLAP_PROCESS_CONTINUE);
+            assert_eq!(
+                unsafe { plugin_process(ptr, &raw const process) },
+                CLAP_PROCESS_CONTINUE
+            );
         };
 
         // 播 1 s（约 94 块 @512/48k）。
-        for i in 0..94_i64 { feed(true, i * frames as i64); }
+        for i in 0..94_i64 {
+            feed(true, i * frames as i64);
+        }
         // 停播后 REAPER 把 transport 位置重置回这一遍的起点，并持续送静音块
         // （现场日志：playing=0 时 raw 从 429264 回到 381648，music 同步回 15.902）。
         let pass_start = 0_i64;
-        for _ in 0..470_i64 { feed(false, pass_start); }
+        for _ in 0..470_i64 {
+            feed(false, pass_start);
+        }
         // 非音频线程心跳：补给线 + 自动 promote 都挂在这里。
-        for _ in 0..10 { owner.capture().service(); owner.tick_preview_quiet(); }
+        for _ in 0..10 {
+            owner.capture().service();
+            owner.tick_preview_quiet();
+        }
 
         let status = reply("capture_status", serde_json::Value::Null);
         let take_count = status["value"]["takeCount"].as_u64().unwrap_or(u64::MAX);
@@ -1214,7 +1278,10 @@ mod tests {
         // 用户真正按停止才产生唯一一个 take。
         let stopped = reply("capture_stop", serde_json::Value::Null);
         assert_eq!(stopped["value"]["status"]["takeCount"], 1, "{stopped}");
-        unsafe { stop_processing(ptr); plugin_deactivate(ptr); }
+        unsafe {
+            stop_processing(ptr);
+            plugin_deactivate(ptr);
+        }
         release(&mut plugin, instance);
     }
 
@@ -1247,14 +1314,13 @@ mod tests {
         assert!(unsafe { plugin_init(ptr) });
         assert!(unsafe { plugin_activate(ptr, 48_000.0, 1, 512) });
         assert!(unsafe { start_processing(ptr) });
-        let owner = std::sync::Arc::clone(&unsafe { crate::instance(ptr) }.expect("instance").owner);
-        let port = hifishifter_plugin::editor::port::EditorPort::new(
-            std::sync::Arc::clone(&owner),
-            "v",
-        );
+        let owner =
+            std::sync::Arc::clone(&unsafe { crate::instance(ptr) }.expect("instance").owner);
+        let port =
+            hifishifter_plugin::editor::port::EditorPort::new(std::sync::Arc::clone(&owner), "v");
         let reply = |command: &str, args: serde_json::Value| {
             let request = serde_json::json!({ "id": 1, "viewId": "v", "version": 1, "command": command, "args": args });
-            crate::editor::protocol::reply_with_editor("v", &request, Some(&port))
+            port.reply(&request)
         };
         assert_eq!(reply("capture_start", serde_json::Value::Null)["ok"], true);
 
@@ -1277,7 +1343,11 @@ mod tests {
                 },
                 flags: crate::abi::transport_flags::HAS_BEATS_TIMELINE
                     | crate::abi::transport_flags::HAS_TEMPO
-                    | if playing { crate::abi::transport_flags::IS_PLAYING } else { 0 },
+                    | if playing {
+                        crate::abi::transport_flags::IS_PLAYING
+                    } else {
+                        0
+                    },
                 song_pos_beats: (beats * crate::abi::CLAP_BEATTIME_FACTOR).round() as i64,
                 song_pos_seconds: 0,
                 tempo: 120.0,
@@ -1291,15 +1361,22 @@ mod tests {
                 tsig_num: 4,
                 tsig_denom: 4,
             };
-            let mut in_planes: [*mut f32; 2] = [live.as_ptr() as *mut f32, live.as_ptr() as *mut f32];
+            let mut in_planes: [*mut f32; 2] =
+                [live.as_ptr() as *mut f32, live.as_ptr() as *mut f32];
             let mut out_planes: [*mut f32; 2] = [out_left.as_mut_ptr(), out_right.as_mut_ptr()];
             let input = crate::abi::clap_audio_buffer_t {
-                data32: in_planes.as_mut_ptr(), data64: std::ptr::null_mut(),
-                channel_count: 2, latency: 0, constant_mask: 0,
+                data32: in_planes.as_mut_ptr(),
+                data64: std::ptr::null_mut(),
+                channel_count: 2,
+                latency: 0,
+                constant_mask: 0,
             };
             let mut output = crate::abi::clap_audio_buffer_t {
-                data32: out_planes.as_mut_ptr(), data64: std::ptr::null_mut(),
-                channel_count: 2, latency: 0, constant_mask: 0,
+                data32: out_planes.as_mut_ptr(),
+                data64: std::ptr::null_mut(),
+                channel_count: 2,
+                latency: 0,
+                constant_mask: 0,
             };
             let process = clap_process_t {
                 steady_time: block_index * frames as i64,
@@ -1313,29 +1390,51 @@ mod tests {
                 out_events: std::ptr::null(),
             };
             block_index += 1;
-            assert_eq!(unsafe { plugin_process(ptr, &raw const process) }, CLAP_PROCESS_CONTINUE);
+            assert_eq!(
+                unsafe { plugin_process(ptr, &raw const process) },
+                CLAP_PROCESS_CONTINUE
+            );
         };
 
         // 宿主一直停播：持续送固定光标处的静音块（远超旧实现那 1 秒窗口）。
-        for _ in 0..400_i64 { feed(false, 381_648, &silent); }
-        for _ in 0..10 { owner.capture().service(); owner.tick_preview_quiet(); }
+        for _ in 0..400_i64 {
+            feed(false, 381_648, &silent);
+        }
+        for _ in 0..10 {
+            owner.capture().service();
+            owner.tick_preview_quiet();
+        }
 
         let status = reply("capture_status", serde_json::Value::Null);
-        assert_eq!(status["value"]["takeCount"].as_u64().unwrap_or(u64::MAX), 0,
-            "停播期间不得产生任何 take：{status}");
-        assert!(status["value"]["recording"].is_null(),
-            "宿主没播放 ⇒ 仍是待命，根本不该有录制读数（计时必须停在 0）：{status}");
-        assert_eq!(status["value"]["state"].as_str().unwrap_or("?"), "standby",
-            "停播时状态必须是待命而不是 recording：{status}");
+        assert_eq!(
+            status["value"]["takeCount"].as_u64().unwrap_or(u64::MAX),
+            0,
+            "停播期间不得产生任何 take：{status}"
+        );
+        assert!(
+            status["value"]["recording"].is_null(),
+            "宿主没播放 ⇒ 仍是待命，根本不该有录制读数（计时必须停在 0）：{status}"
+        );
+        assert_eq!(
+            status["value"]["state"].as_str().unwrap_or("?"),
+            "standby",
+            "停播时状态必须是待命而不是 recording：{status}"
+        );
 
         // 用户真正按播放：这一遍才开始积累素材。
-        let live: Vec<f32> = (0..frames as usize).map(|i| (i as f32 / 64.0).sin() * 0.25).collect();
-        for i in 0..94_i64 { feed(true, 381_648 + i * frames as i64, &live); }
+        let live: Vec<f32> = (0..frames as usize)
+            .map(|i| (i as f32 / 64.0).sin() * 0.25)
+            .collect();
+        for i in 0..94_i64 {
+            feed(true, 381_648 + i * frames as i64, &live);
+        }
         // 用户按停止 ⇒ 唯一一个 take，且带真实内容。
         let stopped = reply("capture_stop", serde_json::Value::Null);
         assert_eq!(stopped["value"]["status"]["takeCount"], 1, "{stopped}");
-        unsafe { stop_processing(ptr); plugin_deactivate(ptr); }
+        unsafe {
+            stop_processing(ptr);
+            plugin_deactivate(ptr);
+        }
         release(&mut plugin, instance);
     }
-
 }

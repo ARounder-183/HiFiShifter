@@ -180,8 +180,8 @@ ARA 侧改了时间拉伸 / 内容淡化，插件会继续用旧配置渲染。
 | 离线 bounce | 按扩展如实给 | 只从 `clap.render` 的 `CLAP_RENDER_OFFLINE` 置位 |
 | ARA 工厂 / 实例扩展 | **有，仅限 ARACLAP.h 定稿 ID** | entry 发布 `ClapAraEntry`（stable + `draft/2` compat）；实例返回 `clap_ara_plugin_extension_t`。REAPER 的 `com.celemony.ara.plugin_extension.draft/1` 被**显式拒绝**（应答会让 REAPER 崩在 `+0x5a677`）。绑定走与 VST3 同一份 `AraBinder` |
 | `ara:supported` / `ara:required` | 声明 supported，不声明 required | 定稿宿主据此发现 ARA。REAPER 的私有草案既不读它也不查 entry 级工厂，那条路径在本插件里不被支持。没有 ARA 的宿主里插件仍可作普通效果器 |
-| 内嵌 WebView | Windows 有 | `clap.gui` + 独立 WebView2 宿主，加载同一份 `frontend/dist`；非 Windows 如实降级 |
-| 编辑器命令 | Capture 回执后端 | `plugin_health`、时间线、参数曲线（`get/set_param_frames`、静态参数）、波形峰值、传输读数都由本模块在进程内回答；未接线的命令立刻回结构化错误，不复用 VST3 的 ARA 会话 |
+| 内嵌 WebView | **与 VST3 同一份视图栈** | `clap.gui` 只做父窗口 / 尺寸 / 焦点的 ABI 翻译；视图本身是 `hifishifter_plugin::editor::gui` 的 `EditorView`（VST3 的 `IPlugView` 建的是同一个）。WebView2 创建、页面重建（渲染进程崩溃）、原生文件对话框、键盘让路、20 ms 泵、模块钉住、Tab 焦点都只有一份实现 |
+| 编辑器命令 | **与 VST3 同一套** | 页面消息经同一个 `EditorClient`（校验、在途预算、回执泵、宿主写回重投），命令经同一个 `commands::dispatch` 进同一个 `EditorSession`（Capture 形态 = `EditorSession::new_capture`，ARA 形态 = 文档 actor）。`get_ui_settings` / `save_ui_settings` / `ui_kv_*` 读写同一份 `settings_store` 配置文件（含 `lockParamLines`） |
 | 音频输出 | **有（渲染结果）** | 捕获的素材 + 用户曲线由 `mixdown::render_mixdown_with_pcm`（与 App 导出同一份）在后台线程渲染成 PCM，`process` 只覆盖"属于素材"的帧；素材之外按 `outside_passthrough` 直通或静音。VST3 / CLAP / App 现共用同一套 `onnx + soundtouch` 推理内核 |
 | 捕获（录音） | **有** | `capture_status` / `start` / `stop` / `cancel` / `clear` / `delete_take` / `set_options` 与 VST3 同名同载荷；音频从 `process` 的输入总线按工程位置写进插件自己的时间线，实现与 VST3 是**同一个 crate**（`hifishifter-capture`） |
 | 写回 / 分割 / 建轨 / 宿主撤销 / take / folder | 不可用 | 与 ARA-only 相同：REAPER 原生扩展是 VST3 COM 专属，CLAP 没有对应接口 |
@@ -207,7 +207,8 @@ MultitrackStudio）的 CLAP ARA 仍需逐个真机验收。
 - **每实例状态**：采样率、`clap.render` 模式与 transport 观察值从进程级 static 移到
   `Instance::audio`。同一宿主进程里两个实例（不同采样率 / 一个实时一个离线）不再
   互相覆盖；`process` 在未 `activate` / 未 `start_processing` / 并发进入时明确拒绝。
-- **窗口与资源**：`clap.gui` 真实创建子 HWND 并挂到宿主的 win32 父窗口；
+- **窗口与资源**：`clap.gui` 把宿主给的父窗口交给共享视图栈（`editor::gui::create_view`），
+  子 HWND 与 WebView2 由 `gui/windows.rs` 创建 —— 与 VST3 的 `attached` 走同一个函数；
   Windows 产物把 `frontend/` 与 `models.json` 装到模块同级的
   `HiFiShifter-resources`（`ResourceLayout::Sibling`），安装器与自检都断言
   `plugin.html` 落地。此前只装 `.clap` 单文件，宿主扫描得到插件却只会给空白窗口。
@@ -217,53 +218,51 @@ MultitrackStudio）的 CLAP ARA 仍需逐个真机验收。
   `plugin-vst3-reaper.log` / `plugin-clap-reaper.log`：格式来自唯一的
   `set_log_tag` 登记点，新增格式自动适配。外壳只把日志额外转发给宿主的
   `clap.log`，不再自己装 logger、开文件或定级别。
-- **editorRoute 不能说 `unbound``：前端的 `captureStore` 在路由为 `unbound` 时**完全跳过**
-  `capture_status` 轮询（那本是"视图连不上处理器"的降频判据）。CLAP 视图由本模块在
-  进程内回答命令，路由因此报 `bound`；真正缺的 ARA/编辑能力由 `hostCapabilities`
-  全 false 表达。这正是用户报的"当前不可用"的第二层原因。
-- **输出接在渲染结果上**：`capture_stop`、清空/删 take、写入曲线/静态参数都会请求一次重渲染
-  （防抖 600 ms），结果以 `ArcSwapOption<RenderTape>` 无锁发布；音频线程在直通之后
-  覆盖素材区间，因此"没处理的地方"听起来与没插插件完全一致。渲染失败会写
-  `[clap][render] render failed`，不会变成静默的"没声音"。
-  端到端判据是**频率**而不是"有样本"：把捕获的 220 Hz 正弦整体抬高 12 个半音，渲染
-  结果的主频必须变成 440 Hz（`a_pitch_edit_changes_the_rendered_audio`）。
+- **editorRoute 是 `bound`，来源是直连**：前端的 `captureStore` 在路由为 `unbound` 时
+  **完全跳过** `capture_status` 轮询（那本是"视图连不上处理器"的降频判据）。CLAP 的实例在
+  `create_plugin` 时就已知归属，链路因此由 `EditorLink::for_owner` 直连
+  （`RouteOrigin::Direct`）—— 不是 VST3 那种"等宿主握手 / 猜唯一实例"的兜底。
+  能力位来自共享的 `bootstrap_capabilities`，与 VST3 逐字段同源。
+- **音频输出接在共享渲染通路上**：`process` 只把 `clap_process_t` 翻译成 `AudioBlock` +
+  `BlockContext`，其余（捕获观察、相位判定、门控、快照输出、离线降级）全部在
+  `ExtensionOwner::process_audio` 里，与 VST3 同一个函数；渲染失败会写
+  `[clap][render] render failed`，不会变成静默的"没声音"。端到端判据是**频率**而不是
+  "有样本"：把捕获的 220 Hz 正弦整体抬高 12 个半音，渲染结果的主频必须变成 440 Hz。
 - **WORLD 的 F0 估计器**：本仓库静态链接的 WORLD 里 `Harvest` 对任何输入都返回全 0，
   而"全 0 的 f0"会让声码器判定"没有有声音高"并**原样返回输入** —— 表现就是"曲线画满、
   声音没变"，且没有任何报错。因此默认改用 DIO + StoneMask，并在首选估计器产不出任何
   有声音高时自动换另一个再试一次（`vocode_one`）。`the_vocoder_actually_shifts_the_pitch`
   用 220→440 Hz 钉住这条。
-- **SoundTouch 是可选 feature**：它是**链接期**依赖，一打开产物就多一个必须与宿主同目录
-  的 `SoundTouchDLL.dll`，而 CLAP 外壳没有 loader 层。内核因此把 `soundtouch` 拆成
-  feature（默认开，VST3/App 行为不变）；CLAP 关掉它，走静态链接的 Signalsmith。
-  判据：`link /dump /dependents dist\HiFiShifter.clap` 里不得出现 `SoundTouchDLL`。
+- **SoundTouch 是运行期依赖**：模块用 `libloading` 按**本模块地址**反查装载路径加载
+  `SoundTouchDLL.dll`，找不到就降级到静态链接的 Signalsmith。因此"宿主里放不放那份 DLL"
+  只影响质量，不影响能否加载；`link /dump /dependents dist\HiFiShifter.clap` 里也不该出现
+  `SoundTouchDLL`（它不再是链接期依赖）。CLAP 与 VST3/App 取**同一组默认 features**，
+  编出同一份内核。
 - **参数编辑器有一条真实的音高线**：`get_processor_params` 按算法给出参数描述符；
   `get_param_frames` / `set_param_frames` 读写时间线上的曲线（与 VST3 同一份
-  `hifishifter_kernel::editor::params`）；音高**原线**由静态链接的 WORLD
-  （`world_vocoder::estimate_f0_hz`）在后台线程上从捕获 PCM 估计后铺到工程帧网格 ——
-  CLAP 外壳不链接 ONNX 推理栈，这是不引入 40 MB 依赖又让原线真实存在的那条路。
-- **宿主调整窗口大小**：`clap.gui` 的 `adjust_size` 只把请求夹到合法区间后**原样放行**。
-  此前它无条件写回 960×640，于是窗口永远拖不动、WebView 也收不到尺寸变化。
-- **捕获的界面读数必须由外壳回答**：编辑器不推送传输事件，光标与捕获带右缘都读
-  `get_playback_state`；时间线的重取由 `plugin_get_apply_state.host_version` 的**前进**
-  触发（CLAP 里它等于捕获存储的修订号）。缺了前一条，页面上的光标永远停在 0、带子
-  右缘跟着冻住（"捕获在计时，界面什么都不动"）；缺了后一条，take 已经落盘、时间线却
-  永远不重取（"捕获结束没有片段"）。
-- **波形峰值来自内存**：CLAP 的源是 `capture://blake3:<hash>`，磁盘上没有文件。
-  `get_waveform_mipmap_binary` / `batch_get_waveform_mipmap` 由外壳按 `WFPK` v2
-  协议直接从捕获 PCM 编码（分块 min/max，三级除数 16/512/4096），结果按源缓存 ——
-  否则片段只是一块没有内容的色块。
+  `hifishifter_kernel::editor::params`）；音高**原线**来自共享的 FCPE/ONNX 分析
+  （`editor::resources::initialize_models` 在模块入口登记模型，两个格式同一步）。
+- **宿主调整窗口大小**：`clap.gui` 的 `adjust_size` 只把请求夹到合法区间后**原样放行**；
+  `set_size` 直接调用共享视图的 `resize`。此前它无条件写回 960×640，于是窗口永远拖不动、
+  WebView 也收不到尺寸变化。
+- **传输由共享视图推送**：`EditorClient::push_transport` 每拍把宿主时钟读数作为事件推给
+  页面（光标与捕获带右缘）；时间线的重取由 `plugin_get_apply_state.host_version` 的**前进**
+  触发（CLAP 里它等于捕获存储的修订号）。缺了前一条，页面上的光标永远停在 0、带子右缘
+  跟着冻住（"捕获在计时，界面什么都不动"）；缺了后一条，take 已经落盘、时间线却永远不重取
+  （"捕获结束没有片段"）。
+- **波形峰值只有一份实现**：源是 `capture://blake3:<hash>`，磁盘上没有文件；
+  `get_waveform_mipmap_binary` / `batch_get_waveform_mipmap` 由共享会话按 `WFPK` v2 协议
+  从捕获 PCM 编码（分块 min/max，三级除数 16/512/4096）并按源缓存 —— 与 VST3 同一个函数。
 - **捕获运行时是共享的**：`recorder` / `sidecar` / `store` / `timeline` / `transport`
   从 VST3 crate 搬进 `backend/hifishifter-capture/`（纯机械搬迁 + 中性类型转换），VST3 与
   CLAP 两个外壳都只是它的适配层：VST3 把 `ProcessContext` 变成 `InputBlock`，CLAP 把
   `clap_event_transport_t` 变成同一个形状。因此 "CLAP 能录" 与 "VST3 能录" 是同一条
-  代码路径 —— 不是一份为 CLAP 重写的简化版。VST3 侧的 779 条库用例与捕获 crate 的 125 条
-  用例逐条通过，判定零改动。
+  代码路径 —— 不是一份为 CLAP 重写的简化版。
 - **WebView2 用户数据目录**：profile 固定在
-  `%LOCALAPPDATA%\HiFiShifter\webview\clap-<pid>`（`hifishifter_plugin_core::local_data`，
-  与内核 `app_paths` 由跨 crate 测试逐字比对）。它**绝不能**落在模块旁边：模块装在
-  `Program Files`，浏览器进程在那里无权建 `EBWebView`，宿主会弹出
-  「Microsoft Edge 无法读取和写入其数据目录」而窗口一片空白（用户实测）。建目录后
-  还会写一次探针文件，写不进去就在窗口里给出原因、且完全不拉起 WebView2；
+  `%LOCALAPPDATA%\HiFiShifter\webview\view-<pid>`（与 VST3 共用同一个共享视图栈；
+  `hifishifter_kernel::config_location` 与 `app_paths` 由跨 crate 测试逐字比对）。它
+  **绝不能**落在模块旁边：模块装在 `Program Files`，浏览器进程在那里无权建 `EBWebView`，
+  宿主会弹出「Microsoft Edge 无法读取和写入其数据目录」而窗口一片空白（用户实测）。
   资源目录一旦混进 `webview/`，构建与自检脚本都会硬失败（运行期状态不进安装包）。
 - **能力诚实性**：黑盒探针把 `clap.state` / `clap.render` / `clap.audio-ports` /
   `clap.timer-support` / `clap.gui` 必须存在、descriptor 声明 `ara:supported` 且
@@ -278,6 +277,39 @@ REAPER 7.85 / Windows x64 的 CLAP 扫描、实例化与 Capture 形态已由隔
 [崩溃分析报告](2026-11-08-reaper-clap-ara-crash-analysis.md)。其余宿主
 （Bitwig / Studio One / MultitrackStudio）与保存重开、WebView 编辑仍按
 `docs/plugin-host-survey.md` 保持「未测」。
+
+### CLAP ↔ VST3 覆盖对照（2026-11 全量审查）
+
+同一份产品有两个外壳。下表把"每件事由谁实现"写成可核对的事实：**"共用"列写着同一份
+类型/函数名的行，两个格式走的就是同一条代码路径**，而不是两份长得像的实现。
+
+| 能力 | VST3 入口 | CLAP 入口 | 共用实现 |
+| --- | --- | --- | --- |
+| 模块加载 / 生命周期 | `InitDll` / `GetPluginFactory` / `ExitDll` | `clap_entry.init/deinit` + 工厂 | `ExtensionOwner` 的 `component_activated` / `processing_started` / `processing_stopped` / `component_terminated` |
+| 音频处理 | `ProcessData` → `BlockContext` | `clap_process_t` → `BlockContext` | `ExtensionOwner::process_audio` |
+| 状态存档 | `getState` / `setState` | `clap.state` | `encode_state` / `restore_state` |
+| ARA 工厂 / 绑定 | `ARAVST3.h` 入口点 | `ARACLAP.h` 工厂 + 实例扩展 | `AraBinder`（角色校验、文档查找、幂等复位） |
+| 编辑器视图 | `IPlugView` | `clap.gui` | `editor::gui::EditorView`（同一个 `create_view`） |
+| 页面协议 / 命令分发 | `IPlugView` → `EditorClient` | `clap.gui` → **同一个** `EditorClient` | `EditorClient` + `commands::dispatch` + `EditorSession` |
+| 设置 / 前端偏好 | `EditorClient` → `settings_store` | 同上 | `settings_store`（与独立 App 同一份配置文件） |
+| 宿主主线程节拍 | REAPER `plugin_register("timer")` | `clap.timer-support` + `on_main_thread` | `editor::host_main_thread_tick` |
+| 窗口 / 模块卸载 | `ExitDll` → `editor::shutdown` | `entry.deinit` → `editor::shutdown` | 同一个函数（含窗口类注销） |
+| 用户目录布局迁移 | 模块入口 | 模块入口 | `initialize_process_state`（同一个钩子函数指针） |
+| 推理模型登记 | 模块入口 | 模块入口 | `initialize_resources` |
+| 诊断 / 日志 / 诊断包 | `diagnostics` + 命令 | 同一个 + `clap.log` 转发 | `diagnostics` + `plugin_diagnostics` |
+| 宿主原生编辑（写回 / 分割 / 剪贴板 / 撤销块 / folder） | REAPER 扩展 | **无** | 仅 VST3（CLAP 没有对应的宿主 API，能力位如实为 false） |
+| 总线声道协商 | `setBusArrangements` 接受任意布局 | 固定立体声端口，由宿主适配 | **差异**：CLAP 的端口表是静态的（`clap.audio-ports`），宿主把单声道轨升混到立体声 |
+
+两条**刻意保留**的差异：
+
+1. **宿主原生编辑只有 VST3 有**。它不是"少写了一段"：REAPER 的原生扩展通过 VST3 的
+   `IPlugFrame`/`plugin_register` 暴露，CLAP 侧没有等价接口。CLAP 的能力位
+   （`clipWrite` / `split` / `itemClipboard` / `undoStack`）因此如实为 false，界面
+   显示只读，而不是让用户点了再撞错误。
+2. **CLAP 的端口表是静态立体声**。VST3 的 `setBusArrangements` 接受任意扬声器布局
+   （拒绝会把插件踢出插槽）；CLAP 没有"协商"这一步，宿主看到的就是 2 声道端口并按自己
+   的规则升混/降混。渲染面本来就只处理前两个声道（其余清零），所以两条路的**音频结果
+   相同**，差别只在宿主侧的总线组织。
 
 ### ARA 发现表的工程证据
 
