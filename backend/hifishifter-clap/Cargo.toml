@@ -19,14 +19,30 @@ hifishifter-plugin-core = { path = "../hifishifter-plugin-core" }
 # 捕获运行时与 VST3 共用同一份（判定、投影、sidecar 全在那边）。
 hifishifter-capture = { path = "../hifishifter-capture" }
 # 实现层（ARA 模型 / 渲染 / 编辑器 / 宿主适配）**唯一的一份**：CLAP 外壳不复制任何逻辑，
-# 只做格式适配。关掉默认 feature ⇒ 不带 ONNX 推理栈与 SoundTouchDLL（链接期依赖，
-# Windows 只按宿主目录解析，CLAP 没有 loader 层）。
-hifishifter-plugin = { path = "../hifishifter-plugin", default-features = false }
+# 只做格式适配。
+#
+# 【为什么用默认 features，且必须与 VST3/App 一致】这里曾写 `default-features = false`
+# 来避开 `SoundTouchDLL.dll` 的链接期 `#[link]`（单文件 CLAP 旁边放不了 DLL），
+# 却连带把 `onnx` 一起关掉 ⇒ `fcpe_onnx` 退化成 stub：捕获结束后那次「音高分析」
+# 只产出 DYN 电平（`has_data = true` 的假象），F0 恒为空 ⇒ `pitch_orig` 全 0、
+# `pitch_orig_key` 永不置位 ⇒ 原线不出现、渲染门禁 pending 60 s 后超时、用户画完
+# 参数线才触发一次 `f0=0` 的直通。三个现象是同一个根因。
+#
+# 更根本的问题是 Cargo feature 按构建图取并集：CLAP 单独打包是 stub，与 VST3 一起
+# 构建又变真 FCPE —— 同一个插件的行为取决于「跟谁一起编译」。现在 SoundTouch 改成
+# 运行期 `libloading`（找不到 DLL 就降级到 Signalsmith，见 soundtouch.rs），链接期
+# 依赖不复存在；ONNX Runtime 本来就是静态链接、DirectML.dll 是系统组件。于是这里
+# 不再有任何裁剪理由：与 VST3/App **字面相同地**取默认 features，编出同一份内核。
+hifishifter-plugin = { path = "../hifishifter-plugin" }
 # ARA 2 的 CLAP 伴生适配器：entry 级工厂表与实例级扩展的**结构体与回调形状**由它给出，
 # 绑定逻辑则走 hifishifter-plugin 的共享 binder（见 src/ara.rs 的说明）。
 ara2-bridge = { version = "0.3.0", features = ["clap"] }
 # 时间线载荷与 VST3 同形（同一个 TimelineState），只用到 serde 类型。
-hifishifter-kernel = { path = "../hifishifter-kernel", default-features = false }
+# 【为什么显式写 features】这一份必须与 hifishifter-plugin 内部对 kernel 的声明
+# **字面相同**（见 ../hifishifter-plugin/Cargo.toml）。用 kernel 的 default 会多带
+# `vslib` —— 那是 `#[link(name="vslib_x64")]` 的链接期依赖，插件包不分发那份闭源
+# DLL，宿主的 LoadLibrary 会直接失败（历史报障 `InitDll returned false`）。
+hifishifter-kernel = { path = "../hifishifter-kernel", default-features = false, features = ["onnx", "soundtouch"] }
 log = { version = "0.4", features = ["std"] }
 serde_json = "1"
 # 波形 mipmap 走 Base64 回执（前端 `atob` 解码）；与 VST3 同一个协议常量。

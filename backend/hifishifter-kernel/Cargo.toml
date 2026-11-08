@@ -54,10 +54,11 @@ cc = "1.0"
 default = ["onnx", "vslib", "soundtouch"]
 onnx = ["dep:ort", "dep:ndarray", "dep:ort-tract"]
 vslib = []
-# 【为什么 SoundTouch 是一个独立 feature】它是**链接期**依赖（`#[link(name=...)]`），
-# 一打开，产物就得多带一个 SoundTouchDLL.dll，而且 Windows 只按**宿主目录**解析
-# 依赖（不是插件模块目录）。CLAP 外壳没有 loader 层，带不动它 —— 关掉这个 feature
-# 之后 CLAP 走 Signalsmith（静态链接、MIT），VST3/App 保持原样。
+# 【为什么保留这个 feature】它现在是**可选的运行期依赖**：模块用 `libloading` 按
+# 绝对路径加载 SoundTouchDLL.dll，找不到就 `is_available() = false`、由 time_stretch
+# 降级到 Signalsmith。已不再是 `#[link]` 链接期依赖，因此**三种格式都默认开启**，
+# 编译同一份代码（见 soundtouch.rs 模块头）。历史上为了绕开链接期解析而给 CLAP 关掉
+# 整个默认 feature 集，连带把 onnx 也关掉 ⇒ fcpe_onnx 变 stub、捕获后没有音高原线。
 soundtouch = []
 
 # ── ONNX Runtime 的平台差异 ──────────────────────────────────────────────────
@@ -90,6 +91,8 @@ windows = { version = "0.62", features = [
     "Win32_System_Com_StructuredStorage",
     "Win32_System_SystemServices",
     "Win32_System_SystemInformation",
+    # soundtouch 运行期按**本模块地址**反查装载路径（不再用 #[link] 链接期解析）。
+    "Win32_System_LibraryLoader",
     "Win32_System_Threading",
     "Win32_System_Variant",
     "Win32_UI_Shell_PropertiesSystem",

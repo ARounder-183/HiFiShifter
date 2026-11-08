@@ -935,10 +935,21 @@ pub fn schedule_clip_pitch_jobs_scoped(
         // 完成一个 clip，更新进度
         let completed = global_batch_state().complete_one();
         global_batch_state().set_current(None);
+        // 【为什么把 F0 与电平分开报】`has_data` 只要电平非空就为真（DYN 基线需要它），
+        // 于是"FCPE 不可用 ⇒ midi 为空"伪装成一次成功的分析：现场日志里只有
+        // `has_data=true`，57 ms 就"分析完成"，而 `pitch_orig` 其实永远组装不出来、
+        // 渲染门禁 pending 到 60 s 超时。分开两个数，这类降级一眼可见。
+        let (midi_frames, level_frames) = analysis
+            .as_ref()
+            .map(|a| (a.midi.len(), a.level.len()))
+            .unwrap_or((0, 0));
         log::warn!(
-            "[pitch_clip] thread: clip '{}' analysis done, has_data={}, completed={}/{}",
+            "[pitch_clip] thread: clip '{}' analysis done, has_data={}, f0_frames={}, \
+             level_frames={}, completed={}/{}",
             job.clip.name,
             has_data,
+            midi_frames,
+            level_frames,
             completed,
             total
         );

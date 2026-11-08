@@ -2379,6 +2379,16 @@ pub fn timeline_fingerprint(timeline: &TimelineState) -> u64 {
         h.f64(params.frame_period_ms);
         h.flag(params.pitch_edit_user_modified);
         h.curve(&params.pitch_edit);
+        // 【原线必须进指纹】`pitch_orig` / `dyn_orig` 是用户在参数编辑器里真正
+        // 看到的那条线，而 `plugin_host_changed` 是"分析算完了、界面该重取"的唯一
+        // 通用信号。以前只哈希 `pitch_edit`：分析把 `pitch_orig` 从全 0 填成真值后
+        // 指纹纹丝不动 ⇒ 前端永远不重取 ⇒ 用户看到一片空白，直到他自己画一笔
+        // （那次写入改了 `pitch_edit` 才顺带触发一次重取）。这正是"捕获完毕后没有
+        // 立即展示原始音高线、必须手动画线才开始分析"的成因之一。
+        h.curve(&params.pitch_orig);
+        h.curve(&params.dyn_orig);
+        h.flag(params.pitch_orig_key.is_some());
+        h.flag(params.dyn_orig_key.is_some());
         h.curve(&params.tension_edit);
         let mut keys: Vec<&String> = params.extra_curves.keys().collect();
         keys.sort();
@@ -12828,6 +12838,37 @@ mod timeline_fingerprint_tests {
                 "{label} 变化必须改变指纹，否则界面会停在旧值"
             );
         }
+    }
+
+    /// **音高原线落地必须改变指纹，否则界面永远停在"没有原线"。**
+    ///
+    /// 【为什么这条是现场报障的正身】捕获结束后分析把 `pitch_orig` 从全 0 填成
+    /// 真实 F0，而 `plugin_host_changed` 是"该重取了"的唯一通用信号。旧指纹只哈希
+    /// `pitch_edit`：这次变化纹丝不动 ⇒ 前端不重取 ⇒ 用户看到一片空白，直到他自己
+    /// 画一笔（那次写入改了 `pitch_edit` 才顺带触发重取）——正是"捕获完毕后没有
+    /// 立即展示原始音高线、必须手动画线才开始分析"的成因。
+    #[test]
+    fn a_landed_pitch_baseline_moves_the_fingerprint() {
+        let mut timeline = timeline();
+        timeline.params_by_root_track.insert(
+            "track".into(),
+            serde_json::from_value(serde_json::json!({
+                "pitch_orig": [0.0, 0.0],
+                "pitch_edit": [0.0, 0.0],
+            }))
+            .unwrap(),
+        );
+        let before = timeline_fingerprint(&timeline);
+        {
+            let entry = timeline.params_by_root_track.get_mut("track").unwrap();
+            entry.pitch_orig = vec![60.0, 62.0];
+            entry.pitch_orig_key = Some("analysis-key".into());
+        }
+        assert_ne!(
+            timeline_fingerprint(&timeline),
+            before,
+            "分析算完的原线必须让界面重取，否则用户永远等不到那条线"
+        );
     }
 
     /// 选区必须进指纹（插件里没有别的通道把它送到 GUI），播放头**不**进

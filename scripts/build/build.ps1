@@ -1,4 +1,4 @@
-﻿# 产品构建：前端 → App → VST3 bundle → 安装器暂存 → 合并安装器 / 便携包。
+# 产品构建：前端 → App → VST3 bundle → 安装器暂存 → 合并安装器 / 便携包。
 #
 # 产物只有一处：dist\。没有中间交付目录、没有构建清单、没有源码指纹 —— 构建产物的身份
 # 由它来自的那个 git 提交决定，不需要再写一份 JSON 去证明。
@@ -208,9 +208,18 @@ if ($Target -eq 'All' -or $Target -eq 'Plugin' -or $Target -eq 'Clap') {
     Copy-Item 'frontend\dist\plugin.html' (Join-Path $clapRes 'frontend')
     Copy-Item 'frontend\dist\assets\*' (Join-Path $clapRes 'frontend\assets') -Recurse
     Copy-Item (Join-Path $modelsSource 'models.json') (Join-Path $clapRes 'models')
+    # 【为什么 CLAP 资源目录里也要放 SoundTouchDLL.dll】三种格式现在编译同一份内核：
+    # SoundTouch 由 `#[link]` 改成运行期 libloading，候选路径包含模块同级与同级的
+    # `<stem>-resources`。VST3 把 DLL 放在引擎旁、App 放在 exe 旁；CLAP 是公共目录里的
+    # 单文件模块，不能往那儿塞通用名 DLL，因此放进自己的私有资源目录。缺这份 DLL
+    # 不算错误（is_available()=false → 已有的 Signalsmith 降级），但带上它才能与
+    # VST3/App 行为一致 —— 用户的拉伸算法设置不该因插件格式而变。
+    $soundtouch = Join-Path $built 'SoundTouchDLL.dll'
+    if (Test-Path $soundtouch) { Copy-Item $soundtouch (Join-Path $clapRes 'SoundTouchDLL.dll') -Force }
     # 【为什么要显式删掉 webview】WebView2 的用户数据目录是**运行期状态**（缓存、
     # 锁文件、本机 profile），它曾经因为落在资源目录里而被打进安装包，也会让下一个
-    # 用户拿到一份被占用的 profile。资源目录里只允许有 frontend 与 models。
+    # 用户拿到一份被占用的 profile。资源目录里只允许有 frontend、models 与
+    # 运行期可选加载的 SoundTouchDLL.dll —— 绝不留下 WebView2 用户数据。
     Remove-Item -LiteralPath (Join-Path $clapRes 'webview') -Recurse -Force -ErrorAction SilentlyContinue
     Write-Host "CLAP 资源已组装：$clapRes" -ForegroundColor Green
     & .\scripts\clap\windows\verify.ps1 -ModulePath (Join-Path $dist 'HiFiShifter.clap')

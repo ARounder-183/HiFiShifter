@@ -342,11 +342,11 @@ pub fn time_stretch_interleaved(
             }
         }
         StretchAlgorithm::SoundTouchDll => {
-            // 【为什么这个分支有两条实现】SoundTouch 是**链接期**依赖（`#[link(name=…)]`），
-            // 一打开，产物就多一个必须与宿主同目录的 `SoundTouchDLL.dll`。CLAP 外壳没有
-            // loader 层，带不动它 —— 于是那边关掉 feature，走线性重采样。
+            // 【为什么仍留一条 cfg 分支】`soundtouch` 现已是运行期 libloading，三种格式
+            // 默认都开启；这条分支只为「显式关闭该 feature 的轻量构建」保留。
             // 【为什么退到线性而不是直通】线性重采样至少保持时长与内容；直通会让"改了速率"
-            // 听起来完全没生效，那是更糟的谎。
+            // 听起来完全没生效，那是更糟的谎。DLL 缺席时 SoundTouchState::new 返回
+            // RuntimeUnavailable，下面的 Err 分支同样落到线性降级。
             #[cfg(not(feature = "soundtouch"))]
             {
                 linear_time_stretch_interleaved(input, channels, out_frames)
