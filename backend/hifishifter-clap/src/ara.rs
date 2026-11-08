@@ -18,19 +18,25 @@
 //! —— 文档控制器、tempo map、region sequence、授权 PCM 全部到位 —— 但只要时间线上
 //! **存在音频 item**，REAPER 7.85 就会在自己的代码里以 `0xC0000005` 崩溃：
 //!
-//! - 崩溃点 `reaper.exe+0x5a677`，指令 `mov rcx,[rbx+8]`，`rbx` 由
-//!   `[rbp+8]` 取得且为 `NULL`，也就是"把对象登记进指针数组"时拿到空对象；
-//! - 该函数在 `test rbx,rbx; je` 之后**仍然解引用 `rbx`**，宿主侧没有做空检查；
-//! - 它只在 REAPER 自己创建完 playback region 之后触发，与插件返回的接口无关：
-//!   强制本实例同时承担 `playback|editor|view`、补齐 ARA 1 遗留字段、关闭
+//! - 崩溃点 `reaper.exe+0x5a677`，指令 `mov rcx,[rbx+8]`，`rbx` 由 `[rbp+8]` 取得
+//!   且为 `NULL`：REAPER 把"空渲染器"当有效对象登记进指针数组，而它的
+//!   `test rbx,rbx; je` 恰好跳进这条解引用指令，空检查在机器码层面等于不存在；
+//! - 空的那个对象是 **playback 渲染器**。ARACLAP.h 规定
+//!   `bind_to_document_controller` 在一个 `clap_plugin` 实例上只能调一次、只承担
+//!   一组角色，所以多角色必须多实例；实测 REAPER 全程只调用**一次** `create_plugin`
+//!   （日志里只有一行），从不补建 playback 实例，也从不向 entry 级 `get_factory`
+//!   要 ARA 工厂（它的二进制里只有上面这一个 ARA-CLAP 字符串）；
+//! - 与插件返回的接口无关：强制本实例同时承担 `playback|editor|view`（日志确认交出
+//!   的 playback/editor/view 三个接口指针全非空）、补齐 ARA 1 遗留字段、关闭
 //!   `samples_access` 的同步 PCM 读取，三种改法都照崩不误；
-//! - 同一台机器、同一份音频，**VST3 形态不崩**（REAPER 为 VST3 建两个实例并分配
-//!   `playback`），而 CLAP 形态只建一个实例（`assigned=editor|view`），说明这条
-//!   私有草案路径在"需要真正渲染"的时候是不完整的。
+//! - 同一台机器、同一份音频，**VST3 形态不崩**：REAPER 为 VST3 建两个实例，并把
+//!   `playback` 分给第二个。
 //!
-//! 结论：这条 ID 不是可用的宿主契约，应答它等于把宿主的空指针缺陷引到用户面前。
-//! 本模块因此只认 ARACLAP.h 定稿的工厂/实例 ID；REAPER 里的 CLAP 插件以 Capture
-//! 形态稳定运行，需要 ARA 时用 VST3 形态（走官方 `ARAVST3.h`，实测稳定）。
+//! 结论：这条 ID 不是可用的宿主契约 —— 应答它等于把宿主的空指针缺陷引到用户面前，
+//! 而且没有任何插件侧写法能让宿主补出那个缺失的实例。本模块因此只认 ARACLAP.h
+//! 定稿的工厂/实例 ID；REAPER 里的 CLAP 插件以 Capture 形态稳定运行，需要 ARA 时
+//! 用 VST3 形态（走官方 `ARAVST3.h`，实测稳定）。完整取证见
+//! `docs/2026-11-08-reaper-clap-ara-crash-analysis.md`。
 
 use crate::abi::clap_plugin_t;
 use ara2_bridge::companion::clap::sys::{ClapAraPluginExtension, ClapPlugin};
@@ -177,6 +183,12 @@ unsafe extern "C" fn ara_bind(
 /// 应答它会在真机上崩宿主（见模块文档）。这不是"能力降级"，而是"不把宿主的
 /// 缺陷引进来"——同一份 ARA 能力仍由 VST3 形态完整提供。
 pub fn get_extension(plugin: *const clap_plugin_t, id: &str) -> *const c_void {
+    // 【为什么把 ARA 查询本身记下来】现场里"宿主根本没问"与"问了但被拒"都表现为
+    // "插件里没有 clip"，处置却完全相反：前者是宿主不支持的 ARA，后者是能力边界。
+    // 一行日志把二者分开，且判据只看 ID 前缀 —— 不按宿主名字分支。
+    if id.starts_with("com.celemony.") || id.starts_with("org.ara-audio.") {
+        log::info!("[clap][ara] instance extension query id={id}");
+    }
     if !matches!(
         id,
         CLAP_EXT_ARA_PLUGIN_EXTENSION | CLAP_EXT_ARA_PLUGIN_EXTENSION_COMPAT

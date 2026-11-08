@@ -181,10 +181,20 @@ unsafe extern "C" fn create_plugin(
         if plugin_id.is_null() || host.is_null() {
             return std::ptr::null();
         }
-        if unsafe { CStr::from_ptr(plugin_id) }.to_bytes() != b"com.hifishifter.clap" {
+        let requested = unsafe { CStr::from_ptr(plugin_id) }
+            .to_string_lossy()
+            .into_owned();
+        // 【为什么每个实例建一次就记一行】"宿主为一份 ARA 文档建了几个实例"是判断
+        // 宿主 ARA 实现是否完整的**唯一**外部读数：ARACLAP.h 规定一个 clap_plugin
+        // 实例只承担一组角色，多角色必须多实例。宿主只建一个却要求多个角色时，
+        // 现场就只剩"没有 clip"或"宿主崩溃"两种结局，而这一行是唯一能区分的证据。
+        log::info!("[clap] create_plugin id={requested}");
+        if requested.as_bytes() != b"com.hifishifter.clap" {
+            log::warn!("[clap] create_plugin rejected unknown id={requested}");
             return std::ptr::null();
         }
         if !unsafe { clap_version_is_compatible((*host).clap_version) } {
+            log::warn!("[clap] create_plugin rejected incompatible clap version from host");
             return std::ptr::null();
         }
         // 宿主在 `clap_host_t` 里自报名字与版本（CLAP 契约要求这两个字段非空）。

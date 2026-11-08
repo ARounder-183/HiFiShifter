@@ -137,8 +137,13 @@ ARA 侧改了时间拉伸 / 内容淡化，插件会继续用旧配置渲染。
 > [报告](2026-11-08-reaper-clap-ara-crash-analysis.md)。
 >
 > 根因是 **REAPER 的 2022 私有草案实现不完整**，不是插件侧可修补的：该崩溃函数在
-> `test rbx,rbx` 之后仍解引用 `rbx`；强制本实例同时承担 `playback|editor|view`、
-> 补齐 ARA 1 遗留字段、关闭 `samples_access` 的同步 PCM 读取，三种改法都照崩。
+> `test rbx,rbx` 之后仍解引用 `rbx`（空的是它自己的 playback 渲染器槽位）；强制本
+> 实例同时承担 `playback|editor|view`（日志确认三个接口指针全非空）、补齐 ARA 1 遗留
+> 字段、关闭 `samples_access` 的同步 PCM 读取，三种改法都照崩。
+> 关键在于**实例数量**：`ARACLAP.h` 规定 `bind_to_document_controller` 在一个
+> `clap_plugin` 实例上只能调一次、只承担一组角色，多角色必须多实例；实测 REAPER 全程
+> 只调用**一次** `create_plugin`，从不补建 playback 实例，也从不向 entry 级
+> `get_factory` 索要 ARA 工厂（其二进制里只有那一个私有的实例级 ID）。
 > 同一台机器同一份音频下 **VST3 形态稳定**（REAPER 为 VST3 建两个实例并分配
 > `playback`；CLAP 只建一个，`assigned=editor|view`）。
 >
