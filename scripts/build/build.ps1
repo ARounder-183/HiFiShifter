@@ -121,7 +121,6 @@ if ($Target -eq 'All' -or $Target -eq 'Plugin') {
     Reset-Directory $module
     Reset-Directory "$resources\frontend"
     Reset-Directory "$resources\models"
-    New-Item -ItemType Directory -Force "$resources\frontend\assets" | Out-Null
 
     Copy-Item "$built\hifishifter_plugin.dll" "$module\HiFiShifterEngine.dll"
     # DLL 白名单刻意不含 vslib：它是独立 App 的闭源运行时，插件不分发。
@@ -129,9 +128,10 @@ if ($Target -eq 'All' -or $Target -eq 'Plugin') {
         if (Test-Path "$built\$dll") { Copy-Item "$built\$dll" $module }
     }
 
-    # 插件和浮动编辑器入口共用同一份 chunk。
-    Copy-Item frontend\dist\plugin.html, frontend\dist\detached.html "$resources\frontend"
-    Copy-Item frontend\dist\assets\* "$resources\frontend\assets" -Recurse
+    # 静态入口与公共资源一起复制，SDK 类型声明不属于运行时载荷。
+    Get-ChildItem -LiteralPath frontend\dist |
+        Where-Object { $_.Name -ne 'sdk' } |
+        Copy-Item -Destination "$resources\frontend" -Recurse
     Copy-Item backend\src-tauri\icons\icon.ico "$resources\frontend"
 
     # 【为什么 bundle 里只有清单、没有权重】安装器把权重写进
