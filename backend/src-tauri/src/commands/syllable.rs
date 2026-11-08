@@ -10,8 +10,8 @@ use hifishifter_kernel::pitch_analysis::{
 };
 use serde::Deserialize;
 use serde::Serialize;
-use tauri::Manager;
 use tauri::State;
+use tauri::{Emitter, Manager};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -31,6 +31,10 @@ pub struct ClipSyllableAnalysisPayload {
     pub algorithm: String,
     pub algorithm_version: u32,
     pub analyzed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root_track_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub block_layout: Option<hifishifter_kernel::param_line_blocks::ParamLineBlockSet>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,6 +124,8 @@ fn payload(
             .map(|a| a.algorithm_version)
             .unwrap_or(SYLLABLE_ALGORITHM_VERSION),
         analyzed: analysis.is_some(),
+        root_track_id: None,
+        block_layout: None,
     }
 }
 
@@ -195,7 +201,21 @@ pub(super) fn analyze_clip_syllables(
     state: State<'_, AppState>,
     clip_id: String,
 ) -> Result<ClipSyllableAnalysisPayload, String> {
-    analyze_clip_syllables_inner(state, clip_id)
+    let mut reply = analyze_clip_syllables_inner(state.clone(), clip_id)?;
+    let timeline = state
+        .timeline
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if let Some(clip) = timeline.clips.iter().find(|clip| clip.id == reply.clip_id) {
+        if let Some(root) = timeline.resolve_root_track_id(&clip.track_id) {
+            reply.block_layout = timeline
+                .params_by_root_track
+                .get(&root)
+                .and_then(|params| params.param_line_blocks.clone());
+            reply.root_track_id = Some(root);
+        }
+    }
+    Ok(reply)
 }
 
 fn analyze_clip_syllables_inner(
@@ -212,7 +232,7 @@ fn analyze_clip_syllables_inner(
             .ok_or_else(|| "clip_not_found".to_string())?;
         (guard.clone(), clip)
     };
-    let mut tl = tl_snapshot;
+    let tl = tl_snapshot;
     let take = clip.active_take().clone();
     let fp = tl.frame_period_ms().max(0.1);
     let digest = source_digest(&clip, fp);
@@ -288,7 +308,7 @@ fn analyze_clip_syllables_inner(
         Some(TakeSyllableAnalysis {
             algorithm,
             algorithm_version: version,
-            source_digest: digest,
+            source_digest: digest.clone(),
             source_spans_sec: spans
                 .into_iter()
                 .map(
@@ -300,27 +320,148 @@ fn analyze_clip_syllables_inner(
                 .collect(),
         })
     };
-    let Some(clip_mut) = tl.clips.iter_mut().find(|c| c.id == clip_id) else {
-        return Err("clip_not_found".to_string());
-    };
-    if let Some(index) = clip_mut
-        .takes
-        .iter()
-        .position(|t| t.id == take.id)
-        .or_else(|| (!clip_mut.takes.is_empty()).then_some(0))
-    {
-        let take_mut = &mut clip_mut.takes[index];
-        take_mut.syllable_analysis = analysis.clone();
-    }
-    {
+    let result = {
         let mut guard = state.timeline.lock().unwrap_or_else(|e| e.into_inner());
-        *guard = tl;
-    }
-    // 音节分析会进入工程文件，必须提示保存；但不属于用户编辑，不进撤销栈。
-    state.bump_timeline_version();
-    state.mark_project_dirty_and_retitle();
+        commit_analysis_metadata(&mut guard, &clip.id, &take.id, &digest, fp, analysis)
+    };
     set_syllable_analysis_progress(None);
-    Ok(payload(&clip, &take.id, analysis.as_ref()))
+    let reply = result?;
+    // 音节分析会进入工程文件，必须提示保存；但不属于用户编辑，不进撤销栈。
+    // Inference only owns one Take's metadata. Do not replace its frozen
+    // timeline snapshot or invalidate the entire project's audio generation.
+    state.mark_project_dirty_and_retitle();
+    if let Some(app) = state.app_handle.get() {
+        let mut event = serde_json::to_value(&reply).map_err(|error| error.to_string())?;
+        event["sourcePath"] = serde_json::json!(clip.source_path);
+        let _ = app.emit("clip_syllables_updated", event);
+        if let (Some(root), Some(layout)) = (&reply.root_track_id, &reply.block_layout) {
+            let _ = app.emit(
+                "param_line_blocks_updated",
+                serde_json::json!({"rootTrackId":root,"layout":layout}),
+            );
+        }
+    }
+    Ok(reply)
+}
+
+fn commit_analysis_metadata(
+    timeline: &mut crate::state::TimelineState,
+    clip_id: &str,
+    take_id: &str,
+    digest: &str,
+    frame_period_ms: f64,
+    analysis: Option<TakeSyllableAnalysis>,
+) -> Result<ClipSyllableAnalysisPayload, String> {
+    let clip = timeline
+        .clips
+        .iter_mut()
+        .find(|clip| clip.id == clip_id)
+        .ok_or("stale syllable analysis result: clip removed")?;
+    if clip.active_take().id != take_id || source_digest(clip, frame_period_ms) != digest {
+        return Err("stale syllable analysis result: source or active take changed".into());
+    }
+    let take = clip
+        .takes
+        .iter_mut()
+        .find(|take| take.id == take_id)
+        .ok_or("stale syllable analysis result: take removed")?;
+    // An empty detector result must not wipe a previously completed cache.
+    if analysis.is_some() {
+        take.syllable_analysis = analysis;
+    }
+    let projected_clip = clip.clone();
+    let mut reply = payload(clip, take_id, clip.active_take().syllable_analysis.as_ref());
+    if let Some(root) = timeline.resolve_root_track_id(&projected_clip.track_id) {
+        if let Some(layout) = timeline
+            .params_by_root_track
+            .get(&root)
+            .and_then(|params| params.param_line_blocks.clone())
+        {
+            if let Some(analysis) = projected_clip.active_take().syllable_analysis.as_ref() {
+                let next = layout.apply_analysis(
+                    &projected_clip,
+                    &analysis.source_digest,
+                    &analysis.source_spans_sec,
+                )?;
+                timeline
+                    .params_by_root_track
+                    .get_mut(&root)
+                    .unwrap()
+                    .param_line_blocks = Some(next.clone());
+                reply.root_track_id = Some(root);
+                reply.block_layout = Some(next);
+            }
+        }
+    }
+    Ok(reply)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn timeline() -> crate::state::TimelineState {
+        serde_json::from_value(serde_json::json!({
+            "tracks":[{"id":"root","name":"Root","order":0}],
+            "clips":[{"id":"clip","track_id":"root","name":"Original","start_sec":0,"length_sec":1,
+                "takes":[{"id":"take","source_path":"a.wav","source_start_sec":0,"source_end_sec":1}]}],
+            "project_sec":2,"bpm":120
+        })).unwrap()
+    }
+
+    #[test]
+    fn game_completion_preserves_edits_and_clips_added_while_inference_was_running() {
+        let mut live = timeline();
+        live.clips[0].normalize_takes();
+        let digest = source_digest(&live.clips[0], 5.0);
+        live.clips[0].name = "Edited during inference".into();
+        live.clips[0].start_sec = 0.25;
+        let mut added = live.clips[0].clone();
+        added.id = "added-while-running".into();
+        live.clips.push(added);
+        live.ensure_params_for_root("root");
+        live.params_by_root_track
+            .get_mut("root")
+            .unwrap()
+            .pitch_edit[0] = 67.0;
+        let analysis = TakeSyllableAnalysis {
+            algorithm: hifishifter_kernel::game_onnx::GAME_ALGORITHM.into(),
+            algorithm_version: hifishifter_kernel::game_onnx::GAME_ALGORITHM_VERSION,
+            source_digest: digest.clone(),
+            source_spans_sec: vec![hifishifter_kernel::pitch_analysis::SyllableSpan {
+                start_sec: 0.0,
+                end_sec: 1.0,
+            }],
+        };
+        let reply =
+            commit_analysis_metadata(&mut live, "clip", "take", &digest, 5.0, Some(analysis))
+                .unwrap();
+        assert!(reply.analyzed);
+        assert_eq!(live.clips.len(), 2);
+        assert_eq!(live.clips[0].name, "Edited during inference");
+        assert_eq!(live.clips[0].start_sec, 0.25);
+        assert_eq!(live.params_by_root_track["root"].pitch_edit[0], 67.0);
+        assert!(
+            !commit_analysis_metadata(&mut live, "clip", "take", &digest, 5.0, None)
+                .unwrap()
+                .source_spans_sec
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn game_completion_rejects_changed_source_or_take() {
+        let mut live = timeline();
+        live.clips[0].normalize_takes();
+        let digest = source_digest(&live.clips[0], 5.0);
+        live.clips[0].source_path = Some("changed.wav".into());
+        assert!(commit_analysis_metadata(&mut live, "clip", "take", &digest, 5.0, None).is_err());
+        live.clips[0].source_path = Some("a.wav".into());
+        assert!(
+            commit_analysis_metadata(&mut live, "clip", "removed-take", &digest, 5.0, None)
+                .is_err()
+        );
+    }
 }
 
 fn fallback_vad_spans(

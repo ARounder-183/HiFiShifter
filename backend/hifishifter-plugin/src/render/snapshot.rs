@@ -1769,14 +1769,27 @@ mod tests {
 
         let publisher = Arc::new(SnapshotPublisher::new(64 * 1024));
         let stop = Arc::new(AtomicBool::new(false));
+        let started = Arc::new(std::sync::Barrier::new(5));
+        publisher
+            .publish(PlaybackSnapshot {
+                sample_rate: 4,
+                origin_sample: 0,
+                left: vec![0.25; 2],
+                right: vec![-0.5; 2],
+                covered: Vec::new(),
+                _reservation: None,
+            })
+            .unwrap();
         let mut readers = Vec::new();
         for _ in 0..4 {
             let publisher = Arc::clone(&publisher);
             let stop = Arc::clone(&stop);
+            let started = Arc::clone(&started);
             readers.push(std::thread::spawn(move || {
                 let mut checksum = 0.0_f64;
                 let mut observed = 0_usize;
-                while !stop.load(Ordering::Relaxed) {
+                started.wait();
+                loop {
                     let read = publisher.enter();
                     if let Some(snapshot) = read.snapshot() {
                         // 读区内校验：内容必须是发布者写入的那个常量图案。
@@ -1787,10 +1800,14 @@ mod tests {
                         checksum += snapshot.left.len() as f64;
                         observed += 1;
                     }
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
                 }
                 (checksum, observed)
             }));
         }
+        started.wait();
         // 发布者持续替换快照，让 `reclaim` 反复尝试回收退役缓冲。
         for _ in 0..2000 {
             publisher

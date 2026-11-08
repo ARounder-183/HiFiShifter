@@ -64,6 +64,7 @@ impl Drop for WaveformInflightGuard<'_> {
 pub struct AppState {
     pub timeline: std::sync::Mutex<TimelineState>,
     pub timeline_version: std::sync::atomic::AtomicU64,
+    pub param_curve_revision: std::sync::atomic::AtomicU64,
     pub timeline_history: std::sync::Mutex<TimelineHistory>,
     pub project: std::sync::Mutex<ProjectState>,
     pub runtime: std::sync::Mutex<RuntimeState>,
@@ -162,6 +163,7 @@ impl AppState {
         Self {
             timeline: std::sync::Mutex::new(TimelineState::default()),
             timeline_version: std::sync::atomic::AtomicU64::new(0),
+            param_curve_revision: std::sync::atomic::AtomicU64::new(0),
             timeline_history: std::sync::Mutex::new(TimelineHistory::default()),
             project: std::sync::Mutex::new(ProjectState::default()),
             runtime: std::sync::Mutex::new(RuntimeState {
@@ -202,6 +204,8 @@ impl AppState {
 
 impl AppState {
     pub fn bump_timeline_version(&self) -> u64 {
+        self.param_curve_revision
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         self.timeline_version
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
             .saturating_add(1)
@@ -740,6 +744,25 @@ impl AppState {
         }
     }
 
+    /// A boundary-only undo step must not invalidate any audio/curve generation.
+    pub(crate) fn checkpoint_block_layout(&self, snapshot: &TimelineState) {
+        if !self
+            .suppress_checkpoints
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            hifishifter_kernel::editor::history::checkpoint(
+                &mut self
+                    .timeline_history
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()),
+                snapshot,
+                HistoryOp::ParamBlockMerge.key().into(),
+                || self.current_notes_markdown(),
+            );
+            self.emit_history_state();
+        }
+    }
+
     pub fn clear_history(&self) {
         {
             let mut h = self
@@ -1027,7 +1050,7 @@ impl AppState {
                 current.notes_markdown = Some(self.current_notes_value());
             }
         }
-        let Some(next_state) = h.records.get(target).and_then(|r| r.state.clone()) else {
+        let Some(mut next_state) = h.records.get(target).and_then(|r| r.state.clone()) else {
             // 目标记录尚未补齐（理论上不可达：非当前位置的记录在离开时即已
             // 补齐）。宁可原地不动，也不套用一个不完整的状态。
             let (undo_depth, redo_depth) = history_depths_of(&h);
@@ -1039,6 +1062,27 @@ impl AppState {
             payload.redo_depth = Some(redo_depth);
             return payload;
         };
+        let layout_only =
+            hifishifter_kernel::param_line_blocks::timeline_equal_except_blocks(&tl, &next_state);
+        // Undo restores content, but transport revisions must remain monotonic.
+        for (root, params) in &tl.params_by_root_track {
+            if let Some(current) = &params.param_line_blocks {
+                if !next_state.tracks.iter().any(|track| track.id == *root) {
+                    continue;
+                }
+                let entry = next_state
+                    .params_by_root_track
+                    .entry(root.clone())
+                    .or_default();
+                let restored = entry.param_line_blocks.get_or_insert_with(|| {
+                    hifishifter_kernel::param_line_blocks::ParamLineBlockSet {
+                        frame_period_ms: current.frame_period_ms,
+                        ..Default::default()
+                    }
+                });
+                restored.revision = restored.revision.max(current.revision).saturating_add(1);
+            }
+        }
         let scale_before = tl.render_scale_signature();
         *tl = next_state;
         h.position = target;
@@ -1056,20 +1100,26 @@ impl AppState {
         let param_selection_restore = param_selection_restore_for(&h, target, intent);
         let (undo_depth, redo_depth) = history_depths_of(&h);
         drop(h);
-        self.bump_timeline_version();
+        if !layout_only {
+            self.bump_timeline_version();
+        }
         self.emit_history_state();
         // 恢复的快照可能改变 clip 的 active take：hnsep 分离缓存键只含
         // clip_id+采样率+样本数，等长 Take 会命中彼此的 harmonic/noise
         // stem（气声路径串音）。撤销/重做属低频操作，整体清空与
         // set_clip_active_take 命令路径的失效策略一致。
-        crate::hnsep_onnx::clear_separation_cache();
+        if !layout_only {
+            crate::hnsep_onnx::clear_separation_cache();
+        }
         // 恢复的时间线快照可能带有 Tempo Map 初始点（工程基准记录）：
         // 同步工程 BPM/拍号/音阶，避免回退后工程记录与 Tempo Map 分叉。
         {
             let mut p = self.project.lock().unwrap_or_else(|e| e.into_inner());
             self.sync_project_record_from_tempo_map(&mut tl, &mut p);
         }
-        self.audio_engine.update_timeline(tl.clone());
+        if !layout_only {
+            self.audio_engine.update_timeline(tl.clone());
+        }
         self.invalidate_render_caches_if_scale_changed(&tl, &scale_before);
         let mut payload = tl.to_payload();
         payload.project = Some(self.project_meta_payload());

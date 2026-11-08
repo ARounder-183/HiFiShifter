@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { hitTestParamBlockTransitionHandles } from "../../paramBlocks";
 
 import { createTimelineAxis } from "../../../renderKernel/timelineAxis";
 import { buildParamBlockInstances, buildParamBlockScene } from "./blockInstances";
@@ -59,6 +60,31 @@ describe("buildParamBlockInstances", () => {
             mergedRgba,
         });
         expect(items.every((item) => item.rgba === selectedRgba)).toBe(true);
+    });
+
+    it("亚像素短块仍保留至少 1 CSS px 的可见填充", () => {
+        const scene = buildParamBlockScene({
+            axis,
+            viewportHeightPx: 400,
+            blocks: [
+                {
+                    id: "tiny",
+                    startSec: 1,
+                    endSec: 1.001,
+                    topPx: 100,
+                    heightPx: 40,
+                    selected: false,
+                    merged: false,
+                },
+            ],
+            borderRgba: rgba,
+            selectedRgba,
+            mergedRgba,
+            fillRgba: rgba,
+        });
+        expect(scene.fills).toHaveLength(1);
+        expect(scene.fills[0]?.w).toBeGreaterThanOrEqual(1);
+        expect(scene.items.length).toBeGreaterThan(0);
     });
 
     it("每个块都保留左右边界，即使它与相邻块时间相接", () => {
@@ -351,4 +377,59 @@ describe("buildParamBlockInstances", () => {
         expect(scene.handles).toEqual([]);
         expect(scene.transitions).toEqual([]);
     });
+});
+
+it("at a small zoom the grip stays above an ascending transition and hit testing follows it", () => {
+    const axis = createTimelineAxis({ pxPerSec: 10, scrollLeftPx: 0, viewportWidthPx: 800 });
+    const blocks = [
+        {
+            id: "left",
+            startSec: 0,
+            endSec: 1,
+            topPx: 100,
+            heightPx: 24,
+            selected: true,
+            merged: false,
+            transitionHandle: { sec: 1, leftId: "left", rightId: "right", widthSec: 0 },
+        },
+        {
+            id: "right",
+            startSec: 1,
+            endSec: 2,
+            topPx: 60,
+            heightPx: 24,
+            selected: false,
+            merged: false,
+        },
+    ];
+    const scene = buildParamBlockScene({
+        axis,
+        viewportHeightPx: 400,
+        blocks,
+        borderRgba: rgba,
+        selectedRgba,
+        mergedRgba,
+        transitionRgba: selectedRgba,
+    });
+    const grip = scene.handles[2];
+    expect(grip.y + grip.h).toBeLessThan(60);
+    expect(scene.transitions[0].every((point) => point.y > grip.y + grip.h)).toBe(true);
+    expect(scene.transitions[0][0].x).toBe(5);
+    expect(scene.transitions[0].at(-1)?.x).toBe(15);
+    expect(
+        hitTestParamBlockTransitionHandles({
+            blocks,
+            clientX: 10,
+            localY: 54,
+            secToX: (sec) => sec * 10,
+        })?.leftId,
+    ).toBe("left");
+    expect(
+        hitTestParamBlockTransitionHandles({
+            blocks,
+            clientX: 10,
+            localY: 94,
+            secToX: (sec) => sec * 10,
+        }),
+    ).toBeNull();
 });

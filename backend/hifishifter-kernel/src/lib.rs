@@ -75,6 +75,7 @@ pub mod log_limiter;
 pub mod logfile;
 pub mod model_paths;
 pub mod model_store;
+pub mod param_line_blocks;
 pub mod rt_retirement;
 pub mod ui_settings_apply;
 pub mod util;

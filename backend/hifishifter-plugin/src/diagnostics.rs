@@ -206,10 +206,14 @@ pub fn flush_pending() {
 /// 可用，而日志在 DLL 加载时就要能写。于是先攒着、拿到名字时再一次性落地：
 /// 会话头会开在**正确的文件**里，早期几行也不会丢。
 pub fn note_host_application(name: &str) {
-    {
-        *HOST_NAME.lock().unwrap_or_else(|e| e.into_inner()) = Some(name.to_owned());
-    }
     let mut guard = WRITER.lock().unwrap_or_else(|e| e.into_inner());
+    {
+        let mut current = HOST_NAME.lock().unwrap_or_else(|e| e.into_inner());
+        if current.as_deref() == Some(name) && guard.is_some() {
+            return;
+        }
+        *current = Some(name.to_owned());
+    }
     match open_writer() {
         Ok(mut writer) => {
             drain_pending_into(&mut writer);

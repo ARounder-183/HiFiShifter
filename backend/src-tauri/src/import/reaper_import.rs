@@ -1082,6 +1082,7 @@ fn convert_reaper_data(
                         extra_params: Default::default(),
                         param_block_merges: Vec::new(),
                         param_block_interval_edits: Vec::new(),
+                        param_line_blocks: None,
                     },
                 );
             }

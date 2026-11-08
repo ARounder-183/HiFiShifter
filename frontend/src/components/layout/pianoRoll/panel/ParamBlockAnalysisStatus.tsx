@@ -11,13 +11,10 @@ import { useI18n } from "../../../../i18n/I18nProvider";
 import { coreApi } from "../../../../services/api";
 import type { SyllableAnalysisProgressPayload } from "../../../../types/api";
 import { AppStatusChip } from "../../../../ui";
-import {
-    blockAnalysisProgressStore,
-    publishBlockAnalysisProgress,
-} from "../blockAnalysisProgress";
+import { blockAnalysisProgressStore, publishBlockAnalysisProgress } from "../blockAnalysisProgress";
 
 export function ParamBlockAnalysisStatus(props: { readonly enabled: boolean }) {
-    const { t, tf } = useI18n();
+    const { t } = useI18n();
     const [progress, setProgress] = useState<SyllableAnalysisProgressPayload | null>(null);
     const localProgress = useSyncExternalStore(
         blockAnalysisProgressStore.subscribe,
@@ -56,14 +53,12 @@ export function ParamBlockAnalysisStatus(props: { readonly enabled: boolean }) {
 
     const shown = localProgress?.active ? localProgress : progress;
     if (!props.enabled || shown === null || !shown.active) return null;
-    const algorithm = shown.algorithm.startsWith("game")
-        ? "GAME"
-        : tf("param_blocks_vad_fallback");
+
     const detail = shown.clipName ? ` "${shown.clipName}"` : "";
     return (
         <AppStatusChip tone="accent">
             {t("status_analyzing_blocks")}
-            {detail} {algorithm} {Math.round(shown.progress * 100)}%
+            {detail} {Math.round(shown.progress * 100)}%
         </AppStatusChip>
     );
 }

@@ -36,6 +36,7 @@ export function normalizeEventKey(e: MinimalKeyboardEvent): string {
  * 与默认绑定（key: "="）一致的主键。
  */
 const PHYSICAL_KEY_BY_CODE: Record<string, string> = {
+    backquote: "`",
     equal: "=",
     minus: "-",
     bracketleft: "[",
@@ -72,7 +73,8 @@ export function matchesKeybinding(e: MinimalKeyboardEvent, kb: Keybinding): bool
     // 命中 key: "=" 的默认绑定；非上档场景两值相同，行为不变。
     const key = normalizeEventKey(e);
     const physical = physicalKeyFromEvent(e);
-    if (key !== kb.key && physical !== kb.key) return false;
+    const backquoteAlias = kb.key === "~" && physical === "`";
+    if (key !== kb.key && physical !== kb.key && !backquoteAlias) return false;
 
     const modKey = IS_MAC ? e.metaKey : e.ctrlKey;
     const wantCtrl = Boolean(kb.ctrl);

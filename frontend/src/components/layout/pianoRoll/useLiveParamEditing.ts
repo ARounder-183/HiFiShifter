@@ -5,6 +5,7 @@ import { paramsApi } from "../../../services/api";
 import { clampParamWriteValue } from "./paramRanges";
 
 import {
+    liveEditWindowMatchesParamView,
     parseLiveEditWindowKey,
     reanchorLiveEditWindow,
     restoreLiveEditRange,
@@ -134,6 +135,27 @@ export function useLiveParamEditing(args: {
         const cur = liveEditOverrideRef.current;
         if (cur !== null && cur.committed === true) clearLiveEditOverride();
     }, [clearLiveEditOverride]);
+
+    /**
+     * 参数窗口真正带上提交值后才撤 live 覆盖。
+     *
+     * 响度快照和曲线快照是两路独立 IPC；不能因为响度先回来就把曲线覆盖撤掉。
+     */
+    const clearCommittedLiveEditOverrideIfCaughtUp = useCallback(
+        (paramView: ParamViewSegment): boolean => {
+            const cur = liveEditOverrideRef.current;
+            if (
+                cur === null ||
+                cur.committed !== true ||
+                !liveEditWindowMatchesParamView({ live: cur, paramView })
+            ) {
+                return false;
+            }
+            clearLiveEditOverride();
+            return true;
+        },
+        [clearLiveEditOverride],
+    );
 
     const ensureLiveEditBase = useCallback((pv: ParamViewSegment) => {
         const cur = liveEditOverrideRef.current;
@@ -505,6 +527,7 @@ export function useLiveParamEditing(args: {
         resetLiveEditPreview,
         clearLiveEditOverride,
         clearCommittedLiveEditOverride,
+        clearCommittedLiveEditOverrideIfCaughtUp,
         markLiveEditCommitted,
         commitStroke,
     };

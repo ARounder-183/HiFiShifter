@@ -85,6 +85,8 @@ mod formant;
 mod notebook;
 #[path = "commands/onnx_status.rs"]
 mod onnx_status;
+#[path = "commands/param_line_blocks.rs"]
+mod param_line_blocks;
 #[path = "commands/syllable.rs"]
 mod syllable;
 // 多选区帧窗口已搬进内核（`hifishifter_kernel::editor::selection`）：MIDI 导入在
@@ -1213,6 +1215,49 @@ pub async fn analyze_clip_formants(
 }
 
 // ===================== clip syllable analysis =====================
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_param_line_blocks(
+    state: State<'_, AppState>,
+    root_track_id: String,
+) -> Result<serde_json::Value, String> {
+    common::guard_command(
+        "get_param_line_blocks",
+        Err("panic in get_param_line_blocks".into()),
+        || param_line_blocks::get(&state, &root_track_id),
+    )
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_param_line_blocks(
+    state: State<'_, AppState>,
+    root_track_id: String,
+    expected_revision: u64,
+    blocks: Vec<hifishifter_kernel::param_line_blocks::ParamLineBlock>,
+    game_baseline: Option<Vec<hifishifter_kernel::param_line_blocks::ParamLineBlock>>,
+    checkpoint: Option<bool>,
+    curve_patches: Option<Vec<hifishifter_kernel::param_line_blocks::ParamLineCurvePatch>>,
+    expected_curve_revision: Option<u64>,
+    expected_geometry_signature: Option<String>,
+) -> Result<serde_json::Value, String> {
+    common::guard_command(
+        "set_param_line_blocks",
+        Err("panic in set_param_line_blocks".into()),
+        || {
+            param_line_blocks::set(
+                &state,
+                root_track_id,
+                expected_revision,
+                blocks,
+                game_baseline,
+                checkpoint.unwrap_or(true),
+                curve_patches.unwrap_or_default(),
+                expected_curve_revision,
+                expected_geometry_signature,
+            )
+        },
+    )
+}
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_clip_syllable_spans(

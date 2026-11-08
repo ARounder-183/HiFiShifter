@@ -206,6 +206,16 @@ fn publish(source_dir: &Path, manifest: &ModelManifest, target_dir: &Path) -> Re
 ///
 /// **绝不因为共享库不可用而失败**：最坏情况就是退回 bundle —— 那正是今天的行为。
 pub fn resolve_and_register(bundle_models: &Path) -> Result<ModelOrigin, String> {
+    resolve_models(bundle_models, true)
+}
+
+/// Plug-in initialization cannot copy a model library on the host UI thread.
+/// Prefer an existing shared version, otherwise register the self-contained bundle.
+pub fn resolve_and_register_without_publish(bundle_models: &Path) -> Result<ModelOrigin, String> {
+    resolve_models(bundle_models, false)
+}
+
+fn resolve_models(bundle_models: &Path, allow_publish: bool) -> Result<ModelOrigin, String> {
     // 1) 显式覆盖：直接用它，不参与共享库的建立（用户可能故意指向别处）。
     if let Some(raw) = std::env::var_os(MODELS_DIR_ENV) {
         let raw = raw.to_string_lossy().trim().to_owned();
@@ -250,7 +260,7 @@ pub fn resolve_and_register(bundle_models: &Path) -> Result<ModelOrigin, String>
             }
 
             // 3) 共享库缺失/不完整 → 从 bundle 建立。失败只是回到 bundle，不影响可用性。
-            if bundle_usable {
+            if bundle_usable && allow_publish {
                 match publish(bundle_models, manifest, &shared) {
                     Ok(()) => {
                         if register(&shared) {

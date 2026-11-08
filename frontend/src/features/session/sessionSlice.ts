@@ -75,6 +75,7 @@ import {
 import { clamp, normalizeClipColor } from "./sessionSlice/helpersCore";
 import { getClipRateMultiplier, updateActiveTakeFromFlat } from "./sessionSlice/helpersTakes";
 import { initialState } from "./sessionSlice/initialState";
+import { applyClipSyllableAnalysisReducer } from "./sessionSlice/syllableMetadata";
 import { registerRuntime } from "./sessionSlice/extraReducers/runtime";
 import { registerAudio } from "./sessionSlice/extraReducers/audio";
 import { registerTransport } from "./sessionSlice/extraReducers/transport";
@@ -218,6 +219,7 @@ const sessionSlice = createSlice({
     initialState: () =>
         isPluginMode() ? { ...initialState, tracks: [], selectedTrackId: null } : initialState,
     reducers: {
+        applyClipSyllableAnalysis: applyClipSyllableAnalysisReducer,
         /**
          * 标记连续交互开始（拖动/滑动等）。
          * 在交互期间，连续操作类 thunk 的 fulfilled handler 会跳过 applyTimelineState()。
@@ -1342,6 +1344,7 @@ export const {
     rollbackClipColor,
     setTrackVolume,
     setClipPitchData,
+    applyClipSyllableAnalysis,
     setClipFormantStatus,
     setClipFormantAnalysis,
     openClipFormantToolWindow,

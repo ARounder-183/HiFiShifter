@@ -493,6 +493,19 @@ impl DocumentSession {
         Ok((flat, grouped))
     }
     /// UI可显示宿主尚未分配给ARA的静音item；这些占位不进入任何renderer或源PCM读取。
+    fn item_source_pairs(&self) -> Vec<(String, String)> {
+        let regions = self.regions.lock_or_recover();
+        let items = self.region_items.lock_or_recover();
+        items
+            .iter()
+            .filter_map(|(key, item)| {
+                regions
+                    .get(key)
+                    .map(|region| (item.clone(), region.audio_source_persistent_id.clone()))
+            })
+            .collect()
+    }
+
     pub(crate) fn present_host_inventory(&self, timeline: &mut TimelineState, namespace: &str) {
         let prefix = |id: &str| format!("{namespace}{id}");
         // 【媒体总时长索引整段删除】它此前只为"占位 clip 的源窗口解算"服务，而那段
@@ -555,24 +568,12 @@ impl DocumentSession {
         // 而音频其实一直在 `edit_sources` 里，并且"活着的 region 指向哪个源"是**文档级**
         // 事实（`regions` 由 `addPlaybackRegion` 写入，与宿主几何无关）。
         //
-        // 【锁序】`region_items` → `regions` → `edit_sources`，与 `publish_readiness` 同向；
-        // 前两张表先取完、立刻释放，最后才取 `edit_sources`（那里也是 `publish_source_pcm`
-        // 的位置）。
+        // Snapshot regions before item mappings; release both before reading PCM.
         let pcm_by_item: std::collections::HashMap<
             String,
             crate::editor::media_identity::PcmFacts,
         > = {
-            let pairs: Vec<(String, String)> = {
-                let items = self.region_items.lock_or_recover();
-                let regions = self.regions.lock_or_recover();
-                items
-                    .iter()
-                    .filter_map(|(key, item)| {
-                        let region = regions.get(key)?;
-                        Some((item.clone(), region.audio_source_persistent_id.clone()))
-                    })
-                    .collect()
-            };
+            let pairs = self.item_source_pairs();
             let sources = self.edit_sources.lock_or_recover();
             pairs
                 .into_iter()
@@ -1231,21 +1232,8 @@ impl DocumentSession {
         // item GUID → 该 item 所属 region 的 ARA 源身份。用来把"这条的源**已被授权却读
         // 不出来**"（`source_read_failed`）与"还没轮到它"分开：前者是宿主/样本侧的真故障，
         // 用户需要立刻知道，不该和"正在分配 region"共用同一句"等待中"。
-        let source_by_item: std::collections::HashMap<String, String> = {
-            // 【锁序】按 `document.rs` 声明的层级取锁：`regions` 先于 `region_items`。
-            // 此前这里是反的，与 `document.rs::clip_for_host_item` 的正序共存，构成真实的
-            // 死锁窗口（两把锁同时在手时方向相反）。
-            let regions = self.regions.lock_or_recover();
-            let items = self.region_items.lock_or_recover();
-            items
-                .iter()
-                .filter_map(|(key, item)| {
-                    regions
-                        .get(key)
-                        .map(|region| (item.clone(), region.audio_source_persistent_id.clone()))
-                })
-                .collect()
-        };
+        let source_by_item: std::collections::HashMap<String, String> =
+            self.item_source_pairs().into_iter().collect();
         let failed_sources: std::collections::HashSet<String> = self
             .source_failures
             .lock_or_recover()
@@ -2761,6 +2749,35 @@ mod tests {
     use ara2_bridge::core::ApiGeneration;
     use ara2_bridge::plugin::ExtensionRoles;
     use std::sync::Arc;
+
+    #[test]
+    fn item_source_snapshot_does_not_hold_items_while_waiting_for_regions() {
+        let document = DocumentSession::new(900001);
+        let regions = document.regions.lock_or_recover();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let concurrent = document.clone();
+        let reader = std::thread::spawn(move || {
+            tx.send(()).unwrap();
+            concurrent.item_source_pairs()
+        });
+        rx.recv().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
+        let mut inversion = false;
+        while std::time::Instant::now() < deadline {
+            if document.region_items.try_lock().is_err() {
+                inversion = true;
+                break;
+            }
+            std::thread::yield_now();
+        }
+        drop(regions);
+        reader.join().unwrap();
+        assert!(
+            !inversion,
+            "item mapping was acquired before the regions snapshot"
+        );
+        document.close();
+    }
 
     /// **B4：等得再久也仍然是"在等"，不会升级成一句断言了原因的话。**
     ///

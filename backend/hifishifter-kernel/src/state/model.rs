@@ -993,6 +993,10 @@ pub struct TrackParamsState {
     /// 用户手动切分 / 伸缩后的块区间（可选附加字段；旧工程为空）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub param_block_interval_edits: Vec<ParamBlockIntervalEdit>,
+    /// Unified root-line intervals. None means legacy data still needs migration;
+    /// Some(empty) is an intentionally empty authored layout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub param_line_blocks: Option<crate::param_line_blocks::ParamLineBlockSet>,
 }
 
 /// 一个被手动合并的块组。
@@ -1128,7 +1132,7 @@ impl TrackParamsState {
             let width = record.end_sec - record.start_sec;
             let valid_interval = record.member_refs.first().is_some()
                 && width.is_finite()
-                && width >= 0.02
+                && width > 1e-9
                 && record.start_sec.is_finite()
                 && record.end_sec.is_finite();
             if !valid_interval && !record.deleted {
@@ -1153,6 +1157,7 @@ impl TrackParamsState {
             && self.extra_params.is_empty()
             && self.param_block_merges.is_empty()
             && self.param_block_interval_edits.is_empty()
+            && self.param_line_blocks.is_none()
     }
 }
 
@@ -3459,6 +3464,30 @@ impl TimelineState {
             return;
         }
         self.ensure_params_for_root(root_track_id);
+        {
+            use crate::editor::param_geometry::{
+                GeometryDelta, GeometryKey, GeometryOp, GeometryWindow,
+            };
+            let deltas = mappings
+                .iter()
+                .enumerate()
+                .map(|(order, mapping)| {
+                    let old = GeometryWindow::new(mapping.old_start_sec, mapping.old_length_sec);
+                    let new = GeometryWindow::new(mapping.new_start_sec, mapping.new_length_sec);
+                    GeometryDelta {
+                        key: GeometryKey::clip(&format!("stretch-{order}")),
+                        old_root: root_track_id.to_owned(),
+                        new_root: root_track_id.to_owned(),
+                        old,
+                        new,
+                        op: GeometryOp::Stretch { old, new },
+                        priority: 1,
+                        order: order as u64,
+                    }
+                })
+                .collect::<Vec<_>>();
+            self.apply_param_block_geometry(&deltas, &[]);
+        }
         let fp = self.frame_period_ms().max(0.1);
 
         // 秒 → 帧；跳过几何没有变化的映射。
@@ -10035,6 +10064,30 @@ impl TimelineState {
             .iter()
             .filter_map(|plan| plan.linked_move.as_ref())
             .collect();
+        {
+            use crate::editor::param_geometry::{
+                GeometryDelta, GeometryKey, GeometryOp, GeometryWindow,
+            };
+            let deltas = linked_moves
+                .iter()
+                .enumerate()
+                .map(|(order, plan)| {
+                    let old = GeometryWindow::new(plan.old_start_sec, plan.clip_length_sec);
+                    let new = GeometryWindow::new(plan.new_start_sec, plan.clip_length_sec);
+                    GeometryDelta {
+                        key: GeometryKey::clip(&format!("move-{order}")),
+                        old_root: plan.old_root_track_id.clone(),
+                        new_root: plan.new_root_track_id.clone(),
+                        old,
+                        new,
+                        op: GeometryOp::Move { old, new },
+                        priority: 1,
+                        order: order as u64,
+                    }
+                })
+                .collect::<Vec<_>>();
+            self.apply_param_block_geometry(&deltas, &[]);
+        }
         for linked_move in &linked_moves {
             self.clear_linked_params_in_root_range(
                 &linked_move.old_root_track_id,
@@ -10101,7 +10154,54 @@ impl TimelineState {
         );
     }
 
+    /// Use the same frame-domain transaction for App and ARA geometry changes.
+    fn apply_param_block_geometry(
+        &mut self,
+        deltas: &[crate::editor::param_geometry::GeometryDelta],
+        crops: &[(String, f64, f64)],
+    ) {
+        let mut layouts = self
+            .params_by_root_track
+            .iter()
+            .filter_map(|(root, entry)| {
+                entry
+                    .param_line_blocks
+                    .clone()
+                    .map(|layout| (root.clone(), layout))
+            })
+            .collect();
+        match crate::param_line_blocks::geometry::apply_geometry(&mut layouts, deltas, crops) {
+            Ok(true) => {
+                for (root, layout) in layouts {
+                    self.params_by_root_track
+                        .entry(root)
+                        .or_default()
+                        .param_line_blocks = Some(layout);
+                }
+            }
+            Ok(false) => {}
+            Err(error) => log::error!("block geometry transaction rejected: {error}"),
+        }
+    }
+
     pub fn patch_clip_state(&mut self, clip_id: &str, patch: ClipStatePatch) {
+        use crate::editor::param_geometry::{ClipGeometry, GeometryFrame, GeometryKey};
+        let previous = self
+            .clips
+            .iter()
+            .find(|clip| clip.id == clip_id)
+            .and_then(|clip| {
+                let root = self.resolve_root_track_id(&clip.track_id)?;
+                self.params_by_root_track
+                    .get(&root)?
+                    .param_line_blocks
+                    .as_ref()?;
+                Some(ClipGeometry::from_clip(
+                    clip,
+                    &root,
+                    GeometryKey::clip(clip_id),
+                ))
+            });
         let content_sync_patch = patch.clone();
         let mut end_sec: Option<f64> = None;
         if let Some(c) = self.clips.iter_mut().find(|c| c.id == clip_id) {
@@ -10331,6 +10431,23 @@ impl TimelineState {
 
         if let Some(v) = end_sec {
             self.ensure_project_end_sec(v);
+        }
+        if let Some(previous) = previous {
+            let clips = self
+                .clips
+                .iter()
+                .filter_map(|clip| {
+                    self.resolve_root_track_id(&clip.track_id).map(|root| {
+                        ClipGeometry::from_clip(clip, &root, GeometryKey::clip(&clip.id))
+                    })
+                })
+                .collect();
+            let old = [(previous.key.clone(), previous)].into_iter().collect();
+            let crops = crate::param_line_blocks::geometry::crop_windows(
+                &old,
+                &GeometryFrame::complete(clips),
+            );
+            self.apply_param_block_geometry(&[], &crops);
         }
     }
 

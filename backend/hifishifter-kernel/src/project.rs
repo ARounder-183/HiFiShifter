@@ -1008,6 +1008,58 @@ mod tests {
     }
 
     #[test]
+    fn prune_interval_edits_keeps_sub_20ms_split_segments() {
+        let mut tl = timeline();
+        tl.add_track(Some("track".into()), None, None);
+        let id = tl.add_clip(
+            Some("track".into()),
+            Some("clip".into()),
+            Some(0.0),
+            Some(1.0),
+            None,
+        );
+        let mut clip = tl.clips.into_iter().find(|c| c.id == id).unwrap();
+        let mut take = crate::state::ClipTake::from_clip(&clip);
+        take.id = "take".into();
+        take.midi_note_data = Some(vec![crate::midi_import::MidiNoteEvent {
+            start_sec: 0.0,
+            end_sec: 1.0,
+            note: 60.0,
+            velocity: 100,
+            channel: 0,
+        }]);
+        clip.takes = vec![take];
+        clip.active_take_id = Some("take".into());
+        let actual_clip_id = clip.id.clone();
+        let mut params = crate::state::TrackParamsState::default();
+        params
+            .param_block_interval_edits
+            .push(crate::state::ParamBlockIntervalEdit {
+                edit_id: "narrow-split".into(),
+                member_refs: vec![crate::state::ParamBlockMemberRef {
+                    clip_id: actual_clip_id,
+                    take_id: "take".into(),
+                    syllable_id: "split".into(),
+                    source_start_sec: 0.0,
+                    source_end_sec: 0.001,
+                }],
+                start_sec: 0.0,
+                end_sec: 0.001,
+                member_start_sec: 0.0,
+                member_end_sec: 1.0,
+                block_ids: vec!["auto:clip:split".into()],
+                explicit: true,
+                deleted: false,
+                manual: false,
+                value: None,
+                transition_sec: 0.0,
+            });
+        params.prune_param_block_merges(&[clip]);
+        assert_eq!(params.param_block_interval_edits.len(), 1);
+        assert!((params.param_block_interval_edits[0].end_sec - 0.001).abs() < 1e-12);
+    }
+
+    #[test]
     fn json_paths_are_recognized_case_insensitively() {
         assert!(is_json_project_path(Path::new("a.json")));
         assert!(is_json_project_path(Path::new("a.JSON")));

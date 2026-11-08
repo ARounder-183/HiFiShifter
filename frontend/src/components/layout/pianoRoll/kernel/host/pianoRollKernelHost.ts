@@ -1,3 +1,4 @@
+import { resolveParamEditorBlockValue } from "../../paramEditorRenderFrame";
 /**
  * 参数编辑器内核 · 宿主（阶段 1：滚动 / 视口所有权）
  *
@@ -64,10 +65,10 @@ import { buildSelectionBandInstances } from "../scene/selectionBandInstances";
 import { buildParamBlockScene } from "../scene/blockInstances";
 import {
     blockRowHeightPx,
-    modeCenterOfValuesInSamples,
     projectParamBlockCenterY,
     PARAM_BLOCK_ROW_HEIGHT_MULTIPLIER,
 } from "../../paramBlocks";
+import { resolveParamBlockFrameValue } from "../../paramBlockFrame";
 import { decimatePolylinePoints } from "../../../renderKernel/gl/polylineDecimation";
 import {
     projectClipboardPreviewPoints,
@@ -1196,8 +1197,10 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
         glBlockUploadedCount = 0;
         glBlockTextQuads = [];
         blockHitRects = [];
+        if (data().paramBlocksVisible === false) return;
         if (glSelectionProgram === null || glHandle === null) return;
-        const spec = data().paramBlocks;
+        const renderFrame = data().paramEditorFrame;
+        const spec = renderFrame ? renderFrame.blocks : data().paramBlocks;
         const target = glHandle.resize(viewportWidthPx, viewportHeightPx, readDevicePixelRatio());
         if (spec === null || spec === undefined) return;
         if (spec.blocks.length === 0) return;
@@ -1225,82 +1228,90 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
          * 不再把多选块合并成一个跨整个选区的矩形：否则两个不相邻的块会被
          * 画成一块横跨中间空白的大块。
          */
-        let liveBlocks = spec.blocks.map((block) => {
-            const liveValue =
-                block.displayCenterValue !== null &&
-                block.displayCenterValue !== undefined &&
-                Number.isFinite(block.displayCenterValue)
-                    ? block.displayCenterValue
-                    : samples === null
-                      ? null
-                      : modeCenterOfValuesInSamples(block.startSec, block.endSec, samples);
-            const value = liveValue ?? block.averageValue ?? null;
-            const displayValue = value;
-            if (
-                displayValue == null ||
-                !Number.isFinite(displayValue) ||
-                liveView == null ||
-                !Number.isFinite(liveView.center) ||
-                !Number.isFinite(liveView.span) ||
-                liveView.span <= 1e-9
-            ) {
-                return block;
-            }
-            /*
-             * 块中心的唯一投影口径：交给共用函数处理 pitch 的 +0.5，
-             * 再走与曲线同一个 valueToY。这里不能自己展开 normalized：
-             * 那样既会漏半键补偿，也会在非整数行高时和曲线错位。
-             */
-            const centerYPx = projectParamBlockCenterY({
-                param,
-                value: displayValue,
-                heightPx: viewportHeightPx,
-                valueToY: spec.valueToY ?? data().grid?.valueToY ?? (() => viewportHeightPx / 2),
-                /* 实时拖动 / 过渡预览必须连续；普通显示吸附到行心。 */
-                snapToSemitone: block.displayCenterSnapToSemitone !== false,
+        const blockAxis = currentAxis();
+        const visibleStart = blockAxis.scrollLeftPx / blockAxis.pxPerSec;
+        const visibleEnd =
+            (blockAxis.scrollLeftPx + blockAxis.viewportWidthPx) / blockAxis.pxPerSec;
+        let liveBlocks = spec.blocks
+            .filter((block) => block.endSec > visibleStart && block.startSec < visibleEnd)
+            .map((block) => {
+                const value = renderFrame
+                    ? resolveParamEditorBlockValue(renderFrame, block)
+                    : resolveParamBlockFrameValue({
+                          block,
+                          samples,
+                          param,
+                          curveOwned: spec.curveOwned,
+                      });
+                const displayValue = value;
+                if (
+                    displayValue == null ||
+                    !Number.isFinite(displayValue) ||
+                    liveView == null ||
+                    !Number.isFinite(liveView.center) ||
+                    !Number.isFinite(liveView.span) ||
+                    liveView.span <= 1e-9
+                ) {
+                    return block;
+                }
+                /*
+                 * 块中心的唯一投影口径：交给共用函数处理 pitch 的 +0.5，
+                 * 再走与曲线同一个 valueToY。这里不能自己展开 normalized：
+                 * 那样既会漏半键补偿，也会在非整数行高时和曲线错位。
+                 */
+                const centerYPx = projectParamBlockCenterY({
+                    param,
+                    value: displayValue,
+                    heightPx: viewportHeightPx,
+                    valueToY:
+                        spec.valueToY ?? data().grid?.valueToY ?? (() => viewportHeightPx / 2),
+                    /* 实时拖动 / 过渡预览必须连续；普通显示吸附到行心。 */
+                    snapToSemitone: spec.curveOwned
+                        ? false
+                        : block.displayCenterSnapToSemitone !== false,
+                });
+                /*
+                 * 块高恒为当前参数一行的 1.2 倍，由**本帧**投影求值；纵向缩放
+                 * 会同时改变键高、曲线与块高。不沿用 React 快照里的 heightPx。
+                 */
+                const heightPx = blockRowHeightPx(
+                    spec.valueToY ?? data().grid?.valueToY,
+                    viewportHeightPx,
+                    param,
+                );
+                /*
+                 * 时间伸缩 / 过渡预览期间，面板传入手势起点的块高快照。
+                 * 它必须覆盖“按当前实时行高重算”，否则曲线预览改变代表值时
+                 * 块会随视觉重心上下漂移；持久化仍只保存时间区间。
+                 */
+                const displayHeightPx =
+                    Number.isFinite(block.displayHeightPx) && (block.displayHeightPx as number) > 0
+                        ? (block.displayHeightPx as number)
+                        : Number.isFinite(spec.rowHeightPx) && (spec.rowHeightPx as number) > 0
+                          ? (spec.rowHeightPx as number) * PARAM_BLOCK_ROW_HEIGHT_MULTIPLIER
+                          : heightPx;
+                /*
+                 * 只由 live 曲线的代表值决定纵向位置；不叠加指针像素位移。
+                 * 拖动已把预览写进 live 曲线，再叠加会与最终值错位。
+                 */
+                const topPx = centerYPx - displayHeightPx / 2;
+                hitRects.push({
+                    id: block.id,
+                    startSec: block.startSec,
+                    endSec: block.endSec,
+                    topPx,
+                    heightPx: displayHeightPx,
+                    averageValue: displayValue,
+                    centerYPx,
+                    transitionHandle: block.transitionHandle ?? null,
+                });
+                return {
+                    ...block,
+                    averageValue: displayValue,
+                    heightPx: displayHeightPx,
+                    topPx,
+                };
             });
-            /*
-             * 块高恒为当前参数一行的 1.2 倍，由**本帧**投影求值；纵向缩放
-             * 会同时改变键高、曲线与块高。不沿用 React 快照里的 heightPx。
-             */
-            const heightPx = blockRowHeightPx(
-                spec.valueToY ?? data().grid?.valueToY,
-                viewportHeightPx,
-                param,
-            );
-            /*
-             * 时间伸缩 / 过渡预览期间，面板传入手势起点的块高快照。
-             * 它必须覆盖“按当前实时行高重算”，否则曲线预览改变代表值时
-             * 块会随视觉重心上下漂移；持久化仍只保存时间区间。
-             */
-            const displayHeightPx =
-                Number.isFinite(block.displayHeightPx) && (block.displayHeightPx as number) > 0
-                    ? (block.displayHeightPx as number)
-                    : Number.isFinite(spec.rowHeightPx) && (spec.rowHeightPx as number) > 0
-                      ? (spec.rowHeightPx as number) * PARAM_BLOCK_ROW_HEIGHT_MULTIPLIER
-                      : heightPx;
-            /*
-             * 只由 live 曲线的代表值决定纵向位置；不叠加指针像素位移。
-             * 拖动已把预览写进 live 曲线，再叠加会与最终值错位。
-             */
-            const topPx = centerYPx - displayHeightPx / 2;
-            hitRects.push({
-                id: block.id,
-                startSec: block.startSec,
-                endSec: block.endSec,
-                topPx,
-                heightPx: displayHeightPx,
-                averageValue: displayValue,
-                centerYPx,
-                transitionHandle: block.transitionHandle ?? null,
-            });
-            return {
-                ...block,
-                averageValue: displayValue,
-                heightPx: displayHeightPx,
-                topPx,
-            };
-        });
         blockHitRects = hitRects;
         /*
          * 块与曲线的纵向位置都取**本帧实时值域**。宿主重算之后再做一次视口拼接：
@@ -1440,7 +1451,7 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
      */
     function drawGlCurves(): void {
         if (glCurveProgram === null || glHandle === null) return;
-        const layers = data().curves;
+        const layers = data().paramEditorFrame?.curves ?? data().curves;
         if (layers === null || layers === undefined || layers.length === 0) return;
 
         const target = glHandle.resize(viewportWidthPx, viewportHeightPx, readDevicePixelRatio());

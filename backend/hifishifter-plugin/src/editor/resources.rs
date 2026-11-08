@@ -1,11 +1,25 @@
-//! 插件资源位置：先于ARA建图/分析登记原FCPE及声码器模型，不使用REAPER的resource_dir。
-//!
-//! 解析本身交给内核的共享模型库（`hifishifter_kernel::model_store`）：它优先用与独立
-//! App 共用的那一份，库里没有就从本 bundle 建立（同卷硬链接）。插件这边只负责回答
-//! "我的 bundle 在哪"。
+//! 登记共享库或 bundle 内的模型；插件启动不复制模型库。
 use std::path::PathBuf;
 /// 模型只登记一次，不初始化推理设备，不改变用户文件或系统路径。
 pub(crate) fn initialize_models() {
+    hifishifter_kernel::vocoder_ort_session::set_host_thread_budget(
+        std::thread::available_parallelism()
+            .map(|n| (n.get() / 2).clamp(1, 4))
+            .unwrap_or(2),
+    );
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static REGISTERED: AtomicBool = AtomicBool::new(false);
+    static REGISTERING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    if REGISTERED.load(Ordering::Acquire) {
+        return;
+    }
+    let Ok(_registration) = REGISTERING.try_lock() else {
+        return;
+    };
+    if REGISTERED.load(Ordering::Acquire) {
+        return;
+    }
+    let _startup_span = crate::startup::Span::new("models.register", 0, 0);
     // FCPE自身还会异步预热；其迟到线程与WebView回调一样不能进入已卸载的DLL。
     #[cfg(all(windows, not(test)))]
     if let Err(error) = pin_analysis_code() {
@@ -18,17 +32,20 @@ pub(crate) fn initialize_models() {
         );
         return;
     };
-    match hifishifter_kernel::model_store::resolve_and_register(&directory) {
+    match hifishifter_kernel::model_store::resolve_and_register_without_publish(&directory) {
         // 来源描述由内核统一给（来源 + 目录 + 版本 + 是否刚发布）：App 与插件的
         // 日志行必须长得一样，否则"模型到底从哪儿来的"每次都要分两处读。
-        Ok(origin) => crate::log_line(&format!("models: {}", origin.describe())),
+        Ok(origin) => {
+            REGISTERED.store(true, Ordering::Release);
+            crate::log_line(&format!("models: {}", origin.describe()));
+        }
         // 模型不可用不该让插件窗口起不来：编辑与界面照常，推理相关的操作各自报错。
         Err(error) => crate::log_line(&format!("models unavailable: {error}")),
     }
 }
 /// 固定本引擎到REAPER退出；不保留UI/实例worker，不支持运行中热更新。
 #[cfg(all(windows, not(test)))]
-fn pin_analysis_code() -> Result<(), String> {
+pub(crate) fn pin_analysis_code() -> Result<(), String> {
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::HMODULE;
     use windows::Win32::System::LibraryLoader::*;

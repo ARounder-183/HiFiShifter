@@ -131,6 +131,13 @@ export interface ClipFormantAnalysisResult {
     message: string | null;
 }
 
+export interface ParamLineBlocksReply {
+    ok: boolean;
+    initialized: boolean;
+    layout: import("../../components/layout/pianoRoll/paramLineBlocks").ParamLineBlockSet;
+    curveRevision?: number;
+}
+
 export interface ClipSyllableAnalysisResult {
     ok: boolean;
     clipId: string;
@@ -140,6 +147,8 @@ export interface ClipSyllableAnalysisResult {
     algorithm: string;
     algorithmVersion: number;
     analyzed: boolean;
+    rootTrackId?: string;
+    blockLayout?: import("../../components/layout/pianoRoll/paramLineBlocks").ParamLineBlockSet;
 }
 
 export interface ParamBlockMemberRefPayload {
@@ -443,6 +452,21 @@ export const timelineApi = {
 
     analyzeClipSyllables: (clipId: string) =>
         invoke<ClipSyllableAnalysisResult>("analyze_clip_syllables", clipId),
+
+    getParamLineBlocks: (rootTrackId: string) =>
+        invoke<ParamLineBlocksReply>("get_param_line_blocks", rootTrackId),
+
+    setParamLineBlocks: (input: {
+        rootTrackId: string;
+        expectedRevision: number;
+        blocks: readonly import("../../components/layout/pianoRoll/paramLineBlocks").ParamLineBlock[];
+        gameBaseline?: readonly import("../../components/layout/pianoRoll/paramLineBlocks").ParamLineBlock[];
+        checkpoint?: boolean;
+        curvePatches?: readonly { param: string; startFrame: number; values: readonly number[] }[];
+        expectedCurveRevision?: number;
+        expectedGeometryRevision?: number;
+        expectedGeometrySignature?: string;
+    }) => invoke<ParamLineBlocksReply>("set_param_line_blocks", input),
 
     getParamBlockMerges: (rootTrackId: string) =>
         invoke<{

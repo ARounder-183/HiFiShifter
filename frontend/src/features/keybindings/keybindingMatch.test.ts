@@ -6,6 +6,7 @@ import {
     normalizeEventKey,
     physicalKeyFromEvent,
 } from "./keybindingMatch";
+import { DEFAULT_KEYBINDINGS } from "./defaultKeybindings";
 import type { Keybinding } from "./types";
 
 /*
@@ -38,6 +39,19 @@ function keyEvent(
 }
 
 describe("keybindingMatch — 物理键位匹配（Shift 上档字符归位）", () => {
+    it("~ 默认切换块编辑与音高绘制，并命中 Shift+Backquote", () => {
+        expect(DEFAULT_KEYBINDINGS["mode.toggleBlockEdit"]).toEqual([
+            { key: "`" },
+            { key: "`", shift: true },
+        ]);
+        expect(
+            matchesKeybinding(keyEvent("~", { code: "Backquote", shift: true }), {
+                key: "~",
+                shift: true,
+            }),
+        ).toBe(true);
+    });
+
     it("normalizeEventKey 保持既有行为（小写字符）", () => {
         expect(normalizeEventKey(keyEvent("T"))).toBe("t");
         expect(normalizeEventKey(keyEvent("-", { code: "Minus" }))).toBe("-");
@@ -95,3 +109,22 @@ describe("keybindingMatch — 物理键位匹配（Shift 上档字符归位）",
         expect(canonicalKeyFromEvent(keyEvent(" ", { code: "Space" }))).toBe("space");
     });
 });
+
+for (const key of ["Process", "Unidentified", "`", "~"]) {
+    for (const shift of [false, true]) {
+        it(`physical Backquote works with ${key}, shift=${shift}`, () => {
+            const event = keyEvent(key, { code: "Backquote", shift });
+            expect(
+                DEFAULT_KEYBINDINGS["mode.toggleBlockEdit"].some((binding) =>
+                    matchesKeybinding(event, binding),
+                ),
+            ).toBe(true);
+            expect(
+                matchesKeybinding(keyEvent(key, { code: "Backquote", shift, ctrl: true }), {
+                    key: "`",
+                    shift,
+                }),
+            ).toBe(false);
+        });
+    }
+}

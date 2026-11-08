@@ -43,9 +43,7 @@ export function ParamBlockAnalysisProgress(props: {
 
     if (!props.visible || !props.enabled || progress === null || !progress.active) return null;
     const percent = Math.max(0, Math.min(100, Math.round(progress.progress * 100)));
-    const algorithm = progress.algorithm.startsWith("game")
-        ? "GAME"
-        : tf("param_blocks_vad_fallback");
+
     return (
         <div
             className="pointer-events-none absolute bottom-2 left-2 z-30 w-[min(280px,calc(100%-1rem))] rounded border border-qt-border bg-qt-panel/95 px-2 py-1.5 shadow-lg"
@@ -65,7 +63,7 @@ export function ParamBlockAnalysisProgress(props: {
                 />
             </div>
             <div className="mt-0.5 truncate hs-type-caption text-qt-text-muted">
-                {algorithm}
+                {tf("status_analyzing_blocks")}
                 {progress.message ? ` · ${progress.message}` : ""}
             </div>
         </div>

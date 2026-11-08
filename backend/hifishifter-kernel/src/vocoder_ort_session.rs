@@ -1868,10 +1868,12 @@ fn create_dml_session(
     // enable device-allocated initializers or disable graph optimization for
     // these graphs.
     if role == OrtSessionRole::Game {
-        let cores = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4)
-            .max(2);
+        let cores = host_threads(
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+                .max(2),
+        );
         let mut builder = builder
             .with_optimization_level(GraphOptimizationLevel::All)
             .map_err(|e| format!("set GAME graph optimization level failed: {e}"))?
@@ -1958,7 +1960,7 @@ fn create_dml_session(
         .map(|n| n.get())
         .unwrap_or(4)
         .max(2);
-    let threads = if strict {
+    let threads = host_threads(if strict {
         // Strict mode: ALL ops on GPU. CPU threads are irrelevant —
         // keep 2 to avoid overhead.
         2
@@ -1966,7 +1968,7 @@ fn create_dml_session(
         // Fallback mode: CPU handles unsupported ops.
         // Max threads for fastest CPU fallback throughput.
         cores.max(4)
-    };
+    });
 
     builder = builder
         .with_intra_threads(threads)
@@ -2035,19 +2037,20 @@ fn apply_diagnostic_cap(base: usize, cap: usize) -> usize {
     }
 }
 
-/// Intra-op thread budget for sessions whose ops run on the CPU (the whole
-/// graph for a CPU session, or the unsupported ops of a GPU session).
-///
-/// Apple Silicon uses every core: measured on an 8-core M-series with 1024 mel
-/// frames, `intra=cores/2` took 1586 ms vs `intra=cores` at 1202 ms (−24%).
-/// Apple's performance and efficiency cores are homogeneous enough that using
-/// all of them is a straight win.
-///
-/// Windows and Linux keep `cores/2`: Intel hybrid CPUs mix P-cores with much
-/// slower E-cores and many workstations are multi-socket/NUMA, so pinning
-/// intra-op work to every logical core can oversubscribe the slow cores and
-/// regress. The conservative half-core budget stays there until it is measured
-/// on those topologies.
+static HOST_THREAD_BUDGET: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub fn set_host_thread_budget(threads: usize) {
+    HOST_THREAD_BUDGET.store(threads, std::sync::atomic::Ordering::Release);
+}
+fn host_threads(threads: usize) -> usize {
+    let cap = HOST_THREAD_BUDGET.load(std::sync::atomic::Ordering::Acquire);
+    if cap == 0 || threads == 0 {
+        threads
+    } else {
+        threads.min(cap.max(1))
+    }
+}
+
+// Standalone defaults retain the platform policy; hosted sessions apply a cap.
 fn cpu_intra_threads(role: OrtSessionRole) -> usize {
     let cores = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -2063,7 +2066,10 @@ fn cpu_intra_threads(role: OrtSessionRole) -> usize {
             }
         }
     };
-    apply_diagnostic_cap(base, DIAGNOSTIC_THREAD_CAP.load(Ordering::Acquire))
+    host_threads(apply_diagnostic_cap(
+        base,
+        DIAGNOSTIC_THREAD_CAP.load(Ordering::Acquire),
+    ))
 }
 
 /// 整段HNSEP尺寸随素材长度变化，CPU arena/pattern会留住整段巨型中间块。

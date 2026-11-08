@@ -473,6 +473,9 @@ impl EditorClient {
     /// 【为什么在这里建 sink 与通道】`view_id` 是"回执属于谁"的唯一凭据，它必须在
     /// 通道建立的那一刻就定下来；让平台各建一次，就是三份 `format!("view-{}-{token}")`。
     pub(crate) fn open(link: Arc<crate::editor::routing::EditorLink>) -> Rc<RefCell<Self>> {
+        if let Ok(owner) = link.owner() {
+            owner.startup_stage(crate::startup::Stage::ViewRequested);
+        }
         static NEXT_VIEW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let token = NEXT_VIEW.fetch_add(1, Ordering::Relaxed);
         let view_id = format!("view-{}-{token}", std::process::id());
@@ -639,6 +642,9 @@ impl EditorClient {
             return;
         }
         self.ready = true;
+        if let Ok(owner) = self.link.owner() {
+            owner.startup_stage(crate::startup::Stage::Bridge);
+        }
         let queued = self.queue.len();
         crate::gui_log_line(&format!(
             "page ready after {}ms ({queued} queued)",
@@ -799,16 +805,26 @@ pub(crate) fn host_tick(link: &Arc<crate::editor::routing::EditorLink>) {
 /// 现在它只有一个调用方：`host/reaper/host_timer` 的宿主节拍（外加情形 A 的定时器）。
 /// 两个驱动、一份实现 —— 两种形态下行为逐字相同。
 pub(crate) fn host_heartbeat() {
-    // 【为什么先按 owner 遍历】宿主时钟采样只需要 owner。链路要等前端 `bind` 之后
-    // 才拿得到 owner —— 只按链路走，会出现「心跳在跑、采样却几乎不发生」：
-    // 现场日志里传送来源以约 0.7 次/秒反复切换，正是宿主读数一次次过期的形状。
+    use crate::host::work_budget::{round_robin, WorkBudget};
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+    static OWNER_CURSOR: AtomicUsize = AtomicUsize::new(0);
+    static LINK_CURSOR: AtomicUsize = AtomicUsize::new(0);
+    static LINKS_FIRST: AtomicBool = AtomicBool::new(false);
+    let _query_scope = crate::render::document::HostQueryScope::nonblocking();
+    let mut budget = WorkBudget::new(std::time::Duration::from_millis(2), 32);
     let owners = crate::editor::routing::live_owners();
-    for owner in &owners {
-        owner.refresh_host_transport_tick();
-    }
-    // 链路侧的收尾（私有状态通知、宿主 Undo 收口）仍然按链路走。
-    for link in crate::editor::routing::live_links() {
-        host_tick(&link);
+    let links = crate::editor::routing::live_links();
+    // Alternate the first lane so a busy group of owners cannot starve view/undo maintenance.
+    if LINKS_FIRST.fetch_xor(true, Ordering::Relaxed) {
+        round_robin(&links, &LINK_CURSOR, &mut budget, |link| host_tick(link));
+        round_robin(&owners, &OWNER_CURSOR, &mut budget, |owner| {
+            owner.refresh_host_transport_tick()
+        });
+    } else {
+        round_robin(&owners, &OWNER_CURSOR, &mut budget, |owner| {
+            owner.refresh_host_transport_tick()
+        });
+        round_robin(&links, &LINK_CURSOR, &mut budget, |link| host_tick(link));
     }
 }
 
@@ -1683,9 +1699,18 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
     // WebKit 的 `File` 没有磁盘路径（沙箱），macOS/Linux 走原生拖放事件 + `import_audio_item`。
     // 普通命令只排队；UI回调不得分析、推理、读文件或等待worker。
     let result = match request["command"].as_str() {
+        // main.tsx awaits preferences before importing/mounting React. Do not put
+        // that read behind session creation, PCM materialization, or inference.
+        Some(command @ ("ui_kv_dump" | "get_ui_settings")) =>
+            Ok(crate::editor::commands::startup_settings(command).expect("startup settings command")),
         // 【为什么必须内联】启动探活发生在宿主重开工程的那一刻，而 `editor_session()`
         // 可能正在做模型加载 / actor 创建。探活只需要 owner 的原子读数，不能排在
         // 会话队列后面 —— 那正是 `get_runtime_info` 30 s 超时的来源。
+        Some("plugin_ui_ready") => {
+            if let Ok(owner)=state.borrow().link.owner(){owner.startup_stage(crate::startup::Stage::React);}
+            crate::gui_log_line(&format!("React shell painted after {}ms", state.borrow().opened_at.elapsed().as_millis()));
+            Ok(serde_json::json!({"ok":true}))
+        }
         Some("plugin_health") => {
             let link = state.borrow().link.clone();
             // 路由状态与健康快照同源：一个回答「会话还在不在」，一个回答「编辑器有没有
@@ -2345,7 +2370,7 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
                 state.borrow_mut().undo_document=Some(Arc::downgrade(document));
                 if command=="begin_undo_group" {document.host_undo.begin_group(&view_id);}
                 if command=="end_undo_group" {document.host_undo.end_group(&view_id);}
-                if crate::editor::commands::mutates_audio(command) {
+                if crate::editor::commands::mutates_audio(command) || command=="set_param_line_blocks" {
                     let checkpoint=request["args"]["checkpoint"].as_bool().unwrap_or(true);
                     match document.host_undo.begin_request(&view_id,id,checkpoint,false,host,&||link.authorize(document).is_ok_and(|current|current==*lease)) {
                         Ok(())=>undo_started=true,
@@ -2691,5 +2716,34 @@ mod group_id_tests {
         let first = host_group_id_for(&["b".into(), "a".into()]);
         let second = host_group_id_for(&["b".into(), "a".into()]);
         assert_eq!(first, second);
+    }
+}
+
+#[cfg(test)]
+mod startup_settings_tests {
+    use super::*;
+    #[test]
+    fn startup_preferences_and_dock_settings_do_not_wait_for_an_editor_actor() {
+        let link = Arc::new(crate::editor::routing::EditorLink::default());
+        let state = EditorClient::open(link);
+        let view = state.borrow().view_id.clone();
+        for (index, command) in ["ui_kv_dump", "get_ui_settings"].iter().enumerate() {
+            on_message(&state,&serde_json::json!({"version":1,"viewId":view,"id":index+1,"command":command,"args":{}}).to_string());
+            let client = state.borrow();
+            assert!(
+                client.pending.is_empty(),
+                "startup settings must not enter the session queue"
+            );
+            let reply: serde_json::Value =
+                serde_json::from_str(client.queue.back().expect("immediate response")).unwrap();
+            assert_eq!(
+                reply["ok"], true,
+                "{command} must work before the editor route binds"
+            );
+            assert_eq!(
+                reply["value"],
+                crate::editor::commands::startup_settings(command).unwrap()
+            );
+        }
     }
 }

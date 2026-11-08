@@ -20,6 +20,19 @@ export type WavePeaksSegment = {
 };
 
 export type ParamViewSegment = {
+    preview?: {
+        base: Readonly<{
+            key: string;
+            startFrame: number;
+            stride: number;
+            framePeriodMs: number;
+            edit: readonly number[];
+            orig?: readonly number[];
+        }>;
+        affectedRanges: readonly { startFrame: number; frameCount: number }[];
+        patches?: readonly { startFrame: number; values: readonly number[] }[];
+        blockValues: ReadonlyMap<string, { startSec: number; endSec: number; value: number }>;
+    };
     key: string;
     framePeriodMs: number;
     startFrame: number;

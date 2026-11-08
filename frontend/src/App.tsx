@@ -14,6 +14,7 @@ import { MenuBar } from "./components/layout/MenuBar";
 import { ActionBar } from "./components/layout/ActionBar";
 import { HostLinkPanel } from "./features/hostLink/HostLinkPanel";
 import { HostAudioNotice } from "./features/ara/HostAudioNotice";
+import { useSyllableAnalysisEvents } from "./features/session/useSyllableAnalysisEvents";
 import { PluginApplyStatus } from "./features/ara/PluginApplyStatus";
 import { HostLinkExportControl } from "./features/hostLink/HostLinkExportControl";
 import { getPluginApplySnapshot, subscribePluginApply } from "./features/ara/pluginApplyStore";
@@ -79,6 +80,7 @@ import {
     saveProjectAsRemote,
     saveProjectToPathRemote,
     setTrackMeters,
+    setEditParam,
     setToolModePersistent,
     setVslibAvailable,
     setPlaybackRenderingState,
@@ -101,6 +103,7 @@ import { PitchAnalysisStatusChip } from "./components/layout/PitchAnalysisStatus
 import { ParamDataLoadingChip } from "./components/layout/ParamDataLoadingChip";
 import { AppStatusProgressChips } from "./components/layout/AppStatusProgressChips";
 import { ParamBlockAnalysisStatus } from "./components/layout/pianoRoll/panel/ParamBlockAnalysisStatus";
+import { toggleParamBlockEditingTool } from "./components/layout/pianoRoll/paramBlockMarquee";
 import { appStatusProgressBus } from "./utils/appStatusProgressBus";
 const FileBrowserPanel = lazy(() =>
     import("./components/layout/FileBrowserPanel").then((module) => ({
@@ -560,6 +563,7 @@ function detectExternalActionKindFromPath(path: string): ExternalFileActionKind 
 }
 
 function AppInner() {
+    useSyllableAnalysisEvents();
     const dispatch = useAppDispatch();
     const { t, tf, tVars, plural } = useI18n();
 
@@ -2965,6 +2969,15 @@ function AppInner() {
                 case "mode.selectTool":
                     void dispatch(setToolModePersistent("select"));
                     break;
+                case "mode.toggleBlockEdit": {
+                    const next = toggleParamBlockEditingTool(runtimeRef.current.toolMode);
+                    if (next === "draw") {
+                        dispatch(setEditParam("pitch"));
+                        void dispatch(persistUiSettings());
+                    }
+                    void dispatch(setToolModePersistent(next));
+                    break;
+                }
                 case "mode.drawTool":
                     void dispatch(setToolModePersistent("draw"));
                     break;

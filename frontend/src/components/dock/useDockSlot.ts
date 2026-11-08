@@ -90,22 +90,19 @@ export function useDockSlot(formId: string | null): React.RefObject<HTMLDivEleme
     // React Compiler 的引用规则（"渲染期不得访问 ref"），而 store 本身就是
     // 权威且随时可读的。
     useEffect(() => {
+        const slot = slotRef.current;
         return () => {
-            // StrictMode 的“挂载 → 清理 → 再挂载”会在**同一槽位**上先跑这里。
-            // 若这时直接把宿主送回停泊区，随后再挂载时 `attachPanelHost` 会把同一
-            // 节点搬回来 —— React 的 portal 宿主因此经历一次脱离文档/重入，
-            // 面板内部的 WebGL / 滚动锚点在浏览器里表现为空白或首击失效。
-            //
-            // 同一个 `formId` 的 StrictMode 二次清理不搬宿主。真正换槽位时
-            // `previousRef` 由主 effect 改写；这里不能以 `formId` 作为“未换槽”的
-            // 判据 —— 标签页切换时同一个槽位会换 `formId`，旧宿主仍必须停泊。
-            if (previousRef.current === formId) return;
+            // A -> B commits the new layout effect before A's passive cleanup.
+            // Never read previousRef as the cleanup target: it already contains
+            // B, and parking it makes the active tab completely blank. The
+            // layout effect owns tab replacement; this cleanup only owns the
+            // captured form when its slot really leaves the document.
+            if (!formId || slot?.isConnected) return;
             const owner = ownerRef.current;
-            const previous = previousRef.current;
-            previousRef.current = null;
-            if (!owner || !previous) return;
-            const panelId = store.getState().dock.layout.forms[previous]?.panelId;
-            parkPanelHost(previous, panelFallbackSize(panelId ?? previous), owner);
+            if (!owner) return;
+            if (previousRef.current === formId) previousRef.current = null;
+            const panelId = store.getState().dock.layout.forms[formId]?.panelId;
+            parkPanelHost(formId, panelFallbackSize(panelId ?? formId), owner);
         };
     }, [formId]);
 

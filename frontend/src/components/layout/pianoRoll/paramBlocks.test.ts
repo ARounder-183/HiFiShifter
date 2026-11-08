@@ -13,6 +13,7 @@ import {
     compressedNeighborSpan,
     buildParamBlockPreviewSegments,
     blocksCoveredByParamBlockCreate,
+    canMergeParamBlocks,
     deleteParamBlocks,
     hitTestParamBlocks,
     hitTestParamBlockEdges,
@@ -20,6 +21,7 @@ import {
     PARAM_BLOCK_TRANSITION_HANDLE_OUTSET_Y_PX,
     PARAM_BLOCK_TRANSITION_HANDLE_OUTSET_X_PX,
     paramBlockCursorForHover,
+    paramBlockContainingSec,
     layoutParamBlockRects,
     materializeParamBlocks,
     mergeParamBlocks,
@@ -31,20 +33,31 @@ import {
     projectMidiNoteSpansToTimeline,
     projectSourceSpansToTimeline,
     previewParamBlockCreateLayout,
+    projectParamBlockCreatePreviewFromBase,
     paramBlockResizeCandidates,
     projectParamBlockResizeDisplay,
+    advanceParamBlockDragCommitRelease,
     canReleaseParamBlockDragCommit,
+    applyFullResSegmentsToParamView,
+    paramViewContainsCommittedSegments,
     resolveParamBlockCommitDisplayCenter,
+    shouldUseParamBlockDragSnapshotForRender,
     resolveParamBlockDragWrite,
+    resolveParamBlockDragRelease,
+    projectParamBlockDragDisplayValue,
     resolveParamBlockPitchSnapDelta,
+    resolveParamBlockSplitSec,
+    shiftParamBlockCurveValuesToTarget,
     resolveParamBlockCreateSpan,
     resolveParamBlockResizePlan,
     resolveParamBlockResizeTarget,
     resolveParamBlockSnapDelta,
     snapParamBlockTimeByDefault,
+    setParamBlockLogicalCenters,
     setParamBlockTransition,
     resizeParamBlock,
     shouldRemoveResizedParamBlock,
+    shouldKeepParamBlockCenterLockedAfterDrag,
     splitParamBlock,
     paramBlockTransitionHandles,
     unmergeParamBlocks,
@@ -285,6 +298,31 @@ describe("projectMidiNoteSpansToTimeline", () => {
 });
 
 describe("mergeParamBlocks", () => {
+    it("合并可用性与传入块数组顺序无关", () => {
+        const clips = [
+            {
+                id: "a",
+                trackId: "root-a",
+                startSec: 0,
+                lengthSec: 1.5,
+                syllableSpansSec: [
+                    { startSec: 0, endSec: 0.5 },
+                    { startSec: 0.5, endSec: 1 },
+                    { startSec: 1, endSec: 1.5 },
+                ],
+            },
+        ];
+        const blocks = autoBlocksForClips("root-a", clips);
+        expect(blocks).toHaveLength(3);
+        expect(
+            canMergeParamBlocks(
+                EMPTY_PARAM_BLOCK_STATE,
+                [blocks[0], blocks[2], blocks[1]],
+                [blocks[2].id, blocks[0].id, blocks[1].id],
+            ),
+        ).toBe(true);
+    });
+
     it("同组相邻块可合并", () => {
         const blocks = autoBlocksForClips("root-a", [clip("a", 0, 2, [0]), clip("b", 2, 2, [2])]);
         const result = mergeParamBlocks({
@@ -820,6 +858,18 @@ describe("nearestParamBlockByTime", () => {
     });
 });
 
+describe("paramBlockContainingSec", () => {
+    it("无选择时按播放头找到可切开的块，边界点不误选", () => {
+        const blocks = [
+            { id: "a", startSec: 0, endSec: 1 },
+            { id: "b", startSec: 1, endSec: 2 },
+        ];
+        expect(paramBlockContainingSec(blocks, 0.5)?.id).toBe("a");
+        expect(paramBlockContainingSec(blocks, 1.5)?.id).toBe("b");
+        expect(paramBlockContainingSec(blocks, 1)).toBeNull();
+    });
+});
+
 describe("param block drag", () => {
     it("手动新增块可持久化并重新派生", () => {
         const clips = editableClips();
@@ -842,6 +892,198 @@ describe("param block drag", () => {
         expect(
             materialized.find((block) => block.id === created.blockId)?.averageValue,
         ).toBeCloseTo(61.5, 6);
+    });
+
+    it("真实 Clip 以 activeTakeId 创建手动块，不能退化成 Clip id", () => {
+        const { takeId: _takeId, ...clipWithoutTakeId } = editableClips()[0];
+        const source = {
+            ...clipWithoutTakeId,
+            activeTakeId: "take-real",
+        } as ParamBlockSourceClip & { readonly activeTakeId: string };
+        const created = createParamBlock({
+            state: EMPTY_PARAM_BLOCK_STATE,
+            clip: source,
+            startSec: 1.1,
+            endSec: 1.4,
+            value: 61.5,
+        });
+        if (!created.ok) throw new Error(created.reason);
+        expect(created.state.persistedEdits?.[0]?.members[0]?.takeId).toBe("take-real");
+    });
+
+    it("删除后在相同区间重建手动块，不会被旧删除记录吞掉", () => {
+        const clips = editableClips();
+        const first = createParamBlock({
+            state: EMPTY_PARAM_BLOCK_STATE,
+            clip: clips[0],
+            blockId: "edit:manual:first",
+            startSec: 1.1,
+            endSec: 1.4,
+            value: 61.5,
+        });
+        if (!first.ok) throw new Error(first.reason);
+        const firstMaterialized = materializeParamBlocks({
+            rootTrackId: "root-a",
+            clips,
+            state: first.state,
+        });
+        const firstBlock = firstMaterialized.find((block) => block.id === first.blockId);
+        if (firstBlock === undefined) throw new Error("first manual block missing");
+        const deleted = deleteParamBlocks({
+            state: first.state,
+            blocks: firstMaterialized,
+            selectedBlockIds: [first.blockId],
+        });
+        if (!deleted.ok) throw new Error(deleted.reason);
+        const recreated = createParamBlock({
+            state: deleted.state,
+            clip: clips[0],
+            blockId: "edit:manual:second",
+            startSec: 1.1,
+            endSec: 1.4,
+            value: 62.5,
+        });
+        if (!recreated.ok) throw new Error(recreated.reason);
+        const materialized = materializeParamBlocks({
+            rootTrackId: "root-a",
+            clips,
+            state: recreated.state,
+        });
+        expect(materialized.find((block) => block.id === recreated.blockId)?.averageValue).toBe(
+            62.5,
+        );
+    });
+
+    it("普通块拖动不锁块中心，Alt 音高缩放才锁中心", () => {
+        expect(shouldKeepParamBlockCenterLockedAfterDrag({ pitchScale: false })).toBe(false);
+        expect(shouldKeepParamBlockCenterLockedAfterDrag({ pitchScale: true })).toBe(true);
+    });
+
+    it("快速拖动以 pointerup 坐标为准，不依赖最后一个 pointermove", () => {
+        expect(
+            resolveParamBlockDragRelease({
+                didDrag: false,
+                startClientY: 100,
+                lastMoveClientY: 102,
+                releaseClientY: 160,
+            }),
+        ).toEqual({ didDrag: true, clientY: 160 });
+        expect(
+            resolveParamBlockDragRelease({
+                didDrag: true,
+                startClientY: 100,
+                lastMoveClientY: 120,
+                releaseClientY: 118,
+            }),
+        ).toEqual({ didDrag: true, clientY: 118 });
+    });
+
+    it("拖动块中心由手势起点和最终位移唯一投影，换曲线窗口也不漂移", () => {
+        const args = {
+            startValue: 60.4,
+            valueDelta: 1,
+            param: "pitch",
+            snapToSemitone: true,
+        } as const;
+        expect(projectParamBlockDragDisplayValue(args)).toBe(61);
+        // 同一手势重复计算必须完全一致；宿主不再从实时主簇反推 y。
+        expect(projectParamBlockDragDisplayValue(args)).toBe(61);
+        expect(
+            projectParamBlockDragDisplayValue({
+                ...args,
+                snapToSemitone: false,
+            }),
+        ).toBeCloseTo(61.4, 9);
+    });
+
+    it("只有权威参数窗口包含全部提交值时才允许撤下交互曲线", () => {
+        const segments = [{ startFrame: 10, values: [64, 65, 66] }];
+        expect(
+            paramViewContainsCommittedSegments({
+                paramView: { startFrame: 10, stride: 1, edit: [64, 65, 66] },
+                segments,
+            }),
+        ).toBe(true);
+        expect(
+            paramViewContainsCommittedSegments({
+                paramView: { startFrame: 10, stride: 1, edit: [64, 65, 60] },
+                segments,
+            }),
+        ).toBe(false);
+    });
+
+    it("降采样窗口只校验同一绝对帧，不要求邻近帧都等于一个样本", () => {
+        const segments = [{ startFrame: 9, values: [63.8, 64, 64.2, 64.1, 65, 65.2, 65.1] }];
+        expect(
+            paramViewContainsCommittedSegments({
+                paramView: { startFrame: 10, stride: 3, edit: [64, 65] },
+                segments,
+            }),
+        ).toBe(true);
+        expect(
+            paramViewContainsCommittedSegments({
+                paramView: { startFrame: 10, stride: 3, edit: [64, 60] },
+                segments,
+            }),
+        ).toBe(false);
+    });
+
+    it("滚动后的窗口仅比较仍可见的提交帧", () => {
+        expect(
+            paramViewContainsCommittedSegments({
+                paramView: { startFrame: 12, stride: 2, edit: [66, 68, 70] },
+                segments: [{ startFrame: 10, values: [64, 65, 66, 67, 68] }],
+            }),
+        ).toBe(true);
+    });
+
+    it("全分辨率回显使用后端相同的采样帧，不把区间外的邻近帧涂进窗口", () => {
+        const paramView = { startFrame: 10, stride: 3, edit: [60, 61, 62] };
+        expect(
+            applyFullResSegmentsToParamView({
+                paramView,
+                segments: [{ startFrame: 9, values: [63.8, 64, 64.2, 64.1, 65, 65.2] }],
+            }).edit,
+        ).toEqual([64, 65, 62]);
+        expect(
+            applyFullResSegmentsToParamView({
+                paramView,
+                segments: [{ startFrame: 11, values: [70] }],
+            }).edit,
+        ).toEqual(paramView.edit);
+    });
+
+    it("创建块预览始终从按下时的块集重建，拖回后可恢复被覆盖块", () => {
+        const baseBlocks = [
+            { id: "a", startSec: 0, endSec: 1, selected: false },
+            { id: "b", startSec: 2, endSec: 3, selected: false },
+        ];
+        const covered = projectParamBlockCreatePreviewFromBase({
+            baseBlocks,
+            startSec: 0.2,
+            endSec: 0.8,
+            createId: "__create__",
+            value: 61,
+        });
+        expect(covered.map((block) => block.id)).toEqual(["b", "__create__"]);
+        const restored = projectParamBlockCreatePreviewFromBase({
+            baseBlocks,
+            startSec: 1.2,
+            endSec: 1.8,
+            createId: "__create__",
+            value: 61,
+        });
+        expect(restored.map((block) => block.id)).toEqual(["a", "b", "__create__"]);
+    });
+
+    it("创建块时曲线轮廓保持形状并整体平移到目标音高", () => {
+        expect(
+            shiftParamBlockCurveValuesToTarget({
+                values: [60, 61, 61, 62],
+                target: 64,
+                param: "pitch",
+            }),
+        ).toEqual([63, 64, 64, 65]);
     });
 
     const editableClips = (): ParamBlockSourceClip[] => [
@@ -929,6 +1171,77 @@ describe("param block drag", () => {
             [1, 1.25],
             [1.25, 1.5],
         ]);
+    });
+
+    it("切分只在光标接近网格线时吸附，远离时保留精确位置", () => {
+        const args = {
+            bpm: 120,
+            timeSignatureDenominator: 4,
+            stepBeats: 1,
+            pxPerSec: 100,
+            thresholdPx: 6,
+        } as const;
+        expect(resolveParamBlockSplitSec({ ...args, sec: 0.46 })).toBeCloseTo(0.5, 9);
+        expect(resolveParamBlockSplitSec({ ...args, sec: 0.4 })).toBeCloseTo(0.4, 9);
+        expect(
+            resolveParamBlockSplitSec({
+                ...args,
+                sec: 0.46,
+                snapToggleHeld: true,
+            }),
+        ).toBeCloseTo(0.46, 9);
+    });
+
+    it("切分吸附范围按固定屏幕像素计算，不随视图放大缩小改变视觉距离", () => {
+        const common = {
+            sec: 0.5,
+            bpm: 120,
+            timeSignatureDenominator: 4,
+            stepBeats: 1,
+            thresholdPx: 12,
+        } as const;
+        // 120 BPM 下一拍为 0.5s。两种缩放下的 10px 偏移都应吸附。
+        expect(resolveParamBlockSplitSec({ ...common, sec: 0.3, pxPerSec: 50 })).toBeCloseTo(
+            0.5,
+            9,
+        );
+        expect(resolveParamBlockSplitSec({ ...common, sec: 0.45, pxPerSec: 200 })).toBeCloseTo(
+            0.5,
+            9,
+        );
+        // 12px 之外保持光标精确时间。
+        expect(resolveParamBlockSplitSec({ ...common, sec: 0.245, pxPerSec: 50 })).toBeCloseTo(
+            0.245,
+            9,
+        );
+        expect(resolveParamBlockSplitSec({ ...common, sec: 0.26, pxPerSec: 200 })).toBeCloseTo(
+            0.26,
+            9,
+        );
+    });
+
+    it("窄于 20ms 的切分段仍可保存和重新派生", () => {
+        const clips = editableClips();
+        const block = autoBlocksForClips("root-a", clips)[0];
+        const split = splitParamBlock({
+            state: EMPTY_PARAM_BLOCK_STATE,
+            block,
+            sec: 1.001,
+            clip: clips[0],
+        });
+        if (!split.ok) throw new Error(split.reason);
+        expect(split.state.persistedEdits?.map((edit) => edit.endSec - edit.startSec)).toEqual([
+            expect.closeTo(0.001, 9),
+            expect.closeTo(0.499, 9),
+        ]);
+        const materialized = materializeParamBlocks({
+            rootTrackId: "root-a",
+            clips,
+            state: split.state,
+        });
+        expect(
+            materialized.some((item) => Math.abs(item.endSec - item.startSec - 0.001) < 1e-9),
+        ).toBe(true);
     });
 
     it("伸缩保存后重新派生，新边界仍生效", () => {
@@ -1448,6 +1761,33 @@ describe("param block drag", () => {
         expect(secondDrag[0].values).toEqual([63, 63]);
     });
 
+    it("拖动后的逻辑音高会持久化并在重新派生时恢复", () => {
+        const clips = editableClips();
+        const block = autoBlocksForClips("root-a", clips)[0];
+        const first = setParamBlockLogicalCenters({
+            state: EMPTY_PARAM_BLOCK_STATE,
+            blocks: [block],
+            centers: new Map([[block.id, 65]]),
+        });
+        const reloaded = materializeParamBlocks({
+            rootTrackId: "root-a",
+            clips,
+            state: first,
+        });
+        const restored = reloaded.find((item) => item.id === block.id);
+        expect(restored?.averageValue).toBe(65);
+        expect(restored?.manualValue).toBe(65);
+        expect(reloaded).toHaveLength(4);
+
+        const second = setParamBlockLogicalCenters({
+            state: first,
+            blocks: [restored ?? block],
+            centers: new Map([[block.id, 67]]),
+        });
+        expect(second.persistedEdits).toHaveLength(1);
+        expect(second.persistedEdits?.[0]?.value).toBe(67);
+    });
+
     it("动态参数也做线性位移，块中心跟随指针而不是按锚点比例缩小", () => {
         const block = { members: [{ clipId: "a", startSec: 0, endSec: 0.02 }] };
         const dragged = buildParamBlockDragSegments({
@@ -1730,6 +2070,19 @@ describe("param block pointer geometry", () => {
         expect(preview[0]?.values[1]).toBeLessThan(62);
     });
 
+    it("过渡提交片段可立即回填当前参数窗口", () => {
+        expect(
+            applyFullResSegmentsToParamView({
+                paramView: {
+                    startFrame: 100,
+                    stride: 1,
+                    edit: [60, 60, 60, 61, 61],
+                },
+                segments: [{ startFrame: 101, values: [62, 63] }],
+            }).edit,
+        ).toEqual([60, 62, 63, 61, 61]);
+    });
+
     it("拉手柄只改过渡曲线，不改块高与代表值", () => {
         const left = {
             id: "left",
@@ -1800,9 +2153,7 @@ describe("param block pointer geometry", () => {
             minBlockSec: 0.04,
         });
         expect(plan.block).toEqual({ startSec: 0, endSec: 1.8 });
-        expect(plan.neighbors).toEqual([
-            { id: "b", startSec: 1, endSec: 1.2, remove: true },
-        ]);
+        expect(plan.neighbors).toEqual([{ id: "b", startSec: 1, endSec: 1.2, remove: true }]);
     });
 
     it("左右扩展时，两侧邻居都在预览与提交中同步缩短", () => {
@@ -2209,6 +2560,107 @@ describe("param block pointer geometry", () => {
                 timeoutMs: 1200,
             }),
         ).toBe(true);
+    });
+
+    it("手动创建的块切分后左右段都会保留", () => {
+        const clips: ParamBlockSourceClip[] = [
+            {
+                id: "a",
+                trackId: "root-a",
+                takeId: "take-a",
+                startSec: 1,
+                lengthSec: 2,
+                sourceStartSec: 0,
+                sourceEndSec: 2,
+            },
+        ];
+        const created = createParamBlock({
+            state: EMPTY_PARAM_BLOCK_STATE,
+            clip: clips[0],
+            blockId: "edit:manual:split-source",
+            startSec: 1.1,
+            endSec: 1.8,
+            value: 61,
+        });
+        if (!created.ok) throw new Error(created.reason);
+        const blocks = materializeParamBlocks({
+            rootTrackId: "root-a",
+            clips,
+            state: created.state,
+        });
+        const source = blocks.find((block) => block.id === created.blockId);
+        if (source === undefined) throw new Error("manual source missing");
+        const split = splitParamBlock({
+            state: created.state,
+            block: source,
+            sec: 1.4,
+            clip: clips[0],
+        });
+        if (!split.ok) throw new Error(split.reason);
+        const materialized = materializeParamBlocks({
+            rootTrackId: "root-a",
+            clips,
+            state: split.state,
+        });
+        expect(
+            materialized
+                .filter((block) => block.startSec >= 1.1 - 1e-9 && block.endSec <= 1.8 + 1e-9)
+                .map((block) => [block.startSec, block.endSec]),
+        ).toContainEqual([1.1, 1.4]);
+        expect(
+            materialized
+                .filter((block) => block.startSec >= 1.1 - 1e-9 && block.endSec <= 1.8 + 1e-9)
+                .map((block) => [block.startSec, block.endSec]),
+        ).toContainEqual([1.4, 1.8]);
+    });
+
+    it("拖动提交就绪后先绘制一帧快照，再在下一绘制时机释放", () => {
+        const ready = {
+            committed: true,
+            startedAt: 100,
+            now: 200,
+            curveSettled: false,
+            valuesApplied: true,
+        } as const;
+        expect(
+            advanceParamBlockDragCommitRelease({
+                ...ready,
+                releaseState: "waiting-for-curve",
+            }),
+        ).toBe("waiting-for-paint");
+        expect(
+            advanceParamBlockDragCommitRelease({
+                ...ready,
+                releaseState: "waiting-for-paint",
+            }),
+        ).toBe("released");
+    });
+
+    it("拖动和提交交接跨窗口时，当前渲染仍使用拖动快照", () => {
+        expect(
+            shouldUseParamBlockDragSnapshotForRender({
+                snapshotKey: "old-window",
+                paramViewKey: "new-window",
+                gestureActive: true,
+                commitHeld: true,
+            }),
+        ).toBe(true);
+        expect(
+            shouldUseParamBlockDragSnapshotForRender({
+                snapshotKey: "old-window",
+                paramViewKey: "new-window",
+                gestureActive: true,
+                commitHeld: false,
+            }),
+        ).toBe(true);
+        expect(
+            shouldUseParamBlockDragSnapshotForRender({
+                snapshotKey: "old-window",
+                paramViewKey: "new-window",
+                gestureActive: false,
+                commitHeld: false,
+            }),
+        ).toBe(false);
     });
 
     it("松手交接中心与普通显示使用同一个吸附行心", () => {

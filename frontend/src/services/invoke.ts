@@ -324,7 +324,11 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
             return { clipId: args[0] };
 
         case "get_param_block_merges":
+        case "get_param_line_blocks":
             return { rootTrackId: args[0] };
+
+        case "set_param_line_blocks":
+            return args[0] as Record<string, unknown>;
 
         case "set_param_block_merges":
             return {

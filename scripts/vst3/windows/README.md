@@ -14,7 +14,8 @@ hard timeout.
 
 - load_probe.cpp — minimal VST3 host-side probe. It does not include the VST3 SDK;
   it defines only the few vtable slots it needs.
-- verify.ps1 — static export/dependency checks, compiles the probe, runs it with a
+- verify-frontend.ps1 — requires plugin and detached editor HTML entries and checks local HTML / bundled JavaScript resource references.
+- verify.ps1 — validates frontend resources, performs static export/dependency checks, compiles the probe, runs it with a
   hard timeout. Probe output is captured in a temporary directory and printed only
   when the gate fails.
 

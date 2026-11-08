@@ -12,6 +12,20 @@
  * 【作用域】只在当前根轨道组内建块。跨组块没有唯一参数所有者，第一版直接拒绝。
  */
 
+import type { ParamLineBlock, ParamLineBlockSet } from "./paramLineBlocks";
+import { placeParamLineBlock, resizeParamLineBlock } from "./paramLineBlocks";
+import { paramLineValueCenter } from "./paramLineBlockValue";
+import {
+    createLineBlock,
+    deleteLineBlocks,
+    lineBlocksForPanel,
+    lineFrame,
+    mergeLineBlocks,
+    resizeLineBlock,
+    splitLineBlock,
+    withParamLineBlocks,
+} from "./paramLineBlockEditing";
+
 export interface ParamBlockSourceClip {
     readonly id: string;
     readonly trackId: string;
@@ -39,6 +53,9 @@ export interface ParamBlockSourceClip {
     readonly sourceSyllableSpansSec?: ReadonlyArray<readonly [number, number]>;
     /** active take id；音节 id 用它保持长时间稳定引用。 */
     readonly takeId?: string;
+    /** 时间线 Clip 的真实 active take；手动块持久化必须使用它。 */
+    readonly activeTakeId?: string;
+    readonly takes?: ReadonlyArray<{ readonly id: string }>;
     /** 为 true 时，无显式音节也按固定时长切成 mock 音节块。 */
     readonly mockSyllables?: boolean;
 }
@@ -219,6 +236,8 @@ export interface ParamBlockMember {
 }
 
 export interface ParamBlock {
+    readonly lineBlock?: ParamLineBlock;
+    readonly lineFramePeriodMs?: number;
     readonly id: string;
     readonly rootTrackId: string;
     readonly kind: "auto" | "merged";
@@ -240,7 +259,7 @@ export interface ParamBlock {
      * 不会被拉平。字段名保留 `averageValue` 以兼容既有宿主 / 测试载荷。
      */
     readonly averageValue: number | null;
-    /** 用户显式创建时选定的显示值；派生层不得用实时曲线把它覆盖。 */
+    /** 音高块显式保存的 MIDI 中心；其他参数必须从各自曲线派生位置。 */
     readonly manualValue?: number | null;
     /**
      * 块间圆滑宽度（秒）：向两侧各 blend 这么多秒，跨越相邻块边界做线性过渡。
@@ -360,6 +379,7 @@ export function hitTestParamBlockEdges<
  */
 export function hitTestParamBlockTransitionHandles<
     T extends {
+        readonly id?: string;
         readonly topPx: number;
         readonly heightPx: number;
         readonly transitionHandle?: {
@@ -408,12 +428,17 @@ export function hitTestParamBlockTransitionHandles<
         heightPx: number;
         distance: number;
     } | null = null;
+    const byId = new Map(args.blocks.map((block) => [block.id, block]));
     for (const block of args.blocks) {
         const handle = block.transitionHandle;
         if (handle === null || handle === undefined) continue;
         const x = args.secToX(handle.sec);
         const handleX = x + outsetX;
-        const handleY = block.topPx - outsetY;
+        const handleY = paramBlockTransitionHandleY(
+            block.topPx,
+            byId.get(handle.rightId)?.topPx,
+            outsetY,
+        );
         const dx = args.clientX - handleX;
         const dy = args.localY - handleY;
         if (Math.abs(dx) > halfW || Math.abs(dy) > halfH) continue;
@@ -548,9 +573,7 @@ export function paramBlockResizeCandidates<T extends ParamBlock>(
                     ? candidate.startSec >= block.endSec - 1e-6
                     : candidate.endSec <= block.startSec + 1e-6),
         )
-        .sort((a, b) =>
-            edge === "right" ? a.startSec - b.startSec : b.endSec - a.endSec,
-        );
+        .sort((a, b) => (edge === "right" ? a.startSec - b.startSec : b.endSec - a.endSec));
 }
 
 export interface ParamBlockResizeNeighborPlan {
@@ -562,6 +585,8 @@ export interface ParamBlockResizeNeighborPlan {
 }
 
 export interface ParamBlockResizePlan {
+    readonly lineLayout?: readonly ParamLineBlock[];
+    readonly lineFramePeriodMs?: number;
     /** 被拖块的新区间。 */
     readonly block: { readonly startSec: number; readonly endSec: number };
     /** 被部分缩短或完整覆盖的右侧 / 左侧块，按拖动方向排列。 */
@@ -595,6 +620,13 @@ export function projectParamBlockResizeDisplay(args: {
     readonly blockId: string;
     readonly plan: ParamBlockResizePlan;
 }): ParamBlockResizeDisplay[] {
+    if (args.plan.lineLayout && args.plan.lineFramePeriodMs)
+        return args.plan.lineLayout.map((block) => ({
+            id: block.id,
+            startSec: (block.startFrame * args.plan.lineFramePeriodMs!) / 1000,
+            endSec: (block.endFrameExclusive * args.plan.lineFramePeriodMs!) / 1000,
+            selected: block.id === args.blockId,
+        }));
     const neighborById = new Map(args.plan.neighbors.map((item) => [item.id, item]));
     const out: ParamBlockResizeDisplay[] = [];
     for (const block of args.baseBlocks) {
@@ -653,10 +685,43 @@ export function canReleaseParamBlockDragCommit(args: {
     if (!args.committed) return false;
     const timeoutMs = Math.max(1, args.timeoutMs ?? 1200);
     return (
-        args.curveSettled ||
-        args.valuesApplied === true ||
-        args.now - args.startedAt >= timeoutMs
+        args.curveSettled || args.valuesApplied === true || args.now - args.startedAt >= timeoutMs
     );
+}
+
+export type ParamBlockDragCommitReleaseState =
+    "waiting-for-curve" | "waiting-for-paint" | "released";
+
+/**
+ * 拖动交接的两阶段释放。
+ *
+ * 数据就绪时当前 React 渲染仍必须使用拖动快照；等这个快照完成一次绘制后，
+ * 下一个绘制时机才撤下它并让正常派生接替。跳过 `waiting-for-paint` 会在一帧里
+ * 先按旧主簇画回原位，再跳到提交位置，也就是用户看到的闪烁。
+ */
+export function advanceParamBlockDragCommitRelease(args: {
+    readonly releaseState: ParamBlockDragCommitReleaseState;
+    readonly committed: boolean;
+    readonly startedAt: number;
+    readonly now: number;
+    readonly curveSettled: boolean;
+    readonly valuesApplied?: boolean;
+    readonly timeoutMs?: number;
+}): ParamBlockDragCommitReleaseState {
+    if (args.releaseState === "released") return "released";
+    if (args.releaseState === "waiting-for-paint") return "released";
+    return canReleaseParamBlockDragCommit(args) ? "waiting-for-paint" : "waiting-for-curve";
+}
+
+/** 拖动窗口在提交交接完成前始终沿用起点快照，即使异步取数换了窗口 key。 */
+export function shouldUseParamBlockDragSnapshotForRender(args: {
+    readonly snapshotKey: string;
+    readonly paramViewKey: string | null;
+    /** A live gesture owns its frozen window even if a background fetch rekeys paramView. */
+    readonly gestureActive: boolean;
+    readonly commitHeld: boolean;
+}): boolean {
+    return args.gestureActive || args.commitHeld || args.paramViewKey === args.snapshotKey;
 }
 
 /**
@@ -676,6 +741,16 @@ export function resolveParamBlockCommitDisplayCenter(args: {
 }
 
 /**
+ * 普通块平移必须继续读取实时曲线中心；只有 Alt 音高缩放才允许锁住中心，
+ * 因为缩放会改变块内起伏而不改变块应有的代表音高。
+ */
+export function shouldKeepParamBlockCenterLockedAfterDrag(args: {
+    readonly pitchScale: boolean;
+}): boolean {
+    return args.pitchScale;
+}
+
+/**
  * 边缘伸缩的唯一几何来源。
  *
  * 预览、拖动中的宿主刷新和松手提交都消费这一份计划，避免“拖动时看见 A，
@@ -683,6 +758,8 @@ export function resolveParamBlockCommitDisplayCenter(args: {
  * 端点，严格首尾相接，不留下会被后续重建误判成重叠的浮点缝。
  */
 export function resolveParamBlockResizePlan(args: {
+    readonly lineLayout?: ParamLineBlockSet;
+    readonly blockId?: string;
     readonly edge: "left" | "right";
     readonly blockStartSec: number;
     readonly blockEndSec: number;
@@ -697,13 +774,38 @@ export function resolveParamBlockResizePlan(args: {
           }
     )[];
     /** 兼容单邻居调用。 */
-    readonly neighbor?: {
-        readonly id?: string;
-        readonly startSec: number;
-        readonly endSec: number;
-    } | ParamBlock | null;
+    readonly neighbor?:
+        | {
+              readonly id?: string;
+              readonly startSec: number;
+              readonly endSec: number;
+          }
+        | ParamBlock
+        | null;
     readonly minBlockSec: number;
 }): ParamBlockResizePlan {
+    if (args.lineLayout && args.blockId) {
+        const fp = args.lineLayout.framePeriodMs;
+        const start = Math.max(
+            0,
+            Math.round(((args.edge === "left" ? args.targetSec : args.blockStartSec) * 1000) / fp),
+        );
+        const end = Math.max(
+            0,
+            Math.round(((args.edge === "right" ? args.targetSec : args.blockEndSec) * 1000) / fp),
+        );
+        const removeBlock = end <= start;
+        const after = removeBlock
+            ? args.lineLayout.blocks.filter((block) => block.id !== args.blockId)
+            : resizeParamLineBlock(args.lineLayout.blocks, args.blockId, start, end);
+        return {
+            block: { startSec: (start * fp) / 1000, endSec: (end * fp) / 1000 },
+            neighbors: [],
+            removeBlock,
+            lineLayout: after,
+            lineFramePeriodMs: fp,
+        };
+    }
     const minSec = Math.max(1e-6, finite(args.minBlockSec, MIN_AUTO_BLOCK_SEC));
     const blockStart = Math.min(args.blockStartSec, args.blockEndSec);
     const blockEnd = Math.max(args.blockStartSec, args.blockEndSec);
@@ -727,9 +829,7 @@ export function resolveParamBlockResizePlan(args: {
                 ? candidate.startSec >= blockEnd - 1e-6
                 : candidate.endSec <= blockStart + 1e-6,
         )
-        .sort((a, b) =>
-            args.edge === "right" ? a.startSec - b.startSec : b.endSec - a.endSec,
-        );
+        .sort((a, b) => (args.edge === "right" ? a.startSec - b.startSec : b.endSec - a.endSec));
     if (args.edge === "right") {
         const lower = blockStart + minSec;
         // 右侧没有硬上限：拖过整块时可继续向前吞并后续块。
@@ -789,12 +889,22 @@ export function resolveParamBlockResizePlan(args: {
 
 /** 创建块：按指针横向位移得到吸附后的区间，粘贴到网格线而不是松手才对齐。 */
 export function resolveParamBlockCreateSpan(args: {
+    readonly framePeriodMs?: number;
     readonly anchorSec: number;
     readonly pointerSec: number;
     readonly snapToGrid: (sec: number) => number;
     readonly snapEnabled: boolean;
     readonly minBlockSec: number;
 }): { readonly startSec: number; readonly endSec: number } {
+    if (args.framePeriodMs) {
+        const fp = args.framePeriodMs / 1000;
+        const snap = (sec: number) =>
+            Math.max(0, Math.round((args.snapEnabled ? args.snapToGrid(sec) : sec) / fp));
+        const anchor = snap(args.anchorSec);
+        let target = snap(args.pointerSec);
+        if (target === anchor) target = anchor + 1;
+        return { startSec: Math.min(anchor, target) * fp, endSec: Math.max(anchor, target) * fp };
+    }
     const minSec = Math.max(1e-6, finite(args.minBlockSec, MIN_AUTO_BLOCK_SEC));
     const snap = (sec: number): number =>
         args.snapEnabled ? finite(args.snapToGrid(sec), sec) : sec;
@@ -806,6 +916,26 @@ export function resolveParamBlockCreateSpan(args: {
     const startSec = Math.min(anchor, target);
     const endSec = Math.max(anchor, target);
     return { startSec, endSec };
+}
+
+/** 切开位置：只有光标靠近网格线时才吸附，否则保留精确时间。 */
+export function resolveParamBlockSplitSec(args: {
+    readonly sec: number;
+    readonly bpm: number;
+    readonly timeSignatureDenominator: number;
+    readonly stepBeats: number;
+    readonly pxPerSec: number;
+    readonly thresholdPx: number;
+    readonly snapToggleHeld?: boolean;
+}): number {
+    if (args.snapToggleHeld === true || !Number.isFinite(args.sec)) return args.sec;
+    const bpm = Number.isFinite(args.bpm) && args.bpm > 0 ? args.bpm : 120;
+    const denominator = Math.max(1, Math.round(args.timeSignatureDenominator) || 4);
+    const stepBeats = Math.max(1e-9, Number(args.stepBeats) || 1);
+    const gridSec = (60 / bpm) * stepBeats * (4 / denominator);
+    const snapped = Math.round(args.sec / gridSec) * gridSec;
+    const distancePx = Math.abs(snapped - args.sec) * Math.max(1, args.pxPerSec);
+    return distancePx <= Math.max(0, args.thresholdPx) ? snapped : args.sec;
 }
 
 export interface MergedParamBlock {
@@ -828,6 +958,10 @@ export interface MergedParamBlock {
 }
 
 export interface ParamBlockState {
+    readonly lineLayout?: ParamLineBlockSet;
+    /** Transient edit basis for optimistic concurrency/replay, never persisted. */
+    readonly lineEditBase?: ParamLineBlockSet;
+    readonly lineRootTrackId?: string;
     readonly mergedBlocks: readonly MergedParamBlock[];
     /** 上一批被删除的块，供用户一键恢复；仅在会话内有效。 */
     readonly lastDeletedBlocks?: readonly PersistedParamBlockDeletion[];
@@ -967,7 +1101,6 @@ export interface ParamBlockSplitInput {
     readonly sec: number;
     /** 可选 Clip 几何；用于给两个独立块保存同一容器锚点。 */
     readonly clip?: ParamBlockSourceClip;
-    readonly minBlockSec?: number;
 }
 
 export interface ParamBlockResizeInput {
@@ -1005,7 +1138,9 @@ export interface ParamBlockResizeInput {
 /** 用户在块层手动画出的新块（横向范围 + 当前参数预览值）。 */
 export interface ParamBlockCreateInput {
     readonly state: ParamBlockState;
-    readonly clip: ParamBlockSourceClip;
+    readonly clip?: ParamBlockSourceClip;
+    /** All source Clips intersected by the preview's root-track interval. */
+    readonly clips?: readonly ParamBlockSourceClip[];
     readonly startSec: number;
     readonly endSec: number;
     readonly value: number | null;
@@ -1050,6 +1185,15 @@ export const PARAM_BLOCK_TRANSITION_HANDLE_DOT_RADIUS_PX = 3.5;
 export const PARAM_BLOCK_TRANSITION_HANDLE_OUTSET_X_PX = 0;
 export const PARAM_BLOCK_TRANSITION_HANDLE_OUTSET_Y_PX = 6;
 export const PARAM_BLOCK_TRANSITION_HANDLE_LINE_LENGTH_PX = 8;
+
+/** Keep the grip above both ends of its curve, including at a small zoom. */
+export function paramBlockTransitionHandleY(
+    leftTopPx: number,
+    rightTopPx?: number,
+    outsetY = PARAM_BLOCK_TRANSITION_HANDLE_OUTSET_Y_PX,
+): number {
+    return Math.min(leftTopPx, rightTopPx ?? leftTopPx) - outsetY;
+}
 /** 兼容旧调用点：历史命名，语义已改为“距块顶的上抬量”。 */
 export const PARAM_BLOCK_TRANSITION_HANDLE_INSET_Y_PX = PARAM_BLOCK_TRANSITION_HANDLE_OUTSET_Y_PX;
 
@@ -1365,6 +1509,7 @@ export function mergeParamBlocks(args: {
     readonly blocks: readonly ParamBlock[];
     readonly selectedBlockIds: readonly string[];
 }): BlockMergeResult {
+    if (args.state.lineLayout) return mergeLineBlocks(args.state, args.selectedBlockIds);
     const selected = args.selectedBlockIds
         .map((id) => args.blocks.find((block) => block.id === id))
         .filter((block): block is ParamBlock => block !== undefined);
@@ -1525,21 +1670,19 @@ function removeManualBlockAt(
  * 点不中的碎片。
  */
 export function splitParamBlock(args: ParamBlockSplitInput): ParamBlockEditResult {
+    if (args.state.lineLayout) return splitLineBlock(args.state, args.block, args.sec);
     const block = args.block;
-    const minSec = Math.max(MIN_AUTO_BLOCK_SEC, args.minBlockSec ?? 0.04);
-    const sec = Math.max(block.startSec + minSec, Math.min(block.endSec - minSec, args.sec));
+    const sec = args.sec;
+    const epsilon = 1e-9;
     const validSplit =
-        Number.isFinite(args.sec) &&
-        Number.isFinite(sec) &&
-        sec - block.startSec >= minSec - 1e-9 &&
-        block.endSec - sec >= minSec - 1e-9;
+        Number.isFinite(args.sec) && sec > block.startSec + epsilon && block.endSec > sec + epsilon;
     if (!validSplit) {
         return { ok: false, reason: "too_short" };
     }
     const sourceMembers = blockMemberRefs(block);
     if (sourceMembers === null) return { ok: false, reason: "no_members" };
-    const leftId = `edit:${block.id}:left:${sec.toFixed(3)}`;
-    const rightId = `edit:${block.id}:right:${sec.toFixed(3)}`;
+    const leftId = `edit:${block.id}:left:${sec.toFixed(9)}`;
+    const rightId = `edit:${block.id}:right:${sec.toFixed(9)}`;
     /*
      * 左右段是**同级独立块**：不引用父块 id，也不共享成员。
      * 源域区间只在各自子块内部按切分比例拆开；之后任何拖动 / 伸缩都只读写
@@ -1557,10 +1700,10 @@ export function splitParamBlock(args: ParamBlockSplitInput): ParamBlockEditResul
             const sourceSpan = Math.max(0, sourceEnd - sourceStart);
             const segSourceStart = sourceStart + sourceSpan * startT;
             const segSourceEnd = sourceStart + sourceSpan * endT;
-            if (segSourceEnd - segSourceStart < 1e-6) continue;
+            if (!(segSourceEnd > segSourceStart + 1e-12)) continue;
             out.push({
                 ...member,
-                syllableId: `${member.syllableId}:${segStartSec.toFixed(3)}:${segEndSec.toFixed(3)}`,
+                syllableId: `${member.syllableId}:${segStartSec.toFixed(9)}:${segEndSec.toFixed(9)}`,
                 sourceStartSec: segSourceStart,
                 sourceEndSec: segSourceEnd,
             });
@@ -1634,6 +1777,8 @@ export function splitParamBlock(args: ParamBlockSplitInput): ParamBlockEditResul
  * 与切分一样写入 `persistedEdits`，下一次 materialize 仍由稳定成员引用恢复。
  */
 export function resizeParamBlock(args: ParamBlockResizeInput): ParamBlockEditResult {
+    if (args.state.lineLayout)
+        return resizeLineBlock(args.state, args.block, args.edge, args.targetSec, args.targetSpan);
     const block = args.block;
     const minSec = Math.max(MIN_AUTO_BLOCK_SEC, args.minBlockSec ?? 0.04);
     const nextStart =
@@ -1735,7 +1880,12 @@ export function resizeParamBlock(args: ParamBlockResizeInput): ParamBlockEditRes
             replacedIds.push(target.id);
         }
     }
-    if (plannedNeighbors.length === 0 && neighbor !== undefined && neighbor !== null && shouldCompressNeighbor) {
+    if (
+        plannedNeighbors.length === 0 &&
+        neighbor !== undefined &&
+        neighbor !== null &&
+        shouldCompressNeighbor
+    ) {
         if (args.edge === "right" && nextEnd > neighbor.startSec + 1e-6) {
             /*
              * 只压缩邻居起点，不允许靠扩展把它删掉。目标已经由
@@ -1850,29 +2000,55 @@ export function resizeParamBlock(args: ParamBlockResizeInput): ParamBlockEditRes
  * 重新打开后的身份规则一致。
  */
 export function createParamBlock(args: ParamBlockCreateInput): ParamBlockEditResult {
+    if (args.state.lineLayout)
+        return createLineBlock(args.state, args.startSec, args.endSec, args.blockId);
+    if (!args.clip) return { ok: false, reason: "no_members" };
     const minSec = Math.max(MIN_AUTO_BLOCK_SEC, args.minBlockSec ?? 0.04);
     const startSec = Math.min(args.startSec, args.endSec);
     const endSec = Math.max(args.startSec, args.endSec);
     if (!Number.isFinite(startSec) || !Number.isFinite(endSec) || endSec - startSec < minSec) {
         return { ok: false, reason: "too_short" };
     }
-    const member = clipSpan(args.clip);
+    const sources = (args.clips ?? [args.clip]).filter(
+        (clip) => clip.startSec < endSec - 1e-9 && clip.startSec + clip.lengthSec > startSec + 1e-9,
+    );
+    if (sources.length === 0) return { ok: false, reason: "too_short" };
+    const member = {
+        startSec: Math.min(...sources.map((clip) => clipSpan(clip).startSec)),
+        endSec: Math.max(...sources.map((clip) => clipSpan(clip).endSec)),
+    };
     const clippedStart = Math.max(member.startSec, Math.min(member.endSec, startSec));
     const clippedEnd = Math.max(member.startSec, Math.min(member.endSec, endSec));
     if (clippedEnd - clippedStart < minSec) {
         return { ok: false, reason: "too_short" };
     }
-    const playbackRate =
-        Number.isFinite(args.clip.playbackRate) && (args.clip.playbackRate as number) > 1e-6
-            ? (args.clip.playbackRate as number)
-            : 1;
-    const sourceStart =
-        Math.max(0, args.clip.sourceStartSec ?? 0) +
-        (clippedStart - member.startSec) * playbackRate;
-    const sourceEnd =
-        Math.max(0, args.clip.sourceStartSec ?? 0) + (clippedEnd - member.startSec) * playbackRate;
-    const takeId = args.clip.takeId ?? args.clip.id;
-    const syllableId = `${takeId}:manual:${sourceStart.toFixed(3)}:${sourceEnd.toFixed(3)}`;
+    const members = sources.map((clip) => {
+        const span = clipSpan(clip);
+        const rate =
+            Number.isFinite(clip.playbackRate) && (clip.playbackRate as number) > 1e-6
+                ? (clip.playbackRate as number)
+                : 1;
+        const localStart = Math.max(clippedStart, span.startSec) - span.startSec;
+        const localEnd = Math.min(clippedEnd, span.endSec) - span.startSec;
+        const sourceBase = Math.max(0, clip.sourceStartSec ?? 0);
+        const reverseEnd = clip.sourceEndSec ?? sourceBase + clip.lengthSec * rate;
+        const sourceStart = clip.reversed
+            ? reverseEnd - localEnd * rate
+            : sourceBase + localStart * rate;
+        const sourceEnd = clip.reversed
+            ? reverseEnd - localStart * rate
+            : sourceBase + localEnd * rate;
+        const takeId = clip.activeTakeId ?? clip.takes?.[0]?.id ?? clip.takeId ?? clip.id;
+        return {
+            clipId: clip.id,
+            takeId,
+            syllableId: `${takeId}:manual:${sourceStart.toFixed(3)}:${sourceEnd.toFixed(3)}`,
+            sourceStartSec: sourceStart,
+            sourceEndSec: sourceEnd,
+        };
+    });
+    const sourceStart = members[0].sourceStartSec;
+    const sourceEnd = members[members.length - 1].sourceEndSec;
     /*
      * 新块压住的旧块整块让位，而不是拆成左右残段。
      *
@@ -1910,15 +2086,7 @@ export function createParamBlock(args: ParamBlockCreateInput): ParamBlockEditRes
         id:
             args.blockId ??
             `edit:manual:${args.clip.id}:${sourceStart.toFixed(3)}:${sourceEnd.toFixed(3)}`,
-        members: [
-            {
-                clipId: args.clip.id,
-                takeId,
-                syllableId,
-                sourceStartSec: sourceStart,
-                sourceEndSec: sourceEnd,
-            },
-        ],
+        members,
         startSec: clippedStart,
         endSec: clippedEnd,
         memberStartSec: member.startSec,
@@ -1942,6 +2110,59 @@ export function createParamBlock(args: ParamBlockCreateInput): ParamBlockEditRes
 }
 
 /**
+ * Persist MIDI-note-like logical centers without changing block geometry.
+ *
+ * Auto blocks normally derive their y from curve samples. Once a user moves a
+ * block, that explicit center becomes authoritative. Existing split/manual edit
+ * records are updated in place; an unchanged auto block receives a
+ * self-contained explicit record so the center survives a plugin/project reopen.
+ */
+export function setParamBlockLogicalCenters(args: {
+    readonly state: ParamBlockState;
+    readonly blocks: readonly ParamBlock[];
+    readonly centers: ReadonlyMap<string, number>;
+}): ParamBlockState {
+    if (args.state.lineLayout) return args.state;
+    const replacements = new Map<string, PersistedParamBlockEdit>();
+    for (const block of args.blocks) {
+        const center = args.centers.get(block.id);
+        if (center === undefined || !Number.isFinite(center)) continue;
+        const existing = (args.state.persistedEdits ?? []).find(
+            (edit) =>
+                edit.deleted !== true &&
+                (edit.id === block.id || edit.blockIds?.includes(block.id) === true),
+        );
+        const members = existing?.members ?? blockMemberRefs(block);
+        if (members === null) continue;
+        const centerOnlyId = `center:${block.id}`;
+        const id = existing?.id ?? centerOnlyId;
+        replacements.set(id, {
+            id,
+            members,
+            startSec: existing?.startSec ?? block.startSec,
+            endSec: existing?.endSec ?? block.endSec,
+            memberStartSec: existing?.memberStartSec ?? block.anchorStartSec ?? block.startSec,
+            memberEndSec: existing?.memberEndSec ?? block.anchorEndSec ?? block.endSec,
+            explicit: existing?.explicit ?? false,
+            blockIds: existing?.blockIds ?? [block.id],
+            overlapTrim: existing?.overlapTrim,
+            deleted: false,
+            manual: existing?.manual,
+            value: center,
+            transitionSec: existing?.transitionSec,
+        });
+    }
+    if (replacements.size === 0) return args.state;
+    return {
+        ...args.state,
+        persistedEdits: [
+            ...(args.state.persistedEdits ?? []).filter((edit) => !replacements.has(edit.id)),
+            ...replacements.values(),
+        ],
+    };
+}
+
+/**
  * 删除块（参数块视图语义）：只隐藏该块，不改写音频、参数曲线或音节分析。
  *
  * 删除记录按成员稳定引用保存；下次自动分析重跑后仍能命中同一批块。若删除的
@@ -1952,6 +2173,7 @@ export function deleteParamBlocks(args: {
     readonly blocks: readonly ParamBlock[];
     readonly selectedBlockIds: readonly string[];
 }): ParamBlockEditResult {
+    if (args.state.lineLayout) return deleteLineBlocks(args.state, args.selectedBlockIds);
     const selected = args.blocks.filter((block) => args.selectedBlockIds.includes(block.id));
     if (selected.length === 0) return { ok: false, reason: "not_found" };
     const members = selected.flatMap((block) => blockMemberRefs(block) ?? []);
@@ -2053,14 +2275,20 @@ export function canMergeParamBlocks(
 ): boolean {
     const selected = blocks.filter((block) => selectedBlockIds.includes(block.id));
     if (selected.length < 2) return false;
+    const ordered = sortParamBlocksByTime(selected);
+    const rootTrackId = ordered[0]?.rootTrackId;
+    if (rootTrackId === undefined || ordered.some((block) => block.rootTrackId !== rootTrackId)) {
+        return false;
+    }
     // 块之间是同级关系；已合并块也可以与相邻块继续合并。
-    return !selected.some(
-        (block, index) => index > 0 && !blocksAreAdjacent(selected[index - 1], block),
+    return !ordered.some(
+        (block, index) => index > 0 && !blocksAreAdjacent(ordered[index - 1], block),
     );
 }
 
 /** 当前块是否已被用户删除（按稳定成员引用 / 自动块 id 命中）。 */
 export function isParamBlockDeleted(state: ParamBlockState, block: ParamBlock): boolean {
+    if (state.lineLayout) return !state.lineLayout.blocks.some((item) => item.id === block.id);
     const ids = new Set((block.members.map((member) => member.syllableId) ?? []).filter(Boolean));
     return (state.persistedEdits ?? []).some(
         (record) =>
@@ -2082,6 +2310,19 @@ export function setParamBlockTransition(args: {
     readonly minBlockSec?: number;
 }): ParamBlockEditResult {
     const width = Math.max(0, Number(args.transitionSec) || 0);
+    if (args.state.lineLayout)
+        return {
+            ok: true,
+            blockId: args.left.id,
+            state: withParamLineBlocks(
+                args.state,
+                args.state.lineLayout.blocks.map((block) =>
+                    block.id === args.left.id
+                        ? { ...block, transitionFrames: lineFrame(args.state, width) }
+                        : block,
+                ),
+            ),
+        };
     // 过渡只作用于右块，宽度最多占右块一半；左块宽度不参与限制。
     const span = Math.max(0, args.right.endSec - args.right.startSec);
     const clamped = Math.min(width, span / 2);
@@ -2127,7 +2368,32 @@ export function materializeParamBlocks(args: {
     readonly clips: readonly ParamBlockSourceClip[];
     readonly state: ParamBlockState;
 }): ParamBlock[] {
-    return materializeNonOverlappingParamBlocks(args);
+    if (args.state.lineLayout) return lineBlocksForPanel(args.rootTrackId, args.state);
+    const centerRecords = (args.state.persistedEdits ?? []).filter(
+        (edit) => edit.deleted !== true && edit.id.startsWith("center:"),
+    );
+    const geometryState: ParamBlockState = {
+        ...args.state,
+        persistedEdits: (args.state.persistedEdits ?? []).filter(
+            (edit) => !edit.id.startsWith("center:"),
+        ),
+    };
+    const blocks = materializeNonOverlappingParamBlocks({
+        ...args,
+        state: geometryState,
+    });
+    if (centerRecords.length === 0) return blocks;
+    const centers = new Map<string, number>();
+    for (const record of centerRecords) {
+        if (record.value === null || record.value === undefined) continue;
+        for (const id of record.blockIds ?? []) centers.set(id, record.value);
+    }
+    return blocks.map((block) => {
+        const center = centers.get(block.id);
+        return center === undefined
+            ? block
+            : { ...block, averageValue: center, manualValue: center };
+    });
 }
 
 /** 自动重叠归并的稳定身份：只由成员自动块 id 决定，不借用用户合并记录的 id。 */
@@ -2320,8 +2586,19 @@ function materializeEditedRecords(
          * 回查，只能按记录保存的容器锚点恢复；否则保存重开后会直接消失。
          */
         if (record.manual === true) {
-            const clipStart = Math.max(0, finite(ownerClip.startSec, 0));
-            const clipEnd = clipStart + Math.max(0, finite(ownerClip.lengthSec, 0));
+            const containers = record.members
+                .map((member) => clipById.get(member.clipId))
+                .filter((clip): clip is ParamBlockSourceClip => clip !== undefined);
+            const clipStart = Math.min(
+                ...containers.map((clip) => Math.max(0, finite(clip.startSec, 0))),
+            );
+            const clipEnd = Math.max(
+                ...containers.map(
+                    (clip) =>
+                        Math.max(0, finite(clip.startSec, 0)) +
+                        Math.max(0, finite(clip.lengthSec, 0)),
+                ),
+            );
             const anchorStart = record.memberStartSec ?? record.startSec;
             const anchorEnd = record.memberEndSec ?? record.endSec;
             const scaleStart = clipStart + (record.startSec - anchorStart);
@@ -2386,7 +2663,11 @@ function materializeEditedRecords(
         const rawEndSec = currentStart + (record.endSec - recordAnchorStart) * scale;
         const startSec = Math.max(currentStart, Math.min(currentEnd, rawStartSec));
         const endSec = Math.max(currentStart, Math.min(currentEnd, rawEndSec));
-        if (!(endSec > startSec + 1e-9) || endSec - startSec < MIN_AUTO_BLOCK_SEC) {
+        const splitRecord = record.id.includes(":left:") || record.id.includes(":right:");
+        if (
+            !(endSec > startSec + 1e-9) ||
+            (!splitRecord && endSec - startSec < MIN_AUTO_BLOCK_SEC)
+        ) {
             return null;
         }
 
@@ -2590,12 +2871,12 @@ function materializeEditedRecords(
          */
         const recordBeyondMember =
             record.startSec < recordedStart - 1e-6 || record.endSec > recordedEnd + 1e-6;
-        const splitSuffix = record.members[0]?.syllableId ?? "";
+        const splitRecord = record.id.includes(":left:") || record.id.includes(":right:");
         const isSplitSegment =
             record.members.length === 1 &&
             record.memberStartSec !== undefined &&
             record.memberEndSec !== undefined &&
-            (splitSuffix.endsWith(":L") || splitSuffix.endsWith(":R")) &&
+            splitRecord &&
             !recordBeyondMember;
         if (recordBeyondMember || isSplitSegment) {
             const delta = originalStart - recordedStart;
@@ -2633,7 +2914,7 @@ function materializeEditedRecords(
             Math.abs(record.endSec - recordedEnd) <= 1e-6
                 ? currentEnd
                 : originalStart + recordEndT * originalWidth;
-        if (!(movedEnd > movedStart + 1e-9) || !(movedEnd - movedStart >= MIN_AUTO_BLOCK_SEC)) {
+        if (!(movedEnd > movedStart + 1e-9)) {
             continue;
         }
         edited.push({
@@ -2783,7 +3064,7 @@ function materializeNonOverlappingParamBlocks(args: {
         const explicit = materializeEditedRecords(
             { ...materializeArgs, state: explicitState },
             auto,
-        );
+        ).filter((block) => block.members.some((member) => explicitClips.has(member.clipId)));
         /*
          * 被替换的原自动块在显式记录里通过 `blockIds` 标记；先按它算出
          * 容器内仍应显示的自动块，再把显式块与它们合并。合并组也用显式块的
@@ -2802,7 +3083,19 @@ function materializeNonOverlappingParamBlocks(args: {
                     edit.startSec < block.endSec - 1e-6 && edit.endSec > block.startSec + 1e-6,
             );
         });
-        const combined = [...explicit, ...keptAuto];
+        // Explicit records only own their member Clips. Reuse the normal
+        // pipeline for every other Clip, including its existing merges/edits.
+        const untouched = materializeNonOverlappingParamBlocks({
+            ...args,
+            clips: args.clips.filter((clip) => !explicitClips.has(clip.id)),
+            state: {
+                ...args.state,
+                persistedEdits: (args.state.persistedEdits ?? []).filter(
+                    (edit) => !edit.members.some((member) => explicitClips.has(member.clipId)),
+                ),
+            },
+        });
+        const combined = [...explicit, ...keptAuto, ...untouched];
         return collapseOverlappingResult(combined, args.rootTrackId);
     }
     const merged = materializeMergedRecords(args, auto);
@@ -3110,6 +3403,88 @@ export function buildParamBlockTransitionPreview(args: {
     return buildParamBlockTransitionSegments({ ...args, sourceAt });
 }
 
+/** 把全分辨率写入片段立即映射回当前参数窗口，供提交后的本地回显使用。 */
+export function applyFullResSegmentsToParamView<
+    T extends {
+        readonly startFrame: number;
+        readonly stride: number;
+        readonly edit: readonly number[];
+    },
+>(args: {
+    readonly paramView: T;
+    readonly segments: readonly {
+        readonly startFrame: number;
+        readonly values: readonly number[];
+    }[];
+}): T & { readonly edit: number[] } {
+    const next = args.paramView.edit.slice();
+    const stride = Math.max(1, Math.round(args.paramView.stride) || 1);
+    for (const segment of args.segments) {
+        const startFrame = Math.floor(segment.startFrame);
+        const firstIndex = Math.max(
+            0,
+            Math.ceil((startFrame - args.paramView.startFrame) / stride),
+        );
+        const lastIndex = Math.min(
+            next.length - 1,
+            Math.floor(
+                (startFrame + segment.values.length - 1 - args.paramView.startFrame) / stride,
+            ),
+        );
+        for (let targetIndex = firstIndex; targetIndex <= lastIndex; targetIndex += 1) {
+            const frame = args.paramView.startFrame + targetIndex * stride;
+            const value = segment.values[frame - startFrame];
+            if (value === undefined) continue;
+            next[targetIndex] = value;
+        }
+    }
+    return { ...args.paramView, edit: next };
+}
+
+/** Compare committed values only at the frames actually sampled by the backend. */
+export function paramViewContainsCommittedSegments(args: {
+    readonly paramView: {
+        readonly startFrame: number;
+        readonly stride: number;
+        readonly edit: readonly number[];
+    };
+    readonly segments: readonly {
+        readonly startFrame: number;
+        readonly values: readonly number[];
+    }[];
+    readonly tolerance?: number;
+}): boolean {
+    const stride = Math.max(1, Math.round(args.paramView.stride) || 1);
+    const tolerance = Math.max(0, args.tolerance ?? 1e-5);
+    for (const segment of args.segments) {
+        const startFrame = Math.floor(segment.startFrame);
+        const endFrame = startFrame + segment.values.length - 1;
+        const firstIndex = Math.max(
+            0,
+            Math.ceil((startFrame - args.paramView.startFrame) / stride),
+        );
+        const lastIndex = Math.min(
+            args.paramView.edit.length - 1,
+            Math.floor((endFrame - args.paramView.startFrame) / stride),
+        );
+        for (let index = firstIndex; index <= lastIndex; index += 1) {
+            const frame = args.paramView.startFrame + index * stride;
+            const value = segment.values[frame - startFrame];
+            const current = args.paramView.edit[index];
+            if (
+                value === undefined ||
+                current === undefined ||
+                !Number.isFinite(current) ||
+                !Number.isFinite(value) ||
+                Math.abs(current - value) > tolerance
+            ) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 /**
  * 吸附拖动时的**目标值**（预览标签与提交共用）。
  *
@@ -3236,6 +3611,75 @@ export function resolveParamBlockDragWrite(args: {
     return snapParamBlockValueDelta({ delta: rawDelta, step: args.step });
 }
 
+/** 快速拖动时 pointerup 可能没有对应的最后一条 pointermove；松手坐标必须优先。 */
+export function resolveParamBlockDragRelease(args: {
+    readonly didDrag: boolean;
+    readonly startClientY: number;
+    readonly lastMoveClientY: number;
+    readonly releaseClientY: number;
+}): { readonly didDrag: boolean; readonly clientY: number } {
+    const clientY = Number.isFinite(args.releaseClientY)
+        ? args.releaseClientY
+        : args.lastMoveClientY;
+    const didDrag =
+        args.didDrag || (Number.isFinite(clientY) && Math.abs(clientY - args.startClientY) > 3);
+    return { didDrag, clientY };
+}
+
+/**
+ * 拖动期间块的显示中心只由**手势起点 + 指针位移**决定。
+ *
+ * 在此之前，块的 y 位置由实时曲线主簇反算。即使最终曲线正确，低缩放的
+ * stride、局部静音帧和异步窗口切换也会让每一帧算出的主簇略有不同，表现为
+ * 块在上下两个像素位置之间闪烁；松手后的全分辨率曲线还会再算一次，造成
+ * 最后一次回跳。拖动和交接期间直接投影这一个确定值，曲线仍独立实时更新。
+ */
+export function projectParamBlockDragDisplayValue(args: {
+    readonly startValue: number | null;
+    readonly valueDelta: number;
+    readonly param: string;
+    readonly snapToSemitone: boolean;
+}): number | null {
+    if (
+        args.startValue === null ||
+        !Number.isFinite(args.startValue) ||
+        !Number.isFinite(args.valueDelta)
+    ) {
+        return null;
+    }
+    const value = args.startValue + args.valueDelta;
+    return args.param === "pitch" && args.snapToSemitone ? Math.round(value) : value;
+}
+
+/**
+ * 创建块时把对应曲线整体平移到目标值，保留原有起伏与滑音轮廓。
+ * 音高 0 表示无声帧，保持不动。
+ */
+export function shiftParamBlockCurveValuesToTarget(args: {
+    readonly values: readonly number[];
+    readonly target: number;
+    readonly param: string;
+    readonly curveOwned?: boolean;
+}): number[] {
+    if (!Number.isFinite(args.target)) return args.values.slice();
+    const editable = args.values.filter(
+        (value) => Number.isFinite(value) && (args.param !== "pitch" || value > 0),
+    );
+    if (editable.length === 0)
+        return args.curveOwned ? args.values.map(() => args.target) : args.values.slice();
+    const center =
+        (args.curveOwned
+            ? paramLineValueCenter(editable, args.param === "pitch")
+            : modeCenterOfValues(editable, {
+                  param: args.param,
+                  isPitch: args.param === "pitch",
+              })) ?? editable[0];
+    const delta = args.target - (center as number);
+    return args.values.map((value) =>
+        Number.isFinite(value) && (args.param !== "pitch" || value > 0) ? value + delta : value,
+    );
+}
+
 function snapScaleMidi(midi: number, notes: readonly number[]): number {
     const normalized = [...new Set(notes.map((n) => ((Math.round(n) % 12) + 12) % 12))];
     if (normalized.length === 0) return Math.round(midi);
@@ -3346,6 +3790,7 @@ export function buildParamBlockDragSegments(args: {
     readonly anchorValue: number;
     readonly valueDelta: number;
     readonly sourceAt: (frame: number) => number;
+    readonly fillEmptyPitch?: boolean;
 }): Array<{ startFrame: number; values: number[] }> {
     const fp = Math.max(1e-6, args.framePeriodMs);
     const spans = args.blocks
@@ -3377,8 +3822,25 @@ export function buildParamBlockDragSegments(args: {
     return merged
         .map((span) => {
             const values: number[] = [];
+            const emptyPitch =
+                args.fillEmptyPitch &&
+                args.param === "pitch" &&
+                !Array.from({ length: span.endFrame - span.startFrame + 1 }, (_, i) =>
+                    args.sourceAt(span.startFrame + i),
+                ).some((value) => value > 0);
             for (let frame = span.startFrame; frame <= span.endFrame; frame += 1) {
                 const source = args.sourceAt(frame);
+                if (emptyPitch) {
+                    values.push(
+                        paramBlockDragValue({
+                            param: args.param,
+                            original: args.anchorValue,
+                            anchorValue: args.anchorValue,
+                            valueDelta: args.valueDelta,
+                        }),
+                    );
+                    continue;
+                }
                 if (args.param === "pitch" && source <= 0) {
                     values.push(source);
                     continue;
@@ -3410,6 +3872,7 @@ export function buildParamBlockPreviewSegments(args: {
     readonly param: string;
     readonly anchorValue: number;
     readonly valueDelta: number;
+    readonly fillEmptyPitch?: boolean;
     readonly pv: {
         readonly startFrame: number;
         readonly stride: number;
@@ -3424,6 +3887,7 @@ export function buildParamBlockPreviewSegments(args: {
         param: args.param,
         anchorValue: args.anchorValue,
         valueDelta: args.valueDelta,
+        fillEmptyPitch: args.fillEmptyPitch,
         sourceAt: (frame) => {
             const index = Math.round((frame - args.pv.startFrame) / step);
             /*
@@ -3540,11 +4004,12 @@ export function previewParamBlockCreateLayout<
         readonly averageValue?: number | null;
         readonly selected: boolean;
         readonly displayCenterValue?: number | null;
-    /** pitch 块中心是否吸附半音行心；实时拖动时显式 false。 */
-    readonly displayCenterSnapToSemitone?: boolean;
+        /** pitch 块中心是否吸附半音行心；实时拖动时显式 false。 */
+        readonly displayCenterSnapToSemitone?: boolean;
     },
 >(args: {
     readonly blocks: readonly T[];
+    readonly framePeriodMs?: number;
     readonly startSec: number;
     readonly endSec: number;
     readonly createId: string;
@@ -3560,6 +4025,38 @@ export function previewParamBlockCreateLayout<
           readonly displayCenterValue?: number | null;
       }
 > {
+    if (args.framePeriodMs) {
+        const fp = args.framePeriodMs;
+        const before = args.blocks.map((block) => ({
+            id: block.id,
+            startFrame: Math.round((block.startSec * 1000) / fp),
+            endFrameExclusive: Math.round((block.endSec * 1000) / fp),
+        }));
+        const target = {
+            id: args.createId,
+            startFrame: Math.round((Math.min(args.startSec, args.endSec) * 1000) / fp),
+            endFrameExclusive: Math.round((Math.max(args.startSec, args.endSec) * 1000) / fp),
+        };
+        return placeParamLineBlock(before, target).map((block) => {
+            const original =
+                args.blocks.find((old) => old.id === block.id) ??
+                args.blocks.find(
+                    (old) =>
+                        old.startSec <= (block.startFrame * fp) / 1000 + 1e-9 &&
+                        old.endSec >= (block.endFrameExclusive * fp) / 1000 - 1e-9,
+                );
+            return {
+                ...original,
+                id: block.id,
+                startSec: (block.startFrame * fp) / 1000,
+                endSec: (block.endFrameExclusive * fp) / 1000,
+                selected: block.id === target.id,
+                averageValue: block.id === target.id ? args.value : original?.averageValue,
+                displayCenterValue:
+                    block.id === target.id ? args.value : original?.displayCenterValue,
+            };
+        });
+    }
     const next: Array<
         | T
         | {
@@ -3595,6 +4092,28 @@ export function previewParamBlockCreateLayout<
         selected: true,
     });
     return next;
+}
+
+/** 创建预览每帧都从按下时的块集重建，拖回后自动恢复曾覆盖的块。 */
+export function projectParamBlockCreatePreviewFromBase<
+    T extends {
+        readonly id: string;
+        readonly startSec: number;
+        readonly endSec: number;
+        readonly averageValue?: number | null;
+        readonly selected: boolean;
+        readonly displayCenterValue?: number | null;
+        readonly displayCenterSnapToSemitone?: boolean;
+    },
+>(args: {
+    readonly baseBlocks: readonly T[];
+    readonly framePeriodMs?: number;
+    readonly startSec: number;
+    readonly endSec: number;
+    readonly createId: string;
+    readonly value: number | null;
+}): ReturnType<typeof previewParamBlockCreateLayout<T>> {
+    return previewParamBlockCreateLayout({ ...args, blocks: args.baseBlocks });
 }
 
 /**
@@ -3671,6 +4190,23 @@ export function nearestParamBlockByTime<
         }
     }
     return best;
+}
+
+/** 播放头严格位于块内部时返回该块；正好落在公共边界上返回 null。 */
+export function paramBlockContainingSec<
+    T extends {
+        readonly startSec: number;
+        readonly endSec: number;
+    },
+>(blocks: readonly T[], sec: number): T | null {
+    if (!Number.isFinite(sec)) return null;
+    return (
+        blocks.find(
+            (block) =>
+                sec > Math.min(block.startSec, block.endSec) + 1e-9 &&
+                sec < Math.max(block.startSec, block.endSec) - 1e-9,
+        ) ?? null
+    );
 }
 
 /**

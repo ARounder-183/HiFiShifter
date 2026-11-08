@@ -130,8 +130,19 @@ declare global {
 type Pending = {
     resolve(value: unknown): void;
     reject(error: Error): void;
-    timer: ReturnType<typeof setTimeout>;
+    timer: ReturnType<typeof setTimeout> | null;
+    command: string;
+    args?: Record<string, unknown>;
+    files?: File[];
 };
+
+export const PLUGIN_ACTIVE_REQUEST_LIMIT = 12;
+export const PLUGIN_BACKGROUND_REQUEST_LIMIT = 2;
+const PLUGIN_PENDING_REQUEST_LIMIT = 512;
+
+function isBackgroundRequest(command: string): boolean {
+    return command.startsWith("get_waveform_");
+}
 
 /**
  * 每条插件命令的等待上限（毫秒）。
@@ -152,6 +163,8 @@ type Pending = {
  */
 const COMMAND_TIMEOUT_MS: Readonly<Record<string, number>> = {
     run_vocoder_benchmark: 15 * 60_000,
+    // GAME is a progress-reporting slow-lane job; leave ordinary reads at 30 s.
+    analyze_clip_syllables: 15 * 60_000,
     // 导出诊断包要读模型摘要 + 打包日志，大工程上远超 30 s。
     export_diagnostics: 5 * 60_000,
 };
@@ -233,7 +246,50 @@ export function createPluginHost(
     let nextId = 1;
     let eventId = 1;
     const pending = new Map<number, Pending>();
+    const interactive: Pending[] = [];
+    const background: Pending[] = [];
+    let activeBackground = 0;
     const listeners = new Map<string, Set<(event: HostEvent<unknown>) => void>>();
+    function pump() {
+        while (!closed && pending.size < PLUGIN_ACTIVE_REQUEST_LIMIT) {
+            const slot =
+                interactive.shift() ??
+                (activeBackground < PLUGIN_BACKGROUND_REQUEST_LIMIT
+                    ? background.shift()
+                    : undefined);
+            if (!slot) return;
+            if (!Number.isSafeInteger(nextId)) {
+                slot.reject(new Error("Exhausted plugin request identity"));
+                continue;
+            }
+            const id = nextId++;
+            pending.set(id, slot);
+            if (isBackgroundRequest(slot.command)) activeBackground += 1;
+            slot.timer = setTimeout(() => {
+                if (!pending.delete(id)) return;
+                if (isBackgroundRequest(slot.command)) activeBackground -= 1;
+                slot.reject(new Error("Plugin command timed out: " + slot.command));
+                pump();
+            }, commandTimeoutMs(slot.command));
+            try {
+                const message = {
+                    version: 1,
+                    viewId: boot.viewId,
+                    id,
+                    command: slot.command,
+                    args: slot.args,
+                };
+                if (slot.files) port.postMessageWithAdditionalObjects!(message, slot.files);
+                else port.postMessage(message);
+            } catch (error) {
+                clearTimeout(slot.timer);
+                if (pending.delete(id)) {
+                    if (isBackgroundRequest(slot.command)) activeBackground -= 1;
+                    slot.reject(error instanceof Error ? error : new Error(String(error)));
+                }
+            }
+        }
+    }
     function receive(event: { data: unknown }) {
         if (closed || !event.data || typeof event.data !== "object") return;
         const data = event.data as Record<string, unknown>;
@@ -257,7 +313,8 @@ export function createPluginHost(
         const slot = pending.get(data.id);
         if (!slot) return;
         pending.delete(data.id);
-        clearTimeout(slot.timer);
+        if (slot.timer !== null) clearTimeout(slot.timer);
+        if (isBackgroundRequest(slot.command)) activeBackground -= 1;
         if (data.ok === true) slot.resolve(data.value);
         else
             slot.reject(
@@ -267,13 +324,18 @@ export function createPluginHost(
                     typeof data.errorCode === "number" ? data.errorCode : null,
                 ),
             );
+        pump();
     }
     port.addEventListener("message", receive);
     return {
         kind: "plugin",
         invoke<T>(command: string, args?: Record<string, unknown>, files?: File[]): Promise<T> {
             if (closed) return Promise.reject(new Error("Plugin editor closed"));
-            if (pending.size >= 128)
+            const total = pending.size + interactive.length + background.length;
+            if (
+                total >= PLUGIN_PENDING_REQUEST_LIMIT ||
+                (isBackgroundRequest(command) && total >= PLUGIN_PENDING_REQUEST_LIMIT - 128)
+            )
                 return Promise.reject(new Error("Too many pending plugin requests"));
             if (!command || command.length > 128 || !Number.isSafeInteger(nextId)) {
                 return Promise.reject(
@@ -290,22 +352,17 @@ export function createPluginHost(
                     new Error("Native File import unavailable; use File menu import"),
                 );
             }
-            const id = nextId++;
             return new Promise<T>((resolve, reject) => {
-                const timer = setTimeout(() => {
-                    pending.delete(id);
-                    reject(new Error("Plugin command timed out: " + command));
-                }, commandTimeoutMs(command));
-                pending.set(id, { resolve: (value) => resolve(value as T), reject, timer });
-                try {
-                    const message = { version: 1, viewId: boot.viewId, id, command, args };
-                    if (files) port.postMessageWithAdditionalObjects!(message, files);
-                    else port.postMessage(message);
-                } catch (error) {
-                    clearTimeout(timer);
-                    pending.delete(id);
-                    reject(error instanceof Error ? error : new Error(String(error)));
-                }
+                const slot: Pending = {
+                    resolve: (value) => resolve(value as T),
+                    reject,
+                    timer: null,
+                    command,
+                    args,
+                    files,
+                };
+                (isBackgroundRequest(command) ? background : interactive).push(slot);
+                pump();
             });
         },
         async listen<T>(event: string, listener: (event: HostEvent<T>) => void) {
@@ -323,11 +380,14 @@ export function createPluginHost(
             if (closed) return;
             closed = true;
             port.removeEventListener("message", receive);
-            for (const slot of pending.values()) {
-                clearTimeout(slot.timer);
+            for (const slot of [...pending.values(), ...interactive, ...background]) {
+                if (slot.timer !== null) clearTimeout(slot.timer);
                 slot.reject(new Error("Plugin editor closed"));
             }
             pending.clear();
+            interactive.length = 0;
+            background.length = 0;
+            activeBackground = 0;
             listeners.clear();
         },
     };

@@ -543,6 +543,7 @@ export interface ParamFramesPayload {
     /** 与 orig/edit 逐帧对齐的显式编辑位图（PFB2）。 */
     edited?: boolean[];
     authority_revision?: number;
+    geometry_signature?: string;
     baseline_revision?: number;
     geometry_revision?: number;
     /**

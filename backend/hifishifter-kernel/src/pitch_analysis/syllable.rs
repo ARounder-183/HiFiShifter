@@ -44,10 +44,11 @@ pub struct TakeSyllableAnalysis {
 
 impl TakeSyllableAnalysis {
     pub fn is_current(&self, source_digest: &str) -> bool {
-        self.algorithm == SYLLABLE_ALGORITHM
-            && self.algorithm_version == SYLLABLE_ALGORITHM_VERSION
-            && self.source_digest == source_digest
-            && !self.source_spans_sec.is_empty()
+        let supported = (self.algorithm == SYLLABLE_ALGORITHM
+            && self.algorithm_version == SYLLABLE_ALGORITHM_VERSION)
+            || (self.algorithm == crate::game_onnx::GAME_ALGORITHM
+                && self.algorithm_version == crate::game_onnx::GAME_ALGORITHM_VERSION);
+        supported && self.source_digest == source_digest && !self.source_spans_sec.is_empty()
     }
 }
 
@@ -504,6 +505,34 @@ pub fn fill_spans_without_merging(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn syllable_cache_accepts_game_and_fallback_with_their_own_versions() {
+        for (algorithm, version) in [
+            (SYLLABLE_ALGORITHM, SYLLABLE_ALGORITHM_VERSION),
+            (
+                crate::game_onnx::GAME_ALGORITHM,
+                crate::game_onnx::GAME_ALGORITHM_VERSION,
+            ),
+        ] {
+            let mut analysis = TakeSyllableAnalysis {
+                algorithm: algorithm.into(),
+                algorithm_version: version,
+                source_digest: "same-pcm".into(),
+                source_spans_sec: vec![SyllableSpan {
+                    start_sec: 0.0,
+                    end_sec: 1.0,
+                }],
+            };
+            assert!(analysis.is_current("same-pcm"), "{algorithm} was rejected");
+            assert!(!analysis.is_current("changed-pcm"));
+            analysis.algorithm_version += 1;
+            assert!(!analysis.is_current("same-pcm"));
+            analysis.algorithm_version = version;
+            analysis.source_spans_sec.clear();
+            assert!(!analysis.is_current("same-pcm"));
+        }
+    }
 
     fn level_at(secs: &[f64], fps: f64) -> Vec<f32> {
         let frames = (secs.len() as f64 * fps).ceil() as usize;

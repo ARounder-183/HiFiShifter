@@ -9,7 +9,7 @@ import type { Rgba } from "../../../renderKernel/instanceTypes";
 import {
     PARAM_BLOCK_TRANSITION_HANDLE_LINE_LENGTH_PX,
     PARAM_BLOCK_TRANSITION_HANDLE_OUTSET_X_PX,
-    PARAM_BLOCK_TRANSITION_HANDLE_OUTSET_Y_PX,
+    paramBlockTransitionHandleY,
 } from "../../paramBlocks";
 import type { GridInstance } from "./gridInstances";
 
@@ -175,8 +175,15 @@ export function buildParamBlockScene(args: ParamBlockInstanceArgs): ParamBlockSc
         if (!Number.isFinite(startSec) || !Number.isFinite(endSec)) continue;
         const x0 = secToViewportPx(axis, startSec);
         const x1 = secToViewportPx(axis, endSec);
-        if (!(x1 - x0 > 0.5)) continue;
+        /*
+         * 时间块没有用户可见的最短长度。即使在高倍缩放下只有亚像素宽，
+         * 也要用至少 1 CSS px 的填充显示出来；直接按 0.5px 跳过会让合法
+         * 短切段完全消失，也无法命中。
+         */
+        if (!(x1 - x0 > 1e-9)) continue;
         if (x1 <= 0 || x0 >= axis.viewportWidthPx) continue;
+        const visibleWidth = Math.max(1, x1 - x0);
+        const visibleX1 = x0 + visibleWidth;
 
         /*
          * 纵向裁剪必须按**视口交集**判断：块整体在视口上下方时直接跳过，
@@ -195,7 +202,7 @@ export function buildParamBlockScene(args: ParamBlockInstanceArgs): ParamBlockSc
             : block.merged
               ? (args.mergedFillRgba ?? args.fillRgba)
               : args.fillRgba;
-        const fillWidth = Math.max(1, x1 - x0);
+        const fillWidth = visibleWidth;
         // 块相交；只在被视口截断的那一侧画边线，不能在上/下边缘伪造一条块顶。
         const clipTop = rawTop < 0;
         const clipBottom = rawBottom > height;
@@ -208,7 +215,11 @@ export function buildParamBlockScene(args: ParamBlockInstanceArgs): ParamBlockSc
                 rgba: fillRgba,
                 radius: Math.max(
                     0,
-                    Math.min(args.cornerRadiusPx ?? DEFAULT_CORNER_RADIUS_PX, (x1 - x0) / 2, h / 2),
+                    Math.min(
+                        args.cornerRadiusPx ?? DEFAULT_CORNER_RADIUS_PX,
+                        visibleWidth / 2,
+                        h / 2,
+                    ),
                 ),
             });
         }
@@ -220,13 +231,16 @@ export function buildParamBlockScene(args: ParamBlockInstanceArgs): ParamBlockSc
          * 曲线帧里的一个绘制步骤，不另建 DOM / Canvas 层。
          */
         const leftEdge = Math.max(0, Math.min(x0, axis.viewportWidthPx - borderPx));
-        const rightEdge = Math.max(0, Math.min(x1 - borderPx, axis.viewportWidthPx - borderPx));
+        const rightEdge = Math.max(
+            0,
+            Math.min(visibleX1 - borderPx, axis.viewportWidthPx - borderPx),
+        );
         items.push({ x: leftEdge, y: top, w: borderPx, h, rgba, value: -3 });
         if (rightEdge > leftEdge + borderPx * 0.5) {
             items.push({ x: rightEdge, y: top, w: borderPx, h, rgba, value: -3 });
         } else {
             items.push({
-                x: Math.max(0, Math.min(x1 - borderPx, axis.viewportWidthPx - borderPx)),
+                x: Math.max(0, Math.min(visibleX1 - borderPx, axis.viewportWidthPx - borderPx)),
                 y: top,
                 w: borderPx,
                 h,
@@ -262,7 +276,7 @@ export function buildParamBlockScene(args: ParamBlockInstanceArgs): ParamBlockSc
             items.push({
                 x: x0,
                 y: top,
-                w: x1 - x0,
+                w: visibleWidth,
                 h: borderPx,
                 rgba: args.mergedRgba,
                 value: -4,
@@ -290,6 +304,7 @@ export function buildParamBlockScene(args: ParamBlockInstanceArgs): ParamBlockSc
         }
         if (block.transitionHandle !== undefined && block.transitionHandle !== null) {
             const handleSecX = secToViewportPx(axis, block.transitionHandle.sec);
+            const rightBlock = blockById.get(block.transitionHandle.rightId);
             /*
              * 手柄不是“每个相接边界”的装饰：它只属于当前正在编辑的块。
              * 块层收到完整的相接关系，但只有块自身被选中（或正在悬停该
@@ -301,7 +316,7 @@ export function buildParamBlockScene(args: ParamBlockInstanceArgs): ParamBlockSc
              * 既容易被下一个块遮住，也会和块边缘缩放热区抢指针。
              */
             const handleX = handleSecX + PARAM_BLOCK_TRANSITION_HANDLE_OUTSET_X_PX;
-            const handleY = rawTop - PARAM_BLOCK_TRANSITION_HANDLE_OUTSET_Y_PX;
+            const handleY = paramBlockTransitionHandleY(rawTop, rightBlock?.topPx);
             if (
                 visible &&
                 handleX >= -HANDLE_GLOW_DIAMETER_PX &&
@@ -352,8 +367,20 @@ export function buildParamBlockScene(args: ParamBlockInstanceArgs): ParamBlockSc
              * widthSec = 0 是“硬切换”，仍画一小段很短的曲线作为可视提示，
              * 与 OpenUtau 的音高轨迹一致；真正增大平滑宽度时再向右展开。
              */
-            const transitionWidthPx = Math.max(8, block.transitionHandle.widthSec * axis.pxPerSec);
-            const rightBlock = blockById.get(block.transitionHandle.rightId);
+            const roomPx = Math.max(
+                0,
+                Math.min(
+                    ((block.endSec - block.startSec) * axis.pxPerSec) / 2,
+                    rightBlock
+                        ? ((rightBlock.endSec - rightBlock.startSec) * axis.pxPerSec) / 2
+                        : Infinity,
+                ),
+            );
+            const transitionWidthPx = Math.min(
+                roomPx,
+                Math.max(Math.min(8, roomPx), block.transitionHandle.widthSec * axis.pxPerSec),
+            );
+            if (transitionWidthPx < 0.5) continue;
             /*
              * 贝塞尔只作用在相接点**右侧**：左侧块自己的音高线保持不变。
              * 起点圆点就是相接点，曲线向右展开；右侧块在原曲线基础上被拉向

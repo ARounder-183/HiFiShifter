@@ -383,7 +383,9 @@ mod lane_tests {
                         {"clipId":clip.clone(),"takeId":take.clone(),"syllableId":"a","sourceStartSec":0.0,"sourceEndSec":0.00004}
                     ],
                     "startSec": 0.0,
-                    "endSec": 0.03
+                    "endSec": 0.03,
+                    "explicit": true,
+                    "transitionSec": 0.25
                 }],
                 "checkpoint": true
             }),
@@ -397,6 +399,8 @@ mod lane_tests {
         );
         assert_eq!(read["intervalEdits"][0]["editId"], "edit:v7");
         assert_eq!(read["intervalEdits"][0]["endSec"], 0.03);
+        assert_eq!(read["intervalEdits"][0]["explicit"], true);
+        assert_eq!(read["intervalEdits"][0]["transitionSec"], 0.25);
         // 通道容量足够容纳本测试产生的 history/state 事件；不读取内容。
     }
 }
@@ -797,6 +801,111 @@ struct IntervalEditInput {
     #[serde(default)]
     transition_sec: f64,
 }
+
+fn interval_edit_input_is_valid(edit: &IntervalEditInput) -> bool {
+    let width = edit.end_sec - edit.start_sec;
+    !edit.member_refs.is_empty()
+        && edit.edit_id.len() <= 512
+        && width.is_finite()
+        // 切分不再有用户可见的最短块限制。这里只拒绝真正零宽 / 倒序记录，
+        // 不能再沿用 20ms 阈值，否则短切段会在命令入口被静默删掉。
+        && width > 1e-9
+        && edit.start_sec.is_finite()
+        && edit.end_sec.is_finite()
+}
+
+fn interval_edit_payload(edit: &ParamBlockIntervalEdit) -> Value {
+    json!({
+        "editId": edit.edit_id,
+        "memberRefs": edit.member_refs.iter().map(|member| json!({
+            "clipId": member.clip_id,
+            "takeId": member.take_id,
+            "syllableId": member.syllable_id,
+            "sourceStartSec": member.source_start_sec,
+            "sourceEndSec": member.source_end_sec,
+        })).collect::<Vec<_>>(),
+        "startSec": edit.start_sec,
+        "endSec": edit.end_sec,
+        "memberStartSec": edit.member_start_sec,
+        "memberEndSec": edit.member_end_sec,
+        "blockIds": edit.block_ids,
+        "explicit": edit.explicit,
+        "deleted": edit.deleted,
+        "manual": edit.manual,
+        "value": edit.value,
+        "transitionSec": edit.transition_sec,
+    })
+}
+
+#[cfg(test)]
+mod interval_edit_input_tests {
+    use super::{
+        interval_edit_input_is_valid, interval_edit_payload, IntervalEditInput, MergeMemberInput,
+        ParamBlockIntervalEdit, ParamBlockMemberRef,
+    };
+
+    fn edit(start_sec: f64, end_sec: f64) -> IntervalEditInput {
+        IntervalEditInput {
+            edit_id: "edit:split".into(),
+            member_refs: vec![MergeMemberInput {
+                clip_id: "clip".into(),
+                take_id: "take".into(),
+                syllable_id: "split".into(),
+                source_start_sec: 0.0,
+                source_end_sec: 1.0,
+            }],
+            start_sec,
+            end_sec,
+            member_start_sec: 0.0,
+            member_end_sec: 1.0,
+            block_ids: Vec::new(),
+            explicit: true,
+            deleted: false,
+            manual: false,
+            value: None,
+            transition_sec: 0.0,
+        }
+    }
+
+    #[test]
+    fn keeps_short_split_segments() {
+        assert!(interval_edit_input_is_valid(&edit(0.0, 0.001)));
+    }
+
+    #[test]
+    fn rejects_only_zero_width_and_reversed_segments() {
+        assert!(!interval_edit_input_is_valid(&edit(0.5, 0.5)));
+        assert!(!interval_edit_input_is_valid(&edit(0.5, 0.49)));
+    }
+
+    #[test]
+    fn payload_round_trips_explicit_and_transition_fields() {
+        let payload = interval_edit_payload(&ParamBlockIntervalEdit {
+            edit_id: "edit:split".into(),
+            member_refs: vec![ParamBlockMemberRef {
+                clip_id: "clip".into(),
+                take_id: "take".into(),
+                syllable_id: "split".into(),
+                source_start_sec: 0.0,
+                source_end_sec: 0.001,
+            }],
+            start_sec: 0.0,
+            end_sec: 0.001,
+            member_start_sec: 0.0,
+            member_end_sec: 1.0,
+            block_ids: vec!["auto:clip:source".into()],
+            explicit: true,
+            deleted: false,
+            manual: false,
+            value: None,
+            transition_sec: 0.25,
+        });
+        assert_eq!(payload["explicit"], true);
+        assert_eq!(payload["transitionSec"], 0.25);
+        assert_eq!(payload["endSec"], 0.001);
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Segment {
@@ -849,7 +958,6 @@ fn estimated_full_payload_bytes(
     for clip in &timeline.clips {
         // 每条 clip 的定长字段（id / 路径 / 淡变 / 速率 / 颜色 …）。
         bytes += 1024;
-        bytes += clip.waveform_preview.as_ref().map_or(0, |w| w.len() * 12);
         bytes += clip
             .midi_note_data
             .as_ref()
@@ -895,6 +1003,11 @@ pub(crate) fn payload(session: &EditorSession, lite: bool) -> Result<Value, Stri
     } else {
         timeline.to_payload()
     };
+    // The editor fetches waveform mipmaps through the binary API. Repeating
+    // previews in every timeline reply floods the UI thread and WebView heap.
+    for clip in &mut payload.clips {
+        clip.waveform_preview = None;
+    }
     payload.playhead_sec = position.max(0.);
     let (undo, redo) = history_depths_of(&session.history.lock_or_recover());
     payload.undo_depth = Some(undo);
@@ -1035,12 +1148,24 @@ fn peaks(
     Ok(result)
 }
 
+/// Read-only startup data has no document/PCM dependency and can bypass the actor.
+pub(crate) fn startup_settings(command: &str) -> Option<Value> {
+    match command {
+        "get_ui_settings" => Some(json!(crate::settings_store::settings())),
+        "ui_kv_dump" => Some(json!(crate::settings_store::frontend_prefs())),
+        _ => None,
+    }
+}
+
 /// 仅actor线程调用。宿主PCM不可用/未知命令/平台能力缺失均明确报错。
 pub(super) fn dispatch(
     session: &EditorSession,
     command: &str,
     input: Value,
 ) -> Result<Value, String> {
+    if let Some(settings) = startup_settings(command) {
+        return Ok(settings);
+    }
     match command {
         "list_directory"
         | "stat_paths"
@@ -1229,6 +1354,36 @@ pub(super) fn dispatch(
             // 同步解码（那会让所有编辑与宿主保存一起排队）。
             return Err("analyze_clip_syllables must run on the syllable slow lane".into());
         }
+        "get_param_line_blocks" => {
+            return session.param_line_block_payload(
+                input["rootTrackId"].as_str().ok_or("rootTrackId missing")?,
+            );
+        }
+        "set_param_line_blocks" => {
+            let root = input["rootTrackId"].as_str().ok_or("rootTrackId missing")?;
+            let expected = input["expectedRevision"]
+                .as_u64()
+                .ok_or("expectedRevision missing")?;
+            return session.set_param_line_blocks(
+                root,
+                expected,
+                args(input["blocks"].clone())?,
+                input
+                    .get("gameBaseline")
+                    .filter(|value| !value.is_null())
+                    .map(|value| args(value.clone()))
+                    .transpose()?,
+                input["checkpoint"].as_bool().unwrap_or(true),
+                input
+                    .get("curvePatches")
+                    .map(|value| args(value.clone()))
+                    .transpose()?
+                    .unwrap_or_default(),
+                input["expectedCurveRevision"].as_u64(),
+                input["expectedGeometryRevision"].as_u64(),
+                input["expectedGeometrySignature"].as_str(),
+            );
+        }
         "get_param_block_merges" => {
             let root_track_id = input["rootTrackId"].as_str().ok_or("rootTrackId missing")?;
             track_exists(session, root_track_id)?;
@@ -1262,26 +1417,7 @@ pub(super) fn dispatch(
                     entry
                         .param_block_interval_edits
                         .iter()
-                        .map(|edit| {
-                            json!({
-                                "editId": edit.edit_id,
-                                "memberRefs": edit.member_refs.iter().map(|member| json!({
-                                    "clipId": member.clip_id,
-                                    "takeId": member.take_id,
-                                    "syllableId": member.syllable_id,
-                                    "sourceStartSec": member.source_start_sec,
-                                    "sourceEndSec": member.source_end_sec,
-                                })).collect::<Vec<_>>(),
-                                "startSec": edit.start_sec,
-                                "endSec": edit.end_sec,
-                                "memberStartSec": edit.member_start_sec,
-                                "memberEndSec": edit.member_end_sec,
-                                "blockIds": edit.block_ids,
-                                "deleted": edit.deleted,
-                                "manual": edit.manual,
-                                "value": edit.value,
-                            })
-                        })
+                        .map(interval_edit_payload)
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
@@ -1328,6 +1464,7 @@ pub(super) fn dispatch(
                     .collect();
                 entry.param_block_interval_edits = interval_edits
                     .into_iter()
+                    .filter(interval_edit_input_is_valid)
                     .map(|edit| hifishifter_kernel::state::ParamBlockIntervalEdit {
                         edit_id: edit.edit_id,
                         member_refs: edit
@@ -1351,15 +1488,6 @@ pub(super) fn dispatch(
                         manual: edit.manual,
                         value: edit.value,
                         transition_sec: edit.transition_sec,
-                    })
-                    .filter(|edit| {
-                        let width = edit.end_sec - edit.start_sec;
-                        !edit.member_refs.is_empty()
-                            && edit.edit_id.len() <= 512
-                            && width.is_finite()
-                            && width >= 0.02
-                            && edit.start_sec.is_finite()
-                            && edit.end_sec.is_finite()
                     })
                     .collect();
             }
@@ -1478,6 +1606,9 @@ pub(super) fn dispatch(
     }
     if let Err(error) = session.ensure_loaded(false) {
         if matches!(command, "get_timeline_state" | "get_timeline_state_lite") {
+            if session.is_loaded() || session.source_files_pending() {
+                return payload(session, command == "get_timeline_state_lite");
+            }
             if let Some(document) = session.document() {
                 if !document.ui_tracks.lock_or_recover().is_empty() {
                     {
@@ -1491,7 +1622,25 @@ pub(super) fn dispatch(
                 }
             }
         }
-        return Err(error);
+        let inventory_command = matches!(
+            command,
+            "get_param_frames"
+                | "set_param_frames"
+                | "restore_param_frames"
+                | "set_static_param"
+                | "get_static_param"
+                | "set_track_state"
+                | "select_clip"
+                | "select_track"
+                | "undo_parameter_edit"
+                | "redo_parameter_edit"
+                | "undo_timeline"
+                | "redo_timeline"
+                | "set_history_position"
+        );
+        if !session.source_files_pending() || !inventory_command {
+            return Err(error);
+        }
     }
     match command {
         "get_timeline_state" => payload(session, false),
@@ -2193,6 +2342,10 @@ pub(super) fn dispatch(
             if let Some((next, _, selection)) =
                 history::jump(&mut recorded, &timeline, target, intent, None)
             {
+                let layout_only =
+                    hifishifter_kernel::param_line_blocks::timeline_equal_except_blocks(
+                        &timeline, &next,
+                    );
                 if matches!(command, "undo_parameter_edit" | "redo_parameter_edit") {
                     // 参数快照只恢复控制数据，绝不把旧clip位置/源窗口写回或覆盖当前宿主几何。
                     timeline.params_by_root_track = next.params_by_root_track;
@@ -2212,9 +2365,13 @@ pub(super) fn dispatch(
                 drop(recorded);
                 let timeline_for_publish = timeline.clone();
                 drop(timeline);
-                session.restore_authority_step(target);
-                session.mark_dirty();
-                session.publish_timeline(timeline_for_publish);
+                let restored_curve = session.restore_authority_step(target);
+                if !layout_only || restored_curve == Some(true) {
+                    session.mark_dirty();
+                    session.publish_timeline(timeline_for_publish);
+                } else {
+                    session.mark_metadata_dirty();
+                }
                 session.emit("history_state", history_state(session));
                 session.notify_timeline();
                 let mut payload = payload(session, false)?;

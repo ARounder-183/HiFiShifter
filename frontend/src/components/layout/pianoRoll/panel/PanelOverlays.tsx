@@ -62,22 +62,17 @@ type Props = {
         | "s"
         | "setCtxMenu"
         | "paramBlockContextMenu"
+        | "canRestoreGameParamBlocks"
+        | "restoreGameParamBlocks"
         | "setParamBlockContextMenu"
         | "selectedParamBlockCount"
-        | "selectedParamBlockIds"
         | "canMergeSelectedParamBlocks"
-        | "canUnmergeSelectedParamBlocks"
         | "canDeleteSelectedParamBlocks"
-        | "canRestoreDeletedParamBlocks"
         | "deleteSelectedParamBlocks"
-        | "restoreParamBlocks"
         | "selectedParamBlockDeleted"
-        | "selectedParamBlockIds"
         | "paramBlockSplitAtSec"
         | "splitSelectedParamBlockAt"
         | "mergeSelectedParamBlocks"
-        | "unmergeSelectedParamBlocks"
-        | "paramBlockMessage"
         | "setMidiDialogOpen"
         | "setVibratoDialogOpen"
         | "specifiedBpm"
@@ -138,21 +133,17 @@ export function PanelOverlays({ m }: Props) {
         s,
         setCtxMenu,
         paramBlockContextMenu,
+        canRestoreGameParamBlocks,
+        restoreGameParamBlocks,
         setParamBlockContextMenu,
         selectedParamBlockCount,
         canMergeSelectedParamBlocks,
-        canUnmergeSelectedParamBlocks,
         canDeleteSelectedParamBlocks,
-        canRestoreDeletedParamBlocks,
         deleteSelectedParamBlocks,
-        restoreParamBlocks,
         selectedParamBlockDeleted,
-        selectedParamBlockIds,
         paramBlockSplitAtSec,
         splitSelectedParamBlockAt,
         mergeSelectedParamBlocks,
-        unmergeSelectedParamBlocks,
-        paramBlockMessage,
         setMidiDialogOpen,
         setVibratoDialogOpen,
         specifiedBpm,
@@ -255,22 +246,14 @@ export function PanelOverlays({ m }: Props) {
                     y={paramBlockContextMenu.y}
                     selectedCount={selectedParamBlockCount}
                     canMerge={canMergeSelectedParamBlocks}
-                    canUnmerge={canUnmergeSelectedParamBlocks}
                     canDelete={canDeleteSelectedParamBlocks}
-                    canRestoreDeleted={canRestoreDeletedParamBlocks}
+                    canRestoreGame={canRestoreGameParamBlocks}
+                    onRestoreGame={restoreGameParamBlocks}
                     selectedDeleted={selectedParamBlockDeleted}
                     onDelete={deleteSelectedParamBlocks}
-                    onRestoreDeleted={() => restoreParamBlocks()}
-                    onRestoreSelected={() => restoreParamBlocks(selectedParamBlockIds)}
-                    mergeMessage={
-                        paramBlockMessage === null
-                            ? null
-                            : tf(paramBlockMessage as Parameters<typeof tf>[0])
-                    }
                     splitAtSec={paramBlockSplitAtSec}
                     onSplit={splitSelectedParamBlockAt}
                     onMerge={mergeSelectedParamBlocks}
-                    onUnmerge={unmergeSelectedParamBlocks}
                     onClose={() => setParamBlockContextMenu(null)}
                     tf={tf}
                 />

@@ -108,3 +108,29 @@ test("编辑 op 的路由分支也带按键描述", async () => {
     expect(fired[0].stroke.code).toBe("KeyC");
     expect(fired[0].stroke.ctrl).toBe(true);
 });
+
+test("IME Backquote triggers once, repeats and editable targets keep normal behavior", async () => {
+    await mount();
+    press({ key: "Process", code: "Backquote", isComposing: true, keyCode: 229 });
+    press({ key: "Process", code: "Backquote", isComposing: true, keyCode: 229, repeat: true });
+    expect(fired.map((item) => item.action)).toEqual(["mode.toggleBlockEdit"]);
+    press({ key: "Process", code: "Backquote", isComposing: true, shiftKey: true });
+    expect(fired).toHaveLength(2);
+    for (const tag of ["input", "textarea", "div"]) {
+        const input = document.createElement(tag);
+        if (tag === "div") input.setAttribute("contenteditable", "true");
+        document.body.append(input);
+        input.dispatchEvent(
+            new KeyboardEvent("keydown", {
+                key: "Process",
+                code: "Backquote",
+                isComposing: true,
+                keyCode: 229,
+                bubbles: true,
+                cancelable: true,
+            }),
+        );
+        input.remove();
+    }
+    expect(fired).toHaveLength(2);
+});

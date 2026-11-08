@@ -530,6 +530,8 @@ pub enum ParamReferenceKind {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ParamFramesPayload {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub geometry_signature: Option<String>,
     pub ok: bool,
     pub root_track_id: String,
     pub param: String,

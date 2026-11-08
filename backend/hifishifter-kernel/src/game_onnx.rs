@@ -639,11 +639,121 @@ pub fn syllable_spans_for_window(
     out
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct GameFileStamp {
+    path: PathBuf,
+    bytes: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+impl GameFileStamp {
+    fn read(path: &Path) -> Result<Self, String> {
+        let metadata = std::fs::metadata(path)
+            .map_err(|error| format!("GAME source/model metadata {}: {error}", path.display()))?;
+        Ok(Self {
+            path: path.canonicalize().unwrap_or_else(|_| path.to_path_buf()),
+            bytes: metadata.len(),
+            modified: metadata.modified().ok(),
+        })
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct GameSourceKey {
+    source: GameFileStamp,
+    models: Vec<GameFileStamp>,
+    inference: (usize, u32, i64, u32),
+}
+
+impl GameSourceKey {
+    fn read(source: &Path, models: &Path, inference: GameInferenceConfig) -> Result<Self, String> {
+        let models = [
+            "config.json",
+            "encoder.onnx",
+            "segmenter.onnx",
+            "estimator.onnx",
+            "bd2dur.onnx",
+            "dur2bd.onnx",
+        ]
+        .iter()
+        .map(|file| GameFileStamp::read(&models.join(file)))
+        .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            source: GameFileStamp::read(source)?,
+            models,
+            inference: (
+                inference.d3pm_steps,
+                inference.seg_threshold.to_bits(),
+                inference.seg_radius,
+                inference.est_threshold.to_bits(),
+            ),
+        })
+    }
+}
+
+const GAME_CACHE_SOURCES: usize = 128;
+const GAME_CACHE_EVENTS: usize = 100_000;
+
+#[derive(Default)]
+struct GameSourceCache {
+    entries: std::collections::VecDeque<(GameSourceKey, Vec<GameNoteEvent>)>,
+    event_count: usize,
+}
+
+impl GameSourceCache {
+    fn get_or_compute(
+        &mut self,
+        key: GameSourceKey,
+        compute: impl FnOnce() -> Result<Vec<GameNoteEvent>, String>,
+    ) -> Result<Vec<GameNoteEvent>, String> {
+        if let Some(index) = self.entries.iter().position(|(stored, _)| stored == &key) {
+            let entry = self.entries.remove(index).unwrap();
+            let result = entry.1.clone();
+            self.entries.push_back(entry);
+            return Ok(result);
+        }
+        let result = compute()?;
+        if result.len() > GAME_CACHE_EVENTS {
+            return Ok(result);
+        }
+        while self.entries.len() >= GAME_CACHE_SOURCES
+            || self.event_count + result.len() > GAME_CACHE_EVENTS
+        {
+            let Some((_, evicted)) = self.entries.pop_front() else {
+                break;
+            };
+            self.event_count -= evicted.len();
+        }
+        self.event_count += result.len();
+        self.entries.push_back((key, result.clone()));
+        Ok(result)
+    }
+}
+
+/// Analyze a source once and reuse its events for all Clip windows/takes that
+/// reference it. Cache only note events, with bounded memory and file/model stamps.
+pub fn analyze_source_file(
+    source_path: &Path,
+    model_dir: &Path,
+    inference: GameInferenceConfig,
+) -> Result<Vec<GameNoteEvent>, String> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<GameSourceCache>> =
+        std::sync::OnceLock::new();
+    let key = GameSourceKey::read(source_path, model_dir, inference)?;
+    CACHE
+        .get_or_init(|| std::sync::Mutex::new(GameSourceCache::default()))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get_or_compute(key, || {
+            analyze_source_file_uncached(source_path, model_dir, inference)
+        })
+}
+
 /// 读取源音频并执行 GAME 分析，返回源域音符事件。
 ///
 /// 解码与重采样都在 kernel 内完成，App 与插件可共用同一条路径。调用方负责
-/// 在慢车道线程上调用；这里不做缓存，也不写工程状态。
-pub fn analyze_source_file(
+/// 在慢车道线程上调用；这里不写工程状态。
+fn analyze_source_file_uncached(
     source_path: &Path,
     model_dir: &Path,
     inference: GameInferenceConfig,
@@ -730,6 +840,122 @@ pub fn resolve_model_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cache_event() -> GameNoteEvent {
+        GameNoteEvent {
+            start_sec: 0.0,
+            end_sec: 2.0,
+            midi_note: 60.0,
+            voiced: true,
+        }
+    }
+
+    fn cache_key(id: usize) -> GameSourceKey {
+        GameSourceKey {
+            source: GameFileStamp {
+                path: PathBuf::from(format!("{id}.wav")),
+                bytes: 1,
+                modified: None,
+            },
+            models: Vec::new(),
+            inference: (8, 0.2f32.to_bits(), 2, 0.2f32.to_bits()),
+        }
+    }
+
+    #[test]
+    fn source_cache_reuses_inference_across_clip_windows_without_sharing_mutable_results() {
+        let mut cache = GameSourceCache::default();
+        let mut calls = 0;
+        let first = cache
+            .get_or_compute(cache_key(1), || {
+                calls += 1;
+                Ok(vec![cache_event()])
+            })
+            .unwrap();
+        assert_eq!(
+            syllable_spans_for_window(&first, 0.0, 0.5),
+            vec![(0.0, 0.5)]
+        );
+        let mut second = cache
+            .get_or_compute(cache_key(1), || {
+                calls += 1;
+                Ok(Vec::new())
+            })
+            .unwrap();
+        assert_eq!(
+            syllable_spans_for_window(&second, 1.0, 1.5),
+            vec![(1.0, 1.5)]
+        );
+        second.clear();
+        assert_eq!(
+            cache
+                .get_or_compute(cache_key(1), || panic!("cached source was recomputed"))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn source_cache_invalidates_changed_source_models_and_inference_settings() {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let directory = std::env::temp_dir().join(format!(
+            "hfs-game-cache-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let source = directory.join("audio.wav");
+        std::fs::write(&source, [0u8; 4]).unwrap();
+        for file in [
+            "config.json",
+            "encoder.onnx",
+            "segmenter.onnx",
+            "estimator.onnx",
+            "bd2dur.onnx",
+            "dur2bd.onnx",
+        ] {
+            std::fs::write(directory.join(file), [0u8]).unwrap();
+        }
+        let inference = GameInferenceConfig::default();
+        let original = GameSourceKey::read(&source, &directory, inference).unwrap();
+        std::fs::write(&source, [0u8; 8]).unwrap();
+        let changed_source = GameSourceKey::read(&source, &directory, inference).unwrap();
+        assert!(changed_source != original);
+        std::fs::write(directory.join("encoder.onnx"), [0u8; 2]).unwrap();
+        let changed_model = GameSourceKey::read(&source, &directory, inference).unwrap();
+        assert!(changed_model != changed_source);
+        let changed_options = GameSourceKey::read(
+            &source,
+            &directory,
+            GameInferenceConfig {
+                d3pm_steps: 4,
+                ..inference
+            },
+        )
+        .unwrap();
+        assert!(changed_options != changed_model);
+    }
+
+    #[test]
+    fn source_cache_bounds_retained_events_and_does_not_cache_failures() {
+        let mut cache = GameSourceCache::default();
+        assert!(cache
+            .get_or_compute(cache_key(1), || Err("failed".into()))
+            .is_err());
+        assert!(cache.entries.is_empty());
+        for id in 0..=GAME_CACHE_SOURCES {
+            cache
+                .get_or_compute(cache_key(id), || Ok(vec![cache_event()]))
+                .unwrap();
+        }
+        assert_eq!(cache.entries.len(), GAME_CACHE_SOURCES);
+        assert!(cache.event_count <= GAME_CACHE_EVENTS);
+        let large = vec![cache_event(); GAME_CACHE_EVENTS + 1];
+        cache.get_or_compute(cache_key(999), || Ok(large)).unwrap();
+        assert!(!cache.entries.iter().any(|(key, _)| key == &cache_key(999)));
+    }
 
     #[test]
     fn config_requires_the_games_timestep() {
@@ -832,6 +1058,13 @@ mod tests {
         assert!(syllable_spans_for_window(&events, 0.0, 3.0)
             .iter()
             .any(|(start, end)| *end > *start + 0.1));
+        for _ in 0..35 {
+            assert_eq!(
+                analyze_source_file(&wav_path, &dir, GameInferenceConfig::default())
+                    .expect("cached GAME events"),
+                events
+            );
+        }
     }
 
     /// 诊断用：逐个加载 GAME 子模型，显式要求 CoreML，打印实际 EP。

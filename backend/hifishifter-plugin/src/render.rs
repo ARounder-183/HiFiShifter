@@ -22,6 +22,7 @@ pub(crate) mod ownership;
 pub(crate) mod preparation;
 pub(crate) mod snapshot;
 pub(crate) mod source;
+pub(crate) mod source_reads;
 pub(crate) mod transport;
 
 /// 一段离线渲染产物。

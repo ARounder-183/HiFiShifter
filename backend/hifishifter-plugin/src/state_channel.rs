@@ -56,6 +56,10 @@ pub(crate) struct EditState {
     )]
     pub take_syllables:
         BTreeMap<TakeSyllableKey, hifishifter_kernel::pitch_analysis::TakeSyllableAnalysis>,
+    /// Authored root parameter-line layouts; independent of audio authority.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub param_line_blocks:
+        BTreeMap<String, hifishifter_kernel::param_line_blocks::ParamLineBlockSet>,
     /// 跨组件共享的插件私有参数分组；GUID关系不参与REAPER folder或音频路由。
     #[serde(
         default,
@@ -248,6 +252,7 @@ impl EditState {
             && self.fades.is_empty()
             && self.clip_local.is_empty()
             && self.take_syllables.is_empty()
+            && self.param_line_blocks.is_empty()
     }
 
     /// 形状记录有界且只允许固定GUID键，冷重开不能按会话clip序号关联。
@@ -281,6 +286,12 @@ impl EditState {
     }
     /// 音节缓存有界，且每个区间必须是有限、正宽、按时间排序的源域秒。
     pub(crate) fn validate_take_syllables(&self) -> Result<(), String> {
+        if self.param_line_blocks.len() > 10000 {
+            return Err("root parameter block budget exceeded".into());
+        }
+        for blocks in self.param_line_blocks.values() {
+            blocks.validate()?;
+        }
         if self.take_syllables.len() > 20000 {
             return Err("take syllable cache budget exceeded".into());
         }
@@ -340,6 +351,7 @@ impl EditState {
             .iter()
             .map(|t| t.id.clone())
             .chain(self.params.keys().cloned())
+            .chain(self.param_line_blocks.keys().cloned())
             .collect();
         for old in &ids {
             // 存档里这一条的身份（缺席与空向量同义：没有可匹配的东西）。
@@ -458,6 +470,15 @@ impl EditState {
                     Some(track)
                 }
                 None if unbound.contains(&track.id) => Some(track.clone()),
+                None => None,
+            })
+            .collect();
+        candidate.param_line_blocks = self
+            .param_line_blocks
+            .iter()
+            .filter_map(|(id, blocks)| match mapping.get(id) {
+                Some((new, _)) => Some((new.clone(), blocks.clone())),
+                None if unbound.contains(id) => Some((id.clone(), blocks.clone())),
                 None => None,
             })
             .collect();
@@ -631,6 +652,12 @@ impl EditState {
             entry.extra_params = params.extra_params.clone();
             // 【T2：派生数组不从这里来】它们属于基线层；恢复路径由
             // `publish_baseline` / `install_baseline_locked` 负责。
+        }
+        for (root, blocks) in &self.param_line_blocks {
+            if !self.unbound.contains(root) && timeline.tracks.iter().any(|track| &track.id == root)
+            {
+                merged.entry(root.clone()).or_default().param_line_blocks = Some(blocks.clone());
+            }
         }
         timeline.params_by_root_track = merged;
         for track in &mut timeline.tracks {
@@ -817,7 +844,7 @@ impl EditState {
                 // 或还没迁移到权威的编辑）。此前这一句无条件执行，于是"曲线只在显示
                 // 数组里"的工程存档一次就永久丢掉它 —— 用户画了线、保存、重开就没了。
                 // 只剥真正的派生缓存（分析基线），那是可以重算的。
-                let params = if authority_present {
+                let mut params = if authority_present {
                     let mut params = params;
                     params.pitch_edit.clear();
                     params.tension_edit.clear();
@@ -827,6 +854,10 @@ impl EditState {
                 } else {
                     crate::editor::capture_edits::strip_derived_curves(&params)
                 };
+                // The root map is authoritative; params is only a view cache.
+                if trimmed.param_line_blocks.contains_key(&root) {
+                    params.param_line_blocks = None;
+                }
                 (root, params)
             })
             .collect();

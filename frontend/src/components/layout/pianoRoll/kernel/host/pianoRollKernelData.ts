@@ -198,6 +198,7 @@ export interface PianoRollSelectionBandSpec {
  * 多选对象，两者可以同时存在。
  */
 export interface PianoRollParamBlockSpec {
+    readonly curveOwned?: boolean;
     /** 当前参数值域（块的参数绝对均值 → 实时视口 y）。 */
     readonly valueMin: number;
     readonly valueMax: number;
@@ -229,6 +230,16 @@ export interface PianoRollParamBlockSpec {
          * 这样纵向拖动时块与曲线、键盘窗同帧移动，不会固定在旧 topPx。
          */
         readonly averageValue?: number | null;
+        /** Explicit pitch placement in MIDI units; never reused by other parameters. */
+        readonly logicalCenterValue?: number | null;
+        /**
+         * Center supplied by the active block gesture frame.
+         *
+         * This value is updated from the same pointer delta as the interaction
+         * curve and is valid only for that gesture. It prevents the block handle
+         * from waiting for an asynchronous sampled window to be rebuilt.
+         */
+        readonly frameCenterValue?: number | null;
         /**
          * 块纵向位置的显式显示值。
          *
@@ -382,12 +393,15 @@ export interface PianoRollKernelData {
      * 每帧读取：块可见性 / 选中态与滚动都会改变投影，而曲线数据不一定变。
      */
     readonly paramBlocks?: PianoRollParamBlockSpec | null;
+    /** Final visibility gate, including stale gesture/commit previews. */
+    readonly paramBlocksVisible?: boolean;
     /**
      * 块的逐帧采样源（曲线 live 数组 + 窗口参数）；宿主据此重算均值。
      *
      * 缺省时回退到 spec 里的 `averageValue`，仅用于纯几何测试。
      */
     readonly paramBlockSamples?: PianoRollParamBlockSamples | null;
+    readonly paramEditorFrame?: ParamEditorRenderFrame | null;
     /**
      * 值域视口快照（每帧由内核在绘制前写入；块层据此跟随纵向平移/缩放）。
      *
@@ -501,3 +515,4 @@ export interface PianoRollCurveLayer {
  * 收益是 5–16 倍（见 Phase 3 计划的 R7）。
  */
 export type PianoRollCurveLayerList = readonly PianoRollCurveLayer[];
+import type { ParamEditorRenderFrame } from "../../paramEditorRenderFrame";

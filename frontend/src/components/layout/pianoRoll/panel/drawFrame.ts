@@ -18,6 +18,9 @@ import { getCaptureBandsAt } from "../../../../features/capture/captureRange";
 import { resolvePanelRenderViewport } from "../kernel/viewportSource";
 import { resolvePlayheadRgba } from "./panelHelpers";
 import type { ModelDeps } from "./modelDeps";
+import { resolveParamBlockFrameView } from "../paramBlockFrame";
+import { createParamEditorRenderFrame } from "../paramEditorRenderFrame";
+import type { ParamViewSegment } from "../types";
 
 /** 画一帧所需的全部捕获值（字段清单由 AST 扫描得出）。 */
 type DrawFrameDeps = Pick<
@@ -54,7 +57,11 @@ type DrawFrameDeps = Pick<
     | "viewSizeRef"
     | "visibleSecondaryParamIds"
     | "visualPlayheadSecRef"
->;
+> & {
+    readonly paramBlockInteractionCurveRef: Readonly<{
+        readonly current: ParamViewSegment | null;
+    }>;
+};
 
 /** 画一帧。内核每帧调用一次；只读捕获值、只写画布。 */
 export function drawPianoRollFrame(deps: DrawFrameDeps): void {
@@ -73,6 +80,7 @@ export function drawPianoRollFrame(deps: DrawFrameDeps): void {
         liveEditOverrideRef,
         loudnessAnalysisPending,
         paramMorphOverlays,
+        paramBlockInteractionCurveRef,
         paramView,
         paramViewsRef,
         pitchEnabled,
@@ -121,29 +129,21 @@ export function drawPianoRollFrame(deps: DrawFrameDeps): void {
     //
     // 【必须是唯一来源】曲线已归 GL（Canvas2D 侧 `skipCurves` 恒为 true），
     // 置 null 等于曲线无人绘制。
-    kernelDataRef.current.curves = buildCurveLayers(drawAxis);
-    /*
-     * 参数块与曲线同源采样。
-     *
-     * 拖动块时写入的是 live override 的**原地数组**，React 不会提交；
-     * 每帧在这里重新指向它，块的高度与落点才会与曲线同一帧变化。
-     */
-    const liveForBlocks = liveEditOverrideRef.current;
-    const liveForBlocksApplies = liveForBlocks !== null && liveForBlocks.key === paramView?.key;
-    kernelDataRef.current.paramBlockSamples =
-        paramView === null
-            ? null
-            : {
-                  values:
-                      liveForBlocksApplies && liveForBlocks !== null
-                          ? liveForBlocks.edit
-                          : paramView.edit,
-                  startFrame: paramView.startFrame,
-                  stride: paramView.stride,
-                  framePeriodMs: paramView.framePeriodMs,
-                  isPitch: editParam === "pitch",
-                  param: editParam,
-              };
+    const blockFrameView = resolveParamBlockFrameView({
+        interaction: paramBlockInteractionCurveRef.current,
+        live: liveEditOverrideRef.current,
+        paramView,
+        param: editParam,
+    });
+    const frame = createParamEditorRenderFrame({
+        param: editParam,
+        view: blockFrameView,
+        blocks: kernelDataRef.current.paramBlocks ?? null,
+        curves: (view) => buildCurveLayers(drawAxis, view),
+    });
+    kernelDataRef.current.paramEditorFrame = frame;
+    kernelDataRef.current.curves = frame.curves;
+    kernelDataRef.current.paramBlockSamples = frame.samples;
 
     // 叠加层镜像（播放头）必须**每帧**更新：播放头用的是插值的
     // 视觉值 `visualPlayheadSecRef`，它不由 React 渲染驱动（见下方注释），
@@ -281,7 +281,7 @@ export function drawPianoRollFrame(deps: DrawFrameDeps): void {
         pitchView: pitchViewRef.current,
         paramViews: paramViewsRef.current,
         valueToY,
-        paramView: pitchEnabled ? paramView : null,
+        paramView: pitchEnabled ? frame.view : null,
         secondaryParamViews: pitchEnabled ? secondaryParamViews : {},
         secondaryParamIds: pitchEnabled ? visibleSecondaryParamIds : [],
         showSecondaryParam: pitchEnabled && visibleSecondaryParamIds.length > 0,

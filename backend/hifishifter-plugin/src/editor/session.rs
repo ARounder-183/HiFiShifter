@@ -304,16 +304,26 @@ struct SyllableAnalysisWorkerResult {
 
 /// 音节分析结果的身份摘要。
 ///
-/// 这里刻意不读宿主原文件：插件的 `source_path` 已是本会话物化的授权 PCM。
-/// 摘要只用于判断“这份授权副本还是不是分析时那一份”，不参与路径授权。
+/// 授权 PCM 的文件名含源身份与样本内容的哈希；临时父目录每个会话都会变化，
+/// 不能参与持久化身份。其他路径仍比较完整路径；此摘要不参与路径授权。
 pub(super) fn syllable_source_digest(
     source_path: &str,
     take: &hifishifter_kernel::state::ClipTake,
     frame_period_ms: f64,
 ) -> String {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"take_syllable_v2");
-    hasher.update(source_path.as_bytes());
+    hasher.update(b"take_syllable_v3");
+    let filename = std::path::Path::new(source_path)
+        .file_name()
+        .and_then(|name| name.to_str());
+    let content_name = filename.filter(|name| {
+        name.strip_prefix("source-")
+            .and_then(|hash| hash.strip_suffix(".wav"))
+            .is_some_and(|hash| {
+                hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+    });
+    hasher.update(content_name.unwrap_or(source_path).as_bytes());
     hasher.update(&take.duration_frames.unwrap_or(0).to_le_bytes());
     hasher.update(&take.source_sample_rate.unwrap_or(0).to_le_bytes());
     hasher.update(&((frame_period_ms.max(0.1) * 1000.0).round() as u32).to_le_bytes());
@@ -393,6 +403,7 @@ impl RegisteredView {
 #[derive(Default)]
 struct Loaded {
     initialized: bool,
+    metadata_loaded: bool,
     edit: u64,
     model: u64,
     scope: u64,
@@ -474,6 +485,15 @@ pub(crate) struct EditorSession {
             hifishifter_kernel::editor::param_authority::ParamAuthority,
         >,
     >,
+    block_layout_history: Mutex<
+        std::collections::BTreeMap<
+            usize,
+            std::collections::BTreeMap<
+                String,
+                hifishifter_kernel::param_line_blocks::ParamLineBlockSet,
+            >,
+        >,
+    >,
     pub(super) project: Mutex<ProjectState>,
     // 设置**不在**这里：它属于用户，不属于某一个 ARA 文档。此前它是本结构体的字段，
     // 于是每个工程一份、初始化为出厂默认，换工程即丢。现在由进程级的
@@ -487,6 +507,7 @@ pub(crate) struct EditorSession {
     // 只保留已获ARA授权后生成的GUI媒体元信息/路径，不保留或复用实时播放PCM。
     display_waveforms: Mutex<HashMap<String, (String, hifishifter_kernel::state::Clip)>>,
     pcm_dir: PathBuf,
+    source_files: super::source_files::SourceFiles,
     pub(super) peaks: Mutex<HashMap<String, Arc<hifishifter_kernel::hfspeaks_v2::HfsPeakFile>>>,
     queue: mpsc::SyncSender<Job>,
     worker: Mutex<Option<std::thread::JoinHandle<()>>>,
@@ -527,6 +548,8 @@ pub(crate) struct EditorSession {
     /// 归因到了音高分析上 —— 而分析其实只跑了 3 次。
     revision_bumps_dirty: AtomicU64,
     revision_bumps_publish: AtomicU64,
+    syllable_revision: AtomicU64,
+    derived_audio_fingerprint: Mutex<Option<u64>>,
     revision_bumps_analysis: AtomicU64,
     /// 上一次打过的三档计数；只在变化时打印（20 ms 定时器驱动，不去重就是每秒 50 行）。
     last_revision_report: Mutex<Option<(u64, u64, u64)>>,
@@ -640,7 +663,123 @@ impl EditorSession {
     pub(super) fn ui_clip_id(&self, native: &str) -> String {
         format!("{}{native}", self.namespace)
     }
-    /// 原App轨道拖动只形成插件参数分组；一次事务保存GUID关系，不调用任何宿主轨道setter。
+
+    pub(super) fn param_line_block_payload(&self, root: &str) -> Result<Value, String> {
+        use hifishifter_kernel::param_line_blocks::ParamLineBlockSet;
+        let (frame_period_ms, local) = {
+            let timeline = self.timeline.lock_or_recover();
+            if !timeline.tracks.iter().any(|track| track.id == root) {
+                return Err("unknown root parameter line".into());
+            }
+            (
+                timeline.frame_period_ms(),
+                timeline
+                    .params_by_root_track
+                    .get(root)
+                    .and_then(|params| params.param_line_blocks.clone()),
+            )
+        };
+        let stored = if let Some(document) = self.document() {
+            let native = root.strip_prefix(&self.namespace).unwrap_or(root);
+            document
+                .edits
+                .lock_or_recover()
+                .param_line_blocks
+                .get(native)
+                .cloned()
+        } else {
+            local
+        };
+        let layout = stored.clone().unwrap_or(ParamLineBlockSet {
+            frame_period_ms,
+            ..Default::default()
+        });
+        Ok(
+            json!({"ok":true,"initialized":stored.is_some(),"layout":layout,"curveRevision":self.authority_revision()}),
+        )
+    }
+
+    pub(super) fn set_param_line_blocks(
+        &self,
+        root: &str,
+        expected: u64,
+        blocks: Vec<hifishifter_kernel::param_line_blocks::ParamLineBlock>,
+        baseline: Option<Vec<hifishifter_kernel::param_line_blocks::ParamLineBlock>>,
+        checkpoint: bool,
+        patches: Vec<hifishifter_kernel::param_line_blocks::ParamLineCurvePatch>,
+        expected_curve: Option<u64>,
+        expected_geometry: Option<u64>,
+        expected_signature: Option<&str>,
+    ) -> Result<Value, String> {
+        use hifishifter_kernel::param_line_blocks::ParamLineBlockSet;
+        let current: ParamLineBlockSet =
+            serde_json::from_value(self.param_line_block_payload(root)?["layout"].clone())
+                .map_err(|error| error.to_string())?;
+        let next = current.replace_with_baseline(expected, blocks, baseline)?;
+        hifishifter_kernel::param_line_blocks::validate_curve_patches(&patches)?;
+        let checkpoint = checkpoint && (next != current || !patches.is_empty());
+        let curve_revision = if let Some(document) = self.document() {
+            let native = root.strip_prefix(&self.namespace).unwrap_or(root);
+            document.commit_param_line_edit(
+                native,
+                expected,
+                next.clone(),
+                &patches,
+                expected_curve,
+                expected_geometry,
+                expected_signature,
+                || {
+                    if checkpoint {
+                        self.checkpoint_authority_step();
+                    }
+                },
+            )?
+        } else {
+            let mut timeline = self.timeline.lock_or_recover();
+            if !patches.is_empty()
+                && expected_curve != Some(self.generation.load(Ordering::Acquire))
+            {
+                return Err("Conflict: parameter curve changed".into());
+            }
+            let candidate = hifishifter_kernel::param_line_blocks::apply_curve_patches(
+                &timeline, root, &patches,
+            )?;
+            if checkpoint {
+                self.checkpoint_timeline(&timeline, HistoryOp::ParamBlockMerge);
+            }
+            *timeline = candidate;
+            if !patches.is_empty() {
+                self.mark_dirty();
+            }
+            self.generation.load(Ordering::Acquire)
+        };
+        {
+            let mut timeline = self.timeline.lock_or_recover();
+            timeline.ensure_params_for_root(root);
+            timeline
+                .params_by_root_track
+                .get_mut(root)
+                .unwrap()
+                .param_line_blocks = Some(next.clone());
+        }
+        if patches.is_empty() {
+            self.mark_metadata_dirty();
+        } else {
+            if self.document().is_some() {
+                self.refresh_display_from_document();
+                self.mark_dirty();
+            }
+            self.render_requested.store(true, Ordering::Release);
+            self.notify_timeline();
+        }
+        self.note_authority_step();
+        self.emit("history_state", super::commands::history_state(self));
+        self.emit(
+            "param_line_blocks_updated",
+            json!({"rootTrackId":root,"layout":next}),
+        );
+        Ok(json!({"ok":true,"initialized":true,"layout":next,"curveRevision":curve_revision}))
+    }
     pub(super) fn move_private_track(
         &self,
         id: &str,
@@ -783,12 +922,14 @@ impl EditorSession {
             param_intents: Mutex::new(Vec::new()),
             history: Mutex::new(Default::default()),
             authority_history: Mutex::new(std::collections::BTreeMap::new()),
+            block_layout_history: Mutex::new(std::collections::BTreeMap::new()),
             project: Mutex::new(initial_project),
             loaded: Mutex::new(Default::default()),
             // 渲染用的 PCM 暂存同样搬出 `%TEMP%`：磁盘清理在会话进行中删掉这些
             // 文件会让正在进行的渲染失败。命名空间含 pid 与序号，多个宿主进程
             // 之间不会互相覆盖。
             pcm_dir: hifishifter_kernel::config_location::local_data_subdir("pcm").join(&namespace),
+            source_files: Default::default(),
             namespace,
             browser_roots: Mutex::new(Vec::new()),
             clipboard_midi: Mutex::new(std::collections::VecDeque::new()),
@@ -807,6 +948,8 @@ impl EditorSession {
             timeline_revision: AtomicU64::new(0),
             revision_bumps_dirty: AtomicU64::new(0),
             revision_bumps_publish: AtomicU64::new(0),
+            syllable_revision: AtomicU64::new(0),
+            derived_audio_fingerprint: Mutex::new(None),
             revision_bumps_analysis: AtomicU64::new(0),
             last_revision_report: Mutex::new(None),
             clip_count: AtomicU64::new(0),
@@ -1011,6 +1154,13 @@ impl EditorSession {
     ///
     /// 由视图层的 `capture_*` 命令在录制结束 / 切换 take / 清空之后调用。加载要读
     /// 捕获存储并物化分析副本（文件 I/O），不能在那条 UI 线程上做。
+    pub(crate) fn wake_for_source(&self) {
+        let mut next = self.initial_retry_at.lock_or_recover();
+        let due = Instant::now() + Duration::from_millis(20);
+        *next = Some(next.map_or(due, |previous| previous.min(due)));
+        let _ = self.queue.try_send(Job::Wake);
+    }
+
     pub(crate) fn request_reload(&self) {
         self.reload_requested.store(true, Ordering::Release);
         // 【为什么不再推进 `submitted`】`submitted` / `processed` 是"**用户编辑**"的账本：
@@ -1187,6 +1337,7 @@ impl EditorSession {
             views.clear();
         }
         self.analysis_cancel.store(true, Ordering::Release);
+        self.source_files.cancel();
         self.fail_pending_syllable_analyses(&crate::editor::errors::DOCUMENT_CLOSED.error());
         self.cancel_render();
         self.submitted.fetch_add(1, Ordering::AcqRel);
@@ -2070,11 +2221,36 @@ impl EditorSession {
     fn publish_timeline_derived(&self) {
         self.revision_bumps_publish.fetch_add(1, Ordering::Relaxed);
         self.timeline_revision.fetch_add(1, Ordering::AcqRel);
-        self.clip_count.store(
-            self.timeline.lock_or_recover().clips.len() as u64,
-            Ordering::Release,
-        );
-        self.render_requested.store(true, Ordering::Release);
+        let (clip_count, mut fingerprint) = {
+            use std::hash::{Hash, Hasher};
+            let timeline = self.timeline.lock_or_recover();
+            let mut audio = std::collections::hash_map::DefaultHasher::new();
+            hifishifter_kernel::state::timeline_fingerprint(&timeline).hash(&mut audio);
+            // Baseline completion can affect audio even when an explicit pitch
+            // edit stays unchanged, including Capture's derived dynamics.
+            let mut roots: Vec<_> = timeline.params_by_root_track.iter().collect();
+            roots.sort_by_key(|(root, _)| *root);
+            for (root, params) in roots {
+                root.hash(&mut audio);
+                params.pitch_orig_key.hash(&mut audio);
+                params.dyn_orig_key.hash(&mut audio);
+                params.pitch_assembly_partial.hash(&mut audio);
+            }
+            (timeline.clips.len(), audio.finish())
+        };
+        self.clip_count.store(clip_count as u64, Ordering::Release);
+        if let Some(document) = self.document() {
+            fingerprint ^= document
+                .editor_audio_revision
+                .load(Ordering::Acquire)
+                .rotate_left(31);
+        }
+        let mut previous = self.derived_audio_fingerprint.lock_or_recover();
+        if *previous != Some(fingerprint) {
+            *previous = Some(fingerprint);
+            self.render_requested.store(true, Ordering::Release);
+        }
+        drop(previous);
         self.notify_timeline();
     }
 
@@ -2120,7 +2296,13 @@ impl EditorSession {
         }
     }
 
+    pub(super) fn source_files_pending(&self) -> bool {
+        self.source_files.pending()
+    }
+
     pub(crate) fn ensure_loaded(&self, force: bool) -> Result<(), String> {
+        let _startup_span =
+            crate::startup::Span::new("editor.load", self.document().map_or(0, |d| d.id), 0);
         if self.is_capture() {
             return self.load_capture_timeline(force);
         }
@@ -2257,13 +2439,82 @@ impl EditorSession {
             .collect();
         // 内容hash决定私有分析路径；model/edit代次和项目位置不应制造新的F0缓存身份。
         let dir = self.pcm_dir.join("sources");
-        let (mut timeline, reverse_paths) = materialize_with_byte_limit(
-            timeline,
-            &views,
-            &dir,
-            crate::render::budget::global_budget().limit(),
-            hifishifter_kernel::editor::host_pcm::ReversePolicy::Materialize,
-        )?;
+        let bytes: usize = snapshot
+            .sources
+            .iter()
+            .map(|(_, pcm)| pcm.planes.iter().map(|p| p.len() * 4).sum::<usize>())
+            .sum();
+        let prepared = if !force && bytes > 64 * 1024 {
+            let wake = self.queue.clone();
+            match self.source_files.prepare(
+                &snapshot.sources,
+                &dir,
+                crate::render::budget::global_budget().limit(),
+                move || {
+                    let _ = wake.try_send(Job::Wake);
+                },
+            )? {
+                Some(paths) => Some(paths),
+                None => {
+                    if !self.loaded.lock_or_recover().initialized {
+                        let mut metadata = timeline;
+                        self.rewrite_ids(&mut metadata, true);
+                        document.present_host_inventory(&mut metadata, &self.namespace);
+                        self.project_host_facts(&mut metadata);
+                        for clip in &mut metadata.clips {
+                            clip.source_path = None;
+                            for take in &mut clip.takes {
+                                take.source_path = None;
+                            }
+                        }
+                        metadata.selected_track_id = metadata
+                            .selected_track_id
+                            .or_else(|| metadata.tracks.first().map(|t| t.id.clone()));
+                        self.restore_take_syllables(
+                            &document.edits.lock_or_recover(),
+                            &mut metadata,
+                        );
+                        {
+                            let mut loaded = self.loaded.lock_or_recover();
+                            loaded.metadata_loaded = true;
+                            loaded.edit = snapshot.revision;
+                            loaded.model = snapshot.model_revision;
+                            loaded.scope = scope;
+                            loaded.audio = snapshot.audio_revision;
+                            loaded.view = Some(view.clone());
+                        }
+                        self.clip_count
+                            .store(metadata.clips.len() as u64, Ordering::Release);
+                        *self.timeline.lock_or_recover() = metadata;
+                        for owner in document.renderer_owners() {
+                            owner.startup_stage(crate::startup::Stage::Metadata);
+                        }
+                        self.notify_timeline();
+                    }
+                    return Err("source files are preparing".into());
+                }
+            }
+        } else {
+            None
+        };
+        let (mut timeline, reverse_paths) = if let Some(paths) = prepared {
+            hifishifter_kernel::editor::host_pcm::materialize_prepared(
+                timeline,
+                &views,
+                &dir,
+                crate::render::budget::global_budget().limit(),
+                hifishifter_kernel::editor::host_pcm::ReversePolicy::Materialize,
+                &paths,
+            )?
+        } else {
+            materialize_with_byte_limit(
+                timeline,
+                &views,
+                &dir,
+                crate::render::budget::global_budget().limit(),
+                hifishifter_kernel::editor::host_pcm::ReversePolicy::Materialize,
+            )?
+        };
         // 旧状态或同URI换音频的原线不能假报就绪；已有完整clip cache由actor重新组装。
         //
         // 【为什么这里要撤销"放弃等待"】这一刻是"该为新素材重新分析"的唯一语义点：
@@ -2281,7 +2532,9 @@ impl EditorSession {
         // 【必须成对】清单写的是宿主**镜像**坐标，这一步把倒放窗口翻回正向 ——
         // 少了它，界面上的倒放窗口就与真实声音不一致（见 `project_host_facts`）。
         self.project_host_facts(&mut timeline);
+        Self::restore_materialized_source_paths(&mut timeline, &reverse_paths);
         self.retain_display_waveforms(&mut timeline, true);
+        self.restore_take_syllables(&document.edits.lock_or_recover(), &mut timeline);
         // 音频迟到只能补齐资源，不能把用户已选中的新粘贴片段跳回首个clip。
         {
             let previous = self.timeline.lock_or_recover();
@@ -2310,11 +2563,14 @@ impl EditorSession {
         self.publish_duration(timeline.project_sec);
         self.clip_count
             .store(timeline.clips.len() as u64, Ordering::Release);
+        for owner in document.renderer_owners() {
+            owner.startup_stage(crate::startup::Stage::Metadata);
+        }
         *self.timeline.lock_or_recover() = timeline;
         {
             let loaded = self.loaded.lock_or_recover();
             if force
-                || !loaded.initialized
+                || (!loaded.initialized && !loaded.metadata_loaded)
                 || loaded.model != snapshot.model_revision
                 || loaded.scope != scope
             {
@@ -2323,6 +2579,7 @@ impl EditorSession {
         }
         *self.loaded.lock_or_recover() = Loaded {
             initialized: true,
+            metadata_loaded: true,
             edit: snapshot.revision,
             model: snapshot.model_revision,
             scope,
@@ -2503,6 +2760,30 @@ impl EditorSession {
                 track.muted = old.muted;
                 track.solo = old.solo;
             }
+            // Capture rebuilds its Takes from the recording inventory too. Keep
+            // completed analysis only while the authorized source still matches.
+            let frame_period_ms = timeline.frame_period_ms();
+            for clip in &mut timeline.clips {
+                for take in &mut clip.takes {
+                    let source = take
+                        .source_path
+                        .as_deref()
+                        .or(clip.source_path.as_deref())
+                        .unwrap_or_default();
+                    let digest = syllable_source_digest(source, take, frame_period_ms);
+                    let cached = take.syllable_analysis.as_ref().or_else(|| {
+                        previous
+                            .clips
+                            .iter()
+                            .find(|old| old.id == clip.id)
+                            .and_then(|old| old.takes.iter().find(|old| old.id == take.id))
+                            .and_then(|old| old.syllable_analysis.as_ref())
+                    });
+                    take.syllable_analysis = cached
+                        .filter(|analysis| analysis.is_current(&digest))
+                        .cloned();
+                }
+            }
         }
         if timeline.selected_track_id.is_none() {
             timeline.selected_track_id = timeline.tracks.first().map(|t| t.id.clone());
@@ -2516,6 +2797,7 @@ impl EditorSession {
         *self.timeline.lock_or_recover() = timeline;
         *self.loaded.lock_or_recover() = Loaded {
             initialized: true,
+            metadata_loaded: true,
             edit: 0,
             model: version,
             scope: version,
@@ -2549,6 +2831,7 @@ impl EditorSession {
         }
         // 先冻结可用fade，再合并清单；只确认开始时的代次，期间的新变化留到下一轮。
         let fades = document.ui_fade_projection().ok();
+        let reverse_paths = self.loaded.lock_or_recover().reverse_paths.clone();
         {
             let mut timeline = self.timeline.lock_or_recover();
             self.retain_display_waveforms(&mut timeline, false);
@@ -2557,6 +2840,7 @@ impl EditorSession {
             // 与 `ensure_loaded` 同一条不变量：清单之后必须补一次事实投影，
             // 否则增量刷新会把已经复原的正向窗口重新打回镜像。
             document.project_host_take_facts_locked(&mut timeline);
+            Self::restore_materialized_source_paths(&mut timeline, &reverse_paths);
             self.retain_display_waveforms(&mut timeline, true);
             if let Some((_, host)) = fades {
                 for clip in &mut timeline.clips {
@@ -2593,34 +2877,11 @@ impl EditorSession {
         // 【版本号必须在 adopt **成功之后**才推进】否则一次失败的 adopt 会把
         // `ui_geometry_version` 推到最新，之后每轮都早退 —— 会话永久停在旧数组上，
         // 用户看到的就是"切屏回来参数线回退"。
-        // 音节分析挂在 live take 上，清单重建会重写 takes。保持与
-        // `apply_take_syllables` 同一判据：稳定键 + 源摘要一致才播种。
+        // 清单与完整加载都会重建 Takes，必须用同一个恢复入口。
         {
             let edits = document.edits.lock_or_recover();
             let mut timeline = self.timeline.lock_or_recover();
-            let frame_period_ms = timeline.frame_period_ms();
-            for clip in &mut timeline.clips {
-                for take in &mut clip.takes {
-                    if take.syllable_analysis.is_some() {
-                        continue;
-                    }
-                    let key = crate::state_channel::TakeSyllableKey {
-                        clip_id: clip.id.clone(),
-                        take_id: take.id.clone(),
-                    };
-                    if let Some(analysis) = edits.take_syllables.get(&key) {
-                        let source_path = take
-                            .source_path
-                            .as_deref()
-                            .or(clip.source_path.as_deref())
-                            .unwrap_or_default();
-                        let digest = syllable_source_digest(source_path, take, frame_period_ms);
-                        if analysis.is_current(&digest) {
-                            take.syllable_analysis = Some(analysis.clone());
-                        }
-                    }
-                }
-            }
+            self.restore_take_syllables(&edits, &mut timeline);
         }
         let mut adopted = !adopt_view;
         // 【take 事实也是几何】清单改写了 clip 的方向 / Loop / 窗口 ⇒ 图集几何变了 ⇒
@@ -2696,7 +2957,7 @@ impl EditorSession {
             let due = {
                 let mut next = self.initial_retry_at.lock_or_recover();
                 match *next {
-                    Some(at) if at > Instant::now() => false,
+                    Some(at) if at > Instant::now() && !self.source_files.finished() => false,
                     _ => {
                         *next = Some(Instant::now() + Duration::from_secs(1));
                         true
@@ -2886,6 +3147,27 @@ impl EditorSession {
         self.check_source(&source_path)?;
         let frame_period_ms = timeline.frame_period_ms().max(0.1);
         let source_digest = syllable_source_digest(&source_path, take, frame_period_ms);
+        if let Some(analysis) = take
+            .syllable_analysis
+            .as_ref()
+            .filter(|analysis| analysis.is_current(&source_digest))
+        {
+            let mut value = Self::syllable_reply(clip_id, &take.id, Some(analysis))?;
+            if let Some(root) = timeline.resolve_root_track_id(&clip.track_id) {
+                if let Some(layout) = timeline
+                    .params_by_root_track
+                    .get(&root)
+                    .and_then(|params| params.param_line_blocks.as_ref())
+                {
+                    value["rootTrackId"] = json!(root);
+                    value["blockLayout"] = json!(layout);
+                }
+            }
+            sink.response(
+                json!({"version":1,"viewId":sink.view_id,"id":id,"ok":true,"value":value}),
+            );
+            return Ok(None);
+        }
         {
             let mut flights = self.syllable_flights.lock_or_recover();
             if let Some(flight) = flights.get_mut(&key) {
@@ -3187,7 +3469,18 @@ impl EditorSession {
         if digest != request.source_digest {
             return Err("stale syllable analysis result: source digest changed".into());
         }
-        let spans = fill_visible_source_window(&parsed.source_spans_sec, request.source_window);
+        let unified = {
+            let timeline = self.timeline.lock_or_recover();
+            timeline
+                .params_by_root_track
+                .get(&request.root_track_id)
+                .is_some_and(|params| params.param_line_blocks.is_some())
+        };
+        let spans = if unified {
+            parsed.source_spans_sec.clone()
+        } else {
+            fill_visible_source_window(&parsed.source_spans_sec, request.source_window)
+        };
         if !parsed.analyzed || spans.is_empty() {
             // 分析没检出发声段时保留现有缓存；前端会按“无区间”回退整段。
             // 不把旧结果清空，避免一次 FCPE 缺席把已保存的块整片抹掉。
@@ -3217,31 +3510,70 @@ impl EditorSession {
             .find(|take| take.id == request.take_id)
             .ok_or("stale syllable analysis result: take removed")?;
         take.syllable_analysis = Some(analysis.clone());
-        let TimelineState {
-            clips,
-            params_by_root_track,
-            ..
-        } = &mut *timeline;
-        if let Some(entry) = params_by_root_track.get_mut(&request.root_track_id) {
-            entry.prune_param_block_merges(clips);
+        let current_clip = clip.clone();
+        let root = timeline
+            .resolve_root_track_id(&current_clip.track_id)
+            .unwrap_or_else(|| request.root_track_id.clone());
+        let mut block_layout = None;
+        if let Some(entry) = timeline.params_by_root_track.get_mut(&root) {
+            if let Some(layout) = entry.param_line_blocks.as_ref() {
+                let next = layout.apply_analysis(
+                    &current_clip,
+                    &analysis.source_digest,
+                    &analysis.source_spans_sec,
+                )?;
+                entry.param_line_blocks = Some(next.clone());
+                block_layout = Some(next);
+            }
         }
-        let reply = Self::syllable_reply(&request.clip_id, &request.take_id, Some(&analysis))?;
+        let mut reply = Self::syllable_reply(&request.clip_id, &request.take_id, Some(&analysis))?;
+        if let Some(layout) = &block_layout {
+            reply["rootTrackId"] = json!(root);
+            reply["blockLayout"] = json!(layout);
+        }
         // Never take `document.edits` while holding `self.timeline`: workspace
         // projection uses edits -> timeline order. Keep the same lock order here
         // and update only the committed Take after releasing the timeline.
         drop(timeline);
         if let Some(document) = self.document() {
-            document.edits.lock_or_recover().take_syllables.insert(
+            let mut edits = document.edits.lock_or_recover();
+            edits.take_syllables.insert(
                 crate::state_channel::TakeSyllableKey {
-                    clip_id: request.clip_id.clone(),
-                    take_id: request.take_id.clone(),
+                    clip_id: request
+                        .clip_id
+                        .strip_prefix(&self.namespace)
+                        .unwrap_or(&request.clip_id)
+                        .to_owned(),
+                    take_id: request
+                        .take_id
+                        .strip_prefix(&self.namespace)
+                        .unwrap_or(&request.take_id)
+                        .to_owned(),
                 },
                 analysis.clone(),
             );
+            if let Some(layout) = &block_layout {
+                edits.param_line_blocks.insert(
+                    root.strip_prefix(&self.namespace)
+                        .unwrap_or(&root)
+                        .to_owned(),
+                    layout.clone(),
+                );
+            }
         }
-        // 分析是缓存而非用户编辑：不建撤销点，但必须推进版本、标脏并通知视图。
-        self.mark_dirty();
-        self.notify_timeline();
+        // Syllable boundaries are metadata: publish them without invalidating
+        // the entire project's audio render after every completed Clip.
+        self.syllable_revision.fetch_add(1, Ordering::AcqRel);
+        self.mark_metadata_dirty();
+        let mut event = reply.clone();
+        event["sourcePath"] = json!(request.source_path);
+        self.emit("clip_syllables_updated", event);
+        if let Some(layout) = block_layout {
+            self.emit(
+                "param_line_blocks_updated",
+                json!({"rootTrackId":root,"layout":layout}),
+            );
+        }
         Ok(reply)
     }
 
@@ -3687,6 +4019,71 @@ impl EditorSession {
             log::info!("[ara] transport diagnostic {}", clock.diagnostics());
         }
     }
+    /// Inventory uses document source IDs; analysis may only use the PCM files
+    /// already materialized from authorized samples. Map identities back after
+    /// every inventory projection, without opening any host media path.
+    fn restore_materialized_source_paths(
+        timeline: &mut TimelineState,
+        reverse_paths: &HashMap<String, String>,
+    ) {
+        let paths: HashMap<&str, &str> = reverse_paths
+            .iter()
+            .map(|(path, source)| (source.as_str(), path.as_str()))
+            .collect();
+        let restore = |source: &mut Option<String>| {
+            if let Some(path) = source.as_deref().and_then(|id| paths.get(id)) {
+                *source = Some((*path).to_owned());
+            }
+        };
+        for clip in &mut timeline.clips {
+            restore(&mut clip.source_path);
+            for take in &mut clip.takes {
+                restore(&mut take.source_path);
+            }
+        }
+    }
+
+    fn restore_take_syllables(
+        &self,
+        edits: &crate::state_channel::EditState,
+        timeline: &mut TimelineState,
+    ) {
+        let frame_period_ms = timeline.frame_period_ms();
+        for clip in &mut timeline.clips {
+            let canonical_id = clip.id.strip_prefix(&self.namespace).unwrap_or(&clip.id);
+            for take in &mut clip.takes {
+                let key = crate::state_channel::TakeSyllableKey {
+                    clip_id: canonical_id.to_owned(),
+                    take_id: take
+                        .id
+                        .strip_prefix(&self.namespace)
+                        .unwrap_or(&take.id)
+                        .to_owned(),
+                };
+                let legacy = crate::state_channel::TakeSyllableKey {
+                    clip_id: clip.id.clone(),
+                    take_id: take.id.clone(),
+                };
+                let source = take
+                    .source_path
+                    .as_deref()
+                    .or(clip.source_path.as_deref())
+                    .unwrap_or_default();
+                let digest = syllable_source_digest(source, take, frame_period_ms);
+                // Prefer persisted authority; accept the old current-session key
+                // as a fallback. Validate inherited Take caches as well: host
+                // geometry can keep a Take ID while replacing its PCM content.
+                take.syllable_analysis = edits
+                    .take_syllables
+                    .get(&key)
+                    .or_else(|| edits.take_syllables.get(&legacy))
+                    .or(take.syllable_analysis.as_ref())
+                    .filter(|analysis| analysis.is_current(&digest))
+                    .cloned();
+            }
+        }
+    }
+
     fn rewrite_ids(&self, timeline: &mut TimelineState, to_ui: bool) {
         let id = |value: &str| {
             if to_ui {
@@ -3878,6 +4275,16 @@ impl EditorSession {
     /// 【内容没变就不通知】判据是 [`Self::published_fingerprint`]：只要用户能看出
     /// 区别的量没变，前端手上那份就是最新的 —— 再让它取一次只会多造一棵对象图。
     /// 这条判据是"通知 → 前端重取 → 重取推动上游 → 再通知"那个环的**唯一**出口。
+    pub(super) fn mark_metadata_dirty(&self) {
+        // 见 `timeline_revision` 的字段说明：它是"编辑 ∪ 发布"的并集。
+        self.timeline_revision.fetch_add(1, Ordering::AcqRel);
+        let views = self.views.lock_or_recover();
+        for view in views.values() {
+            if let Some((link, _)) = &view.route {
+                link.mark_dirty();
+            }
+        }
+    }
     pub(super) fn notify_timeline(&self) -> bool {
         let fingerprint = self.published_fingerprint();
         {
@@ -4173,6 +4580,14 @@ impl EditorSession {
         // 历史分支被截断时，旧 index 的快照已无意义；保留有界即可。
         let keep_from = next.saturating_sub(1);
         steps.retain(|index, _| *index + 100 >= keep_from);
+        drop(steps);
+        if let Some(document) = self.document() {
+            let blocks = document.edits.lock_or_recover().param_line_blocks.clone();
+            let mut layouts = self.block_layout_history.lock_or_recover();
+            layouts.insert(previous, blocks.clone());
+            layouts.insert(next, blocks);
+            layouts.retain(|index, _| *index + 100 >= keep_from);
+        }
     }
 
     fn note_authority_step(&self) {
@@ -4183,29 +4598,51 @@ impl EditorSession {
         self.authority_history
             .lock_or_recover()
             .insert(position, authority);
+        if let Some(document) = self.document() {
+            let blocks = document.edits.lock_or_recover().param_line_blocks.clone();
+            self.block_layout_history
+                .lock_or_recover()
+                .insert(position, blocks);
+        }
     }
 
-    pub(super) fn restore_authority_step(&self, target: usize) -> bool {
+    pub(super) fn restore_authority_step(&self, target: usize) -> Option<bool> {
         let authority = self
             .authority_history
             .lock_or_recover()
             .get(&target)
             .cloned();
         let Some(authority) = authority else {
-            return false;
+            return None;
         };
         let Some(document) = self.document() else {
-            return false;
+            return None;
         };
-        match document.replace_authority(authority) {
-            Ok(()) => {
+        let blocks = self
+            .block_layout_history
+            .lock_or_recover()
+            .get(&target)
+            .cloned();
+        match document.replace_authority_with_blocks(authority, blocks) {
+            Ok(curve_changed) => {
                 self.refresh_display_from_document();
-                self.render_requested.store(true, Ordering::Release);
-                true
+                if curve_changed {
+                    self.render_requested.store(true, Ordering::Release);
+                } else {
+                    self.mark_metadata_dirty();
+                }
+                let layouts = document.edits.lock_or_recover().param_line_blocks.clone();
+                for (root, layout) in layouts {
+                    self.emit(
+                        "param_line_blocks_updated",
+                        json!({"rootTrackId":format!("{}{root}",self.namespace),"layout":layout}),
+                    );
+                }
+                Some(curve_changed)
             }
             Err(error) => {
                 log::warn!("[ara] parameter history restore failed: {error}");
-                false
+                None
             }
         }
     }
@@ -4317,7 +4754,7 @@ impl ParamHost for EditorSession {
     fn authority_revision(&self) -> u64 {
         self.document()
             .map(|document| document.authority_revision())
-            .unwrap_or(0)
+            .unwrap_or_else(|| self.generation.load(Ordering::Acquire))
     }
 
     fn timeline(&self) -> &Mutex<TimelineState> {
@@ -4337,15 +4774,9 @@ impl ParamHost for EditorSession {
     fn mark_dirty(&self) {
         self.revision_bumps_dirty.fetch_add(1, Ordering::Relaxed);
         self.generation.fetch_add(1, Ordering::AcqRel);
-        // 见 `timeline_revision` 的字段说明：它是"编辑 ∪ 发布"的并集。
-        self.timeline_revision.fetch_add(1, Ordering::AcqRel);
-        let views = self.views.lock_or_recover();
-        for view in views.values() {
-            if let Some((link, _)) = &view.route {
-                link.mark_dirty();
-            }
-        }
+        self.mark_metadata_dirty();
     }
+
     fn note_param_edit(&self, intent: hifishifter_kernel::editor::ParamEditIntent) {
         let mut intents = self.param_intents.lock_or_recover();
         if intents.len() >= 256 {
@@ -4670,7 +5101,7 @@ pub(crate) mod tests {
         let document = model.session();
         document.host_undo.pending.store(true, Ordering::Release);
         let editor = owner.editor_session().unwrap();
-        editor.ensure_loaded(false).unwrap();
+        wait_for_source_files(&editor);
         let track = editor.timeline.lock_or_recover().tracks[0].id.clone();
         let (release, wait) = mpsc::channel();
         let mut release = ReleaseDsp(Some(release));
@@ -4771,7 +5202,7 @@ pub(crate) mod tests {
     fn host_clip_gain_display_is_removed_before_parameter_commit() {
         let (_model, owner, _id) = fixture();
         let editor = owner.editor_session().unwrap();
-        editor.ensure_loaded(false).unwrap();
+        wait_for_source_files(&editor);
         let mut display = editor.timeline.lock_or_recover().clone();
         display.clips[0].gain = 0.5;
         display.clips[0].takes[0].gain = 0.5;
@@ -5278,6 +5709,33 @@ pub(crate) mod tests {
     }
 
     /// 只替代真实DAW的建图/授权边界；使用真正owner、native扩展、actor与state编码。
+    pub(crate) fn wait_for_source_files(editor: &EditorSession) {
+        let (reply, receiver) = mpsc::channel();
+        let (events, _event_receiver) = mpsc::sync_channel(128);
+        let sink = UiSink {
+            view_id: "source-files-wait".into(),
+            reply,
+            events,
+            closed: Arc::new(AtomicBool::new(false)),
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            call(
+                editor,
+                &sink,
+                &receiver,
+                0,
+                "get_timeline_state_lite",
+                json!({}),
+            );
+            if editor.is_loaded() && !editor.source_files_pending() {
+                return;
+            }
+            assert!(Instant::now() < deadline, "{:?}", editor.state());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     pub(crate) fn fixture() -> (ModelHandle, Arc<ExtensionOwner>, Box<u8>) {
         let model = ModelHandle::new();
         let document = model.session();
@@ -5380,7 +5838,7 @@ pub(crate) mod tests {
         let (model, owner, _identity) = fixture();
         let document = model.session();
         let editor = owner.editor_session().unwrap();
-        editor.ensure_loaded(false).unwrap();
+        wait_for_source_files(&editor);
         let (reply, rx) = mpsc::channel();
         let (events, event_receiver) = mpsc::sync_channel(64);
         let sink = UiSink {
@@ -5417,6 +5875,51 @@ pub(crate) mod tests {
         document.close();
     }
 
+    #[test]
+    fn derived_publication_deduplicates_metadata_but_keeps_audio_updates() {
+        let (model, owner, _identity) = fixture();
+        let editor = owner.editor_session().unwrap();
+        wait_for_source_files(&editor);
+        editor.publish_timeline_derived();
+        editor.render_requested.store(false, Ordering::Release);
+        editor.syllable_revision.fetch_add(1, Ordering::AcqRel);
+        editor.publish_timeline_derived();
+        assert!(!editor.render_requested.load(Ordering::Acquire));
+        editor.render_requested.store(true, Ordering::Release);
+        editor.publish_timeline_derived();
+        assert!(
+            editor.render_requested.load(Ordering::Acquire),
+            "never cancel queued audio work"
+        );
+        editor.render_requested.store(false, Ordering::Release);
+        {
+            let mut timeline = editor.timeline.lock_or_recover();
+            let root = timeline.tracks[0].id.clone();
+            timeline.ensure_params_for_root(&root);
+            timeline
+                .params_by_root_track
+                .get_mut(&root)
+                .unwrap()
+                .dyn_orig_key = Some("new-baseline".into());
+        }
+        editor.publish_timeline_derived();
+        assert!(
+            editor.render_requested.load(Ordering::Acquire),
+            "baseline completion must render"
+        );
+        editor.render_requested.store(false, Ordering::Release);
+        model
+            .session()
+            .editor_audio_revision
+            .fetch_add(1, Ordering::AcqRel);
+        editor.publish_timeline_derived();
+        assert!(
+            editor.render_requested.load(Ordering::Acquire),
+            "new authorized PCM must render"
+        );
+        model.session().close();
+    }
+
     /// **音节分析只写回 actor 内的 active Take，且可见窗口被补成连续块。**
     ///
     /// 这条测试覆盖第二批最关键的语义：worker 不能在别处改状态；actor 提交前
@@ -5424,9 +5927,9 @@ pub(crate) mod tests {
     /// 一个块”。
     #[test]
     fn syllable_analysis_commit_fills_the_visible_window_and_is_not_history() {
-        let (_model, owner, _identity) = fixture();
+        let (model, owner, _identity) = fixture();
         let editor = owner.editor_session().unwrap();
-        editor.ensure_loaded(false).unwrap();
+        wait_for_source_files(&editor);
         let clip_id = editor.timeline.lock_or_recover().clips[0].id.clone();
         let track_id = editor.timeline.lock_or_recover().tracks[0].id.clone();
         let take_id = editor.timeline.lock_or_recover().clips[0]
@@ -5474,6 +5977,9 @@ pub(crate) mod tests {
             "analyzed": true,
         });
         let history_before = editor.history.lock_or_recover().records.len();
+        let generation_before = editor.generation.load(Ordering::Acquire);
+        let version_before = editor.timeline_revision();
+        let fingerprint_before = editor.published_fingerprint();
         let digest = request.source_digest.clone();
         let clip_id_for_assert = clip_id.clone();
         editor.commit_syllable_analysis(SyllableAnalysisCompletion {
@@ -5495,6 +6001,17 @@ pub(crate) mod tests {
         assert!((analysis.source_spans_sec[2].end_sec - 4.0 / 44100.0).abs() < 1e-9);
         assert_eq!(analysis.source_digest, digest);
         drop(timeline);
+        assert_eq!(
+            editor.generation.load(Ordering::Acquire),
+            generation_before,
+            "syllable cache commits must not invalidate project audio"
+        );
+        assert!(editor.timeline_revision() > version_before);
+        assert_eq!(
+            editor.published_fingerprint(),
+            fingerprint_before,
+            "block metadata must not request a full timeline/curve refresh"
+        );
         let query = super::super::commands::dispatch(
             &editor,
             "get_clip_syllable_spans",
@@ -5508,6 +6025,18 @@ pub(crate) mod tests {
             history_before,
             "分析缓存不是用户编辑，不得产生撤销步"
         );
+        let document = model.session();
+        document.ready.store(false, Ordering::Release);
+        let pending = super::super::commands::dispatch(&editor, "get_timeline_state", json!({}))
+            .expect("a transient ARA graph must retain the loaded block snapshot");
+        assert_eq!(
+            pending["clips"][0]["takes"][0]["syllable_spans_sec"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        document.ready.store(true, Ordering::Release);
         editor.close();
     }
 
@@ -5516,7 +6045,7 @@ pub(crate) mod tests {
     fn a_stale_syllable_result_is_dropped_without_touching_the_timeline() {
         let (_model, owner, _identity) = fixture();
         let editor = owner.editor_session().unwrap();
-        editor.ensure_loaded(false).unwrap();
+        wait_for_source_files(&editor);
         let (clip_id, take_id, source_path) = {
             let timeline = editor.timeline.lock_or_recover();
             let clip = &timeline.clips[0];
@@ -5575,6 +6104,18 @@ pub(crate) mod tests {
             syllable_source_digest("/tmp/hfs/pcm/sources/source.b.wav", &with_frames, 5.0);
         assert_eq!(first, same);
         assert_ne!(first, different_source);
+        let content_name = format!("source-{}.wav", "a".repeat(64));
+        let old_session = format!("C:/private/hfs-ui-100-1-/sources/{content_name}");
+        let new_session = format!("C:/private/hfs-ui-200-2-/sources/{content_name}");
+        assert_eq!(
+            syllable_source_digest(&old_session, &with_frames, 5.0),
+            syllable_source_digest(&new_session, &with_frames, 5.0)
+        );
+        let changed_content = new_session.replace(&"a".repeat(64), &"b".repeat(64));
+        assert_ne!(
+            syllable_source_digest(&old_session, &with_frames, 5.0),
+            syllable_source_digest(&changed_content, &with_frames, 5.0)
+        );
     }
 
     /// 两真实组件使用同源的不同区域，测试原actor而不是拼接UI快照。
@@ -5758,7 +6299,7 @@ pub(crate) mod tests {
         cold_owners[0].restore_state(&parent_state).unwrap();
         cold_owners[1].restore_state(&encoded).unwrap();
         let cold_editor = cold_owners[0].editor_session().unwrap();
-        cold_editor.ensure_loaded(false).unwrap();
+        wait_for_source_files(&cold_editor);
         let cold = cold_editor.timeline.lock_or_recover().clone();
         let cold_b = cold
             .tracks
@@ -6423,7 +6964,7 @@ pub(crate) mod tests {
         use super::super::routing::{EditorLink, RouteLease};
         let (model, owners, _ids) = workspace_fixture();
         let editor = owners[0].editor_session().unwrap();
-        editor.ensure_loaded(false).unwrap();
+        wait_for_source_files(&editor);
         let ra = RouteLease::new(&owners[0]);
         let rb = RouteLease::new(&owners[1]);
         let link = Arc::new(EditorLink::default());
@@ -6532,7 +7073,7 @@ pub(crate) mod tests {
     fn workspace_queued_origin_close_cannot_borrow_the_other_live_component() {
         let (_model, owners, _ids) = workspace_fixture();
         let editor = owners[0].editor_session().unwrap();
-        editor.ensure_loaded(false).unwrap();
+        wait_for_source_files(&editor);
         let lease = super::super::routing::RouteLease::new(&owners[0]);
         let link = Arc::new(super::super::routing::EditorLink::default());
         link.bind(std::process::id() as i64, lease.token()).unwrap();
@@ -6827,7 +7368,7 @@ pub(crate) mod tests {
     fn invalid_track_patch_cannot_partially_mutate_volume_or_create_history() {
         let (_model, owner, _identity) = fixture();
         let editor = owner.editor_session().unwrap();
-        editor.ensure_loaded(false).unwrap();
+        wait_for_source_files(&editor);
         let track = editor.timeline.lock_or_recover().tracks[0].id.clone();
         let result = super::super::commands::dispatch(
             &editor,
@@ -6955,7 +7496,7 @@ pub(crate) mod tests {
         drop(timeline);
         let editor = owner.editor_session().unwrap();
         // 会话照常加载 —— 既不整份失败，也不再隔离。
-        editor.ensure_loaded(false).unwrap();
+        wait_for_source_files(&editor);
         let loaded = editor.timeline.lock_or_recover().clone();
         let clip = &loaded.clips[0];
         assert!(clip.reversed, "宿主事实要保留下来，界面才能显示倒放标记");
@@ -7028,50 +7569,245 @@ pub(crate) mod tests {
         owner.editor_session().unwrap().close();
     }
 
+    #[test]
+    fn ui_inventory_keeps_the_materialized_source_for_game_and_pitch() {
+        let (model, owner, identity) = fixture();
+        let document = model.session();
+        let mock = crate::host::reaper::MockHost::new();
+        mock.enable_writer();
+        mock.enable_media();
+        mock.clear_markers();
+        mock.inventory_enabled.set(true);
+        let mut track = Arc::new(mock.client()).ui_track(&|| true).unwrap();
+        let mut item = track.items.remove(0);
+        item.geometry.start_sec = 0.0;
+        item.geometry.duration_sec = 4.0 / 44100.0;
+        item.geometry.source_start_sec = 0.0;
+        item.geometry.playback_rate = 1.0;
+        item.takes[0].geometry = item.geometry.clone();
+        let clip_id = format!("ara-item-{}", item.geometry.item_id);
+        let take_id = item.geometry.take_id.clone();
+        let key = (&*identity as *const u8) as u64;
+        document
+            .region_items
+            .lock_or_recover()
+            .insert(key, item.geometry.item_id.clone());
+        document
+            .clip_ids
+            .lock_or_recover()
+            .insert(key, clip_id.clone());
+        // Deliberately no authorized_takes observation: the live PCM edge must
+        // be sufficient, including the first inventory after reopening.
+        {
+            let mut timeline = document.timeline.lock_or_recover();
+            let timeline = timeline.as_mut().unwrap();
+            timeline.tracks[0].id = track.id.clone();
+            timeline.clips[0].id = clip_id;
+            timeline.clips[0].track_id = track.id.clone();
+            timeline.clips[0].takes[0].id = take_id.clone();
+            timeline.clips[0].active_take_id = Some(take_id);
+        }
+        document.track_bindings.lock_or_recover().insert(
+            track.id.clone(),
+            vec![("modification".into(), "ara://source".into())],
+        );
+        track.items = vec![item];
+        document
+            .ui_tracks
+            .lock_or_recover()
+            .insert(track.guid.clone(), track);
+        let editor = owner.editor_session().unwrap();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            wait_for_source_files(&editor);
+            let source = editor.timeline.lock_or_recover().clips[0]
+                .active_take()
+                .source_path
+                .clone()
+                .unwrap();
+            assert!(
+                source.ends_with(".wav"),
+                "inventory replaced the authorized PCM path: {source}"
+            );
+            assert!(editor.check_source(&source).is_ok());
+            document.ui_geometry_revision.fetch_add(1, Ordering::AcqRel);
+            editor.refresh_ui_geometry(&document, false);
+            assert_eq!(
+                editor.timeline.lock_or_recover().clips[0]
+                    .active_take()
+                    .source_path
+                    .as_deref(),
+                Some(source.as_str())
+            );
+        }));
+        document.close();
+        if let Err(payload) = outcome {
+            std::panic::resume_unwind(payload);
+        }
+    }
+
     /// **音高分析缓存写入时同步 EditState 的音节副本。**
     ///
     /// ARA 重建会用宿主几何重写 Take；只写 live timeline 会让下一轮
     /// `edits.apply` 用旧副本覆盖刚分析出的块。这里验证提交当刻两处一致。
     #[test]
     fn a_committed_syllable_result_is_captured_into_the_document_edits() {
-        let (model, owner, _identity) = fixture();
-        let document = model.session();
-        let editor = owner.editor_session().unwrap();
-        editor.ensure_loaded(false).unwrap();
-        let timeline = editor.timeline.lock_or_recover().clone();
-        let clip = &timeline.clips[0];
-        let take = clip.active_take().clone();
-        let analysis = hifishifter_kernel::pitch_analysis::TakeSyllableAnalysis {
-            algorithm: hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM.into(),
-            algorithm_version: hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM_VERSION,
-            source_digest: syllable_source_digest(
-                take.source_path.as_deref().unwrap_or_default(),
-                &take,
-                timeline.frame_period_ms(),
-            ),
-            source_spans_sec: vec![hifishifter_kernel::pitch_analysis::SyllableSpan {
-                start_sec: 0.0,
-                end_sec: 0.001,
-            }],
-        };
-        {
-            let mut live = editor.timeline.lock_or_recover();
-            live.clips[0].takes[0].syllable_analysis = Some(analysis.clone());
-            document
-                .edits
-                .lock_or_recover()
-                .capture_take_syllables(&live);
+        for namespace_takes in [false, true] {
+            let (model, owner, _identity) = fixture();
+            let document = model.session();
+            let editor = owner.editor_session().unwrap();
+            wait_for_source_files(&editor);
+            if namespace_takes {
+                // REAPER's inventory projection namespaces Take IDs too, whereas
+                // the ARA-only fixture and Capture keep their original Take IDs.
+                let mut live = editor.timeline.lock_or_recover();
+                let take_id = format!("{}take", editor.namespace);
+                live.clips[0].takes[0].id = take_id.clone();
+                live.clips[0].active_take_id = Some(take_id);
+            }
+            let timeline = editor.timeline.lock_or_recover().clone();
+            let clip = &timeline.clips[0];
+            let take = clip.active_take().clone();
+            let analysis = hifishifter_kernel::pitch_analysis::TakeSyllableAnalysis {
+                algorithm: hifishifter_kernel::game_onnx::GAME_ALGORITHM.into(),
+                algorithm_version: hifishifter_kernel::game_onnx::GAME_ALGORITHM_VERSION,
+                source_digest: syllable_source_digest(
+                    take.source_path.as_deref().unwrap_or_default(),
+                    &take,
+                    timeline.frame_period_ms(),
+                ),
+                source_spans_sec: vec![hifishifter_kernel::pitch_analysis::SyllableSpan {
+                    start_sec: 0.0,
+                    end_sec: 0.001,
+                }],
+            };
+            let request = SyllableAnalysisRequest {
+                clip_id: clip.id.clone(),
+                take_id: take.id.clone(),
+                source_path: take.source_path.clone().unwrap(),
+                source_digest: analysis.source_digest.clone(),
+                frame_period_ms: timeline.frame_period_ms(),
+                root_track_id: clip.track_id.clone(),
+                source_window: (0.0, 4.0 / 44100.0),
+                snapshot: timeline.clone(),
+            };
+            editor
+            .commit_syllable_value(
+                &request,
+                json!({
+                    "clipId":clip.id,"takeId":take.id,
+                    "algorithm":analysis.algorithm,"algorithmVersion":analysis.algorithm_version,
+                    "sourceSpansSec":[{"startSec":0.0,"endSec":4.0/44100.0}],"analyzed":true
+                }),
+            )
+            .unwrap();
+            let committed = editor.timeline.lock_or_recover().clips[0]
+                .active_take()
+                .syllable_analysis
+                .clone()
+                .unwrap();
+            assert_eq!(
+                document.edits.lock_or_recover().take_syllables.get(
+                    &crate::state_channel::TakeSyllableKey {
+                        clip_id: "clip".into(),
+                        take_id: "take".into(),
+                    }
+                ),
+                Some(&committed),
+                "document caches must use canonical IDs, without the UI session namespace"
+            );
+            editor.ensure_loaded(true).unwrap();
+            assert_eq!(
+                editor.timeline.lock_or_recover().clips[0]
+                    .active_take()
+                    .syllable_analysis
+                    .as_ref(),
+                Some(&committed),
+                "full reload lost the blocks"
+            );
+            document.ui_geometry_revision.fetch_add(1, Ordering::AcqRel);
+            editor.refresh_ui_geometry(&document, true);
+            assert_eq!(
+                editor.timeline.lock_or_recover().clips[0]
+                    .active_take()
+                    .syllable_analysis
+                    .as_ref(),
+                Some(&committed),
+                "inventory refresh lost the blocks"
+            );
+
+            let encoded = owner.encode_state().unwrap();
+            let mut saved = crate::state_channel::EditState::default();
+            saved.restore(&encoded).unwrap();
+            assert_eq!(
+                saved.take_syllables.len(),
+                1,
+                "component save pruned a valid analysis"
+            );
+            let (cold_model, cold_owner, _cold_identity) = fixture();
+            cold_owner.restore_state(&encoded).unwrap();
+            let cold_editor = cold_owner.editor_session().unwrap();
+            wait_for_source_files(&cold_editor);
+            assert_ne!(editor.namespace, cold_editor.namespace);
+            assert_ne!(
+                request.source_path,
+                cold_editor.timeline.lock_or_recover().clips[0]
+                    .active_take()
+                    .source_path
+                    .clone()
+                    .unwrap()
+            );
+            let cold_clip_id = cold_editor.timeline.lock_or_recover().clips[0].id.clone();
+            let cold_query = super::super::commands::dispatch(
+                &cold_editor,
+                "get_clip_syllable_spans",
+                json!({"clipId":cold_clip_id}),
+            )
+            .unwrap();
+            assert_eq!(
+                cold_query["analyzed"], true,
+                "new-session digest rejected identical PCM"
+            );
+            let restored = cold_editor.timeline.lock_or_recover().clips[0]
+                .active_take()
+                .syllable_analysis
+                .clone()
+                .unwrap();
+            assert_eq!(restored.source_digest, committed.source_digest);
+            assert_eq!(restored.algorithm, committed.algorithm);
+            assert_eq!(
+                restored.source_spans_sec.len(),
+                committed.source_spans_sec.len()
+            );
+            for (before, after) in committed
+                .source_spans_sec
+                .iter()
+                .zip(&restored.source_spans_sec)
+            {
+                assert!((before.start_sec - after.start_sec).abs() < 1e-12);
+                assert!((before.end_sec - after.end_sec).abs() < 1e-12);
+            }
+
+            cold_model.session().edit_sources.lock_or_recover().insert(
+                "ara://source".into(),
+                Arc::new(SourcePcm {
+                    covered: Vec::new(),
+                    sample_rate: 44100,
+                    planes: vec![vec![0.9, 0.8, 0.7, 0.6]],
+                    version: 1,
+                    _reservation: None,
+                }),
+            );
+            cold_editor.ensure_loaded(true).unwrap();
+            assert!(
+                cold_editor.timeline.lock_or_recover().clips[0]
+                    .active_take()
+                    .syllable_analysis
+                    .is_none(),
+                "changed PCM must invalidate cached blocks"
+            );
+            cold_model.session().close();
+            document.close();
         }
-        assert_eq!(
-            document.edits.lock_or_recover().take_syllables.get(
-                &crate::state_channel::TakeSyllableKey {
-                    clip_id: clip.id.clone(),
-                    take_id: take.id.clone(),
-                }
-            ),
-            Some(&analysis)
-        );
-        editor.close();
     }
 
     /// **不变量：音节缓存也必须改变工作区指纹。**
@@ -7080,7 +7816,7 @@ pub(crate) mod tests {
     /// `edits.take_syllables` 后，如果指纹不变，下一次 `apply` 前就先早退，
     /// UI 永远看不到新区间，自动分析又会被再次触发。
     #[test]
-    fn take_syllables_participate_in_the_workspace_projection() {
+    fn take_syllables_do_not_invalidate_the_audio_workspace_projection() {
         let (model, owner, _identity) = fixture();
         let document = model.session();
         let before = document.workspace_projection().unwrap();
@@ -7100,7 +7836,10 @@ pub(crate) mod tests {
             },
         );
         let after = document.workspace_projection().unwrap();
-        assert_ne!(before, after, "分析缓存必须参与工作区指纹");
+        assert_eq!(
+            before, after,
+            "block metadata must not invalidate audio edit baselines"
+        );
         assert_eq!(
             document.workspace_projection().unwrap(),
             after,
@@ -7121,7 +7860,7 @@ pub(crate) mod tests {
         let (model, owner, _identity) = fixture();
         let document = model.session();
         let editor = owner.editor_session().unwrap();
-        editor.ensure_loaded(false).unwrap();
+        wait_for_source_files(&editor);
 
         // 会话内的一次真实内容变化：`ready` 被按回 false，而宿主尚未发 `endEditing`。
         document.ready.store(false, Ordering::Release);
@@ -7153,7 +7892,7 @@ pub(crate) mod tests {
         let (model, owner, _identity) = fixture();
         let document = model.session();
         let editor = owner.editor_session().unwrap();
-        editor.ensure_loaded(false).unwrap();
+        wait_for_source_files(&editor);
 
         // 宿主内容变化（记录时刻），随后不发收口。
         document.clear_renderers();
@@ -7268,7 +8007,7 @@ pub(crate) mod tests {
         let (model, owner, _) = fixture();
         let document = model.session();
         let editor = owner.editor_session().unwrap();
-        editor.ensure_loaded(false).unwrap();
+        wait_for_source_files(&editor);
         let host = crate::host::MockHost::new();
         host.enable_writer();
         host.enable_media();
@@ -7328,7 +8067,7 @@ pub(crate) mod tests {
         // 前提：ARA-only 宿主的形状就是"没有任何宿主清单"。
         assert!(document.ui_tracks.lock_or_recover().is_empty());
         let editor = owner.editor_session().unwrap();
-        editor.ensure_loaded(false).unwrap();
+        wait_for_source_files(&editor);
 
         // 后端身份：没有原生适配器 ⇒ ARA-only，且片段几何只读。
         let backend = owner.host_backend();
@@ -7376,7 +8115,7 @@ pub(crate) mod tests {
             }
         }
         let editor = owner.editor_session().unwrap();
-        editor.ensure_loaded(false).unwrap();
+        wait_for_source_files(&editor);
         let timeline = editor.timeline.lock_or_recover();
         assert_eq!(timeline.clips[0].playback_rate, 0.5);
         assert_eq!(timeline.clips[0].length_sec, 8.0 / 44100.0);
@@ -7521,7 +8260,7 @@ pub(crate) mod tests {
         let (model, owner, _identity) = fixture();
         let document = model.session();
         let editor = owner.editor_session().unwrap();
-        editor.ensure_loaded(false).unwrap();
+        wait_for_source_files(&editor);
         document.clock.publish_host(3.125, true);
         let (reply, rx) = mpsc::channel();
         let (events, _) = mpsc::sync_channel(4);
@@ -7620,7 +8359,7 @@ pub(crate) mod tests {
     fn effect_only_analysis_gate_does_not_block_none_or_plain_mix() {
         let (_model, owner, _identity) = fixture();
         let editor = owner.editor_session().unwrap();
-        editor.ensure_loaded(false).unwrap();
+        wait_for_source_files(&editor);
         let mut timeline = editor.timeline.lock_or_recover().clone();
         let root = timeline.tracks[0].id.clone();
         timeline.ensure_params_for_root(&root);
@@ -7720,7 +8459,7 @@ pub(crate) mod tests {
         );
         drop(snapshot);
         let editor = owner.editor_session().unwrap();
-        editor.ensure_loaded(false).unwrap();
+        wait_for_source_files(&editor);
         let timeline = editor.timeline.lock_or_recover();
         assert_eq!(timeline.clips[0].length_sec, seconds);
         assert_eq!(timeline.clips[0].duration_frames, Some(frames as u64));
@@ -7809,6 +8548,7 @@ pub(crate) mod tests {
             closed: Arc::new(AtomicBool::new(false)),
         };
         let loaded = call(&editor, &sink, &rx, 1, "get_timeline_state", json!({}));
+        wait_for_source_files(&editor);
         let wait = |generation| {
             let began = Instant::now();
             loop {
@@ -7835,14 +8575,20 @@ pub(crate) mod tests {
                 channel_buffers: planes.as_mut_ptr(),
             };
             // SAFETY: 两个513帧平面存活；逐轨读取尾部511帧，剩余2帧必须补零。
-            assert!(unsafe {
+            let copied = unsafe {
                 owners[index].snapshots[usize::from(rate == 48000)].copy_block(
                     (rate * 180 - 511) as i64,
                     rate as u32,
                     &mut bus,
                     513,
                 )
-            });
+            };
+            assert!(
+                copied,
+                "track={index} rate={rate} snapshot={:?} state={:?}",
+                owners[index].snapshots[usize::from(rate == 48000)].diagnose(&[]),
+                editor.state()
+            );
             assert_eq!(&left[..511], &[value; 511]);
             assert_eq!(right, left);
             assert_eq!(&left[511..], &[0.; 2]);
@@ -7919,7 +8665,7 @@ pub(crate) mod tests {
         let (model, owner, _identity) = fixture();
         let document = model.session();
         let editor = owner.editor_session().unwrap();
-        editor.ensure_loaded(false).unwrap();
+        wait_for_source_files(&editor);
         let before_path = editor.timeline.lock_or_recover().clips[0]
             .source_path
             .clone()
@@ -7981,7 +8727,7 @@ pub(crate) mod tests {
         let (model, owner, _identity) = fixture();
         let document = model.session();
         let editor = owner.editor_session().unwrap();
-        editor.ensure_loaded(false).unwrap();
+        wait_for_source_files(&editor);
         let root = editor.timeline.lock_or_recover().tracks[0].id.clone();
         super::super::commands::dispatch(
             &editor,
@@ -8303,6 +9049,7 @@ pub(crate) mod tests {
             json!({}),
         );
         assert_eq!(timeline["clips"].as_array().unwrap().len(), 1);
+        wait_for_source_files(&editor);
         {
             let live = editor.timeline.lock_or_recover();
             assert!(live.tracks[0].compose_enabled);
@@ -8422,7 +9169,7 @@ pub(crate) mod tests {
     fn pending_pitch_analysis_keeps_the_curve_and_still_needs_the_original_line() {
         let (_model, owner, _identity) = fixture();
         let editor = owner.editor_session().unwrap();
-        editor.ensure_loaded(false).unwrap();
+        wait_for_source_files(&editor);
         let root = {
             let mut timeline = editor.timeline.lock_or_recover();
             timeline.tracks[0].pitch_analysis_algo = PitchAnalysisAlgo::WorldDll;

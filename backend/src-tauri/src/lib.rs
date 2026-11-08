@@ -699,6 +699,8 @@ pub fn run() {
             commands::get_clip_syllable_spans,
             commands::analyze_clip_syllables,
             commands::get_param_block_merges,
+            commands::get_param_line_blocks,
+            commands::set_param_line_blocks,
             commands::set_param_block_merges,
             commands::get_runtime_info,
             commands::consume_startup_project_path,

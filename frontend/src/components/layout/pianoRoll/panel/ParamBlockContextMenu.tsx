@@ -12,18 +12,14 @@ export interface ParamBlockContextMenuProps {
     readonly y: number;
     readonly selectedCount: number;
     readonly canMerge: boolean;
-    readonly canUnmerge: boolean;
     readonly canDelete: boolean;
-    readonly canRestoreDeleted: boolean;
-    readonly mergeMessage: string | null;
+    readonly canRestoreGame?: boolean;
+    readonly onRestoreGame?: () => void;
     readonly splitAtSec: number | null;
     readonly selectedDeleted: boolean;
     readonly onSplit: (sec: number) => void;
     readonly onMerge: () => void;
-    readonly onUnmerge: () => void;
     readonly onDelete: () => void;
-    readonly onRestoreDeleted: () => void;
-    readonly onRestoreSelected: () => void;
     readonly onClose: () => void;
     readonly tf: (key: MessageKey) => string;
 }
@@ -33,32 +29,22 @@ export function ParamBlockContextMenu({
     y,
     selectedCount,
     canMerge,
-    canUnmerge,
     canDelete,
-    canRestoreDeleted,
-    mergeMessage,
+    canRestoreGame,
+    onRestoreGame,
     splitAtSec,
     selectedDeleted,
     onSplit,
     onMerge,
-    onUnmerge,
     onDelete,
-    onRestoreDeleted,
-    onRestoreSelected,
     onClose,
     tf,
 }: ParamBlockContextMenuProps) {
     const items: AppMenuItemSpec[] = [
         {
-            key: "blocks-heading",
-            label: tf("param_blocks_tool"),
-            heading: true,
-        },
-        {
             key: "blocks-split",
             label: tf("param_blocks_split_here"),
             disabled: splitAtSec === null || selectedCount !== 1 || selectedDeleted,
-            description: splitAtSec === null ? tf("param_blocks_split_none") : undefined,
             onSelect: () => {
                 if (splitAtSec !== null) onSplit(splitAtSec);
             },
@@ -67,26 +53,13 @@ export function ParamBlockContextMenu({
             key: "blocks-merge",
             label: tf("param_blocks_merge"),
             disabled: !canMerge || selectedDeleted,
-            description:
-                mergeMessage !== null
-                    ? mergeMessage
-                    : selectedCount < 2
-                      ? tf("param_blocks_merge_need_two")
-                      : undefined,
             onSelect: onMerge,
         },
         {
-            key: "blocks-unmerge",
-            label: tf("param_blocks_unmerge"),
-            disabled: !canUnmerge,
-            description: !canUnmerge ? tf("param_blocks_unmerge_none") : undefined,
-            onSelect: onUnmerge,
-        },
-        {
-            key: "blocks-restore-selected",
-            label: tf("param_blocks_restore_selected"),
-            disabled: !selectedDeleted,
-            onSelect: onRestoreSelected,
+            key: "blocks-restore-game",
+            label: tf("param_blocks_restore_game"),
+            disabled: !canRestoreGame,
+            onSelect: onRestoreGame ?? (() => {}),
         },
         {
             key: "blocks-delete",
@@ -94,15 +67,6 @@ export function ParamBlockContextMenu({
             disabled: !canDelete,
             onSelect: onDelete,
         },
-        ...(canRestoreDeleted
-            ? [
-                  {
-                      key: "blocks-restore",
-                      label: tf("param_blocks_restore"),
-                      onSelect: onRestoreDeleted,
-                  },
-              ]
-            : []),
     ];
     return (
         <AppContextMenu
