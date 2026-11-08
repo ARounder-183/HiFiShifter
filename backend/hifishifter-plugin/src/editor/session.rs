@@ -4163,8 +4163,9 @@ pub(crate) mod tests {
             assert_eq!(session.playback_state()["host_authoritative"], true);
             // 宿主在播放，位置 1.5 s。
             owner.observe_transport(
-                &crate::audio_abi::ProcessContext {
-                    state: (1 << 1) | (1 << 10),
+                &crate::block_context::BlockContext {
+                    playing: true,
+                    tempo: Some(120.0),
                     sample_rate: 48_000.0,
                     project_time_samples: 72_000,
                     ..Default::default()
@@ -4185,8 +4186,7 @@ pub(crate) mod tests {
             assert!((state["position_sec"].as_f64().unwrap() - 1.5).abs() < 1e-9);
             // 宿主停止 ⇒ 如实回落（面板据此说"宿主没在播放，录不到内容"）。
             owner.observe_transport(
-                &crate::audio_abi::ProcessContext {
-                    state: 0,
+                &crate::block_context::BlockContext {
                     sample_rate: 48_000.0,
                     project_time_samples: 72_000,
                     ..Default::default()
@@ -6026,8 +6026,7 @@ pub(crate) mod tests {
             .clock
             .get()
             .unwrap()
-            .update(&crate::audio_abi::ProcessContext {
-                state: 0,
+            .update(&crate::block_context::BlockContext {
                 sample_rate: 44100.,
                 project_time_samples: 88200,
                 ..Default::default()
@@ -6085,10 +6084,9 @@ pub(crate) mod tests {
             .clock
             .get()
             .unwrap()
-            .update(&crate::audio_abi::ProcessContext {
-                state: 1 << 10,
+            .update(&crate::block_context::BlockContext {
                 sample_rate: 44100.,
-                tempo: 150.,
+                tempo: Some(150.),
                 ..Default::default()
             });
         let document = model.session();
@@ -6152,8 +6150,8 @@ pub(crate) mod tests {
             .clock
             .get()
             .unwrap()
-            .update(&crate::audio_abi::ProcessContext {
-                state: 1 << 1,
+            .update(&crate::block_context::BlockContext {
+                playing: true,
                 sample_rate: 44100.,
                 project_time_samples: 44100,
                 ..Default::default()

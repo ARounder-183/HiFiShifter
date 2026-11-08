@@ -30,6 +30,16 @@ pub struct BlockContext {
     pub music: Option<f64>,
     /// 工程速度（BPM）；宿主没声明有效或值非法时为 `None`。
     pub tempo: Option<f64>,
+    /// 宿主系统时间（VST3 `kSystemTimeValid` 的 `systemTime`）。
+    ///
+    /// 【为什么 CLAP 恒为 `None`】CLAP 的 `steady_time` 是"进程内单调计数"，
+    /// 与 VST3 的纳秒系统时间不是同一个量；塞进同一个字段会让诊断读数说谎。
+    pub system_time: Option<i64>,
+    /// 拍号（分子, 分母）；宿主没声明有效拍号时为 `None`。
+    ///
+    /// 【为什么和 tempo 一样用 Option】"宿主这一块没说"与"宿主说是 0/0"是两件事：
+    /// 前者必须保留上一次有效读数。
+    pub time_signature: Option<(i32, i32)>,
     /// 循环区间是否有效。
     pub cycle_valid: bool,
     /// 循环此刻是否在走。
@@ -62,7 +72,8 @@ impl BlockContext {
             PROCESS_CONTEXT_CONTINUOUS_VALID, PROCESS_CONTEXT_CYCLE_ACTIVE,
             PROCESS_CONTEXT_CYCLE_VALID, PROCESS_CONTEXT_PLAYING,
             PROCESS_CONTEXT_PROJECT_TIME_MUSIC_VALID, PROCESS_CONTEXT_RECORDING,
-            PROCESS_CONTEXT_TEMPO_VALID,
+            PROCESS_CONTEXT_SYSTEM_TIME_VALID, PROCESS_CONTEXT_TEMPO_VALID,
+            PROCESS_CONTEXT_TIME_SIG_VALID,
         };
         let mut bits = 0;
         if self.playing {
@@ -79,6 +90,12 @@ impl BlockContext {
         }
         if self.tempo.is_some() {
             bits |= PROCESS_CONTEXT_TEMPO_VALID;
+        }
+        if self.system_time.is_some() {
+            bits |= PROCESS_CONTEXT_SYSTEM_TIME_VALID;
+        }
+        if self.time_signature.is_some() {
+            bits |= PROCESS_CONTEXT_TIME_SIG_VALID;
         }
         if self.cycle_valid {
             bits |= PROCESS_CONTEXT_CYCLE_VALID;
@@ -98,7 +115,8 @@ impl BlockContext {
             PROCESS_CONTEXT_CONTINUOUS_VALID, PROCESS_CONTEXT_CYCLE_ACTIVE,
             PROCESS_CONTEXT_CYCLE_VALID, PROCESS_CONTEXT_PLAYING,
             PROCESS_CONTEXT_PROJECT_TIME_MUSIC_VALID, PROCESS_CONTEXT_RECORDING,
-            PROCESS_CONTEXT_TEMPO_VALID,
+            PROCESS_CONTEXT_SYSTEM_TIME_VALID, PROCESS_CONTEXT_TEMPO_VALID,
+            PROCESS_CONTEXT_TIME_SIG_VALID,
         };
         let state = context.state;
         let tempo_ok = state & PROCESS_CONTEXT_TEMPO_VALID != 0;
@@ -113,6 +131,12 @@ impl BlockContext {
                 .then_some(context.project_time_music),
             tempo: (tempo_ok && context.tempo.is_finite() && context.tempo > 0.0)
                 .then_some(context.tempo),
+            system_time: (state & PROCESS_CONTEXT_SYSTEM_TIME_VALID != 0)
+                .then_some(context.system_time),
+            time_signature: (state & PROCESS_CONTEXT_TIME_SIG_VALID != 0
+                && context.time_sig_numerator > 0
+                && context.time_sig_denominator > 0)
+                .then_some((context.time_sig_numerator, context.time_sig_denominator)),
             cycle_valid: state & PROCESS_CONTEXT_CYCLE_VALID != 0,
             cycle_active: state & PROCESS_CONTEXT_CYCLE_ACTIVE != 0,
             cycle_start_music: context.cycle_start_music,

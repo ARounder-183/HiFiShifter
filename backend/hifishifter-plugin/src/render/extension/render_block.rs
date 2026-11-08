@@ -255,6 +255,17 @@ impl ExtensionOwner {
             playing: context.playing,
         };
         let evidence = self.capture_observe_block(input, stream, context, effective_position);
+        // 【宿主采样通道：两种格式都写在这一处】`observe_transport` 与上面那次捕获观察
+        // 回答的是同一个块的两个问题（"宿主给了什么" / "该画在哪"），而且必须共用
+        // 同一个"位置是否可信"的结论。此前它只由 VST3 外壳调用 —— CLAP 看上去一切正常，
+        // 直到用户在普通播放时发现光标不动（捕获时光标会动，因为那条路走
+        // `publish_capture_block`）。把它放进共享入口，两种格式不再可能分叉。
+        self.observe_transport(
+            &context,
+            stream.index() as i32,
+            block.frames,
+            evidence.is_some_and(|evidence| evidence.position_trusted),
+        );
         // SAFETY: 同一份宿主缓冲，且只在本次回调内使用。
         unsafe { self.render_block(block, Some(context), evidence) }
     }

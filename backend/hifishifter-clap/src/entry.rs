@@ -871,6 +871,150 @@ mod tests {
         release(&mut plugin, instance);
     }
 
+    /// **非 ARA（Capture）形态下，普通播放也必须驱动播放光标。**
+    ///
+    /// 【为什么这条必须存在】宿主采样通道（`ExtensionOwner::observe_transport`）此前
+    /// 只由 VST3 外壳调用：CLAP 的 `process` 通路里根本没有这个调用点。于是现场出现
+    /// 一个很奇怪的分裂 —— **捕获时光标跟随，普通播放时不动**：前者走
+    /// `publish_capture_block`，后者本该走宿主采样通道，而那条通道在 CLAP 上从未接通。
+    /// 两种表现并存让它看起来像前端问题，实际是整条通道缺失。
+    ///
+    /// 这条用例刻意**不调用 capture_start**：它要证明的就是"没有捕获时也有位置"。
+    #[test]
+    fn a_plain_host_playback_moves_the_playhead_without_capturing() {
+        let (mut plugin, instance) = fixture();
+        let ptr: *const clap_plugin_t = &raw const plugin;
+        let host = crate::abi::clap_host_t {
+            clap_version: CLAP_VERSION,
+            host_data: std::ptr::null_mut(),
+            name: c"probe".as_ptr(),
+            vendor: c"probe".as_ptr(),
+            url: c"probe".as_ptr(),
+            version: c"1".as_ptr(),
+            get_extension: None,
+            request_restart: None,
+            request_process: None,
+            request_callback: None,
+        };
+        unsafe { (*instance).host = &raw const host };
+        assert!(unsafe { plugin_init(ptr) });
+        assert!(unsafe { plugin_activate(ptr, 48_000.0, 1, 512) });
+        assert!(unsafe { start_processing(ptr) });
+        let owner = std::sync::Arc::clone(&unsafe { crate::instance(ptr) }.expect("instance").owner);
+        let port = hifishifter_plugin::editor::port::EditorPort::new(
+            std::sync::Arc::clone(&owner),
+            "v",
+        );
+        let reply = |command: &str| {
+            let request = serde_json::json!({ "id": 1, "viewId": "v", "version": 1, "command": command, "args": serde_json::Value::Null });
+            crate::editor::protocol::reply_with_editor("v", &request, Some(&port))
+        };
+
+        // 一开始没有任何宿主块：位置是 0，且没在播放。
+        assert_eq!(reply("get_playback_state")["value"]["is_playing"], false);
+
+        const FRAMES: usize = 480;
+        let mut out_left = vec![0.0_f32; FRAMES];
+        let mut out_right = vec![0.0_f32; FRAMES];
+        let mut feed = |playing: bool, block: i64| {
+            let seconds = block as f64 * FRAMES as f64 / 48_000.0;
+            let mut transport = crate::abi::clap_event_transport_t {
+                header: crate::abi::clap_event_header_t {
+                    size: std::mem::size_of::<crate::abi::clap_event_transport_t>() as u32,
+                    time: 0,
+                    space_id: 0,
+                    type_: crate::abi::CLAP_EVENT_TRANSPORT,
+                    flags: 0,
+                },
+                flags: crate::abi::transport_flags::HAS_SECONDS_TIMELINE
+                    | if playing {
+                        crate::abi::transport_flags::IS_PLAYING
+                    } else {
+                        0
+                    },
+                song_pos_beats: 0,
+                song_pos_seconds: (seconds * crate::abi::CLAP_SECTIME_FACTOR).round() as i64,
+                tempo: 120.0,
+                tempo_inc: 0.0,
+                loop_start_beats: 0,
+                loop_end_beats: 0,
+                loop_start_seconds: 0,
+                loop_end_seconds: 0,
+                bar_start: 0,
+                bar_number: 0,
+                tsig_num: 4,
+                tsig_denom: 4,
+            };
+            let live: Vec<f32> = (0..FRAMES).map(|i| (i as f32 * 0.05).sin() * 0.5).collect();
+            let mut in_planes: [*mut f32; 2] =
+                [live.as_ptr() as *mut f32, live.as_ptr() as *mut f32];
+            let mut out_planes: [*mut f32; 2] = [out_left.as_mut_ptr(), out_right.as_mut_ptr()];
+            let input = crate::abi::clap_audio_buffer_t {
+                data32: in_planes.as_mut_ptr(),
+                data64: std::ptr::null_mut(),
+                channel_count: 2,
+                latency: 0,
+                constant_mask: 0,
+            };
+            let mut output = crate::abi::clap_audio_buffer_t {
+                data32: out_planes.as_mut_ptr(),
+                data64: std::ptr::null_mut(),
+                channel_count: 2,
+                latency: 0,
+                constant_mask: 0,
+            };
+            let process = clap_process_t {
+                steady_time: block * FRAMES as i64,
+                frames_count: FRAMES as u32,
+                transport: &mut transport,
+                audio_inputs: &input,
+                audio_outputs: &mut output,
+                audio_inputs_count: 1,
+                audio_outputs_count: 1,
+                in_events: std::ptr::null(),
+                out_events: std::ptr::null(),
+            };
+            assert_eq!(
+                unsafe { plugin_process(ptr, &raw const process) },
+                CLAP_PROCESS_CONTINUE
+            );
+        };
+
+        // 宿主播放 40 块 ≈ 0.4 s（没有捕获，也没有 ARA 文档）。
+        for block in 0..40_i64 {
+            feed(true, block);
+        }
+        let playing = reply("get_playback_state");
+        assert_eq!(
+            playing["value"]["is_playing"], true,
+            "宿主在播放必须如实报出：{playing}"
+        );
+        let position = playing["value"]["position_sec"].as_f64().unwrap_or(-1.0);
+        let expected = 39.0 * FRAMES as f64 / 48_000.0;
+        assert!(
+            (position - expected).abs() < 0.02,
+            "播放光标必须跟随宿主位置（期望 {expected:.3}s，实际 {position:.3}s）：{playing}"
+        );
+        assert_eq!(
+            playing["value"]["position_source"], "block",
+            "位置应来自音频块通道：{playing}"
+        );
+
+        // 宿主停播：播放位必须如实回落，而不是被闩死。
+        feed(false, 40);
+        assert_eq!(
+            reply("get_playback_state")["value"]["is_playing"],
+            false,
+            "宿主停播必须如实回落"
+        );
+
+        unsafe {
+            stop_processing(ptr);
+            plugin_deactivate(ptr);
+        }
+        release(&mut plugin, instance);
+    }
+
     /// **实例级 ARA 扩展必须真的发得出来**。
     ///
     /// 【为什么这条必须存在】entry 级工厂表与实例级扩展是两条独立通路：宿主先按工厂

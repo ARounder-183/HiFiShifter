@@ -55,6 +55,15 @@ pub unsafe fn process_audio(
             context.cycle_start_music = transport.loop_start_beats as f64 / factor;
             context.cycle_end_music = transport.loop_end_beats as f64 / factor;
         }
+        // 【为什么拍号也进中立块】`TransportClock::update` 与捕获观察问的是同一批事实；
+        // 只给 VST3 一条路的话，CLAP 形态下拍号与速度会永远停在上一次读数。
+        if transport.flags & crate::abi::transport_flags::HAS_TIME_SIGNATURE != 0 {
+            let numerator = i32::from(transport.tsig_num);
+            let denominator = i32::from(transport.tsig_denom);
+            if numerator > 0 && denominator > 0 {
+                context.time_signature = Some((numerator, denominator));
+            }
+        }
     }
     // 进程形态：CLAP 只有“离线 render 模式”这一个权威来源（见 AudioState::is_offline）。
     let mode = if frame.offline { 2 } else { 0 };

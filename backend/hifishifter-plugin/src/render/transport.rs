@@ -338,9 +338,15 @@ impl TransportClock {
     }
 
     /// 只采集原子诊断，不修改播放权威/不打印日志；并发快照是近似观测，不作精确同步证明。
+    ///
+    /// 【为什么入参是中立的 `BlockContext`】这条通道记录的是"宿主这一块给了什么"，
+    /// 与宿主是 VST3 还是 CLAP 无关。此前它直接吃 VST3 的 `ProcessContext`，结果是
+    /// 只有 VST3 外壳能调用它 —— CLAP 一侧根本没有这条通道，于是"播放时光标不跟随"
+    /// （捕获时反而正常，因为那条路走 `publish_capture_block`）。状态位现在只在
+    /// `BlockContext::from_vst3` 里解码一次。
     pub fn observe(
         &self,
-        context: &crate::audio_abi::ProcessContext,
+        context: &crate::block_context::BlockContext,
         writer: u64,
         role: i32,
         mode: i32,
@@ -370,7 +376,7 @@ impl TransportClock {
         let old_rate = self
             .rate
             .swap(context.sample_rate.to_bits(), Ordering::Relaxed);
-        let playing = context.state & (1 << 1) != 0;
+        let playing = context.playing;
         let old_playing = self.observed_playing.swap(playing, Ordering::Relaxed);
         if playing
             && old_playing
@@ -382,13 +388,13 @@ impl TransportClock {
         self.role.store(role, Ordering::Relaxed);
         self.mode.store(mode, Ordering::Relaxed);
         self.system_valid
-            .store(context.state & (1 << 8) != 0, Ordering::Relaxed);
+            .store(context.system_time.is_some(), Ordering::Relaxed);
         self.system_time
-            .store(context.system_time, Ordering::Relaxed);
+            .store(context.system_time.unwrap_or(0), Ordering::Relaxed);
         self.continuous_valid
-            .store(context.state & (1 << 17) != 0, Ordering::Relaxed);
+            .store(context.continuous.is_some(), Ordering::Relaxed);
         self.continuous
-            .store(context.continuous_time_samples, Ordering::Relaxed);
+            .store(context.continuous.unwrap_or(0), Ordering::Relaxed);
     }
 
     /// 记下 prefetch 块带来的**播放位**。位置**绝不**由它写入。
@@ -650,8 +656,11 @@ impl TransportClock {
         same_as_last || same_as_parked
     }
 
-    /// VST3锁定header中kPlaying=1<<1；project_time_samples不需要音乐时间valid位。
-    pub fn update(&self, context: &crate::audio_abi::ProcessContext) {
+    /// 把一块宿主时间事实写进播放权威；`project_time_samples` 不需要音乐时间有效位。
+    ///
+    /// 【为什么入参也是中立的】它与 [`Self::observe`] 回答的是同一个块的两个问题
+    /// （"给过什么"与"该画在哪"）。两种格式都写这一条，光标才会在两种形态下都跟随。
+    pub fn update(&self, context: &crate::block_context::BlockContext) {
         if context.sample_rate.is_finite() && context.sample_rate > 0. {
             let seconds = context.project_time_samples as f64 / context.sample_rate;
             // 同 publish_host：音频线程报回的位置同样可以结算一次定位。
@@ -661,7 +670,7 @@ impl TransportClock {
             // 块序号只递增；它是"音频走到了第几块"的唯一表达（见 HOST_STALE_BLOCKS）。
             self.audio_serial.fetch_add(1, Ordering::Release);
             self.sample_seq.fetch_add(1, Ordering::Release);
-            let playing = context.state & (1 << 1) != 0;
+            let playing = context.playing;
             // 【位置的可信域】`kPlaying == 1` 的块不需要判据：那时位置是真实的传输位置，
             // 包括合法的 seek。`kPlaying == 0` 的块才需要能解释"它为什么在这里"。
             //
@@ -679,21 +688,21 @@ impl TransportClock {
                 self.parked_valid.store(true, Ordering::Release);
             }
             self.playing.store(playing, Ordering::Release);
-            // 锁定ivstprocesscontext.h的kTempoValid=1<<10；不可用字段不能覆盖最后有效BPM。
-            if context.state & (1 << 10) != 0 && context.tempo.is_finite() && context.tempo > 0. {
-                self.tempo.store(context.tempo.to_bits(), Ordering::Release);
-            }
-            // 锁定ivstprocesscontext.h的kTimeSigValid=1<<13。与 tempo 同样的规矩：
-            // 有效位不成立时**不覆盖**最后有效拍号 —— 宿主在某些块里不发它，
-            // 那不是"拍号变成 0/0"，只是这一块没说。
-            if context.state & (1 << 13) != 0
-                && context.time_sig_numerator > 0
-                && context.time_sig_denominator > 0
+            // 不可用字段不能覆盖最后有效 BPM：`BlockContext` 只在有效且合法时才给出值。
+            if let Some(tempo) = context
+                .tempo
+                .filter(|tempo| tempo.is_finite() && *tempo > 0.)
             {
-                self.time_sig_numerator
-                    .store(context.time_sig_numerator, Ordering::Release);
+                self.tempo.store(tempo.to_bits(), Ordering::Release);
+            }
+            // 与 tempo 同样的规矩：宿主某些块里不发拍号，那不是"拍号变成 0/0"。
+            if let Some((numerator, denominator)) = context
+                .time_signature
+                .filter(|(numerator, denominator)| *numerator > 0 && *denominator > 0)
+            {
+                self.time_sig_numerator.store(numerator, Ordering::Release);
                 self.time_sig_denominator
-                    .store(context.time_sig_denominator, Ordering::Release);
+                    .store(denominator, Ordering::Release);
             }
         }
     }
@@ -937,9 +946,9 @@ impl TransportClock {
 mod tests {
     use super::*;
 
-    fn context(samples: i64, playing: bool) -> crate::audio_abi::ProcessContext {
-        crate::audio_abi::ProcessContext {
-            state: if playing { 1 << 1 } else { 0 },
+    fn context(samples: i64, playing: bool) -> crate::block_context::BlockContext {
+        crate::block_context::BlockContext {
+            playing,
             sample_rate: 44100.,
             project_time_samples: samples,
             ..Default::default()
@@ -1115,9 +1124,8 @@ mod tests {
     fn diagnostics_count_sources_without_changing_the_transport() {
         let clock = TransportClock::default();
         let mut ctx = context(44100, true);
-        ctx.state = (1 << 1) | (1 << 8) | (1 << 17);
-        ctx.system_time = 123456;
-        ctx.continuous_time_samples = 44100;
+        ctx.system_time = Some(123456);
+        ctx.continuous = Some(44100);
         clock.observe(&ctx, 1, 2, 0);
         ctx.project_time_samples = 88200;
         clock.observe(&ctx, 2, 1, 1);
@@ -1142,14 +1150,15 @@ mod tests {
     fn only_valid_host_tempo_updates_bpm() {
         let clock = TransportClock::default();
         let mut ctx = context(0, false);
-        ctx.tempo = 150.;
+        // 中立块用 `Option` 表达"这一块没说"，所以"没说"就是 `None`。
+        ctx.tempo = None;
         clock.update(&ctx);
         assert_eq!(clock.tempo(), None);
-        ctx.state = 1 << 10;
+        ctx.tempo = Some(150.);
         clock.update(&ctx);
         assert_eq!(clock.tempo(), Some(150.));
         for tempo in [f64::NAN, 0., -1.] {
-            ctx.tempo = tempo;
+            ctx.tempo = Some(tempo);
             clock.update(&ctx);
             assert_eq!(clock.tempo(), Some(150.));
         }
@@ -1163,24 +1172,20 @@ mod tests {
     fn only_valid_host_time_signature_updates_the_meter() {
         let clock = TransportClock::default();
         let mut ctx = context(0, false);
-        ctx.time_sig_numerator = 7;
-        ctx.time_sig_denominator = 8;
-        // 无有效位：不采纳。
+        // 中立块用 `Option` 表达"这一块没说"。
+        ctx.time_signature = None;
         clock.update(&ctx);
         assert_eq!(clock.time_signature(), None);
-        // 有效位成立：采纳。
-        ctx.state = 1 << 13;
+        ctx.time_signature = Some((7, 8));
         clock.update(&ctx);
         assert_eq!(clock.time_signature(), Some((7, 8)));
-        // 后续块没有有效位：保持上一次读数，而不是退回默认。
-        ctx.state = 0;
+        // 后续块没说：保持上一次读数，而不是退回默认。
+        ctx.time_signature = None;
         clock.update(&ctx);
         assert_eq!(clock.time_signature(), Some((7, 8)));
-        // 有效但非正：拒绝（0/0 与负数都不是合法拍号）。
-        ctx.state = 1 << 13;
+        // 说了但非正：拒绝（0/0 与负数都不是合法拍号）。
         for (numerator, denominator) in [(0, 8), (7, 0), (-4, 4)] {
-            ctx.time_sig_numerator = numerator;
-            ctx.time_sig_denominator = denominator;
+            ctx.time_signature = Some((numerator, denominator));
             clock.update(&ctx);
             assert_eq!(
                 clock.time_signature(),

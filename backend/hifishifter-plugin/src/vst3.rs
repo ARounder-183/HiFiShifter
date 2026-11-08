@@ -1973,15 +1973,16 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
             // 之后只看事实，与 CLAP 侧走同一段代码（见 crate::block_context）。
             let block = crate::block_context::BlockContext::from_vst3(context);
             evidence = owner.capture_observe(probe, block, effective_position);
-            if !owner.processing_pass_active() {
-                let position_trusted = evidence.is_some_and(|evidence| evidence.position_trusted);
-                owner.observe_transport(
-                    context,
-                    probe.process_mode,
-                    probe.num_samples as usize,
-                    position_trusted,
-                );
-            }
+            let position_trusted = evidence.is_some_and(|evidence| evidence.position_trusted);
+            // 【为什么传中立块而不是 `context`】`observe_transport` 现在吃
+            // `BlockContext`（VST3 与 CLAP 共用同一条通道），而这里刚为捕获观察
+            // 造好了同一份事实 —— 再让时钟自己解一次 VST3 状态位就是第二份解码。
+            owner.observe_transport(
+                &block,
+                probe.process_mode,
+                probe.num_samples as usize,
+                position_trusted,
+            );
         }
     }
     match shape {

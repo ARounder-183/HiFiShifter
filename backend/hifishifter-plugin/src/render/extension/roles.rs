@@ -237,11 +237,17 @@ impl ExtensionOwner {
     /// process只写有界原子诊断，JSON/日志全部由actor读取，暂不把候选计数当作根因。
     pub(crate) fn observe_transport(
         &self,
-        context: &crate::audio_abi::ProcessContext,
+        context: &crate::block_context::BlockContext,
         mode: i32,
         frames: usize,
         position_trusted: bool,
     ) {
+        // 【为什么这条判据在共享方法里】离线 pass 的块是"渲染进度"，不是播放位置，
+        // 不能驱动光标。它属于语义、不属于某个外壳，所以两种格式一视同仁 ——
+        // 放在调用点就等于让每个格式各自复述一次。
+        if self.processing_pass_active() {
+            return;
+        }
         if let Some(clock) = self.clock.get() {
             clock.observe(
                 context,
@@ -273,7 +279,7 @@ impl ExtensionOwner {
                 // 播放头约 1~1.5 秒），但 kPlaying 位与 realtime 块同源。把两者拆开
                 // 之后，ARA 形态下的编辑器实例终于有了一个可信的播放位 —— 它的音频
                 // 块恒为零，而宿主采样只在 REAPER 这类宿主里存在。
-                clock.observe_prefetch_playing(context.state & (1 << 1) != 0);
+                clock.observe_prefetch_playing(context.playing);
             }
         }
     }

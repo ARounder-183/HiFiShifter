@@ -73,6 +73,15 @@ pub(crate) const PROCESS_CONTEXT_CYCLE_VALID: u32 = 1 << 12;
 /// `continuousTimeSamples` 是否有效（SDK `ivstprocesscontext.h:113`）。
 pub(crate) const PROCESS_CONTEXT_CONTINUOUS_VALID: u32 = 1 << 17;
 
+/// `systemTime` 是否有效（SDK `ivstprocesscontext.h`，`kSystemTimeValid = 1 << 8`）。
+///
+/// 【为什么现在才给它起名】它此前是 `transport.rs` 里的一处 `1 << 8`。把它和其余
+/// 状态位放在一起，解码 VST3 的 `state` 才只剩 `BlockContext::from_vst3` 这一处。
+pub(crate) const PROCESS_CONTEXT_SYSTEM_TIME_VALID: u32 = 1 << 8;
+
+/// `timeSigNumerator` / `timeSigDenominator` 是否有效（`kTimeSigValid = 1 << 13`）。
+pub(crate) const PROCESS_CONTEXT_TIME_SIG_VALID: u32 = 1 << 13;
+
 /// 完整 SDK 时间上下文；project_time_samples 始终有效，不依赖音乐时间有效位。
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
