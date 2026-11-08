@@ -37,18 +37,27 @@ function Assert-Ok($what) {
 }
 
 function Reset-Directory([string]$path) {
-    Remove-Item $path -Recurse -Force -ErrorAction SilentlyContinue
-    New-Item -ItemType Directory -Force $path | Out-Null
+    $resolved = [IO.Path]::GetFullPath($path)
+    $outputRoot = [IO.Path]::GetFullPath((Join-Path $root 'dist')).TrimEnd('\') + '\'
+    if (!$resolved.StartsWith($outputRoot, [StringComparison]::OrdinalIgnoreCase)) { throw "Unexpected build cleanup path: $resolved" }
+    Remove-Item -LiteralPath $resolved -Recurse -Force -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force $resolved | Out-Null
 }
 
 # 模型权重不在仓库里（见 scripts/setup/fetch-models.py）：缺了就取，已有则是一次
 # 目录扫描。CI 用 actions/cache 以清单哈希为键缓存解压结果，因此这里通常什么都不做。
 python (Join-Path $PSScriptRoot '..\setup\fetch-models.py')
-python (Join-Path $PSScriptRoot '..\setup\fetch-models.py') --fetch-game
 Assert-Ok '模型权重'
+python (Join-Path $PSScriptRoot '..\setup\fetch-models.py') --fetch-game
+Assert-Ok 'GAME 模型权重'
 
 $profile = $Configuration.ToLowerInvariant()
-$built = Join-Path $root "backend\target\$profile"
+$cargoTarget = Join-Path $root 'backend\target'
+if ($env:CARGO_TARGET_DIR) {
+    $cargoTarget = [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR)
+    $env:CARGO_TARGET_DIR = $cargoTarget
+}
+$built = Join-Path $cargoTarget $profile
 $dist = Join-Path $root 'dist'
 $stage = Join-Path $dist '_stage\installer'
 $version = (Get-Content backend\src-tauri\tauri.conf.json -Raw | ConvertFrom-Json).version
@@ -120,9 +129,8 @@ if ($Target -eq 'All' -or $Target -eq 'Plugin') {
         if (Test-Path "$built\$dll") { Copy-Item "$built\$dll" $module }
     }
 
-    # 只拷插件入口与它引用的 chunk。index.html / detached.html / waveform-test.html
-    # 属于独立 App 与开发页面，进了插件 bundle 既是死重量也让目录清单没法对账。
-    Copy-Item frontend\dist\plugin.html "$resources\frontend"
+    # 插件和浮动编辑器入口共用同一份 chunk。
+    Copy-Item frontend\dist\plugin.html, frontend\dist\detached.html "$resources\frontend"
     Copy-Item frontend\dist\assets\* "$resources\frontend\assets" -Recurse
     Copy-Item backend\src-tauri\icons\icon.ico "$resources\frontend"
 
@@ -137,7 +145,10 @@ if ($Target -eq 'All' -or $Target -eq 'Plugin') {
     New-Item -ItemType Directory -Force $objDir | Out-Null
     cl.exe /nologo /utf-8 /std:c++17 /LD /MT /EHsc /O2 backend\hifishifter-plugin\native\module_loader.cpp "/Fo:$objDir\module_loader.obj" /link "/OUT:$module\HiFiShifter.vst3" "/IMPLIB:$objDir\HiFiShifterLoader.lib"
     Assert-Ok '原生 VST3 loader 构建'
-    Remove-Item $objDir -Recurse -Force
+    $resolvedObjects = [IO.Path]::GetFullPath($objDir)
+    $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
+    if (!$resolvedObjects.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase)) { throw 'Unexpected loader cleanup path' }
+    Remove-Item -LiteralPath $resolvedObjects -Recurse -Force
 
     # 编译成功不等于能被宿主加载。打包前跑一次黑盒门禁，别让加载不了的产物进安装器。
     & .\scripts\vst3\windows\verify.ps1 -BundleDirectory $bundle
@@ -170,9 +181,9 @@ function Write-AppPayload {
     Reset-Directory $app
     Copy-Item "$built\HiFiShifter.exe" $app
     # 0 字节的 DLL 是 arm64 上的占位符（vslib 是 x86_64 专用），不进产物。
-    # hifishifter_plugin.dll 属于 VST3 载荷，装进 App 目录只会多一份 40 MB。
+    # 产品模块不作为 App 的运行时依赖重复分发。
     Get-ChildItem $built -Filter *.dll |
-        Where-Object { $_.Length -gt 0 -and $_.Name -ne 'hifishifter_plugin.dll' } |
+        Where-Object { $_.Length -gt 0 -and $_.Name -notin @('hifishifter_plugin.dll', 'hifishifter_clap.dll', 'backend_lib.dll') } |
         Copy-Item -Destination $app
     New-Item -ItemType Directory -Force "$app\models" | Out-Null
     Copy-Item "$modelsSource\models.json" "$app\models"
@@ -362,7 +373,7 @@ $portable = Join-Path $dist 'HiFiShifter'
 Reset-Directory $portable
 Copy-Item "$built\HiFiShifter.exe" $portable
 Get-ChildItem $built -Filter *.dll |
-    Where-Object { $_.Length -gt 0 -and $_.Name -ne 'hifishifter_plugin.dll' } |
+    Where-Object { $_.Length -gt 0 -and $_.Name -notin @('hifishifter_plugin.dll', 'hifishifter_clap.dll', 'backend_lib.dll') } |
     Copy-Item -Destination $portable
 Copy-Item $modelsSource "$portable\models" -Recurse
 Copy-Item $licenses $portable -Recurse
