@@ -5,6 +5,7 @@
  * `param_blocks/projection.rs` 与 golden fixture。
  */
 
+import type { ClipInfo } from "../../../features/session/sessionTypes";
 import type { TakeSpan } from "./paramBlockTypes";
 
 export interface ParamBlockSourceClip {
@@ -228,6 +229,44 @@ export function inverseProject(
 
 export function modEuclid(value: number, modulus: number): number {
     return ((value % modulus) + modulus) % modulus;
+}
+
+/**
+ * 会话里的 `ClipInfo` → 源域投影输入。
+ *
+ * 它描述的是"源域模型需要 Clip 的哪几个字段"，与持久化无关，所以住在投影模块
+ * 而不是某个 hook 里：任何要合成视图的调用方都必须用**同一份**映射，否则
+ * "合成用的 clips"与"编辑用的 clips"会悄悄分叉。
+ */
+export function toParamBlockSourceClip(clip: ClipInfo): ParamBlockSourceClip {
+    return {
+        id: clip.id,
+        trackId: clip.trackId,
+        startSec: clip.startSec,
+        lengthSec: clip.lengthSec,
+        sourceStartSec: clip.sourceStartSec,
+        sourceEndSec: clip.sourceEndSec,
+        playbackRate: clip.playbackRate,
+        reversed: clip.reversed,
+        loopEnabled: clip.loopEnabled,
+        contentDurationSec: clip.durationSec ?? null,
+        activeTakeId: clip.activeTakeId,
+        takes: clip.takes?.map((take) => ({
+            id: take.id,
+            sourceStartSec: take.sourceStartSec,
+            sourceEndSec: take.sourceEndSec,
+            playbackRate: take.playbackRate,
+            reversed: take.reversed,
+            loopEnabled: take.loopEnabled,
+            durationSec: take.durationSec,
+            durationFrames: take.durationFrames,
+            sourceSampleRate: take.sourceSampleRate,
+            syllableSpansSec: take.syllableSpansSec,
+            midiNoteData: take.midiNoteData,
+        })),
+        syllableSpansSec: clip.syllableSpansSec,
+        midiNoteData: clip.midiNoteData,
+    };
 }
 
 /** 源域区间 → 工程秒区间（供旧 UI 命中/矩形继续工作）。 */

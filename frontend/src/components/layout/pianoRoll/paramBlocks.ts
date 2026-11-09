@@ -12,7 +12,6 @@
  * 【作用域】只在当前根轨道组内建块。跨组块没有唯一参数所有者，第一版直接拒绝。
  */
 
-import { composeParamBlockView } from "./paramBlockComposition";
 import {
     createUserBlock,
     deleteProjectedBlocks,
@@ -872,19 +871,31 @@ export function resolveParamBlockSplitSec(args: {
     return distancePx <= Math.max(0, args.thresholdPx) ? snapped : args.sec;
 }
 
-/** 参数块编辑状态：唯一权威是 editSet，view 只是当前派生缓存。 */
+/**
+ * 参数块编辑状态。
+ *
+ * 【唯一权威是 `editSet`】用户只声明"哪些源域区间属于同一个块"。
+ *
+ * 【这里**没有** `view`】块几何是 `(clips, editSet, framePeriodMs)` 的纯函数
+ * （`composeParamBlockView`）。把它存进状态就有两个写入者 —— 本地合成与后端
+ * 回读 —— 而回读在手势期间拿到的是旧几何：于是块在新旧位置之间逐帧来回跳
+ * （闪烁），切分 / 伸缩读到过期边界（"切分点离边缘太近"）。派生值不该被存下来。
+ *
+ * 【这里**也没有** `clips`】同一份 clip 快照存两处，合成用的与调用方传入的迟早
+ * 分叉；几何一律现算，编辑函数一律由调用方显式传 `clips`。
+ */
 export interface ParamBlockState {
     readonly editSet: ParamBlockEditSet;
-    readonly view?: ParamBlockView;
     readonly rootTrackId?: string;
-    /** 当前 root 组 Clip 的只读快照；仅用于本地预览合成，不持久化。 */
-    readonly clips?: readonly ParamBlockSourceClip[];
+    /** 帧周期（工程常量）；由后端回包播种，缺省 5ms。 */
+    readonly framePeriodMs: number;
     /** 上一批被删除的块源域快照，供用户一键恢复；仅会话内有效。 */
     readonly lastDeletedBlocks?: readonly DeletedParamBlockSnapshot[];
 }
 
 export const EMPTY_PARAM_BLOCK_STATE: ParamBlockState = {
     editSet: EMPTY_PARAM_BLOCK_EDIT_SET,
+    framePeriodMs: 5,
 };
 
 export type BlockGroupResult =
@@ -1009,28 +1020,22 @@ export function paramBlockFromProjected(
     };
 }
 
-function withEdits(
-    state: ParamBlockState,
-    edits: ParamBlockEditSet,
-    clips: readonly ParamBlockSourceClip[],
-    framePeriodMs: number,
-): ParamBlockState {
-    const root = state.rootTrackId ?? state.view?.rootTrackId ?? "";
-    return {
-        ...state,
-        editSet: edits,
-        view: composeParamBlockView(root, state.clips ?? clips, edits, framePeriodMs),
-    };
+function withEdits(state: ParamBlockState, edits: ParamBlockEditSet): ParamBlockState {
+    return { ...state, editSet: edits };
 }
 
-/** 从当前派生视图生成面板块。没有 view 就是没有块，绝不从 Clip 重新派生。 */
+/**
+ * 从**调用方现算的**派生视图生成面板块。
+ *
+ * 不接收 `ParamBlockState`：状态里没有几何，任何"从状态读块"的入口都会
+ * 引诱调用方去缓存第二份视图。`view === null` 表示"还没有根轨道"，此时没有块。
+ */
 export function materializeParamBlocks(args: {
     readonly rootTrackId: string;
-    readonly clips?: readonly ParamBlockSourceClip[];
-    readonly state: ParamBlockState;
+    readonly view: ParamBlockView | null;
 }): ParamBlock[] {
-    const view = args.state.view;
-    if (view === undefined) return [];
+    const view = args.view;
+    if (view === null) return [];
     return view.blocks.map((block) =>
         paramBlockFromProjected(args.rootTrackId, block, view.framePeriodMs),
     );
@@ -1130,7 +1135,8 @@ export function groupParamBlocks(args: {
     readonly state: ParamBlockState;
     readonly blocks: readonly ParamBlock[];
     readonly selectedBlockIds: readonly string[];
-    readonly clips?: readonly ParamBlockSourceClip[];
+    /** 与派生视图同源的 clip 快照（编组要按它把源域区间并起来）。 */
+    readonly clips: readonly ParamBlockSourceClip[];
 }): BlockGroupResult {
     const selected = args.blocks.filter((block) => args.selectedBlockIds.includes(block.id));
     if (selected.length < 2) return { ok: false, reason: "empty" };
@@ -1153,18 +1159,15 @@ export function groupParamBlocks(args: {
     if (projected.every((block) => block.userBlockId === projected[0].userBlockId)) {
         return { ok: false, reason: "already_grouped" };
     }
-    const framePeriodMs = args.state.view?.framePeriodMs ?? 5;
+    const framePeriodMs = args.state.framePeriodMs;
     try {
         const edits = groupProjectedBlocks(
-            args.clips ?? [],
+            args.clips,
             args.state.editSet,
             projected,
             framePeriodMs,
         );
-        return {
-            ok: true,
-            state: withEdits(args.state, edits, args.clips ?? [], framePeriodMs),
-        };
+        return { ok: true, state: withEdits(args.state, edits) };
     } catch (error) {
         const message = error instanceof Error ? error.message : "";
         if (message.includes("adjacent")) return { ok: false, reason: "not_adjacent" };
@@ -1180,19 +1183,7 @@ export function ungroupParamBlocks(
 ): ParamBlockState {
     let edits = state.editSet;
     for (const id of blockIds) edits = ungroupUserBlock(edits, id);
-    return {
-        ...state,
-        editSet: edits,
-        view:
-            state.view === undefined
-                ? undefined
-                : composeParamBlockView(
-                      state.view.rootTrackId,
-                      state.clips ?? [],
-                      edits,
-                      state.view.framePeriodMs,
-                  ),
-    };
+    return withEdits(state, edits);
 }
 
 function editFailureFromError(error: unknown): ParamBlockEditFailureReason {
@@ -1206,7 +1197,7 @@ function editFailureFromError(error: unknown): ParamBlockEditFailureReason {
 export function splitParamBlock(input: ParamBlockSplitInput): ParamBlockEditResult {
     const block = input.block.projected;
     if (block === undefined) return { ok: false, reason: "not_found" };
-    const framePeriodMs = input.state.view?.framePeriodMs ?? 5;
+    const framePeriodMs = input.state.framePeriodMs;
     const frame = toFrame(input.sec, framePeriodMs);
     if (frame <= block.startFrame || frame >= block.endFrameExclusive) {
         return { ok: false, reason: "too_short" };
@@ -1219,11 +1210,7 @@ export function splitParamBlock(input: ParamBlockSplitInput): ParamBlockEditResu
             frame,
             framePeriodMs,
         );
-        return {
-            ok: true,
-            blockId: input.block.id,
-            state: withEdits(input.state, edits, input.clips, framePeriodMs),
-        };
+        return { ok: true, blockId: input.block.id, state: withEdits(input.state, edits) };
     } catch (error) {
         return { ok: false, reason: editFailureFromError(error) };
     }
@@ -1232,7 +1219,7 @@ export function splitParamBlock(input: ParamBlockSplitInput): ParamBlockEditResu
 export function resizeParamBlock(input: ParamBlockResizeInput): ParamBlockEditResult {
     const block = input.block.projected;
     if (block === undefined) return { ok: false, reason: "not_found" };
-    const framePeriodMs = input.state.view?.framePeriodMs ?? 5;
+    const framePeriodMs = input.state.framePeriodMs;
     const targetSec = input.targetSpan
         ? input.edge === "left"
             ? input.targetSpan.startSec
@@ -1247,11 +1234,7 @@ export function resizeParamBlock(input: ParamBlockResizeInput): ParamBlockEditRe
             toFrame(targetSec, framePeriodMs),
             framePeriodMs,
         );
-        return {
-            ok: true,
-            blockId: input.block.id,
-            state: withEdits(input.state, edits, input.clips, framePeriodMs),
-        };
+        return { ok: true, blockId: input.block.id, state: withEdits(input.state, edits) };
     } catch (error) {
         return { ok: false, reason: editFailureFromError(error) };
     }
@@ -1259,7 +1242,7 @@ export function resizeParamBlock(input: ParamBlockResizeInput): ParamBlockEditRe
 
 export function createParamBlock(input: ParamBlockCreateInput): ParamBlockEditResult {
     const clips = input.clips ?? (input.clip === undefined ? [] : [input.clip]);
-    const framePeriodMs = input.state.view?.framePeriodMs ?? 5;
+    const framePeriodMs = input.state.framePeriodMs;
     try {
         const edits = createUserBlock(
             clips,
@@ -1272,7 +1255,7 @@ export function createParamBlock(input: ParamBlockCreateInput): ParamBlockEditRe
         return {
             ok: true,
             blockId: input.blockId ?? edits.blocks[edits.blocks.length - 1]?.id ?? "created",
-            state: withEdits(input.state, edits, clips, framePeriodMs),
+            state: withEdits(input.state, edits),
         };
     } catch {
         return { ok: false, reason: "too_short" };
@@ -1283,6 +1266,8 @@ export function deleteParamBlocks(args: {
     readonly state: ParamBlockState;
     readonly blocks: readonly ParamBlock[];
     readonly selectedBlockIds: readonly string[];
+    /** 与派生视图同源的 clip 快照（删除要按它把源域区间拆开）。 */
+    readonly clips: readonly ParamBlockSourceClip[];
 }): ParamBlockEditResult {
     const selected = args.blocks.filter((block) => args.selectedBlockIds.includes(block.id));
     if (selected.length === 0) return { ok: false, reason: "not_found" };
@@ -1290,10 +1275,10 @@ export function deleteParamBlocks(args: {
         .map((block) => block.projected)
         .filter((block): block is ProjectedParamBlock => block !== undefined);
     if (projected.length === 0) return { ok: false, reason: "not_found" };
-    const framePeriodMs = args.state.view?.framePeriodMs ?? 5;
+    const framePeriodMs = args.state.framePeriodMs;
     try {
         const result = deleteProjectedBlocks(
-            args.state.clips ?? [],
+            args.clips,
             args.state.editSet,
             projected,
             framePeriodMs,
@@ -1302,18 +1287,8 @@ export function deleteParamBlocks(args: {
             ok: true,
             blockId: selected[0].id,
             state: {
-                ...args.state,
-                editSet: result.edits,
+                ...withEdits(args.state, result.edits),
                 lastDeletedBlocks: result.deleted,
-                view:
-                    args.state.view === undefined
-                        ? undefined
-                        : composeParamBlockView(
-                              args.state.view.rootTrackId,
-                              args.state.clips ?? [],
-                              result.edits,
-                              args.state.view.framePeriodMs,
-                          ),
             },
         };
     } catch (error) {
@@ -1325,11 +1300,13 @@ export function removeParamBlockAtMinWidth(args: {
     readonly state: ParamBlockState;
     readonly blocks: readonly ParamBlock[];
     readonly blockId: string;
+    readonly clips: readonly ParamBlockSourceClip[];
 }): ParamBlockEditResult {
     return deleteParamBlocks({
         state: args.state,
         blocks: args.blocks,
         selectedBlockIds: [args.blockId],
+        clips: args.clips,
     });
 }
 
@@ -1345,20 +1322,7 @@ export function restoreDeletedParamBlocks(args: {
         return {
             ok: true,
             blockId: deleted[0].block.id,
-            state: {
-                ...args.state,
-                editSet: edits,
-                lastDeletedBlocks: [],
-                view:
-                    args.state.view === undefined
-                        ? undefined
-                        : composeParamBlockView(
-                              args.state.view.rootTrackId,
-                              args.state.clips ?? [],
-                              edits,
-                              args.state.view.framePeriodMs,
-                          ),
-            },
+            state: { ...withEdits(args.state, edits), lastDeletedBlocks: [] },
         };
     } catch (error) {
         return { ok: false, reason: editFailureFromError(error) };
@@ -1387,19 +1351,7 @@ export function setParamBlockLogicalCenters(args: {
     });
     if (!changed) return args.state;
     const edits = { ...args.state.editSet, revision: args.state.editSet.revision + 1, blocks };
-    return {
-        ...args.state,
-        editSet: edits,
-        view:
-            args.state.view === undefined
-                ? undefined
-                : composeParamBlockView(
-                      args.state.view.rootTrackId,
-                      args.state.clips ?? [],
-                      edits,
-                      args.state.view.framePeriodMs,
-                  ),
-    };
+    return withEdits(args.state, edits);
 }
 
 export function setParamBlockTransition(args: {
@@ -1407,22 +1359,20 @@ export function setParamBlockTransition(args: {
     readonly left: ParamBlock;
     readonly right: ParamBlock;
     readonly transitionSec: number;
+    /** 与派生视图同源的 clip 快照（过渡宽度按源域速率折算成帧）。 */
+    readonly clips: readonly ParamBlockSourceClip[];
 }): ParamBlockEditResult {
     if (args.left.projected === undefined) return { ok: false, reason: "not_found" };
-    const framePeriodMs = args.state.view?.framePeriodMs ?? 5;
+    const framePeriodMs = args.state.framePeriodMs;
     try {
         const edits = setProjectedBlockTransition(
-            args.state.clips ?? [],
+            args.clips,
             args.state.editSet,
             args.left.projected,
             args.transitionSec,
             framePeriodMs,
         );
-        return {
-            ok: true,
-            blockId: args.left.id,
-            state: withEdits(args.state, edits, args.state.clips ?? [], framePeriodMs),
-        };
+        return { ok: true, blockId: args.left.id, state: withEdits(args.state, edits) };
     } catch {
         return { ok: false, reason: "not_found" };
     }

@@ -83,6 +83,13 @@ export interface ParamBlockDragContext {
     readonly paramBlockInteractionCurveRef: Ref<ParamViewSegment | null>;
     readonly paramBlockDragSnapshotRef: Ref<ParamBlockDragSnapshot | null>;
     readonly paramBlockStateRef: Ref<ParamBlockState>;
+    /**
+     * 块层是否在管理当前曲线。
+     *
+     * 旧实现读 `paramBlockStateRef.current.view` —— 那是"后端回过一次视图"的
+     * 副产物；派生视图之后，判据就是"有根轨道，块层参与合成"。
+     */
+    readonly curveOwned: boolean;
     readonly paramBlockCommitQueueRef: Ref<Promise<void>>;
     readonly paramViewRef: Ref<ParamViewSegment | null>;
     readonly liveEditActiveRef: Ref<boolean> | undefined;
@@ -157,6 +164,7 @@ export function beginParamBlockDrag(
         paramBlockInteractionCurveRef,
         paramBlockDragSnapshotRef,
         paramBlockStateRef,
+        curveOwned,
         paramBlockCommitQueueRef,
         paramViewRef,
         liveEditActiveRef,
@@ -421,7 +429,7 @@ export function beginParamBlockDrag(
             return;
         }
         const segments = buildParamBlockPreviewSegments({
-            fillEmptyPitch: Boolean(paramBlockStateRef.current.view),
+            fillEmptyPitch: curveOwned,
             blocks: dragBlocks,
             framePeriodMs,
             param: editParam,
@@ -656,7 +664,7 @@ export function beginParamBlockDrag(
                      */
                     const fullResDelta = commitDelta;
                     const windows = buildParamBlockDragSegments({
-                        fillEmptyPitch: Boolean(paramBlockStateRef.current.view),
+                        fillEmptyPitch: curveOwned,
                         blocks: commitBlocks,
                         framePeriodMs,
                         param: editParam,
@@ -701,7 +709,7 @@ export function beginParamBlockDrag(
                     if (commitSegments.length === 0)
                         throw new Error("Block drag has no editable frames");
                     if (liveEditActiveRef) liveEditActiveRef.current = true;
-                    if (paramBlockStateRef.current.view && context.commitLineCurve) {
+                    if (curveOwned && context.commitLineCurve) {
                         const revision = curves[0]?.authorityRevision;
                         const geometry = curves[0]?.geometryRevision;
                         const signature = curves[0]?.geometrySignature;
