@@ -14,6 +14,7 @@ import {
     toggleParamBlocksVisible as toggleParamBlocksVisibleAction,
 } from "../../../../features/session/sessionSlice";
 import { resolveRootTrackId } from "../../../../features/session/trackUtils";
+import type { ClipInfo } from "../../../../features/session/sessionTypes";
 import {
     buildPitchAlgoOptions,
     resolveEffectivePitchAlgo,
@@ -56,8 +57,9 @@ import { useParamBlockDragHandoff } from "../useParamBlockDragHandoff";
 import { createSyllableAnalysisQueue } from "../syllableAnalysisQueue";
 import { useParamBlockPersistence } from "../useParamBlockPersistence";
 import { composeParamBlockView } from "../paramBlockComposition";
-import { toParamBlockSourceClip } from "../paramBlockProjection";
+import { toParamBlockSourceClip, type ParamBlockSourceClip } from "../paramBlockProjection";
 import type { ParamBlockView } from "../paramBlockTypes";
+import { resolveParamBlockGeometryClips } from "../paramBlockGeometryFreeze";
 import { fetchFullResCurve, readPvRange, uploadFullResCurveSegments } from "../selectionEditData";
 import { startPointerGesture } from "../gestures/pointerGesture";
 import { armRightDragContextMenuGuard } from "../../../../utils/rightDragContextMenuGuard";
@@ -138,6 +140,7 @@ import { createLiveOverrideReader, type LiveOverrideReader } from "../liveLoudne
 import { pianoRollViewportBus } from "../pianoRollViewportBus";
 import { createLoudnessGeometryWarp, type LoudnessGeometryWarp } from "../loudnessGeometryWarp";
 import {
+    getClipGeometryPreviewClips,
     getClipGeometryPreviewOrigin,
     subscribeClipGeometryPreview,
     type ClipGeometrySnapshot,
@@ -2688,9 +2691,36 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
      * 期间拿到的是旧几何 —— 屏幕上的块于是逐帧来回跳，切分 / 伸缩也读到过期边界
      * （"切分点离边缘太近"）。派生值只该被现算。
      */
-    const paramBlockSourceClips = useMemo(
+    const paramBlockSourceClipsLive = useMemo(
         () => paramBlockClips.map(toParamBlockSourceClip),
         [paramBlockClips],
+    );
+    /*
+     * 【手势期间冻结块几何】块是参数线的分段，两者必须同源。而手势期间 clip 只做
+     * Redux 乐观更新、参数线要等落库才重取 —— 不冻结就会出现"块跟着 Clip 走、
+     * 线原地不动"（块从曲线上滑走）。
+     *
+     * 快照来自 `clipGeometryPreviewBus`：它在**任何乐观写入之前**建立（交互锁却
+     * 要等到首个位移帧才 +1，读 `s.clips` 会漏掉第一帧的位移）。松手后发布方
+     * 清空快照，块层在下一帧就跟上权威几何 —— 与 Clip 图层换新同步，只有一次跳变。
+     */
+    const [frozenGestureClips, setFrozenGestureClips] = useState<
+        readonly ParamBlockSourceClip[] | null
+    >(null);
+    useEffect(() => {
+        const sync = () => {
+            const clips = getClipGeometryPreviewClips<ClipInfo>();
+            setFrozenGestureClips(clips === null ? null : clips.map(toParamBlockSourceClip));
+            // 块层换了一份几何 ⇒ 必须重绘（宿主不会因为 state 变化自己提交帧）。
+            invalidate();
+        };
+        // 订阅不补发当前状态（见总线的说明），所以先同步一次再订阅。
+        sync();
+        return subscribeClipGeometryPreview(sync);
+    }, [invalidate]);
+    const paramBlockSourceClips = useMemo(
+        () => resolveParamBlockGeometryClips(paramBlockSourceClipsLive, frozenGestureClips),
+        [paramBlockSourceClipsLive, frozenGestureClips],
     );
     const paramBlockView = useMemo<ParamBlockView | null>(
         () =>
