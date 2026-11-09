@@ -16,7 +16,7 @@
  */
 
 import type { Editor } from "@tiptap/core";
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import {
     CheckboxIcon,
     ClipboardIcon,
@@ -30,6 +30,8 @@ import {
 } from "@radix-ui/react-icons";
 
 import { useI18n } from "../../../i18n/I18nProvider";
+import { useDevicePixelRatio } from "../../../hooks/useDevicePixelRatio";
+import { wholeDevicePxLength } from "../../../utils/devicePixelLine";
 import { insertTable, type ToolbarInsertHandlers } from "./notebookInsert";
 import { useNotebookSlashMenu } from "./useNotebookSlashMenu";
 
@@ -58,9 +60,18 @@ export function NotebookToolbar({
 }: NotebookToolbarProps) {
     const { t, shortcut } = useI18n();
     const slash = useNotebookSlashMenu(editor, slashCommands, handlers);
+    // 与 AppToolbar 同一策略：一个工具栏只订阅一次 dpr。
+    const dpr = useDevicePixelRatio();
 
     return (
-        <div className="hs-notebook-toolbar">
+        <div
+            className="hs-notebook-toolbar"
+            style={
+                {
+                    "--hs-notebook-hairline": wholeDevicePxLength(1, dpr) + "px",
+                } as CSSProperties
+            }
+        >
             <div className="hs-notebook-toolbar-group">
                 <ToolbarButton
                     label="H1"

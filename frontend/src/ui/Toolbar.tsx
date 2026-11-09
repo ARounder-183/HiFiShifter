@@ -15,8 +15,10 @@
  * 【为什么不像 PanelToolbar 那样只有固定高度】横条高度是**语境**属性（主工具栏 /
  * 紧凑面板 / 状态栏），不是组件的私有常量。因此由调用方从枚举里选，而不是由组件写死。
  */
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 
+import { useDevicePixelRatio } from "../hooks/useDevicePixelRatio";
+import { wholeDevicePxLength } from "../utils/devicePixelLine";
 import { AppDensityProvider } from "./density";
 import { cx } from "./cx";
 
@@ -73,6 +75,10 @@ export function AppToolbar({
     scrollable = false,
     className,
 }: AppToolbarProps) {
+    // 只在这里订阅一次：一个工具栏通常有 5~10 个分隔线，
+    // 让每个 separator 各订阅一次 matchMedia 是没必要的。
+    const dpr = useDevicePixelRatio();
+
     return (
         <AppDensityProvider value="compact">
             <div
@@ -82,7 +88,12 @@ export function AppToolbar({
                     border && "border-b border-qt-border",
                     className,
                 )}
-                style={{ background: "var(--qt-window)" }}
+                style={
+                    {
+                        background: "var(--qt-window)",
+                        "--hs-toolbar-hairline": wholeDevicePxLength(1, dpr) + "px",
+                    } as CSSProperties
+                }
             >
                 {/*
                  * 默认 `overflow: visible` —— 不裁剪弹层、不产生吃掉高度的滚动条。
@@ -112,7 +123,11 @@ export function AppToolbar({
  */
 export function AppToolbarSeparator({ className }: { className?: string }) {
     return (
-        <div aria-hidden="true" className={cx("mx-1 h-4 w-px shrink-0 bg-qt-border", className)} />
+        <div
+            aria-hidden="true"
+            className={cx("mx-1 h-4 shrink-0 bg-qt-border", className)}
+            style={{ width: "var(--hs-toolbar-hairline, 1px)" }}
+        />
     );
 }
 

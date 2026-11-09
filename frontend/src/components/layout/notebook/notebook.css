@@ -503,7 +503,8 @@
 }
 
 .hs-notebook-toolbar-sep {
-    width: 1px;
+    /* 宽度取整数个物理像素；由 NotebookToolbar 根节点按当前 dpr 写入变量。 */
+    width: var(--hs-notebook-hairline, 1px);
     height: 14px;
     margin: 0 4px;
     background: var(--qt-border);
