@@ -62,33 +62,41 @@ fn support(host: *const clap_host_t) -> Option<&'static HostTimerSupport> {
 
 /// 注册本实例的节拍（幂等）。宿主拒绝时只记一行，不影响激活。
 ///
+/// 【调用点】`plugin.init` —— 不是 `activate`。编辑器可以在未激活的实例上打开，
+/// 而投递泵必须在那之前就存在（VST3 的 REAPER 定时器同样挂在宿主适配器建立时）。
+/// 注销点是 `plugin.destroy`：失活只是暂时状态，窗口可能还开着。
+///
+/// 返回 `true` = 宿主接受了注册（节拍已在跑）；`false` = 没有 timer-support 或宿主
+/// 拒绝 —— 调用方据此改走 `request_callback` 自挂（见 [`request_main_thread`]）。
+///
 /// # Safety
 /// `plugin` 必须是本模块创建、尚未 destroy 的插件记录（或空指针）。
-pub unsafe fn acquire(plugin: *const clap_plugin_t) {
+pub unsafe fn acquire(plugin: *const clap_plugin_t) -> bool {
     let Some(instance) = (unsafe { crate::instance(plugin) }) else {
-        return;
+        return false;
     };
     if instance.timer_id.load(Ordering::Acquire) != u32::MAX {
-        return;
+        return true;
     }
     let Some(support) = support(instance.host) else {
         // 【为什么是 WARN】默认日志级别是 Warn；用 info 记"没有节拍"会让现场与"一切正常"
         // 长得一样，而这正是"播放头不跟随"最难自查的形态。
-        log::warn!("[clap] host has no clap.timer-support; the host-thread pump runs on view callbacks only");
-        return;
+        log::warn!("[clap] host has no clap.timer-support; falling back to clap_host.request_callback");
+        return false;
     };
     let Some(register) = support.register_timer else {
-        return;
+        return false;
     };
     let mut id = u32::MAX;
     // SAFETY: `instance.host` 是本实例存活期内的宿主记录；回调按 CLAP 契约在调用期间有效。
     let ok = unsafe { register(instance.host, PERIOD_MS, &mut id) };
     if !ok || id == u32::MAX {
-        log::warn!("[clap] the host refused the timer registration");
-        return;
+        log::warn!("[clap] the host refused the timer registration; falling back to request_callback");
+        return false;
     }
     instance.timer_id.store(id, Ordering::Release);
     log::warn!("[clap] host-thread pump attached to clap.timer-support (id={id}, {PERIOD_MS} ms)");
+    true
 }
 
 /// 注销本实例的节拍（幂等）。
@@ -112,6 +120,27 @@ pub unsafe fn release(plugin: *const clap_plugin_t) {
     log::info!("[clap] host-thread pump detached (id={id})");
 }
 
+/// 请宿主尽快在主线程上回调我们（`clap_host.request_callback`）。
+///
+/// 【为什么需要它】`clap_plugin.on_main_thread` **只有被请求之后**才会被宿主调用。
+/// 宿主没有 `clap.timer-support` 时，这是唯一的周期来源：`on_main_thread` 跑完一次
+/// 节拍后自己再要一次，就形成"宿主主线程上的自挂节拍"。有 timer-support 时不用它 ——
+/// 那条路更稳定（宿主按固定周期回调，不需要每次重新请求）。
+///
+/// 【线程】`request_callback` 标了 `[thread-safe]`；本函数因此可以从任意线程调用。
+///
+/// # Safety
+/// `host` 必须是本实例存活期内有效的 `clap_host_t`（或空指针）。
+pub unsafe fn request_main_thread(host: *const clap_host_t) {
+    if host.is_null() {
+        return;
+    }
+    let Some(callback) = (unsafe { (*host).request_callback }) else {
+        return;
+    };
+    // SAFETY: 见函数契约；`request_callback` 是 [thread-safe] 的。
+    unsafe { callback(host) };
+}
 unsafe extern "C" fn on_timer(plugin: *const clap_plugin_t, timer_id: u32) {
     hifishifter_plugin_core::guard_ffi((), || {
         let Some(instance) = (unsafe { crate::instance(plugin) }) else {
@@ -147,8 +176,9 @@ mod tests {
     #[test]
     fn a_null_instance_never_registers_anything() {
         unsafe {
-            acquire(std::ptr::null());
+            assert!(!acquire(std::ptr::null()), "空实例不可能挂上节拍");
             release(std::ptr::null());
+            request_main_thread(std::ptr::null());
         }
     }
 }

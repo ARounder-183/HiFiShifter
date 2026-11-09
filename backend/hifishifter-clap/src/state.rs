@@ -138,6 +138,11 @@ unsafe extern "C" fn state_load(
         // 【失败不阻断加载】与 VST3 的 setState 同一条纪律：一份读不出来的旧存档只该
         // 丢掉那份编辑，不该让整份工程加载失败。真因记进日志与恢复读数。
         if let Err(error) = instance.owner.restore_state(&bytes) {
+            // 【为什么必须记进恢复读数】与 VST3 的 `IComponent::setState` 同一条纪律：
+            // 一份读不出来的旧存档只该丢掉那份编辑，不该让整份工程加载失败 —— 但
+            // "丢掉"必须是**可见的**。界面据此报 `restore_unresolved`，诊断包里能读到
+            // 原因；只写一行日志等于让用户面对"参数没了，日志里一行错都没有"。
+            instance.owner.note_restore_failed(&error);
             log::error!("[clap] state.load ignored: {error}; the host document load continues");
         }
         true

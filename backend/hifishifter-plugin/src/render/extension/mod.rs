@@ -513,6 +513,16 @@ pub struct ExtensionOwner {
     capture_prepared: AtomicU64,
 }
 
+/// 宿主采样率的**接受域**（两种格式共用同一份判据）。
+///
+/// 【为什么与 `render::source` 的读取域对齐】快照按 44.1/48k 渲染，其它率由
+/// `PlaybackSnapshot::copy_block` 线性重采样。低于 44.1k 是**没有抗混叠**的降采样
+/// （会有镜像），高于 48k 是升采样；两者都可听、都可诊断，而拒绝的代价是多数宿主
+/// 把插件整条踢出链路（用户看到"插件不见了"）。
+///
+/// 【为什么必须是一个常量】此前 VST3 写死 8000.0..=384000.0、CLAP 什么都不查：
+/// 同一个 4 kHz 工程在 VST3 里被拒绝、在 CLAP 里被接受，行为取决于用哪种格式。
+pub const SUPPORTED_SAMPLE_RATE: std::ops::RangeInclusive<f64> = 8000.0..=384_000.0;
 /// `setActive(true)` 之后允许 ARA 绑定出现的宽限时间（见 [`ExtensionOwner::note_editor_tick`]）。
 ///
 /// 【为什么不是 0】有些宿主在 `setActive` 前后几毫秒内完成绑定；立刻报"没有绑定"会

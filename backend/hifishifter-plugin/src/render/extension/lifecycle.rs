@@ -31,6 +31,14 @@ impl ExtensionOwner {
         offline_declared: bool,
     ) -> Result<(), String> {
         self.set_setup_sample_rate(sample_rate);
+        // 【为什么进程模式也在这里落定】setup_process_mode 回答的是"宿主声明的是
+        // 实时还是离线"，而它有三个读者：离线准备要不要**要求**用户曲线
+        // （capture_prepare_job）、冻结预览的资格判定（note_preview_block）、以及
+        // processing_started 的离线意图。此前只有 VST3 在 setupProcessing 里写它，
+        // CLAP 从不写 ⇒ 恒为 0 ⇒ CLAP 的离线导出会发布一份**没有用户曲线**的产物
+        // （正是 capture_render_input 文档里那条"烘焙进产物"的失败）。
+        // CLAP 没有 kPrefetch 这一档，实时一律记 0、离线记 2，与 VST3 的枚举同值。
+        self.set_setup_process_mode(if offline_declared { 2 } else { 0 });
         self.arm_capture_rendering();
         if !offline_declared {
             return Ok(());

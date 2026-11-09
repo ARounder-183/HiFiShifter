@@ -1009,7 +1009,7 @@ impl Processor {
         let runtime = crate::runtime::runtime()?;
         // 【音频线程零分配】这两个开关用环境变量初始化（会分配 String）。
         // 在组件创建时（宿主 UI 线程）预热，音频回调第一次进入时就不再分配。
-        let _ = buffer_audit_enabled();
+        let _ = crate::audio_stats::buffer_audit_enabled();
         // 【宿主身份必须在 create 解析一次】initialize 不一定会被调用，getName 也
         // 可能返回 unknown；预览判定不能挂在一个只在 initialize 写的诊断字段上。
         crate::editor::connection::resolve_and_record_host_identity();
@@ -1623,7 +1623,9 @@ unsafe extern "system" fn audio_setup_processing(
             // setupProcessing 是宿主 UI 线程上的确定时刻；在这里再解析一次身份，
             // 让包装器/祖先链证据在第一次 process 之前就位（幂等）。
             crate::editor::connection::resolve_and_record_host_identity();
-            owner.set_setup_process_mode(setup.process_mode);
+            // 【为什么这里不再写 process mode】它由 owner.setup_processing 一处落定
+            // （CLAP 的 activate 调的是同一个方法）。两个写入点必然漂移：VST3 曾经
+            // 写 1（kPrefetch），而 CLAP 连写都不写。
             // 诊断：宿主声明的单块上限（不是分配上限；当前实现不依赖它分配）。
             owner.note_max_samples_per_block(setup.max_samples_per_block);
             // 【为什么不再按采样率拒绝】此前只认 44.1/48k，其余 `kResultFalse` —— 而多数宿主
@@ -1658,7 +1660,7 @@ unsafe extern "system" fn audio_setup_processing(
             // `PlaybackSnapshot::copy_block` 的线性重采样出音。**低于 44.1k 时是降采样**，线性
             // 插值没有抗混叠滤波 ⇒ 有明显镜像，所以单独记一条警告 —— 可诊断的降级优于静默消失。
             // 真正按宿主率渲染内部快照（消除这次降采样）是独立一期工作。
-            if !(8000.0..=384000.0).contains(&setup.sample_rate) {
+            if !crate::render::extension::SUPPORTED_SAMPLE_RATE.contains(&setup.sample_rate) {
                 crate::log_line(&format!(
                     "[vst3] setupProcessing refused: sampleRate={} is outside 8000..=384000",
                     setup.sample_rate
@@ -1730,205 +1732,36 @@ unsafe extern "system" fn audio_set_processing(this: *mut c_void, state: i8) -> 
     }
 }
 
-/// 音频回调里被 `catch_unwind` 拦下的 panic 次数。
-///
-/// 【为什么是原子计数而不是日志】音频线程不能做文件 IO（见
-/// `realtime_callbacks_do_not_enter_the_file_logger`），而 panic 现场又必须留下痕迹。
-/// 计一次数，由下一次 UI 轮询/诊断包落盘。
-static AUDIO_PANIC_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// 音频回调被拦下的 panic 次数（诊断用）。
-pub(crate) fn audio_panic_count() -> u64 {
-    AUDIO_PANIC_COUNT.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-/// 超过该时长的音频块记一次"慢块"。
-///
-/// 【为什么是 50 ms】`process` 一秒几百次，不可能逐次记日志；但**它一旦阻塞**，
-/// 宿主在关闭窗口或改变尺寸时会等音频线程，表现为整个 UI 冻住 —— 而日志里什么都
-/// 没有。50 ms（约两个 1024 帧 @44.1k 的块）足以把"宿主在等音频线程"与正常抖动分开。
-const AUDIO_SLOW_BLOCK: std::time::Duration = std::time::Duration::from_millis(50);
-
-/// 慢块累计次数。
-static AUDIO_SLOW_BLOCK_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// 慢块的峰值时长（纳秒）。
-static AUDIO_SLOW_BLOCK_PEAK_NS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-
-/// 记一次块耗时：超阈值才碰原子量（热路径常态下两次比较都省不掉，但写为零成本）。
-fn note_block_elapsed(elapsed: std::time::Duration) {
-    if elapsed < AUDIO_SLOW_BLOCK {
-        return;
-    }
-    AUDIO_SLOW_BLOCK_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    AUDIO_SLOW_BLOCK_PEAK_NS.fetch_max(
-        u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX),
-        std::sync::atomic::Ordering::Relaxed,
-    );
-}
-
-/// 音频回调慢块统计（诊断用）：`(次数, 最慢一块的毫秒数)`。
-pub(crate) fn audio_slow_block_stats() -> (u64, u64) {
-    (
-        AUDIO_SLOW_BLOCK_COUNT.load(std::sync::atomic::Ordering::Relaxed),
-        AUDIO_SLOW_BLOCK_PEAK_NS.load(std::sync::atomic::Ordering::Relaxed) / 1_000_000,
-    )
-}
-
-/// 输出写满审计是否开启（HIFISHIFTER_BUFFER_AUDIT=1）。
-///
-/// 【为什么用环境变量而不是设置项】它是排查工具，不是产品行为；用户永远不会打开它，
-/// 而我们要能在不改构建的情况下让用户跑一遍。读一次就缓存。
-fn buffer_audit_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("HIFISHIFTER_BUFFER_AUDIT")
-            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
-    })
-}
-
-/// 把输出平面预填成 NaN（审计哨兵）。
-///
-/// # Safety
-/// data 由宿主提供；只按声明长度写，形状非法时由后续的 validate 拦下。
-unsafe fn poison_outputs(data: *mut c_void) {
-    if data.is_null() {
-        return;
-    }
-    // SAFETY: 调用方保证 data 指向宿主提供的 ProcessData。
-    let process = unsafe { &*data.cast::<crate::audio_abi::ProcessData>() };
-    if process.outputs.is_null() || process.num_outputs <= 0 || process.num_samples <= 0 {
-        return;
-    }
-    let frames = process.num_samples as usize;
-    for bus in 0..process.num_outputs as usize {
-        // SAFETY: 宿主声明了 num_outputs 个总线。
-        let bus_ref = unsafe { &*process.outputs.add(bus) };
-        if bus_ref.channel_buffers.is_null() || bus_ref.num_channels <= 0 {
-            continue;
-        }
-        for channel in 0..bus_ref.num_channels as usize {
-            // SAFETY: 宿主声明了 num_channels 个平面，每个至少 num_samples 帧。
-            let plane = unsafe { *bus_ref.channel_buffers.add(channel) };
-            if plane.is_null() {
-                continue;
-            }
-            for index in 0..frames {
-                // SAFETY: index < frames。
-                unsafe { *plane.add(index) = f32::NAN };
-            }
-        }
-    }
-}
-
-/// 扫描输出平面里仍未被写过的帧，并按档位记一次读数。
-///
-/// # Safety
-/// 与 poison_outputs 相同。
-unsafe fn report_unwritten(this: *mut c_void, data: *mut c_void) {
-    if data.is_null() {
-        return;
-    }
-    // SAFETY: 调用方保证 this 是存活的音频接口子对象。
-    let owner = unsafe { &(*base_from_audio(this)).extension_owner };
-    // SAFETY: 同一份 ProcessData。
-    let process = unsafe { &*data.cast::<crate::audio_abi::ProcessData>() };
-    if process.outputs.is_null() || process.num_outputs <= 0 || process.num_samples <= 0 {
-        return;
-    }
-    let frames = process.num_samples as usize;
-    let mut unwritten = 0_usize;
-    let mut channels = 0_usize;
-    for bus in 0..process.num_outputs as usize {
-        // SAFETY: 宿主声明了 num_outputs 个总线。
-        let bus_ref = unsafe { &*process.outputs.add(bus) };
-        if bus_ref.channel_buffers.is_null() || bus_ref.num_channels <= 0 {
-            continue;
-        }
-        for channel in 0..bus_ref.num_channels as usize {
-            // SAFETY: 宿主声明了 num_channels 个平面。
-            let plane = unsafe { *bus_ref.channel_buffers.add(channel) };
-            if plane.is_null() {
-                continue;
-            }
-            channels = channels.max(channel + 1);
-            for index in 0..frames {
-                // SAFETY: index < frames。
-                if unsafe { *plane.add(index) }.is_nan() {
-                    unwritten += 1;
-                }
-            }
-        }
-    }
-    owner.note_buffer_audit(channels, unwritten, frames);
-}
-
 /// 宿主音频回调：完整渲染调度 + PCM 快照输出都在 `audio_process_inner` 里完成；
-/// 本层负责 panic 遏制、写满审计与慢块计量。
+/// 本层负责 panic 遏制与慢块计量。
 ///
 /// 【为什么守卫必须在 extern 函数体里】本回调由**宿主音频线程**调用，panic 越过
 /// `extern "system"` 边界是 UB，而且会带走整个 DAW 会话（thread-model.md 的统一纪律，
-/// `check-ffi-guards.py` 按入口强制）。守卫因此罩住**全部**周边步骤 —— 计时、NaN
-/// 审计的预填与回扫都不在逃逸面上。捕获后输出静音（不留上一次的残留），并只做原子
+/// `check-ffi-guards.py` 按入口强制）。捕获后输出静音（不留上一次的残留），并只做原子
 /// 计数：音频线程不得写文件、不得加锁等待。
+///
+/// 【为什么计数与慢块在共享层】`crate::audio_stats` 是两种格式共用的一份读数：CLAP 的
+/// process 记的是同一组原子量。此前它们长在本文件里，于是 CLAP 会话的诊断包永远报 0。
 unsafe extern "system" fn audio_process(this: *mut c_void, data: *mut c_void) -> TResult {
+    let started = std::time::Instant::now();
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-        audio_process_body(this, data)
+        audio_process_inner(this, data)
     }));
+    // 【为什么只记原子量而不打日志】音频线程不能写文件、也不能抢限流表/日志锁
+    // （`realtime_callbacks_do_not_enter_the_file_logger`）—— 而慢块恰恰在最坏时刻
+    // 出现。计数 + 峰值进原子量，由诊断包（`audioSlowBlockCount` / `audioSlowBlockPeakMs`）
+    // 落盘；既有测试保证健康小块零日志零分配。
+    crate::audio_stats::note_block_elapsed(started.elapsed());
     match outcome {
         Ok(result) => result,
         Err(_) => {
-            // 守卫内的步骤（审计/计时）自己 panic 了：计数 + 清空输出后返回 OK，
-            // 此时 `audio_process_inner` 可能根本没跑过，输出平面交给 clear_outputs 兜底。
-            AUDIO_PANIC_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            crate::audio_stats::note_panic();
             // SAFETY: 宿主提供的 ProcessData；清空失败（形状非法）也只能返回 OK，
             // 不能二次 panic。
             let _ = unsafe { crate::audio_abi::clear_outputs(data.cast()) };
             K_RESULT_OK
         }
     }
-}
-
-/// 计时 + 审计 + 调度的非 FFI 主体；panic 由外层 `audio_process` 拦下。
-unsafe fn audio_process_body(this: *mut c_void, data: *mut c_void) -> TResult {
-    // 【输出写满审计（HIFISHIFTER_BUFFER_AUDIT=1）】把输出平面预填成 NaN，回调返回后
-    // 扫一遍：任何仍是 NaN 的帧都说明某条分支**没有写满整块**，于是宿主会把上一次的
-    // 内容（in-place 时甚至是**输入原声**）当作这一次的输出播出去。
-    //
-    // 【为什么这值得一次额外扫描】"输出缓冲残留"是用户提出的方向之一。逐条看分支可以
-    // 论证它在立体声下不成立，但论证不是证据；这条审计把"到底有没有漏写、漏在哪一档"
-    // 变成一次播放就能读到的一行。默认关闭（每块两次内存扫描，约 2 µs）。
-    let started = std::time::Instant::now();
-    let auditing = buffer_audit_enabled();
-    if auditing {
-        // SAFETY: data 由宿主提供；形状非法时下面的 validate 会拦下，不会走到输出。
-        unsafe { poison_outputs(data) };
-    }
-    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-        audio_process_inner(this, data)
-    }));
-    if auditing {
-        // SAFETY: 与 audio_process_inner 同一份宿主提供的 ProcessData。
-        unsafe { report_unwritten(this, data) };
-    }
-    let result = match outcome {
-        Ok(result) => result,
-        Err(_) => {
-            AUDIO_PANIC_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            // SAFETY: 与 audio_process_inner 同一份宿主提供的 ProcessData；清空输出
-            // 失败（形状非法）也只能返回 OK —— 此时输出交给宿主处置，不能二次 panic。
-            let _ = unsafe { crate::audio_abi::clear_outputs(data.cast()) };
-            K_RESULT_OK
-        }
-    };
-    // 【为什么只记原子量而不打日志】音频线程不能写文件、也不能抢限流表/日志锁
-    // （`realtime_callbacks_do_not_enter_the_file_logger`）—— 而慢块恰恰在最坏时刻
-    // 出现。计数 + 峰值进原子量，由诊断包（`audioSlowBlockCount` / `audioSlowBlockPeakMs`）
-    // 落盘；既有测试保证健康小块零日志零分配。
-    note_block_elapsed(started.elapsed());
-    result
 }
 
 unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
@@ -1950,39 +1783,20 @@ unsafe fn audio_process_inner(this: *mut c_void, data: *mut c_void) -> TResult {
         // SAFETY: this 是存活的音频接口子对象。
         let owner = unsafe { &(*base_from_audio(this)).extension_owner };
         // 【T23】`process` 是宿主**一定会周期性到达**的少数入口之一，因此它是“宿主不再
-        // 回调”这条死路在插件侧最可靠的出口。本函数只读两个原子量并按需置位，
-        // 真正的收口仍由 ARA 控制器在下一次回调里执行（`runtime_mut` 的头部）。
-        //
-        // 【为什么在音频线程上也敢调】它不取任何 `Mutex` 的阻塞路径（文档槽用
-        // `try_lock`，拿不到就跳过）—— 下一次块（10 ms 后）会再来。
-        owner.request_settle_if_overdue();
-        // 【为什么精度要记下来】非 32-bit 时插件按设计静音，而“静音”在界面上必须能
-        // 说清原因（见 `CaptureStore::unsupported_precision`）。这一行与形状判定无关，
-        // 所以在 `InvalidArgument` 之外一律记录。
-        owner.capture().note_precision(probe.symbolic_sample_size);
+        // 回调”这条死路在插件侧最可靠的出口；样本精度也在这一步记账。两者都在
+        // `begin_process_block` 里（CLAP 的 process 调的是同一个方法）—— 它们必须
+        // 发生在任何形状判定之前：输出总线形状不合法时，录制与“为什么静音”照样要记。
+        owner.begin_process_block(probe.symbolic_sample_size);
         // 【为什么必须要求 32-bit 浮点】非 32-bit 时 `channelBuffers32` 那个联合体成员
         // 实际是 `channelBuffers64`，按 `f32` 读会读到垃圾。
         if probe.symbolic_sample_size == 0 && !probe.process_context.is_null() {
             // SAFETY: VST3 processContext 的完整 SDK 结构在当前回调期间存活。
             let context = unsafe { &*probe.process_context };
-            let effective_position =
-                owner.note_offline_block(context, probe.process_mode, probe.num_samples as usize);
-            // 【观察顺序：捕获先、宿主采样后】捕获决定本块位置是否可信；宿主采样通道
-            // 必须看到同一个结论，否则 PendingAbsolute 期间它仍会把绝对位置画出去。
-            // 【为什么在这里转成中立描述】VST3 的 state 位只在这一处解码；捕获观察
-            // 之后只看事实，与 CLAP 侧走同一段代码（见 crate::block_context）。
+            // 【为什么在这里转成中立描述】VST3 的 state 位只在这一处解码；之后只看事实。
             let block = crate::block_context::BlockContext::from_vst3(context);
-            evidence = owner.capture_observe(probe, block, effective_position);
-            let position_trusted = evidence.is_some_and(|evidence| evidence.position_trusted);
-            // 【为什么传中立块而不是 `context`】`observe_transport` 现在吃
-            // `BlockContext`（VST3 与 CLAP 共用同一条通道），而这里刚为捕获观察
-            // 造好了同一份事实 —— 再让时钟自己解一次 VST3 状态位就是第二份解码。
-            owner.observe_transport(
-                &block,
-                probe.process_mode,
-                probe.num_samples as usize,
-                position_trusted,
-            );
+            // 【观察顺序：离线 pass → 捕获 → 宿主采样】三步的顺序与依赖写在
+            // `observe_input_block` 里（CLAP 走的是同一个方法），外壳不再复述。
+            evidence = owner.capture_observe(probe, block);
         }
     }
     match shape {

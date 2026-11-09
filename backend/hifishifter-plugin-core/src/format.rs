@@ -4,8 +4,6 @@
 //! 「宿主可选给」的：`Some(true)` = 明确在播，`Some(false)` = 宿主给了 transport 但
 //! 当前不在播，`None` = 宿主根本没有 transport 概念。三者绝不能合并。
 
-use std::ffi::c_void;
-
 #[cfg(test)]
 mod tests;
 
@@ -64,37 +62,9 @@ pub fn frame_is_trustworthy(frame: &TransportFrame) -> bool {
         && frame.sample_rate > 0.0
 }
 
-/// 宿主存取的组件 state：格式层不解释字节块内容。
-pub trait FormatState {
-    /// 读取宿主保存的字节块。
-    fn load(&self, bytes: &[u8]) -> Result<(), String>;
-    /// 交给宿主保存的字节块。
-    fn save(&self) -> Result<Vec<u8>, String>;
-}
-
-/// 宿主把「一个父窗口 + 一套主线程回调 + 一套尺寸协商」交给我们的中性契约。
-pub trait GuiAttach: Send {
-    /// 父窗口原生句柄。
-    fn parent(&self) -> *mut c_void;
-    /// 平台类型：`HWND` / `NSView` / `X11EmbedWindowID` / `WaylandSurfaceID` / `clap:…`。
-    fn platform_kind(&self) -> &str;
-    /// 是否是可嵌入的父窗口；Wayland 等只能开浮窗时为 false。
-    fn embedded(&self) -> bool;
-    /// 格式专属的 frame / run-loop 句柄；没有时为 0。
-    fn frame(&self) -> usize;
-    /// 请求宿主调整视图尺寸。
-    fn request_resize(&self, w: i32, h: i32) -> bool;
-    /// 主线程周期心跳的驱动点。
-    fn on_host_tick(&self);
-}
-
-/// ARA 工厂与文档控制器的绑定契约；具体实现留在格式外壳（companion feature 专属）。
-pub trait AraBinding {
-    /// 进程级稳定的 ARA 工厂指针。
-    fn factory(&self) -> *const c_void;
-    /// 绑定控制器；返回扩展实例指针，失败返回 null。
-    fn bind(&self, controller: *mut c_void, known_roles: i32, assigned_roles: i32)
-        -> *const c_void;
-    /// 观察到控制器侧销毁。
-    fn observe_controller_destruction(&self);
-}
+// 【为什么这里只有 `TransportFrame`】本模块此前还声明过三个 trait（`FormatState` /
+// `GuiAttach` / `AraBinding`），它们的形状来自"每个格式各写一份实现"的时代：GUI 与 ARA
+// 绑定各自由外壳实现，state 由外壳缓存字节。现在三件事都收敛到了共享层（`EditorView`、
+// `AraBinder`、`ExtensionOwner::encode_state/restore_state`），没有任何类型实现这三个
+// trait —— 留着它们只会让下一个人以为"应该在这里再实现一份"，而那正是本轮要消除的分叉。
+// 真正中性的东西只剩时间事实：`TransportFrame` 与 `frame_is_trustworthy`。

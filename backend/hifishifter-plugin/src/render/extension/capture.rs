@@ -551,6 +551,8 @@ impl ExtensionOwner {
     /// （分配一个 String）—— 那是实时线程上唯一一次堆分配。
     pub fn warm_audio_caches(&self) {
         let _ = Self::click_audit_enabled();
+        // 写满审计的开关同样只在音频线程上读一次；不预热就等于首块一次堆分配。
+        let _ = crate::audio_stats::buffer_audit_enabled();
     }
 
     fn click_audit_enabled() -> bool {

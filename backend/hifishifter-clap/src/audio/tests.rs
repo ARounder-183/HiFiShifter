@@ -1,6 +1,6 @@
 // CLAP 音频与 transport 适配的行为夹具。
 use super::*;
-use crate::abi::{clap_event_transport_t, clap_event_header_t, transport_flags};
+use crate::abi::{clap_audio_buffer_t, clap_event_header_t, clap_event_transport_t, transport_flags};
 use hifishifter_plugin_core::format::frame_is_trustworthy;
 
 fn transport(flags: u32, seconds: f64) -> clap_event_transport_t {

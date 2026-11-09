@@ -1392,10 +1392,8 @@ impl ExtensionOwner {
     pub(crate) fn capture_observe(
         &self,
         data: *mut crate::audio_abi::ProcessData,
-        context: impl Into<crate::block_context::BlockContext>,
-        effective_position: Option<i64>,
+        context: crate::block_context::BlockContext,
     ) -> Option<BlockEvidence> {
-        let context = context.into();
         // SAFETY: 调用方保证 data 在本回调期间可读。
         let mode = unsafe { (*data).process_mode };
         let stream = ProcessStream::from_mode(mode)?;
@@ -1404,11 +1402,20 @@ impl ExtensionOwner {
         } else {
             self.setup_sample_rate()
         };
-        let start = effective_position.unwrap_or(context.project_time_samples);
+        // 【为什么起点先按工程位置给】离线 pass 的本地起点由 `observe_input_block`
+        // 算出来并覆盖（它必须先记账再观察）。这里传工程位置只是让非离线块有一个
+        // 与 `capture_view` 契约一致的值。
         // SAFETY: 与 `audio_process_inner` 同一份宿主提供的 ProcessData；切片只在本次
         // 回调内有效，而消费方同步读完就返回。
-        let block = unsafe { crate::audio_abi::capture_view(data, start, rate, context.playing) };
-        self.capture_observe_block(block, stream, context, effective_position)
+        let block = unsafe {
+            crate::audio_abi::capture_view(
+                data,
+                context.project_time_samples,
+                rate,
+                context.playing,
+            )
+        };
+        self.observe_input_block(block, context, stream)
     }
 
     /// 把宿主音频喂进共享捕获路径；返回"本块位置是否可信"。

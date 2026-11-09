@@ -9,7 +9,7 @@ impl ExtensionOwner {
     }
 
     /// 记录 `setupProcessing` 声明的单块上限（诊断用）。
-    pub(crate) fn note_max_samples_per_block(&self, value: i32) {
+    pub fn note_max_samples_per_block(&self, value: i32) {
         self.max_samples_per_block
             .store(value.max(0), Ordering::Release);
     }

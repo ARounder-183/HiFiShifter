@@ -278,27 +278,65 @@ REAPER 7.85 / Windows x64 的 CLAP 扫描、实例化与 Capture 形态已由隔
 （Bitwig / Studio One / MultitrackStudio）与保存重开、WebView 编辑仍按
 `docs/plugin-host-survey.md` 保持「未测」。
 
-### CLAP ↔ VST3 覆盖对照（2026-11 全量审查）
+### CLAP ↔ VST3 覆盖对照（2026-11 全量审查 + 第二轮收敛）
 
 同一份产品有两个外壳。下表把"每件事由谁实现"写成可核对的事实：**"共用"列写着同一份
 类型/函数名的行，两个格式走的就是同一条代码路径**，而不是两份长得像的实现。
 
 | 能力 | VST3 入口 | CLAP 入口 | 共用实现 |
 | --- | --- | --- | --- |
-| 模块加载 / 生命周期 | `InitDll` / `GetPluginFactory` / `ExitDll` | `clap_entry.init/deinit` + 工厂 | `ExtensionOwner` 的 `component_activated` / `processing_started` / `processing_stopped` / `component_terminated` |
-| 音频处理 | `ProcessData` → `BlockContext` | `clap_process_t` → `BlockContext` | `ExtensionOwner::process_audio` |
-| 状态存档 | `getState` / `setState` | `clap.state` | `encode_state` / `restore_state` |
+| 模块加载 / 生命周期 | `InitDll` / `GetPluginFactory` / `ExitDll` | `clap_entry.init/deinit` + 工厂 | `ExtensionOwner` 的 `component_activated` / `processing_started` / `processing_stopped` / `processing_reset` / `component_terminated` |
+| 模块卸载 | `ExitDll` → `shutdown_module` | `entry.deinit` → **同一个** `shutdown_module` | `editor::shutdown` + `slow_lane::wait_until_idle`（含窗口类注销与后台任务等待） |
+| 每块音频：形状判定之前 | `IAudioProcessor::process` | `clap_plugin.process` | `ExtensionOwner::begin_process_block`（T23 收口 + 样本精度记账） |
+| 每块音频：观察 | 同上 | 同上 | `ExtensionOwner::observe_input_block`（离线 pass 本地起点 → 捕获观察 → 宿主时钟采样） |
+| 每块音频：输出仲裁 | 同上 | 同上 | `ExtensionOwner::render_block`（含 `HIFISHIFTER_BUFFER_AUDIT` 写满审计） |
+| 每块音频：完整序列 | 同上 | 同上 | `ExtensionOwner::process_audio`（CLAP 调它；VST3 因输出形状有四种结局而逐步调用同一批方法） |
+| 采样率接受域 | `setupProcessing` | `activate` | `render::extension::SUPPORTED_SAMPLE_RATE`（8 kHz..=384 kHz，同一个常量） |
+| 离线意图 / 离线准备 | `setupProcessing(mode=2)` | `activate` + `clap.render.set` | `ExtensionOwner::setup_processing`（采样率 + 进程模式 + 离线准备） |
+| 状态存档 | `getState` / `setState` | `clap.state` | `encode_state` / `restore_state` + `note_restore_failed`（失败在界面与诊断包里可见） |
 | ARA 工厂 / 绑定 | `ARAVST3.h` 入口点 | `ARACLAP.h` 工厂 + 实例扩展 | `AraBinder`（角色校验、文档查找、幂等复位） |
 | 编辑器视图 | `IPlugView` | `clap.gui` | `editor::gui::EditorView`（同一个 `create_view`） |
 | 页面协议 / 命令分发 | `IPlugView` → `EditorClient` | `clap.gui` → **同一个** `EditorClient` | `EditorClient` + `commands::dispatch` + `EditorSession` |
 | 设置 / 前端偏好 | `EditorClient` → `settings_store` | 同上 | `settings_store`（与独立 App 同一份配置文件） |
-| 宿主主线程节拍 | REAPER `plugin_register("timer")` | `clap.timer-support` + `on_main_thread` | `editor::host_main_thread_tick` |
-| 窗口 / 模块卸载 | `ExitDll` → `editor::shutdown` | `entry.deinit` → `editor::shutdown` | 同一个函数（含窗口类注销） |
-| 用户目录布局迁移 | 模块入口 | 模块入口 | `initialize_process_state`（同一个钩子函数指针） |
-| 推理模型登记 | 模块入口 | 模块入口 | `initialize_resources` |
-| 诊断 / 日志 / 诊断包 | `diagnostics` + 命令 | 同一个 + `clap.log` 转发 | `diagnostics` + `plugin_diagnostics` |
+| 宿主主线程节拍 | REAPER `plugin_register("timer")` + `IPlugView` 回调 | `clap.timer-support` + `on_main_thread` + `clap.gui` 回调 | `editor::host_main_thread_tick` / `editor::pump_host_thread` |
+| 叫醒宿主主线程 | 无对应能力（靠宿主 timer / `IPlugView` 回调） | `clap_host.request_callback` | `timer::request_main_thread`：没有 `clap.timer-support` 时由 `on_main_thread` 自挂节拍（先要一次、每次回调再要下一次） |
+| 用户目录布局迁移 | 模块入口（日志之前） | 模块入口（**同一个顺序**） | `initialize_process_state`（同一个钩子函数指针） |
+| 推理模型登记 / ARA 运行时 | 模块入口 | 模块入口 | `initialize_resources` + `runtime::runtime` |
+| 诊断 / 日志 / 诊断包 | `diagnostics` + 命令 | 同一个 + `clap.log` 转发 | `diagnostics` + `plugin_diagnostics` + `audio_stats`（panic / 慢块 / 写满审计 / 精度） |
 | 宿主原生编辑（写回 / 分割 / 剪贴板 / 撤销块 / folder） | REAPER 扩展 | **无** | 仅 VST3（CLAP 没有对应的宿主 API，能力位如实为 false） |
 | 总线声道协商 | `setBusArrangements` 接受任意布局 | 固定立体声端口，由宿主适配 | **差异**：CLAP 的端口表是静态的（`clap.audio-ports`），宿主把单声道轨升混到立体声 |
+
+### 第二轮审查（2026-11 上旬）：又收敛掉的九处
+
+第一轮把编辑器栈收成一份之后，逐行比对两个外壳的音频与生命周期路径，又找到九处
+"VST3 有、CLAP 没有"的分叉。它们的共同形状是**共享层已经有一份正确实现，CLAP 只是
+没有调用它**，所以症状都是"CLAP 上某个读数恒为 0 / 某个准备从来没发生"：
+
+1. **离线 pass 从未开始**：`note_offline_block` 只由 VST3 调用，CLAP 传 `None`。
+   后果是 `offline_pass_active()` 恒假 ⇒ 离线准备不要求用户曲线 ⇒ bounce 产物里是
+   没处理的声音。现在它是 `observe_input_block` 的第一步，两个格式都走。
+2. **进程模式恒为 0**：`setup_process_mode` 只由 VST3 的 `setupProcessing` 写。
+   现在由 `setup_processing` 一处落定（CLAP 的 `activate` 与 `clap.render.set` 都调它）。
+3. **样本精度从未记账**：CLAP 的 64-bit 分支只静音，不记 `note_precision` ⇒ 界面
+   无法说清"为什么是静音"。现在在 `begin_process_block` 里，两个格式同一处。
+4. **诊断读数永远报 0**：`audioPanicCount` / `audioSlowBlockCount` / 写满审计此前
+   全部长在 `vst3.rs` 的私有 static 上，而诊断包直接读 `crate::vst3::…`。现在它们在
+   `audio_stats` 里，两个外壳写同一组原子量，诊断包读共享层。
+5. **`clap_host.request_callback` 从未被调用**：`on_main_thread` 因此永远不会被宿主
+   调用。现在没有 `clap.timer-support` 的宿主走"自挂节拍"：`plugin.init` 先要一次，
+   每次 `on_main_thread` 结束再要下一次（`timer::request_main_thread`）。
+6. **模块入口顺序**：CLAP 此前先 `diagnostics::init()` 再 `initialize_process_state()`，
+   而布局迁移的判据是"新旧根同时存在就绝不合并" —— 日志目录先建出来，旧目录就再也
+   搬不过去。现在与 VST3 同序（资源根 → 进程状态 → 日志 → 模型）。
+7. **编辑器尺寸策略**：VST3 的 `IPlugView::constrain` 用 640..=16384、CLAP 的
+   `clap.gui.adjust_size` 用 720..=4096 × 480..=2400 —— 同一个用户拖同一个窗口，在
+   两种外壳里得到不同的边界。现在只有一份 `editor::gui` 常量。
+8. **离线 `NotReady` 的结果码**：VST3 回 `kResultFalse`（宿主据此知道这一帧不可用），
+   CLAP 回 `CLAP_PROCESS_CONTINUE`（宿主把静音**当成产物**）。现在两个格式都报失败。
+9. **节拍挂点与诊断探针**：CLAP 的 `clap.timer-support` 从 `activate` 挪到 `init`
+   （编辑器可以在未激活实例上打开）；`HIFISHIFTER_NO_VIEW` / `HIFISHIFTER_NO_ARA` /
+   `HIFISHIFTER_FIXED_SIZE` 三个现场探针在两个外壳上同名同义 —— 否则"CLAP 不冻结、
+   VST3 冻结"这类结论无法排除"根本没建视图"。
 
 两条**刻意保留**的差异：
 

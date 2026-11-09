@@ -666,7 +666,12 @@ impl ExtensionOwner {
         self.setup_process_mode.store(mode, Ordering::Release);
     }
 
-    pub(crate) fn setup_process_mode(&self) -> i32 {
+    /// 宿主声明的进程模式（0 = 实时，1 = 预取，2 = 离线）。
+    ///
+    /// 【为什么公开】它是两种格式都要在诊断里对齐的事实，也是"离线准备到底有没有
+    /// 发生"的唯一直接读数（外壳的集成测试据此断言 `clap.render.set` 真的走到了
+    /// 共享 setup 序列）。
+    pub fn setup_process_mode(&self) -> i32 {
         self.setup_process_mode.load(Ordering::Acquire)
     }
 
@@ -674,9 +679,15 @@ impl ExtensionOwner {
     ///
     /// 【为什么只在未绑定实例上生效】ARA 的离线渲染由文档/区域驱动，仍应使用宿主
     /// 给的 projectTimeSamples；Capture 才需要自己的 0 起点。
+    ///
+    /// 【为什么参数是中立的三个事实】它此前吃 VST3 的 ProcessContext —— 共享层
+    /// 因此认识了一种格式的 ABI，CLAP 想接就只能伪造一个 VST3 结构（于是它干脆
+    /// 没接，见 render_block.rs 的 observe_input_block）。离线 pass 只需要"宿主报的
+    /// 工程位置 / 本块采样率 / 进程模式 / 帧数"，四个数与格式无关。
     pub(crate) fn note_offline_block(
         &self,
-        context: &crate::audio_abi::ProcessContext,
+        raw_start: i64,
+        sample_rate: f64,
         mode: i32,
         frames: usize,
     ) -> Option<i64> {
@@ -684,13 +695,7 @@ impl ExtensionOwner {
             return None;
         }
         self.processing_pass
-            .note_offline_block(
-                mode,
-                context.project_time_samples,
-                frames,
-                context.sample_rate,
-                &self.pass_sequence,
-            )
+            .note_offline_block(mode, raw_start, frames, sample_rate, &self.pass_sequence)
             .map(|block| block.local_start)
     }
 

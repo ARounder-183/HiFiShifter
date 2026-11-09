@@ -4,7 +4,7 @@
 //! 的提示，不是「全静音且缓冲仍可读」；把提示当门控会让录音与输出一起静音。这里一律
 //! **总是读、总是写满**：只处理 F32，F64 保守静音并返回成功；in-place 时先读后写。
 
-use crate::abi::{clap_audio_buffer_t, clap_process_t, CLAP_RENDER_OFFLINE, CLAP_SECTIME_FACTOR};
+use crate::abi::{clap_process_t, CLAP_RENDER_OFFLINE, CLAP_SECTIME_FACTOR};
 use hifishifter_plugin::audio_block::{AudioBlock, InputBus, OutputBus};
 use hifishifter_plugin_core::format::TransportFrame;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -111,18 +111,77 @@ impl AudioState {
     }
 }
 
+/// 本块样本宽度的权威读数：0 = 32-bit 浮点，非 0 = 本插件读不了的宽度。
+///
+/// 【为什么按输出判】CLAP 的 `clap_audio_buffer_t` 用 `data32` / `data64` 两个指针
+/// 表达宽度：`data32` 为空而 `data64` 非空就是 64-bit。输出是"我们要写的那一面"，
+/// 它决定了这一块能不能产出 —— 输入即使给了 32-bit，输出是 64-bit 也写不进去。
+/// 与 VST3 的 `symbolic_sample_size` 同一条事实、同一个取值约定。
+pub fn sample_precision(process: &clap_process_t) -> i32 {
+    if process.audio_outputs_count == 0 || process.audio_outputs.is_null() {
+        return 0;
+    }
+    // SAFETY: 宿主声明了 audio_outputs_count 个总线，第一个在本回调期间有效。
+    let output = unsafe { &*process.audio_outputs };
+    if output.data32.is_null() && !output.data64.is_null() {
+        1
+    } else {
+        0
+    }
+}
+
+/// 把 64-bit 输出平面清零：读不了这种宽度，但宿主仍要拿到一块**确定的**静音。
+///
+/// 【为什么不直接返回错误】与 VST3 的 `silence_unsupported_sample_size` 同一条取舍：
+/// 返回失败会让多数宿主把插件整条踢出链路（用户看到"插件不见了"）；静音但在场是
+/// 可诊断的降级，界面会通过 `CaptureStore::unsupported_precision` 说清原因。
+///
+/// # Safety
+/// `process` 必须是宿主在本次回调里给出的有效记录；非空 `data64` 平面至少含
+/// `frames_count` 帧可写。
+pub unsafe fn silence_f64_outputs(process: &clap_process_t) -> bool {
+    let frames = process.frames_count as usize;
+    if process.audio_outputs_count == 0 || process.audio_outputs.is_null() {
+        return false;
+    }
+    // SAFETY: 宿主声明了 audio_outputs_count 个总线，均在本回调期间有效。
+    let outputs = unsafe {
+        std::slice::from_raw_parts(process.audio_outputs, process.audio_outputs_count as usize)
+    };
+    let mut cleared = false;
+    for output in outputs {
+        if output.data64.is_null() {
+            continue;
+        }
+        for channel in 0..output.channel_count as usize {
+            // SAFETY: channel < 声明的声道数，宿主提供对应指针。
+            let plane = unsafe { *output.data64.add(channel) };
+            if plane.is_null() {
+                continue;
+            }
+            // SAFETY: 非空平面至少含 frames 帧可写。
+            unsafe { std::slice::from_raw_parts_mut(plane, frames) }.fill(0.0);
+            cleared = true;
+        }
+    }
+    cleared
+}
+
 /// 把 CLAP 的 `process` 数据翻译成共享的中立块。
 ///
 /// 【为什么翻译放在格式外壳】`clap_audio_buffer_t` 的字段布局、`data32`/`data64` 的
 /// 联合体语义、`channel_count` 与指针数组的对应关系，都是 **CLAP ABI** 的知识。
-/// 共享渲染层刻意不认识它们 —— 它只面对“平面在哪、有几帧、是不是 in-place”。
+/// 共享渲染层刻意不认识它们 —— 它只面对"平面在哪、有几帧、是不是 in-place"。
 ///
-/// 【为什么 in-place 要看“同一批平面指针”】CLAP 没有 VST3 那种“同一份总线结构”的
+/// 【为什么没有可写输出时也返回一个块】"宿主没接我们的输出"与"这一块该不该录"是
+/// 两件无关的事（见 `ExtensionOwner::capture_observe_block` 的说明）。返回 `None`
+/// 会让观察整段跳过 ⇒ 录制静音、`canCapture` 永远灰着。这里返回一个**零声道**的
+/// 输出视图：观察照常发生，渲染侧写零个声道（`AudioBlock` 的每个写入点都按
+/// `output.channels()` 循环）。
+///
+/// 【为什么 in-place 要看"同一批平面指针"】CLAP 没有 VST3 那种"同一份总线结构"的
 /// 概念，宿主只保证输入与输出的平面指针**可能相同**。逐声道比对指针是这里唯一可靠的
 /// 判据（而它只影响静音掩码这条可选提示）。
-///
-/// 【返回 `None` 的情形】空块或没有可写输出平面 —— 调用方对这两种情形的既有语义都是
-/// “本块没有可处理的内容”。
 ///
 /// # Safety
 /// `process` 必须是宿主在本次回调里给出的有效记录；非空平面至少含 `frames_count` 帧。
@@ -130,51 +189,59 @@ pub unsafe fn block_from_clap<'a>(
     process: &'a clap_process_t,
     mode: i32,
     silence: &'a mut u64,
-) -> Option<AudioBlock<'a>> {
+) -> AudioBlock<'a> {
     let frames = process.frames_count as usize;
-    if frames == 0 || process.audio_outputs_count == 0 || process.audio_outputs.is_null() {
-        return None;
-    }
-    let output = unsafe { &mut *process.audio_outputs };
-    if output.channel_count == 0 || output.data32.is_null() {
-        return None;
-    }
     let input = if process.audio_inputs_count > 0 && !process.audio_inputs.is_null() {
+        // SAFETY: 宿主声明了 audio_inputs_count 个总线，第一个在本回调期间有效。
         let bus = unsafe { &*process.audio_inputs };
-        // SAFETY: 宿主声明 `channel_count` 个平面指针，本回调期间有效。
         unsafe { InputBus::new(bus.data32, bus.channel_count as usize) }
     } else {
         InputBus::empty()
     };
-    let in_place = if process.audio_inputs_count > 0 && !process.audio_inputs.is_null() {
-        let bus = unsafe { &*process.audio_inputs };
-        let shared = bus.channel_count.min(output.channel_count) as usize;
-        (0..shared).any(|channel| {
-            // SAFETY: `channel < min(两个声道路数)`，两侧都声明了对应指针。
-            let source = unsafe { *bus.data32.add(channel) };
-            let target = unsafe { *output.data32.add(channel) };
-            !source.is_null() && source == target
-        })
+    let (pointers, in_place) = if process.audio_outputs_count > 0
+        && !process.audio_outputs.is_null()
+    {
+        // SAFETY: 同上。
+        let bus = unsafe { &*process.audio_outputs };
+        let pointers: &'a mut [*mut f32] = if bus.channel_count > 0 && !bus.data32.is_null() {
+            // SAFETY: 宿主声明了 channel_count 个平面指针，本回调期间有效。
+            unsafe { std::slice::from_raw_parts_mut(bus.data32, bus.channel_count as usize) }
+        } else {
+            &mut []
+        };
+        let shared = if process.audio_inputs_count > 0 && !process.audio_inputs.is_null() {
+            // SAFETY: 同上。
+            let inputs = unsafe { &*process.audio_inputs };
+            let count = (inputs.channel_count as usize).min(bus.channel_count as usize);
+            (0..count).any(|channel| {
+                // SAFETY: channel < min(两个声道路数)，两侧都声明了对应指针。
+                let source = unsafe { *inputs.data32.add(channel) };
+                let target = unsafe { *bus.data32.add(channel) };
+                !source.is_null() && source == target
+            })
+        } else {
+            false
+        };
+        (pointers, shared)
     } else {
-        false
+        (&mut [][..], false)
     };
-    // SAFETY: 上面已确认指针数组非空且声明了 `channel_count` 个平面。
-    let pointers: &'a mut [*mut f32] =
-        unsafe { std::slice::from_raw_parts_mut(output.data32, output.channel_count as usize) };
-    Some(AudioBlock {
+    AudioBlock {
         frames,
         mode,
         input,
         output: OutputBus::new(pointers, silence),
         in_place,
-    })
+    }
 }
-
 /// 校验并直通一个音频块。返回 `false` 表示宿主布局非法（输出必须丢弃）。
 ///
-/// 【为什么这里只剩“翻译 + 直通”】in-place 的“先读齐再写”、单声道下混、inactive 声道
-/// 跳过 —— 这些结论现在只有一处实现（`AudioBlock::pass_through`）。此前它们是本文件
-/// 里的一段独立循环，与 VST3 侧的同名逻辑各写一遍。
+/// 【为什么这里只剩"翻译 + 直通"】in-place 的"先读齐再写"、单声道下混、inactive 声道
+/// 跳过 —— 这些结论现在只有一处实现（`AudioBlock::pass_through`）。
+///
+/// 【它现在只服务两处】F64 宽度由 `silence_f64_outputs` 单独处理；本函数保留给
+/// 直通夹具（`audio/tests.rs`）与"没有可处理内容"的保守分支。真正的播放走
+/// `ExtensionOwner::process_audio`。
 ///
 /// # Safety
 /// `process` 必须来自宿主的有效 `clap_process_t`，其缓冲在调用期间有效。
@@ -184,45 +251,15 @@ pub unsafe fn process_block(process: &clap_process_t) -> bool {
         return true;
     }
     // F64 不处理：保守地把输出写零，但仍返回成功（与 VST3 kSample64 同口径）。
-    if let Some(outputs) = unsafe { buffers(process.audio_outputs, process.audio_outputs_count) } {
-        if outputs.iter().any(|buffer| !buffer.data64.is_null()) {
-            for output in outputs {
-                unsafe { clear_f64(output, frames) };
-            }
-            return true;
-        }
+    if unsafe { silence_f64_outputs(process) } {
+        return true;
     }
     let mut silence = 0_u64;
-    let Some(mut block) = (unsafe { block_from_clap(process, 0, &mut silence) }) else {
-        return false;
-    };
     // SAFETY: 由本函数的调用契约保证。
+    let mut block = unsafe { block_from_clap(process, 0, &mut silence) };
+    // SAFETY: 同上。
     unsafe { block.pass_through() }.is_ok()
 }
-unsafe fn buffers(
-    ptr: *const clap_audio_buffer_t,
-    count: u32,
-) -> Option<&'static [clap_audio_buffer_t]> {
-    if count == 0 {
-        return Some(&[]);
-    }
-    if ptr.is_null() {
-        return None;
-    }
-    Some(unsafe { std::slice::from_raw_parts(ptr, count as usize) })
-}
-unsafe fn clear_f64(buffer: &clap_audio_buffer_t, frames: usize) {
-    if buffer.data64.is_null() {
-        return;
-    }
-    for channel in 0..buffer.channel_count as usize {
-        let ptr = unsafe { *buffer.data64.add(channel) };
-        if !ptr.is_null() {
-            unsafe { std::slice::from_raw_parts_mut(ptr, frames) }.fill(0.0);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     include!("audio/tests.rs");

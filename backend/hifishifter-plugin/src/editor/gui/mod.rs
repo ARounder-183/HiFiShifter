@@ -110,6 +110,29 @@ impl EditorView {
 }
 
 /// 本目标是否提供内嵌编辑器。
+/// 编辑器窗口的**默认**尺寸（与 VST3 的 `ViewRect` 默认值逐字相同）。
+pub const EDITOR_DEFAULT_SIZE: (u32, u32) = (1100, 720);
+
+/// 编辑器窗口的**最小**尺寸。
+///
+/// 【为什么不是 0】参数编辑器与时间轴在这个宽度以下会互相压扁（工具栏换行、轨道头
+/// 吃掉全部横向空间）。给宿主一个下限，比让它把窗口拖成一条缝再画不出来好。
+pub const EDITOR_MIN_SIZE: (u32, u32) = (640, 400);
+
+/// 编辑器窗口的**最大**尺寸（只是"别让一次误拖把窗口设成 8K"的理智线）。
+pub const EDITOR_MAX_SIZE: (u32, u32) = (16_384, 16_384);
+
+/// 把宿主请求的尺寸夹到合法区间。
+///
+/// 【为什么两种格式共用一份】尺寸策略是产品决策，不是 ABI 知识。此前 VST3 的
+/// `IPlugView::constrain` 用 640..=16384、CLAP 的 `clap.gui.adjust_size` 用
+/// 720..=4096 × 480..=2400 —— 同一个用户拖同一个窗口，在两种外壳里得到不同的边界。
+pub fn clamp_editor_size(width: u32, height: u32) -> (u32, u32) {
+    (
+        width.clamp(EDITOR_MIN_SIZE.0, EDITOR_MAX_SIZE.0),
+        height.clamp(EDITOR_MIN_SIZE.1, EDITOR_MAX_SIZE.1),
+    )
+}
 pub const fn available() -> bool {
     cfg!(any(windows, unix))
 }

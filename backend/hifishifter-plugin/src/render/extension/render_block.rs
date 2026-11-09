@@ -56,6 +56,32 @@ impl ExtensionOwner {
         context: Option<crate::block_context::BlockContext>,
         evidence: Option<BlockEvidence>,
     ) -> RenderOutcome {
+        // 【写满审计】HIFISHIFTER_BUFFER_AUDIT=1 时先预填 NaN、返回前再扫一遍。
+        // 它必须在**所有**返回路径上生效，所以只能罩在仲裁函数外面：仲裁有六条早退，
+        // 逐条插入既会漏，也会让"哪条分支没写满"重新变成靠人眼找。
+        let auditing = crate::audio_stats::buffer_audit_enabled();
+        if auditing {
+            block.poison_outputs();
+        }
+        // SAFETY: 由本函数的调用契约保证（见下方 inner 的说明）。
+        let outcome = unsafe { self.render_block_inner(block, context, evidence) };
+        if auditing {
+            let (channels, unwritten) = block.count_unwritten();
+            self.note_buffer_audit(channels, unwritten, block.frames);
+        }
+        outcome
+    }
+
+    /// 输出仲裁本体；写满审计由 [`Self::render_block`] 罩在外面。
+    ///
+    /// # Safety
+    /// 与 [`Self::render_block`] 相同。
+    unsafe fn render_block_inner(
+        &self,
+        block: &mut crate::audio_block::AudioBlock<'_>,
+        context: Option<crate::block_context::BlockContext>,
+        evidence: Option<BlockEvidence>,
+    ) -> RenderOutcome {
         if self.is_editor_only() {
             // 纯编辑角色不是歌曲播放 renderer；保留宿主已经处理的 fade/gain/前级 FX，
             // 包括停播监听。
@@ -234,6 +260,10 @@ impl ExtensionOwner {
     /// 结论；别的格式拿它没有任何用处，只会在传递中丢失字段。这里让它一步到位地
     /// 流进 [`ExtensionOwner::render_block`]。
     ///
+    /// 【`precision` 为什么要从外壳传进来】它是宿主声明样本宽度的**唯一**来源
+    /// （VST3 `symbolic_sample_size` / CLAP `data32:data64`），共享层读不到宿主 ABI。
+    /// 传进来之后，两个格式的"64-bit ⇒ 静音且能说清原因"走同一条记账。
+    ///
     /// # Safety
     /// `block` 的平面由宿主提供，非空平面至少含 `frames` 帧；本函数只在本回调内使用
     /// 它们，不保留任何指针。
@@ -242,31 +272,80 @@ impl ExtensionOwner {
         block: &mut crate::audio_block::AudioBlock<'_>,
         context: crate::block_context::BlockContext,
         stream: ProcessStream,
-        effective_position: Option<i64>,
+        precision: i32,
     ) -> RenderOutcome {
-        let start = effective_position.unwrap_or(context.project_time_samples);
-        // SAFETY: 调用方保证非空输入平面至少含 `frames` 帧可读，且切片不越出本回调。
+        self.begin_process_block(precision);
+        // SAFETY: 调用方保证非空输入平面至少含 frames 帧可读，且切片不越出本回调。
         let planes = unsafe { block.input.planes(block.frames) };
         let input = crate::capture::recorder::InputBlock {
-            start,
+            start: context.project_time_samples,
             frames: block.frames,
             sample_rate: context.sample_rate,
             planes,
             playing: context.playing,
         };
+        let evidence = self.observe_input_block(input, context, stream);
+        // 【为什么没有输出就到此为止】观察（录制、`canCapture`、宿主时钟）只依赖输入
+        // 与位置，与输出总线无关；而仲裁需要可写的平面。VST3 的
+        // `num_samples == 0 || num_outputs == 0` 早退就是这条判据，两个格式必须一致 ——
+        // 否则"宿主没接我们的输出"会让 CLAP 在零声道块上白跑一遍仲裁。
+        if block.frames == 0 || block.output.num_channels == 0 {
+            return RenderOutcome::Done;
+        }
+        // SAFETY: 同一份宿主缓冲，且只在本次回调内使用。
+        unsafe { self.render_block(block, Some(context), evidence) }
+    }
+
+    /// 一块音频的**开头**：周期工作 + 样本精度记账。
+    ///
+    /// 【为什么单独成一步】它必须在**任何形状判定之前**执行：
+    ///   * request_settle_if_overdue 是"宿主不再回调"这条死路的唯一出口，
+    ///     不能因为这一块的输出总线形状不合法就跳过；
+    ///   * note_precision 决定界面能不能说清"为什么是静音"（宿主用 64-bit 样本时
+    ///     本插件按设计不出声）。它此前只在 VST3 外壳里记 —— CLAP 会话里那个读数
+    ///     永远是"32-bit"，于是"静音"没有原因。
+    ///
+    /// 【为什么参数是 i32 而不是枚举】它就是 VST3 symbolic_sample_size /
+    /// CLAP data32:data64 的同一条事实：0 = 32-bit 浮点，非 0 = 不支持的宽度。
+    /// 两种格式在边界各自换算一次，之后只看这一个数。
+    pub fn begin_process_block(&self, precision: i32) {
+        self.request_settle_if_overdue();
+        self.capture().note_precision(precision);
+    }
+
+    /// 一块音频的**观察**：离线 pass 记账 → 捕获观察 → 宿主时钟采样。
+    ///
+    /// 【为什么顺序固定在这一处】三步回答的是同一个块的三件事，而且互相依赖：
+    ///   * 离线 pass 给出本块的**本地**起点（Capture 的 0 起点与宿主工程位置不同）；
+    ///   * 捕获观察用那个起点决定素材写在哪，并给出"位置是否可信"；
+    ///   * 宿主时钟采样必须复用**同一个**可信结论，否则 PendingAbsolute 期间它仍会
+    ///     把绝对域预卷画出去（用户看到光标跳到 60 s 再跳回）。
+    ///
+    /// 此前这三步各写一份：VST3 在外壳里顺序调用，CLAP 只走了其中一部分 ——
+    /// 于是 CLAP 的离线导出永远拿不到本地起点（offline_pass_active 恒假 ⇒
+    /// 离线准备不要求用户曲线 ⇒ 产物里是"没处理"的声音），而且从未记过精度。
+    pub(crate) fn observe_input_block(
+        &self,
+        mut input: crate::capture::recorder::InputBlock<'_>,
+        context: crate::block_context::BlockContext,
+        stream: ProcessStream,
+    ) -> Option<BlockEvidence> {
+        let effective_position = self.note_offline_block(
+            context.project_time_samples,
+            context.sample_rate,
+            stream.index() as i32,
+            input.frames,
+        );
+        if let Some(position) = effective_position {
+            input.start = position;
+        }
         let evidence = self.capture_observe_block(input, stream, context, effective_position);
-        // 【宿主采样通道：两种格式都写在这一处】`observe_transport` 与上面那次捕获观察
-        // 回答的是同一个块的两个问题（"宿主给了什么" / "该画在哪"），而且必须共用
-        // 同一个"位置是否可信"的结论。此前它只由 VST3 外壳调用 —— CLAP 看上去一切正常，
-        // 直到用户在普通播放时发现光标不动（捕获时光标会动，因为那条路走
-        // `publish_capture_block`）。把它放进共享入口，两种格式不再可能分叉。
         self.observe_transport(
             &context,
             stream.index() as i32,
-            block.frames,
+            input.frames,
             evidence.is_some_and(|evidence| evidence.position_trusted),
         );
-        // SAFETY: 同一份宿主缓冲，且只在本次回调内使用。
-        unsafe { self.render_block(block, Some(context), evidence) }
+        evidence
     }
 }

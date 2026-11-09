@@ -77,6 +77,18 @@ pub fn host_main_thread_tick() {
     gui::client::host_heartbeat();
 }
 
+/// 只排空宿主线程投递队列（不跑心跳）。
+///
+/// 【为什么与 `host_main_thread_tick` 分开】VST3 的 `IPlugView` 回调（`getSize` /
+/// `onSize` / `canResize`）与 CLAP 的 `clap.gui` 回调都是"宿主此刻就在我们的 UI 线程上"
+/// 的证据 —— 那里只该泵队列（微秒级），不该跑整个心跳（时钟采样 + 枚举 + JSON）。
+/// 此前 CLAP 的 gui 回调连泵都不跑，于是没有 timer-support 的宿主上编辑器命令
+/// 只能等用户拖动窗口。
+pub fn pump_host_thread() {
+    crate::host::marshal::pump();
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::classify_error;

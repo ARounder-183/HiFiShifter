@@ -196,6 +196,55 @@ impl<'a> AudioBlock<'a> {
         }
     }
 
+    /// 把输出平面预填成 NaN（`HIFISHIFTER_BUFFER_AUDIT=1` 的审计哨兵）。
+    ///
+    /// 【为什么需要它】"输出缓冲残留"是用户提过的方向之一：若某条分支只写了一半，
+    /// 宿主会把上一次的内容（in-place 时甚至是**输入原声**）当作这一次的输出播出去。
+    /// 逐条看分支可以论证立体声下每条都写满，但论证不是证据。预填一个不可能由正常
+    /// 运算产生的值（NaN），回调返回后再扫一遍，任何仍是 NaN 的帧就是漏写 ——
+    /// 一次播放就能读到"有没有漏、漏在哪一档"。
+    ///
+    /// 【为什么放在中立层】漏写的分支属于**输出仲裁**（`render_block`），与外壳无关；
+    /// 两个格式必须被同一把尺子量。
+    pub fn poison_outputs(&mut self) {
+        let frames = self.frames;
+        for channel in 0..self.output.num_channels {
+            let plane = self.output.pointer(channel);
+            if plane.is_null() {
+                continue;
+            }
+            for index in 0..frames {
+                // SAFETY: 调用契约保证非空平面至少有 `frames` 个可写样本。
+                unsafe { *plane.add(index) = f32::NAN };
+            }
+        }
+    }
+
+    /// 扫一遍输出平面：返回 `(声明过的最大声道数, 仍是 NaN 的帧数)`。
+    ///
+    /// 【为什么按声道累计而不是只数总帧】"第 3、4 声道整块没写"与"两个声道各漏一半"
+    /// 在听感上是两件事（前者是环绕声道的残留，后者是块内撕裂），只有分声道读数能把
+    /// 它们分开。
+    pub fn count_unwritten(&self) -> (usize, usize) {
+        let frames = self.frames;
+        let mut unwritten = 0_usize;
+        let mut channels = 0_usize;
+        for channel in 0..self.output.num_channels {
+            let plane = self.output.pointer(channel);
+            if plane.is_null() {
+                continue;
+            }
+            channels = channels.max(channel + 1);
+            for index in 0..frames {
+                // SAFETY: 非空平面至少有 `frames` 个可读样本。
+                if unsafe { *plane.add(index) }.is_nan() {
+                    unwritten += 1;
+                }
+            }
+        }
+        (channels, unwritten)
+    }
+
     /// 把输入原样搬到输出（纯 editor 角色、未知进程形态的降级）。
     ///
     /// 【为什么每帧先读两个源再写输出】宿主可以合法地把同一个缓冲同时当输入和输出，

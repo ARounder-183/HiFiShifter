@@ -23,8 +23,8 @@ impl Default for ViewRect {
         Self {
             left: 0,
             top: 0,
-            right: 1100,
-            bottom: 720,
+            right: crate::editor::gui::EDITOR_DEFAULT_SIZE.0 as i32,
+            bottom: crate::editor::gui::EDITOR_DEFAULT_SIZE.1 as i32,
         }
     }
 }
@@ -33,7 +33,10 @@ impl ViewRect {
     fn dimensions(&self) -> Option<(i32, i32)> {
         let width = self.right.checked_sub(self.left)?;
         let height = self.bottom.checked_sub(self.top)?;
-        ((640..=16384).contains(&width) && (400..=16384).contains(&height))
+        let (min_w, min_h) = crate::editor::gui::EDITOR_MIN_SIZE;
+        let (max_w, max_h) = crate::editor::gui::EDITOR_MAX_SIZE;
+        ((min_w as i32..=max_w as i32).contains(&width)
+            && (min_h as i32..=max_h as i32).contains(&height))
             .then_some((width, height))
     }
 }
@@ -624,8 +627,14 @@ unsafe extern "system" fn constrain(_this: *mut c_void, rect: *mut ViewRect) -> 
                 return K_INVALID_ARGUMENT;
             }
             let (Some(right), Some(bottom)) = (
-                rect.left.checked_add(width.clamp(640, 16384)),
-                rect.top.checked_add(height.clamp(400, 16384)),
+                rect.left.checked_add(width.clamp(
+                    crate::editor::gui::EDITOR_MIN_SIZE.0 as i32,
+                    crate::editor::gui::EDITOR_MAX_SIZE.0 as i32,
+                )),
+                rect.top.checked_add(height.clamp(
+                    crate::editor::gui::EDITOR_MIN_SIZE.1 as i32,
+                    crate::editor::gui::EDITOR_MAX_SIZE.1 as i32,
+                )),
             ) else {
                 return K_INVALID_ARGUMENT;
             };

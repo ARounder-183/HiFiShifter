@@ -206,6 +206,12 @@ pub unsafe fn attach(plugin: *const clap_plugin_t) {
     if instance.ara.is_some() {
         return;
     }
+    // 【临时探针】与 VST3 的 `queryInterface` 同名同义：HIFISHIFTER_NO_ARA=1 时
+    // 不暴露任何 ARA 接口，用来判定"打开 FX 窗口就冻结"是否来自 ARA 这一侧。
+    if std::env::var("HIFISHIFTER_NO_ARA").is_ok_and(|value| value.trim() == "1") {
+        log::warn!("[clap][ara] ARA disabled by HIFISHIFTER_NO_ARA; this instance stays capture-only");
+        return;
+    }
     let Some(runtime) = hifishifter_plugin::runtime::runtime() else {
         log::warn!("[clap][ara] runtime unavailable; this instance stays capture-only");
         return;

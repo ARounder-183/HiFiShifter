@@ -77,16 +77,15 @@ pub static GUI_EXT: clap_plugin_gui_t = clap_plugin_gui_t {
     hide: Some(hide),
 };
 
-/// 编辑器允许的最小 / 最大像素尺寸。
+/// 编辑器尺寸策略（**与 VST3 共用同一份**：`hifishifter_plugin::editor::gui`）。
 ///
-/// 【为什么最小不是 0】参数编辑器与时间轴在这个宽度以下会互相压扁（工具栏换行、
-/// 轨道头吃掉全部横向空间）。给宿主一个下限，比让它把窗口拖成一条缝再画不出来好。
-pub const MIN_EDITOR_SIZE: (u32, u32) = (720, 480);
-/// 上限只是"别让一次误拖把窗口设成 8K"的理智线。
-pub const MAX_EDITOR_SIZE: (u32, u32) = (4096, 2400);
-/// 默认尺寸：与 VST3 的 `ViewRect` 默认值逐字相同（同一个产品，同一个初始观感）。
-pub const DEFAULT_EDITOR_SIZE: (u32, u32) = (1100, 720);
-
+/// 【为什么不在外壳里再定义一遍】尺寸是产品决策，不是 ABI 知识。此前 VST3 的
+/// `IPlugView::constrain` 用 640..=16384、这里用 720..=4096 × 480..=2400 —— 同一个
+/// 用户拖同一个窗口，在两种外壳里得到不同的边界，而两处注释都写着"这是产品的下限"。
+pub use hifishifter_plugin::editor::gui::{
+    clamp_editor_size, EDITOR_DEFAULT_SIZE as DEFAULT_EDITOR_SIZE,
+    EDITOR_MAX_SIZE as MAX_EDITOR_SIZE, EDITOR_MIN_SIZE as MIN_EDITOR_SIZE,
+};
 /// 本平台接受的父窗口 API 名。
 fn platform_api() -> Option<&'static str> {
     #[cfg(windows)]
@@ -133,14 +132,6 @@ fn with_slot<R>(plugin: *const clap_plugin_t, f: impl FnOnce(&mut Slot) -> R) ->
     VIEWS.with(|views| views.borrow_mut().get_mut(&key(plugin)).map(f))
 }
 
-/// 把宿主请求的尺寸夹到合法区间。
-pub fn clamp_editor_size(width: u32, height: u32) -> (u32, u32) {
-    (
-        width.clamp(MIN_EDITOR_SIZE.0, MAX_EDITOR_SIZE.0),
-        height.clamp(MIN_EDITOR_SIZE.1, MAX_EDITOR_SIZE.1),
-    )
-}
-
 unsafe extern "C" fn is_api_supported(
     _p: *const clap_plugin_t,
     api: *const c_char,
@@ -185,6 +176,14 @@ unsafe extern "C" fn get_preferred_api(
 unsafe extern "C" fn create(p: *const clap_plugin_t, api: *const c_char, floating: bool) -> bool {
     hifishifter_plugin_core::guard_ffi(false, || {
         if !unsafe { is_api_supported(p, api, floating) } {
+            return false;
+        }
+        // 【临时探针】与 VST3 的 `createView` 同名同义：HIFISHIFTER_NO_VIEW=1 时
+        // 完全不产生视图，用来判定"宿主冻结"是否出在我们这套视图实现上。
+        // 两个格式必须能被同一把探针分开，否则"CLAP 上不冻结、VST3 上冻结"这种
+        // 结论无法排除"根本没建视图"。
+        if std::env::var("HIFISHIFTER_NO_VIEW").is_ok_and(|value| value.trim() == "1") {
+            log::warn!("[clap][gui] create suppressed by HIFISHIFTER_NO_VIEW");
             return false;
         }
         let Some(instance) = (unsafe { crate::instance(p) }) else {
@@ -248,6 +247,9 @@ unsafe extern "C" fn set_scale(_p: *const clap_plugin_t, _scale: f64) -> bool {
 }
 
 unsafe extern "C" fn get_size(p: *const clap_plugin_t, width: *mut u32, height: *mut u32) -> bool {
+    // 【宿主线程泵】宿主只在它自己的 UI 线程上调用视图回调 —— 这是"不依赖宿主支持
+    // 任何额外能力"的那条泵路径（VST3 的 `IPlugView::getSize` 调的是同一个函数）。
+    hifishifter_plugin::editor::pump_host_thread();
     hifishifter_plugin_core::guard_ffi(false, || {
         if width.is_null() || height.is_null() {
             return false;
@@ -264,7 +266,16 @@ unsafe extern "C" fn get_size(p: *const clap_plugin_t, width: *mut u32, height: 
 }
 
 unsafe extern "C" fn can_resize(_p: *const clap_plugin_t) -> bool {
-    hifishifter_plugin_core::guard_ffi(false, || true)
+    // 同 `get_size`：宿主尺寸协商期间也会走这里。
+    hifishifter_plugin::editor::pump_host_thread();
+    hifishifter_plugin_core::guard_ffi(false, || {
+        // 【临时探针】与 VST3 的 `IPlugView::canResize` 同名同义：声明"不可缩放"后
+        // 宿主完全不进尺寸协商回路 —— 用来判定"打开 FX 窗口就冻结"是否来自这条回路。
+        if std::env::var("HIFISHIFTER_FIXED_SIZE").is_ok_and(|value| value.trim() == "1") {
+            return false;
+        }
+        true
+    })
 }
 
 unsafe extern "C" fn adjust_size(_p: *const clap_plugin_t, w: *mut u32, h: *mut u32) -> bool {
@@ -286,6 +297,8 @@ unsafe extern "C" fn adjust_size(_p: *const clap_plugin_t, w: *mut u32, h: *mut 
 }
 
 unsafe extern "C" fn set_size(p: *const clap_plugin_t, w: u32, h: u32) -> bool {
+    // 同 `get_size`：尺寸协商是宿主 UI 线程上最频繁的进入点。
+    hifishifter_plugin::editor::pump_host_thread();
     hifishifter_plugin_core::guard_ffi(false, || {
         let (width, height) = clamp_editor_size(w, h);
         let view = with_slot(p, |slot| {
@@ -303,6 +316,8 @@ unsafe extern "C" fn set_size(p: *const clap_plugin_t, w: u32, h: u32) -> bool {
 }
 
 unsafe extern "C" fn set_parent(p: *const clap_plugin_t, window: *const clap_window_t) -> bool {
+    // 同 `get_size`：宿主把父窗口交给我们时，它就在自己的 UI 线程上。
+    hifishifter_plugin::editor::pump_host_thread();
     hifishifter_plugin_core::guard_ffi(false, || {
         let Some(window) = (unsafe { window.as_ref() }) else {
             return false;
@@ -399,7 +414,12 @@ mod tests {
             MIN_EDITOR_SIZE,
             "below the floor the window must not collapse"
         );
-        assert_eq!(clamp_editor_size(9000, 9000), MAX_EDITOR_SIZE);
+        assert_eq!(
+            clamp_editor_size(9000, 9000),
+            (9000, 9000),
+            "共享上限（16384）之内的尺寸必须原样放行 —— 那是 VST3 的同一条判据"
+        );
+        assert_eq!(clamp_editor_size(20_000, 20_000), MAX_EDITOR_SIZE);
         let (mut w, mut h) = (1280_u32, 720_u32);
         assert!(unsafe { adjust_size(std::ptr::null(), &mut w, &mut h) });
         assert_eq!((w, h), (1280, 720), "the requested size must pass through");

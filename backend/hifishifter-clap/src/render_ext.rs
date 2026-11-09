@@ -31,7 +31,24 @@ unsafe extern "C" fn set(plugin: *const clap_plugin_t, mode: i32) -> bool {
         let Some(instance) = (unsafe { crate::instance(plugin) }) else {
             return false;
         };
-        instance.audio.set_render_mode(mode)
+        if !instance.audio.set_render_mode(mode) {
+            return false;
+        }
+        // 【为什么这里要重跑 setup 序列】`clap.render.set` 是 CLAP 里"宿主声明这一段
+        // 要离线渲染"的唯一时刻，等价于 VST3 的 `setupProcessing(mode=2)`。离线导出
+        // 只有**一次**机会：不在第一块之前把带用户曲线的结果准备好，产物里就是静音
+        // （VST3 的 setupProcessing 为此同步等待准备完成）。此前这里只记了一个布尔量，
+        // 于是 CLAP 的 bounce 从头到尾没有准备过。
+        let rate = instance.audio.sample_rate();
+        if rate > 0.0 {
+            if let Err(error) = instance
+                .owner
+                .setup_processing(rate, instance.audio.is_offline())
+            {
+                log::warn!("[clap] offline preparation at render.set failed: {error}");
+            }
+        }
+        true
     })
 }
 

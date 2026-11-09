@@ -65,25 +65,27 @@ pub unsafe fn process_audio(
             }
         }
     }
-    // 进程形态：CLAP 只有“离线 render 模式”这一个权威来源（见 AudioState::is_offline）。
+    // 进程形态：CLAP 只有"离线 render 模式"这一个权威来源（见 AudioState::is_offline）。
     let mode = if frame.offline { 2 } else { 0 };
     let stream = if frame.offline {
         hifishifter_capture::recorder::ProcessStream::Offline
     } else {
         hifishifter_capture::recorder::ProcessStream::Realtime
     };
+    // 【为什么宽度要在翻译成块之前判】64-bit 平面读不了：`data32` 为空 ⇒ 中立块只有
+    // 零个声道。那正是"静音但在场"的降级，而精度必须先记账 —— 界面据此说清"为什么
+    // 是静音"（`CaptureStore::unsupported_precision`）。与 VST3 的
+    // `silence_unsupported_sample_size` 是同一条取舍。
+    let precision = crate::audio::sample_precision(process);
+    if precision != 0 {
+        instance.owner.begin_process_block(precision);
+        // SAFETY: 宿主在本次回调里给出的有效记录；非空 data64 平面至少含 frames 帧。
+        unsafe { crate::audio::silence_f64_outputs(process) };
+        return RenderOutcome::Done;
+    }
     let mut silence = 0_u64;
-    // SAFETY: 宿主在本次回调里给出的有效记录；平面至少含 frames_count 帧。
-    let Some(mut block) = (unsafe { crate::audio::block_from_clap(process, mode, &mut silence) })
-    else {
-        // 没有可写输出平面（或 F64 宽度）：交给同一条翻译的保守分支 —— 它把 F64
-        // 输出清零并如实返回成功，与 VST3 的 kSample64 降级同口径。
-        return if unsafe { crate::audio::process_block(process) } {
-            RenderOutcome::Done
-        } else {
-            RenderOutcome::Invalid
-        };
-    };
+    // SAFETY: 宿主在本次回调里给出的有效记录；非空平面至少含 frames_count 帧。
+    let mut block = unsafe { crate::audio::block_from_clap(process, mode, &mut silence) };
     // SAFETY: 与 block_from_clap 同一份宿主缓冲，且只在本次回调内使用。
-    unsafe { instance.owner.process_audio(&mut block, context, stream, None) }
+    unsafe { instance.owner.process_audio(&mut block, context, stream, precision) }
 }

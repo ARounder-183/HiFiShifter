@@ -67,6 +67,8 @@ mod audio_abi;
 
 pub use audio_abi::BufferError;
 pub mod audio_block;
+/// 音频回调的跨格式读数（panic / 慢块 / 写满审计开关）。
+pub mod audio_stats;
 mod capture;
 pub use hifishifter_plugin_core::component_state;
 /// 两种格式共用的**唯一**文件日志实现；格式外壳在自己的模块入口调 `init()`。
@@ -308,8 +310,28 @@ fn module_initialize() -> bool {
 
 /// 模块级卸载：宿主在最后一次释放模块前的清理点。
 fn module_shutdown() -> bool {
-    // 先收尾 GUI（它会写诊断行），等慢车道清空，再把还攒在缓冲里的日志落盘。
-    let result = crate::guard_ffi(false, || {
+    // 先收尾 GUI 与慢车道（共享实现），再把还攒在缓冲里的日志落盘。
+    let result = shutdown_module();
+    diagnostics::flush_pending();
+    result
+}
+
+/// 模块卸载的**唯一**实现：两个格式的模块入口都调它。
+///
+/// 【为什么卸载不能只拆窗口】宿主在最后一次释放模块前的清理点上有三类实体要收：
+///   * 编辑器（窗口类、WebView2 回调、私有 GTK 线程）—— `editor::shutdown`；
+///   * 慢车道任务（以分钟计）—— 它们持有本模块的代码页，卸载后下一次执行就是野跳转；
+///   * 日志缓冲（宽限期内攒着的行）—— 由调用方在本函数返回后落盘。
+///
+/// 此前只有 VST3 的 `ExitDll` 做了前两件，CLAP 的 `entry_deinit` 只拆了编辑器：
+/// 同一个宿主动作（卸载模块）在两种格式下留下不同的残留，而残留的形态恰好是
+/// "卸载之后崩溃"，最难归因。
+///
+/// 【返回值为什么是"编辑器是否已全部关闭"】它是 VST3 `ExitDll` 的历史返回值，
+/// CLAP 不需要它，但两个格式必须给出同一个结论（诊断行也据此判断能否正常卸载）。
+pub fn shutdown_module() -> bool {
+    // 先收尾 GUI（它会写诊断行），等慢车道清空。
+    crate::guard_ffi(false, || {
         let editors = editor::shutdown();
         // 【为什么是限时】慢车道任务以分钟计；等不满就放弃。模块已被
         // `editor::pin_module`（慢车道任务开始 / 编辑器附着时）钉住，
@@ -318,13 +340,11 @@ fn module_shutdown() -> bool {
         let lane_idle = editor::slow_lane::wait_until_idle(std::time::Duration::from_secs(2));
         if !lane_idle {
             crate::gui_log_line(
-                "ExitDll: slow lane still busy; the module stays resident until it finishes",
+                "module shutdown: slow lane still busy; the module stays resident until it finishes",
             );
         }
         editors
-    });
-    diagnostics::flush_pending();
-    result
+    })
 }
 
 /// VST3 模块初始化入口（Windows：REAPER 在 `LoadLibrary` 之后显式调用）。

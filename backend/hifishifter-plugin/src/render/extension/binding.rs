@@ -117,7 +117,7 @@ impl ExtensionOwner {
             .fetch_add(1, Ordering::Relaxed);
     }
     /// 记录"持久化状态合并失败"。
-    pub(crate) fn note_restore_failed(&self, error: &str) {
+    pub fn note_restore_failed(&self, error: &str) {
         self.restore_status.store(RESTORE_FAILED, Ordering::Release);
         *self.restore_error.lock_or_recover() = Some(error.to_owned());
         *self.restore_pending_reason.lock_or_recover() = None;
@@ -130,8 +130,8 @@ impl ExtensionOwner {
             self.restore_applied_generation.load(Ordering::Relaxed),
         )
     }
-    /// 恢复状态的语言无关名（前端按它查 catalog）。
-    pub(crate) fn restore_status_name(&self) -> &'static str {
+    /// 恢复状态的语言无关名（前端按它查 catalog；外壳的集成测试据此断言失败可见）。
+    pub fn restore_status_name(&self) -> &'static str {
         match self.restore_status.load(Ordering::Acquire) {
             RESTORE_APPLIED => "applied",
             RESTORE_PENDING => "pending",

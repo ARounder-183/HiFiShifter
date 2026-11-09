@@ -85,10 +85,11 @@ unsafe extern "C" fn entry_init(plugin_path: *const c_char) -> bool {
     // 最早那几行就会挂到默认的 VST3 文件名下 —— 那正是此前两种格式日志混在一起的成因。
     hifishifter_plugin::set_log_tag("clap");
     hifishifter_plugin_core::guard_ffi(false, || {
-        // 【为什么在共享层装日志器】文件日志只有一份实现（格式、会话头、轮转、级别、
-        // panic hook）。CLAP 外壳只补一条可选的宿主转发 sink（见 log_host::install）。
-        // 必须早于模块路径解析：解析本身可能写日志。
-        hifishifter_plugin::diagnostics::init();
+        // 【为什么资源根与进程状态排在日志初始化之前】`initialize_process_state` 会跑
+        // 用户目录的一次性布局迁移，而迁移的判据是"新旧根同时存在就绝不合并"；
+        // 日志初始化会先创建 `<本地根>\logs`，先装日志就等于把旧目录的日志永远留在原地。
+        // VST3 的入口顺序（`ensure_layout_v2_once` → `diagnostics::init`）正是这个顺序，
+        // CLAP 此前是反的 —— 两个格式在同一个宿主动作上得到不同的用户目录结果。
         if !plugin_path.is_null() {
             if let Ok(path) = unsafe { CStr::from_ptr(plugin_path) }.to_str() {
                 let _ = MODULE_PATH.set(path.to_owned());
@@ -96,23 +97,32 @@ unsafe extern "C" fn entry_init(plugin_path: *const c_char) -> bool {
             }
         }
         resource_root::set_layout(ResourceLayout::for_clap()).ok();
+        hifishifter_plugin::initialize_process_state();
+        // 【为什么在共享层装日志器】文件日志只有一份实现（格式、会话头、轮转、级别、
+        // panic hook）。CLAP 外壳只补一条可选的宿主转发 sink（见 log_host::install）。
+        hifishifter_plugin::diagnostics::init();
         // 【为什么不再自己注册空钩子】`set_layout_migration_hook` 是进程级 OnceLock：
         // 空钩子会挡住 VST3 真正的那一份，而 CLAP-only 用户则永远不迁移。
-        // 现在两个外壳登记同一个函数指针（见 `hifishifter_plugin::initialize_process_state`）。
-        hifishifter_plugin::initialize_process_state();
+        // 现在两个外壳登记同一个函数指针（见 `hifishifter_plugin::initialize_process_state`，
+        // 它已在上面资源根就位之后调用）。
         // 模型登记与 VST3 的模块入口同一步：早调幂等，晚调会让"没开过窗口就导出"的
         // 会话先撞上 models unavailable。
         hifishifter_plugin::initialize_resources();
+
+        // 【为什么也在这里建 ARA 运行时】VST3 的模块入口（`GetPluginFactory`）会建它；
+        // 迟建只会把失败推后到第一次 `get_factory`，而那时宿主已经在等一张表。
+        let _ = hifishifter_plugin::runtime::runtime();
         true
     })
 }
 
 unsafe extern "C" fn entry_deinit() {
     hifishifter_plugin_core::guard_ffi((), || {
-        // 【为什么必须收尾编辑器】窗口类与 WebView2 回调都指向本模块的代码页；宿主随后
-        // 的 `FreeLibrary` 若真的卸载它，下一条窗口消息就是野跳转。与 VST3 的 `ExitDll`
-        // 调的是同一个函数（它还负责注销窗口类）。
-        if !hifishifter_plugin::editor::shutdown() {
+        // 【为什么调共享的卸载序列】窗口类与 WebView2 回调都指向本模块的代码页；宿主
+        // 随后的 `FreeLibrary` 若真的卸载它，下一条窗口消息就是野跳转。共享序列还负责
+        // 等慢车道任务清空 —— 它们同样持有本模块的代码页。VST3 的 `ExitDll` 调的是
+        // 同一个函数。
+        if !hifishifter_plugin::shutdown_module() {
             log::warn!("[clap] module deinit with live editor windows; the module stays resident");
         }
         crate::log_host::clear();
@@ -203,6 +213,12 @@ unsafe extern "C" fn create_plugin(
         let requested = unsafe { CStr::from_ptr(plugin_id) }
             .to_string_lossy()
             .into_owned();
+        // 【为什么宿主身份要在第一行日志之前解析】日志文件名里的宿主段由它决定；
+        // 晚一步解析，最早那几行会写进 `plugin-clap-unknown.log`，随后日志系统
+        // 换名重建 —— 一次会话留下两个文件、两个会话头。VST3 在组件构造里就解析，
+        // 这里与它对齐（判据本身是共享的 `resolve_host_identity`）。
+        hifishifter_plugin::resolve_host_identity();
+
         // 【为什么每个实例建一次就记一行】"宿主为一份 ARA 文档建了几个实例"是判断
         // 宿主 ARA 实现是否完整的**唯一**外部读数：ARACLAP.h 规定一个 clap_plugin
         // 实例只承担一组角色，多角色必须多实例。宿主只建一个却要求多个角色时，
@@ -326,6 +342,17 @@ unsafe extern "C" fn plugin_init(plugin: *const clap_plugin_t) -> bool {
         hifishifter_plugin::resolve_host_identity();
         // SAFETY: 本函数就是宿主调用的 plugin.init，plugin 是本实例的记录。
         unsafe { crate::ara::attach(plugin) };
+        // 【为什么节拍挂在 init 而不是 activate】它是"编辑器命令要回到宿主主线程"的
+        // 唯一驱动（`host::marshal` 的泵），而编辑器可以在**未激活**的实例上打开
+        // （宿主停播时打开 FX 窗口是常态）。VST3 的 REAPER 定时器同样挂在宿主适配器
+        // 建立时，而不是 `setActive` 时。
+        //
+        // 【没有 timer-support 时】改走 `request_callback` 自挂：先要一次，之后每次
+        // `on_main_thread` 结束再要下一次。没有这一条，那种宿主上 `on_main_thread`
+        // 永远不会被调用（宿主只在被请求后回调）。
+        if !unsafe { crate::timer::acquire(plugin) } {
+            unsafe { crate::timer::request_main_thread(instance.host) };
+        }
         log::info!("[clap] instance initialized");
         true
     })
@@ -347,6 +374,7 @@ unsafe extern "C" fn plugin_destroy(plugin: *const clap_plugin_t) {
                 // 窗口类留在已卸载的模块里，下一条窗口消息就是野跳转。
                 unsafe { crate::gui::forget(plugin) };
                 unsafe { crate::timer::release(plugin) };
+
                 // 组件终止：停掉会话 actor 与准备 worker（它们持有指向 owner 的强引用，
                 // 不先关闭邮箱线程就不会退出）。与 VST3 的 terminate 同一个方法。
                 instance.owner.component_terminated();
@@ -378,7 +406,23 @@ unsafe extern "C" fn plugin_activate(
             instance.active.store(false, Ordering::Release);
             return false;
         }
+        // 【为什么接受域与 VST3 完全相同】它是共享常量（SUPPORTED_SAMPLE_RATE）：
+        // 同一个工程在两种格式下必须得到同一个结论。此前 CLAP 只查"有限且大于 0"，
+        // 于是 4 kHz / 400 kHz 在 CLAP 里被接受、在 VST3 里被拒绝。
+        if !hifishifter_plugin::render::extension::SUPPORTED_SAMPLE_RATE.contains(&sample_rate) {
+            log::warn!(
+                "[clap] activate refused: sampleRate={sample_rate} is outside {}..={}",
+                hifishifter_plugin::render::extension::SUPPORTED_SAMPLE_RATE.start(),
+                hifishifter_plugin::render::extension::SUPPORTED_SAMPLE_RATE.end()
+            );
+            instance.active.store(false, Ordering::Release);
+            return false;
+        }
         instance.audio.set_sample_rate(sample_rate);
+        // 【为什么单块上限也要记】它是诊断包里的 maxSamplesPerBlock（"宿主声明的
+        // 块上限"），VST3 在 setupProcessing 里记同一个读数。不记的话 CLAP 会话里
+        // 它恒为 0，排查"块长异常"时读不到宿主到底声明了什么。
+        instance.owner.note_max_samples_per_block(max as i32);
         // 采样率、捕获渲染基础设施与离线意图：与 VST3 的 setupProcessing 同一条共享
         // 序列（见 `ExtensionOwner::setup_processing`）。CLAP 没有单独的 setup 回调，
         // 所以这三件事都由 activate 承担。
@@ -391,9 +435,7 @@ unsafe extern "C" fn plugin_activate(
         // 激活序列（恢复挂起预览 / 清上一遍几何 / 主动重同步）：与 VST3 的
         // setActive(true) 是同一个方法。ARA 的绑定窗口也在这里关闭。
         instance.owner.component_activated();
-        // 宿主侧节拍：把投递泵与宿主时钟/Undo/setDirty 收口挂到 `clap.timer-support` 上。
-        // 与 VST3 挂在 REAPER `plugin_register("timer")` 上的是**同一个** tick 实现。
-        unsafe { crate::timer::acquire(plugin) };
+        // 宿主侧节拍已在 `plugin.init` 挂上（见那里的说明）；激活不需要再动它。
         log::info!("[clap] activated at {sample_rate} Hz, block {min}..={max}");
         true
     })
@@ -412,7 +454,8 @@ unsafe extern "C" fn plugin_deactivate(plugin: *const clap_plugin_t) {
             return;
         }
         instance.audio.set_render_mode(CLAP_RENDER_REALTIME);
-        unsafe { crate::timer::release(plugin) };
+        // 节拍与实例同生共死（`plugin.destroy` 才注销）：宿主可能只是暂时失活，
+        // 而编辑器窗口仍然开着。
         instance.owner.component_deactivated();
     })
 }
@@ -454,7 +497,38 @@ unsafe extern "C" fn reset_processing(plugin: *const clap_plugin_t) {
     })
 }
 
+/// 宿主音频回调：**只**做 panic 遏制、慢块计量与结果码映射。
+///
+/// 【为什么用 `catch_unwind` 而不是 `guard_ffi`】音频回调要把"被拦下的 panic"计进
+/// 共享读数（`audio_stats`，VST3 的 `audio_process` 写的是同一组原子量）。`guard_ffi`
+/// 内部自己 catch，外面再包一层就永远看不到 panic —— 计数恒为 0。FFI 门禁接受
+/// `catch_unwind`（见 scripts/checks/check-ffi-guards.py 的 GUARD_MARKERS）。
 unsafe extern "C" fn plugin_process(
+    plugin: *const clap_plugin_t,
+    process: *const clap_process_t,
+) -> i32 {
+    let started = std::time::Instant::now();
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        plugin_process_body(plugin, process)
+    }));
+    hifishifter_plugin::audio_stats::note_block_elapsed(started.elapsed());
+    match outcome {
+        Ok(code) => code,
+        Err(payload) => {
+            hifishifter_plugin::audio_stats::note_panic();
+            let message = payload
+                .downcast_ref::<&str>()
+                .map(|text| (*text).to_owned())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown panic payload".to_owned());
+            log::error!("[clap] audio callback panicked: {message}");
+            // CLAP 的语义：返回错误 ⇒ 宿主必须丢弃本块输出。
+            CLAP_PROCESS_ERROR
+        }
+    }
+}
+
+unsafe fn plugin_process_body(
     plugin: *const clap_plugin_t,
     process: *const clap_process_t,
 ) -> i32 {
@@ -489,9 +563,13 @@ unsafe extern "C" fn plugin_process(
             match unsafe { crate::process::process_audio(plugin, process) } {
                 // 宿主给的数据不可用 / 形状不受支持：如实上报。
                 RenderOutcome::Invalid | RenderOutcome::Unsupported => CLAP_PROCESS_ERROR,
-                // 写满整块 / 清零 / 直通：本块已按语义处理完。离线流上快照还没就绪
-                // （`NotReady`）时输出是静音，但那不是宿主错误。
-                RenderOutcome::Done | RenderOutcome::NotReady => CLAP_PROCESS_CONTINUE,
+                // 写满整块 / 清零 / 直通：本块已按语义处理完。
+                RenderOutcome::Done => CLAP_PROCESS_CONTINUE,
+                // 【为什么 NotReady 也算失败】它只出现在离线流上（快照还没就绪）。
+                // VST3 对同一结局回 `kResultFalse`，让宿主知道这一帧不可用；CLAP 的
+                // 错误码语义正是"输出必须丢弃"。回成功会让宿主把静音**当成产物**
+                // 烘焙进去 —— 那是数据正确性失败，不是可诊断的降级。
+                RenderOutcome::NotReady => CLAP_PROCESS_ERROR,
             }
         })();
         instance.in_process.store(false, Ordering::Release);
@@ -524,11 +602,19 @@ unsafe extern "C" fn plugin_get_extension(
     })
 }
 
-unsafe extern "C" fn on_main_thread(_plugin: *const clap_plugin_t) {
+unsafe extern "C" fn on_main_thread(plugin: *const clap_plugin_t) {
     hifishifter_plugin_core::guard_ffi((), || {
         // 宿主按 `clap_host.request_callback` 把控制权交回主线程：这正是"投递泵 +
         // 宿主侧周期工作"要的那条线程。内容与 VST3 的宿主节拍**同一份实现**。
         hifishifter_plugin::editor::host_main_thread_tick();
+        // 【为什么这里要再请求一次】没有 `clap.timer-support` 的宿主不会自己再来；
+        // 每次回调结束时补一次请求，就把"宿主主线程上的周期工作"接了起来。有 timer
+        // 时不再请求（那条路更稳定，也不需要每次重新排队）。
+        if let Some(instance) = unsafe { crate::instance(plugin) } {
+            if instance.timer_id.load(Ordering::Acquire) == u32::MAX {
+                unsafe { crate::timer::request_main_thread(instance.host) };
+            }
+        }
     })
 }
 
@@ -1435,6 +1521,212 @@ mod tests {
             stop_processing(ptr);
             plugin_deactivate(ptr);
         }
+        release(&mut plugin, instance);
+    }
+
+    /// **`clap.render.set(OFFLINE)` 必须真的走到共享 setup 序列。**
+    ///
+    /// 【为什么这条必须存在】`clap.render.set` 是 CLAP 里"宿主声明这一段要离线渲染"
+    /// 的唯一时刻，等价于 VST3 的 `setupProcessing(mode=2)`。它此前只记了一个布尔量：
+    /// 进程模式恒为 0 ⇒ `offline_pass_active` 恒假 ⇒ 离线准备不要求用户曲线 ⇒
+    /// bounce 产物里是没处理的声音（正是 `capture_render_input` 文档里那条失败）。
+    #[test]
+    fn an_offline_render_mode_runs_the_shared_setup_sequence() {
+        let (mut plugin, instance) = fixture();
+        let ptr: *const clap_plugin_t = &raw const plugin;
+        let host = crate::abi::clap_host_t {
+            clap_version: CLAP_VERSION,
+            host_data: std::ptr::null_mut(),
+            name: c"probe".as_ptr(),
+            vendor: c"probe".as_ptr(),
+            url: c"probe".as_ptr(),
+            version: c"1".as_ptr(),
+            get_extension: None,
+            request_restart: None,
+            request_process: None,
+            request_callback: None,
+        };
+        unsafe { (*instance).host = &raw const host };
+        assert!(unsafe { plugin_init(ptr) });
+        assert!(unsafe { plugin_activate(ptr, 48_000.0, 1, 512) });
+        let owner = unsafe { &(*instance).owner };
+        assert_eq!(owner.setup_process_mode(), 0, "实时激活必须是实时模式");
+        // SAFETY: 本实例已 init + activate；`clap.render.set` 允许在任何时候调用。
+        let set = RENDER_EXT.set.expect("clap.render.set must be exported");
+        assert!(unsafe { set(ptr, crate::abi::CLAP_RENDER_OFFLINE) });
+        assert_eq!(
+            owner.setup_process_mode(),
+            2,
+            "离线模式必须落进共享的 setup 序列（与 VST3 的 setupProcessing(mode=2) 同一条）"
+        );
+        assert!(owner.capture().project_rate() > 0.0, "采样率必须由同一次 setup 落定");
+        unsafe {
+            stop_processing(ptr);
+            plugin_deactivate(ptr);
+        }
+        release(&mut plugin, instance);
+    }
+
+    /// **64-bit 块必须被记成"不支持的精度"。**
+    ///
+    /// 【为什么这条必须存在】"静音"在界面上必须能说清原因（`CaptureStore::unsupported_precision`）。
+    /// VST3 在 process 入口记这个读数，CLAP 此前从不记 —— 于是 CLAP 会话里
+    /// 那个位永远是"32-bit"，用户只看到"没有声音"而没有任何原因。
+    #[test]
+    fn a_sixty_four_bit_block_is_recorded_as_unsupported_precision() {
+        let (mut plugin, instance) = fixture();
+        let ptr: *const clap_plugin_t = &raw const plugin;
+        let host = crate::abi::clap_host_t {
+            clap_version: CLAP_VERSION,
+            host_data: std::ptr::null_mut(),
+            name: c"probe".as_ptr(),
+            vendor: c"probe".as_ptr(),
+            url: c"probe".as_ptr(),
+            version: c"1".as_ptr(),
+            get_extension: None,
+            request_restart: None,
+            request_process: None,
+            request_callback: None,
+        };
+        unsafe { (*instance).host = &raw const host };
+        assert!(unsafe { plugin_init(ptr) });
+        assert!(unsafe { plugin_activate(ptr, 48_000.0, 1, 512) });
+        assert!(unsafe { start_processing(ptr) });
+        let mut left = vec![1.0_f64; 4];
+        let mut planes = [left.as_mut_ptr()];
+        let buffer = crate::abi::clap_audio_buffer_t {
+            data32: std::ptr::null_mut(),
+            data64: planes.as_mut_ptr(),
+            channel_count: 1,
+            latency: 0,
+            constant_mask: 0,
+        };
+        let process = clap_process_t {
+            steady_time: 0,
+            frames_count: 4,
+            transport: std::ptr::null(),
+            audio_inputs: &buffer,
+            audio_outputs: &buffer as *const _ as *mut _,
+            audio_inputs_count: 1,
+            audio_outputs_count: 1,
+            in_events: std::ptr::null(),
+            out_events: std::ptr::null(),
+        };
+        assert_eq!(
+            unsafe { plugin_process(ptr, &raw const process) },
+            CLAP_PROCESS_CONTINUE,
+            "64-bit 宽度必须静音但在场，而不是让宿主把插件踢出链路"
+        );
+        assert_eq!(left, vec![0.0; 4], "64-bit 输出必须被清零");
+        assert!(
+            unsafe { (*instance).owner.capture().precision_unsupported() },
+            "精度必须记账，否则界面无法解释为什么是静音"
+        );
+        unsafe {
+            stop_processing(ptr);
+            plugin_deactivate(ptr);
+        }
+        release(&mut plugin, instance);
+    }
+
+    /// **读不出来的存档必须把恢复状态标成失败。**
+    ///
+    /// 【为什么这条必须存在】`restore_state` 失败时只写一行日志，界面与诊断包都不知道
+    /// 参数没读回来 —— 用户看到的是"参数没了，日志里一行错都没有"。VST3 在
+    /// `IComponent::setState` 里调 `note_restore_failed`，CLAP 此前不调。
+    #[test]
+    fn an_unreadable_payload_marks_the_restore_as_failed() {
+        struct Cursor {
+            data: Vec<u8>,
+            at: usize,
+        }
+        unsafe extern "C" fn read_cursor(
+            stream: *const crate::state::clap_istream_t,
+            buffer: *mut std::ffi::c_void,
+            size: u64,
+        ) -> i64 {
+            // SAFETY: ctx 由调用方指向本帧内的 Cursor。
+            let cursor = unsafe { &mut *(*stream).ctx.cast::<Cursor>() };
+            let remaining = cursor.data.len().saturating_sub(cursor.at);
+            if remaining == 0 {
+                return 0;
+            }
+            let count = (size as usize).min(remaining);
+            // SAFETY: buffer 至少可写 count 字节（宿主契约）。
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    cursor.data.as_ptr().add(cursor.at),
+                    buffer.cast::<u8>(),
+                    count,
+                )
+            };
+            cursor.at += count;
+            count as i64
+        }
+        let (mut plugin, instance) = fixture();
+        let ptr: *const clap_plugin_t = &raw const plugin;
+        let mut cursor = Cursor {
+            data: b"this is not a component state".to_vec(),
+            at: 0,
+        };
+        let stream = crate::state::clap_istream_t {
+            ctx: (&raw mut cursor).cast(),
+            read: Some(read_cursor),
+        };
+        assert!(
+            unsafe { crate::state::STATE_EXT.load.expect("clap.state.load")(ptr, &raw const stream) },
+            "读不出来的存档不能让宿主认为整份工程加载失败"
+        );
+        assert_eq!(
+            unsafe { (*instance).owner.restore_status_name() },
+            "failed",
+            "失败必须可见：界面据此报 restore_unresolved"
+        );
+        release(&mut plugin, instance);
+    }
+
+    /// **没有 `clap.timer-support` 的宿主必须被 `request_callback` 驱动起来。**
+    ///
+    /// 【为什么这条必须存在】`clap_plugin.on_main_thread` 只有被请求之后才会被宿主
+    /// 调用。没有 timer-support 时若一次都不请求，`host_main_thread_tick` 在那类宿主
+    /// 上一个环节都不跑 —— 而它们恰好是"播放头不跟随、工程不标脏"最容易出现的地方。
+    /// 这条用例钉住"先要一次、每次回调再要下一次"的自挂节拍。
+    #[test]
+    fn a_host_without_timer_support_is_driven_by_request_callback() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        unsafe extern "C" fn count(_host: *const clap_host_t) {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+        }
+        let (mut plugin, instance) = fixture();
+        let ptr: *const clap_plugin_t = &raw const plugin;
+        // `get_extension: None` ⇒ 宿主没有 clap.timer-support（也没有 clap.log）。
+        let host = crate::abi::clap_host_t {
+            clap_version: CLAP_VERSION,
+            host_data: std::ptr::null_mut(),
+            name: c"probe".as_ptr(),
+            vendor: c"probe".as_ptr(),
+            url: c"probe".as_ptr(),
+            version: c"1".as_ptr(),
+            get_extension: None,
+            request_restart: None,
+            request_process: None,
+            request_callback: Some(count),
+        };
+        unsafe { (*instance).host = &raw const host };
+        let before = CALLS.load(Ordering::SeqCst);
+        assert!(unsafe { plugin_init(ptr) });
+        assert_eq!(
+            CALLS.load(Ordering::SeqCst),
+            before + 1,
+            "没有 timer-support 时必须先向宿主要一次主线程回调"
+        );
+        unsafe { on_main_thread(ptr) };
+        assert_eq!(
+            CALLS.load(Ordering::SeqCst),
+            before + 2,
+            "每次 on_main_thread 结束都要再要一次，否则节拍只来一次"
+        );
         release(&mut plugin, instance);
     }
 }

@@ -107,18 +107,3 @@ fn invalid_rates_and_negative_positions_are_rejected() {
         ..frame()
     }));
 }
-
-/// state 契约的哑实现：验证 trait 形状本身可跨格式使用。
-struct Blob(Vec<u8>);
-impl FormatState for Blob {
-    fn load(&self, _bytes: &[u8]) -> Result<(), String> {
-        Ok(())
-    }
-    fn save(&self) -> Result<Vec<u8>, String> {
-        Ok(self.0.clone())
-    }
-}
-#[test]
-fn format_state_round_trips_an_opaque_blob() {
-    assert_eq!(Blob(vec![1, 2, 3]).save().unwrap(), vec![1, 2, 3]);
-}
