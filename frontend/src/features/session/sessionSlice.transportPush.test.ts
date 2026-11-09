@@ -3,7 +3,7 @@
 import { afterEach, expect, test } from "vitest";
 import reducer from "./sessionSlice";
 import { transportPushed, type TransportSample } from "./sessionSlice/extraReducers/transport";
-import { syncPlaybackState } from "./thunks/transportThunks";
+import { stopAudioPlayback, syncPlaybackState } from "./thunks/transportThunks";
 
 const PLUGIN = { version: 1 as const, viewId: "transport-push", transportControl: true };
 
@@ -150,6 +150,17 @@ test("★ 严格更旧的序号仍然被丢弃（乱序防护没有被放宽）"
     const older = reducer(playing, transportPushed(sample({ position_sec: 12, sample_seq: 4 })));
     expect(older.playheadSec).toBe(30);
     expect(older.runtime.isPlaying).toBe(true);
+});
+
+test("★ 停止 / 暂停命令 pending 立即清掉视觉推进位", () => {
+    const base = reducer(undefined, { type: "@@INIT" });
+    const playing = reducer(base, transportPushed(sample({ position_sec: 1 })));
+    expect(playing.runtime.isPlaying).toBe(true);
+    expect(playing.runtime.positionAdvancing).toBe(true);
+
+    const stopping = reducer(playing, stopAudioPlayback.pending("test-stop", undefined));
+    expect(stopping.runtime.isPlaying).toBe(false);
+    expect(stopping.runtime.positionAdvancing).toBe(false);
 });
 
 test("轮询与推送共用同一份语义：同一条采样经两条通道得到同一个状态", () => {

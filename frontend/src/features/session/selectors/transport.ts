@@ -60,7 +60,9 @@ export const isTransportAdvancing = (runtime: TransportAdvanceInput): boolean =>
     ) {
         return runtime.isPlaying && fresh;
     }
-    // 【kPlaying 不是前进判据】FL Studio 停播时仍置 kPlaying=1，位置钉住；如果
-    // 这里只认 isPlaying，视觉层会按 1x 无限前漂。前进必须由两次采样证明。
-    return runtime.positionAdvancing && fresh;
+    // 【kPlaying 不是前进判据】FL Studio 停播时仍置 kPlaying=1，位置钉住；
+    // 所以仍然要求 positionAdvancing。但 isPlaying 是**必要门**：
+    // stopAudioPlayback.pending 会在用户按下暂停/停止的同一拍把 isPlaying 置 false，
+    // 若这里不要求它，旧的 positionAdvancing 会让视觉播放头继续外推一个 IPC 周期。
+    return runtime.isPlaying && runtime.positionAdvancing && fresh;
 };

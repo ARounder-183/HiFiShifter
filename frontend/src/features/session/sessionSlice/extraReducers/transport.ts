@@ -121,6 +121,11 @@ export function registerTransport(builder: ActionReducerMapBuilder<SessionState>
             // Pause UI immediately on user stop/pause command; backend sync will
             // confirm the final transport state shortly after.
             state.runtime.isPlaying = false;
+            // 【为什么必须在这里清】用户按下暂停/停止的同一拍就要冻结视觉播放头。
+            // 只清 isPlaying 不够：宿主分支的 isTransportAdvancing 还看 positionAdvancing，
+            // 而它要等下一条轮询采样才会翻 false —— 中间那一个 IPC 周期就是
+            // “光标还要往前跑一段才停”的来源。
+            state.runtime.positionAdvancing = false;
             state.runtime.playbackTarget = null;
             // 停止/暂停操作开始即交接播放头所有权：在途播放轮询（采样于
             // 本次停止之前、携带旧播放位置）的迟到响应按乱序丢弃 —— 否则
