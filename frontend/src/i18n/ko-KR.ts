@@ -2256,7 +2256,7 @@ export const koKR = {
     installer_publisher: "ARounder",
     installer_welcome_title: "HiFiShifter 설치를 시작합니다",
     installer_welcome_text:
-        "HiFiShifter 앱과 VST3/ARA·CLAP 플러그인을 설치합니다.\n계속하기 전에 HiFiShifter와 플러그인을 사용 중인 DAW를 종료하세요.\nNSF-HiFiGAN 가중치는 CC BY-NC-SA 4.0으로 비상업적 용도로만 사용할 수 있습니다. 자세한 내용은 LICENSE 참조.",
+        "HiFiShifter 앱과 VST3·CLAP 플러그인을 설치합니다.\n계속하기 전에 HiFiShifter와 플러그인을 사용 중인 DAW를 종료하세요.\nNSF-HiFiGAN 가중치는 CC BY-NC-SA 4.0으로 비상업적 용도로만 사용할 수 있습니다. 자세한 내용은 LICENSE 참조.",
     installer_components_top: "용도별로 묶었습니다. 커서를 올리면 설명을 표시합니다.",
     installer_app_dir_text: "앱을 설치할 폴더를 선택하세요.",
     installer_dir_text: "DAW가 검사하는 VST3 폴더를 선택하세요.",
@@ -2271,8 +2271,8 @@ export const koKR = {
     installer_group_app: "애플리케이션",
     installer_group_plugins: "DAW 플러그인",
     installer_component_app: "독립 실행형 앱",
-    installer_component_vst3: "VST3 / ARA",
-    installer_component_clap: "CLAP (ARA + Capture)",
+    installer_component_vst3: "VST3",
+    installer_component_clap: "CLAP",
     installer_component_models: "모델 라이브러리",
     installer_component_shortcuts: "바로 가기",
     installer_component_file_assoc: "파일 연결(.hshp/.hsp)",
@@ -2283,7 +2283,7 @@ export const koKR = {
         "DAW에서 불러올 플러그인 형식입니다. 사용하는 DAW가 지원하는 형식을 선택하세요.",
     installer_desc_app: "독립 실행형 편집기입니다. 항상 설치됩니다.",
     installer_desc_vst3:
-        "VST3 / ARA 플러그인입니다. 다음 페이지에서 선택한 VST3 폴더에 설치됩니다.",
+        "VST3 플러그인(ARA + Capture)입니다. 다음 페이지에서 선택한 VST3 폴더에 설치됩니다.",
     installer_desc_clap: "CLAP 플러그인(ARA + Capture)입니다. 선택한 CLAP 폴더에 설치됩니다.",
     installer_desc_models: "본체와 모든 플러그인이 공유하는 모델 가중치입니다. 한 번만 저장됩니다.",
     installer_desc_shortcuts: "시작 메뉴 항목과 바탕 화면 아이콘을 추가합니다.",

@@ -2286,7 +2286,7 @@ export const jaJP = {
     installer_publisher: "ARounder",
     installer_welcome_title: "HiFiShifter セットアップへようこそ",
     installer_welcome_text:
-        "HiFiShifter 本体と VST3/ARA・CLAP プラグインをインストールします。\n続行する前に、HiFiShifter とプラグインを使用中の DAW を終了してください。\nNSF-HiFiGAN の重みは CC BY-NC-SA 4.0 で非商用のみ。詳細は LICENSE を参照。",
+        "HiFiShifter 本体と VST3・CLAP プラグインをインストールします。\n続行する前に、HiFiShifter とプラグインを使用中の DAW を終了してください。\nNSF-HiFiGAN の重みは CC BY-NC-SA 4.0 で非商用のみ。詳細は LICENSE を参照。",
     installer_components_top: "用途別にグループ化。カーソルを合わせると説明を表示。",
     installer_app_dir_text: "本体のインストール先フォルダーを選択。",
     installer_dir_text: "DAW がスキャンする VST3 フォルダーを選択。",
@@ -2301,8 +2301,8 @@ export const jaJP = {
     installer_group_app: "本体",
     installer_group_plugins: "DAW プラグイン",
     installer_component_app: "スタンドアロン版",
-    installer_component_vst3: "VST3 / ARA",
-    installer_component_clap: "CLAP（ARA + Capture）",
+    installer_component_vst3: "VST3",
+    installer_component_clap: "CLAP",
     installer_component_models: "モデルライブラリ",
     installer_component_shortcuts: "ショートカット",
     installer_component_file_assoc: "ファイル関連付け（.hshp/.hsp）",
@@ -2312,7 +2312,8 @@ export const jaJP = {
     installer_desc_group_plugins:
         "DAW で読み込むプラグイン形式。お使いの DAW が対応するものを選択。",
     installer_desc_app: "スタンドアロン版エディター。常にインストールされます。",
-    installer_desc_vst3: "VST3 / ARA プラグイン。次のページで選ぶ VST3 フォルダーにインストール。",
+    installer_desc_vst3:
+        "VST3 プラグイン（ARA + Capture）。次のページで選ぶ VST3 フォルダーにインストール。",
     installer_desc_clap: "CLAP プラグイン（ARA + Capture）。選んだ CLAP フォルダーにインストール。",
     installer_desc_models: "本体と全プラグインで共有するモデル重み。1 か所にのみ保存。",
     installer_desc_shortcuts: "スタートメニュー項目とデスクトップアイコンを追加。",

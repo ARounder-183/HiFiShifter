@@ -263,6 +263,7 @@ describe("文本风格", () => {
     test("英文标签不整体大写", () => {
         const ACRONYMS = new Set([
             "BPM",
+            "CLAP",
             "MIDI",
             "WAV",
             "MP3",

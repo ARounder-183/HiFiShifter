@@ -29,11 +29,11 @@ LangString HFS_COMPONENT_APP ${LANG_JAPANESE} "スタンドアロン版"
 LangString HFS_COMPONENT_APP ${LANG_KOREAN} "독립 실행형 앱"
 
 ; installer_component_clap
-LangString HFS_COMPONENT_CLAP ${LANG_ENGLISH} "CLAP (ARA + Capture)"
-LangString HFS_COMPONENT_CLAP ${LANG_SIMPCHINESE} "CLAP（ARA + Capture）"
-LangString HFS_COMPONENT_CLAP ${LANG_TRADCHINESE} "CLAP（ARA + Capture）"
-LangString HFS_COMPONENT_CLAP ${LANG_JAPANESE} "CLAP（ARA + Capture）"
-LangString HFS_COMPONENT_CLAP ${LANG_KOREAN} "CLAP (ARA + Capture)"
+LangString HFS_COMPONENT_CLAP ${LANG_ENGLISH} "CLAP"
+LangString HFS_COMPONENT_CLAP ${LANG_SIMPCHINESE} "CLAP"
+LangString HFS_COMPONENT_CLAP ${LANG_TRADCHINESE} "CLAP"
+LangString HFS_COMPONENT_CLAP ${LANG_JAPANESE} "CLAP"
+LangString HFS_COMPONENT_CLAP ${LANG_KOREAN} "CLAP"
 
 ; installer_component_file_assoc
 LangString HFS_COMPONENT_FILE_ASSOC ${LANG_ENGLISH} "File association (.hshp/.hsp)"
@@ -71,11 +71,11 @@ LangString HFS_COMPONENT_SHORTCUTS ${LANG_JAPANESE} "ショートカット"
 LangString HFS_COMPONENT_SHORTCUTS ${LANG_KOREAN} "바로 가기"
 
 ; installer_component_vst3
-LangString HFS_COMPONENT_VST3 ${LANG_ENGLISH} "VST3 / ARA"
-LangString HFS_COMPONENT_VST3 ${LANG_SIMPCHINESE} "VST3 / ARA"
-LangString HFS_COMPONENT_VST3 ${LANG_TRADCHINESE} "VST3 / ARA"
-LangString HFS_COMPONENT_VST3 ${LANG_JAPANESE} "VST3 / ARA"
-LangString HFS_COMPONENT_VST3 ${LANG_KOREAN} "VST3 / ARA"
+LangString HFS_COMPONENT_VST3 ${LANG_ENGLISH} "VST3"
+LangString HFS_COMPONENT_VST3 ${LANG_SIMPCHINESE} "VST3"
+LangString HFS_COMPONENT_VST3 ${LANG_TRADCHINESE} "VST3"
+LangString HFS_COMPONENT_VST3 ${LANG_JAPANESE} "VST3"
+LangString HFS_COMPONENT_VST3 ${LANG_KOREAN} "VST3"
 
 ; installer_components_top
 LangString HFS_COMPONENTS_TOP ${LANG_ENGLISH} "Grouped by purpose. Hover over an item for details."
@@ -134,11 +134,11 @@ LangString HFS_DESC_SHORTCUTS ${LANG_JAPANESE} "スタートメニュー項目�
 LangString HFS_DESC_SHORTCUTS ${LANG_KOREAN} "시작 메뉴 항목과 바탕 화면 아이콘을 추가합니다."
 
 ; installer_desc_vst3
-LangString HFS_DESC_VST3 ${LANG_ENGLISH} "VST3 / ARA plug-in. Installed into the VST3 folder you choose next."
-LangString HFS_DESC_VST3 ${LANG_SIMPCHINESE} "VST3 / ARA 插件，装入下一页所选的 VST3 文件夹。"
-LangString HFS_DESC_VST3 ${LANG_TRADCHINESE} "VST3 / ARA 外掛，裝入下一頁所選的 VST3 資料夾。"
-LangString HFS_DESC_VST3 ${LANG_JAPANESE} "VST3 / ARA プラグイン。次のページで選ぶ VST3 フォルダーにインストール。"
-LangString HFS_DESC_VST3 ${LANG_KOREAN} "VST3 / ARA 플러그인입니다. 다음 페이지에서 선택한 VST3 폴더에 설치됩니다."
+LangString HFS_DESC_VST3 ${LANG_ENGLISH} "VST3 plug-in (ARA + Capture). Installed into the VST3 folder you choose next."
+LangString HFS_DESC_VST3 ${LANG_SIMPCHINESE} "VST3 插件（ARA + Capture），装入下一页所选的 VST3 文件夹。"
+LangString HFS_DESC_VST3 ${LANG_TRADCHINESE} "VST3 外掛（ARA + Capture），裝入下一頁所選的 VST3 資料夾。"
+LangString HFS_DESC_VST3 ${LANG_JAPANESE} "VST3 プラグイン（ARA + Capture）。次のページで選ぶ VST3 フォルダーにインストール。"
+LangString HFS_DESC_VST3 ${LANG_KOREAN} "VST3 플러그인(ARA + Capture)입니다. 다음 페이지에서 선택한 VST3 폴더에 설치됩니다."
 
 ; installer_dir_text
 LangString HFS_DIR_TEXT ${LANG_ENGLISH} "Choose the VST3 folder scanned by your DAW."
@@ -295,11 +295,11 @@ LangString HFS_WEBVIEW2_INSTALL_FAILED ${LANG_JAPANESE} "WebView2 のインス�
 LangString HFS_WEBVIEW2_INSTALL_FAILED ${LANG_KOREAN} "WebView2 설치에 실패했습니다. Microsoft 사이트에서 설치한 뒤 다시 시도하세요."
 
 ; installer_welcome_text
-LangString HFS_WELCOME_TEXT ${LANG_ENGLISH} "Installs the HiFiShifter app and its VST3/ARA and CLAP plug-ins.$\r$\nClose HiFiShifter and any DAW using the plug-ins before continuing.$\r$\nThe NSF-HiFiGAN weights are CC BY-NC-SA 4.0, non-commercial use only; see LICENSE."
-LangString HFS_WELCOME_TEXT ${LANG_SIMPCHINESE} "将安装 HiFiShifter 独立 App，以及 VST3/ARA 与 CLAP 插件。$\r$\n安装前请关闭 HiFiShifter 和所有正在使用插件的 DAW。$\r$\nNSF-HiFiGAN 权重采用 CC BY-NC-SA 4.0，仅限非商业使用。详见 LICENSE。"
-LangString HFS_WELCOME_TEXT ${LANG_TRADCHINESE} "將安裝 HiFiShifter 獨立 App，以及 VST3/ARA 與 CLAP 外掛。$\r$\n安裝前請關閉 HiFiShifter 和所有正在使用外掛的 DAW。$\r$\nNSF-HiFiGAN 權重採用 CC BY-NC-SA 4.0，僅限非商業使用。詳見 LICENSE。"
-LangString HFS_WELCOME_TEXT ${LANG_JAPANESE} "HiFiShifter 本体と VST3/ARA・CLAP プラグインをインストールします。$\r$\n続行する前に、HiFiShifter とプラグインを使用中の DAW を終了してください。$\r$\nNSF-HiFiGAN の重みは CC BY-NC-SA 4.0 で非商用のみ。詳細は LICENSE を参照。"
-LangString HFS_WELCOME_TEXT ${LANG_KOREAN} "HiFiShifter 앱과 VST3/ARA·CLAP 플러그인을 설치합니다.$\r$\n계속하기 전에 HiFiShifter와 플러그인을 사용 중인 DAW를 종료하세요.$\r$\nNSF-HiFiGAN 가중치는 CC BY-NC-SA 4.0으로 비상업적 용도로만 사용할 수 있습니다. 자세한 내용은 LICENSE 참조."
+LangString HFS_WELCOME_TEXT ${LANG_ENGLISH} "Installs the HiFiShifter app and its VST3 and CLAP plug-ins.$\r$\nClose HiFiShifter and any DAW using the plug-ins before continuing.$\r$\nThe NSF-HiFiGAN weights are CC BY-NC-SA 4.0, non-commercial use only; see LICENSE."
+LangString HFS_WELCOME_TEXT ${LANG_SIMPCHINESE} "将安装 HiFiShifter 独立 App，以及 VST3 与 CLAP 插件。$\r$\n安装前请关闭 HiFiShifter 和所有正在使用插件的 DAW。$\r$\nNSF-HiFiGAN 权重采用 CC BY-NC-SA 4.0，仅限非商业使用。详见 LICENSE。"
+LangString HFS_WELCOME_TEXT ${LANG_TRADCHINESE} "將安裝 HiFiShifter 獨立 App，以及 VST3 與 CLAP 外掛。$\r$\n安裝前請關閉 HiFiShifter 和所有正在使用外掛的 DAW。$\r$\nNSF-HiFiGAN 權重採用 CC BY-NC-SA 4.0，僅限非商業使用。詳見 LICENSE。"
+LangString HFS_WELCOME_TEXT ${LANG_JAPANESE} "HiFiShifter 本体と VST3・CLAP プラグインをインストールします。$\r$\n続行する前に、HiFiShifter とプラグインを使用中の DAW を終了してください。$\r$\nNSF-HiFiGAN の重みは CC BY-NC-SA 4.0 で非商用のみ。詳細は LICENSE を参照。"
+LangString HFS_WELCOME_TEXT ${LANG_KOREAN} "HiFiShifter 앱과 VST3·CLAP 플러그인을 설치합니다.$\r$\n계속하기 전에 HiFiShifter와 플러그인을 사용 중인 DAW를 종료하세요.$\r$\nNSF-HiFiGAN 가중치는 CC BY-NC-SA 4.0으로 비상업적 용도로만 사용할 수 있습니다. 자세한 내용은 LICENSE 참조."
 
 ; installer_welcome_title
 LangString HFS_WELCOME_TITLE ${LANG_ENGLISH} "Welcome to the HiFiShifter Setup"
