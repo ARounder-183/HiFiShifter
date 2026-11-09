@@ -5,13 +5,13 @@ import { shouldClearParamRefresh } from "./paramRefreshPolicy";
 
 import type { ParamFramesPayload } from "../../../types/api";
 import { paramsApi } from "../../../services/api";
-import { clamp } from "../timeline";
 
 import type { ParamName, ParamViewSegment } from "./types";
 import { isDynParam } from "./paramRanges";
 import { createLiveEditDeferral } from "./liveEditDeferral";
 import type { LiveEditDeferral } from "./liveEditDeferral";
-import { framesToTime, timeToFrame } from "./utils";
+import { resolveParamFetchWindow } from "./paramFetchWindow";
+import { framesToTime } from "./utils";
 const paramFramePeriodCache = new Map<string, number>();
 
 /**
@@ -412,12 +412,6 @@ export function usePianoRollData(args: {
         const visibleDurSec = Math.max(1e-6, durSec);
         const visibleEndSec = visibleStartSec + visibleDurSec;
 
-        const quantStepSec = 0.02;
-        const q = (x: number) => {
-            const step = Math.max(1e-6, quantStepSec);
-            return Math.round(x / step) * step;
-        };
-
         const fpKey = `${trackId}|${editParam}`;
         const cachedFp = paramFramePeriodCache.get(fpKey);
         const pvForFp = paramViewRef.current;
@@ -440,11 +434,18 @@ export function usePianoRollData(args: {
             return startSecPv <= visibleStartSec && endSecPv >= visibleEndSec;
         })();
 
-        const paramMarginSec = visibleDurSec;
-        const covParamStartSec = Math.max(0, visibleStartSec - paramMarginSec);
-        const covParamDurSec = visibleDurSec + 2 * paramMarginSec;
-        const paramStartSecQ = Math.max(0, q(covParamStartSec));
-        const paramDurSecQ = Math.max(quantStepSec, q(covParamDurSec));
+        // 请求窗口始终覆盖可见区；普通视口保留两侧各一屏余量，宽视口 /
+        // 最小缩放时按可见区扩大预算，不再被旧的 200k 帧硬上限截断。
+        const mainWindow = resolveParamFetchWindow({
+            visibleStartSec,
+            visibleEndSec,
+            framePeriodMs: fpMs,
+        });
+        const startFrame = mainWindow.startFrame;
+        const frameCount = mainWindow.frameCount;
+        const stride = 1;
+        // Version 2: Fixed coordinate calculation to use unquantized time
+        const paramKey = `v2|${trackId}|${editParam}|${startFrame}|${frameCount}|${stride}`;
 
         // DEBUG: Log data request parameters（复用函数入口已读取的 debug 开关）
         const debugEnabled = debug;
@@ -456,49 +457,23 @@ export function usePianoRollData(args: {
                 visibleStartSec,
                 visibleDurSec,
                 visibleEndSec,
-                paramMarginSec,
-                covParamStartSec,
-                covParamDurSec,
-                paramStartSecQ,
-                paramDurSecQ,
+                startFrame,
+                frameCount,
                 framePeriodMs: fpMs,
             });
         }
-
-        // CRITICAL FIX: Use unquantized time for precise frame calculation
-        // Quantization is only for cache alignment, not coordinate calculation
-        const startFrame = Math.max(0, timeToFrame(covParamStartSec, fpMs));
-        // Request full-resolution curve by default.
-        // With fp=5ms, even tens of seconds are only a few thousand samples.
-        const viewFrames = clamp(
-            Math.max(
-                1,
-                // Use unquantized duration for frame count calculation
-                timeToFrame(covParamStartSec + covParamDurSec, fpMs) - startFrame + 1,
-            ),
-            1,
-            200_000,
-        );
-        const stride = 1;
-        const frameCount = viewFrames;
-        // Version 2: Fixed coordinate calculation to use unquantized time
-        const paramKey = `v2|${trackId}|${editParam}|${startFrame}|${frameCount}|${stride}`;
 
         const secondaryRequests = secondaryParamIds.map((secondaryParam) => {
             const secondaryFpKey = `${trackId}|${secondaryParam}`;
             const secondaryCachedFp = paramFramePeriodCache.get(secondaryFpKey);
             const secondaryFpMs = Number(secondaryCachedFp ?? 5) || 5;
-            const secondaryStartFrame = Math.max(0, timeToFrame(covParamStartSec, secondaryFpMs));
-            const secondaryFrameCount = clamp(
-                Math.max(
-                    1,
-                    timeToFrame(covParamStartSec + covParamDurSec, secondaryFpMs) -
-                        secondaryStartFrame +
-                        1,
-                ),
-                1,
-                200_000,
-            );
+            const secondaryWindow = resolveParamFetchWindow({
+                visibleStartSec,
+                visibleEndSec,
+                framePeriodMs: secondaryFpMs,
+            });
+            const secondaryStartFrame = secondaryWindow.startFrame;
+            const secondaryFrameCount = secondaryWindow.frameCount;
             const secondaryParamKey = `v2|${trackId}|${secondaryParam}|${secondaryStartFrame}|${secondaryFrameCount}|${stride}`;
             return {
                 secondaryParam,
@@ -520,20 +495,13 @@ export function usePianoRollData(args: {
                           const referenceFpKey = `${referenceTrackId}|pitch`;
                           const referenceCachedFp = paramFramePeriodCache.get(referenceFpKey);
                           const referenceFpMs = Number(referenceCachedFp ?? 5) || 5;
-                          const referenceStartFrame = Math.max(
-                              0,
-                              timeToFrame(covParamStartSec, referenceFpMs),
-                          );
-                          const referenceFrameCount = clamp(
-                              Math.max(
-                                  1,
-                                  timeToFrame(covParamStartSec + covParamDurSec, referenceFpMs) -
-                                      referenceStartFrame +
-                                      1,
-                              ),
-                              1,
-                              200_000,
-                          );
+                          const referenceWindow = resolveParamFetchWindow({
+                              visibleStartSec,
+                              visibleEndSec,
+                              framePeriodMs: referenceFpMs,
+                          });
+                          const referenceStartFrame = referenceWindow.startFrame;
+                          const referenceFrameCount = referenceWindow.frameCount;
                           const referenceParamKey = `v2|${referenceTrackId}|pitch|${referenceStartFrame}|${referenceFrameCount}|${stride}`;
                           return {
                               referenceTrackId,
@@ -1187,6 +1155,15 @@ export function usePianoRollData(args: {
         const fetchScope = `${rootTrackId}|${editParam}`;
         if (lastFetchScopeRef.current !== fetchScope) {
             lastFetchScopeRef.current = fetchScope;
+            void refreshVisible();
+            return;
+        }
+        // 【覆盖不足必须立即取数，不能等 75ms 去抖】自动滚动在高缩放 / 宽视口下
+        // 会持续提交 scrollLeft（每 256px 一次）；若每次都重置去抖计时器，取数可能
+        // 永远不发出，后段曲线就一直缺失。computeVisibleRequest 读的是内核真值
+        // scrollLeftRef.current，不是量化后的 scrollLeft state。
+        const immediate = computeVisibleRequest();
+        if (immediate && !immediate.paramCoversVisible) {
             void refreshVisible();
             return;
         }

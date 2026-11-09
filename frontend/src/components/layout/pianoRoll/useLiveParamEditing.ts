@@ -23,8 +23,9 @@ import type { ParamName, ParamViewSegment, StrokeMode, StrokePoint } from "./typ
  * - `edit` 由 {@link
  *   useLiveParamEditing} 的 `ensureLiveEditBase` 造出一份**私有副本**（不指向
  *   React state），因此可以原地改写。此前每次采样都 `slice()` 出一份新数组 ——
- *   典型窗口 ~6400 个元素、极端缩放下上限 200000（`usePianoRollData` 的
- *   `viewFrames` 钳制）⇒ 单次 1.6MB，高刷笔一帧数个采样就是数 MB 的年轻代垃圾。
+ *   典型窗口 ~6400 个元素，宽视口 / 最小缩放下可达数十万帧（`usePianoRollData`
+ *   的取数窗口按可见区 3 倍计算）⇒ 单次数 MB，高刷笔一帧数个采样就是数十 MB 的
+ *   年轻代垃圾。
  * - 但"引用变了"此前同时承担了"内容变了"的通知职责。改为原地更新后必须显式
  *   给出这一信号，否则**主画布的内容签名会误判为未变**、绘制中的曲线不再刷新
  *  （见 `mainCanvasSignature.ts` 的约束说明）。故每次写入都取一个**全局单调
