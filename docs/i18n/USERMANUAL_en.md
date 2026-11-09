@@ -645,6 +645,24 @@ After selecting a region with the Select tool, right-click and choose `Smooth...
 
 For a quick flatten, you can also hold the right button inside a selection and drag downward: the lower you drag, the smoother it gets, with live preview.
 
+### 11. Parameter Block Editing
+
+Parameter blocks divide a parameter line into editable segments anchored to Clip / Take source ranges. Click the “Block” pill in the toolbar to enter block editing; click it again to return to the previous draw tool.
+
+- **Create**: hold the left button on empty space and drag horizontally. Timeline snap settings apply; the “toggle snap while dragging” modifier (default Shift) temporarily inverts the snap switch.
+- **Select / multi-select**: click a block; hold the multi-select modifier (default Ctrl / ⌘) to add or remove. Right-drag marquee-selects blocks.
+- **Move**: drag the block body vertically. Pitch snap follows the Pitch Snap settings (semitone / project scale / tolerance); Shift also inverts snapping.
+- **Resize**: drag the left or right edge. Horizontal snapping follows the timeline snap engine, including grid, Swing, Tempo Map, clip edges, playhead, and selection markers.
+- **Split**: select one block and press S, or choose “Split” from the context menu.
+- **Group / Ungroup**: select two or more adjacent blocks and press G to group, U to ungroup. Grouping is reversible: ungrouping restores the original block ids, source ranges, manual values, and transitions. Split / resize of a grouped block requires ungrouping first.
+- **Delete / Restore**: Delete or Backspace removes selected blocks; “Restore deleted blocks” restores the most recent batch.
+- **Restore**: the context-menu “Restore” item restores the selection to the initial GAME / analysis segmentation.
+- **Transitions**: drag the handle above a shared block boundary. Every parameter persists the transition layout; only Pitch additionally blends the curve.
+- **Playhead**: with “Allow the parameter editor to move the playhead” enabled, clicking empty space or a block in block mode moves the playhead; dragging a block, edge, transition handle, or right-clicking does not.
+- **Loop / multiple Takes**: blocks are stored in the source domain. Switching the active Take, reversing, looping, slipping, trimming, or re-analysis reprojects them correctly. Creating or restoring blocks on a Loop Clip covers all visible cycles.
+
+All block-action failures appear in the bottom-left status bar; hover to read the backend detail.
+
 ## 6. Export Audio
 
 After completing all edits, use the `Export Audio` function in the `File` menu to export the HiFiShifter project as an audio file.
