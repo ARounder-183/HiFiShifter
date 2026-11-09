@@ -152,8 +152,6 @@ fn project_user_block(
                         ProjectedBlockKind::Grouped
                     } else if block.manual {
                         ProjectedBlockKind::Manual
-                    } else if run_members.len() > 1 {
-                        ProjectedBlockKind::Grouped
                     } else {
                         ProjectedBlockKind::User
                     },
@@ -469,7 +467,9 @@ mod tests {
 
         let merged = compose_param_block_view(&song, "root", &merged_edits(), 5.0).unwrap();
         assert_eq!(merged.blocks.len(), 1);
-        assert_eq!(merged.blocks[0].kind, ProjectedBlockKind::Grouped);
+        // 两个相邻成员合成一个 run：这是几何事实，**不是**可逆编组 —— 它照样可以
+        // 切分 / 伸缩，所以 `kind` 必须是 `User`（见 `ProjectedBlockKind` 的文档）。
+        assert_eq!(merged.blocks[0].kind, ProjectedBlockKind::User);
         assert_eq!(merged.blocks[0].start_frame, 0);
         assert_eq!(merged.blocks[0].end_frame_exclusive, 200);
 

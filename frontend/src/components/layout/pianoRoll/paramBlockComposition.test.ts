@@ -64,9 +64,39 @@ describe("paramBlockComposition", () => {
         ]);
         const merged = composeParamBlockView("root", [clip], mergedEdits(), 5);
         expect(merged.blocks).toHaveLength(1);
-        expect(merged.blocks[0]?.kind).toBe("grouped");
+        /*
+         * 两个相邻成员合成一个 run 是**几何事实**，不是可逆编组：它照样可以切分 /
+         * 伸缩（内核只拒绝 `grouped_from.is_some()`）。标成 `"grouped"` 会让菜单置灰、
+         * 手柄消失 —— "播放光标确实在块内，却切不了"。
+         */
+        expect(merged.blocks[0]?.kind).toBe("user");
         expect(merged.blocks[0]?.startFrame).toBe(0);
         expect(merged.blocks[0]?.endFrameExclusive).toBe(200);
+    });
+
+    it("可逆编组才是 grouped，且与成员数无关", () => {
+        const edits = mergedEdits();
+        const block = edits.blocks[0];
+        if (block === undefined) throw new Error("expected a block");
+        const grouped = composeParamBlockView(
+            "root",
+            [clip],
+            { ...edits, blocks: [{ ...block, groupedFrom: [] }] },
+            5,
+        );
+        expect(grouped.blocks).toHaveLength(1);
+        expect(grouped.blocks[0]?.kind).toBe("grouped");
+        // 单成员的可逆编组同样是 grouped（判据是快照，不是成员数）。
+        if (block.geometry.kind !== "take") throw new Error("expected a take block");
+        const first = block.geometry.members[0];
+        if (first === undefined) throw new Error("expected a take member");
+        const single: UserParamBlock = {
+            ...block,
+            geometry: { kind: "take", members: [first] },
+            groupedFrom: [block],
+        };
+        const singleView = composeParamBlockView("root", [clip], { ...edits, blocks: [single] }, 5);
+        expect(singleView.blocks[0]?.kind).toBe("grouped");
     });
 
     it("moves a merged block when the Take source window slips", () => {

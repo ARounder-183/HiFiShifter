@@ -60,6 +60,16 @@ export interface ProjectedMember {
     readonly endFrameExclusive: number;
 }
 
+/**
+ * 视图块的编辑能力标签（与 Rust `ProjectedBlockKind` 一一对应）。
+ *
+ * 【`"grouped"` 只有一条语义】可逆编组（`groupedFrom` 非空）：几何是"若干成员 +
+ * 一份快照"的联合，横向切开 / 伸缩没有唯一解，必须先取消编组。
+ *
+ * 它与"这一 run 里有几个成员"**无关** —— 多成员 run（手工跨两条相邻 Clip 拖出来的
+ * 块、或对 2 成员块切一刀之后的左右两半）只是几何事实，切分有唯一解，伸缩也有。
+ * 把它标成 `"grouped"` 会让菜单置灰、手柄消失，静默禁掉一条本来正确的路径。
+ */
 export type ProjectedBlockKind = "base" | "user" | "grouped" | "manual";
 
 export interface ProjectedParamBlock {

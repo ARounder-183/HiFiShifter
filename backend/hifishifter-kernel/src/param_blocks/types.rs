@@ -322,6 +322,16 @@ pub struct ProjectedMember {
     pub end_frame_exclusive: u32,
 }
 
+/// 视图块的编辑能力标签。
+///
+/// 【@BT@Grouped@BT@ 只有一条语义】可逆编组（@BT@UserParamBlock::grouped_from@BT@ 非空）：
+/// 它的几何是"若干成员 + 一份快照"的联合，横向切开 / 伸缩没有唯一解，必须先取消
+/// 编组（内核以 @BT@grouped_locked@BT@ 拒绝）。
+///
+/// 它与"这一 run 里有几个成员"**无关**。多成员 run（手工跨两条相邻 Clip 拖出来的
+/// 块、或对 2 成员块切一刀之后的左右两半）只是几何事实，不影响编辑能力：切分有
+/// 唯一解（找到包含切点的那个成员按源域一分为二），伸缩也有。把它标成 @BT@Grouped@BT@
+/// 会让 UI 静默禁掉一条本来正确的路径（"播放光标确实在块内，却切不了"）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ProjectedBlockKind {

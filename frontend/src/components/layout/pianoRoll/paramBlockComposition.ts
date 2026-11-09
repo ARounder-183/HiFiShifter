@@ -202,14 +202,9 @@ function projectUserBlock(
             userBlockId: block.id,
             start: run.start,
             end: run.end,
-            kind:
-                block.groupedFrom !== undefined
-                    ? "grouped"
-                    : block.manual
-                      ? "manual"
-                      : run.members.length > 1
-                        ? "grouped"
-                        : "user",
+            // 与 Rust `compose` 逐字对应：`grouped` **只**表示可逆编组（`groupedFrom` 非空）。
+            // 多成员 run 是几何事实，不影响编辑能力（见 `ProjectedBlockKind` 的文档）。
+            kind: block.groupedFrom !== undefined ? "grouped" : block.manual ? "manual" : "user",
             members: run.members,
             value: block.value,
             transitionWidthSec: block.transitionOutSec,
