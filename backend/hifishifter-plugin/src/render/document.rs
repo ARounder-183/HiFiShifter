@@ -3080,13 +3080,13 @@ impl DocumentSession {
                     view.params.tension_edit.get(idx).copied().unwrap_or(0.0),
                 ),
                 "extra:dyn" => {
-                    let o = view
-                        .params
-                        .dyn_orig
-                        .get(idx)
-                        .copied()
-                        .filter(|value| value.is_finite() && *value > 0.0)
-                        .unwrap_or(1.0);
+                    // 没有 clip 覆盖的帧没有声音 ⇒ 原始值映射到 0（唯一规则见
+                    // `common_params::dyn_orig_level_at`，与 App 的 `get_param_frames`
+                    // 同源）。
+                    let o = hifishifter_kernel::renderer::common_params::dyn_orig_level_at(
+                        &view.params.dyn_orig,
+                        idx,
+                    );
                     let raw = view
                         .params
                         .extra_curves

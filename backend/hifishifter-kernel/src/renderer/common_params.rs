@@ -180,6 +180,34 @@ pub fn automation_curve_pad_value(kind: crate::state::SynthPipelineKind, param_i
     crate::renderer::automation_curve_default_value(kind, param_id).unwrap_or(0.0)
 }
 
+/// 范围内**没有 clip 覆盖**时，DYN 参数线的「原始值」映射到的电平。
+///
+/// 【为什么是 0，而不是描述符默认值 1.0】`dyn_orig` 是「当前布局下这一帧的原声
+/// 电平」：没有被任何 clip 覆盖的帧**没有声音**，电平就是 0。旧实现把"没有基线"
+/// 当成"回到描述符默认值"，于是空白区在动态参数线上被画成 **0 dBFS 满电平** ——
+/// 与同一段波形（那里是一条静音直线）自相矛盾，用户读到的是一条"凭空存在的
+/// 满幅包络"。0（静音）才是这段范围的实际电平，也是"这里没有内容"唯一自洽的
+/// 画法。
+///
+/// 【它只影响显示】`get_param_frames` 的 `orig`/`edit` 平面由它决定；渲染层的
+/// 未画帧仍然走 [`DYN_FOLLOW_ORIG`] 哨兵（增益 1），不会因为这里显示 0 而被静音。
+pub const DYN_NO_CONTENT_LEVEL: f32 = 0.0;
+
+/// 某一帧 DYN 原声电平（`orig` 平面）的**唯一取值规则**。
+///
+/// 曲线缺席 / 该帧越界 / 非有限 / ≤ 0 都表示"这一帧没有可听内容"，一律落到
+/// [`DYN_NO_CONTENT_LEVEL`]。App（`editor::params::get_param_frames`）与
+/// 插件/ARA（`render::document::read_authority_frames`）两条显示出口必须共用
+/// 它 —— 分叉会让同一份工程在两种宿主里画出不同的动态基线。
+#[inline]
+pub fn dyn_orig_level_at(orig_curve: &[f32], index: usize) -> f32 {
+    orig_curve
+        .get(index)
+        .copied()
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(DYN_NO_CONTENT_LEVEL)
+}
+
 /// 采样动态（DYN）曲线在**绝对帧**处的目标电平。
 ///
 /// 与 `sample_automation_curve`（volume/pan 用）的关键差别是**越界语义**：
@@ -576,6 +604,27 @@ mod tests {
         assert_eq!(automation_curve_pad_value(kind, PAN_PARAM_ID), 0.0);
         // 未知参数（无描述符）回退 0.0，与旧行为一致。
         assert_eq!(automation_curve_pad_value(kind, "no_such_param"), 0.0);
+    }
+
+    /// ★ 没有 clip 覆盖的帧，动态参数线的原始值必须是 0（静音），不是 1.0（0 dBFS）。
+    ///
+    /// 旧口径把"这一帧没有基线"当成"回到描述符默认值"，于是空白区被画成一条
+    /// 凭空的满电平包络 —— 与同一段波形（静音直线）自相矛盾。
+    #[test]
+    fn no_content_frames_report_silence_as_the_original_level() {
+        assert_eq!(DYN_NO_CONTENT_LEVEL, 0.0);
+        let curve = [0.5f32, 0.0, -0.2, f32::NAN, 0.25];
+        assert_eq!(dyn_orig_level_at(&curve, 0), 0.5);
+        // 0 = 这一帧没有可听内容（没有 clip 覆盖 / clip 内静音）⇒ 原始值就是 0。
+        assert_eq!(dyn_orig_level_at(&curve, 1), DYN_NO_CONTENT_LEVEL);
+        assert_eq!(dyn_orig_level_at(&curve, 2), DYN_NO_CONTENT_LEVEL);
+        assert_eq!(dyn_orig_level_at(&curve, 3), DYN_NO_CONTENT_LEVEL);
+        assert_eq!(dyn_orig_level_at(&curve, 4), 0.25);
+        // 曲线缺席 / 越界（分析未就绪、工程尾部之外）同样是"没有内容"。
+        assert_eq!(dyn_orig_level_at(&[], 0), DYN_NO_CONTENT_LEVEL);
+        assert_eq!(dyn_orig_level_at(&curve, 99), DYN_NO_CONTENT_LEVEL);
+        // 旧口径（描述符默认值 1.0）会把空白区画成满电平 —— 明确禁止。
+        assert_ne!(dyn_orig_level_at(&[], 0), 1.0);
     }
 
     /// ★ 回归：重采样 `dyn` 时**不得跨越哨兵**。

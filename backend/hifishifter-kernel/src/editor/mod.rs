@@ -192,6 +192,25 @@ mod tests {
             &[60., 64.]
         );
     }
+    /// ★ 没有 clip 覆盖的范围，动态参数线（orig/edit）都落在 0。
+    ///
+    /// 0 = 静音 = 这段范围的实际电平。旧实现回落到描述符默认值 1.0（0 dBFS），
+    /// 于是空白区在动态面板上是一条凭空的满电平曲线。
+    #[test]
+    fn dyn_parameter_line_is_silent_where_no_clip_covers() {
+        let host = host();
+        let payload =
+            params::get_param_frames(&host, "track".into(), "dyn".into(), 0, 8, None, None, None);
+        assert!(payload.ok);
+        assert_eq!(payload.orig, vec![0.0; 8], "无 clip 覆盖时原始值必须是 0");
+        assert_eq!(
+            payload.edit,
+            vec![0.0; 8],
+            "未画帧解析出的目标电平也必须是 0"
+        );
+        assert!(payload.edited.iter().all(|flag| !flag));
+    }
+
     /// 平滑/恢复/静态写入必须经过同一共享命令，不因平台hook换掉原参数结果。
     #[test]
     fn static_parameters_and_restore_share_original_command_semantics() {

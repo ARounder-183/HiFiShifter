@@ -422,7 +422,8 @@ pub fn get_param_frames(
             //
             // 曲线里的 `DYN_FOLLOW_ORIG`(−1) 哨兵在**出口**解析成真实基线值：
             // 前端永远看不到负值，绘制/平滑/量化全都按普通 0..4 曲线处理。
-            // 分析未就绪时两条都退化为描述符默认值 1.0（此时增益恒为 1）。
+            // 没有 clip 覆盖的帧没有声音 ⇒ 两条都落在 0（见
+            // `common_params::DYN_NO_CONTENT_LEVEL`）；分析未就绪时同理。
             //
             // 【哨兵位图】批量操作（平滑/量化/平均/拖拽提交/复制粘贴）走
             // "读-变换-写回"，若拿不到哨兵信息就会把**未画帧**物化成显式基线值
@@ -431,16 +432,11 @@ pub fn get_param_frames(
             // 把哨兵帧原样写回哨兵（pitch 的 0 哨兵在拖拽里已有同款约定）。
             let orig_curve = entry.dyn_orig.as_slice();
             let user_curve = entry.extra_curves.get("dyn").map(|v| v.as_slice());
-            let fallback = resolve_extra_curve_default_value(param_kind, "dyn");
             let want_sentinel = with_sentinel.unwrap_or(false);
             let mut sentinels: Vec<bool> = Vec::new();
             for i in 0..count {
                 let idx = start.saturating_add(i.saturating_mul(step));
-                let baseline = orig_curve
-                    .get(idx)
-                    .copied()
-                    .filter(|v| v.is_finite() && *v > 0.0)
-                    .unwrap_or(fallback);
+                let baseline = crate::renderer::common_params::dyn_orig_level_at(orig_curve, idx);
                 let user = user_curve.and_then(|c| c.get(idx)).copied();
                 // 「未画」位图与目标电平解析同源（唯一判定见
                 // `common_params::dyn_frame_is_unset`）：分叉会让写回路径把未画帧

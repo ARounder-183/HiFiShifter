@@ -10,7 +10,8 @@
  *
  * 本 hook 为**当前根轨道组**一次性拉取整条工程的：
  * - `volume` 曲线（用户画的音量包络；无数据帧由后端填默认 1.0）；
- * - `dyn` 曲线（用户目标电平；哨兵已在后端出口解析成原声基线）；
+ * - `dyn` 曲线（用户目标电平；哨兵已在后端出口解析成原声基线，
+ *   没有 clip 覆盖的帧为 0）；
  * - `dyn` 的 `orig`（原声电平基线；分析未就绪时为空数组）。
  *
  * 取数用自适应 stride（全工程点数封顶 {@link MAX_SNAPSHOT_FRAMES}），一次请求
@@ -52,7 +53,7 @@ export interface LoudnessSnapshot {
     framePeriodMs: number;
     /** 逐帧音量包络（无数据帧 = 后端默认 1.0）。 */
     volume: number[];
-    /** 逐帧动态目标电平（哨兵已解析为基线；分析未就绪时为退化值 1.0）。 */
+    /** 逐帧动态目标电平（哨兵已解析为基线；无 clip 覆盖 / 分析未就绪时为 0）。 */
     dynTarget: number[];
     /** 逐帧原声电平基线；分析未就绪 / 整组静音时为空数组（动态增益恒 1）。 */
     dynBaseline: number[];
@@ -110,11 +111,16 @@ export function snapshotFromPayloads(
     fallbackFp: number,
 ): LoudnessSnapshot | null {
     const fp = Number(dynPayload.frame_period_ms ?? fallbackFp) || fallbackFp;
-    const dynTarget = (dynPayload.edit ?? []).map((v) => (Number.isFinite(v) ? v : 1.0));
     // 基线**必须保持逐帧对齐**：它是逐帧电平，0（静音）是合法且常见的值，
     // 不能用 filter 剔除 —— 剔除会缩短数组，使后续所有帧整体错位（波形把
     // 一段的增益画到另一段上）。只做有限性净化，长度恒等于目标曲线。
     const dynBaseline = (dynPayload.orig ?? []).map((v) => (Number.isFinite(v) && v > 0 ? v : 0));
+    // 目标电平缺失（异常载荷）时退回**该帧基线**：增益恰为 1（不改变听感），
+    // 这是唯一"无信息"的中性值。绝不能退回 1.0 —— 那是 0 dBFS 目标电平，
+    // 会把波形画成一段凭空的满幅增益。
+    const dynTarget = (dynPayload.edit ?? []).map((v, i) =>
+        Number.isFinite(v) ? v : (dynBaseline[i] ?? 0),
+    );
     // 基线与目标必须等长（同一请求的两条曲线）；长度异常时按"无基线"处理
     // —— 宁可动态增益恒 1，也不允许错位采样。
     if (dynBaseline.length !== dynTarget.length) dynBaseline.length = 0;
