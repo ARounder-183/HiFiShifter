@@ -29,11 +29,11 @@ LangString HFS_COMPONENT_APP ${LANG_JAPANESE} "スタンドアロン版"
 LangString HFS_COMPONENT_APP ${LANG_KOREAN} "독립 실행형 앱"
 
 ; installer_component_clap
-LangString HFS_COMPONENT_CLAP ${LANG_ENGLISH} "CLAP (Capture-only)"
-LangString HFS_COMPONENT_CLAP ${LANG_SIMPCHINESE} "CLAP（Capture）"
-LangString HFS_COMPONENT_CLAP ${LANG_TRADCHINESE} "CLAP（Capture）"
-LangString HFS_COMPONENT_CLAP ${LANG_JAPANESE} "CLAP（Capture）"
-LangString HFS_COMPONENT_CLAP ${LANG_KOREAN} "CLAP (Capture)"
+LangString HFS_COMPONENT_CLAP ${LANG_ENGLISH} "CLAP (ARA + Capture)"
+LangString HFS_COMPONENT_CLAP ${LANG_SIMPCHINESE} "CLAP（ARA + Capture）"
+LangString HFS_COMPONENT_CLAP ${LANG_TRADCHINESE} "CLAP（ARA + Capture）"
+LangString HFS_COMPONENT_CLAP ${LANG_JAPANESE} "CLAP（ARA + Capture）"
+LangString HFS_COMPONENT_CLAP ${LANG_KOREAN} "CLAP (ARA + Capture)"
 
 ; installer_component_file_assoc
 LangString HFS_COMPONENT_FILE_ASSOC ${LANG_ENGLISH} "File association (.hshp/.hsp)"
@@ -92,11 +92,11 @@ LangString HFS_DESC_APP ${LANG_JAPANESE} "スタンドアロン版エディタ�
 LangString HFS_DESC_APP ${LANG_KOREAN} "독립 실행형 편집기입니다. 항상 설치됩니다."
 
 ; installer_desc_clap
-LangString HFS_DESC_CLAP ${LANG_ENGLISH} "CLAP plug-in (Capture-only). Installed into the CLAP folder you choose."
-LangString HFS_DESC_CLAP ${LANG_SIMPCHINESE} "CLAP 插件（仅 Capture），装入所选的 CLAP 文件夹。"
-LangString HFS_DESC_CLAP ${LANG_TRADCHINESE} "CLAP 外掛（僅 Capture），裝入所選的 CLAP 資料夾。"
-LangString HFS_DESC_CLAP ${LANG_JAPANESE} "CLAP プラグイン（Capture のみ）。選んだ CLAP フォルダーにインストール。"
-LangString HFS_DESC_CLAP ${LANG_KOREAN} "CLAP 플러그인(Capture 전용)입니다. 선택한 CLAP 폴더에 설치됩니다."
+LangString HFS_DESC_CLAP ${LANG_ENGLISH} "CLAP plug-in (ARA + Capture). Installed into the CLAP folder you choose."
+LangString HFS_DESC_CLAP ${LANG_SIMPCHINESE} "CLAP 插件（ARA + Capture），装入所选的 CLAP 文件夹。"
+LangString HFS_DESC_CLAP ${LANG_TRADCHINESE} "CLAP 外掛（ARA + Capture），裝入所選的 CLAP 資料夾。"
+LangString HFS_DESC_CLAP ${LANG_JAPANESE} "CLAP プラグイン（ARA + Capture）。選んだ CLAP フォルダーにインストール。"
+LangString HFS_DESC_CLAP ${LANG_KOREAN} "CLAP 플러그인(ARA + Capture)입니다. 선택한 CLAP 폴더에 설치됩니다."
 
 ; installer_desc_file_assoc
 LangString HFS_DESC_FILE_ASSOC ${LANG_ENGLISH} "Open HiFiShifter project files with HiFiShifter by default."

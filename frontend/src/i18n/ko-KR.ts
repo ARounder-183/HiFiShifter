@@ -2272,7 +2272,7 @@ export const koKR = {
     installer_group_plugins: "DAW 플러그인",
     installer_component_app: "독립 실행형 앱",
     installer_component_vst3: "VST3 / ARA",
-    installer_component_clap: "CLAP (Capture)",
+    installer_component_clap: "CLAP (ARA + Capture)",
     installer_component_models: "모델 라이브러리",
     installer_component_shortcuts: "바로 가기",
     installer_component_file_assoc: "파일 연결(.hshp/.hsp)",
@@ -2284,7 +2284,7 @@ export const koKR = {
     installer_desc_app: "독립 실행형 편집기입니다. 항상 설치됩니다.",
     installer_desc_vst3:
         "VST3 / ARA 플러그인입니다. 다음 페이지에서 선택한 VST3 폴더에 설치됩니다.",
-    installer_desc_clap: "CLAP 플러그인(Capture 전용)입니다. 선택한 CLAP 폴더에 설치됩니다.",
+    installer_desc_clap: "CLAP 플러그인(ARA + Capture)입니다. 선택한 CLAP 폴더에 설치됩니다.",
     installer_desc_models: "본체와 모든 플러그인이 공유하는 모델 가중치입니다. 한 번만 저장됩니다.",
     installer_desc_shortcuts: "시작 메뉴 항목과 바탕 화면 아이콘을 추가합니다.",
     installer_desc_file_assoc: "HiFiShifter 프로젝트 파일을 기본적으로 HiFiShifter로 엽니다.",

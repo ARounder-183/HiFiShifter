@@ -2302,7 +2302,7 @@ export const jaJP = {
     installer_group_plugins: "DAW プラグイン",
     installer_component_app: "スタンドアロン版",
     installer_component_vst3: "VST3 / ARA",
-    installer_component_clap: "CLAP（Capture）",
+    installer_component_clap: "CLAP（ARA + Capture）",
     installer_component_models: "モデルライブラリ",
     installer_component_shortcuts: "ショートカット",
     installer_component_file_assoc: "ファイル関連付け（.hshp/.hsp）",
@@ -2313,7 +2313,7 @@ export const jaJP = {
         "DAW で読み込むプラグイン形式。お使いの DAW が対応するものを選択。",
     installer_desc_app: "スタンドアロン版エディター。常にインストールされます。",
     installer_desc_vst3: "VST3 / ARA プラグイン。次のページで選ぶ VST3 フォルダーにインストール。",
-    installer_desc_clap: "CLAP プラグイン（Capture のみ）。選んだ CLAP フォルダーにインストール。",
+    installer_desc_clap: "CLAP プラグイン（ARA + Capture）。選んだ CLAP フォルダーにインストール。",
     installer_desc_models: "本体と全プラグインで共有するモデル重み。1 か所にのみ保存。",
     installer_desc_shortcuts: "スタートメニュー項目とデスクトップアイコンを追加。",
     installer_desc_file_assoc:
