@@ -45,10 +45,12 @@ export function scopePriority(
     if (!scopedContext) return 1;
     switch (scopedContext) {
         case "paramEditorSelect":
-            // 参数编辑器操作只在钢琴卷帘 + 选择工具下生效；其它焦点域硬排除。
-            return domain === "pianoRoll" && (toolMode === "select" || toolMode === "block")
-                ? 0
-                : Infinity;
+            // 参数编辑器选择工具操作只在钢琴卷帘 + 选择工具下生效；块工具
+            // 拥有自己的 paramBlock.* 动作，不再借用参数线编辑命令。
+            return domain === "pianoRoll" && toolMode === "select" ? 0 : Infinity;
+        case "paramEditorBlock":
+            // 块动作只在钢琴卷帘 + 块工具下激活；焦点在时间轴时 S 仍只切 Clip。
+            return domain === "pianoRoll" && toolMode === "block" ? 0 : Infinity;
         case "timelineFocus":
             return domain === "timeline" ? 0 : 2;
         case "trackHeaderFocus":
@@ -145,7 +147,7 @@ export type EditOp =
     | "removeClipsFromParamSelection";
 
 /** 事件通道即契约：hifi:editOp 只属于参数编辑器，hifi:timelineEditOp 只属于时间轴。 */
-export type EditOpChannel = "hifi:editOp" | "hifi:timelineEditOp";
+export type EditOpChannel = "hifi:editOp" | "hifi:timelineEditOp" | "hifi:paramBlockEditOp";
 
 /**
  * 快捷键 actionId → 编辑操作。clip.* 与 pianoRoll.* 的同义操作归一为同一
@@ -153,6 +155,37 @@ export type EditOpChannel = "hifi:editOp" | "hifi:timelineEditOp";
  * 操作（shiftParam*、pasteVocalShifter 等）不在此表 —— 它们只有单一归属，
  * 直接走既有派发路径。
  */
+/** 参数块动作。它们不经过 hifi:editOp，避免与参数线 / Clip 编辑混淆。 */
+export type ParamBlockEditOp =
+    | "split"
+    | "delete"
+    | "group"
+    | "ungroup"
+    | "selectAll"
+    | "deselect"
+    | "restoreGame"
+    | "restoreDeleted"
+    | "normalizePitch";
+
+export const PARAM_BLOCK_ACTION_TO_OP: Partial<Record<ActionId, ParamBlockEditOp>> = {
+    "paramBlock.split": "split",
+    "paramBlock.delete": "delete",
+    "paramBlock.group": "group",
+    "paramBlock.ungroup": "ungroup",
+    "paramBlock.selectAll": "selectAll",
+    "paramBlock.deselect": "deselect",
+    "paramBlock.restoreGame": "restoreGame",
+    "paramBlock.restoreDeleted": "restoreDeleted",
+    "paramBlock.normalizePitch": "normalizePitch",
+};
+
+export function resolveParamBlockEditChannel(
+    surface: EditSurfaceId | null,
+    toolMode: string,
+): "hifi:paramBlockEditOp" | null {
+    return surface === "pianoRoll" && toolMode === "block" ? "hifi:paramBlockEditOp" : null;
+}
+
 export const ACTION_TO_EDIT_OP: Partial<Record<ActionId, EditOp>> = {
     "clip.copy": "copy",
     "clip.cut": "cut",
@@ -225,14 +258,6 @@ export function resolveEditOpRoute(
     op: EditOp | string,
     toolMode?: string,
 ): EditOpChannel | null {
-    /*
-     * 参数块工具拥有 `S`：切的是块，不是上方时间轴 Clip。
-     * 这条必须在统一编辑路由里，而不是散落在某个 keydown 监听中；
-     * 菜单 / 快捷键 / 事件派发都经过这里，才能保证只有块被切分。
-     */
-    if (op === "split" && surface === "pianoRoll" && toolMode === "block") {
-        return "hifi:editOp";
-    }
     switch (op) {
         case "copy":
         case "cut":
@@ -250,7 +275,7 @@ export function resolveEditOpRoute(
             return null;
         case "selectAll":
         case "deselect":
-            if (surface === "pianoRoll" && (toolMode === "select" || toolMode === "block")) {
+            if (surface === "pianoRoll" && toolMode === "select") {
                 return "hifi:editOp";
             }
             return "hifi:timelineEditOp";

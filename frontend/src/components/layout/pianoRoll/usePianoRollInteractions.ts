@@ -232,7 +232,11 @@ export function usePianoRollInteractions(args: {
         readonly editParam: string;
         readonly gridStep: number;
         readonly contextMenu: boolean;
-    }) => boolean;
+        readonly altKey?: boolean;
+        readonly shiftKey?: boolean;
+        readonly ctrlKey?: boolean;
+        readonly metaKey?: boolean;
+    }) => import("./gestures/pointerDeps").ParamBlockPointerDownResult;
 
     bumpRefreshToken: () => void;
     syncScrollLeft: (scroller: HTMLDivElement) => void;

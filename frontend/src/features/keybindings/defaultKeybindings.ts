@@ -147,6 +147,17 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     // 的同时按下右键，这条键位是「右键拖拽中切换方向」的等价替代。
     "pianoRoll.cycleDragDirection": [{ key: "d" }],
 
+    // 参数块操作（仅在参数编辑器 + 块工具下激活）
+    "paramBlock.split": [{ key: "s" }],
+    "paramBlock.delete": [{ key: "delete" }, { key: "backspace" }],
+    "paramBlock.group": [{ key: "g" }],
+    "paramBlock.ungroup": [{ key: "u" }],
+    "paramBlock.selectAll": [{ key: "a", ctrl: true }],
+    "paramBlock.deselect": [{ key: "__none__" }],
+    "paramBlock.restoreGame": [{ key: "__none__" }],
+    "paramBlock.restoreDeleted": [{ key: "__none__" }],
+    "paramBlock.normalizePitch": [{ key: "__none__" }],
+
     // 修饰键行为
     // 多选切换默认为主修饰键（Windows: Ctrl / macOS: ⌘），对齐文件管理器
     // 与 DAW 的"按住主修饰键点击追加选择"惯例；ctrl 字段在 macOS 上自动
@@ -504,6 +515,53 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
         group: "pianoRoll",
     },
 
+    // ── 参数块操作 ─────────────────────────────────────────────
+    "paramBlock.split": {
+        labelKey: "kb_param_block_split",
+        group: "paramBlock",
+        scopedContext: "paramEditorBlock",
+    },
+    "paramBlock.delete": {
+        labelKey: "kb_param_block_delete",
+        group: "paramBlock",
+        scopedContext: "paramEditorBlock",
+    },
+    "paramBlock.group": {
+        labelKey: "kb_param_block_group",
+        group: "paramBlock",
+        scopedContext: "paramEditorBlock",
+    },
+    "paramBlock.ungroup": {
+        labelKey: "kb_param_block_ungroup",
+        group: "paramBlock",
+        scopedContext: "paramEditorBlock",
+    },
+    "paramBlock.selectAll": {
+        labelKey: "kb_param_block_select_all",
+        group: "paramBlock",
+        scopedContext: "paramEditorBlock",
+    },
+    "paramBlock.deselect": {
+        labelKey: "kb_param_block_deselect",
+        group: "paramBlock",
+        scopedContext: "paramEditorBlock",
+    },
+    "paramBlock.restoreGame": {
+        labelKey: "kb_param_block_restore_game",
+        group: "paramBlock",
+        scopedContext: "paramEditorBlock",
+    },
+    "paramBlock.restoreDeleted": {
+        labelKey: "kb_param_block_restore_deleted",
+        group: "paramBlock",
+        scopedContext: "paramEditorBlock",
+    },
+    "paramBlock.normalizePitch": {
+        labelKey: "kb_param_block_normalize_pitch",
+        group: "paramBlock",
+        scopedContext: "paramEditorBlock",
+    },
+
     // ── 修饰键 · 音频块选择与拖拽（时间轴） ────────────────────
     "modifier.clipMultiSelectToggle": {
         labelKey: "kb_modifier_clip_multi_select_toggle",
@@ -763,6 +821,7 @@ export const GROUP_LABEL_KEYS: Record<ActionMeta["group"], string> = {
     clip: "kb_group_clip",
     pianoRoll: "kb_group_pianoroll",
     paramEditor: "kb_group_param_editor",
+    paramBlock: "kb_group_param_block",
     quickSearch: "kb_group_quick_search",
     layout: "kb_group_layout",
     host: "kb_group_host",
@@ -792,6 +851,7 @@ export const GROUP_NAV_LABEL_KEYS: Partial<Record<ActionMeta["group"], string>> 
     project: "kb_group_project_nav",
     clip: "kb_group_clip_nav",
     paramEditor: "kb_group_param_editor_nav",
+    paramBlock: "kb_group_param_block_nav",
     modClip: "kb_group_mod_clip_nav",
     modFade: "kb_group_mod_fade_nav",
     modParam: "kb_group_mod_param_nav",
@@ -812,6 +872,7 @@ export const ACTION_GROUP_ORDER: ActionMeta["group"][] = [
     "clip",
     "pianoRoll",
     "paramEditor",
+    "paramBlock",
     "quickSearch",
     "layout",
     "host",

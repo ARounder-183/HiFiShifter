@@ -87,6 +87,16 @@ export type ActionId =
     | "pianoRoll.vibratoPresetPrev" // 拖拽颤音时切换到上一个预设
     | "pianoRoll.vibratoPresetNext" // 拖拽颤音时切换到下一个预设
     | "pianoRoll.cycleDragDirection" // 循环切换当前工具的拖动方向（拖拽中同样生效）
+    // 参数块操作
+    | "paramBlock.split" // 切开参数块
+    | "paramBlock.delete" // 删除参数块
+    | "paramBlock.group" // 编组参数块
+    | "paramBlock.ungroup" // 取消编组参数块
+    | "paramBlock.selectAll" // 全选参数块
+    | "paramBlock.deselect" // 取消选择参数块
+    | "paramBlock.restoreGame" // 还原参数块
+    | "paramBlock.restoreDeleted" // 恢复删除的参数块
+    | "paramBlock.normalizePitch" // 参数块音高归一化
     // 模式切换
     | "mode.toggle" // 模式切换（正向）
     | "mode.selectTool" // 切换到选择工具
@@ -221,6 +231,7 @@ export interface ActionMeta {
         | "clip"
         | "pianoRoll"
         | "paramEditor"
+        | "paramBlock"
         | "quickSearch"
         | "layout"
         | "host"

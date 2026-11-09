@@ -21,7 +21,7 @@ const clip: ParamBlockSourceClip = {
 
 function mergedEdits(): ParamBlockEditSet {
     const block: UserParamBlock = {
-        id: "merged",
+        id: "grouped",
         geometry: {
             kind: "take",
             members: [
@@ -64,7 +64,7 @@ describe("paramBlockComposition", () => {
         ]);
         const merged = composeParamBlockView("root", [clip], mergedEdits(), 5);
         expect(merged.blocks).toHaveLength(1);
-        expect(merged.blocks[0]?.kind).toBe("merged");
+        expect(merged.blocks[0]?.kind).toBe("grouped");
         expect(merged.blocks[0]?.startFrame).toBe(0);
         expect(merged.blocks[0]?.endFrameExclusive).toBe(200);
     });

@@ -37,7 +37,7 @@ export type ParamBlockDragSnapshot = {
         readonly startSec: number;
         readonly endSec: number;
         readonly anchorValue: number | null;
-        readonly merged: boolean;
+        readonly grouped: boolean;
     }[];
     centerValues: ReadonlyMap<string, number>;
     readonly baseValues: readonly number[];
@@ -49,7 +49,6 @@ export type ParamBlockDragSnapshot = {
 export type ParamBlockDragCommit = {
     readonly blockId: string;
     readonly gestureToken: number;
-    readonly center: number;
     readonly key: string;
     readonly startedAt: number;
     /** 手势冻结窗口的起点 / 步长。 */
@@ -106,6 +105,9 @@ export interface ParamBlockDragContext {
     readonly onParamCommitSucceeded: () => void;
     readonly bumpRefreshToken: () => void;
     readonly snapToggleHeldAt: (event: SnapModifiers) => boolean;
+    /** 当前音高吸附总开关；与 snapToggleHeldAt 做 XOR 得到本次手势的有效吸附。 */
+    readonly pitchSnapEnabled: boolean;
+    readonly onError?: (error: unknown) => void;
     readonly resolveValueDelta: (
         startValue: number,
         rawDelta: number,
@@ -142,6 +144,7 @@ export function beginParamBlockDrag(
     context: ParamBlockDragContext,
 ): void {
     const {
+        pitchSnapEnabled,
         paramBlockDragActivityRef,
         paramView,
         rootTrackId,
@@ -170,6 +173,7 @@ export function beginParamBlockDrag(
         onParamCommitSucceeded,
         bumpRefreshToken,
         snapToggleHeldAt,
+        onError,
         resolveValueDelta,
     } = context;
     const pv = paramView;
@@ -251,7 +255,7 @@ export function beginParamBlockDrag(
                   paramBlockDragSnapshotRef.current?.centerValues.get(block.id) ??
                   (editParam === "pitch" ? block.manualValue : null) ??
                   block.averageValue),
-        merged: block.kind === "merged",
+        grouped: block.kind === "grouped",
     }));
     const snapshot: ParamBlockDragSnapshot = {
         key: pv.key,
@@ -330,6 +334,8 @@ export function beginParamBlockDrag(
         shiftKey: args.shiftKey === true,
         altKey: args.altKey === true,
     });
+    const effectivePitchSnap = (toggle: boolean): boolean =>
+        toggle ? !pitchSnapEnabled : pitchSnapEnabled;
     let rafId: number | null = null;
     let gestureHandle: ReturnType<typeof startPointerGesture> | null = null;
     const framePeriodMs = pv.framePeriodMs;
@@ -464,7 +470,7 @@ export function beginParamBlockDrag(
                 blocks: dragSnapshot.blocks,
                 valueDelta: lastDelta,
                 param: editParam,
-                snapToSemitone: !lastSnapToggleHeld,
+                snapToSemitone: effectivePitchSnap(lastSnapToggleHeld),
             });
         }
         invalidateParamBlockSpec();
@@ -567,7 +573,7 @@ export function beginParamBlockDrag(
                           startValue: block.anchorValue,
                           valueDelta: lastDelta,
                           param: editParam,
-                          snapToSemitone: !lastSnapToggleHeld,
+                          snapToSemitone: effectivePitchSnap(lastSnapToggleHeld),
                       });
                 if (center !== null && Number.isFinite(center)) {
                     logicalCenters.set(block.id, center);
@@ -584,22 +590,10 @@ export function beginParamBlockDrag(
          * 缩放时得到不同结果，松手后块像被拉到远处。
          */
         const commitCenterBlockId = args.anchorBlockId;
-        const rawCommitCenter = pitchScaleDrag ? null : dragAnchorValue + commitDelta;
-        /*
-         * 交接锁存必须使用**最终显示中心**，而不是未吸附的曲线主簇。
-         * 普通绘制会把 pitch 中心吸到最近半音行心；若这里锁住 60.4，
-         * 松手后曲线到位的瞬间就会先显示 60.4、再跳到 60，形成闪烁。
-         */
-        const commitCenter = resolveParamBlockCommitDisplayCenter({
-            rawCenter: rawCommitCenter,
-            param: editParam,
-            continuous: pitchScaleDrag || lastSnapToggleHeld,
-        });
         const commitStartedAt = performance.now();
         const handoff: ParamBlockDragCommit = {
             blockId: commitCenterBlockId,
             gestureToken,
-            center: commitCenter ?? 0,
             key: pv.key,
             startedAt: commitStartedAt,
             startFrame: pv.startFrame,
@@ -763,6 +757,7 @@ export function beginParamBlockDrag(
                 } catch (error) {
                     handoff.failed = true;
                     console.error("[pianoRoll] block drag commit failed", error);
+                    onError?.(error);
                     if (
                         ownsParamBlockGesture({
                             activeGestureToken: paramBlockActiveGestureTokenRef.current,

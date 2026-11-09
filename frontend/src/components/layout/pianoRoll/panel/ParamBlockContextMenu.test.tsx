@@ -4,6 +4,10 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { ParamBlockContextMenu } from "./ParamBlockContextMenu";
 
+vi.mock("../../../../ui/useMenuShortcut", () => ({
+    useMenuShortcut: () => undefined,
+}));
+
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 let host: HTMLDivElement;
@@ -22,61 +26,50 @@ afterEach(() => {
 
 const labels: Record<string, string> = {
     param_blocks_split_here: "切开",
-    param_blocks_merge: "合并",
+    param_blocks_group: "编组",
+    param_blocks_ungroup: "取消编组",
+    param_blocks_restore_game: "还原",
+    param_blocks_restore_deleted: "恢复删除的块",
+    param_blocks_normalize_pitch: "音高归一化",
     param_blocks_delete: "删除",
-    param_blocks_restore_game: "音符块还原",
 };
 
-test("块菜单包含分段还原", async () => {
+const baseProps = {
+    x: 10,
+    y: 20,
+    selectedCount: 2,
+    canGroup: true,
+    canUngroup: false,
+    canDelete: true,
+    splitAtSec: 1,
+    onSplit: () => {},
+    onGroup: () => {},
+    onUngroup: () => {},
+    onDelete: () => {},
+    onClose: () => {},
+    tf: (key: keyof typeof labels) => labels[key] ?? key,
+};
+
+test("块菜单包含编组 / 取消编组 / 还原 / 恢复删除 / 删除", async () => {
     await act(async () => {
-        root.render(
-            <ParamBlockContextMenu
-                x={10}
-                y={20}
-                selectedCount={2}
-                canMerge
-                canDelete
-                splitAtSec={1}
-                selectedDeleted={false}
-                onSplit={() => {}}
-                onMerge={() => {}}
-                onDelete={() => {}}
-                onClose={() => {}}
-                tf={(key) => labels[key] ?? key}
-            />,
-        );
+        root.render(<ParamBlockContextMenu {...baseProps} canRestoreDeleted />);
     });
     expect(
         [...document.querySelectorAll<HTMLButtonElement>(".hs-menu__item")].map((item) =>
             item.textContent?.trim(),
         ),
-    ).toEqual(["切开", "合并", "音符块还原", "删除"]);
+    ).toEqual(["切开", "编组", "取消编组", "还原", "恢复删除的块", "音高归一化", "删除"]);
 });
 
-test("合并项调用回调", async () => {
-    const onMerge = vi.fn();
+test("编组项调用回调", async () => {
+    const onGroup = vi.fn();
     await act(async () => {
-        root.render(
-            <ParamBlockContextMenu
-                x={10}
-                y={20}
-                selectedCount={2}
-                canMerge
-                canDelete
-                splitAtSec={1}
-                selectedDeleted={false}
-                onSplit={() => {}}
-                onMerge={onMerge}
-                onDelete={() => {}}
-                onClose={() => {}}
-                tf={(key) => labels[key] ?? key}
-            />,
-        );
+        root.render(<ParamBlockContextMenu {...baseProps} onGroup={onGroup} />);
     });
-    const merge = [...document.querySelectorAll<HTMLButtonElement>(".hs-menu__item")].find(
-        (item) => item.textContent?.trim() === "合并",
+    const group = [...document.querySelectorAll<HTMLButtonElement>(".hs-menu__item")].find(
+        (item) => item.textContent?.trim() === "编组",
     );
-    if (merge === undefined) throw new Error("merge item missing");
-    await act(async () => merge.click());
-    expect(onMerge).toHaveBeenCalledTimes(1);
+    if (group === undefined) throw new Error("group item missing");
+    await act(async () => group.click());
+    expect(onGroup).toHaveBeenCalledTimes(1);
 });

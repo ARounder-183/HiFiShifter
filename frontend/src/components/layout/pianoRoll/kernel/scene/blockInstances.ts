@@ -40,7 +40,7 @@ export interface ParamBlockRectInput {
     readonly hovered?: boolean;
     /** 悬停在同一相接边界上；只强化该处手柄，不改变可见性规则。 */
     readonly transitionHovered?: boolean;
-    readonly merged: boolean;
+    readonly grouped: boolean;
     readonly transitionHandle?: {
         readonly sec: number;
         readonly leftId: string;
@@ -57,7 +57,7 @@ export interface ParamBlockInstanceArgs {
     readonly blocks: readonly ParamBlockRectInput[];
     readonly borderRgba: Rgba;
     readonly selectedRgba: Rgba;
-    readonly mergedRgba: Rgba;
+    readonly groupedRgba: Rgba;
     readonly labelRgba?: Rgba;
     readonly selectedLabelRgba?: Rgba;
     /** 块填充色；缺省不画填充（兼容只画描边的旧调用）。 */
@@ -65,7 +65,7 @@ export interface ParamBlockInstanceArgs {
     /** 鼠标悬停块的填充色；缺省复用 `fillRgba`。 */
     readonly hoverFillRgba?: Rgba;
     /** 合并块的填充色；缺省复用 `fillRgba`。 */
-    readonly mergedFillRgba?: Rgba;
+    readonly groupedFillRgba?: Rgba;
     /** 选中块的填充色；缺省复用 `fillRgba`。 */
     readonly selectedFillRgba?: Rgba;
     /** 顶部高光色；缺省半透白。 */
@@ -199,8 +199,8 @@ export function buildParamBlockScene(args: ParamBlockInstanceArgs): ParamBlockSc
         const rgba = block.selected ? args.selectedRgba : args.borderRgba;
         const fillRgba = block.selected
             ? (args.selectedFillRgba ?? args.fillRgba)
-            : block.merged
-              ? (args.mergedFillRgba ?? args.fillRgba)
+            : block.grouped
+              ? (args.groupedFillRgba ?? args.fillRgba)
               : args.fillRgba;
         const fillWidth = visibleWidth;
         // 块相交；只在被视口截断的那一侧画边线，不能在上/下边缘伪造一条块顶。
@@ -272,13 +272,13 @@ export function buildParamBlockScene(args: ParamBlockInstanceArgs): ParamBlockSc
                 value: -3,
             });
         }
-        if (block.merged) {
+        if (block.grouped) {
             items.push({
                 x: x0,
                 y: top,
                 w: visibleWidth,
                 h: borderPx,
-                rgba: args.mergedRgba,
+                rgba: args.groupedRgba,
                 value: -4,
             });
         }

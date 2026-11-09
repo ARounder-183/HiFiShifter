@@ -43,7 +43,7 @@ describe("默认值：重做绑两个键", () => {
     it("仅重做与块模式切换具有多种默认键法", () => {
         // 块切换接受 Backquote 的上下档，重做接受两种常见键法。
         const multi = ALL_ACTION_IDS.filter((id) => DEFAULT_KEYBINDINGS[id].length > 1);
-        expect(multi).toEqual(["mode.toggleBlockEdit", "edit.redo"]);
+        expect(multi).toEqual(["mode.toggleBlockEdit", "edit.redo", "paramBlock.delete"]);
     });
 });
 

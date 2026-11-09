@@ -6,7 +6,7 @@ import { buildParamBlockInstances, buildParamBlockScene } from "./blockInstances
 
 const rgba = [0.2, 0.2, 0.2, 1] as const;
 const selectedRgba = [0.1, 0.5, 1, 1] as const;
-const mergedRgba = [1, 0.5, 0.2, 1] as const;
+const groupedRgba = [1, 0.5, 0.2, 1] as const;
 
 describe("buildParamBlockInstances", () => {
     const axis = createTimelineAxis({ pxPerSec: 100, scrollLeftPx: 0, viewportWidthPx: 800 });
@@ -23,12 +23,12 @@ describe("buildParamBlockInstances", () => {
                     topPx: 100,
                     heightPx: 40,
                     selected: false,
-                    merged: false,
+                    grouped: false,
                 },
             ],
             borderRgba: rgba,
             selectedRgba,
-            mergedRgba,
+            groupedRgba,
         });
         expect(items).toHaveLength(4);
         expect(items.every((item) => item.rgba === rgba)).toBe(true);
@@ -52,12 +52,12 @@ describe("buildParamBlockInstances", () => {
                     topPx: 100,
                     heightPx: 40,
                     selected: true,
-                    merged: false,
+                    grouped: false,
                 },
             ],
             borderRgba: rgba,
             selectedRgba,
-            mergedRgba,
+            groupedRgba,
         });
         expect(items.every((item) => item.rgba === selectedRgba)).toBe(true);
     });
@@ -74,12 +74,12 @@ describe("buildParamBlockInstances", () => {
                     topPx: 100,
                     heightPx: 40,
                     selected: false,
-                    merged: false,
+                    grouped: false,
                 },
             ],
             borderRgba: rgba,
             selectedRgba,
-            mergedRgba,
+            groupedRgba,
             fillRgba: rgba,
         });
         expect(scene.fills).toHaveLength(1);
@@ -99,7 +99,7 @@ describe("buildParamBlockInstances", () => {
                     topPx: 100,
                     heightPx: 40,
                     selected: false,
-                    merged: false,
+                    grouped: false,
                     contiguousEnd: true,
                 },
                 {
@@ -109,13 +109,13 @@ describe("buildParamBlockInstances", () => {
                     topPx: 100,
                     heightPx: 40,
                     selected: false,
-                    merged: false,
+                    grouped: false,
                     contiguousStart: true,
                 },
             ],
             borderRgba: rgba,
             selectedRgba,
-            mergedRgba,
+            groupedRgba,
         });
         // 2 块 × 4 边；左右边界没有因连续关系而省略。
         expect(items).toHaveLength(8);
@@ -134,15 +134,15 @@ describe("buildParamBlockInstances", () => {
                     topPx: 80,
                     heightPx: 60,
                     selected: false,
-                    merged: true,
+                    grouped: true,
                 },
             ],
             borderRgba: rgba,
             selectedRgba,
-            mergedRgba,
+            groupedRgba,
         });
         expect(items).toHaveLength(5);
-        expect(items[4].rgba).toBe(mergedRgba);
+        expect(items[4].rgba).toBe(groupedRgba);
     });
 
     it("视口外块与零宽块不产生几何", () => {
@@ -157,7 +157,7 @@ describe("buildParamBlockInstances", () => {
                     topPx: 0,
                     heightPx: 40,
                     selected: false,
-                    merged: false,
+                    grouped: false,
                 },
                 {
                     id: "zero",
@@ -166,12 +166,12 @@ describe("buildParamBlockInstances", () => {
                     topPx: 0,
                     heightPx: 40,
                     selected: false,
-                    merged: false,
+                    grouped: false,
                 },
             ],
             borderRgba: rgba,
             selectedRgba,
-            mergedRgba,
+            groupedRgba,
         });
         expect(items).toEqual([]);
     });
@@ -188,12 +188,12 @@ describe("buildParamBlockInstances", () => {
                     topPx: 390,
                     heightPx: 80,
                     selected: false,
-                    merged: false,
+                    grouped: false,
                 },
             ],
             borderRgba: rgba,
             selectedRgba,
-            mergedRgba,
+            groupedRgba,
         });
         expect(items.every((item) => Number.isFinite(item.y) && Number.isFinite(item.h))).toBe(
             true,
@@ -213,7 +213,7 @@ describe("buildParamBlockInstances", () => {
                     topPx: 100,
                     heightPx: 40,
                     selected: false,
-                    merged: false,
+                    grouped: false,
                     label: "64.2",
                 },
                 {
@@ -223,13 +223,13 @@ describe("buildParamBlockInstances", () => {
                     topPx: 100,
                     heightPx: 40,
                     selected: false,
-                    merged: false,
+                    grouped: false,
                     label: "72.0",
                 },
             ],
             borderRgba: rgba,
             selectedRgba,
-            mergedRgba,
+            groupedRgba,
             labelRgba: rgba,
         });
         expect(scene.labels).toHaveLength(1);
@@ -244,7 +244,7 @@ describe("buildParamBlockInstances", () => {
             topPx: 100,
             heightPx: 40,
             selected: true,
-            merged: false,
+            grouped: false,
             label: "60.0",
         };
         expect(
@@ -254,7 +254,7 @@ describe("buildParamBlockInstances", () => {
                 blocks: [block],
                 borderRgba: rgba,
                 selectedRgba,
-                mergedRgba,
+                groupedRgba,
             }).labels,
         ).toHaveLength(0);
         expect(
@@ -264,7 +264,7 @@ describe("buildParamBlockInstances", () => {
                 blocks: [block],
                 borderRgba: rgba,
                 selectedRgba,
-                mergedRgba,
+                groupedRgba,
                 labelRgba: rgba,
             }).labels[0].rgba,
         ).toBe(rgba);
@@ -275,7 +275,7 @@ describe("buildParamBlockInstances", () => {
                 blocks: [block],
                 borderRgba: rgba,
                 selectedRgba,
-                mergedRgba,
+                groupedRgba,
                 labelRgba: rgba,
                 selectedLabelRgba: selectedRgba,
             }).labels[0].rgba,
@@ -294,12 +294,12 @@ describe("buildParamBlockInstances", () => {
                     topPx: 100,
                     heightPx: 40,
                     selected: false,
-                    merged: false,
+                    grouped: false,
                 },
             ],
             borderRgba: rgba,
             selectedRgba,
-            mergedRgba,
+            groupedRgba,
             fillRgba: [0.5, 0.6, 0.7, 1],
             topHighlightRgba: [1, 1, 1, 0.2],
             topHighlightPx: 2,
@@ -323,7 +323,7 @@ describe("buildParamBlockInstances", () => {
                     topPx: 100,
                     heightPx: 24,
                     selected: true,
-                    merged: false,
+                    grouped: false,
                     transitionHandle: { sec: 2, leftId: "a", rightId: "b", widthSec: 0.1 },
                 },
                 {
@@ -333,12 +333,12 @@ describe("buildParamBlockInstances", () => {
                     topPx: 130,
                     heightPx: 24,
                     selected: false,
-                    merged: false,
+                    grouped: false,
                 },
             ],
             borderRgba: rgba,
             selectedRgba,
-            mergedRgba,
+            groupedRgba,
             transitionRgba: selectedRgba,
         });
         // 横线 + 柔光 + 圆点 + 相接点圆点：共 4 个实例。
@@ -366,13 +366,13 @@ describe("buildParamBlockInstances", () => {
                     topPx: 100,
                     heightPx: 24,
                     selected: false,
-                    merged: false,
+                    grouped: false,
                     transitionHandle: { sec: 2, leftId: "a", rightId: "b", widthSec: 0.1 },
                 },
             ],
             borderRgba: rgba,
             selectedRgba,
-            mergedRgba,
+            groupedRgba,
         });
         expect(scene.handles).toEqual([]);
         expect(scene.transitions).toEqual([]);
@@ -389,7 +389,7 @@ it("at a small zoom the grip stays above an ascending transition and hit testing
             topPx: 100,
             heightPx: 24,
             selected: true,
-            merged: false,
+            grouped: false,
             transitionHandle: { sec: 1, leftId: "left", rightId: "right", widthSec: 0 },
         },
         {
@@ -399,7 +399,7 @@ it("at a small zoom the grip stays above an ascending transition and hit testing
             topPx: 60,
             heightPx: 24,
             selected: false,
-            merged: false,
+            grouped: false,
         },
     ];
     const scene = buildParamBlockScene({
@@ -408,7 +408,7 @@ it("at a small zoom the grip stays above an ascending transition and hit testing
         blocks,
         borderRgba: rgba,
         selectedRgba,
-        mergedRgba,
+        groupedRgba,
         transitionRgba: selectedRgba,
     });
     const grip = scene.handles[2];

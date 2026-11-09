@@ -16,7 +16,7 @@ import { timeToFrame } from "../utils";
 import { isModifierActive } from "../../../../features/keybindings/keybindingsSlice";
 import type { StrokeMode } from "../types";
 import type { PointerEvent as ReactPointerEvent } from "react";
-import type { PointerDeps } from "./pointerDeps";
+import type { ParamBlockPointerDownResult, PointerDeps } from "./pointerDeps";
 import { handleFreehandPointerDown } from "./freehandPointerDown";
 import { handleVibratoPointerDown } from "./vibratoPointerDown";
 import { handleSelectPointerDown } from "./selectPointerDown";
@@ -333,12 +333,9 @@ export function handleCanvasPointerDown(
     if (onParamBlockPointerDown) {
         const rect = canvasRef.current?.getBoundingClientRect();
         if (rect) {
+            let blockResult: ParamBlockPointerDownResult = { handled: false };
             try {
-                /*
-                 * 拖块时不要先 seek：我们要连续纵向拖动；按下即挪播放头会打断
-                 * 手势，而且块编辑不是“定位播放头”。命中块时再阻止后续 seek。
-                 */
-                const consumed = onParamBlockPointerDown({
+                blockResult = onParamBlockPointerDown({
                     sec: pointerSec(e.clientX),
                     localY: e.clientY - rect.top,
                     clientY: e.clientY,
@@ -348,13 +345,13 @@ export function handleCanvasPointerDown(
                     captureTarget: e.currentTarget,
                     setActivePointerGestureEnd,
                     clearActivePointerGestureEnd,
-                    // 新增块用同一个多选修饰键起步：修饰键 + 空白拖拽。
                     add: isModifierActive(paramMultiSelectKb, e.nativeEvent),
-                    // 沿用参数编辑器的多选键（默认 Ctrl / Cmd），与选区语义一致。
                     toggle: isModifierActive(paramMultiSelectKb, e.nativeEvent),
                     pointerType: e.nativeEvent.pointerType,
                     altKey: e.altKey,
                     shiftKey: e.shiftKey,
+                    ctrlKey: e.ctrlKey,
+                    metaKey: e.metaKey,
                     yToValue,
                     canvasHeightPx: rect.height,
                     blockSnapEnabled: isEffectivePitchSnapActive(e.nativeEvent),
@@ -369,30 +366,53 @@ export function handleCanvasPointerDown(
                     editParam,
                     gridStep: 1,
                 });
-                if (consumed) {
-                    /*
-                     * 左键不要 preventDefault：Pointer Events 规范下这会抑制
-                     * 兼容 mouse 事件，双击（dblclick）就永远不会派发。
-                     * 指针捕获也由具体手势安装；单击本身不捕获，否则 pointerup
-                     * 会被重定向，浏览器无法把两次点击合成为 dblclick。
-                     */
-                    if (e.button === 2) {
-                        e.preventDefault();
-                        e.stopPropagation();
-                    }
-                    return;
-                }
             } catch {
                 // 块层是实验能力：命中异常不得让参数编辑器整体失去绘制手势。
+            }
+            if (blockResult.handled) {
+                if (
+                    blockResult.seekOnClick &&
+                    e.button === 0 &&
+                    !isStylusLike(e.nativeEvent) &&
+                    paramEditorSeekPlayheadEnabled !== false
+                ) {
+                    const startX = e.clientX;
+                    const startY = e.clientY;
+                    const seekOnUp = (up: globalThis.PointerEvent) => {
+                        window.removeEventListener("pointerup", seekOnUp, true);
+                        if (Math.hypot(up.clientX - startX, up.clientY - startY) < 4) {
+                            const sec = pointerSec(e.clientX);
+                            dispatch(setPlayheadSec(sec));
+                            void dispatch(seekPlayhead(sec));
+                        }
+                    };
+                    window.addEventListener("pointerup", seekOnUp, true);
+                }
+                if (e.button === 2) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                }
+                return;
             }
         }
     }
     /*
      * 块工具在未命中块时已清空块选择；这里必须终止手势，不能让同一次按下继续
      * 落进自由绘制分支。否则“点击块外空白”会顺手在曲线上画一个点，块工具看起来
-     * 像误触了画笔。
+     * 像误触了画笔。空白点击仍应按设置移动播放头。
      */
-    if (toolMode === "block") return;
+    if (toolMode === "block") {
+        if (
+            e.button === 0 &&
+            !isStylusLike(e.nativeEvent) &&
+            paramEditorSeekPlayheadEnabled !== false
+        ) {
+            const sec = pointerSec(e.clientX);
+            dispatch(setPlayheadSec(sec));
+            void dispatch(seekPlayhead(sec));
+        }
+        return;
+    }
 
     // 掌压拒识：笔 / 鼠标手势进行中时，触摸（书写时的手掌）按下不中止、
     // 不接管当前手势。pen / mouse 的第二指针维持原语义（切笔尖 / 橡皮

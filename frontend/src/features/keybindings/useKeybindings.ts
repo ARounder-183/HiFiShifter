@@ -381,24 +381,6 @@ export function useKeybindings(handler: KeybindingActionHandler): void {
              * 块层只有在真正选中块并成功处理时才 preventDefault（焦点仍可
              * 留在编辑区）；这里按焦点域 + 工具模式直接排除时间轴动作。
              */
-            const blockSplitOwnsS =
-                domain === "pianoRoll" &&
-                toolModeRef.current === "block" &&
-                e.key.toLowerCase() === "s" &&
-                !e.ctrlKey &&
-                !e.metaKey &&
-                !e.altKey;
-            if (blockSplitOwnsS) {
-                /*
-                 * 块切分必须同时吞掉事件：只 `return` 会让同一 keydown
-                 * 继续落到时间轴的捕获监听，结果上方 Clip 也被切开。
-                 * 块层自己的本地监听挂在 window 捕获阶段，会先于这里执行；
-                 * 这里只负责阻止事件继续传播给时间轴。
-                 */
-                e.stopPropagation();
-                return;
-            }
-
             /*
              * 方向键的 preventDefault 不在这里预先做：只有真正派发/消费动作的
              * 分支才阻止默认行为（下方各派发分支与 repeat 吞掉分支都已各自

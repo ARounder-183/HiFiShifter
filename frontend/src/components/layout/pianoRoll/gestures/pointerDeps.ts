@@ -38,12 +38,16 @@ import type { VibratoHudAnchor } from "../vibratoHudState";
 import type { CanvasCursor } from "./pointerSupport";
 import type { MutableRefObject, PointerEvent as ReactPointerEvent, RefObject } from "react";
 
+/** 块工具 pointerdown 的结构化结果：是否消费，以及单击是否应移动播放头。 */
+export type ParamBlockPointerDownResult =
+    { readonly handled: true; readonly seekOnClick: boolean } | { readonly handled: false };
+
 /** 手势回调需要的上下文（各自按需 `Pick`）。 */
 export type PointerDeps = {
     /**
      * 块编辑工具命中。
      *
-     * 返回 true 表示这次按下已由块层消费，参数线手势不再启动。
+     * handled=true 表示这次按下已由块层消费，参数线手势不再启动。
      */
     onParamBlockPointerDown: (args: {
         sec: number;
@@ -71,6 +75,8 @@ export type PointerDeps = {
         altKey?: boolean;
         /** 按下时的 Shift 状态；块编辑临时取消吸附（按 settings 绑定）。 */
         shiftKey?: boolean;
+        ctrlKey?: boolean;
+        metaKey?: boolean;
         /** 屏幕 clientX → 内容秒（用于判断块时间范围）。 */
         secAtClientX: (clientX: number) => number;
         /** 吸附开关（拖动中可随修饰键变化）。 */
@@ -89,7 +95,7 @@ export type PointerDeps = {
         contextMenu: boolean;
         /** 双击命中的块内切分点；由面板负责执行切分。 */
         doubleClick?: boolean;
-    }) => boolean;
+    }) => ParamBlockPointerDownResult;
     activePointerGestureEndRef: RefObject<(() => void) | null>;
     applyDenseToLiveEdit: (
         pv: ParamViewSegment,

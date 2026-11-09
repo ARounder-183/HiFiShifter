@@ -68,7 +68,6 @@ type Props = {
         | "onCanvasPointerMoveForBlocks"
         | "paddedContentWidth"
         | "paramValuePreview"
-        | "paramBlockError"
         | "pianoRollAmplitudeMap"
         | "prTickAxis"
         | "pxPerBeat"
@@ -426,14 +425,6 @@ export function EditorArea({ m }: Props) {
                                     className="absolute inset-0 pointer-events-none"
                                     aria-hidden
                                 />
-                                {m.paramBlockError ? (
-                                    <div
-                                        role="alert"
-                                        className="absolute left-2 top-2 z-30 max-w-md rounded bg-qt-panel px-2 py-1 text-qt-sm text-qt-text"
-                                    >
-                                        {m.paramBlockError}
-                                    </div>
-                                ) : null}
 
                                 {/* 指针旁的实时读数：**参数值 + 颤音拖拽状态合成一个
                                     气泡**。两者曾经各弹一个，颤音那个还压在值上面，

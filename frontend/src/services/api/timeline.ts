@@ -11,6 +11,7 @@ import type { LinkedParamCurves } from "../../features/session/sessionTypes";
 
 import { invoke } from "../invoke";
 import type { ClipTemplate } from "../../features/session/sessionTypes";
+import { normalizeParamBlockEditSet } from "../../components/layout/pianoRoll/paramBlockTypes";
 
 export interface SourceFileChange {
     clip_id: string;
@@ -439,7 +440,7 @@ export const timelineApi = {
                 orphanCount: reply.orphanCount ?? 0,
                 analysisPending: reply.analysisPending ?? false,
             },
-            edits: reply.edits,
+            edits: normalizeParamBlockEditSet(reply.edits),
             curveRevision: reply.curveRevision ?? 0,
         };
     },
@@ -466,7 +467,7 @@ export const timelineApi = {
                 orphanCount: reply.orphanCount ?? 0,
                 analysisPending: reply.analysisPending ?? false,
             },
-            edits: reply.edits,
+            edits: normalizeParamBlockEditSet(reply.edits),
             curveRevision: reply.curveRevision ?? 0,
         };
     },
@@ -489,7 +490,7 @@ export const timelineApi = {
                 orphanCount: reply.orphanCount ?? 0,
                 analysisPending: reply.analysisPending ?? false,
             },
-            edits: reply.edits,
+            edits: normalizeParamBlockEditSet(reply.edits),
             curveRevision: reply.curveRevision ?? 0,
         };
     },

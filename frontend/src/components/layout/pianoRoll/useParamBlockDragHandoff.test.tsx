@@ -39,7 +39,6 @@ async function harness() {
     const commit: NonNullable<ParamBlockDragHandoffInputs["commitRef"]["current"]> = {
         blockId: "note",
         gestureToken: 1,
-        center: 64,
         key: oldView.key,
         startedAt: 0,
         startFrame: 0,

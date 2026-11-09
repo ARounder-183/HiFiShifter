@@ -39,6 +39,8 @@ export interface UserParamBlock {
     readonly value?: number | null;
     readonly transitionOutSec?: number;
     readonly createdSeq: number;
+    /** 可逆编组快照：本块由哪些原始用户块编组而来。 */
+    readonly groupedFrom?: readonly UserParamBlock[];
 }
 
 export interface ParamBlockEditSet {
@@ -58,10 +60,12 @@ export interface ProjectedMember {
     readonly endFrameExclusive: number;
 }
 
-export type ProjectedBlockKind = "base" | "user" | "merged" | "manual";
+export type ProjectedBlockKind = "base" | "user" | "grouped" | "manual";
 
 export interface ProjectedParamBlock {
     readonly id: string;
+    /** 派生视图块所属的用户块 id；base 块没有，多 run 用户块指向父块。 */
+    readonly userBlockId?: string;
     readonly startFrame: number;
     readonly endFrameExclusive: number;
     readonly transitionFrames?: number;
@@ -86,6 +90,17 @@ export const EMPTY_PARAM_BLOCK_EDIT_SET: ParamBlockEditSet = {
     revision: 0,
     blocks: [],
 };
+
+/** 唯一规范化入口：线协议空编辑集必须补出 blocks 数组。 */
+export function normalizeParamBlockEditSet(
+    value: Partial<ParamBlockEditSet> | null | undefined,
+): ParamBlockEditSet {
+    return {
+        schemaVersion: 1,
+        revision: Number.isFinite(value?.revision) ? Number(value!.revision) : 0,
+        blocks: Array.isArray(value?.blocks) ? value!.blocks! : [],
+    };
+}
 
 export const EMPTY_PARAM_BLOCK_VIEW: ParamBlockView = {
     schemaVersion: 1,

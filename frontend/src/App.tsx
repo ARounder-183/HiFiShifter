@@ -103,6 +103,7 @@ import { PitchAnalysisStatusChip } from "./components/layout/PitchAnalysisStatus
 import { ParamDataLoadingChip } from "./components/layout/ParamDataLoadingChip";
 import { AppStatusProgressChips } from "./components/layout/AppStatusProgressChips";
 import { ParamBlockAnalysisStatus } from "./components/layout/pianoRoll/panel/ParamBlockAnalysisStatus";
+import { ParamBlockFeedbackChip } from "./components/layout/pianoRoll/panel/ParamBlockFeedbackChip";
 import { appStatusProgressBus } from "./utils/appStatusProgressBus";
 const FileBrowserPanel = lazy(() =>
     import("./components/layout/FileBrowserPanel").then((module) => ({
@@ -171,8 +172,10 @@ import { selectMergedKeybindings } from "./features/keybindings/keybindingsSlice
 import { beginHoldRepeat } from "./features/keybindings/holdRepeat";
 import {
     ACTION_TO_EDIT_OP,
+    PARAM_BLOCK_ACTION_TO_OP,
     resolveCopyCutRoute,
     resolveEditOpRoute,
+    resolveParamBlockEditChannel,
     resolvePasteRoute,
     type EditOpChannel,
 } from "./features/keybindings/focusRouting";
@@ -2678,6 +2681,22 @@ function AppInner() {
                 if (deniedText) showNotice(deniedText, 4000, "warning");
                 return false;
             }
+            // ── 参数块动作通道 ──
+            // 块动作拥有独立的 ActionId 与 paramEditorBlock 作用域；这里只负责
+            // 在正确的活动表面/工具下派发，具体编辑由面板消费。
+            const blockOp = PARAM_BLOCK_ACTION_TO_OP[actionId];
+            if (blockOp) {
+                const channel = resolveParamBlockEditChannel(
+                    getActiveSurface(),
+                    store.getState().session.toolMode,
+                );
+                if (channel) {
+                    window.dispatchEvent(
+                        new CustomEvent(channel, { detail: { op: blockOp, stroke } }),
+                    );
+                }
+                return;
+            }
             // ── 编辑操作统一路由 ──
             // clip.* 与 pianoRoll.* 的同义绑定（Ctrl+C/X/V）归一为同一编辑 op
             // 后定向派发到唯一执行者 —— 事件名即契约：hifi:editOp 只属于
@@ -4619,6 +4638,8 @@ function AppInner() {
                     <PitchAnalysisStatusChip />
                     {/* 音符块（GAME / VAD）分析：与音高进度同一状态栏槽位。 */}
                     <ParamBlockAnalysisStatus enabled />
+                    {/* 参数块编辑反馈：错误 / 拒绝 / 需要用户处置的提示统一走状态栏。 */}
+                    <ParamBlockFeedbackChip />
                     {/* 参数曲线取数提示：**独立订阅**外部 store，不参与本组件重渲染
                         （见 ParamDataLoadingChip 的说明）。 */}
                     <ParamDataLoadingChip />

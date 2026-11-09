@@ -16,14 +16,18 @@ import { composeParamBlockView } from "./paramBlockComposition";
 import {
     createUserBlock,
     deleteProjectedBlocks,
-    mergeProjectedBlocks,
+    groupProjectedBlocks,
     newParamBlockId,
     resizeProjectedBlock,
+    restoreDeletedBlocks,
     setProjectedBlockTransition,
     splitProjectedBlock,
-    unmergeUserBlock,
+    ungroupUserBlock,
+    type DeletedParamBlockSnapshot,
 } from "./paramBlockEditing";
 import { toFrame, type ParamBlockSourceClip } from "./paramBlockProjection";
+import { getDrawPreviewValue } from "./paramValuePreviewLogic";
+import type { ScaleLike } from "../../../utils/musicalScales";
 import {
     EMPTY_PARAM_BLOCK_EDIT_SET,
     type ParamBlockEditSet,
@@ -211,20 +215,14 @@ export interface ParamBlockMember {
 export interface ParamBlock {
     /** 派生视图块；只读，不是持久化权威。 */
     readonly projected?: ProjectedParamBlock;
+    /** 多 run 用户块所属的父块 id；base 块没有。 */
+    readonly userBlockId?: string;
     readonly id: string;
     readonly rootTrackId: string;
-    readonly kind: "auto" | "merged" | "user" | "manual";
+    readonly kind: "auto" | "grouped" | "user" | "manual";
     readonly members: readonly ParamBlockMember[];
     readonly startSec: number;
     readonly endSec: number;
-    /**
-     * 独立块的几何锚点：块当时所属音节 / 容器的工程秒范围。
-     *
-     * 这不是父子关系。它只用于 Clip 移动 / 拉伸后把**这个块自己**的区间
-     * 重新映射到同一位置；切分后的左右块各自保存锚点，互不引用。
-     */
-    readonly anchorStartSec?: number;
-    readonly anchorEndSec?: number;
     /**
      * 块的代表参数值（**密度众数中心**，不是算术均值）。
      *
@@ -266,7 +264,7 @@ export interface ParamBlockRect {
     /** 与像素同源的块代表值（供拖动锚点直接读取）。 */
     readonly averageValue: number | null;
     readonly selected: boolean;
-    readonly merged: boolean;
+    readonly grouped: boolean;
     /**
      * 本次时间伸缩手势的预览，使用**手势起点**的代表值锁定纵向中心。
      *
@@ -859,22 +857,17 @@ export function resolveParamBlockCreateSpan(args: {
     return { startSec, endSec };
 }
 
-/** 切开位置：只有光标靠近网格线时才吸附，否则保留精确时间。 */
+/** 切开位置：只在像素阈值内吸附；开关与 XOR 由调用方的 snapSec 统一决定。 */
 export function resolveParamBlockSplitSec(args: {
     readonly sec: number;
-    readonly bpm: number;
-    readonly timeSignatureDenominator: number;
-    readonly stepBeats: number;
+    readonly snapSec: (sec: number) => number;
+    readonly enabled: boolean;
     readonly pxPerSec: number;
     readonly thresholdPx: number;
     readonly snapToggleHeld?: boolean;
 }): number {
-    if (args.snapToggleHeld === true || !Number.isFinite(args.sec)) return args.sec;
-    const bpm = Number.isFinite(args.bpm) && args.bpm > 0 ? args.bpm : 120;
-    const denominator = Math.max(1, Math.round(args.timeSignatureDenominator) || 4);
-    const stepBeats = Math.max(1e-9, Number(args.stepBeats) || 1);
-    const gridSec = (60 / bpm) * stepBeats * (4 / denominator);
-    const snapped = Math.round(args.sec / gridSec) * gridSec;
+    if (!args.enabled || !Number.isFinite(args.sec)) return args.sec;
+    const snapped = args.snapSec(args.sec);
     const distancePx = Math.abs(snapped - args.sec) * Math.max(1, args.pxPerSec);
     return distancePx <= Math.max(0, args.thresholdPx) ? snapped : args.sec;
 }
@@ -883,34 +876,39 @@ export function resolveParamBlockSplitSec(args: {
 export interface ParamBlockState {
     readonly editSet: ParamBlockEditSet;
     readonly view?: ParamBlockView;
-    /** 手势起点的编辑集快照，用于乐观并发重放。 */
-    readonly editBase?: ParamBlockEditSet;
     readonly rootTrackId?: string;
     /** 当前 root 组 Clip 的只读快照；仅用于本地预览合成，不持久化。 */
     readonly clips?: readonly ParamBlockSourceClip[];
-    /** 上一批被删除的块，供用户一键恢复；仅会话内有效。 */
-    readonly lastDeletedBlocks?: readonly ParamBlock[];
+    /** 上一批被删除的块源域快照，供用户一键恢复；仅会话内有效。 */
+    readonly lastDeletedBlocks?: readonly DeletedParamBlockSnapshot[];
 }
 
 export const EMPTY_PARAM_BLOCK_STATE: ParamBlockState = {
     editSet: EMPTY_PARAM_BLOCK_EDIT_SET,
 };
 
-export type BlockMergeResult =
+export type BlockGroupResult =
     | { readonly ok: true; readonly state: ParamBlockState }
-    | { readonly ok: false; readonly reason: BlockMergeFailure };
+    | { readonly ok: false; readonly reason: BlockGroupFailure };
 
-export type BlockMergeFailure =
-    "empty" | "different_root" | "not_adjacent" | "already_merged" | "nothing_to_merge";
+export type BlockGroupFailure =
+    | "empty"
+    | "different_root"
+    | "not_adjacent"
+    | "already_grouped"
+    | "mixed_geometry"
+    | "nothing_to_group";
 
-export type BlockMergeHint =
-    | "param_blocks_merge_need_two"
-    | "param_blocks_merge_not_adjacent"
-    | "param_blocks_merge_cross_root"
-    | "param_blocks_merge_already"
-    | "param_blocks_merge_none";
+export type BlockGroupHint =
+    | "param_blocks_group_need_two"
+    | "param_blocks_group_not_adjacent"
+    | "param_blocks_group_cross_root"
+    | "param_blocks_group_already"
+    | "param_blocks_group_mixed_geometry"
+    | "param_blocks_group_none";
 
-export type ParamBlockEditFailureReason = "not_found" | "too_short" | "no_members";
+export type ParamBlockEditFailureReason =
+    "not_found" | "too_short" | "no_members" | "grouped_locked" | "multi_fragment_unsupported";
 
 export type ParamBlockEditResult =
     | { readonly ok: true; readonly state: ParamBlockState; readonly blockId: string }
@@ -956,18 +954,20 @@ export interface ParamBlockCreateInput {
     readonly minBlockSec?: number;
 }
 
-export function paramBlockMergeMessageKey(reason: BlockMergeFailure): BlockMergeHint {
+export function paramBlockGroupMessageKey(reason: BlockGroupFailure): BlockGroupHint {
     switch (reason) {
         case "empty":
-            return "param_blocks_merge_need_two";
+            return "param_blocks_group_need_two";
         case "not_adjacent":
-            return "param_blocks_merge_not_adjacent";
+            return "param_blocks_group_not_adjacent";
         case "different_root":
-            return "param_blocks_merge_cross_root";
-        case "already_merged":
-            return "param_blocks_merge_already";
-        case "nothing_to_merge":
-            return "param_blocks_merge_none";
+            return "param_blocks_group_cross_root";
+        case "already_grouped":
+            return "param_blocks_group_already";
+        case "mixed_geometry":
+            return "param_blocks_group_mixed_geometry";
+        case "nothing_to_group":
+            return "param_blocks_group_none";
     }
 }
 
@@ -1002,12 +1002,13 @@ export function paramBlockFromProjected(
     const toSecLocal = (frame: number) => (frame * Math.max(0.1, framePeriodMs)) / 1000;
     return {
         id: block.id,
+        ...(block.userBlockId === undefined ? {} : { userBlockId: block.userBlockId }),
         rootTrackId,
         kind:
             block.kind === "base"
                 ? "auto"
-                : block.kind === "merged"
-                  ? "merged"
+                : block.kind === "grouped"
+                  ? "grouped"
                   : block.kind === "manual"
                     ? "manual"
                     : "user",
@@ -1031,14 +1032,6 @@ export function paramBlockFromProjected(
                 : (block.transitionFrames * Math.max(0.1, framePeriodMs)) / 1000,
         projected: block,
     };
-}
-
-export function paramBlockStateFromView(
-    rootTrackId: string,
-    view: ParamBlockView,
-    editSet: ParamBlockEditSet,
-): ParamBlockState {
-    return { rootTrackId, view, editSet };
 }
 
 function withEdits(
@@ -1140,7 +1133,7 @@ export function sortedParamBlockTransitionHandles(
     );
 }
 
-export function canMergeParamBlocks(
+export function canGroupParamBlocks(
     blocks: readonly ParamBlock[],
     selectedIds: readonly string[],
 ): boolean {
@@ -1149,22 +1142,29 @@ export function canMergeParamBlocks(
         blocks.filter((block) => selectedIds.includes(block.id)),
     );
     if (selected.length < 2) return false;
+    if (selected.some((block) => block.rootTrackId !== selected[0].rootTrackId)) return false;
+    const hasRoot = selected.some((block) => block.members.length === 0);
+    const hasTake = selected.some((block) => block.members.length > 0);
+    if (hasRoot && hasTake) return false;
     return selected.every(
         (block, index) => index === 0 || blocksAreAdjacent(selected[index - 1], block),
     );
 }
 
-export function mergeParamBlocks(args: {
+export function groupParamBlocks(args: {
     readonly state: ParamBlockState;
     readonly blocks: readonly ParamBlock[];
     readonly selectedBlockIds: readonly string[];
     readonly clips?: readonly ParamBlockSourceClip[];
-}): BlockMergeResult {
+}): BlockGroupResult {
     const selected = args.blocks.filter((block) => args.selectedBlockIds.includes(block.id));
     if (selected.length < 2) return { ok: false, reason: "empty" };
     if (selected.some((block) => block.rootTrackId !== selected[0].rootTrackId)) {
         return { ok: false, reason: "different_root" };
     }
+    const hasRoot = selected.some((block) => block.members.length === 0);
+    const hasTake = selected.some((block) => block.members.length > 0);
+    if (hasRoot && hasTake) return { ok: false, reason: "mixed_geometry" };
     const ordered = sortParamBlocksByTime(selected);
     for (let index = 1; index < ordered.length; index += 1) {
         if (!blocksAreAdjacent(ordered[index - 1], ordered[index])) {
@@ -1174,25 +1174,37 @@ export function mergeParamBlocks(args: {
     const projected = ordered
         .map((block) => block.projected)
         .filter((block): block is ProjectedParamBlock => block !== undefined);
-    if (projected.length !== ordered.length) return { ok: false, reason: "nothing_to_merge" };
+    if (projected.length !== ordered.length) return { ok: false, reason: "nothing_to_group" };
+    if (projected.every((block) => block.userBlockId === projected[0].userBlockId)) {
+        return { ok: false, reason: "already_grouped" };
+    }
     const framePeriodMs = args.state.view?.framePeriodMs ?? 5;
     try {
-        const edits = mergeProjectedBlocks(args.state.editSet, projected, framePeriodMs);
+        const edits = groupProjectedBlocks(
+            args.clips ?? [],
+            args.state.editSet,
+            projected,
+            framePeriodMs,
+        );
         return {
             ok: true,
             state: withEdits(args.state, edits, args.clips ?? [], framePeriodMs),
         };
-    } catch {
-        return { ok: false, reason: "nothing_to_merge" };
+    } catch (error) {
+        const message = error instanceof Error ? error.message : "";
+        if (message.includes("adjacent")) return { ok: false, reason: "not_adjacent" };
+        if (message.includes("already grouped")) return { ok: false, reason: "already_grouped" };
+        if (message.includes("root and take")) return { ok: false, reason: "mixed_geometry" };
+        return { ok: false, reason: "nothing_to_group" };
     }
 }
 
-export function unmergeParamBlocks(
+export function ungroupParamBlocks(
     state: ParamBlockState,
     blockIds: readonly string[],
 ): ParamBlockState {
     let edits = state.editSet;
-    for (const id of blockIds) edits = unmergeUserBlock(edits, id, state.view?.framePeriodMs ?? 5);
+    for (const id of blockIds) edits = ungroupUserBlock(edits, id);
     return {
         ...state,
         editSet: edits,
@@ -1206,6 +1218,14 @@ export function unmergeParamBlocks(
                       state.view.framePeriodMs,
                   ),
     };
+}
+
+function editFailureFromError(error: unknown): ParamBlockEditFailureReason {
+    const message = error instanceof Error ? error.message : "";
+    if (message.includes("grouped block must be ungrouped")) return "grouped_locked";
+    if (message.includes("no source") || message.includes("no members")) return "no_members";
+    if (message.includes("not found") || message.includes("missing")) return "not_found";
+    return "too_short";
 }
 
 export function splitParamBlock(input: ParamBlockSplitInput): ParamBlockEditResult {
@@ -1229,8 +1249,8 @@ export function splitParamBlock(input: ParamBlockSplitInput): ParamBlockEditResu
             blockId: input.block.id,
             state: withEdits(input.state, edits, input.clips, framePeriodMs),
         };
-    } catch {
-        return { ok: false, reason: "too_short" };
+    } catch (error) {
+        return { ok: false, reason: editFailureFromError(error) };
     }
 }
 
@@ -1257,8 +1277,8 @@ export function resizeParamBlock(input: ParamBlockResizeInput): ParamBlockEditRe
             blockId: input.block.id,
             state: withEdits(input.state, edits, input.clips, framePeriodMs),
         };
-    } catch {
-        return { ok: false, reason: "not_found" };
+    } catch (error) {
+        return { ok: false, reason: editFailureFromError(error) };
     }
 }
 
@@ -1295,25 +1315,35 @@ export function deleteParamBlocks(args: {
         .map((block) => block.projected)
         .filter((block): block is ProjectedParamBlock => block !== undefined);
     if (projected.length === 0) return { ok: false, reason: "not_found" };
-    const edits = deleteProjectedBlocks(args.state.editSet, projected);
-    return {
-        ok: true,
-        blockId: selected[0].id,
-        state: {
-            ...args.state,
-            editSet: edits,
-            lastDeletedBlocks: selected,
-            view:
-                args.state.view === undefined
-                    ? undefined
-                    : composeParamBlockView(
-                          args.state.view.rootTrackId,
-                          args.state.clips ?? [],
-                          edits,
-                          args.state.view.framePeriodMs,
-                      ),
-        },
-    };
+    const framePeriodMs = args.state.view?.framePeriodMs ?? 5;
+    try {
+        const result = deleteProjectedBlocks(
+            args.state.clips ?? [],
+            args.state.editSet,
+            projected,
+            framePeriodMs,
+        );
+        return {
+            ok: true,
+            blockId: selected[0].id,
+            state: {
+                ...args.state,
+                editSet: result.edits,
+                lastDeletedBlocks: result.deleted,
+                view:
+                    args.state.view === undefined
+                        ? undefined
+                        : composeParamBlockView(
+                              args.state.view.rootTrackId,
+                              args.state.clips ?? [],
+                              result.edits,
+                              args.state.view.framePeriodMs,
+                          ),
+            },
+        };
+    } catch (error) {
+        return { ok: false, reason: editFailureFromError(error) };
+    }
 }
 
 export function removeParamBlockAtMinWidth(args: {
@@ -1335,45 +1365,29 @@ export function restoreDeletedParamBlocks(args: {
 }): ParamBlockEditResult {
     const deleted = args.state.lastDeletedBlocks ?? [];
     if (deleted.length === 0) return { ok: false, reason: "not_found" };
-    let edits = args.state.editSet;
-    for (const block of deleted) {
-        for (const member of block.projected?.members ?? []) {
-            edits = {
-                ...edits,
-                blocks: edits.blocks.filter(
-                    (candidate) =>
-                        !(
-                            candidate.deleted &&
-                            candidate.geometry.kind === "take" &&
-                            candidate.geometry.members.some(
-                                (span) =>
-                                    span.clipId === member.clipId &&
-                                    span.takeId === member.takeId &&
-                                    span.cycle === member.cycle,
-                            )
-                        ),
-                ),
-            };
-        }
+    try {
+        const edits = restoreDeletedBlocks(args.state.editSet, deleted);
+        return {
+            ok: true,
+            blockId: deleted[0].block.id,
+            state: {
+                ...args.state,
+                editSet: edits,
+                lastDeletedBlocks: [],
+                view:
+                    args.state.view === undefined
+                        ? undefined
+                        : composeParamBlockView(
+                              args.state.view.rootTrackId,
+                              args.state.clips ?? [],
+                              edits,
+                              args.state.view.framePeriodMs,
+                          ),
+            },
+        };
+    } catch (error) {
+        return { ok: false, reason: editFailureFromError(error) };
     }
-    return {
-        ok: true,
-        blockId: deleted[0].id,
-        state: {
-            ...args.state,
-            editSet: { ...edits, revision: edits.revision + 1 },
-            lastDeletedBlocks: [],
-            view:
-                args.state.view === undefined
-                    ? undefined
-                    : composeParamBlockView(
-                          args.state.view.rootTrackId,
-                          args.state.clips ?? [],
-                          { ...edits, revision: edits.revision + 1 },
-                          args.state.view.framePeriodMs,
-                      ),
-        },
-    };
 }
 
 /** 把拖拽得到的逻辑中心写回可持久化的用户块 value；自动块没有 value，保持原样。 */
@@ -1413,10 +1427,6 @@ export function setParamBlockLogicalCenters(args: {
     };
 }
 
-export function isParamBlockDeleted(_state: ParamBlockState, _block: ParamBlock): boolean {
-    return false;
-}
-
 export function setParamBlockTransition(args: {
     readonly state: ParamBlockState;
     readonly left: ParamBlock;
@@ -1427,9 +1437,11 @@ export function setParamBlockTransition(args: {
     const framePeriodMs = args.state.view?.framePeriodMs ?? 5;
     try {
         const edits = setProjectedBlockTransition(
+            args.state.clips ?? [],
             args.state.editSet,
             args.left.projected,
             args.transitionSec,
+            framePeriodMs,
         );
         return {
             ok: true,
@@ -1439,18 +1451,6 @@ export function setParamBlockTransition(args: {
     } catch {
         return { ok: false, reason: "not_found" };
     }
-}
-
-/**
- * 一键合并重叠块：新模型下重叠由 compose 确定性消解，不再需要“合并记录”。
- * 保留函数以给 UI 一个明确的“无操作”结果。
- */
-export function mergeOverlappingParamBlocks(_args: {
-    readonly state: ParamBlockState;
-    readonly blocks: readonly ParamBlock[];
-    readonly includeExisting?: boolean;
-}): BlockMergeResult {
-    return { ok: false, reason: "nothing_to_merge" };
 }
 
 /** 视图块与当前参数曲线采样后的 UI 块。 */
@@ -1554,7 +1554,7 @@ export function layoutParamBlockRects(args: {
             centerYPx: centerY,
             averageValue: block.averageValue,
             selected: args.selectedBlockIds.has(block.id),
-            merged: block.kind === "merged",
+            grouped: block.kind === "grouped",
         });
     }
     return rects;
@@ -1739,132 +1739,6 @@ export function paramViewContainsCommittedSegments(args: {
     return true;
 }
 
-/**
- * 吸附拖动时的**目标值**（预览标签与提交共用）。
- *
- * - pitch：`step=1` → 半音；有 `scaleNotes` → 工程音阶；
- * - 其它参数：按 `step` 取整。
- * 返回的是**位移**，调用方再加到原曲线上。
- */
-export function resolveParamBlockSnapDelta(args: {
-    readonly param: string;
-    readonly startValue: number;
-    readonly rawDelta: number;
-    readonly step: number;
-    readonly scaleNotes?: readonly number[] | null;
-}): number {
-    if (!Number.isFinite(args.rawDelta)) return 0;
-    if (args.param === "pitch") {
-        if (args.scaleNotes && args.scaleNotes.length > 0) {
-            const from = snapScaleMidi(args.startValue, args.scaleNotes);
-            const to = snapScaleMidi(args.startValue + args.rawDelta, args.scaleNotes);
-            return to - from;
-        }
-        return Math.round(args.rawDelta);
-    }
-    const step = Math.max(1e-9, Number(args.step) || 0);
-    return Math.round(args.rawDelta / step) * step;
-}
-
-/**
- * 块编辑的默认吸附策略。
- *
- * - 纵向（音高）：默认吸附半音；按住取消吸附键才连续自由移动。
- * - 横向（时间）：默认吸附 BPM / 拍号网格；按住取消吸附键才自由落点。
- *
- * 这里刻意**不读** `pitchSnapEnabled` / `timelineSnap.enabled`：块编辑是
- * 明确的结构编辑，默认吸附是产品语义；临时取消由修饰键决定。
- */
-export function resolveParamBlockPitchSnapDelta(args: {
-    readonly startValue: number;
-    readonly rawDelta: number;
-    readonly snapToggleHeld: boolean;
-}): number {
-    if (args.snapToggleHeld) return args.rawDelta;
-    /*
-     * 吸附的是**块中心的绝对落点**，不是位移量本身。
-     * 若起点中心是 60.4，位移 0 仍应落到 60 行心，而不是停在 60.4；
-     * 位移 0.6 则落到 61。这样静态显示与拖动吸附使用同一套行心语义。
-     */
-    const anchorRow = Math.round(args.startValue);
-    const targetRow = Math.round(anchorRow + args.rawDelta);
-    return targetRow - args.startValue;
-}
-
-export function snapParamBlockTimeByDefault(args: {
-    readonly sec: number;
-    readonly bpm: number;
-    readonly timeSignatureDenominator: number;
-    readonly stepBeats: number;
-    readonly snapToggleHeld: boolean;
-}): number {
-    if (args.snapToggleHeld) return args.sec;
-    return snapParamBlockTimeToGrid({ ...args, enabled: true });
-}
-
-/**
- * 吸附步进：音高可按半音 / 工程音阶；其余参数按调用方给的网格步长。
- * 返回**吸附后的值偏移**，保证预览起点与提交起点一致。
- */
-export function snapParamBlockValueDelta(args: {
-    readonly delta: number;
-    readonly step: number;
-}): number {
-    const step = Math.max(1e-9, Number(args.step) || 0);
-    return Math.round(args.delta / step) * step;
-}
-
-/** 把工程秒吸附到 BPM / 拍号网格；`subdivision` 是每拍的细分数。 */
-export function snapParamBlockTimeToGrid(args: {
-    readonly sec: number;
-    readonly bpm: number;
-    readonly timeSignatureDenominator: number;
-    /** 网格步长（拍）。调用方直接复用时间轴 `gridStepBeats`。 */
-    readonly stepBeats: number;
-    readonly enabled: boolean;
-}): number {
-    if (!args.enabled || !Number.isFinite(args.sec)) return args.sec;
-    const bpm = Number.isFinite(args.bpm) && args.bpm > 0 ? args.bpm : 120;
-    const denominator = Math.max(1, Math.round(args.timeSignatureDenominator) || 4);
-    const stepBeats = Math.max(1e-9, Number(args.stepBeats) || 1);
-    // 工程拍号的分母不是四分音符时，秒/拍要按分母换算；bar 仅用于文档语义。
-    const gridSec = (60 / bpm) * stepBeats * (4 / denominator);
-    return Math.round(args.sec / gridSec) * gridSec;
-}
-
-/**
- * 把一次块拖动换算成**统一的写入描述**。
- *
- * 自由拖动：值偏移 = 指针位移。
- * 吸附拖动：先把目标值吸附到半音 / 音阶 / 网格，再用「吸附目标 − 起点均值」作为
- * 偏移。这样预览与写回都基于同一个数学量，不会出现“松手跳一格”。
- */
-export function resolveParamBlockDragWrite(args: {
-    readonly param: string;
-    readonly startValue: number;
-    readonly candidateValue: number;
-    readonly snap: boolean;
-    readonly step: number;
-    readonly scaleNotes?: readonly number[] | null;
-}): number {
-    if (!Number.isFinite(args.candidateValue)) return 0;
-    const rawDelta = args.candidateValue - args.startValue;
-    if (!args.snap) return rawDelta;
-    if (args.param === "pitch" && args.scaleNotes && args.scaleNotes.length > 0) {
-        // 以拖动**起点**为音级锚点：先把候选值吸到最近音级，再按起点音级换算
-        // 半音差；这样 60 → 61.2 在 C 大调下落到 62（而不是因 0.2 残差回到 60）。
-        const from = snapScaleMidi(args.startValue, args.scaleNotes);
-        const to = snapScaleMidi(args.startValue + rawDelta, args.scaleNotes);
-        // 向下拖时取“不越过锚点”的另一侧音级，避免半音残差让方向反转。
-        if (rawDelta < 0 && to >= from) {
-            const lower = snapScaleMidiBelow(args.startValue + rawDelta - 1e-9, args.scaleNotes);
-            return lower - from;
-        }
-        return to - from;
-    }
-    return snapParamBlockValueDelta({ delta: rawDelta, step: args.step });
-}
-
 /** 快速拖动时 pointerup 可能没有对应的最后一条 pointermove；松手坐标必须优先。 */
 export function resolveParamBlockDragRelease(args: {
     readonly didDrag: boolean;
@@ -1932,40 +1806,6 @@ export function shiftParamBlockCurveValuesToTarget(args: {
     return args.values.map((value) =>
         Number.isFinite(value) && (args.param !== "pitch" || value > 0) ? value + delta : value,
     );
-}
-
-function snapScaleMidi(midi: number, notes: readonly number[]): number {
-    const normalized = [...new Set(notes.map((n) => ((Math.round(n) % 12) + 12) % 12))];
-    if (normalized.length === 0) return Math.round(midi);
-    const base = Math.floor(midi);
-    let best = base;
-    let bestDistance = Number.POSITIVE_INFINITY;
-    for (let candidate = base - 12; candidate <= base + 12; candidate += 1) {
-        if (!normalized.includes(((candidate % 12) + 12) % 12)) continue;
-        const distance = Math.abs(candidate - midi);
-        if (distance < bestDistance) {
-            best = candidate;
-            bestDistance = distance;
-        }
-    }
-    return best;
-}
-
-function snapScaleMidiBelow(midi: number, notes: readonly number[]): number {
-    const normalized = [...new Set(notes.map((n) => ((Math.round(n) % 12) + 12) % 12))];
-    if (normalized.length === 0) return Math.floor(midi);
-    const base = Math.floor(midi);
-    let best = base;
-    let bestDistance = Number.POSITIVE_INFINITY;
-    for (let candidate = base; candidate >= base - 24; candidate -= 1) {
-        if (!normalized.includes(((candidate % 12) + 12) % 12)) continue;
-        const distance = midi - candidate;
-        if (distance >= -1e-9 && distance < bestDistance) {
-            best = candidate;
-            bestDistance = distance;
-        }
-    }
-    return best;
 }
 
 /**
@@ -2340,11 +2180,24 @@ export function projectParamBlockCreatePreviewFromBase<
 export function resolveCreatedParamBlockValue(args: {
     readonly pointerValue: number;
     readonly param: string;
-    readonly snapToggleHeld: boolean;
+    readonly pitchSnapEnabled: boolean;
+    readonly pitchSnapUnit: "semitone" | "scale";
+    readonly pitchSnapToleranceCents?: number;
+    readonly projectScale?: ScaleLike | null;
+    readonly toggleModifierActive: boolean;
 }): number {
     const value = Number.isFinite(args.pointerValue) ? args.pointerValue : 0;
     if (args.param !== "pitch") return value;
-    return args.snapToggleHeld ? value : Math.round(value);
+    const effective = args.toggleModifierActive ? !args.pitchSnapEnabled : args.pitchSnapEnabled;
+    if (!effective) return value;
+    return getDrawPreviewValue({
+        editParam: "pitch",
+        rawValue: value,
+        effectiveSnap: true,
+        pitchSnapUnit: args.pitchSnapUnit,
+        projectScale: args.pitchSnapUnit === "scale" ? (args.projectScale ?? undefined) : undefined,
+        pitchSnapToleranceCents: args.pitchSnapToleranceCents,
+    });
 }
 
 /** 创建块可用参数：当前根轨道组内、与区间相交的 Clip（重叠时取中心最近者）。 */

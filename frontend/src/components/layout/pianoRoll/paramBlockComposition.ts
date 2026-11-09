@@ -28,6 +28,7 @@ const ANCHOR_OVERLAP_RATIO = 0.5;
 
 interface Candidate {
     readonly id: string;
+    readonly userBlockId?: string;
     readonly start: number;
     readonly end: number;
     readonly kind: ProjectedBlockKind;
@@ -133,9 +134,15 @@ function projectUserBlock(
             candidates: [
                 {
                     id: block.id,
+                    userBlockId: block.id,
                     start,
                     end,
-                    kind: block.manual ? "manual" : "user",
+                    kind:
+                        block.groupedFrom !== undefined
+                            ? "grouped"
+                            : block.manual
+                              ? "manual"
+                              : "user",
                     members: [],
                     value: block.value,
                     transitionWidthSec: block.transitionOutSec,
@@ -192,9 +199,17 @@ function projectUserBlock(
     return {
         candidates: runs.map((run, index) => ({
             id: runs.length === 1 ? block.id : `${block.id}:${index}`,
+            userBlockId: block.id,
             start: run.start,
             end: run.end,
-            kind: block.manual ? "manual" : run.members.length > 1 ? "merged" : "user",
+            kind:
+                block.groupedFrom !== undefined
+                    ? "grouped"
+                    : block.manual
+                      ? "manual"
+                      : run.members.length > 1
+                        ? "grouped"
+                        : "user",
             members: run.members,
             value: block.value,
             transitionWidthSec: block.transitionOutSec,
@@ -346,6 +361,7 @@ export function composeParamBlockView(
         }
         return {
             id: candidate.id,
+            ...(candidate.userBlockId === undefined ? {} : { userBlockId: candidate.userBlockId }),
             startFrame: candidate.start,
             endFrameExclusive: candidate.end,
             ...(transitionFrames === undefined ? {} : { transitionFrames }),

@@ -261,7 +261,7 @@ export interface PianoRollParamBlockSpec {
         readonly contiguousStart?: boolean;
         readonly contiguousEnd?: boolean;
         readonly selected: boolean;
-        readonly merged: boolean;
+        readonly grouped: boolean;
         /** 相接块边界上的圆滑手柄；只对有邻居的块出现。 */
         readonly transitionHandle?: {
             readonly leftId: string;
@@ -274,13 +274,13 @@ export interface PianoRollParamBlockSpec {
     }[];
     readonly borderRgba: readonly [number, number, number, number];
     readonly selectedRgba: readonly [number, number, number, number];
-    readonly mergedRgba: readonly [number, number, number, number];
+    readonly groupedRgba: readonly [number, number, number, number];
     readonly labelRgba?: readonly [number, number, number, number];
     readonly selectedLabelRgba?: readonly [number, number, number, number];
     /** 块的圆角填充；缺省不画填充（只画边框）。 */
     readonly fillRgba?: readonly [number, number, number, number];
     readonly selectedFillRgba?: readonly [number, number, number, number];
-    readonly mergedFillRgba?: readonly [number, number, number, number];
+    readonly groupedFillRgba?: readonly [number, number, number, number];
     readonly topHighlightRgba?: readonly [number, number, number, number];
     /** 顶部高光厚度（CSS px）。 */
     readonly topHighlightPx?: number;

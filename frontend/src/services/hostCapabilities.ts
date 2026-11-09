@@ -542,6 +542,7 @@ export function pluginAllowsEditChannel(channel: string | null, op?: string): ch
         channel !== null &&
         (!isPluginMode() ||
             channel === "hifi:editOp" ||
+            channel === "hifi:paramBlockEditOp" ||
             (channel === "hifi:timelineEditOp" && op === "split" && canSplitHostClips()) ||
             (channel === "hifi:timelineEditOp" &&
                 ["copy", "cut", "paste", "pasteTracks", "delete"].includes(op ?? "") &&

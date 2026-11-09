@@ -66,6 +66,7 @@ import {
     formatKeybindingList,
 } from "../../features/keybindings/keybindingsSlice";
 import type { ActionId } from "../../features/keybindings/types";
+import type { MessageKey } from "../../i18n/messages";
 import {
     resolveCopyCutRoute,
     resolveEditOpRoute,
@@ -492,6 +493,10 @@ export const MenuBar: React.FC<MenuBarProps> = ({
         [s],
     );
 
+    const dispatchParamBlockEditOp = useCallback((op: string) => {
+        window.dispatchEvent(new CustomEvent("hifi:paramBlockEditOp", { detail: { op } }));
+    }, []);
+
     const handleImportAudioFromMenu = useCallback(async () => {
         try {
             const res = (await dispatch(importAudioFromDialog()).unwrap()) as {
@@ -910,6 +915,83 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                             {shortcutLabel("edit.removeClipsFromParamSelection")}
                         </div>
                     </DropdownMenu.Item>
+                    {s.toolMode === "block" ? (
+                        <>
+                            <DropdownMenu.Separator />
+                            <DropdownMenu.Sub>
+                                <DropdownMenu.SubTrigger>
+                                    {tf("param_blocks_tool")}
+                                </DropdownMenu.SubTrigger>
+                                <DropdownMenu.SubContent>
+                                    {(
+                                        [
+                                            [
+                                                "paramBlock.split",
+                                                "param_blocks_split_here",
+                                                "split",
+                                            ],
+                                            ["paramBlock.group", "param_blocks_group", "group"],
+                                            [
+                                                "paramBlock.ungroup",
+                                                "param_blocks_ungroup",
+                                                "ungroup",
+                                            ],
+                                            [
+                                                "paramBlock.restoreGame",
+                                                "param_blocks_restore_game",
+                                                "restoreGame",
+                                            ],
+                                            [
+                                                "paramBlock.restoreDeleted",
+                                                "param_blocks_restore_deleted",
+                                                "restoreDeleted",
+                                            ],
+                                            [
+                                                "paramBlock.normalizePitch",
+                                                "param_blocks_normalize_pitch",
+                                                "normalizePitch",
+                                            ],
+                                            ["paramBlock.delete", "param_blocks_delete", "delete"],
+                                        ] as const satisfies readonly (readonly [
+                                            ActionId,
+                                            MessageKey,
+                                            string,
+                                        ])[]
+                                    ).map(([actionId, labelKey, op]) => (
+                                        <DropdownMenu.Item
+                                            key={actionId}
+                                            color={
+                                                actionId === "paramBlock.delete" ? "red" : undefined
+                                            }
+                                            onSelect={() => dispatchParamBlockEditOp(op)}
+                                        >
+                                            {tf(labelKey)}
+                                            <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
+                                                {shortcutLabel(actionId)}
+                                            </div>
+                                        </DropdownMenu.Item>
+                                    ))}
+                                    <DropdownMenu.Separator />
+                                    <DropdownMenu.Item
+                                        onSelect={() => dispatchParamBlockEditOp("selectAll")}
+                                    >
+                                        {tf("param_blocks_select_all")}
+                                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
+                                            {shortcutLabel("paramBlock.selectAll")}
+                                        </div>
+                                    </DropdownMenu.Item>
+                                    <DropdownMenu.Item
+                                        onSelect={() => dispatchParamBlockEditOp("deselect")}
+                                    >
+                                        {tf("param_blocks_deselect")}
+                                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
+                                            {shortcutLabel("paramBlock.deselect")}
+                                        </div>
+                                    </DropdownMenu.Item>
+                                </DropdownMenu.SubContent>
+                            </DropdownMenu.Sub>
+                        </>
+                    ) : null}
                 </DropdownMenu.Content>
             </DropdownMenu.Root>
 
