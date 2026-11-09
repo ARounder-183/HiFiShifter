@@ -81,7 +81,6 @@ import {
     shiftParamBlockCurveValuesToTarget,
     shouldUseParamBlockDragSnapshotForRender,
     nearestParamBlockByTime,
-    paramBlockGroupMessageKey,
     resolveParamBlockSplitSec,
     resolveParamBlockCreateSpan,
     resolveParamBlockResizePlan,
@@ -125,8 +124,8 @@ import {
     resolveParamBlockTimeSnapResult,
 } from "../paramBlockSnap";
 import { publishParamBlockFeedback } from "../paramBlockFeedback";
+import { warnDev } from "../devWarn";
 import { backendDetail } from "../../../../services/invoke";
-import type { MessageKey } from "../../../../i18n/messages";
 import { makeLoudnessAmplitudeMap } from "../PianoRollWaveformSurface";
 import { formatDbReadout, resolveParamAxisUnit, supportsParamAxisUnit } from "../paramAxisUnits";
 import { useLoudnessCurves, type LoudnessSnapshot } from "../useLoudnessCurves";
@@ -2683,16 +2682,13 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
      * 块的纵向几何与拖动位移都在宿主里按实时值域计算；这里不再保留
      * “视口版本号 / 拖动位移”两份 React 状态，避免出现视觉与命中各自刷新。
      */
-    /** 块操作提示统一进全局状态栏；画布内不再保留浮层。 */
-    const showParamBlockMessage = useCallback(
-        (key: MessageKey) => {
-            publishParamBlockFeedback({ text: tf(key), tone: "warning", holdMs: 4000 });
-        },
-        [tf],
-    );
-    const clearParamBlockMessage = useCallback(() => {
-        publishParamBlockFeedback(null);
-    }, []);
+    /*
+     * 【没有 warning 通道】块动作的前置条件（选了几个、是不是编组块、有没有
+     * 可还原的区间）都是**瞬时状态**：菜单已经置灰，用户再点一下就变。为它们
+     * 弹一条要读三秒的提示，等于把"当前选择还不满足条件"说成了一次错误。
+     * 只有真正的失败 —— 后端拒绝、IPC 异常 —— 才进状态栏，且必须是
+     * `tone: "danger"` + 后端原文 tooltip（见下方的 `publishParamBlockFeedback`）。
+     */
     const [paramBlockContextMenu, setParamBlockContextMenu] = useState<{
         x: number;
         y: number;
@@ -2999,6 +2995,23 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     useLayoutEffect(() => {
         paramBlocksWithValuesRef.current = paramBlocksWithValues;
     }, [paramBlocksWithValues]);
+    /**
+     * 编组块不能做水平伸缩。
+     *
+     * 编组块的几何是"若干源域区间"的联合，横向改边界没有唯一解，内核一律以
+     * `grouped_locked` 拒绝。既然结果是静默失败，就不该先给出可拖的手柄与
+     * `ew-resize` 光标 —— 那会让用户以为拖不动是卡住了。垂直移动、过渡手柄、
+     * 删除、取消编组都不受影响。
+     */
+    const groupedParamBlockIds = useMemo(
+        () =>
+            new Set(
+                paramBlocksWithValues
+                    .filter((block) => block.kind === "grouped")
+                    .map((block) => block.id),
+            ),
+        [paramBlocksWithValues],
+    );
     // 工具切换时清空选中；不用 effect，避免“先画一帧旧选择再清”的闪烁。
     /** 视图变化（重分析 / 切 Take / 删除）后修剪已经不存在块的选择。 */
     useEffect(() => {
@@ -3255,10 +3268,12 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             metaKey?: boolean;
         }): import("../gestures/pointerDeps").ParamBlockPointerDownResult => {
             if (!paramBlockToolActive) return { handled: false };
-            if (!blockPersistence.ready || !paramViewRef.current) {
-                showParamBlockMessage("param_blocks_not_ready");
-                return { handled: true, seekOnClick: false };
-            }
+            /*
+             * 块层未就绪 = 此刻做不了任何块操作。返回 `handled: false`，让指针
+             * 落进块工具的空白分支（按设置移动播放头）—— 用户看到的是"点了一下、
+             * 播放头动了"，而不是一条要读三秒的提示。
+             */
+            if (!blockPersistence.ready || !paramViewRef.current) return { handled: false };
             if (hit.contextMenu) {
                 const layout = paramBlockStateRef.current.view;
                 if (!layout) return { handled: true, seekOnClick: false };
@@ -3334,7 +3349,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                 }
                             } else setRegion(null);
                         }
-                        clearParamBlockMessage();
                         setParamBlockContextMenu({
                             x: event?.clientX ?? hit.clientX,
                             y: event?.clientY ?? hit.clientY,
@@ -3395,7 +3409,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 axisForHandle === undefined
                     ? null
                     : hitTestParamBlockEdges({
-                          blocks: framedHits,
+                          // 编组块不提供水平伸缩（见 `groupedParamBlockIds`）。
+                          blocks: framedHits.filter((rect) => !groupedParamBlockIds.has(rect.id)),
                           clientX: hit.clientX - hit.captureTarget.getBoundingClientRect().left,
                           localY: hit.localY,
                           secToX: (sec) =>
@@ -4202,21 +4217,19 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 selectionRef.current = null;
                 setSelectionUi(null);
                 setSelectedParamBlockIds([]);
-                clearParamBlockMessage();
                 setParamBlockContextMenu(null);
                 invalidate();
                 return { handled: false };
             }
             const fullBlock = paramBlocksWithValues.find((block) => block.id === hitId);
             if (fullBlock === undefined) return { handled: false };
-            clearParamBlockMessage();
             if (hit.contextMenu) {
                 paramBlockClickCandidateRef.current = null;
             }
             /* 命中优先级：手柄已在上方入口处理；这里只剩边缘缩放 > 块体。 */
             const axis = hostRef.current?.getAxis();
             const edgeHit =
-                axis === undefined
+                axis === undefined || groupedParamBlockIds.has(fullBlock.id)
                     ? null
                     : hitTestParamBlockEdges({
                           blocks: framedHits.filter((rect) => rect.id === fullBlock.id),
@@ -4532,6 +4545,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             editParam,
             beginBlockDrag,
             bumpParamBlockStructure,
+            groupedParamBlockIds,
             invalidate,
             paramBlockClips,
             paramBlockToolActive,
@@ -4561,14 +4575,12 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             selectedBlockIds: selectedParamBlockIds,
             clips: paramBlockClips,
         });
-        if (!result.ok) {
-            showParamBlockMessage(paramBlockGroupMessageKey(result.reason));
-            return;
-        }
+        // 前置条件不满足 = 静默 no-op（与时间轴的 `groupClips` 同一约定）。
+        // 菜单项已经置灰；走到这里只可能是"菜单打开后状态变了"。
+        if (!result.ok) return;
         setParamBlockState(result.state);
         persistParamBlockEdits(result.state);
         setSelectedParamBlockIds([]);
-        clearParamBlockMessage();
         setParamBlockContextMenu(null);
     }, [
         paramBlockClips,
@@ -4576,41 +4588,24 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         paramBlocksWithValues,
         persistParamBlockEdits,
         selectedParamBlockIds,
-        showParamBlockMessage,
-        clearParamBlockMessage,
     ]);
     groupSelectedParamBlocksRef.current = groupSelectedParamBlocks;
     const ungroupSelectedParamBlocks = useCallback(() => {
-        if (selectedParamBlockIdSet.size === 0) {
-            showParamBlockMessage("param_blocks_ungroup_none");
-            return;
-        }
         const selectedIds = [...selectedParamBlockIdSet].filter((id) =>
             paramBlocksWithValues.some((block) => block.id === id && block.kind === "grouped"),
         );
-        if (selectedIds.length === 0) {
-            showParamBlockMessage("param_blocks_ungroup_none");
-            return;
-        }
+        // 没有编组块可拆 = 静默；菜单项已经置灰。
+        if (selectedIds.length === 0) return;
         try {
             const next = ungroupParamBlocks(paramBlockState, selectedIds);
             setParamBlockState(next);
             persistParamBlockEdits(next);
             setSelectedParamBlockIds([]);
-            clearParamBlockMessage();
             setParamBlockContextMenu(null);
         } catch (error) {
-            showParamBlockMessage("param_blocks_ungroup_none");
-            console.error("[pianoRoll] ungroup param blocks failed", error);
+            warnDev("[pianoRoll] ungroup param blocks failed: " + String(error));
         }
-    }, [
-        clearParamBlockMessage,
-        paramBlockState,
-        paramBlocksWithValues,
-        persistParamBlockEdits,
-        selectedParamBlockIdSet,
-        showParamBlockMessage,
-    ]);
+    }, [paramBlockState, paramBlocksWithValues, persistParamBlockEdits, selectedParamBlockIdSet]);
     ungroupSelectedParamBlocksRef.current = ungroupSelectedParamBlocks;
     const deleteSelectedParamBlocks = useCallback(() => {
         const result = deleteParamBlocks({
@@ -4618,27 +4613,13 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             blocks: paramBlocksWithValues,
             selectedBlockIds: selectedParamBlockIds,
         });
-        if (!result.ok) {
-            showParamBlockMessage(
-                result.reason === "not_found"
-                    ? "param_blocks_delete_none"
-                    : "param_blocks_delete_blocked",
-            );
-            return;
-        }
+        // 没选中块 / 块不可删 = 静默；菜单项已经置灰。
+        if (!result.ok) return;
         setParamBlockState(result.state);
         persistParamBlockEdits(result.state);
         setSelectedParamBlockIds([]);
-        clearParamBlockMessage();
         setParamBlockContextMenu(null);
-    }, [
-        clearParamBlockMessage,
-        paramBlockState,
-        paramBlocksWithValues,
-        persistParamBlockEdits,
-        selectedParamBlockIds,
-        showParamBlockMessage,
-    ]);
+    }, [paramBlockState, paramBlocksWithValues, persistParamBlockEdits, selectedParamBlockIds]);
     deleteSelectedParamBlocksRef.current = deleteSelectedParamBlocks;
     const restoreParamBlocks = useCallback(
         (blockIds?: readonly string[]) => {
@@ -4646,54 +4627,43 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 state: paramBlockState,
                 selectedBlockIds: blockIds,
             });
-            if (!result.ok) {
-                showParamBlockMessage("param_blocks_restore_none");
-                return;
-            }
+            // 没有可恢复的块 = 静默；菜单项已经置灰。
+            if (!result.ok) return;
             setParamBlockState(result.state);
             persistParamBlockEdits(result.state);
             setSelectedParamBlockIds([]);
-            clearParamBlockMessage();
             setParamBlockContextMenu(null);
         },
-        [clearParamBlockMessage, paramBlockState, persistParamBlockEdits, showParamBlockMessage],
+        [paramBlockState, persistParamBlockEdits],
     );
     restoreParamBlocksRef.current = restoreParamBlocks;
     const applyParamBlockEdit = useCallback(
         (result: ReturnType<typeof splitParamBlock>, onSuccess?: () => void) => {
+            /*
+             * 能走到这里说明前置条件已经通过（目标块由调用方按位置解析），
+             * 失败属于实现层问题：开发构建打印，生产静默。
+             */
             if (!result.ok) {
-                showParamBlockMessage(
-                    result.reason === "grouped_locked"
-                        ? "param_blocks_group_locked_edit"
-                        : result.reason === "too_short"
-                          ? "param_blocks_split_too_short"
-                          : "param_blocks_delete_blocked",
-                );
+                warnDev("[pianoRoll] param block edit failed: " + result.reason);
                 return;
             }
             setParamBlockState(result.state);
             persistParamBlockEdits(result.state);
             onSuccess?.();
-            clearParamBlockMessage();
             setParamBlockContextMenu(null);
         },
-        [clearParamBlockMessage, persistParamBlockEdits, showParamBlockMessage],
+        [persistParamBlockEdits],
     );
     applyParamBlockEditRef.current = applyParamBlockEdit;
     paramBlockStateRef.current = paramBlockState;
     const splitSelectedParamBlockAt = useCallback(
         (sec: number, snapToggleHeld = false) => {
-            if (selectedParamBlockIds.length !== 1) {
-                showParamBlockMessage("param_blocks_split_none");
-                return;
-            }
+            // 没有唯一选中的块 = 静默 no-op（§5 会改成按播放头解析操作数）。
+            if (selectedParamBlockIds.length !== 1) return;
             const selected = paramBlocksWithValues.find((block) =>
                 selectedParamBlockIdSet.has(block.id),
             );
-            if (selected === undefined) {
-                showParamBlockMessage("param_blocks_split_none");
-                return;
-            }
+            if (selected === undefined) return;
             const pxPerSec = hostRef.current?.getAxis()?.pxPerSec ?? pxPerSecRef.current;
             const snap = resolveParamBlockTimeSnapResult({
                 rawSec: sec,
@@ -4745,7 +4715,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             paramBlockClips,
             selectedParamBlockIdSet,
             selectedParamBlockIds.length,
-            showParamBlockMessage,
         ],
     );
     splitSelectedParamBlockAtRef.current = splitSelectedParamBlockAt;
@@ -5003,13 +4972,16 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             if (hit === null) return false;
             const block = paramBlocksWithValues.find((item) => item.id === hit.id);
             if (block === undefined) return false;
-            const edge = hitTestParamBlockEdges({
-                blocks: framedHits,
-                clientX: localX,
-                localY,
-                secToX,
-                hitPx: 8,
-            });
+            // 编组块只有块体光标（`grab`），没有左右伸缩光标。
+            const edge = groupedParamBlockIds.has(hit.id)
+                ? null
+                : hitTestParamBlockEdges({
+                      blocks: framedHits,
+                      clientX: localX,
+                      localY,
+                      secToX,
+                      hitPx: 8,
+                  });
             /* 手柄在右边缘外侧上方，已在上面优先处理；这里只剩边缘与块体。 */
             setCanvasCursor(
                 paramBlockCursorForHover(
@@ -5038,7 +5010,13 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             }
             return true;
         },
-        [paramBlockHitSlopPx, paramBlockToolActive, paramBlocksWithValues, setCanvasCursor],
+        [
+            groupedParamBlockIds,
+            paramBlockHitSlopPx,
+            paramBlockToolActive,
+            paramBlocksWithValues,
+            setCanvasCursor,
+        ],
     );
     paramBlockPointerRef.current = onParamBlockPointerDown;
     useEffect(() => {

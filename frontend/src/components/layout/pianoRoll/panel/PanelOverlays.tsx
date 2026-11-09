@@ -271,15 +271,6 @@ export function PanelOverlays({ m }: Props) {
                     onUngroup={ungroupSelectedParamBlocks}
                     onClose={() => setParamBlockContextMenu(null)}
                     tf={tf}
-                    groupDisabledReason={tf("param_blocks_group_none")}
-                    ungroupDisabledReason={tf("param_blocks_ungroup_disabled_reason")}
-                    restoreDisabledReason={tf("param_blocks_restore_disabled_reason")}
-                    restoreDeletedDisabledReason={tf(
-                        "param_blocks_restore_deleted_disabled_reason",
-                    )}
-                    normalizeDisabledReason={tf("param_blocks_normalize_disabled_reason")}
-                    deleteDisabledReason={tf("param_blocks_delete_disabled_reason")}
-                    splitDisabledReason={tf("param_blocks_split_disabled_reason")}
                 />
             ) : null}
 

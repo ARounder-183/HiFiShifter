@@ -2,7 +2,13 @@
  * 参数块右键菜单。
  *
  * 菜单只承载块编辑的语义动作；打开位置、点击外部关闭与键盘导航交给
- * \`AppContextMenu\`，与参数编辑器已有的编辑菜单保持一致。
+ * `AppContextMenu`，与参数编辑器已有的编辑菜单保持一致。
+ *
+ * 【为什么这里没有任何"为什么点不了"的解释】块动作的禁用条件是**瞬时状态**
+ * （当前选了几个块、块是不是编组块、有没有可还原的区间）。它会被用户的
+ * 下一次点击改变，而菜单弹出期间不可能再变一次 —— 写进第二行只会把菜单
+ * 变成解释墙。`description` 留给"宿主能力"那一类用户无论如何都改不了的
+ * 限制（见 `ui/Menu.tsx` 的字段注释）。
  */
 import { AppContextMenu, type AppMenuItemSpec } from "../../../../ui";
 import { useMenuShortcut } from "../../../../ui/useMenuShortcut";
@@ -28,13 +34,6 @@ export interface ParamBlockContextMenuProps {
     readonly onDelete: () => void;
     readonly onClose: () => void;
     readonly tf: (key: MessageKey) => string;
-    readonly splitDisabledReason?: string;
-    readonly groupDisabledReason?: string;
-    readonly ungroupDisabledReason?: string;
-    readonly restoreDisabledReason?: string;
-    readonly restoreDeletedDisabledReason?: string;
-    readonly normalizeDisabledReason?: string;
-    readonly deleteDisabledReason?: string;
 }
 
 export function ParamBlockContextMenu({
@@ -57,13 +56,6 @@ export function ParamBlockContextMenu({
     onDelete,
     onClose,
     tf,
-    splitDisabledReason,
-    groupDisabledReason,
-    ungroupDisabledReason,
-    restoreDisabledReason,
-    restoreDeletedDisabledReason,
-    normalizeDisabledReason,
-    deleteDisabledReason,
 }: ParamBlockContextMenuProps) {
     const splitShortcut = useMenuShortcut("paramBlock.split");
     const groupShortcut = useMenuShortcut("paramBlock.group");
@@ -73,13 +65,16 @@ export function ParamBlockContextMenu({
     const normalizeShortcut = useMenuShortcut("paramBlock.normalizePitch");
     const deleteShortcut = useMenuShortcut("paramBlock.delete");
 
+    /*
+     * 三段：编辑 / 状态恢复 / 破坏性。删除永远单独成段并带 `danger`，
+     * 避免和"恢复删除的块"这类可逆动作挨在一起被误点。
+     */
     const items: AppMenuItemSpec[] = [
         {
             key: "blocks-split",
             label: tf("param_blocks_split_here"),
             shortcut: splitShortcut,
             disabled: splitAtSec === null || selectedCount !== 1,
-            description: splitDisabledReason,
             onSelect: () => {
                 if (splitAtSec !== null) onSplit(splitAtSec);
             },
@@ -88,8 +83,8 @@ export function ParamBlockContextMenu({
             key: "blocks-group",
             label: tf("param_blocks_group"),
             shortcut: groupShortcut,
+            separatorBefore: true,
             disabled: !canGroup,
-            description: groupDisabledReason,
             onSelect: onGroup,
         },
         {
@@ -97,7 +92,6 @@ export function ParamBlockContextMenu({
             label: tf("param_blocks_ungroup"),
             shortcut: ungroupShortcut,
             disabled: !canUngroup,
-            description: ungroupDisabledReason,
             onSelect: onUngroup,
         },
         {
@@ -105,7 +99,6 @@ export function ParamBlockContextMenu({
             label: tf("param_blocks_restore_game"),
             shortcut: restoreShortcut,
             disabled: !canRestoreGame,
-            description: restoreDisabledReason,
             onSelect: onRestoreGame ?? (() => {}),
         },
         {
@@ -113,7 +106,6 @@ export function ParamBlockContextMenu({
             label: tf("param_blocks_restore_deleted"),
             shortcut: restoreDeletedShortcut,
             disabled: !canRestoreDeleted,
-            description: restoreDeletedDisabledReason,
             onSelect: onRestoreDeleted ?? (() => {}),
         },
         {
@@ -121,7 +113,6 @@ export function ParamBlockContextMenu({
             label: tf("param_blocks_normalize_pitch"),
             shortcut: normalizeShortcut,
             disabled: !canNormalizePitch,
-            description: normalizeDisabledReason,
             onSelect: onNormalizePitch ?? (() => {}),
         },
         {
@@ -129,8 +120,8 @@ export function ParamBlockContextMenu({
             label: tf("param_blocks_delete"),
             shortcut: deleteShortcut,
             danger: true,
+            separatorBefore: true,
             disabled: !canDelete,
-            description: deleteDisabledReason,
             onSelect: onDelete,
         },
     ];

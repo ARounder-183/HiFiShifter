@@ -899,14 +899,6 @@ export type BlockGroupFailure =
     | "mixed_geometry"
     | "nothing_to_group";
 
-export type BlockGroupHint =
-    | "param_blocks_group_need_two"
-    | "param_blocks_group_not_adjacent"
-    | "param_blocks_group_cross_root"
-    | "param_blocks_group_already"
-    | "param_blocks_group_mixed_geometry"
-    | "param_blocks_group_none";
-
 export type ParamBlockEditFailureReason =
     "not_found" | "too_short" | "no_members" | "grouped_locked" | "multi_fragment_unsupported";
 
@@ -952,23 +944,6 @@ export interface ParamBlockCreateInput {
     readonly blockId?: string;
     readonly existingBlocks?: readonly ParamBlock[];
     readonly minBlockSec?: number;
-}
-
-export function paramBlockGroupMessageKey(reason: BlockGroupFailure): BlockGroupHint {
-    switch (reason) {
-        case "empty":
-            return "param_blocks_group_need_two";
-        case "not_adjacent":
-            return "param_blocks_group_not_adjacent";
-        case "different_root":
-            return "param_blocks_group_cross_root";
-        case "already_grouped":
-            return "param_blocks_group_already";
-        case "mixed_geometry":
-            return "param_blocks_group_mixed_geometry";
-        case "nothing_to_group":
-            return "param_blocks_group_none";
-    }
 }
 
 /** 自动块的最小宽度（秒）。 */
