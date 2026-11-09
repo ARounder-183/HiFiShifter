@@ -48,6 +48,175 @@ const SLEW_SEC_PER_SEC = 0.25;
  */
 const SEEK_RESET_SEC = 0.5;
 
+/**
+ * 视觉播放头的**进程级唯一时钟**。
+ *
+ * 【为什么必须共享】时间轴、参数编辑器与轨道头各有一个 `useVisualPlayhead` 消费者。
+ * 每个消费者各自跑一条 rAF 时，它们的锚点建立时刻、回调时间戳与纠偏步长都不完全相同；
+ * 自动滚屏又拿"时间轴时钟"算滚动位置，而参数编辑器拿"自己的时钟"画光标。两个时钟
+ * 相差一帧时，光标在屏幕上的位置会随滚动位置前后摆动（用户看到的"抽动"）。共享一条
+ * 时钟后，所有消费者在同一帧拿到**同一个数**，滚动与光标不再互相追赶。
+ *
+ * 【为什么订阅者分两阶段通知】自动滚屏的回调会在时间轴消费者里同步写共享视口，
+ * 参数编辑器收到广播后会立即重绘。若此时参数编辑器的 `visualPlayheadSecRef` 还没
+ * 更新，这一帧就会用旧时间画光标。因此先对所有订阅者 `setValue`，再统一 `onFrame`。
+ */
+interface VisualPlayheadSubscriber {
+    /** 只写消费者的 ref，不触发绘制。 */
+    setValue(sec: number): void;
+    /** 所有消费者的 ref 都写好后再触发绘制/滚动。 */
+    onFrame(sec: number): void;
+}
+
+let clockVisualSec = 0;
+let clockAnchor = { playheadSec: 0, timestampMs: 0 };
+let clockTargetSec = 0;
+let clockAdvancing = false;
+let clockInitialized = false;
+let clockRafId: number | null = null;
+let lastSampleKey: string | null = null;
+let lastSampleAtMs = Number.NEGATIVE_INFINITY;
+const clockSubscribers = new Set<VisualPlayheadSubscriber>();
+
+function stopClock(): void {
+    if (clockRafId !== null) {
+        cancelAnimationFrame(clockRafId);
+        clockRafId = null;
+    }
+}
+
+function notifyClock(sec: number): void {
+    clockVisualSec = sec;
+    const subscribers = Array.from(clockSubscribers);
+    // 第一阶段：所有消费者先拿到同一个时间值。
+    for (const subscriber of subscribers) subscriber.setValue(sec);
+    // 第二阶段：再允许消费者做会触发绘制 / 跨面板广播的工作。
+    for (const subscriber of subscribers) subscriber.onFrame(sec);
+}
+
+function ensureClockRunning(): void {
+    if (!clockAdvancing || clockSubscribers.size === 0 || clockRafId !== null) return;
+    if (typeof requestAnimationFrame !== "function") return;
+    const nowMs = performance.now();
+    const anchorAgeSec = (nowMs - clockAnchor.timestampMs) / 1000;
+    if (
+        !Number.isFinite(anchorAgeSec) ||
+        anchorAgeSec < 0 ||
+        anchorAgeSec > PLAYHEAD_SAMPLE_FRESH_SEC
+    ) {
+        // 与旧实现的 rAF 重启防护一致：传输暂停过久后重新播放时，不能把整段
+        // "未前进"的空闲时间一次性加到光标上。
+        clockAnchor = { playheadSec: clockVisualSec, timestampMs: nowMs };
+    }
+    clockRafId = requestAnimationFrame(clockTick);
+}
+
+function clockTick(timestampMs: number): void {
+    clockRafId = null;
+    if (!clockAdvancing || clockSubscribers.size === 0) return;
+    const elapsedSec = (timestampMs - clockAnchor.timestampMs) / 1000;
+    // 1) 按 1x 前进。**不设上限**：宿主在播放是已知事实，采样只是它的估计值。
+    const advanced = projectVisualPlayhead(clockAnchor.playheadSec, elapsedSec, false);
+    // 2) 朝采样值纠偏，每帧最多走 `SLEW_SEC_PER_SEC × dt`。
+    const maxStep = SLEW_SEC_PER_SEC * Math.max(0, elapsedSec);
+    const error = clockTargetSec - advanced;
+    const nextPlayheadSec = advanced + Math.max(-maxStep, Math.min(maxStep, error));
+    clockAnchor = { playheadSec: nextPlayheadSec, timestampMs };
+    notifyClock(nextPlayheadSec);
+    ensureClockRunning();
+}
+
+function setVisualPlayheadAdvancing(next: boolean): void {
+    if (clockAdvancing === next) return;
+    clockAdvancing = next;
+    if (next) ensureClockRunning();
+    else stopClock();
+}
+
+function updateVisualPlayheadSample(args: {
+    syncedPlayheadSec: number;
+    syncedAtMs?: number;
+    hostControlled: boolean;
+}): void {
+    const { syncedPlayheadSec, syncedAtMs, hostControlled } = args;
+    const nowMs = performance.now();
+    const sampledAtMs = typeof syncedAtMs === "number" && syncedAtMs > 0 ? syncedAtMs : NaN;
+    const ageSec = Number.isFinite(sampledAtMs) ? Math.max(0, (nowMs - sampledAtMs) / 1000) : NaN;
+    const hasAge = Number.isFinite(ageSec);
+    const fresh = hasAge && ageSec <= PLAYHEAD_SAMPLE_FRESH_SEC;
+    const sampleKey = `${syncedPlayheadSec}|${Number.isFinite(sampledAtMs) ? sampledAtMs : "none"}`;
+
+    // 多个消费者会带着同一个 store 采样依次调用本函数。采样时刻更旧的调用
+    // 不能把共享时钟的锚点拉回去。
+    if (Number.isFinite(sampledAtMs) && sampledAtMs < lastSampleAtMs) return;
+
+    if (!clockInitialized) {
+        clockInitialized = true;
+        clockVisualSec = syncedPlayheadSec;
+        clockAnchor = { playheadSec: syncedPlayheadSec, timestampMs: nowMs };
+        clockTargetSec = syncedPlayheadSec;
+    }
+
+    if (clockAdvancing && (hostControlled || fresh)) {
+        if (sampleKey !== lastSampleKey) {
+            const extrapolatedSec = catchUpSampledPlayhead(syncedPlayheadSec, hasAge ? ageSec : 0);
+            const jumpSec = Math.abs(extrapolatedSec - clockVisualSec);
+            if (!Number.isFinite(jumpSec) || jumpSec > SEEK_RESET_SEC) {
+                clockAnchor = { playheadSec: extrapolatedSec, timestampMs: nowMs };
+                clockTargetSec = extrapolatedSec;
+                notifyClock(extrapolatedSec);
+            } else {
+                // 只更新目标，下一帧由 tick 平滑追上；不要在这里改视觉值，
+                // 否则采样通道的抖动会直接变成光标跳变。
+                clockTargetSec = extrapolatedSec;
+            }
+            lastSampleKey = sampleKey;
+            if (Number.isFinite(sampledAtMs)) lastSampleAtMs = sampledAtMs;
+        }
+    } else if (sampleKey !== lastSampleKey || clockVisualSec !== syncedPlayheadSec) {
+        // 非轮询写入（seek / stop / 粘贴……）或采样过旧：硬复位到提交值。
+        clockAnchor = { playheadSec: syncedPlayheadSec, timestampMs: nowMs };
+        clockTargetSec = syncedPlayheadSec;
+        notifyClock(syncedPlayheadSec);
+        lastSampleKey = sampleKey;
+        if (Number.isFinite(sampledAtMs)) lastSampleAtMs = sampledAtMs;
+    }
+
+    if (clockAdvancing) ensureClockRunning();
+    else stopClock();
+}
+
+function subscribeVisualPlayhead(subscriber: VisualPlayheadSubscriber): () => void {
+    clockSubscribers.add(subscriber);
+    if (clockInitialized) {
+        subscriber.setValue(clockVisualSec);
+        subscriber.onFrame(clockVisualSec);
+    }
+    if (clockAdvancing) ensureClockRunning();
+    return () => {
+        clockSubscribers.delete(subscriber);
+        if (clockSubscribers.size === 0) stopClock();
+    };
+}
+
+/** 读当前共享视觉播放头（秒）。用于非 React 的逐帧消费者与测试。 */
+export function readSharedVisualPlayheadSec(): number {
+    return clockVisualSec;
+}
+
+/** 仅供测试：清空共享时钟，避免用例之间互相污染。 */
+export function resetVisualPlayheadClockForTests(): void {
+    stopClock();
+    clockVisualSec = 0;
+    clockAnchor = { playheadSec: 0, timestampMs: 0 };
+    clockTargetSec = 0;
+    clockAdvancing = false;
+    clockInitialized = false;
+    lastSampleKey = null;
+    lastSampleAtMs = Number.NEGATIVE_INFINITY;
+    clockSubscribers.clear();
+}
+
 export interface UseVisualPlayheadArgs {
     syncedPlayheadSec: number;
     isTransportAdvancing: boolean;
@@ -65,154 +234,46 @@ export interface UseVisualPlayheadArgs {
     onFrame?: (playheadSec: number) => void;
 }
 
+/**
+ * 订阅共享视觉播放头。所有调用方共用一条 rAF，并在同一帧拿到同一个值。
+ *
+ * 语义与旧实现逐条保持一致：
+ * - 新鲜采样只更新目标，视觉值按 `SLEW_SEC_PER_SEC` 平滑纠偏；
+ * - 真实跳转（seek / 循环折返）立即硬复位；
+ * - 停止时只停表，不把视觉值拉回旧采样（光标冻结在停止那一拍）。
+ */
 export function useVisualPlayhead({
     syncedPlayheadSec,
     isTransportAdvancing,
     syncedAtMs,
     onFrame,
 }: UseVisualPlayheadArgs): MutableRefObject<number> {
-    const visualPlayheadSecRef = useRef(syncedPlayheadSec);
-    const syncAnchorRef = useRef({
-        playheadSec: syncedPlayheadSec,
-        timestampMs: 0,
-    });
-    const advancingRef = useRef(isTransportAdvancing);
-    /** 最新采样值（视觉位置朝它纠偏，见 `SLEW_SEC_PER_SEC`）。 */
-    const targetSecRef = useRef(syncedPlayheadSec);
+    const visualPlayheadSecRef = useRef(readSharedVisualPlayheadSec());
     const onFrameRef = useRef(onFrame);
     const hostControlled = isPluginMode();
-
-    useEffect(() => {
-        advancingRef.current = isTransportAdvancing;
-    }, [isTransportAdvancing]);
 
     useEffect(() => {
         onFrameRef.current = onFrame;
     }, [onFrame]);
 
+    // 必须先于采样 effect：挂载 / 恢复播放时共享时钟要已经处于"在走"的状态，
+    // 采样 effect 才能走外推而不是把光标硬复位到旧采样。
     useEffect(() => {
-        const now = performance.now();
-        const sampledAtMs = typeof syncedAtMs === "number" && syncedAtMs > 0 ? syncedAtMs : NaN;
-        const ageSec = Number.isFinite(sampledAtMs) ? Math.max(0, (now - sampledAtMs) / 1000) : NaN;
-        /*
-         * 【为什么宿主受控时不再要求"采样新鲜"】
-         *
-         * `PLAYHEAD_SAMPLE_FRESH_SEC` 存在的理由是：独立 App 的外推是**无界**的，
-         * 一个陈旧采样会让光标自行前漂数秒，所以必须靠"新鲜度"决定要不要外推。
-         *
-         * 插件模式的外推是**有界**的（`projectVisualPlayhead` 把它夹在 100 ms 内），
-         * 那个理由不成立；而继续套用同一条闸门反而制造了缺陷：插件命令的一次往返
-         * 超过 250 ms 时，这一支会走下面的"硬复位"，把光标拉回`syncedPlayheadSec`
-         * —— 那是**命令派发时刻**的位置，不是现在的位置。于是每收到一个采样就先
-         * 往回跳一个往返时延，再被下一帧外推追回去：用户看到的就是"偏移 + 随机闪"。
-         *
-         * 所以判据改成：正在前进、且（宿主受控 或 采样新鲜）就外推。
-         * 宿主受控时交给那个 100 ms 上限兜底，不需要也不应该再看新鲜度。
-         */
-        const hasAge = Number.isFinite(ageSec);
-        const fresh = hasAge && ageSec <= PLAYHEAD_SAMPLE_FRESH_SEC;
-        if (advancingRef.current && (hostControlled || fresh)) {
-            // 新鲜的轮询采样：锚定采样时刻并外推到当前时刻。anchor 的
-            // (值, 时刻) 二元组与 {synced@sampledAt} 表示同一条外推直线，
-            // 因此 React 提交延迟与后续 RAF 帧的插值都不会引入滞后或回跳
-            // （采样值本身已含 reducer 侧的往返时延外推，见
-            // sessionSlice syncPlaybackState.fulfilled）。
-            /*
-             * 【为什么这里传 false（不封顶）】
-             *
-             * 那个 100 ms 上限的语义是"不要对未来**推测**太远"，它约束的是
-             * rAF 帧里 `elapsedSec` 那种**向前**的外推。
-             *
-             * 而这里的 `ageSec = now − sampledAtMs` 是**已经过去的、被测量到的**
-             * 时间：采样确实发生在那么久以前，把它补上不是推测，是还原。
-             *
-             * 此前这里也传了 `hostControlled`，于是每次采样只补 100 ms，剩下的
-             * 往返时延**永久丢失**——光标系统地落后于它自己报出的时间（"偏移"），
-             * 而下一个采样又把差值补回来一部分（"随机闪"）。
-             */
-            const extrapolatedSec = catchUpSampledPlayhead(syncedPlayheadSec, hasAge ? ageSec : 0);
-            /*
-             * 【为什么不再把锚点直接跳到采样值】那会把"采样通道的抖动"变成"光标的跳变"：
-             * 一次迟到 300 ms 的采样会让光标先冻在原地、再瞬间前进 300 ms。
-             *
-             * 现在锚点只**追**采样值：每帧最多走 `SLEW_SEC_PER_SEC × dt`（25% 的速度差），
-             * 于是 300 ms 的误差在 "1.2 s 内平滑吃掉，用户看不到跳变。真正的位置跳变
-             * （seek / 循环折返）仍走硬复位 —— 那是"位置真的变了"，平滑它反而是错的。
-             */
-            const jumpSec = Math.abs(extrapolatedSec - visualPlayheadSecRef.current);
-            if (!Number.isFinite(jumpSec) || jumpSec > SEEK_RESET_SEC) {
-                syncAnchorRef.current = {
-                    playheadSec: extrapolatedSec,
-                    timestampMs: now,
-                };
-                targetSecRef.current = extrapolatedSec;
-                visualPlayheadSecRef.current = extrapolatedSec;
-                onFrameRef.current?.(extrapolatedSec);
-            } else {
-                targetSecRef.current = extrapolatedSec;
-            }
-        } else {
-            // 非轮询写入（seek / stop / 粘贴……）或采样过旧：硬复位到提交值。
-            syncAnchorRef.current = {
-                playheadSec: syncedPlayheadSec,
-                timestampMs: now,
-            };
-            visualPlayheadSecRef.current = syncedPlayheadSec;
-            onFrameRef.current?.(syncedPlayheadSec);
-        }
+        setVisualPlayheadAdvancing(isTransportAdvancing);
+    }, [isTransportAdvancing]);
+
+    useEffect(() => {
+        updateVisualPlayheadSample({ syncedPlayheadSec, syncedAtMs, hostControlled });
     }, [syncedPlayheadSec, syncedAtMs, hostControlled]);
 
     useEffect(() => {
-        if (!isTransportAdvancing) return;
-
-        // RAF（重）启动时的锚点陈旧防护：锚点只在 playheadSec 写入时刷新
-        // （轮询采样 / seek / 停止对齐），而本 effect 在 isTransportAdvancing
-        // 翻转时重启 —— 该翻转可能发生在 playheadSec 长时间未变的窗口之后
-        // （自动暂停后再次播放、阻塞式预渲染窗口、暂停后继续）。此时锚点的
-        // 时刻停在翻转之前，直接按 1x 外推会把整段"传输未前进"的空闲时长
-        // 一次性加到光标上（向前飞跃数秒），直到下一个轮询采样到达才弹回
-        // —— 反复播放/暂停/停止时可见的光标跳变。引擎未前进期间位置是
-        // 真实冻结的：把锚点重置到当前视觉位置、时刻重置为现在，视觉连续
-        // （不跳变）且不携带外推债务。锚点新鲜（正常播放中翻转）时不做
-        // 任何事，保持逐样本精确的既有插值。
-        const nowMs = performance.now();
-        const anchorAgeSec = (nowMs - syncAnchorRef.current.timestampMs) / 1000;
-        if (
-            !Number.isFinite(anchorAgeSec) ||
-            anchorAgeSec < 0 ||
-            anchorAgeSec > PLAYHEAD_SAMPLE_FRESH_SEC
-        ) {
-            syncAnchorRef.current = {
-                playheadSec: visualPlayheadSecRef.current,
-                timestampMs: nowMs,
-            };
-        }
-
-        let rafId = 0;
-
-        const tick = (timestampMs: number) => {
-            const elapsedSec = (timestampMs - syncAnchorRef.current.timestampMs) / 1000;
-            // 1) 按 1x 前进。**不设上限**：宿主在播放是已知事实（`isTransportAdvancing`），
-            //    采样只是它的估计值 —— 用估计值的迟到去冻结一个已知在前进的量是本末倒置。
-            const advanced = projectVisualPlayhead(
-                syncAnchorRef.current.playheadSec,
-                elapsedSec,
-                false,
-            );
-            // 2) 朝采样值纠偏，每帧最多走 `SLEW_SEC_PER_SEC × dt`。
-            const target = targetSecRef.current;
-            const maxStep = SLEW_SEC_PER_SEC * Math.max(0, elapsedSec);
-            const error = target - advanced;
-            const nextPlayheadSec = advanced + Math.max(-maxStep, Math.min(maxStep, error));
-            syncAnchorRef.current = { playheadSec: nextPlayheadSec, timestampMs };
-            visualPlayheadSecRef.current = nextPlayheadSec;
-            onFrameRef.current?.(nextPlayheadSec);
-            rafId = requestAnimationFrame(tick);
-        };
-
-        rafId = requestAnimationFrame(tick);
-        return () => cancelAnimationFrame(rafId);
-    }, [isTransportAdvancing, hostControlled]);
+        return subscribeVisualPlayhead({
+            setValue: (sec) => {
+                visualPlayheadSecRef.current = sec;
+            },
+            onFrame: (sec) => onFrameRef.current?.(sec),
+        });
+    }, []);
 
     return visualPlayheadSecRef;
 }

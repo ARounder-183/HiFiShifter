@@ -1,5 +1,4 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { shallowEqual } from "react-redux";
 import { useAppDispatch, useAppSelector, useAppStore } from "../../../../app/hooks";
 import type { RootState } from "../../../../app/store";
 import { useI18n } from "../../../../i18n/I18nProvider";
@@ -72,11 +71,7 @@ import {
     isChildFormantOffsetCentsParam,
     isChildPitchOffsetParam,
 } from "../childPitchOffsetParams";
-import { computeAutoFollowScrollLeft } from "../../../../utils/autoFollowScroll";
 import { readDevicePixelRatio } from "../../../../utils/devicePixelLine";
-import { useVisualPlayhead } from "../../../../hooks/useVisualPlayhead";
-import { isTransportAdvancing } from "../../../../features/session/selectors/transport";
-import { publishVisualPlayheadSec } from "../../../../features/capture/visualPlayheadBus";
 import {
     subscribeDevicePixelRatio,
     useDevicePixelRatio,
@@ -122,6 +117,28 @@ import { usePianoRollViewport } from "./usePianoRollViewport";
 import { useProcessorParams } from "./useProcessorParams";
 
 /**
+ * 高频会话字段：它们由 `PianoRollPlayheadBridge` 单独订阅，面板主体不因它们重渲染。
+ *
+ * 【为什么必须从面板选择器里剔除】`playheadSec` 与 `runtime` 在播放时约 30Hz 更新；
+ * 面板有数百个 hook / 子组件，若随每次轮询重渲染，60Hz 的光标与自动滚屏会被 React
+ * 提交拖慢。这里只忽略它们，其余会话字段仍按引用浅比较。
+ */
+const PIANO_ROLL_VOLATILE_SESSION_KEYS = new Set<keyof RootState["session"]>([
+    "playheadSec",
+    "playheadSampledAtMs",
+    "runtime",
+]);
+
+function pianoRollSessionEqual(left: RootState["session"], right: RootState["session"]): boolean {
+    if (left === right) return true;
+    for (const key of Object.keys(left) as Array<keyof RootState["session"]>) {
+        if (PIANO_ROLL_VOLATILE_SESSION_KEYS.has(key)) continue;
+        if (left[key] !== right[key]) return false;
+    }
+    return true;
+}
+
+/**
  * 装配参数编辑器面板的模型。
  *
  * @param dockFormId 本窗体在停靠布局里的 id（判断是否与时间轴上下堆叠）。
@@ -133,7 +150,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     // 避免闭包快照滞后。
     const store = useAppStore();
     const rafRef = useRef<number | null>(null);
-    const visualPlayheadSecRef = useRef(0);
+    const visualPlayheadSecRef = useRef(store.getState().session.playheadSec);
     // 视觉插值播放头读取器（与绘制同源）：缩放锚点必须使用它，不能用 33Hz
     // 轮询的 store 滞后值——播放中缩放以滞后值锚定会让播放头跳变 δ·Δpx。
     const getVisualPlayheadSec = useCallback(() => visualPlayheadSecRef.current, []);
@@ -176,26 +193,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     }, []);
 
     /**
-     * 播放头专用标脏：只重绘 GL 叠加层，跳过网格 / 键盘 / 曲线层。
-     *
-     * 【为什么不复用 `invalidate`】播放头每帧前进时视口没变，曲线几何完全不变；
-     * 走完整失效等于每个播放帧白做一次全部曲线几何的重建（本仓实测约 20 万顶点 /
-     * 3 MB 分配 / 帧）。宿主侧有专门的轻量入口（与 `timelineKernelHost` 同一机制）。
-     *
-     * 【无宿主时退回完整路径】回退分支是面板自己的 rAF 画 Canvas2D，没有"只画
-     * 叠加层"的粒度；那种情况本就罕见（宿主尚未创建），退回 `invalidate` 不会
-     * 造成每帧浪费 —— 该分支下曲线也不走 GL。
-     */
-    const invalidatePlayhead = useCallback(() => {
-        const host = hostRef.current;
-        if (host != null) {
-            host.invalidatePlayhead();
-            return;
-        }
-        invalidate();
-    }, [invalidate]);
-
-    /**
      * DPR 变化必须重绘主画布。
      *
      * `rasterize` 会按新 dpr 重设 backing store 与 CSS 尺寸，但**没有任何东西**
@@ -225,7 +222,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         if (element !== null) hostRef.current?.invalidate();
     }, []);
     const { t, tf, tVars } = useI18n();
-    const s = useAppSelector((state: RootState) => state.session, shallowEqual);
+    const s = useAppSelector((state: RootState) => state.session, pianoRollSessionEqual);
 
     // 工程会话切换：强制视口总线按当前工程内容重绘一次（跨工程投影保留契约
     // 的强制点，见 utils/timelineViewportBus.invalidate 的说明）。
@@ -1134,12 +1131,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         return () => ro.disconnect();
     }, []);
 
-    // The ruler is React-rendered, but the main graph is canvas-rendered.
-    // Ensure playhead changes (seek / playback) trigger a redraw.
-    useEffect(() => {
-        invalidate();
-    }, [s.playheadSec, invalidate]);
-
     /**
      * 标尺播放头线的**首帧与缩放后**定位。
      *
@@ -1149,7 +1140,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
      * "标尺的播放头与参数编辑器里的播放头分离"。
      *
      * 这里用 layout effect（绘制前执行）补上首帧与缩放后的位置，播放/滚动期间的
-     * 逐帧位置由 `useVisualPlayhead` 的 onFrame 与 `applyScrollLayers` 负责。
+     * 逐帧位置由 `PianoRollPlayheadBridge` 的共享视觉时钟与 `applyScrollLayers` 负责。
      */
     useLayoutEffect(() => {
         // 内核宿主每帧都在写这两个元素（单写者原则，见 4b0bbb40）：此 effect 只在
@@ -1184,67 +1175,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         }
     }, [pxPerSec]);
 
-    // 【唯一判据在 selector 里】见 `isTransportAdvancing`：三处三个公式，恰好在
-    // "位置冻结"这个场景互相分歧 —— 那正是"停止后光标还在走"。
-    const transportAdvancing = isTransportAdvancing(s.runtime);
-
-    useVisualPlayhead({
-        syncedPlayheadSec: s.playheadSec,
-        syncedAtMs: s.playheadSampledAtMs,
-        isTransportAdvancing: transportAdvancing,
-        onFrame: useCallback(
-            (visualPlayheadSec: number) => {
-                visualPlayheadSecRef.current = visualPlayheadSec;
-                // 参数编辑器单独可见时也必须把视觉时钟广播给捕获带；
-                // TimelineTransportBridge 可能没有挂载。
-                publishVisualPlayheadSec(visualPlayheadSec);
-                // 标尺播放头线**不在这里写**：它由内核在帧提交里按内核视口写，
-                // 与 GL 主体播放头同源同帧（见 `sync.rulerPlayheadLine` 的说明）。
-                // 这里曾用面板的 `pxPerSecRef` 写同一条线 —— 面板缩放与内核缩放
-                // 一旦不一致（面板宽度变化时内核会重新钳制缩放），两条线就会相差
-                // `播放头秒数 × 缩放差`，也就是用户报告的"标尺线与主体线分离"。
-                let followed = false;
-                if (!s.paramEditorSyncTimeline && s.autoScrollEnabled && s.runtime.isPlaying) {
-                    const scroller = scrollerRef.current;
-                    if (scroller) {
-                        const next = computeAutoFollowScrollLeft({
-                            playheadSec: visualPlayheadSec,
-                            pxPerSec: pxPerSecRef.current,
-                            viewportWidth: scroller.clientWidth,
-                            contentWidth,
-                        });
-                        if (Math.abs(scroller.scrollLeft - next) > 0.5) {
-                            scroller.scrollLeft = next;
-                            lastMirroredScrollLeftRef.current = next;
-                            syncScrollLeft(scroller);
-                            followed = true;
-                        }
-                    }
-                }
-                // 【为什么区分两种失效】自动跟随滚动改变了视口，曲线几何必须重建，
-                // 因此那一帧仍走完整失效；而"视口没动的纯播放头前进"帧几何完全不变
-                // —— 走 `invalidatePlayhead()` 只重绘叠加层，省掉每帧约 20 万顶点的
-                // 曲线几何重建（约 3 MB 分配 / 帧）。见宿主接口处的说明。
-                if (followed) {
-                    invalidate();
-                } else {
-                    invalidatePlayhead();
-                }
-            },
-            // syncScrollLeft reads the latest scroll state through refs and is called
-            // imperatively; including the plain render-scope function would defeat memoization.
-            // eslint-disable-next-line react-hooks/exhaustive-deps
-            [
-                contentWidth,
-                invalidate,
-                invalidatePlayhead,
-                s.paramEditorSyncTimeline,
-                s.autoScrollEnabled,
-                s.runtime.isPlaying,
-            ],
-        ),
-    });
-
     useEffect(() => {
         return () => {
             if (scrollStateRafRef.current != null) {
@@ -1264,8 +1194,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
 
     // 内核宿主 + 各图层的同帧落地整块在 `usePianoRollScrollKernel` 里（见该文件头）。
     // 调用点留在原位：这几个函数的声明位置就是它们的**使用顺序**——`syncScrollLeft` 在
-    // 上方 `useVisualPlayhead` 的 onFrame 里被闭包引用（延迟读取，与 `commitViewportNow`
-    // 提前交给 `usePianoRollViewport` 是同一模式），其余调用者都在本行之后。
+    // 各交互与滚动路径里被延迟读取（与 `commitViewportNow` 提前交给
+    // `usePianoRollViewport` 是同一模式），其余调用者都在本行之后。
     const {
         applyScrollLayers,
         applyHorizontalScrollPosition,
@@ -1913,7 +1843,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         setMidiDialogSelection,
         setMidiPath,
         specifiedBpm,
-    } = useMidiImport({ dispatch, paramEditorRef, refreshNow, s, selectionRef });
+    } = useMidiImport({ dispatch, paramEditorRef, refreshNow, s, selectionRef, store });
 
     // 将当前选区发布到总线，供 MenuBar 等判断“工程音阶”是否受 Tempo Map 影响。
     // 多选区发布**包围区间**（首段起点 → 末段终点）：该提示只关心"选区覆盖的
@@ -2276,8 +2206,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         s,
         dispatch,
         editParam,
-        pxPerSec,
-        contentWidth,
         scrollerRef,
         axisWrapRef,
         hScrollbarTrackRef,
@@ -2288,7 +2216,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         lastMirroredScrollTopRef,
         timelineSyncApplyingRef,
         syncScrollLeftRef,
-        visualPlayheadSecRef,
         pitchViewRef,
         paramViewsRef,
         processorParamsRef,

@@ -23,6 +23,7 @@ import type { TempoMap } from "../../../../utils/tempoMap";
 import { buildTimelineTicks } from "../../timeline/runtime/buildTimelineTicks.js";
 import type { createTickAxis } from "../../timeline/runtime/tickAxis.js";
 import { formatCursorTime } from "../../timeline";
+import { readVisualPlayheadSec } from "../../../../features/capture/visualPlayheadBus";
 import type { TimeFormatContext, TimeUnit, TimeUnitChoice } from "../../timeline";
 import type { ModelDeps } from "./modelDeps";
 
@@ -108,7 +109,7 @@ export function useTimelineDisplayControls({ dispatch, s, prTickAxis }: Timeline
         const text = formatCursorTime(
             s.primaryTimeUnit,
             s.secondaryTimeUnit,
-            Number(s.playheadSec ?? 0),
+            readVisualPlayheadSec(),
             timeContext,
         ).combined;
         try {
@@ -116,7 +117,7 @@ export function useTimelineDisplayControls({ dispatch, s, prTickAxis }: Timeline
         } catch {
             // 忽略复制失败
         }
-    }, [s.primaryTimeUnit, s.secondaryTimeUnit, s.playheadSec, timeContext]);
+    }, [s.primaryTimeUnit, s.secondaryTimeUnit, timeContext]);
     return {
         timelineTicks,
         timeContext,

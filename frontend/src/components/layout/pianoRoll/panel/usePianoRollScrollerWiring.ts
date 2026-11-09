@@ -32,7 +32,6 @@ import {
 } from "react";
 import type * as React from "react";
 import type { Keybinding } from "../../../../features/keybindings/types";
-import { computeAutoFollowScrollLeft } from "../../../../utils/autoFollowScroll";
 import { useNonPassiveWheel } from "../../../../utils/useNonPassiveWheel";
 import { isMirrorEcho } from "../../timeline/scrollEcho";
 import type { PianoRollKernelHost } from "../kernel/host/pianoRollKernelHost";
@@ -48,9 +47,6 @@ type PianoRollScrollerWiringInputs = {
     s: ModelDeps["s"];
     dispatch: ModelDeps["dispatch"];
     editParam: ModelDeps["editParam"];
-    /** 渲染期缩放与内容宽（滚动上限与自动跟随都要用）。 */
-    pxPerSec: number;
-    contentWidth: number;
     /** 原生滚动容器与各层元素。 */
     scrollerRef: { current: HTMLDivElement | null };
     axisWrapRef: { current: HTMLDivElement | null };
@@ -65,8 +61,6 @@ type PianoRollScrollerWiringInputs = {
     timelineSyncApplyingRef: { current: boolean };
     /** 渲染期刷新的采纳函数引用（供只注册一次的监听器调用）。 */
     syncScrollLeftRef: { current: (scroller: HTMLDivElement) => void };
-    /** 视觉播放头（自动跟随的锚点）。 */
-    visualPlayheadSecRef: { current: number };
     /** 值域视口与处理器参数。 */
     pitchViewRef: ModelDeps["pitchViewRef"];
     paramViewsRef: ModelDeps["paramViewsRef"];
@@ -118,8 +112,6 @@ export function usePianoRollScrollerWiring({
     s,
     dispatch,
     editParam,
-    pxPerSec,
-    contentWidth,
     scrollerRef,
     axisWrapRef,
     hScrollbarTrackRef,
@@ -130,7 +122,6 @@ export function usePianoRollScrollerWiring({
     lastMirroredScrollTopRef,
     timelineSyncApplyingRef,
     syncScrollLeftRef,
-    visualPlayheadSecRef,
     pitchViewRef,
     paramViewsRef,
     processorParamsRef,
@@ -285,33 +276,6 @@ export function usePianoRollScrollerWiring({
         syncVerticalScrollbarForViewport(editParam, getCurrentViewportForScrollbar(editParam));
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [editParam, processorParams]);
-
-    // Auto-scroll: keep playhead visible in parameter editor during playback
-    useEffect(() => {
-        if (s.paramEditorSyncTimeline) return;
-        if (!s.autoScrollEnabled || !s.runtime.isPlaying) return;
-        const scroller = scrollerRef.current;
-        if (!scroller) return;
-        const next = computeAutoFollowScrollLeft({
-            playheadSec: visualPlayheadSecRef.current,
-            pxPerSec,
-            viewportWidth: scroller.clientWidth,
-            contentWidth,
-        });
-        if (Math.abs(scroller.scrollLeft - next) > 0.5) {
-            scroller.scrollLeft = next;
-            syncScrollLeft(scroller);
-        }
-        // syncScrollLeft reads the latest scroll state through refs; see onFrame above.
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [
-        s.paramEditorSyncTimeline,
-        s.autoScrollEnabled,
-        s.runtime.isPlaying,
-        s.playheadSec,
-        pxPerSec,
-        contentWidth,
-    ]);
 
     // 左轴列的滚轮路由（与主画布同一套 keybinding / 投影 / 上下限）。
     usePianoRollAxisWheel({

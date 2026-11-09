@@ -22,6 +22,7 @@ import React from "react";
 import { Flex } from "@radix-ui/themes";
 
 import { usePianoRollPanelModel } from "./pianoRoll/panel/usePianoRollPanelModel";
+import { PianoRollPlayheadBridge } from "./pianoRoll/panel/PianoRollPlayheadBridge";
 import { ParamToolbar } from "./pianoRoll/panel/ParamToolbar";
 import { EditorArea } from "./pianoRoll/panel/EditorArea";
 import { PanelOverlays } from "./pianoRoll/panel/PanelOverlays";
@@ -55,6 +56,14 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
             // 剪切/粘贴等编辑快捷键的归属依据（见 focusSurface.ts）。
             data-hs-surface="pianoRoll"
         >
+            <PianoRollPlayheadBridge
+                visualPlayheadSecRef={m.visualPlayheadSecRef}
+                hostRef={m.hostRef}
+                scrollerRef={m.scrollerRef}
+                pxPerSecRef={m.pxPerSecRef}
+                contentWidth={m.contentWidth}
+                invalidate={m.invalidate}
+            />
             <ParamToolbar m={m} />
             <EditorArea m={m} />
             <PanelOverlays m={m} />

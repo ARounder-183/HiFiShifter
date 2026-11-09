@@ -27,12 +27,12 @@ import type { ModelDeps } from "./modelDeps";
 /** 导入对话框需要的模型输入（字段清单由 AST 扫描得出）。 */
 type MidiImportDeps = Pick<
     ModelDeps,
-    "dispatch" | "paramEditorRef" | "refreshNow" | "s" | "selectionRef"
+    "dispatch" | "paramEditorRef" | "refreshNow" | "s" | "selectionRef" | "store"
 >;
 
 /** MIDI 导入的状态与指令。 */
 export function useMidiImport(deps: MidiImportDeps) {
-    const { dispatch, paramEditorRef, refreshNow, s, selectionRef } = deps;
+    const { dispatch, paramEditorRef, refreshNow, s, selectionRef, store } = deps;
 
     // MIDI 导入弹窗状态
     const [midiDialogOpen, setMidiDialogOpen] = useState(false);
@@ -321,7 +321,7 @@ export function useMidiImport(deps: MidiImportDeps) {
                     midiPath: result.midiPath,
                     trackIndices: result.trackIndices,
                     trackId: s.selectedTrackId,
-                    startSec: s.playheadSec,
+                    startSec: store.getState().session.playheadSec,
                     fillGaps: result.fillGaps || undefined,
                     multiTrackMerge: result.multiTrackMerge,
                     noteBpmMode: result.noteBpmMode,
@@ -336,7 +336,7 @@ export function useMidiImport(deps: MidiImportDeps) {
                 }),
             );
         },
-        [dispatch, s.selectedTrackId, s.playheadSec],
+        [dispatch, s.selectedTrackId, store],
     );
 
     // 导入位置变更时持久化保存

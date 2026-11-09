@@ -54,7 +54,7 @@ import { PIANO_ROLL_SYNC_ORIGIN } from "./panelHelpers";
 /** 本 hook 读取的会话切片（只声明真正用到的字段，避免与 store 类型整体耦合）。 */
 type ViewportSession = Pick<
     RootState["session"],
-    "bpm" | "clips" | "paramEditorSyncTimeline" | "playheadSec" | "projectSec"
+    "bpm" | "clips" | "paramEditorSyncTimeline" | "projectSec"
 >;
 
 type PianoRollViewportInputs = {
@@ -354,7 +354,8 @@ export function usePianoRollViewport({
             const drawingScrollLeft = timelineViewportNativeToState(store.scrollLeft, offset);
             // 纯滚动（pxPerSec 未变）：在同一个事件帧内同步落地——原生
             // scroller、标尺/网格层（applyScrollLayers）与轨道视图同帧提交，
-            // 两个面板严丝合缝。state 仅作事后对齐（React 在绘制前提交）。
+            // 两个面板严丝合缝。React state 由内核的 onScrollLeftCommit 按
+            // 256px 量化提交（见 usePianoRollScrollKernel），不在这里每帧写。
             //
             // 【判据必须取内核真值，不能取渲染期 ref】`pxPerSecRef` 在渲染期就被同步成
             // state 的新值，而并发渲染可能"渲染了但被丢弃"：用 ref 判定会把一次**缩放**
@@ -372,7 +373,11 @@ export function usePianoRollViewport({
                 // 并在**同一任务**里提交各图层（DOM / Canvas2D / GL）——否则 GL
                 // 侧的曲线 / 播放头会比标尺、网格慢一帧到几帧（见 `paintNow`）。
                 commitViewportNow(drawingScrollLeft);
-                setScrollLeft(drawingScrollLeft);
+                // React state 是**量化提交**：内核会在跨过 256px 步长时经
+                // `onScrollLeftCommit` 提交一次（与时间轴同一约定）。这里若每帧
+                // `setScrollLeft`，60Hz 自动滚屏会把整个参数编辑器灌进 React 渲染，
+                // 反而把光标/滚屏拖慢。宿主尚未挂载时才需要直接对齐 state。
+                if (hostRef.current === null) setScrollLeft(drawingScrollLeft);
                 timelineSyncApplyingRef.current = false;
                 return;
             }
@@ -516,12 +521,10 @@ export function usePianoRollViewport({
     }, [pxPerSec, s.paramEditorSyncTimeline]);
 
     const zoomTimelineStateRef = useRef({
-        playheadSec: s.playheadSec,
         projectSec: dynamicProjectSec,
     });
     useLayoutEffect(() => {
         zoomTimelineStateRef.current = {
-            playheadSec: s.playheadSec,
             projectSec: dynamicProjectSec,
         };
     });
