@@ -1947,7 +1947,7 @@ export const koKR = {
     history_op_param_static: "정적 파라미터 편집",
     history_op_param_stretch: "파라미터 곡선 늘이기",
     history_op_param_paste: "VocalShifter 파라미터 붙여넣기",
-    history_op_param_block_merge: "파라미터 블록 병합",
+    history_op_param_block_edit: "파라미터 블록 편집",
     history_op_import_midi: "MIDI 가져오기",
     history_op_edit_midi: "MIDI 데이터 편집",
     history_op_import_vocalshifter: "VocalShifter 프로젝트 가져오기",

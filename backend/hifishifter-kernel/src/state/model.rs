@@ -51,10 +51,6 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
-fn is_zero_f64(value: &f64) -> bool {
-    value.abs() < 1e-12
-}
-
 /// Clip 源媒体的总时长（秒）：优先 `duration_frames / source_sample_rate`，
 /// 回退 `duration_sec`；均不可用时返回 None。
 ///
@@ -983,166 +979,22 @@ pub struct TrackParamsState {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub extra_params: HashMap<String, f64>,
 
-    /// 用户手动合并的参数块（可选附加字段；旧工程缺省为空）。
+    /// 参数块的唯一用户编辑权威：Take 源域声明式块。
     ///
-    /// 自动分析结果与自动重叠归并**不写入这里**：前者是 Take 缓存，后者是
-    /// 每次派生都可重算的视图。这里只记录用户明确执行过的合并意图。成员使用
-    /// `(clip_id, take_id, syllable_id)`，不存数组序号，重分析后仍能校核。
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub param_block_merges: Vec<ParamBlockMergeRecord>,
-    /// 用户手动切分 / 伸缩后的块区间（可选附加字段；旧工程为空）。
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub param_block_interval_edits: Vec<ParamBlockIntervalEdit>,
-    /// Unified root-line intervals. None means legacy data still needs migration;
-    /// Some(empty) is an intentionally empty authored layout.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub param_line_blocks: Option<crate::param_line_blocks::ParamLineBlockSet>,
-}
-
-/// 一个被手动合并的块组。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct ParamBlockMergeRecord {
-    pub merged_group_id: String,
-    /// 合并组成员。字段名沿用 `member_refs`；成员本身携带源域秒，
-    /// 不再依赖自动数组序号。
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub member_refs: Vec<ParamBlockMemberRef>,
-}
-
-/// 合并组的稳定成员引用。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ParamBlockMemberRef {
-    pub clip_id: String,
-    pub take_id: String,
-    pub syllable_id: String,
-    /// 源域秒坐标：用于校核音节身份。绝不能存工程秒 —— Clip 移动后工程秒就变了。
-    #[serde(default)]
-    pub source_start_sec: f64,
-    #[serde(default)]
-    pub source_end_sec: f64,
-}
-
-/// 一个手动切分 / 伸缩后的块区间。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ParamBlockIntervalEdit {
-    pub edit_id: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub member_refs: Vec<ParamBlockMemberRef>,
-    pub start_sec: f64,
-    pub end_sec: f64,
-    /// 编辑当时的成员工程秒区间；旧工程缺省时前端按成员当前范围兼容。
-    #[serde(default)]
-    pub member_start_sec: f64,
-    #[serde(default)]
-    pub member_end_sec: f64,
-    /// 编辑所作用的自动块 id；切分后左右段共享它。
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub block_ids: Vec<String>,
-    /// 新扁平块记录：切分后的左右段是同级独立块，不通过 `block_ids` 建立父子关系。
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub explicit: bool,
-    /// 该编辑段是否被用户从块编辑视图删除（保留曲线与源音符）。
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub deleted: bool,
-    /// 用户手动新增的块；不要求存在自动音节成员。
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub manual: bool,
-    /// 手动新增块的高度锚点（当前参数值）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub value: Option<f64>,
-    /// 块间圆滑宽度（秒）；0 / 缺省 = 硬切换。
-    #[serde(default, skip_serializing_if = "is_zero_f64")]
-    pub transition_sec: f64,
+    /// 【为什么不存绝对帧】Slip / 移动 / 伸缩 / 倒放 / Loop 都会改变源域到
+    /// 工程时间的映射；绝对帧会把“块”钉死在旧位置上。这里只存源域锚点与
+    /// 用户意图，显示区间由 `param_blocks::compose` 派生。
+    #[serde(
+        default,
+        skip_serializing_if = "crate::param_blocks::ParamBlockEditSet::is_empty"
+    )]
+    pub param_block_edits: crate::param_blocks::ParamBlockEditSet,
+    /// 最近一次合成的派生视图。**不持久化**：打开工程后按编辑集重建。
+    #[serde(skip)]
+    pub param_block_view: Option<crate::param_blocks::ParamBlockView>,
 }
 
 impl TrackParamsState {
-    /// 删除指向已不存在 Clip / Take / 音节块的合并成员。
-    ///
-    /// 合并记录是**用户意图**，但成员引用只有在对应块仍存在时才有意义。
-    /// Clip 删除、Take 删除、音节重分析导致边界变化后，悬空引用会让下一次
-    /// materialize 误把别的块当成同一组成员。这里在写入/加载边界统一校核：
-    /// 保留仍有效的成员，少于两个成员的组整组丢弃。
-    pub fn prune_param_block_merges(&mut self, clips: &[Clip]) {
-        use std::collections::HashMap;
-        let mut valid: HashMap<(&str, &str), Vec<(f64, f64)>> = HashMap::new();
-        for clip in clips {
-            for take in &clip.takes {
-                /*
-                 * MIDI Clip 的块边界就是音符本身，不写入 `syllable_analysis`
-                 * （音频估计不应覆盖精确 MIDI）。若只认音节缓存，MIDI 上的
-                 * 合并 / 切分 / 伸缩记录会在保存时被全部剪掉。
-                 */
-                let spans: Vec<(f64, f64)> = match take.syllable_analysis.as_ref() {
-                    Some(analysis) => analysis
-                        .source_spans_sec
-                        .iter()
-                        .map(|span| (span.start_sec, span.end_sec))
-                        .collect(),
-                    None => take
-                        .midi_note_data
-                        .as_deref()
-                        .unwrap_or_default()
-                        .iter()
-                        .filter_map(|note| {
-                            (note.end_sec > note.start_sec)
-                                .then_some((note.start_sec, note.end_sec))
-                        })
-                        .collect(),
-                };
-                valid.insert((clip.id.as_str(), take.id.as_str()), spans);
-            }
-        }
-        for record in &mut self.param_block_merges {
-            record.member_refs.retain(|member| {
-                let Some(spans) = valid.get(&(member.clip_id.as_str(), member.take_id.as_str()))
-                else {
-                    return false;
-                };
-                spans.iter().any(|(start_sec, end_sec)| {
-                    // 音节 id 已含源域区间；这里再校核秒值，防止旧 id 复用。
-                    member.source_start_sec >= start_sec - 1e-3
-                        && member.source_end_sec <= end_sec + 1e-3
-                })
-            });
-        }
-        self.param_block_merges.retain(|r| r.member_refs.len() >= 2);
-        for record in &mut self.param_block_interval_edits {
-            if record.manual {
-                record.member_refs.retain(|member| {
-                    clips.iter().any(|clip| {
-                        clip.id == member.clip_id
-                            && clip.takes.iter().any(|take| take.id == member.take_id)
-                    })
-                });
-                continue;
-            }
-            record.member_refs.retain(|member| {
-                let Some(spans) = valid.get(&(member.clip_id.as_str(), member.take_id.as_str()))
-                else {
-                    return false;
-                };
-                spans.iter().any(|(start_sec, end_sec)| {
-                    member.source_start_sec >= start_sec - 1e-3
-                        && member.source_end_sec <= end_sec + 1e-3
-                })
-            });
-            let width = record.end_sec - record.start_sec;
-            let valid_interval = !record.member_refs.is_empty()
-                && width.is_finite()
-                && width > 1e-9
-                && record.start_sec.is_finite()
-                && record.end_sec.is_finite();
-            if !valid_interval && !record.deleted {
-                record.member_refs.clear();
-            }
-        }
-        self.param_block_interval_edits
-            .retain(|record| !record.member_refs.is_empty());
-    }
-
     /// 保存工程文件时，没有任何用户数据需要持久化的状态。
     ///
     /// 全零/空的 pitch、tension 和自动化曲线在反序列化后与默认状态语义一致，
@@ -1155,9 +1007,7 @@ impl TrackParamsState {
             && self.tension_edit.is_empty()
             && self.extra_curves.is_empty()
             && self.extra_params.is_empty()
-            && self.param_block_merges.is_empty()
-            && self.param_block_interval_edits.is_empty()
-            && self.param_line_blocks.is_none()
+            && self.param_block_edits.is_empty()
     }
 }
 
@@ -1424,6 +1274,14 @@ pub struct ClipTake {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub syllable_analysis: Option<crate::pitch_analysis::TakeSyllableAnalysis>,
 
+    /// GAME 初始分段基线（源域快照）。
+    ///
+    /// 【与 syllable_analysis 的分工】后者是“当前分析结果”，会被重分析整体替换；
+    /// 本字段只在 GAME 第一次成功时写入，之后只有用户显式“刷新 GAME 基准”才改。
+    /// “还原 GAME 分段”从本字段生成用户块，因此当前分析变化不会破坏还原结果。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game_block_baseline: Option<crate::param_blocks::GameBlockBaseline>,
+
     // ── Take 级拉伸标记 / 包络（预留，Phase 2 起消费） ──
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stretch_markers: Vec<ClipStretchMarker>,
@@ -1482,6 +1340,7 @@ impl ClipTake {
             midi_note_data: clip.midi_note_data.clone(),
             midi_fill_gaps: clip.midi_fill_gaps,
             syllable_analysis: None,
+            game_block_baseline: None,
             stretch_markers: Vec::new(),
             envelopes: None,
         }
@@ -2107,6 +1966,7 @@ impl Clip {
         // 音节分析是 Take 的权威数据，不在 Clip 投影里。必须显式继承，
         // 否则每次 sync（加载 / 保存 / 拖动）都会把它抹掉，重开工程就丢块。
         projection.syllable_analysis = existing.syllable_analysis;
+        projection.game_block_baseline = existing.game_block_baseline;
         // 判定档案是 Take 的权威数据，不在投影里：必须显式继承，否则每一次
         // `sync_clip_takes_from_flat()`（加载/编辑/保存路径上到处都是）都会把
         // 它抹成 None，折叠结论随之丢失并反复重判。
@@ -2641,7 +2501,7 @@ pub enum HistoryOp {
     ParamStretch,
     ParamPaste,
     /// 参数块的合并 / 解合并。
-    ParamBlockMerge,
+    ParamBlockEdit,
     ImportMidi,
     EditMidi,
     ImportVocalShifter,
@@ -2703,7 +2563,7 @@ impl HistoryOp {
             HistoryOp::ParamStatic => "param_static",
             HistoryOp::ParamStretch => "param_stretch",
             HistoryOp::ParamPaste => "param_paste",
-            HistoryOp::ParamBlockMerge => "param_block_merge",
+            HistoryOp::ParamBlockEdit => "param_block_edit",
             HistoryOp::ImportMidi => "import_midi",
             HistoryOp::EditMidi => "edit_midi",
             HistoryOp::ImportVocalShifter => "import_vocalshifter",
@@ -3474,30 +3334,6 @@ impl TimelineState {
             return;
         }
         self.ensure_params_for_root(root_track_id);
-        {
-            use crate::editor::param_geometry::{
-                GeometryDelta, GeometryKey, GeometryOp, GeometryWindow,
-            };
-            let deltas = mappings
-                .iter()
-                .enumerate()
-                .map(|(order, mapping)| {
-                    let old = GeometryWindow::new(mapping.old_start_sec, mapping.old_length_sec);
-                    let new = GeometryWindow::new(mapping.new_start_sec, mapping.new_length_sec);
-                    GeometryDelta {
-                        key: GeometryKey::clip(&format!("stretch-{order}")),
-                        old_root: root_track_id.to_owned(),
-                        new_root: root_track_id.to_owned(),
-                        old,
-                        new,
-                        op: GeometryOp::Stretch { old, new },
-                        priority: 1,
-                        order: order as u64,
-                    }
-                })
-                .collect::<Vec<_>>();
-            self.apply_param_block_geometry(&deltas, &[]);
-        }
         let fp = self.frame_period_ms().max(0.1);
 
         // 秒 → 帧；跳过几何没有变化的映射。
@@ -10074,30 +9910,6 @@ impl TimelineState {
             .iter()
             .filter_map(|plan| plan.linked_move.as_ref())
             .collect();
-        {
-            use crate::editor::param_geometry::{
-                GeometryDelta, GeometryKey, GeometryOp, GeometryWindow,
-            };
-            let deltas = linked_moves
-                .iter()
-                .enumerate()
-                .map(|(order, plan)| {
-                    let old = GeometryWindow::new(plan.old_start_sec, plan.clip_length_sec);
-                    let new = GeometryWindow::new(plan.new_start_sec, plan.clip_length_sec);
-                    GeometryDelta {
-                        key: GeometryKey::clip(&format!("move-{order}")),
-                        old_root: plan.old_root_track_id.clone(),
-                        new_root: plan.new_root_track_id.clone(),
-                        old,
-                        new,
-                        op: GeometryOp::Move { old, new },
-                        priority: 1,
-                        order: order as u64,
-                    }
-                })
-                .collect::<Vec<_>>();
-            self.apply_param_block_geometry(&deltas, &[]);
-        }
         for linked_move in &linked_moves {
             self.clear_linked_params_in_root_range(
                 &linked_move.old_root_track_id,
@@ -10164,54 +9976,7 @@ impl TimelineState {
         );
     }
 
-    /// Use the same frame-domain transaction for App and ARA geometry changes.
-    fn apply_param_block_geometry(
-        &mut self,
-        deltas: &[crate::editor::param_geometry::GeometryDelta],
-        crops: &[(String, f64, f64)],
-    ) {
-        let mut layouts = self
-            .params_by_root_track
-            .iter()
-            .filter_map(|(root, entry)| {
-                entry
-                    .param_line_blocks
-                    .clone()
-                    .map(|layout| (root.clone(), layout))
-            })
-            .collect();
-        match crate::param_line_blocks::geometry::apply_geometry(&mut layouts, deltas, crops) {
-            Ok(true) => {
-                for (root, layout) in layouts {
-                    self.params_by_root_track
-                        .entry(root)
-                        .or_default()
-                        .param_line_blocks = Some(layout);
-                }
-            }
-            Ok(false) => {}
-            Err(error) => log::error!("block geometry transaction rejected: {error}"),
-        }
-    }
-
     pub fn patch_clip_state(&mut self, clip_id: &str, patch: ClipStatePatch) {
-        use crate::editor::param_geometry::{ClipGeometry, GeometryFrame, GeometryKey};
-        let previous = self
-            .clips
-            .iter()
-            .find(|clip| clip.id == clip_id)
-            .and_then(|clip| {
-                let root = self.resolve_root_track_id(&clip.track_id)?;
-                self.params_by_root_track
-                    .get(&root)?
-                    .param_line_blocks
-                    .as_ref()?;
-                Some(ClipGeometry::from_clip(
-                    clip,
-                    &root,
-                    GeometryKey::clip(clip_id),
-                ))
-            });
         let content_sync_patch = patch.clone();
         let mut end_sec: Option<f64> = None;
         if let Some(c) = self.clips.iter_mut().find(|c| c.id == clip_id) {
@@ -10441,23 +10206,6 @@ impl TimelineState {
 
         if let Some(v) = end_sec {
             self.ensure_project_end_sec(v);
-        }
-        if let Some(previous) = previous {
-            let clips = self
-                .clips
-                .iter()
-                .filter_map(|clip| {
-                    self.resolve_root_track_id(&clip.track_id).map(|root| {
-                        ClipGeometry::from_clip(clip, &root, GeometryKey::clip(&clip.id))
-                    })
-                })
-                .collect();
-            let old = [(previous.key.clone(), previous)].into_iter().collect();
-            let crops = crate::param_line_blocks::geometry::crop_windows(
-                &old,
-                &GeometryFrame::complete(clips),
-            );
-            self.apply_param_block_geometry(&[], &crops);
         }
     }
 

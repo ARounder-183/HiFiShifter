@@ -94,7 +94,7 @@ export interface ParamBlockDragContext {
     readonly paintNow: () => void;
     readonly bumpParamBlockStructure: () => void;
     readonly setParamBlockState: (state: ParamBlockState) => void;
-    readonly persistParamBlockMerges: (state: ParamBlockState) => void;
+    readonly persistParamBlockEdits: (state: ParamBlockState) => void;
     readonly commitLineCurve?: (
         segments: readonly { startFrame: number; values: readonly number[] }[],
         authorityRevision?: number,
@@ -164,7 +164,7 @@ export function beginParamBlockDrag(
         paintNow,
         bumpParamBlockStructure,
         setParamBlockState,
-        persistParamBlockMerges,
+        persistParamBlockEdits,
         getAuthorityWatermark,
         paramAuthorityRevision,
         onParamCommitSucceeded,
@@ -206,7 +206,7 @@ export function beginParamBlockDrag(
      * 整个手势只读它，避免拖动期间块重新派生时引用漂移。
      */
     const dragMembers = selectedBlocks.flatMap((block) =>
-        (block.lineBlock
+        (block.members.length === 0
             ? [{ clipId: rootTrackId, startSec: block.startSec, endSec: block.endSec }]
             : block.members
         ).map((member) => ({ ...member })),
@@ -415,7 +415,7 @@ export function beginParamBlockDrag(
             return;
         }
         const segments = buildParamBlockPreviewSegments({
-            fillEmptyPitch: Boolean(paramBlockStateRef.current.lineLayout),
+            fillEmptyPitch: Boolean(paramBlockStateRef.current.view),
             blocks: dragBlocks,
             framePeriodMs,
             param: editParam,
@@ -662,7 +662,7 @@ export function beginParamBlockDrag(
                      */
                     const fullResDelta = commitDelta;
                     const windows = buildParamBlockDragSegments({
-                        fillEmptyPitch: Boolean(paramBlockStateRef.current.lineLayout),
+                        fillEmptyPitch: Boolean(paramBlockStateRef.current.view),
                         blocks: commitBlocks,
                         framePeriodMs,
                         param: editParam,
@@ -707,7 +707,7 @@ export function beginParamBlockDrag(
                     if (commitSegments.length === 0)
                         throw new Error("Block drag has no editable frames");
                     if (liveEditActiveRef) liveEditActiveRef.current = true;
-                    if (paramBlockStateRef.current.lineLayout && context.commitLineCurve) {
+                    if (paramBlockStateRef.current.view && context.commitLineCurve) {
                         const revision = curves[0]?.authorityRevision;
                         const geometry = curves[0]?.geometryRevision;
                         const signature = curves[0]?.geometrySignature;
@@ -750,7 +750,7 @@ export function beginParamBlockDrag(
                         if (nextState !== paramBlockStateRef.current) {
                             paramBlockStateRef.current = nextState;
                             setParamBlockState(nextState);
-                            persistParamBlockMerges(nextState);
+                            persistParamBlockEdits(nextState);
                         }
                     }
                     if (

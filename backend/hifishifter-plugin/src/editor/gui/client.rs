@@ -2401,7 +2401,7 @@ pub(crate) fn on_message(state: &Rc<RefCell<EditorClient>>, text: &str) {
                 state.borrow_mut().undo_document=Some(Arc::downgrade(document));
                 if command=="begin_undo_group" {document.host_undo.begin_group(&view_id);}
                 if command=="end_undo_group" {document.host_undo.end_group(&view_id);}
-                if crate::editor::commands::mutates_audio(command) || command=="set_param_line_blocks" {
+                if crate::editor::commands::mutates_audio(command) || command=="set_param_block_edits" {
                     let checkpoint=request["args"]["checkpoint"].as_bool().unwrap_or(true);
                     match document.host_undo.begin_request(&view_id,id,checkpoint,false,host,&||link.authorize(document).is_ok_and(|current|current==*lease)) {
                         Ok(())=>undo_started=true,

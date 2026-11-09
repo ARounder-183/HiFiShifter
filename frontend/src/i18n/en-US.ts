@@ -156,7 +156,7 @@ export const enUS = {
     history_op_param_static: "Edit static parameter",
     history_op_param_stretch: "Stretch parameter curve",
     history_op_param_paste: "Paste VocalShifter params",
-    history_op_param_block_merge: "Merge parameter blocks",
+    history_op_param_block_edit: "Edit parameter blocks",
     history_op_import_midi: "Import MIDI",
     history_op_edit_midi: "Edit MIDI data",
     history_op_import_vocalshifter: "Import VocalShifter project",

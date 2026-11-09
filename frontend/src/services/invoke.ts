@@ -336,20 +336,12 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
         case "analyze_clip_syllables":
             return { clipId: args[0] };
 
-        case "get_param_block_merges":
-        case "get_param_line_blocks":
+        case "get_param_block_view":
             return { rootTrackId: args[0] };
 
-        case "set_param_line_blocks":
+        case "set_param_block_edits":
+        case "restore_game_param_blocks":
             return args[0] as Record<string, unknown>;
-
-        case "set_param_block_merges":
-            return {
-                rootTrackId: args[0],
-                records: args[1],
-                intervalEdits: args[2] ?? [],
-                checkpoint: args[3] ?? true,
-            };
 
         case "apply_clip_linked_params":
             return {

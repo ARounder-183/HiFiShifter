@@ -85,8 +85,8 @@ mod formant;
 mod notebook;
 #[path = "commands/onnx_status.rs"]
 mod onnx_status;
-#[path = "commands/param_line_blocks.rs"]
-mod param_line_blocks;
+#[path = "commands/param_blocks.rs"]
+mod param_blocks;
 #[path = "commands/syllable.rs"]
 mod syllable;
 // 多选区帧窗口已搬进内核（`hifishifter_kernel::editor::selection`）：MIDI 导入在
@@ -1217,43 +1217,65 @@ pub async fn analyze_clip_formants(
 // ===================== clip syllable analysis =====================
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn get_param_line_blocks(
+pub fn get_param_block_view(
     state: State<'_, AppState>,
     root_track_id: String,
 ) -> Result<serde_json::Value, String> {
     common::guard_command(
-        "get_param_line_blocks",
-        Err("panic in get_param_line_blocks".into()),
-        || param_line_blocks::get(&state, &root_track_id),
+        "get_param_block_view",
+        Err("panic in get_param_block_view".into()),
+        || param_blocks::get(&state, &root_track_id),
     )
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn set_param_line_blocks(
+#[allow(clippy::too_many_arguments)]
+pub fn set_param_block_edits(
     state: State<'_, AppState>,
     root_track_id: String,
-    expected_revision: u64,
-    blocks: Vec<hifishifter_kernel::param_line_blocks::ParamLineBlock>,
-    game_baseline: Option<Vec<hifishifter_kernel::param_line_blocks::ParamLineBlock>>,
+    expected_edit_revision: u64,
+    edits: Vec<hifishifter_kernel::param_blocks::UserParamBlock>,
     checkpoint: Option<bool>,
-    curve_patches: Option<Vec<hifishifter_kernel::param_line_blocks::ParamLineCurvePatch>>,
+    curve_patches: Option<Vec<hifishifter_kernel::param_blocks::ParamBlockCurvePatch>>,
     expected_curve_revision: Option<u64>,
     expected_geometry_signature: Option<String>,
 ) -> Result<serde_json::Value, String> {
     common::guard_command(
-        "set_param_line_blocks",
-        Err("panic in set_param_line_blocks".into()),
+        "set_param_block_edits",
+        Err("panic in set_param_block_edits".into()),
         || {
-            param_line_blocks::set(
+            param_blocks::set(
                 &state,
                 root_track_id,
-                expected_revision,
-                blocks,
-                game_baseline,
+                expected_edit_revision,
+                edits,
                 checkpoint.unwrap_or(true),
                 curve_patches.unwrap_or_default(),
                 expected_curve_revision,
                 expected_geometry_signature,
+            )
+        },
+    )
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn restore_game_param_blocks(
+    state: State<'_, AppState>,
+    root_track_id: String,
+    start_frame: u32,
+    end_frame_exclusive: u32,
+    checkpoint: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    common::guard_command(
+        "restore_game_param_blocks",
+        Err("panic in restore_game_param_blocks".into()),
+        || {
+            param_blocks::restore_game(
+                &state,
+                root_track_id,
+                start_frame,
+                end_frame_exclusive,
+                checkpoint.unwrap_or(true),
             )
         },
     )
@@ -1282,41 +1304,6 @@ pub async fn analyze_clip_syllables(
     })
     .await
     .map_err(|e| format!("syllable analysis worker failed: {e}"))?
-}
-
-#[tauri::command(rename_all = "camelCase")]
-pub fn get_param_block_merges(
-    state: State<'_, AppState>,
-    root_track_id: String,
-) -> serde_json::Value {
-    common::guard_json_command(
-        "get_param_block_merges",
-        || match syllable::get_param_block_merges(state, root_track_id) {
-            Ok((records, interval_edits)) => {
-                serde_json::json!({ "ok": true, "records": records, "intervalEdits": interval_edits })
-            }
-            Err(error) => serde_json::json!({ "ok": false, "error": error }),
-        },
-    )
-}
-
-#[tauri::command(rename_all = "camelCase")]
-pub fn set_param_block_merges(
-    state: State<'_, AppState>,
-    root_track_id: String,
-    records: Vec<syllable::ParamBlockMergeRecordPayload>,
-    interval_edits: Option<Vec<syllable::ParamBlockIntervalEditPayload>>,
-    checkpoint: Option<bool>,
-) -> serde_json::Value {
-    common::guard_json_command("set_param_block_merges", || {
-        syllable::set_param_block_merges(
-            state,
-            root_track_id,
-            records,
-            interval_edits.unwrap_or_default(),
-            checkpoint,
-        )
-    })
 }
 
 // ===================== waveform v2 (二进制 mipmap) =====================

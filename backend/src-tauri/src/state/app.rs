@@ -756,7 +756,7 @@ impl AppState {
                     .lock()
                     .unwrap_or_else(|error| error.into_inner()),
                 snapshot,
-                HistoryOp::ParamBlockMerge.key().into(),
+                HistoryOp::ParamBlockEdit.key().into(),
                 || self.current_notes_markdown(),
             );
             self.emit_history_state();
@@ -1063,25 +1063,27 @@ impl AppState {
             return payload;
         };
         let layout_only =
-            hifishifter_kernel::param_line_blocks::timeline_equal_except_blocks(&tl, &next_state);
+            hifishifter_kernel::param_blocks::timeline_equal_except_blocks(&tl, &next_state);
         // Undo restores content, but transport revisions must remain monotonic.
         for (root, params) in &tl.params_by_root_track {
-            if let Some(current) = &params.param_line_blocks {
-                if !next_state.tracks.iter().any(|track| track.id == *root) {
-                    continue;
-                }
-                let entry = next_state
-                    .params_by_root_track
-                    .entry(root.clone())
-                    .or_default();
-                let restored = entry.param_line_blocks.get_or_insert_with(|| {
-                    hifishifter_kernel::param_line_blocks::ParamLineBlockSet {
-                        frame_period_ms: current.frame_period_ms,
-                        ..Default::default()
-                    }
-                });
-                restored.revision = restored.revision.max(current.revision).saturating_add(1);
+            if params.param_block_edits.is_empty() {
+                continue;
             }
+            if !next_state.tracks.iter().any(|track| track.id == *root) {
+                continue;
+            }
+            let entry = next_state
+                .params_by_root_track
+                .entry(root.clone())
+                .or_default();
+            // 【revision 只增不减】历史快照里的编辑集是旧代次；恢复后必须分配
+            // 比在线权威更大的 revision，旧 GUI 的迟到提交才会被 CAS 拒绝。
+            entry.param_block_edits.revision = entry
+                .param_block_edits
+                .revision
+                .max(params.param_block_edits.revision)
+                .saturating_add(1);
+            entry.param_block_view = None;
         }
         let scale_before = tl.render_scale_signature();
         *tl = next_state;

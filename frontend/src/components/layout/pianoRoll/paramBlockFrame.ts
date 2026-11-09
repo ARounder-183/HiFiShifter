@@ -5,7 +5,6 @@ import {
     type ParamBlock,
 } from "./paramBlocks";
 import type { ParamViewSegment } from "./types";
-import { paramLineBlockValue } from "./paramLineBlockValue";
 
 type LiveEdit = {
     readonly key: string;
@@ -25,10 +24,7 @@ export function resolveParamBlockPanelValues(args: {
         const sampled =
             pv === null
                 ? null
-                : (block.lineBlock
-                      ? (input: Parameters<typeof averageParamValueInSpan>[0]) =>
-                            paramLineBlockValue(input.startSec, input.endSec, input)
-                      : averageParamValueInSpan)({
+                : averageParamValueInSpan({
                       startSec: block.startSec,
                       endSec: block.endSec,
                       values: pv.edit,
@@ -129,11 +125,7 @@ export function resolveParamBlockFrameValue(args: {
     const sampled =
         args.samples === null
             ? null
-            : (args.curveOwned ? paramLineBlockValue : modeCenterOfValuesInSamples)(
-                  args.block.startSec,
-                  args.block.endSec,
-                  args.samples,
-              );
+            : modeCenterOfValuesInSamples(args.block.startSec, args.block.endSec, args.samples);
     return sampled ?? args.block.averageValue ?? null;
 }
 

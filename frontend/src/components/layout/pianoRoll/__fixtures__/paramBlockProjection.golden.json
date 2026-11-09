@@ -1,0 +1,150 @@
+{
+    "framePeriodMs": 5,
+    "cases": [
+        {
+            "name": "forward",
+            "clip": {
+                "id": "c",
+                "startSec": 1,
+                "lengthSec": 2,
+                "sourceStartSec": 0,
+                "sourceEndSec": 2,
+                "playbackRate": 1,
+                "reversed": false,
+                "loopEnabled": false,
+                "contentDurationSec": 2
+            },
+            "span": {
+                "sourceStartSec": 0.5,
+                "sourceEndSec": 1,
+                "cycle": 0
+            },
+            "expected": [
+                {
+                    "cycle": 0,
+                    "startFrame": 300,
+                    "endFrameExclusive": 400
+                }
+            ]
+        },
+        {
+            "name": "reverse",
+            "clip": {
+                "id": "c",
+                "startSec": 0,
+                "lengthSec": 2,
+                "sourceStartSec": 0,
+                "sourceEndSec": 2,
+                "playbackRate": 1,
+                "reversed": true,
+                "loopEnabled": false,
+                "contentDurationSec": 2
+            },
+            "span": {
+                "sourceStartSec": 0.5,
+                "sourceEndSec": 1,
+                "cycle": 0
+            },
+            "expected": [
+                {
+                    "cycle": 0,
+                    "startFrame": 200,
+                    "endFrameExclusive": 300
+                }
+            ]
+        },
+        {
+            "name": "rate",
+            "clip": {
+                "id": "c",
+                "startSec": 0,
+                "lengthSec": 2,
+                "sourceStartSec": 0,
+                "sourceEndSec": 4,
+                "playbackRate": 2,
+                "reversed": false,
+                "loopEnabled": false,
+                "contentDurationSec": 4
+            },
+            "span": {
+                "sourceStartSec": 1,
+                "sourceEndSec": 2,
+                "cycle": 0
+            },
+            "expected": [
+                {
+                    "cycle": 0,
+                    "startFrame": 100,
+                    "endFrameExclusive": 200
+                }
+            ]
+        },
+        {
+            "name": "slip",
+            "clip": {
+                "id": "c",
+                "startSec": 1,
+                "lengthSec": 2,
+                "sourceStartSec": 1,
+                "sourceEndSec": 3,
+                "playbackRate": 1,
+                "reversed": false,
+                "loopEnabled": false,
+                "contentDurationSec": 3
+            },
+            "span": {
+                "sourceStartSec": 1.5,
+                "sourceEndSec": 2,
+                "cycle": 0
+            },
+            "expected": [
+                {
+                    "cycle": 0,
+                    "startFrame": 300,
+                    "endFrameExclusive": 400
+                }
+            ]
+        },
+        {
+            "name": "loop",
+            "clip": {
+                "id": "c",
+                "startSec": 0,
+                "lengthSec": 4,
+                "sourceStartSec": 0,
+                "sourceEndSec": 1,
+                "playbackRate": 1,
+                "reversed": false,
+                "loopEnabled": true,
+                "contentDurationSec": 1
+            },
+            "span": {
+                "sourceStartSec": 0.2,
+                "sourceEndSec": 0.4,
+                "cycle": 0
+            },
+            "expected": [
+                {
+                    "cycle": 0,
+                    "startFrame": 40,
+                    "endFrameExclusive": 80
+                },
+                {
+                    "cycle": 1,
+                    "startFrame": 240,
+                    "endFrameExclusive": 280
+                },
+                {
+                    "cycle": 2,
+                    "startFrame": 440,
+                    "endFrameExclusive": 480
+                },
+                {
+                    "cycle": 3,
+                    "startFrame": 640,
+                    "endFrameExclusive": 680
+                }
+            ]
+        }
+    ]
+}

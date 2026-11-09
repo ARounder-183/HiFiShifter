@@ -131,11 +131,16 @@ export interface ClipFormantAnalysisResult {
     message: string | null;
 }
 
-export interface ParamLineBlocksReply {
+export interface ParamBlockViewReply {
     ok: boolean;
-    initialized: boolean;
-    layout: import("../../components/layout/pianoRoll/paramLineBlocks").ParamLineBlockSet;
-    curveRevision?: number;
+    editRevision: number;
+    layoutKey: string;
+    framePeriodMs: number;
+    blocks: import("../../components/layout/pianoRoll/paramBlockTypes").ProjectedParamBlock[];
+    orphanCount: number;
+    analysisPending: boolean;
+    curveRevision: number;
+    edits: import("../../components/layout/pianoRoll/paramBlockTypes").ParamBlockEditSet;
 }
 
 export interface ClipSyllableAnalysisResult {
@@ -148,39 +153,7 @@ export interface ClipSyllableAnalysisResult {
     algorithmVersion: number;
     analyzed: boolean;
     rootTrackId?: string;
-    blockLayout?: import("../../components/layout/pianoRoll/paramLineBlocks").ParamLineBlockSet;
-}
-
-export interface ParamBlockMemberRefPayload {
-    clipId: string;
-    takeId: string;
-    syllableId: string;
-    sourceStartSec: number;
-    sourceEndSec: number;
-}
-
-export interface ParamBlockMergeRecordPayload {
-    mergedGroupId: string;
-    memberRefs: ParamBlockMemberRefPayload[];
-}
-
-export interface ParamBlockIntervalEditPayload {
-    editId: string;
-    memberRefs: ParamBlockMemberRefPayload[];
-    startSec: number;
-    endSec: number;
-    memberStartSec?: number;
-    memberEndSec?: number;
-    blockIds?: string[];
-    /** 新扁平块记录；旧工程缺省，加载时走旧兼容分支。 */
-    explicit?: boolean;
-    deleted?: boolean;
-    /** 用户手动新增的块；不经自动音节成员校核。 */
-    manual?: boolean;
-    /** 手动新增块的高度锚点。 */
-    value?: number | null;
-    /** 块间圆滑宽度（秒）；0 / 缺省 = 硬切换。 */
-    transitionSec?: number;
+    blockLayout?: import("../../components/layout/pianoRoll/paramBlockTypes").ParamBlockView;
 }
 
 export const timelineApi = {
@@ -453,48 +426,73 @@ export const timelineApi = {
     analyzeClipSyllables: (clipId: string) =>
         invoke<ClipSyllableAnalysisResult>("analyze_clip_syllables", clipId),
 
-    getParamLineBlocks: (rootTrackId: string) =>
-        invoke<ParamLineBlocksReply>("get_param_line_blocks", rootTrackId),
+    getParamBlockView: async (rootTrackId: string) => {
+        const reply = await invoke<ParamBlockViewReply>("get_param_block_view", rootTrackId);
+        return {
+            view: {
+                schemaVersion: 1 as const,
+                rootTrackId,
+                editRevision: reply.editRevision,
+                layoutKey: reply.layoutKey,
+                framePeriodMs: reply.framePeriodMs,
+                blocks: reply.blocks ?? [],
+                orphanCount: reply.orphanCount ?? 0,
+                analysisPending: reply.analysisPending ?? false,
+            },
+            edits: reply.edits,
+            curveRevision: reply.curveRevision ?? 0,
+        };
+    },
 
-    setParamLineBlocks: (input: {
+    setParamBlockEdits: async (input: {
         rootTrackId: string;
-        expectedRevision: number;
-        blocks: readonly import("../../components/layout/pianoRoll/paramLineBlocks").ParamLineBlock[];
-        gameBaseline?: readonly import("../../components/layout/pianoRoll/paramLineBlocks").ParamLineBlock[];
+        expectedEditRevision: number;
+        edits: readonly import("../../components/layout/pianoRoll/paramBlockTypes").UserParamBlock[];
         checkpoint?: boolean;
         curvePatches?: readonly { param: string; startFrame: number; values: readonly number[] }[];
         expectedCurveRevision?: number;
         expectedGeometryRevision?: number;
         expectedGeometrySignature?: string;
-    }) => invoke<ParamLineBlocksReply>("set_param_line_blocks", input),
+    }) => {
+        const reply = await invoke<ParamBlockViewReply>("set_param_block_edits", input);
+        return {
+            view: {
+                schemaVersion: 1 as const,
+                rootTrackId: input.rootTrackId,
+                editRevision: reply.editRevision,
+                layoutKey: reply.layoutKey,
+                framePeriodMs: reply.framePeriodMs,
+                blocks: reply.blocks ?? [],
+                orphanCount: reply.orphanCount ?? 0,
+                analysisPending: reply.analysisPending ?? false,
+            },
+            edits: reply.edits,
+            curveRevision: reply.curveRevision ?? 0,
+        };
+    },
 
-    getParamBlockMerges: (rootTrackId: string) =>
-        invoke<{
-            ok: boolean;
-            records: ParamBlockMergeRecordPayload[];
-            intervalEdits?: ParamBlockIntervalEditPayload[];
-            error?: string;
-        }>("get_param_block_merges", rootTrackId).then((result) => {
-            if (!result?.ok) throw new Error(result?.error ?? "get_param_block_merges failed");
-            return {
-                records: result.records ?? [],
-                intervalEdits: result.intervalEdits ?? [],
-            };
-        }),
-
-    setParamBlockMerges: (
-        rootTrackId: string,
-        records: ParamBlockMergeRecordPayload[],
-        intervalEdits: ParamBlockIntervalEditPayload[] = [],
-        checkpoint = true,
-    ) =>
-        invoke<{ ok: boolean }>(
-            "set_param_block_merges",
-            rootTrackId,
-            records,
-            intervalEdits,
-            checkpoint,
-        ),
+    restoreGameParamBlocks: async (input: {
+        rootTrackId: string;
+        startFrame: number;
+        endFrameExclusive: number;
+        checkpoint?: boolean;
+    }) => {
+        const reply = await invoke<ParamBlockViewReply>("restore_game_param_blocks", input);
+        return {
+            view: {
+                schemaVersion: 1 as const,
+                rootTrackId: input.rootTrackId,
+                editRevision: reply.editRevision,
+                layoutKey: reply.layoutKey,
+                framePeriodMs: reply.framePeriodMs,
+                blocks: reply.blocks ?? [],
+                orphanCount: reply.orphanCount ?? 0,
+                analysisPending: reply.analysisPending ?? false,
+            },
+            edits: reply.edits,
+            curveRevision: reply.curveRevision ?? 0,
+        };
+    },
 
     setClipsStateBulk: (payload: {
         updates: Array<{

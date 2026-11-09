@@ -4,16 +4,29 @@ use crate::sync::MutexExt;
 use std::sync::{atomic::AtomicBool, mpsc, Arc};
 
 #[test]
-fn param_line_layout_is_independent_of_clip_members_and_survives_component_save() {
+fn param_block_edits_are_independent_of_clip_members_and_survive_component_save() {
     let (model, owner, _identity) = crate::editor::session::tests::fixture();
     let editor = owner.editor_session().unwrap();
     editor.ensure_loaded(false).unwrap();
     let root = editor.timeline.lock_or_recover().tracks[0].id.clone();
     let generation = editor.generation.load(Ordering::Acquire);
-    let reply=dispatch(&editor,"set_param_line_blocks",json!({"rootTrackId":root,"expectedRevision":0,
-        "blocks":[{"id":"ordinary","startFrame":10,"endFrameExclusive":80}],
-        "gameBaseline":[{"id":"initial","startFrame":0,"endFrameExclusive":100}],"checkpoint":true})).unwrap();
-    assert_eq!(reply["layout"]["blocks"][0]["id"], "ordinary");
+    let reply = dispatch(
+        &editor,
+        "set_param_block_edits",
+        json!({
+            "rootTrackId": root,
+            "expectedEditRevision": 0,
+            "edits": [{
+                "id": "ordinary",
+                "geometry": {"kind": "root", "span": {"startSec": 0.05, "endSec": 0.4}},
+                "manual": true,
+                "createdSeq": 1
+            }],
+            "checkpoint": true
+        }),
+    )
+    .unwrap();
+    assert_eq!(reply["blocks"][0]["id"], "ordinary");
     assert_eq!(
         editor.generation.load(Ordering::Acquire),
         generation,
@@ -22,11 +35,11 @@ fn param_line_layout_is_independent_of_clip_members_and_survives_component_save(
     editor.ensure_loaded(true).unwrap();
     let after = dispatch(
         &editor,
-        "get_param_line_blocks",
-        json!({"rootTrackId":root}),
+        "get_param_block_view",
+        json!({"rootTrackId": root}),
     )
     .unwrap();
-    assert_eq!(after["layout"]["blocks"][0]["endFrameExclusive"], 80);
+    assert_eq!(after["blocks"][0]["id"], "ordinary");
     let encoded = owner.encode_state().unwrap();
     let (cold_model, cold_owner, _cold_identity) = crate::editor::session::tests::fixture();
     cold_owner.restore_state(&encoded).unwrap();
@@ -35,21 +48,17 @@ fn param_line_layout_is_independent_of_clip_members_and_survives_component_save(
     let cold_root = cold_editor.timeline.lock_or_recover().tracks[0].id.clone();
     let restored = dispatch(
         &cold_editor,
-        "get_param_line_blocks",
-        json!({"rootTrackId":cold_root}),
+        "get_param_block_view",
+        json!({"rootTrackId": cold_root}),
     )
     .unwrap();
-    assert_eq!(restored["layout"]["blocks"][0]["id"], "ordinary");
-    assert_eq!(
-        restored["layout"]["gameBaseline"]["segments"][0]["id"],
-        "initial"
-    );
+    assert_eq!(restored["blocks"][0]["id"], "ordinary");
     cold_model.session().close();
     model.session().close();
 }
 
 #[test]
-fn param_line_layout_and_curve_commit_or_reject_together() {
+fn param_block_edit_and_curve_commit_or_reject_together() {
     let (model, owner, _identity) = crate::editor::session::tests::fixture();
     let editor = owner.editor_session().unwrap();
     editor.ensure_loaded(false).unwrap();
@@ -57,33 +66,44 @@ fn param_line_layout_and_curve_commit_or_reject_together() {
     let read = dispatch(
         &editor,
         "get_param_frames",
-        json!({"trackId":root,"param":"volume","startFrame":0,"frameCount":4,"binary":false}),
+        json!({"trackId": root, "param": "volume", "startFrame": 0, "frameCount": 4, "binary": false}),
     )
     .unwrap();
-    let request = json!({"rootTrackId":root,"expectedRevision":0,"blocks":[{"id":"created","startFrame":0,"endFrameExclusive":4}],
-        "curvePatches":[{"param":"volume","startFrame":0,"values":[0.5,0.6,0.7,0.8]}],
-        "expectedCurveRevision":read["authority_revision"],"expectedGeometrySignature":read["geometry_signature"],"checkpoint":true});
-    let result = dispatch(&editor, "set_param_line_blocks", request.clone()).unwrap();
-    assert_eq!(result["layout"]["blocks"][0]["id"], "created");
+    let request = json!({
+        "rootTrackId": root,
+        "expectedEditRevision": 0,
+        "edits": [{
+            "id": "created",
+            "geometry": {"kind": "root", "span": {"startSec": 0.0, "endSec": 0.02}},
+            "manual": true,
+            "createdSeq": 1
+        }],
+        "curvePatches": [{"param": "volume", "startFrame": 0, "values": [0.5, 0.6, 0.7, 0.8]}],
+        "expectedCurveRevision": read["authority_revision"],
+        "expectedGeometrySignature": read["geometry_signature"],
+        "checkpoint": true
+    });
+    let result = dispatch(&editor, "set_param_block_edits", request.clone()).unwrap();
+    assert_eq!(result["blocks"][0]["id"], "created");
     let curve = dispatch(
         &editor,
         "get_param_frames",
-        json!({"trackId":root,"param":"volume","startFrame":0,"frameCount":4,"binary":false}),
+        json!({"trackId": root, "param": "volume", "startFrame": 0, "frameCount": 4, "binary": false}),
     )
     .unwrap();
     assert!((curve["edit"][0].as_f64().unwrap() - 0.5).abs() < 1e-5);
     let history_before = dispatch(&editor, "get_history_state", json!({})).unwrap();
     let mut stale = request;
-    stale["expectedRevision"] = result["layout"]["revision"].clone();
-    stale["blocks"][0]["id"] = json!("must-not-appear");
-    assert!(dispatch(&editor, "set_param_line_blocks", stale).is_err());
+    stale["expectedEditRevision"] = result["editRevision"].clone();
+    stale["edits"][0]["id"] = json!("must-not-appear");
+    assert!(dispatch(&editor, "set_param_block_edits", stale).is_err());
     let after = dispatch(
         &editor,
-        "get_param_line_blocks",
-        json!({"rootTrackId":root}),
+        "get_param_block_view",
+        json!({"rootTrackId": root}),
     )
     .unwrap();
-    assert_eq!(after["layout"]["blocks"][0]["id"], "created");
+    assert_eq!(after["blocks"][0]["id"], "created");
     assert_eq!(
         dispatch(&editor, "get_history_state", json!({})).unwrap(),
         history_before,
@@ -93,32 +113,43 @@ fn param_line_layout_and_curve_commit_or_reject_together() {
 }
 
 #[test]
-fn param_line_boundary_undo_keeps_audio_generation_and_empty_layout() {
+fn param_block_boundary_undo_keeps_audio_generation_and_empty_layout() {
     let (model, owner, _) = crate::editor::session::tests::fixture();
     let editor = owner.editor_session().unwrap();
     editor.ensure_loaded(false).unwrap();
     let root = editor.timeline.lock_or_recover().tracks[0].id.clone();
     let initial = dispatch(
         &editor,
-        "set_param_line_blocks",
-        json!({"rootTrackId":root,"expectedRevision":0,"blocks":[],"checkpoint":false}),
+        "set_param_block_edits",
+        json!({"rootTrackId": root, "expectedEditRevision": 0, "edits": [], "checkpoint": false}),
     )
     .unwrap();
     let generation = editor.generation.load(Ordering::Acquire);
-    let added=dispatch(&editor,"set_param_line_blocks",json!({"rootTrackId":root,"expectedRevision":initial["layout"]["revision"],"blocks":[{"id":"manual","startFrame":10,"endFrameExclusive":30}],"checkpoint":true})).unwrap();
+    let added = dispatch(
+        &editor,
+        "set_param_block_edits",
+        json!({
+            "rootTrackId": root,
+            "expectedEditRevision": initial["editRevision"],
+            "edits": [{
+                "id": "manual",
+                "geometry": {"kind": "root", "span": {"startSec": 0.05, "endSec": 0.15}},
+                "manual": true,
+                "createdSeq": 1
+            }],
+            "checkpoint": true
+        }),
+    )
+    .unwrap();
     dispatch(&editor, "undo_parameter_edit", json!({})).unwrap();
     let undone = dispatch(
         &editor,
-        "get_param_line_blocks",
-        json!({"rootTrackId":root}),
+        "get_param_block_view",
+        json!({"rootTrackId": root}),
     )
     .unwrap();
-    assert_eq!(undone["initialized"], true);
-    assert_eq!(undone["layout"]["blocks"], json!([]));
-    assert!(
-        undone["layout"]["revision"].as_u64().unwrap()
-            > added["layout"]["revision"].as_u64().unwrap()
-    );
+    assert_eq!(undone["blocks"], json!([]));
+    assert!(undone["editRevision"].as_u64().unwrap() > added["editRevision"].as_u64().unwrap());
     assert_eq!(
         editor.generation.load(Ordering::Acquire),
         generation,
@@ -128,10 +159,10 @@ fn param_line_boundary_undo_keeps_audio_generation_and_empty_layout() {
     assert_eq!(
         dispatch(
             &editor,
-            "get_param_line_blocks",
-            json!({"rootTrackId":root})
+            "get_param_block_view",
+            json!({"rootTrackId": root})
         )
-        .unwrap()["layout"]["blocks"][0]["id"],
+        .unwrap()["blocks"][0]["id"],
         "manual"
     );
     model.session().close();
@@ -776,7 +807,7 @@ fn source_preparation_returns_inventory_before_files_and_preserves_history() {
     let initial = dispatch(&editor, "get_timeline_state", json!({})).unwrap();
     assert_eq!(initial["tracks"].as_array().unwrap().len(), 1);
     let root = initial["tracks"][0]["id"].as_str().unwrap();
-    dispatch(&editor,"set_param_line_blocks",json!({"rootTrackId":root,"expectedRevision":0,"blocks":[{"id":"early","startFrame":0,"endFrameExclusive":4}],"checkpoint":true})).unwrap();
+    dispatch(&editor,"set_param_block_edits",json!({"rootTrackId":root,"expectedEditRevision":0,"edits":[{"id":"early","geometry":{"kind":"root","span":{"startSec":0.0,"endSec":0.02}},"manual":true,"createdSeq":1}],"checkpoint":true})).unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
         if editor.ensure_loaded(false).is_ok() {
@@ -794,12 +825,8 @@ fn source_preparation_returns_inventory_before_files_and_preserves_history() {
         .as_ref()
         .is_some_and(|p| std::path::Path::new(p).is_file()));
     assert_eq!(
-        dispatch(
-            &editor,
-            "get_param_line_blocks",
-            json!({"rootTrackId":root})
-        )
-        .unwrap()["layout"]["blocks"][0]["id"],
+        dispatch(&editor, "get_param_block_view", json!({"rootTrackId":root})).unwrap()["blocks"]
+            [0]["id"],
         "early"
     );
     document.close();

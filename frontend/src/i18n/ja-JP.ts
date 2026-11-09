@@ -1973,7 +1973,7 @@ export const jaJP = {
     history_op_param_static: "静的パラメータを編集",
     history_op_param_stretch: "パラメータカーブを伸縮",
     history_op_param_paste: "VocalShifter パラメータを貼り付け",
-    history_op_param_block_merge: "パラメータブロックを結合",
+    history_op_param_block_edit: "パラメータブロックを編集",
     history_op_import_midi: "MIDI をインポート",
     history_op_edit_midi: "MIDI データを編集",
     history_op_import_vocalshifter: "VocalShifter プロジェクトをインポート",

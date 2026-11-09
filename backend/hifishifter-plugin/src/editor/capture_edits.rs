@@ -81,12 +81,13 @@ pub(crate) struct CaptureEdits {
     )]
     pub take_syllables:
         BTreeMap<CaptureTakeKey, hifishifter_kernel::pitch_analysis::TakeSyllableAnalysis>,
-    /// 根轨 → 手动合并/切开意图。曲线里没有这两类“块意图”的表示。
+    /// 根轨 → Take 源域参数块编辑集。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub param_block_merges: BTreeMap<String, Vec<hifishifter_kernel::state::ParamBlockMergeRecord>>,
+    pub param_block_edits: BTreeMap<String, hifishifter_kernel::param_blocks::ParamBlockEditSet>,
+    /// Take → GAME 初始分段基线。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub param_block_interval_edits:
-        BTreeMap<String, Vec<hifishifter_kernel::state::ParamBlockIntervalEdit>>,
+    pub game_block_baselines:
+        BTreeMap<CaptureTakeKey, hifishifter_kernel::param_blocks::GameBlockBaseline>,
 }
 
 pub(crate) type CaptureTakeKey = crate::state_channel::TakeSyllableKey;
@@ -145,8 +146,7 @@ impl CaptureEdits {
     pub(crate) fn stabilize(&mut self) {
         stabilize_map(&mut self.params_by_root_track);
         stabilize_map(&mut self.track_settings);
-        stabilize_map(&mut self.param_block_merges);
-        stabilize_map(&mut self.param_block_interval_edits);
+        stabilize_map(&mut self.param_block_edits);
         let old = std::mem::take(&mut self.take_syllables);
         for (key, analysis) in old {
             self.take_syllables.insert(
@@ -155,6 +155,16 @@ impl CaptureEdits {
                     take_id: strip_session_namespace(&key.take_id).to_owned(),
                 },
                 analysis,
+            );
+        }
+        let old = std::mem::take(&mut self.game_block_baselines);
+        for (key, baseline) in old {
+            self.game_block_baselines.insert(
+                CaptureTakeKey {
+                    clip_id: strip_session_namespace(&key.clip_id).to_owned(),
+                    take_id: strip_session_namespace(&key.take_id).to_owned(),
+                },
+                baseline,
             );
         }
     }
@@ -166,8 +176,7 @@ impl CaptureEdits {
     pub(crate) fn bind_to_namespace(&mut self, namespace: &str) {
         bind_map(&mut self.params_by_root_track, namespace);
         bind_map(&mut self.track_settings, namespace);
-        bind_map(&mut self.param_block_merges, namespace);
-        bind_map(&mut self.param_block_interval_edits, namespace);
+        bind_map(&mut self.param_block_edits, namespace);
         let old = std::mem::take(&mut self.take_syllables);
         for (key, analysis) in old {
             self.take_syllables.insert(
@@ -178,6 +187,16 @@ impl CaptureEdits {
                     take_id: key.take_id,
                 },
                 analysis,
+            );
+        }
+        let old = std::mem::take(&mut self.game_block_baselines);
+        for (key, baseline) in old {
+            self.game_block_baselines.insert(
+                CaptureTakeKey {
+                    clip_id: bind_key(&key.clip_id, namespace),
+                    take_id: key.take_id,
+                },
+                baseline,
             );
         }
         // `disabled_group_ids` 不是轨道 id，`rewrite_ids` 从不改写它们 —— 保持原样。
@@ -235,24 +254,34 @@ pub(crate) fn capture(
                 })
             })
             .collect(),
-        param_block_merges: timeline
+        param_block_edits: timeline
             .params_by_root_track
             .iter()
-            .filter(|(_, params)| !params.param_block_merges.is_empty())
-            .map(|(root, params)| (root.clone(), params.param_block_merges.clone()))
+            .filter(|(_, params)| !params.param_block_edits.is_empty())
+            .map(|(root, params)| (root.clone(), params.param_block_edits.clone()))
             .collect(),
-        param_block_interval_edits: timeline
-            .params_by_root_track
+        game_block_baselines: timeline
+            .clips
             .iter()
-            .filter(|(_, params)| !params.param_block_interval_edits.is_empty())
-            .map(|(root, params)| (root.clone(), params.param_block_interval_edits.clone()))
+            .flat_map(|clip| {
+                clip.takes.iter().filter_map(move |take| {
+                    take.game_block_baseline.clone().map(|baseline| {
+                        (
+                            CaptureTakeKey {
+                                clip_id: clip.id.clone(),
+                                take_id: take.id.clone(),
+                            },
+                            baseline,
+                        )
+                    })
+                })
+            })
             .collect(),
     };
     // 先按当前命名空间精确剥离，再用通用模式兜住历史载荷。
     strip_namespace_map(&mut edits.params_by_root_track, namespace);
     strip_namespace_map(&mut edits.track_settings, namespace);
-    strip_namespace_map(&mut edits.param_block_merges, namespace);
-    strip_namespace_map(&mut edits.param_block_interval_edits, namespace);
+    strip_namespace_map(&mut edits.param_block_edits, namespace);
     let old = std::mem::take(&mut edits.take_syllables);
     for (key, analysis) in old {
         edits.take_syllables.insert(
@@ -287,6 +316,8 @@ pub(crate) fn strip_derived_curves(params: &TrackParamsState) -> TrackParamsStat
     stripped.dyn_orig_key = None;
     stripped.dyn_orig_source_key = None;
     stripped.pending_pitch_offset = None;
+    stripped.param_block_edits = Default::default();
+    stripped.param_block_view = None;
     sanitize_curve(&mut stripped.pitch_edit);
     sanitize_curve(&mut stripped.tension_edit);
     for curve in stripped.extra_curves.values_mut() {
@@ -310,6 +341,8 @@ pub(crate) fn compact_params(params: &TrackParamsState) -> Option<TrackParamsSta
     compact.dyn_orig_key = None;
     compact.dyn_orig_source_key = None;
     compact.pending_pitch_offset = None;
+    compact.param_block_edits = Default::default();
+    compact.param_block_view = None;
     sanitize_curve(&mut compact.pitch_edit);
     sanitize_curve(&mut compact.tension_edit);
     for curve in compact.extra_curves.values_mut() {
@@ -467,23 +500,26 @@ pub(crate) fn apply_project_state(
     }
     // 合并/切开意图按根恢复。即使当前根还没有曲线条目也先落在这里，
     // 随后的 `ensure_params_for_root` 会保留这些用户意图。
-    for (root, merges) in &edits.param_block_merges {
+    for (root, block_edits) in &edits.param_block_edits {
         let entry = timeline
             .params_by_root_track
             .entry(root.clone())
             .or_default();
-        entry.param_block_merges = merges.clone();
+        entry.param_block_edits = block_edits.clone();
+        entry.param_block_view = None;
     }
-    for (root, interval_edits) in &edits.param_block_interval_edits {
-        let entry = timeline
-            .params_by_root_track
-            .entry(root.clone())
-            .or_default();
-        entry.param_block_interval_edits = interval_edits.clone();
-    }
-    let clips = timeline.clips.clone();
-    for params in timeline.params_by_root_track.values_mut() {
-        params.prune_param_block_merges(&clips);
+    for (key, baseline) in &edits.game_block_baselines {
+        let Some(clip) = timeline
+            .clips
+            .iter_mut()
+            .find(|clip| clip.id == key.clip_id)
+        else {
+            continue;
+        };
+        let Some(take) = clip.takes.iter_mut().find(|take| take.id == key.take_id) else {
+            continue;
+        };
+        take.game_block_baseline = Some(baseline.clone());
     }
     for track in &mut timeline.tracks {
         let Some(settings) = edits.track_settings.get(&track.id) else {
@@ -753,12 +789,14 @@ mod tests {
             .into_iter()
             .enumerate()
             .map(
-                |(index, (start_sec, end_sec))| hifishifter_kernel::state::ParamBlockMemberRef {
+                |(index, (start_sec, end_sec))| hifishifter_kernel::param_blocks::TakeSpan {
                     clip_id: "clip".into(),
                     take_id: "take".into(),
-                    syllable_id: format!("syl-{index}"),
+                    cycle: 0,
                     source_start_sec: start_sec,
                     source_end_sec: end_sec,
+                    syllable_id: Some(format!("syl-{index}")),
+                    label: hifishifter_kernel::param_blocks::BlockLabel::Syllable,
                 },
             )
             .collect::<Vec<_>>();
@@ -766,11 +804,19 @@ mod tests {
             .params_by_root_track
             .get_mut("capture-track")
             .unwrap()
-            .param_block_merges
-            .push(hifishifter_kernel::state::ParamBlockMergeRecord {
-                merged_group_id: "group".into(),
-                member_refs: members,
-            });
+            .param_block_edits = hifishifter_kernel::param_blocks::ParamBlockEditSet {
+            schema_version: 1,
+            revision: 1,
+            blocks: vec![hifishifter_kernel::param_blocks::UserParamBlock {
+                id: "merged".into(),
+                geometry: hifishifter_kernel::param_blocks::BlockGeometry::Take { members },
+                deleted: false,
+                manual: false,
+                value: None,
+                transition_out_sec: None,
+                created_seq: 1,
+            }],
+        };
 
         let bytes = capture(&timeline, "").encode().unwrap();
         let restored = CaptureEdits::decode(&bytes).unwrap();
@@ -782,9 +828,9 @@ mod tests {
             analysis
         );
         assert_eq!(
-            restored.param_block_merges["capture-track"].len(),
+            restored.param_block_edits["capture-track"].blocks.len(),
             1,
-            "手动合并意图必须随载荷保存"
+            "参数块编辑集必须随载荷保存"
         );
 
         let mut target = TimelineState::default();
@@ -797,7 +843,8 @@ mod tests {
         assert_eq!(target.clips[0].takes[0].syllable_analysis, Some(analysis));
         assert_eq!(
             target.params_by_root_track["capture-track"]
-                .param_block_merges
+                .param_block_edits
+                .blocks
                 .len(),
             1
         );
@@ -816,8 +863,7 @@ mod tests {
         });
         let restored = CaptureEdits::decode(&serde_json::to_vec(&legacy).unwrap()).unwrap();
         assert_eq!(restored.take_syllables.len(), 0);
-        assert_eq!(restored.param_block_merges.len(), 0);
-        assert_eq!(restored.param_block_interval_edits.len(), 0);
+        assert_eq!(restored.param_block_edits.len(), 0);
     }
 
     /// **真实命名空间下，Capture 的 Take 身份必须保持稳定。**

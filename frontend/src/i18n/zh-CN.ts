@@ -1906,7 +1906,7 @@ export const zhCN = {
     history_op_param_static: "编辑静态参数",
     history_op_param_stretch: "拉伸参数曲线",
     history_op_param_paste: "粘贴 VocalShifter 参数",
-    history_op_param_block_merge: "合并参数块",
+    history_op_param_block_edit: "编辑参数块",
     history_op_import_midi: "导入 MIDI",
     history_op_edit_midi: "编辑 MIDI 数据",
     history_op_import_vocalshifter: "导入 VocalShifter 工程",
