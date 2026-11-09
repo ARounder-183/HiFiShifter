@@ -34,6 +34,28 @@ pub struct ParamBlockCurvePatch {
     pub values: Vec<f32>,
 }
 
+/// 素材身份摘要：一段分析结果属于**哪个源**。
+///
+/// 【为什么住在 param_blocks】块的唯一身份是"哪个 Take 的哪一段源区间"
+/// （`TakeKey` / `TakeSpan`）。音节分析同样是**源域**派生物，判断它是否仍然
+/// 属于当前 Take 需要同一套身份判据 —— 命令层（分析落库）与历史恢复（撤销时
+/// 搬运分析）共用这一份，才不会各自漂移。
+///
+/// 【为什么不含源窗口】Slip / Trim 只改窗口，不换素材，分析结果依然有效；
+/// 只有路径 / 指纹 / 大小 / 时长 / 采样率 / 帧周期变了才算换了源。
+pub fn source_digest(clip: &crate::state::Clip, frame_period_ms: f64) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"take_syllable_v1");
+    hasher.update(clip.source_path.as_deref().unwrap_or("").as_bytes());
+    hasher.update(&clip.source_file_fingerprint.unwrap_or(0).to_le_bytes());
+    hasher.update(&clip.source_file_size.unwrap_or(0).to_le_bytes());
+    hasher.update(&clip.source_file_mtime.unwrap_or(0).to_le_bytes());
+    hasher.update(&clip.duration_frames.unwrap_or(0).to_le_bytes());
+    hasher.update(&clip.source_sample_rate.unwrap_or(0).to_le_bytes());
+    hasher.update(&((frame_period_ms.max(0.1) * 1000.0).round() as u32).to_le_bytes());
+    hasher.finalize().to_hex().to_string()
+}
+
 pub fn validate_curve_patches(patches: &[ParamBlockCurvePatch]) -> Result<(), String> {
     let mut total = 0usize;
     for patch in patches {

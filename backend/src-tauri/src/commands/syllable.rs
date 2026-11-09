@@ -1,6 +1,7 @@
 //! Clip 音节块的查询与按需重分析。
 
 use crate::state::AppState;
+use hifishifter_kernel::param_blocks::source_digest;
 use hifishifter_kernel::pitch_analysis::syllable::{
     estimate_syllable_spans, SyllableConfig, TakeSyllableAnalysis, SYLLABLE_ALGORITHM,
     SYLLABLE_ALGORITHM_VERSION,
@@ -34,19 +35,6 @@ pub struct ClipSyllableAnalysisPayload {
     pub root_track_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub block_layout: Option<hifishifter_kernel::param_blocks::ParamBlockView>,
-}
-
-fn source_digest(clip: &crate::state::Clip, frame_period_ms: f64) -> String {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"take_syllable_v1");
-    hasher.update(clip.source_path.as_deref().unwrap_or("").as_bytes());
-    hasher.update(&clip.source_file_fingerprint.unwrap_or(0).to_le_bytes());
-    hasher.update(&clip.source_file_size.unwrap_or(0).to_le_bytes());
-    hasher.update(&clip.source_file_mtime.unwrap_or(0).to_le_bytes());
-    hasher.update(&clip.duration_frames.unwrap_or(0).to_le_bytes());
-    hasher.update(&clip.source_sample_rate.unwrap_or(0).to_le_bytes());
-    hasher.update(&((frame_period_ms.max(0.1) * 1000.0).round() as u32).to_le_bytes());
-    hasher.finalize().to_hex().to_string()
 }
 
 fn payload(
@@ -268,7 +256,7 @@ fn analyze_clip_syllables_inner(
         if let (Some(root), Some(layout)) = (&reply.root_track_id, &reply.block_layout) {
             let _ = app.emit(
                 "param_block_view_updated",
-                serde_json::json!({"rootTrackId":root,"layout":layout}),
+                serde_json::json!({"rootTrackId":root,"view":layout}),
             );
         }
     }

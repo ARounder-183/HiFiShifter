@@ -2755,6 +2755,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     }, [dispatch, paramBlockToolActive, paramBlocksVisible]);
     /** 每个 Clip 在本面板会话内的自动分析尝试（只拦自动路径，手动重分析不受影响）。 */
     const autoAnalysisAttemptsRef = useRef<Set<string>>(new Set());
+    /** 上一轮"有音节区间"的 Clip 集合；用于发现分析结果被意外清空。 */
+    const analyzedClipIdsRef = useRef<Set<string>>(new Set());
     const autoAnalysisQueueRef = useRef(createSyllableAnalysisQueue());
     const autoAnalysisRootRef = useRef<string | null>(null);
     useEffect(() => {
@@ -2764,6 +2766,25 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             autoAnalysisRootRef.current = null;
         };
     }, [paramBlocksVisible, pitchEnabled, rootTrackId]);
+    /*
+     * 【安全网】某条 Clip "曾经有音节区间、现在没有" = 分析结果被某条路径清掉了
+     * （撤销跨过分析完成点曾经是主要来源）。把自动分析的"已尝试"记录删掉，让它
+     * 重跑一次 —— 否则块会整片消失而且永远不会自己回来。
+     *
+     * 后端已修好（撤销时按素材身份搬运分析），所以正常路径下这里一次都不触发；
+     * 代价只在真的丢了的时候才付（一次模型推理）。
+     *
+     * 【为什么必须排在分析 effect 之前】effect 按声明顺序执行：先删记录、再判
+     * "要不要分析"，同一次提交里就能补上。反过来的话 ref 变更不会触发渲染，
+     * 分析要等到下一次无关的重渲染才会重试。
+     */
+    useEffect(() => {
+        const current = new Set(paramBlockSyllableSpans.keys());
+        for (const clipId of analyzedClipIdsRef.current) {
+            if (!current.has(clipId)) autoAnalysisAttemptsRef.current.delete(clipId);
+        }
+        analyzedClipIdsRef.current = current;
+    }, [paramBlockSyllableSpans]);
     /**
      * 时间轴内核手势锁的镜像。
      *

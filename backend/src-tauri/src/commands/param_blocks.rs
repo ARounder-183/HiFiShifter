@@ -208,41 +208,40 @@ pub(super) fn restore_game(
 mod tests {
     use super::*;
     use hifishifter_kernel::param_blocks::{BlockGeometry, BlockLabel, TakeSpan};
+    use hifishifter_kernel::pitch_analysis::{SyllableSpan, TakeSyllableAnalysis};
 
-    fn state_with_clip() -> (AppState, String, String, String) {
+    fn analysis(source_digest: String) -> TakeSyllableAnalysis {
+        TakeSyllableAnalysis {
+            algorithm: "test".into(),
+            algorithm_version: 1,
+            source_digest,
+            source_spans_sec: vec![
+                SyllableSpan {
+                    start_sec: 0.0,
+                    end_sec: 0.5,
+                },
+                SyllableSpan {
+                    start_sec: 0.5,
+                    end_sec: 1.0,
+                },
+            ],
+        }
+    }
+
+    /// 一条 root 轨道 + 一条带源路径的 Clip，**还没有**音节分析。
+    fn state_without_analysis() -> (AppState, String, String, String) {
         let state = AppState::default();
         let root = {
             let mut timeline = state.timeline.lock().unwrap();
             timeline.add_track(None, None, None);
             let root = timeline.tracks[0].id.clone();
-            let clip_id = timeline.add_clip(
+            timeline.add_clip(
                 Some(root.clone()),
                 Some("clip".into()),
                 Some(0.0),
                 Some(2.0),
                 Some("a.wav".into()),
             );
-            let clip = timeline
-                .clips
-                .iter_mut()
-                .find(|clip| clip.id == clip_id)
-                .unwrap();
-            clip.takes[0].syllable_analysis =
-                Some(hifishifter_kernel::pitch_analysis::TakeSyllableAnalysis {
-                    algorithm: "test".into(),
-                    algorithm_version: 1,
-                    source_digest: "digest".into(),
-                    source_spans_sec: vec![
-                        hifishifter_kernel::pitch_analysis::SyllableSpan {
-                            start_sec: 0.0,
-                            end_sec: 0.5,
-                        },
-                        hifishifter_kernel::pitch_analysis::SyllableSpan {
-                            start_sec: 0.5,
-                            end_sec: 1.0,
-                        },
-                    ],
-                });
             root
         };
         let (clip_id, take_id) = {
@@ -253,6 +252,37 @@ mod tests {
             )
         };
         (state, root, clip_id, take_id)
+    }
+
+    /// 同上，并把分析结果写进 active take（摘要按真实素材算，与命令层同源）。
+    fn state_with_clip() -> (AppState, String, String, String) {
+        let (state, root, clip_id, take_id) = state_without_analysis();
+        {
+            let mut timeline = state.timeline.lock().unwrap();
+            let frame_period_ms = timeline.frame_period_ms();
+            let clip = timeline
+                .clips
+                .iter_mut()
+                .find(|clip| clip.id == clip_id)
+                .unwrap();
+            let digest = hifishifter_kernel::param_blocks::source_digest(clip, frame_period_ms);
+            clip.takes[0].syllable_analysis = Some(analysis(digest));
+        }
+        (state, root, clip_id, take_id)
+    }
+
+    /// 打一个撤销点（快照 = 当前时间线）。
+    fn checkpoint(state: &AppState) {
+        let timeline = state.timeline.lock().unwrap();
+        state.checkpoint_block_layout(&timeline);
+    }
+
+    fn param_block_view_of(state: &AppState, root: &str) -> Option<ParamBlockView> {
+        let timeline = state.timeline.lock().unwrap();
+        timeline
+            .params_by_root_track
+            .get(root)
+            .and_then(|params| params.param_block_view.clone())
     }
 
     #[test]
@@ -332,5 +362,84 @@ mod tests {
             1
         );
         assert!(set(&state, root, 0, Vec::new(), true, Vec::new(), None, None).is_err());
+    }
+
+    /*
+     * 【撤销不得删除分析结果】音节分析不进撤销栈（它是素材派生物），但历史快照
+     * 存的是整份时间线。于是"记录里还没有分析、实时时间线已经有了"这个中间态
+     * 会让一次撤销把分析一起回退 —— 块整片消失，而前端已经记下"分析过了"，
+     * 不会自己补回来。
+     */
+    #[test]
+    fn undo_does_not_delete_syllable_analysis() {
+        let (state, root, clip_id, _take_id) = state_without_analysis();
+        // 分析完成之前的两个撤销点：两条记录的快照里都没有分析。
+        checkpoint(&state);
+        checkpoint(&state);
+        // 分析完成（不进撤销栈）。
+        {
+            let mut timeline = state.timeline.lock().unwrap();
+            let frame_period_ms = timeline.frame_period_ms();
+            let clip = timeline
+                .clips
+                .iter_mut()
+                .find(|clip| clip.id == clip_id)
+                .unwrap();
+            let digest = hifishifter_kernel::param_blocks::source_digest(clip, frame_period_ms);
+            clip.takes[0].syllable_analysis = Some(analysis(digest));
+        }
+        // `get` 会顺手把派生视图写进缓存 —— 正好用来验证"缓存不得随快照恢复"。
+        assert_eq!(
+            get(&state, &root).unwrap()["blocks"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        checkpoint(&state);
+
+        assert!(state.undo_timeline().ok);
+        assert!(
+            param_block_view_of(&state, &root).is_none(),
+            "撤销不得把快照里的过期派生视图带回来",
+        );
+
+        assert!(state.undo_timeline().ok);
+        assert_eq!(
+            get(&state, &root).unwrap()["blocks"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2,
+            "撤销跨过分析完成点之后，块必须仍然存在",
+        );
+        let timeline = state.timeline.lock().unwrap();
+        assert!(timeline.clips[0].takes[0].syllable_analysis.is_some());
+    }
+
+    /*
+     * 负例：撤销一次"替换素材"不能把**新素材**的分段贴到旧素材上。
+     * 判据是 `source_digest`，所以只要分析摘要对不上就不搬运。
+     */
+    #[test]
+    fn analysis_is_not_carried_across_a_source_swap() {
+        let (state, _root, clip_id, _take_id) = state_without_analysis();
+        checkpoint(&state);
+        checkpoint(&state);
+        {
+            let mut timeline = state.timeline.lock().unwrap();
+            let clip = timeline
+                .clips
+                .iter_mut()
+                .find(|clip| clip.id == clip_id)
+                .unwrap();
+            clip.takes[0].syllable_analysis = Some(analysis("other-media".into()));
+        }
+        checkpoint(&state);
+
+        assert!(state.undo_timeline().ok);
+        assert!(state.undo_timeline().ok);
+        let timeline = state.timeline.lock().unwrap();
+        assert!(timeline.clips[0].takes[0].syllable_analysis.is_none());
     }
 }
