@@ -2897,7 +2897,9 @@ impl DocumentSession {
                     .runs
                     .values()
                     .flat_map(|runs| runs.iter())
-                    .map(|run| ((run.end_sec() * 1000.0 / fp).ceil() as usize).saturating_add(1))
+                    // run 覆盖的是**格**：最后一格铺到 `span_end_sec`。按末样本算长度
+                    // 会少一格，拉伸后的那一帧便无处可写（显示回落成原始值）。
+                    .map(|run| (run.span_end_sec() * 1000.0 / fp).ceil() as usize)
                     .max()
                     .unwrap_or(0)
             })

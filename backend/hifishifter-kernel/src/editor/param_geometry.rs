@@ -287,9 +287,12 @@ impl GeometryDelta {
     }
 
     fn contains_old(&self, sec: f64) -> bool {
-        // 曲线最后一个采样点可以精确落在 clip 结束边界上；它仍属于这条 run，
-        // 必须跟着旧窗口一起变换。若用半开区间，末值会留在原位形成“残影”。
-        sec >= self.old.start_sec - EPS && sec <= self.old.end_sec() + EPS
+        // 【为什么是半开】窗口 `[起, 止)` 覆盖到的**格**才有资格被搬走：第 i 个
+        // 样本拥有 `[t_i, t_i + spf)` 这一格，恰好落在 `止` 上的样本其实是下一段
+        // 素材的第一格。闭区间会把这一格一起带走 —— 用户看到"移动 clip 之后，
+        // 后面那条线少了第一帧"。判据与 `PlacedRun::value_at_project_sec` 同源，
+        // 见 `param_authority::window_covers`。
+        crate::editor::param_authority::window_covers(sec, self.old.start_sec, self.old.end_sec())
     }
 
     fn rank(&self) -> (u64, u64) {
@@ -1172,15 +1175,17 @@ mod tests {
             .iter()
             .find(|run| run.placement.start_sec.abs() < 1e-9)
             .expect("左半段必须留在原位");
-        // 切点按半开区间取：正好落在 0.10 的那一帧属于**被搬走**的那一段。
-        assert_eq!(head.values, vec![61.0; 10], "[0.00, 0.09] 共 10 帧");
+        // 切点按**格**取：0.10 那一格属于被搬走的那一段，0.20 那一格不属于
+        // （它是分割点右侧之后的第一格）。
+        assert_eq!(head.values, vec![61.0; 10], "[0.00, 0.09] 共 10 格");
         // 右半段必须出现在新位置。
         let moved = runs
             .iter()
             .find(|run| (run.placement.start_sec - 0.4).abs() < 1e-9)
             .expect("右半段必须跟着素材走");
-        // 被搬走的窗口两端都是闭的（`contains_old` 的约定）：0.10 与 0.20 都跟着走。
-        assert_eq!(moved.values, vec![61.0; 11], "[0.10, 0.20] 共 11 帧");
+        // 被搬走的是窗口覆盖到的 10 格：[0.10, 0.20)。闭区间会把 0.20 那一格
+        // 也带走 —— 那是下一段素材的第一格。
+        assert_eq!(moved.values, vec![61.0; 10], "[0.10, 0.19] 共 10 格");
         // 旧位置不得留下残影。
         assert!(
             !runs
@@ -1188,12 +1193,13 @@ mod tests {
                 .any(|run| (run.placement.start_sec - 0.1).abs() < 1e-9),
             "搬走的那一段不能在旧位置留残影"
         );
-        // 分割点右侧 0.2 s 之后的部分（不在被拖动的窗口里）必须留在原位。
+        // 分割点右侧 0.2 s 之后的部分（不在被拖动的窗口里）必须留在原位，
+        // 且必须包含 0.20 那一格 —— 它是"下一段素材"的第一格，不能跟着走。
         let tail = runs
             .iter()
-            .find(|run| (run.placement.start_sec - 0.21).abs() < 1e-9)
+            .find(|run| (run.placement.start_sec - 0.2).abs() < 1e-9)
             .expect("窗口之外的尾巴必须留在原位");
-        assert_eq!(tail.values, vec![61.0; 9], "[0.21, 0.29] 共 9 帧");
+        assert_eq!(tail.values, vec![61.0; 10], "[0.20, 0.29] 共 10 格");
     }
 
     #[test]
@@ -1521,6 +1527,78 @@ mod tests {
         assert!(
             deltas.is_empty(),
             "two same-content pairs must not be guessed: {deltas:?}"
+        );
+    }
+
+    /// **拉伸之后，剪辑范围内的每一帧都必须还是编辑值。**
+    ///
+    /// 【为什么这条必须存在】run 存的是**格**：第 i 个 value 拥有
+    /// `[start + i·spf, start + (i+1)·spf)`。旧实现把覆盖区间当成"末样本那一刻"，
+    /// 于是一次拉伸之后新时长比 `(n−1)·spf` 正好长出一格 —— 那一帧落回基线。
+    /// 用户报的就是这个："开了锁定参数线，拉伸一下，音高/动态参数线的边缘帧变回
+    /// 原始值"。判据取"逐帧仍等于编辑值"，因为那正是用户看见的东西。
+    #[test]
+    fn a_stretch_keeps_the_last_cell_of_every_curve() {
+        const DRAWN: f32 = 0.6;
+        let mut authority = ParamAuthority::default();
+        // 剪辑 [0, 0.2)：40 格 × 5 ms，两条曲线都画满整条。
+        authority
+            .write_range("root", "pitch", 0, &[61.0; 40], &[true; 40], 0.0)
+            .unwrap();
+        authority
+            .write_range("root", "dyn", 0, &[DRAWN; 40], &[true; 40], -1.0)
+            .unwrap();
+        let old = clip(0.0, 0.2, 0.0, 0.2, 1.0);
+        let new = clip(0.0, 0.4, 0.0, 0.2, 0.5);
+        apply_geometry_transaction(&mut authority, &[delta(&old, &new)]).unwrap();
+        let view = compose_root_view("root", &authority, &baseline(200), 0);
+        // 拉伸后剪辑覆盖 80 格（0 … 0.395 s）。
+        assert!(
+            view.params.pitch_edit.len() >= 80,
+            "视图至少要覆盖拉伸后的整条剪辑：{} 帧",
+            view.params.pitch_edit.len()
+        );
+        let pitch_lost: Vec<usize> = (0..80)
+            .filter(|&i| (view.params.pitch_edit[i] - 61.0).abs() > 1e-4)
+            .collect();
+        assert!(
+            pitch_lost.is_empty(),
+            "拉伸后这些帧回到了原始值: {pitch_lost:?}"
+        );
+        let dyn_lost: Vec<usize> = (0..80)
+            .filter(|&i| (view.params.extra_curves["dyn"][i] - DRAWN).abs() > 1e-4)
+            .collect();
+        assert!(
+            dyn_lost.is_empty(),
+            "动态参数线拉伸后这些帧回到了未画状态: {dyn_lost:?}"
+        );
+    }
+
+    /// 移动只搬**窗口覆盖到的格**：窗口终点那一格属于下一段素材。
+    ///
+    /// 【为什么要单独钉】`contains_old` 曾经是闭区间，于是移动一条 clip 会把
+    /// 它右边紧邻的那一格也带走 —— 后一条 clip 的第一帧因此消失。判据取"被搬走的
+    /// 格数 == 窗口格数"，并用逐帧视图确认邻段首帧仍在原位。
+    #[test]
+    fn a_move_keeps_the_cell_after_the_window_where_it_belongs() {
+        let mut authority = ParamAuthority::default();
+        authority.frame_period_ms = 10.0;
+        authority
+            .write_range("root", "pitch", 0, &[61.0; 30], &[true; 30], 0.0)
+            .unwrap();
+        let old = clip(0.1, 0.1, 0.1, 0.1, 1.0);
+        let new = clip(0.4, 0.1, 0.1, 0.1, 1.0);
+        apply_geometry_transaction(&mut authority, &[delta(&old, &new)]).unwrap();
+        let runs = &authority.roots["root"].runs["pitch_edit"];
+        let moved = runs
+            .iter()
+            .find(|run| (run.placement.start_sec - 0.4).abs() < 1e-9)
+            .expect("被拖动的窗口必须搬到新位置");
+        assert_eq!(moved.values.len(), 10, "[0.10, 0.20) 共 10 格");
+        let view = compose_root_view("root", &authority, &baseline(40), 0);
+        assert!(
+            (view.params.pitch_edit[20] - 61.0).abs() < 1e-4,
+            "0.20 s 那一格是下一段素材的第一格，必须留在原位"
         );
     }
 

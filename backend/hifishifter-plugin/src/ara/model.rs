@@ -2635,14 +2635,17 @@ mod tests {
         {
             let mut edits = document.edits.lock_or_recover();
             edits.authority.frame_period_ms = 100.;
+            // clip 是 [0, 0.5)，也就是 5 格 × 100 ms。这里**只能画 5 帧**：
+            // 第 6 帧（0.5 s）是窗口终点那一格，属于下一段素材。写进去会让它跟着
+            // 这条 clip 一起被搬走 —— 用户看到"移动之后，后面那条线的第一帧没了"。
             edits
                 .authority
                 .write_range(
                     &root,
                     "pitch",
                     0,
-                    &[60., 61., 62., 63., 64., 65.],
-                    &[true; 6],
+                    &[60., 61., 62., 63., 64.],
+                    &[true; 5],
                     0.0,
                 )
                 .unwrap();
@@ -2660,13 +2663,17 @@ mod tests {
             .pitch_edit
             .clone();
         document.close();
-        assert!(pitch.len() >= 21, "authority仍停在旧项目数组: {pitch:?}");
+        assert!(pitch.len() >= 20, "authority仍停在旧项目数组: {pitch:?}");
+        // [1.0, 2.0) 十帧：5 个样本被拉成 200 ms 一格，逐帧插值后是一条 60→64 的
+        // 斜坡；最后一格外保持末值 64 —— 这一格正是"边缘帧"曾经丢失的地方。
         assert_eq!(
-            &pitch[10..21],
-            &[60., 60.5, 61., 61.5, 62., 62.5, 63., 63.5, 64., 64.5, 65.]
+            &pitch[10..20],
+            &[60., 60.5, 61., 61.5, 62., 62.5, 63., 63.5, 64., 64.]
         );
         // 旧位置只剩**原始曲线**（57）—— 用户画的那条（60）必须已经跟着 clip 走了。
         assert_eq!(pitch[0], 57., "旧位置不能继续遗留编辑");
+        // 窗口终点那一格（0.5 s）不属于这条 clip：既不能被搬走，也不能被清成 0。
+        assert_eq!(pitch[5], 57., "窗口之外的第一格必须留在原位");
     }
     use super::*;
     use ara2_bridge::core::{RegionSequenceKind, Registry};

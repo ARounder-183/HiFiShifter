@@ -189,7 +189,7 @@ plugin156项；后续Verify流水线被中止，不能称整条Verify成功。
 | REAPER | 拖动播放头 | 光标立即跟上 | `[transport] trace … src=host` |
 | REAPER | 插件内 seek（播放中） | 跳过去就停在那 | `src=seek` → `src=host`，无回跳 |
 | REAPER | 移动 item（锁开） | 曲线跟着走 | `[geom] … deltas=[item:{GUID}:move{…}]` + `[param] mutate cause=geometry affected=N` |
-| REAPER | 拉伸 item（锁开） | 曲线按比例缩放 | 同上，op 是 `stretch`，且 `rate` 两侧不同 |
+| REAPER | 拉伸 item（锁开） | 曲线按比例缩放，**首末帧仍是编辑值**（不是原始值） | 同上，op 是 `stretch`，且 `rate` 两侧不同 |
 | REAPER | **分割 item（锁开）** | **曲线一根都不动** | 只有 `[geom]` 那一行，**没有** `[param] mutate cause=geometry` |
 | REAPER | 裁剪 item（锁开） | 曲线不动（素材没被拉长压短） | 同上 |
 | REAPER | 关锁再移动 / 拉伸 / 分割 | 曲线留在原位，逐字节不变 | `[geom] … locked=false`，无 `cause=geometry` |

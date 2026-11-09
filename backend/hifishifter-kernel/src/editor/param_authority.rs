@@ -23,7 +23,31 @@ pub const EXTRA_BREATH_GAIN: &str = "extra:breath_gain";
 const DEFAULT_FRAME_PERIOD_MS: f64 = 5.0;
 const MAX_RUN_VALUES: usize = 1_000_000;
 const MAX_RUNS_PER_PARAM: usize = 65_536;
+
+/// 时间比较的量化余量（秒）。
+///
+/// 【为什么不是更小】这些秒来自宿主 f64 与模型 f32 的往返，1e-7 量级的相对误差是
+/// 常态而不是编辑；比它更小的余量会把一次"没有变化"判成变化。
 const EPS: f64 = 1e-9;
+
+/// 帧位置空间的量化余量（格）。
+///
+/// 【为什么单独一份】`(sec - start) / spf` 会把秒的余量按帧周期放大：以 5 ms 为
+/// 例，1e-9 秒在位置空间是 2e-7 格。用秒的余量去判"这一格在不在窗口里"，边界上
+/// 就会随机偏一格。
+const POS_EPS: f64 = 1e-9;
+
+/// `sec` 是否落在**半开**窗口 `[start, end)` 内。
+///
+/// 【为什么"有没有编辑"只能有一条判据】run 存的是**格**：第 i 个 value 描述
+/// `[start + i·spf, start + (i+1)·spf)` 这一格。把它当成"只在样本时刻上有效"，
+/// 最后一格就无人覆盖 —— 一次拉伸之后新时长比 `(n−1)·spf` 正好长出一格，那一帧
+/// 回落到基线（用户看到的"边缘的帧变回原始值"）。反过来，把窗口当成**闭**区间，
+/// 又会把窗口终点那一格（属于下一段素材）也搬走。两种错法是同一个问题的两侧，
+/// 因此只在这里定义一次。
+pub(crate) fn window_covers(sec: f64, start: f64, end: f64) -> bool {
+    sec.is_finite() && end > start && sec >= start - EPS && sec < end - EPS
+}
 
 fn default_frame_period_ms() -> f64 {
     DEFAULT_FRAME_PERIOD_MS
@@ -122,13 +146,19 @@ pub struct RunPlacement {
 }
 
 impl RunPlacement {
+    /// 最后一个样本的时刻（**不含**它自己那一格的长度）。
     pub fn end_sec(&self, value_count: usize) -> f64 {
         self.start_sec + value_count.saturating_sub(1) as f64 * self.seconds_per_frame
     }
 
-    /// 区间（半开）覆盖到最后一个样本之后一个采样周期；用于“目标范围清理”。
+    /// 半开区间终点：最后一个样本之后一格。
     pub fn span_end_sec(&self, value_count: usize) -> f64 {
         self.start_sec + value_count as f64 * self.seconds_per_frame
+    }
+
+    /// 这个放置（`value_count` 格）是否覆盖 `sec`。
+    pub fn covers(&self, sec: f64, value_count: usize) -> bool {
+        window_covers(sec, self.start_sec, self.span_end_sec(value_count))
     }
 }
 
@@ -163,34 +193,45 @@ impl PlacedRun {
         self.placement.span_end_sec(self.values.len())
     }
 
-    /// 在某个项目秒处线性插值；越界返回 None（不跨 run、不跨空洞）。
+    /// 在某个工程秒处线性插值；这条 run 不覆盖这一秒时返回 None。
+    ///
+    /// 【覆盖口径】第 i 个 value 拥有第 i **格**，最后一格里保持末值 —— 不是
+    /// "末值只在它自己那一瞬有效"。判据见 [`window_covers`]：与几何切分、目标
+    /// 范围清理共用同一个半开区间，"哪一秒有编辑"因此在全链路只有一个答案。
     pub fn value_at_project_sec(&self, sec: f64) -> Option<f32> {
         if !sec.is_finite() || self.values.is_empty() || self.placement.seconds_per_frame <= 0.0 {
             return None;
         }
-        let pos = (sec - self.placement.start_sec) / self.placement.seconds_per_frame;
-        if pos < -EPS || pos > self.values.len().saturating_sub(1) as f64 + EPS {
+        if !self.placement.covers(sec, self.values.len()) {
             return None;
         }
+        let pos = (sec - self.placement.start_sec) / self.placement.seconds_per_frame;
+        let last = self.values.len() - 1;
         let lo = pos.floor().max(0.0) as usize;
-        if lo >= self.values.len() {
+        if lo >= last {
             return self.values.last().copied();
         }
-        let hi = (lo + 1).min(self.values.len() - 1);
+        let hi = lo + 1;
         let t = (pos - lo as f64).clamp(0.0, 1.0) as f32;
         Some(self.values[lo] * (1.0 - t) + self.values[hi] * t)
     }
 
-    /// 按项目时间切出 `[lo, hi]` 内的样本。切点按最近 run 帧取整。
+    /// 切出与半开窗口 `[lo, hi)` 相交的**格**。切点按格边界取整。
+    ///
+    /// 【为什么 hi 要退一格】窗口终点就是下一格的起点：恰好落在 `hi` 上的样本属于
+    /// 窗口**之外**。不退这一格，复制一段 `[a, b)` 就会把 `b` 处那一格也带走 ——
+    /// 粘贴结果比源长一格，而"长出来的那一格"正是下一段素材的编辑。
     ///
     /// 结果保留原始 value 字节；边界样本不重采样，因此不会在多次几何操作里累积误差。
     pub fn slice_by_project_sec(&self, lo: f64, hi: f64) -> Option<PlacedRun> {
-        if self.values.is_empty() || hi < lo - EPS {
+        if self.values.is_empty() || hi - EPS < lo {
             return None;
         }
         let spf = self.placement.seconds_per_frame;
-        let first = ((lo - self.placement.start_sec) / spf).ceil().max(0.0) as usize;
-        let last = ((hi - self.placement.start_sec) / spf).floor();
+        let first = ((lo - self.placement.start_sec) / spf - POS_EPS)
+            .ceil()
+            .max(0.0) as usize;
+        let last = ((hi - EPS - self.placement.start_sec) / spf).floor();
         if !last.is_finite() || last < first as f64 {
             return None;
         }
@@ -1025,9 +1066,10 @@ pub fn compose_root_view(
                 .runs
                 .values()
                 .flat_map(|runs| runs.iter())
-                .map(|run| {
-                    ((run.end_sec() * 1000.0 / fp.max(0.1)).ceil() as usize).saturating_add(1)
-                })
+                // 【为什么用 span_end 而不是 last sample】run 存的是**格**：最后一格
+                // 一直铺到 `span_end_sec`。按末样本定长度会让视图少一格 —— 拉伸之后的
+                // 那一帧根本没有下标可写，用户看到"边缘的帧变回原始值"。
+                .map(|run| (run.span_end_sec() * 1000.0 / fp.max(0.1)).ceil() as usize)
                 .max()
                 .unwrap_or(0)
         })
@@ -1288,12 +1330,16 @@ mod tests {
         authority
             .write_range("root", "pitch", 0, &[61.0; 20], &[true; 20], 0.0)
             .unwrap();
-        // 窗口 [0.05, 0.12] ⇒ 帧 5..=12（两端都含），共 8 个样本。
+        // 窗口 [0.05, 0.12) ⇒ 帧 5..=11，共 7 个样本。
+        //
+        // 【为什么终点那一格不算】帧 12 覆盖 [0.12, 0.13)，那是窗口**之外**的
+        // 下一段素材。把端点当闭区间，复制一段 [a, b) 就会把 b 处那一格也带走，
+        // 粘贴结果比源长一格 —— 用户看到的正是"复制之后末尾多出一帧"。
         let slice = authority.runs_in_window("root", "pitch", 0.05, 0.12);
         assert_eq!(slice.len(), 1);
-        assert_eq!(slice[0].values.len(), 8, "边界样本必须两端都含");
+        assert_eq!(slice[0].values.len(), 7, "窗口终点那一格属于下一段素材");
         assert!((slice[0].placement.start_sec - 0.05).abs() < 1e-9);
-        assert_eq!(slice[0].values, vec![61.0; 8]);
+        assert_eq!(slice[0].values, vec![61.0; 7]);
         // 窗口完全在 run 之外 ⇒ 什么都不交。
         assert!(authority
             .runs_in_window("root", "pitch", 0.5, 0.6)
@@ -1305,6 +1351,52 @@ mod tests {
         assert!(authority
             .runs_in_window("root", "pitch", f64::NAN, 0.5)
             .is_empty());
+    }
+
+    /// **一格一值**：run 覆盖 `[start, start + n·spf)`，最后一格里保持末值。
+    ///
+    /// 【为什么这条必须存在】把覆盖区间当成"样本时刻"（`[start, start + (n−1)·spf]`）
+    /// 时，最后一格没有归属：一次拉伸把它放大成一整帧，那一帧就落回基线 —— 用户
+    /// 报的"边缘的帧变回原始值"。反方向也不能越界：终点之后的第一格属于下一段素材。
+    #[test]
+    fn a_run_owns_its_last_cell_and_nothing_after_it() {
+        let mut authority = ParamAuthority::default();
+        authority.frame_period_ms = 10.0;
+        authority
+            .write_range(
+                "root",
+                "pitch",
+                0,
+                &[61.0, 62.0, 63.0, 64.0],
+                &[true; 4],
+                0.0,
+            )
+            .unwrap();
+        let run = &authority.roots["root"].runs["pitch_edit"][0];
+        assert_eq!(run.value_at_project_sec(0.0), Some(61.0), "首格");
+        assert_eq!(
+            run.value_at_project_sec(0.035),
+            Some(64.0),
+            "末格里保持末值"
+        );
+        assert_eq!(
+            run.value_at_project_sec(0.0399),
+            Some(64.0),
+            "末格的最后一瞬仍是末值"
+        );
+        assert_eq!(
+            run.value_at_project_sec(0.04),
+            None,
+            "终点之后的第一格属于下一段素材"
+        );
+        // 视图长度必须容得下末格：4 格 × 10 ms ⇒ 至少 4 帧。
+        let view = compose_root_view("root", &authority, &baseline(0), 0);
+        assert!(
+            view.params.pitch_edit.len() >= 4,
+            "视图少了末格：{:?}",
+            view.params.pitch_edit
+        );
+        assert_eq!(&view.params.pitch_edit[..4], &[61.0, 62.0, 63.0, 64.0]);
     }
 
     #[test]
