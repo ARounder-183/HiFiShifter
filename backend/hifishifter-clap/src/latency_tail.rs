@@ -32,10 +32,13 @@ pub struct TailExt {
 }
 
 unsafe extern "C" fn latency_get(_p: *const clap_plugin_t) -> u32 {
-    hifishifter_plugin_core::guard_ffi(u32::MAX, || 0)
+    // 【为什么 panic 兜底是 0 而不是 u32::MAX】宿主把返回值当作"要补偿多少采样"。
+    // u32::MAX ≈ 24 小时，会让宿主把整条轨道推到几乎无限远；0 是"不补偿"，与 VST3 的
+    // `getLatencySamples` 同一个兜底值 —— 两个格式对同一次 panic 给出同一个结论。
+    hifishifter_plugin_core::guard_ffi(0, || 0)
 }
 unsafe extern "C" fn tail_get(_p: *const clap_plugin_t) -> u32 {
-    hifishifter_plugin_core::guard_ffi(u32::MAX, || 0)
+    hifishifter_plugin_core::guard_ffi(0, || 0)
 }
 
 /// 直通外壳的延迟表。

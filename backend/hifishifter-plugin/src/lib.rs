@@ -245,6 +245,21 @@ pub(crate) fn gui_log_line(message: &str) {
     log::warn!("[gui] {message}");
 }
 
+/// 模块入口的“我加载了”诊断行（**两种格式共用**）。
+///
+/// 【为什么是 WARN 级】默认日志级别是 Warn，而这一行回答的是“宿主只是扫描了我”
+/// 还是“宿主真的在用我”：用户报“插件不见了”时，第一件要确认的就是模块有没有被
+/// 加载、加载的是哪个版本与哪个目标平台。CLAP 外壳此前一条模块级记录都没有，
+/// 于是同一句诊断在两个格式的日志里只能查到一半。
+pub fn log_module_loaded() {
+    gui_log_line(&format!(
+        "module loaded: {} ({} {})",
+        crate::VERSION,
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    ));
+}
+
 /// FFI 入口的 panic 遏制原语：Rust 1.71+ 起 panic 越过 `extern "system"` 边界 =
 /// abort，宿主（DAW）进程随之崩溃。**每一个被宿主调用的入口**都必须把自己的
 /// panic 拦成明确的失败值 —— 这不是音频回调的特例，而是全部 ABI 面的规则。
@@ -271,12 +286,7 @@ pub extern "system" fn GetPluginFactory() -> *mut c_void {
         diagnostics::init();
         // 【为什么在工厂入口打一行】宿主扫描插件也会走到这里。有了这一行，日志就能
         // 区分"宿主只是扫描了我"与"宿主真的在用我" —— 前者之后再没有任何行是正常的。
-        crate::gui_log_line(&format!(
-            "module loaded: {} ({} {})",
-            crate::VERSION,
-            std::env::consts::OS,
-            std::env::consts::ARCH
-        ));
+        crate::log_module_loaded();
         // 【为什么把 IID 布局写进日志】它是"插件能不能和宿主说上话"的前置条件，却完全
         // 不可见：发错布局的失败形态是宿主回一个 null 指针，日志里只剩一行
         // `available=false`。把它钉在会话头附近，排查时第一眼就能排除一整类猜测。
@@ -302,6 +312,7 @@ fn module_initialize() -> bool {
         crate::set_log_tag("vst3");
         crate::ensure_layout_v2_once();
         diagnostics::init();
+        crate::log_module_loaded();
         editor::resources::initialize_models();
         let _ = runtime::runtime();
         true

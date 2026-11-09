@@ -222,8 +222,7 @@ impl ExtensionOwner {
         };
         // 【为什么在快照写完以后】接缝去咔需要“上一块输出的尾巴”与“这一块的新信号”
         // 做交叉淡化；写完再混，才不会把新源的第一帧直接硬切到旧源的最后帧。
-        let declick_stream =
-            evidence.map_or(ProcessStream::Realtime, |evidence| evidence.stream);
+        let declick_stream = evidence.map_or(ProcessStream::Realtime, |evidence| evidence.stream);
         if layered {
             self.note_layered_probe(declick_stream, layered_probe);
         }
@@ -264,27 +263,46 @@ impl ExtensionOwner {
     /// （VST3 `symbolic_sample_size` / CLAP `data32:data64`），共享层读不到宿主 ABI。
     /// 传进来之后，两个格式的"64-bit ⇒ 静音且能说清原因"走同一条记账。
     ///
+    /// 【`context` 为什么是 `Option`】"宿主没有给时间事实"是一等状态：VST3 的
+    /// `process_context == nullptr`、CLAP 的 `clap_process_t::transport == nullptr`
+    /// 表达的是同一件事。此前 CLAP 外壳总是构造一个 `project_time_samples = 0` 的
+    /// 上下文，于是"宿主什么都没说"被渲染层读成"这一块在工程第 0 帧" —— 离线块会
+    /// 从快照开头取音频。现在两个外壳都传 `None`，渲染层只按"没有位置"处理。
+    ///
     /// # Safety
     /// `block` 的平面由宿主提供，非空平面至少含 `frames` 帧；本函数只在本回调内使用
     /// 它们，不保留任何指针。
     pub unsafe fn process_audio(
         &self,
         block: &mut crate::audio_block::AudioBlock<'_>,
-        context: crate::block_context::BlockContext,
-        stream: ProcessStream,
+        context: Option<crate::block_context::BlockContext>,
         precision: i32,
     ) -> RenderOutcome {
         self.begin_process_block(precision);
-        // SAFETY: 调用方保证非空输入平面至少含 frames 帧可读，且切片不越出本回调。
-        let planes = unsafe { block.input.planes(block.frames) };
-        let input = crate::capture::recorder::InputBlock {
-            start: context.project_time_samples,
-            frames: block.frames,
-            sample_rate: context.sample_rate,
-            planes,
-            playing: context.playing,
+        // 【为什么进程流从块里读】`AudioBlock::mode` 就是宿主声明的处理模式
+        // （VST3 `process_mode` / CLAP render 模式），两个外壳在翻译缓冲时已经落定；
+        // 再让调用方传一次，就是同一事实的第二份来源。未知模式与"没有上下文"一样
+        // 不可观察 —— VST3 的 `capture_observe` 用 `ProcessStream::from_mode(mode)?`
+        // 表达同一条判据。
+        let stream = ProcessStream::from_mode(block.mode);
+        let evidence = match (context, stream) {
+            (Some(context), Some(stream)) => {
+                // SAFETY: 调用方保证非空输入平面至少含 frames 帧可读，且切片不越出本回调。
+                let planes = unsafe { block.input.planes(block.frames) };
+                let input = crate::capture::recorder::InputBlock {
+                    start: context.project_time_samples,
+                    frames: block.frames,
+                    sample_rate: context.sample_rate,
+                    planes,
+                    playing: context.playing,
+                };
+                self.observe_input_block(input, context, stream)
+            }
+            // 【为什么没有时间事实就整段跳过观察】录制与定位都要工程位置；而观察位
+            // （`sawContext`）回答的是"宿主到底给没给上下文"—— 没有上下文时点亮它，
+            // 界面上的录制键就会在一个录不到任何东西的宿主上变亮。
+            _ => None,
         };
-        let evidence = self.observe_input_block(input, context, stream);
         // 【为什么没有输出就到此为止】观察（录制、`canCapture`、宿主时钟）只依赖输入
         // 与位置，与输出总线无关；而仲裁需要可写的平面。VST3 的
         // `num_samples == 0 || num_outputs == 0` 早退就是这条判据，两个格式必须一致 ——
@@ -293,7 +311,7 @@ impl ExtensionOwner {
             return RenderOutcome::Done;
         }
         // SAFETY: 同一份宿主缓冲，且只在本次回调内使用。
-        unsafe { self.render_block(block, Some(context), evidence) }
+        unsafe { self.render_block(block, context, evidence) }
     }
 
     /// 一块音频的**开头**：周期工作 + 样本精度记账。

@@ -329,6 +329,12 @@ impl EditorLink {
             binding.failure = None;
         }
         *link.lease.lock().unwrap_or_else(|e| e.into_inner()) = Some(lease);
+        // 【为什么直连链路也要登记心跳】`live_links()` 是"宿主主线程上要做的收尾工作"
+        // 的唯一名单（`host_heartbeat` → `host_tick`：私有状态通知、宿主 Undo 收口、
+        // `setDirty` 冲刷）。VST3 的链路在 `EditController::new` 里登记；CLAP 的直连
+        // 链路此前漏了这一步，于是那些工作只在 VST3 上发生 —— 同一个编辑器窗口在两种
+        // 外壳里得到不同的收尾时机。
+        link.register_heartbeat();
         Ok(link)
     }
 
@@ -511,6 +517,32 @@ mod tests {
         b.component_terminated();
         assert!(second.owner().is_err());
         assert!(Arc::ptr_eq(&first.owner().unwrap(), &a));
+    }
+    /// **不变量：CLAP 的直连链路必须进心跳表。**
+    ///
+    /// 【为什么钉死】`live_links()` 是宿主主线程收尾工作（私有状态通知、宿主 Undo 收口、
+    /// `setDirty` 冲刷）的**唯一**名单。VST3 的链路在控制器构造时登记；CLAP 的直连链路
+    /// 此前漏了这一步 —— 那些工作只在 VST3 上发生，同一个编辑器窗口在两种外壳里得到
+    /// 不同的收尾时机。
+    #[test]
+    fn a_direct_link_is_registered_for_host_heartbeats() {
+        let owner = Arc::new(ExtensionOwner::default());
+        let link = EditorLink::for_owner(&owner).unwrap();
+        assert!(
+            live_links()
+                .iter()
+                .any(|candidate| Arc::ptr_eq(candidate, &link)),
+            "直连链路必须出现在心跳表里"
+        );
+        // 重复登记不得产生第二条：同一条链路只该被收尾一次。
+        link.register_heartbeat();
+        assert_eq!(
+            live_links()
+                .iter()
+                .filter(|candidate| Arc::ptr_eq(candidate, &link))
+                .count(),
+            1
+        );
     }
 
     /// 兜底失败只记第一条，且不会把已经绑好的链路打回未绑定。

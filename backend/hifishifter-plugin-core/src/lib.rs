@@ -2,7 +2,8 @@
 //!
 //! 【边界】本 crate 不认识任何插件格式的 ABI 类型：不出现 VST3 的 `ProcessContext` /
 //! `AudioBusBuffers`、CLAP 的 `clap_process_t`、AU 的 `AudioBufferList`，也不链接
-//! 任何 companion SDK。格式外壳负责把宿主给的时间与缓冲**在边界转换一次**，再调用这里。
+//! 任何 companion SDK。格式外壳负责把宿主给的时间与缓冲**在边界转换一次**（变成
+//! `hifishifter-plugin` 的 `BlockContext` / `AudioBlock`），再调用这里。
 //!
 //! 【为什么 trait 都是窄接口】宿主能力是可选给的：缺席必须是一等状态，不能拿 0/false
 //! 冒充。每个 trait 只回答一个格式差异问题，避免 core 反过来依赖某个具体宿主协议。
@@ -22,7 +23,6 @@
 
 #[allow(missing_docs)]
 pub mod component_state;
-pub mod format;
 pub mod local_data;
 #[allow(missing_docs)]
 pub mod plugin_log_name;
@@ -35,6 +35,13 @@ use std::sync::OnceLock;
 
 /// 产品显示名。**必须**与各格式 descriptor 及 ARA 工厂的 plugInName 一致。
 pub const CLASS_NAME: &str = "HiFiShifter";
+
+/// 主音频总线的名字（一进一出，两种格式共用）。
+///
+/// 【为什么是一个常量】宿主的路由界面把总线名直接显示给用户。VST3 的 `BusInfo::name`
+/// 与 CLAP 的 `clap_audio_port_info_t::name` 是同一件事的两种 ABI —— 各写一份的结果是
+/// 同一个插件在两种外壳里显示成两个名字（VST3 曾写死单字符 "M"，CLAP 干脆是空串）。
+pub const MAIN_BUS_NAME: &str = "Main";
 /// ARA 工厂的持久 ID（发布后不可改）。
 pub const FACTORY_ID: &str = "com.hifishifter.ara";
 /// ARA 文档归档 ID（发布后不可改）。

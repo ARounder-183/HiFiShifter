@@ -98,6 +98,17 @@ impl EditorView {
         self.host.focus()
     }
 
+    /// 宿主"回来了"的一拍：尺寸协商 / 焦点 / 重新挂父窗口。
+    ///
+    /// 【为什么需要它】浮窗形态（GTK 跑在插件自己的线程上）里，宿主不会再来视图
+    /// 定时器 —— 它下一次调用的任何一个视图回调就是"宿主还活着"的唯一证据。
+    /// VST3 的 `IPlugView::onSize` / `onFocus` / `setFrame` 都调它；CLAP 的等价
+    /// 入口是 `set_size`（CLAP 没有焦点回调），少这一拍会让私有线程上的收尾工作
+    /// 只在 VST3 上发生。
+    pub fn host_tick(&self) {
+        self.host.host_tick();
+    }
+
     /// 平台自报的嵌入形态（诊断用稳定短名）。
     pub fn fidelity(&self) -> &'static str {
         self.host.fidelity().as_str()
@@ -151,10 +162,13 @@ pub fn create_view(
     parent: usize,
     width: i32,
     height: i32,
+    // 宿主给的句柄能不能真正把视图**嵌进去**：Windows / macOS / X11 都能，Wayland 不能
+    // （没有把 WebKitGTK 渲染进外部 wl_surface 的公开 API，只能自建顶层窗口）。
+    embedded: bool,
     link: std::sync::Arc<crate::editor::routing::EditorLink>,
 ) -> Result<EditorView, String> {
     Ok(EditorView {
-        host: create_for(parent, width, height, true, 0, link)?,
+        host: create_for(parent, width, height, embedded, 0, link)?,
     })
 }
 

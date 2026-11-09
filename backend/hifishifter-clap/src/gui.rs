@@ -86,7 +86,7 @@ pub use hifishifter_plugin::editor::gui::{
     clamp_editor_size, EDITOR_DEFAULT_SIZE as DEFAULT_EDITOR_SIZE,
     EDITOR_MAX_SIZE as MAX_EDITOR_SIZE, EDITOR_MIN_SIZE as MIN_EDITOR_SIZE,
 };
-/// 本平台接受的父窗口 API 名。
+/// 本平台**首选**的父窗口 API 名（`get_preferred_api` 的答案）。
 fn platform_api() -> Option<&'static str> {
     #[cfg(windows)]
     {
@@ -102,6 +102,38 @@ fn platform_api() -> Option<&'static str> {
     }
     #[cfg(not(any(windows, unix)))]
     {
+        None
+    }
+}
+
+/// 这个 API 名我们接不接受；`Some(true)` = 能嵌进宿主的父窗口，`Some(false)` = 只能
+/// 自建顶层窗口，`None` = 不支持。
+///
+/// 【为什么 Wayland 也算接受】CLAP 的窗口 API 名是 `x11` / `wayland`。Linux 上没有把
+/// WebKitGTK 渲染进外部 `wl_surface` 的公开 API，于是 Wayland 会话只能开一个**自己的**
+/// 顶层窗口（`GuiFidelity::FloatingWindow`）。VST3 的 `isPlatformTypeSupported` 早就
+/// 接受 `WaylandSurfaceID` 并走同一条浮窗路径 —— CLAP 此前直接拒绝，于是同一个用户在
+/// Wayland 桌面上用 CLAP 得到的是"这个插件没有界面"，用 VST3 却能用。
+fn window_api(api: &str) -> Option<bool> {
+    #[cfg(windows)]
+    {
+        (api == "win32").then_some(true)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        (api == "cocoa").then_some(true)
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        match api {
+            "x11" => Some(true),
+            "wayland" => Some(false),
+            _ => None,
+        }
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = api;
         None
     }
 }
@@ -144,7 +176,7 @@ unsafe extern "C" fn is_api_supported(
         let Ok(api) = unsafe { CStr::from_ptr(api) }.to_str() else {
             return false;
         };
-        platform_api() == Some(api)
+        window_api(api).is_some()
     })
 }
 
@@ -308,7 +340,12 @@ unsafe extern "C" fn set_size(p: *const clap_plugin_t, w: u32, h: u32) -> bool {
         .flatten();
         match view {
             // 已经有视图：把尺寸交给共享原语（它会 SetBounds 并让 WebView 重排）。
-            Some(view) => view.resize(width as i32, height as i32).is_ok(),
+            // 【为什么顺带打一拍】宿主此刻就在我们的 UI 线程上 —— 浮窗形态下这是唯一
+            // 会回来的节拍（VST3 的 `IPlugView::onSize` 调的是同一个 `host_tick`）。
+            Some(view) => {
+                view.host_tick();
+                view.resize(width as i32, height as i32).is_ok()
+            }
             // 还没有视图：尺寸先记账，set_parent 时按它建。
             None => true,
         }
@@ -328,17 +365,18 @@ unsafe extern "C" fn set_parent(p: *const clap_plugin_t, window: *const clap_win
         let Ok(api) = unsafe { CStr::from_ptr(window.api) }.to_str() else {
             return false;
         };
-        if platform_api() != Some(api) {
+        let Some(embedded) = window_api(api) else {
             log::error!("[clap][gui] set_parent with an unexpected window api {api}");
             return false;
-        }
+        };
         // 宿主可能重新挂父窗口：先关旧视图，再用**同一条链路**在新父窗口里重建。
         // 两步都在 `VIEWS` 借用之外 —— `close` 会 DestroyWindow，窗口过程可能同步回调。
         let previous = with_slot(p, |slot| slot.view.take()).flatten();
         if let Some(view) = previous {
             view.close();
         }
-        let Some((size, link)) = with_slot(p, |slot| (slot.size, std::sync::Arc::clone(&slot.link)))
+        let Some((size, link)) =
+            with_slot(p, |slot| (slot.size, std::sync::Arc::clone(&slot.link)))
         else {
             return false;
         };
@@ -346,6 +384,7 @@ unsafe extern "C" fn set_parent(p: *const clap_plugin_t, window: *const clap_win
             window.handle as usize,
             size.0 as i32,
             size.1 as i32,
+            embedded,
             link,
         ) {
             Ok(view) => {

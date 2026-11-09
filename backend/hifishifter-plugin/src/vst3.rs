@@ -1344,7 +1344,11 @@ unsafe extern "system" fn component_get_bus_info(
             };
             bus.bus_type = 0;
             bus.flags = 1; // kDefaultActive
-            bus.name[0] = b'M' as u16;
+
+            // 【为什么用共享常量】宿主的路由界面把总线名直接显示给用户；CLAP 的端口名
+            // 是同一件事的另一种 ABI。此前这里写死单字符 'M'、CLAP 那边是空串 ——
+            // 同一个插件在两种外壳里显示成两个名字。
+            copy_wide_str(&mut bus.name, hifishifter_plugin_core::MAIN_BUS_NAME);
             K_RESULT_OK
         })
     }
@@ -1979,6 +1983,10 @@ impl EditController {
         match self.editor_link.owner() {
             Ok(owner) => {
                 if let Err(error) = owner.restore_state(&bytes) {
+                    // 【为什么记进恢复读数】与 `IComponent::setState` 同一条纪律：失败必须
+                    // 在界面与诊断包里可见（`restore_unresolved`），否则用户只看到
+                    // "参数没了"，日志里连一行错都没有。
+                    owner.note_restore_failed(&error);
                     log::error!(
                         "[state] controller pending state ignored: {error}; the host load continues"
                     );
@@ -2020,6 +2028,10 @@ impl EditController {
         match self.editor_link.owner() {
             Ok(owner) => {
                 if let Err(error) = owner.restore_state(&bytes) {
+                    // 【为什么与组件通道同一条】两条通道（`IComponent::setState` 与
+                    // `IEditController::setState`）读的是同一份载荷、失败的是同一件事；
+                    // 只在其中一条记读数，等于让另一半用户看不到"参数没读回来"。
+                    owner.note_restore_failed(&error);
                     log::error!(
                         "[state] controller setState ignored: {error}; the host load continues"
                     );

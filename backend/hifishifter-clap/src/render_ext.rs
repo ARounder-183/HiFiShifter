@@ -62,23 +62,14 @@ mod tests {
     #[test]
     fn offline_is_not_inferred_from_realtime() {
         let state = crate::audio::AudioState::default();
-        let process = crate::abi::clap_process_t {
-            steady_time: 0,
-            frames_count: 0,
-            transport: std::ptr::null(),
-            audio_inputs: std::ptr::null(),
-            audio_outputs: std::ptr::null_mut(),
-            audio_inputs_count: 0,
-            audio_outputs_count: 0,
-            in_events: std::ptr::null(),
-            out_events: std::ptr::null(),
-        };
         assert!(state.set_render_mode(CLAP_RENDER_REALTIME));
-        assert!(!state.to_transport_frame(&process).offline);
+        assert!(!state.is_offline());
         assert!(
             !state.set_render_mode(99),
             "unknown render modes must be rejected"
         );
-        assert!(!state.to_transport_frame(&process).offline);
+        assert!(!state.is_offline(), "被拒绝的模式不得改动状态");
+        assert!(state.set_render_mode(CLAP_RENDER_OFFLINE));
+        assert!(state.is_offline());
     }
 }

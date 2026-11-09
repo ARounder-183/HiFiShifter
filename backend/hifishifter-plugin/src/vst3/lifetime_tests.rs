@@ -539,3 +539,29 @@ fn task34_real_component_state_stream_flushes_and_saves_only_its_scope() {
         assert_eq!(unsafe { component_release(component) }, 0);
     }
 }
+
+/// **控制器通道的恢复失败必须进共享读数。**
+///
+/// 【为什么钉死】`IComponent::setState` 与 `IEditController::setState` 读的是同一份载荷、
+/// 失败的是同一件事。只有组件通道记 `note_restore_failed` 时，只走控制器通道的宿主会
+/// 看到"参数没了、日志里一行错都没有" —— 界面上的 `restore_unresolved` 横幅永远不会出现。
+#[test]
+fn a_controller_channel_restore_failure_is_recorded_in_the_shared_status() {
+    let owner = Arc::new(crate::render::extension::ExtensionOwner::default());
+    let link = crate::editor::routing::EditorLink::for_owner(&owner).unwrap();
+    let controller = EditController {
+        vtbl: &EDIT_CONTROLLER_VTBL,
+        refcount: AtomicI32::new(1),
+        connection_vtbl: &CONTROLLER_CONNECTION_VTBL,
+        connection: Default::default(),
+        editor_link: link,
+        pending_state: std::sync::Mutex::new(None),
+    };
+    assert_eq!(owner.restore_status_name(), "never");
+    controller.restore_bytes(b"this is not a component state".to_vec());
+    assert_eq!(
+        owner.restore_status_name(),
+        "failed",
+        "控制器通道的失败必须与组件通道一样可见"
+    );
+}

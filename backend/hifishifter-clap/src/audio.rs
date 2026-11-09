@@ -4,9 +4,9 @@
 //! 的提示，不是「全静音且缓冲仍可读」；把提示当门控会让录音与输出一起静音。这里一律
 //! **总是读、总是写满**：只处理 F32，F64 保守静音并返回成功；in-place 时先读后写。
 
-use crate::abi::{clap_process_t, CLAP_RENDER_OFFLINE, CLAP_SECTIME_FACTOR};
+use crate::abi::{clap_process_t, transport_flags, CLAP_RENDER_OFFLINE, CLAP_SECTIME_FACTOR};
 use hifishifter_plugin::audio_block::{AudioBlock, InputBus, OutputBus};
-use hifishifter_plugin_core::format::TransportFrame;
+use hifishifter_plugin::block_context::BlockContext;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// 一个 CLAP 实例的音频时间状态。
@@ -36,7 +36,7 @@ impl AudioState {
         self.sample_rate.store(rate.to_bits(), Ordering::Release);
     }
 
-    /// 取本实例的采样率；未激活时是 0（`frame_is_trustworthy` 会拒绝该块）。
+    /// 取本实例的采样率；未激活时是 0（共享层会按"没有有效采样率"处理该块）。
     pub fn sample_rate(&self) -> f64 {
         f64::from_bits(self.sample_rate.load(Ordering::Acquire))
     }
@@ -60,54 +60,66 @@ impl AudioState {
         self.offline_render.load(Ordering::Acquire)
     }
 
-    /// 把 CLAP 的时间读数转换为中性 `TransportFrame`。
+    /// 把 CLAP 的时间读数翻译成**共享的** `BlockContext`；宿主没给 transport 时返回 `None`。
     ///
-    /// `steady_time` 在停播与重放时仍会前进，因此**绝不**拿它的变化推断播放状态。
-    /// 工程位置只从 transport 事件的 `song_pos_seconds` 换算；没有事件就
-    /// `position_trusted=false`。采样率与离线标记都取自本实例，不读进程级全局。
-    pub fn to_transport_frame(&self, process: &clap_process_t) -> TransportFrame {
+    /// 【为什么不再有第二个中性时间类型】本文件此前还构造过 `TransportFrame`
+    /// （`hifishifter-plugin-core::format`），于是"一个块的时间事实"在仓库里有两份描述：
+    /// VST3 用 `BlockContext::from_vst3`，CLAP 用 `TransportFrame` 再转一次 `BlockContext`。
+    /// 后者只有 CLAP 一个消费者，却要单独维护 `position_trusted` / `playing: Option<bool>`
+    /// 这些前者没有的概念 —— 两个格式因此不可能在"这一块在哪、在不在播"上真正共用判断。
+    /// 现在只保留 `BlockContext`：它是渲染与捕获**唯一**的时间输入。
+    ///
+    /// 【`None` 与"位置 0"是两件事】`clap_process_t::transport` 允许为空，VST3 的
+    /// `ProcessContext` 同样可以为空。两边都映射成 `None`，共享层据此按"没有时间事实"
+    /// 处理（实时静音、离线报 NotReady）。把空 transport 读成"工程第 0 帧"会让离线块
+    /// 从快照开头取音频 —— 那是数据正确性失败，不是降级。
+    pub fn block_context(&self, process: &clap_process_t) -> Option<BlockContext> {
+        // SAFETY: `process` 由宿主在本次回调内给出；transport 指针要么为空，要么指向
+        // 一个在回调期间有效的 `clap_event_transport_t`。
+        let transport = unsafe { process.transport.as_ref() }?;
         let sample_rate = self.sample_rate();
-        let offline = self.offline_render.load(Ordering::Acquire);
-        let steady = (process.steady_time >= 0).then_some(process.steady_time);
-        let Some(transport) = (unsafe { process.transport.as_ref() }) else {
-            return TransportFrame {
-                project_time_samples: 0,
-                sample_rate,
-                playing: None,
-                recording: None,
-                cycle_active: None,
-                tempo: None,
-                time_sig_num: None,
-                time_sig_den: None,
-                steady_time: steady,
-                offline,
-                position_trusted: false,
-            };
-        };
-        // 【为什么这里不再记读数】“宿主给过什么”由共享捕获路径记在 `CaptureStore` 上
-        // （见本文件的字段说明）；这里只负责把这一块的时间换算成中性描述。
-        // 【为什么秒不是唯一来源】CLAP 的 transport 可以只声明拍时间轴。实测宿主
-        // （REAPER 的 CLAP 实现是其中之一）只给 `HAS_BEATS_TIMELINE + HAS_TEMPO` 时，
-        // 只认 seconds 的实现会让 position_trusted 永远是 false —— 表现为"捕获按钮
-        // 永远灰着"，而插件其实已经被正常处理了。拍是精确的定点值，配上速度就能
-        // 换算成秒，因此两种时间轴都接受。
-        let position = transport_position(transport, sample_rate);
-        TransportFrame {
-            project_time_samples: position.unwrap_or(0),
+        let flags = transport.flags;
+        let has_beats = flags & transport_flags::HAS_BEATS_TIMELINE != 0;
+        let has_tempo = flags & transport_flags::HAS_TEMPO != 0;
+        let has_time_signature = flags & transport_flags::HAS_TIME_SIGNATURE != 0;
+        let beats = |value: i64| value as f64 / crate::abi::CLAP_BEATTIME_FACTOR;
+        Some(BlockContext {
             sample_rate,
-            playing: Some(transport.flags & crate::abi::transport_flags::IS_PLAYING != 0),
-            recording: Some(transport.flags & crate::abi::transport_flags::IS_RECORDING != 0),
-            cycle_active: Some(transport.flags & crate::abi::transport_flags::IS_LOOP_ACTIVE != 0),
-            tempo: (transport.flags & crate::abi::transport_flags::HAS_TEMPO != 0)
+            project_time_samples: transport_position(transport, sample_rate).unwrap_or(0),
+            playing: flags & transport_flags::IS_PLAYING != 0,
+            recording: flags & transport_flags::IS_RECORDING != 0,
+            // 【为什么恒为 None】`steady_time` 是"回调的稳态计数"，不是工程位置；
+            // 共享层把它当"距锚点推进了多少帧"用，而宿主可以合法地让它不随块长增长
+            // （或干脆不给），那会让位置推进停住。位置推进由 music+tempo 与块计数器
+            // 两条既有通路负责，与 VST3 用的是同一段代码。
+            continuous: None,
+            music: has_beats.then(|| beats(transport.song_pos_beats)),
+            tempo: (has_tempo && transport.tempo.is_finite() && transport.tempo > 0.0)
                 .then_some(transport.tempo),
-            time_sig_num: (transport.flags & crate::abi::transport_flags::HAS_TIME_SIGNATURE != 0)
-                .then_some(i32::from(transport.tsig_num)),
-            time_sig_den: (transport.flags & crate::abi::transport_flags::HAS_TIME_SIGNATURE != 0)
-                .then_some(i32::from(transport.tsig_denom)),
-            steady_time: steady,
-            offline,
-            position_trusted: position.is_some(),
-        }
+            // 【为什么恒为 None】CLAP 没有系统时间字段（见 `BlockContext::system_time`）。
+            system_time: None,
+            time_signature: (has_time_signature
+                && transport.tsig_num > 0
+                && transport.tsig_denom > 0)
+                .then_some((
+                    i32::from(transport.tsig_num),
+                    i32::from(transport.tsig_denom),
+                )),
+            // 【为什么循环的"有效"看拍轴】起止点是拍时间轴上的值；宿主没给拍轴时那两个
+            // 数没有意义。循环**正在走**另由 `IS_LOOP_ACTIVE` 回答（`cycle_active`）。
+            cycle_valid: has_beats,
+            cycle_active: flags & transport_flags::IS_LOOP_ACTIVE != 0,
+            cycle_start_music: if has_beats {
+                beats(transport.loop_start_beats)
+            } else {
+                0.0
+            },
+            cycle_end_music: if has_beats {
+                beats(transport.loop_end_beats)
+            } else {
+                0.0
+            },
+        })
     }
 }
 
@@ -130,16 +142,19 @@ pub fn sample_precision(process: &clap_process_t) -> i32 {
     }
 }
 
-/// 把 64-bit 输出平面清零：读不了这种宽度，但宿主仍要拿到一块**确定的**静音。
+/// 把输出平面清零：读不了这种宽度（或形状不受支持）时，宿主仍要拿到一块**确定的**静音。
 ///
 /// 【为什么不直接返回错误】与 VST3 的 `silence_unsupported_sample_size` 同一条取舍：
 /// 返回失败会让多数宿主把插件整条踢出链路（用户看到"插件不见了"）；静音但在场是
 /// 可诊断的降级，界面会通过 `CaptureStore::unsupported_precision` 说清原因。
 ///
+/// 【为什么两种宽度都清】64-bit 块里 `data32` 按定义为空，清它没有任何副作用；而
+/// "总线形状不受支持"（`audio_outputs_count > 1`）时两个指针都可能非空 —— 只清其中
+/// 一种会把另一种宽度的垃圾留在宿主缓冲里。一个函数、一条判据。
+///
 /// # Safety
-/// `process` 必须是宿主在本次回调里给出的有效记录；非空 `data64` 平面至少含
-/// `frames_count` 帧可写。
-pub unsafe fn silence_f64_outputs(process: &clap_process_t) -> bool {
+/// `process` 必须是宿主在本次回调里给出的有效记录；非空平面至少含 `frames_count` 帧可写。
+pub unsafe fn silence_outputs(process: &clap_process_t) -> bool {
     let frames = process.frames_count as usize;
     if process.audio_outputs_count == 0 || process.audio_outputs.is_null() {
         return false;
@@ -150,23 +165,46 @@ pub unsafe fn silence_f64_outputs(process: &clap_process_t) -> bool {
     };
     let mut cleared = false;
     for output in outputs {
-        if output.data64.is_null() {
-            continue;
-        }
         for channel in 0..output.channel_count as usize {
-            // SAFETY: channel < 声明的声道数，宿主提供对应指针。
-            let plane = unsafe { *output.data64.add(channel) };
-            if plane.is_null() {
-                continue;
+            // SAFETY: 非空指针数组至少含 channel_count 个有效指针（CLAP 契约）。
+            let f32_plane = unsafe {
+                if output.data32.is_null() {
+                    std::ptr::null_mut()
+                } else {
+                    *output.data32.add(channel)
+                }
+            };
+            let f64_plane = unsafe {
+                if output.data64.is_null() {
+                    std::ptr::null_mut()
+                } else {
+                    *output.data64.add(channel)
+                }
+            };
+            if !f32_plane.is_null() {
+                // SAFETY: 非空平面至少含 frames 帧可写。
+                unsafe { std::slice::from_raw_parts_mut(f32_plane, frames) }.fill(0.0);
+                cleared = true;
             }
-            // SAFETY: 非空平面至少含 frames 帧可写。
-            unsafe { std::slice::from_raw_parts_mut(plane, frames) }.fill(0.0);
-            cleared = true;
+            if !f64_plane.is_null() {
+                // SAFETY: 同上。
+                unsafe { std::slice::from_raw_parts_mut(f64_plane, frames) }.fill(0.0);
+                cleared = true;
+            }
         }
     }
     cleared
 }
 
+/// 本块的输出总线形状是否是我们声明的那一种（`0` = 没有输出，`1` = 单条立体声输出）。
+///
+/// 【为什么需要判】端口表只声明一条输出（`crate::ports`），多出来的总线我们既不知道
+/// 该写什么、也不会被 `AudioBlock` 覆盖 —— 留在那里的会是宿主缓冲里的残留样本。
+/// VST3 的 `audio_abi::validate` 对同一个形状回 `UnsupportedFormat`，两个格式必须
+/// 给出同一个结论。
+pub fn output_layout_supported(process: &clap_process_t) -> bool {
+    process.audio_outputs_count <= 1
+}
 /// 把 CLAP 的 `process` 数据翻译成共享的中立块。
 ///
 /// 【为什么翻译放在格式外壳】`clap_audio_buffer_t` 的字段布局、`data32`/`data64` 的
@@ -198,34 +236,33 @@ pub unsafe fn block_from_clap<'a>(
     } else {
         InputBus::empty()
     };
-    let (pointers, in_place) = if process.audio_outputs_count > 0
-        && !process.audio_outputs.is_null()
-    {
-        // SAFETY: 同上。
-        let bus = unsafe { &*process.audio_outputs };
-        let pointers: &'a mut [*mut f32] = if bus.channel_count > 0 && !bus.data32.is_null() {
-            // SAFETY: 宿主声明了 channel_count 个平面指针，本回调期间有效。
-            unsafe { std::slice::from_raw_parts_mut(bus.data32, bus.channel_count as usize) }
-        } else {
-            &mut []
-        };
-        let shared = if process.audio_inputs_count > 0 && !process.audio_inputs.is_null() {
+    let (pointers, in_place) =
+        if process.audio_outputs_count > 0 && !process.audio_outputs.is_null() {
             // SAFETY: 同上。
-            let inputs = unsafe { &*process.audio_inputs };
-            let count = (inputs.channel_count as usize).min(bus.channel_count as usize);
-            (0..count).any(|channel| {
-                // SAFETY: channel < min(两个声道路数)，两侧都声明了对应指针。
-                let source = unsafe { *inputs.data32.add(channel) };
-                let target = unsafe { *bus.data32.add(channel) };
-                !source.is_null() && source == target
-            })
+            let bus = unsafe { &*process.audio_outputs };
+            let pointers: &'a mut [*mut f32] = if bus.channel_count > 0 && !bus.data32.is_null() {
+                // SAFETY: 宿主声明了 channel_count 个平面指针，本回调期间有效。
+                unsafe { std::slice::from_raw_parts_mut(bus.data32, bus.channel_count as usize) }
+            } else {
+                &mut []
+            };
+            let shared = if process.audio_inputs_count > 0 && !process.audio_inputs.is_null() {
+                // SAFETY: 同上。
+                let inputs = unsafe { &*process.audio_inputs };
+                let count = (inputs.channel_count as usize).min(bus.channel_count as usize);
+                (0..count).any(|channel| {
+                    // SAFETY: channel < min(两个声道路数)，两侧都声明了对应指针。
+                    let source = unsafe { *inputs.data32.add(channel) };
+                    let target = unsafe { *bus.data32.add(channel) };
+                    !source.is_null() && source == target
+                })
+            } else {
+                false
+            };
+            (pointers, shared)
         } else {
-            false
+            (&mut [][..], false)
         };
-        (pointers, shared)
-    } else {
-        (&mut [][..], false)
-    };
     AudioBlock {
         frames,
         mode,
@@ -239,7 +276,7 @@ pub unsafe fn block_from_clap<'a>(
 /// 【为什么这里只剩"翻译 + 直通"】in-place 的"先读齐再写"、单声道下混、inactive 声道
 /// 跳过 —— 这些结论现在只有一处实现（`AudioBlock::pass_through`）。
 ///
-/// 【它现在只服务两处】F64 宽度由 `silence_f64_outputs` 单独处理；本函数保留给
+/// 【它现在只服务两处】F64 宽度由 `silence_outputs` 单独处理；本函数保留给
 /// 直通夹具（`audio/tests.rs`）与"没有可处理内容"的保守分支。真正的播放走
 /// `ExtensionOwner::process_audio`。
 ///
@@ -251,7 +288,10 @@ pub unsafe fn process_block(process: &clap_process_t) -> bool {
         return true;
     }
     // F64 不处理：保守地把输出写零，但仍返回成功（与 VST3 kSample64 同口径）。
-    if unsafe { silence_f64_outputs(process) } {
+    // 【为什么按宽度判而不是看 silence_outputs 的返回值】后者现在也服务"总线形状不受
+    // 支持"，两种宽度都会清 —— 拿它当判据会把正常的 32-bit 块当成 64-bit 静音掉。
+    if sample_precision(process) != 0 {
+        unsafe { silence_outputs(process) };
         return true;
     }
     let mut silence = 0_u64;
@@ -270,7 +310,10 @@ mod tests {
 /// 【为什么抽成函数】它是"宿主时间 → 工程帧"的**唯一**换算：捕获形态的观察用它，
 /// ARA 形态喂给共享捕获路径的 `BlockContext` 也用它。两份实现迟早会在
 /// "只给拍不给秒"的宿主上分叉（REAPER 的 CLAP 就是其中之一）。
-pub fn transport_position(transport: &crate::abi::clap_event_transport_t, sample_rate: f64) -> Option<i64> {
+pub fn transport_position(
+    transport: &crate::abi::clap_event_transport_t,
+    sample_rate: f64,
+) -> Option<i64> {
     let has_seconds = transport.flags & crate::abi::transport_flags::HAS_SECONDS_TIMELINE != 0;
     let has_beats = transport.flags & crate::abi::transport_flags::HAS_BEATS_TIMELINE != 0;
     let has_tempo = transport.flags & crate::abi::transport_flags::HAS_TEMPO != 0;
@@ -278,12 +321,7 @@ pub fn transport_position(transport: &crate::abi::clap_event_transport_t, sample
     let beats = transport.song_pos_beats as f64 / crate::abi::CLAP_BEATTIME_FACTOR;
     if has_seconds && seconds.is_finite() && seconds >= 0.0 {
         Some((seconds * sample_rate).round() as i64)
-    } else if has_beats
-        && has_tempo
-        && beats.is_finite()
-        && beats >= 0.0
-        && transport.tempo > 0.0
-    {
+    } else if has_beats && has_tempo && beats.is_finite() && beats >= 0.0 && transport.tempo > 0.0 {
         Some((beats * 60.0 / transport.tempo * sample_rate).round() as i64)
     } else {
         None

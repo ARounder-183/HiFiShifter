@@ -70,6 +70,22 @@ static RENDER_EXT: crate::render_ext::RenderExt = crate::render_ext::RenderExt::
 static PORTS_EXT: crate::ports::PortsExt = crate::ports::PortsExt::new();
 static TIMER_EXT: crate::timer::TimerExt = crate::timer::TimerExt::new();
 
+/// 已销毁实例的 `clap_plugin_t` **头部**（墓碑）。
+///
+/// 【为什么不能随实例一起释放】`clap_host.request_callback` 是**异步**的：宿主排进主线程
+/// 队列的那一次 `on_main_thread` 可能在 `plugin.destroy` 之后才被投递（CLAP 没有"撤销
+/// 请求"的接口）。回调带的是 `clap_plugin_t*` —— 头部若已释放，读 `plugin_data` 就是一次
+/// use-after-free，而崩溃点在宿主里、看起来与我们无关。
+///
+/// 现在销毁时把 `plugin_data` 置空、把头部移到这里：迟到的回调读到空实例直接返回。
+/// 代价是每个被销毁的实例多留一个头部（`size_of::<clap_plugin_t>()`，约 100 字节），
+/// 直到模块卸载（`entry.deinit`）时统一释放 —— 那时宿主已按契约销毁全部实例。
+///
+/// 【为什么存地址而不是 `Box`】`Vec<Box<T>>` 会触发 `clippy::vec_box`（"已经在堆上"），
+/// 而 `Vec<*mut T>` 不是 `Send`（进不了 `static`）。地址是这两者之间唯一既准确又
+/// 能过 lint 的表示：所有权仍在 `Box` 里，只在 `entry.deinit` 按地址重建一次。
+static RETIRED: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+
 /// CLAP 唯一必须导出的动态库入口符号。
 #[no_mangle]
 pub static clap_entry: clap_plugin_entry_t = clap_plugin_entry_t {
@@ -101,6 +117,11 @@ unsafe extern "C" fn entry_init(plugin_path: *const c_char) -> bool {
         // 【为什么在共享层装日志器】文件日志只有一份实现（格式、会话头、轮转、级别、
         // panic hook）。CLAP 外壳只补一条可选的宿主转发 sink（见 log_host::install）。
         hifishifter_plugin::diagnostics::init();
+        // 【为什么与 VST3 打同一行】"宿主只是扫描了我"与"宿主真的在用我"的唯一区分
+        // 依据就是这一行；CLAP 会话此前一条模块级记录都没有，报障时无法确认版本与
+        // 目标平台。行内容由共享层生成，两种格式逐字相同（格式前缀由 `set_log_tag` 定）。
+        hifishifter_plugin::log_module_loaded();
+
         // 【为什么不再自己注册空钩子】`set_layout_migration_hook` 是进程级 OnceLock：
         // 空钩子会挡住 VST3 真正的那一份，而 CLAP-only 用户则永远不迁移。
         // 现在两个外壳登记同一个函数指针（见 `hifishifter_plugin::initialize_process_state`，
@@ -126,6 +147,14 @@ unsafe extern "C" fn entry_deinit() {
             log::warn!("[clap] module deinit with live editor windows; the module stays resident");
         }
         crate::log_host::clear();
+        // 释放墓碑：CLAP 契约要求宿主在 deinit 之前销毁全部实例，因此这里之后不会
+        // 再有 `on_main_thread` 投递到它们（见 `RETIRED` 的说明）。
+        let retired =
+            std::mem::take(&mut *RETIRED.lock().unwrap_or_else(|error| error.into_inner()));
+        for address in retired {
+            // SAFETY: 每个地址都由 `plugin_destroy` 的 `Box::into_raw` 写入，且只出队一次。
+            drop(unsafe { Box::from_raw(address as *mut clap_plugin_t) });
+        }
         log::info!("[clap] module shutdown");
         // 把宽限期内仍攒在缓冲里的早期日志行落盘：缓冲只在「下一条记录到达」时落地，
         // 宿主不再打日志就退出的会话会把它整段丢掉。
@@ -363,25 +392,36 @@ unsafe extern "C" fn plugin_destroy(plugin: *const clap_plugin_t) {
             return;
         }
         let data = unsafe { (*plugin).plugin_data };
-        if !data.is_null() {
-            if let Some(instance) = unsafe { crate::instance(plugin) } {
-                // destroy() requires !active. Refuse to free a live audio instance.
-                if instance.active.load(Ordering::Acquire) {
-                    log::error!("[clap] destroy called while active; leaking instead of crashing");
-                    return;
-                }
-                // 宿主没按契约先调 `gui.destroy` 时，窗口与链路必须随实例一起消失：
-                // 窗口类留在已卸载的模块里，下一条窗口消息就是野跳转。
-                unsafe { crate::gui::forget(plugin) };
-                unsafe { crate::timer::release(plugin) };
-
-                // 组件终止：停掉会话 actor 与准备 worker（它们持有指向 owner 的强引用，
-                // 不先关闭邮箱线程就不会退出）。与 VST3 的 terminate 同一个方法。
-                instance.owner.component_terminated();
-            }
-            unsafe { drop(Box::from_raw(data.cast::<Instance>())) };
+        if data.is_null() {
+            // 【为什么必须早退】头部现在是墓碑（见 `RETIRED`）。重复 destroy 时再
+            // `Box::from_raw` 一次会把同一块内存入两次队 —— 释放时就是 double free。
+            log::warn!("[clap] duplicate destroy ignored");
+            return;
         }
-        unsafe { drop(Box::from_raw(plugin.cast_mut())) };
+        if let Some(instance) = unsafe { crate::instance(plugin) } {
+            // destroy() requires !active. Refuse to free a live audio instance.
+            if instance.active.load(Ordering::Acquire) {
+                log::error!("[clap] destroy called while active; leaking instead of crashing");
+                return;
+            }
+            // 宿主没按契约先调 `gui.destroy` 时，窗口与链路必须随实例一起消失：
+            // 窗口类留在已卸载的模块里，下一条窗口消息就是野跳转。
+            unsafe { crate::gui::forget(plugin) };
+            unsafe { crate::timer::release(plugin) };
+
+            // 组件终止：停掉会话 actor 与准备 worker（它们持有指向 owner 的强引用，
+            // 不先关闭邮箱线程就不会退出）。与 VST3 的 terminate 同一个方法。
+            instance.owner.component_terminated();
+        }
+        unsafe { drop(Box::from_raw(data.cast::<Instance>())) };
+        // 【为什么只释放实例、保留头部】见 `RETIRED`：迟到的 `on_main_thread` 必须能
+        // 安全地读到"这个实例已经没了"，而不是踩到已释放的内存。
+        let mut header = unsafe { Box::from_raw(plugin.cast_mut()) };
+        header.plugin_data = std::ptr::null_mut();
+        RETIRED
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push(Box::into_raw(header) as usize);
     })
 }
 unsafe extern "C" fn plugin_activate(
@@ -422,7 +462,9 @@ unsafe extern "C" fn plugin_activate(
         // 【为什么单块上限也要记】它是诊断包里的 maxSamplesPerBlock（"宿主声明的
         // 块上限"），VST3 在 setupProcessing 里记同一个读数。不记的话 CLAP 会话里
         // 它恒为 0，排查"块长异常"时读不到宿主到底声明了什么。
-        instance.owner.note_max_samples_per_block(max as i32);
+        instance
+            .owner
+            .note_max_samples_per_block(i32::try_from(max).unwrap_or(i32::MAX));
         // 采样率、捕获渲染基础设施与离线意图：与 VST3 的 setupProcessing 同一条共享
         // 序列（见 `ExtensionOwner::setup_processing`）。CLAP 没有单独的 setup 回调，
         // 所以这三件事都由 activate 承担。
@@ -528,10 +570,7 @@ unsafe extern "C" fn plugin_process(
     }
 }
 
-unsafe fn plugin_process_body(
-    plugin: *const clap_plugin_t,
-    process: *const clap_process_t,
-) -> i32 {
+unsafe fn plugin_process_body(plugin: *const clap_plugin_t, process: *const clap_process_t) -> i32 {
     hifishifter_plugin_core::guard_ffi(CLAP_PROCESS_ERROR, || {
         if process.is_null() {
             return CLAP_PROCESS_ERROR;
@@ -1559,7 +1598,10 @@ mod tests {
             2,
             "离线模式必须落进共享的 setup 序列（与 VST3 的 setupProcessing(mode=2) 同一条）"
         );
-        assert!(owner.capture().project_rate() > 0.0, "采样率必须由同一次 setup 落定");
+        assert!(
+            owner.capture().project_rate() > 0.0,
+            "采样率必须由同一次 setup 落定"
+        );
         unsafe {
             stop_processing(ptr);
             plugin_deactivate(ptr);
@@ -1674,7 +1716,9 @@ mod tests {
             read: Some(read_cursor),
         };
         assert!(
-            unsafe { crate::state::STATE_EXT.load.expect("clap.state.load")(ptr, &raw const stream) },
+            unsafe {
+                crate::state::STATE_EXT.load.expect("clap.state.load")(ptr, &raw const stream)
+            },
             "读不出来的存档不能让宿主认为整份工程加载失败"
         );
         assert_eq!(

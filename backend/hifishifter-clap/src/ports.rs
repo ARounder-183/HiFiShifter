@@ -46,6 +46,15 @@ unsafe extern "C" fn get(
         let info = unsafe { &mut *info };
         info.id = 0;
         info.name.fill(0);
+        // 【为什么不是空串】宿主的路由界面把端口名直接显示给用户；空串在那里就是一条
+        // 没有名字的端口，而 VST3 报的是同一个名字（共享常量 `MAIN_BUS_NAME`）。
+        for (slot, byte) in info
+            .name
+            .iter_mut()
+            .zip(hifishifter_plugin_core::MAIN_BUS_NAME.bytes())
+        {
+            *slot = byte as c_char;
+        }
         info.flags = 1;
         info.channel_count = 2;
         info.port_type = c"stereo".as_ptr().cast();

@@ -305,6 +305,12 @@ REAPER 7.85 / Windows x64 的 CLAP 扫描、实例化与 Capture 形态已由隔
 | 诊断 / 日志 / 诊断包 | `diagnostics` + 命令 | 同一个 + `clap.log` 转发 | `diagnostics` + `plugin_diagnostics` + `audio_stats`（panic / 慢块 / 写满审计 / 精度） |
 | 宿主原生编辑（写回 / 分割 / 剪贴板 / 撤销块 / folder） | REAPER 扩展 | **无** | 仅 VST3（CLAP 没有对应的宿主 API，能力位如实为 false） |
 | 总线声道协商 | `setBusArrangements` 接受任意布局 | 固定立体声端口，由宿主适配 | **差异**：CLAP 的端口表是静态的（`clap.audio-ports`），宿主把单声道轨升混到立体声 |
+| 每块音频：进程流 | `process_mode` | `clap.render` 模式 | `AudioBlock::mode` + `ProcessStream::from_mode`（外壳不再各传一份） |
+| 每块音频：没有时间事实 | `process_context == nullptr` | `transport == nullptr` | `process_audio(block, None, precision)`：实时静音、离线 `NotReady` |
+| 多输出总线 / 64-bit 宽度 | `audio_abi::validate` + `silence_unsupported_sample_size` | `output_layout_supported` + `silence_outputs` | 同一个结局：清零**全部**总线后报失败 |
+| 编辑器链路心跳 | `EditController::new` → `register_heartbeat` | `EditorLink::for_owner` → 同一个 `register_heartbeat` | `live_links()` → `host_tick`（私有状态通知 / 宿主 Undo 收口） |
+| 总线 / 端口名 | `BusInfo::name` | `clap_audio_port_info_t::name` | `hifishifter_plugin_core::MAIN_BUS_NAME` |
+| 模块加载诊断 | `GetPluginFactory` / `InitDll` | `clap_entry.init` | `hifishifter_plugin::log_module_loaded` |
 
 ### 第二轮审查（2026-11 上旬）：又收敛掉的九处
 
@@ -349,6 +355,63 @@ REAPER 7.85 / Windows x64 的 CLAP 扫描、实例化与 Capture 形态已由隔
    的规则升混/降混。渲染面本来就只处理前两个声道（其余清零），所以两条路的**音频结果
    相同**，差别只在宿主侧的总线组织。
 
+### 第三轮审查（2026-11-09）：再收敛掉的十二处
+
+第二轮之后，两个外壳的"调用点"已经对齐，剩下的分叉在**数据形状**与**宿主能力映射**上：
+同一个事实有两份类型、同一次失败只有一条通道看得见、同一个宿主动作在一种格式里没有
+对应分支。逐项如下（前三条是结构性的，其余是"VST3 有、CLAP 没有"的具体缺口）：
+
+1. **两个中性时间类型**。`hifishifter-plugin-core::format::TransportFrame` 与
+   `hifishifter-plugin::block_context::BlockContext` 描述的是同一件事（一个块的时间
+   事实），而前者只有 CLAP 一个消费者 —— CLAP 先造 `TransportFrame`，再在 `process`
+   里转一次 `BlockContext`。于是"这一块在哪、在不在播"这条判断在两种格式里走的是两段
+   代码（`playing: Option<bool>` 与 `bool` 的差别还让"宿主没给"无法表达）。现在
+   `TransportFrame` / `frame_is_trustworthy` 已删除，CLAP 直接构造 `BlockContext`：
+   渲染与捕获只认这一个类型。
+2. **`process_audio` 的进程流有两个来源**。外壳传一个 `stream`，块里又带一个 `mode`；
+   两者一旦不一致（未知模式、离线标记与块不同步），"这一块属于哪条流"就有两个答案。
+   现在只读 `AudioBlock::mode`，未知模式按"不可观察"处理 —— 与 VST3 的
+   `ProcessStream::from_mode(mode)?` 是同一条判据。
+3. **"没有时间事实"被写成了"工程第 0 帧"**。CLAP 的 `transport` 允许为空，此前它被
+   翻译成 `project_time_samples = 0` 的上下文 ⇒ 离线块会从快照开头取音频（数据正确性
+   失败）。现在 `process_audio` 收 `Option<BlockContext>`：空 transport 与 VST3 的
+   `process_context == nullptr` 走同一条路径（实时静音、离线 `NotReady`），也不再点亮
+   `sawContext`。
+4. **多输出总线会漏出宿主残留**。端口表只声明一条输出，但 CLAP 外壳只写第一条总线、
+   其余原样留着宿主缓冲里的旧样本；VST3 对同一形状回 `UnsupportedFormat`。现在
+   `output_layout_supported` 先判形状、`silence_outputs` 清零**全部**总线（两种宽度都
+   清），再报 `CLAP_PROCESS_ERROR` —— 两个格式对同一个形状给出同一个结论。
+5. **编辑器链路没进心跳表**。`EditorLink::for_owner`（CLAP 的直连链路）漏了
+   `register_heartbeat`，于是 `live_links()` 里没有 CLAP 的视图：`host_tick`（私有状态
+   通知、宿主 Undo 收口、`setDirty` 冲刷）与诊断包的 `editorRoutes` 都少一条。现在它与
+   VST3 的 `EditController::new` 同一步登记。
+6. **Wayland 上 CLAP 完全没有编辑器**。VST3 的 `isPlatformTypeSupported` 接受
+   `WaylandSurfaceID` 并开一个自己的顶层窗口（`GuiFidelity::FloatingWindow`）；CLAP 的
+   `clap.gui` 只认 `x11`，`wayland` 直接拒绝 ⇒ 同一个用户在 Wayland 桌面上用 CLAP 得到
+   "这个插件没有界面"，用 VST3 却能用。现在 `window_api` 回答"接不接受 + 能不能嵌入"，
+   `wayland` 走浮窗（`create_view(..., embedded = false, ...)`）。
+7. **`set_size` 不打宿主节拍**。VST3 的 `IPlugView::onSize` / `onFocus` / `setFrame` 都会
+   调 `host_tick`；CLAP 只 resize。浮窗形态下宿主不再回到视图定时器，这条回调就是唯一
+   "宿主还活着"的证据 —— 少它等于让收尾工作只在 VST3 上发生。现在 `set_size` 补上
+   `EditorView::host_tick()`。
+8. **控制器通道的恢复失败不可见**。`IEditController::setState` 读不出来时只写一行日志，
+   不记 `note_restore_failed` ⇒ 只走控制器通道的宿主永远看不到 `restore_unresolved`。
+   现在两条通道（组件 / 控制器）都记同一个读数。
+9. **模块加载没有记录**。CLAP 的 `entry.init` 一条日志都不打，"宿主只是扫描了我"与
+   "宿主真的在用我"在日志里无法区分。现在两种格式共用 `log_module_loaded()`（WARN 级，
+   默认级别可见）。
+10. **总线名 / 端口名不一致**。VST3 写死单字符 `M`，CLAP 是空串 —— 宿主路由界面里是
+    两个不同的名字。现在共用 `hifishifter_plugin_core::MAIN_BUS_NAME`。
+11. **延迟 / 尾音的 panic 兜底值**。CLAP 回 `u32::MAX`（≈24 小时的补偿量，足以让宿主把
+    整条轨道推到几乎无限远），VST3 回 `0`。现在两边都是 `0`。
+12. **销毁之后仍可能收到 `on_main_thread`**。`clap_host.request_callback` 不可撤销：宿主
+    排队的那一次回调可能在 `plugin.destroy` 之后才投递，而它带的是 `clap_plugin_t*`。
+    此前头部随实例一起释放 ⇒ use-after-free（崩溃点在宿主里）。现在销毁只释放实例、
+    把 `plugin_data` 置空并把头部留在 `RETIRED`（墓碑），迟到的回调读到空实例直接返回；
+    墓碑在 `entry.deinit` 统一释放。
+
+这一轮同样**没有**把两处刻意差异改成"看起来一致"：宿主原生编辑仍然只有 VST3（CLAP
+没有等价接口），端口表仍然是静态立体声（宿主自己升混/降混）。
 ### ARA 发现表的工程证据
 
 `backend/hifishifter-clap/tests/ara_discovery.rs` 用 `ara2-bridge-companion` 的
@@ -371,8 +434,11 @@ companion 的 `clap` feature 只挂在 `[dev-dependencies]`：它是纯 checked-
 
 ### 契约层的依赖边界
 
-`hifishifter-plugin-core` 只持有纯数据契约（时间块、音频平面、组件 state、资源根、
-FFI panic 守卫），产品依赖只有 `log`。两条容易回退的归属规则：
+`hifishifter-plugin-core` 只持有纯数据契约（组件 state、资源根、日志文件名、FFI panic
+守卫），产品依赖只有 `log`。**中性块类型不在这里**：`BlockContext`（时间事实）与
+`AudioBlock`（样本面）的消费方是渲染与捕获，两者都在 `hifishifter-plugin` —— 放进 core
+只会让"一个块"出现第二份描述（那正是本轮删掉的 `TransportFrame`）。两条容易回退的
+归属规则：
 
 - `fade`（校验 `hifishifter_kernel::fade_curves` 的形状接受域）与
   `host_identity`（Windows ToolHelp 进程探测 / VST3 宿主名证据）是 **VST3 专属**，
