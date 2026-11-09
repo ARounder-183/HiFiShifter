@@ -118,6 +118,12 @@ pub struct UserParamBlock {
     /// 同一 revision 内创建多个块时的确定性排序键。
     #[serde(default)]
     pub created_seq: u64,
+    /// 可逆编组快照：本块由哪些原始用户块编组而来。
+    ///
+    /// 【只存源域】快照中的块仍是普通 `UserParamBlock`，绝不存绝对帧；
+    /// compose 只看顶层块，不递归投影快照。取消编组时按快照原样恢复。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grouped_from: Option<Vec<UserParamBlock>>,
 }
 
 impl UserParamBlock {
@@ -139,7 +145,7 @@ impl UserParamBlock {
 pub struct ParamBlockEditSet {
     pub schema_version: u32,
     pub revision: u64,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub blocks: Vec<UserParamBlock>,
 }
 
@@ -202,14 +208,53 @@ impl ParamBlockEditSet {
 
     /// 清理指向已不存在 Take 的成员。返回被清理的块数；orphan 默认保留，
     /// 只有调用方明确要求“删除无效块”时才使用本函数。
+    ///
+    /// grouped_from 快照递归清理，但 grouped 块本身只要还有可恢复子块就保留，
+    /// 直到用户显式取消编组。
     pub fn prune_missing_takes(&mut self, allowed: &BTreeSet<TakeKey>) -> usize {
-        let before = self.blocks.len();
-        self.blocks.retain(|block| match &block.geometry {
-            BlockGeometry::Take { members } => {
-                members.iter().any(|member| allowed.contains(&member.key()))
+        fn prune_block(
+            block: &UserParamBlock,
+            allowed: &BTreeSet<TakeKey>,
+        ) -> Option<UserParamBlock> {
+            let mut next = block.clone();
+            if let Some(children) = &block.grouped_from {
+                let kept: Vec<UserParamBlock> = children
+                    .iter()
+                    .filter_map(|child| prune_block(child, allowed))
+                    .collect();
+                next.grouped_from = if kept.is_empty() { None } else { Some(kept) };
             }
-            BlockGeometry::Root { .. } => true,
-        });
+            match &next.geometry {
+                BlockGeometry::Take { members } => {
+                    let kept: Vec<TakeSpan> = members
+                        .iter()
+                        .filter(|member| allowed.contains(&member.key()))
+                        .cloned()
+                        .collect();
+                    if kept.is_empty() {
+                        let mut recovered: Vec<TakeSpan> = Vec::new();
+                        for child in next.grouped_from.as_deref().unwrap_or_default() {
+                            recovered.extend(child.members().iter().cloned());
+                        }
+                        if recovered.is_empty() {
+                            return None;
+                        }
+                        next.geometry = BlockGeometry::Take { members: recovered };
+                        return Some(next);
+                    }
+                    next.geometry = BlockGeometry::Take { members: kept };
+                    Some(next)
+                }
+                BlockGeometry::Root { .. } => Some(next),
+            }
+        }
+
+        let before = self.blocks.len();
+        self.blocks = self
+            .blocks
+            .iter()
+            .filter_map(|block| prune_block(block, allowed))
+            .collect();
         before.saturating_sub(self.blocks.len())
     }
 }
@@ -250,6 +295,9 @@ impl ParamBlockView {
 #[serde(rename_all = "camelCase")]
 pub struct ProjectedParamBlock {
     pub id: String,
+    /// 派生视图块所属的用户块 id。base 块没有；多 run 用户块的每个片段都指向父块。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_block_id: Option<String>,
     pub start_frame: u32,
     pub end_frame_exclusive: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -279,7 +327,7 @@ pub struct ProjectedMember {
 pub enum ProjectedBlockKind {
     Base,
     User,
-    Merged,
+    Grouped,
     Manual,
 }
 
@@ -301,5 +349,16 @@ impl Default for GameBlockBaseline {
             algorithm_version: 0,
             source_spans_sec: Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_edit_set_always_serializes_blocks_array() {
+        let value = serde_json::to_value(ParamBlockEditSet::default()).unwrap();
+        assert_eq!(value["blocks"], serde_json::json!([]));
     }
 }

@@ -14,7 +14,8 @@ pub mod projection;
 pub mod types;
 pub mod validate;
 
-pub use compose::compose_param_block_view;
+pub use compose::{compose_param_block_view, project_single_user_block};
+pub use editing::DeletedParamBlockSnapshot;
 pub use types::{
     BlockGeometry, BlockLabel, GameBlockBaseline, ParamBlockEditSet, ParamBlockView,
     ProjectedBlockKind, ProjectedMember, ProjectedParamBlock, RootSpan, TakeKey, TakeSpan,

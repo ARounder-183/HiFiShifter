@@ -20,6 +20,7 @@ const ANCHOR_OVERLAP_RATIO: f64 = 0.5;
 #[derive(Clone, Debug)]
 struct Candidate {
     id: String,
+    user_block_id: Option<String>,
     start: u32,
     end: u32,
     kind: ProjectedBlockKind,
@@ -67,9 +68,12 @@ fn project_user_block(
             (
                 vec![Candidate {
                     id: block.id.clone(),
+                    user_block_id: Some(block.id.clone()),
                     start,
                     end,
-                    kind: if block.manual {
+                    kind: if block.grouped_from.is_some() {
+                        ProjectedBlockKind::Grouped
+                    } else if block.manual {
                         ProjectedBlockKind::Manual
                     } else {
                         ProjectedBlockKind::User
@@ -141,12 +145,15 @@ fn project_user_block(
                 };
                 out.push(Candidate {
                     id,
+                    user_block_id: Some(block.id.clone()),
                     start,
                     end,
-                    kind: if block.manual {
+                    kind: if block.grouped_from.is_some() {
+                        ProjectedBlockKind::Grouped
+                    } else if block.manual {
                         ProjectedBlockKind::Manual
                     } else if run_members.len() > 1 {
-                        ProjectedBlockKind::Merged
+                        ProjectedBlockKind::Grouped
                     } else {
                         ProjectedBlockKind::User
                     },
@@ -163,6 +170,37 @@ fn project_user_block(
             (out, orphan)
         }
     }
+}
+
+/// 把一个用户块单独投影成视图块，供编辑原语在不知道完整 view 时定位几何。
+pub fn project_single_user_block(
+    timeline: &TimelineState,
+    block: &UserParamBlock,
+    frame_period_ms: f64,
+) -> Result<Option<ProjectedParamBlock>, String> {
+    let (candidates, _) = project_user_block(timeline, block, frame_period_ms);
+    let Some(candidate) = candidates
+        .into_iter()
+        .find(|candidate| candidate.id == block.id)
+        .or_else(|| {
+            project_user_block(timeline, block, frame_period_ms)
+                .0
+                .into_iter()
+                .next()
+        })
+    else {
+        return Ok(None);
+    };
+    Ok(Some(ProjectedParamBlock {
+        id: candidate.id,
+        user_block_id: candidate.user_block_id,
+        start_frame: candidate.start,
+        end_frame_exclusive: candidate.end,
+        transition_frames: candidate.transition_frames,
+        kind: candidate.kind,
+        members: candidate.members,
+        value: candidate.value,
+    }))
 }
 
 fn anchor_matches(base: &TakeSpan, member: &TakeSpan) -> bool {
@@ -241,6 +279,7 @@ pub fn compose_param_block_view(
         let interval = base.projected[0];
         candidates.push(Candidate {
             id: base.id.clone(),
+            user_block_id: None,
             start: interval.start_frame,
             end: interval.end_frame_exclusive,
             kind: ProjectedBlockKind::Base,
@@ -333,6 +372,7 @@ pub fn compose_param_block_view(
         .into_iter()
         .map(|candidate| ProjectedParamBlock {
             id: candidate.id,
+            user_block_id: candidate.user_block_id,
             start_frame: candidate.start,
             end_frame_exclusive: candidate.end,
             transition_frames: candidate.transition_frames,
@@ -411,6 +451,7 @@ mod tests {
                 value: None,
                 transition_out_sec: None,
                 created_seq: 1,
+                grouped_from: None,
             }],
         }
     }
@@ -428,7 +469,7 @@ mod tests {
 
         let merged = compose_param_block_view(&song, "root", &merged_edits(), 5.0).unwrap();
         assert_eq!(merged.blocks.len(), 1);
-        assert_eq!(merged.blocks[0].kind, ProjectedBlockKind::Merged);
+        assert_eq!(merged.blocks[0].kind, ProjectedBlockKind::Grouped);
         assert_eq!(merged.blocks[0].start_frame, 0);
         assert_eq!(merged.blocks[0].end_frame_exclusive, 200);
 
@@ -472,6 +513,7 @@ mod tests {
                 value: None,
                 transition_out_sec: None,
                 created_seq: 1,
+                grouped_from: None,
             }],
         };
         let view = compose_param_block_view(&song, "root", &edits, 5.0).unwrap();
@@ -498,6 +540,7 @@ mod tests {
                 value: Some(60.0),
                 transition_out_sec: None,
                 created_seq: 1,
+                grouped_from: None,
             }],
         };
         let view = compose_param_block_view(&song, "root", &edits, 5.0).unwrap();

@@ -815,6 +815,7 @@ mod tests {
                 value: None,
                 transition_out_sec: None,
                 created_seq: 1,
+                grouped_from: None,
             }],
         };
 

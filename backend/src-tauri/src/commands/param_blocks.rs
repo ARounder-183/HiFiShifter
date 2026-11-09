@@ -256,6 +256,25 @@ mod tests {
     }
 
     #[test]
+    fn empty_edit_set_is_accepted_and_serialized_with_blocks_array() {
+        let (state, root, _clip_id, _take_id) = state_with_clip();
+        let initial = get(&state, &root).unwrap();
+        let revision = initial["editRevision"].as_u64().unwrap();
+        let edited = set(
+            &state,
+            root,
+            revision,
+            Vec::new(),
+            false,
+            Vec::new(),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(edited["edits"]["blocks"], serde_json::json!([]));
+    }
+
+    #[test]
     fn app_block_edit_is_atomic_and_survives_undo() {
         let (state, root, clip_id, take_id) = state_with_clip();
         let initial = get(&state, &root).unwrap();
@@ -283,6 +302,7 @@ mod tests {
                 value: Some(60.0),
                 transition_out_sec: None,
                 created_seq: 1,
+                grouped_from: None,
             }],
             true,
             Vec::new(),

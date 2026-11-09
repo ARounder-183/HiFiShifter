@@ -478,6 +478,9 @@ pub struct UiSettings {
     /// 新建参数块时是否同步归一化该段音高（默认关闭）。
     #[serde(default)]
     pub param_block_follow_pitch: bool,
+    /// 参数块图层可见性（本地记忆，默认关闭）。
+    #[serde(default)]
+    pub param_blocks_visible: bool,
     #[serde(default)]
     pub playhead_zoom: bool,
     #[serde(default)]
@@ -1713,6 +1716,7 @@ impl Default for UiSettings {
             pitch_snap_tolerance_cents: 0,
             pitch_snap_scale: default_pitch_snap_scale(),
             param_block_follow_pitch: false,
+            param_blocks_visible: false,
             playhead_zoom: false,
             auto_scroll: false,
             param_editor_seek_playhead: true,

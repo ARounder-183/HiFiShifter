@@ -738,6 +738,7 @@ mod tests {
                         value: None,
                         transition_out_sec: None,
                         created_seq: 1,
+                        grouped_from: None,
                     }],
                 },
                 param_block_view: Some(crate::param_blocks::ParamBlockView::empty("track", 5.0)),
