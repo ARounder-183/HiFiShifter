@@ -71,6 +71,7 @@ export const persistUiSettings = createAsyncThunk(
             pitchSnapScale: s.pitchSnapScale,
             pitchSnapToleranceCents: s.pitchSnapToleranceCents,
             paramBlockFollowPitch: s.paramBlockFollowPitch,
+            paramBlocksVisible: s.paramBlocksVisible,
             scaleHighlightMode: s.scaleHighlightMode,
             ignoreGrouping: s.ignoreGrouping,
             rippleMode: s.rippleMode,

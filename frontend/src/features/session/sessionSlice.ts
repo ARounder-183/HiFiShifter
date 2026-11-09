@@ -101,7 +101,6 @@ export type {
     TrackInfo,
 } from "./sessionTypes";
 export type { ParamSelectionSnapshot, SessionState } from "./sessionSlice/types";
-
 export {
     undoRemote,
     redoRemote,
@@ -125,7 +124,6 @@ export {
     setProjectStretchSettingsRemote,
     setProjectTimelineSettingsRemote,
 } from "./thunks/projectThunks";
-
 export {
     fetchTimeline,
     seekPlayhead,
@@ -134,7 +132,6 @@ export {
     playOriginal,
     stopAudioPlayback,
 } from "./thunks/transportThunks";
-
 export {
     addTrackRemote,
     createHostTrackRemote,
@@ -177,9 +174,7 @@ export {
     glueClipsRemote,
     selectClipRemote,
 } from "./thunks/timelineThunks";
-
 export { setTrackStateRemote, removeSelectedClipRemote } from "./thunks/trackThunks";
-
 export {
     refreshRuntime,
     clearWaveformCacheRemote,
@@ -187,7 +182,6 @@ export {
     loadUiSettings,
     persistUiSettings,
 } from "./thunks/runtimeThunks";
-
 export { updateMetronome } from "./thunks/transportThunks";
 export { loadModel, loadDefaultModel } from "./thunks/modelThunks";
 
@@ -768,6 +762,12 @@ const sessionSlice = createSlice({
                 state.disabledGroupIds.push(action.payload);
             }
         },
+        toggleParamBlocksVisible(state) {
+            state.paramBlocksVisible = !state.paramBlocksVisible;
+        },
+        setParamBlocksVisible(state, action: PayloadAction<boolean>) {
+            state.paramBlocksVisible = action.payload;
+        },
         toggleParamEditorSeekPlayhead(state) {
             state.paramEditorSeekPlayheadEnabled = !state.paramEditorSeekPlayheadEnabled;
         },
@@ -1277,6 +1277,8 @@ export const {
     toggleIgnoreGrouping,
     cycleRippleMode,
     setRippleMode,
+    toggleParamBlocksVisible,
+    setParamBlocksVisible,
     toggleParamEditorSeekPlayhead,
     toggleParamEditorTimelineClickSelectTrack,
     toggleClipboardPreview,

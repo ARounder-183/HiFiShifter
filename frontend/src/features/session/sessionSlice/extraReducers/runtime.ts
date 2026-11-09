@@ -226,6 +226,9 @@ export function registerRuntime(builder: ActionReducerMapBuilder<SessionState>) 
             if (s.paramBlockFollowPitch != null) {
                 state.paramBlockFollowPitch = Boolean(s.paramBlockFollowPitch);
             }
+            if (s.paramBlocksVisible != null) {
+                state.paramBlocksVisible = Boolean(s.paramBlocksVisible);
+            }
             state.playheadZoomEnabled = s.playheadZoom;
             if (s.autoScroll != null) state.autoScrollEnabled = s.autoScroll;
             if (s.paramEditorSeekPlayhead != null)
