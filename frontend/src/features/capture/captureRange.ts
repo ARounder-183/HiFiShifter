@@ -123,8 +123,12 @@ export function captureScrollExtentSec(status: CaptureStatus | null): number {
     if (!status?.capture) return 0;
     const bands = deriveCaptureBands(status);
     if (!bands) return 0;
-    const lastBand = bands.bands.length > 0 ? bands.bands[bands.bands.length - 1] : null;
-    const endSec = Math.max(bands.positionSec, lastBand?.endSec ?? 0);
+    // 不能只看最后一段：反向 seek 后可能出现“较早开始、但更晚结束”的段，
+    // 按起点排序时它不是最后一段；可滚域必须覆盖所有段的最大右缘。
+    let endSec = bands.positionSec;
+    for (const band of bands.bands) {
+        if (band.endSec > endSec) endSec = band.endSec;
+    }
     return Math.max(0, endSec + bands.leadSec);
 }
 

@@ -173,6 +173,19 @@ test("捕获中的位置可以推出可滚域延伸", () => {
     expect(captureScrollExtentSec(recording)).toBeGreaterThanOrEqual(30);
 });
 
+test("较早开始但更晚结束的段也必须计入可滚长度", () => {
+    // 反向 seek 后可能出现 [0..100s] 与 [10..20s] 两段；按起点排序时最后一段
+    // 不是最右端，不能只看最后一段。
+    const recording = status({
+        runs: [
+            { startFrame: 0, endFrame: 4_800_000 },
+            { startFrame: 480_000, endFrame: 960_000 },
+        ],
+        positionFrame: 960_000,
+    });
+    expect(captureScrollExtentSec(recording)).toBeGreaterThanOrEqual(100);
+});
+
 test("没有捕获 / 采样率非法时没有额外长度", () => {
     expect(captureScrollExtentSec(null)).toBe(0);
     expect(captureScrollExtentSec(status(null))).toBe(0);
