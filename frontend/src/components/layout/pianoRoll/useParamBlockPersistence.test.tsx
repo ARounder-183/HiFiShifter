@@ -2,7 +2,6 @@
 import { act, useEffect, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ClipInfo } from "../../../features/session/sessionTypes";
 import { EMPTY_PARAM_BLOCK_STATE, type ParamBlockState } from "./paramBlocks";
 import { useParamBlockPersistence } from "./useParamBlockPersistence";
 
@@ -38,44 +37,22 @@ function reply(editRevision: number, framePeriodMs = 5) {
     };
 }
 
-function clip(overrides: Partial<ClipInfo> = {}): ClipInfo {
-    return {
-        id: "clip",
-        trackId: "root",
-        startSec: 0,
-        lengthSec: 2,
-        sourceStartSec: 0,
-        sourceEndSec: 2,
-        playbackRate: 1,
-        reversed: false,
-        loopEnabled: false,
-        activeTakeId: "take",
-        takes: [
-            {
-                id: "take",
-                sourceStartSec: 0,
-                sourceEndSec: 2,
-                playbackRate: 1,
-                reversed: false,
-                loopEnabled: false,
-            },
-        ],
-        ...overrides,
-    } as ClipInfo;
-}
-
 let host: HTMLDivElement;
 let root: Root;
 /** 观测点：由 effect 写入（渲染期不得改外部变量）。 */
 const probe: { state: ParamBlockState } = { state: EMPTY_PARAM_BLOCK_STATE };
+/** 测试用的驱动口（同样由 effect 写入）。 */
+const api: {
+    persistence: ReturnType<typeof useParamBlockPersistence> | null;
+    setState: ((next: ParamBlockState) => void) | null;
+} = { persistence: null, setState: null };
 const flags = { defer: false };
-const props = { clips: [clip()] as readonly ClipInfo[], historyKey: "0:0" };
+const props = { historyKey: "0:0" };
 
-function Harness(p: { clips: readonly ClipInfo[]; historyKey: string }) {
+function Harness(p: { historyKey: string }) {
     const [state, setState] = useState<ParamBlockState>(EMPTY_PARAM_BLOCK_STATE);
-    useParamBlockPersistence({
+    const persistence = useParamBlockPersistence({
         rootTrackId: "root",
-        clips: p.clips,
         enabled: true,
         historyKey: p.historyKey,
         state,
@@ -85,12 +62,27 @@ function Harness(p: { clips: readonly ClipInfo[]; historyKey: string }) {
     useEffect(() => {
         probe.state = state;
     }, [state]);
+    // `persistence` 每次渲染都是新对象 ⇒ 这个 effect 每渲染跑一次，正好让驱动口始终最新。
+    useEffect(() => {
+        api.persistence = persistence;
+        api.setState = setState;
+    }, [persistence, setState]);
     return null;
 }
 
 async function render(): Promise<void> {
     await act(async () => {
-        root.render(<Harness clips={props.clips} historyKey={props.historyKey} />);
+        root.render(<Harness historyKey={props.historyKey} />);
+    });
+}
+
+/** 模拟一次本地预览：把"内容代次"推到 revision（切分一次会 +3）。 */
+function previewTo(revision: number): void {
+    act(() => {
+        api.setState?.({
+            ...probe.state,
+            editSet: { schemaVersion: 1, revision, blocks: [] },
+        });
     });
 }
 
@@ -99,9 +91,10 @@ beforeEach(() => {
     mocks.setParamBlockEdits.mockReset();
     mocks.getParamBlockView.mockResolvedValue(reply(3));
     flags.defer = false;
-    props.clips = [clip()];
     props.historyKey = "0:0";
     probe.state = EMPTY_PARAM_BLOCK_STATE;
+    api.persistence = null;
+    api.setState = null;
     host = document.createElement("div");
     document.body.append(host);
     root = createRoot(host);
@@ -121,11 +114,10 @@ describe("useParamBlockPersistence", () => {
     });
 
     /*
-     * 手势期间（Clip 拖动 / 参数块拖动 / 内核手势）不得回读：那时的回包带着
-     * 旧几何，落地就会让块在新旧位置之间来回跳。被挡下的回读只登记，等手势
-     * 结束后合并成一次请求。
+     * 手势期间（参数块拖动 / 过渡手柄）不得回读：那时的回包落地会打断正在进行的
+     * 本地编辑。被挡下的回读只登记，等手势结束后合并成一次请求。
      */
-    it("手势期间既不落地也不发请求，手势结束后合并成一次回读", async () => {
+    it("块手势期间既不落地也不发请求，手势结束后合并成一次回读", async () => {
         await render();
         const before = mocks.getParamBlockView.mock.calls.length;
 
@@ -143,7 +135,7 @@ describe("useParamBlockPersistence", () => {
         expect(probe.state.editSet.revision).toBe(4);
     });
 
-    it("比本地更旧的编辑集不会覆盖当前状态", async () => {
+    it("比镜像更旧的编辑集不会覆盖当前状态", async () => {
         await render();
         expect(probe.state.editSet.revision).toBe(3);
 
@@ -154,50 +146,121 @@ describe("useParamBlockPersistence", () => {
     });
 
     /*
-     * 这是闪烁的根因回归：`historyKey` 只跟撤销深度走。Clip 几何变化不再
-     * 触发回读 —— 块视图是 `(clips, editSet, framePeriodMs)` 的派生值，
-     * 不需要向任何一方"确认"几何。
+     * 【撤销切分无效的根因回归】本地编辑集的 revision 是**内容代次**（前端每落一个
+     * 块 +1，一次切分 +3），服务端的是**权威代次**（每次提交 +1）。旧实现拿它们比
+     * 大小，于是切分之后本地代次永远领先，此后所有权威回写（撤销 / 重做 / 回读）
+     * 都被静默丢弃。
      */
-    it("Clip 几何变化不触发回读", async () => {
+    it("本地预览代次领先时，提交回包仍然落地", async () => {
         await render();
-        const before = mocks.getParamBlockView.mock.calls.length;
+        previewTo(6);
+        expect(probe.state.editSet.revision).toBe(6);
 
-        props.clips = [clip({ startSec: 0.5, lengthSec: 1.5 })];
-        await render();
-        expect(mocks.getParamBlockView.mock.calls.length).toBe(before);
-
-        props.clips = [clip({ activeTakeId: "other" })];
-        await render();
-        expect(mocks.getParamBlockView.mock.calls.length).toBe(before);
+        mocks.setParamBlockEdits.mockResolvedValue(reply(4));
+        await act(async () => {
+            await api.persistence?.commit(probe.state);
+        });
+        expect(probe.state.editSet.revision).toBe(4);
     });
 
-    it("飞行期间几何变了：回包不落地，改为补一次回读", async () => {
+    /*
+     * 【代次相等 ≠ 内容相同】一次 `placeUserBlock` 的预览恰好把本地代次推到服务端的
+     * 下一个代次（3 → 4，而提交回包也是 4）。若拿 revision 相等当"无需落地"的短路，
+     * 服务端那份（已排序 / 规范化的块）就会被跳过，本地继续用预览那一份。
+     */
+    it("预览代次恰好等于服务端代次时，仍然采用服务端的块", async () => {
         await render();
-        const before = mocks.getParamBlockView.mock.calls.length;
+        previewTo(4);
+        expect(probe.state.editSet.revision).toBe(4);
+        expect(probe.state.editSet.blocks).toHaveLength(0);
 
-        let release: ((value: unknown) => void) | null = null;
-        mocks.getParamBlockView.mockImplementationOnce(
-            () =>
-                new Promise((resolve) => {
-                    release = resolve;
-                }),
-        );
-        mocks.getParamBlockView.mockResolvedValue(reply(7));
-        props.historyKey = "3:0";
-        await render();
-        expect(mocks.getParamBlockView.mock.calls.length).toBe(before + 1);
-
-        // 请求还在飞，几何已经变了。
-        props.clips = [clip({ startSec: 1 })];
-        await render();
-        await act(async () => {
-            release?.(reply(7));
+        const serverBlock = {
+            id: "ublock",
+            geometry: {
+                kind: "take" as const,
+                members: [
+                    {
+                        clipId: "clip",
+                        takeId: "take",
+                        cycle: 0,
+                        sourceStartSec: 0,
+                        sourceEndSec: 1,
+                        label: "manual" as const,
+                    },
+                ],
+            },
+            createdSeq: 1,
+        };
+        mocks.setParamBlockEdits.mockResolvedValue({
+            ...reply(4),
+            edits: { schemaVersion: 1, revision: 4, blocks: [serverBlock] },
         });
-        expect(probe.state.editSet.revision).toBe(3);
+        await act(async () => {
+            await api.persistence?.commit(probe.state);
+        });
+        expect(probe.state.editSet.blocks).toHaveLength(1);
+    });
 
-        // 下一次渲染发现有待回读，补一次并落地。
+    it("撤销后的回读能盖掉更靠前的本地代次", async () => {
         await render();
-        expect(mocks.getParamBlockView.mock.calls.length).toBe(before + 2);
+        previewTo(6);
+
+        mocks.getParamBlockView.mockResolvedValue(reply(7));
+        props.historyKey = "1:0";
+        await render();
         expect(probe.state.editSet.revision).toBe(7);
+    });
+
+    /*
+     * 【CAS 基准过期的一次性自愈】镜像可能落后于服务端（带外写入 / 撤销推进代次而
+     * 回读尚未落地）。这时先刷新镜像再原样重试一次；第二次仍冲突才报错。
+     */
+    it("CAS 冲突后刷新镜像并重试一次", async () => {
+        await render();
+        mocks.getParamBlockView.mockResolvedValue(reply(9));
+        mocks.setParamBlockEdits
+            .mockRejectedValueOnce(new Error("Conflict: parameter block edits changed"))
+            .mockResolvedValueOnce(reply(10));
+
+        await act(async () => {
+            await api.persistence?.commit(probe.state);
+        });
+
+        expect(mocks.setParamBlockEdits).toHaveBeenCalledTimes(2);
+        const second = mocks.setParamBlockEdits.mock.calls[1][0] as {
+            expectedEditRevision: number;
+        };
+        expect(second.expectedEditRevision).toBe(9);
+        expect(probe.state.editSet.revision).toBe(10);
+    });
+
+    /*
+     * 【带外写入必须回写镜像】`restore_game_param_blocks` 绕过 `commit` 直接推进了
+     * 服务端代次。钩子若不知道，下一次提交就会以过期基准被 CAS 拒绝（"还原之后
+     * 编辑点了没反应"）。`adopt` 把回包交进同一条落地路径，不需要额外 IPC。
+     */
+    it("adopt 采用带外写入的回包，下一次提交用新基准", async () => {
+        await render();
+        act(() => api.persistence?.adopt("root", reply(8)));
+        expect(probe.state.editSet.revision).toBe(8);
+
+        mocks.setParamBlockEdits.mockResolvedValue(reply(9));
+        await act(async () => {
+            await api.persistence?.commit(probe.state);
+        });
+        const sent = mocks.setParamBlockEdits.mock.calls[0][0] as {
+            expectedEditRevision: number;
+        };
+        expect(sent.expectedEditRevision).toBe(8);
+        expect(probe.state.editSet.revision).toBe(9);
+    });
+
+    it("非冲突错误不重试", async () => {
+        await render();
+        mocks.setParamBlockEdits.mockRejectedValue(new Error("boom"));
+        await act(async () => {
+            await api.persistence?.commit(probe.state).catch(() => undefined);
+        });
+        expect(mocks.setParamBlockEdits).toHaveBeenCalledTimes(1);
     });
 });

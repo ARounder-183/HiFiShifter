@@ -7,77 +7,15 @@ import {
     type Dispatch,
     type SetStateAction,
 } from "react";
-import type { ClipInfo } from "../../../features/session/sessionTypes";
 import { timelineApi } from "../../../services/api";
 import { listen } from "../../../services/hostEvents";
 import { backendDetail } from "../../../services/invoke";
-import { toParamBlockSourceClip, type ParamBlockSourceClip } from "./paramBlockProjection";
 import {
     normalizeParamBlockEditSet,
     type ParamBlockEditSet,
     type ParamBlockView,
 } from "./paramBlockTypes";
 import type { ParamBlockState } from "./paramBlocks";
-
-/**
- * 请求内一致性签名：覆盖所有会改变投影结果的 Clip/Take 几何与分析输入。
- *
- * 【它不再进 `historyKey`】块几何是派生值（见 `ParamBlockState` 的注释），
- * clip 变了不需要回读编辑集 —— 回读只服务"历史位置变了"。把布局拼进
- * `historyKey` 会让一次 Clip 拖动每帧发一轮 `get_param_block_view`，而那时的
- * 回包带着旧几何，正是闪烁的来源。
- *
- * 现在它只回答一个问题：**这次请求飞行期间，几何变了吗？**
- *
- * 不包含 `editSet.revision`：编辑 reply 已经更新状态；把它放进键会让每次
- * 编辑都多一轮 `get_param_block_view`。
- */
-export function paramBlockClipLayoutKey(clips: readonly ParamBlockSourceClip[]): string {
-    return clips
-        .map((clip) =>
-            [
-                clip.id,
-                clip.trackId,
-                clip.startSec,
-                clip.lengthSec,
-                clip.sourceStartSec ?? 0,
-                clip.sourceEndSec ?? 0,
-                clip.playbackRate ?? 1,
-                clip.reversed ? 1 : 0,
-                clip.loopEnabled ? 1 : 0,
-                clip.contentDurationSec ?? 0,
-                clip.activeTakeId ?? "",
-                clip.takes
-                    ?.map((take) =>
-                        [
-                            take.id,
-                            take.sourceStartSec,
-                            take.sourceEndSec,
-                            take.playbackRate,
-                            take.reversed ? 1 : 0,
-                            take.loopEnabled ? 1 : 0,
-                            take.durationSec ?? 0,
-                            take.durationFrames ?? 0,
-                            take.sourceSampleRate ?? 0,
-                            take.syllableSpansSec
-                                ?.map((span) => [span.startSec, span.endSec].join(","))
-                                .join("|") ?? "",
-                            take.midiNoteData
-                                ?.map((note) => [note.startSec, note.endSec, note.note].join(","))
-                                .join("|") ?? "",
-                        ].join(":"),
-                    )
-                    .join("|") ?? "",
-                clip.syllableSpansSec
-                    ?.map((span) => [span.startSec, span.endSec].join(","))
-                    .join("|") ?? "",
-                clip.midiNoteData
-                    ?.map((note) => [note.startSec, note.endSec, note.note].join(","))
-                    .join("|") ?? "",
-            ].join(":"),
-        )
-        .join(";");
-}
 
 /** 一次回读的权威结果：编辑集 + 帧周期。**没有几何** —— 几何永远是派生的。 */
 interface ParamBlockSnapshot {
@@ -93,19 +31,35 @@ function framePeriodOf(view: ParamBlockView | undefined, fallback: number | unde
         : 5;
 }
 
+/** 后端拒绝整集替换时的原文（见 `ParamBlockEditSet::replace`）。 */
+const EDIT_SET_CONFLICT = "parameter block edits changed";
+
+function isEditSetConflict(error: unknown): boolean {
+    return (backendDetail(error) ?? String(error)).includes(EDIT_SET_CONFLICT);
+}
+
 /**
  * 参数块编辑集的持久化。
  *
- * 【职责收窄】它现在只负责"编辑集"这一件事：读（`get_param_block_view`）、
- * 写（`set_param_block_edits`）、以及把手势期间的异步回包挡在门外。
- * 块几何不在它的管辖范围内 —— 那是 `composeParamBlockView` 的纯函数输出。
+ * 【职责收窄】它只负责"编辑集"这一件事：读（`get_param_block_view`）、写
+ * （`set_param_block_edits`）、以及把手势期间的异步回包挡在门外。块几何不在
+ * 它的管辖范围内 —— 那是 `composeParamBlockView` 的纯函数输出，所以本钩子
+ * **不需要** `clips`。
+ *
+ * 【权威镜像】`server` 是**唯一**的权威代次来源。写路径的 CAS 基准
+ * （`expectedEditRevision`）读的就是它，因此：
+ *
+ * - 任何**不经过 `commit`** 的后端写入（`restore_game_param_blocks` 等）
+ *   必须调 `adopt` 把回包交回来，否则下一次提交的基准是过期的；
+ * - 本地编辑集的 `revision` 是**内容代次**（前端每落一个块 +1），服务端的是
+ *   **权威代次**（每次提交 +1）—— 两者**不可比**。唯一的陈旧判据是
+ *   {@link adoptSnapshot} 里"服务端 vs 服务端"的单调闸。
  *
  * 【为什么回读仍然存在】视图可以派生，**编辑集不能**：撤销 / 重做 / 分析回填 /
- * 宿主侧改动都只存在于后端。所以回读只是不再参与几何，而不是被删掉。
+ * 宿主侧改动都只存在于后端。
  */
 export function useParamBlockPersistence(args: {
     rootTrackId: string | null;
-    clips: readonly ClipInfo[];
     enabled: boolean;
     /** 历史位置变化键（撤销 / 重做深度）。**不含** clip 几何。 */
     historyKey: string;
@@ -131,11 +85,28 @@ export function useParamBlockPersistence(args: {
         latest.current.onError?.(backendDetail(error) ?? String(error));
     }, []);
 
-    /** 落地到 React 状态；本地编辑集更新时不倒退。 */
+    /**
+     * 落地到 React 状态。
+     *
+     * 【为什么没有"本地更新就不倒退"的判据】本地编辑集的 `revision` 是**内容
+     * 代次**（每落一个块 +1），服务端的是**权威代次**（每次提交 +1）—— 一次切分会让
+     * 前者一次 +3（物化 + 左右两半）。拿它们比较，切分之后本地代次永远跑在前面，
+     * 于是撤销 / 重做 / 回读的权威结果**全部被丢弃**（用户看到"撤销无法撤销切分"）。
+     *
+     * 唯一有效的陈旧判据在 {@link adoptSnapshot}：两侧都是服务端代次。落地的是已经
+     * 过那道闸的结果，无条件写入。
+     *
+     * 唯一的短路是**对象同一性**（`state.editSet === snapshot.edits`）：只有"把手上
+     * 这一份再写一次"（`flushReadback`）才会命中，返回原对象省掉一次无意义的重渲染。
+     *
+     * 【为什么不能拿 revision 相等当短路】本地预览的代次也可能恰好等于服务端的下一个
+     * 代次（一次 `placeUserBlock` 的编辑就会这样），那时按 revision 短路会把**服务端
+     * 的块**跳过去，本地继续用预览那一份 —— 又是一次"看起来一样、其实没落地"。
+     */
     const writeState = useCallback((root: string, snapshot: ParamBlockSnapshot) => {
         if (latest.current.rootTrackId !== root) return;
         latest.current.setState((state) =>
-            state.editSet.revision > snapshot.edits.revision
+            state.editSet === snapshot.edits && state.framePeriodMs === snapshot.framePeriodMs
                 ? state
                 : {
                       ...state,
@@ -147,39 +118,58 @@ export function useParamBlockPersistence(args: {
     }, []);
 
     /**
-     * 回包落地。
+     * 规范化 + 单调闸 + 写镜像。
      *
-     * 闸门只有一道：**不得比本地编辑集更旧**。几何不需要校验 —— 状态里
-     * 没有几何，块一律按当前 clips 现算，所以再旧的回包也不可能把块的位置
-     * 打回去。旧实现在这里无条件写 `view`，那正是"松手后闪一下回到旧位置"。
+     * 闸门只比**服务端代次**：迟到的回包（revision 更旧）不得覆盖更新的权威。
+     * 返回 `null` 表示这份回包被丢弃。
+     */
+    const adoptSnapshot = useCallback(
+        (
+            root: string,
+            reply: { readonly view?: ParamBlockView; readonly edits: ParamBlockEditSet },
+        ): ParamBlockSnapshot | null => {
+            const edits = normalizeParamBlockEditSet(reply.edits);
+            const known = server.current.get(root);
+            if (known !== undefined && known.edits.revision > edits.revision) return null;
+            const snapshot: ParamBlockSnapshot = {
+                edits,
+                framePeriodMs: framePeriodOf(reply.view, known?.framePeriodMs),
+            };
+            server.current.set(root, snapshot);
+            return snapshot;
+        },
+        [],
+    );
+
+    /** 把手势 / 提交中的落地推到它们结束之后（只登记，不丢权威）。 */
+    const deferLanding = useCallback((root: string): boolean => {
+        if ((pending.current.get(root) ?? 0) > 0) return true;
+        if (latest.current.deferReadback?.()) {
+            refetchPending.current.add(root);
+            return true;
+        }
+        return false;
+    }, []);
+
+    /**
+     * 回包落地：镜像 + 状态。
+     *
+     * 镜像**永远**更新（它就是权威本身，与手势无关）；状态则要等手势 / 提交结束。
+     * 旧实现在这里无条件写 `view`，那正是"松手后闪一下回到旧位置"的来源；
+     * 现在状态里根本没有几何。
      */
     const applyReply = useCallback(
         (
             root: string,
             reply: { readonly view?: ParamBlockView; readonly edits: ParamBlockEditSet },
         ) => {
-            const edits = normalizeParamBlockEditSet(reply.edits);
-            const known = server.current.get(root);
-            if (known !== undefined && known.edits.revision > edits.revision) return;
-            const snapshot: ParamBlockSnapshot = {
-                edits,
-                framePeriodMs: framePeriodOf(reply.view, known?.framePeriodMs),
-            };
-            server.current.set(root, snapshot);
+            const snapshot = adoptSnapshot(root, reply);
+            if (snapshot === null) return;
             if (latest.current.rootTrackId !== root) return;
-            if ((pending.current.get(root) ?? 0) > 0) return;
-            if (latest.current.deferReadback?.()) {
-                refetchPending.current.add(root);
-                return;
-            }
+            if (deferLanding(root)) return;
             writeState(root, snapshot);
         },
-        [writeState],
-    );
-
-    const currentLayoutKey = useCallback(
-        () => paramBlockClipLayoutKey(latest.current.clips.map(toParamBlockSourceClip)),
-        [],
+        [adoptSnapshot, deferLanding, writeState],
     );
 
     /** 读一次权威编辑集。手势期间只登记，不发请求。 */
@@ -190,25 +180,29 @@ export function useParamBlockPersistence(args: {
                 refetchPending.current.add(root);
                 return;
             }
-            const requestLayout = currentLayoutKey();
             try {
                 const reply = await timelineApi.getParamBlockView(root);
                 if (latest.current.rootTrackId !== root) return;
-                if (currentLayoutKey() !== requestLayout) {
-                    /*
-                     * 飞行期间几何变了：这份回包的 `view` 已经对不上当前 clips。
-                     * `edits` 与几何无关，但既然几何还在动，就说明用户还没停手 ——
-                     * 补一次回读（deferral 会把它排到手势结束），而不是把权威丢掉。
-                     */
-                    refetchPending.current.add(root);
-                    return;
-                }
                 applyReply(root, reply);
             } catch (error) {
                 publishError(error);
             }
         },
-        [applyReply, currentLayoutKey, publishError],
+        [applyReply, publishError],
+    );
+
+    /** 只刷新镜像（给提交冲突后的重试用）：不受手势 / 提交中守卫影响。 */
+    const refreshAuthority = useCallback(
+        async (root: string): Promise<ParamBlockSnapshot | null> => {
+            try {
+                const reply = await timelineApi.getParamBlockView(root);
+                return adoptSnapshot(root, reply);
+            } catch (error) {
+                publishError(error);
+                return null;
+            }
+        },
+        [adoptSnapshot, publishError],
     );
 
     useEffect(() => {
@@ -311,9 +305,25 @@ export function useParamBlockPersistence(args: {
                 server.current.set(root, snapshot);
                 return snapshot;
             };
+            /*
+             * 【冲突重试一次】CAS 基准是镜像里的服务端代次。镜像过期只有两种成因：
+             * 带外写入（`restore_game_param_blocks`）与撤销 / 重做推进代次而回读
+             * 尚未落地。两者都不代表"别人改了内容"，所以先刷新镜像再原样重试一次；
+             * 第二次仍冲突就说明真的有人在并发改，交给调用方报错（整集覆盖本来就是
+             * "最后写入者胜"，重试不会放大任何风险）。
+             */
+            const executeWithRetry = async (): Promise<ParamBlockSnapshot> => {
+                try {
+                    return await execute();
+                } catch (error) {
+                    if (!isEditSetConflict(error)) throw error;
+                    if ((await refreshAuthority(root)) === null) throw error;
+                    return execute();
+                }
+            };
             const job = (queues.current.get(root) ?? Promise.resolve())
                 .catch(() => undefined)
-                .then(execute);
+                .then(executeWithRetry);
             const complete = job
                 .then((snapshot) => {
                     if (snapshot) latest.current.onCommitted?.();
@@ -344,7 +354,7 @@ export function useParamBlockPersistence(args: {
             );
             return complete;
         },
-        [publishError, writeState],
+        [publishError, refreshAuthority, writeState],
     );
 
     const persist = useCallback(
@@ -377,6 +387,19 @@ export function useParamBlockPersistence(args: {
          */
         receive: (root: string) => {
             void readback(root);
+        },
+        /**
+         * 采用一份来自**其它命令**的权威回包（`restore_game_param_blocks` 等）。
+         *
+         * 【为什么必须调】写入的 CAS 基准是镜像里的服务端代次；带外写入让服务端代次
+         * 前进却不告诉镜像，下一次提交就会以过期基准被拒（用户看到"点了没反应"）。
+         * 这里把回包直接交进同一条落地路径，不需要多一次 IPC。
+         */
+        adopt: (
+            root: string,
+            reply: { readonly view?: ParamBlockView; readonly edits: ParamBlockEditSet },
+        ) => {
+            applyReply(root, reply);
         },
         flushReadback,
     };

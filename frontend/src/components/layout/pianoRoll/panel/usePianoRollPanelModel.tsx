@@ -2786,24 +2786,12 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         analyzedClipIdsRef.current = current;
     }, [paramBlockSyllableSpans]);
     /**
-     * 时间轴内核手势锁的镜像。
-     *
-     * 不能在回调里直接读 `s` —— 那是渲染期快照，拖动期间不会更新；而
-     * `deferReadback` 恰恰是在拖动期间被调用的。`_interactionLockCount` 覆盖
-     * 移动 / 裁剪 / Slip / 淡化 / 增益 / 交叉淡化全部内核手势。
-     */
-    const interactionLockRef = useRef(s._interactionLockCount);
-    useLayoutEffect(() => {
-        interactionLockRef.current = s._interactionLockCount;
-    }, [s._interactionLockCount]);
-    /**
      * 历史位置镜像。块编辑的 persist 写入会打后端撤销点，但 React 的
      * `paramBlockState` 不会自动回读；只在历史深度变化时 reload，避免普通
      * 重渲染或拖动中的每次进度提交都发一轮 IPC。
      */
     const blockPersistence = useParamBlockPersistence({
         rootTrackId,
-        clips: paramBlockClips,
         enabled: paramBlocksVisible || paramBlockToolActive,
         onCommitted: () => dispatch(markProjectEdited()),
         /*
@@ -2822,14 +2810,17 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 holdMs: 15_000,
             }),
         /*
-         * 手势期间一律不回读：参数块手势（拖动 / 过渡）与**时间轴内核手势**
-         * （移动 / 裁剪 / Slip / 淡化 / 增益）都算。`_interactionLockCount` 是
-         * 时间轴那条既有契约，缺了它，一次 Clip 拖动就会把旧几何的回包放进来。
+         * 【只挡参数块手势】deferral 的唯一职责是保护**正在进行中的本地编辑集**
+         * ——块拖动 / 过渡手柄逐帧改它，回包此刻落地会把预览打断。
+         *
+         * 时间轴内核手势（移动 / 裁剪 / Slip / 淡化 / 增益）**不算**：它不改编辑集，
+         * 而几何早已是派生值（回包不携带几何，也就无从"带回旧几何"）。反过来把
+         * 它挡掉是有害的 —— 撤销之后、手势仍在进行时权威编辑集回不来，镜像留在
+         * 旧代次，下一次块编辑必定被 CAS 拒绝（"点了没反应"）。
          */
         deferReadback: () =>
             paramBlockDragActivityRef.current.pointerGestureToken !== null ||
-            paramBlockDragActivityRef.current.pendingCommits > 0 ||
-            interactionLockRef.current > 0,
+            paramBlockDragActivityRef.current.pendingCommits > 0,
     });
     /** 只提交块过渡布局；所有参数都持久化 transitionOutSec。 */
     const persistBlockTransition = useCallback(
@@ -4847,6 +4838,13 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 checkpoint: true,
             })
             .then((reply) => {
+                /*
+                 * 【必须把回包交回持久化钩子】这条写入绕过了 `commit`，服务端代次
+                 * 已经前进而钩子里的权威镜像还停在旧值 —— 下一次提交就会以过期基准
+                 * 被 CAS 拒绝（表现为"还原之后编辑点了没反应"）。`adopt` 走的是
+                 * 同一条落地路径（含单调闸与手势守卫），不需要多一次 IPC。
+                 */
+                blockPersistence.adopt(rootTrackId, reply);
                 const next: ParamBlockState = {
                     ...state,
                     rootTrackId,
@@ -4867,7 +4865,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 });
             });
         setParamBlockContextMenu(null);
-    }, [dispatch, rootTrackId, selectedParamBlockIds, selectionRef, tf]);
+    }, [blockPersistence.adopt, dispatch, rootTrackId, selectedParamBlockIds, selectionRef, tf]);
     restoreGameParamBlocksRef.current = restoreGameParamBlocks;
 
     /**
