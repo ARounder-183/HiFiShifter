@@ -86,7 +86,7 @@ import {
     nearestParamBlockByTime,
     isStrictlyInsideParamBlock,
     resolveParamBlockSplitSec,
-    resolveParamBlockSplitTarget,
+    resolveSplittableParamBlockAt,
     resolveParamBlockCreateSpan,
     resolveParamBlockResizePlan,
     resolveParamBlockResizeTarget,
@@ -3450,7 +3450,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                              */
                             canSplit:
                                 rootTrackId !== null &&
-                                resolveParamBlockSplitTarget(
+                                resolveSplittableParamBlockAt(
                                     blocksFromViewForPanel(rootTrackId, layout),
                                     store.getState().session.playheadSec,
                                     layout.framePeriodMs,
@@ -4767,11 +4767,9 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             const framePeriodMs = state.framePeriodMs;
             const clips = paramBlockSourceClipsRef.current;
             const blocks = blocksFromViewForPanel(rootTrackId, view);
-            const target = resolveParamBlockSplitTarget(blocks, rawSec, framePeriodMs);
-            // 播放头不在任何块内：静默。
+            // 播放头不在任何可切的块内（含编组块）：静默。
+            const target = resolveSplittableParamBlockAt(blocks, rawSec, framePeriodMs);
             if (target === null) return;
-            // 编组块的几何是若干源域区间的联合，切开没有唯一解。
-            if (target.kind === "grouped") return;
 
             const pxPerSec = hostRef.current?.getAxis()?.pxPerSec ?? pxPerSecRef.current;
             const snap = resolveParamBlockTimeSnapResult({

@@ -883,6 +883,22 @@ export function resolveParamBlockSplitTarget(
 }
 
 /**
+ * 播放头处**可切**的块：位置解析 + 编组块排除。
+ *
+ * 菜单禁用态与快捷键动作必须共用这一份判据 —— 各写一遍的话，编组块会出现在
+ * "菜单可点、点了没反应"的错位状态。编组块的几何是若干源域区间的联合，
+ * 切开没有唯一解（内核一律以 `grouped_locked` 拒绝）。
+ */
+export function resolveSplittableParamBlockAt(
+    blocks: readonly ParamBlock[],
+    splitSec: number,
+    framePeriodMs: number,
+): ParamBlock | null {
+    const target = resolveParamBlockSplitTarget(blocks, splitSec, framePeriodMs);
+    return target === null || target.kind === "grouped" ? null : target;
+}
+
+/**
  * 切点是否严格落在该块内部（与 `splitProjectedBlock` 的边沿判定同一口径）。
  *
  * 用途是**约束磁吸**：切分点允许吸附，但磁吸结果一旦离开目标块就作废 ——

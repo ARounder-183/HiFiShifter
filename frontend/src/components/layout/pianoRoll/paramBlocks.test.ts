@@ -6,6 +6,7 @@ import {
     blocksFromViewForPanel,
     isStrictlyInsideParamBlock,
     resolveParamBlockSplitTarget,
+    resolveSplittableParamBlockAt,
     splitParamBlock,
     type ParamBlock,
 } from "./paramBlocks";
@@ -122,6 +123,62 @@ describe("resolveParamBlockSplitTarget", () => {
         expect(resolveParamBlockSplitTarget(blocks, 0.7, FRAME_MS)?.id).toBe(runs[1]?.id);
         // 两个 run 之间是空的。
         expect(resolveParamBlockSplitTarget(blocks, 0.4, FRAME_MS)).toBeNull();
+    });
+});
+
+describe("resolveSplittableParamBlockAt", () => {
+    /*
+     * 菜单禁用态与快捷键动作共用这一份判据：编组块的几何是若干源域区间的联合，
+     * 切开没有唯一解，所以它既不能出现在"可切"里，也不能让快捷键切一半。
+     */
+    it("编组块不可切", () => {
+        const edits: ParamBlockEditSet = {
+            schemaVersion: 1,
+            revision: 1,
+            blocks: [
+                {
+                    id: "grouped",
+                    geometry: {
+                        kind: "take",
+                        members: [
+                            {
+                                clipId: "clip",
+                                takeId: "clip_take_1",
+                                cycle: 0,
+                                sourceStartSec: 0,
+                                sourceEndSec: 0.5,
+                                label: "syllable",
+                            },
+                            {
+                                clipId: "clip",
+                                takeId: "clip_take_1",
+                                cycle: 0,
+                                sourceStartSec: 0.5,
+                                sourceEndSec: 1,
+                                label: "syllable",
+                            },
+                        ],
+                    },
+                    deleted: false,
+                    manual: false,
+                    value: null,
+                    createdSeq: 1,
+                    groupedFrom: [],
+                },
+            ],
+        };
+        const blocks = panelBlocks([clip()], edits);
+        expect(blocks).toHaveLength(1);
+        expect(blocks[0]?.kind).toBe("grouped");
+        // 位置解析本身仍然返回它 —— "播放头处的块"与"能不能切"是两件事。
+        expect(resolveParamBlockSplitTarget(blocks, 0.5, FRAME_MS)?.kind).toBe("grouped");
+        expect(resolveSplittableParamBlockAt(blocks, 0.5, FRAME_MS)).toBeNull();
+    });
+
+    it("普通块照常返回，空隙返回 null", () => {
+        const blocks = panelBlocks([clip()]);
+        expect(resolveSplittableParamBlockAt(blocks, 0.25, FRAME_MS)?.kind).toBe("auto");
+        expect(resolveSplittableParamBlockAt(blocks, 5, FRAME_MS)).toBeNull();
     });
 });
 
