@@ -10,6 +10,32 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
+thread_local! {
+    static NONBLOCKING_HOST_QUERY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Timer-driven readback may skip a busy frame; explicit synchronous commands
+/// retain their existing transaction semantics outside this scope.
+pub(crate) struct HostQueryScope {
+    previous: bool,
+    _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl HostQueryScope {
+    pub(crate) fn nonblocking() -> Self {
+        Self {
+            previous: NONBLOCKING_HOST_QUERY.with(|flag| flag.replace(true)),
+            _thread: std::marker::PhantomData,
+        }
+    }
+}
+
+impl Drop for HostQueryScope {
+    fn drop(&mut self) {
+        NONBLOCKING_HOST_QUERY.with(|flag| flag.set(self.previous));
+    }
+}
+
 struct RendererLease {
     lease: ExtensionControllerLease,
     _companion: Option<CompanionControllerBinding<'static>>,
@@ -1374,6 +1400,89 @@ pub(crate) struct RenderTicket {
 }
 
 impl DocumentSession {
+    /// Periodic host/UI queries must defer while a background transaction owns
+    /// the document; waiting here can prevent the host from pumping that work.
+    pub(crate) fn try_transaction(&self) -> Option<std::sync::MutexGuard<'_, ()>> {
+        match self.transaction.try_lock() {
+            Ok(guard) => Some(guard),
+            Err(std::sync::TryLockError::Poisoned(error)) => Some(error.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+        }
+    }
+
+    pub(crate) fn host_query_transaction(&self) -> Option<std::sync::MutexGuard<'_, ()>> {
+        if NONBLOCKING_HOST_QUERY.with(std::cell::Cell::get) {
+            self.try_transaction()
+        } else {
+            Some(self.transaction.lock_or_recover())
+        }
+    }
+
+    pub(crate) fn publish_source_read_result(
+        &self,
+        id: String,
+        result: Result<super::source::SourcePcm, String>,
+        cancelled: &AtomicBool,
+    ) {
+        {
+            let _transaction = self.transaction.lock_or_recover();
+            if !self.is_alive() || cancelled.load(Ordering::Acquire) {
+                return;
+            }
+            match result {
+                Ok(pcm) => {
+                    let pcm = Arc::new(pcm);
+                    self.edit_sources
+                        .lock_or_recover()
+                        .insert(id.clone(), pcm.clone());
+                    self.sources.lock_or_recover().insert(id.clone(), pcm);
+                    self.source_states
+                        .lock_or_recover()
+                        .insert(id.clone(), SourceState::Published);
+                    self.source_failures.lock_or_recover().remove(&id);
+                    self.editor_audio_revision.fetch_add(1, Ordering::AcqRel);
+                }
+                Err(error) => {
+                    self.source_states
+                        .lock_or_recover()
+                        .insert(id.clone(), SourceState::Failed);
+                    self.source_failures.lock_or_recover().insert(id, error);
+                }
+            }
+        }
+        if cancelled.load(Ordering::Acquire) || !self.is_alive() {
+            return;
+        }
+        let usable = self.edit_sources.lock_or_recover().len();
+        let (published, failed) = {
+            let states = self.source_states.lock_or_recover();
+            (
+                states
+                    .values()
+                    .filter(|state| **state == SourceState::Published)
+                    .count(),
+                states
+                    .values()
+                    .filter(|state| **state == SourceState::Failed)
+                    .count(),
+            )
+        };
+        if let Some(mut readiness) = self.readiness() {
+            readiness.sources_published = published;
+            readiness.sources_failed = failed;
+            readiness.verdict = InputVerdict::decide(readiness.sources, published, failed, usable);
+            self.note_readiness(readiness);
+        }
+        if let Some(editor) = self.existing_editor_session() {
+            editor.wake_for_source();
+        }
+        if self.ready.load(Ordering::Acquire) {
+            for owner in self.renderer_owners() {
+                owner.prepare();
+            }
+        }
+    }
+
     pub(crate) fn publish_source_pcm(&self, id: String, pcm: Arc<super::source::SourcePcm>) {
         let _transaction = self.transaction.lock_or_recover();
         self.edit_sources
@@ -1792,16 +1901,15 @@ impl DocumentSession {
     pub(crate) fn editor_session(
         self: &Arc<Self>,
     ) -> Result<Arc<crate::editor::session::EditorSession>, String> {
-        // 【为什么先释放事务再建会话】`EditorSession::new` 会加载模型、创建 actor、
-        // 扫临时目录；这些都不是"读文档状态"，却会把 `transaction` 按住数秒。
-        // ARA 模型线程（`remap_and_log` / `prepare_renderers`）等同一把锁，宿主于是
-        // 表现为未响应；UI 线程上的 `get_runtime_info` 也会排在这段时间后面。
-        // 事务只用来回答"文档此刻还活着吗"这一个原子问题。
-        {
-            let _transaction = self.transaction.lock_or_recover();
-            if !self.is_alive() {
-                return Err(crate::editor::errors::DOCUMENT_CLOSED.error());
-            }
+        // UI command routing must not acquire the PCM/geometry transaction.
+        // Session construction stores a Weak document and handles a concurrent
+        // document close independently; the atomic liveness check is sufficient.
+        // Liveness is atomic. Taking the PCM/geometry transaction here makes
+        // every UI command wait behind a large document snapshot or analysis.
+        // This lock never protected construction: it was released before
+        // get_or_init, and the session already handles a concurrent close.
+        if !self.is_alive() {
+            return Err(crate::editor::errors::DOCUMENT_CLOSED.error());
         }
         // 初始化期间文档可能被关闭：会话只弱引用文档，后续命令会自然返回
         // `DOCUMENT_CLOSED`，不需要在这里把构造失败当成终态。
@@ -1891,11 +1999,25 @@ impl DocumentSession {
         // 【为什么可以整体哈希】音阶点的 id 是确定性的（见
         // `plugin_musical_projection`），宿主读数带 1e-6 阈值，所以"内容没变 ⇒
         // 指纹相同"成立，不会造成每轮重载。
+        let mut audio_params = timeline.params_by_root_track;
+        for params in audio_params.values_mut() {
+            params.param_line_blocks = None;
+            params.param_block_merges.clear();
+            params.param_block_interval_edits.clear();
+        }
+        audio_params.retain(|_, params| {
+            !params.is_empty_project_data()
+                || !params.pitch_orig.is_empty()
+                || !params.dyn_orig.is_empty()
+                || !params.tension_orig.is_empty()
+        });
         let bytes = serde_json::to_vec(&(
-            timeline.params_by_root_track,
+            audio_params,
             timeline.tracks,
             &edits.fades,
             &edits.groups,
+            // Syllable boundaries have a separate metadata event. They must
+            // not invalidate audio projections or in-flight curve baselines.
             &timeline.project_scale_notes,
             &timeline.tempo_map,
             // 【为什么渲染事实也进指纹】`ensure_loaded` 靠"版本没变 + 本指纹相同"早退。
@@ -2237,6 +2359,7 @@ impl DocumentSession {
     pub(crate) fn workspace_snapshot(
         &self,
     ) -> Result<(WorkspaceSnapshot, u64, Arc<WorkspaceView>), String> {
+        let _startup_span = crate::startup::Span::new("document.snapshot", self.id, 0);
         let _transaction = self.transaction.lock_or_recover();
         // 【T-D7：恢复失败不能连坐显示】这里以前用 `?` 把恢复的**致命**错误传播出去，
         // 于是一份坏存档会让整份工作区快照失败 ⇒ 界面停在空时间线（用户看到的不是
@@ -2805,22 +2928,49 @@ impl DocumentSession {
     }
 
     /// 用历史快照整体替换权威，然后失效派生视图。
-    pub(crate) fn replace_authority(
+    pub(crate) fn replace_authority_with_blocks(
         &self,
-        authority: hifishifter_kernel::editor::param_authority::ParamAuthority,
-    ) -> Result<(), String> {
+        mut authority: hifishifter_kernel::editor::param_authority::ParamAuthority,
+        blocks: Option<
+            std::collections::BTreeMap<
+                String,
+                hifishifter_kernel::param_line_blocks::ParamLineBlockSet,
+            >,
+        >,
+    ) -> Result<bool, String> {
         let _transaction = self.transaction.lock_or_recover();
-        let mut edits = self.edits.lock_or_recover();
-        let mut authority = authority;
-        authority.sanitize();
-        edits.authority = authority;
-        edits.revision = edits.revision.saturating_add(1);
-        self.render_epoch.fetch_add(1, Ordering::AcqRel);
         let mut host = self.workspace_timeline_locked()?;
+        let mut edits = self.edits.lock_or_recover();
+        authority.sanitize();
+        let changed = authority.content_hash() != edits.authority.content_hash();
+        if changed {
+            authority.revision = edits.authority.revision.saturating_add(1);
+            edits.authority = authority;
+            edits.revision = edits.revision.saturating_add(1);
+            self.render_epoch.fetch_add(1, Ordering::AcqRel);
+        }
+        if let Some(mut blocks) = blocks {
+            for (root, current) in &edits.param_line_blocks {
+                let target = blocks.entry(root.clone()).or_insert_with(|| {
+                    hifishifter_kernel::param_line_blocks::ParamLineBlockSet {
+                        frame_period_ms: current.frame_period_ms,
+                        ..Default::default()
+                    }
+                });
+                target.revision = current.revision.saturating_add(1);
+            }
+            for layout in blocks.values() {
+                layout.validate()?;
+            }
+            edits.param_line_blocks = blocks;
+        }
         self.materialize_views_locked(&mut edits, &mut host);
         drop(edits);
-        self.notify_parameters_changed();
-        Ok(())
+        self.archive_cache.lock_or_recover().take();
+        if changed {
+            self.notify_parameters_changed();
+        }
+        Ok(changed)
     }
 
     /// 渲染守卫票据（调用方必须已持 `transaction`）。
@@ -2930,12 +3080,14 @@ impl DocumentSession {
         if !baseline.tension_orig.is_empty() && baseline.tension_orig.len() < needed {
             baseline.tension_orig.resize(needed, 0.0);
         }
-        hifishifter_kernel::editor::param_authority::compose_root_view(
+        let mut view = hifishifter_kernel::editor::param_authority::compose_root_view(
             root,
             &edits.authority,
             &baseline,
             self.ui_geometry_revision.load(Ordering::Acquire),
-        )
+        );
+        view.params.param_line_blocks = edits.param_line_blocks.get(root).cloned();
+        view
     }
 
     /// 唯一把 `authority + baseline` 写成显示数组的地方。只写派生缓存。
@@ -3130,6 +3282,9 @@ impl DocumentSession {
             authority_revision: view.authority_revision,
             baseline_revision: view.baseline_revision,
             geometry_revision: view.geometry_revision,
+            geometry_signature: Some(
+                hifishifter_kernel::pitch_analysis::build_root_pitch_layout_key(&host, &root),
+            ),
             binary: None,
             reference_kind: if matches!(param, "pitch" | "dyn") {
                 hifishifter_kernel::models::ParamReferenceKind::SourceCurve
@@ -3216,6 +3371,96 @@ impl DocumentSession {
     }
 
     /// 权威写：区间替换 + 显式 present 位图。绝不读取/写回整条显示数组。
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn commit_param_line_edit(
+        &self,
+        root: &str,
+        expected: u64,
+        layout: hifishifter_kernel::param_line_blocks::ParamLineBlockSet,
+        patches: &[hifishifter_kernel::param_line_blocks::ParamLineCurvePatch],
+        expected_curve: Option<u64>,
+        expected_geometry: Option<u64>,
+        expected_signature: Option<&str>,
+        before_commit: impl FnOnce(),
+    ) -> Result<u64, String> {
+        hifishifter_kernel::param_line_blocks::validate_curve_patches(patches)?;
+        layout.validate()?;
+        let _transaction = self.transaction.lock_or_recover();
+        let host = self.workspace_timeline_locked()?;
+        if !host.tracks.iter().any(|track| track.id == root) {
+            return Err("unknown root parameter line".into());
+        }
+        let edits = self.edits.lock_or_recover();
+        if edits
+            .param_line_blocks
+            .get(root)
+            .map_or(0, |layout| layout.revision)
+            != expected
+        {
+            return Err("Conflict: parameter blocks changed".into());
+        }
+        if !patches.is_empty() && expected_curve != Some(edits.authority.revision) {
+            return Err("Conflict: parameter curve changed".into());
+        }
+        if !patches.is_empty()
+            && expected_signature.is_some_and(|signature| {
+                signature
+                    != hifishifter_kernel::pitch_analysis::build_root_pitch_layout_key(&host, root)
+            })
+        {
+            return Err("Conflict: parameter geometry changed".into());
+        }
+        if !patches.is_empty()
+            && expected_signature.is_none()
+            && expected_geometry.is_some_and(|revision| {
+                revision != self.ui_geometry_revision.load(Ordering::Acquire)
+            })
+        {
+            return Err("Conflict: parameter geometry changed".into());
+        }
+        let mut next = edits.clone();
+        let children = self.private_group_descendants(&next, root);
+        for patch in patches {
+            for target in std::iter::once(root).chain(children.iter().map(String::as_str)) {
+                let default = Self::authority_param_default(&host, target, &patch.param);
+                let values = patch
+                    .values
+                    .iter()
+                    .map(|value| Self::normalize_authority_value(&patch.param, *value, default))
+                    .collect::<Vec<_>>();
+                next.authority.write_range(
+                    target,
+                    &patch.param,
+                    patch.start_frame as usize,
+                    &values,
+                    &vec![true; values.len()],
+                    default,
+                )?;
+            }
+        }
+        let changed = next.authority.revision != edits.authority.revision;
+        next.param_line_blocks.insert(root.to_owned(), layout);
+        if changed {
+            next.revision = next.revision.saturating_add(1);
+            if next.tracks.is_empty() {
+                next.tracks = host.tracks.clone();
+            }
+            for target in std::iter::once(root).chain(children.iter().map(String::as_str)) {
+                let view = self.compose_param_view_with(&host, &next, target);
+                next.params.insert(target.to_owned(), view.params);
+            }
+        }
+        let revision = next.authority.revision;
+        drop(edits);
+        before_commit();
+        *self.edits.lock_or_recover() = next;
+        self.archive_cache.lock_or_recover().take();
+        if changed {
+            self.notify_parameters_changed();
+        }
+        Ok(revision)
+    }
+
     pub(crate) fn write_authority_range(
         &self,
         track_id: &str,
@@ -3513,6 +3758,14 @@ impl DocumentSession {
             journal.observe_only(frame);
             return Ok(Default::default());
         }
+        let crops =
+            hifishifter_kernel::param_line_blocks::geometry::crop_windows(journal.entries(), frame);
+        let mut layouts = edits.param_line_blocks.clone();
+        let blocks_changed = hifishifter_kernel::param_line_blocks::geometry::apply_geometry(
+            &mut layouts,
+            &deltas,
+            &crops,
+        )?;
         let report = match apply_geometry_transaction(&mut edits.authority, &deltas) {
             Ok(report) => report,
             Err(error) => {
@@ -3524,7 +3777,8 @@ impl DocumentSession {
                 return Err(error);
             }
         };
-        if report.affected_runs > 0 {
+        edits.param_line_blocks = layouts;
+        if report.affected_runs > 0 || blocks_changed {
             // 只推进编辑代次。派生显示由调用方在自己的时间线上重新合成
             // （`materialize_views_locked` 会整份替换 `edits.params`，而这里拿到的
             // `timeline` 可能是另一份宿主视图 —— 用它覆盖会把在线权威的根 id
@@ -3613,9 +3867,13 @@ impl DocumentSession {
             .map(|(root, _)| root.clone())
             .collect::<std::collections::BTreeSet<_>>();
         partial.authority.retain_roots(&keep);
+        partial
+            .param_line_blocks
+            .retain(|root, _| keep.contains(root));
         if !document_data {
             // 文档级状态没被选中 ⇒ 载荷里不带它，恢复端因此不会覆盖它。
             partial.params.clear();
+            partial.param_line_blocks.clear();
             partial.tracks.clear();
             partial.bindings.clear();
             partial.fades.clear();
@@ -3982,6 +4240,7 @@ impl DocumentSession {
 
     /// 模型线程刷新所有仍存活 renderer，任何 source/geometry/访问变化都触发重新准备。
     pub fn prepare_renderers(&self) {
+        let _startup_span = crate::startup::Span::new("ara.prepare_renderers", self.id, 0);
         let _transaction = self.transaction.lock_or_recover();
         // 【T2：`ready` 的语义收窄为"模型已收口"，不再假装"输入可用"】
         //
@@ -4183,6 +4442,26 @@ impl DocumentSession {
                 merged.authority.roots.insert(root, authority);
             } else {
                 kept_live_roots += 1;
+            }
+        }
+        // 音节缓存不是编辑权威，而是一份**可重建的派生缓存**：冷恢复/undo 才整份
+        // 继承；普通旧载荷只补在线缺失的 Clip/Take，绝不抹掉刚算出的结果。
+        if authoritative {
+            merged.take_syllables = restored.take_syllables.clone();
+        } else {
+            for (key, analysis) in &restored.take_syllables {
+                merged
+                    .take_syllables
+                    .entry(key.clone())
+                    .or_insert_with(|| analysis.clone());
+            }
+        }
+        merged.validate_take_syllables()?;
+        for (root, blocks) in &restored.param_line_blocks {
+            if authoritative || !merged.param_line_blocks.contains_key(root) {
+                merged
+                    .param_line_blocks
+                    .insert(root.clone(), blocks.clone());
             }
         }
         if kept_live_roots > 0 {

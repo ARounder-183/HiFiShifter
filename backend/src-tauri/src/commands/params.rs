@@ -11,7 +11,13 @@ impl ParamHost for AppState {
         AppState::checkpoint_timeline(self, timeline, operation);
     }
     fn mark_dirty(&self) {
+        self.param_curve_revision
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         self.mark_project_dirty_and_retitle();
+    }
+    fn authority_revision(&self) -> u64 {
+        self.param_curve_revision
+            .load(std::sync::atomic::Ordering::Acquire)
     }
     fn publish_timeline(&self, timeline: TimelineState) {
         self.audio_engine.update_timeline(timeline);

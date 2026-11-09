@@ -39,6 +39,7 @@ static TIMERS: std::sync::Mutex<TimerState> = std::sync::Mutex::new(TimerState {
 /// `marshal::Ticket::run` 里被拦成一次"任务失败"，这里再兜一层是为了**泵本身**。
 extern "C" fn host_timer_tick() {
     let _ = std::panic::catch_unwind(|| {
+        let started = std::time::Instant::now();
         // 【为什么不再逐拍打点】曾经在这里按第 1/200 拍各记一行，用来证明
         // "注册成功"之外节拍真的在跑。它只在排查期间有用；稳态下每次会话多两行、
         // 却回答不了任何新问题。"挂上/摘掉"各一行已经足够定位。
@@ -46,6 +47,17 @@ extern "C" fn host_timer_tick() {
         // setDirty 冲刷）。它与情形 A 的 GTK 定时器、CLAP 的 `clap.timer-support`
         // **共用同一份**，于是"内嵌同线程"、"独立进程"与"另一种格式"的行为逐字相同。
         crate::editor::host_main_thread_tick();
+        if started.elapsed() >= std::time::Duration::from_millis(16) {
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "host.timer.slow",
+                format_args!(
+                    "[host] timer callback took {}ms (pid={})",
+                    started.elapsed().as_millis(),
+                    std::process::id()
+                ),
+            );
+        }
     });
 }
 

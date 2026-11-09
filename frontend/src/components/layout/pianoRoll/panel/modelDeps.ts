@@ -42,7 +42,10 @@ import type { Store } from "redux";
 export type ModelDeps = {
     activeVibratoPresetId: string;
     axisCanvasRef: RefObject<HTMLCanvasElement | null>;
-    buildCurveLayers: (axis: TimelineAxis) => PianoRollCurveLayer[];
+    buildCurveLayers: (
+        axis: TimelineAxis,
+        frameView?: ParamViewSegment | null,
+    ) => PianoRollCurveLayer[];
     buildSelectionBandSpec: (selection: ParamSelection | null) => PianoRollSelectionBandSpec | null;
     bumpRefreshToken: () => void;
     canvasRef: RefObject<HTMLCanvasElement | null>;

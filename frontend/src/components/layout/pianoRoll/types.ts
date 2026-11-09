@@ -20,6 +20,19 @@ export type WavePeaksSegment = {
 };
 
 export type ParamViewSegment = {
+    preview?: {
+        base: Readonly<{
+            key: string;
+            startFrame: number;
+            stride: number;
+            framePeriodMs: number;
+            edit: readonly number[];
+            orig?: readonly number[];
+        }>;
+        affectedRanges: readonly { startFrame: number; frameCount: number }[];
+        patches?: readonly { startFrame: number; values: readonly number[] }[];
+        blockValues: ReadonlyMap<string, { startSec: number; endSec: number; value: number }>;
+    };
     key: string;
     framePeriodMs: number;
     startFrame: number;
@@ -39,6 +52,13 @@ export type ParamViewSegment = {
      * `paramRanges.restoreDynSentinels`）。非 dyn 参数恒 undefined。
      */
     editSentinel?: boolean[];
+};
+
+/** 参数块（音节块）的会话级状态；第一版不写入工程文件。 */
+export type ParamBlockToolState = {
+    readonly active: boolean;
+    readonly overlayVisible: boolean;
+    readonly selectedBlockIds: readonly string[];
 };
 
 export type ParamMorphPointKind = "left" | "mid1" | "mid2" | "right";

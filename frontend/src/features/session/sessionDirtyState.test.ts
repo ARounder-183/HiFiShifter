@@ -28,6 +28,7 @@ import sessionReducer, {
     setMetronomeConfig,
     setTempoMapVisible,
     setTrackVolume,
+    markProjectEdited,
 } from "./sessionSlice";
 import { setTempoMapRemote } from "./thunks/tempoMapThunks";
 import { addTrackRemote } from "./thunks/timelineThunks";
@@ -47,6 +48,12 @@ test("markProjectDirty 只做一件事：把标记置为 true", () => {
 });
 
 describe("工程级编辑必须标脏", () => {
+    test("块提交标脏时不触发参数窗口重取或改变撤销深度", () => {
+        const next = run(initial, markProjectEdited());
+        expect(next.project.dirty).toBe(true);
+        expect(next.paramsEpoch).toBe(initial.paramsEpoch);
+        expect(next.historyUndoDepth).toBe(initial.historyUndoDepth);
+    });
     test("轨道改名与变更轨道音量会标脏", () => {
         expect(run(initial, setTrackName({ trackId, name: "Vocals" })).project.dirty).toBe(true);
         expect(run(initial, setTrackVolume({ trackId, volume: 0.5 })).project.dirty).toBe(true);

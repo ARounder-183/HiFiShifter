@@ -80,12 +80,20 @@ point there name the exact file.
    Notice: licenses/NSF-HiGAN-vocoder-NOTICE.txt
    https://openvpi.github.io/vocoders/
 
-9. rusty_mp3 - Pure-Rust MP3 (MPEG-1/2/2.5 Layer III) decoder + encoder
+9. GAME - Generative Adaptive MIDI Extractor (bundled ONNX models under models/GAME/)
+   Model architecture/training code: MIT License
+   https://github.com/openvpi/GAME
+   Model weights: CC BY-NC-SA 4.0 (Attribution-NonCommercial-ShareAlike 4.0
+   International). The model files are NOT covered by this project's MIT
+   license and may not be used for commercial purposes.
+   Notice: licenses/GAME-NOTICE.txt
+
+10. rusty_mp3 - Pure-Rust MP3 (MPEG-1/2/2.5 Layer III) decoder + encoder
    Copyright (c) Remade-With-Rust contributors
    License: Apache License 2.0
    https://github.com/Remade-With-Rust/remade_ffmpeg_rs
 
-10. rusty_flac - Pure-Rust FLAC encoder + decoder
+11. rusty_flac - Pure-Rust FLAC encoder + decoder
    Copyright (c) Remade-With-Rust contributors
    License: Apache License 2.0
    https://github.com/Remade-With-Rust/rusty_flac
@@ -118,6 +126,9 @@ point there name the exact file.
    Copyright (c) Microsoft Corporation
    License: MIT
    https://github.com/microsoft/DirectML
+
+* Subsequent component numbers in this list are historical and may not be
+  contiguous after model additions; names and upstream links are authoritative.
 
 16. CLAP (CLever Audio Plugin) headers
    Copyright (c) 2021-2025 Timo Kaluza and the CLAP contributors

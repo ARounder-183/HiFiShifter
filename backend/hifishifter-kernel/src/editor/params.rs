@@ -197,9 +197,10 @@ pub fn get_param_frames(
                 orig: Vec::new(),
                 edit: Vec::new(),
                 edited: Vec::new(),
-                authority_revision: 0,
+                authority_revision: state.authority_revision(),
                 baseline_revision: 0,
                 geometry_revision: 0,
+                geometry_signature: None,
                 binary: None,
                 reference_kind: resolve_param_reference_kind(&param),
                 analysis_pending: None,
@@ -228,6 +229,8 @@ pub fn get_param_frames(
         param_reference_value,
         param_kind,
         param_frame_target,
+        authority_revision,
+        geometry_signature,
     ) = {
         let mut tl = state.timeline().lock().unwrap_or_else(|e| e.into_inner());
 
@@ -243,9 +246,10 @@ pub fn get_param_frames(
                     orig: vec![],
                     edit: vec![],
                     edited: vec![],
-                    authority_revision: 0,
+                    authority_revision: state.authority_revision(),
                     baseline_revision: 0,
                     geometry_revision: 0,
+                    geometry_signature: None,
                     binary: None,
                     reference_kind: resolve_param_reference_kind("pitch"),
                     analysis_pending: None,
@@ -278,6 +282,8 @@ pub fn get_param_frames(
 
         let param_reference_value = resolve_param_reference_value_with_timeline(&tl, kind, &param);
 
+        let authority_revision = state.authority_revision();
+        let geometry_signature = crate::pitch_analysis::build_root_pitch_layout_key(&tl, &root);
         (
             root,
             fp,
@@ -287,6 +293,8 @@ pub fn get_param_frames(
             param_reference_value,
             kind,
             param_frame_target,
+            authority_revision,
+            geometry_signature,
         )
     };
 
@@ -320,9 +328,10 @@ pub fn get_param_frames(
             orig: vec![],
             edit: vec![],
             edited: vec![],
-            authority_revision: 0,
+            authority_revision: state.authority_revision(),
             baseline_revision: 0,
             geometry_revision: 0,
+            geometry_signature: None,
             binary: None,
             reference_kind: resolve_param_reference_kind("pitch"),
             analysis_pending: None,
@@ -505,7 +514,7 @@ pub fn get_param_frames(
 
     crate::models::ParamFramesPayload {
         ok: true,
-        root_track_id: root,
+        root_track_id: root.clone(),
         param: param.clone(),
         frame_period_ms: fp,
         start_frame,
@@ -513,9 +522,10 @@ pub fn get_param_frames(
         orig: if binary { Vec::new() } else { orig.clone() },
         edit: if binary { Vec::new() } else { edit.clone() },
         edited: if binary { Vec::new() } else { edited },
-        authority_revision: 0,
+        authority_revision,
         baseline_revision: 0,
         geometry_revision: 0,
+        geometry_signature: Some(geometry_signature),
         reference_kind: resolve_param_reference_kind(&param),
         analysis_pending,
         analysis_progress: None,
@@ -1346,7 +1356,7 @@ pub fn get_static_param(
 
     crate::models::StaticParamValuePayload {
         ok: true,
-        root_track_id: root,
+        root_track_id: root.clone(),
         param,
         value,
     }

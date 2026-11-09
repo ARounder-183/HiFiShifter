@@ -28,6 +28,14 @@ import { SNAP_HIGHLIGHT_GROUP, clearSnapHighlights } from "../../../../utils/sna
 import type { SnapTimelineFn } from "./useTimelineState";
 import type { TimelineViewportAccess } from "./timelineViewportAccess";
 
+/**
+ * 末轨行内「进入新建轨道」的纵向阈值。
+ *
+ * 1.0 = 只有越过末轨底边才进入幽灵行。此前取 0.75 会在末轨下部留出一条
+ * "看起来还在末轨、实际不落到任何轨道"的无效带——用户松手后被新建了空轨。
+ */
+const LAST_ROW_NEW_TRACK_FRACTION = 1;
+
 export interface UseTimelineDragDropArgs {
     dispatch: AppDispatch;
     /**
@@ -46,6 +54,12 @@ export interface UseTimelineDragDropArgs {
     /** 吸附引擎入口（媒体项目对象）。 */
     snapTimeline?: SnapTimelineFn;
     trackIdFromClientY: (clientY: number) => string | null;
+    /** 拖放专用：轨道下方返回 null（新建轨道），不会混同「第一轨」。 */
+    dropTrackIdFromClientY?: (clientY: number) => string | null;
+    /** 拖放专用：轨道下标；`tracks.length` 表示新建轨道哨兵行。 */
+    dropTrackIndexFromClientY?: (clientY: number) => number;
+    /** 拖放专用：目标行内纵向比例（末行下半行判新轨用）。 */
+    dropRowFractionFromClientY?: (clientY: number) => number;
     rowTopForTrackId: (trackId: string | null) => number;
     setDropPreview: React.Dispatch<
         React.SetStateAction<{
@@ -95,6 +109,9 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
         beatFromClientX,
         snapTimeline,
         trackIdFromClientY,
+        dropTrackIdFromClientY,
+        dropTrackIndexFromClientY,
+        dropRowFractionFromClientY,
         rowTopForTrackId,
         setDropPreview,
         ensureDropPreviewDuration,
@@ -109,6 +126,36 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
     const tauriDraggedPathRef = useRef<string | null>(null);
     const tauriLastDropPathRef = useRef<string | null>(null);
     const tauriDropHandledAtRef = useRef<number>(0);
+
+    /*
+     * 原生拖放监听只在挂载时注册一次（它订阅的是异步 IPC 事件源）。
+     *
+     * 【为什么这里必须多一层 ref】`trackIdFromClientY` / `rowTopForTrackId` /
+     * `beatFromClientX` 都是面板在 render 期重建的闭包，捕获了当时的行高与缩放。
+     * 把它们放进 effect 依赖会让监听反复重注册；不放进依赖则监听永远用**首次
+     * 挂载时**的几何——用户调整行高 / 缩放后，拖入预览停在 A 轨，松手却按旧
+     * 行高算到 B 轨（常见表现是"文件跑到最上面那条轨道"）。
+     *
+     * 事件回调只经这组 ref 读最新函数；ref 的写发生在每次 render 期，成本为常数。
+     */
+    const geometryRef = useRef({
+        beatFromClientX,
+        rowHeight,
+        rowTopForTrackId,
+        trackIdFromClientY,
+        dropTrackIdFromClientY,
+        dropTrackIndexFromClientY,
+        dropRowFractionFromClientY,
+    });
+    geometryRef.current = {
+        beatFromClientX,
+        rowHeight,
+        rowTopForTrackId,
+        trackIdFromClientY,
+        dropTrackIdFromClientY,
+        dropTrackIndexFromClientY,
+        dropRowFractionFromClientY,
+    };
 
     // ── Tauri 原生拖放 ───────────────────────────────────────
     useEffect(() => {
@@ -141,6 +188,14 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
 
                 unlisten = await win.onDragDropEvent(async (event: TauriDragDropEvent) => {
                     if (disposed) return;
+                    const {
+                        beatFromClientX: beatAt,
+                        dropTrackIdFromClientY: dropTrackAt,
+                        dropTrackIndexFromClientY: dropTrackIndex,
+                        dropRowFractionFromClientY: dropRowFraction,
+                        rowTopForTrackId: rowTopFor,
+                        trackIdFromClientY: trackAt,
+                    } = geometryRef.current;
                     const payload = ("payload" in event ? event.payload : event) as
                         TauriDragDropPayload | undefined;
                     const type = String(payload?.type ?? payload?.event ?? "");
@@ -163,11 +218,31 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                     const clientX = typeof pos?.x === "number" ? pos.x / dpr : undefined;
                     const clientY = typeof pos?.y === "number" ? pos.y / dpr : undefined;
                     const fallbackBeat = sessionRef.current.playheadSec ?? 0;
-                    const trackId = clientY !== undefined ? trackIdFromClientY(clientY) : null;
                     const rawBeat =
                         clientX !== undefined && bounds
-                            ? beatFromClientX(clientX, bounds, viewport.getScrollLeft())
+                            ? beatAt(clientX, bounds, viewport.getScrollLeft())
                             : fallbackBeat;
+                    const rawDropTrackId =
+                        clientY !== undefined ? (dropTrackAt ?? trackAt)(clientY) : null;
+                    /*
+                     * 拖放落点与「普通左键命中的轨道」用的是两套越界语义：
+                     * 后者对轨道下方返回 null，前者需要 `tracks.length` 才能把
+                     * 预览画在幽灵行、并让导入落到新轨。这里取不到专用解析器时
+                     * （旧测试 / 旧调用方）才退回原函数。
+                     */
+                    const dropTrackIndexValue =
+                        clientY !== undefined && dropTrackIndex !== undefined
+                            ? dropTrackIndex(clientY)
+                            : null;
+                    const dropTrackId =
+                        dropTrackIndexValue !== null &&
+                        (dropTrackIndexValue > sessionRef.current.tracks.length ||
+                            (dropTrackIndexValue === sessionRef.current.tracks.length &&
+                                (dropRowFraction?.(clientY ?? 0) ?? 0) >=
+                                    LAST_ROW_NEW_TRACK_FRACTION))
+                            ? null
+                            : rawDropTrackId;
+                    const trackId = dropTrackId;
                     const beat =
                         snapTimeline && sessionRef.current.timelineSnap.enabled
                             ? snapTimeline(rawBeat, "clip", {
@@ -209,7 +284,7 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
 
                             if (prev && dropPreviewRef.current) {
                                 dropPreviewRef.current.style.left = `${Math.max(0, beat * pxPerSecRef.current)}px`;
-                                dropPreviewRef.current.style.top = `${rowTopForTrackId(trackId) + 8}px`;
+                                dropPreviewRef.current.style.top = `${rowTopFor(trackId) + 8}px`;
                                 dropPreviewRef.current.style.width = `${getDropPreviewWidthPx(prev.durationSec)}px`;
                             }
 
@@ -441,7 +516,29 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
             };
             if (!detail) return;
 
+            const {
+                beatFromClientX: beatAt,
+                dropRowFractionFromClientY: dropRowFraction,
+                dropTrackIdFromClientY: dropTrackAt,
+                dropTrackIndexFromClientY: dropTrackIndex,
+                rowTopForTrackId: rowTopFor,
+                trackIdFromClientY: trackAt,
+            } = geometryRef.current;
             const bounds = viewport.getRect();
+
+            const resolveDropTrack = (clientY: number): string | null => {
+                if (dropTrackAt === undefined || dropTrackIndex === undefined) {
+                    return trackAt(clientY);
+                }
+                const index = dropTrackIndex(clientY);
+                const inLastRowBelowNewTrackThreshold =
+                    index === sessionRef.current.tracks.length &&
+                    (dropRowFraction?.(clientY) ?? 0) < LAST_ROW_NEW_TRACK_FRACTION;
+                if (index >= sessionRef.current.tracks.length && !inLastRowBelowNewTrackThreshold) {
+                    return null;
+                }
+                return dropTrackAt(clientY);
+            };
 
             const isOverTimeline =
                 bounds !== null &&
@@ -471,12 +568,8 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
             // 移动时的 DOM 直通与重绘拦截
             if (detail.type === "move" || detail.type === "start") {
                 if (isOverTimeline) {
-                    const rawBeat = beatFromClientX(
-                        detail.clientX,
-                        bounds!,
-                        viewport.getScrollLeft(),
-                    );
-                    const trackId = trackIdFromClientY(detail.clientY);
+                    const rawBeat = beatAt(detail.clientX, bounds!, viewport.getScrollLeft());
+                    const trackId = resolveDropTrack(detail.clientY);
                     const beat = snapDropBeat(rawBeat, trackId);
                     const path = detail.filePath;
                     const fileName = detail.fileName;
@@ -493,7 +586,7 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                     setDropPreview((prev) => {
                         if (prev && dropPreviewRef.current) {
                             dropPreviewRef.current.style.left = `${Math.max(0, beat * pxPerSecRef.current)}px`;
-                            dropPreviewRef.current.style.top = `${rowTopForTrackId(trackId) + 8}px`;
+                            dropPreviewRef.current.style.top = `${rowTopFor(trackId) + 8}px`;
                             dropPreviewRef.current.style.width = `${getDropPreviewWidthPx(prev.durationSec)}px`;
                         }
                         if (!prev || prev.trackId !== trackId || prev.path !== path) {
@@ -527,12 +620,8 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
             if (detail.type === "drop") {
                 setDropPreview(null);
                 if (isOverTimeline) {
-                    const rawBeat = beatFromClientX(
-                        detail.clientX,
-                        bounds!,
-                        viewport.getScrollLeft(),
-                    );
-                    const trackId = trackIdFromClientY(detail.clientY);
+                    const rawBeat = beatAt(detail.clientX, bounds!, viewport.getScrollLeft());
+                    const trackId = resolveDropTrack(detail.clientY);
                     const beat = snapDropBeat(rawBeat, trackId);
                     const filePaths: string[] = detail.filePaths;
                     const isMulti = Array.isArray(filePaths) && filePaths.length > 1;

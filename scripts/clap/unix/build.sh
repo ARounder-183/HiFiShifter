@@ -132,6 +132,12 @@ stage_frontend() {
     log "前端产物就绪：$FRONTEND_DIST"
 }
 
+stage_models_fetch() {
+    step "模型权重"
+    python3 "$REPO_ROOT/scripts/setup/fetch-models.py" || die "模型权重获取失败"
+    python3 "$REPO_ROOT/scripts/setup/fetch-models.py" --fetch-game || die "GAME 模型获取失败"
+}
+
 # ── 阶段 3：组装 ─────────────────────────────────────────────────────────────
 #
 # 【为什么必须带运行时依赖】hifishifter-clap/build.rs 声明了 -Wl,-rpath,$ORIGIN
@@ -201,11 +207,11 @@ stage_package() {
 
 case "$STAGE" in
     build)   stage_build ;;
-    bundle)  stage_build; stage_frontend; stage_bundle ;;
+    bundle)  stage_build; stage_frontend; stage_models_fetch; stage_bundle ;;
     verify)  stage_verify ;;
-    package) stage_build; stage_frontend; stage_bundle; stage_verify; stage_package ;;
+    package) stage_build; stage_frontend; stage_models_fetch; stage_bundle; stage_verify; stage_package ;;
     all)
-        stage_build; stage_frontend; stage_bundle
+        stage_build; stage_frontend; stage_models_fetch; stage_bundle
         if [ "$SKIP_VERIFY" = "1" ]; then log "按 --no-verify 跳过自检"; else stage_verify; fi
         stage_package
         ;;

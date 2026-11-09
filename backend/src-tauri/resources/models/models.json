@@ -1,6 +1,36 @@
 {
-    "version": "d342aa989cee",
+    "version": "09f951263527",
     "files": [
+        {
+            "path": "GAME/bd2dur.onnx",
+            "bytes": 4569,
+            "sha256": "6672D56B00F27A20E9BFAA92801C15E394BB520E49031D3ED2515B0A6CF27402"
+        },
+        {
+            "path": "GAME/config.json",
+            "bytes": 198,
+            "sha256": "60DFE7E7B57DB29475604EEEA9B2ABF5F8CD2A49326F1F4BC0E1C14ED151A55E"
+        },
+        {
+            "path": "GAME/dur2bd.onnx",
+            "bytes": 2632,
+            "sha256": "49D10D1EA186E43C51FD2C51CEDB01A3852D363F1C7056AE77DF50F7E8DD0996"
+        },
+        {
+            "path": "GAME/encoder.onnx",
+            "bytes": 10805372,
+            "sha256": "A6868A702D9C88CCC06B19E54F49D88B7F8CBA4A68517F20806BD81EF6F94E06"
+        },
+        {
+            "path": "GAME/estimator.onnx",
+            "bytes": 19335163,
+            "sha256": "A84738B2504472A1F22773CC6B0ECCAD1353A8F36229AD490B8FEA85388BB5E1"
+        },
+        {
+            "path": "GAME/segmenter.onnx",
+            "bytes": 20906659,
+            "sha256": "7724DB4BA59A388FFF5ABA2F08F0AC025D4CA59CAEF80E7F474053A1455C88E5"
+        },
         {
             "path": "fcpe/fcpe.onnx",
             "bytes": 43340548,

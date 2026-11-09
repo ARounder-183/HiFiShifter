@@ -45,6 +45,9 @@ impl ExtensionOwner {
     /// "槽位里躺着一个死队列"这一档，而那正是重绑时最常见的形状。
     pub(super) fn ensure_preparation(&self) {
         let mut slot = self.preparation.lock_or_recover();
+        if self.is_closed() {
+            return;
+        }
         if slot.as_ref().is_some_and(|queue| !queue.is_closed()) {
             return;
         }

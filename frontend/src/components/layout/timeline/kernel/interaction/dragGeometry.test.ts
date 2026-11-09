@@ -4,6 +4,7 @@ import {
     isContentYBelowTracks,
     resolveDragDelta,
     resolveDragDeltaSec,
+    resolveDropGeometry,
     resolveFadeDrag,
     resolveTargetTrackIndex,
     resolveTrimEdge,
@@ -262,5 +263,89 @@ describe("isContentYBelowTracks（拖到轨道下方 = 新建轨道哨兵）", (
     it("行高非法时退化为 1px 行高而不是除零", () => {
         expect(isContentYBelowTracks(100, 0, 3)).toBe(true);
         expect(isContentYBelowTracks(Number.NaN, 0, 3)).toBe(false);
+    });
+});
+
+describe("resolveDropGeometry（素材拖入落点）", () => {
+    /** 时间轴轨道区：容器顶边位于 y=120（上方是标尺 / 工具栏）。 */
+    const base = {
+        clientX: 700,
+        clientY: 300,
+        containerRect: { left: 400, top: 120 },
+        scrollLeft: 0,
+        scrollTop: 0,
+        pxPerSec: 100,
+        rowHeight: 96,
+        trackCount: 4,
+    } as const;
+
+    it("容器顶部偏移必须计入：不能把标尺上方的 y 当成第一轨", () => {
+        // y=300 − 容器顶 120 = 180 → 轨道 1（96..192），不是 3。
+        const out = resolveDropGeometry(base);
+        expect(out.trackIndex).toBe(1);
+        expect(out.contentY).toBe(180);
+        expect(out.sec).toBeCloseTo(3, 6);
+    });
+
+    it("内核横向滚动计入落点：预览与导入同一 time", () => {
+        const out = resolveDropGeometry({ ...base, scrollLeft: 250 });
+        expect(out.contentX).toBe(550);
+        expect(out.sec).toBeCloseTo(5.5, 6);
+    });
+
+    it("内核纵向滚动计入轨道：滚动后同一屏幕位置属于下一条轨", () => {
+        const out = resolveDropGeometry({ ...base, scrollTop: 96 });
+        expect(out.contentY).toBe(276);
+        expect(out.trackIndex).toBe(2);
+    });
+
+    it("行高变大后落下仍按当前行高计算（不能停在上次挂载的行高）", () => {
+        // 同一 y=300：行高 96 → 轨道 1；行高 120 → 轨道 1 的 180 落在 [120,240)
+        // 仍是轨道 1，但 y=320 时两档会分叉，覆盖“闭包旧行高”的回归。
+        const tall = resolveDropGeometry({ ...base, clientY: 320, rowHeight: 120 });
+        expect(tall.contentY).toBe(200);
+        expect(tall.trackIndex).toBe(1);
+        const short = resolveDropGeometry({ ...base, clientY: 320, rowHeight: 96 });
+        expect(short.contentY).toBe(200);
+        expect(short.trackIndex).toBe(2);
+    });
+
+    it("落在全部轨道之下 → 哨兵行，而不是被钳到第一轨", () => {
+        const out = resolveDropGeometry({ ...base, clientY: 120 + 4 * 96 + 20 });
+        expect(out.belowTracks).toBe(true);
+        expect(out.trackIndex).toBe(4);
+        expect(out.rowFractionY).toBeCloseTo(20 / 96, 6);
+    });
+
+    it("末轨最后一像素仍属于末轨；越过底边才算新轨", () => {
+        const lastPixel = resolveDropGeometry({ ...base, clientY: 120 + 4 * 96 - 1 });
+        expect(lastPixel.trackIndex).toBe(3);
+        expect(lastPixel.belowTracks).toBe(false);
+        expect(lastPixel.rowFractionY).toBeGreaterThan(0.98);
+
+        const justBelow = resolveDropGeometry({ ...base, clientY: 120 + 4 * 96 });
+        expect(justBelow.trackIndex).toBe(4);
+        expect(justBelow.belowTracks).toBe(true);
+        expect(justBelow.rowFractionY).toBe(0);
+    });
+
+    it("拖到轨道区上方 → 第一轨，时间钳到 0", () => {
+        const out = resolveDropGeometry({ ...base, clientX: 350, clientY: 80 });
+        expect(out.trackIndex).toBe(0);
+        expect(out.sec).toBe(0);
+        expect(out.contentX).toBe(0);
+    });
+
+    it("横向拖到内容负区 → 时间钳到 0", () => {
+        const out = resolveDropGeometry({ ...base, clientX: 100, scrollLeft: 0 });
+        expect(out.sec).toBe(0);
+        expect(out.contentX).toBe(0);
+    });
+
+    it("缩放非法 / 行高非法不产生 NaN", () => {
+        const out = resolveDropGeometry({ ...base, pxPerSec: 0, rowHeight: 0 });
+        expect(Number.isFinite(out.sec)).toBe(true);
+        expect(Number.isFinite(out.contentY)).toBe(true);
+        expect(Number.isFinite(out.trackIndex)).toBe(true);
     });
 });

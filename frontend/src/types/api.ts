@@ -65,6 +65,8 @@ export interface TimelineClipTake {
         channel?: number;
     }>;
     midi_fill_gaps?: boolean;
+    /** 源域音节区间 [start_sec, end_sec]；缺省表示尚未分析。 */
+    syllable_spans_sec?: Array<[number, number]>;
     /**
      * 宿主的非线性拉伸标记（REAPER stretch markers）。非空表示该 take 的源时间
      * 映射不是一条直线 —— 插件**不**渲染它，只用于把分割/拖边显式置为只读。
@@ -150,6 +152,8 @@ export interface TimelineClip {
         channel?: number;
     }>;
     midi_fill_gaps?: boolean;
+    /** 源域音节区间 [start_sec, end_sec]；缺省表示尚未分析。 */
+    syllable_spans_sec?: Array<[number, number]>;
 }
 
 // ProjectMeta 保留导出：`selectClipRemote`（features/session/thunks）的导出
@@ -539,6 +543,7 @@ export interface ParamFramesPayload {
     /** 与 orig/edit 逐帧对齐的显式编辑位图（PFB2）。 */
     edited?: boolean[];
     authority_revision?: number;
+    geometry_signature?: string;
     baseline_revision?: number;
     geometry_revision?: number;
     /**
@@ -583,6 +588,17 @@ export interface PitchProgressPayload {
     completedClips?: number;
     /** 需要分析的 clip 总数 */
     totalClips?: number;
+}
+
+/** 参数块（音符）分析进度；与音高原线批次分开，便于显示 GAME / VAD 来源。 */
+export interface SyllableAnalysisProgressPayload {
+    active: boolean;
+    clipId: string;
+    clipName: string;
+    progress: number;
+    stage: string;
+    algorithm: string;
+    message?: string | null;
 }
 
 export interface OnnxStatusResult {

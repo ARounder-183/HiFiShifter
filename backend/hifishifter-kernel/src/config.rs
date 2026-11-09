@@ -475,6 +475,9 @@ pub struct UiSettings {
     /// 音阶吸附使用的音阶（默认 C）。与前端 pitchSnapScale 对应。
     #[serde(default = "default_pitch_snap_scale")]
     pub pitch_snap_scale: String,
+    /// 新建参数块时是否同步归一化该段音高（默认关闭）。
+    #[serde(default)]
+    pub param_block_follow_pitch: bool,
     #[serde(default)]
     pub playhead_zoom: bool,
     #[serde(default)]
@@ -1709,6 +1712,7 @@ impl Default for UiSettings {
             pitch_snap_unit: default_pitch_snap_unit(),
             pitch_snap_tolerance_cents: 0,
             pitch_snap_scale: default_pitch_snap_scale(),
+            param_block_follow_pitch: false,
             playhead_zoom: false,
             auto_scroll: false,
             param_editor_seek_playhead: true,

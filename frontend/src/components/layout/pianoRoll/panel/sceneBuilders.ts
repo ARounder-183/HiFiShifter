@@ -40,7 +40,8 @@ import {
     isChildPitchOffsetDegreesParam,
     isChildFormantOffsetCentsParam,
 } from "../childPitchOffsetParams";
-import type { ParamName, ValueViewport } from "../types";
+import type { ParamName, ParamViewSegment, ValueViewport } from "../types";
+import { resolveParamBlockFrameView } from "../paramBlockFrame";
 import { verticalScrollTopFromCenter } from "../verticalScrollMapping";
 import {
     resolveClipboardPreviewColor,
@@ -546,8 +547,13 @@ export function buildCurveLayers(
         | "valueToY"
         | "viewSizeRef"
         | "visibleSecondaryParamIds"
-    >,
+    > & {
+        readonly interactionParamViewRef?: Readonly<{
+            readonly current: ParamViewSegment | null;
+        }>;
+    },
     axis: TimelineAxis,
+    frameViewOverride?: ParamViewSegment | null,
 ): PianoRollCurveLayer[] {
     const {
         clipboardRef,
@@ -565,6 +571,7 @@ export function buildCurveLayers(
         valueToY,
         viewSizeRef,
         visibleSecondaryParamIds,
+        interactionParamViewRef,
     } = deps;
 
     const layers: PianoRollCurveLayer[] = [];
@@ -649,12 +656,17 @@ export function buildCurveLayers(
     }
 
     // ── ④⑤⑥ 主参数曲线（原始 / 编辑 / 选区高亮）─────────────────
-    const pv = pitchEnabled ? paramView : null;
+    const frameView =
+        frameViewOverride === undefined
+            ? resolveParamBlockFrameView({
+                  interaction: interactionParamViewRef?.current ?? null,
+                  live: liveEditOverrideRef.current,
+                  paramView,
+              })
+            : frameViewOverride;
+    const pv = pitchEnabled ? frameView : null;
     if (pv) {
-        const editValues =
-            liveEditOverrideRef.current && liveEditOverrideRef.current.key === pv.key
-                ? liveEditOverrideRef.current.edit
-                : pv.edit;
+        const editValues = pv.edit;
 
         if (pv.orig.length >= 2) {
             layers.push({

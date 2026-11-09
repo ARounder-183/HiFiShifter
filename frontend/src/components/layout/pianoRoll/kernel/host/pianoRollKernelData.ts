@@ -191,6 +191,127 @@ export interface PianoRollSelectionBandSpec {
 }
 
 /**
+ * 参数块场景输入（第一版 mock）。
+ *
+ * 块由面板按当前根轨道组 + 当前参数曲线派生，宿主只负责把时间区间与块高投影成
+ * 矩形。它与选区块分开：选区块是参数编辑操作的作用域；块是音节级的可视化与
+ * 多选对象，两者可以同时存在。
+ */
+export interface PianoRollParamBlockSpec {
+    readonly curveOwned?: boolean;
+    /** 当前参数值域（块的参数绝对均值 → 实时视口 y）。 */
+    readonly valueMin: number;
+    readonly valueMax: number;
+    readonly param: string;
+    /** 值 → 视口 y 的投影（块高随纵向缩放）。 */
+    readonly valueToY?: (value: number, heightPx: number) => number;
+    /**
+     * 当前行高（块高 = 1.2 × 行高）。
+     *
+     * 面板用它冻结手势起点高度；宿主仍优先使用每个块自己的
+     * `displayHeightPx`，避免个别块的高度锁定互相串。
+     */
+    readonly rowHeightPx?: number;
+    readonly blocks: readonly {
+        readonly id: string;
+        readonly startSec: number;
+        readonly endSec: number;
+        /**
+         * 块顶边 / 高度（CSS px，视口坐标）。
+         *
+         * 【兼容字段】块现在由宿主按**本帧实时曲线**重算均值与几何；这两个值只
+         * 作为没有实时样本时的旧路径兜底。面板不应再用 React 快照决定块位置，
+         * 否则绘制中的曲线会让块停在旧高度，甚至被旧的取数窗口整批过滤掉。
+         */
+        readonly topPx?: number;
+        readonly heightPx?: number;
+        /**
+         * 块均值（参数绝对域）。宿主用它 + **本帧实时值域视口** 重算纵向位置，
+         * 这样纵向拖动时块与曲线、键盘窗同帧移动，不会固定在旧 topPx。
+         */
+        readonly averageValue?: number | null;
+        /** Explicit pitch placement in MIDI units; never reused by other parameters. */
+        readonly logicalCenterValue?: number | null;
+        /**
+         * Center supplied by the active block gesture frame.
+         *
+         * This value is updated from the same pointer delta as the interaction
+         * curve and is valid only for that gesture. It prevents the block handle
+         * from waiting for an asynchronous sampled window to be rebuilt.
+         */
+        readonly frameCenterValue?: number | null;
+        /**
+         * 块纵向位置的显式显示值。
+         *
+         * 只用于“块内音高缩放”这类**不改变块中心**的手势：曲线起伏被缩放后，
+         * 主簇中心会轻微移动；若宿主继续按实时样本重算，块会在提交前后来回跳。
+         * 设置后仍由实时值域投影，只跳过代表值重算。
+         */
+        readonly displayCenterValue?: number | null;
+        /**
+         * 块中心是否吸附到半音行心。
+         *
+         * pitch 默认 true；按住取消吸附键纵向拖动时显式 false，让块连续跟随。
+         * `displayCenterValue` 已由手势锁定时同样传 false，避免二次取整。
+         */
+        readonly displayCenterSnapToSemitone?: boolean;
+        /** 本次手势锁定的块高（CSS px）；只用于时间伸缩预览，不写回数据。 */
+        readonly displayHeightPx?: number | null;
+        /** 时间上是否与相邻块相接；相接处不画竖向分隔，连续块看起来是一整条。 */
+        readonly contiguousStart?: boolean;
+        readonly contiguousEnd?: boolean;
+        readonly selected: boolean;
+        readonly merged: boolean;
+        /** 相接块边界上的圆滑手柄；只对有邻居的块出现。 */
+        readonly transitionHandle?: {
+            readonly leftId: string;
+            readonly rightId: string;
+            readonly sec: number;
+            readonly widthSec: number;
+        } | null;
+        /** 块内平均参数文字；缺省不画（由绘制端按块宽 / 高再决定是否省略）。 */
+        readonly label?: string;
+    }[];
+    readonly borderRgba: readonly [number, number, number, number];
+    readonly selectedRgba: readonly [number, number, number, number];
+    readonly mergedRgba: readonly [number, number, number, number];
+    readonly labelRgba?: readonly [number, number, number, number];
+    readonly selectedLabelRgba?: readonly [number, number, number, number];
+    /** 块的圆角填充；缺省不画填充（只画边框）。 */
+    readonly fillRgba?: readonly [number, number, number, number];
+    readonly selectedFillRgba?: readonly [number, number, number, number];
+    readonly mergedFillRgba?: readonly [number, number, number, number];
+    readonly topHighlightRgba?: readonly [number, number, number, number];
+    /** 顶部高光厚度（CSS px）。 */
+    readonly topHighlightPx?: number;
+    readonly cornerRadiusPx?: number;
+    /** 块间过渡曲线颜色；缺省不画。 */
+    readonly transitionRgba?: readonly [number, number, number, number];
+    /** 过渡曲线的端点圆点颜色；缺省复用 `transitionRgba`。 */
+    readonly transitionPointRgba?: readonly [number, number, number, number];
+    /** 端点圆点半径（CSS px）；缺省 2.5。 */
+    readonly transitionPointRadiusPx?: number;
+}
+
+/**
+ * 参数块的**实时采样源**。
+ *
+ * 宿主每帧用它重算块均值，因此绘制音高线、拖动块、纵向平移/缩放时，块与曲线
+ * 使用同一份数据和同一个实时值域。`values` 允许是 live override 的原地更新数组，
+ * 宿主只读、不复制。
+ */
+export interface PianoRollParamBlockSamples {
+    readonly values: readonly number[];
+    readonly startFrame: number;
+    readonly stride: number;
+    readonly framePeriodMs: number;
+    readonly isPitch: boolean;
+    readonly param: string;
+    /** 与 {@link modeCenterOfValues} 共用；缺省按参数推断。 */
+    readonly binWidth?: number;
+}
+
+/**
  * 动态叠加层的几何输入（阶段 2 Task 6，阶段 3 收窄为只管播放头）。
  *
  * 【为什么播放头要单独一层】播放帧只动播放头，而曲线不变。独立叠加层让
@@ -266,6 +387,28 @@ export interface PianoRollKernelData {
      * 可能被拖拽改变，而滚动/缩放会改变它的视口 x。
      */
     readonly selectionBand?: PianoRollSelectionBandSpec | null;
+    /**
+     * 音节块层（选区块之后、曲线之前）；缺省 / null 表示不画块。
+     *
+     * 每帧读取：块可见性 / 选中态与滚动都会改变投影，而曲线数据不一定变。
+     */
+    readonly paramBlocks?: PianoRollParamBlockSpec | null;
+    /** Final visibility gate, including stale gesture/commit previews. */
+    readonly paramBlocksVisible?: boolean;
+    /**
+     * 块的逐帧采样源（曲线 live 数组 + 窗口参数）；宿主据此重算均值。
+     *
+     * 缺省时回退到 spec 里的 `averageValue`，仅用于纯几何测试。
+     */
+    readonly paramBlockSamples?: PianoRollParamBlockSamples | null;
+    readonly paramEditorFrame?: ParamEditorRenderFrame | null;
+    /**
+     * 值域视口快照（每帧由内核在绘制前写入；块层据此跟随纵向平移/缩放）。
+     *
+     * 面板的 `pitchViewRef` / `paramViewsRef` 是 React 外状态，块派生需要它的
+     * 实时版本。宿主把本帧解析后的 center/span 放在这里，避免块停在旧位置。
+     */
+    valueViewport?: { readonly center: number; readonly span: number } | null;
     /**
      * 曲线图层（阶段 3）；缺省 / null 表示没有曲线。
      *
@@ -372,3 +515,4 @@ export interface PianoRollCurveLayer {
  * 收益是 5–16 倍（见 Phase 3 计划的 R7）。
  */
 export type PianoRollCurveLayerList = readonly PianoRollCurveLayer[];
+import type { ParamEditorRenderFrame } from "../../paramEditorRenderFrame";

@@ -318,7 +318,9 @@ export function usePianoRollScrollerWiring({
     // toolMode 门控）。
 
     useEffect(() => {
-        setCanvasCursor(s.toolMode === "select" ? "default" : "crosshair");
+        setCanvasCursor(
+            s.toolMode === "select" || s.toolMode === "block" ? "default" : "crosshair",
+        );
         // eslint-disable-next-line react-hooks/exhaustive-deps -- setCanvasCursor 是面板 useState 的 setter（按构造稳定）
     }, [s.toolMode]);
 

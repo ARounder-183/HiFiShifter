@@ -61,6 +61,7 @@ import type { BaselineMode, VibratoPreset } from "../../features/vibrato/vibrato
 import type { TempoMap } from "../../utils/tempoMap";
 import { clampDenominator, normalizeTempoMap } from "../../utils/tempoMap";
 import { markProjectDirty } from "./sessionDirtyState";
+import { toggleParamBlockEditingTool } from "../../components/layout/pianoRoll/paramBlockMarquee";
 import type { ClipColor, SessionState, StretchAlgorithmOption } from "./sessionSlice/types";
 import { resolveTrackIdForClipSelection } from "./selectionFocus";
 import { applyHistoryDepths } from "./sessionSlice/history";
@@ -75,6 +76,7 @@ import {
 import { clamp, normalizeClipColor } from "./sessionSlice/helpersCore";
 import { getClipRateMultiplier, updateActiveTakeFromFlat } from "./sessionSlice/helpersTakes";
 import { initialState } from "./sessionSlice/initialState";
+import { applyClipSyllableAnalysisReducer } from "./sessionSlice/syllableMetadata";
 import { registerRuntime } from "./sessionSlice/extraReducers/runtime";
 import { registerAudio } from "./sessionSlice/extraReducers/audio";
 import { registerTransport } from "./sessionSlice/extraReducers/transport";
@@ -218,6 +220,7 @@ const sessionSlice = createSlice({
     initialState: () =>
         isPluginMode() ? { ...initialState, tracks: [], selectedTrackId: null } : initialState,
     reducers: {
+        applyClipSyllableAnalysis: applyClipSyllableAnalysisReducer,
         /**
          * 标记连续交互开始（拖动/滑动等）。
          * 在交互期间，连续操作类 thunk 的 fulfilled handler 会跳过 applyTimelineState()。
@@ -273,6 +276,9 @@ const sessionSlice = createSlice({
                     backend: record.backend ?? backend,
                 }));
             }
+        },
+        markProjectEdited(state) {
+            markProjectDirty(state.project);
         },
         checkpointHistory(state) {
             // 撤销/重做由后端权威管理（undo_timeline / redo_timeline 返回完整
@@ -387,6 +393,9 @@ const sessionSlice = createSlice({
         },
         setPitchSnapToleranceCents(state, action: PayloadAction<number>) {
             state.pitchSnapToleranceCents = clamp(action.payload, 0, 1000);
+        },
+        setParamBlockFollowPitch(state, action: PayloadAction<boolean>) {
+            state.paramBlockFollowPitch = action.payload;
         },
         setScaleHighlightMode(state, action: PayloadAction<"always" | "off">) {
             state.scaleHighlightMode = action.payload;
@@ -1225,6 +1234,7 @@ const sessionSlice = createSlice({
 });
 
 export const {
+    setParamBlockFollowPitch,
     beginInteraction,
     endInteraction,
     setTrackName,
@@ -1232,6 +1242,7 @@ export const {
     clearTrackMeters,
     setHistoryState,
     checkpointHistory,
+    markProjectEdited,
     applyTimelinePayload,
     setToolMode,
     setEditParam,
@@ -1338,6 +1349,7 @@ export const {
     rollbackClipColor,
     setTrackVolume,
     setClipPitchData,
+    applyClipSyllableAnalysis,
     setClipFormantStatus,
     setClipFormantAnalysis,
     openClipFormantToolWindow,
@@ -1369,6 +1381,16 @@ export const setToolModePersistent = createAsyncThunk<ToolMode, ToolMode>(
         dispatch(setToolMode(mode));
         (dispatch as unknown as (action: unknown) => void)(persistUiSettings());
         return mode;
+    },
+);
+
+export const toggleParamBlockEditPersistent = createAsyncThunk<ToolMode, void>(
+    "session/toggleParamBlockEditPersistent",
+    (_, { dispatch, getState }) => {
+        const { toolMode } = (getState() as { session: SessionState }).session;
+        const next = toggleParamBlockEditingTool(toolMode);
+        (dispatch as unknown as (action: unknown) => void)(setToolModePersistent(next));
+        return next;
     },
 );
 

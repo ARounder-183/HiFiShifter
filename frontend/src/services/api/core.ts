@@ -6,6 +6,7 @@ import type {
     OnnxDiagnosticResult,
     OnnxStatusResult,
     PitchProgressPayload,
+    SyllableAnalysisProgressPayload,
     PlaybackStateResult,
     ProcessAudioResult,
     RuntimeInfo,
@@ -310,6 +311,9 @@ export const coreApi = {
     // Pitch analysis progress
     getPitchAnalysisProgress: () =>
         invoke<PitchProgressPayload | null>("get_pitch_analysis_progress"),
+
+    getSyllableAnalysisProgress: () =>
+        invoke<SyllableAnalysisProgressPayload | null>("get_syllable_analysis_progress"),
 
     // ONNX status and diagnostics
     getOnnxStatus: () => invoke<OnnxStatusResult>("get_onnx_status"),

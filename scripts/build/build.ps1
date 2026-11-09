@@ -95,18 +95,25 @@ function Resolve-Python {
 }
 
 function Reset-Directory([string]$path) {
-    Remove-Item $path -Recurse -Force -ErrorAction SilentlyContinue
-    New-Item -ItemType Directory -Force $path | Out-Null
+    $resolved = [IO.Path]::GetFullPath($path)
+    $outputRoot = [IO.Path]::GetFullPath((Join-Path $root 'dist')).TrimEnd('\') + '\'
+    if (!$resolved.StartsWith($outputRoot, [StringComparison]::OrdinalIgnoreCase)) { throw "Unexpected build cleanup path: $resolved" }
+    Remove-Item -LiteralPath $resolved -Recurse -Force -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force $resolved | Out-Null
 }
 
-# 【哪些 DLL 属于"宿主插件载荷"，绝不随独立 App 分发】`backend\target\<profile>` 里同时躺着
+# 【哪些 DLL 不属于独立 App 的运行时载荷】`backend\target\<profile>` 里同时躺着
 # 三种格式的产物：独立 App、VST3 引擎（`hifishifter_plugin.dll`）与 CLAP 模块
-# （`hifishifter_clap.dll`）。它们与 App 自己的通用运行时 DLL 混在同一个目录，于是
-# `Get-ChildItem *.dll` 一把抓就会把两个约 40 MB 的插件模块一并塞进安装包与便携包 ——
-# 用户装了 App 就多出两份永远用不到的宿主插件二进制，而便携包是自解压目录，更藏不住。
-# 插件只经由两条专门通路分发：VST3 bundle（见 Write-Vst3Stage）与 CLAP 目录
-# （见 Write-ClapStage）；App 载荷与它们没有任何交集。
-$pluginModuleDlls = @('hifishifter_plugin.dll', 'hifishifter_clap.dll')
+# （`hifishifter_clap.dll`），以及 App crate 自己编出的 `backend_lib.dll`。
+# 它们与通用运行时 DLL 混在同一个目录，于是 `Get-ChildItem *.dll` 一把抓会把这些
+# 既非运行时、也非 App 所需的模块一并塞进安装包与便携包。插件只经由两条专门通路
+# 分发：VST3 bundle（见 Write-Vst3Stage）与 CLAP 目录（见 Write-ClapStage）；
+# App 载荷与它们没有任何交集。
+$pluginModuleDlls = @(
+    'hifishifter_plugin.dll',
+    'hifishifter_clap.dll',
+    'backend_lib.dll'
+)
 
 function Copy-AppRuntimeDlls([string]$Destination) {
     # 0 字节的 DLL 是 arm64 上的占位符（vslib 是 x86_64 专用），不进产物。
@@ -129,9 +136,16 @@ function Copy-AppRuntimeDlls([string]$Destination) {
 $python = Resolve-Python
 & $python.Exe @($python.Prefix) (Join-Path $PSScriptRoot '..\setup\fetch-models.py')
 Assert-Ok '模型权重'
+& $python.Exe @($python.Prefix) (Join-Path $PSScriptRoot '..\setup\fetch-models.py') --fetch-game
+Assert-Ok 'GAME 模型权重'
 
 $profile = $Configuration.ToLowerInvariant()
-$built = Join-Path $root "backend\target\$profile"
+$cargoTarget = Join-Path $root 'backend\target'
+if ($env:CARGO_TARGET_DIR) {
+    $cargoTarget = [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR)
+    $env:CARGO_TARGET_DIR = $cargoTarget
+}
+$built = Join-Path $cargoTarget $profile
 $dist = Join-Path $root 'dist'
 $stage = Join-Path $dist '_stage\installer'
 $version = (Get-Content backend\src-tauri\tauri.conf.json -Raw | ConvertFrom-Json).version
@@ -210,7 +224,6 @@ if ($Target -eq 'All' -or $Target -eq 'Plugin') {
     Reset-Directory $module
     Reset-Directory "$resources\frontend"
     Reset-Directory "$resources\models"
-    New-Item -ItemType Directory -Force "$resources\frontend\assets" | Out-Null
 
     Copy-Item "$built\hifishifter_plugin.dll" "$module\HiFiShifterEngine.dll"
     Assert-SameBytes "$built\hifishifter_plugin.dll" "$module\HiFiShifterEngine.dll"
@@ -219,10 +232,10 @@ if ($Target -eq 'All' -or $Target -eq 'Plugin') {
         if (Test-Path "$built\$dll") { Copy-Item "$built\$dll" $module }
     }
 
-    # 只拷插件入口与它引用的 chunk。index.html / detached.html / waveform-test.html
-    # 属于独立 App 与开发页面，进了插件 bundle 既是死重量也让目录清单没法对账。
-    Copy-Item frontend\dist\plugin.html "$resources\frontend"
-    Copy-Item frontend\dist\assets\* "$resources\frontend\assets" -Recurse
+    # 静态入口与公共资源一起复制，SDK 类型声明不属于运行时载荷。
+    Get-ChildItem -LiteralPath frontend\dist |
+        Where-Object { $_.Name -ne 'sdk' } |
+        Copy-Item -Destination "$resources\frontend" -Recurse
     Copy-Item backend\src-tauri\icons\icon.ico "$resources\frontend"
 
     # 【为什么 bundle 里只有清单、没有权重】安装器把权重写进
@@ -236,7 +249,10 @@ if ($Target -eq 'All' -or $Target -eq 'Plugin') {
     New-Item -ItemType Directory -Force $objDir | Out-Null
     cl.exe /nologo /utf-8 /std:c++17 /LD /MT /EHsc /O2 backend\hifishifter-plugin\native\module_loader.cpp "/Fo:$objDir\module_loader.obj" /link "/OUT:$module\HiFiShifter.vst3" "/IMPLIB:$objDir\HiFiShifterLoader.lib"
     Assert-Ok '原生 VST3 loader 构建'
-    Remove-Item $objDir -Recurse -Force
+    $resolvedObjects = [IO.Path]::GetFullPath($objDir)
+    $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
+    if (!$resolvedObjects.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase)) { throw 'Unexpected loader cleanup path' }
+    Remove-Item -LiteralPath $resolvedObjects -Recurse -Force
 
     # 编译成功不等于能被宿主加载。打包前跑一次黑盒门禁，别让加载不了的产物进安装器。
     & .\scripts\vst3\windows\verify.ps1 -BundleDirectory $bundle
@@ -257,9 +273,11 @@ if ($Target -eq 'All' -or $Target -eq 'Plugin' -or $Target -eq 'Clap') {
     $clapRes = Join-Path $dist 'HiFiShifter-resources'
     Reset-Directory (Join-Path $clapRes 'frontend')
     Reset-Directory (Join-Path $clapRes 'models')
-    New-Item -ItemType Directory -Force (Join-Path $clapRes 'frontend\assets') | Out-Null
-    Copy-Item 'frontend\dist\plugin.html' (Join-Path $clapRes 'frontend')
-    Copy-Item 'frontend\dist\assets\*' (Join-Path $clapRes 'frontend\assets') -Recurse
+    # 与 VST3 bundle 同一份公共资源：宿主插件与浮动编辑器共用 chunk，SDK 类型声明
+    # 不是运行时载荷。只拷 plugin.html 会让 detached.html 在插件窗口里 404。
+    Get-ChildItem -LiteralPath frontend\dist |
+        Where-Object { $_.Name -ne 'sdk' } |
+        Copy-Item -Destination (Join-Path $clapRes 'frontend') -Recurse
     Copy-Item (Join-Path $modelsSource 'models.json') (Join-Path $clapRes 'models')
     # 【为什么 CLAP 资源目录里也要放 SoundTouchDLL.dll】三种格式现在编译同一份内核：
     # SoundTouch 由 `#[link]` 改成运行期 libloading，候选路径包含模块同级与同级的

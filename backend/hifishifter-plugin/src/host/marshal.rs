@@ -109,15 +109,6 @@ fn take_one() -> Option<Job> {
     pending.remove(index).map(|entry| entry.job)
 }
 
-/// 一次投递完成后继续等下一件的窗口。
-///
-/// 【为什么需要它】编辑器一次刷新要连做十来个宿主调用（采样 / 几何代次 / 清单枚举
-/// ……），而宿主节拍是 30 Hz。每个调用都等一个节拍，一次刷新就要 300 ms 以上 ——
-/// 界面肉眼可见地发涩。留在宿主线程上多等这么一小会儿，同一批调用就几乎全部命中
-/// 同一个节拍。2 ms 是「宿主 UI 线程愿意让出的时间」与「这一批调用之间的人为间隔」
-/// 之间的折中：REAPER 的主循环里有 2 ms 的空转不会被察觉。
-const LINGER: Duration = Duration::from_millis(2);
-
 /// 队列条目的最长滞留时间；超过即按「目标线程已死」清退。
 ///
 /// 【为什么需要清退】`editor::host_threads::deliver` 超时返回 `Queued` 后任务
@@ -149,23 +140,29 @@ fn evict_expired() {
     let now = Instant::now();
     let mut scoped_evicted = 0_usize;
     let mut owned_evicted = 0_usize;
+    let mut expired = Vec::new();
     {
         let mut pending = lock_queue();
-        pending.retain(|entry| {
+        let mut index = 0;
+        while index < pending.len() {
+            let entry = &pending[index];
             let limit = match entry.kind {
                 EntryKind::Scoped => MAX_QUEUE_AGE,
                 EntryKind::Owned => MAX_OWNED_QUEUE_AGE,
             };
             if now.duration_since(entry.queued_at) < limit {
-                return true;
+                index += 1;
+                continue;
             }
+            let entry = pending.remove(index).unwrap();
             match entry.kind {
                 EntryKind::Scoped => scoped_evicted += 1,
                 EntryKind::Owned => owned_evicted += 1,
             }
-            false
-        });
+            expired.push(entry);
+        }
     }
+    drop(expired);
     if scoped_evicted > 0 {
         hifishifter_kernel::log_limiter::emit_limited_key(
             log::Level::Warn,
@@ -202,32 +199,44 @@ fn log_queue_rejected(target: std::thread::ThreadId, depth: usize) {
     );
 }
 
-/// 在**宿主线程**上执行队列里的全部待办。
-///
-/// 【调用者必须是宿主线程】它由 `IPlugView` 的回调与注册到宿主的 timer 驱动。这里
-/// 不做线程断言：断言会把"泵装错了地方"变成宿主崩溃，而不做断言的最坏后果只是任务
-/// 跑在错误的线程上并各自失败 —— 后者可观测、可恢复。
-///
-/// 【为什么空队列时立刻返回】宿主每次重排窗口都会调 `getSize`，一次会话几十次；
-/// 那时队列多半是空的，白等 2 ms 只是白白拖慢宿主。
+/// Cooperative host-thread dispatch; remaining jobs stay queued for the next tick.
 pub(crate) fn pump() {
-    evict_expired();
-    let Some(first) = take_one() else {
+    pump_with_budget(&mut super::work_budget::WorkBudget::new(
+        Duration::from_millis(2),
+        32,
+    ));
+}
+
+pub(crate) fn pump_with_budget(budget: &mut super::work_budget::WorkBudget) {
+    thread_local! { static ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+    if ACTIVE.with(|active| active.replace(true)) {
         return;
-    };
-    run_owned_job(first);
-    let mut idle_since: Option<std::time::Instant> = None;
-    loop {
-        if let Some(job) = take_one() {
-            run_owned_job(job);
-            idle_since = None;
-            continue;
+    }
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            ACTIVE.with(|active| active.set(false));
         }
-        let since = *idle_since.get_or_insert_with(std::time::Instant::now);
-        if since.elapsed() >= LINGER {
-            return;
+    }
+    let _reset = Reset;
+    evict_expired();
+    while budget.take() {
+        let Some(job) = take_one() else {
+            break;
+        };
+        let started = Instant::now();
+        run_owned_job(job);
+        if started.elapsed() >= Duration::from_millis(16) {
+            hifishifter_kernel::log_limiter::emit_limited_key(
+                log::Level::Warn,
+                "host.marshal.slow-job",
+                format_args!(
+                    "[host] slow main-thread job: {}ms; {} queued",
+                    started.elapsed().as_millis(),
+                    pending()
+                ),
+            );
         }
-        std::thread::sleep(Duration::from_micros(150));
     }
 }
 
@@ -513,6 +522,36 @@ mod tests {
             }
         });
         (receiver.recv().unwrap(), handle)
+    }
+
+    #[test]
+    fn a_budgeted_pump_leaves_work_for_the_next_tick() {
+        let _guard = serialize();
+        drain();
+        let hits = Arc::new(AtomicUsize::new(0));
+        for _ in 0..5 {
+            let hit = hits.clone();
+            assert!(post_owned(
+                std::thread::current().id(),
+                Box::new(move || {
+                    hit.fetch_add(1, Ordering::Relaxed);
+                })
+            ));
+        }
+        pump_with_budget(&mut super::super::work_budget::WorkBudget::new(
+            Duration::from_secs(1),
+            2,
+        ));
+        assert_eq!(hits.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            lock_queue()
+                .iter()
+                .filter(|job| job.target == std::thread::current().id())
+                .count(),
+            3
+        );
+        pump();
+        assert_eq!(hits.load(Ordering::Relaxed), 5);
     }
 
     #[test]

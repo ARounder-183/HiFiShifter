@@ -31,7 +31,7 @@ pub const TENSION_ACTIVE_EPSILON: f32 = 1.0e-3;
 
 /// 仅 NSF-HiFiGAN 专有的参数；共通混音级参数（volume / pan / dyn）**不在此处**
 /// —— 它们由 `renderer::common_params` 统一提供，见 `renderer::all_param_descriptors`。
-static HIFIGAN_PARAM_DESCRIPTORS: [ParamDescriptor; 4] = [
+static HIFIGAN_PARAM_DESCRIPTORS: [ParamDescriptor; 5] = [
     ParamDescriptor {
         id: "breath_enabled",
         // 语义是「是否做谐波/噪声分离」，而**不是**「气声开关」：
@@ -63,6 +63,17 @@ static HIFIGAN_PARAM_DESCRIPTORS: [ParamDescriptor; 4] = [
             unit: "%",
             default_value: 0.0,
             min_value: -100.0,
+            max_value: 100.0,
+        },
+    },
+    ParamDescriptor {
+        id: "hifigan_growl",
+        display_name: "Growl",
+        group: "NSF-HiFiGAN",
+        kind: super::traits::ParamKind::AutomationCurve {
+            unit: "%",
+            default_value: 0.0,
+            min_value: 0.0,
             max_value: 100.0,
         },
     },
@@ -299,6 +310,7 @@ impl ProcessingStage for HiFiGanStage {
             .get("formant_shift_cents")
             .map(|v| v.as_slice());
         let tension_curve = cc.extra_curves.get("hifigan_tension").map(|v| v.as_slice());
+        let growl_curve = cc.extra_curves.get("hifigan_growl").map(|v| v.as_slice());
 
         // 张力是否需要真正参与运算（曲线偏离默认 0 即算活跃）。
         // 口径与渲染键一致，避免"曲线存在但全 0"时白跑一遍 HNSEP。
@@ -309,6 +321,10 @@ impl ProcessingStage for HiFiGanStage {
         // 因此 `tension_curve` 自然为 `None`。**不需要**在此重复判断开关 ——
         // 也不应该：两条判据并存正是本项目出现过的漂移来源。
         let tension_active = tension_curve.is_some_and(|c| {
+            c.iter()
+                .any(|v| v.is_finite() && v.abs() > TENSION_ACTIVE_EPSILON)
+        });
+        let growl_active = growl_curve.is_some_and(|c| {
             c.iter()
                 .any(|v| v.is_finite() && v.abs() > TENSION_ACTIVE_EPSILON)
         });
@@ -332,7 +348,7 @@ impl ProcessingStage for HiFiGanStage {
         let separation_switch_on =
             crate::pitch_editing::extra_param_enabled(cc.extra_params, HIFIGAN_SEPARATION_PARAM_ID);
 
-        let needs_separation = tension_active || separation_switch_on;
+        let needs_separation = tension_active || growl_active || separation_switch_on;
 
         if needs_separation && !crate::hnsep_onnx::is_available() {
             // 【绝不静默降级】历史实现只打一条日志然后走非分离路径，而那条路径
@@ -340,7 +356,15 @@ impl ProcessingStage for HiFiGanStage {
             // 任何提示，属于最难排查的一类缺陷。这里返回错误：本次 clip 渲染失败、
             // 不写缓存，`render_background_pass` 会记录并保持等待（与
             // "pitch processor failed" 同一约定），HNSEP 恢复后重试即成功。
-            let what = if tension_active && separation_switch_on {
+            let what = if tension_active && growl_active && separation_switch_on {
+                "气声分离、张力与怒音"
+            } else if tension_active && growl_active {
+                "张力与怒音"
+            } else if growl_active && separation_switch_on {
+                "气声分离与怒音"
+            } else if growl_active {
+                "怒音"
+            } else if tension_active && separation_switch_on {
                 "气声分离与张力"
             } else if tension_active {
                 "张力"
@@ -355,7 +379,7 @@ impl ProcessingStage for HiFiGanStage {
         }
 
         if needs_separation {
-            return self.process_breath(input_pcm, cc, formant_curve, tension_curve);
+            return self.process_breath(input_pcm, cc, formant_curve, tension_curve, growl_curve);
         }
 
         // ── 非 Breath 路径 ──────────────────────────────────────────────
@@ -429,6 +453,7 @@ impl HiFiGanStage {
         cc: &crate::renderer::traits::ClipProcessContext<'_>,
         formant_curve: Option<&[f32]>,
         tension_curve: Option<&[f32]>,
+        growl_curve: Option<&[f32]>,
     ) -> Result<Vec<f32>, String> {
         let (harmonic, noise) = crate::hnsep_onnx::infer_harmonic_noise_mono(
             cc.clip_id,
@@ -440,6 +465,8 @@ impl HiFiGanStage {
 
         // ── 谐波支施加 Rd 张力（在 mel 分析之前，只动谐波）──────────────
         let tensioned_harmonic = Self::apply_rd_tension(&harmonic, cc, tension_curve);
+        // ── 谐波支施加 GRWC 怒音（在 mel 分析之前，只动谐波）────────────
+        let tensioned_harmonic = Self::apply_growl(&tensioned_harmonic, cc, growl_curve);
 
         // 谐波分支：有可用 F0（clip_midi）时走 HiFiGAN mel 拉伸/渲染；否则
         // 回退外部算法拉伸 —— 两种情况输出都是时间轴长度 out_frames。
@@ -479,7 +506,12 @@ impl HiFiGanStage {
                     formant_curve,
                 )?
             } else {
-                renderer.render_with_formant(&render_ctx, formant_curve, tension_curve)?
+                renderer.render_with_formant_with_growl(
+                    &render_ctx,
+                    formant_curve,
+                    tension_curve,
+                    growl_curve,
+                )?
             }
         };
 
@@ -681,6 +713,44 @@ impl HiFiGanStage {
         };
 
         crate::rd_tension::RdTension::apply(harmonic, &source_f0, sr, tension_at, target_at)
+    }
+
+    /// 在谐波支上施加 GRWC 怒音（波形域，mel 分析之前）。
+    ///
+    /// 曲线按**时间轴绝对秒**采样，输出长度恒等于输入长度。曲线缺失、全 0
+    /// 或采样率为 0 时原样返回；非有限值按 0 处理，避免把 NaN 扩散到整段音频。
+    fn apply_growl(
+        harmonic: &[f32],
+        cc: &crate::renderer::traits::ClipProcessContext<'_>,
+        growl_curve: Option<&[f32]>,
+    ) -> Vec<f32> {
+        let Some(curve) = growl_curve else {
+            return harmonic.to_vec();
+        };
+        if harmonic.is_empty()
+            || cc.sample_rate == 0
+            || !curve
+                .iter()
+                .any(|v| v.is_finite() && v.abs() > TENSION_ACTIVE_EPSILON)
+        {
+            return harmonic.to_vec();
+        }
+        let fp = cc.frame_period_ms.max(0.1);
+        let inv_sr = 1.0 / cc.sample_rate.max(1) as f64;
+        let rate = if cc.playback_rate.is_finite() && cc.playback_rate > 1e-6 {
+            cc.playback_rate
+        } else {
+            1.0
+        };
+
+        // 整段只做一次高通 + LFO + 插值，再用逐样本强度包络在干/湿之间混合。
+        // 不能逐块调用 `apply_growl_mono`：每块都会重置滤波器与插值状态，
+        // 50 ms 的接缝会变成额外的机械颤音，且短块会改变实际音色。
+        crate::growl::apply_growl_envelope(harmonic, cc.sample_rate, |i| {
+            let abs_sec = cc.seg_start_sec + i as f64 * inv_sr / rate;
+            let v = sample_curve_at_abs_sec(Some(curve), abs_sec, fp, 0.0);
+            f64::from(v.clamp(0.0, 100.0)) / 100.0
+        })
     }
 }
 

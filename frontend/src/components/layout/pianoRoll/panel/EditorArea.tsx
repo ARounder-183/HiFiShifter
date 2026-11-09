@@ -64,8 +64,11 @@ type Props = {
         | "handleTempoMapCommit"
         | "interactions"
         | "onScrollerScroll"
+        | "onCanvasDoubleClick"
+        | "onCanvasPointerMoveForBlocks"
         | "paddedContentWidth"
         | "paramValuePreview"
+        | "paramBlockError"
         | "pianoRollAmplitudeMap"
         | "prTickAxis"
         | "pxPerBeat"
@@ -122,6 +125,8 @@ export function EditorArea({ m }: Props) {
         handleTempoMapCommit,
         interactions,
         onScrollerScroll,
+        onCanvasDoubleClick,
+        onCanvasPointerMoveForBlocks,
         paddedContentWidth,
         paramValuePreview,
         pianoRollAmplitudeMap,
@@ -401,9 +406,13 @@ export function EditorArea({ m }: Props) {
                                         // scroller 自身不加：触摸屏单指滚动依赖原生。
                                         touchAction: "none",
                                     }}
-                                    onPointerMove={interactions.onCanvasPointerMove}
+                                    onPointerMove={(event) => {
+                                        interactions.onCanvasPointerMove(event);
+                                        onCanvasPointerMoveForBlocks(event);
+                                    }}
                                     onPointerLeave={interactions.onCanvasPointerLeave}
                                     onPointerDown={interactions.onCanvasPointerDown}
+                                    onDoubleClick={onCanvasDoubleClick}
                                 />
 
                                 {/* 动态叠加层（阶段 2/3）：播放头与选区。
@@ -417,6 +426,15 @@ export function EditorArea({ m }: Props) {
                                     className="absolute inset-0 pointer-events-none"
                                     aria-hidden
                                 />
+                                {m.paramBlockError ? (
+                                    <div
+                                        role="alert"
+                                        className="absolute left-2 top-2 z-30 max-w-md rounded bg-qt-panel px-2 py-1 text-qt-sm text-qt-text"
+                                    >
+                                        {m.paramBlockError}
+                                    </div>
+                                ) : null}
+
                                 {/* 指针旁的实时读数：**参数值 + 颤音拖拽状态合成一个
                                     气泡**。两者曾经各弹一个，颤音那个还压在值上面，
                                     用户只能看到后弹出的那个 —— 合成之后第一行是参数值

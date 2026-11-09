@@ -1215,6 +1215,7 @@ unsafe extern "system" fn component_initialize(this: *mut c_void, context: *mut 
             }
             let _call_reference = CallReference(this);
             let owner = unsafe { (*this.cast::<Processor>()).extension_owner.clone() };
+            owner.startup_stage(crate::startup::Stage::Component);
             if owner.is_closed() {
                 return K_RESULT_FALSE;
             }

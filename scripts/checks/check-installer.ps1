@@ -52,6 +52,16 @@ function Get-Makensis {
     throw '找不到 makensis：先跑 scripts\setup\install_deps_windows.ps1'
 }
 
+function Remove-GateDirectory([string]$path) {
+    $resolved = [IO.Path]::GetFullPath($path)
+    $allowed = @(
+        [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'HiFiShifterInstallerTest')),
+        [IO.Path]::GetFullPath((Join-Path $env:APPDATA 'HiFiShifterTest'))
+    )
+    if ($allowed -notcontains $resolved) { throw "Unexpected installer test cleanup path: $resolved" }
+    Remove-Item -LiteralPath $resolved -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 Write-Host 'Installer gate' -ForegroundColor Cyan
 
 if (!$ReleaseInstallerPath) {
@@ -260,16 +270,16 @@ $userDataMarker = Join-Path $userProfileRoot "unsaved\$gateTag.txt"
 # 模型库标记：断言只验证"卸载器不删模型库里的东西"，不依赖安装阶段是否成功建库。
 $modelMarker = Join-Path $modelDir "$gateTag.txt"
 
-Remove-Item $testRoot -Recurse -Force -ErrorAction SilentlyContinue
+Remove-GateDirectory $testRoot
 # 测试模式专用的模型根：每次跑都从干净状态开始，避免上一轮的 .staging 让安装器
 # 误判"已完整"而跳过写库。绝不碰发布模式的 %ProgramData%\HiFiShifter。
 if (Test-Path (Join-Path $env:APPDATA 'HiFiShifterTest')) {
-    Remove-Item (Join-Path $env:APPDATA 'HiFiShifterTest') -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-GateDirectory (Join-Path $env:APPDATA 'HiFiShifterTest')
 }
 
 try {
     Write-Host '  安装（静默）...' -ForegroundColor DarkGray
-    $proc = Start-Process -FilePath $testInstaller -ArgumentList '/S' -Wait -PassThru
+    $proc = Start-Process -FilePath $testInstaller -ArgumentList '/S' -WindowStyle Hidden -Wait -PassThru
     if ($proc.ExitCode -ne 0) { throw "安装器退出码 $($proc.ExitCode)" }
 
     Assert-That 'ARP 注册了卸载项' {
@@ -365,7 +375,7 @@ try {
     # 幂等：再装一次不该重写模型（判定在安装器的 HfsVerifyModels 里；这里验
     # "还能装成功、模型仍在"）。
     Assert-That '重装（幂等）' {
-        $again = Start-Process -FilePath $testInstaller -ArgumentList '/S' -Wait -PassThru
+        $again = Start-Process -FilePath $testInstaller -ArgumentList '/S' -WindowStyle Hidden -Wait -PassThru
         if ($again.ExitCode -ne 0) { throw "重装退出码 $($again.ExitCode)" }
         if (!(Test-Path (Join-Path $modelDir 'models.json'))) { throw '重装后模型库不见了' }
         'ok'
@@ -387,7 +397,7 @@ try {
     Set-Content -LiteralPath $modelMarker -Value 'keep'
     $uninstaller = Join-Path $installDir 'uninstall.exe'
     if (!(Test-Path $uninstaller)) { throw '缺少 uninstall.exe' }
-    Start-Process -FilePath $uninstaller -ArgumentList '/S' -Wait | Out-Null
+    Start-Process -FilePath $uninstaller -ArgumentList '/S' -WindowStyle Hidden -Wait | Out-Null
     # 卸载器把自己复制到临时目录再运行，退出码在 -Wait 下并不可靠；用目录与注册表判定。
     Start-Sleep -Seconds 3
 
@@ -446,11 +456,11 @@ try {
 finally {
     Remove-Item -LiteralPath "$classesRoot\$foreignProgId" -Recurse -Force -ErrorAction SilentlyContinue
     Restore-AssociationBackups
-    Remove-Item $testRoot -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-GateDirectory $testRoot
     Remove-Item $testInstaller -Force -ErrorAction SilentlyContinue
     Remove-Item $disposableMarker, $userDataMarker -Force -ErrorAction SilentlyContinue
     # 测试模式模型根是门禁专用的，整目录清掉，不留 .staging。
-    Remove-Item (Join-Path $env:APPDATA 'HiFiShifterTest') -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-GateDirectory (Join-Path $env:APPDATA 'HiFiShifterTest')
 }
 
 Write-Host ''

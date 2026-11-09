@@ -75,6 +75,7 @@ pub(crate) use types::{
 /// 原生接口与只读元数据属于真实组件，缓存不跨其文档/分配/host变更复用。
 #[derive(Default)]
 pub struct ExtensionOwner {
+    pub(crate) startup: crate::startup::StartupTrace,
     binding: Mutex<Option<ExtensionBinding>>,
     /// 已退役的扩展实例存储。
     ///

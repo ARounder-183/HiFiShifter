@@ -198,6 +198,42 @@ export function usePianoRollInteractions(args: {
     paramView: ParamViewSegment | null;
     paramViewRef: MutableRefObject<ParamViewSegment | null>;
 
+    /**
+     * 块编辑命中回调（mock）。
+     *
+     * 返回 true 表示这次按下已被块工具消费，不再进入参数线绘制 / 选择手势。
+     * 缺省不传 = 块工具未启用，既有交互完全不变。
+     */
+    onParamBlockPointerDown: (args: {
+        readonly sec: number;
+        readonly localY: number;
+        readonly clientY: number;
+        readonly clientX: number;
+        readonly add: boolean;
+        readonly toggle: boolean;
+        readonly pointerType: string;
+        readonly pointerId: number;
+        readonly captureTarget: HTMLCanvasElement;
+        readonly setActivePointerGestureEnd: (endGesture: () => void) => void;
+        readonly clearActivePointerGestureEnd: (endGesture?: () => void) => void;
+        readonly yToValue: (param: string, y: number, h: number) => number;
+        readonly canvasHeightPx: number;
+        readonly blockSnapEnabled: boolean;
+        readonly blockSnapStep: number;
+        readonly blockSnapScale?: ScaleLike | null;
+        readonly pointerValue: (clientY: number) => number;
+        readonly secAtClientX: (clientX: number) => number;
+        readonly isSnapToggleModifierHeld: (event: {
+            ctrlKey: boolean;
+            shiftKey: boolean;
+            altKey: boolean;
+            metaKey?: boolean;
+        }) => boolean;
+        readonly editParam: string;
+        readonly gridStep: number;
+        readonly contextMenu: boolean;
+    }) => boolean;
+
     bumpRefreshToken: () => void;
     syncScrollLeft: (scroller: HTMLDivElement) => void;
     /**
@@ -471,6 +507,7 @@ export function usePianoRollInteractions(args: {
         paramValuePopupEnabled,
         onParamValuePreviewChange,
         onContextMenu,
+        onParamBlockPointerDown,
     } = args;
 
     const {
@@ -2073,7 +2110,7 @@ export function usePianoRollInteractions(args: {
     ]);
 
     const getDefaultCanvasCursor = useCallback((): CanvasCursor => {
-        return toolMode === "select" ? "default" : "crosshair";
+        return toolMode === "select" || toolMode === "block" ? "default" : "crosshair";
     }, [toolMode]);
 
     /**
@@ -2398,6 +2435,7 @@ export function usePianoRollInteractions(args: {
                     morphModifierDownRef,
                     morphOverlayRef,
                     onContextMenu,
+                    onParamBlockPointerDown,
                     onCycleDragDirection,
                     onParamCommitSucceeded,
                     onParamValuePreviewChange,
@@ -2441,6 +2479,7 @@ export function usePianoRollInteractions(args: {
                     toolMode,
                     updateSelectionUi,
                     valueToY,
+                    yToValue,
                     vibratoFrequencyAdjustKb,
                     vibratoHudAnchorRef,
                     vibratoPreset,
@@ -2549,6 +2588,8 @@ export function usePianoRollInteractions(args: {
             vibratoFrequencyAdjustKb,
             reportVibratoDragState,
             finishVibratoDrag,
+            onParamBlockPointerDown,
+            yToValue,
         ],
     );
 

@@ -25,3 +25,9 @@ pub(super) fn get_pitch_analysis_progress(
 
     Ok(progress.as_ref().map(PitchProgressPayload::from))
 }
+
+/// 音符分块（GAME / VAD）的独立进度。前端只在参数块工具/显示开启时轮询。
+pub(super) fn get_syllable_analysis_progress(
+) -> Option<crate::pitch_analysis::SyllableAnalysisProgress> {
+    crate::pitch_analysis::syllable_analysis_progress()
+}

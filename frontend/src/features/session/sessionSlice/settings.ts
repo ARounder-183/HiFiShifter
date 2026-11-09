@@ -169,6 +169,8 @@ export function applyToolMode(state: SessionState, mode: ToolMode): void {
     state.toolMode = mode;
     if (mode === "select") {
         state.toolModeGroup = "select";
+    } else if (mode === "block") {
+        state.toolModeGroup = "block";
     } else {
         state.toolModeGroup = "draw";
         state.drawToolMode = mode;

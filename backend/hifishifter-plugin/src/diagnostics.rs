@@ -274,14 +274,17 @@ pub fn note_host_application(name: &str) {
     if name.is_empty() || name.eq_ignore_ascii_case("unknown") {
         return;
     }
+    // 【为什么先取 WRITER 再比对】宿主名与写入器都是同一份会话状态：只有
+    // "名字未变且写入器已落地"才是幂等返回。名字已登记但写入器还没打开时仍要
+    // 在这里把缓冲里的早期日志补进正确文件，否则那一段会话会永久留在内存里。
+    let mut guard = WRITER.lock().unwrap_or_else(|e| e.into_inner());
     {
-        let mut guard = HOST_NAME.lock().unwrap_or_else(|e| e.into_inner());
-        if guard.as_deref() == Some(name) {
+        let mut current = HOST_NAME.lock().unwrap_or_else(|e| e.into_inner());
+        if current.as_deref() == Some(name) && guard.is_some() {
             return;
         }
-        *guard = Some(name.to_owned());
+        *current = Some(name.to_owned());
     }
-    let mut guard = WRITER.lock().unwrap_or_else(|e| e.into_inner());
     match open_writer() {
         Ok(mut writer) => {
             drain_pending_into(&mut writer);

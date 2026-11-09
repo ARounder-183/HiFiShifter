@@ -46,6 +46,14 @@ export interface OverlapControlHit {
     readonly kind: OverlapControlKind;
     /** 控件所属的 clip（**可能是前一个 clip**——这正是本模块存在的意义）。 */
     readonly clipId: string;
+    /**
+     * 该重叠对里**后一个** clip。
+     *
+     * 无修饰键左键点击重叠区应选中它；控件本身仍可能属于前一个 clip（例如
+     * 前一个的右缘 / 淡出），因此调用方需要这个字段区分「控件归属」与
+     * 「点击选中的对象」。
+     */
+    readonly laterClipId: string;
     /** 淡变控件所属的一侧；clip 边缘命中时缺省。 */
     readonly fadeSide?: "in" | "out";
     /**
@@ -162,6 +170,7 @@ export function hitOverlapControl(args: OverlapControlArgs): OverlapControlHit |
                 result = {
                     kind: "fade",
                     clipId: later.id,
+                    laterClipId: later.id,
                     fadeSide: laterFade.side,
                     fadeIsLine: laterFade.kind === "line",
                 };
@@ -183,6 +192,7 @@ export function hitOverlapControl(args: OverlapControlArgs): OverlapControlHit |
                 result = {
                     kind: "fade",
                     clipId: earlier.id,
+                    laterClipId: later.id,
                     fadeSide: earlierFade.side,
                     fadeIsLine: earlierFade.kind === "line",
                 };
@@ -190,10 +200,18 @@ export function hitOverlapControl(args: OverlapControlArgs): OverlapControlHit |
 
             // 3) clip 边缘（覆盖上面的淡变判定）：整行高、以边界为中心。
             if (Math.abs(contentX - laterStartPx) <= edgeWidthPx / 2) {
-                result = { kind: "clip-left-edge", clipId: later.id };
+                result = {
+                    kind: "clip-left-edge",
+                    clipId: later.id,
+                    laterClipId: later.id,
+                };
             }
             if (Math.abs(contentX - earlierEndPx) <= edgeWidthPx / 2) {
-                result = { kind: "clip-right-edge", clipId: earlier.id };
+                result = {
+                    kind: "clip-right-edge",
+                    clipId: earlier.id,
+                    laterClipId: later.id,
+                };
             }
 
             // 4) 交叉点抓手（**最高优先级**）：旧实现给它显式 `zIndex: 400`，注释
@@ -224,6 +242,7 @@ export function hitOverlapControl(args: OverlapControlArgs): OverlapControlHit |
                     result = {
                         kind: "crossfade-grip",
                         clipId: later.id,
+                        laterClipId: later.id,
                         partnerClipId: earlier.id,
                     };
                 }

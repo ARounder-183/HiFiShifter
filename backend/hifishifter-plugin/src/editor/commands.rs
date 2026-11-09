@@ -46,7 +46,7 @@ pub(crate) enum Lane {
 ///
 /// 【加一条新命令时】必须在 [`dispatch_slow`] 里加同名 arm；
 /// `every_slow_command_is_dispatchable` 会立刻发现漏加。
-const SLOW_COMMANDS: &[&str] = &["run_vocoder_benchmark"];
+const SLOW_COMMANDS: &[&str] = &["run_vocoder_benchmark", "analyze_clip_syllables"];
 
 /// 某条命令该走哪条线。
 pub(crate) fn lane(command: &str) -> Lane {
@@ -101,6 +101,184 @@ fn value<T: serde::Serialize>(input: T) -> Result<Value, String> {
 fn args<T: serde::de::DeserializeOwned>(input: Value) -> Result<T, String> {
     serde_json::from_value(input).map_err(|e| format!("invalid editor arguments: {e}"))
 }
+
+fn syllable_payload(
+    clip_id: &str,
+    take_id: &str,
+    analysis: Option<&hifishifter_kernel::pitch_analysis::TakeSyllableAnalysis>,
+) -> Value {
+    json!({
+        "ok": true,
+        "clipId": clip_id,
+        "takeId": take_id,
+        "sourceSpansSec": analysis.map(|a| a.source_spans_sec.iter().map(|s| {
+            json!({"startSec": s.start_sec, "endSec": s.end_sec})
+        }).collect::<Vec<_>>()).unwrap_or_default(),
+        "algorithm": analysis.map(|a| a.algorithm.clone()).unwrap_or_else(|| {
+            hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM.to_string()
+        }),
+        "algorithmVersion": analysis
+            .map(|a| a.algorithm_version)
+            .unwrap_or(hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM_VERSION),
+        "analyzed": analysis.is_some(),
+    })
+}
+
+/// 慢车道上的纯计算入口：输入是 actor 冻结的 owned 快照，输出可序列化结果。
+///
+/// 【为什么仍然显式接收整个请求类型】只靠 `TimelineState + clipId` 也能算，但那样
+/// worker 就得自己再查一次 Clip/Take/源，而查询到的版本未必与分析时一致。把身份
+/// 与快照绑在一个不可变值里，计算阶段天然不会“看着新源算旧窗口”。
+pub(crate) fn analyze_syllables(
+    request: super::session::SyllableAnalysisRequest,
+) -> Result<Value, String> {
+    let clip = request
+        .snapshot
+        .clips
+        .iter()
+        .find(|clip| clip.id == request.clip_id)
+        .ok_or("clip_not_found")?;
+    let take = clip
+        .takes
+        .iter()
+        .find(|take| take.id == request.take_id)
+        .ok_or("take_not_found")?;
+    // MIDI 音符本身已有精确边界，不应被音频估计覆盖；但这次仍返回一个明确的
+    // “无可分析音频”结果，由 actor 决定保留现有缓存还是回退。
+    if take
+        .midi_note_data
+        .as_ref()
+        .is_some_and(|notes| !notes.is_empty())
+    {
+        hifishifter_kernel::pitch_analysis::set_syllable_analysis_progress(None);
+        return Ok(json!({
+            "clipId": request.clip_id,
+            "takeId": request.take_id,
+            "sourceSpansSec": [],
+            "algorithm": hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM,
+            "algorithmVersion": hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM_VERSION,
+            "analyzed": false,
+        }));
+    }
+    // 插件这里读到的 `source_path` 一定是本会话物化的授权 PCM（在 actor 冻结快照
+    // 前已由 `check_source` 校验）。worker 只做计算，不重新解释路径。
+    if take.source_path.is_none() && clip.source_path.is_none() {
+        hifishifter_kernel::pitch_analysis::set_syllable_analysis_progress(None);
+        return Ok(json!({
+            "clipId": request.clip_id,
+            "takeId": request.take_id,
+            "sourceSpansSec": [],
+            "algorithm": hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM,
+            "algorithmVersion": hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM_VERSION,
+            "analyzed": false,
+        }));
+    }
+    let source_path = take
+        .source_path
+        .as_deref()
+        .or(clip.source_path.as_deref())
+        .ok_or_else(|| {
+            hifishifter_kernel::pitch_analysis::set_syllable_analysis_progress(None);
+            "source_missing".to_string()
+        })?;
+    let window_start = request.source_window.0.min(request.source_window.1);
+    let window_end = request.source_window.0.max(request.source_window.1);
+    hifishifter_kernel::pitch_analysis::set_syllable_analysis_progress(Some(
+        hifishifter_kernel::pitch_analysis::SyllableAnalysisProgress {
+            active: true,
+            clip_id: request.clip_id.clone(),
+            clip_name: clip.name.clone(),
+            progress: 0.02,
+            stage: "decoding".into(),
+            algorithm: hifishifter_kernel::game_onnx::GAME_ALGORITHM.into(),
+            message: None,
+        },
+    ));
+    let game = hifishifter_kernel::game_onnx::resolve_model_dir().map(|dir| {
+        hifishifter_kernel::game_onnx::analyze_source_file(
+            std::path::Path::new(source_path),
+            &dir,
+            hifishifter_kernel::game_onnx::GameInferenceConfig::default(),
+        )
+    });
+    let (spans, algorithm, version) = match game {
+        Some(Ok(events)) => (
+            hifishifter_kernel::game_onnx::syllable_spans_for_window(
+                &events,
+                window_start,
+                window_end,
+            )
+            .into_iter()
+            .map(
+                |(start, end)| hifishifter_kernel::pitch_analysis::SyllableSpan {
+                    start_sec: start,
+                    end_sec: end,
+                },
+            )
+            .collect::<Vec<_>>(),
+            hifishifter_kernel::game_onnx::GAME_ALGORITHM,
+            hifishifter_kernel::game_onnx::GAME_ALGORITHM_VERSION,
+        ),
+        Some(Err(error)) => {
+            log::warn!("GAME plugin syllable analysis failed: {error}");
+            (
+                match vad_fallback_spans(&request, clip) {
+                    Ok(spans) => spans,
+                    Err(error) => {
+                        hifishifter_kernel::pitch_analysis::set_syllable_analysis_progress(None);
+                        return Err(error);
+                    }
+                },
+                hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM,
+                hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM_VERSION,
+            )
+        }
+        None => (
+            match vad_fallback_spans(&request, clip) {
+                Ok(spans) => spans,
+                Err(error) => {
+                    hifishifter_kernel::pitch_analysis::set_syllable_analysis_progress(None);
+                    return Err(error);
+                }
+            },
+            hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM,
+            hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM_VERSION,
+        ),
+    };
+    hifishifter_kernel::pitch_analysis::set_syllable_analysis_progress(None);
+    Ok(json!({
+        "clipId": request.clip_id,
+        "takeId": request.take_id,
+        "sourceSpansSec": spans.iter().map(|span| json!({
+            "startSec": span.start_sec,
+            "endSec": span.end_sec,
+        })).collect::<Vec<_>>(),
+        "algorithm": algorithm,
+        "algorithmVersion": version,
+        // 空 spans 代表“没检测到发声”，不是分析失败；actor 会保留旧缓存并回退。
+        "analyzed": !spans.is_empty(),
+    }))
+}
+
+fn vad_fallback_spans(
+    request: &super::session::SyllableAnalysisRequest,
+    clip: &hifishifter_kernel::state::Clip,
+) -> Result<Vec<hifishifter_kernel::pitch_analysis::SyllableSpan>, String> {
+    let (level, pitch) = hifishifter_kernel::pitch_clip::analyze_clip_for_syllables_isolated(
+        &request.snapshot,
+        clip,
+        &request.root_track_id,
+        request.frame_period_ms,
+        &|| false,
+    )
+    .ok_or("source_missing")?;
+    Ok(hifishifter_kernel::pitch_analysis::estimate_syllable_spans(
+        &level,
+        &pitch,
+        request.frame_period_ms,
+        hifishifter_kernel::pitch_analysis::SyllableConfig::default(),
+    ))
+}
 #[cfg(test)]
 mod lane_tests {
     use super::*;
@@ -114,6 +292,13 @@ mod lane_tests {
     fn every_slow_command_is_dispatchable() {
         for command in SLOW_COMMANDS {
             assert_eq!(lane(command), Lane::Slow, "{command} 必须在慢车道表里");
+            // 音节分析是由 actor 冻结快照后派发的计算型慢任务，不经过
+            // `dispatch_slow` 的纯函数入口。它仍必须被视为慢命令，否则
+            // `enqueue` 会把它排回 actor。
+            if *command == "analyze_clip_syllables" {
+                assert_eq!(lane(command), Lane::Slow);
+                continue;
+            }
             assert!(
                 slow_dispatch_target(command).is_some_and(|(name, _)| name == *command),
                 "{command} 在表里但 dispatch_slow 没有对应 arm"
@@ -141,6 +326,96 @@ mod lane_tests {
         ] {
             assert_eq!(lane(command), Lane::Actor, "{command} 必须留在 actor 上");
         }
+    }
+
+    /// **参数块四项命令必须由插件 actor 真正接住。**
+    ///
+    /// 这条不是“命令名存在”就算过：它验证新机制不会在 VST/ARA 里落到
+    /// `Command unavailable`，且查询 / 合并写入不会误改参数曲线。
+    #[test]
+    fn param_block_commands_are_wired_in_the_plugin() {
+        let (_model, owner, _id) = crate::editor::session::tests::fixture();
+        let editor = owner.editor_session().unwrap();
+        let (reply, rx) = std::sync::mpsc::channel();
+        let (events, _event_rx) = std::sync::mpsc::sync_channel(256);
+        let sink = crate::editor::session::UiSink {
+            view_id: "param-block-diagnostic".into(),
+            reply,
+            events,
+            closed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let call = |id, command: &str, args| {
+            editor
+                .enqueue(crate::editor::session::UiRequest {
+                    id,
+                    command: command.into(),
+                    args,
+                    sink: sink.clone(),
+                    link: None,
+                })
+                .unwrap();
+            let response: Value = rx.recv_timeout(std::time::Duration::from_secs(3)).unwrap();
+            assert_eq!(response["ok"], true, "{response}");
+            response["value"].clone()
+        };
+        let timeline = call(1, "get_timeline_state", json!({}));
+        let track = timeline["tracks"][0]["id"].as_str().unwrap().to_owned();
+        let clip = timeline["clips"][0]["id"].as_str().unwrap().to_owned();
+        let take = timeline["clips"][0]["takes"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        {
+            let mut timeline = editor.timeline.lock_or_recover();
+            timeline.clips[0].takes[0].syllable_analysis =
+                Some(hifishifter_kernel::pitch_analysis::TakeSyllableAnalysis {
+                    algorithm: hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM.into(),
+                    algorithm_version:
+                        hifishifter_kernel::pitch_analysis::SYLLABLE_ALGORITHM_VERSION,
+                    source_digest: "param-block-test".into(),
+                    source_spans_sec: vec![hifishifter_kernel::pitch_analysis::SyllableSpan {
+                        start_sec: 0.0,
+                        end_sec: 0.001,
+                    }],
+                });
+        }
+        let payload = call(
+            2,
+            "set_param_block_merges",
+            json!({
+                "rootTrackId": track,
+                "records": [{
+                    "mergedGroupId": "merged:v7",
+                    "memberRefs": [
+                        {"clipId":clip.clone(),"takeId":take.clone(),"syllableId":"a","sourceStartSec":0.0,"sourceEndSec":0.00004},
+                        {"clipId":clip.clone(),"takeId":take.clone(),"syllableId":"b","sourceStartSec":0.00004,"sourceEndSec":0.00008}
+                    ]
+                }],
+                "intervalEdits": [{
+                    "editId": "edit:v7",
+                    "memberRefs": [
+                        {"clipId":clip.clone(),"takeId":take.clone(),"syllableId":"a","sourceStartSec":0.0,"sourceEndSec":0.00004}
+                    ],
+                    "startSec": 0.0,
+                    "endSec": 0.03,
+                    "explicit": true,
+                    "transitionSec": 0.25
+                }],
+                "checkpoint": true
+            }),
+        );
+        assert_eq!(payload["ok"], true);
+        let read = call(3, "get_param_block_merges", json!({"rootTrackId": track}));
+        assert_eq!(read["ok"], true);
+        assert!(
+            read["records"].as_array().is_some(),
+            "查询必须返回与 App 同形的 records 数组"
+        );
+        assert_eq!(read["intervalEdits"][0]["editId"], "edit:v7");
+        assert_eq!(read["intervalEdits"][0]["endSec"], 0.03);
+        assert_eq!(read["intervalEdits"][0]["explicit"], true);
+        assert_eq!(read["intervalEdits"][0]["transitionSec"], 0.25);
+        // 通道容量足够容纳本测试产生的 history/state 事件；不读取内容。
     }
 }
 
@@ -498,6 +773,153 @@ struct StretchLinked {
     mappings: Vec<hifishifter_kernel::state::StretchLinkedRangeSec>,
     checkpoint: Option<bool>,
 }
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MergeRecordInput {
+    merged_group_id: String,
+    #[serde(default)]
+    member_refs: Vec<MergeMemberInput>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MergeMemberInput {
+    clip_id: String,
+    take_id: String,
+    syllable_id: String,
+    source_start_sec: f64,
+    source_end_sec: f64,
+}
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IntervalEditInput {
+    edit_id: String,
+    #[serde(default)]
+    member_refs: Vec<MergeMemberInput>,
+    start_sec: f64,
+    end_sec: f64,
+    #[serde(default)]
+    member_start_sec: f64,
+    #[serde(default)]
+    member_end_sec: f64,
+    #[serde(default)]
+    block_ids: Vec<String>,
+    #[serde(default)]
+    explicit: bool,
+    #[serde(default)]
+    deleted: bool,
+    #[serde(default)]
+    manual: bool,
+    #[serde(default)]
+    value: Option<f64>,
+    #[serde(default)]
+    transition_sec: f64,
+}
+
+fn interval_edit_input_is_valid(edit: &IntervalEditInput) -> bool {
+    let width = edit.end_sec - edit.start_sec;
+    !edit.member_refs.is_empty()
+        && edit.edit_id.len() <= 512
+        && width.is_finite()
+        // 切分不再有用户可见的最短块限制。这里只拒绝真正零宽 / 倒序记录，
+        // 不能再沿用 20ms 阈值，否则短切段会在命令入口被静默删掉。
+        && width > 1e-9
+        && edit.start_sec.is_finite()
+        && edit.end_sec.is_finite()
+}
+
+fn interval_edit_payload(edit: &ParamBlockIntervalEdit) -> Value {
+    json!({
+        "editId": edit.edit_id,
+        "memberRefs": edit.member_refs.iter().map(|member| json!({
+            "clipId": member.clip_id,
+            "takeId": member.take_id,
+            "syllableId": member.syllable_id,
+            "sourceStartSec": member.source_start_sec,
+            "sourceEndSec": member.source_end_sec,
+        })).collect::<Vec<_>>(),
+        "startSec": edit.start_sec,
+        "endSec": edit.end_sec,
+        "memberStartSec": edit.member_start_sec,
+        "memberEndSec": edit.member_end_sec,
+        "blockIds": edit.block_ids,
+        "explicit": edit.explicit,
+        "deleted": edit.deleted,
+        "manual": edit.manual,
+        "value": edit.value,
+        "transitionSec": edit.transition_sec,
+    })
+}
+
+#[cfg(test)]
+mod interval_edit_input_tests {
+    use super::{
+        interval_edit_input_is_valid, interval_edit_payload, IntervalEditInput, MergeMemberInput,
+        ParamBlockIntervalEdit, ParamBlockMemberRef,
+    };
+
+    fn edit(start_sec: f64, end_sec: f64) -> IntervalEditInput {
+        IntervalEditInput {
+            edit_id: "edit:split".into(),
+            member_refs: vec![MergeMemberInput {
+                clip_id: "clip".into(),
+                take_id: "take".into(),
+                syllable_id: "split".into(),
+                source_start_sec: 0.0,
+                source_end_sec: 1.0,
+            }],
+            start_sec,
+            end_sec,
+            member_start_sec: 0.0,
+            member_end_sec: 1.0,
+            block_ids: Vec::new(),
+            explicit: true,
+            deleted: false,
+            manual: false,
+            value: None,
+            transition_sec: 0.0,
+        }
+    }
+
+    #[test]
+    fn keeps_short_split_segments() {
+        assert!(interval_edit_input_is_valid(&edit(0.0, 0.001)));
+    }
+
+    #[test]
+    fn rejects_only_zero_width_and_reversed_segments() {
+        assert!(!interval_edit_input_is_valid(&edit(0.5, 0.5)));
+        assert!(!interval_edit_input_is_valid(&edit(0.5, 0.49)));
+    }
+
+    #[test]
+    fn payload_round_trips_explicit_and_transition_fields() {
+        let payload = interval_edit_payload(&ParamBlockIntervalEdit {
+            edit_id: "edit:split".into(),
+            member_refs: vec![ParamBlockMemberRef {
+                clip_id: "clip".into(),
+                take_id: "take".into(),
+                syllable_id: "split".into(),
+                source_start_sec: 0.0,
+                source_end_sec: 0.001,
+            }],
+            start_sec: 0.0,
+            end_sec: 0.001,
+            member_start_sec: 0.0,
+            member_end_sec: 1.0,
+            block_ids: vec!["auto:clip:source".into()],
+            explicit: true,
+            deleted: false,
+            manual: false,
+            value: None,
+            transition_sec: 0.25,
+        });
+        assert_eq!(payload["explicit"], true);
+        assert_eq!(payload["transitionSec"], 0.25);
+        assert_eq!(payload["endSec"], 0.001);
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Segment {
@@ -550,7 +972,6 @@ fn estimated_full_payload_bytes(
     for clip in &timeline.clips {
         // 每条 clip 的定长字段（id / 路径 / 淡变 / 速率 / 颜色 …）。
         bytes += 1024;
-        bytes += clip.waveform_preview.as_ref().map_or(0, |w| w.len() * 12);
         bytes += clip
             .midi_note_data
             .as_ref()
@@ -596,6 +1017,11 @@ pub(crate) fn payload(session: &EditorSession, lite: bool) -> Result<Value, Stri
     } else {
         timeline.to_payload()
     };
+    // The editor fetches waveform mipmaps through the binary API. Repeating
+    // previews in every timeline reply floods the UI thread and WebView heap.
+    for clip in &mut payload.clips {
+        clip.waveform_preview = None;
+    }
     payload.playhead_sec = position.max(0.);
     let (undo, redo) = history_depths_of(&session.history.lock_or_recover());
     payload.undo_depth = Some(undo);
@@ -736,12 +1162,24 @@ fn peaks(
     Ok(result)
 }
 
+/// Read-only startup data has no document/PCM dependency and can bypass the actor.
+pub(crate) fn startup_settings(command: &str) -> Option<Value> {
+    match command {
+        "get_ui_settings" => Some(json!(crate::settings_store::settings())),
+        "ui_kv_dump" => Some(json!(crate::settings_store::frontend_prefs())),
+        _ => None,
+    }
+}
+
 /// 仅actor线程调用。宿主PCM不可用/未知命令/平台能力缺失均明确报错。
 pub(super) fn dispatch(
     session: &EditorSession,
     command: &str,
     input: Value,
 ) -> Result<Value, String> {
+    if let Some(settings) = startup_settings(command) {
+        return Ok(settings);
+    }
     match command {
         "list_directory"
         | "stat_paths"
@@ -894,6 +1332,189 @@ pub(super) fn dispatch(
         // 音频来自宿主授权的 PCM（插件禁止读本地文件），切片/倒放/下混与 App 共用
         // kernel 的 `formant_cache::analyze_clip_formants_from_interleaved`。
         "analyze_clip_formants" => return value(session.analyze_clip_formants(&input)?),
+        // ── 参数块：与独立 App 同形的只读 / 缓存命令 ──
+        //
+        // 只读查询与合并持久化在第一批闭环；音频重分析在第二批由 `enqueue`
+        // 分流到慢车道，worker 只计算、actor 复核后提交。
+        "get_clip_syllable_spans" => {
+            let clip_id = input["clipId"].as_str().ok_or("clipId missing")?;
+            let timeline = session.timeline.lock_or_recover();
+            let clip = timeline
+                .clips
+                .iter()
+                .find(|clip| clip.id == clip_id)
+                .ok_or("clip_not_found")?;
+            let take = clip.active_take();
+            let source_path = take
+                .source_path
+                .as_deref()
+                .or(clip.source_path.as_deref())
+                .unwrap_or_default();
+            let digest = crate::editor::session::syllable_source_digest(
+                source_path,
+                take,
+                timeline.frame_period_ms(),
+            );
+            let analysis = take
+                .syllable_analysis
+                .as_ref()
+                .filter(|analysis| analysis.is_current(&digest));
+            return Ok(syllable_payload(clip_id, &take.id, analysis));
+        }
+        "analyze_clip_syllables" => {
+            // 不可达：`enqueue` 在慢车道分流处改投 `EnqueueSyllableAnalysis`，
+            // 由 actor 冻结快照后再派发慢任务。保留这条 arm 是为了有人绕过
+            // `enqueue` 直接调 `dispatch` 时得到可诊断的失败，而不是在 actor 上
+            // 同步解码（那会让所有编辑与宿主保存一起排队）。
+            return Err("analyze_clip_syllables must run on the syllable slow lane".into());
+        }
+        "get_param_line_blocks" => {
+            return session.param_line_block_payload(
+                input["rootTrackId"].as_str().ok_or("rootTrackId missing")?,
+            );
+        }
+        "set_param_line_blocks" => {
+            let root = input["rootTrackId"].as_str().ok_or("rootTrackId missing")?;
+            let expected = input["expectedRevision"]
+                .as_u64()
+                .ok_or("expectedRevision missing")?;
+            return session.set_param_line_blocks(
+                root,
+                expected,
+                args(input["blocks"].clone())?,
+                input
+                    .get("gameBaseline")
+                    .filter(|value| !value.is_null())
+                    .map(|value| args(value.clone()))
+                    .transpose()?,
+                input["checkpoint"].as_bool().unwrap_or(true),
+                input
+                    .get("curvePatches")
+                    .map(|value| args(value.clone()))
+                    .transpose()?
+                    .unwrap_or_default(),
+                input["expectedCurveRevision"].as_u64(),
+                input["expectedGeometryRevision"].as_u64(),
+                input["expectedGeometrySignature"].as_str(),
+            );
+        }
+        "get_param_block_merges" => {
+            let root_track_id = input["rootTrackId"].as_str().ok_or("rootTrackId missing")?;
+            track_exists(session, root_track_id)?;
+            let timeline = session.timeline.lock_or_recover();
+            let records = timeline
+                .params_by_root_track
+                .get(root_track_id)
+                .map(|entry| {
+                    entry
+                        .param_block_merges
+                        .iter()
+                        .map(|record| {
+                            json!({
+                                "mergedGroupId": record.merged_group_id,
+                                "memberRefs": record.member_refs.iter().map(|member| json!({
+                                    "clipId": member.clip_id,
+                                    "takeId": member.take_id,
+                                    "syllableId": member.syllable_id,
+                                    "sourceStartSec": member.source_start_sec,
+                                    "sourceEndSec": member.source_end_sec,
+                                })).collect::<Vec<_>>(),
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let interval_edits = timeline
+                .params_by_root_track
+                .get(root_track_id)
+                .map(|entry| {
+                    entry
+                        .param_block_interval_edits
+                        .iter()
+                        .map(interval_edit_payload)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            return Ok(json!({"ok": true, "records": records, "intervalEdits": interval_edits}));
+        }
+        "set_param_block_merges" => {
+            let root_track_id = input["rootTrackId"]
+                .as_str()
+                .ok_or("rootTrackId missing")?
+                .to_owned();
+            track_exists(session, &root_track_id)?;
+            let records: Vec<MergeRecordInput> = args(input["records"].clone())?;
+            let interval_edits: Vec<IntervalEditInput> = args(
+                input
+                    .get("intervalEdits")
+                    .cloned()
+                    .unwrap_or_else(|| json!([])),
+            )?;
+            let checkpoint = input["checkpoint"].as_bool().unwrap_or(true);
+            let mut timeline = session.timeline.lock_or_recover();
+            if checkpoint {
+                session.checkpoint_timeline(&timeline, HistoryOp::ParamBlockMerge);
+            }
+            timeline.ensure_params_for_root(&root_track_id);
+            if let Some(entry) = timeline.params_by_root_track.get_mut(&root_track_id) {
+                // 只替换合并意图；曲线 / 原线缓存 / 动态基线全部原样保留。
+                entry.param_block_merges = records
+                    .into_iter()
+                    .map(|record| hifishifter_kernel::state::ParamBlockMergeRecord {
+                        merged_group_id: record.merged_group_id,
+                        member_refs: record
+                            .member_refs
+                            .into_iter()
+                            .map(|member| hifishifter_kernel::state::ParamBlockMemberRef {
+                                clip_id: member.clip_id,
+                                take_id: member.take_id,
+                                syllable_id: member.syllable_id,
+                                source_start_sec: member.source_start_sec,
+                                source_end_sec: member.source_end_sec,
+                            })
+                            .collect(),
+                    })
+                    .filter(|record| record.member_refs.len() >= 2)
+                    .collect();
+                entry.param_block_interval_edits = interval_edits
+                    .into_iter()
+                    .filter(interval_edit_input_is_valid)
+                    .map(|edit| hifishifter_kernel::state::ParamBlockIntervalEdit {
+                        edit_id: edit.edit_id,
+                        member_refs: edit
+                            .member_refs
+                            .into_iter()
+                            .map(|member| hifishifter_kernel::state::ParamBlockMemberRef {
+                                clip_id: member.clip_id,
+                                take_id: member.take_id,
+                                syllable_id: member.syllable_id,
+                                source_start_sec: member.source_start_sec,
+                                source_end_sec: member.source_end_sec,
+                            })
+                            .collect(),
+                        start_sec: edit.start_sec,
+                        end_sec: edit.end_sec,
+                        member_start_sec: edit.member_start_sec,
+                        member_end_sec: edit.member_end_sec,
+                        block_ids: edit.block_ids,
+                        explicit: edit.explicit,
+                        deleted: edit.deleted,
+                        manual: edit.manual,
+                        value: edit.value,
+                        transition_sec: edit.transition_sec,
+                    })
+                    .collect();
+            }
+            timeline.sync_clip_takes_from_flat();
+            let clips = timeline.clips.clone();
+            // 与 App 侧同一校核：删除 / 换 take / 重分析后不留悬空合并引用。
+            if let Some(entry) = timeline.params_by_root_track.get_mut(&root_track_id) {
+                entry.prune_param_block_merges(&clips);
+            }
+            drop(timeline);
+            session.mark_dirty();
+            return after_write(session, json!({"ok": true}));
+        }
         "plugin_refresh" => {
             session.ensure_loaded(input["force"].as_bool().unwrap_or(false))?;
             return payload(session, false);
@@ -999,6 +1620,9 @@ pub(super) fn dispatch(
     }
     if let Err(error) = session.ensure_loaded(false) {
         if matches!(command, "get_timeline_state" | "get_timeline_state_lite") {
+            if session.is_loaded() || session.source_files_pending() {
+                return payload(session, command == "get_timeline_state_lite");
+            }
             if let Some(document) = session.document() {
                 if !document.ui_tracks.lock_or_recover().is_empty() {
                     {
@@ -1012,7 +1636,25 @@ pub(super) fn dispatch(
                 }
             }
         }
-        return Err(error);
+        let inventory_command = matches!(
+            command,
+            "get_param_frames"
+                | "set_param_frames"
+                | "restore_param_frames"
+                | "set_static_param"
+                | "get_static_param"
+                | "set_track_state"
+                | "select_clip"
+                | "select_track"
+                | "undo_parameter_edit"
+                | "redo_parameter_edit"
+                | "undo_timeline"
+                | "redo_timeline"
+                | "set_history_position"
+        );
+        if !session.source_files_pending() || !inventory_command {
+            return Err(error);
+        }
     }
     match command {
         "get_timeline_state" => payload(session, false),
@@ -1457,6 +2099,11 @@ pub(super) fn dispatch(
                 None => Value::Null,
             },
         ),
+        "get_syllable_analysis_progress" => Ok(
+            hifishifter_kernel::pitch_analysis::syllable_analysis_progress()
+                .map(|progress| serde_json::to_value(progress).unwrap_or(Value::Null))
+                .unwrap_or(Value::Null),
+        ),
         // 把编辑后的音高曲线导出成 MIDI。
         //
         // 【为什么插件里能做】整条链路是纯变换（读音高数据 → 写文件），不需要任何
@@ -1709,6 +2356,10 @@ pub(super) fn dispatch(
             if let Some((next, _, selection)) =
                 history::jump(&mut recorded, &timeline, target, intent, None)
             {
+                let layout_only =
+                    hifishifter_kernel::param_line_blocks::timeline_equal_except_blocks(
+                        &timeline, &next,
+                    );
                 if matches!(command, "undo_parameter_edit" | "redo_parameter_edit") {
                     // 参数快照只恢复控制数据，绝不把旧clip位置/源窗口写回或覆盖当前宿主几何。
                     timeline.params_by_root_track = next.params_by_root_track;
@@ -1728,9 +2379,13 @@ pub(super) fn dispatch(
                 drop(recorded);
                 let timeline_for_publish = timeline.clone();
                 drop(timeline);
-                session.restore_authority_step(target);
-                session.mark_dirty();
-                session.publish_timeline(timeline_for_publish);
+                let restored_curve = session.restore_authority_step(target);
+                if !layout_only || restored_curve == Some(true) {
+                    session.mark_dirty();
+                    session.publish_timeline(timeline_for_publish);
+                } else {
+                    session.mark_metadata_dirty();
+                }
                 session.emit("history_state", history_state(session));
                 session.notify_timeline();
                 let mut payload = payload(session, false)?;

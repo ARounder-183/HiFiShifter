@@ -215,6 +215,20 @@ impl HiFiGanRenderer {
         formant_shift_curve: Option<&[f32]>,
         tension_curve: Option<&[f32]>,
     ) -> Result<Vec<f32>, String> {
+        self.render_with_formant_with_growl(ctx, formant_shift_curve, tension_curve, None)
+    }
+
+    /// 与 [`Self::render_with_formant`] 相同，额外把 `hifigan_growl` 曲线纳入
+    /// 分块哈希。怒音本身已在进入本函数前作用于波形（见 `chain.rs` 的
+    /// `apply_growl`），这里**不重复施加**；该曲线只用于让分块缓存感知变化，
+    /// 否则修改怒音后会命中旧块，听感与缓存行为不一致。
+    pub fn render_with_formant_with_growl(
+        &self,
+        ctx: &RenderContext<'_>,
+        formant_shift_curve: Option<&[f32]>,
+        tension_curve: Option<&[f32]>,
+        growl_curve: Option<&[f32]>,
+    ) -> Result<Vec<f32>, String> {
         let fp = ctx.frame_period_ms;
         let clip_start = ctx.clip_start_sec;
         let pitch_edit = ctx.pitch_edit;
@@ -264,12 +278,15 @@ impl HiFiGanRenderer {
         // 构建元组数组，不再 new() HashMap 并 clone() 大数组。
         // 张力曲线一并纳入：它虽已在进入本函数前施加到波形上，但**分块缓存的
         // 哈希必须知道它**，否则改张力会命中陈旧块（见函数文档）。
-        let mut extra_curves: Vec<(&str, &[f32])> = Vec::with_capacity(2);
+        let mut extra_curves: Vec<(&str, &[f32])> = Vec::with_capacity(3);
         if let Some(c) = formant_shift_curve {
             extra_curves.push(("formant_shift_cents", c));
         }
         if let Some(c) = tension_curve {
             extra_curves.push(("hifigan_tension", c));
+        }
+        if let Some(c) = growl_curve {
+            extra_curves.push(("hifigan_growl", c));
         }
 
         // 【已删除的 per-segment 合成缓存查询】这里曾对整段曲线切片做一次

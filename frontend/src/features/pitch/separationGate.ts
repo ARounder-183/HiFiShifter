@@ -11,6 +11,7 @@
  *
  * - `breath_gain`（气声音量）：噪声支只存在于 HNSEP 分离路径；
  * - `hifigan_tension`（张力）：Rd 张力只重塑**谐波**支，同样依赖分离。
+ * - `hifigan_growl`（怒音）：GRWC 怒音只调制**谐波**支，同样依赖分离。
  *
  * 开关关闭时，这两个参数在 UI 上置灰、不可选中，其曲线**不可编辑**；
  * 已经显示出来的曲线不会因为开关关闭而消失（见 `paramNeedingVisibilityOnGate`），
@@ -42,7 +43,11 @@ export const SEPARATION_PARAM_ID = "breath_enabled";
  *
  * 必须与后端 `pitch_editing::HIFIGAN_SEPARATION_GATED_CURVES` 保持一致。
  */
-export const SEPARATION_GATED_PARAMS: readonly string[] = ["breath_gain", "hifigan_tension"];
+export const SEPARATION_GATED_PARAMS: readonly string[] = [
+    "breath_gain",
+    "hifigan_tension",
+    "hifigan_growl",
+];
 
 /**
  * 开关状态是否为"开"。
@@ -115,7 +120,7 @@ export function paramNeedingVisibilityOnGate(
 /**
  * Compose 关闭时不可用的参数：**音高之外**的轨道级"合成"参数。
  *
- * 需求口径：Compose 只影响**音高、共振峰、气声、张力**这四类合成参数；
+ * 需求口径：Compose 只影响**音高、共振峰、气声、张力、怒音**这五类合成参数；
  * 音量 / 声相 / 动态是**混音级**参数，刻意不受 Compose 限制，不在此列。
  * 音高由 `pitch_requires_compose` 单独提示，故这里只列其余三项。
  */
@@ -123,6 +128,7 @@ export const COMPOSE_GATED_PARAMS: readonly string[] = [
     "formant_shift_cents",
     "breath_gain",
     "hifigan_tension",
+    "hifigan_growl",
 ];
 
 /**

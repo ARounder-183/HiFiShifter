@@ -18,7 +18,7 @@
  * | cents 类参数 | `child_pitch_offset_cents@*` | additive | 1 | 值本身就是 cents |
  * | 音级类参数 | `child_pitch_offset_degrees@*` | additive | 0.01 | 1 音级名义 = 100 cents |
  * | 乘性增益 | `dyn` / `volume` / `breath_gain` | multiplicative | 0.01 | cents/100 即深度比 |
- * | 其余原始值域 | `hifigan_tension` / `breathiness` / `pan` | additive | 半量程/100 | 按量程百分比 |
+ * | 其余原始值域 | `hifigan_tension` / `hifigan_growl` / `breathiness` / `pan` | additive | 半量程/100 | 按量程百分比 |
  *
  * 【乘性族的静音保护】`dyn` / `volume` / `breath_gain` 都是增益：乘性调制下
  * `base = 0` 恒为 `0`，静音帧不会被"抬起来"。历史实现在 `volume` /
@@ -76,6 +76,7 @@ const RAW_RANGE_FALLBACK: Record<string, VibratoParamRange> = {
     // 换算因子差 100 倍（30 分的深度只摆 0.3 个单位，肉眼看不见）。
     hifigan_tension: { min: -100, max: 100 },
     tension: { min: -100, max: 100 },
+    hifigan_growl: { min: 0, max: 100 },
     breathiness: { min: -10000, max: 10000 },
     pan: { min: -1, max: 1 },
 };

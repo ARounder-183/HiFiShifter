@@ -281,6 +281,18 @@ export interface TimelineStateResult {
     secFromClientX: (clientX: number, bounds: DOMRect, xScroll: number) => number;
     beatFromClientX: (clientX: number, bounds: DOMRect, xScroll: number) => number;
     trackIdFromClientY: (clientY: number) => string | null;
+    /**
+     * 指针落在全部轨道之下时的轨道 id。
+     *
+     * `trackIdFromClientY` 对「轨道下方空白」返回 null，但素材拖入需要区分
+     * 「落到第一轨」与「落到新建轨道行」。这里单独给一个只用于拖放的解析器：
+     * 轨道区内返回真实 id，轨道之下返回 null，轨道上方返回第一轨。
+     */
+    dropTrackIdFromClientY: (clientY: number) => string | null;
+    /** 拖放落点：指针下方的轨道下标；`tracks.length` 表示新建轨道哨兵行。 */
+    dropTrackIndexFromClientY: (clientY: number) => number;
+    /** 拖放落点：目标行内纵向比例（末行下半行判新轨用）。 */
+    dropRowFractionFromClientY: (clientY: number) => number;
     rowTopForTrackId: (trackId: string | null) => number;
     ensureDropPreviewDuration: (path: string) => void;
     getDropPreviewWidthPx: (durationSec: number) => number;
@@ -1037,6 +1049,43 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
         return tracks[idx]?.id ?? null;
     }
 
+    /**
+     * 拖放专用：解析「指针所在的轨道下标」。
+     *
+     * 与 `trackIdFromClientY` 的差别只在越界语义：
+     * - 轨道下方 → `tracks.length`（哨兵行，导入时新建轨道）；
+     * - 轨道上方 → `0`（拖过标尺时不要凭空落到"第 -1 行"）。
+     *
+     * 这样落点预览、导入目标与右键框选共用同一套下标，不再靠"返回 null
+     * 然后调用方各自猜"。`scrollRef` 在内核模式下不存在，返回 0 表示
+     * 「无法量测」；面板侧的 `resolveTrackIdAtClientY` 会走宿主分支。
+     */
+    function dropTrackIndexFromClientY(clientY: number): number {
+        const scroller = scrollRef.current;
+        if (!scroller) return 0;
+        const bounds = scroller.getBoundingClientRect();
+        const y = clientY - bounds.top + scroller.scrollTop;
+        const tracks = sessionRef.current.tracks;
+        const idx = Math.floor(y / Math.max(1, rowHeightRef.current));
+        return Math.max(0, Math.min(tracks.length, idx));
+    }
+
+    function dropRowFractionFromClientY(clientY: number): number {
+        const scroller = scrollRef.current;
+        if (!scroller) return 0;
+        const bounds = scroller.getBoundingClientRect();
+        const rowHeightPx = Math.max(1, rowHeightRef.current);
+        const y = Math.max(0, clientY - bounds.top + scroller.scrollTop);
+        return Math.min(1, Math.max(0, (y % rowHeightPx) / rowHeightPx));
+    }
+
+    /** 拖放专用：轨道区内返回 id，轨道下方返回 null（新建轨道）。 */
+    function dropTrackIdFromClientY(clientY: number): string | null {
+        const tracks = sessionRef.current.tracks;
+        const idx = dropTrackIndexFromClientY(clientY);
+        return idx >= 0 && idx < tracks.length ? (tracks[idx]?.id ?? null) : null;
+    }
+
     function rowTopForTrackId(trackId: string | null) {
         const tracks = sessionRef.current.tracks;
         const rowHeightPx = rowHeightRef.current;
@@ -1298,6 +1347,9 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
         secFromClientX,
         beatFromClientX,
         trackIdFromClientY,
+        dropTrackIdFromClientY,
+        dropTrackIndexFromClientY,
+        dropRowFractionFromClientY,
         rowTopForTrackId,
         ensureDropPreviewDuration,
         getDropPreviewWidthPx,

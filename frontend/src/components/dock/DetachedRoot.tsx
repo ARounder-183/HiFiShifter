@@ -32,9 +32,11 @@ import { useAppTheme } from "../../theme/AppThemeProvider";
 import type { AppearanceSettings } from "../../theme/themeTypes";
 import { DockSubRoot } from "./DockSubRoot";
 import { DockPanelHosts } from "./DockPanelHosts";
+import { useSyllableAnalysisEvents } from "../../features/session/useSyllableAnalysisEvents";
 import "./dock.css";
 
 export function DetachedRoot() {
+    useSyllableAnalysisEvents();
     const formId = satelliteFormId();
     const form = useAppSelector((state) =>
         formId ? (state.dock.layout.forms[formId] ?? null) : null,

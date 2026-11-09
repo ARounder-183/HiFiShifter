@@ -19,6 +19,7 @@ pub(crate) fn read_source_pcm(
     sample_rate: u32,
     version: u64,
 ) -> Result<SourcePcm, AraError> {
+    let _startup_span = crate::startup::Span::new("ara.source_read", 0, frames as u64);
     // 【为什么不再限定 44.1/48k】宿主工程与素材都可能是 88.2/96/176.4/192k（母带、后期
     // 很常见）。此前直接 `Unsupported` ⇒ 插件**一条 region 都拿不到** ⇒ 整个插件静默
     // 不可用。读取路径是**离线**的（不在音频回调里），而下游两处都已经会重采样：

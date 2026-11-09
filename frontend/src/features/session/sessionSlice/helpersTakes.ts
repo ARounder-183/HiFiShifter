@@ -29,6 +29,10 @@ export function parseSelectClipRemoteArg(
 }
 
 export function parseTimelineClipTake(take: TimelineClipTake): ClipTakeInfo {
+    // 后端（插件 actor / 独立 App）把音节区间保存在 Take 上；mock 也走同一个
+    // camelCase 投影。漏掉这一层会让自动分析的结果在 `fetchTimeline` 后消失，
+    // 于是自动分析 effect 再次看到“没有区间”的 Clip —— 在 mock 里就是无限分析
+    // 循环（表现为页面无响应、参数区永远空白）。
     return {
         id: take.id,
         name: take.name ?? "",
@@ -58,6 +62,10 @@ export function parseTimelineClipTake(take: TimelineClipTake): ClipTakeInfo {
             channel: n.channel ?? 0,
         })),
         midiFillGaps: take.midi_fill_gaps ?? false,
+        syllableSpansSec: take.syllable_spans_sec?.map(([startSec, endSec]) => ({
+            startSec,
+            endSec,
+        })),
         // 宿主的非线性拉伸标记 / take 包络：插件不渲染，但前端要据此把分割/拖边显式
         // 置为只读（见 `clipHasNonlinearStretch` / `clipHasTakeEnvelope`）。
         stretchMarkers: Array.isArray(take.stretch_markers) ? take.stretch_markers : undefined,
@@ -90,6 +98,7 @@ export function parseClipTakes(clip: TimelineClip, flat: ClipInfo): ClipTakeInfo
             sourceChannels: flat.sourceChannels,
             midiNoteData: flat.midiNoteData,
             midiFillGaps: flat.midiFillGaps ?? false,
+            syllableSpansSec: flat.syllableSpansSec,
         },
     ];
 }
@@ -186,6 +195,7 @@ export function updateActiveTakeFromFlat(clip: ClipInfo): void {
     take.loopEnabled = clip.loopEnabled;
     take.midiNoteData = clip.midiNoteData;
     take.midiFillGaps = clip.midiFillGaps;
+    take.syllableSpansSec = clip.syllableSpansSec;
 }
 
 /**
@@ -231,6 +241,7 @@ export function applyActiveTakeToFlat(clip: ClipInfo, take: ClipTakeInfo): void 
     clip.midiNoteData = take.midiNoteData;
     clip.midiNoteCount = take.midiNoteData?.length;
     clip.midiFillGaps = take.midiFillGaps ?? false;
+    clip.syllableSpansSec = take.syllableSpansSec;
 }
 
 /**
@@ -314,6 +325,7 @@ export type TakeOptimisticFlat = Pick<
     | "midiNoteData"
     | "midiNoteCount"
     | "midiFillGaps"
+    | "syllableSpansSec"
 >;
 
 export const pendingTakeRollbacks = new Map<
@@ -346,6 +358,7 @@ export const TAKE_FLAT_KEYS = [
     "midiNoteData",
     "midiNoteCount",
     "midiFillGaps",
+    "syllableSpansSec",
 ] as const satisfies readonly (keyof TakeOptimisticFlat)[];
 
 export function snapshotTakeValue(value: unknown): unknown {

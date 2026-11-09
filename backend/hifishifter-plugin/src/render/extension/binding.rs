@@ -1,6 +1,12 @@
 //! 宿主适配器绑定、region → item 几何求解、清单刷新与退避。
 use super::*;
+const HOST_QUERY_BUSY: &str = "host query deferred: document transaction busy";
 impl ExtensionOwner {
+    pub(crate) fn startup_stage(&self, stage: crate::startup::Stage) {
+        self.startup
+            .mark(stage, self.bound_document_id.load(Ordering::Acquire));
+    }
+
     /// 组件终止独立于Arc尚存与否，旧native entry不能维持可编辑授权。
     pub(crate) fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
@@ -540,7 +546,9 @@ impl ExtensionOwner {
                 return Err(error);
             }
         };
-        let _transaction = document.transaction.lock_or_recover();
+        let _transaction = document
+            .host_query_transaction()
+            .ok_or_else(|| HOST_QUERY_BUSY.to_owned())?;
         if self.is_closed() || !document.is_alive() {
             hifishifter_kernel::log_limiter::emit_limited_key(
                 log::Level::Warn,
@@ -577,7 +585,9 @@ impl ExtensionOwner {
         stamp: &(Arc<super::document::DocumentSession>, u64, u64, Vec<u64>),
     ) -> bool {
         let (document, model, scope, keys) = stamp;
-        let _transaction = document.transaction.lock_or_recover();
+        let Some(_transaction) = document.host_query_transaction() else {
+            return false;
+        };
         !self.is_closed()
             && document.is_alive()
             && self
@@ -1059,6 +1069,7 @@ impl ExtensionOwner {
     /// 剪贴板）与测试依赖它**同步**把新几何取回来；节流在那里会把"刚写完就读到新值"
     /// 变成"下次再看"。所以节流只属于定时器这一个调用方。
     pub(crate) fn refresh_host_transport_tick(&self) {
+        let _query_scope = super::document::HostQueryScope::nonblocking();
         // 【T5：前台恢复的本地信号】编辑器窗口是 `WS_CHILD`，收不到 `WM_ACTIVATEAPP`；
         // 而 `resume_resync()` 的唯一调用点是 `setActive(true)`，宿主切窗口焦点时不会重发。
         // 于是"后台→前台"没有任何入口。这里用**定时器自身的间隔**补上：20 ms 的定时器
@@ -1172,7 +1183,11 @@ impl ExtensionOwner {
         //
         // 现在：先采一次并发布（授权判据仍要过 —— 采样本身是宿主调用），再用 stamp
         // 决定要不要继续做下面那一段清单刷新。
-        let stamp = self.host_query_stamp().ok();
+        let stamp = match self.host_query_stamp() {
+            Ok(stamp) => Some(stamp),
+            Err(error) if error == HOST_QUERY_BUSY => return,
+            Err(_) => None,
+        };
         let host = self.native_host();
         if let Some(host) = host {
             // 【为什么授权判据在有 stamp 时才用】**没有 stamp**（无文档 / 无分配）时
@@ -1480,7 +1495,9 @@ impl ExtensionOwner {
                 entry.content_fade_tail = region.has_content_based_fade_at_tail;
             }
         }
-        let _transaction = stamp.0.transaction.lock_or_recover();
+        let Some(_transaction) = stamp.0.host_query_transaction() else {
+            return;
+        };
         if self.is_closed()
             || !stamp.0.is_alive()
             || stamp.0.revision.load(Ordering::Acquire) != stamp.1
@@ -1623,7 +1640,9 @@ impl ExtensionOwner {
                 )
             }))
         };
-        let _transaction = stamp.0.transaction.lock_or_recover();
+        let Some(_transaction) = stamp.0.host_query_transaction() else {
+            return;
+        };
         if self.is_closed()
             || !stamp.0.is_alive()
             || stamp.0.revision.load(Ordering::Acquire) != stamp.1
@@ -1709,7 +1728,9 @@ impl ExtensionOwner {
         // 它只读结果与代次，不碰文档锁。`after` 是本次尝试结束时的宿主几何代次，
         // 用它判断"宿主工程真的变了"。
         self.note_geometry_outcome(&geometry, after);
-        let _transaction = stamp.0.transaction.lock_or_recover();
+        let Some(_transaction) = stamp.0.host_query_transaction() else {
+            return;
+        };
         let mut prepare_fades = false;
         if !self.is_closed()
             && stamp.0.is_alive()

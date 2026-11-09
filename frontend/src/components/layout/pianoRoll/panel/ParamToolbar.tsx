@@ -25,6 +25,7 @@ import { AppIconButton } from "../../../../ui";
 import { ToolbarSlot } from "./toolbarParts";
 import { ParamButtons } from "./ParamButtons";
 import { DrawToolMenu } from "./DrawToolMenu";
+import { BlockToolMenu } from "./BlockToolMenu";
 import { PitchSnapMenu } from "./PitchSnapMenu";
 import { DragDirectionButton } from "./DragDirectionButton";
 import { ReferenceTrackGroup } from "./ReferenceTrackGroup";
@@ -33,7 +34,6 @@ import { SmoothingSlider } from "./SmoothingSlider";
 import { ParamStaticControls } from "./ParamStaticControls";
 import { ToolbarOverflowMenu } from "./ToolbarOverflowMenu";
 import { TIER_ALL_PILLS, TIER_STATIC_PARAMS } from "../toolbarOverflow";
-
 import type { PianoRollPanelModel } from "./usePianoRollPanelModel";
 
 /**
@@ -102,8 +102,24 @@ export type Props = {
         | "separationEnabled"
         | "separationSwitchAnchorParamId"
         | "setDrawToolMenuOpen"
+        | "deleteSelectedParamBlocks"
+        | "restoreParamBlocks"
+        | "canDeleteSelectedParamBlocks"
+        | "canRestoreDeletedParamBlocks"
         | "setHoveredReferenceRootTrackId"
         | "setPitchSnapMenuOpen"
+        | "paramBlocksVisible"
+        | "paramBlockToolActive"
+        | "paramBlockMessage"
+        | "selectedParamBlockCount"
+        | "canMergeSelectedParamBlocks"
+        | "canUnmergeSelectedParamBlocks"
+        | "mergeOverlapsActive"
+        | "toggleMergeOverlaps"
+        | "mergeAllOverlappingParamBlocks"
+        | "toggleParamBlocksVisible"
+        | "mergeSelectedParamBlocks"
+        | "unmergeSelectedParamBlocks"
         | "setPitchSnapOpen"
         | "setTimeDisplaySettingsOpen"
         | "t"
@@ -191,6 +207,7 @@ export function ParamToolbar({ m }: Props) {
                     {/* 锚点外壳：菜单本身挂到 `document.body`（见 AppAnchoredMenu），
                         这里只负责提供"菜单该贴在哪"的矩形。 */}
                     <DrawToolMenu m={m} />
+                    <BlockToolMenu m={m} />
                     <Box
                         style={{
                             // 竖分隔线：宽度取整数个物理像素，任意缩放下粗细恒定

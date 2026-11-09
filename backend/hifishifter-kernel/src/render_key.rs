@@ -449,6 +449,23 @@ mod tests {
         );
     }
 
+    /// 正向契约：`hifigan_growl` 同样必须参与渲染键。
+    ///
+    /// 怒音在谐波支上改变送入声码器的波形；若不进键，改曲线会命中旧渲染
+    /// （跨会话的磁盘缓存还会让错配持续）。它和 tension 属于同一类输入。
+    #[test]
+    fn growl_participates_in_the_key() {
+        let base = hash_of(&base_clip(), &base_entry());
+
+        let mut e = base_entry();
+        e.extra_curves = HashMap::from([("hifigan_growl".to_string(), vec![0.0, 50.0])]);
+        assert_ne!(
+            base,
+            hash_of(&base_clip(), &e),
+            "`hifigan_growl` 必须参与渲染键：它改变谐波支的波形"
+        );
+    }
+
     #[test]
     fn invalid_playback_rate_falls_back_to_one() {
         let mut c = base_clip();

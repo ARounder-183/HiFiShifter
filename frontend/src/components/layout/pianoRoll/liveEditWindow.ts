@@ -154,6 +154,36 @@ export interface LiveEditWindowKey {
     stride: number;
 }
 
+/** live 覆盖是否已经与当前参数窗口逐值一致。 */
+export function liveEditWindowMatchesParamView(args: {
+    readonly live: {
+        readonly key: string;
+        readonly edit: readonly number[];
+    };
+    readonly paramView: {
+        readonly key: string;
+        readonly edit: readonly number[];
+    };
+}): boolean {
+    if (args.live.key !== args.paramView.key) return false;
+    if (args.live.edit.length !== args.paramView.edit.length) return false;
+    for (let index = 0; index < args.live.edit.length; index += 1) {
+        const left = args.live.edit[index];
+        const right = args.paramView.edit[index];
+        if (left === right) continue;
+        if (
+            left === undefined ||
+            right === undefined ||
+            !Number.isFinite(left) ||
+            !Number.isFinite(right) ||
+            Math.abs(left - right) > 1e-9
+        ) {
+            return false;
+        }
+    }
+    return true;
+}
+
 /**
  * 解析 live 覆盖的窗口键。
  *

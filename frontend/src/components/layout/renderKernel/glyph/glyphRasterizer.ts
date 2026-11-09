@@ -185,7 +185,15 @@ export function createGlyphRasterizer(options: GlyphRasterizerOptions): GlyphRas
      * @returns 上下文；创建失败时为 null。
      */
     function ensurePage(page: number): CanvasRenderingContext2D | null {
-        while (pageContexts.length <= page) {
+        // 槽位分配器的页号必须受**本次实例**的 maxPages 约束：一个坏输入一旦让
+        // fontKey 空/异常，`allocate` 会持续返回新页；没有上限时这个 while 会在
+        // 主线程上无限建 canvas，浏览器随后报“页面无响应”。
+        if (!Number.isSafeInteger(page) || page < 0 || page >= maxPages) {
+            return null;
+        }
+        if (pageContexts.length === page) {
+            // 正常路径只增加一页。用 `if` 而不是 `while`，是把“跳到远端页号”
+            // 从主线程忙循环（浏览器报无响应）变成一次明确的拒绝。
             const canvas = document.createElement("canvas");
             canvas.width = pageSize;
             canvas.height = pageSize;
@@ -193,13 +201,19 @@ export function createGlyphRasterizer(options: GlyphRasterizerOptions): GlyphRas
             if (!ctx) return null;
             pageContexts.push(ctx);
         }
+        if (pageContexts.length !== page + 1) return null;
         return pageContexts[page];
     }
 
     /** 测量文本宽度（CSS px）。 */
     function measure(text: string, fontKey: string): number {
+        // 非法 CSS 字体不会让 canvas 抛错，而是**静默保留旧字体**。按字符缓存
+        // 一旦混进空字体，不同字号会共享同一测量结果，字形四边形随之重叠。
+        // 遇到空字体直接拒绝，调用方按“无文字”降级。
+        if (fontKey.trim() === "") return 0;
         measureCtx.font = fontKey;
-        return measureCtx.measureText(text).width;
+        const width = measureCtx.measureText(text).width;
+        return Number.isFinite(width) && width > 0 ? width : 0;
     }
 
     return {
