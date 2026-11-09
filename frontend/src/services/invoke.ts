@@ -82,12 +82,17 @@ export function backendDetail(error: unknown): string | undefined {
     let current: unknown = error;
     let innermost: string | undefined;
     const seen = new Set<unknown>();
-    for (let depth = 0; depth < 8 && current && typeof current === "object"; depth += 1) {
+    for (let depth = 0; depth < 8 && current != null; depth += 1) {
+        if (typeof current === "string") {
+            if (current.trim()) innermost = current.trim();
+            break;
+        }
+        if (typeof current !== "object") break;
         if (seen.has(current)) break;
         seen.add(current);
         const message = (current as { message?: unknown }).message;
         if (typeof message === "string" && message.trim()) {
-            innermost = message;
+            innermost = message.trim();
         }
         current = (current as { cause?: unknown }).cause;
     }
@@ -1162,10 +1167,11 @@ export async function invoke<T>(method: string, ...args: unknown[]): Promise<T> 
             } catch (err) {
                 console.error("Tauri invoke failed", { method, err });
                 reportFrontendError(`Invoke failed: ${method}`, err);
+                const cause = err instanceof Error ? err : new Error(String(err));
                 throw new BackendInvokeError({
                     mode: "tauri",
                     method,
-                    cause: err,
+                    cause,
                 });
             }
         }
@@ -1175,11 +1181,12 @@ export async function invoke<T>(method: string, ...args: unknown[]): Promise<T> 
         } catch (err) {
             console.error("Tauri invoke failed", { method, invokeArgs, err });
             reportFrontendError(`Invoke failed: ${method}`, err);
+            const cause = err instanceof Error ? err : new Error(String(err));
             throw new BackendInvokeError({
                 mode: "tauri",
                 method,
                 args: invokeArgs,
-                cause: err,
+                cause,
             });
         }
     }
@@ -1201,11 +1208,12 @@ export async function invoke<T>(method: string, ...args: unknown[]): Promise<T> 
         // 与 Tauri 分支同口径：失败也上报前端诊断日志（pywebview 模式下
         // BackendInvokeError 只剩 message，原始 cause 不落盘就丢了）。
         reportFrontendError(`Invoke failed: ${method}`, err);
+        const cause = err instanceof Error ? err : new Error(String(err));
         throw new BackendInvokeError({
             mode: "pywebview",
             method,
             args,
-            cause: err,
+            cause,
         });
     }
 }
