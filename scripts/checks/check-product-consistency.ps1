@@ -90,7 +90,7 @@ Test-Invariant '随包许可清单齐全（LICENSE + licenses\ 目录）' {
 # 模型又回到 bundle 里各存一份。
 Test-Invariant '合并安装器注册卸载项、清理受管目录、模型走共享库' {
     $nsi = Get-RepoText 'scripts/release/merged-installer.nsi'
-    foreach ($required in 'WriteUninstaller', 'UninstallString', 'InstallLocation', 'MODELS_VERSION', 'APP_VERSION') {
+    foreach ($required in 'WriteUninstaller', 'UninstallString', 'InstallLocation', 'MODELS_VERSION', 'APP_VERSION', 'FILEASSOC_PROGID', 'Software\Classes') {
         if ($nsi -notmatch [regex]::Escape($required)) { throw "merged-installer.nsi 缺少 $required" }
     }
     if ($nsi -notmatch 'RMDir /r .*Resources\\frontend') {
@@ -112,7 +112,7 @@ Test-Invariant '合并安装器默认走 per-machine 安装' {
     $endif = $nsi.IndexOf('!endif', $else)
     if ($ifdef -lt 0 -or $else -lt 0 -or $endif -lt 0) { throw 'merged-installer.nsi 的 HFS_TEST_MODE 分支不完整' }
     $release = $nsi.Substring($else, $endif - $else)
-    foreach ($required in 'RequestExecutionLevel admin', '!define HFS_ARP_ROOT HKLM', 'COMMONFILES64') {
+    foreach ($required in 'RequestExecutionLevel admin', '!define HFS_ARP_ROOT HKLM', '!define HFS_CLASSES_ROOT HKLM', 'COMMONFILES64') {
         if ($release -notmatch [regex]::Escape($required)) { throw "发布分支缺少 $required" }
     }
     'admin / HKLM / CommonFiles64'

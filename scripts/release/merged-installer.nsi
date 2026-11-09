@@ -85,22 +85,25 @@ ${StrTrimNewLines}
 ; 组件索引：自定义页函数写在 Section 声明**之前**，那时 NSIS 自动生成的
 ; ${SEC_*} 符号还不存在（实测会报 "unknown variable/constant"），所以这里仍用
 ; 显式数字。SectionGroup 自身也会占一个索引，且末尾的 SectionGroupEnd 再占一个
-; —— 实测顺序为 0=组、1/2/3=子项、4=组结束、5=组、6/7=子项。
+; —— 实测顺序为 0=组、1/2/3/4=子项、5=组结束、6=组、7/8=子项。
 ; 【改动声明顺序必须同步改这里】漏改不会编译失败，只会让 VST3/CLAP 目录页判断错
 ; 组件是否被勾选 —— 那是最难从 UI 上察觉的一类回归。
 !define SECGRP_APP 0
 !define SEC_APP 1
 !define SEC_MODELS 2
 !define SEC_SHORTCUTS 3
-; 4 = 第一个 SectionGroupEnd
-!define SECGRP_PLUGINS 5
-!define SEC_VST3 6
-!define SEC_CLAP 7
+!define SEC_FILEASSOC 4
+; 5 = 第一个 SectionGroupEnd
+!define SECGRP_PLUGINS 6
+!define SEC_VST3 7
+!define SEC_CLAP 8
 
 
 !define VST3_SUBDIR "HiFiShifter.vst3"
 !define CLAP_FILENAME "HiFiShifter.clap"
 !define CLAP_RESOURCES "HiFiShifter-resources"
+; 文件关联的稳定 ProgID；扩展名默认值只指向它，不直接写 exe 路径。
+!define FILEASSOC_PROGID "HiFiShifter.Project"
 !define ARP_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\HiFiShifter"
 ; 旧版插件安装器留下的卸载项：本安装器接管模型库与插件目录，成功后把它清掉。
 !define LEGACY_VST3_ARP_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\HiFiShifterVST3"
@@ -123,6 +126,8 @@ ${StrTrimNewLines}
   InstallDir "$LOCALAPPDATA\HiFiShifterInstallerTest\App"
   RequestExecutionLevel user
   !define HFS_ARP_ROOT HKCU
+  ; 测试模式写 HKCU\Software\Classes，门禁不会污染真实用户的 HKLM 关联。
+  !define HFS_CLASSES_ROOT HKCU
   !define HFS_DEFAULT_VST3_DIR "$LOCALAPPDATA\HiFiShifterInstallerTest\VST3"
   !define HFS_DEFAULT_CLAP_DIR "$LOCALAPPDATA\HiFiShifterInstallerTest\CLAP"
   ; 【为什么测试模式换模型根】测试安装器是 user 权限，写 %ProgramData% 会触发 UAC
@@ -135,6 +140,8 @@ ${StrTrimNewLines}
   InstallDir "$PROGRAMFILES64\HiFiShifter"
   RequestExecutionLevel admin
   !define HFS_ARP_ROOT HKLM
+  ; 发布安装器按 per-machine 注册文件关联。
+  !define HFS_CLASSES_ROOT HKLM
   !define HFS_DEFAULT_VST3_DIR "$COMMONFILES64\VST3"
   !define HFS_DEFAULT_CLAP_DIR "$COMMONFILES64\CLAP"
   ; 发布安装器是 admin，写 %ProgramData% 不虚拟化；all 上下文的 $APPDATA 正是它。
@@ -380,6 +387,53 @@ Function un.HfsHostModuleProbe
   ${EndIf}
 FunctionEnd
 
+
+; ── 文件关联：卸载时只解除属于本安装的绑定 ─────────────────────────────
+;
+; 与安装器同名函数同构；字符串函数前缀是 un.，因此必须另写一份。
+; 所有删除都先确认 ProgID / Applications 的 open command 指向 $INSTDIR，
+; 避免把别的安装或别的程序的默认关联误删。
+Function un.HfsRemoveFileAssociations
+  ReadRegStr $R1 ${HFS_CLASSES_ROOT} "Software\Classes\${FILEASSOC_PROGID}\shell\open\command" ""
+  StrCpy $R2 ""
+  ${UnStrStr} $R2 $R1 "$INSTDIR\HiFiShifter.exe"
+  StrCpy $R3 0
+  ${If} $R2 != ""
+    StrCpy $R3 1
+  ${EndIf}
+
+  ReadRegStr $R0 ${HFS_CLASSES_ROOT} "Software\Classes\.hshp" ""
+  ${If} $R0 == "${FILEASSOC_PROGID}"
+  ${AndIf} $R3 == 1
+    DeleteRegValue ${HFS_CLASSES_ROOT} "Software\Classes\.hshp" ""
+  ${EndIf}
+  ${If} $R3 == 1
+    DeleteRegValue ${HFS_CLASSES_ROOT} "Software\Classes\.hshp\OpenWithProgids" "${FILEASSOC_PROGID}"
+  ${EndIf}
+
+  ReadRegStr $R0 ${HFS_CLASSES_ROOT} "Software\Classes\.hsp" ""
+  ${If} $R0 == "${FILEASSOC_PROGID}"
+  ${AndIf} $R3 == 1
+    DeleteRegValue ${HFS_CLASSES_ROOT} "Software\Classes\.hsp" ""
+  ${EndIf}
+  ${If} $R3 == 1
+    DeleteRegValue ${HFS_CLASSES_ROOT} "Software\Classes\.hsp\OpenWithProgids" "${FILEASSOC_PROGID}"
+  ${EndIf}
+
+  ${If} $R3 == 1
+    DeleteRegKey ${HFS_CLASSES_ROOT} "Software\Classes\${FILEASSOC_PROGID}"
+  ${EndIf}
+
+  ReadRegStr $R1 ${HFS_CLASSES_ROOT} "Software\Classes\Applications\HiFiShifter.exe\shell\open\command" ""
+  StrCpy $R2 ""
+  ${UnStrStr} $R2 $R1 "$INSTDIR\HiFiShifter.exe"
+  ${If} $R2 != ""
+    DeleteRegKey ${HFS_CLASSES_ROOT} "Software\Classes\Applications\HiFiShifter.exe"
+  ${EndIf}
+
+  System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
+FunctionEnd
+
 ; ── 主程序运行检查（移植自 Tauri 模板）────────────────────────────────────
 ;
 ; 【为什么用 /FI 而不是把 tasklist 输出接给 findstr】同上：只取一行，不依赖本地化文案。
@@ -435,6 +489,87 @@ Function HfsEnsureWebView2
   ${OrIf} $0 == "0.0.0.0"
     MessageBox MB_OK|MB_ICONSTOP "$(HFS_WEBVIEW2_INSTALL_FAILED)"
   ${EndIf}
+FunctionEnd
+
+
+; ── 文件关联（可选组件）────────────────────────────────────────────────
+;
+; 【为什么用 ProgID 而不是直接写 exe 路径】扩展名默认值必须指向一个稳定的
+; ProgID；直接写 exe 会让“默认程序”与“打开方式”两套 UI 读到不同形状。
+; Windows 10/11 的 UserChoice 受系统保护，安装器不能伪造哈希；这里只注册
+; ProgID、扩展名默认值、OpenWithProgids 与 Applications，系统在无 UserChoice
+; 时采用我们的 ProgID，已有 UserChoice 时至少能在“打开方式”里列出本程序。
+Function HfsWriteFileAssociations
+  WriteRegStr ${HFS_CLASSES_ROOT} "Software\Classes\${FILEASSOC_PROGID}" "" "$(HFS_FILEASSOC_TYPE_NAME)"
+  WriteRegStr ${HFS_CLASSES_ROOT} "Software\Classes\${FILEASSOC_PROGID}\DefaultIcon" "" '"$INSTDIR\HiFiShifter.exe",0'
+  WriteRegStr ${HFS_CLASSES_ROOT} "Software\Classes\${FILEASSOC_PROGID}\shell\open\command" "" '"$INSTDIR\HiFiShifter.exe" "%1"'
+
+  WriteRegStr ${HFS_CLASSES_ROOT} "Software\Classes\Applications\HiFiShifter.exe" "FriendlyAppName" "$(HFS_NAME)"
+  WriteRegStr ${HFS_CLASSES_ROOT} "Software\Classes\Applications\HiFiShifter.exe\shell\open\command" "" '"$INSTDIR\HiFiShifter.exe" "%1"'
+  WriteRegStr ${HFS_CLASSES_ROOT} "Software\Classes\Applications\HiFiShifter.exe\SupportedTypes" ".hshp" ""
+  WriteRegStr ${HFS_CLASSES_ROOT} "Software\Classes\Applications\HiFiShifter.exe\SupportedTypes" ".hsp" ""
+
+  WriteRegStr ${HFS_CLASSES_ROOT} "Software\Classes\.hshp" "" "${FILEASSOC_PROGID}"
+  WriteRegStr ${HFS_CLASSES_ROOT} "Software\Classes\.hshp\OpenWithProgids" "${FILEASSOC_PROGID}" ""
+  WriteRegStr ${HFS_CLASSES_ROOT} "Software\Classes\.hsp" "" "${FILEASSOC_PROGID}"
+  WriteRegStr ${HFS_CLASSES_ROOT} "Software\Classes\.hsp\OpenWithProgids" "${FILEASSOC_PROGID}" ""
+
+  ; 通知资源管理器刷新图标 / 打开方式缓存。
+  System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
+FunctionEnd
+
+; 读 ProgID 的打开命令，判断它是否指向**本次安装**。结果写入 $0（1 = 是）。
+; 卸载 / 取消勾选都必须过这一道：别的安装可能还在用同名 ProgID。
+Function HfsFileAssocCommandIsOurs
+  ReadRegStr $R1 ${HFS_CLASSES_ROOT} "Software\Classes\${FILEASSOC_PROGID}\shell\open\command" ""
+  StrCpy $R2 ""
+  ${StrStr} $R2 $R1 "$INSTDIR\HiFiShifter.exe"
+  ${If} $R2 != ""
+    StrCpy $0 1
+  ${Else}
+    StrCpy $0 0
+  ${EndIf}
+FunctionEnd
+
+; 只在“当前绑定确实指向本安装”时解除，避免卸载时误删别的程序的关联。
+Function HfsRemoveFileAssociationsIfOurs
+  Call HfsFileAssocCommandIsOurs
+
+  ; .hshp / .hsp 的默认 ProgID 只有在命令确实指向本安装时才清；默认值
+  ; 指向别的程序时保持原样。OpenWithProgids 里的本 ProgID 值只在确认
+  ; 本安装拥有该 ProgID 时移除，避免把另一个安装的“打开方式”条目删掉。
+  ReadRegStr $R0 ${HFS_CLASSES_ROOT} "Software\Classes\.hshp" ""
+  ${If} $R0 == "${FILEASSOC_PROGID}"
+  ${AndIf} $0 == 1
+    DeleteRegValue ${HFS_CLASSES_ROOT} "Software\Classes\.hshp" ""
+  ${EndIf}
+  ${If} $0 == 1
+    DeleteRegValue ${HFS_CLASSES_ROOT} "Software\Classes\.hshp\OpenWithProgids" "${FILEASSOC_PROGID}"
+  ${EndIf}
+
+  ReadRegStr $R0 ${HFS_CLASSES_ROOT} "Software\Classes\.hsp" ""
+  ${If} $R0 == "${FILEASSOC_PROGID}"
+  ${AndIf} $0 == 1
+    DeleteRegValue ${HFS_CLASSES_ROOT} "Software\Classes\.hsp" ""
+  ${EndIf}
+  ${If} $0 == 1
+    DeleteRegValue ${HFS_CLASSES_ROOT} "Software\Classes\.hsp\OpenWithProgids" "${FILEASSOC_PROGID}"
+  ${EndIf}
+
+  ; ProgID 只在命令确实指向本安装时删除；别的安装可能还在用同名 ProgID。
+  ${If} $0 == 1
+    DeleteRegKey ${HFS_CLASSES_ROOT} "Software\Classes\${FILEASSOC_PROGID}"
+  ${EndIf}
+
+  ; Applications 注册同理：命令指向别的安装时保留。
+  ReadRegStr $R1 ${HFS_CLASSES_ROOT} "Software\Classes\Applications\HiFiShifter.exe\shell\open\command" ""
+  StrCpy $R2 ""
+  ${StrStr} $R2 $R1 "$INSTDIR\HiFiShifter.exe"
+  ${If} $R2 != ""
+    DeleteRegKey ${HFS_CLASSES_ROOT} "Software\Classes\Applications\HiFiShifter.exe"
+  ${EndIf}
+
+  System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
 FunctionEnd
 
 ; ── 模型库：完整性校验（与运行时 looks_complete 同一判据）──────────────────
@@ -650,6 +785,14 @@ Section "$(HFS_COMPONENT_APP)"
   SetOutPath "$INSTDIR\licenses"
   File /r "${HFS_LICENSES}\*"
 
+  ; 升级时用户可能取消勾选“文件关联”：上一版留下的、仍指向本安装的绑定
+  ; 必须在这一版安装时解除，否则用户的选择不生效。
+  SectionGetFlags ${SEC_FILEASSOC} $0
+  IntOp $0 $0 & ${SF_SELECTED}
+  ${If} $0 == 0
+    Call HfsRemoveFileAssociationsIfOurs
+  ${EndIf}
+
   ; ── 卸载信息 ────────────────────────────────────────────────────────
   ;
   ; 【为什么复用 \Uninstall\HiFiShifter 这个键】旧版 App（Tauri 的 NSIS 安装器）
@@ -721,6 +864,10 @@ Section "$(HFS_COMPONENT_SHORTCUTS)"
   CreateShortCut "$SMPROGRAMS\HiFiShifter\HiFiShifter.lnk" "$INSTDIR\HiFiShifter.exe"
   CreateShortCut "$DESKTOP\HiFiShifter.lnk" "$INSTDIR\HiFiShifter.exe"
   SetShellVarContext current
+SectionEnd
+Section "$(HFS_COMPONENT_FILE_ASSOC)"
+  DetailPrint "$(HFS_INSTALLING)"
+  Call HfsWriteFileAssociations
 SectionEnd
 SectionGroupEnd
 
@@ -794,6 +941,7 @@ SectionGroupEnd
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_APP} "$(HFS_DESC_APP)"
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_MODELS} "$(HFS_DESC_MODELS)"
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_SHORTCUTS} "$(HFS_DESC_SHORTCUTS)"
+  !insertmacro MUI_DESCRIPTION_TEXT ${SEC_FILEASSOC} "$(HFS_DESC_FILE_ASSOC)"
   !insertmacro MUI_DESCRIPTION_TEXT ${SECGRP_PLUGINS} "$(HFS_DESC_GROUP_PLUGINS)"
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_VST3} "$(HFS_DESC_VST3)"
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_CLAP} "$(HFS_DESC_CLAP)"
@@ -838,6 +986,8 @@ Function un.HfsUninstallOptionsLeave
 FunctionEnd
 
 Section "Uninstall"
+  ; 只解除“当前绑定指向本安装”的关联；别的程序的默认程序保持不变。
+  Call un.HfsRemoveFileAssociations
   ; 只删自己：$HfsVst3Dir 是 Common Files\VST3，里面还有别人的插件。
   RMDir /r "$HfsVst3Dir\${VST3_SUBDIR}"
   Delete "$HfsClapDir\${CLAP_FILENAME}"

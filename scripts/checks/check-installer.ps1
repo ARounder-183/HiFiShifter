@@ -195,6 +195,59 @@ $modelRoot = Join-Path $env:APPDATA 'HiFiShifterTest\models'
 $modelDir = Join-Path $modelRoot $manifest.version
 $arpKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\HiFiShifter'
 
+# ── 文件关联的保存 / 恢复 ───────────────────────────────────────────────
+#
+# 测试模式把 .hshp/.hsp 写到 HKCU\Software\Classes。开发机上可能已经有真实
+# 关联，门禁不能把它们覆盖后不还原。这里用 reg.exe 对四个键做**整键快照**：
+# 比逐值恢复更完整（OpenWithProgids、Content Type 等用户值都原样回来），也
+# 不会把测试期间新建的空键留在系统里。
+$classesRoot = 'HKCU:\Software\Classes'
+$classesRegPath = 'HKCU\Software\Classes'
+$foreignProgId = 'HfsInstallerGateForeign.Project'
+$assocKeys = @('.hshp', '.hsp', 'HiFiShifter.Project', 'Applications\HiFiShifter.exe')
+$assocBackupDir = Join-Path $env:TEMP ('hfs-assoc-backup-' + [Guid]::NewGuid().ToString('N'))
+$assocBackup = @{}
+New-Item -ItemType Directory -Force $assocBackupDir | Out-Null
+foreach ($rel in $assocKeys) {
+    $full = Join-Path $classesRoot $rel
+    $file = Join-Path $assocBackupDir (($rel -replace '[\\/]', '_') + '.reg')
+    $existed = Test-Path -LiteralPath $full
+    if ($existed) {
+        & reg.exe export "HKCU\Software\Classes\$rel" $file /y | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "无法备份注册表键 $full（reg export 退出码 $LASTEXITCODE）" }
+    }
+    $assocBackup[$rel] = [pscustomobject]@{ Existed = $existed; File = $file }
+}
+
+function Get-RegDefault([string]$path) {
+    $key = Get-Item -LiteralPath $path -ErrorAction SilentlyContinue
+    if ($null -eq $key) { return $null }
+    return $key.GetValue('')
+}
+
+function Get-RegValue([string]$path, [string]$name) {
+    $key = Get-Item -LiteralPath $path -ErrorAction SilentlyContinue
+    if ($null -eq $key) { return $null }
+    return $key.GetValue($name)
+}
+
+function Restore-AssociationBackups {
+    if (!$assocBackupDir -or !(Test-Path -LiteralPath $assocBackupDir)) { return }
+    foreach ($rel in $assocKeys) {
+        $full = Join-Path $classesRoot $rel
+        Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction SilentlyContinue
+        $entry = $assocBackup[$rel]
+        if ($entry -and $entry.Existed -and (Test-Path -LiteralPath $entry.File)) {
+            & reg.exe import $entry.File | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                Write-Warning "恢复文件关联注册表键失败：$full"
+            }
+        }
+    }
+    Remove-Item -LiteralPath $assocBackupDir -Recurse -Force -ErrorAction SilentlyContinue
+    $script:assocBackupDir = $null
+}
+
 # 默认卸载保留一切用户数据的测试标记：只创建两个以本次 run 唯一命名的文件，
 # 绝不删用户的整个目录。一个放派生物目录（logs）、一个放用户数据目录（unsaved），
 # 静默卸载默认不勾选任何清理选项，两者都应保留。"勾选才清理"的分支由独立的
@@ -221,6 +274,24 @@ try {
     Assert-That 'ARP 注册了卸载项' {
         if (!(Test-Path $arpKey)) { throw "缺少注册表键 $arpKey" }
         (Get-ItemProperty $arpKey).DisplayVersion
+    }
+
+    Assert-That '文件关联指向安装的主程序' {
+        $hshp = Get-RegDefault "$classesRoot\.hshp"
+        if ($hshp -ne 'HiFiShifter.Project') { throw ".hshp 默认 ProgID = $hshp" }
+        $command = Get-RegDefault "$classesRoot\HiFiShifter.Project\shell\open\command"
+        if (!$command -or !$command.Contains("$installDir\HiFiShifter.exe")) {
+            throw "打开命令未指向 $installDir：$command"
+        }
+        $hsp = Get-RegDefault "$classesRoot\.hsp"
+        if ($hsp -ne 'HiFiShifter.Project') { throw ".hsp 默认 ProgID = $hsp" }
+        if ($null -eq (Get-RegValue "$classesRoot\.hshp\OpenWithProgids" 'HiFiShifter.Project')) {
+            throw '.hshp\OpenWithProgids 没有登记 HiFiShifter.Project'
+        }
+        if ($null -eq (Get-RegValue "$classesRoot\Applications\HiFiShifter.exe\SupportedTypes" '.hshp')) {
+            throw 'Applications\HiFiShifter.exe\SupportedTypes 没有登记 .hshp'
+        }
+        'HiFiShifter.Project → HiFiShifter.exe'
     }
 
     Assert-That 'App 目录里没有模型权重（只有清单）' {
@@ -300,6 +371,13 @@ try {
     }
 
     Write-Host '  卸载（静默）...' -ForegroundColor DarkGray
+    # 把 .hsp 模拟成别的程序：卸载器只能清掉仍指向本安装的 .hshp，不能碰它。
+    # 用 reg.exe 而不是 RegistryKey.SetValue：Get-Item 返回的键是只读句柄。
+    & reg.exe add "$classesRegPath\$foreignProgId\shell\open\command" /ve /d '"C:\Other\Other.exe" "%1"' /f | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "无法创建外来 ProgID（reg add 退出码 $LASTEXITCODE）" }
+    & reg.exe add "$classesRegPath\.hsp" /ve /d $foreignProgId /f | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "无法写入 .hsp 外来关联（reg add 退出码 $LASTEXITCODE）" }
+
     New-Item -ItemType Directory -Force (Split-Path $disposableMarker -Parent) | Out-Null
     New-Item -ItemType Directory -Force (Split-Path $userDataMarker -Parent) | Out-Null
     Set-Content -LiteralPath $disposableMarker -Value 'disposable'
@@ -329,6 +407,28 @@ try {
         if (Test-Path $arpKey) { throw "注册表键仍存在：$arpKey" }
         'gone'
     }
+    Assert-That '卸载只解除自己的关联，保留别人的默认程序' {
+        $hshp = Get-RegDefault "$classesRoot\.hshp"
+        if ($hshp -eq 'HiFiShifter.Project') { throw '.hshp 仍绑定 HiFiShifter.Project' }
+        if (Test-Path -LiteralPath "$classesRoot\HiFiShifter.Project") {
+            throw 'HiFiShifter.Project ProgID 仍存在'
+        }
+        if (Test-Path -LiteralPath "$classesRoot\Applications\HiFiShifter.exe") {
+            throw 'Applications\HiFiShifter.exe 仍存在'
+        }
+        $hsp = Get-RegDefault "$classesRoot\.hsp"
+        if ($hsp -ne $foreignProgId) { throw ".hsp 被误改：$hsp" }
+        if (!(Test-Path -LiteralPath "$classesRoot\$foreignProgId")) {
+            throw "$foreignProgId 被误删"
+        }
+        if ($null -ne (Get-RegValue "$classesRoot\.hshp\OpenWithProgids" 'HiFiShifter.Project')) {
+            throw '.hshp\OpenWithProgids 仍残留 HiFiShifter.Project'
+        }
+        if ($null -ne (Get-RegValue "$classesRoot\.hsp\OpenWithProgids" 'HiFiShifter.Project')) {
+            throw '.hsp\OpenWithProgids 仍残留 HiFiShifter.Project'
+        }
+        'own removed, foreign kept'
+    }
     # 【为什么默认断言是"保留"】卸载选项默认都不勾选：卸载只是移除程序，
     # 不该抹掉渲染缓存（重装排障时要复用）与日志（定位上次故障的唯一线索）。
     # 模型库同理，保留后重装同版本可直接复用，装新版由 HfsModelsGc 自己 GC。
@@ -343,6 +443,8 @@ try {
     }
 }
 finally {
+    Remove-Item -LiteralPath "$classesRoot\$foreignProgId" -Recurse -Force -ErrorAction SilentlyContinue
+    Restore-AssociationBackups
     Remove-Item $testRoot -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item $testInstaller -Force -ErrorAction SilentlyContinue
     Remove-Item $disposableMarker, $userDataMarker -Force -ErrorAction SilentlyContinue

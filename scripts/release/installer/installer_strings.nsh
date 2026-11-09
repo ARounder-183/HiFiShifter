@@ -5,7 +5,7 @@
 ; 会因与本文件不一致而失败。
 
 ; 语言：en-US→English、zh-CN→SimpChinese、zh-TW→TradChinese、ja-JP→Japanese、ko-KR→Korean
-; 词条：40 条 × 5 种语言
+; 词条：43 条 × 5 种语言
 
 ; installer_app_dir_text
 LangString HFS_APP_DIR_TEXT ${LANG_ENGLISH} "Choose the app install folder."
@@ -34,6 +34,13 @@ LangString HFS_COMPONENT_CLAP ${LANG_SIMPCHINESE} "CLAP（Capture）"
 LangString HFS_COMPONENT_CLAP ${LANG_TRADCHINESE} "CLAP（Capture）"
 LangString HFS_COMPONENT_CLAP ${LANG_JAPANESE} "CLAP（Capture）"
 LangString HFS_COMPONENT_CLAP ${LANG_KOREAN} "CLAP (Capture)"
+
+; installer_component_file_assoc
+LangString HFS_COMPONENT_FILE_ASSOC ${LANG_ENGLISH} "File association (.hshp/.hsp)"
+LangString HFS_COMPONENT_FILE_ASSOC ${LANG_SIMPCHINESE} "文件关联（.hshp/.hsp）"
+LangString HFS_COMPONENT_FILE_ASSOC ${LANG_TRADCHINESE} "檔案關聯（.hshp/.hsp）"
+LangString HFS_COMPONENT_FILE_ASSOC ${LANG_JAPANESE} "ファイル関連付け（.hshp/.hsp）"
+LangString HFS_COMPONENT_FILE_ASSOC ${LANG_KOREAN} "파일 연결(.hshp/.hsp)"
 
 ; installer_component_models
 LangString HFS_COMPONENT_MODELS ${LANG_ENGLISH} "Model library"
@@ -90,6 +97,13 @@ LangString HFS_DESC_CLAP ${LANG_SIMPCHINESE} "CLAP 插件（仅 Capture），装
 LangString HFS_DESC_CLAP ${LANG_TRADCHINESE} "CLAP 外掛（僅 Capture），裝入所選的 CLAP 資料夾。"
 LangString HFS_DESC_CLAP ${LANG_JAPANESE} "CLAP プラグイン（Capture のみ）。選んだ CLAP フォルダーにインストール。"
 LangString HFS_DESC_CLAP ${LANG_KOREAN} "CLAP 플러그인(Capture 전용)입니다. 선택한 CLAP 폴더에 설치됩니다."
+
+; installer_desc_file_assoc
+LangString HFS_DESC_FILE_ASSOC ${LANG_ENGLISH} "Open HiFiShifter project files with HiFiShifter by default."
+LangString HFS_DESC_FILE_ASSOC ${LANG_SIMPCHINESE} "将 HiFiShifter 工程文件默认用 HiFiShifter 打开。"
+LangString HFS_DESC_FILE_ASSOC ${LANG_TRADCHINESE} "將 HiFiShifter 專案檔預設以 HiFiShifter 開啟。"
+LangString HFS_DESC_FILE_ASSOC ${LANG_JAPANESE} "HiFiShifter のプロジェクトファイルを HiFiShifter で開くようにします。"
+LangString HFS_DESC_FILE_ASSOC ${LANG_KOREAN} "HiFiShifter 프로젝트 파일을 기본적으로 HiFiShifter로 엽니다."
 
 ; installer_desc_group_app
 LangString HFS_DESC_GROUP_APP ${LANG_ENGLISH} "The app, the model library, and optional shortcuts."
@@ -160,6 +174,13 @@ LangString HFS_ERR_TASKLIST ${LANG_SIMPCHINESE} "无法确认 DAW 已全部关�
 LangString HFS_ERR_TASKLIST ${LANG_TRADCHINESE} "無法確認 DAW 已全部關閉，請關閉後重試。"
 LangString HFS_ERR_TASKLIST ${LANG_JAPANESE} "DAW の終了を確認できません。閉じてから再試行してください。"
 LangString HFS_ERR_TASKLIST ${LANG_KOREAN} "DAW 종료를 확인할 수 없습니다. 닫고 다시 시도하세요."
+
+; installer_fileassoc_type_name
+LangString HFS_FILEASSOC_TYPE_NAME ${LANG_ENGLISH} "HiFiShifter Project"
+LangString HFS_FILEASSOC_TYPE_NAME ${LANG_SIMPCHINESE} "HiFiShifter 工程"
+LangString HFS_FILEASSOC_TYPE_NAME ${LANG_TRADCHINESE} "HiFiShifter 專案"
+LangString HFS_FILEASSOC_TYPE_NAME ${LANG_JAPANESE} "HiFiShifter プロジェクト"
+LangString HFS_FILEASSOC_TYPE_NAME ${LANG_KOREAN} "HiFiShifter 프로젝트"
 
 ; installer_group_app
 LangString HFS_GROUP_APP ${LANG_ENGLISH} "Application"

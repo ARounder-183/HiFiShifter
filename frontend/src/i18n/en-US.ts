@@ -2295,6 +2295,7 @@ export const enUS = {
     installer_component_clap: "CLAP (Capture-only)",
     installer_component_models: "Model library",
     installer_component_shortcuts: "Shortcuts",
+    installer_component_file_assoc: "File association (.hshp/.hsp)",
     installer_component_models_install: "Installing model library...",
     installer_component_models_skip: "Model library is up to date.",
     installer_desc_group_app: "The app, the model library, and optional shortcuts.",
@@ -2304,6 +2305,8 @@ export const enUS = {
     installer_desc_clap: "CLAP plug-in (Capture-only). Installed into the CLAP folder you choose.",
     installer_desc_models: "Model weights shared by the app and all plug-ins. Stored once.",
     installer_desc_shortcuts: "Adds a Start menu entry and a desktop icon.",
+    installer_desc_file_assoc: "Open HiFiShifter project files with HiFiShifter by default.",
+    installer_fileassoc_type_name: "HiFiShifter Project",
     installer_webview2_install_failed:
         "WebView2 could not be installed. Install it from Microsoft's site and try again.",
     installer_models_verify_failed:

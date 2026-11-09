@@ -2307,6 +2307,7 @@ export const jaJP = {
     installer_component_clap: "CLAP（Capture）",
     installer_component_models: "モデルライブラリ",
     installer_component_shortcuts: "ショートカット",
+    installer_component_file_assoc: "ファイル関連付け（.hshp/.hsp）",
     installer_component_models_install: "モデルライブラリをインストール中...",
     installer_component_models_skip: "モデルライブラリは最新です。",
     installer_desc_group_app: "本体、モデルライブラリ、任意のショートカット。",
@@ -2317,6 +2318,9 @@ export const jaJP = {
     installer_desc_clap: "CLAP プラグイン（Capture のみ）。選んだ CLAP フォルダーにインストール。",
     installer_desc_models: "本体と全プラグインで共有するモデル重み。1 か所にのみ保存。",
     installer_desc_shortcuts: "スタートメニュー項目とデスクトップアイコンを追加。",
+    installer_desc_file_assoc:
+        "HiFiShifter のプロジェクトファイルを HiFiShifter で開くようにします。",
+    installer_fileassoc_type_name: "HiFiShifter プロジェクト",
     installer_webview2_install_failed:
         "WebView2 のインストールに失敗しました。Microsoft のサイトからインストールして再試行してください。",
     installer_models_verify_failed:
