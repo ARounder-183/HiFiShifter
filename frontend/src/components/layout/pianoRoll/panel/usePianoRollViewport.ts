@@ -27,7 +27,10 @@ import { flushSync } from "react-dom";
 import type { RootState } from "../../../../app/store";
 import { useAppSelector } from "../../../../app/hooks";
 import { resolveScrollableProjectSec } from "../../../../features/session/projectBoundary";
-import { subscribeCapture } from "../../../../features/capture/captureRange";
+import {
+    subscribeCapture,
+    useCaptureScrollExtent,
+} from "../../../../features/capture/captureRange";
 import { resolveSyncOffsetForms } from "../../../../features/dock/dockSchema";
 import { getActiveSurface } from "../../../../features/uiFocus/focusSurface";
 import { PANEL_PARAM_EDITOR, PANEL_TIMELINE } from "../../../dock/registerBuiltinPanels";
@@ -90,9 +93,10 @@ export function usePianoRollViewport({
     // 可滚域时长必须与时间轴内核**同源**：两处各取一个来源时，内容宽 / 可滚上限
     // 会分叉，共享 scrollLeft 的同步会被浏览器钳制、两边永久错位（缺陷 7）。
     // 详见 `resolveScrollableProjectSec` 的说明。
+    const captureExtentSec = useCaptureScrollExtent(s.projectSec);
     const dynamicProjectSec = useMemo(
-        () => resolveScrollableProjectSec(s.projectSec, s.clips),
-        [s.projectSec, s.clips],
+        () => resolveScrollableProjectSec(s.projectSec, s.clips, captureExtentSec),
+        [s.projectSec, s.clips, captureExtentSec],
     );
     const [scrollLeft, setScrollLeft] = useState(0);
     const [pxPerSec, setPxPerSec] = useState(() => {

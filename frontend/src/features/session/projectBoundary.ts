@@ -68,10 +68,17 @@ export function getDynamicProjectSec(clips: ClipInfo[]): number {
  *
  * @param projectSec 后端权威工程时长（秒）；非法时按 0 处理。
  * @param clips clip 列表（用于兜住乐观中间态）。
+ * @param extraSec 捕获等实时来源给出的额外可滚长度（秒）；只影响可滚域，
+ *   不改变权威 projectSec，非法值按 0 处理。
  * @returns 用于计算内容宽 / 可滚上限的工程时长（秒，>= 0）。
  */
-export function resolveScrollableProjectSec(projectSec: number, clips: ClipInfo[]): number {
+export function resolveScrollableProjectSec(
+    projectSec: number,
+    clips: ClipInfo[],
+    extraSec = 0,
+): number {
     const authoritative = Number.isFinite(projectSec) ? Math.max(0, projectSec) : 0;
     const clipBoundary = getDynamicProjectSec(clips);
-    return Math.max(authoritative, clipBoundary);
+    const extra = Number.isFinite(extraSec) ? Math.max(0, extraSec) : 0;
+    return Math.max(authoritative, clipBoundary, extra);
 }

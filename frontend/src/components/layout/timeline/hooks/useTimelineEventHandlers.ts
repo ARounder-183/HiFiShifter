@@ -40,6 +40,7 @@ import { gridStepBeats, MIN_PX_PER_SEC, MAX_PX_PER_SEC } from "../";
 import { computeFocusCursorScrollLeft } from "../../../../utils/autoFollowScroll";
 import { resolveTimelineMinPxPerSec } from "../runtime/timelineZoomBounds";
 import { resolveScrollableProjectSec } from "../../../../features/session/projectBoundary";
+import { resolveCaptureScrollExtentSec } from "../../../../features/capture/captureRange";
 import { expandClipIdsWithGroups } from "./useGroupExpansion";
 import type { TimelineViewportAccess } from "./timelineViewportAccess";
 
@@ -403,6 +404,9 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
             const totalSec = resolveScrollableProjectSec(
                 sessionRef.current.projectSec,
                 sessionRef.current.clips,
+                // 捕获中的实时位置不在 session 里；这里非订阅读取，事件触发时
+                // 拿到的就是当前可滚上限，和视口 / 内核保持同源。
+                resolveCaptureScrollExtentSec(sessionRef.current.projectSec),
             );
             const zoom = resolveHorizontalWheelZoom({
                 factor,
@@ -504,6 +508,7 @@ export function useTimelineEventHandlers(args: UseTimelineEventHandlersArgs): vo
                     resolveScrollableProjectSec(
                         sessionRef.current.projectSec,
                         sessionRef.current.clips,
+                        resolveCaptureScrollExtentSec(sessionRef.current.projectSec),
                     ) * pxPerSec,
             });
             // 写后回读**实际生效值**再广播：请求值可能被钳制/量化/锚定修正

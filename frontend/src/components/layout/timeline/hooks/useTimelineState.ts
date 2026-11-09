@@ -32,6 +32,7 @@ import { seekPlayhead, setPlayheadSec } from "../../../../features/session/sessi
 import { selectKeybinding } from "../../../../features/keybindings/keybindingsSlice";
 import type { Keybinding } from "../../../../features/keybindings/types";
 import { resolveScrollableProjectSec } from "../../../../features/session/projectBoundary";
+import { useCaptureScrollExtent } from "../../../../features/capture/captureRange";
 import { applyNativeScrollLeft } from "../runtime/nativeScrollApply";
 import type { TimelineKernelHost } from "../kernel/host/timelineKernelHost";
 import {
@@ -928,9 +929,10 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
     // 刻度范围、拖拽上限与内容宽都由此推出。此前只用 clip 末端，比后端权威的
     // `projectSec` 短（实测 59.5s vs 120s），会让标尺刻度范围与内核实际可滚范围
     // 不一致（缺陷 7 的同一根因）。
+    const captureExtentSec = useCaptureScrollExtent(s.projectSec);
     const dynamicProjectSec = useMemo(
-        () => resolveScrollableProjectSec(s.projectSec, s.clips),
-        [s.projectSec, s.clips],
+        () => resolveScrollableProjectSec(s.projectSec, s.clips, captureExtentSec),
+        [s.projectSec, s.clips, captureExtentSec],
     );
 
     const contentWidth = useMemo(

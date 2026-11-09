@@ -8,7 +8,12 @@
  */
 import { expect, test } from "vitest";
 
-import { MAX_LEAD_SEC, captureBandsAt, deriveCaptureBands } from "./captureRange";
+import {
+    MAX_LEAD_SEC,
+    captureBandsAt,
+    captureScrollExtentSec,
+    deriveCaptureBands,
+} from "./captureRange";
 import type { CaptureStatus } from "./captureApi";
 
 /**
@@ -157,6 +162,21 @@ test("★ 宿主从不说自己在播时，带子照样要长（非实时预览�
         hostPlaying: false,
     };
     expect(deriveCaptureBands(previewing, 1.05)?.bands).toEqual([{ startSec: 0, endSec: 1.05 }]);
+});
+
+test("捕获中的位置可以推出可滚域延伸", () => {
+    const recording = status({
+        runs: [{ startFrame: 0, endFrame: 144_000 }],
+        positionFrame: 1_440_000, // 30s
+    });
+    // 位置已经跳到 30s；即使最后一段只到 3s，滚动也必须能到当前位置。
+    expect(captureScrollExtentSec(recording)).toBeGreaterThanOrEqual(30);
+});
+
+test("没有捕获 / 采样率非法时没有额外长度", () => {
+    expect(captureScrollExtentSec(null)).toBe(0);
+    expect(captureScrollExtentSec(status(null))).toBe(0);
+    expect(captureScrollExtentSec(status({ sampleRate: 0 }))).toBe(0);
 });
 
 test("采样率不可用时返回 null（不猜一个率去画）", () => {

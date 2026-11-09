@@ -113,6 +113,64 @@ export function deriveCaptureBands(
 }
 
 /**
+ * 捕获期间需要并入可滚域的工程秒数。
+ *
+ * 与 deriveCaptureBands 的区别：带子回答“哪几段已经有素材”，这里回答
+ * “滚动条至少要能到哪”。用户跳到 30s 继续录时，中间 27s 是空洞，但滚动
+ * 仍然必须能到 30s，否则看不见当前捕获位置。
+ */
+export function captureScrollExtentSec(status: CaptureStatus | null): number {
+    if (!status?.capture) return 0;
+    const bands = deriveCaptureBands(status);
+    if (!bands) return 0;
+    const lastBand = bands.bands.length > 0 ? bands.bands[bands.bands.length - 1] : null;
+    const endSec = Math.max(bands.positionSec, lastBand?.endSec ?? 0);
+    return Math.max(0, endSec + bands.leadSec);
+}
+
+let extentCacheStatus: CaptureStatus | null | undefined;
+let extentCacheProjectSec = Number.NaN;
+let extentCacheValue = 0;
+
+function getCaptureScrollExtentSnapshot(projectSec: number): number {
+    const status = getCaptureSnapshot().status;
+    if (status === extentCacheStatus && projectSec === extentCacheProjectSec) {
+        return extentCacheValue;
+    }
+    extentCacheStatus = status;
+    extentCacheProjectSec = projectSec;
+    // 量化到整秒：5 Hz 的状态轮询只在跨过整秒时触发 React 重渲染，
+    // 不让整个时间轴 / 参数编辑器跟着 200 ms 抖动。
+    extentCacheValue = Math.max(projectSec, Math.ceil(captureScrollExtentSec(status)));
+    return extentCacheValue;
+}
+
+/**
+ * 非订阅读取：返回“当前可滚长度”（至少是 projectSec）。
+ *
+ * 事件监听器（缩放 / 聚焦光标）不在 React 渲染期，不能调用 hook；它们需要与
+ * 视口同一份实时值，否则捕获中滚动上限仍停在旧工程末端。
+ */
+export function resolveCaptureScrollExtentSec(projectSec: number): number {
+    return getCaptureScrollExtentSnapshot(projectSec);
+}
+
+/**
+ * 订阅“捕获实时可滚长度”。没有捕获时返回 projectSec 本身。
+ *
+ * 【为什么不用 useCaptureBands】它会随 5 Hz 轮询返回新对象，订阅方
+ * （时间轴 / 参数编辑器）会每 200 ms 整棵重渲染。这里用 useSyncExternalStore
+ * + 整秒量化缓存：只有跨过整秒才换快照。
+ */
+export function useCaptureScrollExtent(projectSec: number): number {
+    return useSyncExternalStore(
+        subscribeCapture,
+        () => resolveCaptureScrollExtentSec(projectSec),
+        () => projectSec,
+    );
+}
+
+/**
  * 按快照身份缓存上一次的派生结果。
  *
  * 【为什么必须有】`useSyncExternalStore` 的 `getSnapshot` 必须**返回稳定引用**：
