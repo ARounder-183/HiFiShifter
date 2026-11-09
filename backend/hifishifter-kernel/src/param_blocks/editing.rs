@@ -473,6 +473,101 @@ fn find_projected_block(
     Err("Invalid: block not found".into())
 }
 
+/** 一个成员在本帧域里的可见区间（与 `compose` 的 run 同源）。 */
+struct SplitMemberInterval<'a> {
+    index: usize,
+    member: &'a TakeSpan,
+    projection: ClipProjection,
+    start_frame: u32,
+    end_frame_exclusive: u32,
+}
+
+/** 要把 `frame` 挪多少帧才能严格落进该成员内部（0 = 已经在内）。 */
+fn frames_to_inside(interval: &SplitMemberInterval<'_>, frame: u32) -> i64 {
+    if frame <= interval.start_frame {
+        interval.start_frame as i64 + 1 - frame as i64
+    } else if frame >= interval.end_frame_exclusive {
+        frame as i64 - (interval.end_frame_exclusive as i64 - 1)
+    } else {
+        0
+    }
+}
+
+/**
+ * 找出"切在哪一个成员上"，并把切点钳进它内部。
+ *
+ * 【为什么需要兜底】合成合并 run 的判据是 `start <= last.end + 1`（相差 1 帧也并），
+ * 因此块的 `[start_frame, end_frame_exclusive)` 里可能存在**成员内无帧**的缝。
+ * 旧实现只做"哪个成员严格包含该帧"，落进缝里就返回 `split outside block` ——
+ * 于是"菜单可点、播放光标在块内，却切不了"。这里改为：先找严格包含的成员；找不到
+ * 就取**帧距离最近**的成员并把切点钳进它的内部。
+ *
+ * 钳位后仍然由该成员的投影反算源域切点，所以切出来的两半首尾相接、无重叠 ——
+ * 与"正好点在成员内"的结果只差不到 1 帧。
+ */
+fn resolve_split_member(
+    timeline: &TimelineState,
+    members: &[TakeSpan],
+    frame: u32,
+    frame_period_ms: f64,
+) -> Option<(usize, f64)> {
+    let mut intervals: Vec<SplitMemberInterval<'_>> = Vec::new();
+    for (index, member) in members.iter().enumerate() {
+        let Some(clip) = timeline.clips.iter().find(|clip| clip.id == member.clip_id) else {
+            continue;
+        };
+        let Some(take) = clip.take(&member.take_id) else {
+            continue;
+        };
+        let projection = ClipProjection::from_clip_take(clip, take);
+        let projected: Vec<_> = project_span(&projection, member, frame_period_ms)
+            .into_iter()
+            .filter(|interval| interval.cycle == member.cycle)
+            .collect();
+        let (Some(first), Some(last)) = (projected.first(), projected.last()) else {
+            continue;
+        };
+        intervals.push(SplitMemberInterval {
+            index,
+            member,
+            projection,
+            start_frame: first.start_frame,
+            end_frame_exclusive: last.end_frame_exclusive,
+        });
+    }
+    if intervals.is_empty() {
+        return None;
+    }
+
+    let mut hit = intervals
+        .iter()
+        .find(|interval| frames_to_inside(interval, frame) == 0);
+    let mut split_frame = frame;
+    if hit.is_none() {
+        let nearest = intervals
+            .iter()
+            .min_by_key(|interval| frames_to_inside(interval, frame))?;
+        let clamped = frame
+            .max(nearest.start_frame.saturating_add(1))
+            .min(nearest.end_frame_exclusive.saturating_sub(1));
+        if clamped <= nearest.start_frame || clamped >= nearest.end_frame_exclusive {
+            return None;
+        }
+        split_frame = clamped;
+        hit = intervals
+            .iter()
+            .find(|interval| interval.index == nearest.index);
+    }
+    let hit = hit?;
+    let source_sec = inverse_project(
+        &hit.projection,
+        split_frame,
+        hit.member.cycle,
+        frame_period_ms,
+    )?;
+    Some((hit.index, source_sec))
+}
+
 pub fn split_block(
     timeline: &TimelineState,
     edits: &ParamBlockEditSet,
@@ -528,35 +623,9 @@ pub fn split_block(
         BlockGeometry::Take { members } => {
             let mut ordered = members.clone();
             ordered.sort_by(|a, b| a.source_start_sec.total_cmp(&b.source_start_sec));
-            let mut split_index = None;
-            let mut split_source = None;
-            for (index, member) in ordered.iter().enumerate() {
-                let Some(clip) = timeline.clips.iter().find(|clip| clip.id == member.clip_id)
-                else {
-                    continue;
-                };
-                let Some(take) = clip.take(&member.take_id) else {
-                    continue;
-                };
-                let projection = ClipProjection::from_clip_take(clip, take);
-                let intervals: Vec<_> = project_span(&projection, member, frame_period_ms)
-                    .into_iter()
-                    .filter(|interval| interval.cycle == member.cycle)
-                    .collect();
-                let start = intervals.first().map(|interval| interval.start_frame);
-                let end = intervals
-                    .last()
-                    .map(|interval| interval.end_frame_exclusive);
-                if let (Some(start), Some(end)) = (start, end) {
-                    if frame > start && frame < end {
-                        split_index = Some(index);
-                        split_source =
-                            inverse_project(&projection, frame, member.cycle, frame_period_ms);
-                        break;
-                    }
-                }
-            }
-            let (Some(index), Some(source_split)) = (split_index, split_source) else {
+            let Some((index, source_split)) =
+                resolve_split_member(timeline, &ordered, frame, frame_period_ms)
+            else {
                 return Err("Invalid: split outside block".into());
             };
             let containing = &ordered[index];
@@ -1180,6 +1249,73 @@ mod tests {
             .blocks
             .iter()
             .any(|block| block.end_frame_exclusive == 200));
+    }
+
+    /// 两个**相差 1 帧**的成员：合成会把它们并成一个 run，并在帧 100 处留下
+    /// "块内有、成员内无"的缝（合并容差是 `start <= last.end + 1`）。
+    fn gap_member_edits() -> ParamBlockEditSet {
+        let member = |start: f64, end: f64| TakeSpan {
+            clip_id: "clip".into(),
+            take_id: "take".into(),
+            cycle: 0,
+            source_start_sec: start,
+            source_end_sec: end,
+            syllable_id: None,
+            label: BlockLabel::Manual,
+        };
+        ParamBlockEditSet {
+            schema_version: 1,
+            revision: 1,
+            blocks: vec![UserParamBlock {
+                id: "user".into(),
+                geometry: BlockGeometry::Take {
+                    members: vec![member(0.0, 0.5), member(0.505, 1.0)],
+                },
+                deleted: false,
+                manual: false,
+                value: Some(60.0),
+                transition_out_sec: None,
+                created_seq: 1,
+                grouped_from: None,
+            }],
+        }
+    }
+
+    /*
+     * 【run 合并容差的缝】旧实现只找"严格包含该帧的成员"，落进缝里就
+     * `split outside block` —— 菜单可点、播放光标在块内，却切不了。
+     * 兜底规则：取帧距离最近的成员，把切点钳进它内部。
+     */
+    #[test]
+    fn split_inside_a_merged_run_gap() {
+        let timeline = timeline();
+        let edits = gap_member_edits();
+        let view = compose_param_block_view(&timeline, "root", &edits, 5.0).unwrap();
+        assert_eq!(view.blocks.len(), 1);
+        assert_eq!(
+            (
+                view.blocks[0].start_frame,
+                view.blocks[0].end_frame_exclusive
+            ),
+            (0, 200)
+        );
+        // 多成员 run 不是可逆编组：它照样可以切分。
+        assert_eq!(
+            view.blocks[0].kind,
+            crate::param_blocks::ProjectedBlockKind::User
+        );
+
+        // 帧 100 落在缝里。
+        let split = split_block(&timeline, &edits, &view.blocks[0].id, 100, 5.0).unwrap();
+        let split_view = compose_param_block_view(&timeline, "root", &split, 5.0).unwrap();
+        assert_eq!(split_view.blocks.len(), 2);
+        assert_eq!(split_view.blocks[0].start_frame, 0);
+        assert_eq!(split_view.blocks[1].end_frame_exclusive, 200);
+
+        // 切完的右半仍然可以再切（回归"多成员块切一刀之后就切不动了"）。
+        let again = split_block(&timeline, &split, &split_view.blocks[1].id, 150, 5.0).unwrap();
+        let again_view = compose_param_block_view(&timeline, "root", &again, 5.0).unwrap();
+        assert_eq!(again_view.blocks.len(), 3);
     }
 
     #[test]

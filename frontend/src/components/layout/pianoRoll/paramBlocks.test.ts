@@ -45,6 +45,54 @@ function state(editSet: ParamBlockEditSet = EMPTY_EDITS) {
     return { ...EMPTY_PARAM_BLOCK_STATE, editSet, framePeriodMs: FRAME_MS };
 }
 
+/**
+ * 一个只有用户块的编辑集（base 会被它抑制）。
+ *
+ * @param members 每个成员的源域区间 [startSec, endSec)。
+ */
+function takeBlockEdits(members: ReadonlyArray<readonly [number, number]>): ParamBlockEditSet {
+    return {
+        schemaVersion: 1,
+        revision: 1,
+        blocks: [
+            {
+                id: "user",
+                geometry: {
+                    kind: "take",
+                    members: members.map(([sourceStartSec, sourceEndSec]) => ({
+                        clipId: "clip",
+                        takeId: "clip_take_1",
+                        cycle: 0,
+                        sourceStartSec,
+                        sourceEndSec,
+                        label: "manual" as const,
+                    })),
+                },
+                deleted: false,
+                manual: false,
+                value: 60,
+                createdSeq: 1,
+            },
+        ],
+    };
+}
+
+/** 两个**相邻**成员：合成成一个 run，但没有任何可逆编组快照。 */
+function twoMemberEdits(): ParamBlockEditSet {
+    return takeBlockEdits([
+        [0, 0.5],
+        [0.5, 1],
+    ]);
+}
+
+/** 两个相差 1 帧的成员：合成会并成一个 run，并在帧 100 处留下"成员内无帧"的缝。 */
+function gapMemberEdits(): ParamBlockEditSet {
+    return takeBlockEdits([
+        [0, 0.5],
+        [0.505, 1],
+    ]);
+}
+
 describe("resolveParamBlockSplitTarget", () => {
     it("播放头在块内部时返回该块", () => {
         const blocks = panelBlocks([clip()]);
@@ -180,6 +228,20 @@ describe("resolveSplittableParamBlockAt", () => {
         expect(resolveSplittableParamBlockAt(blocks, 0.25, FRAME_MS)?.kind).toBe("auto");
         expect(resolveSplittableParamBlockAt(blocks, 5, FRAME_MS)).toBeNull();
     });
+
+    /*
+     * 【多成员 run 不是编组】两个相邻成员合成一个 run 只是几何事实：切分有唯一解
+     * （找到包含切点的那个成员按源域一分为二），所以它必须出现在"可切"里。
+     * 旧实现把它标成 `grouped`，于是菜单置灰、快捷键静默 —— 用户看到的就是
+     * "播放光标确实在块内，却切不了"。
+     */
+    it("多成员 run 可切（它不是可逆编组）", () => {
+        const blocks = panelBlocks([clip()], twoMemberEdits());
+        expect(blocks).toHaveLength(1);
+        expect(blocks[0]?.kind).toBe("user");
+        expect(resolveSplittableParamBlockAt(blocks, 0.25, FRAME_MS)).not.toBeNull();
+        expect(resolveSplittableParamBlockAt(blocks, 0.75, FRAME_MS)).not.toBeNull();
+    });
 });
 
 describe("isStrictlyInsideParamBlock", () => {
@@ -249,5 +311,62 @@ describe("splitParamBlock", () => {
             ok: false,
             reason: "too_short",
         });
+    });
+
+    /*
+     * 【run 合并容差的缝】合成把"相差 1 帧"的两段也并成一个块，于是块内可能存在
+     * "成员内无帧"的位置。旧实现只找严格包含该帧的成员，落进缝里就失败 ——
+     * 菜单可点、播放光标在块内，却切不了。兜底规则：取帧距离最近的成员并把切点
+     * 钳进它内部。
+     */
+    it("落在 run 合并容差缝里也能切", () => {
+        /*
+         * 两个成员的投影分别是 [0, 100) 与 [101, 200)：相差 1 帧，合成把它们并成
+         * 一个 run [0, 200)。帧 100 因此**块内有、成员内无**。
+         */
+        const edits = gapMemberEdits();
+        const blocks = panelBlocks([clip()], edits);
+        expect(blocks).toHaveLength(1);
+        const block = blocks[0];
+        if (block?.projected === undefined) throw new Error("block missing");
+        expect([block.projected.startFrame, block.projected.endFrameExclusive]).toEqual([0, 200]);
+        expect(block.kind).toBe("user");
+
+        const result = splitParamBlock({
+            state: state(edits),
+            block,
+            sec: (100 * FRAME_MS) / 1000,
+            clips: [clip()],
+        });
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const split = panelBlocks([clip()], result.state.editSet);
+        expect(split).toHaveLength(2);
+        expect(split[0]?.projected?.startFrame).toBe(0);
+        expect(split[1]?.projected?.endFrameExclusive).toBe(200);
+    });
+
+    /*
+     * 【不变式】"菜单可点" ⟺ "切得成"。
+     *
+     * 两个判据曾经各写一遍（位置解析 / 成员搜索），容差与四舍五入一有出入就会出现
+     * "可点却失败"。这条属性测试对块内**每一个帧号**同时跑两条路径。
+     */
+    it("块内每个帧号：可切 ⟺ 切得成", () => {
+        const edits = gapMemberEdits();
+        const blocks = panelBlocks([clip()], edits);
+        const block = blocks[0];
+        if (block?.projected === undefined) throw new Error("block missing");
+        for (let frame = 0; frame <= 205; frame += 1) {
+            const sec = (frame * FRAME_MS) / 1000;
+            const splittable = resolveSplittableParamBlockAt(blocks, sec, FRAME_MS) !== null;
+            const result = splitParamBlock({
+                state: state(edits),
+                block,
+                sec,
+                clips: [clip()],
+            });
+            expect({ frame, ok: result.ok }).toEqual({ frame, ok: splittable });
+        }
     });
 });

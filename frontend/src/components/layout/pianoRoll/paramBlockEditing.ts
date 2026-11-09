@@ -11,6 +11,7 @@ import {
     projectionForClip,
     toFrame,
     toSec,
+    type ClipProjection,
     type ParamBlockSourceClip,
 } from "./paramBlockProjection";
 import {
@@ -373,6 +374,76 @@ export function ungroupUserBlock(edits: ParamBlockEditSet, blockId: string): Par
     return { ...next, revision: edits.revision + 1 };
 }
 
+/** 一个成员在本帧域里的可见区间（与合成的 run 同源）。 */
+interface SplitMemberInterval {
+    readonly index: number;
+    readonly member: TakeSpan;
+    readonly projection: ClipProjection;
+    readonly startFrame: number;
+    readonly endFrameExclusive: number;
+}
+
+/** 要把 `frame` 挪多少帧才能严格落进该成员内部（0 = 已经在内）。 */
+function framesToInside(interval: SplitMemberInterval, frame: number): number {
+    if (frame <= interval.startFrame) return interval.startFrame + 1 - frame;
+    if (frame >= interval.endFrameExclusive) return frame - (interval.endFrameExclusive - 1);
+    return 0;
+}
+
+/**
+ * 找出"切在哪一个成员上"，并把切点钳进它内部。
+ *
+ * 【为什么需要兜底】合成合并 run 的判据是 `start <= last.end + 1`（相差 1 帧也并），
+ * 因此块的 `[startFrame, endFrameExclusive)` 里可能存在**成员内无帧**的缝。
+ * 旧实现只做"哪个成员严格包含该帧"，落进缝里就抛 `split outside block` ——
+ * 于是"菜单可点、播放光标在块内，却切不了"。这里改为：先找严格包含的成员；找不到
+ * 就取**帧距离最近**的成员并把切点钳进它的内部。
+ *
+ * 钳位后仍然由该成员的投影反算源域切点，所以切出来的两半首尾相接、无重叠 ——
+ * 与"正好点在成员内"的结果只差不到 1 帧。
+ */
+function resolveSplitMember(args: {
+    readonly clips: readonly ParamBlockSourceClip[];
+    readonly members: readonly TakeSpan[];
+    readonly frame: number;
+    readonly framePeriodMs: number;
+}): { readonly index: number; readonly sourceSec: number } | null {
+    const intervals: SplitMemberInterval[] = [];
+    for (let index = 0; index < args.members.length; index += 1) {
+        const member = args.members[index];
+        const clip = args.clips.find((item) => item.id === member.clipId);
+        if (clip === undefined) continue;
+        const projection = projectionForClip(clip);
+        const projected = projectTakeSpan(projection, member, args.framePeriodMs).filter(
+            (interval) => interval.cycle === member.cycle,
+        );
+        const startFrame = projected[0]?.startFrame;
+        const endFrameExclusive = projected[projected.length - 1]?.endFrameExclusive;
+        if (startFrame === undefined || endFrameExclusive === undefined) continue;
+        intervals.push({ index, member, projection, startFrame, endFrameExclusive });
+    }
+    if (intervals.length === 0) return null;
+
+    let hit = intervals.find((interval) => framesToInside(interval, args.frame) === 0);
+    let splitFrame = args.frame;
+    if (hit === undefined) {
+        hit = intervals.reduce((best, candidate) =>
+            framesToInside(candidate, args.frame) < framesToInside(best, args.frame)
+                ? candidate
+                : best,
+        );
+        splitFrame = Math.min(Math.max(args.frame, hit.startFrame + 1), hit.endFrameExclusive - 1);
+        if (!(splitFrame > hit.startFrame && splitFrame < hit.endFrameExclusive)) return null;
+    }
+    const sourceSec = inverseProject(
+        hit.projection,
+        splitFrame,
+        hit.member.cycle,
+        args.framePeriodMs,
+    );
+    return sourceSec === null ? null : { index: hit.index, sourceSec };
+}
+
 export function splitProjectedBlock(
     clips: readonly ParamBlockSourceClip[],
     edits: ParamBlockEditSet,
@@ -414,25 +485,10 @@ export function splitProjectedBlock(
     const members = user.geometry.members
         .slice()
         .sort((a, b) => a.sourceStartSec - b.sourceStartSec);
-    let splitIndex = -1;
-    let splitSource: number | null = null;
-    for (let index = 0; index < members.length; index += 1) {
-        const member = members[index];
-        const clip = clips.find((item) => item.id === member.clipId);
-        if (clip === undefined) continue;
-        const projection = projectionForClip(clip);
-        const intervals = projectTakeSpan(projection, member, framePeriodMs).filter(
-            (interval) => interval.cycle === member.cycle,
-        );
-        const start = intervals[0]?.startFrame;
-        const end = intervals[intervals.length - 1]?.endFrameExclusive;
-        if (start !== undefined && end !== undefined && frame > start && frame < end) {
-            splitIndex = index;
-            splitSource = inverseProject(projection, frame, member.cycle, framePeriodMs);
-            break;
-        }
-    }
-    if (splitIndex < 0 || splitSource === null) throw new Error("split outside block");
+    const target = resolveSplitMember({ clips, members, frame, framePeriodMs });
+    if (target === null) throw new Error("split outside block");
+    const splitIndex = target.index;
+    const splitSource = target.sourceSec;
     const containing = members[splitIndex];
     if (
         splitSource <= containing.sourceStartSec + EPS ||
