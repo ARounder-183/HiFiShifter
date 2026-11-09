@@ -17,9 +17,7 @@ import { configureStore } from "@reduxjs/toolkit";
 
 import { KeybindingsDialog } from "./KeybindingsDialog";
 import { I18nProvider } from "../../i18n/I18nProvider";
-import keybindingsReducer, {
-    setKeybindings,
-} from "../../features/keybindings/keybindingsSlice";
+import keybindingsReducer, { setKeybindings } from "../../features/keybindings/keybindingsSlice";
 import sessionReducer from "../../features/session/sessionSlice";
 import { ACTION_GROUP_ORDER, ALL_ACTION_IDS } from "../../features/keybindings/defaultKeybindings";
 
@@ -54,10 +52,7 @@ function createTestStore() {
  * 它把内容 portal 到 `<body>` —— 容器里始终只有 0 长度 HTML。
  */
 /** 渲染对话框；返回值里的 `root` 为 `document.body`（portal 目的地）。 */
-function renderDialog(
-    onOpenChange: (open: boolean) => void = () => {},
-    store = createTestStore(),
-) {
+function renderDialog(onOpenChange: (open: boolean) => void = () => {}, store = createTestStore()) {
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);

@@ -2289,8 +2289,7 @@ export const koKR = {
     installer_desc_clap: "CLAP 플러그인(Capture 전용)입니다. 선택한 CLAP 폴더에 설치됩니다.",
     installer_desc_models: "본체와 모든 플러그인이 공유하는 모델 가중치입니다. 한 번만 저장됩니다.",
     installer_desc_shortcuts: "시작 메뉴 항목과 바탕 화면 아이콘을 추가합니다.",
-    installer_desc_file_assoc:
-        "HiFiShifter 프로젝트 파일을 기본적으로 HiFiShifter로 엽니다.",
+    installer_desc_file_assoc: "HiFiShifter 프로젝트 파일을 기본적으로 HiFiShifter로 엽니다.",
     installer_fileassoc_type_name: "HiFiShifter 프로젝트",
     installer_webview2_install_failed:
         "WebView2 설치에 실패했습니다. Microsoft 사이트에서 설치한 뒤 다시 시도하세요.",

@@ -30,11 +30,7 @@ import { AppButton, AppIconButton, AppStatusChip } from "../../../ui";
 import type { ActionMeta, Keybinding } from "../../../features/keybindings/types";
 import { MAX_BINDINGS_PER_ACTION } from "../../../features/keybindings/types";
 import { formatKeybinding } from "../../../features/keybindings/keybindingsSlice";
-import {
-    GESTURE_BADGES,
-    isDefaultBinding,
-    isDefaultBindings,
-} from "./keybindingRowShared";
+import { GESTURE_BADGES, isDefaultBinding, isDefaultBindings } from "./keybindingRowShared";
 
 /**
  * chip 的固定宽度（px）。
