@@ -1476,6 +1476,9 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                 points = projectDetectedCurvePoints({
                     midiCurve: layer.values,
                     curveStartSec: layer.curveStartSec ?? 0,
+                    // 有效跨度 = 所属 clip 的跨度：越界帧与"起点不符"的过期缓存都不画。
+                    clipStartSec: layer.clipStartSec ?? 0,
+                    clipEndSec: layer.clipEndSec ?? Number.POSITIVE_INFINITY,
                     framePeriodMs: layer.framePeriodMs,
                     axis,
                     valueToY,

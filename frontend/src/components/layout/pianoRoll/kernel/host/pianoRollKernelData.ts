@@ -477,9 +477,19 @@ export interface PianoRollCurveLayer {
      *   **并跳过 `midi <= 0` 的无声帧**）。
      */
     readonly projection: "curve" | "clipboard" | "detected";
-    /** `projection === "clipboard"` 时的选区起点（秒）。 */
+    /**
+     * 这条曲线**只在这段时间内有效**（秒）—— 越界帧不画。
+     *
+     * 两个投影共用同一个字段，因为语义只有一条（"曲线的有效跨度"）：
+     *
+     * - `projection === "clipboard"`：选区跨度；
+     * - `projection === "detected"`：所属 clip 的 `[startSec, startSec + lengthSec)`。
+     *
+     * 检测曲线必须给：缓存可能比 clip 长（分割 / 拉伸之前的那一份），不裁就会把
+     * 旧内容画到 clip 外面（"音高线残影"）。
+     */
     readonly clipStartSec?: number;
-    /** `projection === "clipboard"` 时的选区终点（秒）。 */
+    /** 同上，终点（秒，**开区间**）。 */
     readonly clipEndSec?: number;
     /**
      * `projection === "detected"` 时曲线第 0 帧对应的 timeline 绝对时间（秒）。

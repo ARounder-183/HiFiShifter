@@ -553,12 +553,23 @@ describe("与剪贴板预览循环逐点等价", () => {
 describe("projectDetectedCurvePoints", () => {
     const axis = createTimelineAxis({ pxPerSec: 100, scrollLeftPx: 0, viewportWidthPx: 1000 });
     const valueToY = (v: number) => 100 - v;
+    /**
+     * 一个足够宽的"有效跨度"（= 所属 clip 的跨度），让只关心投影语义的用例里裁剪是恒等。
+     *
+     * @param curveStartSec 曲线起点。跨度必须从它开始 —— 否则会被"起点与 clip 不符"
+     *   那条判据整条丢弃（它专门用来识别"属于别的几何"的过期缓存）。
+     */
+    const span = (curveStartSec: number) => ({
+        clipStartSec: curveStartSec,
+        clipEndSec: curveStartSec + 1000,
+    });
 
     it("按 curveStartSec 锚定时间（不是从 0 开始）", () => {
         // curveStartSec = 5s：第 0 个采样点应落在 x = 500（5s × 100px/s）。
         const points = projectDetectedCurvePoints({
             midiCurve: [60, 62, 64],
             curveStartSec: 5,
+            ...span(5),
             framePeriodMs: 10,
             axis,
             valueToY,
@@ -574,6 +585,7 @@ describe("projectDetectedCurvePoints", () => {
         const points = projectDetectedCurvePoints({
             midiCurve: [60, 0, 62, 0, 0, 64],
             curveStartSec: 0,
+            ...span(0),
             framePeriodMs: 10,
             axis,
             valueToY,
@@ -593,6 +605,7 @@ describe("projectDetectedCurvePoints", () => {
         const points = projectDetectedCurvePoints({
             midiCurve: [60, -1, 62],
             curveStartSec: 0,
+            ...span(0),
             framePeriodMs: 10,
             axis,
             valueToY,
@@ -604,6 +617,7 @@ describe("projectDetectedCurvePoints", () => {
         const points = projectDetectedCurvePoints({
             midiCurve: [60, Number.NaN, 62, Number.POSITIVE_INFINITY, 64],
             curveStartSec: 0,
+            ...span(0),
             framePeriodMs: 10,
             axis,
             valueToY,
@@ -615,6 +629,7 @@ describe("projectDetectedCurvePoints", () => {
         const points = projectDetectedCurvePoints({
             midiCurve: [60, 62],
             curveStartSec: 0,
+            ...span(0),
             framePeriodMs: 10,
             axis,
             valueToY,
@@ -630,6 +645,7 @@ describe("projectDetectedCurvePoints", () => {
         const points = projectDetectedCurvePoints({
             midiCurve: many,
             curveStartSec: 0,
+            ...span(0),
             framePeriodMs: 100,
             axis,
             valueToY,
@@ -647,6 +663,7 @@ describe("projectDetectedCurvePoints", () => {
         const points = projectDetectedCurvePoints({
             midiCurve: new Array(200).fill(60),
             curveStartSec: 0,
+            ...span(0),
             framePeriodMs: 100, // 每点 10px
             axis: scrolled,
             valueToY,
@@ -664,6 +681,7 @@ describe("projectDetectedCurvePoints", () => {
         const points = projectDetectedCurvePoints({
             midiCurve: [0, 0, 0],
             curveStartSec: 0,
+            ...span(0),
             framePeriodMs: 10,
             axis,
             valueToY,
@@ -676,6 +694,7 @@ describe("projectDetectedCurvePoints", () => {
             projectDetectedCurvePoints({
                 midiCurve: [60],
                 curveStartSec: 0,
+                ...span(0),
                 framePeriodMs: 10,
                 axis,
                 valueToY,
@@ -685,10 +704,42 @@ describe("projectDetectedCurvePoints", () => {
             projectDetectedCurvePoints({
                 midiCurve: [60, 62],
                 curveStartSec: Number.NaN,
+                ...span(0),
                 framePeriodMs: 10,
                 axis,
                 valueToY,
             }),
         ).toEqual([]);
+    });
+
+    /*
+     * 【残影回归】缓存可能比 clip 更长（分割 / 拉伸之前的那一份）。参数编辑器此前
+     * 不按 clip 裁剪，于是旧曲线被画到了 clip 外面 —— 时间轴那条同源曲线一直裁着。
+     */
+    it("超出 clip 跨度的帧不画（缓存比 clip 长）", () => {
+        const points = projectDetectedCurvePoints({
+            midiCurve: new Array(20).fill(60),
+            curveStartSec: 0,
+            clipStartSec: 0,
+            clipEndSec: 1, // 只画 [0, 1)：20 帧 × 100ms = 2s，后一半越界
+            framePeriodMs: 100,
+            axis,
+            valueToY,
+        });
+        expect(points).toHaveLength(10);
+        for (const point of points) expect(point.x).toBeLessThan(100);
+    });
+
+    it("曲线起点与 clip 起点不符时整条丢弃（不画错线）", () => {
+        const points = projectDetectedCurvePoints({
+            midiCurve: [60, 62, 64],
+            curveStartSec: 0.5,
+            clipStartSec: 0, // 起点不一致 = 这条缓存属于别的几何
+            clipEndSec: 1,
+            framePeriodMs: 10,
+            axis,
+            valueToY,
+        });
+        expect(points).toEqual([]);
     });
 });
