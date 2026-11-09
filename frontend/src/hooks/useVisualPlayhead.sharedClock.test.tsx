@@ -35,11 +35,13 @@ afterEach(() => {
 
 test("all consumers receive one shared frame value and refs update before callbacks", () => {
     const refs: Array<{ current: number } | null> = [null, null];
+    const externalRefs = [{ current: 0 }, { current: 0 }];
     const seen: number[] = [];
     let armed = false;
 
     function Probe({ index }: { index: number }) {
         const ref = useVisualPlayhead({
+            visualPlayheadSecRef: externalRefs[index],
             syncedPlayheadSec: 0,
             syncedAtMs: nowMs - 10,
             isTransportAdvancing: true,
@@ -47,7 +49,10 @@ test("all consumers receive one shared frame value and refs update before callba
                 seen.push(sec);
                 if (armed && index === 0) {
                     // 第二阶段之前，第二个消费者的 ref 必须已经是同一个值。
-                    expect(refs[1]?.current).toBe(sec);
+                    // 这里必须检查**外部传入**的 ref：绘制侧读的是它，而不是
+                    // hook 自己创建、只被调用方忽略的那个内部 ref。
+                    expect(externalRefs[1].current).toBe(sec);
+                    expect(refs[1]).toBe(externalRefs[1]);
                 }
             },
         });

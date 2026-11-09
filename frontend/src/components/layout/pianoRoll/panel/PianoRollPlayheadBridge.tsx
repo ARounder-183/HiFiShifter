@@ -55,12 +55,14 @@ export const PianoRollPlayheadBridge = React.memo(function PianoRollPlayheadBrid
     const transportAdvancing = isTransportAdvancing(transport);
 
     useVisualPlayhead({
+        visualPlayheadSecRef,
         syncedPlayheadSec: transport.playheadSec,
         syncedAtMs: transport.playheadSampledAtMs,
         isTransportAdvancing: transportAdvancing,
         onFrame: React.useCallback(
             (visualPlayheadSec: number) => {
-                visualPlayheadSecRef.current = visualPlayheadSec;
+                // `visualPlayheadSecRef` 已由 useVisualPlayhead 的两阶段通知在第一阶段写好；
+                // 这里不能再依赖 onFrame 才写——时间轴自动滚屏会在本回调之前触发一次同步绘制。
                 // 捕获带右缘读这一份：参数编辑器单独可见时时间轴桥可能没有挂载。
                 publishVisualPlayheadSec(visualPlayheadSec);
 
@@ -112,7 +114,6 @@ export const PianoRollPlayheadBridge = React.memo(function PianoRollPlayheadBrid
                 transport.autoScrollEnabled,
                 transport.isPlaying,
                 transport.paramEditorSyncTimeline,
-                visualPlayheadSecRef,
             ],
         ),
     });

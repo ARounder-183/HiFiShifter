@@ -218,6 +218,14 @@ export function resetVisualPlayheadClockForTests(): void {
 }
 
 export interface UseVisualPlayheadArgs {
+    /**
+     * 调用方自有的视觉播放头 ref。
+     *
+     * 【为什么必须允许外部传入】绘制侧（参数编辑器内核）读的是面板自己的 ref；
+     * 若 hook 只更新内部 ref，自动滚屏触发的同步绘制会在 onFrame 之前读到旧值，
+     * 表现为光标相对滚动抽动。传入后，两阶段通知的第一阶段就会写这个 ref。
+     */
+    visualPlayheadSecRef?: MutableRefObject<number>;
     syncedPlayheadSec: number;
     isTransportAdvancing: boolean;
     /**
@@ -243,12 +251,14 @@ export interface UseVisualPlayheadArgs {
  * - 停止时只停表，不把视觉值拉回旧采样（光标冻结在停止那一拍）。
  */
 export function useVisualPlayhead({
+    visualPlayheadSecRef: externalVisualPlayheadSecRef,
     syncedPlayheadSec,
     isTransportAdvancing,
     syncedAtMs,
     onFrame,
 }: UseVisualPlayheadArgs): MutableRefObject<number> {
-    const visualPlayheadSecRef = useRef(readSharedVisualPlayheadSec());
+    const ownedVisualPlayheadSecRef = useRef(readSharedVisualPlayheadSec());
+    const visualPlayheadSecRef = externalVisualPlayheadSecRef ?? ownedVisualPlayheadSecRef;
     const onFrameRef = useRef(onFrame);
     const hostControlled = isPluginMode();
 
@@ -273,7 +283,8 @@ export function useVisualPlayhead({
             },
             onFrame: (sec) => onFrameRef.current?.(sec),
         });
-    }, []);
+        // 外部 ref 身份若变化（正常调用不会）需要重新绑定订阅；内部 ref 恒稳定。
+    }, [visualPlayheadSecRef]);
 
     return visualPlayheadSecRef;
 }

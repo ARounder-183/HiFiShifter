@@ -71,16 +71,15 @@ export const TimelineTransportBridge = React.memo(function TimelineTransportBrid
     const transportAdvancing = isTransportAdvancing(transport);
 
     useVisualPlayhead({
+        visualPlayheadSecRef: visualPlayheadRef,
         syncedPlayheadSec: transport.playheadSec,
         syncedAtMs: transport.playheadSampledAtMs,
         isTransportAdvancing: transportAdvancing,
         onFrame: React.useCallback(
             (visualPlayheadSec: number) => {
-                // 同步共享 ref：缩放锚点（以播放头为锚时的锚点解析）读取的必须是
-                // 与绘制同源的插值播放头，否则播放中缩放会以滞后的 store 值锚定
-                // 造成跳变。内核宿主也经 `playheadSec` getter 读同一份真值
-                // （见 `timelineKernelHost.readPlayheadSec`）。
-                visualPlayheadRef.current = visualPlayheadSec;
+                // 缩放锚点（以播放头为锚时的锚点解析）读取的必须是与绘制同源的插值
+                // 播放头。`visualPlayheadRef` 已由 useVisualPlayhead 在第一阶段写好；
+                // 不能等到 onFrame 才写——自动滚屏的同步绘制发生在本回调之前。
                 // 捕获带的右缘读这一份：它必须与光标同源，否则两者永远差一个轮询周期。
                 publishVisualPlayheadSec(visualPlayheadSec);
 
@@ -129,7 +128,6 @@ export const TimelineTransportBridge = React.memo(function TimelineTransportBrid
                 syncScrollLeft,
                 transport.isPlaying,
                 projectSec,
-                visualPlayheadRef,
                 requestPlayheadRepaint,
             ],
         ),
