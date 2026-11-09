@@ -653,15 +653,15 @@ Parameter blocks divide a parameter line into editable segments anchored to Clip
 - **Select / multi-select**: click a block; hold the multi-select modifier (default Ctrl / ⌘) to add or remove. Right-drag marquee-selects blocks.
 - **Move**: drag the block body vertically. Pitch snap follows the Pitch Snap settings (semitone / project scale / tolerance); Shift also inverts snapping.
 - **Resize**: drag the left or right edge. Horizontal snapping follows the timeline snap engine, including grid, Swing, Tempo Map, clip edges, playhead, and selection markers.
-- **Split**: select one block and press S, or choose “Split” from the context menu.
-- **Group / Ungroup**: select two or more adjacent blocks and press G to group, U to ungroup. Grouping is reversible: ungrouping restores the original block ids, source ranges, manual values, and transitions. Split / resize of a grouped block requires ungrouping first.
+- **Split**: put the playhead where you want the cut, then press S or choose “Split at playhead” from the context menu. The playhead decides which block is cut, independent of the current selection; pressing S while the playhead is outside every block does nothing at all. The cut point is nudged by the timeline snap settings but is never pulled outside the target block.
+- **Group / Ungroup**: select two or more adjacent blocks and press G to group, U to ungroup. Grouping is reversible: ungrouping restores the original block ids, source ranges, manual values, and transitions. A grouped block cannot be split or resized horizontally (no resize cursor appears on its edges and splitting silently skips it) — ungroup first.
 - **Delete / Restore**: Delete or Backspace removes selected blocks; “Restore deleted blocks” restores the most recent batch.
 - **Restore**: the context-menu “Restore” item restores the selection to the initial GAME / analysis segmentation.
 - **Transitions**: drag the handle above a shared block boundary. Every parameter persists the transition layout; only Pitch additionally blends the curve.
 - **Playhead**: with “Allow the parameter editor to move the playhead” enabled, clicking empty space or a block in block mode moves the playhead; dragging a block, edge, transition handle, or right-clicking does not.
 - **Loop / multiple Takes**: blocks are stored in the source domain. Switching the active Take, reversing, looping, slipping, trimming, or re-analysis reprojects them correctly. Creating or restoring blocks on a Loop Clip covers all visible cycles.
 
-All block-action failures appear in the bottom-left status bar; hover to read the backend detail.
+When a block action's preconditions are not met nothing is shown (same as splitting / grouping audio clips: the menu item is greyed out and the shortcut is silent). Edits that the backend actually rejects appear in the bottom-left status bar; hover to read the backend detail.
 
 ## 6. Export Audio
 
