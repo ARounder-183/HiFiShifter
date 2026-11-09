@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, useState } from "react";
+import { act, useEffect, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ClipInfo } from "../../../features/session/sessionTypes";
@@ -66,7 +66,8 @@ function clip(overrides: Partial<ClipInfo> = {}): ClipInfo {
 
 let host: HTMLDivElement;
 let root: Root;
-let probe: { state: ParamBlockState } | null = null;
+/** 观测点：由 effect 写入（渲染期不得改外部变量）。 */
+const probe: { state: ParamBlockState } = { state: EMPTY_PARAM_BLOCK_STATE };
 const flags = { defer: false };
 const props = { clips: [clip()] as readonly ClipInfo[], historyKey: "0:0" };
 
@@ -81,7 +82,9 @@ function Harness(p: { clips: readonly ClipInfo[]; historyKey: string }) {
         setState,
         deferReadback: () => flags.defer,
     });
-    probe = { state };
+    useEffect(() => {
+        probe.state = state;
+    }, [state]);
     return null;
 }
 
@@ -98,7 +101,7 @@ beforeEach(() => {
     flags.defer = false;
     props.clips = [clip()];
     props.historyKey = "0:0";
-    probe = null;
+    probe.state = EMPTY_PARAM_BLOCK_STATE;
     host = document.createElement("div");
     document.body.append(host);
     root = createRoot(host);
@@ -112,9 +115,9 @@ afterEach(() => {
 describe("useParamBlockPersistence", () => {
     it("挂载后把权威编辑集与帧周期写进状态", async () => {
         await render();
-        expect(probe?.state.editSet.revision).toBe(3);
-        expect(probe?.state.rootTrackId).toBe("root");
-        expect(probe?.state.framePeriodMs).toBe(5);
+        expect(probe.state.editSet.revision).toBe(3);
+        expect(probe.state.rootTrackId).toBe("root");
+        expect(probe.state.framePeriodMs).toBe(5);
     });
 
     /*
@@ -132,22 +135,22 @@ describe("useParamBlockPersistence", () => {
         mocks.getParamBlockView.mockResolvedValue(reply(4));
         await render();
         expect(mocks.getParamBlockView.mock.calls.length).toBe(before);
-        expect(probe?.state.editSet.revision).toBe(3);
+        expect(probe.state.editSet.revision).toBe(3);
 
         flags.defer = false;
         await render();
         expect(mocks.getParamBlockView.mock.calls.length).toBe(before + 1);
-        expect(probe?.state.editSet.revision).toBe(4);
+        expect(probe.state.editSet.revision).toBe(4);
     });
 
     it("比本地更旧的编辑集不会覆盖当前状态", async () => {
         await render();
-        expect(probe?.state.editSet.revision).toBe(3);
+        expect(probe.state.editSet.revision).toBe(3);
 
         mocks.getParamBlockView.mockResolvedValue(reply(1));
         props.historyKey = "2:0";
         await render();
-        expect(probe?.state.editSet.revision).toBe(3);
+        expect(probe.state.editSet.revision).toBe(3);
     });
 
     /*
@@ -190,11 +193,11 @@ describe("useParamBlockPersistence", () => {
         await act(async () => {
             release?.(reply(7));
         });
-        expect(probe?.state.editSet.revision).toBe(3);
+        expect(probe.state.editSet.revision).toBe(3);
 
         // 下一次渲染发现有待回读，补一次并落地。
         await render();
         expect(mocks.getParamBlockView.mock.calls.length).toBe(before + 2);
-        expect(probe?.state.editSet.revision).toBe(7);
+        expect(probe.state.editSet.revision).toBe(7);
     });
 });
