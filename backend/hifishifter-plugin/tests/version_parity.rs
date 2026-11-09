@@ -78,6 +78,8 @@ fn every_version_source_agrees_with_the_plugin_crate() {
         "backend/src-tauri/tauri.conf.dist-dev.json",
         "backend/src-tauri/Cargo.toml",
         "backend/hifishifter-plugin-core/Cargo.toml",
+        "backend/hifishifter-ara/Cargo.toml",
+        "backend/hifishifter-capture/Cargo.toml",
         "backend/hifishifter-clap/Cargo.toml",
         "frontend/package.json",
         "frontend/package-lock.json",
@@ -100,4 +102,24 @@ fn every_version_source_agrees_with_the_plugin_crate() {
          运行 python scripts/release/version.py --write {plugin_version} 同步全部来源。",
         mismatches.join("、")
     );
+}
+
+/// 版本清单必须覆盖所有“产品版本 crate”。
+///
+/// 【为什么需要这条】version-sources.json 是写入与校验共用的唯一清单；
+/// 新增一个 crate 却忘了把它加进清单时，--check 仍然全绿，直到用户
+/// 在“关于”里看到旧版本。这条测试把“清单是否收录”变成结构事实。
+#[test]
+fn version_sources_cover_the_ara_and_capture_crates() {
+    let root = repo_root();
+    let manifest = read(&root.join("scripts/release/version-sources.json"));
+    for relative in [
+        "backend/hifishifter-ara/Cargo.toml",
+        "backend/hifishifter-capture/Cargo.toml",
+    ] {
+        assert!(
+            manifest.contains(&format!("\"path\": \"{relative}\"")),
+            "version-sources.json 缺少 {relative}；运行 python scripts/release/version.py --write <版本> 无法同步它"
+        );
+    }
 }
