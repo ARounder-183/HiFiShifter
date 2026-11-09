@@ -332,24 +332,13 @@ pub enum ProjectedBlockKind {
 }
 
 /// GAME 初始分段基线：源域快照，只有用户显式刷新才替换。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GameBlockBaseline {
     pub revision: u64,
     pub algorithm: String,
     pub algorithm_version: u32,
     pub source_spans_sec: Vec<crate::pitch_analysis::SyllableSpan>,
-}
-
-impl Default for GameBlockBaseline {
-    fn default() -> Self {
-        Self {
-            revision: 0,
-            algorithm: String::new(),
-            algorithm_version: 0,
-            source_spans_sec: Vec::new(),
-        }
-    }
 }
 
 #[cfg(test)]
