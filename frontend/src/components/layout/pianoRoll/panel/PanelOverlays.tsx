@@ -65,7 +65,6 @@ type Props = {
         | "canRestoreGameParamBlocks"
         | "restoreGameParamBlocks"
         | "setParamBlockContextMenu"
-        | "selectedParamBlockCount"
         | "canGroupSelectedParamBlocks"
         | "canUngroupSelectedParamBlocks"
         | "groupSelectedParamBlocks"
@@ -76,8 +75,8 @@ type Props = {
         | "restoreParamBlocks"
         | "canDeleteSelectedParamBlocks"
         | "deleteSelectedParamBlocks"
-        | "paramBlockSplitAtSec"
-        | "splitSelectedParamBlockAt"
+        | "canSplitParamBlockAtPlayhead"
+        | "splitParamBlockAtPlayhead"
         | "setMidiDialogOpen"
         | "setVibratoDialogOpen"
         | "specifiedBpm"
@@ -141,7 +140,6 @@ export function PanelOverlays({ m }: Props) {
         canRestoreGameParamBlocks,
         restoreGameParamBlocks,
         setParamBlockContextMenu,
-        selectedParamBlockCount,
         canGroupSelectedParamBlocks,
         canUngroupSelectedParamBlocks,
         groupSelectedParamBlocks,
@@ -152,8 +150,8 @@ export function PanelOverlays({ m }: Props) {
         restoreParamBlocks,
         canDeleteSelectedParamBlocks,
         deleteSelectedParamBlocks,
-        paramBlockSplitAtSec,
-        splitSelectedParamBlockAt,
+        canSplitParamBlockAtPlayhead,
+        splitParamBlockAtPlayhead,
         setMidiDialogOpen,
         setVibratoDialogOpen,
         specifiedBpm,
@@ -254,7 +252,6 @@ export function PanelOverlays({ m }: Props) {
                 <ParamBlockContextMenu
                     x={paramBlockContextMenu.x}
                     y={paramBlockContextMenu.y}
-                    selectedCount={selectedParamBlockCount}
                     canGroup={canGroupSelectedParamBlocks}
                     canUngroup={canUngroupSelectedParamBlocks}
                     canDelete={canDeleteSelectedParamBlocks}
@@ -265,8 +262,8 @@ export function PanelOverlays({ m }: Props) {
                     onRestoreDeleted={() => restoreParamBlocks()}
                     onNormalizePitch={normalizeSelectedParamBlockPitch}
                     onDelete={deleteSelectedParamBlocks}
-                    splitAtSec={paramBlockSplitAtSec}
-                    onSplit={splitSelectedParamBlockAt}
+                    canSplit={canSplitParamBlockAtPlayhead}
+                    onSplit={splitParamBlockAtPlayhead}
                     onGroup={groupSelectedParamBlocks}
                     onUngroup={ungroupSelectedParamBlocks}
                     onClose={() => setParamBlockContextMenu(null)}

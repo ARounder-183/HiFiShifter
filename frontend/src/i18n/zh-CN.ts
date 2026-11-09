@@ -741,7 +741,7 @@ export const zhCN = {
     param_blocks_show_overlay: "显示参数块",
     param_blocks_ungroup: "取消编组",
     param_blocks_group: "编组",
-    param_blocks_split_here: "切开",
+    param_blocks_split_at_playhead: "在播放头处切开",
     param_blocks_restore_game: "还原",
     param_blocks_restore_deleted: "恢复删除的块",
     param_blocks_normalize_pitch: "音高归一化",

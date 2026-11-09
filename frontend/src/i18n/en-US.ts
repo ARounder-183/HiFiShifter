@@ -904,7 +904,7 @@ export const enUS = {
     param_blocks_show_overlay: "Show parameter blocks",
     param_blocks_ungroup: "Ungroup",
     param_blocks_group: "Group",
-    param_blocks_split_here: "Split",
+    param_blocks_split_at_playhead: "Split at playhead",
     param_blocks_restore_game: "Restore",
     param_blocks_restore_deleted: "Restore deleted blocks",
     param_blocks_normalize_pitch: "Normalize pitch",

@@ -773,7 +773,7 @@ export const jaJP = {
     param_blocks_show_overlay: "パラメータブロックを表示",
     param_blocks_ungroup: "グループ解除",
     param_blocks_group: "グループ化",
-    param_blocks_split_here: "分割",
+    param_blocks_split_at_playhead: "再生ヘッドで分割",
     param_blocks_restore_game: "復元",
     param_blocks_restore_deleted: "削除したブロックを復元",
     param_blocks_normalize_pitch: "ピッチ正規化",

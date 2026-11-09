@@ -17,15 +17,15 @@ import type { MessageKey } from "../../../../i18n/messages";
 export interface ParamBlockContextMenuProps {
     readonly x: number;
     readonly y: number;
-    readonly selectedCount: number;
+    /** 播放头处是否有可切的块（打开菜单时算一次）。 */
+    readonly canSplit: boolean;
     readonly canGroup: boolean;
     readonly canUngroup: boolean;
     readonly canDelete: boolean;
     readonly canRestoreGame?: boolean;
     readonly canRestoreDeleted?: boolean;
     readonly canNormalizePitch?: boolean;
-    readonly splitAtSec: number | null;
-    readonly onSplit: (sec: number) => void;
+    readonly onSplit: () => void;
     readonly onGroup: () => void;
     readonly onUngroup: () => void;
     readonly onRestoreGame?: () => void;
@@ -39,14 +39,13 @@ export interface ParamBlockContextMenuProps {
 export function ParamBlockContextMenu({
     x,
     y,
-    selectedCount,
+    canSplit,
     canGroup,
     canUngroup,
     canDelete,
     canRestoreGame,
     canRestoreDeleted,
     canNormalizePitch,
-    splitAtSec,
     onSplit,
     onGroup,
     onUngroup,
@@ -72,12 +71,10 @@ export function ParamBlockContextMenu({
     const items: AppMenuItemSpec[] = [
         {
             key: "blocks-split",
-            label: tf("param_blocks_split_here"),
+            label: tf("param_blocks_split_at_playhead"),
             shortcut: splitShortcut,
-            disabled: splitAtSec === null || selectedCount !== 1,
-            onSelect: () => {
-                if (splitAtSec !== null) onSplit(splitAtSec);
-            },
+            disabled: !canSplit,
+            onSelect: onSplit,
         },
         {
             key: "blocks-group",

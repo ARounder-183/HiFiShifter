@@ -835,7 +835,7 @@ export const koKR = {
     param_blocks_show_overlay: "파라미터 블록 표시",
     param_blocks_ungroup: "그룹 해제",
     param_blocks_group: "그룹",
-    param_blocks_split_here: "분할",
+    param_blocks_split_at_playhead: "재생 헤드에서 분할",
     param_blocks_restore_game: "복원",
     param_blocks_restore_deleted: "삭제한 블록 복원",
     param_blocks_normalize_pitch: "피치 정규화",

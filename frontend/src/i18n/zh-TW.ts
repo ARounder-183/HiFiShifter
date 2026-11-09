@@ -742,7 +742,7 @@ export const zhTW = {
     param_blocks_show_overlay: "顯示參數區塊",
     param_blocks_ungroup: "取消編組",
     param_blocks_group: "編組",
-    param_blocks_split_here: "切開",
+    param_blocks_split_at_playhead: "在播放頭處切開",
     param_blocks_restore_game: "還原",
     param_blocks_restore_deleted: "恢復刪除的區塊",
     param_blocks_normalize_pitch: "音高歸一化",

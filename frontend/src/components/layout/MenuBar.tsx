@@ -927,7 +927,7 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                         [
                                             [
                                                 "paramBlock.split",
-                                                "param_blocks_split_here",
+                                                "param_blocks_split_at_playhead",
                                                 "split",
                                             ],
                                             ["paramBlock.group", "param_blocks_group", "group"],

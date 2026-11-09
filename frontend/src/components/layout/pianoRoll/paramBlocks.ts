@@ -856,6 +856,49 @@ export function resolveParamBlockCreateSpan(args: {
     return { startSec, endSec };
 }
 
+/**
+ * 播放头处的块 —— 切分的**唯一操作数**。
+ *
+ * 块在时间上互不重叠，所以播放头最多落在一个块里：操作数天然唯一，不需要
+ * 也不应该读"当前选中了哪个块"。解析不到就是"现在没有可切的块"，调用方
+ * 必须静默返回（与音频块的分割 / 编组一致）。
+ *
+ * 只接受**严格内部**：正好落在边界上切出来会是 0 长块。
+ */
+export function resolveParamBlockSplitTarget(
+    blocks: readonly ParamBlock[],
+    splitSec: number,
+    framePeriodMs: number,
+): ParamBlock | null {
+    if (!Number.isFinite(splitSec)) return null;
+    const frame = toFrame(splitSec, framePeriodMs);
+    return (
+        blocks.find(
+            (block) =>
+                block.projected !== undefined &&
+                frame > block.projected.startFrame &&
+                frame < block.projected.endFrameExclusive,
+        ) ?? null
+    );
+}
+
+/**
+ * 切点是否严格落在该块内部（与 `splitProjectedBlock` 的边沿判定同一口径）。
+ *
+ * 用途是**约束磁吸**：切分点允许吸附，但磁吸结果一旦离开目标块就作废 ——
+ * 相邻块的边界是候选之一，吸上去会正好切在边界上。
+ */
+export function isStrictlyInsideParamBlock(
+    block: ParamBlock,
+    splitSec: number,
+    framePeriodMs: number,
+): boolean {
+    const projected = block.projected;
+    if (projected === undefined || !Number.isFinite(splitSec)) return false;
+    const frame = toFrame(splitSec, framePeriodMs);
+    return frame > projected.startFrame && frame < projected.endFrameExclusive;
+}
+
 /** 切开位置：只在像素阈值内吸附；开关与 XOR 由调用方的 snapSec 统一决定。 */
 export function resolveParamBlockSplitSec(args: {
     readonly sec: number;
@@ -911,7 +954,13 @@ export type BlockGroupFailure =
     | "nothing_to_group";
 
 export type ParamBlockEditFailureReason =
-    "not_found" | "too_short" | "no_members" | "grouped_locked" | "multi_fragment_unsupported";
+    | "not_found"
+    | "too_short"
+    | "no_members"
+    | "grouped_locked"
+    | "multi_fragment_unsupported"
+    /** 未分类异常。**不要**兜底成 `too_short`：那会把真错误伪装成"离边缘太近"。 */
+    | "unknown";
 
 export type ParamBlockEditResult =
     | { readonly ok: true; readonly state: ParamBlockState; readonly blockId: string }
@@ -921,6 +970,12 @@ export interface ParamBlockSplitInput {
     readonly state: ParamBlockState;
     readonly block: ParamBlock;
     readonly sec: number;
+    /**
+     * **与派生视图同源**的 clip 快照。
+     *
+     * 块是源域锚定的，切点要反投影回源域才能改写成员区间；用另一份 clips
+     * （例如上一次提交留下的副本）会让边界判定与块几何分叉。
+     */
     readonly clips: readonly ParamBlockSourceClip[];
 }
 
@@ -1191,7 +1246,7 @@ function editFailureFromError(error: unknown): ParamBlockEditFailureReason {
     if (message.includes("grouped block must be ungrouped")) return "grouped_locked";
     if (message.includes("no source") || message.includes("no members")) return "no_members";
     if (message.includes("not found") || message.includes("missing")) return "not_found";
-    return "too_short";
+    return "unknown";
 }
 
 export function splitParamBlock(input: ParamBlockSplitInput): ParamBlockEditResult {

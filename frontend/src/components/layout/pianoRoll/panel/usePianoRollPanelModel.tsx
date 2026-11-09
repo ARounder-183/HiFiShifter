@@ -84,7 +84,9 @@ import {
     shiftParamBlockCurveValuesToTarget,
     shouldUseParamBlockDragSnapshotForRender,
     nearestParamBlockByTime,
+    isStrictlyInsideParamBlock,
     resolveParamBlockSplitSec,
+    resolveParamBlockSplitTarget,
     resolveParamBlockCreateSpan,
     resolveParamBlockResizePlan,
     resolveParamBlockResizeTarget,
@@ -2288,7 +2290,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     }, []);
     /** 块编辑动作在指针回调之后才定义；用 ref 打断声明顺序依赖。 */
     const applyParamBlockEditRef = useRef<
-        ((result: ReturnType<typeof splitParamBlock>, onSuccess?: () => void) => void) | null
+        ((result: ReturnType<typeof splitParamBlock>) => void) | null
     >(null);
     const paramBlockStateRef = useRef<ParamBlockState>(EMPTY_PARAM_BLOCK_STATE);
     /** 让宿主下一次绘制读到刚更新的拖动快照，而不是等某个 React 状态变化。 */
@@ -2357,9 +2359,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             metaKey?: boolean;
         }) => import("../gestures/pointerDeps").ParamBlockPointerDownResult
     >(() => ({ handled: false }));
-    const splitSelectedParamBlockAtRef = useRef<
-        ((sec: number, snapToggleHeld?: boolean) => void) | null
-    >(null);
+    const splitParamBlockAtPlayheadRef = useRef<((snapToggleHeld?: boolean) => void) | null>(null);
     const deleteSelectedParamBlocksRef = useRef<(() => void) | null>(null);
     const groupSelectedParamBlocksRef = useRef<(() => void) | null>(null);
     const ungroupSelectedParamBlocksRef = useRef<(() => void) | null>(null);
@@ -2733,8 +2733,15 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     const [paramBlockContextMenu, setParamBlockContextMenu] = useState<{
         x: number;
         y: number;
-        /** 右键落点（工程秒），供“在此切开”使用。 */
-        sec: number;
+        /**
+         * 打开菜单那一刻"播放头是否落在一个可切的块内"。
+         *
+         * 在打开时算一次是"所见即所点"：面板不随播放头重渲染（`playheadSec`
+         * 被刻意剔出选择器），渲染期算出来的禁用态会和用户点下去那一刻不一致。
+         * 菜单开着时播放头再动（播放中）属于边角情形 —— 点击时会重新解析，
+         * 解析不到就静默，最多差一次点击，不会误切。
+         */
+        canSplit: boolean;
     } | null>(null);
     const toggleParamBlocksVisible = useCallback(() => {
         dispatch(toggleParamBlocksVisibleAction());
@@ -3415,7 +3422,17 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                         setParamBlockContextMenu({
                             x: event?.clientX ?? hit.clientX,
                             y: event?.clientY ?? hit.clientY,
-                            sec: hit.sec,
+                            /*
+                             * 禁用态在**打开时**算一次：面板不随播放头重渲染，
+                             * 渲染期算出来的会和用户点下去那一刻不一致。
+                             */
+                            canSplit:
+                                rootTrackId !== null &&
+                                resolveParamBlockSplitTarget(
+                                    blocksFromViewForPanel(rootTrackId, layout),
+                                    store.getState().session.playheadSec,
+                                    layout.framePeriodMs,
+                                ) !== null,
                         });
                     },
                     registerEnd: hit.setActivePointerGestureEnd,
@@ -4594,6 +4611,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             rootTrackId,
             pxPerSecRef,
             selectedParamBlockIds,
+            store,
             s.bpm,
             s.paramBlockFollowPitch,
             s.project.gridSize,
@@ -4685,7 +4703,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     );
     restoreParamBlocksRef.current = restoreParamBlocks;
     const applyParamBlockEdit = useCallback(
-        (result: ReturnType<typeof splitParamBlock>, onSuccess?: () => void) => {
+        (result: ReturnType<typeof splitParamBlock>) => {
             /*
              * 能走到这里说明前置条件已经通过（目标块由调用方按位置解析），
              * 失败属于实现层问题：开发构建打印，生产静默。
@@ -4696,24 +4714,46 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             }
             setParamBlockState(result.state);
             persistParamBlockEdits(result.state);
-            onSuccess?.();
             setParamBlockContextMenu(null);
         },
         [persistParamBlockEdits],
     );
     applyParamBlockEditRef.current = applyParamBlockEdit;
     paramBlockStateRef.current = paramBlockState;
-    const splitSelectedParamBlockAt = useCallback(
-        (sec: number, snapToggleHeld = false) => {
-            // 没有唯一选中的块 = 静默 no-op（§5 会改成按播放头解析操作数）。
-            if (selectedParamBlockIds.length !== 1) return;
-            const selected = paramBlocksWithValues.find((block) =>
-                selectedParamBlockIdSet.has(block.id),
-            );
-            if (selected === undefined) return;
+    /**
+     * 在播放头处切开。
+     *
+     * 【操作数由位置决定】块在时间上互不重叠，播放头最多落在一个块里 —— "切哪个块"
+     * 天然唯一。要求先选中一个块是多余的一步，还会在 Slip 之后拿旧几何当判据
+     * （"切分点离边缘太近"正是这么来的）。与时间轴的 `resolveSplitTargetsAtSec`
+     * 同一条思路：位置解析优先，解析不到就静默。
+     *
+     * 【前置条件不满足 = 静默】没有块 / 编组块 / 切点贴边：没有提示、没有 IPC、
+     * 不改选择。只有后端真的拒绝才进状态栏。
+     */
+    const splitParamBlockAtPlayhead = useCallback(
+        (snapToggleHeld = false) => {
+            if (rootTrackId === null) return;
+            const view = paramBlockViewRef.current;
+            if (view === null) return;
+            /*
+             * 播放头必须读 store：面板选择器刻意剔除了 `playheadSec`
+             * （见 `PIANO_ROLL_VOLATILE_SESSION_KEYS`），`s.playheadSec` 是滞后快照。
+             */
+            const rawSec = store.getState().session.playheadSec;
+            const state = paramBlockStateRef.current;
+            const framePeriodMs = state.framePeriodMs;
+            const clips = paramBlockSourceClipsRef.current;
+            const blocks = blocksFromViewForPanel(rootTrackId, view);
+            const target = resolveParamBlockSplitTarget(blocks, rawSec, framePeriodMs);
+            // 播放头不在任何块内：静默。
+            if (target === null) return;
+            // 编组块的几何是若干源域区间的联合，切开没有唯一解。
+            if (target.kind === "grouped") return;
+
             const pxPerSec = hostRef.current?.getAxis()?.pxPerSec ?? pxPerSecRef.current;
             const snap = resolveParamBlockTimeSnapResult({
-                rawSec: sec,
+                rawSec,
                 settings: s.timelineSnap,
                 grid: s.project.gridSize,
                 bpm: s.bpm,
@@ -4723,49 +4763,44 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 clips: paramBlockClips,
                 tracks: s.tracks,
                 selectedClipIds: s.multiSelectedClipIds,
-                playheadSec: s.playheadSec,
-                originSec: selected.startSec,
+                playheadSec: rawSec,
+                originSec: target.startSec,
                 toggleModifierActive: snapToggleHeld,
             });
-            publishParamBlockSnapHighlight(snap, selected.startSec);
-            const splitSec = resolveParamBlockSplitSec({
-                sec,
+            const snapped = resolveParamBlockSplitSec({
+                sec: rawSec,
                 snapSec: () => snap.sec,
                 enabled: s.timelineSnap.enabled !== snapToggleHeld,
                 pxPerSec,
                 thresholdPx: 12,
             });
-            applyParamBlockEdit(
-                splitParamBlock({
-                    state: paramBlockState,
-                    block: selected,
-                    sec: splitSec,
-                    clips: paramBlockSourceClips,
-                }),
-                () => setSelectedParamBlockIds([]),
-            );
-            clearParamBlockSnapHighlight();
+            /*
+             * 磁吸候选里有相邻块的边界：吸上去会正好落在边界（切出 0 长块），
+             * 再往外一点甚至会吸进别的块。刀口一旦离开目标块就退回播放头原值 ——
+             * 播放头在块内就一定能切，不会出现"按了没反应"。
+             */
+            const splitSec = isStrictlyInsideParamBlock(target, snapped, framePeriodMs)
+                ? snapped
+                : rawSec;
+            applyParamBlockEdit(splitParamBlock({ state, block: target, sec: splitSec, clips }));
         },
         [
-            paramBlocksWithValues,
+            applyParamBlockEdit,
+            paramBlockClips,
+            rootTrackId,
             s.bpm,
             s.beats,
             s.multiSelectedClipIds,
-            s.playheadSec,
             s.project.gridSize,
             s.timelineSnap,
             s.tempoMap,
             s.tracks,
-            pxPerSecRef,
-            applyParamBlockEdit,
-            paramBlockState,
-            paramBlockSourceClips,
-            selectedParamBlockIdSet,
-            selectedParamBlockIds.length,
+            store,
         ],
     );
-    splitSelectedParamBlockAtRef.current = splitSelectedParamBlockAt;
-    const paramBlockSplitAtSec = paramBlockContextMenu?.sec ?? null;
+    splitParamBlockAtPlayheadRef.current = splitParamBlockAtPlayhead;
+    /** 打开菜单时算一次：播放头处是否有可切的块。 */
+    const canSplitParamBlockAtPlayhead = paramBlockContextMenu?.canSplit ?? false;
     const gameRestoreRanges = paramBlockRestoreRanges(
         paramBlockView?.blocks ?? [],
         selectedParamBlockIds,
@@ -5084,6 +5119,10 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             if (detail?.op === undefined) return;
             switch (detail.op) {
                 case "split": {
+                    /*
+                     * 切分不是拖拽手势，但"临时反转吸附"对磁吸同样有意义，
+                     * 而且与拖动块边缘 / 新建块的 XOR 语义一致。
+                     */
                     const noSnapKb = firstBinding(mergedKeybindings["modifier.clipNoSnap"]);
                     const stroke = detail.stroke;
                     const toggle =
@@ -5096,10 +5135,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                             altKey: stroke.alt,
                             metaKey: stroke.meta,
                         });
-                    splitSelectedParamBlockAtRef.current?.(
-                        store.getState().session.playheadSec,
-                        toggle,
-                    );
+                    splitParamBlockAtPlayheadRef.current?.(toggle);
                     break;
                 }
                 case "delete":
@@ -5815,8 +5851,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         paramBlockResizeRef,
         onCanvasDoubleClick,
         onCanvasPointerMoveForBlocks,
-        paramBlockSplitAtSec,
-        splitSelectedParamBlockAt,
+        canSplitParamBlockAtPlayhead,
+        splitParamBlockAtPlayhead,
         pitchSnapScaleIcon,
         pitchSnapSemitoneIcon,
         presetFlyoutMaxHeight,

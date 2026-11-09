@@ -26,7 +26,7 @@ afterEach(() => {
 
 const labels: Record<string, string> = {
     param_blocks_tool: "块编辑工具",
-    param_blocks_split_here: "切开",
+    param_blocks_split_at_playhead: "在播放头处切开",
     param_blocks_group: "编组",
     param_blocks_ungroup: "取消编组",
     param_blocks_restore_game: "还原",
@@ -40,11 +40,10 @@ const tf = (key: keyof typeof labels): string => labels[key] ?? key;
 const baseProps = {
     x: 10,
     y: 20,
-    selectedCount: 2,
+    canSplit: true,
     canGroup: true,
     canUngroup: false,
     canDelete: true,
-    splitAtSec: 1,
     onSplit: () => {},
     onGroup: () => {},
     onUngroup: () => {},
@@ -57,35 +56,37 @@ function items(): HTMLButtonElement[] {
     return [...document.querySelectorAll<HTMLButtonElement>(".hs-menu__item")];
 }
 
+const expectedLabels = [
+    "在播放头处切开",
+    "编组",
+    "取消编组",
+    "还原",
+    "恢复删除的块",
+    "音高归一化",
+    "删除",
+];
+
 test("块菜单包含切开 / 编组 / 取消编组 / 还原 / 恢复删除 / 音高归一化 / 删除", async () => {
     await act(async () => {
         root.render(<ParamBlockContextMenu {...baseProps} canRestoreDeleted />);
     });
-    expect(items().map((item) => item.textContent?.trim())).toEqual([
-        "切开",
-        "编组",
-        "取消编组",
-        "还原",
-        "恢复删除的块",
-        "音高归一化",
-        "删除",
-    ]);
+    expect(items().map((item) => item.textContent?.trim())).toEqual(expectedLabels);
 });
 
 /*
  * 每个菜单项**只有一行**文字。
  *
- * 块动作的禁用条件是瞬时状态（选了几个块、是不是编组块），菜单弹出期间不会
- * 再变一次；把它写成第二行解释，菜单就变成解释墙。`description` 只服务
- * "宿主能力"那一类用户改不了的限制（Clip / 轨道区域 / 停靠标签在用）。
+ * 块动作的禁用条件是瞬时状态（选了几个块、是不是编组块、播放头在不在块内），
+ * 菜单弹出期间不会再变一次；把它写成第二行解释，菜单就变成解释墙。
+ * `description` 只服务"宿主能力"那一类用户改不了的限制（Clip / 轨道区域 /
+ * 停靠标签在用）。
  */
 test("全部置灰时也不出现第二行解释", async () => {
     await act(async () => {
         root.render(
             <ParamBlockContextMenu
                 {...baseProps}
-                splitAtSec={null}
-                selectedCount={0}
+                canSplit={false}
                 canGroup={false}
                 canUngroup={false}
                 canDelete={false}
@@ -97,15 +98,18 @@ test("全部置灰时也不出现第二行解释", async () => {
     });
     expect(document.querySelectorAll(".hs-menu__description")).toHaveLength(0);
     expect(items().every((item) => item.disabled)).toBe(true);
-    expect(items().map((item) => item.textContent?.trim())).toEqual([
-        "切开",
-        "编组",
-        "取消编组",
-        "还原",
-        "恢复删除的块",
-        "音高归一化",
-        "删除",
-    ]);
+    expect(items().map((item) => item.textContent?.trim())).toEqual(expectedLabels);
+});
+
+test("播放头不在块内时切开项置灰", async () => {
+    await act(async () => {
+        root.render(<ParamBlockContextMenu {...baseProps} canSplit={false} />);
+    });
+    expect(items()[0]?.disabled).toBe(true);
+    await act(async () => {
+        root.render(<ParamBlockContextMenu {...baseProps} canSplit />);
+    });
+    expect(items()[0]?.disabled).toBe(false);
 });
 
 test("编组项调用回调", async () => {
