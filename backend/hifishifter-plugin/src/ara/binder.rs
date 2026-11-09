@@ -295,7 +295,9 @@ impl AraBinder {
 
     /// 初始 companion 绑定的生命周期探针（测试）。
     #[cfg(test)]
-    pub fn lifetime_probe(&self) -> Option<ara2_bridge::companion::CompanionLifetimeProbe<'static>> {
+    pub fn lifetime_probe(
+        &self,
+    ) -> Option<ara2_bridge::companion::CompanionLifetimeProbe<'static>> {
         self.companion.lifetime_probe()
     }
 }

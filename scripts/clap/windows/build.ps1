@@ -20,9 +20,12 @@ Copy-Item $module (Join-Path $outDir "HiFiShifter.clap") -Force
 $resources = Join-Path $outDir "HiFiShifter-resources"
 $frontend = Join-Path $resources "frontend"
 $models = Join-Path $resources "models"
-New-Item -ItemType Directory -Force -Path $frontend, (Join-Path $frontend "assets"), $models | Out-Null
-Copy-Item (Join-Path $root "frontend\dist\plugin.html") $frontend -Force
-Copy-Item (Join-Path $root "frontend\dist\assets\*") (Join-Path $frontend "assets") -Recurse -Force
+# 与 VST3 bundle 同一份公共资源：宿主插件与浮动编辑器共用 chunk，SDK 类型声明
+# 不是运行时载荷。只拷 plugin.html 会让 detached.html 在插件窗口里 404。
+New-Item -ItemType Directory -Force -Path $frontend, $models | Out-Null
+Get-ChildItem -LiteralPath (Join-Path $root "frontend\dist") |
+    Where-Object { $_.Name -ne 'sdk' } |
+    Copy-Item -Destination $frontend -Recurse -Force
 Copy-Item (Join-Path $root "backend\src-tauri\resources\models\models.json") $models -Force
 # WebView2 的 profile 属于运行期状态，绝不跟着资源走（判据同 scripts/build/build.ps1）。
 Remove-Item -LiteralPath (Join-Path $resources "webview") -Recurse -Force -ErrorAction SilentlyContinue

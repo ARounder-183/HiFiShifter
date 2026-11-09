@@ -157,9 +157,7 @@ unsafe extern "C" fn ara_bind(
             log::error!("[clap][ara] bind request on an instance without an ARA binder");
             return std::ptr::null();
         };
-        binder
-            .bind(controller.cast(), known, assigned)
-            .cast()
+        binder.bind(controller.cast(), known, assigned).cast()
     })
 }
 
@@ -209,7 +207,9 @@ pub unsafe fn attach(plugin: *const clap_plugin_t) {
     // 【临时探针】与 VST3 的 `queryInterface` 同名同义：HIFISHIFTER_NO_ARA=1 时
     // 不暴露任何 ARA 接口，用来判定"打开 FX 窗口就冻结"是否来自 ARA 这一侧。
     if std::env::var("HIFISHIFTER_NO_ARA").is_ok_and(|value| value.trim() == "1") {
-        log::warn!("[clap][ara] ARA disabled by HIFISHIFTER_NO_ARA; this instance stays capture-only");
+        log::warn!(
+            "[clap][ara] ARA disabled by HIFISHIFTER_NO_ARA; this instance stays capture-only"
+        );
         return;
     }
     let Some(runtime) = hifishifter_plugin::runtime::runtime() else {
@@ -273,13 +273,16 @@ mod tests {
             "com.celemony.ara.plugin_extension.draft/1"
         );
         assert_ne!(
-            CLAP_EXT_ARA_PLUGIN_EXTENSION_REAPER_LEGACY,
-            CLAP_EXT_ARA_PLUGIN_EXTENSION,
+            CLAP_EXT_ARA_PLUGIN_EXTENSION_REAPER_LEGACY, CLAP_EXT_ARA_PLUGIN_EXTENSION,
             "旧草案 ID 与 ARA SDK 2.3 稳定 ID 是两个不同的字符串"
         );
         // 即使实例没有 ARA 绑定，也不能因为"反正返回 null"而把 ID 放进应答分支：
         // 空实例的 null 与"这个 ID 不在白名单"必须是同一结果，但理由必须唯一。
-        assert!(get_extension(std::ptr::null(), CLAP_EXT_ARA_PLUGIN_EXTENSION_REAPER_LEGACY).is_null());
+        assert!(get_extension(
+            std::ptr::null(),
+            CLAP_EXT_ARA_PLUGIN_EXTENSION_REAPER_LEGACY
+        )
+        .is_null());
     }
     /// entry 级只认 ARA 工厂 ID：别的 ID 不能拿到工厂表。
     #[test]

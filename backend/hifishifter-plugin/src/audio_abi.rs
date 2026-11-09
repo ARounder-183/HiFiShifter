@@ -242,9 +242,7 @@ pub(crate) unsafe fn block_from_vst3<'a>(
 /// 【为什么单独暴露】[`block_from_vst3`] 用它拼整块描述；只关心输出平面的调用点
 /// （分层拷贝、接缝去咔的用例）也用它，从而不必各自复述“指针数组在哪、静音掩码写回
 /// 哪里”。
-pub(crate) fn output_bus<'a>(
-    bus: &'a mut AudioBusBuffers,
-) -> crate::audio_block::OutputBus<'a> {
+pub(crate) fn output_bus<'a>(bus: &'a mut AudioBusBuffers) -> crate::audio_block::OutputBus<'a> {
     let pointers: &'a mut [*mut f32] = if bus.num_channels > 0 && !bus.channel_buffers.is_null() {
         // SAFETY: 调用方保证 `num_channels` 个平面指针在本回调期间有效且独占。
         unsafe { std::slice::from_raw_parts_mut(bus.channel_buffers, bus.num_channels as usize) }

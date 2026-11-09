@@ -1345,7 +1345,9 @@ fn a_recorded_take_is_rendered_and_published_through_the_snapshot_reader() {
         channel_buffers: planes.as_mut_ptr(),
     };
     // SAFETY: bus 的形状与长度由本用例保证；publisher 由 owner 保留。
-    let ready = unsafe { owner.snapshots[1].copy_block(0, 48_000, &mut crate::audio_abi::output_bus(&mut bus), 64) };
+    let ready = unsafe {
+        owner.snapshots[1].copy_block(0, 48_000, &mut crate::audio_abi::output_bus(&mut bus), 64)
+    };
     assert!(ready, "录制之后必须有一份可读的快照");
     // 【为什么不比对具体样本值】这条通路下游是内核的合成（可能含神经网络声码器），
     // 具体波形不是本用例的契约。契约是"有内容、且不是全零静音"。

@@ -1255,8 +1255,8 @@ impl Drop for ReadSection {
 
 #[cfg(test)]
 mod tests {
-    use crate::audio_abi::AudioBusBuffers;
     use super::*;
+    use crate::audio_abi::AudioBusBuffers;
     /// 源窗口越界**不再**是致命错误，且越界段渲染成静音。
     ///
     /// 【为什么这条契约变了】宿主按**工程**速率折算修改时长时必然越界：实测 Cubase 15
@@ -1349,7 +1349,9 @@ mod tests {
             channel_buffers: planes.as_mut_ptr(),
         };
         // SAFETY: 两平面均提供3帧写入范围；尾帧位于快照之外，必须补零。
-        assert!(unsafe { publisher.copy_block(0, 4, &mut crate::audio_abi::output_bus(&mut bus), 3) });
+        assert!(unsafe {
+            publisher.copy_block(0, 4, &mut crate::audio_abi::output_bus(&mut bus), 3)
+        });
         assert_eq!(left, [0.125, -0.25, 0.]);
         assert_eq!(right, left);
         drop(publisher);
@@ -1435,12 +1437,21 @@ mod tests {
         for start in (0..frames).step_by(512) {
             let count = (frames - start).min(512);
             // SAFETY: 稳定 stereo 缓冲最多读取512帧。
-            assert!(unsafe { publisher.copy_block(start as i64, 44100, &mut crate::audio_abi::output_bus(&mut bus), count) });
+            assert!(unsafe {
+                publisher.copy_block(
+                    start as i64,
+                    44100,
+                    &mut crate::audio_abi::output_bus(&mut bus),
+                    count,
+                )
+            });
             assert_eq!(&left[..count], &source[start..start + count]);
             assert_eq!(&right[..count], &source[start..start + count]);
         }
         // SAFETY: seek 后同一缓冲仍合法。
-        assert!(unsafe { publisher.copy_block(0, 44100, &mut crate::audio_abi::output_bus(&mut bus), 512) });
+        assert!(unsafe {
+            publisher.copy_block(0, 44100, &mut crate::audio_abi::output_bus(&mut bus), 512)
+        });
         assert_eq!(left, source[..512]);
     }
     /// 手算源第 1 帧起两帧放到工程第 2 帧，验证裁切、位置和单声道复制。
@@ -1534,15 +1545,21 @@ mod tests {
             channel_buffers: planes.as_mut_ptr(),
         };
         // SAFETY: 每个 output plane 至少 3 帧，最后一帧作为哨兵。
-        assert!(unsafe { publisher.copy_block(3, 4, &mut crate::audio_abi::output_bus(&mut bus), 3) });
+        assert!(unsafe {
+            publisher.copy_block(3, 4, &mut crate::audio_abi::output_bus(&mut bus), 3)
+        });
         assert_eq!(left, [0.3, 0.0, 0.0, 9.0]);
         assert_eq!(right, [0.5, 0.0, 0.0, 9.0]);
         // SAFETY: 缓冲仍然存活。
-        assert!(unsafe { publisher.copy_block(-1, 4, &mut crate::audio_abi::output_bus(&mut bus), 3) });
+        assert!(unsafe {
+            publisher.copy_block(-1, 4, &mut crate::audio_abi::output_bus(&mut bus), 3)
+        });
         assert_eq!(&left[..3], &[0.0, 0.0, 0.0]);
         publisher.clear();
         // SAFETY: 读取空快照应当零输出，不能继续消费旧音频。
-        assert!(!unsafe { publisher.copy_block(2, 4, &mut crate::audio_abi::output_bus(&mut bus), 3) });
+        assert!(!unsafe {
+            publisher.copy_block(2, 4, &mut crate::audio_abi::output_bus(&mut bus), 3)
+        });
         assert_eq!(&left[..3], &[0.0, 0.0, 0.0]);
         assert_eq!(publisher.retained.lock_or_recover().0.len(), 1);
     }
@@ -1575,7 +1592,9 @@ mod tests {
             channel_buffers: mono_planes.as_mut_ptr(),
         };
         // SAFETY: 单个 plane 至少 3 帧。
-        assert!(unsafe { publisher.copy_block(0, 4, &mut crate::audio_abi::output_bus(&mut mono_bus), 3) });
+        assert!(unsafe {
+            publisher.copy_block(0, 4, &mut crate::audio_abi::output_bus(&mut mono_bus), 3)
+        });
         let close = |actual: [f32; 3], expected: [f32; 3]| {
             actual
                 .iter()
@@ -1594,7 +1613,9 @@ mod tests {
             channel_buffers: planes.as_mut_ptr(),
         };
         // SAFETY: 两个 plane 各至少 3 帧。
-        assert!(unsafe { publisher.copy_block(0, 8, &mut crate::audio_abi::output_bus(&mut bus), 3) });
+        assert!(unsafe {
+            publisher.copy_block(0, 8, &mut crate::audio_abi::output_bus(&mut bus), 3)
+        });
         // 位置 0.0 / 0.5 / 1.0 → 0.2 / 0.3 / 0.4。
         assert!(close(left, [0.2, 0.3, 0.4]), "{left:?}");
         assert!(close(right, [0.4, 0.6, 0.8]), "{right:?}");
@@ -1861,7 +1882,15 @@ mod tests {
         let input_right = [8.0_f32; 4];
         let input = [Some(&input_left[..]), Some(&input_right[..])];
         // 块首 sample=0、4 帧：快照覆盖 [2,4) ⇒ 前两帧取输入，后两帧取快照。
-        assert!(unsafe { publisher.copy_block_layered(0, 4, &mut crate::audio_abi::output_bus(&mut bus), 4, &input) });
+        assert!(unsafe {
+            publisher.copy_block_layered(
+                0,
+                4,
+                &mut crate::audio_abi::output_bus(&mut bus),
+                4,
+                &input,
+            )
+        });
         assert_eq!(left, [7.0, 7.0, 0.2, 0.3]);
         assert_eq!(right, [8.0, 8.0, 0.4, 0.5]);
     }
@@ -1902,7 +1931,15 @@ mod tests {
         let input_right = vec![7.0_f32; frames];
         let input = [Some(&input_left[..]), Some(&input_right[..])];
         assert!(unsafe {
-            publisher.copy_block_layered_at(0, 48_000, &mut crate::audio_abi::output_bus(&mut bus), 0, frames, &input, 0)
+            publisher.copy_block_layered_at(
+                0,
+                48_000,
+                &mut crate::audio_abi::output_bus(&mut bus),
+                0,
+                frames,
+                &input,
+                0,
+            )
         });
         // 空洞正中央必须是纯宿主原声（既不是零，也不是快照）。
         assert!(
@@ -1958,7 +1995,15 @@ mod tests {
         let input_right = vec![7.0_f32; frames];
         let input = [Some(&input_left[..]), Some(&input_right[..])];
         assert!(unsafe {
-            publisher.copy_block_layered_at(0, 48_000, &mut crate::audio_abi::output_bus(&mut bus), 0, frames, &input, 0)
+            publisher.copy_block_layered_at(
+                0,
+                48_000,
+                &mut crate::audio_abi::output_bus(&mut bus),
+                0,
+                frames,
+                &input,
+                0,
+            )
         });
         // 洞内：纯宿主原声。
         assert!(
@@ -2011,7 +2056,15 @@ mod tests {
         let input_right = vec![7.0_f32; frames];
         let input = [Some(&input_left[..]), Some(&input_right[..])];
         assert!(unsafe {
-            publisher.copy_block_layered_at(0, 48_000, &mut crate::audio_abi::output_bus(&mut bus), 0, frames, &input, 0)
+            publisher.copy_block_layered_at(
+                0,
+                48_000,
+                &mut crate::audio_abi::output_bus(&mut bus),
+                0,
+                frames,
+                &input,
+                0,
+            )
         });
         // 只看覆盖边界那一小段（4096 起的两个淡化带），那里的变化必须是斜坡。
         let boundary = &left[4096..4096 + 1920];
@@ -2058,7 +2111,15 @@ mod tests {
         let input_right = vec![7.0_f32; frames];
         let input = [Some(&input_left[..]), Some(&input_right[..])];
         assert!(unsafe {
-            publisher.copy_block_layered_at(0, 48_000, &mut crate::audio_abi::output_bus(&mut bus), 0, frames, &input, 0)
+            publisher.copy_block_layered_at(
+                0,
+                48_000,
+                &mut crate::audio_abi::output_bus(&mut bus),
+                0,
+                frames,
+                &input,
+                0,
+            )
         });
         // 稳定段：起点边（0..960）之后、洞的入口斜坡（1088..2048）之前。
         assert!(
@@ -2119,7 +2180,15 @@ mod tests {
         let input_left = [7.0_f32; 4];
         let input_right = [8.0_f32; 4];
         let input = [Some(&input_left[..]), Some(&input_right[..])];
-        assert!(unsafe { publisher.copy_block_layered(0, 4, &mut crate::audio_abi::output_bus(&mut bus), 4, &input) });
+        assert!(unsafe {
+            publisher.copy_block_layered(
+                0,
+                4,
+                &mut crate::audio_abi::output_bus(&mut bus),
+                4,
+                &input,
+            )
+        });
         assert_eq!(left, [7.0, 7.0, 0.2, 0.3]);
         assert_eq!(right, [8.0, 8.0, 0.4, 0.5]);
     }
@@ -2157,7 +2226,15 @@ mod tests {
         let input_right = vec![7.0_f32; frames];
         let input = [Some(&input_left[..]), Some(&input_right[..])];
         assert!(unsafe {
-            publisher.copy_block_layered_at(0, 48_000, &mut crate::audio_abi::output_bus(&mut bus), 0, frames, &input, 0)
+            publisher.copy_block_layered_at(
+                0,
+                48_000,
+                &mut crate::audio_abi::output_bus(&mut bus),
+                0,
+                frames,
+                &input,
+                0,
+            )
         });
         // 覆盖范围之外（这里是 [0, 64)）没有快照采样 ⇒ 必须是纯宿主原声。
         assert!(
@@ -2228,7 +2305,9 @@ mod tests {
             channel_buffers: planes.as_mut_ptr(),
         };
         // SAFETY: 输出平面提供 6 帧；写入 [2, 6)。
-        assert!(unsafe { publisher.copy_block_at(0, 4, &mut crate::audio_abi::output_bus(&mut bus), 2, 4) });
+        assert!(unsafe {
+            publisher.copy_block_at(0, 4, &mut crate::audio_abi::output_bus(&mut bus), 2, 4)
+        });
         assert_eq!(left, [9.0, 9.0, 1.0, 2.0, 3.0, 4.0]);
         assert_eq!(right, [9.0, 9.0, 5.0, 6.0, 7.0, 8.0]);
     }
@@ -2259,7 +2338,17 @@ mod tests {
         let input_right = [10.0_f32, 11.0, 12.0, 13.0, 14.0, 15.0];
         let input = [Some(&input_left[..]), Some(&input_right[..])];
         // SAFETY: 输入/输出都提供 offset + frames 的长度。
-        assert!(unsafe { publisher.copy_block_layered_at(2, 4, &mut crate::audio_abi::output_bus(&mut bus), 1, 4, &input, 2) });
+        assert!(unsafe {
+            publisher.copy_block_layered_at(
+                2,
+                4,
+                &mut crate::audio_abi::output_bus(&mut bus),
+                1,
+                4,
+                &input,
+                2,
+            )
+        });
         // [0] 保留原值；[1..3) 取快照；[3..5) 取输入下标 4、5。
         assert_eq!(left, [9.0, 0.2, 0.3, 4.0, 5.0]);
         assert_eq!(right, [9.0, 0.4, 0.5, 14.0, 15.0]);
@@ -2283,7 +2372,15 @@ mod tests {
         let input_left = [0.5_f32; 2];
         // 单声道输入（右平面缺失）⇒ 两个输出声道都取左。
         let input = [Some(&input_left[..]), None];
-        assert!(!unsafe { publisher.copy_block_layered(0, 4, &mut crate::audio_abi::output_bus(&mut bus), 2, &input) });
+        assert!(!unsafe {
+            publisher.copy_block_layered(
+                0,
+                4,
+                &mut crate::audio_abi::output_bus(&mut bus),
+                2,
+                &input,
+            )
+        });
         assert_eq!(left, [0.5, 0.5]);
         assert_eq!(right, [0.5, 0.5]);
         assert_eq!(bus.silence_flags, 0, "有非零输出就不该报静音");

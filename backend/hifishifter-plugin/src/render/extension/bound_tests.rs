@@ -1360,13 +1360,17 @@ fn automatic_apply_releases_the_transaction_and_rechecks_model_and_edit_versions
         // 许可并让代次失效"，不再是"撤掉已发布的快照"。撤掉会让 bound 实例的每一个
         // 音频块写出纯零（`layered == false`，没有兜底）—— 那正是用户报的间歇性
         // 完全无声。上一份快照继续可听，新快照算完后由 `publish` 原子替换。
-        let available = unsafe { owner.snapshots[0].copy_block(0, 44100, &mut crate::audio_abi::output_bus(&mut bus), 4) };
+        let available = unsafe {
+            owner.snapshots[0].copy_block(0, 44100, &mut crate::audio_abi::output_bus(&mut bus), 4)
+        };
         assert!(available);
         assert_eq!(left, [0.25; 4]);
         assert_eq!(right, [0.5; 4]);
         // 真正"这个实例不再渲染"的路径仍然清空：那里由文档关闭负责。
         document.revoke_renderers();
-        let available = unsafe { owner.snapshots[0].copy_block(0, 44100, &mut crate::audio_abi::output_bus(&mut bus), 4) };
+        let available = unsafe {
+            owner.snapshots[0].copy_block(0, 44100, &mut crate::audio_abi::output_bus(&mut bus), 4)
+        };
         assert!(!available);
         drop(model);
     }
@@ -1560,7 +1564,9 @@ fn cold_restores_are_merged_document_wide_before_background_jobs_start() {
             channel_buffers: planes.as_mut_ptr(),
         };
         // SAFETY: 两个四帧平面；保证无GUI冷恢复确实供音，而非只合入了state。
-        assert!(unsafe { owner.snapshots[0].copy_block(0, 44100, &mut crate::audio_abi::output_bus(&mut bus), 4) });
+        assert!(unsafe {
+            owner.snapshots[0].copy_block(0, 44100, &mut crate::audio_abi::output_bus(&mut bus), 4)
+        });
         for (actual, expected) in left.iter().zip(if index == 0 {
             [0.05, 0.1, 0.15, 0.2]
         } else {

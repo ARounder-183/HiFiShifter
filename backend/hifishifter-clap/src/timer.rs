@@ -81,7 +81,9 @@ pub unsafe fn acquire(plugin: *const clap_plugin_t) -> bool {
     let Some(support) = support(instance.host) else {
         // 【为什么是 WARN】默认日志级别是 Warn；用 info 记"没有节拍"会让现场与"一切正常"
         // 长得一样，而这正是"播放头不跟随"最难自查的形态。
-        log::warn!("[clap] host has no clap.timer-support; falling back to clap_host.request_callback");
+        log::warn!(
+            "[clap] host has no clap.timer-support; falling back to clap_host.request_callback"
+        );
         return false;
     };
     let Some(register) = support.register_timer else {
@@ -91,7 +93,9 @@ pub unsafe fn acquire(plugin: *const clap_plugin_t) -> bool {
     // SAFETY: `instance.host` 是本实例存活期内的宿主记录；回调按 CLAP 契约在调用期间有效。
     let ok = unsafe { register(instance.host, PERIOD_MS, &mut id) };
     if !ok || id == u32::MAX {
-        log::warn!("[clap] the host refused the timer registration; falling back to request_callback");
+        log::warn!(
+            "[clap] the host refused the timer registration; falling back to request_callback"
+        );
         return false;
     }
     instance.timer_id.store(id, Ordering::Release);

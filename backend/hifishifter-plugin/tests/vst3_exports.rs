@@ -76,7 +76,10 @@ fn imported_dlls(artifact: &Path) -> Vec<String> {
         .arg(artifact)
         .output()
         .expect("需要 MSVC 的 dumpbin（先点源 scripts/env/msvc-env.ps1）");
-    assert!(output.status.success(), "dumpbin /dependents 失败: {output:?}");
+    assert!(
+        output.status.success(),
+        "dumpbin /dependents 失败: {output:?}"
+    );
     String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter_map(|line| {
@@ -84,7 +87,7 @@ fn imported_dlls(artifact: &Path) -> Vec<String> {
             (name.len() > 4
                 && name.to_ascii_lowercase().ends_with(".dll")
                 && !name.contains(char::is_whitespace))
-                .then(|| name.to_ascii_lowercase())
+            .then(|| name.to_ascii_lowercase())
         })
         .collect()
 }
@@ -126,7 +129,11 @@ fn the_engine_only_imports_dlls_the_bundle_ships() {
     let artifact = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../target/debug")
         .join(module_file_name());
-    assert!(artifact.is_file(), "找不到 {} —— 先跑 cargo build -p hifishifter-plugin", artifact.display());
+    assert!(
+        artifact.is_file(),
+        "找不到 {} —— 先跑 cargo build -p hifishifter-plugin",
+        artifact.display()
+    );
     // 与 `scripts/build/build.ps1` 的 `foreach ($dll in ...)` 白名单逐字对应。
     const SHIPPED: &[&str] = &["soundtouchdll.dll", "directml.dll", "onnxruntime.dll"];
     let unexpected: Vec<String> = imported_dlls(&artifact)

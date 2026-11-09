@@ -71,9 +71,9 @@ pub mod audio_block;
 pub mod audio_stats;
 mod capture;
 pub use hifishifter_plugin_core::component_state;
+pub mod block_context;
 /// 两种格式共用的**唯一**文件日志实现；格式外壳在自己的模块入口调 `init()`。
 pub mod diagnostics;
-pub mod block_context;
 pub mod editor;
 #[allow(missing_docs)]
 pub mod fade;

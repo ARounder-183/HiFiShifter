@@ -60,7 +60,6 @@ impl<'a> OutputBus<'a> {
     pub fn set_silence_flags(&mut self, value: u64) {
         *self.silence = value;
     }
-
 }
 
 /// 一块音频的**输入平面**。

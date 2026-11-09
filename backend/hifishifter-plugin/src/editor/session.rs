@@ -6562,7 +6562,14 @@ pub(crate) mod tests {
                     channel_buffers: planes.as_mut_ptr(),
                 };
                 // SAFETY: 两个8820帧平面；oracle读取实际后台准备发布的PCM。
-                assert!(unsafe { owner.snapshots[0].copy_block(22050, 44100, &mut crate::audio_abi::output_bus(&mut bus), 8820) });
+                assert!(unsafe {
+                    owner.snapshots[0].copy_block(
+                        22050,
+                        44100,
+                        &mut crate::audio_abi::output_bus(&mut bus),
+                        8820,
+                    )
+                });
                 assert!(left.iter().all(|sample| sample.is_finite()));
                 assert_eq!(left, right);
                 let correlation = |lag: usize| {
@@ -6805,7 +6812,14 @@ pub(crate) mod tests {
                     channel_buffers: planes.as_mut_ptr(),
                 };
                 // SAFETY: 两个平面各四帧；观察真实发布输出是否已经撤销。
-                unsafe { owner.snapshots[0].copy_block(0, 44100, &mut crate::audio_abi::output_bus(&mut bus), 4) }
+                unsafe {
+                    owner.snapshots[0].copy_block(
+                        0,
+                        44100,
+                        &mut crate::audio_abi::output_bus(&mut bus),
+                        4,
+                    )
+                }
             })
             .collect::<Vec<_>>();
         assert!(editor
@@ -7287,7 +7301,14 @@ pub(crate) mod tests {
                     channel_buffers: planes.as_mut_ptr(),
                 };
                 // SAFETY: 每个publisher仅写本次提供的两个四帧平面。
-                assert!(unsafe { owner.snapshots[0].copy_block(0, 44100, &mut crate::audio_abi::output_bus(&mut bus), 4) });
+                assert!(unsafe {
+                    owner.snapshots[0].copy_block(
+                        0,
+                        44100,
+                        &mut crate::audio_abi::output_bus(&mut bus),
+                        4,
+                    )
+                });
                 left
             })
             .collect::<Vec<_>>();
@@ -8696,7 +8717,12 @@ pub(crate) mod tests {
         let began = Instant::now();
         loop {
             unsafe {
-                owner.snapshots[0].copy_block(44100, 44100, &mut crate::audio_abi::output_bus(&mut bus), 4);
+                owner.snapshots[0].copy_block(
+                    44100,
+                    44100,
+                    &mut crate::audio_abi::output_bus(&mut bus),
+                    4,
+                );
             }
             if left == [0.1, 0.2, 0.3, 0.4] {
                 break;
@@ -8951,7 +8977,14 @@ pub(crate) mod tests {
                 channel_buffers: planes.as_mut_ptr(),
             };
             // SAFETY: 两个四帧可写平面完整覆盖copy_block，owner与snapshot仍存活。
-            assert!(unsafe { owner.snapshots[0].copy_block(0, 44100, &mut crate::audio_abi::output_bus(&mut bus), 4) });
+            assert!(unsafe {
+                owner.snapshots[0].copy_block(
+                    0,
+                    44100,
+                    &mut crate::audio_abi::output_bus(&mut bus),
+                    4,
+                )
+            });
             (left, right)
         };
         wait(2);
@@ -9134,7 +9167,14 @@ pub(crate) mod tests {
             channel_buffers: planes.as_mut_ptr(),
         };
         // SAFETY: 两个8820帧平面存活，读取实际已经由actor发布的0.5秒起输出。
-        assert!(unsafe { owner.snapshots[0].copy_block(22050, 44100, &mut crate::audio_abi::output_bus(&mut bus), 8820) });
+        assert!(unsafe {
+            owner.snapshots[0].copy_block(
+                22050,
+                44100,
+                &mut crate::audio_abi::output_bus(&mut bus),
+                8820,
+            )
+        });
         let correlation = |lag: usize| {
             let mut cross = 0_f64;
             let mut first = 0_f64;

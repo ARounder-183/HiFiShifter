@@ -21,10 +21,10 @@ pub mod gui;
 #[cfg(not(windows))]
 pub(crate) mod platform_services;
 mod plugin_diagnostics;
+pub mod port;
 pub(crate) mod private_groups;
 pub(crate) mod resources;
 pub(crate) mod routing;
-pub mod port;
 pub mod session;
 pub(crate) mod slow_lane;
 #[cfg(not(test))]
@@ -88,7 +88,6 @@ pub fn host_main_thread_tick() {
 pub fn pump_host_thread() {
     crate::host::marshal::pump();
 }
-
 
 #[cfg(test)]
 mod tests {

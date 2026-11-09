@@ -67,8 +67,11 @@ fn the_reaper_legacy_id_is_a_distinct_and_rejected_constant() {
     );
     // 应答它 = 把 REAPER 的空指针缺陷引到用户面前；这条断言就是那道闸门。
     assert!(
-        ours::get_extension(std::ptr::null(), ours::CLAP_EXT_ARA_PLUGIN_EXTENSION_REAPER_LEGACY)
-            .is_null(),
+        ours::get_extension(
+            std::ptr::null(),
+            ours::CLAP_EXT_ARA_PLUGIN_EXTENSION_REAPER_LEGACY
+        )
+        .is_null(),
         "the REAPER private draft ID must never be answered"
     );
 }

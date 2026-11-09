@@ -222,8 +222,7 @@ fn open_writer() -> Result<RotatingLog, String> {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let writer =
-        RotatingLog::open(path, &product(), crate::VERSION).map_err(|e| e.to_string())?;
+    let writer = RotatingLog::open(path, &product(), crate::VERSION).map_err(|e| e.to_string())?;
     *LOG_PATH.lock().unwrap_or_else(|e| e.into_inner()) = Some(writer.path().to_path_buf());
     Ok(writer)
 }
@@ -418,14 +417,10 @@ mod tests {
     /// 文件名必须同时带格式与宿主 —— 这是"日志不再混在一起"的契约。
     #[test]
     fn the_log_file_name_carries_both_dimensions() {
-        let clap = hifishifter_plugin_core::plugin_log_name::log_file_name(
-            Some("clap"),
-            Some("REAPER"),
-        );
-        let vst3 = hifishifter_plugin_core::plugin_log_name::log_file_name(
-            Some("vst3"),
-            Some("REAPER"),
-        );
+        let clap =
+            hifishifter_plugin_core::plugin_log_name::log_file_name(Some("clap"), Some("REAPER"));
+        let vst3 =
+            hifishifter_plugin_core::plugin_log_name::log_file_name(Some("vst3"), Some("REAPER"));
         assert_eq!(clap, "plugin-clap-reaper.log");
         assert_ne!(clap, vst3, "同一宿主里两种格式不能共用一个文件");
     }

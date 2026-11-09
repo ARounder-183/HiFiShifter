@@ -215,11 +215,14 @@ impl ExtensionOwner {
 
     /// 宿主应用版本（同一条来源顺序；入口自报里没有版本时返回 `None`）。
     pub fn host_app_version(&self) -> Option<String> {
-        self.host_backend().app_version().map(str::to_owned).or_else(|| {
-            self.host_self_report()
-                .map(|(_, version)| version)
-                .filter(|version| !version.is_empty())
-        })
+        self.host_backend()
+            .app_version()
+            .map(str::to_owned)
+            .or_else(|| {
+                self.host_self_report()
+                    .map(|(_, version)| version)
+                    .filter(|version| !version.is_empty())
+            })
     }
 
     /// 宿主最近一次编辑器视图选择（`notifySelection`），指针键的副本。
@@ -428,7 +431,9 @@ impl ExtensionOwner {
         {
             return;
         }
-        let host = self.host_app_name().unwrap_or_else(|| "this host".to_owned());
+        let host = self
+            .host_app_name()
+            .unwrap_or_else(|| "this host".to_owned());
         // 诊断里要报"激活之后过了多久"，判据本身只问"窗口关没关"（见 `binding_window_closed`）。
         let elapsed = (*self.set_active_at.lock_or_recover())
             .map(|at| at.elapsed())

@@ -103,7 +103,14 @@ impl ExtensionOwner {
         // 给测试上下文补上播放位，保持原有 3 秒计数器语义。
         let mut forced: crate::block_context::BlockContext = context.into();
         forced.playing = true;
-        self.note_stream_block_at(stream, forced, frames, playing_rising, recording_rising, None)
+        self.note_stream_block_at(
+            stream,
+            forced,
+            frames,
+            playing_rising,
+            recording_rising,
+            None,
+        )
     }
 
     /// 与 note_stream_block 相同，但允许调用方给出**本地有效位置**（离线 cursor）。

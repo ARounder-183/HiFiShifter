@@ -47,6 +47,21 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./scripts/setup/prepare-plugin-sdks.ps1
+      # 【为什么 Unix 也要准备 ARA / VST3 SDK】CLAP 外壳复用 hifishifter-plugin，
+      # 而该 crate 的 ara2-bridge 同时启用了 vst3 companion feature；Cargo 的 feature
+      # 是构建图并集，ara2-bridge-companion 的 build.rs 因此会读 ARA_SDK_DIR 与
+      # ARA_VST3_SDK_DIR。只准备 CLAP 头文件时，编译在 build script 阶段以
+      # "VST3 SDK v3.8.0_build_66 is required" 失败。VST3 流水线已经有同一套 pin 校验，
+      # 这里直接复用它的 sdk 阶段，避免两份规则漂移。
+      - name: Prepare pinned ARA and VST3 SDKs (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          bash scripts/vst3/unix/build.sh --stage=sdk
+          echo "ARA_SDK_DIR=$GITHUB_WORKSPACE/third_party/sdk/ARA_SDK" >> "$GITHUB_ENV"
+          echo "ARA_VST3_SDK_DIR=$GITHUB_WORKSPACE/third_party/sdk/vst3sdk" >> "$GITHUB_ENV"
+          echo "HIFISHIFTER_CLAP_SDK_DIR=$GITHUB_WORKSPACE/third_party/sdk/clap" >> "$GITHUB_ENV"
+
       # 【为什么按 commit 取而不是按分支】pin 的是 commit，分支 tip 早就走远了；
       # `--branch 1.1.9` + 比对 HEAD 的写法在 runner 上必然不等（实测两次都红）。
       # 这里与 scripts/setup/prepare-plugin-sdks.ps1 取的是同一份 pin。
@@ -62,15 +77,13 @@ jobs:
           git -C third_party/sdk/clap fetch -q --depth 1 origin "$commit"
           git -C third_party/sdk/clap checkout -q --detach FETCH_HEAD
           test "$(git -C third_party/sdk/clap rev-parse HEAD)" = "$commit"
+      # GAME 音符分块模型由 develop 引入；所有插件流水线都要取齐，否则 models.json
+      # 与真实权重不一致，运行时的块分析会静默降级。
       - name: Fetch model weights
-        run: python scripts/setup/fetch-models.py
+        run: |
+          python scripts/setup/fetch-models.py
+          python scripts/setup/fetch-models.py --fetch-game
         shell: bash
-      # 【为什么显式导出】clap_layout 的 ABI oracle 读这个变量定位钉住的 1.1.9
-      # 头文件；Unix job 是 git fetch 下来的，不经过 sdk-env.ps1 的 Set-SdkEnvironment。
-      - name: Point the CLAP ABI oracle at the pinned SDK
-        if: runner.os != 'Windows'
-        shell: bash
-        run: echo "HIFISHIFTER_CLAP_SDK_DIR=$GITHUB_WORKSPACE/third_party/sdk/clap" >> "$GITHUB_ENV"
       # 前端产物来自 gates.yml 的 frontend job。CLAP 的包与 VST3 同构地带一份
       # frontend/ 与 models.json：少了它，自检里的"窗口空白"判据就成了空跑。
       - name: Download frontend artifact

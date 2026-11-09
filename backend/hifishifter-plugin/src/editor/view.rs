@@ -37,7 +37,7 @@ impl ViewRect {
         let (max_w, max_h) = crate::editor::gui::EDITOR_MAX_SIZE;
         ((min_w as i32..=max_w as i32).contains(&width)
             && (min_h as i32..=max_h as i32).contains(&height))
-            .then_some((width, height))
+        .then_some((width, height))
     }
 }
 

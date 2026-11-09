@@ -157,9 +157,8 @@ fn module_dir() -> Option<PathBuf> {
     #[cfg(unix)]
     {
         let mut info = std::mem::MaybeUninit::<libc::Dl_info>::uninit();
-        let found = unsafe {
-            libc::dladdr(module_dir as *const () as *const c_void, info.as_mut_ptr())
-        };
+        let found =
+            unsafe { libc::dladdr(module_dir as *const () as *const c_void, info.as_mut_ptr()) };
         if found == 0 {
             return None;
         }
@@ -167,9 +166,13 @@ fn module_dir() -> Option<PathBuf> {
         if info.dli_fname.is_null() {
             return None;
         }
-        PathBuf::from(unsafe { CStr::from_ptr(info.dli_fname) }.to_string_lossy().as_ref())
-            .parent()
-            .map(Path::to_path_buf)
+        PathBuf::from(
+            unsafe { CStr::from_ptr(info.dli_fname) }
+                .to_string_lossy()
+                .as_ref(),
+        )
+        .parent()
+        .map(Path::to_path_buf)
     }
     #[cfg(not(any(target_os = "windows", unix)))]
     {

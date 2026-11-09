@@ -14,7 +14,10 @@ fn imported_dlls(artifact: &Path) -> Vec<String> {
         .arg(artifact)
         .output()
         .expect("需要 MSVC 的 dumpbin（先点源 scripts/env/msvc-env.ps1）");
-    assert!(output.status.success(), "dumpbin /dependents 失败: {output:?}");
+    assert!(
+        output.status.success(),
+        "dumpbin /dependents 失败: {output:?}"
+    );
     String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter_map(|line| {
@@ -22,7 +25,7 @@ fn imported_dlls(artifact: &Path) -> Vec<String> {
             (name.len() > 4
                 && name.to_ascii_lowercase().ends_with(".dll")
                 && !name.contains(char::is_whitespace))
-                .then(|| name.to_ascii_lowercase())
+            .then(|| name.to_ascii_lowercase())
         })
         .collect()
 }
@@ -70,7 +73,11 @@ fn the_clap_module_imports_nothing_beyond_system_libraries() {
     let artifact = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../target/debug")
         .join("hifishifter_clap.dll");
-    assert!(artifact.is_file(), "找不到 {} —— 先跑 cargo build -p hifishifter-clap", artifact.display());
+    assert!(
+        artifact.is_file(),
+        "找不到 {} —— 先跑 cargo build -p hifishifter-clap",
+        artifact.display()
+    );
     let unexpected: Vec<String> = imported_dlls(&artifact)
         .into_iter()
         .filter(|name| !is_system_module(name))

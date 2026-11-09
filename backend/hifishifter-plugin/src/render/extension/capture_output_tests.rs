@@ -954,15 +954,33 @@ fn a_gate_clear_arms_a_fade_in_on_resume() {
         channel_buffers: planes.as_mut_ptr(),
     };
     // 先建立"上一块输出的尾巴"。
-    unsafe { owner.apply_output_declick(ProcessStream::Realtime, &mut crate::audio_abi::output_bus(&mut bus), frames) };
+    unsafe {
+        owner.apply_output_declick(
+            ProcessStream::Realtime,
+            &mut crate::audio_abi::output_bus(&mut bus),
+            frames,
+        )
+    };
     // 门控清零：写尾巴→0，并武装下一次淡入。
-    unsafe { owner.apply_gate_fade_out(ProcessStream::Realtime, &mut crate::audio_abi::output_bus(&mut bus), frames) };
+    unsafe {
+        owner.apply_gate_fade_out(
+            ProcessStream::Realtime,
+            &mut crate::audio_abi::output_bus(&mut bus),
+            frames,
+        )
+    };
     assert_eq!(first[frames - 1], 0.0);
     // 恢复：整块内容为 0.5，前 64 帧必须从 0 单调升到 0.5。
     for sample in first.iter_mut().chain(second.iter_mut()) {
         *sample = 0.5;
     }
-    unsafe { owner.apply_output_declick(ProcessStream::Realtime, &mut crate::audio_abi::output_bus(&mut bus), frames) };
+    unsafe {
+        owner.apply_output_declick(
+            ProcessStream::Realtime,
+            &mut crate::audio_abi::output_bus(&mut bus),
+            frames,
+        )
+    };
     assert!(
         first.windows(2).all(|pair| pair[0] <= pair[1]),
         "恢复后的前 64 帧必须单调淡入"
@@ -1848,7 +1866,13 @@ fn a_source_kind_change_on_the_first_block_still_fades() {
     // 相位开始是任意的 —— 从零直接跳到块内波形就是一次标准的起播咔。现在它按
     // `OUTPUT_FIRST_BLOCK_FADE_FRAMES`（5 ms）淡入，之后保持满幅。
     owner.output_token[stream.index()].store(4, std::sync::atomic::Ordering::Release);
-    unsafe { owner.apply_output_declick(stream, &mut crate::audio_abi::output_bus(&mut first), frames) };
+    unsafe {
+        owner.apply_output_declick(
+            stream,
+            &mut crate::audio_abi::output_bus(&mut first),
+            frames,
+        )
+    };
     assert!(
         first_left[0] < 0.05,
         "首块必须从零附近起（实测 {}）",
@@ -1877,7 +1901,13 @@ fn a_source_kind_change_on_the_first_block_still_fades() {
         channel_buffers: second_planes.as_mut_ptr(),
     };
     owner.output_token[stream.index()].store(2, std::sync::atomic::Ordering::Release);
-    unsafe { owner.apply_output_declick(stream, &mut crate::audio_abi::output_bus(&mut second), frames) };
+    unsafe {
+        owner.apply_output_declick(
+            stream,
+            &mut crate::audio_abi::output_bus(&mut second),
+            frames,
+        )
+    };
     // 开头必须还在旧值附近（从 0.5 走向 1.0），不能第一帧就是 1.0。
     assert!(
         second_left[0] < 0.9,
@@ -1928,7 +1958,9 @@ fn a_carryover_source_kind_still_triggers_a_fade() {
 
     // 上一轮：输出过 Raw（种类 4），给 tail 留下 0.5。
     owner.output_token[stream.index()].store(4, std::sync::atomic::Ordering::Release);
-    unsafe { owner.apply_output_declick(stream, &mut crate::audio_abi::output_bus(&mut tail), frames) };
+    unsafe {
+        owner.apply_output_declick(stream, &mut crate::audio_abi::output_bus(&mut tail), frames)
+    };
     // 上一轮首块是 `Raw`（我们算出来的内容）⇒ 现在按 5 ms 淡入，之后满幅。
     let fade = super::OUTPUT_FIRST_BLOCK_FADE_FRAMES;
     assert!(
@@ -1952,7 +1984,13 @@ fn a_carryover_source_kind_still_triggers_a_fade() {
         channel_buffers: planes.as_mut_ptr(),
     };
     owner.output_token[stream.index()].store(2, std::sync::atomic::Ordering::Release);
-    unsafe { owner.apply_output_declick(stream, &mut crate::audio_abi::output_bus(&mut output), frames) };
+    unsafe {
+        owner.apply_output_declick(
+            stream,
+            &mut crate::audio_abi::output_bus(&mut output),
+            frames,
+        )
+    };
     assert!(
         left[0] < 0.9,
         "上一轮停在另一种源上时，本轮首块必须淡化（实测 {}）",
@@ -1982,7 +2020,9 @@ fn a_passthrough_first_block_is_left_verbatim() {
     };
     // 种类 6 = `PassThrough`（宿主原声）。
     owner.output_token[stream.index()].store(6, std::sync::atomic::Ordering::Release);
-    unsafe { owner.apply_output_declick(stream, &mut crate::audio_abi::output_bus(&mut bus), frames) };
+    unsafe {
+        owner.apply_output_declick(stream, &mut crate::audio_abi::output_bus(&mut bus), frames)
+    };
     assert_eq!(left, vec![0.5_f32; frames], "透传首块必须逐样本原样输出");
 }
 /// **"透传宿主原声 → 处理结果"必须淡入，而不是把两段内容叠在一起。**
@@ -2007,7 +2047,9 @@ fn a_passthrough_to_processed_switch_fades_in_instead_of_crossfading() {
 
     // 第一块：透传宿主原声（种类 5 = PendingSynthesis）。
     owner.output_token[stream.index()].store(5, std::sync::atomic::Ordering::Release);
-    unsafe { owner.apply_output_declick(stream, &mut crate::audio_abi::output_bus(&mut host), frames) };
+    unsafe {
+        owner.apply_output_declick(stream, &mut crate::audio_abi::output_bus(&mut host), frames)
+    };
     assert_eq!(host_left, vec![0.8; frames], "透传首块原样输出");
 
     // 第二块：处理结果（种类 2），内容 0.3。
@@ -2020,7 +2062,13 @@ fn a_passthrough_to_processed_switch_fades_in_instead_of_crossfading() {
         channel_buffers: planes.as_mut_ptr(),
     };
     owner.output_token[stream.index()].store(2, std::sync::atomic::Ordering::Release);
-    unsafe { owner.apply_output_declick(stream, &mut crate::audio_abi::output_bus(&mut output), frames) };
+    unsafe {
+        owner.apply_output_declick(
+            stream,
+            &mut crate::audio_abi::output_bus(&mut output),
+            frames,
+        )
+    };
 
     // 淡入：不应出现"宿主原声 × (1-t) + 结果 × t"的叠加值。
     // 叠加会在 t≈0.5 处给出约 0.55，而纯淡入给出约 0.15。
@@ -2104,7 +2152,9 @@ fn the_emit_gate_fades_to_zero_instead_of_stepping() {
     let _ = &mut bus;
     left.fill(1.0);
     right.fill(1.0);
-    unsafe { owner.apply_gate_fade_out(stream, &mut crate::audio_abi::output_bus(&mut bus), frames) };
+    unsafe {
+        owner.apply_gate_fade_out(stream, &mut crate::audio_abi::output_bus(&mut bus), frames)
+    };
     assert!(
         left[0] > 0.0 && left[0] < 1.0,
         "首帧必须是上一块尾巴的淡出起点（实测 {}）",
@@ -2144,12 +2194,16 @@ fn the_gate_fade_clears_the_newest_tail() {
         silence_flags: 0,
         channel_buffers: planes.as_mut_ptr(),
     };
-    unsafe { owner.apply_gate_fade_out(stream, &mut crate::audio_abi::output_bus(&mut bus), frames) };
+    unsafe {
+        owner.apply_gate_fade_out(stream, &mut crate::audio_abi::output_bus(&mut bus), frames)
+    };
     assert!(left[0] > 0.0, "第一块应当从上一块的尾巴淡出");
     // 第二块：尾巴已经被清零，所以整块必须是零（而不是同一段尾巴再淡一次）。
     left.fill(1.0);
     right.fill(1.0);
-    unsafe { owner.apply_gate_fade_out(stream, &mut crate::audio_abi::output_bus(&mut bus), frames) };
+    unsafe {
+        owner.apply_gate_fade_out(stream, &mut crate::audio_abi::output_bus(&mut bus), frames)
+    };
     assert!(
         left.iter().all(|value| *value == 0.0),
         "第二次门控必须输出纯零（旧实现会重放同一段冻结的尾巴）：{:?}",

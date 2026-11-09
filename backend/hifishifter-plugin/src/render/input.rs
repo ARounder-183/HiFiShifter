@@ -1086,11 +1086,20 @@ mod tests {
         let publisher = super::super::snapshot::SnapshotPublisher::default();
         let mut snapshots = snapshots;
         publisher.publish_shared(snapshots.pop().unwrap()).unwrap();
-        assert!(unsafe { publisher.copy_block((48000 * 180 - 511) as i64, 48000, &mut crate::audio_abi::output_bus(&mut bus), 513) });
+        assert!(unsafe {
+            publisher.copy_block(
+                (48000 * 180 - 511) as i64,
+                48000,
+                &mut crate::audio_abi::output_bus(&mut bus),
+                513,
+            )
+        });
         assert_eq!(&left[..511], &[0.25; 511]);
         assert_eq!(&right[..511], &[0.25; 511]);
         assert_eq!(&left[511..], &[0.; 2]);
-        assert!(unsafe { publisher.copy_block(0, 48000, &mut crate::audio_abi::output_bus(&mut bus), 513) });
+        assert!(unsafe {
+            publisher.copy_block(0, 48000, &mut crate::audio_abi::output_bus(&mut bus), 513)
+        });
         assert_eq!(left, [0.25; 513]);
         drop(publisher);
         drop(snapshots);

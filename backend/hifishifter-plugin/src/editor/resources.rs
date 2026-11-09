@@ -112,13 +112,17 @@ pub(crate) fn module_path() -> Result<PathBuf, String> {
         }
         // SAFETY: dli_fname 指向 dladdr 内部的 NUL 结尾字符串。
         Ok(PathBuf::from(
-            unsafe { CStr::from_ptr(info.dli_fname) }.to_string_lossy(),
+            unsafe { CStr::from_ptr(info.dli_fname) }
+                .to_string_lossy()
+                .into_owned(),
         ))
     }
     #[cfg(test)]
     {
-        Ok(PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../target/debug/hifishifter_plugin.dll"))
+        Ok(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../target/debug/hifishifter_plugin.dll"),
+        )
     }
 }
 
@@ -162,7 +166,10 @@ pub(crate) fn frontend_directory() -> Result<PathBuf, String> {
         }
         let folder = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../Resources/frontend");
         if !folder.join("plugin.html").is_file() {
-            return Err(format!("plugin frontend assets missing: {}", folder.display()));
+            return Err(format!(
+                "plugin frontend assets missing: {}",
+                folder.display()
+            ));
         }
         Ok(folder)
     }
