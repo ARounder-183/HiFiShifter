@@ -17,7 +17,9 @@ import { configureStore } from "@reduxjs/toolkit";
 
 import { KeybindingsDialog } from "./KeybindingsDialog";
 import { I18nProvider } from "../../i18n/I18nProvider";
-import keybindingsReducer from "../../features/keybindings/keybindingsSlice";
+import keybindingsReducer, {
+    setKeybindings,
+} from "../../features/keybindings/keybindingsSlice";
 import sessionReducer from "../../features/session/sessionSlice";
 import { ACTION_GROUP_ORDER, ALL_ACTION_IDS } from "../../features/keybindings/defaultKeybindings";
 
@@ -52,13 +54,16 @@ function createTestStore() {
  * 它把内容 portal 到 `<body>` —— 容器里始终只有 0 长度 HTML。
  */
 /** 渲染对话框；返回值里的 `root` 为 `document.body`（portal 目的地）。 */
-function renderDialog(onOpenChange: (open: boolean) => void = () => {}) {
+function renderDialog(
+    onOpenChange: (open: boolean) => void = () => {},
+    store = createTestStore(),
+) {
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
     act(() => {
         root.render(
-            <Provider store={createTestStore()}>
+            <Provider store={store}>
                 <I18nProvider>
                     <KeybindingsDialog open onOpenChange={onOpenChange} />
                 </I18nProvider>
@@ -67,6 +72,7 @@ function renderDialog(onOpenChange: (open: boolean) => void = () => {}) {
     });
     return {
         root: document.body,
+        store,
         cleanup: () => {
             act(() => root.unmount());
             container.remove();
@@ -305,6 +311,49 @@ describe("多绑定：一行的 chip 列表与追加按钮", () => {
 });
 
 /**
+ * 自定义绑定的可见高亮。
+ *
+ * 【回归背景】旧实现按槽位判断“是否与默认一致”，把改过的 chip 染成绿色；一次
+ * 重构把颜色连同判定一起删掉了，用户改完键后界面没有任何反馈。这里重新锁定
+ * 两个行为：改过的槽位必须有高亮，默认槽位必须保持中性；颜色来自语义令牌，
+ * 不来自写死的 green 调色板。
+ */
+describe("自定义绑定高亮", () => {
+    it("与默认不同的键使用 success 语义色高亮", () => {
+        const store = createTestStore();
+        const { cleanup } = renderDialog(() => {}, store);
+        try {
+            act(() => {
+                store.dispatch(
+                    setKeybindings({
+                        actionId: "edit.undo",
+                        bindings: [{ key: "z", ctrl: true, alt: true }],
+                    }),
+                );
+            });
+
+            const chip = document.body.querySelector<HTMLElement>(
+                '[data-hs-kb-row="edit"] [data-hs-kb-slot="0"][data-hs-kb-customized="true"]',
+            );
+            expect(chip).not.toBeNull();
+            expect(chip!.style.background).toContain("--qt-success-bg");
+            expect(chip!.style.color).toContain("--qt-success-text");
+        } finally {
+            cleanup();
+        }
+    });
+
+    it("默认绑定不出现自定义高亮", () => {
+        const { cleanup } = renderDialog();
+        try {
+            expect(document.body.querySelector('[data-hs-kb-customized="true"]')).toBeNull();
+        } finally {
+            cleanup();
+        }
+    });
+});
+
+/**
  * 行的布局稳定性：录入态不得移动任何已有元素。
  *
  * 【回归背景】chip 的文字会在录入时变成"请按键…"，`+` 也会因为不能追加而消失 ——
@@ -368,9 +417,9 @@ describe("布局稳定性：录入态不移动已有元素", () => {
     it("chip 与追加按钮都走设计系统原语", () => {
         /*
          * 【回归背景】这一行控件曾经直用 Radix 的 `Button`/`IconButton`，还带写死的
-         * 调色板色（录入中蓝、自定义绿）与内联 `fontFamily: monospace`。项目里
-         * `AppButton`/`AppIconButton` 是按钮外观的唯一来源，且"自定义绑定"已经由
-         * 分组标题的提示说明，不需要再上一次色。
+         * 调色板色与内联 `fontFamily: monospace`。项目里 `AppButton`/`AppIconButton`
+         * 是按钮外观的唯一来源；自定义绑定必须仍然有可见高亮，但颜色来自
+         * success 语义令牌，不来自写死的 green 调色板。
          */
         const { cleanup } = renderDialog();
         try {

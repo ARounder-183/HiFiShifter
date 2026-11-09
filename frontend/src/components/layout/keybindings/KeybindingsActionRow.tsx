@@ -30,7 +30,11 @@ import { AppButton, AppIconButton, AppStatusChip } from "../../../ui";
 import type { ActionMeta, Keybinding } from "../../../features/keybindings/types";
 import { MAX_BINDINGS_PER_ACTION } from "../../../features/keybindings/types";
 import { formatKeybinding } from "../../../features/keybindings/keybindingsSlice";
-import { GESTURE_BADGES } from "./keybindingRowShared";
+import {
+    GESTURE_BADGES,
+    isDefaultBinding,
+    isDefaultBindings,
+} from "./keybindingRowShared";
 
 /**
  * chip 的固定宽度（px）。
@@ -57,6 +61,8 @@ export interface KeybindingsActionRowProps {
     meta: ActionMeta;
     /** 当前生效的**全部**绑定（已合并用户覆盖）；下标 0 是主绑定。 */
     bindings: readonly Keybinding[];
+    /** 该动作的默认绑定列表；用于逐槽位判断“这一颗键是否被改过”。 */
+    defaultBindings: readonly Keybinding[];
     /** 正在录入的槽位下标；`null` = 本行未在录入。 */
     recordingSlot: number | null;
     /** 本地化后的手势徽章文案。有 `modifierOperationType` 时必填。 */
@@ -94,6 +100,7 @@ export function KeybindingsActionRow({
     label,
     meta,
     bindings,
+    defaultBindings,
     recordingSlot,
     gestureLabel,
     isModifierOnly,
@@ -108,6 +115,8 @@ export function KeybindingsActionRow({
     groupLabel,
 }: KeybindingsActionRowProps) {
     const isRecording = recordingSlot !== null;
+    // 行级标记同时覆盖“删掉了一个默认槽位”这类没有 chip 可染色的结构性改动。
+    const rowCustomized = !isDefaultBindings(bindings, defaultBindings);
     const recordPrompt = isModifierOnly ? pressModifierLabel : pressKeyLabel;
     const atBindingLimit = bindings.length >= MAX_BINDINGS_PER_ACTION;
 
@@ -123,6 +132,7 @@ export function KeybindingsActionRow({
             px="2"
             py="1"
             data-hs-kb-row={meta.group}
+            data-hs-kb-customized={rowCustomized ? "true" : undefined}
             style={{
                 borderRadius: "var(--qt-radius-sm)",
                 background: isRecording ? "var(--qt-accent-subtle)" : undefined,
@@ -147,6 +157,11 @@ export function KeybindingsActionRow({
                 {Array.from({ length: slotCount }, (_, slot) => {
                     const binding = bindings[slot];
                     const slotIsRecording = recordingSlot === slot;
+                    const slotCustomized = (() => {
+                        if (slotIsRecording || !binding) return false;
+                        const fallback = defaultBindings[slot];
+                        return fallback === undefined || !isDefaultBinding(binding, fallback);
+                    })();
                     const text = slotIsRecording
                         ? recordPrompt
                         : binding
@@ -162,11 +177,12 @@ export function KeybindingsActionRow({
                             key={`${meta.group}-${label}-${slot}`}
                             {...(slot === 0 ? { "data-hs-kb-bind": label } : {})}
                             data-hs-kb-slot={slot}
+                            data-hs-kb-customized={slotCustomized ? "true" : undefined}
                             /*
-                             * 只有"正在录入"需要跳出来（实心强调色）。**不再给自定义绑定
-                             * 上色**：那原本是写死的绿色，而"这一组里有自定义绑定"已经由
-                             * 分组标题的 `kb_group_customized_hint` 说明 —— 同一件事说两遍，
-                             * 还用的是设计系统之外的调色板。
+                             * 录入态用实心强调色，优先级高于自定义高亮 —— 用户正在按
+                             * 的那颗键需要压过“它已经被改过”的静态信息。非录入态下，
+                             * 与默认不同的槽位用 success 语义令牌标出；颜色跟随明暗主题，
+                             * 不写死 green 调色板。
                              */
                             intent={slotIsRecording ? "primary" : "default"}
                             size="sm"
@@ -175,7 +191,17 @@ export function KeybindingsActionRow({
                              * 整行跳动（用户报告过"按钮不对齐"）。完整文本放 `title`。
                              */
                             className="hs-type-mono truncate"
-                            style={{ width: CHIP_WIDTH_PX, flex: "0 0 auto" }}
+                            style={{
+                                width: CHIP_WIDTH_PX,
+                                flex: "0 0 auto",
+                                ...(slotCustomized
+                                    ? {
+                                          background: "var(--qt-success-bg)",
+                                          color: "var(--qt-success-text)",
+                                          boxShadow: "inset 0 0 0 1px var(--qt-success-border)",
+                                      }
+                                    : {}),
+                            }}
                             title={text}
                             onClick={() =>
                                 slotIsRecording ? onClearSlot(slot) : onStartRecording(slot)
