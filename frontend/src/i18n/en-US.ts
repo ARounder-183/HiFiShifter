@@ -628,8 +628,6 @@ export const enUS = {
     track_add: "Add Track",
     track_add_host: "Add Host Track",
     track_remove_selected: "Remove Selected Track",
-    track_remove_confirm:
-        "Remove this track? The track and all of its clips are deleted. This cannot be undone.",
 
     param_editor_short: "Param Editor",
     param_toolbar_more: "More parameters",

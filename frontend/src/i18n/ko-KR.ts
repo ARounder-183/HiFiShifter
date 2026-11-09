@@ -560,8 +560,6 @@ export const koKR = {
     track_add: "트랙 추가",
     track_add_host: "호스트 트랙 추가",
     track_remove_selected: "선택한 트랙 삭제",
-    track_remove_confirm:
-        "이 트랙을 삭제할까요? 트랙과 그 위의 모든 클립이 삭제됩니다. 이 작업은 되돌릴 수 없습니다.",
 
     param_editor_short: "파라미터",
     param_toolbar_more: "추가 매개변수",

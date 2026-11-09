@@ -471,7 +471,6 @@ export const zhCN = {
     track_add: "添加轨道",
     track_add_host: "添加宿主轨道",
     track_remove_selected: "删除选中轨道",
-    track_remove_confirm: "删除此轨道？轨道及其上的所有片段都会被删除。此操作无法撤销。",
 
     param_editor_short: "参数编辑器",
     param_toolbar_more: "更多参数",
