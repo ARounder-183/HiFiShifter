@@ -1068,6 +1068,7 @@ mod tests {
     ///
     /// 不参与默认测试：需要本机 GAME 权重与 macOS CoreML。用它回答“GAME
     /// 有没有真的走 CoreML”，而不是靠上层回退后的最终 EP 猜。
+    #[cfg(feature = "onnx")]
     #[test]
     #[ignore = "requires the GAME ONNX weights and macOS CoreML"]
     fn coreml_ep_probe_for_each_game_submodel() {
@@ -1094,6 +1095,7 @@ mod tests {
     ///
     /// 不参与默认测试：需要本机 GAME 权重与 Windows DirectML。保持独立进程运行，
     /// 这样某个 ORT/provider 组合发生原生崩溃时仍能先从输出定位到具体模型。
+    #[cfg(feature = "onnx")]
     #[test]
     #[ignore = "requires the GAME ONNX weights and Windows DirectML"]
     fn directml_ep_probe_for_each_game_submodel() {
