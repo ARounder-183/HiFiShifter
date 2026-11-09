@@ -100,8 +100,15 @@ export interface ParamBlockDragContext {
     readonly paintNow: () => void;
     readonly bumpParamBlockStructure: () => void;
     readonly setParamBlockState: (state: ParamBlockState) => void;
-    readonly persistParamBlockEdits: (state: ParamBlockState) => void;
+    /**
+     * 一次提交同时写**曲线补丁**与**块布局**。
+     *
+     * 【为什么必须一次】后端每次 `set_param_block_edits` 都会打一个撤销点；
+     * 曲线与块中心分成两次写，就等于一次手势产生两步历史 —— 用户要按两次
+     * 撤销才能回到原样。这里把最终编辑集一并交给提交方，让它们走同一个事务。
+     */
     readonly commitLineCurve?: (
+        state: ParamBlockState,
         segments: readonly { startFrame: number; values: readonly number[] }[],
         authorityRevision?: number,
         geometryRevision?: number,
@@ -175,7 +182,6 @@ export function beginParamBlockDrag(
         paintNow,
         bumpParamBlockStructure,
         setParamBlockState,
-        persistParamBlockEdits,
         getAuthorityWatermark,
         paramAuthorityRevision,
         onParamCommitSucceeded,
@@ -709,6 +715,24 @@ export function beginParamBlockDrag(
                     if (commitSegments.length === 0)
                         throw new Error("Block drag has no editable frames");
                     if (liveEditActiveRef) liveEditActiveRef.current = true;
+                    /*
+                     * 【一次手势 = 一个历史步】Pitch 块的显示中心来自 `value`，
+                     * 曲线位移只改帧值；两者都要落盘，但必须落在**同一个事务**里。
+                     * 先把最终编辑集算出来，再连同曲线分段一起提交。
+                     */
+                    const commitState =
+                        editParam === "pitch"
+                            ? setParamBlockLogicalCenters({
+                                  state: paramBlockStateRef.current,
+                                  blocks: selectedBlocks,
+                                  centers: logicalCenters,
+                              })
+                            : paramBlockStateRef.current;
+                    if (commitState !== paramBlockStateRef.current) {
+                        // 本地先落位：块的显示中心立刻到位，不必等回包。
+                        paramBlockStateRef.current = commitState;
+                        setParamBlockState(commitState);
+                    }
                     if (curveOwned && context.commitLineCurve) {
                         const revision = curves[0]?.authorityRevision;
                         const geometry = curves[0]?.geometryRevision;
@@ -724,6 +748,7 @@ export function beginParamBlockDrag(
                         )
                             throw new Error("Conflict: parameter curve changed during block read");
                         await context.commitLineCurve(
+                            commitState,
                             commitSegments,
                             revision,
                             geometry,
@@ -743,18 +768,6 @@ export function beginParamBlockDrag(
                     }));
                     handoff.authorityRequestSeqAtCommit = getAuthorityWatermark().issuedRequestSeq;
                     handoff.committed = true;
-                    if (editParam === "pitch") {
-                        const nextState = setParamBlockLogicalCenters({
-                            state: paramBlockStateRef.current,
-                            blocks: selectedBlocks,
-                            centers: logicalCenters,
-                        });
-                        if (nextState !== paramBlockStateRef.current) {
-                            paramBlockStateRef.current = nextState;
-                            setParamBlockState(nextState);
-                            persistParamBlockEdits(nextState);
-                        }
-                    }
                     if (
                         ownsParamBlockGesture({
                             activeGestureToken: paramBlockActiveGestureTokenRef.current,

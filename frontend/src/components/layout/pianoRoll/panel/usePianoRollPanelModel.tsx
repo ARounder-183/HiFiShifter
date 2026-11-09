@@ -3229,7 +3229,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     paramBlockSpecForDragSnapshotRef.current = paramBlockSpecForDragSnapshot;
     const beginBlockDrag = useCallback(
         (args: ParamBlockDragStart) => {
-            const gestureState = paramBlockStateRef.current;
             const anchorBlock = paramBlocksWithValues.find(
                 (block) => block.id === args.anchorBlockId,
             );
@@ -3263,9 +3262,12 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 requestWaveformRepaint,
                 bumpParamBlockStructure,
                 setParamBlockState,
-                persistParamBlockEdits,
-                commitLineCurve: async (segments, revision, geometry, signature) => {
-                    const state = gestureState;
+                /*
+                 * 曲线补丁与块布局走**同一个事务**：后端每次 `set` 都打一个撤销点，
+                 * 分成两次写就会让一次拖拽需要按两次撤销。`state` 是本次手势算好的
+                 * 最终编辑集（含 Pitch 块的逻辑中心）。
+                 */
+                commitLineCurve: async (state, segments, revision, geometry, signature) => {
                     await blockPersistence.commit(
                         state,
                         true,
@@ -3327,7 +3329,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             mergedKeybindings,
             onParamCommitSucceeded,
             paramBlocksWithValues,
-            persistParamBlockEdits,
             paramView,
             paramAuthorityRevision,
             requestWaveformRepaint,

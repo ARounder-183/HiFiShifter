@@ -285,6 +285,35 @@ mod tests {
             .and_then(|params| params.param_block_view.clone())
     }
 
+    /// 一个覆盖 [source_start, source_end] 的用户块。
+    fn user_block(
+        clip_id: &str,
+        take_id: &str,
+        source_start: f64,
+        source_end: f64,
+    ) -> UserParamBlock {
+        UserParamBlock {
+            id: "manual".into(),
+            geometry: BlockGeometry::Take {
+                members: vec![TakeSpan {
+                    clip_id: clip_id.to_string(),
+                    take_id: take_id.to_string(),
+                    cycle: 0,
+                    source_start_sec: source_start,
+                    source_end_sec: source_end,
+                    syllable_id: None,
+                    label: BlockLabel::Manual,
+                }],
+            },
+            deleted: false,
+            manual: true,
+            value: Some(60.0),
+            transition_out_sec: None,
+            created_seq: 1,
+            grouped_from: None,
+        }
+    }
+
     #[test]
     fn empty_edit_set_is_accepted_and_serialized_with_blocks_array() {
         let (state, root, _clip_id, _take_id) = state_with_clip();
@@ -362,6 +391,65 @@ mod tests {
             1
         );
         assert!(set(&state, root, 0, Vec::new(), true, Vec::new(), None, None).is_err());
+    }
+
+    /*
+     * 【一次提交 = 一个撤销步】曲线补丁与块布局必须在同一个 `set` 里落地。
+     *
+     * 前端的一次块拖拽同时改块中心（`edits`）与曲线（`patches`）；拆成两次写
+     * 就会产生两步历史，用户要按两次撤销才能回到原样。
+     */
+    #[test]
+    fn one_set_with_edits_and_patches_is_one_history_step() {
+        let (state, root, clip_id, take_id) = state_with_clip();
+        let revision = get(&state, &root).unwrap()["editRevision"]
+            .as_u64()
+            .unwrap();
+        let curve_revision = state
+            .param_curve_revision
+            .load(std::sync::atomic::Ordering::Acquire);
+        assert_eq!(state.history_position(), 0);
+
+        let edited = set(
+            &state,
+            root.clone(),
+            revision,
+            vec![user_block(&clip_id, &take_id, 0.0, 1.0)],
+            true,
+            vec![ParamBlockCurvePatch {
+                param: "pitch".into(),
+                start_frame: 0,
+                values: vec![61.0, 61.0],
+            }],
+            Some(curve_revision),
+            None,
+        )
+        .unwrap();
+        assert_eq!(edited["blocks"].as_array().unwrap().len(), 1);
+        assert_eq!(state.history_position(), 1, "一次 set 只能产生一个撤销步",);
+        assert_eq!(
+            state.timeline.lock().unwrap().params_by_root_track[&root]
+                .pitch_edit
+                .get(..2),
+            Some(&[61.0f32, 61.0][..]),
+        );
+
+        // 撤销一次：块与曲线同时回退。
+        assert!(state.undo_timeline().ok);
+        assert_eq!(state.history_position(), 0);
+        assert_eq!(
+            get(&state, &root).unwrap()["blocks"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_ne!(
+            state.timeline.lock().unwrap().params_by_root_track[&root]
+                .pitch_edit
+                .get(..2),
+            Some(&[61.0f32, 61.0][..]),
+        );
     }
 
     /*
