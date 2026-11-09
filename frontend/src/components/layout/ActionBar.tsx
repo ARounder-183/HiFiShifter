@@ -1,5 +1,5 @@
 // hs-interaction-exempt: 主工具栏是紧凑 chrome（size 1、内联底色、BPM 有手势累加器），能力层原语是表单尺寸；本文件的滚轮与精细调整接线已完备（BPM/节拍器音量/三个下拉均有），故刻意保留。
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { isPluginMode, canControlHostTransport } from "../../services/hostCapabilities";
 import { createPortal } from "react-dom";
 import { Flex, Select, TextField, Button, IconButton, Box } from "@radix-ui/themes";
@@ -22,6 +22,8 @@ import { SplitTransitionSettingsDialog } from "./SplitTransitionSettingsDialog";
 import { CustomScaleDialog } from "./CustomScaleDialog";
 import { AppContextMenu } from "../../ui/Menu";
 import { AppToolbarGroup } from "../../ui/Toolbar";
+import { useDevicePixelRatio } from "../../hooks/useDevicePixelRatio";
+import { wholeDevicePxLength } from "../../utils/devicePixelLine";
 import { AppIconButton, AppSlider, AppSliderReadout } from "../../ui";
 
 import {
@@ -191,6 +193,11 @@ const selectActionBarSession = (state: RootState) => {
 
 export function ActionBar() {
     const dispatch = useAppDispatch();
+    // 与 `AppToolbar` 同一口径：分隔线宽度取整数个物理像素。
+    // 主工具栏没有套 `AppToolbar`（它需要按功能组换行），因此必须自己把
+    // `--hs-toolbar-hairline` 放在根上；否则 `AppToolbarSeparator` 会退回 1px
+    // CSS —— 在 Windows 125% / 150% 下就是 1.25 / 1.5 个物理像素，边缘发虚。
+    const dpr = useDevicePixelRatio();
     // 只选取本组件实际消费的字段子集并以 shallowEqual 比较：播放期间
     // runtime.playbackPositionSec 每 ~33ms 变一次，整片 session 的对象引用
     // 随之失效，若直接订阅 state.session，本组件（含全部子菜单定义）会以
@@ -644,6 +651,11 @@ export function ActionBar() {
             // 编辑器那样分级隐藏，所以按**功能组**换行：`min-h-` 而不是 `h-`，让条形
             // 自然长高，下面的内容区自己让位。
             className="min-h-qt-bar-main bg-qt-window border-b border-qt-border px-1 py-1 text-qt-text flex-wrap items-center overflow-hidden"
+            style={
+                {
+                    "--hs-toolbar-hairline": `${wholeDevicePxLength(1, dpr)}px`,
+                } as CSSProperties
+            }
         >
             {/* BPM & Time */}
             <AppToolbarGroup>

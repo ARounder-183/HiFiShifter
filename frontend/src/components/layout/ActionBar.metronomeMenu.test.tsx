@@ -74,8 +74,8 @@ afterEach(() => {
     vi.restoreAllMocks();
 });
 
-/** 打开节拍器菜单（右键节拍器按钮）。 */
-async function openMetronomeMenu() {
+/** 渲染主工具栏。 */
+async function renderActionBar() {
     await act(async () => {
         root.render(
             <Provider store={store}>
@@ -87,6 +87,11 @@ async function openMetronomeMenu() {
             </Provider>,
         );
     });
+}
+
+/** 打开节拍器菜单（右键节拍器按钮）。 */
+async function openMetronomeMenu() {
+    await renderActionBar();
     const trigger = container.querySelector<HTMLElement>("[data-hs-context-menu][data-tooltip]");
     const buttons = Array.from(container.querySelectorAll<HTMLElement>("button"));
     // 节拍器按钮是那个带右键菜单标记的（见 ActionBar 的 metronome 按钮）。
@@ -98,6 +103,17 @@ async function openMetronomeMenu() {
         );
     });
 }
+
+test("toolbar separators use a whole-device-pixel hairline at 125% DPI", async () => {
+    vi.spyOn(window, "devicePixelRatio", "get").mockReturnValue(1.25);
+    await renderActionBar();
+
+    const bar = container.querySelector<HTMLElement>(".min-h-qt-bar-main");
+    expect(bar, "main toolbar must exist").toBeTruthy();
+    // 0.8 CSS px × 1.25 = 恰好 1 个物理像素。若退回 1px CSS，在 125% 下会覆盖
+    // 1.25 个物理像素并抗锯齿 —— 正是工具栏分隔线发虚、显粗的根因。
+    expect(bar!.style.getPropertyValue("--hs-toolbar-hairline")).toBe("0.8px");
+});
 
 test("the metronome volume uses AppSlider, not a bare range input", async () => {
     await openMetronomeMenu();
