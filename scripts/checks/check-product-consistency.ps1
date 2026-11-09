@@ -115,7 +115,7 @@ Test-Invariant '合并安装器默认走 per-machine 安装' {
     foreach ($required in 'RequestExecutionLevel admin', '!define HFS_ARP_ROOT HKLM', '!define HFS_CLASSES_ROOT HKLM', 'COMMONFILES64') {
         if ($release -notmatch [regex]::Escape($required)) { throw "发布分支缺少 $required" }
     }
-    'admin / HKLM / CommonFiles64'
+    'admin / HKLM / CommonFiles64 / Classes'
 }
 
 # Windows 只交付一个安装器：构建脚本必须用 --no-bundle 自打安装器，且 bundle 里只带

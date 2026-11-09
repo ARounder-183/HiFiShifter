@@ -203,7 +203,8 @@ $arpKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\HiFiShifter
 # 不会把测试期间新建的空键留在系统里。
 $classesRoot = 'HKCU:\Software\Classes'
 $classesRegPath = 'HKCU\Software\Classes'
-$foreignProgId = 'HfsInstallerGateForeign.Project'
+# 每次运行用唯一 ProgID，避免与开发机上同名测试键互相覆盖。
+$foreignProgId = 'HfsInstallerGateForeign.' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
 $assocKeys = @('.hshp', '.hsp', 'HiFiShifter.Project', 'Applications\HiFiShifter.exe')
 $assocBackupDir = Join-Path $env:TEMP ('hfs-assoc-backup-' + [Guid]::NewGuid().ToString('N'))
 $assocBackup = @{}
