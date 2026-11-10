@@ -2985,7 +2985,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             state.editSet,
             state.framePeriodMs,
         );
-    }, [rootTrackId]);
+    }, [paramBlockSourceClipsRef, paramBlockStateRef, rootTrackId]);
 
     /** Logical ids fully covered by the current selection, from live geometry. */
     const selectedParamBlockIdsNow = useCallback((): string[] => {
@@ -2994,9 +2994,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         return paramBlockIdsInSelection(
             view.blocks.map((block) => ({
                 id: block.id,
-                ...(block.userBlockId === undefined
-                    ? {}
-                    : { userBlockId: block.userBlockId }),
+                ...(block.userBlockId === undefined ? {} : { userBlockId: block.userBlockId }),
                 startFrame: block.startFrame,
                 endFrameExclusive: block.endFrameExclusive,
             })),
@@ -3107,7 +3105,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         paramBlockAnchorRef.current = null;
         setParamBlockSelection(null);
         setParamBlockContextMenu(null);
-    }, [paramBlockAuthorityKey, setParamBlockSelection]);
+    }, [paramBlockAuthorityKey, setParamBlockSelection, setParamBlockState]);
     const clearParamBlockSelection = useCallback(() => {
         paramBlockAnchorRef.current = null;
         setParamBlockSelection(null);
@@ -4986,8 +4984,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                         setParamBlockState(created.state);
                                         const tx = paramBlockVisualTransactionRef.current;
                                         if (tx !== null) {
-                                            tx.ownedEditRevision =
-                                                created.state.editSet.revision;
+                                            tx.ownedEditRevision = created.state.editSet.revision;
                                         }
                                     } else applyParamBlockEditRef.current?.(created);
                                     preserveCreatePreview = created.ok;
@@ -5793,9 +5790,11 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         clearParamBlockSelection,
         invalidateParamBlockVisualPreviews,
         persistParamBlockEdits,
+        paramBlockStateRef,
         rootTrackId,
         selectedParamBlockIdsNow,
         setParamBlockSelection,
+        setParamBlockState,
         requireBlockPersistenceReady,
     ]);
     useLatestRefValue(groupSelectedParamBlocksRef, groupSelectedParamBlocks);
@@ -5863,9 +5862,11 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         clearParamBlockSelection,
         invalidateParamBlockVisualPreviews,
         persistParamBlockEdits,
+        paramBlockStateRef,
         rootTrackId,
         selectedParamBlockIdsNow,
         setParamBlockSelection,
+        setParamBlockState,
         requireBlockPersistenceReady,
     ]);
     useLatestRefValue(ungroupSelectedParamBlocksRef, ungroupSelectedParamBlocks);
@@ -5931,9 +5932,11 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         editParam,
         invalidateParamBlockVisualPreviews,
         persistParamBlockEdits,
+        paramBlockStateRef,
         requireBlockPersistenceReady,
         rootTrackId,
         selectionRef,
+        setParamBlockState,
         tf,
     ]);
 
@@ -5955,9 +5958,11 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     }, [
         clearParamBlockSelection,
         invalidateParamBlockVisualPreviews,
+        paramBlockStateRef,
         persistParamBlockEdits,
         selectedParamBlockIdsNow,
         requireBlockPersistenceReady,
+        setParamBlockState,
     ]);
     useLatestRefValue(deleteSelectedParamBlocksRef, deleteSelectedParamBlocks);
     const restoreParamBlocks = useCallback(() => {
@@ -5996,10 +6001,12 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     }, [
         clearParamBlockSelection,
         invalidateParamBlockVisualPreviews,
+        paramBlockStateRef,
         persistParamBlockEdits,
         requireBlockPersistenceReady,
         rootTrackId,
         setParamBlockSelection,
+        setParamBlockState,
     ]);
     useLatestRefValue(restoreParamBlocksRef, restoreParamBlocks);
     const applyParamBlockEdit = useCallback(
@@ -6035,6 +6042,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             persistParamBlockEdits,
             requireBlockPersistenceReady,
             rootTrackId,
+            setParamBlockState,
             tf,
         ],
     );
@@ -6198,8 +6206,10 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             dispatch,
             invalidateParamBlockVisualPreviews,
             paramBlockClips,
+            paramBlockStateRef,
             persistParamBlockEdits,
             pxPerSecRef,
+            setParamBlockState,
             rootTrackId,
             s.bpm,
             s.beats,
@@ -6242,7 +6252,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 },
             ) !== null
         );
-    }, [composeParamBlockViewNow, rootTrackId, store]);
+    }, [composeParamBlockViewNow, paramBlockStateRef, rootTrackId, store]);
     const gameRestoreRanges = paramBlockRestoreRanges(
         paramBlockView?.blocks ?? [],
         selectedParamBlockIds,
@@ -6309,14 +6319,17 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             });
         setParamBlockContextMenu(null);
     }, [
-        blockPersistence.adopt,
+        blockPersistence,
         composeParamBlockViewNow,
         dispatch,
         invalidateParamBlockVisualPreviews,
+        paramBlockStateRef,
         rootTrackId,
+        rootTrackIdRef,
         selectedParamBlockIdsNow,
         selectionRef,
         setParamBlockSelection,
+        setParamBlockState,
         requireBlockPersistenceReady,
         tf,
     ]);
@@ -6498,9 +6511,11 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             event.preventDefault();
         },
         [
+            editParam,
             hostRef,
             invalidateParamBlockSpec,
             paramBlockHitSlopPx,
+            paramBlockStateRef,
             paramBlockToolActive,
             paramBlocksWithValues,
             persistBlockTransition,
@@ -6658,7 +6673,13 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         };
         window.addEventListener("hifi:paramBlockEditOp", handler);
         return () => window.removeEventListener("hifi:paramBlockEditOp", handler);
-    }, [clearParamBlockSelection, mergedKeybindings, selectAllParamRange, store]);
+    }, [
+        clearParamBlockSelection,
+        createParamBlocksFromSelection,
+        mergedKeybindings,
+        selectAllParamRange,
+        store,
+    ]);
     /**
      * 块层数据是命令式写入宿主的；用受控 effect 在选中集合变化时立即冲刷，
      * 避免 React 选择态已经更新、宿主仍持有上一个 spec 的情况。
@@ -6902,6 +6923,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         paramBlockStructureTick,
         paramBlockEpoch,
         paramBlockSpecColors,
+        paramBlockStateRef,
         selectedParamBlockIdSet,
         valueToY,
         paramView,

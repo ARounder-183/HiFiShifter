@@ -11,7 +11,8 @@ let host: HTMLDivElement;
 let root: Root;
 const probe: {
     state: ParamBlockState;
-    setState: ((next: ParamBlockState | ((prev: ParamBlockState) => ParamBlockState)) => void) | null;
+    setState:
+        ((next: ParamBlockState | ((prev: ParamBlockState) => ParamBlockState)) => void) | null;
     stateRef: { current: ParamBlockState } | null;
 } = {
     state: EMPTY_PARAM_BLOCK_STATE,

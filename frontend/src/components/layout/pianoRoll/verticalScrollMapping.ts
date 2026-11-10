@@ -17,7 +17,7 @@ export type VerticalScrollMappingInput = {
  * 常见缩放下一个视口只占值域的 10%–20%，同一个屏幕像素速度在值域上会被
  * 放大成数个视口/秒。这里按 span 归一化，保证不同缩放下手感一致。
  */
-export const VALUE_EDGE_SCROLL_VIEWPORTS_PER_SEC = 0.30;
+export const VALUE_EDGE_SCROLL_VIEWPORTS_PER_SEC = 0.3;
 
 /** 值域是否还有可移动的居中范围；span >= range 时滚动条不应再产生位移。 */
 export function valueAxisScrollable(input: {

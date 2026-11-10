@@ -189,7 +189,7 @@ pub(super) fn restore_game(
             timeline.frame_period_ms(),
         )?;
         let view = compose_param_block_view(&timeline, &root, &next, timeline.frame_period_ms())?;
-        if checkpoint {
+        if checkpoint && next.blocks != current.blocks {
             state.checkpoint_block_layout(&timeline);
         }
         timeline.ensure_params_for_root(&root);

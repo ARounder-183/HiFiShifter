@@ -213,9 +213,7 @@ export function publishClipOriginSnapHighlight(args: {
                 targetTrackId: null,
                 targetClipId: null,
                 sources:
-                    args.trackId === null
-                        ? []
-                        : [{ trackId: args.trackId, clipId: args.clipId }],
+                    args.trackId === null ? [] : [{ trackId: args.trackId, clipId: args.clipId }],
             }),
         ],
         "timeline",

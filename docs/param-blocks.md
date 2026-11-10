@@ -70,13 +70,13 @@ game baseline                      playback_rate / reverse        参数块编�
 - 多选纵向拖动：按逻辑块解析每个选中块的起点中心，再扇出到它的全部 run；未选中块不进入拖动成员，提交时也只写选中逻辑块的 `value`。
 - 吸附高亮：时间轴与参数编辑器共用 surface/axis 模型。参数编辑器渲染全高时间线和全宽值线，不渲染时间轴行 accent；右键幅度不发布、也不触发边缘滚动。
 - 分割不发布吸附高亮：播放头分割精确落在播放头（snapMode 为 "none"）；点击分割可吸附网格 / Clip 边缘，但候选集排除播放头，且不再创建 180ms 的临时分割高亮。
-- 时间轴换轨不再有 "Vertical Lock"：跨轨拖动只对落点行做 4–10px 迟滞，水平位移始终保留；目标行变化时由共享吸附总线发布一条 axis 为 "row" 的轨道边界横线。
+- 时间轴换轨不做行吸附，也不画轨道边界横线：目标轨严格跟随指针所在行。跨轨拖动时，如果 Clip 起点回到拖拽前起点 24–32px 内，会水平吸附回原起点并显示一条竖向对齐线；水平拖出该范围后立即释放。
 
 ## 曲线与视觉预览
 
-- 参数窗口同 scope 刷新采用 stale-while-revalidate：paramsEpoch 前进但 root / param 未变时保留上一份可见曲线，新回包到达后原子替换；只有切 scope 才清空。
-- 参数块显示值按 run 缓存：当前采样 → 手动值 → 上一次同 run 有效值；canonical 块绝不回退到值域中点。没有值的块本帧不画，而不是叠到 F#4。
-- 结构命令（分割 / 删除 / 编组 / 还原 / 从选区新建）与外部历史 / 布局变化统一走 invalidateParamBlockVisualPreviews：拖动快照、resize / create 预览、事务曲线一次性撤下，避免旧预览在结构编辑后覆盖 canonical。
+- 参数窗口同 scope 刷新采用 stale-while-revalidate：paramsEpoch 前进但 root / param 未变时保留上一份可见曲线，新回包到达后原子替换；只有切 scope 才清空。同窗口空回包保留旧曲线，窗口变化后的空回包则立即接受，避免旧窗口曲线留在新坐标上。
+- 参数块显示值按 run 缓存：当前采样 → 手动值 → 上一次同 run 且**几何一致**的有效值；canonical 块绝不回退到值域中点。没有值的块本帧不画，而不是叠到 F#4。
+- 结构命令（分割 / 删除 / 编组 / 还原 / 从选区新建）与外部历史 / 布局 / 参数变化统一走 invalidateParamBlockVisualPreviews：拖动快照、resize / create 预览、事务曲线一次性撤下，避免旧预览在结构编辑后覆盖 canonical。视觉 epoch 同时记录参数名与结构 revision；自身提交通过 ownedEditRevision 放行，第三方结构编辑立即失效。
 - paramBlockSpec 是纯投影，不在 useMemo 里写 ref；清理放在 layout effect（早于 paint）。拖动提交前校验全分辨率窗口与编辑集 revision，缺帧 / 结构变化直接取消，不写 0。
 
 ## 持久化与版本

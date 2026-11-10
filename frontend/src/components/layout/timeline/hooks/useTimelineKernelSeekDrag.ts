@@ -704,8 +704,7 @@ export function useTimelineKernelSeekDrag({
                 nextStart = originSnap.startSec;
                 publishClipOriginSnapHighlight({
                     sec: originSnap.startSec,
-                    trackId:
-                        args.targetTrackId === NEW_TRACK_SENTINEL ? null : args.targetTrackId,
+                    trackId: args.targetTrackId === NEW_TRACK_SENTINEL ? null : args.targetTrackId,
                     clipId: args.clipId,
                 });
             } else {
@@ -721,9 +720,7 @@ export function useTimelineKernelSeekDrag({
                     ? snapTimelineDetailed(rawStart, "clip", {
                           originSec: origin.startSec,
                           anchorTrackId: args.targetTrackId,
-                          excludeClipIds: new Set(
-                              origin.participants.map((item) => item.clipId),
-                          ),
+                          excludeClipIds: new Set(origin.participants.map((item) => item.clipId)),
                           moveLengthSec: origin.lengthSec,
                           moveSnapOffsetSec: origin.snapOffsetSec,
                           highlight: {

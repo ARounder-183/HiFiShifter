@@ -548,9 +548,7 @@ function trimMember(
 }
 
 function spanListKey(
-    spans:
-        | readonly { readonly startSec: number; readonly endSec: number }[]
-        | undefined,
+    spans: readonly { readonly startSec: number; readonly endSec: number }[] | undefined,
 ): string {
     return (spans ?? [])
         .map((span) => span.startSec.toFixed(6) + "-" + span.endSec.toFixed(6))
@@ -567,14 +565,7 @@ function noteListKey(
         | undefined,
 ): string {
     return (notes ?? [])
-        .map(
-            (note) =>
-                note.startSec.toFixed(6) +
-                "-" +
-                note.endSec.toFixed(6) +
-                ":" +
-                note.note,
-        )
+        .map((note) => note.startSec.toFixed(6) + "-" + note.endSec.toFixed(6) + ":" + note.note)
         .join(";");
 }
 
@@ -723,9 +714,7 @@ export function composeParamBlockView(
         schemaVersion: 1,
         rootTrackId,
         editRevision: edits.revision,
-        layoutKey: `layout:${hash(
-            `${rootTrackId}|${fp}|${clips.map(clipLayoutKey).join("|")}`,
-        )}`,
+        layoutKey: `layout:${hash(`${rootTrackId}|${fp}|${clips.map(clipLayoutKey).join("|")}`)}`,
         framePeriodMs: fp,
         blocks,
         orphanCount,

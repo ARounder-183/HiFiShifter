@@ -27,12 +27,7 @@ import {
 import { canSplitParamBlockAtFrame } from "./paramBlockGesture";
 import { toFrame, type ParamBlockSourceClip } from "./paramBlockProjection";
 import { getDrawPreviewValue } from "./paramValuePreviewLogic";
-import {
-    clampParamWriteValue,
-    isDynParam,
-    DYN_VALUE_MAX,
-    DYN_VALUE_MIN,
-} from "./paramRanges";
+import { clampParamWriteValue, isDynParam, DYN_VALUE_MAX, DYN_VALUE_MIN } from "./paramRanges";
 import type { ScaleLike } from "../../../utils/musicalScales";
 import {
     EMPTY_PARAM_BLOCK_EDIT_SET,

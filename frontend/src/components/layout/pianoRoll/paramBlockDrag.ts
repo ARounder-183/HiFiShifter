@@ -866,13 +866,11 @@ export function beginParamBlockDrag(
                         const current = paramBlockStateRef.current;
                         const canRollback =
                             current === stateBeforeCommit ||
-                            (appliedCommitState !== null &&
-                                current === appliedCommitState) ||
+                            (appliedCommitState !== null && current === appliedCommitState) ||
                             canRollbackParamBlockDragCommit({
                                 currentRevision: current.editSet.revision,
                                 beforeRevision: stateBeforeCommit.editSet.revision,
-                                appliedRevision:
-                                    appliedCommitState?.editSet.revision ?? null,
+                                appliedRevision: appliedCommitState?.editSet.revision ?? null,
                             });
                         if (canRollback) setParamBlockState(stateBeforeCommit);
                         const pvNow = paramViewRef.current;

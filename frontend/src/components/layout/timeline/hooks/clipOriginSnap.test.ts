@@ -79,12 +79,12 @@ describe("resolveClipOriginSnap", () => {
     });
 
     it("does not snap for invalid input", () => {
-        expect(
-            resolveClipOriginSnap({ ...base, rawStartSec: Number.NaN }),
-        ).toMatchObject({ active: false });
-        expect(
-            resolveClipOriginSnap({ ...base, originStartSec: Number.NaN }),
-        ).toMatchObject({ active: false });
+        expect(resolveClipOriginSnap({ ...base, rawStartSec: Number.NaN })).toMatchObject({
+            active: false,
+        });
+        expect(resolveClipOriginSnap({ ...base, originStartSec: Number.NaN })).toMatchObject({
+            active: false,
+        });
         expect(resolveClipOriginSnap({ ...base, pxPerSec: 0 })).toMatchObject({
             active: false,
         });

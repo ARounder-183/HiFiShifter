@@ -32,6 +32,7 @@ pub fn layout_key(timeline: &TimelineState, root_track_id: &str, frame_period_ms
         hasher.update(clip.id.as_bytes());
         hasher.update(&clip.start_sec.to_le_bytes());
         hasher.update(&clip.length_sec.to_le_bytes());
+        hasher.update(&clip.duration_sec.unwrap_or(0.0).to_le_bytes());
         hasher.update(&(clip.clip_playback_rate as f64).to_le_bytes());
         hasher.update(&[u8::from(clip.reversed), u8::from(clip.loop_enabled)]);
         hasher.update(&clip.loop_period_sec.unwrap_or(0.0).to_le_bytes());
@@ -45,6 +46,9 @@ pub fn layout_key(timeline: &TimelineState, root_track_id: &str, frame_period_ms
         hasher.update(&take.source_end_sec.to_le_bytes());
         hasher.update(&(take.playback_rate as f64).to_le_bytes());
         hasher.update(&[u8::from(take.reversed), u8::from(take.loop_enabled)]);
+        hasher.update(&take.duration_sec.unwrap_or(0.0).to_le_bytes());
+        hasher.update(&take.duration_frames.unwrap_or(0).to_le_bytes());
+        hasher.update(&take.source_sample_rate.unwrap_or(0).to_le_bytes());
         if let Some(analysis) = &take.syllable_analysis {
             hasher.update(analysis.algorithm.as_bytes());
             hasher.update(&analysis.algorithm_version.to_le_bytes());
