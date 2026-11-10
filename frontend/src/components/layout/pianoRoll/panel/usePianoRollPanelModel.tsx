@@ -4889,6 +4889,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                         activity.pointerGestureToken !== null;
                             }
                             if (!preserveCreatePreview) {
+                                paramBlockVisualTransactionRef.current = null;
                                 paramBlockCreateCommitRef.current = previousCreateHandoff;
                                 paramBlockResizeRef.current = previousCreatePreview;
                                 paramBlockInteractionCurveRef.current = previousInteractionCurve;
