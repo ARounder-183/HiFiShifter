@@ -6440,7 +6440,9 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                           averageValue: block.averageValue,
                           logicalCenterValue: block.manualValue,
                           displayCenterSnapToSemitone: block.manualValue == null,
-                          selected: selectedParamBlockIdSet.has(logicalBlockId(block)),
+                          selected:
+                              resizing.baseBlockSpans.find((item) => item.id === block.id)
+                                  ?.selected === true,
                           grouped: block.kind === "grouped",
                           transitionSec: block.transitionSec,
                           centerPolicy: "live",
