@@ -27,9 +27,10 @@ game baseline                      playback_rate / reverse        参数块编�
 - `TakeKey { clipId, takeId }`：Take 在工程中的稳定出现身份。
 - `TakeSpan { clipId, takeId, cycle, sourceStartSec, sourceEndSec, syllableId?, label }`：源域区间，绝不存工程秒。
 - `RootSpan { startSec, endSec }`：没有 Take 来源的自由块。
-- `UserParamBlock { id, geometry, deleted?, manual?, value?, transitionOutSec?, createdSeq, baseCover?, groupedFrom? }`：声明式用户块。
+- `UserParamBlock { id, geometry, deleted?, manual?, value?, transitionOutSec?, createdSeq, baseCover? }`：声明式用户块。
+- `BlockGeometry::Group { children }`：**一等公民组容器**。children 是组唯一的几何真值；组自身不保存合并成员，也没有历史快照。子块必须是普通 Take/Root 块（禁止嵌套），数量 ≥ 2。
 - `BaseCover { spans, full }`：从基块派生时记录“我替代了哪一段基块”。普通手工块没有；`full=true` 命中完整基块时隐藏整段，`full=false` 只覆盖精确投影区间。
-- `ParamBlockEditSet { schemaVersion: 1, revision, blocks }`：一个 root 参数线的唯一编辑权威。
+- `ParamBlockEditSet { schemaVersion: 2, revision, blocks }`：一个 root 参数线的唯一编辑权威。加载时把 v1 的 `groupedFrom` 快照一次性转成 `Group { children }`，转换后不再保留旧字段。
 - `ProjectedMember`：除源域区间外，还携带 `frameSourceStartSec/frameSourceEndSec`（有方向的局部仿射映射）与 `visibleSourceStartSec/visibleSourceEndSec`（可见源域范围）。
 - `ParamBlockView`：派生视图，**不持久化**；App 保存前清空。
 
@@ -45,12 +46,13 @@ game baseline                      playback_rate / reverse        参数块编�
 ## 编辑语义
 
 - **基块是衬底**：base 始终参与合成，用户块/墓碑只覆盖它实际投影到的帧区间；不再“任一用户成员重叠即整段删除基块”。
-- 合并：汇总选中块的源域成员，生成一个多成员 `UserParamBlock`；若所有子块携带同一 `baseCover`，编组块继承它。
+- 编组：选中块成为 `Group` 的 children（已存在的组会被拍平，禁止嵌套）；组只保存容器，compose 时递归收集子块成员。
+- 组的结构编辑：切分 / 伸缩递归作用于子块。切点在某个子块内部时只切那个子块，其余子块按投影顺序分到两侧；某侧只剩一个子块时该侧退化为普通块（组自然消失）。组本身不复制 `baseCover`。
 - 切分：以 `block.members` 的**工程投影顺序**为准。切点在成员内部时只切该成员；切点在成员边界/缝隙时按投影顺序分组，不产生 1 帧碎片；两侧至少各 1 帧，否则拒绝。
 - 边缘伸缩：重写投影顺序的成员列表；缩短时删除被跨过的成员并把落点成员裁到目标；倒放时右边缘改 `sourceStart`、左边缘改 `sourceEnd`；邻居被 `place_user_block` 按源域裁剪。
-- 删除：基块派生块生成携带同一 `baseCover` 的墓碑；**纯手工块不生成墓碑**，删除后基块自然回来。旧版无 `baseCover` 的墓碑仍按成员投影区间抑制基块。
+- 删除：基块派生块生成携带同一 `baseCover` 的墓碑；**纯手工块不生成墓碑**，删除后基块自然回来。旧版无 `baseCover` 的墓碑仍按成员投影区间抑制基块。删除组时，除组本身外还要为组内 base 派生 child 生成 `childTombstones`，恢复时按 id 精确移除后再放回整组。
 - 手动画块：工程区间经 `sourceAtProjectedFrame` 映射为 `TakeSpan`；没有 Take 交集时才用 `RootSpan`。
-- 还原 GAME：只生成与目标帧范围相交的 baseline 源域片段，并裁剪相交用户块，不再“相交就删整块”。
+- 还原 GAME：只生成与目标帧范围相交的 baseline 源域片段，并裁剪相交用户块，不再“相交就删整块”。入口接受**多段**范围（`restore_game_block_ranges`），每段独立还原，段间保持原样。
 - 新建块：调用方传入的 `blockId` 必须成为实际 `UserParamBlock.id`，预览 / 选择 / 交接共用同一个 id。
 
 ## 持久化与版本
