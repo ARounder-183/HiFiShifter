@@ -666,11 +666,11 @@ export function beginParamBlockDrag(
                         block.members.map((member) => {
                             const startFrame = Math.max(
                                 0,
-                                Math.floor((member.startSec * 1000) / framePeriodMs),
+                                Math.round((member.startSec * 1000) / framePeriodMs),
                             );
                             const endFrame = Math.max(
                                 startFrame,
-                                Math.ceil((member.endSec * 1000) / framePeriodMs) - 1,
+                                Math.round((member.endSec * 1000) / framePeriodMs) - 1,
                             );
                             return { startFrame, endFrame };
                         }),
@@ -717,11 +717,11 @@ export function beginParamBlockDrag(
                             pitchScaleBlocks.map(async (block) => {
                                 const startFrame = Math.max(
                                     0,
-                                    Math.floor((block.startSec * 1000) / framePeriodMs),
+                                    Math.round((block.startSec * 1000) / framePeriodMs),
                                 );
                                 const endFrame = Math.max(
                                     startFrame,
-                                    Math.ceil((block.endSec * 1000) / framePeriodMs) - 1,
+                                    Math.round((block.endSec * 1000) / framePeriodMs) - 1,
                                 );
                                 const curve = await fetchFullResCurve({
                                     trackId: rootTrackId,

@@ -574,7 +574,6 @@ export function ungroupUserBlock(edits: ParamBlockEditSet, blockId: string): Par
 export type ParamBlockPlanErrorCode =
     | "block_not_found"
     | "block_deleted"
-    | "grouped_locked"
     | "split_outside_block"
     | "split_too_close_to_edge"
     | "split_at_block_edge"
@@ -1572,7 +1571,14 @@ function resizeGroupPlan(
         });
         tombSeq += 1;
     }
-    const side = groupSideBlock(group, kept, framePeriodMs, clips, nextSeq(edits), group.id);
+    const side = groupSideBlock(
+        group,
+        kept,
+        framePeriodMs,
+        clips,
+        nextSeq(edits) + tombstones.length,
+        group.id,
+    );
     const next = replaceTopLevelBlocks(edits, new Set([group.id]), [side, ...tombstones]);
     const viewAfter = planView(clips, next, framePeriodMs);
     const target =

@@ -4,12 +4,20 @@
  * 块画布右键菜单是主入口；工具栏的“…”是同一份描述表的第二个入口，
  * 让块工具里也能发现初始化 / 复制 / 平滑 / 导出等参数命令。
  */
-import { Fragment } from "react";
+import { Fragment, type FC } from "react";
 import { Box, DropdownMenu } from "@radix-ui/themes";
 import { setToolModePersistent } from "../../../../features/session/sessionSlice";
 import { PARAM_BLOCK_MENU_ITEMS } from "../paramBlockMenuModel";
+import { useMenuShortcut } from "../../../../ui/useMenuShortcut";
+import type { ActionId } from "../../../../features/keybindings/types";
 import type { PianoRollPanelModel } from "./usePianoRollPanelModel";
 import { ParamToolbarPill } from "./toolbarParts";
+
+const ShortcutHint: FC<{ readonly action?: string }> = ({ action }) => {
+    const shortcut = useMenuShortcut((action ?? "edit.selectAll") as ActionId);
+    if (action === undefined || shortcut === undefined) return null;
+    return <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">{shortcut}</div>;
+};
 
 type Props = {
     m: Pick<
@@ -76,6 +84,7 @@ export function BlockToolMenu({ m }: Props) {
                                 onSelect={() => handleParamBlockMenuAction(item.channel, item.op)}
                             >
                                 {tf(item.labelKey)}
+                                <ShortcutHint action={item.shortcutAction} />
                             </DropdownMenu.Item>
                         </Fragment>
                     ))}

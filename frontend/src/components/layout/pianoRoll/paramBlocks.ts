@@ -900,7 +900,7 @@ export function resolveParamBlockSplitTarget(
  *
  * 菜单禁用态与快捷键动作必须共用这一份判据 —— 各写一遍的话，编组块会出现在
  * "菜单可点、点了没反应"的错位状态。编组块的几何是若干源域区间的联合，
- * 切开没有唯一解（内核一律以 `grouped_locked` 拒绝）。
+ * 切开没有唯一解（当前内核已支持组递归切分）。
  */
 export function resolveSplittableParamBlockAt(
     blocks: readonly ParamBlock[],
@@ -1004,7 +1004,6 @@ export type ParamBlockEditFailureReason =
     | "too_close_to_edge"
     | "resize_blocked"
     | "no_members"
-    | "grouped_locked"
     | "multi_fragment_unsupported"
     /** 未分类异常。**不要**兜底成 `too_short`：那会把真错误伪装成"离边缘太近"。 */
     | "unknown";
@@ -1321,8 +1320,6 @@ export function ungroupParamBlocks(
 function editFailureFromError(error: unknown): ParamBlockEditFailureReason {
     if (error instanceof ParamBlockPlanError) {
         switch (error.code) {
-            case "grouped_locked":
-                return "grouped_locked";
             case "split_too_close_to_edge":
                 return "too_close_to_edge";
             case "split_at_block_edge":
@@ -1341,7 +1338,6 @@ function editFailureFromError(error: unknown): ParamBlockEditFailureReason {
         }
     }
     const message = error instanceof Error ? error.message : "";
-    if (message.includes("grouped block must be ungrouped")) return "grouped_locked";
     if (message.includes("no source") || message.includes("no members")) return "no_members";
     if (message.includes("not found") || message.includes("missing")) return "not_found";
     return "unknown";
@@ -1387,7 +1383,11 @@ export function resizeParamBlock(input: ParamBlockResizeInput): ParamBlockEditRe
             toFrame(targetSec, framePeriodMs),
             framePeriodMs,
         );
-        return { ok: true, blockId: input.block.id, state: withEdits(input.state, plan.edits) };
+        return {
+            ok: true,
+            blockId: block.userBlockId ?? block.id,
+            state: withEdits(input.state, plan.edits),
+        };
     } catch (error) {
         return { ok: false, reason: editFailureFromError(error) };
     }
