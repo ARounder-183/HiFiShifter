@@ -78,9 +78,11 @@ describe("paramBlockEditing", () => {
             ],
         };
         const view = composeParamBlockView("root", [clip], edits, 5);
-        expect(view.blocks).toHaveLength(2);
-        const ensured = ensureEditableUserBlock([clip], edits, view.blocks[0]!, 5);
-        expect(ensured.user.id).toBe(view.blocks[0]!.id);
+        // 基块衬底：两个用户 run 之间的空隙会露出基块余段，因此视图不止两块。
+        const userBlocks = view.blocks.filter((block) => block.kind !== "base");
+        expect(userBlocks).toHaveLength(2);
+        const ensured = ensureEditableUserBlock([clip], edits, userBlocks[0]!, 5);
+        expect(ensured.user.id).toBe(userBlocks[0]!.id);
         expect(ensured.user.geometry.kind).toBe("take");
         expect(ensured.edits.blocks.some((block) => block.id === "multi")).toBe(true);
     });

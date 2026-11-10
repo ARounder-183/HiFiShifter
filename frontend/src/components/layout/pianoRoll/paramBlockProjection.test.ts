@@ -1,8 +1,10 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
+    inverseProject,
     projectionForClip,
     projectTakeSpan,
+    sourceAtProjectedFrame,
     type ParamBlockSourceClip,
 } from "./paramBlockProjection";
 
@@ -34,6 +36,75 @@ describe("paramBlockProjection", () => {
             const projection = projectionForClip(testCase.clip);
             const actual = projectTakeSpan(projection, testCase.span, fixture.framePeriodMs);
             expect(actual, testCase.name).toEqual(testCase.expected);
+        }
+    });
+
+    it("sourceAtProjectedFrame stays inside the member for loop wrap and reverse", () => {
+        const loopClip: ParamBlockSourceClip = {
+            id: "c",
+            trackId: "root",
+            startSec: 0,
+            lengthSec: 8,
+            sourceStartSec: 0.266,
+            sourceEndSec: 2.27,
+            playbackRate: 1,
+            reversed: false,
+            loopEnabled: true,
+            loopPeriodSec: 2.27,
+            contentDurationSec: 2.27,
+        };
+        const projection = projectionForClip(loopClip);
+        const span = { sourceStartSec: 0.046, sourceEndSec: 0.252, cycle: 0 };
+        for (const interval of projectTakeSpan(projection, span, 5)) {
+            for (let frame = interval.startFrame; frame <= interval.endFrameExclusive; frame += 1) {
+                const source = sourceAtProjectedFrame(projection, frame, interval.cycle, 5);
+                expect(source).not.toBeNull();
+                expect(source!).toBeGreaterThanOrEqual(0.0459);
+                expect(source!).toBeLessThanOrEqual(0.2521);
+            }
+        }
+        const reverse: ParamBlockSourceClip = {
+            ...loopClip,
+            reversed: true,
+            sourceStartSec: 0,
+            sourceEndSec: 2,
+            loopPeriodSec: 2,
+            contentDurationSec: 2,
+        };
+        const reverseProjection = projectionForClip(reverse);
+        const reverseSpan = { sourceStartSec: 0.2, sourceEndSec: 0.4, cycle: 0 };
+        for (const interval of projectTakeSpan(reverseProjection, reverseSpan, 5)) {
+            for (let frame = interval.startFrame; frame <= interval.endFrameExclusive; frame += 1) {
+                const source = sourceAtProjectedFrame(reverseProjection, frame, interval.cycle, 5);
+                expect(source).not.toBeNull();
+                expect(source!).toBeGreaterThanOrEqual(0.1999);
+                expect(source!).toBeLessThanOrEqual(0.4001);
+            }
+        }
+    });
+
+    it("inverseProject loop wrap stays inside the member instead of jumping to media end", () => {
+        const clip: ParamBlockSourceClip = {
+            id: "c",
+            trackId: "root",
+            startSec: 0,
+            lengthSec: 8,
+            sourceStartSec: 0.266,
+            sourceEndSec: 2.27,
+            playbackRate: 1,
+            reversed: false,
+            loopEnabled: true,
+            loopPeriodSec: 2.27,
+            contentDurationSec: 2.27,
+        };
+        const projection = projectionForClip(clip);
+        const span = { sourceStartSec: 0.046, sourceEndSec: 0.252, cycle: 0 };
+        const interval = projectTakeSpan(projection, span, 5)[0]!;
+        for (let frame = interval.startFrame; frame <= interval.endFrameExclusive; frame += 1) {
+            const source = inverseProject(projection, frame, interval.cycle, 5);
+            expect(source).not.toBeNull();
+            expect(source!).toBeGreaterThanOrEqual(0.0459);
+            expect(source!).toBeLessThanOrEqual(0.2521);
         }
     });
 

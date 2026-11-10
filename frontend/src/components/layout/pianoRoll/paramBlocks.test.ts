@@ -169,8 +169,12 @@ describe("resolveParamBlockSplitTarget", () => {
         expect(runs).toHaveLength(2);
         expect(resolveParamBlockSplitTarget(blocks, 0.1, FRAME_MS)?.id).toBe(runs[0]?.id);
         expect(resolveParamBlockSplitTarget(blocks, 0.7, FRAME_MS)?.id).toBe(runs[1]?.id);
-        // 两个 run 之间是空的。
-        expect(resolveParamBlockSplitTarget(blocks, 0.4, FRAME_MS)).toBeNull();
+        // 两个 run 之间没有用户块；基块衬底会露出基块余段，这是新模型的正确结果。
+        expect(
+            blocks.some(
+                (block) => block.kind !== "auto" && block.startSec < 0.4 && block.endSec > 0.4,
+            ),
+        ).toBe(false);
     });
 });
 
@@ -341,9 +345,11 @@ describe("splitParamBlock", () => {
         expect(result.ok).toBe(true);
         if (!result.ok) return;
         const split = panelBlocks([clip()], result.state.editSet);
-        expect(split).toHaveLength(2);
-        expect(split[0]?.projected?.startFrame).toBe(0);
-        expect(split[1]?.projected?.endFrameExclusive).toBe(200);
+        // 1 帧缝里会露出基块余段；用户块仍应恰好两块。
+        const userBlocks = split.filter((block) => block.kind !== "auto");
+        expect(userBlocks).toHaveLength(2);
+        expect(userBlocks[0]?.projected?.startFrame).toBe(0);
+        expect(userBlocks[1]?.projected?.endFrameExclusive).toBe(200);
     });
 
     /*
