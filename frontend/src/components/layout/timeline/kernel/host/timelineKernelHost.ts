@@ -54,11 +54,7 @@ import { resolveClipSelectionModifiers } from "../../../../../features/keybindin
 import type { Keybinding } from "../../../../../features/keybindings/types";
 import { isPrimaryModifierDown } from "../../../../../utils/platform";
 import { armRightDragContextMenuGuard } from "../../../../../utils/rightDragContextMenuGuard";
-import {
-    clearSnapHighlights,
-    publishTimelineTrackSnapHighlight,
-    TIMELINE_TRACK_SNAP_GROUP,
-} from "../../../../../utils/snapHighlight";
+
 import { getTimelineWheelAction, type ScrollbarZone } from "../../../wheelGesture";
 import { buildTimelineTicks, type TimelineTick } from "../../runtime/buildTimelineTicks";
 import { createTickAxis } from "../../runtime/tickAxis";
@@ -128,7 +124,6 @@ import { clipIntersectsBox, resolveBoxBounds, type BoxBounds } from "../interact
 // 逐帧手势分派表：穷尽性由 `moveDispatch.test.ts` 守住（漏分支曾是
 // 「吸附偏移手柄拖一下就冻结」的根因，手写 if 链没有任何编译期保障）。
 import { resolveMoveDispatch } from "../interaction/moveDispatch";
-import { resolveTrackSnap } from "../interaction/trackSnap";
 import { createGlCanvas } from "../../../renderKernel/gl/glContext";
 import { CLIP_INSTANCE_FLOATS, writeFlatInstance } from "../../../renderKernel/gl/instanceLayout";
 import { createSdfBoxProgram } from "../../../renderKernel/gl/sdfBoxProgram";
@@ -3308,8 +3303,6 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                */
               lastRawDeltaSec: number;
               lastTargetTrackId: string;
-              /** Last accepted row index; null before the first snap frame. */
-              lastTrackSnapIndex: number | null;
           }
         | {
               kind: "gain-drag";
@@ -4740,7 +4733,6 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 return;
             }
             const originTrackId = gesture.originTrackId;
-            const originTrackIndex = data().tracks.findIndex((track) => track.id === originTrackId);
             gesture = {
                 kind: "clip-drag",
                 clipId: gesture.clipId,
@@ -4754,9 +4746,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 lastDeltaSec: 0,
                 lastRawDeltaSec: 0,
                 lastTargetTrackId: originTrackId,
-                lastTrackSnapIndex: originTrackIndex >= 0 ? originTrackIndex : null,
             };
-            clearSnapHighlights(TIMELINE_TRACK_SNAP_GROUP);
             applyDragPreview(event);
             return;
         }
@@ -5044,7 +5034,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      * 计算并派发一次拖拽预览（拖拽期间每帧调用）。
      *
      * 流程：内容坐标位移 → `resolveDragDelta`（时间位移，仅下界 0）→
-     * `resolveTrackSnap`（落点轨道 + 边界迟滞）→ 与上次值比较去重 → 回调。
+     * 指针行解析落点轨道 → 与上次值比较去重 → 回调。
      *
      * 特殊说明：去重是必要的——调用方每次预览都写 Redux，而 Redux 变更会触发
      * 内核重建几何；不去重时指针静止也会持续重建。
@@ -5126,35 +5116,19 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             // 工程时长增长交给面板的 moveClipStart 与后端 ensure_project_end_sec。
         });
         /*
-         * Track drop snapping, not a horizontal lock. The row changes only
-         * after the pointer is a few pixels inside the new row; horizontal
-         * delta is always the real pointer delta, so time snapping still sees
-         * the actual movement.
+         * Target row follows the pointer exactly. There is no row snap and no
+         * row highlight: vertical movement only chooses the destination track,
+         * while horizontal alignment is owned by the panel's drag-origin snap.
          */
-        const snap = resolveTrackSnap({
-            contentY,
-            rowHeight: view.rowHeight,
-            trackCount: d.tracks.length,
-            previousIndex: gesture.lastTrackSnapIndex,
-        });
-        const originTrackId = gesture.kind === "clip-drag" ? gesture.originTrackId : null;
-        const originTrackIndex =
-            originTrackId === null ? -1 : d.tracks.findIndex((track) => track.id === originTrackId);
+        const rowHeight = Math.max(1, view.rowHeight);
+        const rowIndex = Math.min(
+            d.tracks.length,
+            Math.max(0, Math.floor(Math.max(0, contentY) / rowHeight)),
+        );
         const targetTrackId =
-            snap.index >= d.tracks.length
+            rowIndex >= d.tracks.length
                 ? NEW_TRACK_SENTINEL
-                : (d.tracks[snap.index]?.id ?? originTrackId ?? gesture.lastTargetTrackId);
-        gesture.lastTrackSnapIndex = snap.index >= 0 ? snap.index : null;
-        if (targetTrackId !== gesture.lastTargetTrackId) {
-            if (snap.index >= 0 && snap.index !== originTrackIndex) {
-                publishTimelineTrackSnapHighlight({
-                    rowIndex: snap.index,
-                    trackId: targetTrackId === NEW_TRACK_SENTINEL ? null : targetTrackId,
-                });
-            } else {
-                clearSnapHighlights(TIMELINE_TRACK_SNAP_GROUP);
-            }
-        }
+                : (d.tracks[rowIndex]?.id ?? gesture.lastTargetTrackId);
         const effectiveDeltaSec = delta.deltaSec;
         const effectiveRawDeltaSec = delta.rawDeltaSec;
 
@@ -5461,7 +5435,6 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             // 手势结束立即停掉边缘自动滚屏：不停会让视口在松手后继续滑动，
             // 且循环每帧都会读到已失效的手势状态。
             stopDragAutoScroll();
-            clearSnapHighlights(TIMELINE_TRACK_SNAP_GROUP);
             // 交回悬停逻辑（下一次 pointermove 会按命中分区重设）。
             container.style.cursor = "";
         }
@@ -5936,7 +5909,6 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 cancelled: true,
                 modifiers: mods,
             });
-            clearSnapHighlights(TIMELINE_TRACK_SNAP_GROUP);
             gesture = { kind: "none" };
             return true;
         }

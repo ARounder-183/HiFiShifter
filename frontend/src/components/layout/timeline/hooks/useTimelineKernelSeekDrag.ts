@@ -28,9 +28,9 @@ import { NEW_TRACK_SENTINEL } from "../constants";
 import { beginClipGeometryPreview, endClipGeometryPreview } from "../clipGeometryPreviewBus";
 import {
     SNAP_HIGHLIGHT_GROUP,
-    TIMELINE_TRACK_SNAP_GROUP,
     buildLoopBoundaryHighlightEntry,
     clearSnapHighlights,
+    publishClipOriginSnapHighlight,
     publishSnapHighlights,
 } from "../../../../utils/snapHighlight";
 import {
@@ -57,6 +57,7 @@ import {
     previewAutoCrossfade,
 } from "../hooks/autoCrossfade";
 import { computeEffectiveSnap } from "../../../../utils/timelineSnapping";
+import { resolveClipOriginSnap } from "./clipOriginSnap";
 import { store } from "../../../../app/store";
 import { computeSlipWindow, toBoundarySnapClip } from "../hooks/slipWindow";
 import type { TimelineKernelHost } from "../kernel/host/timelineKernelHost";
@@ -687,29 +688,53 @@ export function useTimelineKernelSeekDrag({
                 isModifierActive(noSnapKb, args.modifiers),
             );
             const rawStart = Math.max(0, origin.startSec + args.deltaSec);
-            // 吸附：复用旧实现的 snapTimelineDetailed（多源候选 + 取更近者），
-            // 内核只给几何位移，吸附规则不在内核里重写。
-            //
-            // `highlight` 必须传：吸附高亮的**发布与清除**都由该函数按此选项统一
-            // 处理（见 useTimelineState.snapTimelineDetailed）。不传时吸附本身仍
-            // 生效、位置也对，但完全没有视觉反馈——表现为"吸附没生效"。
-            // `excludeClipIds` 必须覆盖**全部参与者**：整组一起移动时，组内其他
-            // clip 不应成为自己的吸附目标。
-            const nextStart = snapActive
-                ? snapTimelineDetailed(rawStart, "clip", {
-                      originSec: origin.startSec,
-                      anchorTrackId: args.targetTrackId,
-                      excludeClipIds: new Set(origin.participants.map((item) => item.clipId)),
-                      moveLengthSec: origin.lengthSec,
-                      moveSnapOffsetSec: origin.snapOffsetSec,
-                      highlight: {
-                          sources: [{ trackId: args.targetTrackId, clipId: args.clipId }],
-                      },
-                  }).sec
-                : rawStart;
-            // 吸附被关闭（拖拽中切开关 / 按住临时取反键）：高亮必须清掉，
-            // 否则会残留上一次的吸附提示（旧实现同样在 else 分支清除）。
-            if (!snapActive) clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+            // Horizontal drag-origin snap: while the pointer changes tracks, a
+            // small horizontal drift snaps back to the pre-drag start. This is
+            // the replacement for the old vertical lock; it is a time-axis snap,
+            // never a row snap and never a row highlight.
+            const originSnap = resolveClipOriginSnap({
+                rawStartSec: rawStart,
+                originStartSec: origin.startSec,
+                pxPerSec,
+                crossTrack: args.targetTrackId !== origin.trackId,
+                enabled: snapActive,
+            });
+            let nextStart: number;
+            if (originSnap.active) {
+                nextStart = originSnap.startSec;
+                publishClipOriginSnapHighlight({
+                    sec: originSnap.startSec,
+                    trackId:
+                        args.targetTrackId === NEW_TRACK_SENTINEL ? null : args.targetTrackId,
+                    clipId: args.clipId,
+                });
+            } else {
+                // 吸附：复用旧实现的 snapTimelineDetailed（多源候选 + 取更近者），
+                // 内核只给几何位移，吸附规则不在内核里重写。
+                //
+                // `highlight` 必须传：吸附高亮的**发布与清除**都由该函数按此选项统一
+                // 处理（见 useTimelineState.snapTimelineDetailed）。不传时吸附本身仍
+                // 生效、位置也对，但完全没有视觉反馈——表现为"吸附没生效"。
+                // `excludeClipIds` 必须覆盖**全部参与者**：整组一起移动时，组内其他
+                // clip 不应成为自己的吸附目标。
+                nextStart = snapActive
+                    ? snapTimelineDetailed(rawStart, "clip", {
+                          originSec: origin.startSec,
+                          anchorTrackId: args.targetTrackId,
+                          excludeClipIds: new Set(
+                              origin.participants.map((item) => item.clipId),
+                          ),
+                          moveLengthSec: origin.lengthSec,
+                          moveSnapOffsetSec: origin.snapOffsetSec,
+                          highlight: {
+                              sources: [{ trackId: args.targetTrackId, clipId: args.clipId }],
+                          },
+                      }).sec
+                    : rawStart;
+                // 吸附被关闭（拖拽中切开关 / 按住临时取反键）：高亮必须清掉，
+                // 否则会残留上一次的吸附提示（旧实现同样在 else 分支清除）。
+                if (!snapActive) clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+            }
             const trackIds = sessionRef.current.tracks.map((track) => track.id);
             const targetTrackIndex = trackIds.indexOf(args.targetTrackId);
             const deltaTrack =
@@ -802,9 +827,8 @@ export function useTimelineKernelSeekDrag({
             kernelDragOriginRef.current = null;
             if (origin === null) return;
             // 手势结束：清掉吸附高亮（旧实现同样在收尾清除，否则最后一次的
-            // 吸附提示会一直挂在画面上）。轨道边界线由内核发布，收尾也要清。
+            // 吸附提示会一直挂在画面上）。
             clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
-            clearSnapHighlights(TIMELINE_TRACK_SNAP_GROUP);
 
             if (origin.slipMode) {
                 if (args.cancelled) {

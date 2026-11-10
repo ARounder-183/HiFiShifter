@@ -10,10 +10,9 @@ import type { SnapCandidateKind, SnapResult } from "./timelineSnapping";
  */
 
 export const SNAP_HIGHLIGHT_GROUP = "timeline";
-export const TIMELINE_TRACK_SNAP_GROUP = "timelineTrackSnap";
 
 export type SnapGuideSurface = "timeline" | "pianoRoll" | "all";
-export type SnapGuideAxis = "time" | "value" | "row";
+export type SnapGuideAxis = "time" | "value";
 export type SnapHighlightRole = "target" | "source";
 
 export type SnapHighlightKind =
@@ -27,14 +26,11 @@ export type SnapHighlightKind =
     | "cursor"
     | "sampleRate"
     | "loopBoundary"
-    | "track";
+    | "origin";
 
 export interface SnapGuideMarker {
     readonly role: SnapHighlightRole;
-    /**
-     * Time in seconds for axis="time"; parameter value for axis="value";
-     * row-boundary index for axis="row".
-     */
+    /** Time in seconds for axis="time"; parameter value for axis="value". */
     readonly position: number;
     readonly axis: SnapGuideAxis;
     /** Timeline row owner; null means a full-height guide. */
@@ -191,32 +187,36 @@ export function publishSingleTargetSnapHighlight(args: {
     );
 }
 
-/** Horizontal timeline guide at a track-row boundary. */
-export function publishTimelineTrackSnapHighlight(args: {
-    readonly rowIndex: number;
+/**
+ * Vertical timeline guide at the drag origin.
+ *
+ * The target marker is full-height; the source marker puts a short accent on the
+ * target track. This is the horizontal-alignment replacement for the old
+ * vertical lock, not a track-row guide.
+ */
+export function publishClipOriginSnapHighlight(args: {
+    readonly sec: number;
     readonly trackId: string | null;
+    readonly clipId: string | null;
 }): void {
-    if (!Number.isFinite(args.rowIndex)) {
-        clearSnapHighlights(TIMELINE_TRACK_SNAP_GROUP);
+    if (!Number.isFinite(args.sec)) {
+        clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
         return;
     }
     publishSnapHighlights(
-        TIMELINE_TRACK_SNAP_GROUP,
+        SNAP_HIGHLIGHT_GROUP,
         [
-            {
-                id: "track-boundary",
-                kind: "track",
-                surface: "timeline",
-                markers: [
-                    {
-                        role: "target",
-                        axis: "row",
-                        position: Math.round(args.rowIndex),
-                        trackId: args.trackId,
-                        clipId: null,
-                    },
-                ],
-            },
+            buildCandidateHighlightEntry({
+                id: "clip-origin",
+                kind: "origin",
+                sec: args.sec,
+                targetTrackId: null,
+                targetClipId: null,
+                sources:
+                    args.trackId === null
+                        ? []
+                        : [{ trackId: args.trackId, clipId: args.clipId }],
+            }),
         ],
         "timeline",
     );

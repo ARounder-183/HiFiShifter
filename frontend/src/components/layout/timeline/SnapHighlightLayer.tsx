@@ -61,7 +61,6 @@ export const SnapHighlightLayer: React.FC<{
                     rowHeight: safeRowHeight,
                     rowIndexById,
                     contentHeight,
-                    trackCount: tracks.length,
                 }}
                 darkMode={themeMode === "dark"}
                 dpr={dpr}

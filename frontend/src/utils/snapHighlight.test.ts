@@ -2,13 +2,12 @@ import { test } from "vitest";
 
 import {
     SNAP_HIGHLIGHT_GROUP,
-    TIMELINE_TRACK_SNAP_GROUP,
     buildCandidateHighlightEntry,
     buildLoopBoundaryHighlightEntry,
     clearSnapHighlights,
     getSnapHighlightSnapshot,
+    publishClipOriginSnapHighlight,
     publishSnapHighlights,
-    publishTimelineTrackSnapHighlight,
     subscribeSnapHighlight,
 } from "./snapHighlight";
 
@@ -112,22 +111,34 @@ test("utils/snapHighlight.test.ts scripted checks", async () => {
 
     unsubscribe();
 
-    // ── 轨道边界吸附线 ──
-    publishTimelineTrackSnapHighlight({ rowIndex: 2, trackId: "t2" });
-    const trackEntry = getSnapHighlightSnapshot().entries.find((entry) =>
-        entry.id.startsWith(TIMELINE_TRACK_SNAP_GROUP + "\u0000"),
+    // ── Clip 起点水平吸附线 ──
+    publishClipOriginSnapHighlight({ sec: 2.5, trackId: "t2", clipId: "c2" });
+    const originEntry = getSnapHighlightSnapshot().entries.find(
+        (entry) => entry.id === SNAP_HIGHLIGHT_GROUP + "\u0000clip-origin",
     );
-    assertTrue(trackEntry !== undefined, "track entry published");
-    assertEqual(trackEntry?.kind, "track", "track entry kind");
-    assertEqual(trackEntry?.markers[0].axis, "row", "track marker axis");
-    assertEqual(trackEntry?.markers[0].position, 2, "track boundary row");
-    clearSnapHighlights(TIMELINE_TRACK_SNAP_GROUP);
+    assertTrue(originEntry !== undefined, "origin entry published");
+    assertEqual(originEntry?.kind, "origin", "origin entry kind");
+    assertEqual(originEntry?.markers[0].axis, "time", "origin target axis");
+    assertEqual(originEntry?.markers[0].trackId, null, "origin target is full-height");
+    assertEqual(originEntry?.markers[0].position, 2.5, "origin target position");
+    assertEqual(originEntry?.markers[1].trackId, "t2", "origin source track");
+    assertEqual(originEntry?.markers[1].position, 2.5, "origin source position");
+
+    publishClipOriginSnapHighlight({ sec: 3, trackId: "t2", clipId: "c2" });
     assertEqual(
         getSnapHighlightSnapshot().entries.filter((entry) =>
-            entry.id.startsWith(TIMELINE_TRACK_SNAP_GROUP + "\u0000"),
+            entry.id.startsWith(SNAP_HIGHLIGHT_GROUP + "\u0000clip-origin"),
+        ).length,
+        1,
+        "origin group replaced, not accumulated",
+    );
+    clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+    assertEqual(
+        getSnapHighlightSnapshot().entries.filter((entry) =>
+            entry.id.startsWith(SNAP_HIGHLIGHT_GROUP + "\u0000clip-origin"),
         ).length,
         0,
-        "track group cleared",
+        "origin group cleared",
     );
 
     void checks;

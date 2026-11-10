@@ -65,24 +65,31 @@ describe("SnapGuideOverlay", () => {
         expect(html).toContain("width:400px");
     });
 
-    it("projects row markers to track-boundary horizontal lines", () => {
-        const rowEntry: SnapGuideEntry = {
-            id: "track",
-            kind: "track",
+    it("renders a full-height origin guide with a target-row accent", () => {
+        const originEntry: SnapGuideEntry = {
+            id: "origin",
+            kind: "origin",
             surface: "timeline",
             markers: [
                 {
                     role: "target",
-                    axis: "row",
+                    axis: "time",
+                    position: 2,
+                    trackId: null,
+                    clipId: null,
+                },
+                {
+                    role: "source",
+                    axis: "time",
                     position: 2,
                     trackId: "track-2",
-                    clipId: null,
+                    clipId: "clip-2",
                 },
             ],
         };
         const html = renderToStaticMarkup(
             <SnapGuideOverlay
-                entries={[rowEntry]}
+                entries={[originEntry]}
                 projectTimeX={(sec) => sec * 100}
                 layerWidth={400}
                 layerHeight={320}
@@ -90,14 +97,14 @@ describe("SnapGuideOverlay", () => {
                     rowHeight: 80,
                     rowIndexById: new Map([["track-2", 2]]),
                     contentHeight: 240,
-                    trackCount: 3,
                 }}
                 darkMode={false}
                 dpr={1}
             />,
         );
-        expect(html).toContain("top:159px");
-        expect(html).toContain("width:400px");
-        expect(html).toContain("var(--qt-snap-track)");
+        expect(html).toContain("left:199px");
+        expect(html).toContain("height:320px");
+        expect(html).toContain("top:162px");
+        expect(html).toContain("var(--qt-snap-origin)");
     });
 });

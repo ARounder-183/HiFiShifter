@@ -242,7 +242,7 @@
     --qt-snap-cursor: #f05a5a;
     --qt-snap-sample: #94a3b8;
     --qt-snap-loop: #22c55e;
-    --qt-snap-track: #38bdf8;
+    --qt-snap-origin: #fb7185;
 }
 
 .qt-theme.light,
@@ -309,7 +309,7 @@
     --qt-snap-cursor: #de4f5d;
     --qt-snap-sample: #64748b;
     --qt-snap-loop: #16a34a;
-    --qt-snap-track: #0284c7;
+    --qt-snap-origin: #be123c;
 }
 
 /*
