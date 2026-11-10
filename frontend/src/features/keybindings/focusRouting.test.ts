@@ -228,11 +228,11 @@ describe("resolveEditOpRoute（编辑操作的表面兜底层）", () => {
         }
     });
 
-    it("selectAll/deselect：参数编辑器仅在 select 工具下接手，其余落时间轴", () => {
+    it("selectAll/deselect：参数编辑器在 select 与 block 工具下接手", () => {
         expect(resolveEditOpRoute("pianoRoll", "selectAll", "select")).toBe("hifi:editOp");
         expect(resolveEditOpRoute("pianoRoll", "deselect", "select")).toBe("hifi:editOp");
-        expect(resolveEditOpRoute("pianoRoll", "selectAll", "block")).toBe("hifi:timelineEditOp");
-        expect(resolveEditOpRoute("pianoRoll", "deselect", "block")).toBe("hifi:timelineEditOp");
+        expect(resolveEditOpRoute("pianoRoll", "selectAll", "block")).toBe("hifi:editOp");
+        expect(resolveEditOpRoute("pianoRoll", "deselect", "block")).toBe("hifi:editOp");
         expect(resolveEditOpRoute("pianoRoll", "selectAll", "draw")).toBe("hifi:timelineEditOp");
         expect(resolveEditOpRoute("pianoRoll", "selectAll")).toBe("hifi:timelineEditOp");
         expect(resolveEditOpRoute("timeline", "selectAll", "select")).toBe("hifi:timelineEditOp");

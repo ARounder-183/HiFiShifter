@@ -62,21 +62,9 @@ type Props = {
         | "s"
         | "setCtxMenu"
         | "paramBlockContextMenu"
-        | "canRestoreGameParamBlocks"
-        | "restoreGameParamBlocks"
+        | "paramBlockMenuContext"
+        | "handleParamBlockMenuAction"
         | "setParamBlockContextMenu"
-        | "canGroupSelectedParamBlocks"
-        | "canUngroupSelectedParamBlocks"
-        | "groupSelectedParamBlocks"
-        | "ungroupSelectedParamBlocks"
-        | "canNormalizeSelectedParamBlock"
-        | "normalizeSelectedParamBlockPitch"
-        | "canRestoreDeletedParamBlocks"
-        | "restoreParamBlocks"
-        | "canDeleteSelectedParamBlocks"
-        | "deleteSelectedParamBlocks"
-        | "canSplitParamBlockAtPlayhead"
-        | "splitParamBlockAtPlayhead"
         | "setMidiDialogOpen"
         | "setVibratoDialogOpen"
         | "specifiedBpm"
@@ -137,21 +125,9 @@ export function PanelOverlays({ m }: Props) {
         s,
         setCtxMenu,
         paramBlockContextMenu,
-        canRestoreGameParamBlocks,
-        restoreGameParamBlocks,
+        paramBlockMenuContext,
+        handleParamBlockMenuAction,
         setParamBlockContextMenu,
-        canGroupSelectedParamBlocks,
-        canUngroupSelectedParamBlocks,
-        groupSelectedParamBlocks,
-        ungroupSelectedParamBlocks,
-        canNormalizeSelectedParamBlock,
-        normalizeSelectedParamBlockPitch,
-        canRestoreDeletedParamBlocks,
-        restoreParamBlocks,
-        canDeleteSelectedParamBlocks,
-        deleteSelectedParamBlocks,
-        canSplitParamBlockAtPlayhead,
-        splitParamBlockAtPlayhead,
         setMidiDialogOpen,
         setVibratoDialogOpen,
         specifiedBpm,
@@ -252,20 +228,8 @@ export function PanelOverlays({ m }: Props) {
                 <ParamBlockContextMenu
                     x={paramBlockContextMenu.x}
                     y={paramBlockContextMenu.y}
-                    canGroup={canGroupSelectedParamBlocks}
-                    canUngroup={canUngroupSelectedParamBlocks}
-                    canDelete={canDeleteSelectedParamBlocks}
-                    canRestoreGame={canRestoreGameParamBlocks}
-                    canRestoreDeleted={canRestoreDeletedParamBlocks}
-                    canNormalizePitch={canNormalizeSelectedParamBlock}
-                    onRestoreGame={restoreGameParamBlocks}
-                    onRestoreDeleted={() => restoreParamBlocks()}
-                    onNormalizePitch={normalizeSelectedParamBlockPitch}
-                    onDelete={deleteSelectedParamBlocks}
-                    canSplit={canSplitParamBlockAtPlayhead}
-                    onSplit={splitParamBlockAtPlayhead}
-                    onGroup={groupSelectedParamBlocks}
-                    onUngroup={ungroupSelectedParamBlocks}
+                    context={paramBlockMenuContext}
+                    onAction={handleParamBlockMenuAction}
                     onClose={() => setParamBlockContextMenu(null)}
                     tf={tf}
                 />

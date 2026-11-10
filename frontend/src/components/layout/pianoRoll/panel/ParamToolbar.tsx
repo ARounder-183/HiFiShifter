@@ -110,6 +110,8 @@ export type Props = {
         | "setPitchSnapMenuOpen"
         | "paramBlocksVisible"
         | "paramBlockToolActive"
+        | "paramBlockMenuContext"
+        | "handleParamBlockMenuAction"
         | "selectedParamBlockCount"
         | "canGroupSelectedParamBlocks"
         | "canUngroupSelectedParamBlocks"

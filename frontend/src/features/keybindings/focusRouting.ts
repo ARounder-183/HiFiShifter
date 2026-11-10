@@ -275,7 +275,7 @@ export function resolveEditOpRoute(
             return null;
         case "selectAll":
         case "deselect":
-            if (surface === "pianoRoll" && toolMode === "select") {
+            if (surface === "pianoRoll" && (toolMode === "select" || toolMode === "block")) {
                 return "hifi:editOp";
             }
             return "hifi:timelineEditOp";

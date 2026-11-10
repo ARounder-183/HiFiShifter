@@ -747,6 +747,7 @@ export const zhTW = {
     param_blocks_restore_deleted: "恢復刪除的區塊",
     param_blocks_normalize_pitch: "音高歸一化",
     param_blocks_delete: "刪除",
+    param_blocks_create_from_selection: "從選區新建區塊",
     param_blocks_select_all: "全選區塊",
     param_blocks_deselect: "取消選取區塊",
     status_param_block_edit_rejected: "參數區塊編輯被拒絕",

@@ -1,16 +1,13 @@
 /**
- * 参数编辑器「块」药丸。
+ * 参数编辑器「块」药丸与溢出菜单。
  *
- * 只保留两件事：进入块编辑工具、显隐块层。块动作**只有**一个入口 ——
- * 画布右键菜单（`ParamBlockContextMenu`），加上可绑定的快捷键。
- *
- * 【为什么删掉原来的「…」菜单】它和右键菜单逐项重合，只多出「全选 / 取消选择」；
- * 而全选有 `paramBlock.selectAll`（默认 Ctrl+A）与菜单栏「编辑 → 参数块」，
- * 取消选择点空白处即可。同一个动作两套 `disabled` 判定、两套文案、两套测试，
- * 换来的"可发现性"抵不过它制造的歧义：用户会问"这两处为什么不一样"。
+ * 块画布右键菜单是主入口；工具栏的“…”是同一份描述表的第二个入口，
+ * 让块工具里也能发现初始化 / 复制 / 平滑 / 导出等参数命令。
  */
-import { Box } from "@radix-ui/themes";
+import { Fragment } from "react";
+import { Box, DropdownMenu } from "@radix-ui/themes";
 import { setToolModePersistent } from "../../../../features/session/sessionSlice";
+import { PARAM_BLOCK_MENU_ITEMS } from "../paramBlockMenuModel";
 import type { PianoRollPanelModel } from "./usePianoRollPanelModel";
 import { ParamToolbarPill } from "./toolbarParts";
 
@@ -18,6 +15,8 @@ type Props = {
     m: Pick<
         PianoRollPanelModel,
         | "dispatch"
+        | "handleParamBlockMenuAction"
+        | "paramBlockMenuContext"
         | "paramBlockToolActive"
         | "paramBlocksVisible"
         | "s"
@@ -27,8 +26,16 @@ type Props = {
 };
 
 export function BlockToolMenu({ m }: Props) {
-    const { dispatch, paramBlockToolActive, paramBlocksVisible, s, tf, toggleParamBlocksVisible } =
-        m;
+    const {
+        dispatch,
+        handleParamBlockMenuAction,
+        paramBlockMenuContext,
+        paramBlockToolActive,
+        paramBlocksVisible,
+        s,
+        tf,
+        toggleParamBlocksVisible,
+    } = m;
 
     const toggleBlockTool = () => {
         const next = paramBlockToolActive ? s.drawToolMode || "draw" : "block";
@@ -49,6 +56,31 @@ export function BlockToolMenu({ m }: Props) {
                 eyeTooltip={tf("param_blocks_show_overlay")}
                 eyeLabel={tf("param_blocks_show_overlay")}
             />
+            <DropdownMenu.Root>
+                <DropdownMenu.Trigger disabled={!paramBlockToolActive}>
+                    <span
+                        className="rounded px-1.5 py-0.5 text-qt-xs text-qt-text hover:bg-qt-highlight hover:text-white"
+                        aria-label={tf("param_blocks_tool")}
+                        data-tooltip={tf("param_blocks_tool")}
+                    >
+                        …
+                    </span>
+                </DropdownMenu.Trigger>
+                <DropdownMenu.Content variant="soft" color="gray">
+                    {PARAM_BLOCK_MENU_ITEMS.map((item) => (
+                        <Fragment key={item.key}>
+                            {item.separatorBefore === true ? <DropdownMenu.Separator /> : null}
+                            <DropdownMenu.Item
+                                color={item.danger === true ? "red" : undefined}
+                                disabled={!item.enabled(paramBlockMenuContext)}
+                                onSelect={() => handleParamBlockMenuAction(item.channel, item.op)}
+                            >
+                                {tf(item.labelKey)}
+                            </DropdownMenu.Item>
+                        </Fragment>
+                    ))}
+                </DropdownMenu.Content>
+            </DropdownMenu.Root>
         </Box>
     );
 }

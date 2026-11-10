@@ -1262,22 +1262,13 @@ pub fn set_param_block_edits(
 pub fn restore_game_param_blocks(
     state: State<'_, AppState>,
     root_track_id: String,
-    start_frame: u32,
-    end_frame_exclusive: u32,
+    ranges: Vec<hifishifter_kernel::editor::SelectionFrameRange>,
     checkpoint: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     common::guard_command(
         "restore_game_param_blocks",
         Err("panic in restore_game_param_blocks".into()),
-        || {
-            param_blocks::restore_game(
-                &state,
-                root_track_id,
-                start_frame,
-                end_frame_exclusive,
-                checkpoint.unwrap_or(true),
-            )
-        },
+        || param_blocks::restore_game(&state, root_track_id, ranges, checkpoint.unwrap_or(true)),
     )
 }
 

@@ -58,14 +58,19 @@ type PianoRollEditCommandInputs = Pick<
     | "store"
     | "vibratoBaseline"
 > & {
-    /** 块编辑工具下不执行曲线编辑命令（避免点块时误改参数）。 */
-    curveEditsSuppressed: boolean;
     /** 可滚域时长（全选的右边界）。 */
     dynamicProjectSec: number;
     /** 交互层持有的稳定命令入口（渲染期刷新，见文件头）。 */
     handleEditActionRef: RefObject<(op: string) => void>;
     /** 打开颤音窗口（命令分发里的一条路由）。 */
     openVibratoDialog: (mode?: "apply" | "manage", initialPresetId?: string) => void;
+    /**
+     * 参数命令改变了曲线之后的通知（块工具下用来刷新块高）。
+     *
+     * 曲线变了，pitch 块持久化的中心就过期了；由面板负责把它清掉并按
+     * **布局变更**提交（不进撤销栈）。
+     */
+    onParamEditApplied?: (op: string) => void;
 };
 
 /**
@@ -109,7 +114,7 @@ export function usePianoRollEditCommands({
     setSelectionUi,
     store,
     vibratoBaseline,
-    curveEditsSuppressed,
+    onParamEditApplied,
 }: PianoRollEditCommandInputs) {
     /**
      * 参数编辑器「全选」：把整条参数曲线（0 → 工程时长）设为选区。
@@ -121,7 +126,7 @@ export function usePianoRollEditCommands({
      *   同一守卫：绘制 / 直线 / 颤音工具下不产生选区），调用方据此保持原行为。
      */
     const selectAllParamRange = useCallback((): boolean => {
-        if (s.toolMode !== "select") return false;
+        if (s.toolMode !== "select" && s.toolMode !== "block") return false;
         // 整条曲线 = 帧 [0, 工程末端)。**数据路径**直接按整数帧构造：全选的边界就是
         // 首帧与末帧，不该被"最近中点"再挪半帧（见 paramSelection 的两个构造器）。
         const totalFrames = Math.max(
@@ -137,48 +142,49 @@ export function usePianoRollEditCommands({
 
     // ── Edit operation handler (shared by context menu + MenuBar events) ──
     const handleEditOp = useCallback(
-        async (op: string, data?: Record<string, unknown>) =>
-            curveEditsSuppressed
-                ? undefined
-                : runEditOp(
-                      {
-                          activeVibratoPresetId,
-                          bumpRefreshToken,
-                          clipboardRef,
-                          currentParamDefaultValue,
-                          currentParamQuantizeUnit,
-                          currentParamRange,
-                          dispatch,
-                          editParam,
-                          effectiveProjectScale,
-                          invalidate,
-                          midiDialogOpenParamsRef,
-                          midiDialogSourceRef,
-                          paramView,
-                          paramViewRef,
-                          pitchDeltaToDegreeSteps,
-                          pitchEnabled,
-                          processorParamsRef,
-                          projectScaleAtSec,
-                          resolveScaleFromToken,
-                          resolvedVibratoPresets,
-                          rootTrackId,
-                          s,
-                          scrollerRef,
-                          selectAllParamRange,
-                          selectionRef,
-                          setClipboardGuid,
-                          setMidiDialogOpen,
-                          setMidiDialogSelection,
-                          setMidiPath,
-                          setParamView,
-                          setSelectionUi,
-                          store,
-                          vibratoBaseline,
-                      },
-                      op,
-                      data,
-                  ),
+        async (op: string, data?: Record<string, unknown>) => {
+            await runEditOp(
+                {
+                    activeVibratoPresetId,
+                    bumpRefreshToken,
+                    clipboardRef,
+                    currentParamDefaultValue,
+                    currentParamQuantizeUnit,
+                    currentParamRange,
+                    dispatch,
+                    editParam,
+                    effectiveProjectScale,
+                    invalidate,
+                    midiDialogOpenParamsRef,
+                    midiDialogSourceRef,
+                    paramView,
+                    paramViewRef,
+                    pitchDeltaToDegreeSteps,
+                    pitchEnabled,
+                    processorParamsRef,
+                    projectScaleAtSec,
+                    resolveScaleFromToken,
+                    resolvedVibratoPresets,
+                    rootTrackId,
+                    s,
+                    scrollerRef,
+                    selectAllParamRange,
+                    selectionRef,
+                    setClipboardGuid,
+                    setMidiDialogOpen,
+                    setMidiDialogSelection,
+                    setMidiPath,
+                    setParamView,
+                    setSelectionUi,
+                    store,
+                    vibratoBaseline,
+                },
+                op,
+                data,
+            );
+            onParamEditApplied?.(op);
+        },
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- runEditOp intentionally captures stable refs/setters; listing them makes the facade churn every render.
         [
             rootTrackId,
             editParam,
@@ -206,7 +212,6 @@ export function usePianoRollEditCommands({
             resolvedVibratoPresets,
             activeVibratoPresetId,
             vibratoBaseline,
-            curveEditsSuppressed,
         ],
     );
 

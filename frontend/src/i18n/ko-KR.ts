@@ -840,6 +840,7 @@ export const koKR = {
     param_blocks_restore_deleted: "삭제한 블록 복원",
     param_blocks_normalize_pitch: "피치 정규화",
     param_blocks_delete: "삭제",
+    param_blocks_create_from_selection: "선택 범위에서 블록 만들기",
     param_blocks_select_all: "모든 블록 선택",
     param_blocks_deselect: "블록 선택 해제",
     status_param_block_edit_rejected: "파라미터 블록 편집이 거부되었습니다",

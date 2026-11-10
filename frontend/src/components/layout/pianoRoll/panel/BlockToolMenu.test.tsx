@@ -2,6 +2,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { Theme } from "@radix-ui/themes";
 import { BlockToolMenu } from "./BlockToolMenu";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -29,6 +30,20 @@ const labels: Record<string, string> = {
 function model(overrides: Record<string, unknown> = {}) {
     return {
         dispatch: vi.fn(),
+        handleParamBlockMenuAction: vi.fn(),
+        paramBlockMenuContext: {
+            canSplit: false,
+            canGroup: false,
+            canUngroup: false,
+            canDelete: false,
+            canRestoreGame: false,
+            canRestoreDeleted: false,
+            canNormalizePitch: false,
+            hasSelection: false,
+            isPitch: true,
+            isVolume: false,
+            isDyn: false,
+        },
         paramBlockToolActive: false,
         paramBlocksVisible: true,
         s: { drawToolMode: "draw" },
@@ -38,30 +53,27 @@ function model(overrides: Record<string, unknown> = {}) {
     } as unknown as React.ComponentProps<typeof BlockToolMenu>["m"];
 }
 
-/*
- * 「块」药丸只剩两件事：进入块编辑工具、显隐块层。
- *
- * 原来的「…」按钮与右键菜单逐项重合，只多出「全选 / 取消选择」，而这两项
- * 都有快捷键与菜单栏入口。同一个动作两套禁用判定与两套文案，只会让用户
- * 追问"这两处为什么不一样"。
- */
-test("块药丸只有工具按钮与眼睛，没有「更多块操作」", async () => {
+test("块药丸提供工具、眼睛与可发现的溢出菜单", async () => {
     await act(async () => {
-        root.render(<BlockToolMenu m={model()} />);
+        root.render(
+            <Theme>
+                <BlockToolMenu m={model()} />
+            </Theme>,
+        );
     });
-    const buttons = [...host.querySelectorAll<HTMLButtonElement>("button")];
-    expect(buttons).toHaveLength(2);
-    expect(host.querySelector('[aria-label="更多块操作"]')).toBeNull();
     expect(host.querySelector('[aria-label="块编辑工具"]')).not.toBeNull();
     expect(host.querySelector('[aria-label="显示参数块"]')).not.toBeNull();
-    // 不再挂任何弹出菜单表面。
-    expect(document.body.querySelector('[data-hs-context-menu="1"]')).toBeNull();
+    expect(host.textContent).toContain("…");
 });
 
 test("点击标签切换块编辑工具", async () => {
     const dispatch = vi.fn();
     await act(async () => {
-        root.render(<BlockToolMenu m={model({ dispatch })} />);
+        root.render(
+            <Theme>
+                <BlockToolMenu m={model({ dispatch })} />
+            </Theme>,
+        );
     });
     const label = host.querySelector<HTMLButtonElement>('[aria-label="块编辑工具"]');
     if (label === null) throw new Error("tool label missing");
@@ -72,7 +84,11 @@ test("点击标签切换块编辑工具", async () => {
 test("点击眼睛切换块层显隐", async () => {
     const toggle = vi.fn();
     await act(async () => {
-        root.render(<BlockToolMenu m={model({ toggleParamBlocksVisible: toggle })} />);
+        root.render(
+            <Theme>
+                <BlockToolMenu m={model({ toggleParamBlocksVisible: toggle })} />
+            </Theme>,
+        );
     });
     const eye = host.querySelector<HTMLButtonElement>('[aria-label="显示参数块"]');
     if (eye === null) throw new Error("eye button missing");

@@ -153,8 +153,7 @@ pub(super) fn set(
 pub(super) fn restore_game(
     state: &AppState,
     root: String,
-    start_frame: u32,
-    end_frame_exclusive: u32,
+    ranges: Vec<hifishifter_kernel::editor::SelectionFrameRange>,
     checkpoint: bool,
 ) -> Result<serde_json::Value, String> {
     let (view, edits_for_payload, curve_revision) = {
@@ -170,12 +169,23 @@ pub(super) fn restore_game(
             .get(&root)
             .map(|params| params.param_block_edits.clone())
             .unwrap_or_default();
-        let next = hifishifter_kernel::param_blocks::editing::restore_game_blocks(
+        let pairs: Vec<(u32, u32)> = ranges
+            .iter()
+            .map(|range| {
+                (
+                    range.start_frame.min(u32::MAX as usize) as u32,
+                    range
+                        .start_frame
+                        .saturating_add(range.frame_count)
+                        .min(u32::MAX as usize) as u32,
+                )
+            })
+            .collect();
+        let next = hifishifter_kernel::param_blocks::editing::restore_game_block_ranges(
             &timeline,
             &root,
             &current,
-            start_frame,
-            end_frame_exclusive,
+            &pairs,
             timeline.frame_period_ms(),
         )?;
         let view = compose_param_block_view(&timeline, &root, &next, timeline.frame_period_ms())?;
@@ -311,7 +321,6 @@ mod tests {
             transition_out_sec: None,
             created_seq: 1,
             base_cover: None,
-            grouped_from: None,
         }
     }
 
@@ -363,7 +372,6 @@ mod tests {
                 transition_out_sec: None,
                 created_seq: 1,
                 base_cover: None,
-                grouped_from: None,
             }],
             true,
             Vec::new(),

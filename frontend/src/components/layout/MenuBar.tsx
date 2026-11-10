@@ -972,6 +972,51 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                         </DropdownMenu.Item>
                                     ))}
                                     <DropdownMenu.Separator />
+                                    {(
+                                        [
+                                            ["menu_copy", "copy", "edit"],
+                                            ["menu_cut", "cut", "edit"],
+                                            ["menu_paste", "paste", "edit"],
+                                            ["menu_initialize", "initialize", "edit"],
+                                            ["menu_average", "average", "dialog"],
+                                            ["menu_smooth", "smooth", "dialog"],
+                                            ["menu_add_vibrato", "addVibrato", "dialog"],
+                                            ["menu_quantize", "quantize", "dialog"],
+                                            ["menu_mean_quantize", "meanQuantize", "dialog"],
+                                            [
+                                                "menu_convert_volume_to_dyn",
+                                                "convertVolumeToDyn",
+                                                "edit",
+                                            ],
+                                            [
+                                                "menu_convert_dyn_to_volume",
+                                                "convertDynToVolume",
+                                                "edit",
+                                            ],
+                                        ] as const satisfies readonly (readonly [
+                                            MessageKey,
+                                            string,
+                                            "edit" | "dialog",
+                                        ])[]
+                                    ).map(([labelKey, op, channel]) => (
+                                        <DropdownMenu.Item
+                                            key={op}
+                                            onSelect={() => {
+                                                if (channel === "dialog") {
+                                                    window.dispatchEvent(
+                                                        new CustomEvent("hifi:openEditDialog", {
+                                                            detail: { dialog: op },
+                                                        }),
+                                                    );
+                                                } else {
+                                                    dispatchEditOp(op);
+                                                }
+                                            }}
+                                        >
+                                            {tf(labelKey)}
+                                        </DropdownMenu.Item>
+                                    ))}
+                                    <DropdownMenu.Separator />
                                     <DropdownMenu.Item
                                         onSelect={() => dispatchParamBlockEditOp("selectAll")}
                                     >

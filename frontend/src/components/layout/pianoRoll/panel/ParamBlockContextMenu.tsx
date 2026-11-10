@@ -1,37 +1,24 @@
 /**
  * 参数块右键菜单。
  *
- * 菜单只承载块编辑的语义动作；打开位置、点击外部关闭与键盘导航交给
- * `AppContextMenu`，与参数编辑器已有的编辑菜单保持一致。
- *
- * 【为什么这里没有任何"为什么点不了"的解释】块动作的禁用条件是**瞬时状态**
- * （当前选了几个块、块是不是编组块、有没有可还原的区间）。它会被用户的
- * 下一次点击改变，而菜单弹出期间不可能再变一次 —— 写进第二行只会把菜单
- * 变成解释墙。`description` 留给"宿主能力"那一类用户无论如何都改不了的
- * 限制（见 `ui/Menu.tsx` 的字段注释）。
+ * 条目由 `paramBlockMenuModel` 唯一描述；本组件只负责把描述表渲染成
+ * AppContextMenu，并根据当前瞬时上下文计算禁用态。块命令与参数命令走同一
+ * 菜单，不再把块工具当成“另一个编辑器”。
  */
 import { AppContextMenu, type AppMenuItemSpec } from "../../../../ui";
 import { useMenuShortcut } from "../../../../ui/useMenuShortcut";
 import type { MessageKey } from "../../../../i18n/messages";
+import {
+    PARAM_BLOCK_MENU_ITEMS,
+    type ParamBlockMenuChannel,
+    type ParamBlockMenuContext,
+} from "../paramBlockMenuModel";
 
 export interface ParamBlockContextMenuProps {
     readonly x: number;
     readonly y: number;
-    /** 播放头处是否有可切的块（打开菜单时算一次）。 */
-    readonly canSplit: boolean;
-    readonly canGroup: boolean;
-    readonly canUngroup: boolean;
-    readonly canDelete: boolean;
-    readonly canRestoreGame?: boolean;
-    readonly canRestoreDeleted?: boolean;
-    readonly canNormalizePitch?: boolean;
-    readonly onSplit: () => void;
-    readonly onGroup: () => void;
-    readonly onUngroup: () => void;
-    readonly onRestoreGame?: () => void;
-    readonly onRestoreDeleted?: () => void;
-    readonly onNormalizePitch?: () => void;
-    readonly onDelete: () => void;
+    readonly context: ParamBlockMenuContext;
+    readonly onAction: (channel: ParamBlockMenuChannel, op: string) => void;
     readonly onClose: () => void;
     readonly tf: (key: MessageKey) => string;
 }
@@ -39,89 +26,37 @@ export interface ParamBlockContextMenuProps {
 export function ParamBlockContextMenu({
     x,
     y,
-    canSplit,
-    canGroup,
-    canUngroup,
-    canDelete,
-    canRestoreGame,
-    canRestoreDeleted,
-    canNormalizePitch,
-    onSplit,
-    onGroup,
-    onUngroup,
-    onRestoreGame,
-    onRestoreDeleted,
-    onNormalizePitch,
-    onDelete,
+    context,
+    onAction,
     onClose,
     tf,
 }: ParamBlockContextMenuProps) {
-    const splitShortcut = useMenuShortcut("paramBlock.split");
-    const groupShortcut = useMenuShortcut("paramBlock.group");
-    const ungroupShortcut = useMenuShortcut("paramBlock.ungroup");
-    const restoreShortcut = useMenuShortcut("paramBlock.restoreGame");
-    const restoreDeletedShortcut = useMenuShortcut("paramBlock.restoreDeleted");
-    const normalizeShortcut = useMenuShortcut("paramBlock.normalizePitch");
-    const deleteShortcut = useMenuShortcut("paramBlock.delete");
-
-    /*
-     * 三段：编辑 / 状态恢复 / 破坏性。删除永远单独成段并带 `danger`，
-     * 避免和"恢复删除的块"这类可逆动作挨在一起被误点。
-     */
-    const items: AppMenuItemSpec[] = [
-        {
-            key: "blocks-split",
-            label: tf("param_blocks_split_at_playhead"),
-            shortcut: splitShortcut,
-            disabled: !canSplit,
-            onSelect: onSplit,
-        },
-        {
-            key: "blocks-group",
-            label: tf("param_blocks_group"),
-            shortcut: groupShortcut,
-            separatorBefore: true,
-            disabled: !canGroup,
-            onSelect: onGroup,
-        },
-        {
-            key: "blocks-ungroup",
-            label: tf("param_blocks_ungroup"),
-            shortcut: ungroupShortcut,
-            disabled: !canUngroup,
-            onSelect: onUngroup,
-        },
-        {
-            key: "blocks-restore-game",
-            label: tf("param_blocks_restore_game"),
-            shortcut: restoreShortcut,
-            disabled: !canRestoreGame,
-            onSelect: onRestoreGame ?? (() => {}),
-        },
-        {
-            key: "blocks-restore-deleted",
-            label: tf("param_blocks_restore_deleted"),
-            shortcut: restoreDeletedShortcut,
-            disabled: !canRestoreDeleted,
-            onSelect: onRestoreDeleted ?? (() => {}),
-        },
-        {
-            key: "blocks-normalize-pitch",
-            label: tf("param_blocks_normalize_pitch"),
-            shortcut: normalizeShortcut,
-            disabled: !canNormalizePitch,
-            onSelect: onNormalizePitch ?? (() => {}),
-        },
-        {
-            key: "blocks-delete",
-            label: tf("param_blocks_delete"),
-            shortcut: deleteShortcut,
-            danger: true,
-            separatorBefore: true,
-            disabled: !canDelete,
-            onSelect: onDelete,
-        },
-    ];
+    const shortcuts = {
+        "paramBlock.split": useMenuShortcut("paramBlock.split"),
+        "paramBlock.group": useMenuShortcut("paramBlock.group"),
+        "paramBlock.ungroup": useMenuShortcut("paramBlock.ungroup"),
+        "paramBlock.restoreGame": useMenuShortcut("paramBlock.restoreGame"),
+        "paramBlock.restoreDeleted": useMenuShortcut("paramBlock.restoreDeleted"),
+        "paramBlock.normalizePitch": useMenuShortcut("paramBlock.normalizePitch"),
+        "paramBlock.delete": useMenuShortcut("paramBlock.delete"),
+        "clip.copy": useMenuShortcut("clip.copy"),
+        "clip.cut": useMenuShortcut("clip.cut"),
+        "clip.paste": useMenuShortcut("clip.paste"),
+        "edit.selectAll": useMenuShortcut("edit.selectAll"),
+        "edit.deselect": useMenuShortcut("edit.deselect"),
+    } as const;
+    const items: AppMenuItemSpec[] = PARAM_BLOCK_MENU_ITEMS.map((item) => {
+        const action = item.shortcutAction as keyof typeof shortcuts | undefined;
+        return {
+            key: item.key,
+            label: tf(item.labelKey),
+            ...(action === undefined ? {} : { shortcut: shortcuts[action] }),
+            ...(item.separatorBefore === true ? { separatorBefore: true } : {}),
+            ...(item.danger === true ? { danger: true } : {}),
+            disabled: !item.enabled(context),
+            onSelect: () => onAction(item.channel, item.op),
+        };
+    });
     return (
         <AppContextMenu
             x={x}

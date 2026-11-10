@@ -474,8 +474,7 @@ export const timelineApi = {
 
     restoreGameParamBlocks: async (input: {
         rootTrackId: string;
-        startFrame: number;
-        endFrameExclusive: number;
+        ranges: readonly { readonly startFrame: number; readonly frameCount: number }[];
         checkpoint?: boolean;
     }) => {
         const reply = await invoke<ParamBlockViewReply>("restore_game_param_blocks", input);

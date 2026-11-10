@@ -909,6 +909,7 @@ export const enUS = {
     param_blocks_restore_deleted: "Restore deleted blocks",
     param_blocks_normalize_pitch: "Normalize pitch",
     param_blocks_delete: "Delete",
+    param_blocks_create_from_selection: "Create block from selection",
     param_blocks_select_all: "Select all blocks",
     param_blocks_deselect: "Deselect blocks",
     status_param_block_edit_rejected: "Parameter block edit rejected",

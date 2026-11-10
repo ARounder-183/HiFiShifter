@@ -778,6 +778,7 @@ export const jaJP = {
     param_blocks_restore_deleted: "削除したブロックを復元",
     param_blocks_normalize_pitch: "ピッチ正規化",
     param_blocks_delete: "削除",
+    param_blocks_create_from_selection: "選択範囲からブロックを作成",
     param_blocks_select_all: "すべてのブロックを選択",
     param_blocks_deselect: "ブロックの選択を解除",
     status_param_block_edit_rejected: "パラメータブロック編集が拒否されました",

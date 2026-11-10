@@ -746,6 +746,7 @@ export const zhCN = {
     param_blocks_restore_deleted: "恢复删除的块",
     param_blocks_normalize_pitch: "音高归一化",
     param_blocks_delete: "删除",
+    param_blocks_create_from_selection: "从选区新建块",
     param_blocks_select_all: "全选块",
     param_blocks_deselect: "取消选择块",
     status_param_block_edit_rejected: "参数块编辑被拒绝",

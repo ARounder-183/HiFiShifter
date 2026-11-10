@@ -205,7 +205,7 @@ export async function runEditOp(
         return;
     }
     if (op === "deselect") {
-        if (s.toolMode !== "select") return;
+        if (s.toolMode !== "select" && s.toolMode !== "block") return;
         selectionRef.current = null;
         setSelectionUi(null);
         invalidate();
