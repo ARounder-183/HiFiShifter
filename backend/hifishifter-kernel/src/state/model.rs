@@ -2908,36 +2908,6 @@ impl TimelineState {
         }
     }
 
-    /// 把一段区间填成**目标位置自己的原始值**（未编辑帧的归属）。
-    ///
-    /// 【为什么需要它】移动/拉伸一段带编辑的区间时，未编辑的帧不是"0"，而是
-    /// 目标位置这一代分析出的 `pitch_orig`。旧实现把整段显示数组搬过去，
-    /// 于是未编辑帧带的是**旧位置**的原始值（用户看到的"原始线还是旧的"）。
-    fn fill_curve_range(
-        curve: &mut Vec<f32>,
-        required_len: usize,
-        start_frame: usize,
-        end_frame: usize,
-        original: &[f32],
-        default_value: f32,
-    ) {
-        if curve.len() < required_len {
-            curve.resize(required_len, default_value);
-        }
-        let start = start_frame.min(curve.len());
-        let end = end_frame.min(curve.len());
-        if start >= end {
-            return;
-        }
-        for (offset, value) in curve[start..end].iter_mut().enumerate() {
-            *value = original
-                .get(start + offset)
-                .copied()
-                .filter(|sample| sample.is_finite())
-                .unwrap_or(default_value);
-        }
-    }
-
     fn write_curve_range(
         curve: &mut Vec<f32>,
         required_len: usize,
@@ -3069,7 +3039,7 @@ impl TimelineState {
         }
 
         if clear_pitch {
-            entry.pitch_edit_user_modified = true;
+            entry.pitch_edit_user_modified = entry.pitch_edit.iter().any(|value| *value > 0.0);
         }
     }
 
@@ -3111,14 +3081,13 @@ impl TimelineState {
 
         let required_len = entry.pitch_edit.len().max(end_frame);
         if has_pitch {
-            // 未编辑帧取**目标位置**的原始值；payload 里那些帧是 0（=没有编辑）。
-            let original = entry.pitch_orig.clone();
-            Self::fill_curve_range(
+            // 先清空目标窗口，再只写 payload 中的显式目标；0 保持 0。
+            // 未编辑帧的显示回退由读取侧按 pitch_orig 完成。
+            Self::clear_curve_range(
                 &mut entry.pitch_edit,
                 required_len,
                 start_frame,
                 end_frame,
-                &original,
                 0.0,
             );
         }
@@ -3137,22 +3106,7 @@ impl TimelineState {
                 &linked_params.pitch_edit,
                 0.0,
             );
-            // payload 里 0 = "这一帧没有编辑"（`pitch_edit` 的哨兵），不是数值。
-            // 把它写进目标会把刚填好的原始值盖成 0 —— 用户看到的就是"移动之后
-            // 未编辑的原始线整段消失"。这里按帧把哨兵还原成目标位置的原始值。
-            let original = entry.pitch_orig.clone();
-            for (offset, value) in linked_params.pitch_edit.iter().copied().enumerate() {
-                if value != 0.0 {
-                    continue;
-                }
-                let idx = start_frame.saturating_add(offset);
-                if idx >= entry.pitch_edit.len() {
-                    break;
-                }
-                if let Some(sample) = original.get(idx).copied() {
-                    entry.pitch_edit[idx] = sample;
-                }
-            }
+            entry.pitch_edit_user_modified = entry.pitch_edit.iter().any(|value| *value > 0.0);
         }
         Self::write_curve_range(
             &mut entry.tension_edit,
@@ -3760,28 +3714,17 @@ impl TimelineState {
         resize_exact(&mut entry.tension_orig, target, 0.0);
         resize_curve(&mut entry.tension_edit, target, 0.0);
 
-        // Backward compatibility: older projects didn't have `pitch_edit_user_modified`.
-        // Infer it if we detect a meaningful difference between edit and orig.
-        if !entry.pitch_edit_user_modified {
-            let len = entry.pitch_orig.len().min(entry.pitch_edit.len());
-            let mut i = 0usize;
-            let stride = 1usize; // keep it simple; curves are not huge.
-            while i < len {
-                let o = entry.pitch_orig[i];
-                let e = entry.pitch_edit[i];
-                if e.is_finite() && e > 0.0 {
-                    if !(o.is_finite() && o > 0.0) {
-                        entry.pitch_edit_user_modified = true;
-                        break;
-                    }
-                    if (e - o).abs() > 1e-3 {
-                        entry.pitch_edit_user_modified = true;
-                        break;
-                    }
-                }
-                i += stride;
+        // 一次性把旧格式的“pitch_edit = pitch_orig 全量副本”规整为稀疏 0 哨兵。
+        // 0 = 没有用户目标，读取/渲染回退到 pitch_orig；非零才是显式编辑。
+        let len = entry.pitch_orig.len().min(entry.pitch_edit.len());
+        for i in 0..len {
+            let e = entry.pitch_edit[i];
+            let o = entry.pitch_orig[i];
+            if !e.is_finite() || e <= 0.0 || (o.is_finite() && o > 0.0 && (e - o).abs() <= 1e-3) {
+                entry.pitch_edit[i] = 0.0;
             }
         }
+        entry.pitch_edit_user_modified = entry.pitch_edit.iter().any(|value| *value > 0.0);
     }
 
     fn migrate_legacy_common_curves_in_entry(entry: &mut TrackParamsState) {
@@ -11906,9 +11849,6 @@ impl TimelineState {
                 entry.pitch_orig_key = Some(key);
                 entry.pitch_layout_key = Some(layout_key);
                 entry.has_pitch_adjustment_active = has_pitch_adjustment;
-                if !entry.pitch_edit_user_modified {
-                    entry.pitch_edit.clone_from(&entry.pitch_orig);
-                }
             }
         }
     }
@@ -12784,8 +12724,8 @@ mod gain_split_tests {
         {
             let entry = tl.params_by_root_track.get_mut(&root).unwrap();
             entry.pitch_orig = (0..frames).map(|i| 50.0 + i as f32 * 0.01).collect();
-            // 未编辑帧 = 原始值；只有旧范围 100..=120 是用户画的 70。
-            entry.pitch_edit = entry.pitch_orig.clone();
+            // 0 = 未编辑；只有旧范围 100..=120 是用户画的 70。
+            entry.pitch_edit = vec![0.0; frames];
             for frame in 100..=120 {
                 entry.pitch_edit[frame] = 70.0;
             }
@@ -12805,15 +12745,13 @@ mod gain_split_tests {
             "编辑帧必须落到新位置（300），got {}",
             entry.pitch_edit[300]
         );
-        assert!(
-            (entry.pitch_edit[250] - entry.pitch_orig[250]).abs() < 1e-4,
-            "未编辑帧必须取新位置的原始值：{} vs {}",
-            entry.pitch_edit[250],
-            entry.pitch_orig[250]
+        assert_eq!(
+            entry.pitch_edit[250], 0.0,
+            "未编辑帧保持 0 哨兵；显示层会回退到新位置的原始值"
         );
-        assert!(
-            (entry.pitch_edit[200] - entry.pitch_orig[200]).abs() < 1e-4,
-            "新范围起点也必须是新原始值"
+        assert_eq!(
+            entry.pitch_edit[200], 0.0,
+            "新范围起点同样保持 0 哨兵（读取侧回退到新原始值）"
         );
     }
 }

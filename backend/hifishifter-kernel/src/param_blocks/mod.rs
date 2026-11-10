@@ -96,7 +96,7 @@ pub fn apply_curve_patches(
             patch.param.clone(),
             patch.start_frame,
             patch.values.clone(),
-            None,
+            Some(vec![true; patch.values.len()]),
             Some(false),
         );
         if result["ok"] != true {

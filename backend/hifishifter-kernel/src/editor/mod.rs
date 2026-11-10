@@ -147,6 +147,45 @@ mod tests {
             dirty: AtomicBool::new(false),
         }
     }
+    #[test]
+    fn present_false_never_materializes_a_pitch_target() {
+        let host = host();
+        assert_eq!(
+            params::set_param_frames_with_present(
+                &host,
+                "track".into(),
+                "pitch".into(),
+                0,
+                vec![60.0, 61.0, 62.0],
+                Some(vec![true, false, true]),
+                Some(false),
+            )["ok"],
+            true
+        );
+        {
+            let timeline = host.timeline.lock().unwrap();
+            let pitch = &timeline.params_by_root_track["track"].pitch_edit;
+            assert_eq!(&pitch[..3], &[60.0, 0.0, 62.0]);
+            assert!(timeline.params_by_root_track["track"].pitch_edit_user_modified);
+        }
+        assert_eq!(
+            params::set_param_frames_with_present(
+                &host,
+                "track".into(),
+                "pitch".into(),
+                0,
+                vec![0.0, 0.0, 0.0],
+                Some(vec![false, false, false]),
+                Some(false),
+            )["ok"],
+            true
+        );
+        let timeline = host.timeline.lock().unwrap();
+        let entry = &timeline.params_by_root_track["track"];
+        assert_eq!(&entry.pitch_edit[..3], &[0.0, 0.0, 0.0]);
+        assert!(!entry.pitch_edit_user_modified);
+    }
+
     /// 缺少非checkpoint副作用会使最后一笔无法自动应用；既有undo步数不能被增加。
     #[test]
     fn noncheckpoint_tail_updates_curve_and_publication_without_extra_undo() {

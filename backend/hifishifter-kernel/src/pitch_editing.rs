@@ -684,11 +684,22 @@ pub fn selected_pitch_edit_algorithm(timeline: &TimelineState) -> PitchEditAlgor
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sparse_pitch_edit_only_claims_its_own_range() {
+        let mut pitch = vec![0.0f32; 400];
+        pitch[100..120].fill(64.0);
+        // 5ms 帧：100..120 = 0.5s..0.6s
+        assert!(any_user_edit_in_range(5.0, &pitch, 0.49, 0.61));
+        assert!(!any_user_edit_in_range(5.0, &pitch, 0.0, 0.49));
+        assert!(!any_user_edit_in_range(5.0, &pitch, 0.61, 1.0));
+    }
+
     // 这两项本身与 `vslib` feature 无关：`processor_bakes_common_mix_curves`
     // 是无条件定义的，`SynthPipelineKind` 也只是**变体**受 feature 门控。
     // 此前它们被错误地门控在 `feature = "vslib"` 下，于是关闭 vslib 的构建
     // 整个测试模块编译不过（`cargo test --no-default-features` 报
     // "cannot find function / type"）—— 而那正是没有 vslib DLL 时的构建方式。
+    use super::any_user_edit_in_range;
     use super::processor_bakes_common_mix_curves;
     use super::{
         active_child_formant_offset_config, build_clip_effective_formant_shift_curve,
