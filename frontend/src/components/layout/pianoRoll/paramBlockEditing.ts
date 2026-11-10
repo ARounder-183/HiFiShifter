@@ -1372,6 +1372,36 @@ function sourceSpansForTimelineRange(
         const sourceA = sourceAtProjectedFrame(projection, a, cycle, framePeriodMs);
         const sourceB = sourceAtProjectedFrame(projection, b, cycle, framePeriodMs);
         if (sourceA === null || sourceB === null) continue;
+        /*
+         * 正放时 sourceA > sourceB 表示区间跨过媒体末尾回绕；必须拆成
+         * [sourceA, media] + [0, sourceB]，否则会被当成一条从 0 到 media 的巨段。
+         */
+        if (projection.loopEnabled && !projection.reversed && sourceA > sourceB + EPS) {
+            const media =
+                projection.mediaDurationSec ??
+                projection.sourceWindowStartSec + cycleTimeline * rate;
+            if (media > sourceA + EPS) {
+                out.push({
+                    clipId: clip.id,
+                    takeId: projection.takeId,
+                    cycle,
+                    sourceStartSec: sourceA,
+                    sourceEndSec: media,
+                    label: "manual",
+                });
+            }
+            if (sourceB > EPS) {
+                out.push({
+                    clipId: clip.id,
+                    takeId: projection.takeId,
+                    cycle,
+                    sourceStartSec: 0,
+                    sourceEndSec: sourceB,
+                    label: "manual",
+                });
+            }
+            continue;
+        }
         let lo = Math.min(sourceA, sourceB);
         let hi = Math.max(sourceA, sourceB);
         /*

@@ -1257,6 +1257,38 @@ fn source_spans_for_timeline_range(
         else {
             continue;
         };
+        /*
+         * 正放时 source_a > source_b 表示区间跨过媒体末尾回绕；必须拆成
+         * [source_a, media] + [0, source_b]，否则会被当成一条从 0 到 media 的巨段。
+         */
+        if projection.loop_enabled && !projection.reversed && source_a > source_b + EPS {
+            let media = projection
+                .media_duration_sec
+                .unwrap_or(projection.source_window_start_sec + cycle_timeline * rate);
+            if media > source_a + EPS {
+                out.push(TakeSpan {
+                    clip_id: clip.id.clone(),
+                    take_id: take.id.clone(),
+                    cycle,
+                    source_start_sec: source_a,
+                    source_end_sec: media,
+                    syllable_id: None,
+                    label: BlockLabel::Manual,
+                });
+            }
+            if source_b > EPS {
+                out.push(TakeSpan {
+                    clip_id: clip.id.clone(),
+                    take_id: take.id.clone(),
+                    cycle,
+                    source_start_sec: 0.0,
+                    source_end_sec: source_b,
+                    syllable_id: None,
+                    label: BlockLabel::Manual,
+                });
+            }
+            continue;
+        }
         let mut lo = source_a.min(source_b);
         let mut hi = source_a.max(source_b);
         if let Some(media) = projection.media_duration_sec {
