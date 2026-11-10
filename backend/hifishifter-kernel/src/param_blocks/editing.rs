@@ -1216,6 +1216,39 @@ fn source_spans_for_timeline_range(
         if b <= a {
             continue;
         }
+        /*
+         * 覆盖整个周期时，源域是 [anchor, media] + [0, anchor] 两段；只算
+         * source_at(a/b) 会得到 [anchor, media]，漏掉回绕后的尾部。
+         */
+        if projection.loop_enabled && !projection.reversed && a <= cycle_start && b >= cycle_end {
+            let anchor = projection.source_window_start_sec;
+            let media = projection
+                .media_duration_sec
+                .unwrap_or(anchor + cycle_timeline * rate);
+            if media > anchor + EPS {
+                out.push(TakeSpan {
+                    clip_id: clip.id.clone(),
+                    take_id: take.id.clone(),
+                    cycle,
+                    source_start_sec: anchor,
+                    source_end_sec: media,
+                    syllable_id: None,
+                    label: BlockLabel::Manual,
+                });
+            }
+            if anchor > EPS {
+                out.push(TakeSpan {
+                    clip_id: clip.id.clone(),
+                    take_id: take.id.clone(),
+                    cycle,
+                    source_start_sec: 0.0,
+                    source_end_sec: anchor,
+                    syllable_id: None,
+                    label: BlockLabel::Manual,
+                });
+            }
+            continue;
+        }
         let Some(source_a) = source_at_projected_frame(&projection, a, cycle, frame_period_ms)
         else {
             continue;

@@ -1335,6 +1335,40 @@ function sourceSpansForTimelineRange(
             toFrame(clip.startSec + clip.lengthSec, framePeriodMs),
         );
         if (b <= a) continue;
+        /*
+         * 覆盖整个周期时，源域是 [anchor, media] + [0, anchor] 两段；只算
+         * sourceAt(a/b) 会得到 [anchor, media]，漏掉回绕后的尾部。
+         */
+        if (
+            projection.loopEnabled &&
+            !projection.reversed &&
+            a <= cycleStartFrame &&
+            b >= cycleEndFrame
+        ) {
+            const anchor = projection.sourceWindowStartSec;
+            const media = projection.mediaDurationSec ?? anchor + cycleTimeline * rate;
+            if (media > anchor + EPS) {
+                out.push({
+                    clipId: clip.id,
+                    takeId: projection.takeId,
+                    cycle,
+                    sourceStartSec: anchor,
+                    sourceEndSec: media,
+                    label: "manual",
+                });
+            }
+            if (anchor > EPS) {
+                out.push({
+                    clipId: clip.id,
+                    takeId: projection.takeId,
+                    cycle,
+                    sourceStartSec: 0,
+                    sourceEndSec: anchor,
+                    label: "manual",
+                });
+            }
+            continue;
+        }
         const sourceA = sourceAtProjectedFrame(projection, a, cycle, framePeriodMs);
         const sourceB = sourceAtProjectedFrame(projection, b, cycle, framePeriodMs);
         if (sourceA === null || sourceB === null) continue;

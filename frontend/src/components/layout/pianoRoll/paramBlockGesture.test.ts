@@ -444,6 +444,23 @@ describe("paramBlockGesture — base underlay / identity", () => {
         expect(restoredView.blocks[0]!.kind).toBe("user");
     });
 
+    it("create over a full loop cycle keeps the wrap tail", () => {
+        const clip: ParamBlockSourceClip = {
+            ...loopClip(),
+            lengthSec: 2.27,
+            syllableSpansSec: [],
+        };
+        const created = createUserBlock([clip], EMPTY, 0, 454, 60, FRAME_MS, "cycle");
+        const block = created.blocks[0]!;
+        if (block.geometry.kind !== "take") throw new Error("expected take");
+        const width = block.geometry.members.reduce(
+            (sum, member) => sum + (member.sourceEndSec - member.sourceStartSec),
+            0,
+        );
+        expect(width).toBeCloseTo(2.27, 3);
+        expect(block.geometry.members.some((member) => member.sourceStartSec === 0)).toBe(true);
+    });
+
     it("R11: create uses the caller block id", () => {
         const created = createUserBlock([plainClip], EMPTY, 20, 80, 61, FRAME_MS, "want");
         expect(created.blocks.map((block) => block.id)).toEqual(["want"]);
