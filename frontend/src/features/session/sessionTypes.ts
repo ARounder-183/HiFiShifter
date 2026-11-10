@@ -255,6 +255,11 @@ export interface ClipTakeInfo {
     midiFillGaps?: boolean;
     /** 源域音节区间；显示时再按裁切 / 速率 / 倒放 / Loop 投影。 */
     syllableSpansSec?: Array<{ startSec: number; endSec: number }>;
+    /** GAME 分段基线（源域快照）；音节分析为空时作为基块来源。 */
+    gameBlockBaseline?: {
+        revision?: number;
+        sourceSpansSec?: Array<{ startSec: number; endSec: number }>;
+    };
     /**
      * 宿主的非线性拉伸标记（REAPER stretch markers）。非空 ⇒ 该 take 的源时间映射
      * 不是直线，插件不渲染它（见 `clipHasNonlinearStretch`）。
@@ -298,6 +303,8 @@ export interface ClipInfo {
     sourceChannels?: number;
     /** Loop（循环源）：延伸超出源媒体区间时按周期回绕产生循环内容。 */
     loopEnabled: boolean;
+    /** 宿主给出的 Loop 周期（秒）；缺省按媒体时长推断。 */
+    loopPeriodSec?: number | null;
     /**
      * 宿主媒体状态（仅插件模式；见 `features/ara/hostAudio.hostMediaState`）。
      * 缺省 = 独立 App 或旧后端，按 `sourcePath` 推断。
@@ -346,6 +353,11 @@ export interface ClipInfo {
     midiFillGaps?: boolean;
     /** 当前 Take 的源域音节区间（主投影字段的镜像）。 */
     syllableSpansSec?: Array<{ startSec: number; endSec: number }>;
+    /** 当前 Take 的 GAME 分段基线（主投影字段的镜像）。 */
+    gameBlockBaseline?: {
+        revision?: number;
+        sourceSpansSec?: Array<{ startSec: number; endSec: number }>;
+    };
 }
 
 export interface ClipFormantMorph {

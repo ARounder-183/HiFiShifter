@@ -912,6 +912,7 @@ export const enUS = {
     param_blocks_select_all: "Select all blocks",
     param_blocks_deselect: "Deselect blocks",
     status_param_block_edit_rejected: "Parameter block edit rejected",
+    status_param_block_split_too_close: "Split point is too close to the block edge",
     status_param_block_action_failed: "Parameter block action failed",
     kb_param_block_split: "Split parameter block",
     kb_param_block_delete: "Delete parameter block",

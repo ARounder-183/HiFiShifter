@@ -749,6 +749,7 @@ export const zhCN = {
     param_blocks_select_all: "全选块",
     param_blocks_deselect: "取消选择块",
     status_param_block_edit_rejected: "参数块编辑被拒绝",
+    status_param_block_split_too_close: "此位置切分太靠近块边缘",
     status_param_block_action_failed: "参数块操作失败",
     kb_param_block_split: "切开参数块",
     kb_param_block_delete: "删除参数块",

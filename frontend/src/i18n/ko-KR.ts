@@ -843,6 +843,7 @@ export const koKR = {
     param_blocks_select_all: "모든 블록 선택",
     param_blocks_deselect: "블록 선택 해제",
     status_param_block_edit_rejected: "파라미터 블록 편집이 거부되었습니다",
+    status_param_block_split_too_close: "분할 지점이 블록 가장자리에 너무 가깝습니다",
     status_param_block_action_failed: "파라미터 블록 작업이 실패했습니다",
     kb_param_block_split: "파라미터 블록 분할",
     kb_param_block_delete: "파라미터 블록 삭제",

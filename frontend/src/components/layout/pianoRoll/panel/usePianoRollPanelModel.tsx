@@ -57,7 +57,13 @@ import { useParamBlockDragHandoff } from "../useParamBlockDragHandoff";
 import { createSyllableAnalysisQueue } from "../syllableAnalysisQueue";
 import { useParamBlockPersistence } from "../useParamBlockPersistence";
 import { composeParamBlockView } from "../paramBlockComposition";
-import { toParamBlockSourceClip, type ParamBlockSourceClip } from "../paramBlockProjection";
+import { planParamBlockGesture, type ParamBlockGesturePlan } from "../paramBlockGesture";
+import { reportParamBlockDiagnostic } from "../paramBlockDiagnostics";
+import {
+    toFrame,
+    toParamBlockSourceClip,
+    type ParamBlockSourceClip,
+} from "../paramBlockProjection";
 import type { ParamBlockView } from "../paramBlockTypes";
 import { resolveParamBlockGeometryClips } from "../paramBlockGeometryFreeze";
 import { fetchFullResCurve, readPvRange, uploadFullResCurveSegments } from "../selectionEditData";
@@ -79,8 +85,6 @@ import {
     materializeParamBlocks,
     blocksFromViewForPanel,
     groupParamBlocks,
-    paramBlockResizeCandidates,
-    projectParamBlockResizeDisplay,
     applyFullResSegmentsToParamView,
     projectParamBlockCreatePreviewFromBase,
     shiftParamBlockCurveValuesToTarget,
@@ -88,13 +92,11 @@ import {
     nearestParamBlockByTime,
     isStrictlyInsideParamBlock,
     resolveParamBlockSplitSec,
+    resolveParamBlockSplitTarget,
     resolveSplittableParamBlockAt,
     resolveParamBlockCreateSpan,
-    resolveParamBlockResizePlan,
     resolveParamBlockResizeTarget,
     ungroupParamBlocks,
-    resizeParamBlock,
-    removeParamBlockAtMinWidth,
     restoreDeletedParamBlocks,
     splitParamBlock,
     setParamBlockTransition,
@@ -2223,8 +2225,9 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         /** 手势起点的帧周期；提交与 minBlockSec 都按它折算，不受回包影响。 */
         readonly framePeriodMsBasis?: number;
         targetSec: number;
+        targetFrame: number;
         /** 本帧完整伸缩计划；预览 / 宿主刷新 / 提交共用。 */
-        resizePlan: ReturnType<typeof resolveParamBlockResizePlan> | null;
+        resizePlan: ParamBlockGesturePlan | null;
         /** 手势起点左右块的代表值/高度；仅用于锁定预览，不提交。 */
         readonly displayCenterValue?: number | null;
         readonly displayHeightPx?: number | null;
@@ -2773,6 +2776,24 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
          */
         canSplit: boolean;
     } | null>(null);
+    /*
+     * 【一个根只有一个权威】根切换后，旧根的 editSet / 选择 / 删除快照绝不能
+     * 进入新根。持久化钩子的 ready 判据是 rootTrackId + state.rootTrackId，
+     * 因此这里必须同步清空 state；否则第一次按 S 会把 A 根的编辑集提交到 B 根。
+     *
+     * projectEpoch 目前没有独立字段：打开工程时根轨道几乎总会变化；若未来加入
+     * 工程代次，把它拼进 authorityKey 即可，不影响其余逻辑。
+     */
+    const paramBlockAuthorityKey = rootTrackId ?? "";
+    const lastParamBlockAuthorityRef = useRef(paramBlockAuthorityKey);
+    useEffect(() => {
+        if (lastParamBlockAuthorityRef.current === paramBlockAuthorityKey) return;
+        lastParamBlockAuthorityRef.current = paramBlockAuthorityKey;
+        setParamBlockState(EMPTY_PARAM_BLOCK_STATE);
+        paramBlockStateRef.current = EMPTY_PARAM_BLOCK_STATE;
+        setSelectedParamBlockIds([]);
+        setParamBlockContextMenu(null);
+    }, [paramBlockAuthorityKey]);
     const toggleParamBlocksVisible = useCallback(() => {
         dispatch(toggleParamBlocksVisibleAction());
         void dispatch(persistUiSettings());
@@ -3475,6 +3496,10 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                     blocksFromViewForPanel(rootTrackId, layout),
                                     store.getState().session.playheadSec,
                                     layout.framePeriodMs,
+                                    {
+                                        clips: paramBlockSourceClipsRef.current,
+                                        edits: paramBlockStateRef.current.editSet,
+                                    },
                                 ) !== null,
                         });
                     },
@@ -3992,6 +4017,10 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                             createdBlockId: createId,
                             resizePlan: null,
                             targetSec: createSpan.endSec,
+                            targetFrame: toFrame(
+                                createSpan.endSec,
+                                paramBlockStateRef.current.framePeriodMs,
+                            ),
                             value: createBlockValue,
                         };
                         if (createBaseSpec !== null) {
@@ -4349,62 +4378,104 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                       });
             if (edgeHit !== null) {
                 const resizeEdge = edgeHit.edge;
-                /*
-                 * 一次伸缩可能跨过空隙、连续覆盖多个块。候选集按拖动方向
-                 * 由近到远排列，最终哪些块缩短 / 删除由共享计划决定。
-                 */
-                const resizeCandidates = paramBlockResizeCandidates(
-                    paramBlocksWithValues,
-                    fullBlock,
-                    resizeEdge,
-                );
-                const resizePlan = resolveParamBlockResizePlan({
-                    blockId: fullBlock.id,
-                    edge: resizeEdge,
-                    blockStartSec: fullBlock.startSec,
-                    blockEndSec: fullBlock.endSec,
-                    targetSec: resizeEdge === "left" ? fullBlock.startSec : fullBlock.endSec,
-                    neighbors: resizeCandidates,
-                    minBlockSec: paramBlockStateRef.current.framePeriodMs / 1000,
-                });
+                const framePeriodMs =
+                    paramBlockViewRef.current?.framePeriodMs ??
+                    paramBlockStateRef.current.framePeriodMs;
+                const fallbackValue =
+                    Number.isFinite(bounds.min) && Number.isFinite(bounds.max)
+                        ? (bounds.min + bounds.max) / 2
+                        : editParam === "pitch"
+                          ? 60
+                          : 0;
+                const baseBlockSpans = paramBlocksWithValues.map((block) => ({
+                    id: block.id,
+                    startSec: block.startSec,
+                    endSec: block.endSec,
+                    selected: selectedParamBlockIdSet.has(block.id),
+                }));
+                const valueForBlock = (
+                    blockId: string,
+                    startSec: number,
+                    endSec: number,
+                ): number | null => {
+                    const exact = paramBlocksWithValues.find((block) => block.id === blockId);
+                    if (exact?.averageValue != null) return exact.averageValue;
+                    const overlapping = paramBlocksWithValues.find(
+                        (block) => block.startSec < endSec && block.endSec > startSec,
+                    );
+                    return overlapping?.averageValue ?? fallbackValue;
+                };
+                const previewSpecBlocks = (plan: ParamBlockGesturePlan) => {
+                    const fp = plan.viewAfter.framePeriodMs;
+                    return plan.viewAfter.blocks.map((block) => {
+                        const startSec = (block.startFrame * fp) / 1000;
+                        const endSec = (block.endFrameExclusive * fp) / 1000;
+                        const existing =
+                            paramBlocksWithValues.find((item) => item.id === block.id) ??
+                            paramBlocksWithValues.find(
+                                (item) => item.userBlockId === block.userBlockId,
+                            );
+                        return {
+                            id: block.id,
+                            startSec,
+                            endSec,
+                            averageValue:
+                                existing?.averageValue ?? valueForBlock(block.id, startSec, endSec),
+                            logicalCenterValue: existing?.manualValue,
+                            displayCenterValue:
+                                block.id === gestureRef.blockId
+                                    ? (gestureRef.displayCenterValue ?? null)
+                                    : null,
+                            displayCenterSnapToSemitone: existing?.manualValue == null,
+                            displayHeightPx:
+                                block.id === gestureRef.blockId
+                                    ? (gestureRef.displayHeightPx ?? null)
+                                    : null,
+                            selected:
+                                block.id === gestureRef.blockId ||
+                                (existing !== undefined &&
+                                    selectedParamBlockIdSet.has(existing.id) &&
+                                    block.id !== gestureRef.blockId),
+                            grouped: block.kind === "grouped",
+                        };
+                    });
+                };
+                const initialTargetFrame =
+                    resizeEdge === "left"
+                        ? toFrame(fullBlock.startSec, framePeriodMs)
+                        : toFrame(fullBlock.endSec, framePeriodMs);
                 const gestureRef = {
                     blockId: fullBlock.id,
                     edge: resizeEdge,
                     pointerClientX: hit.clientX,
                     startSec: fullBlock.startSec,
                     endSec: fullBlock.endSec,
-                    neighborStartSec: resizeCandidates[0]?.startSec ?? null,
-                    neighborEndSec: resizeCandidates[0]?.endSec ?? null,
-                    resizeCandidates,
-                    baseBlockSpans: hostRef.current?.getParamBlockHitRects().map((rect) => ({
-                        id: rect.id,
-                        startSec: rect.startSec,
-                        endSec: rect.endSec,
-                    })) ?? [
-                        {
-                            id: fullBlock.id,
-                            startSec: fullBlock.startSec,
-                            endSec: fullBlock.endSec,
-                        },
-                        ...resizeCandidates.map((block) => ({
-                            id: block.id,
-                            startSec: block.startSec,
-                            endSec: block.endSec,
-                        })),
-                    ],
-                    resizePlan,
-                    framePeriodMsBasis: paramBlockStateRef.current.framePeriodMs,
+                    neighborStartSec: null,
+                    neighborEndSec: null,
+                    resizeCandidates: [],
+                    baseBlockSpans,
+                    framePeriodMsBasis: framePeriodMs,
                     displayCenterValue: fullBlock.averageValue,
-                    // 块高按当前行高冻结（1.2 × row），A snapshot 的 heightPx 在
-                    // spec 里是视口坐标，可直接沿用；缺省时由 kernel 按本帧行高重算。
                     displayHeightPx:
                         hostRef.current
                             ?.getParamBlockHitRects()
                             .find((rect) => rect.id === fullBlock.id)?.heightPx ?? null,
-                    targetSec:
-                        resizeEdge === "left" ? resizePlan.block.startSec : resizePlan.block.endSec,
-                } as NonNullable<typeof paramBlockResizeRef.current>;
-                paramBlockResizeRef.current = gestureRef;
+                    targetSec: resizeEdge === "left" ? fullBlock.startSec : fullBlock.endSec,
+                    targetFrame: initialTargetFrame,
+                    resizePlan: null as ParamBlockGesturePlan | null,
+                };
+                const runResizePlan = (targetFrame: number) =>
+                    planParamBlockGesture({
+                        clips: paramBlockSourceClipsRef.current,
+                        edits: paramBlockStateRef.current.editSet,
+                        framePeriodMs,
+                        gesture: {
+                            kind: "resize",
+                            blockId: gestureRef.blockId,
+                            edge: gestureRef.edge,
+                            targetFrame,
+                        },
+                    });
                 let activateResize = false;
                 const resizeGesture = startPointerGesture({
                     pointerId: hit.pointerId,
@@ -4422,14 +4493,12 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                             activateResize = true;
                         }
                         /*
-                         * 边缘必须严格跟随指针的**像素位移**。用「指针工程秒 −
-                         * 按下工程秒」在横向缩放或视口刚滚动时会引入锚点误差；
-                         * px / pxPerSec 只依赖 pointerdown 时冻结的 pxPerSec。
+                         * 边缘严格跟随指针的像素位移。帧域目标避免“秒 -> 帧”
+                         * 的二次舍入；吸附仍走时间轴同一套网格。
                          */
                         const targetSec =
                             (gestureRef.edge === "left" ? gestureRef.startSec : gestureRef.endSec) +
                             dx / Math.max(1e-9, pxPerSecRef.current);
-                        const minBlockSec = paramBlockStateRef.current.framePeriodMs / 1000;
                         const snappedTarget = resolveParamBlockResizeTarget({
                             edge: gestureRef.edge,
                             startSec: gestureRef.startSec,
@@ -4456,119 +4525,64 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                 publishParamBlockSnapHighlight(result, sec);
                                 return result.sec;
                             },
-                            minBlockSec,
-                            neighborStartSec: gestureRef.neighborStartSec,
-                            neighborEndSec: gestureRef.neighborEndSec,
+                            minBlockSec: framePeriodMs / 1000,
                         });
-                        gestureRef.resizePlan = resolveParamBlockResizePlan({
-                            blockId: gestureRef.blockId,
-                            edge: gestureRef.edge,
-                            blockStartSec: gestureRef.startSec,
-                            blockEndSec: gestureRef.endSec,
-                            targetSec: snappedTarget,
-                            neighbors: gestureRef.resizeCandidates,
-                            minBlockSec,
-                        });
-                        gestureRef.targetSec =
-                            gestureRef.edge === "left"
-                                ? gestureRef.resizePlan.block.startSec
-                                : gestureRef.resizePlan.block.endSec;
-                        /*
-                         * 拖动中直接刷新宿主块规格。`invalidate()` 只重绘现有
-                         * GL 实例，不会重算 React memo；边缘必须在 onMove 里
-                         * 立刻写新几何，否则要等松手后的状态提交才动。
-                         */
+                        const targetFrame = toFrame(snappedTarget, framePeriodMs);
+                        gestureRef.targetSec = snappedTarget;
+                        gestureRef.targetFrame = targetFrame;
+                        const result = runResizePlan(targetFrame);
+                        if (!result.ok) return;
+                        gestureRef.resizePlan = result.plan;
                         const liveSpec = kernelDataRef.current.paramBlocks ?? paramBlockSpec;
                         if (liveSpec !== null) {
-                            const plan = gestureRef.resizePlan;
-                            if (plan === null) return;
-                            /*
-                             * 每帧都从**手势起点**重新投影；不能从上一帧 live
-                             * 列表继续，否则块一旦被判定删除，后续再拉回来时
-                             * 已经没有源块，预览会永远缺失到松手。
-                             */
-                            const displayBlocks = projectParamBlockResizeDisplay({
-                                baseBlocks: gestureRef.baseBlockSpans,
-                                blockId: gestureRef.blockId,
-                                plan,
-                            });
-                            const displayById = new Map(
-                                displayBlocks.map((block) => [block.id, block]),
-                            );
                             kernelDataRef.current.paramBlocks = {
                                 ...liveSpec,
-                                blocks: gestureRef.baseBlockSpans.flatMap((base) => {
-                                    const shown = displayById.get(base.id);
-                                    if (shown === undefined) return [];
-                                    const original =
-                                        liveSpec.blocks.find((block) => block.id === base.id) ??
-                                        latestParamBlockSpecRef.current?.blocks.find(
-                                            (block) => block.id === base.id,
-                                        );
-                                    return [
-                                        {
-                                            ...(original ?? {
-                                                id: base.id,
-                                                averageValue: null,
-                                                selected: false,
-                                                grouped: false,
-                                            }),
-                                            startSec: shown.startSec,
-                                            endSec: shown.endSec,
-                                            selected:
-                                                shown.selected ||
-                                                (original?.selected === true &&
-                                                    base.id !== gestureRef.blockId),
-                                        },
-                                    ];
-                                }),
+                                blocks: previewSpecBlocks(result.plan),
                             };
                         }
                         invalidate();
                     },
                     onEnd: (reason) => {
-                        const latest = paramBlocksWithValues.find(
-                            (block) => block.id === gestureRef.blockId,
-                        );
-                        if (reason === "up" && activateResize && latest !== undefined) {
-                            const minBlockSec =
-                                gestureRef.framePeriodMsBasis !== undefined
-                                    ? gestureRef.framePeriodMsBasis / 1000
-                                    : Math.max(0.04, 2 / Math.max(1, pxPerSecRef.current));
-                            const plan = gestureRef.resizePlan;
-                            const removeSelf = plan?.removeBlock === true;
-                            if (!removeSelf && plan !== null) {
+                        const plan = gestureRef.resizePlan;
+                        if (reason === "up" && activateResize && plan !== null) {
+                            if (plan.targetSpan !== null) {
+                                const fp = plan.viewAfter.framePeriodMs;
                                 paramBlockCommittedSpanRef.current = {
-                                    blockId: latest.id,
-                                    blockSpan: plan.block,
-                                    neighbors: plan.neighbors,
+                                    blockId: gestureRef.blockId,
+                                    blockSpan: {
+                                        startSec: (plan.targetSpan.startFrame * fp) / 1000,
+                                        endSec: (plan.targetSpan.endFrameExclusive * fp) / 1000,
+                                    },
+                                    neighbors: plan.viewAfter.blocks
+                                        .filter((block) => block.id !== gestureRef.blockId)
+                                        .map((block) => ({
+                                            id: block.id,
+                                            startSec: (block.startFrame * fp) / 1000,
+                                            endSec: (block.endFrameExclusive * fp) / 1000,
+                                            remove: false,
+                                        })),
                                     expiresAt: performance.now() + 800,
                                 };
                             }
-                            applyParamBlockEditRef.current?.(
-                                removeSelf
-                                    ? removeParamBlockAtMinWidth({
-                                          state: paramBlockStateRef.current,
-                                          blocks: paramBlocksWithValues,
-                                          blockId: latest.id,
-                                          clips: paramBlockSourceClipsRef.current,
-                                      })
-                                    : resizeParamBlock({
-                                          state: paramBlockStateRef.current,
-                                          block: latest,
-                                          edge: gestureRef.edge,
-                                          targetSec: gestureRef.targetSec,
-                                          clips: paramBlockSourceClipsRef.current,
-                                          targetSpan: plan?.block ?? null,
-                                          neighborSpans: plan?.neighbors,
-                                          neighborBlocks: gestureRef.resizeCandidates,
-                                          minBlockSec,
-                                      }),
-                            );
-                            if (removeSelf) {
+                            const state = paramBlockStateRef.current;
+                            const next: ParamBlockState = { ...state, editSet: plan.edits };
+                            setParamBlockState(next);
+                            paramBlockStateRef.current = next;
+                            persistParamBlockEdits(next);
+                            if (plan.removedIds.includes(gestureRef.blockId)) {
                                 setSelectedParamBlockIds((ids) =>
-                                    ids.filter((id) => id !== latest.id),
+                                    ids.filter((id) => id !== gestureRef.blockId),
                                 );
+                            }
+                            for (const warning of plan.warnings) {
+                                reportParamBlockDiagnostic({
+                                    code: warning,
+                                    gesture: "resize",
+                                    rootTrackId,
+                                    blockId: gestureRef.blockId,
+                                    frame: gestureRef.targetFrame,
+                                    edge: gestureRef.edge,
+                                });
                             }
                         }
                         paramBlockResizeRef.current = null;
@@ -4752,7 +4766,19 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
              * 失败属于实现层问题：开发构建打印，生产静默。
              */
             if (!result.ok) {
-                warnDev("[pianoRoll] param block edit failed: " + result.reason);
+                reportParamBlockDiagnostic({
+                    code: result.reason,
+                    gesture: "create",
+                    rootTrackId,
+                    blockId: null,
+                    frame: null,
+                });
+                publishParamBlockFeedback({
+                    text: tf("status_param_block_action_failed"),
+                    tone: "danger",
+                    tooltip: result.reason,
+                    holdMs: 8000,
+                });
                 return;
             }
             setParamBlockState(result.state);
@@ -4785,12 +4811,12 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
              */
             const rawSec = store.getState().session.playheadSec;
             const state = paramBlockStateRef.current;
-            const framePeriodMs = state.framePeriodMs;
+            const framePeriodMs = view.framePeriodMs;
             const clips = paramBlockSourceClipsRef.current;
             const blocks = blocksFromViewForPanel(rootTrackId, view);
             // 播放头不在任何可切的块内（含编组块）：静默。
-            const target = resolveSplittableParamBlockAt(blocks, rawSec, framePeriodMs);
-            if (target === null) return;
+            const target = resolveParamBlockSplitTarget(blocks, rawSec, framePeriodMs);
+            if (target === null || target.kind === "grouped") return;
 
             const pxPerSec = hostRef.current?.getAxis()?.pxPerSec ?? pxPerSecRef.current;
             const snap = resolveParamBlockTimeSnapResult({
@@ -4823,7 +4849,46 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             const splitSec = isStrictlyInsideParamBlock(target, snapped, framePeriodMs)
                 ? snapped
                 : rawSec;
-            applyParamBlockEdit(splitParamBlock({ state, block: target, sec: splitSec, clips }));
+            const plan = planParamBlockGesture({
+                clips,
+                edits: state.editSet,
+                framePeriodMs,
+                gesture: {
+                    kind: "split",
+                    blockId: target.id,
+                    frame: toFrame(splitSec, framePeriodMs),
+                },
+            });
+            if (!plan.ok) {
+                reportParamBlockDiagnostic({
+                    code: plan.error.code,
+                    gesture: "split",
+                    rootTrackId,
+                    blockId: target.id,
+                    frame: toFrame(splitSec, framePeriodMs),
+                    ...(plan.error.detail === undefined ? {} : { detail: plan.error.detail }),
+                });
+                if (plan.error.code === "split_too_close_to_edge") {
+                    publishParamBlockFeedback({
+                        text: tf("status_param_block_split_too_close"),
+                        tone: "warning",
+                        holdMs: 3000,
+                    });
+                } else {
+                    publishParamBlockFeedback({
+                        text: tf("status_param_block_action_failed"),
+                        tone: "danger",
+                        tooltip: plan.error.detail ?? plan.error.code,
+                        holdMs: 8000,
+                    });
+                }
+                return;
+            }
+            const next: ParamBlockState = { ...state, editSet: plan.plan.edits };
+            setParamBlockState(next);
+            paramBlockStateRef.current = next;
+            persistParamBlockEdits(next);
+            setParamBlockContextMenu(null);
         },
         [
             applyParamBlockEdit,
@@ -5237,8 +5302,20 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
          */
         const resizing = paramBlockResizeRef.current;
         if (resizing !== null && paramView !== null) {
-            const resizeStart = resizing.resizePlan?.block.startSec ?? resizing.startSec;
-            const resizeEnd = resizing.resizePlan?.block.endSec ?? resizing.endSec;
+            const resizeStart =
+                resizing.resizePlan?.targetSpan !== null &&
+                resizing.resizePlan?.targetSpan !== undefined
+                    ? (resizing.resizePlan.targetSpan.startFrame *
+                          resizing.resizePlan.viewAfter.framePeriodMs) /
+                      1000
+                    : resizing.startSec;
+            const resizeEnd =
+                resizing.resizePlan?.targetSpan !== null &&
+                resizing.resizePlan?.targetSpan !== undefined
+                    ? (resizing.resizePlan.targetSpan.endFrameExclusive *
+                          resizing.resizePlan.viewAfter.framePeriodMs) /
+                      1000
+                    : resizing.endSec;
             if (resizing.blockId === "__create__") {
                 const value =
                     resizing.value ??
@@ -5375,33 +5452,46 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                             grouped: block.kind === "grouped",
                         }));
                     }
-                    const display = projectParamBlockResizeDisplay({
-                        baseBlocks: resizing.baseBlockSpans,
-                        blockId: resizing.blockId,
-                        plan,
-                    });
-                    return display.map((shown) => {
-                        const block = paramBlocksWithValues.find(
-                            (candidate) => candidate.id === shown.id,
-                        );
+                    const fp = plan.viewAfter.framePeriodMs;
+                    return plan.viewAfter.blocks.map((block) => {
+                        const startSec = (block.startFrame * fp) / 1000;
+                        const endSec = (block.endFrameExclusive * fp) / 1000;
+                        const existing =
+                            paramBlocksWithValues.find((item) => item.id === block.id) ??
+                            paramBlocksWithValues.find(
+                                (item) => item.userBlockId === block.userBlockId,
+                            );
                         return {
-                            id: shown.id,
-                            startSec: shown.startSec,
-                            endSec: shown.endSec,
-                            averageValue: block?.averageValue ?? null,
-                            logicalCenterValue: block?.manualValue,
+                            id: block.id,
+                            startSec,
+                            endSec,
+                            averageValue:
+                                existing?.averageValue ??
+                                paramBlocksWithValues.find(
+                                    (item) => item.startSec < endSec && item.endSec > startSec,
+                                )?.averageValue ??
+                                (Number.isFinite(bounds.min) && Number.isFinite(bounds.max)
+                                    ? (bounds.min + bounds.max) / 2
+                                    : editParam === "pitch"
+                                      ? 60
+                                      : 0),
+                            logicalCenterValue: existing?.manualValue,
                             displayCenterValue:
-                                shown.id === resizing.blockId
+                                block.id === resizing.blockId
                                     ? (resizing.displayCenterValue ?? null)
                                     : null,
                             /* 时间伸缩不改音高，显示中心保持吸附行心。 */
-                            displayCenterSnapToSemitone: block?.manualValue == null,
+                            displayCenterSnapToSemitone: existing?.manualValue == null,
                             displayHeightPx:
-                                shown.id === resizing.blockId
+                                block.id === resizing.blockId
                                     ? (resizing.displayHeightPx ?? null)
                                     : null,
-                            selected: shown.selected,
-                            grouped: block?.kind === "grouped",
+                            selected:
+                                block.id === resizing.blockId ||
+                                (resizing.baseBlockSpans.find((item) => item.id === block.id)
+                                    ?.selected === true &&
+                                    block.id !== resizing.blockId),
+                            grouped: block.kind === "grouped",
                         };
                     });
                 })(),

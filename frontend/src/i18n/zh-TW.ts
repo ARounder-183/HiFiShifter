@@ -750,6 +750,7 @@ export const zhTW = {
     param_blocks_select_all: "全選區塊",
     param_blocks_deselect: "取消選取區塊",
     status_param_block_edit_rejected: "參數區塊編輯被拒絕",
+    status_param_block_split_too_close: "此位置切分太靠近區塊邊緣",
     status_param_block_action_failed: "參數區塊操作失敗",
     kb_param_block_split: "切開參數區塊",
     kb_param_block_delete: "刪除參數區塊",

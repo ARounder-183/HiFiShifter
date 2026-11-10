@@ -781,6 +781,7 @@ export const jaJP = {
     param_blocks_select_all: "すべてのブロックを選択",
     param_blocks_deselect: "ブロックの選択を解除",
     status_param_block_edit_rejected: "パラメータブロック編集が拒否されました",
+    status_param_block_split_too_close: "分割位置がブロックの端に近すぎます",
     status_param_block_action_failed: "パラメータブロック操作に失敗しました",
     kb_param_block_split: "パラメータブロックを分割",
     kb_param_block_delete: "パラメータブロックを削除",
