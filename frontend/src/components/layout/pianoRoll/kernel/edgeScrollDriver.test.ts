@@ -395,4 +395,56 @@ describe("createEdgeScrollDriver · 二维", () => {
         expect(h.left()).toBe(500);
         expect(h.top()).toBe(500);
     });
+
+    it("uses the dynamic vertical speed getter on every step", () => {
+        let top = 500;
+        let speed = 300;
+        const driver = createEdgeScrollDriver({
+            getBounds: () => ({ left: 100, right: 1100, top: 100, bottom: 900 }),
+            getScrollLeft: () => 500,
+            setScrollLeft: () => {},
+            getMaxScrollLeft: () => 10_000,
+            getMinScrollLeft: () => 0,
+            getScrollTop: () => top,
+            setScrollTop: (next) => {
+                top = next;
+            },
+            getMaxScrollTop: () => 10_000,
+            getMinScrollTop: () => 0,
+            getMaxSpeedYPxPerSec: () => speed,
+        });
+
+        expect(driver.step(600, 102)).toBe(true);
+        expect(top).toBeLessThan(500);
+
+        speed = 0;
+        const frozen = top;
+        expect(driver.step(600, 102)).toBe(false);
+        expect(top).toBe(frozen);
+    });
+
+    it("does not schedule frames when the value axis has no movable range", () => {
+        let top = 0;
+        const driver = createEdgeScrollDriver({
+            getBounds: () => ({ left: 100, right: 1100, top: 100, bottom: 900 }),
+            getScrollLeft: () => 0,
+            setScrollLeft: () => {},
+            getMaxScrollLeft: () => 0,
+            getMinScrollLeft: () => 0,
+            getScrollTop: () => top,
+            setScrollTop: (next) => {
+                top = next;
+            },
+            getMaxScrollTop: () => 0,
+            getMinScrollTop: () => 0,
+            getMaxSpeedYPxPerSec: () => 500,
+            requestFrame: () => 1,
+            cancelFrame: () => {},
+        });
+
+        expect(driver.step(600, 102)).toBe(false);
+        driver.track(600, 102);
+        expect(driver.isRunning()).toBe(false);
+        expect(top).toBe(0);
+    });
 });

@@ -29,6 +29,11 @@ export interface EdgeScrollDriverOptions {
     onScrolled?: (clientX: number, clientY?: number) => void;
     maxSpeedPxPerSec?: number;
     maxSpeedYPxPerSec?: number;
+    /**
+     * 动态竖向速度（px/秒）。参数编辑器的值域视口会缩放，速度必须按当前
+     * span 现算；固定值只保留给不需要动态速度的调用方。
+     */
+    getMaxSpeedYPxPerSec?: () => number;
     now?: () => number;
     requestFrame?: (cb: () => void) => number;
     cancelFrame?: (id: number) => void;
@@ -54,7 +59,11 @@ export function createEdgeScrollDriver(options: EdgeScrollDriverOptions): EdgeSc
     const requestFrame = options.requestFrame ?? ((cb: () => void) => requestAnimationFrame(cb));
     const cancelFrame = options.cancelFrame ?? ((id: number) => cancelAnimationFrame(id));
     const maxSpeedX = options.maxSpeedPxPerSec ?? EDGE_SCROLL_MAX_SPEED_PX_PER_SEC;
-    const maxSpeedY = options.maxSpeedYPxPerSec ?? maxSpeedX;
+    const fixedMaxSpeedY = options.maxSpeedYPxPerSec ?? maxSpeedX;
+    const resolveMaxSpeedY = (): number => {
+        const value = options.getMaxSpeedYPxPerSec?.() ?? fixedMaxSpeedY;
+        return Number.isFinite(value) && value > 0 ? value : 0;
+    };
 
     let rafId: number | null = null;
     let lastClientX: number | null = null;
@@ -106,8 +115,10 @@ export function createEdgeScrollDriver(options: EdgeScrollDriverOptions): EdgeSc
             frameMs,
             maxSpeedPxPerSec: maxSpeedX,
         });
+        const maxSpeedYNow = resolveMaxSpeedY();
         const deltaY =
             hasVertical() &&
+            maxSpeedYNow > 0 &&
             lastClientY !== null &&
             bounds.top !== undefined &&
             bounds.bottom !== undefined
@@ -116,7 +127,7 @@ export function createEdgeScrollDriver(options: EdgeScrollDriverOptions): EdgeSc
                       minPx: bounds.top,
                       maxPx: bounds.bottom,
                       frameMs,
-                      maxSpeedPxPerSec: maxSpeedY,
+                      maxSpeedPxPerSec: maxSpeedYNow,
                   })
                 : 0;
         lastStepAtMs = atMs;
@@ -125,20 +136,24 @@ export function createEdgeScrollDriver(options: EdgeScrollDriverOptions): EdgeSc
             const current = options.getScrollLeft();
             const max = options.getMaxScrollLeft();
             const min = options.getMinScrollLeft();
-            const next = min >= max ? min : Math.min(max, Math.max(min, current + deltaX));
-            if (Math.abs(next - current) >= MIN_STEP_PX) {
-                options.setScrollLeft(next);
-                moved = true;
+            if (max > min) {
+                const next = Math.min(max, Math.max(min, current + deltaX));
+                if (Math.abs(next - current) >= MIN_STEP_PX) {
+                    options.setScrollLeft(next);
+                    moved = true;
+                }
             }
         }
         if (Math.abs(deltaY) >= MIN_STEP_PX && hasVertical()) {
             const current = options.getScrollTop!();
             const max = options.getMaxScrollTop!();
             const min = options.getMinScrollTop!();
-            const next = min >= max ? min : Math.min(max, Math.max(min, current + deltaY));
-            if (Math.abs(next - current) >= MIN_STEP_PX) {
-                options.setScrollTop!(next);
-                moved = true;
+            if (max > min) {
+                const next = Math.min(max, Math.max(min, current + deltaY));
+                if (Math.abs(next - current) >= MIN_STEP_PX) {
+                    options.setScrollTop!(next);
+                    moved = true;
+                }
             }
         }
         if (moved) emitScrolled(clientX, lastClientY, onScrolled);
@@ -148,7 +163,12 @@ export function createEdgeScrollDriver(options: EdgeScrollDriverOptions): EdgeSc
     const pointerInBand = (clientX: number, clientY: number | null): boolean => {
         const bounds = options.getBounds();
         if (!bounds) return false;
+        const horizontalCanScroll = options.getMaxScrollLeft() > options.getMinScrollLeft();
+        const verticalCanScroll =
+            hasVertical() && options.getMaxScrollTop!() > options.getMinScrollTop!();
+        if (!horizontalCanScroll && !verticalCanScroll) return false;
         const horizontal =
+            horizontalCanScroll &&
             resolveAxisEdgeScrollDeltaPx({
                 pointerPx: clientX,
                 minPx: bounds.left,
@@ -156,8 +176,10 @@ export function createEdgeScrollDriver(options: EdgeScrollDriverOptions): EdgeSc
                 frameMs: DEFAULT_FRAME_MS,
                 maxSpeedPxPerSec: maxSpeedX,
             }) !== 0;
+        const maxSpeedYNow = resolveMaxSpeedY();
         const vertical =
-            hasVertical() &&
+            verticalCanScroll &&
+            maxSpeedYNow > 0 &&
             clientY !== null &&
             bounds.top !== undefined &&
             bounds.bottom !== undefined &&
@@ -166,7 +188,7 @@ export function createEdgeScrollDriver(options: EdgeScrollDriverOptions): EdgeSc
                 minPx: bounds.top,
                 maxPx: bounds.bottom,
                 frameMs: DEFAULT_FRAME_MS,
-                maxSpeedPxPerSec: maxSpeedY,
+                maxSpeedPxPerSec: maxSpeedYNow,
             }) !== 0;
         return horizontal || vertical;
     };

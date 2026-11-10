@@ -11,7 +11,11 @@ import {
     isChildPitchOffsetDegreesParam,
 } from "../childPitchOffsetParams";
 import { createEdgeScrollDriver } from "../kernel/edgeScrollDriver";
-import { verticalScrollTopFromCenter } from "../verticalScrollMapping";
+import {
+    valueAxisScrollable,
+    valueEdgeScrollMaxSpeedPxPerSec,
+    verticalScrollTopFromCenter,
+} from "../verticalScrollMapping";
 import { getDrawPreviewValue } from "../paramValuePreviewLogic";
 import { timeToFrame } from "../utils";
 import { resolveClipSelectionModifiers } from "../../../../features/keybindings/clipSelectionModifiers";
@@ -307,8 +311,22 @@ export function handleCanvasPointerDown(
             });
         },
         setScrollTop: (next) => applyEdgeScrollTop(next),
-        getMaxScrollTop: () => verticalScrollRangePx,
+        // span >= range 时值域中心不可移动：可滚动范围必须归零，否则驱动会
+        // 每帧写入 scrollTop、读回同一个中点，rAF 永不停止。
+        getMaxScrollTop: () => {
+            const mapping = verticalMapping();
+            return valueAxisScrollable(mapping) ? verticalScrollRangePx : 0;
+        },
         getMinScrollTop: () => 0,
+        getMaxSpeedYPxPerSec: () => {
+            const mapping = verticalMapping();
+            return valueEdgeScrollMaxSpeedPxPerSec({
+                min: mapping.min,
+                max: mapping.max,
+                span: mapping.span,
+                scrollRangePx: verticalScrollRangePx,
+            });
+        },
     });
 
     // 中键平移必须早于块命中：块工具下中键仍应移动视图，而不是被当成块点击。

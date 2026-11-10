@@ -239,7 +239,7 @@ import type {
 } from "../kernel/host/pianoRollKernelData";
 import { resolvePanelRenderViewport } from "../kernel/viewportSource";
 import { NOTE_NAMES_SHARP, PARAM_EDITOR_VERTICAL_SCROLL_RANGE_PX } from "./panelHelpers";
-import { centerFromVerticalScrollTop } from "../verticalScrollMapping";
+import { centerFromVerticalScrollTop, valueAxisScrollable } from "../verticalScrollMapping";
 import { usePianoRollParamGates } from "./usePianoRollParamGates";
 import { usePianoRollScrollerWiring } from "./usePianoRollScrollerWiring";
 import { usePianoRollSelectionActions } from "./usePianoRollSelectionActions";
@@ -1011,6 +1011,15 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             const param = editParamRef.current;
             const bounds = getParamValueBoundsForScrollbar(param);
             const current = getCurrentViewportForScrollbar(param);
+            if (
+                !valueAxisScrollable({
+                    min: bounds.min,
+                    max: bounds.max,
+                    span: current.span,
+                })
+            ) {
+                return;
+            }
             const center = centerFromVerticalScrollTop({
                 min: bounds.min,
                 max: bounds.max,
