@@ -4940,7 +4940,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     );
     restoreParamBlocksRef.current = restoreParamBlocks;
     const applyParamBlockEdit = useCallback(
-        (result: ReturnType<typeof splitParamBlock>) => {
+        (result: ReturnType<typeof splitParamBlock>, gesture: "split" | "create" = "split") => {
             /*
              * 能走到这里说明前置条件已经通过（目标块由调用方按位置解析），
              * 失败属于实现层问题：开发构建打印，生产静默。
@@ -4948,7 +4948,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             if (!result.ok) {
                 reportParamBlockDiagnostic({
                     code: result.reason,
-                    gesture: "create",
+                    gesture,
                     rootTrackId,
                     blockId: null,
                     frame: null,
