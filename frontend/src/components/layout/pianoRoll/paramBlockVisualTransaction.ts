@@ -11,6 +11,8 @@ import { reportParamBlockDiagnostic } from "./paramBlockDiagnostics";
 
 export interface ParamBlockEpoch {
     readonly rootTrackId: string | null;
+    /** Parameter name; pitch and volume must never share a visual transaction. */
+    readonly param: string;
     readonly layoutKey: string | null;
     readonly editRevision: number;
     /**
@@ -36,6 +38,11 @@ export interface ParamBlockVisualTransaction {
     spec: PianoRollParamBlockSpec;
     phase: ParamBlockVisualTransactionPhase;
     readonly startedAt: number;
+    /**
+     * Edit revision produced by this transaction's own commit. A transaction
+     * may survive that revision, but never a third-party structural edit.
+     */
+    ownedEditRevision: number | null;
     expectedEditRevision?: number;
     expectedGeometrySignature?: string;
     committedSegments?: readonly {
@@ -47,6 +54,7 @@ export interface ParamBlockVisualTransaction {
 export function sameParamBlockEpoch(a: ParamBlockEpoch, b: ParamBlockEpoch): boolean {
     return (
         a.rootTrackId === b.rootTrackId &&
+        a.param === b.param &&
         a.layoutKey === b.layoutKey &&
         a.editRevision === b.editRevision &&
         a.externalHistoryToken === b.externalHistoryToken &&
@@ -63,6 +71,7 @@ export function sameParamBlockEpoch(a: ParamBlockEpoch, b: ParamBlockEpoch): boo
 export function sameParamBlockEpochLayout(a: ParamBlockEpoch, b: ParamBlockEpoch): boolean {
     return (
         a.rootTrackId === b.rootTrackId &&
+        a.param === b.param &&
         a.layoutKey === b.layoutKey &&
         a.externalHistoryToken === b.externalHistoryToken &&
         Math.abs(a.framePeriodMs - b.framePeriodMs) < 1e-9
@@ -73,9 +82,28 @@ export function sameParamBlockEpochLayout(a: ParamBlockEpoch, b: ParamBlockEpoch
 export function sameParamBlockExternalEpoch(a: ParamBlockEpoch, b: ParamBlockEpoch): boolean {
     return (
         a.rootTrackId === b.rootTrackId &&
+        a.param === b.param &&
         a.layoutKey === b.layoutKey &&
         a.externalHistoryToken === b.externalHistoryToken &&
         Math.abs(a.framePeriodMs - b.framePeriodMs) < 1e-9
+    );
+}
+
+/**
+ * A visual may survive its own commit changing editRevision, but not a
+ * third-party structural edit. External edits do not know the owned revision,
+ * so they fail this check immediately.
+ */
+export function isParamBlockVisualEpochCurrent(args: {
+    readonly epoch: ParamBlockEpoch;
+    readonly current: ParamBlockEpoch;
+    readonly ownedEditRevision: number | null;
+}): boolean {
+    if (!sameParamBlockEpochLayout(args.epoch, args.current)) return false;
+    if (args.current.editRevision === args.epoch.editRevision) return true;
+    return (
+        args.ownedEditRevision !== null &&
+        args.current.editRevision === args.ownedEditRevision
     );
 }
 

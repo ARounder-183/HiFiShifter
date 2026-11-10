@@ -34,6 +34,12 @@ export type SnapModifiers = {
 export type ParamBlockDragSnapshot = {
     readonly key: string;
     readonly epoch: ParamBlockEpoch;
+    /**
+     * Edit revision produced by this gesture's own commit. Mutable so the
+     * commit path can keep the visual alive while a third-party structural
+     * edit invalidates it immediately.
+     */
+    ownedEditRevision: number | null;
     readonly startedAt: number;
     readonly ids: ReadonlySet<string>;
     readonly members: readonly ParamBlockMember[];
@@ -305,6 +311,7 @@ export function beginParamBlockDrag(
     const snapshot: ParamBlockDragSnapshot = {
         key: pv.key,
         epoch: paramBlockEpoch,
+        ownedEditRevision: null,
         startedAt: performance.now(),
         ids: new Set(dragIds),
         members: dragMembers.map((member) => ({ ...member })),
@@ -639,6 +646,7 @@ export function beginParamBlockDrag(
          */
         const commitCenterBlockId = args.anchorBlockId;
         const stateBeforeCommit = paramBlockStateRef.current;
+        let appliedCommitState: ParamBlockState | null = null;
         const commitStartedAt = performance.now();
         const handoff: ParamBlockDragCommit = {
             blockId: commitCenterBlockId,
@@ -777,8 +785,13 @@ export function beginParamBlockDrag(
                             : paramBlockStateRef.current;
                     if (commitState !== paramBlockStateRef.current) {
                         // 本地先落位：块的显示中心立刻到位，不必等回包。
+                        appliedCommitState = commitState;
                         paramBlockStateRef.current = commitState;
                         setParamBlockState(commitState);
+                        const dragSnapshot = paramBlockDragSnapshotRef.current;
+                        if (dragSnapshot !== null) {
+                            dragSnapshot.ownedEditRevision = commitState.editSet.revision;
+                        }
                     }
                     if (context.commitLineCurve) {
                         const revision = curves[0]?.authorityRevision;
@@ -832,9 +845,20 @@ export function beginParamBlockDrag(
                             gestureToken,
                         })
                     ) {
-                        // 曲线写失败时回滚本地 logicalCenters，不能让块停在未落库位置。
-                        paramBlockStateRef.current = stateBeforeCommit;
-                        setParamBlockState(stateBeforeCommit);
+                        // 曲线写失败时回滚本地 logicalCenters，但不能覆盖提交期间
+                        // 已经落地的第三方结构编辑。只允许回滚到本手势的起点或
+                        // 本手势自己刚应用的状态。
+                        const current = paramBlockStateRef.current;
+                        const canRollback =
+                            current === stateBeforeCommit ||
+                            (appliedCommitState !== null &&
+                                current === appliedCommitState) ||
+                            current.editSet.revision ===
+                                stateBeforeCommit.editSet.revision ||
+                            (appliedCommitState !== null &&
+                                current.editSet.revision ===
+                                    appliedCommitState.editSet.revision);
+                        if (canRollback) setParamBlockState(stateBeforeCommit);
                         const pvNow = paramViewRef.current;
                         if (pvNow !== null) resetLiveEditPreview(pvNow);
                         paramBlockDragCommitRef.current = null;

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { PianoRollParamBlockSpec } from "./kernel/host/pianoRollKernelData";
 import {
     advanceParamBlockVisualTransaction,
+    isParamBlockVisualEpochCurrent,
     paramBlockSpecsMatchGeometry,
     sameParamBlockEpoch,
     sameParamBlockEpochLayout,
@@ -12,6 +13,7 @@ import {
 
 const epoch: ParamBlockEpoch = {
     rootTrackId: "root",
+    param: "pitch",
     layoutKey: "layout-a",
     editRevision: 3,
     externalHistoryToken: "0:0",
@@ -49,6 +51,7 @@ function tx(overrides: Partial<ParamBlockVisualTransaction> = {}): ParamBlockVis
         spec: spec(),
         phase: "awaiting-authority",
         startedAt: 0,
+        ownedEditRevision: null,
         ...overrides,
     };
 }
@@ -130,6 +133,37 @@ describe("paramBlockVisualTransaction", () => {
         expect(sameParamBlockEpochLayout(epoch, { ...epoch, externalHistoryToken: "1:0" })).toBe(
             false,
         );
+    });
+
+    it("rejects a transaction when the parameter changes", () => {
+        expect(sameParamBlockEpochLayout(epoch, { ...epoch, param: "volume" })).toBe(false);
+        expect(
+            shouldUseParamBlockVisualTransaction(tx(), { ...epoch, param: "volume" }),
+        ).toBe(false);
+    });
+
+    it("accepts base and owned edit revisions, but not a third-party edit", () => {
+        expect(
+            isParamBlockVisualEpochCurrent({
+                epoch,
+                current: epoch,
+                ownedEditRevision: null,
+            }),
+        ).toBe(true);
+        expect(
+            isParamBlockVisualEpochCurrent({
+                epoch,
+                current: { ...epoch, editRevision: 4 },
+                ownedEditRevision: 4,
+            }),
+        ).toBe(true);
+        expect(
+            isParamBlockVisualEpochCurrent({
+                epoch,
+                current: { ...epoch, editRevision: 5 },
+                ownedEditRevision: 4,
+            }),
+        ).toBe(false);
     });
 
     it("compares only observable geometry, not presentation fields", () => {
