@@ -3033,6 +3033,23 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             document.removeEventListener("visibilitychange", onVisibility);
         };
     }, []);
+    /**
+     * The only writer for parameter-block selection.
+     *
+     * Keeping selectionRef and selectionUi in one function removes the window
+     * where a command reads the ref while the UI still shows the old range (or
+     * vice versa). It also keeps session.paramSelectionActive in sync for
+     * immediate Ctrl+C / Ctrl+X after a block click.
+     */
+    const setParamBlockSelection = useCallback(
+        (next: ParamSelection | null) => {
+            selectionRef.current = next;
+            setSelectionUi(next);
+            dispatch(setParamSelectionActive(next !== null));
+            invalidate();
+        },
+        [dispatch, invalidate, selectionRef, setSelectionUi],
+    );
     useEffect(() => {
         if (lastParamBlockAuthorityRef.current === paramBlockAuthorityKey) return;
         lastParamBlockAuthorityRef.current = paramBlockAuthorityKey;
@@ -3041,17 +3058,14 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         paramBlockVisualTransactionRef.current = null;
         paramBlockResizeRef.current = null;
         paramBlockAnchorRef.current = null;
-        selectionRef.current = null;
-        setSelectionUi(null);
+        setParamBlockSelection(null);
         setParamBlockContextMenu(null);
-    }, [paramBlockAuthorityKey, selectionRef, setSelectionUi]);
+    }, [paramBlockAuthorityKey, setParamBlockSelection]);
     const clearParamBlockSelection = useCallback(() => {
         paramBlockAnchorRef.current = null;
-        selectionRef.current = null;
-        setSelectionUi(null);
+        setParamBlockSelection(null);
         setParamBlockContextMenu(null);
-        invalidate();
-    }, [invalidate, selectionRef, setSelectionUi]);
+    }, [setParamBlockSelection]);
     const previousBlockToolActiveRef = useRef(paramBlockToolActive);
     useEffect(() => {
         if (previousBlockToolActiveRef.current === paramBlockToolActive) return;
@@ -3067,12 +3081,11 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 selectionRef.current,
             );
             if (next.length > 0) {
-                selectionRef.current = next;
-                setSelectionUi(next);
+                setParamBlockSelection(next);
             }
         }
         invalidate();
-    }, [invalidate, paramBlockToolActive, selectionRef, setSelectionUi]);
+    }, [invalidate, paramBlockToolActive, selectionRef, setParamBlockSelection]);
     const toggleParamBlocksVisible = useCallback(() => {
         dispatch(toggleParamBlocksVisibleAction());
         void dispatch(persistUiSettings());
@@ -3526,19 +3539,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             paramBlockToolActive ? paramBlockIdsInSelection(selectionFrameBlocks, selectionUi) : [],
         [paramBlockToolActive, selectionFrameBlocks, selectionUi],
     );
-    const setParamBlockSelection = useCallback(
-        (next: ParamSelection | null) => {
-            selectionRef.current = next;
-            setSelectionUi(next);
-            /*
-             * 复制/剪切路由读的是 session.paramSelectionActive；等 useEffect
-             * 下一帧同步会让"块点击后立刻 Ctrl+C"仍按旧状态走时间轴。
-             */
-            dispatch(setParamSelectionActive(next !== null));
-            invalidate();
-        },
-        [dispatch, invalidate, selectionRef, setSelectionUi],
-    );
     useEffect(() => {
         if (!paramBlockToolActive || selectionUi === null) return;
         if (paramBlockAnchorRef.current !== null) return;
@@ -3762,7 +3762,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 onPitchSnapGuide: (target) =>
                     publishParamBlockPitchSnapHighlight(
                         target,
-                        getParamValueBoundsForScrollbar(editParam),
+                        getParamValueBoundsForScrollbarImpl({ processorParamsRef }, editParam),
                     ),
                 onError: (error) => {
                     publishParamBlockFeedback({
