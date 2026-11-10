@@ -4,7 +4,7 @@
 //! 关系：`types::ParamBlockEditSet::replace` 与 `compose` 都调用本文件。
 //! 维护约束：错误字符串统一以 `Invalid: ` 开头；绝不 panic。
 
-use super::types::{BlockGeometry, ParamBlockEditSet, ParamBlockView, UserParamBlock};
+use super::types::{BlockGeometry, ParamBlockEditSet, ParamBlockView, TakeSpan, UserParamBlock};
 
 pub const MAX_BLOCKS: usize = 20_000;
 pub const MAX_MEMBERS: usize = 20_000;
@@ -49,7 +49,7 @@ fn validate_block(
             if members.is_empty() || members.len() > MAX_MEMBERS {
                 return Err("Invalid: parameter block members".into());
             }
-            for member in members {
+            for (index, member) in members.iter().enumerate() {
                 if member.clip_id.is_empty()
                     || member.take_id.is_empty()
                     || !member.source_start_sec.is_finite()
@@ -57,6 +57,21 @@ fn validate_block(
                     || member.source_end_sec <= member.source_start_sec
                 {
                     return Err("Invalid: parameter block source span".into());
+                }
+                /*
+                 * 同一块内重复/重叠成员会让 compose 的 run 顺序与编辑结果不确定：
+                 * 重复成员会画两次、重叠成员在伸缩时会被裁剪成不可预测的片段。
+                 * 相邻（end == start）是合法几何，只拒绝真正的重叠。
+                 */
+                for other in &members[..index] {
+                    if member.clip_id == other.clip_id
+                        && member.take_id == other.take_id
+                        && member.cycle == other.cycle
+                        && member.source_start_sec < other.source_end_sec - 1e-9
+                        && other.source_start_sec < member.source_end_sec - 1e-9
+                    {
+                        return Err("Invalid: parameter block overlapping members".into());
+                    }
                 }
             }
         }
@@ -70,6 +85,9 @@ fn validate_block(
             {
                 return Err("Invalid: parameter block root span".into());
             }
+            if block.base_cover.is_some() {
+                return Err("Invalid: root block base cover".into());
+            }
         }
     }
     if block
@@ -81,12 +99,42 @@ fn validate_block(
     if block.value.is_some_and(|value| !value.is_finite()) {
         return Err("Invalid: parameter block value".into());
     }
+    if let Some(cover) = &block.base_cover {
+        if cover.spans.is_empty() || cover.spans.len() > MAX_MEMBERS {
+            return Err("Invalid: parameter block base cover".into());
+        }
+        validate_cover_spans(&cover.spans)?;
+    }
     if let Some(children) = &block.grouped_from {
         if children.len() < 2 {
             return Err("Invalid: parameter block group members".into());
         }
         for child in children {
             validate_block(child, depth + 1, total_blocks, ids)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_cover_spans(spans: &[TakeSpan]) -> Result<(), String> {
+    for (index, span) in spans.iter().enumerate() {
+        if span.clip_id.is_empty()
+            || span.take_id.is_empty()
+            || !span.source_start_sec.is_finite()
+            || !span.source_end_sec.is_finite()
+            || span.source_end_sec <= span.source_start_sec
+        {
+            return Err("Invalid: parameter block base cover span".into());
+        }
+        for other in &spans[..index] {
+            if span.clip_id == other.clip_id
+                && span.take_id == other.take_id
+                && span.cycle == other.cycle
+                && (span.source_start_sec - other.source_start_sec).abs() <= 1e-9
+                && (span.source_end_sec - other.source_end_sec).abs() <= 1e-9
+            {
+                return Err("Invalid: parameter block base cover duplicate".into());
+            }
         }
     }
     Ok(())

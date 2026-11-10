@@ -92,6 +92,18 @@ pub enum BlockGeometry {
     Root { span: RootSpan },
 }
 
+/// 用户块对基块的“所有权覆盖”。
+///
+/// - `full = true`：这些 span 命中完整基块时，隐藏整个基块；即使可见几何被
+///   缩短，缩短掉的部分也保持空白；
+/// - `full = false`：只覆盖这些 span 自身的投影区间（基块片段）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BaseCover {
+    pub spans: Vec<TakeSpan>,
+    pub full: bool,
+}
+
 /// 用户声明式块。
 ///
 /// 【单一事实】用户只声明“哪些源域区间属于同一个块”。最终显示区间、成员投影、
@@ -118,6 +130,9 @@ pub struct UserParamBlock {
     /// 同一 revision 内创建多个块时的确定性排序键。
     #[serde(default)]
     pub created_seq: u64,
+    /// 从基块派生时记录“我替代了哪一段基块”。普通手工块为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_cover: Option<BaseCover>,
     /// 可逆编组快照：本块由哪些原始用户块编组而来。
     ///
     /// 【只存源域】快照中的块仍是普通 `UserParamBlock`，绝不存绝对帧；
@@ -306,6 +321,9 @@ pub struct ProjectedParamBlock {
     pub members: Vec<ProjectedMember>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<f64>,
+    /// 基块候选的所有权覆盖；用户块为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_cover: Option<BaseCover>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -318,8 +336,17 @@ pub struct ProjectedMember {
     pub source_end_sec: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub syllable_id: Option<String>,
+    /// 成员的语义标签；编辑回写时保留。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<BlockLabel>,
     pub start_frame: u32,
     pub end_frame_exclusive: u32,
+    /// 该可见帧区间起点 / 终点对应的源域秒（有方向；倒放时 start > end）。
+    pub frame_source_start_sec: f64,
+    pub frame_source_end_sec: f64,
+    /// 可见区间覆盖的源域范围（source 顺序，供 BaseCover / 片段物化使用）。
+    pub visible_source_start_sec: f64,
+    pub visible_source_end_sec: f64,
 }
 
 /// 视图块的编辑能力标签。

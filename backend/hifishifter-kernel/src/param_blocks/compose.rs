@@ -6,10 +6,12 @@
 
 use super::base::{base_blocks_for_root, root_analysis_pending};
 use super::layout::layout_key;
-use super::projection::{project_span, ClipProjection};
+use super::projection::{
+    normalize_loop_span, project_span, source_at_projected_frame, ClipProjection,
+};
 use super::types::{
-    BlockGeometry, ParamBlockEditSet, ParamBlockView, ProjectedBlockKind, ProjectedMember,
-    ProjectedParamBlock, TakeSpan, UserParamBlock,
+    BaseCover, BlockGeometry, ParamBlockEditSet, ParamBlockView, ProjectedBlockKind,
+    ProjectedMember, ProjectedParamBlock, TakeSpan, UserParamBlock,
 };
 use super::validate::validate_view;
 use crate::state::TimelineState;
@@ -32,13 +34,26 @@ struct Candidate {
     priority: u8,
     seq: u64,
     z_order: u32,
+    base_cover: Option<BaseCover>,
 }
 
 fn interval_width(start: u32, end: u32) -> u32 {
     end.saturating_sub(start)
 }
 
-fn member_from(span: &TakeSpan, start: u32, end: u32) -> ProjectedMember {
+fn member_from(
+    span: &TakeSpan,
+    start: u32,
+    end: u32,
+    projection: &ClipProjection,
+    frame_period_ms: f64,
+) -> ProjectedMember {
+    let frame_source_start_sec =
+        source_at_projected_frame(projection, start, span.cycle, frame_period_ms)
+            .unwrap_or(span.source_start_sec);
+    let frame_source_end_sec =
+        source_at_projected_frame(projection, end, span.cycle, frame_period_ms)
+            .unwrap_or(span.source_end_sec);
     ProjectedMember {
         clip_id: span.clip_id.clone(),
         take_id: span.take_id.clone(),
@@ -46,8 +61,13 @@ fn member_from(span: &TakeSpan, start: u32, end: u32) -> ProjectedMember {
         source_start_sec: span.source_start_sec,
         source_end_sec: span.source_end_sec,
         syllable_id: span.syllable_id.clone(),
+        label: Some(span.label),
         start_frame: start,
         end_frame_exclusive: end,
+        frame_source_start_sec,
+        frame_source_end_sec,
+        visible_source_start_sec: frame_source_start_sec.min(frame_source_end_sec),
+        visible_source_end_sec: frame_source_start_sec.max(frame_source_end_sec),
     }
 }
 
@@ -86,6 +106,7 @@ fn project_user_block(
                     priority: if block.manual { 4 } else { 3 },
                     seq: block.created_seq,
                     z_order: 0,
+                    base_cover: block.base_cover.clone(),
                 }],
                 0,
             )
@@ -105,17 +126,25 @@ fn project_user_block(
                 };
                 let projection = ClipProjection::from_clip_take(clip, take);
                 let mut matched = false;
-                for interval in project_span(&projection, member, frame_period_ms) {
-                    if interval.cycle != member.cycle {
-                        continue;
+                for part in normalize_loop_span(&projection, member) {
+                    for interval in project_span(&projection, &part, frame_period_ms) {
+                        if interval.cycle != part.cycle {
+                            continue;
+                        }
+                        matched = true;
+                        projected.push((
+                            interval.start_frame,
+                            interval.end_frame_exclusive,
+                            member_from(
+                                &part,
+                                interval.start_frame,
+                                interval.end_frame_exclusive,
+                                &projection,
+                                frame_period_ms,
+                            ),
+                            projection.effective_rate,
+                        ));
                     }
-                    matched = true;
-                    projected.push((
-                        interval.start_frame,
-                        interval.end_frame_exclusive,
-                        member_from(member, interval.start_frame, interval.end_frame_exclusive),
-                        projection.effective_rate,
-                    ));
                 }
                 if !matched {
                     orphan += 1;
@@ -163,6 +192,7 @@ fn project_user_block(
                     priority: if block.manual { 4 } else { 3 },
                     seq: block.created_seq,
                     z_order: 0,
+                    base_cover: block.base_cover.clone(),
                 });
             }
             (out, orphan)
@@ -198,6 +228,7 @@ pub fn project_single_user_block(
         kind: candidate.kind,
         members: candidate.members,
         value: candidate.value,
+        base_cover: candidate.base_cover,
     }))
 }
 
@@ -214,25 +245,100 @@ fn anchor_matches(base: &TakeSpan, member: &TakeSpan) -> bool {
     if same_edges {
         return true;
     }
-    let overlap = base
-        .source_end_sec
-        .min(member.source_end_sec)
-        .max(base.source_start_sec.max(member.source_start_sec));
+    let overlap = base.source_end_sec.min(member.source_end_sec)
+        - base.source_start_sec.max(member.source_start_sec);
     let width = (base.source_end_sec - base.source_start_sec)
         .min(member.source_end_sec - member.source_start_sec);
     overlap > 0.0 && width > 1e-9 && overlap / width >= ANCHOR_OVERLAP_RATIO
 }
 
-fn suppressed_by_user(base: &TakeSpan, edits: &ParamBlockEditSet) -> bool {
-    edits.blocks.iter().any(|block| {
-        block.members().iter().any(|member| {
-            member.clip_id == base.clip_id
-                && member.take_id == base.take_id
-                && member.cycle == base.cycle
-                && member.overlaps(base)
-                && anchor_matches(base, member)
-        })
-    })
+fn base_span_of(candidate: &Candidate) -> Option<&TakeSpan> {
+    candidate
+        .base_cover
+        .as_ref()
+        .and_then(|cover| cover.spans.first())
+}
+
+/// 收集所有会“拥有”这个基块的覆盖区间。
+///
+/// 普通手工块没有 base_cover，不在这里出现；它只通过占用区间覆盖基块，
+/// 因此会留下两侧剩余段。
+fn cover_intervals_for_base(
+    timeline: &TimelineState,
+    base: &Candidate,
+    edits: &ParamBlockEditSet,
+    frame_period_ms: f64,
+) -> Vec<(u32, u32)> {
+    let Some(base_span) = base_span_of(base) else {
+        return Vec::new();
+    };
+    let mut intervals = Vec::new();
+    for block in &edits.blocks {
+        /*
+         * 旧版墓碑没有 base_cover：它只有“删除即抑制基块”的语义。为了兼容旧
+         * 工程，把 deleted + 无 base_cover 的块按它自己的成员投影区间当作覆盖。
+         */
+        let Some(cover) = block.base_cover.as_ref() else {
+            if block.deleted {
+                for span in block.members() {
+                    if span.clip_id != base_span.clip_id
+                        || span.take_id != base_span.take_id
+                        || span.cycle != base_span.cycle
+                    {
+                        continue;
+                    }
+                    let Some(clip) = timeline.clips.iter().find(|clip| clip.id == span.clip_id)
+                    else {
+                        continue;
+                    };
+                    let Some(take) = clip.take(&span.take_id) else {
+                        continue;
+                    };
+                    let projection = ClipProjection::from_clip_take(clip, take);
+                    for interval in project_span(&projection, span, frame_period_ms) {
+                        if interval.cycle != span.cycle {
+                            continue;
+                        }
+                        let start = base.start.max(interval.start_frame);
+                        let end = base.end.min(interval.end_frame_exclusive);
+                        if end > start {
+                            intervals.push((start, end));
+                        }
+                    }
+                }
+            }
+            continue;
+        };
+        for span in &cover.spans {
+            if span.clip_id != base_span.clip_id
+                || span.take_id != base_span.take_id
+                || span.cycle != base_span.cycle
+            {
+                continue;
+            }
+            if cover.full && anchor_matches(base_span, span) {
+                return vec![(base.start, base.end)];
+            }
+            let Some(clip) = timeline.clips.iter().find(|clip| clip.id == span.clip_id) else {
+                continue;
+            };
+            let Some(take) = clip.take(&span.take_id) else {
+                continue;
+            };
+            let projection = ClipProjection::from_clip_take(clip, take);
+            for interval in project_span(&projection, span, frame_period_ms) {
+                if interval.cycle != span.cycle {
+                    continue;
+                }
+                let start = base.start.max(interval.start_frame);
+                let end = base.end.min(interval.end_frame_exclusive);
+                if end > start {
+                    intervals.push((start, end));
+                }
+            }
+        }
+    }
+    intervals
 }
 
 fn subtract_span(start: u32, end: u32, occupied: &[(u32, u32)]) -> Vec<(u32, u32)> {
@@ -259,6 +365,90 @@ fn subtract_span(start: u32, end: u32, occupied: &[(u32, u32)]) -> Vec<(u32, u32
     pieces
 }
 
+fn base_piece_candidate(
+    base: &Candidate,
+    start: u32,
+    end: u32,
+    timeline: &TimelineState,
+    frame_period_ms: f64,
+) -> Option<Candidate> {
+    let member = base.members.first()?;
+    let base_span = base_span_of(base)?;
+    let clip = timeline
+        .clips
+        .iter()
+        .find(|clip| clip.id == member.clip_id)?;
+    let take = clip.take(&member.take_id)?;
+    let projection = ClipProjection::from_clip_take(clip, take);
+    let a = source_at_projected_frame(&projection, start, member.cycle, frame_period_ms)?;
+    let b = source_at_projected_frame(&projection, end, member.cycle, frame_period_ms)?;
+    let (lo, hi) = (a.min(b), a.max(b));
+    if hi <= lo + 1e-12 {
+        return None;
+    }
+    let piece_span = TakeSpan {
+        clip_id: member.clip_id.clone(),
+        take_id: member.take_id.clone(),
+        cycle: member.cycle,
+        source_start_sec: lo,
+        source_end_sec: hi,
+        syllable_id: None,
+        label: member.label.unwrap_or(base_span.label),
+    };
+    let mut piece = base.clone();
+    piece.id = format!("{}:{}:{}", base.id, start, end);
+    piece.start = start;
+    piece.end = end;
+    piece.members = vec![member_from(
+        &piece_span,
+        start,
+        end,
+        &projection,
+        frame_period_ms,
+    )];
+    piece.base_cover = Some(BaseCover {
+        spans: vec![piece_span],
+        full: false,
+    });
+    Some(piece)
+}
+
+fn trim_member(
+    timeline: &TimelineState,
+    member: &ProjectedMember,
+    start: u32,
+    end: u32,
+    frame_period_ms: f64,
+) -> ProjectedMember {
+    let Some(clip) = timeline.clips.iter().find(|clip| clip.id == member.clip_id) else {
+        let mut next = member.clone();
+        next.start_frame = start;
+        next.end_frame_exclusive = end;
+        return next;
+    };
+    let Some(take) = clip.take(&member.take_id) else {
+        let mut next = member.clone();
+        next.start_frame = start;
+        next.end_frame_exclusive = end;
+        return next;
+    };
+    let projection = ClipProjection::from_clip_take(clip, take);
+    let a = source_at_projected_frame(&projection, start, member.cycle, frame_period_ms);
+    let b = source_at_projected_frame(&projection, end, member.cycle, frame_period_ms);
+    let mut next = member.clone();
+    next.start_frame = start;
+    next.end_frame_exclusive = end;
+    if let Some(a) = a {
+        next.frame_source_start_sec = a;
+    }
+    if let Some(b) = b {
+        next.frame_source_end_sec = b;
+    }
+    next.visible_source_start_sec = next.frame_source_start_sec.min(next.frame_source_end_sec);
+    next.visible_source_end_sec = next.frame_source_start_sec.max(next.frame_source_end_sec);
+    next
+}
+
 pub fn compose_param_block_view(
     timeline: &TimelineState,
     root_track_id: &str,
@@ -271,11 +461,8 @@ pub fn compose_param_block_view(
     let mut orphan_count = 0usize;
 
     for base in &base_blocks {
-        if suppressed_by_user(&base.span, edits) {
-            continue;
-        }
         let interval = base.projected[0];
-        candidates.push(Candidate {
+        let candidate = Candidate {
             id: base.id.clone(),
             user_block_id: None,
             start: interval.start_frame,
@@ -285,6 +472,8 @@ pub fn compose_param_block_view(
                 &base.span,
                 interval.start_frame,
                 interval.end_frame_exclusive,
+                &base.projection,
+                frame_period_ms,
             )],
             value: None,
             transition_width_sec: None,
@@ -293,7 +482,24 @@ pub fn compose_param_block_view(
             priority: 1,
             seq: 0,
             z_order: base.z_order,
-        });
+            base_cover: Some(BaseCover {
+                spans: vec![base.span.clone()],
+                full: true,
+            }),
+        };
+        let covers = cover_intervals_for_base(timeline, &candidate, edits, frame_period_ms);
+        for (start, end) in subtract_span(candidate.start, candidate.end, &covers) {
+            if end <= start {
+                continue;
+            }
+            if start == candidate.start && end == candidate.end {
+                candidates.push(candidate.clone());
+            } else if let Some(piece) =
+                base_piece_candidate(&candidate, start, end, timeline, frame_period_ms)
+            {
+                candidates.push(piece);
+            }
+        }
     }
 
     for block in edits.blocks.iter().filter(|block| !block.deleted) {
@@ -320,24 +526,39 @@ pub fn compose_param_block_view(
             if end <= start {
                 continue;
             }
+            let trimmed = piece_count > 1 || start != candidate.start || end != candidate.end;
+            if candidate.kind == ProjectedBlockKind::Base && trimmed {
+                if let Some(mut piece) =
+                    base_piece_candidate(&candidate, start, end, timeline, frame_period_ms)
+                {
+                    piece.id = format!("{}:{}", piece.id, index);
+                    accepted.push(piece);
+                }
+                continue;
+            }
             let mut piece = candidate.clone();
             piece.start = start;
             piece.end = end;
-            if piece_count > 1 || start != candidate.start || end != candidate.end {
+            if trimmed {
                 piece.id = format!("{}:{}:{}", candidate.id, start, end);
                 if piece_count > 1 {
                     piece.id = format!("{}:{}", piece.id, index);
                 }
             }
-            for member in &mut piece.members {
-                member.start_frame = member.start_frame.max(start);
-                member.end_frame_exclusive = member.end_frame_exclusive.min(end);
-            }
-            piece.members.retain(|member| {
-                member.end_frame_exclusive > member.start_frame
-                    && member.start_frame >= start
-                    && member.end_frame_exclusive <= end
-            });
+            piece.members = piece
+                .members
+                .iter()
+                .filter(|member| member.end_frame_exclusive > start && member.start_frame < end)
+                .map(|member| {
+                    trim_member(
+                        timeline,
+                        member,
+                        member.start_frame.max(start),
+                        member.end_frame_exclusive.min(end),
+                        frame_period_ms,
+                    )
+                })
+                .collect();
             accepted.push(piece);
         }
     }
@@ -377,6 +598,7 @@ pub fn compose_param_block_view(
             kind: candidate.kind,
             members: candidate.members,
             value: candidate.value,
+            base_cover: candidate.base_cover,
         })
         .collect();
 
@@ -449,6 +671,7 @@ mod tests {
                 value: None,
                 transition_out_sec: None,
                 created_seq: 1,
+                base_cover: None,
                 grouped_from: None,
             }],
         }
@@ -513,6 +736,7 @@ mod tests {
                 value: None,
                 transition_out_sec: None,
                 created_seq: 1,
+                base_cover: None,
                 grouped_from: None,
             }],
         };
@@ -540,6 +764,7 @@ mod tests {
                 value: Some(60.0),
                 transition_out_sec: None,
                 created_seq: 1,
+                base_cover: None,
                 grouped_from: None,
             }],
         };

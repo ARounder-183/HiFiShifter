@@ -31,6 +31,21 @@ export type BlockGeometry =
     | { readonly kind: "take"; readonly members: readonly TakeSpan[] }
     | { readonly kind: "root"; readonly span: RootSpan };
 
+/**
+ * 用户块对基块的“所有权覆盖”。
+ *
+ * - `full: true`：这些 span 命中完整基块时，隐藏整个基块（即使可见几何被缩短，
+ *   缩短掉的部分也保持空白，而不是重新露出基块）；
+ * - `full: false`：只覆盖这些 span 自身的投影区间（基块片段）。
+ *
+ * 普通手工块没有 baseCover：它只按自己的投影区间占用，因此基块会在两侧留下
+ * 剩余段（这正是“在基块中间画一块”应有的结果）。
+ */
+export interface BaseCover {
+    readonly spans: readonly TakeSpan[];
+    readonly full: boolean;
+}
+
 export interface UserParamBlock {
     readonly id: string;
     readonly geometry: BlockGeometry;
@@ -39,6 +54,8 @@ export interface UserParamBlock {
     readonly value?: number | null;
     readonly transitionOutSec?: number;
     readonly createdSeq: number;
+    /** 从基块派生时记录“我替代了哪一段基块”。 */
+    readonly baseCover?: BaseCover;
     /** 可逆编组快照：本块由哪些原始用户块编组而来。 */
     readonly groupedFrom?: readonly UserParamBlock[];
 }
@@ -56,8 +73,22 @@ export interface ProjectedMember {
     readonly sourceStartSec: number;
     readonly sourceEndSec: number;
     readonly syllableId?: string;
+    /** 成员的语义标签；编辑回写时保留（缺省按 manual 处理）。 */
+    readonly label?: BlockLabel;
     readonly startFrame: number;
     readonly endFrameExclusive: number;
+    /**
+     * 该可见帧区间起点 / 终点对应的源域秒。
+     *
+     * 有方向：倒放时 `frameSourceStartSec > frameSourceEndSec`。它是编辑的局部
+     * 仿射坐标系，**不是** inverseProject 的结果 —— Loop 回绕、循环边界与倒放
+     * 都必须由它表达，而不是再从全局帧反推。
+     */
+    readonly frameSourceStartSec: number;
+    readonly frameSourceEndSec: number;
+    /** 可见区间覆盖的源域范围（source 顺序，供 BaseCover / 片段物化使用）。 */
+    readonly visibleSourceStartSec: number;
+    readonly visibleSourceEndSec: number;
 }
 
 /**
@@ -82,6 +113,8 @@ export interface ProjectedParamBlock {
     readonly kind: ProjectedBlockKind;
     readonly members: readonly ProjectedMember[];
     readonly value?: number | null;
+    /** 基块候选的所有权覆盖；用户块为 undefined。 */
+    readonly baseCover?: BaseCover;
 }
 
 export interface ParamBlockView {

@@ -5,7 +5,7 @@
 //! 关系：`compose` 消费本文件的 `BaseBlock`；本文件不写任何状态。
 //! 维护约束：没有分析结果的音频 Clip 绝不伪造“整段一块”。
 
-use super::projection::{project_span, ClipProjection, ProjectedInterval};
+use super::projection::{normalize_loop_span, project_span, ClipProjection, ProjectedInterval};
 use super::types::{BlockLabel, TakeKey, TakeSpan};
 use crate::state::{Clip, ClipTake, TimelineState};
 
@@ -16,6 +16,7 @@ pub struct BaseBlock {
     pub z_order: u32,
     pub projected: Vec<ProjectedInterval>,
     pub rate: f64,
+    pub projection: ClipProjection,
 }
 
 fn stable_id(take: &ClipTake, clip: &Clip, span: &TakeSpan) -> String {
@@ -115,31 +116,46 @@ pub fn base_blocks_for_root(
         };
         let projection = ClipProjection::from_clip_take(clip, &take);
         for (index, (start_sec, end_sec)) in normalized_spans(spans).into_iter().enumerate() {
-            let span = TakeSpan {
+            let identity = format!(
+                "span:{}:{}:{:08}",
+                take.id,
+                index,
+                (start_sec * 1000.0).round() as i64
+            );
+            let base_span = TakeSpan {
                 clip_id: clip.id.clone(),
                 take_id: take.id.clone(),
                 cycle: 0,
                 source_start_sec: start_sec,
                 source_end_sec: end_sec,
                 // 稳定源域身份：重分析边界微移时仍能按重叠比例匹配。
-                syllable_id: Some(format!(
-                    "span:{}:{}:{:08}",
-                    take.id,
-                    index,
-                    (start_sec * 1000.0).round() as i64
-                )),
+                syllable_id: Some(identity.clone()),
                 label,
             };
-            for interval in project_span(&projection, &span, frame_period_ms) {
-                let mut cycle_span = span.clone();
-                cycle_span.cycle = interval.cycle;
-                out.push(BaseBlock {
-                    id: stable_id(&take, clip, &cycle_span),
-                    span: cycle_span,
-                    z_order: z_order as u32,
-                    projected: vec![interval],
-                    rate: projection.effective_rate,
-                });
+            let parts = normalize_loop_span(&projection, &base_span);
+            let parts_len = parts.len();
+            for (part_index, part) in parts.into_iter().enumerate() {
+                let syllable_id = if parts_len > 1 {
+                    Some(format!("{}:part{}", identity, part_index))
+                } else {
+                    Some(identity.clone())
+                };
+                for interval in project_span(&projection, &part, frame_period_ms) {
+                    if interval.cycle < part.cycle {
+                        continue;
+                    }
+                    let mut cycle_span = part.clone();
+                    cycle_span.cycle = interval.cycle;
+                    cycle_span.syllable_id = syllable_id.clone();
+                    out.push(BaseBlock {
+                        id: stable_id(&take, clip, &cycle_span),
+                        span: cycle_span,
+                        z_order: z_order as u32,
+                        projected: vec![interval],
+                        rate: projection.effective_rate,
+                        projection: projection.clone(),
+                    });
+                }
             }
         }
     }

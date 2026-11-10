@@ -310,6 +310,7 @@ mod tests {
             value: Some(60.0),
             transition_out_sec: None,
             created_seq: 1,
+            base_cover: None,
             grouped_from: None,
         }
     }
@@ -361,6 +362,7 @@ mod tests {
                 value: Some(60.0),
                 transition_out_sec: None,
                 created_seq: 1,
+                base_cover: None,
                 grouped_from: None,
             }],
             true,

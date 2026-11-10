@@ -17,13 +17,15 @@ import {
     deleteProjectedBlocks,
     groupProjectedBlocks,
     newParamBlockId,
-    resizeProjectedBlock,
+    ParamBlockPlanError,
+    planResizeProjectedBlock,
+    planSplitProjectedBlock,
     restoreDeletedBlocks,
     setProjectedBlockTransition,
-    splitProjectedBlock,
     ungroupUserBlock,
     type DeletedParamBlockSnapshot,
 } from "./paramBlockEditing";
+import { canSplitParamBlockAtFrame } from "./paramBlockGesture";
 import { toFrame, type ParamBlockSourceClip } from "./paramBlockProjection";
 import { getDrawPreviewValue } from "./paramValuePreviewLogic";
 import type { ScaleLike } from "../../../utils/musicalScales";
@@ -328,10 +330,15 @@ export function hitTestParamBlockEdges<
         }
         const leftX = args.secToX(Math.min(block.startSec, block.endSec));
         const rightX = args.secToX(Math.max(block.startSec, block.endSec));
+        /*
+         * 窄块不能整块都变成边缘热区：热区按块宽收缩到 1/3，保证块体仍可拖动。
+         * 宽块仍用固定 8px 热区。
+         */
+        const effectiveHitPx = Math.min(hitPx, Math.max(2, Math.abs(rightX - leftX) / 3));
         for (const edge of ["left", "right"] as const) {
             const edgeX = edge === "left" ? leftX : rightX;
             const distance = Math.abs(args.clientX - edgeX);
-            if (distance > hitPx) continue;
+            if (distance > effectiveHitPx) continue;
             if (best === null || distance < best.distance - 1e-9) {
                 best = { block, edge, distance };
             }
@@ -893,9 +900,25 @@ export function resolveSplittableParamBlockAt(
     blocks: readonly ParamBlock[],
     splitSec: number,
     framePeriodMs: number,
+    context?: {
+        readonly clips: readonly ParamBlockSourceClip[];
+        readonly edits: ParamBlockEditSet;
+    },
 ): ParamBlock | null {
     const target = resolveParamBlockSplitTarget(blocks, splitSec, framePeriodMs);
-    return target === null || target.kind === "grouped" ? null : target;
+    if (target === null || target.kind === "grouped") return null;
+    if (context === undefined) return target;
+    const frame = toFrame(splitSec, framePeriodMs);
+    if (target.projected === undefined) return null;
+    return canSplitParamBlockAtFrame({
+        clips: context.clips,
+        edits: context.edits,
+        framePeriodMs,
+        block: target.projected,
+        frame,
+    })
+        ? target
+        : null;
 }
 
 /**
@@ -972,6 +995,8 @@ export type BlockGroupFailure =
 export type ParamBlockEditFailureReason =
     | "not_found"
     | "too_short"
+    | "too_close_to_edge"
+    | "resize_blocked"
     | "no_members"
     | "grouped_locked"
     | "multi_fragment_unsupported"
@@ -1258,6 +1283,27 @@ export function ungroupParamBlocks(
 }
 
 function editFailureFromError(error: unknown): ParamBlockEditFailureReason {
+    if (error instanceof ParamBlockPlanError) {
+        switch (error.code) {
+            case "grouped_locked":
+                return "grouped_locked";
+            case "split_too_close_to_edge":
+                return "too_close_to_edge";
+            case "split_at_block_edge":
+            case "split_outside_block":
+            case "resize_too_short":
+                return "too_short";
+            case "resize_blocked_by_other_source":
+                return "resize_blocked";
+            case "block_not_found":
+            case "block_deleted":
+                return "not_found";
+            case "loop_span_crosses_cycle":
+                return "multi_fragment_unsupported";
+            default:
+                return "unknown";
+        }
+    }
     const message = error instanceof Error ? error.message : "";
     if (message.includes("grouped block must be ungrouped")) return "grouped_locked";
     if (message.includes("no source") || message.includes("no members")) return "no_members";
@@ -1274,14 +1320,14 @@ export function splitParamBlock(input: ParamBlockSplitInput): ParamBlockEditResu
         return { ok: false, reason: "too_short" };
     }
     try {
-        const edits = splitProjectedBlock(
+        const plan = planSplitProjectedBlock(
             input.clips,
             input.state.editSet,
             block,
             frame,
             framePeriodMs,
         );
-        return { ok: true, blockId: input.block.id, state: withEdits(input.state, edits) };
+        return { ok: true, blockId: plan.rightBlockId, state: withEdits(input.state, plan.edits) };
     } catch (error) {
         return { ok: false, reason: editFailureFromError(error) };
     }
@@ -1297,7 +1343,7 @@ export function resizeParamBlock(input: ParamBlockResizeInput): ParamBlockEditRe
             : input.targetSpan.endSec
         : input.targetSec;
     try {
-        const edits = resizeProjectedBlock(
+        const plan = planResizeProjectedBlock(
             input.clips,
             input.state.editSet,
             block,
@@ -1305,7 +1351,7 @@ export function resizeParamBlock(input: ParamBlockResizeInput): ParamBlockEditRe
             toFrame(targetSec, framePeriodMs),
             framePeriodMs,
         );
-        return { ok: true, blockId: input.block.id, state: withEdits(input.state, edits) };
+        return { ok: true, blockId: input.block.id, state: withEdits(input.state, plan.edits) };
     } catch (error) {
         return { ok: false, reason: editFailureFromError(error) };
     }
@@ -1322,10 +1368,12 @@ export function createParamBlock(input: ParamBlockCreateInput): ParamBlockEditRe
             toFrame(input.endSec, framePeriodMs),
             input.value,
             framePeriodMs,
+            input.blockId,
         );
+        const actualId = input.blockId ?? edits.blocks[edits.blocks.length - 1]?.id ?? "created";
         return {
             ok: true,
-            blockId: input.blockId ?? edits.blocks[edits.blocks.length - 1]?.id ?? "created",
+            blockId: actualId,
             state: withEdits(input.state, edits),
         };
     } catch {
@@ -1359,7 +1407,10 @@ export function deleteParamBlocks(args: {
             blockId: selected[0].id,
             state: {
                 ...withEdits(args.state, result.edits),
-                lastDeletedBlocks: result.deleted,
+                lastDeletedBlocks: result.deleted.map((snapshot) => ({
+                    ...snapshot,
+                    rootTrackId: args.state.rootTrackId,
+                })),
             },
         };
     } catch (error) {
@@ -1386,7 +1437,12 @@ export function restoreDeletedParamBlocks(args: {
     readonly blocks?: readonly ParamBlock[];
     readonly selectedBlockIds?: readonly string[];
 }): ParamBlockEditResult {
-    const deleted = args.state.lastDeletedBlocks ?? [];
+    const deleted = (args.state.lastDeletedBlocks ?? []).filter(
+        (snapshot) =>
+            snapshot.rootTrackId === undefined ||
+            args.state.rootTrackId === undefined ||
+            snapshot.rootTrackId === args.state.rootTrackId,
+    );
     if (deleted.length === 0) return { ok: false, reason: "not_found" };
     try {
         const edits = restoreDeletedBlocks(args.state.editSet, deleted);
@@ -1407,13 +1463,31 @@ export function setParamBlockLogicalCenters(args: {
     readonly centers: readonly (number | null)[] | ReadonlyMap<string, number | null>;
 }): ParamBlockState {
     let changed = false;
-    const centerFor = (id: string, index: number): number | null => {
-        if (args.centers instanceof Map) return args.centers.get(id) ?? null;
+    /*
+     * 多 run 块的 view id 是 `parent:0` / `parent:1`，editSet 里只有 `parent`。
+     * 只按 view id 查会让 value 永远写不回去（拖动看着动了，落库没有）。这里同时
+     * 按 parent id 与任意一个 run 的 id 查，并让同一块的所有成员共享一个逻辑中心。
+     */
+    const centerFor = (blockId: string, index: number): number | null => {
+        if (args.centers instanceof Map) {
+            const direct = args.centers.get(blockId);
+            if (direct !== undefined) return direct;
+            const run = args.blocks.find(
+                (item) => item.userBlockId === blockId || item.id === blockId,
+            );
+            return run === undefined ? null : (args.centers.get(run.id) ?? null);
+        }
         const list = args.centers as readonly (number | null)[];
-        return index >= 0 ? (list[index] ?? null) : null;
+        if (index >= 0 && list[index] !== undefined) return list[index] ?? null;
+        const run = args.blocks.find((item) => item.userBlockId === blockId || item.id === blockId);
+        if (run === undefined) return null;
+        const runIndex = args.blocks.findIndex((item) => item.id === run.id);
+        return runIndex >= 0 ? (list[runIndex] ?? null) : null;
     };
     const blocks = args.state.editSet.blocks.map((block) => {
-        const index = args.blocks.findIndex((item) => item.id === block.id);
+        const index = args.blocks.findIndex(
+            (item) => item.id === block.id || item.userBlockId === block.id,
+        );
         const center = centerFor(block.id, index);
         if (center === null || center === undefined || !Number.isFinite(center)) return block;
         if (block.value === center) return block;

@@ -16,9 +16,13 @@ export interface ParamBlockSourceClip {
     readonly sourceStartSec?: number;
     readonly sourceEndSec?: number;
     readonly playbackRate?: number;
+    /** Clip 级播放倍率；与 take.playbackRate 相乘得到有效速率。 */
+    readonly clipPlaybackRate?: number;
     readonly reversed?: boolean;
     readonly loopEnabled?: boolean;
-    /** 源媒体总时长（秒）；Loop 回绕周期优先取它。 */
+    /** 宿主给出的 Loop 周期（秒）；优先于媒体时长。 */
+    readonly loopPeriodSec?: number | null;
+    /** 源媒体总时长（秒）；Loop 回绕周期的兜底。 */
     readonly contentDurationSec?: number | null;
     readonly activeTakeId?: string;
     readonly takes?: ReadonlyArray<{
@@ -35,6 +39,12 @@ export interface ParamBlockSourceClip {
             readonly startSec: number;
             readonly endSec: number;
         }>;
+        readonly gameBlockBaseline?: {
+            readonly sourceSpansSec?: ReadonlyArray<{
+                readonly startSec: number;
+                readonly endSec: number;
+            }>;
+        };
         readonly midiNoteData?: ReadonlyArray<{
             readonly startSec: number;
             readonly endSec: number;
@@ -45,6 +55,12 @@ export interface ParamBlockSourceClip {
         readonly startSec: number;
         readonly endSec: number;
     }>;
+    readonly gameBlockBaseline?: {
+        readonly sourceSpansSec?: ReadonlyArray<{
+            readonly startSec: number;
+            readonly endSec: number;
+        }>;
+    };
     readonly midiNoteData?: ReadonlyArray<{
         readonly startSec: number;
         readonly endSec: number;
@@ -93,9 +109,31 @@ export interface ClipProjection {
     readonly loopCycleSec: number | null;
 }
 
+function nonEmpty<T>(value: readonly T[] | undefined | null): value is readonly T[] {
+    return Array.isArray(value) && value.length > 0;
+}
+
+function firstSpanList<T>(
+    ...candidates: ReadonlyArray<readonly T[] | undefined | null>
+): readonly T[] | null {
+    for (const candidate of candidates) {
+        if (nonEmpty(candidate)) return candidate;
+    }
+    return null;
+}
+
 export function projectionForClip(clip: ParamBlockSourceClip): ClipProjection {
     const take = activeTake(clip);
-    const rate = Math.max(1e-9, finite(clip.playbackRate, 1));
+    /*
+     * 【与 Rust `ClipProjection::from_clip_take` 同源】有效速率 = Clip 级倍率 ×
+     * Take 级倍率。ClipInfo.playbackRate 通常是两者相乘后的有效值，但插件/乐观
+     * 更新可能只写其中一个；两个来源都读，才能保证前后端投影不漂移。
+     */
+    const takeRate = Math.max(1e-9, finite(take?.playbackRate, 1));
+    const clipRate = finite(clip.clipPlaybackRate, Number.NaN);
+    const rate = Number.isFinite(clipRate)
+        ? Math.max(1e-9, clipRate * takeRate)
+        : Math.max(1e-9, finite(clip.playbackRate, 1));
     const span = Math.max(0, finite(clip.lengthSec, 0) * rate);
     const takeStart = finite(take?.sourceStartSec ?? clip.sourceStartSec, 0);
     const takeEnd = finite(take?.sourceEndSec ?? clip.sourceEndSec, takeStart + span);
@@ -103,11 +141,17 @@ export function projectionForClip(clip: ParamBlockSourceClip): ClipProjection {
     const loopEnabled = take?.loopEnabled ?? clip.loopEnabled === true;
     const windowStart = loopEnabled ? takeStart : reversed ? takeEnd - span : takeStart;
     const windowEnd = loopEnabled ? takeEnd : reversed ? takeEnd : takeStart + span;
-    const mediaDuration =
-        clip.contentDurationSec ??
-        take?.durationSec ??
-        (take?.durationFrames && take.sourceSampleRate
+    const durationFromFrames =
+        take?.durationFrames && take?.sourceSampleRate && take.sourceSampleRate > 0
             ? take.durationFrames / take.sourceSampleRate
+            : null;
+    const mediaDuration =
+        (durationFromFrames !== null && durationFromFrames > 0 ? durationFromFrames : null) ??
+        (take?.durationSec !== undefined && take.durationSec > 0 ? take.durationSec : null) ??
+        (clip.contentDurationSec !== undefined &&
+        clip.contentDurationSec !== null &&
+        clip.contentDurationSec > 0
+            ? clip.contentDurationSec
             : null) ??
         (take?.midiNoteData?.length
             ? Math.max(...take.midiNoteData.map((note) => note.endSec))
@@ -115,8 +159,27 @@ export function projectionForClip(clip: ParamBlockSourceClip): ClipProjection {
         (clip.midiNoteData?.length
             ? Math.max(...clip.midiNoteData.map((note) => note.endSec))
             : null);
+    /*
+     * Loop 周期优先级与后端逐项一致：宿主读数 → 精确帧数/采样率 → durationSec
+     * → 媒体时长 → 源窗口宽度。空数组/0 都必须继续回退，不能当成“已给出”。
+     */
     const loopCycle = loopEnabled
-        ? Math.max(1e-9, mediaDuration ?? Math.abs(takeEnd - takeStart))
+        ? Math.max(
+              1e-9,
+              (clip.loopPeriodSec !== undefined &&
+              clip.loopPeriodSec !== null &&
+              clip.loopPeriodSec > 1e-9
+                  ? clip.loopPeriodSec
+                  : null) ??
+                  (durationFromFrames !== null && durationFromFrames > 1e-9
+                      ? durationFromFrames
+                      : null) ??
+                  (take?.durationSec !== undefined && take.durationSec > 1e-9
+                      ? take.durationSec
+                      : null) ??
+                  (mediaDuration !== null && mediaDuration > 1e-9 ? mediaDuration : null) ??
+                  Math.abs(takeEnd - takeStart),
+          )
         : null;
     return {
         clipId: clip.id,
@@ -133,7 +196,30 @@ export function projectionForClip(clip: ParamBlockSourceClip): ClipProjection {
     };
 }
 
-function loopAnchor(projection: ClipProjection): number {
+/** 基块分析区间的统一回退链：音节分析 → GAME baseline → MIDI。 */
+export function baseSourceSpansForClip(clip: ParamBlockSourceClip): {
+    readonly spans: readonly { readonly startSec: number; readonly endSec: number }[];
+    readonly label: "syllable" | "gameBaseline" | "midiNote";
+} | null {
+    const take = activeTake(clip);
+    const syllable = firstSpanList(take?.syllableSpansSec, clip.syllableSpansSec);
+    if (syllable !== null) return { spans: syllable, label: "syllable" };
+    const baseline = firstSpanList(
+        take?.gameBlockBaseline?.sourceSpansSec,
+        clip.gameBlockBaseline?.sourceSpansSec,
+    );
+    if (baseline !== null) return { spans: baseline, label: "gameBaseline" };
+    const midi = firstSpanList(take?.midiNoteData, clip.midiNoteData);
+    if (midi !== null) {
+        return {
+            spans: midi.map((note) => ({ startSec: note.startSec, endSec: note.endSec })),
+            label: "midiNote",
+        };
+    }
+    return null;
+}
+
+export function loopAnchor(projection: ClipProjection): number {
     if (!projection.reversed) return projection.sourceWindowStartSec;
     const duration = projection.mediaDurationSec;
     return duration === null
@@ -158,7 +244,15 @@ export function projectTakeSpan(
         const phase = projection.reversed
             ? modEuclid(anchor - span.sourceEndSec, cycle)
             : modEuclid(span.sourceStartSec - anchor, cycle);
-        const lengthSec = Math.min((span.sourceEndSec - span.sourceStartSec) / rate, cycle / rate);
+        /*
+         * 一个成员只能覆盖它所在周期的剩余部分；跨周期必须由
+         * `normalizeLoopTakeSpans` 先切成多个成员。否则 endSec 会越过周期边界，
+         * 把“下一周期的开头”画成本周期的尾巴。
+         */
+        const lengthSec = Math.min(
+            (span.sourceEndSec - span.sourceStartSec) / rate,
+            (cycle - phase) / rate,
+        );
         const cycleTimeline = cycle / rate;
         if (cycleTimeline <= EPS) return [];
         for (
@@ -213,9 +307,21 @@ export function inverseProject(
         const cycleSec = projection.loopCycleSec;
         const phase = (localSec - cycle * (cycleSec / rate)) * rate;
         const anchor = loopAnchor(projection);
-        source = projection.reversed
-            ? anchor - modEuclid(phase, cycleSec)
-            : anchor + modEuclid(phase, cycleSec);
+        /*
+         * 【不能先 clamp 再取模】旧实现把 anchor + phase 直接截到媒体末尾，导致
+         * anchor 之前的回绕成员被映射到媒体尾部。正确顺序是：先得到未归一化的
+         * 源坐标，再在媒体域做一次归一化（取模），最后才允许等于 mediaDuration
+         * 的端点保持原值。
+         */
+        source = projection.reversed ? anchor - phase : anchor + phase;
+        if (projection.mediaDurationSec !== null) {
+            const duration = projection.mediaDurationSec;
+            if (source < -EPS || source > duration + EPS) {
+                source = modEuclid(source, duration);
+            } else if (Math.abs(source - duration) <= EPS) {
+                source = duration;
+            }
+        }
     } else {
         source = projection.reversed
             ? projection.sourceWindowEndSec - localSec * rate
@@ -229,6 +335,188 @@ export function inverseProject(
 
 export function modEuclid(value: number, modulus: number): number {
     return ((value % modulus) + modulus) % modulus;
+}
+
+/**
+ * 工程帧 → 源域秒的**局部仿射**映射（不取模、不 clamp）。
+ *
+ * `cycle` 必须是该投影区间自己的周期号。与 `inverseProject` 的区别：
+ * - 不把 anchor + phase 再截到媒体末尾（Loop 回绕会因此跳到媒体尾部）；
+ * - 不在周期边界把 endFrameExclusive 折回 anchor（否则“结束于边界”变成“开始”）；
+ * - 倒放时直接按 `anchor - offset` 计算，方向由成员自己的 frameSource* 表达。
+ */
+export function sourceAtProjectedFrame(
+    projection: ClipProjection,
+    frame: number,
+    cycle: number,
+    framePeriodMs: number,
+): number | null {
+    const fp = Math.max(0.1, framePeriodMs);
+    const projectSec = toSec(frame, fp);
+    const localSec = projectSec - projection.projectStartSec;
+    if (localSec < -EPS || localSec > projection.projectLengthSec + EPS) return null;
+    const rate = Math.max(1e-9, projection.rate);
+    if (projection.loopEnabled && projection.loopCycleSec !== null) {
+        const cycleSec = projection.loopCycleSec;
+        const cycleTimeline = cycleSec / rate;
+        const offsetSec = localSec - cycle * cycleTimeline;
+        const anchor = loopAnchor(projection);
+        let source = projection.reversed ? anchor - offsetSec * rate : anchor + offsetSec * rate;
+        /*
+         * Loop 的源域是 [0, mediaDuration) 的环。anchor 之前的成员在局部仿射
+         * 映射里会得到 anchor+phase（大于媒体末尾），必须归一化回环内；否则
+         * R1/R3 仍会读到媒体末尾。端点恰好等于 mediaDuration 时保留原值，
+         * 因为那是“独占结束”而不是回绕到 0。
+         */
+        const media = projection.mediaDurationSec;
+        if (media !== null && media > EPS) {
+            if (source < -EPS || source > media + EPS) {
+                source = modEuclid(source, media);
+            } else if (Math.abs(source - media) <= EPS) {
+                source = media;
+            }
+        }
+        return source;
+    }
+    return projection.reversed
+        ? projection.sourceWindowEndSec - localSec * rate
+        : projection.sourceWindowStartSec + localSec * rate;
+}
+
+/** 源域秒 → 工程帧（用于定位一个源点在某个周期里的出现位置）。 */
+export function projectFrameOfSource(
+    projection: ClipProjection,
+    sourceSec: number,
+    cycle: number,
+    framePeriodMs: number,
+): number {
+    const fp = Math.max(0.1, framePeriodMs);
+    const rate = Math.max(1e-9, projection.rate);
+    if (projection.loopEnabled && projection.loopCycleSec !== null) {
+        const cycleSec = projection.loopCycleSec;
+        const anchor = loopAnchor(projection);
+        const phase = projection.reversed
+            ? modEuclid(anchor - sourceSec, cycleSec)
+            : modEuclid(sourceSec - anchor, cycleSec);
+        return toFrame(projection.projectStartSec + phase / rate + cycle * (cycleSec / rate), fp);
+    }
+    return toFrame(
+        projection.reversed
+            ? projection.projectStartSec + (projection.sourceWindowEndSec - sourceSec) / rate
+            : projection.projectStartSec + (sourceSec - projection.sourceWindowStartSec) / rate,
+        fp,
+    );
+}
+
+/**
+ * 把一个可能跨 Loop 周期边界的源域区间切成“每段都属于单一周期”的成员。
+ *
+ * 边界有两类：
+ * 1. **anchor**：正放时越过 anchor 的部分属于下一个周期；倒放时属于同一周期
+ *    的尾部（方向相反）。
+ * 2. **mediaDuration**：越过媒体末尾的部分回绕到 0，仍属于同一周期。
+ *
+ * 返回顺序不保证工程顺序；调用方应按投影起点排序（见 `orderTakeSpansByProjection`）。
+ */
+export function normalizeLoopTakeSpans(projection: ClipProjection, span: TakeSpan): TakeSpan[] {
+    if (!projection.loopEnabled || projection.loopCycleSec === null) return [span];
+    const cycleSec = projection.loopCycleSec;
+    const media = projection.mediaDurationSec ?? cycleSec;
+    const anchor = loopAnchor(projection);
+    const width = span.sourceEndSec - span.sourceStartSec;
+    if (!(width > EPS)) return [];
+    if (width > cycleSec + EPS) {
+        /*
+         * 超过一个完整周期的区间无法用单个成员表达；按周期宽度切块并递增周期。
+         * 正常分析/创建不会产生这种输入，这里只做确定性兜底，绝不静默截断。
+         */
+        const out: TakeSpan[] = [];
+        let start = span.sourceStartSec;
+        let cycle = span.cycle;
+        while (start < span.sourceEndSec - EPS) {
+            const end = Math.min(start + cycleSec, span.sourceEndSec);
+            out.push(
+                ...normalizeLoopTakeSpans(projection, {
+                    ...span,
+                    cycle,
+                    sourceStartSec: start,
+                    sourceEndSec: end,
+                }),
+            );
+            start = end;
+            cycle += 1;
+        }
+        return out;
+    }
+    const wrapMedia = (lo: number, hi: number): Array<[number, number]> => {
+        if (hi <= lo + EPS) return [];
+        if (lo < -EPS) {
+            if (hi <= EPS) return [[media + lo, media + hi]];
+            return [
+                [media + lo, media],
+                [0, hi],
+            ];
+        }
+        if (lo >= media - EPS) {
+            return [[lo - media, hi - media]];
+        }
+        if (hi > media + EPS) {
+            return [
+                [lo, media],
+                [0, hi - media],
+            ];
+        }
+        return [[lo, hi]];
+    };
+    const out: TakeSpan[] = [];
+    for (const [lo, hi] of wrapMedia(span.sourceStartSec, span.sourceEndSec)) {
+        if (projection.reversed) {
+            /*
+             * 倒放：源域随时间**下降**。越过 anchor 的区间不换周期：
+             * [anchor, hi] 在本周期开头，[lo, anchor] 在本周期末尾。
+             */
+            if (lo < anchor - EPS && hi > anchor + EPS) {
+                out.push({ ...span, cycle: span.cycle, sourceStartSec: anchor, sourceEndSec: hi });
+                out.push({ ...span, cycle: span.cycle, sourceStartSec: lo, sourceEndSec: anchor });
+            } else {
+                out.push({ ...span, cycle: span.cycle, sourceStartSec: lo, sourceEndSec: hi });
+            }
+        } else if (lo < anchor - EPS && hi > anchor + EPS) {
+            /*
+             * 正放：越过 anchor 的部分在**下一个**周期开头。
+             */
+            out.push({ ...span, cycle: span.cycle, sourceStartSec: lo, sourceEndSec: anchor });
+            out.push({
+                ...span,
+                cycle: span.cycle + 1,
+                sourceStartSec: anchor,
+                sourceEndSec: hi,
+            });
+        } else {
+            out.push({ ...span, cycle: span.cycle, sourceStartSec: lo, sourceEndSec: hi });
+        }
+    }
+    return out.filter((item) => item.sourceEndSec > item.sourceStartSec + EPS);
+}
+
+/** 按工程投影起点排序成员；同一成员若投影到多个周期，取它自己的 cycle。 */
+export function orderTakeSpansByProjection(
+    projection: ClipProjection,
+    spans: readonly TakeSpan[],
+    framePeriodMs: number,
+): TakeSpan[] {
+    return spans.slice().sort((a, b) => {
+        const ia = projectTakeSpan(projection, a, framePeriodMs).find(
+            (interval) => interval.cycle === a.cycle,
+        );
+        const ib = projectTakeSpan(projection, b, framePeriodMs).find(
+            (interval) => interval.cycle === b.cycle,
+        );
+        return (
+            (ia?.startFrame ?? Number.MAX_SAFE_INTEGER) -
+            (ib?.startFrame ?? Number.MAX_SAFE_INTEGER)
+        );
+    });
 }
 
 /**
@@ -247,8 +535,10 @@ export function toParamBlockSourceClip(clip: ClipInfo): ParamBlockSourceClip {
         sourceStartSec: clip.sourceStartSec,
         sourceEndSec: clip.sourceEndSec,
         playbackRate: clip.playbackRate,
+        clipPlaybackRate: clip.clipPlaybackRate,
         reversed: clip.reversed,
         loopEnabled: clip.loopEnabled,
+        loopPeriodSec: clip.loopPeriodSec ?? null,
         contentDurationSec: clip.durationSec ?? null,
         activeTakeId: clip.activeTakeId,
         takes: clip.takes?.map((take) => ({
@@ -262,9 +552,11 @@ export function toParamBlockSourceClip(clip: ClipInfo): ParamBlockSourceClip {
             durationFrames: take.durationFrames,
             sourceSampleRate: take.sourceSampleRate,
             syllableSpansSec: take.syllableSpansSec,
+            gameBlockBaseline: take.gameBlockBaseline,
             midiNoteData: take.midiNoteData,
         })),
         syllableSpansSec: clip.syllableSpansSec,
+        gameBlockBaseline: clip.gameBlockBaseline,
         midiNoteData: clip.midiNoteData,
     };
 }

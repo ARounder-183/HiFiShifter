@@ -198,8 +198,9 @@ pub fn project_span(
         } else {
             (span.source_start_sec - anchor).rem_euclid(cycle_sec)
         };
+        // 一个成员只能覆盖它所在周期的剩余部分；跨周期必须先 normalize_loop_span。
         let length_sec = ((span.source_end_sec - span.source_start_sec) / rate)
-            .min(cycle_sec / rate)
+            .min(((cycle_sec - phase) / rate).max(0.0))
             .max(0.0);
         let cycle_timeline_sec = cycle_sec / rate;
         if cycle_timeline_sec <= 1e-9 {
@@ -283,13 +284,26 @@ pub fn inverse_project(
         let phase = (local_sec - cycle as f64 * cycle_timeline_sec) * rate;
         let anchor = projection.loop_anchor();
         if projection.reversed {
-            anchor - phase.rem_euclid(cycle_sec)
+            anchor - phase
         } else {
-            anchor + phase.rem_euclid(cycle_sec)
+            anchor + phase
         }
     } else {
         projection.inverse_non_loop(project_sec)
     };
+    /*
+     * 【不能先 clamp 再取模】旧实现把 anchor + phase 直接截到媒体末尾，导致
+     * anchor 之前的回绕成员被映射到媒体尾部。正确顺序是：先得到未归一化的
+     * 源坐标，再在媒体域做一次归一化（取模），最后才允许等于 mediaDuration
+     * 的端点保持原值。
+     */
+    if let Some(duration) = projection.media_duration_sec.filter(|d| *d > 1e-9) {
+        if source < -1e-9 || source > duration + 1e-9 {
+            source = source.rem_euclid(duration);
+        } else if (source - duration).abs() <= 1e-9 {
+            source = duration;
+        }
+    }
     if let Some(duration) = projection.media_duration_sec {
         source = source.clamp(0.0, duration);
     }
@@ -298,6 +312,144 @@ pub fn inverse_project(
     } else {
         None
     }
+}
+
+/**
+ * 工程帧 → 源域秒的**局部仿射**映射（不取模、不 clamp）。
+ *
+ * `cycle` 必须是该投影区间自己的周期号。与 `inverse_project` 的区别：
+ * - 不把 anchor + phase 再截到媒体末尾（Loop 回绕会因此跳到媒体尾部）；
+ * - 不在周期边界把 end_frame_exclusive 折回 anchor；
+ * - 倒放时直接按 `anchor - offset` 计算，方向由成员自己的 frame_source* 表达。
+ */
+pub fn source_at_projected_frame(
+    projection: &ClipProjection,
+    frame: u32,
+    cycle: u32,
+    frame_period_ms: f64,
+) -> Option<f64> {
+    let project_sec = frame as f64 * frame_period_ms.max(0.1) / 1000.0;
+    let local_sec = project_sec - projection.project_start_sec;
+    if local_sec < -1e-9 || local_sec > projection.project_length_sec + 1e-9 {
+        return None;
+    }
+    let rate = projection.effective_rate.max(1e-9);
+    if projection.loop_enabled {
+        let cycle_sec = projection.loop_cycle_sec?;
+        let cycle_timeline_sec = cycle_sec / rate;
+        let offset_sec = local_sec - cycle as f64 * cycle_timeline_sec;
+        let anchor = projection.loop_anchor();
+        let mut source = if projection.reversed {
+            anchor - offset_sec * rate
+        } else {
+            anchor + offset_sec * rate
+        };
+        if let Some(media) = projection.media_duration_sec.filter(|d| *d > 1e-9) {
+            if source < -1e-9 || source > media + 1e-9 {
+                source = source.rem_euclid(media);
+            } else if (source - media).abs() <= 1e-9 {
+                source = media;
+            }
+        }
+        return source.is_finite().then_some(source);
+    }
+    let source = if projection.reversed {
+        projection.source_window_end_sec - local_sec * rate
+    } else {
+        projection.source_window_start_sec + local_sec * rate
+    };
+    source.is_finite().then_some(source)
+}
+
+/// 把一个可能跨 Loop 周期边界的源域区间切成“每段都属于单一周期”的成员。
+pub fn normalize_loop_span(projection: &ClipProjection, span: &TakeSpan) -> Vec<TakeSpan> {
+    if !projection.loop_enabled {
+        return vec![span.clone()];
+    }
+    let Some(cycle_sec) = projection.loop_cycle_sec.filter(|value| *value > 1e-9) else {
+        return vec![span.clone()];
+    };
+    let media = projection.media_duration_sec.unwrap_or(cycle_sec);
+    let anchor = projection.loop_anchor();
+    let width = span.source_end_sec - span.source_start_sec;
+    if width <= 1e-12 {
+        return Vec::new();
+    }
+    if width > cycle_sec + 1e-9 {
+        let mut out = Vec::new();
+        let mut start = span.source_start_sec;
+        let mut cycle = span.cycle;
+        while start < span.source_end_sec - 1e-9 {
+            let end = (start + cycle_sec).min(span.source_end_sec);
+            let mut part = span.clone();
+            part.cycle = cycle;
+            part.source_start_sec = start;
+            part.source_end_sec = end;
+            out.extend(normalize_loop_span(projection, &part));
+            start = end;
+            cycle = cycle.saturating_add(1);
+        }
+        return out;
+    }
+    let mut wrapped: Vec<(f64, f64)> = Vec::new();
+    let (lo, hi) = (span.source_start_sec, span.source_end_sec);
+    if lo < -1e-9 {
+        if hi <= 1e-9 {
+            wrapped.push((media + lo, media + hi));
+        } else {
+            wrapped.push((media + lo, media));
+            wrapped.push((0.0, hi));
+        }
+    } else if lo >= media - 1e-9 {
+        wrapped.push((lo - media, hi - media));
+    } else if hi > media + 1e-9 {
+        wrapped.push((lo, media));
+        wrapped.push((0.0, hi - media));
+    } else {
+        wrapped.push((lo, hi));
+    }
+    let mut out = Vec::new();
+    for (lo, hi) in wrapped {
+        if projection.reversed {
+            if lo < anchor - 1e-9 && hi > anchor + 1e-9 {
+                let mut first = span.clone();
+                first.cycle = span.cycle;
+                first.source_start_sec = anchor;
+                first.source_end_sec = hi;
+                let mut second = span.clone();
+                second.cycle = span.cycle;
+                second.source_start_sec = lo;
+                second.source_end_sec = anchor;
+                out.push(first);
+                out.push(second);
+            } else {
+                let mut part = span.clone();
+                part.cycle = span.cycle;
+                part.source_start_sec = lo;
+                part.source_end_sec = hi;
+                out.push(part);
+            }
+        } else if lo < anchor - 1e-9 && hi > anchor + 1e-9 {
+            let mut first = span.clone();
+            first.cycle = span.cycle;
+            first.source_start_sec = lo;
+            first.source_end_sec = anchor;
+            let mut second = span.clone();
+            second.cycle = span.cycle.saturating_add(1);
+            second.source_start_sec = anchor;
+            second.source_end_sec = hi;
+            out.push(first);
+            out.push(second);
+        } else {
+            let mut part = span.clone();
+            part.cycle = span.cycle;
+            part.source_start_sec = lo;
+            part.source_end_sec = hi;
+            out.push(part);
+        }
+    }
+    out.retain(|part| part.source_end_sec > part.source_start_sec + 1e-12);
+    out
 }
 
 /// 源域宽度换算成工程帧宽度（用于过渡手柄）。
@@ -367,6 +519,28 @@ mod tests {
         assert_eq!(interval.start_frame, 280);
         let source = inverse_project(&projection, interval.start_frame, 0, 5.0).unwrap();
         assert!((source - 0.6).abs() < 0.01, "{source}");
+    }
+
+    #[test]
+    fn inverse_loop_wrap_stays_inside_the_member() {
+        let clip = clip(serde_json::json!({
+            "id":"clip","track_id":"root","name":"c","start_sec":0.0,"length_sec":8.0,
+            "loop_enabled":true,"loop_period_sec":2.27,
+            "takes":[{"id":"take","source_path":"a","source_start_sec":0.266,
+                "source_end_sec":2.27,"loop_enabled":true,"duration_sec":2.27}]
+        }));
+        let projection = ClipProjection::from_clip(&clip).unwrap();
+        let span = span(0.046, 0.252);
+        let intervals = project_span(&projection, &span, 5.0);
+        assert_eq!(intervals[0].start_frame, 410);
+        assert_eq!(intervals[0].end_frame_exclusive, 451);
+        for frame in intervals[0].start_frame..=intervals[0].end_frame_exclusive {
+            let source = inverse_project(&projection, frame, intervals[0].cycle, 5.0).unwrap();
+            assert!(
+                (0.0459..=0.2521).contains(&source),
+                "frame {frame} -> {source}"
+            );
+        }
     }
 
     #[test]
