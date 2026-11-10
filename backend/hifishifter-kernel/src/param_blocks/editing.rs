@@ -208,7 +208,7 @@ fn materialize_projected_fragment(
     else {
         return Err("Invalid: block not found".into());
     };
-    if parent.grouped_from.is_some() {
+    if parent.is_group() {
         return Ok((edits.clone(), parent));
     }
     let fragment = projected_members_to_spans(timeline, block, frame_period_ms)?;
@@ -282,7 +282,6 @@ fn materialize_projected_fragment(
         transition_out_sec: parent.transition_out_sec,
         created_seq: next.next_seq(),
         base_cover: parent.base_cover.clone(),
-        grouped_from: None,
     };
     let next = place_user_block(&next, child.clone())?;
     Ok((next, child))
@@ -333,10 +332,44 @@ pub fn ensure_editable_user_block(
             .map(|frames| frames as f64 * frame_period_ms.max(0.1) / 1000.0),
         created_seq: next_seq(edits),
         base_cover: block.base_cover.clone(),
-        grouped_from: None,
     };
     let next = place_user_block(edits, target.clone())?;
     Ok((next, target))
+}
+
+fn first_projected_frame(
+    timeline: &TimelineState,
+    block: &UserParamBlock,
+    frame_period_ms: f64,
+) -> u32 {
+    super::compose::project_single_user_block(timeline, block, frame_period_ms)
+        .ok()
+        .flatten()
+        .map(|projected| projected.start_frame)
+        .unwrap_or(u32::MAX)
+}
+
+/// 顶层替换：删除指定 id 后原样放入 replacements。组编辑专用。
+///
+/// 不能走 `place_user_block`：Group 没有可裁剪的成员，旧顶层块必须显式移除，
+/// 否则组会和被它包含的原块同时存在。
+fn replace_top_level_blocks(
+    edits: &ParamBlockEditSet,
+    remove_ids: &std::collections::BTreeSet<String>,
+    replacements: Vec<UserParamBlock>,
+) -> Result<ParamBlockEditSet, String> {
+    let mut next = edits.clone();
+    next.blocks
+        .retain(|block| !remove_ids.contains(block.id.as_str()));
+    next.blocks.extend(replacements);
+    next.blocks.sort_by(|a, b| {
+        a.created_seq
+            .cmp(&b.created_seq)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    next.revision = edits.revision.saturating_add(1);
+    next.validate()?;
+    Ok(next)
 }
 
 pub fn group_blocks(
@@ -357,70 +390,58 @@ pub fn group_blocks(
     }
 
     let mut working = edits.clone();
-    let mut snapshots = Vec::new();
+    let mut ensured_ids = std::collections::BTreeSet::new();
+    let mut children: Vec<UserParamBlock> = Vec::new();
     for block in &ordered {
         let (next, user) = ensure_editable_user_block(timeline, &working, block, frame_period_ms)?;
         working = next;
-        snapshots.push(user);
+        ensured_ids.insert(user.id.clone());
+        if user.is_group() {
+            for child in user.flatten_children() {
+                if !children.iter().any(|existing| existing.id == child.id) {
+                    children.push(child.clone());
+                }
+            }
+        } else if !children.iter().any(|existing| existing.id == user.id) {
+            children.push(user);
+        }
     }
-    if snapshots.iter().all(|block| block.id == snapshots[0].id) {
+    if children.len() < 2 {
         return Err("Invalid: blocks are already grouped".into());
     }
-    let has_root = snapshots
+    children.sort_by_key(|child| first_projected_frame(timeline, child, frame_period_ms));
+
+    let has_root = children
         .iter()
         .any(|block| matches!(block.geometry, BlockGeometry::Root { .. }));
-    let has_take = snapshots.iter().any(UserParamBlock::is_take);
+    let has_take = children.iter().any(UserParamBlock::is_take);
     if has_root && has_take {
         return Err("Invalid: cannot group root and take blocks together".into());
     }
+    if children.iter().any(UserParamBlock::is_group) {
+        return Err("Invalid: nested group".into());
+    }
 
-    let members: Vec<TakeSpan> = snapshots
-        .iter()
-        .flat_map(|block| block.members().iter().cloned())
-        .collect();
-    let geometry = if !has_take {
-        let start = ordered.first().map(|block| block.start_frame).unwrap_or(0);
-        let end = ordered
-            .last()
-            .map(|block| block.end_frame_exclusive)
-            .unwrap_or(0);
-        BlockGeometry::Root {
-            span: RootSpan {
-                start_sec: start as f64 * frame_period_ms.max(0.1) / 1000.0,
-                end_sec: end as f64 * frame_period_ms.max(0.1) / 1000.0,
-            },
-        }
-    } else {
-        BlockGeometry::Take { members }
-    };
-    let values: Vec<Option<f64>> = snapshots.iter().map(|block| block.value).collect();
+    let values: Vec<Option<f64>> = children.iter().map(|block| block.value).collect();
     let value = values
         .first()
         .copied()
         .flatten()
         .filter(|first| values.iter().all(|value| *value == Some(*first)));
-    let manual = snapshots.iter().all(|block| block.manual);
-    let transition_out_sec = snapshots.last().and_then(|block| block.transition_out_sec);
-    let base_cover = snapshots
-        .first()
-        .and_then(|block| block.base_cover.clone())
-        .filter(|cover| {
-            snapshots
-                .iter()
-                .all(|block| block.base_cover.as_ref() == Some(cover))
-        });
+    let manual = children.iter().any(|block| block.manual);
+    let transition_out_sec = children.last().and_then(|block| block.transition_out_sec);
     let target = UserParamBlock {
         id: new_id("ublock", &format!("group:{}", ordered[0].id)),
-        geometry,
+        geometry: BlockGeometry::Group { children },
         deleted: false,
         manual,
         value,
         transition_out_sec,
         created_seq: working.next_seq(),
-        base_cover,
-        grouped_from: Some(snapshots),
+        base_cover: None,
     };
-    place_user_block(&working, target)
+    working = replace_top_level_blocks(&working, &ensured_ids, vec![target])?;
+    Ok(working)
 }
 
 pub fn ungroup_user_block(
@@ -432,21 +453,16 @@ pub fn ungroup_user_block(
         .iter()
         .find(|item| item.id == block_id)
         .ok_or_else(|| "Invalid: block not found".to_string())?;
-    let Some(children) = block.grouped_from.clone() else {
-        return Err("Invalid: block is not grouped".into());
-    };
+    let children = block
+        .children()
+        .ok_or_else(|| "Invalid: block is not grouped".to_string())?
+        .to_vec();
     if children.len() < 2 {
         return Err("Invalid: grouped block has no members".into());
     }
-    let mut next = edits.clone();
-    next.blocks.retain(|item| item.id != block_id);
-    next.revision = edits.revision.saturating_add(1);
-    for child in children {
-        next = place_user_block(&next, child)?;
-    }
-    next.revision = edits.revision.saturating_add(1);
-    next.validate()?;
-    Ok(next)
+    let mut remove = std::collections::BTreeSet::new();
+    remove.insert(block_id.to_owned());
+    replace_top_level_blocks(edits, &remove, children)
 }
 
 fn span_from_projected_member(member: &ProjectedMember) -> TakeSpan {
@@ -577,14 +593,14 @@ fn find_projected_block(
     Err("Invalid: block not found".into())
 }
 
-fn split_take_block(
+fn split_take_parts(
     timeline: &TimelineState,
     working: &ParamBlockEditSet,
     block: &UserParamBlock,
     projected: &ProjectedParamBlock,
     frame: u32,
     frame_period_ms: f64,
-) -> Result<ParamBlockEditSet, String> {
+) -> Result<(UserParamBlock, UserParamBlock), String> {
     let members = &projected.members;
     if members.is_empty() {
         return Err("Invalid: block has no members".into());
@@ -649,7 +665,6 @@ fn split_take_block(
         transition_out_sec: Some(0.0),
         created_seq: next_seq(working),
         base_cover: block.base_cover.clone(),
-        grouped_from: None,
     };
     let right = UserParamBlock {
         id: new_id("ublock", &format!("split:{}:{frame}:right", block.id)),
@@ -662,10 +677,355 @@ fn split_take_block(
         transition_out_sec: block.transition_out_sec,
         created_seq: next_seq(working).saturating_add(1),
         base_cover: block.base_cover.clone(),
-        grouped_from: None,
     };
-    let next = place_user_block(working, left)?;
-    place_user_block(&next, right)
+    Ok((left, right))
+}
+
+fn split_root_parts(
+    working: &ParamBlockEditSet,
+    block: &UserParamBlock,
+    span: &RootSpan,
+    frame: u32,
+    frame_period_ms: f64,
+) -> Result<(UserParamBlock, UserParamBlock), String> {
+    let split_sec = frame as f64 * frame_period_ms.max(0.1) / 1000.0;
+    if split_sec <= span.start_sec + EPS || split_sec >= span.end_sec - EPS {
+        return Err("Invalid: split outside block".into());
+    }
+    let left = UserParamBlock {
+        id: new_id("ublock", &format!("split:{}:{frame}:left", block.id)),
+        geometry: BlockGeometry::Root {
+            span: RootSpan {
+                start_sec: span.start_sec,
+                end_sec: split_sec,
+            },
+        },
+        deleted: false,
+        manual: block.manual,
+        value: block.value,
+        transition_out_sec: Some(0.0),
+        created_seq: next_seq(working),
+        base_cover: None,
+    };
+    let right = UserParamBlock {
+        id: new_id("ublock", &format!("split:{}:{frame}:right", block.id)),
+        geometry: BlockGeometry::Root {
+            span: RootSpan {
+                start_sec: split_sec,
+                end_sec: span.end_sec,
+            },
+        },
+        deleted: false,
+        manual: block.manual,
+        value: block.value,
+        transition_out_sec: block.transition_out_sec,
+        created_seq: next_seq(working).saturating_add(1),
+        base_cover: None,
+    };
+    Ok((left, right))
+}
+
+fn split_leaf_parts(
+    timeline: &TimelineState,
+    working: &ParamBlockEditSet,
+    block: &UserParamBlock,
+    projected: &ProjectedParamBlock,
+    frame: u32,
+    frame_period_ms: f64,
+) -> Result<(UserParamBlock, UserParamBlock), String> {
+    match &block.geometry {
+        BlockGeometry::Root { span } => {
+            split_root_parts(working, block, span, frame, frame_period_ms)
+        }
+        BlockGeometry::Take { .. } => {
+            split_take_parts(timeline, working, block, projected, frame, frame_period_ms)
+        }
+        BlockGeometry::Group { .. } => Err("Invalid: nested group".into()),
+    }
+}
+
+fn split_group_block(
+    timeline: &TimelineState,
+    edits: &ParamBlockEditSet,
+    group: &UserParamBlock,
+    frame: u32,
+    frame_period_ms: f64,
+) -> Result<ParamBlockEditSet, String> {
+    let mut ordered = group
+        .flatten_children()
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    ordered.sort_by_key(|child| first_projected_frame(timeline, child, frame_period_ms));
+    let working = edits.clone();
+    let mut left: Vec<UserParamBlock> = Vec::new();
+    let mut right: Vec<UserParamBlock> = Vec::new();
+    for child in ordered {
+        let Some(projected) =
+            super::compose::project_single_user_block(timeline, &child, frame_period_ms)?
+        else {
+            continue;
+        };
+        if projected.end_frame_exclusive <= frame {
+            left.push(child);
+        } else if projected.start_frame >= frame {
+            right.push(child);
+        } else {
+            let (left_part, right_part) = split_leaf_parts(
+                timeline,
+                &working,
+                &child,
+                &projected,
+                frame,
+                frame_period_ms,
+            )?;
+            left.push(left_part);
+            right.push(right_part);
+        }
+    }
+    if left.is_empty() || right.is_empty() {
+        return Err("Invalid: split at block edge".into());
+    }
+    let mut remove = std::collections::BTreeSet::new();
+    remove.insert(group.id.clone());
+    let mut replacements = Vec::new();
+    let first_seq = working.next_seq();
+    replacements.push(group_side(
+        timeline,
+        group,
+        left,
+        &format!("split:{}:{frame}:left", group.id),
+        frame_period_ms,
+        first_seq,
+    ));
+    replacements.push(group_side(
+        timeline,
+        group,
+        right,
+        &format!("split:{}:{frame}:right", group.id),
+        frame_period_ms,
+        first_seq.saturating_add(1),
+    ));
+    replace_top_level_blocks(&working, &remove, replacements)
+}
+
+fn group_side(
+    timeline: &TimelineState,
+    original: &UserParamBlock,
+    mut children: Vec<UserParamBlock>,
+    identity: &str,
+    frame_period_ms: f64,
+    created_seq: u64,
+) -> UserParamBlock {
+    children.sort_by_key(|child| first_projected_frame(timeline, child, frame_period_ms));
+    if children.len() == 1 {
+        let mut child = children.remove(0);
+        if original.value.is_some() {
+            child.value = original.value;
+        }
+        return child;
+    }
+    UserParamBlock {
+        id: new_id("ublock", identity),
+        geometry: BlockGeometry::Group { children },
+        deleted: false,
+        manual: original.manual,
+        value: original.value,
+        transition_out_sec: original.transition_out_sec,
+        created_seq,
+        base_cover: None,
+    }
+}
+
+fn resize_single_leaf(
+    timeline: &TimelineState,
+    edits: &ParamBlockEditSet,
+    child: &UserParamBlock,
+    edge: &str,
+    target_frame: u32,
+    frame_period_ms: f64,
+) -> Result<Vec<UserParamBlock>, String> {
+    let temp = ParamBlockEditSet {
+        schema_version: 2,
+        revision: edits.revision,
+        blocks: vec![child.clone()],
+    };
+    let Some(projected) =
+        super::compose::project_single_user_block(timeline, child, frame_period_ms)?
+    else {
+        return Ok(Vec::new());
+    };
+    let resized = resize_block(
+        timeline,
+        &temp,
+        &projected.id,
+        edge,
+        target_frame,
+        frame_period_ms,
+    )?;
+    Ok(resized.blocks)
+}
+
+fn resize_group_block(
+    timeline: &TimelineState,
+    edits: &ParamBlockEditSet,
+    group: &UserParamBlock,
+    edge: &str,
+    target_frame: u32,
+    frame_period_ms: f64,
+) -> Result<ParamBlockEditSet, String> {
+    let mut children = group
+        .flatten_children()
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    children.sort_by_key(|child| first_projected_frame(timeline, child, frame_period_ms));
+    if children.is_empty() {
+        return Err("Invalid: group has no children".into());
+    }
+    let Some(first_projected) =
+        super::compose::project_single_user_block(timeline, &children[0], frame_period_ms)?
+    else {
+        return Err("Invalid: group child not projected".into());
+    };
+    let Some(last_projected) = super::compose::project_single_user_block(
+        timeline,
+        children.last().unwrap(),
+        frame_period_ms,
+    )?
+    else {
+        return Err("Invalid: group child not projected".into());
+    };
+    if edge == "right" && target_frame <= first_projected.start_frame.saturating_add(1) {
+        let group_projected =
+            super::compose::project_single_user_block(timeline, group, frame_period_ms)?
+                .ok_or_else(|| "Invalid: block not found".to_string())?;
+        return Ok(delete_blocks(timeline, edits, &[group_projected], frame_period_ms)?.0);
+    }
+    if edge == "left" && target_frame >= last_projected.end_frame_exclusive.saturating_sub(1) {
+        let group_projected =
+            super::compose::project_single_user_block(timeline, group, frame_period_ms)?
+                .ok_or_else(|| "Invalid: block not found".to_string())?;
+        return Ok(delete_blocks(timeline, edits, &[group_projected], frame_period_ms)?.0);
+    }
+
+    let mut kept: Vec<UserParamBlock> = Vec::new();
+    if edge == "right" {
+        for child in &children {
+            let Some(projected) =
+                super::compose::project_single_user_block(timeline, child, frame_period_ms)?
+            else {
+                continue;
+            };
+            if projected.end_frame_exclusive <= target_frame {
+                kept.push(child.clone());
+            } else if projected.start_frame >= target_frame {
+                break;
+            } else {
+                let (left_part, _) = split_leaf_parts(
+                    timeline,
+                    edits,
+                    child,
+                    &projected,
+                    target_frame,
+                    frame_period_ms,
+                )?;
+                kept.push(left_part);
+                break;
+            }
+        }
+        if kept.is_empty() {
+            let group_projected =
+                super::compose::project_single_user_block(timeline, group, frame_period_ms)?
+                    .ok_or_else(|| "Invalid: block not found".to_string())?;
+            return Ok(delete_blocks(timeline, edits, &[group_projected], frame_period_ms)?.0);
+        }
+        if target_frame >= last_projected.end_frame_exclusive
+            && kept.last().is_some_and(|child| {
+                super::compose::project_single_user_block(timeline, child, frame_period_ms)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|projected| projected.end_frame_exclusive < target_frame)
+            })
+        {
+            let last = kept.pop().unwrap();
+            let mut resized = resize_single_leaf(
+                timeline,
+                edits,
+                &last,
+                "right",
+                target_frame,
+                frame_period_ms,
+            )?;
+            kept.append(&mut resized);
+        }
+    } else {
+        for child in children.iter().rev() {
+            let Some(projected) =
+                super::compose::project_single_user_block(timeline, child, frame_period_ms)?
+            else {
+                continue;
+            };
+            if projected.start_frame >= target_frame {
+                kept.push(child.clone());
+            } else if projected.end_frame_exclusive <= target_frame {
+                break;
+            } else {
+                let (_, right_part) = split_leaf_parts(
+                    timeline,
+                    edits,
+                    child,
+                    &projected,
+                    target_frame,
+                    frame_period_ms,
+                )?;
+                kept.push(right_part);
+                break;
+            }
+        }
+        kept.reverse();
+        if kept.is_empty() {
+            let group_projected =
+                super::compose::project_single_user_block(timeline, group, frame_period_ms)?
+                    .ok_or_else(|| "Invalid: block not found".to_string())?;
+            return Ok(delete_blocks(timeline, edits, &[group_projected], frame_period_ms)?.0);
+        }
+        if target_frame <= first_projected.start_frame
+            && kept.first().is_some_and(|child| {
+                super::compose::project_single_user_block(timeline, child, frame_period_ms)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|projected| projected.start_frame > target_frame)
+            })
+        {
+            let first = kept.remove(0);
+            let mut resized = resize_single_leaf(
+                timeline,
+                edits,
+                &first,
+                "left",
+                target_frame,
+                frame_period_ms,
+            )?;
+            resized.append(&mut kept);
+            kept = resized;
+        }
+    }
+
+    let mut remove = std::collections::BTreeSet::new();
+    remove.insert(group.id.clone());
+    if kept.is_empty() {
+        return replace_top_level_blocks(edits, &remove, Vec::new());
+    }
+    let side = group_side(
+        timeline,
+        group,
+        kept,
+        &format!("resize:{}:{edge}:{target_frame}", group.id),
+        frame_period_ms,
+        edits.next_seq(),
+    );
+    replace_top_level_blocks(edits, &remove, vec![side])
 }
 
 pub fn split_block(
@@ -676,67 +1036,26 @@ pub fn split_block(
     frame_period_ms: f64,
 ) -> Result<ParamBlockEditSet, String> {
     let projected = find_projected_block(timeline, edits, block_id, frame_period_ms)?;
-    if projected.kind == ProjectedBlockKind::Grouped {
-        return Err("Invalid: grouped block must be ungrouped first".into());
-    }
     if frame <= projected.start_frame || frame >= projected.end_frame_exclusive {
         return Err("Invalid: split outside block".into());
     }
     let (working, block) =
         ensure_editable_user_block(timeline, edits, &projected, frame_period_ms)?;
-    if block.grouped_from.is_some() {
-        return Err("Invalid: grouped block must be ungrouped first".into());
+    if let BlockGeometry::Group { .. } = &block.geometry {
+        return split_group_block(timeline, &working, &block, frame, frame_period_ms);
     }
-    match &block.geometry {
-        BlockGeometry::Root { span } => {
-            let split_sec = frame as f64 * frame_period_ms.max(0.1) / 1000.0;
-            if split_sec <= span.start_sec + EPS || split_sec >= span.end_sec - EPS {
-                return Err("Invalid: split outside block".into());
-            }
-            let left = UserParamBlock {
-                id: new_id("ublock", &format!("split:{}:{frame}:left", block.id)),
-                geometry: BlockGeometry::Root {
-                    span: RootSpan {
-                        start_sec: span.start_sec,
-                        end_sec: split_sec,
-                    },
-                },
-                deleted: false,
-                manual: block.manual,
-                value: block.value,
-                transition_out_sec: Some(0.0),
-                created_seq: next_seq(&working),
-                base_cover: block.base_cover.clone(),
-                grouped_from: None,
-            };
-            let right = UserParamBlock {
-                id: new_id("ublock", &format!("split:{}:{frame}:right", block.id)),
-                geometry: BlockGeometry::Root {
-                    span: RootSpan {
-                        start_sec: split_sec,
-                        end_sec: span.end_sec,
-                    },
-                },
-                deleted: false,
-                manual: block.manual,
-                value: block.value,
-                transition_out_sec: block.transition_out_sec,
-                created_seq: next_seq(&working).saturating_add(1),
-                base_cover: block.base_cover.clone(),
-                grouped_from: None,
-            };
-            let next = place_user_block(&working, left)?;
-            place_user_block(&next, right)
-        }
-        BlockGeometry::Take { .. } => split_take_block(
-            timeline,
-            &working,
-            &block,
-            &projected,
-            frame,
-            frame_period_ms,
-        ),
-    }
+    let projected = super::compose::project_single_user_block(timeline, &block, frame_period_ms)?
+        .ok_or_else(|| "Invalid: block not found".to_string())?;
+    let (left, right) = split_leaf_parts(
+        timeline,
+        &working,
+        &block,
+        &projected,
+        frame,
+        frame_period_ms,
+    )?;
+    let next = place_user_block(&working, left)?;
+    place_user_block(&next, right)
 }
 
 fn edge_clip_bounds(
@@ -773,13 +1092,17 @@ pub fn resize_block(
     frame_period_ms: f64,
 ) -> Result<ParamBlockEditSet, String> {
     let projected = find_projected_block(timeline, edits, block_id, frame_period_ms)?;
-    if projected.kind == ProjectedBlockKind::Grouped {
-        return Err("Invalid: grouped block must be ungrouped first".into());
-    }
     let (working, block) =
         ensure_editable_user_block(timeline, edits, &projected, frame_period_ms)?;
-    if block.grouped_from.is_some() {
-        return Err("Invalid: grouped block must be ungrouped first".into());
+    if let BlockGeometry::Group { .. } = &block.geometry {
+        return resize_group_block(
+            timeline,
+            &working,
+            &block,
+            edge,
+            target_frame,
+            frame_period_ms,
+        );
     }
     let mut next = block.clone();
     match &mut next.geometry {
@@ -796,6 +1119,7 @@ pub fn resize_block(
             return place_user_block(&working, next);
         }
         BlockGeometry::Take { .. } => {}
+        BlockGeometry::Group { .. } => unreachable!(),
     }
     let members = projected.members.clone();
     if members.is_empty() {
@@ -1081,7 +1405,6 @@ fn make_tombstone(user: &UserParamBlock, member: &TakeSpan, seq: u64) -> UserPar
         transition_out_sec: None,
         created_seq: seq,
         base_cover: user.base_cover.clone(),
-        grouped_from: None,
     }
 }
 
@@ -1089,6 +1412,8 @@ fn make_tombstone(user: &UserParamBlock, member: &TakeSpan, seq: u64) -> UserPar
 pub struct DeletedParamBlockSnapshot {
     pub block: UserParamBlock,
     pub previous_edits: ParamBlockEditSet,
+    /// 组删除时为 base 派生 child 生成的墓碑；恢复时按这些 id 精确移除。
+    pub child_tombstones: Vec<UserParamBlock>,
 }
 
 /// 删除块并返回精确到源区间的可逆快照。base 与多 run 片段先物化。
@@ -1114,9 +1439,33 @@ pub fn delete_blocks(
         if owned.is_some() {
             snapshot_block.base_cover = owned;
         }
+        let mut child_tombstones = Vec::new();
+        for child in user.flatten_children() {
+            if child.manual && child.base_cover.is_none() {
+                continue;
+            }
+            if child.is_group() {
+                continue;
+            }
+            for member in child.members() {
+                if !child_tombstones
+                    .iter()
+                    .any(|tombstone: &UserParamBlock| tombstone_matches(tombstone, member))
+                {
+                    child_tombstones.push(make_tombstone(
+                        child,
+                        member,
+                        working
+                            .next_seq()
+                            .saturating_add(child_tombstones.len() as u64),
+                    ));
+                }
+            }
+        }
         snapshots.push(DeletedParamBlockSnapshot {
             block: snapshot_block,
             previous_edits: before,
+            child_tombstones,
         });
     }
     if snapshots.is_empty() {
@@ -1142,6 +1491,17 @@ pub fn delete_blocks(
     for tombstone in tombstones {
         working = place_user_block(&working, tombstone)?;
     }
+    for snapshot in &snapshots {
+        for tombstone in &snapshot.child_tombstones {
+            if !working
+                .blocks
+                .iter()
+                .any(|candidate| candidate.id == tombstone.id)
+            {
+                working = place_user_block(&working, tombstone.clone())?;
+            }
+        }
+    }
     working.revision = edits.revision.saturating_add(1);
     working.validate()?;
     Ok((working, snapshots))
@@ -1157,12 +1517,18 @@ pub fn restore_deleted_blocks(
     }
     let mut next = edits.clone();
     for snapshot in snapshots {
+        let child_ids: std::collections::BTreeSet<&str> = snapshot
+            .child_tombstones
+            .iter()
+            .map(|tombstone| tombstone.id.as_str())
+            .collect();
         next.blocks.retain(|candidate| {
-            !snapshot
-                .block
-                .members()
-                .iter()
-                .any(|member| tombstone_matches(candidate, member))
+            !child_ids.contains(candidate.id.as_str())
+                && !snapshot
+                    .block
+                    .members()
+                    .iter()
+                    .any(|member| tombstone_matches(candidate, member))
         });
         next = place_user_block(&next, snapshot.block.clone())?;
     }
@@ -1386,7 +1752,6 @@ pub fn create_block_with_id(
         transition_out_sec: None,
         created_seq: next_seq(edits),
         base_cover: None,
-        grouped_from: None,
     };
     place_user_block(edits, target)
 }
@@ -1525,6 +1890,71 @@ pub fn restore_game_blocks(
                 part.geometry = BlockGeometry::Take { members: kept };
                 kept_blocks.push(part);
             }
+            BlockGeometry::Group { children } => {
+                let mut kept_children = Vec::new();
+                let start_sec = start_frame as f64 * frame_period_ms.max(0.1) / 1000.0;
+                let end_sec = end_frame as f64 * frame_period_ms.max(0.1) / 1000.0;
+                for child in children {
+                    match &child.geometry {
+                        BlockGeometry::Take { members } => {
+                            let kept = keep_take_members_outside_range(
+                                timeline,
+                                members,
+                                start_frame,
+                                end_frame,
+                                frame_period_ms,
+                            );
+                            if !kept.is_empty() {
+                                let mut part = child.clone();
+                                part.geometry = BlockGeometry::Take { members: kept };
+                                kept_children.push(part);
+                            }
+                        }
+                        BlockGeometry::Root { span } => {
+                            for (index, (a, b)) in
+                                subtract_interval(span.start_sec, span.end_sec, start_sec, end_sec)
+                                    .into_iter()
+                                    .enumerate()
+                            {
+                                if b <= a + EPS {
+                                    continue;
+                                }
+                                let mut part = child.clone();
+                                if index > 0 {
+                                    part.id = new_id(
+                                        "ublock",
+                                        &format!("restore-group:{}:{a:.9}:{b:.9}", child.id),
+                                    );
+                                }
+                                part.geometry = BlockGeometry::Root {
+                                    span: RootSpan {
+                                        start_sec: a,
+                                        end_sec: b,
+                                    },
+                                };
+                                kept_children.push(part);
+                            }
+                        }
+                        BlockGeometry::Group { .. } => {}
+                    }
+                }
+                if kept_children.is_empty() {
+                    continue;
+                }
+                if kept_children.len() == 1 {
+                    let mut child = kept_children.remove(0);
+                    if block.value.is_some() {
+                        child.value = block.value;
+                    }
+                    kept_blocks.push(child);
+                } else {
+                    let mut part = block.clone();
+                    part.geometry = BlockGeometry::Group {
+                        children: kept_children,
+                    };
+                    kept_blocks.push(part);
+                }
+            }
         }
     }
     next.blocks = kept_blocks;
@@ -1610,7 +2040,6 @@ pub fn restore_game_blocks(
                             spans: vec![member],
                             full: false,
                         }),
-                        grouped_from: None,
                     };
                     next = place_user_block(&next, target)?;
                 }
@@ -1619,6 +2048,31 @@ pub fn restore_game_blocks(
     }
     next.revision = edits.revision.saturating_add(1);
     next.validate()?;
+    Ok(next)
+}
+
+/// 多段范围还原：每一段独立执行一次 GAME 基线还原，段间保持原样。
+pub fn restore_game_block_ranges(
+    timeline: &TimelineState,
+    root_track_id: &str,
+    edits: &ParamBlockEditSet,
+    ranges: &[(u32, u32)],
+    frame_period_ms: f64,
+) -> Result<ParamBlockEditSet, String> {
+    let mut next = edits.clone();
+    for (start_frame, end_frame) in ranges {
+        if end_frame <= start_frame {
+            continue;
+        }
+        next = restore_game_blocks(
+            timeline,
+            root_track_id,
+            &next,
+            *start_frame,
+            *end_frame,
+            frame_period_ms,
+        )?;
+    }
     Ok(next)
 }
 
@@ -1711,22 +2165,65 @@ mod tests {
     }
 
     #[test]
-    fn grouped_blocks_reject_split_and_resize() {
+    fn grouped_blocks_split_and_resize() {
         let timeline = timeline();
         let view = base_view(&timeline);
         let grouped =
             group_blocks(&timeline, &ParamBlockEditSet::default(), &view.blocks, 5.0).unwrap();
         let grouped_view = compose_param_block_view(&timeline, "root", &grouped, 5.0).unwrap();
-        assert!(split_block(&timeline, &grouped, &grouped_view.blocks[0].id, 50, 5.0).is_err());
-        assert!(resize_block(
-            &timeline,
-            &grouped,
-            &grouped_view.blocks[0].id,
-            "right",
-            150,
-            5.0
-        )
-        .is_err());
+        let group_id = grouped_view.blocks[0].id.clone();
+        let split = split_block(&timeline, &grouped, &group_id, 50, 5.0).unwrap();
+        let split_view = compose_param_block_view(&timeline, "root", &split, 5.0).unwrap();
+        assert_eq!(
+            split_view
+                .blocks
+                .iter()
+                .filter(|block| block.kind != crate::param_blocks::ProjectedBlockKind::Base)
+                .count(),
+            2
+        );
+        assert!(
+            split
+                .blocks
+                .iter()
+                .filter(|block| block.is_group())
+                .flat_map(|block| block.flatten_children())
+                .count()
+                >= 2
+        );
+
+        let resized = resize_block(&timeline, &grouped, &group_id, "right", 150, 5.0).unwrap();
+        let resized_view = compose_param_block_view(&timeline, "root", &resized, 5.0).unwrap();
+        // 组伸缩会重建容器（新 id），因此按结果几何断言而不是按 id 找回。
+        let user_blocks: Vec<_> = resized_view
+            .blocks
+            .iter()
+            .filter(|block| block.kind != crate::param_blocks::ProjectedBlockKind::Base)
+            .collect();
+        assert_eq!(user_blocks.len(), 1);
+        assert_eq!(user_blocks[0].end_frame_exclusive, 150);
+    }
+
+    #[test]
+    fn group_delete_creates_child_tombstones_and_restores() {
+        let timeline = timeline();
+        let base = base_view(&timeline);
+        let grouped =
+            group_blocks(&timeline, &ParamBlockEditSet::default(), &base.blocks, 5.0).unwrap();
+        let grouped_view = compose_param_block_view(&timeline, "root", &grouped, 5.0).unwrap();
+        let (deleted, snapshots) =
+            delete_blocks(&timeline, &grouped, &grouped_view.blocks, 5.0).unwrap();
+        assert_eq!(snapshots.len(), 1);
+        assert!(snapshots[0].child_tombstones.len() >= 2);
+        let deleted_view = compose_param_block_view(&timeline, "root", &deleted, 5.0).unwrap();
+        assert!(deleted_view.blocks.is_empty(), "base must stay hidden");
+        let restored = restore_deleted_blocks(&deleted, &snapshots).unwrap();
+        let restored_view = compose_param_block_view(&timeline, "root", &restored, 5.0).unwrap();
+        assert_eq!(restored_view.blocks.len(), 1);
+        assert_eq!(
+            restored_view.blocks[0].kind,
+            crate::param_blocks::ProjectedBlockKind::Grouped
+        );
     }
 
     #[test]
@@ -1746,7 +2243,6 @@ mod tests {
             transition_out_sec: None,
             created_seq: 1,
             base_cover: None,
-            grouped_from: None,
         };
         let cut = UserParamBlock {
             id: "cut".into(),
@@ -1762,7 +2258,6 @@ mod tests {
             transition_out_sec: None,
             created_seq: 2,
             base_cover: None,
-            grouped_from: None,
         };
         let next = place_user_block(&ParamBlockEditSet::default(), target).unwrap();
         let next = place_user_block(&next, cut).unwrap();
@@ -1787,7 +2282,7 @@ mod tests {
             label: BlockLabel::Manual,
         };
         ParamBlockEditSet {
-            schema_version: 1,
+            schema_version: 2,
             revision: 1,
             blocks: vec![UserParamBlock {
                 id: "user".into(),
@@ -1800,7 +2295,6 @@ mod tests {
                 transition_out_sec: None,
                 created_seq: 1,
                 base_cover: None,
-                grouped_from: None,
             }],
         }
     }

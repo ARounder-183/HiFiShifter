@@ -47,7 +47,7 @@ function mergedEdits(): ParamBlockEditSet {
         },
         createdSeq: 1,
     };
-    return { schemaVersion: 1, revision: 1, blocks: [block] };
+    return { schemaVersion: 2, revision: 1, blocks: [block] };
 }
 
 describe("paramBlockComposition", () => {
@@ -55,7 +55,7 @@ describe("paramBlockComposition", () => {
         const base = composeParamBlockView(
             "root",
             [clip],
-            { schemaVersion: 1, revision: 0, blocks: [] },
+            { schemaVersion: 2, revision: 0, blocks: [] },
             5,
         );
         expect(base.blocks.map((block) => [block.startFrame, block.endFrameExclusive])).toEqual([
@@ -74,29 +74,32 @@ describe("paramBlockComposition", () => {
         expect(merged.blocks[0]?.endFrameExclusive).toBe(200);
     });
 
-    it("可逆编组才是 grouped，且与成员数无关", () => {
+    it("组容器产生一个 grouped 块，且不复制合并成员", () => {
         const edits = mergedEdits();
         const block = edits.blocks[0];
-        if (block === undefined) throw new Error("expected a block");
-        const grouped = composeParamBlockView(
-            "root",
-            [clip],
-            { ...edits, blocks: [{ ...block, groupedFrom: [] }] },
-            5,
-        );
-        expect(grouped.blocks).toHaveLength(1);
-        expect(grouped.blocks[0]?.kind).toBe("grouped");
-        // 单成员的可逆编组同样是 grouped（判据是快照，不是成员数）。
-        if (block.geometry.kind !== "take") throw new Error("expected a take block");
-        const first = block.geometry.members[0];
-        if (first === undefined) throw new Error("expected a take member");
-        const single: UserParamBlock = {
+        if (block === undefined || block.geometry.kind !== "take") {
+            throw new Error("expected a take block");
+        }
+        const [first, second] = block.geometry.members;
+        if (first === undefined || second === undefined) throw new Error("expected two members");
+        const child = (id: string, member: typeof first): UserParamBlock => ({
             ...block,
-            geometry: { kind: "take", members: [first] },
-            groupedFrom: [block],
+            id,
+            geometry: { kind: "take", members: [member] },
+        });
+        const grouped: UserParamBlock = {
+            ...block,
+            id: "group",
+            geometry: {
+                kind: "group",
+                children: [child("child-a", first), child("child-b", second)],
+            },
         };
-        const singleView = composeParamBlockView("root", [clip], { ...edits, blocks: [single] }, 5);
-        expect(singleView.blocks[0]?.kind).toBe("grouped");
+        const view = composeParamBlockView("root", [clip], { ...edits, blocks: [grouped] }, 5);
+        expect(view.blocks).toHaveLength(1);
+        expect(view.blocks[0]?.kind).toBe("grouped");
+        expect(view.blocks[0]?.startFrame).toBe(0);
+        expect(view.blocks[0]?.endFrameExclusive).toBe(200);
     });
 
     it("moves a merged block when the Take source window slips", () => {

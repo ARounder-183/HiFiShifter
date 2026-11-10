@@ -805,7 +805,7 @@ mod tests {
             .get_mut("capture-track")
             .unwrap()
             .param_block_edits = hifishifter_kernel::param_blocks::ParamBlockEditSet {
-            schema_version: 1,
+            schema_version: 2,
             revision: 1,
             blocks: vec![hifishifter_kernel::param_blocks::UserParamBlock {
                 id: "merged".into(),
@@ -816,7 +816,6 @@ mod tests {
                 transition_out_sec: None,
                 created_seq: 1,
                 base_cover: None,
-                grouped_from: None,
             }],
         };
 

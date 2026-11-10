@@ -1481,7 +1481,6 @@ mod tests {
                     transition_out_sec: None,
                     created_seq: 1,
                     base_cover: None,
-                    grouped_from: None,
                 }];
             state.checkpoint_timeline(&timeline, HistoryOp::ParamCurve);
         }

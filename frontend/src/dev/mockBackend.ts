@@ -208,7 +208,7 @@ const mockParamBlockViews = new Map<
     {
         editRevision: number;
         blocks: unknown[];
-        edits: { schemaVersion: 1; revision: number; blocks: unknown[] };
+        edits: { schemaVersion: 2; revision: number; blocks: unknown[] };
     }
 >();
 
@@ -554,7 +554,7 @@ function buildHandlers(): Record<string, (...args: unknown[]) => unknown> {
             const stored = mockParamBlockViews.get(root) ?? {
                 editRevision: 0,
                 blocks: [],
-                edits: { schemaVersion: 1, revision: 0, blocks: [] },
+                edits: { schemaVersion: 2, revision: 0, blocks: [] },
             };
             return {
                 ok: true,
@@ -581,7 +581,7 @@ function buildHandlers(): Record<string, (...args: unknown[]) => unknown> {
                 throw new Error("Conflict: parameter block edits changed");
             }
             const edits = {
-                schemaVersion: 1 as const,
+                schemaVersion: 2 as const,
                 revision: expected + 1,
                 blocks: Array.isArray(input.edits) ? input.edits : [],
             };
@@ -603,7 +603,7 @@ function buildHandlers(): Record<string, (...args: unknown[]) => unknown> {
             const root = String(input.rootTrackId ?? "");
             const current = mockParamBlockViews.get(root);
             const edits = {
-                schemaVersion: 1 as const,
+                schemaVersion: 2 as const,
                 revision: (current?.editRevision ?? 0) + 1,
                 blocks: [],
             };

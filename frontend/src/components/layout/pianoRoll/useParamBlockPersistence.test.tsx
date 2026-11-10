@@ -32,7 +32,7 @@ function reply(editRevision: number, framePeriodMs = 5) {
             orphanCount: 0,
             analysisPending: false,
         },
-        edits: { schemaVersion: 1 as const, revision: editRevision, blocks: [] },
+        edits: { schemaVersion: 2 as const, revision: editRevision, blocks: [] },
         curveRevision: 0,
     };
 }
@@ -81,7 +81,7 @@ function previewTo(revision: number): void {
     act(() => {
         api.setState?.({
             ...probe.state,
-            editSet: { schemaVersion: 1, revision, blocks: [] },
+            editSet: { schemaVersion: 2, revision, blocks: [] },
         });
     });
 }
@@ -193,7 +193,7 @@ describe("useParamBlockPersistence", () => {
         };
         mocks.setParamBlockEdits.mockResolvedValue({
             ...reply(4),
-            edits: { schemaVersion: 1, revision: 4, blocks: [serverBlock] },
+            edits: { schemaVersion: 2, revision: 4, blocks: [serverBlock] },
         });
         await act(async () => {
             await api.persistence?.commit(probe.state);

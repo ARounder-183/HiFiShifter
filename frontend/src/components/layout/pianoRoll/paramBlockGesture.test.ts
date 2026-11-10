@@ -6,7 +6,7 @@ import { EMPTY_PARAM_BLOCK_STATE, createParamBlock } from "./paramBlocks";
 import type { ParamBlockSourceClip } from "./paramBlockProjection";
 import type { ParamBlockEditSet } from "./paramBlockTypes";
 
-const EMPTY: ParamBlockEditSet = { schemaVersion: 1, revision: 0, blocks: [] };
+const EMPTY: ParamBlockEditSet = { schemaVersion: 2, revision: 0, blocks: [] };
 const FRAME_MS = 5;
 
 function loopClip(): ParamBlockSourceClip {
@@ -70,7 +70,7 @@ function crossClips(): ParamBlockSourceClip[] {
 
 function crossEdits(): ParamBlockEditSet {
     return {
-        schemaVersion: 1,
+        schemaVersion: 2,
         revision: 1,
         blocks: [
             {
@@ -106,7 +106,7 @@ function crossEdits(): ParamBlockEditSet {
 
 function twoMemberEdits(): ParamBlockEditSet {
     return {
-        schemaVersion: 1,
+        schemaVersion: 2,
         revision: 1,
         blocks: [
             {
@@ -214,7 +214,7 @@ describe("paramBlockGesture — loop / reverse", () => {
             },
         ];
         const edits: ParamBlockEditSet = {
-            schemaVersion: 1,
+            schemaVersion: 2,
             revision: 1,
             blocks: [
                 {
@@ -380,7 +380,7 @@ describe("paramBlockGesture — base underlay / identity", () => {
         const base = composeParamBlockView("root", [baseClip], EMPTY, FRAME_MS);
         expect(base.blocks).toHaveLength(1);
         const edits: ParamBlockEditSet = {
-            schemaVersion: 1,
+            schemaVersion: 2,
             revision: 1,
             blocks: [
                 {

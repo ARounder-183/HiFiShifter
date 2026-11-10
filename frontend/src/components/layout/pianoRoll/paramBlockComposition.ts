@@ -20,6 +20,7 @@ import {
     type ClipProjection,
     type ParamBlockSourceClip,
 } from "./paramBlockProjection";
+import { flattenGroupChildren, groupCommonValue, groupLeafMembers } from "./paramBlockTypes";
 import type {
     BaseCover,
     ParamBlockEditSet,
@@ -27,6 +28,7 @@ import type {
     ProjectedBlockKind,
     ProjectedMember,
     ProjectedParamBlock,
+    RootSpan,
     TakeSpan,
     UserParamBlock,
 } from "./paramBlockTypes";
@@ -152,45 +154,22 @@ function baseCandidates(
     return out;
 }
 
-function projectUserBlock(
+function projectTakeMembers(
     clips: readonly ParamBlockSourceClip[],
-    block: UserParamBlock,
+    id: string,
+    members: readonly TakeSpan[],
+    kind: ProjectedBlockKind,
+    value: number | null | undefined,
+    transitionWidthSec: number | undefined,
+    manual: boolean,
+    createdSeq: number,
+    baseCover: BaseCover | undefined,
     framePeriodMs: number,
 ): { candidates: Candidate[]; orphan: number } {
-    if (block.geometry.kind === "root") {
-        const start = toFrame(block.geometry.span.startSec, framePeriodMs);
-        const end = toFrame(block.geometry.span.endSec, framePeriodMs);
-        if (end <= start) return { candidates: [], orphan: 0 };
-        return {
-            candidates: [
-                {
-                    id: block.id,
-                    userBlockId: block.id,
-                    start,
-                    end,
-                    kind:
-                        block.groupedFrom !== undefined
-                            ? "grouped"
-                            : block.manual
-                              ? "manual"
-                              : "user",
-                    members: [],
-                    value: block.value,
-                    transitionWidthSec: block.transitionOutSec,
-                    rate: 1,
-                    priority: block.manual ? 4 : 3,
-                    seq: block.createdSeq,
-                    zOrder: 0,
-                    ...(block.baseCover === undefined ? {} : { baseCover: block.baseCover }),
-                },
-            ],
-            orphan: 0,
-        };
-    }
     let orphan = 0;
     const projected: Array<{ start: number; end: number; member: ProjectedMember; rate: number }> =
         [];
-    for (const member of block.geometry.members) {
+    for (const member of members) {
         const clip = clips.find((item) => item.id === member.clipId);
         if (clip === undefined) {
             orphan += 1;
@@ -233,24 +212,125 @@ function projectUserBlock(
     }
     return {
         candidates: runs.map((run, index) => ({
-            id: runs.length === 1 ? block.id : `${block.id}:${index}`,
-            userBlockId: block.id,
+            id: runs.length === 1 ? id : `${id}:${index}`,
+            userBlockId: id,
             start: run.start,
             end: run.end,
-            // 与 Rust `compose` 逐字对应：`grouped` **只**表示可逆编组（`groupedFrom` 非空）。
-            // 多成员 run 是几何事实，不影响编辑能力（见 `ProjectedBlockKind` 的文档）。
-            kind: block.groupedFrom !== undefined ? "grouped" : block.manual ? "manual" : "user",
+            kind,
             members: run.members,
-            value: block.value,
-            transitionWidthSec: block.transitionOutSec,
+            value,
+            transitionWidthSec,
             rate: run.rate,
-            priority: block.manual ? 4 : 3,
-            seq: block.createdSeq,
+            priority: manual ? 4 : 3,
+            seq: createdSeq,
             zOrder: 0,
-            ...(block.baseCover === undefined ? {} : { baseCover: block.baseCover }),
+            ...(baseCover === undefined ? {} : { baseCover }),
         })),
         orphan,
     };
+}
+
+function projectGroupBlock(
+    clips: readonly ParamBlockSourceClip[],
+    block: UserParamBlock,
+    children: readonly UserParamBlock[],
+    framePeriodMs: number,
+): { candidates: Candidate[]; orphan: number } {
+    const manual = block.manual === true || children.some((child) => child.manual === true);
+    const value = block.value ?? groupCommonValue(block);
+    const transitionWidthSec =
+        block.transitionOutSec ?? children[children.length - 1]?.transitionOutSec;
+    const leaves = flattenGroupChildren(block);
+    const hasRoot = leaves.some((child) => child.geometry.kind === "root");
+    if (hasRoot) {
+        const spans = leaves
+            .map((child) => (child.geometry.kind === "root" ? child.geometry.span : null))
+            .filter((span): span is RootSpan => span !== null);
+        if (spans.length === 0) return { candidates: [], orphan: 0 };
+        const startSec = Math.min(...spans.map((span) => span.startSec));
+        const endSec = Math.max(...spans.map((span) => span.endSec));
+        const start = toFrame(startSec, framePeriodMs);
+        const end = toFrame(endSec, framePeriodMs);
+        if (end <= start) return { candidates: [], orphan: 0 };
+        return {
+            candidates: [
+                {
+                    id: block.id,
+                    userBlockId: block.id,
+                    start,
+                    end,
+                    kind: "grouped",
+                    members: [],
+                    value,
+                    transitionWidthSec,
+                    rate: 1,
+                    priority: manual ? 4 : 3,
+                    seq: block.createdSeq,
+                    zOrder: 0,
+                },
+            ],
+            orphan: 0,
+        };
+    }
+    return projectTakeMembers(
+        clips,
+        block.id,
+        groupLeafMembers(block),
+        "grouped",
+        value,
+        transitionWidthSec,
+        manual,
+        block.createdSeq,
+        undefined,
+        framePeriodMs,
+    );
+}
+
+function projectUserBlock(
+    clips: readonly ParamBlockSourceClip[],
+    block: UserParamBlock,
+    framePeriodMs: number,
+): { candidates: Candidate[]; orphan: number } {
+    if (block.geometry.kind === "group") {
+        return projectGroupBlock(clips, block, block.geometry.children, framePeriodMs);
+    }
+    if (block.geometry.kind === "root") {
+        const start = toFrame(block.geometry.span.startSec, framePeriodMs);
+        const end = toFrame(block.geometry.span.endSec, framePeriodMs);
+        if (end <= start) return { candidates: [], orphan: 0 };
+        return {
+            candidates: [
+                {
+                    id: block.id,
+                    userBlockId: block.id,
+                    start,
+                    end,
+                    kind: block.manual ? "manual" : "user",
+                    members: [],
+                    value: block.value,
+                    transitionWidthSec: block.transitionOutSec,
+                    rate: 1,
+                    priority: block.manual ? 4 : 3,
+                    seq: block.createdSeq,
+                    zOrder: 0,
+                    ...(block.baseCover === undefined ? {} : { baseCover: block.baseCover }),
+                },
+            ],
+            orphan: 0,
+        };
+    }
+    return projectTakeMembers(
+        clips,
+        block.id,
+        block.geometry.members,
+        block.manual ? "manual" : "user",
+        block.value,
+        block.transitionOutSec,
+        block.manual === true,
+        block.createdSeq,
+        block.baseCover,
+        framePeriodMs,
+    );
 }
 
 function anchorMatches(base: TakeSpan, member: TakeSpan): boolean {

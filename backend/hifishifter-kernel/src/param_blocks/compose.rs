@@ -72,6 +72,171 @@ fn member_from(
 }
 
 /// 把用户块投影成连续的候选块。返回 (候选, orphan 成员数)。
+fn project_take_members(
+    timeline: &TimelineState,
+    id: &str,
+    members: &[TakeSpan],
+    kind: ProjectedBlockKind,
+    value: Option<f64>,
+    transition_width_sec: Option<f64>,
+    priority: u8,
+    created_seq: u64,
+    base_cover: Option<BaseCover>,
+    frame_period_ms: f64,
+) -> (Vec<Candidate>, usize) {
+    let mut projected: Vec<(u32, u32, ProjectedMember, f64)> = Vec::new();
+    let mut orphan = 0usize;
+    for member in members {
+        let Some(clip) = timeline.clips.iter().find(|clip| clip.id == member.clip_id) else {
+            orphan += 1;
+            continue;
+        };
+        let Some(take) = clip.take(&member.take_id) else {
+            orphan += 1;
+            continue;
+        };
+        let projection = ClipProjection::from_clip_take(clip, take);
+        let mut matched = false;
+        for part in normalize_loop_span(&projection, member) {
+            for interval in project_span(&projection, &part, frame_period_ms) {
+                if interval.cycle != part.cycle {
+                    continue;
+                }
+                matched = true;
+                projected.push((
+                    interval.start_frame,
+                    interval.end_frame_exclusive,
+                    member_from(
+                        &part,
+                        interval.start_frame,
+                        interval.end_frame_exclusive,
+                        &projection,
+                        frame_period_ms,
+                    ),
+                    projection.effective_rate,
+                ));
+            }
+        }
+        if !matched {
+            orphan += 1;
+        }
+    }
+    if projected.is_empty() {
+        return (Vec::new(), orphan);
+    }
+    projected.sort_by_key(|(start, end, _, _)| (*start, *end));
+    let mut runs: Vec<(u32, u32, Vec<ProjectedMember>, f64)> = Vec::new();
+    for (start, end, member, rate) in projected {
+        match runs.last_mut() {
+            Some(run) if start <= run.1.saturating_add(1) => {
+                run.1 = run.1.max(end);
+                run.2.push(member);
+            }
+            _ => runs.push((start, end, vec![member], rate)),
+        }
+    }
+    let count = runs.len();
+    let mut out = Vec::new();
+    for (index, (start, end, run_members, rate)) in runs.into_iter().enumerate() {
+        let candidate_id = if count == 1 {
+            id.to_owned()
+        } else {
+            format!("{id}:{index}")
+        };
+        out.push(Candidate {
+            id: candidate_id,
+            user_block_id: Some(id.to_owned()),
+            start,
+            end,
+            kind,
+            members: run_members,
+            value,
+            transition_width_sec,
+            transition_frames: None,
+            rate,
+            priority,
+            seq: created_seq,
+            z_order: 0,
+            base_cover: base_cover.clone(),
+        });
+    }
+    (out, orphan)
+}
+
+fn project_group_block(
+    timeline: &TimelineState,
+    block: &UserParamBlock,
+    children: &[UserParamBlock],
+    frame_period_ms: f64,
+) -> (Vec<Candidate>, usize) {
+    let manual = block.manual || children.iter().any(|child| child.manual);
+    let priority = if manual { 4 } else { 3 };
+    let value = block.value.or_else(|| block.group_common_value());
+    let transition_width_sec = block
+        .transition_out_sec
+        .or_else(|| children.last().and_then(|child| child.transition_out_sec));
+    let has_root = children
+        .iter()
+        .any(|child| matches!(child.geometry, BlockGeometry::Root { .. }));
+    if has_root {
+        let start = children
+            .iter()
+            .filter_map(|child| match child.geometry {
+                BlockGeometry::Root { ref span } => Some(span.start_sec),
+                _ => None,
+            })
+            .fold(f64::INFINITY, f64::min);
+        let end = children
+            .iter()
+            .filter_map(|child| match child.geometry {
+                BlockGeometry::Root { ref span } => Some(span.end_sec),
+                _ => None,
+            })
+            .fold(f64::NEG_INFINITY, f64::max);
+        if !(start.is_finite() && end.is_finite()) || end <= start {
+            return (Vec::new(), 0);
+        }
+        let start = (start.max(0.0) * 1000.0 / frame_period_ms.max(0.1)).round() as u32;
+        let end = (end.max(0.0) * 1000.0 / frame_period_ms.max(0.1)).round() as u32;
+        if end <= start {
+            return (Vec::new(), 0);
+        }
+        return (
+            vec![Candidate {
+                id: block.id.clone(),
+                user_block_id: Some(block.id.clone()),
+                start,
+                end,
+                kind: ProjectedBlockKind::Grouped,
+                members: Vec::new(),
+                value,
+                transition_width_sec,
+                transition_frames: None,
+                rate: 1.0,
+                priority,
+                seq: block.created_seq,
+                z_order: 0,
+                base_cover: None,
+            }],
+            0,
+        );
+    }
+    let members = block.leaf_members();
+    project_take_members(
+        timeline,
+        &block.id,
+        &members,
+        ProjectedBlockKind::Grouped,
+        value,
+        transition_width_sec,
+        priority,
+        block.created_seq,
+        None,
+        frame_period_ms,
+    )
+}
+
+/// 把用户块投影成连续的候选块。返回 (候选, orphan 成员数)。
 fn project_user_block(
     timeline: &TimelineState,
     block: &UserParamBlock,
@@ -91,9 +256,7 @@ fn project_user_block(
                     user_block_id: Some(block.id.clone()),
                     start,
                     end,
-                    kind: if block.grouped_from.is_some() {
-                        ProjectedBlockKind::Grouped
-                    } else if block.manual {
+                    kind: if block.manual {
                         ProjectedBlockKind::Manual
                     } else {
                         ProjectedBlockKind::User
@@ -111,91 +274,24 @@ fn project_user_block(
                 0,
             )
         }
-        BlockGeometry::Take { members } => {
-            let mut projected: Vec<(u32, u32, ProjectedMember, f64)> = Vec::new();
-            let mut orphan = 0usize;
-            for member in members {
-                let Some(clip) = timeline.clips.iter().find(|clip| clip.id == member.clip_id)
-                else {
-                    orphan += 1;
-                    continue;
-                };
-                let Some(take) = clip.take(&member.take_id) else {
-                    orphan += 1;
-                    continue;
-                };
-                let projection = ClipProjection::from_clip_take(clip, take);
-                let mut matched = false;
-                for part in normalize_loop_span(&projection, member) {
-                    for interval in project_span(&projection, &part, frame_period_ms) {
-                        if interval.cycle != part.cycle {
-                            continue;
-                        }
-                        matched = true;
-                        projected.push((
-                            interval.start_frame,
-                            interval.end_frame_exclusive,
-                            member_from(
-                                &part,
-                                interval.start_frame,
-                                interval.end_frame_exclusive,
-                                &projection,
-                                frame_period_ms,
-                            ),
-                            projection.effective_rate,
-                        ));
-                    }
-                }
-                if !matched {
-                    orphan += 1;
-                }
-            }
-            if projected.is_empty() {
-                return (Vec::new(), orphan);
-            }
-            projected.sort_by_key(|(start, end, _, _)| (*start, *end));
-            let mut runs: Vec<(u32, u32, Vec<ProjectedMember>, f64)> = Vec::new();
-            for (start, end, member, rate) in projected {
-                match runs.last_mut() {
-                    Some(run) if start <= run.1.saturating_add(1) => {
-                        run.1 = run.1.max(end);
-                        run.2.push(member);
-                    }
-                    _ => runs.push((start, end, vec![member], rate)),
-                }
-            }
-            let count = runs.len();
-            let mut out = Vec::new();
-            for (index, (start, end, run_members, rate)) in runs.into_iter().enumerate() {
-                let id = if count == 1 {
-                    block.id.clone()
-                } else {
-                    format!("{}:{}", block.id, index)
-                };
-                out.push(Candidate {
-                    id,
-                    user_block_id: Some(block.id.clone()),
-                    start,
-                    end,
-                    kind: if block.grouped_from.is_some() {
-                        ProjectedBlockKind::Grouped
-                    } else if block.manual {
-                        ProjectedBlockKind::Manual
-                    } else {
-                        ProjectedBlockKind::User
-                    },
-                    members: run_members,
-                    value: block.value,
-                    transition_width_sec: block.transition_out_sec,
-                    transition_frames: None,
-                    rate,
-                    priority: if block.manual { 4 } else { 3 },
-                    seq: block.created_seq,
-                    z_order: 0,
-                    base_cover: block.base_cover.clone(),
-                });
-            }
-            (out, orphan)
+        BlockGeometry::Take { members } => project_take_members(
+            timeline,
+            &block.id,
+            members,
+            if block.manual {
+                ProjectedBlockKind::Manual
+            } else {
+                ProjectedBlockKind::User
+            },
+            block.value,
+            block.transition_out_sec,
+            if block.manual { 4 } else { 3 },
+            block.created_seq,
+            block.base_cover.clone(),
+            frame_period_ms,
+        ),
+        BlockGeometry::Group { children } => {
+            project_group_block(timeline, block, children, frame_period_ms)
         }
     }
 }
@@ -640,7 +736,7 @@ mod tests {
 
     fn merged_edits() -> ParamBlockEditSet {
         ParamBlockEditSet {
-            schema_version: 1,
+            schema_version: 2,
             revision: 1,
             blocks: vec![UserParamBlock {
                 id: "merged".into(),
@@ -672,7 +768,6 @@ mod tests {
                 transition_out_sec: None,
                 created_seq: 1,
                 base_cover: None,
-                grouped_from: None,
             }],
         }
     }
@@ -716,7 +811,7 @@ mod tests {
     fn deleted_tombstone_hides_base_without_showing_a_block() {
         let song = timeline(0.0, 0.0);
         let edits = ParamBlockEditSet {
-            schema_version: 1,
+            schema_version: 2,
             revision: 1,
             blocks: vec![UserParamBlock {
                 id: "tomb".into(),
@@ -737,7 +832,6 @@ mod tests {
                 transition_out_sec: None,
                 created_seq: 1,
                 base_cover: None,
-                grouped_from: None,
             }],
         };
         let view = compose_param_block_view(&song, "root", &edits, 5.0).unwrap();
@@ -749,7 +843,7 @@ mod tests {
     fn root_block_is_absolute_and_does_not_follow_slip() {
         let song = timeline(0.0, 0.0);
         let edits = ParamBlockEditSet {
-            schema_version: 1,
+            schema_version: 2,
             revision: 1,
             blocks: vec![UserParamBlock {
                 id: "root".into(),
@@ -765,7 +859,6 @@ mod tests {
                 transition_out_sec: None,
                 created_seq: 1,
                 base_cover: None,
-                grouped_from: None,
             }],
         };
         let view = compose_param_block_view(&song, "root", &edits, 5.0).unwrap();

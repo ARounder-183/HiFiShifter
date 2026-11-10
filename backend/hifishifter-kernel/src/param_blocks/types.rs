@@ -85,11 +85,19 @@ impl RootSpan {
 }
 
 /// 用户块的几何：Take 源域成员，或真正的空白自由块。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum BlockGeometry {
-    Take { members: Vec<TakeSpan> },
-    Root { span: RootSpan },
+    Take {
+        members: Vec<TakeSpan>,
+    },
+    Root {
+        span: RootSpan,
+    },
+    /// 一等公民的组容器：children 是唯一几何真值，组自身不再保存合并成员或快照。
+    Group {
+        children: Vec<UserParamBlock>,
+    },
 }
 
 /// 用户块对基块的“所有权覆盖”。
@@ -109,7 +117,7 @@ pub struct BaseCover {
 /// 【单一事实】用户只声明“哪些源域区间属于同一个块”。最终显示区间、成员投影、
 /// 过渡宽度全部由 `compose` 派生，不在本类型中保存绝对帧。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase", from = "UserParamBlockWire")]
 pub struct UserParamBlock {
     /// 稳定用户块 id，创建后不再改变。
     pub id: String,
@@ -133,30 +141,168 @@ pub struct UserParamBlock {
     /// 从基块派生时记录“我替代了哪一段基块”。普通手工块为 None。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_cover: Option<BaseCover>,
-    /// 可逆编组快照：本块由哪些原始用户块编组而来。
-    ///
-    /// 【只存源域】快照中的块仍是普通 `UserParamBlock`，绝不存绝对帧；
-    /// compose 只看顶层块，不递归投影快照。取消编组时按快照原样恢复。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub grouped_from: Option<Vec<UserParamBlock>>,
 }
 
 impl UserParamBlock {
     pub fn members(&self) -> &[TakeSpan] {
         match &self.geometry {
             BlockGeometry::Take { members } => members,
-            BlockGeometry::Root { .. } => &[],
+            BlockGeometry::Root { .. } | BlockGeometry::Group { .. } => &[],
         }
     }
 
     pub fn is_take(&self) -> bool {
         matches!(self.geometry, BlockGeometry::Take { .. })
     }
+
+    pub fn children(&self) -> Option<&[UserParamBlock]> {
+        match &self.geometry {
+            BlockGeometry::Group { children } => Some(children),
+            _ => None,
+        }
+    }
+
+    pub fn is_group(&self) -> bool {
+        matches!(self.geometry, BlockGeometry::Group { .. })
+    }
+
+    /// 组内拍平。组创建时已禁止嵌套；这里递归只是防御旧数据。
+    pub fn flatten_children(&self) -> Vec<&UserParamBlock> {
+        let mut out = Vec::new();
+        fn visit<'a>(block: &'a UserParamBlock, out: &mut Vec<&'a UserParamBlock>) {
+            match &block.geometry {
+                BlockGeometry::Group { children } => {
+                    for child in children {
+                        visit(child, out);
+                    }
+                }
+                _ => out.push(block),
+            }
+        }
+        if let BlockGeometry::Group { children } = &self.geometry {
+            for child in children {
+                visit(child, &mut out);
+            }
+        }
+        out
+    }
+
+    /// Group 递归收集全部叶子成员。
+    pub fn leaf_members(&self) -> Vec<TakeSpan> {
+        self.flatten_children()
+            .into_iter()
+            .flat_map(|child| child.members().iter().cloned())
+            .collect()
+    }
+
+    /// 所有 child 的 value 完全一致时才返回该值。
+    pub fn group_common_value(&self) -> Option<f64> {
+        let children = self.children()?;
+        let first = children.first()?.value?;
+        children
+            .iter()
+            .all(|child| child.value == Some(first))
+            .then_some(first)
+    }
+}
+
+/// 线协议 v1 -> v2 的一次性加载规整。
+///
+/// v1 的组是 “合并 geometry + groupedFrom 快照” 的双重表示；v2 只认
+/// `BlockGeometry::Group { children }`。这里把旧快照转成容器后立即丢弃旧字段，
+/// 运行期不再存在第二份几何真值。
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UserParamBlockWire {
+    id: String,
+    geometry: BlockGeometryWire,
+    #[serde(default)]
+    deleted: bool,
+    #[serde(default)]
+    manual: bool,
+    #[serde(default)]
+    value: Option<f64>,
+    #[serde(default)]
+    transition_out_sec: Option<f64>,
+    #[serde(default)]
+    created_seq: u64,
+    #[serde(default)]
+    base_cover: Option<BaseCover>,
+    #[serde(default)]
+    grouped_from: Option<Vec<UserParamBlockWire>>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum BlockGeometryWire {
+    Take { members: Vec<TakeSpan> },
+    Root { span: RootSpan },
+    Group { children: Vec<UserParamBlockWire> },
+}
+
+impl From<BlockGeometryWire> for BlockGeometry {
+    fn from(value: BlockGeometryWire) -> Self {
+        match value {
+            BlockGeometryWire::Take { members } => Self::Take { members },
+            BlockGeometryWire::Root { span } => Self::Root { span },
+            BlockGeometryWire::Group { children } => Self::Group {
+                children: children.into_iter().map(UserParamBlock::from).collect(),
+            },
+        }
+    }
+}
+
+impl From<UserParamBlockWire> for UserParamBlock {
+    fn from(value: UserParamBlockWire) -> Self {
+        let geometry = match value.grouped_from {
+            Some(children) if children.len() >= 2 => BlockGeometry::Group {
+                children: children.into_iter().map(UserParamBlock::from).collect(),
+            },
+            _ => value.geometry.into(),
+        };
+        Self {
+            id: value.id,
+            geometry,
+            deleted: value.deleted,
+            manual: value.manual,
+            value: value.value,
+            transition_out_sec: value.transition_out_sec,
+            created_seq: value.created_seq,
+            base_cover: value.base_cover,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ParamBlockEditSetWire {
+    #[serde(default)]
+    schema_version: u32,
+    #[serde(default)]
+    revision: u64,
+    #[serde(default)]
+    blocks: Vec<UserParamBlockWire>,
+}
+
+impl From<ParamBlockEditSetWire> for ParamBlockEditSet {
+    fn from(value: ParamBlockEditSetWire) -> Self {
+        // v1 与缺失版本都在加载时规整为当前版本；运行期只认 2。
+        let _ = value.schema_version;
+        Self {
+            schema_version: 2,
+            revision: value.revision,
+            blocks: value.blocks.into_iter().map(UserParamBlock::from).collect(),
+        }
+    }
 }
 
 /// 一个 root 参数线的用户编辑覆盖层。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(
+    rename_all = "camelCase",
+    deny_unknown_fields,
+    from = "ParamBlockEditSetWire"
+)]
 pub struct ParamBlockEditSet {
     pub schema_version: u32,
     pub revision: u64,
@@ -167,7 +313,7 @@ pub struct ParamBlockEditSet {
 impl Default for ParamBlockEditSet {
     fn default() -> Self {
         Self {
-            schema_version: 1,
+            schema_version: 2,
             revision: 0,
             blocks: Vec::new(),
         }
@@ -224,22 +370,28 @@ impl ParamBlockEditSet {
     /// 清理指向已不存在 Take 的成员。返回被清理的块数；orphan 默认保留，
     /// 只有调用方明确要求“删除无效块”时才使用本函数。
     ///
-    /// grouped_from 快照递归清理，但 grouped 块本身只要还有可恢复子块就保留，
-    /// 直到用户显式取消编组。
+    /// Group 递归清理子块；空组删除，只剩一个子块时自然退化为普通块。
     pub fn prune_missing_takes(&mut self, allowed: &BTreeSet<TakeKey>) -> usize {
         fn prune_block(
             block: &UserParamBlock,
             allowed: &BTreeSet<TakeKey>,
         ) -> Option<UserParamBlock> {
             let mut next = block.clone();
-            if let Some(children) = &block.grouped_from {
-                let kept: Vec<UserParamBlock> = children
-                    .iter()
-                    .filter_map(|child| prune_block(child, allowed))
-                    .collect();
-                next.grouped_from = if kept.is_empty() { None } else { Some(kept) };
-            }
             match &next.geometry {
+                BlockGeometry::Group { children } => {
+                    let kept: Vec<UserParamBlock> = children
+                        .iter()
+                        .filter_map(|child| prune_block(child, allowed))
+                        .collect();
+                    if kept.is_empty() {
+                        return None;
+                    }
+                    if kept.len() == 1 {
+                        return kept.into_iter().next();
+                    }
+                    next.geometry = BlockGeometry::Group { children: kept };
+                    Some(next)
+                }
                 BlockGeometry::Take { members } => {
                     let kept: Vec<TakeSpan> = members
                         .iter()
@@ -247,15 +399,7 @@ impl ParamBlockEditSet {
                         .cloned()
                         .collect();
                     if kept.is_empty() {
-                        let mut recovered: Vec<TakeSpan> = Vec::new();
-                        for child in next.grouped_from.as_deref().unwrap_or_default() {
-                            recovered.extend(child.members().iter().cloned());
-                        }
-                        if recovered.is_empty() {
-                            return None;
-                        }
-                        next.geometry = BlockGeometry::Take { members: recovered };
-                        return Some(next);
+                        return None;
                     }
                     next.geometry = BlockGeometry::Take { members: kept };
                     Some(next)

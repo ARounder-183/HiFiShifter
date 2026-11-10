@@ -117,7 +117,7 @@ fn cross_clip_timeline() -> TimelineState {
 
 fn cross_edits() -> ParamBlockEditSet {
     ParamBlockEditSet {
-        schema_version: 1,
+        schema_version: 2,
         revision: 1,
         blocks: vec![UserParamBlock {
             id: "cross".into(),
@@ -149,7 +149,6 @@ fn cross_edits() -> ParamBlockEditSet {
             transition_out_sec: None,
             created_seq: 1,
             base_cover: None,
-            grouped_from: None,
         }],
     }
 }
@@ -198,7 +197,7 @@ fn multi_member_shrink_stops_at_the_target_frame() {
         "takes":[{"id":"take","source_path":"a.wav","source_start_sec":0.0,"source_end_sec":2.0}]
     }]));
     let edits = ParamBlockEditSet {
-        schema_version: 1,
+        schema_version: 2,
         revision: 1,
         blocks: vec![UserParamBlock {
             id: "user".into(),
@@ -230,7 +229,6 @@ fn multi_member_shrink_stops_at_the_target_frame() {
             transition_out_sec: None,
             created_seq: 1,
             base_cover: None,
-            grouped_from: None,
         }],
     };
     for (edge, target) in [
@@ -282,10 +280,9 @@ fn base_underlay_keeps_remainders_and_manual_delete_restores_base() {
         transition_out_sec: None,
         created_seq: 1,
         base_cover: None,
-        grouped_from: None,
     };
     let edits = ParamBlockEditSet {
-        schema_version: 1,
+        schema_version: 2,
         revision: 1,
         blocks: vec![manual],
     };
@@ -343,7 +340,7 @@ fn restore_game_trims_only_the_requested_range() {
                 "sourceSpansSec":[{"startSec":0.0,"endSec":1.0}]}}]
     }]));
     let edits = ParamBlockEditSet {
-        schema_version: 1,
+        schema_version: 2,
         revision: 1,
         blocks: vec![UserParamBlock {
             id: "user".into(),
@@ -364,7 +361,6 @@ fn restore_game_trims_only_the_requested_range() {
             transition_out_sec: None,
             created_seq: 1,
             base_cover: None,
-            grouped_from: None,
         }],
     };
     let next = restore_game_blocks(&timeline, "root", &edits, 50, 100, 5.0).unwrap();

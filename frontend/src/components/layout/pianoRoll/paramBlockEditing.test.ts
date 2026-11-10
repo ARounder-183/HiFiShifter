@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
     createUserBlock,
+    deleteProjectedBlocks,
     ensureEditableUserBlock,
     groupProjectedBlocks,
+    planResizeProjectedBlock,
+    planSplitProjectedBlock,
+    restoreDeletedBlocks,
     splitProjectedBlock,
     ungroupUserBlock,
 } from "./paramBlockEditing";
@@ -29,7 +33,7 @@ describe("paramBlockEditing", () => {
     it("creates a Take-anchored block instead of an absolute interval", () => {
         const edits = createUserBlock(
             [clip],
-            { schemaVersion: 1, revision: 0, blocks: [] },
+            { schemaVersion: 2, revision: 0, blocks: [] },
             20,
             80,
             61,
@@ -44,7 +48,7 @@ describe("paramBlockEditing", () => {
 
     it("materializes a multi-run user block before editing one run", () => {
         const edits = {
-            schemaVersion: 1 as const,
+            schemaVersion: 2 as const,
             revision: 1,
             blocks: [
                 {
@@ -87,16 +91,135 @@ describe("paramBlockEditing", () => {
         expect(ensured.edits.blocks.some((block) => block.id === "multi")).toBe(true);
     });
 
-    it("groups adjacent projected blocks reversibly and splits at a frame", () => {
+    it("delete group creates child tombstones and restores the whole group", () => {
         const base = composeParamBlockView(
             "root",
             [clip],
-            { schemaVersion: 1, revision: 0, blocks: [] },
+            { schemaVersion: 2, revision: 0, blocks: [] },
             5,
         );
         const grouped = groupProjectedBlocks(
             [clip],
-            { schemaVersion: 1, revision: 0, blocks: [] },
+            { schemaVersion: 2, revision: 0, blocks: [] },
+            base.blocks,
+            5,
+        );
+        const view = composeParamBlockView("root", [clip], grouped, 5);
+        const deleted = deleteProjectedBlocks([clip], grouped, view.blocks, 5);
+        expect(deleted.deleted).toHaveLength(1);
+        expect(deleted.deleted[0]?.childTombstones?.length ?? 0).toBeGreaterThanOrEqual(2);
+        expect(
+            composeParamBlockView("root", [clip], deleted.edits, 5).blocks.filter(
+                (block) => block.kind !== "base",
+            ),
+        ).toHaveLength(0);
+        const restored = restoreDeletedBlocks(deleted.edits, deleted.deleted);
+        const restoredView = composeParamBlockView("root", [clip], restored, 5);
+        const user = restoredView.blocks.filter((block) => block.kind !== "base");
+        expect(user).toHaveLength(1);
+        expect(user[0]?.kind).toBe("grouped");
+    });
+
+    it("splits a group inside a child and can ungroup the edited children", () => {
+        const base = composeParamBlockView(
+            "root",
+            [clip],
+            { schemaVersion: 2, revision: 0, blocks: [] },
+            5,
+        );
+        const grouped = groupProjectedBlocks(
+            [clip],
+            { schemaVersion: 2, revision: 0, blocks: [] },
+            base.blocks,
+            5,
+        );
+        const view = composeParamBlockView("root", [clip], grouped, 5);
+        const plan = planSplitProjectedBlock([clip], grouped, view.blocks[0]!, 50, 5);
+        const after = composeParamBlockView("root", [clip], plan.edits, 5);
+        const userBlocks = after.blocks.filter((block) => block.kind !== "base");
+        expect(userBlocks).toHaveLength(2);
+        expect([plan.leftSpan.startFrame, plan.leftSpan.endFrameExclusive]).toEqual([0, 50]);
+        expect([plan.rightSpan.startFrame, plan.rightSpan.endFrameExclusive]).toEqual([50, 200]);
+        const rightGroup = plan.edits.blocks.find((block) => block.id === plan.rightBlockId);
+        expect(rightGroup?.geometry.kind).toBe("group");
+        if (rightGroup?.geometry.kind !== "group") throw new Error("expected right group");
+        expect(rightGroup.geometry.children).toHaveLength(2);
+        const restored = ungroupUserBlock(plan.edits, rightGroup.id);
+        const restoredUser = composeParamBlockView("root", [clip], restored, 5).blocks.filter(
+            (block) => block.kind !== "base",
+        );
+        expect(restoredUser).toHaveLength(3);
+        expect(restoredUser[2]?.endFrameExclusive).toBe(200);
+    });
+
+    it("splits a group exactly at a child boundary into plain blocks", () => {
+        const base = composeParamBlockView(
+            "root",
+            [clip],
+            { schemaVersion: 2, revision: 0, blocks: [] },
+            5,
+        );
+        const grouped = groupProjectedBlocks(
+            [clip],
+            { schemaVersion: 2, revision: 0, blocks: [] },
+            base.blocks,
+            5,
+        );
+        const view = composeParamBlockView("root", [clip], grouped, 5);
+        const plan = planSplitProjectedBlock([clip], grouped, view.blocks[0]!, 100, 5);
+        expect(plan.edits.blocks.map((block) => block.geometry.kind)).toEqual(["take", "take"]);
+    });
+
+    it("resizes group edges and degrades to a child when only one remains", () => {
+        const base = composeParamBlockView(
+            "root",
+            [clip],
+            { schemaVersion: 2, revision: 0, blocks: [] },
+            5,
+        );
+        const grouped = groupProjectedBlocks(
+            [clip],
+            { schemaVersion: 2, revision: 0, blocks: [] },
+            base.blocks,
+            5,
+        );
+        const view = composeParamBlockView("root", [clip], grouped, 5);
+        const shortened = planResizeProjectedBlock(
+            [clip],
+            grouped,
+            view.blocks[0]!,
+            "right",
+            50,
+            5,
+        );
+        expect(shortened.targetSpan).toEqual({ startFrame: 0, endFrameExclusive: 50 });
+        expect(shortened.edits.blocks).toHaveLength(1);
+        expect(shortened.edits.blocks[0]?.id).not.toBe(view.blocks[0]?.id);
+        const extended = planResizeProjectedBlock(
+            [clip],
+            shortened.edits,
+            (() => {
+                const block = composeParamBlockView("root", [clip], shortened.edits, 5).blocks[0];
+                if (block === undefined) throw new Error("missing shortened block");
+                return block;
+            })(),
+            "right",
+            150,
+            5,
+        );
+        expect(extended.targetSpan?.endFrameExclusive).toBe(150);
+    });
+
+    it("groups adjacent projected blocks reversibly and splits at a frame", () => {
+        const base = composeParamBlockView(
+            "root",
+            [clip],
+            { schemaVersion: 2, revision: 0, blocks: [] },
+            5,
+        );
+        const grouped = groupProjectedBlocks(
+            [clip],
+            { schemaVersion: 2, revision: 0, blocks: [] },
             base.blocks,
             5,
         );

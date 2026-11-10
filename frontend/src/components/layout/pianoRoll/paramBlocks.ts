@@ -906,7 +906,7 @@ export function resolveSplittableParamBlockAt(
     },
 ): ParamBlock | null {
     const target = resolveParamBlockSplitTarget(blocks, splitSec, framePeriodMs);
-    if (target === null || target.kind === "grouped") return null;
+    if (target === null) return null;
     if (context === undefined) return target;
     const frame = toFrame(splitSec, framePeriodMs);
     if (target.projected === undefined) return null;
@@ -1214,8 +1214,15 @@ export function canGroupParamBlocks(
     selectedIds: readonly string[],
 ): boolean {
     if (selectedIds.length < 2) return false;
+    const seen = new Set<string>();
     const selected = sortParamBlocksByTime(
-        blocks.filter((block) => selectedIds.includes(block.id)),
+        blocks.filter((block) => {
+            if (!selectedIds.includes(block.id)) return false;
+            const identity = block.userBlockId ?? block.id;
+            if (seen.has(identity)) return false;
+            seen.add(identity);
+            return true;
+        }),
     );
     if (selected.length < 2) return false;
     if (selected.some((block) => block.rootTrackId !== selected[0].rootTrackId)) return false;
@@ -1234,7 +1241,14 @@ export function groupParamBlocks(args: {
     /** 与派生视图同源的 clip 快照（编组要按它把源域区间并起来）。 */
     readonly clips: readonly ParamBlockSourceClip[];
 }): BlockGroupResult {
-    const selected = args.blocks.filter((block) => args.selectedBlockIds.includes(block.id));
+    const seen = new Set<string>();
+    const selected = args.blocks.filter((block) => {
+        if (!args.selectedBlockIds.includes(block.id)) return false;
+        const identity = block.userBlockId ?? block.id;
+        if (seen.has(identity)) return false;
+        seen.add(identity);
+        return true;
+    });
     if (selected.length < 2) return { ok: false, reason: "empty" };
     if (selected.some((block) => block.rootTrackId !== selected[0].rootTrackId)) {
         return { ok: false, reason: "different_root" };
@@ -1388,7 +1402,14 @@ export function deleteParamBlocks(args: {
     /** 与派生视图同源的 clip 快照（删除要按它把源域区间拆开）。 */
     readonly clips: readonly ParamBlockSourceClip[];
 }): ParamBlockEditResult {
-    const selected = args.blocks.filter((block) => args.selectedBlockIds.includes(block.id));
+    const seen = new Set<string>();
+    const selected = args.blocks.filter((block) => {
+        if (!args.selectedBlockIds.includes(block.id)) return false;
+        const identity = block.userBlockId ?? block.id;
+        if (seen.has(identity)) return false;
+        seen.add(identity);
+        return true;
+    });
     if (selected.length === 0) return { ok: false, reason: "not_found" };
     const projected = selected
         .map((block) => block.projected)
@@ -1454,6 +1475,31 @@ export function restoreDeletedParamBlocks(args: {
     } catch (error) {
         return { ok: false, reason: editFailureFromError(error) };
     }
+}
+
+/**
+ * 参数命令改变曲线后，pitch 块的持久化中心不再代表曲线重心 —— 必须清掉，
+ * 让块高重新从新曲线派生（否则块会悬空在旧高度）。
+ *
+ * 只改 `value`，不动几何；调用方应把它当作**布局**变更提交（不进撤销栈）。
+ */
+export function clearParamBlockValues(
+    state: ParamBlockState,
+    blockIds?: readonly string[],
+): ParamBlockState {
+    const ids = blockIds === undefined ? null : new Set(blockIds);
+    let changed = false;
+    const blocks = state.editSet.blocks.map((block) => {
+        if (block.value === undefined || block.value === null) return block;
+        if (ids !== null && !ids.has(block.id)) return block;
+        changed = true;
+        return { ...block, value: null };
+    });
+    if (!changed) return state;
+    return {
+        ...state,
+        editSet: { ...state.editSet, revision: state.editSet.revision + 1, blocks },
+    };
 }
 
 /** 把拖拽得到的逻辑中心写回可持久化的用户块 value；自动块没有 value，保持原样。 */
@@ -1915,7 +1961,7 @@ export function buildParamBlockDragSegments(args: {
     const merged: Array<{ startFrame: number; endFrame: number }> = [];
     for (const span of spans) {
         const previous = merged[merged.length - 1];
-        if (previous !== undefined && span.startFrame <= previous.endFrame + 1) {
+        if (previous !== undefined && span.startFrame <= previous.endFrame) {
             previous.endFrame = Math.max(previous.endFrame, span.endFrame);
         } else {
             merged.push({ ...span });

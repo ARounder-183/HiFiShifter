@@ -4,15 +4,16 @@ import type { ParamBlockSourceClip } from "./paramBlockProjection";
 import {
     EMPTY_PARAM_BLOCK_STATE,
     blocksFromViewForPanel,
+    buildParamBlockDragSegments,
     isStrictlyInsideParamBlock,
     resolveParamBlockSplitTarget,
     resolveSplittableParamBlockAt,
     splitParamBlock,
     type ParamBlock,
 } from "./paramBlocks";
-import type { ParamBlockEditSet } from "./paramBlockTypes";
+import type { ParamBlockEditSet, UserParamBlock } from "./paramBlockTypes";
 
-const EMPTY_EDITS: ParamBlockEditSet = { schemaVersion: 1, revision: 0, blocks: [] };
+const EMPTY_EDITS: ParamBlockEditSet = { schemaVersion: 2, revision: 0, blocks: [] };
 const FRAME_MS = 5;
 
 function clip(overrides: Partial<ParamBlockSourceClip> = {}): ParamBlockSourceClip {
@@ -52,7 +53,7 @@ function state(editSet: ParamBlockEditSet = EMPTY_EDITS) {
  */
 function takeBlockEdits(members: ReadonlyArray<readonly [number, number]>): ParamBlockEditSet {
     return {
-        schemaVersion: 1,
+        schemaVersion: 2,
         revision: 1,
         blocks: [
             {
@@ -131,7 +132,7 @@ describe("resolveParamBlockSplitTarget", () => {
 
     it("多 run 用户块返回命中的那个 run", () => {
         const edits: ParamBlockEditSet = {
-            schemaVersion: 1,
+            schemaVersion: 2,
             revision: 1,
             blocks: [
                 {
@@ -178,53 +179,71 @@ describe("resolveParamBlockSplitTarget", () => {
     });
 });
 
+describe("buildParamBlockDragSegments", () => {
+    it("does not write across a one-frame gap between members", () => {
+        const segments = buildParamBlockDragSegments({
+            blocks: [
+                {
+                    members: [
+                        { clipId: "clip", startSec: 0, endSec: 0.5 },
+                        { clipId: "clip", startSec: 0.505, endSec: 1 },
+                    ],
+                },
+            ],
+            framePeriodMs: 5,
+            param: "pitch",
+            anchorValue: 60,
+            valueDelta: 1,
+            sourceAt: () => 60,
+        });
+        expect(segments.map((segment) => [segment.startFrame, segment.values.length])).toEqual([
+            [0, 100],
+            [101, 99],
+        ]);
+    });
+});
+
 describe("resolveSplittableParamBlockAt", () => {
-    /*
-     * 菜单禁用态与快捷键动作共用这一份判据：编组块的几何是若干源域区间的联合，
-     * 切开没有唯一解，所以它既不能出现在"可切"里，也不能让快捷键切一半。
-     */
-    it("编组块不可切", () => {
+    /* 组是容器而不是冻结快照：组内切点合法就必须可切。 */
+    it("编组块可切", () => {
+        const member = (start: number, end: number) => ({
+            clipId: "clip",
+            takeId: "clip_take_1",
+            cycle: 0,
+            sourceStartSec: start,
+            sourceEndSec: end,
+            label: "syllable" as const,
+        });
+        const child = (id: string, start: number, end: number): UserParamBlock => ({
+            id,
+            geometry: { kind: "take", members: [member(start, end)] },
+            deleted: false,
+            manual: false,
+            value: null,
+            createdSeq: id === "child-a" ? 1 : 2,
+        });
         const edits: ParamBlockEditSet = {
-            schemaVersion: 1,
+            schemaVersion: 2,
             revision: 1,
             blocks: [
                 {
                     id: "grouped",
                     geometry: {
-                        kind: "take",
-                        members: [
-                            {
-                                clipId: "clip",
-                                takeId: "clip_take_1",
-                                cycle: 0,
-                                sourceStartSec: 0,
-                                sourceEndSec: 0.5,
-                                label: "syllable",
-                            },
-                            {
-                                clipId: "clip",
-                                takeId: "clip_take_1",
-                                cycle: 0,
-                                sourceStartSec: 0.5,
-                                sourceEndSec: 1,
-                                label: "syllable",
-                            },
-                        ],
+                        kind: "group",
+                        children: [child("child-a", 0, 0.5), child("child-b", 0.5, 1)],
                     },
                     deleted: false,
                     manual: false,
                     value: null,
-                    createdSeq: 1,
-                    groupedFrom: [],
+                    createdSeq: 3,
                 },
             ],
         };
         const blocks = panelBlocks([clip()], edits);
         expect(blocks).toHaveLength(1);
         expect(blocks[0]?.kind).toBe("grouped");
-        // 位置解析本身仍然返回它 —— "播放头处的块"与"能不能切"是两件事。
         expect(resolveParamBlockSplitTarget(blocks, 0.5, FRAME_MS)?.kind).toBe("grouped");
-        expect(resolveSplittableParamBlockAt(blocks, 0.5, FRAME_MS)).toBeNull();
+        expect(resolveSplittableParamBlockAt(blocks, 0.25, FRAME_MS)).not.toBeNull();
     });
 
     it("普通块照常返回，空隙返回 null", () => {

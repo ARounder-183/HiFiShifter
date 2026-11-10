@@ -11,7 +11,7 @@ pub const MAX_MEMBERS: usize = 20_000;
 pub const MAX_GROUP_DEPTH: usize = 8;
 
 pub fn validate_edit_set(edits: &ParamBlockEditSet) -> Result<(), String> {
-    if edits.schema_version != 1 {
+    if edits.schema_version != 2 {
         return Err("Invalid: parameter block schema version".into());
     }
     let mut total_blocks = 0usize;
@@ -41,7 +41,7 @@ fn validate_block(
     if block.id.is_empty() || block.id.len() > 512 || !ids.insert(block.id.clone()) {
         return Err("Invalid: parameter block id".into());
     }
-    if block.deleted && block.grouped_from.is_some() {
+    if block.deleted && block.is_group() {
         return Err("Invalid: deleted grouped block".into());
     }
     match &block.geometry {
@@ -89,6 +89,33 @@ fn validate_block(
                 return Err("Invalid: root block base cover".into());
             }
         }
+        BlockGeometry::Group { children } => {
+            if block.deleted {
+                return Err("Invalid: deleted grouped block".into());
+            }
+            if children.len() < 2 || children.len() > MAX_MEMBERS {
+                return Err("Invalid: parameter block group members".into());
+            }
+            if block.base_cover.is_some() {
+                return Err("Invalid: group block base cover".into());
+            }
+            let mut has_take = false;
+            let mut has_root = false;
+            for child in children {
+                if child.is_group() {
+                    return Err("Invalid: nested parameter block group".into());
+                }
+                if child.deleted {
+                    return Err("Invalid: deleted group child".into());
+                }
+                has_take |= child.is_take();
+                has_root |= matches!(child.geometry, BlockGeometry::Root { .. });
+                validate_block(child, depth + 1, total_blocks, ids)?;
+            }
+            if has_take && has_root {
+                return Err("Invalid: mixed parameter block group geometry".into());
+            }
+        }
     }
     if block
         .transition_out_sec
@@ -104,14 +131,6 @@ fn validate_block(
             return Err("Invalid: parameter block base cover".into());
         }
         validate_cover_spans(&cover.spans)?;
-    }
-    if let Some(children) = &block.grouped_from {
-        if children.len() < 2 {
-            return Err("Invalid: parameter block group members".into());
-        }
-        for child in children {
-            validate_block(child, depth + 1, total_blocks, ids)?;
-        }
     }
     Ok(())
 }

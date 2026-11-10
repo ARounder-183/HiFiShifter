@@ -29,7 +29,9 @@ export interface RootSpan {
 
 export type BlockGeometry =
     | { readonly kind: "take"; readonly members: readonly TakeSpan[] }
-    | { readonly kind: "root"; readonly span: RootSpan };
+    | { readonly kind: "root"; readonly span: RootSpan }
+    /** 一等公民组容器：children 是唯一几何真值。 */
+    | { readonly kind: "group"; readonly children: readonly UserParamBlock[] };
 
 /**
  * 用户块对基块的“所有权覆盖”。
@@ -56,12 +58,10 @@ export interface UserParamBlock {
     readonly createdSeq: number;
     /** 从基块派生时记录“我替代了哪一段基块”。 */
     readonly baseCover?: BaseCover;
-    /** 可逆编组快照：本块由哪些原始用户块编组而来。 */
-    readonly groupedFrom?: readonly UserParamBlock[];
 }
 
 export interface ParamBlockEditSet {
-    readonly schemaVersion: 1;
+    readonly schemaVersion: 2;
     readonly revision: number;
     readonly blocks: readonly UserParamBlock[];
 }
@@ -129,20 +129,99 @@ export interface ParamBlockView {
 }
 
 export const EMPTY_PARAM_BLOCK_EDIT_SET: ParamBlockEditSet = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     revision: 0,
     blocks: [],
 };
 
-/** 唯一规范化入口：线协议空编辑集必须补出 blocks 数组。 */
-export function normalizeParamBlockEditSet(
-    value: Partial<ParamBlockEditSet> | null | undefined,
-): ParamBlockEditSet {
-    return {
-        schemaVersion: 1,
-        revision: Number.isFinite(value?.revision) ? Number(value!.revision) : 0,
-        blocks: Array.isArray(value?.blocks) ? value!.blocks! : [],
+type LegacyBlock = Partial<UserParamBlock> & {
+    readonly id?: string;
+    readonly geometry?:
+        | BlockGeometry
+        | { readonly kind: "take"; readonly members: readonly TakeSpan[] }
+        | { readonly kind: "root"; readonly span: RootSpan };
+    readonly groupedFrom?: readonly LegacyBlock[];
+    readonly createdSeq?: number;
+};
+
+function normalizeUserBlock(value: LegacyBlock): UserParamBlock | null {
+    if (typeof value.id !== "string" || value.id.length === 0 || value.geometry === undefined)
+        return null;
+    const legacyChildren = Array.isArray(value.groupedFrom) ? value.groupedFrom : [];
+    const convertChildren = (children: readonly LegacyBlock[]) =>
+        children.map(normalizeUserBlock).filter((child): child is UserParamBlock => child !== null);
+    const base = {
+        id: value.id,
+        deleted: value.deleted === true,
+        manual: value.manual === true,
+        ...(value.value === undefined ? {} : { value: value.value }),
+        ...(value.transitionOutSec === undefined
+            ? {}
+            : { transitionOutSec: value.transitionOutSec }),
+        createdSeq: Number.isFinite(value.createdSeq) ? Number(value.createdSeq) : 0,
+        ...(value.baseCover === undefined ? {} : { baseCover: value.baseCover }),
     };
+    if (value.geometry.kind === "group") {
+        const children = convertChildren(value.geometry.children as readonly LegacyBlock[]);
+        return children.length >= 2 ? { ...base, geometry: { kind: "group", children } } : null;
+    }
+    if (legacyChildren.length >= 2) {
+        const children = convertChildren(legacyChildren);
+        return children.length >= 2 ? { ...base, geometry: { kind: "group", children } } : null;
+    }
+    if (value.geometry.kind === "take") {
+        return {
+            ...base,
+            geometry: {
+                kind: "take",
+                members: value.geometry.members.map((member) => ({ ...member })),
+            },
+        };
+    }
+    if (value.geometry.kind === "root") {
+        return { ...base, geometry: { kind: "root", span: { ...value.geometry.span } } };
+    }
+    return null;
+}
+
+/** 唯一规范化入口：空编辑集补 blocks 数组，并一次性把旧 groupedFrom 转成 Group 容器。 */
+export function normalizeParamBlockEditSet(
+    value:
+        | (Partial<ParamBlockEditSet> & { readonly blocks?: readonly LegacyBlock[] })
+        | null
+        | undefined,
+): ParamBlockEditSet {
+    const blocks = Array.isArray(value?.blocks)
+        ? value!.blocks
+              .map(normalizeUserBlock)
+              .filter((block): block is UserParamBlock => block !== null)
+        : [];
+    return {
+        schemaVersion: 2,
+        revision: Number.isFinite(value?.revision) ? Number(value!.revision) : 0,
+        blocks,
+    };
+}
+
+/** 递归拍平组，返回全部叶子块。 */
+export function flattenGroupChildren(block: UserParamBlock): UserParamBlock[] {
+    if (block.geometry.kind !== "group") return [block];
+    return block.geometry.children.flatMap(flattenGroupChildren);
+}
+
+/** Group 的全部叶子成员。 */
+export function groupLeafMembers(block: UserParamBlock): TakeSpan[] {
+    return flattenGroupChildren(block).flatMap((child) =>
+        child.geometry.kind === "take" ? child.geometry.members : [],
+    );
+}
+
+/** 所有 child 的 value 完全一致时才返回公共值。 */
+export function groupCommonValue(block: UserParamBlock): number | null {
+    if (block.geometry.kind !== "group") return null;
+    const first = block.geometry.children[0]?.value;
+    if (first === undefined || first === null) return null;
+    return block.geometry.children.every((child) => child.value === first) ? first : null;
 }
 
 export const EMPTY_PARAM_BLOCK_VIEW: ParamBlockView = {

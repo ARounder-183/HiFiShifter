@@ -718,7 +718,7 @@ mod tests {
             "track".into(),
             crate::state::TrackParamsState {
                 param_block_edits: crate::param_blocks::ParamBlockEditSet {
-                    schema_version: 1,
+                    schema_version: 2,
                     revision: 3,
                     blocks: vec![crate::param_blocks::UserParamBlock {
                         id: "ublock:1".into(),
@@ -739,7 +739,6 @@ mod tests {
                         transition_out_sec: None,
                         created_seq: 1,
                         base_cover: None,
-                        grouped_from: None,
                     }],
                 },
                 param_block_view: Some(crate::param_blocks::ParamBlockView::empty("track", 5.0)),
