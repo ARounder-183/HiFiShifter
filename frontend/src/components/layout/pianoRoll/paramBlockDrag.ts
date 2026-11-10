@@ -1,13 +1,12 @@
 import type { useLiveParamEditing } from "./useLiveParamEditing";
 import type { ParamViewSegment } from "./types";
-import { fetchFullResCurve, readPvRange, uploadFullResCurveSegments } from "./selectionEditData";
+import { fetchFullResCurve, uploadFullResCurveSegments } from "./selectionEditData";
 import { startPointerGesture } from "./gestures/pointerGesture";
 import {
     applyFullResSegmentsToParamView,
     buildParamBlockDragSegments,
     buildParamBlockPreviewSegments,
     projectParamBlockDragDisplayValue,
-    resolveParamBlockCommitDisplayCenter,
     resolveParamBlockDragRelease,
     setParamBlockLogicalCenters,
     type ParamBlock,
@@ -17,7 +16,6 @@ import {
 } from "./paramBlocks";
 import { buildParamBlockFrameCenters } from "./paramBlockFrame";
 import { ownsParamBlockGesture, type ParamAuthorityWatermark } from "./paramBlockTransaction";
-import { pitchScaleFactorFromDrag, scalePitchAroundCenter } from "./paramBlockPitch";
 import { logicalBlockId } from "./paramBlockTypes";
 
 type Ref<T> = { current: T };
@@ -146,8 +144,6 @@ export type ParamBlockDragStart = {
     anchorValue?: number | null;
     /** All selected centers from the same rendered hit geometry. */
     centerValues?: ReadonlyMap<string, number>;
-    /** Alt+上下拖：缩放块内音高（中心不动），而不是平移块。 */
-    pitchScale?: boolean;
     /** 按下瞬间的取消吸附键状态（Shift 等，按设置绑定）。 */
     shiftKey?: boolean;
     altKey?: boolean;
@@ -250,30 +246,6 @@ export function beginParamBlockDrag(
         ).map((member) => ({ ...member })),
     );
     const dragBlocks = [{ members: dragMembers }];
-    const pitchScaleDrag = editParam === "pitch" && args.pitchScale === true;
-    const anchorBlockForScale =
-        selectedBlocks.find((block) => block.id === args.anchorBlockId) ??
-        selectedBlocks.find((block) => logicalBlockId(block) === anchorLogicalId) ??
-        selectedBlocks[0];
-    const pitchScaleBlocks = selectedBlocks.filter(
-        (block) =>
-            logicalBlockId(block) ===
-            logicalBlockId(anchorBlockForScale ?? { id: anchorLogicalId }),
-    );
-    const pitchScaleCenter =
-        pitchScaleDrag && pitchScaleBlocks.length > 0
-            ? resolveParamBlockCommitDisplayCenter({
-                  rawCenter:
-                      args.anchorValue !== undefined &&
-                      args.anchorValue !== null &&
-                      Number.isFinite(args.anchorValue)
-                          ? args.anchorValue
-                          : (anchorBlockForScale?.averageValue ?? null),
-                  param: editParam,
-                  continuous: false,
-              })
-            : null;
-    const pitchScaleValues = pitchScaleDrag ? startBase.slice() : null;
     /*
      * 不可在这里清空 hover 状态：拖动一开始，`kernelDataRef` 会被
      * 拖拽快照覆盖，快照里通常没有手柄。若同时把 hover 归零，已经被
@@ -372,6 +344,7 @@ export function beginParamBlockDrag(
     let didDrag = false;
     let lastDelta = 0;
     let lastClientY = args.clientY;
+    let lastClientX = args.clientX;
     let lastSnapToggleHeld = snapToggleHeldAt({
         ctrlKey: args.ctrlKey === true,
         shiftKey: args.shiftKey === true,
@@ -399,69 +372,6 @@ export function beginParamBlockDrag(
          * Only the optional live mirror is window-specific.
          */
         const livePv = pvNow?.key === pv.key ? pvNow : null;
-        const scaleSegments =
-            pitchScaleValues === null
-                ? null
-                : pitchScaleBlocks.map((block) => {
-                      const startFrame = Math.max(
-                          0,
-                          Math.round((block.startSec * 1000) / framePeriodMs),
-                      );
-                      const endFrame = Math.max(
-                          startFrame,
-                          Math.round((block.endSec * 1000) / framePeriodMs) - 1,
-                      );
-                      return {
-                          startFrame,
-                          values: scalePitchAroundCenter({
-                              values: readPvRange({ ...pv, edit: startBase }, startFrame, endFrame),
-                              center: pitchScaleCenter,
-                              factor: pitchScaleFactorFromDrag(lastDelta * 24),
-                          }),
-                      };
-                  });
-        if (scaleSegments !== null) {
-            /*
-             * Alt 缩放只更新 live 草稿，不能每帧把预览写进权威
-             * `paramView`。多 run 块逐 run 缩放，中间空隙不写入。
-             */
-            if (livePv !== null) {
-                resetLiveEditPreview(livePv);
-                for (const segment of scaleSegments) {
-                    applyDenseToLiveEdit(
-                        livePv,
-                        segment.startFrame,
-                        segment.values,
-                        pv.startFrame,
-                        segment.startFrame + segment.values.length - 1,
-                        "draw",
-                    );
-                }
-            }
-            paramBlockInteractionCurveRef.current = {
-                ...pv,
-                edit: applyFullResSegmentsToParamView({
-                    paramView: { ...pv, edit: startBase },
-                    segments: scaleSegments,
-                }).edit,
-            };
-            const scaleSnapshot = paramBlockDragSnapshotRef.current;
-            if (scaleSnapshot !== null) {
-                scaleSnapshot.centerValues = buildParamBlockFrameCenters({
-                    blocks: scaleSnapshot.blocks,
-                    valueDelta: 0,
-                    param: editParam,
-                    snapToSemitone: false,
-                });
-            }
-            /*
-             * The interaction curve changed in place. Rebuild the block
-             * frame from that exact curve before the next paint.
-             */
-            invalidateParamBlockSpec();
-            requestWaveformRepaint();
-            return;
-        }
         const segments = buildParamBlockPreviewSegments({
             fillEmptyPitch: curveOwned,
             blocks: dragBlocks,
@@ -531,8 +441,9 @@ export function beginParamBlockDrag(
             gestureHandle?.end("up", event);
             return;
         }
+        const dx = event.clientX - args.clientX;
         const dy = event.clientY - startClientY;
-        if (!didDrag && Math.abs(dy) <= 3) return;
+        if (!didDrag && Math.hypot(dx, dy) <= 3) return;
         didDrag = true;
         /*
          * 拖动位移只由**指针相对按下点的移动**推出；锚点块中心与
@@ -540,12 +451,9 @@ export function beginParamBlockDrag(
          * 跳到指针位置，也不会把上一轮提交位置当作新基准。
          */
         const rawDelta = valueDeltaAtClientY(event.clientY);
-        /*
-         * Alt 缩放必须连续。以前这里也套用音高半音吸附，缩放因子
-         * 按指数放大量级后会在相邻半音门槛间大幅跳变，正是抖动来源。
-         */
-        lastDelta = pitchScaleDrag ? rawDelta : snapDeltaAt(event, rawDelta);
+        lastDelta = snapDeltaAt(event, rawDelta);
         lastClientY = event.clientY;
+        lastClientX = event.clientX;
         lastSnapToggleHeld = snapToggleHeldAt(event);
         if (pendingImmediatePreview) {
             pendingImmediatePreview = false;
@@ -569,6 +477,9 @@ export function beginParamBlockDrag(
                 startClientY,
                 lastMoveClientY: lastClientY,
                 releaseClientY: releaseEvent?.clientY ?? lastClientY,
+                startClientX: args.clientX,
+                lastMoveClientX: lastClientX,
+                releaseClientX: releaseEvent?.clientX ?? lastClientX,
             });
             didDrag = release.didDrag;
             lastClientY = release.clientY;
@@ -602,26 +513,44 @@ export function beginParamBlockDrag(
          * 松手时不能再用可能延迟的 rAF 预览覆盖 live 曲线：直接按
          * 最后一次指针位置同步落到 live，然后提交。
          */
-        lastDelta = pitchScaleDrag
-            ? valueDeltaAtClientY(lastClientY)
-            : resolveValueDelta(
-                  dragAnchorValue,
-                  valueDeltaAtClientY(lastClientY),
-                  lastSnapToggleHeld,
-              );
+        lastDelta = resolveValueDelta(
+            dragAnchorValue,
+            valueDeltaAtClientY(lastClientY),
+            lastSnapToggleHeld,
+        );
+        /*
+         * 横向拖动越过死区后，纵向位移可能回到 0。此时没有任何帧值变化：
+         * 不能生成一个空撤销点，也不能把它当成点击去触发分割。
+         */
+        if (Math.abs(lastDelta) < 1e-9) {
+            if (rollback === null) return;
+            const previous = rollback.commit?.failed === true ? null : rollback;
+            paramBlockActiveGestureTokenRef.current = previous?.token ?? null;
+            paramBlockDragCommitRef.current = previous?.commit ?? null;
+            paramBlockDragSnapshotRef.current = previous?.snapshot ?? null;
+            paramBlockInteractionCurveRef.current = previous?.curve ?? null;
+            paramBlockDragActivityRef.current.pointerGestureToken = null;
+            resetLiveEditPreview(previous?.curve ?? paramViewRef.current ?? pv);
+            if (previous?.commit?.committed) onParamCommitSucceeded();
+            if (liveEditActiveRef) {
+                liveEditActiveRef.current = paramBlockDragActivityRef.current.pendingCommits > 0;
+            }
+            bumpParamBlockStructure();
+            invalidateParamBlockSpec();
+            requestWaveformRepaint();
+            return;
+        }
         preview();
         const finalSnapshot = paramBlockDragSnapshotRef.current;
         const logicalCenters = new Map<string, number>();
         if (finalSnapshot !== null) {
             for (const block of finalSnapshot.blocks) {
-                const center = pitchScaleDrag
-                    ? block.anchorValue
-                    : projectParamBlockDragDisplayValue({
-                          startValue: block.anchorValue,
-                          valueDelta: lastDelta,
-                          param: editParam,
-                          snapToSemitone: effectivePitchSnap(lastSnapToggleHeld),
-                      });
+                const center = projectParamBlockDragDisplayValue({
+                    startValue: block.anchorValue,
+                    valueDelta: lastDelta,
+                    param: editParam,
+                    snapToSemitone: effectivePitchSnap(lastSnapToggleHeld),
+                });
                 if (center !== null && Number.isFinite(center)) {
                     logicalCenters.set(block.id, center);
                 }
@@ -711,37 +640,7 @@ export function beginParamBlockDrag(
                         valueDelta: fullResDelta,
                         sourceAt,
                     });
-                    let scaleWindows: Array<{ startFrame: number; values: number[] }> | null = null;
-                    if (pitchScaleValues !== null) {
-                        scaleWindows = await Promise.all(
-                            pitchScaleBlocks.map(async (block) => {
-                                const startFrame = Math.max(
-                                    0,
-                                    Math.round((block.startSec * 1000) / framePeriodMs),
-                                );
-                                const endFrame = Math.max(
-                                    startFrame,
-                                    Math.round((block.endSec * 1000) / framePeriodMs) - 1,
-                                );
-                                const curve = await fetchFullResCurve({
-                                    trackId: rootTrackId,
-                                    param: "pitch",
-                                    startFrame,
-                                    endFrame,
-                                    paramView: null,
-                                });
-                                return {
-                                    startFrame,
-                                    values: scalePitchAroundCenter({
-                                        values: curve.values,
-                                        center: pitchScaleCenter,
-                                        factor: pitchScaleFactorFromDrag(commitDelta * 24),
-                                    }),
-                                };
-                            }),
-                        );
-                    }
-                    const commitSegments = scaleWindows ?? windows;
+                    const commitSegments = windows;
                     if (commitSegments.length === 0)
                         throw new Error("Block drag has no editable frames");
                     if (liveEditActiveRef) liveEditActiveRef.current = true;

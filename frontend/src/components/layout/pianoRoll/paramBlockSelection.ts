@@ -33,13 +33,18 @@ function rangesOf(input: RangeInput): ParamBlockFrameRange[] {
 function runRange(block: FrameBlock): ParamBlockFrameRange {
     return {
         startFrame: block.startFrame,
-        frameCount: Math.max(1, block.endFrameExclusive - block.startFrame),
+        frameCount: Math.max(0, block.endFrameExclusive - block.startFrame),
     };
 }
 
 function mergeRanges(ranges: readonly ParamBlockFrameRange[]): ParamBlockFrameRange[] {
     const sorted = ranges
-        .filter((range) => Number.isFinite(range.startFrame) && Number.isFinite(range.frameCount))
+        .filter(
+            (range) =>
+                Number.isFinite(range.startFrame) &&
+                Number.isFinite(range.frameCount) &&
+                range.frameCount > 0,
+        )
         .map((range) => ({ ...range }))
         .sort((a, b) => a.startFrame - b.startFrame);
     const out: ParamBlockFrameRange[] = [];
@@ -65,14 +70,17 @@ function mergeRanges(ranges: readonly ParamBlockFrameRange[]): ParamBlockFrameRa
 export function logicalBlocksOf(blocks: readonly FrameBlock[]): LogicalBlockFrames[] {
     const grouped = new Map<string, ParamBlockFrameRange[]>();
     for (const block of blocks) {
+        const range = runRange(block);
+        if (range.frameCount <= 0) continue;
         const id = logicalBlockId(block);
         const list = grouped.get(id) ?? [];
-        list.push(runRange(block));
+        list.push(range);
         grouped.set(id, list);
     }
     return [...grouped.entries()]
-        .map(([id, runs]) => {
+        .map(([id, runs]): LogicalBlockFrames | null => {
             const merged = mergeRanges(runs);
+            if (merged.length === 0) return null;
             return {
                 id,
                 runs: merged,
@@ -82,6 +90,7 @@ export function logicalBlocksOf(blocks: readonly FrameBlock[]): LogicalBlockFram
                 ),
             };
         })
+        .filter((block): block is LogicalBlockFrames => block !== null)
         .sort((a, b) => a.startFrame - b.startFrame || a.id.localeCompare(b.id));
 }
 

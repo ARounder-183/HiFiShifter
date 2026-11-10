@@ -67,7 +67,7 @@ import {
 } from "../paramBlockSelectionGesture";
 import { selectionForRangeDrag } from "../paramSelectionDrag";
 import type { ParamBlockMenuChannel, ParamBlockMenuContext } from "../paramBlockMenuModel";
-import { publishParamBlockMenuContext } from "../paramBlockMenuBus";
+import { activateParamBlockMenuContext, publishParamBlockMenuContext } from "../paramBlockMenuBus";
 import {
     captureParamBlockCreateCurve,
     enqueueParamBlockCreateCommit,
@@ -270,6 +270,8 @@ function pianoRollSessionEqual(left: RootState["session"], right: RootState["ses
  * @returns 面板视图层需要的全部状态、派生值与回调。
  */
 export function usePianoRollPanelModel(dockFormId: string | undefined) {
+    const generatedPanelId = React.useId();
+    const paramBlockPanelId = dockFormId ?? generatedPanelId;
     const dispatch = useAppDispatch();
     // 事件监听器内同步读取 session（如 selectClipParamRange 的 Clip 查找），
     // 避免闭包快照滞后。
@@ -2385,6 +2387,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             clampSelectionFrame?: (frame: number) => number;
             edgeScroll?: { step(clientX: number): void };
             pointerType: string;
+            nativeEvent: globalThis.PointerEvent;
             pointerId: number;
             captureTarget: HTMLCanvasElement;
             setActivePointerGestureEnd: (endGesture: () => void) => void;
@@ -2398,10 +2401,21 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         }) => import("../gestures/pointerDeps").ParamBlockPointerDownResult
     >(() => ({ handled: false }));
     const splitParamBlockAtPlayheadRef = useRef<((snapToggleHeld?: boolean) => void) | null>(null);
+    const splitParamBlockAtSecRef = useRef<
+        | ((args: {
+              readonly rawSec: number;
+              readonly targetBlockId?: string;
+              readonly snapToggleHeld?: boolean;
+              readonly movePlayhead?: boolean;
+              readonly selectResult?: boolean;
+          }) => boolean)
+        | null
+    >(null);
+    const suppressBlockDoubleClickUntilRef = useRef(0);
     const deleteSelectedParamBlocksRef = useRef<(() => void) | null>(null);
     const groupSelectedParamBlocksRef = useRef<(() => void) | null>(null);
     const ungroupSelectedParamBlocksRef = useRef<(() => void) | null>(null);
-    const restoreParamBlocksRef = useRef<((blockIds?: readonly string[]) => void) | null>(null);
+    const restoreParamBlocksRef = useRef<(() => void) | null>(null);
     const restoreGameParamBlocksRef = useRef<(() => void) | null>(null);
     const normalizeSelectedParamBlockPitchRef = useRef<(() => void) | null>(null);
     /**
@@ -2555,6 +2569,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             [],
         ),
     });
+    const beginParamBlockMorphRef = useRef(interactions.beginParamBlockMorph);
+    beginParamBlockMorphRef.current = interactions.beginParamBlockMorph;
 
     // 参数数据更新后重算当前悬停浮窗：键盘平移参数线（"=" / "-" / "]" / "["
     // 及其 Shift/Ctrl 变体）、撤销/重做、远端写入都只更新 paramView 数据，
@@ -3507,6 +3523,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             clampSelectionFrame?: (frame: number) => number;
             edgeScroll?: { step(clientX: number): void };
             pointerType: string;
+            nativeEvent: globalThis.PointerEvent;
             pointerId: number;
             captureTarget: HTMLCanvasElement;
             setActivePointerGestureEnd: (endGesture: () => void) => void;
@@ -3519,18 +3536,114 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             metaKey?: boolean;
         }): import("../gestures/pointerDeps").ParamBlockPointerDownResult => {
             if (!paramBlockToolActive) return { handled: false };
+            activateParamBlockMenuContext(paramBlockPanelId);
             /*
              * 块层未就绪 = 此刻做不了任何块操作。返回 `handled: false`，让指针
              * 落进块工具的空白分支（按设置移动播放头）—— 用户看到的是"点了一下、
              * 播放头动了"，而不是一条要读三秒的提示。
              */
             if (!blockPersistence.ready || !paramViewRef.current) return { handled: false };
+            const blockModifierActive = (
+                action:
+                    | "modifier.paramBlockSplitAtClick"
+                    | "modifier.paramBlockCreate"
+                    | "modifier.paramBlockCreateFlat",
+            ): boolean => {
+                const binding = firstBinding(mergedKeybindings[action]);
+                return (
+                    binding !== undefined &&
+                    !isNoneBinding(binding) &&
+                    isModifierActive(binding, {
+                        ctrlKey: hit.ctrlKey === true,
+                        shiftKey: hit.shiftKey === true,
+                        altKey: hit.altKey === true,
+                        metaKey: hit.metaKey === true,
+                    })
+                );
+            };
+            const splitAtClick = blockModifierActive("modifier.paramBlockSplitAtClick");
+            const createBlock = blockModifierActive("modifier.paramBlockCreate");
+            const createFlat = blockModifierActive("modifier.paramBlockCreateFlat");
             if (hit.contextMenu) {
                 const layout = paramBlockViewRef.current;
                 if (!layout) return { handled: true, seekOnClick: false };
                 paramBlockClickCandidateRef.current = null;
                 setParamBlockContextMenu(null);
                 const fp = layout.framePeriodMs;
+                const framedHits = sortParamBlocksByTime(
+                    hostRef.current?.getParamBlockHitRects() ?? [],
+                );
+                const rightHitRect = hitTestParamBlocksAtPoint({
+                    blocks: framedHits,
+                    sec: hit.sec,
+                    localY: hit.localY,
+                    slopPx:
+                        hit.pointerType === "mouse"
+                            ? Math.min(1, paramBlockHitSlopPx)
+                            : paramBlockHitSlopPx,
+                });
+                const axisForRight = hostRef.current?.getAxis();
+                const rightEdgeHit =
+                    axisForRight === undefined
+                        ? null
+                        : hitTestParamBlockEdges({
+                              blocks: framedHits,
+                              clientX: hit.clientX - hit.captureTarget.getBoundingClientRect().left,
+                              localY: hit.localY,
+                              secToX: (sec) =>
+                                  sec * axisForRight.pxPerSec - axisForRight.scrollLeftPx,
+                              hitPx: 8,
+                          });
+                const rightTransition =
+                    axisForRight === undefined
+                        ? null
+                        : hitTestParamBlockTransitionHandles({
+                              blocks: framedHits,
+                              clientX: hit.clientX - hit.captureTarget.getBoundingClientRect().left,
+                              localY: hit.localY,
+                              secToX: (sec) =>
+                                  sec * axisForRight.pxPerSec - axisForRight.scrollLeftPx,
+                              outsetPx: PARAM_BLOCK_TRANSITION_HANDLE_OUTSET_X_PX,
+                              outsetYPx: PARAM_BLOCK_TRANSITION_HANDLE_OUTSET_Y_PX,
+                          });
+                const rightBlockId =
+                    rightHitRect?.id ?? rightEdgeHit?.block.id ?? rightTransition?.leftId ?? null;
+                const rightBlock =
+                    rightBlockId === null
+                        ? null
+                        : (paramBlocksWithValues.find((block) => block.id === rightBlockId) ??
+                          null);
+                if (rightBlock !== null) {
+                    const logicalId = logicalBlockId(rightBlock);
+                    const frame = toFrame(hit.sec, fp);
+                    if (!selectedParamBlockIdSet.has(logicalId)) {
+                        setParamBlockSelection(
+                            normalizeSelection(
+                                paramBlockLogicalFrameRanges(selectionFrameBlocks, rightBlock.id),
+                            ),
+                        );
+                    }
+                    paramBlockAnchorRef.current = { blockId: logicalId, frame };
+                    const rawSelection = selectionRef.current;
+                    const expanded =
+                        rawSelection === null
+                            ? []
+                            : expandParamBlockSelection(layout.blocks, rawSelection);
+                    const morphSelection =
+                        expanded.length > 0 ? normalizeSelection(expanded) : rawSelection;
+                    if (morphSelection !== rawSelection) setParamBlockSelection(morphSelection);
+                    beginParamBlockMorphRef.current({
+                        selection: morphSelection ?? [],
+                        nativeEvent: hit.nativeEvent,
+                        clientX: hit.clientX,
+                        clientY: hit.clientY,
+                        pointerId: hit.pointerId,
+                        captureTarget: hit.captureTarget,
+                        onCommitted: () => refreshParamBlockValuesAfterParamEdit("blockAmplitude"),
+                        onContextMenu: (x, y) => setParamBlockContextMenu({ x, y }),
+                    });
+                    return { handled: true, seekOnClick: false };
+                }
                 const originalSelection = selectionRef.current;
                 const anchorFrame = toFrame(hit.sec, fp);
                 let dragging = false;
@@ -3591,34 +3704,14 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                         }
                         if (event && dragging) update(event.clientX, true);
                         if (dragging) {
-                            if (event) seekFollowingPointer(event.clientX);
-                            return;
-                        }
-                        const frame = anchorFrame;
-                        const hitBlock = layout.blocks.find(
-                            (block) => frame >= block.startFrame && frame < block.endFrameExclusive,
-                        );
-                        const selectedAtFrame =
-                            hitBlock !== undefined && selectionRef.current !== null
-                                ? paramBlockIdsInSelection(layout.blocks, selectionRef.current)
-                                : [];
-                        if (hitBlock !== undefined && !selectedAtFrame.includes(hitBlock.id)) {
-                            setParamBlockSelection(
-                                paramBlockLogicalFrameRanges(layout.blocks, hitBlock.id),
-                            );
-                        }
-                        if (hitBlock !== undefined) {
-                            paramBlockAnchorRef.current = {
-                                blockId: hitBlock.userBlockId ?? hitBlock.id,
-                                frame,
-                            };
-                        } else {
                             paramBlockAnchorRef.current = resolveBlockAnchor({
                                 blocks: layout.blocks,
-                                anchor: null,
+                                anchor: paramBlockAnchorRef.current,
                                 selection: selectionRef.current,
-                                playheadFrame: frame,
+                                playheadFrame: anchorFrame,
                             });
+                            if (event) seekFollowingPointer(event.clientX);
+                            return;
                         }
                         setParamBlockContextMenu({
                             x: event?.clientX ?? hit.clientX,
@@ -3630,7 +3723,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 });
                 return { handled: true, seekOnClick: false };
             }
-
             const framedHits = sortParamBlocksByTime(
                 hostRef.current?.getParamBlockHitRects() ?? [],
             );
@@ -3700,6 +3792,88 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
              * 可能是左边界。边缘（左/右边界）在这些位置优先：手柄只在
              * 不落在任何边缘热区内时才接管。
              */
+            /*
+             * Alt + 左键点击块内 = 在点击位置分割。它必须优先于边缘伸缩、
+             * 过渡手柄与普通块拖动；拖动越过 3px 死区后由 beginBlockDrag
+             * 自动取消“点击”回调，回到普通块拖动。
+             */
+            const splitBlock =
+                hitRect !== null
+                    ? (paramBlocksWithValues.find((block) => block.id === hitRect.id) ?? null)
+                    : handleEdgeHit !== null
+                      ? (paramBlocksWithValues.find(
+                            (block) => block.id === handleEdgeHit.block.id,
+                        ) ?? null)
+                      : null;
+            if (splitAtClick && !createFlat && splitBlock !== null) {
+                const logicalId = logicalBlockId(splitBlock);
+                const splitFrame = toFrame(hit.sec, paramBlockStateRef.current.framePeriodMs);
+                const splitOriginalSelection = selectionRef.current;
+                const splitOriginalAnchor = paramBlockAnchorRef.current;
+                if (!selectedParamBlockIdSet.has(logicalId)) {
+                    setParamBlockSelection(
+                        normalizeSelection(
+                            paramBlockLogicalFrameRanges(selectionFrameBlocks, splitBlock.id),
+                        ),
+                    );
+                }
+                paramBlockAnchorRef.current = { blockId: logicalId, frame: splitFrame };
+                paramBlockClickCandidateRef.current = null;
+                setParamBlockContextMenu(null);
+                const dragSelection = paramBlockIdsInSelection(
+                    selectionFrameBlocks,
+                    selectionRef.current,
+                );
+                const splitDragStarted = beginBlockDrag({
+                    anchorBlockId: splitBlock.id,
+                    clientX: hit.clientX,
+                    clientY: hit.clientY,
+                    contextMenu: false,
+                    pointerId: hit.pointerId,
+                    captureTarget: hit.captureTarget,
+                    setActivePointerGestureEnd: hit.setActivePointerGestureEnd,
+                    clearActivePointerGestureEnd: hit.clearActivePointerGestureEnd,
+                    pointerValue: hit.pointerValue,
+                    selection: dragSelection,
+                    anchorValue:
+                        framedHits.find((block) => block.id === splitBlock.id)?.averageValue ??
+                        null,
+                    centerValues: new Map(
+                        framedHits.flatMap((block) =>
+                            block.averageValue == null
+                                ? []
+                                : [[block.id, block.averageValue] as const],
+                        ),
+                    ),
+                    shiftKey: hit.shiftKey,
+                    altKey: hit.altKey,
+                    ctrlKey: hit.ctrlKey,
+                    metaKey: hit.metaKey,
+                    onClickWithoutDrag: () => {
+                        const ok = splitParamBlockAtSecRef.current?.({
+                            rawSec: hit.sec,
+                            targetBlockId: splitBlock.id,
+                            snapToggleHeld: noSnapKeyHeld({
+                                ctrlKey: hit.ctrlKey === true,
+                                shiftKey: hit.shiftKey === true,
+                                altKey: hit.altKey === true,
+                                metaKey: hit.metaKey === true,
+                            }),
+                            movePlayhead: false,
+                            selectResult: true,
+                        });
+                        if (ok) {
+                            suppressBlockDoubleClickUntilRef.current = performance.now() + 500;
+                        } else {
+                            setParamBlockSelection(splitOriginalSelection);
+                            paramBlockAnchorRef.current = splitOriginalAnchor;
+                        }
+                    },
+                });
+                if (!splitDragStarted) return { handled: true, seekOnClick: false };
+                return { handled: true, seekOnClick: false };
+            }
+
             if (touchedHandle !== null && !handleStealsEdge && !hit.contextMenu) {
                 const leftBlock = paramBlocksWithValues.find(
                     (block) => block.id === touchedHandle.leftId,
@@ -3962,8 +4136,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                  * Alt + 左键在空白处拖动 = 快速新建块。普通左键 / Ctrl+左键
                  * 属于选区手势，不能与创建抢占。
                  */
-                if (paramBlockToolActive && hit.altKey === true && !hit.contextMenu) {
-                    const flattenCreatedPitch = editParam === "pitch" && hit.altKey === true;
+                if (paramBlockToolActive && (createBlock || createFlat) && !hit.contextMenu) {
+                    const flattenCreatedCurve = createFlat;
                     const createStartSec = hit.sec;
                     const createStartClientX = hit.clientX;
                     const createStartClientY = hit.clientY;
@@ -4206,7 +4380,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                 values: source,
                                 target: resolveCreateBlockValue(createValue),
                                 param: editParam,
-                                flatten: flattenCreatedPitch,
+                                flatten: flattenCreatedCurve,
                                 curveOwned: paramBlockViewRef.current !== null,
                             });
                             applyDenseToLiveEdit(
@@ -4278,7 +4452,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                         startSec: createSpan.startSec,
                                         endSec: createSpan.endSec,
                                         value: resolveCreateBlockValue(createValue),
-                                        existingBlocks: paramBlocksWithValues,
                                     });
                                     if (created.ok) {
                                         setParamBlockState(created.state);
@@ -4370,7 +4543,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                                                         createValue,
                                                                     ),
                                                                     param: editParam,
-                                                                    flatten: flattenCreatedPitch,
+                                                                    flatten: flattenCreatedCurve,
                                                                     curveOwned:
                                                                         createLayoutBasis !== null,
                                                                 },
@@ -4598,9 +4771,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             }
             const fullBlock = paramBlocksWithValues.find((block) => block.id === hitId);
             if (fullBlock === undefined) return { handled: false };
-            if (hit.contextMenu) {
-                paramBlockClickCandidateRef.current = null;
-            }
             /* 命中优先级：手柄已在上方入口处理；这里只剩边缘缩放 > 块体。 */
             const axis = hostRef.current?.getAxis();
             const edgeHit =
@@ -4870,25 +5040,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 paramBlockAnchorRef.current = clickOutcome.anchor;
                 setParamBlockSelection(clickOutcome.selection);
             };
-            if (hit.contextMenu) {
-                const logicalId = fullBlock.userBlockId ?? fullBlock.id;
-                if (!selectedParamBlockIds.includes(logicalId)) {
-                    setParamBlockSelection(
-                        normalizeSelection(
-                            paramBlockLogicalFrameRanges(selectionFrameBlocks, fullBlock.id),
-                        ),
-                    );
-                }
-                paramBlockAnchorRef.current = {
-                    blockId: logicalId,
-                    frame: targetFrame,
-                };
-                setParamBlockContextMenu({
-                    x: hit.clientX,
-                    y: hit.clientY,
-                });
-                return { handled: true, seekOnClick: false };
-            }
             /*
              * Shift 点击必须延迟到 pointerup：Shift + 拖动仍是"临时反转
              * 吸附"的块拖动，不能在按下瞬间把选区改成范围。
@@ -4914,12 +5065,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                     at: performance.now(),
                 };
             }
-            /*
-             * Alt + 上下拖 = 块内音高缩放。Alt 是参数编辑器已有的参数
-             * 修饰键（拉伸/精细调整都是它），但块工具下它只作用在块身上：
-             * 不会进入块平移，也不改变块的起止时间。
-             */
-            const pitchScaleGesture = editParam === "pitch" && hit.altKey === true;
             const dragStarted = beginBlockDrag({
                 anchorBlockId: fullBlock.id,
                 clientX: hit.clientX,
@@ -4937,7 +5082,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                         block.averageValue == null ? [] : [[block.id, block.averageValue] as const],
                     ),
                 ),
-                pitchScale: pitchScaleGesture,
                 shiftKey: hit.shiftKey,
                 altKey: hit.altKey,
                 ctrlKey: hit.ctrlKey,
@@ -4951,6 +5095,10 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         [
             editParam,
             beginBlockDrag,
+            refreshParamBlockValuesAfterParamEdit,
+            mergedKeybindings,
+            paramBlockPanelId,
+            selectedParamBlockIdSet,
             bumpParamBlockStructure,
             invalidate,
             paramBlockClips,
@@ -5058,14 +5206,21 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                         .filter((block) => block.deleted !== true && childIds.has(block.id))
                         .map((block) => block.id),
                 );
-                const ranges = view.blocks
-                    .filter((block) => remainingIds.has(logicalBlockId(block)))
-                    .flatMap((block) => logicalFrameRangesFromView(view.blocks, block.id));
+                const remainingBlocks = view.blocks.filter((block) =>
+                    remainingIds.has(logicalBlockId(block)),
+                );
+                const ranges = remainingBlocks.flatMap((block) =>
+                    logicalFrameRangesFromView(view.blocks, block.id),
+                );
                 setParamBlockSelection(normalizeSelection(ranges));
+                const firstRemaining = remainingBlocks[0];
                 paramBlockAnchorRef.current =
-                    ranges.length > 0
-                        ? { blockId: selectedIds[0]!, frame: ranges[0]!.startFrame }
-                        : null;
+                    firstRemaining === undefined
+                        ? null
+                        : {
+                              blockId: logicalBlockId(firstRemaining),
+                              frame: firstRemaining.startFrame,
+                          };
             } else {
                 clearParamBlockSelection();
             }
@@ -5075,10 +5230,13 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         }
     }, [
         clearParamBlockSelection,
+        paramBlockSourceClips,
         paramBlockState,
         paramBlocksWithValues,
         persistParamBlockEdits,
+        rootTrackId,
         selectedParamBlockIdSet,
+        setParamBlockSelection,
         requireBlockPersistenceReady,
     ]);
     ungroupSelectedParamBlocksRef.current = ungroupSelectedParamBlocks;
@@ -5091,6 +5249,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         let changed = false;
         let lastCreatedId: string | null = null;
         let lastCreatedFrame = 0;
+        const failures: string[] = [];
         for (const range of ranges) {
             const result = createParamBlock({
                 state: working,
@@ -5098,15 +5257,35 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 startSec: (range.startFrame * framePeriodMs) / 1000,
                 endSec: ((range.startFrame + range.frameCount) * framePeriodMs) / 1000,
                 value: editParam === "pitch" ? 60 : null,
-                existingBlocks: paramBlocksWithValuesRef.current,
             });
-            if (!result.ok) continue;
+            if (!result.ok) {
+                failures.push(result.reason);
+                continue;
+            }
             working = result.state;
             changed = true;
             lastCreatedId = result.blockId;
             lastCreatedFrame = range.startFrame;
         }
-        if (!changed) return;
+        if (!changed) {
+            if (failures.length > 0) {
+                publishParamBlockFeedback({
+                    text: tf("status_param_block_action_failed"),
+                    tone: "danger",
+                    tooltip: failures.join(", "),
+                    holdMs: 8000,
+                });
+            }
+            return;
+        }
+        if (failures.length > 0) {
+            publishParamBlockFeedback({
+                text: tf("status_param_block_action_failed"),
+                tone: "warning",
+                tooltip: failures.join(", "),
+                holdMs: 8000,
+            });
+        }
         setParamBlockState(working);
         paramBlockStateRef.current = working;
         if (lastCreatedId !== null) {
@@ -5125,6 +5304,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         requireBlockPersistenceReady,
         rootTrackId,
         selectionRef,
+        tf,
     ]);
 
     const deleteSelectedParamBlocks = useCallback(() => {
@@ -5151,46 +5331,45 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         requireBlockPersistenceReady,
     ]);
     deleteSelectedParamBlocksRef.current = deleteSelectedParamBlocks;
-    const restoreParamBlocks = useCallback(
-        (blockIds?: readonly string[]) => {
-            if (!requireBlockPersistenceReady()) return;
-            const deletedSnapshots = paramBlockState.lastDeletedBlocks ?? [];
-            const result = restoreDeletedParamBlocks({
-                state: paramBlockState,
-                selectedBlockIds: blockIds,
-            });
-            // 没有可恢复的块 = 静默；菜单项已经置灰。
-            if (!result.ok) return;
-            setParamBlockState(result.state);
-            persistParamBlockEdits(result.state);
-            if (rootTrackId !== null) {
-                const view = composeParamBlockView(
-                    rootTrackId,
-                    paramBlockSourceClips,
-                    result.state.editSet,
-                    result.state.framePeriodMs,
-                );
-                const restoredIds = new Set(deletedSnapshots.map((snapshot) => snapshot.block.id));
-                const ranges = view.blocks
-                    .filter((block) => restoredIds.has(logicalBlockId(block)))
-                    .flatMap((block) => logicalFrameRangesFromView(view.blocks, block.id));
-                setParamBlockSelection(normalizeSelection(ranges));
-                paramBlockAnchorRef.current =
-                    ranges.length > 0
-                        ? { blockId: result.blockId, frame: ranges[0]!.startFrame }
-                        : null;
-            } else {
-                clearParamBlockSelection();
-            }
-            setParamBlockContextMenu(null);
-        },
-        [
-            clearParamBlockSelection,
-            paramBlockState,
-            persistParamBlockEdits,
-            requireBlockPersistenceReady,
-        ],
-    );
+    const restoreParamBlocks = useCallback(() => {
+        if (!requireBlockPersistenceReady()) return;
+        const deletedSnapshots = paramBlockState.lastDeletedBlocks ?? [];
+        const result = restoreDeletedParamBlocks({
+            state: paramBlockState,
+        });
+        // 没有可恢复的块 = 静默；菜单项已经置灰。
+        if (!result.ok) return;
+        setParamBlockState(result.state);
+        persistParamBlockEdits(result.state);
+        if (rootTrackId !== null) {
+            const view = composeParamBlockView(
+                rootTrackId,
+                paramBlockSourceClips,
+                result.state.editSet,
+                result.state.framePeriodMs,
+            );
+            const restoredIds = new Set(deletedSnapshots.map((snapshot) => snapshot.block.id));
+            const ranges = view.blocks
+                .filter((block) => restoredIds.has(logicalBlockId(block)))
+                .flatMap((block) => logicalFrameRangesFromView(view.blocks, block.id));
+            setParamBlockSelection(normalizeSelection(ranges));
+            paramBlockAnchorRef.current =
+                ranges.length > 0
+                    ? { blockId: result.blockId, frame: ranges[0]!.startFrame }
+                    : null;
+        } else {
+            clearParamBlockSelection();
+        }
+        setParamBlockContextMenu(null);
+    }, [
+        clearParamBlockSelection,
+        paramBlockSourceClips,
+        paramBlockState,
+        persistParamBlockEdits,
+        requireBlockPersistenceReady,
+        rootTrackId,
+        setParamBlockSelection,
+    ]);
     restoreParamBlocksRef.current = restoreParamBlocks;
     const applyParamBlockEdit = useCallback(
         (result: ReturnType<typeof splitParamBlock>, gesture: "split" | "create" = "split") => {
@@ -5224,7 +5403,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     applyParamBlockEditRef.current = applyParamBlockEdit;
     paramBlockStateRef.current = paramBlockState;
     /**
-     * 在播放头处切开。
+     * 在播放头处分割。
      *
      * 【操作数由位置决定】块在时间上互不重叠，播放头最多落在一个块里 —— "切哪个块"
      * 天然唯一。要求先选中一个块是多余的一步，还会在 Slip 之后拿旧几何当判据
@@ -5234,24 +5413,40 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
      * 【前置条件不满足 = 静默】没有块 / 编组块 / 切点贴边：没有提示、没有 IPC、
      * 不改选择。只有后端真的拒绝才进状态栏。
      */
-    const splitParamBlockAtPlayhead = useCallback(
-        (snapToggleHeld = false) => {
-            if (rootTrackId === null) return;
+    const splitParamBlockAtSec = useCallback(
+        (args: {
+            readonly rawSec: number;
+            readonly targetBlockId?: string;
+            readonly snapToggleHeld?: boolean;
+            readonly movePlayhead?: boolean;
+            readonly selectResult?: boolean;
+        }): boolean => {
+            if (rootTrackId === null) return false;
             const view = paramBlockViewRef.current;
-            if (view === null) return;
-            /*
-             * 播放头必须读 store：面板选择器刻意剔除了 `playheadSec`
-             * （见 `PIANO_ROLL_VOLATILE_SESSION_KEYS`），`s.playheadSec` 是滞后快照。
-             */
-            const rawSec = store.getState().session.playheadSec;
+            if (view === null) return false;
+            const rawSec = args.rawSec;
             const state = paramBlockStateRef.current;
             const framePeriodMs = view.framePeriodMs;
             const clips = paramBlockSourceClipsRef.current;
             const blocks = blocksFromViewForPanel(rootTrackId, view);
-            // 播放头不在任何可切的块内（含编组块）：静默。
-            const target = resolveParamBlockSplitTarget(blocks, rawSec, framePeriodMs);
-            if (target === null) return;
-
+            const target =
+                args.targetBlockId === undefined
+                    ? resolveParamBlockSplitTarget(blocks, rawSec, framePeriodMs)
+                    : (blocks.find(
+                          (block) =>
+                              (block.id === args.targetBlockId ||
+                                  logicalBlockId(block) === args.targetBlockId) &&
+                              block.startSec < rawSec &&
+                              block.endSec > rawSec,
+                      ) ??
+                      blocks.find(
+                          (block) =>
+                              block.id === args.targetBlockId ||
+                              logicalBlockId(block) === args.targetBlockId,
+                      ) ??
+                      null);
+            if (target === null) return false;
+            const snapToggleHeld = args.snapToggleHeld === true;
             const pxPerSec = hostRef.current?.getAxis()?.pxPerSec ?? pxPerSecRef.current;
             const snap = resolveParamBlockTimeSnapResult({
                 rawSec,
@@ -5275,11 +5470,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 pxPerSec,
                 thresholdPx: 12,
             });
-            /*
-             * 磁吸候选里有相邻块的边界：吸上去会正好落在边界（切出 0 长块），
-             * 再往外一点甚至会吸进别的块。刀口一旦离开目标块就退回播放头原值 ——
-             * 播放头在块内就一定能切，不会出现"按了没反应"。
-             */
             const splitSec = isStrictlyInsideParamBlock(target, snapped, framePeriodMs)
                 ? snapped
                 : rawSec;
@@ -5316,12 +5506,16 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                         holdMs: 8000,
                     });
                 }
-                return;
+                return false;
             }
             const next: ParamBlockState = { ...state, editSet: plan.plan.edits };
             setParamBlockState(next);
             paramBlockStateRef.current = next;
             persistParamBlockEdits(next);
+            if (args.movePlayhead === true) {
+                dispatch(setPlayheadSec(splitSec));
+                void dispatch(seekPlayhead(splitSec));
+            }
             const leftBlockId = plan.plan.leftBlockId;
             const rightBlockId = plan.plan.rightBlockId;
             const resultRanges = [
@@ -5332,19 +5526,23 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                     ? []
                     : logicalFrameRangesFromView(plan.plan.viewAfter.blocks, rightBlockId)),
             ];
-            setParamBlockSelection(normalizeSelection(resultRanges));
-            paramBlockAnchorRef.current =
-                resultRanges.length > 0
-                    ? {
-                          blockId: rightBlockId ?? leftBlockId ?? "",
-                          frame: plan.plan.rightSpan?.startFrame ?? resultRanges[0]!.startFrame,
-                      }
-                    : null;
+            if (args.selectResult !== false) {
+                setParamBlockSelection(normalizeSelection(resultRanges));
+                paramBlockAnchorRef.current =
+                    resultRanges.length > 0
+                        ? {
+                              blockId: rightBlockId ?? leftBlockId ?? "",
+                              frame: plan.plan.rightSpan?.startFrame ?? resultRanges[0]!.startFrame,
+                          }
+                        : null;
+            }
             bumpParamBlockStructure();
             setParamBlockContextMenu(null);
+            return true;
         },
         [
             bumpParamBlockStructure,
+            dispatch,
             paramBlockClips,
             persistParamBlockEdits,
             pxPerSecRef,
@@ -5358,8 +5556,15 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             s.timelineSnap,
             s.tempoMap,
             s.tracks,
-            store,
         ],
+    );
+    splitParamBlockAtSecRef.current = splitParamBlockAtSec;
+    const splitParamBlockAtPlayhead = useCallback(
+        (snapToggleHeld = false) => {
+            const rawSec = store.getState().session.playheadSec;
+            splitParamBlockAtSec({ rawSec, snapToggleHeld, movePlayhead: false });
+        },
+        [splitParamBlockAtSec, store],
     );
     splitParamBlockAtPlayheadRef.current = splitParamBlockAtPlayhead;
     /** 实时求值：播放头移动 / 块结构变化后，菜单打开即得到正确可用态。 */
@@ -5493,6 +5698,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                     segments,
                 });
                 bumpRefreshToken();
+                refreshParamBlockValuesAfterParamEdit("normalizePitch");
             } catch (error) {
                 console.error("[pianoRoll] normalize block pitch failed", error);
                 publishParamBlockFeedback({
@@ -5507,6 +5713,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             bumpRefreshToken,
             editParam,
             paramView,
+            refreshParamBlockValuesAfterParamEdit,
             requireBlockPersistenceReady,
             rootTrackId,
             selectionFrameBlocks,
@@ -5531,6 +5738,10 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     const onCanvasDoubleClick = useCallback(
         (event: React.MouseEvent<HTMLCanvasElement>) => {
             if (!paramBlockToolActive) return;
+            if (performance.now() < suppressBlockDoubleClickUntilRef.current) {
+                event.preventDefault();
+                return;
+            }
             const rect = event.currentTarget.getBoundingClientRect();
             const axis = hostRef.current?.getAxis();
             if (axis === undefined) return;
@@ -6417,6 +6628,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
 
     const paramBlockMenuContext = useMemo<ParamBlockMenuContext>(
         () => ({
+            panelId: paramBlockPanelId,
             canSplit: canSplitParamBlockAtPlayhead,
             canGroup: canGroupParamBlocks(paramBlocksWithValues, selectedParamBlockIds),
             canUngroup: paramBlocksWithValues.some(
@@ -6441,12 +6653,13 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             selectedParamBlockIdSet,
             selectedParamBlockIds,
             selectionUi,
+            paramBlockPanelId,
         ],
     );
     useEffect(() => {
-        publishParamBlockMenuContext(paramBlockMenuContext);
-        return () => publishParamBlockMenuContext(null);
-    }, [paramBlockMenuContext]);
+        publishParamBlockMenuContext(paramBlockPanelId, paramBlockMenuContext);
+        return () => publishParamBlockMenuContext(paramBlockPanelId, null);
+    }, [paramBlockMenuContext, paramBlockPanelId]);
     const handleParamBlockMenuAction = useCallback(
         (channel: ParamBlockMenuChannel, op: string) => {
             if (channel === "edit") {
@@ -6534,19 +6747,24 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     useEffect(() => {
         const handler = (event: Event) => {
             const detail = (event as CustomEvent).detail as
-                { channel?: ParamBlockMenuChannel; op?: string } | undefined;
-            if (detail?.channel !== undefined && detail.op !== undefined) {
+                { channel?: ParamBlockMenuChannel; op?: string; panelId?: string } | undefined;
+            if (
+                detail?.channel !== undefined &&
+                detail.op !== undefined &&
+                detail.panelId === paramBlockPanelId
+            ) {
                 handleParamBlockMenuAction(detail.channel, detail.op);
             }
         };
         window.addEventListener("hifi:paramBlockMenuAction", handler);
         return () => window.removeEventListener("hifi:paramBlockMenuAction", handler);
-    }, [handleParamBlockMenuAction]);
+    }, [handleParamBlockMenuAction, paramBlockPanelId]);
     /*
      * 【这个返回对象就是视图层的全部输入】字段清单是三个视图文件 AST 扫描结果的并集
      * （另加外框自己用的 `paramEditorRef`）。新增字段 = 视图里用一个新名字，然后在这里补上。
      */
     return {
+        activateParamBlockMenu: () => activateParamBlockMenuContext(paramBlockPanelId),
         activeDragDirection,
         activeDragDirectionTool,
         activeVibratoPreset,

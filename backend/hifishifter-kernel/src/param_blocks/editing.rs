@@ -8,7 +8,7 @@ use super::projection::{
     normalize_loop_span, project_span, source_at_projected_frame, ClipProjection,
 };
 use super::types::{
-    BlockGeometry, BlockLabel, ParamBlockEditSet, ProjectedBlockKind, ProjectedMember,
+    BaseCover, BlockGeometry, BlockLabel, ParamBlockEditSet, ProjectedBlockKind, ProjectedMember,
     ProjectedParamBlock, RootSpan, TakeSpan, UserParamBlock,
 };
 use crate::state::{ClipTake, TimelineState};
@@ -630,6 +630,113 @@ fn find_projected_block(
     Err("Invalid: block not found".into())
 }
 
+/// 按分割帧把 baseCover 拆成左右两份；跨切点的 span 两侧都降为 full:false。
+fn split_base_cover(
+    timeline: &TimelineState,
+    cover: &Option<BaseCover>,
+    frame: u32,
+    frame_period_ms: f64,
+) -> (Option<BaseCover>, Option<BaseCover>) {
+    let Some(cover) = cover else {
+        return (None, None);
+    };
+    let mut left_spans: Vec<TakeSpan> = Vec::new();
+    let mut right_spans: Vec<TakeSpan> = Vec::new();
+    let mut left_full = cover.full;
+    let mut right_full = cover.full;
+    for span in &cover.spans {
+        let Some(clip) = timeline.clips.iter().find(|clip| clip.id == span.clip_id) else {
+            left_spans.push(span.clone());
+            right_spans.push(span.clone());
+            left_full = false;
+            right_full = false;
+            continue;
+        };
+        let Some(take) = clip.take(&span.take_id) else {
+            left_spans.push(span.clone());
+            right_spans.push(span.clone());
+            left_full = false;
+            right_full = false;
+            continue;
+        };
+        let projection = ClipProjection::from_clip_take(clip, take);
+        let intervals = project_span(&projection, span, frame_period_ms);
+        let mut crossing = None;
+        let mut side: Option<&str> = None;
+        for interval in intervals {
+            if interval.start_frame < frame && frame < interval.end_frame_exclusive {
+                crossing = Some(interval);
+                break;
+            }
+            if interval.end_frame_exclusive <= frame {
+                side = Some(if side == Some("right") {
+                    "both"
+                } else {
+                    "left"
+                });
+            } else if interval.start_frame >= frame {
+                side = Some(if side == Some("left") {
+                    "both"
+                } else {
+                    "right"
+                });
+            }
+        }
+        if let Some(interval) = crossing {
+            let a = source_at_projected_frame(
+                &projection,
+                interval.start_frame,
+                interval.cycle,
+                frame_period_ms,
+            );
+            let b = source_at_projected_frame(
+                &projection,
+                interval.end_frame_exclusive,
+                interval.cycle,
+                frame_period_ms,
+            );
+            let cut =
+                source_at_projected_frame(&projection, frame, interval.cycle, frame_period_ms);
+            if let (Some(a), Some(b), Some(cut)) = (a, b, cut) {
+                let lo = a.min(b);
+                let hi = a.max(b);
+                let cut = cut.clamp(lo, hi);
+                let mut left = span.clone();
+                left.source_start_sec = lo;
+                left.source_end_sec = cut;
+                let mut right = span.clone();
+                right.source_start_sec = cut;
+                right.source_end_sec = hi;
+                left_spans.push(left);
+                right_spans.push(right);
+                left_full = false;
+                right_full = false;
+                continue;
+            }
+        }
+        match side {
+            Some("left") => left_spans.push(span.clone()),
+            Some("right") => right_spans.push(span.clone()),
+            _ => {
+                left_spans.push(span.clone());
+                right_spans.push(span.clone());
+                left_full = false;
+                right_full = false;
+            }
+        }
+    }
+    (
+        (!left_spans.is_empty()).then_some(BaseCover {
+            spans: left_spans,
+            full: left_full,
+        }),
+        (!right_spans.is_empty()).then_some(BaseCover {
+            spans: right_spans,
+            full: right_full,
+        }),
+    )
+}
+
 fn split_take_parts(
     timeline: &TimelineState,
     working: &ParamBlockEditSet,
@@ -691,6 +798,8 @@ fn split_take_parts(
         }
         (left, right)
     };
+    let (left_cover, right_cover) =
+        split_base_cover(timeline, &block.base_cover, frame, frame_period_ms);
     let left = UserParamBlock {
         id: new_id("ublock", &format!("split:{}:{frame}:left", block.id)),
         geometry: BlockGeometry::Take {
@@ -701,7 +810,7 @@ fn split_take_parts(
         value: block.value,
         transition_out_sec: Some(0.0),
         created_seq: next_seq(working),
-        base_cover: block.base_cover.clone(),
+        base_cover: left_cover,
     };
     let right = UserParamBlock {
         id: new_id("ublock", &format!("split:{}:{frame}:right", block.id)),
@@ -713,7 +822,7 @@ fn split_take_parts(
         value: block.value,
         transition_out_sec: block.transition_out_sec,
         created_seq: next_seq(working).saturating_add(1),
-        base_cover: block.base_cover.clone(),
+        base_cover: right_cover,
     };
     Ok((left, right))
 }
@@ -1507,6 +1616,9 @@ pub fn delete_blocks(
             if child.manual && child.base_cover.is_none() {
                 continue;
             }
+            if child.base_cover.as_ref().is_some_and(|cover| !cover.full) {
+                continue;
+            }
             if child.is_group() {
                 continue;
             }
@@ -1537,6 +1649,14 @@ pub fn delete_blocks(
     for snapshot in &snapshots {
         // 纯手工块删除后必须让基块回来：它没有 base_cover，也不需要墓碑。
         if snapshot.block.manual && snapshot.block.base_cover.is_none() {
+            continue;
+        }
+        if snapshot
+            .block
+            .base_cover
+            .as_ref()
+            .is_some_and(|cover| !cover.full)
+        {
             continue;
         }
         for member in snapshot.block.members() {

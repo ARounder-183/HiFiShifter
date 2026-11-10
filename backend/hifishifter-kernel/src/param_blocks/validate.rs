@@ -102,15 +102,14 @@ fn validate_block(
             let mut has_take = false;
             let mut has_root = false;
             for child in children {
-                if child.is_group() {
-                    return Err("Invalid: nested parameter block group".into());
-                }
                 if child.deleted {
                     return Err("Invalid: deleted group child".into());
                 }
-                has_take |= child.is_take();
-                has_root |= matches!(child.geometry, BlockGeometry::Root { .. });
                 validate_block(child, depth + 1, total_blocks, ids)?;
+            }
+            for leaf in block.flatten_children() {
+                has_take |= leaf.is_take();
+                has_root |= matches!(leaf.geometry, BlockGeometry::Root { .. });
             }
             if has_take && has_root {
                 return Err("Invalid: mixed parameter block group geometry".into());

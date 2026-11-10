@@ -88,7 +88,7 @@ export type ActionId =
     | "pianoRoll.vibratoPresetNext" // 拖拽颤音时切换到下一个预设
     | "pianoRoll.cycleDragDirection" // 循环切换当前工具的拖动方向（拖拽中同样生效）
     // 参数块操作
-    | "paramBlock.split" // 切开参数块
+    | "paramBlock.split" // 分割参数块
     | "paramBlock.delete" // 删除参数块
     | "paramBlock.group" // 编组参数块
     | "paramBlock.ungroup" // 取消编组参数块
@@ -126,6 +126,9 @@ export type ActionId =
     | "modifier.paramMorph" // 参数编辑器形变模式（按住）
     | "modifier.paramMultiSelect" // 参数编辑器多选区（按住拖动追加一段；按住点击已有段取消该段）
     | "modifier.paramRangeSelect" // 参数块范围选择（按住并点击，从锚点扩展）
+    | "modifier.paramBlockSplitAtClick" // 块工具：按住并左键点击参数块 = 在点击位置分割
+    | "modifier.paramBlockCreate" // 块工具：按住并在空白处拖拽 = 新建参数块
+    | "modifier.paramBlockCreateFlat" // 块工具：按住 Ctrl+Alt 在空白处拖拽 = 新建并拉平当前参数线
     | "modifier.clipRangeToParamSelection" // 按住并右键单击音频块：把该块范围追加/移出参数编辑器选区
     | "modifier.paramFineAdjust" // 精细调整（按住）
     | "modifier.vibratoAmplitudeAdjust" // 颤音绘制时滚轮调振幅

@@ -246,6 +246,11 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     "modifier.paramMultiSelect": [{ key: "control", modifierOnly: true, ctrl: true }],
     // 参数块范围选择：与 Clip 的 Shift 点击同义，从上次点击的锚点扩展到目标块。
     "modifier.paramRangeSelect": [{ key: "shift", modifierOnly: true, shift: true }],
+    // 参数块工具：点击与拖拽是两种可区分手势，因此 Alt 可以同时承担
+    // 「块上点击分割」与「空白拖拽新建」；Ctrl+Alt 在空白处额外表示拉平新建。
+    "modifier.paramBlockSplitAtClick": [{ key: "alt", modifierOnly: true, alt: true }],
+    "modifier.paramBlockCreate": [{ key: "alt", modifierOnly: true, alt: true }],
+    "modifier.paramBlockCreateFlat": [{ key: "alt", modifierOnly: true, ctrl: true, alt: true }],
     "modifier.paramFineAdjust": [{ key: "control", modifierOnly: true, ctrl: true }],
     "modifier.vibratoAmplitudeAdjust": [{ key: "__none__", modifierOnly: true }],
     "modifier.vibratoFrequencyAdjust": [{ key: "alt", modifierOnly: true, alt: true }],
@@ -654,6 +659,27 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
         group: "modParam",
         modifierOperationType: "click",
         // 块选择与参数选区框选是同一场景；与 clipNoSnap 的 drag 语义不冲突。
+        conflictScenes: ["roll.select"],
+    },
+    "modifier.paramBlockSplitAtClick": {
+        labelKey: "kb_modifier_param_block_split_at_click",
+        group: "modParam",
+        modifierOperationType: "click",
+        // 与 Shift 范围选择、Ctrl 多选同处块选择场景；同一修饰键的
+        // click 与 drag 绑定不互相冲突（Alt 同时用于新建就是靠这一点）。
+        conflictScenes: ["roll.select"],
+    },
+    "modifier.paramBlockCreate": {
+        labelKey: "kb_modifier_param_block_create",
+        group: "modParam",
+        modifierOperationType: "drag",
+        // 创建只发生在空白处；与 Ctrl 多选的空白拖拽共享同一场景。
+        conflictScenes: ["roll.select"],
+    },
+    "modifier.paramBlockCreateFlat": {
+        labelKey: "kb_modifier_param_block_create_flat",
+        group: "modParam",
+        modifierOperationType: "drag",
         conflictScenes: ["roll.select"],
     },
     // 参数编辑器：拖动参数选区边缘 = 拉伸选区。与时间轴的 `modifier.clipStretch`

@@ -65,6 +65,7 @@ export type PointerDeps = {
         /** 与选择工具同源的边缘自动滚动驱动。 */
         edgeScroll?: { step(clientX: number): void };
         pointerType: string;
+        nativeEvent: globalThis.PointerEvent;
         pointerId: number;
         captureTarget: HTMLCanvasElement;
         setActivePointerGestureEnd: (endGesture: () => void) => void;

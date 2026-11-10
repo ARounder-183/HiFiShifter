@@ -144,6 +144,84 @@ type LegacyBlock = Partial<UserParamBlock> & {
 
 const MAX_GROUP_DEPTH = 8;
 
+const BLOCK_LABELS: ReadonlySet<string> = new Set([
+    "syllable",
+    "phoneme",
+    "midiNote",
+    "gameBaseline",
+    "manual",
+]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === "object" && value !== null;
+}
+
+function normalizeTakeSpan(
+    value: unknown,
+    diagnostics: string[] | undefined,
+    code: string,
+): TakeSpan | null {
+    if (!isRecord(value)) {
+        diagnostics?.push(code);
+        return null;
+    }
+    const clipId = value.clipId;
+    const takeId = value.takeId;
+    const cycle = value.cycle;
+    const sourceStartSec = value.sourceStartSec;
+    const sourceEndSec = value.sourceEndSec;
+    const rawLabel = value.label;
+    const label = rawLabel === undefined ? "manual" : rawLabel;
+    if (
+        typeof clipId !== "string" ||
+        clipId.length === 0 ||
+        typeof takeId !== "string" ||
+        takeId.length === 0 ||
+        typeof cycle !== "number" ||
+        !Number.isInteger(cycle) ||
+        cycle < 0 ||
+        typeof sourceStartSec !== "number" ||
+        typeof sourceEndSec !== "number" ||
+        !Number.isFinite(sourceStartSec) ||
+        !Number.isFinite(sourceEndSec) ||
+        sourceEndSec <= sourceStartSec ||
+        typeof label !== "string" ||
+        !BLOCK_LABELS.has(label)
+    ) {
+        diagnostics?.push(code);
+        return null;
+    }
+    const syllableId = value.syllableId;
+    return {
+        clipId,
+        takeId,
+        cycle,
+        sourceStartSec,
+        sourceEndSec,
+        ...(typeof syllableId === "string" ? { syllableId } : {}),
+        label: label as BlockLabel,
+    };
+}
+
+function normalizeBaseCover(
+    value: unknown,
+    diagnostics: string[] | undefined,
+): BaseCover | undefined {
+    if (value === undefined || value === null) return undefined;
+    if (!isRecord(value) || !Array.isArray(value.spans)) {
+        diagnostics?.push("block_malformed_base_cover");
+        return undefined;
+    }
+    const spans = value.spans
+        .map((span) => normalizeTakeSpan(span, diagnostics, "block_malformed_base_cover"))
+        .filter((span): span is TakeSpan => span !== null);
+    if (spans.length === 0) {
+        diagnostics?.push("block_malformed_base_cover");
+        return undefined;
+    }
+    return { spans, full: value.full === true };
+}
+
 function normalizeUserBlock(
     value: LegacyBlock,
     depth = 0,
@@ -157,57 +235,102 @@ function normalizeUserBlock(
         diagnostics?.push("block_missing_geometry");
         return null;
     }
+    const invalid = (code: string): Record<string, never> => {
+        diagnostics?.push(code);
+        return {};
+    };
+    const rawValue = value.value;
+    const valueField =
+        rawValue === undefined
+            ? {}
+            : rawValue === null || (typeof rawValue === "number" && Number.isFinite(rawValue))
+              ? { value: rawValue }
+              : invalid("block_malformed_value");
+    const rawTransition = value.transitionOutSec;
+    const transitionField =
+        rawTransition === undefined
+            ? {}
+            : typeof rawTransition === "number" &&
+                Number.isFinite(rawTransition) &&
+                rawTransition >= 0
+              ? { transitionOutSec: rawTransition }
+              : invalid("block_malformed_transition");
+    const base = {
+        id: value.id,
+        deleted: value.deleted === true,
+        manual: value.manual === true,
+        ...valueField,
+        ...transitionField,
+        createdSeq: Number.isFinite(value.createdSeq) ? Number(value.createdSeq) : 0,
+    };
+    const baseCover = normalizeBaseCover(value.baseCover, diagnostics);
     const legacyChildren = Array.isArray(value.groupedFrom) ? value.groupedFrom : [];
     const convertChildren = (children: readonly LegacyBlock[]) =>
         children
             .map((child) => normalizeUserBlock(child, depth + 1, diagnostics))
             .filter((child): child is UserParamBlock => child !== null);
-    const base = {
-        id: value.id,
-        deleted: value.deleted === true,
-        manual: value.manual === true,
-        ...(value.value === undefined ? {} : { value: value.value }),
-        ...(value.transitionOutSec === undefined
-            ? {}
-            : { transitionOutSec: value.transitionOutSec }),
-        createdSeq: Number.isFinite(value.createdSeq) ? Number(value.createdSeq) : 0,
-        ...(value.baseCover === undefined ? {} : { baseCover: value.baseCover }),
+    const finishGroup = (children: readonly LegacyBlock[]) => {
+        const converted = convertChildren(children);
+        if (converted.length === 0) {
+            diagnostics?.push("group_too_small");
+            return null;
+        }
+        if (converted.length === 1) {
+            diagnostics?.push("group_too_small");
+            return converted[0]!;
+        }
+        const leaves = converted.flatMap(flattenGroupChildren);
+        const hasRoot = leaves.some((child) => child.geometry.kind === "root");
+        const hasTake = leaves.some((child) => child.geometry.kind === "take");
+        if (hasRoot && hasTake) {
+            diagnostics?.push("group_mixed_geometry");
+            return null;
+        }
+        return { ...base, geometry: { kind: "group" as const, children: converted } };
     };
     if (value.geometry.kind === "group") {
         if (!Array.isArray(value.geometry.children)) {
             diagnostics?.push("group_children_missing");
             return null;
         }
-        const children = convertChildren(value.geometry.children as readonly LegacyBlock[]);
-        if (children.length < 2) {
-            diagnostics?.push("group_too_small");
-            return null;
-        }
-        return { ...base, geometry: { kind: "group", children } };
+        return finishGroup(value.geometry.children as readonly LegacyBlock[]);
     }
-    if (legacyChildren.length >= 2) {
-        const children = convertChildren(legacyChildren);
-        if (children.length < 2) {
-            diagnostics?.push("group_too_small");
-            return null;
-        }
-        return { ...base, geometry: { kind: "group", children } };
-    }
+    if (legacyChildren.length >= 2) return finishGroup(legacyChildren);
     if (value.geometry.kind === "take") {
+        if (!Array.isArray(value.geometry.members)) {
+            diagnostics?.push("block_missing_members");
+            return null;
+        }
+        const members = value.geometry.members
+            .map((member) => normalizeTakeSpan(member, diagnostics, "block_missing_members"))
+            .filter((member): member is TakeSpan => member !== null);
+        if (members.length === 0) {
+            diagnostics?.push("block_missing_members");
+            return null;
+        }
         return {
             ...base,
-            geometry: {
-                kind: "take",
-                members: value.geometry.members.map((member) => ({ ...member })),
-            },
+            geometry: { kind: "take", members },
+            ...(baseCover === undefined ? {} : { baseCover }),
         };
     }
     if (value.geometry.kind === "root") {
-        return { ...base, geometry: { kind: "root", span: { ...value.geometry.span } } };
+        const span = value.geometry.span;
+        if (
+            !isRecord(span) ||
+            typeof span.startSec !== "number" ||
+            typeof span.endSec !== "number" ||
+            !Number.isFinite(span.startSec) ||
+            !Number.isFinite(span.endSec) ||
+            span.endSec <= span.startSec
+        ) {
+            diagnostics?.push("block_malformed_root");
+            return null;
+        }
+        return { ...base, geometry: { kind: "root", span: { ...span } } };
     }
     return null;
 }
-
 /** 唯一规范化入口：空编辑集补 blocks 数组，并一次性把旧 groupedFrom 转成 Group 容器。 */
 export function normalizeParamBlockEditSet(
     value:
@@ -269,12 +392,13 @@ export function groupLeafMembers(block: UserParamBlock): TakeSpan[] {
     );
 }
 
-/** 所有 child 的 value 完全一致时才返回公共值。 */
+/** 所有叶子 value 完全一致时才返回公共值（嵌套组递归）。 */
 export function groupCommonValue(block: UserParamBlock): number | null {
     if (block.geometry.kind !== "group") return null;
-    const first = block.geometry.children[0]?.value;
+    const leaves = flattenGroupChildren(block);
+    const first = leaves[0]?.value;
     if (first === undefined || first === null) return null;
-    return block.geometry.children.every((child) => child.value === first) ? first : null;
+    return leaves.every((child) => child.value === first) ? first : null;
 }
 
 export const EMPTY_PARAM_BLOCK_VIEW: ParamBlockView = {

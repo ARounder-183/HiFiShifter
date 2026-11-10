@@ -210,7 +210,7 @@ const selectMenuBarSession = (state: RootState) => {
 const ParamBlockMenuItems: React.FC<{
     readonly tf: (key: MessageKey) => string;
     readonly shortcutLabel: (action: ActionId) => string;
-    readonly onAction: (channel: ParamBlockMenuChannel, op: string) => void;
+    readonly onAction: (channel: ParamBlockMenuChannel, op: string, panelId: string) => void;
 }> = ({ tf, shortcutLabel, onAction }) => {
     const context = useSyncExternalStore(
         subscribeParamBlockMenuContext,
@@ -225,7 +225,7 @@ const ParamBlockMenuItems: React.FC<{
                     <DropdownMenu.Item
                         color={item.danger === true ? "red" : undefined}
                         disabled={context === null || !item.enabled(context)}
-                        onSelect={() => onAction(item.channel, item.op)}
+                        onSelect={() => onAction(item.channel, item.op, context?.panelId ?? "")}
                     >
                         {tf(item.labelKey)}
                         {item.shortcutAction === undefined ? null : (
@@ -972,10 +972,10 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                     <ParamBlockMenuItems
                                         tf={tf}
                                         shortcutLabel={shortcutLabel}
-                                        onAction={(channel, op) => {
+                                        onAction={(channel, op, panelId) => {
                                             window.dispatchEvent(
                                                 new CustomEvent("hifi:paramBlockMenuAction", {
-                                                    detail: { channel, op },
+                                                    detail: { channel, op, panelId },
                                                 }),
                                             );
                                         }}

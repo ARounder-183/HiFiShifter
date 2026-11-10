@@ -18,7 +18,6 @@ import {
     groupProjectedBlocks,
     newParamBlockId,
     ParamBlockPlanError,
-    planResizeProjectedBlock,
     planSplitProjectedBlock,
     restoreDeletedBlocks,
     setProjectedBlockTransition,
@@ -718,19 +717,6 @@ export function resolveParamBlockCommitDisplayCenter(args: {
  * 普通块平移必须继续读取实时曲线中心；只有 Alt 音高缩放才允许锁住中心，
  * 因为缩放会改变块内起伏而不改变块应有的代表音高。
  */
-export function shouldKeepParamBlockCenterLockedAfterDrag(args: {
-    readonly pitchScale: boolean;
-}): boolean {
-    return args.pitchScale;
-}
-
-/**
- * 边缘伸缩的唯一几何来源。
- *
- * 预览、拖动中的宿主刷新和松手提交都消费这一份计划，避免“拖动时看见 A，
- * 松手后变成 B”。右边缘只改右端，左边缘只改左端；邻块被压缩时使用同一个
- * 端点，严格首尾相接，不留下会被后续重建误判成重叠的浮点缝。
- */
 export function resolveParamBlockResizePlan(args: {
     readonly blockId?: string;
     readonly edge: "left" | "right";
@@ -1054,7 +1040,6 @@ export interface ParamBlockCreateInput {
     readonly endSec: number;
     readonly value: number | null;
     readonly blockId?: string;
-    readonly existingBlocks?: readonly ParamBlock[];
     readonly minBlockSec?: number;
 }
 
@@ -1365,34 +1350,6 @@ export function splitParamBlock(input: ParamBlockSplitInput): ParamBlockEditResu
     }
 }
 
-export function resizeParamBlock(input: ParamBlockResizeInput): ParamBlockEditResult {
-    const block = input.block.projected;
-    if (block === undefined) return { ok: false, reason: "not_found" };
-    const framePeriodMs = input.state.framePeriodMs;
-    const targetSec = input.targetSpan
-        ? input.edge === "left"
-            ? input.targetSpan.startSec
-            : input.targetSpan.endSec
-        : input.targetSec;
-    try {
-        const plan = planResizeProjectedBlock(
-            input.clips,
-            input.state.editSet,
-            block,
-            input.edge,
-            toFrame(targetSec, framePeriodMs),
-            framePeriodMs,
-        );
-        return {
-            ok: true,
-            blockId: block.userBlockId ?? block.id,
-            state: withEdits(input.state, plan.edits),
-        };
-    } catch (error) {
-        return { ok: false, reason: editFailureFromError(error) };
-    }
-}
-
 export function createParamBlock(input: ParamBlockCreateInput): ParamBlockEditResult {
     const clips = input.clips ?? (input.clip === undefined ? [] : [input.clip]);
     const framePeriodMs = input.state.framePeriodMs;
@@ -1412,8 +1369,8 @@ export function createParamBlock(input: ParamBlockCreateInput): ParamBlockEditRe
             blockId: actualId,
             state: withEdits(input.state, edits),
         };
-    } catch {
-        return { ok: false, reason: "too_short" };
+    } catch (error) {
+        return { ok: false, reason: editFailureFromError(error) };
     }
 }
 
@@ -1459,24 +1416,8 @@ export function deleteParamBlocks(args: {
         return { ok: false, reason: editFailureFromError(error) };
     }
 }
-export function removeParamBlockAtMinWidth(args: {
-    readonly state: ParamBlockState;
-    readonly blocks: readonly ParamBlock[];
-    readonly blockId: string;
-    readonly clips: readonly ParamBlockSourceClip[];
-}): ParamBlockEditResult {
-    return deleteParamBlocks({
-        state: args.state,
-        blocks: args.blocks,
-        selectedBlockIds: [args.blockId],
-        clips: args.clips,
-    });
-}
-
 export function restoreDeletedParamBlocks(args: {
     readonly state: ParamBlockState;
-    readonly blocks?: readonly ParamBlock[];
-    readonly selectedBlockIds?: readonly string[];
 }): ParamBlockEditResult {
     const deleted = (args.state.lastDeletedBlocks ?? []).filter(
         (snapshot) =>
@@ -1881,13 +1822,22 @@ export function resolveParamBlockDragRelease(args: {
     readonly startClientY: number;
     readonly lastMoveClientY: number;
     readonly releaseClientY: number;
+    readonly startClientX?: number;
+    readonly lastMoveClientX?: number;
+    readonly releaseClientX?: number;
 }): { readonly didDrag: boolean; readonly clientY: number } {
     const clientY = Number.isFinite(args.releaseClientY)
         ? args.releaseClientY
         : args.lastMoveClientY;
-    const didDrag =
-        args.didDrag || (Number.isFinite(clientY) && Math.abs(clientY - args.startClientY) > 3);
-    return { didDrag, clientY };
+    const hasX =
+        args.startClientX !== undefined &&
+        Number.isFinite(args.startClientX) &&
+        Number.isFinite(args.releaseClientX ?? args.lastMoveClientX);
+    const clientX = hasX ? (args.releaseClientX ?? args.lastMoveClientX)! : args.startClientX;
+    const moved = hasX
+        ? Math.hypot(clientX! - args.startClientX!, clientY - args.startClientY) > 3
+        : Math.abs(clientY - args.startClientY) > 3;
+    return { didDrag: args.didDrag || (Number.isFinite(clientY) && moved), clientY };
 }
 
 /**
@@ -1927,7 +1877,13 @@ export function shiftParamBlockCurveValuesToTarget(args: {
     readonly flatten?: boolean;
 }): number[] {
     if (!Number.isFinite(args.target)) return args.values.slice();
-    if (args.flatten && args.param === "pitch") return args.values.map(() => args.target);
+    if (args.flatten) {
+        return args.values.map((value) => {
+            if (!Number.isFinite(value)) return value;
+            if (args.param === "pitch") return value > 0 ? args.target : value;
+            return args.target;
+        });
+    }
     const editable = args.values.filter(
         (value) => Number.isFinite(value) && (args.param !== "pitch" || value > 0),
     );

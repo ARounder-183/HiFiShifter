@@ -39,11 +39,11 @@ export function ParamBlockContextMenu({
         "paramBlock.restoreDeleted": useMenuShortcut("paramBlock.restoreDeleted"),
         "paramBlock.normalizePitch": useMenuShortcut("paramBlock.normalizePitch"),
         "paramBlock.delete": useMenuShortcut("paramBlock.delete"),
-        "clip.copy": useMenuShortcut("clip.copy"),
-        "clip.cut": useMenuShortcut("clip.cut"),
-        "clip.paste": useMenuShortcut("clip.paste"),
-        "edit.selectAll": useMenuShortcut("edit.selectAll"),
-        "edit.deselect": useMenuShortcut("edit.deselect"),
+        "pianoRoll.copy": useMenuShortcut("pianoRoll.copy"),
+        "pianoRoll.cut": useMenuShortcut("pianoRoll.cut"),
+        "pianoRoll.paste": useMenuShortcut("pianoRoll.paste"),
+        "paramBlock.selectAll": useMenuShortcut("paramBlock.selectAll"),
+        "paramBlock.deselect": useMenuShortcut("paramBlock.deselect"),
     } as const;
     const items: AppMenuItemSpec[] = PARAM_BLOCK_MENU_ITEMS.map((item) => {
         const action = item.shortcutAction as keyof typeof shortcuts | undefined;

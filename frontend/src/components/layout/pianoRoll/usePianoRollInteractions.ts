@@ -7,6 +7,7 @@ import type {
 } from "react";
 import { useCallback, useEffect, useRef } from "react";
 import { pianoRollViewportBus } from "./pianoRollViewportBus";
+import { beginParamSelectionMorph } from "./gestures/selection/paramSelectionMorph";
 import {
     resolveViewportReplay,
     warnViewportReplayButtonsLost,
@@ -217,6 +218,7 @@ export function usePianoRollInteractions(args: {
         readonly clampSelectionFrame?: (frame: number) => number;
         readonly edgeScroll?: { step(clientX: number): void };
         readonly pointerType: string;
+        readonly nativeEvent: globalThis.PointerEvent;
         readonly pointerId: number;
         readonly captureTarget: HTMLCanvasElement;
         readonly setActivePointerGestureEnd: (endGesture: () => void) => void;
@@ -2627,6 +2629,82 @@ export function usePianoRollInteractions(args: {
         };
     }, [paramValuePopupEnabled, onParamValuePreviewChange]);
 
+    /**
+     * 块工具右键幅度入口：与选择工具共用同一份右键幅度实现。
+     * 选区、参数视图与所有低层依赖都由 hook 作用域补齐；调用方只提供
+     * 本次指针和块菜单回调。
+     */
+    const beginParamBlockMorph = useCallback(
+        (args: {
+            readonly selection: ParamSelection;
+            readonly nativeEvent: globalThis.PointerEvent;
+            readonly clientX: number;
+            readonly clientY: number;
+            readonly pointerId: number;
+            readonly captureTarget: HTMLCanvasElement;
+            readonly onCommitted?: () => void;
+            readonly onContextMenu?: (x: number, y: number) => void;
+        }): boolean => {
+            const pv = paramViewRef.current;
+            if (pv === null) return false;
+            return beginParamSelectionMorph({
+                ...args,
+                applyDenseToLiveEdit,
+                buildUploadSegments,
+                bumpRefreshToken,
+                clearActivePointerGestureEnd,
+                createFineAdjustedPointerState,
+                disposeFineAdjustedPointerState,
+                edgeHalfSpanForIndices,
+                editParam,
+                ensureLiveEditBase,
+                fetchCommitBaseSource,
+                framePeriodMs: pv.framePeriodMs,
+                getFineAdjustedPointerPosition,
+                invalidate,
+                liveEditActiveRef,
+                liveEditOverrideRef,
+                onContextMenu: args.onContextMenu ?? onContextMenu,
+                onParamCommitSucceeded,
+                onParamValuePreviewChange,
+                paramValuePopupEnabled,
+                paramView: pv,
+                paramViewRef,
+                requestWaveformRepaint,
+                rootTrackId,
+                setActivePointerGestureEnd,
+                setCanvasCursor,
+                setParamView,
+            });
+        },
+        [
+            applyDenseToLiveEdit,
+            buildUploadSegments,
+            bumpRefreshToken,
+            clearActivePointerGestureEnd,
+            createFineAdjustedPointerState,
+            disposeFineAdjustedPointerState,
+            edgeHalfSpanForIndices,
+            editParam,
+            ensureLiveEditBase,
+            fetchCommitBaseSource,
+            getFineAdjustedPointerPosition,
+            invalidate,
+            liveEditActiveRef,
+            liveEditOverrideRef,
+            onContextMenu,
+            onParamCommitSucceeded,
+            onParamValuePreviewChange,
+            paramValuePopupEnabled,
+            paramViewRef,
+            requestWaveformRepaint,
+            rootTrackId,
+            setActivePointerGestureEnd,
+            setCanvasCursor,
+            setParamView,
+        ],
+    );
+
     return {
         onRulerMouseDown,
         onScrollerAuxClick,
@@ -2637,6 +2715,7 @@ export function usePianoRollInteractions(args: {
         onCanvasPointerMove,
         onCanvasPointerLeave,
         onCanvasPointerDown,
+        beginParamBlockMorph,
         refreshParamValuePreview,
     };
 }

@@ -367,6 +367,7 @@ export function handleCanvasPointerDown(
                             Math.max(0, timeToFrame(dynamicProjectSec, framePeriodMs) - 1),
                         ),
                     pointerType: e.nativeEvent.pointerType,
+                    nativeEvent: e.nativeEvent,
                     altKey: e.altKey,
                     shiftKey: e.shiftKey,
                     ctrlKey: e.ctrlKey,

@@ -22,7 +22,7 @@ afterEach(() => {
 });
 
 const labels: Record<string, string> = {
-    param_blocks_tool: "块编辑工具",
+    param_blocks_tool: "参数块编辑工具",
     param_blocks_short: "块",
     param_blocks_show_overlay: "显示参数块",
 };
@@ -61,12 +61,12 @@ test("块药丸提供工具、眼睛与可发现的溢出菜单", async () => {
             </Theme>,
         );
     });
-    expect(host.querySelector('[aria-label="块编辑工具"]')).not.toBeNull();
+    expect(host.querySelector('[aria-label="参数块编辑工具"]')).not.toBeNull();
     expect(host.querySelector('[aria-label="显示参数块"]')).not.toBeNull();
     expect(host.textContent).toContain("…");
 });
 
-test("点击标签切换块编辑工具", async () => {
+test("点击标签切换参数块编辑工具", async () => {
     const dispatch = vi.fn();
     await act(async () => {
         root.render(
@@ -75,7 +75,7 @@ test("点击标签切换块编辑工具", async () => {
             </Theme>,
         );
     });
-    const label = host.querySelector<HTMLButtonElement>('[aria-label="块编辑工具"]');
+    const label = host.querySelector<HTMLButtonElement>('[aria-label="参数块编辑工具"]');
     if (label === null) throw new Error("tool label missing");
     await act(async () => label.click());
     expect(dispatch).toHaveBeenCalledTimes(1);

@@ -37,6 +37,18 @@ describe("paramBlockSelection", () => {
         ]);
     });
 
+    it("zero-length runs do not become ghost blocks", () => {
+        const withZero = [...blocks, { id: "zero", startFrame: 80, endFrameExclusive: 80 }];
+        expect(paramBlockLogicalFrameRanges(withZero, "zero")).toEqual([]);
+        expect(paramBlockIdsInSelection(withZero, [{ startFrame: 79, frameCount: 2 }])).toEqual([]);
+        expect(
+            paramBlockIdsInSelection(withZero, [
+                { startFrame: 0, frameCount: 20 },
+                { startFrame: 100, frameCount: 20 },
+            ]),
+        ).toEqual(["a"]);
+    });
+
     it("restore scope uses whole logical blocks, not just the clicked run", () => {
         expect(paramBlockRestoreRanges(blocks, ["a:0"], null)).toEqual([
             { startFrame: 0, frameCount: 20 },

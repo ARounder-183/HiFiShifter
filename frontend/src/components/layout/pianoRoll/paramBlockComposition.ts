@@ -180,6 +180,13 @@ function projectTakeMembers(
         let matched = false;
         for (const part of parts) {
             for (const interval of projectTakeSpan(projection, part, framePeriodMs)) {
+                /*
+                 * 用户成员是**周期特定**的：cycle=N 的成员只画第 N 个周期。
+                 * 基块不同：一个 syllable span 在每个循环周期都出现，所以
+                 * baseCandidates 用 `interval.cycle < cycleSpan.cycle` 收集
+                 * 后续周期；用户块必须精确匹配，否则一个 cycle=0 的成员会
+                 * 覆盖整段 Loop，后面的基块被错误吞掉。
+                 */
                 if (interval.cycle !== part.cycle) continue;
                 matched = true;
                 projected.push({
@@ -646,7 +653,7 @@ export function composeParamBlockView(
             `${rootTrackId}|${fp}|${clips
                 .map(
                     (clip) =>
-                        `${clip.id}:${clip.startSec}:${clip.lengthSec}:${clip.sourceStartSec}:${clip.sourceEndSec}:${clip.playbackRate}:${clip.clipPlaybackRate}:${clip.reversed}:${clip.loopEnabled}:${clip.loopPeriodSec}:${clip.takes
+                        `${clip.id}:${clip.activeTakeId ?? ""}:${clip.startSec}:${clip.lengthSec}:${clip.sourceStartSec}:${clip.sourceEndSec}:${clip.playbackRate}:${clip.clipPlaybackRate}:${clip.reversed}:${clip.loopEnabled}:${clip.loopPeriodSec}:${clip.takes
                             ?.map(
                                 (take) =>
                                     `${take.id}:${take.sourceStartSec}:${take.sourceEndSec}:${take.playbackRate}:${take.reversed}:${take.loopEnabled}:${take.durationSec}:${take.durationFrames}:${take.sourceSampleRate}:${(take.syllableSpansSec ?? []).map((span) => `${span.startSec.toFixed(6)}-${span.endSec.toFixed(6)}`).join(";")}:${(take.gameBlockBaseline?.sourceSpansSec ?? []).map((span) => `${span.startSec.toFixed(6)}-${span.endSec.toFixed(6)}`).join(";")}:${(take.midiNoteData ?? []).map((note) => `${note.startSec.toFixed(6)}-${note.endSec.toFixed(6)}`).join(";")}`,

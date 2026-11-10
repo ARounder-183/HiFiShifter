@@ -768,17 +768,17 @@ export const jaJP = {
     fade_in: "フェードイン",
     fade_out: "フェードアウト",
     show_secondary_param: "サブパラメータオーバーレイを表示",
-    param_blocks_tool: "ブロック編集ツール",
+    param_blocks_tool: "パラメータブロック編集ツール",
     param_blocks_short: "ブロック",
     param_blocks_show_overlay: "パラメータブロックを表示",
     param_blocks_ungroup: "グループ解除",
     param_blocks_group: "グループ化",
     param_blocks_split_at_playhead: "再生ヘッドで分割",
-    param_blocks_restore_game: "復元",
-    param_blocks_restore_deleted: "削除したブロックを復元",
+    param_blocks_restore_game: "パラメータブロックを復元",
+    param_blocks_restore_deleted: "削除したパラメータブロックを復元",
     param_blocks_normalize_pitch: "ピッチ正規化",
-    param_blocks_delete: "削除",
-    param_blocks_create_from_selection: "選択範囲からブロックを作成",
+    param_blocks_delete: "パラメータブロックを削除",
+    param_blocks_create_from_selection: "選択範囲からパラメータブロックを作成",
     status_param_block_edit_rejected: "パラメータブロック編集が拒否されました",
     status_param_block_split_too_close: "分割位置がブロックの端に近すぎます",
     status_param_block_action_failed: "パラメータブロック操作に失敗しました",
@@ -797,7 +797,7 @@ export const jaJP = {
     kb_group_param_block_nav: "ブロック",
     param_block_settings_title: "パラメータブロック設定",
     param_block_settings_desc: "これらの設定はすべてのプロジェクトに適用されます。",
-    param_block_follow_pitch: "ブロック作成時にピッチを追従",
+    param_block_follow_pitch: "パラメータブロック作成時にピッチを追従",
     param_block_follow_pitch_hint:
         "現在のピッチスナップ単位（半音またはプロジェクトスケール）に合わせて、新しいブロックのピッチ全体を最寄りの位置へ移動し、起伏を保ちます。",
     hide_secondary_param: "サブパラメータオーバーレイを非表示",
@@ -999,6 +999,8 @@ export const jaJP = {
     kb_close: "閉じる",
     kb_conflict_msg: "このショートカットは以下のシーンで既存の操作と競合しています：",
     kb_conflict_override: "上書き",
+    kb_conflict_param_block_create_hint:
+        "Ctrl + 空白ドラッグはパラメータ選択範囲の追加に使われます。通常作成は Alt、作成して平坦化は {modifier}+Alt を使用してください。裸の Ctrl で作成するには明示的な作成モードが必要です。",
     kb_conflict_cancel: "キャンセル",
     kb_dialog_hint_click: "左クリックで「なし」に設定。右クリックでデフォルトに戻す。",
     kb_search_placeholder: "ショートカットまたはキーを検索...",
@@ -1137,7 +1139,13 @@ export const jaJP = {
         "クリップ範囲をパラメーター選択範囲に追加（押しながら右クリック）",
     kb_modifier_param_multi_select:
         "複数選択範囲（押しながらドラッグで範囲を追加、既存の範囲を押しながらクリックで解除）",
-    kb_modifier_param_range_select: "範囲選択（押しながらブロックをクリック、アンカーから拡張）",
+    kb_modifier_param_range_select:
+        "範囲選択（押しながらパラメータブロックをクリック、アンカーから拡張）",
+    kb_modifier_param_block_split_at_click:
+        "クリック位置で分割（押しながらパラメータブロックをクリック）",
+    kb_modifier_param_block_create: "パラメータブロックを作成（押しながら空白をドラッグ）",
+    kb_modifier_param_block_create_flat:
+        "パラメータブロックを作成してパラメータ線を平坦化（{modifier}+Alt を押しながら空白をドラッグ）",
     kb_modifier_param_fine_adjust:
         "微調整（押しながら：スライダー / 入力欄ホイール / ゲインドラッグ / ビブラートホイール）",
     kb_modifier_vibrato_amplitude_adjust: "ビブラート振幅調整（ビブラートドラッグ中ホイール）",

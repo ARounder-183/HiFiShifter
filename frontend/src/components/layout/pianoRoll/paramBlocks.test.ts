@@ -8,6 +8,7 @@ import {
     isStrictlyInsideParamBlock,
     resolveParamBlockSplitTarget,
     resolveSplittableParamBlockAt,
+    shiftParamBlockCurveValuesToTarget,
     splitParamBlock,
     type ParamBlock,
 } from "./paramBlocks";
@@ -395,5 +396,36 @@ describe("splitParamBlock", () => {
                 expect({ frame, ok: result.ok }).toEqual({ frame, ok: true });
             }
         }
+    });
+});
+
+describe("shiftParamBlockCurveValuesToTarget", () => {
+    it("flatten fills every non-pitch frame and preserves the pitch zero sentinel", () => {
+        expect(
+            shiftParamBlockCurveValuesToTarget({
+                values: [10, 20, 30],
+                target: 7,
+                param: "volume",
+                flatten: true,
+            }),
+        ).toEqual([7, 7, 7]);
+        expect(
+            shiftParamBlockCurveValuesToTarget({
+                values: [58, 0, 61, 0],
+                target: 60,
+                param: "pitch",
+                flatten: true,
+            }),
+        ).toEqual([60, 0, 60, 0]);
+    });
+
+    it("without flatten the original contour is shifted, not flattened", () => {
+        expect(
+            shiftParamBlockCurveValuesToTarget({
+                values: [58, 60, 62],
+                target: 60,
+                param: "pitch",
+            }),
+        ).toEqual([58, 60, 62]);
     });
 });

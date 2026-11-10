@@ -99,6 +99,11 @@ fn project_take_members(
         let mut matched = false;
         for part in normalize_loop_span(&projection, member) {
             for interval in project_span(&projection, &part, frame_period_ms) {
+                /*
+                 * 用户成员是周期特定的：cycle=N 只画第 N 个周期。基块
+                 * 在 base_candidates 中用 < 收集后续周期；用户块若也用 <，
+                 * 一个 cycle=0 成员会吞掉整段 Loop 后面的基块。
+                 */
                 if interval.cycle != part.cycle {
                     continue;
                 }
@@ -175,7 +180,8 @@ fn project_group_block(
     let transition_width_sec = block
         .transition_out_sec
         .or_else(|| children.last().and_then(|child| child.transition_out_sec));
-    let has_root = children
+    let leaves = block.flatten_children();
+    let has_root = leaves
         .iter()
         .any(|child| matches!(child.geometry, BlockGeometry::Root { .. }));
     if has_root {
@@ -183,7 +189,7 @@ fn project_group_block(
          * 根块组必须按每个 child 生成独立 run；min..max 包围盒会把子块之间
          * 的空白也填成组，等于凭空制造几何。
          */
-        let mut runs: Vec<(u32, u32)> = children
+        let mut runs: Vec<(u32, u32)> = leaves
             .iter()
             .filter_map(|child| match child.geometry {
                 BlockGeometry::Root { ref span } => {

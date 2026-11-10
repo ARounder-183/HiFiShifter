@@ -294,6 +294,83 @@ describe("paramBlockEditing", () => {
         expect(right[1]?.startFrame).toBe(120);
     });
 
+    it("right-expands the last member of a multi-member run, not the first", () => {
+        const edits = {
+            schemaVersion: 2 as const,
+            revision: 1,
+            blocks: [
+                {
+                    id: "multi-member",
+                    geometry: {
+                        kind: "take" as const,
+                        members: [
+                            {
+                                clipId: "clip",
+                                takeId: "clip_take_1",
+                                cycle: 0,
+                                sourceStartSec: 0,
+                                sourceEndSec: 0.2,
+                                label: "manual" as const,
+                            },
+                            {
+                                clipId: "clip",
+                                takeId: "clip_take_1",
+                                cycle: 0,
+                                sourceStartSec: 0.2,
+                                sourceEndSec: 0.4,
+                                label: "manual" as const,
+                            },
+                        ],
+                    },
+                    deleted: false,
+                    manual: true,
+                    value: 60,
+                    createdSeq: 1,
+                },
+            ],
+        };
+        const view = composeParamBlockView("root", [clip], edits, 5);
+        const block = view.blocks.find((item) => item.userBlockId === "multi-member");
+        if (block === undefined) throw new Error("multi-member run missing");
+        const resized = planResizeProjectedBlock([clip], edits, block, "right", 120, 5);
+        const result = resized.edits.blocks.find((item) => item.id === "multi-member");
+        if (result?.geometry.kind !== "take") throw new Error("expected take");
+        expect(result.geometry.members[0]?.sourceEndSec).toBeCloseTo(0.2, 6);
+        expect(result.geometry.members[1]?.sourceEndSec).toBeCloseTo(0.6, 6);
+    });
+
+    it("splitting a base-derived block partitions its baseCover so deleting one half restores the base", () => {
+        const base = composeParamBlockView(
+            "root",
+            [clip],
+            { schemaVersion: 2, revision: 0, blocks: [] },
+            5,
+        );
+        const ensured = ensureEditableUserBlock(
+            [clip],
+            { schemaVersion: 2, revision: 0, blocks: [] },
+            base.blocks[0]!,
+            5,
+        );
+        const userView = composeParamBlockView("root", [clip], ensured.edits, 5).blocks.find(
+            (block) => block.userBlockId === ensured.user.id,
+        );
+        if (userView === undefined) throw new Error("materialized block missing");
+        const split = planSplitProjectedBlock([clip], ensured.edits, userView, 50, 5);
+        const right = split.viewAfter.blocks.find((block) => block.id === split.rightBlockId);
+        if (right === undefined) throw new Error("right split missing");
+        const deleted = deleteProjectedBlocks([clip], split.edits, [right], 5);
+        const after = composeParamBlockView("root", [clip], deleted.edits, 5);
+        expect(
+            after.blocks.some(
+                (block) =>
+                    block.kind === "base" &&
+                    block.startFrame === 50 &&
+                    block.endFrameExclusive === 100,
+            ),
+        ).toBe(true);
+    });
+
     it("resizes only the grabbed run of a multi-run block", () => {
         const edits = {
             schemaVersion: 2 as const,

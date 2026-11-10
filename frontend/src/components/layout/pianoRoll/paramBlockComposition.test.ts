@@ -136,6 +136,73 @@ describe("paramBlockComposition", () => {
         ]);
         expect(view.blocks.every((block) => block.userBlockId === "root-group")).toBe(true);
     });
+    it("layoutKey changes when the active take changes", () => {
+        const take = (id: string) => ({
+            id,
+            sourceStartSec: 0,
+            sourceEndSec: 2,
+            playbackRate: 1,
+            reversed: false,
+            loopEnabled: false,
+        });
+        const base = composeParamBlockView(
+            "root",
+            [{ ...clip, activeTakeId: "a", takes: [take("a"), take("b")] }],
+            { schemaVersion: 2, revision: 0, blocks: [] },
+            5,
+        );
+        const switched = composeParamBlockView(
+            "root",
+            [{ ...clip, activeTakeId: "b", takes: [take("a"), take("b")] }],
+            { schemaVersion: 2, revision: 0, blocks: [] },
+            5,
+        );
+        expect(base.layoutKey).not.toBe(switched.layoutKey);
+    });
+
+    it("keeps cycle>0 members when a loop span crosses the anchor", () => {
+        const loopClip: ParamBlockSourceClip = {
+            id: "loop",
+            trackId: "root",
+            startSec: 0,
+            lengthSec: 2,
+            sourceStartSec: 0.2,
+            sourceEndSec: 0.8,
+            playbackRate: 1,
+            reversed: false,
+            loopEnabled: true,
+            loopPeriodSec: 0.6,
+        };
+        const edits: ParamBlockEditSet = {
+            schemaVersion: 2,
+            revision: 1,
+            blocks: [
+                {
+                    id: "cross-anchor",
+                    geometry: {
+                        kind: "take",
+                        members: [
+                            {
+                                clipId: "loop",
+                                takeId: "loop_take_1",
+                                cycle: 0,
+                                sourceStartSec: 0.1,
+                                sourceEndSec: 0.3,
+                                label: "manual",
+                            },
+                        ],
+                    },
+                    createdSeq: 1,
+                },
+            ],
+        };
+        const view = composeParamBlockView("root", [loopClip], edits, 5);
+        const user = view.blocks.filter((block) => block.userBlockId === "cross-anchor");
+        expect(user).toHaveLength(1);
+        expect(user[0]?.members.map((member) => member.cycle)).toEqual([0, 1]);
+        expect(view.orphanCount).toBe(0);
+    });
+
     it("moves a merged block when the Take source window slips", () => {
         const slipped = { ...clip, startSec: 1, sourceStartSec: 0.5, sourceEndSec: 2.5 };
         const edits = mergedEdits();

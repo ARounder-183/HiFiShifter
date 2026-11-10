@@ -197,7 +197,7 @@ impl UserParamBlock {
 
     /// 所有 child 的 value 完全一致时才返回该值。
     pub fn group_common_value(&self) -> Option<f64> {
-        let children = self.children()?;
+        let children = self.flatten_children();
         let first = children.first()?.value?;
         children
             .iter()

@@ -4,7 +4,7 @@
 
 ## 三层模型
 
-~~~text
+```text
 Take 源域                          Clip 编排                       Track 参数线
 ────────────────────────────      ──────────────────────         ─────────────────────────
 syllable / phoneme spans           start / length                 pitch_edit / tension_edit
@@ -13,7 +13,7 @@ game baseline                      playback_rate / reverse        参数块编�
 （块的身份与真值）                 loop / cycle                   （跨 Clip 的用户意图）
                                     │
                                     └──────── 投影 ────────────────> ParamBlockView（绝对帧，派生）
-~~~
+```
 
 四条不变量：
 
@@ -28,7 +28,7 @@ game baseline                      playback_rate / reverse        参数块编�
 - `TakeSpan { clipId, takeId, cycle, sourceStartSec, sourceEndSec, syllableId?, label }`：源域区间，绝不存工程秒。
 - `RootSpan { startSec, endSec }`：没有 Take 来源的自由块。
 - `UserParamBlock { id, geometry, deleted?, manual?, value?, transitionOutSec?, createdSeq, baseCover? }`：声明式用户块。
-- `BlockGeometry::Group { children }`：**一等公民组容器**。children 是组唯一的几何真值；组自身不保存合并成员，也没有历史快照。子块必须是普通 Take/Root 块（禁止嵌套），数量 ≥ 2。
+- `BlockGeometry::Group { children }`：**一等公民组容器**。children 是组唯一的几何真值；组自身不保存合并成员，也没有历史快照。子块可以是 Take/Root 块或嵌套组，最多 8 层；同一组内不得混用 root 与 take 叶子。
 - `BaseCover { spans, full }`：从基块派生时记录“我替代了哪一段基块”。普通手工块没有；`full=true` 命中完整基块时隐藏整段，`full=false` 只覆盖精确投影区间。
 - `ParamBlockEditSet { schemaVersion: 2, revision, blocks }`：一个 root 参数线的唯一编辑权威。加载时把 v1 的 `groupedFrom` 快照一次性转成 `Group { children }`，转换后不再保留旧字段。
 - `ProjectedMember`：除源域区间外，还携带 `frameSourceStartSec/frameSourceEndSec`（有方向的局部仿射映射）与 `visibleSourceStartSec/visibleSourceEndSec`（可见源域范围）。
@@ -46,11 +46,11 @@ game baseline                      playback_rate / reverse        参数块编�
 ## 编辑语义
 
 - **基块是衬底**：base 始终参与合成，用户块/墓碑只覆盖它实际投影到的帧区间；不再“任一用户成员重叠即整段删除基块”。
-- 编组：选中块成为 `Group` 的 children（已存在的组会被拍平，禁止嵌套）；组只保存容器，compose 时递归收集子块成员。
-- 组的结构编辑：切分 / 伸缩递归作用于子块。切点在某个子块内部时只切那个子块，其余子块按投影顺序分到两侧；某侧只剩一个子块时该侧退化为普通块（组自然消失）。组本身不复制 `baseCover`。
-- 切分：以 `block.members` 的**工程投影顺序**为准。切点在成员内部时只切该成员；切点在成员边界/缝隙时按投影顺序分组，不产生 1 帧碎片；两侧至少各 1 帧，否则拒绝。
+- 编组：选中块成为 `Group` 的 children；组只保存容器，compose 时递归收集全部叶子成员。嵌套组允许最多 8 层，但同一组内不得混用 root 与 take 叶子。
+- 组的结构编辑：分割 / 伸缩递归作用于子块。切点在某个子块内部时只分割那个子块，其余子块按投影顺序分到两侧；某侧只剩一个子块时该侧退化为普通块（组自然消失）。组本身不复制 `baseCover`。
+- 分割：以 `block.members` 的**工程投影顺序**为准。切点在成员内部时只切该成员；切点在成员边界/缝隙时按投影顺序分组，不产生 1 帧碎片；两侧至少各 1 帧，否则拒绝。
 - 边缘伸缩：重写投影顺序的成员列表；缩短时删除被跨过的成员并把落点成员裁到目标；倒放时右边缘改 `sourceStart`、左边缘改 `sourceEnd`；邻居被 `place_user_block` 按源域裁剪。
-- 删除：基块派生块生成携带同一 `baseCover` 的墓碑；**纯手工块不生成墓碑**，删除后基块自然回来。旧版无 `baseCover` 的墓碑仍按成员投影区间抑制基块。删除组时，除组本身外还要为组内 base 派生 child 生成 `childTombstones`，恢复时按 id 精确移除后再放回整组。
+- 删除：`full=true` 的基块派生块生成携带同一 `baseCover` 的墓碑；**纯手工块不生成墓碑**，删除后基块自然回来。`full=false` 的分割半块删除后直接移除所有权，让被删半段的基块恢复。旧版无 `baseCover` 的墓碑仍按成员投影区间抑制基块。删除组时，除组本身外还要递归为组内 base 派生叶子生成 `childTombstones`，恢复时按 id 精确移除后再放回整组。
 - 手动画块：工程区间经 `sourceAtProjectedFrame` 映射为 `TakeSpan`；没有 Take 交集时才用 `RootSpan`。
 - 还原 GAME：只生成与目标帧范围相交的 baseline 源域片段，并裁剪相交用户块，不再“相交就删整块”。入口接受**多段**范围（`restore_game_block_ranges`），每段独立还原，段间保持原样。
 - 新建块：调用方传入的 `blockId` 必须成为实际 `UserParamBlock.id`，预览 / 选择 / 交接共用同一个 id。
@@ -59,11 +59,14 @@ game baseline                      playback_rate / reverse        参数块编�
 
 - 块选择没有独立状态：选区（selectionRef / selectionUi）是唯一真值，块高亮由「完整覆盖」派生。一个逻辑块的全部可见 run 都被选区覆盖，它才进入 selectedParamBlockIds。
 - 逻辑块身份是 userBlockId ?? id。多 run 用户块在点击、Ctrl 切换、Shift 范围、拖动、删除、编组、取消编组、归一化、恢复与菜单计数中都是一个单位；只有绘制 / 命中 / 过渡手柄看单个 run。
-- Ctrl / Cmd + 点击块：切换该逻辑块的成员资格。Shift + 点击块：从锚点到目标块按整块范围选择；Ctrl + Shift 退化为普通单选。Alt 不参与选择。
-- 点击与拖动以 3px 死区区分。Shift 点击延迟到 pointerup 才应用范围选择，因此 Shift + 拖动仍然是临时反转吸附的块拖动。Ctrl 点击移除块后不会启动拖动。
+- Ctrl / Cmd + 点击块：切换该逻辑块的成员资格。Shift + 点击块：从锚点到目标块按整块范围选择；Ctrl + Shift 退化为普通单选。Alt + 点击块：在点击位置分割（默认绑定，可在快捷键设置修改）；Ctrl+Alt 在块上回退为 Ctrl 选择。
+- 点击与拖动以二维 3px 死区区分。Shift 点击延迟到 pointerup 才应用范围选择，因此 Shift + 拖动仍然是临时反转吸附的块拖动。Ctrl 点击移除块后不会启动拖动。Alt 点击分割在水平或纵向拖动越过死区后自动取消，进入普通块拖动。
 - 块选择动作同时写入参数编辑器选区；切换工具不清空选区，块高亮只在块工具显示。块工具内的背景拖动会把碰到的逻辑块扩展为全部 run，保证高亮与 Delete / Group 的作用域一致。
-- 锚点只服务 Shift：普通点击、Ctrl 点击、Shift 点击都会更新锚点；背景拖动结束落在起点块；清空 / 根切换清空。
+- 锚点只服务 Shift：普通点击、Ctrl 点击、Shift 点击都会更新锚点；背景拖动结束落在起点块；右键空白拖动追加后按「原锚点 → 选区首块 → 播放头块」回退；清空 / 根切换清空。
 - 组伸缩与删除递归保留 baseCover：组的基块所有权等于全部叶子 child 的 baseCover 并集；被缩掉 / 丢弃的 base 派生 child 生成墓碑，避免基块复活。组 resize 保持组 id；根块组按 child 生成多个 run，不填满空隙。
+- 右键块体拖动 = 幅度调整：复用选择工具的 `createSelectionAmplifier` / `transformSelectionByRightDrag`，上拖放大、下拖平滑，百分比浮窗与选择工具同源；右键块体单击 = 块菜单。右键空白拖动 = 追加参数选区；右键空白单击 = 块菜单。
+- 新建块：`modifier.paramBlockCreate`（默认 Alt）在空白拖动 = 普通新建并平移原曲线；`modifier.paramBlockCreateFlat`（默认 Ctrl+Alt）在空白拖动 = 新建并把当前参数线拉平。pitch 拉平保留 0 未浊哨兵，非 pitch 全部填平。普通 Alt 不再隐式拉平。
+- 分割：除播放头分割外，`modifier.paramBlockSplitAtClick`（默认 Alt）支持左键点击块内位置分割；点击与拖动以 3px 死区区分，拖动超过死区回到普通块拖动。Ctrl+Alt 在块上按 Ctrl 选择处理，不创建、不分割。
 
 ## 持久化与版本
 

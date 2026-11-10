@@ -16,8 +16,10 @@ import {
 } from "./paramBlockProjection";
 import { composeParamBlockView } from "./paramBlockComposition";
 import {
+    flattenGroupChildren,
     logicalBlockId,
     takeSpanKey,
+    type BaseCover,
     type BlockGeometry,
     type ParamBlockEditSet,
     type ProjectedMember,
@@ -745,7 +747,6 @@ function splitRootPlan(
         value: user.value,
         transitionOutSec: 0,
         createdSeq: nextSeq(working),
-        ...(user.baseCover === undefined ? {} : { baseCover: user.baseCover }),
     };
     const right: UserParamBlock = {
         id: `split:${user.id}:${frame}:right`,
@@ -755,7 +756,6 @@ function splitRootPlan(
         value: user.value,
         ...(user.transitionOutSec === undefined ? {} : { transitionOutSec: user.transitionOutSec }),
         createdSeq: nextSeq(working) + 1,
-        ...(user.baseCover === undefined ? {} : { baseCover: user.baseCover }),
     };
     const edits = replaceBlock(working, user.id, [left, right]);
     const viewAfter = planView(clips, edits, framePeriodMs);
@@ -848,6 +848,86 @@ function memberProjectionOfRun(
     );
 }
 
+/**
+ * 把 baseCover 按分割帧拆成左右两份。
+ *
+ * baseCover 是源域所有权，不是可见几何；分割块时必须把“我替代了哪段基块”
+ * 也一分为二。跨切点的 span 两侧都降为 full:false：full:true 的语义是
+ * “整个基块都被替代”，一旦分成两半就不再成立。
+ */
+export function splitBaseCoverAtFrame(
+    clips: readonly ParamBlockSourceClip[],
+    cover: BaseCover | undefined,
+    frame: number,
+    framePeriodMs: number,
+): { readonly left?: BaseCover; readonly right?: BaseCover } {
+    if (cover === undefined) return {};
+    const leftSpans: TakeSpan[] = [];
+    const rightSpans: TakeSpan[] = [];
+    let leftFull = cover.full;
+    let rightFull = cover.full;
+    for (const span of cover.spans) {
+        const clip = clips.find((item) => item.id === span.clipId);
+        if (clip === undefined) {
+            leftSpans.push({ ...span });
+            rightSpans.push({ ...span });
+            leftFull = false;
+            rightFull = false;
+            continue;
+        }
+        const projection = projectionForClip(clip);
+        const intervals = projectTakeSpan(projection, span, framePeriodMs);
+        let crossing: { startFrame: number; endFrameExclusive: number; cycle: number } | null =
+            null;
+        let side: "left" | "right" | "both" | null = null;
+        for (const interval of intervals) {
+            if (interval.startFrame < frame && frame < interval.endFrameExclusive) {
+                crossing = interval;
+                break;
+            }
+            if (interval.endFrameExclusive <= frame) side = side === "right" ? "both" : "left";
+            else if (interval.startFrame >= frame) side = side === "left" ? "both" : "right";
+        }
+        if (crossing !== null) {
+            const a = sourceAtProjectedFrame(
+                projection,
+                crossing.startFrame,
+                crossing.cycle,
+                framePeriodMs,
+            );
+            const b = sourceAtProjectedFrame(
+                projection,
+                crossing.endFrameExclusive,
+                crossing.cycle,
+                framePeriodMs,
+            );
+            const cut = sourceAtProjectedFrame(projection, frame, crossing.cycle, framePeriodMs);
+            if (a !== null && b !== null && cut !== null) {
+                const lo = Math.min(a, b);
+                const hi = Math.max(a, b);
+                const cutClamped = Math.max(lo, Math.min(hi, cut));
+                leftSpans.push({ ...span, sourceStartSec: lo, sourceEndSec: cutClamped });
+                rightSpans.push({ ...span, sourceStartSec: cutClamped, sourceEndSec: hi });
+                leftFull = false;
+                rightFull = false;
+                continue;
+            }
+        }
+        if (side === "left") leftSpans.push({ ...span });
+        else if (side === "right") rightSpans.push({ ...span });
+        else {
+            leftSpans.push({ ...span });
+            rightSpans.push({ ...span });
+            leftFull = false;
+            rightFull = false;
+        }
+    }
+    return {
+        ...(leftSpans.length === 0 ? {} : { left: { spans: leftSpans, full: leftFull } }),
+        ...(rightSpans.length === 0 ? {} : { right: { spans: rightSpans, full: rightFull } }),
+    };
+}
+
 export function splitLogicalUserBlock(
     clips: readonly ParamBlockSourceClip[],
     edits: ParamBlockEditSet,
@@ -909,6 +989,7 @@ export function splitLogicalUserBlock(
             throw new ParamBlockPlanError("split_at_block_edge");
         }
     }
+    const splitCover = splitBaseCoverAtFrame(clips, parent.baseCover, frame, framePeriodMs);
     const left: UserParamBlock = {
         id: "split:" + parent.id + ":" + frame + ":left",
         geometry: { kind: "take", members: leftMembers },
@@ -917,7 +998,7 @@ export function splitLogicalUserBlock(
         value: parent.value,
         transitionOutSec: 0,
         createdSeq: nextSeq(edits),
-        ...(parent.baseCover === undefined ? {} : { baseCover: parent.baseCover }),
+        ...(splitCover.left === undefined ? {} : { baseCover: splitCover.left }),
     };
     const right: UserParamBlock = {
         id: "split:" + parent.id + ":" + frame + ":right",
@@ -929,7 +1010,7 @@ export function splitLogicalUserBlock(
             ? {}
             : { transitionOutSec: parent.transitionOutSec }),
         createdSeq: nextSeq(edits) + 1,
-        ...(parent.baseCover === undefined ? {} : { baseCover: parent.baseCover }),
+        ...(splitCover.right === undefined ? {} : { baseCover: splitCover.right }),
     };
     const next = replaceBlock(edits, parent.id, [left, right]);
     const viewAfter = planView(clips, next, framePeriodMs);
@@ -980,16 +1061,54 @@ export function resizeLogicalUserBlock(
     );
     let nextMembers = parent.geometry.members.map((member) => ({ ...member }));
     const warnings: string[] = [];
-    const clamped = false;
+    let clamped = false;
+    /*
+     * 多 run 逻辑块的伸缩也必须遵守 Clip / Loop 周期边界与相邻块占用。
+     * 旧实现把目标帧直接交给 sourceAtMemberFrame，越过 Clip 末端时得到
+     * null 后抛 internal；用户看到的是“拖到边缘就失败”。先把目标钳到
+     * 合法边界，再走原来的成员改写。
+     */
+    const viewBefore = planView(clips, edits, framePeriodMs);
+    const neighbor = nearestOtherBlock(viewBefore, block, edge);
+    const edgeMember = edge === "right" ? run.members[run.members.length - 1] : run.members[0];
+    let effectiveTargetFrame = targetFrame;
+    if (edgeMember !== undefined) {
+        const clip = clips.find((item) => item.id === edgeMember.clipId);
+        if (clip !== undefined) {
+            const bounds = findEdgeClipBounds(
+                clip,
+                projectionForClip(clip),
+                edgeMember.cycle,
+                framePeriodMs,
+            );
+            if (edge === "right") {
+                effectiveTargetFrame = Math.min(
+                    effectiveTargetFrame,
+                    bounds.maxFrame,
+                    neighbor?.startFrame ?? Number.POSITIVE_INFINITY,
+                );
+            } else {
+                effectiveTargetFrame = Math.max(
+                    effectiveTargetFrame,
+                    bounds.minFrame,
+                    neighbor?.endFrameExclusive ?? Number.NEGATIVE_INFINITY,
+                );
+            }
+        }
+    }
+    if (effectiveTargetFrame !== targetFrame) {
+        clamped = true;
+        warnings.push("resize_clamped_to_edge");
+    }
+    const targetFrameClamped = effectiveTargetFrame;
     if (edge === "right") {
-        if (targetFrame >= run.endFrameExclusive) {
+        if (targetFrameClamped >= run.endFrameExclusive) {
             const last = run.members[run.members.length - 1];
             if (last === undefined) throw new ParamBlockPlanError("internal", "run has no members");
-            const index = nextMembers.findIndex((member) =>
-                runKeys.has(projectedMemberKey(member)),
-            );
+            const lastKey = projectedMemberKey(memberSpan(last, last.label));
+            const index = nextMembers.findIndex((member) => projectedMemberKey(member) === lastKey);
             if (index < 0) throw new ParamBlockPlanError("internal", "member not found");
-            const source = sourceAtMemberFrame(clips, last, targetFrame, framePeriodMs);
+            const source = sourceAtMemberFrame(clips, last, targetFrameClamped, framePeriodMs);
             const reversed = memberIsReversed(last, clips);
             if (reversed) {
                 if (source < nextMembers[index].sourceStartSec) {
@@ -1003,9 +1122,14 @@ export function resizeLogicalUserBlock(
                 if (!runKeys.has(projectedMemberKey(member))) return [member];
                 const projected = memberProjectionOfRun(run, member);
                 if (projected === undefined) return [member];
-                if (projected.endFrameExclusive <= targetFrame) return [member];
-                if (projected.startFrame >= targetFrame) return [];
-                const source = sourceAtMemberFrame(clips, projected, targetFrame, framePeriodMs);
+                if (projected.endFrameExclusive <= targetFrameClamped) return [member];
+                if (projected.startFrame >= targetFrameClamped) return [];
+                const source = sourceAtMemberFrame(
+                    clips,
+                    projected,
+                    targetFrameClamped,
+                    framePeriodMs,
+                );
                 const reversed = memberIsReversed(projected, clips);
                 return [
                     reversed
@@ -1014,12 +1138,12 @@ export function resizeLogicalUserBlock(
                 ];
             });
         }
-    } else if (targetFrame <= run.startFrame) {
+    } else if (targetFrameClamped <= run.startFrame) {
         const first = run.members[0];
         if (first === undefined) throw new ParamBlockPlanError("internal", "run has no members");
         const index = nextMembers.findIndex((member) => runKeys.has(projectedMemberKey(member)));
         if (index < 0) throw new ParamBlockPlanError("internal", "member not found");
-        const source = sourceAtMemberFrame(clips, first, targetFrame, framePeriodMs);
+        const source = sourceAtMemberFrame(clips, first, targetFrameClamped, framePeriodMs);
         const reversed = memberIsReversed(first, clips);
         if (reversed) {
             if (source > nextMembers[index].sourceEndSec) {
@@ -1033,9 +1157,9 @@ export function resizeLogicalUserBlock(
             if (!runKeys.has(projectedMemberKey(member))) return [member];
             const projected = memberProjectionOfRun(run, member);
             if (projected === undefined) return [member];
-            if (projected.startFrame >= targetFrame) return [member];
-            if (projected.endFrameExclusive <= targetFrame) return [];
-            const source = sourceAtMemberFrame(clips, projected, targetFrame, framePeriodMs);
+            if (projected.startFrame >= targetFrameClamped) return [member];
+            if (projected.endFrameExclusive <= targetFrameClamped) return [];
+            const source = sourceAtMemberFrame(clips, projected, targetFrameClamped, framePeriodMs);
             const reversed = memberIsReversed(projected, clips);
             return [
                 reversed
@@ -1253,6 +1377,7 @@ export function planSplitProjectedBlock(
             throw new ParamBlockPlanError("split_at_block_edge");
         }
     }
+    const splitCover = splitBaseCoverAtFrame(clips, user.baseCover, frame, framePeriodMs);
     const left: UserParamBlock = {
         id: `split:${user.id}:${frame}:left`,
         geometry: { kind: "take", members: leftMembers },
@@ -1261,7 +1386,7 @@ export function planSplitProjectedBlock(
         value: user.value,
         transitionOutSec: 0,
         createdSeq: nextSeq(working),
-        ...(user.baseCover === undefined ? {} : { baseCover: user.baseCover }),
+        ...(splitCover.left === undefined ? {} : { baseCover: splitCover.left }),
     };
     const right: UserParamBlock = {
         id: `split:${user.id}:${frame}:right`,
@@ -1271,7 +1396,7 @@ export function planSplitProjectedBlock(
         value: user.value,
         ...(user.transitionOutSec === undefined ? {} : { transitionOutSec: user.transitionOutSec }),
         createdSeq: nextSeq(working) + 1,
-        ...(user.baseCover === undefined ? {} : { baseCover: user.baseCover }),
+        ...(splitCover.right === undefined ? {} : { baseCover: splitCover.right }),
     };
     const next = replaceBlock(working, user.id, [left, right]);
     const viewAfter = planView(clips, next, framePeriodMs);
@@ -1290,6 +1415,36 @@ export function planSplitProjectedBlock(
     };
 }
 
+/**
+ * 递归收集组内所有需要保留的 base 派生叶子墓碑。
+ *
+ * 删除 / 缩短组时不能只看直接 children：嵌套组里的 base 派生 leaf 一旦
+ * 丢掉 baseCover，基块会在原位置复活。手工 leaf（manual 且无 baseCover）
+ * 不生成墓碑。
+ */
+function collectBaseDerivedTombstones(group: UserParamBlock, startSeq: number): UserParamBlock[] {
+    const tombstones: UserParamBlock[] = [];
+    let seq = startSeq;
+    for (const leaf of flattenGroupChildren(group)) {
+        if (leaf.manual === true && leaf.baseCover === undefined) continue;
+        if (leaf.baseCover?.full === false) continue;
+        if (leaf.geometry.kind !== "take") continue;
+        tombstones.push({
+            id: "tomb:" + leaf.id,
+            geometry: {
+                kind: "take",
+                members: leaf.geometry.members.map((member) => ({ ...member })),
+            },
+            deleted: true,
+            manual: false,
+            createdSeq: seq,
+            ...(leaf.baseCover === undefined ? {} : { baseCover: leaf.baseCover }),
+        });
+        seq += 1;
+    }
+    return tombstones;
+}
+
 function removeOrTombstone(
     working: ParamBlockEditSet,
     user: UserParamBlock,
@@ -1297,7 +1452,7 @@ function removeOrTombstone(
     _framePeriodMs: number,
 ): ParamBlockEditSet {
     const isManual = user.manual === true && user.baseCover === undefined;
-    if (isManual) {
+    if (isManual || user.baseCover?.full === false) {
         return {
             ...working,
             revision: working.revision + 1,
@@ -1556,20 +1711,9 @@ function resizeGroupPlan(
     const tombstones: UserParamBlock[] = [];
     let tombSeq = nextSeq(edits);
     for (const child of dropped) {
-        if (child.manual === true && child.baseCover === undefined) continue;
-        if (child.geometry.kind !== "take") continue;
-        tombstones.push({
-            id: "tomb:" + child.id,
-            geometry: {
-                kind: "take",
-                members: child.geometry.members.map((member) => ({ ...member })),
-            },
-            deleted: true,
-            manual: false,
-            createdSeq: tombSeq,
-            ...(child.baseCover === undefined ? {} : { baseCover: child.baseCover }),
-        });
-        tombSeq += 1;
+        const childTombstones = collectBaseDerivedTombstones(child, tombSeq);
+        tombstones.push(...childTombstones);
+        tombSeq += childTombstones.length;
     }
     const side = groupSideBlock(
         group,
@@ -2001,23 +2145,7 @@ export function deleteProjectedBlocks(
         removed.add(ensured.user.id);
         const childTombstones: UserParamBlock[] = [];
         if (ensured.user.geometry.kind === "group") {
-            let seq = nextSeq(working);
-            for (const child of ensured.user.geometry.children) {
-                if (child.manual === true && child.baseCover === undefined) continue;
-                if (child.geometry.kind !== "take") continue;
-                childTombstones.push({
-                    id: `tomb:${child.id}`,
-                    geometry: {
-                        kind: "take",
-                        members: child.geometry.members.map((member) => ({ ...member })),
-                    },
-                    deleted: true,
-                    manual: false,
-                    createdSeq: seq,
-                    ...(child.baseCover === undefined ? {} : { baseCover: child.baseCover }),
-                });
-                seq += 1;
-            }
+            childTombstones.push(...collectBaseDerivedTombstones(ensured.user, nextSeq(working)));
         }
         /*
          * 删除基块派生块时，墓碑必须同时拥有“它当前实际覆盖的基块片段”。
@@ -2099,6 +2227,7 @@ export function deleteProjectedBlocks(
          * 同一个 baseCover —— 删除的是“对基块的替代”，不是基块本身。
          */
         if (snapshot.block.manual === true && snapshot.block.baseCover === undefined) continue;
+        if (snapshot.block.baseCover?.full === false) continue;
         if (snapshot.block.geometry.kind !== "take") continue;
         if (working.blocks.some((candidate) => tombstoneMatchesBlock(candidate, snapshot.block))) {
             continue;

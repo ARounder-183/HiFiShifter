@@ -9,6 +9,8 @@ import type { MessageKey } from "../../../i18n/messages";
 export type ParamBlockMenuChannel = "paramBlock" | "edit";
 
 export interface ParamBlockMenuContext {
+    /** 上下文所属参数编辑器面板；菜单动作只回送到这个面板。 */
+    readonly panelId: string;
     /** 实时求值：菜单渲染时读取播放头与当前块视图，不能保存打开瞬间的快照。 */
     readonly canSplit: () => boolean;
     readonly canGroup: boolean;
@@ -99,7 +101,7 @@ export const PARAM_BLOCK_MENU_ITEMS: readonly ParamBlockMenuItem[] = [
         labelKey: "menu_copy",
         op: "copy",
         channel: "edit",
-        shortcutAction: "clip.copy",
+        shortcutAction: "pianoRoll.copy",
         separatorBefore: true,
         // copy/cut/initialize 通过 handleEditOp 支持隐式全选；菜单不应比快捷键更严。
         enabled: () => true,
@@ -109,7 +111,7 @@ export const PARAM_BLOCK_MENU_ITEMS: readonly ParamBlockMenuItem[] = [
         labelKey: "menu_cut",
         op: "cut",
         channel: "edit",
-        shortcutAction: "clip.cut",
+        shortcutAction: "pianoRoll.cut",
         enabled: () => true,
     },
     {
@@ -117,7 +119,7 @@ export const PARAM_BLOCK_MENU_ITEMS: readonly ParamBlockMenuItem[] = [
         labelKey: "menu_paste",
         op: "paste",
         channel: "edit",
-        shortcutAction: "clip.paste",
+        shortcutAction: "pianoRoll.paste",
         enabled: () => true,
     },
     {
@@ -218,7 +220,7 @@ export const PARAM_BLOCK_MENU_ITEMS: readonly ParamBlockMenuItem[] = [
         labelKey: "menu_select_all",
         op: "selectAll",
         channel: "edit",
-        shortcutAction: "edit.selectAll",
+        shortcutAction: "paramBlock.selectAll",
         separatorBefore: true,
         enabled: () => true,
     },
@@ -227,7 +229,7 @@ export const PARAM_BLOCK_MENU_ITEMS: readonly ParamBlockMenuItem[] = [
         labelKey: "menu_deselect",
         op: "deselect",
         channel: "edit",
-        shortcutAction: "edit.deselect",
+        shortcutAction: "paramBlock.deselect",
         enabled: (ctx) => ctx.hasSelection,
     },
     {

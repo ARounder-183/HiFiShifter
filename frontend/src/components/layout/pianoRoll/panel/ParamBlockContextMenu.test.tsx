@@ -26,13 +26,13 @@ afterEach(() => {
 });
 
 const labels: Record<string, string> = {
-    param_blocks_tool: "块编辑工具",
-    param_blocks_split_at_playhead: "在播放头处切开",
-    param_blocks_create_from_selection: "从选区新建块",
+    param_blocks_tool: "参数块编辑工具",
+    param_blocks_split_at_playhead: "在播放头处分割",
+    param_blocks_create_from_selection: "从选区新建参数块",
     param_blocks_group: "编组",
     param_blocks_ungroup: "取消编组",
-    param_blocks_restore_game: "还原",
-    param_blocks_restore_deleted: "恢复删除的块",
+    param_blocks_restore_game: "还原参数块",
+    param_blocks_restore_deleted: "恢复已删除的参数块",
     param_blocks_normalize_pitch: "音高归一化",
     menu_copy: "复制",
     menu_cut: "剪切",
@@ -52,12 +52,13 @@ const labels: Record<string, string> = {
     menu_convert_dyn_to_volume: "转换为音量",
     menu_select_all: "全选",
     menu_deselect: "取消选择",
-    param_blocks_delete: "删除",
+    param_blocks_delete: "删除参数块",
 };
 
 const tf = (key: string): string => labels[key] ?? key;
 
 const context: ParamBlockMenuContext = {
+    panelId: "param-editor",
     canSplit: () => true,
     canGroup: true,
     canUngroup: false,
@@ -91,8 +92,8 @@ test("块菜单同时包含块动作与参数动作", async () => {
         root.render(<ParamBlockContextMenu {...baseProps} />);
     });
     const text = items().map((item) => item.textContent?.trim());
-    expect(text).toContain("在播放头处切开");
-    expect(text).toContain("从选区新建块");
+    expect(text).toContain("在播放头处分割");
+    expect(text).toContain("从选区新建参数块");
     expect(text).toContain("初始化");
     expect(text).toContain("平滑化...");
     expect(text).toContain("导出为 MIDI");
@@ -120,7 +121,7 @@ test("参数项按参数类型与选区禁用，而不是消失", async () => {
     expect(byLabel("初始化")?.disabled).toBe(false);
     expect(byLabel("粘贴")?.disabled).toBe(false);
     expect(byLabel("全选")?.disabled).toBe(false);
-    expect(byLabel("在播放头处切开")?.disabled).toBe(true);
+    expect(byLabel("在播放头处分割")?.disabled).toBe(true);
 });
 
 test("块动作经统一 action 通道执行", async () => {
@@ -150,7 +151,7 @@ test("删除项是破坏性项，并单独成段放在最后", async () => {
         root.render(<ParamBlockContextMenu {...baseProps} />);
     });
     const last = items().at(-1);
-    expect(last?.textContent?.trim()).toBe("删除");
+    expect(last?.textContent?.trim()).toBe("删除参数块");
     expect(last?.getAttribute("data-danger")).toBe("1");
     expect(document.querySelectorAll(".hs-menu__separator").length).toBeGreaterThanOrEqual(2);
 });
