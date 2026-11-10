@@ -6,12 +6,22 @@
  * 提交后的等待阶段另有硬超时，避免撤销后交接条件永远不成立而把旧块锁在屏幕上。
  */
 import type { PianoRollParamBlockSpec } from "./kernel/host/pianoRollKernelData";
+import type { ParamViewSegment } from "./types";
+import { reportParamBlockDiagnostic } from "./paramBlockDiagnostics";
 
 export interface ParamBlockEpoch {
     readonly rootTrackId: string | null;
     readonly layoutKey: string | null;
     readonly editRevision: number;
-    readonly historyKey: string;
+    /**
+     * Only explicit history jumps (undo / redo / jump / project switch) change
+     * this token. A block commit also advances the backend history depth, but
+     * that must not be mistaken for an external jump while the gesture hands
+     * its visual state over to the authoritative view.
+     */
+    readonly externalHistoryToken: string;
+    /** Monotonic token for commits produced by this panel. */
+    readonly commitToken: string;
     readonly framePeriodMs: number;
 }
 
@@ -39,17 +49,32 @@ export function sameParamBlockEpoch(a: ParamBlockEpoch, b: ParamBlockEpoch): boo
         a.rootTrackId === b.rootTrackId &&
         a.layoutKey === b.layoutKey &&
         a.editRevision === b.editRevision &&
-        a.historyKey === b.historyKey &&
+        a.externalHistoryToken === b.externalHistoryToken &&
+        a.commitToken === b.commitToken &&
         Math.abs(a.framePeriodMs - b.framePeriodMs) < 1e-9
     );
 }
 
-/** 拖拽期间允许本地 logicalCenters 提交改变 editRevision，但不能跨 Clip/历史/根切换。 */
+/**
+ * Drag visuals survive their own commit changing editRevision / commitToken,
+ * but not an external history jump, root switch, clip layout change, or frame
+ * period change.
+ */
 export function sameParamBlockEpochLayout(a: ParamBlockEpoch, b: ParamBlockEpoch): boolean {
     return (
         a.rootTrackId === b.rootTrackId &&
         a.layoutKey === b.layoutKey &&
-        a.historyKey === b.historyKey &&
+        a.externalHistoryToken === b.externalHistoryToken &&
+        Math.abs(a.framePeriodMs - b.framePeriodMs) < 1e-9
+    );
+}
+
+/** Cancellation predicate for an in-flight drag commit: only external changes matter. */
+export function sameParamBlockExternalEpoch(a: ParamBlockEpoch, b: ParamBlockEpoch): boolean {
+    return (
+        a.rootTrackId === b.rootTrackId &&
+        a.layoutKey === b.layoutKey &&
+        a.externalHistoryToken === b.externalHistoryToken &&
         Math.abs(a.framePeriodMs - b.framePeriodMs) < 1e-9
     );
 }
@@ -58,7 +83,9 @@ export function shouldUseParamBlockVisualTransaction(
     tx: ParamBlockVisualTransaction | null,
     currentEpoch: ParamBlockEpoch,
 ): boolean {
-    return tx !== null && tx.phase !== "released" && sameParamBlockEpoch(tx.epoch, currentEpoch);
+    return (
+        tx !== null && tx.phase !== "released" && sameParamBlockEpochLayout(tx.epoch, currentEpoch)
+    );
 }
 
 function finiteCenter(value: number | null | undefined): number | null {
@@ -108,7 +135,9 @@ export function advanceParamBlockVisualTransaction(args: {
 }): "keep" | "release" | "expire" {
     const { tx } = args;
     if (tx.phase === "released") return "release";
-    if (!sameParamBlockEpoch(tx.epoch, args.currentEpoch)) return "release";
+    // A visual transaction must survive its own commit changing editRevision /
+    // commitToken; only an external history or layout change releases it.
+    if (!sameParamBlockEpochLayout(tx.epoch, args.currentEpoch)) return "release";
     if (tx.phase === "gesture") return "keep";
     const timeoutMs = args.timeoutMs ?? 1200;
     if (args.now - tx.startedAt > timeoutMs) return "expire";
@@ -118,4 +147,41 @@ export function advanceParamBlockVisualTransaction(args: {
     const authorityAdvanced = args.authorityRevision > args.authorityRevisionAtStart;
     if (matches && authorityAdvanced && args.committedSegmentsPresent) return "release";
     return "keep";
+}
+
+export interface ParamBlockDragVisualRefs {
+    readonly snapshotRef: { current: unknown | null };
+    readonly commitRef: { current: unknown | null };
+    readonly interactionCurveRef: { current: ParamViewSegment | null };
+    readonly activeGestureTokenRef: { current: number | null };
+}
+
+/**
+ * The one exit door for drag visuals. Every path that clears a snapshot or a
+ * commit must go through here so a stale interaction curve can never outlive
+ * its gesture and shadow later authoritative paramView updates.
+ */
+export function releaseParamBlockDragVisuals(args: {
+    readonly refs: ParamBlockDragVisualRefs;
+    readonly paramView: ParamViewSegment | null;
+    readonly resetLiveEditPreview: (pv: ParamViewSegment) => void;
+    readonly invalidate: () => void;
+    readonly bumpStructure: () => void;
+    readonly reason: "committed" | "cancelled" | "epoch" | "timeout" | "error" | "stale";
+}): void {
+    args.refs.snapshotRef.current = null;
+    args.refs.commitRef.current = null;
+    args.refs.interactionCurveRef.current = null;
+    args.refs.activeGestureTokenRef.current = null;
+    if (args.paramView !== null) args.resetLiveEditPreview(args.paramView);
+    args.bumpStructure();
+    args.invalidate();
+    reportParamBlockDiagnostic({
+        code: "drag_visual_released",
+        gesture: "drag",
+        rootTrackId: null,
+        blockId: null,
+        frame: null,
+        detail: args.reason,
+    });
 }

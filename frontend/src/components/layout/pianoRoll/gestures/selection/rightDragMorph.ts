@@ -9,6 +9,7 @@ import {
     fetchFullResCurve,
     readPvRange,
     uploadFullResCurveSegments,
+    type FullResWriteSegment,
 } from "../../selectionEditData";
 import {
     createSelectionAmplifier,
@@ -21,7 +22,7 @@ import type { ParamViewSegment } from "../../types";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import type { ParamSelection } from "../../paramSelection";
 import type { PointerDeps } from "../pointerDeps";
-import type { EdgeScrollDriver } from "../../kernel/edgeScrollDriver";
+import { trackParamBlockCommit } from "../../paramBlockCommitCoordinator";
 
 /** `handleParamLineDrag` 作用域里的局部量。 */
 type ParamLineLocals = {
@@ -58,7 +59,11 @@ type Deps = Pick<
     | "setCanvasCursor"
     | "setParamView"
 > & {
-    readonly edgeScroll?: EdgeScrollDriver;
+    /**
+     * Optional atomic commit used by the block tool: curve patches and the
+     * cleared pitch-block values go to the backend in one history step.
+     */
+    readonly commitAmplitude?: (segments: readonly FullResWriteSegment[]) => Promise<void>;
 } & ParamLineLocals;
 
 /**
@@ -97,7 +102,7 @@ export function handleRightDragMorph(deps: Deps, e: ReactPointerEvent<HTMLCanvas
         setActivePointerGestureEnd,
         setCanvasCursor,
         setParamView,
-        edgeScroll,
+        commitAmplitude,
     } = deps;
 
     e.preventDefault();
@@ -214,20 +219,6 @@ export function handleRightDragMorph(deps: Deps, e: ReactPointerEvent<HTMLCanvas
             return;
         }
         const adjusted = getFineAdjustedPointerPosition(finePointerState, ev);
-        edgeScroll?.track(ev.clientX, ev.clientY, (clientX, clientY) => {
-            window.dispatchEvent(
-                new PointerEvent("pointermove", {
-                    ...ev,
-                    clientX,
-                    clientY,
-                    pointerId: ev.pointerId,
-                    pointerType: ev.pointerType,
-                    isPrimary: ev.isPrimary,
-                    buttons: 2,
-                    button: -1,
-                }),
-            );
-        });
         const dy = startClientY - adjusted.clientY;
         if (Math.abs(dy) >= 2) {
             didDrag = true;
@@ -285,7 +276,6 @@ export function handleRightDragMorph(deps: Deps, e: ReactPointerEvent<HTMLCanvas
     };
 
     const onEnd = async (reason: "up" | "cancel", ev: globalThis.PointerEvent | null) => {
-        edgeScroll?.stop();
         disposeFineAdjustedPointerState(finePointerState);
         // 取消路径没有可信的指针位置，因此不打开菜单；其余收尾两种原因相同。
         const allowContextMenu = reason === "up";
@@ -386,11 +376,20 @@ export function handleRightDragMorph(deps: Deps, e: ReactPointerEvent<HTMLCanvas
             // 上传失败同样复位 liveEdit（finally），不让覆盖层冻结。
             void (async () => {
                 try {
-                    await uploadFullResCurveSegments({
-                        trackId: rootTrackId,
-                        param: editParam,
-                        segments: buildUploadSegments(editParam, pieces, commit.sentinelAt),
-                    });
+                    const segments = buildUploadSegments(editParam, pieces, commit.sentinelAt);
+                    if (commitAmplitude !== undefined) {
+                        await commitAmplitude(segments);
+                    } else {
+                        await trackParamBlockCommit(
+                            "amplitude",
+                            rootTrackId,
+                            uploadFullResCurveSegments({
+                                trackId: rootTrackId,
+                                param: editParam,
+                                segments,
+                            }),
+                        );
+                    }
                 } catch (err) {
                     console.error("[pianoRoll] right-drag upload failed", err);
                 } finally {

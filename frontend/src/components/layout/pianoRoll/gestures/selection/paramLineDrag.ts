@@ -28,6 +28,7 @@ type Deps = Pick<
     | "disposeFineAdjustedPointerState"
     | "dragDirection"
     | "edgeHalfSpanForIndices"
+    | "edgeScroll"
     | "editParam"
     | "ensureLiveEditBase"
     | "fetchCommitBaseSource"
@@ -42,6 +43,7 @@ type Deps = Pick<
     | "onParamCommitSucceeded"
     | "onParamValuePreviewChange"
     | "onPitchSnapGestureActiveChange"
+    | "onPitchSnapGuide"
     | "paramValuePopupEnabled"
     | "paramViewRef"
     | "pitchSnapUnit"
@@ -82,6 +84,7 @@ export function handleParamLineDrag(deps: Deps, e: ReactPointerEvent<HTMLCanvasE
         disposeFineAdjustedPointerState,
         dragDirection,
         edgeHalfSpanForIndices,
+        edgeScroll,
         editParam,
         ensureLiveEditBase,
         fetchCommitBaseSource,
@@ -96,6 +99,7 @@ export function handleParamLineDrag(deps: Deps, e: ReactPointerEvent<HTMLCanvasE
         onParamCommitSucceeded,
         onParamValuePreviewChange,
         onPitchSnapGestureActiveChange,
+        onPitchSnapGuide,
         paramValuePopupEnabled,
         paramViewRef,
         pitchSnapUnit,
@@ -161,6 +165,7 @@ export function handleParamLineDrag(deps: Deps, e: ReactPointerEvent<HTMLCanvasE
                         disposeFineAdjustedPointerState,
                         dragDirection,
                         edgeHalfSpanForIndices,
+                        edgeScroll,
                         editParam,
                         ensureLiveEditBase,
                         fetchCommitBaseSource,
@@ -177,6 +182,7 @@ export function handleParamLineDrag(deps: Deps, e: ReactPointerEvent<HTMLCanvasE
                         onParamCommitSucceeded,
                         onParamValuePreviewChange,
                         onPitchSnapGestureActiveChange,
+                        onPitchSnapGuide,
                         paramValuePopupEnabled,
                         paramViewRef,
                         pitchSnapUnit,

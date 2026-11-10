@@ -821,6 +821,7 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
                     publishSingleTargetSnapHighlight({
                         group: SNAP_HIGHLIGHT_GROUP,
                         result,
+                        surface: "all",
                     });
                 } else {
                     clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);

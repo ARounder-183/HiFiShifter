@@ -15,11 +15,12 @@ import {
     type ParamBlockMember,
     type ParamBlockState,
 } from "./paramBlocks";
-import { buildParamBlockFrameCenters } from "./paramBlockFrame";
+import { resolveParamBlockDragCenters } from "./paramBlockDragCenters";
 import { ownsParamBlockGesture, type ParamAuthorityWatermark } from "./paramBlockTransaction";
-import { sameParamBlockEpoch, type ParamBlockEpoch } from "./paramBlockVisualTransaction";
+import { sameParamBlockExternalEpoch, type ParamBlockEpoch } from "./paramBlockVisualTransaction";
 import type { EdgeScrollDriver } from "./kernel/edgeScrollDriver";
-import { logicalBlockId } from "./paramBlockTypes";
+import { blockMatchesLogicalId, logicalBlockId } from "./paramBlockTypes";
+import { trackParamBlockCommit } from "./paramBlockCommitCoordinator";
 
 type Ref<T> = { current: T };
 type LiveEditing = ReturnType<typeof useLiveParamEditing>;
@@ -38,12 +39,18 @@ export type ParamBlockDragSnapshot = {
     readonly members: readonly ParamBlockMember[];
     readonly blocks: readonly {
         readonly id: string;
+        readonly userBlockId?: string;
         readonly startSec: number;
         readonly endSec: number;
         readonly anchorValue: number | null;
         readonly grouped: boolean;
     }[];
-    centerValues: ReadonlyMap<string, number>;
+    /** Per-run preview centers for this frame. */
+    frameCenters: ReadonlyMap<string, number>;
+    /** Per-logical-block preview centers, shared by every run. */
+    logicalCenters: ReadonlyMap<string, number>;
+    /** Immutable start center per logical block. */
+    readonly logicalStartValues: ReadonlyMap<string, number>;
     readonly baseValues: readonly number[];
     readonly startFrame: number;
     readonly stride: number;
@@ -60,6 +67,8 @@ export type ParamBlockDragCommit = {
     readonly stride: number;
     /** 手势开始时已经落地的后端参数 revision。 */
     readonly authorityRevisionAtStart: number;
+    /** External history token at gesture start; a jump cancels the commit. */
+    readonly externalHistoryTokenAtStart: string;
     /** 写入成功时已发出的最大请求序号，排除写入前及写入中的陈旧响应。 */
     authorityRequestSeqAtCommit: number;
     /** 后端提交的逐帧值；权威窗口必须实际包含这些值才能撤预览。 */
@@ -127,6 +136,10 @@ export interface ParamBlockDragContext {
     readonly snapToggleHeldAt: (event: SnapModifiers) => boolean;
     /** 当前音高吸附总开关；与 snapToggleHeldAt 做 XOR 得到本次手势的有效吸附。 */
     readonly pitchSnapEnabled: boolean;
+    /** Midpoint of the current value viewport, used only when a block has no center. */
+    readonly fallbackValue: number;
+    /** Publishes/clears the horizontal pitch snap guide while the gesture runs. */
+    readonly onPitchSnapGuide?: (targetValue: number | null) => void;
     readonly onError?: (error: unknown) => void;
     readonly resolveValueDelta: (
         startValue: number,
@@ -230,15 +243,25 @@ export function beginParamBlockDrag(
      * targetSelected=false，调用方不会启动拖动；这里仍保留这条规则，
      * 防止 Shift / 右键等路径误把未选中的块并进拖动。
      */
-    const selectionIds = new Set(args.selection.map(String));
-    const anchorLogicalId = logicalBlockId(
-        paramBlocksWithValues.find((block) => block.id === args.anchorBlockId) ?? {
-            id: args.anchorBlockId,
-        },
+    /*
+     * The selection can contain run ids or logical ids (Ctrl/Shift and the
+     * context-menu paths use both). Normalize it to logical identities before
+     * deciding which blocks participate; otherwise a run id that is not also
+     * the parent id silently drops every sibling run.
+     */
+    const selectionLogicalIds = new Set<string>();
+    for (const id of args.selection.map(String)) {
+        const matches = paramBlocksWithValues.filter((block) => blockMatchesLogicalId(block, id));
+        if (matches.length === 0) selectionLogicalIds.add(id);
+        else for (const block of matches) selectionLogicalIds.add(logicalBlockId(block));
+    }
+    const anchorBlock = paramBlocksWithValues.find((block) =>
+        blockMatchesLogicalId(block, args.anchorBlockId),
     );
+    const anchorLogicalId = logicalBlockId(anchorBlock ?? { id: args.anchorBlockId });
     const anchorInSelection =
-        selectionIds.has(anchorLogicalId) || selectionIds.has(args.anchorBlockId);
-    const dragIds = new Set<string>(anchorInSelection ? args.selection : [anchorLogicalId]);
+        selectionLogicalIds.has(anchorLogicalId) || selectionLogicalIds.has(args.anchorBlockId);
+    const dragIds = new Set<string>(anchorInSelection ? selectionLogicalIds : [anchorLogicalId]);
     dragIds.add(anchorLogicalId);
     const selectedBlocks = paramBlocksWithValues.filter((block) =>
         dragIds.has(logicalBlockId(block)),
@@ -264,39 +287,24 @@ export function beginParamBlockDrag(
      * 才恢复。拖动结束时统一清理即可。
      */
     /*
-     * 多 run 块必须共享一个逻辑中心：如果每个 run 各自取 anchorValue，
-     * 预览会按 run 分开算主簇，松手后 setParamBlockLogicalCenters 只写回
-     * 父块一个 value，其他 run 就会跳到第一个 run 的高度。
+     * Resolve one start center per logical block, then fan it out to every
+     * visible run. The old implementation only resolved the anchor group, so
+     * every other selected block had anchorValue=null and stayed still.
      */
-    const logicalAnchorValues = new Map<string, number | null>();
-    for (const block of selectedBlocks) {
-        const logicalId = logicalBlockId(block);
-        if (logicalAnchorValues.has(logicalId)) continue;
-        const group = selectedBlocks.filter((item) => logicalBlockId(item) === logicalId);
-        const anchor = group.find(
-            (item) => item.id === args.anchorBlockId || logicalBlockId(item) === args.anchorBlockId,
-        );
-        const explicit =
-            anchor !== undefined &&
-            args.anchorValue !== undefined &&
-            args.anchorValue !== null &&
-            Number.isFinite(args.anchorValue)
-                ? args.anchorValue
-                : undefined;
-        logicalAnchorValues.set(
-            logicalId,
-            explicit ??
-                (anchor === undefined ? null : args.centerValues?.get(anchor.id)) ??
-                (anchor === undefined ? null : editParam === "pitch" ? anchor.manualValue : null) ??
-                anchor?.averageValue ??
-                null,
-        );
-    }
+    const dragCenters = resolveParamBlockDragCenters({
+        selectedBlocks,
+        anchorBlockId: args.anchorBlockId,
+        anchorValue: args.anchorValue,
+        centerValues: args.centerValues,
+        param: editParam,
+        fallbackValue: context.fallbackValue,
+    });
     const dragSnapshotBlocks = selectedBlocks.map((block) => ({
         id: block.id,
+        ...(block.userBlockId === undefined ? {} : { userBlockId: block.userBlockId }),
         startSec: block.startSec,
         endSec: block.endSec,
-        anchorValue: logicalAnchorValues.get(logicalBlockId(block)) ?? null,
+        anchorValue: dragCenters.byRun.get(block.id) ?? null,
         grouped: block.kind === "grouped",
     }));
     const snapshot: ParamBlockDragSnapshot = {
@@ -306,12 +314,9 @@ export function beginParamBlockDrag(
         ids: new Set(dragIds),
         members: dragMembers.map((member) => ({ ...member })),
         blocks: dragSnapshotBlocks,
-        centerValues: buildParamBlockFrameCenters({
-            blocks: dragSnapshotBlocks,
-            valueDelta: 0,
-            param: editParam,
-            snapToSemitone: false,
-        }),
+        frameCenters: new Map(dragCenters.byRun),
+        logicalCenters: new Map(dragCenters.byLogical),
+        logicalStartValues: new Map(dragCenters.byLogical),
         baseValues: startBase,
         startFrame: pv.startFrame,
         stride: pv.stride,
@@ -353,9 +358,6 @@ export function beginParamBlockDrag(
      * y。否则“抓住块中部”会把整块先跳到指针位置，松手后的落点与
      * 按下时的块中心不一致。
      */
-    const anchorBlock = selectedBlocks.find(
-        (block) => block.id === args.anchorBlockId || logicalBlockId(block) === args.anchorBlockId,
-    );
     /*
      * 块的中心在屏幕上不一定正好位于 `averageValue` 对应的曲线上
      * （代表值来自主簇，不是逐帧值）。因此锚点必须取按下瞬间的
@@ -367,11 +369,7 @@ export function beginParamBlockDrag(
         args.anchorValue !== undefined &&
         Number.isFinite(args.anchorValue)
             ? args.anchorValue
-            : anchorBlock?.averageValue !== null &&
-                anchorBlock?.averageValue !== undefined &&
-                Number.isFinite(anchorBlock.averageValue)
-              ? anchorBlock.averageValue
-              : anchorPointerValue;
+            : (dragCenters.byLogical.get(anchorLogicalId) ?? anchorPointerValue);
     let didDrag = false;
     let lastDelta = 0;
     let lastClientY = args.clientY;
@@ -449,12 +447,50 @@ export function beginParamBlockDrag(
         };
         const dragSnapshot = paramBlockDragSnapshotRef.current;
         if (dragSnapshot !== null) {
-            dragSnapshot.centerValues = buildParamBlockFrameCenters({
-                blocks: dragSnapshot.blocks,
-                valueDelta: lastDelta,
-                param: editParam,
-                snapToSemitone: effectivePitchSnap(lastSnapToggleHeld),
-            });
+            const snapToSemitone = effectivePitchSnap(lastSnapToggleHeld);
+            const frameCenters = new Map<string, number>();
+            for (const block of dragSnapshot.blocks) {
+                const center = projectParamBlockDragDisplayValue({
+                    startValue: block.anchorValue,
+                    valueDelta: lastDelta,
+                    param: editParam,
+                    snapToSemitone,
+                });
+                if (center !== null && Number.isFinite(center)) {
+                    frameCenters.set(block.id, center);
+                }
+            }
+            const logicalCenters = new Map<string, number>();
+            for (const [logicalId, startValue] of dragSnapshot.logicalStartValues) {
+                const center = projectParamBlockDragDisplayValue({
+                    startValue,
+                    valueDelta: lastDelta,
+                    param: editParam,
+                    snapToSemitone,
+                });
+                if (center !== null && Number.isFinite(center)) {
+                    logicalCenters.set(logicalId, center);
+                }
+            }
+            dragSnapshot.frameCenters = frameCenters;
+            dragSnapshot.logicalCenters = logicalCenters;
+            const snappedTarget =
+                editParam === "pitch" && snapToSemitone
+                    ? projectParamBlockDragDisplayValue({
+                          startValue: dragAnchorValue,
+                          valueDelta: lastDelta,
+                          param: editParam,
+                          snapToSemitone: true,
+                      })
+                    : null;
+            const rawTarget = dragAnchorValue + valueDeltaAtClientY(lastClientY);
+            context.onPitchSnapGuide?.(
+                snappedTarget !== null &&
+                    Number.isFinite(snappedTarget) &&
+                    Math.abs(snappedTarget - rawTarget) > 1e-6
+                    ? snappedTarget
+                    : null,
+            );
         }
         invalidateParamBlockSpec();
         requestWaveformRepaint();
@@ -513,6 +549,7 @@ export function beginParamBlockDrag(
             rafId = null;
         }
         args.edgeScroll?.stop();
+        context.onPitchSnapGuide?.(null);
         if (reason === "up") {
             const release = resolveParamBlockDragRelease({
                 didDrag,
@@ -584,20 +621,7 @@ export function beginParamBlockDrag(
         }
         preview();
         const finalSnapshot = paramBlockDragSnapshotRef.current;
-        const logicalCenters = new Map<string, number>();
-        if (finalSnapshot !== null) {
-            for (const block of finalSnapshot.blocks) {
-                const center = projectParamBlockDragDisplayValue({
-                    startValue: block.anchorValue,
-                    valueDelta: lastDelta,
-                    param: editParam,
-                    snapToSemitone: effectivePitchSnap(lastSnapToggleHeld),
-                });
-                if (center !== null && Number.isFinite(center)) {
-                    logicalCenters.set(block.id, center);
-                }
-            }
-        }
+        const logicalCenters = new Map<string, number>(finalSnapshot?.logicalCenters ?? []);
         const commitBlocks = dragBlocks;
         const commitDelta = lastDelta;
         /*
@@ -619,6 +643,7 @@ export function beginParamBlockDrag(
             stride: pv.stride,
             authorityRevisionAtStart: paramAuthorityRevision,
             authorityRequestSeqAtCommit: getAuthorityWatermark().issuedRequestSeq,
+            externalHistoryTokenAtStart: paramBlockEpoch.externalHistoryToken,
             committed: false,
             releaseState: "waiting-for-curve",
         };
@@ -661,9 +686,9 @@ export function beginParamBlockDrag(
                     );
                     if (
                         getCurrentParamBlockEpoch !== undefined &&
-                        !sameParamBlockEpoch(commitEpoch, getCurrentParamBlockEpoch())
+                        !sameParamBlockExternalEpoch(commitEpoch, getCurrentParamBlockEpoch())
                     ) {
-                        throw new Error("Block drag commit cancelled: epoch changed");
+                        throw new Error("Block drag commit cancelled: external history changed");
                     }
                     const sourceAt = (frame: number): number => {
                         for (let index = 0; index < ranges.length; index += 1) {
@@ -712,7 +737,7 @@ export function beginParamBlockDrag(
                         paramBlockStateRef.current = commitState;
                         setParamBlockState(commitState);
                     }
-                    if (curveOwned && context.commitLineCurve) {
+                    if (context.commitLineCurve) {
                         const revision = curves[0]?.authorityRevision;
                         const geometry = curves[0]?.geometryRevision;
                         const signature = curves[0]?.geometrySignature;
@@ -805,7 +830,11 @@ export function beginParamBlockDrag(
                     }
                 }
             });
-        paramBlockCommitQueueRef.current = commitRun;
+        paramBlockCommitQueueRef.current = trackParamBlockCommit(
+            "drag",
+            rootTrackId,
+            commitRun,
+        ).then(() => undefined);
     };
     gestureHandle = startPointerGesture({
         pointerId: args.pointerId,

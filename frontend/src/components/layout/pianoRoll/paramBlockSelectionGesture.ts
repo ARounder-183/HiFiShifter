@@ -156,6 +156,8 @@ export function resolveBlockClickSelection(args: {
 export interface BlockPressPlan {
     readonly downSelection: ParamSelection | null;
     readonly downAnchor: ParamBlockSelectionAnchor | null;
+    /** Selection used if the press turns into a drag (range result included). */
+    readonly dragSelection: ParamSelection | null;
     readonly dragIds: readonly string[];
     readonly clickSelection: ParamSelection | null;
     readonly startsDrag: boolean;
@@ -194,6 +196,7 @@ export function resolveBlockPressPlan(args: {
         return {
             downSelection: args.selection,
             downAnchor: args.anchor,
+            dragSelection: args.selection,
             dragIds: [],
             clickSelection: null,
             startsDrag: false,
@@ -210,6 +213,7 @@ export function resolveBlockPressPlan(args: {
             return {
                 downSelection: args.selection,
                 downAnchor: targetAnchor,
+                dragSelection: args.selection,
                 dragIds: selectedIds,
                 clickSelection: normalizeSelection(target.runs),
                 startsDrag: true,
@@ -219,6 +223,7 @@ export function resolveBlockPressPlan(args: {
         return {
             downSelection: next,
             downAnchor: targetAnchor,
+            dragSelection: next,
             dragIds: [target.id],
             clickSelection: next,
             startsDrag: true,
@@ -234,6 +239,7 @@ export function resolveBlockPressPlan(args: {
                     anchor: null,
                     selection: click.selection,
                 }),
+                dragSelection: null,
                 dragIds: [],
                 clickSelection: null,
                 startsDrag: false,
@@ -242,17 +248,19 @@ export function resolveBlockPressPlan(args: {
         return {
             downSelection: click.selection,
             downAnchor: targetAnchor,
+            dragSelection: click.selection,
             dragIds: paramBlockIdsInSelection(args.blocks, click.selection),
             clickSelection: null,
             startsDrag: true,
         };
     }
     return {
-        downSelection: args.selection,
-        downAnchor: args.anchor ?? targetAnchor,
-        dragIds: selectedIds,
+        downSelection: click.selection ?? args.selection,
+        downAnchor: click.anchor ?? args.anchor ?? targetAnchor,
+        dragSelection: click.selection ?? args.selection,
+        dragIds: paramBlockIdsInSelection(args.blocks, click.selection ?? args.selection),
         clickSelection: click.selection,
-        startsDrag: selectedIds.length > 0,
+        startsDrag: click.selection !== null,
     };
 }
 

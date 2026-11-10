@@ -21,6 +21,7 @@ type SelectLocals = {
 type Deps = Pick<
     PointerDeps,
     | "clearActivePointerGestureEnd"
+    | "edgeScroll"
     | "frameToViewportPx"
     | "invalidate"
     | "selectionRef"
@@ -43,6 +44,7 @@ export function handleSelectionEdgeDrag(
 ): boolean {
     const {
         clearActivePointerGestureEnd,
+        edgeScroll,
         frameToViewportPx,
         invalidate,
         sel,
@@ -83,8 +85,12 @@ export function handleSelectionEdgeDrag(
             return;
         }
         applyEdgePointer(ev.clientX, true);
+        edgeScroll.track(ev.clientX, ev.clientY, (clientX) => {
+            applyEdgePointer(clientX, false);
+        });
     };
     const onEnd = () => {
+        edgeScroll.stop();
         // 收尾：把被拖到**不可见宽度**的段丢掉（与"单击不留零宽
         // 选区"同一条规则）。判据与边缘命中同源 —— 像素宽度不足
         // `SELECTION_EDGE_MIN_WIDTH_PX` 的段既看不到区域，也再也

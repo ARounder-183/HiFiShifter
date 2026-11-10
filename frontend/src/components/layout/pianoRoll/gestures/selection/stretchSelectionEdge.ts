@@ -15,6 +15,7 @@ import {
     uploadFullResCurve,
 } from "../../selectionEditData";
 import { PARAM_DRAG_DEAD_ZONE_PX, recordGestureParamSelectionStep } from "../pointerSupport";
+import { trackParamBlockCommit } from "../../paramBlockCommitCoordinator";
 import type { ParamSelection } from "../../paramSelection";
 import type { ParamViewSegment } from "../../types";
 import type { PointerEvent as ReactPointerEvent } from "react";
@@ -36,6 +37,7 @@ type Deps = Pick<
     | "createFineAdjustedPointerState"
     | "disposeFineAdjustedPointerState"
     | "edgeHalfSpanForIndices"
+    | "edgeScroll"
     | "edgeSmoothnessPercent"
     | "editParam"
     | "ensureLiveEditBase"
@@ -75,6 +77,7 @@ export function handleStretchSelectionEdge(
         createFineAdjustedPointerState,
         disposeFineAdjustedPointerState,
         edgeHalfSpanForIndices,
+        edgeScroll,
         edgeSmoothnessPercent,
         editParam,
         ensureLiveEditBase,
@@ -353,7 +356,12 @@ export function handleStretchSelectionEdge(
             didDrag = true;
         }
         const adjusted = getFineAdjustedPointerPosition(finePointerState, ev);
-        queuedCursorFrame = pointerFrame(adjusted.clientX);
+        queueCursor(adjusted.clientX);
+        edgeScroll.track(ev.clientX, ev.clientY, (clientX) => queueCursor(clientX));
+    };
+
+    const queueCursor = (clientX: number) => {
+        queuedCursorFrame = pointerFrame(clientX);
         if (previewRafId == null) {
             previewRafId = requestAnimationFrame(() => {
                 previewRafId = null;
@@ -363,6 +371,7 @@ export function handleStretchSelectionEdge(
     };
 
     const onEnd = () => {
+        edgeScroll.stop();
         disposeFineAdjustedPointerState(finePointerState);
         // 取消挂起的预览帧：松手后的提交路径负责重建。
         if (previewRafId != null) {
@@ -457,12 +466,16 @@ export function handleStretchSelectionEdge(
         void (async () => {
             let committed = false;
             try {
-                await uploadFullResCurve({
-                    trackId: rootTrackId,
-                    param: editParam,
-                    startFrame: built.overallMinFrame,
-                    values: expandedForUpload,
-                });
+                await trackParamBlockCommit(
+                    "layout",
+                    rootTrackId,
+                    uploadFullResCurve({
+                        trackId: rootTrackId,
+                        param: editParam,
+                        startFrame: built.overallMinFrame,
+                        values: expandedForUpload,
+                    }),
+                );
                 committed = true;
             } catch (err) {
                 console.error("[pianoRoll] stretch-edge commit failed", err);

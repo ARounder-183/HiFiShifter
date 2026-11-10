@@ -19,13 +19,17 @@ import {
     type TimelineSnapContext,
 } from "../../../utils/timelineSnapping";
 import {
+    buildValueGuideEntry,
     clearSnapHighlights,
     publishSingleTargetSnapHighlight,
+    publishSnapHighlights,
 } from "../../../utils/snapHighlight";
 import type { ScaleLike } from "../../../utils/musicalScales";
 import { getDrawPreviewValue } from "./paramValuePreviewLogic";
 
 export const PARAM_BLOCK_SNAP_HIGHLIGHT_GROUP = "paramBlock";
+export const PARAM_BLOCK_SPLIT_SNAP_HIGHLIGHT_GROUP = "paramBlockSplit";
+export const PARAM_BLOCK_PITCH_SNAP_HIGHLIGHT_GROUP = "paramBlockPitch";
 
 export interface ParamBlockTimeSnapInput {
     readonly rawSec: number;
@@ -102,9 +106,49 @@ export function publishParamBlockSnapHighlight(result: SnapResult): void {
         group: PARAM_BLOCK_SNAP_HIGHLIGHT_GROUP,
         result,
         id: "param-block",
+        surface: "pianoRoll",
     });
 }
 
+/** Split uses the same target-only time guide; the line lives until the click settles. */
+export function publishParamBlockSplitSnapHighlight(result: SnapResult): void {
+    publishSingleTargetSnapHighlight({
+        group: PARAM_BLOCK_SPLIT_SNAP_HIGHLIGHT_GROUP,
+        result,
+        id: "param-block-split",
+        surface: "pianoRoll",
+    });
+}
+
+/**
+ * Horizontal pitch guide. Only called when a snapped target actually differs
+ * from the raw value; null clears immediately on pointerup/cancel.
+ */
+export function publishParamBlockPitchSnapHighlight(targetValue: number | null): void {
+    if (targetValue === null || !Number.isFinite(targetValue)) {
+        clearSnapHighlights(PARAM_BLOCK_PITCH_SNAP_HIGHLIGHT_GROUP);
+        return;
+    }
+    publishSnapHighlights(
+        PARAM_BLOCK_PITCH_SNAP_HIGHLIGHT_GROUP,
+        [
+            buildValueGuideEntry({
+                id: "param-block-pitch",
+                kind: "grid",
+                value: targetValue,
+            }),
+        ],
+        "pianoRoll",
+    );
+}
+
+export function clearParamBlockSplitSnapHighlight(): void {
+    clearSnapHighlights(PARAM_BLOCK_SPLIT_SNAP_HIGHLIGHT_GROUP);
+}
+
+/** Clear every parameter-block guide (time and value). */
 export function clearParamBlockSnapHighlight(): void {
     clearSnapHighlights(PARAM_BLOCK_SNAP_HIGHLIGHT_GROUP);
+    clearSnapHighlights(PARAM_BLOCK_SPLIT_SNAP_HIGHLIGHT_GROUP);
+    clearSnapHighlights(PARAM_BLOCK_PITCH_SNAP_HIGHLIGHT_GROUP);
 }

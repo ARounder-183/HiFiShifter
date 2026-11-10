@@ -135,7 +135,7 @@ describe("paramBlockSelectionGesture", () => {
         expect(plan.clickSelection).toBeNull();
     });
 
-    it("shift press keeps the current drag set and delays range selection to pointerup", () => {
+    it("shift press drags the range result instead of the stale selection", () => {
         const plan = resolveBlockPressPlan({
             blocks,
             selection: [{ startFrame: 40, frameCount: 20 }],
@@ -144,7 +144,8 @@ describe("paramBlockSelectionGesture", () => {
             targetFrame: 65,
             mode: "range",
         });
-        expect(plan.dragIds).toEqual(["b"]);
+        expect(plan.dragIds).toEqual(["b", "c"]);
+        expect(plan.dragSelection).toEqual([{ startFrame: 40, frameCount: 40 }]);
         expect(plan.clickSelection).toEqual([{ startFrame: 40, frameCount: 40 }]);
         expect(plan.startsDrag).toBe(true);
     });

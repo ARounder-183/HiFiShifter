@@ -5,6 +5,7 @@ import {
     type ParamBlock,
 } from "./paramBlocks";
 import type { ParamViewSegment } from "./types";
+import { reportParamBlockDiagnostic } from "./paramBlockDiagnostics";
 
 type LiveEdit = {
     readonly key: string;
@@ -123,6 +124,15 @@ export function resolveParamBlockFrameValue(args: {
             Number.isFinite(args.block.logicalCenterValue)
         ) {
             return args.block.logicalCenterValue;
+        }
+        if (args.block.averageValue == null) {
+            reportParamBlockDiagnostic({
+                code: "drag_center_missing",
+                gesture: "drag",
+                rootTrackId: null,
+                blockId: null,
+                frame: null,
+            });
         }
         return args.block.averageValue ?? null;
     }

@@ -958,6 +958,7 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                         tracks={tracks}
                         contentHeight={snapHighlight.contentHeight}
                         viewportHeightPx={viewportSize.height}
+                        layerWidth={snapHighlight.contentWidth}
                     />
                 </div>
             ) : null}

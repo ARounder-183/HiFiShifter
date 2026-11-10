@@ -188,6 +188,8 @@ export type PointerDeps = {
     dragDirection: "free" | "x-only" | "y-only" | undefined;
     dynamicProjectSec: number;
     edgeHalfSpanForIndices: (indicesLen: number, strideValue: number) => number;
+    /** Shared 2D edge-scroll driver for spatial gestures in the current pointerdown. */
+    edgeScroll: EdgeScrollDriver;
     edgeSmoothnessPercent: number | undefined;
     editParam: string;
     ensureLiveEditBase: (pv: ParamViewSegment) => void;
@@ -285,6 +287,8 @@ export type PointerDeps = {
           ) => void)
         | undefined;
     onPitchSnapGestureActiveChange: ((active: boolean) => void) | undefined;
+    /** Horizontal pitch guide target; null clears it. */
+    onPitchSnapGuide: ((targetValue: number | null) => void) | undefined;
     panRef: MutableRefObject<{
         pointerId: number;
         startClientX: number;

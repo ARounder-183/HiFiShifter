@@ -15,12 +15,14 @@ export interface ParamBlockFrameRange {
 
 type RangeInput = ParamBlockFrameRange | readonly ParamBlockFrameRange[] | null | undefined;
 
-interface FrameBlock {
+export interface ParamBlockFrameBlock {
     readonly id: string;
     readonly userBlockId?: string;
     readonly startFrame: number;
     readonly endFrameExclusive: number;
 }
+
+type FrameBlock = ParamBlockFrameBlock;
 
 /** 一个逻辑块的全部可见 run；id 永远是逻辑 id（userBlockId ?? id）。 */
 export interface LogicalBlockFrames {

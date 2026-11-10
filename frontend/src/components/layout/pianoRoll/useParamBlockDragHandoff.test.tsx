@@ -45,6 +45,7 @@ async function harness() {
         stride: 1,
         authorityRevisionAtStart: 1,
         authorityRequestSeqAtCommit: 5,
+        externalHistoryTokenAtStart: "0:0",
         committed: true,
         committedSegments: [{ startFrame: 0, values: targetView.edit }],
         releaseState: "waiting-for-curve",

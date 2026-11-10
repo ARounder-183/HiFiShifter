@@ -13,6 +13,7 @@ import { timeRulerHeightPx } from "../../timeline/rulerHeight";
 import { TempoMapCornerButton } from "../../timeline/TempoMapCornerButton";
 import { AXIS_W, PARAM_EDITOR_BOTTOM_BAR_PX } from "../constants";
 import { PianoRollWaveformSurface } from "../PianoRollWaveformSurface";
+import { PianoRollSnapGuideLayer } from "./PianoRollSnapGuideLayer";
 import { pianoRollViewportBus } from "../pianoRollViewportBus";
 import { pointerOverlayStyle } from "../../pointerOverlayStyle";
 import { VibratoPresetGlyph } from "../../vibrato/VibratoPresetGlyph";
@@ -85,6 +86,7 @@ type Props = {
         | "vScrollbarThumbRef"
         | "vibratoDragHud"
         | "viewSize"
+        | "valueToY"
         | "waveformColors"
     >;
 };
@@ -145,6 +147,7 @@ export function EditorArea({ m }: Props) {
         vScrollbarThumbRef,
         vibratoDragHud,
         viewSize,
+        valueToY,
         waveformColors,
     } = m;
 
@@ -424,6 +427,15 @@ export function EditorArea({ m }: Props) {
                                     ref={glOverlayCanvasRef}
                                     className="absolute inset-0 pointer-events-none"
                                     aria-hidden
+                                />
+
+                                {/* 参数编辑器吸附引导：与时间轴共用模型与渲染核心，
+                                    但只投影到本面板的实时视口；右键幅度不发布。 */}
+                                <PianoRollSnapGuideLayer
+                                    param={editParam}
+                                    viewWidth={viewSize.w}
+                                    viewHeight={viewSize.h}
+                                    valueToY={valueToY}
                                 />
 
                                 {/* 指针旁的实时读数：**参数值 + 颤音拖拽状态合成一个

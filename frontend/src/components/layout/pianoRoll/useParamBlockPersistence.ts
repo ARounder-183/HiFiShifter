@@ -17,6 +17,7 @@ import {
     type ParamBlockView,
 } from "./paramBlockTypes";
 import type { ParamBlockState } from "./paramBlocks";
+import { trackParamBlockCommit, type ParamBlockCommitKind } from "./paramBlockCommitCoordinator";
 
 /** 一次回读的权威结果：编辑集 + 帧周期。**没有几何** —— 几何永远是派生的。 */
 interface ParamBlockSnapshot {
@@ -252,6 +253,12 @@ export function useParamBlockPersistence(args: {
     useEffect(() => {
         const root = args.rootTrackId;
         if (!root || !args.enabled) return;
+        if ((pending.current.get(root) ?? 0) > 0) {
+            // A history change during an in-flight commit must be replayed
+            // after the queue drains, not silently dropped.
+            refetchPending.current.add(root);
+            return;
+        }
         void readback(root);
     }, [args.rootTrackId, args.enabled, args.historyKey, readback]);
 
@@ -280,6 +287,7 @@ export function useParamBlockPersistence(args: {
             expectedCurveRevision?: number,
             expectedGeometryRevision?: number,
             expectedGeometrySignature?: string,
+            kind: ParamBlockCommitKind = "layout",
         ) => {
             const root = state.rootTrackId ?? latest.current.rootTrackId;
             const known = root === null ? undefined : server.current.get(root);
@@ -332,7 +340,7 @@ export function useParamBlockPersistence(args: {
             const job = (queues.current.get(root) ?? Promise.resolve())
                 .catch(() => undefined)
                 .then(executeWithRetry);
-            const complete = job
+            const complete = trackParamBlockCommit(kind, root, job)
                 .then((snapshot) => {
                     if (snapshot) latest.current.onCommitted?.();
                     if (

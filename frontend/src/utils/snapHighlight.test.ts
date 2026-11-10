@@ -52,7 +52,7 @@ test("utils/snapHighlight.test.ts scripted checks", async () => {
     assertEqual(stored.markers[0].role, "target", "first marker is target");
     assertEqual(stored.markers[0].trackId, null, "grid target is full-height");
     assertEqual(stored.markers[1].role, "source", "second marker is source");
-    assertEqual(stored.markers[1].sec, 2, "source defaults to snapped sec");
+    assertEqual(stored.markers[1].position, 2, "source defaults to snapped sec");
     assertEqual(stored.markers[1].trackId, "t1", "source trackId");
 
     // ── 同组发布整组替换 ──
@@ -103,7 +103,7 @@ test("utils/snapHighlight.test.ts scripted checks", async () => {
         clipId: "c2",
     });
     assertEqual(
-        loopEntry2.markers.map((m) => m.sec),
+        loopEntry2.markers.map((m) => m.position),
         [5, 7],
         "loop two secs preserved",
     );

@@ -437,6 +437,8 @@ export function usePianoRollInteractions(args: {
     edgeSmoothnessPercent?: number;
     /** 选择拖拽/绘制进行中时，用于临时切换吸附按钮视觉 */
     onPitchSnapGestureActiveChange?: (active: boolean) => void;
+    /** Horizontal pitch guide target; null clears it. */
+    onPitchSnapGuide?: (targetValue: number | null) => void;
     /** 形变控制线变化回调（null 表示隐藏；多选区时每段一条） */
     onMorphOverlayChange?: (next: ParamMorphOverlay[] | null) => void;
     /** 当前参数值域（用于振幅滚轮步进自适应） */
@@ -541,6 +543,7 @@ export function usePianoRollInteractions(args: {
         cycleDragDirectionKb,
         edgeSmoothnessPercent,
         onPitchSnapGestureActiveChange,
+        onPitchSnapGuide,
         onMorphOverlayChange,
         currentParamRange,
     } = args;
@@ -2527,6 +2530,7 @@ export function usePianoRollInteractions(args: {
                     onParamCommitSucceeded,
                     onParamValuePreviewChange,
                     onPitchSnapGestureActiveChange,
+                    onPitchSnapGuide,
                     panRef,
                     paramEditorSeekPlayheadEnabled,
                     paramMultiSelectKb,
@@ -2589,6 +2593,7 @@ export function usePianoRollInteractions(args: {
             // 只是把"确实读到的值"如实登记。
             applyEdgeScrollLeft,
             getViewportTruth,
+            onPitchSnapGuide,
             scrollLeftRef,
             canvasRef,
             viewSizeRef,
@@ -2719,7 +2724,9 @@ export function usePianoRollInteractions(args: {
             readonly captureTarget: HTMLCanvasElement;
             readonly onCommitted?: () => void;
             readonly onContextMenu?: (x: number, y: number) => void;
-            readonly edgeScroll?: import("./kernel/edgeScrollDriver").EdgeScrollDriver;
+            readonly commitAmplitude?: (
+                segments: readonly { startFrame: number; values: number[] }[],
+            ) => Promise<void>;
         }): boolean => {
             const pv = paramViewRef.current;
             if (pv === null) return false;
@@ -2751,7 +2758,7 @@ export function usePianoRollInteractions(args: {
                 setActivePointerGestureEnd,
                 setCanvasCursor,
                 setParamView,
-                edgeScroll: args.edgeScroll,
+                commitAmplitude: args.commitAmplitude,
             });
         },
         [

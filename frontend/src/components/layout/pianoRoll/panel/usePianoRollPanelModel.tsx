@@ -74,6 +74,8 @@ import {
 } from "../paramBlockCreationTransaction";
 import { usePianoRollData } from "../usePianoRollData";
 import { useParamBlockDragHandoff } from "../useParamBlockDragHandoff";
+import { resolveParamBlockSplitSelection } from "../paramBlockSplitSelection";
+import { HISTORY_JUMP_EVENT } from "../../../../features/session/historyJump";
 import { createSyllableAnalysisQueue } from "../syllableAnalysisQueue";
 import { useParamBlockPersistence } from "../useParamBlockPersistence";
 import { composeParamBlockView } from "../paramBlockComposition";
@@ -141,7 +143,6 @@ import {
     type ParamBlockSpecColors,
 } from "../paramBlockRenderSpec";
 import {
-    sameParamBlockEpoch,
     sameParamBlockEpochLayout,
     shouldUseParamBlockVisualTransaction,
     type ParamBlockEpoch,
@@ -166,7 +167,10 @@ import {
 } from "../paramBlockModifierPolicy";
 import {
     clearParamBlockSnapHighlight,
+    clearParamBlockSplitSnapHighlight,
+    publishParamBlockPitchSnapHighlight,
     publishParamBlockSnapHighlight,
+    publishParamBlockSplitSnapHighlight,
     resolveParamBlockPitchSnapDelta,
     resolveParamBlockTimeSnapResult,
 } from "../paramBlockSnap";
@@ -2565,6 +2569,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         onPitchSnapGestureActiveChange: useCallback((active: boolean) => {
             setSnapGestureActive(active);
         }, []),
+        onPitchSnapGuide: publishParamBlockPitchSnapHighlight,
         paramValuePopupEnabled: s.showParamValuePopup,
         onParamValuePreviewChange: useCallback(
             (
@@ -2794,6 +2799,15 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     }, []);
     const [paramBlockState, setParamBlockState] =
         useState<ParamBlockState>(EMPTY_PARAM_BLOCK_STATE);
+    /** Explicit history jumps only; self commits advance history depth too. */
+    const [paramBlockExternalHistoryToken, setParamBlockExternalHistoryToken] = useState(0);
+    /** Incremented after every successful parameter-block commit. */
+    const [paramBlockCommitToken, setParamBlockCommitToken] = useState(0);
+    useEffect(() => {
+        const onHistoryJump = () => setParamBlockExternalHistoryToken((value) => value + 1);
+        window.addEventListener(HISTORY_JUMP_EVENT, onHistoryJump);
+        return () => window.removeEventListener(HISTORY_JUMP_EVENT, onHistoryJump);
+    }, []);
     /*
      * 【几何只有一个权威】块视图是 `(clips, editSet, framePeriodMs)` 的纯函数。
      *
@@ -2858,7 +2872,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             rootTrackId,
             layoutKey: paramBlockView?.layoutKey ?? null,
             editRevision: paramBlockView?.editRevision ?? paramBlockState.editSet.revision,
-            historyKey: `${s.historyUndoDepth}:${s.historyRedoDepth}`,
+            externalHistoryToken: `${rootTrackId ?? ""}:${paramBlockExternalHistoryToken}`,
+            commitToken: String(paramBlockCommitToken),
             framePeriodMs: paramBlockState.framePeriodMs,
         }),
         [
@@ -2867,8 +2882,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             paramBlockView?.editRevision,
             paramBlockState.editSet.revision,
             paramBlockState.framePeriodMs,
-            s.historyUndoDepth,
-            s.historyRedoDepth,
+            paramBlockExternalHistoryToken,
+            paramBlockCommitToken,
         ],
     );
     const paramBlockEpochRef = useRef(paramBlockEpoch);
@@ -2911,7 +2926,51 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     useEffect(() => {
         // 外部布局 / 历史变化后，右键菜单里的旧块快照已不再可信。
         setParamBlockContextMenu(null);
-    }, [paramBlockEpoch.layoutKey, paramBlockEpoch.historyKey, paramBlockEpoch.rootTrackId]);
+    }, [
+        paramBlockEpoch.layoutKey,
+        paramBlockEpoch.externalHistoryToken,
+        paramBlockEpoch.rootTrackId,
+    ]);
+    useEffect(() => {
+        // Any external epoch change must not leave a guide from the old view.
+        clearParamBlockSnapHighlight();
+    }, [
+        paramBlockEpoch.layoutKey,
+        paramBlockEpoch.externalHistoryToken,
+        paramBlockEpoch.rootTrackId,
+    ]);
+    useEffect(() => {
+        // Undo/redo can invalidate a live preview even when no drag snapshot
+        // exists anymore. Clear the override as well as the interaction curve.
+        clearLiveEditOverride();
+        paramBlockInteractionCurveRef.current = null;
+        if (
+            liveEditActiveRef.current &&
+            paramBlockDragActivityRef.current.pointerGestureToken === null &&
+            paramBlockDragActivityRef.current.pendingCommits === 0 &&
+            paramBlockDragCommitRef.current === null
+        ) {
+            liveEditActiveRef.current = false;
+        }
+    }, [
+        paramBlockExternalHistoryToken,
+        clearLiveEditOverride,
+        liveEditActiveRef,
+        paramBlockDragCommitRef,
+        paramBlockInteractionCurveRef,
+    ]);
+    useEffect(() => {
+        const clear = () => clearParamBlockSnapHighlight();
+        const onVisibility = () => {
+            if (document.visibilityState === "hidden") clear();
+        };
+        window.addEventListener("blur", clear);
+        document.addEventListener("visibilitychange", onVisibility);
+        return () => {
+            window.removeEventListener("blur", clear);
+            document.removeEventListener("visibilitychange", onVisibility);
+        };
+    }, []);
     useEffect(() => {
         if (lastParamBlockAuthorityRef.current === paramBlockAuthorityKey) return;
         lastParamBlockAuthorityRef.current = paramBlockAuthorityKey;
@@ -3002,7 +3061,10 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     const blockPersistence = useParamBlockPersistence({
         rootTrackId,
         enabled: paramBlocksVisible || paramBlockToolActive,
-        onCommitted: () => dispatch(markProjectEdited()),
+        onCommitted: () => {
+            setParamBlockCommitToken((value) => value + 1);
+            dispatch(markProjectEdited());
+        },
         /*
          * 只跟历史位置走。clip 几何不进这个键：块视图是派生的，clip 一变就
          * 自动跟上；把它拼进来会让一次 Clip 拖动每帧发一轮回读，而那时的回包
@@ -3164,7 +3226,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
      */
     useLayoutEffect(() => {
         const tx = paramBlockVisualTransactionRef.current;
-        const txMismatch = tx !== null && !sameParamBlockEpoch(tx.epoch, paramBlockEpoch);
+        const txMismatch = tx !== null && !sameParamBlockEpochLayout(tx.epoch, paramBlockEpoch);
         const dragSnapshot = paramBlockDragSnapshotRef.current;
         const dragMismatch =
             dragSnapshot !== null &&
@@ -3442,10 +3504,19 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         (snapshot: ParamBlockDragSnapshot): PianoRollParamBlockSpec | null => {
             if (!paramBlocksVisible) return null;
             if (snapshot.blocks.length === 0) return null;
-            const draggedById = new Map(snapshot.blocks.map((block) => [block.id, block]));
+            const draggedById = new Map<string, (typeof snapshot.blocks)[number]>();
+            for (const draggedBlock of snapshot.blocks) {
+                draggedById.set(draggedBlock.id, draggedBlock);
+                if (draggedBlock.userBlockId !== undefined) {
+                    draggedById.set(draggedBlock.userBlockId, draggedBlock);
+                }
+            }
             const blocks: ParamBlockRenderBlock[] = paramBlocksWithValues.map((block) => {
                 const dragged = snapshot.ids.has(logicalBlockId(block))
-                    ? draggedById.get(block.id)
+                    ? (draggedById.get(block.id) ??
+                      (block.userBlockId === undefined
+                          ? undefined
+                          : draggedById.get(block.userBlockId)))
                     : undefined;
                 return {
                     id: block.id,
@@ -3457,7 +3528,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                     frameCenterValue:
                         dragged === undefined
                             ? undefined
-                            : (snapshot.centerValues.get(block.id) ?? null),
+                            : (snapshot.frameCenters.get(block.id) ?? null),
                     displayCenterSnapToSemitone:
                         dragged === undefined ? block.manualValue == null : false,
                     selected: dragged !== undefined,
@@ -3498,7 +3569,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 previous !== null &&
                 previous.kind === kind &&
                 previous.phase === phase &&
-                sameParamBlockEpoch(previous.epoch, paramBlockEpochRef.current);
+                sameParamBlockEpochLayout(previous.epoch, paramBlockEpochRef.current);
             paramBlockVisualTransactionRef.current = {
                 id: sameGesture ? previous.id : ++paramBlockGestureSerialRef.current,
                 epoch: paramBlockEpochRef.current,
@@ -3561,6 +3632,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                         revision,
                         geometry,
                         signature,
+                        "drag",
                     );
                 },
                 getAuthorityWatermark,
@@ -3569,6 +3641,13 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 bumpRefreshToken,
                 paintNow: () => hostRef.current?.paintNow(),
                 pitchSnapEnabled: s.pitchSnapEnabled,
+                fallbackValue:
+                    Number.isFinite(bounds.min) && Number.isFinite(bounds.max)
+                        ? (bounds.min + bounds.max) / 2
+                        : editParam === "pitch"
+                          ? 60
+                          : 0,
+                onPitchSnapGuide: publishParamBlockPitchSnapHighlight,
                 onError: (error) => {
                     publishParamBlockFeedback({
                         text: tf("status_param_block_action_failed"),
@@ -3607,8 +3686,11 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             applyDenseToLiveEdit,
             bumpRefreshToken,
             bumpParamBlockStructure,
+            bounds.max,
+            bounds.min,
             editParam,
-            blockPersistence.commit,
+            blockPersistence,
+            effectiveProjectScale,
             getAuthorityWatermark,
             invalidateParamBlockSpec,
             liveEditActiveRef,
@@ -3618,11 +3700,16 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             paramBlocksWithValues,
             paramView,
             paramAuthorityRevision,
+            projectScaleAtSec,
             requestWaveformRepaint,
             resetLiveEditPreview,
             rootTrackId,
+            s.pitchSnapEnabled,
+            s.pitchSnapToleranceCents,
+            s.pitchSnapUnit,
             setParamBlockState,
             paramViewRef,
+            tf,
         ],
     );
 
@@ -3758,9 +3845,31 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                         clientY: hit.clientY,
                         pointerId: hit.pointerId,
                         captureTarget: hit.captureTarget,
-                        onCommitted: () => refreshParamBlockValuesAfterParamEdit("blockAmplitude"),
                         onContextMenu: (x, y) => setParamBlockContextMenu({ x, y }),
-                        edgeScroll: hit.edgeScroll,
+                        commitAmplitude: async (segments) => {
+                            /*
+                             * One backend transaction for both the transformed
+                             * curve and the cleared pitch centers. Splitting this
+                             * into upload + checkpoint=false used to create a
+                             * second write that could land after undo.
+                             */
+                            const state = clearParamBlockValues(paramBlockStateRef.current, [
+                                ...selectedParamBlockIdSet,
+                            ]);
+                            if (state !== paramBlockStateRef.current) {
+                                paramBlockStateRef.current = state;
+                                setParamBlockState(state);
+                            }
+                            await blockPersistence.commit(
+                                state,
+                                true,
+                                segments.map((segment) => ({ ...segment, param: editParam })),
+                                undefined,
+                                undefined,
+                                undefined,
+                                "amplitude",
+                            );
+                        },
                     });
                     return { handled: true, seekOnClick: false };
                 }
@@ -4717,6 +4826,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                             queue: paramBlockCommitQueueRef,
                                             activity: paramBlockDragActivityRef,
                                             liveActive: liveEditActiveRef,
+                                            rootTrackId,
                                             onSettled: () => {
                                                 blockPersistence.flushReadback();
                                                 bumpRefreshToken();
@@ -5335,7 +5445,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                             clearActivePointerGestureEnd: hit.clearActivePointerGestureEnd,
                             pointerValue: hit.pointerValue,
                             edgeScroll: hit.edgeScroll,
-                            selection: [fullBlock.id],
+                            selection: press.dragIds.length > 0 ? press.dragIds : [fullBlock.id],
                             anchorValue:
                                 framedHits.find((block) => block.id === hitId)?.averageValue ??
                                 null,
@@ -5372,7 +5482,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 clearActivePointerGestureEnd: hit.clearActivePointerGestureEnd,
                 pointerValue: hit.pointerValue,
                 edgeScroll: hit.edgeScroll,
-                selection: press.dragIds,
+                selection: press.dragIds.length > 0 ? press.dragIds : [fullBlock.id],
                 anchorValue: framedHits.find((block) => block.id === hitId)?.averageValue ?? null,
                 centerValues: new Map(
                     framedHits.flatMap((block) =>
@@ -5730,6 +5840,11 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             const framePeriodMs = view.framePeriodMs;
             const clips = paramBlockSourceClipsRef.current;
             const blocks = blocksFromViewForPanel(rootTrackId, view);
+            /*
+             * A target id is only a hint. If it no longer strictly contains the
+             * split position, the gesture must fail rather than silently split
+             * a different block that happens to share an id.
+             */
             const target =
                 args.targetBlockId === undefined
                     ? resolveParamBlockSplitTarget(blocks, rawSec, framePeriodMs)
@@ -5739,14 +5854,9 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                   logicalBlockId(block) === args.targetBlockId) &&
                               block.startSec < rawSec &&
                               block.endSec > rawSec,
-                      ) ??
-                      blocks.find(
-                          (block) =>
-                              block.id === args.targetBlockId ||
-                              logicalBlockId(block) === args.targetBlockId,
-                      ) ??
-                      null);
+                      ) ?? null);
             if (target === null) return false;
+            const selectionBefore = selectionRef.current;
             const snapToggleHeld = args.snapToggleHeld === true;
             const pxPerSec = hostRef.current?.getAxis()?.pxPerSec ?? pxPerSecRef.current;
             const snap = resolveParamBlockTimeSnapResult({
@@ -5774,6 +5884,11 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             const splitSec = isStrictlyInsideParamBlock(target, snapped, framePeriodMs)
                 ? snapped
                 : rawSec;
+            if (splitSec === snapped) publishParamBlockSplitSnapHighlight(snap);
+            else clearParamBlockSplitSnapHighlight();
+            // Split is a click, not a drag: keep the target visible long enough
+            // to read, then clear so it cannot linger over the next gesture.
+            window.setTimeout(clearParamBlockSplitSnapHighlight, 180);
             const plan = planParamBlockGesture({
                 clips,
                 edits: state.editSet,
@@ -5819,23 +5934,19 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             }
             const leftBlockId = plan.plan.leftBlockId;
             const rightBlockId = plan.plan.rightBlockId;
-            const resultRanges = [
-                ...(leftBlockId === undefined
-                    ? []
-                    : logicalFrameRangesFromView(plan.plan.viewAfter.blocks, leftBlockId)),
-                ...(rightBlockId === undefined
-                    ? []
-                    : logicalFrameRangesFromView(plan.plan.viewAfter.blocks, rightBlockId)),
-            ];
             if (args.selectResult !== false) {
-                setParamBlockSelection(normalizeSelection(resultRanges));
-                paramBlockAnchorRef.current =
-                    resultRanges.length > 0
-                        ? {
-                              blockId: rightBlockId ?? leftBlockId ?? "",
-                              frame: plan.plan.rightSpan?.startFrame ?? resultRanges[0]!.startFrame,
-                          }
-                        : null;
+                const nextSelection = resolveParamBlockSplitSelection({
+                    beforeBlocks: view.blocks,
+                    beforeSelection: selectionBefore,
+                    splitFrame: toFrame(splitSec, framePeriodMs),
+                    targetLogicalId: logicalBlockId(target),
+                    leftBlockId,
+                    rightBlockId,
+                    viewAfter: plan.plan.viewAfter,
+                    rightSpan: plan.plan.rightSpan,
+                });
+                setParamBlockSelection(nextSelection.selection);
+                paramBlockAnchorRef.current = nextSelection.anchor;
             }
             bumpParamBlockStructure();
             setParamBlockContextMenu(null);
@@ -6490,8 +6601,11 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         const dragSnapshot = paramBlockDragSnapshotRef.current;
         if (dragSnapshot !== null) {
             if (!sameParamBlockEpochLayout(dragSnapshot.epoch, paramBlockEpoch)) {
+                // Never clear only two of the three visual refs: a surviving
+                // interaction curve outranks paramView forever after this point.
                 paramBlockDragSnapshotRef.current = null;
                 paramBlockDragCommitRef.current = null;
+                paramBlockInteractionCurveRef.current = null;
             } else if (
                 shouldUseParamBlockDragSnapshotForRender({
                     snapshotKey: dragSnapshot.key,

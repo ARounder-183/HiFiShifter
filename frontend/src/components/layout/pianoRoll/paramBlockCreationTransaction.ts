@@ -1,6 +1,7 @@
 import type { RefObject } from "react";
 import type { ParamBlockDragActivity } from "./paramBlockDrag";
 import type { ParamViewSegment } from "./types";
+import { trackParamBlockCommit } from "./paramBlockCommitCoordinator";
 
 /** A new gesture continues the visible edits, including commits still in flight. */
 export function captureParamBlockCreateCurve(
@@ -20,6 +21,7 @@ export function enqueueParamBlockCreateCommit(args: {
     liveActive: RefObject<boolean>;
     work: () => Promise<void>;
     onSettled: () => void;
+    rootTrackId?: string | null;
 }): Promise<void> {
     args.activity.current.pendingCommits++;
     args.liveActive.current = true;
@@ -35,6 +37,7 @@ export function enqueueParamBlockCreateCommit(args: {
                 args.liveActive.current = false;
             args.onSettled();
         });
-    args.queue.current = job.catch(() => undefined);
-    return job;
+    const tracked = trackParamBlockCommit("create", args.rootTrackId ?? null, job);
+    args.queue.current = tracked.catch(() => undefined);
+    return tracked;
 }

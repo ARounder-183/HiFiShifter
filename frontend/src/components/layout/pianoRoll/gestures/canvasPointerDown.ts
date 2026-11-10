@@ -78,6 +78,7 @@ type CanvasPointerDownDeps = Pick<
     | "onParamCommitSucceeded"
     | "onParamValuePreviewChange"
     | "onPitchSnapGestureActiveChange"
+    | "onPitchSnapGuide"
     | "panRef"
     | "paramEditorSeekPlayheadEnabled"
     | "paramMultiSelectKb"
@@ -212,6 +213,7 @@ export function handleCanvasPointerDown(
         onParamCommitSucceeded,
         onParamValuePreviewChange,
         onPitchSnapGestureActiveChange,
+        onPitchSnapGuide,
         panRef,
         paramEditorSeekPlayheadEnabled,
         paramMultiSelectKb,
@@ -575,7 +577,9 @@ export function handleCanvasPointerDown(
      * 颤音分支在拖动中改写它。用持有者而不是直接传值，是为了让分支能原样搬进独立函数
      * —— 传值会复制一份，写入就到不了驱动的闭包。
      */
-    const onEdgeScrolledRef: { current: ((clientX: number) => void) | null } = { current: null };
+    const onEdgeScrolledRef: {
+        current: ((clientX: number, clientY?: number) => void) | null;
+    } = { current: null };
 
     /**
      * 滚动上界：工程末端与**已取数窗口末端**取小。
@@ -662,7 +666,7 @@ export function handleCanvasPointerDown(
         },
         getMaxScrollTop: () => verticalScrollRangePx,
         getMinScrollTop: () => 0,
-        onScrolled: (clientX) => onEdgeScrolledRef.current?.(clientX),
+        onScrolled: (clientX, clientY) => onEdgeScrolledRef.current?.(clientX, clientY),
     });
 
     if (toolMode === "select") {
@@ -706,6 +710,7 @@ export function handleCanvasPointerDown(
                     onParamCommitSucceeded,
                     onParamValuePreviewChange,
                     onPitchSnapGestureActiveChange,
+                    onPitchSnapGuide,
                     paramMultiSelectKb,
                     paramStretchKb,
                     paramValuePopupEnabled,

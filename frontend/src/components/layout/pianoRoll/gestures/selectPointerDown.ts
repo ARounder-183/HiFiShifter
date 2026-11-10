@@ -63,6 +63,7 @@ type SelectPointerDeps = Pick<
     | "onParamCommitSucceeded"
     | "onParamValuePreviewChange"
     | "onPitchSnapGestureActiveChange"
+    | "onPitchSnapGuide"
     | "paramMultiSelectKb"
     | "paramStretchKb"
     | "paramValuePopupEnabled"
@@ -137,6 +138,7 @@ export function handleSelectPointerDown(
         onParamCommitSucceeded,
         onParamValuePreviewChange,
         onPitchSnapGestureActiveChange,
+        onPitchSnapGuide,
         paramMultiSelectKb,
         paramStretchKb,
         paramValuePopupEnabled,
@@ -253,15 +255,10 @@ export function handleSelectPointerDown(
         const bounds = scroller.getBoundingClientRect();
 
         if (allowAutoScroll) {
-            // 边缘自动滚动收口在 `edgeScroll` 驱动里（几何是
-            // `shared/edgeAutoScroll` 的纯函数，驱动本身有单测）。
-            // 这里只需"按当前指针位置滚一帧"：滚动量、可达上界、方向
-            // 符号、帧时长归一都由它负责，本函数不再自己算一遍。
-            //
-            // 【为什么选择工具不启用持续滚动】它的语义是"指针到哪选到哪"，
-            // 松手即定型 —— 停在边缘不动没有意义。持续滚动只服务绘制类
-            // 工具（笔画必须跟着视图继续延伸）。
-            edgeScroll.step(clientX, clientY);
+            // Continuous scrolling is owned by the branch's edgeScroll.track()
+            // call. A one-frame step here would double-advance the viewport
+            // whenever the track callback replays this projection.
+            void clientY;
         }
 
         const clampedClientX = clamp(clientX, bounds.left, bounds.right);
@@ -370,8 +367,16 @@ export function handleSelectPointerDown(
             selectionRef.current = addPointerRange(baseSelection, startFrame, bbFrame);
             updateSelectionUi(selectionRef.current);
             invalidate();
+            edgeScroll.track(ev.clientX, ev.clientY, (clientX, clientY) => {
+                if (!moved) return;
+                const trackedFrame = selectionFrameFromClientX(clientX, false, clientY);
+                selectionRef.current = addPointerRange(baseSelection, startFrame, trackedFrame);
+                updateSelectionUi(selectionRef.current);
+                invalidate();
+            });
         };
         const onEnd = (reason: "up" | "cancel", ev: globalThis.PointerEvent | null) => {
+            edgeScroll.stop();
             // 「原地点击已有段 = 取消该段」只属于**修饰键**路径：右键起手的
             // 分支只在未选中区域触发，右键点击在那里是"交回菜单"（见下），
             // 不应借帧坐标的边界夹取误差误删某一段。
@@ -436,6 +441,7 @@ export function handleSelectPointerDown(
                         createFineAdjustedPointerState,
                         disposeFineAdjustedPointerState,
                         edgeHalfSpanForIndices,
+                        edgeScroll,
                         edgeSmoothnessPercent,
                         editParam,
                         ensureLiveEditBase,
@@ -481,6 +487,7 @@ export function handleSelectPointerDown(
                 handleSelectionEdgeDrag(
                     {
                         clearActivePointerGestureEnd,
+                        edgeScroll,
                         frameToViewportPx,
                         invalidate,
                         sel,
@@ -524,6 +531,7 @@ export function handleSelectPointerDown(
                 handleSelectionPanDrag(
                     {
                         clearActivePointerGestureEnd,
+                        edgeScroll,
                         invalidate,
                         maxSelectableFrame,
                         onContextMenu,
@@ -556,6 +564,7 @@ export function handleSelectPointerDown(
                         disposeFineAdjustedPointerState,
                         dragDirection,
                         edgeHalfSpanForIndices,
+                        edgeScroll,
                         editParam,
                         ensureLiveEditBase,
                         fetchCommitBaseSource,
@@ -570,6 +579,7 @@ export function handleSelectPointerDown(
                         onParamCommitSucceeded,
                         onParamValuePreviewChange,
                         onPitchSnapGestureActiveChange,
+                        onPitchSnapGuide,
                         paramValuePopupEnabled,
                         paramViewRef,
                         pitchSnapUnit,
@@ -652,8 +662,18 @@ export function handleSelectPointerDown(
             selectionRef.current = next;
             updateSelectionUi(selectionRef.current);
             invalidate(); // 实时重绘选区
+            edgeScroll.track(adjusted.clientX, adjusted.clientY, (clientX, clientY) => {
+                if (!moved) return;
+                const trackedFrame = selectionFrameFromClientX(clientX, false, clientY);
+                const trackedSelection = selectionFromPointers(startFrame, trackedFrame);
+                if (trackedSelection == null) return;
+                selectionRef.current = trackedSelection;
+                updateSelectionUi(selectionRef.current);
+                invalidate();
+            });
         };
         const onEnd = () => {
+            edgeScroll.stop();
             disposeFineAdjustedPointerState(finePointerState);
             if (!moved) {
                 // 单击（含笔/触摸的抖动）：没有拖动就没有新选区，同时把

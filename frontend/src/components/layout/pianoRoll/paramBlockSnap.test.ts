@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createDefaultTimelineSnapSettings } from "../../../features/session/sessionSlice";
 import {
     clearParamBlockSnapHighlight,
+    publishParamBlockPitchSnapHighlight,
     publishParamBlockSnapHighlight,
     resolveParamBlockPitchSnapDelta,
     resolveParamBlockTimeSnap,
@@ -108,6 +109,29 @@ it("publishes only the snap target, never a second line at the raw pointer", () 
     );
     expect(entries).toHaveLength(1);
     expect(entries[0]?.markers).toHaveLength(1);
-    expect(entries[0]?.markers[0]).toMatchObject({ role: "target", sec: 1 });
+    expect(entries[0]?.markers[0]).toMatchObject({
+        role: "target",
+        position: 1,
+        axis: "time",
+    });
+    expect(entries[0]?.surface).toBe("pianoRoll");
     clearParamBlockSnapHighlight();
+});
+
+it("publishes a horizontal value guide for pitch snapping", () => {
+    clearParamBlockSnapHighlight();
+    publishParamBlockPitchSnapHighlight(61);
+    const entries = getSnapHighlightSnapshot().entries.filter(
+        (entry) => entry.surface === "pianoRoll",
+    );
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.markers[0]).toMatchObject({
+        role: "target",
+        axis: "value",
+        position: 61,
+    });
+    publishParamBlockPitchSnapHighlight(null);
+    expect(
+        getSnapHighlightSnapshot().entries.filter((entry) => entry.surface === "pianoRoll"),
+    ).toHaveLength(0);
 });

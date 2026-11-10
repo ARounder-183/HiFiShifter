@@ -4,6 +4,7 @@ import {
     advanceParamBlockVisualTransaction,
     paramBlockSpecsMatchGeometry,
     sameParamBlockEpoch,
+    sameParamBlockEpochLayout,
     shouldUseParamBlockVisualTransaction,
     type ParamBlockEpoch,
     type ParamBlockVisualTransaction,
@@ -13,7 +14,8 @@ const epoch: ParamBlockEpoch = {
     rootTrackId: "root",
     layoutKey: "layout-a",
     editRevision: 3,
-    historyKey: "0:0",
+    externalHistoryToken: "0:0",
+    commitToken: "0",
     framePeriodMs: 5,
 };
 
@@ -115,12 +117,19 @@ describe("paramBlockVisualTransaction", () => {
                 tx: tx({ phase: "gesture" }),
                 now: 5000,
                 canonicalSpec: null,
-                currentEpoch: { ...epoch, historyKey: "1:0" },
+                currentEpoch: { ...epoch, externalHistoryToken: "1:0" },
                 authorityRevision: 1,
                 authorityRevisionAtStart: 1,
                 committedSegmentsPresent: false,
             }),
         ).toBe("release");
+    });
+
+    it("keeps drag layout valid across a self commit but not an external jump", () => {
+        expect(sameParamBlockEpochLayout(epoch, { ...epoch, commitToken: "1" })).toBe(true);
+        expect(sameParamBlockEpochLayout(epoch, { ...epoch, externalHistoryToken: "1:0" })).toBe(
+            false,
+        );
     });
 
     it("compares only observable geometry, not presentation fields", () => {
