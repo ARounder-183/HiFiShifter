@@ -1,6 +1,6 @@
 // 参数面板数据窗口：刷新与笔画推迟共用作用域，插件提交不清掉同scope可见曲线。
 import { useCallback, useEffect, useRef, useState } from "react";
-import { shouldClearParamRefresh } from "./paramRefreshPolicy";
+import { shouldAcceptParamPayload, shouldClearParamRefresh } from "./paramRefreshPolicy";
 
 import type { ParamFramesPayload } from "../../../types/api";
 import { paramsApi } from "../../../services/api";
@@ -209,16 +209,15 @@ export function usePianoRollData(args: {
      * 分析回填）经常先回一份空窗口，随后才是真正的新窗口。此时保留上一份非空
      * 视图，等下一次回包原子替换，避免曲线消失一帧。真正清空由 scope 变化负责。
      */
-    const acceptParamPayload = (
-        payload: ParamFramesPayload,
-        trackId: string,
-        param: ParamName,
-    ): boolean => {
+    const acceptParamPayload = (payload: ParamFramesPayload, requestedKey: string): boolean => {
         const hasValues = (payload.edit?.length ?? 0) > 0 || (payload.orig?.length ?? 0) > 0;
-        if (hasValues) return true;
         const previous = paramViewRef.current;
-        if (previous === null || previous.edit.length === 0) return true;
-        return !previous.key.startsWith(`v2|${trackId}|${param}|`);
+        return shouldAcceptParamPayload({
+            hasValues,
+            requestedKey,
+            previousKey: previous?.key ?? null,
+            previousHasValues: previous !== null && previous.edit.length > 0,
+        });
     };
 
     /**
@@ -769,7 +768,7 @@ export function usePianoRollData(args: {
 
                     const payload = res as ParamFramesPayload;
                     if (!acceptAuthorityRevision(payload)) return;
-                    if (!acceptParamPayload(payload, trackId, editParam)) {
+                    if (!acceptParamPayload(payload, paramKey)) {
                         lastAppliedForceParamFetchTokenRef.current = localForceParamFetchToken;
                         return;
                     }
@@ -962,7 +961,7 @@ export function usePianoRollData(args: {
                 if (liveEditDeferral.defer()) return;
                 const payload = paramRes as ParamFramesPayload;
                 if (!acceptAuthorityRevision(payload)) return;
-                if (!acceptParamPayload(payload, trackId, editParam)) return;
+                if (!acceptParamPayload(payload, paramKey)) return;
 
                 if (editParam === "pitch") {
                     const userModified = payload.pitch_edit_user_modified;

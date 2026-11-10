@@ -9,3 +9,20 @@
 export function shouldClearParamRefresh(scopeChanged: boolean): boolean {
     return scopeChanged;
 }
+
+/**
+ * Same-window empty responses are usually a transient refresh; keep the last
+ * visible curve. A different window's empty response is authoritative and must
+ * replace the old window, otherwise scrolling to an empty region leaves the
+ * previous curve painted on the new coordinates.
+ */
+export function shouldAcceptParamPayload(args: {
+    readonly hasValues: boolean;
+    readonly requestedKey: string;
+    readonly previousKey: string | null;
+    readonly previousHasValues: boolean;
+}): boolean {
+    if (args.hasValues) return true;
+    if (!args.previousHasValues || args.previousKey === null) return true;
+    return args.previousKey !== args.requestedKey;
+}

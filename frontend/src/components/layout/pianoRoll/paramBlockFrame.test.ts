@@ -231,9 +231,22 @@ describe("param block visual frame", () => {
                 param: "volume",
                 paramView: null,
                 fallbackValue: 1,
-                previousValues: new Map([["note", 0.75]]),
+                previousValues: new Map([
+                    ["note", { value: 0.75, startSec: 0, endSec: 0.02 }],
+                ]),
             })[0].averageValue,
         ).toBe(0.75);
+        expect(
+            resolveParamBlockPanelValues({
+                blocks: [block],
+                param: "volume",
+                paramView: null,
+                fallbackValue: 1,
+                previousValues: new Map([
+                    ["note", { value: 0.75, startSec: 0.1, endSec: 0.12 }],
+                ]),
+            })[0].averageValue,
+        ).toBeNull();
     });
 });
 

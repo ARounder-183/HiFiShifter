@@ -79,6 +79,7 @@ import { HISTORY_JUMP_EVENT } from "../../../../features/session/historyJump";
 import { createSyllableAnalysisQueue } from "../syllableAnalysisQueue";
 import { useParamBlockPersistence } from "../useParamBlockPersistence";
 import { useParamBlockState } from "../useParamBlockState";
+import { useLatestRef, useLatestRefValue } from "../useLatestRef";
 import { trackParamBlockCommit } from "../paramBlockCommitCoordinator";
 import { composeParamBlockView } from "../paramBlockComposition";
 import { planParamBlockGesture, type ParamBlockGesturePlan } from "../paramBlockGesture";
@@ -428,8 +429,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
      * 值，切换参数后回调仍按旧参数换算视口，会出现"切了参数但竖向位置按上一个参数
      * 映射"的错位。ref 每次渲染刷新，回调现读即最新。
      */
-    const editParamRef = useRef<ParamName>(editParam);
-    editParamRef.current = editParam;
+    const editParamRef = useLatestRef(editParam);
     // pitchSnapOpen 已在顶部工具栏 JSX 内声明和使用，无需重复声明
     // pianoRoll.copy/cut/paste 的复制/剪切/粘贴已由全局路由统一派发到
     // handleEditOp，本地不再需要键位匹配（见 useKeybindings/focusRouting）。
@@ -2425,7 +2425,12 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
      * 值域中点（pitch 下那正好是 F#4，所有块会叠成一条线）。缓存只用于显示，
      * 不写回后端；作用域切换时清空，结构变化时按现存 run 裁剪。
      */
-    const paramBlockValueCacheRef = useRef<Map<string, number>>(new Map());
+    type ParamBlockCachedValue = {
+        readonly value: number;
+        readonly startSec: number;
+        readonly endSec: number;
+    };
+    const paramBlockValueCacheRef = useRef<Map<string, ParamBlockCachedValue>>(new Map());
     const paramBlockValueCacheKeyRef = useRef<string | null>(null);
     /** 让宿主下一次绘制读到刚更新的拖动快照，而不是等某个 React 状态变化。 */
     const latestParamBlockSpecRef = useRef<PianoRollParamBlockSpec | null>(null);
@@ -2964,13 +2969,41 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             paramBlockCommitToken,
         ],
     );
-    const paramBlockEpochRef = useRef(paramBlockEpoch);
-    paramBlockEpochRef.current = paramBlockEpoch;
+    const paramBlockEpochRef = useLatestRef(paramBlockEpoch);
     /** 与派生视图同源的 clip 快照；编辑函数按它把源域区间拆开 / 合并。 */
     const paramBlockSourceClipsRef = useRef(paramBlockSourceClips);
     useLayoutEffect(() => {
         paramBlockSourceClipsRef.current = paramBlockSourceClips;
     }, [paramBlockSourceClips]);
+    /** Compose the live edit set instead of reading a possibly stale view ref. */
+    const composeParamBlockViewNow = useCallback((): ParamBlockView | null => {
+        if (rootTrackId === null) return null;
+        const state = paramBlockStateRef.current;
+        return composeParamBlockView(
+            rootTrackId,
+            paramBlockSourceClipsRef.current,
+            state.editSet,
+            state.framePeriodMs,
+        );
+    }, [rootTrackId]);
+
+    /** Logical ids fully covered by the current selection, from live geometry. */
+    const selectedParamBlockIdsNow = useCallback((): string[] => {
+        const view = composeParamBlockViewNow();
+        if (view === null) return [];
+        return paramBlockIdsInSelection(
+            view.blocks.map((block) => ({
+                id: block.id,
+                ...(block.userBlockId === undefined
+                    ? {}
+                    : { userBlockId: block.userBlockId }),
+                startFrame: block.startFrame,
+                endFrameExclusive: block.endFrameExclusive,
+            })),
+            selectionRef.current,
+        );
+    }, [composeParamBlockViewNow, selectionRef]);
+
     /*
      * 块选择不是第二份状态：selectedParamBlockIds 由 selectionUi 在块层投影派生。
      */
@@ -2997,8 +3030,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
      * projectEpoch 目前没有独立字段：打开工程时根轨道几乎总会变化；若未来加入
      * 工程代次，把它拼进 authorityKey 即可，不影响其余逻辑。
      */
-    const rootTrackIdRef = useRef<string | null>(rootTrackId);
-    rootTrackIdRef.current = rootTrackId;
+    const rootTrackIdRef = useLatestRef(rootTrackId);
     const paramBlockAuthorityKey = rootTrackId ?? "";
     const lastParamBlockAuthorityRef = useRef(paramBlockAuthorityKey);
     useEffect(() => {
@@ -3528,10 +3560,12 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     useLayoutEffect(() => {
         const cacheKey = `${rootTrackId ?? ""}|${editParam}`;
         const currentIds = new Set(paramBlocksForPanel.map((block) => block.id));
-        const next = new Map<string, number>();
+        const next = new Map<string, ParamBlockCachedValue>();
         if (paramBlockValueCacheKeyRef.current === cacheKey) {
-            for (const [id, value] of paramBlockValueCacheRef.current) {
-                if (currentIds.has(id) && Number.isFinite(value)) next.set(id, value);
+            for (const [id, cached] of paramBlockValueCacheRef.current) {
+                if (currentIds.has(id) && Number.isFinite(cached.value)) {
+                    next.set(id, cached);
+                }
             }
         }
         for (const block of paramBlocksWithValues) {
@@ -3540,7 +3574,11 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 block.averageValue !== null &&
                 Number.isFinite(block.averageValue)
             ) {
-                next.set(block.id, block.averageValue);
+                next.set(block.id, {
+                    value: block.averageValue,
+                    startSec: block.startSec,
+                    endSec: block.endSec,
+                });
             }
         }
         paramBlockValueCacheKeyRef.current = cacheKey;
@@ -5312,7 +5350,14 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                     const exact = paramBlocksWithValues.find((block) => block.id === blockId);
                     if (exact?.averageValue != null) return exact.averageValue;
                     const cached = paramBlockValueCacheRef.current.get(blockId);
-                    if (cached !== undefined && Number.isFinite(cached)) return cached;
+                    if (
+                        cached !== undefined &&
+                        Math.abs(cached.startSec - startSec) <= 1e-6 &&
+                        Math.abs(cached.endSec - endSec) <= 1e-6 &&
+                        Number.isFinite(cached.value)
+                    ) {
+                        return cached.value;
+                    }
                     const overlapping = paramBlocksWithValues.find(
                         (block) => block.startSec < endSec && block.endSec > startSec,
                     );
@@ -5714,7 +5759,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         const result = groupParamBlocks({
             state,
             blocks,
-            selectedBlockIds: selectedParamBlockIds,
+            selectedBlockIds: selectedParamBlockIdsNow(),
             clips,
         });
         // 前置条件不满足 = 静默 no-op（与时间轴的 `groupClips` 同一约定）。
@@ -5749,16 +5794,16 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         invalidateParamBlockVisualPreviews,
         persistParamBlockEdits,
         rootTrackId,
-        selectedParamBlockIds,
+        selectedParamBlockIdsNow,
         setParamBlockSelection,
         requireBlockPersistenceReady,
     ]);
-    groupSelectedParamBlocksRef.current = groupSelectedParamBlocks;
+    useLatestRefValue(groupSelectedParamBlocksRef, groupSelectedParamBlocks);
     const ungroupSelectedParamBlocks = useCallback(() => {
         if (!requireBlockPersistenceReady()) return;
         const state = paramBlockStateRef.current;
         const clips = paramBlockSourceClipsRef.current;
-        const selectedIds = [...selectedParamBlockIdSet].filter((id) =>
+        const selectedIds = selectedParamBlockIdsNow().filter((id) =>
             paramBlocksWithValuesRef.current.some(
                 (block) => logicalBlockId(block) === id && block.kind === "grouped",
             ),
@@ -5819,11 +5864,11 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         invalidateParamBlockVisualPreviews,
         persistParamBlockEdits,
         rootTrackId,
-        selectedParamBlockIdSet,
+        selectedParamBlockIdsNow,
         setParamBlockSelection,
         requireBlockPersistenceReady,
     ]);
-    ungroupSelectedParamBlocksRef.current = ungroupSelectedParamBlocks;
+    useLatestRefValue(ungroupSelectedParamBlocksRef, ungroupSelectedParamBlocks);
     const createParamBlocksFromSelection = useCallback(() => {
         if (!rootTrackId || !requireBlockPersistenceReady()) return;
         const ranges = selectionToFrameRanges(selectionRef.current);
@@ -5897,7 +5942,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         const result = deleteParamBlocks({
             state: paramBlockStateRef.current,
             blocks: paramBlocksWithValuesRef.current,
-            selectedBlockIds: selectedParamBlockIds,
+            selectedBlockIds: selectedParamBlockIdsNow(),
             clips: paramBlockSourceClipsRef.current,
         });
         // 没选中块 / 块不可删 = 静默；菜单项已经置灰。
@@ -5911,10 +5956,10 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         clearParamBlockSelection,
         invalidateParamBlockVisualPreviews,
         persistParamBlockEdits,
-        selectedParamBlockIds,
+        selectedParamBlockIdsNow,
         requireBlockPersistenceReady,
     ]);
-    deleteSelectedParamBlocksRef.current = deleteSelectedParamBlocks;
+    useLatestRefValue(deleteSelectedParamBlocksRef, deleteSelectedParamBlocks);
     const restoreParamBlocks = useCallback(() => {
         if (!requireBlockPersistenceReady()) return;
         const state = paramBlockStateRef.current;
@@ -5956,7 +6001,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         rootTrackId,
         setParamBlockSelection,
     ]);
-    restoreParamBlocksRef.current = restoreParamBlocks;
+    useLatestRefValue(restoreParamBlocksRef, restoreParamBlocks);
     const applyParamBlockEdit = useCallback(
         (result: ReturnType<typeof splitParamBlock>, gesture: "split" | "create" = "split") => {
             if (!requireBlockPersistenceReady()) return;
@@ -5993,7 +6038,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             tf,
         ],
     );
-    applyParamBlockEditRef.current = applyParamBlockEdit;
+    useLatestRefValue(applyParamBlockEditRef, applyParamBlockEdit);
     /**
      * 在播放头处分割。
      *
@@ -6168,7 +6213,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             s.tracks,
         ],
     );
-    splitParamBlockAtSecRef.current = splitParamBlockAtSec;
+    useLatestRefValue(splitParamBlockAtSecRef, splitParamBlockAtSec);
     const splitParamBlockAtPlayhead = useCallback(
         (snapToggleHeld = false) => {
             const rawSec = store.getState().session.playheadSec;
@@ -6181,10 +6226,10 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         },
         [splitParamBlockAtSec, store],
     );
-    splitParamBlockAtPlayheadRef.current = splitParamBlockAtPlayhead;
+    useLatestRefValue(splitParamBlockAtPlayheadRef, splitParamBlockAtPlayhead);
     /** 实时求值：播放头移动 / 块结构变化后，菜单打开即得到正确可用态。 */
     const canSplitParamBlockAtPlayhead = useCallback((): boolean => {
-        const view = paramBlockViewRef.current;
+        const view = composeParamBlockViewNow();
         if (view === null || rootTrackId === null) return false;
         return (
             resolveSplittableParamBlockAt(
@@ -6197,7 +6242,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 },
             ) !== null
         );
-    }, [rootTrackId, store]);
+    }, [composeParamBlockViewNow, rootTrackId, store]);
     const gameRestoreRanges = paramBlockRestoreRanges(
         paramBlockView?.blocks ?? [],
         selectedParamBlockIds,
@@ -6207,11 +6252,11 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     const restoreGameParamBlocks = useCallback(() => {
         if (!requireBlockPersistenceReady()) return;
         const state = paramBlockStateRef.current;
-        const view = paramBlockViewRef.current;
+        const view = composeParamBlockViewNow();
         if (view === null || !rootTrackId) return;
         const ranges = paramBlockRestoreRanges(
             view.blocks,
-            selectedParamBlockIds,
+            selectedParamBlockIdsNow(),
             selectionRef.current,
         );
         if (ranges.length === 0) return;
@@ -6265,16 +6310,17 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         setParamBlockContextMenu(null);
     }, [
         blockPersistence.adopt,
+        composeParamBlockViewNow,
         dispatch,
         invalidateParamBlockVisualPreviews,
         rootTrackId,
-        selectedParamBlockIds,
+        selectedParamBlockIdsNow,
         selectionRef,
         setParamBlockSelection,
         requireBlockPersistenceReady,
         tf,
     ]);
-    restoreGameParamBlocksRef.current = restoreGameParamBlocks;
+    useLatestRefValue(restoreGameParamBlocksRef, restoreGameParamBlocks);
 
     /**
      * 把一段音高整体平移到最近钢琴键（半音），保留颤音 / 滑音轮廓。
@@ -6338,14 +6384,14 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         ],
     );
     const normalizeParamBlockPitchRef = useRef(normalizeParamBlockPitch);
-    normalizeParamBlockPitchRef.current = normalizeParamBlockPitch;
-    normalizeSelectedParamBlockPitchRef.current = () => {
+    useLatestRefValue(normalizeParamBlockPitchRef, normalizeParamBlockPitch);
+    useLatestRefValue(normalizeSelectedParamBlockPitchRef, () => {
         if (selectedParamBlockIds.length !== 1) return;
         const block = paramBlocksWithValues.find(
             (item) => logicalBlockId(item) === selectedParamBlockIds[0],
         );
         if (block !== undefined) void normalizeParamBlockPitch(block);
-    };
+    });
     /**
      * 双击块 = 把整块音高归一到最近半音。切分保留右键菜单 / S 键。
      *
@@ -6545,7 +6591,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         },
         [paramBlockHitSlopPx, paramBlockToolActive, paramBlocksWithValues, setCanvasCursor],
     );
-    paramBlockPointerRef.current = onParamBlockPointerDown;
+    useLatestRefValue(paramBlockPointerRef, onParamBlockPointerDown);
     useEffect(() => {
         const handler = (event: Event) => {
             const detail = (
@@ -6775,7 +6821,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                               endSec,
                               averageValue:
                                   existing?.averageValue ??
-                                  paramBlockValueCacheRef.current.get(block.id) ??
+                                  paramBlockValueCacheRef.current.get(block.id)?.value ??
                                   paramBlocksWithValues.find(
                                       (item) => item.startSec < endSec && item.endSec > startSec,
                                   )?.averageValue ??

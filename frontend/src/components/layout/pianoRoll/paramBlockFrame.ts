@@ -20,7 +20,10 @@ export function resolveParamBlockPanelValues(args: {
     /** Viewport midpoint; only used by previews that explicitly opt in. */
     readonly fallbackValue: number;
     /** Last known value per run, used while a refresh is in flight. */
-    readonly previousValues?: ReadonlyMap<string, number>;
+    readonly previousValues?: ReadonlyMap<
+        string,
+        { readonly value: number; readonly startSec: number; readonly endSec: number }
+    >;
     /** Canonical blocks must never guess a center from the viewport. */
     readonly allowFallback?: boolean;
 }): ParamBlock[] {
@@ -40,7 +43,13 @@ export function resolveParamBlockPanelValues(args: {
                       isPitch: args.param === "pitch",
                       param: args.param,
                   });
-        const previous = args.previousValues?.get(block.id) ?? null;
+        const cached = args.previousValues?.get(block.id);
+        const previous =
+            cached !== undefined &&
+            Math.abs(cached.startSec - block.startSec) <= 1e-6 &&
+            Math.abs(cached.endSec - block.endSec) <= 1e-6
+                ? cached.value
+                : null;
         const previewAverage =
             pv === null && args.param === "pitch" && Number.isFinite(block.averageValue)
                 ? block.averageValue
