@@ -61,7 +61,7 @@ import type { BaselineMode, VibratoPreset } from "../../features/vibrato/vibrato
 import type { TempoMap } from "../../utils/tempoMap";
 import { clampDenominator, normalizeTempoMap } from "../../utils/tempoMap";
 import { markProjectDirty } from "./sessionDirtyState";
-import { toggleParamBlockEditingTool } from "../../components/layout/pianoRoll/paramBlockMarquee";
+import { toggleParamBlockEditingTool } from "./toolMode";
 import type { ClipColor, SessionState, StretchAlgorithmOption } from "./sessionSlice/types";
 import { resolveTrackIdForClipSelection } from "./selectionFocus";
 import { applyHistoryDepths } from "./sessionSlice/history";
@@ -1389,8 +1389,8 @@ export const setToolModePersistent = createAsyncThunk<ToolMode, ToolMode>(
 export const toggleParamBlockEditPersistent = createAsyncThunk<ToolMode, void>(
     "session/toggleParamBlockEditPersistent",
     (_, { dispatch, getState }) => {
-        const { toolMode } = (getState() as { session: SessionState }).session;
-        const next = toggleParamBlockEditingTool(toolMode);
+        const { toolMode, drawToolMode } = (getState() as { session: SessionState }).session;
+        const next = toggleParamBlockEditingTool(toolMode, drawToolMode);
         (dispatch as unknown as (action: unknown) => void)(setToolModePersistent(next));
         return next;
     },

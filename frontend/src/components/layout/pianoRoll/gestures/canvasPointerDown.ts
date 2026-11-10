@@ -13,7 +13,7 @@ import {
 import { createEdgeScrollDriver } from "../kernel/edgeScrollDriver";
 import { getDrawPreviewValue } from "../paramValuePreviewLogic";
 import { timeToFrame } from "../utils";
-import { isModifierActive } from "../../../../features/keybindings/keybindingsSlice";
+import { resolveClipSelectionModifiers } from "../../../../features/keybindings/clipSelectionModifiers";
 import type { StrokeMode } from "../types";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import type { ParamBlockPointerDownResult, PointerDeps } from "./pointerDeps";
@@ -78,6 +78,7 @@ type CanvasPointerDownDeps = Pick<
     | "panRef"
     | "paramEditorSeekPlayheadEnabled"
     | "paramMultiSelectKb"
+    | "paramRangeSelectKb"
     | "paramStretchKb"
     | "paramValuePopupEnabled"
     | "paramView"
@@ -209,6 +210,7 @@ export function handleCanvasPointerDown(
         panRef,
         paramEditorSeekPlayheadEnabled,
         paramMultiSelectKb,
+        paramRangeSelectKb,
         paramStretchKb,
         paramValuePopupEnabled,
         paramView,
@@ -345,8 +347,25 @@ export function handleCanvasPointerDown(
                     captureTarget: e.currentTarget,
                     setActivePointerGestureEnd,
                     clearActivePointerGestureEnd,
-                    add: isModifierActive(paramMultiSelectKb, e.nativeEvent),
-                    toggle: isModifierActive(paramMultiSelectKb, e.nativeEvent),
+                    ...(() => {
+                        const selectionMods = resolveClipSelectionModifiers({
+                            event: e.nativeEvent,
+                            multiSelectToggleKb: paramMultiSelectKb,
+                            rangeSelectKb: paramRangeSelectKb,
+                        });
+                        return {
+                            add: selectionMods.multiSelectToggleActive,
+                            toggle: selectionMods.multiSelectToggleActive,
+                            multiSelect: selectionMods.multiSelectToggleActive,
+                            rangeSelect: selectionMods.rangeSelectActive,
+                        };
+                    })(),
+                    pointerFrame: (clientX) => pointerFrame(clientX),
+                    clampSelectionFrame: (frame) =>
+                        Math.min(
+                            frame,
+                            Math.max(0, timeToFrame(dynamicProjectSec, framePeriodMs) - 1),
+                        ),
                     pointerType: e.nativeEvent.pointerType,
                     altKey: e.altKey,
                     shiftKey: e.shiftKey,

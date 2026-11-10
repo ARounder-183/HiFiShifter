@@ -128,7 +128,7 @@ fn project_take_members(
     let mut runs: Vec<(u32, u32, Vec<ProjectedMember>, f64)> = Vec::new();
     for (start, end, member, rate) in projected {
         match runs.last_mut() {
-            Some(run) if start <= run.1.saturating_add(1) => {
+            Some(run) if start <= run.1 => {
                 run.1 = run.1.max(end);
                 run.2.push(member);
             }
@@ -179,45 +179,52 @@ fn project_group_block(
         .iter()
         .any(|child| matches!(child.geometry, BlockGeometry::Root { .. }));
     if has_root {
-        let start = children
+        /*
+         * 根块组必须按每个 child 生成独立 run；min..max 包围盒会把子块之间
+         * 的空白也填成组，等于凭空制造几何。
+         */
+        let mut runs: Vec<(u32, u32)> = children
             .iter()
             .filter_map(|child| match child.geometry {
-                BlockGeometry::Root { ref span } => Some(span.start_sec),
+                BlockGeometry::Root { ref span } => {
+                    let start = (span.start_sec.max(0.0) * 1000.0 / frame_period_ms.max(0.1))
+                        .round() as u32;
+                    let end =
+                        (span.end_sec.max(0.0) * 1000.0 / frame_period_ms.max(0.1)).round() as u32;
+                    (end > start).then_some((start, end))
+                }
                 _ => None,
             })
-            .fold(f64::INFINITY, f64::min);
-        let end = children
-            .iter()
-            .filter_map(|child| match child.geometry {
-                BlockGeometry::Root { ref span } => Some(span.end_sec),
-                _ => None,
-            })
-            .fold(f64::NEG_INFINITY, f64::max);
-        if !(start.is_finite() && end.is_finite()) || end <= start {
+            .collect();
+        runs.sort_by_key(|(start, end)| (*start, *end));
+        if runs.is_empty() {
             return (Vec::new(), 0);
         }
-        let start = (start.max(0.0) * 1000.0 / frame_period_ms.max(0.1)).round() as u32;
-        let end = (end.max(0.0) * 1000.0 / frame_period_ms.max(0.1)).round() as u32;
-        if end <= start {
-            return (Vec::new(), 0);
-        }
+        let count = runs.len();
         return (
-            vec![Candidate {
-                id: block.id.clone(),
-                user_block_id: Some(block.id.clone()),
-                start,
-                end,
-                kind: ProjectedBlockKind::Grouped,
-                members: Vec::new(),
-                value,
-                transition_width_sec,
-                transition_frames: None,
-                rate: 1.0,
-                priority,
-                seq: block.created_seq,
-                z_order: 0,
-                base_cover: None,
-            }],
+            runs.into_iter()
+                .enumerate()
+                .map(|(index, (start, end))| Candidate {
+                    id: if count == 1 {
+                        block.id.clone()
+                    } else {
+                        format!("{}:{}", block.id, index)
+                    },
+                    user_block_id: Some(block.id.clone()),
+                    start,
+                    end,
+                    kind: ProjectedBlockKind::Grouped,
+                    members: Vec::new(),
+                    value,
+                    transition_width_sec,
+                    transition_frames: None,
+                    rate: 1.0,
+                    priority,
+                    seq: block.created_seq,
+                    z_order: 0,
+                    base_cover: None,
+                })
+                .collect(),
             0,
         );
     }
@@ -328,6 +335,45 @@ pub fn project_single_user_block(
     }))
 }
 
+/// 把逻辑块的全部可见 run 合成一个投影块。组算法 / 切分应使用它，
+/// 而不是只看第一个 run。
+pub fn project_logical_user_block(
+    timeline: &TimelineState,
+    block: &UserParamBlock,
+    frame_period_ms: f64,
+) -> Result<Option<ProjectedParamBlock>, String> {
+    let (candidates, _) = project_user_block(timeline, block, frame_period_ms);
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+    let start = candidates
+        .iter()
+        .map(|candidate| candidate.start)
+        .min()
+        .unwrap_or(0);
+    let end = candidates
+        .iter()
+        .map(|candidate| candidate.end)
+        .max()
+        .unwrap_or(0);
+    let members = candidates
+        .iter()
+        .flat_map(|candidate| candidate.members.iter().cloned())
+        .collect();
+    let first = &candidates[0];
+    Ok(Some(ProjectedParamBlock {
+        id: block.id.clone(),
+        user_block_id: Some(block.id.clone()),
+        start_frame: start,
+        end_frame_exclusive: end,
+        transition_frames: first.transition_frames,
+        kind: first.kind,
+        members,
+        value: block.value,
+        base_cover: block.base_cover.clone(),
+    }))
+}
+
 fn anchor_matches(base: &TakeSpan, member: &TakeSpan) -> bool {
     if base.syllable_id.is_some()
         && member.syllable_id.is_some()
@@ -355,6 +401,20 @@ fn base_span_of(candidate: &Candidate) -> Option<&TakeSpan> {
         .and_then(|cover| cover.spans.first())
 }
 
+/// 递归收集组内全部叶子的 base_cover；组本身不携带 base_cover。
+fn collect_base_covers(block: &UserParamBlock) -> Vec<&BaseCover> {
+    let mut covers: Vec<&BaseCover> = Vec::new();
+    if let Some(cover) = block.base_cover.as_ref() {
+        covers.push(cover);
+    }
+    if let BlockGeometry::Group { children } = &block.geometry {
+        for child in children {
+            covers.extend(collect_base_covers(child));
+        }
+    }
+    covers
+}
+
 /// 收集所有会“拥有”这个基块的覆盖区间。
 ///
 /// 普通手工块没有 base_cover，不在这里出现；它只通过占用区间覆盖基块，
@@ -373,8 +433,10 @@ fn cover_intervals_for_base(
         /*
          * 旧版墓碑没有 base_cover：它只有“删除即抑制基块”的语义。为了兼容旧
          * 工程，把 deleted + 无 base_cover 的块按它自己的成员投影区间当作覆盖。
+         * 组则递归收集全部叶子的 base_cover。
          */
-        let Some(cover) = block.base_cover.as_ref() else {
+        let covers = collect_base_covers(block);
+        if covers.is_empty() {
             if block.deleted {
                 for span in block.members() {
                     if span.clip_id != base_span.clip_id
@@ -404,32 +466,34 @@ fn cover_intervals_for_base(
                 }
             }
             continue;
-        };
-        for span in &cover.spans {
-            if span.clip_id != base_span.clip_id
-                || span.take_id != base_span.take_id
-                || span.cycle != base_span.cycle
-            {
-                continue;
-            }
-            if cover.full && anchor_matches(base_span, span) {
-                return vec![(base.start, base.end)];
-            }
-            let Some(clip) = timeline.clips.iter().find(|clip| clip.id == span.clip_id) else {
-                continue;
-            };
-            let Some(take) = clip.take(&span.take_id) else {
-                continue;
-            };
-            let projection = ClipProjection::from_clip_take(clip, take);
-            for interval in project_span(&projection, span, frame_period_ms) {
-                if interval.cycle != span.cycle {
+        }
+        for cover in covers {
+            for span in &cover.spans {
+                if span.clip_id != base_span.clip_id
+                    || span.take_id != base_span.take_id
+                    || span.cycle != base_span.cycle
+                {
                     continue;
                 }
-                let start = base.start.max(interval.start_frame);
-                let end = base.end.min(interval.end_frame_exclusive);
-                if end > start {
-                    intervals.push((start, end));
+                if cover.full && anchor_matches(base_span, span) {
+                    return vec![(base.start, base.end)];
+                }
+                let Some(clip) = timeline.clips.iter().find(|clip| clip.id == span.clip_id) else {
+                    continue;
+                };
+                let Some(take) = clip.take(&span.take_id) else {
+                    continue;
+                };
+                let projection = ClipProjection::from_clip_take(clip, take);
+                for interval in project_span(&projection, span, frame_period_ms) {
+                    if interval.cycle != span.cycle {
+                        continue;
+                    }
+                    let start = base.start.max(interval.start_frame);
+                    let end = base.end.min(interval.end_frame_exclusive);
+                    if end > start {
+                        intervals.push((start, end));
+                    }
                 }
             }
         }

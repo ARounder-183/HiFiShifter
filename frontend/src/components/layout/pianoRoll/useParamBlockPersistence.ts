@@ -12,6 +12,7 @@ import { listen } from "../../../services/hostEvents";
 import { backendDetail } from "../../../services/invoke";
 import {
     normalizeParamBlockEditSet,
+    normalizeParamBlockEditSetWithDiagnostics,
     type ParamBlockEditSet,
     type ParamBlockView,
 } from "./paramBlockTypes";
@@ -128,7 +129,14 @@ export function useParamBlockPersistence(args: {
             root: string,
             reply: { readonly view?: ParamBlockView; readonly edits: ParamBlockEditSet },
         ): ParamBlockSnapshot | null => {
-            const edits = normalizeParamBlockEditSet(reply.edits);
+            const normalized = normalizeParamBlockEditSetWithDiagnostics(reply.edits);
+            if (normalized.diagnostics.length > 0) {
+                console.warn(
+                    "[pianoRoll] dropped malformed parameter blocks:",
+                    normalized.diagnostics.join(", "),
+                );
+            }
+            const edits = normalized.edits;
             const known = server.current.get(root);
             if (known !== undefined && known.edits.revision > edits.revision) return null;
             const snapshot: ParamBlockSnapshot = {

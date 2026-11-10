@@ -841,11 +841,11 @@ export const koKR = {
     param_blocks_normalize_pitch: "피치 정규화",
     param_blocks_delete: "삭제",
     param_blocks_create_from_selection: "선택 범위에서 블록 만들기",
-    param_blocks_select_all: "모든 블록 선택",
-    param_blocks_deselect: "블록 선택 해제",
     status_param_block_edit_rejected: "파라미터 블록 편집이 거부되었습니다",
     status_param_block_split_too_close: "분할 지점이 블록 가장자리에 너무 가깝습니다",
     status_param_block_action_failed: "파라미터 블록 작업이 실패했습니다",
+    status_param_block_not_ready:
+        "파라미터 블록 레이어가 아직 준비되지 않았습니다. 잠시 후 다시 시도하세요.",
     kb_param_block_split: "파라미터 블록 분할",
     kb_param_block_delete: "파라미터 블록 삭제",
     kb_param_block_group: "파라미터 블록 그룹",
@@ -1196,6 +1196,7 @@ export const koKR = {
         "클립 범위를 파라미터 선택 범위에 추가 (누른 채 오른쪽 클릭)",
     kb_modifier_param_multi_select:
         "다중 선택 범위 (누른 채 드래그로 범위 추가, 기존 범위를 누른 채 클릭하면 해당 범위 해제)",
+    kb_modifier_param_range_select: "범위 선택 (누른 채 블록 클릭, 앵커에서 확장)",
     kb_modifier_param_fine_adjust:
         "미세 조정 (누른 채: 슬라이더 / 입력란 휠 / 게인 드래그 / 비브라토 휠)",
     kb_modifier_vibrato_amplitude_adjust: "비브라토 진폭 조절 (비브라토 드래그 중 휠)",

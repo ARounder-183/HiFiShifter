@@ -102,6 +102,40 @@ describe("paramBlockComposition", () => {
         expect(view.blocks[0]?.endFrameExclusive).toBe(200);
     });
 
+    it("projects a root group as one run per child instead of a bounding box", () => {
+        const edits: ParamBlockEditSet = {
+            schemaVersion: 2,
+            revision: 1,
+            blocks: [
+                {
+                    id: "root-group",
+                    geometry: {
+                        kind: "group",
+                        children: [
+                            {
+                                id: "root-a",
+                                geometry: { kind: "root", span: { startSec: 0.1, endSec: 0.3 } },
+                                createdSeq: 1,
+                            },
+                            {
+                                id: "root-b",
+                                geometry: { kind: "root", span: { startSec: 0.5, endSec: 0.7 } },
+                                createdSeq: 2,
+                            },
+                        ],
+                    },
+                    createdSeq: 3,
+                },
+            ],
+        };
+        const view = composeParamBlockView("root", [], edits, 5);
+        expect(view.blocks).toHaveLength(2);
+        expect(view.blocks.map((block) => [block.startFrame, block.endFrameExclusive])).toEqual([
+            [20, 60],
+            [100, 140],
+        ]);
+        expect(view.blocks.every((block) => block.userBlockId === "root-group")).toBe(true);
+    });
     it("moves a merged block when the Take source window slips", () => {
         const slipped = { ...clip, startSec: 1, sourceStartSec: 0.5, sourceEndSec: 2.5 };
         const edits = mergedEdits();

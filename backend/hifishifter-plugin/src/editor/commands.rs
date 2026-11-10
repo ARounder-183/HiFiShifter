@@ -1226,12 +1226,37 @@ pub(super) fn dispatch(
         }
         "restore_game_param_blocks" => {
             let root = input["rootTrackId"].as_str().ok_or("rootTrackId missing")?;
-            return session.restore_game_param_blocks(
-                root,
-                input["startFrame"].as_u64().ok_or("startFrame missing")? as u32,
-                input["endFrameExclusive"]
+            /*
+             * 前端发送的是 ranges（与独立 App 同一契约）；单 range 字段仅作为
+             * 旧调用方的兼容入口保留，不能再成为插件模式的隐藏崩溃点。
+             */
+            let ranges: Vec<(u32, u32)> = if let Some(items) = input["ranges"].as_array() {
+                items
+                    .iter()
+                    .map(|item| {
+                        let start = item["startFrame"]
+                            .as_u64()
+                            .ok_or("ranges.startFrame missing")?
+                            as u32;
+                        let count = item["frameCount"]
+                            .as_u64()
+                            .ok_or("ranges.frameCount missing")?
+                            as u32;
+                        Ok((start, start.saturating_add(count)))
+                    })
+                    .collect::<Result<Vec<_>, String>>()?
+            } else {
+                let start = input["startFrame"]
                     .as_u64()
-                    .ok_or("endFrameExclusive missing")? as u32,
+                    .ok_or("startFrame or ranges missing")? as u32;
+                let end = input["endFrameExclusive"]
+                    .as_u64()
+                    .ok_or("endFrameExclusive or ranges missing")? as u32;
+                vec![(start, end)]
+            };
+            return session.restore_game_param_block_ranges(
+                root,
+                &ranges,
                 input["checkpoint"].as_bool().unwrap_or(true),
             );
         }

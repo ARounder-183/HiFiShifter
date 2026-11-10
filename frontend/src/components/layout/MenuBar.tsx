@@ -1,4 +1,12 @@
-import React, { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import React, {
+    lazy,
+    Suspense,
+    useCallback,
+    useEffect,
+    useMemo,
+    useState,
+    useSyncExternalStore,
+} from "react";
 import {
     isPluginMode,
     canImportHostAudio,
@@ -74,6 +82,14 @@ import {
 } from "../../features/keybindings/focusRouting";
 import { IS_WINDOWS } from "../../utils/platform";
 import { getActiveSurface } from "../../features/uiFocus/focusSurface";
+import {
+    PARAM_BLOCK_MENU_ITEMS,
+    type ParamBlockMenuChannel,
+} from "./pianoRoll/paramBlockMenuModel";
+import {
+    getParamBlockMenuContext,
+    subscribeParamBlockMenuContext,
+} from "./pianoRoll/paramBlockMenuBus";
 import { webApi } from "../../services/webviewApi";
 const KeybindingsDialog = lazy(() =>
     import("./KeybindingsDialog").then((module) => ({ default: module.KeybindingsDialog })),
@@ -188,6 +204,40 @@ const selectMenuBarSession = (state: RootState) => {
         toolMode: session.toolMode,
         tracks: session.tracks,
     };
+};
+
+/** 菜单栏里的参数块条目：与右键菜单共用同一份描述表与实时上下文。 */
+const ParamBlockMenuItems: React.FC<{
+    readonly tf: (key: MessageKey) => string;
+    readonly shortcutLabel: (action: ActionId) => string;
+    readonly onAction: (channel: ParamBlockMenuChannel, op: string) => void;
+}> = ({ tf, shortcutLabel, onAction }) => {
+    const context = useSyncExternalStore(
+        subscribeParamBlockMenuContext,
+        getParamBlockMenuContext,
+        getParamBlockMenuContext,
+    );
+    return (
+        <>
+            {PARAM_BLOCK_MENU_ITEMS.map((item) => (
+                <React.Fragment key={item.key}>
+                    {item.separatorBefore === true ? <DropdownMenu.Separator /> : null}
+                    <DropdownMenu.Item
+                        color={item.danger === true ? "red" : undefined}
+                        disabled={context === null || !item.enabled(context)}
+                        onSelect={() => onAction(item.channel, item.op)}
+                    >
+                        {tf(item.labelKey)}
+                        {item.shortcutAction === undefined ? null : (
+                            <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
+                                {shortcutLabel(item.shortcutAction as ActionId)}
+                            </div>
+                        )}
+                    </DropdownMenu.Item>
+                </React.Fragment>
+            ))}
+        </>
+    );
 };
 
 export const MenuBar: React.FC<MenuBarProps> = ({
@@ -492,10 +542,6 @@ export const MenuBar: React.FC<MenuBarProps> = ({
         },
         [s],
     );
-
-    const dispatchParamBlockEditOp = useCallback((op: string) => {
-        window.dispatchEvent(new CustomEvent("hifi:paramBlockEditOp", { detail: { op } }));
-    }, []);
 
     const handleImportAudioFromMenu = useCallback(async () => {
         try {
@@ -923,116 +969,17 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                                     {tf("param_blocks_tool")}
                                 </DropdownMenu.SubTrigger>
                                 <DropdownMenu.SubContent>
-                                    {(
-                                        [
-                                            [
-                                                "paramBlock.split",
-                                                "param_blocks_split_at_playhead",
-                                                "split",
-                                            ],
-                                            ["paramBlock.group", "param_blocks_group", "group"],
-                                            [
-                                                "paramBlock.ungroup",
-                                                "param_blocks_ungroup",
-                                                "ungroup",
-                                            ],
-                                            [
-                                                "paramBlock.restoreGame",
-                                                "param_blocks_restore_game",
-                                                "restoreGame",
-                                            ],
-                                            [
-                                                "paramBlock.restoreDeleted",
-                                                "param_blocks_restore_deleted",
-                                                "restoreDeleted",
-                                            ],
-                                            [
-                                                "paramBlock.normalizePitch",
-                                                "param_blocks_normalize_pitch",
-                                                "normalizePitch",
-                                            ],
-                                            ["paramBlock.delete", "param_blocks_delete", "delete"],
-                                        ] as const satisfies readonly (readonly [
-                                            ActionId,
-                                            MessageKey,
-                                            string,
-                                        ])[]
-                                    ).map(([actionId, labelKey, op]) => (
-                                        <DropdownMenu.Item
-                                            key={actionId}
-                                            color={
-                                                actionId === "paramBlock.delete" ? "red" : undefined
-                                            }
-                                            onSelect={() => dispatchParamBlockEditOp(op)}
-                                        >
-                                            {tf(labelKey)}
-                                            <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
-                                                {shortcutLabel(actionId)}
-                                            </div>
-                                        </DropdownMenu.Item>
-                                    ))}
-                                    <DropdownMenu.Separator />
-                                    {(
-                                        [
-                                            ["menu_copy", "copy", "edit"],
-                                            ["menu_cut", "cut", "edit"],
-                                            ["menu_paste", "paste", "edit"],
-                                            ["menu_initialize", "initialize", "edit"],
-                                            ["menu_average", "average", "dialog"],
-                                            ["menu_smooth", "smooth", "dialog"],
-                                            ["menu_add_vibrato", "addVibrato", "dialog"],
-                                            ["menu_quantize", "quantize", "dialog"],
-                                            ["menu_mean_quantize", "meanQuantize", "dialog"],
-                                            [
-                                                "menu_convert_volume_to_dyn",
-                                                "convertVolumeToDyn",
-                                                "edit",
-                                            ],
-                                            [
-                                                "menu_convert_dyn_to_volume",
-                                                "convertDynToVolume",
-                                                "edit",
-                                            ],
-                                        ] as const satisfies readonly (readonly [
-                                            MessageKey,
-                                            string,
-                                            "edit" | "dialog",
-                                        ])[]
-                                    ).map(([labelKey, op, channel]) => (
-                                        <DropdownMenu.Item
-                                            key={op}
-                                            onSelect={() => {
-                                                if (channel === "dialog") {
-                                                    window.dispatchEvent(
-                                                        new CustomEvent("hifi:openEditDialog", {
-                                                            detail: { dialog: op },
-                                                        }),
-                                                    );
-                                                } else {
-                                                    dispatchEditOp(op);
-                                                }
-                                            }}
-                                        >
-                                            {tf(labelKey)}
-                                        </DropdownMenu.Item>
-                                    ))}
-                                    <DropdownMenu.Separator />
-                                    <DropdownMenu.Item
-                                        onSelect={() => dispatchParamBlockEditOp("selectAll")}
-                                    >
-                                        {tf("param_blocks_select_all")}
-                                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
-                                            {shortcutLabel("paramBlock.selectAll")}
-                                        </div>
-                                    </DropdownMenu.Item>
-                                    <DropdownMenu.Item
-                                        onSelect={() => dispatchParamBlockEditOp("deselect")}
-                                    >
-                                        {tf("param_blocks_deselect")}
-                                        <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
-                                            {shortcutLabel("paramBlock.deselect")}
-                                        </div>
-                                    </DropdownMenu.Item>
+                                    <ParamBlockMenuItems
+                                        tf={tf}
+                                        shortcutLabel={shortcutLabel}
+                                        onAction={(channel, op) => {
+                                            window.dispatchEvent(
+                                                new CustomEvent("hifi:paramBlockMenuAction", {
+                                                    detail: { channel, op },
+                                                }),
+                                            );
+                                        }}
+                                    />
                                 </DropdownMenu.SubContent>
                             </DropdownMenu.Sub>
                         </>

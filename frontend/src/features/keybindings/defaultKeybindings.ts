@@ -244,6 +244,8 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     // （与时间轴 ⌘/Ctrl + 点击的多选切换同源语义）。默认主修饰键，macOS 上
     // 由 ctrl 字段自动映射为 ⌘（见 platform.ts）。
     "modifier.paramMultiSelect": [{ key: "control", modifierOnly: true, ctrl: true }],
+    // 参数块范围选择：与 Clip 的 Shift 点击同义，从上次点击的锚点扩展到目标块。
+    "modifier.paramRangeSelect": [{ key: "shift", modifierOnly: true, shift: true }],
     "modifier.paramFineAdjust": [{ key: "control", modifierOnly: true, ctrl: true }],
     "modifier.vibratoAmplitudeAdjust": [{ key: "__none__", modifierOnly: true }],
     "modifier.vibratoFrequencyAdjust": [{ key: "alt", modifierOnly: true, alt: true }],
@@ -646,6 +648,13 @@ export const ACTION_META: Record<ActionId, ActionMeta> = {
         //   按键时多选会完全失效。
         // 与之不同目标的场景（时间轴 clip.select、滚轮场景）不列入，避免误报。
         conflictScenes: ["roll.select", "roll.paramDrag", "roll.paramEdge"],
+    },
+    "modifier.paramRangeSelect": {
+        labelKey: "kb_modifier_param_range_select",
+        group: "modParam",
+        modifierOperationType: "click",
+        // 块选择与参数选区框选是同一场景；与 clipNoSnap 的 drag 语义不冲突。
+        conflictScenes: ["roll.select"],
     },
     // 参数编辑器：拖动参数选区边缘 = 拉伸选区。与时间轴的 `modifier.clipStretch`
     // **分离**（此前共用同一个 action，改一处会同时改另一处）。默认同为 Alt，

@@ -18,6 +18,7 @@ import {
 import { buildParamBlockFrameCenters } from "./paramBlockFrame";
 import { ownsParamBlockGesture, type ParamAuthorityWatermark } from "./paramBlockTransaction";
 import { pitchScaleFactorFromDrag, scalePitchAroundCenter } from "./paramBlockPitch";
+import { logicalBlockId } from "./paramBlockTypes";
 
 type Ref<T> = { current: T };
 type LiveEditing = ReturnType<typeof useLiveParamEditing>;
@@ -150,13 +151,17 @@ export type ParamBlockDragStart = {
     /** 按下瞬间的取消吸附键状态（Shift 等，按设置绑定）。 */
     shiftKey?: boolean;
     altKey?: boolean;
+    ctrlKey?: boolean;
+    metaKey?: boolean;
+    /** 未拖动（点击）时执行；用于 Shift 延迟范围选择。 */
+    onClickWithoutDrag?: () => void;
 };
 
 /** Owns one pointer gesture and its queued full-resolution commit. */
 export function beginParamBlockDrag(
     args: ParamBlockDragStart,
     context: ParamBlockDragContext,
-): void {
+): boolean {
     const {
         pitchSnapEnabled,
         paramBlockDragActivityRef,
@@ -191,7 +196,7 @@ export function beginParamBlockDrag(
         resolveValueDelta,
     } = context;
     const pv = paramView;
-    if (!pv || !rootTrackId) return;
+    if (!pv || !rootTrackId) return false;
     /*
      * 预览基准必须是**一次性快照**。
      *
@@ -213,10 +218,25 @@ export function beginParamBlockDrag(
      * 只拖本次手势参与的块：按下的锚点块；若它已在多选集合里，
      * 才把其余选中块一起带走。未选中的块绝不跟着整体平移。
      */
-    const dragIds = new Set<string>(args.selection);
-    dragIds.add(args.anchorBlockId);
-    const selectedBlocks = paramBlocksWithValues.filter((block) => dragIds.has(block.id));
-    if (selectedBlocks.length === 0) return;
+    /*
+     * 锚点已在选区里才拖整个选区；否则只拖锚点。Ctrl 点击"移除"后
+     * targetSelected=false，调用方不会启动拖动；这里仍保留这条规则，
+     * 防止 Shift / 右键等路径误把未选中的块并进拖动。
+     */
+    const selectionIds = new Set(args.selection.map(String));
+    const anchorLogicalId = logicalBlockId(
+        paramBlocksWithValues.find((block) => block.id === args.anchorBlockId) ?? {
+            id: args.anchorBlockId,
+        },
+    );
+    const anchorInSelection =
+        selectionIds.has(anchorLogicalId) || selectionIds.has(args.anchorBlockId);
+    const dragIds = new Set<string>(anchorInSelection ? args.selection : [anchorLogicalId]);
+    dragIds.add(anchorLogicalId);
+    const selectedBlocks = paramBlocksWithValues.filter((block) =>
+        dragIds.has(logicalBlockId(block)),
+    );
+    if (selectedBlocks.length === 0) return false;
     const gestureToken = ++paramBlockGestureSerialRef.current;
     /*
      * 成员的来源区间可能彼此重叠（自动归并块 / 手动合并块）。
@@ -231,15 +251,24 @@ export function beginParamBlockDrag(
     );
     const dragBlocks = [{ members: dragMembers }];
     const pitchScaleDrag = editParam === "pitch" && args.pitchScale === true;
+    const anchorBlockForScale =
+        selectedBlocks.find((block) => block.id === args.anchorBlockId) ??
+        selectedBlocks.find((block) => logicalBlockId(block) === anchorLogicalId) ??
+        selectedBlocks[0];
+    const pitchScaleBlocks = selectedBlocks.filter(
+        (block) =>
+            logicalBlockId(block) ===
+            logicalBlockId(anchorBlockForScale ?? { id: anchorLogicalId }),
+    );
     const pitchScaleCenter =
-        selectedBlocks.length === 1
+        pitchScaleDrag && pitchScaleBlocks.length > 0
             ? resolveParamBlockCommitDisplayCenter({
                   rawCenter:
                       args.anchorValue !== undefined &&
                       args.anchorValue !== null &&
                       Number.isFinite(args.anchorValue)
                           ? args.anchorValue
-                          : (selectedBlocks[0]?.averageValue ?? null),
+                          : (anchorBlockForScale?.averageValue ?? null),
                   param: editParam,
                   continuous: false,
               })
@@ -344,9 +373,10 @@ export function beginParamBlockDrag(
     let lastDelta = 0;
     let lastClientY = args.clientY;
     let lastSnapToggleHeld = snapToggleHeldAt({
-        ctrlKey: false,
+        ctrlKey: args.ctrlKey === true,
         shiftKey: args.shiftKey === true,
         altKey: args.altKey === true,
+        metaKey: args.metaKey === true,
     });
     const effectivePitchSnap = (toggle: boolean): boolean =>
         toggle ? !pitchSnapEnabled : pitchSnapEnabled;
@@ -369,52 +399,50 @@ export function beginParamBlockDrag(
          * Only the optional live mirror is window-specific.
          */
         const livePv = pvNow?.key === pv.key ? pvNow : null;
-        const scaleValues =
+        const scaleSegments =
             pitchScaleValues === null
                 ? null
-                : (() => {
+                : pitchScaleBlocks.map((block) => {
                       const startFrame = Math.max(
                           0,
-                          Math.round(((selectedBlocks[0]?.startSec ?? 0) * 1000) / framePeriodMs),
+                          Math.round((block.startSec * 1000) / framePeriodMs),
                       );
                       const endFrame = Math.max(
                           startFrame,
-                          Math.round(
-                              ((selectedBlocks.at(-1)?.endSec ?? 0) * 1000) / framePeriodMs,
-                          ) - 1,
+                          Math.round((block.endSec * 1000) / framePeriodMs) - 1,
                       );
-                      return scalePitchAroundCenter({
-                          values: readPvRange({ ...pv, edit: startBase }, startFrame, endFrame),
-                          center: pitchScaleCenter,
-                          factor: pitchScaleFactorFromDrag(lastDelta * 24),
-                      });
-                  })();
-        if (scaleValues !== null) {
-            const startFrame = Math.max(
-                0,
-                Math.round(((selectedBlocks[0]?.startSec ?? 0) * 1000) / framePeriodMs),
-            );
+                      return {
+                          startFrame,
+                          values: scalePitchAroundCenter({
+                              values: readPvRange({ ...pv, edit: startBase }, startFrame, endFrame),
+                              center: pitchScaleCenter,
+                              factor: pitchScaleFactorFromDrag(lastDelta * 24),
+                          }),
+                      };
+                  });
+        if (scaleSegments !== null) {
             /*
              * Alt 缩放只更新 live 草稿，不能每帧把预览写进权威
-             * `paramView`。后者会触发取数、重新派生和另一条异步重绘，
-             * 表现为块上下抖动。块中心由 displayCenterLock 冻结。
+             * `paramView`。多 run 块逐 run 缩放，中间空隙不写入。
              */
             if (livePv !== null) {
                 resetLiveEditPreview(livePv);
-                applyDenseToLiveEdit(
-                    livePv,
-                    startFrame,
-                    scaleValues,
-                    pv.startFrame,
-                    startFrame + scaleValues.length - 1,
-                    "draw",
-                );
+                for (const segment of scaleSegments) {
+                    applyDenseToLiveEdit(
+                        livePv,
+                        segment.startFrame,
+                        segment.values,
+                        pv.startFrame,
+                        segment.startFrame + segment.values.length - 1,
+                        "draw",
+                    );
+                }
             }
             paramBlockInteractionCurveRef.current = {
                 ...pv,
                 edit: applyFullResSegmentsToParamView({
                     paramView: { ...pv, edit: startBase },
-                    segments: [{ startFrame, values: scaleValues }],
+                    segments: scaleSegments,
                 }).edit,
             };
             const scaleSnapshot = paramBlockDragSnapshotRef.current;
@@ -547,6 +575,11 @@ export function beginParamBlockDrag(
             if (releaseEvent !== null) lastSnapToggleHeld = snapToggleHeldAt(releaseEvent);
         }
         if (reason === "cancel" || !didDrag) {
+            /*
+             * 点击（未拖动）必须在 rollback 早退之前回调：手势可能从未
+             * activate（rollback === null），但 Shift 延迟选择仍然要落地。
+             */
+            if (reason === "up" && !didDrag) args.onClickWithoutDrag?.();
             // A click has not acquired the visual transaction or the refresh guard.
             if (rollback === null) return;
             const previous = rollback.commit?.failed === true ? null : rollback;
@@ -680,36 +713,33 @@ export function beginParamBlockDrag(
                     });
                     let scaleWindows: Array<{ startFrame: number; values: number[] }> | null = null;
                     if (pitchScaleValues !== null) {
-                        const block = selectedBlocks[0];
-                        if (block !== undefined) {
-                            const startFrame = Math.max(
-                                0,
-                                Math.floor((block.startSec * 1000) / framePeriodMs),
-                            );
-                            const endFrame = Math.max(
-                                startFrame,
-                                Math.ceil((block.endSec * 1000) / framePeriodMs) - 1,
-                            );
-                            const curve = await fetchFullResCurve({
-                                trackId: rootTrackId,
-                                param: "pitch",
-                                startFrame,
-                                endFrame,
-                                paramView: null,
-                            });
-                            scaleWindows = [
-                                {
+                        scaleWindows = await Promise.all(
+                            pitchScaleBlocks.map(async (block) => {
+                                const startFrame = Math.max(
+                                    0,
+                                    Math.floor((block.startSec * 1000) / framePeriodMs),
+                                );
+                                const endFrame = Math.max(
+                                    startFrame,
+                                    Math.ceil((block.endSec * 1000) / framePeriodMs) - 1,
+                                );
+                                const curve = await fetchFullResCurve({
+                                    trackId: rootTrackId,
+                                    param: "pitch",
+                                    startFrame,
+                                    endFrame,
+                                    paramView: null,
+                                });
+                                return {
                                     startFrame,
                                     values: scalePitchAroundCenter({
                                         values: curve.values,
                                         center: pitchScaleCenter,
                                         factor: pitchScaleFactorFromDrag(commitDelta * 24),
                                     }),
-                                },
-                            ];
-                        } else {
-                            scaleWindows = [];
-                        }
+                                };
+                            }),
+                        );
                     }
                     const commitSegments = scaleWindows ?? windows;
                     if (commitSegments.length === 0)
@@ -833,4 +863,5 @@ export function beginParamBlockDrag(
         registerEnd: args.setActivePointerGestureEnd,
         clearEnd: args.clearActivePointerGestureEnd,
     });
+    return true;
 }

@@ -58,7 +58,7 @@ const labels: Record<string, string> = {
 const tf = (key: string): string => labels[key] ?? key;
 
 const context: ParamBlockMenuContext = {
-    canSplit: true,
+    canSplit: () => true,
     canGroup: true,
     canUngroup: false,
     canDelete: true,
@@ -108,15 +108,16 @@ test("参数项按参数类型与选区禁用，而不是消失", async () => {
                     ...context,
                     hasSelection: false,
                     isPitch: false,
-                    canSplit: false,
+                    canSplit: () => false,
                     canGroup: false,
                 }}
             />,
         );
     });
     const byLabel = (label: string) => items().find((item) => item.textContent?.trim() === label);
-    expect(byLabel("复制")?.disabled).toBe(true);
-    expect(byLabel("初始化")?.disabled).toBe(true);
+    // copy / initialize 走 handleEditOp 的隐式全选，菜单不能比快捷键更严。
+    expect(byLabel("复制")?.disabled).toBe(false);
+    expect(byLabel("初始化")?.disabled).toBe(false);
     expect(byLabel("粘贴")?.disabled).toBe(false);
     expect(byLabel("全选")?.disabled).toBe(false);
     expect(byLabel("在播放头处切开")?.disabled).toBe(true);

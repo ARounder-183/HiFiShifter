@@ -32,7 +32,7 @@ function model(overrides: Record<string, unknown> = {}) {
         dispatch: vi.fn(),
         handleParamBlockMenuAction: vi.fn(),
         paramBlockMenuContext: {
-            canSplit: false,
+            canSplit: () => false,
             canGroup: false,
             canUngroup: false,
             canDelete: false,

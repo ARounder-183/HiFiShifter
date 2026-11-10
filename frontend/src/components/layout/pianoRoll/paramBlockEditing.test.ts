@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
     createUserBlock,
+    placeUserBlock,
     deleteProjectedBlocks,
     ensureEditableUserBlock,
     groupProjectedBlocks,
@@ -193,8 +194,10 @@ describe("paramBlockEditing", () => {
             5,
         );
         expect(shortened.targetSpan).toEqual({ startFrame: 0, endFrameExclusive: 50 });
-        expect(shortened.edits.blocks).toHaveLength(1);
-        expect(shortened.edits.blocks[0]?.id).not.toBe(view.blocks[0]?.id);
+        // 被缩掉的 base 派生 child 变成墓碑；组退化为剩下的 child。
+        expect(shortened.edits.blocks).toHaveLength(2);
+        expect(shortened.edits.blocks.some((block) => block.deleted === true)).toBe(true);
+        expect(shortened.edits.blocks.some((block) => block.deleted !== true)).toBe(true);
         const extended = planResizeProjectedBlock(
             [clip],
             shortened.edits,
@@ -210,6 +213,210 @@ describe("paramBlockEditing", () => {
         expect(extended.targetSpan?.endFrameExclusive).toBe(150);
     });
 
+    it("does not resurrect base blocks when a group is shortened", () => {
+        const base = composeParamBlockView(
+            "root",
+            [clip],
+            { schemaVersion: 2, revision: 0, blocks: [] },
+            5,
+        );
+        const grouped = groupProjectedBlocks(
+            [clip],
+            { schemaVersion: 2, revision: 0, blocks: [] },
+            base.blocks,
+            5,
+        );
+        const view = composeParamBlockView("root", [clip], grouped, 5);
+        const shortened = planResizeProjectedBlock(
+            [clip],
+            grouped,
+            view.blocks[0]!,
+            "right",
+            150,
+            5,
+        );
+        const after = composeParamBlockView("root", [clip], shortened.edits, 5);
+        expect(after.blocks.filter((block) => block.kind === "base")).toHaveLength(0);
+        expect(
+            shortened.edits.blocks.some((block) => block.id === view.blocks[0]?.userBlockId),
+        ).toBe(true);
+        const tighter = planResizeProjectedBlock([clip], grouped, view.blocks[0]!, "right", 50, 5);
+        const afterTight = composeParamBlockView("root", [clip], tighter.edits, 5);
+        expect(afterTight.blocks.filter((block) => block.kind === "base")).toHaveLength(0);
+    });
+
+    it("splits a multi-run block as one logical block", () => {
+        const edits = {
+            schemaVersion: 2 as const,
+            revision: 1,
+            blocks: [
+                {
+                    id: "multi",
+                    geometry: {
+                        kind: "take" as const,
+                        members: [
+                            {
+                                clipId: "clip",
+                                takeId: "clip_take_1",
+                                cycle: 0,
+                                sourceStartSec: 0,
+                                sourceEndSec: 0.2,
+                                label: "manual" as const,
+                            },
+                            {
+                                clipId: "clip",
+                                takeId: "clip_take_1",
+                                cycle: 0,
+                                sourceStartSec: 0.6,
+                                sourceEndSec: 0.8,
+                                label: "manual" as const,
+                            },
+                        ],
+                    },
+                    deleted: false,
+                    manual: true,
+                    value: 60,
+                    createdSeq: 1,
+                },
+            ],
+        };
+        const view = composeParamBlockView("root", [clip], edits, 5);
+        const first = view.blocks.find((block) => block.userBlockId === "multi");
+        if (first === undefined) throw new Error("multi run missing");
+        const plan = planSplitProjectedBlock([clip], edits, first, 20, 5);
+        const after = composeParamBlockView("root", [clip], plan.edits, 5);
+        const left = after.blocks.filter((block) => block.userBlockId === plan.leftBlockId);
+        const right = after.blocks.filter((block) => block.userBlockId === plan.rightBlockId);
+        expect(left).toHaveLength(1);
+        expect(right).toHaveLength(2);
+        expect(left[0]?.startFrame).toBe(0);
+        expect(right[0]?.startFrame).toBe(20);
+        expect(right[1]?.startFrame).toBe(120);
+    });
+
+    it("resizes only the grabbed run of a multi-run block", () => {
+        const edits = {
+            schemaVersion: 2 as const,
+            revision: 1,
+            blocks: [
+                {
+                    id: "multi",
+                    geometry: {
+                        kind: "take" as const,
+                        members: [
+                            {
+                                clipId: "clip",
+                                takeId: "clip_take_1",
+                                cycle: 0,
+                                sourceStartSec: 0,
+                                sourceEndSec: 0.2,
+                                label: "manual" as const,
+                            },
+                            {
+                                clipId: "clip",
+                                takeId: "clip_take_1",
+                                cycle: 0,
+                                sourceStartSec: 0.6,
+                                sourceEndSec: 0.8,
+                                label: "manual" as const,
+                            },
+                        ],
+                    },
+                    deleted: false,
+                    manual: true,
+                    value: 60,
+                    createdSeq: 1,
+                },
+            ],
+        };
+        const view = composeParamBlockView("root", [clip], edits, 5);
+        const first = view.blocks.find((block) => block.userBlockId === "multi");
+        if (first === undefined) throw new Error("multi run missing");
+        const plan = planResizeProjectedBlock([clip], edits, first, "right", 20, 5);
+        const after = composeParamBlockView("root", [clip], plan.edits, 5);
+        const runs = after.blocks.filter((block) => block.userBlockId === "multi");
+        expect(runs.map((block) => [block.startFrame, block.endFrameExclusive])).toEqual([
+            [0, 20],
+            [120, 160],
+        ]);
+    });
+
+    it("trims a group recursively when a new block covers part of it", () => {
+        const group: import("./paramBlockTypes").UserParamBlock = {
+            id: "group",
+            geometry: {
+                kind: "group",
+                children: [
+                    {
+                        id: "child-a",
+                        geometry: {
+                            kind: "take",
+                            members: [
+                                {
+                                    clipId: "clip",
+                                    takeId: "clip_take_1",
+                                    cycle: 0,
+                                    sourceStartSec: 0,
+                                    sourceEndSec: 0.5,
+                                    label: "manual",
+                                },
+                            ],
+                        },
+                        manual: true,
+                        createdSeq: 1,
+                    },
+                    {
+                        id: "child-b",
+                        geometry: {
+                            kind: "take",
+                            members: [
+                                {
+                                    clipId: "clip",
+                                    takeId: "clip_take_1",
+                                    cycle: 0,
+                                    sourceStartSec: 0.5,
+                                    sourceEndSec: 1,
+                                    label: "manual",
+                                },
+                            ],
+                        },
+                        manual: true,
+                        createdSeq: 2,
+                    },
+                ],
+            },
+            manual: true,
+            createdSeq: 3,
+        };
+        const target: import("./paramBlockTypes").UserParamBlock = {
+            id: "target",
+            geometry: {
+                kind: "take",
+                members: [
+                    {
+                        clipId: "clip",
+                        takeId: "clip_take_1",
+                        cycle: 0,
+                        sourceStartSec: 0.2,
+                        sourceEndSec: 0.4,
+                        label: "manual",
+                    },
+                ],
+            },
+            manual: true,
+            createdSeq: 4,
+        };
+        const next = placeUserBlock({ schemaVersion: 2, revision: 0, blocks: [group] }, target);
+        const groupAfter = next.blocks.find((block) => block.id === "group");
+        expect(groupAfter?.geometry.kind).toBe("group");
+        if (groupAfter?.geometry.kind !== "group") return;
+        const members = groupAfter.geometry.children.flatMap((child) =>
+            child.geometry.kind === "take" ? child.geometry.members : [],
+        );
+        expect(
+            members.some((member) => member.sourceStartSec < 0.4 && member.sourceEndSec > 0.2),
+        ).toBe(false);
+    });
     it("groups adjacent projected blocks reversibly and splits at a frame", () => {
         const base = composeParamBlockView(
             "root",

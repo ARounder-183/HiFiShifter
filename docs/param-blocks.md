@@ -55,6 +55,16 @@ game baseline                      playback_rate / reverse        参数块编�
 - 还原 GAME：只生成与目标帧范围相交的 baseline 源域片段，并裁剪相交用户块，不再“相交就删整块”。入口接受**多段**范围（`restore_game_block_ranges`），每段独立还原，段间保持原样。
 - 新建块：调用方传入的 `blockId` 必须成为实际 `UserParamBlock.id`，预览 / 选择 / 交接共用同一个 id。
 
+## 选择与编辑作用域
+
+- 块选择没有独立状态：选区（selectionRef / selectionUi）是唯一真值，块高亮由「完整覆盖」派生。一个逻辑块的全部可见 run 都被选区覆盖，它才进入 selectedParamBlockIds。
+- 逻辑块身份是 userBlockId ?? id。多 run 用户块在点击、Ctrl 切换、Shift 范围、拖动、删除、编组、取消编组、归一化、恢复与菜单计数中都是一个单位；只有绘制 / 命中 / 过渡手柄看单个 run。
+- Ctrl / Cmd + 点击块：切换该逻辑块的成员资格。Shift + 点击块：从锚点到目标块按整块范围选择；Ctrl + Shift 退化为普通单选。Alt 不参与选择。
+- 点击与拖动以 3px 死区区分。Shift 点击延迟到 pointerup 才应用范围选择，因此 Shift + 拖动仍然是临时反转吸附的块拖动。Ctrl 点击移除块后不会启动拖动。
+- 块选择动作同时写入参数编辑器选区；切换工具不清空选区，块高亮只在块工具显示。块工具内的背景拖动会把碰到的逻辑块扩展为全部 run，保证高亮与 Delete / Group 的作用域一致。
+- 锚点只服务 Shift：普通点击、Ctrl 点击、Shift 点击都会更新锚点；背景拖动结束落在起点块；清空 / 根切换清空。
+- 组伸缩与删除递归保留 baseCover：组的基块所有权等于全部叶子 child 的 baseCover 并集；被缩掉 / 丢弃的 base 派生 child 生成墓碑，避免基块复活。组 resize 保持组 id；根块组按 child 生成多个 run，不填满空隙。
+
 ## 持久化与版本
 
 - App 工程版本：7。`TrackParamsState.param_block_edits` 持久化；`param_block_view` 不持久化。

@@ -211,6 +211,11 @@ export function usePianoRollInteractions(args: {
         readonly clientX: number;
         readonly add: boolean;
         readonly toggle: boolean;
+        readonly multiSelect: boolean;
+        readonly rangeSelect: boolean;
+        readonly pointerFrame?: (clientX: number) => number;
+        readonly clampSelectionFrame?: (frame: number) => number;
+        readonly edgeScroll?: { step(clientX: number): void };
         readonly pointerType: string;
         readonly pointerId: number;
         readonly captureTarget: HTMLCanvasElement;
@@ -316,6 +321,8 @@ export function usePianoRollInteractions(args: {
     paramMorphKb: Keybinding;
     /** modifier.paramMultiSelect 绑定（按住拖动追加选区段 / 点击取消该段） */
     paramMultiSelectKb: Keybinding;
+    /** modifier.paramRangeSelect 绑定（Shift 点击块范围选择） */
+    paramRangeSelectKb: Keybinding;
     /** modifier.paramFineAdjust 绑定 */
     paramFineAdjustKb: Keybinding;
     /** `modifier.paramStretch` 绑定（选择工具下参数选区边缘拉伸） */
@@ -490,6 +497,7 @@ export function usePianoRollInteractions(args: {
         scrollbarZoomKb,
         paramMorphKb,
         paramMultiSelectKb,
+        paramRangeSelectKb,
         paramFineAdjustKb,
         paramStretchKb,
         vibratoAmplitudeAdjustKb,
@@ -2447,6 +2455,7 @@ export function usePianoRollInteractions(args: {
                     panRef,
                     paramEditorSeekPlayheadEnabled,
                     paramMultiSelectKb,
+                    paramRangeSelectKb,
                     paramStretchKb,
                     paramValuePopupEnabled,
                     paramView,
@@ -2522,6 +2531,7 @@ export function usePianoRollInteractions(args: {
             selectionRef,
             updateSelectionUi,
             paramMultiSelectKb,
+            paramRangeSelectKb,
             findStretchSelectionEdge,
             isPointerNearDraggableSelection,
             frameToViewportPx,

@@ -349,26 +349,24 @@ describe("splitParamBlock", () => {
          */
         const edits = gapMemberEdits();
         const blocks = panelBlocks([clip()], edits);
-        expect(blocks).toHaveLength(1);
-        const block = blocks[0];
-        if (block?.projected === undefined) throw new Error("block missing");
-        expect([block.projected.startFrame, block.projected.endFrameExclusive]).toEqual([0, 200]);
-        expect(block.kind).toBe("user");
-
-        const result = splitParamBlock({
-            state: state(edits),
-            block,
-            sec: (100 * FRAME_MS) / 1000,
-            clips: [clip()],
-        });
-        expect(result.ok).toBe(true);
-        if (!result.ok) return;
-        const split = panelBlocks([clip()], result.state.editSet);
-        // 1 帧缝里会露出基块余段；用户块仍应恰好两块。
-        const userBlocks = split.filter((block) => block.kind !== "auto");
+        /*
+         * 1 帧缝必须保持为缝：两个用户 run + 中间露出的基块余段。
+         * 旧实现用 <= last.end + 1 把缝吞成一个连续 run，等于凭空抹掉了
+         * 源域里的空洞。
+         */
+        expect(blocks).toHaveLength(3);
+        const userBlocks = blocks.filter((block) => block.kind === "user");
         expect(userBlocks).toHaveLength(2);
-        expect(userBlocks[0]?.projected?.startFrame).toBe(0);
-        expect(userBlocks[1]?.projected?.endFrameExclusive).toBe(200);
+        expect([
+            userBlocks[0]?.projected?.startFrame,
+            userBlocks[0]?.projected?.endFrameExclusive,
+        ]).toEqual([0, 100]);
+        expect([
+            userBlocks[1]?.projected?.startFrame,
+            userBlocks[1]?.projected?.endFrameExclusive,
+        ]).toEqual([101, 200]);
+        const gap = blocks.find((block) => block.kind === "auto");
+        expect([gap?.projected?.startFrame, gap?.projected?.endFrameExclusive]).toEqual([100, 101]);
     });
 
     /*
@@ -379,19 +377,23 @@ describe("splitParamBlock", () => {
      */
     it("块内每个帧号：可切 ⟺ 切得成", () => {
         const edits = gapMemberEdits();
-        const blocks = panelBlocks([clip()], edits);
-        const block = blocks[0];
-        if (block?.projected === undefined) throw new Error("block missing");
-        for (let frame = 0; frame <= 205; frame += 1) {
-            const sec = (frame * FRAME_MS) / 1000;
-            const splittable = resolveSplittableParamBlockAt(blocks, sec, FRAME_MS) !== null;
-            const result = splitParamBlock({
-                state: state(edits),
-                block,
-                sec,
-                clips: [clip()],
-            });
-            expect({ frame, ok: result.ok }).toEqual({ frame, ok: splittable });
+        const blocks = panelBlocks([clip()], edits).filter((block) => block.kind === "user");
+        for (const block of blocks) {
+            if (block.projected === undefined) continue;
+            for (
+                let frame = block.projected.startFrame + 1;
+                frame < block.projected.endFrameExclusive;
+                frame += 1
+            ) {
+                const sec = (frame * FRAME_MS) / 1000;
+                const result = splitParamBlock({
+                    state: state(edits),
+                    block,
+                    sec,
+                    clips: [clip()],
+                });
+                expect({ frame, ok: result.ok }).toEqual({ frame, ok: true });
+            }
         }
     });
 });

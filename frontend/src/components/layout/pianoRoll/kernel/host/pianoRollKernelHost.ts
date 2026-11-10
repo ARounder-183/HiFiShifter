@@ -394,6 +394,9 @@ export interface PianoRollKernelHost {
         readonly heightPx: number;
         /** 与像素同源的代表值（live 曲线主簇中心）。 */
         readonly averageValue: number;
+        /** 块是否被完整选中 / 悬停；过渡手柄只在可见时参与命中。 */
+        readonly selected?: boolean;
+        readonly hovered?: boolean;
         /** 与像素同源的块中心 y（CSS px，视口坐标）。 */
         readonly centerYPx: number;
         /** 相接块边界的圆滑手柄；null = 该块右侧没有相接邻居。 */
@@ -1214,6 +1217,8 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             topPx: number;
             heightPx: number;
             averageValue: number;
+            selected?: boolean;
+            hovered?: boolean;
             centerYPx: number;
             transitionHandle?: {
                 readonly sec: number;
@@ -1243,7 +1248,12 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                           param,
                           curveOwned: spec.curveOwned,
                       });
-                const displayValue = value;
+                const displayValue =
+                    value ??
+                    block.averageValue ??
+                    (Number.isFinite(spec.valueMin) && Number.isFinite(spec.valueMax)
+                        ? (spec.valueMin + spec.valueMax) / 2
+                        : null);
                 if (
                     displayValue == null ||
                     !Number.isFinite(displayValue) ||
@@ -1302,6 +1312,8 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                     topPx,
                     heightPx: displayHeightPx,
                     averageValue: displayValue,
+                    selected: block.selected === true,
+                    hovered: (block as { hovered?: boolean }).hovered === true,
                     centerYPx,
                     transitionHandle: block.transitionHandle ?? null,
                 });

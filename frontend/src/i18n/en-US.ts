@@ -910,11 +910,11 @@ export const enUS = {
     param_blocks_normalize_pitch: "Normalize pitch",
     param_blocks_delete: "Delete",
     param_blocks_create_from_selection: "Create block from selection",
-    param_blocks_select_all: "Select all blocks",
-    param_blocks_deselect: "Deselect blocks",
     status_param_block_edit_rejected: "Parameter block edit rejected",
     status_param_block_split_too_close: "Split point is too close to the block edge",
     status_param_block_action_failed: "Parameter block action failed",
+    status_param_block_not_ready:
+        "The parameter block layer is not ready yet. Please try again shortly.",
     kb_param_block_split: "Split parameter block",
     kb_param_block_delete: "Delete parameter block",
     kb_param_block_group: "Group parameter blocks",
@@ -1262,6 +1262,7 @@ export const enUS = {
         "Add Clip Range to Param Selection (hold + right-click a clip)",
     kb_modifier_param_multi_select:
         "Multi-Range Select (hold + drag to add a range; hold + click an existing range to remove it)",
+    kb_modifier_param_range_select: "Range Select (hold + click a block, extends from anchor)",
     kb_modifier_param_fine_adjust:
         "Fine Adjust (hold: sliders / input wheel / gain drag / vibrato wheel)",
     kb_modifier_vibrato_amplitude_adjust: "Vibrato Amplitude (wheel during vibrato drag)",

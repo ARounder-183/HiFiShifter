@@ -779,11 +779,11 @@ export const jaJP = {
     param_blocks_normalize_pitch: "ピッチ正規化",
     param_blocks_delete: "削除",
     param_blocks_create_from_selection: "選択範囲からブロックを作成",
-    param_blocks_select_all: "すべてのブロックを選択",
-    param_blocks_deselect: "ブロックの選択を解除",
     status_param_block_edit_rejected: "パラメータブロック編集が拒否されました",
     status_param_block_split_too_close: "分割位置がブロックの端に近すぎます",
     status_param_block_action_failed: "パラメータブロック操作に失敗しました",
+    status_param_block_not_ready:
+        "パラメータブロック層の準備ができていません。しばらくしてから再試行してください。",
     kb_param_block_split: "パラメータブロックを分割",
     kb_param_block_delete: "パラメータブロックを削除",
     kb_param_block_group: "パラメータブロックをグループ化",
@@ -1137,6 +1137,7 @@ export const jaJP = {
         "クリップ範囲をパラメーター選択範囲に追加（押しながら右クリック）",
     kb_modifier_param_multi_select:
         "複数選択範囲（押しながらドラッグで範囲を追加、既存の範囲を押しながらクリックで解除）",
+    kb_modifier_param_range_select: "範囲選択（押しながらブロックをクリック、アンカーから拡張）",
     kb_modifier_param_fine_adjust:
         "微調整（押しながら：スライダー / 入力欄ホイール / ゲインドラッグ / ビブラートホイール）",
     kb_modifier_vibrato_amplitude_adjust: "ビブラート振幅調整（ビブラートドラッグ中ホイール）",

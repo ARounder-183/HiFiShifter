@@ -60,6 +60,8 @@ type PianoRollEditCommandInputs = Pick<
 > & {
     /** 可滚域时长（全选的右边界）。 */
     dynamicProjectSec: number;
+    /** 块工具下最后一个逻辑块的末端帧；Ctrl+A 必须完整覆盖它。 */
+    paramBlockExtentFrame?: () => number;
     /** 交互层持有的稳定命令入口（渲染期刷新，见文件头）。 */
     handleEditActionRef: RefObject<(op: string) => void>;
     /** 打开颤音窗口（命令分发里的一条路由）。 */
@@ -88,6 +90,7 @@ export function usePianoRollEditCommands({
     currentParamRange,
     dispatch,
     dynamicProjectSec,
+    paramBlockExtentFrame,
     editParam,
     effectiveProjectScale,
     handleEditActionRef,
@@ -132,13 +135,20 @@ export function usePianoRollEditCommands({
         const totalFrames = Math.max(
             0,
             timeToFrame(dynamicProjectSec, paramView?.framePeriodMs ?? 5),
+            s.toolMode === "block" ? (paramBlockExtentFrame?.() ?? 0) : 0,
         );
         selectionRef.current = selectionFromFrames(0, totalFrames);
         setSelectionUi(selectionRef.current);
         invalidate();
         return true;
         // eslint-disable-next-line react-hooks/exhaustive-deps -- selectionRef 是面板的 useRef 结果、setSelectionUi 是面板 useState 的 setter（按构造稳定）
-    }, [s.toolMode, dynamicProjectSec, paramView?.framePeriodMs, invalidate]);
+    }, [
+        s.toolMode,
+        dynamicProjectSec,
+        paramBlockExtentFrame,
+        paramView?.framePeriodMs,
+        invalidate,
+    ]);
 
     // ── Edit operation handler (shared by context menu + MenuBar events) ──
     const handleEditOp = useCallback(

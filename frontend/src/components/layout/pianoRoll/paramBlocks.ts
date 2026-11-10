@@ -31,6 +31,8 @@ import { getDrawPreviewValue } from "./paramValuePreviewLogic";
 import type { ScaleLike } from "../../../utils/musicalScales";
 import {
     EMPTY_PARAM_BLOCK_EDIT_SET,
+    blockMatchesLogicalId,
+    logicalBlockId,
     type ParamBlockEditSet,
     type ParamBlockView,
     type ProjectedParamBlock,
@@ -359,6 +361,8 @@ export function hitTestParamBlockTransitionHandles<
         readonly id?: string;
         readonly topPx: number;
         readonly heightPx: number;
+        readonly selected?: boolean;
+        readonly hovered?: boolean;
         readonly transitionHandle?: {
             readonly sec: number;
             readonly leftId: string;
@@ -409,6 +413,8 @@ export function hitTestParamBlockTransitionHandles<
     for (const block of args.blocks) {
         const handle = block.transitionHandle;
         if (handle === null || handle === undefined) continue;
+        // 手柄只在块被选中 / 悬停时绘制；不可见的手柄不能抢命中。
+        if (block.selected !== true && block.hovered !== true) continue;
         const x = args.secToX(handle.sec);
         const handleX = x + outsetX;
         const handleY = paramBlockTransitionHandleY(
@@ -1213,24 +1219,36 @@ export function canGroupParamBlocks(
     blocks: readonly ParamBlock[],
     selectedIds: readonly string[],
 ): boolean {
-    if (selectedIds.length < 2) return false;
-    const seen = new Set<string>();
-    const selected = sortParamBlocksByTime(
-        blocks.filter((block) => {
-            if (!selectedIds.includes(block.id)) return false;
-            const identity = block.userBlockId ?? block.id;
-            if (seen.has(identity)) return false;
-            seen.add(identity);
-            return true;
-        }),
-    );
-    if (selected.length < 2) return false;
-    if (selected.some((block) => block.rootTrackId !== selected[0].rootTrackId)) return false;
-    const hasRoot = selected.some((block) => block.members.length === 0);
-    const hasTake = selected.some((block) => block.members.length > 0);
+    const identities = new Set<string>();
+    for (const block of blocks) {
+        if (selectedIds.some((id) => blockMatchesLogicalId(block, id))) {
+            identities.add(logicalBlockId(block));
+        }
+    }
+    if (identities.size < 2) return false;
+    const selected = [...identities]
+        .map((id) => {
+            const runs = blocks.filter((block) => logicalBlockId(block) === id);
+            return {
+                id,
+                runs,
+                startSec: Math.min(...runs.map((block) => block.startSec)),
+                endSec: Math.max(...runs.map((block) => block.endSec)),
+                hasRoot: runs.some((block) => block.members.length === 0),
+            };
+        })
+        .sort((a, b) => a.startSec - b.startSec);
+    if (
+        selected.some((block) => block.runs[0]?.rootTrackId !== selected[0]?.runs[0]?.rootTrackId)
+    ) {
+        return false;
+    }
+    const hasRoot = selected.some((block) => block.hasRoot);
+    const hasTake = selected.some((block) => !block.hasRoot);
     if (hasRoot && hasTake) return false;
     return selected.every(
-        (block, index) => index === 0 || blocksAreAdjacent(selected[index - 1], block),
+        (block, index) =>
+            index === 0 || Math.abs(selected[index - 1]!.endSec - block.startSec) <= 1e-6,
     );
 }
 
@@ -1241,34 +1259,39 @@ export function groupParamBlocks(args: {
     /** 与派生视图同源的 clip 快照（编组要按它把源域区间并起来）。 */
     readonly clips: readonly ParamBlockSourceClip[];
 }): BlockGroupResult {
-    const seen = new Set<string>();
-    const selected = args.blocks.filter((block) => {
-        if (!args.selectedBlockIds.includes(block.id)) return false;
-        const identity = block.userBlockId ?? block.id;
-        if (seen.has(identity)) return false;
-        seen.add(identity);
-        return true;
-    });
-    if (selected.length < 2) return { ok: false, reason: "empty" };
-    if (selected.some((block) => block.rootTrackId !== selected[0].rootTrackId)) {
+    const identities = new Set<string>();
+    for (const block of args.blocks) {
+        if (args.selectedBlockIds.some((id) => blockMatchesLogicalId(block, id))) {
+            identities.add(logicalBlockId(block));
+        }
+    }
+    if (identities.size < 2) return { ok: false, reason: "empty" };
+    const selected = args.blocks.filter((block) => identities.has(logicalBlockId(block)));
+    if (selected.some((block) => block.rootTrackId !== selected[0]?.rootTrackId)) {
         return { ok: false, reason: "different_root" };
     }
     const hasRoot = selected.some((block) => block.members.length === 0);
     const hasTake = selected.some((block) => block.members.length > 0);
     if (hasRoot && hasTake) return { ok: false, reason: "mixed_geometry" };
-    const ordered = sortParamBlocksByTime(selected);
-    for (let index = 1; index < ordered.length; index += 1) {
-        if (!blocksAreAdjacent(ordered[index - 1], ordered[index])) {
+    const extents = [...identities]
+        .map((id) => {
+            const runs = selected.filter((block) => logicalBlockId(block) === id);
+            return {
+                id,
+                startSec: Math.min(...runs.map((block) => block.startSec)),
+                endSec: Math.max(...runs.map((block) => block.endSec)),
+            };
+        })
+        .sort((a, b) => a.startSec - b.startSec);
+    for (let index = 1; index < extents.length; index += 1) {
+        if (Math.abs(extents[index - 1]!.endSec - extents[index]!.startSec) > 1e-6) {
             return { ok: false, reason: "not_adjacent" };
         }
     }
-    const projected = ordered
+    const projected = selected
         .map((block) => block.projected)
         .filter((block): block is ProjectedParamBlock => block !== undefined);
-    if (projected.length !== ordered.length) return { ok: false, reason: "nothing_to_group" };
-    if (projected.every((block) => block.userBlockId === projected[0].userBlockId)) {
-        return { ok: false, reason: "already_grouped" };
-    }
+    if (projected.length === 0) return { ok: false, reason: "nothing_to_group" };
     const framePeriodMs = args.state.framePeriodMs;
     try {
         const edits = groupProjectedBlocks(
@@ -1286,7 +1309,6 @@ export function groupParamBlocks(args: {
         return { ok: false, reason: "nothing_to_group" };
     }
 }
-
 export function ungroupParamBlocks(
     state: ParamBlockState,
     blockIds: readonly string[],
@@ -1402,14 +1424,13 @@ export function deleteParamBlocks(args: {
     /** 与派生视图同源的 clip 快照（删除要按它把源域区间拆开）。 */
     readonly clips: readonly ParamBlockSourceClip[];
 }): ParamBlockEditResult {
-    const seen = new Set<string>();
-    const selected = args.blocks.filter((block) => {
-        if (!args.selectedBlockIds.includes(block.id)) return false;
-        const identity = block.userBlockId ?? block.id;
-        if (seen.has(identity)) return false;
-        seen.add(identity);
-        return true;
-    });
+    const identities = new Set<string>();
+    for (const block of args.blocks) {
+        if (args.selectedBlockIds.some((id) => blockMatchesLogicalId(block, id))) {
+            identities.add(logicalBlockId(block));
+        }
+    }
+    const selected = args.blocks.filter((block) => identities.has(logicalBlockId(block)));
     if (selected.length === 0) return { ok: false, reason: "not_found" };
     const projected = selected
         .map((block) => block.projected)
@@ -1425,7 +1446,7 @@ export function deleteParamBlocks(args: {
         );
         return {
             ok: true,
-            blockId: selected[0].id,
+            blockId: selected[0]!.id,
             state: {
                 ...withEdits(args.state, result.edits),
                 lastDeletedBlocks: result.deleted.map((snapshot) => ({
@@ -1438,7 +1459,6 @@ export function deleteParamBlocks(args: {
         return { ok: false, reason: editFailureFromError(error) };
     }
 }
-
 export function removeParamBlockAtMinWidth(args: {
     readonly state: ParamBlockState;
     readonly blocks: readonly ParamBlock[];

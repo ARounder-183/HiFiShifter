@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { normalizeParamBlockEditSet } from "./paramBlockTypes";
+import {
+    normalizeParamBlockEditSet,
+    normalizeParamBlockEditSetWithDiagnostics,
+} from "./paramBlockTypes";
 
 describe("normalizeParamBlockEditSet", () => {
     it("always materializes blocks as an array", () => {
@@ -13,6 +16,22 @@ describe("normalizeParamBlockEditSet", () => {
             revision: 0,
             blocks: [],
         });
+    });
+
+    it("reports malformed groups instead of silently dropping them", () => {
+        const result = normalizeParamBlockEditSetWithDiagnostics({
+            schemaVersion: 2,
+            revision: 1,
+            blocks: [
+                {
+                    id: "bad-group",
+                    geometry: { kind: "group", children: [] },
+                    createdSeq: 1,
+                },
+            ],
+        } as never);
+        expect(result.edits.blocks).toHaveLength(0);
+        expect(result.diagnostics).toContain("group_too_small");
     });
 
     it("converts legacy groupedFrom snapshots into Group children exactly once", () => {

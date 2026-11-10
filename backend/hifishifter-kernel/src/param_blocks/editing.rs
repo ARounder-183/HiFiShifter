@@ -73,6 +73,100 @@ fn root_piece_id(block: &UserParamBlock, index: usize, start: f64, end: f64) -> 
 }
 
 /// 用 target 覆盖旧用户块；被部分覆盖的块保留未覆盖成员。
+fn trim_block_against(existing: &UserParamBlock, target: &UserParamBlock) -> Vec<UserParamBlock> {
+    if let BlockGeometry::Group { children } = &target.geometry {
+        let mut out = vec![existing.clone()];
+        for child in children {
+            out = out
+                .into_iter()
+                .flat_map(|block| trim_block_against(&block, child))
+                .collect();
+            if out.is_empty() {
+                break;
+            }
+        }
+        return out;
+    }
+    if let BlockGeometry::Group { children } = &existing.geometry {
+        let mut out = Vec::new();
+        for child in children {
+            out.extend(trim_block_against(child, target));
+        }
+        if out.is_empty() {
+            return Vec::new();
+        }
+        if out.len() == 1 {
+            return out;
+        }
+        let mut group = existing.clone();
+        group.geometry = BlockGeometry::Group { children: out };
+        return vec![group];
+    }
+    match (&existing.geometry, &target.geometry) {
+        (BlockGeometry::Take { members }, BlockGeometry::Take { members: cuts }) => {
+            let mut kept = Vec::new();
+            for member in members {
+                let mut pieces = vec![(member.source_start_sec, member.source_end_sec)];
+                for cut in cuts {
+                    if cut.clip_id != member.clip_id
+                        || cut.take_id != member.take_id
+                        || cut.cycle != member.cycle
+                    {
+                        continue;
+                    }
+                    let mut next = Vec::new();
+                    for (start, end) in pieces {
+                        next.extend(subtract_interval(
+                            start,
+                            end,
+                            cut.source_start_sec,
+                            cut.source_end_sec,
+                        ));
+                    }
+                    pieces = next;
+                }
+                for (start, end) in pieces {
+                    if end > start + EPS {
+                        let mut part = member.clone();
+                        part.source_start_sec = start;
+                        part.source_end_sec = end;
+                        kept.push(part);
+                    }
+                }
+            }
+            if kept.is_empty() {
+                return Vec::new();
+            }
+            let mut next = existing.clone();
+            next.geometry = BlockGeometry::Take { members: kept };
+            vec![next]
+        }
+        (BlockGeometry::Root { span }, BlockGeometry::Root { span: cut }) => {
+            let mut out = Vec::new();
+            for (index, (start, end)) in
+                subtract_interval(span.start_sec, span.end_sec, cut.start_sec, cut.end_sec)
+                    .into_iter()
+                    .enumerate()
+            {
+                if end <= start + EPS {
+                    continue;
+                }
+                let mut next = existing.clone();
+                next.id = root_piece_id(existing, index, start, end);
+                next.geometry = BlockGeometry::Root {
+                    span: RootSpan {
+                        start_sec: start,
+                        end_sec: end,
+                    },
+                };
+                out.push(next);
+            }
+            out
+        }
+        _ => vec![existing.clone()],
+    }
+}
+
 pub fn place_user_block(
     edits: &ParamBlockEditSet,
     target: UserParamBlock,
@@ -87,64 +181,7 @@ pub fn place_user_block(
             blocks.push(block.clone());
             continue;
         }
-        match (&block.geometry, &target.geometry) {
-            (BlockGeometry::Take { members }, BlockGeometry::Take { members: cuts }) => {
-                let mut kept = Vec::new();
-                for member in members {
-                    let mut pieces = vec![(member.source_start_sec, member.source_end_sec)];
-                    for cut in cuts {
-                        if cut.clip_id != member.clip_id
-                            || cut.take_id != member.take_id
-                            || cut.cycle != member.cycle
-                        {
-                            continue;
-                        }
-                        let mut next = Vec::new();
-                        for (start, end) in pieces {
-                            next.extend(subtract_interval(
-                                start,
-                                end,
-                                cut.source_start_sec,
-                                cut.source_end_sec,
-                            ));
-                        }
-                        pieces = next;
-                    }
-                    for (start, end) in pieces {
-                        if end > start + EPS {
-                            let mut part = member.clone();
-                            part.source_start_sec = start;
-                            part.source_end_sec = end;
-                            kept.push(part);
-                        }
-                    }
-                }
-                if !kept.is_empty() {
-                    let mut next = block.clone();
-                    next.geometry = BlockGeometry::Take { members: kept };
-                    blocks.push(next);
-                }
-            }
-            (BlockGeometry::Root { span }, BlockGeometry::Root { span: cut }) => {
-                let pieces =
-                    subtract_interval(span.start_sec, span.end_sec, cut.start_sec, cut.end_sec);
-                for (index, (start, end)) in pieces.into_iter().enumerate() {
-                    if end <= start + EPS {
-                        continue;
-                    }
-                    let mut next = block.clone();
-                    next.id = root_piece_id(block, index, start, end);
-                    next.geometry = BlockGeometry::Root {
-                        span: RootSpan {
-                            start_sec: start,
-                            end_sec: end,
-                        },
-                    };
-                    blocks.push(next);
-                }
-            }
-            _ => blocks.push(block.clone()),
-        }
+        blocks.extend(trim_block_against(block, &target));
     }
     blocks.push(target);
     let mut next = edits.clone();
@@ -762,7 +799,7 @@ fn split_group_block(
     let mut right: Vec<UserParamBlock> = Vec::new();
     for child in ordered {
         let Some(projected) =
-            super::compose::project_single_user_block(timeline, &child, frame_period_ms)?
+            super::compose::project_logical_user_block(timeline, &child, frame_period_ms)?
         else {
             continue;
         };
@@ -1017,15 +1054,43 @@ fn resize_group_block(
     if kept.is_empty() {
         return replace_top_level_blocks(edits, &remove, Vec::new());
     }
+    let kept_ids: std::collections::BTreeSet<String> =
+        kept.iter().map(|child| child.id.clone()).collect();
+    let mut tombstones: Vec<UserParamBlock> = Vec::new();
+    for child in &children {
+        if kept_ids.contains(&child.id) {
+            continue;
+        }
+        if child.manual && child.base_cover.is_none() {
+            continue;
+        }
+        if !child.is_take() {
+            continue;
+        }
+        for member in child.members() {
+            if !tombstones
+                .iter()
+                .any(|tombstone| tombstone_matches(tombstone, member))
+            {
+                tombstones.push(make_tombstone(
+                    child,
+                    member,
+                    edits.next_seq().saturating_add(tombstones.len() as u64),
+                ));
+            }
+        }
+    }
     let side = group_side(
         timeline,
         group,
         kept,
-        &format!("resize:{}:{edge}:{target_frame}", group.id),
+        &format!("resize:{}", group.id),
         frame_period_ms,
         edits.next_seq(),
     );
-    replace_top_level_blocks(edits, &remove, vec![side])
+    let mut replacements = vec![side];
+    replacements.extend(tombstones);
+    replace_top_level_blocks(edits, &remove, replacements)
 }
 
 pub fn split_block(
@@ -1411,7 +1476,6 @@ fn make_tombstone(user: &UserParamBlock, member: &TakeSpan, seq: u64) -> UserPar
 #[derive(Clone, Debug)]
 pub struct DeletedParamBlockSnapshot {
     pub block: UserParamBlock,
-    pub previous_edits: ParamBlockEditSet,
     /// 组删除时为 base 派生 child 生成的墓碑；恢复时按这些 id 精确移除。
     pub child_tombstones: Vec<UserParamBlock>,
 }
@@ -1432,7 +1496,6 @@ pub fn delete_blocks(
         if !removed.insert(user.id.clone()) {
             continue;
         }
-        let before = working.clone();
         let owned = augment_base_cover_for_delete(timeline, &working, &user, frame_period_ms);
         working.blocks.retain(|candidate| candidate.id != user.id);
         let mut snapshot_block = user.clone();
@@ -1464,7 +1527,6 @@ pub fn delete_blocks(
         }
         snapshots.push(DeletedParamBlockSnapshot {
             block: snapshot_block,
-            previous_edits: before,
             child_tombstones,
         });
     }

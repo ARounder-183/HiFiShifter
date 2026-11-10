@@ -16,6 +16,7 @@ import {
 } from "./paramBlockProjection";
 import { composeParamBlockView } from "./paramBlockComposition";
 import {
+    logicalBlockId,
     takeSpanKey,
     type BlockGeometry,
     type ParamBlockEditSet,
@@ -86,6 +87,7 @@ function rootPieceId(block: UserParamBlock, index: number, start: number, end: n
 export function placeUserBlock(
     edits: ParamBlockEditSet,
     target: UserParamBlock,
+    context?: { readonly clips: readonly ParamBlockSourceClip[]; readonly framePeriodMs: number },
 ): ParamBlockEditSet {
     const blocks: UserParamBlock[] = [];
     for (const block of edits.blocks) {
@@ -94,55 +96,7 @@ export function placeUserBlock(
             blocks.push(block);
             continue;
         }
-        if (block.geometry.kind === "take" && target.geometry.kind === "take") {
-            const kept: TakeSpan[] = [];
-            for (const member of block.geometry.members) {
-                let pieces: Array<[number, number]> = [
-                    [member.sourceStartSec, member.sourceEndSec],
-                ];
-                for (const cut of target.geometry.members) {
-                    if (
-                        cut.clipId !== member.clipId ||
-                        cut.takeId !== member.takeId ||
-                        cut.cycle !== member.cycle
-                    ) {
-                        continue;
-                    }
-                    const next: Array<[number, number]> = [];
-                    for (const [start, end] of pieces) {
-                        next.push(
-                            ...subtractInterval(start, end, cut.sourceStartSec, cut.sourceEndSec),
-                        );
-                    }
-                    pieces = next;
-                }
-                for (const [start, end] of pieces) {
-                    if (end > start + EPS)
-                        kept.push({ ...member, sourceStartSec: start, sourceEndSec: end });
-                }
-            }
-            if (kept.length > 0)
-                blocks.push({ ...block, geometry: { kind: "take", members: kept } });
-            continue;
-        }
-        if (block.geometry.kind === "root" && target.geometry.kind === "root") {
-            const pieces = subtractInterval(
-                block.geometry.span.startSec,
-                block.geometry.span.endSec,
-                target.geometry.span.startSec,
-                target.geometry.span.endSec,
-            );
-            pieces.forEach(([start, end], index) => {
-                if (end <= start + EPS) return;
-                blocks.push({
-                    ...block,
-                    id: rootPieceId(block, index, start, end),
-                    geometry: { kind: "root", span: { startSec: start, endSec: end } },
-                });
-            });
-            continue;
-        }
-        blocks.push(block);
+        blocks.push(...trimUserBlockAgainst(block, target, context));
     }
     blocks.push(target);
     return {
@@ -150,6 +104,165 @@ export function placeUserBlock(
         revision: edits.revision + 1,
         blocks,
     };
+}
+
+/** 把一个块按 target 裁剪；组会递归到叶子，空组退化，单 child 组退化。 */
+function trimUserBlockAgainst(
+    existing: UserParamBlock,
+    target: UserParamBlock,
+    context?: { readonly clips: readonly ParamBlockSourceClip[]; readonly framePeriodMs: number },
+): UserParamBlock[] {
+    if (target.geometry.kind === "group") {
+        let current: UserParamBlock[] = [existing];
+        for (const child of target.geometry.children) {
+            current = current.flatMap((block) => trimUserBlockAgainst(block, child, context));
+            if (current.length === 0) break;
+        }
+        return current;
+    }
+    if (existing.geometry.kind === "group") {
+        const children = existing.geometry.children.flatMap((child) =>
+            trimUserBlockAgainst(child, target, context),
+        );
+        if (children.length === 0) return [];
+        if (children.length === 1) return children;
+        return [
+            {
+                ...existing,
+                geometry: { kind: "group", children },
+            },
+        ];
+    }
+    if (existing.geometry.kind === "take" && target.geometry.kind === "take") {
+        const kept: TakeSpan[] = [];
+        for (const member of existing.geometry.members) {
+            let pieces: Array<[number, number]> = [[member.sourceStartSec, member.sourceEndSec]];
+            for (const cut of target.geometry.members) {
+                if (
+                    cut.clipId !== member.clipId ||
+                    cut.takeId !== member.takeId ||
+                    cut.cycle !== member.cycle
+                ) {
+                    continue;
+                }
+                const next: Array<[number, number]> = [];
+                for (const [start, end] of pieces) {
+                    next.push(
+                        ...subtractInterval(start, end, cut.sourceStartSec, cut.sourceEndSec),
+                    );
+                }
+                pieces = next;
+            }
+            for (const [start, end] of pieces) {
+                if (end > start + EPS)
+                    kept.push({ ...member, sourceStartSec: start, sourceEndSec: end });
+            }
+        }
+        if (kept.length === 0) return [];
+        return [{ ...existing, geometry: { kind: "take", members: kept } }];
+    }
+    if (existing.geometry.kind === "root" && target.geometry.kind === "root") {
+        return subtractInterval(
+            existing.geometry.span.startSec,
+            existing.geometry.span.endSec,
+            target.geometry.span.startSec,
+            target.geometry.span.endSec,
+        )
+            .filter(([start, end]) => end > start + EPS)
+            .map(([start, end], index) => ({
+                ...existing,
+                id: rootPieceId(existing, index, start, end),
+                geometry: { kind: "root", span: { startSec: start, endSec: end } },
+            }));
+    }
+    /*
+     * take ↔ root 的交叉覆盖：只有调用方给出同源 clips 时才能把投影帧
+     * 反算回源域；否则保留原块，避免在没有足够上下文时破坏几何。
+     */
+    if (
+        context !== undefined &&
+        (existing.geometry.kind === "take" || existing.geometry.kind === "root") &&
+        (target.geometry.kind === "take" || target.geometry.kind === "root")
+    ) {
+        return trimCrossGeometry(existing, target, context.clips, context.framePeriodMs);
+    }
+    return [existing];
+}
+
+function trimCrossGeometry(
+    existing: UserParamBlock,
+    target: UserParamBlock,
+    clips: readonly ParamBlockSourceClip[],
+    framePeriodMs: number,
+): UserParamBlock[] {
+    const existingView = composeParamBlockView(
+        "",
+        clips,
+        { schemaVersion: 2, revision: 0, blocks: [existing] },
+        framePeriodMs,
+    );
+    const targetView = composeParamBlockView(
+        "",
+        clips,
+        { schemaVersion: 2, revision: 0, blocks: [target] },
+        framePeriodMs,
+    );
+    const cuts = targetView.blocks
+        .filter((block) => block.kind !== "base")
+        .map((block) => [block.startFrame, block.endFrameExclusive] as const);
+    if (cuts.length === 0) return [existing];
+    const pieces = existingView.blocks
+        .filter((block) => block.kind !== "base")
+        .flatMap((block) => {
+            let spans: Array<[number, number]> = [[block.startFrame, block.endFrameExclusive]];
+            for (const [cutStart, cutEnd] of cuts) {
+                spans = spans.flatMap(([start, end]) => {
+                    if (cutEnd <= start || cutStart >= end)
+                        return [[start, end] as [number, number]];
+                    const out: Array<[number, number]> = [];
+                    if (start < cutStart) out.push([start, cutStart]);
+                    if (end > cutEnd) out.push([cutEnd, end]);
+                    return out;
+                });
+            }
+            return spans;
+        });
+    if (pieces.length === 0) return [];
+    if (existing.geometry.kind === "root") {
+        return pieces.map(([start, end], index) => ({
+            ...existing,
+            id: rootPieceId(
+                existing,
+                index,
+                toSec(start, framePeriodMs),
+                toSec(end, framePeriodMs),
+            ),
+            geometry: {
+                kind: "root",
+                span: { startSec: toSec(start, framePeriodMs), endSec: toSec(end, framePeriodMs) },
+            },
+        }));
+    }
+    const sourcePieces: TakeSpan[] = [];
+    for (const [start, end] of pieces) {
+        const member = existingView.blocks
+            .flatMap((block) => block.members)
+            .find((item) => item.startFrame < end && item.endFrameExclusive > start);
+        if (member === undefined) continue;
+        const projection = projectionOfSpan(clips, memberSpan(member));
+        if (projection === null) continue;
+        const a = sourceAtProjectedFrame(projection, start, member.cycle, framePeriodMs);
+        const b = sourceAtProjectedFrame(projection, end, member.cycle, framePeriodMs);
+        if (a === null || b === null) continue;
+        sourcePieces.push({
+            ...memberSpan(member, member.label),
+            sourceStartSec: Math.min(a, b),
+            sourceEndSec: Math.max(a, b),
+        });
+    }
+    return sourcePieces.length === 0
+        ? []
+        : [{ ...existing, geometry: { kind: "take", members: sourcePieces } }];
 }
 
 function memberSpan(member: ProjectedMember, label?: TakeSpan["label"]): TakeSpan {
@@ -303,7 +416,10 @@ export function ensureEditableUserBlock(
         createdSeq: nextSeq(edits),
         ...(block.baseCover === undefined ? {} : { baseCover: block.baseCover }),
     };
-    return { edits: placeUserBlock(edits, target), user: target };
+    return {
+        edits: placeUserBlock(edits, target, { clips, framePeriodMs }),
+        user: target,
+    };
 }
 
 function firstProjectedFrame(
@@ -382,7 +498,25 @@ export function groupProjectedBlocks(
     framePeriodMs: number,
 ): ParamBlockEditSet {
     if (selected.length < 2) throw new Error("group needs two blocks");
-    const ordered = selected.slice().sort((a, b) => a.startFrame - b.startFrame);
+    const byLogical = new Map<string, ProjectedParamBlock>();
+    for (const block of selected) {
+        const id = logicalBlockId(block);
+        const existing = byLogical.get(id);
+        if (existing === undefined) {
+            byLogical.set(id, { ...block, id, userBlockId: id });
+        } else {
+            byLogical.set(id, {
+                ...existing,
+                startFrame: Math.min(existing.startFrame, block.startFrame),
+                endFrameExclusive: Math.max(existing.endFrameExclusive, block.endFrameExclusive),
+                members: [...existing.members, ...block.members],
+            });
+        }
+    }
+    const ordered = [...byLogical.values()].sort(
+        (a, b) => a.startFrame - b.startFrame || a.endFrameExclusive - b.endFrameExclusive,
+    );
+    if (ordered.length < 2) throw new Error("group needs two blocks");
     for (let index = 1; index < ordered.length; index += 1) {
         if (ordered[index - 1].endFrameExclusive !== ordered[index].startFrame) {
             throw new Error("group blocks are not adjacent");
@@ -428,14 +562,13 @@ export function groupProjectedBlocks(
     };
     return replaceTopLevelBlocks(working, removeIds, [target]);
 }
-
 export function ungroupUserBlock(edits: ParamBlockEditSet, blockId: string): ParamBlockEditSet {
     const block = edits.blocks.find((item) => item.id === blockId);
     if (block === undefined) throw new Error("block not found");
     if (block.geometry.kind !== "group" || block.geometry.children.length < 2) {
         throw new Error("block is not grouped");
     }
-    return replaceTopLevelBlocks(edits, new Set([blockId]), block.geometry.children);
+    return replaceTopLevelBlocks(edits, new Set([block.id]), block.geometry.children);
 }
 
 export type ParamBlockPlanErrorCode =
@@ -655,6 +788,7 @@ function groupSideBlock(
     framePeriodMs: number,
     clips: readonly ParamBlockSourceClip[],
     createdSeq: number,
+    stableId?: string,
 ): UserParamBlock {
     children.sort(
         (a, b) =>
@@ -671,7 +805,7 @@ function groupSideBlock(
         };
     }
     return {
-        id: newParamBlockId("group"),
+        id: stableId ?? newParamBlockId("group"),
         geometry: { kind: "group", children },
         deleted: false,
         manual: children.some((child) => child.manual === true),
@@ -683,22 +817,296 @@ function groupSideBlock(
     };
 }
 
-function projectSingleUserBlock(
+function runMembersForUser(
     clips: readonly ParamBlockSourceClip[],
-    block: UserParamBlock,
+    user: UserParamBlock,
+    framePeriodMs: number,
+): ProjectedParamBlock[] {
+    const view = composeParamBlockView(
+        "",
+        clips,
+        { schemaVersion: 2, revision: 0, blocks: [user] },
+        framePeriodMs,
+    );
+    return view.blocks.filter((block) => logicalBlockId(block) === user.id);
+}
+
+function projectedMemberKey(member: TakeSpan): string {
+    return takeSpanKey(member);
+}
+
+function memberProjectionOfRun(
+    run: ProjectedParamBlock,
+    span: TakeSpan,
+): ProjectedMember | undefined {
+    return run.members.find(
+        (member) =>
+            member.clipId === span.clipId &&
+            member.takeId === span.takeId &&
+            member.cycle === span.cycle &&
+            Math.abs(member.sourceStartSec - span.sourceStartSec) <= 1e-7 &&
+            Math.abs(member.sourceEndSec - span.sourceEndSec) <= 1e-7,
+    );
+}
+
+export function splitLogicalUserBlock(
+    clips: readonly ParamBlockSourceClip[],
+    edits: ParamBlockEditSet,
+    block: ProjectedParamBlock,
+    frame: number,
+    framePeriodMs: number,
+): SplitProjectedBlockPlan {
+    const parentId = block.userBlockId ?? block.id;
+    const parent = edits.blocks.find((item) => item.id === parentId);
+    if (parent === undefined || parent.geometry.kind === "group") {
+        throw new ParamBlockPlanError("block_not_found");
+    }
+    if (frame <= block.startFrame || frame >= block.endFrameExclusive) {
+        throw new ParamBlockPlanError("split_outside_block");
+    }
+    if (parent.geometry.kind === "root") {
+        return splitRootPlan(edits, parent, frame, framePeriodMs, clips);
+    }
+    const logical = projectLogicalUserBlock(clips, parent, framePeriodMs);
+    const members = logical?.members ?? block.members;
+    if (members.length === 0) throw new ParamBlockPlanError("internal", "no members");
+    const insideIndex = members.findIndex(
+        (member) => member.startFrame < frame && frame < member.endFrameExclusive,
+    );
+    let leftMembers: TakeSpan[];
+    let rightMembers: TakeSpan[];
+    if (insideIndex >= 0) {
+        const hit = members[insideIndex];
+        const leftFrames = frame - hit.startFrame;
+        const rightFrames = hit.endFrameExclusive - frame;
+        if (leftFrames < 1 || rightFrames < 1 || hit.endFrameExclusive - hit.startFrame <= 1) {
+            throw new ParamBlockPlanError(
+                "split_too_close_to_edge",
+                leftFrames + "/" + rightFrames,
+            );
+        }
+        const source = sourceAtMemberFrame(clips, hit, frame, framePeriodMs);
+        const reversed = memberIsReversed(hit, clips);
+        const leftPart: TakeSpan = {
+            ...projectedSpanOfMember(hit),
+            sourceStartSec: reversed ? source : hit.sourceStartSec,
+            sourceEndSec: reversed ? hit.sourceEndSec : source,
+        };
+        const rightPart: TakeSpan = {
+            ...projectedSpanOfMember(hit),
+            sourceStartSec: reversed ? hit.sourceStartSec : source,
+            sourceEndSec: reversed ? source : hit.sourceEndSec,
+        };
+        leftMembers = [...members.slice(0, insideIndex).map(projectedSpanOfMember), leftPart];
+        rightMembers = [rightPart, ...members.slice(insideIndex + 1).map(projectedSpanOfMember)];
+    } else {
+        leftMembers = members
+            .filter((member) => member.endFrameExclusive <= frame)
+            .map(projectedSpanOfMember);
+        rightMembers = members
+            .filter((member) => member.startFrame >= frame)
+            .map(projectedSpanOfMember);
+        if (leftMembers.length === 0 || rightMembers.length === 0) {
+            throw new ParamBlockPlanError("split_at_block_edge");
+        }
+    }
+    const left: UserParamBlock = {
+        id: "split:" + parent.id + ":" + frame + ":left",
+        geometry: { kind: "take", members: leftMembers },
+        deleted: false,
+        manual: parent.manual,
+        value: parent.value,
+        transitionOutSec: 0,
+        createdSeq: nextSeq(edits),
+        ...(parent.baseCover === undefined ? {} : { baseCover: parent.baseCover }),
+    };
+    const right: UserParamBlock = {
+        id: "split:" + parent.id + ":" + frame + ":right",
+        geometry: { kind: "take", members: rightMembers },
+        deleted: false,
+        manual: parent.manual,
+        value: parent.value,
+        ...(parent.transitionOutSec === undefined
+            ? {}
+            : { transitionOutSec: parent.transitionOutSec }),
+        createdSeq: nextSeq(edits) + 1,
+        ...(parent.baseCover === undefined ? {} : { baseCover: parent.baseCover }),
+    };
+    const next = replaceBlock(edits, parent.id, [left, right]);
+    const viewAfter = planView(clips, next, framePeriodMs);
+    const leftRuns = viewAfter.blocks.filter((item) => logicalBlockId(item) === left.id);
+    const rightRuns = viewAfter.blocks.filter((item) => logicalBlockId(item) === right.id);
+    if (leftRuns.length === 0 || rightRuns.length === 0) {
+        throw new ParamBlockPlanError("internal", "split result missing");
+    }
+    return {
+        edits: next,
+        viewAfter,
+        leftBlockId: left.id,
+        rightBlockId: right.id,
+        leftSpan: {
+            startFrame: Math.min(...leftRuns.map((item) => item.startFrame)),
+            endFrameExclusive: Math.max(...leftRuns.map((item) => item.endFrameExclusive)),
+        },
+        rightSpan: {
+            startFrame: Math.min(...rightRuns.map((item) => item.startFrame)),
+            endFrameExclusive: Math.max(...rightRuns.map((item) => item.endFrameExclusive)),
+        },
+    };
+}
+
+export function resizeLogicalUserBlock(
+    clips: readonly ParamBlockSourceClip[],
+    edits: ParamBlockEditSet,
+    block: ProjectedParamBlock,
+    edge: "left" | "right",
+    targetFrame: number,
+    framePeriodMs: number,
+): ResizeProjectedBlockPlan {
+    const parentId = block.userBlockId ?? block.id;
+    const parent = edits.blocks.find((item) => item.id === parentId);
+    if (parent === undefined || parent.geometry.kind !== "take") {
+        throw new ParamBlockPlanError("block_not_found");
+    }
+    const runs = runMembersForUser(clips, parent, framePeriodMs);
+    const run =
+        runs.find((item) => item.id === block.id) ??
+        runs.find(
+            (item) => item.startFrame <= targetFrame && item.endFrameExclusive >= targetFrame,
+        ) ??
+        (edge === "right" ? runs[runs.length - 1] : runs[0]);
+    if (run === undefined) throw new ParamBlockPlanError("internal", "run not found");
+    const runKeys = new Set(
+        run.members.map((member) => projectedMemberKey(memberSpan(member, member.label))),
+    );
+    let nextMembers = parent.geometry.members.map((member) => ({ ...member }));
+    const warnings: string[] = [];
+    const clamped = false;
+    if (edge === "right") {
+        if (targetFrame >= run.endFrameExclusive) {
+            const last = run.members[run.members.length - 1];
+            if (last === undefined) throw new ParamBlockPlanError("internal", "run has no members");
+            const index = nextMembers.findIndex((member) =>
+                runKeys.has(projectedMemberKey(member)),
+            );
+            if (index < 0) throw new ParamBlockPlanError("internal", "member not found");
+            const source = sourceAtMemberFrame(clips, last, targetFrame, framePeriodMs);
+            const reversed = memberIsReversed(last, clips);
+            if (reversed) {
+                if (source < nextMembers[index].sourceStartSec) {
+                    nextMembers[index] = { ...nextMembers[index], sourceStartSec: source };
+                }
+            } else if (source > nextMembers[index].sourceEndSec) {
+                nextMembers[index] = { ...nextMembers[index], sourceEndSec: source };
+            }
+        } else {
+            nextMembers = nextMembers.flatMap((member) => {
+                if (!runKeys.has(projectedMemberKey(member))) return [member];
+                const projected = memberProjectionOfRun(run, member);
+                if (projected === undefined) return [member];
+                if (projected.endFrameExclusive <= targetFrame) return [member];
+                if (projected.startFrame >= targetFrame) return [];
+                const source = sourceAtMemberFrame(clips, projected, targetFrame, framePeriodMs);
+                const reversed = memberIsReversed(projected, clips);
+                return [
+                    reversed
+                        ? { ...member, sourceStartSec: source }
+                        : { ...member, sourceEndSec: source },
+                ];
+            });
+        }
+    } else if (targetFrame <= run.startFrame) {
+        const first = run.members[0];
+        if (first === undefined) throw new ParamBlockPlanError("internal", "run has no members");
+        const index = nextMembers.findIndex((member) => runKeys.has(projectedMemberKey(member)));
+        if (index < 0) throw new ParamBlockPlanError("internal", "member not found");
+        const source = sourceAtMemberFrame(clips, first, targetFrame, framePeriodMs);
+        const reversed = memberIsReversed(first, clips);
+        if (reversed) {
+            if (source > nextMembers[index].sourceEndSec) {
+                nextMembers[index] = { ...nextMembers[index], sourceEndSec: source };
+            }
+        } else if (source < nextMembers[index].sourceStartSec) {
+            nextMembers[index] = { ...nextMembers[index], sourceStartSec: source };
+        }
+    } else {
+        nextMembers = nextMembers.flatMap((member) => {
+            if (!runKeys.has(projectedMemberKey(member))) return [member];
+            const projected = memberProjectionOfRun(run, member);
+            if (projected === undefined) return [member];
+            if (projected.startFrame >= targetFrame) return [member];
+            if (projected.endFrameExclusive <= targetFrame) return [];
+            const source = sourceAtMemberFrame(clips, projected, targetFrame, framePeriodMs);
+            const reversed = memberIsReversed(projected, clips);
+            return [
+                reversed
+                    ? { ...member, sourceEndSec: source }
+                    : { ...member, sourceStartSec: source },
+            ];
+        });
+    }
+    const expanded = nextMembers.flatMap((span) => normalizeSpanForProjection(clips, span));
+    const ordered = orderSpansByProjection(clips, expanded, framePeriodMs);
+    if (ordered.length === 0) {
+        const next = removeOrTombstone(edits, parent, clips, framePeriodMs);
+        return {
+            edits: next,
+            viewAfter: planView(clips, next, framePeriodMs),
+            targetSpan: null,
+            removedIds: [parent.id],
+            warnings,
+            clamped,
+        };
+    }
+    const next = placeUserBlock(edits, {
+        ...parent,
+        geometry: { kind: "take", members: ordered },
+    });
+    const viewAfter = planView(clips, next, framePeriodMs);
+    const targetRuns = viewAfter.blocks.filter((item) => logicalBlockId(item) === parent.id);
+    if (targetRuns.length === 0) throw new ParamBlockPlanError("internal", "resize result missing");
+    return {
+        edits: next,
+        viewAfter,
+        targetSpan: {
+            startFrame: Math.min(...targetRuns.map((item) => item.startFrame)),
+            endFrameExclusive: Math.max(...targetRuns.map((item) => item.endFrameExclusive)),
+        },
+        removedIds: [],
+        warnings,
+        clamped,
+    };
+}
+
+/**
+ * 把逻辑块的全部可见 run 合成一个 ProjectedParamBlock。组算法、切分、
+ * 伸缩都只应该看这个整体边界，而不是第一个 run。
+ */
+export function projectLogicalUserBlock(
+    clips: readonly ParamBlockSourceClip[],
+    user: UserParamBlock,
     framePeriodMs: number,
 ): ProjectedParamBlock | null {
     const view = composeParamBlockView(
         "",
         clips,
-        { schemaVersion: 2, revision: 0, blocks: [block] },
+        { schemaVersion: 2, revision: 0, blocks: [user] },
         framePeriodMs,
     );
-    return (
-        view.blocks.find(
-            (candidate) => candidate.id === block.id || candidate.userBlockId === block.id,
-        ) ?? null
-    );
+    const runs = view.blocks.filter((block) => logicalBlockId(block) === user.id);
+    if (runs.length === 0) return null;
+    return {
+        id: user.id,
+        userBlockId: user.id,
+        startFrame: Math.min(...runs.map((run) => run.startFrame)),
+        endFrameExclusive: Math.max(...runs.map((run) => run.endFrameExclusive)),
+        ...(runs[0]?.transitionFrames === undefined
+            ? {}
+            : { transitionFrames: runs[0].transitionFrames }),
+        kind: runs[0]?.kind ?? "user",
+        members: runs.flatMap((run) => run.members),
+        ...(user.value === undefined ? {} : { value: user.value }),
+    };
 }
 
 function splitGroupPlan(
@@ -726,7 +1134,7 @@ function splitGroupPlan(
     const left: UserParamBlock[] = [];
     const right: UserParamBlock[] = [];
     for (const child of ordered) {
-        const projected = projectSingleUserBlock(clips, child, framePeriodMs);
+        const projected = projectLogicalUserBlock(clips, child, framePeriodMs);
         if (projected === null) continue;
         if (projected.endFrameExclusive <= frame) {
             left.push(child);
@@ -788,6 +1196,9 @@ export function planSplitProjectedBlock(
 ): SplitProjectedBlockPlan {
     if (block.kind === "grouped") {
         return splitGroupPlan(clips, edits, block, frame, framePeriodMs);
+    }
+    if (block.userBlockId !== undefined && block.userBlockId !== block.id) {
+        return splitLogicalUserBlock(clips, edits, block, frame, framePeriodMs);
     }
     if (frame <= block.startFrame || frame >= block.endFrameExclusive) {
         throw new ParamBlockPlanError("split_outside_block");
@@ -1023,7 +1434,7 @@ function resizeGroupPlan(
     if (children.length === 0) throw new ParamBlockPlanError("internal", "group has no children");
     const projectedChildren = children.map((child) => ({
         child,
-        projected: projectSingleUserBlock(clips, child, framePeriodMs),
+        projected: projectLogicalUserBlock(clips, child, framePeriodMs),
     }));
     const projectedFirst = projectedChildren[0]?.projected;
     const projectedLast = projectedChildren[projectedChildren.length - 1]?.projected;
@@ -1051,6 +1462,28 @@ function resizeGroupPlan(
     const kept: UserParamBlock[] = [];
     const warnings: string[] = [];
     let clamped = false;
+    const resizeChild = (
+        child: UserParamBlock,
+        projected: ProjectedParamBlock,
+        childEdge: "left" | "right",
+    ): ResizeProjectedBlockPlan =>
+        child.geometry.kind === "take"
+            ? resizeLogicalUserBlock(
+                  clips,
+                  { schemaVersion: 2, revision: 0, blocks: [child] },
+                  projected,
+                  childEdge,
+                  targetFrame,
+                  framePeriodMs,
+              )
+            : planResizeProjectedBlock(
+                  clips,
+                  { schemaVersion: 2, revision: 0, blocks: [child] },
+                  projected,
+                  childEdge,
+                  targetFrame,
+                  framePeriodMs,
+              );
     if (edge === "right") {
         for (const item of projectedChildren) {
             if (item.projected === null) continue;
@@ -1059,14 +1492,7 @@ function resizeGroupPlan(
             } else if (item.projected.startFrame >= targetFrame) {
                 break;
             } else {
-                const plan = planResizeProjectedBlock(
-                    clips,
-                    { schemaVersion: 2, revision: 0, blocks: [item.child] },
-                    item.projected,
-                    "right",
-                    targetFrame,
-                    framePeriodMs,
-                );
+                const plan = resizeChild(item.child, item.projected, "right");
                 const result = plan.edits.blocks[0];
                 if (result !== undefined) kept.push(result);
                 warnings.push(...plan.warnings);
@@ -1076,21 +1502,14 @@ function resizeGroupPlan(
         }
         if (kept.length === 0) return deleteGroupAsResize(clips, edits, block, framePeriodMs);
         const last = kept[kept.length - 1];
-        const lastProjected = projectSingleUserBlock(clips, last, framePeriodMs);
+        const lastProjected = projectLogicalUserBlock(clips, last, framePeriodMs);
         if (
             targetFrame >= groupEnd &&
             lastProjected !== null &&
             lastProjected.endFrameExclusive < targetFrame
         ) {
             kept.pop();
-            const plan = planResizeProjectedBlock(
-                clips,
-                { schemaVersion: 2, revision: 0, blocks: [last] },
-                lastProjected,
-                "right",
-                targetFrame,
-                framePeriodMs,
-            );
+            const plan = resizeChild(last, lastProjected, "right");
             kept.push(...plan.edits.blocks);
             warnings.push(...plan.warnings);
             clamped ||= plan.clamped;
@@ -1103,14 +1522,7 @@ function resizeGroupPlan(
             } else if (item.projected.endFrameExclusive <= targetFrame) {
                 break;
             } else {
-                const plan = planResizeProjectedBlock(
-                    clips,
-                    { schemaVersion: 2, revision: 0, blocks: [item.child] },
-                    item.projected,
-                    "left",
-                    targetFrame,
-                    framePeriodMs,
-                );
+                const plan = resizeChild(item.child, item.projected, "left");
                 const result = plan.edits.blocks[0];
                 if (result !== undefined) kept.push(result);
                 warnings.push(...plan.warnings);
@@ -1121,29 +1533,47 @@ function resizeGroupPlan(
         kept.reverse();
         if (kept.length === 0) return deleteGroupAsResize(clips, edits, block, framePeriodMs);
         const first = kept[0];
-        const firstProjected = projectSingleUserBlock(clips, first, framePeriodMs);
+        const firstProjected = projectLogicalUserBlock(clips, first, framePeriodMs);
         if (
             targetFrame <= groupStart &&
             firstProjected !== null &&
             firstProjected.startFrame > targetFrame
         ) {
             kept.shift();
-            const plan = planResizeProjectedBlock(
-                clips,
-                { schemaVersion: 2, revision: 0, blocks: [first] },
-                firstProjected,
-                "left",
-                targetFrame,
-                framePeriodMs,
-            );
+            const plan = resizeChild(first, firstProjected, "left");
             kept.unshift(...plan.edits.blocks);
             warnings.push(...plan.warnings);
             clamped ||= plan.clamped;
         }
     }
     if (kept.length === 0) return deleteGroupAsResize(clips, edits, block, framePeriodMs);
-    const side = groupSideBlock(group, kept, framePeriodMs, clips, nextSeq(edits));
-    const next = replaceTopLevelBlocks(edits, new Set([group.id]), [side]);
+    /*
+     * 被缩掉的 child 不能凭空消失：base 派生 child 携带的 baseCover 是
+     * "这块基块已经被替代"的唯一证据。丢掉它，compose 会把被缩掉的基块
+     * 重新露出来。手工 child 没有 baseCover，直接丢弃即可。
+     */
+    const keptIds = new Set(kept.map((child) => child.id));
+    const dropped = children.filter((child) => !keptIds.has(child.id));
+    const tombstones: UserParamBlock[] = [];
+    let tombSeq = nextSeq(edits);
+    for (const child of dropped) {
+        if (child.manual === true && child.baseCover === undefined) continue;
+        if (child.geometry.kind !== "take") continue;
+        tombstones.push({
+            id: "tomb:" + child.id,
+            geometry: {
+                kind: "take",
+                members: child.geometry.members.map((member) => ({ ...member })),
+            },
+            deleted: true,
+            manual: false,
+            createdSeq: tombSeq,
+            ...(child.baseCover === undefined ? {} : { baseCover: child.baseCover }),
+        });
+        tombSeq += 1;
+    }
+    const side = groupSideBlock(group, kept, framePeriodMs, clips, nextSeq(edits), group.id);
+    const next = replaceTopLevelBlocks(edits, new Set([group.id]), [side, ...tombstones]);
     const viewAfter = planView(clips, next, framePeriodMs);
     const target =
         viewAfter.blocks.find(
@@ -1203,6 +1633,9 @@ export function planResizeProjectedBlock(
     const current = findViewBlock(viewBefore, block.id);
     if (block.kind === "grouped") {
         return resizeGroupPlan(clips, edits, current, edge, targetFrame, framePeriodMs);
+    }
+    if (current.userBlockId !== undefined && current.userBlockId !== current.id) {
+        return resizeLogicalUserBlock(clips, edits, current, edge, targetFrame, framePeriodMs);
     }
     const ensured = ensureEditableUserBlock(clips, edits, current, framePeriodMs);
     const working = ensured.edits;
@@ -1537,7 +1970,6 @@ function tombstoneMatchesBlock(tombstone: UserParamBlock, block: UserParamBlock)
 
 export interface DeletedParamBlockSnapshot {
     readonly block: UserParamBlock;
-    readonly previousEdits: ParamBlockEditSet;
     /** 删除发生时的根；根切换后“恢复删除”不得把旧根源区间插进新根。 */
     readonly rootTrackId?: string;
     /** 组删除时为 base 派生 child 生成的墓碑；恢复时按 id 精确移除。 */
@@ -1555,11 +1987,12 @@ export function deleteProjectedBlocks(
     const deleted: DeletedParamBlockSnapshot[] = [];
     const removed = new Set<string>();
     for (const block of selected) {
+        const logicalId = logicalBlockId(block);
+        if (removed.has(logicalId)) continue;
         const ensured = ensureLogicalUserBlock(clips, working, block, framePeriodMs);
         working = ensured.edits;
         if (removed.has(ensured.user.id)) continue;
         removed.add(ensured.user.id);
-        const before = working;
         const childTombstones: UserParamBlock[] = [];
         if (ensured.user.geometry.kind === "group") {
             let seq = nextSeq(working);
@@ -1588,10 +2021,14 @@ export function deleteProjectedBlocks(
         let owned = ensured.user.baseCover;
         if (owned !== undefined) {
             const viewBefore = composeParamBlockView("", clips, working, framePeriodMs);
-            const target =
-                viewBefore.blocks.find((item) => item.id === ensured.user.id) ??
-                viewBefore.blocks.find((item) => item.userBlockId === ensured.user.id);
-            if (target !== undefined) {
+            const targets = viewBefore.blocks.filter(
+                (item) => logicalBlockId(item) === ensured.user.id,
+            );
+            if (targets.length > 0) {
+                const target = {
+                    startFrame: Math.min(...targets.map((item) => item.startFrame)),
+                    endFrameExclusive: Math.max(...targets.map((item) => item.endFrameExclusive)),
+                };
                 // 目标块自己会遮住它覆盖的基块；移除目标后再合成，才能看到这些基块。
                 const withoutTarget: ParamBlockEditSet = {
                     ...working,
@@ -1644,7 +2081,6 @@ export function deleteProjectedBlocks(
         };
         deleted.push({
             block: { ...ensured.user, ...(owned === undefined ? {} : { baseCover: owned }) },
-            previousEdits: before,
             childTombstones,
         });
     }
@@ -1852,18 +2288,28 @@ export function createUserBlock(
         if (clip.startSec + clip.lengthSec <= startSec || clip.startSec >= endSec) continue;
         members.push(...sourceSpansForTimelineRange(clip, startFrame, endFrame, framePeriodMs));
     }
+    if (
+        members.length === 0 &&
+        clips.some((clip) => clip.startSec < endSec && clip.startSec + clip.lengthSec > startSec)
+    ) {
+        throw new Error("create_no_source");
+    }
     const geometry: BlockGeometry =
         members.length > 0
             ? { kind: "take", members }
             : { kind: "root", span: { startSec, endSec } };
-    return placeUserBlock(edits, {
-        id: blockId ?? newParamBlockId("create"),
-        geometry,
-        deleted: false,
-        manual: true,
-        value,
-        createdSeq: nextSeq(edits),
-    });
+    return placeUserBlock(
+        edits,
+        {
+            id: blockId ?? newParamBlockId("create"),
+            geometry,
+            deleted: false,
+            manual: true,
+            value,
+            createdSeq: nextSeq(edits),
+        },
+        { clips, framePeriodMs },
+    );
 }
 
 export function setProjectedBlockTransition(
@@ -1873,7 +2319,7 @@ export function setProjectedBlockTransition(
     widthSec: number,
     framePeriodMs: number,
 ): ParamBlockEditSet {
-    const ensured = ensureEditableUserBlock(clips, edits, block, framePeriodMs);
+    const ensured = ensureLogicalUserBlock(clips, edits, block, framePeriodMs);
     return {
         ...ensured.edits,
         revision: edits.revision + 1,

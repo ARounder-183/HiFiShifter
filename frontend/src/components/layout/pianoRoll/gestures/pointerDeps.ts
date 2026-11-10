@@ -56,6 +56,14 @@ export type PointerDeps = {
         clientX: number;
         add: boolean;
         toggle: boolean;
+        multiSelect: boolean;
+        rangeSelect: boolean;
+        /** 当前指针的连续帧坐标（用于 Shift 范围选择）。 */
+        pointerFrame?: (clientX: number) => number;
+        /** 选择边界夹取（与选择工具同一规则）。 */
+        clampSelectionFrame?: (frame: number) => number;
+        /** 与选择工具同源的边缘自动滚动驱动。 */
+        edgeScroll?: { step(clientX: number): void };
         pointerType: string;
         pointerId: number;
         captureTarget: HTMLCanvasElement;
@@ -283,6 +291,7 @@ export type PointerDeps = {
     } | null>;
     paramEditorSeekPlayheadEnabled: boolean | undefined;
     paramMultiSelectKb: Keybinding;
+    paramRangeSelectKb: Keybinding;
     paramStretchKb: Keybinding;
     paramValuePopupEnabled: boolean | undefined;
     paramView: ParamViewSegment | null;

@@ -198,7 +198,7 @@ function projectTakeMembers(
         [];
     for (const item of projected) {
         const last = runs[runs.length - 1];
-        if (last !== undefined && item.start <= last.end + 1) {
+        if (last !== undefined && item.start <= last.end) {
             last.end = Math.max(last.end, item.end);
             last.members.push(item.member);
         } else {
@@ -247,28 +247,33 @@ function projectGroupBlock(
             .map((child) => (child.geometry.kind === "root" ? child.geometry.span : null))
             .filter((span): span is RootSpan => span !== null);
         if (spans.length === 0) return { candidates: [], orphan: 0 };
-        const startSec = Math.min(...spans.map((span) => span.startSec));
-        const endSec = Math.max(...spans.map((span) => span.endSec));
-        const start = toFrame(startSec, framePeriodMs);
-        const end = toFrame(endSec, framePeriodMs);
-        if (end <= start) return { candidates: [], orphan: 0 };
+        /*
+         * 根块组必须按每个 child 生成独立 run，不能用一个 min..max 包围盒：
+         * 子块之间的空隙属于基块 / 空白，不能被组偷偷填满。
+         */
+        const runs = spans
+            .map((span) => ({
+                start: toFrame(span.startSec, framePeriodMs),
+                end: toFrame(span.endSec, framePeriodMs),
+            }))
+            .filter((run) => run.end > run.start)
+            .sort((a, b) => a.start - b.start || a.end - b.end);
+        if (runs.length === 0) return { candidates: [], orphan: 0 };
         return {
-            candidates: [
-                {
-                    id: block.id,
-                    userBlockId: block.id,
-                    start,
-                    end,
-                    kind: "grouped",
-                    members: [],
-                    value,
-                    transitionWidthSec,
-                    rate: 1,
-                    priority: manual ? 4 : 3,
-                    seq: block.createdSeq,
-                    zOrder: 0,
-                },
-            ],
+            candidates: runs.map((run, index) => ({
+                id: runs.length === 1 ? block.id : block.id + ":" + index,
+                userBlockId: block.id,
+                start: run.start,
+                end: run.end,
+                kind: "grouped" as const,
+                members: [],
+                value,
+                transitionWidthSec,
+                rate: 1,
+                priority: manual ? 4 : 3,
+                seq: block.createdSeq,
+                zOrder: 0,
+            })),
             orphan: 0,
         };
     }
@@ -362,6 +367,18 @@ function baseSpanOf(candidate: Candidate): TakeSpan | null {
     return span ?? null;
 }
 
+/** 递归收集组内全部叶子的 baseCover；组本身不携带 baseCover。 */
+function collectBaseCovers(block: UserParamBlock): BaseCover[] {
+    const covers: BaseCover[] = [];
+    if (block.baseCover !== undefined) covers.push(block.baseCover);
+    if (block.geometry.kind === "group") {
+        for (const child of block.geometry.children) {
+            covers.push(...collectBaseCovers(child));
+        }
+    }
+    return covers;
+}
+
 /**
  * 收集所有会“拥有”这个基块的覆盖区间。
  *
@@ -378,8 +395,8 @@ function coverIntervalsForBase(
     if (baseSpan === null) return [];
     const intervals: Array<[number, number]> = [];
     for (const block of edits.blocks) {
-        const cover = block.baseCover;
-        if (cover === undefined) {
+        const covers = collectBaseCovers(block);
+        if (covers.length === 0) {
             // 旧版墓碑：deleted + 无 baseCover，按自身成员投影区间抑制基块。
             if (block.deleted && block.geometry.kind === "take") {
                 for (const span of block.geometry.members) {
@@ -403,25 +420,27 @@ function coverIntervalsForBase(
             }
             continue;
         }
-        for (const span of cover.spans) {
-            if (
-                span.clipId !== baseSpan.clipId ||
-                span.takeId !== baseSpan.takeId ||
-                span.cycle !== baseSpan.cycle
-            ) {
-                continue;
-            }
-            if (cover.full && anchorMatches(baseSpan, span)) {
-                return [[base.start, base.end]];
-            }
-            const clip = clips.find((item) => item.id === span.clipId);
-            if (clip === undefined) continue;
-            const projection = projectionForClip(clip);
-            for (const interval of projectTakeSpan(projection, span, framePeriodMs)) {
-                if (interval.cycle !== span.cycle) continue;
-                const start = Math.max(base.start, interval.startFrame);
-                const end = Math.min(base.end, interval.endFrameExclusive);
-                if (end > start) intervals.push([start, end]);
+        for (const cover of covers) {
+            for (const span of cover.spans) {
+                if (
+                    span.clipId !== baseSpan.clipId ||
+                    span.takeId !== baseSpan.takeId ||
+                    span.cycle !== baseSpan.cycle
+                ) {
+                    continue;
+                }
+                if (cover.full && anchorMatches(baseSpan, span)) {
+                    return [[base.start, base.end]];
+                }
+                const clip = clips.find((item) => item.id === span.clipId);
+                if (clip === undefined) continue;
+                const projection = projectionForClip(clip);
+                for (const interval of projectTakeSpan(projection, span, framePeriodMs)) {
+                    if (interval.cycle !== span.cycle) continue;
+                    const start = Math.max(base.start, interval.startFrame);
+                    const end = Math.min(base.end, interval.endFrameExclusive);
+                    if (end > start) intervals.push([start, end]);
+                }
             }
         }
     }
@@ -630,7 +649,7 @@ export function composeParamBlockView(
                         `${clip.id}:${clip.startSec}:${clip.lengthSec}:${clip.sourceStartSec}:${clip.sourceEndSec}:${clip.playbackRate}:${clip.clipPlaybackRate}:${clip.reversed}:${clip.loopEnabled}:${clip.loopPeriodSec}:${clip.takes
                             ?.map(
                                 (take) =>
-                                    `${take.id}:${take.sourceStartSec}:${take.sourceEndSec}:${take.playbackRate}:${take.reversed}:${take.loopEnabled}:${take.durationSec}:${take.durationFrames}:${take.sourceSampleRate}:${take.syllableSpansSec?.length ?? 0}:${take.gameBlockBaseline?.sourceSpansSec?.length ?? 0}:${take.midiNoteData?.length ?? 0}`,
+                                    `${take.id}:${take.sourceStartSec}:${take.sourceEndSec}:${take.playbackRate}:${take.reversed}:${take.loopEnabled}:${take.durationSec}:${take.durationFrames}:${take.sourceSampleRate}:${(take.syllableSpansSec ?? []).map((span) => `${span.startSec.toFixed(6)}-${span.endSec.toFixed(6)}`).join(";")}:${(take.gameBlockBaseline?.sourceSpansSec ?? []).map((span) => `${span.startSec.toFixed(6)}-${span.endSec.toFixed(6)}`).join(";")}:${(take.midiNoteData ?? []).map((note) => `${note.startSec.toFixed(6)}-${note.endSec.toFixed(6)}`).join(";")}`,
                             )
                             .join(",")}`,
                 )

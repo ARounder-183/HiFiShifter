@@ -125,6 +125,7 @@ export type ActionId =
     | "modifier.pianoKeysVerticalZoom" // 钢琴键垂直缩放（按住+滚轮）
     | "modifier.paramMorph" // 参数编辑器形变模式（按住）
     | "modifier.paramMultiSelect" // 参数编辑器多选区（按住拖动追加一段；按住点击已有段取消该段）
+    | "modifier.paramRangeSelect" // 参数块范围选择（按住并点击，从锚点扩展）
     | "modifier.clipRangeToParamSelection" // 按住并右键单击音频块：把该块范围追加/移出参数编辑器选区
     | "modifier.paramFineAdjust" // 精细调整（按住）
     | "modifier.vibratoAmplitudeAdjust" // 颤音绘制时滚轮调振幅

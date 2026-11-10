@@ -10,7 +10,8 @@ export type ParamBlockMenuScope = "block" | "param" | "selection";
 export type ParamBlockMenuChannel = "paramBlock" | "edit";
 
 export interface ParamBlockMenuContext {
-    readonly canSplit: boolean;
+    /** 实时求值：菜单渲染时读取播放头与当前块视图，不能保存打开瞬间的快照。 */
+    readonly canSplit: () => boolean;
     readonly canGroup: boolean;
     readonly canUngroup: boolean;
     readonly canDelete: boolean;
@@ -45,7 +46,7 @@ export const PARAM_BLOCK_MENU_ITEMS: readonly ParamBlockMenuItem[] = [
         scope: "block",
         channel: "paramBlock",
         shortcutAction: "paramBlock.split",
-        enabled: (ctx) => ctx.canSplit,
+        enabled: (ctx) => ctx.canSplit(),
     },
     {
         key: "create-from-selection",
@@ -110,7 +111,8 @@ export const PARAM_BLOCK_MENU_ITEMS: readonly ParamBlockMenuItem[] = [
         channel: "edit",
         shortcutAction: "clip.copy",
         separatorBefore: true,
-        enabled: selectionAvailable,
+        // copy/cut/initialize 通过 handleEditOp 支持隐式全选；菜单不应比快捷键更严。
+        enabled: () => true,
     },
     {
         key: "cut",
@@ -119,7 +121,7 @@ export const PARAM_BLOCK_MENU_ITEMS: readonly ParamBlockMenuItem[] = [
         scope: "param",
         channel: "edit",
         shortcutAction: "clip.cut",
-        enabled: selectionAvailable,
+        enabled: () => true,
     },
     {
         key: "paste",
@@ -137,7 +139,7 @@ export const PARAM_BLOCK_MENU_ITEMS: readonly ParamBlockMenuItem[] = [
         scope: "param",
         channel: "edit",
         separatorBefore: true,
-        enabled: selectionAvailable,
+        enabled: () => true,
     },
     {
         key: "transpose-cents",

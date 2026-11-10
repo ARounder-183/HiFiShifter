@@ -27,7 +27,14 @@ describe("paramBlockSelection", () => {
         ]);
         expect(
             paramBlockIdsInSelection(blocks, paramBlockLogicalFrameRanges(blocks, "a:0")),
-        ).toEqual(["a:0", "a:1"]);
+        ).toEqual(["a"]);
+    });
+
+    it("requires full coverage before a block is selected", () => {
+        expect(paramBlockIdsInSelection(blocks, [{ startFrame: 0, frameCount: 10 }])).toEqual([]);
+        expect(paramBlockIdsInSelection(blocks, [{ startFrame: 40, frameCount: 20 }])).toEqual([
+            "b",
+        ]);
     });
 
     it("restore scope uses whole logical blocks, not just the clicked run", () => {

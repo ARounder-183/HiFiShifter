@@ -94,12 +94,10 @@ export interface ProjectedMember {
 /**
  * 视图块的编辑能力标签（与 Rust `ProjectedBlockKind` 一一对应）。
  *
- * 【`"grouped"` 只有一条语义】可逆编组（`groupedFrom` 非空）：几何是"若干成员 +
- * 一份快照"的联合，横向切开 / 伸缩没有唯一解，必须先取消编组。
- *
- * 它与"这一 run 里有几个成员"**无关** —— 多成员 run（手工跨两条相邻 Clip 拖出来的
- * 块、或对 2 成员块切一刀之后的左右两半）只是几何事实，切分有唯一解，伸缩也有。
- * 把它标成 `"grouped"` 会让菜单置灰、手柄消失，静默禁掉一条本来正确的路径。
+ * 【`"grouped"` 只有一条语义】组容器投影：几何由 children 决定，可切分 /
+ * 可伸缩，但不可嵌套。它与"这一 run 里有几个成员"无关 —— 多成员 run
+ * （手工跨两条相邻 Clip 拖出来的块、或对 2 成员块切一刀之后的左右两半）
+ * 只是几何事实，切分有唯一解，伸缩也有。
  */
 export type ProjectedBlockKind = "base" | "user" | "grouped" | "manual";
 
@@ -144,12 +142,26 @@ type LegacyBlock = Partial<UserParamBlock> & {
     readonly createdSeq?: number;
 };
 
-function normalizeUserBlock(value: LegacyBlock): UserParamBlock | null {
-    if (typeof value.id !== "string" || value.id.length === 0 || value.geometry === undefined)
+const MAX_GROUP_DEPTH = 8;
+
+function normalizeUserBlock(
+    value: LegacyBlock,
+    depth = 0,
+    diagnostics?: string[],
+): UserParamBlock | null {
+    if (depth > MAX_GROUP_DEPTH) {
+        diagnostics?.push("group_depth_exceeded");
         return null;
+    }
+    if (typeof value.id !== "string" || value.id.length === 0 || value.geometry === undefined) {
+        diagnostics?.push("block_missing_geometry");
+        return null;
+    }
     const legacyChildren = Array.isArray(value.groupedFrom) ? value.groupedFrom : [];
     const convertChildren = (children: readonly LegacyBlock[]) =>
-        children.map(normalizeUserBlock).filter((child): child is UserParamBlock => child !== null);
+        children
+            .map((child) => normalizeUserBlock(child, depth + 1, diagnostics))
+            .filter((child): child is UserParamBlock => child !== null);
     const base = {
         id: value.id,
         deleted: value.deleted === true,
@@ -162,12 +174,24 @@ function normalizeUserBlock(value: LegacyBlock): UserParamBlock | null {
         ...(value.baseCover === undefined ? {} : { baseCover: value.baseCover }),
     };
     if (value.geometry.kind === "group") {
+        if (!Array.isArray(value.geometry.children)) {
+            diagnostics?.push("group_children_missing");
+            return null;
+        }
         const children = convertChildren(value.geometry.children as readonly LegacyBlock[]);
-        return children.length >= 2 ? { ...base, geometry: { kind: "group", children } } : null;
+        if (children.length < 2) {
+            diagnostics?.push("group_too_small");
+            return null;
+        }
+        return { ...base, geometry: { kind: "group", children } };
     }
     if (legacyChildren.length >= 2) {
         const children = convertChildren(legacyChildren);
-        return children.length >= 2 ? { ...base, geometry: { kind: "group", children } } : null;
+        if (children.length < 2) {
+            diagnostics?.push("group_too_small");
+            return null;
+        }
+        return { ...base, geometry: { kind: "group", children } };
     }
     if (value.geometry.kind === "take") {
         return {
@@ -191,16 +215,45 @@ export function normalizeParamBlockEditSet(
         | null
         | undefined,
 ): ParamBlockEditSet {
+    return normalizeParamBlockEditSetWithDiagnostics(value).edits;
+}
+
+export function normalizeParamBlockEditSetWithDiagnostics(
+    value:
+        | (Partial<ParamBlockEditSet> & { readonly blocks?: readonly LegacyBlock[] })
+        | null
+        | undefined,
+): { readonly edits: ParamBlockEditSet; readonly diagnostics: readonly string[] } {
+    const diagnostics: string[] = [];
     const blocks = Array.isArray(value?.blocks)
         ? value!.blocks
-              .map(normalizeUserBlock)
+              .map((block) => normalizeUserBlock(block, 0, diagnostics))
               .filter((block): block is UserParamBlock => block !== null)
         : [];
     return {
-        schemaVersion: 2,
-        revision: Number.isFinite(value?.revision) ? Number(value!.revision) : 0,
-        blocks,
+        edits: {
+            schemaVersion: 2,
+            revision: Number.isFinite(value?.revision) ? Number(value!.revision) : 0,
+            blocks,
+        },
+        diagnostics,
     };
+}
+
+/** 逻辑块身份：同一用户块的全部投影 run 共享一个 id；base 块用自身 id。 */
+export function logicalBlockId(block: {
+    readonly id: string;
+    readonly userBlockId?: string;
+}): string {
+    return block.userBlockId ?? block.id;
+}
+
+/** 选中 id 可以来自逻辑块或任一投影 run；统一按逻辑身份匹配。 */
+export function blockMatchesLogicalId(
+    block: { readonly id: string; readonly userBlockId?: string },
+    id: string,
+): boolean {
+    return block.id === id || block.userBlockId === id || logicalBlockId(block) === id;
 }
 
 /** 递归拍平组，返回全部叶子块。 */
