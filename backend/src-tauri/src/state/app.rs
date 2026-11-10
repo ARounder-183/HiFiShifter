@@ -1073,23 +1073,42 @@ impl AppState {
          */
         carry_analysis_forward(&tl, &mut next_state, tl.frame_period_ms());
         // Undo restores content, but transport revisions must remain monotonic.
-        for (root, params) in &tl.params_by_root_track {
-            if params.param_block_edits.is_empty() {
-                continue;
-            }
+        /*
+         * 【必须取两侧根集合的并集】旧实现只遍历"当前在线编辑集非空"的根：
+         * - 当前为空、目标非空（撤销一次“删除全部块”）时，目标根的 revision
+         *   不会被抬高，前端单调闸会把回包当成陈旧数据丢掉，重做看起来没反应；
+         * - 当前非空、目标为空时，目标根也不会被抬高。
+         * 只要任一侧存在这个根，就要把 revision 抬到两侧最大值 +1。
+         */
+        let roots: std::collections::BTreeSet<String> = tl
+            .params_by_root_track
+            .keys()
+            .chain(next_state.params_by_root_track.keys())
+            .cloned()
+            .collect();
+        for root in roots.iter() {
             if !next_state.tracks.iter().any(|track| track.id == *root) {
                 continue;
             }
+            let target_rev = next_state
+                .params_by_root_track
+                .get(root)
+                .map(|params| params.param_block_edits.revision)
+                .unwrap_or(0);
+            let live_rev = tl
+                .params_by_root_track
+                .get(root)
+                .map(|params| params.param_block_edits.revision)
+                .unwrap_or(0);
             let entry = next_state
                 .params_by_root_track
                 .entry(root.clone())
                 .or_default();
-            // 【revision 只增不减】历史快照里的编辑集是旧代次；恢复后必须分配
-            // 比在线权威更大的 revision，旧 GUI 的迟到提交才会被 CAS 拒绝。
             entry.param_block_edits.revision = entry
                 .param_block_edits
                 .revision
-                .max(params.param_block_edits.revision)
+                .max(target_rev)
+                .max(live_rev)
                 .saturating_add(1);
         }
         /*
@@ -1423,6 +1442,77 @@ mod tests {
         assert!(payload.ok);
         assert_eq!(payload.notes_markdown, Some("Hello, world!".to_string()));
         assert_eq!(state.current_notes_value(), "Hello, world!");
+    }
+
+    /// 撤销回到“空编辑集”时也必须抬高 revision，否则前端单调闸会把回包丢掉。
+    #[test]
+    fn undo_and_redo_bump_revision_across_empty_edit_sets() {
+        let state = AppState::default();
+        let root = {
+            let mut timeline = state.timeline.lock().unwrap();
+            timeline.add_track(None, None, None);
+            timeline.tracks[0].id.clone()
+        };
+        // 第 1 步：空编辑集。
+        {
+            let timeline = state.timeline.lock().unwrap();
+            state.checkpoint_timeline(&timeline, HistoryOp::ParamCurve);
+        }
+        // 第 2 步：非空编辑集，revision = 7。
+        {
+            let mut timeline = state.timeline.lock().unwrap();
+            let params = timeline
+                .params_by_root_track
+                .entry(root.clone())
+                .or_default();
+            params.param_block_edits.revision = 7;
+            params.param_block_edits.blocks =
+                vec![hifishifter_kernel::param_blocks::UserParamBlock {
+                    id: "root".into(),
+                    geometry: hifishifter_kernel::param_blocks::BlockGeometry::Root {
+                        span: hifishifter_kernel::param_blocks::RootSpan {
+                            start_sec: 0.0,
+                            end_sec: 1.0,
+                        },
+                    },
+                    deleted: false,
+                    manual: true,
+                    value: Some(60.0),
+                    transition_out_sec: None,
+                    created_seq: 1,
+                    base_cover: None,
+                    grouped_from: None,
+                }];
+            state.checkpoint_timeline(&timeline, HistoryOp::ParamCurve);
+        }
+        let undo = state.undo_timeline();
+        assert!(undo.ok);
+        let undo_revision = {
+            let timeline = state.timeline.lock().unwrap();
+            timeline
+                .params_by_root_track
+                .get(&root)
+                .map(|params| params.param_block_edits.revision)
+                .unwrap_or(0)
+        };
+        assert!(
+            undo_revision > 7,
+            "撤销到空编辑集也必须抬高 revision：{undo_revision}"
+        );
+        let redo = state.redo_timeline();
+        assert!(redo.ok);
+        let redo_revision = {
+            let timeline = state.timeline.lock().unwrap();
+            timeline
+                .params_by_root_track
+                .get(&root)
+                .map(|params| params.param_block_edits.revision)
+                .unwrap_or(0)
+        };
+        assert!(
+            redo_revision > undo_revision,
+            "重做必须继续抬高 revision：{redo_revision} <= {undo_revision}"
+        );
     }
 
     /// 「边缘拉伸」的选区快照：随**产生它的那一步**记录，撤销/重做/跳转由载荷带回；
