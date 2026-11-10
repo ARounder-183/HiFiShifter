@@ -2791,6 +2791,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         lastParamBlockAuthorityRef.current = paramBlockAuthorityKey;
         setParamBlockState(EMPTY_PARAM_BLOCK_STATE);
         paramBlockStateRef.current = EMPTY_PARAM_BLOCK_STATE;
+        paramBlockCommittedSpanRef.current = null;
+        paramBlockResizeRef.current = null;
         setSelectedParamBlockIds([]);
         setParamBlockContextMenu(null);
     }, [paramBlockAuthorityKey]);
