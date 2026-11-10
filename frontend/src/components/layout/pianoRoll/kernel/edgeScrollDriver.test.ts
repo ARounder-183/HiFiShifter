@@ -355,3 +355,44 @@ describe("createEdgeScrollDriver · 负下界（同步留白）", () => {
         expect(h.getScrollLeft()).toBe(0);
     });
 });
+
+describe("createEdgeScrollDriver · 二维", () => {
+    function twoAxisHarness() {
+        let left = 500;
+        let top = 500;
+        const driver = createEdgeScrollDriver({
+            getBounds: () => ({ left: 100, right: 1100, top: 100, bottom: 900 }),
+            getScrollLeft: () => left,
+            setScrollLeft: (next) => {
+                left = next;
+            },
+            getMaxScrollLeft: () => 10_000,
+            getMinScrollLeft: () => 0,
+            getScrollTop: () => top,
+            setScrollTop: (next) => {
+                top = next;
+            },
+            getMaxScrollTop: () => 10_000,
+            getMinScrollTop: () => 0,
+            requestFrame: () => 1,
+            cancelFrame: () => {},
+        });
+        return { driver, left: () => left, top: () => top };
+    }
+
+    it("scrolls both axes in a corner", () => {
+        const h = twoAxisHarness();
+        expect(h.driver.step(1098, 102)).toBe(true);
+        expect(h.left()).toBeGreaterThan(500);
+        expect(h.top()).toBeLessThan(500);
+    });
+
+    it("stop clears both axes", () => {
+        const h = twoAxisHarness();
+        h.driver.track(1098, 102);
+        h.driver.stop();
+        expect(h.driver.isRunning()).toBe(false);
+        expect(h.left()).toBe(500);
+        expect(h.top()).toBe(500);
+    });
+});

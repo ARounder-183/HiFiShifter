@@ -711,7 +711,11 @@ export function advanceParamBlockDragCommitRelease(args: {
     return canReleaseParamBlockDragCommit(args) ? "waiting-for-paint" : "waiting-for-curve";
 }
 
-/** 拖动窗口在提交交接完成前始终沿用起点快照，即使异步取数换了窗口 key。 */
+/**
+ * 只有 active gesture / 等待提交交接的事务才能持有拖动快照。
+ * 旧实现还在 paramViewKey === snapshotKey 时返回 true；撤销或 Clip 编辑后
+ * 这个 key 可能保持不变，旧快照就会在无事务状态下继续覆盖 canonical。
+ */
 export function shouldUseParamBlockDragSnapshotForRender(args: {
     readonly snapshotKey: string;
     readonly paramViewKey: string | null;
@@ -719,7 +723,9 @@ export function shouldUseParamBlockDragSnapshotForRender(args: {
     readonly gestureActive: boolean;
     readonly commitHeld: boolean;
 }): boolean {
-    return args.gestureActive || args.commitHeld || args.paramViewKey === args.snapshotKey;
+    void args.snapshotKey;
+    void args.paramViewKey;
+    return args.gestureActive || args.commitHeld;
 }
 
 /**
@@ -1185,8 +1191,15 @@ export function adjacentParamBlocks(
     };
 }
 
-export function paramBlockTransitionHandles(
-    blocks: readonly ParamBlock[],
+export function paramBlockTransitionHandles<
+    T extends {
+        readonly id: string;
+        readonly startSec: number;
+        readonly endSec: number;
+        readonly transitionSec?: number;
+    },
+>(
+    blocks: readonly T[],
     framePeriodMs = 5,
 ): Array<{
     readonly leftId: string;
@@ -1215,10 +1228,14 @@ export function paramBlockTransitionHandles(
     return out;
 }
 
-export function sortedParamBlockTransitionHandles(
-    blocks: readonly ParamBlock[],
-    framePeriodMs = 5,
-) {
+export function sortedParamBlockTransitionHandles<
+    T extends {
+        readonly id: string;
+        readonly startSec: number;
+        readonly endSec: number;
+        readonly transitionSec?: number;
+    },
+>(blocks: readonly T[], framePeriodMs = 5) {
     return paramBlockTransitionHandles(blocks, framePeriodMs).sort(
         (a, b) => a.boundarySec - b.boundarySec,
     );
@@ -1946,9 +1963,8 @@ export function buildParamBlockDragSegments(args: {
              * 若这里按 1 帧对齐而预览按 stride 网格对齐，边缘会差一帧，
              * 拖动时块高度就会落在两个位置之间闪。
              */
-            const startFrame = Math.max(0, Math.round((member.startSec * 1000) / fp));
-            const endFrame = Math.max(startFrame, Math.round((member.endSec * 1000) / fp) - 1);
-            return { startFrame, endFrame };
+            const span = paramBlockFrameSpan(member.startSec, member.endSec, fp);
+            return { startFrame: span.startFrame, endFrame: span.endFrameExclusive - 1 };
         })
         .sort((a, b) => a.startFrame - b.startFrame);
     if (spans.length === 0) return [];
@@ -2400,6 +2416,21 @@ export function paramBlockContainingSec<
  *
  * @param binWidth 显式箱宽；缺省由 {@link inferBlockBinWidth} 按参数量级推断。
  */
+/**
+ * 块秒区间 → 统一采样帧跨度。所有预览 / 提交 / 反算都走这里，
+ * 避免 ceil/round 混用导致边缘样本不一致。
+ */
+export function paramBlockFrameSpan(
+    startSec: number,
+    endSec: number,
+    framePeriodMs: number,
+): { startFrame: number; endFrameExclusive: number } {
+    const fp = Math.max(1e-6, framePeriodMs);
+    const startFrame = Math.max(0, Math.round((startSec * 1000) / fp));
+    const endFrameExclusive = Math.max(startFrame + 1, Math.round((endSec * 1000) / fp));
+    return { startFrame, endFrameExclusive };
+}
+
 export function averageParamValueInSpan(args: {
     readonly startSec: number;
     readonly endSec: number;
@@ -2417,8 +2448,11 @@ export function averageParamValueInSpan(args: {
     const fp = Math.max(1e-6, args.framePeriodMs);
     const stride = Math.max(1, args.stride);
     if (!Array.isArray(args.values) || args.values.length === 0) return null;
-    const startFrame = Math.max(0, Math.ceil((args.startSec * 1000) / fp));
-    const endFrame = Math.max(startFrame + 1, Math.ceil((args.endSec * 1000) / fp));
+    const { startFrame, endFrameExclusive: endFrame } = paramBlockFrameSpan(
+        args.startSec,
+        args.endSec,
+        fp,
+    );
     const samples: number[] = [];
     for (let frame = startFrame; frame < endFrame; frame += stride) {
         const index = Math.floor((frame - args.startFrame) / stride);
@@ -2476,7 +2510,9 @@ export function modeCenterOfValues(
 
     const counts = new Map<number, number[]>();
     for (const value of sorted) {
-        const bin = Math.floor(value / binWidth);
+        // 相对中位数分箱：整组值平移 delta 后 median 与 bin 归属同步平移，
+        // 主簇不会因绝对分箱边界改变而换一个峰。
+        const bin = Math.floor((value - median) / binWidth);
         const bucket = counts.get(bin);
         if (bucket === undefined) counts.set(bin, [value]);
         else bucket.push(value);
@@ -2534,8 +2570,7 @@ export function modeCenterOfValuesInSamples(
     if (samples.values.length === 0) return null;
     const fp = Math.max(1e-6, samples.framePeriodMs);
     const stride = Math.max(1, samples.stride);
-    const startFrame = Math.max(0, Math.ceil((startSec * 1000) / fp));
-    const endFrame = Math.max(startFrame + 1, Math.ceil((endSec * 1000) / fp));
+    const { startFrame, endFrameExclusive: endFrame } = paramBlockFrameSpan(startSec, endSec, fp);
     const values: number[] = [];
     for (let frame = startFrame; frame < endFrame; frame += stride) {
         const index = Math.floor((frame - samples.startFrame) / stride);

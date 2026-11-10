@@ -23,6 +23,7 @@
 import { useCallback, useEffect } from "react";
 import type { RootState } from "../../../../app/store";
 import { readDevicePixelRatio } from "../../../../utils/devicePixelLine";
+import { pianoRollInteractionViewportBus } from "../pianoRollInteractionViewportBus";
 import {
     timelineViewportNativeToState,
     timelineViewportStateToNative,
@@ -175,6 +176,18 @@ export function usePianoRollScrollKernel({
             refScrollLeftPx: scrollLeftRef.current,
         }).pxPerSec;
         pianoRollViewportBus.emit(next, emitPxPerSec, viewSizeRef.current.w);
+        const param = editParamRef.current;
+        const view = getCurrentViewportForScrollbar(param);
+        pianoRollInteractionViewportBus.emit({
+            scrollLeftPx: next,
+            pxPerSec: emitPxPerSec,
+            viewportWidthPx: viewSizeRef.current.w,
+            viewportHeightPx: viewSizeRef.current.h,
+            param,
+            valueCenter: view.center,
+            valueSpan: view.span,
+            dpr: readDevicePixelRatio(),
+        });
         // 标尺播放头线：**宿主模式下由内核写**（同一次帧提交、同一份内核视口，
         // 与 GL 主体播放头逐设备像素一致）。这里只在无宿主时兜底 —— 两个写者写同一
         // 个 `style.left` 是"最后一次写入者获胜"，一旦口径不同就会分离。

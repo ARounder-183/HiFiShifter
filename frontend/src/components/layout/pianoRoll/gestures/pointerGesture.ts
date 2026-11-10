@@ -113,7 +113,7 @@ export function startPointerGesture(options: PointerGestureOptions): PointerGest
     };
 
     /** 面板登记的收尾入口。**引用必须恒定**，见模块头。 */
-    const endFromFocus = () => end("up");
+    const endFromFocus = () => end("cancel");
 
     const onPointerUp = (event: Event) => end("up", event as globalThis.PointerEvent);
     const onPointerCancel = (event: Event) => end("cancel", event as globalThis.PointerEvent);

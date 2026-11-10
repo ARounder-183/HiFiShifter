@@ -19,10 +19,8 @@ import {
     type TimelineSnapContext,
 } from "../../../utils/timelineSnapping";
 import {
-    buildCandidateHighlightEntry,
     clearSnapHighlights,
-    publishSnapHighlights,
-    snapHighlightKindFromCandidate,
+    publishSingleTargetSnapHighlight,
 } from "../../../utils/snapHighlight";
 import type { ScaleLike } from "../../../utils/musicalScales";
 import { getDrawPreviewValue } from "./paramValuePreviewLogic";
@@ -98,22 +96,13 @@ export function resolveParamBlockPitchSnapDelta(args: {
     return target - args.startValue;
 }
 
-/** 发布横向吸附竖线；没有候选时清空本组，避免上一手势残留。 */
-export function publishParamBlockSnapHighlight(result: SnapResult, sourceSec: number): void {
-    if (!result.snapped || result.candidate === null) {
-        clearSnapHighlights(PARAM_BLOCK_SNAP_HIGHLIGHT_GROUP);
-        return;
-    }
-    publishSnapHighlights(PARAM_BLOCK_SNAP_HIGHLIGHT_GROUP, [
-        buildCandidateHighlightEntry({
-            id: "param-block",
-            kind: snapHighlightKindFromCandidate(result.candidate.kind),
-            sec: result.candidate.sec,
-            targetTrackId: result.candidate.trackId ?? null,
-            targetClipId: result.candidate.clipId ?? null,
-            sources: [{ sec: sourceSec }],
-        }),
-    ]);
+/** 发布横向吸附竖线；参数块没有“另一个对象边缘”，只发布吸附目标。 */
+export function publishParamBlockSnapHighlight(result: SnapResult): void {
+    publishSingleTargetSnapHighlight({
+        group: PARAM_BLOCK_SNAP_HIGHLIGHT_GROUP,
+        result,
+        id: "param-block",
+    });
 }
 
 export function clearParamBlockSnapHighlight(): void {

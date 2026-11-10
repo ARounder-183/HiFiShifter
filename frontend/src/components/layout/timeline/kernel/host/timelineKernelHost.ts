@@ -155,7 +155,7 @@ import {
 } from "../input/verticalZoomSettle";
 // 拖拽边缘自动滚屏：内核自绘滚动没有浏览器兜底，缺了它 clip 拖到视口边缘就再也
 // 无法继续右移（设计文档早已承诺、此前未实现）。
-import { resolveDragEdgeScroll, shouldAutoScrollForGesture } from "../input/dragAutoScroll";
+import { dragAutoScrollAxesForGesture, resolveDragEdgeScroll2D } from "../input/dragAutoScroll";
 // 缩放方向判定：**不能只看 deltaY 的符号**（`deltaY = 0` 会被判成缩小、变号噪声会
 // 逐事件翻转方向 → Windows 上表现为剧烈抖动）。见该模块文件头与回归测试。
 import {
@@ -3480,7 +3480,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
      */
     function tickDragAutoScroll(): void {
         dragAutoScrollFrame = null;
-        if (!shouldAutoScrollForGesture(gesture.kind)) {
+        const axes = dragAutoScrollAxesForGesture(gesture.kind);
+        if (!axes.x && !axes.y) {
             stopDragAutoScroll();
             return;
         }
@@ -3493,17 +3494,26 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
             return;
         }
         const rect = container.getBoundingClientRect();
-        const deltaPx = resolveDragEdgeScroll({
+        const { dx, dy } = resolveDragEdgeScroll2D({
             clientX: event.clientX,
+            clientY: event.clientY,
             leftPx: rect.left,
             rightPx: rect.right,
+            topPx: rect.top,
+            bottomPx: rect.bottom,
             frameMs,
         });
-        if (Math.abs(deltaPx) > 0.01) {
-            const view = scroll.get();
-            scroll.setScrollLeft(view.scrollLeft + deltaPx);
-            replayGesturePreviewAtLastPointer();
+        let moved = false;
+        const view = scroll.get();
+        if (axes.x && Math.abs(dx) > 0.01) {
+            scroll.setScrollLeft(view.scrollLeft + dx);
+            moved = true;
         }
+        if (axes.y && Math.abs(dy) > 0.01 && scroll.maxScrollTop() > 0) {
+            scroll.setScrollTop(view.scrollTop + dy);
+            moved = true;
+        }
+        if (moved) replayGesturePreviewAtLastPointer();
         dragAutoScrollFrame = requestAnimationFrame(tickDragAutoScroll);
     }
 
@@ -3517,7 +3527,8 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
         // `replayGesturePreviewAtLastPointer`），因此**每个**手势都需要它，
         // 而不只是需要自动滚屏的那些。
         dragAutoScrollEvent = event;
-        if (!shouldAutoScrollForGesture(gesture.kind)) return;
+        const axes = dragAutoScrollAxesForGesture(gesture.kind);
+        if (!axes.x && !axes.y) return;
         if (dragAutoScrollFrame !== null) return;
         dragAutoScrollLastTs = 0;
         dragAutoScrollFrame = requestAnimationFrame(tickDragAutoScroll);

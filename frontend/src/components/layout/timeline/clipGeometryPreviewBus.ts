@@ -103,6 +103,7 @@ export interface ClipGeometrySource {
 }
 
 let origin: readonly ClipGeometrySnapshot[] | null = null;
+let ownerToken: symbol | null = null;
 /**
  * 手势起点的**完整** clip 列表（原样留存）。
  *
@@ -131,7 +132,9 @@ function notify(): void {
  * 差分就退化成恒等，映射也就失去意义。调用点（`beginKernelGestureInteraction`）
  * 已满足这一时序：它在首个真实位移帧、且在任何预览派发之前执行。
  */
-export function beginClipGeometryPreview(clips: readonly ClipGeometrySource[]): void {
+export function beginClipGeometryPreview(clips: readonly ClipGeometrySource[]): symbol {
+    const token = Symbol("clip-geometry-preview");
+    ownerToken = token;
     originClips = clips;
     origin = clips.map((clip) => ({
         clipId: clip.id,
@@ -155,6 +158,7 @@ export function beginClipGeometryPreview(clips: readonly ClipGeometrySource[]): 
         midiNoteData: clip.midiNoteData ?? null,
     }));
     notify();
+    return token;
 }
 
 /**
@@ -166,8 +170,10 @@ export function beginClipGeometryPreview(clips: readonly ClipGeometrySource[]): 
  * 撤下的判据是**后端返回的基线所依据的几何变了**（`LoudnessSnapshot.baselineKey`），
  * 与快照落地落在同一次渲染里；本函数只负责宣告手势已经结束。
  */
-export function endClipGeometryPreview(): void {
+export function endClipGeometryPreview(token?: symbol): void {
+    if (token !== undefined && ownerToken !== token) return;
     if (origin === null) return;
+    ownerToken = null;
     origin = null;
     originClips = null;
     notify();

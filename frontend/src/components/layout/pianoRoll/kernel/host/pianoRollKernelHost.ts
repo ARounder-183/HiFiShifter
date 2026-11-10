@@ -62,7 +62,7 @@ import {
 } from "../../../renderKernel/gl/polylineProgram";
 import { buildPolylineVertices } from "../../../renderKernel/gl/polylineGeometry";
 import { buildSelectionBandInstances } from "../scene/selectionBandInstances";
-import { buildParamBlockScene } from "../scene/blockInstances";
+import { buildParamBlockScene, snapParamBlockRect } from "../scene/blockInstances";
 import {
     blockRowHeightPx,
     projectParamBlockCenterY,
@@ -1276,9 +1276,10 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                     valueToY:
                         spec.valueToY ?? data().grid?.valueToY ?? (() => viewportHeightPx / 2),
                     /* 实时拖动 / 过渡预览必须连续；普通显示吸附到行心。 */
-                    snapToSemitone: spec.curveOwned
-                        ? false
-                        : block.displayCenterSnapToSemitone !== false,
+                    snapToSemitone:
+                        block.centerPolicy === "locked" || spec.curveOwned
+                            ? false
+                            : block.displayCenterSnapToSemitone !== false,
                 });
                 /*
                  * 块高恒为当前参数一行的 1.2 倍，由**本帧**投影求值；纵向缩放
@@ -1304,13 +1305,24 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                  * 只由 live 曲线的代表值决定纵向位置；不叠加指针像素位移。
                  * 拖动已把预览写进 live 曲线，再叠加会与最终值错位。
                  */
-                const topPx = centerYPx - displayHeightPx / 2;
+                const rawTopPx = centerYPx - displayHeightPx / 2;
+                const snappedRect = snapParamBlockRect({
+                    x0: secToViewportPx(blockAxis, block.startSec),
+                    x1: secToViewportPx(blockAxis, block.endSec),
+                    rawTop: rawTopPx,
+                    rawBottom: rawTopPx + displayHeightPx,
+                    viewportWidthPx: blockAxis.viewportWidthPx,
+                    viewportHeightPx,
+                    dpr: blockAxis.dpr,
+                });
+                const topPx = snappedRect?.top ?? rawTopPx;
+                const hitHeightPx = snappedRect?.height ?? displayHeightPx;
                 hitRects.push({
                     id: block.id,
                     startSec: block.startSec,
                     endSec: block.endSec,
                     topPx,
-                    heightPx: displayHeightPx,
+                    heightPx: hitHeightPx,
                     averageValue: displayValue,
                     selected: block.selected === true,
                     hovered: (block as { hovered?: boolean }).hovered === true,
@@ -1320,7 +1332,7 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                 return {
                     ...block,
                     averageValue: displayValue,
-                    heightPx: displayHeightPx,
+                    heightPx: hitHeightPx,
                     topPx,
                 };
             });

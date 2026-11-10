@@ -8,8 +8,18 @@
  */
 
 export type ParamBlockPointerTarget =
-    | { readonly kind: "transition"; readonly leftId: string; readonly rightId: string }
-    | { readonly kind: "edge"; readonly blockId: string; readonly edge: "left" | "right" }
+    | {
+          readonly kind: "transition";
+          readonly leftId: string;
+          readonly rightId: string;
+          readonly logicalId?: string;
+      }
+    | {
+          readonly kind: "edge";
+          readonly blockId: string;
+          readonly logicalId?: string;
+          readonly edge: "left" | "right";
+      }
     | { readonly kind: "block"; readonly blockId: string; readonly logicalId: string }
     | { readonly kind: "blank" };
 
@@ -57,10 +67,18 @@ export interface ParamBlockPointerPolicyInput {
 function blockTarget(target: ParamBlockPointerTarget): ParamBlockBlockTarget | null {
     if (target.kind === "block") return target;
     if (target.kind === "edge") {
-        return { kind: "block", blockId: target.blockId, logicalId: target.blockId };
+        return {
+            kind: "block",
+            blockId: target.blockId,
+            logicalId: target.logicalId ?? target.blockId,
+        };
     }
     if (target.kind === "transition") {
-        return { kind: "block", blockId: target.leftId, logicalId: target.leftId };
+        return {
+            kind: "block",
+            blockId: target.leftId,
+            logicalId: target.logicalId ?? target.leftId,
+        };
     }
     return null;
 }

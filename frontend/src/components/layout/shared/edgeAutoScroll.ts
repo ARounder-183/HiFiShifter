@@ -40,6 +40,9 @@ export const EDGE_SCROLL_BAND_PX = 32;
 export interface EdgeScrollBounds {
     readonly left: number;
     readonly right: number;
+    /** 竖直边缘（可选；只做水平滚动的旧调用不传）。 */
+    readonly top?: number;
+    readonly bottom?: number;
 }
 
 /** 比例上限：指针拖出视口后不再继续加速（否则越拖越快，难以停在想看的位置）。 */
@@ -86,31 +89,31 @@ function clampNumber(value: number, min: number, max: number): number {
  * @param args.maxSpeedPxPerSec 该面板的最大滚屏速度（CSS px/秒），见模块头说明。
  * @returns 本帧滚动步长（CSS px，左负右正）；不在边缘带内时为 0。
  */
-export function resolveEdgeScrollDeltaPx(args: {
-    readonly clientX: number;
-    readonly leftPx: number;
-    readonly rightPx: number;
+export function resolveAxisEdgeScrollDeltaPx(args: {
+    readonly pointerPx: number;
+    readonly minPx: number;
+    readonly maxPx: number;
     readonly frameMs: number;
     readonly maxSpeedPxPerSec: number;
 }): number {
-    const { clientX, leftPx, rightPx, maxSpeedPxPerSec } = args;
-    if (!Number.isFinite(clientX) || !Number.isFinite(leftPx) || !Number.isFinite(rightPx)) {
+    const { pointerPx, minPx, maxPx, maxSpeedPxPerSec } = args;
+    if (!Number.isFinite(pointerPx) || !Number.isFinite(minPx) || !Number.isFinite(maxPx)) {
         return 0;
     }
     if (!Number.isFinite(maxSpeedPxPerSec) || maxSpeedPxPerSec <= 0) return 0;
     // 视口宽为 0 / 反向（布局未就绪）：没有可用的边缘语义。
-    if (!(rightPx > leftPx)) return 0;
+    if (!(maxPx > minPx)) return 0;
 
     let ratio = 0;
-    if (clientX < leftPx + EDGE_SCROLL_BAND_PX) {
+    if (pointerPx < minPx + EDGE_SCROLL_BAND_PX) {
         ratio = -clampNumber(
-            (leftPx + EDGE_SCROLL_BAND_PX - clientX) / EDGE_SCROLL_BAND_PX,
+            (minPx + EDGE_SCROLL_BAND_PX - pointerPx) / EDGE_SCROLL_BAND_PX,
             0,
             EDGE_SCROLL_MAX_RATIO,
         );
-    } else if (clientX > rightPx - EDGE_SCROLL_BAND_PX) {
+    } else if (pointerPx > maxPx - EDGE_SCROLL_BAND_PX) {
         ratio = clampNumber(
-            (clientX - (rightPx - EDGE_SCROLL_BAND_PX)) / EDGE_SCROLL_BAND_PX,
+            (pointerPx - (maxPx - EDGE_SCROLL_BAND_PX)) / EDGE_SCROLL_BAND_PX,
             0,
             EDGE_SCROLL_MAX_RATIO,
         );
@@ -123,6 +126,23 @@ export function resolveEdgeScrollDeltaPx(args: {
             : DEFAULT_FRAME_MS;
     const perSecond = ratio * maxSpeedPxPerSec;
     return (perSecond * frameMs) / 1000;
+}
+
+/** 水平轴兼容包装；时间轴与参数编辑器既有调用保持不变。 */
+export function resolveEdgeScrollDeltaPx(args: {
+    readonly clientX: number;
+    readonly leftPx: number;
+    readonly rightPx: number;
+    readonly frameMs: number;
+    readonly maxSpeedPxPerSec: number;
+}): number {
+    return resolveAxisEdgeScrollDeltaPx({
+        pointerPx: args.clientX,
+        minPx: args.leftPx,
+        maxPx: args.rightPx,
+        frameMs: args.frameMs,
+        maxSpeedPxPerSec: args.maxSpeedPxPerSec,
+    });
 }
 
 /**

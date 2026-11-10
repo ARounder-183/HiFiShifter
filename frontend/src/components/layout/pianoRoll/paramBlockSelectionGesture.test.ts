@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
     resolveBlockAnchor,
     resolveBlockClickSelection,
+    resolveBlockPressPlan,
     resolveBlockRangeSelection,
 } from "./paramBlockSelectionGesture";
 
@@ -65,6 +66,87 @@ describe("paramBlockSelectionGesture", () => {
             { startFrame: 40, frameCount: 40 },
             { startFrame: 100, frameCount: 20 },
         ]);
+    });
+
+    it("replace press on a selected block preserves the multi-selection until drag starts", () => {
+        const selection = [
+            { startFrame: 0, frameCount: 20 },
+            { startFrame: 40, frameCount: 20 },
+            { startFrame: 100, frameCount: 20 },
+        ];
+        const plan = resolveBlockPressPlan({
+            blocks,
+            selection,
+            anchor: { blockId: "a", frame: 5 },
+            targetBlockId: "b",
+            targetFrame: 45,
+            mode: "replace",
+        });
+        expect(plan.downSelection).toBe(selection);
+        expect(plan.dragIds).toEqual(["a", "b"]);
+        expect(plan.clickSelection).toEqual([{ startFrame: 40, frameCount: 20 }]);
+        expect(plan.startsDrag).toBe(true);
+    });
+
+    it("replace press on an unselected block collapses selection immediately", () => {
+        const plan = resolveBlockPressPlan({
+            blocks,
+            selection: [{ startFrame: 40, frameCount: 20 }],
+            anchor: { blockId: "b", frame: 40 },
+            targetBlockId: "c",
+            targetFrame: 65,
+            mode: "replace",
+        });
+        expect(plan.downSelection).toEqual([{ startFrame: 60, frameCount: 20 }]);
+        expect(plan.dragIds).toEqual(["c"]);
+        expect(plan.clickSelection).toEqual([{ startFrame: 60, frameCount: 20 }]);
+    });
+
+    it("ctrl removal never starts a drag and moves the anchor off the removed block", () => {
+        const selection = [
+            { startFrame: 40, frameCount: 20 },
+            { startFrame: 60, frameCount: 20 },
+        ];
+        const plan = resolveBlockPressPlan({
+            blocks,
+            selection,
+            anchor: { blockId: "b", frame: 45 },
+            targetBlockId: "b",
+            targetFrame: 45,
+            mode: "toggle",
+        });
+        expect(plan.downSelection).toEqual([{ startFrame: 60, frameCount: 20 }]);
+        expect(plan.dragIds).toEqual([]);
+        expect(plan.startsDrag).toBe(false);
+        expect(plan.downAnchor?.blockId).toBe("c");
+    });
+
+    it("ctrl addition drags the whole new selection", () => {
+        const plan = resolveBlockPressPlan({
+            blocks,
+            selection: [{ startFrame: 40, frameCount: 20 }],
+            anchor: { blockId: "b", frame: 40 },
+            targetBlockId: "c",
+            targetFrame: 65,
+            mode: "toggle",
+        });
+        expect(plan.dragIds).toEqual(["b", "c"]);
+        expect(plan.startsDrag).toBe(true);
+        expect(plan.clickSelection).toBeNull();
+    });
+
+    it("shift press keeps the current drag set and delays range selection to pointerup", () => {
+        const plan = resolveBlockPressPlan({
+            blocks,
+            selection: [{ startFrame: 40, frameCount: 20 }],
+            anchor: { blockId: "b", frame: 45 },
+            targetBlockId: "c",
+            targetFrame: 65,
+            mode: "range",
+        });
+        expect(plan.dragIds).toEqual(["b"]);
+        expect(plan.clickSelection).toEqual([{ startFrame: 40, frameCount: 40 }]);
+        expect(plan.startsDrag).toBe(true);
     });
 
     it("anchor fallback uses the first selected block then the playhead block", () => {

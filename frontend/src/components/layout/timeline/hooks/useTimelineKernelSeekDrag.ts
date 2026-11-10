@@ -357,13 +357,14 @@ export function useTimelineKernelSeekDrag({
      * 纯取消 / 零位移的路径没有任何远程写入，直接释放。
      */
     const kernelGestureInteractionActiveRef = React.useRef(false);
+    const kernelGestureGeometryTokenRef = React.useRef<symbol | null>(null);
     const beginKernelGestureInteraction = React.useCallback((): void => {
         if (kernelGestureInteractionActiveRef.current) return;
         kernelGestureInteractionActiveRef.current = true;
         // 记录**按下时**的全量 clip 几何，供参数编辑器把响度基线/曲线搬到正确位置
         //（见 `clipGeometryPreviewBus`）。时序要求：必须早于本次手势的任何乐观写入
         // —— 本函数在首个真实位移帧、且在任何预览派发之前调用，满足该要求。
-        beginClipGeometryPreview(sessionRef.current.clips);
+        kernelGestureGeometryTokenRef.current = beginClipGeometryPreview(sessionRef.current.clips);
         dispatch(beginInteraction());
     }, [dispatch, sessionRef]);
     const endKernelGestureInteraction = React.useCallback((): void => {
@@ -371,7 +372,8 @@ export function useTimelineKernelSeekDrag({
         kernelGestureInteractionActiveRef.current = false;
         // 只宣告手势结束；映射本身由消费方保留到"提交之后取的快照"落地（否则
         // 松手瞬间会退回旧位置的基线，表现为闪一下）。
-        endClipGeometryPreview();
+        endClipGeometryPreview(kernelGestureGeometryTokenRef.current ?? undefined);
+        kernelGestureGeometryTokenRef.current = null;
         dispatch(endInteraction());
     }, [dispatch]);
 

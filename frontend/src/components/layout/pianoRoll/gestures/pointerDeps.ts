@@ -20,6 +20,7 @@ import type { PinchStepState } from "../../../../utils/pinchGesture";
 import type { TimelineAxis } from "../../renderKernel/timelineAxis";
 import type { FrameSpan, ParamSelection } from "../paramSelection";
 import type { MultiRangeEditPiece } from "../selectionEditData";
+import type { EdgeScrollDriver } from "../kernel/edgeScrollDriver";
 import type {
     ParamMorphOverlay,
     ParamName,
@@ -63,7 +64,7 @@ export type PointerDeps = {
         /** 选择边界夹取（与选择工具同一规则）。 */
         clampSelectionFrame?: (frame: number) => number;
         /** 与选择工具同源的边缘自动滚动驱动。 */
-        edgeScroll?: { step(clientX: number): void };
+        edgeScroll?: EdgeScrollDriver;
         pointerType: string;
         nativeEvent: globalThis.PointerEvent;
         pointerId: number;
@@ -161,6 +162,8 @@ export type PointerDeps = {
     bumpRefreshToken: () => void;
     canvasRef: MutableRefObject<HTMLCanvasElement | null>;
     clampViewport: (param: ParamName, v: ValueViewport) => ValueViewport;
+    getCurrentViewportForScrollbar: (param: ParamName) => ValueViewport;
+    getParamValueBoundsForScrollbar: (param: ParamName) => { min: number; max: number };
     clearActivePointerGestureEnd: (endGesture?: () => void) => void;
     commitStroke: (points: StrokePoint[], mode: StrokeMode) => Promise<void>;
     createFineAdjustedPointerState: (

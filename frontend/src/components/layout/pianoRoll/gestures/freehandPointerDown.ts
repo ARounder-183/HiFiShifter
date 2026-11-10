@@ -250,7 +250,7 @@ export function handleFreehandPointerDown(
         // 边缘自动滚屏：`track` 会立刻滚一帧并维持 rAF 循环（指针停在
         // 边缘不动时也继续滚）。**不在这里读坐标做处理** —— 事件仍走
         // 下面的合帧队列，滚动引发的重算由 `onEdgeScrolled` 负责。
-        edgeScroll.track(ev.clientX);
+        edgeScroll.track(ev.clientX, ev.clientY);
         pendingMoveEvents.push(ev);
         if (strokeRafId == null) {
             strokeRafId = requestAnimationFrame(flushPendingMoves);

@@ -152,6 +152,110 @@ export function resolveBlockClickSelection(args: {
     };
 }
 
+/** 一次块按下的完整计划：按下选区、拖动成员、松手点击收敛。 */
+export interface BlockPressPlan {
+    readonly downSelection: ParamSelection | null;
+    readonly downAnchor: ParamBlockSelectionAnchor | null;
+    readonly dragIds: readonly string[];
+    readonly clickSelection: ParamSelection | null;
+    readonly startsDrag: boolean;
+}
+
+/**
+ * 把“按下”与“点击”拆开。
+ *
+ * 无修饰键按下已选块时不能立刻把选区收敛成目标块：那会让多选拖动在
+ * pointerdown 阶段就退化成单选。收敛只发生在 pointerup 且没有拖动时。
+ */
+export function resolveBlockPressPlan(args: {
+    readonly blocks: readonly FrameBlock[];
+    readonly selection: ParamSelection | null;
+    readonly anchor: ParamBlockSelectionAnchor | null;
+    readonly targetBlockId: string;
+    readonly targetFrame: number;
+    readonly mode: BlockClickMode;
+}): BlockPressPlan {
+    const click = resolveBlockClickSelection(args);
+    const logical = logicalBlocksOf(args.blocks);
+    const target = logical.find(
+        (block) =>
+            block.id === args.targetBlockId ||
+            block.runs.some(
+                (run) =>
+                    run.startFrame <= args.targetFrame &&
+                    run.startFrame + run.frameCount > args.targetFrame,
+            ) ||
+            args.blocks.some(
+                (candidate) =>
+                    candidate.id === args.targetBlockId && logicalBlockId(candidate) === block.id,
+            ),
+    );
+    if (target === undefined) {
+        return {
+            downSelection: args.selection,
+            downAnchor: args.anchor,
+            dragIds: [],
+            clickSelection: null,
+            startsDrag: false,
+        };
+    }
+    const selectedIds = paramBlockIdsInSelection(args.blocks, args.selection);
+    const targetSelected = selectedIds.includes(target.id);
+    const targetAnchor: ParamBlockSelectionAnchor = {
+        blockId: target.id,
+        frame: args.targetFrame,
+    };
+    if (args.mode === "replace") {
+        if (targetSelected) {
+            return {
+                downSelection: args.selection,
+                downAnchor: targetAnchor,
+                dragIds: selectedIds,
+                clickSelection: normalizeSelection(target.runs),
+                startsDrag: true,
+            };
+        }
+        const next = normalizeSelection(target.runs);
+        return {
+            downSelection: next,
+            downAnchor: targetAnchor,
+            dragIds: [target.id],
+            clickSelection: next,
+            startsDrag: true,
+        };
+    }
+    if (args.mode === "toggle") {
+        if (!click.targetSelected) {
+            return {
+                downSelection: click.selection,
+                downAnchor: resolveBlockAnchor({
+                    blocks: args.blocks,
+                    // 目标已从选区移除；原 anchor 即使仍存在也不再是合法锚点。
+                    anchor: null,
+                    selection: click.selection,
+                }),
+                dragIds: [],
+                clickSelection: null,
+                startsDrag: false,
+            };
+        }
+        return {
+            downSelection: click.selection,
+            downAnchor: targetAnchor,
+            dragIds: paramBlockIdsInSelection(args.blocks, click.selection),
+            clickSelection: null,
+            startsDrag: true,
+        };
+    }
+    return {
+        downSelection: args.selection,
+        downAnchor: args.anchor ?? targetAnchor,
+        dragIds: selectedIds,
+        clickSelection: click.selection,
+        startsDrag: selectedIds.length > 0,
+    };
+}
+
 /**
  * 下一次 Shift 点击的锚点回退顺序：
  * 1. 原锚点仍存在；

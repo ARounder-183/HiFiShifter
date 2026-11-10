@@ -9,6 +9,7 @@ import { handleRightDragMorph } from "./rightDragMorph";
 import type { ParamSelection } from "../../paramSelection";
 import type { ParamViewSegment } from "../../types";
 import type { PointerDeps } from "../pointerDeps";
+import type { EdgeScrollDriver } from "../../kernel/edgeScrollDriver";
 import type { PointerEvent as ReactPointerEvent } from "react";
 
 type MorphDeps = Pick<
@@ -50,6 +51,7 @@ export interface ParamSelectionMorphArgs extends MorphDeps {
     readonly framePeriodMs: number;
     /** 提交成功后的额外收尾（块工具用来清 pitch 块 value）。 */
     readonly onCommitted?: () => void;
+    readonly edgeScroll?: EdgeScrollDriver;
 }
 
 /** 开始一次右键幅度手势；返回值表示事件是否被消费。 */
@@ -94,6 +96,7 @@ export function beginParamSelectionMorph(args: ParamSelectionMorphArgs): boolean
             setActivePointerGestureEnd: args.setActivePointerGestureEnd,
             setCanvasCursor: args.setCanvasCursor,
             setParamView: args.setParamView,
+            edgeScroll: args.edgeScroll,
         },
         syntheticEvent,
     );

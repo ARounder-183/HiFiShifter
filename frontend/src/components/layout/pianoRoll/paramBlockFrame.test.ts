@@ -248,3 +248,25 @@ it("does not project a previous parameter or root's preview into the new editor"
         }),
     ).toBe(other);
 });
+
+it("locked centerPolicy never falls back to curve sampling", () => {
+    expect(
+        resolveParamBlockFrameValue({
+            block: {
+                startSec: 0,
+                endSec: 0.02,
+                averageValue: 58,
+                displayCenterValue: 61,
+                centerPolicy: "locked",
+            },
+            samples: {
+                values: [64, 64, 64, 64],
+                startFrame: 0,
+                stride: 1,
+                framePeriodMs: 5,
+                isPitch: true,
+                param: "pitch",
+            },
+        }),
+    ).toBe(61);
+});

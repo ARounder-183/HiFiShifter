@@ -20,6 +20,8 @@ export interface ParamBlockDragHandoffInputs {
     readonly structureVersion: number;
     readonly clearLiveEditOverride: () => void;
     readonly onReleased: () => void;
+    /** 提交等待硬超时；超时后回到 canonical，绝不永久锁住旧快照。 */
+    readonly timeoutMs?: number;
 }
 
 /** Retire a block gesture only after a matching post-commit window can take over. */
@@ -35,7 +37,43 @@ export function useParamBlockDragHandoff({
     structureVersion,
     clearLiveEditOverride,
     onReleased,
+    timeoutMs = 1200,
 }: ParamBlockDragHandoffInputs): void {
+    useEffect(() => {
+        const pending = commitRef.current;
+        if (pending === null || pending.releaseState === "released") return;
+        const timer = setTimeout(
+            () => {
+                if (
+                    commitRef.current !== pending ||
+                    !ownsParamBlockGesture({
+                        activeGestureToken: activeGestureTokenRef.current,
+                        gestureToken: pending.gestureToken,
+                    })
+                ) {
+                    return;
+                }
+                clearLiveEditOverride();
+                pending.releaseState = "released";
+                commitRef.current = null;
+                snapshotRef.current = null;
+                interactionCurveRef.current = null;
+                activeGestureTokenRef.current = null;
+                onReleased();
+            },
+            Math.max(0, timeoutMs),
+        );
+        return () => clearTimeout(timer);
+    }, [
+        activeGestureTokenRef,
+        clearLiveEditOverride,
+        commitRef,
+        interactionCurveRef,
+        onReleased,
+        snapshotRef,
+        timeoutMs,
+    ]);
+
     useEffect(() => {
         const handoff = commitRef.current;
         if (

@@ -1,6 +1,11 @@
 /** 参数块选区工具：只处理派生视图帧，不读任何旧块记录。 */
 
-import { normalizeSelection, selectionCoversFrameRange, type FrameRange } from "./paramSelection";
+import {
+    normalizeSelection,
+    selectionCoversFrameRange,
+    type FrameRange,
+    type ParamSelection,
+} from "./paramSelection";
 import { logicalBlockId } from "./paramBlockTypes";
 
 export interface ParamBlockFrameRange {
@@ -158,6 +163,16 @@ export function paramBlockIdsInSelection(
             ),
         )
         .map((block) => block.id);
+}
+
+/**
+ * 块工具 Ctrl+A：只选择所有可见逻辑块实际覆盖的帧区间。
+ * 块间空隙与轨道头尾不进入选区；无块时返回 null（不是整条曲线）。
+ */
+export function selectAllParamBlockRanges(blocks: readonly FrameBlock[]): ParamSelection | null {
+    const ranges = logicalBlocksOf(blocks).flatMap((block) => block.runs);
+    if (ranges.length === 0) return null;
+    return normalizeSelection(mergeRanges(ranges));
 }
 
 export function paramBlockRestoreRanges(

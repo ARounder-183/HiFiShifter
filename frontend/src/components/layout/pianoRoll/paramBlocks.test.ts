@@ -6,6 +6,8 @@ import {
     blocksFromViewForPanel,
     buildParamBlockDragSegments,
     canGroupParamBlocks,
+    modeCenterOfValues,
+    paramBlockFrameSpan,
     groupParamBlocks,
     paramBlockEdgeCandidates,
     isStrictlyInsideParamBlock,
@@ -572,5 +574,32 @@ describe("shiftParamBlockCurveValuesToTarget", () => {
                 param: "pitch",
             }),
         ).toEqual([58, 60, 62]);
+    });
+});
+
+describe("paramBlockFrameSpan / translation-invariant mode center", () => {
+    it("uses the same round-to-frame span for preview and commit", () => {
+        expect(paramBlockFrameSpan(0.0125, 0.0325, 5)).toEqual({
+            startFrame: 3,
+            endFrameExclusive: 7,
+        });
+        expect(paramBlockFrameSpan(0, 0, 5)).toEqual({ startFrame: 0, endFrameExclusive: 1 });
+    });
+
+    it.each([
+        ["pitch", 1],
+        ["volume", 0.04],
+        ["tension", 50],
+    ])("mode center translates with the values for %s", (param, binWidth) => {
+        const values = [60, 60, 60, 61, 59, 60, 60];
+        const base = modeCenterOfValues(values, { param, binWidth });
+        for (const delta of [-1.3, -0.37, 0, 0.1, 2.7]) {
+            expect(
+                modeCenterOfValues(
+                    values.map((value) => value + delta),
+                    { param, binWidth },
+                ),
+            ).toBeCloseTo((base as number) + delta, 9);
+        }
     });
 });

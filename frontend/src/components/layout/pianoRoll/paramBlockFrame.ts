@@ -88,6 +88,8 @@ export function resolveParamBlockFrameValue(args: {
         readonly averageValue?: number | null;
         readonly logicalCenterValue?: number | null;
         readonly displayCenterValue?: number | null;
+        /** Explicit center policy; locked previews must not fall back to curve sampling. */
+        readonly centerPolicy?: "live" | "locked";
         /** Center produced by the active block gesture, in the same frame as its curve. */
         readonly frameCenterValue?: number | null;
     };
@@ -106,6 +108,23 @@ export function resolveParamBlockFrameValue(args: {
         Number.isFinite(args.block.frameCenterValue)
     ) {
         return args.block.frameCenterValue;
+    }
+    if (args.block.centerPolicy === "locked") {
+        if (
+            args.block.displayCenterValue !== null &&
+            args.block.displayCenterValue !== undefined &&
+            Number.isFinite(args.block.displayCenterValue)
+        ) {
+            return args.block.displayCenterValue;
+        }
+        if (
+            (args.param ?? args.samples?.param ?? "pitch") === "pitch" &&
+            args.block.logicalCenterValue != null &&
+            Number.isFinite(args.block.logicalCenterValue)
+        ) {
+            return args.block.logicalCenterValue;
+        }
+        return args.block.averageValue ?? null;
     }
     if (
         !args.curveOwned &&

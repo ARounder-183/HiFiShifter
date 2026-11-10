@@ -5,6 +5,7 @@
  * 参数曲线仍在最上层（`drawGlCurves` 在块层之后），块不能抢走它的可读性。
  */
 import { secToViewportPx, type TimelineAxis } from "../../../renderKernel/timelineAxis";
+import { snapToDevicePx, wholeDevicePxLength } from "../../../../../utils/devicePixelLine";
 import type { Rgba } from "../../../renderKernel/instanceTypes";
 import {
     PARAM_BLOCK_TRANSITION_HANDLE_LINE_LENGTH_PX,
@@ -79,8 +80,10 @@ export interface ParamBlockInstanceArgs {
     readonly topHighlightPx?: number;
     /** 块的圆角半径（CSS px）。 */
     readonly cornerRadiusPx?: number;
-    /** 边框厚度（CSS px）；缺省 1。第一版块只是“可见的边界”，不抢曲线。 */
+    /** 边框厚度（CSS 意图）；缺省 1 个物理像素。 */
     readonly borderWidthPx?: number;
+    /** 边框物理像素数；缺省 1。与网格 hairline 同口径。 */
+    readonly borderPhysicalPx?: number;
     /** 块间过渡曲线颜色；缺省不画。 */
     readonly transitionRgba?: Rgba;
     /** 过渡曲线的端点圆点颜色；缺省复用 `transitionRgba`。 */
@@ -89,7 +92,7 @@ export interface ParamBlockInstanceArgs {
     readonly transitionPointRadiusPx?: number;
 }
 
-const DEFAULT_BORDER_PX = 1;
+const DEFAULT_BORDER_PHYSICAL_PX = 1;
 /** 块内标签：额外缩进，避免文字压住 1px 边线。 */
 const LABEL_INSET_PX = 4;
 /** 标签宽度不足时省略；与块最小高度一起保证小块不出现半截文字。 */
@@ -135,6 +138,74 @@ export interface ParamBlockFillInstance {
     readonly radius: number;
 }
 
+export interface SnappedBlockRect {
+    readonly left: number;
+    readonly right: number;
+    readonly top: number;
+    readonly bottom: number;
+    readonly width: number;
+    readonly height: number;
+    readonly borderPx: number;
+}
+
+function clamp(value: number, min: number, max: number): number {
+    return Math.min(max, Math.max(min, value));
+}
+
+/**
+ * 把块矩形吸附到设备像素栅格，并让四条边的厚度都是整数物理像素。
+ *
+ * 只在位置或线宽单方面取整都不够：位置落在半物理像素上时，同一条 1px
+ * 线会因覆盖列数不同而看起来一粗一细。这里同时吸附左右/上下边界，
+ * 线宽也换算成整数物理像素，填充与边框因此共享同一个矩形。
+ */
+export function snapParamBlockRect(args: {
+    readonly x0: number;
+    readonly x1: number;
+    readonly rawTop: number;
+    readonly rawBottom: number;
+    readonly viewportWidthPx: number;
+    readonly viewportHeightPx: number;
+    readonly dpr: number;
+    readonly borderPhysicalPx?: number;
+}): SnappedBlockRect | null {
+    const dpr = Number.isFinite(args.dpr) && args.dpr > 0 ? args.dpr : 1;
+    const borderPhysicalPx = Math.max(
+        1,
+        Math.round(
+            Number.isFinite(args.borderPhysicalPx)
+                ? (args.borderPhysicalPx as number)
+                : DEFAULT_BORDER_PHYSICAL_PX,
+        ),
+    );
+    const borderPx = borderPhysicalPx / dpr;
+    const vw = Math.max(0, args.viewportWidthPx);
+    const vh = Math.max(0, args.viewportHeightPx);
+    let left = clamp(snapToDevicePx(args.x0, dpr), 0, vw);
+    let right = clamp(snapToDevicePx(args.x1, dpr), 0, vw);
+    let top = clamp(snapToDevicePx(args.rawTop, dpr), 0, vh);
+    let bottom = clamp(snapToDevicePx(args.rawBottom, dpr), 0, vh);
+    if (!(right > 0) || left >= vw || !(bottom > 0) || top >= vh) return null;
+    if (right - left < borderPx) {
+        right = Math.min(vw, left + borderPx);
+        if (right - left < borderPx) left = Math.max(0, right - borderPx);
+    }
+    if (bottom - top < borderPx) {
+        bottom = Math.min(vh, top + borderPx);
+        if (bottom - top < borderPx) top = Math.max(0, bottom - borderPx);
+    }
+    if (!(right > left) || !(bottom > top)) return null;
+    return {
+        left,
+        right,
+        top,
+        bottom,
+        width: right - left,
+        height: bottom - top,
+        borderPx,
+    };
+}
+
 /**
  * 构建块边框实例。
  *
@@ -153,10 +224,12 @@ export function buildParamBlockInstances(args: ParamBlockInstanceArgs): GridInst
  */
 export function buildParamBlockScene(args: ParamBlockInstanceArgs): ParamBlockScene {
     const { axis, viewportHeightPx, blocks } = args;
+    const dpr = Number.isFinite(axis.dpr) && axis.dpr > 0 ? axis.dpr : 1;
     const borderPx =
         Number.isFinite(args.borderWidthPx) && (args.borderWidthPx as number) > 0
-            ? (args.borderWidthPx as number)
-            : DEFAULT_BORDER_PX;
+            ? wholeDevicePxLength(args.borderWidthPx as number, dpr)
+            : (args.borderPhysicalPx ?? DEFAULT_BORDER_PHYSICAL_PX) / dpr;
+    const borderPhysicalPx = Math.max(1, Math.round(borderPx * dpr));
     const height = Math.max(0, viewportHeightPx);
     const items: GridInstance[] = [];
     const labels: ParamBlockLabel[] = [];
@@ -175,27 +248,23 @@ export function buildParamBlockScene(args: ParamBlockInstanceArgs): ParamBlockSc
         if (!Number.isFinite(startSec) || !Number.isFinite(endSec)) continue;
         const x0 = secToViewportPx(axis, startSec);
         const x1 = secToViewportPx(axis, endSec);
-        /*
-         * 时间块没有用户可见的最短长度。即使在高倍缩放下只有亚像素宽，
-         * 也要用至少 1 CSS px 的填充显示出来；直接按 0.5px 跳过会让合法
-         * 短切段完全消失，也无法命中。
-         */
         if (!(x1 - x0 > 1e-9)) continue;
         if (x1 <= 0 || x0 >= axis.viewportWidthPx) continue;
-        const visibleWidth = Math.max(1, x1 - x0);
-        const visibleX1 = x0 + visibleWidth;
-
-        /*
-         * 纵向裁剪必须按**视口交集**判断：块整体在视口上下方时直接跳过，
-         * 不能把 top 夹到 0 / height-1 后画成边缘的一条假块。
-         */
         const rawTop = Number.isFinite(block.topPx) ? block.topPx : 0;
         const rawBottom = rawTop + Math.max(1, block.heightPx);
         if (rawBottom <= 0 || rawTop >= height) continue;
-        const top = Math.max(0, rawTop);
-        const bottom = Math.min(height, rawBottom);
-        const h = Math.max(1, bottom - top);
-        if (h <= 0.5) continue;
+        const snapped = snapParamBlockRect({
+            x0,
+            x1,
+            rawTop,
+            rawBottom,
+            viewportWidthPx: axis.viewportWidthPx,
+            viewportHeightPx: height,
+            dpr,
+            borderPhysicalPx,
+        });
+        if (snapped === null) continue;
+        const { left, right, top, bottom, width: visibleWidth, height: h } = snapped;
         const rgba = block.selected ? args.selectedRgba : args.borderRgba;
         const fillRgba = block.selected
             ? (args.selectedFillRgba ?? args.fillRgba)
@@ -208,7 +277,7 @@ export function buildParamBlockScene(args: ParamBlockInstanceArgs): ParamBlockSc
         const clipBottom = rawBottom > height;
         if (fillRgba !== undefined) {
             fills.push({
-                x: x0,
+                x: left,
                 y: top,
                 w: fillWidth,
                 h,
@@ -230,33 +299,24 @@ export function buildParamBlockScene(args: ParamBlockInstanceArgs): ParamBlockSc
          * 边界与填充在**同一条实例缓冲、同一次 draw call** 内提交：块层只是
          * 曲线帧里的一个绘制步骤，不另建 DOM / Canvas 层。
          */
-        const leftEdge = Math.max(0, Math.min(x0, axis.viewportWidthPx - borderPx));
-        const rightEdge = Math.max(
-            0,
-            Math.min(visibleX1 - borderPx, axis.viewportWidthPx - borderPx),
-        );
-        items.push({ x: leftEdge, y: top, w: borderPx, h, rgba, value: -3 });
-        if (rightEdge > leftEdge + borderPx * 0.5) {
-            items.push({ x: rightEdge, y: top, w: borderPx, h, rgba, value: -3 });
-        } else {
-            items.push({
-                x: Math.max(0, Math.min(visibleX1 - borderPx, axis.viewportWidthPx - borderPx)),
-                y: top,
-                w: borderPx,
-                h,
-                rgba,
-                value: -3,
-            });
-        }
+        items.push({ x: left, y: top, w: borderPx, h, rgba, value: -3 });
+        items.push({
+            x: Math.max(left, right - borderPx),
+            y: top,
+            w: borderPx,
+            h,
+            rgba,
+            value: -3,
+        });
         const topH = args.topHighlightPx ?? 0;
         if (!clipTop) {
-            items.push({ x: x0, y: top, w: fillWidth, h: borderPx, rgba, value: -3 });
+            items.push({ x: left, y: top, w: fillWidth, h: borderPx, rgba, value: -3 });
             if (topH > 0) {
                 highlights.push({
-                    x: x0,
+                    x: left,
                     y: top,
                     w: fillWidth,
-                    h: topH,
+                    h: wholeDevicePxLength(topH, dpr),
                     rgba: args.topHighlightRgba ?? rgba,
                     radius: 0,
                 });
@@ -264,8 +324,8 @@ export function buildParamBlockScene(args: ParamBlockInstanceArgs): ParamBlockSc
         }
         if (!clipBottom) {
             items.push({
-                x: x0,
-                y: top + h - borderPx,
+                x: left,
+                y: bottom - borderPx,
                 w: fillWidth,
                 h: borderPx,
                 rgba,
@@ -274,7 +334,7 @@ export function buildParamBlockScene(args: ParamBlockInstanceArgs): ParamBlockSc
         }
         if (block.grouped) {
             items.push({
-                x: x0,
+                x: left,
                 y: top,
                 w: visibleWidth,
                 h: borderPx,
@@ -286,13 +346,13 @@ export function buildParamBlockScene(args: ParamBlockInstanceArgs): ParamBlockSc
         if (
             label.length > 0 &&
             h >= LABEL_FONT_PX + 4 &&
-            x1 - x0 >= LABEL_MIN_WIDTH_PX + LABEL_INSET_PX * 2 &&
+            visibleWidth >= LABEL_MIN_WIDTH_PX + LABEL_INSET_PX * 2 &&
             args.labelRgba !== undefined
         ) {
             labels.push({
                 text: label,
                 fontKey: `${LABEL_FONT_PX}px sans-serif`,
-                x: Math.max(0, x0) + LABEL_INSET_PX,
+                x: left + LABEL_INSET_PX,
                 y: top + h / 2,
                 align: "left",
                 baseline: "middle",
@@ -316,7 +376,7 @@ export function buildParamBlockScene(args: ParamBlockInstanceArgs): ParamBlockSc
              * 既容易被下一个块遮住，也会和块边缘缩放热区抢指针。
              */
             const handleX = handleSecX + PARAM_BLOCK_TRANSITION_HANDLE_OUTSET_X_PX;
-            const handleY = paramBlockTransitionHandleY(rawTop, rightBlock?.topPx);
+            const handleY = paramBlockTransitionHandleY(top, rightBlock?.topPx);
             if (
                 visible &&
                 handleX >= -HANDLE_GLOW_DIAMETER_PX &&
@@ -386,7 +446,7 @@ export function buildParamBlockScene(args: ParamBlockInstanceArgs): ParamBlockSc
              * 起点圆点就是相接点，曲线向右展开；右侧块在原曲线基础上被拉向
              * 目标值，而不是被一条独立线覆盖。
              */
-            const leftY = rawTop + Math.max(1, block.heightPx) / 2;
+            const leftY = top + h / 2;
             const rightY =
                 rightBlock === undefined
                     ? leftY

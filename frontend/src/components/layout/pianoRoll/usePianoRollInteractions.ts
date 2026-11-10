@@ -6,7 +6,7 @@ import type {
     UIEvent,
 } from "react";
 import { useCallback, useEffect, useRef } from "react";
-import { pianoRollViewportBus } from "./pianoRollViewportBus";
+import { pianoRollInteractionViewportBus } from "./pianoRollInteractionViewportBus";
 import { beginParamSelectionMorph } from "./gestures/selection/paramSelectionMorph";
 import {
     resolveViewportReplay,
@@ -216,7 +216,7 @@ export function usePianoRollInteractions(args: {
         readonly rangeSelect: boolean;
         readonly pointerFrame?: (clientX: number) => number;
         readonly clampSelectionFrame?: (frame: number) => number;
-        readonly edgeScroll?: { step(clientX: number): void };
+        readonly edgeScroll?: import("./kernel/edgeScrollDriver").EdgeScrollDriver;
         readonly pointerType: string;
         readonly nativeEvent: globalThis.PointerEvent;
         readonly pointerId: number;
@@ -261,6 +261,8 @@ export function usePianoRollInteractions(args: {
     yToValue: (param: ParamName, y: number, h: number) => number;
     valueToY: (param: ParamName, v: number, h: number) => number;
     clampViewport: (param: ParamName, v: ValueViewport) => ValueViewport;
+    getCurrentViewportForScrollbar: (param: ParamName) => ValueViewport;
+    getParamValueBoundsForScrollbar: (param: ParamName) => { min: number; max: number };
 
     ensureLiveEditBase: (pv: ParamViewSegment) => void;
     applyDenseToLiveEdit: (
@@ -478,6 +480,8 @@ export function usePianoRollInteractions(args: {
         yToValue,
         valueToY,
         clampViewport,
+        getCurrentViewportForScrollbar,
+        getParamValueBoundsForScrollbar,
         ensureLiveEditBase,
         applyDenseToLiveEdit,
         onParamCommitSucceeded,
@@ -1847,6 +1851,12 @@ export function usePianoRollInteractions(args: {
      */
     const lastPointerMoveRef = useRef<globalThis.PointerEvent | null>(null);
     const pointerDownRef = useRef(false);
+    const modifierKeysRef = useRef({
+        ctrlKey: false,
+        shiftKey: false,
+        altKey: false,
+        metaKey: false,
+    });
     /**
      * **此刻**按下的按键位掩码（0 = 没有任何键按下）。
      *
@@ -1865,22 +1875,74 @@ export function usePianoRollInteractions(args: {
         };
         const onDown = (event: globalThis.PointerEvent) => {
             pressedButtonsRef.current = event.buttons;
-            if (event.button === 0) pointerDownRef.current = true;
+            modifierKeysRef.current = {
+                ctrlKey: event.ctrlKey,
+                shiftKey: event.shiftKey,
+                altKey: event.altKey,
+                metaKey: event.metaKey,
+            };
+            // 任意按钮都算活动手势：右键幅度拖拽也必须参与视口重放。
+            pointerDownRef.current = true;
         };
         const onUp = () => {
             pointerDownRef.current = false;
             pressedButtonsRef.current = 0;
+        };
+        /**
+         * 修饰键变化 → 用最近指针位置合成一次 pointermove。
+         *
+         * 创建块时补按 / 松开 Ctrl、块拖动时按 Shift 切换吸附，都必须在
+         * 鼠标不动时立即生效；键盘事件本身不会产生 pointermove。
+         */
+        const replayModifierChange = (event: globalThis.KeyboardEvent) => {
+            if (event.repeat) return;
+            const next = {
+                ctrlKey: event.ctrlKey,
+                shiftKey: event.shiftKey,
+                altKey: event.altKey,
+                metaKey: event.metaKey,
+            };
+            const previous = modifierKeysRef.current;
+            if (
+                previous.ctrlKey === next.ctrlKey &&
+                previous.shiftKey === next.shiftKey &&
+                previous.altKey === next.altKey &&
+                previous.metaKey === next.metaKey
+            ) {
+                return;
+            }
+            modifierKeysRef.current = next;
+            const last = lastPointerMoveRef.current;
+            if (!pointerDownRef.current || last === null || pressedButtonsRef.current === 0) return;
+            window.dispatchEvent(
+                new PointerEvent("pointermove", {
+                    bubbles: true,
+                    cancelable: true,
+                    clientX: last.clientX,
+                    clientY: last.clientY,
+                    pointerId: last.pointerId,
+                    pointerType: last.pointerType,
+                    isPrimary: last.isPrimary,
+                    buttons: pressedButtonsRef.current,
+                    button: -1,
+                    ...next,
+                }),
+            );
         };
         // 捕获阶段：即使某个手势 stopPropagation 也要记到。
         window.addEventListener("pointermove", onMove, true);
         window.addEventListener("pointerdown", onDown, true);
         window.addEventListener("pointerup", onUp, true);
         window.addEventListener("pointercancel", onUp, true);
+        window.addEventListener("keydown", replayModifierChange, true);
+        window.addEventListener("keyup", replayModifierChange, true);
         return () => {
             window.removeEventListener("pointermove", onMove, true);
             window.removeEventListener("pointerdown", onDown, true);
             window.removeEventListener("pointerup", onUp, true);
             window.removeEventListener("pointercancel", onUp, true);
+            window.removeEventListener("keydown", replayModifierChange, true);
+            window.removeEventListener("keyup", replayModifierChange, true);
         };
     }, []);
 
@@ -1902,14 +1964,23 @@ export function usePianoRollInteractions(args: {
      */
     useEffect(() => {
         let lastProjection: ViewportProjection | null = null;
-        return pianoRollViewportBus.subscribe((scrollLeftPx, pxPerSec, viewportWidthPx) => {
-            const projection: ViewportProjection = { scrollLeftPx, pxPerSec, viewportWidthPx };
+        return pianoRollInteractionViewportBus.subscribe((viewport) => {
+            const projection: ViewportProjection = {
+                scrollLeftPx: viewport.scrollLeftPx,
+                pxPerSec: viewport.pxPerSec,
+                viewportWidthPx: viewport.viewportWidthPx,
+                viewportHeightPx: viewport.viewportHeightPx,
+                param: viewport.param,
+                valueCenter: viewport.valueCenter,
+                valueSpan: viewport.valueSpan,
+            };
             const decision = resolveViewportReplay({
                 projection,
                 previousProjection: lastProjection,
                 dragging: pointerDownRef.current,
                 pressedButtons: pressedButtonsRef.current,
                 lastMove: lastPointerMoveRef.current,
+                currentModifiers: modifierKeysRef.current,
             });
             // 无论是否重放都要推进基准：漏推一次会让下一次比较错位，真实滚动反而被
             // 当成"没变"而漏掉重放。
@@ -2418,6 +2489,8 @@ export function usePianoRollInteractions(args: {
                     bumpRefreshToken,
                     canvasRef,
                     clampViewport,
+                    getCurrentViewportForScrollbar,
+                    getParamValueBoundsForScrollbar,
                     clearActivePointerGestureEnd,
                     commitStroke,
                     createFineAdjustedPointerState,
@@ -2524,6 +2597,8 @@ export function usePianoRollInteractions(args: {
             paramViewsRef,
             syncScrollLeft,
             clampViewport,
+            getCurrentViewportForScrollbar,
+            getParamValueBoundsForScrollbar,
             setPitchView,
             setParamViewport,
             invalidate,
@@ -2644,6 +2719,7 @@ export function usePianoRollInteractions(args: {
             readonly captureTarget: HTMLCanvasElement;
             readonly onCommitted?: () => void;
             readonly onContextMenu?: (x: number, y: number) => void;
+            readonly edgeScroll?: import("./kernel/edgeScrollDriver").EdgeScrollDriver;
         }): boolean => {
             const pv = paramViewRef.current;
             if (pv === null) return false;
@@ -2675,6 +2751,7 @@ export function usePianoRollInteractions(args: {
                 setActivePointerGestureEnd,
                 setCanvasCursor,
                 setParamView,
+                edgeScroll: args.edgeScroll,
             });
         },
         [

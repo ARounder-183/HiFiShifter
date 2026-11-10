@@ -229,13 +229,20 @@ export function handleSelectPointerDown(
     const maxSelectableFrame = Math.max(0, timeToFrame(dynamicProjectSec, framePeriodMs));
     const clampSelectionFrame = (frame: number) =>
         Math.min(frame, Math.max(0, maxSelectableFrame - 1));
-    const selectionFrameFromClientX = (clientX: number, allowAutoScroll: boolean) =>
-        clampSelectionFrame(rawFrameFromClientX(clientX, allowAutoScroll));
+    const selectionFrameFromClientX = (
+        clientX: number,
+        allowAutoScroll: boolean,
+        clientY?: number,
+    ) => clampSelectionFrame(rawFrameFromClientX(clientX, allowAutoScroll, clientY));
 
     /**
      * 视口 x → **连续帧坐标**（不夹取）。自动滚动与投影都在这里。
      */
-    function rawFrameFromClientX(clientX: number, allowAutoScroll: boolean): number {
+    function rawFrameFromClientX(
+        clientX: number,
+        allowAutoScroll: boolean,
+        clientY?: number,
+    ): number {
         const scroller = scrollerRef.current;
         if (!scroller) {
             return pointerFrame(clientX);
@@ -254,7 +261,7 @@ export function handleSelectPointerDown(
             // 【为什么选择工具不启用持续滚动】它的语义是"指针到哪选到哪"，
             // 松手即定型 —— 停在边缘不动没有意义。持续滚动只服务绘制类
             // 工具（笔画必须跟着视图继续延伸）。
-            edgeScroll.step(clientX);
+            edgeScroll.step(clientX, clientY);
         }
 
         const clampedClientX = clamp(clientX, bounds.left, bounds.right);
@@ -359,7 +366,7 @@ export function handleSelectPointerDown(
                 if (isRightDrag) armRightDragContextMenuGuard();
             }
             if (!moved) return;
-            const bbFrame = selectionFrameFromClientX(ev.clientX, true);
+            const bbFrame = selectionFrameFromClientX(ev.clientX, true, ev.clientY);
             selectionRef.current = addPointerRange(baseSelection, startFrame, bbFrame);
             updateSelectionUi(selectionRef.current);
             invalidate();
@@ -636,7 +643,7 @@ export function handleSelectPointerDown(
             if (entrySelection != null && selectionRef.current == null) return;
             if (!moved) return;
             const adjusted = getFineAdjustedPointerPosition(finePointerState, ev);
-            const bbFrame = selectionFrameFromClientX(adjusted.clientX, true);
+            const bbFrame = selectionFrameFromClientX(adjusted.clientX, true, adjusted.clientY);
             // 整段拖拽都落在工程起点之前（左侧那段额外空间）→
             // `frameRangeFromPointers` 给出"无选区"：既不建新选区，也**不动**
             // 原选区（否则在空白处拖一下就会把用户的选区清掉）。

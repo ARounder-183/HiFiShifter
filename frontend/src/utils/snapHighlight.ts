@@ -1,4 +1,4 @@
-import type { SnapCandidateKind } from "./timelineSnapping";
+import type { SnapCandidateKind, SnapResult } from "./timelineSnapping";
 
 /**
  * 吸附竖线高亮总线（轨道视图）。
@@ -154,6 +154,34 @@ export function buildCandidateHighlightEntry(args: {
         });
     }
     return { id: args.id ?? "primary", kind: args.kind, markers };
+}
+
+/**
+ * 只发布吸附目标 marker 的共享入口。
+ *
+ * 用于“没有另一个被拖对象边缘”的吸附（参数块边缘 / 创建、TempoMap 标尺）。
+ * 调用方若把原始指针位置作为 source 传进来，会额外画出一条鼠标位置线；
+ * 这里固定 sources 为空，从发布侧消除这类误用。
+ */
+export function publishSingleTargetSnapHighlight(args: {
+    readonly group: string;
+    readonly result: SnapResult;
+    readonly id?: string;
+}): void {
+    if (!args.result.snapped || args.result.candidate === null) {
+        clearSnapHighlights(args.group);
+        return;
+    }
+    publishSnapHighlights(args.group, [
+        buildCandidateHighlightEntry({
+            ...(args.id === undefined ? {} : { id: args.id }),
+            kind: snapHighlightKindFromCandidate(args.result.candidate.kind),
+            sec: args.result.candidate.sec,
+            targetTrackId: args.result.candidate.trackId ?? null,
+            targetClipId: args.result.candidate.clipId ?? null,
+            sources: [],
+        }),
+    ]);
 }
 
 /** 循环节/源媒体边界吸附的快捷构建（目标与被吸附边通常重合于同一 x）。 */

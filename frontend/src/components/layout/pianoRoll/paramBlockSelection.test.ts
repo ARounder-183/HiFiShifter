@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { selectAllParamBlockRanges } from "./paramBlockSelection";
 import {
     expandParamBlockSelection,
     paramBlockIdsInSelection,
@@ -54,5 +55,36 @@ describe("paramBlockSelection", () => {
             { startFrame: 0, frameCount: 20 },
             { startFrame: 100, frameCount: 20 },
         ]);
+    });
+});
+
+describe("selectAllParamBlockRanges", () => {
+    it("selects only the union of block runs, not track head/tail or gaps", () => {
+        expect(
+            selectAllParamBlockRanges([
+                { id: "a", startFrame: 100, endFrameExclusive: 200 },
+                { id: "b", startFrame: 400, endFrameExclusive: 500 },
+            ]),
+        ).toEqual([
+            { startFrame: 100, frameCount: 100 },
+            { startFrame: 400, frameCount: 100 },
+        ]);
+    });
+
+    it("expands every run of a multi-run logical block and filters zero-length runs", () => {
+        expect(
+            selectAllParamBlockRanges([
+                { id: "a:0", userBlockId: "a", startFrame: 10, endFrameExclusive: 20 },
+                { id: "a:1", userBlockId: "a", startFrame: 100, endFrameExclusive: 120 },
+                { id: "zero", startFrame: 50, endFrameExclusive: 50 },
+            ]),
+        ).toEqual([
+            { startFrame: 10, frameCount: 10 },
+            { startFrame: 100, frameCount: 20 },
+        ]);
+    });
+
+    it("returns null when there are no blocks", () => {
+        expect(selectAllParamBlockRanges([])).toBeNull();
     });
 });

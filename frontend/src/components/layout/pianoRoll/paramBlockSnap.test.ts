@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { createDefaultTimelineSnapSettings } from "../../../features/session/sessionSlice";
-import { resolveParamBlockPitchSnapDelta, resolveParamBlockTimeSnap } from "./paramBlockSnap";
+import {
+    clearParamBlockSnapHighlight,
+    publishParamBlockSnapHighlight,
+    resolveParamBlockPitchSnapDelta,
+    resolveParamBlockTimeSnap,
+} from "./paramBlockSnap";
+import { getSnapHighlightSnapshot } from "../../../utils/snapHighlight";
 import { resolveParamBlockSplitSec } from "./paramBlocks";
 
 describe("paramBlockSnap", () => {
@@ -87,4 +93,21 @@ describe("paramBlockSnap", () => {
             }),
         ).toBeCloseTo(0.51);
     });
+});
+
+it("publishes only the snap target, never a second line at the raw pointer", () => {
+    clearParamBlockSnapHighlight();
+    publishParamBlockSnapHighlight({
+        sec: 1,
+        snapped: true,
+        distancePx: 12,
+        candidate: { sec: 1, kind: "grid", priority: 0 },
+    });
+    const entries = getSnapHighlightSnapshot().entries.filter((entry) =>
+        entry.id.startsWith("paramBlock\u0000"),
+    );
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.markers).toHaveLength(1);
+    expect(entries[0]?.markers[0]).toMatchObject({ role: "target", sec: 1 });
+    clearParamBlockSnapHighlight();
 });

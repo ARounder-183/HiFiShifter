@@ -58,10 +58,11 @@ import {
     paramBlockIdsInSelection,
     paramBlockLogicalFrameRanges,
     paramBlockRestoreRanges,
+    selectAllParamBlockRanges,
 } from "../paramBlockSelection";
 import {
     resolveBlockAnchor,
-    resolveBlockClickSelection,
+    resolveBlockPressPlan,
     type BlockClickMode,
     type ParamBlockSelectionAnchor,
 } from "../paramBlockSelectionGesture";
@@ -97,7 +98,6 @@ import {
     canGroupParamBlocks,
     clearParamBlockValues,
     deleteParamBlocks,
-    formatParamBlockLabel,
     paramBlockCursorForHover,
     paramBlockEdgeCandidates,
     hitTestParamBlockEdges,
@@ -126,7 +126,6 @@ import {
     buildParamBlockTransitionPreview,
     PARAM_BLOCK_TRANSITION_HANDLE_OUTSET_X_PX,
     PARAM_BLOCK_TRANSITION_HANDLE_OUTSET_Y_PX,
-    sortedParamBlockTransitionHandles,
     sortParamBlocksByTime,
     createParamBlock,
     clipAtParamBlockCreateSpan,
@@ -137,6 +136,19 @@ import {
     type ParamBlockState,
 } from "../paramBlocks";
 import { resolveParamBlockFrameView, resolveParamBlockPanelValues } from "../paramBlockFrame";
+import {
+    buildParamBlockRenderSpec,
+    type ParamBlockRenderBlock,
+    type ParamBlockSpecColors,
+} from "../paramBlockRenderSpec";
+import {
+    sameParamBlockEpoch,
+    sameParamBlockEpochLayout,
+    shouldUseParamBlockVisualTransaction,
+    type ParamBlockEpoch,
+    type ParamBlockVisualTransaction,
+    type ParamBlockVisualTransactionKind,
+} from "../paramBlockVisualTransaction";
 import { isParamAuthorityConfirmedAfterCommit } from "../paramBlockTransaction";
 import {
     beginParamBlockDrag,
@@ -148,6 +160,11 @@ import {
 import { publishBlockAnalysisProgress } from "../blockAnalysisProgress";
 import { normalizePitchToNearestSemitone } from "../paramBlockPitch";
 import { getDrawPreviewValue } from "../paramValuePreviewLogic";
+import {
+    resolveParamBlockCreateShape,
+    resolveParamBlockModifierSnapshot,
+    type ParamBlockCreateShape,
+} from "../paramBlockModifierPolicy";
 import {
     clearParamBlockSnapHighlight,
     publishParamBlockSnapHighlight,
@@ -162,6 +179,7 @@ import { formatDbReadout, resolveParamAxisUnit, supportsParamAxisUnit } from "..
 import { useLoudnessCurves, type LoudnessSnapshot } from "../useLoudnessCurves";
 import { createLiveOverrideReader, type LiveOverrideReader } from "../liveLoudnessOverride";
 import { pianoRollViewportBus } from "../pianoRollViewportBus";
+import { pianoRollInteractionViewportBus } from "../pianoRollInteractionViewportBus";
 import { createLoudnessGeometryWarp, type LoudnessGeometryWarp } from "../loudnessGeometryWarp";
 import {
     getClipGeometryPreviewClips,
@@ -211,6 +229,7 @@ import {
 import { clearPianoRollLoading, setPianoRollLoading } from "../../../../utils/pianoRollStatusBus";
 import { parseCustomScaleToken } from "../../../../utils/scaleSelection";
 import { type PianoRollKernelHost } from "../kernel/host/pianoRollKernelHost";
+import type { EdgeScrollDriver } from "../kernel/edgeScrollDriver";
 import type {
     MutablePianoRollKernelData,
     PianoRollGridSpec,
@@ -920,6 +939,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         (next: ValueViewport) => {
             pitchViewRef.current = next;
             syncVerticalScrollbarForViewport("pitch", next);
+            publishInteractionViewport("pitch", next);
             // 值域视口是**竖轴的手势提交点**：滚动条 thumb 已同步写下 DOM，曲线 /
             // 音高键 / 数值轴（GL）必须在**同一任务**里提交，否则竖轴平移/缩放时
             // 这些线比滚动条慢一帧到几帧（见 `paintNow`）。
@@ -934,12 +954,27 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         (param: string, next: ValueViewport) => {
             paramViewsRef.current = { ...paramViewsRef.current, [param]: next };
             syncVerticalScrollbarForViewport(param as ParamName, next);
+            publishInteractionViewport(param, next);
             // 同 `setPitchView`：竖轴的手势提交点，DOM 与 GL 必须同任务。
             paintNow();
         },
         // eslint-disable-next-line react-hooks/exhaustive-deps
         [invalidate],
     );
+
+    function publishInteractionViewport(param: string, view: ValueViewport): void {
+        const size = viewSizeRef.current;
+        pianoRollInteractionViewportBus.emit({
+            scrollLeftPx: scrollLeftRef.current,
+            pxPerSec: pxPerSecRef.current,
+            viewportWidthPx: size.w,
+            viewportHeightPx: size.h,
+            param,
+            valueCenter: view.center,
+            valueSpan: view.span,
+            dpr: readDevicePixelRatio(),
+        });
+    }
 
     const rootTrackId = useMemo(() => {
         return resolveRootTrackId(s.tracks, effectiveSelectedTrackId);
@@ -1265,6 +1300,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             // 裁剪（窗口外 clip 直接跳过、不发起取数）——fresh 应用在
             // 首次滚动/缩放之前总线永远不会被 emit，波形因此无法显示。
             pianoRollViewportBus.emit(scrollLeftRef.current, pxPerSecRef.current, w);
+            publishInteractionViewport(editParam, getCurrentViewportForScrollbar(editParam));
         });
         ro.observe(el);
         return () => ro.disconnect();
@@ -2281,17 +2317,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
      * 后先绘一帧旧派生几何；用户会看到“松手闪回旧位置，再跳到新位置”。
      * 这里冻结刚提交的两个块区间，直到下一次派生真正包含它们。
      */
-    const paramBlockCommittedSpanRef = useRef<{
-        readonly blockId: string;
-        readonly blockSpan: { readonly startSec: number; readonly endSec: number };
-        readonly neighbors: readonly {
-            readonly id: string;
-            readonly startSec: number;
-            readonly endSec: number;
-            readonly remove: boolean;
-        }[];
-        readonly expiresAt: number;
-    } | null>(null);
+    const paramBlockVisualTransactionRef = useRef<ParamBlockVisualTransaction | null>(null);
     /**
      * 纵向块拖动提交后的交接。
      *
@@ -2331,6 +2357,12 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     /** 让宿主下一次绘制读到刚更新的拖动快照，而不是等某个 React 状态变化。 */
     const latestParamBlockSpecRef = useRef<PianoRollParamBlockSpec | null>(null);
     const invalidateParamBlockSpec = useCallback(() => {
+        const transaction = paramBlockVisualTransactionRef.current;
+        if (transaction !== null && transaction.phase !== "released") {
+            kernelDataRef.current.paramBlocks = transaction.spec;
+            invalidate();
+            return;
+        }
         const snapshot = paramBlockDragSnapshotRef.current;
         const pv = paramViewRef.current;
         if (
@@ -2386,7 +2418,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             rangeSelect: boolean;
             pointerFrame?: (clientX: number) => number;
             clampSelectionFrame?: (frame: number) => number;
-            edgeScroll?: { step(clientX: number): void };
+            edgeScroll?: EdgeScrollDriver;
             pointerType: string;
             nativeEvent: globalThis.PointerEvent;
             pointerId: number;
@@ -2470,6 +2502,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         yToValue,
         valueToY,
         clampViewport,
+        getCurrentViewportForScrollbar,
+        getParamValueBoundsForScrollbar,
         ensureLiveEditBase,
         applyDenseToLiveEdit,
         resetLiveEditPreview,
@@ -2681,10 +2715,9 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         currentParamRange,
         dispatch,
         dynamicProjectSec,
-        paramBlockExtentFrame: () => {
+        paramBlockSelectAllRanges: () => {
             const view = paramBlockViewRef.current;
-            if (view === null || view.blocks.length === 0) return 0;
-            return Math.max(...view.blocks.map((block) => block.endFrameExclusive));
+            return view === null ? null : selectAllParamBlockRanges(view.blocks);
         },
         editParam,
         effectiveProjectScale,
@@ -2823,6 +2856,26 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     useLayoutEffect(() => {
         paramBlockViewRef.current = paramBlockView;
     }, [paramBlockView]);
+    const paramBlockEpoch = useMemo<ParamBlockEpoch>(
+        () => ({
+            rootTrackId,
+            layoutKey: paramBlockView?.layoutKey ?? null,
+            editRevision: paramBlockView?.editRevision ?? paramBlockState.editSet.revision,
+            historyKey: `${s.historyUndoDepth}:${s.historyRedoDepth}`,
+            framePeriodMs: paramBlockState.framePeriodMs,
+        }),
+        [
+            rootTrackId,
+            paramBlockView?.layoutKey,
+            paramBlockView?.editRevision,
+            paramBlockState.editSet.revision,
+            paramBlockState.framePeriodMs,
+            s.historyUndoDepth,
+            s.historyRedoDepth,
+        ],
+    );
+    const paramBlockEpochRef = useRef(paramBlockEpoch);
+    paramBlockEpochRef.current = paramBlockEpoch;
     /** 与派生视图同源的 clip 快照；编辑函数按它把源域区间拆开 / 合并。 */
     const paramBlockSourceClipsRef = useRef(paramBlockSourceClips);
     useLayoutEffect(() => {
@@ -2859,11 +2912,15 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     const paramBlockAuthorityKey = rootTrackId ?? "";
     const lastParamBlockAuthorityRef = useRef(paramBlockAuthorityKey);
     useEffect(() => {
+        // 外部布局 / 历史变化后，右键菜单里的旧块快照已不再可信。
+        setParamBlockContextMenu(null);
+    }, [paramBlockEpoch.layoutKey, paramBlockEpoch.historyKey, paramBlockEpoch.rootTrackId]);
+    useEffect(() => {
         if (lastParamBlockAuthorityRef.current === paramBlockAuthorityKey) return;
         lastParamBlockAuthorityRef.current = paramBlockAuthorityKey;
         setParamBlockState(EMPTY_PARAM_BLOCK_STATE);
         paramBlockStateRef.current = EMPTY_PARAM_BLOCK_STATE;
-        paramBlockCommittedSpanRef.current = null;
+        paramBlockVisualTransactionRef.current = null;
         paramBlockResizeRef.current = null;
         paramBlockAnchorRef.current = null;
         selectionRef.current = null;
@@ -3103,10 +3160,44 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         ],
     );
 
-    useEffect(() => {
-        // 撤销/重做会整批替换块记录；刚提交的伸缩交接快照不能跨历史版本生效。
-        paramBlockCommittedSpanRef.current = null;
-    }, [rootTrackId, s.historyRedoDepth, s.historyUndoDepth]);
+    /*
+     * 外部 epoch 变化（Clip 编辑 / 撤销 / 根切换 / 参数窗口变化）必须在绘制前
+     * 撤下所有视觉事务。这里只做同步清理，真正的渲染选择在 paramBlockSpec
+     * 顶部已经按 epoch 完成，因此不会先闪一帧旧块。
+     */
+    useLayoutEffect(() => {
+        const tx = paramBlockVisualTransactionRef.current;
+        const txMismatch = tx !== null && !sameParamBlockEpoch(tx.epoch, paramBlockEpoch);
+        const dragSnapshot = paramBlockDragSnapshotRef.current;
+        const dragMismatch =
+            dragSnapshot !== null &&
+            !sameParamBlockEpochLayout(dragSnapshot.epoch, paramBlockEpoch);
+        const hasResizePreview = paramBlockResizeRef.current !== null;
+        if (!txMismatch && !dragMismatch && !hasResizePreview) return;
+        paramBlockVisualTransactionRef.current = null;
+        paramBlockInteractionCurveRef.current = null;
+        paramBlockResizeRef.current = null;
+        paramBlockCreateCommitRef.current = null;
+        paramBlockDragSnapshotRef.current = null;
+        paramBlockDragCommitRef.current = null;
+        paramBlockActiveGestureTokenRef.current = null;
+        paramBlockDragActivityRef.current.pointerGestureToken = null;
+        if (paramBlockCreateReleaseRafRef.current !== null) {
+            cancelAnimationFrame(paramBlockCreateReleaseRafRef.current);
+            paramBlockCreateReleaseRafRef.current = null;
+        }
+        const pvNow = paramViewRef.current;
+        if (pvNow !== null) resetLiveEditPreview(pvNow);
+        bumpParamBlockStructure();
+        invalidate();
+    }, [
+        bumpParamBlockStructure,
+        invalidate,
+        paramBlockEpoch,
+        paramBlockInteractionCurveRef,
+        paramViewRef,
+        resetLiveEditPreview,
+    ]);
     /*
      * 持久化合并不在组件状态里：从工程参数读取，写入时走带撤销点的命令。
      * 只在根轨道切换 / 历史推进时刷新；拖动块本身不触发网络请求。
@@ -3287,6 +3378,65 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     }, [paramBlockToolActive, selectionFrameBlocks, selectionUi]);
     const activeSelectedParamBlockIds = selectedParamBlockIds;
     const bounds = getParamValueBoundsForScrollbar(editParam);
+    const paramBlockSpecColors = useMemo<ParamBlockSpecColors>(
+        () => ({
+            borderRgba: parseRgbaColor(
+                normalizeCssColor(
+                    themeMode === "dark" ? "rgba(124,198,236,0.95)" : "rgba(31,103,160,0.95)",
+                ),
+            ),
+            transitionRgba: parseRgbaColor(
+                normalizeCssColor(
+                    themeMode === "dark" ? "rgba(219,246,255,0.92)" : "rgba(0,94,156,0.90)",
+                ),
+            ),
+            transitionPointRgba: parseRgbaColor(
+                normalizeCssColor(
+                    themeMode === "dark" ? "rgba(255,255,255,1)" : "rgba(0,66,112,1)",
+                ),
+            ),
+            transitionPointRadiusPx: 2.5,
+            selectedRgba: parseRgbaColor(
+                normalizeCssColor(
+                    themeMode === "dark" ? "rgba(210,242,255,1)" : "rgba(0,72,128,1)",
+                ),
+            ),
+            groupedRgba: parseRgbaColor(
+                normalizeCssColor(
+                    themeMode === "dark" ? "rgba(124,198,236,0.95)" : "rgba(31,103,160,0.95)",
+                ),
+            ),
+            labelRgba: parseRgbaColor(
+                normalizeCssColor(
+                    themeMode === "dark" ? "rgba(244,251,255,0.92)" : "rgba(235,247,255,0.92)",
+                ),
+            ),
+            selectedLabelRgba: parseRgbaColor(normalizeCssColor("rgba(255,255,255,1)")),
+            fillRgba: parseRgbaColor(
+                normalizeCssColor(
+                    themeMode === "dark" ? "rgba(57,111,145,0.90)" : "rgba(107,158,192,0.84)",
+                ),
+            ),
+            selectedFillRgba: parseRgbaColor(
+                normalizeCssColor(
+                    themeMode === "dark" ? "rgba(49,132,180,0.98)" : "rgba(54,132,184,0.96)",
+                ),
+            ),
+            groupedFillRgba: parseRgbaColor(
+                normalizeCssColor(
+                    themeMode === "dark" ? "rgba(57,111,145,0.90)" : "rgba(107,158,192,0.84)",
+                ),
+            ),
+            topHighlightRgba: parseRgbaColor(
+                normalizeCssColor(
+                    themeMode === "dark" ? "rgba(255,255,255,0.11)" : "rgba(255,255,255,0.20)",
+                ),
+            ),
+            cornerRadiusPx: 2,
+            topHighlightPx: 1,
+        }),
+        [themeMode],
+    );
     const selectedParamBlockIdSet = useMemo(
         () => new Set(activeSelectedParamBlockIds),
         [activeSelectedParamBlockIds],
@@ -3295,112 +3445,79 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         (snapshot: ParamBlockDragSnapshot): PianoRollParamBlockSpec | null => {
             if (!paramBlocksVisible) return null;
             if (snapshot.blocks.length === 0) return null;
-            return {
-                curveOwned: paramBlockViewRef.current !== null,
+            const draggedById = new Map(snapshot.blocks.map((block) => [block.id, block]));
+            const blocks: ParamBlockRenderBlock[] = paramBlocksWithValues.map((block) => {
+                const dragged = snapshot.ids.has(logicalBlockId(block))
+                    ? draggedById.get(block.id)
+                    : undefined;
+                return {
+                    id: block.id,
+                    userBlockId: block.userBlockId,
+                    startSec: dragged?.startSec ?? block.startSec,
+                    endSec: dragged?.endSec ?? block.endSec,
+                    averageValue: dragged?.anchorValue ?? block.averageValue,
+                    logicalCenterValue: block.manualValue,
+                    frameCenterValue:
+                        dragged === undefined
+                            ? undefined
+                            : (snapshot.centerValues.get(block.id) ?? null),
+                    displayCenterSnapToSemitone:
+                        dragged === undefined ? block.manualValue == null : false,
+                    selected: dragged !== undefined,
+                    grouped: block.kind === "grouped",
+                    transitionSec: block.transitionSec,
+                    centerPolicy: dragged === undefined ? "live" : "locked",
+                };
+            });
+            return buildParamBlockRenderSpec({
+                blocks,
                 param: editParam,
                 valueMin: bounds.min,
                 valueMax: bounds.max,
                 valueToY: (value, heightPx) => valueToY(editParam, value, heightPx),
-                blocks: [
-                    ...snapshot.blocks.map((block) => ({
-                        id: block.id,
-                        startSec: block.startSec,
-                        endSec: block.endSec,
-                        averageValue: block.anchorValue,
-                        frameCenterValue: snapshot.centerValues.get(block.id) ?? null,
-                        displayCenterSnapToSemitone: false,
-                        selected: true,
-                        grouped: block.grouped,
-                    })),
-                    ...paramBlocksWithValues
-                        .filter((block) => !snapshot.ids.has(logicalBlockId(block)))
-                        .map((block) => ({
-                            id: block.id,
-                            startSec: block.startSec,
-                            endSec: block.endSec,
-                            averageValue: block.averageValue,
-                            logicalCenterValue: block.manualValue,
-                            displayCenterSnapToSemitone: block.manualValue == null,
-                            selected: false,
-                            grouped: block.kind === "grouped",
-                        })),
-                ],
-                borderRgba: parseRgbaColor(
-                    normalizeCssColor(
-                        themeMode === "dark" ? "rgba(124,198,236,0.95)" : "rgba(31,103,160,0.95)",
-                    ),
-                ),
-                // 过渡曲线与手柄同色系，和 OpenUtau 的音高轨迹一致。
-                transitionRgba: parseRgbaColor(
-                    normalizeCssColor(
-                        themeMode === "dark" ? "rgba(219,246,255,0.92)" : "rgba(0,94,156,0.90)",
-                    ),
-                ),
-                transitionPointRgba: parseRgbaColor(
-                    normalizeCssColor(
-                        themeMode === "dark" ? "rgba(255,255,255,1)" : "rgba(0,66,112,1)",
-                    ),
-                ),
-                transitionPointRadiusPx: 2.5,
-                selectedRgba: parseRgbaColor(
-                    normalizeCssColor(
-                        themeMode === "dark" ? "rgba(210,242,255,1)" : "rgba(0,72,128,1)",
-                    ),
-                ),
-                groupedRgba: parseRgbaColor(
-                    normalizeCssColor(
-                        themeMode === "dark" ? "rgba(124,198,236,0.95)" : "rgba(31,103,160,0.95)",
-                    ),
-                ),
-                labelRgba: parseRgbaColor(
-                    normalizeCssColor(
-                        themeMode === "dark" ? "rgba(244,251,255,0.92)" : "rgba(235,247,255,0.92)",
-                    ),
-                ),
-                selectedLabelRgba: parseRgbaColor(
-                    normalizeCssColor(
-                        themeMode === "dark" ? "rgba(255,255,255,1)" : "rgba(255,255,255,1)",
-                    ),
-                ),
-                fillRgba: parseRgbaColor(
-                    normalizeCssColor(
-                        themeMode === "dark" ? "rgba(57,111,145,0.90)" : "rgba(107,158,192,0.84)",
-                    ),
-                ),
-                selectedFillRgba: parseRgbaColor(
-                    normalizeCssColor(
-                        themeMode === "dark" ? "rgba(49,132,180,0.98)" : "rgba(54,132,184,0.96)",
-                    ),
-                ),
-                groupedFillRgba: parseRgbaColor(
-                    normalizeCssColor(
-                        themeMode === "dark" ? "rgba(57,111,145,0.90)" : "rgba(107,158,192,0.84)",
-                    ),
-                ),
-                topHighlightRgba: parseRgbaColor(
-                    normalizeCssColor(
-                        themeMode === "dark" ? "rgba(255,255,255,0.11)" : "rgba(255,255,255,0.20)",
-                    ),
-                ),
-                cornerRadiusPx: 2,
-                topHighlightPx: 1,
-            };
+                colors: paramBlockSpecColors,
+                curveOwned: paramBlockViewRef.current !== null,
+            });
         },
         [
             bounds.max,
             bounds.min,
             editParam,
+            paramBlockSpecColors,
             paramBlocksVisible,
             paramBlocksWithValues,
-            themeMode,
             valueToY,
         ],
     );
     paramBlockSpecForDragSnapshotRef.current = paramBlockSpecForDragSnapshot;
+    const publishParamBlockVisualTransaction = useCallback(
+        (
+            kind: ParamBlockVisualTransactionKind,
+            spec: PianoRollParamBlockSpec,
+            phase: ParamBlockVisualTransaction["phase"] = "gesture",
+        ) => {
+            const previous = paramBlockVisualTransactionRef.current;
+            const sameGesture =
+                previous !== null &&
+                previous.kind === kind &&
+                previous.phase === phase &&
+                sameParamBlockEpoch(previous.epoch, paramBlockEpochRef.current);
+            paramBlockVisualTransactionRef.current = {
+                id: sameGesture ? previous.id : ++paramBlockGestureSerialRef.current,
+                epoch: paramBlockEpochRef.current,
+                kind,
+                spec,
+                phase,
+                startedAt: sameGesture ? previous.startedAt : performance.now(),
+            };
+        },
+        [],
+    );
     const beginBlockDrag = useCallback(
         (args: ParamBlockDragStart) => {
             const anchorBlock = paramBlocksWithValues.find(
-                (block) => block.id === args.anchorBlockId,
+                (block) =>
+                    block.id === args.anchorBlockId || logicalBlockId(block) === args.anchorBlockId,
             );
             if (paramBlockResizeRef.current?.blockId === "__create__") {
                 paramBlockResizeRef.current = null;
@@ -3422,6 +3539,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 paramBlockInteractionCurveRef,
                 paramBlockDragSnapshotRef,
                 paramBlockStateRef,
+                paramBlockEpoch,
+                getCurrentParamBlockEpoch: () => paramBlockEpochRef.current,
                 curveOwned: paramBlockViewRef.current !== null,
                 paramBlockCommitQueueRef,
                 paramViewRef,
@@ -3498,6 +3617,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             liveEditActiveRef,
             mergedKeybindings,
             onParamCommitSucceeded,
+            paramBlockEpoch,
             paramBlocksWithValues,
             paramView,
             paramAuthorityRevision,
@@ -3522,7 +3642,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             rangeSelect: boolean;
             pointerFrame?: (clientX: number) => number;
             clampSelectionFrame?: (frame: number) => number;
-            edgeScroll?: { step(clientX: number): void };
+            edgeScroll?: EdgeScrollDriver;
             pointerType: string;
             nativeEvent: globalThis.PointerEvent;
             pointerId: number;
@@ -3537,6 +3657,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             metaKey?: boolean;
         }): import("../gestures/pointerDeps").ParamBlockPointerDownResult => {
             if (!paramBlockToolActive) return { handled: false };
+            // 新手势优先：上一笔等待回读的视觉事务不能盖住本次按下。
+            paramBlockVisualTransactionRef.current = null;
             activateParamBlockMenuContext(paramBlockPanelId);
             /*
              * 块层未就绪 = 此刻做不了任何块操作。返回 `handled: false`，让指针
@@ -3642,6 +3764,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                         captureTarget: hit.captureTarget,
                         onCommitted: () => refreshParamBlockValuesAfterParamEdit("blockAmplitude"),
                         onContextMenu: (x, y) => setParamBlockContextMenu({ x, y }),
+                        edgeScroll: hit.edgeScroll,
                     });
                     return { handled: true, seekOnClick: false };
                 }
@@ -3649,7 +3772,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 const anchorFrame = toFrame(hit.sec, fp);
                 let dragging = false;
                 let lastX = hit.clientX;
-                let raf = 0;
                 const setRegion = (region: ParamSelection | null) => {
                     const expanded =
                         region === null ? null : expandParamBlockSelection(layout.blocks, region);
@@ -3677,27 +3799,18 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                     );
                     if (seek) seekFollowingPointer(clientX);
                 };
-                const edgeScroll = () => {
-                    if (dragging) {
-                        const rect = hit.captureTarget.getBoundingClientRect();
-                        const axis = hostRef.current?.getAxis();
-                        const dx = lastX < rect.left + 24 ? -12 : lastX > rect.right - 24 ? 12 : 0;
-                        if (dx && axis) {
-                            applyEdgeScrollLeft(axis.scrollLeftPx + dx);
-                            update(lastX, true);
-                        }
-                    }
-                    raf = requestAnimationFrame(edgeScroll);
-                };
-                raf = requestAnimationFrame(edgeScroll);
                 startPointerGesture({
                     pointerId: hit.pointerId,
                     captureTarget: hit.captureTarget,
                     onMove: (event) => {
-                        if ((event.buttons & 2) === 2) update(event.clientX, true);
+                        if ((event.buttons & 2) !== 2) return;
+                        hit.edgeScroll?.track(event.clientX, event.clientY, () => {
+                            update(lastX, true);
+                        });
+                        update(event.clientX, true);
                     },
                     onEnd: (reason, event) => {
-                        cancelAnimationFrame(raf);
+                        hit.edgeScroll?.stop();
                         armRightDragContextMenuGuard();
                         if (reason !== "up") {
                             setParamBlockSelection(originalSelection);
@@ -3838,6 +3951,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                     setActivePointerGestureEnd: hit.setActivePointerGestureEnd,
                     clearActivePointerGestureEnd: hit.clearActivePointerGestureEnd,
                     pointerValue: hit.pointerValue,
+                    edgeScroll: hit.edgeScroll,
                     selection: dragSelection,
                     anchorValue:
                         framedHits.find((block) => block.id === splitBlock.id)?.averageValue ??
@@ -3853,16 +3967,23 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                     altKey: hit.altKey,
                     ctrlKey: hit.ctrlKey,
                     metaKey: hit.metaKey,
-                    onClickWithoutDrag: () => {
+                    onClickWithoutDrag: (event) => {
+                        const modifierEvent = {
+                            ctrlKey: event?.ctrlKey ?? hit.ctrlKey === true,
+                            shiftKey: event?.shiftKey ?? hit.shiftKey === true,
+                            altKey: event?.altKey ?? hit.altKey === true,
+                            metaKey: event?.metaKey ?? hit.metaKey === true,
+                        };
+                        const snapshot = resolveParamBlockModifierSnapshot({
+                            event: modifierEvent,
+                            keybindings: mergedKeybindings,
+                        });
+                        // 分割是“点击意图”：松开分割键后 pointerup 不再分割。
+                        if (!snapshot.splitAtClick) return;
                         const ok = splitParamBlockAtSecRef.current?.({
                             rawSec: hit.sec,
                             targetBlockId: splitBlock.id,
-                            snapToggleHeld: noSnapKeyHeld({
-                                ctrlKey: hit.ctrlKey === true,
-                                shiftKey: hit.shiftKey === true,
-                                altKey: hit.altKey === true,
-                                metaKey: hit.metaKey === true,
-                            }),
+                            snapToggleHeld: snapshot.snapToggle,
                             movePlayhead: false,
                             selectResult: true,
                         });
@@ -3886,23 +4007,28 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                     (block) => block.id === touchedHandle.rightId,
                 );
                 if (leftBlock !== undefined && rightBlock !== undefined) {
-                    if (!selectedParamBlockIdSet.has(logicalBlockId(leftBlock))) {
-                        const ranges = paramBlockLogicalFrameRanges(
-                            selectionFrameBlocks,
-                            leftBlock.id,
-                        );
-                        setParamBlockSelection(normalizeSelection(ranges));
-                        paramBlockAnchorRef.current = {
-                            blockId: logicalBlockId(leftBlock),
-                            frame: toFrame(hit.sec, paramBlockStateRef.current.framePeriodMs),
-                        };
+                    const transitionPress = resolveBlockPressPlan({
+                        blocks: selectionFrameBlocks,
+                        selection: selectionRef.current,
+                        anchor: paramBlockAnchorRef.current,
+                        targetBlockId: leftBlock.id,
+                        targetFrame: toFrame(hit.sec, paramBlockStateRef.current.framePeriodMs),
+                        mode: "replace",
+                    });
+                    if (transitionPress.downSelection !== selectionRef.current) {
+                        setParamBlockSelection(transitionPress.downSelection);
+                    }
+                    if (transitionPress.downAnchor !== null) {
+                        paramBlockAnchorRef.current = transitionPress.downAnchor;
                     }
                     hit.captureTarget.setPointerCapture?.(hit.pointerId);
                     const startX = hit.clientX;
+                    const pointerStartSec = hit.secAtClientX(hit.clientX);
                     const startWidth = Math.max(0, touchedHandle.widthSec);
                     let targetWidth = startWidth;
                     let activated = false;
                     let lastClientX = startX;
+                    let lastTransitionEvent: globalThis.PointerEvent | null = null;
                     const transitionFramePeriodMs = paramViewRef.current?.framePeriodMs ?? 5;
                     /*
                      * 手柄拖动只改过渡曲线，不改两个块的高度。
@@ -4002,15 +4128,36 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                 if (Math.abs(dx) < 3) return;
                                 activated = true;
                             }
-                            const perSec = pxPerSecRef.current;
+                            lastTransitionEvent = event;
+                            hit.edgeScroll?.track(
+                                event.clientX,
+                                event.clientY,
+                                (clientX, clientY) => {
+                                    if (lastTransitionEvent === null) return;
+                                    window.dispatchEvent(
+                                        new PointerEvent("pointermove", {
+                                            ...lastTransitionEvent,
+                                            clientX,
+                                            clientY,
+                                            pointerId: lastTransitionEvent.pointerId,
+                                            pointerType: lastTransitionEvent.pointerType,
+                                            isPrimary: lastTransitionEvent.isPrimary,
+                                            buttons: 1,
+                                            button: -1,
+                                        }),
+                                    );
+                                },
+                            );
+                            const pointerNowSec = hit.secAtClientX(event.clientX);
                             targetWidth = Math.max(
                                 0,
                                 Math.min(
                                     (rightBlock.endSec - rightBlock.startSec) / 2,
-                                    startWidth - dx / Math.max(1, perSec),
+                                    startWidth + (pointerStartSec - pointerNowSec),
                                 ),
                             );
-                            const widthSpec = kernelDataRef.current.paramBlocks ?? paramBlockSpec;
+                            const widthSpec =
+                                paramBlockSpec ?? kernelDataRef.current.paramBlocks ?? null;
                             if (widthSpec !== null) {
                                 kernelDataRef.current.paramBlocks = {
                                     ...widthSpec,
@@ -4024,6 +4171,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                                           ? lockedLeftCenter
                                                           : lockedRightCenter,
                                                   displayHeightPx: lockedHeightPx,
+                                                  centerPolicy: "locked",
                                               }
                                             : block,
                                     ),
@@ -4035,9 +4183,9 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                              * 规格上；从 ref 重读会在 React 重绘的间隙拿到旧手柄，
                              * 拉动时就会在两个宽度之间闪。
                              */
-                            const liveSpec = kernelDataRef.current.paramBlocks ?? widthSpec;
+                            const liveSpec = kernelDataRef.current.paramBlocks ?? widthSpec ?? null;
                             if (liveSpec !== null) {
-                                kernelDataRef.current.paramBlocks = {
+                                const nextSpec = {
                                     ...liveSpec,
                                     blocks: liveSpec.blocks.map((block) =>
                                         block.id === touchedHandle.leftId
@@ -4051,25 +4199,40 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                             : block,
                                     ),
                                 };
+                                kernelDataRef.current.paramBlocks = nextSpec;
+                                publishParamBlockVisualTransaction("transition", nextSpec);
                             }
                             invalidate();
                         },
-                        onEnd: (reason) => {
+                        onEnd: (reason, event) => {
+                            hit.edgeScroll?.stop();
                             if (reason === "up" && !activated) {
                                 const dx = lastClientX - startX;
                                 if (Math.abs(dx) >= 3) {
                                     activated = true;
-                                    const perSec = pxPerSecRef.current;
+                                    const releaseEvent = event ?? lastTransitionEvent;
+                                    const pointerNowSec =
+                                        releaseEvent === null
+                                            ? pointerStartSec
+                                            : hit.secAtClientX(releaseEvent.clientX);
                                     targetWidth = Math.max(
                                         0,
                                         Math.min(
                                             (rightBlock.endSec - rightBlock.startSec) / 2,
-                                            startWidth - dx / Math.max(1, perSec),
+                                            startWidth + (pointerStartSec - pointerNowSec),
                                         ),
                                     );
                                 }
                             }
                             if (reason === "up" && activated) {
+                                const finalSpec = kernelDataRef.current.paramBlocks ?? null;
+                                if (finalSpec !== null) {
+                                    publishParamBlockVisualTransaction(
+                                        "transition",
+                                        finalSpec,
+                                        "awaiting-authority",
+                                    );
+                                }
                                 paramBlockDragSnapshotRef.current = null;
                                 invalidateParamBlockSpec();
                                 const transitionCommit =
@@ -4141,7 +4304,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                  * 属于选区手势，不能与创建抢占。
                  */
                 if (paramBlockToolActive && (createBlock || createFlat) && !hit.contextMenu) {
-                    const flattenCreatedCurve = createFlat;
+                    let createShape: ParamBlockCreateShape = createFlat ? "flat" : "normal";
                     const createStartSec = hit.sec;
                     const createStartClientX = hit.clientX;
                     const createStartClientY = hit.clientY;
@@ -4164,7 +4327,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                         });
                     const snapCreateAt = (sec: number, toggle: boolean): number => {
                         const result = snapCreateResult(sec, toggle);
-                        publishParamBlockSnapHighlight(result, sec);
+                        publishParamBlockSnapHighlight(result);
                         return result.sec;
                     };
                     const noSnapKb = firstBinding(mergedKeybindings["modifier.clipNoSnap"]);
@@ -4194,6 +4357,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                     });
                     let createCommitted = false;
                     let createActivated = false;
+                    let lastCreateEvent: globalThis.PointerEvent | null = null;
                     let preserveCreatePreview = false;
                     const createId = newParamBlockId();
                     const createToken = ++paramBlockGestureSerialRef.current;
@@ -4229,7 +4393,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                               })
                             : value;
                     const createLayoutBasis = paramBlockViewRef.current;
-                    const createBaseSpec = kernelDataRef.current.paramBlocks ?? paramBlockSpec;
+                    const createBaseSpec = paramBlockSpec ?? kernelDataRef.current.paramBlocks;
                     const createCurveBase = captureParamBlockCreateCurve(
                         paramViewRef.current,
                         kernelDataRef.current.paramEditorFrame?.view?.key ===
@@ -4281,6 +4445,15 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                         altKey: boolean;
                         metaKey: boolean;
                     }) => {
+                        const modifierSnapshot = resolveParamBlockModifierSnapshot({
+                            event,
+                            keybindings: mergedKeybindings,
+                        });
+                        createShape = resolveParamBlockCreateShape({
+                            previous: createShape,
+                            snapshot: modifierSnapshot,
+                        });
+                        const flatten = createShape === "flat";
                         const noSnap = createNoSnap(event);
                         const axis = hostRef.current?.getAxis();
                         if (axis === undefined) return;
@@ -4339,20 +4512,51 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                 createId,
                                 value: createBlockValue,
                             });
-                            kernelDataRef.current.paramBlocks = {
-                                ...createBaseSpec,
-                                blocks: preview.map((block) => ({
-                                    ...block,
-                                    grouped: false,
-                                    selected: block.id === createId,
-                                    frameCenterValue:
-                                        block.id === createId ? createBlockValue : undefined,
-                                    displayCenterValue:
-                                        block.id === createId
-                                            ? createBlockValue
-                                            : (block.displayCenterValue ?? null),
-                                })),
-                            };
+                            const blocks: ParamBlockRenderBlock[] = preview.map((raw) => {
+                                const block = raw as ParamBlockRenderBlock & {
+                                    readonly grouped?: boolean;
+                                    readonly transitionSec?: number;
+                                };
+                                const existing =
+                                    paramBlocksWithValues.find((item) => item.id === block.id) ??
+                                    paramBlocksWithValues.find(
+                                        (item) => item.userBlockId === block.id,
+                                    );
+                                const created = block.id === createId;
+                                return {
+                                    id: block.id,
+                                    userBlockId: block.userBlockId ?? existing?.userBlockId,
+                                    startSec: block.startSec,
+                                    endSec: block.endSec,
+                                    averageValue:
+                                        block.averageValue ??
+                                        existing?.averageValue ??
+                                        createBlockValue,
+                                    logicalCenterValue: existing?.manualValue,
+                                    frameCenterValue: created ? createBlockValue : undefined,
+                                    displayCenterValue: created
+                                        ? createBlockValue
+                                        : (block.displayCenterValue ?? null),
+                                    displayCenterSnapToSemitone: created
+                                        ? false
+                                        : existing?.manualValue == null,
+                                    selected: created,
+                                    grouped: block.grouped === true,
+                                    transitionSec: block.transitionSec ?? existing?.transitionSec,
+                                    centerPolicy: created ? "locked" : "live",
+                                };
+                            });
+                            const previewSpec = buildParamBlockRenderSpec({
+                                blocks,
+                                param: editParam,
+                                valueMin: bounds.min,
+                                valueMax: bounds.max,
+                                valueToY: (value, heightPx) => valueToY(editParam, value, heightPx),
+                                colors: paramBlockSpecColors,
+                                curveOwned: paramBlockViewRef.current !== null,
+                            });
+                            kernelDataRef.current.paramBlocks = previewSpec;
+                            publishParamBlockVisualTransaction("create", previewSpec);
                         }
                         if (createCurveBase !== null) {
                             const fp = Math.max(1e-6, createCurveBase.framePeriodMs);
@@ -4384,7 +4588,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                 values: source,
                                 target: resolveCreateBlockValue(createValue),
                                 param: editParam,
-                                flatten: flattenCreatedCurve,
+                                flatten,
                                 curveOwned: paramBlockViewRef.current !== null,
                             });
                             applyDenseToLiveEdit(
@@ -4425,9 +4629,30 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                 if (Math.abs(dx) < 4 && Math.abs(dy) < 4) return;
                                 createActivated = true;
                             }
+                            lastCreateEvent = event;
+                            hit.edgeScroll?.track(
+                                event.clientX,
+                                event.clientY,
+                                (clientX, clientY) => {
+                                    if (lastCreateEvent === null) return;
+                                    window.dispatchEvent(
+                                        new PointerEvent("pointermove", {
+                                            ...lastCreateEvent,
+                                            clientX,
+                                            clientY,
+                                            pointerId: lastCreateEvent.pointerId,
+                                            pointerType: lastCreateEvent.pointerType,
+                                            isPrimary: lastCreateEvent.isPrimary,
+                                            buttons: 1,
+                                            button: -1,
+                                        }),
+                                    );
+                                },
+                            );
                             updateCreatePreview(event);
                         },
                         onEnd: (reason, event) => {
+                            hit.edgeScroll?.stop();
                             const activity = paramBlockDragActivityRef.current;
                             if (activity.pointerGestureToken === createToken)
                                 activity.pointerGestureToken = null;
@@ -4441,6 +4666,14 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                             }
                             if (reason === "up" && createActivated && !createCommitted) {
                                 createCommitted = true;
+                                const finalPreviewSpec = kernelDataRef.current.paramBlocks ?? null;
+                                if (finalPreviewSpec !== null) {
+                                    publishParamBlockVisualTransaction(
+                                        "create",
+                                        finalPreviewSpec,
+                                        "awaiting-authority",
+                                    );
+                                }
                                 const clip =
                                     clipAtParamBlockCreateSpan({
                                         clips: paramBlockSourceClipsRef.current,
@@ -4547,7 +4780,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                                                         createValue,
                                                                     ),
                                                                     param: editParam,
-                                                                    flatten: flattenCreatedCurve,
+                                                                    flatten: createShape === "flat",
                                                                     curveOwned:
                                                                         createLayoutBasis !== null,
                                                                 },
@@ -4680,7 +4913,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 const mode = hit.multiSelect ? "add" : "replace";
                 let moved = false;
                 let lastX = startClientX;
-                let raf = 0;
                 const seekFollowingPointer = (clientX: number) => {
                     if (!s.paramEditorSeekPlayheadEnabled) return;
                     const sec = hit.secAtClientX(clientX);
@@ -4710,28 +4942,18 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                     );
                     if (seek) seekFollowingPointer(clientX);
                 };
-                const edgeScroll = () => {
-                    if (moved) {
-                        const rect = hit.captureTarget.getBoundingClientRect();
-                        const axis = hostRef.current?.getAxis();
-                        const dx = lastX < rect.left + 24 ? -12 : lastX > rect.right - 24 ? 12 : 0;
-                        if (dx && axis) {
-                            applyEdgeScrollLeft(axis.scrollLeftPx + dx);
-                            update(lastX, true);
-                        }
-                    }
-                    raf = requestAnimationFrame(edgeScroll);
-                };
-                raf = requestAnimationFrame(edgeScroll);
                 startPointerGesture({
                     pointerId: hit.pointerId,
                     captureTarget: hit.captureTarget,
                     onMove: (event) => {
                         if ((event.buttons & 1) !== 1) return;
+                        hit.edgeScroll?.track(event.clientX, event.clientY, () => {
+                            update(lastX, true);
+                        });
                         update(event.clientX, true);
                     },
                     onEnd: (reason, event) => {
-                        cancelAnimationFrame(raf);
+                        hit.edgeScroll?.stop();
                         if (reason !== "up") {
                             setParamBlockSelection(originalSelection);
                             return;
@@ -4791,19 +5013,21 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                       });
             if (edgeHit !== null) {
                 const resizeEdge = edgeHit.edge;
-                const logicalBlockIdForResize = logicalBlockId(fullBlock);
-                if (!selectedParamBlockIdSet.has(logicalBlockIdForResize)) {
-                    const outcome = resolveBlockClickSelection({
-                        blocks: selectionFrameBlocks,
-                        selection: selectionRef.current,
-                        anchor: paramBlockAnchorRef.current,
-                        targetBlockId: fullBlock.id,
-                        targetFrame: toFrame(hit.sec, paramBlockStateRef.current.framePeriodMs),
-                        mode: "replace",
-                    });
-                    paramBlockAnchorRef.current = outcome.anchor;
-                    setParamBlockSelection(outcome.selection);
+                const resizePress = resolveBlockPressPlan({
+                    blocks: selectionFrameBlocks,
+                    selection: selectionRef.current,
+                    anchor: paramBlockAnchorRef.current,
+                    targetBlockId: fullBlock.id,
+                    targetFrame: toFrame(hit.sec, paramBlockStateRef.current.framePeriodMs),
+                    mode: "replace",
+                });
+                if (resizePress.downSelection !== selectionRef.current) {
+                    setParamBlockSelection(resizePress.downSelection);
                 }
+                if (resizePress.downAnchor !== null) {
+                    paramBlockAnchorRef.current = resizePress.downAnchor;
+                }
+                const resizeSelectedIds = new Set(resizePress.dragIds);
                 const framePeriodMs =
                     paramBlockViewRef.current?.framePeriodMs ??
                     paramBlockStateRef.current.framePeriodMs;
@@ -4817,7 +5041,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                     id: block.id,
                     startSec: block.startSec,
                     endSec: block.endSec,
-                    selected: selectedParamBlockIdSet.has(logicalBlockId(block)),
+                    selected: resizeSelectedIds.has(logicalBlockId(block)),
                 }));
                 const valueForBlock = (
                     blockId: string,
@@ -4831,7 +5055,9 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                     );
                     return overlapping?.averageValue ?? fallbackValue;
                 };
-                const previewSpecBlocks = (plan: ParamBlockGesturePlan) => {
+                const previewSpecBlocks = (
+                    plan: ParamBlockGesturePlan,
+                ): ParamBlockRenderBlock[] => {
                     const fp = plan.viewAfter.framePeriodMs;
                     return plan.viewAfter.blocks.map((block) => {
                         const startSec = (block.startFrame * fp) / 1000;
@@ -4843,6 +5069,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                             );
                         return {
                             id: block.id,
+                            userBlockId: block.userBlockId,
                             startSec,
                             endSec,
                             averageValue:
@@ -4852,7 +5079,10 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                 block.id === gestureRef.blockId
                                     ? (gestureRef.displayCenterValue ?? null)
                                     : null,
-                            displayCenterSnapToSemitone: existing?.manualValue == null,
+                            displayCenterSnapToSemitone:
+                                block.id === gestureRef.blockId
+                                    ? false
+                                    : existing?.manualValue == null,
                             displayHeightPx:
                                 block.id === gestureRef.blockId
                                     ? (gestureRef.displayHeightPx ?? null)
@@ -4860,9 +5090,11 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                             selected:
                                 block.id === gestureRef.blockId ||
                                 (existing !== undefined &&
-                                    selectedParamBlockIdSet.has(logicalBlockId(existing)) &&
+                                    resizeSelectedIds.has(logicalBlockId(existing)) &&
                                     block.id !== gestureRef.blockId),
                             grouped: block.kind === "grouped",
+                            transitionSec: existing?.transitionSec,
+                            centerPolicy: block.id === gestureRef.blockId ? "locked" : "live",
                         };
                     });
                 };
@@ -4874,6 +5106,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                     blockId: fullBlock.id,
                     edge: resizeEdge,
                     pointerClientX: hit.clientX,
+                    pointerStartSec: hit.secAtClientX(hit.clientX),
                     startSec: fullBlock.startSec,
                     endSec: fullBlock.endSec,
                     neighborStartSec: null,
@@ -4903,6 +5136,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                         },
                     });
                 let activateResize = false;
+                let lastResizeEvent: globalThis.PointerEvent | null = null;
                 const resizeGesture = startPointerGesture({
                     pointerId: hit.pointerId,
                     captureTarget: hit.captureTarget,
@@ -4918,13 +5152,31 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                             }
                             activateResize = true;
                         }
+                        lastResizeEvent = event;
+                        hit.edgeScroll?.track(event.clientX, event.clientY, (clientX, clientY) => {
+                            if (lastResizeEvent === null) return;
+                            window.dispatchEvent(
+                                new PointerEvent("pointermove", {
+                                    ...lastResizeEvent,
+                                    clientX,
+                                    clientY,
+                                    pointerId: lastResizeEvent.pointerId,
+                                    pointerType: lastResizeEvent.pointerType,
+                                    isPrimary: lastResizeEvent.isPrimary,
+                                    buttons: 1,
+                                    button: -1,
+                                }),
+                            );
+                        });
                         /*
-                         * 边缘严格跟随指针的像素位移。帧域目标避免“秒 -> 帧”
-                         * 的二次舍入；吸附仍走时间轴同一套网格。
+                         * 用“当前指针内容坐标 - 按下时内容坐标”的位移，而不是
+                         * dx / pxPerSec：滚动或缩放后 pxPerSec 与 scrollLeft 都
+                         * 会变，纯像素差会让目标边缘漂移。
                          */
+                        const pointerNowSec = hit.secAtClientX(event.clientX);
                         const targetSec =
                             (gestureRef.edge === "left" ? gestureRef.startSec : gestureRef.endSec) +
-                            dx / Math.max(1e-9, pxPerSecRef.current);
+                            (pointerNowSec - gestureRef.pointerStartSec);
                         const snappedTarget = resolveParamBlockResizeTarget({
                             edge: gestureRef.edge,
                             startSec: gestureRef.startSec,
@@ -4948,7 +5200,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                     originSec: gestureRef.startSec,
                                     toggleModifierActive: noSnapKeyHeld(event),
                                 });
-                                publishParamBlockSnapHighlight(result, sec);
+                                publishParamBlockSnapHighlight(result);
                                 return result.sec;
                             },
                             minBlockSec: framePeriodMs / 1000,
@@ -4959,37 +5211,36 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                         const result = runResizePlan(targetFrame);
                         if (!result.ok) return;
                         gestureRef.resizePlan = result.plan;
-                        const liveSpec = kernelDataRef.current.paramBlocks ?? paramBlockSpec;
-                        if (liveSpec !== null) {
-                            kernelDataRef.current.paramBlocks = {
-                                ...liveSpec,
-                                blocks: previewSpecBlocks(result.plan),
-                            };
-                        }
+                        const previewSpec = buildParamBlockRenderSpec({
+                            blocks: previewSpecBlocks(result.plan),
+                            param: editParam,
+                            valueMin: bounds.min,
+                            valueMax: bounds.max,
+                            valueToY: (value, heightPx) => valueToY(editParam, value, heightPx),
+                            colors: paramBlockSpecColors,
+                            curveOwned: paramBlockViewRef.current !== null,
+                        });
+                        kernelDataRef.current.paramBlocks = previewSpec;
+                        publishParamBlockVisualTransaction("resize", previewSpec);
                         invalidate();
                     },
                     onEnd: (reason) => {
                         const plan = gestureRef.resizePlan;
                         if (reason === "up" && activateResize && plan !== null) {
-                            if (plan.targetSpan !== null) {
-                                const fp = plan.viewAfter.framePeriodMs;
-                                paramBlockCommittedSpanRef.current = {
-                                    blockId: gestureRef.blockId,
-                                    blockSpan: {
-                                        startSec: (plan.targetSpan.startFrame * fp) / 1000,
-                                        endSec: (plan.targetSpan.endFrameExclusive * fp) / 1000,
-                                    },
-                                    neighbors: plan.viewAfter.blocks
-                                        .filter((block) => block.id !== gestureRef.blockId)
-                                        .map((block) => ({
-                                            id: block.id,
-                                            startSec: (block.startFrame * fp) / 1000,
-                                            endSec: (block.endFrameExclusive * fp) / 1000,
-                                            remove: false,
-                                        })),
-                                    expiresAt: performance.now() + 800,
-                                };
-                            }
+                            publishParamBlockVisualTransaction(
+                                "resize",
+                                buildParamBlockRenderSpec({
+                                    blocks: previewSpecBlocks(plan),
+                                    param: editParam,
+                                    valueMin: bounds.min,
+                                    valueMax: bounds.max,
+                                    valueToY: (value, heightPx) =>
+                                        valueToY(editParam, value, heightPx),
+                                    colors: paramBlockSpecColors,
+                                    curveOwned: paramBlockViewRef.current !== null,
+                                }),
+                                "awaiting-authority",
+                            );
                             const state = paramBlockStateRef.current;
                             const next: ParamBlockState = { ...state, editSet: plan.edits };
                             setParamBlockState(next);
@@ -5010,6 +5261,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                 });
                             }
                         }
+                        hit.edgeScroll?.stop();
                         paramBlockResizeRef.current = null;
                         bumpParamBlockStructure();
                         invalidate();
@@ -5021,9 +5273,9 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 return { handled: true, seekOnClick: false };
             }
             /*
-             * 拖动开始前先同步“本次参与拖动”的选中集合。点击空白外时
-             * React 选中态会在拖动手势已经建立之后才提交；把锚点加入
-             * 局部集合，保证第一次按住就能拖动，且不牵动别的块。
+             * 按下计划：无修饰键按下已选块时保留整个选区，只有 pointerup
+             * 且没有拖动时才把选区收敛成目标块。这样多选拖动不会在
+             * pointerdown 阶段被 resolveBlockClickSelection 压成单选。
              */
             const framePeriodMsForClick =
                 paramBlockViewRef.current?.framePeriodMs ??
@@ -5034,7 +5286,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 : hit.multiSelect
                   ? "toggle"
                   : "replace";
-            const clickOutcome = resolveBlockClickSelection({
+            const press = resolveBlockPressPlan({
                 blocks: selectionFrameBlocks,
                 selection: selectionRef.current,
                 anchor: paramBlockAnchorRef.current,
@@ -5042,25 +5294,10 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 targetFrame,
                 mode,
             });
-            const applyClickOutcome = () => {
-                paramBlockAnchorRef.current = clickOutcome.anchor;
-                setParamBlockSelection(clickOutcome.selection);
-            };
-            /*
-             * Shift 点击必须延迟到 pointerup：Shift + 拖动仍是"临时反转
-             * 吸附"的块拖动，不能在按下瞬间把选区改成范围。
-             */
-            if (!hit.rangeSelect) {
-                applyClickOutcome();
-                if (!clickOutcome.targetSelected) {
-                    // Ctrl 点击移除后绝不启动拖动，避免手抖把刚取消的块拖走。
-                    bumpParamBlockStructure();
-                    return { handled: true, seekOnClick: false };
-                }
+            if (press.downSelection !== selectionRef.current) {
+                setParamBlockSelection(press.downSelection);
             }
-            const dragSelection = hit.rangeSelect
-                ? selectedParamBlockIds
-                : paramBlockIdsInSelection(selectionFrameBlocks, clickOutcome.selection);
+            if (press.downAnchor !== null) paramBlockAnchorRef.current = press.downAnchor;
             setParamBlockContextMenu(null);
             bumpParamBlockStructure();
             if (!hit.contextMenu) {
@@ -5070,6 +5307,62 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                     token: "block:" + paramBlockDoubleClickTokenRef.current,
                     at: performance.now(),
                 };
+            }
+            if (!press.startsDrag) {
+                /*
+                 * Ctrl 移除在按下时已经生效，不需要再启动拖动；Shift 在空选区上
+                 * 点击则只等待 pointerup 应用范围选择。这里用一个轻量点击手势
+                 * 保证“延迟到松手”的语义，同时不产生任何持久化写入。
+                 */
+                if (press.clickSelection === null) return { handled: true, seekOnClick: false };
+                let clickGesture: ReturnType<typeof startPointerGesture> | null = null;
+                let handedOff = false;
+                const startX = hit.clientX;
+                const startY = hit.clientY;
+                clickGesture = startPointerGesture({
+                    pointerId: hit.pointerId,
+                    captureTarget: hit.captureTarget,
+                    onMove: (event) => {
+                        if (handedOff) return;
+                        if (Math.hypot(event.clientX - startX, event.clientY - startY) < 3) return;
+                        handedOff = true;
+                        clickGesture?.end("cancel");
+                        void beginBlockDrag({
+                            anchorBlockId: fullBlock.id,
+                            clientX: event.clientX,
+                            clientY: event.clientY,
+                            contextMenu: hit.contextMenu,
+                            pointerId: hit.pointerId,
+                            captureTarget: hit.captureTarget,
+                            setActivePointerGestureEnd: hit.setActivePointerGestureEnd,
+                            clearActivePointerGestureEnd: hit.clearActivePointerGestureEnd,
+                            pointerValue: hit.pointerValue,
+                            edgeScroll: hit.edgeScroll,
+                            selection: [fullBlock.id],
+                            anchorValue:
+                                framedHits.find((block) => block.id === hitId)?.averageValue ??
+                                null,
+                            centerValues: new Map(
+                                framedHits.flatMap((block) =>
+                                    block.averageValue == null
+                                        ? []
+                                        : [[block.id, block.averageValue] as const],
+                                ),
+                            ),
+                            shiftKey: hit.shiftKey,
+                            altKey: hit.altKey,
+                            ctrlKey: hit.ctrlKey,
+                            metaKey: hit.metaKey,
+                        });
+                    },
+                    onEnd: (reason) => {
+                        if (handedOff) return;
+                        if (reason === "up") setParamBlockSelection(press.clickSelection);
+                    },
+                    registerEnd: hit.setActivePointerGestureEnd,
+                    clearEnd: hit.clearActivePointerGestureEnd,
+                });
+                return { handled: true, seekOnClick: false };
             }
             const dragStarted = beginBlockDrag({
                 anchorBlockId: fullBlock.id,
@@ -5081,7 +5374,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 setActivePointerGestureEnd: hit.setActivePointerGestureEnd,
                 clearActivePointerGestureEnd: hit.clearActivePointerGestureEnd,
                 pointerValue: hit.pointerValue,
-                selection: dragSelection,
+                edgeScroll: hit.edgeScroll,
+                selection: press.dragIds,
                 anchorValue: framedHits.find((block) => block.id === hitId)?.averageValue ?? null,
                 centerValues: new Map(
                     framedHits.flatMap((block) =>
@@ -5092,9 +5386,14 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 altKey: hit.altKey,
                 ctrlKey: hit.ctrlKey,
                 metaKey: hit.metaKey,
-                onClickWithoutDrag: hit.rangeSelect ? applyClickOutcome : undefined,
+                onClickWithoutDrag:
+                    press.clickSelection === null
+                        ? undefined
+                        : () => setParamBlockSelection(press.clickSelection),
             });
-            if (!dragStarted && hit.rangeSelect) applyClickOutcome();
+            if (!dragStarted && press.clickSelection !== null) {
+                setParamBlockSelection(press.clickSelection);
+            }
             return { handled: true, seekOnClick: true };
         },
         // eslint-disable-next-line react-hooks/exhaustive-deps -- paramBlockSpec 作为事件期几何读取；加入依赖会让手势在预览帧重建。
@@ -6014,6 +6313,17 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         if (!paramBlocksVisible) return null;
         // 拖动 ref 由命令式路径更新；tick 是让下一次 React memo 读取新 ref 的显式闸门。
         void paramBlockStructureTick;
+        const activeTransaction = paramBlockVisualTransactionRef.current;
+        if (activeTransaction !== null) {
+            if (!shouldUseParamBlockVisualTransaction(activeTransaction, paramBlockEpoch)) {
+                paramBlockVisualTransactionRef.current = null;
+                // 同一个渲染帧内也不能再落回旧 resize/create 预览。
+                paramBlockResizeRef.current = null;
+                paramBlockCreateCommitRef.current = null;
+            } else {
+                return activeTransaction.spec;
+            }
+        }
         /*
          * 边缘伸缩 / 新建块的预览必须优先于拖拽快照。以前这里先检查
          * `paramBlockDragSnapshotRef`，而它的 key 与 `paramView.key` 相同，
@@ -6036,6 +6346,17 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                           resizing.resizePlan.viewAfter.framePeriodMs) /
                       1000
                     : resizing.endSec;
+            const fallbackValue =
+                Number.isFinite(bounds.min) && Number.isFinite(bounds.max)
+                    ? (bounds.min + bounds.max) / 2
+                    : editParam === "pitch"
+                      ? 60
+                      : 0;
+            const existingFor = (id: string, userBlockId?: string) =>
+                paramBlocksWithValues.find((item) => item.id === id) ??
+                (userBlockId === undefined
+                    ? undefined
+                    : paramBlocksWithValues.find((item) => item.userBlockId === userBlockId));
             if (resizing.blockId === "__create__") {
                 const value =
                     resizing.value ??
@@ -6052,6 +6373,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                     (Number.isFinite(bounds.min) && Number.isFinite(bounds.max)
                         ? (bounds.min + bounds.max) / 2
                         : null);
+                const createId = resizing.createdBlockId ?? "__create__";
                 const previewBlocks = projectParamBlockCreatePreviewFromBase({
                     framePeriodMs: paramBlockStateRef.current.framePeriodMs,
                     baseBlocks:
@@ -6068,383 +6390,152 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                         })),
                     startSec: resizeStart,
                     endSec: resizeEnd,
-                    createId: resizing.createdBlockId ?? "__create__",
+                    createId,
                     value,
                 });
-                return {
-                    curveOwned: paramBlockViewRef.current !== null,
+                const blocks: ParamBlockRenderBlock[] = previewBlocks.map((raw) => {
+                    const block = raw as ParamBlockRenderBlock & {
+                        readonly grouped?: boolean;
+                        readonly manualValue?: number | null;
+                    };
+                    const existing = existingFor(block.id, block.userBlockId);
+                    const created = block.id === createId;
+                    return {
+                        id: block.id,
+                        userBlockId: block.userBlockId,
+                        startSec: block.startSec,
+                        endSec: block.endSec,
+                        averageValue: block.averageValue ?? value ?? fallbackValue,
+                        logicalCenterValue: existing?.manualValue ?? block.manualValue ?? null,
+                        frameCenterValue: created ? value : undefined,
+                        displayCenterValue: created ? value : null,
+                        displayCenterSnapToSemitone: created
+                            ? false
+                            : existing?.manualValue == null,
+                        selected: created,
+                        grouped: block.grouped === true,
+                        transitionSec: existing?.transitionSec,
+                        centerPolicy: created ? "locked" : "live",
+                    };
+                });
+                return buildParamBlockRenderSpec({
+                    blocks,
                     param: editParam,
                     valueMin: bounds.min,
                     valueMax: bounds.max,
                     valueToY: (value, heightPx) => valueToY(editParam, value, heightPx),
-                    blocks: previewBlocks.map((block) => ({
-                        ...block,
-                        selected: block.id === (resizing.createdBlockId ?? "__create__"),
-                        frameCenterValue:
-                            block.id === (resizing.createdBlockId ?? "__create__")
-                                ? value
-                                : undefined,
-                        grouped:
-                            "grouped" in block && typeof block.grouped === "boolean"
-                                ? block.grouped
-                                : false,
-                    })),
-                    borderRgba: parseRgbaColor(
-                        normalizeCssColor(
-                            themeMode === "dark"
-                                ? "rgba(124,198,236,0.95)"
-                                : "rgba(31,103,160,0.95)",
-                        ),
-                    ),
-                    selectedRgba: parseRgbaColor(
-                        normalizeCssColor(
-                            themeMode === "dark" ? "rgba(210,242,255,1)" : "rgba(0,72,128,1)",
-                        ),
-                    ),
-                    groupedRgba: parseRgbaColor(
-                        normalizeCssColor(
-                            themeMode === "dark"
-                                ? "rgba(124,198,236,0.95)"
-                                : "rgba(31,103,160,0.95)",
-                        ),
-                    ),
-                    labelRgba: parseRgbaColor(
-                        normalizeCssColor(
-                            themeMode === "dark"
-                                ? "rgba(244,251,255,0.92)"
-                                : "rgba(235,247,255,0.92)",
-                        ),
-                    ),
-                    selectedLabelRgba: parseRgbaColor(normalizeCssColor("rgba(255,255,255,1)")),
-                    fillRgba: parseRgbaColor(
-                        normalizeCssColor(
-                            themeMode === "dark"
-                                ? "rgba(57,111,145,0.90)"
-                                : "rgba(107,158,192,0.84)",
-                        ),
-                    ),
-                    selectedFillRgba: parseRgbaColor(
-                        normalizeCssColor(
-                            themeMode === "dark"
-                                ? "rgba(49,132,180,0.98)"
-                                : "rgba(54,132,184,0.96)",
-                        ),
-                    ),
-                    groupedFillRgba: parseRgbaColor(
-                        normalizeCssColor(
-                            themeMode === "dark"
-                                ? "rgba(57,111,145,0.90)"
-                                : "rgba(107,158,192,0.84)",
-                        ),
-                    ),
-                    topHighlightRgba: parseRgbaColor(
-                        normalizeCssColor(
-                            themeMode === "dark"
-                                ? "rgba(255,255,255,0.11)"
-                                : "rgba(255,255,255,0.20)",
-                        ),
-                    ),
-                    cornerRadiusPx: 2,
-                    topHighlightPx: 1,
-                };
+                    colors: paramBlockSpecColors,
+                    curveOwned: paramBlockViewRef.current !== null,
+                });
             }
-            return {
-                curveOwned: paramBlockViewRef.current !== null,
+            const plan = resizing.resizePlan;
+            const blocks: ParamBlockRenderBlock[] =
+                plan === null
+                    ? paramBlocksWithValues.map((block) => ({
+                          id: block.id,
+                          userBlockId: block.userBlockId,
+                          startSec: block.startSec,
+                          endSec: block.endSec,
+                          averageValue: block.averageValue,
+                          logicalCenterValue: block.manualValue,
+                          displayCenterSnapToSemitone: block.manualValue == null,
+                          selected: selectedParamBlockIdSet.has(logicalBlockId(block)),
+                          grouped: block.kind === "grouped",
+                          transitionSec: block.transitionSec,
+                          centerPolicy: "live",
+                      }))
+                    : plan.viewAfter.blocks.map((block) => {
+                          const fp = plan.viewAfter.framePeriodMs;
+                          const startSec = (block.startFrame * fp) / 1000;
+                          const endSec = (block.endFrameExclusive * fp) / 1000;
+                          const existing = existingFor(block.id, block.userBlockId);
+                          const resized = block.id === resizing.blockId;
+                          return {
+                              id: block.id,
+                              userBlockId: block.userBlockId,
+                              startSec,
+                              endSec,
+                              averageValue:
+                                  existing?.averageValue ??
+                                  paramBlocksWithValues.find(
+                                      (item) => item.startSec < endSec && item.endSec > startSec,
+                                  )?.averageValue ??
+                                  fallbackValue,
+                              logicalCenterValue: existing?.manualValue,
+                              displayCenterValue: resized
+                                  ? (resizing.displayCenterValue ?? null)
+                                  : null,
+                              displayCenterSnapToSemitone: resized
+                                  ? false
+                                  : existing?.manualValue == null,
+                              displayHeightPx: resized ? (resizing.displayHeightPx ?? null) : null,
+                              selected:
+                                  resized ||
+                                  (resizing.baseBlockSpans.find((item) => item.id === block.id)
+                                      ?.selected === true &&
+                                      block.id !== resizing.blockId),
+                              grouped: block.kind === "grouped",
+                              transitionSec: existing?.transitionSec,
+                              centerPolicy: resized ? "locked" : "live",
+                          };
+                      });
+            return buildParamBlockRenderSpec({
+                blocks,
                 param: editParam,
                 valueMin: bounds.min,
                 valueMax: bounds.max,
                 valueToY: (value, heightPx) => valueToY(editParam, value, heightPx),
-                /*
-                 * 预览每帧从手势起点重新投影，而不是从上一帧的可见块继续。
-                 * 否则块被判定删除后会从源集合里消失，指针再拉回来也无法恢复。
-                 */
-                blocks: (() => {
-                    const plan = resizing.resizePlan;
-                    if (plan === null) {
-                        return paramBlocksWithValues.map((block) => ({
-                            id: block.id,
-                            startSec: block.startSec,
-                            endSec: block.endSec,
-                            averageValue: block.averageValue,
-                            logicalCenterValue: block.manualValue,
-                            displayCenterSnapToSemitone: block.manualValue == null,
-                            selected: false,
-                            grouped: block.kind === "grouped",
-                        }));
-                    }
-                    const fp = plan.viewAfter.framePeriodMs;
-                    return plan.viewAfter.blocks.map((block) => {
-                        const startSec = (block.startFrame * fp) / 1000;
-                        const endSec = (block.endFrameExclusive * fp) / 1000;
-                        const existing =
-                            paramBlocksWithValues.find((item) => item.id === block.id) ??
-                            paramBlocksWithValues.find(
-                                (item) => item.userBlockId === block.userBlockId,
-                            );
-                        return {
-                            id: block.id,
-                            startSec,
-                            endSec,
-                            averageValue:
-                                existing?.averageValue ??
-                                paramBlocksWithValues.find(
-                                    (item) => item.startSec < endSec && item.endSec > startSec,
-                                )?.averageValue ??
-                                (Number.isFinite(bounds.min) && Number.isFinite(bounds.max)
-                                    ? (bounds.min + bounds.max) / 2
-                                    : editParam === "pitch"
-                                      ? 60
-                                      : 0),
-                            logicalCenterValue: existing?.manualValue,
-                            displayCenterValue:
-                                block.id === resizing.blockId
-                                    ? (resizing.displayCenterValue ?? null)
-                                    : null,
-                            /* 时间伸缩不改音高，显示中心保持吸附行心。 */
-                            displayCenterSnapToSemitone: existing?.manualValue == null,
-                            displayHeightPx:
-                                block.id === resizing.blockId
-                                    ? (resizing.displayHeightPx ?? null)
-                                    : null,
-                            selected:
-                                block.id === resizing.blockId ||
-                                (resizing.baseBlockSpans.find((item) => item.id === block.id)
-                                    ?.selected === true &&
-                                    block.id !== resizing.blockId),
-                            grouped: block.kind === "grouped",
-                        };
-                    });
-                })(),
-                borderRgba: parseRgbaColor(
-                    normalizeCssColor(
-                        themeMode === "dark" ? "rgba(124,198,236,0.95)" : "rgba(31,103,160,0.95)",
-                    ),
-                ),
-                transitionRgba: parseRgbaColor(
-                    normalizeCssColor(
-                        themeMode === "dark" ? "rgba(219,246,255,0.92)" : "rgba(0,94,156,0.90)",
-                    ),
-                ),
-                transitionPointRgba: parseRgbaColor(
-                    normalizeCssColor(
-                        themeMode === "dark" ? "rgba(255,255,255,1)" : "rgba(0,66,112,1)",
-                    ),
-                ),
-                transitionPointRadiusPx: 2.5,
-                selectedRgba: parseRgbaColor(
-                    normalizeCssColor(
-                        themeMode === "dark" ? "rgba(210,242,255,1)" : "rgba(0,72,128,1)",
-                    ),
-                ),
-                groupedRgba: parseRgbaColor(
-                    normalizeCssColor(
-                        themeMode === "dark" ? "rgba(124,198,236,0.95)" : "rgba(31,103,160,0.95)",
-                    ),
-                ),
-                labelRgba: parseRgbaColor(
-                    normalizeCssColor(
-                        themeMode === "dark" ? "rgba(244,251,255,0.92)" : "rgba(235,247,255,0.92)",
-                    ),
-                ),
-                selectedLabelRgba: parseRgbaColor(normalizeCssColor("rgba(255,255,255,1)")),
-                fillRgba: parseRgbaColor(
-                    normalizeCssColor(
-                        themeMode === "dark" ? "rgba(57,111,145,0.90)" : "rgba(107,158,192,0.84)",
-                    ),
-                ),
-                selectedFillRgba: parseRgbaColor(
-                    normalizeCssColor(
-                        themeMode === "dark" ? "rgba(49,132,180,0.98)" : "rgba(54,132,184,0.96)",
-                    ),
-                ),
-                groupedFillRgba: parseRgbaColor(
-                    normalizeCssColor(
-                        themeMode === "dark" ? "rgba(57,111,145,0.90)" : "rgba(107,158,192,0.84)",
-                    ),
-                ),
-                topHighlightRgba: parseRgbaColor(
-                    normalizeCssColor(
-                        themeMode === "dark" ? "rgba(255,255,255,0.11)" : "rgba(255,255,255,0.20)",
-                    ),
-                ),
-                cornerRadiusPx: 2,
-                topHighlightPx: 1,
-            };
+                colors: paramBlockSpecColors,
+                curveOwned: paramBlockViewRef.current !== null,
+            });
         }
         const dragSnapshot = paramBlockDragSnapshotRef.current;
-        if (
-            dragSnapshot !== null &&
-            shouldUseParamBlockDragSnapshotForRender({
-                snapshotKey: dragSnapshot.key,
-                paramViewKey: paramView?.key ?? null,
-                gestureActive: paramBlockActiveGestureTokenRef.current !== null,
-                commitHeld: paramBlockDragCommitRef.current !== null,
-            })
-        ) {
-            return paramBlockSpecForDragSnapshot(dragSnapshot);
-        }
-        /*
-         * 提交后的短暂交接：只有当前派生还没有反映刚提交的区间时才用快照
-         * 覆盖。一旦 state 更新到位，块会自然走正常派生，不会永久钉住。
-         */
-        const committed = paramBlockCommittedSpanRef.current;
-        if (committed !== null) {
-            const now = performance.now();
-            const current = paramBlocksWithValues.find((block) => block.id === committed.blockId);
-            const settled =
-                current !== undefined &&
-                Math.abs(current.startSec - committed.blockSpan.startSec) <= 1e-6 &&
-                Math.abs(current.endSec - committed.blockSpan.endSec) <= 1e-6;
-            if (now > committed.expiresAt || settled) {
-                paramBlockCommittedSpanRef.current = null;
+        if (dragSnapshot !== null) {
+            if (!sameParamBlockEpochLayout(dragSnapshot.epoch, paramBlockEpoch)) {
+                paramBlockDragSnapshotRef.current = null;
+                paramBlockDragCommitRef.current = null;
+            } else if (
+                shouldUseParamBlockDragSnapshotForRender({
+                    snapshotKey: dragSnapshot.key,
+                    paramViewKey: paramView?.key ?? null,
+                    gestureActive: paramBlockActiveGestureTokenRef.current !== null,
+                    commitHeld: paramBlockDragCommitRef.current !== null,
+                })
+            ) {
+                return paramBlockSpecForDragSnapshot(dragSnapshot);
             }
         }
-        const committedSpans = paramBlockCommittedSpanRef.current;
         if (paramBlocksWithValues.length === 0) return null;
-        const sortedBlocks = paramBlocksWithValues
-            .slice()
-            .sort((a, b) => a.startSec - b.startSec || a.endSec - b.endSec);
-        const logicalOrdinals = new Map<string, number>();
-        for (const block of sortedBlocks) {
-            const id = logicalBlockId(block);
-            if (!logicalOrdinals.has(id)) logicalOrdinals.set(id, logicalOrdinals.size + 1);
-        }
-        const transitionByLeftId = new Map(
-            sortedParamBlockTransitionHandles(paramBlocksWithValues).map((handle) => [
-                handle.leftId,
-                handle,
-            ]),
-        );
-        return {
-            curveOwned: paramBlockViewRef.current !== null,
+        const blocks: ParamBlockRenderBlock[] = paramBlocksWithValues.map((block) => ({
+            id: block.id,
+            userBlockId: block.userBlockId,
+            startSec: block.startSec,
+            endSec: block.endSec,
+            topPx: 0,
+            heightPx: 0,
+            averageValue: block.averageValue,
+            logicalCenterValue: block.manualValue,
+            displayCenterSnapToSemitone: block.manualValue == null,
+            selected: selectedParamBlockIdSet.has(logicalBlockId(block)),
+            grouped: block.kind === "grouped",
+            transitionSec: block.transitionSec,
+            centerPolicy: "live",
+        }));
+        return buildParamBlockRenderSpec({
+            blocks,
             param: editParam,
             valueMin: bounds.min,
             valueMax: bounds.max,
             valueToY: (value, heightPx) => valueToY(editParam, value, heightPx),
-            blocks: sortedBlocks
-                .map<PianoRollParamBlockSpec["blocks"][number] | null>(
-                    (block, blockIndex, allBlocks) => {
-                        const previous = allBlocks[blockIndex - 1];
-                        const next = allBlocks[blockIndex + 1];
-                        const contiguousStart =
-                            previous !== undefined &&
-                            Math.abs(previous.endSec - block.startSec) < 1e-6;
-                        const contiguousEnd =
-                            next !== undefined && Math.abs(next.startSec - block.endSec) < 1e-6;
-                        const connected = transitionByLeftId.get(block.id);
-                        const transitionHandle =
-                            connected !== undefined
-                                ? {
-                                      sec: connected.sec,
-                                      leftId: connected.leftId,
-                                      rightId: connected.rightId,
-                                      // 该相接关系只挂在这个左块上；不要按右块 id 回查，
-                                      // 否则同一宽度会串到右块的另一条边界。
-                                      widthSec: connected.transitionSec,
-                                  }
-                                : null;
-                        const ordinal =
-                            logicalOrdinals.get(logicalBlockId(block)) ?? blockIndex + 1;
-                        const committedSpan =
-                            committedSpans?.blockId === block.id
-                                ? committedSpans.blockSpan
-                                : (committedSpans?.neighbors.find((item) => item.id === block.id) ??
-                                  null);
-                        if (
-                            committedSpan !== null &&
-                            "remove" in committedSpan &&
-                            committedSpan.remove
-                        ) {
-                            return null;
-                        }
-                        return {
-                            id: block.id,
-                            startSec: committedSpan?.startSec ?? block.startSec,
-                            endSec: committedSpan?.endSec ?? block.endSec,
-                            topPx: 0,
-                            heightPx: 0,
-                            averageValue: block.averageValue,
-                            logicalCenterValue: block.manualValue,
-                            displayCenterSnapToSemitone: block.manualValue == null,
-                            contiguousStart,
-                            contiguousEnd,
-                            transitionHandle,
-                            selected: selectedParamBlockIdSet.has(logicalBlockId(block)),
-                            grouped: block.kind === "grouped",
-                            label: formatParamBlockLabel(block.averageValue, ordinal, editParam),
-                        };
-                    },
-                )
-                .filter(
-                    (block): block is PianoRollParamBlockSpec["blocks"][number] => block !== null,
-                ),
-            borderRgba: parseRgbaColor(
-                normalizeCssColor(
-                    themeMode === "dark" ? "rgba(124,198,236,0.95)" : "rgba(31,103,160,0.95)",
-                ),
-            ),
-            transitionRgba: parseRgbaColor(
-                normalizeCssColor(
-                    themeMode === "dark" ? "rgba(219,246,255,0.92)" : "rgba(0,94,156,0.90)",
-                ),
-            ),
-            transitionPointRgba: parseRgbaColor(
-                normalizeCssColor(
-                    themeMode === "dark" ? "rgba(255,255,255,1)" : "rgba(0,66,112,1)",
-                ),
-            ),
-            transitionPointRadiusPx: 2.5,
-            selectedRgba: parseRgbaColor(
-                normalizeCssColor(
-                    themeMode === "dark" ? "rgba(210,242,255,1)" : "rgba(0,72,128,1)",
-                ),
-            ),
-            groupedRgba: parseRgbaColor(
-                normalizeCssColor(
-                    themeMode === "dark" ? "rgba(124,198,236,0.95)" : "rgba(31,103,160,0.95)",
-                ),
-            ),
-            labelRgba: parseRgbaColor(
-                normalizeCssColor(
-                    themeMode === "dark" ? "rgba(244,251,255,0.92)" : "rgba(235,247,255,0.92)",
-                ),
-            ),
-            selectedLabelRgba: parseRgbaColor(
-                normalizeCssColor(
-                    themeMode === "dark" ? "rgba(255,255,255,1)" : "rgba(255,255,255,1)",
-                ),
-            ),
-            fillRgba: parseRgbaColor(
-                normalizeCssColor(
-                    themeMode === "dark" ? "rgba(57,111,145,0.90)" : "rgba(107,158,192,0.84)",
-                ),
-            ),
-            selectedFillRgba: parseRgbaColor(
-                normalizeCssColor(
-                    themeMode === "dark" ? "rgba(49,132,180,0.98)" : "rgba(54,132,184,0.96)",
-                ),
-            ),
-            groupedFillRgba: parseRgbaColor(
-                normalizeCssColor(
-                    themeMode === "dark" ? "rgba(57,111,145,0.90)" : "rgba(107,158,192,0.84)",
-                ),
-            ),
-            topHighlightRgba: parseRgbaColor(
-                normalizeCssColor(
-                    themeMode === "dark" ? "rgba(255,255,255,0.11)" : "rgba(255,255,255,0.20)",
-                ),
-            ),
-            /*
-             * 视觉统一：未选中块都是一种实心蓝灰底，只有“被选中 / 合并”
-             * 才换强调色。之前按 merged 选色会让用户看到几种色块混在一起。
-             */
-            cornerRadiusPx: 2,
-            topHighlightPx: 1,
-        };
+            colors: paramBlockSpecColors,
+            curveOwned: paramBlockViewRef.current !== null,
+        });
     }, [
         paramBlocksVisible,
         paramBlocksWithValues,
         paramBlockStructureTick,
+        paramBlockEpoch,
+        paramBlockSpecColors,
         selectedParamBlockIdSet,
         valueToY,
         paramView,
@@ -6455,6 +6546,77 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         paramBlockSpecForDragSnapshot,
     ]);
     latestParamBlockSpecRef.current = paramBlockSpec;
+    /*
+     * 视觉事务收尾：本地派生几何已经与事务快照一致时释放；否则最多等
+     * 1200ms。epoch 失配的路径在 paramBlockSpec 顶部与上面的 layout effect
+     * 已同步撤下，不依赖这里。
+     */
+    useEffect(() => {
+        const tx = paramBlockVisualTransactionRef.current;
+        if (tx === null || tx.phase === "gesture") return;
+        const now = performance.now();
+        const settled =
+            tx.kind === "create"
+                ? tx.spec.blocks
+                      .filter((block) => block.selected)
+                      .every((block) =>
+                          paramBlocksWithValues.some(
+                              (current) =>
+                                  current.id === block.id &&
+                                  Math.abs(current.startSec - block.startSec) <= 1e-6 &&
+                                  Math.abs(current.endSec - block.endSec) <= 1e-6,
+                          ),
+                      )
+                : tx.spec.blocks.every((block) => {
+                      const current = paramBlocksWithValues.find(
+                          (candidate) => candidate.id === block.id,
+                      );
+                      return (
+                          current !== undefined &&
+                          Math.abs(current.startSec - block.startSec) <= 1e-6 &&
+                          Math.abs(current.endSec - block.endSec) <= 1e-6
+                      );
+                  });
+        const transitionSettled =
+            tx.kind !== "transition" ||
+            tx.spec.blocks.every((block) => {
+                const handle = block.transitionHandle;
+                if (handle === undefined || handle === null) return true;
+                const current = paramBlocksWithValues.find(
+                    (candidate) => candidate.id === block.id,
+                );
+                return (
+                    current?.transitionSec !== undefined &&
+                    Math.abs(current.transitionSec - handle.widthSec) <= 1e-6
+                );
+            });
+        if (!(settled && transitionSettled) && now - tx.startedAt <= 1200) {
+            const remaining = Math.max(0, 1200 - (now - tx.startedAt));
+            const timer = window.setTimeout(() => {
+                if (paramBlockVisualTransactionRef.current !== tx) return;
+                paramBlockVisualTransactionRef.current = null;
+                paramBlockInteractionCurveRef.current = null;
+                const pvNow = paramViewRef.current;
+                if (pvNow !== null) resetLiveEditPreview(pvNow);
+                bumpParamBlockStructure();
+                invalidate();
+            }, remaining);
+            return () => window.clearTimeout(timer);
+        }
+        paramBlockVisualTransactionRef.current = null;
+        paramBlockInteractionCurveRef.current = null;
+        const pvNow = paramViewRef.current;
+        if (pvNow !== null) resetLiveEditPreview(pvNow);
+        bumpParamBlockStructure();
+        invalidate();
+    }, [
+        bumpParamBlockStructure,
+        invalidate,
+        paramBlockStructureTick,
+        paramBlocksWithValues,
+        paramViewRef,
+        resetLiveEditPreview,
+    ]);
     /*
      * 新建块预览 -> 正式块的交接。只有同时满足以下条件才撤预览：
      * 1. React 块记录已包含新块；
@@ -6498,6 +6660,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             )
                 return;
             paramBlockCreateCommitRef.current = null;
+            paramBlockVisualTransactionRef.current = null;
             if (paramBlockResizeRef.current?.blockId === "__create__") {
                 paramBlockResizeRef.current = null;
             }

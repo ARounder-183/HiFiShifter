@@ -11,6 +11,7 @@ import {
     isChildPitchOffsetDegreesParam,
 } from "../childPitchOffsetParams";
 import { createEdgeScrollDriver } from "../kernel/edgeScrollDriver";
+import { centerFromVerticalScrollTop, verticalScrollTopFromCenter } from "../verticalScrollMapping";
 import { getDrawPreviewValue } from "../paramValuePreviewLogic";
 import { timeToFrame } from "../utils";
 import { resolveClipSelectionModifiers } from "../../../../features/keybindings/clipSelectionModifiers";
@@ -39,6 +40,8 @@ type CanvasPointerDownDeps = Pick<
     | "bumpRefreshToken"
     | "canvasRef"
     | "clampViewport"
+    | "getCurrentViewportForScrollbar"
+    | "getParamValueBoundsForScrollbar"
     | "clearActivePointerGestureEnd"
     | "commitStroke"
     | "createFineAdjustedPointerState"
@@ -191,6 +194,8 @@ export function handleCanvasPointerDown(
         getDefaultCanvasCursor,
         getFineAdjustedPointerPosition,
         getViewportTruth,
+        getCurrentViewportForScrollbar,
+        getParamValueBoundsForScrollbar,
         installDragDirectionKeyCycler,
         invalidate,
         isEffectivePitchSnapActive,
@@ -255,6 +260,59 @@ export function handleCanvasPointerDown(
         vibratoStateRef,
         viewSizeRef,
     } = deps;
+
+    const verticalScrollRangePx = 1600;
+    const currentVerticalView = () => getCurrentViewportForScrollbar(editParam);
+    const verticalMapping = () => {
+        const bounds = getParamValueBoundsForScrollbar(editParam);
+        return {
+            min: bounds.min,
+            max: bounds.max,
+            span: currentVerticalView().span,
+            scrollRangePx: verticalScrollRangePx,
+        };
+    };
+    const projectMaxScrollLeft = () => {
+        const scroller = scrollerRef.current;
+        if (!scroller) return 0;
+        const axis = axisFromRefs();
+        const nativeOffsetPx = syncTimelineEnabled ? timelineOffsetRef.current : 0;
+        return edgeScrollMaxLeftPx({
+            pxPerSec: axis.pxPerSec,
+            framePeriodMs,
+            maxFrame: Math.max(0, timeToFrame(dynamicProjectSec, framePeriodMs)),
+            viewportWidthPx: scroller.clientWidth,
+            nativeOffsetPx,
+        });
+    };
+    const blockEdgeScroll = createEdgeScrollDriver({
+        getBounds: () => {
+            const rect = canvasRef.current?.getBoundingClientRect();
+            if (rect === undefined) return null;
+            return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom };
+        },
+        getScrollLeft: () => getViewportTruth()?.scrollLeft ?? scrollLeftRef.current,
+        setScrollLeft: (next) => applyEdgeScrollLeft(next),
+        getMaxScrollLeft: projectMaxScrollLeft,
+        getMinScrollLeft: () => (syncTimelineEnabled ? -timelineOffsetRef.current : 0),
+        getScrollTop: () => {
+            const mapping = verticalMapping();
+            return verticalScrollTopFromCenter({
+                ...mapping,
+                center: currentVerticalView().center,
+            });
+        },
+        setScrollTop: (next) => {
+            const mapping = verticalMapping();
+            const view = currentVerticalView();
+            const center = centerFromVerticalScrollTop({ ...mapping, scrollTop: next });
+            const clamped = clampViewport(editParam, { span: view.span, center });
+            if (editParam === "pitch") setPitchView(clamped);
+            else setParamViewport(editParam, clamped);
+        },
+        getMaxScrollTop: () => verticalScrollRangePx,
+        getMinScrollTop: () => 0,
+    });
 
     // 中键平移必须早于块命中：块工具下中键仍应移动视图，而不是被当成块点击。
     if (e.button === 1) {
@@ -382,6 +440,7 @@ export function handleCanvasPointerDown(
                             : undefined,
                     pointerValue,
                     secAtClientX: pointerSec,
+                    edgeScroll: blockEdgeScroll,
                     isSnapToggleModifierHeld,
                     editParam,
                     gridStep: 1,
@@ -562,10 +621,9 @@ export function handleCanvasPointerDown(
 
     const edgeScroll = createEdgeScrollDriver({
         getBounds: () => {
-            const scroller = scrollerRef.current;
-            if (!scroller) return null;
-            const rect = scroller.getBoundingClientRect();
-            return { left: rect.left, right: rect.right };
+            const rect = canvasRef.current?.getBoundingClientRect();
+            if (rect === undefined) return null;
+            return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom };
         },
         // ★ 读**内核真值**（绘制坐标），不读原生 `scrollLeft`。
         //
@@ -587,6 +645,23 @@ export function handleCanvasPointerDown(
         // 传 0 会让"向左滚"每帧都被夹回 0，与内核自己的下界（−偏移）打架 ——
         // 视图在两处往复即用户看到的"闪现"。
         getMinScrollLeft: () => (syncTimelineEnabled ? -timelineOffsetRef.current : 0),
+        getScrollTop: () => {
+            const mapping = verticalMapping();
+            return verticalScrollTopFromCenter({
+                ...mapping,
+                center: currentVerticalView().center,
+            });
+        },
+        setScrollTop: (next) => {
+            const mapping = verticalMapping();
+            const view = currentVerticalView();
+            const center = centerFromVerticalScrollTop({ ...mapping, scrollTop: next });
+            const clamped = clampViewport(editParam, { span: view.span, center });
+            if (editParam === "pitch") setPitchView(clamped);
+            else setParamViewport(editParam, clamped);
+        },
+        getMaxScrollTop: () => verticalScrollRangePx,
+        getMinScrollTop: () => 0,
         onScrolled: (clientX) => onEdgeScrolledRef.current?.(clientX),
     });
 

@@ -19,7 +19,7 @@ import type { RefObject } from "react";
 import { createClipboardPreviewSync } from "../clipboardPreviewSync";
 import { pitchDeltaToDegreeSteps } from "./sceneBuilders";
 import { runEditOp } from "./editOperations";
-import { selectionFromFrames } from "../paramSelection";
+import { selectionFromFrames, type ParamSelection } from "../paramSelection";
 import { timeToFrame } from "../utils";
 import { readSystemClipboardObject } from "../../../../utils/systemClipboard";
 import type { ModelDeps } from "./modelDeps";
@@ -60,8 +60,8 @@ type PianoRollEditCommandInputs = Pick<
 > & {
     /** 可滚域时长（全选的右边界）。 */
     dynamicProjectSec: number;
-    /** 块工具下最后一个逻辑块的末端帧；Ctrl+A 必须完整覆盖它。 */
-    paramBlockExtentFrame?: () => number;
+    /** 块工具下 Ctrl+A 的块区间并集；无块时返回 null。 */
+    paramBlockSelectAllRanges?: () => ParamSelection | null;
     /** 交互层持有的稳定命令入口（渲染期刷新，见文件头）。 */
     handleEditActionRef: RefObject<(op: string) => void>;
     /** 打开颤音窗口（命令分发里的一条路由）。 */
@@ -90,7 +90,7 @@ export function usePianoRollEditCommands({
     currentParamRange,
     dispatch,
     dynamicProjectSec,
-    paramBlockExtentFrame,
+    paramBlockSelectAllRanges,
     editParam,
     effectiveProjectScale,
     handleEditActionRef,
@@ -130,12 +130,18 @@ export function usePianoRollEditCommands({
      */
     const selectAllParamRange = useCallback((): boolean => {
         if (s.toolMode !== "select" && s.toolMode !== "block") return false;
+        if (s.toolMode === "block") {
+            const ranges = paramBlockSelectAllRanges?.() ?? null;
+            selectionRef.current = ranges;
+            setSelectionUi(ranges);
+            invalidate();
+            return ranges !== null;
+        }
         // 整条曲线 = 帧 [0, 工程末端)。**数据路径**直接按整数帧构造：全选的边界就是
         // 首帧与末帧，不该被"最近中点"再挪半帧（见 paramSelection 的两个构造器）。
         const totalFrames = Math.max(
             0,
             timeToFrame(dynamicProjectSec, paramView?.framePeriodMs ?? 5),
-            s.toolMode === "block" ? (paramBlockExtentFrame?.() ?? 0) : 0,
         );
         selectionRef.current = selectionFromFrames(0, totalFrames);
         setSelectionUi(selectionRef.current);
@@ -145,7 +151,7 @@ export function usePianoRollEditCommands({
     }, [
         s.toolMode,
         dynamicProjectSec,
-        paramBlockExtentFrame,
+        paramBlockSelectAllRanges,
         paramView?.framePeriodMs,
         invalidate,
     ]);

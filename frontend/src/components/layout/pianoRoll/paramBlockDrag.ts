@@ -6,6 +6,7 @@ import {
     applyFullResSegmentsToParamView,
     buildParamBlockDragSegments,
     buildParamBlockPreviewSegments,
+    paramBlockFrameSpan,
     projectParamBlockDragDisplayValue,
     resolveParamBlockDragRelease,
     setParamBlockLogicalCenters,
@@ -16,6 +17,8 @@ import {
 } from "./paramBlocks";
 import { buildParamBlockFrameCenters } from "./paramBlockFrame";
 import { ownsParamBlockGesture, type ParamAuthorityWatermark } from "./paramBlockTransaction";
+import { sameParamBlockEpoch, type ParamBlockEpoch } from "./paramBlockVisualTransaction";
+import type { EdgeScrollDriver } from "./kernel/edgeScrollDriver";
 import { logicalBlockId } from "./paramBlockTypes";
 
 type Ref<T> = { current: T };
@@ -29,6 +32,8 @@ export type SnapModifiers = {
 
 export type ParamBlockDragSnapshot = {
     readonly key: string;
+    readonly epoch: ParamBlockEpoch;
+    readonly startedAt: number;
     readonly ids: ReadonlySet<string>;
     readonly members: readonly ParamBlockMember[];
     readonly blocks: readonly {
@@ -82,6 +87,8 @@ export interface ParamBlockDragContext {
     readonly paramBlockInteractionCurveRef: Ref<ParamViewSegment | null>;
     readonly paramBlockDragSnapshotRef: Ref<ParamBlockDragSnapshot | null>;
     readonly paramBlockStateRef: Ref<ParamBlockState>;
+    readonly paramBlockEpoch: ParamBlockEpoch;
+    readonly getCurrentParamBlockEpoch?: () => ParamBlockEpoch;
     /**
      * 块层是否在管理当前曲线。
      *
@@ -149,8 +156,10 @@ export type ParamBlockDragStart = {
     altKey?: boolean;
     ctrlKey?: boolean;
     metaKey?: boolean;
-    /** 未拖动（点击）时执行；用于 Shift 延迟范围选择。 */
-    onClickWithoutDrag?: () => void;
+    /** 未拖动（点击）时执行；用于 Shift 延迟范围选择 / 分割键松开检查。 */
+    onClickWithoutDrag?: (event?: globalThis.PointerEvent | null) => void;
+    /** 块手势共享的二维边缘滚动驱动。 */
+    edgeScroll?: EdgeScrollDriver;
 };
 
 /** Owns one pointer gesture and its queued full-resolution commit. */
@@ -172,6 +181,8 @@ export function beginParamBlockDrag(
         paramBlockInteractionCurveRef,
         paramBlockDragSnapshotRef,
         paramBlockStateRef,
+        paramBlockEpoch,
+        getCurrentParamBlockEpoch,
         curveOwned,
         paramBlockCommitQueueRef,
         paramViewRef,
@@ -252,28 +263,46 @@ export function beginParamBlockDrag(
      * 选中的块会在下一帧失去所有手柄，用户松开后也要等重新 hover
      * 才恢复。拖动结束时统一清理即可。
      */
-    const dragSnapshotBlocks = selectedBlocks.map((block) => ({
-        id: block.id,
-        startSec: block.startSec,
-        endSec: block.endSec,
-        /*
-         * 锚点块使用宿主本帧命中几何的代表值，和用户按下时看到的
-         * 矩形完全同源；其余多选块沿用各自派生代表值。
-         */
-        anchorValue:
-            block.id === args.anchorBlockId &&
+    /*
+     * 多 run 块必须共享一个逻辑中心：如果每个 run 各自取 anchorValue，
+     * 预览会按 run 分开算主簇，松手后 setParamBlockLogicalCenters 只写回
+     * 父块一个 value，其他 run 就会跳到第一个 run 的高度。
+     */
+    const logicalAnchorValues = new Map<string, number | null>();
+    for (const block of selectedBlocks) {
+        const logicalId = logicalBlockId(block);
+        if (logicalAnchorValues.has(logicalId)) continue;
+        const group = selectedBlocks.filter((item) => logicalBlockId(item) === logicalId);
+        const anchor = group.find(
+            (item) => item.id === args.anchorBlockId || logicalBlockId(item) === args.anchorBlockId,
+        );
+        const explicit =
+            anchor !== undefined &&
             args.anchorValue !== undefined &&
             args.anchorValue !== null &&
             Number.isFinite(args.anchorValue)
                 ? args.anchorValue
-                : (args.centerValues?.get(block.id) ??
-                  paramBlockDragSnapshotRef.current?.centerValues.get(block.id) ??
-                  (editParam === "pitch" ? block.manualValue : null) ??
-                  block.averageValue),
+                : undefined;
+        logicalAnchorValues.set(
+            logicalId,
+            explicit ??
+                (anchor === undefined ? null : args.centerValues?.get(anchor.id)) ??
+                (anchor === undefined ? null : editParam === "pitch" ? anchor.manualValue : null) ??
+                anchor?.averageValue ??
+                null,
+        );
+    }
+    const dragSnapshotBlocks = selectedBlocks.map((block) => ({
+        id: block.id,
+        startSec: block.startSec,
+        endSec: block.endSec,
+        anchorValue: logicalAnchorValues.get(logicalBlockId(block)) ?? null,
         grouped: block.kind === "grouped",
     }));
     const snapshot: ParamBlockDragSnapshot = {
         key: pv.key,
+        epoch: paramBlockEpoch,
+        startedAt: performance.now(),
         ids: new Set(dragIds),
         members: dragMembers.map((member) => ({ ...member })),
         blocks: dragSnapshotBlocks,
@@ -324,7 +353,9 @@ export function beginParamBlockDrag(
      * y。否则“抓住块中部”会把整块先跳到指针位置，松手后的落点与
      * 按下时的块中心不一致。
      */
-    const anchorBlock = selectedBlocks.find((block) => block.id === args.anchorBlockId);
+    const anchorBlock = selectedBlocks.find(
+        (block) => block.id === args.anchorBlockId || logicalBlockId(block) === args.anchorBlockId,
+    );
     /*
      * 块的中心在屏幕上不一定正好位于 `averageValue` 对应的曲线上
      * （代表值来自主簇，不是逐帧值）。因此锚点必须取按下瞬间的
@@ -455,6 +486,16 @@ export function beginParamBlockDrag(
         lastClientY = event.clientY;
         lastClientX = event.clientX;
         lastSnapToggleHeld = snapToggleHeldAt(event);
+        args.edgeScroll?.track(event.clientX, event.clientY, (clientX, clientY) => {
+            lastClientX = clientX;
+            if (clientY !== undefined) lastClientY = clientY;
+            lastDelta = resolveValueDelta(
+                dragAnchorValue,
+                valueDeltaAtClientY(lastClientY),
+                lastSnapToggleHeld,
+            );
+            preview();
+        });
         if (pendingImmediatePreview) {
             pendingImmediatePreview = false;
             preview();
@@ -471,6 +512,7 @@ export function beginParamBlockDrag(
             cancelAnimationFrame(rafId);
             rafId = null;
         }
+        args.edgeScroll?.stop();
         if (reason === "up") {
             const release = resolveParamBlockDragRelease({
                 didDrag,
@@ -490,7 +532,7 @@ export function beginParamBlockDrag(
              * 点击（未拖动）必须在 rollback 早退之前回调：手势可能从未
              * activate（rollback === null），但 Shift 延迟选择仍然要落地。
              */
-            if (reason === "up" && !didDrag) args.onClickWithoutDrag?.();
+            if (reason === "up" && !didDrag) args.onClickWithoutDrag?.(releaseEvent);
             // A click has not acquired the visual transaction or the refresh guard.
             if (rollback === null) return;
             const previous = rollback.commit?.failed === true ? null : rollback;
@@ -566,6 +608,7 @@ export function beginParamBlockDrag(
          * 缩放时得到不同结果，松手后块像被拉到远处。
          */
         const commitCenterBlockId = args.anchorBlockId;
+        const stateBeforeCommit = paramBlockStateRef.current;
         const commitStartedAt = performance.now();
         const handoff: ParamBlockDragCommit = {
             blockId: commitCenterBlockId,
@@ -582,6 +625,7 @@ export function beginParamBlockDrag(
         paramBlockDragCommitRef.current = handoff;
         paramBlockDragActivityRef.current.pointerGestureToken = null;
         paramBlockDragActivityRef.current.pendingCommits += 1;
+        const commitEpoch = paramBlockEpoch;
         const commitRun = paramBlockCommitQueueRef.current
             .catch(() => undefined)
             .then(async () => {
@@ -593,15 +637,15 @@ export function beginParamBlockDrag(
                      */
                     const ranges = commitBlocks.flatMap((block) =>
                         block.members.map((member) => {
-                            const startFrame = Math.max(
-                                0,
-                                Math.round((member.startSec * 1000) / framePeriodMs),
+                            const span = paramBlockFrameSpan(
+                                member.startSec,
+                                member.endSec,
+                                framePeriodMs,
                             );
-                            const endFrame = Math.max(
-                                startFrame,
-                                Math.round((member.endSec * 1000) / framePeriodMs) - 1,
-                            );
-                            return { startFrame, endFrame };
+                            return {
+                                startFrame: span.startFrame,
+                                endFrame: span.endFrameExclusive - 1,
+                            };
                         }),
                     );
                     const curves = await Promise.all(
@@ -615,6 +659,12 @@ export function beginParamBlockDrag(
                             }),
                         ),
                     );
+                    if (
+                        getCurrentParamBlockEpoch !== undefined &&
+                        !sameParamBlockEpoch(commitEpoch, getCurrentParamBlockEpoch())
+                    ) {
+                        throw new Error("Block drag commit cancelled: epoch changed");
+                    }
                     const sourceAt = (frame: number): number => {
                         for (let index = 0; index < ranges.length; index += 1) {
                             const range = ranges[index];
@@ -714,6 +764,9 @@ export function beginParamBlockDrag(
                             gestureToken,
                         })
                     ) {
+                        // 曲线写失败时回滚本地 logicalCenters，不能让块停在未落库位置。
+                        paramBlockStateRef.current = stateBeforeCommit;
+                        setParamBlockState(stateBeforeCommit);
                         const pvNow = paramViewRef.current;
                         if (pvNow !== null) resetLiveEditPreview(pvNow);
                         paramBlockDragCommitRef.current = null;

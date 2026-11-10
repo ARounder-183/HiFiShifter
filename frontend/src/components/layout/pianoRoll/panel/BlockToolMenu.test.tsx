@@ -30,30 +30,16 @@ const labels: Record<string, string> = {
 function model(overrides: Record<string, unknown> = {}) {
     return {
         dispatch: vi.fn(),
-        handleParamBlockMenuAction: vi.fn(),
-        paramBlockMenuContext: {
-            canSplit: () => false,
-            canGroup: false,
-            canUngroup: false,
-            canDelete: false,
-            canRestoreGame: false,
-            canRestoreDeleted: false,
-            canNormalizePitch: false,
-            hasSelection: false,
-            isPitch: true,
-            isVolume: false,
-            isDyn: false,
-        },
         paramBlockToolActive: false,
         paramBlocksVisible: true,
-        s: { drawToolMode: "draw" },
+        s: { toolMode: "draw", drawToolMode: "draw" },
         tf: (key: string) => labels[key] ?? key,
         toggleParamBlocksVisible: vi.fn(),
         ...overrides,
     } as unknown as React.ComponentProps<typeof BlockToolMenu>["m"];
 }
 
-test("块药丸提供工具、眼睛与可发现的溢出菜单", async () => {
+test("块药丸只提供工具与眼睛，不再渲染省略号菜单", async () => {
     await act(async () => {
         root.render(
             <Theme>
@@ -63,7 +49,8 @@ test("块药丸提供工具、眼睛与可发现的溢出菜单", async () => {
     });
     expect(host.querySelector('[aria-label="参数块编辑工具"]')).not.toBeNull();
     expect(host.querySelector('[aria-label="显示参数块"]')).not.toBeNull();
-    expect(host.textContent).toContain("…");
+    expect(host.textContent).not.toContain("…");
+    expect(host.querySelector("[data-radix-menu-trigger]")).toBeNull();
 });
 
 test("点击标签切换参数块编辑工具", async () => {

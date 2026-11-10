@@ -2,7 +2,11 @@ import { describe, expect, it } from "vitest";
 import { hitTestParamBlockTransitionHandles } from "../../paramBlocks";
 
 import { createTimelineAxis } from "../../../renderKernel/timelineAxis";
-import { buildParamBlockInstances, buildParamBlockScene } from "./blockInstances";
+import {
+    buildParamBlockInstances,
+    buildParamBlockScene,
+    snapParamBlockRect,
+} from "./blockInstances";
 
 const rgba = [0.2, 0.2, 0.2, 1] as const;
 const selectedRgba = [0.1, 0.5, 1, 1] as const;
@@ -432,4 +436,72 @@ it("at a small zoom the grip stays above an ascending transition and hit testing
             secToX: (sec) => sec * 10,
         }),
     ).toBeNull();
+});
+
+describe("snapParamBlockRect / high-DPI borders", () => {
+    it.each([1, 1.25, 1.5, 1.75, 2, 2.5, 3])(
+        "keeps every edge on a device-pixel boundary at dpr=%s",
+        (dpr) => {
+            const rect = snapParamBlockRect({
+                x0: 10.13,
+                x1: 90.77,
+                rawTop: 20.31,
+                rawBottom: 60.63,
+                viewportWidthPx: 200,
+                viewportHeightPx: 100,
+                dpr,
+            });
+            expect(rect).not.toBeNull();
+            for (const value of [rect!.left, rect!.right, rect!.top, rect!.bottom]) {
+                expect(Math.abs(value * dpr - Math.round(value * dpr))).toBeLessThan(1e-9);
+            }
+            expect(Math.abs(rect!.borderPx * dpr - Math.round(rect!.borderPx * dpr))).toBeLessThan(
+                1e-9,
+            );
+            expect(rect!.right - rect!.left).toBeGreaterThanOrEqual(rect!.borderPx - 1e-9);
+            expect(rect!.bottom - rect!.top).toBeGreaterThanOrEqual(rect!.borderPx - 1e-9);
+        },
+    );
+
+    it("shares the same snapped rectangle between fill and all four borders", () => {
+        const dpr = 1.5;
+        const axis = createTimelineAxis({
+            pxPerSec: 100,
+            scrollLeftPx: 0,
+            viewportWidthPx: 800,
+            dpr,
+        });
+        const scene = buildParamBlockScene({
+            axis,
+            viewportHeightPx: 400,
+            blocks: [
+                {
+                    id: "a",
+                    startSec: 1,
+                    endSec: 3,
+                    topPx: 100.3,
+                    heightPx: 40.2,
+                    selected: false,
+                    grouped: false,
+                },
+            ],
+            borderRgba: rgba,
+            selectedRgba,
+            groupedRgba,
+            fillRgba: rgba,
+        });
+        const fill = scene.fills[0]!;
+        const vertical = scene.items.filter((item) => item.w === 1 / dpr);
+        const horizontal = scene.items.filter((item) => item.h === 1 / dpr);
+        expect(vertical).toHaveLength(2);
+        expect(horizontal).toHaveLength(2);
+        for (const edge of [...vertical, ...horizontal]) {
+            expect(edge.x * dpr).toBeCloseTo(Math.round(edge.x * dpr), 9);
+            expect(edge.y * dpr).toBeCloseTo(Math.round(edge.y * dpr), 9);
+        }
+        expect(fill.x).toBe(vertical[0]?.x);
+        expect(fill.y).toBe(horizontal[0]?.y);
+        expect(fill.w).toBeCloseTo((vertical[1]?.x ?? 0) + 1 / dpr - fill.x, 9);
+        expect(fill.h).toBeCloseTo((horizontal[1]?.y ?? 0) + 1 / dpr - fill.y, 9);
+    });
 });

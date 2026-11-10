@@ -1,30 +1,19 @@
 /**
- * 参数编辑器「块」药丸与溢出菜单。
+ * 参数编辑器「块」药丸。
  *
- * 块画布右键菜单是主入口；工具栏的“…”是同一份描述表的第二个入口，
- * 让块工具里也能发现初始化 / 复制 / 平滑 / 导出等参数命令。
+ * 块画布右键菜单是参数块命令的唯一入口；工具栏只保留工具切换与眼睛，
+ * 不再渲染“…”菜单或第二个命令描述表。
  */
-import { Fragment, type FC } from "react";
-import { Box, DropdownMenu } from "@radix-ui/themes";
+import { Box } from "@radix-ui/themes";
 import { setToolModePersistent } from "../../../../features/session/sessionSlice";
-import { PARAM_BLOCK_MENU_ITEMS } from "../paramBlockMenuModel";
-import { useMenuShortcut } from "../../../../ui/useMenuShortcut";
-import type { ActionId } from "../../../../features/keybindings/types";
+import { toggleParamBlockEditingTool } from "../../../../features/session/toolMode";
 import type { PianoRollPanelModel } from "./usePianoRollPanelModel";
 import { ParamToolbarPill } from "./toolbarParts";
-
-const ShortcutHint: FC<{ readonly action?: string }> = ({ action }) => {
-    const shortcut = useMenuShortcut((action ?? "edit.selectAll") as ActionId);
-    if (action === undefined || shortcut === undefined) return null;
-    return <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">{shortcut}</div>;
-};
 
 type Props = {
     m: Pick<
         PianoRollPanelModel,
         | "dispatch"
-        | "handleParamBlockMenuAction"
-        | "paramBlockMenuContext"
         | "paramBlockToolActive"
         | "paramBlocksVisible"
         | "s"
@@ -34,20 +23,13 @@ type Props = {
 };
 
 export function BlockToolMenu({ m }: Props) {
-    const {
-        dispatch,
-        handleParamBlockMenuAction,
-        paramBlockMenuContext,
-        paramBlockToolActive,
-        paramBlocksVisible,
-        s,
-        tf,
-        toggleParamBlocksVisible,
-    } = m;
+    const { dispatch, paramBlockToolActive, paramBlocksVisible, s, tf, toggleParamBlocksVisible } =
+        m;
 
     const toggleBlockTool = () => {
-        const next = paramBlockToolActive ? s.drawToolMode || "draw" : "block";
-        void dispatch(setToolModePersistent(next));
+        void dispatch(
+            setToolModePersistent(toggleParamBlockEditingTool(s.toolMode, s.drawToolMode)),
+        );
     };
 
     return (
@@ -64,32 +46,6 @@ export function BlockToolMenu({ m }: Props) {
                 eyeTooltip={tf("param_blocks_show_overlay")}
                 eyeLabel={tf("param_blocks_show_overlay")}
             />
-            <DropdownMenu.Root>
-                <DropdownMenu.Trigger disabled={!paramBlockToolActive}>
-                    <span
-                        className="rounded px-1.5 py-0.5 text-qt-xs text-qt-text hover:bg-qt-highlight hover:text-white"
-                        aria-label={tf("param_blocks_tool")}
-                        data-tooltip={tf("param_blocks_tool")}
-                    >
-                        …
-                    </span>
-                </DropdownMenu.Trigger>
-                <DropdownMenu.Content variant="soft" color="gray">
-                    {PARAM_BLOCK_MENU_ITEMS.map((item) => (
-                        <Fragment key={item.key}>
-                            {item.separatorBefore === true ? <DropdownMenu.Separator /> : null}
-                            <DropdownMenu.Item
-                                color={item.danger === true ? "red" : undefined}
-                                disabled={!item.enabled(paramBlockMenuContext)}
-                                onSelect={() => handleParamBlockMenuAction(item.channel, item.op)}
-                            >
-                                {tf(item.labelKey)}
-                                <ShortcutHint action={item.shortcutAction} />
-                            </DropdownMenu.Item>
-                        </Fragment>
-                    ))}
-                </DropdownMenu.Content>
-            </DropdownMenu.Root>
         </Box>
     );
 }

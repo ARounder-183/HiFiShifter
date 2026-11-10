@@ -21,7 +21,9 @@ import { describe, expect, it } from "vitest";
 import {
     DRAG_EDGE_SCROLL_BAND_PX,
     DRAG_EDGE_SCROLL_MAX_SPEED_PX_PER_SEC,
+    dragAutoScrollAxesForGesture,
     resolveDragEdgeScroll,
+    resolveDragEdgeScroll2D,
     shouldAutoScrollForGesture,
 } from "./dragAutoScroll";
 
@@ -126,5 +128,36 @@ describe("shouldAutoScrollForGesture", () => {
 
     it("未知种类不滚屏（保守：宁可不动，也不要误滚）", () => {
         expect(shouldAutoScrollForGesture("something-new")).toBe(false);
+    });
+});
+
+describe("resolveDragEdgeScroll2D / dragAutoScrollAxesForGesture", () => {
+    const bounds = { leftPx: 100, rightPx: 1100, topPx: 50, bottomPx: 650 };
+
+    it("scrolls both axes at a corner", () => {
+        const delta = resolveDragEdgeScroll2D({
+            clientX: 1098,
+            clientY: 52,
+            ...bounds,
+            frameMs: FRAME,
+        });
+        expect(delta.dx).toBeGreaterThan(0);
+        expect(delta.dy).toBeLessThan(0);
+    });
+
+    it("returns zero for the axis whose pointer is centered", () => {
+        const delta = resolveDragEdgeScroll2D({
+            clientX: 600,
+            clientY: 52,
+            ...bounds,
+            frameMs: FRAME,
+        });
+        expect(delta.dx).toBe(0);
+        expect(delta.dy).not.toBe(0);
+    });
+
+    it("enables both axes only for position-class gestures", () => {
+        expect(dragAutoScrollAxesForGesture("clip-drag")).toEqual({ x: true, y: true });
+        expect(dragAutoScrollAxesForGesture("gain-drag")).toEqual({ x: false, y: false });
     });
 });
