@@ -68,7 +68,6 @@ import {
 } from "../paramBlockSelectionGesture";
 import { selectionForRangeDrag } from "../paramSelectionDrag";
 import type { ParamBlockMenuChannel, ParamBlockMenuContext } from "../paramBlockMenuModel";
-import { activateParamBlockMenuContext, publishParamBlockMenuContext } from "../paramBlockMenuBus";
 import {
     captureParamBlockCreateCurve,
     enqueueParamBlockCreateCommit,
@@ -290,8 +289,6 @@ function pianoRollSessionEqual(left: RootState["session"], right: RootState["ses
  * @returns 面板视图层需要的全部状态、派生值与回调。
  */
 export function usePianoRollPanelModel(dockFormId: string | undefined) {
-    const generatedPanelId = React.useId();
-    const paramBlockPanelId = dockFormId ?? generatedPanelId;
     const dispatch = useAppDispatch();
     // 事件监听器内同步读取 session（如 selectClipParamRange 的 Clip 查找），
     // 避免闭包快照滞后。
@@ -3659,7 +3656,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             if (!paramBlockToolActive) return { handled: false };
             // 新手势优先：上一笔等待回读的视觉事务不能盖住本次按下。
             paramBlockVisualTransactionRef.current = null;
-            activateParamBlockMenuContext(paramBlockPanelId);
             /*
              * 块层未就绪 = 此刻做不了任何块操作。返回 `handled: false`，让指针
              * 落进块工具的空白分支（按设置移动播放头）—— 用户看到的是"点了一下、
@@ -5403,7 +5399,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             beginBlockDrag,
             refreshParamBlockValuesAfterParamEdit,
             mergedKeybindings,
-            paramBlockPanelId,
             selectedParamBlockIdSet,
             bumpParamBlockStructure,
             invalidate,
@@ -6803,7 +6798,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
 
     const paramBlockMenuContext = useMemo<ParamBlockMenuContext>(
         () => ({
-            panelId: paramBlockPanelId,
             canSplit: canSplitParamBlockAtPlayhead,
             canGroup: canGroupParamBlocks(paramBlocksWithValues, selectedParamBlockIds),
             canUngroup: paramBlocksWithValues.some(
@@ -6828,13 +6822,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             selectedParamBlockIdSet,
             selectedParamBlockIds,
             selectionUi,
-            paramBlockPanelId,
         ],
     );
-    useEffect(() => {
-        publishParamBlockMenuContext(paramBlockPanelId, paramBlockMenuContext);
-        return () => publishParamBlockMenuContext(paramBlockPanelId, null);
-    }, [paramBlockMenuContext, paramBlockPanelId]);
     const handleParamBlockMenuAction = useCallback(
         (channel: ParamBlockMenuChannel, op: string) => {
             if (channel === "edit") {
@@ -6919,27 +6908,11 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         ],
     );
 
-    useEffect(() => {
-        const handler = (event: Event) => {
-            const detail = (event as CustomEvent).detail as
-                { channel?: ParamBlockMenuChannel; op?: string; panelId?: string } | undefined;
-            if (
-                detail?.channel !== undefined &&
-                detail.op !== undefined &&
-                detail.panelId === paramBlockPanelId
-            ) {
-                handleParamBlockMenuAction(detail.channel, detail.op);
-            }
-        };
-        window.addEventListener("hifi:paramBlockMenuAction", handler);
-        return () => window.removeEventListener("hifi:paramBlockMenuAction", handler);
-    }, [handleParamBlockMenuAction, paramBlockPanelId]);
     /*
      * 【这个返回对象就是视图层的全部输入】字段清单是三个视图文件 AST 扫描结果的并集
      * （另加外框自己用的 `paramEditorRef`）。新增字段 = 视图里用一个新名字，然后在这里补上。
      */
     return {
-        activateParamBlockMenu: () => activateParamBlockMenuContext(paramBlockPanelId),
         activeDragDirection,
         activeDragDirectionTool,
         activeVibratoPreset,

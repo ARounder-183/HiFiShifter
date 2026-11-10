@@ -58,7 +58,6 @@ const labels: Record<string, string> = {
 const tf = (key: string): string => labels[key] ?? key;
 
 const context: ParamBlockMenuContext = {
-    panelId: "param-editor",
     canSplit: () => true,
     canGroup: true,
     canUngroup: false,

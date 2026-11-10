@@ -1,12 +1,4 @@
-import React, {
-    lazy,
-    Suspense,
-    useCallback,
-    useEffect,
-    useMemo,
-    useState,
-    useSyncExternalStore,
-} from "react";
+import React, { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import {
     isPluginMode,
     canImportHostAudio,
@@ -74,7 +66,6 @@ import {
     formatKeybindingList,
 } from "../../features/keybindings/keybindingsSlice";
 import type { ActionId } from "../../features/keybindings/types";
-import type { MessageKey } from "../../i18n/messages";
 import {
     resolveCopyCutRoute,
     resolveEditOpRoute,
@@ -82,14 +73,6 @@ import {
 } from "../../features/keybindings/focusRouting";
 import { IS_WINDOWS } from "../../utils/platform";
 import { getActiveSurface } from "../../features/uiFocus/focusSurface";
-import {
-    PARAM_BLOCK_MENU_ITEMS,
-    type ParamBlockMenuChannel,
-} from "./pianoRoll/paramBlockMenuModel";
-import {
-    getParamBlockMenuContext,
-    subscribeParamBlockMenuContext,
-} from "./pianoRoll/paramBlockMenuBus";
 import { webApi } from "../../services/webviewApi";
 const KeybindingsDialog = lazy(() =>
     import("./KeybindingsDialog").then((module) => ({ default: module.KeybindingsDialog })),
@@ -204,40 +187,6 @@ const selectMenuBarSession = (state: RootState) => {
         toolMode: session.toolMode,
         tracks: session.tracks,
     };
-};
-
-/** 菜单栏里的参数块条目：与右键菜单共用同一份描述表与实时上下文。 */
-const ParamBlockMenuItems: React.FC<{
-    readonly tf: (key: MessageKey) => string;
-    readonly shortcutLabel: (action: ActionId) => string;
-    readonly onAction: (channel: ParamBlockMenuChannel, op: string, panelId: string) => void;
-}> = ({ tf, shortcutLabel, onAction }) => {
-    const context = useSyncExternalStore(
-        subscribeParamBlockMenuContext,
-        getParamBlockMenuContext,
-        getParamBlockMenuContext,
-    );
-    return (
-        <>
-            {PARAM_BLOCK_MENU_ITEMS.map((item) => (
-                <React.Fragment key={item.key}>
-                    {item.separatorBefore === true ? <DropdownMenu.Separator /> : null}
-                    <DropdownMenu.Item
-                        color={item.danger === true ? "red" : undefined}
-                        disabled={context === null || !item.enabled(context)}
-                        onSelect={() => onAction(item.channel, item.op, context?.panelId ?? "")}
-                    >
-                        {tf(item.labelKey)}
-                        {item.shortcutAction === undefined ? null : (
-                            <div className="ml-auto pl-4 text-qt-xs text-qt-text-muted">
-                                {shortcutLabel(item.shortcutAction as ActionId)}
-                            </div>
-                        )}
-                    </DropdownMenu.Item>
-                </React.Fragment>
-            ))}
-        </>
-    );
 };
 
 export const MenuBar: React.FC<MenuBarProps> = ({
@@ -961,29 +910,6 @@ export const MenuBar: React.FC<MenuBarProps> = ({
                             {shortcutLabel("edit.removeClipsFromParamSelection")}
                         </div>
                     </DropdownMenu.Item>
-                    {s.toolMode === "block" ? (
-                        <>
-                            <DropdownMenu.Separator />
-                            <DropdownMenu.Sub>
-                                <DropdownMenu.SubTrigger>
-                                    {tf("param_blocks_tool")}
-                                </DropdownMenu.SubTrigger>
-                                <DropdownMenu.SubContent>
-                                    <ParamBlockMenuItems
-                                        tf={tf}
-                                        shortcutLabel={shortcutLabel}
-                                        onAction={(channel, op, panelId) => {
-                                            window.dispatchEvent(
-                                                new CustomEvent("hifi:paramBlockMenuAction", {
-                                                    detail: { channel, op, panelId },
-                                                }),
-                                            );
-                                        }}
-                                    />
-                                </DropdownMenu.SubContent>
-                            </DropdownMenu.Sub>
-                        </>
-                    ) : null}
                 </DropdownMenu.Content>
             </DropdownMenu.Root>
 

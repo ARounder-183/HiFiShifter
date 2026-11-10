@@ -55,8 +55,6 @@ const PianoRollPanelImpl: React.FC<PianoRollPanelProps> = ({ dockFormId }) => {
             // 编辑器（工具栏/标尺/卷帘）解析为「pianoRoll」表面，作为复制/
             // 剪切/粘贴等编辑快捷键的归属依据（见 focusSurface.ts）。
             data-hs-surface="pianoRoll"
-            onPointerDownCapture={() => m.activateParamBlockMenu()}
-            onFocusCapture={() => m.activateParamBlockMenu()}
         >
             <PianoRollPlayheadBridge
                 visualPlayheadSecRef={m.visualPlayheadSecRef}

@@ -1,16 +1,14 @@
 /**
  * 参数块命令面的唯一描述表。
  *
- * 右键菜单、菜单栏与工具栏溢出菜单都从这里生成条目；差异只在
- * `ParamBlockMenuContext` 的瞬时可用态，不在文案或动作名上。
+ * 参数块右键菜单从这里生成条目；差异只在 `ParamBlockMenuContext` 的瞬时
+ * 可用态，不在文案或动作名上。
  */
 import type { MessageKey } from "../../../i18n/messages";
 
 export type ParamBlockMenuChannel = "paramBlock" | "edit";
 
 export interface ParamBlockMenuContext {
-    /** 上下文所属参数编辑器面板；菜单动作只回送到这个面板。 */
-    readonly panelId: string;
     /** 实时求值：菜单渲染时读取播放头与当前块视图，不能保存打开瞬间的快照。 */
     readonly canSplit: () => boolean;
     readonly canGroup: boolean;
