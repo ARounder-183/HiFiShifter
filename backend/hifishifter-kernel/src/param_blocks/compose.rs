@@ -174,13 +174,13 @@ fn project_group_block(
     children: &[UserParamBlock],
     frame_period_ms: f64,
 ) -> (Vec<Candidate>, usize) {
-    let manual = block.manual || children.iter().any(|child| child.manual);
+    let leaves = block.flatten_children();
+    let manual = block.manual || leaves.iter().any(|child| child.manual);
     let priority = if manual { 4 } else { 3 };
     let value = block.value.or_else(|| block.group_common_value());
     let transition_width_sec = block
         .transition_out_sec
         .or_else(|| children.last().and_then(|child| child.transition_out_sec));
-    let leaves = block.flatten_children();
     let has_root = leaves
         .iter()
         .any(|child| matches!(child.geometry, BlockGeometry::Root { .. }));

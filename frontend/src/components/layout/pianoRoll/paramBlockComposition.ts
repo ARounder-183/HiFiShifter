@@ -243,11 +243,11 @@ function projectGroupBlock(
     children: readonly UserParamBlock[],
     framePeriodMs: number,
 ): { candidates: Candidate[]; orphan: number } {
-    const manual = block.manual === true || children.some((child) => child.manual === true);
+    const leaves = flattenGroupChildren(block);
+    const manual = block.manual === true || leaves.some((child) => child.manual === true);
     const value = block.value ?? groupCommonValue(block);
     const transitionWidthSec =
         block.transitionOutSec ?? children[children.length - 1]?.transitionOutSec;
-    const leaves = flattenGroupChildren(block);
     const hasRoot = leaves.some((child) => child.geometry.kind === "root");
     if (hasRoot) {
         const spans = leaves
