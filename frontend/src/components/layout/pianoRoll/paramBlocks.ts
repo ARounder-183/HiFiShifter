@@ -27,6 +27,12 @@ import {
 import { canSplitParamBlockAtFrame } from "./paramBlockGesture";
 import { toFrame, type ParamBlockSourceClip } from "./paramBlockProjection";
 import { getDrawPreviewValue } from "./paramValuePreviewLogic";
+import {
+    clampParamWriteValue,
+    isDynParam,
+    DYN_VALUE_MAX,
+    DYN_VALUE_MIN,
+} from "./paramRanges";
 import type { ScaleLike } from "../../../utils/musicalScales";
 import {
     EMPTY_PARAM_BLOCK_EDIT_SET,
@@ -1682,15 +1688,37 @@ export function layoutParamBlockRects(args: {
  * “锚点值”缩放会让块只移动一部分距离（锚点越小时越明显）。因此所有参数
  * 统一做线性偏移，保证块中心与指针同步；值域钳制仍由调用方的写入入口负责。
  */
+export function clampParamBlockDragValue(args: {
+    readonly param: string;
+    readonly original: number;
+    readonly valueDelta: number;
+}): number {
+    if (!Number.isFinite(args.original) || !Number.isFinite(args.valueDelta)) {
+        return args.original;
+    }
+    const next = args.original + args.valueDelta;
+    if (args.param === "pitch" && args.original === 0) return 0;
+    if (isDynParam(args.param)) {
+        // Negative dyn values are the "follow original" sentinel; a drag must
+        // not materialize them. Positive targets clamp to the descriptor range
+        // instead of collapsing below zero into the sentinel.
+        if (args.original < 0) return args.original;
+        return Math.min(DYN_VALUE_MAX, Math.max(DYN_VALUE_MIN, next));
+    }
+    return clampParamWriteValue(args.param, next);
+}
+
 export function paramBlockDragValue(args: {
     readonly param: string;
     readonly original: number;
     readonly anchorValue: number;
     readonly valueDelta: number;
 }): number {
-    if (!Number.isFinite(args.original)) return args.original;
-    if (!Number.isFinite(args.valueDelta)) return args.original;
-    return args.original + args.valueDelta;
+    return clampParamBlockDragValue({
+        param: args.param,
+        original: args.original,
+        valueDelta: args.valueDelta,
+    });
 }
 
 /**
@@ -1897,7 +1925,7 @@ export function projectParamBlockDragDisplayValue(args: {
     ) {
         return null;
     }
-    const value = args.startValue + args.valueDelta;
+    const value = clampParamWriteValue(args.param, args.startValue + args.valueDelta);
     return args.param === "pitch" && args.snapToSemitone ? Math.round(value) : value;
 }
 
@@ -2446,16 +2474,23 @@ export function averageParamValueInSpan(args: {
     readonly binWidth?: number;
 }): number | null {
     const fp = Math.max(1e-6, args.framePeriodMs);
-    const stride = Math.max(1, args.stride);
+    const stride = Math.max(1, Math.floor(args.stride));
     if (!Array.isArray(args.values) || args.values.length === 0) return null;
     const { startFrame, endFrameExclusive: endFrame } = paramBlockFrameSpan(
         args.startSec,
         args.endSec,
         fp,
     );
+    /*
+     * The block start is not necessarily on the paramView sample grid. Start at
+     * the first sample at or after the block start; iterating from blockStart
+     * would read a sample before the block and miss the block's last sample.
+     */
+    const firstFrame =
+        args.startFrame + Math.ceil((startFrame - args.startFrame) / stride) * stride;
     const samples: number[] = [];
-    for (let frame = startFrame; frame < endFrame; frame += stride) {
-        const index = Math.floor((frame - args.startFrame) / stride);
+    for (let frame = firstFrame; frame < endFrame; frame += stride) {
+        const index = (frame - args.startFrame) / stride;
         if (index < 0 || index >= args.values.length) continue;
         const value = Number(args.values[index]);
         if (!Number.isFinite(value)) continue;
@@ -2569,11 +2604,13 @@ export function modeCenterOfValuesInSamples(
 ): number | null {
     if (samples.values.length === 0) return null;
     const fp = Math.max(1e-6, samples.framePeriodMs);
-    const stride = Math.max(1, samples.stride);
+    const stride = Math.max(1, Math.floor(samples.stride));
     const { startFrame, endFrameExclusive: endFrame } = paramBlockFrameSpan(startSec, endSec, fp);
+    const firstFrame =
+        samples.startFrame + Math.ceil((startFrame - samples.startFrame) / stride) * stride;
     const values: number[] = [];
-    for (let frame = startFrame; frame < endFrame; frame += stride) {
-        const index = Math.floor((frame - samples.startFrame) / stride);
+    for (let frame = firstFrame; frame < endFrame; frame += stride) {
+        const index = (frame - samples.startFrame) / stride;
         if (index < 0 || index >= samples.values.length) continue;
         const value = Number(samples.values[index]);
         if (!Number.isFinite(value)) continue;

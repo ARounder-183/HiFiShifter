@@ -4,7 +4,10 @@ import type { ParamBlockSourceClip } from "./paramBlockProjection";
 import {
     EMPTY_PARAM_BLOCK_STATE,
     blocksFromViewForPanel,
+    averageParamValueInSpan,
     buildParamBlockDragSegments,
+    clampParamBlockDragValue,
+    modeCenterOfValuesInSamples,
     canGroupParamBlocks,
     modeCenterOfValues,
     paramBlockFrameSpan,
@@ -348,6 +351,93 @@ describe("buildParamBlockDragSegments", () => {
             [0, 100],
             [101, 99],
         ]);
+    });
+});
+
+describe("clampParamBlockDragValue", () => {
+    it("clamps scalar parameters to the same ranges as the backend", () => {
+        expect(clampParamBlockDragValue({ param: "volume", original: 1.9, valueDelta: 0.5 })).toBe(
+            2,
+        );
+        expect(clampParamBlockDragValue({ param: "volume", original: 0.1, valueDelta: -0.5 })).toBe(
+            0,
+        );
+        expect(clampParamBlockDragValue({ param: "tension", original: 99, valueDelta: 10 })).toBe(
+            100,
+        );
+        expect(clampParamBlockDragValue({ param: "pitch", original: 126, valueDelta: 10 })).toBe(
+            127,
+        );
+        expect(clampParamBlockDragValue({ param: "pitch", original: 0, valueDelta: 10 })).toBe(0);
+    });
+
+    it("keeps the dyn follow-original sentinel and clamps positive targets to 0..1", () => {
+        expect(clampParamBlockDragValue({ param: "dyn", original: -1, valueDelta: 0.5 })).toBe(-1);
+        expect(clampParamBlockDragValue({ param: "dyn", original: 0.2, valueDelta: -0.5 })).toBe(0);
+        expect(clampParamBlockDragValue({ param: "dyn", original: 0.9, valueDelta: 0.5 })).toBe(1);
+    });
+
+    it("passes non-finite values through unchanged", () => {
+        expect(
+            clampParamBlockDragValue({
+                param: "volume",
+                original: Number.NaN,
+                valueDelta: 1,
+            }),
+        ).toBeNaN();
+    });
+});
+
+describe("block value sampling on a strided param view", () => {
+    const view = {
+        startFrame: 0,
+        stride: 2,
+        framePeriodMs: 5,
+        values: [10, 20, 30, 40],
+    };
+
+    it("starts at the first sample at or after the block start", () => {
+        const average = averageParamValueInSpan({
+            startSec: 0.005,
+            endSec: 0.025,
+            values: view.values,
+            startFrame: view.startFrame,
+            stride: view.stride,
+            framePeriodMs: view.framePeriodMs,
+            isPitch: false,
+            param: "volume",
+            binWidth: 100,
+        });
+        // Frames 1..4 contain samples at 2 and 4: values 20 and 30.
+        expect(average).toBe(25);
+    });
+
+    it("does not read a sample outside the block or miss the last one", () => {
+        const average = averageParamValueInSpan({
+            startSec: 0.006,
+            endSec: 0.008,
+            values: view.values,
+            startFrame: view.startFrame,
+            stride: view.stride,
+            framePeriodMs: view.framePeriodMs,
+            isPitch: false,
+            param: "volume",
+        });
+        // No sample falls inside frames 1..1.
+        expect(average).toBeNull();
+    });
+
+    it("uses the same grid for the host sample mirror", () => {
+        const average = modeCenterOfValuesInSamples(0.005, 0.025, {
+            values: view.values,
+            startFrame: view.startFrame,
+            stride: view.stride,
+            framePeriodMs: view.framePeriodMs,
+            isPitch: false,
+            param: "volume",
+            binWidth: 100,
+        });
+        expect(average).toBe(25);
     });
 });
 

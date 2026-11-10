@@ -8,6 +8,7 @@ import {
     planResizeProjectedBlock,
     planSplitProjectedBlock,
     restoreDeletedBlocks,
+    splitBaseCoverAtFrame,
     splitProjectedBlock,
     ungroupUserBlock,
 } from "./paramBlockEditing";
@@ -45,6 +46,47 @@ describe("paramBlockEditing", () => {
         if (block?.geometry.kind !== "take") throw new Error("expected take");
         expect(block.geometry.members[0]?.sourceStartSec).toBeCloseTo(0.1);
         expect(block.geometry.members[0]?.sourceEndSec).toBeCloseTo(0.4);
+    });
+
+    it("splits a reversed base cover on the correct source sides", () => {
+        const reversed: ParamBlockSourceClip = {
+            ...clip,
+            reversed: true,
+            syllableSpansSec: undefined,
+            takes: [
+                {
+                    id: "clip_take_1",
+                    sourceStartSec: 0,
+                    sourceEndSec: 2,
+                    playbackRate: 1,
+                    reversed: true,
+                    loopEnabled: false,
+                },
+            ],
+            activeTakeId: "clip_take_1",
+        };
+        const cover = {
+            spans: [
+                {
+                    clipId: "clip",
+                    takeId: "clip_take_1",
+                    cycle: 0,
+                    sourceStartSec: 0,
+                    sourceEndSec: 2,
+                    label: "syllable" as const,
+                },
+            ],
+            full: true,
+        };
+        const split = splitBaseCoverAtFrame([reversed], cover, 100, 5);
+        expect(split.left?.spans[0]).toMatchObject({
+            sourceStartSec: 1.5,
+            sourceEndSec: 2,
+        });
+        expect(split.right?.spans[0]).toMatchObject({
+            sourceStartSec: 0,
+            sourceEndSec: 1.5,
+        });
     });
 
     it("materializes a multi-run user block before editing one run", () => {

@@ -74,6 +74,51 @@ describe("paramBlockComposition", () => {
         expect(merged.blocks[0]?.endFrameExclusive).toBe(200);
     });
 
+    it("hashes clip-level analysis and duration, but not the edit revision", () => {
+        const base = composeParamBlockView(
+            "root",
+            [clip],
+            { schemaVersion: 2, revision: 0, blocks: [] },
+            5,
+        );
+        const durationChanged = composeParamBlockView(
+            "root",
+            [{ ...clip, contentDurationSec: 3 }],
+            { schemaVersion: 2, revision: 0, blocks: [] },
+            5,
+        );
+        const analysisChanged = composeParamBlockView(
+            "root",
+            [
+                {
+                    ...clip,
+                    syllableSpansSec: [
+                        { startSec: 0, endSec: 0.25 },
+                        { startSec: 0.25, endSec: 1 },
+                    ],
+                },
+            ],
+            { schemaVersion: 2, revision: 0, blocks: [] },
+            5,
+        );
+        const midiChanged = composeParamBlockView(
+            "root",
+            [{ ...clip, midiNoteData: [{ startSec: 0, endSec: 0.5, note: 60 }] }],
+            { schemaVersion: 2, revision: 0, blocks: [] },
+            5,
+        );
+        const revisionChanged = composeParamBlockView(
+            "root",
+            [clip],
+            { schemaVersion: 2, revision: 9, blocks: [] },
+            5,
+        );
+        expect(durationChanged.layoutKey).not.toBe(base.layoutKey);
+        expect(analysisChanged.layoutKey).not.toBe(base.layoutKey);
+        expect(midiChanged.layoutKey).not.toBe(base.layoutKey);
+        expect(revisionChanged.layoutKey).toBe(base.layoutKey);
+    });
+
     it("组容器产生一个 grouped 块，且不复制合并成员", () => {
         const edits = mergedEdits();
         const block = edits.blocks[0];

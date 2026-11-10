@@ -913,8 +913,23 @@ export function splitBaseCoverAtFrame(
                 const lo = Math.min(a, b);
                 const hi = Math.max(a, b);
                 const cutClamped = Math.max(lo, Math.min(hi, cut));
-                leftSpans.push({ ...span, sourceStartSec: lo, sourceEndSec: cutClamped });
-                rightSpans.push({ ...span, sourceStartSec: cutClamped, sourceEndSec: hi });
+                /*
+                 * Forward playback: visible time increases with source, so the
+                 * left half is [lo, cut]. Reversed playback is the opposite:
+                 * the left half is [cut, hi]. This must match the member split
+                 * in splitLogicalUserBlock.
+                 */
+                const forward = a <= b;
+                leftSpans.push(
+                    forward
+                        ? { ...span, sourceStartSec: lo, sourceEndSec: cutClamped }
+                        : { ...span, sourceStartSec: cutClamped, sourceEndSec: hi },
+                );
+                rightSpans.push(
+                    forward
+                        ? { ...span, sourceStartSec: cutClamped, sourceEndSec: hi }
+                        : { ...span, sourceStartSec: lo, sourceEndSec: cutClamped },
+                );
                 leftFull = false;
                 rightFull = false;
                 continue;

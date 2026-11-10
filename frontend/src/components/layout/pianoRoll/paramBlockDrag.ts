@@ -87,6 +87,21 @@ export type ParamBlockDragCommit = {
 
 export type ParamBlockDragActivity = { pointerGestureToken: number | null; pendingCommits: number };
 
+/**
+ * A failed commit may only roll back the state it started from or the state it
+ * applied itself. A third-party structural edit during the async read must win.
+ */
+export function canRollbackParamBlockDragCommit(args: {
+    readonly currentRevision: number;
+    readonly beforeRevision: number;
+    readonly appliedRevision: number | null;
+}): boolean {
+    return (
+        args.currentRevision === args.beforeRevision ||
+        (args.appliedRevision !== null && args.currentRevision === args.appliedRevision)
+    );
+}
+
 export interface ParamBlockDragContext {
     readonly paramBlockDragActivityRef: Ref<ParamBlockDragActivity>;
     readonly paramView: ParamViewSegment | null;
@@ -853,11 +868,12 @@ export function beginParamBlockDrag(
                             current === stateBeforeCommit ||
                             (appliedCommitState !== null &&
                                 current === appliedCommitState) ||
-                            current.editSet.revision ===
-                                stateBeforeCommit.editSet.revision ||
-                            (appliedCommitState !== null &&
-                                current.editSet.revision ===
-                                    appliedCommitState.editSet.revision);
+                            canRollbackParamBlockDragCommit({
+                                currentRevision: current.editSet.revision,
+                                beforeRevision: stateBeforeCommit.editSet.revision,
+                                appliedRevision:
+                                    appliedCommitState?.editSet.revision ?? null,
+                            });
                         if (canRollback) setParamBlockState(stateBeforeCommit);
                         const pvNow = paramViewRef.current;
                         if (pvNow !== null) resetLiveEditPreview(pvNow);

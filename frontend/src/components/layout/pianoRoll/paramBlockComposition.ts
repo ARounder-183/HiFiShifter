@@ -547,6 +547,80 @@ function trimMember(
     };
 }
 
+function spanListKey(
+    spans:
+        | readonly { readonly startSec: number; readonly endSec: number }[]
+        | undefined,
+): string {
+    return (spans ?? [])
+        .map((span) => span.startSec.toFixed(6) + "-" + span.endSec.toFixed(6))
+        .join(";");
+}
+
+function noteListKey(
+    notes:
+        | readonly {
+              readonly startSec: number;
+              readonly endSec: number;
+              readonly note: number;
+          }[]
+        | undefined,
+): string {
+    return (notes ?? [])
+        .map(
+            (note) =>
+                note.startSec.toFixed(6) +
+                "-" +
+                note.endSec.toFixed(6) +
+                ":" +
+                note.note,
+        )
+        .join(";");
+}
+
+function takeLayoutKey(take: NonNullable<ParamBlockSourceClip["takes"]>[number]): string {
+    return [
+        take.id,
+        take.sourceStartSec,
+        take.sourceEndSec,
+        take.playbackRate,
+        take.reversed,
+        take.loopEnabled,
+        take.durationSec,
+        take.durationFrames,
+        take.sourceSampleRate,
+        spanListKey(take.syllableSpansSec),
+        spanListKey(take.gameBlockBaseline?.sourceSpansSec),
+        noteListKey(take.midiNoteData),
+    ].join(":");
+}
+
+/**
+ * The hash must cover every input that can change projection or block
+ * boundaries. In particular, clip-level analysis fallbacks and clip duration
+ * are used by projectionForClip even when the take array is present.
+ */
+function clipLayoutKey(clip: ParamBlockSourceClip): string {
+    return [
+        clip.id,
+        clip.activeTakeId ?? "",
+        clip.startSec,
+        clip.lengthSec,
+        clip.sourceStartSec,
+        clip.sourceEndSec,
+        clip.playbackRate,
+        clip.clipPlaybackRate,
+        clip.reversed,
+        clip.loopEnabled,
+        clip.loopPeriodSec,
+        clip.contentDurationSec,
+        spanListKey(clip.syllableSpansSec),
+        spanListKey(clip.gameBlockBaseline?.sourceSpansSec),
+        noteListKey(clip.midiNoteData),
+        (clip.takes ?? []).map(takeLayoutKey).join(","),
+    ].join(":");
+}
+
 export function composeParamBlockView(
     rootTrackId: string,
     clips: readonly ParamBlockSourceClip[],
@@ -650,17 +724,7 @@ export function composeParamBlockView(
         rootTrackId,
         editRevision: edits.revision,
         layoutKey: `layout:${hash(
-            `${rootTrackId}|${fp}|${clips
-                .map(
-                    (clip) =>
-                        `${clip.id}:${clip.activeTakeId ?? ""}:${clip.startSec}:${clip.lengthSec}:${clip.sourceStartSec}:${clip.sourceEndSec}:${clip.playbackRate}:${clip.clipPlaybackRate}:${clip.reversed}:${clip.loopEnabled}:${clip.loopPeriodSec}:${clip.takes
-                            ?.map(
-                                (take) =>
-                                    `${take.id}:${take.sourceStartSec}:${take.sourceEndSec}:${take.playbackRate}:${take.reversed}:${take.loopEnabled}:${take.durationSec}:${take.durationFrames}:${take.sourceSampleRate}:${(take.syllableSpansSec ?? []).map((span) => `${span.startSec.toFixed(6)}-${span.endSec.toFixed(6)}`).join(";")}:${(take.gameBlockBaseline?.sourceSpansSec ?? []).map((span) => `${span.startSec.toFixed(6)}-${span.endSec.toFixed(6)}`).join(";")}:${(take.midiNoteData ?? []).map((note) => `${note.startSec.toFixed(6)}-${note.endSec.toFixed(6)}`).join(";")}`,
-                            )
-                            .join(",")}`,
-                )
-                .join("|")}`,
+            `${rootTrackId}|${fp}|${clips.map(clipLayoutKey).join("|")}`,
         )}`,
         framePeriodMs: fp,
         blocks,
