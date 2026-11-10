@@ -494,6 +494,79 @@ describe("paramBlockEditing", () => {
             members.some((member) => member.sourceStartSec < 0.4 && member.sourceEndSec > 0.2),
         ).toBe(false);
     });
+    it("groups non-adjacent projected blocks without filling the gap", () => {
+        const edits = {
+            schemaVersion: 2 as const,
+            revision: 1,
+            blocks: [
+                {
+                    id: "left",
+                    geometry: {
+                        kind: "take" as const,
+                        members: [
+                            {
+                                clipId: "clip",
+                                takeId: "clip_take_1",
+                                cycle: 0,
+                                sourceStartSec: 0,
+                                sourceEndSec: 0.2,
+                                label: "manual" as const,
+                            },
+                        ],
+                    },
+                    deleted: false,
+                    manual: true,
+                    value: 60,
+                    createdSeq: 1,
+                },
+                {
+                    id: "right",
+                    geometry: {
+                        kind: "take" as const,
+                        members: [
+                            {
+                                clipId: "clip",
+                                takeId: "clip_take_1",
+                                cycle: 0,
+                                sourceStartSec: 0.6,
+                                sourceEndSec: 0.8,
+                                label: "manual" as const,
+                            },
+                        ],
+                    },
+                    deleted: false,
+                    manual: true,
+                    value: 60,
+                    createdSeq: 2,
+                },
+            ],
+        };
+        const view = composeParamBlockView("root", [clip], edits, 5);
+        const selected = view.blocks.filter((block) => block.kind !== "base");
+        expect(selected).toHaveLength(2);
+        const grouped = groupProjectedBlocks([clip], edits, selected, 5);
+        const groupedView = composeParamBlockView("root", [clip], grouped, 5);
+        const runs = groupedView.blocks.filter((block) => block.kind !== "base");
+        expect(runs.map((block) => [block.startFrame, block.endFrameExclusive])).toEqual([
+            [0, 40],
+            [120, 160],
+        ]);
+        expect(runs.every((block) => block.userBlockId !== undefined)).toBe(true);
+        expect(new Set(runs.map((block) => block.userBlockId)).size).toBe(1);
+        // 组只覆盖两个 child 的真实 run，80..120 的空白不能被组填满。
+        expect(runs.some((block) => block.startFrame < 80 && block.endFrameExclusive > 80)).toBe(
+            false,
+        );
+        const restored = ungroupUserBlock(grouped, runs[0]!.userBlockId!);
+        const restoredView = composeParamBlockView("root", [clip], restored, 5);
+        expect(
+            restoredView.blocks
+                .filter((block) => block.kind !== "base")
+                .map((block) => block.id)
+                .sort(),
+        ).toEqual(["left", "right"]);
+    });
+
     it("groups adjacent projected blocks reversibly and splits at a frame", () => {
         const base = composeParamBlockView(
             "root",

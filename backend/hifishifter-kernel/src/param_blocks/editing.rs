@@ -374,6 +374,15 @@ pub fn ensure_editable_user_block(
     Ok((next, target))
 }
 
+fn projected_blocks_overlap(selected: &[ProjectedParamBlock]) -> bool {
+    let mut intervals: Vec<(u32, u32)> = selected
+        .iter()
+        .map(|block| (block.start_frame, block.end_frame_exclusive))
+        .collect();
+    intervals.sort_unstable();
+    intervals.windows(2).any(|pair| pair[1].0 < pair[0].1)
+}
+
 fn first_projected_frame(
     timeline: &TimelineState,
     block: &UserParamBlock,
@@ -418,12 +427,40 @@ pub fn group_blocks(
     if selected.len() < 2 {
         return Err("Invalid: group needs two blocks".into());
     }
-    let mut ordered = selected.to_vec();
-    ordered.sort_by_key(|block| block.start_frame);
-    for pair in ordered.windows(2) {
-        if pair[0].end_frame_exclusive != pair[1].start_frame {
-            return Err("Invalid: group blocks are not adjacent".into());
+    if projected_blocks_overlap(selected) {
+        return Err("Invalid: group blocks overlap".into());
+    }
+    /*
+     * 多 run 逻辑块在一次选择里会出现多个 ProjectedParamBlock。先按逻辑 id
+     * 收敛成一个块，再物化；否则每个 run 都会各自 materialize 一次，父块
+     * 的剩余成员会被拆成兄弟块，组里就会漏进未选中的片段。
+     */
+    let mut by_logical: std::collections::BTreeMap<String, ProjectedParamBlock> =
+        std::collections::BTreeMap::new();
+    for block in selected {
+        let id = block
+            .user_block_id
+            .clone()
+            .unwrap_or_else(|| block.id.clone());
+        match by_logical.get_mut(&id) {
+            Some(existing) => {
+                existing.start_frame = existing.start_frame.min(block.start_frame);
+                existing.end_frame_exclusive =
+                    existing.end_frame_exclusive.max(block.end_frame_exclusive);
+                existing.members.extend(block.members.iter().cloned());
+            }
+            None => {
+                let mut copy = block.clone();
+                copy.id = id.clone();
+                copy.user_block_id = Some(id.clone());
+                by_logical.insert(id, copy);
+            }
         }
+    }
+    let mut ordered: Vec<ProjectedParamBlock> = by_logical.into_values().collect();
+    ordered.sort_by_key(|block| block.start_frame);
+    if ordered.len() < 2 {
+        return Err("Invalid: group needs two blocks".into());
     }
 
     let mut working = edits.clone();
@@ -2344,6 +2381,92 @@ mod tests {
         assert_eq!(ungrouped_view.blocks.len(), 2);
         assert_eq!(ungrouped.blocks[0].id, view.blocks[0].id);
         assert_eq!(ungrouped.blocks[1].id, view.blocks[1].id);
+    }
+
+    #[test]
+    fn group_non_adjacent_blocks_without_filling_gap() {
+        let timeline = timeline();
+        let edits = ParamBlockEditSet {
+            schema_version: 2,
+            revision: 1,
+            blocks: vec![
+                UserParamBlock {
+                    id: "left".into(),
+                    geometry: BlockGeometry::Take {
+                        members: vec![TakeSpan {
+                            clip_id: "clip".into(),
+                            take_id: "take".into(),
+                            cycle: 0,
+                            source_start_sec: 0.0,
+                            source_end_sec: 0.2,
+                            syllable_id: None,
+                            label: BlockLabel::Manual,
+                        }],
+                    },
+                    deleted: false,
+                    manual: true,
+                    value: Some(60.0),
+                    transition_out_sec: None,
+                    created_seq: 1,
+                    base_cover: None,
+                },
+                UserParamBlock {
+                    id: "right".into(),
+                    geometry: BlockGeometry::Take {
+                        members: vec![TakeSpan {
+                            clip_id: "clip".into(),
+                            take_id: "take".into(),
+                            cycle: 0,
+                            source_start_sec: 0.6,
+                            source_end_sec: 0.8,
+                            syllable_id: None,
+                            label: BlockLabel::Manual,
+                        }],
+                    },
+                    deleted: false,
+                    manual: true,
+                    value: Some(60.0),
+                    transition_out_sec: None,
+                    created_seq: 2,
+                    base_cover: None,
+                },
+            ],
+        };
+        let view = compose_param_block_view(&timeline, "root", &edits, 5.0).unwrap();
+        let selected: Vec<ProjectedParamBlock> = view
+            .blocks
+            .iter()
+            .filter(|block| block.kind != ProjectedBlockKind::Base)
+            .cloned()
+            .collect();
+        assert_eq!(selected.len(), 2);
+        let grouped = group_blocks(&timeline, &edits, &selected, 5.0).unwrap();
+        let grouped_view = compose_param_block_view(&timeline, "root", &grouped, 5.0).unwrap();
+        let runs: Vec<_> = grouped_view
+            .blocks
+            .iter()
+            .filter(|block| block.kind != ProjectedBlockKind::Base)
+            .collect();
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].start_frame, 0);
+        assert_eq!(runs[0].end_frame_exclusive, 40);
+        assert_eq!(runs[1].start_frame, 120);
+        assert_eq!(runs[1].end_frame_exclusive, 160);
+        let group_id = runs[0].user_block_id.clone().unwrap();
+        assert_eq!(runs[1].user_block_id.as_deref(), Some(group_id.as_str()));
+        assert!(runs
+            .iter()
+            .all(|block| !(block.start_frame < 80 && block.end_frame_exclusive > 80)));
+        let ungrouped = ungroup_user_block(&grouped, &group_id).unwrap();
+        let ungrouped_view = compose_param_block_view(&timeline, "root", &ungrouped, 5.0).unwrap();
+        let restored: Vec<_> = ungrouped_view
+            .blocks
+            .iter()
+            .filter(|block| block.kind != ProjectedBlockKind::Base)
+            .collect();
+        assert_eq!(restored.len(), 2);
+        assert_eq!(restored[0].start_frame, 0);
+        assert_eq!(restored[1].start_frame, 120);
     }
 
     #[test]

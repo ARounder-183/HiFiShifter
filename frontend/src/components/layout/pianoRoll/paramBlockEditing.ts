@@ -492,6 +492,17 @@ function groupValue(children: readonly UserParamBlock[]): number | null {
     return children.every((child) => (child.value ?? null) === first) ? first : null;
 }
 
+/** 组是逻辑容器，不是连续区间；但两个可见 run 真重叠时无法定义唯一并集。 */
+function projectedBlocksOverlap(blocks: readonly ProjectedParamBlock[]): boolean {
+    const ordered = blocks
+        .slice()
+        .sort((a, b) => a.startFrame - b.startFrame || a.endFrameExclusive - b.endFrameExclusive);
+    for (let index = 1; index < ordered.length; index += 1) {
+        if (ordered[index]!.startFrame < ordered[index - 1]!.endFrameExclusive) return true;
+    }
+    return false;
+}
+
 /** 可逆编组：children 是唯一几何真值；组本身不保存合并成员。 */
 export function groupProjectedBlocks(
     clips: readonly ParamBlockSourceClip[],
@@ -500,6 +511,7 @@ export function groupProjectedBlocks(
     framePeriodMs: number,
 ): ParamBlockEditSet {
     if (selected.length < 2) throw new Error("group needs two blocks");
+    if (projectedBlocksOverlap(selected)) throw new Error("group blocks overlap");
     const byLogical = new Map<string, ProjectedParamBlock>();
     for (const block of selected) {
         const id = logicalBlockId(block);
@@ -519,11 +531,6 @@ export function groupProjectedBlocks(
         (a, b) => a.startFrame - b.startFrame || a.endFrameExclusive - b.endFrameExclusive,
     );
     if (ordered.length < 2) throw new Error("group needs two blocks");
-    for (let index = 1; index < ordered.length; index += 1) {
-        if (ordered[index - 1].endFrameExclusive !== ordered[index].startFrame) {
-            throw new Error("group blocks are not adjacent");
-        }
-    }
 
     let working = edits;
     const removeIds = new Set<string>();

@@ -293,6 +293,31 @@ export function paramBlockCursorForHover(kind: ParamBlockHoverKind | null): stri
 }
 
 /**
+ * 组的可见 run 可能不连续。组的外边缘只在首/末 run；内部 run 的左右边界
+ * 是子块边界，不是组边界，不能拿来触发“整个组”的伸缩。
+ */
+export function paramBlockEdgeCandidates(blocks: readonly ParamBlock[]): ParamBlock[] {
+    const grouped = new Map<string, ParamBlock[]>();
+    for (const block of blocks) {
+        if (block.kind !== "grouped") continue;
+        const id = logicalBlockId(block);
+        const runs = grouped.get(id);
+        if (runs === undefined) grouped.set(id, [block]);
+        else runs.push(block);
+    }
+    return blocks.filter((block) => {
+        if (block.kind !== "grouped") return true;
+        const runs = grouped.get(logicalBlockId(block));
+        if (runs === undefined || runs.length <= 1) return true;
+        const startSec = Math.min(...runs.map((run) => run.startSec));
+        const endSec = Math.max(...runs.map((run) => run.endSec));
+        return (
+            Math.abs(block.startSec - startSec) <= 1e-6 || Math.abs(block.endSec - endSec) <= 1e-6
+        );
+    });
+}
+
+/**
  * 块的左右边缘命中。
  *
  * 只按时间容差判断时，`pxPerSec` 很小会把“离边缘几像素”算成很大的秒数，
@@ -979,7 +1004,7 @@ export type BlockGroupResult =
 export type BlockGroupFailure =
     | "empty"
     | "different_root"
-    | "not_adjacent"
+    | "overlap"
     | "already_grouped"
     | "mixed_geometry"
     | "nothing_to_group";
@@ -1199,6 +1224,16 @@ export function sortedParamBlockTransitionHandles(
     );
 }
 
+function paramBlockRangesOverlap(
+    ranges: readonly { readonly startSec: number; readonly endSec: number }[],
+): boolean {
+    const ordered = ranges.slice().sort((a, b) => a.startSec - b.startSec || a.endSec - b.endSec);
+    for (let index = 1; index < ordered.length; index += 1) {
+        if (ordered[index]!.startSec < ordered[index - 1]!.endSec - 1e-6) return true;
+    }
+    return false;
+}
+
 export function canGroupParamBlocks(
     blocks: readonly ParamBlock[],
     selectedIds: readonly string[],
@@ -1217,7 +1252,6 @@ export function canGroupParamBlocks(
                 id,
                 runs,
                 startSec: Math.min(...runs.map((block) => block.startSec)),
-                endSec: Math.max(...runs.map((block) => block.endSec)),
                 hasRoot: runs.some((block) => block.members.length === 0),
             };
         })
@@ -1230,10 +1264,7 @@ export function canGroupParamBlocks(
     const hasRoot = selected.some((block) => block.hasRoot);
     const hasTake = selected.some((block) => !block.hasRoot);
     if (hasRoot && hasTake) return false;
-    return selected.every(
-        (block, index) =>
-            index === 0 || Math.abs(selected[index - 1]!.endSec - block.startSec) <= 1e-6,
-    );
+    return !paramBlockRangesOverlap(selected.flatMap((block) => block.runs));
 }
 
 export function groupParamBlocks(args: {
@@ -1257,20 +1288,8 @@ export function groupParamBlocks(args: {
     const hasRoot = selected.some((block) => block.members.length === 0);
     const hasTake = selected.some((block) => block.members.length > 0);
     if (hasRoot && hasTake) return { ok: false, reason: "mixed_geometry" };
-    const extents = [...identities]
-        .map((id) => {
-            const runs = selected.filter((block) => logicalBlockId(block) === id);
-            return {
-                id,
-                startSec: Math.min(...runs.map((block) => block.startSec)),
-                endSec: Math.max(...runs.map((block) => block.endSec)),
-            };
-        })
-        .sort((a, b) => a.startSec - b.startSec);
-    for (let index = 1; index < extents.length; index += 1) {
-        if (Math.abs(extents[index - 1]!.endSec - extents[index]!.startSec) > 1e-6) {
-            return { ok: false, reason: "not_adjacent" };
-        }
+    if (paramBlockRangesOverlap(selected)) {
+        return { ok: false, reason: "overlap" };
     }
     const projected = selected
         .map((block) => block.projected)
@@ -1287,7 +1306,7 @@ export function groupParamBlocks(args: {
         return { ok: true, state: withEdits(args.state, edits) };
     } catch (error) {
         const message = error instanceof Error ? error.message : "";
-        if (message.includes("adjacent")) return { ok: false, reason: "not_adjacent" };
+        if (message.includes("overlap")) return { ok: false, reason: "overlap" };
         if (message.includes("already grouped")) return { ok: false, reason: "already_grouped" };
         if (message.includes("root and take")) return { ok: false, reason: "mixed_geometry" };
         return { ok: false, reason: "nothing_to_group" };

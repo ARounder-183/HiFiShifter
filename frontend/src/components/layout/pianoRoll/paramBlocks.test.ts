@@ -5,6 +5,9 @@ import {
     EMPTY_PARAM_BLOCK_STATE,
     blocksFromViewForPanel,
     buildParamBlockDragSegments,
+    canGroupParamBlocks,
+    groupParamBlocks,
+    paramBlockEdgeCandidates,
     isStrictlyInsideParamBlock,
     resolveParamBlockSplitTarget,
     resolveSplittableParamBlockAt,
@@ -87,6 +90,87 @@ function twoMemberEdits(): ParamBlockEditSet {
     ]);
 }
 
+/** 两个彼此分离的独立逻辑块：帧域 [0,40) 与 [120,160)。 */
+function disjointBlockEdits(): ParamBlockEditSet {
+    return {
+        schemaVersion: 2,
+        revision: 1,
+        blocks: [
+            {
+                id: "left",
+                geometry: {
+                    kind: "take",
+                    members: [
+                        {
+                            clipId: "clip",
+                            takeId: "clip_take_1",
+                            cycle: 0,
+                            sourceStartSec: 0,
+                            sourceEndSec: 0.2,
+                            label: "manual",
+                        },
+                    ],
+                },
+                deleted: false,
+                manual: true,
+                value: 60,
+                createdSeq: 1,
+            },
+            {
+                id: "right",
+                geometry: {
+                    kind: "take",
+                    members: [
+                        {
+                            clipId: "clip",
+                            takeId: "clip_take_1",
+                            cycle: 0,
+                            sourceStartSec: 0.6,
+                            sourceEndSec: 0.8,
+                            label: "manual",
+                        },
+                    ],
+                },
+                deleted: false,
+                manual: true,
+                value: 60,
+                createdSeq: 2,
+            },
+        ],
+    };
+}
+
+/** 三个彼此分离的独立块：用于验证组只暴露首/末 run 的外边缘。 */
+function threeDisjointBlockEdits(): ParamBlockEditSet {
+    const base = disjointBlockEdits();
+    return {
+        ...base,
+        blocks: [
+            ...base.blocks,
+            {
+                id: "middle",
+                geometry: {
+                    kind: "take",
+                    members: [
+                        {
+                            clipId: "clip",
+                            takeId: "clip_take_1",
+                            cycle: 0,
+                            sourceStartSec: 0.35,
+                            sourceEndSec: 0.5,
+                            label: "manual",
+                        },
+                    ],
+                },
+                deleted: false,
+                manual: true,
+                value: 60,
+                createdSeq: 3,
+            },
+        ],
+    };
+}
+
 /** 两个相差 1 帧的成员：合成会并成一个 run，并在帧 100 处留下"成员内无帧"的缝。 */
 function gapMemberEdits(): ParamBlockEditSet {
     return takeBlockEdits([
@@ -94,6 +178,67 @@ function gapMemberEdits(): ParamBlockEditSet {
         [0.505, 1],
     ]);
 }
+
+describe("param block grouping", () => {
+    it("allows non-adjacent logical blocks and leaves the gap unfilled", () => {
+        const clips = [clip()];
+        const edits = disjointBlockEdits();
+        const blocks = panelBlocks(clips, edits);
+        expect(canGroupParamBlocks(blocks, ["left", "right"])).toBe(true);
+
+        const result = groupParamBlocks({
+            state: state(edits),
+            blocks,
+            selectedBlockIds: ["left", "right"],
+            clips,
+        });
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+
+        const view = composeParamBlockView("root", clips, result.state.editSet, FRAME_MS);
+        const runs = view.blocks.filter((block) => block.kind !== "base");
+        expect(runs.map((block) => [block.startFrame, block.endFrameExclusive])).toEqual([
+            [0, 40],
+            [120, 160],
+        ]);
+        expect(runs.every((block) => block.userBlockId !== undefined)).toBe(true);
+        expect(new Set(runs.map((block) => block.userBlockId)).size).toBe(1);
+        expect(runs.some((block) => block.startFrame < 80 && block.endFrameExclusive > 80)).toBe(
+            false,
+        );
+    });
+
+    it("exposes only the outer edges of a multi-run group", () => {
+        const clips = [clip()];
+        const edits = threeDisjointBlockEdits();
+        const blocks = panelBlocks(clips, edits);
+        const result = groupParamBlocks({
+            state: state(edits),
+            blocks,
+            selectedBlockIds: ["left", "middle", "right"],
+            clips,
+        });
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const view = composeParamBlockView("root", clips, result.state.editSet, FRAME_MS);
+        const groupedRuns = view.blocks.filter((block) => block.kind === "grouped");
+        expect(groupedRuns).toHaveLength(3);
+        const edgeCandidates = paramBlockEdgeCandidates(
+            blocksFromViewForPanel("root", view),
+        ).filter((block) => block.kind === "grouped");
+        expect(edgeCandidates.map((block) => block.id)).toEqual([
+            groupedRuns[0]!.id,
+            groupedRuns[2]!.id,
+        ]);
+    });
+
+    it("rejects selecting only multiple runs of one logical block", () => {
+        const clips = [clip()];
+        const edits = disjointBlockEdits();
+        const blocks = panelBlocks(clips, edits);
+        expect(canGroupParamBlocks(blocks, ["left", "left"])).toBe(false);
+    });
+});
 
 describe("resolveParamBlockSplitTarget", () => {
     it("播放头在块内部时返回该块", () => {

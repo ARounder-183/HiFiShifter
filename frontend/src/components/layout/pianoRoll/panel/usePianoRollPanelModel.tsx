@@ -99,6 +99,7 @@ import {
     deleteParamBlocks,
     formatParamBlockLabel,
     paramBlockCursorForHover,
+    paramBlockEdgeCandidates,
     hitTestParamBlockEdges,
     hitTestParamBlockTransitionHandles,
     hitTestParamBlocks,
@@ -3726,6 +3727,9 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             const framedHits = sortParamBlocksByTime(
                 hostRef.current?.getParamBlockHitRects() ?? [],
             );
+            const edgeCandidateIds = new Set(
+                paramBlockEdgeCandidates(paramBlocksWithValues).map((block) => block.id),
+            );
             const noSnapKeyHeld = (event: {
                 ctrlKey: boolean;
                 shiftKey: boolean;
@@ -3771,7 +3775,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 axisForHandle === undefined
                     ? null
                     : hitTestParamBlockEdges({
-                          blocks: framedHits,
+                          blocks: framedHits.filter((rect) => edgeCandidateIds.has(rect.id)),
                           clientX: hit.clientX - hit.captureTarget.getBoundingClientRect().left,
                           localY: hit.localY,
                           secToX: (sec) =>
@@ -4777,7 +4781,9 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                 axis === undefined
                     ? null
                     : hitTestParamBlockEdges({
-                          blocks: framedHits.filter((rect) => rect.id === fullBlock.id),
+                          blocks: framedHits.filter(
+                              (rect) => rect.id === fullBlock.id && edgeCandidateIds.has(rect.id),
+                          ),
                           clientX: hit.clientX - hit.captureTarget.getBoundingClientRect().left,
                           localY: hit.localY,
                           secToX: (sec) => sec * axis.pxPerSec - axis.scrollLeftPx,
@@ -5863,6 +5869,9 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             if (axis === undefined) return false;
             const sec = viewportPxToSec(axis, localX);
             const framedHits = hostRef.current?.getParamBlockHitRects() ?? [];
+            const edgeCandidateIds = new Set(
+                paramBlockEdgeCandidates(paramBlocksWithValues).map((block) => block.id),
+            );
             const secToX = (value: number) => value * axis.pxPerSec - axis.scrollLeftPx;
             const transition = hitTestParamBlockTransitionHandles({
                 // 手柄可见时即可抓住；首次 hover 不依赖块已选中。
@@ -5889,7 +5898,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             const block = paramBlocksWithValues.find((item) => item.id === hit.id);
             if (block === undefined) return false;
             const edge = hitTestParamBlockEdges({
-                blocks: framedHits,
+                blocks: framedHits.filter((rect) => edgeCandidateIds.has(rect.id)),
                 clientX: localX,
                 localY,
                 secToX,
