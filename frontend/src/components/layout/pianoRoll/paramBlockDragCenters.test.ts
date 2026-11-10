@@ -18,7 +18,7 @@ function block(args: {
         members: [],
         startSec: args.startSec ?? 0,
         endSec: args.endSec ?? 1,
-        averageValue: args.averageValue ?? 60,
+        averageValue: args.averageValue === undefined ? 60 : args.averageValue,
         manualValue: args.manualValue ?? null,
     };
 }
@@ -38,7 +38,6 @@ describe("resolveParamBlockDragCenters", () => {
                 ["c", 64],
             ]),
             param: "pitch",
-            fallbackValue: 60,
         });
         expect(centers.byLogical.get("a")).toBe(60.25);
         expect(centers.byLogical.get("b")).toBe(62);
@@ -65,7 +64,6 @@ describe("resolveParamBlockDragCenters", () => {
             anchorBlockId: "parent:0",
             anchorValue: 48,
             param: "pitch",
-            fallbackValue: 60,
         });
         expect(centers.byLogical.get("parent")).toBe(48);
         expect(centers.byRun.get("parent:0")).toBe(48);
@@ -83,7 +81,6 @@ describe("resolveParamBlockDragCenters", () => {
                 ["b", 51],
             ]),
             param: "pitch",
-            fallbackValue: 0,
         });
         expect(centers.byLogical.get("a")).toBe(61);
         expect(centers.byLogical.get("b")).toBe(51);
@@ -95,8 +92,18 @@ describe("resolveParamBlockDragCenters", () => {
             selectedBlocks: [a],
             anchorBlockId: "a",
             param: "volume",
-            fallbackValue: 0,
         });
         expect(centers.byLogical.get("a")).toBe(0.5);
+    });
+
+    it("does not invent a center when the block has no rendered value", () => {
+        const a = block({ id: "a", averageValue: null, manualValue: null });
+        const centers = resolveParamBlockDragCenters({
+            selectedBlocks: [a],
+            anchorBlockId: "a",
+            param: "pitch",
+        });
+        expect(centers.byLogical.has("a")).toBe(false);
+        expect(centers.byRun.has("a")).toBe(false);
     });
 });

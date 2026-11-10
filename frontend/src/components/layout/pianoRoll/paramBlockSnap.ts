@@ -28,7 +28,6 @@ import type { ScaleLike } from "../../../utils/musicalScales";
 import { getDrawPreviewValue } from "./paramValuePreviewLogic";
 
 export const PARAM_BLOCK_SNAP_HIGHLIGHT_GROUP = "paramBlock";
-export const PARAM_BLOCK_SPLIT_SNAP_HIGHLIGHT_GROUP = "paramBlockSplit";
 export const PARAM_BLOCK_PITCH_SNAP_HIGHLIGHT_GROUP = "paramBlockPitch";
 
 export interface ParamBlockTimeSnapInput {
@@ -45,6 +44,8 @@ export interface ParamBlockTimeSnapInput {
     readonly playheadSec: number;
     readonly originSec?: number;
     readonly toggleModifierActive: boolean;
+    /** Split clicks must not snap to the playhead they are not using. */
+    readonly includePlayhead?: boolean;
 }
 
 export function resolveParamBlockTimeSnapResult(input: ParamBlockTimeSnapInput): SnapResult {
@@ -65,6 +66,7 @@ export function resolveParamBlockTimeSnapResult(input: ParamBlockTimeSnapInput):
         playheadSec: input.playheadSec,
         object: "clip",
         originSec: input.originSec,
+        includePlayhead: input.includePlayhead,
     };
     return snapTimelinePosition(ctx, input.rawSec);
 }
@@ -110,45 +112,34 @@ export function publishParamBlockSnapHighlight(result: SnapResult): void {
     });
 }
 
-/** Split uses the same target-only time guide; the line lives until the click settles. */
-export function publishParamBlockSplitSnapHighlight(result: SnapResult): void {
-    publishSingleTargetSnapHighlight({
-        group: PARAM_BLOCK_SPLIT_SNAP_HIGHLIGHT_GROUP,
-        result,
-        id: "param-block-split",
-        surface: "pianoRoll",
-    });
-}
-
 /**
  * Horizontal pitch guide. Only called when a snapped target actually differs
  * from the raw value; null clears immediately on pointerup/cancel.
  */
-export function publishParamBlockPitchSnapHighlight(targetValue: number | null): void {
+export function publishParamBlockPitchSnapHighlight(
+    targetValue: number | null,
+    bounds?: { readonly min: number; readonly max: number },
+): void {
     if (targetValue === null || !Number.isFinite(targetValue)) {
         clearSnapHighlights(PARAM_BLOCK_PITCH_SNAP_HIGHLIGHT_GROUP);
         return;
     }
+    const value = bounds ? Math.min(bounds.max, Math.max(bounds.min, targetValue)) : targetValue;
     publishSnapHighlights(
         PARAM_BLOCK_PITCH_SNAP_HIGHLIGHT_GROUP,
         [
             buildValueGuideEntry({
                 id: "param-block-pitch",
                 kind: "grid",
-                value: targetValue,
+                value,
             }),
         ],
         "pianoRoll",
     );
 }
 
-export function clearParamBlockSplitSnapHighlight(): void {
-    clearSnapHighlights(PARAM_BLOCK_SPLIT_SNAP_HIGHLIGHT_GROUP);
-}
-
 /** Clear every parameter-block guide (time and value). */
 export function clearParamBlockSnapHighlight(): void {
     clearSnapHighlights(PARAM_BLOCK_SNAP_HIGHLIGHT_GROUP);
-    clearSnapHighlights(PARAM_BLOCK_SPLIT_SNAP_HIGHLIGHT_GROUP);
     clearSnapHighlights(PARAM_BLOCK_PITCH_SNAP_HIGHLIGHT_GROUP);
 }

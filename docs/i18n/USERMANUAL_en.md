@@ -464,7 +464,7 @@ The Draw tool lets you draw parameter curves by hand. Default shortcut: `F8`.
 
 Left-drag to draw freely or horizontally, depending on the `Drag Direction` setting. While left-dragging, press the right button (or the `D` key) to quickly toggle drag direction.
 
-When you drag near the left/right edge of the view, the view scrolls horizontally automatically, faster the closer you are to the edge, so you can draw in one stroke into places you cannot see. The Draw, Line and Vibrato tools scroll continuously while the drag is held; the Select tool only advances while the pointer moves — parking the pointer at the edge does not keep it scrolling. The vertical direction never auto-scrolls. This behavior needs no setting and cannot be turned off.
+When you drag near any edge of the view, the view scrolls automatically in that direction, faster the closer you are to the edge, so you can draw in one stroke into places you cannot see. The Draw, Line and Vibrato tools scroll continuously while the drag is held; the Select tool only advances while the pointer moves — parking the pointer at the edge does not keep it scrolling. The top/bottom edges scroll the parameter value range (same direction as the scrollbar and wheel), while the left/right edges scroll time. This behavior needs no setting and cannot be turned off.
 
 Right-drag resets the current curve.
 

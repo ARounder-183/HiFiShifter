@@ -11,7 +11,7 @@ import {
     isChildPitchOffsetDegreesParam,
 } from "../childPitchOffsetParams";
 import { createEdgeScrollDriver } from "../kernel/edgeScrollDriver";
-import { centerFromVerticalScrollTop, verticalScrollTopFromCenter } from "../verticalScrollMapping";
+import { verticalScrollTopFromCenter } from "../verticalScrollMapping";
 import { getDrawPreviewValue } from "../paramValuePreviewLogic";
 import { timeToFrame } from "../utils";
 import { resolveClipSelectionModifiers } from "../../../../features/keybindings/clipSelectionModifiers";
@@ -28,6 +28,7 @@ type CanvasPointerDownDeps = Pick<
     | "activePointerGestureEndRef"
     | "applyDenseToLiveEdit"
     | "applyEdgeScrollLeft"
+    | "applyEdgeScrollTop"
     | "applyMorphOverlayPreview"
     | "applyPostStrokeSmoothing"
     | "applyVibratoChoice"
@@ -163,6 +164,7 @@ export function handleCanvasPointerDown(
         activePointerGestureEndRef,
         applyDenseToLiveEdit,
         applyEdgeScrollLeft,
+        applyEdgeScrollTop,
         applyMorphOverlayPreview,
         applyPostStrokeSmoothing,
         applyVibratoChoice,
@@ -304,14 +306,7 @@ export function handleCanvasPointerDown(
                 center: currentVerticalView().center,
             });
         },
-        setScrollTop: (next) => {
-            const mapping = verticalMapping();
-            const view = currentVerticalView();
-            const center = centerFromVerticalScrollTop({ ...mapping, scrollTop: next });
-            const clamped = clampViewport(editParam, { span: view.span, center });
-            if (editParam === "pitch") setPitchView(clamped);
-            else setParamViewport(editParam, clamped);
-        },
+        setScrollTop: (next) => applyEdgeScrollTop(next),
         getMaxScrollTop: () => verticalScrollRangePx,
         getMinScrollTop: () => 0,
     });
@@ -656,14 +651,7 @@ export function handleCanvasPointerDown(
                 center: currentVerticalView().center,
             });
         },
-        setScrollTop: (next) => {
-            const mapping = verticalMapping();
-            const view = currentVerticalView();
-            const center = centerFromVerticalScrollTop({ ...mapping, scrollTop: next });
-            const clamped = clampViewport(editParam, { span: view.span, center });
-            if (editParam === "pitch") setPitchView(clamped);
-            else setParamViewport(editParam, clamped);
-        },
+        setScrollTop: (next) => applyEdgeScrollTop(next),
         getMaxScrollTop: () => verticalScrollRangePx,
         getMinScrollTop: () => 0,
         onScrolled: (clientX, clientY) => onEdgeScrolledRef.current?.(clientX, clientY),

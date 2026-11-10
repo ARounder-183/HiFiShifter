@@ -20,7 +20,6 @@ export interface ParamBlockDragCenterInput {
     readonly anchorValue?: number | null;
     readonly centerValues?: ReadonlyMap<string, number>;
     readonly param: string;
-    readonly fallbackValue: number;
 }
 
 export interface ParamBlockDragCenters {
@@ -88,12 +87,7 @@ export function resolveParamBlockDragCenters(
                 .find((value): value is number => value !== null) ?? null;
         const manualCenter = input.param === "pitch" ? finite(representative.manualValue) : null;
         const averageCenter = finite(representative.averageValue);
-        const center =
-            explicit ??
-            renderedCenter ??
-            manualCenter ??
-            averageCenter ??
-            finite(input.fallbackValue);
+        const center = explicit ?? renderedCenter ?? manualCenter ?? averageCenter;
         if (center === null) continue;
 
         byLogical.set(group.id, center);

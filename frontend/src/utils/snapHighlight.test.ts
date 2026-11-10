@@ -2,11 +2,13 @@ import { test } from "vitest";
 
 import {
     SNAP_HIGHLIGHT_GROUP,
+    TIMELINE_TRACK_SNAP_GROUP,
     buildCandidateHighlightEntry,
     buildLoopBoundaryHighlightEntry,
     clearSnapHighlights,
     getSnapHighlightSnapshot,
     publishSnapHighlights,
+    publishTimelineTrackSnapHighlight,
     subscribeSnapHighlight,
 } from "./snapHighlight";
 
@@ -109,6 +111,24 @@ test("utils/snapHighlight.test.ts scripted checks", async () => {
     );
 
     unsubscribe();
+
+    // ── 轨道边界吸附线 ──
+    publishTimelineTrackSnapHighlight({ rowIndex: 2, trackId: "t2" });
+    const trackEntry = getSnapHighlightSnapshot().entries.find((entry) =>
+        entry.id.startsWith(TIMELINE_TRACK_SNAP_GROUP + "\u0000"),
+    );
+    assertTrue(trackEntry !== undefined, "track entry published");
+    assertEqual(trackEntry?.kind, "track", "track entry kind");
+    assertEqual(trackEntry?.markers[0].axis, "row", "track marker axis");
+    assertEqual(trackEntry?.markers[0].position, 2, "track boundary row");
+    clearSnapHighlights(TIMELINE_TRACK_SNAP_GROUP);
+    assertEqual(
+        getSnapHighlightSnapshot().entries.filter((entry) =>
+            entry.id.startsWith(TIMELINE_TRACK_SNAP_GROUP + "\u0000"),
+        ).length,
+        0,
+        "track group cleared",
+    );
 
     void checks;
 });

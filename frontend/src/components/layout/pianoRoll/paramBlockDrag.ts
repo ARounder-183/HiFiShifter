@@ -67,8 +67,6 @@ export type ParamBlockDragCommit = {
     readonly stride: number;
     /** 手势开始时已经落地的后端参数 revision。 */
     readonly authorityRevisionAtStart: number;
-    /** External history token at gesture start; a jump cancels the commit. */
-    readonly externalHistoryTokenAtStart: string;
     /** 写入成功时已发出的最大请求序号，排除写入前及写入中的陈旧响应。 */
     authorityRequestSeqAtCommit: number;
     /** 后端提交的逐帧值；权威窗口必须实际包含这些值才能撤预览。 */
@@ -136,8 +134,6 @@ export interface ParamBlockDragContext {
     readonly snapToggleHeldAt: (event: SnapModifiers) => boolean;
     /** 当前音高吸附总开关；与 snapToggleHeldAt 做 XOR 得到本次手势的有效吸附。 */
     readonly pitchSnapEnabled: boolean;
-    /** Midpoint of the current value viewport, used only when a block has no center. */
-    readonly fallbackValue: number;
     /** Publishes/clears the horizontal pitch snap guide while the gesture runs. */
     readonly onPitchSnapGuide?: (targetValue: number | null) => void;
     readonly onError?: (error: unknown) => void;
@@ -297,7 +293,6 @@ export function beginParamBlockDrag(
         anchorValue: args.anchorValue,
         centerValues: args.centerValues,
         param: editParam,
-        fallbackValue: context.fallbackValue,
     });
     const dragSnapshotBlocks = selectedBlocks.map((block) => ({
         id: block.id,
@@ -369,7 +364,10 @@ export function beginParamBlockDrag(
         args.anchorValue !== undefined &&
         Number.isFinite(args.anchorValue)
             ? args.anchorValue
-            : (dragCenters.byLogical.get(anchorLogicalId) ?? anchorPointerValue);
+            : dragCenters.byLogical.get(anchorLogicalId);
+    // No guessed midpoint: a block without a known center must not start a
+    // gesture that would later snap every selected block to the viewport middle.
+    if (dragAnchorValue === undefined || !Number.isFinite(dragAnchorValue)) return false;
     let didDrag = false;
     let lastDelta = 0;
     let lastClientY = args.clientY;
@@ -391,7 +389,10 @@ export function beginParamBlockDrag(
     const snapDeltaAt = (event: SnapModifiers, rawDelta: number) =>
         resolveValueDelta(dragAnchorValue, rawDelta, snapToggleHeldAt(event));
     const preview = () => {
-        rafId = null;
+        if (rafId !== null) {
+            cancelAnimationFrame(rafId);
+            rafId = null;
+        }
         activate();
         const pvNow = paramViewRef.current;
         /*
@@ -450,11 +451,16 @@ export function beginParamBlockDrag(
             const snapToSemitone = effectivePitchSnap(lastSnapToggleHeld);
             const frameCenters = new Map<string, number>();
             for (const block of dragSnapshot.blocks) {
+                /*
+                 * `lastDelta` is already the snapped delta for the anchor.
+                 * Re-snapping each block would move blocks by different
+                 * amounts while the curve moves by the anchor delta.
+                 */
                 const center = projectParamBlockDragDisplayValue({
                     startValue: block.anchorValue,
                     valueDelta: lastDelta,
                     param: editParam,
-                    snapToSemitone,
+                    snapToSemitone: false,
                 });
                 if (center !== null && Number.isFinite(center)) {
                     frameCenters.set(block.id, center);
@@ -466,7 +472,7 @@ export function beginParamBlockDrag(
                     startValue,
                     valueDelta: lastDelta,
                     param: editParam,
-                    snapToSemitone,
+                    snapToSemitone: false,
                 });
                 if (center !== null && Number.isFinite(center)) {
                     logicalCenters.set(logicalId, center);
@@ -643,7 +649,6 @@ export function beginParamBlockDrag(
             stride: pv.stride,
             authorityRevisionAtStart: paramAuthorityRevision,
             authorityRequestSeqAtCommit: getAuthorityWatermark().issuedRequestSeq,
-            externalHistoryTokenAtStart: paramBlockEpoch.externalHistoryToken,
             committed: false,
             releaseState: "waiting-for-curve",
         };
@@ -690,15 +695,40 @@ export function beginParamBlockDrag(
                     ) {
                         throw new Error("Block drag commit cancelled: external history changed");
                     }
+                    /*
+                     * Never turn a missing / short read into zeros. A backend
+                     * error or a truncated window must cancel the commit, not
+                     * write a silent gap into the curve.
+                     */
+                    for (let index = 0; index < ranges.length; index += 1) {
+                        const range = ranges[index];
+                        const curve = curves[index];
+                        const expected = range.endFrame - range.startFrame + 1;
+                        if (
+                            curve === undefined ||
+                            curve.startFrame !== range.startFrame ||
+                            curve.values.length !== expected
+                        ) {
+                            throw new Error(
+                                "Block drag commit cancelled: incomplete full-resolution curve",
+                            );
+                        }
+                    }
                     const sourceAt = (frame: number): number => {
                         for (let index = 0; index < ranges.length; index += 1) {
                             const range = ranges[index];
                             if (frame < range.startFrame || frame > range.endFrame) {
                                 continue;
                             }
-                            return Number(curves[index]?.values[frame - range.startFrame]) || 0;
+                            const value = curves[index]?.values[frame - range.startFrame];
+                            if (value === undefined || !Number.isFinite(value)) {
+                                throw new Error(
+                                    "Block drag commit cancelled: missing source frame",
+                                );
+                            }
+                            return value;
                         }
-                        return 0;
+                        throw new Error("Block drag commit cancelled: source frame outside ranges");
                     };
                     /*
                      * MIDI-like semantics: the curve moves by the same
@@ -719,6 +749,19 @@ export function beginParamBlockDrag(
                     if (commitSegments.length === 0)
                         throw new Error("Block drag has no editable frames");
                     if (liveEditActiveRef) liveEditActiveRef.current = true;
+                    /*
+                     * A structural edit may have landed while the full-res
+                     * reads were in flight. Never overwrite it with the
+                     * gesture's pre-commit snapshot.
+                     */
+                    if (
+                        stateBeforeCommit.editSet.revision !==
+                        paramBlockStateRef.current.editSet.revision
+                    ) {
+                        throw new Error(
+                            "Block drag commit cancelled: parameter blocks changed during read",
+                        );
+                    }
                     /*
                      * 【一次手势 = 一个历史步】Pitch 块的显示中心来自 `value`，
                      * 曲线位移只改帧值；两者都要落盘，但必须落在**同一个事务**里。

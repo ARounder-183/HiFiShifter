@@ -16,6 +16,7 @@ const SNAP_GUIDE_KIND_COLOR: Record<SnapHighlightKind, string> = {
     cursor: "var(--qt-snap-cursor)",
     sampleRate: "var(--qt-snap-sample)",
     loopBoundary: "var(--qt-snap-loop)",
+    track: "var(--qt-snap-track)",
 };
 
 export interface SnapGuideRowLayout {
@@ -114,6 +115,7 @@ const SnapEntry: React.FC<{
     const color = SNAP_GUIDE_KIND_COLOR[entry.kind];
     const timeMarkers = entry.markers.filter((marker) => marker.axis === "time");
     const valueMarkers = entry.markers.filter((marker) => marker.axis === "value");
+    const rowMarkers = entry.markers.filter((marker) => marker.axis === "row");
 
     let rangeTop = 0;
     let rangeHeight = layerHeight;
@@ -183,6 +185,19 @@ const SnapEntry: React.FC<{
         }
     }
 
+    const rowLines: number[] = [];
+    if (rowLayout !== undefined) {
+        for (const marker of rowMarkers) {
+            if (!finite(marker.position)) continue;
+            const rowIndex = Math.max(
+                0,
+                Math.min(rowLayout.trackCount, Math.round(marker.position)),
+            );
+            const y = Math.min(rowLayout.contentHeight, rowIndex * rowLayout.rowHeight);
+            if (finite(y)) rowLines.push(y);
+        }
+    }
+
     return (
         <>
             {rangeHeight > 0
@@ -245,6 +260,26 @@ const SnapEntry: React.FC<{
                             opacity: darkMode ? 0.85 : 0.7,
                             boxShadow: darkMode
                                 ? "0 0 6px 1px color-mix(in oklab, " + color + " 60%, transparent)"
+                                : "none",
+                        }}
+                    />
+                );
+            })}
+            {rowLines.map((y, index) => {
+                const geometry = horizontalHairlineGeometry(y, 2, dpr);
+                return (
+                    <div
+                        key={"row-" + index}
+                        className="absolute"
+                        style={{
+                            left: 0,
+                            top: geometry.top,
+                            width: layerWidth,
+                            height: geometry.height,
+                            backgroundColor: color,
+                            opacity: darkMode ? 0.9 : 0.75,
+                            boxShadow: darkMode
+                                ? "0 0 6px 1px color-mix(in oklab, " + color + " 55%, transparent)"
                                 : "none",
                         }}
                     />

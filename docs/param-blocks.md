@@ -69,6 +69,15 @@ game baseline                      playback_rate / reverse        参数块编�
 - 分割：除播放头分割外，`modifier.paramBlockSplitAtClick`（默认 Alt）支持左键点击块内位置分割；点击与拖动以 3px 死区区分，拖动超过死区回到普通块拖动。Ctrl+Alt 在块上按 Ctrl 选择处理，不创建、不分割。分割完成后只选中右侧结果；分割点左侧的旧选中项取消，右侧既有选中项保留。
 - 多选纵向拖动：按逻辑块解析每个选中块的起点中心，再扇出到它的全部 run；未选中块不进入拖动成员，提交时也只写选中逻辑块的 `value`。
 - 吸附高亮：时间轴与参数编辑器共用 surface/axis 模型。参数编辑器渲染全高时间线和全宽值线，不渲染时间轴行 accent；右键幅度不发布、也不触发边缘滚动。
+- 分割不发布吸附高亮：播放头分割精确落在播放头（snapMode 为 "none"）；点击分割可吸附网格 / Clip 边缘，但候选集排除播放头，且不再创建 180ms 的临时分割高亮。
+- 时间轴换轨不再有 "Vertical Lock"：跨轨拖动只对落点行做 4–10px 迟滞，水平位移始终保留；目标行变化时由共享吸附总线发布一条 axis 为 "row" 的轨道边界横线。
+
+## 曲线与视觉预览
+
+- 参数窗口同 scope 刷新采用 stale-while-revalidate：paramsEpoch 前进但 root / param 未变时保留上一份可见曲线，新回包到达后原子替换；只有切 scope 才清空。
+- 参数块显示值按 run 缓存：当前采样 → 手动值 → 上一次同 run 有效值；canonical 块绝不回退到值域中点。没有值的块本帧不画，而不是叠到 F#4。
+- 结构命令（分割 / 删除 / 编组 / 还原 / 从选区新建）与外部历史 / 布局变化统一走 invalidateParamBlockVisualPreviews：拖动快照、resize / create 预览、事务曲线一次性撤下，避免旧预览在结构编辑后覆盖 canonical。
+- paramBlockSpec 是纯投影，不在 useMemo 里写 ref；清理放在 layout effect（早于 paint）。拖动提交前校验全分辨率窗口与编辑集 revision，缺帧 / 结构变化直接取消，不写 0。
 
 ## 持久化与版本
 

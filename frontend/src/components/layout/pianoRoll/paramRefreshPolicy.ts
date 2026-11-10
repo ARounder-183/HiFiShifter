@@ -1,5 +1,11 @@
-// 参数刷新显示策略：插件同作用域保留已提交曲线，独立App和切作用域仍使用原清窗规则。
-/** 强制重新取数不等于必须先清空画面；插件DSP等待期保持当前scope的可见数据。 */
-export function shouldClearParamRefresh(scopeChanged: boolean, plugin: boolean): boolean {
-    return scopeChanged || !plugin;
+// 参数刷新显示策略：同一作用域内刷新时保留已提交曲线，只有切作用域才清窗。
+/**
+ * 强制重新取数不等于必须先清空画面。
+ *
+ * 时间线刷新（Clip 编辑 / 撤销 / 分析回填）会让 `paramsEpoch` 前进，但参数窗口的
+ * 作用域（root + param）没有变化。此时清空 `paramView` 会让曲线消失到下一次
+ * IPC 回包；参数块也会因此失去采样值。保留旧曲线，等新数据原子替换即可。
+ */
+export function shouldClearParamRefresh(scopeChanged: boolean): boolean {
+    return scopeChanged;
 }

@@ -1248,12 +1248,13 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                           param,
                           curveOwned: spec.curveOwned,
                       });
-                const displayValue =
-                    value ??
-                    block.averageValue ??
-                    (Number.isFinite(spec.valueMin) && Number.isFinite(spec.valueMax)
-                        ? (spec.valueMin + spec.valueMax) / 2
-                        : null);
+                /*
+                 * No midpoint fallback: a block without a sampled / cached /
+                 * manual center is skipped for this frame. Falling back to the
+                 * viewport middle put every unvalued block on the same line
+                 * (F#4 in the reported project).
+                 */
+                const displayValue = value ?? block.averageValue ?? null;
                 if (
                     displayValue == null ||
                     !Number.isFinite(displayValue) ||

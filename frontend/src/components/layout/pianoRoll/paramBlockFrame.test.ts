@@ -215,7 +215,25 @@ describe("param block visual frame", () => {
                 paramView: null,
                 fallbackValue: 1,
             })[0].averageValue,
+        ).toBeNull();
+        expect(
+            resolveParamBlockPanelValues({
+                blocks: [block],
+                param: "volume",
+                paramView: null,
+                fallbackValue: 1,
+                allowFallback: true,
+            })[0].averageValue,
         ).toBe(1);
+        expect(
+            resolveParamBlockPanelValues({
+                blocks: [block],
+                param: "volume",
+                paramView: null,
+                fallbackValue: 1,
+                previousValues: new Map([["note", 0.75]]),
+            })[0].averageValue,
+        ).toBe(0.75);
     });
 });
 

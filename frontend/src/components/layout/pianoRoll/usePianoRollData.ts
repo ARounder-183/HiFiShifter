@@ -1,6 +1,5 @@
 // 参数面板数据窗口：刷新与笔画推迟共用作用域，插件提交不清掉同scope可见曲线。
 import { useCallback, useEffect, useRef, useState } from "react";
-import { isPluginMode } from "../../../services/hostCapabilities";
 import { shouldClearParamRefresh } from "./paramRefreshPolicy";
 
 import type { ParamFramesPayload } from "../../../types/api";
@@ -203,6 +202,24 @@ export function usePianoRollData(args: {
         }
         return true;
     };
+    /**
+     * 同 scope 的空回包不能把可见曲线清成空白。
+     *
+     * 后端在“曲线确实为空”时也会返回空数组；但同 scope 的刷新（Clip 编辑 / 撤销 /
+     * 分析回填）经常先回一份空窗口，随后才是真正的新窗口。此时保留上一份非空
+     * 视图，等下一次回包原子替换，避免曲线消失一帧。真正清空由 scope 变化负责。
+     */
+    const acceptParamPayload = (
+        payload: ParamFramesPayload,
+        trackId: string,
+        param: ParamName,
+    ): boolean => {
+        const hasValues = (payload.edit?.length ?? 0) > 0 || (payload.orig?.length ?? 0) > 0;
+        if (hasValues) return true;
+        const previous = paramViewRef.current;
+        if (previous === null || previous.edit.length === 0) return true;
+        return !previous.key.startsWith(`v2|${trackId}|${param}|`);
+    };
 
     /**
      * 当前参数（渲染期同步刷新）。
@@ -251,8 +268,9 @@ export function usePianoRollData(args: {
         const scopeChanged = lastParamScopeRef.current !== scope;
         lastParamScopeRef.current = scope;
         if (!scopeChanged && liveEditDeferral.defer({ force: true })) return;
-        // 同scope提交保留当前可见数据，仍强制取权威数据；切参数/轨道必须清除旧scope。
-        if (shouldClearParamRefresh(scopeChanged, isPluginMode())) {
+        // 同 scope 的时间线刷新保留当前可见数据，仍强制取权威数据；
+        // 只有切参数 / 轨道才清除旧 scope。
+        if (shouldClearParamRefresh(scopeChanged)) {
             setParamView(null);
             setSecondaryParamViews({});
             setReferencePitchViews({});
@@ -751,6 +769,10 @@ export function usePianoRollData(args: {
 
                     const payload = res as ParamFramesPayload;
                     if (!acceptAuthorityRevision(payload)) return;
+                    if (!acceptParamPayload(payload, trackId, editParam)) {
+                        lastAppliedForceParamFetchTokenRef.current = localForceParamFetchToken;
+                        return;
+                    }
 
                     if (editParam === "pitch") {
                         const userModified = payload.pitch_edit_user_modified;
@@ -940,6 +962,7 @@ export function usePianoRollData(args: {
                 if (liveEditDeferral.defer()) return;
                 const payload = paramRes as ParamFramesPayload;
                 if (!acceptAuthorityRevision(payload)) return;
+                if (!acceptParamPayload(payload, trackId, editParam)) return;
 
                 if (editParam === "pitch") {
                     const userModified = payload.pitch_edit_user_modified;

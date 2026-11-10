@@ -10,9 +10,10 @@ import type { SnapCandidateKind, SnapResult } from "./timelineSnapping";
  */
 
 export const SNAP_HIGHLIGHT_GROUP = "timeline";
+export const TIMELINE_TRACK_SNAP_GROUP = "timelineTrackSnap";
 
 export type SnapGuideSurface = "timeline" | "pianoRoll" | "all";
-export type SnapGuideAxis = "time" | "value";
+export type SnapGuideAxis = "time" | "value" | "row";
 export type SnapHighlightRole = "target" | "source";
 
 export type SnapHighlightKind =
@@ -25,11 +26,15 @@ export type SnapHighlightKind =
     | "selection"
     | "cursor"
     | "sampleRate"
-    | "loopBoundary";
+    | "loopBoundary"
+    | "track";
 
 export interface SnapGuideMarker {
     readonly role: SnapHighlightRole;
-    /** Time in seconds for axis="time"; parameter value for axis="value". */
+    /**
+     * Time in seconds for axis="time"; parameter value for axis="value";
+     * row-boundary index for axis="row".
+     */
     readonly position: number;
     readonly axis: SnapGuideAxis;
     /** Timeline row owner; null means a full-height guide. */
@@ -183,6 +188,37 @@ export function publishSingleTargetSnapHighlight(args: {
             }),
         ],
         args.surface ?? "timeline",
+    );
+}
+
+/** Horizontal timeline guide at a track-row boundary. */
+export function publishTimelineTrackSnapHighlight(args: {
+    readonly rowIndex: number;
+    readonly trackId: string | null;
+}): void {
+    if (!Number.isFinite(args.rowIndex)) {
+        clearSnapHighlights(TIMELINE_TRACK_SNAP_GROUP);
+        return;
+    }
+    publishSnapHighlights(
+        TIMELINE_TRACK_SNAP_GROUP,
+        [
+            {
+                id: "track-boundary",
+                kind: "track",
+                surface: "timeline",
+                markers: [
+                    {
+                        role: "target",
+                        axis: "row",
+                        position: Math.round(args.rowIndex),
+                        trackId: args.trackId,
+                        clipId: null,
+                    },
+                ],
+            },
+        ],
+        "timeline",
     );
 }
 

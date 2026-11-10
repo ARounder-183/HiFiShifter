@@ -116,6 +116,7 @@ export type PointerDeps = {
         mode: StrokeMode,
     ) => void;
     applyEdgeScrollLeft: (drawingScrollLeft: number) => void;
+    applyEdgeScrollTop: (scrollTopPx: number) => void;
     applyMorphOverlayPreview: (overlays: ParamMorphOverlay[]) => void;
     applyPostStrokeSmoothing: (points: StrokePoint[], mode: StrokeMode) => Promise<void>;
     applyVibratoChoice: (choice: VibratoChoice, clientX?: number, clientY?: number) => boolean;

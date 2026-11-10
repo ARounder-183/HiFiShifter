@@ -65,6 +65,32 @@ describe("paramBlockSnap", () => {
         ).toBeCloseTo(0.5);
     });
 
+    it("can exclude the playhead from snap candidates for click splits", () => {
+        const settings = {
+            ...createDefaultTimelineSnapSettings(),
+            snapClipsToGrid: false,
+            snapClipEdges: false,
+            snapClipsToSelectionMarkersCursor: true,
+        };
+        const input = {
+            settings,
+            grid: "1/4" as const,
+            bpm: 120,
+            beatsPerBar: 4,
+            tempoMap: null,
+            pxPerSec: 100,
+            clips: [],
+            tracks: [],
+            selectedClipIds: [],
+            playheadSec: 1.01,
+            toggleModifierActive: false,
+        };
+        expect(resolveParamBlockTimeSnap({ ...input, rawSec: 1 })).toBeCloseTo(1.01);
+        expect(
+            resolveParamBlockTimeSnap({ ...input, rawSec: 1, includePlayhead: false }),
+        ).toBeCloseTo(1);
+    });
+
     it("split snap only applies within the pixel threshold", () => {
         expect(
             resolveParamBlockSplitSec({

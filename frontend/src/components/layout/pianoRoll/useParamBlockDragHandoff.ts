@@ -42,6 +42,10 @@ export function useParamBlockDragHandoff({
     useEffect(() => {
         const pending = commitRef.current;
         if (pending === null || pending.releaseState === "released") return;
+        // The hard timeout only starts after the write has settled. Releasing a
+        // still-in-flight commit would expose the old canonical geometry and
+        // make the block jump back until the write lands.
+        if (!pending.committed) return;
         const timer = setTimeout(
             () => {
                 if (

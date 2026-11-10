@@ -17,7 +17,12 @@ export function resolveParamBlockPanelValues(args: {
     readonly blocks: readonly ParamBlock[];
     readonly param: string;
     readonly paramView: ParamViewSegment | null;
+    /** Viewport midpoint; only used by previews that explicitly opt in. */
     readonly fallbackValue: number;
+    /** Last known value per run, used while a refresh is in flight. */
+    readonly previousValues?: ReadonlyMap<string, number>;
+    /** Canonical blocks must never guess a center from the viewport. */
+    readonly allowFallback?: boolean;
 }): ParamBlock[] {
     return args.blocks.map((block) => {
         const manualValue = args.param === "pitch" ? (block.manualValue ?? null) : null;
@@ -35,14 +40,20 @@ export function resolveParamBlockPanelValues(args: {
                       isPitch: args.param === "pitch",
                       param: args.param,
                   });
+        const previous = args.previousValues?.get(block.id) ?? null;
+        const previewAverage =
+            pv === null && args.param === "pitch" && Number.isFinite(block.averageValue)
+                ? block.averageValue
+                : null;
         return {
             ...block,
             manualValue,
             averageValue:
                 manualValue ??
                 sampled ??
-                (pv === null && args.param === "pitch" ? block.averageValue : null) ??
-                args.fallbackValue,
+                (Number.isFinite(previous) ? previous : null) ??
+                previewAverage ??
+                (args.allowFallback === true ? args.fallbackValue : null),
         };
     });
 }
@@ -62,12 +73,16 @@ export function resolveParamBlockFrameView(args: {
     const scope = (key: string) =>
         key.startsWith("v2|") ? key.split("|").slice(0, 3).join("|") : key;
     const interaction = args.interaction;
+    const sameScope =
+        interaction !== null &&
+        args.paramView !== null &&
+        scope(interaction.key) === scope(args.paramView.key);
     if (
         interaction !== null &&
+        sameScope &&
         (!args.param ||
             !interaction.key.startsWith("v2|") ||
-            interaction.key.split("|")[2] === args.param) &&
-        (!args.paramView || scope(interaction.key) === scope(args.paramView.key))
+            interaction.key.split("|")[2] === args.param)
     )
         return interaction;
     if (args.live !== null && args.live.key === args.paramView?.key) {

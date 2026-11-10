@@ -28,6 +28,7 @@ import { NEW_TRACK_SENTINEL } from "../constants";
 import { beginClipGeometryPreview, endClipGeometryPreview } from "../clipGeometryPreviewBus";
 import {
     SNAP_HIGHLIGHT_GROUP,
+    TIMELINE_TRACK_SNAP_GROUP,
     buildLoopBoundaryHighlightEntry,
     clearSnapHighlights,
     publishSnapHighlights,
@@ -801,8 +802,9 @@ export function useTimelineKernelSeekDrag({
             kernelDragOriginRef.current = null;
             if (origin === null) return;
             // 手势结束：清掉吸附高亮（旧实现同样在收尾清除，否则最后一次的
-            // 吸附提示会一直挂在画面上）。
+            // 吸附提示会一直挂在画面上）。轨道边界线由内核发布，收尾也要清。
             clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+            clearSnapHighlights(TIMELINE_TRACK_SNAP_GROUP);
 
             if (origin.slipMode) {
                 if (args.cancelled) {
