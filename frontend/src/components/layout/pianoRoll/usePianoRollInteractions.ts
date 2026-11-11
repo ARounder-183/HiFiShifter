@@ -255,8 +255,8 @@ export function usePianoRollInteractions(args: {
      * 提交。见 `PianoRollPanel` 里 `applyEdgeScrollLeft` 的说明。
      */
     applyEdgeScrollLeft: (drawingScrollLeft: number) => void;
-    /** Edge auto-scroll on the value axis; only writes the viewport + marks dirty. */
-    applyEdgeScrollTop: (scrollTopPx: number) => void;
+    /** Edge auto-scroll on the value axis; writes the value-viewport centre only. */
+    applyValueScrollCenter: (center: number) => void;
     invalidate: () => void;
 
     yToViewportT: (y: number, h: number) => number;
@@ -478,7 +478,7 @@ export function usePianoRollInteractions(args: {
         bumpRefreshToken,
         syncScrollLeft,
         applyEdgeScrollLeft,
-        applyEdgeScrollTop,
+        applyValueScrollCenter,
         invalidate,
         yToViewportT,
         yToValue,
@@ -2517,7 +2517,7 @@ export function usePianoRollInteractions(args: {
                     activePointerGestureEndRef,
                     applyDenseToLiveEdit,
                     applyEdgeScrollLeft,
-                    applyEdgeScrollTop,
+                    applyValueScrollCenter,
                     applyMorphOverlayPreview,
                     applyPostStrokeSmoothing,
                     applyVibratoChoice,
@@ -2631,7 +2631,7 @@ export function usePianoRollInteractions(args: {
             // 里），`scrollLeftRef` 是 ref —— 列入依赖不会让本回调每帧重建，
             // 只是把"确实读到的值"如实登记。
             applyEdgeScrollLeft,
-            applyEdgeScrollTop,
+            applyValueScrollCenter,
             getViewportTruth,
             scrollLeftRef,
             canvasRef,

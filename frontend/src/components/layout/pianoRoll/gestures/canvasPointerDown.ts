@@ -11,15 +11,12 @@ import {
     isChildPitchOffsetDegreesParam,
 } from "../childPitchOffsetParams";
 import { createEdgeScrollDriver } from "../kernel/edgeScrollDriver";
+import { createHorizontalEdgeScrollAxis } from "../kernel/edgeScrollAxis";
 import {
-    VALUE_EDGE_SCROLL_BAND_PX,
-    VALUE_EDGE_SCROLL_MAX_RATIO,
-    VALUE_EDGE_SCROLL_RAMP_EXPONENT,
+    createValueAxisEdgeScrollAxis,
     valueAxisScrollable,
-    valueEdgeScrollMaxSpeedPxPerSec,
-    verticalScrollTopFromCenter,
-} from "../verticalScrollMapping";
-import { PARAM_EDITOR_VERTICAL_SCROLL_RANGE_PX } from "../panel/panelHelpers";
+} from "../kernel/valueAxisEdgeScroller";
+import { EDGE_SCROLL_MAX_SPEED_PX_PER_SEC } from "../kernel/dragArithmetic";
 import { getDrawPreviewValue } from "../paramValuePreviewLogic";
 import { timeToFrame } from "../utils";
 import { resolveClipSelectionModifiers } from "../../../../features/keybindings/clipSelectionModifiers";
@@ -36,7 +33,7 @@ type CanvasPointerDownDeps = Pick<
     | "activePointerGestureEndRef"
     | "applyDenseToLiveEdit"
     | "applyEdgeScrollLeft"
-    | "applyEdgeScrollTop"
+    | "applyValueScrollCenter"
     | "applyMorphOverlayPreview"
     | "applyPostStrokeSmoothing"
     | "applyVibratoChoice"
@@ -174,7 +171,7 @@ export function handleCanvasPointerDown(
         activePointerGestureEndRef,
         applyDenseToLiveEdit,
         applyEdgeScrollLeft,
-        applyEdgeScrollTop,
+        applyValueScrollCenter,
         applyMorphOverlayPreview,
         applyPostStrokeSmoothing,
         applyVibratoChoice,
@@ -275,17 +272,7 @@ export function handleCanvasPointerDown(
         viewSizeRef,
     } = deps;
 
-    const verticalScrollRangePx = PARAM_EDITOR_VERTICAL_SCROLL_RANGE_PX;
     const currentVerticalView = () => getCurrentViewportForScrollbar(editParam);
-    const verticalMapping = () => {
-        const bounds = getParamValueBoundsForScrollbar(editParam);
-        return {
-            min: bounds.min,
-            max: bounds.max,
-            span: currentVerticalView().span,
-            scrollRangePx: verticalScrollRangePx,
-        };
-    };
     const projectMaxScrollLeft = () => {
         const scroller = scrollerRef.current;
         if (!scroller) return 0;
@@ -301,39 +288,25 @@ export function handleCanvasPointerDown(
     };
     /*
      * 值轴配置的唯一来源：块拖动与绘制类手势必须用同一套带宽 / 速度 / 软启动，
-     * 否则同一个参数编辑器里会出现两种上下滚动手感。水平上界仍由各自驱动决定。
+     * 否则同一个参数编辑器里会出现两种上下滚动手感。
+     *
+     * 【为什么是「值域中心」而不是 scrollTop】值轴的物理刻度是参数值；借道 1600px
+     * 的 scrollTop 代理域会让单帧步长在值域上失去上限（见 valueAxisEdgeScroller）。
+     * 滚动条自己的映射仍走 `verticalScrollMapping`，与这里互不影响。
      */
-    const valueAxisScrollOptions = {
-        getScrollTop: () => {
-            const mapping = verticalMapping();
-            return verticalScrollTopFromCenter({
-                ...mapping,
-                center: currentVerticalView().center,
+    const valueAxis = createValueAxisEdgeScrollAxis({
+        getSpan: () => currentVerticalView().span,
+        getCenter: () => currentVerticalView().center,
+        setCenter: (center) => applyValueScrollCenter(center),
+        canScroll: () => {
+            const bounds = getParamValueBoundsForScrollbar(editParam);
+            return valueAxisScrollable({
+                min: bounds.min,
+                max: bounds.max,
+                span: currentVerticalView().span,
             });
         },
-        setScrollTop: (next: number) => applyEdgeScrollTop(next),
-        // span >= range 时值域中心不可移动：可滚动范围必须归零，否则驱动会
-        // 每帧写入 scrollTop、读回同一个中点，rAF 永不停止。
-        getMaxScrollTop: () => {
-            const mapping = verticalMapping();
-            return valueAxisScrollable(mapping) ? verticalScrollRangePx : 0;
-        },
-        getMinScrollTop: () => 0,
-        getMaxSpeedYPxPerSec: () => {
-            const mapping = verticalMapping();
-            return valueEdgeScrollMaxSpeedPxPerSec({
-                min: mapping.min,
-                max: mapping.max,
-                span: mapping.span,
-                scrollRangePx: verticalScrollRangePx,
-            });
-        },
-        verticalPolicy: {
-            bandPx: VALUE_EDGE_SCROLL_BAND_PX,
-            maxRatio: VALUE_EDGE_SCROLL_MAX_RATIO,
-            rampExponent: VALUE_EDGE_SCROLL_RAMP_EXPONENT,
-        },
-    };
+    });
 
     const blockEdgeScroll = createEdgeScrollDriver({
         getBounds: () => {
@@ -341,11 +314,16 @@ export function handleCanvasPointerDown(
             if (rect === undefined) return null;
             return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom };
         },
-        getScrollLeft: () => getViewportTruth()?.scrollLeft ?? scrollLeftRef.current,
-        setScrollLeft: (next) => applyEdgeScrollLeft(next),
-        getMaxScrollLeft: projectMaxScrollLeft,
-        getMinScrollLeft: () => (syncTimelineEnabled ? -timelineOffsetRef.current : 0),
-        ...valueAxisScrollOptions,
+        axes: [
+            createHorizontalEdgeScrollAxis({
+                getScrollLeft: () => getViewportTruth()?.scrollLeft ?? scrollLeftRef.current,
+                setScrollLeft: (next) => applyEdgeScrollLeft(next),
+                getMaxScrollLeft: projectMaxScrollLeft,
+                getMinScrollLeft: () => (syncTimelineEnabled ? -timelineOffsetRef.current : 0),
+                maxSpeedPxPerSec: EDGE_SCROLL_MAX_SPEED_PX_PER_SEC,
+            }),
+            valueAxis,
+        ],
     });
 
     // 中键平移必须早于块命中：参数块选择模式下中键仍应移动视图，而不是被当成块点击。
@@ -661,28 +639,34 @@ export function handleCanvasPointerDown(
             if (rect === undefined) return null;
             return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom };
         },
-        // ★ 读**内核真值**（绘制坐标），不读原生 `scrollLeft`。
-        //
-        // 【为什么不能读原生】写入走 `applyEdgeScrollLeft` → `host.setScrollLeft`
-        //（内核），而原生 scroller 只是**镜像**，要到下一次帧提交才被回写。
-        // 若驱动读原生值，第二次 step 读到的仍是上一帧的旧位置，于是每一帧
-        // 都从同一个旧位置重新加一个增量 —— 滚动会"原地踏步"或严重偏慢。
-        // 这与面板其它地方"真值在内核"的约定一致（见 `getViewportTruth`）。
-        getScrollLeft: () => getViewportTruth()?.scrollLeft ?? scrollLeftRef.current,
-        setScrollLeft: (nextDrawing) => {
-            // 走自动滚屏专用落点：写内核 + 推共享视口 + **标脏**，
-            // 不自己重绘（绘制由笔画的合帧循环负责，避免每帧两次全帧提交）。
-            applyEdgeScrollLeft(nextDrawing);
-        },
-        // 上界同为绘制坐标（`edgeScrollMaxLeftPx` 已含 nativeOffset 平移）。
-        // block 已收进 select 族，滚动上界与 range 选择完全同源。
-        getMaxScrollLeft: () => maxScrollLeftFor(toolMode !== "select"),
-        // ★ 下界必须也是绘制坐标且可为负：开启同步时绘制域是
-        // `[−偏移, 内容宽 − 偏移]`，左侧那片预留的对齐留白是**合法的负区间**。
-        // 传 0 会让"向左滚"每帧都被夹回 0，与内核自己的下界（−偏移）打架 ——
-        // 视图在两处往复即用户看到的"闪现"。
-        getMinScrollLeft: () => (syncTimelineEnabled ? -timelineOffsetRef.current : 0),
-        ...valueAxisScrollOptions,
+        axes: [
+            // ★ 读**内核真值**（绘制坐标），不读原生 `scrollLeft`。
+            //
+            // 【为什么不能读原生】写入走 `applyEdgeScrollLeft` → `host.setScrollLeft`
+            //（内核），而原生 scroller 只是**镜像**，要到下一次帧提交才被回写。
+            // 若驱动读原生值，第二次 step 读到的仍是上一帧的旧位置，于是每一帧
+            // 都从同一个旧位置重新加一个增量 —— 滚动会"原地踏步"或严重偏慢。
+            // 这与面板其它地方"真值在内核"的约定一致（见 `getViewportTruth`）。
+            createHorizontalEdgeScrollAxis({
+                getScrollLeft: () => getViewportTruth()?.scrollLeft ?? scrollLeftRef.current,
+                setScrollLeft: (nextDrawing) => {
+                    // 走自动滚屏专用落点：写内核 + 推共享视口 + **标脏**，
+                    // 不自己重绘（绘制由笔画的合帧循环负责，避免每帧两次全帧提交）。
+                    applyEdgeScrollLeft(nextDrawing);
+                },
+                // 上界同为绘制坐标（`edgeScrollMaxLeftPx` 已含 nativeOffset 平移）。
+                // block 已收进 select 族，滚动上界与 range 选择完全同源。
+                getMaxScrollLeft: () => maxScrollLeftFor(toolMode !== "select"),
+                // ★ 下界必须也是绘制坐标且可为负：开启同步时绘制域是
+                // `[−偏移, 内容宽 − 偏移]`，左侧那片预留的对齐留白是**合法的负区间**。
+                // 传 0 会让"向左滚"每帧都被夹回 0，与内核自己的下界（−偏移）打架 ——
+                // 视图在两处往复即用户看到的"闪现"。
+                getMinScrollLeft: () => (syncTimelineEnabled ? -timelineOffsetRef.current : 0),
+                maxSpeedPxPerSec: EDGE_SCROLL_MAX_SPEED_PX_PER_SEC,
+            }),
+            // 两个驱动共用同一个值轴实例：避免两份 span / center 快照打架。
+            valueAxis,
+        ],
         onScrolled: (clientX, clientY) => onEdgeScrolledRef.current?.(clientX, clientY),
     });
 

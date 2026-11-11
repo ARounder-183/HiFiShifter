@@ -1,116 +1,61 @@
 import { describe, expect, it } from "vitest";
-import {
-    VALUE_EDGE_SCROLL_VIEWPORTS_PER_SEC,
-    valueAxisScrollable,
-    valueEdgeScrollMaxSpeedPxPerSec,
-} from "./verticalScrollMapping";
 
-describe("valueAxisScrollable", () => {
-    it("reports a movable center only when the span is smaller than the range", () => {
-        expect(valueAxisScrollable({ min: 0, max: 127, span: 24 })).toBe(true);
-        expect(valueAxisScrollable({ min: 0, max: 127, span: 127 })).toBe(false);
-        expect(valueAxisScrollable({ min: 0, max: 127, span: 200 })).toBe(false);
-        expect(valueAxisScrollable({ min: 0, max: 0, span: 0 })).toBe(false);
+import { centerFromVerticalScrollTop, verticalScrollTopFromCenter } from "./verticalScrollMapping";
+
+/**
+ * 滚动条映射的自检。
+ *
+ * 【本测试守护什么】`verticalScrollTopFromCenter` 与 `centerFromVerticalScrollTop`
+ * 必须是同一条直线的两个方向 —— 滚动条 thumb 位置与值域中心不允许有两套算术。
+ * 边缘滚动的速度 / 带宽 / 单帧上限**不在**本模块（见
+ * `kernel/valueAxisEdgeScroller.test.ts`）。
+ */
+const PITCH = { min: 0, max: 127, span: 24, scrollRangePx: 1600 } as const;
+
+describe("verticalScrollTopFromCenter", () => {
+    it("puts the highest centre at scrollTop 0 and the lowest at the range end", () => {
+        expect(verticalScrollTopFromCenter({ ...PITCH, center: PITCH.max - PITCH.span / 2 })).toBe(
+            0,
+        );
+        expect(verticalScrollTopFromCenter({ ...PITCH, center: PITCH.min + PITCH.span / 2 })).toBe(
+            PITCH.scrollRangePx,
+        );
     });
 
-    it("is safe for non-finite input", () => {
-        expect(valueAxisScrollable({ min: Number.NaN, max: 1, span: 0 })).toBe(false);
-        expect(valueAxisScrollable({ min: 0, max: Number.POSITIVE_INFINITY, span: 1 })).toBe(false);
+    it("is linear in the centre", () => {
+        const mid = (PITCH.min + PITCH.max) / 2;
+        expect(verticalScrollTopFromCenter({ ...PITCH, center: mid })).toBeCloseTo(800, 6);
+    });
+
+    it("clamps a centre outside the movable range", () => {
+        expect(verticalScrollTopFromCenter({ ...PITCH, center: 1e9 })).toBe(0);
+        expect(verticalScrollTopFromCenter({ ...PITCH, center: -1e9 })).toBe(PITCH.scrollRangePx);
+    });
+
+    it("returns 0 when the value axis cannot move", () => {
+        expect(verticalScrollTopFromCenter({ ...PITCH, span: 127, center: 63 })).toBe(0);
+        expect(verticalScrollTopFromCenter({ ...PITCH, span: 200, center: 63 })).toBe(0);
+        expect(verticalScrollTopFromCenter({ ...PITCH, scrollRangePx: 0, center: 63 })).toBe(0);
     });
 });
 
-describe("valueEdgeScrollMaxSpeedPxPerSec", () => {
-    it("moves 0.12 visible value viewports per second", () => {
-        const speed = valueEdgeScrollMaxSpeedPxPerSec({
-            min: 0,
-            max: 127,
-            span: 24,
-            scrollRangePx: 1600,
-        });
-        // 0.12 * 24 * 1600 / (127 - 24)
-        expect(speed).toBeCloseTo(44.7379, 3);
-
-        const centerPerSecond = speed * ((127 - 24) / 1600);
-        expect(centerPerSecond / 24).toBeCloseTo(VALUE_EDGE_SCROLL_VIEWPORTS_PER_SEC, 9);
+describe("centerFromVerticalScrollTop", () => {
+    it("round-trips with verticalScrollTopFromCenter", () => {
+        for (const center of [15, 40, 63.5, 100, 112]) {
+            const scrollTop = verticalScrollTopFromCenter({ ...PITCH, center });
+            expect(centerFromVerticalScrollTop({ ...PITCH, scrollTop })).toBeCloseTo(center, 6);
+        }
     });
 
-    it("scales with the visible span so zoom does not change the feel", () => {
-        const at12 = valueEdgeScrollMaxSpeedPxPerSec({
-            min: 0,
-            max: 127,
-            span: 12,
-            scrollRangePx: 1600,
-        });
-        const at48 = valueEdgeScrollMaxSpeedPxPerSec({
-            min: 0,
-            max: 127,
-            span: 48,
-            scrollRangePx: 1600,
-        });
-        expect(at12).toBeCloseTo(20.0348, 3);
-        expect(at48).toBeCloseTo(116.6582, 3);
-        expect(at48).toBeGreaterThan(at12);
+    it("clamps scrollTop to the range", () => {
+        expect(centerFromVerticalScrollTop({ ...PITCH, scrollTop: -100 })).toBeCloseTo(115, 6);
+        expect(centerFromVerticalScrollTop({ ...PITCH, scrollTop: 9999 })).toBeCloseTo(12, 6);
     });
 
-    it("returns zero when the value axis cannot move", () => {
-        expect(
-            valueEdgeScrollMaxSpeedPxPerSec({ min: 0, max: 127, span: 127, scrollRangePx: 1600 }),
-        ).toBe(0);
-        expect(
-            valueEdgeScrollMaxSpeedPxPerSec({ min: 0, max: 127, span: 200, scrollRangePx: 1600 }),
-        ).toBe(0);
-    });
-
-    it("accepts an injected viewports-per-second value", () => {
-        const base = valueEdgeScrollMaxSpeedPxPerSec({
-            min: 0,
-            max: 127,
-            span: 24,
-            scrollRangePx: 1600,
-        });
-        const doubled = valueEdgeScrollMaxSpeedPxPerSec({
-            min: 0,
-            max: 127,
-            span: 24,
-            scrollRangePx: 1600,
-            viewportsPerSec: VALUE_EDGE_SCROLL_VIEWPORTS_PER_SEC * 2,
-        });
-        expect(doubled).toBeCloseTo(base * 2, 9);
-    });
-
-    it("returns zero for non-finite or non-positive inputs", () => {
-        expect(
-            valueEdgeScrollMaxSpeedPxPerSec({
-                min: Number.NaN,
-                max: 127,
-                span: 24,
-                scrollRangePx: 1600,
-            }),
-        ).toBe(0);
-        expect(
-            valueEdgeScrollMaxSpeedPxPerSec({
-                min: 0,
-                max: 127,
-                span: Number.NaN,
-                scrollRangePx: 1600,
-            }),
-        ).toBe(0);
-        expect(
-            valueEdgeScrollMaxSpeedPxPerSec({
-                min: 0,
-                max: 127,
-                span: 24,
-                scrollRangePx: Number.NaN,
-            }),
-        ).toBe(0);
-        expect(
-            valueEdgeScrollMaxSpeedPxPerSec({
-                min: 0,
-                max: 127,
-                span: 24,
-                scrollRangePx: 1600,
-                viewportsPerSec: -1,
-            }),
-        ).toBe(0);
+    it("falls back to the middle when the axis cannot move", () => {
+        expect(centerFromVerticalScrollTop({ ...PITCH, span: 127, scrollTop: 800 })).toBeCloseTo(
+            63.5,
+            6,
+        );
     });
 });

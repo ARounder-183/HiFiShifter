@@ -243,8 +243,7 @@ import type {
     PianoRollParamBlockSpec,
 } from "../kernel/host/pianoRollKernelData";
 import { resolvePanelRenderViewport } from "../kernel/viewportSource";
-import { NOTE_NAMES_SHARP, PARAM_EDITOR_VERTICAL_SCROLL_RANGE_PX } from "./panelHelpers";
-import { centerFromVerticalScrollTop, valueAxisScrollable } from "../verticalScrollMapping";
+import { NOTE_NAMES_SHARP } from "./panelHelpers";
 import { usePianoRollParamGates } from "./usePianoRollParamGates";
 import { usePianoRollScrollerWiring } from "./usePianoRollScrollerWiring";
 import { usePianoRollSelectionActions } from "./usePianoRollSelectionActions";
@@ -1028,28 +1027,15 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
      * Only refs / kernel writes; the current gesture's rAF (or the host frame
      * loop) owns the paint. The old path called setPitchView() -> paintNow()
      * on every driver tick, which is exactly the vertical jank.
+     *
+     * 【为什么只收「中心」而不是 scrollTop】值轴的积分器直接产出 Δ值（见
+     * kernel/valueAxisEdgeScroller）。把中心再翻译成 1600px 的 scrollTop 代理域
+     * 会让单帧步长在值域上失去上限 —— 那正是"上下滚动手感极差"的根因。
      */
-    const applyEdgeScrollTop = useCallback(
-        (nextScrollTopPx: number) => {
+    const applyValueScrollCenter = useCallback(
+        (center: number) => {
             const param = editParamRef.current;
-            const bounds = getParamValueBoundsForScrollbar(param);
             const current = getCurrentViewportForScrollbar(param);
-            if (
-                !valueAxisScrollable({
-                    min: bounds.min,
-                    max: bounds.max,
-                    span: current.span,
-                })
-            ) {
-                return;
-            }
-            const center = centerFromVerticalScrollTop({
-                min: bounds.min,
-                max: bounds.max,
-                span: current.span,
-                scrollTop: nextScrollTopPx,
-                scrollRangePx: PARAM_EDITOR_VERTICAL_SCROLL_RANGE_PX,
-            });
             commitValueViewport(param, { center, span: current.span }, "coalesced");
         },
         // All reads are refs / hoisted functions; a stable identity keeps the
@@ -1384,7 +1370,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             pianoRollViewportBus.emit(scrollLeftRef.current, pxPerSecRef.current, w);
             // ResizeObserver 只在挂载时注册，回调必须读**当前**参数轴（切换参数后
             // 再触发 resize 时，用 mount 时的 editParam 会把旧参数的 valueCenter /
-            // valueSpan 广播到交互视口总线）。同文件 applyEdgeScrollTop 的惯例。
+            // valueSpan 广播到交互视口总线）。同文件 applyValueScrollCenter 的惯例。
             const param = editParamRef.current;
             publishInteractionViewport(param, getCurrentViewportForScrollbar(param));
         });
@@ -2626,7 +2612,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         bumpRefreshToken,
         syncScrollLeft,
         applyEdgeScrollLeft,
-        applyEdgeScrollTop,
+        applyValueScrollCenter,
         invalidate,
         yToViewportT,
         yToValue,

@@ -117,7 +117,8 @@ export type PointerDeps = {
         mode: StrokeMode,
     ) => void;
     applyEdgeScrollLeft: (drawingScrollLeft: number) => void;
-    applyEdgeScrollTop: (scrollTopPx: number) => void;
+    /** 值轴边缘滚动的落点：写入新的值域中心（"coalesced"：不额外重绘）。 */
+    applyValueScrollCenter: (center: number) => void;
     applyMorphOverlayPreview: (overlays: ParamMorphOverlay[]) => void;
     applyPostStrokeSmoothing: (points: StrokePoint[], mode: StrokeMode) => Promise<void>;
     applyVibratoChoice: (choice: VibratoChoice, clientX?: number, clientY?: number) => boolean;

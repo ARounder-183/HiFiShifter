@@ -1,47 +1,50 @@
 /**
- * 参数编辑器内核 · 拖拽边缘自动滚屏驱动（二维）。
+ * 参数编辑器内核 · 拖拽边缘自动滚屏驱动。
  *
- * 指针停在视口左/右/上/下边缘时持续滚动，并在每次真实位移后回调调用方，
- * 让它按滚动后的投影重算笔画 / 选区 / 块预览。几何公式与时间轴共用
- * `shared/edgeAutoScroll` 的轴无关实现；本模块只负责时钟、rAF 与钳制。
+ * 【主要内容】
+ * 1. 时钟：本帧时长按「距**上一帧**」计算，离开触发带即复位；
+ * 2. rAF 循环：指针停在边缘不动也持续滚，离开带 / 到边界 / 松手即停；
+ * 3. 分派：把「指针位置 + 边界 + 帧时长」交给每个轴的 `apply`。
+ *
+ * 【它不做什么】
+ * - 不知道单位（px 还是参数值）—— 那是 `EdgeScrollAxis` 的事；
+ * - 不知道工具、不知道参数块、不写 React state；
+ * - 不自己算速度、带宽、软启动（`edgeScrollAxis` / `valueAxisEdgeScroller` 的事）。
+ *
+ * 【为什么时钟必须「距上一帧」而不是「距上一次 step」】
+ * 旧实现在 `step()` 里推进时钟。指针离开触发带时驱动**不排帧**，于是
+ * `lastStepAtMs` 停在最后一次真正滚动的那一刻；指针重新进带的第一帧会拿到
+ * 「带外空闲时长」（最多 200ms，被 `GESTURE_GAP_RESET_MS` 截断），一次补一大段。
+ * 用户来回蹭边缘时看到的"每蹭一次跳一下"就是它。现在的规则是：
+ * - 时钟只在带内推进；
+ * - 离开带 ⇒ `lastFrameAtMs = null`；
+ * - 复位后的第一帧 `frameMs = 0`（位移恒为 0），第二帧才是真实帧时长。
+ * 代价是每次进带晚一帧起步（约 16ms），换来的是一条**连续**的速度曲线。
+ *
+ * 【为什么帧时长每帧只算一次】
+ * `frameMsFor` 会推进 `lastFrameAtMs`。若每个轴各调一次，第二个轴永远拿到 0
+ * —— 症状是"只有横向会滚、竖向怎么拖都不动"，或反之（取决于轴顺序）。
+ *
+ * 【违反边界的症状】
+ * - 时钟按 step 计：来回蹭边缘时视图一跳一跳；
+ * - 帧时长每轴各算一次：只有一个轴生效；
+ * - 到达边界后仍排帧：松手前 CPU 空转、每帧标脏重绘。
  */
+import type { EdgeScrollBounds } from "../../shared/edgeAutoScroll";
 import {
-    resolveAxisEdgeScrollDeltaPx,
-    type EdgeScrollAxisPolicy,
-    type EdgeScrollBounds,
-} from "../../shared/edgeAutoScroll";
-import { EDGE_SCROLL_MAX_SPEED_PX_PER_SEC } from "./dragArithmetic";
-
-const MIN_STEP_PX = 0.01;
-const GESTURE_GAP_RESET_MS = 200;
-const DEFAULT_FRAME_MS = 1000 / 60;
+    EDGE_SCROLL_MAX_AXIS_FRAME_MS,
+    resolveEdgeScrollRatio,
+    type EdgeScrollAxis,
+} from "./edgeScrollAxis";
 
 export type { EdgeScrollBounds };
 
 export interface EdgeScrollDriverOptions {
     getBounds: () => EdgeScrollBounds | null;
-    getScrollLeft: () => number;
-    setScrollLeft: (next: number) => void;
-    getMaxScrollLeft: () => number;
-    getMinScrollLeft: () => number;
-    /** 竖直轴可选；缺省 = 只做水平滚动（旧调用）。 */
-    getScrollTop?: () => number;
-    setScrollTop?: (next: number) => void;
-    getMaxScrollTop?: () => number;
-    getMinScrollTop?: () => number;
+    /** 本驱动负责的轴。每个轴自带单位、可滚性与手感。 */
+    readonly axes: readonly EdgeScrollAxis[];
     /** 本帧确实滚动了。带指针位置，供调用方按同一位置重算。 */
     onScrolled?: (clientX: number, clientY?: number) => void;
-    maxSpeedPxPerSec?: number;
-    maxSpeedYPxPerSec?: number;
-    /** 水平轴手感策略；缺省 = 时间轴既有 32px / 1.5 / 线性。 */
-    horizontalPolicy?: EdgeScrollAxisPolicy;
-    /** 竖直轴（值轴）手感策略；参数编辑器传 18px / 1.0 / 1.6。 */
-    verticalPolicy?: EdgeScrollAxisPolicy;
-    /**
-     * 动态竖向速度（px/秒）。参数编辑器的值域视口会缩放，速度必须按当前
-     * span 现算；固定值只保留给不需要动态速度的调用方。
-     */
-    getMaxSpeedYPxPerSec?: () => number;
     now?: () => number;
     requestFrame?: (cb: () => void) => number;
     cancelFrame?: (id: number) => void;
@@ -66,39 +69,57 @@ export function createEdgeScrollDriver(options: EdgeScrollDriverOptions): EdgeSc
     const now = options.now ?? (() => performance.now());
     const requestFrame = options.requestFrame ?? ((cb: () => void) => requestAnimationFrame(cb));
     const cancelFrame = options.cancelFrame ?? ((id: number) => cancelAnimationFrame(id));
-    const maxSpeedX = options.maxSpeedPxPerSec ?? EDGE_SCROLL_MAX_SPEED_PX_PER_SEC;
-    const fixedMaxSpeedY = options.maxSpeedYPxPerSec ?? maxSpeedX;
-    const resolveMaxSpeedY = (): number => {
-        const value = options.getMaxSpeedYPxPerSec?.() ?? fixedMaxSpeedY;
-        return Number.isFinite(value) && value > 0 ? value : 0;
-    };
 
     let rafId: number | null = null;
     let lastClientX: number | null = null;
     let lastClientY: number | null = null;
-    let lastStepAtMs: number | null = null;
+    /** 上一帧的时间戳；`null` = 时钟已复位（指针不在带内 / 手势刚开始）。 */
+    let lastFrameAtMs: number | null = null;
+    /** 最近一帧的时长，供 `tick` 判断「复位帧」是否需要继续排帧。 */
+    let lastFrameMs = 0;
     let trackedOnScrolled: ((clientX: number, clientY?: number) => void) | undefined;
 
-    const frameMsFor = (atMs: number): number => {
-        if (lastStepAtMs === null) return DEFAULT_FRAME_MS;
-        const elapsed = atMs - lastStepAtMs;
-        if (!Number.isFinite(elapsed) || elapsed <= 0 || elapsed > GESTURE_GAP_RESET_MS) {
-            return DEFAULT_FRAME_MS;
+    /**
+     * 本帧时长：距**上一帧**，不是距上一次 step。
+     *
+     * 复位后的第一帧返回 0（本帧不滚），让「带外空闲」永远不会被折算成位移。
+     */
+    const frameMsFor = (atMs: number, maxFrameMs: number): number => {
+        if (lastFrameAtMs === null) {
+            lastFrameAtMs = atMs;
+            return 0;
         }
-        return elapsed;
+        const elapsed = atMs - lastFrameAtMs;
+        lastFrameAtMs = atMs;
+        if (!Number.isFinite(elapsed) || elapsed <= 0) return 0;
+        return Math.min(elapsed, maxFrameMs);
     };
 
-    const hasVertical = (): boolean =>
-        options.getScrollTop !== undefined &&
-        options.setScrollTop !== undefined &&
-        options.getMaxScrollTop !== undefined &&
-        options.getMinScrollTop !== undefined;
+    /** 某个轴的指针坐标与边界；竖直轴缺边界时返回 null。 */
+    const axisPointer = (
+        axis: EdgeScrollAxis,
+        clientX: number,
+        clientY: number | null,
+        bounds: EdgeScrollBounds,
+    ): { pointerPx: number; minPx: number; maxPx: number } | null => {
+        if (axis.id === "x") {
+            return { pointerPx: clientX, minPx: bounds.left, maxPx: bounds.right };
+        }
+        if (clientY === null || bounds.top === undefined || bounds.bottom === undefined)
+            return null;
+        return { pointerPx: clientY, minPx: bounds.top, maxPx: bounds.bottom };
+    };
 
-    const horizontalCanScroll = (): boolean =>
-        options.getMaxScrollLeft() > options.getMinScrollLeft();
-
-    const verticalCanScroll = (): boolean =>
-        hasVertical() && options.getMaxScrollTop!() > options.getMinScrollTop!();
+    const axisRatio = (
+        axis: EdgeScrollAxis,
+        clientX: number,
+        clientY: number | null,
+        bounds: EdgeScrollBounds,
+    ): number => {
+        const geometry = axisPointer(axis, clientX, clientY, bounds);
+        if (geometry === null) return 0;
+        return resolveEdgeScrollRatio({ ...geometry, policy: axis.policy });
+    };
 
     const emitScrolled = (
         clientX: number,
@@ -120,96 +141,28 @@ export function createEdgeScrollDriver(options: EdgeScrollDriverOptions): EdgeSc
         if (clientY !== undefined) lastClientY = clientY;
         const bounds = options.getBounds();
         if (!bounds) return false;
-        const atMs = now();
-        const frameMs = frameMsFor(atMs);
-        const deltaX = horizontalCanScroll()
-            ? resolveAxisEdgeScrollDeltaPx({
-                  pointerPx: clientX,
-                  minPx: bounds.left,
-                  maxPx: bounds.right,
-                  frameMs,
-                  maxSpeedPxPerSec: maxSpeedX,
-                  ...options.horizontalPolicy,
-              })
-            : 0;
-        const maxSpeedYNow = resolveMaxSpeedY();
-        const deltaY =
-            verticalCanScroll() &&
-            maxSpeedYNow > 0 &&
-            lastClientY !== null &&
-            bounds.top !== undefined &&
-            bounds.bottom !== undefined
-                ? resolveAxisEdgeScrollDeltaPx({
-                      pointerPx: lastClientY,
-                      minPx: bounds.top,
-                      maxPx: bounds.bottom,
-                      frameMs,
-                      maxSpeedPxPerSec: maxSpeedYNow,
-                      ...options.verticalPolicy,
-                  })
-                : 0;
-        lastStepAtMs = atMs;
+        // ★ 每帧只算一次：frameMsFor 会推进时钟，两个轴各调一次会让第二个轴拿到 0。
+        const frameMs = frameMsFor(now(), EDGE_SCROLL_MAX_AXIS_FRAME_MS);
+        lastFrameMs = frameMs;
         let moved = false;
-        if (Math.abs(deltaX) >= MIN_STEP_PX) {
-            const current = options.getScrollLeft();
-            const max = options.getMaxScrollLeft();
-            const min = options.getMinScrollLeft();
-            if (max > min) {
-                const next = Math.min(max, Math.max(min, current + deltaX));
-                if (Math.abs(next - current) >= MIN_STEP_PX) {
-                    options.setScrollLeft(next);
-                    moved = true;
-                }
-            }
-        }
-        if (Math.abs(deltaY) >= MIN_STEP_PX && hasVertical()) {
-            const current = options.getScrollTop!();
-            const max = options.getMaxScrollTop!();
-            const min = options.getMinScrollTop!();
-            if (max > min) {
-                const next = Math.min(max, Math.max(min, current + deltaY));
-                if (Math.abs(next - current) >= MIN_STEP_PX) {
-                    options.setScrollTop!(next);
-                    moved = true;
-                }
-            }
+        for (const axis of options.axes) {
+            if (!axis.canScroll()) continue;
+            const ratio = axisRatio(axis, clientX, lastClientY, bounds);
+            if (ratio === 0) continue;
+            const axisFrameMs = Math.min(frameMs, axis.maxFrameMs ?? EDGE_SCROLL_MAX_AXIS_FRAME_MS);
+            if (axis.apply(ratio, axisFrameMs)) moved = true;
         }
         if (moved) emitScrolled(clientX, lastClientY, onScrolled);
         return moved;
     };
 
+    /** 指针是否落在**任一可滚轴**的触发带内。 */
     const pointerInBand = (clientX: number, clientY: number | null): boolean => {
         const bounds = options.getBounds();
         if (!bounds) return false;
-        const canScrollX = horizontalCanScroll();
-        const canScrollY = verticalCanScroll();
-        if (!canScrollX && !canScrollY) return false;
-        const horizontal =
-            canScrollX &&
-            resolveAxisEdgeScrollDeltaPx({
-                pointerPx: clientX,
-                minPx: bounds.left,
-                maxPx: bounds.right,
-                frameMs: DEFAULT_FRAME_MS,
-                maxSpeedPxPerSec: maxSpeedX,
-                ...options.horizontalPolicy,
-            }) !== 0;
-        const maxSpeedYNow = resolveMaxSpeedY();
-        const vertical =
-            canScrollY &&
-            maxSpeedYNow > 0 &&
-            clientY !== null &&
-            bounds.top !== undefined &&
-            bounds.bottom !== undefined &&
-            resolveAxisEdgeScrollDeltaPx({
-                pointerPx: clientY,
-                minPx: bounds.top,
-                maxPx: bounds.bottom,
-                frameMs: DEFAULT_FRAME_MS,
-                maxSpeedPxPerSec: maxSpeedYNow,
-                ...options.verticalPolicy,
-            }) !== 0;
-        return horizontal || vertical;
+        return options.axes.some(
+            (axis) => axis.canScroll() && axisRatio(axis, clientX, clientY, bounds) !== 0,
+        );
     };
 
     const tick = () => {
@@ -217,10 +170,13 @@ export function createEdgeScrollDriver(options: EdgeScrollDriverOptions): EdgeSc
         const clientX = lastClientX;
         if (clientX === null) return;
         const moved = step(clientX, lastClientY ?? undefined, trackedOnScrolled);
-        // 指针离开边缘带，或仍在带内但两个轴都已到边界 → 停止排帧。
-        if (moved && pointerInBand(clientX, lastClientY)) {
-            rafId = requestFrame(tick);
+        if (!pointerInBand(clientX, lastClientY)) {
+            // ★ 离开带 ⇒ 复位时钟。否则下一次进带的第一帧会拿到整段带外空闲。
+            lastFrameAtMs = null;
+            return;
         }
+        // 复位帧（frameMs = 0）不会有位移，但必须继续排帧，否则循环在第一帧就停了。
+        if (moved || lastFrameMs === 0) rafId = requestFrame(tick);
     };
 
     const track = (
@@ -231,9 +187,18 @@ export function createEdgeScrollDriver(options: EdgeScrollDriverOptions): EdgeSc
         lastClientX = clientX;
         if (clientY !== undefined) lastClientY = clientY;
         trackedOnScrolled = onScrolled;
-        if (rafId === null && pointerInBand(clientX, lastClientY)) {
-            rafId = requestFrame(tick);
+        if (!pointerInBand(clientX, lastClientY)) {
+            // ★ 离开带 ⇒ 复位时钟并取消挂起帧（与 tick 同一规则，两处都必须做）。
+            // 不取消的话，指针移出边缘后仍会多跑一帧才停 —— 那一帧的 frameMs 是
+            // 真实帧时长，于是"离开边缘的瞬间"会补一段本不该有的位移。
+            lastFrameAtMs = null;
+            if (rafId !== null) {
+                cancelFrame(rafId);
+                rafId = null;
+            }
+            return;
         }
+        if (rafId === null) rafId = requestFrame(tick);
     };
 
     const stop = (): void => {
@@ -243,7 +208,8 @@ export function createEdgeScrollDriver(options: EdgeScrollDriverOptions): EdgeSc
         }
         lastClientX = null;
         lastClientY = null;
-        lastStepAtMs = null;
+        lastFrameAtMs = null;
+        lastFrameMs = 0;
         trackedOnScrolled = undefined;
     };
 

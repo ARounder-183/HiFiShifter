@@ -2,10 +2,12 @@
  * 拖拽边缘自动滚屏 · 几何（纯函数，跨内核共享）
  *
  * 【主要内容】
- * 1. `resolveEdgeScrollDeltaPx()`：指针位置 + 视口边界 + 本帧时长 + 最大速度
- *    → 本帧滚动步长；
- * 2. `edgeScrollMaxLeftPx()`：视口能滚到的最右位置（`scrollLeft` 上界）；
- * 3. 两个与速度无关的常量：边缘带宽、比例上限。
+ * 1. `resolveEdgeScrollRatio()`：指针位置 + 视口边界 → 带内归一化比例。
+ *    这是全仓**唯一**一份边缘几何；单位由消费方自己乘（像素或参数值）；
+ * 2. `resolveAxisEdgeScrollDeltaPx()` / `resolveEdgeScrollDeltaPx()`：
+ *    比例 × 速度 × 帧时长 → 本帧像素步长（时间轴的直接消费口）；
+ * 3. `edgeScrollMaxLeftPx()`：视口能滚到的最右位置（`scrollLeft` 上界）；
+ * 4. 两个与速度无关的常量：边缘带宽、比例上限。
  *
  * 【为什么单独成模块】
  * 时间轴内核（`timeline/kernel/input/dragAutoScroll.ts`）与参数编辑器内核
@@ -48,23 +50,7 @@ export interface EdgeScrollBounds {
 /** 比例上限：指针拖出视口后不再继续加速（否则越拖越快，难以停在想看的位置）。 */
 export const EDGE_SCROLL_MAX_RATIO = 1.5;
 
-/**
- * 单轴边缘滚屏的可选手感策略。
- *
- * 时间轴与参数编辑器共用同一套几何，但值轴需要更窄的触发带、更低的饱和上限
- * 与更柔和的起步曲线。策略只影响「比例 → 本帧步长」这一段，不改变速度入参，
- * 也不改变帧率无关性。
- */
-export interface EdgeScrollAxisPolicy {
-    /** 触发带宽（CSS px）；必须是有限正数。 */
-    readonly bandPx?: number;
-    /** 指针拖出视口后的比例上限；必须是有限非负数。 */
-    readonly maxRatio?: number;
-    /** 比例软启动指数；1 = 线性，>1 = 越靠近带内缘越慢。 */
-    readonly rampExponent?: number;
-}
-
-/** 本帧时长的合法区间（毫秒）。上限的理由见 `resolveEdgeScrollDeltaPx`。 */
+/** 本帧时长的合法区间（毫秒）。上限的理由见 `resolveAxisEdgeScrollDeltaPx`。 */
 const MIN_FRAME_MS = 1;
 const MAX_FRAME_MS = 100;
 
@@ -78,10 +64,77 @@ function clampNumber(value: number, min: number, max: number): number {
 }
 
 /**
- * 把「指针相对视口边缘的位置」解析为**本帧**的滚动步长。
+ * 指针 → 带内比例的几何策略。
+ *
+ * 与 `pianoRoll/kernel/edgeScrollAxis.ts` 的 `EdgeScrollAxisPolicy` 结构兼容
+ * （那边字段是必填，这边是可缺省 + 默认值），这样轴抽象可以直接把策略对象传进来，
+ * 而时间轴的旧调用（只传部分字段）也无需改动。
+ */
+export interface EdgeScrollRatioPolicy {
+    readonly bandPx?: number;
+    readonly maxRatio?: number;
+    readonly rampExponent?: number;
+}
+
+/**
+ * 指针位置 → **带内归一化比例**（`-maxRatio .. maxRatio`）。
+ *
+ * 这是「边缘滚动」里唯一一处几何：带内线性、带外为 0、拖出视口后按 `maxRatio`
+ * 饱和、可选软启动指数。把它单独暴露出来，是因为两个消费方的**单位不同**：
+ * 时间轴 / 水平轴要的是像素步长（再乘速度与帧时长），参数编辑器的值轴要的是
+ * 值域步长。让它们各自乘自己的单位，就不必再把值轴绕进 scrollTop 代理域。
+ *
+ * 【符号约定】正 = 指针靠近「后」侧边界（右 / 下），与 `scrollLeft` 增大、
+ * 「看到更晚的时间 / 更低的值」一致。
+ *
+ * 【退化输入】视口非正（`maxPx <= minPx`）或任一坐标非有限 → 0。
+ */
+export function resolveEdgeScrollRatio(args: {
+    readonly pointerPx: number;
+    readonly minPx: number;
+    readonly maxPx: number;
+    readonly policy: EdgeScrollRatioPolicy;
+}): number {
+    const { pointerPx, minPx, maxPx, policy } = args;
+    if (!Number.isFinite(pointerPx) || !Number.isFinite(minPx) || !Number.isFinite(maxPx)) {
+        return 0;
+    }
+    // 视口宽为 0 / 反向（布局未就绪）：没有可用的边缘语义。
+    if (!(maxPx > minPx)) return 0;
+
+    const bandPx =
+        policy.bandPx !== undefined && Number.isFinite(policy.bandPx) && policy.bandPx > 0
+            ? policy.bandPx
+            : EDGE_SCROLL_BAND_PX;
+    const maxRatio =
+        policy.maxRatio !== undefined && Number.isFinite(policy.maxRatio) && policy.maxRatio >= 0
+            ? policy.maxRatio
+            : EDGE_SCROLL_MAX_RATIO;
+    const rampExponent =
+        policy.rampExponent !== undefined &&
+        Number.isFinite(policy.rampExponent) &&
+        policy.rampExponent > 0
+            ? policy.rampExponent
+            : 1;
+
+    let ratio = 0;
+    if (pointerPx < minPx + bandPx) {
+        ratio = -clampNumber((minPx + bandPx - pointerPx) / bandPx, 0, maxRatio);
+    } else if (pointerPx > maxPx - bandPx) {
+        ratio = clampNumber((pointerPx - (maxPx - bandPx)) / bandPx, 0, maxRatio);
+    }
+    if (ratio === 0) return 0;
+    if (rampExponent !== 1) {
+        ratio = Math.sign(ratio) * Math.pow(Math.abs(ratio), rampExponent);
+    }
+    return ratio;
+}
+
+/**
+ * 把「指针相对视口边缘的位置」解析为**本帧**的滚动步长（CSS px）。
  *
  * 流程：
- * 1. 指针落在左/右边缘带内 → 按"进入带宽的比例"线性加速（上限 1.5）；
+ * 1. 比例交给 `resolveEdgeScrollRatio`（带内线性 / 上限 / 软启动）；
  * 2. 比例 × 最大速度 → 每秒速度；
  * 3. 每秒速度 × 本帧时长（秒）→ 本帧步长。
  *
@@ -98,12 +151,12 @@ function clampNumber(value: number, min: number, max: number): number {
  * 后恢复"这类非真实帧，按真实时长补步会一次性跳过很远的位置；夹到 100ms 相当于
  * 「补一帧、不补一段」。
  *
- * @param args.clientX 指针的视口坐标 X。
- * @param args.leftPx 视口左边界（`getBoundingClientRect().left`）。
- * @param args.rightPx 视口右边界（`getBoundingClientRect().right`）。
+ * @param args.pointerPx 指针的视口坐标（X 或 Y）。
+ * @param args.minPx 视口近端边界（左 / 上）。
+ * @param args.maxPx 视口远端边界（右 / 下）。
  * @param args.frameMs 本帧时长（毫秒）；非法值回退 1/60 秒，上限 100ms。
  * @param args.maxSpeedPxPerSec 该面板的最大滚屏速度（CSS px/秒），见模块头说明。
- * @returns 本帧滚动步长（CSS px，左负右正）；不在边缘带内时为 0。
+ * @returns 本帧滚动步长（CSS px，向"前"为负、向"后"为正）；不在边缘带内时为 0。
  */
 export function resolveAxisEdgeScrollDeltaPx(args: {
     readonly pointerPx: number;
@@ -115,45 +168,23 @@ export function resolveAxisEdgeScrollDeltaPx(args: {
     readonly maxRatio?: number;
     readonly rampExponent?: number;
 }): number {
-    const { pointerPx, minPx, maxPx, maxSpeedPxPerSec } = args;
-    if (!Number.isFinite(pointerPx) || !Number.isFinite(minPx) || !Number.isFinite(maxPx)) {
-        return 0;
-    }
-    if (!Number.isFinite(maxSpeedPxPerSec) || maxSpeedPxPerSec <= 0) return 0;
-    // 视口宽为 0 / 反向（布局未就绪）：没有可用的边缘语义。
-    if (!(maxPx > minPx)) return 0;
-
-    const bandPx =
-        args.bandPx !== undefined && Number.isFinite(args.bandPx) && args.bandPx > 0
-            ? args.bandPx
-            : EDGE_SCROLL_BAND_PX;
-    const maxRatio =
-        args.maxRatio !== undefined && Number.isFinite(args.maxRatio) && args.maxRatio >= 0
-            ? args.maxRatio
-            : EDGE_SCROLL_MAX_RATIO;
-    const rampExponent =
-        args.rampExponent !== undefined &&
-        Number.isFinite(args.rampExponent) &&
-        args.rampExponent > 0
-            ? args.rampExponent
-            : 1;
-
-    let ratio = 0;
-    if (pointerPx < minPx + bandPx) {
-        ratio = -clampNumber((minPx + bandPx - pointerPx) / bandPx, 0, maxRatio);
-    } else if (pointerPx > maxPx - bandPx) {
-        ratio = clampNumber((pointerPx - (maxPx - bandPx)) / bandPx, 0, maxRatio);
-    }
+    if (!Number.isFinite(args.maxSpeedPxPerSec) || args.maxSpeedPxPerSec <= 0) return 0;
+    const ratio = resolveEdgeScrollRatio({
+        pointerPx: args.pointerPx,
+        minPx: args.minPx,
+        maxPx: args.maxPx,
+        policy: {
+            bandPx: args.bandPx,
+            maxRatio: args.maxRatio,
+            rampExponent: args.rampExponent,
+        },
+    });
     if (ratio === 0) return 0;
-    if (rampExponent !== 1) {
-        ratio = Math.sign(ratio) * Math.pow(Math.abs(ratio), rampExponent);
-    }
-
     const frameMs =
         Number.isFinite(args.frameMs) && args.frameMs > 0
             ? clampNumber(args.frameMs, MIN_FRAME_MS, MAX_FRAME_MS)
             : DEFAULT_FRAME_MS;
-    const perSecond = ratio * maxSpeedPxPerSec;
+    const perSecond = ratio * args.maxSpeedPxPerSec;
     return (perSecond * frameMs) / 1000;
 }
 
