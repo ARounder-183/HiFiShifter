@@ -787,53 +787,6 @@ impl EditorSession {
         );
         Ok(view)
     }
-    pub(super) fn restore_game_param_blocks(
-        &self,
-        root: &str,
-        start_frame: u32,
-        end_frame_exclusive: u32,
-        checkpoint: bool,
-    ) -> Result<Value, String> {
-        let (current, timeline) = {
-            let timeline = self.timeline.lock_or_recover().clone();
-            let native = root.strip_prefix(&self.namespace).unwrap_or(root);
-            let current = if let Some(document) = self.document() {
-                document
-                    .edits
-                    .lock_or_recover()
-                    .param_block_edits
-                    .get(native)
-                    .cloned()
-                    .unwrap_or_default()
-            } else {
-                timeline
-                    .params_by_root_track
-                    .get(root)
-                    .map(|params| params.param_block_edits.clone())
-                    .unwrap_or_default()
-            };
-            (current, timeline)
-        };
-        let next = hifishifter_kernel::param_blocks::editing::restore_game_blocks(
-            &timeline,
-            root,
-            &current,
-            start_frame,
-            end_frame_exclusive,
-            timeline.frame_period_ms(),
-        )?;
-        self.set_param_block_edits(
-            root,
-            current.revision,
-            next.blocks,
-            checkpoint,
-            Vec::new(),
-            None,
-            None,
-            None,
-        )
-    }
-
     pub(super) fn restore_game_param_block_ranges(
         &self,
         root: &str,
