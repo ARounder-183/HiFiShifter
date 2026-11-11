@@ -103,6 +103,16 @@ export interface ClipGeometrySource {
 }
 
 let origin: readonly ClipGeometrySnapshot[] | null = null;
+let ownerToken: symbol | null = null;
+/**
+ * 手势起点的**完整** clip 列表（原样留存）。
+ *
+ * 【为什么还要留一份原样的】上面的快照只保留"决定素材落在哪一刻"的字段，够响度
+ * 映射用；参数块合成还要 `takes` / `syllableSpansSec` / `midiNoteData`。手势期间
+ * 块层必须钉在同一份"按下之前"的几何上（否则块跟着乐观更新的 clip 走、参数线不动，
+ * 块就从曲线上滑走了）。同一个发布点、同一份时序保证，两个消费方共用。
+ */
+let originClips: readonly ClipGeometrySource[] | null = null;
 const listeners = new Set<() => void>();
 
 function notify(): void {
@@ -122,7 +132,10 @@ function notify(): void {
  * 差分就退化成恒等，映射也就失去意义。调用点（`beginKernelGestureInteraction`）
  * 已满足这一时序：它在首个真实位移帧、且在任何预览派发之前执行。
  */
-export function beginClipGeometryPreview(clips: readonly ClipGeometrySource[]): void {
+export function beginClipGeometryPreview(clips: readonly ClipGeometrySource[]): symbol {
+    const token = Symbol("clip-geometry-preview");
+    ownerToken = token;
+    originClips = clips;
     origin = clips.map((clip) => ({
         clipId: clip.id,
         startSec: Number(clip.startSec) || 0,
@@ -145,6 +158,7 @@ export function beginClipGeometryPreview(clips: readonly ClipGeometrySource[]): 
         midiNoteData: clip.midiNoteData ?? null,
     }));
     notify();
+    return token;
 }
 
 /**
@@ -156,15 +170,29 @@ export function beginClipGeometryPreview(clips: readonly ClipGeometrySource[]): 
  * 撤下的判据是**后端返回的基线所依据的几何变了**（`LoudnessSnapshot.baselineKey`），
  * 与快照落地落在同一次渲染里；本函数只负责宣告手势已经结束。
  */
-export function endClipGeometryPreview(): void {
+export function endClipGeometryPreview(token?: symbol): void {
+    if (token !== undefined && ownerToken !== token) return;
     if (origin === null) return;
+    ownerToken = null;
     origin = null;
+    originClips = null;
     notify();
 }
 
 /** 当前手势的几何快照；`null` = 没有进行中的几何手势。 */
 export function getClipGeometryPreviewOrigin(): readonly ClipGeometrySnapshot[] | null {
     return origin;
+}
+
+/**
+ * 当前手势起点的**完整** clip 列表；`null` = 没有进行中的几何手势。
+ *
+ * 类型参数由调用方按"发布时传进来的那个类型"取回（发布方传的就是 `ClipInfo[]`），
+ * 因此这里的收窄是安全的 —— 它与 {@link getClipGeometryPreviewOrigin} 是同一份
+ * 列表的两种视图，不会各存一份状态。
+ */
+export function getClipGeometryPreviewClips<T extends ClipGeometrySource>(): readonly T[] | null {
+    return (originClips as readonly T[] | null) ?? null;
 }
 
 /**

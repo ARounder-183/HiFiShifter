@@ -478,6 +478,9 @@ pub struct UiSettings {
     /// 新建参数块时是否同步归一化该段音高（默认关闭）。
     #[serde(default)]
     pub param_block_follow_pitch: bool,
+    /// 参数块图层可见性（本地记忆，默认关闭）。
+    #[serde(default)]
+    pub param_blocks_visible: bool,
     #[serde(default)]
     pub playhead_zoom: bool,
     #[serde(default)]
@@ -579,6 +582,12 @@ pub struct UiSettings {
     /// 与拖动方向同属"本地记忆"，因此不需要配置迁移。
     #[serde(default)]
     pub param_editor_tool: Option<String>,
+    /// 参数编辑器选择族子模式：`range` / `block`。`None` = range。
+    ///
+    /// block 不是独立工具族，而是选择工具的对象级子模式；旧配置没有这一项时
+    /// 前端按 range 回落，不需要迁移。
+    #[serde(default)]
+    pub param_editor_selection_mode: Option<String>,
     #[serde(default, alias = "edgeSmoothnessPercent")]
     pub smoothness_percent: u32,
     #[serde(default = "default_scale_highlight_mode")]
@@ -1713,6 +1722,7 @@ impl Default for UiSettings {
             pitch_snap_tolerance_cents: 0,
             pitch_snap_scale: default_pitch_snap_scale(),
             param_block_follow_pitch: false,
+            param_blocks_visible: false,
             playhead_zoom: false,
             auto_scroll: false,
             param_editor_seek_playhead: true,
@@ -1740,6 +1750,7 @@ impl Default for UiSettings {
             draw_drag_direction: default_draw_drag_direction(),
             line_vibrato_drag_direction: default_draw_drag_direction(),
             param_editor_tool: None,
+            param_editor_selection_mode: None,
             smoothness_percent: 0,
             scale_highlight_mode: default_scale_highlight_mode(),
             custom_scale_presets: Vec::new(),

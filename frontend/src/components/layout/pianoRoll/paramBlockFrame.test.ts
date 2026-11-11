@@ -169,6 +169,42 @@ describe("param block visual frame", () => {
         ).toBe(value);
     });
 
+    it("keeps a persisted manual value for non-pitch user blocks", () => {
+        const userBlock: ParamBlock = {
+            id: "volume-block",
+            rootTrackId: "track",
+            kind: "user",
+            startSec: 0,
+            endSec: 0.02,
+            members: [],
+            averageValue: 0.3,
+            manualValue: 0.8,
+        };
+        const volumeView = {
+            ...authoritative,
+            key: "v2|track|volume|0|4|1",
+            edit: [0.3, 0.3, 0.3, 0.3],
+        };
+        const volume = resolveParamBlockPanelValues({
+            blocks: [userBlock],
+            param: "volume",
+            paramView: volumeView,
+            fallbackValue: 0,
+        })[0];
+        expect(volume.averageValue).toBe(0.8);
+        expect(volume.manualValue).toBe(0.8);
+
+        const autoBlock: ParamBlock = { ...userBlock, kind: "auto" };
+        expect(
+            resolveParamBlockPanelValues({
+                blocks: [autoBlock],
+                param: "volume",
+                paramView: volumeView,
+                fallbackValue: 0,
+            })[0].averageValue,
+        ).toBe(0.3);
+    });
+
     it("derives each parameter from its own curve while preserving the pitch placement", () => {
         const block: ParamBlock = {
             id: "note",
@@ -215,7 +251,34 @@ describe("param block visual frame", () => {
                 paramView: null,
                 fallbackValue: 1,
             })[0].averageValue,
+        ).toBeNull();
+        expect(
+            resolveParamBlockPanelValues({
+                blocks: [block],
+                param: "volume",
+                paramView: null,
+                fallbackValue: 1,
+                allowFallback: true,
+            })[0].averageValue,
         ).toBe(1);
+        expect(
+            resolveParamBlockPanelValues({
+                blocks: [block],
+                param: "volume",
+                paramView: null,
+                fallbackValue: 1,
+                previousValues: new Map([["note", { value: 0.75, startSec: 0, endSec: 0.02 }]]),
+            })[0].averageValue,
+        ).toBe(0.75);
+        expect(
+            resolveParamBlockPanelValues({
+                blocks: [block],
+                param: "volume",
+                paramView: null,
+                fallbackValue: 1,
+                previousValues: new Map([["note", { value: 0.75, startSec: 0.1, endSec: 0.12 }]]),
+            })[0].averageValue,
+        ).toBeNull();
     });
 });
 
@@ -247,4 +310,26 @@ it("does not project a previous parameter or root's preview into the new editor"
             param: "pitch",
         }),
     ).toBe(other);
+});
+
+it("locked centerPolicy never falls back to curve sampling", () => {
+    expect(
+        resolveParamBlockFrameValue({
+            block: {
+                startSec: 0,
+                endSec: 0.02,
+                averageValue: 58,
+                displayCenterValue: 61,
+                centerPolicy: "locked",
+            },
+            samples: {
+                values: [64, 64, 64, 64],
+                startFrame: 0,
+                stride: 1,
+                framePeriodMs: 5,
+                isPitch: true,
+                param: "pitch",
+            },
+        }),
+    ).toBe(61);
 });

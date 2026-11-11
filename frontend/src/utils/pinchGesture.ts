@@ -28,6 +28,14 @@ export const PINCH_UNITS_PER_NOTCH = 100;
 export const PINCH_FACTOR_PER_NOTCH = 1.1;
 
 /**
+ * `deltaMode = DOM_DELTA_LINE` 时一行的 CSS 像素数。
+ *
+ * 【为什么放在 utils】捏合识别、`normalizeWheel.ts` 与内核 wheel 监听都要用
+ * 同一个行高做单位换算；此前各写一份字面量 16，改一处就会让三处手感分叉。
+ */
+export const WHEEL_LINE_HEIGHT_PX = 16;
+
+/**
  * 两次捏合事件间隔超过这个时长即视为**新手势**（重新计比例）。
  *
  * 【为什么需要】捏合是"连续的若干个小事件"，而结束没有专门的信号 ——
@@ -44,10 +52,10 @@ export function pinchDeltaFromWheel(event: {
 }): number | null {
     if (!event.ctrlKey && !event.metaKey) return null;
     if (!Number.isFinite(event.deltaY) || event.deltaY === 0) return null;
-    // deltaMode: 0 = 像素，1 = 行，2 = 页。后两者按行高 16px / 页 400px 折算，
-    // 与 `normalizeWheel` 的既有约定一致（宁可粗一点，也不要漏掉整段手势）。
+    // deltaMode: 0 = 像素，1 = 行，2 = 页。后两者按 WHEEL_LINE_HEIGHT_PX /
+    // 页 400px 折算，与 `normalizeWheel` 的行高约定共用同一份常量。
     const mode = event.deltaMode ?? 0;
-    const scale = mode === 1 ? 16 : mode === 2 ? 400 : 1;
+    const scale = mode === 1 ? WHEEL_LINE_HEIGHT_PX : mode === 2 ? 400 : 1;
     const pixels = event.deltaY * scale;
     // 捏合张开（放大）时 deltaY 为负 → 取负号使"正 = 放大"，与直觉一致。
     return -pixels;

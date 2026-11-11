@@ -242,6 +242,7 @@
     --qt-snap-cursor: #f05a5a;
     --qt-snap-sample: #94a3b8;
     --qt-snap-loop: #22c55e;
+    --qt-snap-origin: #fb7185;
 }
 
 .qt-theme.light,
@@ -308,6 +309,7 @@
     --qt-snap-cursor: #de4f5d;
     --qt-snap-sample: #64748b;
     --qt-snap-loop: #16a34a;
+    --qt-snap-origin: #be123c;
 }
 
 /*
@@ -1493,10 +1495,6 @@ textarea {
     padding-inline: 5px;
     font-size: var(--font-size-1);
     line-height: 16px;
-}
-.param-pill__seg--block-icon {
-    min-width: 24px;
-    padding-inline: 3px;
 }
 .param-pill__seg--chev {
     min-width: 20px;

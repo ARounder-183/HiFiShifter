@@ -10,6 +10,7 @@ import type {
     EditParam,
     GridSize,
     PitchSnapUnit,
+    SelectToolMode,
     SplitTransitionCurveType,
     TimelineSnapSettings,
     TimeUnit,
@@ -17,7 +18,6 @@ import type {
     SilenceDetectSettings,
     TrackMeterInfo,
     ToolMode,
-    ToolModeGroup,
     TrackInfo,
 } from "../sessionTypes";
 import type { SearchSettings } from "../../search/searchSettings";
@@ -42,7 +42,7 @@ export type {
     EditParam,
     GridSize,
     ToolMode,
-    ToolModeGroup,
+    SelectToolMode,
     TrackInfo,
 };
 
@@ -66,7 +66,8 @@ export type ParamSelectionSnapshot = Array<{ startFrame: number; frameCount: num
 
 export interface SessionState {
     toolMode: ToolMode;
-    toolModeGroup: ToolModeGroup;
+    /** 选择族的当前 / 上次子模式；block 只在选择族激活时参与派生。 */
+    selectToolMode: SelectToolMode;
     drawToolMode: DrawToolMode;
     editParam: EditParam;
     bpm: number;
@@ -115,6 +116,15 @@ export interface SessionState {
     pitchSnapScale: import("../../../utils/musicalScales").ScaleKey;
     /** 新建块后把音高按原曲线形状归一化到音阶。 */
     paramBlockFollowPitch: boolean;
+    /**
+     * 参数块图层是否**始终**显示（功能设置，随 UiSettings 落盘，默认关）。
+     *
+     * 【为什么不是「当前是否可见」】可见性是 alwaysShowParamBlocks 与
+     * isBlockSelectionActive(...) 的派生结果。把它存成状态就会出现三个写入者
+     * （用户 / 进块模式 / 水合），并且必须靠「关图层就收回 range」来维持自洽 ——
+     * 一个视图开关反向改工具状态。见 isParamBlockLayerVisible。
+     */
+    alwaysShowParamBlocks: boolean;
     /** 音阶高亮模式：始终 / 关闭 */
     scaleHighlightMode: "always" | "off";
     /** 播放头缩放 */

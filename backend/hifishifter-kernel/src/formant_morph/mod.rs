@@ -230,11 +230,14 @@ pub fn apply_formant_morph_mono(
             / sample_rate as f32)
             .min(analysis_dur_sec);
         let af_f = (t_sec / ANALYSIS_HOP_SEC).clamp(0.0, tracks_max);
-        // 不变式：candidates 与 frame_coeffs 严格同步 push，非空一起非空。
-        // 上方 "af 恒为 0" 的历史修复就在这个易漂移区（见本函数注释），显式钉住。
+        // 不变式：candidates / frame_coeffs / frame_poles 严格同步 push，非空一起非空。
+        // 上方 "af 恒为 0" 的历史修复就在这个易漂移区（见本函数注释），显式钉住
+        // **三者等长**；release 下的防护不依赖 debug_assert，见下面的 `.get()`。
         debug_assert!(
-            !frame_coeffs.is_empty(),
-            "frame_coeffs must track candidates and never be empty here"
+            !frame_coeffs.is_empty()
+                && frame_coeffs.len() == candidates.len()
+                && frame_poles.len() == candidates.len(),
+            "frame_coeffs/frame_poles must track candidates and stay equal in length"
         );
         let af = (af_f.round() as usize).min(frame_coeffs.len().saturating_sub(1));
 
@@ -245,15 +248,21 @@ pub fn apply_formant_morph_mono(
             hop_sec,
         );
 
-        let can_process =
-            gate_val > STRENGTH_EPS && candidates[af].is_some() && !frame_coeffs[af].is_empty();
+        // 【为什么用 .get 而不是 [af]】不变式一旦漂移，release 构建里的索引会
+        // panic（本函数跑在渲染线程）。取不到就落回"原样 OLA"分支，与 gate 关闭
+        // 同一条退化路径 —— 行为收敛，绝不崩。
+        let frame_data = candidates
+            .get(af)
+            .and_then(|cand| cand.as_ref())
+            .zip(frame_coeffs.get(af))
+            .zip(frame_poles.get(af))
+            .map(|((cand, coeffs), poles)| (cand, coeffs, poles))
+            .filter(|(_, coeffs, _)| !coeffs.is_empty() && gate_val > STRENGTH_EPS);
 
-        if can_process {
+        if let Some((cand, coeffs, poles)) = frame_data {
             fft_forward.process(&mut frame_buf);
 
             // 目标极点：仅迁移 F1/F2（按平滑轨迹插值 + strength），其余极点不动
-            let cand = candidates[af].unwrap();
-            let poles = &frame_poles[af];
             let mut moved_pairs = poles.pairs.clone();
             for p in moved_pairs.iter_mut() {
                 if (p.freq_hz - cand.f1.freq_hz).abs() < 1.0 {
@@ -272,7 +281,7 @@ pub fn apply_formant_morph_mono(
 
             // H(k) = |A_orig / A_target|（限幅 + 模型奈奎斯特外衰减）
             let h_db = correction::h_ratio_db(
-                &frame_coeffs[af],
+                coeffs,
                 &coeffs_target,
                 fft_size,
                 sample_rate as f32,

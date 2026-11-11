@@ -2043,7 +2043,7 @@ dependencies = [
 
 [[package]]
 name = "hifishifter-clipboard"
-version = "0.1.0"
+version = "0.2.0-beta"
 dependencies = [
  "base64 0.23.1",
  "clipboard-win",
@@ -2057,7 +2057,7 @@ dependencies = [
 
 [[package]]
 name = "hifishifter-host-link"
-version = "0.1.0"
+version = "0.2.0-beta"
 dependencies = [
  "blake3",
  "hound",
@@ -2068,7 +2068,7 @@ dependencies = [
 
 [[package]]
 name = "hifishifter-kernel"
-version = "0.1.0"
+version = "0.2.0-beta"
 dependencies = [
  "aberth",
  "arc-swap",

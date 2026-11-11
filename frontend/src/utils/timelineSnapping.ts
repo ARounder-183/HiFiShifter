@@ -52,6 +52,11 @@ export interface TimelineSnapContext {
     object: SnapObjectKind;
     /** 拖动起点（用于 snapRelativeToGrid 与 selection 倍数）。 */
     originSec?: number;
+    /**
+     * 是否把播放光标作为候选。参数块点击分割传 false：分割点不是播放头，
+     * 吸到播放头会画出一条与操作无关的竖线。
+     */
+    includePlayhead?: boolean;
     /** 拖动锚点所在轨道。 */
     anchorTrackId?: string | null;
     /** 从候选集中排除的 clip id（通常是正在移动的 clip 自身）。 */
@@ -622,7 +627,7 @@ export function snapTimelinePosition(
             includeSelection: ctx.object !== "selection",
             excludeSelected: ctx.object === "selection",
         });
-        if (ctx.object !== "cursor") {
+        if (ctx.object !== "cursor" && ctx.includePlayhead !== false) {
             candidates.push({ sec: clampSec(ctx.playheadSec), kind: "cursor", priority: 5 });
         }
     }

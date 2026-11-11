@@ -23,6 +23,7 @@
 import { useCallback, useEffect } from "react";
 import type { RootState } from "../../../../app/store";
 import { readDevicePixelRatio } from "../../../../utils/devicePixelLine";
+import { pianoRollInteractionViewportBus } from "../pianoRollInteractionViewportBus";
 import {
     timelineViewportNativeToState,
     timelineViewportStateToNative,
@@ -151,51 +152,82 @@ export function usePianoRollScrollKernel({
 }: PianoRollScrollKernelInputs) {
     // 以 useCallback 稳定引用（依赖仅含 ref 与模块级工具）：供 syncScrollLeft 等
     // 需要长期持有本函数的路径使用，避免随渲染重建引发上游回调引用抖动。
-    const applyScrollLayers = useCallback(function applyScrollLayers(next: number) {
-        if (rulerContentRef.current) {
-            // 平移量吸附到设备像素（见 `rulerLayerTranslatePx`）：与内核同一约定，
-            // 否则层内标尺竖线在系统缩放率 > 1 时粗细不一。
-            rulerContentRef.current.style.transform = `translateX(${-rulerLayerTranslatePx(next, readDevicePixelRatio())}px)`;
-        }
-
-        if (gridLayerRef.current) {
-            invokeGridRedrawHandler(gridLayerRef.current, next);
-        }
-
-        // 同步绘制：滚动事件在绘制前触发，画布必须与标尺/网格（上方已同步
-        // 落地）在同一帧内提交，否则滚动中会出现画布与网格的分层漂移。
-        drawRef.current();
-        // 波形面走同一条同步链：不能在 React state（rAF）提交后再画。
-        //
-        // 缩放一并取内核真值（与 `drawRef` 同一理由，见 `resolvePanelRenderViewport`）：
-        // 渲染期 ref 可能提前于内核变化，波形与其余图层就会差一个缩放。
-        const emitPxPerSec = resolvePanelRenderViewport({
-            kernelView: hostRef.current?.getViewport() ?? null,
-            refPxPerSec: pxPerSecRef.current,
-            refScrollLeftPx: scrollLeftRef.current,
-        }).pxPerSec;
-        pianoRollViewportBus.emit(next, emitPxPerSec, viewSizeRef.current.w);
-        // 标尺播放头线：**宿主模式下由内核写**（同一次帧提交、同一份内核视口，
-        // 与 GL 主体播放头逐设备像素一致）。这里只在无宿主时兜底 —— 两个写者写同一
-        // 个 `style.left` 是"最后一次写入者获胜"，一旦口径不同就会分离。
-        if (hostRef.current === null) {
-            const playheadLeftPx = playheadLineLeftPx(
-                createTimelineAxis({
-                    pxPerSec: emitPxPerSec,
-                    scrollLeftPx: next,
-                    viewportWidthPx: viewSizeRef.current.w,
-                    dpr: readDevicePixelRatio(),
-                }),
-                visualPlayheadSecRef.current,
-            );
-            if (rulerPlayheadLineRef.current) {
-                rulerPlayheadLineRef.current.style.left = `${playheadLeftPx}px`;
+    const applyScrollLayers = useCallback(
+        function applyScrollLayers(next: number) {
+            // 设备像素比一帧只读一次：它会在标尺平移与交互视口两处用到，重复读取
+            // 等于把同一个全局查询跑两遍（并且两处若读到不同值，标尺与画布会错半像素）。
+            const dpr = readDevicePixelRatio();
+            if (rulerContentRef.current) {
+                // 平移量吸附到设备像素（见 `rulerLayerTranslatePx`）：与内核同一约定，
+                // 否则层内标尺竖线在系统缩放率 > 1 时粗细不一。
+                rulerContentRef.current.style.transform = `translateX(${-rulerLayerTranslatePx(next, dpr)}px)`;
             }
-            if (rulerPlayheadHeadRef.current) {
-                rulerPlayheadHeadRef.current.style.left = `${playheadLeftPx}px`;
+
+            if (gridLayerRef.current) {
+                invokeGridRedrawHandler(gridLayerRef.current, next);
             }
-        }
-    }, []);
+
+            // 同步绘制：滚动事件在绘制前触发，画布必须与标尺/网格（上方已同步
+            // 落地）在同一帧内提交，否则滚动中会出现画布与网格的分层漂移。
+            drawRef.current();
+            // 波形面走同一条同步链：不能在 React state（rAF）提交后再画。
+            //
+            // 缩放一并取内核真值（与 `drawRef` 同一理由，见 `resolvePanelRenderViewport`）：
+            // 渲染期 ref 可能提前于内核变化，波形与其余图层就会差一个缩放。
+            const emitPxPerSec = resolvePanelRenderViewport({
+                kernelView: hostRef.current?.getViewport() ?? null,
+                refPxPerSec: pxPerSecRef.current,
+                refScrollLeftPx: scrollLeftRef.current,
+            }).pxPerSec;
+            pianoRollViewportBus.emit(next, emitPxPerSec, viewSizeRef.current.w);
+            const param = editParamRef.current;
+            const view = getCurrentViewportForScrollbar(param);
+            pianoRollInteractionViewportBus.publish({
+                scrollLeftPx: next,
+                pxPerSec: emitPxPerSec,
+                viewportWidthPx: viewSizeRef.current.w,
+                viewportHeightPx: viewSizeRef.current.h,
+                param,
+                valueCenter: view.center,
+                valueSpan: view.span,
+                dpr,
+            });
+            // 标尺播放头线：**宿主模式下由内核写**（同一次帧提交、同一份内核视口，
+            // 与 GL 主体播放头逐设备像素一致）。这里只在无宿主时兜底 —— 两个写者写同一
+            // 个 `style.left` 是"最后一次写入者获胜"，一旦口径不同就会分离。
+            if (hostRef.current === null) {
+                const playheadLeftPx = playheadLineLeftPx(
+                    createTimelineAxis({
+                        pxPerSec: emitPxPerSec,
+                        scrollLeftPx: next,
+                        viewportWidthPx: viewSizeRef.current.w,
+                        dpr,
+                    }),
+                    visualPlayheadSecRef.current,
+                );
+                if (rulerPlayheadLineRef.current) {
+                    rulerPlayheadLineRef.current.style.left = `${playheadLeftPx}px`;
+                }
+                if (rulerPlayheadHeadRef.current) {
+                    rulerPlayheadHeadRef.current.style.left = `${playheadLeftPx}px`;
+                }
+            }
+        },
+        [
+            drawRef,
+            editParamRef,
+            getCurrentViewportForScrollbar,
+            gridLayerRef,
+            hostRef,
+            pxPerSecRef,
+            rulerContentRef,
+            rulerPlayheadHeadRef,
+            rulerPlayheadLineRef,
+            scrollLeftRef,
+            viewSizeRef,
+            visualPlayheadSecRef,
+        ],
+    );
 
     /**
      * 把「绘制坐标」的水平位置提交到当前滚动载体。
@@ -219,21 +251,28 @@ export function usePianoRollScrollKernel({
      * 挂在拖拽的 rAF 循环上，每帧重建回调会连带重建整条调用链）。
      * 函数体只读 ref，依赖为空数组即可，身份因此恒定。
      */
-    const applyHorizontalScrollPosition = useCallback(function applyHorizontalScrollPosition(
-        drawingScrollLeft: number,
-    ): void {
-        const host = hostRef.current;
-        if (host) {
-            host.setScrollLeft(drawingScrollLeft);
-            return;
-        }
-        const scroller = scrollerRef.current;
-        if (!scroller) return;
-        const offset = paramEditorSyncTimelineRef.current ? timelineOffsetRef.current : 0;
-        const native = timelineViewportStateToNative(drawingScrollLeft, offset);
-        scroller.scrollLeft = native;
-        lastMirroredScrollLeftRef.current = native;
-    }, []);
+    const applyHorizontalScrollPosition = useCallback(
+        function applyHorizontalScrollPosition(drawingScrollLeft: number): void {
+            const host = hostRef.current;
+            if (host) {
+                host.setScrollLeft(drawingScrollLeft);
+                return;
+            }
+            const scroller = scrollerRef.current;
+            if (!scroller) return;
+            const offset = paramEditorSyncTimelineRef.current ? timelineOffsetRef.current : 0;
+            const native = timelineViewportStateToNative(drawingScrollLeft, offset);
+            scroller.scrollLeft = native;
+            lastMirroredScrollLeftRef.current = native;
+        },
+        [
+            hostRef,
+            lastMirroredScrollLeftRef,
+            paramEditorSyncTimelineRef,
+            scrollerRef,
+            timelineOffsetRef,
+        ],
+    );
 
     /**
      * **拖拽边缘自动滚屏**的落点：写内核 + 推共享视口，**不自己重绘**。
@@ -277,7 +316,17 @@ export function usePianoRollScrollKernel({
                 );
             }
         },
-        [applyHorizontalScrollPosition, applyScrollLayers],
+        [
+            applyHorizontalScrollPosition,
+            applyScrollLayers,
+            hostRef,
+            lastScrollLeftRef,
+            paramEditorSyncTimelineRef,
+            pxPerSecRef,
+            scrollLeftRef,
+            timelineOffsetRef,
+            timelineSyncApplyingRef,
+        ],
     );
 
     /**
@@ -352,7 +401,18 @@ export function usePianoRollScrollKernel({
                 });
             }
         },
-        [applyScrollLayers, s.paramEditorSyncTimeline, setScrollLeft],
+        [
+            applyScrollLayers,
+            s.paramEditorSyncTimeline,
+            setScrollLeft,
+            hostRef,
+            lastScrollLeftRef,
+            pxPerSecRef,
+            scrollLeftRef,
+            scrollStateRafRef,
+            timelineOffsetRef,
+            timelineSyncApplyingRef,
+        ],
     );
 
     // ── 内核宿主：创建 / 销毁 ────────────────────────────────────────

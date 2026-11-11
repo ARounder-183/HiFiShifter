@@ -6,7 +6,8 @@ import type {
     UIEvent,
 } from "react";
 import { useCallback, useEffect, useRef } from "react";
-import { pianoRollViewportBus } from "./pianoRollViewportBus";
+import { pianoRollInteractionViewportBus } from "./pianoRollInteractionViewportBus";
+import { beginParamSelectionMorph } from "./gestures/selection/paramSelectionMorph";
 import {
     resolveViewportReplay,
     warnViewportReplayButtonsLost,
@@ -15,11 +16,8 @@ import {
 import type { ParamFramesPayload } from "../../../types/api";
 import type { AppDispatch } from "../../../app/store";
 import { paramsApi } from "../../../services/api";
-import {
-    persistUiSettings,
-    setActiveVibratoPreset,
-    setToolModePersistent,
-} from "../../../features/session/sessionSlice";
+import { persistUiSettings, setActiveVibratoPreset } from "../../../features/session/sessionSlice";
+import { setToolModePersistent } from "../../../features/session/thunks/toolModeThunks";
 import { clamp } from "../timeline";
 import type { LiveEditOverride } from "./useLiveParamEditing";
 import type { DrawToolMode } from "../../../features/session/sessionTypes";
@@ -75,6 +73,7 @@ import {
     planSelectionEditWindows,
     type MultiRangeEditPiece,
 } from "./selectionEditData";
+import type { ParamCurveCommitAuthority } from "./paramBlockCommitPolicy";
 import {
     frameRangeEndCut,
     frameRangeStartCut,
@@ -123,6 +122,16 @@ export function usePianoRollInteractions(args: {
     editParam: ParamName;
     pitchEnabled: boolean;
     toolMode: string;
+    /** 参数块选择是否激活；由 panel 的 toolMode + selectToolMode 派生。 */
+    paramBlockToolActive: boolean;
+    /**
+     * 选择族的 **range** 子模式是否激活（`isRangeToolActive` 的派生结果）。
+     *
+     * 【为什么单独传一个布尔】四点编辑控件、可拖选区光标、选区边缘拉伸提示**只属于**
+     * range 子模式；它们此前共用 `toolMode === "select"`，而 block 也满足它，于是块
+     * 模式里按住 Alt 会弹出四点编辑控件（Alt 在块模式里是「新建块 / 在点击处分割」）。
+     */
+    rangeToolActive: boolean;
     /** 每帧时长（毫秒）。选区的单位是**帧**（见 `paramSelection.ts`），因此本 hook
      *  只需要帧周期，不再需要每拍秒数 —— 选区的所有换算都与 BPM 无关。 */
     framePeriodMs: number;
@@ -199,10 +208,10 @@ export function usePianoRollInteractions(args: {
     paramViewRef: MutableRefObject<ParamViewSegment | null>;
 
     /**
-     * 块编辑命中回调（mock）。
+     * 参数块选择命中回调。
      *
-     * 返回 true 表示这次按下已被块工具消费，不再进入参数线绘制 / 选择手势。
-     * 缺省不传 = 块工具未启用，既有交互完全不变。
+     * 返回 true 表示这次按下已被参数块选择模式消费，不再进入参数线绘制 / 选择手势。
+     * 缺省不传 = 参数块选择模式未启用，既有交互完全不变。
      */
     onParamBlockPointerDown: (args: {
         readonly sec: number;
@@ -211,7 +220,13 @@ export function usePianoRollInteractions(args: {
         readonly clientX: number;
         readonly add: boolean;
         readonly toggle: boolean;
+        readonly multiSelect: boolean;
+        readonly rangeSelect: boolean;
+        readonly pointerFrame?: (clientX: number) => number;
+        readonly clampSelectionFrame?: (frame: number) => number;
+        readonly edgeScroll?: import("./kernel/edgeScrollDriver").EdgeScrollDriver;
         readonly pointerType: string;
+        readonly nativeEvent: globalThis.PointerEvent;
         readonly pointerId: number;
         readonly captureTarget: HTMLCanvasElement;
         readonly setActivePointerGestureEnd: (endGesture: () => void) => void;
@@ -232,7 +247,11 @@ export function usePianoRollInteractions(args: {
         readonly editParam: string;
         readonly gridStep: number;
         readonly contextMenu: boolean;
-    }) => boolean;
+        readonly altKey?: boolean;
+        readonly shiftKey?: boolean;
+        readonly ctrlKey?: boolean;
+        readonly metaKey?: boolean;
+    }) => import("./gestures/pointerDeps").ParamBlockPointerDownResult;
 
     bumpRefreshToken: () => void;
     syncScrollLeft: (scroller: HTMLDivElement) => void;
@@ -244,12 +263,16 @@ export function usePianoRollInteractions(args: {
      * 提交。见 `PianoRollPanel` 里 `applyEdgeScrollLeft` 的说明。
      */
     applyEdgeScrollLeft: (drawingScrollLeft: number) => void;
+    /** Edge auto-scroll on the value axis; writes the value-viewport centre only. */
+    applyValueScrollCenter: (center: number) => void;
     invalidate: () => void;
 
     yToViewportT: (y: number, h: number) => number;
     yToValue: (param: ParamName, y: number, h: number) => number;
     valueToY: (param: ParamName, v: number, h: number) => number;
     clampViewport: (param: ParamName, v: ValueViewport) => ValueViewport;
+    getCurrentViewportForScrollbar: (param: ParamName) => ValueViewport;
+    getParamValueBoundsForScrollbar: (param: ParamName) => { min: number; max: number };
 
     ensureLiveEditBase: (pv: ParamViewSegment) => void;
     applyDenseToLiveEdit: (
@@ -312,6 +335,8 @@ export function usePianoRollInteractions(args: {
     paramMorphKb: Keybinding;
     /** modifier.paramMultiSelect 绑定（按住拖动追加选区段 / 点击取消该段） */
     paramMultiSelectKb: Keybinding;
+    /** modifier.paramRangeSelect 绑定（Shift 点击块范围选择） */
+    paramRangeSelectKb: Keybinding;
     /** modifier.paramFineAdjust 绑定 */
     paramFineAdjustKb: Keybinding;
     /** `modifier.paramStretch` 绑定（选择工具下参数选区边缘拉伸） */
@@ -433,6 +458,8 @@ export function usePianoRollInteractions(args: {
         editParam,
         pitchEnabled,
         toolMode,
+        paramBlockToolActive,
+        rangeToolActive,
         framePeriodMs,
         scrollLeftRef,
         pxPerSecRef,
@@ -460,11 +487,14 @@ export function usePianoRollInteractions(args: {
         bumpRefreshToken,
         syncScrollLeft,
         applyEdgeScrollLeft,
+        applyValueScrollCenter,
         invalidate,
         yToViewportT,
         yToValue,
         valueToY,
         clampViewport,
+        getCurrentViewportForScrollbar,
+        getParamValueBoundsForScrollbar,
         ensureLiveEditBase,
         applyDenseToLiveEdit,
         onParamCommitSucceeded,
@@ -486,6 +516,7 @@ export function usePianoRollInteractions(args: {
         scrollbarZoomKb,
         paramMorphKb,
         paramMultiSelectKb,
+        paramRangeSelectKb,
         paramFineAdjustKb,
         paramStretchKb,
         vibratoAmplitudeAdjustKb,
@@ -708,6 +739,7 @@ export function usePianoRollInteractions(args: {
         }): Promise<{
             sourceAt: (frame: number) => number;
             sentinelAt: (frame: number) => boolean | undefined;
+            authority: ParamCurveCommitAuthority;
         }> => {
             const windows = planSelectionEditWindows({
                 ranges: input.ranges,
@@ -723,9 +755,35 @@ export function usePianoRollInteractions(args: {
                         endFrame: window.endFrame,
                         paramView: input.paramView,
                         withSentinel: input.withSentinel,
+                        // 提交必须拿到权威 watermark；pv 快路径不携带 revision，
+                        // 传下去会让带曲线补丁的事务必被后端拒绝。
+                        forceAuthority: true,
                     }),
                 ),
             );
+            if (curves.length === 0) {
+                throw new Error("param block commit requires at least one curve window");
+            }
+            const authorityRevision = curves[0]?.authorityRevision;
+            if (authorityRevision === undefined) {
+                throw new Error("param block commit requires expectedCurveRevision");
+            }
+            for (const curve of curves) {
+                if (curve.authorityRevision !== authorityRevision) {
+                    throw new Error("Conflict: parameter curve changed during read");
+                }
+            }
+            const geometrySignature = curves[0]?.geometrySignature;
+            const geometryRevision = curves[0]?.geometryRevision;
+            for (const curve of curves) {
+                if (
+                    geometrySignature !== undefined
+                        ? curve.geometrySignature !== geometrySignature
+                        : curve.geometryRevision !== geometryRevision
+                ) {
+                    throw new Error("Conflict: parameter geometry changed during read");
+                }
+            }
             return {
                 sourceAt: (frame: number) => {
                     for (let i = 0; i < windows.length; i += 1) {
@@ -742,6 +800,15 @@ export function usePianoRollInteractions(args: {
                         return curves[i]?.sentinel?.[frame - window.startFrame];
                     }
                     return undefined;
+                },
+                authority: {
+                    expectedCurveRevision: authorityRevision,
+                    ...(geometryRevision === undefined
+                        ? {}
+                        : { expectedGeometryRevision: geometryRevision }),
+                    ...(geometrySignature === undefined
+                        ? {}
+                        : { expectedGeometrySignature: geometrySignature }),
                 },
             };
         },
@@ -1565,7 +1632,7 @@ export function usePianoRollInteractions(args: {
     }, [onVibratoDragEnd]);
 
     useEffect(() => {
-        if (toolMode !== "select") {
+        if (!rangeToolActive) {
             morphModifierDownRef.current = false;
             if (!morphDragRef.current) {
                 setMorphOverlay(null);
@@ -1578,7 +1645,7 @@ export function usePianoRollInteractions(args: {
                 | { ctrlKey: boolean; shiftKey: boolean; altKey: boolean; metaKey?: boolean },
         ) => {
             const active =
-                toolMode === "select" &&
+                rangeToolActive &&
                 !panRef.current &&
                 !strokeRef.current &&
                 !morphDragRef.current &&
@@ -1630,17 +1697,17 @@ export function usePianoRollInteractions(args: {
         liveEditOverrideRef,
         panRef,
         paramMorphKb,
+        rangeToolActive,
         setMorphOverlay,
         strokeRef,
-        toolMode,
     ]);
 
     useEffect(() => {
         if (!selectionUi) return;
-        if (toolMode !== "select") return;
+        if (!rangeToolActive) return;
         if (!morphModifierDownRef.current || morphDragRef.current) return;
         setMorphOverlay(buildMorphOverlaysFromSelection());
-    }, [buildMorphOverlaysFromSelection, selectionUi, setMorphOverlay, toolMode]);
+    }, [buildMorphOverlaysFromSelection, rangeToolActive, selectionUi, setMorphOverlay]);
 
     // Track last pointer position and synthesize pointermove on key changes
     useEffect(() => {
@@ -1833,6 +1900,12 @@ export function usePianoRollInteractions(args: {
      */
     const lastPointerMoveRef = useRef<globalThis.PointerEvent | null>(null);
     const pointerDownRef = useRef(false);
+    const modifierKeysRef = useRef({
+        ctrlKey: false,
+        shiftKey: false,
+        altKey: false,
+        metaKey: false,
+    });
     /**
      * **此刻**按下的按键位掩码（0 = 没有任何键按下）。
      *
@@ -1851,22 +1924,74 @@ export function usePianoRollInteractions(args: {
         };
         const onDown = (event: globalThis.PointerEvent) => {
             pressedButtonsRef.current = event.buttons;
-            if (event.button === 0) pointerDownRef.current = true;
+            modifierKeysRef.current = {
+                ctrlKey: event.ctrlKey,
+                shiftKey: event.shiftKey,
+                altKey: event.altKey,
+                metaKey: event.metaKey,
+            };
+            // 任意按钮都算活动手势：右键幅度拖拽也必须参与视口重放。
+            pointerDownRef.current = true;
         };
         const onUp = () => {
             pointerDownRef.current = false;
             pressedButtonsRef.current = 0;
+        };
+        /**
+         * 修饰键变化 → 用最近指针位置合成一次 pointermove。
+         *
+         * 创建块时补按 / 松开 Ctrl、块拖动时按 Shift 切换吸附，都必须在
+         * 鼠标不动时立即生效；键盘事件本身不会产生 pointermove。
+         */
+        const replayModifierChange = (event: globalThis.KeyboardEvent) => {
+            if (event.repeat) return;
+            const next = {
+                ctrlKey: event.ctrlKey,
+                shiftKey: event.shiftKey,
+                altKey: event.altKey,
+                metaKey: event.metaKey,
+            };
+            const previous = modifierKeysRef.current;
+            if (
+                previous.ctrlKey === next.ctrlKey &&
+                previous.shiftKey === next.shiftKey &&
+                previous.altKey === next.altKey &&
+                previous.metaKey === next.metaKey
+            ) {
+                return;
+            }
+            modifierKeysRef.current = next;
+            const last = lastPointerMoveRef.current;
+            if (!pointerDownRef.current || last === null || pressedButtonsRef.current === 0) return;
+            window.dispatchEvent(
+                new PointerEvent("pointermove", {
+                    bubbles: true,
+                    cancelable: true,
+                    clientX: last.clientX,
+                    clientY: last.clientY,
+                    pointerId: last.pointerId,
+                    pointerType: last.pointerType,
+                    isPrimary: last.isPrimary,
+                    buttons: pressedButtonsRef.current,
+                    button: -1,
+                    ...next,
+                }),
+            );
         };
         // 捕获阶段：即使某个手势 stopPropagation 也要记到。
         window.addEventListener("pointermove", onMove, true);
         window.addEventListener("pointerdown", onDown, true);
         window.addEventListener("pointerup", onUp, true);
         window.addEventListener("pointercancel", onUp, true);
+        window.addEventListener("keydown", replayModifierChange, true);
+        window.addEventListener("keyup", replayModifierChange, true);
         return () => {
             window.removeEventListener("pointermove", onMove, true);
             window.removeEventListener("pointerdown", onDown, true);
             window.removeEventListener("pointerup", onUp, true);
             window.removeEventListener("pointercancel", onUp, true);
+            window.removeEventListener("keydown", replayModifierChange, true);
+            window.removeEventListener("keyup", replayModifierChange, true);
         };
     }, []);
 
@@ -1888,14 +2013,23 @@ export function usePianoRollInteractions(args: {
      */
     useEffect(() => {
         let lastProjection: ViewportProjection | null = null;
-        return pianoRollViewportBus.subscribe((scrollLeftPx, pxPerSec, viewportWidthPx) => {
-            const projection: ViewportProjection = { scrollLeftPx, pxPerSec, viewportWidthPx };
+        return pianoRollInteractionViewportBus.subscribe((viewport) => {
+            const projection: ViewportProjection = {
+                scrollLeftPx: viewport.scrollLeftPx,
+                pxPerSec: viewport.pxPerSec,
+                viewportWidthPx: viewport.viewportWidthPx,
+                viewportHeightPx: viewport.viewportHeightPx,
+                param: viewport.param,
+                valueCenter: viewport.valueCenter,
+                valueSpan: viewport.valueSpan,
+            };
             const decision = resolveViewportReplay({
                 projection,
                 previousProjection: lastProjection,
                 dragging: pointerDownRef.current,
                 pressedButtons: pressedButtonsRef.current,
                 lastMove: lastPointerMoveRef.current,
+                currentModifiers: modifierKeysRef.current,
             });
             // 无论是否重放都要推进基准：漏推一次会让下一次比较错位，真实滚动反而被
             // 当成"没变"而漏掉重放。
@@ -2110,7 +2244,7 @@ export function usePianoRollInteractions(args: {
     ]);
 
     const getDefaultCanvasCursor = useCallback((): CanvasCursor => {
-        return toolMode === "select" || toolMode === "block" ? "default" : "crosshair";
+        return toolMode === "select" ? "default" : "crosshair";
     }, [toolMode]);
 
     /**
@@ -2184,6 +2318,12 @@ export function usePianoRollInteractions(args: {
      */
     const refreshParamValuePreview = useCallback(() => {
         if (!paramValuePopupEnabled) return;
+        /*
+         * 块模式下读数归块手势（含块拖拽与新建）。悬停续显是给「键盘平移 / 撤销重做 /
+         * 远端写入」准备的：它按指针位置重算曲线值，在块拖拽期间会把块手势刚发的读数
+         * 按旧值盖回去。
+         */
+        if (paramBlockToolActive) return;
         if (!hoverPreviewNearCurveRef.current) return;
         if (strokeRef.current || panRef.current) return;
         const last = lastPointerClientRef.current;
@@ -2200,6 +2340,7 @@ export function usePianoRollInteractions(args: {
             value: point.value,
         });
     }, [
+        paramBlockToolActive,
         paramValuePopupEnabled,
         onParamValuePreviewChange,
         getCurvePointAtPointer,
@@ -2210,7 +2351,7 @@ export function usePianoRollInteractions(args: {
 
     const isPointerNearDraggableSelection = useCallback(
         (clientX: number, clientY: number, pointerType?: string | null): boolean => {
-            if (toolMode !== "select") return false;
+            if (!rangeToolActive) return false;
             const sel = selectionRef.current;
             const canvas = canvasRef.current;
             if (!sel || sel.length === 0 || !canvas) return false;
@@ -2239,7 +2380,7 @@ export function usePianoRollInteractions(args: {
                 }),
             );
         },
-        [toolMode, selectionRef, canvasRef, frameToViewportPx, getCurveValueNearPointer],
+        [rangeToolActive, selectionRef, canvasRef, frameToViewportPx, getCurveValueNearPointer],
     );
 
     /**
@@ -2257,7 +2398,7 @@ export function usePianoRollInteractions(args: {
             e: ReactPointerEvent<HTMLCanvasElement>,
             options?: { readonly requireModifier?: boolean },
         ): { rangeIndex: number; edge: "left" | "right" } | null => {
-            if (toolMode !== "select") return null;
+            if (!rangeToolActive) return null;
             if (
                 (options?.requireModifier ?? true) &&
                 !isModifierActive(paramStretchKb, e.nativeEvent)
@@ -2298,7 +2439,7 @@ export function usePianoRollInteractions(args: {
             }
             return best;
         },
-        [toolMode, paramStretchKb, selectionRef, canvasRef, frameToViewportPx],
+        [rangeToolActive, paramStretchKb, selectionRef, canvasRef, frameToViewportPx],
     );
 
     const isPointerNearStretchSelectionEdge = useCallback(
@@ -2347,6 +2488,7 @@ export function usePianoRollInteractions(args: {
                     setCanvasCursor,
                     strokeRef,
                     toolMode,
+                    rangeToolActive,
                 },
                 e,
             ),
@@ -2372,6 +2514,7 @@ export function usePianoRollInteractions(args: {
             setCanvasCursor,
             getDefaultCanvasCursor,
             pointerSec,
+            rangeToolActive,
         ],
     );
 
@@ -2392,6 +2535,7 @@ export function usePianoRollInteractions(args: {
                     activePointerGestureEndRef,
                     applyDenseToLiveEdit,
                     applyEdgeScrollLeft,
+                    applyValueScrollCenter,
                     applyMorphOverlayPreview,
                     applyPostStrokeSmoothing,
                     applyVibratoChoice,
@@ -2404,6 +2548,8 @@ export function usePianoRollInteractions(args: {
                     bumpRefreshToken,
                     canvasRef,
                     clampViewport,
+                    getCurrentViewportForScrollbar,
+                    getParamValueBoundsForScrollbar,
                     clearActivePointerGestureEnd,
                     commitStroke,
                     createFineAdjustedPointerState,
@@ -2436,6 +2582,7 @@ export function usePianoRollInteractions(args: {
                     morphOverlayRef,
                     onContextMenu,
                     onParamBlockPointerDown,
+                    paramBlockToolActive,
                     onCycleDragDirection,
                     onParamCommitSucceeded,
                     onParamValuePreviewChange,
@@ -2443,6 +2590,7 @@ export function usePianoRollInteractions(args: {
                     panRef,
                     paramEditorSeekPlayheadEnabled,
                     paramMultiSelectKb,
+                    paramRangeSelectKb,
                     paramStretchKb,
                     paramValuePopupEnabled,
                     paramView,
@@ -2493,6 +2641,7 @@ export function usePianoRollInteractions(args: {
             rootTrackId,
             editParam,
             toolMode,
+            paramBlockToolActive,
             straightVibratoPreset,
             scrollerRef,
             // 边缘自动滚屏与视口真值：`applyEdgeScrollLeft` / `getViewportTruth`
@@ -2500,6 +2649,7 @@ export function usePianoRollInteractions(args: {
             // 里），`scrollLeftRef` 是 ref —— 列入依赖不会让本回调每帧重建，
             // 只是把"确实读到的值"如实登记。
             applyEdgeScrollLeft,
+            applyValueScrollCenter,
             getViewportTruth,
             scrollLeftRef,
             canvasRef,
@@ -2509,6 +2659,8 @@ export function usePianoRollInteractions(args: {
             paramViewsRef,
             syncScrollLeft,
             clampViewport,
+            getCurrentViewportForScrollbar,
+            getParamValueBoundsForScrollbar,
             setPitchView,
             setParamViewport,
             invalidate,
@@ -2518,6 +2670,7 @@ export function usePianoRollInteractions(args: {
             selectionRef,
             updateSelectionUi,
             paramMultiSelectKb,
+            paramRangeSelectKb,
             findStretchSelectionEdge,
             isPointerNearDraggableSelection,
             frameToViewportPx,
@@ -2613,6 +2766,87 @@ export function usePianoRollInteractions(args: {
         };
     }, [paramValuePopupEnabled, onParamValuePreviewChange]);
 
+    /**
+     * 参数块选择模式右键幅度入口：与参数线选择共用同一份右键幅度实现。
+     * 选区、参数视图与所有低层依赖都由 hook 作用域补齐；调用方只提供
+     * 本次指针和块菜单回调。
+     */
+    const beginParamBlockMorph = useCallback(
+        (args: {
+            readonly selection: ParamSelection;
+            readonly nativeEvent: globalThis.PointerEvent;
+            readonly clientX: number;
+            readonly clientY: number;
+            readonly pointerId: number;
+            readonly captureTarget: HTMLCanvasElement;
+            readonly onCommitted?: () => void;
+            readonly onContextMenu?: (x: number, y: number) => void;
+            readonly commitAmplitude?: (
+                segments: readonly { startFrame: number; values: number[] }[],
+                authority: ParamCurveCommitAuthority,
+            ) => Promise<void>;
+        }): boolean => {
+            const pv = paramViewRef.current;
+            if (pv === null) return false;
+            return beginParamSelectionMorph({
+                ...args,
+                applyDenseToLiveEdit,
+                buildUploadSegments,
+                bumpRefreshToken,
+                clearActivePointerGestureEnd,
+                createFineAdjustedPointerState,
+                disposeFineAdjustedPointerState,
+                edgeHalfSpanForIndices,
+                editParam,
+                ensureLiveEditBase,
+                fetchCommitBaseSource,
+                framePeriodMs: pv.framePeriodMs,
+                getFineAdjustedPointerPosition,
+                invalidate,
+                liveEditActiveRef,
+                liveEditOverrideRef,
+                onContextMenu: args.onContextMenu ?? onContextMenu,
+                onParamCommitSucceeded,
+                onParamValuePreviewChange,
+                paramValuePopupEnabled,
+                paramView: pv,
+                paramViewRef,
+                requestWaveformRepaint,
+                rootTrackId,
+                setActivePointerGestureEnd,
+                setCanvasCursor,
+                setParamView,
+                commitAmplitude: args.commitAmplitude,
+            });
+        },
+        [
+            applyDenseToLiveEdit,
+            buildUploadSegments,
+            bumpRefreshToken,
+            clearActivePointerGestureEnd,
+            createFineAdjustedPointerState,
+            disposeFineAdjustedPointerState,
+            edgeHalfSpanForIndices,
+            editParam,
+            ensureLiveEditBase,
+            fetchCommitBaseSource,
+            getFineAdjustedPointerPosition,
+            invalidate,
+            liveEditActiveRef,
+            liveEditOverrideRef,
+            onContextMenu,
+            onParamCommitSucceeded,
+            onParamValuePreviewChange,
+            paramValuePopupEnabled,
+            paramViewRef,
+            requestWaveformRepaint,
+            rootTrackId,
+            setActivePointerGestureEnd,
+            setCanvasCursor,
+            setParamView,
+        ],
+    );
+
     return {
         onRulerMouseDown,
         onScrollerAuxClick,
@@ -2623,6 +2857,9 @@ export function usePianoRollInteractions(args: {
         onCanvasPointerMove,
         onCanvasPointerLeave,
         onCanvasPointerDown,
+        beginParamBlockMorph,
         refreshParamValuePreview,
+        /** 本工具的默认光标（块层的空白分支与通用处理器共用同一判据）。 */
+        getDefaultCanvasCursor,
     };
 }

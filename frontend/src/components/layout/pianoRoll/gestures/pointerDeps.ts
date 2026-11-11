@@ -19,7 +19,9 @@ import type { ScaleLike } from "../../../../utils/musicalScales";
 import type { PinchStepState } from "../../../../utils/pinchGesture";
 import type { TimelineAxis } from "../../renderKernel/timelineAxis";
 import type { FrameSpan, ParamSelection } from "../paramSelection";
+import type { ParamCurveCommitAuthority } from "../paramBlockCommitPolicy";
 import type { MultiRangeEditPiece } from "../selectionEditData";
+import type { EdgeScrollDriver } from "../kernel/edgeScrollDriver";
 import type {
     ParamMorphOverlay,
     ParamName,
@@ -38,12 +40,16 @@ import type { VibratoHudAnchor } from "../vibratoHudState";
 import type { CanvasCursor } from "./pointerSupport";
 import type { MutableRefObject, PointerEvent as ReactPointerEvent, RefObject } from "react";
 
+/** 参数块选择模式 pointerdown 的结构化结果：是否消费，以及单击是否应移动播放头。 */
+export type ParamBlockPointerDownResult =
+    { readonly handled: true; readonly seekOnClick: boolean } | { readonly handled: false };
+
 /** 手势回调需要的上下文（各自按需 `Pick`）。 */
 export type PointerDeps = {
     /**
-     * 块编辑工具命中。
+     * 参数块选择模式命中。
      *
-     * 返回 true 表示这次按下已由块层消费，参数线手势不再启动。
+     * handled=true 表示这次按下已由块层消费，参数线手势不再启动。
      */
     onParamBlockPointerDown: (args: {
         sec: number;
@@ -52,7 +58,16 @@ export type PointerDeps = {
         clientX: number;
         add: boolean;
         toggle: boolean;
+        multiSelect: boolean;
+        rangeSelect: boolean;
+        /** 当前指针的连续帧坐标（用于 Shift 范围选择）。 */
+        pointerFrame?: (clientX: number) => number;
+        /** 选择边界夹取（与选择工具同一规则）。 */
+        clampSelectionFrame?: (frame: number) => number;
+        /** 与选择工具同源的边缘自动滚动驱动。 */
+        edgeScroll?: EdgeScrollDriver;
         pointerType: string;
+        nativeEvent: globalThis.PointerEvent;
         pointerId: number;
         captureTarget: HTMLCanvasElement;
         setActivePointerGestureEnd: (endGesture: () => void) => void;
@@ -67,10 +82,12 @@ export type PointerDeps = {
         blockSnapScale?: ScaleLike | null;
         /** 实时的指针值（用于折算纵向拖动偏移）。 */
         pointerValue: (clientY: number) => number;
-        /** 按下时的 Alt 状态；块工具用 Alt+上下拖缩放块内音高。 */
+        /** 按下时的 Alt 状态；参数块选择模式用 Alt+上下拖缩放块内音高。 */
         altKey?: boolean;
         /** 按下时的 Shift 状态；块编辑临时取消吸附（按 settings 绑定）。 */
         shiftKey?: boolean;
+        ctrlKey?: boolean;
+        metaKey?: boolean;
         /** 屏幕 clientX → 内容秒（用于判断块时间范围）。 */
         secAtClientX: (clientX: number) => number;
         /** 吸附开关（拖动中可随修饰键变化）。 */
@@ -89,7 +106,7 @@ export type PointerDeps = {
         contextMenu: boolean;
         /** 双击命中的块内切分点；由面板负责执行切分。 */
         doubleClick?: boolean;
-    }) => boolean;
+    }) => ParamBlockPointerDownResult;
     activePointerGestureEndRef: RefObject<(() => void) | null>;
     applyDenseToLiveEdit: (
         pv: ParamViewSegment,
@@ -100,6 +117,8 @@ export type PointerDeps = {
         mode: StrokeMode,
     ) => void;
     applyEdgeScrollLeft: (drawingScrollLeft: number) => void;
+    /** 值轴边缘滚动的落点：写入新的值域中心（"coalesced"：不额外重绘）。 */
+    applyValueScrollCenter: (center: number) => void;
     applyMorphOverlayPreview: (overlays: ParamMorphOverlay[]) => void;
     applyPostStrokeSmoothing: (points: StrokePoint[], mode: StrokeMode) => Promise<void>;
     applyVibratoChoice: (choice: VibratoChoice, clientX?: number, clientY?: number) => boolean;
@@ -146,6 +165,8 @@ export type PointerDeps = {
     bumpRefreshToken: () => void;
     canvasRef: MutableRefObject<HTMLCanvasElement | null>;
     clampViewport: (param: ParamName, v: ValueViewport) => ValueViewport;
+    getCurrentViewportForScrollbar: (param: ParamName) => ValueViewport;
+    getParamValueBoundsForScrollbar: (param: ParamName) => { min: number; max: number };
     clearActivePointerGestureEnd: (endGesture?: () => void) => void;
     commitStroke: (points: StrokePoint[], mode: StrokeMode) => Promise<void>;
     createFineAdjustedPointerState: (
@@ -170,6 +191,8 @@ export type PointerDeps = {
     dragDirection: "free" | "x-only" | "y-only" | undefined;
     dynamicProjectSec: number;
     edgeHalfSpanForIndices: (indicesLen: number, strideValue: number) => number;
+    /** Shared 2D edge-scroll driver for spatial gestures in the current pointerdown. */
+    edgeScroll: EdgeScrollDriver;
     edgeSmoothnessPercent: number | undefined;
     editParam: string;
     ensureLiveEditBase: (pv: ParamViewSegment) => void;
@@ -184,6 +207,7 @@ export type PointerDeps = {
     }) => Promise<{
         sourceAt: (frame: number) => number;
         sentinelAt: (frame: number) => boolean | undefined;
+        authority: ParamCurveCommitAuthority;
     }>;
     findStretchSelectionEdge: (
         e: ReactPointerEvent<HTMLCanvasElement>,
@@ -277,6 +301,7 @@ export type PointerDeps = {
     } | null>;
     paramEditorSeekPlayheadEnabled: boolean | undefined;
     paramMultiSelectKb: Keybinding;
+    paramRangeSelectKb: Keybinding;
     paramStretchKb: Keybinding;
     paramValuePopupEnabled: boolean | undefined;
     paramView: ParamViewSegment | null;
@@ -322,7 +347,12 @@ export type PointerDeps = {
     syncScrollLeft: (scroller: HTMLDivElement) => void;
     syncTimelineEnabled: boolean;
     timelineOffsetRef: MutableRefObject<number>;
+    /** 当前工具族成员；块选择不是 toolMode，而是下面的派生布尔值。 */
     toolMode: string;
+    /** 参数块选择是否激活（由 toolMode + selectToolMode 派生）。 */
+    paramBlockToolActive: boolean;
+    /** 选择族的 range 子模式是否激活（见 isRangeToolActive）；块模式下恒 false。 */
+    rangeToolActive: boolean;
     updateSelectionUi: (next: ParamSelection | null) => void;
     valueToY: (param: ParamName, v: number, h: number) => number;
     vibratoAmplitudeAdjustKb: Keybinding;

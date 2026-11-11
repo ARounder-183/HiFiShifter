@@ -298,10 +298,13 @@ export function useVibratoDialogModel({
     );
 
     /** 按给定草稿重新拟合纵轴。 */
-    const fitPreviewAxis = useCallback((preset: VibratoPreset | null) => {
-        if (!preset) return;
-        setPreviewHalfCents(fitPreviewRangeCents(buildVibratoPreview(preset).peakCents));
-    }, []);
+    const fitPreviewAxis = useCallback(
+        (preset: VibratoPreset | null) => {
+            if (!preset) return;
+            setPreviewHalfCents(fitPreviewRangeCents(buildVibratoPreview(preset).peakCents));
+        },
+        [setPreviewHalfCents],
+    );
 
     const isBuiltin = Boolean(draft?.builtin);
     /** 正在编辑的这条是否就是当前使用的（编辑器顶部的按钮据此显示状态）。 */

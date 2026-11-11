@@ -9,7 +9,7 @@
  * 3. 多手势全部触发且单点异常被隔离；
  * 4. visibilitychange → hidden 收尾、回 visible 不收尾。
  */
-import { test } from "vitest";
+import { test, vi } from "vitest";
 
 type ListenerMap = Record<string, Array<() => void>>;
 
@@ -100,3 +100,35 @@ test("components/layout/timeline/gestureFocusGuard.ts scripted checks", async ()
     assertEq(hiddenCalls, 2, "abort must be dead after unregister");
     fireVisibility("visible");
 }, 30_000);
+
+test("窗口缺失时的首调不会把监听永久标记为已挂载", async () => {
+    // 独立模块实例：本文件第一个用例已把模块级 listenersAttached 置 true。
+    vi.resetModules();
+    const win = makeTarget();
+    const doc = makeTarget();
+    const globals = globalThis as { window?: unknown; document?: unknown };
+    const savedWindow = globals.window;
+    const savedDocument = globals.document;
+    delete globals.window;
+    delete globals.document;
+    try {
+        const { registerDragAbort } = await import("./gestureFocusGuard");
+        // 纯 node 首调：没有监听可挂，但不能把"已挂载"写死。
+        const early = registerDragAbort(() => undefined);
+        globals.window = win.target;
+        globals.document = doc.target;
+        let calls = 0;
+        const later = registerDragAbort(() => {
+            calls += 1;
+        });
+        for (const fn of [...(win.listeners["blur"] ?? [])]) fn();
+        if (calls !== 1) {
+            throw new Error(`listeners should attach on retry, got ${calls} blur aborts`);
+        }
+        later();
+        early();
+    } finally {
+        globals.window = savedWindow;
+        globals.document = savedDocument;
+    }
+});

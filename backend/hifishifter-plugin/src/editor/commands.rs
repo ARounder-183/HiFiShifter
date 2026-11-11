@@ -360,11 +360,6 @@ mod lane_tests {
         };
         let timeline = call(1, "get_timeline_state", json!({}));
         let track = timeline["tracks"][0]["id"].as_str().unwrap().to_owned();
-        let clip = timeline["clips"][0]["id"].as_str().unwrap().to_owned();
-        let take = timeline["clips"][0]["takes"][0]["id"]
-            .as_str()
-            .unwrap()
-            .to_owned();
         {
             let mut timeline = editor.timeline.lock_or_recover();
             timeline.clips[0].takes[0].syllable_analysis =
@@ -381,40 +376,23 @@ mod lane_tests {
         }
         let payload = call(
             2,
-            "set_param_block_merges",
+            "set_param_block_edits",
             json!({
                 "rootTrackId": track,
-                "records": [{
-                    "mergedGroupId": "merged:v7",
-                    "memberRefs": [
-                        {"clipId":clip.clone(),"takeId":take.clone(),"syllableId":"a","sourceStartSec":0.0,"sourceEndSec":0.00004},
-                        {"clipId":clip.clone(),"takeId":take.clone(),"syllableId":"b","sourceStartSec":0.00004,"sourceEndSec":0.00008}
-                    ]
-                }],
-                "intervalEdits": [{
-                    "editId": "edit:v7",
-                    "memberRefs": [
-                        {"clipId":clip.clone(),"takeId":take.clone(),"syllableId":"a","sourceStartSec":0.0,"sourceEndSec":0.00004}
-                    ],
-                    "startSec": 0.0,
-                    "endSec": 0.03,
-                    "explicit": true,
-                    "transitionSec": 0.25
+                "expectedEditRevision": 0,
+                "edits": [{
+                    "id": "manual:test",
+                    "geometry": {"kind": "root", "span": {"startSec": 0.0, "endSec": 0.02}},
+                    "manual": true,
+                    "createdSeq": 1
                 }],
                 "checkpoint": true
             }),
         );
-        assert_eq!(payload["ok"], true);
-        let read = call(3, "get_param_block_merges", json!({"rootTrackId": track}));
-        assert_eq!(read["ok"], true);
-        assert!(
-            read["records"].as_array().is_some(),
-            "查询必须返回与 App 同形的 records 数组"
-        );
-        assert_eq!(read["intervalEdits"][0]["editId"], "edit:v7");
-        assert_eq!(read["intervalEdits"][0]["endSec"], 0.03);
-        assert_eq!(read["intervalEdits"][0]["explicit"], true);
-        assert_eq!(read["intervalEdits"][0]["transitionSec"], 0.25);
+        assert_eq!(payload["blocks"][0]["id"], "manual:test");
+        let read = call(3, "get_param_block_view", json!({"rootTrackId": track}));
+        assert_eq!(read["editRevision"], payload["editRevision"]);
+        assert_eq!(read["blocks"][0]["kind"], "manual");
         // 通道容量足够容纳本测试产生的 history/state 事件；不读取内容。
     }
 }
@@ -773,153 +751,6 @@ struct StretchLinked {
     mappings: Vec<hifishifter_kernel::state::StretchLinkedRangeSec>,
     checkpoint: Option<bool>,
 }
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct MergeRecordInput {
-    merged_group_id: String,
-    #[serde(default)]
-    member_refs: Vec<MergeMemberInput>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct MergeMemberInput {
-    clip_id: String,
-    take_id: String,
-    syllable_id: String,
-    source_start_sec: f64,
-    source_end_sec: f64,
-}
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct IntervalEditInput {
-    edit_id: String,
-    #[serde(default)]
-    member_refs: Vec<MergeMemberInput>,
-    start_sec: f64,
-    end_sec: f64,
-    #[serde(default)]
-    member_start_sec: f64,
-    #[serde(default)]
-    member_end_sec: f64,
-    #[serde(default)]
-    block_ids: Vec<String>,
-    #[serde(default)]
-    explicit: bool,
-    #[serde(default)]
-    deleted: bool,
-    #[serde(default)]
-    manual: bool,
-    #[serde(default)]
-    value: Option<f64>,
-    #[serde(default)]
-    transition_sec: f64,
-}
-
-fn interval_edit_input_is_valid(edit: &IntervalEditInput) -> bool {
-    let width = edit.end_sec - edit.start_sec;
-    !edit.member_refs.is_empty()
-        && edit.edit_id.len() <= 512
-        && width.is_finite()
-        // 切分不再有用户可见的最短块限制。这里只拒绝真正零宽 / 倒序记录，
-        // 不能再沿用 20ms 阈值，否则短切段会在命令入口被静默删掉。
-        && width > 1e-9
-        && edit.start_sec.is_finite()
-        && edit.end_sec.is_finite()
-}
-
-fn interval_edit_payload(edit: &ParamBlockIntervalEdit) -> Value {
-    json!({
-        "editId": edit.edit_id,
-        "memberRefs": edit.member_refs.iter().map(|member| json!({
-            "clipId": member.clip_id,
-            "takeId": member.take_id,
-            "syllableId": member.syllable_id,
-            "sourceStartSec": member.source_start_sec,
-            "sourceEndSec": member.source_end_sec,
-        })).collect::<Vec<_>>(),
-        "startSec": edit.start_sec,
-        "endSec": edit.end_sec,
-        "memberStartSec": edit.member_start_sec,
-        "memberEndSec": edit.member_end_sec,
-        "blockIds": edit.block_ids,
-        "explicit": edit.explicit,
-        "deleted": edit.deleted,
-        "manual": edit.manual,
-        "value": edit.value,
-        "transitionSec": edit.transition_sec,
-    })
-}
-
-#[cfg(test)]
-mod interval_edit_input_tests {
-    use super::{
-        interval_edit_input_is_valid, interval_edit_payload, IntervalEditInput, MergeMemberInput,
-        ParamBlockIntervalEdit, ParamBlockMemberRef,
-    };
-
-    fn edit(start_sec: f64, end_sec: f64) -> IntervalEditInput {
-        IntervalEditInput {
-            edit_id: "edit:split".into(),
-            member_refs: vec![MergeMemberInput {
-                clip_id: "clip".into(),
-                take_id: "take".into(),
-                syllable_id: "split".into(),
-                source_start_sec: 0.0,
-                source_end_sec: 1.0,
-            }],
-            start_sec,
-            end_sec,
-            member_start_sec: 0.0,
-            member_end_sec: 1.0,
-            block_ids: Vec::new(),
-            explicit: true,
-            deleted: false,
-            manual: false,
-            value: None,
-            transition_sec: 0.0,
-        }
-    }
-
-    #[test]
-    fn keeps_short_split_segments() {
-        assert!(interval_edit_input_is_valid(&edit(0.0, 0.001)));
-    }
-
-    #[test]
-    fn rejects_only_zero_width_and_reversed_segments() {
-        assert!(!interval_edit_input_is_valid(&edit(0.5, 0.5)));
-        assert!(!interval_edit_input_is_valid(&edit(0.5, 0.49)));
-    }
-
-    #[test]
-    fn payload_round_trips_explicit_and_transition_fields() {
-        let payload = interval_edit_payload(&ParamBlockIntervalEdit {
-            edit_id: "edit:split".into(),
-            member_refs: vec![ParamBlockMemberRef {
-                clip_id: "clip".into(),
-                take_id: "take".into(),
-                syllable_id: "split".into(),
-                source_start_sec: 0.0,
-                source_end_sec: 0.001,
-            }],
-            start_sec: 0.0,
-            end_sec: 0.001,
-            member_start_sec: 0.0,
-            member_end_sec: 1.0,
-            block_ids: vec!["auto:clip:source".into()],
-            explicit: true,
-            deleted: false,
-            manual: false,
-            value: None,
-            transition_sec: 0.25,
-        });
-        assert_eq!(payload["explicit"], true);
-        assert_eq!(payload["transitionSec"], 0.25);
-        assert_eq!(payload["endSec"], 0.001);
-    }
-}
-
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Segment {
@@ -1368,25 +1199,20 @@ pub(super) fn dispatch(
             // 同步解码（那会让所有编辑与宿主保存一起排队）。
             return Err("analyze_clip_syllables must run on the syllable slow lane".into());
         }
-        "get_param_line_blocks" => {
-            return session.param_line_block_payload(
+        "get_param_block_view" => {
+            return session.param_block_view_payload(
                 input["rootTrackId"].as_str().ok_or("rootTrackId missing")?,
             );
         }
-        "set_param_line_blocks" => {
+        "set_param_block_edits" => {
             let root = input["rootTrackId"].as_str().ok_or("rootTrackId missing")?;
-            let expected = input["expectedRevision"]
+            let expected = input["expectedEditRevision"]
                 .as_u64()
-                .ok_or("expectedRevision missing")?;
-            return session.set_param_line_blocks(
+                .ok_or("expectedEditRevision missing")?;
+            return session.set_param_block_edits(
                 root,
                 expected,
-                args(input["blocks"].clone())?,
-                input
-                    .get("gameBaseline")
-                    .filter(|value| !value.is_null())
-                    .map(|value| args(value.clone()))
-                    .transpose()?,
+                args(input["edits"].clone())?,
                 input["checkpoint"].as_bool().unwrap_or(true),
                 input
                     .get("curvePatches")
@@ -1398,122 +1224,41 @@ pub(super) fn dispatch(
                 input["expectedGeometrySignature"].as_str(),
             );
         }
-        "get_param_block_merges" => {
-            let root_track_id = input["rootTrackId"].as_str().ok_or("rootTrackId missing")?;
-            track_exists(session, root_track_id)?;
-            let timeline = session.timeline.lock_or_recover();
-            let records = timeline
-                .params_by_root_track
-                .get(root_track_id)
-                .map(|entry| {
-                    entry
-                        .param_block_merges
-                        .iter()
-                        .map(|record| {
-                            json!({
-                                "mergedGroupId": record.merged_group_id,
-                                "memberRefs": record.member_refs.iter().map(|member| json!({
-                                    "clipId": member.clip_id,
-                                    "takeId": member.take_id,
-                                    "syllableId": member.syllable_id,
-                                    "sourceStartSec": member.source_start_sec,
-                                    "sourceEndSec": member.source_end_sec,
-                                })).collect::<Vec<_>>(),
-                            })
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            let interval_edits = timeline
-                .params_by_root_track
-                .get(root_track_id)
-                .map(|entry| {
-                    entry
-                        .param_block_interval_edits
-                        .iter()
-                        .map(interval_edit_payload)
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            return Ok(json!({"ok": true, "records": records, "intervalEdits": interval_edits}));
-        }
-        "set_param_block_merges" => {
-            let root_track_id = input["rootTrackId"]
-                .as_str()
-                .ok_or("rootTrackId missing")?
-                .to_owned();
-            track_exists(session, &root_track_id)?;
-            let records: Vec<MergeRecordInput> = args(input["records"].clone())?;
-            let interval_edits: Vec<IntervalEditInput> = args(
-                input
-                    .get("intervalEdits")
-                    .cloned()
-                    .unwrap_or_else(|| json!([])),
-            )?;
-            let checkpoint = input["checkpoint"].as_bool().unwrap_or(true);
-            let mut timeline = session.timeline.lock_or_recover();
-            if checkpoint {
-                session.checkpoint_timeline(&timeline, HistoryOp::ParamBlockMerge);
-            }
-            timeline.ensure_params_for_root(&root_track_id);
-            if let Some(entry) = timeline.params_by_root_track.get_mut(&root_track_id) {
-                // 只替换合并意图；曲线 / 原线缓存 / 动态基线全部原样保留。
-                entry.param_block_merges = records
-                    .into_iter()
-                    .map(|record| hifishifter_kernel::state::ParamBlockMergeRecord {
-                        merged_group_id: record.merged_group_id,
-                        member_refs: record
-                            .member_refs
-                            .into_iter()
-                            .map(|member| hifishifter_kernel::state::ParamBlockMemberRef {
-                                clip_id: member.clip_id,
-                                take_id: member.take_id,
-                                syllable_id: member.syllable_id,
-                                source_start_sec: member.source_start_sec,
-                                source_end_sec: member.source_end_sec,
-                            })
-                            .collect(),
+        "restore_game_param_blocks" => {
+            let root = input["rootTrackId"].as_str().ok_or("rootTrackId missing")?;
+            /*
+             * 前端发送的是 ranges（与独立 App 同一契约）；单 range 字段仅作为
+             * 旧调用方的兼容入口保留，不能再成为插件模式的隐藏崩溃点。
+             */
+            let ranges: Vec<(u32, u32)> = if let Some(items) = input["ranges"].as_array() {
+                items
+                    .iter()
+                    .map(|item| {
+                        let start = item["startFrame"]
+                            .as_u64()
+                            .ok_or("ranges.startFrame missing")?
+                            as u32;
+                        let count = item["frameCount"]
+                            .as_u64()
+                            .ok_or("ranges.frameCount missing")?
+                            as u32;
+                        Ok((start, start.saturating_add(count)))
                     })
-                    .filter(|record| record.member_refs.len() >= 2)
-                    .collect();
-                entry.param_block_interval_edits = interval_edits
-                    .into_iter()
-                    .filter(interval_edit_input_is_valid)
-                    .map(|edit| hifishifter_kernel::state::ParamBlockIntervalEdit {
-                        edit_id: edit.edit_id,
-                        member_refs: edit
-                            .member_refs
-                            .into_iter()
-                            .map(|member| hifishifter_kernel::state::ParamBlockMemberRef {
-                                clip_id: member.clip_id,
-                                take_id: member.take_id,
-                                syllable_id: member.syllable_id,
-                                source_start_sec: member.source_start_sec,
-                                source_end_sec: member.source_end_sec,
-                            })
-                            .collect(),
-                        start_sec: edit.start_sec,
-                        end_sec: edit.end_sec,
-                        member_start_sec: edit.member_start_sec,
-                        member_end_sec: edit.member_end_sec,
-                        block_ids: edit.block_ids,
-                        explicit: edit.explicit,
-                        deleted: edit.deleted,
-                        manual: edit.manual,
-                        value: edit.value,
-                        transition_sec: edit.transition_sec,
-                    })
-                    .collect();
-            }
-            timeline.sync_clip_takes_from_flat();
-            let clips = timeline.clips.clone();
-            // 与 App 侧同一校核：删除 / 换 take / 重分析后不留悬空合并引用。
-            if let Some(entry) = timeline.params_by_root_track.get_mut(&root_track_id) {
-                entry.prune_param_block_merges(&clips);
-            }
-            drop(timeline);
-            session.mark_dirty();
-            return after_write(session, json!({"ok": true}));
+                    .collect::<Result<Vec<_>, String>>()?
+            } else {
+                let start = input["startFrame"]
+                    .as_u64()
+                    .ok_or("startFrame or ranges missing")? as u32;
+                let end = input["endFrameExclusive"]
+                    .as_u64()
+                    .ok_or("endFrameExclusive or ranges missing")? as u32;
+                vec![(start, end)]
+            };
+            return session.restore_game_param_block_ranges(
+                root,
+                &ranges,
+                input["checkpoint"].as_bool().unwrap_or(true),
+            );
         }
         "plugin_refresh" => {
             session.ensure_loaded(input["force"].as_bool().unwrap_or(false))?;
@@ -2356,10 +2101,9 @@ pub(super) fn dispatch(
             if let Some((next, _, selection)) =
                 history::jump(&mut recorded, &timeline, target, intent, None)
             {
-                let layout_only =
-                    hifishifter_kernel::param_line_blocks::timeline_equal_except_blocks(
-                        &timeline, &next,
-                    );
+                let layout_only = hifishifter_kernel::param_blocks::timeline_equal_except_blocks(
+                    &timeline, &next,
+                );
                 if matches!(command, "undo_parameter_edit" | "redo_parameter_edit") {
                     // 参数快照只恢复控制数据，绝不把旧clip位置/源窗口写回或覆盖当前宿主几何。
                     timeline.params_by_root_track = next.params_by_root_track;

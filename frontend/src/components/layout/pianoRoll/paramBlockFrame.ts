@@ -5,30 +5,38 @@ import {
     type ParamBlock,
 } from "./paramBlocks";
 import type { ParamViewSegment } from "./types";
-import { paramLineBlockValue } from "./paramLineBlockValue";
+import { reportParamBlockDiagnostic } from "./paramBlockDiagnostics";
 
 type LiveEdit = {
     readonly key: string;
     readonly edit: readonly number[];
 };
 
-/** Block boundaries are shared, but a saved MIDI center belongs only to pitch. */
+/** Block boundaries are shared; every non-auto block may carry an explicit center. */
 export function resolveParamBlockPanelValues(args: {
     readonly blocks: readonly ParamBlock[];
     readonly param: string;
     readonly paramView: ParamViewSegment | null;
+    /** Viewport midpoint; only used by previews that explicitly opt in. */
     readonly fallbackValue: number;
+    /** Last known value per run, used while a refresh is in flight. */
+    readonly previousValues?: ReadonlyMap<
+        string,
+        { readonly value: number; readonly startSec: number; readonly endSec: number }
+    >;
+    /** Canonical blocks must never guess a center from the viewport. */
+    readonly allowFallback?: boolean;
 }): ParamBlock[] {
     return args.blocks.map((block) => {
-        const manualValue = args.param === "pitch" ? (block.manualValue ?? null) : null;
+        // volume / dyn 的拖动落点同样写在 `value` 里；只对 pitch 生效会让块高
+        // 在下一次曲线刷新时跳回主簇。auto 块没有持久化中心，保持 null。
+        const manualValue =
+            block.kind === "auto" && args.param !== "pitch" ? null : (block.manualValue ?? null);
         const pv = args.paramView;
         const sampled =
             pv === null
                 ? null
-                : (block.lineBlock
-                      ? (input: Parameters<typeof averageParamValueInSpan>[0]) =>
-                            paramLineBlockValue(input.startSec, input.endSec, input)
-                      : averageParamValueInSpan)({
+                : averageParamValueInSpan({
                       startSec: block.startSec,
                       endSec: block.endSec,
                       values: pv.edit,
@@ -38,14 +46,26 @@ export function resolveParamBlockPanelValues(args: {
                       isPitch: args.param === "pitch",
                       param: args.param,
                   });
+        const cached = args.previousValues?.get(block.id);
+        const previous =
+            cached !== undefined &&
+            Math.abs(cached.startSec - block.startSec) <= 1e-6 &&
+            Math.abs(cached.endSec - block.endSec) <= 1e-6
+                ? cached.value
+                : null;
+        const previewAverage =
+            pv === null && args.param === "pitch" && Number.isFinite(block.averageValue)
+                ? block.averageValue
+                : null;
         return {
             ...block,
             manualValue,
             averageValue:
                 manualValue ??
                 sampled ??
-                (pv === null && args.param === "pitch" ? block.averageValue : null) ??
-                args.fallbackValue,
+                (Number.isFinite(previous) ? previous : null) ??
+                previewAverage ??
+                (args.allowFallback === true ? args.fallbackValue : null),
         };
     });
 }
@@ -65,12 +85,16 @@ export function resolveParamBlockFrameView(args: {
     const scope = (key: string) =>
         key.startsWith("v2|") ? key.split("|").slice(0, 3).join("|") : key;
     const interaction = args.interaction;
+    const sameScope =
+        interaction !== null &&
+        args.paramView !== null &&
+        scope(interaction.key) === scope(args.paramView.key);
     if (
         interaction !== null &&
+        sameScope &&
         (!args.param ||
             !interaction.key.startsWith("v2|") ||
-            interaction.key.split("|")[2] === args.param) &&
-        (!args.paramView || scope(interaction.key) === scope(args.paramView.key))
+            interaction.key.split("|")[2] === args.param)
     )
         return interaction;
     if (args.live !== null && args.live.key === args.paramView?.key) {
@@ -92,6 +116,8 @@ export function resolveParamBlockFrameValue(args: {
         readonly averageValue?: number | null;
         readonly logicalCenterValue?: number | null;
         readonly displayCenterValue?: number | null;
+        /** Explicit center policy; locked previews must not fall back to curve sampling. */
+        readonly centerPolicy?: "live" | "locked";
         /** Center produced by the active block gesture, in the same frame as its curve. */
         readonly frameCenterValue?: number | null;
     };
@@ -111,6 +137,32 @@ export function resolveParamBlockFrameValue(args: {
     ) {
         return args.block.frameCenterValue;
     }
+    if (args.block.centerPolicy === "locked") {
+        if (
+            args.block.displayCenterValue !== null &&
+            args.block.displayCenterValue !== undefined &&
+            Number.isFinite(args.block.displayCenterValue)
+        ) {
+            return args.block.displayCenterValue;
+        }
+        if (
+            (args.param ?? args.samples?.param ?? "pitch") === "pitch" &&
+            args.block.logicalCenterValue != null &&
+            Number.isFinite(args.block.logicalCenterValue)
+        ) {
+            return args.block.logicalCenterValue;
+        }
+        if (args.block.averageValue == null) {
+            reportParamBlockDiagnostic({
+                code: "drag_center_missing",
+                gesture: "drag",
+                rootTrackId: null,
+                blockId: null,
+                frame: null,
+            });
+        }
+        return args.block.averageValue ?? null;
+    }
     if (
         !args.curveOwned &&
         (args.param ?? args.samples?.param ?? "pitch") === "pitch" &&
@@ -129,11 +181,7 @@ export function resolveParamBlockFrameValue(args: {
     const sampled =
         args.samples === null
             ? null
-            : (args.curveOwned ? paramLineBlockValue : modeCenterOfValuesInSamples)(
-                  args.block.startSec,
-                  args.block.endSec,
-                  args.samples,
-              );
+            : modeCenterOfValuesInSamples(args.block.startSec, args.block.endSec, args.samples);
     return sampled ?? args.block.averageValue ?? null;
 }
 

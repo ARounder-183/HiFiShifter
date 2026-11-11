@@ -16,9 +16,14 @@ import {
     registerImportRun,
     resetImportCancellationForTests,
 } from "./thunks/importCancellation";
+import {
+    resetParamBlockCommitCoordinatorForTests,
+    trackParamBlockCommit,
+} from "../../components/layout/pianoRoll/paramBlockCommitCoordinator";
 
 beforeEach(() => {
     resetImportCancellationForTests();
+    resetParamBlockCommitCoordinatorForTests();
 });
 
 test("否决在途导入", async () => {
@@ -58,4 +63,22 @@ test("【关键】等在途导入收尾之后才返回（避免命令落在跳�
 
 test("没有在途导入时立即返回", async () => {
     await expect(notifyHistoryJump()).resolves.toBeUndefined();
+});
+
+test("waits for pending parameter-block commits before jumping", async () => {
+    let release!: () => void;
+    const commit = new Promise<void>((resolve) => {
+        release = resolve;
+    });
+    trackParamBlockCommit("drag", "root", commit);
+    let settled = false;
+    const jump = notifyHistoryJump().then(() => {
+        settled = true;
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    release();
+    await jump;
+    expect(settled).toBe(true);
 });

@@ -154,6 +154,8 @@ export interface UiSettings {
     pitchSnapToleranceCents?: number;
     /** 新建块后是否把该段音高按曲线形状归一化到音阶。 */
     paramBlockFollowPitch?: boolean;
+    /** 参数块图层是否始终显示（功能设置，默认关）。 */
+    alwaysShowParamBlocks?: boolean;
     scaleHighlightMode?: string;
     ignoreGrouping?: boolean;
     /** 波纹编辑（自动跟进）模式：off / track / all（对应 REAPER Ripple Editing）。 */
@@ -217,6 +219,8 @@ export interface UiSettings {
      * （含旧配置里没有这一项）在读取时回落出厂默认（绘制工具），因此不需要迁移。
      */
     paramEditorTool?: string;
+    /** 选择族子模式：range / block；缺省 / 非法值按 range。 */
+    paramEditorSelectionMode?: string;
     smoothnessPercent?: number;
     /** 旧版边缘平滑字段名（读取兼容）。 */
     edgeSmoothnessPercent?: number;

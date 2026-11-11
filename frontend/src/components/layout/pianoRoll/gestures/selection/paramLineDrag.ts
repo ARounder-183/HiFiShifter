@@ -28,6 +28,7 @@ type Deps = Pick<
     | "disposeFineAdjustedPointerState"
     | "dragDirection"
     | "edgeHalfSpanForIndices"
+    | "edgeScroll"
     | "editParam"
     | "ensureLiveEditBase"
     | "fetchCommitBaseSource"
@@ -82,6 +83,7 @@ export function handleParamLineDrag(deps: Deps, e: ReactPointerEvent<HTMLCanvasE
         disposeFineAdjustedPointerState,
         dragDirection,
         edgeHalfSpanForIndices,
+        edgeScroll,
         editParam,
         ensureLiveEditBase,
         fetchCommitBaseSource,
@@ -161,6 +163,7 @@ export function handleParamLineDrag(deps: Deps, e: ReactPointerEvent<HTMLCanvasE
                         disposeFineAdjustedPointerState,
                         dragDirection,
                         edgeHalfSpanForIndices,
+                        edgeScroll,
                         editParam,
                         ensureLiveEditBase,
                         fetchCommitBaseSource,

@@ -11,12 +11,18 @@ import {
     isChildPitchOffsetDegreesParam,
 } from "../childPitchOffsetParams";
 import { createEdgeScrollDriver } from "../kernel/edgeScrollDriver";
+import { createHorizontalEdgeScrollAxis } from "../kernel/edgeScrollAxis";
+import {
+    createValueAxisEdgeScrollAxis,
+    valueAxisScrollable,
+} from "../kernel/valueAxisEdgeScroller";
+import { EDGE_SCROLL_MAX_SPEED_PX_PER_SEC } from "../kernel/dragArithmetic";
 import { getDrawPreviewValue } from "../paramValuePreviewLogic";
 import { timeToFrame } from "../utils";
-import { isModifierActive } from "../../../../features/keybindings/keybindingsSlice";
+import { resolveClipSelectionModifiers } from "../../../../features/keybindings/clipSelectionModifiers";
 import type { StrokeMode } from "../types";
 import type { PointerEvent as ReactPointerEvent } from "react";
-import type { PointerDeps } from "./pointerDeps";
+import type { ParamBlockPointerDownResult, PointerDeps } from "./pointerDeps";
 import { handleFreehandPointerDown } from "./freehandPointerDown";
 import { handleVibratoPointerDown } from "./vibratoPointerDown";
 import { handleSelectPointerDown } from "./selectPointerDown";
@@ -27,6 +33,7 @@ type CanvasPointerDownDeps = Pick<
     | "activePointerGestureEndRef"
     | "applyDenseToLiveEdit"
     | "applyEdgeScrollLeft"
+    | "applyValueScrollCenter"
     | "applyMorphOverlayPreview"
     | "applyPostStrokeSmoothing"
     | "applyVibratoChoice"
@@ -39,6 +46,8 @@ type CanvasPointerDownDeps = Pick<
     | "bumpRefreshToken"
     | "canvasRef"
     | "clampViewport"
+    | "getCurrentViewportForScrollbar"
+    | "getParamValueBoundsForScrollbar"
     | "clearActivePointerGestureEnd"
     | "commitStroke"
     | "createFineAdjustedPointerState"
@@ -76,8 +85,10 @@ type CanvasPointerDownDeps = Pick<
     | "onParamValuePreviewChange"
     | "onPitchSnapGestureActiveChange"
     | "panRef"
+    | "paramBlockToolActive"
     | "paramEditorSeekPlayheadEnabled"
     | "paramMultiSelectKb"
+    | "paramRangeSelectKb"
     | "paramStretchKb"
     | "paramValuePopupEnabled"
     | "paramView"
@@ -145,7 +156,9 @@ export type PointerDownBranch = "select" | "vibrato" | "freehand";
  * "每个工具都有归属"变成一条能失败的测试，而不是要靠读 645 行 if/else 才知道。
  */
 export function pointerDownBranchFor(toolMode: string): PointerDownBranch {
-    if (toolMode === "select" || toolMode === "block") return "select";
+    // block 是选择族子模式，不在这里出现；若调用方仍传旧值，按未知工具
+    // 落进自由绘制而不是伪装成选择，避免把已删除的工具身份带回来。
+    if (toolMode === "select") return "select";
     if (toolMode === "line" || toolMode === "vibrato") return "vibrato";
     return "freehand";
 }
@@ -158,6 +171,7 @@ export function handleCanvasPointerDown(
         activePointerGestureEndRef,
         applyDenseToLiveEdit,
         applyEdgeScrollLeft,
+        applyValueScrollCenter,
         applyMorphOverlayPreview,
         applyPostStrokeSmoothing,
         applyVibratoChoice,
@@ -190,6 +204,8 @@ export function handleCanvasPointerDown(
         getDefaultCanvasCursor,
         getFineAdjustedPointerPosition,
         getViewportTruth,
+        getCurrentViewportForScrollbar,
+        getParamValueBoundsForScrollbar,
         installDragDirectionKeyCycler,
         invalidate,
         isEffectivePitchSnapActive,
@@ -202,6 +218,7 @@ export function handleCanvasPointerDown(
         morphOverlayRef,
         onContextMenu,
         onParamBlockPointerDown,
+        paramBlockToolActive,
         onCycleDragDirection,
         onParamCommitSucceeded,
         onParamValuePreviewChange,
@@ -209,6 +226,7 @@ export function handleCanvasPointerDown(
         panRef,
         paramEditorSeekPlayheadEnabled,
         paramMultiSelectKb,
+        paramRangeSelectKb,
         paramStretchKb,
         paramValuePopupEnabled,
         paramView,
@@ -254,7 +272,61 @@ export function handleCanvasPointerDown(
         viewSizeRef,
     } = deps;
 
-    // 中键平移必须早于块命中：块工具下中键仍应移动视图，而不是被当成块点击。
+    const currentVerticalView = () => getCurrentViewportForScrollbar(editParam);
+    const projectMaxScrollLeft = () => {
+        const scroller = scrollerRef.current;
+        if (!scroller) return 0;
+        const axis = axisFromRefs();
+        const nativeOffsetPx = syncTimelineEnabled ? timelineOffsetRef.current : 0;
+        return edgeScrollMaxLeftPx({
+            pxPerSec: axis.pxPerSec,
+            framePeriodMs,
+            maxFrame: Math.max(0, timeToFrame(dynamicProjectSec, framePeriodMs)),
+            viewportWidthPx: scroller.clientWidth,
+            nativeOffsetPx,
+        });
+    };
+    /*
+     * 值轴配置的唯一来源：块拖动与绘制类手势必须用同一套带宽 / 速度 / 软启动，
+     * 否则同一个参数编辑器里会出现两种上下滚动手感。
+     *
+     * 【为什么是「值域中心」而不是 scrollTop】值轴的物理刻度是参数值；借道 1600px
+     * 的 scrollTop 代理域会让单帧步长在值域上失去上限（见 valueAxisEdgeScroller）。
+     * 滚动条自己的映射仍走 `verticalScrollMapping`，与这里互不影响。
+     */
+    const valueAxis = createValueAxisEdgeScrollAxis({
+        getSpan: () => currentVerticalView().span,
+        getCenter: () => currentVerticalView().center,
+        setCenter: (center) => applyValueScrollCenter(center),
+        canScroll: () => {
+            const bounds = getParamValueBoundsForScrollbar(editParam);
+            return valueAxisScrollable({
+                min: bounds.min,
+                max: bounds.max,
+                span: currentVerticalView().span,
+            });
+        },
+    });
+
+    const blockEdgeScroll = createEdgeScrollDriver({
+        getBounds: () => {
+            const rect = canvasRef.current?.getBoundingClientRect();
+            if (rect === undefined) return null;
+            return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom };
+        },
+        axes: [
+            createHorizontalEdgeScrollAxis({
+                getScrollLeft: () => getViewportTruth()?.scrollLeft ?? scrollLeftRef.current,
+                setScrollLeft: (next) => applyEdgeScrollLeft(next),
+                getMaxScrollLeft: projectMaxScrollLeft,
+                getMinScrollLeft: () => (syncTimelineEnabled ? -timelineOffsetRef.current : 0),
+                maxSpeedPxPerSec: EDGE_SCROLL_MAX_SPEED_PX_PER_SEC,
+            }),
+            valueAxis,
+        ],
+    });
+
+    // 中键平移必须早于块命中：参数块选择模式下中键仍应移动视图，而不是被当成块点击。
     if (e.button === 1) {
         e.preventDefault();
         const scroller = scrollerRef.current;
@@ -324,21 +396,18 @@ export function handleCanvasPointerDown(
     }
 
     /*
-     * 块编辑工具优先于曲线手势。
+     * 参数块选择模式优先于曲线手势。
      *
      * 【为什么放在最前面】块是同一条曲线上的另一种“命中目标”；若先走曲线 / 选区
      * 分支，用户永远选不中块。回调返回 true 表示已消费，必须直接 return。
-     * 只有块工具启用时面板才会传该回调，因此既有交互不受影响。
+     * 只有参数块选择模式启用时面板才会传该回调，因此既有交互不受影响。
      */
-    if (onParamBlockPointerDown) {
+    if (onParamBlockPointerDown && paramBlockToolActive) {
         const rect = canvasRef.current?.getBoundingClientRect();
         if (rect) {
+            let blockResult: ParamBlockPointerDownResult = { handled: false };
             try {
-                /*
-                 * 拖块时不要先 seek：我们要连续纵向拖动；按下即挪播放头会打断
-                 * 手势，而且块编辑不是“定位播放头”。命中块时再阻止后续 seek。
-                 */
-                const consumed = onParamBlockPointerDown({
+                blockResult = onParamBlockPointerDown({
                     sec: pointerSec(e.clientX),
                     localY: e.clientY - rect.top,
                     clientY: e.clientY,
@@ -348,13 +417,31 @@ export function handleCanvasPointerDown(
                     captureTarget: e.currentTarget,
                     setActivePointerGestureEnd,
                     clearActivePointerGestureEnd,
-                    // 新增块用同一个多选修饰键起步：修饰键 + 空白拖拽。
-                    add: isModifierActive(paramMultiSelectKb, e.nativeEvent),
-                    // 沿用参数编辑器的多选键（默认 Ctrl / Cmd），与选区语义一致。
-                    toggle: isModifierActive(paramMultiSelectKb, e.nativeEvent),
+                    ...(() => {
+                        const selectionMods = resolveClipSelectionModifiers({
+                            event: e.nativeEvent,
+                            multiSelectToggleKb: paramMultiSelectKb,
+                            rangeSelectKb: paramRangeSelectKb,
+                        });
+                        return {
+                            add: selectionMods.multiSelectToggleActive,
+                            toggle: selectionMods.multiSelectToggleActive,
+                            multiSelect: selectionMods.multiSelectToggleActive,
+                            rangeSelect: selectionMods.rangeSelectActive,
+                        };
+                    })(),
+                    pointerFrame: (clientX) => pointerFrame(clientX),
+                    clampSelectionFrame: (frame) =>
+                        Math.min(
+                            frame,
+                            Math.max(0, timeToFrame(dynamicProjectSec, framePeriodMs) - 1),
+                        ),
                     pointerType: e.nativeEvent.pointerType,
+                    nativeEvent: e.nativeEvent,
                     altKey: e.altKey,
                     shiftKey: e.shiftKey,
+                    ctrlKey: e.ctrlKey,
+                    metaKey: e.metaKey,
                     yToValue,
                     canvasHeightPx: rect.height,
                     blockSnapEnabled: isEffectivePitchSnapActive(e.nativeEvent),
@@ -365,34 +452,58 @@ export function handleCanvasPointerDown(
                             : undefined,
                     pointerValue,
                     secAtClientX: pointerSec,
+                    edgeScroll: blockEdgeScroll,
                     isSnapToggleModifierHeld,
                     editParam,
                     gridStep: 1,
                 });
-                if (consumed) {
-                    /*
-                     * 左键不要 preventDefault：Pointer Events 规范下这会抑制
-                     * 兼容 mouse 事件，双击（dblclick）就永远不会派发。
-                     * 指针捕获也由具体手势安装；单击本身不捕获，否则 pointerup
-                     * 会被重定向，浏览器无法把两次点击合成为 dblclick。
-                     */
-                    if (e.button === 2) {
-                        e.preventDefault();
-                        e.stopPropagation();
-                    }
-                    return;
-                }
             } catch {
                 // 块层是实验能力：命中异常不得让参数编辑器整体失去绘制手势。
+            }
+            if (blockResult.handled) {
+                if (
+                    blockResult.seekOnClick &&
+                    e.button === 0 &&
+                    !isStylusLike(e.nativeEvent) &&
+                    paramEditorSeekPlayheadEnabled !== false
+                ) {
+                    const startX = e.clientX;
+                    const startY = e.clientY;
+                    const seekOnUp = (up: globalThis.PointerEvent) => {
+                        window.removeEventListener("pointerup", seekOnUp, true);
+                        if (Math.hypot(up.clientX - startX, up.clientY - startY) < 4) {
+                            const sec = pointerSec(e.clientX);
+                            dispatch(setPlayheadSec(sec));
+                            void dispatch(seekPlayhead(sec));
+                        }
+                    };
+                    window.addEventListener("pointerup", seekOnUp, true);
+                }
+                if (e.button === 2) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                }
+                return;
             }
         }
     }
     /*
-     * 块工具在未命中块时已清空块选择；这里必须终止手势，不能让同一次按下继续
-     * 落进自由绘制分支。否则“点击块外空白”会顺手在曲线上画一个点，块工具看起来
-     * 像误触了画笔。
+     * 参数块选择模式在未命中块时已清空块选择；这里必须终止手势，不能让同一次按下继续
+     * 落进自由绘制分支。否则“点击块外空白”会顺手在曲线上画一个点，参数块选择模式看起来
+     * 像误触了画笔。空白点击仍应按设置移动播放头。
      */
-    if (toolMode === "block") return;
+    if (paramBlockToolActive) {
+        if (
+            e.button === 0 &&
+            !isStylusLike(e.nativeEvent) &&
+            paramEditorSeekPlayheadEnabled !== false
+        ) {
+            const sec = pointerSec(e.clientX);
+            dispatch(setPlayheadSec(sec));
+            void dispatch(seekPlayhead(sec));
+        }
+        return;
+    }
 
     // 掌压拒识：笔 / 鼠标手势进行中时，触摸（书写时的手掌）按下不中止、
     // 不接管当前手势。pen / mouse 的第二指针维持原语义（切笔尖 / 橡皮
@@ -476,7 +587,9 @@ export function handleCanvasPointerDown(
      * 颤音分支在拖动中改写它。用持有者而不是直接传值，是为了让分支能原样搬进独立函数
      * —— 传值会复制一份，写入就到不了驱动的闭包。
      */
-    const onEdgeScrolledRef: { current: ((clientX: number) => void) | null } = { current: null };
+    const onEdgeScrolledRef: {
+        current: ((clientX: number, clientY?: number) => void) | null;
+    } = { current: null };
 
     /**
      * 滚动上界：工程末端与**已取数窗口末端**取小。
@@ -522,32 +635,39 @@ export function handleCanvasPointerDown(
 
     const edgeScroll = createEdgeScrollDriver({
         getBounds: () => {
-            const scroller = scrollerRef.current;
-            if (!scroller) return null;
-            const rect = scroller.getBoundingClientRect();
-            return { left: rect.left, right: rect.right };
+            const rect = canvasRef.current?.getBoundingClientRect();
+            if (rect === undefined) return null;
+            return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom };
         },
-        // ★ 读**内核真值**（绘制坐标），不读原生 `scrollLeft`。
-        //
-        // 【为什么不能读原生】写入走 `applyEdgeScrollLeft` → `host.setScrollLeft`
-        //（内核），而原生 scroller 只是**镜像**，要到下一次帧提交才被回写。
-        // 若驱动读原生值，第二次 step 读到的仍是上一帧的旧位置，于是每一帧
-        // 都从同一个旧位置重新加一个增量 —— 滚动会"原地踏步"或严重偏慢。
-        // 这与面板其它地方"真值在内核"的约定一致（见 `getViewportTruth`）。
-        getScrollLeft: () => getViewportTruth()?.scrollLeft ?? scrollLeftRef.current,
-        setScrollLeft: (nextDrawing) => {
-            // 走自动滚屏专用落点：写内核 + 推共享视口 + **标脏**，
-            // 不自己重绘（绘制由笔画的合帧循环负责，避免每帧两次全帧提交）。
-            applyEdgeScrollLeft(nextDrawing);
-        },
-        // 上界同为绘制坐标（`edgeScrollMaxLeftPx` 已含 nativeOffset 平移）。
-        getMaxScrollLeft: () => maxScrollLeftFor(toolMode !== "select" && toolMode !== "block"),
-        // ★ 下界必须也是绘制坐标且可为负：开启同步时绘制域是
-        // `[−偏移, 内容宽 − 偏移]`，左侧那片预留的对齐留白是**合法的负区间**。
-        // 传 0 会让"向左滚"每帧都被夹回 0，与内核自己的下界（−偏移）打架 ——
-        // 视图在两处往复即用户看到的"闪现"。
-        getMinScrollLeft: () => (syncTimelineEnabled ? -timelineOffsetRef.current : 0),
-        onScrolled: (clientX) => onEdgeScrolledRef.current?.(clientX),
+        axes: [
+            // ★ 读**内核真值**（绘制坐标），不读原生 `scrollLeft`。
+            //
+            // 【为什么不能读原生】写入走 `applyEdgeScrollLeft` → `host.setScrollLeft`
+            //（内核），而原生 scroller 只是**镜像**，要到下一次帧提交才被回写。
+            // 若驱动读原生值，第二次 step 读到的仍是上一帧的旧位置，于是每一帧
+            // 都从同一个旧位置重新加一个增量 —— 滚动会"原地踏步"或严重偏慢。
+            // 这与面板其它地方"真值在内核"的约定一致（见 `getViewportTruth`）。
+            createHorizontalEdgeScrollAxis({
+                getScrollLeft: () => getViewportTruth()?.scrollLeft ?? scrollLeftRef.current,
+                setScrollLeft: (nextDrawing) => {
+                    // 走自动滚屏专用落点：写内核 + 推共享视口 + **标脏**，
+                    // 不自己重绘（绘制由笔画的合帧循环负责，避免每帧两次全帧提交）。
+                    applyEdgeScrollLeft(nextDrawing);
+                },
+                // 上界同为绘制坐标（`edgeScrollMaxLeftPx` 已含 nativeOffset 平移）。
+                // block 已收进 select 族，滚动上界与 range 选择完全同源。
+                getMaxScrollLeft: () => maxScrollLeftFor(toolMode !== "select"),
+                // ★ 下界必须也是绘制坐标且可为负：开启同步时绘制域是
+                // `[−偏移, 内容宽 − 偏移]`，左侧那片预留的对齐留白是**合法的负区间**。
+                // 传 0 会让"向左滚"每帧都被夹回 0，与内核自己的下界（−偏移）打架 ——
+                // 视图在两处往复即用户看到的"闪现"。
+                getMinScrollLeft: () => (syncTimelineEnabled ? -timelineOffsetRef.current : 0),
+                maxSpeedPxPerSec: EDGE_SCROLL_MAX_SPEED_PX_PER_SEC,
+            }),
+            // 两个驱动共用同一个值轴实例：避免两份 span / center 快照打架。
+            valueAxis,
+        ],
+        onScrolled: (clientX, clientY) => onEdgeScrolledRef.current?.(clientX, clientY),
     });
 
     if (toolMode === "select") {

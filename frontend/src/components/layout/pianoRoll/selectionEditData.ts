@@ -27,6 +27,20 @@ import { restoreDynSentinels } from "./paramRanges";
 /** 单次 IPC 收发的帧数上限。约 32k 帧 ≈ 190 ms @ fp 5.8ms，单次处理不会掉帧。 */
 const CHUNK_FRAMES = 32_768;
 
+/** 多块全分辨率读的最大尝试次数（含首次）。 */
+const CURVE_READ_ATTEMPTS = 3;
+
+/**
+ * 读窗口之间出现了并发写入。
+ *
+ * 只有这两条错误可以在"整轮重读"的意义上重试：它们是**观测到**的不一致，
+ * 不是校验失败。其余错误（`Invalid:` / 传输失败）重试只会再失败一次。
+ */
+function isCurveReadRace(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    return message.includes("changed during read");
+}
+
 /** 让出事件循环，使长任务期间界面仍能响应（滚动、绘制、取消操作）。 */
 export function yieldToUi(): Promise<void> {
     return new Promise<void>((resolve) => {
@@ -98,6 +112,12 @@ export async function fetchFullResCurve(args: {
     paramView?: ParamViewSegment | null;
     onProgress?: (doneFrames: number, totalFrames: number) => void;
     withSentinel?: boolean;
+    /**
+     * 即使 pv 已以 stride=1 覆盖也强制回源。提交路径需要
+     * `authorityRevision` 做 CAS，pv 快路径不携带它；不强制时会把
+     * `undefined` 传给后端，必然触发 `Conflict: parameter curve changed`。
+     */
+    forceAuthority?: boolean;
 }): Promise<
     FrameCurve & {
         sentinel?: boolean[];
@@ -106,7 +126,7 @@ export async function fetchFullResCurve(args: {
         geometrySignature?: string;
     }
 > {
-    const { trackId, param, paramView, onProgress, withSentinel } = args;
+    const { trackId, param, paramView, onProgress, withSentinel, forceAuthority } = args;
     const startFrame = Math.max(0, Math.floor(args.startFrame));
     const endFrame = Math.max(startFrame, Math.floor(args.endFrame));
     const totalFrames = endFrame - startFrame + 1;
@@ -114,7 +134,7 @@ export async function fetchFullResCurve(args: {
     // 快路径：pv 已以 stride=1 覆盖，直接切片。带哨兵位图时同样可走 ——
     // pv 现在自带 edit_sentinel（见 ParamViewSegment.editSentinel），位图缺位
     // （旧状态 / 非 dyn）才回源取数。
-    const pvFastPath = paramView ?? null;
+    const pvFastPath = forceAuthority === true ? null : (paramView ?? null);
     if (pvCoversFullRes(pvFastPath, startFrame, endFrame)) {
         const pv = pvFastPath as ParamViewSegment;
         const offset = startFrame - pv.startFrame;
@@ -141,51 +161,73 @@ export async function fetchFullResCurve(args: {
     let authorityRevision: number | undefined;
     let geometryRevision: number | undefined;
     let geometrySignature: string | undefined;
-    for (let chunkStart = startFrame; chunkStart <= endFrame; chunkStart += CHUNK_FRAMES) {
-        const chunkEnd = Math.min(endFrame, chunkStart + CHUNK_FRAMES - 1);
-        const count = chunkEnd - chunkStart + 1;
-        const res = await paramsApi.getParamFrames(
-            trackId,
-            param,
-            chunkStart,
-            count,
-            1,
-            true,
-            withSentinel ?? false,
-        );
-        if (!res?.ok) throw new Error("Failed to read full-resolution parameter curve");
-        if (
-            authorityRevision !== undefined &&
-            res.authority_revision !== undefined &&
-            authorityRevision !== res.authority_revision
-        )
-            throw new Error("Conflict: parameter curve changed during read");
-        if (
-            geometrySignature !== undefined &&
-            res.geometry_signature !== undefined &&
-            geometrySignature !== res.geometry_signature
-        )
-            throw new Error("Conflict: parameter geometry changed during read");
-        if (
-            geometrySignature === undefined &&
-            geometryRevision !== undefined &&
-            res.geometry_revision !== undefined &&
-            geometryRevision !== res.geometry_revision
-        )
-            throw new Error("Conflict: parameter geometry changed during read");
-        authorityRevision = res.authority_revision;
-        geometryRevision = res.geometry_revision;
-        geometrySignature = res.geometry_signature;
-        const src = res?.ok ? res.edit : undefined;
-        const sent = res?.ok ? res.edit_sentinel : undefined;
-        for (let i = 0; i < count; i += 1) {
-            const k = chunkStart - startFrame + i;
-            values[k] = src ? (src[i] ?? 0) : 0;
-            if (sentinel) sentinel[k] = sent?.[i] === true;
+    /*
+     * 【为什么要重试整轮读】`authority_revision` 是**进程全局**的曲线代次：任何
+     * 参数写入都会让它前进。多块读之间只要插入一次无关写入，各块的 revision 就
+     * 不再相同，而曲线补丁的 CAS 要求"所有窗口来自同一个 revision"。旧实现直接
+     * 抛 `Conflict: parameter curve changed during read`，用户看到的就是"有时
+     * 能提交、有时报参数块操作失败"。这里把整轮读重来一次：窗口之间没有写入时
+     * 第二轮必然一致；仍然不一致说明后台写入非常频繁，那就真的不能提交。
+     */
+    for (let attempt = 0; ; attempt += 1) {
+        try {
+            for (let chunkStart = startFrame; chunkStart <= endFrame; chunkStart += CHUNK_FRAMES) {
+                const chunkEnd = Math.min(endFrame, chunkStart + CHUNK_FRAMES - 1);
+                const count = chunkEnd - chunkStart + 1;
+                const res = await paramsApi.getParamFrames(
+                    trackId,
+                    param,
+                    chunkStart,
+                    count,
+                    1,
+                    true,
+                    withSentinel ?? false,
+                );
+                if (!res?.ok) throw new Error("Failed to read full-resolution parameter curve");
+                if (
+                    authorityRevision !== undefined &&
+                    res.authority_revision !== undefined &&
+                    authorityRevision !== res.authority_revision
+                )
+                    throw new Error("Conflict: parameter curve changed during read");
+                if (
+                    geometrySignature !== undefined &&
+                    res.geometry_signature !== undefined &&
+                    geometrySignature !== res.geometry_signature
+                )
+                    throw new Error("Conflict: parameter geometry changed during read");
+                if (
+                    geometrySignature === undefined &&
+                    geometryRevision !== undefined &&
+                    res.geometry_revision !== undefined &&
+                    geometryRevision !== res.geometry_revision
+                )
+                    throw new Error("Conflict: parameter geometry changed during read");
+                authorityRevision = res.authority_revision;
+                geometryRevision = res.geometry_revision;
+                geometrySignature = res.geometry_signature;
+                const src = res?.ok ? res.edit : undefined;
+                const sent = res?.ok ? res.edit_sentinel : undefined;
+                for (let i = 0; i < count; i += 1) {
+                    const k = chunkStart - startFrame + i;
+                    values[k] = src ? (src[i] ?? 0) : 0;
+                    if (sentinel) sentinel[k] = sent?.[i] === true;
+                }
+                done += count;
+                onProgress?.(done, totalFrames);
+                await yieldToUi();
+            }
+        } catch (error) {
+            if (!isCurveReadRace(error) || attempt >= CURVE_READ_ATTEMPTS - 1) throw error;
+            values.fill(0);
+            sentinel?.fill(false);
+            done = 0;
+            authorityRevision = undefined;
+            geometryRevision = undefined;
+            geometrySignature = undefined;
+            continue;
         }
-        done += count;
-        onProgress?.(done, totalFrames);
-        await yieldToUi();
+        break;
     }
     return {
         startFrame,

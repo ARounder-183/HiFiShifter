@@ -3,6 +3,7 @@ import {
     resolveActionByFocus,
     resolveCopyCutRoute,
     resolveEditOpRoute,
+    resolveParamBlockEditChannel,
     resolvePasteRoute,
     ACTION_TO_EDIT_OP,
 } from "./focusRouting";
@@ -69,7 +70,9 @@ describe("resolveActionByFocus — 焦点感知路由", () => {
         expect(result).toBe("edit.setPitch");
     });
 
-    it("参数编辑器 + block 工具：paramEditorSelect 仍优先（块工具不能误落到全局操作）", () => {
+    it("参数编辑器 + block 子模式：paramEditorSelect 以共享优先级继续生效", () => {
+        // block 是选择族子模式，标准参数命令（Ctrl+T 设置音高）仍然要命中；
+        // 若这里硬排除，块模式里的复制/粘贴/初始化/移调会整族消失。
         const result = resolveActionByFocus(
             keyEvent("t", { ctrl: true }),
             FULL_CTRL_T,
@@ -77,6 +80,16 @@ describe("resolveActionByFocus — 焦点感知路由", () => {
             "block",
         );
         expect(result).toBe("edit.setPitch");
+    });
+
+    it("block 子模式下 edit.initialize 也由共享 paramEditorSelect 路由", () => {
+        const map = lists({
+            "track.clone": { key: "d", ctrl: true },
+            "edit.initialize": { key: "backspace" },
+        });
+        expect(resolveActionByFocus(keyEvent("backspace"), map, "pianoRoll", "block")).toBe(
+            "edit.initialize",
+        );
     });
 
     it("时间轴焦点：全局操作优先（添加轨道），paramEditorSelect 硬排除", () => {
@@ -227,7 +240,7 @@ describe("resolveEditOpRoute（编辑操作的表面兜底层）", () => {
         }
     });
 
-    it("selectAll/deselect：参数编辑器仅在 select 工具下接手，其余落时间轴", () => {
+    it("selectAll/deselect：参数编辑器在 select 与派生 block scope 下接手", () => {
         expect(resolveEditOpRoute("pianoRoll", "selectAll", "select")).toBe("hifi:editOp");
         expect(resolveEditOpRoute("pianoRoll", "deselect", "select")).toBe("hifi:editOp");
         expect(resolveEditOpRoute("pianoRoll", "selectAll", "block")).toBe("hifi:editOp");
@@ -254,9 +267,38 @@ describe("resolveEditOpRoute（编辑操作的表面兜底层）", () => {
         }
     });
 
-    it("参数块工具下 split 归参数编辑器，不切上方 Clip", () => {
-        expect(resolveEditOpRoute("pianoRoll", "split", "block")).toBe("hifi:editOp");
+    it("参数块选择子模式下 split 不再走 hifi:editOp；块动作有独立通道", () => {
+        expect(resolveEditOpRoute("pianoRoll", "split", "block")).toBe("hifi:timelineEditOp");
         expect(resolveEditOpRoute("timeline", "split", "block")).toBe("hifi:timelineEditOp");
+        /*
+         * 判据吃**两根轴**：block 是 selectToolMode 的取值，不是 ToolMode 的成员。
+         * 上一版这里传的是一个 "block" 字符串（把派生 scope 当 toolMode），于是
+         * 测试通过、真实调用永远为 null —— 这一格现在钉住真实的字段组合。
+         */
+        expect(
+            resolveParamBlockEditChannel("pianoRoll", {
+                toolMode: "select",
+                selectToolMode: "block",
+            }),
+        ).toBe("hifi:paramBlockEditOp");
+        expect(
+            resolveParamBlockEditChannel("pianoRoll", {
+                toolMode: "select",
+                selectToolMode: "range",
+            }),
+        ).toBeNull();
+        expect(
+            resolveParamBlockEditChannel("pianoRoll", {
+                toolMode: "draw",
+                selectToolMode: "block",
+            }),
+        ).toBeNull();
+        expect(
+            resolveParamBlockEditChannel("timeline", {
+                toolMode: "select",
+                selectToolMode: "block",
+            }),
+        ).toBeNull();
     });
 
     it("未收录的操作返回 null（调用方走各自固定通道）", () => {

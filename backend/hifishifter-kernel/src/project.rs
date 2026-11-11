@@ -100,19 +100,12 @@ impl SynthConfig {
 /// `serde(default)`，缺省为空，旧文件照常打开。
 /// 当前工程文件格式版本。
 ///
-/// v6：气声分离开关（`breath_enabled`）开始同时门控张力。为避免旧工程静默失去
-/// 张力，打开 v5 及更早的工程时会自动置位该开关（见
-/// [`crate::state::TimelineState::migrate_legacy_breath_separation`]）；
-/// 该迁移**仅对 < v6 生效**，因此用户此后手动关闭开关的选择会持久保留。
+/// v7：参数块改为“Take 源域编辑集 + 派生视图”。
 ///
-/// `ClipTake.syllable_analysis`（源域音节区间）与
-/// `TrackParamsState.param_block_merges`（用户合并意图）都是可选附加字段：
-/// `serde(default)` / `skip_serializing_if` 让它们对旧版本可忽略。
-///
-/// 【为什么不升 v7】旧 App 遇到更高的 `version` 会直接拒绝打开工程文件。
-/// 仅新增可选字段不构成“必须新构建才能读”的格式变化，升代只会让回退到旧
-/// 构建的用户失去整份工程，而收益为零。
-pub const CURRENT_PROJECT_FILE_VERSION: u32 = 6;
+/// 【为什么直接升 v7 且不迁移】开发版从未分发给终端用户；旧的绝对帧块、
+/// 合并意图与切分/伸缩记录全部删除。旧工程里的这些字段被 serde 忽略，
+/// 块编辑从空集开始。工程版本不保留兼容分支。
+pub const CURRENT_PROJECT_FILE_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -427,6 +420,8 @@ pub fn prepare_timeline_for_project_save(
     }
 
     for params in tl.params_by_root_track.values_mut() {
+        // 派生视图不是权威，保存前必须清空；打开工程后按编辑集重建。
+        params.param_block_view = None;
         if params.pitch_edit_user_modified {
             // 用户只编辑了部分帧时，orig 仍是未编辑帧的显示/导出基线，保留；
             // 全零 orig 没有信息量，直接省略。
@@ -454,13 +449,6 @@ pub fn prepare_timeline_for_project_save(
         // 空曲线与缺失 key 语义相同（都取参数默认值）。
         params.extra_curves.retain(|_, curve| !curve.is_empty());
     }
-    // 合并成员指向的 Clip / Take / 音节区间必须仍然存在；失效成员清掉，
-    // 少于两个成员的组合整组丢弃。避免重分析 / 删除后误合并别的块。
-    let clips = tl.clips.clone();
-    for params in tl.params_by_root_track.values_mut() {
-        params.prune_param_block_merges(&clips);
-    }
-
     // 精简后没有任何用户数据的 root-track 参数记录直接删除；
     // 打开工程时会按需用 ensure_params_for_root 重新创建。
     tl.params_by_root_track
@@ -707,356 +695,72 @@ mod tests {
         }
     }
 
-    /// 音箱块新字段：旧文件缺省为空；新文件往返保留源域音节与合并意图。
+    /// 参数块编辑集与 GAME 基线往返；旧字段不参与新格式。
     #[test]
-    fn optional_syllable_and_block_merge_fields_round_trip_and_default_on_legacy_json() {
-        let legacy: ProjectFile = serde_json::from_value(serde_json::json!({
-            "version": 6,
-            "name": "legacy",
-            "timeline": {
-                "tracks": [],
-                "clips": [],
-                "bpm": 120.0,
-                "project_sec": 1.0
-            },
-            "base_scale": "C",
-            "beats_per_bar": 4,
-            "time_signature_denominator": 4,
-            "grid_size": "1/4"
-        }))
-        .expect("v6 without optional block fields must load");
-        assert!(legacy.timeline.params_by_root_track.is_empty());
-
+    fn param_block_edit_set_round_trips_and_view_is_never_persisted() {
         let mut pf = project("blocks");
-        let take = crate::state::ClipTake {
-            id: "take".into(),
-            name: "take".into(),
-            gain: 1.0,
-            source_path: None,
-            source_path_relative: None,
-            duration_sec: None,
-            duration_frames: None,
-            source_sample_rate: None,
-            source_file_fingerprint: None,
-            source_file_mtime: None,
-            source_file_size: None,
-            content_id: None,
-            waveform_preview: None,
-            pitch_range: None,
-            source_start_sec: 0.0,
-            source_end_sec: 0.0,
-            playback_rate: 1.0,
-            reversed: false,
-            loop_enabled: false,
-            channel_mode: 0,
-            source_channels: None,
-            channel_decision: None,
-            midi_note_data: None,
-            midi_fill_gaps: false,
-            syllable_analysis: Some(crate::pitch_analysis::TakeSyllableAnalysis {
-                algorithm: crate::pitch_analysis::SYLLABLE_ALGORITHM.into(),
-                algorithm_version: crate::pitch_analysis::SYLLABLE_ALGORITHM_VERSION,
-                source_digest: "digest".into(),
-                source_spans_sec: vec![crate::pitch_analysis::SyllableSpan {
-                    start_sec: 0.1,
-                    end_sec: 0.3,
-                }],
-            }),
-            stretch_markers: vec![],
-            envelopes: None,
-        };
-        pf.timeline.clips.push(crate::state::Clip {
-            id: "clip".into(),
-            group_id: None,
-            track_id: "track".into(),
-            name: "clip".into(),
-            start_sec: 0.0,
-            length_sec: 1.0,
-            color: "blue".into(),
-            takes: vec![take],
-            active_take_id: Some("take".into()),
-            clip_playback_rate: 1.0,
-            source_path: None,
-            source_path_relative: None,
-            duration_sec: None,
-            duration_frames: None,
-            source_sample_rate: None,
-            source_file_mtime: None,
-            source_file_size: None,
-            source_file_fingerprint: None,
-            content_id: None,
-            waveform_preview: None,
-            pitch_range: None,
-            gain: 1.0,
-            clip_gain: 1.0,
-            muted: false,
-            source_start_sec: 0.0,
-            source_end_sec: 0.0,
-            playback_rate: 1.0,
-            reversed: false,
-            channel_mode: 0,
-            source_channels: None,
-            loop_enabled: false,
-            loop_period_sec: None,
-            snap_offset_sec: 0.0,
-            fade_in_sec: 0.0,
-            fade_out_sec: 0.0,
-            fade_in_curve: "sine".into(),
-            fade_out_curve: "sine".into(),
-            fade_in_shape: 0.0,
-            fade_out_shape: 0.0,
-            fade_in_dir: 0.0,
-            fade_out_dir: 0.0,
-            fade_in_s: 0.0,
-            fade_out_s: 0.0,
-            auto_fade_in_sec: 0.0,
-            auto_fade_out_sec: 0.0,
-            extra_curves: None,
-            extra_params: None,
-            formant_morph: None,
-            midi_note_data: None,
-            midi_fill_gaps: false,
+        let mut clip: crate::state::Clip = serde_json::from_value(serde_json::json!({
+            "id":"clip","track_id":"track","name":"clip","start_sec":0.0,"length_sec":1.0,
+            "takes":[{"id":"take","name":"take","source_path":"a.wav","source_start_sec":0.0,"source_end_sec":1.0}]
+        })).unwrap();
+        clip.normalize_takes();
+        clip.takes[0].game_block_baseline = Some(crate::param_blocks::GameBlockBaseline {
+            revision: 1,
+            algorithm: "game".into(),
+            algorithm_version: 1,
+            source_spans_sec: vec![crate::pitch_analysis::SyllableSpan {
+                start_sec: 0.1,
+                end_sec: 0.3,
+            }],
         });
+        pf.timeline.clips.push(clip);
         pf.timeline.params_by_root_track.insert(
             "track".into(),
             crate::state::TrackParamsState {
-                param_block_merges: vec![crate::state::ParamBlockMergeRecord {
-                    merged_group_id: "group".into(),
-                    member_refs: vec![crate::state::ParamBlockMemberRef {
-                        clip_id: "clip".into(),
-                        take_id: "take".into(),
-                        syllable_id: "syl".into(),
-                        source_start_sec: 0.1,
-                        source_end_sec: 0.3,
+                param_block_edits: crate::param_blocks::ParamBlockEditSet {
+                    schema_version: 2,
+                    revision: 3,
+                    blocks: vec![crate::param_blocks::UserParamBlock {
+                        id: "ublock:1".into(),
+                        geometry: crate::param_blocks::BlockGeometry::Take {
+                            members: vec![crate::param_blocks::TakeSpan {
+                                clip_id: "clip".into(),
+                                take_id: "take".into(),
+                                cycle: 0,
+                                source_start_sec: 0.1,
+                                source_end_sec: 0.3,
+                                syllable_id: Some("syl".into()),
+                                label: crate::param_blocks::BlockLabel::Syllable,
+                            }],
+                        },
+                        deleted: false,
+                        manual: false,
+                        value: None,
+                        transition_out_sec: None,
+                        created_seq: 1,
+                        base_cover: None,
                     }],
-                }],
-                param_block_interval_edits: vec![crate::state::ParamBlockIntervalEdit {
-                    edit_id: "edit-left".into(),
-                    member_refs: vec![crate::state::ParamBlockMemberRef {
-                        clip_id: "clip".into(),
-                        take_id: "take".into(),
-                        syllable_id: "syl".into(),
-                        source_start_sec: 0.1,
-                        source_end_sec: 0.3,
-                    }],
-                    start_sec: 0.0,
-                    end_sec: 0.2,
-                    member_start_sec: 0.0,
-                    member_end_sec: 0.3,
-                    block_ids: vec!["auto:clip:0".into()],
-                    explicit: false,
-                    deleted: false,
-                    manual: false,
-                    value: None,
-                    transition_sec: 0.0,
-                }],
+                },
+                param_block_view: Some(crate::param_blocks::ParamBlockView::empty("track", 5.0)),
                 ..Default::default()
             },
         );
-        let json = serde_json::to_vec(&pf).unwrap();
-        let loaded: ProjectFile = serde_json::from_slice(&json).unwrap();
-        assert_eq!(loaded.version, 6);
+        let bytes = serde_json::to_vec(&pf).unwrap();
+        let loaded: ProjectFile = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(loaded.version, CURRENT_PROJECT_FILE_VERSION);
+        let params = &loaded.timeline.params_by_root_track["track"];
+        assert_eq!(params.param_block_edits.blocks.len(), 1);
+        assert_eq!(params.param_block_edits.blocks[0].id, "ublock:1");
+        assert!(params.param_block_view.is_none());
         assert_eq!(
             loaded.timeline.clips[0].takes[0]
-                .syllable_analysis
+                .game_block_baseline
                 .as_ref()
                 .unwrap()
                 .source_spans_sec[0]
                 .end_sec,
             0.3
         );
-        assert_eq!(
-            loaded.timeline.params_by_root_track["track"].param_block_merges[0].member_refs[0]
-                .syllable_id,
-            "syl"
-        );
-        let edit = &loaded.timeline.params_by_root_track["track"].param_block_interval_edits[0];
-        assert_eq!(edit.edit_id, "edit-left");
-        assert_eq!(edit.start_sec, 0.0);
-        assert_eq!(edit.end_sec, 0.2);
-    }
-
-    #[test]
-    fn missing_deleted_field_keeps_old_interval_visible() {
-        let edit: crate::state::ParamBlockIntervalEdit =
-            serde_json::from_value(serde_json::json!({
-                "editId": "legacy",
-                "memberRefs": [],
-                "startSec": 0.0,
-                "endSec": 0.5
-            }))
-            .expect("legacy interval edit should deserialize");
-        assert!(!edit.deleted);
-        assert!(!edit.explicit);
-    }
-
-    #[test]
-    fn prune_merges_drops_dangling_members_and_keeps_valid_groups() {
-        fn make_clip() -> crate::state::Clip {
-            let mut tl = timeline();
-            let id = tl.add_clip(None, Some("clip".into()), Some(0.0), Some(1.0), None);
-            tl.clips.into_iter().find(|c| c.id == id).unwrap()
-        }
-        let mut params = crate::state::TrackParamsState::default();
-        params
-            .param_block_merges
-            .push(crate::state::ParamBlockMergeRecord {
-                merged_group_id: "group".into(),
-                member_refs: vec![
-                    crate::state::ParamBlockMemberRef {
-                        clip_id: "clip".into(),
-                        take_id: "take".into(),
-                        syllable_id: "a".into(),
-                        source_start_sec: 0.1,
-                        source_end_sec: 0.3,
-                    },
-                    crate::state::ParamBlockMemberRef {
-                        clip_id: "clip".into(),
-                        take_id: "take".into(),
-                        syllable_id: "b".into(),
-                        source_start_sec: 0.3,
-                        source_end_sec: 0.5,
-                    },
-                    crate::state::ParamBlockMemberRef {
-                        clip_id: "gone".into(),
-                        take_id: "take".into(),
-                        syllable_id: "c".into(),
-                        source_start_sec: 0.5,
-                        source_end_sec: 0.7,
-                    },
-                ],
-            });
-        let mut clip = make_clip();
-        let mut take = crate::state::ClipTake::from_clip(&clip);
-        take.id = "take".into();
-        take.syllable_analysis = Some(crate::pitch_analysis::TakeSyllableAnalysis {
-            algorithm: crate::pitch_analysis::SYLLABLE_ALGORITHM.into(),
-            algorithm_version: crate::pitch_analysis::SYLLABLE_ALGORITHM_VERSION,
-            source_digest: "digest".into(),
-            source_spans_sec: vec![
-                crate::pitch_analysis::SyllableSpan {
-                    start_sec: 0.1,
-                    end_sec: 0.3,
-                },
-                crate::pitch_analysis::SyllableSpan {
-                    start_sec: 0.3,
-                    end_sec: 0.5,
-                },
-            ],
-        });
-        clip.id = "clip".into();
-        clip.takes = vec![take];
-        clip.active_take_id = Some("take".into());
-        params.prune_param_block_merges(&[clip]);
-        assert_eq!(params.param_block_merges.len(), 1);
-        assert_eq!(params.param_block_merges[0].member_refs.len(), 2);
-    }
-
-    #[test]
-    fn prune_interval_edits_accepts_midi_note_boundaries() {
-        fn midi_note(start_sec: f64, end_sec: f64) -> crate::midi_import::MidiNoteEvent {
-            crate::midi_import::MidiNoteEvent {
-                start_sec,
-                end_sec,
-                note: 60.0,
-                velocity: 100,
-                channel: 0,
-            }
-        }
-        let mut tl = timeline();
-        tl.add_track(Some("track".into()), None, None);
-        let id = tl.add_clip(
-            Some("track".into()),
-            Some("clip".into()),
-            Some(0.0),
-            Some(1.0),
-            None,
-        );
-        let mut clip = tl.clips.into_iter().find(|c| c.id == id).unwrap();
-        let mut take = crate::state::ClipTake::from_clip(&clip);
-        take.id = "take".into();
-        take.midi_note_data = Some(vec![midi_note(0.0, 0.25), midi_note(0.25, 0.5)]);
-        clip.takes = vec![take];
-        clip.active_take_id = Some("take".into());
-        let actual_clip_id = clip.id.clone();
-        let mut params = crate::state::TrackParamsState::default();
-        params
-            .param_block_interval_edits
-            .push(crate::state::ParamBlockIntervalEdit {
-                edit_id: "split-midi".into(),
-                member_refs: vec![crate::state::ParamBlockMemberRef {
-                    clip_id: actual_clip_id.clone(),
-                    take_id: "take".into(),
-                    syllable_id: "midi".into(),
-                    source_start_sec: 0.0,
-                    source_end_sec: 0.25,
-                }],
-                start_sec: 0.0,
-                end_sec: 0.125,
-                member_start_sec: 0.0,
-                member_end_sec: 0.25,
-                block_ids: vec!["auto:clip:midi".into()],
-                explicit: false,
-                deleted: false,
-                manual: false,
-                value: None,
-                transition_sec: 0.0,
-            });
-        params.prune_param_block_merges(&[clip]);
-        assert_eq!(params.param_block_interval_edits.len(), 1);
-        assert_eq!(params.param_block_interval_edits[0].member_refs.len(), 1);
-    }
-
-    #[test]
-    fn prune_interval_edits_keeps_sub_20ms_split_segments() {
-        let mut tl = timeline();
-        tl.add_track(Some("track".into()), None, None);
-        let id = tl.add_clip(
-            Some("track".into()),
-            Some("clip".into()),
-            Some(0.0),
-            Some(1.0),
-            None,
-        );
-        let mut clip = tl.clips.into_iter().find(|c| c.id == id).unwrap();
-        let mut take = crate::state::ClipTake::from_clip(&clip);
-        take.id = "take".into();
-        take.midi_note_data = Some(vec![crate::midi_import::MidiNoteEvent {
-            start_sec: 0.0,
-            end_sec: 1.0,
-            note: 60.0,
-            velocity: 100,
-            channel: 0,
-        }]);
-        clip.takes = vec![take];
-        clip.active_take_id = Some("take".into());
-        let actual_clip_id = clip.id.clone();
-        let mut params = crate::state::TrackParamsState::default();
-        params
-            .param_block_interval_edits
-            .push(crate::state::ParamBlockIntervalEdit {
-                edit_id: "narrow-split".into(),
-                member_refs: vec![crate::state::ParamBlockMemberRef {
-                    clip_id: actual_clip_id,
-                    take_id: "take".into(),
-                    syllable_id: "split".into(),
-                    source_start_sec: 0.0,
-                    source_end_sec: 0.001,
-                }],
-                start_sec: 0.0,
-                end_sec: 0.001,
-                member_start_sec: 0.0,
-                member_end_sec: 1.0,
-                block_ids: vec!["auto:clip:split".into()],
-                explicit: true,
-                deleted: false,
-                manual: false,
-                value: None,
-                transition_sec: 0.0,
-            });
-        params.prune_param_block_merges(&[clip]);
-        assert_eq!(params.param_block_interval_edits.len(), 1);
-        assert!((params.param_block_interval_edits[0].end_sec - 0.001).abs() < 1e-12);
     }
 
     #[test]

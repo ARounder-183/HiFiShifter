@@ -538,7 +538,7 @@ export function ActionBar() {
     useEffect(() => {
         applyBpmCommitRef.current = applyBpmCommit;
     }, [applyBpmCommit]);
-    // eslint-disable-next-line react-hooks/refs -- 初始化只读 ref 的当前值；后续提交都在事件回调里
+
     const [bpmCommitRef] = useState(() =>
         createFrameCommitter<number>((value) => applyBpmCommitRef.current(value)),
     );

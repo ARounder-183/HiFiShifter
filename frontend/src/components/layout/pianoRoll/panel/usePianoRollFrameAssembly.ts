@@ -451,11 +451,18 @@ export function usePianoRollFrameAssembly({
                 const clip = s.clips.find((cl) => cl.id === clipId);
                 return clip && groupTrackIds.has(clip.trackId) && !clip.muted;
             })
-            .map(([, c]) => ({
-                curveStartSec: c.curveStartSec,
-                midiCurve: c.midiCurve,
-                framePeriodMs: c.framePeriodMs,
-            }));
+            .map(([clipId, c]) => {
+                // 跨度取**当前**几何：缓存可能比 clip 长（见 `DetectedPitchCurve`）。
+                const clip = s.clips.find((cl) => cl.id === clipId);
+                const clipStartSec = clip?.startSec ?? c.curveStartSec;
+                return {
+                    curveStartSec: c.curveStartSec,
+                    midiCurve: c.midiCurve,
+                    framePeriodMs: c.framePeriodMs,
+                    clipStartSec,
+                    clipEndSec: clipStartSec + (clip?.lengthSec ?? 0),
+                };
+            });
     }, [editParam, rootTrack, s.clipPitchCurves, s.clips, groupTrackIds]);
 
     const referencePitchOverlays = useMemo((): ReferencePitchOverlay[] => {

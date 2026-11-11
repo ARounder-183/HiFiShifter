@@ -2,8 +2,6 @@
 // - Tauri: window.__TAURI__.core.invoke / window.__TAURI__.invoke (named args)
 // - pywebview: window.pywebview.api[method] (positional args)
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
-
 import { reportFrontendError } from "./frontendErrorLog";
 import { getPluginHost, PluginInvokeError } from "./pluginHost";
 import { markBackendTerminal, sessionTerminal } from "./sessionGate";
@@ -11,7 +9,7 @@ import { markBackendTerminal, sessionTerminal } from "./sessionGate";
 declare global {
     interface Window {
         pywebview?: {
-            api?: Record<string, (...args: any[]) => Promise<any>>;
+            api?: PyWebviewApi;
         };
         __TAURI__?: {
             core?: {
@@ -22,7 +20,11 @@ declare global {
     }
 }
 
-type PyWebviewApi = Record<string, (...args: any[]) => Promise<any>>;
+/**
+ * pywebview 兼容边界没有方法级类型表；命令参数与结果在这里统一当作 unknown，
+ * 由 invoke() 在每个调用点按 T 收窄，而不是让 any 扩散进整个 services 层。
+ */
+type PyWebviewApi = Record<string, (...args: unknown[]) => Promise<unknown>>;
 
 type InvokeMode = "plugin" | "tauri" | "pywebview";
 
@@ -82,12 +84,17 @@ export function backendDetail(error: unknown): string | undefined {
     let current: unknown = error;
     let innermost: string | undefined;
     const seen = new Set<unknown>();
-    for (let depth = 0; depth < 8 && current && typeof current === "object"; depth += 1) {
+    for (let depth = 0; depth < 8 && current != null; depth += 1) {
+        if (typeof current === "string") {
+            if (current.trim()) innermost = current.trim();
+            break;
+        }
+        if (typeof current !== "object") break;
         if (seen.has(current)) break;
         seen.add(current);
         const message = (current as { message?: unknown }).message;
         if (typeof message === "string" && message.trim()) {
-            innermost = message;
+            innermost = message.trim();
         }
         current = (current as { cause?: unknown }).cause;
     }
@@ -136,8 +143,8 @@ async function waitForPyWebviewApi(timeoutMs: number): Promise<PyWebviewApi | nu
             if (done) return;
             done = true;
             if (typeof window !== "undefined") {
-                window.removeEventListener("pywebviewready", onReady as any);
-                document.removeEventListener("pywebviewready", onReady as any);
+                window.removeEventListener("pywebviewready", onReady as EventListener);
+                document.removeEventListener("pywebviewready", onReady as EventListener);
             }
             clearInterval(pollId);
             clearTimeout(timeoutId);
@@ -169,10 +176,10 @@ async function waitForPyWebviewApi(timeoutMs: number): Promise<PyWebviewApi | nu
         );
 
         if (typeof window !== "undefined") {
-            window.addEventListener("pywebviewready", onReady as any, {
+            window.addEventListener("pywebviewready", onReady as EventListener, {
                 once: true,
             });
-            document.addEventListener("pywebviewready", onReady as any, {
+            document.addEventListener("pywebviewready", onReady as EventListener, {
                 once: true,
             });
         }
@@ -336,20 +343,12 @@ export function buildTauriArgs(method: string, args: unknown[]): BuildArgsResult
         case "analyze_clip_syllables":
             return { clipId: args[0] };
 
-        case "get_param_block_merges":
-        case "get_param_line_blocks":
+        case "get_param_block_view":
             return { rootTrackId: args[0] };
 
-        case "set_param_line_blocks":
+        case "set_param_block_edits":
+        case "restore_game_param_blocks":
             return args[0] as Record<string, unknown>;
-
-        case "set_param_block_merges":
-            return {
-                rootTrackId: args[0],
-                records: args[1],
-                intervalEdits: args[2] ?? [],
-                checkpoint: args[3] ?? true,
-            };
 
         case "apply_clip_linked_params":
             return {
@@ -1040,6 +1039,10 @@ const NO_ARG_COMMANDS: ReadonlySet<string> = new Set([
     "capture_clear",
     "plugin_get_apply_state",
     "plugin_health",
+    // 插件形态的 UI 就绪信号（无参，见 mount.tsx；后端 client.rs 的
+    // plugin_ui_ready 分支）。此前漏登记，靠 invoke 的"零参 __unwired 兜底"
+    // 恰好不炸，但违反布线纪律，且带参调用会直接抛 method not wired yet。
+    "plugin_ui_ready",
     "host_link_submit",
     "host_link_release",
     // 插件侧的宿主链接命令（仅插件形态；与 `host_link_list/open/refresh` 同名不同通道）。
@@ -1170,10 +1173,11 @@ export async function invoke<T>(method: string, ...args: unknown[]): Promise<T> 
             } catch (err) {
                 console.error("Tauri invoke failed", { method, err });
                 reportFrontendError(`Invoke failed: ${method}`, err);
+                const cause = err instanceof Error ? err : new Error(String(err));
                 throw new BackendInvokeError({
                     mode: "tauri",
                     method,
-                    cause: err,
+                    cause,
                 });
             }
         }
@@ -1183,11 +1187,12 @@ export async function invoke<T>(method: string, ...args: unknown[]): Promise<T> 
         } catch (err) {
             console.error("Tauri invoke failed", { method, invokeArgs, err });
             reportFrontendError(`Invoke failed: ${method}`, err);
+            const cause = err instanceof Error ? err : new Error(String(err));
             throw new BackendInvokeError({
                 mode: "tauri",
                 method,
                 args: invokeArgs,
-                cause: err,
+                cause,
             });
         }
     }
@@ -1209,11 +1214,12 @@ export async function invoke<T>(method: string, ...args: unknown[]): Promise<T> 
         // 与 Tauri 分支同口径：失败也上报前端诊断日志（pywebview 模式下
         // BackendInvokeError 只剩 message，原始 cause 不落盘就丢了）。
         reportFrontendError(`Invoke failed: ${method}`, err);
+        const cause = err instanceof Error ? err : new Error(String(err));
         throw new BackendInvokeError({
             mode: "pywebview",
             method,
             args,
-            cause: err,
+            cause,
         });
     }
 }

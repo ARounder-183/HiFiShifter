@@ -411,31 +411,23 @@ pub fn maybe_schedule_pitch_orig(
                     entry.pitch_layout_key = Some(layout_key);
                     entry.has_pitch_adjustment_active = has_pitch_adjustment;
 
-                    // 应用 Reaper 导入的待定音高偏移
+                    // 应用 Reaper 导入的待定音高偏移。
+                    //
+                    // 【只写有偏移的帧】pitch_edit 的 0 是“没有用户目标”的唯一哨兵；
+                    // 把 pitch_orig 整条复制进来会让整条根轨被当成用户编辑。
+                    if entry.pitch_edit.len() < entry.pitch_orig.len() {
+                        entry.pitch_edit.resize(entry.pitch_orig.len(), 0.0);
+                    }
                     if let Some(offsets) = entry.pending_pitch_offset.take() {
                         let len = entry.pitch_orig.len().min(offsets.len());
-                        // 若已有用户编辑的 pitch_edit，在其基础上叠加偏移，避免重置其他片段的音高线
-                        if entry.pitch_edit.is_empty() || !entry.pitch_edit_user_modified {
-                            entry.pitch_edit = entry.pitch_orig.clone();
-                        }
-                        // 确保 pitch_edit 长度与 pitch_orig 一致
-                        if entry.pitch_edit.len() < entry.pitch_orig.len() {
-                            let old_len = entry.pitch_edit.len();
-                            // 单次 memcpy 直接拷入，消灭 memset 和 越界检查
-                            entry
-                                .pitch_edit
-                                .extend_from_slice(&entry.pitch_orig[old_len..]);
-                        }
                         for i in 0..len {
                             if offsets[i].abs() > 1e-6 && entry.pitch_orig[i].abs() > 1e-6 {
                                 entry.pitch_edit[i] = entry.pitch_orig[i] + offsets[i];
                             }
                         }
-                        entry.pitch_edit_user_modified = true;
-                    } else if !entry.pitch_edit_user_modified {
-                        // 复用已有内存，避免昂贵的重新分配
-                        entry.pitch_edit.clone_from(&entry.pitch_orig);
                     }
+                    entry.pitch_edit_user_modified =
+                        entry.pitch_edit.iter().any(|value| *value > 0.0);
                     should_emit = true;
                     emit_root_track_id = job.root_track_id.clone();
                     // 【全量命中 = 组装收敛】此时该根的 pitch_orig_key 已置位，

@@ -950,7 +950,7 @@ impl RootBaseline {
             pitch_key: params.pitch_orig_key.clone(),
             dyn_key: params.dyn_orig_key.clone(),
             ready: !params.pitch_orig.is_empty()
-                || !params.pitch_edit.is_empty()
+                || params.pitch_edit.iter().any(|value| *value > 0.0)
                 || !params.dyn_orig.is_empty()
                 || !params.tension_orig.is_empty(),
             revision: 1,
@@ -1034,8 +1034,9 @@ impl RootBaseline {
             dyn_orig_key: self.dyn_key.clone(),
             ..Default::default()
         };
-        // 未编辑帧的"目标曲线"就是原始曲线 —— 编辑由 `compose_root_view` 的 run 覆写。
-        params.pitch_edit = pitch_orig;
+        // 0 是“未编辑”的唯一哨兵；目标曲线由 `compose_root_view` 的 run 覆写。
+        // 不能再把 pitch_orig 整条复制进来 —— 那会把基线伪装成用户所有权。
+        params.pitch_edit = vec![0.0; count];
         params.tension_edit = vec![0.0; count];
         params
             .extra_curves
@@ -1403,7 +1404,8 @@ mod tests {
     fn empty_authority_displays_the_current_baseline() {
         let authority = ParamAuthority::default();
         let view = compose_root_view("root", &authority, &baseline(8), 0);
-        assert_eq!(view.params.pitch_edit, vec![60.0; 8]);
+        // 0 = 未编辑；显示/渲染出口回退到 pitch_orig，不在编辑层复制基线。
+        assert_eq!(view.params.pitch_edit, vec![0.0; 8]);
         assert_eq!(view.params.tension_edit, vec![0.0; 8]);
         assert_eq!(view.params.extra_curves["dyn"], vec![-1.0; 8]);
         assert!(!view.params.pitch_edit_user_modified);
@@ -1483,7 +1485,7 @@ mod tests {
         let view = compose_root_view("root", &authority, &baseline(8), 0);
         assert_eq!(
             &view.params.pitch_edit[..6],
-            &[61.0, 61.0, 60.0, 60.0, 61.0, 61.0]
+            &[61.0, 61.0, 0.0, 0.0, 61.0, 61.0]
         );
         assert_eq!(
             view.edited_mask("pitch")[..6],

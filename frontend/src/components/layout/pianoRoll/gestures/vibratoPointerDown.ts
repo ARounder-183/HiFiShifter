@@ -294,7 +294,7 @@ export function handleVibratoPointerDown(
         if (!st || st.pointerId !== e.pointerId) return;
         // 边缘自动滚屏：立刻滚一帧并维持 rAF 循环（指针停在边缘不动时
         // 也继续滚）。滚动引发的端点重算由 `onEdgeScrolled` 负责。
-        edgeScroll.track(ev.clientX);
+        edgeScroll.track(ev.clientX, ev.clientY);
         // 端点式预览：只保留最新采样（含同帧 coalesced 末点）。
         const coalesced = coalescedEventsOf(ev);
         pendingLineEvent = coalesced[coalesced.length - 1] ?? ev;

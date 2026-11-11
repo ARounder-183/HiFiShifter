@@ -62,17 +62,10 @@ type Props = {
         | "s"
         | "setCtxMenu"
         | "paramBlockContextMenu"
-        | "canRestoreGameParamBlocks"
-        | "restoreGameParamBlocks"
+        | "paramBlockMenuContext"
+        | "paramBlockToolActive"
+        | "handleParamBlockMenuAction"
         | "setParamBlockContextMenu"
-        | "selectedParamBlockCount"
-        | "canMergeSelectedParamBlocks"
-        | "canDeleteSelectedParamBlocks"
-        | "deleteSelectedParamBlocks"
-        | "selectedParamBlockDeleted"
-        | "paramBlockSplitAtSec"
-        | "splitSelectedParamBlockAt"
-        | "mergeSelectedParamBlocks"
         | "setMidiDialogOpen"
         | "setVibratoDialogOpen"
         | "specifiedBpm"
@@ -133,17 +126,10 @@ export function PanelOverlays({ m }: Props) {
         s,
         setCtxMenu,
         paramBlockContextMenu,
-        canRestoreGameParamBlocks,
-        restoreGameParamBlocks,
+        paramBlockMenuContext,
+        paramBlockToolActive,
+        handleParamBlockMenuAction,
         setParamBlockContextMenu,
-        selectedParamBlockCount,
-        canMergeSelectedParamBlocks,
-        canDeleteSelectedParamBlocks,
-        deleteSelectedParamBlocks,
-        selectedParamBlockDeleted,
-        paramBlockSplitAtSec,
-        splitSelectedParamBlockAt,
-        mergeSelectedParamBlocks,
         setMidiDialogOpen,
         setVibratoDialogOpen,
         specifiedBpm,
@@ -203,7 +189,11 @@ export function PanelOverlays({ m }: Props) {
                 importTempoMapKeySignature={importTempoMapKeySignature}
                 onImportTempoMapKeySignatureChange={handleImportTempoMapKeySignatureChange}
             />
-            {ctxMenu && s.toolMode === "select" && (
+            {/*
+             * 标准参数菜单与块菜单共享同一组编辑回调。block 是 select 的子模式，
+             * 所以两个 guard 必须互斥：块菜单出现时，标准菜单不能再叠一层。
+             */}
+            {ctxMenu && s.toolMode === "select" && !paramBlockToolActive ? (
                 <EditContextMenu
                     x={ctxMenu.x}
                     y={ctxMenu.y}
@@ -239,21 +229,13 @@ export function PanelOverlays({ m }: Props) {
                     onConvertVolumeToDyn={() => void handleEditOp("convertVolumeToDyn")}
                     onConvertDynToVolume={() => void handleEditOp("convertDynToVolume")}
                 />
-            )}
-            {paramBlockContextMenu !== null ? (
+            ) : null}
+            {paramBlockToolActive && paramBlockContextMenu !== null ? (
                 <ParamBlockContextMenu
                     x={paramBlockContextMenu.x}
                     y={paramBlockContextMenu.y}
-                    selectedCount={selectedParamBlockCount}
-                    canMerge={canMergeSelectedParamBlocks}
-                    canDelete={canDeleteSelectedParamBlocks}
-                    canRestoreGame={canRestoreGameParamBlocks}
-                    onRestoreGame={restoreGameParamBlocks}
-                    selectedDeleted={selectedParamBlockDeleted}
-                    onDelete={deleteSelectedParamBlocks}
-                    splitAtSec={paramBlockSplitAtSec}
-                    onSplit={splitSelectedParamBlockAt}
-                    onMerge={mergeSelectedParamBlocks}
+                    context={paramBlockMenuContext}
+                    onAction={handleParamBlockMenuAction}
                     onClose={() => setParamBlockContextMenu(null)}
                     tf={tf}
                 />

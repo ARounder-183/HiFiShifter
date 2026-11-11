@@ -1,5 +1,7 @@
 // 时间轴内核 seek / 拖拽手势。拆自 TimelinePanel。
 import React from "react";
+import { sameKernelGhostGeometry, type KernelGhostEntry } from "./kernelGhostGeometry";
+import { useKernelGestureInteractionLock } from "./useKernelGestureInteractionLock";
 import { isModifierActive } from "../../../../features/keybindings/keybindingsSlice";
 import { resolveClipDragCopyMode } from "../hooks/clipDragCopyMode";
 import { copyClipsFromDrag } from "../hooks/copyClipsFromDrag";
@@ -15,8 +17,6 @@ import {
     moveClipTrack,
     checkpointHistory,
     setClipSourceRange,
-    beginInteraction,
-    endInteraction,
 } from "../../../../features/session/sessionSlice";
 import type { TimelineSessionSlice } from "./useTimelineState";
 import { batch } from "react-redux";
@@ -25,11 +25,11 @@ import {
     moveClipsRemote,
 } from "../../../../features/session/thunks/timelineThunks";
 import { NEW_TRACK_SENTINEL } from "../constants";
-import { beginClipGeometryPreview, endClipGeometryPreview } from "../clipGeometryPreviewBus";
 import {
     SNAP_HIGHLIGHT_GROUP,
     buildLoopBoundaryHighlightEntry,
     clearSnapHighlights,
+    publishClipOriginSnapHighlight,
     publishSnapHighlights,
 } from "../../../../utils/snapHighlight";
 import {
@@ -56,6 +56,9 @@ import {
     previewAutoCrossfade,
 } from "../hooks/autoCrossfade";
 import { computeEffectiveSnap } from "../../../../utils/timelineSnapping";
+import { resolveClipOriginSnap } from "./clipOriginSnap";
+import { clearTrackDropTarget, publishTrackDropTarget } from "../trackDropTargetHighlight";
+import { resolveTrackDropTarget } from "../trackDropTargetDrag";
 import { store } from "../../../../app/store";
 import { computeSlipWindow, toBoundarySnapClip } from "../hooks/slipWindow";
 import type { TimelineKernelHost } from "../kernel/host/timelineKernelHost";
@@ -340,40 +343,23 @@ export function useTimelineKernelSeekDrag({
     const kernelDropToNewTrackRef = React.useRef(false);
 
     /**
-     * 内核手势的**交互锁**（`beginInteraction` / `endInteraction` 的成对封装）。
-     *
-     * 【为什么每个手势都必须持有】`sessionSlice` 在 `_interactionLockCount > 0`
-     * 时丢弃后端回包的过期快照。手势期间若有一条 `*Remote.fulfilled` 抵达（例如
-     * 上一次点击的 `selectClipRemote`、或后端的周期性状态推送），没有这把锁它的
-     * 旧快照会**覆盖掉正在预览的乐观值**——表现为拖拽中途画面突然弹回原位。
-     * 旧实现的每个连续手势都成对调用（`useClipDrag` / `useEditDrag` /
-     * `useSlipDrag` / `useSnapOffsetDrag` 各一处），内核路径此前只有 snap offset 接了。
-     *
-     * 【为什么用 ref 去重】预览回调逐帧触发，而 begin / end 每只手势只能各一次。
-     *
-     * 【释放时机】与旧实现一致：**落库请求完成后**才释放。若在提交瞬间就释放，
-     * `endInteraction()` 到 `fulfilled` 之间会留出一个窗口，窗口内其他 in-flight
-     * thunk 的旧快照仍能把乐观值打回去（旧实现 `useClipDrag` 对此有逐字注释）。
-     * 纯取消 / 零位移的路径没有任何远程写入，直接释放。
+     * copy 幽灵块的**上次已提交几何**：预览每帧都会重算同一组值，`setKernelGhost`
+     * 挂在面板级 state 上，逐帧提交新数组会重渲染整个 TimelinePanel。
+     * 与 `kernelDropToNewTrackRef` 同一手法：几何未变就不 setState（判据见
+     * `kernelGhostGeometry.ts`）。
      */
-    const kernelGestureInteractionActiveRef = React.useRef(false);
-    const beginKernelGestureInteraction = React.useCallback((): void => {
-        if (kernelGestureInteractionActiveRef.current) return;
-        kernelGestureInteractionActiveRef.current = true;
-        // 记录**按下时**的全量 clip 几何，供参数编辑器把响度基线/曲线搬到正确位置
-        //（见 `clipGeometryPreviewBus`）。时序要求：必须早于本次手势的任何乐观写入
-        // —— 本函数在首个真实位移帧、且在任何预览派发之前调用，满足该要求。
-        beginClipGeometryPreview(sessionRef.current.clips);
-        dispatch(beginInteraction());
-    }, [dispatch, sessionRef]);
-    const endKernelGestureInteraction = React.useCallback((): void => {
-        if (!kernelGestureInteractionActiveRef.current) return;
-        kernelGestureInteractionActiveRef.current = false;
-        // 只宣告手势结束；映射本身由消费方保留到"提交之后取的快照"落地（否则
-        // 松手瞬间会退回旧位置的基线，表现为闪一下）。
-        endClipGeometryPreview();
-        dispatch(endInteraction());
-    }, [dispatch]);
+    const kernelGhostGeometryRef = React.useRef<KernelGhostEntry[] | null>(null);
+
+    // 面板卸载 / 根切换时不能把目标轨道环留在全局 store 里。
+    React.useEffect(() => () => clearTrackDropTarget(), []);
+
+    // 交互锁的计数语义（重叠手势不得提前释放）见
+    // `useKernelGestureInteractionLock.ts` 的模块注释与同名契约测试。
+    const {
+        depthRef: kernelGestureInteractionDepthRef,
+        begin: beginKernelGestureInteraction,
+        end: endKernelGestureInteraction,
+    } = useKernelGestureInteractionLock({ dispatch, sessionRef });
 
     const kernelDragOriginRef = React.useRef<{
         clipId: string;
@@ -557,6 +543,7 @@ export function useTimelineKernelSeekDrag({
             // copy 模式判定：复用旧实现的函数（含"已配置绑定为准 + 非 macOS 的 Ctrl
             // 回退"）。**单向**——一旦进入 copy 就不再退回移动，避免松手瞬间语义反转。
             if (origin.slipMode) {
+                clearTrackDropTarget();
                 // Alt + 拖 clip 中部 = **slip**（调整内部偏移）：时间轴位置与长度
                 // 都不变，只平移源窗口。逐帧按**增量**应用（用当前 Redux 值 + 增量
                 // 换算），避免累计位移被重复施加导致越拖越快。
@@ -567,6 +554,13 @@ export function useTimelineKernelSeekDrag({
                 // 把**累计位移**替换为吸附值，再以「目标累计 − 已应用累计」驱动增量
                 // （与旧实现 `useSlipDrag` 同一算法，只是位移正负号约定相反）。
                 const timelineSnap = sessionRef.current.timelineSnap;
+                // 【为什么每帧只建一次 id→clip 映射】slip 里锚 clip 与每个 participant
+                // 都要按 id 取**当前** Redux clip（`computeSlipWindow` 要求逐帧读当前
+                // 值，见 slipWindow.ts 的说明），逐次 `clips.find` 是每帧 O(n·m)。
+                // 一次 Map 构建把每帧降到 O(m+n)，语义完全不变。
+                const clipsById = new Map(
+                    sessionRef.current.clips.map((clip) => [clip.id, clip] as const),
+                );
                 // 【为什么 Slip 用未钳制位移】`args.deltaSec` 是**位置**位移（内核按
                 // "clip 不能从负时间开始"钳到 ≥0）；而 Slip 改的是 clip 内部的源窗口
                 // 偏移，合法域是任意符号任意大小（向左滑出媒体起点 = 前导静音）。
@@ -602,9 +596,7 @@ export function useTimelineKernelSeekDrag({
                             // 循环节命中：只高亮**真正对齐**的那一侧（媒体边界恰好
                             // 落在 Clip 起点 → 亮起点；落在终点 → 亮终点；len·r 恰为
                             // 整周期等两侧同时对齐才两缘同亮）。
-                            const anchorClip = sessionRef.current.clips.find(
-                                (item) => item.id === origin.clipId,
-                            );
+                            const anchorClip = clipsById.get(origin.clipId);
                             if (anchorClip !== undefined) {
                                 const aligned = slipBoundaryAlignedSides(anchor, snappedW);
                                 const clipStartSec = Math.max(0, Number(anchorClip.startSec) || 0);
@@ -640,9 +632,7 @@ export function useTimelineKernelSeekDrag({
                     sourceEndSec: number;
                 }> = [];
                 for (const participant of origin.participants) {
-                    const clip = sessionRef.current.clips.find(
-                        (item) => item.id === participant.clipId,
-                    );
+                    const clip = clipsById.get(participant.clipId);
                     if (clip === undefined) continue;
                     // ⚠️ **取反号**：`dApplied` 在「屏幕位移」域（内核约定正 = 向右拖），
                     // 而 `computeSlipWindow` 要的是「窗口平移量」域（正 = 源窗口向素材
@@ -684,29 +674,58 @@ export function useTimelineKernelSeekDrag({
                 isModifierActive(noSnapKb, args.modifiers),
             );
             const rawStart = Math.max(0, origin.startSec + args.deltaSec);
-            // 吸附：复用旧实现的 snapTimelineDetailed（多源候选 + 取更近者），
-            // 内核只给几何位移，吸附规则不在内核里重写。
-            //
-            // `highlight` 必须传：吸附高亮的**发布与清除**都由该函数按此选项统一
-            // 处理（见 useTimelineState.snapTimelineDetailed）。不传时吸附本身仍
-            // 生效、位置也对，但完全没有视觉反馈——表现为"吸附没生效"。
-            // `excludeClipIds` 必须覆盖**全部参与者**：整组一起移动时，组内其他
-            // clip 不应成为自己的吸附目标。
-            const nextStart = snapActive
-                ? snapTimelineDetailed(rawStart, "clip", {
-                      originSec: origin.startSec,
-                      anchorTrackId: args.targetTrackId,
-                      excludeClipIds: new Set(origin.participants.map((item) => item.clipId)),
-                      moveLengthSec: origin.lengthSec,
-                      moveSnapOffsetSec: origin.snapOffsetSec,
-                      highlight: {
-                          sources: [{ trackId: args.targetTrackId, clipId: args.clipId }],
-                      },
-                  }).sec
-                : rawStart;
-            // 吸附被关闭（拖拽中切开关 / 按住临时取反键）：高亮必须清掉，
-            // 否则会残留上一次的吸附提示（旧实现同样在 else 分支清除）。
-            if (!snapActive) clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+            // Horizontal drag-origin snap: while the pointer changes tracks, a
+            // small horizontal drift snaps back to the pre-drag start. This is
+            // the replacement for the old vertical lock; it is a time-axis snap,
+            // never a row snap and never a row highlight.
+            const originSnap = resolveClipOriginSnap({
+                rawStartSec: rawStart,
+                originStartSec: origin.startSec,
+                pxPerSec,
+                crossTrack: args.targetTrackId !== origin.trackId,
+                enabled: snapActive,
+            });
+            let nextStart: number;
+            /**
+             * 是否被**拖拽起点吸附**钉住了。与 snapResult.snapped（任何候选命中：
+             * 网格 / 相邻 Clip 边缘 / 播放头 / 选区标记……）的区别就是它要求回到
+             * 自己出发时的横向位置 —— 目标轨描边只认这个事实（originPinned）。
+             */
+            let originPinned = false;
+            if (originSnap.active) {
+                nextStart = originSnap.startSec;
+                originPinned = true;
+                publishClipOriginSnapHighlight({
+                    sec: originSnap.startSec,
+                    trackId: args.targetTrackId === NEW_TRACK_SENTINEL ? null : args.targetTrackId,
+                    clipId: args.clipId,
+                });
+            } else {
+                // 吸附：复用旧实现的 snapTimelineDetailed（多源候选 + 取更近者），
+                // 内核只给几何位移，吸附规则不在内核里重写。
+                //
+                // `highlight` 必须传：吸附高亮的**发布与清除**都由该函数按此选项统一
+                // 处理（见 useTimelineState.snapTimelineDetailed）。不传时吸附本身仍
+                // 生效、位置也对，但完全没有视觉反馈——表现为"吸附没生效"。
+                // `excludeClipIds` 必须覆盖**全部参与者**：整组一起移动时，组内其他
+                // clip 不应成为自己的吸附目标。
+                const snapResult = snapActive
+                    ? snapTimelineDetailed(rawStart, "clip", {
+                          originSec: origin.startSec,
+                          anchorTrackId: args.targetTrackId,
+                          excludeClipIds: new Set(origin.participants.map((item) => item.clipId)),
+                          moveLengthSec: origin.lengthSec,
+                          moveSnapOffsetSec: origin.snapOffsetSec,
+                          highlight: {
+                              sources: [{ trackId: args.targetTrackId, clipId: args.clipId }],
+                          },
+                      })
+                    : null;
+                nextStart = snapResult?.sec ?? rawStart;
+                // 吸附被关闭（拖拽中切开关 / 按住临时取反键）：高亮必须清掉，
+                // 否则会残留上一次的吸附提示（旧实现同样在 else 分支清除）。
+                if (!snapActive) clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
+            }
             const trackIds = sessionRef.current.tracks.map((track) => track.id);
             const targetTrackIndex = trackIds.indexOf(args.targetTrackId);
             const deltaTrack =
@@ -728,16 +747,29 @@ export function useTimelineKernelSeekDrag({
                 dropToNewTrack,
             });
             origin.lastDeltaStartSec = deltaStartSec;
+            /* 描边只认「被吸回原起点」（= 上面的 originSnap.active），与竖向对齐线同源。 */
+            const targetDrop = resolveTrackDropTarget({
+                moves,
+                participants: origin.participants,
+                dropToNewTrack,
+                originPinned,
+            });
+            if (targetDrop === null) clearTrackDropTarget();
+            else publishTrackDropTarget(targetDrop);
             if (origin.copyMode) {
                 // copy：**原 clip 不动**，只更新 ghost（整组，内容坐标）。
-                setKernelGhost(
-                    origin.participants.map((participant, index) => ({
-                        key: participant.clipId,
-                        leftPx: moves[index].startSec * pxPerSec,
-                        widthPx: Math.max(1, participant.lengthSec * pxPerSec),
-                        trackId: moves[index].trackId,
-                    })),
-                );
+                // 只在几何真的变化时提交 state：⌘ 拖拽的每一帧都会走到这里，
+                // 无条件 setState 会让整个 TimelinePanel 逐帧重渲染。
+                const ghost = origin.participants.map((participant, index) => ({
+                    key: participant.clipId,
+                    leftPx: moves[index].startSec * pxPerSec,
+                    widthPx: Math.max(1, participant.lengthSec * pxPerSec),
+                    trackId: moves[index].trackId,
+                }));
+                if (!sameKernelGhostGeometry(kernelGhostGeometryRef.current, ghost)) {
+                    kernelGhostGeometryRef.current = ghost;
+                    setKernelGhost(ghost);
+                }
                 // 复制不移动原片：波纹跟随集恢复原位（覆盖「拖拽中途切到复制」的残留预览）。
                 applyRippleFollowerShift(dispatch, origin.rippleFollowers, 0);
                 return;
@@ -797,6 +829,7 @@ export function useTimelineKernelSeekDrag({
         }) => {
             const origin = kernelDragOriginRef.current;
             kernelDragOriginRef.current = null;
+            clearTrackDropTarget();
             if (origin === null) return;
             // 手势结束：清掉吸附高亮（旧实现同样在收尾清除，否则最后一次的
             // 吸附提示会一直挂在画面上）。
@@ -843,6 +876,7 @@ export function useTimelineKernelSeekDrag({
 
             if (origin.copyMode) {
                 setKernelGhost(null);
+                kernelGhostGeometryRef.current = null;
                 // 落点解析必须早于取消早退：取消路径同样要清掉「落到新轨」标记，
                 // 否则虚线新轨行会一直挂在画面上，且之后每一次普通移动都会被误读成
                 // 哨兵落点（`kernelDropToNewTrackRef` 的语义是"本次手势的落点"，
@@ -1107,7 +1141,7 @@ export function useTimelineKernelSeekDrag({
         setKernelDropToNewTrack,
         kernelGhost,
         setKernelGhost,
-        kernelGestureInteractionActiveRef,
+        kernelGestureInteractionDepthRef,
         beginKernelGestureInteraction,
         endKernelGestureInteraction,
         kernelDragOriginRef,

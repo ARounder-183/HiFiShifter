@@ -629,7 +629,15 @@ pub fn set_param_frames_with_present(
             Err(error) => serde_json::json!({"ok": false, "error": error}),
         };
     }
-    set_param_frames_legacy_body(state, track_id, param, start_frame, values, checkpoint)
+    set_param_frames_legacy_body(
+        state,
+        track_id,
+        param,
+        start_frame,
+        values,
+        present.as_deref(),
+        checkpoint,
+    )
 }
 
 /// 旧 App 的数组写入主体；插件权威路径在进入这里之前已返回。
@@ -639,6 +647,7 @@ fn set_param_frames_legacy_body(
     param: String,
     start_frame: u32,
     values: Vec<f32>,
+    present: Option<&[bool]>,
     checkpoint: Option<bool>,
 ) -> serde_json::Value {
     let mut tl = state.timeline().lock().unwrap_or_else(|e| e.into_inner());
@@ -711,7 +720,20 @@ fn set_param_frames_legacy_body(
             break;
         }
 
-        let mut v = if v.is_finite() {
+        let present_frame = present.is_none_or(|mask| mask.get(i).copied().unwrap_or(false));
+        let mut v = if !present_frame {
+            // present=false 是“这一帧没有用户目标”：pitch/tension 回 0，
+            // dyn / extra 回到各自默认哨兵。绝不能把旧值或基线物化进来。
+            if is_extra_curve {
+                if param == "dyn" {
+                    crate::renderer::common_params::DYN_FOLLOW_ORIG
+                } else {
+                    extra_curve_default
+                }
+            } else {
+                0.0
+            }
+        } else if v.is_finite() {
             v
         } else {
             non_finite += 1;
@@ -806,7 +828,7 @@ fn set_param_frames_legacy_body(
     }
 
     if param == "pitch" {
-        entry.pitch_edit_user_modified = true;
+        entry.pitch_edit_user_modified = entry.pitch_edit.iter().any(|value| *value > 0.0);
     }
 
     // checkpoint只决定undo；分块尾段/异步平滑也须在timeline锁内重新标脏。
@@ -899,23 +921,11 @@ pub fn restore_param_frames(
                 if idx >= entry.pitch_edit.len() {
                     break;
                 }
-                let o = entry.pitch_orig.get(idx).copied().unwrap_or(0.0);
-                entry.pitch_edit[idx] = o;
+                // “初始化” = 放弃显式目标，回到 0 哨兵；读取侧自动回退到
+                // pitch_orig，而不是把基线值写进用户编辑层。
+                entry.pitch_edit[idx] = 0.0;
             }
-
-            // If the curve fully matches orig now, clear the user-modified flag.
-            let len = entry.pitch_orig.len().min(entry.pitch_edit.len());
-            entry.pitch_edit_user_modified = false;
-            for i in 0..len {
-                let o = entry.pitch_orig[i];
-                let e = entry.pitch_edit[i];
-                if (e.is_finite() && e > 0.0)
-                    && (!(o.is_finite() && o > 0.0) || (e - o).abs() > 1e-3)
-                {
-                    entry.pitch_edit_user_modified = true;
-                    break;
-                }
-            }
+            entry.pitch_edit_user_modified = entry.pitch_edit.iter().any(|value| *value > 0.0);
         }
         "tension" => {
             let reference_value = param_reference_value;

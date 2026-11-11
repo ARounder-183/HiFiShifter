@@ -1913,6 +1913,7 @@ pub(super) fn add_clip_take_from_media(
         midi_note_data: None,
         midi_fill_gaps: false,
         syllable_analysis: None,
+        game_block_baseline: None,
         stretch_markers: Vec::new(),
         envelopes: None,
     };
@@ -1990,6 +1991,7 @@ pub(super) fn import_media_files_as_takes(
             midi_note_data: None,
             midi_fill_gaps: false,
             syllable_analysis: None,
+            game_block_baseline: None,
             stretch_markers: Vec::new(),
             envelopes: None,
         };

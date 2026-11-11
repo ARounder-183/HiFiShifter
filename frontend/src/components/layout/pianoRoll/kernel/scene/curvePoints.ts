@@ -258,6 +258,16 @@ export function projectDetectedCurvePoints(args: {
     readonly midiCurve: readonly number[];
     /** 曲线第 0 帧对应的 timeline 绝对时间（秒）。 */
     readonly curveStartSec: number;
+    /**
+     * 所属 clip 的起点（秒）。
+     *
+     * 曲线只在 `[clipStartSec, clipEndSec)` 内有效：越界帧一律不画，起点与
+     * clip 起点不符则整条丢弃。两条判据合起来让"过期的长曲线"在结构上不可能
+     * 画到 clip 外面（用户报的"音高线残影"）。
+     */
+    readonly clipStartSec: number;
+    /** 所属 clip 的终点（秒，**开区间**）。 */
+    readonly clipEndSec: number;
     /** WORLD 帧周期（毫秒）。 */
     readonly framePeriodMs: number;
     /** 统一投影。 */
@@ -265,11 +275,20 @@ export function projectDetectedCurvePoints(args: {
     /** 值 → 视口 y 的投影。 */
     readonly valueToY: (value: number) => number;
 }): CurvePoint[] {
-    const { midiCurve, curveStartSec, framePeriodMs, axis, valueToY } = args;
+    const { midiCurve, curveStartSec, clipStartSec, clipEndSec, framePeriodMs, axis, valueToY } =
+        args;
     if (midiCurve.length < 2) return [];
     if (!Number.isFinite(curveStartSec)) return [];
 
     const fp = Math.max(1e-6, framePeriodMs);
+    const clipOriginSec = Math.max(0, clipStartSec);
+    /*
+     * 【起点必须与 clip 对齐】后端推送的 `curve_start_sec` 恒等于
+     * `clip.start_sec`（见 `compute_pitch_curve_start_sec`）。不一致说明这条缓存
+     * 属于**别的几何**（分割 / 移动之前的那一份）：丢弃，而不是"修正"成 clip 起点 ——
+     * 数值是按旧起点排的，挪过去只会画出一条错误曲线。"缺线"好过"错线"。
+     */
+    if (Math.abs(curveStartSec - clipOriginSec) > fp / 1000) return [];
 
     // 与旧实现一致：检测曲线按 **x** 判可见性（`x > w + 10` / `x < -10`），
     // 不是按时间区间——因为它只有绝对秒、没有 `startFrame`，用时间判会多一次换算。
@@ -283,6 +302,12 @@ export function projectDetectedCurvePoints(args: {
         if (midi == null || !Number.isFinite(midi)) continue;
 
         const frameSec = curveStartSec + (i * fp) / 1000;
+        /*
+         * 【越界帧不画】曲线可能比 clip 长（缓存是分割 / 拉伸之前的那一份）。参数
+         * 编辑器此前是唯一不裁剪这个数据的面板 —— 时间轴那条同源曲线一直裁着
+         * （见 `timelineCanvasModel.buildMidiPitchCurvePx`），所以残影只出现在这里。
+         */
+        if (frameSec < clipOriginSec - 1e-9 || frameSec >= clipEndSec - 1e-9) continue;
         const x = secToViewportPx(axis, frameSec);
         if (x > rightLimitPx) break;
         if (x < leftLimitPx) continue;

@@ -14,6 +14,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
     beginClipGeometryPreview,
     endClipGeometryPreview,
+    getClipGeometryPreviewClips,
     getClipGeometryPreviewOrigin,
     subscribeClipGeometryPreview,
 } from "./clipGeometryPreviewBus";
@@ -27,6 +28,28 @@ describe("clipGeometryPreviewBus", () => {
     it("初始无手势", () => {
         reset();
         expect(getClipGeometryPreviewOrigin()).toBeNull();
+        expect(getClipGeometryPreviewClips()).toBeNull();
+    });
+
+    /*
+     * 【块层也要吃这份快照】削减后的快照只有"素材落在哪一刻"的字段，块合成还需要
+     * takes / 音节区间。发布方原样传进来的那份列表必须能原样取回 —— 它是"手势起点
+     * 几何"的唯一来源，不能各存一份。
+     */
+    it("begin 同时留存完整 clip 列表，end 一并清空", () => {
+        reset();
+        const clips = [
+            {
+                id: "a",
+                startSec: 1,
+                lengthSec: 2,
+                takes: [{ id: "t", syllableSpansSec: [{ startSec: 0, endSec: 0.5 }] }],
+            },
+        ];
+        beginClipGeometryPreview(clips);
+        expect(getClipGeometryPreviewClips<(typeof clips)[number]>()).toBe(clips);
+        endClipGeometryPreview();
+        expect(getClipGeometryPreviewClips()).toBeNull();
     });
 
     it("begin 发布按下时的几何快照（含源窗口 / 速率等消费字段）", () => {

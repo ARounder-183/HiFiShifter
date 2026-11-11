@@ -505,14 +505,15 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
     // 以 useCallback 稳定引用（依赖仅含稳定 ref）：供只注册一次的订阅回调 /
     // useCallback 化的同步入口长期持有，引用抖动会连带放大（与 `syncScrollLeft`
     // 同一口径）。
-    const livePxPerSec = React.useCallback(
-        function livePxPerSec(): number {
+    const liveReadersRef = React.useRef({
+        pxPerSec: (): number => {
             const host = kernelHostRef.current;
-            if (host !== null) return host.getViewport().pxPerSec;
-            return pxPerSecRef.current;
+            return host !== null ? host.getViewport().pxPerSec : pxPerSecRef.current;
         },
-        [kernelHostRef],
-    );
+        scrollLeft: (): number =>
+            kernelHostRef.current?.getViewport().scrollLeft ?? scrollLeftRef.current,
+    });
+    const livePxPerSec = React.useCallback(() => liveReadersRef.current.pxPerSec(), []);
 
     /**
      * 立刻把实时滚动值提交给 React（只用于手势结束/静默收尾）。
@@ -649,10 +650,7 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
      * **不要**在鼠标交互里用 `scrollLeft` state —— 它按 256px 量化，残差会让
      * ToolTip/点击落点稳定偏移。
      */
-    const getScrollLeftLive = React.useCallback(
-        () => kernelHostRef.current?.getViewport().scrollLeft ?? scrollLeftRef.current,
-        [kernelHostRef],
-    );
+    const getScrollLeftLive = React.useCallback(() => liveReadersRef.current.scrollLeft(), []);
 
     // 同步开关（双向交互）：订阅共享视口，并把参数编辑器写入的值应用到轨道视图。
     useEffect(() => {
@@ -825,6 +823,10 @@ export function useTimelineState(args: UseTimelineStateArgs = {}): TimelineState
     ]);
 
     // ── keyboard zoom layout effect ──────────────────────────
+    // `scrollRef` 没有 JSX 挂载点，内核模式下这两个 effect 会在 !scroller 处早退；
+    // 保留它们是挂载期 / 内核尚未创建时（含组件测试）的兜底，不是可删的死代码。
+    // 内核就绪后的键盘缩放走 `viewport.setZoomAndScroll` 原子提交。
+    // tests/timelineViewportGates.test.ts 钉住"scrollRef 不得重新挂到 JSX"这一约束。
     useLayoutEffect(() => {
         const pending = keyboardZoomPendingRef.current;
         if (!pending) return;

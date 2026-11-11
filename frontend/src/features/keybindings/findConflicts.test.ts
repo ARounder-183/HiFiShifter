@@ -129,6 +129,35 @@ describe("findConflicts — 「拉伸」修饰键按场景分离（clip 边缘 v
     });
 });
 
+describe("findConflicts — 参数块选择模式修饰键", () => {
+    it("Alt 同时用于块上点击分割与空白拖拽新建不冲突", () => {
+        expect(findConflicts({}, "modifier.paramBlockSplitAtClick", mod("alt"))).not.toContain(
+            "modifier.paramBlockCreate",
+        );
+    });
+
+    it("分割改到 Shift 与范围选择冲突", () => {
+        expect(findConflicts({}, "modifier.paramBlockSplitAtClick", mod("shift"))).toContain(
+            "modifier.paramRangeSelect",
+        );
+    });
+
+    it("新建改到 Ctrl 与参数多选冲突", () => {
+        expect(findConflicts({}, "modifier.paramBlockCreate", mod("control"))).toContain(
+            "modifier.paramMultiSelect",
+        );
+    });
+
+    it("拉平新建绑到裸 Alt / 裸 Ctrl 分别与普通新建 / 多选冲突", () => {
+        expect(findConflicts({}, "modifier.paramBlockCreateFlat", mod("alt"))).toContain(
+            "modifier.paramBlockCreate",
+        );
+        expect(findConflicts({}, "modifier.paramBlockCreateFlat", mod("control"))).toContain(
+            "modifier.paramMultiSelect",
+        );
+    });
+});
+
 describe("findConflicts — 键盘快捷键按作用域检测", () => {
     it("quickSearch 作用域内的绑定不与全局绑定冲突", () => {
         // quickSearch.confirm 默认 enter；playback.stop 默认也是 enter，但作用域不同

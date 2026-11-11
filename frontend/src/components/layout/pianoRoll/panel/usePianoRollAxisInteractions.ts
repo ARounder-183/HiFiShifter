@@ -258,5 +258,13 @@ export function usePianoRollAxisInteractions({
             if (previewRafId != null) cancelAnimationFrame(previewRafId);
             setAxisValuePreview(null);
         };
-    }, [s.showParamValuePopup, editParam, yToValue, formatParamValuePreview]);
+    }, [
+        s.showParamValuePopup,
+        editParam,
+        yToValue,
+        formatParamValuePreview,
+        axisWrapRef,
+        setAxisValuePreview,
+        viewSizeRef,
+    ]);
 }

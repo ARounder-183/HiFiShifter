@@ -140,7 +140,7 @@ export function usePianoRollParamGates({
             );
         }
         dispatch(setEditParam(blocked as typeof editParam));
-    }, [editParam, separationEnabled, composeEnabled, dispatch]);
+    }, [editParam, separationEnabled, composeEnabled, dispatch, setSecondaryParamVisible]);
 
     // 收集轨道组内所有 trackId（root + 递归所有子轨道）
     const groupTrackIds = useMemo(() => {
@@ -198,7 +198,7 @@ export function usePianoRollParamGates({
         ) {
             setHoveredReferenceRootTrackId(null);
         }
-    }, [hoveredReferenceRootTrackId, visibleReferenceRootTrackIds]);
+    }, [hoveredReferenceRootTrackId, visibleReferenceRootTrackIds, setHoveredReferenceRootTrackId]);
 
     const pitchHardDisableReason = useMemo(() => {
         if (editParam !== "pitch") return null;

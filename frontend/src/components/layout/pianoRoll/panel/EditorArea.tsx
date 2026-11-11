@@ -13,6 +13,7 @@ import { timeRulerHeightPx } from "../../timeline/rulerHeight";
 import { TempoMapCornerButton } from "../../timeline/TempoMapCornerButton";
 import { AXIS_W, PARAM_EDITOR_BOTTOM_BAR_PX } from "../constants";
 import { PianoRollWaveformSurface } from "../PianoRollWaveformSurface";
+import { PianoRollSnapGuideLayer } from "./PianoRollSnapGuideLayer";
 import { pianoRollViewportBus } from "../pianoRollViewportBus";
 import { pointerOverlayStyle } from "../../pointerOverlayStyle";
 import { VibratoPresetGlyph } from "../../vibrato/VibratoPresetGlyph";
@@ -68,7 +69,6 @@ type Props = {
         | "onCanvasPointerMoveForBlocks"
         | "paddedContentWidth"
         | "paramValuePreview"
-        | "paramBlockError"
         | "pianoRollAmplitudeMap"
         | "prTickAxis"
         | "pxPerBeat"
@@ -407,8 +407,14 @@ export function EditorArea({ m }: Props) {
                                         touchAction: "none",
                                     }}
                                     onPointerMove={(event) => {
+                                        /*
+                                         * 【顺序不可交换】块层在块模式下是**唯一**的指针所有者：
+                                         * 它决定光标、hover、以及读数。通用处理器按「是否贴近
+                                         * 参数线」另算一套，先跑它就会把块层刚设好的状态覆盖掉
+                                         * —— 这正是「拖块时读数显示的是指针处的旧曲线值」的成因。
+                                         */
+                                        if (onCanvasPointerMoveForBlocks(event)) return;
                                         interactions.onCanvasPointerMove(event);
-                                        onCanvasPointerMoveForBlocks(event);
                                     }}
                                     onPointerLeave={interactions.onCanvasPointerLeave}
                                     onPointerDown={interactions.onCanvasPointerDown}
@@ -426,14 +432,13 @@ export function EditorArea({ m }: Props) {
                                     className="absolute inset-0 pointer-events-none"
                                     aria-hidden
                                 />
-                                {m.paramBlockError ? (
-                                    <div
-                                        role="alert"
-                                        className="absolute left-2 top-2 z-30 max-w-md rounded bg-qt-panel px-2 py-1 text-qt-sm text-qt-text"
-                                    >
-                                        {m.paramBlockError}
-                                    </div>
-                                ) : null}
+
+                                {/* 参数编辑器吸附引导：只画时间轴竖线；
+                                    音高/参数吸附只量化，不渲染 value 轴高亮线。 */}
+                                <PianoRollSnapGuideLayer
+                                    viewWidth={viewSize.w}
+                                    viewHeight={viewSize.h}
+                                />
 
                                 {/* 指针旁的实时读数：**参数值 + 颤音拖拽状态合成一个
                                     气泡**。两者曾经各弹一个，颤音那个还压在值上面，

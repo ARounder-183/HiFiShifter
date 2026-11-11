@@ -29,6 +29,12 @@
             "why": "只认 [package] 段里的 version；[dependencies] 里也有同名字段"
         },
         {
+            "path": "backend/hifishifter-kernel/Cargo.toml",
+            "pattern": "(?ms)(\\[package\\].*?^\\s*version\\s*=\\s*\")([^\"]+)(\")",
+            "occurrences": 1,
+            "why": "内核此前停留 0.1.0 且未纳入清单，诊断包里的 kernel 版本与插件链不同步"
+        },
+        {
             "path": "backend/hifishifter-plugin/Cargo.toml",
             "pattern": "(?ms)(\\[package\\].*?^\\s*version\\s*=\\s*\")([^\"]+)(\")",
             "occurrences": 1
@@ -89,6 +95,42 @@
             "pattern": "(?ms)(\\[\\[package\\]\\]\\s*name\\s*=\\s*\"hifishifter-clap\"\\s*version\\s*=\\s*\")([^\"]+)(\")",
             "occurrences": 1,
             "id": "backend/Cargo.lock (hifishifter-clap)"
+        },
+        {
+            "path": "backend/hifishifter-clipboard/Cargo.toml",
+            "pattern": "(?ms)(\\[package\\].*?^\\s*version\\s*=\\s*\")([^\"]+)(\")",
+            "occurrences": 1,
+            "id": "clipboard"
+        },
+        {
+            "path": "backend/hifishifter-host-link/Cargo.toml",
+            "pattern": "(?ms)(\\[package\\].*?^\\s*version\\s*=\\s*\")([^\"]+)(\")",
+            "occurrences": 1,
+            "id": "host-link"
+        },
+        {
+            "path": "backend/hfs-gui/Cargo.toml",
+            "pattern": "(?ms)(\\[package\\].*?^\\s*version\\s*=\\s*\")([^\"]+)(\")",
+            "occurrences": 1,
+            "id": "hfs-gui"
+        },
+        {
+            "path": "backend/Cargo.lock",
+            "pattern": "(?ms)(\\[\\[package\\]\\]\\s*name\\s*=\\s*\"hifishifter-clipboard\"\\s*version\\s*=\\s*\")([^\"]+)(\")",
+            "occurrences": 1,
+            "id": "backend/Cargo.lock (hifishifter-clipboard)"
+        },
+        {
+            "path": "backend/Cargo.lock",
+            "pattern": "(?ms)(\\[\\[package\\]\\]\\s*name\\s*=\\s*\"hifishifter-host-link\"\\s*version\\s*=\\s*\")([^\"]+)(\")",
+            "occurrences": 1,
+            "id": "backend/Cargo.lock (hifishifter-host-link)"
+        },
+        {
+            "path": "backend/hfs-gui/Cargo.lock",
+            "pattern": "(?ms)(\\[\\[package\\]\\]\\s*name\\s*=\\s*\"hfs-gui\"\\s*version\\s*=\\s*\")([^\"]+)(\")",
+            "occurrences": 1,
+            "id": "backend/hfs-gui/Cargo.lock (hfs-gui)"
         }
     ]
 }

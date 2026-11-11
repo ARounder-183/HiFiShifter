@@ -202,39 +202,14 @@ const mockParamWrites = new Map<string, Map<number, number>>();
 /** mock 的 v7 音节块分析：按固定 0.55s 切片，仅浏览器实验用。 */
 const mockSyllableSpans = new Map<string, Array<{ startSec: number; endSec: number }>>();
 
-/** mock 的 v7 手动合并记录（root track → 记录）。 */
-const mockParamBlockMerges = new Map<
+/** mock 的参数块派生视图（root track → view）。 */
+const mockParamBlockViews = new Map<
     string,
-    Array<{
-        mergedGroupId: string;
-        memberRefs: Array<{
-            clipId: string;
-            takeId: string;
-            syllableId: string;
-            startSec: number;
-            endSec: number;
-        }>;
-    }>
->();
-
-/** mock 的 v7 手动切分 / 伸缩记录（root track → 记录）。 */
-const mockParamBlockEdits = new Map<
-    string,
-    Array<{
-        editId: string;
-        memberRefs: Array<{
-            clipId: string;
-            takeId: string;
-            syllableId: string;
-            sourceStartSec: number;
-            sourceEndSec: number;
-        }>;
-        startSec: number;
-        endSec: number;
-        memberStartSec?: number;
-        memberEndSec?: number;
-        blockIds?: string[];
-    }>
+    {
+        editRevision: number;
+        blocks: unknown[];
+        edits: { schemaVersion: 2; revision: number; blocks: unknown[] };
+    }
 >();
 
 function mockParamWriteKey(trackId: string, param: string): string {
@@ -574,21 +549,76 @@ function buildHandlers(): Record<string, (...args: unknown[]) => unknown> {
                 analyzed: spans.length > 0,
             };
         },
-        get_param_block_merges: (...args: unknown[]) => ({
-            ok: true,
-            records: mockParamBlockMerges.get(String(args[0] ?? "")) ?? [],
-            intervalEdits: mockParamBlockEdits.get(String(args[0] ?? "")) ?? [],
-        }),
-        set_param_block_merges: (...args: unknown[]) => {
-            mockParamBlockMerges.set(
-                String(args[0] ?? ""),
-                Array.isArray(args[1]) ? (args[1] as never[]) : [],
-            );
-            mockParamBlockEdits.set(
-                String(args[0] ?? ""),
-                Array.isArray(args[2]) ? (args[2] as never[]) : [],
-            );
-            return { ok: true };
+        get_param_block_view: (...args: unknown[]) => {
+            const root = String(args[0] ?? "");
+            const stored = mockParamBlockViews.get(root) ?? {
+                editRevision: 0,
+                blocks: [],
+                edits: { schemaVersion: 2, revision: 0, blocks: [] },
+            };
+            return {
+                ok: true,
+                editRevision: stored.editRevision,
+                layoutKey: "",
+                framePeriodMs: 5,
+                blocks: stored.blocks,
+                orphanCount: 0,
+                analysisPending: false,
+                curveRevision: 0,
+                edits: stored.edits,
+            };
+        },
+        set_param_block_edits: (...args: unknown[]) => {
+            const input = (args[0] ?? {}) as {
+                rootTrackId?: string;
+                expectedEditRevision?: number;
+                edits?: unknown[];
+            };
+            const root = String(input.rootTrackId ?? "");
+            const current = mockParamBlockViews.get(root);
+            const expected = input.expectedEditRevision ?? 0;
+            if (current && current.editRevision !== expected) {
+                throw new Error("Conflict: parameter block edits changed");
+            }
+            const edits = {
+                schemaVersion: 2 as const,
+                revision: expected + 1,
+                blocks: Array.isArray(input.edits) ? input.edits : [],
+            };
+            mockParamBlockViews.set(root, { editRevision: edits.revision, blocks: [], edits });
+            return {
+                ok: true,
+                editRevision: edits.revision,
+                layoutKey: "",
+                framePeriodMs: 5,
+                blocks: [],
+                orphanCount: 0,
+                analysisPending: false,
+                curveRevision: 0,
+                edits,
+            };
+        },
+        restore_game_param_blocks: (...args: unknown[]) => {
+            const input = (args[0] ?? {}) as { rootTrackId?: string };
+            const root = String(input.rootTrackId ?? "");
+            const current = mockParamBlockViews.get(root);
+            const edits = {
+                schemaVersion: 2 as const,
+                revision: (current?.editRevision ?? 0) + 1,
+                blocks: [],
+            };
+            mockParamBlockViews.set(root, { editRevision: edits.revision, blocks: [], edits });
+            return {
+                ok: true,
+                editRevision: edits.revision,
+                layoutKey: "",
+                framePeriodMs: 5,
+                blocks: [],
+                orphanCount: 0,
+                analysisPending: false,
+                curveRevision: 0,
+                edits,
+            };
         },
         ping: () => ({ ok: true }),
         get_runtime_info: () => ({

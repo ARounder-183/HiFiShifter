@@ -46,6 +46,7 @@ import {
     normalizeTimelineSnapSettings,
     createDefaultTimelineSnapSettings,
     applyToolMode,
+    normalizeSelectToolMode,
 } from "../settings";
 import { setPending, setRejected } from "./shared";
 import type { ActionReducerMapBuilder } from "@reduxjs/toolkit";
@@ -226,6 +227,9 @@ export function registerRuntime(builder: ActionReducerMapBuilder<SessionState>) 
             if (s.paramBlockFollowPitch != null) {
                 state.paramBlockFollowPitch = Boolean(s.paramBlockFollowPitch);
             }
+            if (s.alwaysShowParamBlocks != null) {
+                state.alwaysShowParamBlocks = Boolean(s.alwaysShowParamBlocks);
+            }
             state.playheadZoomEnabled = s.playheadZoom;
             if (s.autoScroll != null) state.autoScrollEnabled = s.autoScroll;
             if (s.paramEditorSeekPlayhead != null)
@@ -394,9 +398,14 @@ export function registerRuntime(builder: ActionReducerMapBuilder<SessionState>) 
                     (id: unknown): id is string => typeof id === "string" && id.length > 0,
                 );
             }
-            // 上次使用的工具：只认已知取值（手改配置里的野值一律忽略，回落默认）。
-            // 放在最后：`applyToolMode` 会一并派生 `toolModeGroup` / `drawToolMode`，
-            // 后面不该再有分支去改这三个字段。
+            // 上次使用的选择族子模式：非法 / 缺项一律 range。
+            // 只恢复**工具身份**：块图层是否可见由 isParamBlockLayerVisible 派生，
+            // 水合不再代写任何设置 —— 旧实现在这里把图层强制打开，于是「上次是
+            // 块模式」会永久留下一个用户没开过的图层开关。
+            state.selectToolMode = normalizeSelectToolMode(s.paramEditorSelectionMode);
+            // 上次使用的工具族：只认四个合法成员（旧配置里的 `"block"` 是未知值，
+            // 回落出厂默认的绘制工具）。放在最后：`applyToolMode` 还会同步
+            // `drawToolMode`。
             if (
                 typeof s.paramEditorTool === "string" &&
                 (TOOL_MODES as readonly string[]).includes(s.paramEditorTool)

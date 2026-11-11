@@ -39,6 +39,15 @@ interface EditContextMenuProps {
     onConvertVolumeToDyn?: () => void;
     /** 动态 → 音量（源参数归位到「沿用原声」）。 */
     onConvertDynToVolume?: () => void;
+    /**
+     * 插在标准参数命令之前的菜单项（参数块子菜单用）。
+     *
+     * 参数块右键菜单只额外需要一个“参数块 ▸”入口；标准参数命令仍然全部来自
+     * 本组件唯一的描述表，避免维护第二张 26 项平行表。
+     */
+    leadingItems?: AppMenuItemSpec[];
+    /** 菜单的无障碍名称；块菜单会覆盖成“参数块操作”。 */
+    ariaLabel?: string;
 }
 
 export function EditContextMenu({
@@ -66,6 +75,8 @@ export function EditContextMenu({
     onExportMidi,
     onConvertVolumeToDyn,
     onConvertDynToVolume,
+    leadingItems,
+    ariaLabel,
 }: EditContextMenuProps) {
     const { tf } = useI18n();
 
@@ -90,11 +101,16 @@ export function EditContextMenu({
     // 菜单项映射到共享原语的 AppMenuItemSpec：分组分隔线由每段首项的
     // `separatorBefore` 表达；`onSelect` 只调用业务动作，关闭由原语负责
     //（原语在 onSelect 之后自行调用 onClose）。
+    const hasLeadingItems = (leadingItems?.length ?? 0) > 0;
     const items: AppMenuItemSpec[] = [
+        ...(leadingItems ?? []),
         {
             key: "copy",
             label: tf("menu_copy"),
             shortcut: copyShortcut,
+            // 块菜单的顶部子菜单与标准命令之间需要一条分组线；普通编辑菜单
+            // 没有 leadingItems 时保持原样（第一项不加分隔线）。
+            separatorBefore: hasLeadingItems,
             onSelect: () => onCopy?.(),
         },
         {
@@ -230,5 +246,5 @@ export function EditContextMenu({
             : []),
     ];
 
-    return <AppContextMenu x={x} y={y} items={items} onClose={onClose} />;
+    return <AppContextMenu x={x} y={y} items={items} onClose={onClose} ariaLabel={ariaLabel} />;
 }

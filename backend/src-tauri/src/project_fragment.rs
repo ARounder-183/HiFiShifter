@@ -39,8 +39,8 @@ fn shift_track_params_for_merge(
 
     let mut out = params.clone();
     // 合并记录只引用 Clip/Take 身份，不随参数帧平移。
-    out.param_block_merges.clear();
-    out.param_block_interval_edits.clear();
+    out.param_block_edits = Default::default();
+    out.param_block_view = None;
     out.pitch_orig = shift_curve(&params.pitch_orig, delta_frames, 0.0);
     out.pitch_edit = shift_curve(&params.pitch_edit, delta_frames, 0.0);
     out.tension_edit = shift_curve(&params.tension_edit, delta_frames, 0.0);

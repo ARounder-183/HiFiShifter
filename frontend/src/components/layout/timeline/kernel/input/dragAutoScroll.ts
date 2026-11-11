@@ -31,7 +31,11 @@
  * - 独立性：纯函数，不依赖 DOM / React，可直接单测（本模块的测试即回归锁）。
  */
 
-import { EDGE_SCROLL_BAND_PX, resolveEdgeScrollDeltaPx } from "../../../shared/edgeAutoScroll";
+import {
+    EDGE_SCROLL_BAND_PX,
+    resolveAxisEdgeScrollDeltaPx,
+    resolveEdgeScrollDeltaPx,
+} from "../../../shared/edgeAutoScroll";
 
 /** 边缘触发带宽（CSS px）：指针进入距视口边缘这么近时开始自动滚屏。 */
 export const DRAG_EDGE_SCROLL_BAND_PX = EDGE_SCROLL_BAND_PX;
@@ -43,6 +47,8 @@ export const DRAG_EDGE_SCROLL_BAND_PX = EDGE_SCROLL_BAND_PX;
  * ——时间轴的 clip 更宽（全览时一个 clip 可能横跨半个视口），滚太快难以精确落点。
  */
 export const DRAG_EDGE_SCROLL_MAX_SPEED_PX_PER_SEC = 720;
+/** 竖直滚动的最大速度（轨道列表比时间轴窄，手感与水平一致）。 */
+export const DRAG_EDGE_SCROLL_MAX_SPEED_Y_PX_PER_SEC = 720;
 
 /**
  * 把「指针相对视口边缘的位置」解析为**本帧**的水平滚屏步长。
@@ -67,6 +73,42 @@ export function resolveDragEdgeScroll(args: {
         ...args,
         maxSpeedPxPerSec: DRAG_EDGE_SCROLL_MAX_SPEED_PX_PER_SEC,
     });
+}
+
+/** 二维拖拽边缘步长；没有竖直边界时 dy=0。 */
+export function resolveDragEdgeScroll2D(args: {
+    readonly clientX: number;
+    readonly clientY: number;
+    readonly leftPx: number;
+    readonly rightPx: number;
+    readonly topPx: number;
+    readonly bottomPx: number;
+    readonly frameMs: number;
+}): { dx: number; dy: number } {
+    return {
+        dx: resolveEdgeScrollDeltaPx({
+            clientX: args.clientX,
+            leftPx: args.leftPx,
+            rightPx: args.rightPx,
+            frameMs: args.frameMs,
+            maxSpeedPxPerSec: DRAG_EDGE_SCROLL_MAX_SPEED_PX_PER_SEC,
+        }),
+        dy: resolveAxisEdgeScrollDeltaPx({
+            pointerPx: args.clientY,
+            minPx: args.topPx,
+            maxPx: args.bottomPx,
+            frameMs: args.frameMs,
+            maxSpeedPxPerSec: DRAG_EDGE_SCROLL_MAX_SPEED_Y_PX_PER_SEC,
+        }),
+    };
+}
+
+/** 手势的轴能力：Clip 位置类手势两轴都可滚，增益类不滚。 */
+export function dragAutoScrollAxesForGesture(kind: string): {
+    readonly x: boolean;
+    readonly y: boolean;
+} {
+    return shouldAutoScrollForGesture(kind) ? { x: true, y: true } : { x: false, y: false };
 }
 
 /**

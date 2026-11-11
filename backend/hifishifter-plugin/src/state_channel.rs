@@ -56,10 +56,12 @@ pub(crate) struct EditState {
     )]
     pub take_syllables:
         BTreeMap<TakeSyllableKey, hifishifter_kernel::pitch_analysis::TakeSyllableAnalysis>,
-    /// Authored root parameter-line layouts; independent of audio authority.
+    /// 参数块的唯一用户编辑权威：root → Take 源域编辑集。
+    ///
+    /// 【为什么独立于音频权威】块是离散分段，曲线是连续函数；宿主重建不能把
+    /// 用户的块编辑变成曲线 run 的一部分。视图不存这里，恢复后重新 compose。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub param_line_blocks:
-        BTreeMap<String, hifishifter_kernel::param_line_blocks::ParamLineBlockSet>,
+    pub param_block_edits: BTreeMap<String, hifishifter_kernel::param_blocks::ParamBlockEditSet>,
     /// 跨组件共享的插件私有参数分组；GUID关系不参与REAPER folder或音频路由。
     #[serde(
         default,
@@ -249,7 +251,7 @@ impl EditState {
             && self.fades.is_empty()
             && self.clip_local.is_empty()
             && self.take_syllables.is_empty()
-            && self.param_line_blocks.is_empty()
+            && self.param_block_edits.is_empty()
     }
 
     /// 形状记录有界且只允许固定GUID键，冷重开不能按会话clip序号关联。
@@ -283,11 +285,11 @@ impl EditState {
     }
     /// 音节缓存有界，且每个区间必须是有限、正宽、按时间排序的源域秒。
     pub(crate) fn validate_take_syllables(&self) -> Result<(), String> {
-        if self.param_line_blocks.len() > 10000 {
+        if self.param_block_edits.len() > 10000 {
             return Err("root parameter block budget exceeded".into());
         }
-        for blocks in self.param_line_blocks.values() {
-            blocks.validate()?;
+        for edits in self.param_block_edits.values() {
+            edits.validate()?;
         }
         if self.take_syllables.len() > 20000 {
             return Err("take syllable cache budget exceeded".into());
@@ -348,7 +350,7 @@ impl EditState {
             .iter()
             .map(|t| t.id.clone())
             .chain(self.params.keys().cloned())
-            .chain(self.param_line_blocks.keys().cloned())
+            .chain(self.param_block_edits.keys().cloned())
             .collect();
         for old in &ids {
             // 存档里这一条的身份（缺席与空向量同义：没有可匹配的东西）。
@@ -470,12 +472,12 @@ impl EditState {
                 None => None,
             })
             .collect();
-        candidate.param_line_blocks = self
-            .param_line_blocks
+        candidate.param_block_edits = self
+            .param_block_edits
             .iter()
-            .filter_map(|(id, blocks)| match mapping.get(id) {
-                Some((new, _)) => Some((new.clone(), blocks.clone())),
-                None if unbound.contains(id) => Some((id.clone(), blocks.clone())),
+            .filter_map(|(id, edits)| match mapping.get(id) {
+                Some((new, _)) => Some((new.clone(), edits.clone())),
+                None if unbound.contains(id) => Some((id.clone(), edits.clone())),
                 None => None,
             })
             .collect();
@@ -650,10 +652,12 @@ impl EditState {
             // 【T2：派生数组不从这里来】它们属于基线层；恢复路径由
             // `publish_baseline` / `install_baseline_locked` 负责。
         }
-        for (root, blocks) in &self.param_line_blocks {
+        for (root, edits) in &self.param_block_edits {
             if !self.unbound.contains(root) && timeline.tracks.iter().any(|track| &track.id == root)
             {
-                merged.entry(root.clone()).or_default().param_line_blocks = Some(blocks.clone());
+                let entry = merged.entry(root.clone()).or_default();
+                entry.param_block_edits = edits.clone();
+                entry.param_block_view = None;
             }
         }
         timeline.params_by_root_track = merged;
@@ -802,7 +806,7 @@ impl EditState {
     ///
     /// 【音节缓存不升代际】`take_syllables` 缺省为空，是**可选缓存**；升代会让已经
     /// 写出的第 2 代载荷被整份拒绝，而缺少缓存最多回退成整段 / MIDI 音符。
-    pub(crate) const STATE_VERSION: u64 = 2;
+    pub(crate) const STATE_VERSION: u64 = 3;
 
     /// 有版本且有界的组件state；旧空state保持默认编辑。
     pub fn encode(&self) -> Result<Vec<u8>, String> {
@@ -852,8 +856,9 @@ impl EditState {
                     crate::editor::capture_edits::strip_derived_curves(&params)
                 };
                 // The root map is authoritative; params is only a view cache.
-                if trimmed.param_line_blocks.contains_key(&root) {
-                    params.param_line_blocks = None;
+                if trimmed.param_block_edits.contains_key(&root) {
+                    params.param_block_edits = Default::default();
+                    params.param_block_view = None;
                 }
                 (root, params)
             })
@@ -909,10 +914,13 @@ impl EditState {
             .iter()
             .map(|t| &t.id)
             .chain(restored.params.keys())
+            .chain(restored.param_block_edits.keys())
             .filter(|id| restored.bindings.get(*id).is_none_or(Vec::is_empty))
             .cloned()
             .collect();
-        restored.needs_rebind = !restored.tracks.is_empty() || !restored.params.is_empty();
+        restored.needs_rebind = !restored.tracks.is_empty()
+            || !restored.params.is_empty()
+            || !restored.param_block_edits.is_empty();
         restored.validate_clip_local()?;
         restored.validate_take_syllables()?;
         restored.revision = self
@@ -1018,7 +1026,7 @@ mod tests {
         assert_eq!(edits.take_syllables.get(&keys), Some(&syllable_analysis()));
         let bytes = edits.encode().expect("encode");
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(value["version"], 2);
+        assert_eq!(value["version"], EditState::STATE_VERSION);
         let mut restored = EditState::default();
         restored.restore(&bytes).expect("restore");
         assert_eq!(restored.take_syllables.len(), 1);

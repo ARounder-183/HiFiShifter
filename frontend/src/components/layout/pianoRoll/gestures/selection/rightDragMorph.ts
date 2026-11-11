@@ -9,6 +9,7 @@ import {
     fetchFullResCurve,
     readPvRange,
     uploadFullResCurveSegments,
+    type FullResWriteSegment,
 } from "../../selectionEditData";
 import {
     createSelectionAmplifier,
@@ -21,6 +22,8 @@ import type { ParamViewSegment } from "../../types";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import type { ParamSelection } from "../../paramSelection";
 import type { PointerDeps } from "../pointerDeps";
+import { trackParamBlockCommit } from "../../paramBlockCommitCoordinator";
+import type { ParamCurveCommitAuthority } from "../../paramBlockCommitPolicy";
 
 /** `handleParamLineDrag` 作用域里的局部量。 */
 type ParamLineLocals = {
@@ -56,8 +59,16 @@ type Deps = Pick<
     | "setActivePointerGestureEnd"
     | "setCanvasCursor"
     | "setParamView"
-> &
-    ParamLineLocals;
+> & {
+    /**
+     * Optional atomic commit used by the block selection mode: curve patches and the
+     * cleared pitch-block values go to the backend in one history step.
+     */
+    readonly commitAmplitude?: (
+        segments: readonly FullResWriteSegment[],
+        authority: ParamCurveCommitAuthority,
+    ) => Promise<void>;
+} & ParamLineLocals;
 
 /**
  * 处理参数线上的右键拖动（百分比形变）。
@@ -95,6 +106,7 @@ export function handleRightDragMorph(deps: Deps, e: ReactPointerEvent<HTMLCanvas
         setActivePointerGestureEnd,
         setCanvasCursor,
         setParamView,
+        commitAmplitude,
     } = deps;
 
     e.preventDefault();
@@ -368,11 +380,20 @@ export function handleRightDragMorph(deps: Deps, e: ReactPointerEvent<HTMLCanvas
             // 上传失败同样复位 liveEdit（finally），不让覆盖层冻结。
             void (async () => {
                 try {
-                    await uploadFullResCurveSegments({
-                        trackId: rootTrackId,
-                        param: editParam,
-                        segments: buildUploadSegments(editParam, pieces, commit.sentinelAt),
-                    });
+                    const segments = buildUploadSegments(editParam, pieces, commit.sentinelAt);
+                    if (commitAmplitude !== undefined) {
+                        await commitAmplitude(segments, commit.authority);
+                    } else {
+                        await trackParamBlockCommit(
+                            "amplitude",
+                            rootTrackId,
+                            uploadFullResCurveSegments({
+                                trackId: rootTrackId,
+                                param: editParam,
+                                segments,
+                            }),
+                        );
+                    }
                 } catch (err) {
                     console.error("[pianoRoll] right-drag upload failed", err);
                 } finally {

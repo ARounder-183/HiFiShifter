@@ -191,7 +191,7 @@ export interface PianoRollSelectionBandSpec {
 }
 
 /**
- * 参数块场景输入（第一版 mock）。
+ * 参数块场景输入。
  *
  * 块由面板按当前根轨道组 + 当前参数曲线派生，宿主只负责把时间区间与块高投影成
  * 矩形。它与选区块分开：选区块是参数编辑操作的作用域；块是音节级的可视化与
@@ -255,13 +255,15 @@ export interface PianoRollParamBlockSpec {
          * `displayCenterValue` 已由手势锁定时同样传 false，避免二次取整。
          */
         readonly displayCenterSnapToSemitone?: boolean;
+        /** canonical = live（曲线反算）；手势预览 = locked（显式中心优先）。 */
+        readonly centerPolicy?: "live" | "locked";
         /** 本次手势锁定的块高（CSS px）；只用于时间伸缩预览，不写回数据。 */
         readonly displayHeightPx?: number | null;
         /** 时间上是否与相邻块相接；相接处不画竖向分隔，连续块看起来是一整条。 */
         readonly contiguousStart?: boolean;
         readonly contiguousEnd?: boolean;
         readonly selected: boolean;
-        readonly merged: boolean;
+        readonly grouped: boolean;
         /** 相接块边界上的圆滑手柄；只对有邻居的块出现。 */
         readonly transitionHandle?: {
             readonly leftId: string;
@@ -274,13 +276,13 @@ export interface PianoRollParamBlockSpec {
     }[];
     readonly borderRgba: readonly [number, number, number, number];
     readonly selectedRgba: readonly [number, number, number, number];
-    readonly mergedRgba: readonly [number, number, number, number];
+    readonly groupedRgba: readonly [number, number, number, number];
     readonly labelRgba?: readonly [number, number, number, number];
     readonly selectedLabelRgba?: readonly [number, number, number, number];
     /** 块的圆角填充；缺省不画填充（只画边框）。 */
     readonly fillRgba?: readonly [number, number, number, number];
     readonly selectedFillRgba?: readonly [number, number, number, number];
-    readonly mergedFillRgba?: readonly [number, number, number, number];
+    readonly groupedFillRgba?: readonly [number, number, number, number];
     readonly topHighlightRgba?: readonly [number, number, number, number];
     /** 顶部高光厚度（CSS px）。 */
     readonly topHighlightPx?: number;
@@ -477,9 +479,19 @@ export interface PianoRollCurveLayer {
      *   **并跳过 `midi <= 0` 的无声帧**）。
      */
     readonly projection: "curve" | "clipboard" | "detected";
-    /** `projection === "clipboard"` 时的选区起点（秒）。 */
+    /**
+     * 这条曲线**只在这段时间内有效**（秒）—— 越界帧不画。
+     *
+     * 两个投影共用同一个字段，因为语义只有一条（"曲线的有效跨度"）：
+     *
+     * - `projection === "clipboard"`：选区跨度；
+     * - `projection === "detected"`：所属 clip 的 `[startSec, startSec + lengthSec)`。
+     *
+     * 检测曲线必须给：缓存可能比 clip 长（分割 / 拉伸之前的那一份），不裁就会把
+     * 旧内容画到 clip 外面（"音高线残影"）。
+     */
     readonly clipStartSec?: number;
-    /** `projection === "clipboard"` 时的选区终点（秒）。 */
+    /** 同上，终点（秒，**开区间**）。 */
     readonly clipEndSec?: number;
     /**
      * `projection === "detected"` 时曲线第 0 帧对应的 timeline 绝对时间（秒）。

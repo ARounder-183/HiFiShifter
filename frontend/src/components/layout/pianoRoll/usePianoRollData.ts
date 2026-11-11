@@ -1,7 +1,8 @@
 // 参数面板数据窗口：刷新与笔画推迟共用作用域，插件提交不清掉同scope可见曲线。
 import { useCallback, useEffect, useRef, useState } from "react";
-import { isPluginMode } from "../../../services/hostCapabilities";
-import { shouldClearParamRefresh } from "./paramRefreshPolicy";
+import type { ParamAuthoritySnapshot } from "./paramBlockTransaction";
+import { createDebugLogger } from "../../../utils/debugLog";
+import { shouldAcceptParamPayload, shouldClearParamRefresh } from "./paramRefreshPolicy";
 
 import type { ParamFramesPayload } from "../../../types/api";
 import { paramsApi } from "../../../services/api";
@@ -13,6 +14,8 @@ import type { LiveEditDeferral } from "./liveEditDeferral";
 import { resolveParamFetchWindow } from "./paramFetchWindow";
 import { framesToTime } from "./utils";
 const paramFramePeriodCache = new Map<string, number>();
+
+const pianoRollDebug = createDebugLogger("hifishifter.debugPianoRoll");
 
 /**
  * 「参数曲线取数中」提示的静默窗口（毫秒）。
@@ -97,14 +100,21 @@ export function usePianoRollData(args: {
     const liveEditDeferral: LiveEditDeferral = liveEditDeferralRef.current;
     const [paramView, setParamView] = useState<ParamViewSegment | null>(null);
     /**
-     * Backend-only monotonic revision for `paramView`.
+     * 已落地的**权威**曲线代次（后端 `param_curve_revision`）+ 产生它的读请求序号。
      *
-     * `paramView.key` intentionally identifies only the window geometry, so a
-     * forced refresh of the same window keeps the same key. Block commits must
-     * still know that an authoritative payload (not their own optimistic local
-     * echo) has arrived before retiring a preview snapshot.
+     * `paramView.key` 只标识窗口几何，所以同窗口的强制重取会保持同一个 key；
+     * 块提交必须另外知道「一份**权威**回包（而不是自己的本地回显）到了」才允许
+     * 撤下预览快照。
+     *
+     * 【为什么是后端代次而不是本地计数器】它是 `set_param_block_edits` 的 CAS 单位，
+     * 也是「这次写入有没有生效」的唯一可比证据。旧实现暴露的是本地计数器（每落地
+     * 一次回包 +1），而视觉事务上存的是后端代次 —— 两者不可比，于是带曲线补丁的
+     * 过渡事务每次都要等满 2s 超时才释放预览。
      */
-    const [authorityRevision, setAuthorityRevision] = useState(0);
+    const [authoritySnapshot, setAuthoritySnapshot] = useState<ParamAuthoritySnapshot>({
+        curveRevision: 0,
+        requestSeq: 0,
+    });
     /**
      * A response is authoritative for a commit only when the request itself was
      * issued after that commit. A response from an older request can arrive
@@ -203,6 +213,37 @@ export function usePianoRollData(args: {
         }
         return true;
     };
+    /**
+     * 同 scope 的空回包不能把可见曲线清成空白。
+     *
+     * 后端在“曲线确实为空”时也会返回空数组；但同 scope 的刷新（Clip 编辑 / 撤销 /
+     * 分析回填）经常先回一份空窗口，随后才是真正的新窗口。此时保留上一份非空
+     * 视图，等下一次回包原子替换，避免曲线消失一帧。真正清空由 scope 变化负责。
+     */
+    /**
+     * 把「这一次落地的权威曲线代次」发布给下游。
+     *
+     * 【每次都换对象】状态身份变化是下游释放判据重跑的唯一触发器；代次可能相同
+     * （同窗口重取），但请求序号一定前进。
+     */
+    const publishAuthoritySnapshot = (payload: ParamFramesPayload, requestSeq: number): void => {
+        const curveRevision = Number(payload.authority_revision ?? 0);
+        setAuthoritySnapshot((previous) =>
+            previous.curveRevision === curveRevision && previous.requestSeq === requestSeq
+                ? previous
+                : { curveRevision, requestSeq },
+        );
+    };
+    const acceptParamPayload = (payload: ParamFramesPayload, requestedKey: string): boolean => {
+        const hasValues = (payload.edit?.length ?? 0) > 0 || (payload.orig?.length ?? 0) > 0;
+        const previous = paramViewRef.current;
+        return shouldAcceptParamPayload({
+            hasValues,
+            requestedKey,
+            previousKey: previous?.key ?? null,
+            previousHasValues: previous !== null && previous.edit.length > 0,
+        });
+    };
 
     /**
      * 当前参数（渲染期同步刷新）。
@@ -251,8 +292,9 @@ export function usePianoRollData(args: {
         const scopeChanged = lastParamScopeRef.current !== scope;
         lastParamScopeRef.current = scope;
         if (!scopeChanged && liveEditDeferral.defer({ force: true })) return;
-        // 同scope提交保留当前可见数据，仍强制取权威数据；切参数/轨道必须清除旧scope。
-        if (shouldClearParamRefresh(scopeChanged, isPluginMode())) {
+        // 同 scope 的时间线刷新保留当前可见数据，仍强制取权威数据；
+        // 只有切参数 / 轨道才清除旧 scope。
+        if (shouldClearParamRefresh(scopeChanged)) {
             setParamView(null);
             setSecondaryParamViews({});
             setReferencePitchViews({});
@@ -466,7 +508,7 @@ export function usePianoRollData(args: {
         const debugEnabled = debug;
 
         if (debugEnabled) {
-            console.log("[usePianoRollData] Request params:", {
+            pianoRollDebug.log("[usePianoRollData] Request params:", {
                 trackId,
                 editParam,
                 visibleStartSec,
@@ -705,7 +747,7 @@ export function usePianoRollData(args: {
                 beginLoading();
                 try {
                     if (debugEnabled) {
-                        console.log("[usePianoRollData] Fetching param frames:", {
+                        pianoRollDebug.log("[usePianoRollData] Fetching param frames:", {
                             trackId,
                             editParam,
                             startFrame,
@@ -751,6 +793,10 @@ export function usePianoRollData(args: {
 
                     const payload = res as ParamFramesPayload;
                     if (!acceptAuthorityRevision(payload)) return;
+                    if (!acceptParamPayload(payload, paramKey)) {
+                        lastAppliedForceParamFetchTokenRef.current = localForceParamFetchToken;
+                        return;
+                    }
 
                     if (editParam === "pitch") {
                         const userModified = payload.pitch_edit_user_modified;
@@ -772,7 +818,7 @@ export function usePianoRollData(args: {
                     const receivedEditLen = (payload.edit ?? []).length;
 
                     if (debugEnabled) {
-                        console.log("[usePianoRollData] Received param data:", {
+                        pianoRollDebug.log("[usePianoRollData] Received param data:", {
                             trackId,
                             editParam,
                             requestedStartFrame: startFrame,
@@ -809,7 +855,7 @@ export function usePianoRollData(args: {
                             : undefined,
                     });
                     authorityAppliedRequestSeqRef.current = reqId;
-                    setAuthorityRevision((value) => value + 1);
+                    publishAuthoritySnapshot(payload, reqId);
                     lastAppliedForceParamFetchTokenRef.current = localForceParamFetchToken;
                     invalidate();
 
@@ -940,6 +986,7 @@ export function usePianoRollData(args: {
                 if (liveEditDeferral.defer()) return;
                 const payload = paramRes as ParamFramesPayload;
                 if (!acceptAuthorityRevision(payload)) return;
+                if (!acceptParamPayload(payload, paramKey)) return;
 
                 if (editParam === "pitch") {
                     const userModified = payload.pitch_edit_user_modified;
@@ -970,7 +1017,7 @@ export function usePianoRollData(args: {
                         : undefined,
                 });
                 authorityAppliedRequestSeqRef.current = reqId;
-                setAuthorityRevision((value) => value + 1);
+                publishAuthoritySnapshot(payload, reqId);
 
                 if (Math.abs(fpRes - fpMs) > 1e-3) {
                     const retryKey = `${fpKey}|${fpMs}`;
@@ -1177,6 +1224,15 @@ export function usePianoRollData(args: {
             void refreshVisible();
             return;
         }
+        /*
+         * 【块提交刚落地必须立即取数】预览已经等到权威、下一步就要撤下，若还要等
+         * 75ms 去抖，那 75ms 里屏幕上只能画旧曲线 —— 正是「先回弹」的最后一段。
+         * `forceParamFetchToken` 只在编辑提交 / 分析回填时前进，是离散事件。
+         */
+        if (lastAppliedForceParamFetchTokenRef.current !== forceParamFetchToken) {
+            void refreshVisible();
+            return;
+        }
         // 【覆盖不足必须立即取数，不能等 75ms 去抖】自动滚动在高缩放 / 宽视口下
         // 会持续提交 scrollLeft（每 256px 一次）；若每次都重置去抖计时器，取数可能
         // 永远不发出，后段曲线就一直缺失。computeVisibleRequest 读的是内核真值
@@ -1252,7 +1308,7 @@ export function usePianoRollData(args: {
 
     return {
         paramView,
-        authorityRevision,
+        authoritySnapshot,
         getAuthorityWatermark,
         setParamView,
         secondaryParamViews,

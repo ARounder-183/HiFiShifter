@@ -105,9 +105,11 @@ describe("invoke wiring", () => {
             eager: true,
         }) as Record<string, string>;
 
-        // 提取 invoke / invoke<T,...>( "cmd" 调用的命令名（跨行 + 泛型兼容）。
-        // PluginHost.invoke 自己接收命名参数/附件，不经过 buildTauriArgs。
-        const callPattern = /(?<![.\w])invoke\s*<[^>]*>?\s*\(\s*["'`]([a-z_0-9]+)["'`]/g;
+        // 提取 invoke("cmd") / invoke<T>("cmd")：尖括号整体是**可选**组。
+        // 此前 `<` 必填，最朴素的 invoke("cmd") 调用全部漏扫（见布线门禁的
+        // "新增命令漏登记必红"契约）。PluginHost.invoke 自己接收命名参数/附件，
+        // 不经过 buildTauriArgs。
+        const callPattern = /(?<![.\w])invoke\s*(?:<[^>]*>)?\s*\(\s*["'`]([a-z_0-9]+)["'`]/g;
         const invoked = new Set<string>();
         const fileCount = Object.keys(sources).length;
         for (const [file, text] of Object.entries(sources)) {
@@ -156,7 +158,7 @@ describe("invoke wiring", () => {
             import: "default",
             eager: true,
         }) as Record<string, string>;
-        const callPattern = /invoke\s*<[^>]*>?\s*\(\s*["'`]([a-z_0-9]+)["'`]/g;
+        const callPattern = /(?<![.\w])invoke\s*(?:<[^>]*>)?\s*\(\s*["'`]([a-z_0-9]+)["'`]/g;
         const invoked = new Set<string>();
         for (const [file, text] of Object.entries(sources)) {
             if (/\.test\.(ts|tsx)$/.test(file)) continue;

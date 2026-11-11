@@ -18,6 +18,7 @@
  * @module render
  */
 
+import { createDebugLogger } from "../../../utils/debugLog";
 import type { ParamMorphOverlay, ParamName, ParamViewSegment, ValueViewport } from "./types";
 import type { ParamSelection } from "./paramSelection";
 import { frameRangeEndCut, frameRangeStartCut, selectionToFrameRanges } from "./paramSelection";
@@ -42,25 +43,14 @@ import {
     isChildFormantOffsetCentsParam,
 } from "./childPitchOffsetParams";
 import { formatAxisMarkLabel } from "./kernel/scene/axisMarkInstances";
+import { projectDetectedCurvePoints } from "./kernel/scene/curvePoints";
 import { isDynParam } from "./paramRanges";
 import { isSameMainCanvasSignature, type MainCanvasSignature } from "./mainCanvasSignature";
 
 // 调试开关缓存：drawCurveTimed 每帧会被调用多次（主曲线 / 编辑线 / 选区叠加 /
-// 每条副参数 / 每条参考线），逐次同步读 localStorage 会拖慢绘制热路径；
-// 1 秒 TTL 足以跟踪开关变化。
-let debugFlagCache = { value: false, checkedAt: 0 };
-function isPianoRollDebugEnabled(): boolean {
-    const now = Date.now();
-    if (now - debugFlagCache.checkedAt > 1000) {
-        debugFlagCache = {
-            value:
-                typeof window !== "undefined" &&
-                window.localStorage?.getItem("hifishifter.debugPianoRoll") === "1",
-            checkedAt: now,
-        };
-    }
-    return debugFlagCache.value;
-}
+// 诊断输出统一走 debugLog.ts：开关探测节流、生产构建恒关闭，绘制热路径不再
+// 各自维护一份 localStorage 缓存。
+const pianoRollDebug = createDebugLogger("hifishifter.debugPianoRoll");
 
 /**
  * 返回视觉上固定像素长度的虚线参数，避免随 dpr/缩放产生样式漂移。
@@ -219,7 +209,7 @@ function drawCurveTimed(args: {
     const visibleDurSec = viewportEndSec(axis) - visibleStartSec;
 
     // DEBUG: 验证曲线时间参数（使用统一转换函数）
-    const debugEnabled = isPianoRollDebugEnabled();
+    const debugEnabled = pianoRollDebug.enabled;
     const curveStartSec = debugEnabled ? framesToTime(startFrame, fp) : 0;
     const curveEndSec = debugEnabled
         ? framesToTime(startFrame + (values.length - 1) * step, fp)
@@ -227,7 +217,7 @@ function drawCurveTimed(args: {
     const curveTotalDurSec = curveEndSec - curveStartSec;
 
     if (debugEnabled) {
-        console.log("[drawCurveTimed] Params:", {
+        pianoRollDebug.log("[drawCurveTimed] Params:", {
             param,
             visibleStartSec,
             visibleDurSec,
@@ -300,7 +290,7 @@ function drawCurveTimed(args: {
 
     // DEBUG: Log first and last rendered points
     if (debugEnabled && firstFrame !== -1) {
-        console.log("[drawCurveTimed] Rendered points:", {
+        pianoRollDebug.log("[drawCurveTimed] Rendered points:", {
             param,
             firstPoint: {
                 frame: firstFrame,
@@ -395,6 +385,17 @@ export interface DetectedPitchCurve {
     midiCurve: number[];
     /** WORLD 帧周期（毫秒） */
     framePeriodMs: number;
+    /**
+     * 所属 clip 的当前跨度（秒）。
+     *
+     * 【为什么必须在数据里】这份缓存只由 `clip_pitch_data` 事件刷新，可能比它所属的
+     * clip 更长（分割 / 拉伸之前的那一份）。绘制端只有拿到 clip 边界才能把它裁回去 ——
+     * 时间轴那条同源曲线一直是裁的（见 `timelineCanvasModel.buildMidiPitchCurvePx`），
+     * 参数编辑器此前没裁，于是过长的旧曲线被画到了 clip 外面（"音高线残影"）。
+     */
+    clipStartSec: number;
+    /** 所属 clip 的终点（秒，**开区间**）。 */
+    clipEndSec: number;
 }
 
 export interface ReferencePitchOverlay {
@@ -1044,9 +1045,21 @@ export function drawPianoRoll(args: {
             const curve = detectedPitchCurves[ci];
             if (!curve.midiCurve || curve.midiCurve.length < 2) continue;
 
-            const fp = Math.max(1e-6, curve.framePeriodMs);
-            // 曲线起始时间（秒）：直接来自后端，无需帧→秒转换
-            const curveStartSec = curve.curveStartSec;
+            /*
+             * 【与 GL 路径共用同一个投影】裁剪（clip 跨度 / 起点不符）、无声帧、越界
+             * 判据只有一份实现。此前这里是逐行复制的第二份，两份都**没有**按 clip
+             * 裁剪 —— 过长的旧曲线于是被画到 clip 外面（"音高线残影"）。
+             */
+            const points = projectDetectedCurvePoints({
+                midiCurve: curve.midiCurve,
+                curveStartSec: curve.curveStartSec,
+                clipStartSec: curve.clipStartSec,
+                clipEndSec: curve.clipEndSec,
+                framePeriodMs: curve.framePeriodMs,
+                axis,
+                valueToY: (value) => valueToY("pitch", value, h),
+            });
+            if (points.length < 2) continue;
 
             ctx.save();
             ctx.strokeStyle = DETECTED_COLORS[ci % DETECTED_COLORS.length];
@@ -1055,35 +1068,10 @@ export function drawPianoRoll(args: {
             ctx.globalAlpha = 1;
 
             ctx.beginPath();
-            let hasStarted = false;
-
-            for (let i = 0; i < curve.midiCurve.length; i++) {
-                const midi = curve.midiCurve[i];
-                if (midi == null || !isFinite(midi)) continue;
-
-                // 计算当前帧的时间（秒），统一用 sec 坐标系
-                const frameSec = curveStartSec + (i * fp) / 1000;
-                const x = secToViewportPx(axis, frameSec);
-
-                if (x > w + 10) break;
-
-                // 裁剪左侧不可见区域
-                if (x < -10) continue;
-
-                // 无声帧（midi <= 0）：跳过，但保持连续性
-                if (midi <= 0) {
-                    continue;
-                }
-
-                // pitch 曲线加 0.5 偏移，使点落在键中心
-                const y = valueToY("pitch", midi + 0.5, h);
-
-                if (!hasStarted) {
-                    ctx.moveTo(x, y);
-                    hasStarted = true;
-                } else {
-                    ctx.lineTo(x, y);
-                }
+            for (let index = 0; index < points.length; index += 1) {
+                const point = points[index];
+                if (index === 0) ctx.moveTo(point.x, point.y);
+                else ctx.lineTo(point.x, point.y);
             }
             ctx.stroke();
             ctx.restore();

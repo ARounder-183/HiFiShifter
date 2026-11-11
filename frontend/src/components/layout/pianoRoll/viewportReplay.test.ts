@@ -215,3 +215,48 @@ describe("resolveViewportReplay：不重放的其余情形", () => {
         expect(decision.reason).not.toBe("pressed-buttons-lost");
     });
 });
+
+describe("resolveViewportReplay：竖直视口与当前修饰键", () => {
+    const withVertical = (overrides: Partial<ViewportProjection> = {}): ViewportProjection => ({
+        ...projection(300),
+        viewportHeightPx: 600,
+        param: "pitch",
+        valueCenter: 60,
+        valueSpan: 24,
+        ...overrides,
+    });
+
+    it("only valueCenter / valueSpan / viewportHeight changes trigger replay", () => {
+        for (const next of [
+            withVertical({ valueCenter: 61 }),
+            withVertical({ valueSpan: 25 }),
+            withVertical({ viewportHeightPx: 601 }),
+        ]) {
+            expect(isSameViewportProjection(withVertical(), next)).toBe(false);
+            expect(
+                resolveViewportReplay(
+                    replayableInput({ projection: next, previousProjection: withVertical() }),
+                ).replay,
+            ).toBe(true);
+        }
+        expect(
+            resolveViewportReplay(
+                replayableInput({ projection: withVertical(), previousProjection: withVertical() }),
+            ).replay,
+        ).toBe(false);
+    });
+
+    it("uses current modifiers, not the stale last pointer snapshot", () => {
+        const decision = resolveViewportReplay(
+            replayableInput({
+                lastMove: { ...dragMove(), ctrlKey: false, altKey: true, shiftKey: false },
+                currentModifiers: { ctrlKey: true, altKey: false, shiftKey: true, metaKey: false },
+            }),
+        );
+        expect(decision.replay).toBe(true);
+        if (!decision.replay) return;
+        expect(decision.payload.ctrlKey).toBe(true);
+        expect(decision.payload.altKey).toBe(false);
+        expect(decision.payload.shiftKey).toBe(true);
+    });
+});

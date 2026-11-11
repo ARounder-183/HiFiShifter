@@ -62,7 +62,7 @@ import {
 } from "../../../renderKernel/gl/polylineProgram";
 import { buildPolylineVertices } from "../../../renderKernel/gl/polylineGeometry";
 import { buildSelectionBandInstances } from "../scene/selectionBandInstances";
-import { buildParamBlockScene } from "../scene/blockInstances";
+import { buildParamBlockScene, snapParamBlockRect } from "../scene/blockInstances";
 import {
     blockRowHeightPx,
     projectParamBlockCenterY,
@@ -385,7 +385,7 @@ export interface PianoRollKernelHost {
     setValueCenter(center: number): void;
     /** 读取两条滚动条的几何（供面板绘制 / 调试）。 */
     getScrollbarGeometries(): PianoRollScrollbarGeometries;
-    /** 读取本帧块几何（与画面同源）；块工具做命中时使用。 */
+    /** 读取本帧块几何（与画面同源）；参数块选择模式做命中时使用。 */
     getParamBlockHitRects(): ReadonlyArray<{
         readonly id: string;
         readonly startSec: number;
@@ -394,6 +394,9 @@ export interface PianoRollKernelHost {
         readonly heightPx: number;
         /** 与像素同源的代表值（live 曲线主簇中心）。 */
         readonly averageValue: number;
+        /** 块是否被完整选中 / 悬停；过渡手柄只在可见时参与命中。 */
+        readonly selected?: boolean;
+        readonly hovered?: boolean;
         /** 与像素同源的块中心 y（CSS px，视口坐标）。 */
         readonly centerYPx: number;
         /** 相接块边界的圆滑手柄；null = 该块右侧没有相接邻居。 */
@@ -1214,6 +1217,8 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             topPx: number;
             heightPx: number;
             averageValue: number;
+            selected?: boolean;
+            hovered?: boolean;
             centerYPx: number;
             transitionHandle?: {
                 readonly sec: number;
@@ -1243,7 +1248,13 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                           param,
                           curveOwned: spec.curveOwned,
                       });
-                const displayValue = value;
+                /*
+                 * No midpoint fallback: a block without a sampled / cached /
+                 * manual center is skipped for this frame. Falling back to the
+                 * viewport middle put every unvalued block on the same line
+                 * (F#4 in the reported project).
+                 */
+                const displayValue = value ?? block.averageValue ?? null;
                 if (
                     displayValue == null ||
                     !Number.isFinite(displayValue) ||
@@ -1266,9 +1277,10 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                     valueToY:
                         spec.valueToY ?? data().grid?.valueToY ?? (() => viewportHeightPx / 2),
                     /* 实时拖动 / 过渡预览必须连续；普通显示吸附到行心。 */
-                    snapToSemitone: spec.curveOwned
-                        ? false
-                        : block.displayCenterSnapToSemitone !== false,
+                    snapToSemitone:
+                        block.centerPolicy === "locked" || spec.curveOwned
+                            ? false
+                            : block.displayCenterSnapToSemitone !== false,
                 });
                 /*
                  * 块高恒为当前参数一行的 1.2 倍，由**本帧**投影求值；纵向缩放
@@ -1294,21 +1306,34 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                  * 只由 live 曲线的代表值决定纵向位置；不叠加指针像素位移。
                  * 拖动已把预览写进 live 曲线，再叠加会与最终值错位。
                  */
-                const topPx = centerYPx - displayHeightPx / 2;
+                const rawTopPx = centerYPx - displayHeightPx / 2;
+                const snappedRect = snapParamBlockRect({
+                    x0: secToViewportPx(blockAxis, block.startSec),
+                    x1: secToViewportPx(blockAxis, block.endSec),
+                    rawTop: rawTopPx,
+                    rawBottom: rawTopPx + displayHeightPx,
+                    viewportWidthPx: blockAxis.viewportWidthPx,
+                    viewportHeightPx,
+                    dpr: blockAxis.dpr,
+                });
+                const topPx = snappedRect?.top ?? rawTopPx;
+                const hitHeightPx = snappedRect?.height ?? displayHeightPx;
                 hitRects.push({
                     id: block.id,
                     startSec: block.startSec,
                     endSec: block.endSec,
                     topPx,
-                    heightPx: displayHeightPx,
+                    heightPx: hitHeightPx,
                     averageValue: displayValue,
+                    selected: block.selected === true,
+                    hovered: (block as { hovered?: boolean }).hovered === true,
                     centerYPx,
                     transitionHandle: block.transitionHandle ?? null,
                 });
                 return {
                     ...block,
                     averageValue: displayValue,
-                    heightPx: displayHeightPx,
+                    heightPx: hitHeightPx,
                     topPx,
                 };
             });
@@ -1333,12 +1358,12 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
             blocks: drawableBlocks,
             borderRgba: spec.borderRgba,
             selectedRgba: spec.selectedRgba,
-            mergedRgba: spec.mergedRgba,
+            groupedRgba: spec.groupedRgba,
             labelRgba: spec.labelRgba,
             selectedLabelRgba: spec.selectedLabelRgba,
             fillRgba: spec.fillRgba,
             selectedFillRgba: spec.selectedFillRgba,
-            mergedFillRgba: spec.mergedFillRgba,
+            groupedFillRgba: spec.groupedFillRgba,
             topHighlightRgba: spec.topHighlightRgba,
             handleRgba: spec.selectedRgba,
             transitionRgba: spec.transitionRgba,
@@ -1476,6 +1501,9 @@ export function createPianoRollKernelHost(args: PianoRollKernelHostArgs): PianoR
                 points = projectDetectedCurvePoints({
                     midiCurve: layer.values,
                     curveStartSec: layer.curveStartSec ?? 0,
+                    // 有效跨度 = 所属 clip 的跨度：越界帧与"起点不符"的过期缓存都不画。
+                    clipStartSec: layer.clipStartSec ?? 0,
+                    clipEndSec: layer.clipEndSec ?? Number.POSITIVE_INFINITY,
                     framePeriodMs: layer.framePeriodMs,
                     axis,
                     valueToY,

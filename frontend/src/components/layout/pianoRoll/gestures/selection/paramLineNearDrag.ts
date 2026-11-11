@@ -24,6 +24,7 @@ import {
     recordGestureParamSelectionStep,
 } from "../pointerSupport";
 import { handleRightDragMorph } from "./rightDragMorph";
+import { trackParamBlockCommit } from "../../paramBlockCommitCoordinator";
 import type { FrameSpan, ParamSelection } from "../../paramSelection";
 import type { ParamViewSegment } from "../../types";
 import type { PointerEvent as ReactPointerEvent } from "react";
@@ -49,6 +50,7 @@ type Deps = Pick<
     | "disposeFineAdjustedPointerState"
     | "dragDirection"
     | "edgeHalfSpanForIndices"
+    | "edgeScroll"
     | "editParam"
     | "ensureLiveEditBase"
     | "fetchCommitBaseSource"
@@ -103,6 +105,7 @@ export function handleParamLineNearDrag(
         disposeFineAdjustedPointerState,
         dragDirection,
         edgeHalfSpanForIndices,
+        edgeScroll,
         editParam,
         ensureLiveEditBase,
         fetchCommitBaseSource,
@@ -360,32 +363,20 @@ export function handleParamLineNearDrag(
         }
     };
 
-    /** 手势句柄（onMove 需要主动收尾，见 pan 分支的同名字段）。 */
-    let gesture: PointerGesture | null = null;
-    const onMove = (ev: globalThis.PointerEvent) => {
-        // 掌侧误触防御：协议已按 pointerId 过滤，第二指的 move 到不了这里。
-        if ((ev.buttons & 1) !== 1) {
-            gesture?.end("up", ev);
-            return;
-        }
-        // 点击死区：越过阈值之前一律按"还没开始拖"处理 ——
-        // 不更新位移、不预览、不弹浮窗（因此画面上不会有任何
-        // 变化），松手时也不会回写。
-        if (!didDrag) {
-            if (
-                Math.abs(ev.clientX - startClientX) <= PARAM_DRAG_DEAD_ZONE_PX &&
-                Math.abs(ev.clientY - startClientY) <= PARAM_DRAG_DEAD_ZONE_PX
-            ) {
-                return;
-            }
-            didDrag = true;
-        }
-        const adjusted = getFineAdjustedPointerPosition(finePointerState, ev);
-        const currentVal = pointerValue(adjusted.clientY);
-        let rawValueDelta = currentVal - startMouseVal;
+    let lastEffectiveSnap = false;
 
-        // 音高吸附：Toggle snap modifier (XOR with pitchSnapEnabled)
-        const effectiveSnap = isEffectivePitchSnapActive(ev);
+    /**
+     * Apply one pointer position to the drag state. Kept separate from onMove
+     * so the edge-scroll callback can replay it without recursively calling
+     * track() again.
+     */
+    const applyPointerPosition = (
+        clientX: number,
+        clientY: number,
+        effectiveSnap: boolean,
+    ): void => {
+        const currentVal = pointerValue(clientY);
+        let rawValueDelta = currentVal - startMouseVal;
         const yDragEnabled = currentDragDir !== "x-only";
         if (effectiveSnap && editParam === "pitch" && yDragEnabled) {
             if (pitchSnapUnit === "scale" && dragAnchorScale) {
@@ -417,21 +408,16 @@ export function handleParamLineNearDrag(
             }
         }
 
-        // 计算 X 方向帧偏移：指针帧坐标之差，取整到整数帧
-        // （选区与数据都按整数帧落位，无需任何单位换算）。
-        const currentFrame = pointerFrame(adjusted.clientX);
+        const currentFrame = pointerFrame(clientX);
         const rawFrameDelta = snapFrame(currentFrame - startFrame);
-
-        // 应用拖动方向限制
         lastValueDelta = yDragEnabled ? rawValueDelta : 0;
         lastFrameDelta = currentDragDir === "y-only" ? 0 : rawFrameDelta;
 
-        // 悬停弹窗跟随原始事件坐标（廉价，不合帧）。
         if (paramValuePopupEnabled) {
             const previewCurrentVal = yDragEnabled ? currentVal : startMouseVal;
             onParamValuePreviewChange?.({
-                clientX: ev.clientX,
-                clientY: ev.clientY,
+                clientX,
+                clientY,
                 value: getSelectDragPreviewValue({
                     editParam,
                     startValue: startMouseVal,
@@ -439,16 +425,43 @@ export function handleParamLineNearDrag(
                     fineScale: 1,
                     effectiveSnap,
                     pitchSnapUnit,
-                    projectScale: scaleAtSec?.(pointerSec(ev.clientX)) ?? projectScale,
+                    projectScale: scaleAtSec?.(pointerSec(clientX)) ?? projectScale,
                 }),
             });
         }
-
-        // O(n) 预览重算合帧到下一渲染帧（见上方注释）。
         schedulePreview();
     };
 
+    /** 手势句柄（onMove 需要主动收尾，见 pan 分支的同名字段）。 */
+    let gesture: PointerGesture | null = null;
+    const onMove = (ev: globalThis.PointerEvent) => {
+        // 掌侧误触防御：协议已按 pointerId 过滤，第二指的 move 到不了这里。
+        if ((ev.buttons & 1) !== 1) {
+            gesture?.end("up", ev);
+            return;
+        }
+        // 点击死区：越过阈值之前一律按"还没开始拖"处理 ——
+        // 不更新位移、不预览、不弹浮窗（因此画面上不会有任何
+        // 变化），松手时也不会回写。
+        if (!didDrag) {
+            if (
+                Math.abs(ev.clientX - startClientX) <= PARAM_DRAG_DEAD_ZONE_PX &&
+                Math.abs(ev.clientY - startClientY) <= PARAM_DRAG_DEAD_ZONE_PX
+            ) {
+                return;
+            }
+            didDrag = true;
+        }
+        const adjusted = getFineAdjustedPointerPosition(finePointerState, ev);
+        lastEffectiveSnap = isEffectivePitchSnapActive(ev);
+        edgeScroll?.track(ev.clientX, ev.clientY, (clientX, clientY) => {
+            applyPointerPosition(clientX, clientY ?? adjusted.clientY, lastEffectiveSnap);
+        });
+        applyPointerPosition(adjusted.clientX, adjusted.clientY, lastEffectiveSnap);
+    };
+
     const onEnd = async () => {
+        edgeScroll?.stop();
         disposeDragDirKey();
         disposeFineAdjustedPointerState(finePointerState);
         // 取消挂起的预览帧：松手后由提交路径以全分辨率
@@ -581,11 +594,19 @@ export function handleParamLineNearDrag(
                     void (async () => {
                         let uploaded = false;
                         try {
-                            await uploadFullResCurveSegments({
-                                trackId: rootTrackId,
-                                param: editParam,
-                                segments: buildUploadSegments(editParam, pieces, commit.sentinelAt),
-                            });
+                            await trackParamBlockCommit(
+                                "drag",
+                                rootTrackId,
+                                uploadFullResCurveSegments({
+                                    trackId: rootTrackId,
+                                    param: editParam,
+                                    segments: buildUploadSegments(
+                                        editParam,
+                                        pieces,
+                                        commit.sentinelAt,
+                                    ),
+                                }),
+                            );
                             uploaded = true;
                         } catch (err) {
                             console.error("[pianoRoll] select-drag upload failed", err);

@@ -145,7 +145,7 @@ export function useMidiImport(deps: MidiImportDeps) {
             setClipboardGuid(null);
             setMidiDialogOpen(true);
         },
-        [s.editParam, s.toolMode],
+        [s.editParam, s.toolMode, selectionRef],
     );
 
     const handleOpenMidiDialog = useCallback(() => {
@@ -154,17 +154,20 @@ export function useMidiImport(deps: MidiImportDeps) {
 
     const [paramEditorMidiDragOver, setParamEditorMidiDragOver] = useState(false);
 
-    const isPointOverParamEditor = useCallback((clientX: number, clientY: number) => {
-        const el = paramEditorRef.current;
-        if (!el) return false;
-        const rect = el.getBoundingClientRect();
-        return (
-            clientX >= rect.left &&
-            clientX <= rect.right &&
-            clientY >= rect.top &&
-            clientY <= rect.bottom
-        );
-    }, []);
+    const isPointOverParamEditor = useCallback(
+        (clientX: number, clientY: number) => {
+            const el = paramEditorRef.current;
+            if (!el) return false;
+            const rect = el.getBoundingClientRect();
+            return (
+                clientX >= rect.left &&
+                clientX <= rect.right &&
+                clientY >= rect.top &&
+                clientY <= rect.bottom
+            );
+        },
+        [paramEditorRef],
+    );
 
     useEffect(() => {
         // 从拖拽载荷中取第一个 MIDI 文件路径（无则 null）。

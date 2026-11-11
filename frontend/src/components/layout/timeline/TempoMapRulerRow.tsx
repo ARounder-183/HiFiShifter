@@ -48,10 +48,8 @@ import {
 import { publishFadeRichTooltip } from "./fadeTooltipText";
 import {
     SNAP_HIGHLIGHT_GROUP,
-    buildCandidateHighlightEntry,
     clearSnapHighlights,
-    publishSnapHighlights,
-    snapHighlightKindFromCandidate,
+    publishSingleTargetSnapHighlight,
 } from "../../../utils/snapHighlight";
 import { useAppSelector, useAppStore } from "../../../app/hooks";
 import { isModifierActive, selectKeybinding } from "../../../features/keybindings/keybindingsSlice";
@@ -820,15 +818,11 @@ export const TempoMapRulerRow: React.FC<TempoMapRulerRowProps> = ({
             );
             if (manageHighlight) {
                 if (result.snapped && result.candidate) {
-                    publishSnapHighlights(SNAP_HIGHLIGHT_GROUP, [
-                        buildCandidateHighlightEntry({
-                            kind: snapHighlightKindFromCandidate(result.candidate.kind),
-                            sec: result.sec,
-                            targetTrackId: result.candidate.trackId ?? null,
-                            targetClipId: result.candidate.clipId ?? null,
-                            sources: [],
-                        }),
-                    ]);
+                    publishSingleTargetSnapHighlight({
+                        group: SNAP_HIGHLIGHT_GROUP,
+                        result,
+                        surface: "all",
+                    });
                 } else {
                     clearSnapHighlights(SNAP_HIGHLIGHT_GROUP);
                 }

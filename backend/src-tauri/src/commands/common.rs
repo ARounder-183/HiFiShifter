@@ -33,6 +33,275 @@ pub(crate) fn guard_command<T>(name: &str, fallback: T, f: impl FnOnce() -> T) -
     }
 }
 
+/// 同步命令返回类型的"panic 失败形态"。
+///
+/// 【为什么要有这个 trait】同步 Tauri 命令在 WebView IPC 线程内联执行，panic 越过
+/// FFI 边界会 abort 整个 App；`guard_command` 需要一个与返回类型同型的 fallback，
+/// 而 payload 大多没有 `Default`（且默认零值未必是"失败"语义）。把每种 payload
+/// 的失败形态集中在 trait 实现里，命令包装层就只需一行 `common::guarded(...)`，
+/// 不必各自发明一份错误数据。
+pub(crate) trait PanicFallback: Sized {
+    /// panic 被拦下后返回给前端的失败形态：`ok=false` / 空集合 / 带 error 原因。
+    fn panic_fallback() -> Self;
+}
+
+/// 同步命令的统一 panic 守卫。用法：`common::guarded("命令名", || 原命令体)`。
+///
+/// 【覆盖面】`commands.rs` 的全部同步命令接线完毕（此前 23 条读路径 / 配置命令
+/// 只有裸委托，panic 会越过 FFI 边界 abort 整个 App）；`process_audio` 另走
+/// `spawn_blocking`，由任务边界结构性遏制。新增同步命令必须在这里接守卫，
+/// 新增返回类型必须实现 `PanicFallback`。
+pub(crate) fn guarded<T: PanicFallback>(name: &str, f: impl FnOnce() -> T) -> T {
+    guard_command(name, T::panic_fallback(), f)
+}
+
+mod fallbacks {
+    use super::PanicFallback;
+    use std::collections::BTreeMap;
+
+    impl PanicFallback for crate::models::RuntimeInfoPayload {
+        fn panic_fallback() -> Self {
+            Self {
+                ok: false,
+                device: String::new(),
+                model_loaded: false,
+                audio_loaded: false,
+                has_synthesized: false,
+                is_playing: None,
+                playback_target: None,
+                timeline: None,
+                gpu_backend: String::new(),
+            }
+        }
+    }
+
+    impl PanicFallback for crate::models::ProjectMetaPayload {
+        fn panic_fallback() -> Self {
+            Self {
+                name: String::new(),
+                path: None,
+                dirty: false,
+                recent: vec![],
+                notes_markdown: String::new(),
+                base_scale: String::new(),
+                use_custom_scale: false,
+                custom_scale: None,
+                beats_per_bar: 0,
+                time_signature_denominator: 0,
+                grid_size: String::new(),
+                stretch_algorithm_override: None,
+                save_undo_history: false,
+                hifigan_mel_stretch_override: None,
+            }
+        }
+    }
+
+    impl PanicFallback for crate::config::AutoBackupSettings {
+        fn panic_fallback() -> Self {
+            Self {
+                save_on_save_enabled: false,
+                timed_backup_enabled: false,
+                timed_backup_interval_sec: 0,
+                timed_backup_path_template: String::new(),
+            }
+        }
+    }
+
+    impl PanicFallback for crate::config::RecordingSettings {
+        fn panic_fallback() -> Self {
+            Self {
+                source_device: String::new(),
+                capture_mode: String::new(),
+                loopback_device: String::new(),
+                capture_app_id: String::new(),
+                capture_app_name: String::new(),
+                capture_app_process: String::new(),
+                sample_rate: 0,
+                bit_depth: 0,
+                channels: 0,
+                input_gain_db: 0.0,
+                monitor_enabled: false,
+                monitor_gain_db: 0.0,
+                countdown_sec: 0,
+                auto_normalize: false,
+                auto_stop_at_selection_end: false,
+                path_template: String::new(),
+            }
+        }
+    }
+
+    impl PanicFallback for crate::recording::RecordingStatePayload {
+        fn panic_fallback() -> Self {
+            Self {
+                active: false,
+                elapsed_sec: 0.0,
+                level: 0.0,
+                peak: 0.0,
+                start_sec: None,
+                output_path: None,
+                error: Some("panic in command: get_recording_state".to_string()),
+            }
+        }
+    }
+
+    impl PanicFallback for crate::models::CheckSourceFilesChangedPayload {
+        fn panic_fallback() -> Self {
+            Self { changed: vec![] }
+        }
+    }
+
+    impl PanicFallback for crate::models::ParamFramesPayload {
+        fn panic_fallback() -> Self {
+            Self {
+                geometry_signature: None,
+                ok: false,
+                root_track_id: String::new(),
+                param: String::new(),
+                frame_period_ms: 0.0,
+                start_frame: 0,
+                orig: vec![],
+                edit: vec![],
+                edited: vec![],
+                authority_revision: 0,
+                baseline_revision: 0,
+                geometry_revision: 0,
+                binary: None,
+                reference_kind: crate::models::ParamReferenceKind::DefaultValue,
+                analysis_pending: None,
+                analysis_progress: None,
+                pitch_edit_user_modified: None,
+                pitch_edit_backend_available: None,
+                edit_sentinel: None,
+                dyn_orig_key: None,
+            }
+        }
+    }
+
+    impl PanicFallback for crate::models::StaticParamValuePayload {
+        fn panic_fallback() -> Self {
+            Self {
+                ok: false,
+                root_track_id: String::new(),
+                param: String::new(),
+                value: 0.0,
+            }
+        }
+    }
+
+    impl PanicFallback for crate::models::ModelConfigPayload {
+        fn panic_fallback() -> Self {
+            Self {
+                ok: false,
+                config: crate::models::ModelConfig {
+                    audio_sample_rate: 0,
+                    audio_num_mel_bins: 0,
+                    hop_size: 0,
+                    fmin: 0.0,
+                    fmax: 0.0,
+                },
+            }
+        }
+    }
+
+    impl PanicFallback for crate::models::PlaybackStatePayload {
+        fn panic_fallback() -> Self {
+            Self {
+                ok: false,
+                is_playing: false,
+                waiting_for_render: false,
+                target: None,
+                base_sec: 0.0,
+                position_sec: 0.0,
+                duration_sec: 0.0,
+            }
+        }
+    }
+
+    impl PanicFallback for super::super::onnx_status::OnnxStatusPayload {
+        fn panic_fallback() -> Self {
+            Self {
+                compiled: false,
+                available: false,
+                error: Some("panic in command: get_onnx_status".to_string()),
+                ep_choice: String::new(),
+            }
+        }
+    }
+
+    impl PanicFallback for crate::nsf_hifigan_onnx::OnnxDiagnosticInfo {
+        fn panic_fallback() -> Self {
+            Self {
+                compiled: false,
+                available: false,
+                error: Some("panic in command: get_onnx_diagnostic".to_string()),
+                ep_choice: String::new(),
+                active_ep: String::new(),
+                onnx_version: None,
+                providers: None,
+                gpu_diagnostic: None,
+            }
+        }
+    }
+
+    impl PanicFallback for super::super::vslib_status::VslibStatusPayload {
+        fn panic_fallback() -> Self {
+            Self {
+                compiled: false,
+                available: false,
+                version: None,
+                error: Some("panic in command: get_vslib_status".to_string()),
+            }
+        }
+    }
+
+    impl PanicFallback for super::super::synth::ExportAudioDefaultsPayload {
+        fn panic_fallback() -> Self {
+            Self {
+                ok: false,
+                project_name: String::new(),
+                documents_dir: String::new(),
+                project_output_dir: String::new(),
+                project_file_name: String::new(),
+                separated_output_dir: String::new(),
+                separated_file_name: String::new(),
+                sample_rate: 0,
+                bit_depth: 0,
+                format: crate::encode::OutputFormat::default(),
+                encoder: crate::encode::OutputSpec::default(),
+            }
+        }
+    }
+
+    impl PanicFallback for super::super::synth::ExportAudioPlanPayload {
+        fn panic_fallback() -> Self {
+            Self {
+                ok: false,
+                mode: super::super::synth::ExportAudioMode::Project,
+                targets: vec![],
+                existing_paths: vec![],
+            }
+        }
+    }
+
+    impl PanicFallback for Vec<crate::search::TranslitResult> {
+        fn panic_fallback() -> Self {
+            vec![]
+        }
+    }
+
+    impl PanicFallback for Vec<super::super::processor_caps::ParamDescriptorDto> {
+        fn panic_fallback() -> Self {
+            vec![]
+        }
+    }
+
+    impl PanicFallback for BTreeMap<String, String> {
+        fn panic_fallback() -> Self {
+            BTreeMap::new()
+        }
+    }
+}
+
 /// 同步 Tauri 命令的 panic 守卫（`serde_json::Value` 版）。
 ///
 /// 【为什么必须接在每条同步命令上】Tauri 的同步命令在 WebView 的 IPC 线程上

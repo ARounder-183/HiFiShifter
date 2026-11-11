@@ -1203,9 +1203,8 @@ pub fn import_vsp(data: &[u8], vsp_file_dir: &Path) -> Result<VspImportResult, S
                     dyn_orig_source_key: None,
                     extra_curves,
                     extra_params,
-                    param_block_merges: Vec::new(),
-                    param_block_interval_edits: Vec::new(),
-                    param_line_blocks: None,
+                    param_block_edits: Default::default(),
+                    param_block_view: None,
                 },
             );
         }
@@ -1991,9 +1990,8 @@ pub fn import_vsp_clipboard(
                     dyn_orig_source_key: None,
                     extra_curves,
                     extra_params,
-                    param_block_merges: Vec::new(),
-                    param_block_interval_edits: Vec::new(),
-                    param_line_blocks: None,
+                    param_block_edits: Default::default(),
+                    param_block_view: None,
                 },
             );
         }
@@ -2595,9 +2593,8 @@ fn import_vsp_clipboard_selected_tracks(
                     dyn_orig_source_key: None,
                     extra_curves,
                     extra_params,
-                    param_block_merges: Vec::new(),
-                    param_block_interval_edits: Vec::new(),
-                    param_line_blocks: None,
+                    param_block_edits: Default::default(),
+                    param_block_view: None,
                 },
             );
         }

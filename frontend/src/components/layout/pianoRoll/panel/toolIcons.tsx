@@ -1,23 +1,40 @@
 /**
- * 工具栏上的**工具图标**：颤音 / 直线 / 吸附半音 / 吸附音阶 / 当前工具。
+ * 工具栏上的**工具图标**：选择族 / 绘制族 / 吸附半音 / 吸附音阶 / 参数块常显。
  *
- * 【为什么是独立的一个模块】这五个图标原本夹在 Pitch Snap 弹窗状态与返回对象之间
- * （原在面板模型里，紧挨着工具按钮的渲染处）。它们是纯 JSX 常量，只依赖"当前画的是什么工具"，与面板的
- * 任何状态、effect、hook 顺序都无关 —— 所以这里**不是 hook，是一个纯函数**：模型的
- * 调用点每帧重建同样的元素树，与拆分前逐字相同（没有引入 memo，因为拆分前也没有）。
+ * 【为什么是独立的一个模块】这些图标原本夹在 Pitch Snap 弹窗状态与返回对象之间
+ * （原在面板模型里，紧挨着工具按钮的渲染处）。它们是纯 JSX 常量，只依赖"当前
+ * 画的是什么工具 / 选择族记住的是哪个子模式"，与面板的任何状态、effect、hook
+ * 顺序都无关 —— 所以这里**不是 hook，是一个纯函数**。
  *
- * 【为什么图标要区分】直线与颤音若共用图标，工具栏上就只剩 tooltip 能说明"现在按下
- * 去画的是直线还是颤音"，而 tooltip 需要悬停才看得见。
+ * 【为什么图标要区分】选择族的两个子模式、绘制族的三工具若共用图标，工具栏上
+ * 就只剩 tooltip 能说明"现在按下去是什么"，而 tooltip 需要悬停才看得见。
  */
-import { Pencil1Icon } from "@radix-ui/react-icons";
-import type { DrawToolMode } from "../../../../features/session/sessionTypes";
+import { CursorArrowIcon, Pencil1Icon } from "@radix-ui/react-icons";
+import type { DrawToolMode, SelectToolMode } from "../../../../features/session/sessionTypes";
 
 /**
- * 生成工具栏要用的五个图标。
+ * 「永远显示参数块」的图标：三条**堆叠的横向分段条**。
  *
- * @param currentDrawTool 当前绘制工具（决定"当前工具"图标取哪一个）。
+ * 【为什么手绘而不是取图标库】参数块的形状语言是「横向被切开的条」（见块工具图标）。
+ * 图标库里没有这个语义（RowsIcon 是四条通栏细线，读起来像文本行 / 汉堡菜单）；
+ * 手绘可以引用同一套形状语言，同时保证**不与任何现有图标重复**。
+ * 三个条的宽度不等（11.0 / 8.8 / 11.6）是有意的：等宽会读成「列表」。
  */
-export function buildToolIcons(currentDrawTool: DrawToolMode) {
+export const paramBlocksAlwaysShowIcon = (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden="true">
+        <rect x="1.6" y="2.9" width="11.0" height="2.5" rx="1.0" fill="currentColor" />
+        <rect x="1.6" y="6.25" width="8.8" height="2.5" rx="1.0" fill="currentColor" />
+        <rect x="1.6" y="9.6" width="11.6" height="2.5" rx="1.0" fill="currentColor" />
+    </svg>
+);
+
+/**
+ * 生成工具栏要用的图标。
+ *
+ * @param currentDrawTool 当前绘制族记忆（决定绘制族按钮图标）。
+ * @param selectToolMode 选择族当前 / 上次子模式（决定选择族按钮图标）。
+ */
+export function buildToolIcons(currentDrawTool: DrawToolMode, selectToolMode: SelectToolMode) {
     const vibratoToolIcon = (
         <svg
             width="15"
@@ -86,6 +103,27 @@ export function buildToolIcons(currentDrawTool: DrawToolMode) {
         </svg>
     );
 
+    /**
+     * 参数块选择的图标：横向分栏。
+     *
+     * 与参数组药丸的旧块图标同形，但现在只属于“选择族 → 块选择”这一种子模式，
+     * 不再附带眼睛，也不再是第三个工具按钮。
+     */
+    const paramBlockToolIcon = (
+        <svg width="14" height="14" viewBox="0 0 15 15" fill="none" aria-hidden="true">
+            <rect
+                x="1.5"
+                y="3.5"
+                width="12"
+                height="8"
+                rx="1.5"
+                stroke="currentColor"
+                strokeWidth="1.2"
+            />
+            <path d="M5.75 4V11" stroke="currentColor" strokeWidth="1.2" />
+            <path d="M9.25 4V11" stroke="currentColor" strokeWidth="1.2" />
+        </svg>
+    );
     const currentDrawToolIcon =
         currentDrawTool === "vibrato" ? (
             vibratoToolIcon
@@ -94,11 +132,15 @@ export function buildToolIcons(currentDrawTool: DrawToolMode) {
         ) : (
             <Pencil1Icon />
         );
+    const currentSelectToolIcon =
+        selectToolMode === "block" ? paramBlockToolIcon : <CursorArrowIcon />;
     return {
         vibratoToolIcon,
         lineToolIcon,
         pitchSnapSemitoneIcon,
         pitchSnapScaleIcon,
         currentDrawToolIcon,
+        currentSelectToolIcon,
+        paramBlockToolIcon,
     };
 }

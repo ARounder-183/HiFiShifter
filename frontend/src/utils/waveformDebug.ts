@@ -1,3 +1,5 @@
+import { createDebugLogger } from "./debugLog";
+
 /**
  * waveformDebug — 波形渲染诊断工具
  *
@@ -13,6 +15,7 @@
  *   - invalidate 调用次数 vs 实际绘制次数
  */
 const INTERVAL_MS = 2000;
+const waveformDebugLogger = createDebugLogger("hifishifter.debugWaveform");
 
 let _enabled = false;
 /**
@@ -105,18 +108,18 @@ function dump(): void {
     const missPct =
         _hitCount + missTotal > 0 ? ((missTotal / (_hitCount + missTotal)) * 100).toFixed(1) : "0";
 
-    console.log(
+    waveformDebugLogger.log(
         `%c[WaveformDiag]──────── ${new Date().toLocaleTimeString()} ────────`,
         "font-weight:bold;color:#0af",
     );
-    console.log(
+    waveformDebugLogger.log(
         `  frames: ${_frameTotal} total | ${_frameSlow} slow(>16ms) | avg=${avg}ms | max=${_frameTimeMax.toFixed(1)}ms | draws=${_drawCount}`,
     );
-    console.log(
+    waveformDebugLogger.log(
         `  invalidate src: bus=${_invalidateBusCalls} mipmap=${_invalidateMipmapCalls} props=${_invalidatePropCalls}`,
     );
     const missStyle = "color:red;font-weight:bold";
-    console.log(
+    waveformDebugLogger.log(
         // 高丢失率时整行标红：样式必须带 `%c` 占位才会被 console 当作格式，
         // 否则会作为第二个参数原样打印出来。
         `  data: hit=${_hitCount} | miss(null)=${_missNullCount} miss(short)=${_missShortCount} | missRate=${missPct}%${missTotal > _hitCount * 0.1 ? " %c" : ""}`,
@@ -126,13 +129,13 @@ function dump(): void {
     for (const [name, s] of Object.entries(_poolStats)) {
         const total = s.acquire || 1;
         const hitRate = ((1 - s.miss / total) * 100).toFixed(0);
-        console.log(
+        waveformDebugLogger.log(
             `  pool[${name}]: acq=${s.acquire} miss=${s.miss}(${hitRate}% hit) | rel=${s.release} discard=${s.discard} | sz=${s.currentSize()}`,
         );
     }
 
     if (_mipmapSizeFn) {
-        console.log(`  mipmapCache: ${_mipmapSizeFn()} files`);
+        waveformDebugLogger.log(`  mipmapCache: ${_mipmapSizeFn()} files`);
     }
 }
 

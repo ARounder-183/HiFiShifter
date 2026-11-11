@@ -1,0 +1,243 @@
+{
+    "framePeriodMs": 5,
+    "cases": [
+        {
+            "name": "forward",
+            "clip": {
+                "id": "c",
+                "startSec": 1,
+                "lengthSec": 2,
+                "sourceStartSec": 0,
+                "sourceEndSec": 2,
+                "playbackRate": 1,
+                "reversed": false,
+                "loopEnabled": false,
+                "contentDurationSec": 2
+            },
+            "span": {
+                "sourceStartSec": 0.5,
+                "sourceEndSec": 1,
+                "cycle": 0
+            },
+            "expected": [
+                {
+                    "cycle": 0,
+                    "startFrame": 300,
+                    "endFrameExclusive": 400
+                }
+            ]
+        },
+        {
+            "name": "reverse",
+            "clip": {
+                "id": "c",
+                "startSec": 0,
+                "lengthSec": 2,
+                "sourceStartSec": 0,
+                "sourceEndSec": 2,
+                "playbackRate": 1,
+                "reversed": true,
+                "loopEnabled": false,
+                "contentDurationSec": 2
+            },
+            "span": {
+                "sourceStartSec": 0.5,
+                "sourceEndSec": 1,
+                "cycle": 0
+            },
+            "expected": [
+                {
+                    "cycle": 0,
+                    "startFrame": 200,
+                    "endFrameExclusive": 300
+                }
+            ]
+        },
+        {
+            "name": "rate",
+            "clip": {
+                "id": "c",
+                "startSec": 0,
+                "lengthSec": 2,
+                "sourceStartSec": 0,
+                "sourceEndSec": 4,
+                "playbackRate": 2,
+                "reversed": false,
+                "loopEnabled": false,
+                "contentDurationSec": 4
+            },
+            "span": {
+                "sourceStartSec": 1,
+                "sourceEndSec": 2,
+                "cycle": 0
+            },
+            "expected": [
+                {
+                    "cycle": 0,
+                    "startFrame": 100,
+                    "endFrameExclusive": 200
+                }
+            ]
+        },
+        {
+            "name": "slip",
+            "clip": {
+                "id": "c",
+                "startSec": 1,
+                "lengthSec": 2,
+                "sourceStartSec": 1,
+                "sourceEndSec": 3,
+                "playbackRate": 1,
+                "reversed": false,
+                "loopEnabled": false,
+                "contentDurationSec": 3
+            },
+            "span": {
+                "sourceStartSec": 1.5,
+                "sourceEndSec": 2,
+                "cycle": 0
+            },
+            "expected": [
+                {
+                    "cycle": 0,
+                    "startFrame": 300,
+                    "endFrameExclusive": 400
+                }
+            ]
+        },
+        {
+            "name": "loop",
+            "clip": {
+                "id": "c",
+                "startSec": 0,
+                "lengthSec": 4,
+                "sourceStartSec": 0,
+                "sourceEndSec": 1,
+                "playbackRate": 1,
+                "reversed": false,
+                "loopEnabled": true,
+                "contentDurationSec": 1
+            },
+            "span": {
+                "sourceStartSec": 0.2,
+                "sourceEndSec": 0.4,
+                "cycle": 0
+            },
+            "expected": [
+                {
+                    "cycle": 0,
+                    "startFrame": 40,
+                    "endFrameExclusive": 80
+                },
+                {
+                    "cycle": 1,
+                    "startFrame": 240,
+                    "endFrameExclusive": 280
+                },
+                {
+                    "cycle": 2,
+                    "startFrame": 440,
+                    "endFrameExclusive": 480
+                },
+                {
+                    "cycle": 3,
+                    "startFrame": 640,
+                    "endFrameExclusive": 680
+                }
+            ]
+        },
+        {
+            "name": "loop-wrap",
+            "clip": {
+                "id": "c",
+                "startSec": 0,
+                "lengthSec": 8,
+                "sourceStartSec": 0.266,
+                "sourceEndSec": 2.27,
+                "playbackRate": 1,
+                "reversed": false,
+                "loopEnabled": true,
+                "contentDurationSec": 2.27
+            },
+            "span": {
+                "sourceStartSec": 0.046,
+                "sourceEndSec": 0.252,
+                "cycle": 0
+            },
+            "expected": [
+                {
+                    "cycle": 0,
+                    "startFrame": 410,
+                    "endFrameExclusive": 451
+                },
+                {
+                    "cycle": 1,
+                    "startFrame": 864,
+                    "endFrameExclusive": 905
+                },
+                {
+                    "cycle": 2,
+                    "startFrame": 1318,
+                    "endFrameExclusive": 1359
+                }
+            ]
+        },
+        {
+            "name": "loop-anchor-end",
+            "clip": {
+                "id": "c",
+                "startSec": 0,
+                "lengthSec": 4,
+                "sourceStartSec": 0.266,
+                "sourceEndSec": 2.27,
+                "playbackRate": 1,
+                "reversed": false,
+                "loopEnabled": true,
+                "contentDurationSec": 2.27
+            },
+            "span": {
+                "sourceStartSec": 0.2,
+                "sourceEndSec": 0.266,
+                "cycle": 0
+            },
+            "expected": [
+                {
+                    "cycle": 0,
+                    "startFrame": 441,
+                    "endFrameExclusive": 454
+                }
+            ]
+        },
+        {
+            "name": "reverse-loop",
+            "clip": {
+                "id": "c",
+                "startSec": 0,
+                "lengthSec": 4,
+                "sourceStartSec": 0,
+                "sourceEndSec": 2,
+                "playbackRate": 1,
+                "reversed": true,
+                "loopEnabled": true,
+                "contentDurationSec": 2
+            },
+            "span": {
+                "sourceStartSec": 0.2,
+                "sourceEndSec": 0.4,
+                "cycle": 0
+            },
+            "expected": [
+                {
+                    "cycle": 0,
+                    "startFrame": 320,
+                    "endFrameExclusive": 360
+                },
+                {
+                    "cycle": 1,
+                    "startFrame": 720,
+                    "endFrameExclusive": 760
+                }
+            ]
+        }
+    ]
+}

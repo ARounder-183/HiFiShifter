@@ -12,6 +12,7 @@
  * 失效（落点回退到播放头、预览消失）。因此本 hook 只接受
  * `TimelineViewportAccess`，由它内部区分「原生 scroller / 内核自绘滚动」。
  */
+import { createDebugLogger } from "../../../../utils/debugLog";
 import { useEffect, useRef } from "react";
 import type { AppDispatch } from "../../../../app/store";
 import type { RootState } from "../../../../app/store";
@@ -118,7 +119,8 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
         getDropPreviewWidthPx,
         setImportModeMenu,
         setProjectActionMenu,
-        pxPerSec,
+        // `pxPerSec` 在 args 里保留供调用方传参；本 hook 的缩放一律读
+        // `pxPerSecRef`（见下方两个监听的 ref 镜像），避免监听随缩放重注册。
         rowHeight,
         onMidiDrop,
     } = args;
@@ -157,12 +159,35 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
         dropRowFractionFromClientY,
     };
 
+    /*
+     * 与 geometryRef 同一取舍，覆盖**回调**面：Tauri 拖放监听只在挂载时注册一次，
+     * 而 `onMidiDrop` / `setProjectActionMenu` / `setImportModeMenu` 是面板在
+     * render 期重建的内联闭包。直接捕获会让 drop 永远调用首次挂载时的那一份；
+     * 一旦这些回调将来读 React 状态，用户就会看到过期行为。事件只经 ref 读最新值。
+     */
+    const callbacksRef = useRef({
+        onMidiDrop,
+        setProjectActionMenu,
+        setImportModeMenu,
+    });
+    // 写在 effect 里（与 useNonPassiveWheel 的 handlerRef 同款）：渲染期直接写 ref
+    // 会被 react-hooks/refs 判为违规，而这里不需要"本次提交的最新值"那种
+    // 渲染期同步语义 —— 监听在下方 effect 里注册，两者同一次 commit 内按声明
+    // 顺序执行，注册时 ref 已是最新值。
+    useEffect(() => {
+        callbacksRef.current = {
+            onMidiDrop,
+            setProjectActionMenu,
+            setImportModeMenu,
+        };
+    });
+
     // ── Tauri 原生拖放 ───────────────────────────────────────
     useEffect(() => {
         let disposed = false;
         let unlisten: null | (() => void) = null;
 
-        const debugDnd = localStorage.getItem("hifishifter.debugDnd") === "1";
+        const dndLog = createDebugLogger("hifishifter.debugDnd");
 
         async function setup() {
             try {
@@ -171,9 +196,7 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                 ).loadStandaloneWindowApi();
                 const win = mod.getCurrentWindow();
 
-                if (debugDnd) {
-                    console.log("[dnd] attaching tauri drag-drop listener");
-                }
+                dndLog.log("[dnd] attaching tauri drag-drop listener");
 
                 type TauriDragDropPayload = {
                     type?: string;
@@ -201,15 +224,13 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                     const type = String(payload?.type ?? payload?.event ?? "");
                     const paths: string[] = Array.isArray(payload?.paths) ? payload.paths : [];
 
-                    if (debugDnd) {
-                        console.log("[dnd] tauri event", {
-                            type,
-                            pathsCount: paths.length,
-                            hasPosition: Boolean(
-                                payload?.position ?? payload?.pos ?? payload?.cursorPosition,
-                            ),
-                        });
-                    }
+                    dndLog.log("[dnd] tauri event", {
+                        type,
+                        pathsCount: paths.length,
+                        hasPosition: Boolean(
+                            payload?.position ?? payload?.pos ?? payload?.cursorPosition,
+                        ),
+                    });
 
                     const bounds = viewport.getRect();
                     const pos = (payload?.position ?? payload?.pos ?? payload?.cursorPosition) as
@@ -345,8 +366,8 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                             /* 见上：降级为"没有目录" */
                         }
                         const partition = partitionDroppedPaths(paths, { directories });
-                        if (partition.rejectedPaths.length > 0 && debugDnd) {
-                            console.info(
+                        if (partition.rejectedPaths.length > 0) {
+                            dndLog.info(
                                 "[dnd] 已拒绝拖放（类型不在准入白名单）:",
                                 partition.rejectedPaths,
                             );
@@ -408,7 +429,7 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                                 clientY >= bounds.top &&
                                 clientY <= bounds.bottom;
                             if (overTimeline) {
-                                onMidiDrop?.({
+                                callbacksRef.current.onMidiDrop?.({
                                     midiPath,
                                     trackId,
                                     startSec: beat,
@@ -464,9 +485,7 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                     unlisten();
                 }
             } catch (err) {
-                if (debugDnd) {
-                    console.warn("Failed to attach Tauri drag-drop listener", err);
-                }
+                dndLog.warn("Failed to attach Tauri drag-drop listener", err);
             }
         }
 
@@ -684,7 +703,7 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                         // 拖入 HiFiShifter 工程（hshp/hsp）：始终弹出
                         // 「打开工程 / 导入工程」操作菜单，不直接执行打开。
                         armSuppressCtx();
-                        setProjectActionMenu?.({
+                        callbacksRef.current.setProjectActionMenu?.({
                             x: detail.clientX,
                             y: detail.clientY,
                             path: filePath,
@@ -700,7 +719,7 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                         // 右键拖拽媒体文件 → 弹出导入模式菜单
                         // （跨时间添加 / 跨轨道添加 / 作为 Take 添加）。
                         armSuppressCtx();
-                        setImportModeMenu({
+                        callbacksRef.current.setImportModeMenu({
                             x: detail.clientX,
                             y: detail.clientY,
                             audioPaths: isMulti ? filePaths : [filePath],
@@ -712,7 +731,7 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                     }
 
                     if (isMulti) {
-                        setImportModeMenu({
+                        callbacksRef.current.setImportModeMenu({
                             x: detail.clientX,
                             y: detail.clientY,
                             audioPaths: filePaths,
@@ -721,7 +740,7 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
                         });
                     } else {
                         if (actionKind === "importMidi") {
-                            onMidiDrop?.({
+                            callbacksRef.current.onMidiDrop?.({
                                 midiPath: filePath,
                                 trackId,
                                 startSec: beat,
@@ -756,10 +775,10 @@ export function useTimelineDragDrop(args: UseTimelineDragDropArgs): UseTimelineD
         return () => {
             window.removeEventListener("hifi-file-drag", onHifiFileDrag);
         };
-        // Re-registering this DOM listener whenever transient helpers change would
-        // interrupt in-flight drag state; the helpers read the latest refs instead.
+        // 与上方 Tauri 监听同口径：几何与缩放都经 ref 读最新值，缩放 / 行高变化
+        // 不该重注册 DOM 监听（重注册会打断 in-flight drag state）。
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [dispatch, pxPerSec, rowHeight, snapTimeline]);
+    }, [dispatch, snapTimeline]);
 
     return {
         tauriDraggedPathRef,

@@ -205,6 +205,7 @@ export async function runEditOp(
         return;
     }
     if (op === "deselect") {
+        // 选择族同时覆盖参数线 range 与参数块 block。
         if (s.toolMode !== "select") return;
         selectionRef.current = null;
         setSelectionUi(null);

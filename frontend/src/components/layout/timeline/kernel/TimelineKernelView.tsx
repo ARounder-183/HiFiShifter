@@ -37,6 +37,7 @@ import { selectKeybinding } from "../../../../features/keybindings/keybindingsSl
 import { readDevicePixelRatio, wholeDevicePxLength } from "../../../../utils/devicePixelLine";
 import type { ClipInfo } from "../../../../features/session/sessionTypes";
 import { SnapHighlightLayer } from "../SnapHighlightLayer";
+import { TrackDropTargetLayer } from "../TrackDropTargetLayer";
 import { CaptureRangeLayer } from "../CaptureRangeLayer";
 import { CLIP_BODY_PADDING_Y, CLIP_HEADER_HEIGHT } from "../constants";
 import { KernelClipInlineEditor } from "./KernelClipInlineEditor";
@@ -958,6 +959,14 @@ export const TimelineKernelView: React.FC<TimelineKernelViewProps> = (props) => 
                         tracks={tracks}
                         contentHeight={snapHighlight.contentHeight}
                         viewportHeightPx={viewportSize.height}
+                        layerWidth={snapHighlight.contentWidth}
+                    />
+                    {/* 跨轨落点反馈：独立于吸附线，跨轨拖动全程显示目标轨道整行描边。 */}
+                    <TrackDropTargetLayer
+                        rowHeight={rowHeight}
+                        tracks={tracks}
+                        contentWidth={snapHighlight.contentWidth}
+                        contentHeight={snapHighlight.contentHeight}
                     />
                 </div>
             ) : null}

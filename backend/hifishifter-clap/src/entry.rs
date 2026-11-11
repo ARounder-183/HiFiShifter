@@ -539,12 +539,41 @@ unsafe extern "C" fn reset_processing(plugin: *const clap_plugin_t) {
     })
 }
 
+#[cfg(test)]
+mod panic_injection {
+    use std::cell::Cell;
+
+    // 仅测试构建存在：让 `plugin_process_body` 在 audio-thread 路径上主动 panic，
+    // 用来验证外层的 `catch_unwind` → `audio_stats::note_panic` 分层。
+    // 【为什么是 thread_local】cargo test 的用例在不同线程并行跑；进程级
+    // AtomicBool 会把 panic 注入到同进程里所有其它 process 用例上。
+    std::thread_local! {
+        static FORCE_PANIC: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub fn arm() {
+        FORCE_PANIC.with(|flag| flag.set(true));
+    }
+
+    pub fn disarm() {
+        FORCE_PANIC.with(|flag| flag.set(false));
+    }
+
+    pub fn maybe_panic() {
+        if FORCE_PANIC.with(Cell::get) {
+            panic!("clap audio callback panic injection (test only)");
+        }
+    }
+}
+
 /// 宿主音频回调：**只**做 panic 遏制、慢块计量与结果码映射。
 ///
-/// 【为什么用 `catch_unwind` 而不是 `guard_ffi`】音频回调要把"被拦下的 panic"计进
-/// 共享读数（`audio_stats`，VST3 的 `audio_process` 写的是同一组原子量）。`guard_ffi`
-/// 内部自己 catch，外面再包一层就永远看不到 panic —— 计数恒为 0。FFI 门禁接受
-/// `catch_unwind`（见 scripts/checks/check-ffi-guards.py 的 GUARD_MARKERS）。
+/// 【为什么守卫必须在这一层】本回调由**宿主音频线程**调用，panic 越过 `extern`
+/// 边界是 UB 且会带走整个 DAW 会话；`check-ffi-guards.py` 按入口强制这一点。
+/// 与 VST3 的 `audio_process` 同一分层：外层 `catch_unwind` 拦下后只写共享原子量
+/// （`audio_stats::note_panic`），**不打日志**——音频线程不能写文件、不能抢日志锁
+/// （`realtime_callbacks_do_not_enter_the_file_logger`）。内层 body 不再包
+/// `guard_ffi`：它内部自己 catch，外面这一层就永远看不到 panic，计数会恒为 0。
 unsafe extern "C" fn plugin_process(
     plugin: *const clap_plugin_t,
     process: *const clap_process_t,
@@ -556,14 +585,9 @@ unsafe extern "C" fn plugin_process(
     hifishifter_plugin::audio_stats::note_block_elapsed(started.elapsed());
     match outcome {
         Ok(code) => code,
-        Err(payload) => {
+        Err(_) => {
+            // 计数 + 错误码，不留日志：与 VST3 的 `audio_process` 逐字对齐。
             hifishifter_plugin::audio_stats::note_panic();
-            let message = payload
-                .downcast_ref::<&str>()
-                .map(|text| (*text).to_owned())
-                .or_else(|| payload.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "unknown panic payload".to_owned());
-            log::error!("[clap] audio callback panicked: {message}");
             // CLAP 的语义：返回错误 ⇒ 宿主必须丢弃本块输出。
             CLAP_PROCESS_ERROR
         }
@@ -571,49 +595,49 @@ unsafe extern "C" fn plugin_process(
 }
 
 unsafe fn plugin_process_body(plugin: *const clap_plugin_t, process: *const clap_process_t) -> i32 {
-    hifishifter_plugin_core::guard_ffi(CLAP_PROCESS_ERROR, || {
-        if process.is_null() {
-            return CLAP_PROCESS_ERROR;
-        }
-        let Some(instance) = (unsafe { crate::instance(plugin) }) else {
+    #[cfg(test)]
+    panic_injection::maybe_panic();
+    if process.is_null() {
+        return CLAP_PROCESS_ERROR;
+    }
+    let Some(instance) = (unsafe { crate::instance(plugin) }) else {
+        return CLAP_PROCESS_ERROR;
+    };
+    // [audio-thread & active_state & processing_state]: refuse any other
+    // combination instead of silently reading a half-initialised state.
+    if !instance.active.load(Ordering::Acquire) || !instance.processing.load(Ordering::Acquire) {
+        // 逐块可触发的路径：只写原子计数，绝不能在音频线程取文件日志锁。
+        hifishifter_plugin::audio_stats::note_invalid_state_rejection();
+        return CLAP_PROCESS_ERROR;
+    }
+    if instance.in_process.swap(true, Ordering::AcqRel) {
+        hifishifter_plugin::audio_stats::note_concurrent_process_rejection();
+        return CLAP_PROCESS_ERROR;
+    }
+    let result = (|| {
+        let Some(process) = (unsafe { process.as_ref() }) else {
             return CLAP_PROCESS_ERROR;
         };
-        // [audio-thread & active_state & processing_state]: refuse any other
-        // combination instead of silently reading a half-initialised state.
-        if !instance.active.load(Ordering::Acquire) || !instance.processing.load(Ordering::Acquire)
-        {
-            log::error!("[clap] process outside the active/processing state rejected");
-            return CLAP_PROCESS_ERROR;
+        // 【为什么整条通路只有一处】捕获观察、相位判定、门控与快照输出都在
+        // `ExtensionOwner::process_audio` 里（VST3 调的是同一个方法）。外壳只翻译
+        // 缓冲与 transport，再把结局映射成 CLAP 的返回码 —— 于是两种格式不可能在
+        // “这一块该出什么声”上分叉，两种**形态**（ARA / Capture）也不会。
+        use hifishifter_plugin::render::extension::RenderOutcome;
+        let _ = instance;
+        match unsafe { crate::process::process_audio(plugin, process) } {
+            // 宿主给的数据不可用 / 形状不受支持：如实上报。
+            RenderOutcome::Invalid | RenderOutcome::Unsupported => CLAP_PROCESS_ERROR,
+            // 写满整块 / 清零 / 直通：本块已按语义处理完。
+            RenderOutcome::Done => CLAP_PROCESS_CONTINUE,
+            // 【为什么 NotReady 也算失败】它只出现在离线流上（快照还没就绪）。
+            // VST3 对同一结局回 `kResultFalse`，让宿主知道这一帧不可用；CLAP 的
+            // 错误码语义正是"输出必须丢弃"。回成功会让宿主把静音**当成产物**
+            // 烘焙进去 —— 那是数据正确性失败，不是可诊断的降级。
+            RenderOutcome::NotReady => CLAP_PROCESS_ERROR,
         }
-        if instance.in_process.swap(true, Ordering::AcqRel) {
-            log::error!("[clap] concurrent process on one instance rejected");
-            return CLAP_PROCESS_ERROR;
-        }
-        let result = (|| {
-            let Some(process) = (unsafe { process.as_ref() }) else {
-                return CLAP_PROCESS_ERROR;
-            };
-            // 【为什么整条通路只有一处】捕获观察、相位判定、门控与快照输出都在
-            // `ExtensionOwner::process_audio` 里（VST3 调的是同一个方法）。外壳只翻译
-            // 缓冲与 transport，再把结局映射成 CLAP 的返回码 —— 于是两种格式不可能在
-            // “这一块该出什么声”上分叉，两种**形态**（ARA / Capture）也不会。
-            use hifishifter_plugin::render::extension::RenderOutcome;
-            let _ = instance;
-            match unsafe { crate::process::process_audio(plugin, process) } {
-                // 宿主给的数据不可用 / 形状不受支持：如实上报。
-                RenderOutcome::Invalid | RenderOutcome::Unsupported => CLAP_PROCESS_ERROR,
-                // 写满整块 / 清零 / 直通：本块已按语义处理完。
-                RenderOutcome::Done => CLAP_PROCESS_CONTINUE,
-                // 【为什么 NotReady 也算失败】它只出现在离线流上（快照还没就绪）。
-                // VST3 对同一结局回 `kResultFalse`，让宿主知道这一帧不可用；CLAP 的
-                // 错误码语义正是"输出必须丢弃"。回成功会让宿主把静音**当成产物**
-                // 烘焙进去 —— 那是数据正确性失败，不是可诊断的降级。
-                RenderOutcome::NotReady => CLAP_PROCESS_ERROR,
-            }
-        })();
-        instance.in_process.store(false, Ordering::Release);
-        result
-    })
+    })();
+    instance.in_process.store(false, Ordering::Release);
+    result
 }
 
 unsafe extern "C" fn plugin_get_extension(
@@ -702,6 +726,93 @@ mod tests {
         unsafe { drop(Box::from_raw(instance)) };
     }
 
+    // 与 VST3 `realtime_tests.rs` 同一手法：装一个只计数不落盘的 logger，
+    // 在"音频线程回调"标志为真的窗口里断言 `plugin_process` 全程零日志。
+    // `plugin_process_body` 里的两处拒绝与外层的 panic 路径都必须只写原子量。
+    std::thread_local! {
+        static IN_REALTIME_CALLBACK: std::cell::Cell<bool> =
+            const { std::cell::Cell::new(false) };
+        static REALTIME_LOGS: std::cell::Cell<usize> =
+            const { std::cell::Cell::new(0) };
+    }
+
+    struct ObservingLogger;
+
+    impl log::Log for ObservingLogger {
+        fn enabled(&self, _: &log::Metadata<'_>) -> bool {
+            true
+        }
+        fn log(&self, _: &log::Record<'_>) {
+            if IN_REALTIME_CALLBACK.with(std::cell::Cell::get) {
+                REALTIME_LOGS.with(|count| count.set(count.get() + 1));
+            }
+        }
+        fn flush(&self) {}
+    }
+
+    /// 安装一次观察 logger；并发用例各自以 thread-local 标志隔离，互不干扰。
+    fn install_observing_logger() {
+        static LOGGER: ObservingLogger = ObservingLogger;
+        let _ = log::set_logger(&LOGGER);
+        log::set_max_level(log::LevelFilter::Info);
+    }
+
+    /// panic 被外层 catch_unwind 拦下：共享 panic 计数 +1、返回错误码、零日志。
+    /// 这条用例专门钉住 B2 的回归——内层再包 guard_ffi 会让计数恒为 0。
+    #[test]
+    fn audio_callback_panic_is_counted_without_logging() {
+        install_observing_logger();
+        let (mut plugin, instance) = fixture();
+        let ptr: *const clap_plugin_t = &raw const plugin;
+        let host = crate::abi::clap_host_t {
+            clap_version: CLAP_VERSION,
+            host_data: std::ptr::null_mut(),
+            name: c"probe".as_ptr(),
+            vendor: c"probe".as_ptr(),
+            url: c"probe".as_ptr(),
+            version: c"1".as_ptr(),
+            get_extension: None,
+            request_restart: None,
+            request_process: None,
+            request_callback: None,
+        };
+        unsafe { (*instance).host = &raw const host };
+        assert!(unsafe { plugin_init(ptr) });
+        assert!(unsafe { plugin_activate(ptr, 48_000.0, 1, 512) });
+        assert!(unsafe { start_processing(ptr) });
+
+        let process = clap_process_t {
+            steady_time: 0,
+            frames_count: 0,
+            transport: std::ptr::null(),
+            audio_inputs: std::ptr::null(),
+            audio_outputs: std::ptr::null_mut(),
+            audio_inputs_count: 0,
+            audio_outputs_count: 0,
+            in_events: std::ptr::null(),
+            out_events: std::ptr::null(),
+        };
+        let panics_before = hifishifter_plugin::audio_stats::panic_count();
+        panic_injection::arm();
+        IN_REALTIME_CALLBACK.with(|flag| flag.set(true));
+        let code = unsafe { plugin_process(ptr, &raw const process) };
+        IN_REALTIME_CALLBACK.with(|flag| flag.set(false));
+        panic_injection::disarm();
+
+        assert_eq!(code, CLAP_PROCESS_ERROR);
+        assert_eq!(
+            hifishifter_plugin::audio_stats::panic_count(),
+            panics_before + 1,
+            "the outer catch_unwind must see the panic and count it"
+        );
+        assert_eq!(REALTIME_LOGS.with(std::cell::Cell::get), 0);
+        unsafe {
+            stop_processing(ptr);
+            plugin_deactivate(ptr);
+        }
+        release(&mut plugin, instance);
+    }
+
     #[test]
     fn activate_requires_init_and_rejects_duplicates() {
         let (mut plugin, instance) = fixture();
@@ -744,6 +855,7 @@ mod tests {
     #[test]
     fn process_is_rejected_before_start_processing() {
         let (mut plugin, instance) = fixture();
+        let invalid_before = hifishifter_plugin::audio_stats::rejection_stats().0;
         let ptr: *const clap_plugin_t = &raw const plugin;
         let host = crate::abi::clap_host_t {
             clap_version: CLAP_VERSION,
@@ -775,6 +887,12 @@ mod tests {
             unsafe { plugin_process(ptr, &raw const process) },
             CLAP_PROCESS_ERROR,
             "process before start_processing must fail"
+        );
+        // 逐块拒绝只写原子计数，不碰文件日志锁（VST3 同等路径零日志）。
+        assert_eq!(
+            hifishifter_plugin::audio_stats::rejection_stats().0,
+            invalid_before + 1,
+            "rejection must be counted once, not logged"
         );
         assert!(unsafe { start_processing(ptr) });
         assert_eq!(

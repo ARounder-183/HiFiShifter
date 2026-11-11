@@ -47,6 +47,33 @@ pub fn panic_count() -> u64 {
     AUDIO_PANIC_COUNT.load(Ordering::Relaxed)
 }
 
+/// 音频回调里被拒绝的块数（状态非法 / 并发调用），按原因分开记。
+///
+/// 【为什么是计数而不是日志】宿主在错误状态下会**逐块**反复调 process；每个块
+/// 打一条 `log::error!` 就会在音频线程上抢文件日志锁（见
+/// `realtime_callbacks_do_not_enter_the_file_logger`）。VST3 的同等路径也是零日志、
+/// 只写原子量，两种格式因此共用这里的进程级读数。
+static AUDIO_INVALID_STATE_COUNT: AtomicU64 = AtomicU64::new(0);
+static AUDIO_CONCURRENT_PROCESS_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// 记一次"实例未处于 active/processing 状态"的拒绝（**音频线程**：一次原子加）。
+pub fn note_invalid_state_rejection() {
+    AUDIO_INVALID_STATE_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
+/// 记一次"同一实例并发 process"的拒绝（**音频线程**：一次原子加）。
+pub fn note_concurrent_process_rejection() {
+    AUDIO_CONCURRENT_PROCESS_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
+/// 被拒绝的块数：`(状态非法, 并发调用)`（诊断用）。
+pub fn rejection_stats() -> (u64, u64) {
+    (
+        AUDIO_INVALID_STATE_COUNT.load(Ordering::Relaxed),
+        AUDIO_CONCURRENT_PROCESS_COUNT.load(Ordering::Relaxed),
+    )
+}
+
 /// 记一次块耗时：超阈值才碰原子量。
 pub fn note_block_elapsed(elapsed: Duration) {
     if elapsed < AUDIO_SLOW_BLOCK {
@@ -106,5 +133,17 @@ mod tests {
         note_panic();
         note_panic();
         assert_eq!(panic_count(), before + 2);
+    }
+
+    /// 两类拒绝计数互相独立、只增不减：音频线程的拒绝不能靠日志核对。
+    #[test]
+    fn rejections_are_counted_per_reason() {
+        let (invalid_before, concurrent_before) = rejection_stats();
+        note_invalid_state_rejection();
+        note_invalid_state_rejection();
+        note_concurrent_process_rejection();
+        let (invalid, concurrent) = rejection_stats();
+        assert_eq!(invalid, invalid_before + 2);
+        assert_eq!(concurrent, concurrent_before + 1);
     }
 }

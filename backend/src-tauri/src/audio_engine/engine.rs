@@ -1536,25 +1536,18 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
     // 与 `&tl.tracks` 等读取共存无碍）。
     let new_root_by_track: HashMap<&str, &str> = tl.root_track_map();
 
-    // ── 3. 收集需要重新推送 pitch data 的 clip ─────────────────────────────
-    let moved_clip_ids: std::collections::HashSet<&str> = tl
+    // ── 3. 需要重发 clip_pitch_data 的 clip ────────────────────────────────
+    //
+    // 判据收口在 `clip_pitch_data_needs_emit`：曲线是按 `[start_sec, start_sec + length_sec)`
+    // 截取 + resample 后推送的，所以**任何**改变"播放哪段内容 / 在哪一刻播放"的编辑
+    // 都必须重发（含**新建**）。旧实现分三路内联判据，漏了两类：新建 clip（分割出的
+    // 右半）与"只改 `length_sec` 的编辑"（Loop 分割）。漏发就会在参数编辑器里留下
+    // 一条过期的旧曲线 —— 用户看到的"音高线残影"。
+    let pitch_emit_clip_ids: std::collections::HashSet<&str> = tl
         .clips
         .iter()
         .filter(|clip| {
-            old_clips_map
-                .get(clip.id.as_str())
-                .map(|old| {
-                    let pos_changed = (old.start_sec - clip.start_sec).abs() > 1e-9;
-                    let source_range_changed = (old.source_start_sec - clip.source_start_sec).abs()
-                        > 1e-6
-                        || (old.source_end_sec - clip.source_end_sec).abs() > 1e-6;
-                    let rate_changed = (old.playback_rate - clip.playback_rate).abs() > 1e-6;
-                    // Loop 开关会改变 pitch 曲线的目标长度（回绕铺满），
-                    // 需要重新截取 + resample 推送。
-                    let loop_changed = old.loop_enabled != clip.loop_enabled;
-                    pos_changed || source_range_changed || rate_changed || loop_changed
-                })
-                .unwrap_or(false)
+            clip_pitch_data_needs_emit(old_clips_map.get(clip.id.as_str()).copied(), clip)
         })
         .map(|clip| clip.id.as_str()) // 零拷贝
         .collect();
@@ -1578,20 +1571,6 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
             }
         });
 
-    let pitch_params_changed_clip_ids: std::collections::HashSet<&str> = tl
-        .clips
-        .iter()
-        .filter_map(|clip| {
-            old_clips_map.get(clip.id.as_str()).and_then(|old| {
-                if clip_pitch_params_changed(old, clip) {
-                    Some(clip.id.as_str()) // 优化：零拷贝
-                } else {
-                    None
-                }
-            })
-        })
-        .collect();
-
     // 检测 track 级别的变化。
     //
     // 复用函数开头算出的 `track_render_settings_changed`（同一份"算法 / Compose
@@ -1606,29 +1585,11 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
     }
 
     // ── 动态（DYN）原声电平基线的组装/调度 ────────────────────────────────
-    // 实际组装已在上方（`moved_clip_ids` 建立之前）完成，此处只并入调度判定。
+    // 实际组装已在上方（`pitch_emit_clip_ids` 建立之前）完成，此处只并入调度判定。
+    //
+    // 【它只回答"要不要重跑音频分析"】与"要不要重发曲线"是两件事：移动 / 裁剪 /
+    // 分割都不需要重新分析（内容缓存命中），但都必须重发曲线（见下方的唯一发射点）。
     let needs_pitch_schedule = clip_changed || track_render_settings_changed || dyn_needs_analysis;
-
-    // 预计算需要推送 pitch data 的 MIDI clip（必须在 *s.last_timeline 赋值之前，避免 borrow 冲突）
-    let midi_clips_needing_emit: std::collections::HashSet<String> = tl
-        .clips
-        .iter()
-        .filter(|c| c.midi_note_data.is_some())
-        .filter(|c| {
-            old_clips_map.get(c.id.as_str()).is_none_or(|old| {
-                (old.start_sec - c.start_sec).abs() > 1e-9
-                    || (old.source_start_sec - c.source_start_sec).abs() > 1e-6
-                    || (old.source_end_sec - c.source_end_sec).abs() > 1e-6
-                    || (old.playback_rate - c.playback_rate).abs() > 1e-6
-                    || old.reversed != c.reversed
-                    || old.loop_enabled != c.loop_enabled
-                    || old.midi_fill_gaps != c.midi_fill_gaps
-                    || old.muted != c.muted
-                    || old.midi_note_data != c.midi_note_data
-            })
-        })
-        .map(|c| c.id.clone())
-        .collect();
 
     *s.last_timeline = Some(tl.clone());
     *s.last_play_file = None;
@@ -1681,65 +1642,24 @@ fn handle_update_timeline(s: &mut EngineWorkerState, tl: TimelineState) {
     // 才调用 schedule_clip_pitch_jobs。clip 仅移动（start_sec 变化）时跳过，
     // 避免对所有 clip 做不必要的文件系统 I/O 和缓存查询。
     // 注意：检测逻辑已在 last_timeline 更新之前完成（见上方）
-
     if needs_pitch_schedule {
-        if !pitch_params_changed_clip_ids.is_empty() {
-            if let Some(app) = s.app_handle.as_ref() {
-                for clip in tl
-                    .clips
-                    .iter()
-                    .filter(|c| pitch_params_changed_clip_ids.contains(c.id.as_str()))
-                // 适配 &str
-                {
-                    emit_clip_pitch_data_for_clip(app, &tl, clip);
-                }
-            }
-        }
         schedule_clip_pitch_jobs(&tl, s.tx, s.sr);
     }
 
-    if !moved_clip_ids.is_empty() {
+    // 曲线推送（唯一发射点）。
+    //
+    // 【为什么独立于 `needs_pitch_schedule`】那个标志回答的是"要不要重跑音频分析"，
+    // 与"要不要重发曲线"是两件事：移动 / 裁剪 / 分割都不需要重新分析（内容缓存
+    // 命中），但都必须重发曲线。此前移动走一条支路、参数变化走另一条、MIDI 再走
+    // 第三条，新建 clip 与"只改长度"两类正好落在三条路的缝里 —— 那正是残影。
+    if !pitch_emit_clip_ids.is_empty() {
         if let Some(app) = s.app_handle.as_ref() {
             for clip in tl
                 .clips
                 .iter()
-                .filter(|c| moved_clip_ids.contains(c.id.as_str()))
-            {
-                // 适配 &str
-                emit_clip_pitch_data_for_clip(app, &tl, clip);
-            }
-        }
-    }
-
-    // 新增或参数变更的 MIDI clip 需要推送 pitch data
-    // （MIDI clip 没有 source_path，不会进入 pitch_params_changed_clip_ids 和 schedule_clip_pitch_jobs）
-    if !midi_clips_needing_emit.is_empty() {
-        if let Some(app) = s.app_handle.as_ref() {
-            for clip in tl
-                .clips
-                .iter()
-                .filter(|c| midi_clips_needing_emit.contains(c.id.as_str()))
+                .filter(|c| pitch_emit_clip_ids.contains(c.id.as_str()))
             {
                 emit_clip_pitch_data_for_clip(app, &tl, clip);
-            }
-        }
-
-        // MIDI clip 的变更需要触发 pitch_orig 组装，设置 has_pitch_adjustment_active 标志，
-        // 确保渲染管线能正确地将音高参考块的 MIDI 数据应用到同组音频块的渲染中。
-        if let Some(app) = s.app_handle.as_ref() {
-            let state = app.state::<crate::state::AppState>();
-            let mut emitted_roots: std::collections::HashSet<String> =
-                std::collections::HashSet::new();
-            for clip in tl
-                .clips
-                .iter()
-                .filter(|c| midi_clips_needing_emit.contains(c.id.as_str()))
-            {
-                if let Some(root) = root_of(&new_root_by_track, &clip.track_id) {
-                    if emitted_roots.insert(root.clone()) {
-                        crate::pitch_analysis::maybe_schedule_pitch_orig(&state.timeline, &root);
-                    }
-                }
             }
         }
     }
@@ -2213,11 +2133,47 @@ fn emit_clip_pitch_data_for_clip(
 /// 判断 clip 的 pitch 分析相关参数是否发生变化。
 /// 全量分析策略：只有源文件变化才需要重新分析。
 /// trim/rate 变化时不触发重新分析（全量缓存不会 miss），
-/// 而是由 moved_clip_ids 分支重新推送 trim+resample 后的 pitch 数据。
+/// 而是由 `clip_pitch_data_needs_emit` 重新推送 trim+resample 后的 pitch 数据。
 fn clip_pitch_params_changed(old: &crate::state::Clip, new: &crate::state::Clip) -> bool {
     old.source_path != new.source_path
         // 同路径文件替换：mtime 变化说明文件内容已变，必须重新分析 pitch
         || old.source_file_mtime != new.source_file_mtime
+}
+
+/// 这个 clip 的 `clip_pitch_data` 是否必须重发。
+///
+/// 【为什么判据是"可见窗口"而不是"源文件"】曲线按
+/// `[start_sec, start_sec + length_sec)` 截取 + resample 后推送（见
+/// `emit_clip_pitch_data_for_clip`）；窗口任何一项变了，旧曲线就不再对应这个 clip。
+///
+/// 旧实现把这件事拆成三处内联判据，漏了两类：
+///
+/// - **新建**（分割出的右半）：`old_clips_map.get(..)` 为 `None` 时一律跳过，
+///   而内容缓存命中又不会走 `ClipPitchReady` 回调 —— 它永远拿不到曲线；
+/// - **只改 `length_sec`**（Loop 分割：左侧"不修改 source 窗口"）：四个比较项里
+///   没有它 —— 左半保留着分割前那条**比 clip 更长**的曲线。
+///
+/// 两类漏发都会让前端缓存里留着一条过长的旧曲线；参数编辑器不按 clip 裁剪，于是把
+/// 旧内容画到了 clip 外面（用户报的"音高线残影"）。
+///
+/// 【为什么用位相等而不是容差】这里回答的是"用户有没有动它"，不是"数值是否可视为
+/// 相同"：落库的值是精确的，中间帧的乐观值不经过这条路。
+fn clip_pitch_data_needs_emit(old: Option<&crate::state::Clip>, new: &crate::state::Clip) -> bool {
+    let Some(old) = old else { return true }; // 新建：必须发
+    old.start_sec != new.start_sec
+        || old.length_sec != new.length_sec
+        || old.source_start_sec != new.source_start_sec
+        || old.source_end_sec != new.source_end_sec
+        || old.playback_rate != new.playback_rate
+        || old.reversed != new.reversed
+        || old.loop_enabled != new.loop_enabled
+        || old.muted != new.muted
+        || old.midi_note_data != new.midi_note_data
+        || old.midi_fill_gaps != new.midi_fill_gaps
+        || old.source_path != new.source_path
+        || old.source_file_mtime != new.source_file_mtime
+        // 换 active take = 换内容（窗口与速率都可能跟着变）。
+        || old.active_take_id != new.active_take_id
 }
 
 #[cfg(test)]
@@ -2289,6 +2245,41 @@ mod tests {
             midi_note_data: None,
         });
         timeline
+    }
+
+    /// 曲线推送的判据回归。
+    ///
+    /// 这两类曾经漏发，正是"参数编辑器里留下旧音高线残影"的来源：新建 clip
+    /// （分割出的右半）与"只改 `length_sec` 的编辑"（Loop 分割不动 source 窗口）。
+    #[test]
+    fn clip_pitch_data_needs_emit_covers_new_and_resized_clips() {
+        let clip = make_plain_stretch_timeline().clips.remove(0);
+
+        // 新建：必须发（分割出的右半靠这一条拿到曲线）。
+        assert!(clip_pitch_data_needs_emit(None, &clip));
+        // 什么都没改：不发（否则每次时间线更新都会重发整条曲线）。
+        assert!(!clip_pitch_data_needs_emit(Some(&clip), &clip));
+
+        // 移动。
+        let mut moved = clip.clone();
+        moved.start_sec += 1.0;
+        assert!(clip_pitch_data_needs_emit(Some(&clip), &moved));
+
+        // 只改长度（Loop 分割：source 窗口原样不动）。
+        let mut shorter = clip.clone();
+        shorter.length_sec -= 0.25;
+        assert!(clip_pitch_data_needs_emit(Some(&clip), &shorter));
+
+        // 只改源窗口（Slip）。
+        let mut slipped = clip.clone();
+        slipped.source_start_sec += 0.25;
+        slipped.source_end_sec += 0.25;
+        assert!(clip_pitch_data_needs_emit(Some(&clip), &slipped));
+
+        // 静音：曲线不该再画出来，必须重发（payload 里的曲线会变空）。
+        let mut muted = clip.clone();
+        muted.muted = true;
+        assert!(clip_pitch_data_needs_emit(Some(&clip), &muted));
     }
 
     #[test]

@@ -627,6 +627,9 @@ export function buildCurveLayers(
                 dash: null,
                 projection: "detected",
                 curveStartSec: curve.curveStartSec,
+                // 有效跨度 = 所属 clip 的跨度（缓存可能比 clip 长，见 DetectedPitchCurve）。
+                clipStartSec: curve.clipStartSec,
+                clipEndSec: curve.clipEndSec,
                 valueToY: (v) => project("pitch", v),
             });
         });

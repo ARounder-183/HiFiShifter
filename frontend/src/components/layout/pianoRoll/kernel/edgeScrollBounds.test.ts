@@ -13,6 +13,7 @@
 import { describe, expect, it } from "vitest";
 
 import { createEdgeScrollDriver } from "./edgeScrollDriver";
+import { createHorizontalEdgeScrollAxis } from "./edgeScrollAxis";
 import { edgeScrollMaxLeftPx } from "../../shared/edgeAutoScroll";
 
 /**
@@ -77,9 +78,9 @@ describe("边缘自动滚屏的上下界 vs 内核真值", () => {
     it("★ 驱动在负下界区间内能逐帧推进（闪现的直接回归）", () => {
         const MIN = -200;
         let scrollLeft = 0;
+        let clockMs = 0;
         const seen: number[] = [];
-        const driver = createEdgeScrollDriver({
-            getBounds: () => ({ left: 100, right: 1100 }),
+        const axis = createHorizontalEdgeScrollAxis({
             getScrollLeft: () => scrollLeft,
             setScrollLeft: (next) => {
                 scrollLeft = next;
@@ -87,17 +88,22 @@ describe("边缘自动滚屏的上下界 vs 内核真值", () => {
             getMaxScrollLeft: () => CONTENT_W,
             getMinScrollLeft: () => MIN,
             maxSpeedPxPerSec: 420,
-            now: () => seen.length * (1000 / 60),
+        });
+        const driver = createEdgeScrollDriver({
+            getBounds: () => ({ left: 100, right: 1100 }),
+            axes: [axis],
+            now: () => clockMs,
             requestFrame: () => 1,
             cancelFrame: () => {},
         });
-        // 指针停在左缘，手动推进若干帧。
-        for (let i = 0; i < 6; i += 1) {
+        // 指针停在左缘，手动推进若干帧（首帧是复位帧，位移为 0）。
+        for (let i = 0; i < 8; i += 1) {
+            clockMs += 1000 / 60;
             driver.step(100 + 4);
             seen.push(scrollLeft);
         }
-        // 严格递减 ⇒ 每帧都在推进；若下界被错当成 0，则全部为 0。
-        for (let i = 1; i < seen.length; i += 1) {
+        // 复位帧之后严格递减 ⇒ 每帧都在推进；若下界被错当成 0，则全部为 0。
+        for (let i = 2; i < seen.length; i += 1) {
             expect(seen[i]).toBeLessThan(seen[i - 1]);
         }
         expect(seen.at(-1)).toBeLessThan(0);
