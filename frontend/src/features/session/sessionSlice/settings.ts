@@ -1,6 +1,7 @@
 // Session 的轻量设置 helper 与工具模式派生。拆自 sessionSlice。
 import type {
     GridSize,
+    SelectToolMode,
     TimeUnit,
     TimeUnitChoice,
     TimelineSnapSettings,
@@ -165,14 +166,46 @@ export function normalizeTimelineSnapSettings(
     };
 }
 
+/**
+ * 把一次工具族切换写进状态。
+ *
+ * 【唯一实现】用户切换（`setToolMode`）与启动恢复（`loadUiSettings.fulfilled`）
+ * 必须落到同一组字段上：当前工具族、绘制族记忆，以及选择族记忆所要求的图层
+ * 可见性。两处各写一遍，迟早会漏掉一条不变量。
+ *
+ * `selectToolMode` 是选择族的**当前 / 上次**子模式：切到绘制族时保留它，Tab
+ * 回到选择族时才能恢复上次的 range / block。块是否**正在**激活只看
+ * `toolMode === "select" && selectToolMode === "block"`，不由这里另存布尔值。
+ */
 export function applyToolMode(state: SessionState, mode: ToolMode): void {
     state.toolMode = mode;
-    if (mode === "select") {
-        state.toolModeGroup = "select";
-    } else if (mode === "block") {
-        state.toolModeGroup = "block";
-    } else {
-        state.toolModeGroup = "draw";
-        state.drawToolMode = mode;
+    if (mode !== "select") state.drawToolMode = mode;
+    // block 子模式必须能看见块层；这是状态不变量，不靠组件 effect 补。
+    if (mode === "select" && state.selectToolMode === "block") {
+        state.paramBlocksVisible = true;
     }
+}
+
+/** 写入选择族子模式；进入 block 时同步打开块层。 */
+export function applySelectToolMode(state: SessionState, mode: SelectToolMode): void {
+    state.toolMode = "select";
+    state.selectToolMode = mode;
+    if (mode === "block") state.paramBlocksVisible = true;
+}
+
+/**
+ * 写入参数块图层可见性。
+ *
+ * 图层关闭时不可能继续做块选择，因此在 reducer 收口为 range，避免出现
+ * “工具仍想选块、图层却已隐藏”的死状态。重新打开图层不会自动回到 block ——
+ * 可见性与工具子模式是两根轴，用户需要显式再选块。
+ */
+export function applyParamBlocksVisible(state: SessionState, visible: boolean): void {
+    state.paramBlocksVisible = visible;
+    if (!visible) state.selectToolMode = "range";
+}
+
+/** 外部设置输入的白名单归一：只认 block，其余一律 range。 */
+export function normalizeSelectToolMode(value: unknown): SelectToolMode {
+    return value === "block" ? "block" : "range";
 }

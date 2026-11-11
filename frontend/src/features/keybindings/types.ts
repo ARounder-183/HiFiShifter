@@ -100,7 +100,7 @@ export type ActionId =
     // 模式切换
     | "mode.toggle" // 模式切换（正向）
     | "mode.selectTool" // 切换到选择工具
-    | "mode.toggleBlockEdit" // 当前参数的块编辑与绘制双向切换
+    | "mode.toggleBlockSelection" // 在当前参数的选择族内切换参数线 / 参数块
     | "mode.drawTool" // 切换到绘制工具
     | "mode.lineTool" // 切换到直线工具
     | "mode.vibratoTool" // 切换到颤音工具
@@ -126,9 +126,9 @@ export type ActionId =
     | "modifier.paramMorph" // 参数编辑器形变模式（按住）
     | "modifier.paramMultiSelect" // 参数编辑器多选区（按住拖动追加一段；按住点击已有段取消该段）
     | "modifier.paramRangeSelect" // 参数块范围选择（按住并点击，从锚点扩展）
-    | "modifier.paramBlockSplitAtClick" // 块工具：按住并左键点击参数块 = 在点击位置分割
-    | "modifier.paramBlockCreate" // 块工具：按住并在空白处拖拽 = 新建参数块
-    | "modifier.paramBlockCreateFlat" // 块工具：按住 Ctrl+Alt 在空白处拖拽 = 新建并拉平当前参数线
+    | "modifier.paramBlockSplitAtClick" // 参数块选择模式：按住并左键点击参数块 = 在点击位置分割
+    | "modifier.paramBlockCreate" // 参数块选择模式：按住并在空白处拖拽 = 新建参数块
+    | "modifier.paramBlockCreateFlat" // 参数块选择模式：按住 Ctrl+Alt 在空白处拖拽 = 新建并拉平当前参数线
     | "modifier.clipRangeToParamSelection" // 按住并右键单击音频块：把该块范围追加/移出参数编辑器选区
     | "modifier.paramFineAdjust" // 精细调整（按住）
     | "modifier.vibratoAmplitudeAdjust" // 颤音绘制时滚轮调振幅

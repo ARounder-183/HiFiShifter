@@ -6,13 +6,15 @@
  * pianoRoll.copy 共绑 Ctrl+C，参数编辑器焦点优先参数粘贴）同一套思路。
  *
  * 匹配顺序（同一按键事件命中多个绑定时）：
- *  0. 当前焦点域内激活的作用域操作（如参数编辑器内 select 工具下的
+ *  0. 当前焦点域内激活的作用域操作（如参数编辑器选择族下的
  *     paramEditorSelect 操作；轨道头内的 trackHeaderFocus 操作）—— 最高优先。
+ *  0.5. 选择族块子模式下的共享操作：paramEditorSelect 仍可执行复制、粘贴、
+ *     初始化、移调等标准参数命令，但要低于块专用的 paramEditorBlock。
  *  1. 全局（无 scopedContext）操作 —— 例如 track.add / clip.* / edit.*。
  *  2. 其它焦点域的作用域操作 —— 仅在没有更优匹配时兜底（例如在时间轴
  *     按 Ctrl+D，轨道头专用的 track.clone 仍是唯一匹配时也照常生效）。
  *  Infinity. 硬排除：当前焦点域下明确不应响应的作用域
- *     （paramEditorSelect 仅在参数编辑器 + select 工具下响应；
+ *     （paramEditorSelect 仅在参数编辑器选择族下响应；
  *     quickSearch / pianoRollVibratoDrag 由各自的弹窗与拖拽表面接管）。
  *
  * 这样两个绑定键值相同但作用域不同的操作不再互相"抢占"，也不会被
@@ -45,11 +47,14 @@ export function scopePriority(
     if (!scopedContext) return 1;
     switch (scopedContext) {
         case "paramEditorSelect":
-            // 参数编辑器选择工具操作只在钢琴卷帘 + 选择工具下生效；块工具
-            // 拥有自己的 paramBlock.* 动作，不再借用参数线编辑命令。
-            return domain === "pianoRoll" && toolMode === "select" ? 0 : Infinity;
+            if (domain !== "pianoRoll") return Infinity;
+            // 参数线范围选择是选择族的默认动作；块子模式仍需执行复制/粘贴/
+            // 初始化/移调等标准参数命令，因此以共享优先级继续激活。
+            if (toolMode === "select") return 0;
+            if (toolMode === "block") return SCOPE_PRIORITY_SHARED;
+            return Infinity;
         case "paramEditorBlock":
-            // 块动作只在钢琴卷帘 + 块工具下激活；焦点在时间轴时 S 仍只切 Clip。
+            // 块专用动作只叠加在派生的 block scope；焦点在时间轴时 S 仍只切 Clip。
             return domain === "pianoRoll" && toolMode === "block" ? 0 : Infinity;
         case "timelineFocus":
             return domain === "timeline" ? 0 : 2;
@@ -59,6 +64,13 @@ export function scopePriority(
             return HARD_EXCLUDED_CONTEXTS.has(scopedContext) ? Infinity : 2;
     }
 }
+
+/**
+ * 块子模式下 paramEditorSelect 的共享优先级：低于块专用（0），高于全局（1）。
+ * 若反过来，G/U/S/Delete 会被全局 Clip 命令抢走；若把它硬排除，块模式里的
+ * Ctrl+C / Ctrl+T 等标准参数命令会整族消失。
+ */
+export const SCOPE_PRIORITY_SHARED = 0.5;
 
 export const SCOPE_PRIORITY_MAX = Infinity;
 
@@ -71,7 +83,8 @@ export const SCOPE_PRIORITY_MAX = Infinity;
  * （与复制/粘贴的焦点分发同构）。
  *
  * @param domain 当前焦点域（pianoRoll / timeline / trackHeader / null）
- * @param toolMode 当前工具（select / draw / vibrato），用于 paramEditorSelect 激活判定
+ * @param toolMode 当前快捷键作用域（ToolScope：select / block / draw / line / vibrato）。
+ *   全局路由里的 block 是选择族 + 块子模式的派生值，不是 Redux 原始 ToolMode。
  * @param options.hardExcludeParamEditorSelect 参数编辑器作用域是否硬排除
  *   （默认按 scopePriority 的规则自动判定；无需显式传参）
  */
@@ -183,6 +196,8 @@ export function resolveParamBlockEditChannel(
     surface: EditSurfaceId | null,
     toolMode: string,
 ): "hifi:paramBlockEditOp" | null {
+    // 参数是派生 ToolScope；block 只可能来自选择族 + block 子模式。
+
     return surface === "pianoRoll" && toolMode === "block" ? "hifi:paramBlockEditOp" : null;
 }
 
@@ -246,7 +261,7 @@ export function resolveCopyCutRoute(args: {
  * - paste：**此处仅作兜底** —— 正常路径由 resolvePasteRoute 按剪贴板载荷
  *   类型（last-copy-wins）路由；只有槽位为空/外来数据时才落到本函数，
  *   按活动表面选择 REAPER/MIDI 兜底流程的归属。
- * - selectAll/deselect：参数编辑器仅在 select 工具下实现（见
+ * - selectAll/deselect：参数编辑器在选择族（select / block）下实现（见
  *   PianoRollPanel.handleEditOp 的工具守卫），draw/vibrato 工具下落回
  *   时间轴全选 Clip（与既有行为一致）。
  * - delete/split/…：时间轴专有操作，固定路由到时间轴通道 —— 无论最后

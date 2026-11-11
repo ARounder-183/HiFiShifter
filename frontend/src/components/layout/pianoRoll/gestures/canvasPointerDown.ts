@@ -88,6 +88,7 @@ type CanvasPointerDownDeps = Pick<
     | "onParamValuePreviewChange"
     | "onPitchSnapGestureActiveChange"
     | "panRef"
+    | "paramBlockToolActive"
     | "paramEditorSeekPlayheadEnabled"
     | "paramMultiSelectKb"
     | "paramRangeSelectKb"
@@ -158,7 +159,9 @@ export type PointerDownBranch = "select" | "vibrato" | "freehand";
  * "每个工具都有归属"变成一条能失败的测试，而不是要靠读 645 行 if/else 才知道。
  */
 export function pointerDownBranchFor(toolMode: string): PointerDownBranch {
-    if (toolMode === "select" || toolMode === "block") return "select";
+    // block 是选择族子模式，不在这里出现；若调用方仍传旧值，按未知工具
+    // 落进自由绘制而不是伪装成选择，避免把已删除的工具身份带回来。
+    if (toolMode === "select") return "select";
     if (toolMode === "line" || toolMode === "vibrato") return "vibrato";
     return "freehand";
 }
@@ -218,6 +221,7 @@ export function handleCanvasPointerDown(
         morphOverlayRef,
         onContextMenu,
         onParamBlockPointerDown,
+        paramBlockToolActive,
         onCycleDragDirection,
         onParamCommitSucceeded,
         onParamValuePreviewChange,
@@ -344,7 +348,7 @@ export function handleCanvasPointerDown(
         ...valueAxisScrollOptions,
     });
 
-    // 中键平移必须早于块命中：块工具下中键仍应移动视图，而不是被当成块点击。
+    // 中键平移必须早于块命中：参数块选择模式下中键仍应移动视图，而不是被当成块点击。
     if (e.button === 1) {
         e.preventDefault();
         const scroller = scrollerRef.current;
@@ -414,13 +418,13 @@ export function handleCanvasPointerDown(
     }
 
     /*
-     * 块编辑工具优先于曲线手势。
+     * 参数块选择模式优先于曲线手势。
      *
      * 【为什么放在最前面】块是同一条曲线上的另一种“命中目标”；若先走曲线 / 选区
      * 分支，用户永远选不中块。回调返回 true 表示已消费，必须直接 return。
-     * 只有块工具启用时面板才会传该回调，因此既有交互不受影响。
+     * 只有参数块选择模式启用时面板才会传该回调，因此既有交互不受影响。
      */
-    if (onParamBlockPointerDown) {
+    if (onParamBlockPointerDown && paramBlockToolActive) {
         const rect = canvasRef.current?.getBoundingClientRect();
         if (rect) {
             let blockResult: ParamBlockPointerDownResult = { handled: false };
@@ -506,11 +510,11 @@ export function handleCanvasPointerDown(
         }
     }
     /*
-     * 块工具在未命中块时已清空块选择；这里必须终止手势，不能让同一次按下继续
-     * 落进自由绘制分支。否则“点击块外空白”会顺手在曲线上画一个点，块工具看起来
+     * 参数块选择模式在未命中块时已清空块选择；这里必须终止手势，不能让同一次按下继续
+     * 落进自由绘制分支。否则“点击块外空白”会顺手在曲线上画一个点，参数块选择模式看起来
      * 像误触了画笔。空白点击仍应按设置移动播放头。
      */
-    if (toolMode === "block") {
+    if (paramBlockToolActive) {
         if (
             e.button === 0 &&
             !isStylusLike(e.nativeEvent) &&
@@ -671,7 +675,8 @@ export function handleCanvasPointerDown(
             applyEdgeScrollLeft(nextDrawing);
         },
         // 上界同为绘制坐标（`edgeScrollMaxLeftPx` 已含 nativeOffset 平移）。
-        getMaxScrollLeft: () => maxScrollLeftFor(toolMode !== "select" && toolMode !== "block"),
+        // block 已收进 select 族，滚动上界与 range 选择完全同源。
+        getMaxScrollLeft: () => maxScrollLeftFor(toolMode !== "select"),
         // ★ 下界必须也是绘制坐标且可为负：开启同步时绘制域是
         // `[−偏移, 内容宽 − 偏移]`，左侧那片预留的对齐留白是**合法的负区间**。
         // 传 0 会让"向左滚"每帧都被夹回 0，与内核自己的下界（−偏移）打架 ——

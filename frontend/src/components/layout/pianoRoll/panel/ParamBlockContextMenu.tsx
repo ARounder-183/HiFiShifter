@@ -1,32 +1,37 @@
 /**
- * 参数块右键菜单。
+ * 参数块右键菜单：**一个块命令子菜单 + 标准参数编辑菜单**。
  *
- * 条目由 `paramBlockMenuModel` 唯一描述；本组件只负责：
- * 1. 按 `visible` 过滤瞬时不可用命令；
- * 2. 把块 / 选区 / 剪贴板平铺，把变换 / 文件 IO 收进“更多参数操作”子菜单；
- * 3. 从 `shortcutAction` 读取真实快捷键文本，避免在描述表里伪造按键。
+ * 块命令由 `paramBlockCommandMenu` 描述（只有 8 项）；复制、剪切、粘贴、全选、
+ * 初始化、移调、平滑、颤音、量化、导出等标准命令全部交给 `EditContextMenu`
+ * 的唯一描述表。本组件只负责：
+ * 1. 按 `visible` 过滤当前时刻不可用的块命令；
+ * 2. 从 `shortcutAction` 读取真实快捷键文本；
+ * 3. 把块项收成一个顶部“参数块 ▸”子菜单，标准项仍走 `edit` 动作通道。
  */
-import { AppContextMenu, type AppMenuItemSpec } from "../../../../ui";
+import type { AppMenuItemSpec } from "../../../../ui";
 import { useMenuShortcut } from "../../../../ui/useMenuShortcut";
 import type { ActionId } from "../../../../features/keybindings/types";
 import type { MessageKey } from "../../../../i18n/messages";
+import { EditContextMenu } from "../../../editDialogs/EditContextMenu";
 import {
-    PARAM_BLOCK_MENU_ITEMS,
-    type ParamBlockMenuChannel,
-    type ParamBlockMenuContext,
-    type ParamBlockMenuItem,
-} from "../paramBlockMenuModel";
+    PARAM_BLOCK_COMMANDS,
+    type ParamBlockCommandContext,
+    type ParamBlockCommandItem,
+} from "../paramBlockCommandMenu";
+
+export type ParamBlockMenuActionChannel = "paramBlock" | "edit";
 
 export interface ParamBlockContextMenuProps {
     readonly x: number;
     readonly y: number;
-    readonly context: ParamBlockMenuContext;
-    readonly onAction: (channel: ParamBlockMenuChannel, op: string) => void;
+    readonly context: ParamBlockCommandContext & {
+        readonly isVolume: boolean;
+        readonly isDyn: boolean;
+    };
+    readonly onAction: (channel: ParamBlockMenuActionChannel, op: string) => void;
     readonly onClose: () => void;
     readonly tf: (key: MessageKey) => string;
 }
-
-const FLAT_GROUP_ORDER = ["block", "selection", "clipboard"] as const;
 
 export function ParamBlockContextMenu({
     x,
@@ -38,7 +43,7 @@ export function ParamBlockContextMenu({
 }: ParamBlockContextMenuProps) {
     /*
      * 所有 useMenuShortcut 必须无条件调用：菜单项是否可见不能改变 hooks 顺序。
-     * 记录表只覆盖本菜单真正用到的 ActionId；没有绑定（或绑定为 __none__）时
+     * 只登记块命令真正用到的 ActionId；没有绑定（或绑定为 __none__）时
      * useMenuShortcut 返回空串，渲染层会省略快捷键列。
      */
     const shortcuts: Partial<Record<ActionId, string>> = {
@@ -49,70 +54,59 @@ export function ParamBlockContextMenu({
         "paramBlock.restoreDeleted": useMenuShortcut("paramBlock.restoreDeleted"),
         "paramBlock.normalizePitch": useMenuShortcut("paramBlock.normalizePitch"),
         "paramBlock.delete": useMenuShortcut("paramBlock.delete"),
-        "paramBlock.selectAll": useMenuShortcut("paramBlock.selectAll"),
-        "paramBlock.deselect": useMenuShortcut("paramBlock.deselect"),
-        "pianoRoll.copy": useMenuShortcut("pianoRoll.copy"),
-        "pianoRoll.cut": useMenuShortcut("pianoRoll.cut"),
-        "pianoRoll.paste": useMenuShortcut("pianoRoll.paste"),
-        "edit.initialize": useMenuShortcut("edit.initialize"),
-        "edit.transposeCents": useMenuShortcut("edit.transposeCents"),
-        "edit.transposeDegrees": useMenuShortcut("edit.transposeDegrees"),
-        "edit.setPitch": useMenuShortcut("edit.setPitch"),
-        "edit.average": useMenuShortcut("edit.average"),
-        "edit.smooth": useMenuShortcut("edit.smooth"),
-        "edit.addVibrato": useMenuShortcut("edit.addVibrato"),
-        "edit.quantize": useMenuShortcut("edit.quantize"),
-        "edit.meanQuantize": useMenuShortcut("edit.meanQuantize"),
     };
 
-    const toSpec = (item: ParamBlockMenuItem, firstInGroup = false): AppMenuItemSpec => {
+    const toSpec = (item: ParamBlockCommandItem): AppMenuItemSpec => {
         const shortcut =
             item.shortcutAction === undefined ? "" : (shortcuts[item.shortcutAction] ?? "");
-        const labelKey =
-            typeof item.labelKey === "function" ? item.labelKey(context) : item.labelKey;
         return {
             key: item.key,
-            label: tf(labelKey),
+            label: tf(item.labelKey),
             ...(shortcut.length > 0 ? { shortcut } : {}),
-            ...(item.separatorBefore === true && !firstInGroup ? { separatorBefore: true } : {}),
+            ...(item.separatorBefore === true ? { separatorBefore: true } : {}),
             ...(item.danger === true ? { danger: true } : {}),
             disabled: !item.enabled(context),
-            onSelect: () => onAction(item.channel, item.op),
+            onSelect: () => onAction("paramBlock", item.op),
         };
     };
 
-    const visibleItems = PARAM_BLOCK_MENU_ITEMS.filter((item) => item.visible?.(context) ?? true);
-    const flatItems = FLAT_GROUP_ORDER.flatMap((group) =>
-        visibleItems.filter((item) => item.group === group && item.key !== "delete"),
-    ).map((item, index) => toSpec(item, index === 0));
-    const moreItems = visibleItems
-        .filter((item) => item.group === "transform" || item.group === "io")
-        .map((item, index) => toSpec(item, index === 0));
-    const destructiveItems = visibleItems
-        .filter((item) => item.key === "delete")
-        .map((item) => toSpec(item));
-
-    const items: AppMenuItemSpec[] = [
-        ...flatItems,
-        ...(moreItems.length > 0
-            ? [
-                  {
-                      key: "more",
-                      label: tf("param_blocks_menu_more"),
-                      items: moreItems,
-                  } satisfies AppMenuItemSpec,
-              ]
-            : []),
-        ...destructiveItems,
-    ];
+    const blockItems = PARAM_BLOCK_COMMANDS.filter((item) => item.visible?.(context) ?? true).map(
+        toSpec,
+    );
+    const blockMenu: AppMenuItemSpec = {
+        key: "paramBlock",
+        label: tf("param_blocks_submenu"),
+        items: blockItems,
+    };
 
     return (
-        <AppContextMenu
+        <EditContextMenu
             x={x}
             y={y}
-            items={items}
+            leadingItems={[blockMenu]}
+            isPitchParam={context.isPitch}
+            isVolumeParam={context.isVolume}
+            isDynParam={context.isDyn}
+            ariaLabel={tf("param_blocks_menu")}
             onClose={onClose}
-            ariaLabel={tf("param_blocks_tool")}
+            onCopy={() => onAction("edit", "copy")}
+            onCut={() => onAction("edit", "cut")}
+            onPaste={() => onAction("edit", "paste")}
+            onSelectAll={() => onAction("edit", "selectAll")}
+            onDeselect={() => onAction("edit", "deselect")}
+            onInitialize={() => onAction("edit", "initialize")}
+            onTransposeCents={() => onAction("edit", "transposeCents")}
+            onTransposeDegrees={() => onAction("edit", "transposeDegrees")}
+            onSetPitch={() => onAction("edit", "setPitch")}
+            onAverage={() => onAction("edit", "average")}
+            onSmooth={() => onAction("edit", "smooth")}
+            onAddVibrato={() => onAction("edit", "addVibrato")}
+            onQuantize={() => onAction("edit", "quantize")}
+            onMeanQuantize={() => onAction("edit", "meanQuantize")}
+            onSaveAsPitchRef={() => onAction("edit", "saveAsPitchRef")}
+            onExportMidi={() => onAction("edit", "exportMidi")}
+            onConvertVolumeToDyn={() => onAction("edit", "convertVolumeToDyn")}
+            onConvertDynToVolume={() => onAction("edit", "convertDynToVolume")}
         />
     );
 }

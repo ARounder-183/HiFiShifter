@@ -219,6 +219,8 @@ export interface UiSettings {
      * （含旧配置里没有这一项）在读取时回落出厂默认（绘制工具），因此不需要迁移。
      */
     paramEditorTool?: string;
+    /** 选择族子模式：range / block；缺省 / 非法值按 range。 */
+    paramEditorSelectionMode?: string;
     smoothnessPercent?: number;
     /** 旧版边缘平滑字段名（读取兼容）。 */
     edgeSmoothnessPercent?: number;

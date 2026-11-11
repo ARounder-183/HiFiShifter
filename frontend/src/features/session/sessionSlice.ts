@@ -1,5 +1,5 @@
 // Session 同步 reducers。拆自 sessionSlice，按原顺序汇总。
-import { createSlice, createAsyncThunk, type PayloadAction } from "@reduxjs/toolkit";
+import { createSlice, type PayloadAction } from "@reduxjs/toolkit";
 import { isPluginMode } from "../../services/hostCapabilities";
 import type { HistoryRecordSummary, TimelineState } from "../../types/api";
 import type {
@@ -9,6 +9,7 @@ import type {
     EditParam,
     GridSize,
     PitchSnapUnit,
+    SelectToolMode,
     SplitTransitionCurveType,
     TimelineSnapSettings,
     TimeUnit,
@@ -28,7 +29,6 @@ import {
     type FolderImportOptions,
 } from "../fileBrowser/folderImportOptions";
 import { clampGain } from "../../utils/gainDb";
-import { persistUiSettings } from "./thunks/runtimeThunks";
 import {
     type ChannelImportPolicy,
     type PenInputSettings,
@@ -61,13 +61,14 @@ import type { BaselineMode, VibratoPreset } from "../../features/vibrato/vibrato
 import type { TempoMap } from "../../utils/tempoMap";
 import { clampDenominator, normalizeTempoMap } from "../../utils/tempoMap";
 import { markProjectDirty } from "./sessionDirtyState";
-import { toggleParamBlockEditingTool } from "./toolMode";
-import type { ClipColor, SessionState, StretchAlgorithmOption } from "./sessionSlice/types";
+import type { ClipColor, StretchAlgorithmOption } from "./sessionSlice/types";
 import { resolveTrackIdForClipSelection } from "./selectionFocus";
 import { applyHistoryDepths } from "./sessionSlice/history";
 import { applyTimelineState } from "./sessionSlice/helpersTimeline";
 import { intentPlayheadSec } from "./sessionSlice/playheadIntent";
 import {
+    applyParamBlocksVisible,
+    applySelectToolMode,
     applyToolMode,
     normalizeTimelineSnapSettings,
     VALID_TIME_UNITS,
@@ -96,8 +97,8 @@ export type {
     DrawDragDirection,
     EditParam,
     GridSize,
+    SelectToolMode,
     ToolMode,
-    ToolModeGroup,
     TrackInfo,
 } from "./sessionTypes";
 export type { ParamSelectionSnapshot, SessionState } from "./sessionSlice/types";
@@ -298,6 +299,10 @@ const sessionSlice = createSlice({
             // 不入 undo 历史（否则 Ctrl+Z 会先回退一次"不存在的内容变更"），
             // 也不标记 project.dirty（否则仅切工具就会触发"未保存"退出确认）。
             applyToolMode(state, action.payload);
+        },
+        /** 选择族子模式：参数线 range ↔ 参数块 block（进入 block 自动显示图层）。 */
+        setSelectToolMode(state, action: PayloadAction<SelectToolMode>) {
+            applySelectToolMode(state, action.payload);
         },
         setEditParam(state, action: PayloadAction<EditParam>) {
             state.editParam = action.payload;
@@ -763,10 +768,10 @@ const sessionSlice = createSlice({
             }
         },
         toggleParamBlocksVisible(state) {
-            state.paramBlocksVisible = !state.paramBlocksVisible;
+            applyParamBlocksVisible(state, !state.paramBlocksVisible);
         },
         setParamBlocksVisible(state, action: PayloadAction<boolean>) {
-            state.paramBlocksVisible = action.payload;
+            applyParamBlocksVisible(state, action.payload);
         },
         toggleParamEditorSeekPlayhead(state) {
             state.paramEditorSeekPlayheadEnabled = !state.paramEditorSeekPlayheadEnabled;
@@ -1245,6 +1250,7 @@ export const {
     markProjectEdited,
     applyTimelinePayload,
     setToolMode,
+    setSelectToolMode,
     setEditParam,
     setBpm,
     setBeats,
@@ -1359,41 +1365,5 @@ export const {
     closeClipFormantToolWindow,
     bumpParamsEpoch,
 } = sessionSlice.actions;
-
-/**
- * 切换参数编辑器工具并落盘。
- *
- * 【为什么要一个专门的入口】`setToolMode` 在 App 与参数编辑器面板里共有 8 个
- * dispatch 点。逐个补一句 `persistUiSettings()`，等于埋 8 个"以后新增入口时忘了
- * 补"的坑；工具选择是低频动作（一次点击或一次按键），立即写一次盘的代价可以忽略。
- *
- * 【已经在这个工具上时直接返回】这让"声明式地断言工具"变成免费操作：拖拽中的
- * 预设轮转每次都要确保自己落在正确的工具上（见 `applyVibratoChoice`），若每次都
- * 写一遍盘，一次轮转就会产生两次设置写入。跳过重复项之后，只有真的换了工具才落盘。
- *
- * 【为什么里面要转型】`persistUiSettings` 自己是个 thunk，而 `createAsyncThunk`
- * 默认的 `dispatch` 只认 plain action —— 与 `importThunks` 的
- * `dispatch as unknown as TrackDispatch` 是同一手法。
- */
-export const setToolModePersistent = createAsyncThunk<ToolMode, ToolMode>(
-    "session/setToolModePersistent",
-    (mode, { dispatch, getState }) => {
-        // 读的是**派发前**的状态：派发之后它必然等于 `mode`，那样判断永远为真。
-        if ((getState() as { session: SessionState }).session.toolMode === mode) return mode;
-        dispatch(setToolMode(mode));
-        (dispatch as unknown as (action: unknown) => void)(persistUiSettings());
-        return mode;
-    },
-);
-
-export const toggleParamBlockEditPersistent = createAsyncThunk<ToolMode, void>(
-    "session/toggleParamBlockEditPersistent",
-    (_, { dispatch, getState }) => {
-        const { toolMode, drawToolMode } = (getState() as { session: SessionState }).session;
-        const next = toggleParamBlockEditingTool(toolMode, drawToolMode);
-        (dispatch as unknown as (action: unknown) => void)(setToolModePersistent(next));
-        return next;
-    },
-);
 
 export default sessionSlice.reducer;

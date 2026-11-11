@@ -168,7 +168,7 @@ export function paramBlockIdsInSelection(
 }
 
 /**
- * 块工具 Ctrl+A：只选择所有可见逻辑块实际覆盖的帧区间。
+ * 参数块选择模式 Ctrl+A：只选择所有可见逻辑块实际覆盖的帧区间。
  * 块间空隙与轨道头尾不进入选区；无块时返回 null（不是整条曲线）。
  */
 export function selectAllParamBlockRanges(blocks: readonly FrameBlock[]): ParamSelection | null {

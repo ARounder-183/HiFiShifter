@@ -21,7 +21,7 @@ import type { SessionState } from "./types";
 
 export const initialState: SessionState = {
     toolMode: "draw",
-    toolModeGroup: "draw",
+    selectToolMode: "range",
     drawToolMode: "draw",
     editParam: "pitch",
     bpm: 120,

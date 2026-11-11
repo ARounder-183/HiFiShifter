@@ -129,7 +129,7 @@ describe("findConflicts — 「拉伸」修饰键按场景分离（clip 边缘 v
     });
 });
 
-describe("findConflicts — 参数块工具修饰键", () => {
+describe("findConflicts — 参数块选择模式修饰键", () => {
     it("Alt 同时用于块上点击分割与空白拖拽新建不冲突", () => {
         expect(findConflicts({}, "modifier.paramBlockSplitAtClick", mod("alt"))).not.toContain(
             "modifier.paramBlockCreate",

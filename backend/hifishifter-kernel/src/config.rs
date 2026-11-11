@@ -582,6 +582,12 @@ pub struct UiSettings {
     /// 与拖动方向同属"本地记忆"，因此不需要配置迁移。
     #[serde(default)]
     pub param_editor_tool: Option<String>,
+    /// 参数编辑器选择族子模式：`range` / `block`。`None` = range。
+    ///
+    /// block 不是独立工具族，而是选择工具的对象级子模式；旧配置没有这一项时
+    /// 前端按 range 回落，不需要迁移。
+    #[serde(default)]
+    pub param_editor_selection_mode: Option<String>,
     #[serde(default, alias = "edgeSmoothnessPercent")]
     pub smoothness_percent: u32,
     #[serde(default = "default_scale_highlight_mode")]
@@ -1744,6 +1750,7 @@ impl Default for UiSettings {
             draw_drag_direction: default_draw_drag_direction(),
             line_vibrato_drag_direction: default_draw_drag_direction(),
             param_editor_tool: None,
+            param_editor_selection_mode: None,
             smoothness_percent: 0,
             scale_highlight_mode: default_scale_highlight_mode(),
             custom_scale_presets: Vec::new(),

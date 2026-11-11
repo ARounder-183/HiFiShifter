@@ -63,6 +63,7 @@ type Props = {
         | "setCtxMenu"
         | "paramBlockContextMenu"
         | "paramBlockMenuContext"
+        | "paramBlockToolActive"
         | "handleParamBlockMenuAction"
         | "setParamBlockContextMenu"
         | "setMidiDialogOpen"
@@ -126,6 +127,7 @@ export function PanelOverlays({ m }: Props) {
         setCtxMenu,
         paramBlockContextMenu,
         paramBlockMenuContext,
+        paramBlockToolActive,
         handleParamBlockMenuAction,
         setParamBlockContextMenu,
         setMidiDialogOpen,
@@ -187,7 +189,11 @@ export function PanelOverlays({ m }: Props) {
                 importTempoMapKeySignature={importTempoMapKeySignature}
                 onImportTempoMapKeySignatureChange={handleImportTempoMapKeySignatureChange}
             />
-            {ctxMenu && s.toolMode === "select" && (
+            {/*
+             * 标准参数菜单与块菜单共享同一组编辑回调。block 是 select 的子模式，
+             * 所以两个 guard 必须互斥：块菜单出现时，标准菜单不能再叠一层。
+             */}
+            {ctxMenu && s.toolMode === "select" && !paramBlockToolActive ? (
                 <EditContextMenu
                     x={ctxMenu.x}
                     y={ctxMenu.y}
@@ -223,8 +229,8 @@ export function PanelOverlays({ m }: Props) {
                     onConvertVolumeToDyn={() => void handleEditOp("convertVolumeToDyn")}
                     onConvertDynToVolume={() => void handleEditOp("convertDynToVolume")}
                 />
-            )}
-            {paramBlockContextMenu !== null ? (
+            ) : null}
+            {paramBlockToolActive && paramBlockContextMenu !== null ? (
                 <ParamBlockContextMenu
                     x={paramBlockContextMenu.x}
                     y={paramBlockContextMenu.y}

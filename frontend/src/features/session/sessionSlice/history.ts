@@ -1,5 +1,4 @@
 // Session 撤销/重做深度与参数选区恢复 helper。拆自 sessionSlice。
-import type { ToolMode } from "../sessionTypes";
 import type { ParamSelectionSnapshot, SessionState } from "./types";
 
 export function applyHistoryDepths(
@@ -185,23 +184,3 @@ export {
     importMultipleAudioAtPosition,
     importMultipleAudioFilesAtPosition,
 } from "../thunks/importThunks";
-
-/**
- * 把一次工具选择写进状态。
- *
- * 【为什么抽成函数】`setToolMode`（用户切换）与 `loadUiSettings.fulfilled`
- * （启动恢复）必须落到**同一组**字段上：`toolMode` 是当前工具，`toolModeGroup`
- * 与 `drawToolMode` 是它的派生视图（"这一组里选的是哪个绘制工具"供 `Tab` 回跳）。
- * 两处各写一遍，迟早会有一处漏掉 `drawToolMode`，表现为"按 Tab 回不到刚才那个工具"。
- */
-export function applyToolMode(state: SessionState, mode: ToolMode): void {
-    state.toolMode = mode;
-    if (mode === "select") {
-        state.toolModeGroup = "select";
-    } else if (mode === "block") {
-        state.toolModeGroup = "block";
-    } else {
-        state.toolModeGroup = "draw";
-        state.drawToolMode = mode;
-    }
-}

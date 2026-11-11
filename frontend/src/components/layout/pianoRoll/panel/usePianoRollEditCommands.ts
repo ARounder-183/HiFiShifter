@@ -60,14 +60,16 @@ type PianoRollEditCommandInputs = Pick<
 > & {
     /** 可滚域时长（全选的右边界）。 */
     dynamicProjectSec: number;
-    /** 块工具下 Ctrl+A 的块区间并集；无块时返回 null。 */
+    /** 块选择是否激活；决定 Ctrl+A 走块覆盖区间还是整条曲线。 */
+    paramBlockToolActive: boolean;
+    /** 块选择下 Ctrl+A 的块区间并集；无块时返回 null。 */
     paramBlockSelectAllRanges?: () => ParamSelection | null;
     /** 交互层持有的稳定命令入口（渲染期刷新，见文件头）。 */
     handleEditActionRef: RefObject<(op: string) => void>;
     /** 打开颤音窗口（命令分发里的一条路由）。 */
     openVibratoDialog: (mode?: "apply" | "manage", initialPresetId?: string) => void;
     /**
-     * 参数命令改变了曲线之后的通知（块工具下用来刷新块高）。
+     * 参数命令改变了曲线之后的通知（参数块选择模式下用来刷新块高）。
      *
      * 曲线变了，pitch 块持久化的中心就过期了；由面板负责把它清掉并按
      * **布局变更**提交（不进撤销栈）。
@@ -90,6 +92,7 @@ export function usePianoRollEditCommands({
     currentParamRange,
     dispatch,
     dynamicProjectSec,
+    paramBlockToolActive,
     paramBlockSelectAllRanges,
     editParam,
     effectiveProjectScale,
@@ -129,8 +132,9 @@ export function usePianoRollEditCommands({
      *   同一守卫：绘制 / 直线 / 颤音工具下不产生选区），调用方据此保持原行为。
      */
     const selectAllParamRange = useCallback((): boolean => {
-        if (s.toolMode !== "select" && s.toolMode !== "block") return false;
-        if (s.toolMode === "block") {
+        // 选择族同时覆盖 range 与 block；绘制族不产生参数选区。
+        if (s.toolMode !== "select") return false;
+        if (paramBlockToolActive) {
             const ranges = paramBlockSelectAllRanges?.() ?? null;
             selectionRef.current = ranges;
             setSelectionUi(ranges);
@@ -150,6 +154,7 @@ export function usePianoRollEditCommands({
         // eslint-disable-next-line react-hooks/exhaustive-deps -- selectionRef 是面板的 useRef 结果、setSelectionUi 是面板 useState 的 setter（按构造稳定）
     }, [
         s.toolMode,
+        paramBlockToolActive,
         dynamicProjectSec,
         paramBlockSelectAllRanges,
         paramView?.framePeriodMs,

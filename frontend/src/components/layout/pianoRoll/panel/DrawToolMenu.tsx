@@ -1,17 +1,17 @@
 /**
- * 工具栏的**绘制工具**按钮与它的右键菜单。
+ * 工具栏的**绘制工具族** split button 与模式菜单。
  *
- * 按钮本身显示当前工具（选择 / 绘制 / 直线 / 颤音），右下角有一个小三角提示
- * "还有别的工具"；右键（或长按）弹出菜单在四种工具之间切换。菜单里还挂着颤音
- * 预设的子面板（`AppSubMenu`）与"打开预设管理"入口。
+ * 绘制族包含自由手绘 / 直线 / 颤音三种工具。按钮显示绘制族记住的当前工具，
+ * 右下角小三角表示“族内还有别的模式”；右键（或长按）打开菜单切换。菜单里还
+ * 挂着颤音预设的子面板（`AppSubMenu`）与“打开预设管理”入口。
  *
- * 【为什么单独成文件】它是工具栏里唯一**带弹出层**的按钮：按钮、锚点外壳、菜单、
+ * 【为什么单独成文件】它是工具栏里**带弹出层**的按钮：按钮、锚点外壳、菜单、
  * 子面板四层结构混在工具栏的行内布局里时，横向伸缩（`minWidth: 0`、
- * `hideAt` 让位）与弹出层定位的因果关系读不出来。拆出来后，"按钮怎么排"与
- * "菜单里有什么"各自成立。
+ * `hideAt` 让位）与弹出层定位的因果关系读不出来。拆出来后，“按钮怎么排”与
+ * “菜单里有什么”各自成立。
  *
  * 【锚点外壳】菜单本体挂到 `document.body`（见 `AppAnchoredMenu`），这里的
- * `Box` 只负责提供"菜单该贴在哪"的矩形，因此它必须始终挂载——不能跟着
+ * `Box` 只负责提供“菜单该贴在哪”的矩形，因此它必须始终挂载——不能跟着
  * 工具栏层级一起隐藏。
  */
 import { Box, ScrollArea } from "@radix-ui/themes";
@@ -24,10 +24,11 @@ import {
     persistUiSettings,
     setActiveVibratoPreset,
 } from "../../../../features/session/sessionSlice";
-import { setToolModePersistent } from "../../../../features/session/sessionSlice";
+import { setToolModePersistent } from "../../../../features/session/thunks/toolModeThunks";
 import { chooseVibratoPreset } from "../../../../features/vibrato/vibratoPresetList";
 import { vibratoPresetLabel } from "../../vibrato/vibratoDialogLogic";
-import { AppAnchoredMenu, AppIconButton, AppSubMenu } from "../../../../ui";
+import { AppAnchoredMenu, AppSubMenu } from "../../../../ui";
+import { ToolFamilyButton } from "./ToolFamilyButton";
 import type { PianoRollPanelModel } from "./usePianoRollPanelModel";
 import { VibratoPresetGlyph } from "../../vibrato/VibratoPresetGlyph";
 
@@ -84,58 +85,15 @@ export function DrawToolMenu({ m }: Props) {
 
     return (
         <Box ref={drawToolMenuAnchorRef} data-hs-context-menu>
-            <AppIconButton
-                active={s.toolModeGroup === "draw"}
-                // 激活时用主题强调色（旧写法不带 color，Radix 回落强调色）
-                emphasis="accent"
+            <ToolFamilyButton
+                active={s.toolMode !== "select"}
                 tooltip={drawToolButtonTitle}
-                tabIndex={-1}
+                icon={currentDrawToolIcon}
                 onClick={() => void dispatch(setToolModePersistent(currentDrawTool))}
                 onContextMenu={(e) => {
                     e.preventDefault();
                     setDrawToolMenuOpen(true);
                 }}
-                icon={
-                    <Box
-                        style={{
-                            position: "relative",
-                            width: 15,
-                            height: 15,
-                        }}
-                    >
-                        <Box
-                            style={{
-                                position: "absolute",
-                                inset: 0,
-                                display: "flex",
-                                alignItems: "center",
-                                justifyContent: "center",
-                            }}
-                        >
-                            {currentDrawToolIcon}
-                        </Box>
-                        <Box
-                            style={{
-                                position: "absolute",
-                                right: -1,
-                                bottom: -1,
-                                width: 6,
-                                height: 6,
-                                opacity: 0.7,
-                            }}
-                        >
-                            <svg
-                                width="6"
-                                height="6"
-                                viewBox="0 0 6 6"
-                                fill="none"
-                                xmlns="http://www.w3.org/2000/svg"
-                            >
-                                <path d="M0 6L6 0V6Z" fill="currentColor" />
-                            </svg>
-                        </Box>
-                    </Box>
-                }
             />
 
             <AppAnchoredMenu
@@ -170,7 +128,9 @@ export function DrawToolMenu({ m }: Props) {
                         shortcut: vibratoToolKb,
                     },
                 ].map((item) => {
-                    const active = currentDrawTool === item.mode;
+                    // 选择族激活时，绘制菜单不伪造“当前绘制工具”的勾选：
+                    // 勾选只在这三个工具真的属于当前工具族时出现。
+                    const active = s.toolMode !== "select" && currentDrawTool === item.mode;
                     return (
                         <button
                             key={item.mode}

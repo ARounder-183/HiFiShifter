@@ -80,8 +80,6 @@ import {
     saveProjectAsRemote,
     saveProjectToPathRemote,
     setTrackMeters,
-    setToolModePersistent,
-    toggleParamBlockEditPersistent,
     setVslibAvailable,
     setPlaybackRenderingState,
     checkpointHistory,
@@ -94,6 +92,7 @@ import {
     persistUiSettings,
 } from "./features/session/sessionSlice";
 import { resolveTransportShortcutCommand } from "./features/session/transportShortcuts";
+import * as toolModeThunks from "./features/session/thunks/toolModeThunks";
 import { useI18n } from "./i18n/I18nProvider";
 import { useClipPitchDataListener } from "./hooks/useClipPitchDataListener";
 import { useHistoryStateListener } from "./hooks/useHistoryStateListener";
@@ -2995,29 +2994,30 @@ function AppInner() {
                     void dispatch(openVocalShifterFromDialog());
                     break;
                 case "mode.toggle": {
+                    // 工具族切换：选择族 ↔ 上次的绘制族成员。选择族子模式
+                    // （range / block）留在 `selectToolMode` 里，由 Tab 回来时恢复。
                     const cur = runtimeRef.current.toolMode;
-                    if (cur === "select" || cur === "block") {
-                        void dispatch(setToolModePersistent(runtimeRef.current.drawToolMode));
-                    } else {
-                        void dispatch(setToolModePersistent("select"));
-                    }
+                    const next = cur === "select" ? runtimeRef.current.drawToolMode : "select";
+                    void dispatch(toolModeThunks.setToolModePersistent(next));
                     break;
                 }
                 case "mode.selectTool":
-                    void dispatch(setToolModePersistent("select"));
+                    // F7 是参数线选择的直达键：不只是进入选择族，还要强制 range。
+                    void dispatch(toolModeThunks.setSelectToolModePersistent("range"));
                     break;
-                case "mode.toggleBlockEdit": {
-                    void dispatch(toggleParamBlockEditPersistent());
+                case "mode.toggleBlockSelection": {
+                    // `~` 只管理选择族子模式；从绘制族进入时直达 block。
+                    void dispatch(toolModeThunks.toggleSelectToolModePersistent());
                     break;
                 }
                 case "mode.drawTool":
-                    void dispatch(setToolModePersistent("draw"));
+                    void dispatch(toolModeThunks.setToolModePersistent("draw"));
                     break;
                 case "mode.lineTool":
-                    void dispatch(setToolModePersistent("line"));
+                    void dispatch(toolModeThunks.setToolModePersistent("line"));
                     break;
                 case "mode.vibratoTool":
-                    void dispatch(setToolModePersistent("vibrato"));
+                    void dispatch(toolModeThunks.setToolModePersistent("vibrato"));
                     break;
                 case "quickSearch.open":
                     setQuickSearchOpen(true);
@@ -3108,14 +3108,10 @@ function AppInner() {
                     break;
                 }
                 case "pianoRoll.cycleDragDirection": {
-                    // 循环切换当前活动工具的拖动方向（与工具栏方向按钮同源）。
-                    // 左键拖拽参数线期间按下同一键时，参数编辑器内的本地监听会
-                    // 同步切换本次拖拽的方向 —— 触控板用户的「右键切换」替代。
+                    // 与工具栏方向按钮同源；直线/颤音共用 vibrato 档（同一手势）。
                     const ss = store.getState().session;
-                    // 直线与颤音共用同一份拖动方向（同一个"起点 → 终点"手势），
-                    // 因此两者都归到 `"vibrato"` 这一路。
                     const tool =
-                        ss.toolMode === "select" || ss.toolMode === "block"
+                        ss.toolMode === "select"
                             ? ("select" as const)
                             : ss.drawToolMode === "draw"
                               ? ("draw" as const)

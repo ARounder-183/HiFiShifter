@@ -16,11 +16,8 @@ import {
 import type { ParamFramesPayload } from "../../../types/api";
 import type { AppDispatch } from "../../../app/store";
 import { paramsApi } from "../../../services/api";
-import {
-    persistUiSettings,
-    setActiveVibratoPreset,
-    setToolModePersistent,
-} from "../../../features/session/sessionSlice";
+import { persistUiSettings, setActiveVibratoPreset } from "../../../features/session/sessionSlice";
+import { setToolModePersistent } from "../../../features/session/thunks/toolModeThunks";
 import { clamp } from "../timeline";
 import type { LiveEditOverride } from "./useLiveParamEditing";
 import type { DrawToolMode } from "../../../features/session/sessionTypes";
@@ -125,6 +122,8 @@ export function usePianoRollInteractions(args: {
     editParam: ParamName;
     pitchEnabled: boolean;
     toolMode: string;
+    /** 参数块选择是否激活；由 panel 的 toolMode + selectToolMode 派生。 */
+    paramBlockToolActive: boolean;
     /** 每帧时长（毫秒）。选区的单位是**帧**（见 `paramSelection.ts`），因此本 hook
      *  只需要帧周期，不再需要每拍秒数 —— 选区的所有换算都与 BPM 无关。 */
     framePeriodMs: number;
@@ -201,10 +200,10 @@ export function usePianoRollInteractions(args: {
     paramViewRef: MutableRefObject<ParamViewSegment | null>;
 
     /**
-     * 块编辑命中回调（mock）。
+     * 参数块选择命中回调。
      *
-     * 返回 true 表示这次按下已被块工具消费，不再进入参数线绘制 / 选择手势。
-     * 缺省不传 = 块工具未启用，既有交互完全不变。
+     * 返回 true 表示这次按下已被参数块选择模式消费，不再进入参数线绘制 / 选择手势。
+     * 缺省不传 = 参数块选择模式未启用，既有交互完全不变。
      */
     onParamBlockPointerDown: (args: {
         readonly sec: number;
@@ -451,6 +450,7 @@ export function usePianoRollInteractions(args: {
         editParam,
         pitchEnabled,
         toolMode,
+        paramBlockToolActive,
         framePeriodMs,
         scrollLeftRef,
         pxPerSecRef,
@@ -2235,7 +2235,7 @@ export function usePianoRollInteractions(args: {
     ]);
 
     const getDefaultCanvasCursor = useCallback((): CanvasCursor => {
-        return toolMode === "select" || toolMode === "block" ? "default" : "crosshair";
+        return toolMode === "select" ? "default" : "crosshair";
     }, [toolMode]);
 
     /**
@@ -2564,6 +2564,7 @@ export function usePianoRollInteractions(args: {
                     morphOverlayRef,
                     onContextMenu,
                     onParamBlockPointerDown,
+                    paramBlockToolActive,
                     onCycleDragDirection,
                     onParamCommitSucceeded,
                     onParamValuePreviewChange,
@@ -2622,6 +2623,7 @@ export function usePianoRollInteractions(args: {
             rootTrackId,
             editParam,
             toolMode,
+            paramBlockToolActive,
             straightVibratoPreset,
             scrollerRef,
             // 边缘自动滚屏与视口真值：`applyEdgeScrollLeft` / `getViewportTruth`
@@ -2747,7 +2749,7 @@ export function usePianoRollInteractions(args: {
     }, [paramValuePopupEnabled, onParamValuePreviewChange]);
 
     /**
-     * 块工具右键幅度入口：与选择工具共用同一份右键幅度实现。
+     * 参数块选择模式右键幅度入口：与参数线选择共用同一份右键幅度实现。
      * 选区、参数视图与所有低层依赖都由 hook 作用域补齐；调用方只提供
      * 本次指针和块菜单回调。
      */

@@ -10,6 +10,7 @@ import type {
     EditParam,
     GridSize,
     PitchSnapUnit,
+    SelectToolMode,
     SplitTransitionCurveType,
     TimelineSnapSettings,
     TimeUnit,
@@ -17,7 +18,6 @@ import type {
     SilenceDetectSettings,
     TrackMeterInfo,
     ToolMode,
-    ToolModeGroup,
     TrackInfo,
 } from "../sessionTypes";
 import type { SearchSettings } from "../../search/searchSettings";
@@ -42,7 +42,7 @@ export type {
     EditParam,
     GridSize,
     ToolMode,
-    ToolModeGroup,
+    SelectToolMode,
     TrackInfo,
 };
 
@@ -66,7 +66,8 @@ export type ParamSelectionSnapshot = Array<{ startFrame: number; frameCount: num
 
 export interface SessionState {
     toolMode: ToolMode;
-    toolModeGroup: ToolModeGroup;
+    /** 选择族的当前 / 上次子模式；block 只在选择族激活时参与派生。 */
+    selectToolMode: SelectToolMode;
     drawToolMode: DrawToolMode;
     editParam: EditParam;
     bpm: number;

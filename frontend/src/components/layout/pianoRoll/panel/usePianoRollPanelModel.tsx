@@ -10,7 +10,6 @@ import {
     persistUiSettings,
     applyClipSyllableAnalysis,
     markProjectEdited,
-    setParamBlocksVisible,
     toggleParamBlocksVisible as toggleParamBlocksVisibleAction,
     seekPlayhead,
     setPlayheadSec,
@@ -67,7 +66,8 @@ import {
     type ParamBlockSelectionAnchor,
 } from "../paramBlockSelectionGesture";
 import { selectionForRangeDrag } from "../paramSelectionDrag";
-import type { ParamBlockMenuChannel, ParamBlockMenuContext } from "../paramBlockMenuModel";
+import type { ParamBlockCommandContext } from "../paramBlockCommandMenu";
+import { isBlockSelectionActive } from "../../../../features/session/toolMode";
 import {
     captureParamBlockCreateCurve,
     enqueueParamBlockCreateCommit,
@@ -376,6 +376,13 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     }, []);
     const { t, tf, tVars } = useI18n();
     const s = useAppSelector((state: RootState) => state.session, pianoRollSessionEqual);
+    /**
+     * 参数块选择是否激活。
+     *
+     * block 不是 ToolMode，而是选择族的对象级子模式；所有块手势、光标与菜单
+     * 都只认这个派生布尔值，避免再出现“工具层知道、手势层不知道”的分叉。
+     */
+    const paramBlockToolActive = isBlockSelectionActive(s.toolMode, s.selectToolMode);
 
     // 工程会话切换：强制视口总线按当前工程内容重绘一次（跨工程投影保留契约
     // 的强制点，见 utils/timelineViewportBus.invalidate 的说明）。
@@ -654,6 +661,10 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     );
     // 工具菜单里三项各自的快捷键：把绑定显示在菜单上，用户不必去设置里查。
     const drawToolKb = useAppSelector((state) => selectKeybindings(state, "mode.drawTool"));
+    const selectToolKb = useAppSelector((state) => selectKeybindings(state, "mode.selectTool"));
+    const blockSelectionKb = useAppSelector((state) =>
+        selectKeybindings(state, "mode.toggleBlockSelection"),
+    );
     const lineToolKb = useAppSelector((state) => selectKeybindings(state, "mode.lineTool"));
     const vibratoToolKb = useAppSelector((state) => selectKeybindings(state, "mode.vibratoTool"));
     const mergedKeybindings = useAppSelector(selectMergedKeybindings);
@@ -693,6 +704,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     // 右键编辑菜单状态
     const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null);
     const [drawToolMenuOpen, setDrawToolMenuOpen] = useState(false);
+    const [selectToolMenuOpen, setSelectToolMenuOpen] = useState(false);
     /**
      * 工具栏下拉的**锚点**与**面板** ref 必须分开。
      *
@@ -702,6 +714,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
      */
     const drawToolMenuAnchorRef = useRef<HTMLDivElement | null>(null);
     const drawToolMenuRef = useRef<HTMLDivElement | null>(null);
+    const selectToolMenuAnchorRef = useRef<HTMLDivElement | null>(null);
+    const selectToolMenuRef = useRef<HTMLDivElement | null>(null);
     const [pitchSnapMenuOpen, setPitchSnapMenuOpen] = useState(false);
     const pitchSnapMenuAnchorRef = useRef<HTMLDivElement | null>(null);
     const pitchSnapMenuRef = useRef<HTMLDivElement | null>(null);
@@ -787,6 +801,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     );
 
     const currentDrawTool = s.drawToolMode;
+    const selectToolButtonTitle =
+        s.selectToolMode === "block" ? tf("select_tool_block") : tf("select_tool_range");
     const drawToolButtonTitle =
         currentDrawTool === "vibrato"
             ? // 颤音工具下把当前预设一并报出来：预设按钮已经并进右键菜单，
@@ -796,7 +812,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
               ? tf("line_draw_tool")
               : tf("draw_tool");
     const activeDragDirection =
-        s.toolMode === "select" || s.toolMode === "block"
+        s.toolMode === "select"
             ? s.selectDragDirection
             : currentDrawTool === "draw"
               ? s.drawDragDirection
@@ -804,24 +820,27 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     // 直线与颤音共用同一份拖动方向（`lineVibratoDragDirection`）—— 它们是同一个
     // "起点 → 终点"手势，拆成两份只会让"在直线下调过、切到颤音又不算"成为新的困惑。
     const activeDragDirectionTool =
-        s.toolMode === "select" || s.toolMode === "block"
+        s.toolMode === "select"
             ? ("select" as const)
             : currentDrawTool === "draw"
               ? ("draw" as const)
               : ("vibrato" as const);
 
     useEffect(() => {
-        if (!drawToolMenuOpen && !pitchSnapMenuOpen) return;
+        if (!drawToolMenuOpen && !selectToolMenuOpen && !pitchSnapMenuOpen) return;
         const onPointerDown = (e: PointerEvent) => {
             const target = e.target as Node | null;
             if (drawToolMenuRef.current?.contains(target)) return;
+            if (selectToolMenuRef.current?.contains(target)) return;
             if (pitchSnapMenuRef.current?.contains(target)) return;
             setDrawToolMenuOpen(false);
+            setSelectToolMenuOpen(false);
             setPitchSnapMenuOpen(false);
         };
         const onKeyDown = (e: KeyboardEvent) => {
             if (e.key === "Escape") {
                 setDrawToolMenuOpen(false);
+                setSelectToolMenuOpen(false);
                 setPitchSnapMenuOpen(false);
             }
         };
@@ -831,7 +850,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             window.removeEventListener("pointerdown", onPointerDown, true);
             window.removeEventListener("keydown", onKeyDown, true);
         };
-    }, [drawToolMenuOpen, pitchSnapMenuOpen]);
+    }, [drawToolMenuOpen, selectToolMenuOpen, pitchSnapMenuOpen]);
 
     /** 量一次预设列表的最大高度（锚点 / 面板缺失时返回 null）。 */
     const measurePresetFlyoutMaxHeight = useCallback((): number | null => {
@@ -2577,6 +2596,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         editParam,
         pitchEnabled,
         toolMode: s.toolMode,
+        paramBlockToolActive,
         framePeriodMs: paramView?.framePeriodMs ?? 5,
         dynamicProjectSec,
         scrollLeftRef,
@@ -2824,6 +2844,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         currentParamRange,
         dispatch,
         dynamicProjectSec,
+        paramBlockToolActive,
         paramBlockSelectAllRanges: () => {
             const view = paramBlockViewRef.current;
             return view === null ? null : selectAllParamBlockRanges(view.blocks);
@@ -2886,8 +2907,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     // Pitch Snap 设置弹窗状态
     const [pitchSnapOpen, setPitchSnapOpen] = useState(false);
 
-    /** 块工具来自现有工具状态；切换离开时清掉块选择，避免“看不见但还选中”。 */
-    const paramBlockToolActive = s.toolMode === "block";
     const paramBlocksVisible = s.paramBlocksVisible;
     useLayoutEffect(() => {
         kernelDataRef.current.paramBlocksVisible = paramBlocksVisible;
@@ -3146,7 +3165,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         previousBlockToolActiveRef.current = paramBlockToolActive;
         setParamBlockContextMenu(null);
         /*
-         * 选区属于参数编辑器，不随工具切换消失。进入块工具时把自由选区
+         * 选区属于参数编辑器，不随工具切换消失。进入参数块选择模式时把自由选区
          * 规整到被碰到的逻辑块；离开只关闭块菜单，块高亮由工具门控隐藏。
          */
         if (paramBlockToolActive) {
@@ -3164,12 +3183,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         dispatch(toggleParamBlocksVisibleAction());
         void dispatch(persistUiSettings());
     }, [dispatch]);
-    useEffect(() => {
-        // 进入块工具只需把块层从隐藏变为显示（单向），不存在级联回写。
-        if (paramBlockToolActive && !paramBlocksVisible) {
-            dispatch(setParamBlocksVisible(true));
-        }
-    }, [dispatch, paramBlockToolActive, paramBlocksVisible]);
     /** 每个 Clip 在本面板会话内的自动分析尝试（只拦自动路径，手动重分析不受影响）。 */
     const autoAnalysisAttemptsRef = useRef<Set<string>>(new Set());
     /** 上一轮"有音节区间"的 Clip 集合；用于发现分析结果被意外清空。 */
@@ -3209,7 +3222,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
      */
     const blockPersistence = useParamBlockPersistence({
         rootTrackId,
-        enabled: paramBlocksVisible || paramBlockToolActive,
+        // 块选择必然 visible（reducer 不变量），因此只看图层开关。
+        enabled: paramBlocksVisible,
         onCommitted: () => {
             setParamBlockCommitToken((value) => value + 1);
             dispatch(markProjectEdited());
@@ -3360,8 +3374,8 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         if (!rootTrackId) return;
         /*
          * 块谱面可见性只决定“是否显示 / 分配 block 编辑 UI”；音节分析本身
-         * 需要“块工具打开”或“眼睛打开”任一即可。进入块工具时眼睛会同步打开，
-         * 但显隐 effect 与这个分析 effect 的提交顺序不应决定是否分析。
+         * 只看图层眼睛是否打开。进入参数块选择模式时 reducer 会同步打开眼睛，
+         * 因此 block 模式必然包含在 `paramBlocksVisible` 里，不需要第二个开关。
          */
         const blocksEnabled = paramBlocksVisible && blockPersistence.ready;
         /*
@@ -3857,7 +3871,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             paramBlockVisualTransactionRef.current = null;
             /*
              * 块层未就绪 = 此刻做不了任何块操作。返回 `handled: false`，让指针
-             * 落进块工具的空白分支（按设置移动播放头）—— 用户看到的是"点了一下、
+             * 落进参数块选择模式的空白分支（按设置移动播放头）—— 用户看到的是"点了一下、
              * 播放头动了"，而不是一条要读三秒的提示。
              */
             if (!blockPersistence.ready || !paramViewRef.current) return { handled: false };
@@ -6357,7 +6371,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
     /**
      * 双击块 = 把整块音高归一到最近半音。切分保留右键菜单 / S 键。
      *
-     * 块工具下 pointerdown 会接管指针，但左键不能调用 preventDefault，
+     * 参数块选择模式下 pointerdown 会接管指针，但左键不能调用 preventDefault，
      * 否则兼容 mouse 事件被抑制、dblclick 永远不派发。
      */
     const onCanvasDoubleClick = useCallback(
@@ -6427,7 +6441,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             }
             const sec = viewportPxToSec(axis, localX);
             /*
-             * 双击事件在块工具里可能被 pointerdown 的“选中 + 捕获”抢先处理；
+             * 双击事件在参数块选择模式里可能被 pointerdown 的“选中 + 捕获”抢先处理；
              * 这里同时接受“本次指针下的实时矩形命中”和“刚刚按下的块候选”，
              * 后者只按稳定 block id 找到当前派生块，绝不使用过期的几何。
              */
@@ -7122,7 +7136,9 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         pitchSnapSemitoneIcon,
         pitchSnapScaleIcon,
         currentDrawToolIcon,
-    } = buildToolIcons(currentDrawTool);
+        currentSelectToolIcon,
+        paramBlockToolIcon,
+    } = buildToolIcons(currentDrawTool, s.selectToolMode);
 
     // 标尺刻度 / 时间格式 / 单位切换 / 复制播放头时间整块在
     // `useTimelineDisplayControls` 里（见该文件头）。它们只依赖会话切片与刻度轴。
@@ -7136,7 +7152,9 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         handleCopyPlayheadTime,
     } = useTimelineDisplayControls({ dispatch, s, prTickAxis });
 
-    const paramBlockMenuContext = useMemo<ParamBlockMenuContext>(
+    const paramBlockMenuContext = useMemo<
+        ParamBlockCommandContext & { readonly isVolume: boolean; readonly isDyn: boolean }
+    >(
         () => ({
             canSplit: canSplitParamBlockAtPlayhead,
             canGroup: canGroupParamBlocks(paramBlocksWithValues, selectedParamBlockIds),
@@ -7165,7 +7183,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         ],
     );
     const handleParamBlockMenuAction = useCallback(
-        (channel: ParamBlockMenuChannel, op: string) => {
+        (channel: "paramBlock" | "edit", op: string) => {
             if (channel === "edit") {
                 switch (op) {
                     case "transposeCents":
@@ -7264,6 +7282,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         composeEnabled,
         currentDrawTool,
         currentDrawToolIcon,
+        currentSelectToolIcon,
         cycleDragDirectionKb,
         devicePixelRatio,
         dispatch,
@@ -7273,6 +7292,15 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         drawToolMenuOpen,
         drawToolMenuRef,
         editParam,
+        selectToolMenuAnchorRef,
+        selectToolMenuOpen,
+        selectToolMenuRef,
+        setSelectToolMenuOpen,
+        selectToolKb,
+        blockSelectionKb,
+        selectToolButtonTitle,
+        paramBlockToolIcon,
+        paramBlockToolActive,
         effectivePitchSnapVisual,
         enabledVibratoPresetList,
         gatedPillHideOrder,
@@ -7295,7 +7323,6 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
         pitchSnapMenuOpen,
         pitchSnapMenuRef,
         pitchSnapOpen,
-        paramBlockToolActive,
         paramBlocksVisible,
         paramBlockContextMenu,
         paramBlockMenuContext,

@@ -1,17 +1,18 @@
 import { test } from "vitest";
 
-import reducer, { setToolMode } from "./sessionSlice.ts";
+import reducer, { setParamBlocksVisible, setSelectToolMode, setToolMode } from "./sessionSlice.ts";
 import { loadUiSettings } from "./thunks/runtimeThunks.ts";
 import type { UiSettings } from "../../services/api/settings.ts";
 import type { ToolMode } from "./sessionTypes.ts";
 
 /**
- * 参数编辑器的工具选择：
- * - 三个字段（`toolMode` / `toolModeGroup` / `drawToolMode`）必须由同一次切换一起
- *   写对 —— `drawToolMode` 是"按 `Tab` 回跳到哪个绘制工具"的依据，漏写就回不去；
- * - 它属于"本地记忆"，要从设置里读回，且野值不得污染状态。
+ * 参数编辑器的工具状态：
+ * - `toolMode` 只表示两个工具族（select / draw / line / vibrato）；
+ * - `selectToolMode` 表示选择族的当前 / 上次子模式（range / block）；
+ * - `drawToolMode` 记住绘制族上次成员，供 Tab 回跳；
+ * - block 是选择族子模式，不是 `ToolMode` 的第三个成员。
  */
-test("features/session/sessionSlice.toolMode.test.ts tool mode state and hydration", () => {
+test("features/session/sessionSlice.toolMode.test.ts tool family state and hydration", () => {
     function assertEqual(actual: unknown, expected: unknown, label: string): void {
         if (actual !== expected) {
             throw new Error(`${label}: expected ${String(expected)}, received ${String(actual)}`);
@@ -19,62 +20,81 @@ test("features/session/sessionSlice.toolMode.test.ts tool mode state and hydrati
     }
 
     const base = reducer(undefined, { type: "@@INIT" });
-    assertEqual(base.toolMode, "draw", "初始工具是绘制");
-    assertEqual(base.toolModeGroup, "draw", "初始分组是绘制组");
+    assertEqual(base.toolMode, "draw", "初始工具族是绘制");
+    assertEqual(base.selectToolMode, "range", "初始选择子模式是 range");
     assertEqual(base.drawToolMode, "draw", "初始绘制工具是绘制");
 
-    // ── 切换绘制类工具：三个字段一起走 ──
+    // ── 切换绘制族成员：只改当前工具与绘制记忆 ──
     for (const mode of ["draw", "line", "vibrato"] as const) {
         const next = reducer(base, setToolMode(mode));
         assertEqual(next.toolMode, mode, `${mode}：toolMode`);
-        assertEqual(next.toolModeGroup, "draw", `${mode}：留在绘制组`);
+        assertEqual(next.selectToolMode, "range", `${mode}：不污染选择子模式`);
         assertEqual(next.drawToolMode, mode, `${mode}：记住绘制工具`);
     }
 
-    // ── 切到选择工具：只改分组，不改"上次用的绘制工具" ──
+    // ── 切到选择族：只改族，不改"上次用的绘制工具" ──
     const toVibrato = reducer(base, setToolMode("vibrato"));
     const toSelect = reducer(toVibrato, setToolMode("select"));
-    assertEqual(toSelect.toolMode, "select", "选择工具：toolMode");
-    assertEqual(toSelect.toolModeGroup, "select", "选择工具：分组");
-    assertEqual(toSelect.drawToolMode, "vibrato", "选择工具：保留上次的绘制工具（供 Tab 回跳）");
+    assertEqual(toSelect.toolMode, "select", "选择族：toolMode");
+    assertEqual(toSelect.selectToolMode, "range", "选择族：保留 range");
+    assertEqual(toSelect.drawToolMode, "vibrato", "选择族：保留上次绘制工具（供 Tab 回跳）");
 
-    // ── 切到块工具：单独分组，仍保留上次的绘制工具 ──
-    const toBlock = reducer(toVibrato, setToolMode("block"));
-    assertEqual(toBlock.toolMode, "block", "块工具：toolMode");
-    assertEqual(toBlock.toolModeGroup, "block", "块工具：分组");
-    assertEqual(toBlock.drawToolMode, "vibrato", "块工具：保留上次的绘制工具");
+    // ── 设置选择族子模式：进入 block 自动打开块图层 ──
+    const toBlock = reducer(toSelect, setSelectToolMode("block"));
+    assertEqual(toBlock.toolMode, "select", "块选择：toolMode 仍是 select");
+    assertEqual(toBlock.selectToolMode, "block", "块选择：子模式");
+    assertEqual(toBlock.paramBlocksVisible, true, "块选择：强制显示块图层");
 
-    // ── 水合：从设置里读回 ──
-    // （这里只关心工具三字段，其余字段与这条断言无关。）
-    const hydrate = (paramEditorTool: unknown) =>
+    // ── 关闭块图层：选择子模式必须收回 range，不能留下不可达的 block ──
+    const hidden = reducer(toBlock, setParamBlocksVisible(false));
+    assertEqual(hidden.paramBlocksVisible, false, "关闭图层：可见性");
+    assertEqual(hidden.selectToolMode, "range", "关闭图层：块子模式收回 range");
+
+    // ── 从绘制族后台恢复 block 记忆：可见性被不变量拉起 ──
+    const fromDraw = reducer(toVibrato, setSelectToolMode("block"));
+    assertEqual(fromDraw.toolMode, "select", "从绘制族进入块选择：选择族");
+    assertEqual(fromDraw.paramBlocksVisible, true, "从绘制族进入块选择：显示图层");
+
+    // ── 水合：工具族与选择子模式分别读取、各自白名单校验 ──
+    const hydrate = (paramEditorTool: unknown, paramEditorSelectionMode?: unknown) =>
         reducer(
             base,
-            loadUiSettings.fulfilled({ paramEditorTool } as UiSettings, "req", undefined),
+            loadUiSettings.fulfilled(
+                { paramEditorTool, paramEditorSelectionMode } as UiSettings,
+                "req",
+                undefined,
+            ),
         );
 
-    for (const mode of ["select", "draw", "line", "vibrato", "block"] as const) {
+    for (const mode of ["select", "draw", "line", "vibrato"] as const) {
         const state = hydrate(mode);
         assertEqual(state.toolMode, mode, `水合 ${mode}：toolMode`);
-        assertEqual(
-            state.toolModeGroup,
-            mode === "select" ? "select" : mode === "block" ? "block" : "draw",
-            `水合 ${mode}：分组`,
-        );
-        if (mode !== "select" && mode !== "block") {
+        if (mode !== "select") {
             assertEqual(state.drawToolMode, mode, `水合 ${mode}：绘制工具`);
         }
     }
 
-    // 手改配置里的野值 / 缺项一律忽略，回落出厂默认。
-    assertEqual(hydrate("sideways").toolMode, "draw", "未知取值回落默认");
+    const hydratedBlock = hydrate("select", "block");
+    assertEqual(hydratedBlock.toolMode, "select", "水合 block：工具族");
+    assertEqual(hydratedBlock.selectToolMode, "block", "水合 block：子模式");
+    assertEqual(hydratedBlock.paramBlocksVisible, true, "水合 block：块图层可见");
+
+    const unknownSelection = hydrate("select", "sideways");
+    assertEqual(unknownSelection.selectToolMode, "range", "未知选择子模式回落 range");
+    assertEqual(unknownSelection.paramBlocksVisible, false, "未知选择子模式不打开图层");
+
+    // 旧配置里的 `paramEditorTool: "block"` 是未知工具族，回落默认绘制工具。
+    assertEqual(hydrate("block").toolMode, "draw", "旧 block 工具值回落默认绘制");
+    assertEqual(hydrate("sideways").toolMode, "draw", "未知工具族回落默认");
     assertEqual(hydrate(undefined).toolMode, "draw", "缺项回落默认");
     assertEqual(hydrate(null).toolMode, "draw", "null 回落默认");
     assertEqual(hydrate(3).toolMode, "draw", "非字符串回落默认");
 
-    // 水合非法值时不得把状态写成"半切换"的样子。
+    // 非法工具族不得把状态写成"半切换"的样子。
     const wild = hydrate("nonsense");
-    assertEqual(wild.toolModeGroup, "draw", "野值：分组保持默认");
+    assertEqual(wild.toolMode, "draw", "野值：工具族保持默认");
     assertEqual(wild.drawToolMode, "draw", "野值：绘制工具保持默认");
+    assertEqual(wild.selectToolMode, "range", "野值：选择子模式保持默认");
 });
 
 /**
@@ -83,13 +103,16 @@ test("features/session/sessionSlice.toolMode.test.ts tool mode state and hydrati
  */
 test("features/session/sessionSlice.toolMode.test.ts every tool survives a round trip", () => {
     const base = reducer(undefined, { type: "@@INIT" });
-    const all: ToolMode[] = ["select", "draw", "line", "vibrato", "block"];
+    const all: ToolMode[] = ["select", "draw", "line", "vibrato"];
     for (const mode of all) {
         const persisted = reducer(base, setToolMode(mode));
         const restored = reducer(
             base,
             loadUiSettings.fulfilled(
-                { paramEditorTool: persisted.toolMode } as UiSettings,
+                {
+                    paramEditorTool: persisted.toolMode,
+                    paramEditorSelectionMode: persisted.selectToolMode,
+                } as UiSettings,
                 "req",
                 undefined,
             ),
@@ -97,5 +120,21 @@ test("features/session/sessionSlice.toolMode.test.ts every tool survives a round
         if (restored.toolMode !== mode) {
             throw new Error(`${mode} 未能从设置恢复，得到 ${restored.toolMode}`);
         }
+    }
+
+    const block = reducer(base, setSelectToolMode("block"));
+    const restoredBlock = reducer(
+        base,
+        loadUiSettings.fulfilled(
+            {
+                paramEditorTool: block.toolMode,
+                paramEditorSelectionMode: block.selectToolMode,
+            } as UiSettings,
+            "req",
+            undefined,
+        ),
+    );
+    if (restoredBlock.toolMode !== "select" || restoredBlock.selectToolMode !== "block") {
+        throw new Error("选择族 block 子模式未能从设置恢复");
     }
 });

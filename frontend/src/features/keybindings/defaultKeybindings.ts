@@ -9,10 +9,10 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     // 模式切换
     "mode.toggle": [{ key: "tab" }],
     "mode.selectTool": [{ key: "f7" }],
-    "mode.toggleBlockEdit": [{ key: "`" }, { key: "`", shift: true }],
+    "mode.toggleBlockSelection": [{ key: "`" }, { key: "`", shift: true }],
     "mode.drawTool": [{ key: "f8" }],
-    // 直线与颤音是两种工具（直线 ≡ 颤音 + 直线预设），因此各占一个键；
-    // F7→F10 与工具栏右键菜单里的排列顺序一致。
+    // F7 是选择族的参数线直达键；F8–F10 是绘制族三种工具。
+    // `~` 负责选择族内部的 range ↔ block，Tab 负责两个工具族之间切换。
     "mode.lineTool": [{ key: "f9" }],
     "mode.vibratoTool": [{ key: "f10" }],
 
@@ -147,7 +147,7 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     // 的同时按下右键，这条键位是「右键拖拽中切换方向」的等价替代。
     "pianoRoll.cycleDragDirection": [{ key: "d" }],
 
-    // 参数块操作（仅在参数编辑器 + 块工具下激活）
+    // 参数块操作（仅在参数编辑器 + 参数块选择模式下激活）
     "paramBlock.split": [{ key: "s" }],
     "paramBlock.delete": [{ key: "delete" }, { key: "backspace" }],
     "paramBlock.group": [{ key: "g" }],
@@ -246,7 +246,7 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
     "modifier.paramMultiSelect": [{ key: "control", modifierOnly: true, ctrl: true }],
     // 参数块范围选择：与 Clip 的 Shift 点击同义，从上次点击的锚点扩展到目标块。
     "modifier.paramRangeSelect": [{ key: "shift", modifierOnly: true, shift: true }],
-    // 参数块工具：点击与拖拽是两种可区分手势，因此 Alt 可以同时承担
+    // 参数块选择模式：点击与拖拽是两种可区分手势，因此 Alt 可以同时承担
     // 「块上点击分割」与「空白拖拽新建」；Ctrl+Alt 在空白处额外表示拉平新建。
     "modifier.paramBlockSplitAtClick": [{ key: "alt", modifierOnly: true, alt: true }],
     "modifier.paramBlockCreate": [{ key: "alt", modifierOnly: true, alt: true }],
@@ -274,8 +274,8 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
 export const ACTION_META: Record<ActionId, ActionMeta> = {
     "mode.toggle": { labelKey: "kb_mode_toggle", group: "mode" },
     "mode.selectTool": { labelKey: "kb_mode_select_tool", group: "mode" },
-    "mode.toggleBlockEdit": {
-        labelKey: "kb_mode_toggle_block_edit",
+    "mode.toggleBlockSelection": {
+        labelKey: "kb_mode_toggle_block_selection",
         group: "mode",
     },
     "mode.drawTool": { labelKey: "kb_mode_draw_tool", group: "mode" },

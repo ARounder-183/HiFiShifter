@@ -40,14 +40,14 @@ import type { VibratoHudAnchor } from "../vibratoHudState";
 import type { CanvasCursor } from "./pointerSupport";
 import type { MutableRefObject, PointerEvent as ReactPointerEvent, RefObject } from "react";
 
-/** 块工具 pointerdown 的结构化结果：是否消费，以及单击是否应移动播放头。 */
+/** 参数块选择模式 pointerdown 的结构化结果：是否消费，以及单击是否应移动播放头。 */
 export type ParamBlockPointerDownResult =
     { readonly handled: true; readonly seekOnClick: boolean } | { readonly handled: false };
 
 /** 手势回调需要的上下文（各自按需 `Pick`）。 */
 export type PointerDeps = {
     /**
-     * 块编辑工具命中。
+     * 参数块选择模式命中。
      *
      * handled=true 表示这次按下已由块层消费，参数线手势不再启动。
      */
@@ -82,7 +82,7 @@ export type PointerDeps = {
         blockSnapScale?: ScaleLike | null;
         /** 实时的指针值（用于折算纵向拖动偏移）。 */
         pointerValue: (clientY: number) => number;
-        /** 按下时的 Alt 状态；块工具用 Alt+上下拖缩放块内音高。 */
+        /** 按下时的 Alt 状态；参数块选择模式用 Alt+上下拖缩放块内音高。 */
         altKey?: boolean;
         /** 按下时的 Shift 状态；块编辑临时取消吸附（按 settings 绑定）。 */
         shiftKey?: boolean;
@@ -346,7 +346,10 @@ export type PointerDeps = {
     syncScrollLeft: (scroller: HTMLDivElement) => void;
     syncTimelineEnabled: boolean;
     timelineOffsetRef: MutableRefObject<number>;
+    /** 当前工具族成员；块选择不是 toolMode，而是下面的派生布尔值。 */
     toolMode: string;
+    /** 参数块选择是否激活（由 toolMode + selectToolMode 派生）。 */
+    paramBlockToolActive: boolean;
     updateSelectionUi: (next: ParamSelection | null) => void;
     valueToY: (param: ParamName, v: number, h: number) => number;
     vibratoAmplitudeAdjustKb: Keybinding;

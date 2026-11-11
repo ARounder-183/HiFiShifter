@@ -385,7 +385,7 @@ export interface PianoRollKernelHost {
     setValueCenter(center: number): void;
     /** 读取两条滚动条的几何（供面板绘制 / 调试）。 */
     getScrollbarGeometries(): PianoRollScrollbarGeometries;
-    /** 读取本帧块几何（与画面同源）；块工具做命中时使用。 */
+    /** 读取本帧块几何（与画面同源）；参数块选择模式做命中时使用。 */
     getParamBlockHitRects(): ReadonlyArray<{
         readonly id: string;
         readonly startSec: number;

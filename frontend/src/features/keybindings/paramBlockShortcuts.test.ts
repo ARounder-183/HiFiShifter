@@ -21,7 +21,7 @@ describe("param block shortcuts", () => {
         expect(DEFAULT_KEYBINDINGS["paramBlock.deselect"]).toEqual([{ key: "__none__" }]);
     });
 
-    it("routes block actions only in pianoRoll + block tool", () => {
+    it("routes block actions only in pianoRoll + block selection mode", () => {
         expect(resolveActionByFocus(keyEvent("g"), DEFAULT_KEYBINDINGS, "pianoRoll", "block")).toBe(
             "paramBlock.group",
         );

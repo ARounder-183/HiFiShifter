@@ -57,12 +57,9 @@ export function handleScrollerKeyDown(deps: Deps, e: KeyboardEvent<HTMLDivElemen
             if (!matchesAnyKeybinding(e.nativeEvent, bindings)) continue;
             {
                 const meta = ACTION_META[actionId];
-                // paramEditorSelect-scoped actions only work with "select" tool
-                if (
-                    meta?.scopedContext === "paramEditorSelect" &&
-                    toolMode !== "select" &&
-                    toolMode !== "block"
-                ) {
+                // paramEditorSelect 在选择族（range / block）下都可用。
+                // block 已由 toolMode === "select" 包含，不再有第三工具族。
+                if (meta?.scopedContext === "paramEditorSelect" && toolMode !== "select") {
                     continue;
                 }
                 const op = actionId.replace("edit.", "");

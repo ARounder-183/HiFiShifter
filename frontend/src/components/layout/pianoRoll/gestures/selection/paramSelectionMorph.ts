@@ -1,7 +1,7 @@
 /**
  * 参数选区右键幅度手势的共享入口。
  *
- * 选择工具（参数线右键）与块编辑工具（块体右键）必须使用同一套数据变换、
+ * 参数线选择（参数线右键）与参数块选择（块体右键）必须使用同一套数据变换、
  * 百分比映射、预览合帧与提交/撤销语义。底层实现保持在 rightDragMorph.ts，
  * 本文件只把「显式参数」适配成它已经验证过的依赖对象，避免复制算法。
  */
@@ -50,9 +50,9 @@ export interface ParamSelectionMorphArgs extends MorphDeps {
     readonly selection: ParamSelection;
     readonly paramView: ParamViewSegment;
     readonly framePeriodMs: number;
-    /** 提交成功后的额外收尾（块工具用来清 pitch 块 value）。 */
+    /** 提交成功后的额外收尾（参数块选择模式用来清 pitch 块 value）。 */
     readonly onCommitted?: () => void;
-    /** 块工具：曲线与清 value 在同一事务中提交。 */
+    /** 参数块选择模式：曲线与清 value 在同一事务中提交。 */
     readonly commitAmplitude?: (
         segments: readonly FullResWriteSegment[],
         authority: ParamCurveCommitAuthority,

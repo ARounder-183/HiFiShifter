@@ -46,6 +46,7 @@ import {
     normalizeTimelineSnapSettings,
     createDefaultTimelineSnapSettings,
     applyToolMode,
+    normalizeSelectToolMode,
 } from "../settings";
 import { setPending, setRejected } from "./shared";
 import type { ActionReducerMapBuilder } from "@reduxjs/toolkit";
@@ -397,9 +398,16 @@ export function registerRuntime(builder: ActionReducerMapBuilder<SessionState>) 
                     (id: unknown): id is string => typeof id === "string" && id.length > 0,
                 );
             }
-            // 上次使用的工具：只认已知取值（手改配置里的野值一律忽略，回落默认）。
-            // 放在最后：`applyToolMode` 会一并派生 `toolModeGroup` / `drawToolMode`，
-            // 后面不该再有分支去改这三个字段。
+            // 上次使用的选择族子模式：非法 / 缺项一律 range。
+            // 放在工具族之前：两者共同决定 `paramBlocksVisible` 是否被块子模式
+            // 强制打开；`applyToolMode` 是这条不变量的唯一收口。
+            state.selectToolMode = normalizeSelectToolMode(s.paramEditorSelectionMode);
+            if (state.selectToolMode === "block") {
+                state.paramBlocksVisible = true;
+            }
+            // 上次使用的工具族：只认四个合法成员（旧配置里的 `"block"` 是未知值，
+            // 回落出厂默认的绘制工具）。放在最后：`applyToolMode` 还会同步
+            // `drawToolMode` 与选择族的块图层不变量。
             if (
                 typeof s.paramEditorTool === "string" &&
                 (TOOL_MODES as readonly string[]).includes(s.paramEditorTool)

@@ -70,14 +70,26 @@ describe("resolveActionByFocus — 焦点感知路由", () => {
         expect(result).toBe("edit.setPitch");
     });
 
-    it("参数编辑器 + block 工具：paramEditorSelect 硬排除，块动作由 paramBlock.* 接管", () => {
+    it("参数编辑器 + block 子模式：paramEditorSelect 以共享优先级继续生效", () => {
+        // block 是选择族子模式，标准参数命令（Ctrl+T 设置音高）仍然要命中；
+        // 若这里硬排除，块模式里的复制/粘贴/初始化/移调会整族消失。
         const result = resolveActionByFocus(
             keyEvent("t", { ctrl: true }),
             FULL_CTRL_T,
             "pianoRoll",
             "block",
         );
-        expect(result).toBe("track.add");
+        expect(result).toBe("edit.setPitch");
+    });
+
+    it("block 子模式下 edit.initialize 也由共享 paramEditorSelect 路由", () => {
+        const map = lists({
+            "track.clone": { key: "d", ctrl: true },
+            "edit.initialize": { key: "backspace" },
+        });
+        expect(resolveActionByFocus(keyEvent("backspace"), map, "pianoRoll", "block")).toBe(
+            "edit.initialize",
+        );
     });
 
     it("时间轴焦点：全局操作优先（添加轨道），paramEditorSelect 硬排除", () => {
@@ -228,7 +240,7 @@ describe("resolveEditOpRoute（编辑操作的表面兜底层）", () => {
         }
     });
 
-    it("selectAll/deselect：参数编辑器在 select 与 block 工具下接手", () => {
+    it("selectAll/deselect：参数编辑器在 select 与派生 block scope 下接手", () => {
         expect(resolveEditOpRoute("pianoRoll", "selectAll", "select")).toBe("hifi:editOp");
         expect(resolveEditOpRoute("pianoRoll", "deselect", "select")).toBe("hifi:editOp");
         expect(resolveEditOpRoute("pianoRoll", "selectAll", "block")).toBe("hifi:editOp");
@@ -255,7 +267,7 @@ describe("resolveEditOpRoute（编辑操作的表面兜底层）", () => {
         }
     });
 
-    it("参数块工具下 split 不再走 hifi:editOp；块动作有独立通道", () => {
+    it("参数块选择子模式下 split 不再走 hifi:editOp；块动作有独立通道", () => {
         expect(resolveEditOpRoute("pianoRoll", "split", "block")).toBe("hifi:timelineEditOp");
         expect(resolveEditOpRoute("timeline", "split", "block")).toBe("hifi:timelineEditOp");
         expect(resolveParamBlockEditChannel("pianoRoll", "block")).toBe("hifi:paramBlockEditOp");

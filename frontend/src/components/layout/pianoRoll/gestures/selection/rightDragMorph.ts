@@ -61,7 +61,7 @@ type Deps = Pick<
     | "setParamView"
 > & {
     /**
-     * Optional atomic commit used by the block tool: curve patches and the
+     * Optional atomic commit used by the block selection mode: curve patches and the
      * cleared pitch-block values go to the backend in one history step.
      */
     readonly commitAmplitude?: (

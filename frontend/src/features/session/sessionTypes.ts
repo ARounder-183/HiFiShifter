@@ -5,24 +5,28 @@
  * 两者共用同一条拖拽与调参代码路径 —— 差别只在起手预设固定与否。
  */
 export type DrawToolMode = "draw" | "line" | "vibrato";
-export type ToolModeGroup = "select" | "draw" | "block";
-/**
- * 参数编辑器的工具。
- *
- * `block` 是块编辑（mock）：它不写参数曲线，而是把点击解释为选块 / 多选。
- * 【为什么不复用 `select`】选区工具在空白处拖拽会建参数选区；块工具必须把
- * 同一次拖拽留给块层，不能悄悄改曲线选区。
- */
-export type ToolMode = "select" | DrawToolMode | "block";
+
+/** 选择工具族的子模式：参数线范围选择 / 参数块选择。 */
+export type SelectToolMode = "range" | "block";
 
 /**
- * 工具手势状态的**运行时常量**（与 `ToolMode` 同源）。
+ * 参数编辑器的**工具族成员**。
+ *
+ * 工具只有两族：选择（`select`）与绘制（`draw` / `line` / `vibrato`）。
+ * `block` 不是第三族，而是选择族的对象级子模式，由 `selectToolMode` 表达；
+ * 是否处于块选择由 `toolMode === "select" && selectToolMode === "block"` 派生。
+ */
+export type ToolMode = "select" | DrawToolMode;
+
+/**
+ * 工具 / 子模式的**运行时常量**（与类型同源）。
  *
  * 【为什么要有它】持久化设置是外部输入，读取时必须按白名单校验。把名单写死成
  * 第二份字面量，加一种工具时就会漏改一处；从类型推导出常量则改不动。
  */
-export const TOOL_MODES = ["select", "draw", "line", "vibrato", "block"] as const;
 export const DRAW_TOOL_MODES = ["draw", "line", "vibrato"] as const;
+export const SELECT_TOOL_MODES = ["range", "block"] as const;
+export const TOOL_MODES = ["select", ...DRAW_TOOL_MODES] as const;
 export type PitchSnapUnit = "semitone" | "scale";
 export type ScaleHighlightMode = "always" | "off";
 export type DragDirection = "free" | "x-only" | "y-only";
