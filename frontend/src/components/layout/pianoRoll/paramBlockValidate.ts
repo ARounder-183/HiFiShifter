@@ -51,10 +51,10 @@ import type {
 
 /** 与 Rust 逐值一致。 */
 export const MAX_BLOCKS = 20_000;
-export const MAX_MEMBERS = 20_000;
+const MAX_MEMBERS = 20_000;
 export const MAX_GROUP_DEPTH = 8;
 /** 视图帧区间上界（Rust 的 `1_000_000`）。 */
-export const MAX_VIEW_END_FRAME = 1_000_000;
+const MAX_VIEW_END_FRAME = 1_000_000;
 
 export type ParamBlockValidationCode =
     | "schema_version"

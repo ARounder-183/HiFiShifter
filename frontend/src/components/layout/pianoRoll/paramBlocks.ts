@@ -42,123 +42,6 @@ import {
 export type { ParamBlockSourceClip } from "./paramBlockProjection";
 export { newParamBlockId };
 
-/**
- * MIDI 音符（**源域**秒）→ 工程秒上的音节块时间区间。
- *
- * Note `startSec` / `endSec` 是源文件坐标，不是相对 Clip 起点。之前的
- * `clip.startSec + note.startSec` 只在 `sourceStart=0`、速率 1、正放、
- * 非 Loop 时成立；裁切 / 拉伸 / 倒放 / Loop 都会整体偏时。
- *
- * 这里复用时间轴音高曲线的同一套窗口数学，只把“源域音符”换成“时间线段”，
- * 不另写第二份；Loop 音符可能跨周期，按每个周期投影后再合并相邻区间。
- */
-export function projectMidiNoteSpansToTimeline(clip: ParamBlockSourceClip): Array<{
-    startSec: number;
-    endSec: number;
-}> {
-    const notes = clip.midiNoteData ?? [];
-    if (notes.length === 0) return [];
-    const clipStartSec = finite(clip.startSec, 0);
-    const lengthSec = Math.max(0, finite(clip.lengthSec, 0));
-    if (!(lengthSec > 1e-9)) return [];
-    const rate =
-        Number.isFinite(clip.playbackRate) && (clip.playbackRate as number) > 1e-6
-            ? (clip.playbackRate as number)
-            : 1;
-    const reversed = clip.reversed === true;
-    const sourceStartSec = finite(clip.sourceStartSec ?? 0, 0);
-    const sourceEndRaw = Number.isFinite(clip.sourceEndSec)
-        ? (clip.sourceEndSec as number)
-        : Math.max(0, ...notes.map((note) => finite(note.endSec, 0)));
-    /*
-     * 非 Loop 的可见窗口结束 = 显式 sourceEnd，缺省才按 length×rate 推导。
-     * 不能无条件用推导值：音频 Clip 的 sourceEnd 是权威媒体窗口，用它参与
-     * 裁切才能与后端逐帧映射 / 音高线投影一致。
-     */
-    const srcEnd =
-        clip.loopEnabled === true
-            ? sourceEndRaw
-            : reversed
-              ? sourceEndRaw
-              : Number.isFinite(clip.sourceEndSec)
-                ? Math.min(sourceEndRaw, sourceStartSec + lengthSec * rate)
-                : sourceStartSec + lengthSec * rate;
-    const winStartSec =
-        clip.loopEnabled === true
-            ? sourceStartSec
-            : reversed
-              ? srcEnd - lengthSec * rate
-              : sourceStartSec;
-    const srcTotalLen = Math.max(0, srcEnd - winStartSec);
-    if (!(srcTotalLen > 1e-9)) return [];
-    const cycleSec =
-        clip.loopEnabled === true
-            ? Math.max(1e-9, Math.abs(finite(clip.contentDurationSec ?? 0, 0)) || srcTotalLen)
-            : null;
-    const spans: Array<{ startSec: number; endSec: number }> = [];
-    for (const note of notes) {
-        const noteStart = finite(note.startSec, 0);
-        const noteEnd = finite(note.endSec, 0);
-        if (!(noteEnd > noteStart)) continue;
-        if (cycleSec !== null) {
-            const anchor = reversed ? srcEnd : sourceStartSec;
-            const offset = reversed
-                ? modEuclid(anchor - noteEnd, cycleSec)
-                : modEuclid(noteStart - anchor, cycleSec);
-            const length = Math.min(lengthSec, (noteEnd - noteStart) / rate);
-            const cycleTimeline = cycleSec / rate;
-            for (
-                let startLocal = offset / rate;
-                startLocal < lengthSec - 1e-9;
-                startLocal += cycleTimeline
-            ) {
-                const endLocal = Math.min(lengthSec, startLocal + length);
-                if (endLocal > startLocal + 1e-9) {
-                    spans.push({
-                        startSec: clipStartSec + startLocal,
-                        endSec: clipStartSec + endLocal,
-                    });
-                }
-            }
-            continue;
-        }
-        if (noteEnd <= winStartSec || noteStart >= srcEnd) continue;
-        const relStart = Math.max(0, noteStart - winStartSec);
-        const relEnd = Math.min(srcTotalLen, noteEnd - winStartSec);
-        if (!(relEnd > relStart)) continue;
-        const [effStart, effEnd] = reversed
-            ? [Math.max(0, srcTotalLen - relEnd), Math.min(srcTotalLen, srcTotalLen - relStart)]
-            : [relStart, relEnd];
-        if (!(effEnd > effStart)) continue;
-        const startLocal = Math.max(0, effStart / rate);
-        const endLocal = Math.min(lengthSec, effEnd / rate);
-        if (endLocal > startLocal + 1e-9) {
-            spans.push({ startSec: clipStartSec + startLocal, endSec: clipStartSec + endLocal });
-        }
-    }
-    return mergeSortedSpans(spans);
-}
-
-function mergeSortedSpans(
-    spans: Array<{ startSec: number; endSec: number }>,
-): Array<{ startSec: number; endSec: number }> {
-    const sorted = spans.slice().sort((a, b) => a.startSec - b.startSec);
-    const merged: Array<{ startSec: number; endSec: number }> = [];
-    for (const span of sorted) {
-        const previous = merged[merged.length - 1];
-        if (previous !== undefined && span.startSec <= previous.endSec + 1e-9) {
-            previous.endSec = Math.max(previous.endSec, span.endSec);
-        } else {
-            merged.push({ ...span });
-        }
-    }
-    return merged;
-}
-
-function modEuclid(value: number, modulus: number): number {
-    return ((value % modulus) + modulus) % modulus;
-}
-
 export interface ParamBlockMember {
     readonly clipId: string;
     readonly takeId?: string;
@@ -438,34 +321,6 @@ export function resolveParamBlockResizeTarget(args: {
     return args.edge === "left" ? plan.block.startSec : plan.block.endSec;
 }
 
-/**
- * 纵向块拖动提交后的显示交接是否结束。
- *
- * 松手时 live 曲线已是最终值，但 `paramView` 与拖动快照的释放顺序若早一帧，
- * 宿主会先按旧主簇画一次，表现为块闪回原位。直到曲线窗口真正包含提交值，
- * 才允许释放这次交接；超时必须强制结束，避免异常路径永久锁定。
- */
-export function canReleaseParamBlockDragCommit(args: {
-    readonly committed: boolean;
-    readonly startedAt: number;
-    readonly now: number;
-    readonly curveSettled: boolean;
-    /**
-     * 当前窗口是否已经包含提交后的曲线值。
-     *
-     * 本地回显可能复用同一个 `paramView.key`，因此不能只看 key 是否变化。
-     * 只要新值已进入窗口，就可以安全撤掉拖动快照。
-     */
-    readonly valuesApplied?: boolean;
-    readonly timeoutMs?: number;
-}): boolean {
-    if (!args.committed) return false;
-    const timeoutMs = Math.max(1, args.timeoutMs ?? 1200);
-    return (
-        args.curveSettled || args.valuesApplied === true || args.now - args.startedAt >= timeoutMs
-    );
-}
-
 export type ParamBlockDragCommitReleaseState =
     "waiting-for-curve" | "waiting-for-paint" | "released";
 
@@ -490,7 +345,7 @@ export function shouldUseParamBlockDragSnapshotForRender(args: {
  * 普通块平移必须继续读取实时曲线中心；只有 Alt 音高缩放才允许锁住中心，
  * 因为缩放会改变块内起伏而不改变块应有的代表音高。
  */
-export function resolveParamBlockResizePlan(args: {
+function resolveParamBlockResizePlan(args: {
     readonly blockId?: string;
     readonly edge: "left" | "right";
     readonly blockStartSec: number;
@@ -833,7 +688,7 @@ export interface ParamBlockCreateInput {
 }
 
 /** 自动块的最小宽度（秒）。 */
-export const MIN_AUTO_BLOCK_SEC = 0.02;
+const MIN_AUTO_BLOCK_SEC = 0.02;
 export const PARAM_BLOCK_ROW_HEIGHT_MULTIPLIER = 1.2;
 export const PARAM_BLOCK_TRANSITION_HANDLE_OUTSET_X_PX = 0;
 export const PARAM_BLOCK_TRANSITION_HANDLE_OUTSET_Y_PX = 6;
@@ -851,7 +706,7 @@ function finite(value: number, fallback: number): number {
 }
 
 /** 派生视图块 → UI 块。UI 只读；任何编辑都必须回到 editSet。 */
-export function paramBlockFromProjected(
+function paramBlockFromProjected(
     rootTrackId: string,
     block: ProjectedParamBlock,
     framePeriodMs: number,
@@ -918,7 +773,7 @@ export function sortParamBlocksByTime<
     return blocks.slice().sort((a, b) => a.startSec - b.startSec || a.endSec - b.endSec);
 }
 
-export function blocksAreAdjacent(
+function blocksAreAdjacent(
     a: { readonly startSec: number; readonly endSec: number },
     b: { readonly startSec: number; readonly endSec: number },
 ): boolean {
@@ -1326,7 +1181,7 @@ export function clampParamBlockDragValue(args: {
     return clampParamWriteValue(args.param, next);
 }
 
-export function paramBlockDragValue(args: {
+function paramBlockDragValue(args: {
     readonly param: string;
     readonly original: number;
     readonly anchorValue: number;
@@ -1783,7 +1638,7 @@ export function hitTestParamBlocksAtPoint<
 }
 
 /** 新块压到的旧块 id：创建预览与提交共用同一个“整块让位”判定。 */
-export function blocksCoveredByParamBlockCreate<
+function blocksCoveredByParamBlockCreate<
     T extends { readonly id: string; readonly startSec: number; readonly endSec: number },
 >(args: {
     readonly blocks: readonly T[];
@@ -1807,7 +1662,7 @@ export function blocksCoveredByParamBlockCreate<
  * 预览使用当前可见块（而不是持久化记录），让用户在松手前就看见最终布局；
  * 不能拆成左右残段，否则松手后残段会突然消失，造成“闪一下”的错觉。
  */
-export function previewParamBlockCreateLayout<
+function previewParamBlockCreateLayout<
     T extends {
         readonly id: string;
         readonly startSec: number;
@@ -2260,7 +2115,7 @@ export function blockRowHeightPx(
  * 曲线用 `valueToY(midi + 0.5)` 把 MIDI N 画在 N 键中心；块中心必须走同一
  * 口径。非 pitch 参数没有半键概念，直接使用参数值。
  */
-export function paramBlockCenterValue(
+function paramBlockCenterValue(
     param: string,
     value: number,
     opts?: { readonly snapToSemitone?: boolean },

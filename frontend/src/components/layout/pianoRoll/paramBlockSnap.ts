@@ -25,7 +25,7 @@ import {
 import type { ScaleLike } from "../../../utils/musicalScales";
 import { getDrawPreviewValue } from "./paramValuePreviewLogic";
 
-export const PARAM_BLOCK_SNAP_HIGHLIGHT_GROUP = "paramBlock";
+const PARAM_BLOCK_SNAP_HIGHLIGHT_GROUP = "paramBlock";
 
 export interface ParamBlockTimeSnapInput {
     readonly rawSec: number;

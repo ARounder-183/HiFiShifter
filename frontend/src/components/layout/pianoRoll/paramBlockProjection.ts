@@ -75,7 +75,7 @@ export interface ProjectedInterval {
 }
 
 const EPS = 1e-9;
-export const MAX_FRAME = 1_000_000;
+const MAX_FRAME = 1_000_000;
 
 export function toFrame(sec: number, framePeriodMs: number): number {
     const value = Math.round((sec * 1000) / Math.max(0.1, framePeriodMs));
@@ -219,7 +219,7 @@ export function baseSourceSpansForClip(clip: ParamBlockSourceClip): {
     return null;
 }
 
-export function loopAnchor(projection: ClipProjection): number {
+function loopAnchor(projection: ClipProjection): number {
     if (!projection.reversed) return projection.sourceWindowStartSec;
     const duration = projection.mediaDurationSec;
     return duration === null
@@ -475,26 +475,6 @@ export function normalizeLoopTakeSpans(projection: ClipProjection, span: TakeSpa
         }
     }
     return out.filter((item) => item.sourceEndSec > item.sourceStartSec + EPS);
-}
-
-/** 按工程投影起点排序成员；同一成员若投影到多个周期，取它自己的 cycle。 */
-export function orderTakeSpansByProjection(
-    projection: ClipProjection,
-    spans: readonly TakeSpan[],
-    framePeriodMs: number,
-): TakeSpan[] {
-    return spans.slice().sort((a, b) => {
-        const ia = projectTakeSpan(projection, a, framePeriodMs).find(
-            (interval) => interval.cycle === a.cycle,
-        );
-        const ib = projectTakeSpan(projection, b, framePeriodMs).find(
-            (interval) => interval.cycle === b.cycle,
-        );
-        return (
-            (ia?.startFrame ?? Number.MAX_SAFE_INTEGER) -
-            (ib?.startFrame ?? Number.MAX_SAFE_INTEGER)
-        );
-    });
 }
 
 /**

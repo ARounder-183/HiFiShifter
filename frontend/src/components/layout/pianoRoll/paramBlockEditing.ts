@@ -314,7 +314,7 @@ function projectedMembersToSpans(
  * 多 run 用户块的片段物化：只保留被点中的 run，父块剩余成员成为兄弟块。
  * 这是 Loop / 非连续源域块可编辑的前提。
  */
-export function materializeProjectedFragment(
+function materializeProjectedFragment(
     clips: readonly ParamBlockSourceClip[],
     edits: ParamBlockEditSet,
     block: ProjectedParamBlock,
@@ -971,7 +971,7 @@ export function splitBaseCoverAtFrame(
     };
 }
 
-export function splitLogicalUserBlock(
+function splitLogicalUserBlock(
     clips: readonly ParamBlockSourceClip[],
     edits: ParamBlockEditSet,
     block: ProjectedParamBlock,
@@ -1078,7 +1078,7 @@ export function splitLogicalUserBlock(
     };
 }
 
-export function resizeLogicalUserBlock(
+function resizeLogicalUserBlock(
     clips: readonly ParamBlockSourceClip[],
     edits: ParamBlockEditSet,
     block: ProjectedParamBlock,
@@ -1248,7 +1248,7 @@ export function resizeLogicalUserBlock(
  * 把逻辑块的全部可见 run 合成一个 ProjectedParamBlock。组算法、切分、
  * 伸缩都只应该看这个整体边界，而不是第一个 run。
  */
-export function projectLogicalUserBlock(
+function projectLogicalUserBlock(
     clips: readonly ParamBlockSourceClip[],
     user: UserParamBlock,
     framePeriodMs: number,

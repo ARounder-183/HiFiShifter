@@ -32,7 +32,7 @@ function finite(value: number | null | undefined): number | null {
 }
 
 /** Group projected runs by logical identity, deterministically ordered by time. */
-export function groupBlocksByLogicalId(blocks: readonly ParamBlock[]): ParamBlockLogicalGroup[] {
+function groupBlocksByLogicalId(blocks: readonly ParamBlock[]): ParamBlockLogicalGroup[] {
     const grouped = new Map<string, ParamBlock[]>();
     for (const block of blocks) {
         const id = logicalBlockId(block);

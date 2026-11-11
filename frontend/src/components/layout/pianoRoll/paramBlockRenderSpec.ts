@@ -48,7 +48,7 @@ export interface ParamBlockSpecColors {
 }
 
 /** 时间序稳定排序；同一时刻按 id 兜底，保证输出与输入数组顺序无关。 */
-export function sortParamBlockRenderBlocks<
+function sortParamBlockRenderBlocks<
     T extends Pick<ParamBlockRenderBlock, "id" | "startSec" | "endSec">,
 >(blocks: readonly T[]): T[] {
     return blocks
