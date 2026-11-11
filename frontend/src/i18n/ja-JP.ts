@@ -779,6 +779,7 @@ export const jaJP = {
     param_blocks_normalize_pitch: "ピッチ正規化",
     param_blocks_delete: "パラメータブロックを削除",
     param_blocks_create_from_selection: "選択範囲からパラメータブロックを作成",
+    param_blocks_menu_more: "その他のパラメータ操作",
     status_param_block_edit_rejected: "パラメータブロック編集が拒否されました",
     status_param_block_split_too_close: "分割位置がブロックの端に近すぎます",
     status_param_block_action_failed: "パラメータブロック操作に失敗しました",

@@ -748,6 +748,7 @@ export const zhTW = {
     param_blocks_normalize_pitch: "音高歸一化",
     param_blocks_delete: "刪除參數區塊",
     param_blocks_create_from_selection: "從選區新建參數區塊",
+    param_blocks_menu_more: "更多參數操作",
     status_param_block_edit_rejected: "參數區塊編輯被拒絕",
     status_param_block_split_too_close: "此位置分割太靠近參數區塊邊緣",
     status_param_block_action_failed: "參數區塊操作失敗",

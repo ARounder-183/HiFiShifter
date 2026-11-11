@@ -164,6 +164,7 @@ import {
 import { publishBlockAnalysisProgress } from "../blockAnalysisProgress";
 import { normalizePitchToNearestSemitone } from "../paramBlockPitch";
 import { getDrawPreviewValue } from "../paramValuePreviewLogic";
+import { isDynParam } from "../paramRanges";
 import {
     resolveParamBlockCreateShape,
     resolveParamBlockModifierSnapshot,
@@ -7205,7 +7206,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
             hasSelection: selectionUi !== null && selectionUi.length > 0,
             isPitch: editParam === "pitch",
             isVolume: editParam === "volume",
-            isDyn: editParam === "dyn",
+            isDyn: isDynParam(editParam),
         }),
         [
             canRestoreGameParamBlocks,

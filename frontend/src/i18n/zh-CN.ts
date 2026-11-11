@@ -747,6 +747,7 @@ export const zhCN = {
     param_blocks_normalize_pitch: "音高归一化",
     param_blocks_delete: "删除参数块",
     param_blocks_create_from_selection: "从选区新建参数块",
+    param_blocks_menu_more: "更多参数操作",
     status_param_block_edit_rejected: "参数块编辑被拒绝",
     status_param_block_split_too_close: "此位置分割太靠近参数块边缘",
     status_param_block_action_failed: "参数块操作失败",

@@ -910,6 +910,7 @@ export const enUS = {
     param_blocks_normalize_pitch: "Normalize pitch",
     param_blocks_delete: "Delete Parameter Block",
     param_blocks_create_from_selection: "Create Parameter Block from Selection",
+    param_blocks_menu_more: "More parameter actions",
     status_param_block_edit_rejected: "Parameter block edit rejected",
     status_param_block_split_too_close: "Split point is too close to the parameter block edge",
     status_param_block_action_failed: "Parameter block action failed",
