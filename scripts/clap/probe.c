@@ -62,6 +62,32 @@ typedef struct {
     const void *in_events, *out_events;
 } clap_process_t;
 
+/* clap/events.h 的 CLAP_EVENT_TRANSPORT 记录。布局必须与 Rust 侧
+   clap_event_transport_t 的 #[repr(C)] 逐字段对齐（头文件本身也是 C ABI）。
+   【为什么探针要给 transport】共享渲染通路把空 transport 读成"宿主没给时间
+   事实"——实时块按设计静音，离线块报 NotReady。那样插件是"正确地拒绝输出"，
+   而这条黑盒判据要验的是**有位置时的直通**，两者不是同一件事。给一份最小
+   合法的 transport，探针才真正走到 pass_through 分支。 */
+typedef struct {
+    uint32_t size; uint32_t time; uint16_t space_id; uint16_t type; uint32_t flags;
+} clap_event_header_t;
+typedef struct {
+    clap_event_header_t header;
+    uint32_t flags;
+    int64_t song_pos_beats, song_pos_seconds;
+    double tempo, tempo_inc;
+    int64_t loop_start_beats, loop_end_beats, loop_start_seconds, loop_end_seconds;
+    int64_t bar_start; int32_t bar_number;
+    uint16_t tsig_num, tsig_denom;
+} clap_event_transport_t;
+#define CLAP_EVENT_TRANSPORT 9
+/* clap/events.h transport flags */
+#define CLAP_TRANSPORT_HAS_TEMPO          (1u << 0)
+#define CLAP_TRANSPORT_HAS_BEATS_TIMELINE (1u << 1)
+#define CLAP_TRANSPORT_HAS_SECONDS_TIMELINE (1u << 2)
+#define CLAP_TRANSPORT_HAS_TIME_SIGNATURE (1u << 3)
+#define CLAP_TRANSPORT_IS_PLAYING        (1u << 4)
+
 /* ctx 必须排在函数指针前面：CLAP 的 stream 结构以 ctx 开头（clap/stream.h）。
    少了这个字段，插件会从错误的偏移读 write —— 症状是 state.save 永远返回 false，
    而"保存失败"与"插件没有 state 扩展"在宿主日志里长得一模一样。 */
@@ -237,7 +263,20 @@ int main(int argc, char **argv) {
     float *in_planes[2] = {left, right}, *out_planes[2] = {out_left, out_right};
     clap_audio_buffer_t input = {in_planes, NULL, 2, 0, 0};
     clap_audio_buffer_t output = {out_planes, NULL, 2, 0, 0};
-    clap_process_t process = {0, 8, NULL, &input, &output, 1, 1, NULL, NULL};
+    clap_event_transport_t transport = {0};
+    transport.header.size = (uint32_t)sizeof(transport);
+    transport.header.type = CLAP_EVENT_TRANSPORT;
+    transport.flags = CLAP_TRANSPORT_HAS_TEMPO | CLAP_TRANSPORT_HAS_BEATS_TIMELINE |
+        CLAP_TRANSPORT_HAS_SECONDS_TIMELINE | CLAP_TRANSPORT_HAS_TIME_SIGNATURE |
+        CLAP_TRANSPORT_IS_PLAYING;
+    transport.song_pos_beats = 0;
+    transport.song_pos_seconds = 0;
+    transport.tempo = 120.0;
+    transport.loop_start_beats = 0;
+    transport.loop_end_beats = 0;
+    transport.tsig_num = 4;
+    transport.tsig_denom = 4;
+    clap_process_t process = {0, 8, &transport, &input, &output, 1, 1, NULL, NULL};
     if (plugin->process(plugin, &process) != 1) { fprintf(stderr, "process failed\n"); return 1; }
     for (int i = 0; i < 8; ++i) if (out_left[i] != left[i] || out_right[i] != right[i]) {
         fprintf(stderr, "process output mismatch at %d\n", i); return 1;
