@@ -50,11 +50,21 @@ export interface ParamBlockVisualTransaction {
     authorityRevisionAtStart?: number;
     /** 提交时的权威请求序号；配合 watermark 排除"提交前发出的在飞回包"。 */
     authorityRequestSeqAtCommit?: number;
-    /** 本次提交写入的曲线片段；释放前必须能在当前窗口里看到它们。 */
-    committedSegments?: readonly {
-        readonly startFrame: number;
-        readonly values: readonly number[];
-    }[];
+    /**
+     * 本次提交写入的曲线片段；释放前必须能在当前窗口里看到它们。
+     *
+     * - `undefined`：纯布局提交，没有曲线可等；
+     * - `null`：**已宣布**要写曲线，但片段还没算出来（异步读基准期间）。
+     *   这段窗口必须继续等 —— 过渡手柄的几何不变化，若此时按几何相等释放，
+     *   就会退回旧曲线（"先回弹"的根因）；
+     * - 数组：片段已知，按权威判据等它们出现。
+     */
+    committedSegments?:
+        | readonly {
+              readonly startFrame: number;
+              readonly values: readonly number[];
+          }[]
+        | null;
 }
 
 /**

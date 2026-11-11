@@ -33,6 +33,23 @@ export const PARAM_BLOCK_PREVIEW_RELEASE_TIMEOUT_MS = 2000;
 export type ParamBlockPreviewRelease = "wait" | "release" | "timeout";
 
 /**
+ * 宣布「这次提交会写曲线」。
+ *
+ * 【为什么必须在 pointerup 那一刻宣布】过渡手柄的几何根本不变化，如果等到异步
+ * 读基准之后才写 `committedSegments`，这中间的每一帧都会按"几何相等"判定可以
+ * 释放 —— 预览被撤、曲线回旧值，用户看到"先回弹、再生效"。
+ *
+ * @param pending true = 会写曲线但片段还没算出来（`null`）；false = 纯布局。
+ */
+export function stampParamBlockCurveIntent(
+    transaction: ParamBlockVisualTransaction | null,
+    pending: boolean,
+): void {
+    if (transaction === null) return;
+    transaction.committedSegments = pending ? null : undefined;
+}
+
+/**
  * 预览几何是否已经出现在派生块里（纯布局提交的判据）。
  *
  * 只比 `startSec` / `endSec`：块的值来自曲线采样，属于曲线判据的事；几何相等
@@ -109,6 +126,8 @@ export function shouldReleaseParamBlockPreview(
     const timeoutMs = input.timeoutMs ?? PARAM_BLOCK_PREVIEW_RELEASE_TIMEOUT_MS;
     const timedOut = input.now - transaction.startedAt > timeoutMs;
     const committed = transaction.committedSegments;
+    // 已宣布要写曲线但片段还没算出来：必须等（几何相等在这里没有意义）。
+    if (committed === null) return timedOut ? "timeout" : "wait";
 
     if (committed !== undefined && committed.length > 0) {
         const authoritySettled =

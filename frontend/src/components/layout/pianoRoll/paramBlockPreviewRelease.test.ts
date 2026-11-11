@@ -129,6 +129,24 @@ describe("shouldReleaseParamBlockPreview", () => {
         expect(shouldReleaseParamBlockPreview({ ...BASE, transaction: tx() })).toBe("release");
     });
 
+    it("★ keeps the preview alive while the committed segments are still unknown", () => {
+        // 过渡手柄：pointerup 时宣布"要写曲线"，片段要等异步读基准之后才知道。
+        // 这段窗口里几何根本没变 —— 若按几何相等释放，就是"先回弹"。
+        expect(
+            shouldReleaseParamBlockPreview({
+                ...BASE,
+                transaction: tx({ committedSegments: null }),
+            }),
+        ).toBe("wait");
+        expect(
+            shouldReleaseParamBlockPreview({
+                ...BASE,
+                transaction: tx({ committedSegments: null }),
+                now: PARAM_BLOCK_PREVIEW_RELEASE_TIMEOUT_MS + 1,
+            }),
+        ).toBe("timeout");
+    });
+
     it("releases a layout-only commit as soon as the geometry is settled", () => {
         const layoutOnly = tx({ committedSegments: undefined });
         expect(

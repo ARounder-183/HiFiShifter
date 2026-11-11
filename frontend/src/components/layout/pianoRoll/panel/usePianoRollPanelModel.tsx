@@ -160,6 +160,7 @@ import {
     isParamBlockPreviewGeometrySettled,
     PARAM_BLOCK_PREVIEW_RELEASE_TIMEOUT_MS,
     shouldReleaseParamBlockPreview,
+    stampParamBlockCurveIntent,
 } from "../paramBlockPreviewRelease";
 import { isParamAuthorityConfirmedAfterCommit } from "../paramBlockTransaction";
 import {
@@ -4441,6 +4442,11 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                         finalSpec,
                                         "awaiting-authority",
                                     );
+                                    // 过渡几何不变：不在此刻宣布"要写曲线"就会被立刻释放。
+                                    stampParamBlockCurveIntent(
+                                        paramBlockVisualTransactionRef.current,
+                                        editParam === "pitch" && targetWidth > 1e-6,
+                                    );
                                 }
                                 paramBlockDragSnapshotRef.current = null;
                                 invalidateParamBlockSpec();
@@ -4886,18 +4892,17 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                                         finalPreviewSpec,
                                         "awaiting-authority",
                                     );
-                                    /*
-                                     * 给预览盖上「这次提交依据的权威水位」。
-                                     * 没有它，释放判据只能退回几何相等 —— 那正是
-                                     * 「松手先回弹旧参数」的来源（见
-                                     * paramBlockPreviewRelease）。
-                                     */
+                                    // 盖上「权威水位 + 曲线意图」；否则释放判据只能退回几何相等。
                                     const createTx = paramBlockVisualTransactionRef.current;
                                     if (createTx !== null) {
                                         createTx.authorityRevisionAtStart =
                                             createAuthorityRevisionAtStart;
                                         createTx.authorityRequestSeqAtCommit =
                                             createAuthorityRequestSeqAtCommit;
+                                        stampParamBlockCurveIntent(
+                                            createTx,
+                                            (createCurveBase ?? paramViewRef.current) !== null,
+                                        );
                                     }
                                 }
                                 const clip =
