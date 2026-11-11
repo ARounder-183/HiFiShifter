@@ -5279,7 +5279,7 @@ export function createTimelineKernelHost(args: TimelineKernelHostArgs): Timeline
                 pendingContextMenu = null;
                 if (boxActive) {
                     suppressNextContextMenu = true;
-                } else if (!cancelled) {
+                } else if (!cancelled && !synthetic) {
                     // 未拖动的右键单击：吞掉菜单（本平台上 contextmenu 在松手**之后**
                     // 触发，此时 pendingContextMenu 还未设置——见 onContextMenu 的
                     // 事件顺序），改为单块并入 / 挖掉。命中按**松开时**的指针位置
