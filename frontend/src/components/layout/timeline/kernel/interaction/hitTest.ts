@@ -16,8 +16,8 @@
  * - 独立性：纯函数，无 DOM / React 依赖，可直接单测。
  *
  * 【设计约束】
- * 1. 轨道内 clip 按 `startSec` **升序**（调用方保证），本模块用二分查找定位
- *    候选 clip——轨道内 clip 数可达数百，线性扫描会进入手势热路径。
+ * 1. 轨道内 clip 按 `startSec` **升序**（调用方保证），二分缩小起点范围后，
+ *    在仍覆盖该点的片段里按图层取最上层，避免漏掉较早长 clip。
  * 2. 命中判定使用**半开区间** `[startSec, startSec + lengthSec)`：相邻紧贴的
  *    两个 clip 在交界处只命中右侧那个，与旧实现的 DOM 层叠顺序一致。
  */
@@ -29,6 +29,7 @@ import {
     fadeCornerReservePx,
     snapOffsetHandleXPx,
 } from "../../constants";
+import { compareClipLayerOrder } from "../../trackOverlap";
 
 /**
  * 左右边缘（裁短 / 延长 / 拉伸）的命中宽度（CSS px）。
@@ -229,38 +230,47 @@ export function downgradeOverlapHitForPlainLeftPress<
 }
 
 /**
- * 在轨道内二分查找覆盖 `sec` 的 clip。
+ * 在轨道内查找覆盖 `sec` 的最上层 clip。
  *
- * 规则：取「最后一个 startSec <= sec」的 clip，再校验 sec 是否落在其长度内
- * （半开区间，见文件头约束 2）。
+ * 规则：二分定位「最后一个 startSec <= sec」，从它向前依次校验半开区间。
+ * 主体优先短片段；header 沿用时间顺序，后开始的片段占重叠区。
  *
  * @param list 该轨道的 clip（按 startSec 升序）。
  * @param sec 目标时间（秒）。
  * @returns 命中的 clip；无命中时为 null。
  */
-function findClipAt(list: readonly HitTestClip[], sec: number): HitTestClip | null {
+function findClipAt(
+    list: readonly HitTestClip[],
+    sec: number,
+    inHeader: boolean,
+): HitTestClip | null {
     if (list.length === 0) return null;
     let low = 0;
     let high = list.length - 1;
-    let candidate: HitTestClip | null = null;
     while (low <= high) {
         const mid = (low + high) >> 1;
         const item = list[mid];
         if (item.startSec <= sec) {
-            candidate = item;
             low = mid + 1;
         } else {
             high = mid - 1;
         }
     }
-    if (candidate === null) return null;
-    return sec < candidate.startSec + candidate.lengthSec ? candidate : null;
+    let hit: HitTestClip | null = null;
+    // 时间排序只负责缩小候选范围，不能代替长片段在后、短片段在前的图层顺序。
+    for (let index = high; index >= 0; index -= 1) {
+        const candidate = list[index];
+        if (sec >= candidate.startSec + candidate.lengthSec) continue;
+        if (inHeader) return candidate;
+        if (hit === null || compareClipLayerOrder(candidate, hit) > 0) hit = candidate;
+    }
+    return hit;
 }
 
 /**
  * 执行命中测试。
  *
- * 流程：内容坐标 → 工程时间 → 轨道行 → 轨道内二分 → 分区判定。
+ * 流程：内容坐标 → 工程时间 → 轨道行 → 二分定位并回查覆盖片段 → 分区判定。
  *
  * 特殊说明：落在轨道区之外（`contentY < 0` 或超出最后一行）时返回 `empty` 且
  * `trackId = null`，调用方据此区分「轨道间空白」与「工程空白」（前者不 seek）。
@@ -281,15 +291,14 @@ export function hitTest(args: HitTestArgs): HitResult {
     }
     const track = args.tracks[trackIndex];
     const list = args.clipsByTrack.get(track.id) ?? [];
-    const clip = findClipAt(list, sec);
-    if (clip === null) {
-        return { kind: "empty", sec, trackId: track.id, trackIndex };
-    }
-
     const localY = Math.max(0, args.contentY) - trackIndex * rowHeight;
     const headerHeightPx = Number.isFinite(args.headerHeightPx)
         ? Math.max(0, args.headerHeightPx)
         : 0;
+    const clip = findClipAt(list, sec, localY < headerHeightPx);
+    if (clip === null) {
+        return { kind: "empty", sec, trackId: track.id, trackIndex };
+    }
 
     // 边缘优先于 header / body（见 ClipHitRegion 注释）。边缘宽度按 clip 宽度
     // 收敛到 1/3：极短 clip 不能整块都算边缘，否则 body 区域消失、拖不动。

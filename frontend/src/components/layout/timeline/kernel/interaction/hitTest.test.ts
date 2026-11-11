@@ -210,6 +210,187 @@ describe("hitTest", () => {
     });
 });
 
+describe("hitTest · 同轨重叠 clip", () => {
+    // yuurei 的实际时间范围；短片段结束后，底下的长片段仍延续到 29s。
+    const longClip: HitTestClip = {
+        id: "long",
+        trackId: "A",
+        startSec: 18.206009070294783,
+        lengthSec: 10.793990929705215,
+    };
+    const shortSpans = [
+        [18.65670875293238, 0.14231116032099322],
+        [18.823227652433648, 0.12450036783407016],
+        [18.936396425787173, 0.20046689996009803],
+        [19.166666666666664, 0.13555878954812073],
+        [19.31694215699784, 0.3434996086198723],
+        [19.645725064834657, 0.44190782089372505],
+    ] as const;
+    const clips: HitTestClip[] = [
+        longClip,
+        ...shortSpans.map(([startSec, lengthSec], index) => ({
+            id: `short-${index + 1}`,
+            trackId: "A",
+            startSec,
+            lengthSec,
+        })),
+    ];
+
+    function overlapArgs(
+        sec: number,
+        list: readonly HitTestClip[] = clips,
+        overrides: Partial<HitTestArgs> = {},
+    ): HitTestArgs {
+        return makeArgs({
+            contentX: sec * (overrides.pxPerSec ?? 100),
+            contentY: 40,
+            clipsByTrack: new Map<string, readonly HitTestClip[]>([
+                ["A", list],
+                ["B", []],
+            ]),
+            ...overrides,
+        });
+    }
+
+    it.each([18.304, 18.81, 19.15, 20.088, 20.4, 21, 25, 28.99])(
+        "在 %s 秒命中仍覆盖该点的长 clip",
+        (sec) => {
+            expect(hitTest(overlapArgs(sec))).toMatchObject({
+                kind: "clip",
+                clip: { id: "long" },
+            });
+        },
+    );
+
+    it("短 clip 仍覆盖点击位置时保留后序片段的优先级", () => {
+        expect(hitTest(overlapArgs(19.9))).toMatchObject({
+            kind: "clip",
+            clip: { id: "short-6" },
+        });
+    });
+
+    it("起点更早的短 clip 仍优先于起点更晚的长 clip", () => {
+        const list: HitTestClip[] = [
+            { id: "short", trackId: "A", startSec: 1, lengthSec: 2 },
+            { id: "long", trackId: "A", startSec: 2, lengthSec: 10 },
+        ];
+        expect(hitTest(overlapArgs(2.5, list, { contentY: 40 }))).toMatchObject({
+            kind: "clip",
+            clip: { id: "short" },
+        });
+        expect(hitTest(overlapArgs(2.5, list, { contentY: 5 }))).toMatchObject({
+            kind: "clip",
+            clip: { id: "long" },
+            region: "header",
+        });
+        expect(hitTest(overlapArgs(3, list))).toMatchObject({
+            kind: "clip",
+            clip: { id: "long" },
+        });
+    });
+
+    it("多个嵌套片段覆盖同一点时优先最短的片段", () => {
+        const list: HitTestClip[] = [
+            { id: "short", trackId: "A", startSec: 1, lengthSec: 2 },
+            { id: "middle", trackId: "A", startSec: 1.5, lengthSec: 4 },
+            { id: "long", trackId: "A", startSec: 2, lengthSec: 10 },
+        ];
+        expect(hitTest(overlapArgs(2.5, list))).toMatchObject({
+            kind: "clip",
+            clip: { id: "short" },
+        });
+    });
+
+    it("嵌套短片段结束后命中最近一个仍覆盖该点的片段", () => {
+        const nested: HitTestClip[] = [
+            { id: "long", trackId: "A", startSec: 0, lengthSec: 20 },
+            { id: "middle", trackId: "A", startSec: 2, lengthSec: 10 },
+            { id: "short", trackId: "A", startSec: 4, lengthSec: 1 },
+        ];
+        expect(hitTest(overlapArgs(6, nested))).toMatchObject({
+            kind: "clip",
+            clip: { id: "middle" },
+        });
+    });
+
+    it("较晚片段尚未开始时不阻止回查较早的长片段", () => {
+        const separated: HitTestClip[] = [
+            { id: "long", trackId: "A", startSec: 0, lengthSec: 20 },
+            { id: "short", trackId: "A", startSec: 2, lengthSec: 1 },
+            { id: "future", trackId: "A", startSec: 10, lengthSec: 2 },
+        ];
+        expect(hitTest(overlapArgs(5, separated))).toMatchObject({
+            kind: "clip",
+            clip: { id: "long" },
+        });
+    });
+
+    it("起点相同的短片段结束后仍能命中长片段", () => {
+        const sameStart: HitTestClip[] = [
+            { id: "long", trackId: "A", startSec: 0, lengthSec: 10 },
+            { id: "short", trackId: "A", startSec: 0, lengthSec: 2 },
+        ];
+        expect(hitTest(overlapArgs(1, sameStart))).toMatchObject({
+            kind: "clip",
+            clip: { id: "short" },
+        });
+        expect(hitTest(overlapArgs(3, sameStart))).toMatchObject({
+            kind: "clip",
+            clip: { id: "long" },
+        });
+    });
+
+    it("零长度片段不遮挡仍覆盖点击位置的长片段", () => {
+        expect(
+            hitTest(
+                overlapArgs(20.4, [
+                    longClip,
+                    { id: "zero", trackId: "A", startSec: 20.4, lengthSec: 0 },
+                ]),
+            ),
+        ).toMatchObject({ kind: "clip", clip: { id: "long" } });
+    });
+
+    it("短片段的右端点回落到长片段，长片段的右端点保持空白", () => {
+        const lastShort = clips[clips.length - 1];
+        expect(hitTest(overlapArgs(lastShort.startSec + lastShort.lengthSec))).toMatchObject({
+            kind: "clip",
+            clip: { id: "long" },
+        });
+        expect(hitTest(overlapArgs(longClip.startSec + longClip.lengthSec)).kind).toBe("empty");
+    });
+
+    it("真实空白不会因为回查而命中已经结束的片段", () => {
+        const separated: HitTestClip[] = [
+            { id: "earlier", trackId: "A", startSec: 1, lengthSec: 2 },
+            { id: "later", trackId: "A", startSec: 4, lengthSec: 1 },
+        ];
+        expect(hitTest(overlapArgs(3.5, separated)).kind).toBe("empty");
+        expect(hitTest(overlapArgs(30)).kind).toBe("empty");
+    });
+
+    it.each([
+        ["header", 5],
+        ["body", 40],
+    ] as const)("回查后仍正确识别 %s 分区", (region, contentY) => {
+        expect(hitTest(overlapArgs(20.4, clips, { contentY }))).toMatchObject({
+            kind: "clip",
+            clip: { id: "long" },
+            region,
+        });
+    });
+
+    it.each([50, 100, 500, 2000])("缩放为 %s px/s 时在不同轨道行高下均能命中", (pxPerSec) => {
+        for (const rowHeight of [80, 96, 160]) {
+            expect(hitTest(overlapArgs(20.4, clips, { pxPerSec, rowHeight }))).toMatchObject({
+                kind: "clip",
+                clip: { id: "long" },
+                region: "body",
+            });
+        }
+    });
+});
+
 describe("hitTest · clip 内局部坐标", () => {
     it("返回以 clip 左上角为原点的局部坐标（供 header 控件级命中复用）", () => {
         // a1 起点 1s、pxPerSec 100 → clipLeft = 100px；contentX = 200 → localX = 100

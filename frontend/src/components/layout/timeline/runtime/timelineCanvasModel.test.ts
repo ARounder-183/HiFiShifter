@@ -1,7 +1,56 @@
-import { test } from "vitest";
+import { expect, test } from "vitest";
 
 import { buildSparseClipRenderModel } from "./timelineCanvasModel.js";
 import { createTimelineAxis } from "../../renderKernel/timelineAxis.js";
+
+test("short clip stays in the foreground without changing clip geometry", () => {
+    const base = {
+        trackId: "track",
+        sourcePath: "/mock.wav",
+        gain: 1,
+        playbackRate: 1,
+        muted: false,
+        fadeInSec: 0,
+        fadeOutSec: 0,
+        fadeInShape: 1,
+        fadeOutShape: 1,
+        fadeInDir: 0,
+        fadeOutDir: 0,
+    };
+    const clips = [
+        { ...base, id: "short", name: "Short", startSec: 1, lengthSec: 2 },
+        { ...base, id: "long", name: "Long", startSec: 2, lengthSec: 10 },
+    ];
+    const model = buildSparseClipRenderModel({
+        visibleTracks: [{ id: "track" }],
+        startTrackIndex: 0,
+        visibleTrackClipsById: { track: clips },
+        axis: createTimelineAxis({ pxPerSec: 100, viewportWidthPx: 1400 }),
+        rowHeight: 96,
+        selectedClipId: "short",
+        multiSelectedClipIds: [],
+        renamingClipId: null,
+    });
+    expect(model.drawClips.map((item) => item.id)).toEqual(["long", "short"]);
+    expect(model.drawClips[1]).toMatchObject({
+        leftPx: 100,
+        widthPx: 200,
+        topPx: 0,
+        heightPx: 94,
+        headerHeightPx: 18,
+        trailingHeaderOverlapPx: 100,
+        selected: true,
+        hasOverlap: true,
+    });
+    expect(model.drawClips[0]).toMatchObject({
+        leftPx: 200,
+        widthPx: 1000,
+        topPx: 0,
+        heightPx: 94,
+        hasOverlap: true,
+    });
+    expect(clips.map((item) => item.id)).toEqual(["short", "long"]);
+});
 
 test("components/layout/timeline/runtime/timelineCanvasModel.test.ts scripted checks", async () => {
     function assertEqual(actual: unknown, expected: unknown, label: string): void {

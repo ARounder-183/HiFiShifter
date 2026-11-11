@@ -8,7 +8,7 @@ import { timelineViewportBus } from "../../../utils/timelineViewportBus";
 import { WaveformSurface } from "../../../waveform/WaveformSurface";
 import type { WaveformSceneClip, WaveformSceneRow } from "../../../waveform/sceneBuilder";
 import { CLIP_BODY_PADDING_Y, CLIP_HEADER_HEIGHT } from "./constants";
-import { computeLeadingOverlapSecByClipId } from "./trackOverlap";
+import { compareClipLayerOrder, computeLeadingOverlapSecByClipId } from "./trackOverlap";
 import { clipToSceneClip, expandClipToTakeSceneClips } from "./takeLanes";
 
 /**
@@ -78,7 +78,7 @@ export const TimelineWaveformSurface = React.memo(function TimelineWaveformSurfa
                 // 或开关关闭时回退为单 active-take 投影（与 DOM 命中区同套
                 // takeLanes 数学，lane 边界逐像素一致）。
                 const sceneClips: WaveformSceneClip[] = [];
-                for (const clip of clips) {
+                for (const clip of clips.slice().sort(compareClipLayerOrder)) {
                     const laneClips = expandClipToTakeSceneClips(
                         clip,
                         showAllTakes,
