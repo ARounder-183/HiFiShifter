@@ -32,8 +32,14 @@ export interface ParamBlockHoverDeps {
     readonly hoveredParamBlockIdRef: MutableRefObject<string | null>;
     /** 过渡手柄的 hover 键是**左块 id**（与 paramBlockTransitionHandles 的 leftId 对应）。 */
     readonly hoveredTransitionLeftIdRef: MutableRefObject<string | null>;
-    /** 新建块手势进行中（光标是 crosshair 而不是 grabbing）。 */
-    readonly createGestureActive: boolean;
+    /**
+     * 新建块手势是否进行中（光标是 crosshair 而不是 grabbing）。
+     *
+     * 【为什么是取值函数而不是布尔】它读的是 `paramBlockResizeRef.current`，而 ref
+     * 的写入**不触发渲染**：渲染期取快照会在整段手势里停在旧值上，光标于是显示
+     * `grabbing` 而不是 `crosshair`。
+     */
+    readonly isCreateGesture: () => boolean;
     /** 本工具的默认光标（空白处回到它，而不是留一个通用的 default）。 */
     readonly getDefaultCanvasCursor: () => string;
     readonly setCanvasCursor: (cursor: string) => void;
@@ -52,7 +58,7 @@ export function handleParamBlockHover(
     if (!deps.paramBlockToolActive) return false;
     if (event.buttons !== 0) {
         // 手势期间保持拖动光标；由 pointerup 的默认光标接替。
-        deps.setCanvasCursor(deps.createGestureActive ? "crosshair" : "grabbing");
+        deps.setCanvasCursor(deps.isCreateGesture() ? "crosshair" : "grabbing");
         return true;
     }
     const rect = event.currentTarget.getBoundingClientRect();

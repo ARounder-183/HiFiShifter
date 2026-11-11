@@ -75,7 +75,7 @@ function makeDeps(overrides: Partial<ParamBlockHoverDeps> = {}) {
         hostRef: { current: host },
         hoveredParamBlockIdRef,
         hoveredTransitionLeftIdRef,
-        createGestureActive: false,
+        isCreateGesture: () => false,
         getDefaultCanvasCursor: () => "crosshair",
         setCanvasCursor,
         invalidate,
@@ -140,7 +140,7 @@ describe("handleParamBlockHover", () => {
         ).toBe(true);
         expect(grabbing.setCanvasCursor).toHaveBeenLastCalledWith("grabbing");
 
-        const creating = makeDeps({ createGestureActive: true });
+        const creating = makeDeps({ isCreateGesture: () => true });
         handleParamBlockHover(
             creating.deps,
             pointerEvent({ clientX: 500, clientY: 10, buttons: 1 }),

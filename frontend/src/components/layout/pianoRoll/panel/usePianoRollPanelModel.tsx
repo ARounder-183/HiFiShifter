@@ -6503,7 +6503,7 @@ export function usePianoRollPanelModel(dockFormId: string | undefined) {
                     hostRef,
                     hoveredParamBlockIdRef,
                     hoveredTransitionLeftIdRef,
-                    createGestureActive: paramBlockResizeRef.current?.blockId === "__create__",
+                    isCreateGesture: () => paramBlockResizeRef.current?.blockId === "__create__",
                     getDefaultCanvasCursor: interactions.getDefaultCanvasCursor,
                     setCanvasCursor,
                     invalidate,
